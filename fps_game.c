@@ -684,6 +684,58 @@ void DrawColoredCube(float cx, float cy, float cz, float halfSize) {
     glColor3f(1.0f, 1.0f, 1.0f);
 }
 
+// Resolves collision between a player and a box by pushing the player out
+void ResolvePlayerCollision(Player *p, Box box) {
+    // Compute the closest point on the box (projected to the XZ plane)
+    float closestX = clamp(p->x, box.minx, box.maxx);
+    float closestZ = clamp(p->z, box.minz, box.maxz);
+    
+    // Compute vector from the closest point to the player
+    float dx = p->x - closestX;
+    float dz = p->z - closestZ;
+    
+    // Compute distance (in the XZ plane)
+    float dist = sqrtf(dx * dx + dz * dz);
+    
+    // If the distance is less than the player's radius, there's penetration.
+    if (dist < PLAYER_RADIUS) {
+        float penetration = PLAYER_RADIUS - dist;
+        // Avoid division by zero; if inside exactly, choose an arbitrary direction.
+        if (dist == 0.0f) {
+            dx = 1.0f;
+            dz = 0.0f;
+            dist = 1.0f;
+        }
+        // Push the player out along the collision normal
+        p->x += (dx / dist) * penetration*2;
+        p->z += (dz / dist) * penetration*2;
+    }
+}
+
+void ResolvePlayerCollisions(Player *p) {
+    const int maxIterations = 5;
+    for (int iter = 0; iter < maxIterations; iter++) {
+        bool collisionFound = false;
+        
+        // Check against world bounds first (optional)
+        if (p->x < -9.0f + PLAYER_RADIUS) { p->x = -9.0f + PLAYER_RADIUS; collisionFound = true; }
+        else if (p->x > 9.0f - PLAYER_RADIUS) { p->x = 9.0f - PLAYER_RADIUS; collisionFound = true; }
+        if (p->z < -9.0f + PLAYER_RADIUS) { p->z = -9.0f + PLAYER_RADIUS; collisionFound = true; }
+        else if (p->z > 9.0f - PLAYER_RADIUS) { p->z = 9.0f - PLAYER_RADIUS; collisionFound = true; }
+        
+        // Check against all collision obstacles
+        for (int o = 0; o < numCollisionObstacles; ++o) {
+            if (CollidePlayerWithBox(p->x, p->z, PLAYER_RADIUS, collisionObstacles[o])) {
+                ResolvePlayerCollision(p, collisionObstacles[o]);
+                collisionFound = true;
+            }
+        }
+        // If no collisions were found, exit early
+        if (!collisionFound)
+            break;
+    }
+}
+
 int main(int argc, char *argv[]) {
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
         fprintf(stderr, "SDL init failed: %s\n", SDL_GetError());
@@ -815,7 +867,7 @@ int main(int argc, char *argv[]) {
 
             // Apply movement with collision check:
             if (moveDX != 0.0f || moveDZ != 0.0f) {
-                // Check against obstacles by attempting movement in X and Z separately (simplified collision response)
+                /* // Check against obstacles by attempting movement in X and Z separately (simplified collision response)
                 float newX = players[i].x + moveDX;
                 float newZ = players[i].z + moveDZ;
                 bool collisionX = false;
@@ -840,7 +892,18 @@ int main(int argc, char *argv[]) {
                 }
                 // Apply movement if no collision
                 if (!collisionX) players[i].x = newX;
-                if (!collisionZ) players[i].z = newZ;
+                if (!collisionZ) players[i].z = newZ; */
+
+                // Compute intended new position based on input
+                float newX = players[i].x + moveDX;
+                float newZ = players[i].z + moveDZ;
+
+                // Update position (even if this results in overlap)
+                players[i].x = newX;
+                players[i].z = newZ;
+
+                // Now resolve any collisions (iteratively push out of obstacles)
+                ResolvePlayerCollisions(&players[i]);
             }
 
             // Apply gravity and jumping physics for player i
