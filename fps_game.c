@@ -1,6 +1,7 @@
 #include <SDL2/SDL.h>
 #include <GL/gl.h>
 #include <GL/glu.h>
+#include <SDL_ttf.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -39,6 +40,9 @@ const SDL_Scancode P2_STRAFE_L = SDL_SCANCODE_COMMA;   // ',' key
 const SDL_Scancode P2_STRAFE_R = SDL_SCANCODE_PERIOD;  // '.' key
 const SDL_Scancode P2_JUMP     = SDL_SCANCODE_RSHIFT;
 const SDL_Scancode P2_SHOOT    = SDL_SCANCODE_RCTRL;
+
+
+int scores[2] = {0, 0}; // scores[0] for player 1, scores[1] for player 2
 
 // Structure definitions
 typedef struct {
@@ -798,6 +802,91 @@ void ResolvePlayerCollisions(Player *p) {
     }
 }
 
+TTF_Font* font = NULL;
+GLuint scoreTexture = 3;
+
+// Initialize SDL_ttf and load a font
+void InitFont() {
+    TTF_Init();
+    font = TTF_OpenFont("./leadcoat.ttf", 24);  // Use an appropriate font and size
+    if (!font) {
+        fprintf(stderr, "Failed to load font: %s\n", TTF_GetError());
+    }
+}
+
+// Render a score string to an OpenGL texture
+void CreateScoreTexture(const char* text, GLuint *texID) {
+    SDL_Color white = {255, 255, 255};
+    SDL_Surface* surface = TTF_RenderText_Blended(font, text, white);
+    if (!surface) {
+        fprintf(stderr, "TTF_RenderText_Blended error: %s\n", TTF_GetError());
+        return;
+    }
+    
+    // Convert the surface to a known 32-bit RGBA format.
+    SDL_Surface* formatted = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGBA32, 0);
+    SDL_FreeSurface(surface);  // free the original surface
+    if (!formatted) {
+        fprintf(stderr, "SDL_ConvertSurfaceFormat error: %s\n", SDL_GetError());
+        return;
+    }
+    
+    // Generate and bind texture.
+    glGenTextures(1, texID);
+    glBindTexture(GL_TEXTURE_2D, *texID);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    
+    // Ensure rows are tightly packed.
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    
+    // Upload texture data.
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, formatted->w, formatted->h,
+                 0, GL_RGBA, GL_UNSIGNED_BYTE, formatted->pixels);
+    
+    // Optionally, you can store the dimensions in global variables so you know how large your texture is.
+    // For example: texWidth = formatted->w; texHeight = formatted->h;
+    
+    SDL_FreeSurface(formatted);
+}
+
+
+void RenderScoreTexture(GLuint texID, int texWidth, int texHeight) {
+    // Set up orthographic projection
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    gluOrtho2D(0, SCREEN_WIDTH, 0, SCREEN_HEIGHT/2);
+    
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+    
+    // Enable blending so the alpha channel is used
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, texID);
+    glColor3f(1, 1, 1);
+    
+    glBegin(GL_QUADS);
+        glTexCoord2f(0, 0); glVertex2f(10, 10);
+        glTexCoord2f(1, 0); glVertex2f(10 + texWidth, 10);
+        glTexCoord2f(1, 1); glVertex2f(10 + texWidth, 10 + texHeight);
+        glTexCoord2f(0, 1); glVertex2f(10, 10 + texHeight);
+    glEnd();
+    
+    glDisable(GL_TEXTURE_2D);
+    glDisable(GL_BLEND);
+    
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+}
+
+
 int main(int argc, char *argv[]) {
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
         fprintf(stderr, "SDL init failed: %s\n", SDL_GetError());
@@ -840,6 +929,11 @@ int main(int argc, char *argv[]) {
     CreateCheckerTexture();
     CreateRockTexture();
     CreateGrassTexture();
+
+    // Initialization code (before the main loop)
+    InitFont();  // Initialize SDL_ttf and load the font
+    // Create the initial score texture, for example with score "Score: 0"
+    CreateScoreTexture("Score: 0", &scoreTexture);
 
     // Setup initial game state
     ResetGame();
@@ -1016,6 +1110,10 @@ int main(int argc, char *argv[]) {
                 if (distSq < (PLAYER_RADIUS * PLAYER_RADIUS)) {
                     // Bullet hit player pi
                     printf("Player %d was hit by Player %d!\n", pi+1, bullets[b].owner+1);
+
+
+                    // Award a point to the shooter
+                    scores[bullets[b].owner] += 1;
                     // For prototype, reset the hit player position (or reduce health)
                     players[pi].x = randomInRange(-9.0f, 9.0f);
                     players[pi].y = BASE_EYE_HEIGHT;
@@ -1042,6 +1140,7 @@ int main(int argc, char *argv[]) {
                 // Bottom half for player 2
                 glViewport(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT/2);
             }
+
             // Set perspective projection for this viewport
             glMatrixMode(GL_PROJECTION);
             glLoadIdentity();
@@ -1102,6 +1201,15 @@ int main(int argc, char *argv[]) {
             glColor3f(0.8f, 0.2f, 0.2f); // opponent color (reddish)
             // Draw player model (e.g., cube of height ~1.5 centered at their eye level)
             DrawColoredCube(players[other].x, players[other].y, players[other].z, 0.5f);
+
+             // For example, if you store player scores in an array 'scores':
+            char scoreStr[64];
+            sprintf(scoreStr, "Score: %d", scores[i]);
+            // You can call CreateScoreTexture() to update the texture when the score changes.
+            // (For a production game, update only when needed.)
+            CreateScoreTexture(scoreStr, &scoreTexture);
+            // Render the score texture overlay onto the viewport
+            RenderScoreTexture(scoreTexture, /*texWidth*/ 200, /*texHeight*/ 50);
         } // end for each viewport
 
         SDL_GL_SwapWindow(window);
