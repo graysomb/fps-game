@@ -386,6 +386,63 @@ void CreateRockTexture() {
     // You can store texRock in a global variable for later use in your render loop.
 }
 
+
+// --- Create a Grassy Texture ---
+// Texture ID
+GLuint texGrass = 2;
+// Generate a procedural rock texture (128x128)
+void CreateGrassTexture() {
+    const int TEX_SIZE = 128;
+    unsigned char image[TEX_SIZE * TEX_SIZE * 3];
+    float scale = 8.0f;  // Controls the "zoom" level of the noise
+    
+    // With 4 octaves, the maximum possible amplitude sum is ~1 + 0.5 + 0.25 + 0.125 = 1.875.
+    // We'll normalize fbm() output (which is roughly in [-1.875, 1.875]) to [0,1].
+    float amplitudeSum = 1.875f;
+    
+    // Loop over each pixel
+    for (int j = 0; j < TEX_SIZE; ++j) {
+        for (int i = 0; i < TEX_SIZE; ++i) {
+            // Map pixel coordinates to noise space
+            float x = ((float)i / TEX_SIZE) * scale;
+            float y = ((float)j / TEX_SIZE) * scale;
+            float value = fbm(x, y);
+            // Normalize from roughly [-amplitudeSum, amplitudeSum] to [0,1]
+            value = (value + amplitudeSum) / (2.0f * amplitudeSum);
+            
+            // Map the noise value to a rocky color.
+            // Here we use a base rock color with slight variation.
+            // You can experiment with these formulas to get different hues.
+            int r = (int)(value * 80 + 30 + (rand() % 10));  // A dark, earthy red tone
+            int g = (int)(value * 80 + 70 + (rand() % 10));  // Similar green value for grayish look
+            int b = (int)(value * 80 + 30 + (rand() % 10));  // A touch more blue for a cool rock feel
+
+            // Clamp to [0, 255]
+            if (r > 255) r = 255;
+            if (g > 255) g = 255;
+            if (b > 255) b = 255;
+            
+            image[(j * TEX_SIZE + i) * 3 + 0] = (unsigned char)r;
+            image[(j * TEX_SIZE + i) * 3 + 1] = (unsigned char)g;
+            image[(j * TEX_SIZE + i) * 3 + 2] = (unsigned char)b;
+        }
+    }
+    
+    // Create the OpenGL texture object
+    glGenTextures(1, &texGrass);
+    glBindTexture(GL_TEXTURE_2D, texGrass);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    // Upload texture data (RGB format)
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, TEX_SIZE, TEX_SIZE, 0,
+                 GL_RGB, GL_UNSIGNED_BYTE, image);
+    
+    // You can store texRock in a global variable for later use in your render loop.
+}
+
+
 // Utility: Clamp a value between min and max
 static float clamp(float value, float min, float max) {
     if(value < min) return min;
@@ -777,6 +834,7 @@ int main(int argc, char *argv[]) {
     // Create textures (checkerboard)
     CreateCheckerTexture();
     CreateRockTexture();
+    CreateGrassTexture();
 
     // Setup initial game state
     ResetGame();
@@ -992,7 +1050,7 @@ int main(int argc, char *argv[]) {
             glTranslatef(-players[i].x, -players[i].y, -players[i].z);
 
             // Draw floor (textured)
-            glBindTexture(GL_TEXTURE_2D, texChecker);
+            glBindTexture(GL_TEXTURE_2D, texGrass);
             glEnable(GL_TEXTURE_2D);
             glColor3f(1,1,1);
             float floorSize = 10.0f;
