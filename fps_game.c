@@ -114,6 +114,11 @@ float fbm(float x, float y) {
     return total;
 }
 
+// Set a random position within a given range
+float randomInRange(float min, float max) {
+    return min + ((float)rand() / (float)RAND_MAX) * (max - min);
+}
+
 
 // Create a new BSP node
 BSPNode* CreateBSPNode(float x, float z, float width, float depth) {
@@ -618,9 +623,9 @@ void CollectCorridorWalls() {
 // Reset game (players positions, etc.)
 void ResetGame() {
     // Initialize players at different positions
-    players[0].x = -3.0f; players[0].y = BASE_EYE_HEIGHT; players[0].z = 0.0f;
+    players[0].x = randomInRange(-9.0f, 9.0f); players[0].y = BASE_EYE_HEIGHT; players[0].z = randomInRange(-9.0f, 9.0f);
     players[0].yaw = 0.0f; players[0].vy = 0.0f; players[0].onGround = true;
-    players[1].x = 3.0f;  players[1].y = BASE_EYE_HEIGHT; players[1].z = 0.0f;
+    players[1].x = randomInRange(-9.0f, 9.0f);  players[1].y = BASE_EYE_HEIGHT; players[1].z = randomInRange(-9.0f, 9.0f);
     players[1].yaw = 180.0f; players[1].vy = 0.0f; players[1].onGround = true;
     // Clear bullets
     numBullets = 0;
@@ -990,10 +995,10 @@ int main(int argc, char *argv[]) {
                 continue;
             }
             // Check obstacle collisions
-            for (int o = 0; o < NUM_OBSTACLES; ++o) {
-                if (bullets[b].x >= obstacles[o].minx && bullets[b].x <= obstacles[o].maxx &&
-                    bullets[b].y >= obstacles[o].miny && bullets[b].y <= obstacles[o].maxy &&
-                    bullets[b].z >= obstacles[o].minz && bullets[b].z <= obstacles[o].maxz) {
+            for (int o = 0; o < numCollisionObstacles; ++o) {
+                if (bullets[b].x >= collisionObstacles[o].minx && bullets[b].x <= collisionObstacles[o].maxx &&
+                    bullets[b].y >= collisionObstacles[o].miny && bullets[b].y <= collisionObstacles[o].maxy &&
+                    bullets[b].z >= collisionObstacles[o].minz && bullets[b].z <= collisionObstacles[o].maxz) {
                     // Bullet hit an obstacle
                     bullets[b].active = false;
                     continue;
@@ -1012,9 +1017,9 @@ int main(int argc, char *argv[]) {
                     // Bullet hit player pi
                     printf("Player %d was hit by Player %d!\n", pi+1, bullets[b].owner+1);
                     // For prototype, reset the hit player position (or reduce health)
-                    players[pi].x = (pi == 0 ? -3.0f : 3.0f);
+                    players[pi].x = randomInRange(-9.0f, 9.0f);
                     players[pi].y = BASE_EYE_HEIGHT;
-                    players[pi].z = 0.0f;
+                    players[pi].z = randomInRange(-9.0f, 9.0f);
                     players[pi].vy = 0.0f;
                     players[pi].onGround = true;
                     // Remove bullet
