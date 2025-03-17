@@ -1,0 +1,1 @@
+gcc fps_game.c -o fps_game `sdl2-config --cflags --libs` -lGL -lGLU -lm
