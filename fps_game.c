@@ -1,7 +1,7 @@
 #include <SDL2/SDL.h>
 #include <GL/gl.h>
 #include <GL/glu.h>
-#include <SDL_ttf.h>
+#include <SDL2/SDL_ttf.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -22,24 +22,34 @@
 //constants for map
 #define NUM_OBSTACLES 2 
 
-// Key mappings (SDL Scancodes for player actions)
+// Player 1 key mappings (WASD movement, F/H yaw, T/G pitch)
 const SDL_Scancode P1_FORWARD    = SDL_SCANCODE_W;
-const SDL_Scancode P1_BACKWARD  = SDL_SCANCODE_S;
-const SDL_Scancode P1_STRAFE_L  = SDL_SCANCODE_A;
-const SDL_Scancode P1_STRAFE_R  = SDL_SCANCODE_D;
-const SDL_Scancode P1_TURN_L    = SDL_SCANCODE_L;
-const SDL_Scancode P1_TURN_R    = SDL_SCANCODE_J;
-const SDL_Scancode P1_JUMP      = SDL_SCANCODE_SPACE;
-const SDL_Scancode P1_SHOOT     = SDL_SCANCODE_LCTRL;
+const SDL_Scancode P1_BACKWARD   = SDL_SCANCODE_S;
+const SDL_Scancode P1_STRAFE_L   = SDL_SCANCODE_A;
+const SDL_Scancode P1_STRAFE_R   = SDL_SCANCODE_D;
+// F/H for yaw (left/right), T/G for pitch (up/down)
+// F/H swapped: H to turn left, F to turn right
+const SDL_Scancode P1_TURN_L     = SDL_SCANCODE_H;    // yaw left
+const SDL_Scancode P1_TURN_R     = SDL_SCANCODE_F;    // yaw right
+const SDL_Scancode P1_PITCH_UP   = SDL_SCANCODE_T;    // look up
+const SDL_Scancode P1_PITCH_DOWN = SDL_SCANCODE_G;    // look down
+const SDL_Scancode P1_JUMP       = SDL_SCANCODE_SPACE;
+const SDL_Scancode P1_SHOOT      = SDL_SCANCODE_LCTRL;
 
-const SDL_Scancode P2_FORWARD   = SDL_SCANCODE_UP;
-const SDL_Scancode P2_BACKWARD = SDL_SCANCODE_DOWN;
-const SDL_Scancode P2_TURN_L   = SDL_SCANCODE_LEFT;
-const SDL_Scancode P2_TURN_R   = SDL_SCANCODE_RIGHT;
-const SDL_Scancode P2_STRAFE_L = SDL_SCANCODE_COMMA;   // ',' key
-const SDL_Scancode P2_STRAFE_R = SDL_SCANCODE_PERIOD;  // '.' key
-const SDL_Scancode P2_JUMP     = SDL_SCANCODE_RSHIFT;
-const SDL_Scancode P2_SHOOT    = SDL_SCANCODE_RCTRL;
+// Player 2 key mappings (IJKL movement)
+const SDL_Scancode P2_FORWARD   = SDL_SCANCODE_I;
+const SDL_Scancode P2_BACKWARD  = SDL_SCANCODE_K;
+// Strafing: J to strafe left, L to strafe right (swapped)
+const SDL_Scancode P2_STRAFE_L  = SDL_SCANCODE_J;    // strafe left
+const SDL_Scancode P2_STRAFE_R  = SDL_SCANCODE_L;    // strafe right
+// Yaw: RIGHT arrow to turn left, LEFT arrow to turn right
+const SDL_Scancode P2_TURN_L    = SDL_SCANCODE_RIGHT; // yaw left
+const SDL_Scancode P2_TURN_R    = SDL_SCANCODE_LEFT;  // yaw right
+// Pitch: UP arrow to look up, DOWN arrow to look down
+const SDL_Scancode P2_PITCH_UP  = SDL_SCANCODE_UP;     // look up
+const SDL_Scancode P2_PITCH_DOWN= SDL_SCANCODE_DOWN;   // look down
+const SDL_Scancode P2_JUMP      = SDL_SCANCODE_RSHIFT;
+const SDL_Scancode P2_SHOOT     = SDL_SCANCODE_RCTRL;
 
 
 int scores[2] = {0, 0}; // scores[0] for player 1, scores[1] for player 2
@@ -48,6 +58,7 @@ int scores[2] = {0, 0}; // scores[0] for player 1, scores[1] for player 2
 typedef struct {
     float x, y, z;
     float yaw;        // rotation around Y-axis in degrees
+    float pitch;      // rotation around X-axis (look up/down) in degrees
     float vy;         // vertical velocity
     bool  onGround;
 } Player;
@@ -628,9 +639,9 @@ void CollectCorridorWalls() {
 void ResetGame() {
     // Initialize players at different positions
     players[0].x = randomInRange(-9.0f, 9.0f); players[0].y = BASE_EYE_HEIGHT; players[0].z = randomInRange(-9.0f, 9.0f);
-    players[0].yaw = 0.0f; players[0].vy = 0.0f; players[0].onGround = true;
+    players[0].yaw   = 0.0f; players[0].pitch = 0.0f; players[0].vy = 0.0f; players[0].onGround = true;
     players[1].x = randomInRange(-9.0f, 9.0f);  players[1].y = BASE_EYE_HEIGHT; players[1].z = randomInRange(-9.0f, 9.0f);
-    players[1].yaw = 180.0f; players[1].vy = 0.0f; players[1].onGround = true;
+    players[1].yaw   = 180.0f; players[1].pitch = 0.0f; players[1].vy = 0.0f; players[1].onGround = true;
     // Clear bullets
     numBullets = 0;
     for(int i=0; i<MAX_BULLETS; ++i) bullets[i].active = false;
@@ -675,15 +686,22 @@ void FireBullet(int playerIndex) {
     for(int i=0; i<MAX_BULLETS; ++i) {
         if(!bullets[i].active) {
             // Set bullet initial position at player's eye
-            float yawRad = players[playerIndex].yaw * M_PI / 180.0f;
-            float dirx = sinf(-yawRad);
-            float dirz = -cosf(yawRad);
-            bullets[i].x = players[playerIndex].x + dirx * 0.8f; // offset forward a bit
-            bullets[i].y = players[playerIndex].y; 
-            bullets[i].z = players[playerIndex].z + dirz * 0.8f;
-            bullets[i].vx = dirx * 20.0f; // bullet speed ~20 units/s
-            bullets[i].vy = 0.0f;
-            bullets[i].vz = dirz * 20.0f;
+            // Compute direction with yaw and pitch
+            float yawRad   = players[playerIndex].yaw   * (M_PI / 180.0f);
+            float pitchRad = players[playerIndex].pitch * (M_PI / 180.0f);
+            float dirx = sinf(-yawRad) * cosf(pitchRad);
+            float diry = sinf(pitchRad);
+            float dirz = -cosf(yawRad) * cosf(pitchRad);
+            // Set bullet initial position slightly in front of the eye
+            float offset = 0.8f;
+            bullets[i].x = players[playerIndex].x + dirx * offset;
+            bullets[i].y = players[playerIndex].y + diry * offset;
+            bullets[i].z = players[playerIndex].z + dirz * offset;
+            // Set bullet velocity
+            float speed = 20.0f;
+            bullets[i].vx = dirx * speed;
+            bullets[i].vy = diry * speed;
+            bullets[i].vz = dirz * speed;
             bullets[i].active = true;
             bullets[i].owner = playerIndex;
             break;
@@ -997,12 +1015,23 @@ int main(int argc, char *argv[]) {
             // Keep yaw within [0,360)
             if (players[i].yaw < 0) players[i].yaw += 360.0f;
             if (players[i].yaw >= 360.0f) players[i].yaw -= 360.0f;
+            // Pitch control for both players
+            if ((i == 0 && keystate[P1_PITCH_UP]) || (i == 1 && keystate[P2_PITCH_UP])) {
+                players[i].pitch += TURN_SPEED * dt;
+            }
+            if ((i == 0 && keystate[P1_PITCH_DOWN]) || (i == 1 && keystate[P2_PITCH_DOWN])) {
+                players[i].pitch -= TURN_SPEED * dt;
+            }
+            // Clamp pitch to avoid flipping
+            if (players[i].pitch > 89.0f)  players[i].pitch = 89.0f;
+            if (players[i].pitch < -89.0f) players[i].pitch = -89.0f;
             // Movement forward/back/strafe
             float yawRad = players[i].yaw * (M_PI / 180.0f);
             float forwardX = sinf(-yawRad);
             float forwardZ = -cosf(yawRad);
-            float rightX   = cosf(yawRad);
-            float rightZ   = sinf(yawRad);
+            // Strafe direction: perpendicular to forward, projected horizontally
+            float rightX   = -forwardZ;
+            float rightZ   =  forwardX;
             float moveDX = 0.0f;
             float moveDZ = 0.0f;
             if ((i == 0 && keystate[P1_FORWARD]) || (i == 1 && keystate[P2_FORWARD])) {
@@ -1149,9 +1178,17 @@ int main(int argc, char *argv[]) {
             // Set camera view for player i
             glMatrixMode(GL_MODELVIEW);
             glLoadIdentity();
-            // Camera rotations (note: no pitch implemented, only yaw)
-            glRotatef(-players[i].yaw, 0.0f, 1.0f, 0.0f);
-            glTranslatef(-players[i].x, -players[i].y, -players[i].z);
+            // Camera view with yaw (horizontal) and pitch (vertical)
+            {
+                float yawRad   = players[i].yaw   * (M_PI / 180.0f);
+                float pitchRad = players[i].pitch * (M_PI / 180.0f);
+                float dirX = sinf(-yawRad) * cosf(pitchRad);
+                float dirY = sinf(pitchRad);
+                float dirZ = -cosf(yawRad) * cosf(pitchRad);
+                gluLookAt(players[i].x, players[i].y, players[i].z,
+                          players[i].x + dirX, players[i].y + dirY, players[i].z + dirZ,
+                          0.0f, 1.0f, 0.0f);
+            }
 
             // Draw floor (textured)
             glBindTexture(GL_TEXTURE_2D, texGrass);
