@@ -18,6 +18,8 @@
 #define GRAVITY       9.8f    // gravity acceleration (units/s^2)
 #define PLAYER_RADIUS 0.5f    // radius for player collision (approximate)
 #define BASE_EYE_HEIGHT 1.0f  // eye height when standing on ground
+#define ACCELERATION   40.0f  // horizontal acceleration (units/s^2)
+#define FRICTION       20.0f  // ground friction deceleration (units/s^2)
 
 //constants for map
 #define NUM_OBSTACLES 2 
@@ -60,6 +62,7 @@ typedef struct {
     float yaw;        // rotation around Y-axis in degrees
     float pitch;      // rotation around X-axis (look up/down) in degrees
     float vy;         // vertical velocity
+    float vx, vz;     // horizontal velocity
     bool  onGround;
 } Player;
 
@@ -639,9 +642,9 @@ void CollectCorridorWalls() {
 void ResetGame() {
     // Initialize players at different positions
     players[0].x = randomInRange(-9.0f, 9.0f); players[0].y = BASE_EYE_HEIGHT; players[0].z = randomInRange(-9.0f, 9.0f);
-    players[0].yaw   = 0.0f; players[0].pitch = 0.0f; players[0].vy = 0.0f; players[0].onGround = true;
+    players[0].yaw   = 0.0f; players[0].pitch = 0.0f; players[0].vy = 0.0f; players[0].vx = 0.0f; players[0].vz = 0.0f; players[0].onGround = true;
     players[1].x = randomInRange(-9.0f, 9.0f);  players[1].y = BASE_EYE_HEIGHT; players[1].z = randomInRange(-9.0f, 9.0f);
-    players[1].yaw   = 180.0f; players[1].pitch = 0.0f; players[1].vy = 0.0f; players[1].onGround = true;
+    players[1].yaw   = 180.0f; players[1].pitch = 0.0f; players[1].vy = 0.0f; players[1].vx = 0.0f; players[1].vz = 0.0f; players[1].onGround = true;
     // Clear bullets
     numBullets = 0;
     for(int i=0; i<MAX_BULLETS; ++i) bullets[i].active = false;
@@ -1029,70 +1032,58 @@ int main(int argc, char *argv[]) {
             // Clamp pitch to avoid flipping
             if (players[i].pitch > 89.0f)  players[i].pitch = 89.0f;
             if (players[i].pitch < -89.0f) players[i].pitch = -89.0f;
-            // Movement forward/back/strafe
-            float yawRad = players[i].yaw * (M_PI / 180.0f);
-            float forwardX = sinf(-yawRad);
-            float forwardZ = -cosf(yawRad);
-            // Strafe direction: perpendicular to forward, projected horizontally
-            float rightX   = -forwardZ;
-            float rightZ   =  forwardX;
-            float moveDX = 0.0f;
-            float moveDZ = 0.0f;
-            if ((i == 0 && keystate[P1_FORWARD]) || (i == 1 && keystate[P2_FORWARD])) {
-                moveDX += forwardX * MOVE_SPEED * dt;
-                moveDZ += forwardZ * MOVE_SPEED * dt;
-            }
-            if ((i == 0 && keystate[P1_BACKWARD]) || (i == 1 && keystate[P2_BACKWARD])) {
-                moveDX -= forwardX * MOVE_SPEED * dt;
-                moveDZ -= forwardZ * MOVE_SPEED * dt;
-            }
-            if ((i == 0 && keystate[P1_STRAFE_R]) || (i == 1 && keystate[P2_STRAFE_R])) {
-                moveDX += rightX * MOVE_SPEED * dt;
-                moveDZ += rightZ * MOVE_SPEED * dt;
-            }
-            if ((i == 0 && keystate[P1_STRAFE_L]) || (i == 1 && keystate[P2_STRAFE_L])) {
-                moveDX -= rightX * MOVE_SPEED * dt;
-                moveDZ -= rightZ * MOVE_SPEED * dt;
-            }
-
-            // Apply movement with collision check:
-            if (moveDX != 0.0f || moveDZ != 0.0f) {
-                /* // Check against obstacles by attempting movement in X and Z separately (simplified collision response)
-                float newX = players[i].x + moveDX;
-                float newZ = players[i].z + moveDZ;
-                bool collisionX = false;
-                bool collisionZ = false;
-                // World bounds check (keep players within +/-9 in X,Z)
-                if (newX < -9.0f || newX > 9.0f) collisionX = true;
-                if (newZ < -9.0f || newZ > 9.0f) collisionZ = true;
-                // Obstacle collision
-                for (int o = 0; o < numCollisionObstacles; ++o) {
-                    // Check intended X movement
-                    if (!collisionX) {
-                        if (CollidePlayerWithBox(newX, players[i].z, PLAYER_RADIUS, collisionObstacles[o])) {
-                            collisionX = true;
-                        }
-                    }
-                    // Check intended Z movement
-                    if (!collisionZ) {
-                        if (CollidePlayerWithBox(players[i].x, newZ, PLAYER_RADIUS, collisionObstacles[o])) {
-                            collisionZ = true;
-                        }
+            // Movement with momentum and friction
+            {
+                float yawRad = players[i].yaw * (M_PI / 180.0f);
+                float forwardX = sinf(-yawRad);
+                float forwardZ = -cosf(yawRad);
+                // Strafe direction (perpendicular)
+                float rightX = -forwardZ;
+                float rightZ =  forwardX;
+                // Build input vector
+                float inputX = 0.0f, inputZ = 0.0f;
+                if ((i == 0 && keystate[P1_FORWARD]) || (i == 1 && keystate[P2_FORWARD])) {
+                    inputX += forwardX; inputZ += forwardZ;
+                }
+                if ((i == 0 && keystate[P1_BACKWARD]) || (i == 1 && keystate[P2_BACKWARD])) {
+                    inputX -= forwardX; inputZ -= forwardZ;
+                }
+                if ((i == 0 && keystate[P1_STRAFE_R]) || (i == 1 && keystate[P2_STRAFE_R])) {
+                    inputX += rightX; inputZ += rightZ;
+                }
+                if ((i == 0 && keystate[P1_STRAFE_L]) || (i == 1 && keystate[P2_STRAFE_L])) {
+                    inputX -= rightX; inputZ -= rightZ;
+                }
+                // Normalize input
+                float inMag = sqrtf(inputX*inputX + inputZ*inputZ);
+                if (inMag > 0.0f) {
+                    inputX /= inMag; inputZ /= inMag;
+                }
+                // Apply acceleration
+                players[i].vx += inputX * ACCELERATION * dt;
+                players[i].vz += inputZ * ACCELERATION * dt;
+                // Apply friction when no input
+                if (inMag < 1e-6f) {
+                    float speed = sqrtf(players[i].vx*players[i].vx + players[i].vz*players[i].vz);
+                    if (speed > 0.0f) {
+                        float decel = FRICTION * dt;
+                        float newSpeed = speed - decel;
+                        if (newSpeed < 0.0f) newSpeed = 0.0f;
+                        players[i].vx *= newSpeed/speed;
+                        players[i].vz *= newSpeed/speed;
                     }
                 }
-                // Apply movement if no collision
-                if (!collisionX) players[i].x = newX;
-                if (!collisionZ) players[i].z = newZ; */
-
-                // Compute intended new position based on input
-                float newX = players[i].x + moveDX;
-                float newZ = players[i].z + moveDZ;
-
-                // Update position (even if this results in overlap)
-                players[i].x = newX;
-                players[i].z = newZ;
-
-                // Now resolve any collisions (iteratively push out of obstacles)
+                // Clamp max speed
+                {
+                    float speed = sqrtf(players[i].vx*players[i].vx + players[i].vz*players[i].vz);
+                    if (speed > MOVE_SPEED) {
+                        players[i].vx *= MOVE_SPEED/speed;
+                        players[i].vz *= MOVE_SPEED/speed;
+                    }
+                }
+                // Move and resolve collisions
+                players[i].x += players[i].vx * dt;
+                players[i].z += players[i].vz * dt;
                 ResolvePlayerCollisions(&players[i]);
             }
             
