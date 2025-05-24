@@ -7,6 +7,9 @@
 #include <stdio.h>
 #include <time.h>
 #include <stdlib.h>
+// Forward declarations for procedural floor
+void GenerateFloor();
+float GetFloorHeight(float x, float z);
 
 
 // Constants for game mechanics
@@ -18,11 +21,17 @@
 #define GRAVITY       9.8f    // gravity acceleration (units/s^2)
 #define PLAYER_RADIUS 0.5f    // radius for player collision (approximate)
 #define BASE_EYE_HEIGHT 1.0f  // eye height when standing on ground
+#define WALL_HEIGHT       2.0f  // height of BSP walls and corridors
 #define ACCELERATION   40.0f  // horizontal acceleration (units/s^2)
 #define FRICTION       20.0f  // ground friction deceleration (units/s^2)
 
 //constants for map
 #define NUM_OBSTACLES 2 
+// Procedural floor parameters
+#define FLOOR_SIZE           20.0f     // extent of floor in X/Z (+/- FLOOR_SIZE)
+#define FLOOR_RES            64        // grid resolution per axis
+#define FLOOR_NOISE_SCALE    0.03f      // noise frequency scale
+#define FLOOR_HEIGHT_SCALE   3.0f      // noise amplitude scale
 
 // Player 1 key mappings (WASD movement, F/H yaw, T/G pitch)
 const SDL_Scancode P1_FORWARD    = SDL_SCANCODE_W;
@@ -198,9 +207,15 @@ void CreateRooms(BSPNode* node) {
         node->room.minz = roomZ;
         node->room.maxx = roomX + roomW;
         node->room.maxz = roomZ + roomD;
-        // Set vertical extents (you can adjust these as needed)
-        node->room.miny = 0.0f;
-        node->room.maxy = 2.0f;
+        // Set vertical extents based on procedural floor height
+        {
+            // sample floor height at room center
+            float cx = (node->room.minx + node->room.maxx) * 0.5f;
+            float cz = (node->room.minz + node->room.maxz) * 0.5f;
+            float baseY = GetFloorHeight(cx, cz);
+            node->room.miny = baseY;
+            node->room.maxy = baseY + WALL_HEIGHT;
+        }
     } else {
         if (node->left)
             CreateRooms(node->left);
@@ -234,16 +249,28 @@ void ConnectTwoRooms(Box a, Box b, Corridor* corridor1, Corridor* corridor2) {
     corridor1->maxx = fmax(ax, bx);
     corridor1->minz = az - 0.5f; // corridor width of ~1 unit
     corridor1->maxz = az + 0.5f;
-    corridor1->miny = 0.0f;
-    corridor1->maxy = 2.0f;
+    // Vertical extents adapt to floor height at corridor center
+    {
+        float rx = (corridor1->minx + corridor1->maxx) * 0.5f;
+        float rz = (corridor1->minz + corridor1->maxz) * 0.5f;
+        float baseY = GetFloorHeight(rx, rz);
+        corridor1->miny = baseY;
+        corridor1->maxy = baseY + WALL_HEIGHT;
+    }
     
     // Vertical segment: from az to bz at bx
     corridor2->minx = bx - 0.5f;
     corridor2->maxx = bx + 0.5f;
     corridor2->minz = fmin(az, bz);
     corridor2->maxz = fmax(az, bz);
-    corridor2->miny = 0.0f;
-    corridor2->maxy = 2.0f;
+    // Vertical extents adapt to floor height at corridor center
+    {
+        float rx = (corridor2->minx + corridor2->maxx) * 0.5f;
+        float rz = (corridor2->minz + corridor2->maxz) * 0.5f;
+        float baseY = GetFloorHeight(rx, rz);
+        corridor2->miny = baseY;
+        corridor2->maxy = baseY + WALL_HEIGHT;
+    }
 }
 
 // Traverse the BSP tree and, for every internal node, connect the rooms
@@ -562,6 +589,8 @@ void DrawCorridors() {
 }
 
 #define WALL_THICKNESS 0.2f
+// Height of BSP walls and corridors
+#define WALL_HEIGHT    2.0f
 
 // Add wall obstacles for a given room (leaf node)
 void GenerateRoomWalls(Box room, Box obstacles[], int *count, int maxObstacles) {
@@ -572,8 +601,14 @@ void GenerateRoomWalls(Box room, Box obstacles[], int *count, int maxObstacles) 
     obstacles[*count].maxx = room.minx + WALL_THICKNESS;
     obstacles[*count].minz = room.minz;
     obstacles[*count].maxz = room.maxz;
-    obstacles[*count].miny = 0.0f;
-    obstacles[*count].maxy = 2.0f;
+    // set vertical extents based on floor height at wall center
+    {
+        float wx = (obstacles[*count].minx + obstacles[*count].maxx) * 0.5f;
+        float wz = (obstacles[*count].minz + obstacles[*count].maxz) * 0.5f;
+        float baseY = GetFloorHeight(wx, wz);
+        obstacles[*count].miny = baseY;
+        obstacles[*count].maxy = baseY + WALL_HEIGHT;
+    }
     (*count)++;
 
     // Right wall (along maxx)
@@ -581,8 +616,14 @@ void GenerateRoomWalls(Box room, Box obstacles[], int *count, int maxObstacles) 
     obstacles[*count].maxx = room.maxx;
     obstacles[*count].minz = room.minz;
     obstacles[*count].maxz = room.maxz;
-    obstacles[*count].miny = 0.0f;
-    obstacles[*count].maxy = 2.0f;
+    // set vertical extents based on floor height at wall center
+    {
+        float wx = (obstacles[*count].minx + obstacles[*count].maxx) * 0.5f;
+        float wz = (obstacles[*count].minz + obstacles[*count].maxz) * 0.5f;
+        float baseY = GetFloorHeight(wx, wz);
+        obstacles[*count].miny = baseY;
+        obstacles[*count].maxy = baseY + WALL_HEIGHT;
+    }
     (*count)++;
 
     // Top wall (along maxz)
@@ -590,8 +631,14 @@ void GenerateRoomWalls(Box room, Box obstacles[], int *count, int maxObstacles) 
     obstacles[*count].maxx = room.maxx;
     obstacles[*count].minz = room.maxz - WALL_THICKNESS;
     obstacles[*count].maxz = room.maxz;
-    obstacles[*count].miny = 0.0f;
-    obstacles[*count].maxy = 2.0f;
+    // set vertical extents based on floor height at wall center
+    {
+        float wx = (obstacles[*count].minx + obstacles[*count].maxx) * 0.5f;
+        float wz = (obstacles[*count].minz + obstacles[*count].maxz) * 0.5f;
+        float baseY = GetFloorHeight(wx, wz);
+        obstacles[*count].miny = baseY;
+        obstacles[*count].maxy = baseY + WALL_HEIGHT;
+    }
     (*count)++;
 
     // Bottom wall (along minz)
@@ -599,8 +646,14 @@ void GenerateRoomWalls(Box room, Box obstacles[], int *count, int maxObstacles) 
     obstacles[*count].maxx = room.maxx;
     obstacles[*count].minz = room.minz;
     obstacles[*count].maxz = room.minz + WALL_THICKNESS;
-    obstacles[*count].miny = 0.0f;
-    obstacles[*count].maxy = 2.0f;
+    // set vertical extents based on floor height at wall center
+    {
+        float wx = (obstacles[*count].minx + obstacles[*count].maxx) * 0.5f;
+        float wz = (obstacles[*count].minz + obstacles[*count].maxz) * 0.5f;
+        float baseY = GetFloorHeight(wx, wz);
+        obstacles[*count].miny = baseY;
+        obstacles[*count].maxy = baseY + WALL_HEIGHT;
+    }
     (*count)++;
 }
 
@@ -637,9 +690,86 @@ void CollectCorridorWalls() {
     }
 }
 
+// Floor height map array (size FLOOR_RES+1 by FLOOR_RES+1)
+static float floorHeights[FLOOR_RES+1][FLOOR_RES+1];
+
+// Generates a fractal noise-based heightmap for the floor
+void GenerateFloor() {
+    for (int iz = 0; iz <= FLOOR_RES; ++iz) {
+        for (int ix = 0; ix <= FLOOR_RES; ++ix) {
+            float x = -FLOOR_SIZE + (2.0f * FLOOR_SIZE) * ix / (float)FLOOR_RES;
+            float z = -FLOOR_SIZE + (2.0f * FLOOR_SIZE) * iz / (float)FLOOR_RES;
+            // Fractal Brownian Motion noise
+            float h = fbm(x * FLOOR_NOISE_SCALE, z * FLOOR_NOISE_SCALE) * FLOOR_HEIGHT_SCALE;
+            floorHeights[ix][iz] = h;
+        }
+    }
+}
+
+// Bilinearly sample the floor heightmap at world coordinates (x,z)
+float GetFloorHeight(float x, float z) {
+    float fx = (x + FLOOR_SIZE) * (FLOOR_RES / (2.0f * FLOOR_SIZE));
+    float fz = (z + FLOOR_SIZE) * (FLOOR_RES / (2.0f * FLOOR_SIZE));
+    int ix0 = (int)floorf(fx);
+    int iz0 = (int)floorf(fz);
+    float tx = fx - ix0;
+    float tz = fz - iz0;
+    if (ix0 < 0) ix0 = 0;
+    if (iz0 < 0) iz0 = 0;
+    if (ix0 >= FLOOR_RES) ix0 = FLOOR_RES - 1;
+    if (iz0 >= FLOOR_RES) iz0 = FLOOR_RES - 1;
+    int ix1 = ix0 + 1;
+    int iz1 = iz0 + 1;
+    float h00 = floorHeights[ix0][iz0];
+    float h10 = floorHeights[ix1][iz0];
+    float h01 = floorHeights[ix0][iz1];
+    float h11 = floorHeights[ix1][iz1];
+    float h0 = h00 * (1.0f - tx) + h10 * tx;
+    float h1 = h01 * (1.0f - tx) + h11 * tx;
+    return h0 * (1.0f - tz) + h1 * tz;
+}
+
+// Draws the floor as a triangulated height mesh using the grass texture
+void DrawProceduralFloor() {
+    glBindTexture(GL_TEXTURE_2D, texGrass);
+    glEnable(GL_TEXTURE_2D);
+    glColor3f(1.0f, 1.0f, 1.0f);
+    float step = (2.0f * FLOOR_SIZE) / FLOOR_RES;
+    float texStep = 10.0f / FLOOR_RES; // reuse tileRepeat = 10
+    for (int iz = 0; iz < FLOOR_RES; ++iz) {
+        float z0 = -FLOOR_SIZE + step * iz;
+        float z1 = z0 + step;
+        float v0 = texStep * iz;
+        float v1 = v0 + texStep;
+        glBegin(GL_TRIANGLES);
+        for (int ix = 0; ix < FLOOR_RES; ++ix) {
+            float x0 = -FLOOR_SIZE + step * ix;
+            float x1 = x0 + step;
+            float u0 = texStep * ix;
+            float u1 = u0 + texStep;
+            float h00 = floorHeights[ix][iz];
+            float h10 = floorHeights[ix+1][iz];
+            float h11 = floorHeights[ix+1][iz+1];
+            float h01 = floorHeights[ix][iz+1];
+            // Triangle 1
+            glTexCoord2f(u0, v0); glVertex3f(x0, h00, z0);
+            glTexCoord2f(u1, v0); glVertex3f(x1, h10, z0);
+            glTexCoord2f(u1, v1); glVertex3f(x1, h11, z1);
+            // Triangle 2
+            glTexCoord2f(u0, v0); glVertex3f(x0, h00, z0);
+            glTexCoord2f(u1, v1); glVertex3f(x1, h11, z1);
+            glTexCoord2f(u0, v1); glVertex3f(x0, h01, z1);
+        }
+        glEnd();
+    }
+    glDisable(GL_TEXTURE_2D);
+}
+
 
 // Reset game (players positions, etc.)
 void ResetGame() {
+    // Generate procedural floor heightmap before BSP and walls
+    GenerateFloor();
     // Initialize players at different positions
     players[0].x = randomInRange(-9.0f, 9.0f); players[0].y = BASE_EYE_HEIGHT; players[0].z = randomInRange(-9.0f, 9.0f);
     players[0].yaw   = 0.0f; players[0].pitch = 0.0f; players[0].vy = 0.0f; players[0].vx = 0.0f; players[0].vz = 0.0f; players[0].onGround = true;
@@ -651,9 +781,11 @@ void ResetGame() {
     //GenerateRandomObstacles(obstacles);
     // gen map
 
-    // Define your overall map area (for example, an arena from -9 to +9 in X and Z)
-    float mapX = -9.0f, mapZ = -9.0f;
-    float mapWidth = 18.0f, mapDepth = 18.0f;
+    // Define your overall map area based on procedural floor size
+    float mapX = -FLOOR_SIZE;
+    float mapZ = -FLOOR_SIZE;
+    float mapWidth = FLOOR_SIZE * 2.0f;
+    float mapDepth = FLOOR_SIZE * 2.0f;
     root = CreateBSPNode(mapX, mapZ, mapWidth, mapDepth);
 
     // Recursively partition the map
@@ -804,11 +936,21 @@ void ResolvePlayerCollisions(Player *p) {
     for (int iter = 0; iter < maxIterations; iter++) {
         bool collisionFound = false;
         
-        // Check against world bounds first (optional)
-        if (p->x < -9.0f + PLAYER_RADIUS) { p->x = -9.0f + PLAYER_RADIUS; collisionFound = true; }
-        else if (p->x > 9.0f - PLAYER_RADIUS) { p->x = 9.0f - PLAYER_RADIUS; collisionFound = true; }
-        if (p->z < -9.0f + PLAYER_RADIUS) { p->z = -9.0f + PLAYER_RADIUS; collisionFound = true; }
-        else if (p->z > 9.0f - PLAYER_RADIUS) { p->z = 9.0f - PLAYER_RADIUS; collisionFound = true; }
+        // Check against world bounds first (optional), using FLOOR_SIZE
+        if (p->x < -FLOOR_SIZE + PLAYER_RADIUS) {
+            p->x = -FLOOR_SIZE + PLAYER_RADIUS;
+            collisionFound = true;
+        } else if (p->x > FLOOR_SIZE - PLAYER_RADIUS) {
+            p->x = FLOOR_SIZE - PLAYER_RADIUS;
+            collisionFound = true;
+        }
+        if (p->z < -FLOOR_SIZE + PLAYER_RADIUS) {
+            p->z = -FLOOR_SIZE + PLAYER_RADIUS;
+            collisionFound = true;
+        } else if (p->z > FLOOR_SIZE - PLAYER_RADIUS) {
+            p->z = FLOOR_SIZE - PLAYER_RADIUS;
+            collisionFound = true;
+        }
         
         // Check against all collision obstacles
         for (int o = 0; o < numCollisionObstacles; ++o) {
@@ -1096,8 +1238,9 @@ int main(int argc, char *argv[]) {
                 }
                 // Predict new vertical position
                 float newY = oldY + players[i].vy * dt;
-                // Determine support height (ground or highest obstacle top beneath player)
-                float supportHeight = BASE_EYE_HEIGHT;
+                // Determine support height (floor or obstacle tops) beneath player's feet
+                float floorY = GetFloorHeight(players[i].x, players[i].z);
+                float supportHeight = floorY + BASE_EYE_HEIGHT;
                 for (int o = 0; o < numCollisionObstacles; ++o) {
                     Box *b = &collisionObstacles[o];
                     if (players[i].x >= b->minx - PLAYER_RADIUS && players[i].x <= b->maxx + PLAYER_RADIUS &&
@@ -1202,18 +1345,10 @@ int main(int argc, char *argv[]) {
                           0.0f, 1.0f, 0.0f);
             }
 
-            // Draw floor (textured)
-            glBindTexture(GL_TEXTURE_2D, texGrass);
+            // Draw procedural floor mesh
+            DrawProceduralFloor();
+            // Ensure texturing is enabled for walls and other objects
             glEnable(GL_TEXTURE_2D);
-            glColor3f(1,1,1);
-            float floorSize = 10.0f;
-            float tileRepeat = 10.0f;
-            glBegin(GL_QUADS);
-              glTexCoord2f(0.0f, 0.0f); glVertex3f(-floorSize, 0.0f, -floorSize);
-              glTexCoord2f(tileRepeat, 0.0f); glVertex3f( floorSize, 0.0f, -floorSize);
-              glTexCoord2f(tileRepeat, tileRepeat); glVertex3f( floorSize, 0.0f,  floorSize);
-              glTexCoord2f(0.0f, tileRepeat); glVertex3f(-floorSize, 0.0f,  floorSize);
-            glEnd();
 
             // Draw obstacles (textured cubes)
             glBindTexture(GL_TEXTURE_2D, texRock);
