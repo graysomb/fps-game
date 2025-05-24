@@ -809,9 +809,13 @@ void ResolvePlayerCollisions(Player *p) {
         
         // Check against all collision obstacles
         for (int o = 0; o < numCollisionObstacles; ++o) {
-            if (CollidePlayerWithBox(p->x, p->z, PLAYER_RADIUS, collisionObstacles[o])) {
-                ResolvePlayerCollision(p, collisionObstacles[o]);
-                collisionFound = true;
+            Box *b = &collisionObstacles[o];
+            // Only collide if player is below the top of the obstacle (allow jumping over)
+            if (p->y < b->maxy) {
+                if (CollidePlayerWithBox(p->x, p->z, PLAYER_RADIUS, *b)) {
+                    ResolvePlayerCollision(p, *b);
+                    collisionFound = true;
+                }
             }
         }
         // If no collisions were found, exit early
@@ -1091,17 +1095,34 @@ int main(int argc, char *argv[]) {
                 // Now resolve any collisions (iteratively push out of obstacles)
                 ResolvePlayerCollisions(&players[i]);
             }
-
+            
             // Apply gravity and jumping physics for player i
-            if (!players[i].onGround) {
-                players[i].vy -= GRAVITY * dt;
-            }
-            players[i].y += players[i].vy * dt;
-            // Ground collision
-            if (players[i].y <= BASE_EYE_HEIGHT) {
-                players[i].y = BASE_EYE_HEIGHT;
-                players[i].vy = 0.0f;
-                players[i].onGround = true;
+            {
+                float oldY = players[i].y;
+                // Apply gravity if airborne
+                if (!players[i].onGround) {
+                    players[i].vy -= GRAVITY * dt;
+                }
+                // Predict new vertical position
+                float newY = oldY + players[i].vy * dt;
+                // Determine support height (ground or highest obstacle top beneath player)
+                float supportHeight = BASE_EYE_HEIGHT;
+                for (int o = 0; o < numCollisionObstacles; ++o) {
+                    Box *b = &collisionObstacles[o];
+                    if (players[i].x >= b->minx - PLAYER_RADIUS && players[i].x <= b->maxx + PLAYER_RADIUS &&
+                        players[i].z >= b->minz - PLAYER_RADIUS && players[i].z <= b->maxz + PLAYER_RADIUS) {
+                        supportHeight = fmaxf(supportHeight, b->maxy);
+                    }
+                }
+                // Check for landing
+                if (newY <= supportHeight) {
+                    players[i].y = supportHeight;
+                    players[i].vy = 0.0f;
+                    players[i].onGround = true;
+                } else {
+                    players[i].y = newY;
+                    players[i].onGround = false;
+                }
             }
         } // end player loop
 
