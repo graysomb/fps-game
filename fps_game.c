@@ -80,6 +80,7 @@ typedef struct {
     float vx, vy, vz;
     bool active;
     int owner;  // which player fired (0 or 1)
+    float life; // remaining lifetime in seconds
 } Bullet;
 
 typedef struct {
@@ -349,6 +350,8 @@ BSPNode* root = NULL;
 // Global game state
 Player players[2];
 #define MAX_BULLETS 50
+#define BULLET_LIFETIME 3.0f        // bullet time-to-live in seconds
+#define BULLET_WORLD_BOUND 20.0f    // world bounds for bullet Y coordinate
 Bullet bullets[MAX_BULLETS];
 int numBullets = 0;  // or we can reuse bullets in a pool
 // Define a few obstacles in the scene (e.g., 2 boxes)
@@ -732,16 +735,34 @@ float GetFloorHeight(float x, float z) {
     return h0 * (1.0f - tz) + h1 * tz;
 }
 // Deform floor heightmap at given world position (hitX, hitZ) with crater effect
+// Deform floor heightmap around (hitX, hitZ) within radius
 void Deform(float hitX, float hitZ, float radius, float depth) {
-    for (int iz = 0; iz <= FLOOR_RES; ++iz) {
-        for (int ix = 0; ix <= FLOOR_RES; ++ix) {
+    // Compute grid conversion factor (cells per unit)
+    float invGrid = (FLOOR_RES / (2.0f * FLOOR_SIZE));
+    // Convert world coords to grid indices
+    float fx = (hitX + FLOOR_SIZE) * invGrid;
+    float fz = (hitZ + FLOOR_SIZE) * invGrid;
+    int ixCenter = (int)fx;
+    int izCenter = (int)fz;
+    // Compute affected radius in grid cells
+    int radiusCells = (int)(radius * invGrid) + 1;
+    // Clamp index ranges
+    int ix0 = ixCenter - radiusCells; if (ix0 < 0) ix0 = 0;
+    int iz0 = izCenter - radiusCells; if (iz0 < 0) iz0 = 0;
+    int ix1 = ixCenter + radiusCells; if (ix1 > FLOOR_RES) ix1 = FLOOR_RES;
+    int iz1 = izCenter + radiusCells; if (iz1 > FLOOR_RES) iz1 = FLOOR_RES;
+    float radiusSq = radius * radius;
+    // Only iterate over affected cells
+    for (int iz = iz0; iz <= iz1; ++iz) {
+        for (int ix = ix0; ix <= ix1; ++ix) {
+            // Compute world position of cell center
             float x = -FLOOR_SIZE + (2.0f * FLOOR_SIZE) * ix / (float)FLOOR_RES;
             float z = -FLOOR_SIZE + (2.0f * FLOOR_SIZE) * iz / (float)FLOOR_RES;
             float dx = x - hitX;
             float dz = z - hitZ;
-            float dist = sqrtf(dx * dx + dz * dz);
-            if (dist <= radius) {
-                float falloff = 1.0f - (dist / radius);
+            float distSq = dx*dx + dz*dz;
+            if (distSq <= radiusSq) {
+                float falloff = 1.0f - (sqrtf(distSq) / radius);
                 floorHeights[ix][iz] -= depth * falloff;
             }
         }
@@ -796,7 +817,11 @@ void ResetGame() {
     players[1].yaw   = 180.0f; players[1].pitch = 0.0f; players[1].vy = 0.0f; players[1].vx = 0.0f; players[1].vz = 0.0f; players[1].onGround = true;
     // Clear bullets
     numBullets = 0;
-    for(int i=0; i<MAX_BULLETS; ++i) bullets[i].active = false;
+    // Reset bullets
+    for(int i = 0; i < MAX_BULLETS; ++i) {
+        bullets[i].active = false;
+        bullets[i].life   = 0.0f;
+    }
     //GenerateRandomObstacles(obstacles);
     // gen map
 
@@ -855,13 +880,21 @@ void FireBullet(int playerIndex) {
             bullets[i].x = players[playerIndex].x + dirx * offset;
             bullets[i].y = players[playerIndex].y + diry * offset;
             bullets[i].z = players[playerIndex].z + dirz * offset;
+            // Ensure bullet spawns above the floor
+            {
+                float floorY = GetFloorHeight(bullets[i].x, bullets[i].z);
+                if (bullets[i].y <= floorY + 0.05f) {
+                    bullets[i].y = floorY + 0.05f;
+                }
+            }
             // Set bullet velocity
             float speed = 20.0f;
             bullets[i].vx = dirx * speed;
             bullets[i].vy = diry * speed;
             bullets[i].vz = dirz * speed;
             bullets[i].active = true;
-            bullets[i].owner = playerIndex;
+            bullets[i].owner  = playerIndex;
+            bullets[i].life   = BULLET_LIFETIME;
             break;
         }
     }
@@ -1286,12 +1319,23 @@ int main(int argc, char *argv[]) {
         // Update bullets
         for (int b = 0; b < MAX_BULLETS; ++b) {
             if (!bullets[b].active) continue;
+            // Decrease lifetime and deactivate if expired
+            bullets[b].life -= dt;
+            if (bullets[b].life <= 0.0f) {
+                bullets[b].active = false;
+                continue;
+            }
             // Move bullet
             bullets[b].x += bullets[b].vx * dt;
             bullets[b].y += bullets[b].vy * dt;
             bullets[b].z += bullets[b].vz * dt;
             // Check lifetime or out of bounds (e.g., beyond 50 units or out of arena)
             if (bullets[b].x < -10 || bullets[b].x > 10 || bullets[b].z < -10 || bullets[b].z > 10) {
+                bullets[b].active = false;
+                continue;
+            }
+            // Check vertical bounds
+            if (bullets[b].y < -BULLET_WORLD_BOUND || bullets[b].y > BULLET_WORLD_BOUND) {
                 bullets[b].active = false;
                 continue;
             }
