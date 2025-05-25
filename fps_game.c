@@ -660,6 +660,9 @@ void GenerateRoomWalls(Box room, Box obstacles[], int *count, int maxObstacles) 
 #define MAX_COLLISION_OBSTACLES 100
 Box collisionObstacles[MAX_COLLISION_OBSTACLES];
 int numCollisionObstacles = 0;
+// Health for each wall segment in collisionObstacles
+#define WALL_MAX_HEALTH 3  // number of hits to destroy a wall segment
+int wallHealth[MAX_COLLISION_OBSTACLES];
 
 // Traverse the BSP tree and generate walls for each room (leaf node)
 void CollectRoomWalls(BSPNode *node) {
@@ -727,6 +730,22 @@ float GetFloorHeight(float x, float z) {
     float h0 = h00 * (1.0f - tx) + h10 * tx;
     float h1 = h01 * (1.0f - tx) + h11 * tx;
     return h0 * (1.0f - tz) + h1 * tz;
+}
+// Deform floor heightmap at given world position (hitX, hitZ) with crater effect
+void Deform(float hitX, float hitZ, float radius, float depth) {
+    for (int iz = 0; iz <= FLOOR_RES; ++iz) {
+        for (int ix = 0; ix <= FLOOR_RES; ++ix) {
+            float x = -FLOOR_SIZE + (2.0f * FLOOR_SIZE) * ix / (float)FLOOR_RES;
+            float z = -FLOOR_SIZE + (2.0f * FLOOR_SIZE) * iz / (float)FLOOR_RES;
+            float dx = x - hitX;
+            float dz = z - hitZ;
+            float dist = sqrtf(dx * dx + dz * dz);
+            if (dist <= radius) {
+                float falloff = 1.0f - (dist / radius);
+                floorHeights[ix][iz] -= depth * falloff;
+            }
+        }
+    }
 }
 
 // Draws the floor as a triangulated height mesh using the grass texture
@@ -803,6 +822,10 @@ void ResetGame() {
     CollectRoomWalls(root);
     // Optionally, add corridor obstacles as well
     CollectCorridorWalls();
+    // Initialize health for each wall segment
+    for (int w = 0; w < numCollisionObstacles; ++w) {
+        wallHealth[w] = WALL_MAX_HEALTH;
+    }
 
 /*     // Define obstacle boxes (e.g., two blocks in the arena)
     obstacles[0].minx = -1.0f; obstacles[0].maxx = 1.0f;
@@ -1272,14 +1295,26 @@ int main(int argc, char *argv[]) {
                 bullets[b].active = false;
                 continue;
             }
-            // Check obstacle collisions
-            for (int o = 0; o < numCollisionObstacles; ++o) {
-                if (bullets[b].x >= collisionObstacles[o].minx && bullets[b].x <= collisionObstacles[o].maxx &&
-                    bullets[b].y >= collisionObstacles[o].miny && bullets[b].y <= collisionObstacles[o].maxy &&
-                    bullets[b].z >= collisionObstacles[o].minz && bullets[b].z <= collisionObstacles[o].maxz) {
-                    // Bullet hit an obstacle
+            // Check floor collision and deform floor
+            {
+                float floorY = GetFloorHeight(bullets[b].x, bullets[b].z);
+                if (bullets[b].y <= floorY) {
+                    Deform(bullets[b].x, bullets[b].z, 0.6f, 0.3f);
                     bullets[b].active = false;
                     continue;
+                }
+            }
+            // Check wall collisions and apply damage
+            for (int o = 0; o < numCollisionObstacles; ++o) {
+                if (wallHealth[o] <= 0) continue;
+                Box *wall = &collisionObstacles[o];
+                if (bullets[b].x >= wall->minx && bullets[b].x <= wall->maxx &&
+                    bullets[b].y >= wall->miny && bullets[b].y <= wall->maxy &&
+                    bullets[b].z >= wall->minz && bullets[b].z <= wall->maxz) {
+                    // Bullet hit a wall: decrement health
+                    wallHealth[o]--;
+                    bullets[b].active = false;
+                    break;
                 }
             }
             if (!bullets[b].active) continue; // skip further checks if deactivated
@@ -1347,25 +1382,14 @@ int main(int argc, char *argv[]) {
 
             // Draw procedural floor mesh
             DrawProceduralFloor();
-            // Ensure texturing is enabled for walls and other objects
+            // Draw wall segments from BSP (collision obstacles)
             glEnable(GL_TEXTURE_2D);
-
-            // Draw obstacles (textured cubes)
             glBindTexture(GL_TEXTURE_2D, texRock);
-            for (int o = 0; o < NUM_OBSTACLES; ++o) {
-                DrawTexturedBox(obstacles[o]);
+            for (int w = 0; w < numCollisionObstacles; ++w) {
+                if (wallHealth[w] <= 0) continue;
+                DrawTexturedBox(collisionObstacles[w]);
             }
-
-
-            // Disable texture if you want plain colored BSP elements
-            //glDisable(GL_TEXTURE_2D);
-            glBindTexture(GL_TEXTURE_2D, texRock);
-
-            // Draw BSP generated rooms
-            DrawBSPRooms(root);
-
-            // Draw corridors connecting the rooms
-            DrawCorridors();
+            glDisable(GL_TEXTURE_2D);
 
             // Draw bullets (small colored cubes)
             glDisable(GL_TEXTURE_2D);
