@@ -8,13 +8,13 @@ jobs:
   build-linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v3
       - name: Install Linux dependencies
         run: sudo apt update && sudo apt install -y libsdl2-dev libsdl2-ttf-dev libglu1-mesa-dev
       - name: Compile for Linux
         run: gcc fps_game.c -o fps_game $(sdl2-config --cflags --libs) -lGL -lGLU -lSDL2_ttf -lm
       - name: Upload Linux build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: fps_game-linux
           path: fps_game
@@ -22,7 +22,7 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v3
       - name: Setup MSYS2 and dependencies
         uses: msys2/setup-msys2@v2
         with:
@@ -33,16 +33,16 @@ jobs:
             mingw-w64-x86_64-SDL2
             mingw-w64-x86_64-SDL2_ttf
       - name: Compile for Windows
-        shell: bash
+        shell: msys2 {0}
         run: |
           gcc fps_game.c -o fps_game.exe \
-            -I/mingw64/include/SDL2 \
+            -I/mingw64/include \
             -L/mingw64/lib \
             -lmingw32 -lSDL2main -lSDL2 -lSDL2_ttf \
             -lopengl32 -lglu32 \
             -lm
       - name: Upload Windows build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: fps_game-win
           path: fps_game.exe
@@ -50,13 +50,20 @@ jobs:
   build-macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v3
       - name: Install macOS dependencies
         run: brew install sdl2 sdl2_ttf
       - name: Compile for macOS
-        run: gcc fps_game.c -o fps_game $(sdl2-config --cflags --libs) -lSDL2_ttf -framework OpenGL -lm
+        run: |
+          prefix=$(brew --prefix)
+          gcc fps_game.c -o fps_game \
+            -I${prefix}/include \
+            $(sdl2-config --cflags --libs) \
+            -lSDL2_ttf \
+            -framework OpenGL \
+            -lm
       - name: Upload macOS build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: fps_game-mac
           path: fps_game
