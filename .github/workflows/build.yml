@@ -10,9 +10,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Linux dependencies
-        run: sudo apt update && sudo apt install -y libsdl2-dev libglu1-mesa-dev
+        run: sudo apt update && sudo apt install -y libsdl2-dev libsdl2-ttf-dev libglu1-mesa-dev
       - name: Compile for Linux
-        run: gcc fps_game.c -o fps_game $(sdl2-config --cflags --libs) -lGL -lGLU -lm
+        run: gcc fps_game.c -o fps_game $(sdl2-config --cflags --libs) -lGL -lGLU -lSDL2_ttf -lm
       - name: Upload Linux build
         uses: actions/upload-artifact@v4
         with:
@@ -31,13 +31,14 @@ jobs:
           install: |
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-SDL2_ttf
       - name: Compile for Windows
         shell: bash
         run: |
           gcc fps_game.c -o fps_game.exe \
             -I/mingw64/include/SDL2 \
             -L/mingw64/lib \
-            -lmingw32 -lSDL2main -lSDL2 \
+            -lmingw32 -lSDL2main -lSDL2 -lSDL2_ttf \
             -lopengl32 -lglu32 \
             -lm
       - name: Upload Windows build
@@ -51,9 +52,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install macOS dependencies
-        run: brew install sdl2
+        run: brew install sdl2 sdl2_ttf
       - name: Compile for macOS
-        run: gcc fps_game.c -o fps_game $(sdl2-config --cflags --libs) -framework OpenGL -lm
+        run: gcc fps_game.c -o fps_game $(sdl2-config --cflags --libs) -lSDL2_ttf -framework OpenGL -lm
       - name: Upload macOS build
         uses: actions/upload-artifact@v4
         with:
