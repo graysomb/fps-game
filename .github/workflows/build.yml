@@ -1,0 +1,58 @@
+name: Build FPS Game
+on: [push, pull_request]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install Linux dependencies
+        run: sudo apt update && sudo apt install -y libsdl2-dev libglu1-mesa-dev
+      - name: Compile for Linux
+        run: gcc fps_game.c -o fps_game $(sdl2-config --cflags --libs) -lGL -lGLU -lm
+      - name: Upload Linux build
+        uses: actions/upload-artifact@v2
+        with:
+          name: fps_game-linux
+          path: fps_game
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Setup MSYS2 and dependencies
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: |
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-SDL2
+      - name: Compile for Windows
+        shell: bash
+        run: |
+          gcc fps_game.c -o fps_game.exe \
+            -I/mingw64/include/SDL2 \
+            -L/mingw64/lib \
+            -lmingw32 -lSDL2main -lSDL2 \
+            -lopengl32 -lglu32 \
+            -lm
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v2
+        with:
+          name: fps_game-win
+          path: fps_game.exe
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install macOS dependencies
+        run: brew install sdl2
+      - name: Compile for macOS
+        run: gcc fps_game.c -o fps_game $(sdl2-config --cflags --libs) -framework OpenGL -lm
+      - name: Upload macOS build
+        uses: actions/upload-artifact@v2
+        with:
+          name: fps_game-mac
+          path: fps_game
