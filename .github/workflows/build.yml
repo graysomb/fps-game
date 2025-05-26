@@ -8,13 +8,13 @@ jobs:
   build-linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Install Linux dependencies
         run: sudo apt update && sudo apt install -y libsdl2-dev libsdl2-ttf-dev libglu1-mesa-dev
       - name: Compile for Linux
         run: gcc fps_game.c -o fps_game $(sdl2-config --cflags --libs) -lGL -lGLU -lSDL2_ttf -lm
       - name: Upload Linux build
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: fps_game-linux
           path: fps_game
@@ -22,7 +22,7 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Setup MSYS2 and dependencies
         uses: msys2/setup-msys2@v2
         with:
@@ -42,7 +42,7 @@ jobs:
             -lopengl32 -lglu32 \
             -lm
       - name: Upload Windows build
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: fps_game-win
           path: fps_game.exe
@@ -50,7 +50,7 @@ jobs:
   build-macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Install macOS dependencies
         run: brew install sdl2 sdl2_ttf
       - name: Compile for macOS
@@ -63,7 +63,7 @@ jobs:
             -framework OpenGL \
             -lm
       - name: Upload macOS build
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: fps_game-mac
           path: fps_game
