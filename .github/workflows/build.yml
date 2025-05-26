@@ -1,4 +1,7 @@
 name: Build FPS Game
+permissions:
+  contents: read
+  actions: write
 on: [push, pull_request]
 
 jobs:
