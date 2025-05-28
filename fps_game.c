@@ -7,6 +7,7 @@
 #include <GL/glu.h>
 #endif
 #include <SDL2/SDL_ttf.h>
+#include <SDL2/SDL_image.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -18,8 +19,8 @@ float GetFloorHeight(float x, float z);
 
 
 // Constants for game mechanics
-#define SCREEN_WIDTH  800
-#define SCREEN_HEIGHT 600
+#define SCREEN_WIDTH  1600
+#define SCREEN_HEIGHT 900
 #define MOVE_SPEED    5.0f    // units per second
 #define TURN_SPEED    90.0f   // degrees per second
 #define JUMP_SPEED    10.0f    // initial upward velocity for jumps
@@ -448,6 +449,40 @@ void CreateRockTexture() {
 // --- Create a Grassy Texture ---
 // Texture ID
 GLuint texGrass = 2;
+// Skybox texture ID
+GLuint texSky = 0;
+// Quadric object for rendering the sky sphere
+GLUquadric* skyQuad = NULL;
+// Draw sky using fish-eye radial mapping: map texture center to pole, edges to equator
+static void DrawFishEyeSkySphere(void) {
+    const int slices = 64;
+    const int stacks = 32;
+    const float radius = 100.0f;
+    for (int i = 0; i < stacks; ++i) {
+        float phi1 = (M_PI / 2.0f) * ((float)i / stacks);
+        float phi2 = (M_PI / 2.0f) * ((float)(i + 1) / stacks);
+        float sinPhi1 = sinf(phi1), cosPhi1 = cosf(phi1);
+        float sinPhi2 = sinf(phi2), cosPhi2 = cosf(phi2);
+        float r_tex1 = phi1 / M_PI;
+        float r_tex2 = phi2 / M_PI;
+        glBegin(GL_TRIANGLE_STRIP);
+        for (int j = 0; j <= slices; ++j) {
+            float theta = 2.0f * M_PI * ((float)j / slices);
+            float cosTheta = cosf(theta), sinTheta = sinf(theta);
+            // Vertex at stack i
+            float x1 = sinPhi1 * cosTheta, y1 = cosPhi1, z1 = sinPhi1 * sinTheta;
+            float u1 = 0.5f + r_tex1 * cosTheta, v1 = 0.5f + r_tex1 * sinTheta;
+            glTexCoord2f(u1, v1);
+            glVertex3f(x1 * radius, y1 * radius, z1 * radius);
+            // Vertex at stack i+1
+            float x2 = sinPhi2 * cosTheta, y2 = cosPhi2, z2 = sinPhi2 * sinTheta;
+            float u2 = 0.5f + r_tex2 * cosTheta, v2 = 0.5f + r_tex2 * sinTheta;
+            glTexCoord2f(u2, v2);
+            glVertex3f(x2 * radius, y2 * radius, z2 * radius);
+        }
+        glEnd();
+    }
+}
 // Generate a procedural rock texture (128x128)
 void CreateGrassTexture() {
     const int TEX_SIZE = 128;
@@ -1157,6 +1192,32 @@ int main(int argc, char *argv[]) {
     CreateCheckerTexture();
     CreateRockTexture();
     CreateGrassTexture();
+    // Initialize SDL_image for PNG loading
+    if ((IMG_Init(IMG_INIT_PNG) & IMG_INIT_PNG) != IMG_INIT_PNG) {
+        fprintf(stderr, "SDL_image could not initialize PNG support: %s\n", IMG_GetError());
+    }
+    // Load skybox texture
+    {
+        SDL_Surface* skySurface = IMG_Load("skybox.png");
+        if (!skySurface) {
+            fprintf(stderr, "Failed to load skybox.png: %s\n", IMG_GetError());
+        } else {
+            glGenTextures(1, &texSky);
+            glBindTexture(GL_TEXTURE_2D, texSky);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            GLenum format = (skySurface->format->BytesPerPixel == 4) ? GL_RGBA : GL_RGB;
+            glTexImage2D(GL_TEXTURE_2D, 0, format, skySurface->w, skySurface->h, 0,
+                         format, GL_UNSIGNED_BYTE, skySurface->pixels);
+            SDL_FreeSurface(skySurface);
+        }
+    }
+    // Create quadric for sky sphere rendering
+    skyQuad = gluNewQuadric();
+    gluQuadricTexture(skyQuad, GL_TRUE);
+    gluQuadricOrientation(skyQuad, GLU_INSIDE);
 
     // Initialization code (before the main loop)
     InitFont();  // Initialize SDL_ttf and load the font
@@ -1428,6 +1489,24 @@ int main(int argc, char *argv[]) {
                           players[i].x + dirX, players[i].y + dirY, players[i].z + dirZ,
                           0.0f, 1.0f, 0.0f);
             }
+            // Draw sky sphere
+            glPushAttrib(GL_ENABLE_BIT | GL_DEPTH_BUFFER_BIT);
+            glDisable(GL_DEPTH_TEST);
+            glDepthMask(GL_FALSE);
+            glEnable(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, texSky);
+            // Render sky sphere centered on camera
+            glMatrixMode(GL_MODELVIEW);
+            glPushMatrix();
+            // Rotate sky sphere so the texture's center aligns with the zenith
+            glRotatef(0.0f, 1.0f, 0.0f, 0.0f);
+            glTranslatef(0.0f, -20.0f, 00.0f);
+            // (Optional) for vertical adjustment, you can also pitch the sphere by 90 degrees:
+            // glRotatef(90.0f, 1.0f, 0.0f, 0.0f);
+            // Draw fish-eye sky: center of texture at pole, edges at equator
+            DrawFishEyeSkySphere();
+            glPopMatrix();
+            glPopAttrib();
 
             // Draw procedural floor mesh
             DrawProceduralFloor();

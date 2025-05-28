@@ -10,7 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Linux dependencies
-        run: sudo apt update && sudo apt install -y libsdl2-dev libsdl2-ttf-dev libglu1-mesa-dev
+        run: sudo apt update && sudo apt install -y libsdl2-dev libsdl2-ttf-dev libglu1-mesa-dev libsdl2-image-dev
       - name: Compile for Linux
         run: gcc fps_game.c -o fps_game $(sdl2-config --cflags --libs) -lGL -lGLU -lSDL2_ttf -lm
       - name: Upload Linux build
@@ -32,6 +32,7 @@ jobs:
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-SDL2
             mingw-w64-x86_64-SDL2_ttf
+            mingw-w64-x86_64-SDL2_image
       - name: Compile for Windows
         shell: msys2 {0}
         run: |
@@ -52,7 +53,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install macOS dependencies
-        run: brew install sdl2 sdl2_ttf
+        run: brew install sdl2 sdl2_ttf sdl2_image
       - name: Compile for macOS
         run: |
           prefix=$(brew --prefix)
