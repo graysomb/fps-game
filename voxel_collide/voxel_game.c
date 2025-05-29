@@ -212,13 +212,12 @@ static void bh_insertNode(int nodeIndex, int vidx) {
     }
 }
 
-// Build the octree from all simulating charged voxels
+// Build the spatial octree from all voxels (for collision queries)
 static void bh_initTree(void) {
     float minx = FLT_MAX, miny = FLT_MAX, minz = FLT_MAX;
     float maxx = -FLT_MAX, maxy = -FLT_MAX, maxz = -FLT_MAX;
     for(int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
-        if(!v->simulate || v->charge == 0) continue;
         Vec3 p = v->pos;
         if(p.x < minx) minx = p.x; if(p.y < miny) miny = p.y; if(p.z < minz) minz = p.z;
         if(p.x > maxx) maxx = p.x; if(p.y > maxy) maxy = p.y; if(p.z > maxz) maxz = p.z;
@@ -235,8 +234,7 @@ static void bh_initTree(void) {
     root->particleIndex = -1;
     for(int c = 0; c < 8; c++) root->children[c] = -1;
     for(int i = 0; i < voxel_count; i++){
-        Voxel *v = &voxels[i];
-        if(!v->simulate || v->charge == 0) continue;
+        // insert every voxel into the spatial tree
         bh_insertNode(0, i);
     }
 }
@@ -277,10 +275,41 @@ static Vec3 bh_computeForce(int nodeIndex, Vec3 pos, int selfIdx) {
     return force;
 }
 
+// AABB intersection test between cubic node and query box
+static bool aabb_intersect(const Vec3 center, float halfSize, Vec3 min, Vec3 max) {
+    Vec3 nodeMin = v3(center.x - halfSize, center.y - halfSize, center.z - halfSize);
+    Vec3 nodeMax = v3(center.x + halfSize, center.y + halfSize, center.z + halfSize);
+    if (nodeMin.x > max.x || nodeMax.x < min.x) return false;
+    if (nodeMin.y > max.y || nodeMax.y < min.y) return false;
+    if (nodeMin.z > max.z || nodeMax.z < min.z) return false;
+    return true;
+}
+
+// Query the octree for voxels whose centers lie within [min, max]
+static void bh_queryRange(int nodeIndex, Vec3 min, Vec3 max, int *out, int *count) {
+    BHNode *node = &bhNodes[nodeIndex];
+    if (!aabb_intersect(node->center, node->halfSize, min, max)) return;
+    // Leaf node with a particle
+    if (node->children[0] < 0 && node->particleIndex >= 0) {
+        Voxel *v = &voxels[node->particleIndex];
+        if (v->pos.x >= min.x && v->pos.x <= max.x &&
+            v->pos.y >= min.y && v->pos.y <= max.y &&
+            v->pos.z >= min.z && v->pos.z <= max.z) {
+            out[(*count)++] = node->particleIndex;
+        }
+        return;
+    }
+    // Recurse into children
+    for (int i = 0; i < 8; i++) {
+        int ci = node->children[i];
+        if (ci >= 0) bh_queryRange(ci, min, max, out, count);
+    }
+}
+
 /* =================== PHYSICS =================== */
 static void physics_step(float dt){
-    // (Charges and Barnes-Hut forces disabled for pure collision physics)
-    // NOTE: remove bh_initTree and charge forces to focus on Newtonian collisions
+    // Build spatial octree for collision broad-phase
+    bh_initTree();
     for(int i=0;i<active_count;){
         int idx = active[i];
         Voxel *v = &voxels[idx];
@@ -331,8 +360,13 @@ static void physics_step(float dt){
             }
         }
         /* block-block collision: equal and opposite impulse transfer */
-        if(nx!=v->gx || ny!=v->gy || nz!=v->gz) {
-            int oidx = hget(nx,ny,nz);
+        if(nx != v->gx || ny != v->gy || nz != v->gz) {
+            // Broad-phase via spatial octree query instead of direct hash lookup
+            Vec3 qmin = v3(nx * VOXEL_SIZE, ny * VOXEL_SIZE, nz * VOXEL_SIZE);
+            Vec3 qmax = v3((nx + 1) * VOXEL_SIZE, (ny + 1) * VOXEL_SIZE, (nz + 1) * VOXEL_SIZE);
+            int cands[8], ccount = 0;
+            bh_queryRange(0, qmin, qmax, cands, &ccount);
+            int oidx = (ccount > 0) ? cands[0] : -1;
             if(oidx >= 0) {
                 Voxel *u = &voxels[oidx];
                 // break fixed voxel on impact: enable physics on it
