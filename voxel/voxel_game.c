@@ -39,12 +39,12 @@
 #define HASH_SIZE   32768  /* must be power‑of‑two */
 #define GRAVITY     9.81f
 #define FIXED_DT    0.0166667f  /* 60 Hz */
-#define VOXEL_SIZE  0.2f
-#define INTERACTION_K 10.0f   /* strength of inter-voxel forces */
+#define VOXEL_SIZE  0.3f
+#define INTERACTION_K 1.0f   /* strength of inter-voxel forces */
 #define EPSILON 1e-3f         /* minimum distance squared to avoid singularity */
 // Limits for physics to prevent runaway acceleration/velocity
-#define MAX_ACCELERATION 100.0f  /* maximum acceleration magnitude */
-#define MAX_VELOCITY     50.0f   /* maximum velocity magnitude */
+#define MAX_ACCELERATION 1000.0f  /* maximum acceleration magnitude */
+#define MAX_VELOCITY     500.0f   /* maximum velocity magnitude */
 #define FRICTION_COEFF   1.0f    /* velocity damping coefficient per second */
 
 /* =================== MATH =================== */
@@ -103,7 +103,8 @@ static bool occupied(int x,int y,int z){ return hget(x,y,z)>=0; }
 static void mark_surface(int idx){
     Voxel *v=&voxels[idx];
     int x=v->gx, y=v->gy, z=v->gz;
-    v->surface = !occupied(x+1,y,z)||!occupied(x-1,y,z)||!occupied(x,y+1,z)||!occupied(x,y-1,z)||!occupied(x,y,z+1)||!occupied(x,y,z-1);
+    //v->surface = !occupied(x+1,y,z)||!occupied(x-1,y,z)||!occupied(x,y+1,z)||!occupied(x,y-1,z)||!occupied(x,y,z+1)||!occupied(x,y,z-1);
+    v->surface = true;
 }
 static void update_around(int x,int y,int z){
     static const int nb[6][3]={{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
@@ -346,12 +347,21 @@ static void physics_step(float dt){
                 hset(nx,ny,nz,idx);
                 update_around(nx,ny,nz);
             }
-        } else if(fabsf(v->vel.x)<0.0001f && fabsf(v->vel.y)<0.0001f && fabsf(v->vel.z)<0.0001f && fabsf(v->acc.x)<0.0001f && fabsf(v->acc.y)<0.0001f && fabsf(v->acc.z)<0.0001f ) {
+        } else if(fabsf(v->vel.x)<0.0001f && fabsf(v->vel.y)<0.0001f && fabsf(v->vel.z)<0.0001f
+                  && fabsf(v->acc.x)<0.0001f && fabsf(v->acc.y)<0.0001f && fabsf(v->acc.z)<0.0001f) {
             /* deactivate slow/stopped voxels */
             v->simulate = false;
+            /* snap to grid */
+            v->pos = v3((v->gx + 0.5f) * VOXEL_SIZE,
+                       (v->gy + 0.5f) * VOXEL_SIZE,
+                       (v->gz + 0.5f) * VOXEL_SIZE);
             active[i] = active[--active_count];
             continue;
         }
+        /* snap to grid */
+        v->pos = v3((v->gx + 0.5f) * VOXEL_SIZE,
+                   (v->gy + 0.5f) * VOXEL_SIZE,
+                   (v->gz + 0.5f) * VOXEL_SIZE);
         i++;
     }
 }
@@ -438,7 +448,7 @@ static void build_demo(void){ /* static cube 6×6×6 */
                 if(idx<0) continue;
                 /* random charge: -1 repel, 0 neutral, 1 attract */
                 int ch=(rand()%3)-1;
-                voxels[idx].charge=ch;
+                voxels[idx].charge= ch;
                 /* color based on charge */
                 if(ch>0){
                     voxels[idx].r=1.0f; voxels[idx].g=0.0f; voxels[idx].b=0.0f;
