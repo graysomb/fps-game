@@ -9,7 +9,7 @@
  *  • Sparse physics – only voxels in `active` array are stepped each tick
  *  • Simple neighbor queries (hash map) to mark surface voxels
  *  • Player free‑fly camera with WASD (XZ) + T/G (Y) + F/H (yaw) controls
- *  • Demo scene containing a static cube and a falling sand pile
+ *  • Demo scene containing a static cube 
  *  • Constant friction damping on all moving voxels
  *
  * Build (Debian/Ubuntu):
@@ -43,8 +43,8 @@
 #define INTERACTION_K 10.0f   /* strength of inter-voxel forces */
 #define EPSILON 1e-3f         /* minimum distance squared to avoid singularity */
 // Limits for physics to prevent runaway acceleration/velocity
-#define MAX_ACCELERATION 1000.0f  /* maximum acceleration magnitude */
-#define MAX_VELOCITY     500.0f   /* maximum velocity magnitude */
+#define MAX_ACCELERATION 100.0f  /* maximum acceleration magnitude */
+#define MAX_VELOCITY     50.0f   /* maximum velocity magnitude */
 #define FRICTION_COEFF   1.0f    /* velocity damping coefficient per second */
 
 /* =================== MATH =================== */
@@ -83,12 +83,16 @@ static void hset(int x,int y,int z,int idx){
     while(table[h].key){ h=(h+1)&(HASH_SIZE-1);} /* empty */
     table[h].key=1; table[h].idx=idx;
 }
+// Retrieve the voxel index at grid position (x,y,z), or -1 if none
 static int hget(int x,int y,int z){
-    int h=hash(x,y,z);
+    int h = hash(x,y,z);
     while(table[h].key){
-        int i=table[h].idx;
-        if(i>=0){ Voxel *v=&voxels[i]; if(v->gx==x&&v->gy==y&&v->gz==z) return i; }
-        h=(h+1)&(HASH_SIZE-1);
+        int i = table[h].idx;
+        if(i >= 0){
+            Voxel *v = &voxels[i];
+            if(v->gx == x && v->gy == y && v->gz == z) return i;
+        }
+        h = (h + 1) & (HASH_SIZE - 1);
     }
     return -1;
 }
@@ -342,7 +346,7 @@ static void physics_step(float dt){
                 hset(nx,ny,nz,idx);
                 update_around(nx,ny,nz);
             }
-        } else if(fabsf(v->vel.x)<0.01f && fabsf(v->vel.y)<0.01f && fabsf(v->vel.z)<0.01f) {
+        } else if(fabsf(v->vel.x)<0.0001f && fabsf(v->vel.y)<0.0001f && fabsf(v->vel.z)<0.0001f && fabsf(v->acc.x)<0.0001f && fabsf(v->acc.y)<0.0001f && fabsf(v->acc.z)<0.0001f ) {
             /* deactivate slow/stopped voxels */
             v->simulate = false;
             active[i] = active[--active_count];
@@ -368,7 +372,46 @@ static void draw_voxel(const Voxel *v){
     if(!occupied(v->gx,v->gy,v->gz+1)){ glBegin(GL_QUADS); glVertex3f(x  ,y  ,z+s); glVertex3f(x  ,y+s,z+s); glVertex3f(x+s,y+s,z+s); glVertex3f(x+s,y  ,z+s); glEnd(); }
     if(!occupied(v->gx,v->gy,v->gz-1)){ glBegin(GL_QUADS); glVertex3f(x  ,y  ,z  ); glVertex3f(x+s,y  ,z  ); glVertex3f(x+s,y+s,z  ); glVertex3f(x  ,y+s,z  ); glEnd(); }
 }
-static void render_scene(void){ glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT); for(int i=0;i<voxel_count;i++) draw_voxel(&voxels[i]); }
+static void draw_bh_boxes(void) {
+    glColor3f(1.0f, 1.0f, 1.0f);
+    glLineWidth(1.0f);
+    glDisable(GL_DEPTH_TEST);
+    glBegin(GL_LINES);
+    for(int i = 0; i < bhNodeCount; i++){
+        BHNode *n = &bhNodes[i];
+        float minx = n->center.x - n->halfSize;
+        float maxx = n->center.x + n->halfSize;
+        float miny = n->center.y - n->halfSize;
+        float maxy = n->center.y + n->halfSize;
+        float minz = n->center.z - n->halfSize;
+        float maxz = n->center.z + n->halfSize;
+        glVertex3f(minx,miny,minz); glVertex3f(maxx,miny,minz);
+        glVertex3f(maxx,miny,maxz); glVertex3f(minx,miny,maxz);
+        glVertex3f(minx,maxy,minz); glVertex3f(maxx,maxy,minz);
+        glVertex3f(maxx,maxy,maxz); glVertex3f(minx,maxy,maxz);
+        glVertex3f(minx,miny,minz); glVertex3f(minx,maxy,minz);
+        glVertex3f(maxx,miny,minz); glVertex3f(maxx,maxy,minz);
+        glVertex3f(maxx,miny,maxz); glVertex3f(maxx,maxy,maxz);
+        glVertex3f(minx,miny,maxz); glVertex3f(minx,maxy,maxz);
+
+        // bottom face, front→back
+        glVertex3f(minx, miny, minz);  
+        glVertex3f(minx, miny, maxz);
+
+        glVertex3f(maxx, miny, minz);  
+        glVertex3f(maxx, miny, maxz);
+
+        // top face, front→back
+        glVertex3f(minx, maxy, minz);  
+        glVertex3f(minx, maxy, maxz);
+
+        glVertex3f(maxx, maxy, minz);  
+        glVertex3f(maxx, maxy, maxz);
+    }
+    glEnd();
+    glEnable(GL_DEPTH_TEST);
+}
+static void render_scene(void){ glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT); for(int i=0;i<voxel_count;i++) draw_voxel(&voxels[i]); draw_bh_boxes(); }
 
 /* =================== CAMERA & INPUT =================== */
 /* position camera to face demo cube at startup */
@@ -386,7 +429,7 @@ static void set_camera(void){ glMatrixMode(GL_PROJECTION); glLoadIdentity(); glu
 /* =================== DEMO SCENE =================== */
 static void build_demo(void){ /* static cube 6×6×6 */
     /* cube 6×6×6 with random charge and color, enabled for simulation */
-    int N = 24;
+    int N = 6;
     for(int x=0;x<N;x++){
         for(int y=0;y<N;y++){
             for(int z=0;z<N;z++){
