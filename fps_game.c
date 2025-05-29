@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <stdlib.h>
+//gcc fps_game.c -o fps_game     $(sdl2-config --cflags --libs)     $(pkg-config --cflags --libs SDL2_ttf SDL2_image)     -lGL -lGLU -lm
 // Forward declarations for procedural floor
 void GenerateFloor();
 float GetFloorHeight(float x, float z);

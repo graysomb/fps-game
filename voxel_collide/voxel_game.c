@@ -39,13 +39,13 @@
 #define HASH_SIZE   32768  /* must be power‑of‑two */
 #define GRAVITY     9.81f
 #define FIXED_DT    0.0166667f  /* 60 Hz */
-#define VOXEL_SIZE  0.3f
+#define VOXEL_SIZE  0.1f
 #define INTERACTION_K 1.0f   /* strength of inter-voxel forces */
 #define EPSILON 1e-3f         /* minimum distance squared to avoid singularity */
 // Limits for physics to prevent runaway acceleration/velocity
 #define MAX_ACCELERATION 1000.0f  /* maximum acceleration magnitude */
 #define MAX_VELOCITY     500.0f   /* maximum velocity magnitude */
-#define FRICTION_COEFF   1.0f    /* velocity damping coefficient per second */
+#define FRICTION_COEFF   0.1f    /* velocity damping coefficient per second */
 
 /* =================== MATH =================== */
 typedef struct { float x, y, z; } Vec3;
@@ -279,8 +279,8 @@ static Vec3 bh_computeForce(int nodeIndex, Vec3 pos, int selfIdx) {
 
 /* =================== PHYSICS =================== */
 static void physics_step(float dt){
-    // build Barnes-Hut tree once for this physics step
-    bh_initTree();
+    // (Charges and Barnes-Hut forces disabled for pure collision physics)
+    // NOTE: remove bh_initTree and charge forces to focus on Newtonian collisions
     for(int i=0;i<active_count;){
         int idx = active[i];
         Voxel *v = &voxels[idx];
@@ -289,13 +289,8 @@ static void physics_step(float dt){
             i++;
             continue;
         }
-        // start with gravity
+        // start with gravity only
         Vec3 acc = v3(0.0f, -GRAVITY, 0.0f);
-        // approximate Coulomb force via Barnes-Hut
-        if(v->charge != 0) {
-            Vec3 f = bh_computeForce(0, v->pos, idx);
-            acc = v_add(acc, f);
-        }
         // clamp acceleration to prevent excessive forces
         {
             float acc_mag2 = acc.x*acc.x + acc.y*acc.y + acc.z*acc.z;
@@ -340,6 +335,14 @@ static void physics_step(float dt){
             int oidx = hget(nx,ny,nz);
             if(oidx >= 0) {
                 Voxel *u = &voxels[oidx];
+                // break fixed voxel on impact: enable physics on it
+                if(u->fixed) {
+                    u->fixed = false;
+                    u->simulate = true;
+                    if(active_count < MAX_ACTIVE) active[active_count++] = oidx;
+                    mark_surface(oidx);
+                    update_around(u->gx, u->gy, u->gz);
+                }
                 /* compute impulse J = m1 * v1 */
                 Vec3 v1 = v->vel;
                 float m1 = v->mass;
@@ -441,33 +444,37 @@ static void handle_input(float dt){ const Uint8*ks=SDL_GetKeyboardState(NULL); f
 static void set_camera(void){ glMatrixMode(GL_PROJECTION); glLoadIdentity(); gluPerspective(60,4.0/3.0,0.1,1000); glMatrixMode(GL_MODELVIEW); glLoadIdentity(); Vec3 look=v_add(camPos,v3(cosf(camYaw),0,sinf(camYaw))); gluLookAt(camPos.x,camPos.y,camPos.z,look.x,look.y,look.z,0,1,0);} 
 
 /* =================== DEMO SCENE =================== */
-static void build_demo(void){ /* static cube 6×6×6 */
-    /* cube 6×6×6 with random charge and color, enabled for simulation */
-    int N = 6;
-    for(int x=0;x<N;x++){
-        for(int y=0;y<N;y++){
-            for(int z=0;z<N;z++){
-                /* make cube voxels simulating so they can move */
-                int idx = add_voxel(x, y, z, /*fixed=*/false, /*sim=*/true, 0.2f, 0.7f, 0.9f);
-                if(idx<0) continue;
-                /* random charge: -1 repel, 0 neutral, 1 attract */
-                int ch=(rand()%3)-1;
-                voxels[idx].charge= ch;
-                /* color based on charge */
-                if(ch>0){
-                    voxels[idx].r=1.0f; voxels[idx].g=0.0f; voxels[idx].b=0.0f;
-                } else if(ch<0){
-                    voxels[idx].r=0.0f; voxels[idx].g=0.0f; voxels[idx].b=1.0f;
-                } else {
-                    voxels[idx].r=0.5f; voxels[idx].g=0.5f; voxels[idx].b=0.5f;
-                }
+static void build_demo(void) {
+    // Large static block that will break apart on impact
+    const int N2 = 10;
+    const int offset2x = 0, offset2y = 0, offset2z = 0;
+    for(int x = 0; x < N2; x++) {
+        for(int y = 0; y < N2; y++) {
+            for(int z = 0; z < N2; z++) {
+                add_voxel(x + offset2x, y + offset2y, z + offset2z,
+                          /*fixed=*/true, /*sim=*/false,
+                          0.6f, 0.6f, 0.6f);
             }
         }
     }
-    /* mark all initial surfaces */
-    for(int i=0;i<voxel_count;i++){
-        mark_surface(i);
+    // Moving block that will be propelled into the static block
+    const int N1 = 8;
+    const int start_z = offset2z + N2 + 500;
+    Vec3 init_vel = v3(0.0f, 5.5f, -50.0f);
+    for(int x = 0; x < N1; x++) {
+        for(int y = 0; y < N1; y++) {
+            for(int z = 0; z < N1; z++) {
+                int idx = add_voxel(offset2x + (N2 - N1) / 2 + x,
+                                    offset2y + (N2 - N1) / 2 + y,
+                                    start_z + z,
+                                    /*fixed=*/false, /*sim=*/true,
+                                    1.0f, 0.2f, 0.2f);
+                voxels[idx].vel = init_vel;
+            }
+        }
     }
+    // mark all initial surfaces for rendering
+    for(int i = 0; i < voxel_count; i++) mark_surface(i);
 }
 
 /* =================== MAIN =================== */
