@@ -10,6 +10,7 @@
  *  • Simple neighbor queries (hash map) to mark surface voxels
  *  • Player free‑fly camera with WASD (XZ) + T/G (Y) + F/H (yaw) controls
  *  • Demo scene containing a static cube and a falling sand pile
+ *  • Constant friction damping on all moving voxels
  *
  * Build (Debian/Ubuntu):
  *   sudo apt install build-essential libsdl2-dev libgl1-mesa-dev libglu1-mesa-dev
@@ -28,6 +29,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdint.h>
 
 /* =================== CONFIG =================== */
 #define MAX_VOXELS  200
@@ -36,22 +39,31 @@
 #define GRAVITY     9.81f
 #define FIXED_DT    0.0166667f  /* 60 Hz */
 #define VOXEL_SIZE  1.0f
+#define INTERACTION_K 10.0f   /* strength of inter-voxel forces */
+#define EPSILON 1e-4f         /* minimum distance squared to avoid singularity */
+// Limits for physics to prevent runaway acceleration/velocity
+#define MAX_ACCELERATION 100.0f  /* maximum acceleration magnitude */
+#define MAX_VELOCITY     50.0f   /* maximum velocity magnitude */
+#define FRICTION_COEFF   0.1f    /* velocity damping coefficient per second */
 
 /* =================== MATH =================== */
 typedef struct { float x, y, z; } Vec3;
 static inline Vec3 v3(float x,float y,float z){ return (Vec3){x,y,z}; }
 static inline Vec3 v_add(Vec3 a,Vec3 b){ return v3(a.x+b.x, a.y+b.y, a.z+b.z); }
 static inline Vec3 v_mul(Vec3 a,float s){ return v3(a.x*s, a.y*s, a.z*s); }
+static inline Vec3 v_sub(Vec3 a,Vec3 b){ return v3(a.x-b.x, a.y-b.y, a.z-b.z); }
 
 /* =================== VOXEL =================== */
 typedef struct {
     int   gx, gy, gz;   /* grid coords */
     float mass;
     Vec3  vel;
+    Vec3  acc;
     bool  fixed;
     bool  simulate;
     bool  surface;
     float r,g,b;
+    int   charge;    /* -1 repel, 1 attract, 0 none */
 } Voxel;
 
 static Voxel voxels[MAX_VOXELS];
@@ -95,7 +107,8 @@ static void update_around(int x,int y,int z){
 static int add_voxel(int x,int y,int z,bool fixed,bool sim,float r,float g,float b){
     if(voxel_count>=MAX_VOXELS) return -1;
     int idx=voxel_count++;
-    voxels[idx]=(Voxel){x,y,z,1.0f,v3(0,0,0),fixed,sim,false,r,g,b};
+    Vec3 init_acc=sim?v3(0,-GRAVITY,0):v3(0,0,0);
+    voxels[idx]=(Voxel){x,y,z,1.0f,v3(0,0,0),init_acc,fixed,sim,false,r,g,b,0};
     hset(x,y,z,idx);
     if(sim && active_count<MAX_ACTIVE) active[active_count++]=idx;
     return idx;
@@ -105,19 +118,77 @@ static int add_voxel(int x,int y,int z,bool fixed,bool sim,float r,float g,float
 static void physics_step(float dt){
     for(int i=0;i<active_count;){
         int idx=active[i]; Voxel *v=&voxels[idx]; if(!v->simulate){ i++; continue; }
-        Vec3 acc=v3(0,-GRAVITY,0);
-        v->vel=v_add(v->vel,v_mul(acc,dt));
+        Vec3 acc=v->acc;
+        /* inter-voxel attractive/repulsive forces */
+        Vec3 pos_v = v3((v->gx+0.5f)*VOXEL_SIZE, (v->gy+0.5f)*VOXEL_SIZE, (v->gz+0.5f)*VOXEL_SIZE);
+        for(int j=0;j<voxel_count;j++){
+            if(j==idx) continue;
+            Voxel *w=&voxels[j];
+            if(v->charge==0 || w->charge==0) continue;
+            Vec3 pos_w = v3((w->gx+0.5f)*VOXEL_SIZE, (w->gy+0.5f)*VOXEL_SIZE, (w->gz+0.5f)*VOXEL_SIZE);
+            Vec3 dpos = v_sub(pos_w, pos_v);
+            float dist2 = dpos.x*dpos.x + dpos.y*dpos.y + dpos.z*dpos.z;
+            if(dist2 < EPSILON) continue;
+            float dist = sqrtf(dist2);
+            float force_mag = INTERACTION_K * v->charge * w->charge / dist2;
+            Vec3 dir = v_mul(dpos, 1.0f / dist);
+            acc = v_add(acc, v_mul(dir, force_mag / v->mass));
+        }
+        // clamp acceleration to prevent excessive forces
+        {
+            float acc_mag2 = acc.x*acc.x + acc.y*acc.y + acc.z*acc.z;
+            if(acc_mag2 > MAX_ACCELERATION * MAX_ACCELERATION) {
+                float acc_mag = sqrtf(acc_mag2);
+                acc = v_mul(acc, MAX_ACCELERATION / acc_mag);
+            }
+        }
+        v->vel = v_add(v->vel, v_mul(acc, dt));
+        // clamp velocity to fixed maximum
+        {
+            float vel_mag2 = v->vel.x*v->vel.x + v->vel.y*v->vel.y + v->vel.z*v->vel.z;
+            if(vel_mag2 > MAX_VELOCITY * MAX_VELOCITY) {
+                float vel_mag = sqrtf(vel_mag2);
+                v->vel = v_mul(v->vel, MAX_VELOCITY / vel_mag);
+            }
+        }
+        // apply friction damping
+        {
+            float friction_factor = 1.0f - FRICTION_COEFF * dt;
+            if(friction_factor < 0.0f) friction_factor = 0.0f;
+            v->vel = v_mul(v->vel, friction_factor);
+        }
         Vec3 pos=v_add(v3((v->gx+0.5f)*VOXEL_SIZE,(v->gy+0.5f)*VOXEL_SIZE,(v->gz+0.5f)*VOXEL_SIZE),v_mul(v->vel,dt));
         int nx=floorf(pos.x/VOXEL_SIZE), ny=floorf(pos.y/VOXEL_SIZE), nz=floorf(pos.z/VOXEL_SIZE);
         bool collide=false;
+        /* collision with floor or occupied cell */
         if(ny<0){ ny=0; v->vel.y=0; collide=true; }
-        if(occupied(nx,ny,nz) && !(nx==v->gx&&ny==v->gy&&nz==v->gz)){ v->vel=v3(0,0,0); collide=true; }
+        if(occupied(nx,ny,nz) && !(nx==v->gx && ny==v->gy && nz==v->gz)){
+            v->vel = v3(0,0,0);
+            collide = true;
+        }
         if(!collide){
-            hset(v->gx,v->gy,v->gz,-1); /* lazy delete */
-            v->gx=nx; v->gy=ny; v->gz=nz; hset(nx,ny,nz,idx); update_around(nx,ny,nz);
-        }else if(fabsf(v->vel.x)<0.01f&&fabsf(v->vel.y)<0.01f&&fabsf(v->vel.z)<0.01f){
-            v->simulate=false; active[i]=active[--active_count]; continue; }
-        i++; }
+            // only update hash map on actual cell move
+            if(nx!=v->gx || ny!=v->gy || nz!=v->gz){
+                // remove old mapping
+                int ox=v->gx, oy=v->gy, oz=v->gz;
+                int h=hash(ox,oy,oz);
+                while(table[h].key){
+                    if(table[h].idx==idx){ table[h].key=0; break; }
+                    h=(h+1)&(HASH_SIZE-1);
+                }
+                // insert new mapping
+                v->gx=nx; v->gy=ny; v->gz=nz;
+                hset(nx,ny,nz,idx);
+                update_around(nx,ny,nz);
+            }
+        } else if(fabsf(v->vel.x)<0.01f && fabsf(v->vel.y)<0.01f && fabsf(v->vel.z)<0.01f) {
+            /* deactivate slow/stopped voxels */
+            v->simulate = false;
+            active[i] = active[--active_count];
+            continue;
+        }
+        i++;
+    }
 }
 
 /* =================== RENDERING =================== */
@@ -135,7 +206,9 @@ static void draw_voxel(const Voxel *v){
 static void render_scene(void){ glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT); for(int i=0;i<voxel_count;i++) draw_voxel(&voxels[i]); }
 
 /* =================== CAMERA & INPUT =================== */
-static Vec3 camPos={10,10,20}; static float camYaw=-0.8f;
+/* position camera to face demo cube at startup */
+static Vec3 camPos={3.0f,3.0f,15.0f};
+static float camYaw=-1.5708f;  /* -90° yaw to look down -Z towards the cube center */
 static void handle_input(float dt){ const Uint8*ks=SDL_GetKeyboardState(NULL); float mv=10.0f, rt=1.5f; Vec3 fwd=v3(cosf(camYaw),0,sinf(camYaw)); Vec3 right=v3(-fwd.z,0,fwd.x);
     if(ks[SDL_SCANCODE_W]) camPos=v_add(camPos,v_mul(fwd,mv*dt));
     if(ks[SDL_SCANCODE_S]) camPos=v_add(camPos,v_mul(fwd,-mv*dt));
@@ -147,10 +220,31 @@ static void set_camera(void){ glMatrixMode(GL_PROJECTION); glLoadIdentity(); glu
 
 /* =================== DEMO SCENE =================== */
 static void build_demo(void){ /* static cube 6×6×6 */
-    for(int x=0;x<6;x++) for(int y=0;y<6;y++) for(int z=0;z<6;z++) add_voxel(x,y,z,true,false,0.2f,0.7f,0.9f);
-    /* sand */
-    for(int i=0;i<200;i++){ int sx=rand()%4+1, sz=rand()%4+1, sy=10+i/16; add_voxel(sx,sy,sz,false,true,0.9f,0.8f,0.2f);} 
-    for(int i=0;i<voxel_count;i++) mark_surface(i);
+    /* cube 6×6×6 with random charge and color, enabled for simulation */
+    for(int x=0;x<6;x++){
+        for(int y=0;y<6;y++){
+            for(int z=0;z<6;z++){
+                /* make cube voxels simulating so they can move */
+                int idx = add_voxel(x, y, z, /*fixed=*/false, /*sim=*/true, 0.2f, 0.7f, 0.9f);
+                if(idx<0) continue;
+                /* random charge: -1 repel, 0 neutral, 1 attract */
+                int ch=(rand()%3)-1;
+                voxels[idx].charge=ch;
+                /* color based on charge */
+                if(ch>0){
+                    voxels[idx].r=1.0f; voxels[idx].g=0.0f; voxels[idx].b=0.0f;
+                } else if(ch<0){
+                    voxels[idx].r=0.0f; voxels[idx].g=0.0f; voxels[idx].b=1.0f;
+                } else {
+                    voxels[idx].r=0.5f; voxels[idx].g=0.5f; voxels[idx].b=0.5f;
+                }
+            }
+        }
+    }
+    /* mark all initial surfaces */
+    for(int i=0;i<voxel_count;i++){
+        mark_surface(i);
+    }
 }
 
 /* =================== MAIN =================== */
@@ -161,8 +255,23 @@ int main(){ SDL_Init(SDL_INIT_VIDEO);
     glEnable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
     build_demo();
     uint64_t prev=SDL_GetPerformanceCounter(); float acc=0;
-    bool running=true; while(running){ SDL_Event e; while(SDL_PollEvent(&e)){ if(e.type==SDL_QUIT) running=false; if(e.type==SDL_KEYDOWN&&e.key.keysym.sym==SDLK_ESCAPE) running=false; }
-        uint64_t now=SDL_GetPerformanceCounter(); float dt=(now-prev)/(float)SDL_GetPerformanceFrequency(); prev=now;
-        handle_input(dt); acc+=dt; while(acc>=FIXED_DT){ physics_step(FIXED_DT); acc-=FIXED_DT; }
-        set_camera(); render_scene(); SDL_GL_SwapWindow(win); }
+    bool running=true; while(running){ 
+        SDL_Event e; 
+        while(SDL_PollEvent(&e)){ 
+            if(e.type==SDL_QUIT) running=false; 
+            if(e.type==SDL_KEYDOWN&&e.key.keysym.sym==SDLK_ESCAPE) running=false; }
+        uint64_t now=SDL_GetPerformanceCounter();
+        float dt=(now-prev)/(float) SDL_GetPerformanceFrequency();
+        prev=now;
+        handle_input(dt);
+        acc+=dt;
+        //float out = acc/dt;
+        //printf( "Now = %f ticks\n", (float) out );
+        while(acc>=FIXED_DT){
+            physics_step(FIXED_DT);
+            acc -= FIXED_DT;
+        }
+        set_camera();
+        render_scene();
+        SDL_GL_SwapWindow(win); }
     SDL_GL_DeleteContext(ctx); SDL_DestroyWindow(win); SDL_Quit(); return 0; }
