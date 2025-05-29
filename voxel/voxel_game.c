@@ -24,6 +24,7 @@
 #include <GL/gl.h>
 #include <GL/glu.h>
 #include <math.h>
+#include <float.h>  // for FLT_MAX
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -33,12 +34,12 @@
 #include <stdint.h>
 
 /* =================== CONFIG =================== */
-#define MAX_VOXELS  200
-#define MAX_ACTIVE  200
+#define MAX_VOXELS  20000
+#define MAX_ACTIVE  20000
 #define HASH_SIZE   32768  /* must be power‑of‑two */
 #define GRAVITY     9.81f
 #define FIXED_DT    0.0166667f  /* 60 Hz */
-#define VOXEL_SIZE  1.0f
+#define VOXEL_SIZE  0.1f
 #define INTERACTION_K 10.0f   /* strength of inter-voxel forces */
 #define EPSILON 1e-4f         /* minimum distance squared to avoid singularity */
 // Limits for physics to prevent runaway acceleration/velocity
@@ -127,26 +128,168 @@ static int add_voxel(int x,int y,int z,bool fixed,bool sim,float r,float g,float
     return idx;
 }
 
+/* =================== Barnes-Hut Octree =================== */
+#define BH_THETA 0.5f
+#define BH_MAX_NODES (MAX_VOXELS * 2)
+
+typedef struct {
+    Vec3 center;        /* center of this cube */
+    float halfSize;     /* half the width of the cube */
+    float chargeSum;    /* total charge in this node */
+    Vec3 com;           /* center-of-charge (weighted position) */
+    int children[8];    /* child node indices, -1 if empty */
+    int particleIndex;  /* voxel index if leaf, -1 otherwise */
+} BHNode;
+
+static BHNode bhNodes[BH_MAX_NODES];
+static int bhNodeCount;
+
+// forward prototypes
+static void bh_insertNode(int nodeIndex, int vidx);
+static void bh_initTree(void);
+static Vec3 bh_computeForce(int nodeIndex, Vec3 pos, int selfIdx);
+
+// Insert a voxel into the octree at nodeIndex
+static void bh_insertNode(int nodeIndex, int vidx) {
+    if(bhNodeCount >= BH_MAX_NODES) return;
+    BHNode *node = &bhNodes[nodeIndex];
+    Voxel *v = &voxels[vidx];
+    int oct = 0;
+    if(v->pos.x >= node->center.x) oct |= 4;
+    if(v->pos.y >= node->center.y) oct |= 2;
+    if(v->pos.z >= node->center.z) oct |= 1;
+    // empty leaf?
+    if(node->particleIndex < 0 && node->children[0] < 0) {
+        node->particleIndex = vidx;
+        node->chargeSum = (float)v->charge;
+        node->com = v->pos;
+        return;
+    }
+    // leaf with existing particle: subdivide
+    if(node->children[0] < 0) {
+        int existing = node->particleIndex;
+        node->particleIndex = -1;
+        for(int c = 0; c < 8; c++) node->children[c] = -1;
+        bh_insertNode(nodeIndex, existing);
+    }
+    // internal node: ensure child exists
+    if(node->children[oct] < 0) {
+        int ci = bhNodeCount++;
+        BHNode *child = &bhNodes[ci];
+        float h = node->halfSize * 0.5f;
+        child->halfSize = h;
+        child->center = node->center;
+        child->center.x += (oct & 4) ? h : -h;
+        child->center.y += (oct & 2) ? h : -h;
+        child->center.z += (oct & 1) ? h : -h;
+        child->chargeSum = 0.0f;
+        child->com = v3(0,0,0);
+        child->particleIndex = -1;
+        for(int c = 0; c < 8; c++) child->children[c] = -1;
+        node->children[oct] = ci;
+    }
+    // insert recursively
+    bh_insertNode(node->children[oct], vidx);
+    // update aggregate
+    node->chargeSum = 0.0f;
+    node->com = v3(0,0,0);
+    for(int c = 0; c < 8; c++){
+        int ci = node->children[c];
+        if(ci < 0) continue;
+        BHNode *ch = &bhNodes[ci];
+        if(ch->chargeSum != 0.0f){
+            node->chargeSum += ch->chargeSum;
+            node->com = v_add(node->com, v_mul(ch->com, ch->chargeSum));
+        }
+    }
+    if(node->chargeSum != 0.0f) {
+        node->com = v_mul(node->com, 1.0f / node->chargeSum);
+    }
+}
+
+// Build the octree from all simulating charged voxels
+static void bh_initTree(void) {
+    float minx = FLT_MAX, miny = FLT_MAX, minz = FLT_MAX;
+    float maxx = -FLT_MAX, maxy = -FLT_MAX, maxz = -FLT_MAX;
+    for(int i = 0; i < voxel_count; i++) {
+        Voxel *v = &voxels[i];
+        if(!v->simulate || v->charge == 0) continue;
+        Vec3 p = v->pos;
+        if(p.x < minx) minx = p.x; if(p.y < miny) miny = p.y; if(p.z < minz) minz = p.z;
+        if(p.x > maxx) maxx = p.x; if(p.y > maxy) maxy = p.y; if(p.z > maxz) maxz = p.z;
+    }
+    Vec3 center = v3((minx + maxx) * 0.5f, (miny + maxy) * 0.5f, (minz + maxz) * 0.5f);
+    float half = fmaxf(fmaxf(maxx - minx, maxy - miny), maxz - minz) * 0.5f;
+    if(half < 1e-3f) half = 1.0f;
+    bhNodeCount = 1;
+    BHNode *root = &bhNodes[0];
+    root->center = center;
+    root->halfSize = half;
+    root->chargeSum = 0.0f;
+    root->com = v3(0,0,0);
+    root->particleIndex = -1;
+    for(int c = 0; c < 8; c++) root->children[c] = -1;
+    for(int i = 0; i < voxel_count; i++){
+        Voxel *v = &voxels[i];
+        if(!v->simulate || v->charge == 0) continue;
+        bh_insertNode(0, i);
+    }
+}
+
+// Traverse the tree to compute approximate Coulomb acceleration
+static Vec3 bh_computeForce(int nodeIndex, Vec3 pos, int selfIdx) {
+    BHNode *node = &bhNodes[nodeIndex];
+    Vec3 force = v3(0,0,0);
+    if(node->particleIndex == selfIdx && node->children[0] < 0) {
+        return force;
+    }
+    Vec3 dpos = v_sub(node->com, pos);
+    float dist2 = dpos.x*dpos.x + dpos.y*dpos.y + dpos.z*dpos.z;
+    if(dist2 < EPSILON) return force;
+    float dist = sqrtf(dist2);
+    // leaf?
+    if(node->children[0] < 0) {
+        Voxel *v = &voxels[selfIdx];
+        float Q = node->chargeSum;
+        float fmag = INTERACTION_K * v->charge * Q / dist2;
+        Vec3 dir = v_mul(dpos, 1.0f / dist);
+        return v_mul(dir, fmag / v->mass);
+    }
+    // opening angle criterion
+    float s = node->halfSize * 2.0f;
+    if(s / dist < BH_THETA) {
+        Voxel *v = &voxels[selfIdx];
+        float Q = node->chargeSum;
+        float fmag = INTERACTION_K * v->charge * Q / dist2;
+        Vec3 dir = v_mul(dpos, 1.0f / dist);
+        return v_mul(dir, fmag / v->mass);
+    }
+    // recurse
+    for(int c = 0; c < 8; c++){
+        int ci = node->children[c];
+        if(ci >= 0) force = v_add(force, bh_computeForce(ci, pos, selfIdx));
+    }
+    return force;
+}
+
 /* =================== PHYSICS =================== */
 static void physics_step(float dt){
+    // build Barnes-Hut tree once for this physics step
+    bh_initTree();
     for(int i=0;i<active_count;){
-        int idx=active[i]; Voxel *v=&voxels[idx]; if(!v->simulate){ i++; continue; }
-        Vec3 acc=v->acc;
-        /* inter-voxel attractive/repulsive forces */
-        // continuous position for force calculations
-        Vec3 pos_v = v->pos;
-        for(int j=0;j<voxel_count;j++){
-            if(j==idx) continue;
-            Voxel *w=&voxels[j];
-            if(v->charge==0 || w->charge==0) continue;
-            Vec3 pos_w = w->pos;
-            Vec3 dpos = v_sub(pos_w, pos_v);
-            float dist2 = dpos.x*dpos.x + dpos.y*dpos.y + dpos.z*dpos.z;
-            if(dist2 < EPSILON) continue;
-            float dist = sqrtf(dist2);
-            float force_mag = INTERACTION_K * v->charge * w->charge / dist2;
-            Vec3 dir = v_mul(dpos, 1.0f / dist);
-            acc = v_add(acc, v_mul(dir, force_mag / v->mass));
+        int idx = active[i];
+        Voxel *v = &voxels[idx];
+        // skip non-simulating or fixed voxels
+        if(!v->simulate || v->fixed){
+            i++;
+            continue;
+        }
+        // start with gravity
+        Vec3 acc = v3(0.0f, -GRAVITY, 0.0f);
+        // approximate Coulomb force via Barnes-Hut
+        if(v->charge != 0) {
+            Vec3 f = bh_computeForce(0, v->pos, idx);
+            acc = v_add(acc, f);
         }
         // clamp acceleration to prevent excessive forces
         {
@@ -243,9 +386,9 @@ static void set_camera(void){ glMatrixMode(GL_PROJECTION); glLoadIdentity(); glu
 /* =================== DEMO SCENE =================== */
 static void build_demo(void){ /* static cube 6×6×6 */
     /* cube 6×6×6 with random charge and color, enabled for simulation */
-    for(int x=0;x<6;x++){
-        for(int y=0;y<6;y++){
-            for(int z=0;z<6;z++){
+    for(int x=0;x<60;x++){
+        for(int y=0;y<60;y++){
+            for(int z=0;z<60;z++){
                 /* make cube voxels simulating so they can move */
                 int idx = add_voxel(x, y, z, /*fixed=*/false, /*sim=*/true, 0.2f, 0.7f, 0.9f);
                 if(idx<0) continue;
