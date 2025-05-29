@@ -59,11 +59,12 @@ typedef struct {
     float mass;
     Vec3  vel;
     Vec3  acc;
+    Vec3  pos;         /* continuous center position */
     bool  fixed;
     bool  simulate;
     bool  surface;
-    float r,g,b;
-    int   charge;    /* -1 repel, 1 attract, 0 none */
+    float r, g, b;
+    int   charge;      /* -1 repel, 1 attract, 0 none */
 } Voxel;
 
 static Voxel voxels[MAX_VOXELS];
@@ -108,8 +109,20 @@ static int add_voxel(int x,int y,int z,bool fixed,bool sim,float r,float g,float
     if(voxel_count>=MAX_VOXELS) return -1;
     int idx=voxel_count++;
     Vec3 init_acc=sim?v3(0,-GRAVITY,0):v3(0,0,0);
-    voxels[idx]=(Voxel){x,y,z,1.0f,v3(0,0,0),init_acc,fixed,sim,false,r,g,b,0};
-    hset(x,y,z,idx);
+    // initialize voxel properties
+    Voxel *v = &voxels[idx];
+    v->gx = x; v->gy = y; v->gz = z;
+    v->mass = 1.0f;
+    v->vel = v3(0,0,0);
+    v->acc = init_acc;
+    v->pos = v3((x + 0.5f) * VOXEL_SIZE, (y + 0.5f) * VOXEL_SIZE, (z + 0.5f) * VOXEL_SIZE);
+    v->fixed = fixed;
+    v->simulate = sim;
+    v->surface = false;
+    v->r = r; v->g = g; v->b = b;
+    v->charge = 0;
+    // insert into spatial hash
+    hset(x, y, z, idx);
     if(sim && active_count<MAX_ACTIVE) active[active_count++]=idx;
     return idx;
 }
@@ -120,12 +133,13 @@ static void physics_step(float dt){
         int idx=active[i]; Voxel *v=&voxels[idx]; if(!v->simulate){ i++; continue; }
         Vec3 acc=v->acc;
         /* inter-voxel attractive/repulsive forces */
-        Vec3 pos_v = v3((v->gx+0.5f)*VOXEL_SIZE, (v->gy+0.5f)*VOXEL_SIZE, (v->gz+0.5f)*VOXEL_SIZE);
+        // continuous position for force calculations
+        Vec3 pos_v = v->pos;
         for(int j=0;j<voxel_count;j++){
             if(j==idx) continue;
             Voxel *w=&voxels[j];
             if(v->charge==0 || w->charge==0) continue;
-            Vec3 pos_w = v3((w->gx+0.5f)*VOXEL_SIZE, (w->gy+0.5f)*VOXEL_SIZE, (w->gz+0.5f)*VOXEL_SIZE);
+            Vec3 pos_w = w->pos;
             Vec3 dpos = v_sub(pos_w, pos_v);
             float dist2 = dpos.x*dpos.x + dpos.y*dpos.y + dpos.z*dpos.z;
             if(dist2 < EPSILON) continue;
@@ -157,8 +171,12 @@ static void physics_step(float dt){
             if(friction_factor < 0.0f) friction_factor = 0.0f;
             v->vel = v_mul(v->vel, friction_factor);
         }
-        Vec3 pos=v_add(v3((v->gx+0.5f)*VOXEL_SIZE,(v->gy+0.5f)*VOXEL_SIZE,(v->gz+0.5f)*VOXEL_SIZE),v_mul(v->vel,dt));
-        int nx=floorf(pos.x/VOXEL_SIZE), ny=floorf(pos.y/VOXEL_SIZE), nz=floorf(pos.z/VOXEL_SIZE);
+        // update continuous position
+        v->pos = v_add(v->pos, v_mul(v->vel, dt));
+        // determine new grid cell based on position
+        int nx = (int)floorf(v->pos.x / VOXEL_SIZE);
+        int ny = (int)floorf(v->pos.y / VOXEL_SIZE);
+        int nz = (int)floorf(v->pos.z / VOXEL_SIZE);
         bool collide=false;
         /* collision with floor or occupied cell */
         if(ny<0){ ny=0; v->vel.y=0; collide=true; }
@@ -194,7 +212,11 @@ static void physics_step(float dt){
 /* =================== RENDERING =================== */
 static void draw_voxel(const Voxel *v){
     if(!v->surface) return;
-    float x=v->gx*VOXEL_SIZE, y=v->gy*VOXEL_SIZE, z=v->gz*VOXEL_SIZE, s=VOXEL_SIZE;
+    // compute cube corner from continuous center position
+    float s = VOXEL_SIZE;
+    float x = v->pos.x - 0.5f * s;
+    float y = v->pos.y - 0.5f * s;
+    float z = v->pos.z - 0.5f * s;
     glColor3f(v->r,v->g,v->b);
     if(!occupied(v->gx+1,v->gy,v->gz)){ glBegin(GL_QUADS); glVertex3f(x+s,y  ,z  ); glVertex3f(x+s,y  ,z+s); glVertex3f(x+s,y+s,z+s); glVertex3f(x+s,y+s,z  ); glEnd(); }
     if(!occupied(v->gx-1,v->gy,v->gz)){ glBegin(GL_QUADS); glVertex3f(x  ,y  ,z  ); glVertex3f(x  ,y+s,z  ); glVertex3f(x  ,y+s,z+s); glVertex3f(x  ,y  ,z+s); glEnd(); }
