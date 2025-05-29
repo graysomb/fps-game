@@ -39,13 +39,13 @@
 #define HASH_SIZE   32768  /* must be power‑of‑two */
 #define GRAVITY     9.81f
 #define FIXED_DT    0.0166667f  /* 60 Hz */
-#define VOXEL_SIZE  0.1f
+#define VOXEL_SIZE  0.2f
 #define INTERACTION_K 10.0f   /* strength of inter-voxel forces */
-#define EPSILON 1e-4f         /* minimum distance squared to avoid singularity */
+#define EPSILON 1e-3f         /* minimum distance squared to avoid singularity */
 // Limits for physics to prevent runaway acceleration/velocity
-#define MAX_ACCELERATION 100.0f  /* maximum acceleration magnitude */
-#define MAX_VELOCITY     50.0f   /* maximum velocity magnitude */
-#define FRICTION_COEFF   0.1f    /* velocity damping coefficient per second */
+#define MAX_ACCELERATION 1000.0f  /* maximum acceleration magnitude */
+#define MAX_VELOCITY     500.0f   /* maximum velocity magnitude */
+#define FRICTION_COEFF   1.0f    /* velocity damping coefficient per second */
 
 /* =================== MATH =================== */
 typedef struct { float x, y, z; } Vec3;
@@ -386,9 +386,10 @@ static void set_camera(void){ glMatrixMode(GL_PROJECTION); glLoadIdentity(); glu
 /* =================== DEMO SCENE =================== */
 static void build_demo(void){ /* static cube 6×6×6 */
     /* cube 6×6×6 with random charge and color, enabled for simulation */
-    for(int x=0;x<60;x++){
-        for(int y=0;y<60;y++){
-            for(int z=0;z<60;z++){
+    int N = 24;
+    for(int x=0;x<N;x++){
+        for(int y=0;y<N;y++){
+            for(int z=0;z<N;z++){
                 /* make cube voxels simulating so they can move */
                 int idx = add_voxel(x, y, z, /*fixed=*/false, /*sim=*/true, 0.2f, 0.7f, 0.9f);
                 if(idx<0) continue;
