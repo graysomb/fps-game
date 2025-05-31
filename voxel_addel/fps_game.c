@@ -82,6 +82,179 @@ typedef struct {
     int owner;  // which player fired (0 or 1)
     float life; // remaining lifetime in seconds
 } Bullet;
+// === Voxel physics integration from voxel_game ===
+#include <stdint.h>
+#include <string.h>
+#define MAX_VOXELS 20000
+#define HASH_SIZE  32768
+#define VOXEL_SIZE 0.2f
+
+typedef struct { float x, y, z; } Vec3;
+static inline Vec3 v3(float x, float y, float z) { return (Vec3){x, y, z}; }
+static inline Vec3 v_add(Vec3 a, Vec3 b) { return v3(a.x + b.x, a.y + b.y, a.z + b.z); }
+static inline Vec3 v_mul(Vec3 a, float s) { return v3(a.x * s, a.y * s, a.z * s); }
+
+typedef struct {
+    int gx, gy, gz;
+    Vec3 pos;
+    Vec3 vel;
+    bool fixed;
+    bool simulate;
+    int type;
+    float r, g, b;
+} Voxel;
+
+static Voxel voxels[MAX_VOXELS];
+static int voxel_count = 0;
+
+typedef struct { int key; int idx; } Slot;
+static Slot table[HASH_SIZE];
+
+// Spatial hash for voxels
+static inline int hash_voxel(int x, int y, int z) {
+    uint32_t h = (uint32_t)(x*73856093 ^ y*19349663 ^ z*83492791);
+    return h & (HASH_SIZE - 1);
+}
+// Insert voxel index into hash
+static void table_set(int x, int y, int z, int idx) {
+    int h = hash_voxel(x, y, z);
+    while (table[h].key) h = (h + 1) & (HASH_SIZE - 1);
+    table[h].key = 1;
+    table[h].idx = idx;
+}
+// Retrieve voxel index at grid pos, or -1
+static int table_get(int x, int y, int z) {
+    int h = hash_voxel(x, y, z);
+    while (table[h].key) {
+        int i = table[h].idx;
+        Voxel *v = &voxels[i];
+        if (v->gx == x && v->gy == y && v->gz == z) return i;
+        h = (h + 1) & (HASH_SIZE - 1);
+    }
+    return -1;
+}
+// Check occupancy
+static bool occupied_voxel(int x, int y, int z) {
+    return table_get(x, y, z) >= 0;
+}
+
+// Add a voxel at continuous pos (px,py,pz)
+static int add_voxel(float px, float py, float pz, bool fixed, bool sim,
+                     float r, float g, float b, int type) {
+    if (voxel_count >= MAX_VOXELS) return -1;
+    int idx = voxel_count++;
+    Voxel *v = &voxels[idx];
+    v->pos = v3(px, py, pz);
+    v->vel = v3(0.0f, 0.0f, 0.0f);
+    v->fixed = fixed;
+    v->simulate = sim;
+    v->type = type;
+    v->r = r; v->g = g; v->b = b;
+    int x = (int)floorf(px / VOXEL_SIZE);
+    int y = (int)floorf(py / VOXEL_SIZE);
+    int z = (int)floorf(pz / VOXEL_SIZE);
+    v->gx = x; v->gy = y; v->gz = z;
+    table_set(x, y, z, idx);
+    return idx;
+}
+
+// Simple physics step: gravity & block-block collision
+static void physics_step(float dt) {
+    // Rebuild spatial hash
+    memset(table, 0, sizeof(table));
+    for (int i = 0; i < voxel_count; i++) {
+        Voxel *v = &voxels[i];
+        int x = (int)floorf(v->pos.x / VOXEL_SIZE);
+        int y = (int)floorf(v->pos.y / VOXEL_SIZE);
+        int z = (int)floorf(v->pos.z / VOXEL_SIZE);
+        v->gx = x; v->gy = y; v->gz = z;
+        table_set(x, y, z, i);
+    }
+    // Simulate dynamic voxels
+    for (int i = 0; i < voxel_count; i++) {
+        Voxel *v = &voxels[i];
+        if (!v->simulate) continue;
+        // Apply gravity
+        v->vel.y -= GRAVITY * dt;
+        // Move
+        v->pos = v_add(v->pos, v_mul(v->vel, dt));
+        // Check grid collision
+        int nx = (int)floorf(v->pos.x / VOXEL_SIZE);
+        int ny = (int)floorf(v->pos.y / VOXEL_SIZE);
+        int nz = (int)floorf(v->pos.z / VOXEL_SIZE);
+        if (nx != v->gx || ny != v->gy || nz != v->gz) {
+            int hit = table_get(nx, ny, nz);
+            if (hit >= 0 && hit != i) {
+                if (v->type == 1) {
+                    // Destructive collision: remove bullet and hit block
+                    v->simulate = false;
+                    v->fixed = true;
+                    v->pos = v3(-999.0f, -999.0f, -999.0f);
+                    // Remove existing block
+                    Voxel *u = &voxels[hit];
+                    u->simulate = false;
+                    u->fixed = true;
+                    u->pos = v3(-999.0f, -999.0f, -999.0f);
+                } else {
+                    v->simulate = false;
+                    v->fixed = true;
+                    v->pos = v3((v->gx + 0.5f) * VOXEL_SIZE,
+                                (v->gy + 0.5f) * VOXEL_SIZE,
+                                (v->gz + 0.5f) * VOXEL_SIZE);
+                }
+            }
+        }
+    }
+}
+
+// Draw all voxels as colored cubes
+static void draw_voxels(void) {
+    for (int i = 0; i < voxel_count; i++) {
+        Voxel *v = &voxels[i];
+        glColor3f(v->r, v->g, v->b);
+        DrawColoredCube(v->pos.x, v->pos.y, v->pos.z, VOXEL_SIZE/2);
+    }
+    glColor3f(1.0f, 1.0f, 1.0f);
+}
+
+// Build a static cube of voxels like demo
+static void build_demo(void) {
+    const int N = 10;
+    const int offx = 0, offy = 0, offz = 0;
+    for (int x = 0; x < N; x++) for (int y = 0; y < N; y++) for (int z = 0; z < N; z++) {
+        add_voxel((x + 0.5f) * VOXEL_SIZE + offx,
+                  (y + 0.5f) * VOXEL_SIZE + offy,
+                  (z + 0.5f) * VOXEL_SIZE + offz,
+                  true, false,
+                  0.6f, 0.6f, 0.6f,
+                  0);
+    }
+}
+
+// Toggleable voxel type for player 1
+static int p1_voxel_type = 0;
+
+// Fire a voxel bullet from a player
+static void FireVoxel(int playerIndex) {
+    float yawRad = players[playerIndex].yaw * (M_PI / 180.0f);
+    float pitchRad = players[playerIndex].pitch * (M_PI / 180.0f);
+    float dirx = sinf(-yawRad) * cosf(pitchRad);
+    float diry = sinf(pitchRad);
+    float dirz = -cosf(yawRad) * cosf(pitchRad);
+    float offset = 0.8f;
+    float sx = players[playerIndex].x + dirx * offset;
+    float sy = players[playerIndex].y + diry * offset;
+    float sz = players[playerIndex].z + dirz * offset;
+    int type = (playerIndex == 0 ? p1_voxel_type : 0);
+    // choose color based on type
+    float r = (type == 1 ? 1.0f : 1.0f);
+    float g = (type == 1 ? 0.0f : 1.0f);
+    float b = (type == 1 ? 0.0f : 1.0f);
+    int idx = add_voxel(sx, sy, sz, false, true, r, g, b, type);
+    if (idx >= 0) {
+        voxels[idx].vel = v_mul(v3(dirx, diry, dirz), 20.0f);
+    }
+}
 
 
 
@@ -442,6 +615,8 @@ int main(int argc, char *argv[]) {
 
     // Setup initial game state
     ResetGame();
+    // Build static voxel cube in map
+    build_demo();
 
     // Timing
     Uint32 lastTicks = SDL_GetTicks();
@@ -457,10 +632,14 @@ int main(int argc, char *argv[]) {
             } else if (event.type == SDL_KEYDOWN) {
                 // Handle one-time key presses (shoot, jump)
                 if (event.key.keysym.scancode == P1_SHOOT && !event.key.repeat) {
-                    FireBullet(0);
-                } 
+                    FireVoxel(0);
+                }
                 if (event.key.keysym.scancode == P2_SHOOT && !event.key.repeat) {
-                    FireBullet(1);
+                    FireVoxel(1);
+                }
+                // Toggle voxel type for player 1
+                if (event.key.keysym.scancode == SDL_SCANCODE_Q && !event.key.repeat) {
+                    p1_voxel_type = 1 - p1_voxel_type;
                 }
                 if (event.key.keysym.scancode == P1_JUMP && !event.key.repeat) {
                     if (players[0].onGround) {
@@ -598,8 +777,10 @@ int main(int argc, char *argv[]) {
             }
         } // end player loop
 
-        // Update bullets
-        for (int b = 0; b < MAX_BULLETS; ++b) {
+        // Update voxel physics
+        physics_step(dt);
+        // Disable old bullet system
+        #if 0
             if (!bullets[b].active) continue;
             // Decrease lifetime and deactivate if expired
             bullets[b].life -= dt;
@@ -649,6 +830,7 @@ int main(int argc, char *argv[]) {
                 }
             }
         }
+        #endif
 
         // Rendering
         glViewport(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
@@ -685,15 +867,9 @@ int main(int argc, char *argv[]) {
                           0.0f, 1.0f, 0.0f);
             }
             
-            // Draw bullets (small colored cubes)
+            // Draw voxels
             glDisable(GL_TEXTURE_2D);
-            for (int b = 0; b < MAX_BULLETS; ++b) {
-                if (!bullets[b].active) continue;
-                // Use white color for bullets
-                glColor3f(1.0f, 1.0f, 0.2f);
-                // Draw as a small cube (or point)
-                DrawColoredCube(bullets[b].x, bullets[b].y, bullets[b].z, 0.1f);
-            }
+            draw_voxels();
 
             // Draw other player (cube to represent opponent)
             int other = (i == 0 ? 1 : 0);
