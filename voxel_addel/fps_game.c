@@ -568,6 +568,11 @@ int main(int argc, char *argv[]) {
         // Update each player
         for (int i = 0; i < 2; ++i) {
             // Turning (yaw)
+            /*
+            if ((i == 0 && keystate[P1_SHOOT]) || (i == 1 && keystate[P2_SHOOT])) {
+                    FireVoxel(i);
+            }*/
+
             if ((i == 0 && keystate[P1_TURN_L]) || (i == 1 && keystate[P2_TURN_L])) {
                 players[i].yaw -= TURN_SPEED * dt;
             }
