@@ -39,13 +39,14 @@
 #define HASH_SIZE   32768  /* must be power‑of‑two */
 #define GRAVITY     9.81f
 #define FIXED_DT    0.0166667f  /* 60 Hz */
-#define VOXEL_SIZE  0.1f
+#define VOXEL_SIZE  0.2f
 #define INTERACTION_K 1.0f   /* strength of inter-voxel forces */
 #define EPSILON 1e-3f         /* minimum distance squared to avoid singularity */
 // Limits for physics to prevent runaway acceleration/velocity
 #define MAX_ACCELERATION 1000.0f  /* maximum acceleration magnitude */
 #define MAX_VELOCITY     500.0f   /* maximum velocity magnitude */
 #define FRICTION_COEFF   0.1f    /* velocity damping coefficient per second */
+#define STICK   0.1f
 
 /* =================== MATH =================== */
 typedef struct { float x, y, z; } Vec3;
@@ -53,6 +54,62 @@ static inline Vec3 v3(float x,float y,float z){ return (Vec3){x,y,z}; }
 static inline Vec3 v_add(Vec3 a,Vec3 b){ return v3(a.x+b.x, a.y+b.y, a.z+b.z); }
 static inline Vec3 v_mul(Vec3 a,float s){ return v3(a.x*s, a.y*s, a.z*s); }
 static inline Vec3 v_sub(Vec3 a,Vec3 b){ return v3(a.x-b.x, a.y-b.y, a.z-b.z); }
+static inline float v_prod(Vec3 a,Vec3 b){ return (a.x*b.x+ a.y*b.y + a.z*b.z); }
+
+#include <math.h>
+#include <stdlib.h>  // for rand()
+
+#define PI 3.1415926535f
+
+// Vector utilities
+static inline float v3_length(Vec3 v) {
+    return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+}
+
+static inline Vec3 v3_normalize(Vec3 v) {
+    float len = v3_length(v);
+    return len > 0 ? v3(v.x / len, v.y / len, v.z / len) : v;
+}
+
+static inline Vec3 v3_cross(Vec3 a, Vec3 b) {
+    return v3(
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x
+    );
+}
+
+static inline float randf() {
+    return rand() / (float)RAND_MAX;
+}
+
+// Perturb v by up to angle `a` radians in random direction, preserving magnitude
+static Vec3 v3_deviate(Vec3 v, float a) {
+    float len = v3_length(v);
+    if (len < 1e-6f) return v;
+
+    Vec3 dir = v3_normalize(v);
+
+    // Find an arbitrary perpendicular vector
+    Vec3 up = fabsf(dir.y) < 0.999f ? v3(0,1,0) : v3(1,0,0);
+    Vec3 axis = v3_cross(dir, up);
+    axis = v3_normalize(axis);
+
+    // Random rotation angle in [-a, a]
+    float theta = (randf() * 2.0f - 1.0f) * a;
+
+    // Rodrigues' rotation formula
+    float cos_theta = cosf(theta);
+    float sin_theta = sinf(theta);
+
+    Vec3 rotated;
+    rotated.x = dir.x * cos_theta + axis.x * sin_theta + v3_cross(axis, dir).x * (1.0f - cos_theta);
+    rotated.y = dir.y * cos_theta + axis.y * sin_theta + v3_cross(axis, dir).y * (1.0f - cos_theta);
+    rotated.z = dir.z * cos_theta + axis.z * sin_theta + v3_cross(axis, dir).z * (1.0f - cos_theta);
+
+    return v3(rotated.x * len, rotated.y * len, rotated.z * len);
+}
+
 
 /* =================== VOXEL =================== */
 typedef struct {
@@ -157,8 +214,15 @@ static void physics_step(float dt){
         }
         // start with gravity only
         Vec3 acc = v3(0.0f, -GRAVITY, 0.0f);
+        if (v_prod(v->vel,v->vel)<(10.0f*STICK)){
+            v->vel = v3(0,0,0);
+            v->simulate =false;
+            v->fixed = true;
+        }
         //update velocity
         v->vel = v_add(v->vel, v_mul(acc, dt));
+
+        v->vel = v_mul(v->vel, 0.999f);
         // update continuous position
         v->pos = v_add(v->pos, v_mul(v->vel, dt));
         // determine new grid cell based on position
@@ -189,14 +253,19 @@ static void physics_step(float dt){
                 }
                 /* compute impulse J = m1 * v1 */
                 Vec3 v1 = v->vel;
+                Vec3 v2 = u->vel;
                 float m1 = v->mass;
                 float m2 = u->mass;
-                Vec3 J = v_mul(v1, m1);
+                Vec3 J1 = v_mul(v1, m1);
+                Vec3 J2 = v_mul(v2, m2);
+                Vec3 impact = v_sub(v1,v2);
+                float a = v_prod(impact,impact);
                 /* apply to occupant: Δv2 = J/m2 */
-                if(!u->fixed) u->vel = v_add(u->vel, v_mul(J, 1.0f / m2));
+                u->vel = v3_deviate(v_mul(v_add(v1,v2),0.5f), 1);
+                //u->vel = v1;
                 /* apply to self:   Δv1 = -J/m1 */
-                v->vel = v_add(v->vel, v_mul(J, -1.0f / m1));
-                v->vel = v3(0.0f,0.0f,0.0f);
+                v->vel = v3_deviate(v_mul(v_add(v1,v2),0.5f), 1);
+                //v->vel = v2;
                 /* snap back to current cell center */
                 v->pos = v3((v->gx + 0.5f) * VOXEL_SIZE,
                             (v->gy + 0.5f) * VOXEL_SIZE,
@@ -221,25 +290,52 @@ static void physics_step(float dt){
 /* =================== RENDERING =================== */
 static void draw_voxel(const Voxel *v){
     if(!v->surface) return;
-    // compute cube corner from continuous center position
+
     float s = VOXEL_SIZE;
     float x = v->pos.x - 0.5f * s;
     float y = v->pos.y - 0.5f * s;
     float z = v->pos.z - 0.5f * s;
-    glColor3f(v->r,v->g,v->b);
-    if(!occupied(v->gx+1,v->gy,v->gz)){ glBegin(GL_QUADS); glVertex3f(x+s,y  ,z  ); glVertex3f(x+s,y  ,z+s); glVertex3f(x+s,y+s,z+s); glVertex3f(x+s,y+s,z  ); glEnd(); }
-    if(!occupied(v->gx-1,v->gy,v->gz)){ glBegin(GL_QUADS); glVertex3f(x  ,y  ,z  ); glVertex3f(x  ,y+s,z  ); glVertex3f(x  ,y+s,z+s); glVertex3f(x  ,y  ,z+s); glEnd(); }
-    if(!occupied(v->gx,v->gy+1,v->gz)){ glBegin(GL_QUADS); glVertex3f(x  ,y+s,z  ); glVertex3f(x+s,y+s,z  ); glVertex3f(x+s,y+s,z+s); glVertex3f(x  ,y+s,z+s); glEnd(); }
-    if(!occupied(v->gx,v->gy-1,v->gz)){ glBegin(GL_QUADS); glVertex3f(x  ,y  ,z  ); glVertex3f(x  ,y  ,z+s); glVertex3f(x+s,y  ,z+s); glVertex3f(x+s,y  ,z  ); glEnd(); }
-    if(!occupied(v->gx,v->gy,v->gz+1)){ glBegin(GL_QUADS); glVertex3f(x  ,y  ,z+s); glVertex3f(x  ,y+s,z+s); glVertex3f(x+s,y+s,z+s); glVertex3f(x+s,y  ,z+s); glEnd(); }
-    if(!occupied(v->gx,v->gy,v->gz-1)){ glBegin(GL_QUADS); glVertex3f(x  ,y  ,z  ); glVertex3f(x+s,y  ,z  ); glVertex3f(x+s,y+s,z  ); glVertex3f(x  ,y+s,z  ); glEnd(); }
+
+    typedef struct { float x, y, z; } Pt;
+    Pt face[6][4] = {
+        {{x+s,y  ,z  },{x+s,y  ,z+s},{x+s,y+s,z+s},{x+s,y+s,z  }}, // +X
+        {{x  ,y  ,z  },{x  ,y+s,z  },{x  ,y+s,z+s},{x  ,y  ,z+s}}, // -X
+        {{x  ,y+s,z  },{x+s,y+s,z  },{x+s,y+s,z+s},{x  ,y+s,z+s}}, // +Y
+        {{x  ,y  ,z  },{x  ,y  ,z+s},{x+s,y  ,z+s},{x+s,y  ,z  }}, // -Y
+        {{x  ,y  ,z+s},{x  ,y+s,z+s},{x+s,y+s,z+s},{x+s,y  ,z+s}}, // +Z
+        {{x  ,y  ,z  },{x+s,y  ,z  },{x+s,y+s,z  },{x  ,y+s,z  }}  // -Z
+    };
+    int gx = v->gx, gy = v->gy, gz = v->gz;
+    int neighbors[6][3] = {
+        {gx+1, gy, gz}, {gx-1, gy, gz}, {gx, gy+1, gz},
+        {gx, gy-1, gz}, {gx, gy, gz+1}, {gx, gy, gz-1}
+    };
+
+    for(int i = 0; i < 6; i++){
+        if(occupied(neighbors[i][0], neighbors[i][1], neighbors[i][2]))
+            continue;
+
+        // Draw face color
+        glColor3f(v->r, v->g, v->b);
+        glBegin(GL_QUADS);
+        for(int j = 0; j < 4; j++)
+            glVertex3f(face[i][j].x, face[i][j].y, face[i][j].z);
+        glEnd();
+
+        // Draw black wireframe edge
+        glColor3f(0, 0, 0);
+        glBegin(GL_LINE_LOOP);
+        for(int j = 0; j < 4; j++)
+            glVertex3f(face[i][j].x, face[i][j].y, face[i][j].z);
+        glEnd();
+    }
 }
 
 static void render_scene(void){ glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT); for(int i=0;i<voxel_count;i++) draw_voxel(&voxels[i]); }
 
 /* =================== CAMERA & INPUT =================== */
 /* position camera to face demo cube at startup */
-static Vec3 camPos={3.0f,3.0f,15.0f};
+static Vec3 camPos={3.0f,3.0f,10.0f};
 static float camYaw=-1.5708f;  /* -90° yaw to look down -Z towards the cube center */
 static void handle_input(float dt){ const Uint8*ks=SDL_GetKeyboardState(NULL); float mv=10.0f, rt=1.5f; Vec3 fwd=v3(cosf(camYaw),0,sinf(camYaw)); Vec3 right=v3(-fwd.z,0,fwd.x);
     if(ks[SDL_SCANCODE_W]) camPos=v_add(camPos,v_mul(fwd,mv*dt));
@@ -267,7 +363,7 @@ static void build_demo(void) {
     // Moving block that will be propelled into the static block
     const int N1 = 1;
     const int start_z = offset2z + N2 + 500;
-    Vec3 init_vel = v3(0.0f, 5.5f, -50.0f);
+    Vec3 init_vel = v3(0.0f, 7.0f, -50.0f);
     for(int x = 0; x < N1; x++) {
         for(int y = 0; y < N1; y++) {
             for(int z = 0; z < N1; z++) {
