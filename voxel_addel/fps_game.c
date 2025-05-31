@@ -94,12 +94,16 @@ static inline Vec3 v3(float x, float y, float z) { return (Vec3){x, y, z}; }
 static inline Vec3 v_add(Vec3 a, Vec3 b) { return v3(a.x + b.x, a.y + b.y, a.z + b.z); }
 static inline Vec3 v_mul(Vec3 a, float s) { return v3(a.x * s, a.y * s, a.z * s); }
 
+/* =================== VOXEL =================== */
 typedef struct {
-    int gx, gy, gz;
-    Vec3 pos;
-    Vec3 vel;
-    bool fixed;
-    bool simulate;
+    int   gx, gy, gz;   /* grid coords */
+    float mass;
+    Vec3  vel;
+    Vec3  acc;
+    Vec3  pos;         /* continuous center position */
+    bool  fixed;
+    bool  simulate;
+    bool  surface;
     int type;
     float r, g, b;
 } Voxel;
@@ -138,6 +142,7 @@ static bool occupied_voxel(int x, int y, int z) {
     return table_get(x, y, z) >= 0;
 }
 
+static bool occupied(int x,int y,int z){ return  table_get(x,y,z)>=0; }
 // Add a voxel at continuous pos (px,py,pz)
 static int add_voxel(float px, float py, float pz, bool fixed, bool sim,
                      float r, float g, float b, int type) {
@@ -149,6 +154,7 @@ static int add_voxel(float px, float py, float pz, bool fixed, bool sim,
     v->fixed = fixed;
     v->simulate = sim;
     v->type = type;
+    v->surface = true;
     v->r = r; v->g = g; v->b = b;
     int x = (int)floorf(px / VOXEL_SIZE);
     int y = (int)floorf(py / VOXEL_SIZE);
@@ -207,12 +213,54 @@ static void physics_step(float dt) {
     }
 }
 
+
+static void draw_voxel(const Voxel *v){
+    if(!v->surface) return;
+
+    float s = VOXEL_SIZE;
+    float x = v->pos.x - 0.5f * s;
+    float y = v->pos.y - 0.5f * s;
+    float z = v->pos.z - 0.5f * s;
+
+    typedef struct { float x, y, z; } Pt;
+    Pt face[6][4] = {
+        {{x+s,y  ,z  },{x+s,y  ,z+s},{x+s,y+s,z+s},{x+s,y+s,z  }}, // +X
+        {{x  ,y  ,z  },{x  ,y+s,z  },{x  ,y+s,z+s},{x  ,y  ,z+s}}, // -X
+        {{x  ,y+s,z  },{x+s,y+s,z  },{x+s,y+s,z+s},{x  ,y+s,z+s}}, // +Y
+        {{x  ,y  ,z  },{x  ,y  ,z+s},{x+s,y  ,z+s},{x+s,y  ,z  }}, // -Y
+        {{x  ,y  ,z+s},{x  ,y+s,z+s},{x+s,y+s,z+s},{x+s,y  ,z+s}}, // +Z
+        {{x  ,y  ,z  },{x+s,y  ,z  },{x+s,y+s,z  },{x  ,y+s,z  }}  // -Z
+    };
+    int gx = v->gx, gy = v->gy, gz = v->gz;
+    int neighbors[6][3] = {
+        {gx+1, gy, gz}, {gx-1, gy, gz}, {gx, gy+1, gz},
+        {gx, gy-1, gz}, {gx, gy, gz+1}, {gx, gy, gz-1}
+    };
+
+    for(int i = 0; i < 6; i++){
+        if(occupied(neighbors[i][0], neighbors[i][1], neighbors[i][2]))
+            continue;
+
+        // Draw face color
+        glColor3f(v->r, v->g, v->b);
+        glBegin(GL_QUADS);
+        for(int j = 0; j < 4; j++)
+            glVertex3f(face[i][j].x, face[i][j].y, face[i][j].z);
+        glEnd();
+
+        // Draw black wireframe edge
+        glColor3f(0, 0, 0);
+        glBegin(GL_LINE_LOOP);
+        for(int j = 0; j < 4; j++)
+            glVertex3f(face[i][j].x, face[i][j].y, face[i][j].z);
+        glEnd();
+    }
+}
 // Draw all voxels as colored cubes
 static void draw_voxels(void) {
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
-        glColor3f(v->r, v->g, v->b);
-        DrawColoredCube(v->pos.x, v->pos.y, v->pos.z, VOXEL_SIZE/2);
+        draw_voxel(v);
     }
     glColor3f(1.0f, 1.0f, 1.0f);
 }
@@ -233,6 +281,26 @@ static void build_demo(void) {
 
 // Toggleable voxel type for player 1
 static int p1_voxel_type = 0;
+
+// Set a random position within a given range
+float randomInRange(float min, float max) {
+    return min + ((float)rand() / (float)RAND_MAX) * (max - min);
+}
+
+
+// Call this once at startup to seed the random generator.
+void SeedRandom() {
+    srand((unsigned)time(NULL));
+}
+
+// Global game state
+Player players[2];
+#define MAX_BULLETS 50
+#define BULLET_LIFETIME 3.0f        // bullet time-to-live in seconds
+#define BULLET_WORLD_BOUND 20.0f    // world bounds for bullet Y coordinate
+Bullet bullets[MAX_BULLETS];
+int numBullets = 0;  // or we can reuse bullets in a pool
+
 
 // Fire a voxel bullet from a player
 static void FireVoxel(int playerIndex) {
@@ -255,49 +323,12 @@ static void FireVoxel(int playerIndex) {
         voxels[idx].vel = v_mul(v3(dirx, diry, dirz), 20.0f);
     }
 }
-
-
-
-// Set a random position within a given range
-float randomInRange(float min, float max) {
-    return min + ((float)rand() / (float)RAND_MAX) * (max - min);
-}
-
-
-// Call this once at startup to seed the random generator.
-void SeedRandom() {
-    srand((unsigned)time(NULL));
-}
-
-// Global game state
-Player players[2];
-#define MAX_BULLETS 50
-#define BULLET_LIFETIME 3.0f        // bullet time-to-live in seconds
-#define BULLET_WORLD_BOUND 20.0f    // world bounds for bullet Y coordinate
-Bullet bullets[MAX_BULLETS];
-int numBullets = 0;  // or we can reuse bullets in a pool
-
-
 // Utility: Clamp a value between min and max
 static float clamp(float value, float min, float max) {
     if(value < min) return min;
     if(value > max) return max;
     return value;
 }
-
-// Check collision between a point (px, pz) (player position on XZ plane) 
-// and an AABB obstacle (projected on XZ). Uses player radius for a soft collision boundary.
-bool CollidePlayerWithBox(float px, float pz, float radius, Box box) {
-    // Find closest point on the box to the player's center (xz only, treat y as irrelevant for walls)
-    float closestX = clamp(px, box.minx, box.maxx);
-    float closestZ = clamp(pz, box.minz, box.maxz);
-    // Distance from player to this point
-    float dx = px - closestX;
-    float dz = pz - closestZ;
-    float distSq = dx*dx + dz*dz;
-    return distSq < (radius * radius);
-}
-
 
 
 // Reset game (players positions, etc.)
@@ -321,6 +352,7 @@ void ResetGame() {
     float mapWidth = FLOOR_SIZE * 2.0f;
     float mapDepth = FLOOR_SIZE * 2.0f;
 
+}
 
 // Spawn a bullet from a player
 void FireBullet(int playerIndex) {
@@ -339,13 +371,6 @@ void FireBullet(int playerIndex) {
             bullets[i].x = players[playerIndex].x + dirx * offset;
             bullets[i].y = players[playerIndex].y + diry * offset;
             bullets[i].z = players[playerIndex].z + dirz * offset;
-            // Ensure bullet spawns above the floor
-            {
-                float floorY = GetFloorHeight(bullets[i].x, bullets[i].z);
-                if (bullets[i].y <= floorY + 0.05f) {
-                    bullets[i].y = floorY + 0.05f;
-                }
-            }
             // Set bullet velocity
             float speed = 20.0f;
             bullets[i].vx = dirx * speed;
@@ -418,34 +443,6 @@ void DrawColoredCube(float cx, float cy, float cz, float halfSize) {
     glColor3f(1.0f, 1.0f, 1.0f);
 }
 
-// Resolves collision between a player and a box by pushing the player out
-void ResolvePlayerCollision(Player *p, Box box) {
-    // Compute the closest point on the box (projected to the XZ plane)
-    float closestX = clamp(p->x, box.minx, box.maxx);
-    float closestZ = clamp(p->z, box.minz, box.maxz);
-    
-    // Compute vector from the closest point to the player
-    float dx = p->x - closestX;
-    float dz = p->z - closestZ;
-    
-    // Compute distance (in the XZ plane)
-    float dist = sqrtf(dx * dx + dz * dz);
-    
-    // If the distance is less than the player's radius, there's penetration.
-    if (dist < PLAYER_RADIUS) {
-        float penetration = PLAYER_RADIUS - dist;
-        // Avoid division by zero; if inside exactly, choose an arbitrary direction.
-        if (dist == 0.0f) {
-            dx = 1.0f;
-            dz = 0.0f;
-            dist = 1.0f;
-        }
-        // Push the player out along the collision normal
-        p->x += (dx / dist) * penetration*2;
-        p->z += (dz / dist) * penetration*2;
-    }
-}
-
 void ResolvePlayerCollisions(Player *p) {
     const int maxIterations = 5;
     for (int iter = 0; iter < maxIterations; iter++) {
@@ -467,105 +464,10 @@ void ResolvePlayerCollisions(Player *p) {
             collisionFound = true;
         }
         
-        // Check against all collision obstacles
-        for (int o = 0; o < numCollisionObstacles; ++o) {
-            Box *b = &collisionObstacles[o];
-            // Only collide if player is below the top of the obstacle (allow jumping over)
-            if (p->y < b->maxy) {
-                if (CollidePlayerWithBox(p->x, p->z, PLAYER_RADIUS, *b)) {
-                    ResolvePlayerCollision(p, *b);
-                    collisionFound = true;
-                }
-            }
-        }
         // If no collisions were found, exit early
         if (!collisionFound)
             break;
     }
-}
-
-TTF_Font* font = NULL;
-GLuint scoreTexture = 3;
-
-// Initialize SDL_ttf and load a font
-void InitFont() {
-    TTF_Init();
-    font = TTF_OpenFont("./leadcoat.ttf", 24);  // Use an appropriate font and size
-    if (!font) {
-        fprintf(stderr, "Failed to load font: %s\n", TTF_GetError());
-    }
-}
-
-// Render a score string to an OpenGL texture
-void CreateScoreTexture(const char* text, GLuint *texID) {
-    SDL_Color white = {255, 255, 255};
-    SDL_Surface* surface = TTF_RenderText_Blended(font, text, white);
-    if (!surface) {
-        fprintf(stderr, "TTF_RenderText_Blended error: %s\n", TTF_GetError());
-        return;
-    }
-    
-    // Convert the surface to a known 32-bit RGBA format.
-    SDL_Surface* formatted = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGBA32, 0);
-    SDL_FreeSurface(surface);  // free the original surface
-    if (!formatted) {
-        fprintf(stderr, "SDL_ConvertSurfaceFormat error: %s\n", SDL_GetError());
-        return;
-    }
-    
-    // Generate and bind texture.
-    glGenTextures(1, texID);
-    glBindTexture(GL_TEXTURE_2D, *texID);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    
-    // Ensure rows are tightly packed.
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    
-    // Upload texture data.
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, formatted->w, formatted->h,
-                 0, GL_RGBA, GL_UNSIGNED_BYTE, formatted->pixels);
-    
-    // Optionally, you can store the dimensions in global variables so you know how large your texture is.
-    // For example: texWidth = formatted->w; texHeight = formatted->h;
-    
-    SDL_FreeSurface(formatted);
-}
-
-
-void RenderScoreTexture(GLuint texID, int texWidth, int texHeight) {
-    // Set up orthographic projection
-    glMatrixMode(GL_PROJECTION);
-    glPushMatrix();
-    glLoadIdentity();
-    gluOrtho2D(0, SCREEN_WIDTH, 0, SCREEN_HEIGHT/2);
-    
-    glMatrixMode(GL_MODELVIEW);
-    glPushMatrix();
-    glLoadIdentity();
-    
-    // Enable blending so the alpha channel is used
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    
-    glEnable(GL_TEXTURE_2D);
-    glBindTexture(GL_TEXTURE_2D, texID);
-    glColor3f(1, 1, 1);
-    
-    glBegin(GL_QUADS);
-        glTexCoord2f(0, 0); glVertex2f(10, 10);
-        glTexCoord2f(1, 0); glVertex2f(10 + texWidth, 10);
-        glTexCoord2f(1, 1); glVertex2f(10 + texWidth, 10 + texHeight);
-        glTexCoord2f(0, 1); glVertex2f(10, 10 + texHeight);
-    glEnd();
-    
-    glDisable(GL_TEXTURE_2D);
-    glDisable(GL_BLEND);
-    
-    glPopMatrix();
-    glMatrixMode(GL_PROJECTION);
-    glPopMatrix();
-    glMatrixMode(GL_MODELVIEW);
 }
 
 
@@ -606,12 +508,6 @@ int main(int argc, char *argv[]) {
     glShadeModel(GL_SMOOTH);
     // Setup simple lighting if desired (or leave unlit)
     // glEnable(GL_LIGHTING); ... (skipped for simplicity)
-
-
-    // Initialization code (before the main loop)
-    InitFont();  // Initialize SDL_ttf and load the font
-    // Create the initial score texture, for example with score "Score: 0"
-    CreateScoreTexture("Score: 0", &scoreTexture);
 
     // Setup initial game state
     ResetGame();
@@ -756,15 +652,8 @@ int main(int argc, char *argv[]) {
                 // Predict new vertical position
                 float newY = oldY + players[i].vy * dt;
                 // Determine support height (floor or obstacle tops) beneath player's feet
-                float floorY = GetFloorHeight(players[i].x, players[i].z);
+                float floorY = 0.0f;
                 float supportHeight = floorY + BASE_EYE_HEIGHT;
-                for (int o = 0; o < numCollisionObstacles; ++o) {
-                    Box *b = &collisionObstacles[o];
-                    if (players[i].x >= b->minx - PLAYER_RADIUS && players[i].x <= b->maxx + PLAYER_RADIUS &&
-                        players[i].z >= b->minz - PLAYER_RADIUS && players[i].z <= b->maxz + PLAYER_RADIUS) {
-                        supportHeight = fmaxf(supportHeight, b->maxy);
-                    }
-                }
                 // Check for landing
                 if (newY <= supportHeight) {
                     players[i].y = supportHeight;
@@ -779,58 +668,6 @@ int main(int argc, char *argv[]) {
 
         // Update voxel physics
         physics_step(dt);
-        // Disable old bullet system
-        #if 0
-            if (!bullets[b].active) continue;
-            // Decrease lifetime and deactivate if expired
-            bullets[b].life -= dt;
-            if (bullets[b].life <= 0.0f) {
-                bullets[b].active = false;
-                continue;
-            }
-            // Move bullet
-            bullets[b].x += bullets[b].vx * dt;
-            bullets[b].y += bullets[b].vy * dt;
-            bullets[b].z += bullets[b].vz * dt;
-            // Check lifetime or out of bounds (e.g., beyond 50 units or out of arena)
-            if (bullets[b].x < -10 || bullets[b].x > 10 || bullets[b].z < -10 || bullets[b].z > 10) {
-                bullets[b].active = false;
-                continue;
-            }
-            // Check vertical bounds
-            if (bullets[b].y < -BULLET_WORLD_BOUND || bullets[b].y > BULLET_WORLD_BOUND) {
-                bullets[b].active = false;
-                continue;
-            }
-
-            if (!bullets[b].active) continue; // skip further checks if deactivated
-            // Check player collisions
-            for (int pi = 0; pi < 2; ++pi) {
-                if (pi == bullets[b].owner) continue; // skip the shooter
-                // Distance from bullet to player
-                float dx = bullets[b].x - players[pi].x;
-                float dy = bullets[b].y - players[pi].y;
-                float dz = bullets[b].z - players[pi].z;
-                float distSq = dx*dx + dy*dy + dz*dz;
-                if (distSq < (PLAYER_RADIUS * PLAYER_RADIUS)) {
-                    // Bullet hit player pi
-                    printf("Player %d was hit by Player %d!\n", pi+1, bullets[b].owner+1);
-
-
-                    // Award a point to the shooter
-                    scores[bullets[b].owner] += 1;
-                    // For prototype, reset the hit player position (or reduce health)
-                    players[pi].x = randomInRange(-9.0f, 9.0f);
-                    players[pi].y = BASE_EYE_HEIGHT;
-                    players[pi].z = randomInRange(-9.0f, 9.0f);
-                    players[pi].vy = 0.0f;
-                    players[pi].onGround = true;
-                    // Remove bullet
-                    bullets[b].active = false;
-                }
-            }
-        }
-        #endif
 
         // Rendering
         glViewport(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
@@ -869,6 +706,7 @@ int main(int argc, char *argv[]) {
             
             // Draw voxels
             glDisable(GL_TEXTURE_2D);
+
             draw_voxels();
 
             // Draw other player (cube to represent opponent)
@@ -883,11 +721,7 @@ int main(int argc, char *argv[]) {
              // For example, if you store player scores in an array 'scores':
             char scoreStr[64];
             sprintf(scoreStr, "Score: %d", scores[i]);
-            // You can call CreateScoreTexture() to update the texture when the score changes.
-            // (For a production game, update only when needed.)
-            CreateScoreTexture(scoreStr, &scoreTexture);
-            // Render the score texture overlay onto the viewport
-            RenderScoreTexture(scoreTexture, /*texWidth*/ 200, /*texHeight*/ 50);
+
         } // end for each viewport
 
         SDL_GL_SwapWindow(window);
@@ -898,4 +732,4 @@ int main(int argc, char *argv[]) {
     SDL_DestroyWindow(window);
     SDL_Quit();
     return 0;
-}
+};
