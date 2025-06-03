@@ -19,6 +19,7 @@
 #define FRICTION       400.0f    // ground friction deceleration
 #define PLAYER_RADIUS   0.5f
 #define FLOOR_SIZE     20.0f    // half-size of floor in world units
+#define PLAYER_SIZE 0.5f
 
 // Voxel physics constants
 #define MAX_VOXELS    20000
@@ -32,6 +33,7 @@ typedef struct {
     float pitch;
     Vector3 vel;
     bool onGround;
+    int vType;
 } Player;
 static Player players[2];
 static int scores[2] = { 0, 0 };
@@ -44,10 +46,11 @@ typedef struct {
     bool fixed;
     Color color;
     int type;
+    bool  surface;
     int gx, gy, gz;
 } Voxel;
 static Voxel voxels[MAX_VOXELS];
-static int voxelCount = 0;
+static int voxel_count = 0;
 // Spatial hash table for voxels
 static struct { int key, idx; } table[HASH_SIZE];
 
@@ -60,10 +63,10 @@ static float clampf(float v, float lo, float hi) {
     if (v > hi) return hi;
     return v;
 }
-static Vector3 vAdd(Vector3 a, Vector3 b) {
+static Vector3 v_add(Vector3 a, Vector3 b) {
     return (Vector3){ a.x + b.x, a.y + b.y, a.z + b.z };
 }
-static Vector3 vScale(Vector3 v, float s) {
+static Vector3 v_mul(Vector3 v, float s) {
     return (Vector3){ v.x*s, v.y*s, v.z*s };
 }
 
@@ -72,13 +75,13 @@ static int hashVoxel(int x, int y, int z) {
     unsigned int h = (unsigned int)(x*73856093 ^ y*19349663 ^ z*83492791);
     return (int)(h & (HASH_SIZE - 1));
 }
-static void tableSet(int x, int y, int z, int idx) {
+static void table_set(int x, int y, int z, int idx) {
     int h = hashVoxel(x,y,z);
     while (table[h].key) h = (h + 1) & (HASH_SIZE - 1);
     table[h].key = 1;
     table[h].idx = idx;
 }
-static int tableGet(int x, int y, int z) {
+static int table_get(int x, int y, int z) {
     int h = hashVoxel(x,y,z);
     while (table[h].key) {
         Voxel *v = &voxels[table[h].idx];
@@ -88,10 +91,13 @@ static int tableGet(int x, int y, int z) {
     return -1;
 }
 
+// Check occupancy
+static bool occupied(int x,int y,int z){ return  table_get(x,y,z)>=0; }
+
 // Add a voxel (static or dynamic)
 static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Color color, int type) {
-    if (voxelCount >= MAX_VOXELS) return -1;
-    int idx = voxelCount++;
+    if (voxel_count >= MAX_VOXELS) return -1;
+    int idx = voxel_count++;
     Voxel *v = &voxels[idx];
     v->pos = (Vector3){ px, py, pz };
     v->vel = (Vector3){ 0,0,0 };
@@ -103,7 +109,7 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     v->gx = (int)floorf(px / VOXEL_SIZE);
     v->gy = (int)floorf(py / VOXEL_SIZE);
     v->gz = (int)floorf(pz / VOXEL_SIZE);
-    tableSet(v->gx, v->gy, v->gz, idx);
+    table_set(v->gx, v->gy, v->gz, idx);
     return idx;
 }
 
@@ -127,8 +133,9 @@ static void ResetGame(void) {
     players[0].pitch = players[1].pitch = 0;
     players[0].vel = players[1].vel = (Vector3){0,0,0};
     players[0].onGround = players[1].onGround = true;
+    players[0].vType = players[1].vType = 0;
     // clear voxels
-    voxelCount = 0;
+    voxel_count = 0;
     // clear hash
     memset(table, 0, sizeof(table));
     // build static blocks
@@ -166,18 +173,18 @@ static void physics_step(float dt) {
                     // Destructive collision: remove bullet and hit block
                     v->simulate = false;
                     v->fixed = true;
-                    v->pos = v3(-999.0f, -999.0f, -999.0f);
+                    v->pos = (Vector3){-999.0f, -999.0f, -999.0f};
                     // Remove existing block
                     Voxel *u = &voxels[hit];
                     u->simulate = false;
                     u->fixed = true;
-                    u->pos = v3(-999.0f, -999.0f, -999.0f);
+                    u->pos = (Vector3){-999.0f, -999.0f, -999.0f};
                 } else {
                     v->simulate = false;
                     v->fixed = true;
-                    v->pos = v3((v->gx + 0.5f) * VOXEL_SIZE,
+                    v->pos = (Vector3){(v->gx + 0.5f) * VOXEL_SIZE,
                                 (v->gy + 0.5f) * VOXEL_SIZE,
-                                (v->gz + 0.5f) * VOXEL_SIZE);
+                                (v->gz + 0.5f) * VOXEL_SIZE};
                 }
             }
         }
@@ -190,18 +197,26 @@ static void FireVoxel(int idx) {
     float yawRad = DEG2RAD * p->yaw;
     float pitchRad = DEG2RAD * p->pitch;
     Vector3 dir = { sinf(-yawRad)*cosf(pitchRad), sinf(pitchRad), -cosf(yawRad)*cosf(pitchRad) };
-    Vector3 start = vAdd(p->pos, vScale(dir, 0.8f));
-    Color col = (idx==0? RED : BLUE);
-    int vix = addVoxel(start.x, start.y, start.z, false, true, col, 0);
-    if (vix >= 0) voxels[vix].vel = vScale(dir, 50.0f);
+    Vector3 start = v_add(p->pos, v_mul(dir, 0.8f));
+    Color col = (p->vType==0? RED : BLUE);
+    int vix = addVoxel(start.x, start.y, start.z, false, true, col, p->vType);
+    if (vix >= 0) voxels[vix].vel = v_mul(dir, 50.0f);
 }
 
 // Draw all voxels as cubes
 static void DrawVoxels(void) {
-    for (int i = 0; i < voxelCount; i++) {
+    for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
         DrawCube(v->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, v->color);
         DrawCubeWires(v->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, BLACK);
+    }
+}
+
+static void draw_players(void) {
+    for (int i = 0; i < 2; i++) {
+        Player *p = &players[i];
+        DrawCube(p->pos, PLAYER_SIZE,PLAYER_SIZE, PLAYER_SIZE, BLACK);
+        DrawCubeWires(p->pos, PLAYER_SIZE,PLAYER_SIZE,PLAYER_SIZE, BLACK);
     }
 }
 
@@ -223,6 +238,8 @@ int main(void) {
         // input: shooting and jump
         if (IsKeyPressed(KEY_LEFT_CONTROL))  FireVoxel(0);
         if (IsKeyPressed(KEY_RIGHT_CONTROL)) FireVoxel(1);
+        if (IsKeyPressed(KEY_Q)) players[0].vType = 1-players[0].vType;
+        if (IsKeyPressed(KEY_U)) players[0].vType = 1-players[0].vType;
         if (IsKeyPressed(KEY_SPACE) && players[0].onGround) { players[0].vel.y = JUMP_SPEED; players[0].onGround = false; }
         if (IsKeyPressed(KEY_RIGHT_SHIFT) && players[1].onGround) { players[1].vel.y = JUMP_SPEED; players[1].onGround = false; }
         // update players
@@ -238,17 +255,17 @@ int main(void) {
             // compute forward/right
             float yr = DEG2RAD * p->yaw;
             Vector3 forward = { sinf(-yr), 0, -cosf(yr) };
-            Vector3 right   = { forward.z, 0, -forward.x };
+            Vector3 right   = { -forward.z, 0, forward.x };
             // acceleration
             Vector3 accel = {0,0,0};
-            if ((i==0 && IsKeyDown(KEY_W)) || (i==1 && IsKeyDown(KEY_I))) accel = vAdd(accel, forward);
-            if ((i==0 && IsKeyDown(KEY_S)) || (i==1 && IsKeyDown(KEY_K))) accel = vAdd(accel, vScale(forward, -1));
-            if ((i==0 && IsKeyDown(KEY_A)) || (i==1 && IsKeyDown(KEY_J))) accel = vAdd(accel, vScale(right, -1));
-            if ((i==0 && IsKeyDown(KEY_D)) || (i==1 && IsKeyDown(KEY_L))) accel = vAdd(accel, right);
+            if ((i==0 && IsKeyDown(KEY_W)) || (i==1 && IsKeyDown(KEY_I))) accel = v_add(accel, forward);
+            if ((i==0 && IsKeyDown(KEY_S)) || (i==1 && IsKeyDown(KEY_K))) accel = v_add(accel, v_mul(forward, -1));
+            if ((i==0 && IsKeyDown(KEY_A)) || (i==1 && IsKeyDown(KEY_J))) accel = v_add(accel, v_mul(right, -1));
+            if ((i==0 && IsKeyDown(KEY_D)) || (i==1 && IsKeyDown(KEY_L))) accel = v_add(accel, right);
             if (accel.x!=0 || accel.z!=0) {
                 float len = sqrtf(accel.x*accel.x + accel.z*accel.z);
-                accel = vScale(accel, 1/len);
-                p->vel = vAdd(p->vel, vScale(accel, ACCELERATION*dt));
+                accel = v_mul(accel, 1/len);
+                p->vel = v_add(p->vel, v_mul(accel, ACCELERATION*dt));
             } else {
                 // friction
                 float sp = sqrtf(p->vel.x*p->vel.x + p->vel.z*p->vel.z);
@@ -266,6 +283,14 @@ int main(void) {
                 p->pos.y = BASE_EYE_HEIGHT;
                 p->vel.y = 0;
                 p->onGround = true;
+            }
+            //clamp speed
+            {
+                float speed = sqrtf(p->vel.x*p->vel.x + p->vel.z*p->vel.z);
+                if (speed > MOVE_SPEED) {
+                    p->vel.x *= MOVE_SPEED/speed;
+                    p->vel.z *= MOVE_SPEED/speed;
+                }
             }
             // horizontal move
             p->pos.x += p->vel.x*dt;
@@ -285,13 +310,13 @@ int main(void) {
         cam0.position = players[0].pos;
         {
             float yr = DEG2RAD*players[0].yaw, pr = DEG2RAD*players[0].pitch;
-            cam0.target = vAdd(players[0].pos, (Vector3){ sinf(-yr)*cosf(pr), sinf(pr), -cosf(yr)*cosf(pr) });
+            cam0.target = v_add(players[0].pos, (Vector3){ sinf(-yr)*cosf(pr), sinf(pr), -cosf(yr)*cosf(pr) });
         }
         // camera 1
         cam1.position = players[1].pos;
         {
             float yr = DEG2RAD*players[1].yaw, pr = DEG2RAD*players[1].pitch;
-            cam1.target = vAdd(players[1].pos, (Vector3){ sinf(-yr)*cosf(pr), sinf(pr), -cosf(yr)*cosf(pr) });
+            cam1.target = v_add(players[1].pos, (Vector3){ sinf(-yr)*cosf(pr), sinf(pr), -cosf(yr)*cosf(pr) });
         }
         // render to textures
         BeginTextureMode(screen0);
@@ -299,6 +324,7 @@ int main(void) {
             BeginMode3D(cam0);
                 DrawPlane((Vector3){0,0,0}, (Vector2){FLOOR_SIZE*2, FLOOR_SIZE*2}, DARKGRAY);
                 DrawVoxels();
+                draw_players();
             EndMode3D();
             // UI p1
             DrawRectangle(0,0, SCREEN_WIDTH/2, 40, Fade(BLACK, 0.5f));
