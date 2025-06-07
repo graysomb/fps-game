@@ -52,12 +52,15 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Install macOS dependencies
         run: brew install sdl2 sdl2_ttf sdl2_image
-      - name: Compile for macOS (universal binary)
+
+      - name: Compile universal binary for macOS (Intel + ARM)
         run: |
           prefix=$(brew --prefix)
 
+          # Compile both architectures separately
           gcc -arch x86_64 fps_game.c -o fps_game_x86 \
             -I${prefix}/include \
             $(sdl2-config --cflags --libs) \
@@ -70,9 +73,12 @@ jobs:
             -lSDL2_ttf -lSDL2_image \
             -framework OpenGL -lm
 
+          # Merge the two into a universal binary
           lipo -create -output fps_game fps_game_x86 fps_game_arm
+
       - name: Upload macOS build
         uses: actions/upload-artifact@v4
         with:
           name: fps_game-mac
           path: fps_game
+
