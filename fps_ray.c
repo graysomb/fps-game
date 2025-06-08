@@ -94,6 +94,12 @@ static int table_get(int x, int y, int z) {
 // Check occupancy
 static bool occupied(int x,int y,int z){ return  table_get(x,y,z)>=0; }
 
+static void mark_surface(int idx){
+    Voxel *v=&voxels[idx];
+    int x=v->gx, y=v->gy, z=v->gz;
+    v->surface = !occupied(x+1,y,z)||!occupied(x-1,y,z)||!occupied(x,y+1,z)||!occupied(x,y-1,z)||!occupied(x,y,z+1)||!occupied(x,y,z-1);
+}
+
 // Add a voxel (static or dynamic)
 static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Color color, int type) {
     if (voxel_count >= MAX_VOXELS) return -1;
@@ -105,6 +111,7 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     v->simulate = simulate;
     v->color = color;
     v->type = type;
+    v->surface = true;
     // compute grid coords
     v->gx = (int)floorf(px / VOXEL_SIZE);
     v->gy = (int)floorf(py / VOXEL_SIZE);
@@ -140,6 +147,9 @@ static void ResetGame(void) {
     memset(table, 0, sizeof(table));
     // build static blocks
     buildDemo();
+    for (int i = 0; i < voxel_count; i++) {
+        mark_surface(i);
+    }
 }
 
 // Physics step for voxels
@@ -187,6 +197,8 @@ static void physics_step(float dt) {
                                 (v->gz + 0.5f) * VOXEL_SIZE};
                 }
             }
+            mark_surface(i);
+            mark_surface(hit);
         }
     }
 }
@@ -207,6 +219,7 @@ static void FireVoxel(int idx) {
 static void DrawVoxels(void) {
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
+        if(!v->surface) continue;
         DrawCube(v->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, v->color);
         DrawCubeWires(v->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, BLACK);
     }
