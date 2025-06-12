@@ -22,8 +22,8 @@
 #define PLAYER_SIZE 0.5f
 
 // Voxel physics constants
-#define MAX_VOXELS    20000
-#define HASH_SIZE     32768    // must be power of two
+#define MAX_VOXELS    30000
+#define HASH_SIZE     65536    // must be power of two
 #define VOXEL_SIZE     0.2f    // size of each voxel cube
 
 // Player structure
@@ -128,6 +128,14 @@ static void buildDemo(void) {
         float py = (y + 0.5f) * VOXEL_SIZE;
         float pz = (z + 0.5f) * VOXEL_SIZE;
         addVoxel(px, py, pz, true, false, (Color){ 150,150,150,255 }, 0);
+    }
+    int M = (int)(2.0f*FLOOR_SIZE / VOXEL_SIZE);
+    for (int x = 0; x <= M ; x++) {
+        for (int z = 0; z <= M ; z++) {
+            float px = (x + 0.5f) * VOXEL_SIZE-FLOOR_SIZE;
+            float pz = (z + 0.5f) * VOXEL_SIZE-FLOOR_SIZE;
+            addVoxel(px, 0, pz, true, false, (Color){ 150,150,150,255 }, 0);
+        }
     }
 }
 
