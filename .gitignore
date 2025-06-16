@@ -2,3 +2,10 @@ voxel_addel/cmake-4.0.1/
 voxel_addel/raylib/
 voxel_addel/cmake-4.0.1.tar.gz
 
+gen_flame.sh
+out.perf
+perf.data
+perf.data.old
+profile.sh
+counts.txt
+Flamegraph/

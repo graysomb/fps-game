@@ -1,5 +1,6 @@
 // Raylib split-screen FPS prototype (port of fps_game.c)
 #include "raylib.h"
+#include "rlgl.h" // for rlBegin/rlEnd
 #include <math.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -22,8 +23,8 @@
 #define PLAYER_SIZE 0.5f
 
 // Voxel physics constants
-#define MAX_VOXELS    30000
-#define HASH_SIZE     65536    // must be power of two
+#define MAX_VOXELS    20000
+#define HASH_SIZE     32768    // must be power of two
 #define VOXEL_SIZE     0.2f    // size of each voxel cube
 
 // Player structure
@@ -129,13 +130,13 @@ static void buildDemo(void) {
         float pz = (z + 0.5f) * VOXEL_SIZE;
         addVoxel(px, py, pz, true, false, (Color){ 150,150,150,255 }, 0);
     }
-    int M = (int)(2.0f*FLOOR_SIZE / VOXEL_SIZE);
+    int M = (int)(1.0f*FLOOR_SIZE / VOXEL_SIZE);
     for (int x = 0; x <= M ; x++) {
-        for (int z = 0; z <= M ; z++) {
-            float px = (x + 0.5f) * VOXEL_SIZE-FLOOR_SIZE;
-            float pz = (z + 0.5f) * VOXEL_SIZE-FLOOR_SIZE;
-            addVoxel(px, 0, pz, true, false, (Color){ 150,150,150,255 }, 0);
-        }
+       for (int z = 0; z <= M ; z++) {
+           float px = (x + 0.5f) * VOXEL_SIZE-FLOOR_SIZE;
+           float pz = (z + 0.5f) * VOXEL_SIZE-FLOOR_SIZE;
+           addVoxel(px, 0, pz, true, false, (Color){ 150,150,150,255 }, 0);
+       }
     }
 }
 
@@ -222,14 +223,134 @@ static void FireVoxel(int idx) {
     int vix = addVoxel(start.x, start.y, start.z, false, true, col, p->vType);
     if (vix >= 0) voxels[vix].vel = v_mul(dir, 50.0f);
 }
+// Append the 12 edges (24 vertices) of a cube to the current RL_LINES batch
+static void drawCubeEdges(Vector3 pos, float w, float h, float d)
+{
+    float hw = w * 0.5f, hh = h * 0.5f, hd = d * 0.5f;
+    float x = pos.x, y = pos.y, z = pos.z;
+
+    // 4 bottom vertices
+    Vector3 v000 = { x - hw, y - hh, z - hd };
+    Vector3 v001 = { x - hw, y - hh, z + hd };
+    Vector3 v101 = { x + hw, y - hh, z + hd };
+    Vector3 v100 = { x + hw, y - hh, z - hd };
+
+    // 4 top vertices
+    Vector3 v010 = { x - hw, y + hh, z - hd };
+    Vector3 v011 = { x - hw, y + hh, z + hd };
+    Vector3 v111 = { x + hw, y + hh, z + hd };
+    Vector3 v110 = { x + hw, y + hh, z - hd };
+
+    // Bottom rectangle
+    rlVertex3f(v000.x, v000.y, v000.z); rlVertex3f(v001.x, v001.y, v001.z);
+    rlVertex3f(v001.x, v001.y, v001.z); rlVertex3f(v101.x, v101.y, v101.z);
+    rlVertex3f(v101.x, v101.y, v101.z); rlVertex3f(v100.x, v100.y, v100.z);
+    rlVertex3f(v100.x, v100.y, v100.z); rlVertex3f(v000.x, v000.y, v000.z);
+
+    // Top rectangle
+    rlVertex3f(v010.x, v010.y, v010.z); rlVertex3f(v011.x, v011.y, v011.z);
+    rlVertex3f(v011.x, v011.y, v011.z); rlVertex3f(v111.x, v111.y, v111.z);
+    rlVertex3f(v111.x, v111.y, v111.z); rlVertex3f(v110.x, v110.y, v110.z);
+    rlVertex3f(v110.x, v110.y, v110.z); rlVertex3f(v010.x, v010.y, v010.z);
+
+    // Vertical pillars
+    rlVertex3f(v000.x, v000.y, v000.z); rlVertex3f(v010.x, v010.y, v010.z);
+    rlVertex3f(v001.x, v001.y, v001.z); rlVertex3f(v011.x, v011.y, v011.z);
+    rlVertex3f(v101.x, v101.y, v101.z); rlVertex3f(v111.x, v111.y, v111.z);
+    rlVertex3f(v100.x, v100.y, v100.z); rlVertex3f(v110.x, v110.y, v110.z);
+}
+
+static void drawCubeMan(Vector3 pos,
+                        float width,
+                        float height,
+                        float depth,
+                        Color color)
+{
+    float hw = width  * 0.5f;
+    float hh = height * 0.5f;
+    float hd = depth  * 0.5f;
+
+    float x = pos.x, y = pos.y, z = pos.z;
+
+    rlColor4ub(color.r, color.g, color.b, color.a);
+
+    /* ----------  FRONT  (+Z)  ---------- */
+    rlNormal3f(0.0f, 0.0f, 1.0f);
+    rlVertex3f(x - hw, y - hh, z + hd);   // CCW
+    rlVertex3f(x + hw, y - hh, z + hd);
+    rlVertex3f(x + hw, y + hh, z + hd);
+
+    rlVertex3f(x - hw, y - hh, z + hd);
+    rlVertex3f(x + hw, y + hh, z + hd);
+    rlVertex3f(x - hw, y + hh, z + hd);
+
+    /* ----------  BACK  (-Z)  ----------- */
+    rlNormal3f(0.0f, 0.0f, -1.0f);
+    rlVertex3f(x + hw, y - hh, z - hd);
+    rlVertex3f(x - hw, y - hh, z - hd);
+    rlVertex3f(x - hw, y + hh, z - hd);
+
+    rlVertex3f(x + hw, y - hh, z - hd);
+    rlVertex3f(x - hw, y + hh, z - hd);
+    rlVertex3f(x + hw, y + hh, z - hd);
+
+    /* ----------  TOP   (+Y)  ----------- */
+    rlNormal3f(0.0f, 1.0f, 0.0f);
+    rlVertex3f(x - hw, y + hh, z + hd);
+    rlVertex3f(x + hw, y + hh, z + hd);
+    rlVertex3f(x + hw, y + hh, z - hd);
+
+    rlVertex3f(x - hw, y + hh, z + hd);
+    rlVertex3f(x + hw, y + hh, z - hd);
+    rlVertex3f(x - hw, y + hh, z - hd);
+
+    /* ----------  BOTTOM (-Y) ----------- */
+    rlNormal3f(0.0f, -1.0f, 0.0f);
+    rlVertex3f(x - hw, y - hh, z + hd);
+    rlVertex3f(x + hw, y - hh, z - hd);
+    rlVertex3f(x + hw, y - hh, z + hd);
+
+    rlVertex3f(x - hw, y - hh, z + hd);
+    rlVertex3f(x - hw, y - hh, z - hd);
+    rlVertex3f(x + hw, y - hh, z - hd);
+
+    /* ----------  RIGHT (+X) ------------ */
+    rlNormal3f(1.0f, 0.0f, 0.0f);
+    rlVertex3f(x + hw, y - hh, z + hd);
+    rlVertex3f(x + hw, y - hh, z - hd);
+    rlVertex3f(x + hw, y + hh, z - hd);
+
+    rlVertex3f(x + hw, y - hh, z + hd);
+    rlVertex3f(x + hw, y + hh, z - hd);
+    rlVertex3f(x + hw, y + hh, z + hd);
+
+    /* ----------  LEFT  (-X) ------------ */
+    rlNormal3f(-1.0f, 0.0f, 0.0f);
+    rlVertex3f(x - hw, y - hh, z - hd);
+    rlVertex3f(x - hw, y - hh, z + hd);
+    rlVertex3f(x - hw, y + hh, z + hd);
+
+    rlVertex3f(x - hw, y - hh, z - hd);
+    rlVertex3f(x - hw, y + hh, z + hd);
+    rlVertex3f(x - hw, y + hh, z - hd);
+}
+
 
 // Draw all voxels as cubes
 static void DrawVoxels(void) {
+    rlBegin(RL_TRIANGLES);
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
         if(!v->surface) continue;
-        DrawCube(v->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, v->color);
-        DrawCubeWires(v->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, BLACK);
+        drawCubeMan(v->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, v->color);
+    }
+    rlEnd();
+    rlBegin(RL_LINES);
+    rlColor4ub(0, 0, 0, 255);   // set once for all edges
+    for (int i = 0; i < voxel_count; i++) {
+        Voxel *v = &voxels[i];
+        if(!v->surface) continue;
+        drawCubeEdges(v->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
     }
 }
 
