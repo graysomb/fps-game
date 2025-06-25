@@ -47,6 +47,7 @@ typedef struct {
     bool fixed;
     Color color;
     int type;
+    int owner;
     bool  surface;
     int gx, gy, gz;
 } Voxel;
@@ -112,6 +113,7 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     v->simulate = simulate;
     v->color = color;
     v->type = type;
+    v->owner = -1;
     v->surface = true;
     // compute grid coords
     v->gx = (int)floorf(px / VOXEL_SIZE);
@@ -130,14 +132,14 @@ static void buildDemo(void) {
         float pz = (z + 0.5f) * VOXEL_SIZE;
         addVoxel(px, py, pz, true, false, (Color){ 150,150,150,255 }, 0);
     }
-    int M = (int)(1.0f*FLOOR_SIZE / VOXEL_SIZE);
-    for (int x = 0; x <= M ; x++) {
-       for (int z = 0; z <= M ; z++) {
-           float px = (x + 0.5f) * VOXEL_SIZE-FLOOR_SIZE;
-           float pz = (z + 0.5f) * VOXEL_SIZE-FLOOR_SIZE;
-           addVoxel(px, 0, pz, true, false, (Color){ 150,150,150,255 }, 0);
-       }
-    }
+    // int M = (int)(1.0f*FLOOR_SIZE / VOXEL_SIZE);
+    // for (int x = 0; x <= M; x++) {
+    //     for (int z = 0; z <= M; z++) {
+    //         float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    //         float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    //         addVoxel(px, 0, pz, true, false, (Color){ 150,150,150,255 }, 0);
+    //     }
+    // }
 }
 
 // Reset game: players and voxels
@@ -181,6 +183,28 @@ static void physics_step(float dt) {
         v->vel.y -= GRAVITY * dt;
         // Move
         v->pos = v_add(v->pos, v_mul(v->vel, dt));
+        for (int j = 0; j < 2; j++) {
+            float dx = v->pos.x - players[j].pos.x;
+            float dy = v->pos.y - players[j].pos.y;
+            float dz = v->pos.z - players[j].pos.z;
+            if (fabsf(dx) < PLAYER_SIZE && fabsf(dy) < PLAYER_SIZE && fabsf(dz) < PLAYER_SIZE) {
+                if (v->owner >= 0 && v->owner != j) {
+                    scores[v->owner]++;
+                    printf("Player %d scored! total=%d\n", v->owner + 1, scores[v->owner]);
+                    fflush(stdout);
+                }
+                players[j].pos     = (Vector3){ randomInRange(-9,9), BASE_EYE_HEIGHT, randomInRange(-9,9) };
+                players[j].vel     = (Vector3){0,0,0};
+                players[j].onGround= true;
+                players[j].yaw     = (j == 0 ? 0 : 180);
+                players[j].pitch   = 0;
+                v->simulate = false;
+                v->fixed    = true;
+                v->pos      = (Vector3){ -999.0f, -999.0f, -999.0f };
+                break;
+            }
+        }
+        if (!v->simulate) continue;
         // Check grid collision
         int nx = (int)floorf(v->pos.x / VOXEL_SIZE);
         int ny = (int)floorf(v->pos.y / VOXEL_SIZE);
@@ -207,7 +231,7 @@ static void physics_step(float dt) {
                 }
             }
             mark_surface(i);
-            mark_surface(hit);
+            if (hit >= 0) mark_surface(hit);
         }
     }
 }
@@ -221,7 +245,10 @@ static void FireVoxel(int idx) {
     Vector3 start = v_add(p->pos, v_mul(dir, 0.8f));
     Color col = (p->vType==0? RED : BLUE);
     int vix = addVoxel(start.x, start.y, start.z, false, true, col, p->vType);
-    if (vix >= 0) voxels[vix].vel = v_mul(dir, 50.0f);
+    if (vix >= 0) {
+        voxels[vix].vel = v_mul(dir, 50.0f);
+        voxels[vix].owner = idx;
+    }
 }
 // Append the 12 edges (24 vertices) of a cube to the current RL_LINES batch
 static void drawCubeEdges(Vector3 pos, float w, float h, float d)
@@ -480,6 +507,7 @@ int main(void) {
             BeginMode3D(cam1);
                 DrawPlane((Vector3){0,0,0}, (Vector2){FLOOR_SIZE*2, FLOOR_SIZE*2}, DARKGRAY);
                 DrawVoxels();
+                draw_players();
             EndMode3D();
             // UI p2
             DrawRectangle(0,0, SCREEN_WIDTH/2, 40, Fade(BLACK, 0.5f));
