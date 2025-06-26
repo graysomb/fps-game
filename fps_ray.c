@@ -132,14 +132,14 @@ static void buildDemo(void) {
         float pz = (z + 0.5f) * VOXEL_SIZE;
         addVoxel(px, py, pz, true, false, (Color){ 150,150,150,255 }, 0);
     }
-    // int M = (int)(1.0f*FLOOR_SIZE / VOXEL_SIZE);
-    // for (int x = 0; x <= M; x++) {
-    //     for (int z = 0; z <= M; z++) {
-    //         float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //         float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //         addVoxel(px, 0, pz, true, false, (Color){ 150,150,150,255 }, 0);
-    //     }
-    // }
+    int M = (int)(1.0f*FLOOR_SIZE / VOXEL_SIZE);
+    for (int x = 0; x <= M; x++) {
+        for (int z = 0; z <= M; z++) {
+            float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+            float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+            addVoxel(px, 0, pz, true, false, (Color){ 150,150,150,255 }, 0);
+        }
+    }
 }
 
 // Reset game: players and voxels
