@@ -7,6 +7,7 @@
 #include <stdbool.h>
 #include <time.h>
 #include <string.h>
+#include <stdint.h>
 //gcc fps_ray.c -o fps_ray  $(pkg-config --cflags --libs raylib) -lm -Wl,-rpath,/usr/local/lib
 // Screen and game constants
 #define SCREEN_WIDTH    1600
@@ -53,8 +54,7 @@ typedef struct {
 } Voxel;
 static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
-// Spatial hash table for voxels
-static struct { int key, idx; } table[HASH_SIZE];
+
 
 // Utility functions
 static float randomInRange(float min, float max) {
@@ -85,26 +85,114 @@ static Vector3 v_norm(Vector3 v) {
     return v_mul(v, 1.0f / len);
 }
 
+// Spatial hash table for voxels
+//static struct { int key, idx; } table[HASH_SIZE];
 // Spatial hash helpers
-static int hashVoxel(int x, int y, int z) {
-    unsigned int h = (unsigned int)(x*73856093 ^ y*19349663 ^ z*83492791);
-    return (int)(h & (HASH_SIZE - 1));
+// static int hashVoxel(int x, int y, int z) {
+//     unsigned int h = (unsigned int)(x*73856093 ^ y*19349663 ^ z*83492791);
+//     return (int)(h & (HASH_SIZE - 1));
+// }
+// static void table_set(int x, int y, int z, int idx) {
+//     int h = hashVoxel(x,y,z);
+//     while (table[h].key) h = (h + 1) & (HASH_SIZE - 1);
+//     table[h].key = 1;
+//     table[h].idx = idx;
+// }
+// static int table_get(int x, int y, int z) {
+//     int h = hashVoxel(x,y,z);
+//     while (table[h].key) {
+//         Voxel *v = &voxels[table[h].idx];
+//         if (v->gx==x && v->gy==y && v->gz==z) return table[h].idx;
+//         h = (h + 1) & (HASH_SIZE - 1);
+//     }
+//     return -1;
+// }
+
+/*----------------------------------------------------------*/
+/*  Morton helpers                                           */
+/*----------------------------------------------------------*/
+
+static inline uint64_t part1by2(uint32_t n)
+/* Interleave lower 21 bits of n with two 0-bits. */
+{
+    uint64_t x = n & 0x1FFFFFu;            // keep 21 bits, promote to 64-bit
+
+    x = (x | (x << 32)) & 0x1F00000000FFFFULL;
+    x = (x | (x << 16)) & 0x1F0000FF0000FFULL;
+    x = (x | (x <<  8)) & 0x100F00F00F00F00FULL;
+    x = (x | (x <<  4)) & 0x10C30C30C30C30C3ULL;
+    x = (x | (x <<  2)) & 0x1249249249249249ULL;
+    return x;
 }
-static void table_set(int x, int y, int z, int idx) {
-    int h = hashVoxel(x,y,z);
-    while (table[h].key) h = (h + 1) & (HASH_SIZE - 1);
-    table[h].key = 1;
+
+static inline uint64_t mortonKey(int x, int y, int z)
+/* Pack signed coords into an **unsigned** Morton key.
+ * We bias them by +2^20 so −1 048 575..+1 048 575 map into 0..2^21-1. */
+{
+    const uint32_t bias = 1u << 20;       // 1 048 576
+    return  (part1by2((uint32_t)(x + bias))      ) |   // bits 0,3,6…
+            (part1by2((uint32_t)(y + bias)) << 1 ) |   // bits 1,4,7…
+            (part1by2((uint32_t)(z + bias)) << 2 );    // bits 2,5,8…
+}
+
+/*----------------------------------------------------------*/
+/*  Hash table bucket & hash function                       */
+/*----------------------------------------------------------*/
+
+typedef struct {
+    uint64_t key;   // 0 = empty
+    int      idx;   // index in `voxels[]`
+} Bucket;
+
+static Bucket table[HASH_SIZE];
+
+static inline size_t hashVoxelKey(uint64_t k)
+/*  SplitMix64 finalizer—fast avalanche, single multiply.
+ *  HASH_SIZE **must** be a power of two so `&` is equivalent to % */
+{
+    k ^= k >> 30;  k *= 0xbf58476d1ce4e5b9ULL;
+    k ^= k >> 27;  k *= 0x94d049bb133111ebULL;
+    k ^= k >> 31;
+    return (size_t)(k & (HASH_SIZE - 1));
+}
+
+/*----------------------------------------------------------*/
+/*  Public helpers                                          */
+/*----------------------------------------------------------*/
+
+static int hashVoxel(int x, int y, int z)
+/*  **Only** used by table_set and table_get; keep it for API parity. */
+{
+    return (int)hashVoxelKey(mortonKey(x, y, z));
+}
+
+static void table_set(int x, int y, int z, int idx)
+{
+    uint64_t k = mortonKey(x, y, z);
+    size_t   h = hashVoxelKey(k);
+
+    /* linear probe until we find an empty slot or an exact key match */
+    while (table[h].key && table[h].key != k)
+        h = (h + 1) & (HASH_SIZE - 1);
+
+    table[h].key = k;      // stores the full Morton key
     table[h].idx = idx;
 }
-static int table_get(int x, int y, int z) {
-    int h = hashVoxel(x,y,z);
-    while (table[h].key) {
-        Voxel *v = &voxels[table[h].idx];
-        if (v->gx==x && v->gy==y && v->gz==z) return table[h].idx;
-        h = (h + 1) & (HASH_SIZE - 1);
+
+static int table_get(int x, int y, int z)
+/*  Returns voxel index or –1 if empty */
+{
+    uint64_t k = mortonKey(x, y, z);
+    size_t   h = hashVoxelKey(k);
+
+    while (1) {
+        uint64_t bk = table[h].key;
+        if (bk == 0)      return -1;          // empty bucket ⇒ miss
+        if (bk == k)      return table[h].idx;  // exact key ⇒ hit
+        h = (h + 1) & (HASH_SIZE - 1);        // step to next bucket
     }
-    return -1;
 }
+
 
 // Check occupancy
 static bool occupied(int x,int y,int z){ return  table_get(x,y,z)>=0; }
