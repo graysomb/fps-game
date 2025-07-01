@@ -379,7 +379,7 @@ static void drawCubeMan(Vector3 pos,
 // Draw all voxels as cubes
 static void DrawVoxels(Camera3D cam) {
     rlBegin(RL_TRIANGLES);
-    int screenStep = 100;
+    int screenStep = 10;
     for (int y = 0; y < SCREEN_HEIGHT; y += screenStep) {
         for (int x = 0; x < SCREEN_WIDTH; x += screenStep) {
             Ray ray = GetScreenToWorldRay((Vector2){ x, y }, cam);
@@ -392,10 +392,11 @@ static void DrawVoxels(Camera3D cam) {
                 int nx = (int)floorf((pos.x+dir.x*step) / VOXEL_SIZE);
                 int ny = (int)floorf((pos.y+dir.y*step) / VOXEL_SIZE);
                 int nz = (int)floorf((pos.z+dir.z*step) / VOXEL_SIZE);
-                if (occupied(nx,ny,nz)) {
-                    int hit = table_get(nx, ny, nz);
+                int hit = table_get(nx, ny, nz);
+                if ( hit >= 0) {
                     Voxel *u = &voxels[hit];
                     drawCubeMan(u->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, u->color);
+                    break;
                 }
             }
         }
