@@ -72,6 +72,19 @@ static Vector3 v_mul(Vector3 v, float s) {
     return (Vector3){ v.x*s, v.y*s, v.z*s };
 }
 
+static float v_length(Vector3 v) {
+    return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+}
+
+static Vector3 v_norm(Vector3 v) {
+    float len = v_length(v);
+    if (len == 0.0f) {
+        // Return zero vector or handle however you want
+        return (Vector3){ 0.0f, 0.0f, 0.0f };
+    }
+    return v_mul(v, 1.0f / len);
+}
+
 // Spatial hash helpers
 static int hashVoxel(int x, int y, int z) {
     unsigned int h = (unsigned int)(x*73856093 ^ y*19349663 ^ z*83492791);
@@ -364,21 +377,30 @@ static void drawCubeMan(Vector3 pos,
 
 
 // Draw all voxels as cubes
-static void DrawVoxels(void) {
+static void DrawVoxels(Camera3D cam) {
     rlBegin(RL_TRIANGLES);
-    for (int i = 0; i < voxel_count; i++) {
-        Voxel *v = &voxels[i];
-        if(!v->surface) continue;
-        drawCubeMan(v->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, v->color);
+    int screenStep = 100;
+    for (int y = 0; y < SCREEN_HEIGHT; y += screenStep) {
+        for (int x = 0; x < SCREEN_WIDTH; x += screenStep) {
+            Ray ray = GetScreenToWorldRay((Vector2){ x, y }, cam);
+            // walk ray
+            Vector3 pos = ray.position;
+            Vector3 dir = v_norm(ray.direction);
+
+            float maxSteps = 100;
+            for (int step = 0; step < maxSteps; step++) {
+                int nx = (int)floorf((pos.x+dir.x*step) / VOXEL_SIZE);
+                int ny = (int)floorf((pos.y+dir.y*step) / VOXEL_SIZE);
+                int nz = (int)floorf((pos.z+dir.z*step) / VOXEL_SIZE);
+                if (occupied(nx,ny,nz)) {
+                    int hit = table_get(nx, ny, nz);
+                    Voxel *u = &voxels[hit];
+                    drawCubeMan(u->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, u->color);
+                }
+            }
+        }
     }
     rlEnd();
-    rlBegin(RL_LINES);
-    rlColor4ub(0, 0, 0, 255);   // set once for all edges
-    for (int i = 0; i < voxel_count; i++) {
-        Voxel *v = &voxels[i];
-        if(!v->surface) continue;
-        drawCubeEdges(v->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
-    }
 }
 
 static void draw_players(void) {
@@ -492,7 +514,7 @@ int main(void) {
             ClearBackground(SKYBLUE);
             BeginMode3D(cam0);
                 DrawPlane((Vector3){0,0,0}, (Vector2){FLOOR_SIZE*2, FLOOR_SIZE*2}, DARKGRAY);
-                DrawVoxels();
+                DrawVoxels(cam0);
                 draw_players();
             EndMode3D();
             // UI p1
@@ -506,7 +528,7 @@ int main(void) {
             ClearBackground(SKYBLUE);
             BeginMode3D(cam1);
                 DrawPlane((Vector3){0,0,0}, (Vector2){FLOOR_SIZE*2, FLOOR_SIZE*2}, DARKGRAY);
-                DrawVoxels();
+                DrawVoxels(cam1);
                 draw_players();
             EndMode3D();
             // UI p2
