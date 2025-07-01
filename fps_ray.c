@@ -375,10 +375,89 @@ static void drawCubeMan(Vector3 pos,
     rlVertex3f(x - hw, y + hh, z - hd);
 }
 
+// Return the parametric distance t (along the ray) to the first voxel boundary
+// we’ll cross on this axis.  If the ray is exactly parallel to the axis (d == 0),
+// we return +INF so the DDA never steps on this axis.
+static inline float ray_t_to_next_plane(float p,      // ray.position.x  (or y / z)
+                                        float d,      // ray.direction.x (or y / z) – assumed normalised-ish
+                                        int   cell,   // floor(p / VOXEL_SIZE)
+                                        float voxel)  // VOXEL_SIZE
+{
+    if (d == 0.0f) return INFINITY;          // will never cross a plane on this axis
+
+    // Which side of the voxel are we travelling toward?
+    // If d > 0 we leave via the "high" face at (cell+1)*voxel,
+    // else we leave via the "low" face at  cell   *voxel.
+    float nextPlane = (d > 0.0f) ? (cell + 1) * voxel
+                                 :  cell      * voxel;
+
+    // Distance along the ray parameter t = (planePos - pos) / dir
+    return (nextPlane - p) / d;              // d has sign, so t is positive
+}
+
+typedef struct {
+    int id;       // voxel index in your array
+    int x, y, z;  // voxel grid coords (optional, handy for debugging)
+    float t;      // parametric distance along the ray
+} VoxelHit;
+
+static int first_voxel_hit(Ray ray, float t_max) {
+    // 1. Normalise once
+    ray.direction = v_norm(ray.direction);
+    Vector3 dir   = ray.direction;
+
+    // 2. Starting voxel indices
+    int x = (int)floorf(ray.position.x / VOXEL_SIZE);
+    int y = (int)floorf(ray.position.y / VOXEL_SIZE);
+    int z = (int)floorf(ray.position.z / VOXEL_SIZE);
+
+    // 3. Step direction per axis
+    int stepX = (dir.x > 0.0f) ?  1 : (dir.x < 0.0f ? -1 : 0);
+    int stepY = (dir.y > 0.0f) ?  1 : (dir.y < 0.0f ? -1 : 0);
+    int stepZ = (dir.z > 0.0f) ?  1 : (dir.z < 0.0f ? -1 : 0);
+
+    // 4. t delta per axis (distance to cross one voxel)
+    float txDelta = (dir.x == 0.0f) ? INFINITY : fabsf(VOXEL_SIZE / dir.x);
+    float tyDelta = (dir.y == 0.0f) ? INFINITY : fabsf(VOXEL_SIZE / dir.y);
+    float tzDelta = (dir.z == 0.0f) ? INFINITY : fabsf(VOXEL_SIZE / dir.z);
+
+    // 5. first plane crossings
+    float txNext = ray_t_to_next_plane(ray.position.x, dir.x, x, VOXEL_SIZE);
+    float tyNext = ray_t_to_next_plane(ray.position.y, dir.y, y, VOXEL_SIZE);
+    float tzNext = ray_t_to_next_plane(ray.position.z, dir.z, z, VOXEL_SIZE);
+
+    // 6. DDA walk
+    while (fminf(txNext, fminf(tyNext, tzNext)) <= t_max) {
+        int id = table_get(x, y, z);
+        if (id >= 0) {                // hit!
+            return id;
+        }
+
+        if (txNext < tyNext && txNext < tzNext) {
+            x += stepX;
+            txNext += txDelta;
+        } else if (tyNext < tzNext) {
+            y += stepY;
+            tyNext += tyDelta;
+        } else {
+            z += stepZ;
+            tzNext += tzDelta;
+        }
+    }
+    return -1;                        // no voxel found within t_max
+}
+
 
 // Draw all voxels as cubes
 static void DrawVoxels(Camera3D cam) {
     rlBegin(RL_TRIANGLES);
+    // for (int i = 0; i < voxel_count; i++) {
+    //     Voxel *v = &voxels[i];
+    //     if (v->surface){
+    //     drawCubeMan(v->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, v->color);
+    //     }
+        
+    // }
     int screenStep = 10;
     for (int y = 0; y < SCREEN_HEIGHT; y += screenStep) {
         for (int x = 0; x < SCREEN_WIDTH; x += screenStep) {
@@ -386,18 +465,10 @@ static void DrawVoxels(Camera3D cam) {
             // walk ray
             Vector3 pos = ray.position;
             Vector3 dir = v_norm(ray.direction);
-
-            float maxSteps = 100;
-            for (int step = 0; step < maxSteps; step++) {
-                int nx = (int)floorf((pos.x+dir.x*step) / VOXEL_SIZE);
-                int ny = (int)floorf((pos.y+dir.y*step) / VOXEL_SIZE);
-                int nz = (int)floorf((pos.z+dir.z*step) / VOXEL_SIZE);
-                int hit = table_get(nx, ny, nz);
-                if ( hit >= 0) {
-                    Voxel *u = &voxels[hit];
-                    drawCubeMan(u->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, u->color);
-                    break;
-                }
+            int hit = first_voxel_hit(ray, FLOOR_SIZE/2);
+            if (hit>=0){
+                Voxel *v = &voxels[hit];
+                drawCubeMan(v->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, v->color);
             }
         }
     }
