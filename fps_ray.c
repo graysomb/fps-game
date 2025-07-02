@@ -546,6 +546,21 @@ static int first_voxel_hit(Ray ray, float t_max) {
 // Generate a greedy mesh of all visible voxels (to be implemented)
 static Mesh gen_greedy_mesh(void) {
     Mesh mesh = { 0 };
+
+    // Collect all static (non-simulated) voxels by visible faces (principal planes)
+    int xyCount = 0, xzCount = 0, yzCount = 0;
+    int xyList[MAX_VOXELS], xzList[MAX_VOXELS], yzList[MAX_VOXELS];
+    for (int i = 0; i < voxel_count; i++) {
+        Voxel *v = &voxels[i];
+        if (v->simulate) continue;
+        // XY-plane faces (+Z / -Z)
+        if (v->surface[4] || v->surface[5]) xyList[xyCount++] = i;
+        // XZ-plane faces (+Y / -Y)
+        if (v->surface[2] || v->surface[3]) xzList[xzCount++] = i;
+        // YZ-plane faces (+X / -X)
+        if (v->surface[0] || v->surface[1]) yzList[yzCount++] = i;
+    }
+
     return mesh;
 }
 
