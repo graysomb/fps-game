@@ -1,6 +1,7 @@
 // Raylib split-screen FPS prototype (port of fps_game.c)
 #include "raylib.h"
 #include "rlgl.h" // for rlBegin/rlEnd
+#include "raymath.h" // for MatrixIdentity()
 #include <math.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -8,6 +9,7 @@
 #include <time.h>
 #include <string.h>
 #include <stdint.h>
+#include <limits.h>
 //gcc fps_ray.c -o fps_ray  $(pkg-config --cflags --libs raylib) -lm -Wl,-rpath,/usr/local/lib
 // Screen and game constants
 #define SCREEN_WIDTH    1600
@@ -86,6 +88,21 @@ static Vector3 v_norm(Vector3 v) {
     }
     return v_mul(v, 1.0f / len);
 }
+
+// Patch for a merged quad in one of the principal planes
+typedef struct {
+    int   plane;     // 0=XY,1=XZ,2=YZ
+    int   layer;     // z for XY, y for XZ, x for YZ
+    int   i0, j0;    // lower-left grid cell in plane coords
+    int   di, dj;    // width/height in voxels along in-plane axes
+    bool  positive;  // true => positive-facing side (+Z,+Y,+X), else negative
+    Color col;       // face color
+} Patch;
+
+static Mesh greedyMesh = { 0 };
+static bool meshDirty  = true;
+
+
 
 // Spatial hash table for voxels
 //static struct { int key, idx; } table[HASH_SIZE];
@@ -250,6 +267,8 @@ static void buildDemo(void) {
     }
 }
 
+
+
 // Reset game: players and voxels
 static void ResetGame(void) {
     // init players
@@ -269,6 +288,8 @@ static void ResetGame(void) {
     for (int i = 0; i < voxel_count; i++) {
         mark_surface(i);
     }
+    meshDirty = true;
+
 }
 
 // Physics step for voxels
@@ -543,9 +564,12 @@ static int first_voxel_hit(Ray ray, float t_max) {
 }
 
 
-// Generate a greedy mesh of all visible voxels (to be implemented)
+
+// Generate a greedy mesh of all visible voxels
 static Mesh gen_greedy_mesh(void) {
     Mesh mesh = { 0 };
+    Patch patches[MAX_VOXELS];
+    int   patchCount = 0;
 
     // Collect all static (non-simulated) voxels by visible faces (principal planes)
     int xyCount = 0, xzCount = 0, yzCount = 0;
@@ -553,46 +577,309 @@ static Mesh gen_greedy_mesh(void) {
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
         if (v->simulate) continue;
-        // XY-plane faces (+Z / -Z)
-        if (v->surface[4] || v->surface[5]) xyList[xyCount++] = i;
-        // XZ-plane faces (+Y / -Y)
-        if (v->surface[2] || v->surface[3]) xzList[xzCount++] = i;
-        // YZ-plane faces (+X / -X)
-        if (v->surface[0] || v->surface[1]) yzList[yzCount++] = i;
+        if (v->surface[4] || v->surface[5]) xyList[xyCount++] = i;  // XY-plane (+Z/-Z)
+        if (v->surface[2] || v->surface[3]) xzList[xzCount++] = i;  // XZ-plane (+Y/-Y)
+        if (v->surface[0] || v->surface[1]) yzList[yzCount++] = i;  // YZ-plane (+X/-X)
     }
 
+    // Merge rectangles in each principal plane via a greedy 2D algorithm
+    // XY-plane merging (group by z)
+    if (xyCount) {
+        int zLayers[xyCount], zLayerCount = 0;
+        for (int ii = 0; ii < xyCount; ii++) {
+            int idx = xyList[ii]; int z = voxels[idx].gz;
+            bool seen = false;
+            for (int ll = 0; ll < zLayerCount; ll++) if (zLayers[ll] == z) { seen = true; break; }
+            if (!seen) zLayers[zLayerCount++] = z;
+        }
+        for (int zl = 0; zl < zLayerCount; zl++) {
+            int z = zLayers[zl];
+            // find bounds
+            int minX = INT_MAX, maxX = INT_MIN, minY = INT_MAX, maxY = INT_MIN;
+            for (int ii = 0; ii < xyCount; ii++) {
+                Voxel *v = &voxels[xyList[ii]];
+                if (v->gz != z) continue;
+                if (v->gx < minX) minX = v->gx;
+                if (v->gx > maxX) maxX = v->gx;
+                if (v->gy < minY) minY = v->gy;
+                if (v->gy > maxY) maxY = v->gy;
+            }
+            int w = maxX - minX + 1;
+            int h = maxY - minY + 1;
+            bool mask[w][h]; memset(mask, 0, sizeof mask);
+            for (int ii = 0; ii < xyCount; ii++) {
+                Voxel *v = &voxels[xyList[ii]];
+                if (v->gz != z) continue;
+                mask[v->gx - minX][v->gy - minY] = true;
+            }
+            for (int yy = 0; yy < h; yy++) {
+                for (int xx = 0; xx < w; xx++) {
+                    if (!mask[xx][yy]) continue;
+                    // start cell
+                    int sx = xx, sy = yy;
+                    // determine width
+                    int ww = 1;
+                    while (sx + ww < w && mask[sx + ww][sy]) ww++;
+                    // determine height
+                    int hh = 1;
+                    for (;;) {
+                        bool block = false;
+                        for (int k = 0; k < ww; k++) {
+                            if (!mask[sx + k][sy + hh]) { block = true; break; }
+                        }
+                        if (block || sy + hh >= h) break;
+                        hh++;
+                    }
+                    // mark used
+                    for (int dy = 0; dy < hh; dy++)
+                        for (int dx = 0; dx < ww; dx++)
+                            mask[sx + dx][sy + dy] = false;
+                    xx = sx + ww - 1;
+                    // record merged patch in XY-plane at z
+                    {
+                        Patch *pt = &patches[patchCount++];
+                        pt->plane    = 0;
+                        pt->layer    = z;
+                        pt->i0       = minX + sx;
+                        pt->j0       = minY + sy;
+                        pt->di       = ww;
+                        pt->dj       = hh;
+                        int baseIdx = table_get(minX + sx, minY + sy, z);
+                        pt->positive = voxels[baseIdx].surface[4];
+                        pt->col      = voxels[baseIdx].color;
+                    }
+                }
+            }
+        }
+    }
+
+    // XZ-plane merging (group by y)
+    if (xzCount) {
+        int yLayers[xzCount], yLayerCount = 0;
+        for (int ii = 0; ii < xzCount; ii++) {
+            int idx = xzList[ii]; int y = voxels[idx].gy;
+            bool seen = false;
+            for (int ll = 0; ll < yLayerCount; ll++) if (yLayers[ll] == y) { seen = true; break; }
+            if (!seen) yLayers[yLayerCount++] = y;
+        }
+        for (int yl = 0; yl < yLayerCount; yl++) {
+            int y = yLayers[yl];
+            int minX = INT_MAX, maxX = INT_MIN, minZ = INT_MAX, maxZ = INT_MIN;
+            for (int ii = 0; ii < xzCount; ii++) {
+                Voxel *v = &voxels[xzList[ii]];
+                if (v->gy != y) continue;
+                if (v->gx < minX) minX = v->gx;
+                if (v->gx > maxX) maxX = v->gx;
+                if (v->gz < minZ) minZ = v->gz;
+                if (v->gz > maxZ) maxZ = v->gz;
+            }
+            int w = maxX - minX + 1;
+            int h = maxZ - minZ + 1;
+            bool mask[w][h]; memset(mask, 0, sizeof mask);
+            for (int ii = 0; ii < xzCount; ii++) {
+                Voxel *v = &voxels[xzList[ii]];
+                if (v->gy != y) continue;
+                mask[v->gx - minX][v->gz - minZ] = true;
+            }
+            for (int zz = 0; zz < h; zz++) {
+                for (int xx = 0; xx < w; xx++) {
+                    if (!mask[xx][zz]) continue;
+                    // start cell
+                    int sx = xx, sz = zz;
+                    // width
+                    int ww = 1;
+                    while (sx + ww < w && mask[sx + ww][sz]) ww++;
+                    // height
+                    int hh = 1;
+                    for (;;) {
+                        bool block = false;
+                        for (int k = 0; k < ww; k++) {
+                            if (!mask[sx + k][sz + hh]) { block = true; break; }
+                        }
+                        if (block || sz + hh >= h) break;
+                        hh++;
+                    }
+                    // mark used
+                    for (int dz = 0; dz < hh; dz++)
+                        for (int dx = 0; dx < ww; dx++)
+                            mask[sx + dx][sz + dz] = false;
+                    xx = sx + ww - 1;
+                    // record merged patch in XZ-plane at y
+                    {
+                        Patch *pt = &patches[patchCount++];
+                        pt->plane    = 1;
+                        pt->layer    = y;
+                        pt->i0       = minX + sx;
+                        pt->j0       = minZ + sz;
+                        pt->di       = ww;
+                        pt->dj       = hh;
+                        int baseIdx = table_get(minX + sx, y, minZ + sz);
+                        pt->positive = voxels[baseIdx].surface[2];
+                        pt->col      = voxels[baseIdx].color;
+                    }
+                }
+            }
+        }
+    }
+
+    // YZ-plane merging (group by x)
+    if (yzCount) {
+        int xLayers[yzCount], xLayerCount = 0;
+        for (int ii = 0; ii < yzCount; ii++) {
+            int idx = yzList[ii]; int x = voxels[idx].gx;
+            bool seen = false;
+            for (int ll = 0; ll < xLayerCount; ll++) if (xLayers[ll] == x) { seen = true; break; }
+            if (!seen) xLayers[xLayerCount++] = x;
+        }
+        for (int xl = 0; xl < xLayerCount; xl++) {
+            int x = xLayers[xl];
+            int minY = INT_MAX, maxY = INT_MIN, minZ = INT_MAX, maxZ = INT_MIN;
+            for (int ii = 0; ii < yzCount; ii++) {
+                Voxel *v = &voxels[yzList[ii]];
+                if (v->gx != x) continue;
+                if (v->gy < minY) minY = v->gy;
+                if (v->gy > maxY) maxY = v->gy;
+                if (v->gz < minZ) minZ = v->gz;
+                if (v->gz > maxZ) maxZ = v->gz;
+            }
+            int w = maxY - minY + 1;
+            int h = maxZ - minZ + 1;
+            bool mask[w][h]; memset(mask, 0, sizeof mask);
+            for (int ii = 0; ii < yzCount; ii++) {
+                Voxel *v = &voxels[yzList[ii]];
+                if (v->gx != x) continue;
+                mask[v->gy - minY][v->gz - minZ] = true;
+            }
+            for (int zz = 0; zz < h; zz++) {
+                for (int yy = 0; yy < w; yy++) {
+                    if (!mask[yy][zz]) continue;
+                    // start cell
+                    int sy = yy, sz = zz;
+                    // width
+                    int ww = 1;
+                    while (sy + ww < w && mask[sy + ww][sz]) ww++;
+                    // height
+                    int hh = 1;
+                    for (;;) {
+                        bool block = false;
+                        for (int k = 0; k < ww; k++) {
+                            if (!mask[sy + k][sz + hh]) { block = true; break; }
+                        }
+                        if (block || sz + hh >= h) break;
+                        hh++;
+                    }
+                    // mark used
+                    for (int dz = 0; dz < hh; dz++)
+                        for (int dy = 0; dy < ww; dy++)
+                            mask[sy + dy][sz + dz] = false;
+                    yy = sy + ww - 1;
+                    // record merged patch in YZ-plane at x
+                    {
+                        Patch *pt = &patches[patchCount++];
+                        pt->plane    = 2;
+                        pt->layer    = x;
+                        pt->i0       = minY + sy;
+                        pt->j0       = minZ + sz;
+                        pt->di       = ww;
+                        pt->dj       = hh;
+                        int baseIdx = table_get(x, minY + sy, minZ + sz);
+                        pt->positive = voxels[baseIdx].surface[0];
+                        pt->col      = voxels[baseIdx].color;
+                    }
+                }
+            }
+        }
+    }
+
+    // Build Raylib mesh from collected patches
+    int vCount = patchCount * 4;
+    int iCount = patchCount * 6;
+    float *verts  = calloc(vCount*3, sizeof(float));
+    float *norms  = calloc(vCount*3, sizeof(float));
+    float *uvs    = calloc(vCount*2, sizeof(float));
+    unsigned char *cols = calloc(vCount*4, sizeof(unsigned char));
+    unsigned short *inds = calloc(iCount, sizeof(unsigned short));
+    for (int p = 0; p < patchCount; p++) {
+        Patch *pt = &patches[p];
+        // Determine plane basis vectors and position
+        Vector3 origin = {0};
+        Vector3 iu, ju, norm;
+        switch (pt->plane) {
+        case 0: // XY plane at Z=layer
+            origin = (Vector3){ (pt->i0 + 0.0f)*VOXEL_SIZE,
+                                (pt->j0 + 0.0f)*VOXEL_SIZE,
+                                (pt->layer + (pt->positive?1:0))*VOXEL_SIZE };
+            iu = (Vector3){ VOXEL_SIZE*pt->di, 0, 0 };
+            ju = (Vector3){ 0, VOXEL_SIZE*pt->dj, 0 };
+            norm = pt->positive? (Vector3){0,0,1} : (Vector3){0,0,-1};
+            break;
+        case 1: // XZ plane at Y=layer
+            origin = (Vector3){ (pt->i0 + 0.0f)*VOXEL_SIZE,
+                                (pt->layer + (pt->positive?1:0))*VOXEL_SIZE,
+                                (pt->j0 + 0.0f)*VOXEL_SIZE };
+            iu = (Vector3){ VOXEL_SIZE*pt->di, 0, 0 };
+            ju = (Vector3){ 0, 0, VOXEL_SIZE*pt->dj };
+            norm = pt->positive? (Vector3){0,1,0} : (Vector3){0,-1,0};
+            break;
+        default: // YZ plane at X=layer
+            origin = (Vector3){ (pt->layer + (pt->positive?1:0))*VOXEL_SIZE,
+                                (pt->i0 + 0.0f)*VOXEL_SIZE,
+                                (pt->j0 + 0.0f)*VOXEL_SIZE };
+            iu = (Vector3){ 0, VOXEL_SIZE*pt->di, 0 };
+            ju = (Vector3){ 0, 0, VOXEL_SIZE*pt->dj };
+            norm = pt->positive? (Vector3){1,0,0} : (Vector3){-1,0,0};
+            break;
+        }
+        // build quad vertices
+        int vofs = p*4;
+        Vector3 corners[4] = {
+            origin,
+            v_add(origin, iu),
+            v_add(v_add(origin, iu), ju),
+            v_add(origin, ju)
+        };
+        for (int k = 0; k < 4; k++) {
+            verts[(vofs+k)*3 + 0] = corners[k].x;
+            verts[(vofs+k)*3 + 1] = corners[k].y;
+            verts[(vofs+k)*3 + 2] = corners[k].z;
+            norms[(vofs+k)*3 + 0] = norm.x;
+            norms[(vofs+k)*3 + 1] = norm.y;
+            norms[(vofs+k)*3 + 2] = norm.z;
+            uvs[(vofs+k)*2 + 0] = (k==1||k==2);
+            uvs[(vofs+k)*2 + 1] = (k>=2);
+            cols[(vofs+k)*4 + 0] = pt->col.r;
+            cols[(vofs+k)*4 + 1] = pt->col.g;
+            cols[(vofs+k)*4 + 2] = pt->col.b;
+            cols[(vofs+k)*4 + 3] = pt->col.a;
+        }
+        int iofs = p*6;
+        inds[iofs + 0] = vofs + 0;
+        inds[iofs + 1] = vofs + 1;
+        inds[iofs + 2] = vofs + 2;
+        inds[iofs + 3] = vofs + 0;
+        inds[iofs + 4] = vofs + 2;
+        inds[iofs + 5] = vofs + 3;
+    }
+    mesh.vertexCount   = vCount;
+    mesh.triangleCount = patchCount * 2;
+    mesh.vertices      = verts;
+    mesh.normals       = norms;
+    mesh.texcoords     = uvs;
+    mesh.colors        = cols;
+    mesh.indices       = inds;
+    UploadMesh(&mesh, false);
     return mesh;
 }
 
 // Draw all voxels via greedy mesh instead of per-voxel raycasting
 static void DrawVoxels(Camera3D cam) {
-    // Temporarily disable per-voxel raycasting; will replace with greedy mesh.
-    // TODO: call gen_greedy_mesh() and draw the resulting mesh.
-#if 0
-    rlBegin(RL_TRIANGLES);
-    // for (int i = 0; i < voxel_count; i++) {
-    //     Voxel *v = &voxels[i];
-    //     if (v->surface){
-    //     drawCubeMan(v->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, v->color);
-    //     }
-        
-    // }
-    int screenStep = 10;
-    for (int y = 0; y < SCREEN_HEIGHT; y += screenStep) {
-        for (int x = 0; x < SCREEN_WIDTH; x += screenStep) {
-            Ray ray = GetScreenToWorldRay((Vector2){ x, y }, cam);
-            // walk ray
-            Vector3 pos = ray.position;
-            Vector3 dir = v_norm(ray.direction);
-            int hit = first_voxel_hit(ray, FLOOR_SIZE/2);
-            if (hit>=0){
-                Voxel *v = &voxels[hit];
-                drawCubeMan(v->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, v->color);
-            }
-        }
+    (void)cam;
+    if (meshDirty) {
+        if (greedyMesh.vertices) UnloadMesh(greedyMesh);
+        greedyMesh = gen_greedy_mesh();
+        meshDirty = false;
     }
-    rlEnd();
-#endif
+    DrawMesh(greedyMesh, LoadMaterialDefault(), MatrixIdentity());
 }
 
 static void draw_players(void) {
