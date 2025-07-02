@@ -49,7 +49,8 @@ typedef struct {
     Color color;
     int type;
     int owner;
-    bool  surface;
+    /* Visible face index: 0=+X,1=-X,2=+Y,3=-Y,4=+Z,5=-Z; -1 if fully occluded */
+    int   surface;
     int gx, gy, gz;
 } Voxel;
 static Voxel voxels[MAX_VOXELS];
@@ -197,10 +198,16 @@ static int table_get(int x, int y, int z)
 // Check occupancy
 static bool occupied(int x,int y,int z){ return  table_get(x,y,z)>=0; }
 
-static void mark_surface(int idx){
-    Voxel *v=&voxels[idx];
-    int x=v->gx, y=v->gy, z=v->gz;
-    v->surface = !occupied(x+1,y,z)||!occupied(x-1,y,z)||!occupied(x,y+1,z)||!occupied(x,y-1,z)||!occupied(x,y,z+1)||!occupied(x,y,z-1);
+static void mark_surface(int idx) {
+    Voxel *v = &voxels[idx];
+    int x = v->gx, y = v->gy, z = v->gz;
+    if      (!occupied(x+1, y,   z  )) v->surface = 0;
+    else if (!occupied(x-1, y,   z  )) v->surface = 1;
+    else if (!occupied(x,   y+1, z  )) v->surface = 2;
+    else if (!occupied(x,   y-1, z  )) v->surface = 3;
+    else if (!occupied(x,   y,   z+1)) v->surface = 4;
+    else if (!occupied(x,   y,   z-1)) v->surface = 5;
+    else                               v->surface = -1;
 }
 
 // Add a voxel (static or dynamic)
@@ -214,8 +221,8 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     v->simulate = simulate;
     v->color = color;
     v->type = type;
-    v->owner = -1;
-    v->surface = true;
+    v->owner   = -1;
+    v->surface = -1;
     // compute grid coords
     v->gx = (int)floorf(px / VOXEL_SIZE);
     v->gy = (int)floorf(py / VOXEL_SIZE);
