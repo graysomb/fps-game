@@ -879,7 +879,9 @@ static void DrawVoxels(Camera3D cam) {
         greedyMesh = gen_greedy_mesh();
         meshDirty = false;
     }
+    rlDisableBackfaceCulling();
     DrawMesh(greedyMesh, LoadMaterialDefault(), MatrixIdentity());
+    rlEnableBackfaceCulling();
 }
 
 static void draw_players(void) {
