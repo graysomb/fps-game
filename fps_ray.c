@@ -49,9 +49,10 @@ typedef struct {
     Color color;
     int type;
     int owner;
-    /* Visible face index: 0=+X,1=-X,2=+Y,3=-Y,4=+Z,5=-Z; -1 if fully occluded */
-    int   surface;
-    int gx, gy, gz;
+    /* Visible faces mask: surface[i]=true if face i is visible:
+       0=+X,1=-X,2=+Y,3=-Y,4=+Z,5=-Z */
+    bool surface[6];
+    int  gx, gy, gz;
 } Voxel;
 static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
@@ -201,13 +202,12 @@ static bool occupied(int x,int y,int z){ return  table_get(x,y,z)>=0; }
 static void mark_surface(int idx) {
     Voxel *v = &voxels[idx];
     int x = v->gx, y = v->gy, z = v->gz;
-    if      (!occupied(x+1, y,   z  )) v->surface = 0;
-    else if (!occupied(x-1, y,   z  )) v->surface = 1;
-    else if (!occupied(x,   y+1, z  )) v->surface = 2;
-    else if (!occupied(x,   y-1, z  )) v->surface = 3;
-    else if (!occupied(x,   y,   z+1)) v->surface = 4;
-    else if (!occupied(x,   y,   z-1)) v->surface = 5;
-    else                               v->surface = -1;
+    v->surface[0] = !occupied(x+1, y,   z  );
+    v->surface[1] = !occupied(x-1, y,   z  );
+    v->surface[2] = !occupied(x,   y+1, z  );
+    v->surface[3] = !occupied(x,   y-1, z  );
+    v->surface[4] = !occupied(x,   y,   z+1);
+    v->surface[5] = !occupied(x,   y,   z-1);
 }
 
 // Add a voxel (static or dynamic)
@@ -222,7 +222,7 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     v->color = color;
     v->type = type;
     v->owner   = -1;
-    v->surface = -1;
+    memset(v->surface, 0, sizeof v->surface);
     // compute grid coords
     v->gx = (int)floorf(px / VOXEL_SIZE);
     v->gy = (int)floorf(py / VOXEL_SIZE);
@@ -543,8 +543,17 @@ static int first_voxel_hit(Ray ray, float t_max) {
 }
 
 
-// Draw all voxels as cubes
+// Generate a greedy mesh of all visible voxels (to be implemented)
+static Mesh gen_greedy_mesh(void) {
+    Mesh mesh = { 0 };
+    return mesh;
+}
+
+// Draw all voxels via greedy mesh instead of per-voxel raycasting
 static void DrawVoxels(Camera3D cam) {
+    // Temporarily disable per-voxel raycasting; will replace with greedy mesh.
+    // TODO: call gen_greedy_mesh() and draw the resulting mesh.
+#if 0
     rlBegin(RL_TRIANGLES);
     // for (int i = 0; i < voxel_count; i++) {
     //     Voxel *v = &voxels[i];
@@ -568,6 +577,7 @@ static void DrawVoxels(Camera3D cam) {
         }
     }
     rlEnd();
+#endif
 }
 
 static void draw_players(void) {
