@@ -99,8 +99,10 @@ typedef struct {
     Color col;       // face color
 } Patch;
 
-static Mesh greedyMesh = { 0 };
-static bool meshDirty  = true;
+static Patch patches[MAX_VOXELS];
+static int   patchCount = 0;
+static Mesh  greedyMesh = { 0 };
+static bool  meshDirty  = true;
 
 
 
@@ -568,8 +570,7 @@ static int first_voxel_hit(Ray ray, float t_max) {
 // Generate a greedy mesh of all visible voxels
 static Mesh gen_greedy_mesh(void) {
     Mesh mesh = { 0 };
-    Patch patches[MAX_VOXELS];
-    int   patchCount = 0;
+    patchCount = 0;
 
     // Collect all static (non-simulated) voxels by visible faces (principal planes)
     int xyCount = 0, xzCount = 0, yzCount = 0;
@@ -881,6 +882,47 @@ static void DrawVoxels(Camera3D cam) {
     }
     rlDisableBackfaceCulling();
     DrawMesh(greedyMesh, LoadMaterialDefault(), MatrixIdentity());
+    // Draw voxel grid lines atop merged quads
+    rlBegin(RL_LINES);
+    rlColor4ub(0, 0, 0, 255);
+    for (int p = 0; p < patchCount; p++) {
+        Patch *pt = &patches[p];
+        Vector3 origin, iu, ju;
+        switch (pt->plane) {
+            case 0: // XY
+                origin = (Vector3){ pt->i0*VOXEL_SIZE,
+                                    pt->j0*VOXEL_SIZE,
+                                    (pt->layer + (pt->positive?1:0))*VOXEL_SIZE };
+                iu = (Vector3){ VOXEL_SIZE, 0, 0 };
+                ju = (Vector3){ 0, VOXEL_SIZE, 0 };
+                break;
+            case 1: // XZ
+                origin = (Vector3){ pt->i0*VOXEL_SIZE,
+                                    (pt->layer + (pt->positive?1:0))*VOXEL_SIZE,
+                                    pt->j0*VOXEL_SIZE };
+                iu = (Vector3){ VOXEL_SIZE, 0, 0 };
+                ju = (Vector3){ 0, 0, VOXEL_SIZE };
+                break;
+            default: // YZ
+                origin = (Vector3){ (pt->layer + (pt->positive?1:0))*VOXEL_SIZE,
+                                    pt->i0*VOXEL_SIZE,
+                                    pt->j0*VOXEL_SIZE };
+                iu = (Vector3){ 0, VOXEL_SIZE, 0 };
+                ju = (Vector3){ 0, 0, VOXEL_SIZE };
+                break;
+        }
+        for (int ix = 0; ix <= pt->di; ix++) {
+            Vector3 a = v_add(origin, v_mul(iu, ix));
+            Vector3 b = v_add(a, v_mul(ju, pt->dj));
+            rlVertex3f(a.x, a.y, a.z); rlVertex3f(b.x, b.y, b.z);
+        }
+        for (int jy = 0; jy <= pt->dj; jy++) {
+            Vector3 a = v_add(origin, v_mul(ju, jy));
+            Vector3 b = v_add(a, v_mul(iu, pt->di));
+            rlVertex3f(a.x, a.y, a.z); rlVertex3f(b.x, b.y, b.z);
+        }
+    }
+    rlEnd();
     rlEnableBackfaceCulling();
 }
 
