@@ -343,6 +343,10 @@ static void physics_step(float dt) {
         if (nx != v->gx || ny != v->gy || nz != v->gz) {
             int hit = table_get(nx, ny, nz);
             if (hit >= 0 && hit != i) {
+
+                //reset mesh
+                meshDirty = true;
+
                 if (v->type == 1) {
                     // Destructive collision: remove bullet and hit block
                     v->simulate = false;
@@ -933,6 +937,7 @@ static void DrawVoxels(Camera3D cam) {
         }
         
     }
+    rlEnd();
 }
 
 static void draw_players(void) {
