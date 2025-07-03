@@ -1028,6 +1028,10 @@ int main(void) {
             p->pos.z = clampf(p->pos.z, -FLOOR_SIZE+PLAYER_RADIUS, FLOOR_SIZE-PLAYER_RADIUS);
         }
         // update voxel physics
+        // int subStep = 8;
+        // for( int i = 0; i < subStep; i++){
+        //     physics_step(dt/subStep);
+        // }
         physics_step(dt);
         // setup cameras
         Camera3D cam0 = {0}, cam1 = {0};
