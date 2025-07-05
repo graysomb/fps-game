@@ -257,7 +257,9 @@ static void buildDemo(void) {
         float px = (x + 0.5f) * VOXEL_SIZE;
         float py = (y + 0.5f) * VOXEL_SIZE;
         float pz = (z + 0.5f) * VOXEL_SIZE;
-        addVoxel(px, py, pz, true, false, (Color){ 150,150,150,255 }, 0);
+        if (x < 8 && x < 8 && x < 8  ){
+            addVoxel(px, py, pz, true, false, (Color){ 150,150,150,255 }, 0);
+        }
     }
     int M = (int)(2.0f*FLOOR_SIZE / VOXEL_SIZE);
     for (int x = 0; x <= M; x++) {
@@ -343,10 +345,6 @@ static void physics_step(float dt) {
         if (nx != v->gx || ny != v->gy || nz != v->gz) {
             int hit = table_get(nx, ny, nz);
             if (hit >= 0 && hit != i) {
-
-                //reset mesh
-                meshDirty = true;
-
                 if (v->type == 1) {
                     // Destructive collision: remove bullet and hit block
                     v->simulate = false;
@@ -357,16 +355,19 @@ static void physics_step(float dt) {
                     u->simulate = false;
                     u->fixed = true;
                     u->pos = (Vector3){-999.0f, -999.0f, -999.0f};
+                    //update surface on neighboring voxes
                 } else {
                     v->simulate = false;
                     v->fixed = true;
                     v->pos = (Vector3){(v->gx + 0.5f) * VOXEL_SIZE,
                                 (v->gy + 0.5f) * VOXEL_SIZE,
                                 (v->gz + 0.5f) * VOXEL_SIZE};
+                    if (hit >= 0) mark_surface(hit);
+                    mark_surface(i);
                 }
+                //reset mesh
+                meshDirty = true;
             }
-            mark_surface(i);
-            if (hit >= 0) mark_surface(hit);
         }
     }
 }
@@ -1032,7 +1033,7 @@ int main(void) {
         // for( int i = 0; i < subStep; i++){
         //     physics_step(dt/subStep);
         // }
-        physics_step(dt);
+        physics_step(dt/2);
         // setup cameras
         Camera3D cam0 = {0}, cam1 = {0};
         cam0.up = cam1.up = (Vector3){0,1,0};
