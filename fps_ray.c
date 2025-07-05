@@ -418,8 +418,8 @@ static void physics_step(float dt) {
                     v->pos = (Vector3){(v->gx + 0.5f) * VOXEL_SIZE,
                                 (v->gy + 0.5f) * VOXEL_SIZE,
                                 (v->gz + 0.5f) * VOXEL_SIZE};
-                    if (hit >= 0) mark_surface(hit);
                     mark_surface(i);
+                    mark_surface(hit);
                 }
                 //reset mesh
                 meshDirty = true;
@@ -628,7 +628,7 @@ static int first_voxel_hit(Ray ray, float t_max) {
 
 
 
-// Generate a greedy mesh of all visible voxels
+// Generate a greedy mesh of all visible voxels ( i think the bug where single voxels are not drawn right is somewhere in here)
 static Mesh gen_greedy_mesh(void) {
     Mesh mesh = { 0 };
     patchCount = 0;
@@ -1085,11 +1085,10 @@ int main(void) {
             p->pos.z = clampf(p->pos.z, -FLOOR_SIZE+PLAYER_RADIUS, FLOOR_SIZE-PLAYER_RADIUS);
         }
         // update voxel physics
-        // int subStep = 8;
-        // for( int i = 0; i < subStep; i++){
-        //     physics_step(dt/subStep);
-        // }
-        physics_step(dt/2);
+        int subStep = 3;
+        for( int i = 0; i < subStep; i++){
+            physics_step(dt/subStep);
+        }
         // setup cameras
         Camera3D cam0 = {0}, cam1 = {0};
         cam0.up = cam1.up = (Vector3){0,1,0};
