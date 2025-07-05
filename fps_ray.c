@@ -213,6 +213,35 @@ static int table_get(int x, int y, int z)
         h = (h + 1) & (HASH_SIZE - 1);        // step to next bucket
     }
 }
+// Remove voxel entry from spatial hash and rehash subsequent cluster entries
+static void table_remove(int x, int y, int z) {
+    uint64_t k = mortonKey(x, y, z);
+    size_t mask = HASH_SIZE - 1;
+    size_t h = hashVoxelKey(k);
+    // Locate the bucket for this key
+    while (table[h].key) {
+        if (table[h].key == k) break;
+        h = (h + 1) & mask;
+    }
+    if (!table[h].key) return; // Key not found
+    // Remove the entry
+    table[h].key = 0;
+    // Rehash any following entries in this probe cluster
+    size_t j = (h + 1) & mask;
+    while (table[j].key) {
+        uint64_t k2 = table[j].key;
+        int idx2 = table[j].idx;
+        table[j].key = 0;
+        // Find new home for this entry
+        size_t h2 = hashVoxelKey(k2);
+        while (table[h2].key) {
+            h2 = (h2 + 1) & mask;
+        }
+        table[h2].key = k2;
+        table[h2].idx = idx2;
+        j = (j + 1) & mask;
+    }
+}
 
 
 // Check occupancy
@@ -227,6 +256,31 @@ static void mark_surface(int idx) {
     v->surface[3] = !occupied(x,   y-1, z  );
     v->surface[4] = !occupied(x,   y,   z+1);
     v->surface[5] = !occupied(x,   y,   z-1);
+}
+// Mark surfaces of voxels adjacent to a given world position
+static void mark_surface_neighbors(Vector3 pos) {
+    // Compute grid coordinates of the given position
+    int gx = (int)floorf(pos.x / VOXEL_SIZE);
+    int gy = (int)floorf(pos.y / VOXEL_SIZE);
+    int gz = (int)floorf(pos.z / VOXEL_SIZE);
+
+    // Offsets for the 6 face-adjacent neighbors
+    const int offs[6][3] = {
+        { 1,  0,  0 }, { -1,  0,  0 },
+        { 0,  1,  0 }, {  0, -1,  0 },
+        { 0,  0,  1 }, {  0,  0, -1 }
+    };
+
+    // Lookup each neighbor and mark its surface
+    for (int i = 0; i < 6; i++) {
+        int nx = gx + offs[i][0];
+        int ny = gy + offs[i][1];
+        int nz = gz + offs[i][2];
+        int neighbor_idx = table_get(nx, ny, nz);
+        if (neighbor_idx >= 0) {
+            mark_surface(neighbor_idx);
+        }
+    }
 }
 
 // Add a voxel (static or dynamic)
@@ -350,12 +404,14 @@ static void physics_step(float dt) {
                     v->simulate = false;
                     v->fixed = true;
                     v->pos = (Vector3){-999.0f, -999.0f, -999.0f};
-                    // Remove existing block
+                    // Remove existing block from spatial hash and update neighbors
                     Voxel *u = &voxels[hit];
+                    table_remove(u->gx, u->gy, u->gz);
+                    // Recompute surfaces of face-adjacent voxels
+                    mark_surface_neighbors(u->pos);
                     u->simulate = false;
                     u->fixed = true;
                     u->pos = (Vector3){-999.0f, -999.0f, -999.0f};
-                    //update surface on neighboring voxes
                 } else {
                     v->simulate = false;
                     v->fixed = true;
