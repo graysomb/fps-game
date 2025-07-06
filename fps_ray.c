@@ -282,6 +282,31 @@ static void mark_surface_neighbors(Vector3 pos) {
         }
     }
 }
+//-----------------------------------------------------------------------------
+// Check for voxels adjacent to a given world position
+// neighbors[0] = +X, neighbors[1] = -X,
+// neighbors[2] = +Y, neighbors[3] = -Y,
+// neighbors[4] = +Z, neighbors[5] = -Z
+static void get_adjacent_voxel_directions(Vector3 pos, bool neighbors[6]) {
+    // Compute grid coordinates of the position
+    int gx = (int)floorf(pos.x / VOXEL_SIZE);
+    int gy = (int)floorf(pos.y / VOXEL_SIZE-VOXEL_SIZE);
+    int gz = (int)floorf(pos.z / VOXEL_SIZE);
+    // Offsets for the 6 face-adjacent neighbors
+    const int offs[6][3] = {
+        { 1,  0,  0 }, { -1,  0,  0 },
+        { 0,  1,  0 }, {  0, -1,  0 },
+        { 0,  0,  1 }, {  0,  0, -1 }
+    };
+    // Test occupancy at each neighboring cell
+    for (int i = 0; i < 6; i++) {
+        neighbors[i] = occupied(
+            gx + offs[i][0],
+            gy + offs[i][1],
+            gz + offs[i][2]
+        );
+    }
+}
 
 // Add a voxel (static or dynamic)
 static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Color color, int type) {
@@ -1061,15 +1086,9 @@ int main(void) {
                     p->vel.z *= ns/sp;
                 }
             }
-            // vertical
-            p->vel.y -= GRAVITY*dt;
-            p->pos.y += p->vel.y*dt;
-            if (p->pos.y <= BASE_EYE_HEIGHT) {
-                p->pos.y = BASE_EYE_HEIGHT;
-                p->vel.y = 0;
-                p->onGround = true;
-            }
-            //clamp speed
+            
+
+            // clamp horizontal speed
             {
                 float speed = sqrtf(p->vel.x*p->vel.x + p->vel.z*p->vel.z);
                 if (speed > MOVE_SPEED) {
@@ -1077,10 +1096,39 @@ int main(void) {
                     p->vel.z *= MOVE_SPEED/speed;
                 }
             }
-            // horizontal move
+
+            // Block velocity where a neighbor voxel exists in movement direction
+            {
+                bool neigh[6];
+                get_adjacent_voxel_directions(p->pos, neigh);
+                // X-axis (+X/neigh[0], -X/neigh[1])
+                if ((p->vel.x > 0 && neigh[0]) || (p->vel.x < 0 && neigh[1])) p->vel.x = 0;
+                // Y-axis (+Y/neigh[2], -Y/neigh[3])
+                if ((p->vel.y > 0 && neigh[2]) || (p->vel.y < 0 && neigh[3])) p->vel.y = 0;
+                // Z-axis (+Z/neigh[4], -Z/neigh[5])
+                if ((p->vel.z > 0 && neigh[4]) || (p->vel.z < 0 && neigh[5])) p->vel.z = 0;
+                if (!neigh[3]){
+                    // apply gravity
+                    p->vel.y -= GRAVITY*dt;
+                    p->onGround = false;
+                }else{
+                    p->onGround = true;
+                }
+            }
+            
+
+            // apply movement
             p->pos.x += p->vel.x*dt;
+            p->pos.y += p->vel.y*dt;
             p->pos.z += p->vel.z*dt;
-            // bounds
+
+            // ground clamp
+            if (p->pos.y <= BASE_EYE_HEIGHT) {
+                p->pos.y = BASE_EYE_HEIGHT;
+                p->vel.y = 0;
+                p->onGround = true;
+            }
+            // world bounds clamp for X,Z
             p->pos.x = clampf(p->pos.x, -FLOOR_SIZE+PLAYER_RADIUS, FLOOR_SIZE-PLAYER_RADIUS);
             p->pos.z = clampf(p->pos.z, -FLOOR_SIZE+PLAYER_RADIUS, FLOOR_SIZE-PLAYER_RADIUS);
         }
