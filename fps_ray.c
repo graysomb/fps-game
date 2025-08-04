@@ -331,12 +331,12 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
 
 // Build static demo cube of voxels
 static void buildDemo(void) {
-    const int N = 10;
+    const int N = 1;
     for (int x = 0; x < N; x++) for (int y = 0; y < N; y++) for (int z = 0; z < N; z++) {
         float px = (x + 0.5f) * VOXEL_SIZE;
-        float py = (y + 0.5f) * VOXEL_SIZE;
+        float py = 2.0f+(y + 0.5f) * VOXEL_SIZE;
         float pz = (z + 0.5f) * VOXEL_SIZE;
-        if (x < 8 && x < 8 && x < 8  ){
+        if (x < 10 && y< 10 && z < 10  ){
             addVoxel(px, py, pz, true, false, (Color){ 150,150,150,255 }, 0);
         }
     }
@@ -654,6 +654,120 @@ static int first_voxel_hit(Ray ray, float t_max) {
 
 
 // Generate a greedy mesh of all visible voxels ( i think the bug where single voxels are not drawn right is somewhere in here)
+// Only one layer is drawn per voxel, this makes layers disappear on the individual voxel level
+
+static void merge_rects_on_plane(int count, int *list, int plane) {
+    if (!count) return;
+
+    // Group voxels by layer
+    int layers[count], layerCount = 0;
+    for (int i = 0; i < count; i++) {
+        int idx = list[i];
+        int layer = 0;
+        switch (plane) {
+            case 0: layer = voxels[idx].gz; break; // XY-plane, group by z
+            case 1: layer = voxels[idx].gy; break; // XZ-plane, group by y
+            case 2: layer = voxels[idx].gx; break; // YZ-plane, group by x
+        }
+        bool seen = false;
+        for (int j = 0; j < layerCount; j++) {
+            if (layers[j] == layer) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) layers[layerCount++] = layer;
+    }
+
+    // For each layer, find and merge rectangles
+    for (int l = 0; l < layerCount; l++) {
+        int layer = layers[l];
+
+        // Find the bounds of the current layer
+        int minI = INT_MAX, maxI = INT_MIN, minJ = INT_MAX, maxJ = INT_MIN;
+        for (int i = 0; i < count; i++) {
+            Voxel *v = &voxels[list[i]];
+            int vLayer = 0, vI = 0, vJ = 0;
+            switch (plane) {
+                case 0: vLayer = v->gz; vI = v->gx; vJ = v->gy; break;
+                case 1: vLayer = v->gy; vI = v->gx; vJ = v->gz; break;
+                case 2: vLayer = v->gx; vI = v->gy; vJ = v->gz; break;
+            }
+
+            if (vLayer != layer) continue;
+            if (vI < minI) minI = vI;
+            if (vI > maxI) maxI = vI;
+            if (vJ < minJ) minJ = vJ;
+            if (vJ > maxJ) maxJ = vJ;
+        }
+
+        int w = maxI - minI + 1;
+        int h = maxJ - minJ + 1;
+        bool mask[w][h];
+        memset(mask, 0, sizeof(mask));
+
+        for (int i = 0; i < count; i++) {
+            Voxel *v = &voxels[list[i]];
+            int vLayer = 0, vI = 0, vJ = 0;
+            switch (plane) {
+                case 0: vLayer = v->gz; vI = v->gx; vJ = v->gy; break;
+                case 1: vLayer = v->gy; vI = v->gx; vJ = v->gz; break;
+                case 2: vLayer = v->gx; vI = v->gy; vJ = v->gz; break;
+            }
+            if (vLayer != layer) continue;
+            mask[vI - minI][vJ - minJ] = true;
+        }
+
+        for (int j = 0; j < h; j++) {
+            for (int i = 0; i < w; i++) {
+                if (!mask[i][j]) continue;
+
+                int si = i, sj = j;
+                int ww = 1;
+                while (si + ww < w && mask[si + ww][sj]) ww++;
+
+                int hh = 1;
+                for (;;) {
+                    bool block = false;
+                    for (int k = 0; k < ww; k++) {
+                        if (sj + hh >= h || !mask[si + k][sj + hh]) {
+                            block = true;
+                            break;
+                        }
+                    }
+                    if (block) break;
+                    hh++;
+                }
+                
+                for (int dj = 0; dj < hh; dj++) {
+                    for (int di = 0; di < ww; di++) {
+                        mask[si + di][sj + dj] = false;
+                    }
+                }
+                
+                i = si + ww - 1;
+                
+                Patch *pt = &patches[patchCount++];
+                pt->plane = plane;
+                pt->layer = layer;
+                pt->i0 = minI + si;
+                pt->j0 = minJ + sj;
+                pt->di = ww;
+                pt->dj = hh;
+                
+                int baseIdx = 0;
+                switch (plane) {
+                    case 0: baseIdx = table_get(pt->i0, pt->j0, layer); pt->positive = voxels[baseIdx].surface[4]; break;
+                    case 1: baseIdx = table_get(pt->i0, layer, pt->j0); pt->positive = voxels[baseIdx].surface[2]; break;
+                    case 2: baseIdx = table_get(layer, pt->i0, pt->j0); pt->positive = voxels[baseIdx].surface[0]; break;
+                }
+                pt->col = voxels[baseIdx].color;
+            }
+        }
+    }
+}
+
+
 static Mesh gen_greedy_mesh(void) {
     Mesh mesh = { 0 };
     patchCount = 0;
@@ -669,214 +783,10 @@ static Mesh gen_greedy_mesh(void) {
         if (v->surface[0] || v->surface[1]) yzList[yzCount++] = i;  // YZ-plane (+X/-X)
     }
 
-    // Merge rectangles in each principal plane via a greedy 2D algorithm
-    // XY-plane merging (group by z)
-    if (xyCount) {
-        int zLayers[xyCount], zLayerCount = 0;
-        for (int ii = 0; ii < xyCount; ii++) {
-            int idx = xyList[ii]; int z = voxels[idx].gz;
-            bool seen = false;
-            for (int ll = 0; ll < zLayerCount; ll++) if (zLayers[ll] == z) { seen = true; break; }
-            if (!seen) zLayers[zLayerCount++] = z;
-        }
-        for (int zl = 0; zl < zLayerCount; zl++) {
-            int z = zLayers[zl];
-            // find bounds
-            int minX = INT_MAX, maxX = INT_MIN, minY = INT_MAX, maxY = INT_MIN;
-            for (int ii = 0; ii < xyCount; ii++) {
-                Voxel *v = &voxels[xyList[ii]];
-                if (v->gz != z) continue;
-                if (v->gx < minX) minX = v->gx;
-                if (v->gx > maxX) maxX = v->gx;
-                if (v->gy < minY) minY = v->gy;
-                if (v->gy > maxY) maxY = v->gy;
-            }
-            int w = maxX - minX + 1;
-            int h = maxY - minY + 1;
-            bool mask[w][h]; memset(mask, 0, sizeof mask);
-            for (int ii = 0; ii < xyCount; ii++) {
-                Voxel *v = &voxels[xyList[ii]];
-                if (v->gz != z) continue;
-                mask[v->gx - minX][v->gy - minY] = true;
-            }
-            for (int yy = 0; yy < h; yy++) {
-                for (int xx = 0; xx < w; xx++) {
-                    if (!mask[xx][yy]) continue;
-                    // start cell
-                    int sx = xx, sy = yy;
-                    // determine width
-                    int ww = 1;
-                    while (sx + ww < w && mask[sx + ww][sy]) ww++;
-                    // determine height
-                    int hh = 1;
-                    for (;;) {
-                        bool block = false;
-                        for (int k = 0; k < ww; k++) {
-                            if (!mask[sx + k][sy + hh]) { block = true; break; }
-                        }
-                        if (block || sy + hh >= h) break;
-                        hh++;
-                    }
-                    // mark used
-                    for (int dy = 0; dy < hh; dy++)
-                        for (int dx = 0; dx < ww; dx++)
-                            mask[sx + dx][sy + dy] = false;
-                    xx = sx + ww - 1;
-                    // record merged patch in XY-plane at z
-                    {
-                        Patch *pt = &patches[patchCount++];
-                        pt->plane    = 0;
-                        pt->layer    = z;
-                        pt->i0       = minX + sx;
-                        pt->j0       = minY + sy;
-                        pt->di       = ww;
-                        pt->dj       = hh;
-                        int baseIdx = table_get(minX + sx, minY + sy, z);
-                        pt->positive = voxels[baseIdx].surface[4];
-                        pt->col      = voxels[baseIdx].color;
-                    }
-                }
-            }
-        }
-    }
-
-    // XZ-plane merging (group by y)
-    if (xzCount) {
-        int yLayers[xzCount], yLayerCount = 0;
-        for (int ii = 0; ii < xzCount; ii++) {
-            int idx = xzList[ii]; int y = voxels[idx].gy;
-            bool seen = false;
-            for (int ll = 0; ll < yLayerCount; ll++) if (yLayers[ll] == y) { seen = true; break; }
-            if (!seen) yLayers[yLayerCount++] = y;
-        }
-        for (int yl = 0; yl < yLayerCount; yl++) {
-            int y = yLayers[yl];
-            int minX = INT_MAX, maxX = INT_MIN, minZ = INT_MAX, maxZ = INT_MIN;
-            for (int ii = 0; ii < xzCount; ii++) {
-                Voxel *v = &voxels[xzList[ii]];
-                if (v->gy != y) continue;
-                if (v->gx < minX) minX = v->gx;
-                if (v->gx > maxX) maxX = v->gx;
-                if (v->gz < minZ) minZ = v->gz;
-                if (v->gz > maxZ) maxZ = v->gz;
-            }
-            int w = maxX - minX + 1;
-            int h = maxZ - minZ + 1;
-            bool mask[w][h]; memset(mask, 0, sizeof mask);
-            for (int ii = 0; ii < xzCount; ii++) {
-                Voxel *v = &voxels[xzList[ii]];
-                if (v->gy != y) continue;
-                mask[v->gx - minX][v->gz - minZ] = true;
-            }
-            for (int zz = 0; zz < h; zz++) {
-                for (int xx = 0; xx < w; xx++) {
-                    if (!mask[xx][zz]) continue;
-                    // start cell
-                    int sx = xx, sz = zz;
-                    // width
-                    int ww = 1;
-                    while (sx + ww < w && mask[sx + ww][sz]) ww++;
-                    // height
-                    int hh = 1;
-                    for (;;) {
-                        bool block = false;
-                        for (int k = 0; k < ww; k++) {
-                            if (!mask[sx + k][sz + hh]) { block = true; break; }
-                        }
-                        if (block || sz + hh >= h) break;
-                        hh++;
-                    }
-                    // mark used
-                    for (int dz = 0; dz < hh; dz++)
-                        for (int dx = 0; dx < ww; dx++)
-                            mask[sx + dx][sz + dz] = false;
-                    xx = sx + ww - 1;
-                    // record merged patch in XZ-plane at y
-                    {
-                        Patch *pt = &patches[patchCount++];
-                        pt->plane    = 1;
-                        pt->layer    = y;
-                        pt->i0       = minX + sx;
-                        pt->j0       = minZ + sz;
-                        pt->di       = ww;
-                        pt->dj       = hh;
-                        int baseIdx = table_get(minX + sx, y, minZ + sz);
-                        pt->positive = voxels[baseIdx].surface[2];
-                        pt->col      = voxels[baseIdx].color;
-                    }
-                }
-            }
-        }
-    }
-
-    // YZ-plane merging (group by x)
-    if (yzCount) {
-        int xLayers[yzCount], xLayerCount = 0;
-        for (int ii = 0; ii < yzCount; ii++) {
-            int idx = yzList[ii]; int x = voxels[idx].gx;
-            bool seen = false;
-            for (int ll = 0; ll < xLayerCount; ll++) if (xLayers[ll] == x) { seen = true; break; }
-            if (!seen) xLayers[xLayerCount++] = x;
-        }
-        for (int xl = 0; xl < xLayerCount; xl++) {
-            int x = xLayers[xl];
-            int minY = INT_MAX, maxY = INT_MIN, minZ = INT_MAX, maxZ = INT_MIN;
-            for (int ii = 0; ii < yzCount; ii++) {
-                Voxel *v = &voxels[yzList[ii]];
-                if (v->gx != x) continue;
-                if (v->gy < minY) minY = v->gy;
-                if (v->gy > maxY) maxY = v->gy;
-                if (v->gz < minZ) minZ = v->gz;
-                if (v->gz > maxZ) maxZ = v->gz;
-            }
-            int w = maxY - minY + 1;
-            int h = maxZ - minZ + 1;
-            bool mask[w][h]; memset(mask, 0, sizeof mask);
-            for (int ii = 0; ii < yzCount; ii++) {
-                Voxel *v = &voxels[yzList[ii]];
-                if (v->gx != x) continue;
-                mask[v->gy - minY][v->gz - minZ] = true;
-            }
-            for (int zz = 0; zz < h; zz++) {
-                for (int yy = 0; yy < w; yy++) {
-                    if (!mask[yy][zz]) continue;
-                    // start cell
-                    int sy = yy, sz = zz;
-                    // width
-                    int ww = 1;
-                    while (sy + ww < w && mask[sy + ww][sz]) ww++;
-                    // height
-                    int hh = 1;
-                    for (;;) {
-                        bool block = false;
-                        for (int k = 0; k < ww; k++) {
-                            if (!mask[sy + k][sz + hh]) { block = true; break; }
-                        }
-                        if (block || sz + hh >= h) break;
-                        hh++;
-                    }
-                    // mark used
-                    for (int dz = 0; dz < hh; dz++)
-                        for (int dy = 0; dy < ww; dy++)
-                            mask[sy + dy][sz + dz] = false;
-                    yy = sy + ww - 1;
-                    // record merged patch in YZ-plane at x
-                    {
-                        Patch *pt = &patches[patchCount++];
-                        pt->plane    = 2;
-                        pt->layer    = x;
-                        pt->i0       = minY + sy;
-                        pt->j0       = minZ + sz;
-                        pt->di       = ww;
-                        pt->dj       = hh;
-                        int baseIdx = table_get(x, minY + sy, minZ + sz);
-                        pt->positive = voxels[baseIdx].surface[0];
-                        pt->col      = voxels[baseIdx].color;
-                    }
-                }
-            }
-        }
-    }
+    // Merge rectangles in each principal plane
+    merge_rects_on_plane(xyCount, xyList, 0); // XY-plane
+    merge_rects_on_plane(xzCount, xzList, 1); // XZ-plane
+    merge_rects_on_plane(yzCount, yzList, 2); // YZ-plane
 
     // Build Raylib mesh from collected patches
     int vCount = patchCount * 4;
@@ -886,6 +796,7 @@ static Mesh gen_greedy_mesh(void) {
     float *uvs    = calloc(vCount*2, sizeof(float));
     unsigned char *cols = calloc(vCount*4, sizeof(unsigned char));
     unsigned short *inds = calloc(iCount, sizeof(unsigned short));
+
     for (int p = 0; p < patchCount; p++) {
         Patch *pt = &patches[p];
         // Determine plane basis vectors and position
@@ -955,6 +866,7 @@ static Mesh gen_greedy_mesh(void) {
     mesh.colors        = cols;
     mesh.indices       = inds;
     UploadMesh(&mesh, false);
+
     return mesh;
 }
 
