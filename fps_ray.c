@@ -424,27 +424,56 @@ static void physics_step(float dt) {
         if (nx != v->gx || ny != v->gy || nz != v->gz) {
             int hit = table_get(nx, ny, nz);
             if (hit >= 0 && hit != i) {
-                if (v->type == 1) {
-                    // Destructive collision: remove bullet and hit block
-                    v->simulate = false;
-                    v->fixed = true;
-                    v->pos = (Vector3){-999.0f, -999.0f, -999.0f};
-                    // Remove existing block from spatial hash and update neighbors
+                // Stop the bullet
+                v->simulate = false;
+                v->fixed = true;
+                v->pos = (Vector3){-999.0f, -999.0f, -999.0f};
+
+                if (v->type == 1) { // DESTRUCTION
                     Voxel *u = &voxels[hit];
-                    table_remove(u->gx, u->gy, u->gz);
-                    // Recompute surfaces of face-adjacent voxels
-                    mark_surface_neighbors(u->pos);
-                    u->simulate = false;
-                    u->fixed = true;
-                    u->pos = (Vector3){-999.0f, -999.0f, -999.0f};
-                } else {
-                    v->simulate = false;
-                    v->fixed = true;
-                    v->pos = (Vector3){(v->gx + 0.5f) * VOXEL_SIZE,
-                                (v->gy + 0.5f) * VOXEL_SIZE,
-                                (v->gz + 0.5f) * VOXEL_SIZE};
-                    mark_surface(i);
-                    mark_surface(hit);
+                    int anchorX = u->gx;
+                    int anchorY = u->gy;
+                    int anchorZ = u->gz;
+
+                    for (int dx = 0; dx < 2; dx++) {
+                        for (int dy = 0; dy < 2; dy++) {
+                            for (int dz = 0; dz < 2; dz++) {
+                                int victim_idx = table_get(anchorX + dx, anchorY + dy, anchorZ + dz);
+                                if (victim_idx >= 0) {
+                                    Voxel *victim = &voxels[victim_idx];
+                                    table_remove(victim->gx, victim->gy, victim->gz);
+                                    mark_surface_neighbors(victim->pos);
+                                    victim->simulate = false;
+                                    victim->fixed = true;
+                                    victim->pos = (Vector3){-999.0f, -999.0f, -999.0f};
+                                }
+                            }
+                        }
+                    }
+                } else { // CONSTRUCTION
+                    int anchorX = v->gx;
+                    int anchorY = v->gy;
+                    int anchorZ = v->gz;
+
+                    for (int dx = 0; dx < 2; dx++) {
+                        for (int dy = 0; dy < 2; dy++) {
+                            for (int dz = 0; dz < 2; dz++) {
+                                int targetX = anchorX + dx;
+                                int targetY = anchorY + dy;
+                                int targetZ = anchorZ + dz;
+                                if (!occupied(targetX, targetY, targetZ)) {
+                                    float px = (targetX + 0.5f) * VOXEL_SIZE;
+                                    float py = (targetY + 0.5f) * VOXEL_SIZE;
+                                    float pz = (targetZ + 0.5f) * VOXEL_SIZE;
+                                    int new_idx = addVoxel(px, py, pz, true, false, v->color, 0);
+                                    if (new_idx >= 0) {
+                                        mark_surface(new_idx);
+                                        mark_surface_neighbors(voxels[new_idx].pos);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 //reset mesh
                 meshDirty = true;
