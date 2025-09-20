@@ -656,7 +656,7 @@ static int first_voxel_hit(Ray ray, float t_max) {
 // Generate a greedy mesh of all visible voxels ( i think the bug where single voxels are not drawn right is somewhere in here)
 // Only one layer is drawn per voxel, this makes layers disappear on the individual voxel level
 
-static void merge_rects_on_plane(int count, int *list, int plane) {
+static void merge_rects_on_plane(int count, int *list, int plane, bool positive) {
     if (!count) return;
 
     // Group voxels by layer
@@ -754,12 +754,13 @@ static void merge_rects_on_plane(int count, int *list, int plane) {
                 pt->j0 = minJ + sj;
                 pt->di = ww;
                 pt->dj = hh;
+                pt->positive = positive;
                 
                 int baseIdx = 0;
                 switch (plane) {
-                    case 0: baseIdx = table_get(pt->i0, pt->j0, layer); pt->positive = voxels[baseIdx].surface[4]; break;
-                    case 1: baseIdx = table_get(pt->i0, layer, pt->j0); pt->positive = voxels[baseIdx].surface[2]; break;
-                    case 2: baseIdx = table_get(layer, pt->i0, pt->j0); pt->positive = voxels[baseIdx].surface[0]; break;
+                    case 0: baseIdx = table_get(pt->i0, pt->j0, layer); break;
+                    case 1: baseIdx = table_get(pt->i0, layer, pt->j0); break;
+                    case 2: baseIdx = table_get(layer, pt->i0, pt->j0); break;
                 }
                 pt->col = voxels[baseIdx].color;
             }
@@ -773,20 +774,30 @@ static Mesh gen_greedy_mesh(void) {
     patchCount = 0;
 
     // Collect all static (non-simulated) voxels by visible faces (principal planes)
-    int xyCount = 0, xzCount = 0, yzCount = 0;
-    int xyList[MAX_VOXELS], xzList[MAX_VOXELS], yzList[MAX_VOXELS];
+    int yzPosCount = 0, yzNegCount = 0; // +X, -X
+    int xzPosCount = 0, xzNegCount = 0; // +Y, -Y
+    int xyPosCount = 0, xyNegCount = 0; // +Z, -Z
+    int yzPosList[MAX_VOXELS], yzNegList[MAX_VOXELS];
+    int xzPosList[MAX_VOXELS], xzNegList[MAX_VOXELS];
+    int xyPosList[MAX_VOXELS], xyNegList[MAX_VOXELS];
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
         if (v->simulate) continue;
-        if (v->surface[4] || v->surface[5]) xyList[xyCount++] = i;  // XY-plane (+Z/-Z)
-        if (v->surface[2] || v->surface[3]) xzList[xzCount++] = i;  // XZ-plane (+Y/-Y)
-        if (v->surface[0] || v->surface[1]) yzList[yzCount++] = i;  // YZ-plane (+X/-X)
+        if (v->surface[0]) yzPosList[yzPosCount++] = i; // +X face
+        if (v->surface[1]) yzNegList[yzNegCount++] = i; // -X face
+        if (v->surface[2]) xzPosList[xzPosCount++] = i; // +Y face
+        if (v->surface[3]) xzNegList[xzNegCount++] = i; // -Y face
+        if (v->surface[4]) xyPosList[xyPosCount++] = i; // +Z face
+        if (v->surface[5]) xyNegList[xyNegCount++] = i; // -Z face
     }
 
     // Merge rectangles in each principal plane
-    merge_rects_on_plane(xyCount, xyList, 0); // XY-plane
-    merge_rects_on_plane(xzCount, xzList, 1); // XZ-plane
-    merge_rects_on_plane(yzCount, yzList, 2); // YZ-plane
+    merge_rects_on_plane(xyPosCount, xyPosList, 0, true); // XY-plane, +Z
+    merge_rects_on_plane(xyNegCount, xyNegList, 0, false); // XY-plane, -Z
+    merge_rects_on_plane(xzPosCount, xzPosList, 1, true); // XZ-plane, +Y
+    merge_rects_on_plane(xzNegCount, xzNegList, 1, false); // XZ-plane, -Y
+    merge_rects_on_plane(yzPosCount, yzPosList, 2, true); // YZ-plane, +X
+    merge_rects_on_plane(yzNegCount, yzNegList, 2, false); // YZ-plane, -X
 
     // Build Raylib mesh from collected patches
     int vCount = patchCount * 4;
