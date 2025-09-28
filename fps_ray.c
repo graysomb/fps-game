@@ -381,6 +381,8 @@ static void ResetGame(void) {
 
 }
 
+static int first_voxel_hit(Ray ray, float t_max, int ignore_id);
+
 // Physics step for voxels
 static void physics_step(float dt) {
     // Rebuild spatial hash
@@ -397,46 +399,29 @@ static void physics_step(float dt) {
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
         if (!v->simulate) continue;
+
         // Apply gravity
         v->vel.y -= GRAVITY * dt;
-        // Move
-        v->pos = v_add(v->pos, v_mul(v->vel, dt));
-        for (int j = 0; j < 2; j++) {
-            float dx = v->pos.x - players[j].pos.x;
-            float dy = v->pos.y - players[j].pos.y;
-            float dz = v->pos.z - players[j].pos.z;
-            if (fabsf(dx) < PLAYER_SIZE && fabsf(dy) < PLAYER_SIZE && fabsf(dz) < PLAYER_SIZE) {
-                if (v->owner >= 0 && v->owner != j) {
-                    scores[v->owner]++;
-                    printf("Player %d scored! total=%d\n", v->owner + 1, scores[v->owner]);
-                    fflush(stdout);
-                }
-                players[j].pos     = (Vector3){ randomInRange(-9,9), BASE_EYE_HEIGHT, randomInRange(-9,9) };
-                players[j].vel     = (Vector3){0,0,0};
-                players[j].onGround= true;
-                players[j].yaw     = (j == 0 ? 0 : 180);
-                players[j].pitch   = 0;
-                v->simulate = false;
-                v->fixed    = true;
-                v->pos      = (Vector3){ -999.0f, -999.0f, -999.0f };
-                break;
-            }
-        }
-        if (!v->simulate) continue;
-        // Check grid collision
-        int nx = (int)floorf(v->pos.x / VOXEL_SIZE);
-        int ny = (int)floorf(v->pos.y / VOXEL_SIZE);
-        int nz = (int)floorf(v->pos.z / VOXEL_SIZE);
-        if (nx != v->gx || ny != v->gy || nz != v->gz) {
-            int hit = table_get(nx, ny, nz);
-            if (hit >= 0 && hit != i) {
+
+        // Continuous collision detection
+        Vector3 displacement = v_mul(v->vel, dt);
+        float distance = v_length(displacement);
+        bool hit_voxel = false;
+
+        if (distance > 0.0001f) { // only cast if moving
+            Ray ray = { v->pos, v_norm(v->vel) };
+            int hit_id = first_voxel_hit(ray, distance, i);
+
+            if (hit_id >= 0) {
+                hit_voxel = true;
+                
                 // Stop the bullet
                 v->simulate = false;
                 v->fixed = true;
                 v->pos = (Vector3){-999.0f, -999.0f, -999.0f};
 
                 if (v->type == 1) { // DESTRUCTION
-                    Voxel *u = &voxels[hit];
+                    Voxel *u = &voxels[hit_id];
                     int anchorX = u->gx;
                     int anchorY = u->gy;
                     int anchorZ = u->gz;
@@ -483,6 +468,32 @@ static void physics_step(float dt) {
                 }
                 //reset mesh
                 meshDirty = true;
+            }
+        }
+
+        if (!hit_voxel) {
+            // Move
+            v->pos = v_add(v->pos, displacement);
+            for (int j = 0; j < 2; j++) {
+                float dx = v->pos.x - players[j].pos.x;
+                float dy = v->pos.y - players[j].pos.y;
+                float dz = v->pos.z - players[j].pos.z;
+                if (fabsf(dx) < PLAYER_SIZE && fabsf(dy) < PLAYER_SIZE && fabsf(dz) < PLAYER_SIZE) {
+                    if (v->owner >= 0 && v->owner != j) {
+                        scores[v->owner]++;
+                        printf("Player %d scored! total=%d\n", v->owner + 1, scores[v->owner]);
+                        fflush(stdout);
+                    }
+                    players[j].pos     = (Vector3){ randomInRange(-9,9), BASE_EYE_HEIGHT, randomInRange(-9,9) };
+                    players[j].vel     = (Vector3){0,0,0};
+                    players[j].onGround= true;
+                    players[j].yaw     = (j == 0 ? 0 : 180);
+                    players[j].pitch   = 0;
+                    v->simulate = false;
+                    v->fixed    = true;
+                    v->pos      = (Vector3){ -999.0f, -999.0f, -999.0f };
+                    break;
+                }
             }
         }
     }
@@ -640,7 +651,7 @@ typedef struct {
     float t;      // parametric distance along the ray
 } VoxelHit;
 
-static int first_voxel_hit(Ray ray, float t_max) {
+static int first_voxel_hit(Ray ray, float t_max, int ignore_id) {
     // 1. Normalise once
     ray.direction = v_norm(ray.direction);
     Vector3 dir   = ray.direction;
@@ -668,7 +679,7 @@ static int first_voxel_hit(Ray ray, float t_max) {
     // 6. DDA walk
     while (fminf(txNext, fminf(tyNext, tzNext)) <= t_max) {
         int id = table_get(x, y, z);
-        if (id >= 0) {                // hit!
+        if (id >= 0 && id != ignore_id) {                // hit!
             return id;
         }
 
