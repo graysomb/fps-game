@@ -21,6 +21,8 @@
 #define BASE_EYE_HEIGHT 1.0f    // player eye height above floor
 #define ACCELERATION   400.0f    // horizontal acceleration
 #define FRICTION       400.0f    // ground friction deceleration
+#define TURN_ACCELERATION 400.0f
+#define TURN_FRICTION 400.0f
 #define PLAYER_RADIUS   0.5f
 #define FLOOR_SIZE     20.0f    // half-size of floor in world units
 #define PLAYER_SIZE 0.5f
@@ -35,6 +37,8 @@ typedef struct {
     Vector3 pos;
     float yaw;
     float pitch;
+    float yaw_vel;
+    float pitch_vel;
     Vector3 vel;
     bool onGround;
     int vType;
@@ -359,6 +363,8 @@ static void ResetGame(void) {
     players[1].pos = (Vector3){ randomInRange(-9,9), BASE_EYE_HEIGHT, randomInRange(-9,9) };
     players[0].yaw = 0; players[1].yaw = 180;
     players[0].pitch = players[1].pitch = 0;
+    players[0].yaw_vel = players[1].yaw_vel = 0;
+    players[0].pitch_vel = players[1].pitch_vel = 0;
     players[0].vel = players[1].vel = (Vector3){0,0,0};
     players[0].onGround = players[1].onGround = true;
     players[0].vType = players[1].vType = 0;
@@ -1008,11 +1014,44 @@ int main(void) {
         for (int i = 0; i < 2; i++) {
             Player *p = &players[i];
             // turn
-            if ((i==0 && IsKeyDown(KEY_H)) || (i==1 && IsKeyDown(KEY_RIGHT))) p->yaw -= TURN_SPEED*dt;
-            if ((i==0 && IsKeyDown(KEY_F)) || (i==1 && IsKeyDown(KEY_LEFT)))  p->yaw += TURN_SPEED*dt;
+            float yaw_accel = 0.0f;
+            if ((i==0 && IsKeyDown(KEY_F)) || (i==1 && IsKeyDown(KEY_LEFT)))  yaw_accel += TURN_ACCELERATION;
+            if ((i==0 && IsKeyDown(KEY_H)) || (i==1 && IsKeyDown(KEY_RIGHT))) yaw_accel -= TURN_ACCELERATION;
+
+            if (yaw_accel != 0.0f) {
+                p->yaw_vel += yaw_accel * dt;
+            } else {
+                // friction
+                if (p->yaw_vel > 0) {
+                    p->yaw_vel -= TURN_FRICTION * dt;
+                    if (p->yaw_vel < 0) p->yaw_vel = 0;
+                } else if (p->yaw_vel < 0) {
+                    p->yaw_vel += TURN_FRICTION * dt;
+                    if (p->yaw_vel > 0) p->yaw_vel = 0;
+                }
+            }
+            p->yaw_vel = clampf(p->yaw_vel, -TURN_SPEED, TURN_SPEED);
+            p->yaw += p->yaw_vel * dt;
+
             // look up/down
-            if ((i==0 && IsKeyDown(KEY_T)) || (i==1 && IsKeyDown(KEY_UP)))   p->pitch += TURN_SPEED*dt;
-            if ((i==0 && IsKeyDown(KEY_G)) || (i==1 && IsKeyDown(KEY_DOWN))) p->pitch -= TURN_SPEED*dt;
+            float pitch_accel = 0.0f;
+            if ((i==0 && IsKeyDown(KEY_T)) || (i==1 && IsKeyDown(KEY_UP)))   pitch_accel += TURN_ACCELERATION;
+            if ((i==0 && IsKeyDown(KEY_G)) || (i==1 && IsKeyDown(KEY_DOWN))) pitch_accel -= TURN_ACCELERATION;
+
+            if (pitch_accel != 0.0f) {
+                p->pitch_vel += pitch_accel * dt;
+            } else {
+                // friction
+                if (p->pitch_vel > 0) {
+                    p->pitch_vel -= TURN_FRICTION * dt;
+                    if (p->pitch_vel < 0) p->pitch_vel = 0;
+                } else if (p->pitch_vel < 0) {
+                    p->pitch_vel += TURN_FRICTION * dt;
+                    if (p->pitch_vel > 0) p->pitch_vel = 0;
+                }
+            }
+            p->pitch_vel = clampf(p->pitch_vel, -TURN_SPEED, TURN_SPEED);
+            p->pitch += p->pitch_vel * dt;
             p->pitch = clampf(p->pitch, -89, 89);
             // compute forward/right
             float yr = DEG2RAD * p->yaw;
