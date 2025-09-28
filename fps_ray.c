@@ -27,6 +27,10 @@
 #define FLOOR_SIZE     20.0f    // half-size of floor in world units
 #define PLAYER_SIZE 0.5f
 
+// KD-stats constants
+#define BASE_HEALTH 100
+#define VOXEL_DAMAGE 50
+
 // Voxel physics constants
 #define MAX_VOXELS    131072
 #define HASH_SIZE     131072    // must be power of two
@@ -42,9 +46,12 @@ typedef struct {
     Vector3 vel;
     bool onGround;
     int vType;
+    int kills;
+    int deaths;
+    float kd_ratio;
+    int health;
 } Player;
 static Player players[2];
-static int scores[2] = { 0, 0 };
 
 // Voxel structure
 typedef struct {
@@ -356,18 +363,26 @@ static void buildDemo(void) {
 
 
 
+static int first_voxel_hit(Ray ray, float t_max, int ignore_id);
+static void UpdateKdRatio(int player_index);
+
 // Reset game: players and voxels
 static void ResetGame(void) {
     // init players
-    players[0].pos = (Vector3){ randomInRange(-9,9), BASE_EYE_HEIGHT, randomInRange(-9,9) };
-    players[1].pos = (Vector3){ randomInRange(-9,9), BASE_EYE_HEIGHT, randomInRange(-9,9) };
-    players[0].yaw = 0; players[1].yaw = 180;
-    players[0].pitch = players[1].pitch = 0;
-    players[0].yaw_vel = players[1].yaw_vel = 0;
-    players[0].pitch_vel = players[1].pitch_vel = 0;
-    players[0].vel = players[1].vel = (Vector3){0,0,0};
-    players[0].onGround = players[1].onGround = true;
-    players[0].vType = players[1].vType = 0;
+    for (int i = 0; i < 2; i++) {
+        players[i].pos = (Vector3){ randomInRange(-9,9), BASE_EYE_HEIGHT, randomInRange(-9,9) };
+        players[i].yaw = (i == 0) ? 0 : 180;
+        players[i].pitch = 0;
+        players[i].yaw_vel = 0;
+        players[i].pitch_vel = 0;
+        players[i].vel = (Vector3){0,0,0};
+        players[i].onGround = true;
+        players[i].vType = 0;
+        players[i].kills = 0;
+        players[i].deaths = 0;
+        UpdateKdRatio(i);
+        players[i].health = BASE_HEALTH;
+    }
     // clear voxels
     voxel_count = 0;
     // clear hash
@@ -379,13 +394,15 @@ static void ResetGame(void) {
     }
     meshDirty = true;
 
+} 
+
+static void UpdateKdRatio(int player_index) {
+    Player *p = &players[player_index];
+    p->kd_ratio = (float)(p->kills + 1) / (p->deaths + 1);
 }
 
-static int first_voxel_hit(Ray ray, float t_max, int ignore_id);
-
 // Physics step for voxels
-static void physics_step(float dt) {
-    // Rebuild spatial hash
+static void physics_step(float dt) {    // Rebuild spatial hash
     memset(table, 0, sizeof(table));
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
@@ -479,19 +496,25 @@ static void physics_step(float dt) {
                 float dy = v->pos.y - players[j].pos.y;
                 float dz = v->pos.z - players[j].pos.z;
                 if (fabsf(dx) < PLAYER_SIZE && fabsf(dy) < PLAYER_SIZE && fabsf(dz) < PLAYER_SIZE) {
-                    if (v->owner >= 0 && v->owner != j) {
-                        scores[v->owner]++;
-                        printf("Player %d scored! total=%d\n", v->owner + 1, scores[v->owner]);
-                        fflush(stdout);
-                    }
-                    players[j].pos     = (Vector3){ randomInRange(-9,9), BASE_EYE_HEIGHT, randomInRange(-9,9) };
-                    players[j].vel     = (Vector3){0,0,0};
-                    players[j].onGround= true;
-                    players[j].yaw     = (j == 0 ? 0 : 180);
-                    players[j].pitch   = 0;
+                    players[j].health -= VOXEL_DAMAGE;
                     v->simulate = false;
                     v->fixed    = true;
                     v->pos      = (Vector3){ -999.0f, -999.0f, -999.0f };
+
+                    if (players[j].health <= 0) {
+                        if (v->owner >= 0 && v->owner != j) {
+                            players[v->owner].kills++;
+                            players[j].deaths++;
+                            UpdateKdRatio(v->owner);
+                            UpdateKdRatio(j);
+                        }
+                        players[j].pos     = (Vector3){ randomInRange(-9,9), BASE_EYE_HEIGHT, randomInRange(-9,9) };
+                        players[j].vel     = (Vector3){0,0,0};
+                        players[j].onGround= true;
+                        players[j].yaw     = (j == 0 ? 0 : 180);
+                        players[j].pitch   = 0;
+                        players[j].health = BASE_HEALTH * players[j].kd_ratio;
+                    }
                     break;
                 }
             }
@@ -1026,42 +1049,42 @@ int main(void) {
             Player *p = &players[i];
             // turn
             float yaw_accel = 0.0f;
-            if ((i==0 && IsKeyDown(KEY_F)) || (i==1 && IsKeyDown(KEY_LEFT)))  yaw_accel += TURN_ACCELERATION;
-            if ((i==0 && IsKeyDown(KEY_H)) || (i==1 && IsKeyDown(KEY_RIGHT))) yaw_accel -= TURN_ACCELERATION;
+            if ((i==0 && IsKeyDown(KEY_F)) || (i==1 && IsKeyDown(KEY_LEFT)))  yaw_accel += TURN_ACCELERATION * p->kd_ratio;
+            if ((i==0 && IsKeyDown(KEY_H)) || (i==1 && IsKeyDown(KEY_RIGHT))) yaw_accel -= TURN_ACCELERATION * p->kd_ratio;
 
             if (yaw_accel != 0.0f) {
                 p->yaw_vel += yaw_accel * dt;
             } else {
                 // friction
                 if (p->yaw_vel > 0) {
-                    p->yaw_vel -= TURN_FRICTION * dt;
+                    p->yaw_vel -= TURN_FRICTION * p->kd_ratio * dt;
                     if (p->yaw_vel < 0) p->yaw_vel = 0;
                 } else if (p->yaw_vel < 0) {
-                    p->yaw_vel += TURN_FRICTION * dt;
+                    p->yaw_vel += TURN_FRICTION * p->kd_ratio * dt;
                     if (p->yaw_vel > 0) p->yaw_vel = 0;
                 }
             }
-            p->yaw_vel = clampf(p->yaw_vel, -TURN_SPEED, TURN_SPEED);
+            p->yaw_vel = clampf(p->yaw_vel, -TURN_SPEED * p->kd_ratio, TURN_SPEED * p->kd_ratio);
             p->yaw += p->yaw_vel * dt;
 
             // look up/down
             float pitch_accel = 0.0f;
-            if ((i==0 && IsKeyDown(KEY_T)) || (i==1 && IsKeyDown(KEY_UP)))   pitch_accel += TURN_ACCELERATION;
-            if ((i==0 && IsKeyDown(KEY_G)) || (i==1 && IsKeyDown(KEY_DOWN))) pitch_accel -= TURN_ACCELERATION;
+            if ((i==0 && IsKeyDown(KEY_T)) || (i==1 && IsKeyDown(KEY_UP)))   pitch_accel += TURN_ACCELERATION * p->kd_ratio;
+            if ((i==0 && IsKeyDown(KEY_G)) || (i==1 && IsKeyDown(KEY_DOWN))) pitch_accel -= TURN_ACCELERATION * p->kd_ratio;
 
             if (pitch_accel != 0.0f) {
                 p->pitch_vel += pitch_accel * dt;
             } else {
                 // friction
                 if (p->pitch_vel > 0) {
-                    p->pitch_vel -= TURN_FRICTION * dt;
+                    p->pitch_vel -= TURN_FRICTION * p->kd_ratio * dt;
                     if (p->pitch_vel < 0) p->pitch_vel = 0;
                 } else if (p->pitch_vel < 0) {
-                    p->pitch_vel += TURN_FRICTION * dt;
+                    p->pitch_vel += TURN_FRICTION * p->kd_ratio * dt;
                     if (p->pitch_vel > 0) p->pitch_vel = 0;
                 }
             }
-            p->pitch_vel = clampf(p->pitch_vel, -TURN_SPEED, TURN_SPEED);
+            p->pitch_vel = clampf(p->pitch_vel, -TURN_SPEED * p->kd_ratio, TURN_SPEED * p->kd_ratio);
             p->pitch += p->pitch_vel * dt;
             p->pitch = clampf(p->pitch, -89, 89);
             // compute forward/right
@@ -1077,12 +1100,12 @@ int main(void) {
             if (accel.x!=0 || accel.z!=0) {
                 float len = sqrtf(accel.x*accel.x + accel.z*accel.z);
                 accel = v_mul(accel, 1/len);
-                p->vel = v_add(p->vel, v_mul(accel, ACCELERATION*dt));
+                p->vel = v_add(p->vel, v_mul(accel, ACCELERATION * p->kd_ratio * dt));
             } else {
                 // friction
                 float sp = sqrtf(p->vel.x*p->vel.x + p->vel.z*p->vel.z);
                 if (sp > 0) {
-                    float dec = FRICTION*dt;
+                    float dec = FRICTION * p->kd_ratio * dt;
                     float ns = sp - dec; if (ns < 0) ns = 0;
                     p->vel.x *= ns/sp;
                     p->vel.z *= ns/sp;
@@ -1093,9 +1116,9 @@ int main(void) {
             // clamp horizontal speed
             {
                 float speed = sqrtf(p->vel.x*p->vel.x + p->vel.z*p->vel.z);
-                if (speed > MOVE_SPEED) {
-                    p->vel.x *= MOVE_SPEED/speed;
-                    p->vel.z *= MOVE_SPEED/speed;
+                if (speed > MOVE_SPEED * p->kd_ratio) {
+                    p->vel.x *= MOVE_SPEED * p->kd_ratio / speed;
+                    p->vel.z *= MOVE_SPEED * p->kd_ratio / speed;
                 }
             }
 
@@ -1166,8 +1189,7 @@ int main(void) {
             EndMode3D();
             // UI p1
             DrawRectangle(0,0, SCREEN_WIDTH/2, 40, Fade(BLACK, 0.5f));
-            DrawText("P1: WASD move, H/F turn, T/G look, LCTRL shoot", 10,10,20,WHITE);
-            DrawText(TextFormat("Score: %d", scores[0]), SCREEN_WIDTH/2 -150,10,20,WHITE);
+            DrawText(TextFormat("P1 | Kills: %d Deaths: %d | Health: %d", players[0].kills, players[0].deaths, players[0].health), 10, 10, 20, WHITE);
             DrawLine(SCREEN_WIDTH/4-10, SCREEN_HEIGHT/2, SCREEN_WIDTH/4+10, SCREEN_HEIGHT/2, WHITE);
             DrawLine(SCREEN_WIDTH/4, SCREEN_HEIGHT/2-10, SCREEN_WIDTH/4, SCREEN_HEIGHT/2+10, WHITE);
         EndTextureMode();
@@ -1180,8 +1202,7 @@ int main(void) {
             EndMode3D();
             // UI p2
             DrawRectangle(0,0, SCREEN_WIDTH/2, 40, Fade(BLACK, 0.5f));
-            DrawText("P2: I/K move, RIGHT/LEFT turn, UP/DOWN look, RCTRL shoot", 10,10,20,WHITE);
-            DrawText(TextFormat("Score: %d", scores[1]), SCREEN_WIDTH/2 -150,10,20,WHITE);
+            DrawText(TextFormat("P2 | Kills: %d Deaths: %d | Health: %d", players[1].kills, players[1].deaths, players[1].health), 10, 10, 20, WHITE);
             DrawLine(SCREEN_WIDTH/4-10, SCREEN_HEIGHT/2, SCREEN_WIDTH/4+10, SCREEN_HEIGHT/2, WHITE);
             DrawLine(SCREEN_WIDTH/4, SCREEN_HEIGHT/2-10, SCREEN_WIDTH/4, SCREEN_HEIGHT/2+10, WHITE);
         EndTextureMode();
