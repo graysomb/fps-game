@@ -29,6 +29,8 @@
 
 // KD-stats constants
 #define BASE_HEALTH 100
+#define BASE_SHIELD 150
+#define SHIELD_REGEN_DELAY 5.0f
 #define VOXEL_DAMAGE 50
 
 // Voxel physics constants
@@ -50,6 +52,8 @@ typedef struct {
     int deaths;
     float kd_ratio;
     int health;
+    int shield;
+    float last_damage_time;
 } Player;
 static Player players[2];
 
@@ -415,6 +419,8 @@ static void ResetGame(void) {
         players[i].deaths = 0;
         UpdateKdRatio(i);
         players[i].health = BASE_HEALTH;
+        players[i].shield = BASE_SHIELD;
+        players[i].last_damage_time = 0.0f;
     }
     // clear voxels
     voxel_count = 0;
@@ -529,7 +535,17 @@ static void physics_step(float dt) {    // Rebuild spatial hash
                 float dy = v->pos.y - players[j].pos.y;
                 float dz = v->pos.z - players[j].pos.z;
                 if (fabsf(dx) < PLAYER_SIZE && fabsf(dy) < PLAYER_SIZE && fabsf(dz) < PLAYER_SIZE) {
-                    players[j].health -= VOXEL_DAMAGE;
+                    players[j].last_damage_time = (float)GetTime();
+                    if (players[j].shield > 0) {
+                        players[j].shield -= VOXEL_DAMAGE;
+                        if (players[j].shield < 0) {
+                            players[j].health += players[j].shield;
+                            players[j].shield = 0;
+                        }
+                    } else {
+                        players[j].health -= VOXEL_DAMAGE;
+                    }
+
                     v->simulate = false;
                     v->fixed    = true;
                     v->pos      = (Vector3){ -999.0f, -999.0f, -999.0f };
@@ -547,6 +563,7 @@ static void physics_step(float dt) {    // Rebuild spatial hash
                         players[j].yaw     = (j == 0 ? 0 : 180);
                         players[j].pitch   = 0;
                         players[j].health = BASE_HEALTH * players[j].kd_ratio;
+                        players[j].shield = BASE_SHIELD;
                     }
                     break;
                 }
@@ -1052,6 +1069,18 @@ static void draw_players(void) {
         Player *p = &players[i];
         DrawCube(p->pos, PLAYER_SIZE,PLAYER_SIZE, PLAYER_SIZE, BLACK);
         DrawCubeWires(p->pos, PLAYER_SIZE,PLAYER_SIZE,PLAYER_SIZE, BLACK);
+        if (p->shield > 0) {
+            float shield_percentage = (float)p->shield / BASE_SHIELD;
+            float fluctuation = (1.0f - shield_percentage) * 100.0f;
+            Color shield_color = {
+                (unsigned char)randomInRange(0, fluctuation),
+                (unsigned char)randomInRange(0, fluctuation),
+                (unsigned char)clampf(255 - randomInRange(0, fluctuation), 0, 255),
+                128
+            };
+            DrawCube(p->pos, PLAYER_SIZE + 0.2f, PLAYER_SIZE + 0.2f, PLAYER_SIZE + 0.2f, shield_color);
+            DrawCubeWires(p->pos, PLAYER_SIZE + 0.2f, PLAYER_SIZE + 0.2f, PLAYER_SIZE + 0.2f, Fade(shield_color, 0.8f));
+        }
     }
 }
 
@@ -1077,6 +1106,19 @@ int main(void) {
         if (IsKeyPressed(KEY_U)) players[0].vType = 1-players[0].vType;
         if (IsKeyPressed(KEY_SPACE) && players[0].onGround) { players[0].vel.y = JUMP_SPEED; players[0].onGround = false; }
         if (IsKeyPressed(KEY_RIGHT_SHIFT) && players[1].onGround) { players[1].vel.y = JUMP_SPEED; players[1].onGround = false; }
+
+        // Shield regeneration
+        for (int i = 0; i < 2; i++) {
+            if ((float)GetTime() - players[i].last_damage_time > SHIELD_REGEN_DELAY) {
+                if (players[i].shield < BASE_SHIELD) {
+                    players[i].shield += 1; // Regenerate 1 shield point per frame
+                }
+                if (players[i].shield > BASE_SHIELD) {
+                    players[i].shield = BASE_SHIELD;
+                }
+            }
+        }
+
         // update players
         for (int i = 0; i < 2; i++) {
             Player *p = &players[i];
@@ -1222,7 +1264,7 @@ int main(void) {
             EndMode3D();
             // UI p1
             DrawRectangle(0,0, SCREEN_WIDTH/2, 40, Fade(BLACK, 0.5f));
-            DrawText(TextFormat("P1 | Kills: %d Deaths: %d | Health: %d", players[0].kills, players[0].deaths, players[0].health), 10, 10, 20, WHITE);
+            DrawText(TextFormat("P1 | Kills: %d Deaths: %d | Health: %d | Shield: %d", players[0].kills, players[0].deaths, players[0].health, players[0].shield), 10, 10, 20, WHITE);
             DrawLine(SCREEN_WIDTH/4-10, SCREEN_HEIGHT/2, SCREEN_WIDTH/4+10, SCREEN_HEIGHT/2, WHITE);
             DrawLine(SCREEN_WIDTH/4, SCREEN_HEIGHT/2-10, SCREEN_WIDTH/4, SCREEN_HEIGHT/2+10, WHITE);
         EndTextureMode();
@@ -1235,7 +1277,7 @@ int main(void) {
             EndMode3D();
             // UI p2
             DrawRectangle(0,0, SCREEN_WIDTH/2, 40, Fade(BLACK, 0.5f));
-            DrawText(TextFormat("P2 | Kills: %d Deaths: %d | Health: %d", players[1].kills, players[1].deaths, players[1].health), 10, 10, 20, WHITE);
+            DrawText(TextFormat("P2 | Kills: %d Deaths: %d | Health: %d | Shield: %d", players[1].kills, players[1].deaths, players[1].health, players[1].shield), 10, 10, 20, WHITE);
             DrawLine(SCREEN_WIDTH/4-10, SCREEN_HEIGHT/2, SCREEN_WIDTH/4+10, SCREEN_HEIGHT/2, WHITE);
             DrawLine(SCREEN_WIDTH/4, SCREEN_HEIGHT/2-10, SCREEN_WIDTH/4, SCREEN_HEIGHT/2+10, WHITE);
         EndTextureMode();

@@ -11,6 +11,7 @@ This file tracks the current and future development tasks for the voxel FPS game
 - [ ] sliding, grappling hooks
 - [ ] tune jump height with k/d
 - [ ] what other stuff can be tuned?
+- [ ] add sheilds
 
 
 ## Graphics and Rendering
@@ -56,6 +57,13 @@ This file tracks the current and future development tasks for the voxel FPS game
 - [ ] super position
 
 ## physics
+- [ ] add ray casting to player collisions
 - [ ] Implement rigid body physics (floating bodies fall)
 - [ ] Implement torque
 - [ ] Implement intervoxel sticking
+
+# voxel types
+- [ ] goop you move slowly throught
+- [ ] bouncy
+- [ ] slippy
+- [ ] portal
