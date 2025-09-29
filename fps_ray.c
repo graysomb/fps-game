@@ -342,21 +342,54 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
 
 // Build static demo cube of voxels
 static void buildDemo(void) {
-    const int N = 1;
-    for (int x = 0; x < N; x++) for (int y = 0; y < N; y++) for (int z = 0; z < N; z++) {
-        float px = (x + 0.5f) * VOXEL_SIZE;
-        float py = 2.0f+(y + 0.5f) * VOXEL_SIZE;
-        float pz = (z + 0.5f) * VOXEL_SIZE;
-        if (x < 10 && y< 10 && z < 10  ){
-            addVoxel(px, py, pz, true, false, (Color){ 150,150,150,255 }, 0);
-        }
-    }
-    int M = (int)(2.0f*FLOOR_SIZE / VOXEL_SIZE);
+    // Floor
+    int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
     for (int x = 0; x <= M; x++) {
         for (int z = 0; z <= M; z++) {
             float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
             float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-            addVoxel(px, 0, pz, true, false, (Color){ 150,150,150,255 }, 0);
+            addVoxel(px, 0, pz, true, false, (Color){ 150, 150, 150, 255 }, 0);
+        }
+    }
+
+    // Pillars
+    int pillar_height = 35; // 45 - 10
+    int pillar_radius = 3;
+    int pillar_positions[4][2] = {
+        { M / 4, M / 4 },
+        { M / 4, 3 * M / 4 },
+        { 3 * M / 4, M / 4 },
+        { 3 * M / 4, 3 * M / 4 }
+    };
+
+    for (int p = 0; p < 4; p++) {
+        int cx = pillar_positions[p][0];
+        int cz = pillar_positions[p][1];
+        for (int y = 1; y <= pillar_height; y++) {
+            for (int dx = -pillar_radius; dx <= pillar_radius; dx++) {
+                for (int dz = -pillar_radius; dz <= pillar_radius; dz++) {
+                    if (dx*dx + dz*dz > pillar_radius*pillar_radius) continue; // circular pillar
+                    float px = (cx + dx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                    float py = (y + 0.5f) * VOXEL_SIZE;
+                    float pz = (cz + dz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                    addVoxel(px, py, pz, true, false, (Color){ 200, 100, 50, 255 }, 0);
+                }
+            }
+        }
+    }
+
+    // Central platform
+    int platform_size = M / 5;
+    int platform_height = 5; // 15 / 3
+    int platform_base_height = 16; // to keep top at same level (21)
+    for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
+        for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
+            for (int z = M/2 - platform_size/2; z <= M/2 + platform_size/2; z++) {
+                float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                float py = (y + 0.5f) * VOXEL_SIZE;
+                float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                addVoxel(px, py, pz, true, false, (Color){ 100, 200, 100, 255 }, 0);
+            }
         }
     }
 }
