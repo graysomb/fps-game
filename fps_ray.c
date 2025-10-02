@@ -1200,7 +1200,7 @@ int main(void) {
             // Block velocity where a neighbor voxel exists in movement direction
             {
                 bool neigh[6];
-                get_adjacent_voxel_directions(p->pos, neigh);
+                get_adjacent_voxel_directions(v_add(p->pos,v_mul(p->vel,dt)), neigh);
                 // X-axis (+X/neigh[0], -X/neigh[1])
                 if ((p->vel.x > 0 && neigh[0]) || (p->vel.x < 0 && neigh[1])) p->vel.x = 0;
                 // Y-axis (+Y/neigh[2], -Y/neigh[3])
