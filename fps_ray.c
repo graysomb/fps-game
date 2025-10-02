@@ -562,7 +562,7 @@ static void physics_step(float dt) {    // Rebuild spatial hash
                         players[j].onGround= true;
                         players[j].yaw     = (j == 0 ? 0 : 180);
                         players[j].pitch   = 0;
-                        players[j].health = BASE_HEALTH * players[j].kd_ratio;
+                        players[j].health = BASE_HEALTH / players[j].kd_ratio;
                         players[j].shield = BASE_SHIELD;
                     }
                     break;
@@ -1124,42 +1124,42 @@ int main(void) {
             Player *p = &players[i];
             // turn
             float yaw_accel = 0.0f;
-            if ((i==0 && IsKeyDown(KEY_F)) || (i==1 && IsKeyDown(KEY_LEFT)))  yaw_accel += TURN_ACCELERATION * p->kd_ratio;
-            if ((i==0 && IsKeyDown(KEY_H)) || (i==1 && IsKeyDown(KEY_RIGHT))) yaw_accel -= TURN_ACCELERATION * p->kd_ratio;
+            if ((i==0 && IsKeyDown(KEY_F)) || (i==1 && IsKeyDown(KEY_LEFT)))  yaw_accel += TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
+            if ((i==0 && IsKeyDown(KEY_H)) || (i==1 && IsKeyDown(KEY_RIGHT))) yaw_accel -= TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
 
             if (yaw_accel != 0.0f) {
                 p->yaw_vel += yaw_accel * dt;
             } else {
                 // friction
                 if (p->yaw_vel > 0) {
-                    p->yaw_vel -= TURN_FRICTION * p->kd_ratio * dt;
+                    p->yaw_vel -= TURN_FRICTION * fmaxf(p->kd_ratio,1) * dt;
                     if (p->yaw_vel < 0) p->yaw_vel = 0;
                 } else if (p->yaw_vel < 0) {
-                    p->yaw_vel += TURN_FRICTION * p->kd_ratio * dt;
+                    p->yaw_vel += TURN_FRICTION * fmaxf(p->kd_ratio,1) * dt;
                     if (p->yaw_vel > 0) p->yaw_vel = 0;
                 }
             }
-            p->yaw_vel = clampf(p->yaw_vel, -TURN_SPEED * p->kd_ratio, TURN_SPEED * p->kd_ratio);
+            p->yaw_vel = clampf(p->yaw_vel, -TURN_SPEED * fmaxf(p->kd_ratio,1), TURN_SPEED * fmaxf(p->kd_ratio,1));
             p->yaw += p->yaw_vel * dt;
 
             // look up/down
             float pitch_accel = 0.0f;
-            if ((i==0 && IsKeyDown(KEY_T)) || (i==1 && IsKeyDown(KEY_UP)))   pitch_accel += TURN_ACCELERATION * p->kd_ratio;
-            if ((i==0 && IsKeyDown(KEY_G)) || (i==1 && IsKeyDown(KEY_DOWN))) pitch_accel -= TURN_ACCELERATION * p->kd_ratio;
+            if ((i==0 && IsKeyDown(KEY_T)) || (i==1 && IsKeyDown(KEY_UP)))   pitch_accel += TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
+            if ((i==0 && IsKeyDown(KEY_G)) || (i==1 && IsKeyDown(KEY_DOWN))) pitch_accel -= TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
 
             if (pitch_accel != 0.0f) {
                 p->pitch_vel += pitch_accel * dt;
             } else {
                 // friction
                 if (p->pitch_vel > 0) {
-                    p->pitch_vel -= TURN_FRICTION * p->kd_ratio * dt;
+                    p->pitch_vel -= TURN_FRICTION * fmaxf(p->kd_ratio,1) * dt;
                     if (p->pitch_vel < 0) p->pitch_vel = 0;
                 } else if (p->pitch_vel < 0) {
-                    p->pitch_vel += TURN_FRICTION * p->kd_ratio * dt;
+                    p->pitch_vel += TURN_FRICTION * fmaxf(p->kd_ratio,1) * dt;
                     if (p->pitch_vel > 0) p->pitch_vel = 0;
                 }
             }
-            p->pitch_vel = clampf(p->pitch_vel, -TURN_SPEED * p->kd_ratio, TURN_SPEED * p->kd_ratio);
+            p->pitch_vel = clampf(p->pitch_vel, -TURN_SPEED * fmaxf(p->kd_ratio,1), TURN_SPEED * fmaxf(p->kd_ratio,1));
             p->pitch += p->pitch_vel * dt;
             p->pitch = clampf(p->pitch, -89, 89);
             // compute forward/right
@@ -1175,12 +1175,12 @@ int main(void) {
             if (accel.x!=0 || accel.z!=0) {
                 float len = sqrtf(accel.x*accel.x + accel.z*accel.z);
                 accel = v_mul(accel, 1/len);
-                p->vel = v_add(p->vel, v_mul(accel, ACCELERATION * p->kd_ratio * dt));
+                p->vel = v_add(p->vel, v_mul(accel, ACCELERATION * fmaxf(p->kd_ratio,1) * dt));
             } else {
                 // friction
                 float sp = sqrtf(p->vel.x*p->vel.x + p->vel.z*p->vel.z);
                 if (sp > 0) {
-                    float dec = FRICTION * p->kd_ratio * dt;
+                    float dec = FRICTION * fmaxf(p->kd_ratio,1) * dt;
                     float ns = sp - dec; if (ns < 0) ns = 0;
                     p->vel.x *= ns/sp;
                     p->vel.z *= ns/sp;
@@ -1191,9 +1191,9 @@ int main(void) {
             // clamp horizontal speed
             {
                 float speed = sqrtf(p->vel.x*p->vel.x + p->vel.z*p->vel.z);
-                if (speed > MOVE_SPEED * p->kd_ratio) {
-                    p->vel.x *= MOVE_SPEED * p->kd_ratio / speed;
-                    p->vel.z *= MOVE_SPEED * p->kd_ratio / speed;
+                if (speed > MOVE_SPEED * fmaxf(p->kd_ratio,1)) {
+                    p->vel.x *= MOVE_SPEED * fmaxf(p->kd_ratio,1) / speed;
+                    p->vel.z *= MOVE_SPEED * fmaxf(p->kd_ratio,1) / speed;
                 }
             }
 

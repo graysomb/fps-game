@@ -12,6 +12,8 @@ This file tracks the current and future development tasks for the voxel FPS game
 - [ ] tune jump height with k/d
 - [ ] what other stuff can be tuned?
 - [ ] add sheilds
+- [ ] health is add to the winner not the loser
+
 
 
 ## Graphics and Rendering
