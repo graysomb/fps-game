@@ -15,9 +15,17 @@
 typedef enum {
     GAME_STATE_MENU,
     GAME_STATE_PLAYING,
-    GAME_STATE_PAUSED
+    GAME_STATE_PAUSED,
+    GAME_STATE_SETTINGS
 } GameState;
 static GameState gameState = GAME_STATE_MENU;
+
+// Input type enum
+typedef enum {
+    INPUT_TYPE_KEYBOARD,
+    INPUT_TYPE_GAMEPAD
+} InputType;
+static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 
 //gcc fps_ray.c -o fps_ray  $(pkg-config --cflags --libs raylib) -lm -Wl,-rpath,/usr/local/lib
 // Screen and game constants
@@ -1093,6 +1101,160 @@ static void draw_players(void) {
     }
 }
 
+static void HandleKeyboardInput(int i, float dt) {
+    Player *p = &players[i];
+    // turn
+    float yaw_accel = 0.0f;
+    if ((i==0 && IsKeyDown(KEY_F)) || (i==1 && IsKeyDown(KEY_LEFT)))  yaw_accel += TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
+    if ((i==0 && IsKeyDown(KEY_H)) || (i==1 && IsKeyDown(KEY_RIGHT))) yaw_accel -= TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
+
+    if (yaw_accel != 0.0f) {
+        p->yaw_vel += yaw_accel * dt;
+    } else {
+        // friction
+        if (p->yaw_vel > 0) {
+            p->yaw_vel -= TURN_FRICTION * fmaxf(p->kd_ratio,1) * dt;
+            if (p->yaw_vel < 0) p->yaw_vel = 0;
+        } else if (p->yaw_vel < 0) {
+            p->yaw_vel += TURN_FRICTION * fmaxf(p->kd_ratio,1) * dt;
+            if (p->yaw_vel > 0) p->yaw_vel = 0;
+        }
+    }
+    p->yaw_vel = clampf(p->yaw_vel, -TURN_SPEED * fmaxf(p->kd_ratio,1), TURN_SPEED * fmaxf(p->kd_ratio,1));
+    p->yaw += p->yaw_vel * dt;
+
+    // look up/down
+    float pitch_accel = 0.0f;
+    if ((i==0 && IsKeyDown(KEY_T)) || (i==1 && IsKeyDown(KEY_UP)))   pitch_accel += TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
+    if ((i==0 && IsKeyDown(KEY_G)) || (i==1 && IsKeyDown(KEY_DOWN))) pitch_accel -= TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
+
+    if (pitch_accel != 0.0f) {
+        p->pitch_vel += pitch_accel * dt;
+    } else {
+        // friction
+        if (p->pitch_vel > 0) {
+            p->pitch_vel -= TURN_FRICTION * fmaxf(p->kd_ratio,1) * dt;
+            if (p->pitch_vel < 0) p->pitch_vel = 0;
+        } else if (p->pitch_vel < 0) {
+            p->pitch_vel += TURN_FRICTION * fmaxf(p->kd_ratio,1) * dt;
+            if (p->pitch_vel > 0) p->pitch_vel = 0;
+        }
+    }
+    p->pitch_vel = clampf(p->pitch_vel, -TURN_SPEED * fmaxf(p->kd_ratio,1), TURN_SPEED * fmaxf(p->kd_ratio,1));
+    p->pitch += p->pitch_vel * dt;
+    p->pitch = clampf(p->pitch, -89, 89);
+    // compute forward/right
+    float yr = DEG2RAD * p->yaw;
+    Vector3 forward = { sinf(-yr), 0, -cosf(yr) };
+    Vector3 right   = { -forward.z, 0, forward.x };
+    // acceleration
+    Vector3 accel = {0,0,0};
+    if ((i==0 && IsKeyDown(KEY_W)) || (i==1 && IsKeyDown(KEY_I))) accel = v_add(accel, forward);
+    if ((i==0 && IsKeyDown(KEY_S)) || (i==1 && IsKeyDown(KEY_K))) accel = v_add(accel, v_mul(forward, -1));
+    if ((i==0 && IsKeyDown(KEY_A)) || (i==1 && IsKeyDown(KEY_J))) accel = v_add(accel, v_mul(right, -1));
+    if ((i==0 && IsKeyDown(KEY_D)) || (i==1 && IsKeyDown(KEY_L))) accel = v_add(accel, right);
+    if (accel.x!=0 || accel.z!=0) {
+        float len = sqrtf(accel.x*accel.x + accel.z*accel.z);
+        accel = v_mul(accel, 1/len);
+        p->vel = v_add(p->vel, v_mul(accel, ACCELERATION * fmaxf(p->kd_ratio,1) * dt));
+    } else {
+        // friction
+        float sp = sqrtf(p->vel.x*p->vel.x + p->vel.z*p->vel.z);
+        if (sp > 0) {
+            float dec = FRICTION * fmaxf(p->kd_ratio,1) * dt;
+            float ns = sp - dec; if (ns < 0) ns = 0;
+            p->vel.x *= ns/sp;
+            p->vel.z *= ns/sp;
+        }
+    }
+}
+
+static void HandleGamepadInput(int i, float dt) {
+    if (!IsGamepadAvailable(i)) return;
+
+    Player *p = &players[i];
+
+    // turn (right stick horizontal)
+    float yaw_accel = 0.0f;
+    float yaw_axis = GetGamepadAxisMovement(i, GAMEPAD_AXIS_RIGHT_X);
+    if (fabsf(yaw_axis) > 0.1f) {
+        yaw_accel = yaw_axis * TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
+    }
+
+    if (yaw_accel != 0.0f) {
+        p->yaw_vel += yaw_accel * dt;
+    } else {
+        // friction
+        if (p->yaw_vel > 0) {
+            p->yaw_vel -= TURN_FRICTION * fmaxf(p->kd_ratio,1) * dt;
+            if (p->yaw_vel < 0) p->yaw_vel = 0;
+        } else if (p->yaw_vel < 0) {
+            p->yaw_vel += TURN_FRICTION * fmaxf(p->kd_ratio,1) * dt;
+            if (p->yaw_vel > 0) p->yaw_vel = 0;
+        }
+    }
+    p->yaw_vel = clampf(p->yaw_vel, -TURN_SPEED * fmaxf(p->kd_ratio,1), TURN_SPEED * fmaxf(p->kd_ratio,1));
+    p->yaw += p->yaw_vel * dt;
+
+    // look up/down (right stick vertical)
+    float pitch_accel = 0.0f;
+    float pitch_axis = GetGamepadAxisMovement(i, GAMEPAD_AXIS_RIGHT_Y);
+    if (fabsf(pitch_axis) > 0.1f) {
+        pitch_accel = pitch_axis * TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
+    }
+
+    if (pitch_accel != 0.0f) {
+        p->pitch_vel += pitch_accel * dt;
+    } else {
+        // friction
+        if (p->pitch_vel > 0) {
+            p->pitch_vel -= TURN_FRICTION * fmaxf(p->kd_ratio,1) * dt;
+            if (p->pitch_vel < 0) p->pitch_vel = 0;
+        } else if (p->pitch_vel < 0) {
+            p->pitch_vel += TURN_FRICTION * fmaxf(p->kd_ratio,1) * dt;
+            if (p->pitch_vel > 0) p->pitch_vel = 0;
+        }
+    }
+    p->pitch_vel = clampf(p->pitch_vel, -TURN_SPEED * fmaxf(p->kd_ratio,1), TURN_SPEED * fmaxf(p->kd_ratio,1));
+    p->pitch += p->pitch_vel * dt;
+    p->pitch = clampf(p->pitch, -89, 89);
+
+    // compute forward/right
+    float yr = DEG2RAD * p->yaw;
+    Vector3 forward = { sinf(-yr), 0, -cosf(yr) };
+    Vector3 right   = { -forward.z, 0, forward.x };
+
+    // acceleration (left stick)
+    Vector3 accel = {0,0,0};
+    float accel_x = GetGamepadAxisMovement(i, GAMEPAD_AXIS_LEFT_X);
+    float accel_y = GetGamepadAxisMovement(i, GAMEPAD_AXIS_LEFT_Y);
+
+    if (fabsf(accel_y) > 0.1f) {
+        accel = v_add(accel, v_mul(forward, -accel_y));
+    }
+    if (fabsf(accel_x) > 0.1f) {
+        accel = v_add(accel, v_mul(right, accel_x));
+    }
+
+    if (accel.x!=0 || accel.z!=0) {
+        float len = sqrtf(accel.x*accel.x + accel.z*accel.z);
+        accel = v_mul(accel, 1/len);
+        p->vel = v_add(p->vel, v_mul(accel, ACCELERATION * fmaxf(p->kd_ratio,1) * dt));
+    } else {
+        // friction
+        float sp = sqrtf(p->vel.x*p->vel.x + p->vel.z*p->vel.z);
+        if (sp > 0) {
+            float dec = FRICTION * fmaxf(p->kd_ratio,1) * dt;
+            float ns = sp - dec; if (ns < 0) ns = 0;
+            p->vel.x *= ns/sp;
+            p->vel.z *= ns/sp;
+        }
+    }
+}
+
+static void HandleKeyboardInput(int i, float dt);
+static void HandleGamepadInput(int i, float dt);
+
 int main(void) {
     // init window and render textures
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Split-Screen FPS (raylib)");
@@ -1114,21 +1276,31 @@ int main(void) {
                     ClearBackground(RAYWHITE);
                     DrawText("Main Menu", SCREEN_WIDTH / 2 - MeasureText("Main Menu", 40) / 2, 100, 40, BLACK);
                     DrawText("Press ENTER to Start", SCREEN_WIDTH / 2 - MeasureText("Press ENTER to Start", 20) / 2, 200, 20, DARKGRAY);
+                    DrawText("Press S for Settings", SCREEN_WIDTH / 2 - MeasureText("Press S for Settings", 20) / 2, 250, 20, DARKGRAY);
                 EndDrawing();
 
                 if (IsKeyPressed(KEY_ENTER)) {
                     gameState = GAME_STATE_PLAYING;
                 }
+                if (IsKeyPressed(KEY_S)) {
+                    gameState = GAME_STATE_SETTINGS;
+                }
                 break;
             case GAME_STATE_PLAYING:
         float dt = GetFrameTime();
         // input: shooting and jump
-        if (IsKeyPressed(KEY_LEFT_CONTROL))  FireVoxel(0);
-        if (IsKeyPressed(KEY_RIGHT_CONTROL)) FireVoxel(1);
+        if (playerInput[0] == INPUT_TYPE_KEYBOARD && IsKeyPressed(KEY_LEFT_CONTROL))  FireVoxel(0);
+        if (playerInput[0] == INPUT_TYPE_GAMEPAD && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_TRIGGER_2)) FireVoxel(0);
+        if (playerInput[1] == INPUT_TYPE_KEYBOARD && IsKeyPressed(KEY_RIGHT_CONTROL)) FireVoxel(1);
+        if (playerInput[1] == INPUT_TYPE_GAMEPAD && IsGamepadButtonPressed(1, GAMEPAD_BUTTON_RIGHT_TRIGGER_2)) FireVoxel(1);
+
         if (IsKeyPressed(KEY_Q)) players[0].vType = 1-players[0].vType;
         if (IsKeyPressed(KEY_U)) players[0].vType = 1-players[0].vType;
-        if (IsKeyPressed(KEY_SPACE) && players[0].onGround) { players[0].vel.y = JUMP_SPEED; players[0].onGround = false; }
-        if (IsKeyPressed(KEY_RIGHT_SHIFT) && players[1].onGround) { players[1].vel.y = JUMP_SPEED; players[1].onGround = false; }
+
+        if (playerInput[0] == INPUT_TYPE_KEYBOARD && IsKeyPressed(KEY_SPACE) && players[0].onGround) { players[0].vel.y = JUMP_SPEED; players[0].onGround = false; }
+        if (playerInput[0] == INPUT_TYPE_GAMEPAD && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN) && players[0].onGround) { players[0].vel.y = JUMP_SPEED; players[0].onGround = false; }
+        if (playerInput[1] == INPUT_TYPE_KEYBOARD && IsKeyPressed(KEY_RIGHT_SHIFT) && players[1].onGround) { players[1].vel.y = JUMP_SPEED; players[1].onGround = false; }
+        if (playerInput[1] == INPUT_TYPE_GAMEPAD && IsGamepadButtonPressed(1, GAMEPAD_BUTTON_RIGHT_FACE_DOWN) && players[1].onGround) { players[1].vel.y = JUMP_SPEED; players[1].onGround = false; }
 
         if (IsKeyPressed(KEY_P)) {
             gameState = GAME_STATE_PAUSED;
@@ -1148,71 +1320,12 @@ int main(void) {
 
         // update players
         for (int i = 0; i < 2; i++) {
+            if (playerInput[i] == INPUT_TYPE_KEYBOARD) {
+                HandleKeyboardInput(i, dt);
+            } else if (playerInput[i] == INPUT_TYPE_GAMEPAD) {
+                HandleGamepadInput(i, dt);
+            }
             Player *p = &players[i];
-            // turn
-            float yaw_accel = 0.0f;
-            if ((i==0 && IsKeyDown(KEY_F)) || (i==1 && IsKeyDown(KEY_LEFT)))  yaw_accel += TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
-            if ((i==0 && IsKeyDown(KEY_H)) || (i==1 && IsKeyDown(KEY_RIGHT))) yaw_accel -= TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
-
-            if (yaw_accel != 0.0f) {
-                p->yaw_vel += yaw_accel * dt;
-            } else {
-                // friction
-                if (p->yaw_vel > 0) {
-                    p->yaw_vel -= TURN_FRICTION * fmaxf(p->kd_ratio,1) * dt;
-                    if (p->yaw_vel < 0) p->yaw_vel = 0;
-                } else if (p->yaw_vel < 0) {
-                    p->yaw_vel += TURN_FRICTION * fmaxf(p->kd_ratio,1) * dt;
-                    if (p->yaw_vel > 0) p->yaw_vel = 0;
-                }
-            }
-            p->yaw_vel = clampf(p->yaw_vel, -TURN_SPEED * fmaxf(p->kd_ratio,1), TURN_SPEED * fmaxf(p->kd_ratio,1));
-            p->yaw += p->yaw_vel * dt;
-
-            // look up/down
-            float pitch_accel = 0.0f;
-            if ((i==0 && IsKeyDown(KEY_T)) || (i==1 && IsKeyDown(KEY_UP)))   pitch_accel += TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
-            if ((i==0 && IsKeyDown(KEY_G)) || (i==1 && IsKeyDown(KEY_DOWN))) pitch_accel -= TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
-
-            if (pitch_accel != 0.0f) {
-                p->pitch_vel += pitch_accel * dt;
-            } else {
-                // friction
-                if (p->pitch_vel > 0) {
-                    p->pitch_vel -= TURN_FRICTION * fmaxf(p->kd_ratio,1) * dt;
-                    if (p->pitch_vel < 0) p->pitch_vel = 0;
-                } else if (p->pitch_vel < 0) {
-                    p->pitch_vel += TURN_FRICTION * fmaxf(p->kd_ratio,1) * dt;
-                    if (p->pitch_vel > 0) p->pitch_vel = 0;
-                }
-            }
-            p->pitch_vel = clampf(p->pitch_vel, -TURN_SPEED * fmaxf(p->kd_ratio,1), TURN_SPEED * fmaxf(p->kd_ratio,1));
-            p->pitch += p->pitch_vel * dt;
-            p->pitch = clampf(p->pitch, -89, 89);
-            // compute forward/right
-            float yr = DEG2RAD * p->yaw;
-            Vector3 forward = { sinf(-yr), 0, -cosf(yr) };
-            Vector3 right   = { -forward.z, 0, forward.x };
-            // acceleration
-            Vector3 accel = {0,0,0};
-            if ((i==0 && IsKeyDown(KEY_W)) || (i==1 && IsKeyDown(KEY_I))) accel = v_add(accel, forward);
-            if ((i==0 && IsKeyDown(KEY_S)) || (i==1 && IsKeyDown(KEY_K))) accel = v_add(accel, v_mul(forward, -1));
-            if ((i==0 && IsKeyDown(KEY_A)) || (i==1 && IsKeyDown(KEY_J))) accel = v_add(accel, v_mul(right, -1));
-            if ((i==0 && IsKeyDown(KEY_D)) || (i==1 && IsKeyDown(KEY_L))) accel = v_add(accel, right);
-            if (accel.x!=0 || accel.z!=0) {
-                float len = sqrtf(accel.x*accel.x + accel.z*accel.z);
-                accel = v_mul(accel, 1/len);
-                p->vel = v_add(p->vel, v_mul(accel, ACCELERATION * fmaxf(p->kd_ratio,1) * dt));
-            } else {
-                // friction
-                float sp = sqrtf(p->vel.x*p->vel.x + p->vel.z*p->vel.z);
-                if (sp > 0) {
-                    float dec = FRICTION * fmaxf(p->kd_ratio,1) * dt;
-                    float ns = sp - dec; if (ns < 0) ns = 0;
-                    p->vel.x *= ns/sp;
-                    p->vel.z *= ns/sp;
-                }
-            }
             
 
             // clamp horizontal speed
@@ -1329,6 +1442,28 @@ int main(void) {
                     gameState = GAME_STATE_PLAYING;
                 }
                 if (IsKeyPressed(KEY_Q)) {
+                    gameState = GAME_STATE_MENU;
+                }
+                break;
+            case GAME_STATE_SETTINGS:
+                // Draw settings menu
+                BeginDrawing();
+                    ClearBackground(RAYWHITE);
+                    DrawText("Settings", SCREEN_WIDTH / 2 - MeasureText("Settings", 40) / 2, 100, 40, BLACK);
+                    DrawText(TextFormat("Player 1 Input: %s", playerInput[0] == INPUT_TYPE_KEYBOARD ? "Keyboard" : "Gamepad"), 100, 200, 20, DARKGRAY);
+                    DrawText(TextFormat("Player 2 Input: %s", playerInput[1] == INPUT_TYPE_KEYBOARD ? "Keyboard" : "Gamepad"), 100, 250, 20, DARKGRAY);
+                    DrawText("Press 1 to toggle Player 1 input", 100, 350, 20, DARKGRAY);
+                    DrawText("Press 2 to toggle Player 2 input", 100, 400, 20, DARKGRAY);
+                    DrawText("Press M to return to Main Menu", 100, 500, 20, DARKGRAY);
+                EndDrawing();
+
+                if (IsKeyPressed(KEY_ONE)) {
+                    playerInput[0] = 1 - playerInput[0];
+                }
+                if (IsKeyPressed(KEY_TWO)) {
+                    playerInput[1] = 1 - playerInput[1];
+                }
+                if (IsKeyPressed(KEY_M)) {
                     gameState = GAME_STATE_MENU;
                 }
                 break;
