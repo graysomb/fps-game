@@ -10,6 +10,15 @@
 #include <string.h>
 #include <stdint.h>
 #include <limits.h>
+
+// Game state enum
+typedef enum {
+    GAME_STATE_MENU,
+    GAME_STATE_PLAYING,
+    GAME_STATE_PAUSED
+} GameState;
+static GameState gameState = GAME_STATE_MENU;
+
 //gcc fps_ray.c -o fps_ray  $(pkg-config --cflags --libs raylib) -lm -Wl,-rpath,/usr/local/lib
 // Screen and game constants
 #define SCREEN_WIDTH    1600
@@ -1098,6 +1107,20 @@ int main(void) {
     Rectangle screenRec = { 0, 0, (float)screen0.texture.width, (float)-screen0.texture.height };
     // main loop
     while (!WindowShouldClose()) {
+        switch (gameState) {
+            case GAME_STATE_MENU:
+                // Draw menu
+                BeginDrawing();
+                    ClearBackground(RAYWHITE);
+                    DrawText("Main Menu", SCREEN_WIDTH / 2 - MeasureText("Main Menu", 40) / 2, 100, 40, BLACK);
+                    DrawText("Press ENTER to Start", SCREEN_WIDTH / 2 - MeasureText("Press ENTER to Start", 20) / 2, 200, 20, DARKGRAY);
+                EndDrawing();
+
+                if (IsKeyPressed(KEY_ENTER)) {
+                    gameState = GAME_STATE_PLAYING;
+                }
+                break;
+            case GAME_STATE_PLAYING:
         float dt = GetFrameTime();
         // input: shooting and jump
         if (IsKeyPressed(KEY_LEFT_CONTROL))  FireVoxel(0);
@@ -1106,6 +1129,10 @@ int main(void) {
         if (IsKeyPressed(KEY_U)) players[0].vType = 1-players[0].vType;
         if (IsKeyPressed(KEY_SPACE) && players[0].onGround) { players[0].vel.y = JUMP_SPEED; players[0].onGround = false; }
         if (IsKeyPressed(KEY_RIGHT_SHIFT) && players[1].onGround) { players[1].vel.y = JUMP_SPEED; players[1].onGround = false; }
+
+        if (IsKeyPressed(KEY_P)) {
+            gameState = GAME_STATE_PAUSED;
+        }
 
         // Shield regeneration
         for (int i = 0; i < 2; i++) {
@@ -1263,7 +1290,7 @@ int main(void) {
                 draw_players();
             EndMode3D();
             // UI p1
-            DrawRectangle(0,0, SCREEN_WIDTH/2, 40, Fade(BLACK, 0.5f));
+            DrawRectangle(0,0, SCREEN_WIDTH/2, 4.0f, Fade(BLACK, 0.5f));
             DrawText(TextFormat("P1 | Kills: %d Deaths: %d | Health: %d | Shield: %d", players[0].kills, players[0].deaths, players[0].health, players[0].shield), 10, 10, 20, WHITE);
             DrawLine(SCREEN_WIDTH/4-10, SCREEN_HEIGHT/2, SCREEN_WIDTH/4+10, SCREEN_HEIGHT/2, WHITE);
             DrawLine(SCREEN_WIDTH/4, SCREEN_HEIGHT/2-10, SCREEN_WIDTH/4, SCREEN_HEIGHT/2+10, WHITE);
@@ -1276,7 +1303,7 @@ int main(void) {
                 draw_players();
             EndMode3D();
             // UI p2
-            DrawRectangle(0,0, SCREEN_WIDTH/2, 40, Fade(BLACK, 0.5f));
+            DrawRectangle(0,0, SCREEN_WIDTH/2, 4.0f, Fade(BLACK, 0.5f));
             DrawText(TextFormat("P2 | Kills: %d Deaths: %d | Health: %d | Shield: %d", players[1].kills, players[1].deaths, players[1].health, players[1].shield), 10, 10, 20, WHITE);
             DrawLine(SCREEN_WIDTH/4-10, SCREEN_HEIGHT/2, SCREEN_WIDTH/4+10, SCREEN_HEIGHT/2, WHITE);
             DrawLine(SCREEN_WIDTH/4, SCREEN_HEIGHT/2-10, SCREEN_WIDTH/4, SCREEN_HEIGHT/2+10, WHITE);
@@ -1288,6 +1315,25 @@ int main(void) {
             DrawTextureRec(screen1.texture, screenRec, (Vector2){SCREEN_WIDTH/2,0}, WHITE);
             DrawRectangle(SCREEN_WIDTH/2-2, 0, 4, SCREEN_HEIGHT, LIGHTGRAY);
         EndDrawing();
+        break;
+            case GAME_STATE_PAUSED:
+                // Draw pause menu
+                BeginDrawing();
+                    ClearBackground(RAYWHITE);
+                    DrawText("Paused", SCREEN_WIDTH / 2 - MeasureText("Paused", 40) / 2, 100, 40, BLACK);
+                    DrawText("Press P to Resume", SCREEN_WIDTH / 2 - MeasureText("Press P to Resume", 20) / 2, 200, 20, DARKGRAY);
+                    DrawText("Press Q to Quit", SCREEN_WIDTH / 2 - MeasureText("Press Q to Quit", 20) / 2, 250, 20, DARKGRAY);
+                EndDrawing();
+
+                if (IsKeyPressed(KEY_P)) {
+                    gameState = GAME_STATE_PLAYING;
+                }
+                if (IsKeyPressed(KEY_Q)) {
+                    gameState = GAME_STATE_MENU;
+                }
+                break;
+
+        }
     }
     // cleanup
     UnloadRenderTexture(screen0);
