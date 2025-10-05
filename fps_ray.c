@@ -1179,7 +1179,7 @@ static void HandleGamepadInput(int i, float dt) {
     float yaw_accel = 0.0f;
     float yaw_axis = GetGamepadAxisMovement(i, GAMEPAD_AXIS_RIGHT_X);
     if (fabsf(yaw_axis) > 0.1f) {
-        yaw_accel = yaw_axis * TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
+        yaw_accel = -yaw_axis * TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
     }
 
     if (yaw_accel != 0.0f) {
@@ -1201,7 +1201,7 @@ static void HandleGamepadInput(int i, float dt) {
     float pitch_accel = 0.0f;
     float pitch_axis = GetGamepadAxisMovement(i, GAMEPAD_AXIS_RIGHT_Y);
     if (fabsf(pitch_axis) > 0.1f) {
-        pitch_accel = pitch_axis * TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
+        pitch_accel = -pitch_axis * TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
     }
 
     if (pitch_accel != 0.0f) {
@@ -1297,6 +1297,8 @@ int main(void) {
 
         if (IsKeyPressed(KEY_Q)) players[0].vType = 1-players[0].vType;
         if (IsKeyPressed(KEY_U)) players[0].vType = 1-players[0].vType;
+        if (playerInput[0] == INPUT_TYPE_GAMEPAD && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_TRIGGER_1)) players[0].vType = 1-players[0].vType;
+        if (playerInput[1] == INPUT_TYPE_GAMEPAD && IsGamepadButtonPressed(1, GAMEPAD_BUTTON_LEFT_TRIGGER_1)) players[1].vType = 1-players[1].vType;
 
         if (playerInput[0] == INPUT_TYPE_KEYBOARD && IsKeyPressed(KEY_SPACE) && players[0].onGround) { players[0].vel.y = JUMP_SPEED; players[0].onGround = false; }
         if (playerInput[0] == INPUT_TYPE_GAMEPAD && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN) && players[0].onGround) { players[0].vel.y = JUMP_SPEED; players[0].onGround = false; }
