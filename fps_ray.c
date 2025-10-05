@@ -905,6 +905,10 @@ static void merge_rects_on_plane(int count, int *list, int plane, bool positive)
 }
 
 
+static int yzPosList[MAX_VOXELS], yzNegList[MAX_VOXELS];
+static int xzPosList[MAX_VOXELS], xzNegList[MAX_VOXELS];
+static int xyPosList[MAX_VOXELS], xyNegList[MAX_VOXELS];
+
 static Mesh gen_greedy_mesh(void) {
     Mesh mesh = { 0 };
     patchCount = 0;
@@ -913,9 +917,6 @@ static Mesh gen_greedy_mesh(void) {
     int yzPosCount = 0, yzNegCount = 0; // +X, -X
     int xzPosCount = 0, xzNegCount = 0; // +Y, -Y
     int xyPosCount = 0, xyNegCount = 0; // +Z, -Z
-    int yzPosList[MAX_VOXELS], yzNegList[MAX_VOXELS];
-    int xzPosList[MAX_VOXELS], xzNegList[MAX_VOXELS];
-    int xyPosList[MAX_VOXELS], xyNegList[MAX_VOXELS];
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
         if (v->simulate) continue;
