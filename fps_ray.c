@@ -55,6 +55,9 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define HASH_SIZE     131072    // must be power of two
 #define VOXEL_SIZE     0.2f    // size of each voxel cube
 
+// Tunable voxel edit brush (per-axis span of the add/remove operation)
+static int voxelBrushSpan = 4;
+
 // Player structure
 typedef struct {
     Vector3 pos;
@@ -493,15 +496,17 @@ static void physics_step(float dt) {    // Rebuild spatial hash
                 v->fixed = true;
                 v->pos = (Vector3){-999.0f, -999.0f, -999.0f};
 
+                int brushExtent = (voxelBrushSpan < 1) ? 1 : voxelBrushSpan;
+
                 if (v->type == 1) { // DESTRUCTION
                     Voxel *u = &voxels[hit_id];
                     int anchorX = u->gx;
                     int anchorY = u->gy;
                     int anchorZ = u->gz;
 
-                    for (int dx = 0; dx < 2; dx++) {
-                        for (int dy = 0; dy < 2; dy++) {
-                            for (int dz = 0; dz < 2; dz++) {
+                    for (int dx = 0; dx < brushExtent; dx++) {
+                        for (int dy = 0; dy < brushExtent; dy++) {
+                            for (int dz = 0; dz < brushExtent; dz++) {
                                 int victim_idx = table_get(anchorX + dx, anchorY + dy, anchorZ + dz);
                                 if (victim_idx >= 0) {
                                     Voxel *victim = &voxels[victim_idx];
@@ -519,9 +524,9 @@ static void physics_step(float dt) {    // Rebuild spatial hash
                     int anchorY = v->gy;
                     int anchorZ = v->gz;
 
-                    for (int dx = 0; dx < 2; dx++) {
-                        for (int dy = 0; dy < 2; dy++) {
-                            for (int dz = 0; dz < 2; dz++) {
+                    for (int dx = 0; dx < brushExtent; dx++) {
+                        for (int dy = 0; dy < brushExtent; dy++) {
+                            for (int dz = 0; dz < brushExtent; dz++) {
                                 int targetX = anchorX + dx;
                                 int targetY = anchorY + dy;
                                 int targetZ = anchorZ + dz;
