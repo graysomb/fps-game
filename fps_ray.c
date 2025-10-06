@@ -102,6 +102,7 @@ typedef struct OctreeNode {
     float   halfSize;             // half-length of the cube's edge
     int     voxelIndex;           // index into voxels[] if this is a leaf with one voxel
     int     voxelCount;           // total voxels contained within this node's subtree
+    float   fillFraction;          // ratio of node volume to contained voxel volume
     bool    isLeaf;               // true when node has no children
     struct OctreeNode *children[8];
 } OctreeNode;
@@ -152,6 +153,7 @@ static OctreeNode *octree_create_node(Vector3 center, float halfSize) {
     node->halfSize = halfSize;
     node->voxelIndex = -1;
     node->voxelCount = 0;
+    node->fillFraction = 0.0f;
     node->isLeaf = true;
     for (int i = 0; i < 8; i++) node->children[i] = NULL;
     return node;
@@ -232,6 +234,25 @@ static OctreeNode *octree_build_recursive(Vector3 center, float halfSize, const 
     return node;
 }
 
+static void octree_update_fill_fraction(OctreeNode *node) {
+    if (!node) return;
+    const float nodeSide = node->halfSize * 2.0f;
+    const float nodeVolume = nodeSide * nodeSide * nodeSide;
+    const float voxelVolume = VOXEL_SIZE * VOXEL_SIZE * VOXEL_SIZE;
+    if (node->voxelCount > 0 && voxelVolume > 0.0f) {
+        node->fillFraction = nodeVolume / (node->voxelCount * voxelVolume);
+    } else {
+        node->fillFraction = 0.0f;
+    }
+    if (!node->isLeaf) {
+        for (int i = 0; i < 8; i++) {
+            if (node->children[i]) {
+                octree_update_fill_fraction(node->children[i]);
+            }
+        }
+    }
+}
+
 static OctreeNode *build_voxel_octree(void) {
     int activeCount = 0;
     for (int i = 0; i < voxel_count; i++) {
@@ -296,6 +317,7 @@ static void rebuild_voxel_octree(void) {
     }
     voxelOctreeRoot = build_voxel_octree();
     if (voxelOctreeRoot) {
+        octree_update_fill_fraction(voxelOctreeRoot);
         octreeDirty = false;
     }
 }
