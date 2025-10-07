@@ -57,7 +57,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define VOXEL_SIZE     0.2f    // size of each voxel cube
 
 // Tunable voxel edit brush (per-axis span of the add/remove operation)
-static int voxelBrushSpan = 4;
+static int voxelBrushSpan = 1;
 
 // Player structure
 typedef struct {
@@ -239,8 +239,8 @@ static void octree_update_fill_fraction(OctreeNode *node) {
     const float nodeSide = node->halfSize * 2.0f;
     const float nodeVolume = nodeSide * nodeSide * nodeSide;
     const float voxelVolume = VOXEL_SIZE * VOXEL_SIZE * VOXEL_SIZE;
-    if (node->voxelCount > 0 && voxelVolume > 0.0f) {
-        node->fillFraction = nodeVolume / (node->voxelCount * voxelVolume);
+    if (node->voxelCount > 0 && voxelVolume > 0.0f && nodeVolume > 0.0f) {
+        node->fillFraction = (node->voxelCount * voxelVolume) / nodeVolume;
     } else {
         node->fillFraction = 0.0f;
     }
@@ -248,6 +248,37 @@ static void octree_update_fill_fraction(OctreeNode *node) {
         for (int i = 0; i < 8; i++) {
             if (node->children[i]) {
                 octree_update_fill_fraction(node->children[i]);
+            }
+        }
+    }
+}
+
+static void octree_set_subtree_simulate(OctreeNode *node, bool value) {
+    if (!node) return;
+
+    if (node->voxelIndex >= 0 && node->voxelIndex < voxel_count) {
+        voxels[node->voxelIndex].simulate = value;
+    }
+
+    if (!node->isLeaf) {
+        for (int i = 0; i < 8; i++) {
+            if (node->children[i]) {
+                octree_set_subtree_simulate(node->children[i], value);
+            }
+        }
+    }
+}
+
+static void octree_mark_simulate_by_fill(OctreeNode *node, float threshold) {
+    if (!node) return;
+
+    const bool enable = node->fillFraction <= threshold;
+    octree_set_subtree_simulate(node, enable);
+
+    if (!node->isLeaf) {
+        for (int i = 0; i < 8; i++) {
+            if (node->children[i]) {
+                octree_mark_simulate_by_fill(node->children[i], threshold);
             }
         }
     }
@@ -318,6 +349,7 @@ static void rebuild_voxel_octree(void) {
     voxelOctreeRoot = build_voxel_octree();
     if (voxelOctreeRoot) {
         octree_update_fill_fraction(voxelOctreeRoot);
+        octree_mark_simulate_by_fill(voxelOctreeRoot, 0.1f);
         octreeDirty = false;
     }
 }
