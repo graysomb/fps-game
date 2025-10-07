@@ -547,6 +547,142 @@ static void mark_surface_neighbors(Vector3 pos) {
         }
     }
 }
+
+static int sign_to_int(float value) {
+    const float eps = 1e-4f;
+    if (value > eps) return 1;
+    if (value < -eps) return -1;
+    return 0;
+}
+
+static void add_unique_offset(int offsets[][3], int *count, int dx, int dy, int dz) {
+    if (dx == 0 && dy == 0 && dz == 0) return;
+    for (int i = 0; i < *count; i++) {
+        if (offsets[i][0] == dx && offsets[i][1] == dy && offsets[i][2] == dz) {
+            return;
+        }
+    }
+    offsets[*count][0] = dx;
+    offsets[*count][1] = dy;
+    offsets[*count][2] = dz;
+    (*count)++;
+}
+
+static bool place_voxel_near_hit(int movingIdx, int hitIdx) {
+    if (movingIdx < 0 || movingIdx >= voxel_count) return false;
+    Voxel *moving = &voxels[movingIdx];
+    Voxel *hit    = (hitIdx >= 0 && hitIdx < voxel_count) ? &voxels[hitIdx] : NULL;
+
+    int baseX = hit ? hit->gx : moving->gx;
+    int baseY = hit ? hit->gy : moving->gy;
+    int baseZ = hit ? hit->gz : moving->gz;
+
+    int offsets[32][3];
+    int offsetCount = 0;
+
+    int dirX = sign_to_int(moving->vel.x);
+    int dirY = sign_to_int(moving->vel.y);
+    int dirZ = sign_to_int(moving->vel.z);
+
+    if (dirX || dirY || dirZ) {
+        add_unique_offset(offsets, &offsetCount, -dirX, -dirY, -dirZ);
+        add_unique_offset(offsets, &offsetCount, -dirX, 0, 0);
+        add_unique_offset(offsets, &offsetCount, 0, -dirY, 0);
+        add_unique_offset(offsets, &offsetCount, 0, 0, -dirZ);
+        if (dirX && dirY) add_unique_offset(offsets, &offsetCount, -dirX, -dirY, 0);
+        if (dirX && dirZ) add_unique_offset(offsets, &offsetCount, -dirX, 0, -dirZ);
+        if (dirY && dirZ) add_unique_offset(offsets, &offsetCount, 0, -dirY, -dirZ);
+    }
+
+    const int neighborOffsets[6][3] = {
+        { 1,  0,  0 }, { -1,  0,  0 },
+        { 0,  1,  0 }, {  0, -1,  0 },
+        { 0,  0,  1 }, {  0,  0, -1 }
+    };
+
+    for (int i = 0; i < 6; i++) {
+        add_unique_offset(offsets, &offsetCount,
+                          neighborOffsets[i][0],
+                          neighborOffsets[i][1],
+                          neighborOffsets[i][2]);
+    }
+
+    int targetX = moving->gx;
+    int targetY = moving->gy;
+    int targetZ = moving->gz;
+    bool found = false;
+
+    int oldX = moving->gx;
+    int oldY = moving->gy;
+    int oldZ = moving->gz;
+    Vector3 oldPos = moving->pos;
+    table_remove(oldX, oldY, oldZ);
+    mark_surface_neighbors(oldPos);
+
+    for (int i = 0; i < offsetCount && !found; i++) {
+        int x = baseX + offsets[i][0];
+        int y = baseY + offsets[i][1];
+        int z = baseZ + offsets[i][2];
+        if (!occupied(x, y, z)) {
+            targetX = x;
+            targetY = y;
+            targetZ = z;
+            found = true;
+        }
+    }
+
+    if (!found) {
+        const int maxRadius = 4;
+        for (int r = 1; r <= maxRadius && !found; r++) {
+            for (int dx = -r; dx <= r && !found; dx++) {
+                for (int dy = -r; dy <= r && !found; dy++) {
+                    for (int dz = -r; dz <= r; dz++) {
+                        if (dx == 0 && dy == 0 && dz == 0) continue;
+                        if (abs(dx) != r && abs(dy) != r && abs(dz) != r) continue;
+                        int x = baseX + dx;
+                        int y = baseY + dy;
+                        int z = baseZ + dz;
+                        if (!occupied(x, y, z)) {
+                            targetX = x;
+                            targetY = y;
+                            targetZ = z;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (!found) {
+        table_set(oldX, oldY, oldZ, movingIdx);
+        return false;
+    }
+
+    moving->gx = targetX;
+    moving->gy = targetY;
+    moving->gz = targetZ;
+    moving->pos = (Vector3){
+        (targetX + 0.5f) * VOXEL_SIZE,
+        (targetY + 0.5f) * VOXEL_SIZE,
+        (targetZ + 0.5f) * VOXEL_SIZE
+    };
+    moving->vel = (Vector3){ 0, 0, 0 };
+    moving->simulate = false;
+    moving->fixed = true;
+
+    table_set(moving->gx, moving->gy, moving->gz, movingIdx);
+    mark_surface(movingIdx);
+    mark_surface_neighbors(moving->pos);
+    if (hit) {
+        mark_surface(hitIdx);
+        mark_surface_neighbors(hit->pos);
+    }
+    octreeDirty = true;
+    meshDirty = true;
+    return true;
+}
 //-----------------------------------------------------------------------------
 // Check for voxels adjacent to a given world position
 // neighbors[0] = +X, neighbors[1] = -X,
@@ -726,12 +862,6 @@ static void physics_step(float dt) {    // Rebuild spatial hash
 
             if (hit_id >= 0) {
                 hit_voxel = true;
-                
-                // Stop the bullet
-                v->simulate = false;
-                v->fixed = true;
-                v->pos = (Vector3){-999.0f, -999.0f, -999.0f};
-                octreeDirty = true;
 
                 int brushExtent = (voxelBrushSpan < 1) ? 1 : voxelBrushSpan;
 
@@ -785,6 +915,19 @@ static void physics_step(float dt) {    // Rebuild spatial hash
                 }
                 //reset mesh
                 meshDirty = true;
+
+                if (!place_voxel_near_hit(i, hit_id)) {
+                    int oldGX = v->gx;
+                    int oldGY = v->gy;
+                    int oldGZ = v->gz;
+                    Vector3 oldPos = v->pos;
+                    table_remove(oldGX, oldGY, oldGZ);
+                    mark_surface_neighbors(oldPos);
+                    v->simulate = false;
+                    v->fixed = true;
+                    v->pos = (Vector3){ -999.0f, -999.0f, -999.0f };
+                    octreeDirty = true;
+                }
             }
         }
 
