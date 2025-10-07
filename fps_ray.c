@@ -58,6 +58,11 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 // Tunable voxel edit brush (per-axis span of the add/remove operation)
 static int voxelBrushSpan = 4;
 
+#define CASCADE_DEPTH 4
+#define VOXEL_TYPE_CONSTRUCTION 0
+#define VOXEL_TYPE_DESTRUCTION 1
+#define VOXEL_TYPE_DEBRIS 2
+
 // Player structure
 typedef struct {
     Vector3 pos;
@@ -343,6 +348,83 @@ static void get_adjacent_voxel_directions(Vector3 pos, bool neighbors[6]) {
     }
 }
 
+static Vector3 grid_cell_center(int gx, int gy, int gz) {
+    return (Vector3){
+        (gx + 0.5f) * VOXEL_SIZE,
+        (gy + 0.5f) * VOXEL_SIZE,
+        (gz + 0.5f) * VOXEL_SIZE
+    };
+}
+
+static void activate_voxel_simulation(int idx) {
+    if (idx < 0 || idx >= voxel_count) return;
+    Voxel *voxel = &voxels[idx];
+
+    bool wasSimulated = voxel->simulate;
+    voxel->simulate = true;
+    voxel->fixed = false;
+    voxel->vel = (Vector3){ 0, 0, 0 };
+    voxel->owner = -1;
+    if (voxel->type == VOXEL_TYPE_CONSTRUCTION)
+        voxel->type = VOXEL_TYPE_DEBRIS;
+
+    if (!wasSimulated) {
+        meshDirty = true;
+    }
+}
+
+static void cascade_activate_voxels(int start_idx, int iterations) {
+    if (start_idx < 0 || start_idx >= voxel_count) return;
+
+    static bool visited[MAX_VOXELS];
+    memset(visited, 0, sizeof(visited));
+
+    int queue[2048];
+    int depth[2048];
+    int front = 0;
+    int back = 0;
+
+    queue[back] = start_idx;
+    depth[back] = 0;
+    visited[start_idx] = true;
+    back++;
+
+    const int offsets[6][3] = {
+        { 1,  0,  0 }, { -1,  0,  0 },
+        { 0,  1,  0 }, {  0, -1,  0 },
+        { 0,  0,  1 }, {  0,  0, -1 }
+    };
+
+    while (front < back) {
+        int idx = queue[front];
+        int level = depth[front];
+        front++;
+
+        activate_voxel_simulation(idx);
+
+        if (level >= iterations) continue;
+
+        Voxel *base = &voxels[idx];
+        for (int k = 0; k < 6; k++) {
+            int nx = base->gx + offsets[k][0];
+            int ny = base->gy + offsets[k][1];
+            int nz = base->gz + offsets[k][2];
+            int neighbor_idx = table_get(nx, ny, nz);
+            if (neighbor_idx >= 0 && !visited[neighbor_idx]) {
+                if (back < (int)(sizeof(queue)/sizeof(queue[0]))) {
+                    visited[neighbor_idx] = true;
+                    queue[back] = neighbor_idx;
+                    depth[back] = level + 1;
+                    back++;
+                }
+            }
+        }
+    }
+
+    // Mark for redraw after cascade
+    meshDirty = true;
+}
+
 // Add a voxel (static or dynamic)
 static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Color color, int type) {
     if (voxel_count >= MAX_VOXELS) return -1;
@@ -490,62 +572,105 @@ static void physics_step(float dt) {    // Rebuild spatial hash
 
             if (hit_id >= 0) {
                 hit_voxel = true;
-                
-                // Stop the bullet
-                v->simulate = false;
-                v->fixed = true;
-                v->pos = (Vector3){-999.0f, -999.0f, -999.0f};
 
-                int brushExtent = (voxelBrushSpan < 1) ? 1 : voxelBrushSpan;
+                bool isBullet = (v->type == VOXEL_TYPE_CONSTRUCTION || v->type == VOXEL_TYPE_DESTRUCTION);
 
-                if (v->type == 1) { // DESTRUCTION
-                    Voxel *u = &voxels[hit_id];
-                    int anchorX = u->gx;
-                    int anchorY = u->gy;
-                    int anchorZ = u->gz;
+                if (isBullet) {
+                    // Stop the bullet voxel itself
+                    v->simulate = false;
+                    v->fixed = true;
+                    v->vel = (Vector3){ 0, 0, 0 };
+                    v->pos = (Vector3){ -999.0f, -999.0f, -999.0f };
 
-                    for (int dx = 0; dx < brushExtent; dx++) {
-                        for (int dy = 0; dy < brushExtent; dy++) {
-                            for (int dz = 0; dz < brushExtent; dz++) {
-                                int victim_idx = table_get(anchorX + dx, anchorY + dy, anchorZ + dz);
-                                if (victim_idx >= 0) {
-                                    Voxel *victim = &voxels[victim_idx];
-                                    table_remove(victim->gx, victim->gy, victim->gz);
-                                    mark_surface_neighbors(victim->pos);
-                                    victim->simulate = false;
-                                    victim->fixed = true;
-                                    victim->pos = (Vector3){-999.0f, -999.0f, -999.0f};
+                    int brushExtent = (voxelBrushSpan < 1) ? 1 : voxelBrushSpan;
+
+                    if (v->type == VOXEL_TYPE_DESTRUCTION) {
+                        Voxel *u = &voxels[hit_id];
+                        int anchorX = u->gx;
+                        int anchorY = u->gy;
+                        int anchorZ = u->gz;
+
+                        for (int dx = 0; dx < brushExtent; dx++) {
+                            for (int dy = 0; dy < brushExtent; dy++) {
+                                for (int dz = 0; dz < brushExtent; dz++) {
+                                    int victim_idx = table_get(anchorX + dx, anchorY + dy, anchorZ + dz);
+                                    if (victim_idx >= 0) {
+                                        activate_voxel_simulation(victim_idx);
+                                    }
                                 }
                             }
                         }
-                    }
-                } else { // CONSTRUCTION
-                    int anchorX = v->gx;
-                    int anchorY = v->gy;
-                    int anchorZ = v->gz;
+                    } else { // CONSTRUCTION BULLET
+                        int anchorX = v->gx;
+                        int anchorY = v->gy;
+                        int anchorZ = v->gz;
 
-                    for (int dx = 0; dx < brushExtent; dx++) {
-                        for (int dy = 0; dy < brushExtent; dy++) {
-                            for (int dz = 0; dz < brushExtent; dz++) {
-                                int targetX = anchorX + dx;
-                                int targetY = anchorY + dy;
-                                int targetZ = anchorZ + dz;
-                                if (!occupied(targetX, targetY, targetZ)) {
-                                    float px = (targetX + 0.5f) * VOXEL_SIZE;
-                                    float py = (targetY + 0.5f) * VOXEL_SIZE;
-                                    float pz = (targetZ + 0.5f) * VOXEL_SIZE;
-                                    int new_idx = addVoxel(px, py, pz, true, false, v->color, 0);
-                                    if (new_idx >= 0) {
-                                        mark_surface(new_idx);
-                                        mark_surface_neighbors(voxels[new_idx].pos);
+                        for (int dx = 0; dx < brushExtent; dx++) {
+                            for (int dy = 0; dy < brushExtent; dy++) {
+                                for (int dz = 0; dz < brushExtent; dz++) {
+                                    int targetX = anchorX + dx;
+                                    int targetY = anchorY + dy;
+                                    int targetZ = anchorZ + dz;
+                                    if (!occupied(targetX, targetY, targetZ)) {
+                                        float px = (targetX + 0.5f) * VOXEL_SIZE;
+                                        float py = (targetY + 0.5f) * VOXEL_SIZE;
+                                        float pz = (targetZ + 0.5f) * VOXEL_SIZE;
+                                        int new_idx = addVoxel(px, py, pz, true, false, v->color, VOXEL_TYPE_CONSTRUCTION);
+                                        if (new_idx >= 0) {
+                                            mark_surface(new_idx);
+                                            mark_surface_neighbors(voxels[new_idx].pos);
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+
+                    cascade_activate_voxels(hit_id, CASCADE_DEPTH);
+                    meshDirty = true;
+                } else {
+                    // Non-bullet voxel collision: settle the voxel without deleting it
+                    Voxel *target = &voxels[hit_id];
+                    int prevX = v->gx;
+                    int prevY = v->gy;
+                    int prevZ = v->gz;
+
+                    Vector3 newPos = v->pos;
+
+                    int dx = target->gx - prevX;
+                    int dy = target->gy - prevY;
+                    int dz = target->gz - prevZ;
+
+                    if (dx != 0) {
+                        float targetCenterX = (target->gx + 0.5f) * VOXEL_SIZE;
+                        newPos.x = targetCenterX - dx * VOXEL_SIZE;
+                    }
+                    if (dy != 0) {
+                        float targetCenterY = (target->gy + 0.5f) * VOXEL_SIZE;
+                        newPos.y = targetCenterY - dy * VOXEL_SIZE;
+                    }
+                    if (dz != 0) {
+                        float targetCenterZ = (target->gz + 0.5f) * VOXEL_SIZE;
+                        newPos.z = targetCenterZ - dz * VOXEL_SIZE;
+                    }
+
+                    v->pos = newPos;
+                    v->vel = (Vector3){ 0, 0, 0 };
+                    v->simulate = false;
+                    v->fixed = true;
+                    v->type = VOXEL_TYPE_CONSTRUCTION;
+
+                    table_remove(prevX, prevY, prevZ);
+                    v->gx = (int)floorf(v->pos.x / VOXEL_SIZE);
+                    v->gy = (int)floorf(v->pos.y / VOXEL_SIZE);
+                    v->gz = (int)floorf(v->pos.z / VOXEL_SIZE);
+                    table_set(v->gx, v->gy, v->gz, i);
+
+                    mark_surface(i);
+                    mark_surface_neighbors(grid_cell_center(prevX, prevY, prevZ));
+                    mark_surface_neighbors(v->pos);
+                    meshDirty = true;
                 }
-                //reset mesh
-                meshDirty = true;
             }
         }
 

@@ -64,6 +64,8 @@ This file tracks the current and future development tasks for the voxel FPS game
 - [ ] Implement torque
 - [ ] Implement intervoxel sticking
 
+i treid octree it didn't really work, now im tryng the neighbor cascade check
+
 # voxel types
 - [ ] goop you move slowly throught
 - [ ] bouncy
