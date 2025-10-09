@@ -149,6 +149,7 @@ typedef struct {
 #define MAX_VOXEL_GROUPS MAX_VOXELS
 static VoxelGroupRender voxelGroupRender[MAX_VOXEL_GROUPS];
 static bool groupsDirty = true;
+static unsigned char groupStructureDirty[MAX_VOXEL_GROUPS];
 
 typedef struct {
     bool active;
@@ -180,6 +181,7 @@ static void unload_group_mesh(VoxelGroupRender *grp) {
 static void mark_group_dirty(int groupId) {
     if (groupId >= 0 && groupId < MAX_VOXEL_GROUPS) {
         voxelGroupRender[groupId].dirty = true;
+        groupStructureDirty[groupId] = 1;
     }
 }
 
@@ -546,7 +548,8 @@ static void refine_groups_break_bridges(void) {
         int pos = cursor[gid]++;
         members[pos] = i;
     }
-    int newGroupCounter = 0;
+    int nextGroupId = groupLimit;
+    bool splitOccurred = false;
     for (int g = 0; g < groupLimit; g++) {
         int start = offsets[g];
         int end = offsets[g + 1];
@@ -691,8 +694,8 @@ static void refine_groups_break_bridges(void) {
             }
             componentCount++;
         }
-        int *componentMap = malloc(sizeof(int) * componentCount);
-        if (!componentMap) {
+        int *componentSizes = calloc(componentCount, sizeof(int));
+        if (!componentSizes) {
             free(componentId);
             free(queue);
             free(bridgeFlag);
@@ -704,8 +707,42 @@ static void refine_groups_break_bridges(void) {
             }
             continue;
         }
-        for (int ci = 0; ci < componentCount; ci++) {
-            componentMap[ci] = newGroupCounter++;
+        for (int li = 0; li < localSize; li++) {
+            int comp = componentId[li];
+            if (comp >= 0) componentSizes[comp]++;
+        }
+        int *componentMap = malloc(sizeof(int) * componentCount);
+        if (!componentMap) {
+            free(componentSizes);
+            free(componentId);
+            free(queue);
+            free(bridgeFlag);
+            free(clusterVisited);
+            free(candidate);
+            free(degrees);
+            for (int idx = start; idx < end; idx++) {
+                voxelLocalIndex[members[idx]] = -1;
+            }
+            continue;
+        }
+        if (componentCount <= 1) {
+            componentMap[0] = g;
+        } else {
+            splitOccurred = true;
+            groupStructureDirty[g] = 1;
+            int largest = 0;
+            for (int ci = 1; ci < componentCount; ci++) {
+                if (componentSizes[ci] > componentSizes[largest]) largest = ci;
+            }
+            componentMap[largest] = g;
+            for (int ci = 0; ci < componentCount; ci++) {
+                if (ci == largest) continue;
+                int newId = (nextGroupId < MAX_VOXEL_GROUPS) ? nextGroupId++ : g;
+                componentMap[ci] = newId;
+                if (newId < MAX_VOXEL_GROUPS) {
+                    groupStructureDirty[newId] = 1;
+                }
+            }
         }
         for (int li = 0; li < localSize; li++) {
             int globalIdx = members[start + li];
@@ -718,6 +755,7 @@ static void refine_groups_break_bridges(void) {
             voxelLocalIndex[members[idx]] = -1;
         }
         free(componentMap);
+        free(componentSizes);
         free(componentId);
         free(queue);
         free(bridgeFlag);
@@ -725,7 +763,12 @@ static void refine_groups_break_bridges(void) {
         free(candidate);
         free(degrees);
     }
-    voxelGroupCount = newGroupCounter;
+    if (nextGroupId > voxelGroupCount) {
+        voxelGroupCount = nextGroupId;
+    }
+    if (splitOccurred) {
+        groupsDirty = true;
+    }
     free(cursor);
     free(members);
     free(offsets);
@@ -770,7 +813,9 @@ static void ensure_voxel_groups_up_to_date(void) {
         voxelGroupCount = MAX_VOXEL_GROUPS;
     }
     for (int i = 0; i < voxelGroupCount; i++) {
-        voxelGroupRender[i].dirty = true;
+        if (groupStructureDirty[i]) {
+            voxelGroupRender[i].dirty = true;
+        }
         voxelGroupState[i].active = true;
         if (!voxelGroupState[i].falling) {
             voxelGroupState[i].velocity = (Vector3){0,0,0};
@@ -778,10 +823,12 @@ static void ensure_voxel_groups_up_to_date(void) {
     }
     for (int i = voxelGroupCount; i < prevRenderCount; i++) {
         unload_group_mesh(&voxelGroupRender[i]);
-        voxelGroupRender[i].dirty = true;
         voxelGroupState[i].active = false;
         voxelGroupState[i].falling = false;
         voxelGroupState[i].velocity = (Vector3){0,0,0};
+        if (i < MAX_VOXEL_GROUPS) {
+            groupStructureDirty[i] = 0;
+        }
     }
     voxelGroupRenderCount = voxelGroupCount;
     groupsDirty = false;
@@ -1614,6 +1661,9 @@ static void ensure_group_mesh(int groupId) {
     grp->patchCount = patchCount;
     grp->dirty = false;
     grp->drawOffset = (Vector3){0,0,0};
+    if (groupId >= 0 && groupId < MAX_VOXEL_GROUPS) {
+        groupStructureDirty[groupId] = 0;
+    }
 }
 
 static void draw_group_grid_lines(const VoxelGroupRender *grp) {
