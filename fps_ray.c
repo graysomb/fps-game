@@ -142,6 +142,7 @@ typedef struct {
     Patch *patches;
     int patchCount;
     bool dirty;
+    Vector3 drawOffset;
 } VoxelGroupRender;
 
 #define MAX_VOXEL_GROUPS MAX_VOXELS
@@ -171,6 +172,7 @@ static void unload_group_mesh(VoxelGroupRender *grp) {
         grp->patches = NULL;
     }
     grp->patchCount = 0;
+    grp->drawOffset = (Vector3){0,0,0};
 }
 
 static void mark_group_dirty(int groupId) {
@@ -518,7 +520,9 @@ static void translate_group(int groupId, float dy) {
         mark_surface(vi);
         mark_surface_neighbors(voxels[vi].pos);
     }
-    mark_group_dirty(groupId);
+    if (groupId >= 0 && groupId < MAX_VOXEL_GROUPS) {
+        voxelGroupRender[groupId].drawOffset.y += dy;
+    }
 }
 
 static void ensure_voxel_groups_up_to_date(void) {
@@ -1372,10 +1376,12 @@ static void ensure_group_mesh(int groupId) {
     grp->patches = patchList;
     grp->patchCount = patchCount;
     grp->dirty = false;
+    grp->drawOffset = (Vector3){0,0,0};
 }
 
 static void draw_group_grid_lines(const VoxelGroupRender *grp) {
     if (!grp->patches) return;
+    Vector3 offset = grp->drawOffset;
     for (int p = 0; p < grp->patchCount; p++) {
         const Patch *pt = &grp->patches[p];
         Vector3 origin, iu, ju;
@@ -1402,6 +1408,7 @@ static void draw_group_grid_lines(const VoxelGroupRender *grp) {
                 ju = (Vector3){ 0, 0, VOXEL_SIZE };
                 break;
         }
+        origin = v_add(origin, offset);
         for (int ix = 0; ix <= pt->di; ix++) {
             Vector3 a = v_add(origin, v_mul(iu, ix));
             Vector3 b = v_add(a, v_mul(ju, pt->dj));
@@ -1433,7 +1440,8 @@ static void DrawVoxels(Camera3D cam) {
         ensure_group_mesh(g);
         VoxelGroupRender *grp = &voxelGroupRender[g];
         if (grp->mesh.vertexCount > 0) {
-            DrawMesh(grp->mesh, groupMaterial, MatrixIdentity());
+            Matrix transform = MatrixTranslate(grp->drawOffset.x, grp->drawOffset.y, grp->drawOffset.z);
+            DrawMesh(grp->mesh, groupMaterial, transform);
         }
     }
     rlBegin(RL_LINES);
