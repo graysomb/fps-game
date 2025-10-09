@@ -54,6 +54,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define MAX_VOXELS    131072
 #define HASH_SIZE     131072    // must be power of two
 #define VOXEL_SIZE     0.2f    // size of each voxel cube
+#define BRIDGE_CLUSTER_THRESHOLD 3
 
 // Tunable voxel edit brush (per-axis span of the add/remove operation)
 static int voxelBrushSpan = 4;
@@ -161,6 +162,7 @@ static int groupMemberList[MAX_VOXELS];
 static int groupMemberCounts[MAX_VOXEL_GROUPS];
 static int groupMemberCursor[MAX_VOXEL_GROUPS];
 static const float GROUP_GRAVITY = GRAVITY;
+static int voxelLocalIndex[MAX_VOXELS];
 
 static void unload_group_mesh(VoxelGroupRender *grp) {
     if (grp->mesh.vertices) {
@@ -399,6 +401,7 @@ static bool voxel_is_removed(const Voxel *v) {
 static bool voxel_is_static_active(const Voxel *v) {
     return (!v->simulate && !voxel_is_removed(v));
 }
+static void refine_groups_break_bridges(void);
 
 static Color color_for_group(int groupId) {
     if (groupId < 0) {
@@ -460,6 +463,7 @@ static void compute_static_voxel_groups(void) {
             }
         }
     }
+    refine_groups_break_bridges();
 }
 
 static void gather_group_members(void) {
@@ -493,6 +497,239 @@ static void gather_group_members(void) {
     if (limit < MAX_VOXEL_GROUPS) {
         groupMemberOffsets[limit + 1] = total;
     }
+}
+
+static void refine_groups_break_bridges(void) {
+    if (voxelGroupCount <= 0) return;
+    int groupLimit = voxelGroupCount;
+    int *counts = calloc(groupLimit, sizeof(int));
+    if (!counts) return;
+    int staticCount = 0;
+    for (int i = 0; i < voxel_count; i++) {
+        Voxel *v = &voxels[i];
+        if (!voxel_is_static_active(v)) continue;
+        if (v->groupId < 0 || v->groupId >= groupLimit) continue;
+        counts[v->groupId]++;
+        staticCount++;
+    }
+    int *offsets = calloc(groupLimit + 1, sizeof(int));
+    if (!offsets) {
+        free(counts);
+        return;
+    }
+    int running = 0;
+    for (int g = 0; g < groupLimit; g++) {
+        offsets[g] = running;
+        running += counts[g];
+    }
+    offsets[groupLimit] = running;
+    int *cursor = malloc(sizeof(int) * groupLimit);
+    int *members = malloc(sizeof(int) * running);
+    if (!members) {
+        free(cursor);
+        free(offsets);
+        free(counts);
+        return;
+    }
+    if (!cursor) {
+        free(members);
+        free(offsets);
+        free(counts);
+        return;
+    }
+    memcpy(cursor, offsets, sizeof(int) * groupLimit);
+    for (int i = 0; i < voxel_count; i++) {
+        Voxel *v = &voxels[i];
+        if (!voxel_is_static_active(v)) continue;
+        int gid = v->groupId;
+        if (gid < 0 || gid >= groupLimit) continue;
+        int pos = cursor[gid]++;
+        members[pos] = i;
+    }
+    int newGroupCounter = 0;
+    for (int g = 0; g < groupLimit; g++) {
+        int start = offsets[g];
+        int end = offsets[g + 1];
+        int localCount = end - start;
+        if (localCount <= 0) continue;
+        for (int idx = start; idx < end; idx++) {
+            voxelLocalIndex[members[idx]] = idx - start;
+        }
+        int localSize = localCount;
+        int *degrees = malloc(sizeof(int) * localSize);
+        unsigned char *candidate = calloc(localSize, sizeof(unsigned char));
+        unsigned char *clusterVisited = calloc(localSize, sizeof(unsigned char));
+        unsigned char *bridgeFlag = calloc(localSize, sizeof(unsigned char));
+        int *queue = malloc(sizeof(int) * localSize);
+        if (!degrees || !candidate || !clusterVisited || !bridgeFlag || !queue) {
+            free(queue);
+            free(bridgeFlag);
+            free(clusterVisited);
+            free(candidate);
+            free(degrees);
+            for (int idx = start; idx < end; idx++) {
+                voxelLocalIndex[members[idx]] = -1;
+            }
+            continue;
+        }
+        const int dirs[6][3] = {
+            {1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}
+        };
+        for (int li = 0; li < localSize; li++) {
+            degrees[li] = 0;
+            int globalIdx = members[start + li];
+            Voxel *v = &voxels[globalIdx];
+            for (int n = 0; n < 6; n++) {
+                int nx = v->gx + dirs[n][0];
+                int ny = v->gy + dirs[n][1];
+                int nz = v->gz + dirs[n][2];
+                int neighborIdx = table_get(nx, ny, nz);
+                if (neighborIdx < 0) continue;
+                int localNeighbor = voxelLocalIndex[neighborIdx];
+                if (localNeighbor >= 0 && localNeighbor < localSize) {
+                    degrees[li]++;
+                }
+            }
+            if (degrees[li] <= 2) {
+                candidate[li] = 1;
+            }
+        }
+        for (int li = 0; li < localSize; li++) {
+            if (!candidate[li] || clusterVisited[li]) continue;
+            int qh = 0, qt = 0;
+            queue[qt++] = li;
+            clusterVisited[li] = 1;
+            int clusterSize = 0;
+            int *clusterList = malloc(sizeof(int) * localSize);
+            int adjCount = 0;
+            int *adjList = malloc(sizeof(int) * localSize);
+            if (!clusterList || !adjList) {
+                free(adjList);
+                free(clusterList);
+                break;
+            }
+            unsigned char *adjMark = calloc(localSize, sizeof(unsigned char));
+            if (!adjMark) {
+                free(adjList);
+                free(clusterList);
+                break;
+            }
+            while (qh < qt) {
+                int cur = queue[qh++];
+                clusterList[clusterSize++] = cur;
+                int globalIdx = members[start + cur];
+                Voxel *v = &voxels[globalIdx];
+                for (int n = 0; n < 6; n++) {
+                    int nx = v->gx + dirs[n][0];
+                    int ny = v->gy + dirs[n][1];
+                    int nz = v->gz + dirs[n][2];
+                    int neighborIdx = table_get(nx, ny, nz);
+                    if (neighborIdx < 0) continue;
+                    int localNeighbor = voxelLocalIndex[neighborIdx];
+                    if (localNeighbor < 0 || localNeighbor >= localSize) continue;
+                    if (candidate[localNeighbor]) {
+                        if (!clusterVisited[localNeighbor]) {
+                            clusterVisited[localNeighbor] = 1;
+                            queue[qt++] = localNeighbor;
+                        }
+                    } else {
+                        if (!adjMark[localNeighbor]) {
+                            adjMark[localNeighbor] = 1;
+                            adjList[adjCount++] = localNeighbor;
+                        }
+                    }
+                }
+            }
+            if (clusterSize < BRIDGE_CLUSTER_THRESHOLD && adjCount >= 2) {
+                for (int ci = 0; ci < clusterSize; ci++) {
+                    bridgeFlag[clusterList[ci]] = 1;
+                }
+            }
+            free(adjMark);
+            free(adjList);
+            free(clusterList);
+        }
+        int *componentId = malloc(sizeof(int) * localSize);
+        if (!componentId) {
+            free(queue);
+            free(bridgeFlag);
+            free(clusterVisited);
+            free(candidate);
+            free(degrees);
+            for (int idx = start; idx < end; idx++) {
+                voxelLocalIndex[members[idx]] = -1;
+            }
+            continue;
+        }
+        for (int li = 0; li < localSize; li++) componentId[li] = -1;
+        int componentCount = 0;
+        for (int li = 0; li < localSize; li++) {
+            if (componentId[li] >= 0) continue;
+            int qh = 0, qt = 0;
+            queue[qt++] = li;
+            componentId[li] = componentCount;
+            unsigned char bridgeOnly = bridgeFlag[li];
+            while (qh < qt) {
+                int cur = queue[qh++];
+                int globalIdx = members[start + cur];
+                Voxel *v = &voxels[globalIdx];
+                for (int n = 0; n < 6; n++) {
+                    int nx = v->gx + dirs[n][0];
+                    int ny = v->gy + dirs[n][1];
+                    int nz = v->gz + dirs[n][2];
+                    int neighborIdx = table_get(nx, ny, nz);
+                    if (neighborIdx < 0) continue;
+                    int localNeighbor = voxelLocalIndex[neighborIdx];
+                    if (localNeighbor < 0 || localNeighbor >= localSize) continue;
+                    if (componentId[localNeighbor] >= 0) continue;
+                    if (bridgeFlag[cur] || bridgeFlag[localNeighbor]) {
+                        if (!(bridgeFlag[cur] && bridgeFlag[localNeighbor])) continue;
+                    }
+                    componentId[localNeighbor] = componentCount;
+                    queue[qt++] = localNeighbor;
+                }
+            }
+            componentCount++;
+        }
+        int *componentMap = malloc(sizeof(int) * componentCount);
+        if (!componentMap) {
+            free(componentId);
+            free(queue);
+            free(bridgeFlag);
+            free(clusterVisited);
+            free(candidate);
+            free(degrees);
+            for (int idx = start; idx < end; idx++) {
+                voxelLocalIndex[members[idx]] = -1;
+            }
+            continue;
+        }
+        for (int ci = 0; ci < componentCount; ci++) {
+            componentMap[ci] = newGroupCounter++;
+        }
+        for (int li = 0; li < localSize; li++) {
+            int globalIdx = members[start + li];
+            int comp = componentId[li];
+            if (comp >= 0) {
+                voxels[globalIdx].groupId = componentMap[comp];
+            }
+        }
+        for (int idx = start; idx < end; idx++) {
+            voxelLocalIndex[members[idx]] = -1;
+        }
+        free(componentMap);
+        free(componentId);
+        free(queue);
+        free(bridgeFlag);
+        free(clusterVisited);
+        free(candidate);
+        free(degrees);
+    }
+    voxelGroupCount = newGroupCounter;
+    free(cursor);
+    free(members);
+    free(offsets);
+    free(counts);
 }
 
 static void translate_group(int groupId, float dy) {
