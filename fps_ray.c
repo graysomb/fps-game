@@ -96,7 +96,7 @@ static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
 static int voxelGroupCount = 0;
 static int voxelGroupQueue[MAX_VOXELS];
-
+static int voxelGroupRenderCount = 0;
 
 // Utility functions
 static float randomInRange(float min, float max) {
@@ -137,12 +137,43 @@ typedef struct {
     Color col;       // face color
 } Patch;
 
-static Patch patches[MAX_VOXELS];
-static int   patchCount = 0;
-static Mesh  greedyMesh = { 0 };
-static bool  meshDirty  = true;
+typedef struct {
+    Mesh mesh;
+    Patch *patches;
+    int patchCount;
+    bool dirty;
+} VoxelGroupRender;
 
+#define MAX_VOXEL_GROUPS MAX_VOXELS
+static VoxelGroupRender voxelGroupRender[MAX_VOXEL_GROUPS];
+static bool groupsDirty = true;
 
+static void unload_group_mesh(VoxelGroupRender *grp) {
+    if (grp->mesh.vertices) {
+        UnloadMesh(grp->mesh);
+        grp->mesh = (Mesh){ 0 };
+    }
+    if (grp->patches) {
+        free(grp->patches);
+        grp->patches = NULL;
+    }
+    grp->patchCount = 0;
+}
+
+static void mark_group_dirty(int groupId) {
+    if (groupId >= 0 && groupId < MAX_VOXEL_GROUPS) {
+        voxelGroupRender[groupId].dirty = true;
+    }
+}
+
+static void mark_all_groups_dirty(void) {
+    int limit = voxelGroupRenderCount;
+    if (limit > MAX_VOXEL_GROUPS) limit = MAX_VOXEL_GROUPS;
+    for (int i = 0; i < limit; i++) {
+        mark_group_dirty(i);
+    }
+    groupsDirty = true;
+}
 
 // Spatial hash table for voxels
 //static struct { int key, idx; } table[HASH_SIZE];
@@ -435,6 +466,9 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     v->gy = (int)floorf(py / VOXEL_SIZE);
     v->gz = (int)floorf(pz / VOXEL_SIZE);
     table_set(v->gx, v->gy, v->gz, idx);
+    if (!simulate) {
+        groupsDirty = true;
+    }
     return idx;
 }
 
@@ -525,7 +559,9 @@ static void ResetGame(void) {
     for (int i = 0; i < voxel_count; i++) {
         mark_surface(i);
     }
-    meshDirty = true;
+    voxelGroupCount = 0;
+    voxelGroupRenderCount = 0;
+    mark_all_groups_dirty();
 
 } 
 
@@ -620,8 +656,7 @@ static void physics_step(float dt) {    // Rebuild spatial hash
                         }
                     }
                 }
-                //reset mesh
-                meshDirty = true;
+                mark_all_groups_dirty();
             }
         }
 
@@ -874,7 +909,8 @@ static int first_voxel_hit(Ray ray, float t_max, int ignore_id) {
 // Generate a greedy mesh of all visible voxels ( i think the bug where single voxels are not drawn right is somewhere in here)
 // Only one layer is drawn per voxel, this makes layers disappear on the individual voxel level
 
-static void merge_rects_on_plane(int count, int *list, int plane, bool positive) {
+static void merge_rects_on_plane(int count, int *list, int plane, bool positive,
+                                 Patch *patchBuffer, int patchCapacity, int *patchCount) {
     if (!count) return;
 
     // Group voxels by layer
@@ -965,7 +1001,10 @@ static void merge_rects_on_plane(int count, int *list, int plane, bool positive)
                 
                 i = si + ww - 1;
                 
-                Patch *pt = &patches[patchCount++];
+                if (*patchCount >= patchCapacity) {
+                    continue;
+                }
+                Patch *pt = &patchBuffer[(*patchCount)++];
                 pt->plane = plane;
                 pt->layer = layer;
                 pt->i0 = minI + si;
@@ -995,35 +1034,45 @@ static int yzPosList[MAX_VOXELS], yzNegList[MAX_VOXELS];
 static int xzPosList[MAX_VOXELS], xzNegList[MAX_VOXELS];
 static int xyPosList[MAX_VOXELS], xyNegList[MAX_VOXELS];
 
-static Mesh gen_greedy_mesh(void) {
-    Mesh mesh = { 0 };
-    patchCount = 0;
-    compute_static_voxel_groups();
-
-    // Collect all static (non-simulated) voxels by visible faces (principal planes)
-    int yzPosCount = 0, yzNegCount = 0; // +X, -X
-    int xzPosCount = 0, xzNegCount = 0; // +Y, -Y
-    int xyPosCount = 0, xyNegCount = 0; // +Z, -Z
-    for (int i = 0; i < voxel_count; i++) {
-        Voxel *v = &voxels[i];
-        if (v->simulate) continue;
-        if (v->surface[0]) yzPosList[yzPosCount++] = i; // +X face
-        if (v->surface[1]) yzNegList[yzNegCount++] = i; // -X face
-        if (v->surface[2]) xzPosList[xzPosCount++] = i; // +Y face
-        if (v->surface[3]) xzNegList[xzNegCount++] = i; // -Y face
-        if (v->surface[4]) xyPosList[xyPosCount++] = i; // +Z face
-        if (v->surface[5]) xyNegList[xyNegCount++] = i; // -Z face
+static Mesh gen_group_mesh(int groupId, Patch **outPatches, int *outPatchCount) {
+    Mesh mesh = (Mesh){ 0 };
+    Patch *patchTemp = malloc(sizeof(Patch) * MAX_VOXELS);
+    if (!patchTemp) {
+        *outPatchCount = 0;
+        *outPatches = NULL;
+        return mesh;
     }
 
-    // Merge rectangles in each principal plane
-    merge_rects_on_plane(xyPosCount, xyPosList, 0, true); // XY-plane, +Z
-    merge_rects_on_plane(xyNegCount, xyNegList, 0, false); // XY-plane, -Z
-    merge_rects_on_plane(xzPosCount, xzPosList, 1, true); // XZ-plane, +Y
-    merge_rects_on_plane(xzNegCount, xzNegList, 1, false); // XZ-plane, -Y
-    merge_rects_on_plane(yzPosCount, yzPosList, 2, true); // YZ-plane, +X
-    merge_rects_on_plane(yzNegCount, yzNegList, 2, false); // YZ-plane, -X
+    int yzPosCount = 0, yzNegCount = 0;
+    int xzPosCount = 0, xzNegCount = 0;
+    int xyPosCount = 0, xyNegCount = 0;
+    for (int i = 0; i < voxel_count; i++) {
+        Voxel *v = &voxels[i];
+        if (!voxel_is_static_active(v)) continue;
+        if (v->groupId != groupId) continue;
+        if (v->surface[0]) yzPosList[yzPosCount++] = i;
+        if (v->surface[1]) yzNegList[yzNegCount++] = i;
+        if (v->surface[2]) xzPosList[xzPosCount++] = i;
+        if (v->surface[3]) xzNegList[xzNegCount++] = i;
+        if (v->surface[4]) xyPosList[xyPosCount++] = i;
+        if (v->surface[5]) xyNegList[xyNegCount++] = i;
+    }
 
-    // Build Raylib mesh from collected patches
+    int patchCount = 0;
+    merge_rects_on_plane(xyPosCount, xyPosList, 0, true,  patchTemp, MAX_VOXELS, &patchCount);
+    merge_rects_on_plane(xyNegCount, xyNegList, 0, false, patchTemp, MAX_VOXELS, &patchCount);
+    merge_rects_on_plane(xzPosCount, xzPosList, 1, true,  patchTemp, MAX_VOXELS, &patchCount);
+    merge_rects_on_plane(xzNegCount, xzNegList, 1, false, patchTemp, MAX_VOXELS, &patchCount);
+    merge_rects_on_plane(yzPosCount, yzPosList, 2, true,  patchTemp, MAX_VOXELS, &patchCount);
+    merge_rects_on_plane(yzNegCount, yzNegList, 2, false, patchTemp, MAX_VOXELS, &patchCount);
+
+    if (patchCount == 0) {
+        free(patchTemp);
+        *outPatchCount = 0;
+        *outPatches = NULL;
+        return mesh;
+    }
+
     int vCount = patchCount * 4;
     int iCount = patchCount * 6;
     float *verts  = calloc(vCount*3, sizeof(float));
@@ -1033,37 +1082,36 @@ static Mesh gen_greedy_mesh(void) {
     unsigned short *inds = calloc(iCount, sizeof(unsigned short));
 
     for (int p = 0; p < patchCount; p++) {
-        Patch *pt = &patches[p];
-        // Determine plane basis vectors and position
+        Patch *pt = &patchTemp[p];
         Vector3 origin = {0};
         Vector3 iu, ju, norm;
         switch (pt->plane) {
-        case 0: // XY plane at Z=layer
-            origin = (Vector3){ (pt->i0 + 0.0f)*VOXEL_SIZE,
-                                (pt->j0 + 0.0f)*VOXEL_SIZE,
-                                (pt->layer + (pt->positive?1:0))*VOXEL_SIZE };
-            iu = (Vector3){ VOXEL_SIZE*pt->di, 0, 0 };
-            ju = (Vector3){ 0, VOXEL_SIZE*pt->dj, 0 };
-            norm = pt->positive? (Vector3){0,0,1} : (Vector3){0,0,-1};
-            break;
-        case 1: // XZ plane at Y=layer
-            origin = (Vector3){ (pt->i0 + 0.0f)*VOXEL_SIZE,
-                                (pt->layer + (pt->positive?1:0))*VOXEL_SIZE,
-                                (pt->j0 + 0.0f)*VOXEL_SIZE };
-            iu = (Vector3){ VOXEL_SIZE*pt->di, 0, 0 };
-            ju = (Vector3){ 0, 0, VOXEL_SIZE*pt->dj };
-            norm = pt->positive? (Vector3){0,1,0} : (Vector3){0,-1,0};
-            break;
-        default: // YZ plane at X=layer
-            origin = (Vector3){ (pt->layer + (pt->positive?1:0))*VOXEL_SIZE,
-                                (pt->i0 + 0.0f)*VOXEL_SIZE,
-                                (pt->j0 + 0.0f)*VOXEL_SIZE };
-            iu = (Vector3){ 0, VOXEL_SIZE*pt->di, 0 };
-            ju = (Vector3){ 0, 0, VOXEL_SIZE*pt->dj };
-            norm = pt->positive? (Vector3){1,0,0} : (Vector3){-1,0,0};
-            break;
+            case 0:
+                origin = (Vector3){ (pt->i0 + 0.0f)*VOXEL_SIZE,
+                                    (pt->j0 + 0.0f)*VOXEL_SIZE,
+                                    (pt->layer + (pt->positive?1:0))*VOXEL_SIZE };
+                iu = (Vector3){ VOXEL_SIZE*pt->di, 0, 0 };
+                ju = (Vector3){ 0, VOXEL_SIZE*pt->dj, 0 };
+                norm = pt->positive? (Vector3){0,0,1} : (Vector3){0,0,-1};
+                break;
+            case 1:
+                origin = (Vector3){ (pt->i0 + 0.0f)*VOXEL_SIZE,
+                                    (pt->layer + (pt->positive?1:0))*VOXEL_SIZE,
+                                    (pt->j0 + 0.0f)*VOXEL_SIZE };
+                iu = (Vector3){ VOXEL_SIZE*pt->di, 0, 0 };
+                ju = (Vector3){ 0, 0, VOXEL_SIZE*pt->dj };
+                norm = pt->positive? (Vector3){0,1,0} : (Vector3){0,-1,0};
+                break;
+            default:
+                origin = (Vector3){ (pt->layer + (pt->positive?1:0))*VOXEL_SIZE,
+                                    (pt->i0 + 0.0f)*VOXEL_SIZE,
+                                    (pt->j0 + 0.0f)*VOXEL_SIZE };
+                iu = (Vector3){ 0, VOXEL_SIZE*pt->di, 0 };
+                ju = (Vector3){ 0, 0, VOXEL_SIZE*pt->dj };
+                norm = pt->positive? (Vector3){1,0,0} : (Vector3){-1,0,0};
+                break;
         }
-        // build quad vertices
+
         int vofs = p*4;
         Vector3 corners[4] = {
             origin,
@@ -1093,6 +1141,7 @@ static Mesh gen_greedy_mesh(void) {
         inds[iofs + 4] = vofs + 2;
         inds[iofs + 5] = vofs + 3;
     }
+
     mesh.vertexCount   = vCount;
     mesh.triangleCount = patchCount * 2;
     mesh.vertices      = verts;
@@ -1102,41 +1151,70 @@ static Mesh gen_greedy_mesh(void) {
     mesh.indices       = inds;
     UploadMesh(&mesh, false);
 
+    Patch *patchCopy = malloc(sizeof(Patch) * patchCount);
+    if (patchCopy) {
+        memcpy(patchCopy, patchTemp, sizeof(Patch) * patchCount);
+    } else {
+        patchCount = 0;
+    }
+
+    free(patchTemp);
+    *outPatchCount = patchCount;
+    *outPatches = patchCopy;
     return mesh;
 }
 
-// Draw all voxels via greedy mesh instead of per-voxel raycasting
-static void DrawVoxels(Camera3D cam) {
-    (void)cam;
-    if (meshDirty) {
-        if (greedyMesh.vertices) UnloadMesh(greedyMesh);
-        greedyMesh = gen_greedy_mesh();
-        meshDirty = false;
+static void ensure_group_mesh(int groupId) {
+    if (groupId < 0 || groupId >= voxelGroupCount) return;
+    VoxelGroupRender *grp = &voxelGroupRender[groupId];
+    if (!grp->dirty) return;
+    unload_group_mesh(grp);
+    Patch *patchList = NULL;
+    int patchCount = 0;
+    grp->mesh = gen_group_mesh(groupId, &patchList, &patchCount);
+    grp->patches = patchList;
+    grp->patchCount = patchCount;
+    grp->dirty = false;
+}
+
+static void ensure_voxel_groups_up_to_date(void) {
+    if (!groupsDirty) return;
+    compute_static_voxel_groups();
+    if (voxelGroupCount > MAX_VOXEL_GROUPS) {
+        voxelGroupCount = MAX_VOXEL_GROUPS;
     }
-    rlDisableBackfaceCulling();
-    DrawMesh(greedyMesh, LoadMaterialDefault(), MatrixIdentity());
-    // Draw voxel grid lines atop merged quads
-    rlBegin(RL_LINES);
-    rlColor4ub(0, 0, 0, 255);
-    for (int p = 0; p < patchCount; p++) {
-        Patch *pt = &patches[p];
+    for (int i = 0; i < voxelGroupCount; i++) {
+        voxelGroupRender[i].dirty = true;
+    }
+    for (int i = voxelGroupCount; i < voxelGroupRenderCount; i++) {
+        unload_group_mesh(&voxelGroupRender[i]);
+        voxelGroupRender[i].dirty = true;
+    }
+    voxelGroupRenderCount = voxelGroupCount;
+    groupsDirty = false;
+}
+
+static void draw_group_grid_lines(const VoxelGroupRender *grp) {
+    if (!grp->patches) return;
+    for (int p = 0; p < grp->patchCount; p++) {
+        const Patch *pt = &grp->patches[p];
         Vector3 origin, iu, ju;
         switch (pt->plane) {
-            case 0: // XY
+            case 0:
                 origin = (Vector3){ pt->i0*VOXEL_SIZE,
                                     pt->j0*VOXEL_SIZE,
                                     (pt->layer + (pt->positive?1:0))*VOXEL_SIZE };
                 iu = (Vector3){ VOXEL_SIZE, 0, 0 };
                 ju = (Vector3){ 0, VOXEL_SIZE, 0 };
                 break;
-            case 1: // XZ
+            case 1:
                 origin = (Vector3){ pt->i0*VOXEL_SIZE,
                                     (pt->layer + (pt->positive?1:0))*VOXEL_SIZE,
                                     pt->j0*VOXEL_SIZE };
                 iu = (Vector3){ VOXEL_SIZE, 0, 0 };
                 ju = (Vector3){ 0, 0, VOXEL_SIZE };
                 break;
-            default: // YZ
+            default:
                 origin = (Vector3){ (pt->layer + (pt->positive?1:0))*VOXEL_SIZE,
                                     pt->i0*VOXEL_SIZE,
                                     pt->j0*VOXEL_SIZE };
@@ -1147,24 +1225,51 @@ static void DrawVoxels(Camera3D cam) {
         for (int ix = 0; ix <= pt->di; ix++) {
             Vector3 a = v_add(origin, v_mul(iu, ix));
             Vector3 b = v_add(a, v_mul(ju, pt->dj));
-            rlVertex3f(a.x, a.y, a.z); rlVertex3f(b.x, b.y, b.z);
+            rlVertex3f(a.x, a.y, a.z);
+            rlVertex3f(b.x, b.y, b.z);
         }
         for (int jy = 0; jy <= pt->dj; jy++) {
             Vector3 a = v_add(origin, v_mul(ju, jy));
             Vector3 b = v_add(a, v_mul(iu, pt->di));
-            rlVertex3f(a.x, a.y, a.z); rlVertex3f(b.x, b.y, b.z);
+            rlVertex3f(a.x, a.y, a.z);
+            rlVertex3f(b.x, b.y, b.z);
         }
+    }
+}
+
+// Draw all voxels via per-group greedy meshes
+static void DrawVoxels(Camera3D cam) {
+    (void)cam;
+    ensure_voxel_groups_up_to_date();
+    static bool materialInit = false;
+    static Material groupMaterial;
+    if (!materialInit) {
+        groupMaterial = LoadMaterialDefault();
+        materialInit = true;
+    }
+
+    rlDisableBackfaceCulling();
+    for (int g = 0; g < voxelGroupCount; g++) {
+        ensure_group_mesh(g);
+        VoxelGroupRender *grp = &voxelGroupRender[g];
+        if (grp->mesh.vertexCount > 0) {
+            DrawMesh(grp->mesh, groupMaterial, MatrixIdentity());
+        }
+    }
+    rlBegin(RL_LINES);
+    rlColor4ub(0, 0, 0, 255);
+    for (int g = 0; g < voxelGroupCount; g++) {
+        draw_group_grid_lines(&voxelGroupRender[g]);
     }
     rlEnd();
     rlEnableBackfaceCulling();
-    //draw moving voxels
+
     rlBegin(RL_TRIANGLES);
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
-        if (v->simulate){
-        drawCubeMan(v->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, v->color);
+        if (v->simulate) {
+            drawCubeMan(v->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, v->color);
         }
-        
     }
     rlEnd();
 }
