@@ -86,6 +86,7 @@ typedef struct {
     Color color;
     int type;
     int owner;
+    int groupId;
     /* Visible faces mask: surface[i]=true if face i is visible:
        0=+X,1=-X,2=+Y,3=-Y,4=+Z,5=-Z */
     bool surface[6];
@@ -93,6 +94,8 @@ typedef struct {
 } Voxel;
 static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
+static int voxelGroupCount = 0;
+static int voxelGroupQueue[MAX_VOXELS];
 
 
 // Utility functions
@@ -343,6 +346,76 @@ static void get_adjacent_voxel_directions(Vector3 pos, bool neighbors[6]) {
     }
 }
 
+static bool voxel_is_removed(const Voxel *v) {
+    return (v->pos.x <= -900.0f && v->pos.y <= -900.0f && v->pos.z <= -900.0f);
+}
+
+static bool voxel_is_static_active(const Voxel *v) {
+    return (!v->simulate && !voxel_is_removed(v));
+}
+
+static Color color_for_group(int groupId) {
+    if (groupId < 0) {
+        return (Color){ 200, 200, 200, 255 };
+    }
+    float hue = fmodf((float)(groupId * 61), 360.0f);
+    float saturation = 0.55f + 0.35f * fmodf((float)(groupId * 17) / 23.0f, 1.0f);
+    float value = 0.85f;
+    return ColorFromHSV(hue, saturation, value);
+}
+
+static Color voxel_group_color(const Voxel *v) {
+    if (voxel_is_static_active(v) && v->groupId >= 0) {
+        return color_for_group(v->groupId);
+    }
+    return v->color;
+}
+
+static void compute_static_voxel_groups(void) {
+    // Flood-fill static voxels into 6-connected groups for visualization.
+    static const int neighborOffsets[6][3] = {
+        { 1,  0,  0 }, { -1,  0,  0 },
+        { 0,  1,  0 }, {  0, -1,  0 },
+        { 0,  0,  1 }, {  0,  0, -1 }
+    };
+
+    for (int i = 0; i < voxel_count; i++) {
+        voxels[i].groupId = -1;
+    }
+
+    voxelGroupCount = 0;
+    for (int i = 0; i < voxel_count; i++) {
+        Voxel *root = &voxels[i];
+        if (!voxel_is_static_active(root)) continue;
+        if (root->groupId >= 0) continue;
+
+        int groupId = voxelGroupCount++;
+        int head = 0;
+        int tail = 0;
+        root->groupId = groupId;
+        voxelGroupQueue[tail++] = i;
+
+        while (head < tail) {
+            int idx = voxelGroupQueue[head++];
+            Voxel *current = &voxels[idx];
+            for (int n = 0; n < 6; n++) {
+                int nx = current->gx + neighborOffsets[n][0];
+                int ny = current->gy + neighborOffsets[n][1];
+                int nz = current->gz + neighborOffsets[n][2];
+                int neighborIdx = table_get(nx, ny, nz);
+                if (neighborIdx < 0) continue;
+                Voxel *neighbor = &voxels[neighborIdx];
+                if (!voxel_is_static_active(neighbor)) continue;
+                if (neighbor->groupId >= 0) continue;
+                neighbor->groupId = groupId;
+                if (tail < MAX_VOXELS) {
+                    voxelGroupQueue[tail++] = neighborIdx;
+                }
+            }
+        }
+    }
+}
+
 // Add a voxel (static or dynamic)
 static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Color color, int type) {
     if (voxel_count >= MAX_VOXELS) return -1;
@@ -355,6 +428,7 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     v->color = color;
     v->type = type;
     v->owner   = -1;
+    v->groupId = -1;
     memset(v->surface, 0, sizeof v->surface);
     // compute grid coords
     v->gx = (int)floorf(px / VOXEL_SIZE);
@@ -495,6 +569,7 @@ static void physics_step(float dt) {    // Rebuild spatial hash
                 v->simulate = false;
                 v->fixed = true;
                 v->pos = (Vector3){-999.0f, -999.0f, -999.0f};
+                v->groupId = -1;
 
                 int brushExtent = (voxelBrushSpan < 1) ? 1 : voxelBrushSpan;
 
@@ -515,6 +590,7 @@ static void physics_step(float dt) {    // Rebuild spatial hash
                                     victim->simulate = false;
                                     victim->fixed = true;
                                     victim->pos = (Vector3){-999.0f, -999.0f, -999.0f};
+                                    victim->groupId = -1;
                                 }
                             }
                         }
@@ -571,6 +647,7 @@ static void physics_step(float dt) {    // Rebuild spatial hash
                     v->simulate = false;
                     v->fixed    = true;
                     v->pos      = (Vector3){ -999.0f, -999.0f, -999.0f };
+                    v->groupId  = -1;
 
                     if (players[j].health <= 0) {
                         if (v->owner >= 0 && v->owner != j) {
@@ -903,7 +980,11 @@ static void merge_rects_on_plane(int count, int *list, int plane, bool positive)
                     case 1: baseIdx = table_get(pt->i0, layer, pt->j0); break;
                     case 2: baseIdx = table_get(layer, pt->i0, pt->j0); break;
                 }
-                pt->col = voxels[baseIdx].color;
+                if (baseIdx >= 0) {
+                    pt->col = voxel_group_color(&voxels[baseIdx]);
+                } else {
+                    pt->col = (Color){ 255, 255, 255, 255 };
+                }
             }
         }
     }
@@ -917,6 +998,7 @@ static int xyPosList[MAX_VOXELS], xyNegList[MAX_VOXELS];
 static Mesh gen_greedy_mesh(void) {
     Mesh mesh = { 0 };
     patchCount = 0;
+    compute_static_voxel_groups();
 
     // Collect all static (non-simulated) voxels by visible faces (principal planes)
     int yzPosCount = 0, yzNegCount = 0; // +X, -X
