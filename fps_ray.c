@@ -55,7 +55,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define MAX_VOXELS    131072
 #define HASH_SIZE     131072    // must be power of two
 #define VOXEL_SIZE     0.2f    // size of each voxel cube
-#define VOXEL_MASS     1.0f     // mass per voxel unit
+#define VOXEL_MASS     0.05f    // mass per voxel unit
 #define BRIDGE_CLUSTER_THRESHOLD 3
 
 // Tunable voxel edit brush (per-axis span of the add/remove operation)
@@ -181,6 +181,7 @@ static VoxelGroupBody voxelGroupBody[MAX_VOXEL_GROUPS];
 static int groundedGroupId = -1;
 static bool groupBodiesDirty = true;
 static const float GROUP_REST_VELOCITY_THRESHOLD = 0.05f;
+static const int MIN_DYNAMIC_GROUP_SIZE = 3;
 static int groupMemberOffsets[MAX_VOXEL_GROUPS + 1];
 static int groupMemberList[MAX_VOXELS];
 static int groupMemberCounts[MAX_VOXEL_GROUPS];
@@ -193,6 +194,17 @@ static Vector3 body_local_to_world(const VoxelGroupBody *body, Vector3 local) {
         body->position.x + body->axisX.x * local.x + body->axisY.x * local.y + body->axisZ.x * local.z,
         body->position.y + body->axisX.y * local.x + body->axisY.y * local.y + body->axisZ.y * local.z,
         body->position.z + body->axisX.z * local.x + body->axisY.z * local.y + body->axisZ.z * local.z
+    };
+}
+
+static Vector3 body_world_to_local(const VoxelGroupBody *body, Vector3 world) {
+    Vector3 relative = (Vector3){ world.x - body->position.x,
+                                  world.y - body->position.y,
+                                  world.z - body->position.z };
+    return (Vector3){
+        Vector3DotProduct(relative, body->axisX),
+        Vector3DotProduct(relative, body->axisY),
+        Vector3DotProduct(relative, body->axisZ)
     };
 }
 
@@ -212,6 +224,20 @@ static void orthonormalize_axes(VoxelGroupBody *body) {
     body->axisZ = Vector3Normalize(body->axisZ);
     body->axisY = Vector3CrossProduct(body->axisZ, body->axisX);
     body->axisY = Vector3Normalize(body->axisY);
+}
+
+static Vector3 apply_inv_inertia_world(const VoxelGroupBody *body, Vector3 vecWorld) {
+    Vector3 local = (Vector3){
+        Vector3DotProduct(vecWorld, body->axisX),
+        Vector3DotProduct(vecWorld, body->axisY),
+        Vector3DotProduct(vecWorld, body->axisZ)
+    };
+    local.x *= body->invInertia.x;
+    local.y *= body->invInertia.y;
+    local.z *= body->invInertia.z;
+    return Vector3Add(Vector3Add(Vector3Scale(body->axisX, local.x),
+                                 Vector3Scale(body->axisY, local.y)),
+                      Vector3Scale(body->axisZ, local.z));
 }
 
 static int first_voxel_hit(Ray ray, float t_max, int ignore_id);
@@ -742,7 +768,7 @@ static void rebuild_group_bodies(void) {
 
         Vector3 localMin = (Vector3){ FLT_MAX, FLT_MAX, FLT_MAX };
         Vector3 localMax = (Vector3){ -FLT_MAX, -FLT_MAX, -FLT_MAX };
-
+        Vector3 inertiaAcc = (Vector3){0,0,0};
         for (int j = 0; j < count; j++) {
             int idx = groupMemberList[start + j];
             Voxel *v = &voxels[idx];
@@ -760,11 +786,12 @@ static void rebuild_group_bodies(void) {
             if (local.x > localMax.x) localMax.x = local.x;
             if (local.y > localMax.y) localMax.y = local.y;
             if (local.z > localMax.z) localMax.z = local.z;
-        }
 
-        float width  = (localMax.x - localMin.x) + VOXEL_SIZE;
-        float height = (localMax.y - localMin.y) + VOXEL_SIZE;
-        float depth  = (localMax.z - localMin.z) + VOXEL_SIZE;
+            float mass = VOXEL_MASS;
+            inertiaAcc.x += mass * (local.y*local.y + local.z*local.z);
+            inertiaAcc.y += mass * (local.x*local.x + local.z*local.z);
+            inertiaAcc.z += mass * (local.x*local.x + local.y*local.y);
+        }
 
         body->memberCount = count;
         body->exists = true;
@@ -779,9 +806,9 @@ static void rebuild_group_bodies(void) {
         body->mass = VOXEL_MASS * (float)count;
         body->invMass = (body->mass > 1e-5f) ? (1.0f / body->mass) : 0.0f;
 
-        float Ixx = (1.0f / 12.0f) * body->mass * (height*height + depth*depth);
-        float Iyy = (1.0f / 12.0f) * body->mass * (width*width  + depth*depth);
-        float Izz = (1.0f / 12.0f) * body->mass * (width*width  + height*height);
+        float Ixx = inertiaAcc.x;
+        float Iyy = inertiaAcc.y;
+        float Izz = inertiaAcc.z;
         body->invInertia = (Vector3){ (Ixx > 1e-5f) ? 1.0f / Ixx : 0.0f,
                                       (Iyy > 1e-5f) ? 1.0f / Iyy : 0.0f,
                                       (Izz > 1e-5f) ? 1.0f / Izz : 0.0f };
@@ -797,7 +824,9 @@ static void rebuild_group_bodies(void) {
             body->referencePosition = prevReference;
         }
 
-        if (g == groundedGroupId) {
+        bool shouldDetach = (g != groundedGroupId) && (count >= MIN_DYNAMIC_GROUP_SIZE);
+
+        if (!shouldDetach) {
             body->dynamic = false;
             for (int j = 0; j < count; j++) {
                 int idx = body->members[j];
@@ -826,11 +855,12 @@ typedef struct {
     float allowed;
     bool collided;
     int contactCount;
-    Vector3 rCrossNormalSum;
+    Vector3 contactOffsetSum;
+    Vector3 normal;
 } VerticalConstraint;
 
 static VerticalConstraint resolve_group_vertical_motion(int groupId, VoxelGroupBody *body, float desired) {
-    VerticalConstraint result = { desired, false, 0, (Vector3){0,0,0} };
+    VerticalConstraint result = { desired, false, 0, (Vector3){0,0,0}, (Vector3){0,1,0} };
     if (!body || !body->exists || body->memberCount <= 0) {
         return result;
     }
@@ -850,8 +880,7 @@ static VerticalConstraint resolve_group_vertical_motion(int groupId, VoxelGroupB
                 Vector3 contactPoint = worldPos;
                 contactPoint.y -= half;
                 Vector3 r = Vector3Subtract(contactPoint, body->position);
-                Vector3 rCrossN = Vector3CrossProduct(r, normal);
-                result.rCrossNormalSum = Vector3Add(result.rCrossNormalSum, rCrossN);
+                result.contactOffsetSum = Vector3Add(result.contactOffsetSum, r);
                 result.contactCount++;
                 result.collided = true;
             }
@@ -873,13 +902,13 @@ static VerticalConstraint resolve_group_vertical_motion(int groupId, VoxelGroupB
                     Vector3 contactPoint = worldPos;
                     contactPoint.y -= half;
                     Vector3 r = Vector3Subtract(contactPoint, body->position);
-                    Vector3 rCrossN = Vector3CrossProduct(r, normal);
-                    result.rCrossNormalSum = Vector3Add(result.rCrossNormalSum, rCrossN);
+                    result.contactOffsetSum = Vector3Add(result.contactOffsetSum, r);
                     result.contactCount++;
                 }
             }
         }
     } else if (desired > 0.0f) {
+        normal = (Vector3){0, -1, 0};
         for (int i = 0; i < body->memberCount; i++) {
             Vector3 worldPos = body_local_to_world(body, body->localPositions[i]);
             float top = worldPos.y + half;
@@ -900,9 +929,7 @@ static VerticalConstraint resolve_group_vertical_motion(int groupId, VoxelGroupB
                     Vector3 contactPoint = worldPos;
                     contactPoint.y += half;
                     Vector3 r = Vector3Subtract(contactPoint, body->position);
-                    Vector3 n = (Vector3){0, -1, 0};
-                    Vector3 rCrossN = Vector3CrossProduct(r, n);
-                    result.rCrossNormalSum = Vector3Add(result.rCrossNormalSum, rCrossN);
+                    result.contactOffsetSum = Vector3Add(result.contactOffsetSum, r);
                     result.contactCount++;
                 }
             }
@@ -912,6 +939,8 @@ static VerticalConstraint resolve_group_vertical_motion(int groupId, VoxelGroupB
     if (fabsf(result.allowed - desired) > 1e-6f) {
         result.collided = true;
     }
+
+    result.normal = normal;
 
     return result;
 }
@@ -1022,6 +1051,12 @@ static void refine_groups_break_bridges(void) {
         int end = offsets[g + 1];
         int localCount = end - start;
         if (localCount <= 0) continue;
+        if (localCount < 12) {
+            for (int idx = start; idx < end; idx++) {
+                voxelLocalIndex[members[idx]] = -1;
+            }
+            continue;
+        }
         for (int idx = start; idx < end; idx++) {
             voxelLocalIndex[members[idx]] = idx - start;
         }
@@ -1299,33 +1334,50 @@ static void update_group_physics(float dt) {
         body->position.z += desiredMove.z;
         body->position.y += constraint.allowed;
 
-        if (constraint.collided && preVy < 0.0f) {
-            float impulseMag = -preVy * body->mass;
-            if (impulseMag > 0.0f) {
-                Vector3 impulse = (Vector3){0, impulseMag, 0};
+        if (constraint.collided && constraint.contactCount > 0) {
+            Vector3 n = constraint.normal;
+            Vector3 rAvg = Vector3Scale(constraint.contactOffsetSum, 1.0f / (float)constraint.contactCount);
+
+            Vector3 contactVel = Vector3Add(body->velocity, Vector3CrossProduct(body->angularVelocity, rAvg));
+            float vRel = Vector3DotProduct(contactVel, n);
+            if (vRel < 0.0f) {
+                Vector3 rCrossN = Vector3CrossProduct(rAvg, n);
+                Vector3 Iinv_rCrossN = apply_inv_inertia_world(body, rCrossN);
+                float denom = body->invMass + Vector3DotProduct(n, Vector3CrossProduct(Iinv_rCrossN, rAvg));
+                if (denom < 1e-6f) denom = 1e-6f;
+                float restitution = 0.05f;
+                float j = -(1.0f + restitution) * vRel / denom;
+                Vector3 impulse = Vector3Scale(n, j);
                 body->velocity = Vector3Add(body->velocity, Vector3Scale(impulse, body->invMass));
-                if (constraint.contactCount > 0) {
-                    float share = impulseMag / (float)constraint.contactCount;
-                    Vector3 torqueImpulse = Vector3Scale(constraint.rCrossNormalSum, share);
-                    Vector3 torqueLocal = (Vector3){
-                        Vector3DotProduct(torqueImpulse, body->axisX),
-                        Vector3DotProduct(torqueImpulse, body->axisY),
-                        Vector3DotProduct(torqueImpulse, body->axisZ)
-                    };
-                    Vector3 deltaAngularLocal = (Vector3){
-                        torqueLocal.x * body->invInertia.x,
-                        torqueLocal.y * body->invInertia.y,
-                        torqueLocal.z * body->invInertia.z
-                    };
-                    Vector3 deltaAngularWorld = Vector3Add(
-                        Vector3Add(Vector3Scale(body->axisX, deltaAngularLocal.x),
-                                   Vector3Scale(body->axisY, deltaAngularLocal.y)),
-                        Vector3Scale(body->axisZ, deltaAngularLocal.z));
-                    body->angularVelocity = Vector3Add(body->angularVelocity, deltaAngularWorld);
+                Vector3 angularDelta = apply_inv_inertia_world(body, Vector3CrossProduct(rAvg, impulse));
+                body->angularVelocity = Vector3Add(body->angularVelocity, angularDelta);
+
+                float normalComponent = Vector3DotProduct(body->velocity, n);
+                body->velocity = Vector3Subtract(body->velocity, Vector3Scale(n, normalComponent));
+
+                contactVel = Vector3Add(body->velocity, Vector3CrossProduct(body->angularVelocity, rAvg));
+                Vector3 tangent = Vector3Subtract(contactVel, Vector3Scale(n, Vector3DotProduct(contactVel, n)));
+                float tangentLen = Vector3Length(tangent);
+                if (tangentLen > 1e-5f) {
+                    Vector3 tDir = Vector3Scale(tangent, 1.0f / tangentLen);
+                    Vector3 rCrossT = Vector3CrossProduct(rAvg, tDir);
+                    Vector3 Iinv_rCrossT = apply_inv_inertia_world(body, rCrossT);
+                    float denomT = body->invMass + Vector3DotProduct(tDir, Vector3CrossProduct(Iinv_rCrossT, rAvg));
+                    if (denomT < 1e-6f) denomT = 1e-6f;
+                    float jt = -Vector3DotProduct(contactVel, tDir) / denomT;
+                    float mu = 0.3f;
+                    float jtMax = mu * fabsf(j);
+                    if (jt > jtMax) jt = jtMax;
+                    if (jt < -jtMax) jt = -jtMax;
+                    Vector3 frictionImpulse = Vector3Scale(tDir, jt);
+                    body->velocity = Vector3Add(body->velocity, Vector3Scale(frictionImpulse, body->invMass));
+                    Vector3 angularFriction = apply_inv_inertia_world(body, Vector3CrossProduct(rAvg, frictionImpulse));
+                    body->angularVelocity = Vector3Add(body->angularVelocity, angularFriction);
                 }
             }
-            body->velocity.y = 0.0f;
-            if (fabsf(preVy * dt) < GROUP_REST_VELOCITY_THRESHOLD) {
+
+            if (fabsf(Vector3DotProduct(body->velocity, n)) < GROUP_REST_VELOCITY_THRESHOLD &&
+                Vector3Length(body->angularVelocity) < GROUP_REST_VELOCITY_THRESHOLD) {
                 settle_group_into_ground(g);
                 continue;
             }
