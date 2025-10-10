@@ -55,7 +55,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define MAX_VOXELS    131072
 #define HASH_SIZE     131072    // must be power of two
 #define VOXEL_SIZE     0.2f    // size of each voxel cube
-#define VOXEL_MASS     0.05f    // mass per voxel unit
+#define VOXEL_MASS     0.2f     // mass per voxel unit
 #define BRIDGE_CLUSTER_THRESHOLD 3
 
 // Tunable voxel edit brush (per-axis span of the add/remove operation)
@@ -181,7 +181,7 @@ static VoxelGroupBody voxelGroupBody[MAX_VOXEL_GROUPS];
 static int groundedGroupId = -1;
 static bool groupBodiesDirty = true;
 static const float GROUP_REST_VELOCITY_THRESHOLD = 0.05f;
-static const int MIN_DYNAMIC_GROUP_SIZE = 3;
+static const int MIN_DYNAMIC_GROUP_SIZE = 5;
 static int groupMemberOffsets[MAX_VOXEL_GROUPS + 1];
 static int groupMemberList[MAX_VOXELS];
 static int groupMemberCounts[MAX_VOXEL_GROUPS];
@@ -1321,10 +1321,19 @@ static void update_group_physics(float dt) {
 
         body->accumulatedForce.y -= body->mass * GROUP_GRAVITY;
 
+        for (int i = 0; i < body->memberCount; i++) {
+            Vector3 worldPos = body_local_to_world(body, body->localPositions[i]);
+            float mass = VOXEL_MASS;
+            body->accumulatedTorque = Vector3Add(body->accumulatedTorque,
+                Vector3CrossProduct(Vector3Subtract(worldPos, body->position), (Vector3){0, -mass * GROUP_GRAVITY, 0}));
+        }
+
         Vector3 acceleration = (body->invMass > 0.0f)
             ? Vector3Scale(body->accumulatedForce, body->invMass)
             : (Vector3){0,0,0};
         body->velocity = Vector3Add(body->velocity, Vector3Scale(acceleration, dt));
+        Vector3 angularAcceleration = apply_inv_inertia_world(body, body->accumulatedTorque);
+        body->angularVelocity = Vector3Add(body->angularVelocity, Vector3Scale(angularAcceleration, dt));
 
         Vector3 desiredMove = Vector3Scale(body->velocity, dt);
         float preVy = body->velocity.y;
@@ -1345,7 +1354,7 @@ static void update_group_physics(float dt) {
                 Vector3 Iinv_rCrossN = apply_inv_inertia_world(body, rCrossN);
                 float denom = body->invMass + Vector3DotProduct(n, Vector3CrossProduct(Iinv_rCrossN, rAvg));
                 if (denom < 1e-6f) denom = 1e-6f;
-                float restitution = 0.05f;
+                float restitution = 0.02f;
                 float j = -(1.0f + restitution) * vRel / denom;
                 Vector3 impulse = Vector3Scale(n, j);
                 body->velocity = Vector3Add(body->velocity, Vector3Scale(impulse, body->invMass));
@@ -1365,7 +1374,7 @@ static void update_group_physics(float dt) {
                     float denomT = body->invMass + Vector3DotProduct(tDir, Vector3CrossProduct(Iinv_rCrossT, rAvg));
                     if (denomT < 1e-6f) denomT = 1e-6f;
                     float jt = -Vector3DotProduct(contactVel, tDir) / denomT;
-                    float mu = 0.3f;
+                    float mu = 0.6f;
                     float jtMax = mu * fabsf(j);
                     if (jt > jtMax) jt = jtMax;
                     if (jt < -jtMax) jt = -jtMax;
