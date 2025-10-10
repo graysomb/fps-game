@@ -150,14 +150,28 @@ typedef struct {
 static VoxelGroupRender voxelGroupRender[MAX_VOXEL_GROUPS];
 static bool groupsDirty = true;
 static unsigned char groupStructureDirty[MAX_VOXEL_GROUPS];
-
 typedef struct {
-    bool active;
-    bool falling;
-    Vector3 velocity;
-} VoxelGroupState;
+    bool   exists;
+    bool   dynamic;
+    bool   settled;
+    Vector3 position;      // accumulated translation relative to stored local positions
+    Vector3 velocity;      // linear velocity (world space)
+    Vector3 axisX;         // local axes (initially aligned to world)
+    Vector3 axisY;
+    Vector3 axisZ;
+    Vector3 *localPositions; // cached center positions captured when the body detached
+    int     *members;         // indices into `voxels[]`
+    int     memberCount;
+    Color  *colors;
+    unsigned char *fixedFlags;
+    int     *types;
+    int     *owners;
+} VoxelGroupBody;
 
-static VoxelGroupState voxelGroupState[MAX_VOXEL_GROUPS];
+static VoxelGroupBody voxelGroupBody[MAX_VOXEL_GROUPS];
+static int groundedGroupId = -1;
+static bool groupBodiesDirty = true;
+static const float GROUP_REST_VELOCITY_THRESHOLD = 0.05f;
 static int groupMemberOffsets[MAX_VOXEL_GROUPS + 1];
 static int groupMemberList[MAX_VOXELS];
 static int groupMemberCounts[MAX_VOXEL_GROUPS];
@@ -182,6 +196,7 @@ static void mark_group_dirty(int groupId) {
     if (groupId >= 0 && groupId < MAX_VOXEL_GROUPS) {
         voxelGroupRender[groupId].dirty = true;
         groupStructureDirty[groupId] = 1;
+        groupBodiesDirty = true;
     }
 }
 
@@ -192,6 +207,7 @@ static void mark_all_groups_dirty(void) {
         mark_group_dirty(i);
     }
     groupsDirty = true;
+    groupBodiesDirty = true;
 }
 
 // Spatial hash table for voxels
@@ -401,7 +417,14 @@ static bool voxel_is_removed(const Voxel *v) {
 }
 
 static bool voxel_is_static_active(const Voxel *v) {
-    return (!v->simulate && !voxel_is_removed(v));
+    if (voxel_is_removed(v)) return false;
+    if (v->groupId >= 0 && v->groupId < MAX_VOXEL_GROUPS) {
+        const VoxelGroupBody *body = &voxelGroupBody[v->groupId];
+        if (body->exists && body->dynamic) {
+            return false;
+        }
+    }
+    return !v->simulate;
 }
 static void refine_groups_break_bridges(void);
 
@@ -431,7 +454,17 @@ static void compute_static_voxel_groups(void) {
     };
 
     for (int i = 0; i < voxel_count; i++) {
-        voxels[i].groupId = -1;
+        Voxel *v = &voxels[i];
+        bool belongsToDynamic = false;
+        if (v->groupId >= 0 && v->groupId < MAX_VOXEL_GROUPS) {
+            VoxelGroupBody *body = &voxelGroupBody[v->groupId];
+            if (body->exists && body->dynamic) {
+                belongsToDynamic = true;
+            }
+        }
+        if (!belongsToDynamic) {
+            v->groupId = -1;
+        }
     }
 
     voxelGroupCount = 0;
@@ -466,6 +499,22 @@ static void compute_static_voxel_groups(void) {
         }
     }
     refine_groups_break_bridges();
+
+    int dynamicMax = -1;
+    for (int g = 0; g < MAX_VOXEL_GROUPS; g++) {
+        VoxelGroupBody *body = &voxelGroupBody[g];
+        if (!body->exists || !body->dynamic) continue;
+        if (body->memberCount <= 0) continue;
+        if (dynamicMax < g) dynamicMax = g;
+        for (int i = 0; i < body->memberCount; i++) {
+            int idx = body->members[i];
+            if (idx < 0 || idx >= voxel_count) continue;
+            voxels[idx].groupId = g;
+        }
+    }
+    if (dynamicMax >= 0 && voxelGroupCount <= dynamicMax) {
+        voxelGroupCount = dynamicMax + 1;
+    }
 }
 
 static void gather_group_members(void) {
@@ -499,6 +548,280 @@ static void gather_group_members(void) {
     if (limit < MAX_VOXEL_GROUPS) {
         groupMemberOffsets[limit + 1] = total;
     }
+}
+
+static void clear_group_body(VoxelGroupBody *body) {
+    if (!body) return;
+    if (body->localPositions) { free(body->localPositions); }
+    if (body->members) { free(body->members); }
+    if (body->colors) { free(body->colors); }
+    if (body->fixedFlags) { free(body->fixedFlags); }
+    if (body->types) { free(body->types); }
+    if (body->owners) { free(body->owners); }
+    body->localPositions = NULL;
+    body->members = NULL;
+    body->colors = NULL;
+    body->fixedFlags = NULL;
+    body->types = NULL;
+    body->owners = NULL;
+    body->memberCount = 0;
+    body->exists = false;
+    body->dynamic = false;
+    body->settled = false;
+    body->position = (Vector3){0,0,0};
+    body->velocity = (Vector3){0,0,0};
+    body->axisX = (Vector3){1,0,0};
+    body->axisY = (Vector3){0,1,0};
+    body->axisZ = (Vector3){0,0,1};
+}
+
+static void detach_dynamic_group(int groupId, VoxelGroupBody *body) {
+    if (!body || !body->exists || body->memberCount <= 0) return;
+    for (int i = 0; i < body->memberCount; i++) {
+        int idx = body->members[i];
+        if (idx < 0 || idx >= voxel_count) continue;
+        Voxel *v = &voxels[idx];
+        table_remove(v->gx, v->gy, v->gz);
+        mark_surface_neighbors(v->pos);
+        v->simulate = false;
+        v->fixed = false;
+    }
+    if (groundedGroupId >= 0 && groundedGroupId < MAX_VOXEL_GROUPS) {
+        mark_group_dirty(groundedGroupId);
+    }
+}
+
+static void rebuild_group_bodies(void) {
+    if (!groupBodiesDirty) return;
+
+    int limit = voxelGroupCount;
+    if (limit > MAX_VOXEL_GROUPS) limit = MAX_VOXEL_GROUPS;
+    if (limit < 0) limit = 0;
+
+    if (limit == 0) {
+        groundedGroupId = -1;
+        groupBodiesDirty = false;
+        return;
+    }
+
+    gather_group_members();
+
+    int newGround = -1;
+    int largestCount = -1;
+    const float half = VOXEL_SIZE * 0.5f;
+    for (int g = 0; g < limit; g++) {
+        int start = groupMemberOffsets[g];
+        int end = groupMemberOffsets[g + 1];
+        int count = end - start;
+        if (count <= 0) continue;
+
+        bool touchesGround = false;
+        for (int idx = start; idx < end; idx++) {
+            Voxel *v = &voxels[groupMemberList[idx]];
+            float bottom = v->pos.y - half;
+            if (bottom <= 0.001f) {
+                touchesGround = true;
+                break;
+            }
+        }
+        if (!touchesGround) continue;
+        if (count > largestCount) {
+            largestCount = count;
+            newGround = g;
+        }
+    }
+
+    if (newGround < 0) {
+        for (int g = 0; g < limit; g++) {
+            int start = groupMemberOffsets[g];
+            int end = groupMemberOffsets[g + 1];
+            int count = end - start;
+            if (count > largestCount) {
+                largestCount = count;
+                newGround = g;
+            }
+        }
+    }
+
+    groundedGroupId = newGround;
+
+    for (int g = 0; g < limit; g++) {
+        int start = groupMemberOffsets[g];
+        int end = groupMemberOffsets[g + 1];
+        int count = end - start;
+        VoxelGroupBody *body = &voxelGroupBody[g];
+        bool wasDynamic = body->exists && body->dynamic;
+
+        if (count <= 0) {
+            if (!wasDynamic) {
+                clear_group_body(body);
+            } else {
+                voxelGroupRender[g].drawOffset = body->position;
+            }
+            continue;
+        }
+
+        clear_group_body(body);
+
+        body->members = malloc(sizeof(int) * count);
+        body->localPositions = malloc(sizeof(Vector3) * count);
+        body->colors = malloc(sizeof(Color) * count);
+        body->fixedFlags = malloc(sizeof(unsigned char) * count);
+        body->types = malloc(sizeof(int) * count);
+        body->owners = malloc(sizeof(int) * count);
+        if (!body->members || !body->localPositions || !body->colors ||
+            !body->fixedFlags || !body->types || !body->owners) {
+            clear_group_body(body);
+            continue;
+        }
+
+        for (int j = 0; j < count; j++) {
+            int idx = groupMemberList[start + j];
+            Voxel *v = &voxels[idx];
+            body->members[j] = idx;
+            body->localPositions[j] = v->pos;
+            body->colors[j] = v->color;
+            body->fixedFlags[j] = v->fixed ? 1 : 0;
+            body->types[j] = v->type;
+            body->owners[j] = v->owner;
+        }
+
+        body->memberCount = count;
+        body->exists = true;
+        body->settled = false;
+        body->position = (Vector3){0,0,0};
+        body->velocity = (Vector3){0,0,0};
+        body->axisX = (Vector3){1,0,0};
+        body->axisY = (Vector3){0,1,0};
+        body->axisZ = (Vector3){0,0,1};
+
+        if (g == groundedGroupId) {
+            body->dynamic = false;
+            voxelGroupRender[g].drawOffset = (Vector3){0,0,0};
+            for (int j = 0; j < count; j++) {
+                int idx = body->members[j];
+                if (idx < 0 || idx >= voxel_count) continue;
+                voxels[idx].simulate = false;
+            }
+        } else {
+            body->dynamic = true;
+            detach_dynamic_group(g, body);
+            voxelGroupRender[g].drawOffset = body->position;
+        }
+    }
+
+    for (int g = limit; g < MAX_VOXEL_GROUPS; g++) {
+        VoxelGroupBody *body = &voxelGroupBody[g];
+        if (body->exists && !body->dynamic) {
+            clear_group_body(body);
+        }
+    }
+
+    groupBodiesDirty = false;
+}
+
+static float resolve_group_vertical_motion(int groupId, VoxelGroupBody *body, float desired) {
+    if (!body || !body->exists || body->memberCount <= 0) return desired;
+
+    float allowed = desired;
+    const float half = VOXEL_SIZE * 0.5f;
+
+    if (desired < 0.0f) {
+        for (int i = 0; i < body->memberCount; i++) {
+            Vector3 worldPos = v_add(body->localPositions[i], body->position);
+            float bottom = worldPos.y - half;
+            float groundLimit = -bottom;
+            if (allowed < groundLimit) {
+                allowed = groundLimit;
+            }
+
+            int gx = (int)floorf(worldPos.x / VOXEL_SIZE);
+            int gy = (int)floorf(worldPos.y / VOXEL_SIZE);
+            int gz = (int)floorf(worldPos.z / VOXEL_SIZE);
+
+            int belowIdx = table_get(gx, gy - 1, gz);
+            if (belowIdx >= 0) {
+                Voxel *b = &voxels[belowIdx];
+                if (voxel_is_static_active(b) && b->groupId != groupId) {
+                    float occupantTop = (b->gy + 1) * VOXEL_SIZE;
+                    float dropLimit = occupantTop - bottom;
+                    if (allowed < dropLimit) {
+                        allowed = dropLimit;
+                    }
+                }
+            }
+        }
+    } else if (desired > 0.0f) {
+        for (int i = 0; i < body->memberCount; i++) {
+            Vector3 worldPos = v_add(body->localPositions[i], body->position);
+            float top = worldPos.y + half;
+            int gx = (int)floorf(worldPos.x / VOXEL_SIZE);
+            int gy = (int)floorf(worldPos.y / VOXEL_SIZE);
+            int gz = (int)floorf(worldPos.z / VOXEL_SIZE);
+
+            int aboveIdx = table_get(gx, gy + 1, gz);
+            if (aboveIdx >= 0) {
+                Voxel *b = &voxels[aboveIdx];
+                if (voxel_is_static_active(b) && b->groupId != groupId) {
+                    float occupantBottom = b->gy * VOXEL_SIZE;
+                    float riseLimit = occupantBottom - top;
+                    if (allowed > riseLimit) {
+                        allowed = riseLimit;
+                    }
+                }
+            }
+        }
+    }
+    return allowed;
+}
+
+static void settle_group_into_ground(int groupId) {
+    if (groupId < 0 || groupId >= MAX_VOXEL_GROUPS) return;
+    VoxelGroupBody *body = &voxelGroupBody[groupId];
+    if (!body || !body->exists) return;
+    if (groundedGroupId < 0) groundedGroupId = groupId;
+
+    for (int i = 0; i < body->memberCount; i++) {
+        int idx = body->members[i];
+        if (idx < 0 || idx >= voxel_count) continue;
+        Voxel *v = &voxels[idx];
+        Vector3 worldPos = v_add(body->localPositions[i], body->position);
+        v->pos = worldPos;
+        v->vel = (Vector3){0,0,0};
+        v->simulate = false;
+        v->fixed = body->fixedFlags ? (body->fixedFlags[i] != 0) : false;
+        v->color = body->colors ? body->colors[i] : v->color;
+        v->type = body->types ? body->types[i] : v->type;
+        v->owner = body->owners ? body->owners[i] : v->owner;
+        v->groupId = groundedGroupId;
+        v->gx = (int)floorf(worldPos.x / VOXEL_SIZE);
+        v->gy = (int)floorf(worldPos.y / VOXEL_SIZE);
+        v->gz = (int)floorf(worldPos.z / VOXEL_SIZE);
+        table_set(v->gx, v->gy, v->gz, idx);
+        mark_surface(idx);
+        mark_surface_neighbors(worldPos);
+    }
+
+    voxelGroupRender[groupId].drawOffset = (Vector3){0,0,0};
+
+    clear_group_body(body);
+    unload_group_mesh(&voxelGroupRender[groupId]);
+    voxelGroupRender[groupId].dirty = true;
+
+    if (groundedGroupId >= 0) {
+        voxelGroupRender[groundedGroupId].dirty = true;
+        groupStructureDirty[groundedGroupId] = 0;
+    }
+    groupBodiesDirty = true;
+}
+
+static Matrix body_transform_matrix(const VoxelGroupBody *body) {
+    if (!body || !body->exists) {
+        return MatrixIdentity();
+    }
+    Matrix translation = MatrixTranslate(body->position.x, body->position.y, body->position.z);
+    // TODO: incorporate axis rotations when angular dynamics are introduced.
+    return translation;
 }
 
 static void refine_groups_break_bridges(void) {
@@ -768,41 +1091,12 @@ static void refine_groups_break_bridges(void) {
     }
     if (splitOccurred) {
         groupsDirty = true;
+        groupBodiesDirty = true;
     }
     free(cursor);
     free(members);
     free(offsets);
     free(counts);
-}
-
-static void translate_group(int groupId, float dy) {
-    if (groupId < 0 || groupId >= voxelGroupCount) return;
-    if (fabsf(dy) < 1e-6f) return;
-    int start = groupMemberOffsets[groupId];
-    int end = groupMemberOffsets[groupId + 1];
-    if (start >= end) return;
-    for (int idx = start; idx < end; idx++) {
-        Voxel *v = &voxels[groupMemberList[idx]];
-        table_remove(v->gx, v->gy, v->gz);
-    }
-    for (int idx = start; idx < end; idx++) {
-        Voxel *v = &voxels[groupMemberList[idx]];
-        v->pos.y += dy;
-        v->gy = (int)floorf(v->pos.y / VOXEL_SIZE);
-    }
-    for (int idx = start; idx < end; idx++) {
-        int vi = groupMemberList[idx];
-        Voxel *v = &voxels[vi];
-        table_set(v->gx, v->gy, v->gz, vi);
-    }
-    for (int idx = start; idx < end; idx++) {
-        int vi = groupMemberList[idx];
-        mark_surface(vi);
-        mark_surface_neighbors(voxels[vi].pos);
-    }
-    if (groupId >= 0 && groupId < MAX_VOXEL_GROUPS) {
-        voxelGroupRender[groupId].drawOffset.y += dy;
-    }
 }
 
 static void ensure_voxel_groups_up_to_date(void) {
@@ -816,116 +1110,53 @@ static void ensure_voxel_groups_up_to_date(void) {
         if (groupStructureDirty[i]) {
             voxelGroupRender[i].dirty = true;
         }
-        voxelGroupState[i].active = true;
-        if (!voxelGroupState[i].falling) {
-            voxelGroupState[i].velocity = (Vector3){0,0,0};
-        }
     }
     for (int i = voxelGroupCount; i < prevRenderCount; i++) {
         unload_group_mesh(&voxelGroupRender[i]);
-        voxelGroupState[i].active = false;
-        voxelGroupState[i].falling = false;
-        voxelGroupState[i].velocity = (Vector3){0,0,0};
         if (i < MAX_VOXEL_GROUPS) {
             groupStructureDirty[i] = 0;
+            clear_group_body(&voxelGroupBody[i]);
         }
     }
     voxelGroupRenderCount = voxelGroupCount;
     groupsDirty = false;
-}
-
-static bool group_supported(int groupId) {
-    if (groupId < 0 || groupId >= voxelGroupCount) return false;
-    int start = groupMemberOffsets[groupId];
-    int end = groupMemberOffsets[groupId + 1];
-    if (start >= end) return true;
-    const float half = VOXEL_SIZE * 0.5f;
-    for (int idx = start; idx < end; idx++) {
-        Voxel *v = &voxels[groupMemberList[idx]];
-        float bottom = v->pos.y - half;
-        if (bottom <= 0.001f) {
-            return true;
-        }
-        int belowIdx = table_get(v->gx, v->gy - 1, v->gz);
-        if (belowIdx >= 0) {
-            Voxel *b = &voxels[belowIdx];
-            if (voxel_is_static_active(b) && b->groupId != groupId) {
-                return true;
-            }
-        }
-    }
-    return false;
+    groupBodiesDirty = true;
 }
 
 static void update_group_physics(float dt) {
     ensure_voxel_groups_up_to_date();
-    if (voxelGroupCount <= 0) return;
-    gather_group_members();
+    rebuild_group_bodies();
     int limit = (voxelGroupCount > MAX_VOXEL_GROUPS) ? MAX_VOXEL_GROUPS : voxelGroupCount;
-    const float half = VOXEL_SIZE * 0.5f;
-    bool regroupNeeded = false;
     for (int g = 0; g < limit; g++) {
-        int start = groupMemberOffsets[g];
-        int end   = groupMemberOffsets[g + 1];
-        VoxelGroupState *state = &voxelGroupState[g];
-        if (start >= end) {
-            state->active = false;
-            state->falling = false;
-            state->velocity = (Vector3){0,0,0};
+        VoxelGroupBody *body = &voxelGroupBody[g];
+        if (!body->exists) {
+            voxelGroupRender[g].drawOffset = (Vector3){0,0,0};
             continue;
         }
-        state->active = true;
-        bool supported = group_supported(g);
-        if (supported) {
-            if (state->falling) {
-                state->falling = false;
-                state->velocity = (Vector3){0,0,0};
-            }
+
+        if (!body->dynamic) {
+            voxelGroupRender[g].drawOffset = body->position;
             continue;
         }
-        if (!state->falling) {
-            state->falling = true;
-            state->velocity = (Vector3){0,0,0};
-        }
-        state->velocity.y -= GROUP_GRAVITY * dt;
-        float desired = state->velocity.y * dt;
-        float allowed = desired;
-        int collidedGroup = -1;
-        for (int idx = start; idx < end; idx++) {
-            Voxel *v = &voxels[groupMemberList[idx]];
-            float bottom = v->pos.y - half;
-            float groundLimit = -bottom;
-            if (allowed < groundLimit) {
-                allowed = groundLimit;
-                collidedGroup = -1;
-            }
-            int belowIdx = table_get(v->gx, v->gy - 1, v->gz);
-            if (belowIdx >= 0) {
-                Voxel *b = &voxels[belowIdx];
-                if (voxel_is_static_active(b) && b->groupId != g) {
-                    float occupantTop = (b->gy + 1) * VOXEL_SIZE;
-                    float dropLimit = occupantTop - bottom;
-                    if (allowed < dropLimit) {
-                        allowed = dropLimit;
-                        collidedGroup = b->groupId;
-                    }
-                }
-            }
-        }
+
+        body->velocity.y -= GROUP_GRAVITY * dt;
+        float desired = body->velocity.y * dt;
+        float allowed = resolve_group_vertical_motion(g, body, desired);
+        bool collided = (allowed > desired + 1e-5f);
+
         if (fabsf(allowed) > 1e-6f) {
-            translate_group(g, allowed);
+            body->position.y += allowed;
         }
-        if (allowed > desired + 1e-5f) {
-            state->falling = false;
-            state->velocity = (Vector3){0,0,0};
-            if (collidedGroup >= 0) {
-                mark_group_dirty(collidedGroup);
+
+        if (collided) {
+            body->velocity.y = 0.0f;
+            if (fabsf(desired) < GROUP_REST_VELOCITY_THRESHOLD) {
+                settle_group_into_ground(g);
+                continue;
             }
-            regroupNeeded = true;
         }
-    }
-    if (regroupNeeded) {
-        groupsDirty = true;
+
+        voxelGroupRender[g].drawOffset = body->position;
     }
 }
 
@@ -950,6 +1181,7 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     table_set(v->gx, v->gy, v->gz, idx);
     if (!simulate) {
         groupsDirty = true;
+        groupBodiesDirty = true;
     }
     return idx;
 }
@@ -1013,8 +1245,13 @@ static void buildDemo(void) {
 static int first_voxel_hit(Ray ray, float t_max, int ignore_id);
 static void UpdateKdRatio(int player_index);
 static void gather_group_members(void);
-static void translate_group(int groupId, float dy);
 static void update_group_physics(float dt);
+static void clear_group_body(VoxelGroupBody *body);
+static void rebuild_group_bodies(void);
+static void detach_dynamic_group(int groupId, VoxelGroupBody *body);
+static float resolve_group_vertical_motion(int groupId, VoxelGroupBody *body, float desired);
+static void settle_group_into_ground(int groupId);
+static Matrix body_transform_matrix(const VoxelGroupBody *body);
 
 // Reset game: players and voxels
 static void ResetGame(void) {
@@ -1047,8 +1284,13 @@ static void ResetGame(void) {
     voxelGroupCount = 0;
     voxelGroupRenderCount = 0;
     mark_all_groups_dirty();
+    groundedGroupId = -1;
+    for (int i = 0; i < MAX_VOXEL_GROUPS; i++) {
+        clear_group_body(&voxelGroupBody[i]);
+    }
+    groupBodiesDirty = true;
 
-} 
+}
 
 static void UpdateKdRatio(int player_index) {
     Player *p = &players[player_index];
@@ -1060,6 +1302,12 @@ static void physics_step(float dt) {    // Rebuild spatial hash
     memset(table, 0, sizeof(table));
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
+        if (v->groupId >= 0 && v->groupId < MAX_VOXEL_GROUPS) {
+            VoxelGroupBody *body = &voxelGroupBody[v->groupId];
+            if (body->exists && body->dynamic) {
+                continue; // dynamic groups are tracked separately while detached
+            }
+        }
         int x = (int)floorf(v->pos.x / VOXEL_SIZE);
         int y = (int)floorf(v->pos.y / VOXEL_SIZE);
         int z = (int)floorf(v->pos.z / VOXEL_SIZE);
@@ -1070,6 +1318,12 @@ static void physics_step(float dt) {    // Rebuild spatial hash
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
         if (!v->simulate) continue;
+        if (v->groupId >= 0 && v->groupId < MAX_VOXEL_GROUPS) {
+            VoxelGroupBody *body = &voxelGroupBody[v->groupId];
+            if (body->exists && body->dynamic) {
+                continue;
+            }
+        }
 
         // Apply gravity
         v->vel.y -= GRAVITY * dt;
@@ -1395,7 +1649,8 @@ static int first_voxel_hit(Ray ray, float t_max, int ignore_id) {
 // Only one layer is drawn per voxel, this makes layers disappear on the individual voxel level
 
 static void merge_rects_on_plane(int count, int *list, int plane, bool positive,
-                                 Patch *patchBuffer, int patchCapacity, int *patchCount) {
+                                 Patch *patchBuffer, int patchCapacity, int *patchCount,
+                                 int groupId, const VoxelGroupBody *bodyInfo) {
     if (!count) return;
 
     // Group voxels by layer
@@ -1506,6 +1761,9 @@ static void merge_rects_on_plane(int count, int *list, int plane, bool positive,
                 }
                 if (baseIdx >= 0) {
                     pt->col = voxel_group_color(&voxels[baseIdx]);
+                } else if (bodyInfo && bodyInfo->exists && bodyInfo->dynamic && count > 0) {
+                    Voxel *fallback = &voxels[list[0]];
+                    pt->col = fallback->color;
                 } else {
                     pt->col = (Color){ 255, 255, 255, 255 };
                 }
@@ -1531,10 +1789,18 @@ static Mesh gen_group_mesh(int groupId, Patch **outPatches, int *outPatchCount) 
     int yzPosCount = 0, yzNegCount = 0;
     int xzPosCount = 0, xzNegCount = 0;
     int xyPosCount = 0, xyNegCount = 0;
+    const VoxelGroupBody *bodyInfo = NULL;
+    if (groupId >= 0 && groupId < MAX_VOXEL_GROUPS) {
+        bodyInfo = &voxelGroupBody[groupId];
+    }
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
-        if (!voxel_is_static_active(v)) continue;
         if (v->groupId != groupId) continue;
+        bool include = voxel_is_static_active(v);
+        if (!include && bodyInfo && bodyInfo->exists && bodyInfo->dynamic) {
+            include = true;
+        }
+        if (!include) continue;
         if (v->surface[0]) yzPosList[yzPosCount++] = i;
         if (v->surface[1]) yzNegList[yzNegCount++] = i;
         if (v->surface[2]) xzPosList[xzPosCount++] = i;
@@ -1544,12 +1810,12 @@ static Mesh gen_group_mesh(int groupId, Patch **outPatches, int *outPatchCount) 
     }
 
     int patchCount = 0;
-    merge_rects_on_plane(xyPosCount, xyPosList, 0, true,  patchTemp, MAX_VOXELS, &patchCount);
-    merge_rects_on_plane(xyNegCount, xyNegList, 0, false, patchTemp, MAX_VOXELS, &patchCount);
-    merge_rects_on_plane(xzPosCount, xzPosList, 1, true,  patchTemp, MAX_VOXELS, &patchCount);
-    merge_rects_on_plane(xzNegCount, xzNegList, 1, false, patchTemp, MAX_VOXELS, &patchCount);
-    merge_rects_on_plane(yzPosCount, yzPosList, 2, true,  patchTemp, MAX_VOXELS, &patchCount);
-    merge_rects_on_plane(yzNegCount, yzNegList, 2, false, patchTemp, MAX_VOXELS, &patchCount);
+    merge_rects_on_plane(xyPosCount, xyPosList, 0, true,  patchTemp, MAX_VOXELS, &patchCount, groupId, bodyInfo);
+    merge_rects_on_plane(xyNegCount, xyNegList, 0, false, patchTemp, MAX_VOXELS, &patchCount, groupId, bodyInfo);
+    merge_rects_on_plane(xzPosCount, xzPosList, 1, true,  patchTemp, MAX_VOXELS, &patchCount, groupId, bodyInfo);
+    merge_rects_on_plane(xzNegCount, xzNegList, 1, false, patchTemp, MAX_VOXELS, &patchCount, groupId, bodyInfo);
+    merge_rects_on_plane(yzPosCount, yzPosList, 2, true,  patchTemp, MAX_VOXELS, &patchCount, groupId, bodyInfo);
+    merge_rects_on_plane(yzNegCount, yzNegList, 2, false, patchTemp, MAX_VOXELS, &patchCount, groupId, bodyInfo);
 
     if (patchCount == 0) {
         free(patchTemp);
@@ -1727,7 +1993,9 @@ static void DrawVoxels(Camera3D cam) {
         ensure_group_mesh(g);
         VoxelGroupRender *grp = &voxelGroupRender[g];
         if (grp->mesh.vertexCount > 0) {
-            Matrix transform = MatrixTranslate(grp->drawOffset.x, grp->drawOffset.y, grp->drawOffset.z);
+            const VoxelGroupBody *body = (g < MAX_VOXEL_GROUPS) ? &voxelGroupBody[g] : NULL;
+            Matrix transform = body ? body_transform_matrix(body)
+                                    : MatrixTranslate(grp->drawOffset.x, grp->drawOffset.y, grp->drawOffset.z);
             DrawMesh(grp->mesh, groupMaterial, transform);
         }
     }
@@ -1743,6 +2011,12 @@ static void DrawVoxels(Camera3D cam) {
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
         if (v->simulate) {
+            if (v->groupId >= 0 && v->groupId < MAX_VOXEL_GROUPS) {
+                VoxelGroupBody *body = &voxelGroupBody[v->groupId];
+                if (body->exists && body->dynamic) {
+                    continue;
+                }
+            }
             drawCubeMan(v->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, v->color);
         }
     }

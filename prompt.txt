@@ -1,0 +1,12 @@
+new voxel goup is created I want it to be greedily meshed
+  seperateley from other groups which it currently is. The
+  meshing generates a simplified polygon object which will
+  now represent the group. This object will have a x,y,z axis
+  which initially will align with the global axis. This object
+  will experience gravity and collide with the global non
+  moving group i.e. the one that is grounded. This motion will
+  be animated by the simply greedy mesh and its axises being
+  updated. When the object finally comes to rest the final group
+  coordinates will be used to translate all voxels back into
+  the global frame and combined with the global group (grounded
+  largest group). could you sumarize a plan for these changes?
