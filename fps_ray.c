@@ -1944,7 +1944,7 @@ int main(void) {
             // Block velocity where a neighbor voxel exists in movement direction
             {
                 bool neigh[6];
-                get_adjacent_voxel_directions(v_add(p->pos,v_mul(p->vel,dt)), neigh);
+                get_adjacent_voxel_directions(v_add(p->pos,v_mul(p->vel,dt_raw)), neigh);
                 // X-axis (+X/neigh[0], -X/neigh[1])
                 if ((p->vel.x > 0 && neigh[0]) || (p->vel.x < 0 && neigh[1])) p->vel.x = 0;
                 // Y-axis (+Y/neigh[2], -Y/neigh[3])
@@ -1953,7 +1953,7 @@ int main(void) {
                 if ((p->vel.z > 0 && neigh[4]) || (p->vel.z < 0 && neigh[5])) p->vel.z = 0;
                 if (!neigh[3]){
                     // apply gravity
-                    p->vel.y -= GRAVITY*dt;
+                    p->vel.y -= GRAVITY*dt_raw;
                     p->onGround = false;
                 }else{
                     p->onGround = true;
@@ -1962,9 +1962,9 @@ int main(void) {
             
 
             // apply movement
-            p->pos.x += p->vel.x*dt;
-            p->pos.y += p->vel.y*dt;
-            p->pos.z += p->vel.z*dt;
+            p->pos.x += p->vel.x*dt_raw;
+            p->pos.y += p->vel.y*dt_raw;
+            p->pos.z += p->vel.z*dt_raw;
 
             // ground clamp
             if (p->pos.y <= BASE_EYE_HEIGHT) {
