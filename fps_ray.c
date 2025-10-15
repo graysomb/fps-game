@@ -68,6 +68,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define STRAIN_LIMIT_BASE_COMPRESSION (-0.25f)
 #define STRAIN_LIMIT_SHELL_BONUS   1000.0f
 
+#define MAX_VOXEL_LINEAR_SPEED   50.0f
+
 // Tunable voxel edit brush (per-axis span of the add/remove operation)
 static int voxelBrushSpan = 4;
 
@@ -253,7 +255,7 @@ static bool  meshDirty  = true;
 static bool  voxelModelDirty = false;
 static bool  voxelDebugLog = false;
 static int   voxelDebugFrame = 0;
-static float timeScale = 0.1f;
+static float timeScale = 0.01f;
 
 
 
@@ -841,7 +843,13 @@ static void apply_voxel_constraints(float dt) {
     if (dt <= 0.0f) return;
     for (int iter = 0; iter < CONSTRAINT_ITERATIONS; iter++) {
         for (int i = 0; i < voxel_count; i++) {
-            voxel_apply_vgs(&voxels[i], VGS_ALPHA_DEFAULT, VGS_BETA_DEFAULT, VGS_LOCAL_ITERATIONS);
+            float alpha = VGS_ALPHA_DEFAULT;
+            float beta  = VGS_BETA_DEFAULT;
+            if (voxels[i].simulate) {
+                alpha = 0.25f;
+                beta  = 0.8f;
+            }
+            voxel_apply_vgs(&voxels[i], alpha, beta, VGS_LOCAL_ITERATIONS);
         }
         for (int axis = 0; axis < 3; axis++) {
             solve_face_constraints_axis(axis);
@@ -854,6 +862,10 @@ static void apply_voxel_constraints(float dt) {
         voxel_update_center_from_corners(&voxels[i]);
         voxel_update_corner_velocities(&voxels[i], inv_dt);
         voxel_update_linear_velocity(&voxels[i], inv_dt);
+        float speed = v_length(voxels[i].vel);
+        if (speed > MAX_VOXEL_LINEAR_SPEED) {
+            voxels[i].vel = v_mul(voxels[i].vel, MAX_VOXEL_LINEAR_SPEED / speed);
+        }
     }
 }
 
