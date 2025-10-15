@@ -251,6 +251,8 @@ static int   patchCount = 0;
 static Mesh  greedyMesh = { 0 };
 static bool  meshDirty  = true;
 static bool  voxelModelDirty = false;
+static bool  voxelDebugLog = false;
+static int   voxelDebugFrame = 0;
 
 
 
@@ -743,13 +745,21 @@ static void voxel_apply_vgs(Voxel *v, float alpha, float beta, int iterations) {
         if (len2 > 1e-6f) u2 = v_mul(u2, target2 / len2);
 
         float volume = v_dot(v_cross(u0, u1), u2);
-        if (fabsf(volume) > 1e-9f) {
+        if (fabsf(volume) > 1e-6f) {
             float ratio = V0 / volume;
-            float scale = 0.5f * powf(fabsf(ratio), 1.0f / 3.0f);
+            ratio = clampf(ratio, -100.0f, 100.0f);
+            float scaleMag = powf(fabsf(ratio), 1.0f / 3.0f);
+            scaleMag = clampf(scaleMag, 0.25f, 4.0f);
+            float scale = 0.5f * scaleMag;
             if (volume < 0.0f) scale = -scale;
             u0 = v_mul(u0, scale);
             u1 = v_mul(u1, scale);
             u2 = v_mul(u2, scale);
+        } else {
+            for (int vid = 0; vid < 8; vid++) {
+                p[vid] = v_add(v->pos, voxel_corner_offsets[vid]);
+            }
+            break;
         }
 
         for (int vid = 0; vid < 8; vid++) {
@@ -827,11 +837,6 @@ static void solve_face_constraints_axis(int axis) {
 
 static void apply_voxel_constraints(float dt) {
     if (dt <= 0.0f) return;
-    for (int i = 0; i < voxel_count; i++) {
-        if (!voxels[i].simulate) continue;
-        voxel_store_prev_corners(&voxels[i]);
-    }
-
     for (int iter = 0; iter < CONSTRAINT_ITERATIONS; iter++) {
         for (int i = 0; i < voxel_count; i++) {
             voxel_apply_vgs(&voxels[i], VGS_ALPHA_DEFAULT, VGS_BETA_DEFAULT, VGS_LOCAL_ITERATIONS);
@@ -914,7 +919,7 @@ static void buildDemo(void) {
             }
         }
     }
-
+    
     const int blobRadius = 5;
     const int blobHeight = 10;
     Vector3 blobCenter = { 0.0f, (blobHeight + 4) * VOXEL_SIZE, 0.0f };
@@ -981,6 +986,7 @@ static void physics_step(float dt) {    // Rebuild spatial hash
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
         if (!v->simulate) continue;
+        voxel_store_prev_corners(v);
 
         // Apply gravity
         v->vel.y -= GRAVITY * dt;
@@ -1101,6 +1107,27 @@ static void physics_step(float dt) {    // Rebuild spatial hash
 
     if (voxelModelDirty) {
         build_voxel_model_metadata();
+    }
+
+    if (voxelDebugLog) {
+        voxelDebugFrame++;
+        if (voxelDebugFrame % 5 == 0) {
+            int logged = 0;
+            for (int i = 0; i < voxel_count && logged < 8; i++) {
+                Voxel *v = &voxels[i];
+                if (!v->simulate) continue;
+                printf("[voxel-debug] id=%d pos=(%.2f,%.2f,%.2f) vel=(%.2f,%.2f,%.2f) dist=%.2f skeleton=%d\n",
+                       i,
+                       v->pos.x, v->pos.y, v->pos.z,
+                       v->vel.x, v->vel.y, v->vel.z,
+                       v->distance_to_surface,
+                       v->skeleton);
+                logged++;
+            }
+            if (logged == 0) {
+                printf("[voxel-debug] no active voxels\n");
+            }
+        }
     }
 }
 
@@ -1850,6 +1877,10 @@ int main(void) {
 
         if (IsKeyPressed(KEY_P)) {
             gameState = GAME_STATE_PAUSED;
+        }
+        if (IsKeyPressed(KEY_F4)) {
+            voxelDebugLog = !voxelDebugLog;
+            printf("[voxel-debug] logging %s\n", voxelDebugLog ? "enabled" : "disabled");
         }
 
         // Shield regeneration
