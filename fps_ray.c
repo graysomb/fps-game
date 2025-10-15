@@ -638,11 +638,6 @@ static void compute_voxel_skeleton_from_distance(void) {
             }
         }
         v->skeleton = (selfDist >= 2.0f * VOXEL_SIZE) && localMax;
-        if (v->skeleton && v->simulate) {
-            v->simulate = false;
-            v->fixed = true;
-            voxel_update_inverse_masses(v);
-        }
     }
 }
 
@@ -886,23 +881,23 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
 
 // Build static demo cube of voxels
 static void buildDemo(void) {
-    const int floorExtent = 30; // smaller, centered platform (≈61x61 voxels)
+    const int floorExtent = 55; // covers player spawn range (≈22 units)
     for (int gx = -floorExtent; gx <= floorExtent; gx++) {
         for (int gz = -floorExtent; gz <= floorExtent; gz++) {
-            if (abs(gx) > 20 && abs(gz) > 20) continue; // trim corners for fewer voxels
+            if (abs(gx) > 45 && abs(gz) > 45) continue; // trim corners for density reduction
             float px = (gx + 0.5f) * VOXEL_SIZE;
             float pz = (gz + 0.5f) * VOXEL_SIZE;
             addVoxel(px, 0.0f, pz, true, false, (Color){ 140, 140, 150, 255 }, 0);
         }
     }
 
-    const int pillarHeight = 18;
-    const int pillarRadius = 2;
+    const int pillarHeight = 12;
+    const int pillarRadius = 1;
     const int pillarPositions[4][2] = {
-        { -18, -18 },
-        { -18,  18 },
-        {  18, -18 },
-        {  18,  18 }
+        { -20, -20 },
+        { -20,  20 },
+        {  20, -20 },
+        {  20,  20 }
     };
     for (int p = 0; p < 4; p++) {
         int cx = pillarPositions[p][0];
@@ -910,26 +905,30 @@ static void buildDemo(void) {
         for (int gy = 1; gy <= pillarHeight; gy++) {
             for (int dx = -pillarRadius; dx <= pillarRadius; dx++) {
                 for (int dz = -pillarRadius; dz <= pillarRadius; dz++) {
-                    if (dx*dx + dz*dz > pillarRadius*pillarRadius) continue;
+                    if (abs(dx) + abs(dz) > pillarRadius + 1) continue;
                     float px = (cx + dx + 0.5f) * VOXEL_SIZE;
                     float py = (gy + 0.5f) * VOXEL_SIZE;
                     float pz = (cz + dz + 0.5f) * VOXEL_SIZE;
-                    addVoxel(px, py, pz, true, false, (Color){ 180, 110, 70, 255 }, 0);
+                    addVoxel(px, py, pz, true, false, (Color){ 165, 115, 90, 255 }, 0);
                 }
             }
         }
     }
 
-    const int platformExtent = 8;
-    const int platformHeight = 6;
-    for (int gy = 12; gy < 12 + platformHeight; gy++) {
-        for (int gx = -platformExtent; gx <= platformExtent; gx++) {
-            for (int gz = -platformExtent; gz <= platformExtent; gz++) {
-                if (abs(gx) > platformExtent - 2 && abs(gz) > platformExtent - 2) continue;
-                float px = (gx + 0.5f) * VOXEL_SIZE;
-                float py = (gy + 0.5f) * VOXEL_SIZE;
-                float pz = (gz + 0.5f) * VOXEL_SIZE;
-                addVoxel(px, py, pz, true, false, (Color){ 90, 180, 110, 255 }, 0);
+    const int blobRadius = 5;
+    const int blobHeight = 10;
+    Vector3 blobCenter = { 0.0f, (blobHeight + 4) * VOXEL_SIZE, 0.0f };
+    for (int gx = -blobRadius; gx <= blobRadius; gx++) {
+        for (int gy = 0; gy < blobHeight; gy++) {
+            for (int gz = -blobRadius; gz <= blobRadius; gz++) {
+                float dx = (float)gx;
+                float dz = (float)gz;
+                if (dx*dx + dz*dz > (blobRadius + 0.5f)*(blobRadius + 0.5f)) continue;
+                float px = blobCenter.x + (gx + 0.5f) * VOXEL_SIZE;
+                float py = blobCenter.y + (gy + 0.5f) * VOXEL_SIZE;
+                float pz = blobCenter.z + (gz + 0.5f) * VOXEL_SIZE;
+                Color c = (Color){ 80, (unsigned char)(130 + gy*4), 200, 255 };
+                addVoxel(px, py, pz, false, true, c, 0);
             }
         }
     }
@@ -951,7 +950,7 @@ static void ResetGame(void) {
         players[i].pitch_vel = 0;
         players[i].vel = (Vector3){0,0,0};
         players[i].onGround = true;
-        players[i].vType = 0;
+        players[i].vType = 1;
         players[i].kills = 0;
         players[i].deaths = 0;
         UpdateKdRatio(i);
@@ -1018,6 +1017,7 @@ static void physics_step(float dt) {    // Rebuild spatial hash
                                     table_remove(victim->gx, victim->gy, victim->gz);
                                     mark_surface_neighbors(victim->pos);
                                     voxel_deactivate(victim);
+                                    voxelModelDirty = true;
                                 }
                             }
                         }
