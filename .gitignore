@@ -1,6 +1,7 @@
 voxel_addel/cmake-4.0.1/
 voxel_addel/raylib/
 voxel_addel/cmake-4.0.1.tar.gz
+DestructibleVoxelSystem/
 
 gen_flame.sh
 out.perf

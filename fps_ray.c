@@ -10,6 +10,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <limits.h>
+#include <float.h>
 
 // Game state enum
 typedef enum {
@@ -55,6 +56,18 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define HASH_SIZE     131072    // must be power of two
 #define VOXEL_SIZE     0.2f    // size of each voxel cube
 
+#define VGS_ALPHA_DEFAULT       0.5f
+#define VGS_BETA_DEFAULT        1.0f
+#define VGS_LOCAL_ITERATIONS    3
+#define CONSTRAINT_ITERATIONS   3
+
+#define VOXEL_PARTICLE_RADIUS   (VOXEL_SIZE * 0.5f)
+#define HALF_VOXEL_SIZE         (VOXEL_SIZE * 0.5f)
+
+#define STRAIN_LIMIT_BASE_TENSION  0.35f
+#define STRAIN_LIMIT_BASE_COMPRESSION (-0.25f)
+#define STRAIN_LIMIT_SHELL_BONUS   1000.0f
+
 // Tunable voxel edit brush (per-axis span of the add/remove operation)
 static int voxelBrushSpan = 4;
 
@@ -90,9 +103,74 @@ typedef struct {
        0=+X,1=-X,2=+Y,3=-Y,4=+Z,5=-Z */
     bool surface[6];
     int  gx, gy, gz;
+    Vector3 corners[8];
+    Vector3 corners_prev[8];
+    Vector3 corner_vel[8];
+    float  inv_mass[8];
+    float  rest_volume;
+    float  particle_radius;
+    float  distance_to_surface;
+    bool   skeleton;
 } Voxel;
 static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
+
+static const Vector3 voxel_corner_offsets[8] = {
+    { -HALF_VOXEL_SIZE, -HALF_VOXEL_SIZE, -HALF_VOXEL_SIZE },
+    {  HALF_VOXEL_SIZE, -HALF_VOXEL_SIZE, -HALF_VOXEL_SIZE },
+    { -HALF_VOXEL_SIZE,  HALF_VOXEL_SIZE, -HALF_VOXEL_SIZE },
+    {  HALF_VOXEL_SIZE,  HALF_VOXEL_SIZE, -HALF_VOXEL_SIZE },
+    { -HALF_VOXEL_SIZE, -HALF_VOXEL_SIZE,  HALF_VOXEL_SIZE },
+    {  HALF_VOXEL_SIZE, -HALF_VOXEL_SIZE,  HALF_VOXEL_SIZE },
+    { -HALF_VOXEL_SIZE,  HALF_VOXEL_SIZE,  HALF_VOXEL_SIZE },
+    {  HALF_VOXEL_SIZE,  HALF_VOXEL_SIZE,  HALF_VOXEL_SIZE }
+};
+
+static const int face_axis_offsets[3][3] = {
+    { 1, 0, 0 },
+    { 0, 1, 0 },
+    { 0, 0, 1 }
+};
+
+static const int face_vertex_pairs[3][4][2] = {
+    { {1,0}, {3,2}, {5,4}, {7,6} }, // +X face against neighbor's -X face
+    { {2,0}, {3,1}, {6,4}, {7,5} }, // +Y
+    { {4,0}, {5,1}, {6,2}, {7,3} }  // +Z
+};
+
+static const int axis_edge_pairs[3][4][2] = {
+    { {0,1}, {2,3}, {4,5}, {6,7} }, // X edges
+    { {0,2}, {1,3}, {4,6}, {5,7} }, // Y edges
+    { {0,4}, {1,5}, {2,6}, {3,7} }  // Z edges
+};
+
+typedef struct {
+    int   a;
+    int   b;
+    float strain_compressive;
+    float strain_tensile;
+    bool  active;
+} FaceConstraint;
+
+static FaceConstraint face_constraints[3][MAX_VOXELS];
+static int face_constraint_counts[3] = { 0, 0, 0 };
+
+static void clear_face_constraints(void) {
+    for (int axis = 0; axis < 3; axis++) {
+        face_constraint_counts[axis] = 0;
+    }
+}
+
+static void add_face_constraint(int axis, int a, int b, float strain_c, float strain_t) {
+    if (axis < 0 || axis >= 3) return;
+    if (face_constraint_counts[axis] >= MAX_VOXELS) return;
+    FaceConstraint *dst = &face_constraints[axis][face_constraint_counts[axis]++];
+    dst->a = a;
+    dst->b = b;
+    dst->strain_compressive = strain_c;
+    dst->strain_tensile = strain_t;
+    dst->active = true;
+}
 
 
 // Utility functions
@@ -110,6 +188,26 @@ static Vector3 v_add(Vector3 a, Vector3 b) {
 static Vector3 v_mul(Vector3 v, float s) {
     return (Vector3){ v.x*s, v.y*s, v.z*s };
 }
+static Vector3 v_sub(Vector3 a, Vector3 b) {
+    return (Vector3){ a.x - b.x, a.y - b.y, a.z - b.z };
+}
+static float v_dot(Vector3 a, Vector3 b) {
+    return a.x*b.x + a.y*b.y + a.z*b.z;
+}
+static Vector3 v_cross(Vector3 a, Vector3 b) {
+    return (Vector3){
+        a.y*b.z - a.z*b.y,
+        a.z*b.x - a.x*b.z,
+        a.x*b.y - a.y*b.x
+    };
+}
+
+static Vector3 project_onto(Vector3 base, Vector3 vec) {
+    float denom = v_dot(base, base);
+    if (denom <= 1e-6f) return (Vector3){0.0f, 0.0f, 0.0f};
+    float scale = v_dot(vec, base) / denom;
+    return v_mul(base, scale);
+}
 
 static float v_length(Vector3 v) {
     return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
@@ -122,6 +220,20 @@ static Vector3 v_norm(Vector3 v) {
         return (Vector3){ 0.0f, 0.0f, 0.0f };
     }
     return v_mul(v, 1.0f / len);
+}
+
+static Vector3 v_normalize(Vector3 v) {
+    float len = v_length(v);
+    if (len <= 1e-6f) return (Vector3){0.0f, 0.0f, 0.0f};
+    return v_mul(v, 1.0f / len);
+}
+
+static bool voxel_is_removed(const Voxel *v) {
+    return (v->pos.x <= -900.0f && v->pos.y <= -900.0f && v->pos.z <= -900.0f);
+}
+
+static bool voxel_is_active(const Voxel *v) {
+    return !voxel_is_removed(v);
 }
 
 // Patch for a merged quad in one of the principal planes
@@ -138,6 +250,7 @@ static Patch patches[MAX_VOXELS];
 static int   patchCount = 0;
 static Mesh  greedyMesh = { 0 };
 static bool  meshDirty  = true;
+static bool  voxelModelDirty = false;
 
 
 
@@ -282,6 +395,18 @@ static void table_remove(int x, int y, int z) {
 // Check occupancy
 static bool occupied(int x,int y,int z){ return  table_get(x,y,z)>=0; }
 
+static void rebuild_spatial_hash(void) {
+    memset(table, 0, sizeof(table));
+    for (int i = 0; i < voxel_count; i++) {
+        Voxel *v = &voxels[i];
+        if (!voxel_is_active(v)) continue;
+        v->gx = (int)floorf(v->pos.x / VOXEL_SIZE);
+        v->gy = (int)floorf(v->pos.y / VOXEL_SIZE);
+        v->gz = (int)floorf(v->pos.z / VOXEL_SIZE);
+        table_set(v->gx, v->gy, v->gz, i);
+    }
+}
+
 static void mark_surface(int idx) {
     Voxel *v = &voxels[idx];
     int x = v->gx, y = v->gy, z = v->gz;
@@ -343,13 +468,401 @@ static void get_adjacent_voxel_directions(Vector3 pos, bool neighbors[6]) {
     }
 }
 
+static void voxel_update_inverse_masses(Voxel *v) {
+    float inv = (v->simulate && !v->fixed) ? 1.0f : 0.0f;
+    for (int i = 0; i < 8; i++) {
+        v->inv_mass[i] = inv;
+    }
+}
+
+static void voxel_sync_corners_to_center(Voxel *v) {
+    for (int i = 0; i < 8; i++) {
+        v->corners[i] = v_add(v->pos, voxel_corner_offsets[i]);
+        v->corner_vel[i] = v->vel;
+    }
+}
+
+static void voxel_apply_translation(Voxel *v, Vector3 delta) {
+    for (int i = 0; i < 8; i++) {
+        v->corners[i] = v_add(v->corners[i], delta);
+    }
+}
+
+static void voxel_store_prev_corners(Voxel *v) {
+    for (int i = 0; i < 8; i++) {
+        v->corners_prev[i] = v->corners[i];
+    }
+}
+
+static Vector3 voxel_centroid_from_corners(const Vector3 corners[8]) {
+    Vector3 sum = {0.0f, 0.0f, 0.0f};
+    for (int i = 0; i < 8; i++) sum = v_add(sum, corners[i]);
+    return v_mul(sum, 1.0f / 8.0f);
+}
+
+static void voxel_update_center_from_corners(Voxel *v) {
+    v->pos = voxel_centroid_from_corners(v->corners);
+}
+
+static void voxel_update_corner_velocities(Voxel *v, float inv_dt) {
+    if (!isfinite(inv_dt)) return;
+    for (int i = 0; i < 8; i++) {
+        Vector3 delta = v_sub(v->corners[i], v->corners_prev[i]);
+        v->corner_vel[i] = v_mul(delta, inv_dt);
+    }
+}
+
+static void voxel_update_linear_velocity(Voxel *v, float inv_dt) {
+    if (!isfinite(inv_dt)) return;
+    Vector3 prev_c = voxel_centroid_from_corners(v->corners_prev);
+    Vector3 curr_c = v->pos;
+    Vector3 delta = v_sub(curr_c, prev_c);
+    v->vel = v_mul(delta, inv_dt);
+}
+
+static void voxel_deactivate(Voxel *v) {
+    v->simulate = false;
+    v->fixed = true;
+    voxel_update_inverse_masses(v);
+    v->vel = (Vector3){0.0f, 0.0f, 0.0f};
+    v->pos = (Vector3){ -999.0f, -999.0f, -999.0f };
+    for (int i = 0; i < 8; i++) {
+        v->corners[i] = v->pos;
+        v->corner_vel[i] = (Vector3){0.0f, 0.0f, 0.0f};
+        v->corners_prev[i] = v->pos;
+    }
+    v->distance_to_surface = 0.0f;
+    v->skeleton = false;
+}
+
+static void voxel_set_velocity(Voxel *v, Vector3 vel) {
+    v->vel = vel;
+    for (int i = 0; i < 8; i++) v->corner_vel[i] = vel;
+}
+
+static void compute_voxel_distance_transform(void) {
+    if (voxel_count <= 0) return;
+
+    float *dist = (float *)malloc(sizeof(float) * (size_t)voxel_count);
+    int   *queue = (int *)malloc(sizeof(int) * (size_t)voxel_count);
+    if (!dist || !queue) {
+        free(dist);
+        free(queue);
+        return;
+    }
+
+    int head = 0, tail = 0;
+    for (int i = 0; i < voxel_count; i++) {
+        Voxel *v = &voxels[i];
+        if (!voxel_is_active(v)) {
+            dist[i] = 0.0f;
+            continue;
+        }
+        bool isSurface = false;
+        for (int s = 0; s < 6; s++) {
+            if (v->surface[s]) { isSurface = true; break; }
+        }
+        if (isSurface) {
+            dist[i] = 0.0f;
+            queue[tail++] = i;
+        } else {
+            dist[i] = FLT_MAX;
+        }
+    }
+
+    if (tail == 0) {
+        for (int i = 0; i < voxel_count; i++) {
+            if (!voxel_is_active(&voxels[i])) continue;
+            dist[i] = 0.0f;
+            queue[tail++] = i;
+        }
+    }
+
+    const int offs[6][3] = {
+        { 1, 0, 0 }, { -1, 0, 0 },
+        { 0, 1, 0 }, { 0,-1, 0 },
+        { 0, 0, 1 }, { 0, 0,-1 }
+    };
+
+    while (head < tail) {
+        int idx = queue[head++];
+        float base = dist[idx];
+        Voxel *v = &voxels[idx];
+        if (!voxel_is_active(v)) continue;
+        for (int n = 0; n < 6; n++) {
+            int nx = v->gx + offs[n][0];
+            int ny = v->gy + offs[n][1];
+            int nz = v->gz + offs[n][2];
+            int neighbor = table_get(nx, ny, nz);
+            if (neighbor < 0) continue;
+            if (dist[neighbor] > base + 1.0f) {
+                dist[neighbor] = base + 1.0f;
+                queue[tail++] = neighbor;
+            }
+        }
+    }
+
+    for (int i = 0; i < voxel_count; i++) {
+        float voxDist = (dist[i] == FLT_MAX) ? 0.0f : dist[i] * VOXEL_SIZE;
+        voxels[i].distance_to_surface = voxDist;
+    }
+
+    free(dist);
+    free(queue);
+}
+
+static void compute_voxel_skeleton_from_distance(void) {
+    const int offs[6][3] = {
+        { 1, 0, 0 }, { -1, 0, 0 },
+        { 0, 1, 0 }, { 0,-1, 0 },
+        { 0, 0, 1 }, { 0, 0,-1 }
+    };
+
+    for (int i = 0; i < voxel_count; i++) {
+        Voxel *v = &voxels[i];
+        if (!voxel_is_active(v)) {
+            v->skeleton = false;
+            continue;
+        }
+        float selfDist = v->distance_to_surface;
+        bool localMax = true;
+        for (int n = 0; n < 6; n++) {
+            int nx = v->gx + offs[n][0];
+            int ny = v->gy + offs[n][1];
+            int nz = v->gz + offs[n][2];
+            int neighbor = table_get(nx, ny, nz);
+            if (neighbor < 0) continue;
+            if (voxels[neighbor].distance_to_surface > selfDist + 1e-4f) {
+                localMax = false;
+                break;
+            }
+        }
+        v->skeleton = (selfDist >= 2.0f * VOXEL_SIZE) && localMax;
+        if (v->skeleton && v->simulate) {
+            v->simulate = false;
+            v->fixed = true;
+            voxel_update_inverse_masses(v);
+        }
+    }
+}
+
+static void rebuild_face_constraints(void) {
+    clear_face_constraints();
+
+    const int offs[3][3] = {
+        { 1, 0, 0 },
+        { 0, 1, 0 },
+        { 0, 0, 1 }
+    };
+
+    for (int i = 0; i < voxel_count; i++) {
+        Voxel *a = &voxels[i];
+        if (!voxel_is_active(a)) continue;
+        for (int axis = 0; axis < 3; axis++) {
+            int nx = a->gx + offs[axis][0];
+            int ny = a->gy + offs[axis][1];
+            int nz = a->gz + offs[axis][2];
+            int neighbor = table_get(nx, ny, nz);
+            if (neighbor < 0) continue;
+            Voxel *b = &voxels[neighbor];
+            if (!voxel_is_active(b)) continue;
+
+            float da = a->distance_to_surface;
+            float db = b->distance_to_surface;
+            float diff = fabsf(da - db);
+
+            float minDepth = fminf(da, db);
+            float depthFactor = clampf(minDepth / (VOXEL_SIZE * 4.0f), 0.0f, 1.0f);
+            float surfaceSoftness = 1.0f - clampf(minDepth / (VOXEL_SIZE * 1.25f), 0.0f, 1.0f);
+
+            float strain_c = STRAIN_LIMIT_BASE_COMPRESSION - depthFactor * 0.3f;
+            float strain_t = STRAIN_LIMIT_BASE_TENSION + depthFactor * 0.6f;
+
+            strain_c *= (0.7f + 0.3f * (1.0f - surfaceSoftness));
+            strain_t *= (0.4f + 0.6f * (1.0f - surfaceSoftness));
+
+            if (axis == 1) { // vertical layers tend to delaminate
+                strain_c *= 0.8f;
+                strain_t *= 0.75f;
+            } else if (axis == 2) { // Z-axis slightly stronger
+                strain_c *= 1.1f;
+                strain_t *= 1.1f;
+            }
+
+            if (a->skeleton && b->skeleton && diff < VOXEL_SIZE * 0.5f) {
+                strain_c = -STRAIN_LIMIT_SHELL_BONUS;
+                strain_t = STRAIN_LIMIT_SHELL_BONUS;
+            } else if (diff > VOXEL_SIZE * 1.5f) {
+                strain_c *= 0.5f;
+                strain_t *= 0.5f;
+            }
+
+            add_face_constraint(axis, i, neighbor, strain_c, strain_t);
+        }
+    }
+}
+
+static void build_voxel_model_metadata(void) {
+    rebuild_spatial_hash();
+    for (int i = 0; i < voxel_count; i++) {
+        if (voxel_is_active(&voxels[i])) mark_surface(i);
+    }
+    compute_voxel_distance_transform();
+    compute_voxel_skeleton_from_distance();
+    rebuild_face_constraints();
+    voxelModelDirty = false;
+}
+
+static void voxel_apply_vgs(Voxel *v, float alpha, float beta, int iterations) {
+    if (!v->simulate) return;
+
+    Vector3 p[8];
+    for (int i = 0; i < 8; i++) p[i] = v->corners[i];
+
+    float r = v->particle_radius;
+    float V0 = v->rest_volume;
+
+    for (int it = 0; it < iterations; it++) {
+        Vector3 c = {0.0f, 0.0f, 0.0f};
+        for (int i = 0; i < 8; i++) c = v_add(c, p[i]);
+        c = v_mul(c, 1.0f / 8.0f);
+
+        Vector3 v0 = v_mul(v_add(v_add(v_add(v_sub(p[1], p[0]), v_sub(p[3], p[2])), v_sub(p[5], p[4])), v_sub(p[7], p[6])), 0.25f);
+        Vector3 v1 = v_mul(v_add(v_add(v_add(v_sub(p[2], p[0]), v_sub(p[3], p[1])), v_sub(p[6], p[4])), v_sub(p[7], p[5])), 0.25f);
+        Vector3 v2 = v_mul(v_add(v_add(v_add(v_sub(p[4], p[0]), v_sub(p[5], p[1])), v_sub(p[6], p[2])), v_sub(p[7], p[3])), 0.25f);
+
+        Vector3 u0 = v_sub(v0, v_mul(v_add(project_onto(v1, v0), project_onto(v2, v0)), alpha));
+        Vector3 u1 = v_sub(v1, v_mul(v_add(project_onto(v2, v1), project_onto(v0, v1)), alpha));
+        Vector3 u2 = v_sub(v2, v_mul(v_add(project_onto(v0, v2), project_onto(v1, v2)), alpha));
+
+        float len0 = v_length(u0);
+        float len1 = v_length(u1);
+        float len2 = v_length(u2);
+
+        float target0 = (1.0f - beta) * r + beta * v_length(v0);
+        float target1 = (1.0f - beta) * r + beta * v_length(v1);
+        float target2 = (1.0f - beta) * r + beta * v_length(v2);
+
+        if (len0 > 1e-6f) u0 = v_mul(u0, target0 / len0);
+        if (len1 > 1e-6f) u1 = v_mul(u1, target1 / len1);
+        if (len2 > 1e-6f) u2 = v_mul(u2, target2 / len2);
+
+        float volume = v_dot(v_cross(u0, u1), u2);
+        if (fabsf(volume) > 1e-9f) {
+            float ratio = V0 / volume;
+            float scale = 0.5f * powf(fabsf(ratio), 1.0f / 3.0f);
+            if (volume < 0.0f) scale = -scale;
+            u0 = v_mul(u0, scale);
+            u1 = v_mul(u1, scale);
+            u2 = v_mul(u2, scale);
+        }
+
+        for (int vid = 0; vid < 8; vid++) {
+            if (v->inv_mass[vid] <= 0.0f) continue;
+            Vector3 offset = {0.0f, 0.0f, 0.0f};
+            offset = v_add(offset, v_mul(u0, (vid & 1) ? 1.0f : -1.0f));
+            offset = v_add(offset, v_mul(u1, (vid & 2) ? 1.0f : -1.0f));
+            offset = v_add(offset, v_mul(u2, (vid & 4) ? 1.0f : -1.0f));
+            p[vid] = v_add(c, offset);
+        }
+    }
+
+    for (int i = 0; i < 8; i++) v->corners[i] = p[i];
+}
+
+static void solve_distance_constraint(Vector3 *pa, Vector3 *pb, float wa, float wb, float rest_length) {
+    float wsum = wa + wb;
+    if (wsum <= 0.0f) return;
+    Vector3 diff = v_sub(*pb, *pa);
+    float len = v_length(diff);
+    if (len <= 1e-6f) return;
+    Vector3 n = v_mul(diff, 1.0f / len);
+    float constraint = len - rest_length;
+    float lambda = -constraint / wsum;
+    if (wa > 0.0f) *pa = v_add(*pa, v_mul(n, wa * lambda));
+    if (wb > 0.0f) *pb = v_add(*pb, v_mul(n, -wb * lambda));
+}
+
+static void solve_face_constraints_axis(int axis) {
+    const int (*pairs_surface)[2] = face_vertex_pairs[axis];
+    const int (*axis_edges)[2] = axis_edge_pairs[axis];
+
+    int count = face_constraint_counts[axis];
+    for (int idx = 0; idx < count; idx++) {
+        FaceConstraint *c = &face_constraints[axis][idx];
+        if (!c->active) continue;
+        if (c->a < 0 || c->a >= voxel_count || c->b < 0 || c->b >= voxel_count) {
+            c->active = false;
+            continue;
+        }
+        Voxel *a = &voxels[c->a];
+        Voxel *b = &voxels[c->b];
+
+        float maxStrain = -FLT_MAX;
+        float minStrain = FLT_MAX;
+
+        for (int e = 0; e < 4; e++) {
+            int va0 = axis_edges[e][0];
+            int va1 = axis_edges[e][1];
+            Vector3 edgeA = v_sub(a->corners[va0], a->corners[va1]);
+            float lenA = v_length(edgeA);
+            float strainA = (lenA - VOXEL_SIZE) / VOXEL_SIZE;
+            if (strainA > maxStrain) maxStrain = strainA;
+            if (strainA < minStrain) minStrain = strainA;
+
+            Vector3 edgeB = v_sub(b->corners[va0], b->corners[va1]);
+            float lenB = v_length(edgeB);
+            float strainB = (lenB - VOXEL_SIZE) / VOXEL_SIZE;
+            if (strainB > maxStrain) maxStrain = strainB;
+            if (strainB < minStrain) minStrain = strainB;
+        }
+
+        if (maxStrain > c->strain_tensile || minStrain < c->strain_compressive) {
+            c->active = false;
+            continue;
+        }
+
+        for (int p = 0; p < 4; p++) {
+            int ia = pairs_surface[p][0];
+            int ib = pairs_surface[p][1];
+            solve_distance_constraint(&a->corners[ia], &b->corners[ib], a->inv_mass[ia], b->inv_mass[ib], 0.0f);
+        }
+    }
+}
+
+static void apply_voxel_constraints(float dt) {
+    if (dt <= 0.0f) return;
+    for (int i = 0; i < voxel_count; i++) {
+        if (!voxels[i].simulate) continue;
+        voxel_store_prev_corners(&voxels[i]);
+    }
+
+    for (int iter = 0; iter < CONSTRAINT_ITERATIONS; iter++) {
+        for (int i = 0; i < voxel_count; i++) {
+            voxel_apply_vgs(&voxels[i], VGS_ALPHA_DEFAULT, VGS_BETA_DEFAULT, VGS_LOCAL_ITERATIONS);
+        }
+        for (int axis = 0; axis < 3; axis++) {
+            solve_face_constraints_axis(axis);
+        }
+    }
+
+    float inv_dt = 1.0f / dt;
+    for (int i = 0; i < voxel_count; i++) {
+        if (!voxels[i].simulate) continue;
+        voxel_update_center_from_corners(&voxels[i]);
+        voxel_update_corner_velocities(&voxels[i], inv_dt);
+        voxel_update_linear_velocity(&voxels[i], inv_dt);
+    }
+}
+
+
 // Add a voxel (static or dynamic)
 static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Color color, int type) {
     if (voxel_count >= MAX_VOXELS) return -1;
     int idx = voxel_count++;
     Voxel *v = &voxels[idx];
     v->pos = (Vector3){ px, py, pz };
-    v->vel = (Vector3){ 0,0,0 };
+    voxel_set_velocity(v, (Vector3){0.0f, 0.0f, 0.0f});
     v->fixed = fixed;
     v->simulate = simulate;
     v->color = color;
@@ -360,59 +873,63 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     v->gx = (int)floorf(px / VOXEL_SIZE);
     v->gy = (int)floorf(py / VOXEL_SIZE);
     v->gz = (int)floorf(pz / VOXEL_SIZE);
+    v->rest_volume = VOXEL_SIZE * VOXEL_SIZE * VOXEL_SIZE;
+    v->particle_radius = VOXEL_PARTICLE_RADIUS;
+    voxel_update_inverse_masses(v);
+    voxel_sync_corners_to_center(v);
+    voxel_store_prev_corners(v);
+    v->distance_to_surface = 0.0f;
+    v->skeleton = false;
     table_set(v->gx, v->gy, v->gz, idx);
     return idx;
 }
 
 // Build static demo cube of voxels
 static void buildDemo(void) {
-    // Floor
-    int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
-    for (int x = 0; x <= M; x++) {
-        for (int z = 0; z <= M; z++) {
-            float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-            float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-            addVoxel(px, 0, pz, true, false, (Color){ 150, 150, 150, 255 }, 0);
+    const int floorExtent = 30; // smaller, centered platform (≈61x61 voxels)
+    for (int gx = -floorExtent; gx <= floorExtent; gx++) {
+        for (int gz = -floorExtent; gz <= floorExtent; gz++) {
+            if (abs(gx) > 20 && abs(gz) > 20) continue; // trim corners for fewer voxels
+            float px = (gx + 0.5f) * VOXEL_SIZE;
+            float pz = (gz + 0.5f) * VOXEL_SIZE;
+            addVoxel(px, 0.0f, pz, true, false, (Color){ 140, 140, 150, 255 }, 0);
         }
     }
 
-    // Pillars
-    int pillar_height = 35; // 45 - 10
-    int pillar_radius = 3;
-    int pillar_positions[4][2] = {
-        { M / 4, M / 4 },
-        { M / 4, 3 * M / 4 },
-        { 3 * M / 4, M / 4 },
-        { 3 * M / 4, 3 * M / 4 }
+    const int pillarHeight = 18;
+    const int pillarRadius = 2;
+    const int pillarPositions[4][2] = {
+        { -18, -18 },
+        { -18,  18 },
+        {  18, -18 },
+        {  18,  18 }
     };
-
     for (int p = 0; p < 4; p++) {
-        int cx = pillar_positions[p][0];
-        int cz = pillar_positions[p][1];
-        for (int y = 1; y <= pillar_height; y++) {
-            for (int dx = -pillar_radius; dx <= pillar_radius; dx++) {
-                for (int dz = -pillar_radius; dz <= pillar_radius; dz++) {
-                    if (dx*dx + dz*dz > pillar_radius*pillar_radius) continue; // circular pillar
-                    float px = (cx + dx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                    float py = (y + 0.5f) * VOXEL_SIZE;
-                    float pz = (cz + dz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                    addVoxel(px, py, pz, true, false, (Color){ 200, 100, 50, 255 }, 0);
+        int cx = pillarPositions[p][0];
+        int cz = pillarPositions[p][1];
+        for (int gy = 1; gy <= pillarHeight; gy++) {
+            for (int dx = -pillarRadius; dx <= pillarRadius; dx++) {
+                for (int dz = -pillarRadius; dz <= pillarRadius; dz++) {
+                    if (dx*dx + dz*dz > pillarRadius*pillarRadius) continue;
+                    float px = (cx + dx + 0.5f) * VOXEL_SIZE;
+                    float py = (gy + 0.5f) * VOXEL_SIZE;
+                    float pz = (cz + dz + 0.5f) * VOXEL_SIZE;
+                    addVoxel(px, py, pz, true, false, (Color){ 180, 110, 70, 255 }, 0);
                 }
             }
         }
     }
 
-    // Central platform
-    int platform_size = M / 5;
-    int platform_height = 5; // 15 / 3
-    int platform_base_height = 16; // to keep top at same level (21)
-    for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
-        for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
-            for (int z = M/2 - platform_size/2; z <= M/2 + platform_size/2; z++) {
-                float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                float py = (y + 0.5f) * VOXEL_SIZE;
-                float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                addVoxel(px, py, pz, true, false, (Color){ 100, 200, 100, 255 }, 0);
+    const int platformExtent = 8;
+    const int platformHeight = 6;
+    for (int gy = 12; gy < 12 + platformHeight; gy++) {
+        for (int gx = -platformExtent; gx <= platformExtent; gx++) {
+            for (int gz = -platformExtent; gz <= platformExtent; gz++) {
+                if (abs(gx) > platformExtent - 2 && abs(gz) > platformExtent - 2) continue;
+                float px = (gx + 0.5f) * VOXEL_SIZE;
+                float py = (gy + 0.5f) * VOXEL_SIZE;
+                float pz = (gz + 0.5f) * VOXEL_SIZE;
+                addVoxel(px, py, pz, true, false, (Color){ 90, 180, 110, 255 }, 0);
             }
         }
     }
@@ -448,9 +965,7 @@ static void ResetGame(void) {
     memset(table, 0, sizeof(table));
     // build static blocks
     buildDemo();
-    for (int i = 0; i < voxel_count; i++) {
-        mark_surface(i);
-    }
+    build_voxel_model_metadata();
     meshDirty = true;
 
 } 
@@ -462,15 +977,7 @@ static void UpdateKdRatio(int player_index) {
 
 // Physics step for voxels
 static void physics_step(float dt) {    // Rebuild spatial hash
-    memset(table, 0, sizeof(table));
-    for (int i = 0; i < voxel_count; i++) {
-        Voxel *v = &voxels[i];
-        int x = (int)floorf(v->pos.x / VOXEL_SIZE);
-        int y = (int)floorf(v->pos.y / VOXEL_SIZE);
-        int z = (int)floorf(v->pos.z / VOXEL_SIZE);
-        v->gx = x; v->gy = y; v->gz = z;
-        table_set(x, y, z, i);
-    }
+    rebuild_spatial_hash();
     // Simulate dynamic voxels
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
@@ -490,11 +997,9 @@ static void physics_step(float dt) {    // Rebuild spatial hash
 
             if (hit_id >= 0) {
                 hit_voxel = true;
-                
+
                 // Stop the bullet
-                v->simulate = false;
-                v->fixed = true;
-                v->pos = (Vector3){-999.0f, -999.0f, -999.0f};
+                voxel_deactivate(v);
 
                 int brushExtent = (voxelBrushSpan < 1) ? 1 : voxelBrushSpan;
 
@@ -512,9 +1017,7 @@ static void physics_step(float dt) {    // Rebuild spatial hash
                                     Voxel *victim = &voxels[victim_idx];
                                     table_remove(victim->gx, victim->gy, victim->gz);
                                     mark_surface_neighbors(victim->pos);
-                                    victim->simulate = false;
-                                    victim->fixed = true;
-                                    victim->pos = (Vector3){-999.0f, -999.0f, -999.0f};
+                                    voxel_deactivate(victim);
                                 }
                             }
                         }
@@ -538,6 +1041,7 @@ static void physics_step(float dt) {    // Rebuild spatial hash
                                     if (new_idx >= 0) {
                                         mark_surface(new_idx);
                                         mark_surface_neighbors(voxels[new_idx].pos);
+                                        voxelModelDirty = true;
                                     }
                                 }
                             }
@@ -546,12 +1050,14 @@ static void physics_step(float dt) {    // Rebuild spatial hash
                 }
                 //reset mesh
                 meshDirty = true;
+                voxelModelDirty = true;
             }
         }
 
         if (!hit_voxel) {
             // Move
             v->pos = v_add(v->pos, displacement);
+            voxel_apply_translation(v, displacement);
             for (int j = 0; j < 2; j++) {
                 float dx = v->pos.x - players[j].pos.x;
                 float dy = v->pos.y - players[j].pos.y;
@@ -561,16 +1067,14 @@ static void physics_step(float dt) {    // Rebuild spatial hash
                     if (players[j].shield > 0) {
                         players[j].shield -= VOXEL_DAMAGE;
                         if (players[j].shield < 0) {
-                            players[j].health += players[j].shield;
-                            players[j].shield = 0;
-                        }
-                    } else {
-                        players[j].health -= VOXEL_DAMAGE;
+                        players[j].health += players[j].shield;
+                        players[j].shield = 0;
                     }
+                } else {
+                    players[j].health -= VOXEL_DAMAGE;
+                }
 
-                    v->simulate = false;
-                    v->fixed    = true;
-                    v->pos      = (Vector3){ -999.0f, -999.0f, -999.0f };
+                    voxel_deactivate(v);
 
                     if (players[j].health <= 0) {
                         if (v->owner >= 0 && v->owner != j) {
@@ -592,6 +1096,12 @@ static void physics_step(float dt) {    // Rebuild spatial hash
             }
         }
     }
+
+    apply_voxel_constraints(dt);
+
+    if (voxelModelDirty) {
+        build_voxel_model_metadata();
+    }
 }
 
 // Fire a voxel bullet
@@ -604,7 +1114,7 @@ static void FireVoxel(int idx) {
     Color col = (p->vType==0? RED : BLUE);
     int vix = addVoxel(start.x, start.y, start.z, false, true, col, p->vType);
     if (vix >= 0) {
-        voxels[vix].vel = v_mul(dir, 50.0f);
+        voxel_set_velocity(&voxels[vix], v_mul(dir, 50.0f));
         voxels[vix].owner = idx;
     }
 }
@@ -718,6 +1228,34 @@ static void drawCubeMan(Vector3 pos,
     rlVertex3f(x - hw, y - hh, z - hd);
     rlVertex3f(x - hw, y + hh, z + hd);
     rlVertex3f(x - hw, y + hh, z - hd);
+}
+
+static void draw_deformed_voxel(const Voxel *v) {
+    static const int faces[6][4] = {
+        {4,5,7,6}, // +Z
+        {0,2,3,1}, // -Z
+        {2,6,7,3}, // +Y
+        {0,1,5,4}, // -Y
+        {1,3,7,5}, // +X
+        {0,4,6,2}  // -X
+    };
+
+    rlColor4ub(v->color.r, v->color.g, v->color.b, v->color.a);
+    for (int f = 0; f < 6; f++) {
+        Vector3 a = v->corners[faces[f][0]];
+        Vector3 b = v->corners[faces[f][1]];
+        Vector3 c = v->corners[faces[f][2]];
+        Vector3 d = v->corners[faces[f][3]];
+        Vector3 normal = v_normalize(v_cross(v_sub(b, a), v_sub(c, a)));
+        rlNormal3f(normal.x, normal.y, normal.z);
+        rlVertex3f(a.x, a.y, a.z);
+        rlVertex3f(b.x, b.y, b.z);
+        rlVertex3f(c.x, c.y, c.z);
+
+        rlVertex3f(a.x, a.y, a.z);
+        rlVertex3f(c.x, c.y, c.z);
+        rlVertex3f(d.x, d.y, d.z);
+    }
 }
 
 // Return the parametric distance t (along the ray) to the first voxel boundary
@@ -1080,9 +1618,9 @@ static void DrawVoxels(Camera3D cam) {
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
         if (v->simulate){
-        drawCubeMan(v->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, v->color);
+            draw_deformed_voxel(v);
         }
-        
+
     }
     rlEnd();
 }
