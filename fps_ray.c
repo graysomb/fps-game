@@ -756,8 +756,9 @@ static void voxel_apply_vgs(Voxel *v, float alpha, float beta, int iterations) {
             u1 = v_mul(u1, scale);
             u2 = v_mul(u2, scale);
         } else {
+            Vector3 center = c;
             for (int vid = 0; vid < 8; vid++) {
-                p[vid] = v_add(v->pos, voxel_corner_offsets[vid]);
+                p[vid] = v_add(center, voxel_corner_offsets[vid]);
             }
             break;
         }
@@ -1063,7 +1064,13 @@ static void physics_step(float dt) {    // Rebuild spatial hash
         if (!hit_voxel) {
             // Move
             v->pos = v_add(v->pos, displacement);
-            voxel_apply_translation(v, displacement);
+            if (fabsf(v->pos.x) > FLOOR_SIZE * 8.0f ||
+                fabsf(v->pos.y) > FLOOR_SIZE * 8.0f ||
+                fabsf(v->pos.z) > FLOOR_SIZE * 8.0f) {
+                voxel_deactivate(v);
+            } else {
+                voxel_apply_translation(v, displacement);
+            }
             for (int j = 0; j < 2; j++) {
                 float dx = v->pos.x - players[j].pos.x;
                 float dy = v->pos.y - players[j].pos.y;
@@ -1268,6 +1275,11 @@ static void draw_deformed_voxel(const Voxel *v) {
     };
 
     rlColor4ub(v->color.r, v->color.g, v->color.b, v->color.a);
+    if (fabsf(v->pos.x) > FLOOR_SIZE * 8.0f ||
+        fabsf(v->pos.y) > FLOOR_SIZE * 8.0f ||
+        fabsf(v->pos.z) > FLOOR_SIZE * 8.0f) {
+        return;
+    }
     for (int f = 0; f < 6; f++) {
         Vector3 a = v->corners[faces[f][0]];
         Vector3 b = v->corners[faces[f][1]];
