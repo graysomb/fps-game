@@ -253,6 +253,7 @@ static bool  meshDirty  = true;
 static bool  voxelModelDirty = false;
 static bool  voxelDebugLog = false;
 static int   voxelDebugFrame = 0;
+static float timeScale = 0.1f;
 
 
 
@@ -1841,7 +1842,7 @@ static void HandleGamepadInput(int i, float dt);
 int main(void) {
     // init window and render textures
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Split-Screen FPS (raylib)");
-    SetTargetFPS(60);
+    SetTargetFPS(120);
     // seed RNG
     srand((unsigned)time(NULL));
     // reset game state
@@ -1869,8 +1870,22 @@ int main(void) {
                     gameState = GAME_STATE_SETTINGS;
                 }
                 break;
-            case GAME_STATE_PLAYING:
-        float dt = GetFrameTime();
+            case GAME_STATE_PLAYING: {
+        if (IsKeyPressed(KEY_ZERO)) {
+            timeScale = 1.0f;
+            printf("[time] scale reset to 1.0\n");
+        }
+        if (IsKeyPressed(KEY_MINUS)) {
+            timeScale = fmaxf(0.1f, timeScale - 0.1f);
+            printf("[time] scale = %.2f\n", timeScale);
+        }
+        if (IsKeyPressed(KEY_EQUAL)) {
+            timeScale = fminf(4.0f, timeScale + 0.1f);
+            printf("[time] scale = %.2f\n", timeScale);
+        }
+
+        float dt_raw = GetFrameTime();
+        float dt = dt_raw * timeScale;
         // input: shooting and jump
         if (playerInput[0] == INPUT_TYPE_KEYBOARD && IsKeyPressed(KEY_LEFT_CONTROL))  FireVoxel(0);
         if (playerInput[0] == INPUT_TYPE_GAMEPAD && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_TRIGGER_2)) FireVoxel(0);
@@ -1910,9 +1925,9 @@ int main(void) {
         // update players
         for (int i = 0; i < 2; i++) {
             if (playerInput[i] == INPUT_TYPE_KEYBOARD) {
-                HandleKeyboardInput(i, dt);
+                HandleKeyboardInput(i, dt_raw);
             } else if (playerInput[i] == INPUT_TYPE_GAMEPAD) {
-                HandleGamepadInput(i, dt);
+                HandleGamepadInput(i, dt_raw);
             }
             Player *p = &players[i];
             
@@ -2018,6 +2033,7 @@ int main(void) {
             DrawRectangle(SCREEN_WIDTH/2-2, 0, 4, SCREEN_HEIGHT, LIGHTGRAY);
         EndDrawing();
         break;
+            }
             case GAME_STATE_PAUSED:
                 // Draw pause menu
                 BeginDrawing();
