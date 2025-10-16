@@ -126,7 +126,7 @@ static int voxel_count = 0;
 static FaceConstraint face_constraints[3][MAX_FACE_CONSTRAINTS_PER_AXIS];
 static int face_constraint_count[3] = { 0, 0, 0 };
 
-static const uint8_t face_pairs[3][4][2] = {
+static const int face_pairs[3][4][2] = {
     { {1,0}, {3,2}, {5,4}, {7,6} },
     { {2,0}, {3,1}, {6,4}, {7,5} },
     { {4,0}, {5,1}, {6,2}, {7,3} }
@@ -137,6 +137,8 @@ static const Vector3 axis_dirs[3] = {
     { 0.0f, 1.0f, 0.0f },
     { 0.0f, 0.0f, 1.0f }
 };
+
+static int table_get(int x, int y, int z);
 
 static void face_constraints_reset(void) {
     for (int axis = 0; axis < 3; ++axis) {
@@ -151,21 +153,6 @@ static void face_constraints_reset(void) {
     }
 }
 
-static FaceConstraint *find_face_constraint(int axis, int a, int b) {
-    if (a > b) {
-        int tmp = a;
-        a = b;
-        b = tmp;
-    }
-    for (int i = 0; i < face_constraint_count[axis]; ++i) {
-        FaceConstraint *fc = &face_constraints[axis][i];
-        if (fc->voxelA == a && fc->voxelB == b) {
-            return fc;
-        }
-    }
-    return NULL;
-}
-
 static void add_face_constraint_internal(int axis, int a, int b) {
     if (a == b || axis < 0 || axis > 2) return;
     if (a > b) {
@@ -174,24 +161,24 @@ static void add_face_constraint_internal(int axis, int a, int b) {
         b = tmp;
     }
 
-    FaceConstraint *existing = find_face_constraint(axis, a, b);
-    if (existing) {
-        existing->active = true;
-        existing->strain_min = FACE_COMPRESS_LIMIT;
-        existing->strain_max = FACE_TENSILE_LIMIT;
-        return;
+    for (int i = 0; i < face_constraint_count[axis]; ++i) {
+        FaceConstraint *fc = &face_constraints[axis][i];
+        if (fc->voxelA == a && fc->voxelB == b) {
+            fc->active = true;
+            fc->strain_min = FACE_COMPRESS_LIMIT;
+            fc->strain_max = FACE_TENSILE_LIMIT;
+            return;
+        }
     }
 
-    if (face_constraint_count[axis] >= MAX_FACE_CONSTRAINTS_PER_AXIS) {
-        return;
+    if (face_constraint_count[axis] < MAX_FACE_CONSTRAINTS_PER_AXIS) {
+        FaceConstraint *fc = &face_constraints[axis][face_constraint_count[axis]++];
+        fc->voxelA = a;
+        fc->voxelB = b;
+        fc->strain_min = FACE_COMPRESS_LIMIT;
+        fc->strain_max = FACE_TENSILE_LIMIT;
+        fc->active = true;
     }
-
-    FaceConstraint *fc = &face_constraints[axis][face_constraint_count[axis]++];
-    fc->voxelA = a;
-    fc->voxelB = b;
-    fc->strain_min = FACE_COMPRESS_LIMIT;
-    fc->strain_max = FACE_TENSILE_LIMIT;
-    fc->active = true;
 }
 
 static void deactivate_constraints_for_voxel(int voxel_idx) {
@@ -567,7 +554,7 @@ static void buildDemo(void) {
                     float px = (cx + dx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
                     float py = (y + 0.5f) * VOXEL_SIZE;
                     float pz = (cz + dz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                    addVoxel(px, py, pz, true, false, (Color){ 200, 100, 50, 255 }, 0);
+                    addVoxel(px, py, pz, false, true, (Color){ 200, 100, 50, 255 }, 0);
                 }
             }
         }
@@ -583,7 +570,7 @@ static void buildDemo(void) {
                 float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
                 float py = (y + 0.5f) * VOXEL_SIZE;
                 float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                addVoxel(px, py, pz, true, false, (Color){ 100, 200, 100, 255 }, 0);
+                addVoxel(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0);
             }
         }
     }
@@ -1090,20 +1077,20 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
 }
 
 void simulate_voxel_pbd(float dt) {
-    const int substeps = 3;
+    const int substeps = 1;
     const int constraint_iterations = 3;
     const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
 
     for (int step = 0; step < substeps; ++step) {
-        integrate_particles(sub_dt);
-        solve_particle_collisions(sub_dt);
+        //integrate_particles(sub_dt);
+        //solve_particle_collisions(sub_dt);
 
         for (int it = 0; it < constraint_iterations; ++it) {
             for (int i = 0; i < voxel_count; ++i) {
                 Voxel *voxel = &voxels[i];
                 if (!voxel->simulate)
                     continue;
-                solve_voxel_shape(voxel);
+                //solve_voxel_shape(voxel);
             }
 
             for (int axis = 0; axis < 3; ++axis) {
@@ -1115,7 +1102,7 @@ void simulate_voxel_pbd(float dt) {
             }
         }
 
-        update_particle_velocities(sub_dt);
+        //update_particle_velocities(sub_dt);
     }
 }
 
