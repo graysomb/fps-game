@@ -367,6 +367,23 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     v->gx = (int)floorf(px / VOXEL_SIZE);
     v->gy = (int)floorf(py / VOXEL_SIZE);
     v->gz = (int)floorf(pz / VOXEL_SIZE);
+    const float half = VOXEL_SIZE * 0.5f;
+    static const int corner_signs[8][3] = {
+        { -1, -1, -1 }, {  1, -1, -1 },
+        { -1,  1, -1 }, {  1,  1, -1 },
+        { -1, -1,  1 }, {  1, -1,  1 },
+        { -1,  1,  1 }, {  1,  1,  1 }
+    };
+    for (int i = 0; i < 8; ++i) {
+        Particle *p = &v->particles[i];
+        p->pos = (Vector3){
+            px + corner_signs[i][0] * half,
+            py + corner_signs[i][1] * half,
+            pz + corner_signs[i][2] * half
+        };
+        p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+        p->inv_mass = (fixed || !simulate) ? 0.0f : 1.0f;
+    }
     table_set(v->gx, v->gy, v->gz, idx);
     return idx;
 }
@@ -600,6 +617,43 @@ static void physics_step(float dt) {    // Rebuild spatial hash
         }
     }
 }
+
+/*
+ * Sketch of the CPU voxel PBD loop, mirroring the paper's GPU pipeline.
+ *
+ * void simulate_voxel_pbd(float dt) {
+ *     const int substeps = get_substep_count();
+ *     const float sub_dt = dt / (float)substeps;
+ *
+ *     for (int step = 0; step < substeps; ++step) {
+ *         // 1. Kinematics + collisions for all particles (predict positions).
+ *         integrate_particles(sub_dt);
+ *         solve_particle_collisions(sub_dt);
+ *
+ *         // 2. Constraint iterations (Gauss-Seidel order).
+ *         for (int it = 0; it < get_constraint_iterations(); ++it) {
+ *             // 2a. Voxel Gram-Schmidt shape matching (Algorithm 1).
+ *             for_each_voxel(voxel_count, [&](Voxel *v) {
+ *                 solve_voxel_shape(v, sub_dt);
+ *             });
+ *
+ *             // 2b. Breakable face constraints in three partitions.
+ *             for (int partition = 0; partition < 3; ++partition) {
+ *                 for_each_face_constraint(partition, [&](FaceConstraint *fc) {
+ *                     if (constraint_over_strain(fc)) {
+ *                         detach_voxels(fc);
+ *                         return; // skip projection when broken
+ *                     }
+ *                     project_face_constraint(fc);
+ *                 });
+ *             }
+ *         }
+ *
+ *         // 3. Velocity update from corrected positions.
+ *         update_particle_velocities(sub_dt);
+ *     }
+ * }
+ */
 
 // Fire a voxel bullet
 static void FireVoxel(int idx) {
