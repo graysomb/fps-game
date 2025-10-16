@@ -646,6 +646,15 @@ static void integrate_particles(float dt) {
     }
 }
 
+void simulate_voxel_pbd(float dt) {
+    const int substeps = 3;
+    const float sub_dt = dt / (float)substeps;
+    for (int step = 0; step < substeps; ++step) {
+        integrate_particles(sub_dt);
+    }
+
+}
+
 /*
  * Sketch of the CPU voxel PBD loop, mirroring the paper's GPU pipeline.
  *
@@ -1486,6 +1495,7 @@ int main(void) {
         for( int i = 0; i < subStep; i++){
             physics_step(dt/subStep);
         }
+         simulate_voxel_pbd(dt);
         // setup cameras
         Camera3D cam0 = {0}, cam1 = {0};
         cam0.up = cam1.up = (Vector3){0,1,0};
