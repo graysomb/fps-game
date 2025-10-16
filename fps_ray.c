@@ -43,6 +43,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define PLAYER_RADIUS   0.5f
 #define FLOOR_SIZE     20.0f    // half-size of floor in world units
 #define PLAYER_SIZE 0.5f
+#define PARTICLE_RADIUS (VOXEL_SIZE * 0.25f)
 
 // KD-stats constants
 #define BASE_HEALTH 100
@@ -115,6 +116,9 @@ static float clampf(float v, float lo, float hi) {
 }
 static Vector3 v_add(Vector3 a, Vector3 b) {
     return (Vector3){ a.x + b.x, a.y + b.y, a.z + b.z };
+}
+static Vector3 v_sub(Vector3 a, Vector3 b) {
+    return (Vector3){ a.x - b.x, a.y - b.y, a.z - b.z };
 }
 static Vector3 v_mul(Vector3 v, float s) {
     return (Vector3){ v.x*s, v.y*s, v.z*s };
@@ -646,11 +650,125 @@ static void integrate_particles(float dt) {
     }
 }
 
+static void solve_particle_collisions(float dt) {
+    (void)dt;
+
+    const float radius = PARTICLE_RADIUS;
+    const float radius_sq = radius * radius;
+    const float min_dist = radius * 2.0f;
+    const float min_dist_sq = min_dist * min_dist;
+    const float half_player = PLAYER_SIZE * 0.5f;
+
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+
+        for (int j = 0; j < 8; ++j) {
+            Particle *p = &voxel->particles[j];
+
+            if (p->inv_mass == 0.0f)
+                continue;
+
+            Vector3 pos = p->predicted_pos;
+
+            if (pos.y < radius) {
+                pos.y = radius;
+                p->prev_pos.y = pos.y;
+            }
+
+            for (int player_idx = 0; player_idx < 2; ++player_idx) {
+                Player *pl = &players[player_idx];
+                Vector3 box_min = {
+                    pl->pos.x - half_player,
+                    pl->pos.y - half_player,
+                    pl->pos.z - half_player
+                };
+                Vector3 box_max = {
+                    pl->pos.x + half_player,
+                    pl->pos.y + half_player,
+                    pl->pos.z + half_player
+                };
+
+                Vector3 nearest = {
+                    clampf(pos.x, box_min.x, box_max.x),
+                    clampf(pos.y, box_min.y, box_max.y),
+                    clampf(pos.z, box_min.z, box_max.z)
+                };
+
+                Vector3 delta = v_sub(pos, nearest);
+                float dist_sq = delta.x*delta.x + delta.y*delta.y + delta.z*delta.z;
+                if (dist_sq < radius_sq) {
+                    float dist = sqrtf(fmaxf(dist_sq, 1e-12f));
+                    float penetration = radius - dist;
+                    Vector3 normal;
+                    if (dist > 1e-6f) {
+                        normal = v_mul(delta, 1.0f / dist);
+                    } else {
+                        normal = (Vector3){ 0.0f, 1.0f, 0.0f };
+                    }
+                    pos = v_add(pos, v_mul(normal, penetration));
+                    p->prev_pos = pos;
+                }
+            }
+
+            p->predicted_pos = pos;
+
+            for (int dx = -1; dx <= 1; ++dx) {
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dz = -1; dz <= 1; ++dz) {
+                        int nx = voxel->gx + dx;
+                        int ny = voxel->gy + dy;
+                        int nz = voxel->gz + dz;
+                        int neighbor_idx = table_get(nx, ny, nz);
+                        if (neighbor_idx < 0)
+                            continue;
+
+                        if (neighbor_idx < i)
+                            continue;
+
+                        Voxel *other = &voxels[neighbor_idx];
+                        for (int q = 0; q < 8; ++q) {
+                            if (neighbor_idx == i && q <= j)
+                                continue;
+
+                            Particle *p_other = &other->particles[q];
+                            if (p_other->inv_mass + p->inv_mass == 0.0f)
+                                continue;
+
+                            Vector3 delta = v_sub(p->predicted_pos, p_other->predicted_pos);
+                            float dist_sq = delta.x*delta.x + delta.y*delta.y + delta.z*delta.z;
+                            if (dist_sq >= min_dist_sq)
+                                continue;
+
+                            float dist = sqrtf(fmaxf(dist_sq, 1e-12f));
+                            float penetration = min_dist - dist;
+                            Vector3 normal;
+                            if (dist > 1e-6f) {
+                                normal = v_mul(delta, 1.0f / dist);
+                            } else {
+                                normal = (Vector3){ 1.0f, 0.0f, 0.0f };
+                            }
+
+                            float w_sum = p->inv_mass + p_other->inv_mass;
+                            if (w_sum == 0.0f)
+                                continue;
+
+                            Vector3 corr = v_mul(normal, penetration / w_sum);
+                            p->predicted_pos = v_add(p->predicted_pos, v_mul(corr, p->inv_mass));
+                            p_other->predicted_pos = v_add(p_other->predicted_pos, v_mul(corr, -p_other->inv_mass));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 void simulate_voxel_pbd(float dt) {
     const int substeps = 3;
     const float sub_dt = dt / (float)substeps;
     for (int step = 0; step < substeps; ++step) {
         integrate_particles(sub_dt);
+        solve_particle_collisions(sub_dt);
     }
 
 }
@@ -707,115 +825,79 @@ static void FireVoxel(int idx) {
     }
 }
 // Append the 12 edges (24 vertices) of a cube to the current RL_LINES batch
-static void drawCubeEdges(Vector3 pos, float w, float h, float d)
+static void drawCubeEdges(const Voxel *voxel)
 {
-    float hw = w * 0.5f, hh = h * 0.5f, hd = d * 0.5f;
-    float x = pos.x, y = pos.y, z = pos.z;
+    Vector3 v[8];
+    for (int i = 0; i < 8; ++i) v[i] = voxel->particles[i].pos;
 
-    // 4 bottom vertices
-    Vector3 v000 = { x - hw, y - hh, z - hd };
-    Vector3 v001 = { x - hw, y - hh, z + hd };
-    Vector3 v101 = { x + hw, y - hh, z + hd };
-    Vector3 v100 = { x + hw, y - hh, z - hd };
+    static const int edge_indices[12][2] = {
+        {0,1},{1,3},{3,2},{2,0},
+        {4,5},{5,7},{7,6},{6,4},
+        {0,4},{1,5},{3,7},{2,6}
+    };
 
-    // 4 top vertices
-    Vector3 v010 = { x - hw, y + hh, z - hd };
-    Vector3 v011 = { x - hw, y + hh, z + hd };
-    Vector3 v111 = { x + hw, y + hh, z + hd };
-    Vector3 v110 = { x + hw, y + hh, z - hd };
-
-    // Bottom rectangle
-    rlVertex3f(v000.x, v000.y, v000.z); rlVertex3f(v001.x, v001.y, v001.z);
-    rlVertex3f(v001.x, v001.y, v001.z); rlVertex3f(v101.x, v101.y, v101.z);
-    rlVertex3f(v101.x, v101.y, v101.z); rlVertex3f(v100.x, v100.y, v100.z);
-    rlVertex3f(v100.x, v100.y, v100.z); rlVertex3f(v000.x, v000.y, v000.z);
-
-    // Top rectangle
-    rlVertex3f(v010.x, v010.y, v010.z); rlVertex3f(v011.x, v011.y, v011.z);
-    rlVertex3f(v011.x, v011.y, v011.z); rlVertex3f(v111.x, v111.y, v111.z);
-    rlVertex3f(v111.x, v111.y, v111.z); rlVertex3f(v110.x, v110.y, v110.z);
-    rlVertex3f(v110.x, v110.y, v110.z); rlVertex3f(v010.x, v010.y, v010.z);
-
-    // Vertical pillars
-    rlVertex3f(v000.x, v000.y, v000.z); rlVertex3f(v010.x, v010.y, v010.z);
-    rlVertex3f(v001.x, v001.y, v001.z); rlVertex3f(v011.x, v011.y, v011.z);
-    rlVertex3f(v101.x, v101.y, v101.z); rlVertex3f(v111.x, v111.y, v111.z);
-    rlVertex3f(v100.x, v100.y, v100.z); rlVertex3f(v110.x, v110.y, v110.z);
+    for (int e = 0; e < 12; ++e) {
+        const Vector3 a = v[edge_indices[e][0]];
+        const Vector3 b = v[edge_indices[e][1]];
+        rlVertex3f(a.x, a.y, a.z);
+        rlVertex3f(b.x, b.y, b.z);
+    }
 }
 
-static void drawCubeMan(Vector3 pos,
-                        float width,
-                        float height,
-                        float depth,
-                        Color color)
+static void drawCubeMan(const Voxel *voxel)
 {
-    float hw = width  * 0.5f;
-    float hh = height * 0.5f;
-    float hd = depth  * 0.5f;
+    Vector3 v[8];
+    for (int i = 0; i < 8; ++i) v[i] = voxel->particles[i].pos;
 
-    float x = pos.x, y = pos.y, z = pos.z;
+    rlColor4ub(voxel->color.r, voxel->color.g, voxel->color.b, voxel->color.a);
 
-    rlColor4ub(color.r, color.g, color.b, color.a);
-
-    /* ----------  FRONT  (+Z)  ---------- */
     rlNormal3f(0.0f, 0.0f, 1.0f);
-    rlVertex3f(x - hw, y - hh, z + hd);   // CCW
-    rlVertex3f(x + hw, y - hh, z + hd);
-    rlVertex3f(x + hw, y + hh, z + hd);
+    rlVertex3f(v[4].x, v[4].y, v[4].z);
+    rlVertex3f(v[5].x, v[5].y, v[5].z);
+    rlVertex3f(v[7].x, v[7].y, v[7].z);
+    rlVertex3f(v[4].x, v[4].y, v[4].z);
+    rlVertex3f(v[7].x, v[7].y, v[7].z);
+    rlVertex3f(v[6].x, v[6].y, v[6].z);
 
-    rlVertex3f(x - hw, y - hh, z + hd);
-    rlVertex3f(x + hw, y + hh, z + hd);
-    rlVertex3f(x - hw, y + hh, z + hd);
-
-    /* ----------  BACK  (-Z)  ----------- */
     rlNormal3f(0.0f, 0.0f, -1.0f);
-    rlVertex3f(x + hw, y - hh, z - hd);
-    rlVertex3f(x - hw, y - hh, z - hd);
-    rlVertex3f(x - hw, y + hh, z - hd);
+    rlVertex3f(v[1].x, v[1].y, v[1].z);
+    rlVertex3f(v[0].x, v[0].y, v[0].z);
+    rlVertex3f(v[2].x, v[2].y, v[2].z);
+    rlVertex3f(v[1].x, v[1].y, v[1].z);
+    rlVertex3f(v[2].x, v[2].y, v[2].z);
+    rlVertex3f(v[3].x, v[3].y, v[3].z);
 
-    rlVertex3f(x + hw, y - hh, z - hd);
-    rlVertex3f(x - hw, y + hh, z - hd);
-    rlVertex3f(x + hw, y + hh, z - hd);
-
-    /* ----------  TOP   (+Y)  ----------- */
     rlNormal3f(0.0f, 1.0f, 0.0f);
-    rlVertex3f(x - hw, y + hh, z + hd);
-    rlVertex3f(x + hw, y + hh, z + hd);
-    rlVertex3f(x + hw, y + hh, z - hd);
+    rlVertex3f(v[6].x, v[6].y, v[6].z);
+    rlVertex3f(v[7].x, v[7].y, v[7].z);
+    rlVertex3f(v[3].x, v[3].y, v[3].z);
+    rlVertex3f(v[6].x, v[6].y, v[6].z);
+    rlVertex3f(v[3].x, v[3].y, v[3].z);
+    rlVertex3f(v[2].x, v[2].y, v[2].z);
 
-    rlVertex3f(x - hw, y + hh, z + hd);
-    rlVertex3f(x + hw, y + hh, z - hd);
-    rlVertex3f(x - hw, y + hh, z - hd);
-
-    /* ----------  BOTTOM (-Y) ----------- */
     rlNormal3f(0.0f, -1.0f, 0.0f);
-    rlVertex3f(x - hw, y - hh, z + hd);
-    rlVertex3f(x + hw, y - hh, z - hd);
-    rlVertex3f(x + hw, y - hh, z + hd);
+    rlVertex3f(v[0].x, v[0].y, v[0].z);
+    rlVertex3f(v[1].x, v[1].y, v[1].z);
+    rlVertex3f(v[5].x, v[5].y, v[5].z);
+    rlVertex3f(v[0].x, v[0].y, v[0].z);
+    rlVertex3f(v[5].x, v[5].y, v[5].z);
+    rlVertex3f(v[4].x, v[4].y, v[4].z);
 
-    rlVertex3f(x - hw, y - hh, z + hd);
-    rlVertex3f(x - hw, y - hh, z - hd);
-    rlVertex3f(x + hw, y - hh, z - hd);
-
-    /* ----------  RIGHT (+X) ------------ */
     rlNormal3f(1.0f, 0.0f, 0.0f);
-    rlVertex3f(x + hw, y - hh, z + hd);
-    rlVertex3f(x + hw, y - hh, z - hd);
-    rlVertex3f(x + hw, y + hh, z - hd);
+    rlVertex3f(v[5].x, v[5].y, v[5].z);
+    rlVertex3f(v[1].x, v[1].y, v[1].z);
+    rlVertex3f(v[3].x, v[3].y, v[3].z);
+    rlVertex3f(v[5].x, v[5].y, v[5].z);
+    rlVertex3f(v[3].x, v[3].y, v[3].z);
+    rlVertex3f(v[7].x, v[7].y, v[7].z);
 
-    rlVertex3f(x + hw, y - hh, z + hd);
-    rlVertex3f(x + hw, y + hh, z - hd);
-    rlVertex3f(x + hw, y + hh, z + hd);
-
-    /* ----------  LEFT  (-X) ------------ */
     rlNormal3f(-1.0f, 0.0f, 0.0f);
-    rlVertex3f(x - hw, y - hh, z - hd);
-    rlVertex3f(x - hw, y - hh, z + hd);
-    rlVertex3f(x - hw, y + hh, z + hd);
-
-    rlVertex3f(x - hw, y - hh, z - hd);
-    rlVertex3f(x - hw, y + hh, z + hd);
-    rlVertex3f(x - hw, y + hh, z - hd);
+    rlVertex3f(v[0].x, v[0].y, v[0].z);
+    rlVertex3f(v[4].x, v[4].y, v[4].z);
+    rlVertex3f(v[6].x, v[6].y, v[6].z);
+    rlVertex3f(v[0].x, v[0].y, v[0].z);
+    rlVertex3f(v[6].x, v[6].y, v[6].z);
+    rlVertex3f(v[2].x, v[2].y, v[2].z);
 }
 
 // Return the parametric distance t (along the ray) to the first voxel boundary
@@ -1178,21 +1260,20 @@ static void DrawVoxels(Camera3D cam) {
     rlBegin(RL_TRIANGLES);
     /*for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
-        if (v->simulate){
-        drawCubeMan(v->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, v->color);
+        if (v->simulate) {
+            drawCubeMan(v);
         }
-        
     }*/
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
-        drawCubeMan(v->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, v->color);
+        drawCubeMan(v);
     }
     rlEnd();
     rlBegin(RL_LINES);
     rlColor4ub(0, 0, 0, 255);
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
-        drawCubeEdges(v->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
+        drawCubeEdges(v);
     }
     rlEnd();
 }
