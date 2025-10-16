@@ -382,7 +382,7 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
             pz + corner_signs[i][2] * half
         };
         p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
-        p->inv_mass = (fixed || !simulate) ? 0.0f : 1.0f;
+        p->inv_mass = 1.0f;
     }
     table_set(v->gx, v->gy, v->gz, idx);
     return idx;
