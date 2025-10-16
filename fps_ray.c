@@ -10,6 +10,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <limits.h>
+#include <float.h>
 
 // Game state enum
 typedef enum {
@@ -48,6 +49,9 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define VGS_BETA 0.5f
 #define VGS_ITERS 3
 #define VGS_EPS 1e-6f
+#define FACE_TENSILE_LIMIT 0.35f
+#define FACE_COMPRESS_LIMIT -0.35f
+#define MAX_FACE_CONSTRAINTS_PER_AXIS (MAX_VOXELS * 2)
 
 // KD-stats constants
 #define BASE_HEALTH 100
@@ -90,6 +94,14 @@ typedef struct {
     float inv_mass;
 } Particle;
 
+typedef struct {
+    int  voxelA;
+    int  voxelB;
+    float strain_min;
+    float strain_max;
+    bool active;
+} FaceConstraint;
+
 // Voxel structure
 typedef struct {
     Vector3 pos;
@@ -110,6 +122,112 @@ typedef struct {
 } Voxel;
 static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
+
+static FaceConstraint face_constraints[3][MAX_FACE_CONSTRAINTS_PER_AXIS];
+static int face_constraint_count[3] = { 0, 0, 0 };
+
+static const uint8_t face_pairs[3][4][2] = {
+    { {1,0}, {3,2}, {5,4}, {7,6} },
+    { {2,0}, {3,1}, {6,4}, {7,5} },
+    { {4,0}, {5,1}, {6,2}, {7,3} }
+};
+
+static const Vector3 axis_dirs[3] = {
+    { 1.0f, 0.0f, 0.0f },
+    { 0.0f, 1.0f, 0.0f },
+    { 0.0f, 0.0f, 1.0f }
+};
+
+static void face_constraints_reset(void) {
+    for (int axis = 0; axis < 3; ++axis) {
+        face_constraint_count[axis] = 0;
+        for (int i = 0; i < MAX_FACE_CONSTRAINTS_PER_AXIS; ++i) {
+            face_constraints[axis][i].active = false;
+            face_constraints[axis][i].voxelA = -1;
+            face_constraints[axis][i].voxelB = -1;
+            face_constraints[axis][i].strain_min = FACE_COMPRESS_LIMIT;
+            face_constraints[axis][i].strain_max = FACE_TENSILE_LIMIT;
+        }
+    }
+}
+
+static FaceConstraint *find_face_constraint(int axis, int a, int b) {
+    if (a > b) {
+        int tmp = a;
+        a = b;
+        b = tmp;
+    }
+    for (int i = 0; i < face_constraint_count[axis]; ++i) {
+        FaceConstraint *fc = &face_constraints[axis][i];
+        if (fc->voxelA == a && fc->voxelB == b) {
+            return fc;
+        }
+    }
+    return NULL;
+}
+
+static void add_face_constraint_internal(int axis, int a, int b) {
+    if (a == b || axis < 0 || axis > 2) return;
+    if (a > b) {
+        int tmp = a;
+        a = b;
+        b = tmp;
+    }
+
+    FaceConstraint *existing = find_face_constraint(axis, a, b);
+    if (existing) {
+        existing->active = true;
+        existing->strain_min = FACE_COMPRESS_LIMIT;
+        existing->strain_max = FACE_TENSILE_LIMIT;
+        return;
+    }
+
+    if (face_constraint_count[axis] >= MAX_FACE_CONSTRAINTS_PER_AXIS) {
+        return;
+    }
+
+    FaceConstraint *fc = &face_constraints[axis][face_constraint_count[axis]++];
+    fc->voxelA = a;
+    fc->voxelB = b;
+    fc->strain_min = FACE_COMPRESS_LIMIT;
+    fc->strain_max = FACE_TENSILE_LIMIT;
+    fc->active = true;
+}
+
+static void deactivate_constraints_for_voxel(int voxel_idx) {
+    for (int axis = 0; axis < 3; ++axis) {
+        for (int i = 0; i < face_constraint_count[axis]; ++i) {
+            FaceConstraint *fc = &face_constraints[axis][i];
+            if (!fc->active) continue;
+            if (fc->voxelA == voxel_idx || fc->voxelB == voxel_idx) {
+                fc->active = false;
+            }
+        }
+    }
+}
+
+static void add_face_constraints_for_voxel(int voxel_idx) {
+    if (voxel_idx < 0 || voxel_idx >= voxel_count) return;
+    Voxel *v = &voxels[voxel_idx];
+    int gx = v->gx;
+    int gy = v->gy;
+    int gz = v->gz;
+
+    int neighbor = table_get(gx + 1, gy, gz);
+    if (neighbor >= 0) add_face_constraint_internal(0, voxel_idx, neighbor);
+    neighbor = table_get(gx - 1, gy, gz);
+    if (neighbor >= 0) add_face_constraint_internal(0, voxel_idx, neighbor);
+
+    neighbor = table_get(gx, gy + 1, gz);
+    if (neighbor >= 0) add_face_constraint_internal(1, voxel_idx, neighbor);
+    neighbor = table_get(gx, gy - 1, gz);
+    if (neighbor >= 0) add_face_constraint_internal(1, voxel_idx, neighbor);
+
+    neighbor = table_get(gx, gy, gz + 1);
+    if (neighbor >= 0) add_face_constraint_internal(2, voxel_idx, neighbor);
+    neighbor = table_get(gx, gy, gz - 1);
+    if (neighbor >= 0) add_face_constraint_internal(2, voxel_idx, neighbor);
+}
 
 
 // Utility functions
@@ -413,6 +531,7 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
         p->inv_mass = (fixed || !simulate) ? 0.0f : 1.0f;
     }
     table_set(v->gx, v->gy, v->gz, idx);
+    add_face_constraints_for_voxel(idx);
     return idx;
 }
 
@@ -496,6 +615,7 @@ static void ResetGame(void) {
     }
     // clear voxels
     voxel_count = 0;
+    face_constraints_reset();
     // clear hash
     memset(table, 0, sizeof(table));
     // build static blocks
@@ -542,11 +662,12 @@ static void physics_step(float dt) {    // Rebuild spatial hash
 
             if (hit_id >= 0) {
                 hit_voxel = true;
-                
+
                 // Stop the bullet
                 v->simulate = false;
                 v->fixed = true;
                 v->pos = (Vector3){-999.0f, -999.0f, -999.0f};
+                deactivate_constraints_for_voxel(i);
 
                 int brushExtent = (voxelBrushSpan < 1) ? 1 : voxelBrushSpan;
 
@@ -567,6 +688,7 @@ static void physics_step(float dt) {    // Rebuild spatial hash
                                     victim->simulate = false;
                                     victim->fixed = true;
                                     victim->pos = (Vector3){-999.0f, -999.0f, -999.0f};
+                                    deactivate_constraints_for_voxel(victim_idx);
                                 }
                             }
                         }
@@ -623,6 +745,7 @@ static void physics_step(float dt) {    // Rebuild spatial hash
                     v->simulate = false;
                     v->fixed    = true;
                     v->pos      = (Vector3){ -999.0f, -999.0f, -999.0f };
+                    deactivate_constraints_for_voxel(i);
 
                     if (players[j].health <= 0) {
                         if (v->owner >= 0 && v->owner != j) {
@@ -918,6 +1041,54 @@ static void update_particle_velocities(float dt) {
     }
 }
 
+static bool project_face_constraint(FaceConstraint *fc, int axis) {
+    if (!fc->active) return false;
+    Voxel *a = &voxels[fc->voxelA];
+    Voxel *b = &voxels[fc->voxelB];
+
+    if ((!a->simulate && !b->simulate) || fc->voxelA == fc->voxelB)
+        return true;
+
+    const Vector3 dir = axis_dirs[axis];
+    const int (*pairs)[2] = face_pairs[axis];
+    float rest_len = 2.0f * PARTICLE_RADIUS;
+    float max_strain = -FLT_MAX;
+    float min_strain = FLT_MAX;
+
+    for (int i = 0; i < 4; ++i) {
+        Particle *pa = &a->particles[pairs[i][0]];
+        Particle *pb = &b->particles[pairs[i][1]];
+        Vector3 shifted_b = v_add(pb->predicted_pos, v_mul(dir, PARTICLE_RADIUS));
+        Vector3 shifted_a = v_sub(pa->predicted_pos, v_mul(dir, PARTICLE_RADIUS));
+        float separation = v_dot(v_sub(shifted_b, shifted_a), dir);
+        float strain = (separation - rest_len) / rest_len;
+        if (strain > max_strain) max_strain = strain;
+        if (strain < min_strain) min_strain = strain;
+    }
+
+    if (max_strain > fc->strain_max || min_strain < fc->strain_min) {
+        fc->active = false;
+        return false;
+    }
+
+    for (int i = 0; i < 4; ++i) {
+        Particle *pa = &a->particles[pairs[i][0]];
+        Particle *pb = &b->particles[pairs[i][1]];
+        float w_sum = pa->inv_mass + pb->inv_mass;
+        if (w_sum == 0.0f) continue;
+
+        Vector3 shifted_b = v_add(pb->predicted_pos, v_mul(dir, PARTICLE_RADIUS));
+        Vector3 shifted_a = v_sub(pa->predicted_pos, v_mul(dir, PARTICLE_RADIUS));
+        float separation = v_dot(v_sub(shifted_b, shifted_a), dir);
+        float delta = separation - rest_len;
+        float lambda = delta / w_sum;
+        pa->predicted_pos = v_add(pa->predicted_pos, v_mul(dir, lambda * pa->inv_mass));
+        pb->predicted_pos = v_sub(pb->predicted_pos, v_mul(dir, lambda * pb->inv_mass));
+    }
+
+    return true;
+}
+
 void simulate_voxel_pbd(float dt) {
     const int substeps = 3;
     const int constraint_iterations = 3;
@@ -933,6 +1104,14 @@ void simulate_voxel_pbd(float dt) {
                 if (!voxel->simulate)
                     continue;
                 solve_voxel_shape(voxel);
+            }
+
+            for (int axis = 0; axis < 3; ++axis) {
+                for (int ci = 0; ci < face_constraint_count[axis]; ++ci) {
+                    FaceConstraint *fc = &face_constraints[axis][ci];
+                    if (!fc->active) continue;
+                    project_face_constraint(fc, axis);
+                }
             }
         }
 
