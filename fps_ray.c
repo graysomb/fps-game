@@ -44,6 +44,10 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define FLOOR_SIZE     20.0f    // half-size of floor in world units
 #define PLAYER_SIZE 0.5f
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.25f)
+#define VGS_ALPHA 0.5f
+#define VGS_BETA 0.5f
+#define VGS_ITERS 3
+#define VGS_EPS 1e-6f
 
 // KD-stats constants
 #define BASE_HEALTH 100
@@ -100,6 +104,9 @@ typedef struct {
     bool surface[6];
     int  gx, gy, gz;
     Particle particles[8];
+    float rest_volume;
+    float rest_edge;
+    float particle_radius;
 } Voxel;
 static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
@@ -122,6 +129,16 @@ static Vector3 v_sub(Vector3 a, Vector3 b) {
 }
 static Vector3 v_mul(Vector3 v, float s) {
     return (Vector3){ v.x*s, v.y*s, v.z*s };
+}
+static float v_dot(Vector3 a, Vector3 b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+static Vector3 v_cross(Vector3 a, Vector3 b) {
+    return (Vector3){
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x
+    };
 }
 
 static float v_length(Vector3 v) {
@@ -373,6 +390,9 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     v->gx = (int)floorf(px / VOXEL_SIZE);
     v->gy = (int)floorf(py / VOXEL_SIZE);
     v->gz = (int)floorf(pz / VOXEL_SIZE);
+    v->rest_volume = VOXEL_SIZE * VOXEL_SIZE * VOXEL_SIZE;
+    v->rest_edge = VOXEL_SIZE;
+    v->particle_radius = PARTICLE_RADIUS;
     const float half = VOXEL_SIZE * 0.5f;
     static const int corner_signs[8][3] = {
         { -1, -1, -1 }, {  1, -1, -1 },
@@ -390,7 +410,7 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
         p->prev_pos = p->pos;
         p->predicted_pos = p->pos;
         p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
-        p->inv_mass = 1.0f;
+        p->inv_mass = (fixed || !simulate) ? 0.0f : 1.0f;
     }
     table_set(v->gx, v->gy, v->gz, idx);
     return idx;
@@ -650,6 +670,109 @@ static void integrate_particles(float dt) {
     }
 }
 
+static Vector3 vgs_project(Vector3 onto, Vector3 vec) {
+    float denom = v_dot(onto, onto);
+    if (denom < VGS_EPS) {
+        return (Vector3){ 0.0f, 0.0f, 0.0f };
+    }
+    float scale = v_dot(onto, vec) / denom;
+    return v_mul(onto, scale);
+}
+
+static void solve_voxel_shape(Voxel *voxel) {
+    bool has_dynamic = false;
+    Vector3 p[8];
+    float w[8];
+
+    for (int i = 0; i < 8; ++i) {
+        Particle *part = &voxel->particles[i];
+        p[i] = part->predicted_pos;
+        w[i] = part->inv_mass;
+        if (w[i] > 0.0f) {
+            has_dynamic = true;
+        }
+    }
+
+    if (!has_dynamic) {
+        return;
+    }
+
+    const float rest_volume = voxel->rest_volume;
+    const float rest_edge = voxel->rest_edge;
+    Vector3 centroid = { 0.0f, 0.0f, 0.0f };
+
+    for (int iter = 0; iter < VGS_ITERS; ++iter) {
+        centroid = (Vector3){ 0.0f, 0.0f, 0.0f };
+        for (int i = 0; i < 8; ++i) {
+            centroid = v_add(centroid, p[i]);
+        }
+        centroid = v_mul(centroid, 1.0f / 8.0f);
+
+        Vector3 v0 = v_add(v_add(v_sub(p[1], p[0]), v_sub(p[3], p[2])),
+                           v_add(v_sub(p[5], p[4]), v_sub(p[7], p[6])));
+        v0 = v_mul(v0, 0.25f);
+
+        Vector3 v1 = v_add(v_add(v_sub(p[2], p[0]), v_sub(p[3], p[1])),
+                           v_add(v_sub(p[6], p[4]), v_sub(p[7], p[5])));
+        v1 = v_mul(v1, 0.25f);
+
+        Vector3 v2 = v_add(v_add(v_sub(p[4], p[0]), v_sub(p[5], p[1])),
+                           v_add(v_sub(p[6], p[2]), v_sub(p[7], p[3])));
+        v2 = v_mul(v2, 0.25f);
+
+        Vector3 u0 = v_sub(v0, v_mul(v_add(vgs_project(v1, v0), vgs_project(v2, v0)), VGS_ALPHA));
+        Vector3 u1 = v_sub(v1, v_mul(v_add(vgs_project(v2, v1), vgs_project(v0, v1)), VGS_ALPHA));
+        Vector3 u2 = v_sub(v2, v_mul(v_add(vgs_project(v0, v2), vgs_project(v1, v2)), VGS_ALPHA));
+
+        float len0 = v_length(u0);
+        float len1 = v_length(u1);
+        float len2 = v_length(u2);
+
+        float target0 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * v_length(v0));
+        float target1 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * v_length(v1));
+        float target2 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * v_length(v2));
+
+        if (len0 > VGS_EPS) u0 = v_mul(u0, target0 / len0);
+        if (len1 > VGS_EPS) u1 = v_mul(u1, target1 / len1);
+        if (len2 > VGS_EPS) u2 = v_mul(u2, target2 / len2);
+
+        float volume = v_dot(v_cross(u0, u1), u2);
+        if (fabsf(volume) > VGS_EPS) {
+            float scale = rest_volume / volume;
+            float root = cbrtf(fabsf(scale));
+            if (scale < 0.0f) {
+                root = -root;
+            }
+            float factor = 0.5f * root;
+            u0 = v_mul(u0, factor);
+            u1 = v_mul(u1, factor);
+            u2 = v_mul(u2, factor);
+        }
+
+        Vector3 new_p[8];
+        new_p[0] = v_sub(v_sub(v_sub(centroid, u0), u1), u2);
+        new_p[1] = v_sub(v_sub(v_add(centroid, u0), u1), u2);
+        new_p[2] = v_sub(v_add(v_sub(centroid, u0), u1), u2);
+        new_p[3] = v_sub(v_add(v_add(centroid, u0), u1), u2);
+        new_p[4] = v_add(v_sub(v_sub(centroid, u0), u1), u2);
+        new_p[5] = v_add(v_sub(v_add(centroid, u0), u1), u2);
+        new_p[6] = v_add(v_add(v_sub(centroid, u0), u1), u2);
+        new_p[7] = v_add(v_add(v_add(centroid, u0), u1), u2);
+
+        for (int i = 0; i < 8; ++i) {
+            if (w[i] == 0.0f)
+                continue;
+            p[i] = new_p[i];
+        }
+
+    }
+
+    voxel->pos = centroid;
+    for (int i = 0; i < 8; ++i) {
+        voxel->particles[i].predicted_pos = p[i];
+    }
+}
+
 static void solve_particle_collisions(float dt) {
     (void)dt;
 
@@ -763,14 +886,58 @@ static void solve_particle_collisions(float dt) {
     }
 }
 
+static void update_particle_velocities(float dt) {
+    float inv_dt = (dt > 0.0f) ? 1.0f / dt : 0.0f;
+
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        Vector3 centroid = { 0.0f, 0.0f, 0.0f };
+        Vector3 prev_centroid = { 0.0f, 0.0f, 0.0f };
+
+        for (int j = 0; j < 8; ++j) {
+            Particle *p = &voxel->particles[j];
+            centroid = v_add(centroid, p->predicted_pos);
+            prev_centroid = v_add(prev_centroid, p->prev_pos);
+
+            Vector3 new_pos = p->predicted_pos;
+            Vector3 delta = v_sub(new_pos, p->prev_pos);
+
+            if (p->inv_mass > 0.0f) {
+                p->vel = v_mul(delta, inv_dt);
+            } else {
+                p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+            }
+
+            p->pos = new_pos;
+        }
+
+        centroid = v_mul(centroid, 1.0f / 8.0f);
+        prev_centroid = v_mul(prev_centroid, 1.0f / 8.0f);
+        voxel->vel = v_mul(v_sub(centroid, prev_centroid), inv_dt);
+        voxel->pos = centroid;
+    }
+}
+
 void simulate_voxel_pbd(float dt) {
     const int substeps = 3;
-    const float sub_dt = dt / (float)substeps;
+    const int constraint_iterations = 3;
+    const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
+
     for (int step = 0; step < substeps; ++step) {
         integrate_particles(sub_dt);
         solve_particle_collisions(sub_dt);
-    }
 
+        for (int it = 0; it < constraint_iterations; ++it) {
+            for (int i = 0; i < voxel_count; ++i) {
+                Voxel *voxel = &voxels[i];
+                if (!voxel->simulate)
+                    continue;
+                solve_voxel_shape(voxel);
+            }
+        }
+
+        update_particle_velocities(sub_dt);
+    }
 }
 
 /*
@@ -820,8 +987,13 @@ static void FireVoxel(int idx) {
     Color col = (p->vType==0? RED : BLUE);
     int vix = addVoxel(start.x, start.y, start.z, false, true, col, p->vType);
     if (vix >= 0) {
-        voxels[vix].vel = v_mul(dir, 50.0f);
-        voxels[vix].owner = idx;
+        Voxel *shot = &voxels[vix];
+        Vector3 vel = v_mul(dir, 50.0f);
+        shot->vel = vel;
+        shot->owner = idx;
+        for (int i = 0; i < 8; ++i) {
+            shot->particles[i].vel = vel;
+        }
     }
 }
 // Append the 12 edges (24 vertices) of a cube to the current RL_LINES batch
