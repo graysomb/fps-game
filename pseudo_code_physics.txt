@@ -77,3 +77,24 @@
           p.pos += correction * p.invMass
       if q.invMass > 0:
           q.pos -= correction * q.invMass
+
+
+
+
+With the data we have now, Gauss–Seidel-style collision handling just becomes another position-based constraint pass that touches
+  the particle fields you already added (pos, predicted_pos, prev_pos, vel, inv_mass). A CPU sketch for one substep looks like this:
+
+  - Predict – for every voxel/particle, move to predicted_pos = pos + vel * dt; cache prev_pos = pos.
+  - Collide (Gauss–Seidel) – walk particles one constraint at a time and resolve immediately:
+      - Static environment/ground: test predicted_pos against planes or AABBs, compute penetration depth and normal, then correct
+        predicted_pos by -penetration * n. Because we update in place, later constraints see the corrected state—this is the Gauss–
+        Seidel benefit.
+      - Player or other bodies: do the same against each player capsule/box (or any analytic collider).
+      - Particle–particle (optional): to collide two voxels, use the voxel hash to find neighbouring voxels, iterate their eight
+        particles, check sphere overlap (radius = VOXEL_SIZE * 0.5f from the paper), and push the pair apart proportionally to their
+        inverse masses.
+  - Accumulate – after all collision constraints (and the VGS/face constraints) finish, update velocities with vel = (predicted_pos -
+    prev_pos) / dt and commit pos = predicted_pos.
+
+  Because each voxel owns its particles, you don’t need partitioning; just running these corrections inside the constraint loop keeps
+  everything Gauss–Seidel.

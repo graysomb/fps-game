@@ -79,6 +79,8 @@ static Player players[2];
 
 typedef struct {
     Vector3 pos;
+    Vector3 prev_pos;
+    Vector3 predicted_pos;
     Vector3 vel;
     float inv_mass;
 } Particle;
@@ -381,6 +383,8 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
             py + corner_signs[i][1] * half,
             pz + corner_signs[i][2] * half
         };
+        p->prev_pos = p->pos;
+        p->predicted_pos = p->pos;
         p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
         p->inv_mass = 1.0f;
     }
@@ -614,6 +618,30 @@ static void physics_step(float dt) {    // Rebuild spatial hash
                     break;
                 }
             }
+        }
+    }
+}
+
+static void integrate_particles(float dt) {
+    const Vector3 gravity = { 0.0f, -GRAVITY, 0.0f };
+    const float dt_sq = dt * dt;
+
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+
+        for (int j = 0; j < 8; ++j) {
+            Particle *p = &voxel->particles[j];
+
+            p->prev_pos = p->pos;
+            p->predicted_pos = p->pos;
+
+            if (p->inv_mass == 0.0f) {
+                continue;
+            }
+
+            Vector3 step = v_mul(p->vel, dt);
+            Vector3 accel = v_mul(gravity, dt_sq);
+            p->predicted_pos = v_add(p->predicted_pos, v_add(step, accel));
         }
     }
 }
