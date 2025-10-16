@@ -1,0 +1,79 @@
+  dt = frame_dt / num_substeps
+
+  for substep in 1..num_substeps:
+      #--- predict ------------------------------------
+      for p in particles:
+          p.vel += dt * (gravity + externalForce(p))
+          p.prevPos = p.pos
+          p.pos     = p.pos + dt * p.vel    # x* predictor
+
+      #--- rebuild uniform grid -----------------------
+      clearCounts()
+      for p in particles:
+          cell = gridIndex(p.pos)
+          counts[cell]++
+      prefixSum(counts, starts)
+      for p in particles:
+          cell = gridIndex(p.pos)
+          writeIndex = atomicInc(counts[cell])   # or a simple counter on CPU
+          compact[ starts[cell] + writeIndex ] = p.id
+
+      #--- build neighbor-contact list ----------------
+      contacts.clear()
+      for cell in grid:
+          for each particle i in cell:
+              for each neighbor-cell of cell:
+                  for each particle j in neighbor-cell:
+                      if j > i and overlap(i,j):
+                          contacts.push( contact(i,j) )
+
+      # color contact list so pairs sharing a particle aren’t in same group
+      partitions = colorContacts(contacts)
+
+      #--- Gauss–Seidel solver iterations -------------
+      for iter in 1..num_constraint_iters:
+
+          # collision partitions first
+          for part in partitions:
+              for c in part:
+                  projectCollisionPairGaussSeidel(c.p, c.q)
+
+          # voxel Gram–Schmidt constraints (disjoint sets)
+          for vox in voxels:
+              projectVoxelShapeConstraint(vox.cornerParticles)
+
+          # face constraints (three non-overlapping partitions)
+          for axis in {X, Y, Z}:
+              for face in faceConstraints[axis]:
+                  if face.active:
+                      if beyondStrain(face):
+                          face.active = false
+                      else:
+                          projectFaceShapeConstraint(face.particles)
+
+      #--- velocity update ----------------------------
+      inv_dt = 1 / dt
+      for p in particles:
+          p.vel = (p.pos - p.prevPos) * inv_dt
+
+
+
+  projectCollisionPairGaussSeidel(p, q):
+      diff   = p.pos - q.pos
+      dist   = length(diff)
+      minDist = p.radius + q.radius
+      if dist >= minDist or dist == 0:
+          return
+
+      dir     = diff / dist                         # contact normal from q->p
+      penetration = minDist - dist
+
+      wsum = p.invMass + q.invMass                 # reciprocal masses
+      if wsum == 0:
+          return                                   # both static
+
+      correction = dir * (penetration / wsum)
+      if p.invMass > 0:
+          p.pos += correction * p.invMass
+      if q.invMass > 0:
+          q.pos -= correction * q.invMass

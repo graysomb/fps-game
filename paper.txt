@@ -1,0 +1,917 @@
+Gram-Schmidt voxel constraints for real-time destructible soft
+ bodies
+ Tim McGraw
+ Computer Graphics Technology, Purdue University
+ USA
+ tmcgraw@purdue.edu
+ Figure 1: Our breakable voxel constraints enable fast inhomogeneous and anisotropic destruction effects for triangle meshes.
+ In this image sequence the armadillo is being stretched apart by its limbs.
+ Abstract
+ Much previous research about fracture of deformable bodies has
+ focused on physical principles (e.g. energy and mass conservation),
+ leading to simulation methods that are very realistic, but not yet
+ applicable in real-time. We present a stylized animation method
+ for destruction that is visually plausible and capable of running at
+ hundreds of frames per second by sacrificing visual realism and
+ physical accuracy.
+ In this paper we describe a new volume-preserving voxel con
+straint based on Gram-Schmidt orthonomalization for real-time
+ animation of soft bodies. This constraint can be used in tandemwith
+ a breakable face-to-face voxel constraint to create destructible mod
+els. The model creation pipeline and constraints presented here are
+ designed to minimize the number of partitions needed for parallel
+ Gauss-Seidel iterations. We compare the proposed techniques with
+ shape constraints and the state-of-the-art material point method
+ on the basis of memory usage, computation time and visual results.
+ CCSConcepts
+ • Computing methodologies → Real-time simulation.
+ Keywords
+ animation, simulation, physics, fracture
+ Author’s Contact Information: Tim McGraw, Computer Graphics Technology, Purdue
+ University, USA, tmcgraw@purdue.edu.
+ This work is licensed under a Creative Commons Attribution International
+ 4.0 License.
+ MIG ’24, November 21–23, 2024, Arlington, VA, USA
+ ©2024 Copyright held by the owner/author(s).
+ ACMISBN979-8-4007-1090-2/24/11
+ https://doi.org/10.1145/3677388.3696322
+ ACMReference Format:
+ Tim McGraw. 2024. Gram-Schmidt voxel constraints for real-time destruc
+tible soft bodies. In The 17th ACM SIGGRAPH Conference on Motion, Interac
+tion, and Games (MIG ’24), November 21–23, 2024, Arlington, VA, USA. ACM,
+ New York, NY, USA, Article 111, 10 pages. https://doi.org/10.1145/3677388.
+ 3696322
+ 1 Introduction
+ Modern graphics hardware and APIs have enabled not only high
+ visual fidelity in real-time graphics, but also high-performance
+ animation and simulation. The parallel processing capability of
+ the GPU is exposed to developers through dedicated APIs, such
+ as OpenCL and CUDA, and through compute shader support in
+ graphics APIs, such as Vulkan, DirectX, OpenGL, and WebGPU.
+ However, accurate physical simulation of render-quality assets,
+ which can have hundreds of thousands of vertices is still not feasi
+ble in real-time applications, such as games, that must divide their
+ frame budget among many other tasks. This problem can be over
+come by embedding the rest pose of a high-resolution mesh in a
+ lower-resolution control surface, and transferring its deformations
+ back to the mesh. Handling fracture and destruction within this
+ framework is achallenge which must beovercomeforthefull range
+ of material behaviors to be realized in real-time applications.
+ Simple building-blocks, such as tetrahedra [Wojtan and Turk
+ 2008] and hexahedra [Muller et al. 2004] are commonly used be
+cause they have few vertices and their geometric properties are
+ generally easier to compute than those of more complex shapes.
+ In this work we consider deformable voxels which are initialized
+ as a voxelization of an input mesh. Although it may be possible to
+ apply Delaunay tetrahedralization to many triangle meshes, the
+ resulting mesh will often have some undesirable features, such as
+ narrow tetrahedra and high-degree vertices. Narrow tetrahedra can
+ result in numerical issues when computing volume and project
+ing constraints. Variable tetrahedron size also makes it difficult to
+MIG’24, November 21–23, 2024, Arlington, VA, USA
+ McGraw
+ use particles as collision primitives in particle-based frameworks
+ since the tetrahedron cannot be effectively covered by particles
+ of the same radius positioned at its vertices. High-degree vertices
+ pose a challenge to parallelization since vertex degree is a lower
+ limit on the number of partitions required when using Gauss-Seidel
+ iterations to parallelize constraint projection. The purpose of par
+titioning is to group constraints into sets such that no particle is
+ affected by more than one constraint in the set, which avoids par
+allel read/write conflicts. Minimizing the number of partitions is
+ important for real-time applications because it minimizes the num
+ber of compute shader dispatches and memory barriers we must
+ execute per frame. Jacobi iteration, an alternative to Gauss-Seidel
+ iteration, does not require partitioning, but generally leads to slow
+ convergence and less stiff results [Bender et al. 2017] and relies on
+ slow atomic operations to avoid read/write conflicts.
+ The voxel grid structure is regular and the maximum vertex de
+gree is fixed at 8. We can easily partition voxel constraints without
+ solving a graph-coloring [Abu Rumman and Fratarcangeli 2015]
+ or clustering [Ton-That et al. 2023] problem. A cubical voxel can
+ be covered with particles of the same radius without large gaps
+ between particles, allowing simple particle-based collision detec
+tion. However, a challenge with deformable voxels is that the 8
+ vertices initially forming a cube may not remain a cube or even a
+ parallelepiped when vertices are allowed to move independently.
+ In fact, the faces may not even remain planar. The volume of such
+ a general shape is difficult to formulate, making constraining the
+ volume with gradient-based techniques challenging. Macklin and
+ Müller et al. [Macklin and Muller 2021] overcome this problem by
+ approximating the cube with 5 tetrahedra. In parallel implementa
+tion, the 5 tetrahedral constraints can be solved sequentially within
+ a single thread, allowing the partitioning benefits of the regular
+ voxel structure to be maintained.
+ In this work we describe our system which was previously
+ demonstrated [McGraw 2024] at SIGGRAPH Real-Time Live. We
+ take advantage of the simple voxel geometry to define shape and
+ connectivity constraints, and we exploit the regularity of the voxel
+ grid to optimize our parallel implementation by minimizing the
+ numberofconstraint partitions. Our constraints are based on Gram
+Schmidt orthogonalization, and have several important benefits
+ over alternative methods. Our constraint is a soft constraint with
+ relaxation parameters that permits the 8 voxel vertices to approx
+imate a parallelpiped after volume-preserving deformation. Our
+ constraint does not suffer from the bias problem that is inherent to
+ other variants of Gram-Schmidt orthonormalization, and requires
+ less memory than previously proposed shape constraints. We also
+ describe a new breakable face constraint that permits us to explore
+ a range of inhomogeneous and anisotropic materials in real-time
+ destruction, only requiring a total of 4 constraint partitions, making
+ parallel computation fast.
+ 2 Related work
+ Stable and fast simulation and physically-based animation of de
+formable objects has been a goal of graphics research for decades.
+ Many approaches and representations have been proposed, such as
+ f
+ inite difference optimization of parametric surfaces [Terzopoulos
+ et al. 1987], mass-spring systems [Desbrun et al. 1999], and finite
+ element methods [Wojtan and Turk 2008].
+ Jakobsen [Jakobsen 2001] described the real-time techniques
+ used to animate physically-based models built from systems of
+ constrained particles in the game Hitman. His approach worked in
+ terms of particle positions, without explicitly keeping track of linear
+ or angular accelerations. This work was a forerunner to position
+based dynamics (PBD) approaches, and was followed by many
+ variations and extensions, most importantly, general techniques for
+ formulating and solving different types of constraints [Macklin et al.
+ 2014; Müller et al. 2007]. Bender et al. [Bender et al. 2017] and Fang
+ et al. [Fang et al. 2023] have written surveys which cover much of
+ the related work in the 20 years following Jakobsen’s paper.
+ Acompelling feature of PBD systems is that plausible rotational
+ behavior emerges as a side effect of constraints between particles.
+ This permits large-scale models built from constrained particles to
+ behave naturally, without having to explicitly compute physical
+ properties, such as the moment of inertia. Although a surprising
+ array of complex structures can be built from particles and distance
+ constraints, volumetric elements make it convenient to accurately
+ model more complex phenomena.
+ Tetrahedra seem to be a natural choice of volume element for
+ physically-based animation of triangle meshes. However, Macklin
+ and Müller observed an issue with tetrahedral meshes [Macklin and
+ Muller 2021], namely that parallelization is hindered by the large
+ number of partitions required to avoid read/write conflicts. They
+ proposed instead a regular hexahedral grid which requires only
+ 8 partitions. Each hexahedron is filled with 5 tetrahedral volume
+ constraints which can be solved by serializing them within a single
+ thread, permitting the volume of the hexahedral element to be
+ constrained.
+ Shape matching constraints are a geometric, but physically
+plausible approach to animating rigid shapes. Imposing the con
+straint involves finding the optimal rotation and translations that
+ align the rest pose shape and the deformed shape. The translations
+ (pre- and post-rotation) can be written in terms of the rest pose and
+ deformed shape centroids. It is more difficult to find the optimal
+ rotation, so the problem is solved by instead finding the optimal
+ linear transformation matrix (denoted 𝐴𝑝𝑞 in [Müller et al. 2005]),
+ then factoring out the rotational part of that matrix using singular
+ value decomposition (SVD) or polar decomposition.
+ The shape-matching technique has been adopted in many appli
+cations. Shape matching constraints were combined with oriented
+ particles (ellipsoids) [Müller and Chentanez 2011] to create sparse
+ models for complex meshes. Jones et al. [Jones et al. 2016] com
+pute ductile fracture in terms of dense clusters of particles with
+ local shape matching constraints. Physically-based shape matching
+ using Hookean and Neo-Hookean models were later described by
+ Müller at al. [Müller et al. 2022].
+ In this work, we propose the use of Gram-Schmidt (GS) orthono
+malization for voxel shape constraints. GS approaches were iden
+tified as being potentially useful in shape matching [Müller et al.
+ 2016], but other approaches, such as polar decomposition were
+ preferred due to the bias problem inherent to GS. Gram-Schmidt
+ orthogonalization takes a set of linearly independent vectors and
+ generates a set of orthonormal vectors. There are two variations
+ of the algorithm. Both classical Gram-Schmidt (CGS) and modified
+Gram-Schmidt voxel constraints for real-time destructible soft bodies
+ MIG’24, November 21–23, 2024, Arlington, VA, USA
+ Gram-Schmidt (MGS) are biased in the sense that the results de
+pend on the processing order of the vectors. In infinite precision
+ arithmetic they would give the same result, but in finite precision
+ the MGS computation is preferred since it is less sensitive to the
+ accumulation of round-off errors [Golub and Van Loan 2013]. In
+ this work we present a shape constraint based on a variation of GS
+ which mitigates the bias problem.
+ Compared to traditional shape constraints, our proposed ap
+proach has several benefits. Since the rest shape of the deformable
+ voxel is a cube centered at the origin, we do not need to store the
+ rest shape explicitly. We constrain the voxel using a GS-like process
+ applied to voxel edges, so the quaternion or rotation matrix used to
+ “warm-start” the polar decomposition [Müller et al. 2016] does not
+ need to be stored. These two benefits mean that for our destructible
+ models, the voxel shape constraints require no additional memory,
+ and other constraints based on this technique, like the face-to-face
+ voxel constraints proposed in this paper, occupy very little memory.
+ Additionally, our constraint is a volume-preserving soft constraint
+ where the degree of softness can be controlled with two relaxation
+ parameters, so that the solution can be a parallelepiped instead of a
+ cube, resulting in a more natural soft-body behavior. By constrast,
+ shape-matching computes a rigid transformation between rest pose
+ and deformed pose.
+ Techniques for fracture have been proposed since the earliest
+ days of deformable models. Terzopolous and Fleicher [Terzopoulos
+ and Fleischer 1988] implemented fracture in surfaces defined as
+ piecewise continuous polynomial splines by breaking continuity
+ between elements. O’Brien fractured FEM models [O’Brien et al.
+ 2002; O’Brien and Hodgins 1999] by splitting tetrahedral elements.
+ In extended finite element methods (XFEM), such as the one de
+scribed by Koshier et al. [Koschier et al. 2017], cutting without
+ domain remeshing is performed by introducing discontinuous local
+ enrichment functions to the finite element shape functions.
+ Recently, there has been renewed interest in hybrid Eulerian
+Lagragian techniques, like material point methods (MPM) [Jiang
+ et al. 2016]. Like the particle-in-cell (PIC) methods, such as FLIP
+ for incompressible fluid simulation [Zhu and Bridson 2005], these
+ methods use both Lagrangian particles and an Eulerian grid. A wide
+ variety of materials may be simulated, including fluids, anisotropic
+ solids [Mandal et al. 2022], granular materials [Stomakhin et al.
+ 2013] and interacting solid/fluid systems [Yan et al. 2018]. Simula
+tion proceeds by updating particle state and scattering values to
+ the grid, iterating the grid values, and then gathering values back
+ to particles from the grid. These methods are capable of impressive
+ results, including change of topology (fracture), but real-time im
+plementation is challenging due to the high memory bandwidth
+ required by particle-to-grid and grid-to-particle memory transfers.
+ Since it is a meshless method, rendering the fractured mesh requires
+ additional work. Some approaches utilize the simulation grid (or a
+ higher resolution grid) in volume rendering [Stomakhin et al. 2013],
+ or to generate an isosurface [Wolper et al. 2019]. Other approaches
+ based on the particles include tetrahedralizing the particles [Wang
+ et al. 2019]. Our approach, since we are targeting a stylized voxel
+ rendering, uses only the original input mesh and intersections of
+ the mesh with a grid of voxels. The voxelized approach we propose
+ is similar to previous approaches which use hexahedral elements
+ linked together by their faces [Dick et al. 2010; Frisken-Gibson
+ 1999] and perform cutting by disconnecting links. Since our goal is
+ a voxel-style real-time animation technique and not an engineering
+ simulation, we do not perform any additional domain refinement
+ or element splitting.
+ 3 Methods
+ In this section we describe our new voxel shape constraint based
+ on GS, and describe how we use it to create destructible soft body
+ models in a PBD framework. Then we give an overview of the
+ rendering process, which involves using task and mesh shaders to
+ render the surface mesh and internal details computed from the
+ voxelization.
+ 3.1 Voxel Gram-Schmidt constraint
+ Rather than subdividing voxels into tetrahedra or using traditional
+ shape constraints, we developed a technique we call voxel Gram
+Schmidt (VGS) based on GS orthogonalization to constrain the
+ vertices of our voxels to remain nearly cubical parallelepipeds. The
+ traditional CGS and MGS algorithms produce a set of orthonor
+mal vectors, {𝑢0,𝑢1,𝑢2}, from a set of linearly independent vectors,
+ {𝑣0, 𝑣1,𝑣2}. However, the MGS and CGS results depend on the se
+quential order that the vectors are processed, leading to directional
+ bias in the system since𝑢0 will be equal to 𝑣0/||𝑣0||. We propose a
+ method that reduces directional bias by introducing a relaxation
+ parameter, 𝛼, and iteratively solving for 𝑣 and projecting the point
+ set onto a paralellepiped.
+ Figure 2: Z-order vertices for a single voxel.
+ For Algorithm 1, the order of input vertices, 𝑝 for each voxel are
+ shown in Figure 2. In line 3 the voxel centroid, 𝑐, and in lines 4 − 6
+ the averaged voxel edges, {𝑣𝑖}, are computed.
+ Lines 7 − 9 are the relaxed Gram-Schmidt steps, where the
+ weighted projections (proj𝑥 (𝑦) = 𝑥·𝑦
+ 𝑥·𝑥 𝑥) of each edge vector onto
+ the other edge vectors are subtracted to obtain {𝑢𝑖}. More guidance
+ for the selection of 𝛼 is given in Results, but in general it controls
+ the stiffness of the orthogonality constraint between edges.
+ In lines 10 and 11, rather than normalizing voxel edges, as in CGS
+ and MGS, we introduce another weight, 𝛽 which controls whether
+ all edges should be equal length (𝛽 = 1), or if we should permit the
+ voxel to have nonuniform edge lengths at convergence.
+ Lines 12 − 14 impose the volume constraint, which keeps the
+ output voxel volume,𝑉 the same as the initial voxel volume,𝑉0. A
+ factor of 1/2 is also multiplied here in preparation for the final step.
+ Lines 15 − 22 form the parallelepiped, by reconstructing the
+ output vertices in terms of the centroid, 𝑐, and voxel edges, {𝑢𝑖},
+ taking into account static (𝑤𝑖 = 0) vertices.
+ VGS has some similarities to the iterative closest point (ICP) al
+gorithm [Besl and McKay 1992] for point cloud registration. In this
+MIG’24, November 21–23, 2024, Arlington, VA, USA
+ McGraw
+ Algorithm 1 Voxel Gram-Schmidt (VGS) algorithm for constrain
+ing 8 vertices, 𝑝, given reciprocal masses, 𝑤, voxel volume, 𝑉0,
+ particle radius, 𝑟, iteration count, 𝑣𝑔𝑠_𝑖𝑡, and relaxation parameter,
+ 𝛼.
+ 1: procedure VGS(𝛼, 𝛽, 𝑣𝑔𝑠_𝑖𝑡, 𝑝[8], 𝑤[8], 𝑟)
+ 2:
+ 3:
+ 4:
+ 5:
+ 6:
+ 7:
+ 8:
+ 9:
+ 10:
+ 11:
+ 12:
+ 13:
+ 14:
+ 15:
+ 16:
+ 17:
+ 18:
+ 19:
+ 20:
+ 21:
+ 22:
+ for 𝑖 = 0;𝑖 < 𝑣𝑔𝑠_𝑖𝑡;𝑖 + + do
+ // Compute centroid
+ 𝑐 ← 𝑖𝑝𝑖/8
+ // Compute edge vectors by averaging
+ 𝑣0 ← ((𝑝1 −𝑝0) + (𝑝3 −𝑝2) + (𝑝5 −𝑝4) + (𝑝7 −𝑝6))/4
+ 𝑣1 ← ((𝑝2 −𝑝0) + (𝑝3 −𝑝1) + (𝑝6 −𝑝4) + (𝑝7 −𝑝5))/4
+ 𝑣2 ← ((𝑝4 −𝑝0) + (𝑝5 −𝑝1) + (𝑝6 −𝑝2) + (𝑝7 −𝑝3))/4
+ // Relaxed Gram-Schmidt
+ 𝑢0 ←𝑣0 −𝛼(proj𝑣1
+ (𝑣0) +proj𝑣2
+ (𝑣0))
+ 𝑢1 ←𝑣1 −𝛼(proj𝑣2
+ (𝑣1) +proj𝑣0
+ (𝑣1))
+ 𝑢2 ←𝑣2 −𝛼(proj𝑣0
+ (𝑣2) +proj𝑣1
+ (𝑣2))
+ // Equal edge length constraint
+ for 𝑖 = 0 to 2 do
+ 𝑢𝑖 ← 𝑢𝑖
+ | |𝑢𝑖 || ( (1 − 𝛽)𝑟 + 𝛽 ||𝑣𝑖|||
+ // Volume constraint
+ 𝑉 = (𝑢0 ×𝑢1) ·𝑢2
+ for 𝑖 = 0 to 2 do
+ 𝑢𝑖 ← 1
+ 2 (𝑉0/𝑉)1/3𝑢𝑖
+ 2 )
+ // Project to parallelepiped
+ if 𝑤0 ≠ 0then𝑝0 ←𝑐 −𝑢0 −𝑢1 −𝑢2
+ if 𝑤1 ≠ 0then𝑝1 ←𝑐 +𝑢0 −𝑢1 −𝑢2
+ if 𝑤2 ≠ 0then𝑝2 ←𝑐 −𝑢0 +𝑢1 −𝑢2
+ if 𝑤3 ≠ 0then𝑝3 ←𝑐 +𝑢0 +𝑢1 −𝑢2
+ if 𝑤4 ≠ 0then𝑝4 ←𝑐 −𝑢0 −𝑢1 +𝑢2
+ if 𝑤5 ≠ 0then𝑝5 ←𝑐 +𝑢0 −𝑢1 +𝑢2
+ if 𝑤6 ≠ 0then𝑝6 ←𝑐 −𝑢0 +𝑢1 +𝑢2
+ if 𝑤7 ≠ 0then𝑝7 ←𝑐 +𝑢0 +𝑢1 +𝑢2
+ case, however, point correspondences are known and the transfor
+mation that aligns the point clouds is estimated with Gram-Schmidt
+ rather than SVD. VGS can also be seen as a simplified special case
+ of a shape matching constraint [Müller et al. 2005] where the shape
+ is a cube. But in this case we do not extract the rotational part of a
+ general transformation [Müller et al. 2016], and instead use vectors
+ 𝑢0,𝑢1,𝑢2 to define an affine transformation. In preliminary experi
+ments (described in Results) we found that 𝛼 = 0.5 and 𝑣𝑔𝑠_𝑖𝑡 = 3
+ iterations were sufficient to produce an orthonormal basis to high
+ precision. Note that simulation substepping and multiple constraint
+ iterations will result in the the constraint projection happening
+ many more times per frame than the value given by 𝑣𝑔𝑠_𝑖𝑡.
+ 3.2 Voxelized model construction
+ Webegin byvoxelizing the input mesh once at startup. Destructible
+ models use a solid voxelization since interior voxels will be exposed
+ during destruction, which means the input must be a closed, water
+tight mesh. The voxelization technique used in our system [Crassin
+ and Green 2012] uses the rendering pipeline to select the dominant
+ triangle axis and perform conservative rasterization to voxelize
+ triangles directly into a 3d texture. From the filled voxelization, we
+ compute a distance transform volume [Strutz 2021] and a skeleton
+ based on the medial axis [Lee et al. 1994]. We use these later to as
+sign strain limits which determine when neighboring voxels break
+ apart, and also to synthesize internal texture details.
+ Figure 3: Destructible model creation (left to right) begins
+ with an input mesh in the rest pose which is voxelized
+ (32 × 32 ×32 shown here). Eight particles are created for each
+ voxel. A skeleton (rightmost image) is computed from the
+ voxelization.
+ In an offline precomputation step, we compute the voxel face
+ intersections with the surface mesh using CGAL [Hachenberger
+ and Kettner 2024; The CGAL Project 2024]. These intersections
+ represent interior surfaces that will be seen when the model breaks
+ apart, and are saved to a file for loading at run time. Unfortunately,
+ we cannot use any stencil buffer tricks to efficiently render the
+ intersection of each voxel with the mesh [Wiegand 1996] since
+ these approaches rely on rendering front and back faces to modify
+ stencil values and would therefore require us to render the entire
+ mesh once per voxel.
+ Figure 4: Voxel and particle arrangement for destructible
+ meshes (left). There are no shared particles between voxels
+ so that no new particles need to be created during destruc
+tion. The colored boxes represent breakable face-to-face con
+straints between voxels. Different colors represent different
+ constraint partitions. In 3D, a total of 3 partitions are re
+quired. To prevent interlock, voxel collision normals (right)
+ depend on the collision normals of the particles near the
+ corners of the voxel and an imaginary particle at the center.
+Gram-Schmidt voxel constraints for real-time destructible soft bodies
+ MIG’24, November 21–23, 2024, Arlington, VA, USA
+ Next, we generate 8 particles with reciprocal mass 𝑤 = 1 and
+ radius 𝑟 = 𝐿/4 per voxel, where 𝐿 is the voxel edge length, using
+ the arrangement shown in Figure 4. All particles are created during
+ model construction to avoid creating additional particles at runtime
+ when the model is destroyed. We buffer the particles in Morton
+ code (z-curve) [Lauterbach et al. 2009] order so that we can easily
+ gobackandforthbetweenparticle and voxel indices in the compute
+ shader, and we get a side benefit of improved cache coherence since
+ adjacent voxels will exhibit memory address locality. Using this
+ arrangement, our voxel constraints occupy no additional memory.
+ Wesimply dispatch our compute shader with a stride of 8 to solve
+ voxel constraints. Since there are no shared particles, the entire
+ buffer of voxel constraints can be projected with a single dispatch
+ without partitioning. Voxel and particle indices are related as shown
+ in Equation 1.
+ vox = vert𝑗 ≫ 3
+ vert0 = vox ≪ 3
+ vert𝑗 = vert0 + 𝑗
+ vert𝑑𝑖𝑎𝑔(𝑗) = vert0 + 7 − 𝑗,
+ (1a)
+ (1b)
+ (1c)
+ (1d)
+ where ≫ is the bitwise shift right operator, vox is the voxel index,
+ vert0 is the index of the first particle (lowest Morton code value)
+ of the voxel, vert𝑗 is the index of the 𝑗th particle of the voxel, and
+ vert𝑑𝑖𝑎𝑔(𝑗) is the index of the particle diagonally opposite the 𝑗th
+ particle. Equations 1a-1c follow from the fact that voxel vertices
+ are stored as consecutive groups of 8 particles in buffer. Equation
+ 1d is a consequence the z-order particle storage shown in Figure 2
+ for a single voxel.
+ Macklin et al. [Macklin et al. 2014] noted that using particles
+ as a collision primitive can lead to interlock problems, and they
+ proposed a one-sided particle collision normal based on the bound
+ary normal. We take a related approach, and augment our particle
+ collision normals with the collision normal of an imaginary particle
+ of radius 1.5𝑟 centered on the voxel (see Figure 4). We estimate the
+ center as the midpoint of the voxel diagonal which we determine by
+ reading only 2 particle positions and using vert𝑑𝑖𝑎𝑔(𝑗) in Equation
+ 1.
+ Face-to-face constraints between voxels are represented as a
+ structure consisting of 2 16-bit integer voxel indices (sufficient for
+ voxelizations up to 32×32×32), and two half-precision strain limits,
+ {ˆ𝜀𝑐, ˆ𝜀𝑡 } , for a total of 8 bytes per constraint with no padding needed
+ for memory alignment. The two strain limits (one positive and one
+ negative) determine when a constraint should be broken due to
+ tension or compression. Face index is uniform per compute shader
+ dispatch, so it doesn’t need to be stored per-constraint. Based on
+ the voxel indices and face index we can determine which voxel
+ vertices are involved in each constraint.
+ One-dimensional linear strain is given by 𝜀 = Δ𝐿/𝐿0, where
+ 𝐿0 is the rest length. For voxel face constraints, the strain is the
+ maximum strain of the 4 constraint edges perpendicular to the
+ face being constrained (so, edges in the rest pose x-direction for
+ x-constraints). A constraint is broken if the strain is less than the
+ compressive strain limit or greater than the tensile strain limit.
+ Since constraints are created on a face-by-face basis, anisotropic
+ materials can be modeled by setting different values for the strain
+ limits. This allows a lot of flexibility in creating destruction effects.
+ Some of the possibilities include (letting ˆ𝜀(𝑥), ˆ𝜀(𝑦), and ˆ𝜀(𝑧) denote
+ the strain limits on faces with 𝑥,𝑦,𝑧 orientations.),
+ • High|ˆ𝜀| forstrongerpartsofthemodelandlow |ˆ𝜀| forweaker
+ parts of the model, to prefer fracture in particular locations
+ • Randomized ˆ𝜀 to avoid simple fracture into voxels and en
+courage chunks to form
+ • Setting |ˆ𝜀(𝑥)| = |ˆ𝜀(𝑦)| = |ˆ𝜀(𝑧)| = ∞ for skeleton-to-skeleton
+ constraints creates an indestructible skeleton. We can then
+ interact with the skeleton, such as hanging the mesh by the
+ skeleton without breaking it.
+ • Setting |ˆ𝜀(𝑥)| ≈ |ˆ𝜀(𝑦)| >> |ˆ𝜀(𝑧)| results in anisotropic mate
+rials that tend to delaminate into sheets.
+ • Setting |ˆ𝜀(𝑥)| >> |ˆ𝜀(𝑦)| ≈ |ˆ𝜀(𝑧)| results in materials that
+ splinter into matchsticks.
+ • Using the distance transform 𝑑(vox), which gives the dis
+tance between avoxelandthesurfaceofthevoxelized model,
+ to break a model into shells. For constraints between a voxel
+ pair vox𝑎 and vox𝑏, if dist(vox𝑎) equals dist(vox𝑏) set the
+ corresponding |ˆ𝜀| to a high value.
+ 3.3 Animation
+ In the compute shader, prior to voxel Gram-Schmidt iterations, we
+ compute the strain of the constraint. First, the 4 edges, 𝑒0,𝑒1,𝑒2,𝑒3,
+ across the constraint are computed by subtracting corresponding
+ particle positions. The rest length of these edges is 2𝑟, where 𝑟
+ is the particle radius. The strain of each edge is given by 𝜀(𝑒𝑖) =
+ (||𝑒𝑖 || − 2𝑟)/2𝑟.
+ If the strain limit for a constraint on a face, 𝑓 , is exceeded,
+ max𝑖𝜀(𝑒𝑖) > ˆ𝜀𝑡 (𝑓 ),or
+ min𝑖𝜀(𝑒𝑖) < ˆ𝜀𝑐(𝑓 ),
+ we break the constraint by setting the voxel indices for the con
+straint to-1. This represents an inactive constraint, and the compute
+ shader invocation simply returns when inactive constraints are de
+tected. We also check if the constraint has turned inside out (V =
+ (𝑢0 ×𝑢1) ·𝑢2 < 0), which can occur during fast motion or extreme
+ deformations, and break the constraint if this occurs. When this
+ situation is encountered in voxels (which cannot be broken, to pre
+serve the mass of the model) we invert the shortest edge, which is
+ analogous to the approach taken by Schmedding et al. [Schmedding
+ and Teschner 2008] with tetrahedral elements.
+ Weonly need 3 partitions of face-to-face voxel constraints (Fig
+ure 4) since our voxels do not share vertices and we do not consider
+ edge-to-edge or corner-to-corner constraints between voxels. The
+ client-side constraint-solving part of the PBD loop is implemented
+ as showninAlgorithm2.Weimplementourvoxelconstraintsolvers
+ in glsl compute shaders and incorporate them into a PBD frame
+work as described in [Bender et al. 2017]. Particle collision and
+ kinematics are solved in a single compute shader dispatch per sim
+ulation substep. A memory barrier is issued after each compute
+ shader dispatch to ensure that the updated particle positions will
+ be visible to subsequent dispatches.
+MIG’24, November 21–23, 2024, Arlington, VA, USA
+ McGraw
+ Algorithm 2 Pseudocode for client-side constraint projection step
+ for destructible models.
+ 1: for 𝑖 = 0;𝑖 < 𝑐𝑜𝑛_𝑖𝑡;𝑖 + + do
+ // Project VGS constraints
+ 2:
+ 3:
+ 4:
+ 5:
+ 6:
+ 7:
+ VgsCompute.Dispatch(Particles.size() / 8)
+ MemoryBarrier( )
+ // Project breakable face constraints
+ for 𝑝𝑥 = 0;𝑝𝑥 < 3;𝑝𝑥 ++do
+ BindBuffer(VoxelFace[𝑝𝑥])
+ VoxelFaceCompute.Dispatch(VoxelFace[𝑝𝑥].size())
+ MemoryBarrier( )
+ 3.4 Rendering
+ The input mesh is embedded into voxels by computing the local
+ coordinates 𝑚 = [𝑚0,𝑚1,𝑚2] of each mesh vertex relative to the
+ rest pose voxel containing that vertex. For each mesh vertex, 𝑞,
+ let the coordinate frame be given by the first voxel vertex, 𝑝0 and
+ the local voxel basis {𝑒0 = 𝑝1 − 𝑝0,𝑒1 = 𝑝2 − 𝑝0,𝑒2 = 𝑝4 − 𝑝0}.
+ The local coordinates are given by𝑚 = 𝑞 −𝑣0. After deformation,
+ the new world-space vertex coordinates are computed from the
+ deformed voxel basis, {𝑒′
+ 0 ,𝑒′
+ 1 ,𝑒′
+ 2} and the local coordinates as 𝑞′ =
+ 𝑣0 +𝑚0𝑒′
+ 0 +𝑚1𝑒′
+ 1 +𝑚2𝑒′
+ 2 .
+ Weuse task and mesh shaders [Kubisch 2018] for rendering de
+structible meshes, both the outer mesh surface and internal details.
+ Asurface meshlet is formed for each voxel that intersects the input
+ mesh. Since the geometry can deform, we do not attempt meshlet
+ culling based on the cone of normals, since these cones would need
+ to be recomputed every frame. This is feasible [Unterguggenberger
+ et al. 2021], but was beyond the scope of this project. We do not
+ clip the surface mesh to voxel faces, which gives the boundaries a
+ jagged, torn appearance. However, this effect requires that the mesh
+ be tessellated so that triangles are not excessively large relative to
+ a voxel.
+ An internal cube meshlet is also created for each voxel. These
+ are culled in the task shader, unless the corresponding face-to
+face voxel constraint is broken. We enable 4 user-defined clipping
+ planes and clip the voxel plane geometry for each face to the voxel
+ boundary when rendering internal voxel surfaces.
+ We procedurally create internal texture details based on the
+ distance transform of the voxel grid which is stored in a 3d texture.
+ In the results shown in this paper, we display isocontours of the
+ distance transform on the exposed surfaces using tricubic texture
+ interpolation [Ruijters et al. 2008] due to the low resolution of the
+ distance transform. The voxel skeleton could also be used to provide
+ additional internal visual details, but currently we only use it for
+ structural purposes. In production, a custom 3d texture could be
+ authored for each destructible mesh.
+ 4 Results
+ Wedon’t present an analytic proof that the proposed GS variant
+ converges to an orthogonal basis or remains unbiased, but we in
+stead tested the behavior empirically. We generated 100000 random
+ nearly orthogonal bases and processed them by iterating lines 7−9
+ of the VGS process described in Algorithm 1. The output was com
+pared to the results obtained using MGS using the metrics described
+ below. The random input bases were obtained by generating 3 × 3
+ single precision matrices with each element distributed uniformly
+ 𝑈(−1.0,1.0). The columns of these matrices were processed with
+ MGStoobtain orthonormal bases. Then we added noise, uniformly
+ distributed 𝑈 (−0.1,0.1), to the orthogonal bases. Representative
+ images of a few input and output basis vectors are shown in Figure
+ 5.
+ Figure 5: Example input vectors, 𝑢𝑖 (semitransparent) and
+ output vectors 𝑣𝑖 (opaque) computed by VGS.
+ The metric we used to assess orthonormality is ortho({𝑣𝑖}) =
+ | |𝑉𝑇𝑉 −𝐼||𝐹, where𝑉 = [𝑣0|𝑣1|𝑣2]. An orthonormal basis will have
+ ortho = 0.Werepeatedtheexperiment for multiple iteration counts
+ 𝑣𝑔𝑠_𝑖𝑡, and results for 3 values of 𝛼 are shown in Figure 6.
+ The results show that VGS monotonically converges to an or
+thonormal result, and eventually attains the same degree of or
+thonormality as MGS. Convergence speed depends on 𝛼, and con
+verges fastest for 𝛼 = 0.5.
+ To assess bias, we ran the VGS algorithm for 3 permutations
+ of each input basis and compared the corresponding unpermuted
+ outputs. If the result is unbiased the permutation should not affect
+ the result and corresponding output vectors should be equal. We
+ use the bias metric based on cosine similarity shown in Equation 3,
+ which will yield a value of 0 when the result is unbiased.
+ 𝑣0, 𝑣1,𝑣2 = 𝑉𝐺𝑆(𝑢0,𝑢1,𝑢2)
+ 2 ,𝑣′′
+ 𝑣′
+ 1, 𝑣′
+ 2, 𝑣′
+ 0 = 𝑉𝐺𝑆(𝑢1,𝑢2,𝑢0)
+ 𝑣′′
+ 0 ,𝑣′′
+ 1 =𝑉𝐺𝑆(𝑢2,𝑢0,𝑢1)
+ bias(𝑣𝑖, 𝑣′
+ 𝑖 , 𝑣′′
+ (3)
+ 𝑖 ) = max𝑖(max(1−𝑣𝑖 ·𝑣′
+ 𝑖 ,1 −𝑣𝑖 ·𝑣′′
+ 𝑖 ))
+ As expected, we see that MGS is highly biased. Comparatively,
+ VGS exhibits orders of magnitude less bias.
+ Wealso wish for the computed basis to approximate the input
+ basis in a least squares sense. To assess this we use the index of
+ dispersion (mean/variance) of the cosine similarity of correspond
+ing vectors, disp(𝑢𝑖,𝑣𝑖) = 𝑣𝑖·𝑢𝑖
+ | |𝑢𝑖 || . This measure will be zero when
+ the dot products between all pairs 𝑢𝑖
+ | |𝑢𝑖 || , 𝑣𝑖 are the same. MGS will
+ generally yield a highly dispersed result since 𝑣0 = 𝑢0, and if the
+ input basis is not orthogonal, then 𝑣1 ≠ 𝑢1 and 𝑣2 ≠ 𝑢2. On the
+ other hand, a result where each output is equiangular from its cor
+responding input will have disp(𝑢,𝑣) = 0. Plots of maximum and
+ mean dispersion for 100000 random bases are shown in Figure 8.
+ Weobserve an overshooting behavior for 𝛼 > 0.5, but our mean
+ dispersion always stays well below MGS by orders of magnitude.
+ Based on these results, we feel confident that the VGS method is a
+ reliable method of imposing a shape constraint on voxels. Though
+ it seems from these graphs that 𝛼 = 0.5 is an ideal value, we use 𝛼
+Gram-Schmidt voxel constraints for real-time destructible soft bodies
+ MIG’24, November 21–23, 2024, Arlington, VA, USA
+ Figure 6: Plots of ortho({𝑣𝑖}) for 3 values of 𝛼 and iterations
+ upto25. VGSresults are solid lines and MGS are dotted lines.
+ as a stiffness parameter to get softer constraints and the appearance
+ of more compliant meshes.
+ To demonstrate the variety of voxel shape results we can obtain
+ with VGS, we compare with the results obtained by replacing our
+ projection steps with MGSinFigure9.Two-dimensionalprojections
+ of a voxel are shown in the rest pose (blue), after displacement (red),
+ and after constraints are applied (black). Using MGS, bias is evident
+ along the bottom edge, which remains parallel to the bottom edge
+ of deformed voxel. This will be the case for any deformation with
+ a large shear component. In the case of MGS, the output vectors
+ are normalized and the voxel will always remain a cube. For VGS,
+ depending on 𝛼 and 𝛽, the result can be a rotated, nonuniformly
+ scaled and/or sheared voxel with the same volume as the input.
+ Figure 7: Plots of bias(𝑢,𝑣) for 3 values of 𝛼 and iterations up
+ to 25.
+ 4.1 Performance comparison
+ Weimplemented the destructible models described in the previous
+ sections as glsl compute shaders. Compute times were acquired on
+ a PC with Intel Core i7-8700K 3.7 GHz, 32GB of RAM and NVIDIA
+ GeForce RTX 4070. Based on a grid search we found that the opti
+mal local workgroup size for the VGS compute shader is 32. Our
+ PBD loop in these experiments includes 5 substeps and 3 collision
+ iterations.
+ Model sizes and compute times for VGS models are shown in
+ Table 1. We compare with a destructible model where VGS was
+ replaced with per-voxel shape matching constraints implemented
+ as described by Müller et al. [Müller et al. 2005]. VGS times are
+ practically the same as shape matching constraints, but recall that
+ VGS supports volume-preserving affine deformations of voxels,
+MIG’24,November21–23,2024,Arlington,VA,USA McGraw
+ Table1:Performancecomparisonwithshapematching.ShapeMatchingandVGSConstraintstimesincludeonlyvoxelandface
+ constraintprojection.MPMP2G/G2Ptimedoesnotincludegridcomputation.VGSTotaltimeincludesPBDparticlekinematics
+ anduniformgridcollisiondetection.
+ Time(ms) Time(ms)
+ Face Shape VGS VGS MLS-MPM VGS VGS
+ Mesh Voxels Particles Constraints Matching Constraints Speedup P2G/G2P Total Speedup
+ Stanfordbunny 8467 67736 23476 0.98 1.01 0.97 4.33 2.36 1.83
+ Cow 6148 49184 16843 0.86 0.88 0.98 3.41 2.00 1.70
+ Armadillo 3661 29288 9442 0.66 0.67 0.99 2.26 1.69 1.34
+ Gummybear 2128 17024 5770 0.52 0.52 1.00 1.32 1.54 0.86
+ Figure8:Plotsofdisp(𝑢,𝑣)for3valuesof𝛼anditerationsup
+ to25.
+ notjustrigidtransformations.WealsocompareruntimesofMPM
+ (a)Restposevoxel(blue),
+ deformedvoxel(red)
+ (b)MGS (c)VGS,𝛼=0.5,𝛽=1.0
+ (d)VGS,𝛼=0.5,𝛽=0.1(e)VGS,𝛼=0.1,𝛽=1.0(f)VGS,𝛼=0.1,𝛽=0.1
+ Figure9:2dprojectionsofvoxelconstraintsusingMGSand
+ VGS.Theoriginalvoxelisshowninblue,andthedisplaced
+ voxelinred(a).ResultsafterconstraintprojectionusingMGS
+ (b)andVGS(c-f)showninblack.
+ modelsandVGSmodelswiththesamenumberofparticles.Since
+ MPMcomputationtimeswilldependheavilyontheefficiency
+ ofthesparsegridimplementationwecompareonlytheparticle
+ updatetimesofthehigh-performanceMLS-MPMtechnique[Hu
+ etal.2018]usingadensegridtogetaveryconservativeestimateof
+ MPMcomputationtime.Weused10MPMsubstepsperframefor
+ astableresult.MPMparticleupdatesarefasterthanVGSforthe
+ smallestmodel,butasmodelsgetbiggertheVGSspeedupincreases.
+ 4.2 Visualresults
+ Inthissectionwepresentimagesequencesofmodelsinitialized
+ withavarietyofstrainlimitstoshowthedifferentdestruction
+ effectsthatarepossiblewithourmethods.InFigure1thearmadillo
+ mesh,voxelizedtoaresolutionof32×32×32isstretchedpastits
+ strainlimitsandpulledapart.Thestrainlimitsforthismodelwere
+ ˆ𝜀𝑥=ˆ𝜀𝑦=ˆ𝜀𝑧={𝑈(−0.1,−0.5),𝑈(1.75,5.0)}.Theskeletonwasnot
+ usedinthismodel.
+ Figure10showsacomparisonofadestructiblemodelusing
+ theVGSconstraintandamodelwherelocalvoxelshapematch
+ingconstraintswereused.Ahighstrainlimitwasset,sothatthe
+ volume-preservingeffectsofVGScouldbeinvestigated.WithVGS,
+ thewaistofthearmadillocanbeseennarrowingbeforebreaking
+Gram-Schmidt voxel constraints for real-time destructible soft bodies
+ MIG’24, November 21–23, 2024, Arlington, VA, USA
+ (as if the material had a Poisson’s ratio of about 0.5), but not with
+ shape matching. When animated, it can also be observed that the
+ behavior of shape matching is more brittle, and the broken ends of
+ the VGS model snap back with a softer appearance.
+ Figure 10: Volume conservation in VGS leads to the waist of
+ the armadillo narrowing before tearing (left), but not when
+ replaced with voxel shape matching constraints (right).
+ Figure 11: Exploding armadillo with high strain limit skele
+ton.
+ Figure 12: A layered model using the distance transform to
+ create tougher skin (left), and unlayered model (right).
+ Theimagesequence in Figure 11 shows the effect of a high strain
+ limit skeleton (ˆ𝜀𝑥 = ˆ𝜀𝑦 = ˆ𝜀𝑧 = {−0.1,100}). The armadillo’s torso
+ is completely ripped from the skeleton, while the hands and ears
+ remain attached.
+ Figure 12 shows a layered model where the distance transform
+ was used to set high strain limits for 𝑑 < 2 and, for comparison, an
+ unlayered model. When the cannonball hits the layered model, the
+ surface of the face is able to remain attached and internal pieces
+ (with lower strain limits) are ejected. In the unlayered model the
+ model simply breaks apart into homogenous chunks.
+ The effect of anisotropic strain limits is clearly demonstrated
+ in Figure 13. This model is unlayered and the skeleton is not used.
+ Strain limits are
+ ˆ
+ 𝜀𝑥 = {𝑈(−0.1,−0.5),𝑈 (0.3,0.5)}, ˆ𝜀𝑦𝑧 = {𝑈 (−0.8,−0.9),𝑈 (3,5)}.
+ The figure shows a few frames captured while interactively peeling
+ steak-like slabs off of the model.
+ Figure 13: Planar anisotropy of face constraints allow Spot
+ the cow to be pulled into steaks.
+ Figure 14: Piecewise rigid fracture with 𝛼 = 0.5,𝛽 = 1.0 and
+ rigid skeleton
+ In Figure 14, we set parameters to obtain a rigid material (𝛼 =
+ 0.5, 𝛽 = 1.0) and use standard PBD shape-matching on the skeleton
+ to get a rigid fracture effect.
+ During experiments we observed several limitations of the pro
+posed techniques. During extreme deformations on models with
+ high strain limits, VGS can fail to converge to a unique solution.
+ The process does not blow up, but may instead oscillate between
+ multiple solutions. Due to the fact that face constraints are not
+ rendered, gaps between voxels will appear during large deforma
+tions. The voxel collision normal (see Figure 4) prevents particle
+ interlock with voxels, but it is not used for face constraints, since
+ the relations in Equation 1 only hold for voxels, not face constraints.
+ So some interlock may still occur.
+ 5 Conclusions
+ Wehave described a new voxel shape constraint based on Gram
+Schmidt orthonormalization, and applied it to real-time destruc
+tible models computed from triangle meshes. The voxel constraint
+ projects sets of 8 vertices onto a parallelepiped while avoiding the
+ bias problem inherent in traditional Gram-Schmidt approaches. We
+ have detailed the creation and simulation pipeline, and showed
+ that the new voxel constraint is as fast as shape constraints and
+ does not require additional matrix/quaternion storage. The VGS
+ relaxation parameters give our method additional flexibility com
+pared to shape constraints which rigidly map the rest pose to the
+MIG’24, November 21–23, 2024, Arlington, VA, USA
+ McGraw
+ deformed state. Voxel shape constraints can be dispatched in a
+ single partition.
+ Weuse the VGS approach to create breakable face-to-face voxel
+ constraints which glue voxels together until a predefined strain
+ limit is exceeded. Since these constraints are applied on a face-by
+face basis we can achieve a number of different anisotropic material
+ destruction effects in real-time. Face-to-face constraints occupy
+ only 8 bytes each and require only 3 partitions for Gauss-Seidel
+ iterations, making parallel implementations fast. Though not a
+ physically accurate simulation technique, we feel the results are
+ plausible enough to be useful in real-time applications like games.
+ In future work, we plan to implement new animation and render
+ing features. Synthesizing smooth internal details for destructible
+ meshes will allow them to be used in applications beyond voxel
+ art style games. To increase the model detail we are investigating
+ multigrid approaches that would permit us to animate regions of
+ higher voxel resolution without sacrificing speed. To improve the
+ stiffness of larger model, we will explore the use of voxel-based
+ long-range constraints [Müller et al. 2017].
+ References
+ Nadine Abu Rumman and Marco Fratarcangeli. 2015. Position-based skinning for soft
+ articulated characters. 34, 6 (2015), 240–250.
+ Jan Bender, Matthias Müller, and Miles Macklin. 2017. A survey on position based
+ dynamics, 2017. In Proceedings of the European Association for Computer Graphics:
+ Tutorials. 1–31.
+ Paul J Besl and Neil D McKay. 1992. Method for registration of 3-D shapes. In Sensor
+ fusion IV: control paradigms and data structures, Vol. 1611. Spie, 586–606.
+ Cyril Crassin and Simon Green. 2012. Octree-based sparse voxelization using the GPU
+ hardware rasterizer. OpenGL Insights (2012), 303–318.
+ Mathieu Desbrun, Peter Schröder, and Alan Barr. 1999. Interactive animation of
+ structured deformable objects. In Graphics Interface, Vol. 99. 10.
+ Christian Dick, Joachim Georgii, and Rüdiger Westermann. 2010. A hexahedral multi
+grid approach for simulating cuts in deformable objects. IEEE Transactions on
+ Visualization and Computer Graphics 17, 11 (2010), 1663–1675.
+ Junheng Fang, Lihua You, Ehtzaz Chaudhry, and Jian Zhang. 2023. State-of-the-art
+ improvements and applications of position based dynamics. Computer Animation
+ and Virtual Worlds 34, 5 (2023), e2143.
+ Sarah F Frisken-Gibson. 1999. Using linked volumes to model object collisions, de
+formation, cutting, carving, and joining. IEEE transactions on visualization and
+ computer graphics 5, 4 (1999), 333–348.
+ Gene H Golub and Charles F Van Loan. 2013. Matrix computations. JHU press.
+ Peter Hachenberger and Lutz Kettner. 2024. 3D Boolean Operations on Nef Polyhedra.
+ In CGAL User and Reference Manual (5.6.1 ed.). CGAL Editorial Board. https:
+ //doc.cgal.org/5.6.1/Manual/packages.html#PkgNef3
+ Yuanming Hu, Yu Fang, Ziheng Ge, Ziyin Qu, Yixin Zhu, Andre Pradhana, and Chen
+fanfu Jiang. 2018. A moving least squares material point method with displacement
+ discontinuity and two-way rigid body coupling. ACM Transactions on Graphics
+ (TOG) 37, 4 (2018), 1–14.
+ Thomas Jakobsen. 2001. Advanced character physics. In Game developers conference,
+ Vol. 3. IO Interactive, Copenhagen Denmark, 383–401.
+ Chenfanfu Jiang, Craig Schroeder, Joseph Teran, Alexey Stomakhin, and Andrew Selle.
+ 2016. The material point method for simulating continuum materials. In ACM
+ SIGGRAPH 2016 Courses. 1–52.
+ Ben Jones, April Martin, Joshua A Levine, Tamar Shinar, and Adam W Bargteil. 2016.
+ Ductile fracture for clustered shape matching. In Proceedings of the 20th ACM
+ SIGGRAPH Symposium on Interactive 3D Graphics and Games. 65–70.
+ Dan Koschier, Jan Bender, and Nils Thuerey. 2017. Robust extended finite elements for
+ complex cutting of deformables. ACM Transactions on Graphics (TOG) 36, 4 (2017),
+ 1–13.
+ Christoph Kubisch. 2018. Introduction to Turing mesh shaders. NVIDIA Developer
+ Technical Blog (2018). https://developer.nvidia.com/blog/introduction-turing-mesh
+shaders/
+ Christian Lauterbach, Michael Garland, Shubhabrata Sengupta, David Luebke, and
+ Dinesh Manocha. 2009. Fast BVH construction on GPUs. In Computer Graphics
+ Forum, Vol. 28. Wiley Online Library, 375–384.
+ Ta-Chih Lee, Rangasami L Kashyap, and Chong-Nam Chu. 1994. Building skeleton
+ models via 3-D medial surface axis thinning algorithms. CVGIP: graphical models
+ and image processing 56, 6 (1994), 462–478.
+ Miles Macklin and Matthias Muller. 2021. A constraint-based formulation of stable
+ neo-hookean materials. In Proceedings of the 14th ACM SIGGRAPH conference on
+ motion, interaction and games. 1–7.
+ Miles Macklin, Matthias Müller, Nuttapong Chentanez, and Tae-Yong Kim. 2014. Uni
+f
+ ied particle physics for real-time applications. ACM Transactions on Graphics (TOG)
+ 33, 4 (2014), 1–12.
+ Avirup Mandal, Parag Chaudhuri, and Subhasis Chaudhuri. 2022. Simulating Fracture
+ in Anisotropic Materials Containing Impurities. In Proceedings of the 15th ACM
+ SIGGRAPH Conference on Motion, Interaction and Games. 1–10.
+ Tim McGraw. 2024. Mesh Mortal Kombat: Real-time voxelized soft-body destruc
+tion. In ACM SIGGRAPH 2024 Real-Time Live! (Denver, CO, USA) (SIGGRAPH ’24).
+ Association for Computing Machinery, New York, NY, USA, Article 5, 2 pages.
+ Matthias Müller, Jan Bender, Nuttapong Chentanez, and Miles Macklin. 2016. A robust
+ method to extract the rotational part of deformations. In Proceedings of the 9th
+ International Conference on Motion in Games. 55–60.
+ Matthias Müller and Nuttapong Chentanez. 2011. Solid simulation with oriented
+ particles. In ACM SIGGRAPH 2011 papers. 1–10.
+ Matthias Müller, Nuttapong Chentanez, Miles Macklin, and Stefan Jeschke. 2017.
+ Long range constraints for rigid body simulations. In Proceedings of the ACM
+ SIGGRAPH/Eurographics Symposium on Computer Animation. 1–10.
+ Matthias Müller, Bruno Heidelberger, Marcus Hennix, and John Ratcliff. 2007. Position
+ based dynamics. Journal of Visual Communication and Image Representation 18, 2
+ (2007), 109–118.
+ Matthias Müller, Bruno Heidelberger, Matthias Teschner, and Markus Gross. 2005.
+ Meshless deformations based on shape matching. ACM transactions on graphics
+ (TOG) 24, 3 (2005), 471–478.
+ Matthias Müller, Miles Macklin, Nuttapong Chentanez, and Stefan Jeschke. 2022. Phys
+ically based shape matching. In Computer Graphics Forum, Vol. 41. Wiley Online
+ Library, 1–7.
+ Matthias Muller, Matthias Teschner, and Markus Gross. 2004. Physically-based simula
+tion of objects represented by surface meshes. In Proceedings Computer Graphics
+ International, 2004. IEEE, 26–33.
+ James F O’Brien, Adam W Bargteil, and Jessica K Hodgins. 2002. Graphical modeling
+ and animation of ductile fracture. In Proceedings of the 29th annual conference on
+ Computer graphics and interactive techniques. 291–294.
+ James F O’Brien and Jessica K Hodgins. 1999. Graphical modeling and animation of
+ brittle fracture. In Proceedings of the 26th annual conference on Computer graphics
+ and interactive techniques. 137–146.
+ Daniel Ruijters, Bart M ter Haar Romeny, and Paul Suetens. 2008. Efficient GPU-based
+ texture interpolation using uniform B-splines. Journal of Graphics Tools 13, 4 (2008),
+ 61–69.
+ Ruediger Schmedding and Matthias Teschner. 2008. Inversion handling for stable
+ deformable modeling. The Visual Computer 24 (2008), 625–633.
+ Alexey Stomakhin, Craig Schroeder, Lawrence Chai, Joseph Teran, and Andrew Selle.
+ 2013. A material point method for snow simulation. ACM Transactions on Graphics
+ (TOG) 32, 4 (2013), 1–10.
+ Tilo Strutz. 2021. The distance transform and its computation. arXiv preprint
+ arXiv:2106.03503 (2021).
+ Demetri Terzopoulos and Kurt Fleischer. 1988. Modeling inelastic deformation: vis
+colelasticity, plasticity, fracture. In Proceedings of the 15th annual conference on
+ Computer graphics and interactive techniques. 269–278.
+ Demetri Terzopoulos, John Platt, Alan Barr, and Kurt Fleischer. 1987. Elastically de
+formable models. In Proceedings of the 14th annual conference on Computer graphics
+ and interactive techniques. 205–214.
+ The CGAL Project. 2024. CGAL User and Reference Manual (5.6.1 ed.). CGAL Editorial
+ Board. https://doc.cgal.org/5.6.1/Manual/packages.html
+ Quoc-Minh Ton-That, Paul G Kry, and Sheldon Andrews. 2023. Parallel block Neo
+Hookean XPBD using graph clustering. Computers & Graphics 110 (2023), 1–10.
+ Johannes Unterguggenberger, Bernhard Kerbl, Jakob Pernsteiner, and Michael Wim
+mer. 2021. Conservative meshlet bounds for robust culling of skinned meshes. In
+ Computer graphics forum, Vol. 40. Wiley Online Library, 57–69.
+ Stephanie Wang, Mengyuan Ding, Theodore F Gast, Leyi Zhu, Steven Gagniere, Chen
+fanfu Jiang, and Joseph M Teran. 2019. Simulation and visualization of ductile
+ fracture with the material point method. Proceedings of the ACM on Computer
+ Graphics and Interactive Techniques 2, 2 (2019), 1–20.
+ TE Wiegand. 1996. Interactive rendering of CSG models. In Computer Graphics Forum,
+ Vol. 15. Wiley Online Library, 249–261.
+ Chris Wojtan and Greg Turk. 2008. Fast viscoelastic behavior with thin features. In
+ ACMSIGGRAPH 2008 papers. 1–8.
+ Joshuah Wolper, Yu Fang, Minchen Li, Jiecong Lu, Ming Gao, and Chenfanfu Jiang.
+ 2019. CD-MPM: continuum damage material point methods for dynamic fracture
+ animation. ACM Transactions on Graphics (TOG) 38, 4 (2019), 1–15.
+ Xiao Yan, C-F Li, X-S Chen, and S-M Hu. 2018. MPM simulation of interacting fluids
+ and solids. In Computer Graphics Forum, Vol. 37. Wiley Online Library, 183–193.
+ Yongning Zhu and Robert Bridson. 2005. Animating sand as a fluid. ACM Transactions
+ on Graphics (TOG) 24, 3 (2005), 965–972.

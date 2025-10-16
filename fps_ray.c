@@ -77,6 +77,12 @@ typedef struct {
 } Player;
 static Player players[2];
 
+typedef struct {
+    Vector3 pos;
+    Vector3 vel;
+    float inv_mass;
+} Particle;
+
 // Voxel structure
 typedef struct {
     Vector3 pos;
@@ -90,6 +96,7 @@ typedef struct {
        0=+X,1=-X,2=+Y,3=-Y,4=+Z,5=-Z */
     bool surface[6];
     int  gx, gy, gz;
+    Particle particles[8];
 } Voxel;
 static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
@@ -368,16 +375,16 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
 static void buildDemo(void) {
     // Floor
     int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
-    for (int x = 0; x <= M; x++) {
+    /* for (int x = 0; x <= M; x++) {
         for (int z = 0; z <= M; z++) {
             float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
             float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
             addVoxel(px, 0, pz, true, false, (Color){ 150, 150, 150, 255 }, 0);
         }
-    }
+    } */
 
     // Pillars
-    int pillar_height = 35; // 45 - 10
+    int pillar_height = 15; // 45 - 10
     int pillar_radius = 3;
     int pillar_positions[4][2] = {
         { M / 4, M / 4 },
@@ -403,8 +410,8 @@ static void buildDemo(void) {
     }
 
     // Central platform
-    int platform_size = M / 5;
-    int platform_height = 5; // 15 / 3
+    int platform_size = M / 10;
+    int platform_height = 3; // 15 / 3
     int platform_base_height = 16; // to keep top at same level (21)
     for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
         for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
@@ -1025,7 +1032,7 @@ static Mesh gen_greedy_mesh(void) {
 
 // Draw all voxels via greedy mesh instead of per-voxel raycasting
 static void DrawVoxels(Camera3D cam) {
-    (void)cam;
+    /* (void)cam;
     if (meshDirty) {
         if (greedyMesh.vertices) UnloadMesh(greedyMesh);
         greedyMesh = gen_greedy_mesh();
@@ -1074,15 +1081,27 @@ static void DrawVoxels(Camera3D cam) {
         }
     }
     rlEnd();
-    rlEnableBackfaceCulling();
+    rlEnableBackfaceCulling();*/
+
     //draw moving voxels
     rlBegin(RL_TRIANGLES);
-    for (int i = 0; i < voxel_count; i++) {
+    /*for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
         if (v->simulate){
         drawCubeMan(v->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, v->color);
         }
         
+    }*/
+    for (int i = 0; i < voxel_count; i++) {
+        Voxel *v = &voxels[i];
+        drawCubeMan(v->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, v->color);
+    }
+    rlEnd();
+    rlBegin(RL_LINES);
+    rlColor4ub(0, 0, 0, 255);
+    for (int i = 0; i < voxel_count; i++) {
+        Voxel *v = &voxels[i];
+        drawCubeEdges(v->pos, VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
     }
     rlEnd();
 }
