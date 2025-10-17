@@ -630,130 +630,130 @@ static void physics_step(float dt) {    // Rebuild spatial hash
         v->gx = x; v->gy = y; v->gz = z;
         table_set(x, y, z, i);
     }
-    // Simulate dynamic voxels
-    for (int i = 0; i < voxel_count; i++) {
-        Voxel *v = &voxels[i];
-        if (!v->simulate) continue;
+    // // Simulate dynamic voxels
+    // for (int i = 0; i < voxel_count; i++) {
+    //     Voxel *v = &voxels[i];
+    //     if (!v->simulate) continue;
 
-        // Apply gravity
-        v->vel.y -= GRAVITY * dt;
+    //     // Apply gravity
+    //     v->vel.y -= GRAVITY * dt;
 
-        // Continuous collision detection
-        Vector3 displacement = v_mul(v->vel, dt);
-        float distance = v_length(displacement);
-        bool hit_voxel = false;
+    //     // Continuous collision detection
+    //     Vector3 displacement = v_mul(v->vel, dt);
+    //     float distance = v_length(displacement);
+    //     bool hit_voxel = false;
 
-        if (distance > 0.0001f) { // only cast if moving
-            Ray ray = { v->pos, v_norm(v->vel) };
-            int hit_id = first_voxel_hit(ray, distance, i);
+    //     if (distance > 0.0001f) { // only cast if moving
+    //         Ray ray = { v->pos, v_norm(v->vel) };
+    //         int hit_id = first_voxel_hit(ray, distance, i);
 
-            if (hit_id >= 0) {
-                hit_voxel = true;
+    //         if (hit_id >= 0) {
+    //             hit_voxel = true;
 
-                // Stop the bullet
-                v->simulate = false;
-                v->fixed = true;
-                v->pos = (Vector3){-999.0f, -999.0f, -999.0f};
-                deactivate_constraints_for_voxel(i);
+    //             // Stop the bullet
+    //             v->simulate = false;
+    //             v->fixed = true;
+    //             v->pos = (Vector3){-999.0f, -999.0f, -999.0f};
+    //             deactivate_constraints_for_voxel(i);
 
-                int brushExtent = (voxelBrushSpan < 1) ? 1 : voxelBrushSpan;
+    //             int brushExtent = (voxelBrushSpan < 1) ? 1 : voxelBrushSpan;
 
-                if (v->type == 1) { // DESTRUCTION
-                    Voxel *u = &voxels[hit_id];
-                    int anchorX = u->gx;
-                    int anchorY = u->gy;
-                    int anchorZ = u->gz;
+    //             if (v->type == 1) { // DESTRUCTION
+    //                 Voxel *u = &voxels[hit_id];
+    //                 int anchorX = u->gx;
+    //                 int anchorY = u->gy;
+    //                 int anchorZ = u->gz;
 
-                    for (int dx = 0; dx < brushExtent; dx++) {
-                        for (int dy = 0; dy < brushExtent; dy++) {
-                            for (int dz = 0; dz < brushExtent; dz++) {
-                                int victim_idx = table_get(anchorX + dx, anchorY + dy, anchorZ + dz);
-                                if (victim_idx >= 0) {
-                                    Voxel *victim = &voxels[victim_idx];
-                                    table_remove(victim->gx, victim->gy, victim->gz);
-                                    mark_surface_neighbors(victim->pos);
-                                    victim->simulate = false;
-                                    victim->fixed = true;
-                                    victim->pos = (Vector3){-999.0f, -999.0f, -999.0f};
-                                    deactivate_constraints_for_voxel(victim_idx);
-                                }
-                            }
-                        }
-                    }
-                } else { // CONSTRUCTION
-                    int anchorX = v->gx;
-                    int anchorY = v->gy;
-                    int anchorZ = v->gz;
+    //                 for (int dx = 0; dx < brushExtent; dx++) {
+    //                     for (int dy = 0; dy < brushExtent; dy++) {
+    //                         for (int dz = 0; dz < brushExtent; dz++) {
+    //                             int victim_idx = table_get(anchorX + dx, anchorY + dy, anchorZ + dz);
+    //                             if (victim_idx >= 0) {
+    //                                 Voxel *victim = &voxels[victim_idx];
+    //                                 table_remove(victim->gx, victim->gy, victim->gz);
+    //                                 mark_surface_neighbors(victim->pos);
+    //                                 victim->simulate = false;
+    //                                 victim->fixed = true;
+    //                                 victim->pos = (Vector3){-999.0f, -999.0f, -999.0f};
+    //                                 deactivate_constraints_for_voxel(victim_idx);
+    //                             }
+    //                         }
+    //                     }
+    //                 }
+    //             } else { // CONSTRUCTION
+    //                 int anchorX = v->gx;
+    //                 int anchorY = v->gy;
+    //                 int anchorZ = v->gz;
 
-                    for (int dx = 0; dx < brushExtent; dx++) {
-                        for (int dy = 0; dy < brushExtent; dy++) {
-                            for (int dz = 0; dz < brushExtent; dz++) {
-                                int targetX = anchorX + dx;
-                                int targetY = anchorY + dy;
-                                int targetZ = anchorZ + dz;
-                                if (!occupied(targetX, targetY, targetZ)) {
-                                    float px = (targetX + 0.5f) * VOXEL_SIZE;
-                                    float py = (targetY + 0.5f) * VOXEL_SIZE;
-                                    float pz = (targetZ + 0.5f) * VOXEL_SIZE;
-                                    int new_idx = addVoxel(px, py, pz, true, false, v->color, 0);
-                                    if (new_idx >= 0) {
-                                        mark_surface(new_idx);
-                                        mark_surface_neighbors(voxels[new_idx].pos);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                //reset mesh
-                meshDirty = true;
-            }
-        }
+    //                 for (int dx = 0; dx < brushExtent; dx++) {
+    //                     for (int dy = 0; dy < brushExtent; dy++) {
+    //                         for (int dz = 0; dz < brushExtent; dz++) {
+    //                             int targetX = anchorX + dx;
+    //                             int targetY = anchorY + dy;
+    //                             int targetZ = anchorZ + dz;
+    //                             if (!occupied(targetX, targetY, targetZ)) {
+    //                                 float px = (targetX + 0.5f) * VOXEL_SIZE;
+    //                                 float py = (targetY + 0.5f) * VOXEL_SIZE;
+    //                                 float pz = (targetZ + 0.5f) * VOXEL_SIZE;
+    //                                 int new_idx = addVoxel(px, py, pz, true, false, v->color, 0);
+    //                                 if (new_idx >= 0) {
+    //                                     mark_surface(new_idx);
+    //                                     mark_surface_neighbors(voxels[new_idx].pos);
+    //                                 }
+    //                             }
+    //                         }
+    //                     }
+    //                 }
+    //             }
+    //             //reset mesh
+    //             meshDirty = true;
+    //         }
+    //     }
 
-        if (!hit_voxel) {
-            // Move
-            v->pos = v_add(v->pos, displacement);
-            for (int j = 0; j < 2; j++) {
-                float dx = v->pos.x - players[j].pos.x;
-                float dy = v->pos.y - players[j].pos.y;
-                float dz = v->pos.z - players[j].pos.z;
-                if (fabsf(dx) < PLAYER_SIZE && fabsf(dy) < PLAYER_SIZE && fabsf(dz) < PLAYER_SIZE) {
-                    players[j].last_damage_time = (float)GetTime();
-                    if (players[j].shield > 0) {
-                        players[j].shield -= VOXEL_DAMAGE;
-                        if (players[j].shield < 0) {
-                            players[j].health += players[j].shield;
-                            players[j].shield = 0;
-                        }
-                    } else {
-                        players[j].health -= VOXEL_DAMAGE;
-                    }
+    //     if (!hit_voxel) {
+    //         // Move
+    //         v->pos = v_add(v->pos, displacement);
+    //         for (int j = 0; j < 2; j++) {
+    //             float dx = v->pos.x - players[j].pos.x;
+    //             float dy = v->pos.y - players[j].pos.y;
+    //             float dz = v->pos.z - players[j].pos.z;
+    //             if (fabsf(dx) < PLAYER_SIZE && fabsf(dy) < PLAYER_SIZE && fabsf(dz) < PLAYER_SIZE) {
+    //                 players[j].last_damage_time = (float)GetTime();
+    //                 if (players[j].shield > 0) {
+    //                     players[j].shield -= VOXEL_DAMAGE;
+    //                     if (players[j].shield < 0) {
+    //                         players[j].health += players[j].shield;
+    //                         players[j].shield = 0;
+    //                     }
+    //                 } else {
+    //                     players[j].health -= VOXEL_DAMAGE;
+    //                 }
 
-                    v->simulate = false;
-                    v->fixed    = true;
-                    v->pos      = (Vector3){ -999.0f, -999.0f, -999.0f };
-                    deactivate_constraints_for_voxel(i);
+    //                 v->simulate = false;
+    //                 v->fixed    = true;
+    //                 v->pos      = (Vector3){ -999.0f, -999.0f, -999.0f };
+    //                 deactivate_constraints_for_voxel(i);
 
-                    if (players[j].health <= 0) {
-                        if (v->owner >= 0 && v->owner != j) {
-                            players[v->owner].kills++;
-                            players[j].deaths++;
-                            UpdateKdRatio(v->owner);
-                            UpdateKdRatio(j);
-                        }
-                        players[j].pos     = (Vector3){ randomInRange(-9,9), BASE_EYE_HEIGHT, randomInRange(-9,9) };
-                        players[j].vel     = (Vector3){0,0,0};
-                        players[j].onGround= true;
-                        players[j].yaw     = (j == 0 ? 0 : 180);
-                        players[j].pitch   = 0;
-                        players[j].health = BASE_HEALTH / players[j].kd_ratio;
-                        players[j].shield = BASE_SHIELD;
-                    }
-                    break;
-                }
-            }
-        }
-    }
+    //                 if (players[j].health <= 0) {
+    //                     if (v->owner >= 0 && v->owner != j) {
+    //                         players[v->owner].kills++;
+    //                         players[j].deaths++;
+    //                         UpdateKdRatio(v->owner);
+    //                         UpdateKdRatio(j);
+    //                     }
+    //                     players[j].pos     = (Vector3){ randomInRange(-9,9), BASE_EYE_HEIGHT, randomInRange(-9,9) };
+    //                     players[j].vel     = (Vector3){0,0,0};
+    //                     players[j].onGround= true;
+    //                     players[j].yaw     = (j == 0 ? 0 : 180);
+    //                     players[j].pitch   = 0;
+    //                     players[j].health = BASE_HEALTH / players[j].kd_ratio;
+    //                     players[j].shield = BASE_SHIELD;
+    //                 }
+    //                 break;
+    //             }
+    //         }
+    //     }
+    // }
 }
 
 static void integrate_particles(float dt) {
