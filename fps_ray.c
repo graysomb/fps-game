@@ -138,6 +138,13 @@ static const Vector3 axis_dirs[3] = {
     { 0.0f, 0.0f, 1.0f }
 };
 
+static const int corner_signs[8][3] = {
+    { -1, -1, -1 }, {  1, -1, -1 },
+    { -1,  1, -1 }, {  1,  1, -1 },
+    { -1, -1,  1 }, {  1, -1,  1 },
+    { -1,  1,  1 }, {  1,  1,  1 }
+};
+
 static int table_get(int x, int y, int z);
 
 static void face_constraints_reset(void) {
@@ -214,6 +221,42 @@ static void add_face_constraints_for_voxel(int voxel_idx) {
     if (neighbor >= 0) add_face_constraint_internal(2, voxel_idx, neighbor);
     neighbor = table_get(gx, gy, gz - 1);
     if (neighbor >= 0) add_face_constraint_internal(2, voxel_idx, neighbor);
+}
+
+static bool face_constraint_active_between(int axis, int idxA, int idxB) {
+    if (axis < 0 || axis > 2) return false;
+    if (idxA > idxB) {
+        int tmp = idxA;
+        idxA = idxB;
+        idxB = tmp;
+    }
+
+    for (int i = 0; i < face_constraint_count[axis]; ++i) {
+        FaceConstraint *fc = &face_constraints[axis][i];
+        if (!fc->active) continue;
+        if (fc->voxelA == idxA && fc->voxelB == idxB) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool is_face_linked_corner_pair(int axis, int dirSign, int cornerA, int cornerB) {
+    if (axis < 0 || axis > 2 || dirSign == 0) return false;
+    if (cornerA < 0 || cornerA >= 8 || cornerB < 0 || cornerB >= 8) return false;
+
+    int signA = corner_signs[cornerA][axis];
+    int signB = corner_signs[cornerB][axis];
+    if (signA != dirSign || signB != -dirSign) return false;
+
+    for (int i = 0; i < 3; ++i) {
+        if (i == axis) continue;
+        if (corner_signs[cornerA][i] != corner_signs[cornerB][i]) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 
@@ -499,12 +542,6 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     v->rest_edge = VOXEL_SIZE;
     v->particle_radius = PARTICLE_RADIUS;
     const float half = VOXEL_SIZE * 0.5f;
-    static const int corner_signs[8][3] = {
-        { -1, -1, -1 }, {  1, -1, -1 },
-        { -1,  1, -1 }, {  1,  1, -1 },
-        { -1, -1,  1 }, {  1, -1,  1 },
-        { -1,  1,  1 }, {  1,  1,  1 }
-    };
     for (int i = 0; i < 8; ++i) {
         Particle *p = &v->particles[i];
         p->pos = (Vector3){
@@ -959,6 +996,28 @@ static void solve_particle_collisions(float dt) {
                             continue;
 
                         Voxel *other = &voxels[neighbor_idx];
+
+                        bool skip_face_pairs = false;
+                        int face_axis = -1;
+                        int face_dir = 0;
+                        int non_zero = (dx != 0) + (dy != 0) + (dz != 0);
+                        if (non_zero == 1) {
+                            if (dx != 0) {
+                                face_axis = 0;
+                                face_dir = dx;
+                            } else if (dy != 0) {
+                                face_axis = 1;
+                                face_dir = dy;
+                            } else {
+                                face_axis = 2;
+                                face_dir = dz;
+                            }
+
+                            if (face_constraint_active_between(face_axis, i, neighbor_idx)) {
+                                skip_face_pairs = true;
+                            }
+                        }
+
                         for (int q = 0; q < 8; ++q) {
                             if (neighbor_idx == i && q <= j)
                                 continue;
@@ -966,6 +1025,11 @@ static void solve_particle_collisions(float dt) {
                             Particle *p_other = &other->particles[q];
                             if (p_other->inv_mass + p->inv_mass == 0.0f)
                                 continue;
+
+                            if (skip_face_pairs &&
+                                is_face_linked_corner_pair(face_axis, face_dir, j, q)) {
+                                continue;
+                            }
 
                             Vector3 delta = v_sub(p->predicted_pos, p_other->predicted_pos);
                             float dist_sq = delta.x*delta.x + delta.y*delta.y + delta.z*delta.z;
