@@ -49,6 +49,12 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define VGS_BETA 0.5f
 #define VGS_ITERS 3
 #define VGS_EPS 1e-6f
+#define PBD_MAX_STEP_DT 0.005f
+#define PBD_SUBSTEPS 3
+#define PBD_CONSTRAINT_ITERS 5
+#define COLLISION_RELAXATION 0.9f
+#define CENTER_RELAXATION 0.9f
+#define VELOCITY_DAMPING 0.99f
 #define FACE_TENSILE_LIMIT .35f
 #define FACE_COMPRESS_LIMIT -.35f
 #define MAX_FACE_CONSTRAINTS_PER_AXIS (MAX_VOXELS * 2)
@@ -239,24 +245,6 @@ static bool face_constraint_active_between(int axis, int idxA, int idxB) {
         }
     }
     return false;
-}
-
-static bool is_face_linked_corner_pair(int axis, int dirSign, int cornerA, int cornerB) {
-    if (axis < 0 || axis > 2 || dirSign == 0) return false;
-    if (cornerA < 0 || cornerA >= 8 || cornerB < 0 || cornerB >= 8) return false;
-
-    int signA = corner_signs[cornerA][axis];
-    int signB = corner_signs[cornerB][axis];
-    if (signA != dirSign || signB != -dirSign) return false;
-
-    for (int i = 0; i < 3; ++i) {
-        if (i == axis) continue;
-        if (corner_signs[cornerA][i] != corner_signs[cornerB][i]) {
-            return false;
-        }
-    }
-
-    return true;
 }
 
 
@@ -810,6 +798,7 @@ static void integrate_particles(float dt) {
                 continue;
             }
 
+            p->vel = v_mul(p->vel, VELOCITY_DAMPING);
             Vector3 step = v_mul(p->vel, dt);
             Vector3 accel = v_mul(gravity, dt_sq);
             p->predicted_pos = v_add(p->predicted_pos, v_add(step, accel));
@@ -1018,25 +1007,19 @@ static void solve_particle_collisions(float dt) {
 
                         Voxel *other = &voxels[neighbor_idx];
 
-                        bool skip_face_pairs = false;
+                        bool face_locked = false;
                         int face_axis = -1;
-                        int face_dir = 0;
                         int non_zero = (dx != 0) + (dy != 0) + (dz != 0);
                         if (non_zero == 1) {
                             if (dx != 0) {
                                 face_axis = 0;
-                                face_dir = dx;
                             } else if (dy != 0) {
                                 face_axis = 1;
-                                face_dir = dy;
                             } else {
                                 face_axis = 2;
-                                face_dir = dz;
                             }
 
-                            if (face_constraint_active_between(face_axis, i, neighbor_idx)) {
-                                skip_face_pairs = true;
-                            }
+                            face_locked = face_constraint_active_between(face_axis, i, neighbor_idx);
                         }
 
                         for (int q = 0; q < 8; ++q) {
@@ -1046,11 +1029,6 @@ static void solve_particle_collisions(float dt) {
                             Particle *p_other = &other->particles[q];
                             if (p_other->inv_mass + p->inv_mass == 0.0f)
                                 continue;
-
-                            if (skip_face_pairs &&
-                                is_face_linked_corner_pair(face_axis, face_dir, j, q)) {
-                                continue;
-                            }
 
                             Vector3 delta = v_sub(p->predicted_pos, p_other->predicted_pos);
                             float dist_sq = delta.x*delta.x + delta.y*delta.y + delta.z*delta.z;
@@ -1071,6 +1049,16 @@ static void solve_particle_collisions(float dt) {
                                 continue;
 
                             Vector3 corr = v_mul(normal, penetration / w_sum);
+
+                            if (face_locked && face_axis >= 0) {
+                                Vector3 axis_n = axis_dirs[face_axis];
+                                Vector3 normal_component = v_mul(axis_n, v_dot(corr, axis_n));
+                                corr = v_sub(corr, normal_component);
+                                if (v_length(corr) < 1e-8f) {
+                                    continue;
+                                }
+                            }
+
                             p->predicted_pos = v_add(p->predicted_pos, v_mul(corr, p->inv_mass));
                             p_other->predicted_pos = v_add(p_other->predicted_pos, v_mul(corr, -p_other->inv_mass));
                         }
@@ -1095,29 +1083,20 @@ static void solve_particle_collisions(float dt) {
 
                     Voxel *other = &voxels[neighbor_idx];
 
-                    bool skip_face_pairs = false;
+                    bool face_locked = false;
                     int face_axis = -1;
-                    int face_dir = 0;
                     int non_zero = (dx != 0) + (dy != 0) + (dz != 0);
                     if (non_zero == 1) {
                         if (dx != 0) {
                             face_axis = 0;
-                            face_dir = dx;
                         } else if (dy != 0) {
                             face_axis = 1;
-                            face_dir = dy;
                         } else {
                             face_axis = 2;
-                            face_dir = dz;
                         }
 
-                        if (face_constraint_active_between(face_axis, i, neighbor_idx)) {
-                            skip_face_pairs = true;
-                        }
+                        face_locked = face_constraint_active_between(face_axis, i, neighbor_idx);
                     }
-
-                    if (skip_face_pairs)
-                        continue;
 
                     Vector3 center_a, center_b;
                     float inv_mass_a = 0.0f;
@@ -1147,6 +1126,17 @@ static void solve_particle_collisions(float dt) {
                     float scale_b = (inv_mass_b > 0.0f) ? (inv_mass_b / w_sum) : 0.0f;
                     Vector3 shift_a = v_mul(normal, penetration * scale_a);
                     Vector3 shift_b = v_mul(normal, -penetration * scale_b);
+
+                    if (face_locked && face_axis >= 0) {
+                        Vector3 axis_n = axis_dirs[face_axis];
+                        Vector3 normal_component_a = v_mul(axis_n, v_dot(shift_a, axis_n));
+                        Vector3 normal_component_b = v_mul(axis_n, v_dot(shift_b, axis_n));
+                        shift_a = v_sub(shift_a, normal_component_a);
+                        shift_b = v_sub(shift_b, normal_component_b);
+                        if (v_length(shift_a) < 1e-8f && v_length(shift_b) < 1e-8f) {
+                            continue;
+                        }
+                    }
 
                     if (inv_mass_a > 0.0f) {
                         for (int corner = 0; corner < 8; ++corner) {
@@ -1208,13 +1198,13 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
     Voxel *a = &voxels[fc->voxelA];
     Voxel *b = &voxels[fc->voxelB];
 
-    printf("[project_face_constraint] axis=%d fcIndexA=%d fcIndexB=%d active=%d simA=%d simB=%d strain_min=%.3f strain_max=%.3f\n",
-           axis, fc->voxelA, fc->voxelB, fc->active, a->simulate, b->simulate,
-           fc->strain_min, fc->strain_max);
+    // printf("[project_face_constraint] axis=%d fcIndexA=%d fcIndexB=%d active=%d simA=%d simB=%d strain_min=%.3f strain_max=%.3f\n",
+    //        axis, fc->voxelA, fc->voxelB, fc->active, a->simulate, b->simulate,
+    //        fc->strain_min, fc->strain_max);
 
     if ((!a->simulate && !b->simulate) || fc->voxelA == fc->voxelB) {
-        printf("[project_face_constraint] axis=%d skipping (simulate flags: %d, %d) or same voxel (%d == %d)\n",
-               axis, a->simulate, b->simulate, fc->voxelA, fc->voxelB);
+        // printf("[project_face_constraint] axis=%d skipping (simulate flags: %d, %d) or same voxel (%d == %d)\n",
+        //        axis, a->simulate, b->simulate, fc->voxelA, fc->voxelB);
         return true;
     }
 
@@ -1231,18 +1221,18 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
         Vector3 shifted_a = v_sub(pa->predicted_pos, v_mul(dir, PARTICLE_RADIUS));
         float separation = v_dot(v_sub(shifted_b, shifted_a), dir);
         float strain = (separation - rest_len) / rest_len;
-        printf("[project_face_constraint] axis=%d pair=%d separation=%.6f strain=%.6f\n",
-               axis, i, separation, strain);
+        // printf("[project_face_constraint] axis=%d pair=%d separation=%.6f strain=%.6f\n",
+        //        axis, i, separation, strain);
         if (strain > max_strain) max_strain = strain;
         if (strain < min_strain) min_strain = strain;
     }
 
-    printf("[project_face_constraint] axis=%d strain range min=%.6f max=%.6f (rest_len=%.6f)\n",
-           axis, min_strain, max_strain, rest_len);
+    // printf("[project_face_constraint] axis=%d strain range min=%.6f max=%.6f (rest_len=%.6f)\n",
+    //        axis, min_strain, max_strain, rest_len);
 
     if (max_strain > fc->strain_max || min_strain < fc->strain_min) {
-        printf("[project_face_constraint] axis=%d deactivating constraint; limits=%.6f/%.6f\n",
-               axis, fc->strain_min, fc->strain_max);
+        // printf("[project_face_constraint] axis=%d deactivating constraint; limits=%.6f/%.6f\n",
+        //        axis, fc->strain_min, fc->strain_max);
         fc->active = false;
         return false;
     }
@@ -1252,7 +1242,7 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
         Particle *pb = &b->particles[pairs[i][1]];
         float w_sum = pa->inv_mass + pb->inv_mass;
         if (w_sum == 0.0f) {
-            printf("[project_face_constraint] axis=%d pair=%d skipping (w_sum=0)\n", axis, i);
+            // printf("[project_face_constraint] axis=%d pair=%d skipping (w_sum=0)\n", axis, i);
             continue;
         }
 
@@ -1261,8 +1251,8 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
         float separation = v_dot(v_sub(shifted_b, shifted_a), dir);
         float delta = separation - rest_len;
         float lambda = delta / w_sum;
-        printf("[project_face_constraint] axis=%d pair=%d lambda=%.6f delta=%.6f w_sum=%.6f\n",
-               axis, i, lambda, delta, w_sum);
+        // printf("[project_face_constraint] axis=%d pair=%d lambda=%.6f delta=%.6f w_sum=%.6f\n",
+        //        axis, i, lambda, delta, w_sum);
         Vector3 prev_pa = pa->predicted_pos;
         Vector3 prev_pb = pb->predicted_pos;
         pa->predicted_pos = v_add(pa->predicted_pos, v_mul(dir, lambda * pa->inv_mass));
@@ -1270,18 +1260,18 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
         Vector3 shifted_b_after = v_add(pb->predicted_pos, v_mul(dir, PARTICLE_RADIUS));
         Vector3 shifted_a_after = v_sub(pa->predicted_pos, v_mul(dir, PARTICLE_RADIUS));
         float separation_after = v_dot(v_sub(shifted_b_after, shifted_a_after), dir);
-        printf("[project_face_constraint] axis=%d pair=%d separation_after=%.6f delta_after=%.6f pa_shift=%.6f pb_shift=%.6f\n",
-               axis, i, separation_after, separation_after - rest_len,
-               v_dot(v_sub(pa->predicted_pos, prev_pa), dir),
-               v_dot(v_sub(prev_pb, pb->predicted_pos), dir));
+        // printf("[project_face_constraint] axis=%d pair=%d separation_after=%.6f delta_after=%.6f pa_shift=%.6f pb_shift=%.6f\n",
+        //        axis, i, separation_after, separation_after - rest_len,
+        //        v_dot(v_sub(pa->predicted_pos, prev_pa), dir),
+        //        v_dot(v_sub(prev_pb, pb->predicted_pos), dir));
     }
 
     return true;
 }
 
 void simulate_voxel_pbd(float dt) {
-    const int substeps = 1;
-    const int constraint_iterations = 3;
+    const int substeps = 3;
+    const int constraint_iterations = 5;
     const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
 
     for (int step = 0; step < substeps; ++step) {
@@ -1295,16 +1285,15 @@ void simulate_voxel_pbd(float dt) {
                     continue;
                 solve_voxel_shape(voxel);
             }
-
             for (int axis = 0; axis < 3; ++axis) {
                 for (int ci = 0; ci < face_constraint_count[axis]; ++ci) {
                     FaceConstraint *fc = &face_constraints[axis][ci];
                     if (!fc->active) continue;
-                    printf("[simulate_voxel_pbd] step=%d iteration=%d axis=%d constraintIndex=%d active=%d\n",
-                           step, it, axis, ci, fc->active);
+                    // printf("[simulate_voxel_pbd] step=%d iteration=%d axis=%d constraintIndex=%d active=%d\n",
+                    //        step, it, axis, ci, fc->active);
                     bool applied = project_face_constraint(fc, axis);
-                    printf("[simulate_voxel_pbd] step=%d iteration=%d axis=%d constraintIndex=%d result=%d\n",
-                           step, it, axis, ci, applied);
+                    // printf("[simulate_voxel_pbd] step=%d iteration=%d axis=%d constraintIndex=%d result=%d\n",
+                    //        step, it, axis, ci, applied);
                 }
             }
         }
@@ -2000,7 +1989,7 @@ static void HandleGamepadInput(int i, float dt);
 int main(void) {
     // init window and render textures
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Split-Screen FPS (raylib)");
-    SetTargetFPS(60);
+    SetTargetFPS(120);
     // seed RNG
     srand((unsigned)time(NULL));
     // reset game state
