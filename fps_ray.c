@@ -49,8 +49,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define VGS_BETA 0.5f
 #define VGS_ITERS 3
 #define VGS_EPS 1e-6f
-#define FACE_TENSILE_LIMIT 0.35f
-#define FACE_COMPRESS_LIMIT -0.35f
+#define FACE_TENSILE_LIMIT 10.0f
+#define FACE_COMPRESS_LIMIT -10.0f
 #define MAX_FACE_CONSTRAINTS_PER_AXIS (MAX_VOXELS * 2)
 
 // KD-stats constants
@@ -1033,8 +1033,15 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
     Voxel *a = &voxels[fc->voxelA];
     Voxel *b = &voxels[fc->voxelB];
 
-    if ((!a->simulate && !b->simulate) || fc->voxelA == fc->voxelB)
+    printf("[project_face_constraint] axis=%d fcIndexA=%d fcIndexB=%d active=%d simA=%d simB=%d strain_min=%.3f strain_max=%.3f\n",
+           axis, fc->voxelA, fc->voxelB, fc->active, a->simulate, b->simulate,
+           fc->strain_min, fc->strain_max);
+
+    if ((!a->simulate && !b->simulate) || fc->voxelA == fc->voxelB) {
+        printf("[project_face_constraint] axis=%d skipping (simulate flags: %d, %d) or same voxel (%d == %d)\n",
+               axis, a->simulate, b->simulate, fc->voxelA, fc->voxelB);
         return true;
+    }
 
     const Vector3 dir = axis_dirs[axis];
     const int (*pairs)[2] = face_pairs[axis];
@@ -1049,11 +1056,18 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
         Vector3 shifted_a = v_sub(pa->predicted_pos, v_mul(dir, PARTICLE_RADIUS));
         float separation = v_dot(v_sub(shifted_b, shifted_a), dir);
         float strain = (separation - rest_len) / rest_len;
-        if (strain > max_strain) max_strain = strain;
-        if (strain < min_strain) min_strain = strain;
+        printf("[project_face_constraint] axis=%d pair=%d separation=%.6f strain=%.6f\n",
+               axis, i, separation, strain);
+        //if (strain > max_strain) max_strain = strain;
+        //if (strain < min_strain) min_strain = strain;
     }
 
+    printf("[project_face_constraint] axis=%d strain range min=%.6f max=%.6f (rest_len=%.6f)\n",
+           axis, min_strain, max_strain, rest_len);
+
     if (max_strain > fc->strain_max || min_strain < fc->strain_min) {
+        printf("[project_face_constraint] axis=%d deactivating constraint; limits=%.6f/%.6f\n",
+               axis, fc->strain_min, fc->strain_max);
         fc->active = false;
         return false;
     }
@@ -1062,13 +1076,18 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
         Particle *pa = &a->particles[pairs[i][0]];
         Particle *pb = &b->particles[pairs[i][1]];
         float w_sum = pa->inv_mass + pb->inv_mass;
-        if (w_sum == 0.0f) continue;
+        if (w_sum == 0.0f) {
+            printf("[project_face_constraint] axis=%d pair=%d skipping (w_sum=0)\n", axis, i);
+            continue;
+        }
 
         Vector3 shifted_b = v_add(pb->predicted_pos, v_mul(dir, PARTICLE_RADIUS));
         Vector3 shifted_a = v_sub(pa->predicted_pos, v_mul(dir, PARTICLE_RADIUS));
         float separation = v_dot(v_sub(shifted_b, shifted_a), dir);
         float delta = separation - rest_len;
         float lambda = delta / w_sum;
+        printf("[project_face_constraint] axis=%d pair=%d lambda=%.6f delta=%.6f w_sum=%.6f\n",
+               axis, i, lambda, delta, w_sum);
         pa->predicted_pos = v_add(pa->predicted_pos, v_mul(dir, lambda * pa->inv_mass));
         pb->predicted_pos = v_sub(pb->predicted_pos, v_mul(dir, lambda * pb->inv_mass));
     }
@@ -1097,7 +1116,11 @@ void simulate_voxel_pbd(float dt) {
                 for (int ci = 0; ci < face_constraint_count[axis]; ++ci) {
                     FaceConstraint *fc = &face_constraints[axis][ci];
                     if (!fc->active) continue;
-                    project_face_constraint(fc, axis);
+                    printf("[simulate_voxel_pbd] step=%d iteration=%d axis=%d constraintIndex=%d active=%d\n",
+                           step, it, axis, ci, fc->active);
+                    bool applied = project_face_constraint(fc, axis);
+                    printf("[simulate_voxel_pbd] step=%d iteration=%d axis=%d constraintIndex=%d result=%d\n",
+                           step, it, axis, ci, applied);
                 }
             }
         }
