@@ -62,7 +62,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 // Voxel physics constants
 #define MAX_VOXELS    131072
 #define HASH_SIZE     131072    // must be power of two
-#define VOXEL_SIZE     0.2f    // size of each voxel cube
+#define VOXEL_SIZE     0.5f    // size of each voxel cube
 
 // Tunable voxel edit brush (per-axis span of the add/remove operation)
 static int voxelBrushSpan = 4;
@@ -535,35 +535,35 @@ static void buildDemo(void) {
     } */
 
     // Pillars
-    int pillar_height = 15; // 45 - 10
-    int pillar_radius = 3;
-    int pillar_positions[4][2] = {
-        { M / 4, M / 4 },
-        { M / 4, 3 * M / 4 },
-        { 3 * M / 4, M / 4 },
-        { 3 * M / 4, 3 * M / 4 }
-    };
+    // int pillar_height = 15; // 45 - 10
+    // int pillar_radius = 3;
+    // int pillar_positions[4][2] = {
+    //     { M / 4, M / 4 },
+    //     { M / 4, 3 * M / 4 },
+    //     { 3 * M / 4, M / 4 },
+    //     { 3 * M / 4, 3 * M / 4 }
+    // };
 
-    for (int p = 0; p < 4; p++) {
-        int cx = pillar_positions[p][0];
-        int cz = pillar_positions[p][1];
-        for (int y = 1; y <= pillar_height; y++) {
-            for (int dx = -pillar_radius; dx <= pillar_radius; dx++) {
-                for (int dz = -pillar_radius; dz <= pillar_radius; dz++) {
-                    if (dx*dx + dz*dz > pillar_radius*pillar_radius) continue; // circular pillar
-                    float px = (cx + dx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                    float py = (y + 0.5f) * VOXEL_SIZE;
-                    float pz = (cz + dz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                    addVoxel(px, py, pz, false, true, (Color){ 200, 100, 50, 255 }, 0);
-                }
-            }
-        }
-    }
+    // for (int p = 0; p < 4; p++) {
+    //     int cx = pillar_positions[p][0];
+    //     int cz = pillar_positions[p][1];
+    //     for (int y = 1; y <= pillar_height; y++) {
+    //         for (int dx = -pillar_radius; dx <= pillar_radius; dx++) {
+    //             for (int dz = -pillar_radius; dz <= pillar_radius; dz++) {
+    //                 if (dx*dx + dz*dz > pillar_radius*pillar_radius) continue; // circular pillar
+    //                 float px = (cx + dx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    //                 float py = (y + 0.5f) * VOXEL_SIZE;
+    //                 float pz = (cz + dz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    //                 addVoxel(px, py, pz, false, true, (Color){ 200, 100, 50, 255 }, 0);
+    //             }
+    //         }
+    //     }
+    //}
 
     // Central platform
-    int platform_size = M / 10;
-    int platform_height = 3; // 15 / 3
-    int platform_base_height = 16; // to keep top at same level (21)
+    int platform_size = 2;
+    int platform_height = 2; // 15 / 3
+    int platform_base_height = 4; // to keep top at same level (21)
     for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
         for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
             for (int z = M/2 - platform_size/2; z <= M/2 + platform_size/2; z++) {
@@ -905,7 +905,7 @@ static void solve_particle_collisions(float dt) {
 
             if (pos.y < radius) {
                 pos.y = radius;
-                p->prev_pos.y = pos.y;
+                //p->prev_pos.y = pos.y;
             }
 
             for (int player_idx = 0; player_idx < 2; ++player_idx) {
@@ -934,12 +934,12 @@ static void solve_particle_collisions(float dt) {
                     float penetration = radius - dist;
                     Vector3 normal;
                     if (dist > 1e-6f) {
-                        normal = v_mul(delta, 1.0f / dist);
+                        normal = v_mul(delta, -1.0f / dist);
                     } else {
                         normal = (Vector3){ 0.0f, 1.0f, 0.0f };
                     }
                     pos = v_add(pos, v_mul(normal, penetration));
-                    p->prev_pos = pos;
+                    //p->prev_pos = pos;
                 }
             }
 
@@ -1082,15 +1082,15 @@ void simulate_voxel_pbd(float dt) {
     const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
 
     for (int step = 0; step < substeps; ++step) {
-        //integrate_particles(sub_dt);
-        //solve_particle_collisions(sub_dt);
+        integrate_particles(sub_dt);
+        solve_particle_collisions(sub_dt);
 
         for (int it = 0; it < constraint_iterations; ++it) {
             for (int i = 0; i < voxel_count; ++i) {
                 Voxel *voxel = &voxels[i];
                 if (!voxel->simulate)
                     continue;
-                //solve_voxel_shape(voxel);
+                solve_voxel_shape(voxel);
             }
 
             for (int axis = 0; axis < 3; ++axis) {
@@ -1102,7 +1102,7 @@ void simulate_voxel_pbd(float dt) {
             }
         }
 
-        //update_particle_velocities(sub_dt);
+        update_particle_velocities(sub_dt);
     }
 }
 
