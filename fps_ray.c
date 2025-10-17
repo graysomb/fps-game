@@ -49,8 +49,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define VGS_BETA 0.5f
 #define VGS_ITERS 3
 #define VGS_EPS 1e-6f
-#define FACE_TENSILE_LIMIT 10.0f
-#define FACE_COMPRESS_LIMIT -10.0f
+#define FACE_TENSILE_LIMIT .35f
+#define FACE_COMPRESS_LIMIT -.35f
 #define MAX_FACE_CONSTRAINTS_PER_AXIS (MAX_VOXELS * 2)
 
 // KD-stats constants
@@ -563,7 +563,7 @@ static void buildDemo(void) {
     // Central platform
     int platform_size = 2;
     int platform_height = 2; // 15 / 3
-    int platform_base_height = 4; // to keep top at same level (21)
+    int platform_base_height = 0; // to keep top at same level (21)
     for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
         for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
             for (int z = M/2 - platform_size/2; z <= M/2 + platform_size/2; z++) {
@@ -1058,8 +1058,8 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
         float strain = (separation - rest_len) / rest_len;
         printf("[project_face_constraint] axis=%d pair=%d separation=%.6f strain=%.6f\n",
                axis, i, separation, strain);
-        //if (strain > max_strain) max_strain = strain;
-        //if (strain < min_strain) min_strain = strain;
+        if (strain > max_strain) max_strain = strain;
+        if (strain < min_strain) min_strain = strain;
     }
 
     printf("[project_face_constraint] axis=%d strain range min=%.6f max=%.6f (rest_len=%.6f)\n",
@@ -1088,8 +1088,17 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
         float lambda = delta / w_sum;
         printf("[project_face_constraint] axis=%d pair=%d lambda=%.6f delta=%.6f w_sum=%.6f\n",
                axis, i, lambda, delta, w_sum);
+        Vector3 prev_pa = pa->predicted_pos;
+        Vector3 prev_pb = pb->predicted_pos;
         pa->predicted_pos = v_add(pa->predicted_pos, v_mul(dir, lambda * pa->inv_mass));
         pb->predicted_pos = v_sub(pb->predicted_pos, v_mul(dir, lambda * pb->inv_mass));
+        Vector3 shifted_b_after = v_add(pb->predicted_pos, v_mul(dir, PARTICLE_RADIUS));
+        Vector3 shifted_a_after = v_sub(pa->predicted_pos, v_mul(dir, PARTICLE_RADIUS));
+        float separation_after = v_dot(v_sub(shifted_b_after, shifted_a_after), dir);
+        printf("[project_face_constraint] axis=%d pair=%d separation_after=%.6f delta_after=%.6f pa_shift=%.6f pb_shift=%.6f\n",
+               axis, i, separation_after, separation_after - rest_len,
+               v_dot(v_sub(pa->predicted_pos, prev_pa), dir),
+               v_dot(v_sub(prev_pb, pb->predicted_pos), dir));
     }
 
     return true;
