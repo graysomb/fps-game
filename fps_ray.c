@@ -920,6 +920,24 @@ static void solve_voxel_shape(Voxel *voxel) {
     }
 }
 
+static void compute_voxel_center_and_mass(const Voxel *voxel, Vector3 *center, float *inv_mass_sum) {
+    Vector3 c = { 0.0f, 0.0f, 0.0f };
+    float sum = 0.0f;
+
+    for (int i = 0; i < 8; ++i) {
+        const Particle *p = &voxel->particles[i];
+        c = v_add(c, p->predicted_pos);
+        sum += p->inv_mass;
+    }
+
+    if (center) {
+        *center = v_mul(c, 1.0f / 8.0f);
+    }
+    if (inv_mass_sum) {
+        *inv_mass_sum = sum;
+    }
+}
+
 static void solve_particle_collisions(float dt) {
     (void)dt;
 
@@ -928,6 +946,9 @@ static void solve_particle_collisions(float dt) {
     const float min_dist = radius * 2.0f;
     const float min_dist_sq = min_dist * min_dist;
     const float half_player = PLAYER_SIZE * 0.5f;
+    const float center_radius = PARTICLE_RADIUS * 1.5f;
+    const float center_min_dist = center_radius * 2.0f;
+    const float center_min_dist_sq = center_min_dist * center_min_dist;
 
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
@@ -1052,6 +1073,96 @@ static void solve_particle_collisions(float dt) {
                             Vector3 corr = v_mul(normal, penetration / w_sum);
                             p->predicted_pos = v_add(p->predicted_pos, v_mul(corr, p->inv_mass));
                             p_other->predicted_pos = v_add(p_other->predicted_pos, v_mul(corr, -p_other->inv_mass));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply phantom center-sphere collisions to reduce voxel interlocking.
+        for (int dx = -1; dx <= 1; ++dx) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dz = -1; dz <= 1; ++dz) {
+                    int nx = voxel->gx + dx;
+                    int ny = voxel->gy + dy;
+                    int nz = voxel->gz + dz;
+                    int neighbor_idx = table_get(nx, ny, nz);
+                    if (neighbor_idx < 0)
+                        continue;
+
+                    if (neighbor_idx <= i)
+                        continue;
+
+                    Voxel *other = &voxels[neighbor_idx];
+
+                    bool skip_face_pairs = false;
+                    int face_axis = -1;
+                    int face_dir = 0;
+                    int non_zero = (dx != 0) + (dy != 0) + (dz != 0);
+                    if (non_zero == 1) {
+                        if (dx != 0) {
+                            face_axis = 0;
+                            face_dir = dx;
+                        } else if (dy != 0) {
+                            face_axis = 1;
+                            face_dir = dy;
+                        } else {
+                            face_axis = 2;
+                            face_dir = dz;
+                        }
+
+                        if (face_constraint_active_between(face_axis, i, neighbor_idx)) {
+                            skip_face_pairs = true;
+                        }
+                    }
+
+                    if (skip_face_pairs)
+                        continue;
+
+                    Vector3 center_a, center_b;
+                    float inv_mass_a = 0.0f;
+                    float inv_mass_b = 0.0f;
+                    compute_voxel_center_and_mass(voxel, &center_a, &inv_mass_a);
+                    compute_voxel_center_and_mass(other, &center_b, &inv_mass_b);
+
+                    Vector3 delta = v_sub(center_a, center_b);
+                    float dist_sq = delta.x*delta.x + delta.y*delta.y + delta.z*delta.z;
+                    if (dist_sq >= center_min_dist_sq)
+                        continue;
+
+                    float dist = sqrtf(fmaxf(dist_sq, 1e-12f));
+                    Vector3 normal;
+                    if (dist > 1e-6f) {
+                        normal = v_mul(delta, 1.0f / dist);
+                    } else {
+                        normal = (Vector3){ 1.0f, 0.0f, 0.0f };
+                    }
+
+                    float penetration = center_min_dist - dist;
+                    float w_sum = inv_mass_a + inv_mass_b;
+                    if (w_sum == 0.0f)
+                        continue;
+
+                    float scale_a = (inv_mass_a > 0.0f) ? (inv_mass_a / w_sum) : 0.0f;
+                    float scale_b = (inv_mass_b > 0.0f) ? (inv_mass_b / w_sum) : 0.0f;
+                    Vector3 shift_a = v_mul(normal, penetration * scale_a);
+                    Vector3 shift_b = v_mul(normal, -penetration * scale_b);
+
+                    if (inv_mass_a > 0.0f) {
+                        for (int corner = 0; corner < 8; ++corner) {
+                            Particle *pa = &voxel->particles[corner];
+                            if (pa->inv_mass == 0.0f)
+                                continue;
+                            pa->predicted_pos = v_add(pa->predicted_pos, shift_a);
+                        }
+                    }
+
+                    if (inv_mass_b > 0.0f) {
+                        for (int corner = 0; corner < 8; ++corner) {
+                            Particle *pb = &other->particles[corner];
+                            if (pb->inv_mass == 0.0f)
+                                continue;
+                            pb->predicted_pos = v_add(pb->predicted_pos, shift_b);
                         }
                     }
                 }
