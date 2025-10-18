@@ -2,6 +2,10 @@
 #include "raylib.h"
 #include "rlgl.h" // for rlBegin/rlEnd
 #include "raymath.h" // for MatrixIdentity()
+#include "physics/pbd_math.h"
+#include "physics/pbd_voxel_shape.h"
+#include "physics/pbd_face_constraints.h"
+#include "physics/pbd_collisions.h"
 #include <math.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -185,13 +189,6 @@ static const int corner_signs[8][3] = {
     { -1,  1,  1 }, {  1,  1,  1 }
 };
 
-static const int face_planar_signs[4][2] = {
-    { -1, -1 },
-    {  1, -1 },
-    { -1,  1 },
-    {  1,  1 }
-};
-
 static int table_get(int x, int y, int z);
 
 static void face_constraints_reset(void) {
@@ -294,45 +291,34 @@ static float randomInRange(float min, float max) {
     return min + ((float)rand()/ (float)RAND_MAX) * (max - min);
 }
 static float clampf(float v, float lo, float hi) {
-    if (v < lo) return lo;
-    if (v > hi) return hi;
-    return v;
+    return pbd_clampf(v, lo, hi);
 }
 
 static float mixf(float a, float b, float t) {
-    return a * (1.0f - t) + b * t;
+    return pbd_mixf(a, b, t);
 }
 static Vector3 v_add(Vector3 a, Vector3 b) {
-    return (Vector3){ a.x + b.x, a.y + b.y, a.z + b.z };
+    return pbd_v3_add(a, b);
 }
 static Vector3 v_sub(Vector3 a, Vector3 b) {
-    return (Vector3){ a.x - b.x, a.y - b.y, a.z - b.z };
+    return pbd_v3_sub(a, b);
 }
 static Vector3 v_mul(Vector3 v, float s) {
-    return (Vector3){ v.x*s, v.y*s, v.z*s };
+    return pbd_v3_scale(v, s);
 }
 static float v_dot(Vector3 a, Vector3 b) {
-    return a.x * b.x + a.y * b.y + a.z * b.z;
+    return pbd_v3_dot(a, b);
 }
 static Vector3 v_cross(Vector3 a, Vector3 b) {
-    return (Vector3){
-        a.y * b.z - a.z * b.y,
-        a.z * b.x - a.x * b.z,
-        a.x * b.y - a.y * b.x
-    };
+    return pbd_v3_cross(a, b);
 }
 
 static float v_length(Vector3 v) {
-    return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+    return pbd_v3_length(v);
 }
 
 static Vector3 v_norm(Vector3 v) {
-    float len = v_length(v);
-    if (len == 0.0f) {
-        // Return zero vector or handle however you want
-        return (Vector3){ 0.0f, 0.0f, 0.0f };
-    }
-    return v_mul(v, 1.0f / len);
+    return pbd_v3_normalize(v);
 }
 
 // Patch for a merged quad in one of the principal planes
@@ -854,26 +840,17 @@ static void integrate_particles(float dt) {
     }
 }
 
-static Vector3 vgs_project(Vector3 onto, Vector3 vec) {
-    float denom = v_dot(onto, onto);
-    if (denom < VGS_EPS) {
-        return (Vector3){ 0.0f, 0.0f, 0.0f };
-    }
-    float scale = v_dot(onto, vec) / denom;
-    return v_mul(onto, scale);
-}
-
 // Voxel Gram-Schmidt shape matching (Algorithm 1 in the paper) keeps each cell near-rest.
 static void solve_voxel_shape(Voxel *voxel) {
+    Vector3 positions[8];
+    float inv_mass[8];
     bool has_dynamic = false;
-    Vector3 p[8];
-    float w[8];
 
     for (int i = 0; i < 8; ++i) {
         Particle *part = &voxel->particles[i];
-        p[i] = part->predicted_pos;
-        w[i] = part->inv_mass;
-        if (w[i] > 0.0f) {
+        positions[i] = part->predicted_pos;
+        inv_mass[i] = part->inv_mass;
+        if (inv_mass[i] > 0.0f) {
             has_dynamic = true;
         }
     }
@@ -882,82 +859,26 @@ static void solve_voxel_shape(Voxel *voxel) {
         return;
     }
 
-    const float rest_volume = voxel_rest_volume_value(voxel);
-    const float rest_edge = voxel_rest_edge_value(voxel);
-    Vector3 centroid = { 0.0f, 0.0f, 0.0f };
+    PbdVoxelShapeParams params = {
+        .positions = positions,
+        .inv_mass = inv_mass,
+        .radius = voxel_particle_radius(voxel),
+        .alpha = FACE_VGS_ALPHA,
+        .alpha_len = FACE_VGS_ALPHA_LEN,
+        .iterations = VGS_ITERS,
+        .eps = VGS_EPS
+    };
 
-    for (int iter = 0; iter < VGS_ITERS; ++iter) {
-        centroid = (Vector3){ 0.0f, 0.0f, 0.0f };
-        for (int i = 0; i < 8; ++i) {
-            centroid = v_add(centroid, p[i]);
-        }
-        centroid = v_mul(centroid, 1.0f / 8.0f);
-
-        // Compute principal axes (v0..v2) and damp them toward orthogonality via Gram-Schmidt.
-        Vector3 v0 = v_add(v_add(v_sub(p[1], p[0]), v_sub(p[3], p[2])),
-                           v_add(v_sub(p[5], p[4]), v_sub(p[7], p[6])));
-        v0 = v_mul(v0, 0.25f);
-
-        Vector3 v1 = v_add(v_add(v_sub(p[2], p[0]), v_sub(p[3], p[1])),
-                           v_add(v_sub(p[6], p[4]), v_sub(p[7], p[5])));
-        v1 = v_mul(v1, 0.25f);
-
-        Vector3 v2 = v_add(v_add(v_sub(p[4], p[0]), v_sub(p[5], p[1])),
-                           v_add(v_sub(p[6], p[2]), v_sub(p[7], p[3])));
-        v2 = v_mul(v2, 0.25f);
-
-        Vector3 u0 = v_sub(v0, v_mul(v_add(vgs_project(v1, v0), vgs_project(v2, v0)), VGS_ALPHA));
-        Vector3 u1 = v_sub(v1, v_mul(v_add(vgs_project(v2, v1), vgs_project(v0, v1)), VGS_ALPHA));
-        Vector3 u2 = v_sub(v2, v_mul(v_add(vgs_project(v0, v2), vgs_project(v1, v2)), VGS_ALPHA));
-
-        float len0 = v_length(u0);
-        float len1 = v_length(u1);
-        float len2 = v_length(u2);
-
-        float target0 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * v_length(v0));
-        float target1 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * v_length(v1));
-        float target2 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * v_length(v2));
-
-        if (len0 > VGS_EPS) u0 = v_mul(u0, target0 / len0);
-        if (len1 > VGS_EPS) u1 = v_mul(u1, target1 / len1);
-        if (len2 > VGS_EPS) u2 = v_mul(u2, target2 / len2);
-
-        // Volume correction mirrors the GPU "ResizeVoxelBasis" stage.
-        float volume = v_dot(v_cross(u0, u1), u2);
-        if (fabsf(volume) > VGS_EPS) {
-            float scale = rest_volume / volume;
-            float root = cbrtf(fabsf(scale));
-            if (scale < 0.0f) {
-                root = -root;
-            }
-            float factor = 0.5f * root;
-            u0 = v_mul(u0, factor);
-            u1 = v_mul(u1, factor);
-            u2 = v_mul(u2, factor);
-        }
-
-        // Rebuild the voxel corners from the orthogonal frame and push dynamic particles only.
-        Vector3 new_p[8];
-        new_p[0] = v_sub(v_sub(v_sub(centroid, u0), u1), u2);
-        new_p[1] = v_sub(v_sub(v_add(centroid, u0), u1), u2);
-        new_p[2] = v_sub(v_add(v_sub(centroid, u0), u1), u2);
-        new_p[3] = v_sub(v_add(v_add(centroid, u0), u1), u2);
-        new_p[4] = v_add(v_sub(v_sub(centroid, u0), u1), u2);
-        new_p[5] = v_add(v_sub(v_add(centroid, u0), u1), u2);
-        new_p[6] = v_add(v_add(v_sub(centroid, u0), u1), u2);
-        new_p[7] = v_add(v_add(v_add(centroid, u0), u1), u2);
-
-        for (int i = 0; i < 8; ++i) {
-            if (w[i] == 0.0f)
-                continue;
-            p[i] = new_p[i];
-        }
-
+    if (!pbd_voxel_shape_project(&params)) {
+        return;
     }
 
-    voxel->pos = centroid;
     for (int i = 0; i < 8; ++i) {
-        voxel->particles[i].predicted_pos = p[i];
+        Particle *part = &voxel->particles[i];
+        if (part->inv_mass == 0.0f) {
+            continue;
+        }
+        part->predicted_pos = positions[i];
     }
 }
 
@@ -980,6 +901,7 @@ static void compute_voxel_center_and_mass(const Voxel *voxel, Vector3 *center, f
 }
 
 // Resolve collisions against the scene and neighbouring voxels (mirrors ResolveCollisions compute pass).
+
 static void solve_particle_collisions(float dt) {
     (void)dt;
 
@@ -987,7 +909,8 @@ static void solve_particle_collisions(float dt) {
     const float omega = COLLISION_RELAXATION;
     const float eps = 1e-6f;
 
-    // First, clamp predictions against static scene bounds and player capsules.
+    Vector4 ground_plane = (Vector4){ 0.0f, 1.0f, 0.0f, 0.0f };
+
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
         float voxel_radius = voxel_particle_radius(voxel);
@@ -997,15 +920,13 @@ static void solve_particle_collisions(float dt) {
             Particle *p = &voxel->particles[j];
 
             Vector3 pos = p->predicted_pos;
-
-            if (pos.y < voxel_radius) {
-                pos.y = voxel_radius;
-            }
+            Vector3 wall_dx = pbd_wall_collision(pos, voxel_radius, p->inv_mass,
+                                                 ground_plane, omega, eps, NULL);
+            pos = v_add(pos, wall_dx);
 
             pos.x = clampf(pos.x, -terrain_limit, terrain_limit);
             pos.z = clampf(pos.z, -terrain_limit, terrain_limit);
 
-            // Interactions with player bounding boxes (kept for gameplay parity).
             for (int player_idx = 0; player_idx < 2; ++player_idx) {
                 Player *pl = &players[player_idx];
                 Vector3 box_min = {
@@ -1042,7 +963,6 @@ static void solve_particle_collisions(float dt) {
         }
     }
 
-    // Particle-particle collisions using a symmetric correction identical to the compute shader.
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxelA = &voxels[i];
         float radiusA = voxel_particle_radius(voxelA);
@@ -1061,7 +981,6 @@ static void solve_particle_collisions(float dt) {
                         if (neighbor_idx < 0) {
                             continue;
                         }
-
                         if (neighbor_idx < i) {
                             continue;
                         }
@@ -1073,7 +992,7 @@ static void solve_particle_collisions(float dt) {
                             }
                         }
                         if (skip_collision) {
-                            continue; // keep constrained faces from being separated by collision resolution
+                            continue;
                         }
 
                         Voxel *voxelB = &voxels[neighbor_idx];
@@ -1085,41 +1004,9 @@ static void solve_particle_collisions(float dt) {
                             }
 
                             Particle *pb = &voxelB->particles[q];
-                            float wb = pb->inv_mass;
-
-                            float w_sum = wa + wb;
-                            if (w_sum <= 0.0f) {
-                                continue;
-                            }
-
-                            Vector3 delta = v_sub(pa->predicted_pos, pb->predicted_pos);
-                            float dist_sq = v_dot(delta, delta);
-                            float target_dist = radiusA + radiusB;
-
-                            if (dist_sq >= (target_dist * target_dist)) {
-                                continue;
-                            }
-
-                            float dist = sqrtf(fmaxf(dist_sq, eps));
-                            float penetration = target_dist - dist;
-                            if (penetration <= 0.0f) {
-                                continue;
-                            }
-
-                            Vector3 normal = (dist > eps)
-                                ? v_mul(delta, 1.0f / dist)
-                                : (Vector3){ 1.0f, 0.0f, 0.0f };
-
-                            float h = 0.5f * penetration;
-                            float scale = omega * h / w_sum;
-
-                            // Apply equal-and-opposite displacements weighted by inverse mass.
-                            if (wa > 0.0f) {
-                                pa->predicted_pos = v_add(pa->predicted_pos, v_mul(normal, scale * wa));
-                            }
-                            if (wb > 0.0f) {
-                                pb->predicted_pos = v_sub(pb->predicted_pos, v_mul(normal, scale * wb));
-                            }
+                            pbd_resolve_particle_pair(&pa->predicted_pos, wa, radiusA,
+                                                      &pb->predicted_pos, pb->inv_mass, radiusB,
+                                                      omega, eps);
                         }
                     }
                 }
@@ -1161,22 +1048,20 @@ static void update_particle_velocities(float dt) {
 }
 
 // Partitioned face constraint solve (Algorithm 2) keeps adjacent voxels glued until strain breaks.
+
 static bool project_face_constraint(FaceConstraint *fc, int axis) {
-    // Early-out if the constraint is disabled or both voxels are effectively rigid.
     if (!fc->active) return false;
+
     Voxel *voxelA = &voxels[fc->voxelA];
     Voxel *voxelB = &voxels[fc->voxelB];
-
     if ((!voxelA->simulate && !voxelB->simulate) || fc->voxelA == fc->voxelB) {
         return true;
     }
 
-    const Vector3 dir = axis_dirs[axis];
     int dx = voxelB->gx - voxelA->gx;
     int dy = voxelB->gy - voxelA->gy;
     int dz = voxelB->gz - voxelA->gz;
 
-    // Identify the opposed faces aligned with the partition axis.
     int face0_ix = -1;
     int face1_ix = -1;
     if (axis == 0) {
@@ -1190,7 +1075,6 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
         else if (dz < 0) { face0_ix = 4; face1_ix = 5; }
     }
 
-    // Fallback when voxels are co-located along the axis (should be rare but safe).
     if (face0_ix < 0 || face1_ix < 0) {
         face0_ix = axis * 2;
         face1_ix = axis * 2 + 1;
@@ -1198,212 +1082,59 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
 
     Particle *face0_parts[4];
     Particle *face1_parts[4];
-    Vector3 face0_pos[4];
-    Vector3 face1_pos[4];
-    float face0_w[4];
-    float face1_w[4];
+    Vector3 face0_positions[4];
+    Vector3 face1_positions[4];
+    float face0_inv_mass[4];
+    float face1_inv_mass[4];
 
-    float sum_w0 = 0.0f;
-    float sum_w1 = 0.0f;
-
-    // Gather the four corner particles on each face.
     for (int i = 0; i < 4; ++i) {
         int idx0 = face_corner_table[face0_ix][i];
         int idx1 = face_corner_table[face1_ix][i];
         face0_parts[i] = &voxelA->particles[idx0];
         face1_parts[i] = &voxelB->particles[idx1];
-        face0_pos[i] = face0_parts[i]->predicted_pos;
-        face1_pos[i] = face1_parts[i]->predicted_pos;
-        face0_w[i] = face0_parts[i]->inv_mass;
-        face1_w[i] = face1_parts[i]->inv_mass;
-        sum_w0 += face0_w[i];
-        sum_w1 += face1_w[i];
+        face0_positions[i] = face0_parts[i]->predicted_pos;
+        face1_positions[i] = face1_parts[i]->predicted_pos;
+        face0_inv_mass[i] = face0_parts[i]->inv_mass;
+        face1_inv_mass[i] = face1_parts[i]->inv_mass;
     }
 
-    float halfA = voxel_rest_half_edge(voxelA);
-    float halfB = voxel_rest_half_edge(voxelB);
-    float active_radius = (sum_w0 > 0.0f && sum_w1 > 0.0f)
-        ? 0.5f * (halfA + halfB)
-        : ((sum_w0 > 0.0f) ? halfA : halfB);
-    float rest_len = 2.0f * active_radius;
+    float radiusA = voxel_particle_radius(voxelA);
+    float radiusB = voxel_particle_radius(voxelB);
+    float active_radius = (radiusA + radiusB) * 0.5f;
 
-    float max_strain = -FLT_MAX;
-    float min_strain = FLT_MAX;
-    // Measure separation along the axis and gate overly stretched/buckled faces.
-    for (int i = 0; i < 4; ++i) {
-        Vector3 shifted_b = v_add(face1_pos[i], v_mul(dir, active_radius));
-        Vector3 shifted_a = v_sub(face0_pos[i], v_mul(dir, active_radius));
-        float separation = v_dot(v_sub(shifted_b, shifted_a), dir);
-        float strain = (separation - rest_len) / rest_len;
-        //if (strain > max_strain) max_strain = strain;
-        //if (strain < min_strain) min_strain = strain;
-    }
+    PbdFaceConstraintParams params = {
+        .face0_positions = face0_positions,
+        .face1_positions = face1_positions,
+        .face0_inv_mass = face0_inv_mass,
+        .face1_inv_mass = face1_inv_mass,
+        .radius = active_radius,
+        .strain_limit_max = fc->strain_max,
+        .strain_limit_min = fc->strain_min,
+        .face_index = face0_ix,
+        .alpha = FACE_VGS_ALPHA,
+        .alpha_len = FACE_VGS_ALPHA_LEN,
+        .enable_fracture = true,
+        .seed = (uint32_t)(fc->voxelA * 73856093u ^ fc->voxelB * 19349663u ^ axis * 83492791u)
+    };
 
-    // Break contact when strain exceeds limits, matching the GPU detachment pass.
-    if (max_strain > fc->strain_max || min_strain < fc->strain_min) {
+    bool broken = false;
+    bool applied = pbd_face_constraint_project(&params, &broken);
+
+    if (broken) {
         fc->active = false;
         return false;
     }
 
-    const float eps = 1e-12f;
-
-    if (sum_w0 == 0.0f || sum_w1 == 0.0f) {
-        // One side is fixed: snap the movable face back to a canonical box anchored at the midpoint.
-        Vector3 centroid = { 0.0f, 0.0f, 0.0f };
-        for (int i = 0; i < 4; ++i) {
-            centroid = v_add(centroid, face0_pos[i]);
-            centroid = v_add(centroid, face1_pos[i]);
-        }
-        centroid = v_mul(centroid, 0.125f);
-
-        Vector3 u1 = { 0.0f, 0.0f, 0.0f };
-        Vector3 u2 = { 0.0f, 0.0f, 0.0f };
-        if (sum_w0 == 0.0f) {
-            u1 = v_add(v_sub(face0_pos[1], face0_pos[0]), v_sub(face0_pos[3], face0_pos[2]));
-            u2 = v_add(v_sub(face0_pos[2], face0_pos[0]), v_sub(face0_pos[3], face0_pos[1]));
-        } else {
-            u1 = v_add(v_sub(face1_pos[1], face1_pos[0]), v_sub(face1_pos[3], face1_pos[2]));
-            u2 = v_add(v_sub(face1_pos[2], face1_pos[0]), v_sub(face1_pos[3], face1_pos[1]));
-        }
-
-        Vector3 u0;
-        if (face0_ix == 3) {
-            u0 = v_cross(u2, u1);
-        } else {
-            u0 = v_cross(u1, u2);
-        }
-
-        float len1 = v_length(u1);
-        float len2 = v_length(u2);
-        float len0 = v_length(u0);
-        if (len1 > eps) u1 = v_mul(u1, active_radius / len1);
-        if (len2 > eps) u2 = v_mul(u2, active_radius / len2);
-        if (len0 > eps) u0 = v_mul(u0, active_radius / len0);
-
-        // Construct two quads that meet at the centroid with the desired spacing.
-        float desired_half_gap = active_radius * FACE_CONTACT_BIAS;
-        Vector3 normal_dir = v_norm(u0);
-        if (normal_dir.x == 0.0f && normal_dir.y == 0.0f && normal_dir.z == 0.0f) {
-            normal_dir = dir;
-        }
-        Vector3 gap = v_mul(normal_dir, desired_half_gap);
-        Vector3 base0 = v_sub(centroid, gap);
-        Vector3 base1 = v_add(centroid, gap);
-        Vector3 planar_u = u1;
-        Vector3 planar_v = u2;
-
-        Vector3 new_face0[4];
-        Vector3 new_face1[4];
-        for (int i = 0; i < 4; ++i) {
-            int su = face_planar_signs[i][0];
-            int sv = face_planar_signs[i][1];
-            Vector3 offset = v_add(v_mul(planar_u, (float)su), v_mul(planar_v, (float)sv));
-            new_face0[i] = v_add(base0, offset);
-            new_face1[i] = v_add(base1, offset);
-        }
-
-        for (int i = 0; i < 4; ++i) {
-            if (face0_w[i] > 0.0f) face0_parts[i]->predicted_pos = new_face0[i];
-            if (face1_w[i] > 0.0f) face1_parts[i]->predicted_pos = new_face1[i];
-        }
-
-        return true;
-    }
-
-    for (int iter = 0; iter < 3; ++iter) {
-        // Step 0: accumulate average offset and in-plane diagonals between the two faces.
-        Vector3 dp0 = { 0.0f, 0.0f, 0.0f };
-        Vector3 dp1 = { 0.0f, 0.0f, 0.0f };
-        Vector3 dp2 = { 0.0f, 0.0f, 0.0f };
-
-        for (int i = 0; i < 4; ++i) {
-            dp0 = v_add(dp0, v_sub(face1_pos[i], face0_pos[i]));
-        }
-
-        // Blend the in-plane diagonals from both faces so we can re-orthogonalise them together.
-        dp1 = v_add(v_add(v_sub(face0_pos[1], face0_pos[0]), v_sub(face0_pos[3], face0_pos[2])),
-                    v_add(v_sub(face1_pos[1], face1_pos[0]), v_sub(face1_pos[3], face1_pos[2])));
-
-        dp2 = v_add(v_add(v_sub(face0_pos[2], face0_pos[0]), v_sub(face0_pos[3], face0_pos[1])),
-                    v_add(v_sub(face1_pos[2], face1_pos[0]), v_sub(face1_pos[3], face1_pos[1])));
-
-        // Shared centroid anchors both faces so the correction is symmetric.
-        Vector3 centroid = { 0.0f, 0.0f, 0.0f };
-        for (int i = 0; i < 4; ++i) {
-            centroid = v_add(centroid, face0_pos[i]);
-            centroid = v_add(centroid, face1_pos[i]);
-        }
-        centroid = v_mul(centroid, 0.125f);
-
-        Vector3 u0 = v_sub(dp0, v_mul(v_add(vgs_project(dp1, dp0), vgs_project(dp2, dp0)), FACE_VGS_ALPHA));
-        Vector3 u1 = v_sub(dp1, v_mul(v_add(vgs_project(dp0, dp1), vgs_project(dp2, dp1)), FACE_VGS_ALPHA));
-        Vector3 u2 = v_sub(dp2, v_mul(v_add(vgs_project(dp0, dp2), vgs_project(dp1, dp2)), FACE_VGS_ALPHA));
-
-        // Reject inverted volumes (face flip) by disabling the constraint on the spot.
-        float vol = v_dot(v_cross(u0, u1), u2);
-        if (face0_ix == 3) {
-            vol = -vol;
-        }
-        if (vol < -FACE_VOLUME_EPS) {
-            fc->active = false;
-            return false;
-        }
-
-        float len_u0 = v_length(u0) + eps;
-        float len_u1 = v_length(u1) + eps;
-        float len_u2 = v_length(u2) + eps;
-
-        float len_dp0 = v_length(dp0) + eps;
-        float len_dp1 = v_length(dp1) + eps;
-        float len_dp2 = v_length(dp2) + eps;
-
-        // Volume-preserving scale factor interpolates toward the rest cube dimensions.
-        float r_v = powf(active_radius * active_radius * active_radius /
-                          (len_dp0 * len_dp1 * len_dp2), 0.3333333f);
-
-        float target0 = mixf(active_radius, len_dp0 * r_v, FACE_VGS_ALPHA_LEN);
-        float target1 = mixf(active_radius, len_dp1 * r_v, FACE_VGS_ALPHA_LEN);
-        float target2 = mixf(active_radius, len_dp2 * r_v, FACE_VGS_ALPHA_LEN);
-
-        Vector3 dp_new0 = v_mul(u0, target0 / len_u0);
-        Vector3 dp_new1 = v_mul(u1, target1 / len_u1);
-        Vector3 dp_new2 = v_mul(u2, target2 / len_u2);
-
-        // Reconstruct corrected face geometry from the orthogonal frame.
-        float desired_half_gap = active_radius * FACE_CONTACT_BIAS;
-        Vector3 normal_dir = v_norm(dp_new0);
-        if (normal_dir.x == 0.0f && normal_dir.y == 0.0f && normal_dir.z == 0.0f) {
-            normal_dir = dir;
-        }
-        Vector3 gap = v_mul(normal_dir, desired_half_gap);
-        Vector3 base0 = v_sub(centroid, gap);
-        Vector3 base1 = v_add(centroid, gap);
-        Vector3 planar_u = dp_new1;
-        Vector3 planar_v = dp_new2;
-
-        Vector3 new_face0[4];
-        Vector3 new_face1[4];
-        for (int i = 0; i < 4; ++i) {
-            int su = face_planar_signs[i][0];
-            int sv = face_planar_signs[i][1];
-            Vector3 offset = v_add(v_mul(planar_u, (float)su), v_mul(planar_v, (float)sv));
-            new_face0[i] = v_add(base0, offset);
-            new_face1[i] = v_add(base1, offset);
-        }
-
-        // Feed the corrected positions back so the next iteration refines them further.
-        for (int i = 0; i < 4; ++i) {
-            if (face0_w[i] > 0.0f) face0_pos[i] = new_face0[i];
-            if (face1_w[i] > 0.0f) face1_pos[i] = new_face1[i];
-        }
-    }
-
     for (int i = 0; i < 4; ++i) {
-        if (face0_w[i] > 0.0f) face0_parts[i]->predicted_pos = face0_pos[i];
-        if (face1_w[i] > 0.0f) face1_parts[i]->predicted_pos = face1_pos[i];
+        if (face0_inv_mass[i] > 0.0f) {
+            face0_parts[i]->predicted_pos = face0_positions[i];
+        }
+        if (face1_inv_mass[i] > 0.0f) {
+            face1_parts[i]->predicted_pos = face1_positions[i];
+        }
     }
 
-    return true;
+    return applied;
 }
 
 void simulate_voxel_pbd(float dt) {
