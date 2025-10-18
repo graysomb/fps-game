@@ -7,6 +7,7 @@
 #include "physics/pbd_voxel_shape.h"
 #include "physics/pbd_face_constraints.h"
 #include "physics/pbd_collisions.h"
+#include "physics/pbd_uniform_grid.h"
 #include <math.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -145,11 +146,7 @@ static FaceConstraint face_constraints[3][MAX_FACE_CONSTRAINTS_PER_AXIS];
 static int face_constraint_count[3] = { 0, 0, 0 };
 
 static PbdSystemData gPbdSystem;
-static int *pbdGridCount = NULL;
-static int *pbdGridStart = NULL;
-static int *pbdGridContent = NULL;
-static int pbdGridCapacity = 0;
-static int pbdGridContentCapacity = 0;
+static PbdUniformGridCPU gPbdGrid = { 0 };
 
 static bool debugDrawParticles = false;
 static bool debugColorParticlesByVelocity = false;
@@ -281,31 +278,6 @@ static bool face_constraint_active_between(int axis, int idxA, int idxB) {
     }
     return false;
 }
-
-static inline int clamp_int(int v, int lo, int hi) {
-    if (v < lo) return lo;
-    if (v > hi) return hi;
-    return v;
-}
-
-static inline int total_particle_count(void) {
-    return voxel_count * 8;
-}
-
-static inline Particle *particle_by_index(int idx) {
-    int vox = idx / 8;
-    int corner = idx % 8;
-    if (vox < 0 || vox >= voxel_count) {
-        return NULL;
-    }
-    return &voxels[vox].particles[corner];
-}
-
-static void update_system_data(float dt);
-static void rebuild_uniform_grid(void);
-static void project_particle_collisions_with_grid(void);
-static void apply_environment_collisions(float dt);
-
 
 // Utility functions
 static float randomInRange(float min, float max) {
@@ -925,159 +897,37 @@ static void compute_voxel_center_and_mass(const Voxel *voxel, Vector3 *center, f
     }
 }
 
-static void ensure_uniform_grid_capacity(int numCells, int numParticles) {
-    if (numCells > pbdGridCapacity) {
-        int *newCount = (int *)realloc(pbdGridCount, (size_t)numCells * sizeof(int));
-        int *newStart = (int *)realloc(pbdGridStart, (size_t)numCells * sizeof(int));
-        if (!newCount || !newStart) {
-            // Allocation failure: keep existing buffers to avoid crash, but skip updates.
-            return;
-        }
-        pbdGridCount = newCount;
-        pbdGridStart = newStart;
-        pbdGridCapacity = numCells;
-    }
-
-    if (numParticles > pbdGridContentCapacity) {
-        int *newContent = (int *)realloc(pbdGridContent, (size_t)numParticles * sizeof(int));
-        if (!newContent) {
-            return;
-        }
-        pbdGridContent = newContent;
-        pbdGridContentCapacity = numParticles;
-    }
+static inline int total_particle_count(void) {
+    return voxel_count * 8;
 }
 
-static void update_system_data(float dt) {
-    gPbdSystem.numParticles = total_particle_count();
-    gPbdSystem.dt = dt;
-    gPbdSystem.compliance = 0.0f;
-    gPbdSystem.omega_collision = COLLISION_RELAXATION;
-    gPbdSystem.time += dt;
-    gPbdSystem.maxCellsPerElement = 8;
-
-    gPbdSystem.gravity = (Vector4){ 0.0f, -GRAVITY, 0.0f, 0.0f };
-
-    const Vector4 walls[6] = {
-        {  1.0f,  0.0f,  0.0f,  FLOOR_SIZE },
-        { -1.0f,  0.0f,  0.0f,  FLOOR_SIZE },
-        {  0.0f,  1.0f,  0.0f,  FLOOR_SIZE },
-        {  0.0f, -1.0f,  0.0f,  FLOOR_SIZE },
-        {  0.0f,  0.0f,  1.0f,  FLOOR_SIZE },
-        {  0.0f,  0.0f, -1.0f,  FLOOR_SIZE }
-    };
-    for (int i = 0; i < 6; ++i) {
-        gPbdSystem.wallConstraints[i] = walls[i];
-    }
+static Particle *particle_lookup(int index, void *ctx) {
+    (void)ctx;
+    int vox = index / 8;
+    int corner = index % 8;
+    if (vox < 0 || vox >= voxel_count) return NULL;
+    return &voxels[vox].particles[corner];
 }
 
-static void rebuild_uniform_grid(void) {
-    const int totalParticles = total_particle_count();
-    if (totalParticles <= 0) {
-        gPbdSystem.numCells = 0;
-        return;
-    }
-
-    const Vector3 gridMin = { -FLOOR_SIZE, -FLOOR_SIZE, -FLOOR_SIZE };
-    const Vector3 gridMax = {  FLOOR_SIZE,  FLOOR_SIZE,  FLOOR_SIZE };
-    const Vector3 cellSize = { VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE };
-
-    int rx = (int)ceilf((gridMax.x - gridMin.x) / cellSize.x);
-    int ry = (int)ceilf((gridMax.y - gridMin.y) / cellSize.y);
-    int rz = (int)ceilf((gridMax.z - gridMin.z) / cellSize.z);
-    if (rx < 1) rx = 1;
-    if (ry < 1) ry = 1;
-    if (rz < 1) rz = 1;
-
-    const int numCells = rx * ry * rz;
-    ensure_uniform_grid_capacity(numCells, totalParticles);
-    if (numCells > pbdGridCapacity || totalParticles > pbdGridContentCapacity) {
-        // Allocation failed; skip grid rebuild this frame.
-        gPbdSystem.numCells = 0;
-        return;
-    }
-
-    memset(pbdGridCount, 0, (size_t)numCells * sizeof(int));
-    memset(pbdGridStart, 0, (size_t)numCells * sizeof(int));
-
-    gPbdSystem.gridMin = gridMin;
-    gPbdSystem.gridMax = gridMax;
-    gPbdSystem.cellSize = cellSize;
-    gPbdSystem.gridRes[0] = rx;
-    gPbdSystem.gridRes[1] = ry;
-    gPbdSystem.gridRes[2] = rz;
-    gPbdSystem.numCells = numCells;
-
-    const float invCellX = 1.0f / cellSize.x;
-    const float invCellY = 1.0f / cellSize.y;
-    const float invCellZ = 1.0f / cellSize.z;
-
-    for (int idx = 0; idx < totalParticles; ++idx) {
-        Particle *p = particle_by_index(idx);
-        if (!p) continue;
-        Vector3 rel = v_sub(p->predicted_pos, gridMin);
-        int cx = clamp_int((int)floorf(rel.x * invCellX), 0, rx - 1);
-        int cy = clamp_int((int)floorf(rel.y * invCellY), 0, ry - 1);
-        int cz = clamp_int((int)floorf(rel.z * invCellZ), 0, rz - 1);
-        int cell = cx + rx * (cy + ry * cz);
-        pbdGridCount[cell]++;
-    }
-
-    int running = 0;
-    for (int cell = 0; cell < numCells; ++cell) {
-        pbdGridStart[cell] = running;
-        running += pbdGridCount[cell];
-        pbdGridCount[cell] = 0;
-    }
-
-    if (running > pbdGridContentCapacity) {
-        ensure_uniform_grid_capacity(numCells, running);
-        if (running > pbdGridContentCapacity) {
-            gPbdSystem.numCells = 0;
-            return;
-        }
-        // Recompute prefix if buffer grew.
-        memset(pbdGridCount, 0, (size_t)numCells * sizeof(int));
-        for (int idx = 0; idx < totalParticles; ++idx) {
-            Particle *p = particle_by_index(idx);
-            if (!p) continue;
-            Vector3 rel = v_sub(p->predicted_pos, gridMin);
-            int cx = clamp_int((int)floorf(rel.x * invCellX), 0, rx - 1);
-            int cy = clamp_int((int)floorf(rel.y * invCellY), 0, ry - 1);
-            int cz = clamp_int((int)floorf(rel.z * invCellZ), 0, rz - 1);
-            int cell = cx + rx * (cy + ry * cz);
-            pbdGridCount[cell]++;
-        }
-        running = 0;
-        for (int cell = 0; cell < numCells; ++cell) {
-            int count = pbdGridCount[cell];
-            pbdGridStart[cell] = running;
-            running += count;
-            pbdGridCount[cell] = 0;
+static bool skip_particle_pair(int particleA, int particleB, void *ctx) {
+    (void)ctx;
+    int voxelA = particleA / 8;
+    int voxelB = particleB / 8;
+    if (voxelA == voxelB) return true;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (face_constraint_active_between(axis, voxelA, voxelB)) {
+            return true;
         }
     }
-
-    for (int idx = 0; idx < totalParticles; ++idx) {
-        Particle *p = particle_by_index(idx);
-        if (!p) continue;
-        Vector3 rel = v_sub(p->predicted_pos, gridMin);
-        int cx = clamp_int((int)floorf(rel.x * invCellX), 0, rx - 1);
-        int cy = clamp_int((int)floorf(rel.y * invCellY), 0, ry - 1);
-        int cz = clamp_int((int)floorf(rel.z * invCellZ), 0, rz - 1);
-        int cell = cx + rx * (cy + ry * cz);
-        int start = pbdGridStart[cell];
-        int offset = pbdGridCount[cell]++;
-        pbdGridContent[start + offset] = idx;
-    }
+    return false;
 }
 
 static void apply_environment_collisions(float dt) {
     (void)dt;
-
     const float half_player = PLAYER_SIZE * 0.5f;
     const float omega = gPbdSystem.omega_collision;
     const float eps = 1e-6f;
-    Vector4 ground_plane = (Vector4){ 0.0f, 1.0f, 0.0f, 0.0f };
+    const Vector4 ground_plane = { 0.0f, 1.0f, 0.0f, 0.0f };
 
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
@@ -1132,104 +982,48 @@ static void apply_environment_collisions(float dt) {
     }
 }
 
-static void project_particle_collisions_with_grid(void) {
-    const int totalParticles = gPbdSystem.numParticles;
-    if (totalParticles <= 0 || gPbdSystem.numCells == 0) {
+static void solve_particle_collisions(float dt) {
+    const Vector4 walls[6] = {
+        {  1.0f,  0.0f,  0.0f,  FLOOR_SIZE },
+        { -1.0f,  0.0f,  0.0f,  FLOOR_SIZE },
+        {  0.0f,  1.0f,  0.0f,  FLOOR_SIZE },
+        {  0.0f, -1.0f,  0.0f,  FLOOR_SIZE },
+        {  0.0f,  0.0f,  1.0f,  FLOOR_SIZE },
+        {  0.0f,  0.0f, -1.0f,  FLOOR_SIZE }
+    };
+
+    pbd_system_configure(&gPbdSystem,
+                         dt,
+                         COLLISION_RELAXATION,
+                         (Vector3){ 0.0f, -GRAVITY, 0.0f },
+                         walls,
+                         total_particle_count(),
+                         8);
+
+    apply_environment_collisions(dt);
+
+    Vector3 gridMin = { -FLOOR_SIZE, -FLOOR_SIZE, -FLOOR_SIZE };
+    Vector3 gridMax = {  FLOOR_SIZE,  FLOOR_SIZE,  FLOOR_SIZE };
+    Vector3 cellSize = { VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE };
+
+    if (!pbd_uniform_grid_rebuild(&gPbdGrid,
+                                  &gPbdSystem,
+                                  total_particle_count(),
+                                  particle_lookup,
+                                  NULL,
+                                  gridMin,
+                                  gridMax,
+                                  cellSize)) {
         return;
     }
 
-    const int rx = gPbdSystem.gridRes[0];
-    const int ry = gPbdSystem.gridRes[1];
-    const int rz = gPbdSystem.gridRes[2];
-    const Vector3 cellSize = gPbdSystem.cellSize;
-    const Vector3 gridMin = gPbdSystem.gridMin;
-    const float invCellX = 1.0f / cellSize.x;
-    const float invCellY = 1.0f / cellSize.y;
-    const float invCellZ = 1.0f / cellSize.z;
-    const float eps = 1e-6f;
-
-    for (int ix = 0; ix < totalParticles; ++ix) {
-        Particle *pi = particle_by_index(ix);
-        if (!pi) continue;
-
-        float wi = pi->inv_mass;
-        if (wi == 0.0f) {
-            continue;
-        }
-
-        int voxel_i = ix / 8;
-        float ri = voxel_particle_radius(&voxels[voxel_i]);
-        Vector3 dp = { 2.0f * ri, 2.0f * ri, 2.0f * ri };
-        Vector3 minPos = v_sub(pi->predicted_pos, dp);
-        Vector3 maxPos = v_add(pi->predicted_pos, dp);
-
-        int cx_min = clamp_int((int)floorf((minPos.x - gridMin.x) * invCellX), 0, rx - 1);
-        int cy_min = clamp_int((int)floorf((minPos.y - gridMin.y) * invCellY), 0, ry - 1);
-        int cz_min = clamp_int((int)floorf((minPos.z - gridMin.z) * invCellZ), 0, rz - 1);
-        int cx_max = clamp_int((int)floorf((maxPos.x - gridMin.x) * invCellX), 0, rx - 1);
-        int cy_max = clamp_int((int)floorf((maxPos.y - gridMin.y) * invCellY), 0, ry - 1);
-        int cz_max = clamp_int((int)floorf((maxPos.z - gridMin.z) * invCellZ), 0, rz - 1);
-
-        Vector3 dx_total = { 0.0f, 0.0f, 0.0f };
-
-        for (int cx = cx_min; cx <= cx_max; ++cx) {
-            for (int cy = cy_min; cy <= cy_max; ++cy) {
-                for (int cz = cz_min; cz <= cz_max; ++cz) {
-                    int cell = cx + rx * (cy + ry * cz);
-                    int start = pbdGridStart[cell];
-                    int count = pbdGridCount[cell];
-                    for (int t = 0; t < count; ++t) {
-                        int jx = pbdGridContent[start + t];
-                        if (jx == ix) continue;
-
-                        Particle *pj = particle_by_index(jx);
-                        if (!pj) continue;
-
-                        int voxel_j = jx / 8;
-                        if (voxel_j == voxel_i) continue;
-                        bool skip_collision = false;
-                        for (int axis = 0; axis < 3 && !skip_collision; ++axis) {
-                            if (face_constraint_active_between(axis, voxel_i, voxel_j)) {
-                                skip_collision = true;
-                            }
-                        }
-                        if (skip_collision) continue;
-
-                        float rj = voxel_particle_radius(&voxels[voxel_j]);
-                        float wj = pj->inv_mass;
-                        if (wj == 0.0f) continue;
-
-                        Vector3 nij = v_sub(pi->predicted_pos, pj->predicted_pos);
-                        float d = v_length(nij) + eps;
-                        float target = ri + rj;
-                        if (d >= target) continue;
-
-                        Vector3 uij = v_mul(nij, 1.0f / d);
-                        float pen = target - d;
-                        if (pen <= 0.0f) continue;
-
-                        float denom = wi + wj;
-                        if (denom <= 0.0f) continue;
-
-                        float h = 0.5f * pen;
-                        float scale = wi * gPbdSystem.omega_collision * h / denom;
-                        dx_total = v_add(dx_total, v_mul(uij, scale));
-                    }
-                }
-            }
-        }
-
-        pi->predicted_pos = v_add(pi->predicted_pos, dx_total);
-    }
-}
-
-// Resolve collisions against the scene and neighbouring voxels using shader-style helpers.
-
-static void solve_particle_collisions(float dt) {
-    update_system_data(dt);
-    apply_environment_collisions(dt);
-    rebuild_uniform_grid();
-    project_particle_collisions_with_grid();
+    pbd_project_collisions_with_grid(&gPbdGrid,
+                                     &gPbdSystem,
+                                     total_particle_count(),
+                                     particle_lookup,
+                                     NULL,
+                                     skip_particle_pair,
+                                     NULL);
 }
 
 static void update_particle_velocities(float dt) {
@@ -1368,7 +1162,7 @@ void simulate_voxel_pbd(float dt) {
                 Voxel *voxel = &voxels[i];
                 if (!voxel->simulate)
                     continue;
-                solve_voxel_shape(voxel);
+                //solve_voxel_shape(voxel);
             }
             for (int axis = 0; axis < 3; ++axis) {
                 for (int ci = 0; ci < face_constraint_count[axis]; ++ci) {
