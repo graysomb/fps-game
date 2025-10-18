@@ -131,6 +131,10 @@ typedef struct {
 static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
 
+static inline float voxel_particle_radius(const Voxel *v) {
+    return (v->particle_radius > 0.0f) ? v->particle_radius : PARTICLE_RADIUS;
+}
+
 static FaceConstraint face_constraints[3][MAX_FACE_CONSTRAINTS_PER_AXIS];
 static int face_constraint_count[3] = { 0, 0, 0 };
 
@@ -946,31 +950,29 @@ static void compute_voxel_center_and_mass(const Voxel *voxel, Vector3 *center, f
 static void solve_particle_collisions(float dt) {
     (void)dt;
 
-    const float radius = PARTICLE_RADIUS;
-    const float radius_sq = radius * radius;
-    const float min_dist = radius * 2.0f;
-    const float min_dist_sq = min_dist * min_dist;
     const float half_player = PLAYER_SIZE * 0.5f;
-    const float center_radius = PARTICLE_RADIUS * 1.5f;
-    const float center_min_dist = center_radius * 2.0f;
-    const float center_min_dist_sq = center_min_dist * center_min_dist;
+    const float omega = COLLISION_RELAXATION;
+    const float eps = 1e-6f;
 
+    // First, handle environmental collisions (ground, world bounds, players).
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
+        float voxel_radius = voxel_particle_radius(voxel);
+        float terrain_limit = FLOOR_SIZE - voxel_radius;
 
         for (int j = 0; j < 8; ++j) {
             Particle *p = &voxel->particles[j];
 
-            if (p->inv_mass == 0.0f)
-                continue;
-
             Vector3 pos = p->predicted_pos;
 
-            if (pos.y < radius) {
-                pos.y = radius;
-                //p->prev_pos.y = pos.y;
+            if (pos.y < voxel_radius) {
+                pos.y = voxel_radius;
             }
 
+            pos.x = clampf(pos.x, -terrain_limit, terrain_limit);
+            pos.z = clampf(pos.z, -terrain_limit, terrain_limit);
+
+            // Interactions with player bounding boxes (kept for gameplay parity).
             for (int player_idx = 0; player_idx < 2; ++player_idx) {
                 Player *pl = &players[player_idx];
                 Vector3 box_min = {
@@ -991,184 +993,89 @@ static void solve_particle_collisions(float dt) {
                 };
 
                 Vector3 delta = v_sub(pos, nearest);
-                float dist_sq = delta.x*delta.x + delta.y*delta.y + delta.z*delta.z;
+                float dist_sq = v_dot(delta, delta);
+                float radius_sq = voxel_radius * voxel_radius;
                 if (dist_sq < radius_sq) {
-                    float dist = sqrtf(fmaxf(dist_sq, 1e-12f));
-                    float penetration = radius - dist;
-                    Vector3 normal;
-                    if (dist > 1e-6f) {
-                        normal = v_mul(delta, -1.0f / dist);
-                    } else {
-                        normal = (Vector3){ 0.0f, 1.0f, 0.0f };
-                    }
+                    float dist = sqrtf(fmaxf(dist_sq, eps));
+                    float penetration = voxel_radius - dist;
+                    Vector3 normal = (dist > eps)
+                        ? v_mul(delta, -1.0f / dist)
+                        : (Vector3){ 0.0f, 1.0f, 0.0f };
                     pos = v_add(pos, v_mul(normal, penetration));
-                    //p->prev_pos = pos;
                 }
             }
 
             p->predicted_pos = pos;
+        }
+    }
+
+    // Particle-particle collisions using a GPU-style symmetric correction.
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxelA = &voxels[i];
+        float radiusA = voxel_particle_radius(voxelA);
+
+        for (int j = 0; j < 8; ++j) {
+            Particle *pa = &voxelA->particles[j];
+            float wa = pa->inv_mass;
 
             for (int dx = -1; dx <= 1; ++dx) {
                 for (int dy = -1; dy <= 1; ++dy) {
                     for (int dz = -1; dz <= 1; ++dz) {
-                        int nx = voxel->gx + dx;
-                        int ny = voxel->gy + dy;
-                        int nz = voxel->gz + dz;
+                        int nx = voxelA->gx + dx;
+                        int ny = voxelA->gy + dy;
+                        int nz = voxelA->gz + dz;
                         int neighbor_idx = table_get(nx, ny, nz);
-                        if (neighbor_idx < 0)
+                        if (neighbor_idx < 0) {
                             continue;
-
-                        if (neighbor_idx < i)
-                            continue;
-
-                        Voxel *other = &voxels[neighbor_idx];
-
-                        bool face_locked = false;
-                        int face_axis = -1;
-                        int non_zero = (dx != 0) + (dy != 0) + (dz != 0);
-                        if (non_zero == 1) {
-                            if (dx != 0) {
-                                face_axis = 0;
-                            } else if (dy != 0) {
-                                face_axis = 1;
-                            } else {
-                                face_axis = 2;
-                            }
-
-                            face_locked = face_constraint_active_between(face_axis, i, neighbor_idx);
                         }
+
+                        if (neighbor_idx < i) {
+                            continue;
+                        }
+
+                        Voxel *voxelB = &voxels[neighbor_idx];
+                        float radiusB = voxel_particle_radius(voxelB);
 
                         for (int q = 0; q < 8; ++q) {
-                            if (neighbor_idx == i && q <= j)
+                            if (neighbor_idx == i && q <= j) {
                                 continue;
-
-                            Particle *p_other = &other->particles[q];
-                            if (p_other->inv_mass + p->inv_mass == 0.0f)
-                                continue;
-
-                            Vector3 delta = v_sub(p->predicted_pos, p_other->predicted_pos);
-                            float dist_sq = delta.x*delta.x + delta.y*delta.y + delta.z*delta.z;
-                            if (dist_sq >= min_dist_sq)
-                                continue;
-
-                            float dist = sqrtf(fmaxf(dist_sq, 1e-12f));
-                            float penetration = min_dist - dist;
-                            Vector3 normal;
-                            if (dist > 1e-6f) {
-                                normal = v_mul(delta, 1.0f / dist);
-                            } else {
-                                normal = (Vector3){ 1.0f, 0.0f, 0.0f };
                             }
 
-                            float w_sum = p->inv_mass + p_other->inv_mass;
-                            if (w_sum == 0.0f)
+                            Particle *pb = &voxelB->particles[q];
+                            float wb = pb->inv_mass;
+
+                            float w_sum = wa + wb;
+                            if (w_sum <= 0.0f) {
                                 continue;
-
-                            Vector3 corr = v_mul(normal, penetration / w_sum);
-
-                            if (face_locked && face_axis >= 0) {
-                                Vector3 axis_n = axis_dirs[face_axis];
-                                Vector3 normal_component = v_mul(axis_n, v_dot(corr, axis_n));
-                                corr = v_sub(corr, normal_component);
-                                if (v_length(corr) < 1e-8f) {
-                                    continue;
-                                }
                             }
 
-                            p->predicted_pos = v_add(p->predicted_pos, v_mul(corr, p->inv_mass));
-                            p_other->predicted_pos = v_add(p_other->predicted_pos, v_mul(corr, -p_other->inv_mass));
-                        }
-                    }
-                }
-            }
-        }
+                            Vector3 delta = v_sub(pa->predicted_pos, pb->predicted_pos);
+                            float dist_sq = v_dot(delta, delta);
+                            float target_dist = radiusA + radiusB;
 
-        // Apply phantom center-sphere collisions to reduce voxel interlocking.
-        for (int dx = -1; dx <= 1; ++dx) {
-            for (int dy = -1; dy <= 1; ++dy) {
-                for (int dz = -1; dz <= 1; ++dz) {
-                    int nx = voxel->gx + dx;
-                    int ny = voxel->gy + dy;
-                    int nz = voxel->gz + dz;
-                    int neighbor_idx = table_get(nx, ny, nz);
-                    if (neighbor_idx < 0)
-                        continue;
-
-                    if (neighbor_idx <= i)
-                        continue;
-
-                    Voxel *other = &voxels[neighbor_idx];
-
-                    bool face_locked = false;
-                    int face_axis = -1;
-                    int non_zero = (dx != 0) + (dy != 0) + (dz != 0);
-                    if (non_zero == 1) {
-                        if (dx != 0) {
-                            face_axis = 0;
-                        } else if (dy != 0) {
-                            face_axis = 1;
-                        } else {
-                            face_axis = 2;
-                        }
-
-                        face_locked = face_constraint_active_between(face_axis, i, neighbor_idx);
-                    }
-
-                    Vector3 center_a, center_b;
-                    float inv_mass_a = 0.0f;
-                    float inv_mass_b = 0.0f;
-                    compute_voxel_center_and_mass(voxel, &center_a, &inv_mass_a);
-                    compute_voxel_center_and_mass(other, &center_b, &inv_mass_b);
-
-                    Vector3 delta = v_sub(center_a, center_b);
-                    float dist_sq = delta.x*delta.x + delta.y*delta.y + delta.z*delta.z;
-                    if (dist_sq >= center_min_dist_sq)
-                        continue;
-
-                    float dist = sqrtf(fmaxf(dist_sq, 1e-12f));
-                    Vector3 normal;
-                    if (dist > 1e-6f) {
-                        normal = v_mul(delta, 1.0f / dist);
-                    } else {
-                        normal = (Vector3){ 1.0f, 0.0f, 0.0f };
-                    }
-
-                    float penetration = center_min_dist - dist;
-                    float w_sum = inv_mass_a + inv_mass_b;
-                    if (w_sum == 0.0f)
-                        continue;
-
-                    float scale_a = (inv_mass_a > 0.0f) ? (inv_mass_a / w_sum) : 0.0f;
-                    float scale_b = (inv_mass_b > 0.0f) ? (inv_mass_b / w_sum) : 0.0f;
-                    Vector3 shift_a = v_mul(normal, penetration * scale_a);
-                    Vector3 shift_b = v_mul(normal, -penetration * scale_b);
-
-                    if (face_locked && face_axis >= 0) {
-                        Vector3 axis_n = axis_dirs[face_axis];
-                        Vector3 normal_component_a = v_mul(axis_n, v_dot(shift_a, axis_n));
-                        Vector3 normal_component_b = v_mul(axis_n, v_dot(shift_b, axis_n));
-                        shift_a = v_sub(shift_a, normal_component_a);
-                        shift_b = v_sub(shift_b, normal_component_b);
-                        if (v_length(shift_a) < 1e-8f && v_length(shift_b) < 1e-8f) {
-                            continue;
-                        }
-                    }
-
-                    if (inv_mass_a > 0.0f) {
-                        for (int corner = 0; corner < 8; ++corner) {
-                            Particle *pa = &voxel->particles[corner];
-                            if (pa->inv_mass == 0.0f)
+                            if (dist_sq >= (target_dist * target_dist)) {
                                 continue;
-                            pa->predicted_pos = v_add(pa->predicted_pos, shift_a);
-                        }
-                    }
+                            }
 
-                    if (inv_mass_b > 0.0f) {
-                        for (int corner = 0; corner < 8; ++corner) {
-                            Particle *pb = &other->particles[corner];
-                            if (pb->inv_mass == 0.0f)
+                            float dist = sqrtf(fmaxf(dist_sq, eps));
+                            float penetration = target_dist - dist;
+                            if (penetration <= 0.0f) {
                                 continue;
-                            pb->predicted_pos = v_add(pb->predicted_pos, shift_b);
+                            }
+
+                            Vector3 normal = (dist > eps)
+                                ? v_mul(delta, 1.0f / dist)
+                                : (Vector3){ 1.0f, 0.0f, 0.0f };
+
+                            float h = 0.5f * penetration;
+                            float scale = omega * h / w_sum;
+
+                            if (wa > 0.0f) {
+                                pa->predicted_pos = v_add(pa->predicted_pos, v_mul(normal, scale * wa));
+                            }
+                            if (wb > 0.0f) {
+                                pb->predicted_pos = v_sub(pb->predicted_pos, v_mul(normal, scale * wb));
+                            }
                         }
                     }
                 }
@@ -1423,7 +1330,7 @@ void simulate_voxel_pbd(float dt) {
     const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
 
     for (int step = 0; step < substeps; ++step) {
-        //integrate_particles(sub_dt);
+        integrate_particles(sub_dt);
         solve_particle_collisions(sub_dt);
 
         for (int it = 0; it < constraint_iterations; ++it) {
