@@ -610,7 +610,8 @@ static void UpdateKdRatio(int player_index);
 static void ResetGame(void) {
     // init players
     for (int i = 0; i < 2; i++) {
-        players[i].pos = (Vector3){ randomInRange(-9,9), BASE_EYE_HEIGHT, randomInRange(-9,9) };
+        //players[i].pos = (Vector3){ randomInRange(-9,9), BASE_EYE_HEIGHT, randomInRange(-9,9) };
+        players[i].pos = (Vector3){ 0, BASE_EYE_HEIGHT, -9 };
         players[i].yaw = (i == 0) ? 0 : 180;
         players[i].pitch = 0;
         players[i].yaw_vel = 0;
