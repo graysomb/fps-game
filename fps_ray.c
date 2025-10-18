@@ -44,7 +44,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define PLAYER_RADIUS   0.5f
 #define FLOOR_SIZE     20.0f    // half-size of floor in world units
 #define PLAYER_SIZE 0.5f
-#define PARTICLE_RADIUS (VOXEL_SIZE * 0.25f)
+#define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
 #define VGS_ALPHA 0.5f
 #define VGS_BETA 0.5f
 #define VGS_ITERS 3
@@ -808,7 +808,7 @@ static void physics_step(float dt) {    // Rebuild spatial hash
 
 // Predict positions for the next step (equivalent to the GPU PredictPositions kernel).
 static void integrate_particles(float dt) {
-    const Vector3 gravity = { 0.0f, -GRAVITY, 0.0f };
+    const Vector3 gravity = { 0.0f, -GRAVITY*0.0f, 0.0f };
     const float dt_sq = dt * dt;
 
     for (int i = 0; i < voxel_count; ++i) {
@@ -1131,6 +1131,7 @@ static void update_particle_velocities(float dt) {
 
 // Partitioned face constraint solve (Algorithm 2) keeps adjacent voxels glued until strain breaks.
 static bool project_face_constraint(FaceConstraint *fc, int axis) {
+    // Early-out if the constraint is disabled or both voxels are effectively rigid.
     if (!fc->active) return false;
     Voxel *voxelA = &voxels[fc->voxelA];
     Voxel *voxelB = &voxels[fc->voxelB];
@@ -1158,6 +1159,7 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
         else if (dz < 0) { face0_ix = 4; face1_ix = 5; }
     }
 
+    // Fallback when voxels are co-located along the axis (should be rare but safe).
     if (face0_ix < 0 || face1_ix < 0) {
         face0_ix = axis * 2;
         face1_ix = axis * 2 + 1;
@@ -1194,6 +1196,7 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
 
     float max_strain = -FLT_MAX;
     float min_strain = FLT_MAX;
+    // Measure separation along the axis and gate overly stretched/buckled faces.
     for (int i = 0; i < 4; ++i) {
         Vector3 shifted_b = v_add(face1_pos[i], v_mul(dir, active_radius));
         Vector3 shifted_a = v_sub(face0_pos[i], v_mul(dir, active_radius));
@@ -1212,6 +1215,7 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
     const float eps = 1e-12f;
 
     if (sum_w0 == 0.0f || sum_w1 == 0.0f) {
+        // One side is fixed: snap the movable face back to a canonical box anchored at the midpoint.
         Vector3 centroid = { 0.0f, 0.0f, 0.0f };
         for (int i = 0; i < 4; ++i) {
             centroid = v_add(centroid, face0_pos[i]);
@@ -1243,6 +1247,7 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
         if (len2 > eps) u2 = v_mul(u2, active_radius / len2);
         if (len0 > eps) u0 = v_mul(u0, active_radius / len0);
 
+        // Construct two quads that meet at the centroid with the desired spacing.
         Vector3 new_face0[4];
         Vector3 new_face1[4];
         new_face0[0] = v_sub(v_sub(v_sub(centroid, u0), u1), u2);
@@ -1263,6 +1268,7 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
     }
 
     for (int iter = 0; iter < 3; ++iter) {
+        // Step 0: accumulate average offset and in-plane diagonals between the two faces.
         Vector3 dp0 = { 0.0f, 0.0f, 0.0f };
         Vector3 dp1 = { 0.0f, 0.0f, 0.0f };
         Vector3 dp2 = { 0.0f, 0.0f, 0.0f };
@@ -1271,12 +1277,14 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
             dp0 = v_add(dp0, v_sub(face1_pos[i], face0_pos[i]));
         }
 
+        // Blend the in-plane diagonals from both faces so we can re-orthogonalise them together.
         dp1 = v_add(v_add(v_sub(face0_pos[1], face0_pos[0]), v_sub(face0_pos[3], face0_pos[2])),
                     v_add(v_sub(face1_pos[1], face1_pos[0]), v_sub(face1_pos[3], face1_pos[2])));
 
         dp2 = v_add(v_add(v_sub(face0_pos[2], face0_pos[0]), v_sub(face0_pos[3], face0_pos[1])),
                     v_add(v_sub(face1_pos[2], face1_pos[0]), v_sub(face1_pos[3], face1_pos[1])));
 
+        // Shared centroid anchors both faces so the correction is symmetric.
         Vector3 centroid = { 0.0f, 0.0f, 0.0f };
         for (int i = 0; i < 4; ++i) {
             centroid = v_add(centroid, face0_pos[i]);
@@ -1288,6 +1296,7 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
         Vector3 u1 = v_sub(dp1, v_mul(v_add(vgs_project(dp0, dp1), vgs_project(dp2, dp1)), FACE_VGS_ALPHA));
         Vector3 u2 = v_sub(dp2, v_mul(v_add(vgs_project(dp0, dp2), vgs_project(dp1, dp2)), FACE_VGS_ALPHA));
 
+        // Reject inverted volumes (face flip) by disabling the constraint on the spot.
         float vol = v_dot(v_cross(u0, u1), u2);
         if (face0_ix == 3) {
             vol = -vol;
@@ -1305,6 +1314,7 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
         float len_dp1 = v_length(dp1) + eps;
         float len_dp2 = v_length(dp2) + eps;
 
+        // Volume-preserving scale factor interpolates toward the rest cube dimensions.
         float r_v = powf(active_radius * active_radius * active_radius /
                           (len_dp0 * len_dp1 * len_dp2), 0.3333333f);
 
@@ -1316,6 +1326,7 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
         Vector3 dp_new1 = v_mul(u1, target1 / len_u1);
         Vector3 dp_new2 = v_mul(u2, target2 / len_u2);
 
+        // Reconstruct corrected face geometry from the orthogonal frame.
         Vector3 new_face0[4];
         Vector3 new_face1[4];
         new_face0[0] = v_sub(v_sub(v_sub(centroid, dp_new0), dp_new1), dp_new2);
@@ -1327,6 +1338,7 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
         new_face1[2] = v_add(v_add(v_sub(centroid, dp_new0), dp_new1), dp_new2);
         new_face1[3] = v_add(v_add(v_add(centroid, dp_new0), dp_new1), dp_new2);
 
+        // Feed the corrected positions back so the next iteration refines them further.
         for (int i = 0; i < 4; ++i) {
             if (face0_w[i] > 0.0f) face0_pos[i] = new_face0[i];
             if (face1_w[i] > 0.0f) face1_pos[i] = new_face1[i];
@@ -1342,8 +1354,8 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
 }
 
 void simulate_voxel_pbd(float dt) {
-    const int substeps = 1;
-    const int constraint_iterations = 2;
+    const int substeps = 2;
+    const int constraint_iterations = 4;
     const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
 
     for (int step = 0; step < substeps; ++step) {
