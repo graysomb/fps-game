@@ -60,6 +60,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define FACE_TENSILE_LIMIT .35f
 #define FACE_COMPRESS_LIMIT -.35f
 #define MAX_FACE_CONSTRAINTS_PER_AXIS (MAX_VOXELS * 2)
+#define FACE_CONTACT_BIAS 1e-4f
+#define FACE_VOLUME_EPS 1e-8f
 
 // KD-stats constants
 #define BASE_HEALTH 100
@@ -135,6 +137,18 @@ static inline float voxel_particle_radius(const Voxel *v) {
     return (v->particle_radius > 0.0f) ? v->particle_radius : PARTICLE_RADIUS;
 }
 
+static inline float voxel_rest_edge_value(const Voxel *v) {
+    return (v->rest_edge > 0.0f) ? v->rest_edge : VOXEL_SIZE;
+}
+
+static inline float voxel_rest_half_edge(const Voxel *v) {
+    return 0.5f * voxel_rest_edge_value(v);
+}
+
+static inline float voxel_rest_volume_value(const Voxel *v) {
+    return (v->rest_volume > 0.0f) ? v->rest_volume : (VOXEL_SIZE * VOXEL_SIZE * VOXEL_SIZE);
+}
+
 static FaceConstraint face_constraints[3][MAX_FACE_CONSTRAINTS_PER_AXIS];
 static int face_constraint_count[3] = { 0, 0, 0 };
 
@@ -169,6 +183,13 @@ static const int corner_signs[8][3] = {
     { -1,  1, -1 }, {  1,  1, -1 },
     { -1, -1,  1 }, {  1, -1,  1 },
     { -1,  1,  1 }, {  1,  1,  1 }
+};
+
+static const int face_planar_signs[4][2] = {
+    { -1, -1 },
+    {  1, -1 },
+    { -1,  1 },
+    {  1,  1 }
 };
 
 static int table_get(int x, int y, int z);
@@ -539,7 +560,7 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     int idx = voxel_count++;
     Voxel *v = &voxels[idx];
     v->pos = (Vector3){ px, py, pz };
-    v->vel = (Vector3){ 0,0,0 };
+    v->vel = (Vector3){ 0,-1.0,0 };
     v->fixed = fixed;
     v->simulate = simulate;
     v->color = color;
@@ -552,7 +573,7 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     v->gz = (int)floorf(pz / VOXEL_SIZE);
     v->rest_volume = VOXEL_SIZE * VOXEL_SIZE * VOXEL_SIZE;
     v->rest_edge = VOXEL_SIZE;
-    v->particle_radius = PARTICLE_RADIUS;
+    v->particle_radius = voxel_rest_half_edge(v);
     const float half = VOXEL_SIZE * 0.5f;
     for (int i = 0; i < 8; ++i) {
         Particle *p = &v->particles[i];
@@ -563,7 +584,7 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
         };
         p->prev_pos = p->pos;
         p->predicted_pos = p->pos;
-        p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+        p->vel = (Vector3){ 0.0f, -1.0f, 0.0f };
         p->inv_mass = (fixed || !simulate) ? 0.0f : 1.0f;
     }
     table_set(v->gx, v->gy, v->gz, idx);
@@ -861,8 +882,8 @@ static void solve_voxel_shape(Voxel *voxel) {
         return;
     }
 
-    const float rest_volume = voxel->rest_volume;
-    const float rest_edge = voxel->rest_edge;
+    const float rest_volume = voxel_rest_volume_value(voxel);
+    const float rest_edge = voxel_rest_edge_value(voxel);
     Vector3 centroid = { 0.0f, 0.0f, 0.0f };
 
     for (int iter = 0; iter < VGS_ITERS; ++iter) {
@@ -1045,6 +1066,16 @@ static void solve_particle_collisions(float dt) {
                             continue;
                         }
 
+                        bool skip_collision = false;
+                        for (int axis = 0; axis < 3 && !skip_collision; ++axis) {
+                            if (face_constraint_active_between(axis, i, neighbor_idx)) {
+                                skip_collision = true;
+                            }
+                        }
+                        if (skip_collision) {
+                            continue; // keep constrained faces from being separated by collision resolution
+                        }
+
                         Voxel *voxelB = &voxels[neighbor_idx];
                         float radiusB = voxel_particle_radius(voxelB);
 
@@ -1189,9 +1220,11 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
         sum_w1 += face1_w[i];
     }
 
-    float radiusA = voxelA->particle_radius > 0.0f ? voxelA->particle_radius : PARTICLE_RADIUS;
-    float radiusB = voxelB->particle_radius > 0.0f ? voxelB->particle_radius : PARTICLE_RADIUS;
-    float active_radius = (sum_w0 > 0.0f) ? radiusA : radiusB;
+    float halfA = voxel_rest_half_edge(voxelA);
+    float halfB = voxel_rest_half_edge(voxelB);
+    float active_radius = (sum_w0 > 0.0f && sum_w1 > 0.0f)
+        ? 0.5f * (halfA + halfB)
+        : ((sum_w0 > 0.0f) ? halfA : halfB);
     float rest_len = 2.0f * active_radius;
 
     float max_strain = -FLT_MAX;
@@ -1248,16 +1281,26 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
         if (len0 > eps) u0 = v_mul(u0, active_radius / len0);
 
         // Construct two quads that meet at the centroid with the desired spacing.
+        float desired_half_gap = active_radius * FACE_CONTACT_BIAS;
+        Vector3 normal_dir = v_norm(u0);
+        if (normal_dir.x == 0.0f && normal_dir.y == 0.0f && normal_dir.z == 0.0f) {
+            normal_dir = dir;
+        }
+        Vector3 gap = v_mul(normal_dir, desired_half_gap);
+        Vector3 base0 = v_sub(centroid, gap);
+        Vector3 base1 = v_add(centroid, gap);
+        Vector3 planar_u = u1;
+        Vector3 planar_v = u2;
+
         Vector3 new_face0[4];
         Vector3 new_face1[4];
-        new_face0[0] = v_sub(v_sub(v_sub(centroid, u0), u1), u2);
-        new_face0[1] = v_sub(v_sub(v_add(centroid, u0), u1), u2);
-        new_face0[2] = v_sub(v_add(v_sub(centroid, u0), u1), u2);
-        new_face0[3] = v_sub(v_add(v_add(centroid, u0), u1), u2);
-        new_face1[0] = v_add(v_sub(v_sub(centroid, u0), u1), u2);
-        new_face1[1] = v_add(v_sub(v_add(centroid, u0), u1), u2);
-        new_face1[2] = v_add(v_add(v_sub(centroid, u0), u1), u2);
-        new_face1[3] = v_add(v_add(v_add(centroid, u0), u1), u2);
+        for (int i = 0; i < 4; ++i) {
+            int su = face_planar_signs[i][0];
+            int sv = face_planar_signs[i][1];
+            Vector3 offset = v_add(v_mul(planar_u, (float)su), v_mul(planar_v, (float)sv));
+            new_face0[i] = v_add(base0, offset);
+            new_face1[i] = v_add(base1, offset);
+        }
 
         for (int i = 0; i < 4; ++i) {
             if (face0_w[i] > 0.0f) face0_parts[i]->predicted_pos = new_face0[i];
@@ -1301,7 +1344,7 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
         if (face0_ix == 3) {
             vol = -vol;
         }
-        if (vol < 0.0f) {
+        if (vol < -FACE_VOLUME_EPS) {
             fc->active = false;
             return false;
         }
@@ -1327,16 +1370,26 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
         Vector3 dp_new2 = v_mul(u2, target2 / len_u2);
 
         // Reconstruct corrected face geometry from the orthogonal frame.
+        float desired_half_gap = active_radius * FACE_CONTACT_BIAS;
+        Vector3 normal_dir = v_norm(dp_new0);
+        if (normal_dir.x == 0.0f && normal_dir.y == 0.0f && normal_dir.z == 0.0f) {
+            normal_dir = dir;
+        }
+        Vector3 gap = v_mul(normal_dir, desired_half_gap);
+        Vector3 base0 = v_sub(centroid, gap);
+        Vector3 base1 = v_add(centroid, gap);
+        Vector3 planar_u = dp_new1;
+        Vector3 planar_v = dp_new2;
+
         Vector3 new_face0[4];
         Vector3 new_face1[4];
-        new_face0[0] = v_sub(v_sub(v_sub(centroid, dp_new0), dp_new1), dp_new2);
-        new_face0[1] = v_sub(v_sub(v_add(centroid, dp_new0), dp_new1), dp_new2);
-        new_face0[2] = v_sub(v_add(v_sub(centroid, dp_new0), dp_new1), dp_new2);
-        new_face0[3] = v_sub(v_add(v_add(centroid, dp_new0), dp_new1), dp_new2);
-        new_face1[0] = v_add(v_sub(v_sub(centroid, dp_new0), dp_new1), dp_new2);
-        new_face1[1] = v_add(v_sub(v_add(centroid, dp_new0), dp_new1), dp_new2);
-        new_face1[2] = v_add(v_add(v_sub(centroid, dp_new0), dp_new1), dp_new2);
-        new_face1[3] = v_add(v_add(v_add(centroid, dp_new0), dp_new1), dp_new2);
+        for (int i = 0; i < 4; ++i) {
+            int su = face_planar_signs[i][0];
+            int sv = face_planar_signs[i][1];
+            Vector3 offset = v_add(v_mul(planar_u, (float)su), v_mul(planar_v, (float)sv));
+            new_face0[i] = v_add(base0, offset);
+            new_face1[i] = v_add(base1, offset);
+        }
 
         // Feed the corrected positions back so the next iteration refines them further.
         for (int i = 0; i < 4; ++i) {
@@ -1355,12 +1408,12 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
 
 void simulate_voxel_pbd(float dt) {
     const int substeps = 2;
-    const int constraint_iterations = 4;
+    const int constraint_iterations = 3;
     const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
 
     for (int step = 0; step < substeps; ++step) {
         integrate_particles(sub_dt);
-        solve_particle_collisions(sub_dt);
+        
 
         for (int it = 0; it < constraint_iterations; ++it) {
             for (int i = 0; i < voxel_count; ++i) {
@@ -1381,7 +1434,7 @@ void simulate_voxel_pbd(float dt) {
                 }
             }
         }
-
+        solve_particle_collisions(sub_dt);
         update_particle_velocities(sub_dt);
     }
 }
