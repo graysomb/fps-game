@@ -910,15 +910,9 @@ static Particle *particle_lookup(int index, void *ctx) {
 }
 
 static bool skip_particle_pair(int particleA, int particleB, void *ctx) {
+    (void)particleA;
+    (void)particleB;
     (void)ctx;
-    int voxelA = particleA / 8;
-    int voxelB = particleB / 8;
-    if (voxelA == voxelB) return true;
-    for (int axis = 0; axis < 3; ++axis) {
-        if (face_constraint_active_between(axis, voxelA, voxelB)) {
-            return true;
-        }
-    }
     return false;
 }
 
