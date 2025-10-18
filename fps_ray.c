@@ -605,9 +605,9 @@ static void buildDemo(void) {
     //}
 
     // Central platform
-    int platform_size = 2;
-    int platform_height = 2; // 15 / 3
-    int platform_base_height = 0; // to keep top at same level (21)
+    int platform_size = 1;
+    int platform_height =1; // 15 / 3
+    int platform_base_height = 1; // to keep top at same level (21)
     for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
         for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
             for (int z = M/2 - platform_size/2; z <= M/2 + platform_size/2; z++) {
@@ -1183,8 +1183,8 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
         Vector3 shifted_a = v_sub(face0_pos[i], v_mul(dir, active_radius));
         float separation = v_dot(v_sub(shifted_b, shifted_a), dir);
         float strain = (separation - rest_len) / rest_len;
-        if (strain > max_strain) max_strain = strain;
-        if (strain < min_strain) min_strain = strain;
+        //if (strain > max_strain) max_strain = strain;
+        //if (strain < min_strain) min_strain = strain;
     }
 
     if (max_strain > fc->strain_max || min_strain < fc->strain_min) {
@@ -1325,8 +1325,8 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
 }
 
 void simulate_voxel_pbd(float dt) {
-    const int substeps = 3;
-    const int constraint_iterations = 5;
+    const int substeps = 2;
+    const int constraint_iterations = 2;
     const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
 
     for (int step = 0; step < substeps; ++step) {
