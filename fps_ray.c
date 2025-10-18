@@ -806,6 +806,7 @@ static void physics_step(float dt) {    // Rebuild spatial hash
     // }
 }
 
+// Predict positions for the next step (equivalent to the GPU PredictPositions kernel).
 static void integrate_particles(float dt) {
     const Vector3 gravity = { 0.0f, -GRAVITY, 0.0f };
     const float dt_sq = dt * dt;
@@ -823,6 +824,7 @@ static void integrate_particles(float dt) {
                 continue;
             }
 
+            // Damped semi-implicit Euler: carry over velocity and integrate constant gravity.
             p->vel = v_mul(p->vel, VELOCITY_DAMPING);
             Vector3 step = v_mul(p->vel, dt);
             Vector3 accel = v_mul(gravity, dt_sq);
@@ -840,6 +842,7 @@ static Vector3 vgs_project(Vector3 onto, Vector3 vec) {
     return v_mul(onto, scale);
 }
 
+// Voxel Gram-Schmidt shape matching (Algorithm 1 in the paper) keeps each cell near-rest.
 static void solve_voxel_shape(Voxel *voxel) {
     bool has_dynamic = false;
     Vector3 p[8];
@@ -869,6 +872,7 @@ static void solve_voxel_shape(Voxel *voxel) {
         }
         centroid = v_mul(centroid, 1.0f / 8.0f);
 
+        // Compute principal axes (v0..v2) and damp them toward orthogonality via Gram-Schmidt.
         Vector3 v0 = v_add(v_add(v_sub(p[1], p[0]), v_sub(p[3], p[2])),
                            v_add(v_sub(p[5], p[4]), v_sub(p[7], p[6])));
         v0 = v_mul(v0, 0.25f);
@@ -897,6 +901,7 @@ static void solve_voxel_shape(Voxel *voxel) {
         if (len1 > VGS_EPS) u1 = v_mul(u1, target1 / len1);
         if (len2 > VGS_EPS) u2 = v_mul(u2, target2 / len2);
 
+        // Volume correction mirrors the GPU "ResizeVoxelBasis" stage.
         float volume = v_dot(v_cross(u0, u1), u2);
         if (fabsf(volume) > VGS_EPS) {
             float scale = rest_volume / volume;
@@ -910,6 +915,7 @@ static void solve_voxel_shape(Voxel *voxel) {
             u2 = v_mul(u2, factor);
         }
 
+        // Rebuild the voxel corners from the orthogonal frame and push dynamic particles only.
         Vector3 new_p[8];
         new_p[0] = v_sub(v_sub(v_sub(centroid, u0), u1), u2);
         new_p[1] = v_sub(v_sub(v_add(centroid, u0), u1), u2);
@@ -952,6 +958,7 @@ static void compute_voxel_center_and_mass(const Voxel *voxel, Vector3 *center, f
     }
 }
 
+// Resolve collisions against the scene and neighbouring voxels (mirrors ResolveCollisions compute pass).
 static void solve_particle_collisions(float dt) {
     (void)dt;
 
@@ -959,7 +966,7 @@ static void solve_particle_collisions(float dt) {
     const float omega = COLLISION_RELAXATION;
     const float eps = 1e-6f;
 
-    // First, handle environmental collisions (ground, world bounds, players).
+    // First, clamp predictions against static scene bounds and player capsules.
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
         float voxel_radius = voxel_particle_radius(voxel);
@@ -1014,7 +1021,7 @@ static void solve_particle_collisions(float dt) {
         }
     }
 
-    // Particle-particle collisions using a GPU-style symmetric correction.
+    // Particle-particle collisions using a symmetric correction identical to the compute shader.
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxelA = &voxels[i];
         float radiusA = voxel_particle_radius(voxelA);
@@ -1075,6 +1082,7 @@ static void solve_particle_collisions(float dt) {
                             float h = 0.5f * penetration;
                             float scale = omega * h / w_sum;
 
+                            // Apply equal-and-opposite displacements weighted by inverse mass.
                             if (wa > 0.0f) {
                                 pa->predicted_pos = v_add(pa->predicted_pos, v_mul(normal, scale * wa));
                             }
@@ -1121,6 +1129,7 @@ static void update_particle_velocities(float dt) {
     }
 }
 
+// Partitioned face constraint solve (Algorithm 2) keeps adjacent voxels glued until strain breaks.
 static bool project_face_constraint(FaceConstraint *fc, int axis) {
     if (!fc->active) return false;
     Voxel *voxelA = &voxels[fc->voxelA];
@@ -1135,6 +1144,7 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
     int dy = voxelB->gy - voxelA->gy;
     int dz = voxelB->gz - voxelA->gz;
 
+    // Identify the opposed faces aligned with the partition axis.
     int face0_ix = -1;
     int face1_ix = -1;
     if (axis == 0) {
@@ -1163,6 +1173,7 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
     float sum_w0 = 0.0f;
     float sum_w1 = 0.0f;
 
+    // Gather the four corner particles on each face.
     for (int i = 0; i < 4; ++i) {
         int idx0 = face_corner_table[face0_ix][i];
         int idx1 = face_corner_table[face1_ix][i];
@@ -1192,6 +1203,7 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
         //if (strain < min_strain) min_strain = strain;
     }
 
+    // Break contact when strain exceeds limits, matching the GPU detachment pass.
     if (max_strain > fc->strain_max || min_strain < fc->strain_min) {
         fc->active = false;
         return false;
