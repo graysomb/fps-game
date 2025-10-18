@@ -138,6 +138,11 @@ static inline float voxel_particle_radius(const Voxel *v) {
 static FaceConstraint face_constraints[3][MAX_FACE_CONSTRAINTS_PER_AXIS];
 static int face_constraint_count[3] = { 0, 0, 0 };
 
+static bool debugDrawParticles = false;
+static bool debugColorParticlesByVelocity = false;
+static const float PARTICLE_DEBUG_MARKER_RADIUS = 0.6f;
+static const float PARTICLE_DEBUG_MAX_SPEED = 20.0f;
+
 static const int face_pairs[3][4][2] = {
     { {1,0}, {3,2}, {5,4}, {7,6} },
     { {2,0}, {3,1}, {6,4}, {7,5} },
@@ -1325,7 +1330,7 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
 }
 
 void simulate_voxel_pbd(float dt) {
-    const int substeps = 2;
+    const int substeps = 1;
     const int constraint_iterations = 2;
     const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
 
@@ -1487,6 +1492,36 @@ static void drawCubeMan(const Voxel *voxel)
     rlVertex3f(v[0].x, v[0].y, v[0].z);
     rlVertex3f(v[6].x, v[6].y, v[6].z);
     rlVertex3f(v[2].x, v[2].y, v[2].z);
+}
+
+static Color particle_velocity_color(float speed)
+{
+    float t = clampf(speed / PARTICLE_DEBUG_MAX_SPEED, 0.0f, 1.0f);
+    float hue = 240.0f - 240.0f * t; // 240=blue (slow) to 0=red (fast)
+    Color c = ColorFromHSV(hue, 0.85f, 1.0f);
+    c.a = 255;
+    return c;
+}
+
+static void draw_particle_debug(void)
+{
+    const Color baseColor = { 255, 200, 80, 255 };
+
+    for (int i = 0; i < voxel_count; ++i) {
+        const Voxel *voxel = &voxels[i];
+        if (!voxel->simulate) continue;
+        float baseRadius = voxel_particle_radius(voxel);
+        float markerRadius = fmaxf(baseRadius * PARTICLE_DEBUG_MARKER_RADIUS, 0.02f);
+        for (int j = 0; j < 8; ++j) {
+            const Particle *p = &voxel->particles[j];
+            Color markerColor = baseColor;
+            if (debugColorParticlesByVelocity && p->inv_mass > 0.0f) {
+                float speed = v_length(p->vel);
+                markerColor = particle_velocity_color(speed);
+            }
+            DrawSphere(p->pos, markerRadius, markerColor);
+        }
+    }
 }
 
 // Return the parametric distance t (along the ray) to the first voxel boundary
@@ -1865,6 +1900,10 @@ static void DrawVoxels(Camera3D cam) {
         drawCubeEdges(v);
     }
     rlEnd();
+
+    if (debugDrawParticles) {
+        draw_particle_debug();
+    }
 }
 
 static void draw_players(void) {
@@ -2094,6 +2133,19 @@ int main(void) {
             gameState = GAME_STATE_PAUSED;
         }
 
+        if (IsKeyPressed(KEY_F3)) {
+            debugDrawParticles = !debugDrawParticles;
+            if (!debugDrawParticles) {
+                debugColorParticlesByVelocity = false;
+            }
+        }
+        if (IsKeyPressed(KEY_F4)) {
+            debugColorParticlesByVelocity = !debugColorParticlesByVelocity;
+            if (debugColorParticlesByVelocity) {
+                debugDrawParticles = true;
+            }
+        }
+
         // Shield regeneration
         for (int i = 0; i < 2; i++) {
             if ((float)GetTime() - players[i].last_damage_time > SHIELD_REGEN_DELAY) {
@@ -2216,6 +2268,10 @@ int main(void) {
             DrawTextureRec(screen0.texture, screenRec, (Vector2){0,0}, WHITE);
             DrawTextureRec(screen1.texture, screenRec, (Vector2){SCREEN_WIDTH/2,0}, WHITE);
             DrawRectangle(SCREEN_WIDTH/2-2, 0, 4, SCREEN_HEIGHT, LIGHTGRAY);
+            DrawText(TextFormat("Particles (F3): %s", debugDrawParticles ? "ON" : "OFF"), 20, 20, 20, LIGHTGRAY);
+            if (debugDrawParticles) {
+                DrawText(TextFormat("Velocity Heatmap (F4): %s", debugColorParticlesByVelocity ? "ON" : "OFF"), 20, 44, 20, LIGHTGRAY);
+            }
         EndDrawing();
         break;
             case GAME_STATE_PAUSED:
