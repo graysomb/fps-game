@@ -49,6 +49,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define VGS_BETA 0.5f
 #define VGS_ITERS 3
 #define VGS_EPS 1e-6f
+#define FACE_VGS_ALPHA 0.75f
+#define FACE_VGS_ALPHA_LEN 0.0f
 #define PBD_MAX_STEP_DT 0.005f
 #define PBD_SUBSTEPS 3
 #define PBD_CONSTRAINT_ITERS 5
@@ -136,6 +138,15 @@ static const int face_pairs[3][4][2] = {
     { {1,0}, {3,2}, {5,4}, {7,6} },
     { {2,0}, {3,1}, {6,4}, {7,5} },
     { {4,0}, {5,1}, {6,2}, {7,3} }
+};
+
+static const int face_corner_table[6][4] = {
+    { 0, 2, 4, 6 }, // -X
+    { 1, 3, 5, 7 }, // +X
+    { 0, 1, 4, 5 }, // -Y
+    { 2, 3, 6, 7 }, // +Y
+    { 0, 1, 2, 3 }, // -Z
+    { 4, 5, 6, 7 }  // +Z
 };
 
 static const Vector3 axis_dirs[3] = {
@@ -256,6 +267,10 @@ static float clampf(float v, float lo, float hi) {
     if (v < lo) return lo;
     if (v > hi) return hi;
     return v;
+}
+
+static float mixf(float a, float b, float t) {
+    return a * (1.0f - t) + b * t;
 }
 static Vector3 v_add(Vector3 a, Vector3 b) {
     return (Vector3){ a.x + b.x, a.y + b.y, a.z + b.z };
@@ -1196,75 +1211,207 @@ static void update_particle_velocities(float dt) {
 
 static bool project_face_constraint(FaceConstraint *fc, int axis) {
     if (!fc->active) return false;
-    Voxel *a = &voxels[fc->voxelA];
-    Voxel *b = &voxels[fc->voxelB];
+    Voxel *voxelA = &voxels[fc->voxelA];
+    Voxel *voxelB = &voxels[fc->voxelB];
 
-    // printf("[project_face_constraint] axis=%d fcIndexA=%d fcIndexB=%d active=%d simA=%d simB=%d strain_min=%.3f strain_max=%.3f\n",
-    //        axis, fc->voxelA, fc->voxelB, fc->active, a->simulate, b->simulate,
-    //        fc->strain_min, fc->strain_max);
-
-    if ((!a->simulate && !b->simulate) || fc->voxelA == fc->voxelB) {
-        // printf("[project_face_constraint] axis=%d skipping (simulate flags: %d, %d) or same voxel (%d == %d)\n",
-        //        axis, a->simulate, b->simulate, fc->voxelA, fc->voxelB);
+    if ((!voxelA->simulate && !voxelB->simulate) || fc->voxelA == fc->voxelB) {
         return true;
     }
 
     const Vector3 dir = axis_dirs[axis];
-    const int (*pairs)[2] = face_pairs[axis];
-    float rest_len = 2.0f * PARTICLE_RADIUS;
-    float max_strain = -FLT_MAX;
-    float min_strain = FLT_MAX;
+    int dx = voxelB->gx - voxelA->gx;
+    int dy = voxelB->gy - voxelA->gy;
+    int dz = voxelB->gz - voxelA->gz;
+
+    int face0_ix = -1;
+    int face1_ix = -1;
+    if (axis == 0) {
+        if (dx > 0) { face0_ix = 1; face1_ix = 0; }
+        else if (dx < 0) { face0_ix = 0; face1_ix = 1; }
+    } else if (axis == 1) {
+        if (dy > 0) { face0_ix = 3; face1_ix = 2; }
+        else if (dy < 0) { face0_ix = 2; face1_ix = 3; }
+    } else if (axis == 2) {
+        if (dz > 0) { face0_ix = 5; face1_ix = 4; }
+        else if (dz < 0) { face0_ix = 4; face1_ix = 5; }
+    }
+
+    if (face0_ix < 0 || face1_ix < 0) {
+        face0_ix = axis * 2;
+        face1_ix = axis * 2 + 1;
+    }
+
+    Particle *face0_parts[4];
+    Particle *face1_parts[4];
+    Vector3 face0_pos[4];
+    Vector3 face1_pos[4];
+    float face0_w[4];
+    float face1_w[4];
+
+    float sum_w0 = 0.0f;
+    float sum_w1 = 0.0f;
 
     for (int i = 0; i < 4; ++i) {
-        Particle *pa = &a->particles[pairs[i][0]];
-        Particle *pb = &b->particles[pairs[i][1]];
-        Vector3 shifted_b = v_add(pb->predicted_pos, v_mul(dir, PARTICLE_RADIUS));
-        Vector3 shifted_a = v_sub(pa->predicted_pos, v_mul(dir, PARTICLE_RADIUS));
+        int idx0 = face_corner_table[face0_ix][i];
+        int idx1 = face_corner_table[face1_ix][i];
+        face0_parts[i] = &voxelA->particles[idx0];
+        face1_parts[i] = &voxelB->particles[idx1];
+        face0_pos[i] = face0_parts[i]->predicted_pos;
+        face1_pos[i] = face1_parts[i]->predicted_pos;
+        face0_w[i] = face0_parts[i]->inv_mass;
+        face1_w[i] = face1_parts[i]->inv_mass;
+        sum_w0 += face0_w[i];
+        sum_w1 += face1_w[i];
+    }
+
+    float radiusA = voxelA->particle_radius > 0.0f ? voxelA->particle_radius : PARTICLE_RADIUS;
+    float radiusB = voxelB->particle_radius > 0.0f ? voxelB->particle_radius : PARTICLE_RADIUS;
+    float active_radius = (sum_w0 > 0.0f) ? radiusA : radiusB;
+    float rest_len = 2.0f * active_radius;
+
+    float max_strain = -FLT_MAX;
+    float min_strain = FLT_MAX;
+    for (int i = 0; i < 4; ++i) {
+        Vector3 shifted_b = v_add(face1_pos[i], v_mul(dir, active_radius));
+        Vector3 shifted_a = v_sub(face0_pos[i], v_mul(dir, active_radius));
         float separation = v_dot(v_sub(shifted_b, shifted_a), dir);
         float strain = (separation - rest_len) / rest_len;
-        // printf("[project_face_constraint] axis=%d pair=%d separation=%.6f strain=%.6f\n",
-        //        axis, i, separation, strain);
         if (strain > max_strain) max_strain = strain;
         if (strain < min_strain) min_strain = strain;
     }
 
-    // printf("[project_face_constraint] axis=%d strain range min=%.6f max=%.6f (rest_len=%.6f)\n",
-    //        axis, min_strain, max_strain, rest_len);
-
     if (max_strain > fc->strain_max || min_strain < fc->strain_min) {
-        // printf("[project_face_constraint] axis=%d deactivating constraint; limits=%.6f/%.6f\n",
-        //        axis, fc->strain_min, fc->strain_max);
         fc->active = false;
         return false;
     }
 
-    for (int i = 0; i < 4; ++i) {
-        Particle *pa = &a->particles[pairs[i][0]];
-        Particle *pb = &b->particles[pairs[i][1]];
-        float w_sum = pa->inv_mass + pb->inv_mass;
-        if (w_sum == 0.0f) {
-            // printf("[project_face_constraint] axis=%d pair=%d skipping (w_sum=0)\n", axis, i);
-            continue;
+    const float eps = 1e-12f;
+
+    if (sum_w0 == 0.0f || sum_w1 == 0.0f) {
+        Vector3 centroid = { 0.0f, 0.0f, 0.0f };
+        for (int i = 0; i < 4; ++i) {
+            centroid = v_add(centroid, face0_pos[i]);
+            centroid = v_add(centroid, face1_pos[i]);
+        }
+        centroid = v_mul(centroid, 0.125f);
+
+        Vector3 u1 = { 0.0f, 0.0f, 0.0f };
+        Vector3 u2 = { 0.0f, 0.0f, 0.0f };
+        if (sum_w0 == 0.0f) {
+            u1 = v_add(v_sub(face0_pos[1], face0_pos[0]), v_sub(face0_pos[3], face0_pos[2]));
+            u2 = v_add(v_sub(face0_pos[2], face0_pos[0]), v_sub(face0_pos[3], face0_pos[1]));
+        } else {
+            u1 = v_add(v_sub(face1_pos[1], face1_pos[0]), v_sub(face1_pos[3], face1_pos[2]));
+            u2 = v_add(v_sub(face1_pos[2], face1_pos[0]), v_sub(face1_pos[3], face1_pos[1]));
         }
 
-        Vector3 shifted_b = v_add(pb->predicted_pos, v_mul(dir, PARTICLE_RADIUS));
-        Vector3 shifted_a = v_sub(pa->predicted_pos, v_mul(dir, PARTICLE_RADIUS));
-        float separation = v_dot(v_sub(shifted_b, shifted_a), dir);
-        float delta = separation - rest_len;
-        float lambda = delta / w_sum;
-        // printf("[project_face_constraint] axis=%d pair=%d lambda=%.6f delta=%.6f w_sum=%.6f\n",
-        //        axis, i, lambda, delta, w_sum);
-        Vector3 prev_pa = pa->predicted_pos;
-        Vector3 prev_pb = pb->predicted_pos;
-        pa->predicted_pos = v_add(pa->predicted_pos, v_mul(dir, lambda * pa->inv_mass));
-        pb->predicted_pos = v_sub(pb->predicted_pos, v_mul(dir, lambda * pb->inv_mass));
-        Vector3 shifted_b_after = v_add(pb->predicted_pos, v_mul(dir, PARTICLE_RADIUS));
-        Vector3 shifted_a_after = v_sub(pa->predicted_pos, v_mul(dir, PARTICLE_RADIUS));
-        float separation_after = v_dot(v_sub(shifted_b_after, shifted_a_after), dir);
-        // printf("[project_face_constraint] axis=%d pair=%d separation_after=%.6f delta_after=%.6f pa_shift=%.6f pb_shift=%.6f\n",
-        //        axis, i, separation_after, separation_after - rest_len,
-        //        v_dot(v_sub(pa->predicted_pos, prev_pa), dir),
-        //        v_dot(v_sub(prev_pb, pb->predicted_pos), dir));
+        Vector3 u0;
+        if (face0_ix == 3) {
+            u0 = v_cross(u2, u1);
+        } else {
+            u0 = v_cross(u1, u2);
+        }
+
+        float len1 = v_length(u1);
+        float len2 = v_length(u2);
+        float len0 = v_length(u0);
+        if (len1 > eps) u1 = v_mul(u1, active_radius / len1);
+        if (len2 > eps) u2 = v_mul(u2, active_radius / len2);
+        if (len0 > eps) u0 = v_mul(u0, active_radius / len0);
+
+        Vector3 new_face0[4];
+        Vector3 new_face1[4];
+        new_face0[0] = v_sub(v_sub(v_sub(centroid, u0), u1), u2);
+        new_face0[1] = v_sub(v_sub(v_add(centroid, u0), u1), u2);
+        new_face0[2] = v_sub(v_add(v_sub(centroid, u0), u1), u2);
+        new_face0[3] = v_sub(v_add(v_add(centroid, u0), u1), u2);
+        new_face1[0] = v_add(v_sub(v_sub(centroid, u0), u1), u2);
+        new_face1[1] = v_add(v_sub(v_add(centroid, u0), u1), u2);
+        new_face1[2] = v_add(v_add(v_sub(centroid, u0), u1), u2);
+        new_face1[3] = v_add(v_add(v_add(centroid, u0), u1), u2);
+
+        for (int i = 0; i < 4; ++i) {
+            if (face0_w[i] > 0.0f) face0_parts[i]->predicted_pos = new_face0[i];
+            if (face1_w[i] > 0.0f) face1_parts[i]->predicted_pos = new_face1[i];
+        }
+
+        return true;
+    }
+
+    for (int iter = 0; iter < 3; ++iter) {
+        Vector3 dp0 = { 0.0f, 0.0f, 0.0f };
+        Vector3 dp1 = { 0.0f, 0.0f, 0.0f };
+        Vector3 dp2 = { 0.0f, 0.0f, 0.0f };
+
+        for (int i = 0; i < 4; ++i) {
+            dp0 = v_add(dp0, v_sub(face1_pos[i], face0_pos[i]));
+        }
+
+        dp1 = v_add(v_add(v_sub(face0_pos[1], face0_pos[0]), v_sub(face0_pos[3], face0_pos[2])),
+                    v_add(v_sub(face1_pos[1], face1_pos[0]), v_sub(face1_pos[3], face1_pos[2])));
+
+        dp2 = v_add(v_add(v_sub(face0_pos[2], face0_pos[0]), v_sub(face0_pos[3], face0_pos[1])),
+                    v_add(v_sub(face1_pos[2], face1_pos[0]), v_sub(face1_pos[3], face1_pos[1])));
+
+        Vector3 centroid = { 0.0f, 0.0f, 0.0f };
+        for (int i = 0; i < 4; ++i) {
+            centroid = v_add(centroid, face0_pos[i]);
+            centroid = v_add(centroid, face1_pos[i]);
+        }
+        centroid = v_mul(centroid, 0.125f);
+
+        Vector3 u0 = v_sub(dp0, v_mul(v_add(vgs_project(dp1, dp0), vgs_project(dp2, dp0)), FACE_VGS_ALPHA));
+        Vector3 u1 = v_sub(dp1, v_mul(v_add(vgs_project(dp0, dp1), vgs_project(dp2, dp1)), FACE_VGS_ALPHA));
+        Vector3 u2 = v_sub(dp2, v_mul(v_add(vgs_project(dp0, dp2), vgs_project(dp1, dp2)), FACE_VGS_ALPHA));
+
+        float vol = v_dot(v_cross(u0, u1), u2);
+        if (face0_ix == 3) {
+            vol = -vol;
+        }
+        if (vol < 0.0f) {
+            fc->active = false;
+            return false;
+        }
+
+        float len_u0 = v_length(u0) + eps;
+        float len_u1 = v_length(u1) + eps;
+        float len_u2 = v_length(u2) + eps;
+
+        float len_dp0 = v_length(dp0) + eps;
+        float len_dp1 = v_length(dp1) + eps;
+        float len_dp2 = v_length(dp2) + eps;
+
+        float r_v = powf(active_radius * active_radius * active_radius /
+                          (len_dp0 * len_dp1 * len_dp2), 0.3333333f);
+
+        float target0 = mixf(active_radius, len_dp0 * r_v, FACE_VGS_ALPHA_LEN);
+        float target1 = mixf(active_radius, len_dp1 * r_v, FACE_VGS_ALPHA_LEN);
+        float target2 = mixf(active_radius, len_dp2 * r_v, FACE_VGS_ALPHA_LEN);
+
+        Vector3 dp_new0 = v_mul(u0, target0 / len_u0);
+        Vector3 dp_new1 = v_mul(u1, target1 / len_u1);
+        Vector3 dp_new2 = v_mul(u2, target2 / len_u2);
+
+        Vector3 new_face0[4];
+        Vector3 new_face1[4];
+        new_face0[0] = v_sub(v_sub(v_sub(centroid, dp_new0), dp_new1), dp_new2);
+        new_face0[1] = v_sub(v_sub(v_add(centroid, dp_new0), dp_new1), dp_new2);
+        new_face0[2] = v_sub(v_add(v_sub(centroid, dp_new0), dp_new1), dp_new2);
+        new_face0[3] = v_sub(v_add(v_add(centroid, dp_new0), dp_new1), dp_new2);
+        new_face1[0] = v_add(v_sub(v_sub(centroid, dp_new0), dp_new1), dp_new2);
+        new_face1[1] = v_add(v_sub(v_add(centroid, dp_new0), dp_new1), dp_new2);
+        new_face1[2] = v_add(v_add(v_sub(centroid, dp_new0), dp_new1), dp_new2);
+        new_face1[3] = v_add(v_add(v_add(centroid, dp_new0), dp_new1), dp_new2);
+
+        for (int i = 0; i < 4; ++i) {
+            if (face0_w[i] > 0.0f) face0_pos[i] = new_face0[i];
+            if (face1_w[i] > 0.0f) face1_pos[i] = new_face1[i];
+        }
+    }
+
+    for (int i = 0; i < 4; ++i) {
+        if (face0_w[i] > 0.0f) face0_parts[i]->predicted_pos = face0_pos[i];
+        if (face1_w[i] > 0.0f) face1_parts[i]->predicted_pos = face1_pos[i];
     }
 
     return true;
@@ -1276,7 +1423,7 @@ void simulate_voxel_pbd(float dt) {
     const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
 
     for (int step = 0; step < substeps; ++step) {
-        integrate_particles(sub_dt);
+        //integrate_particles(sub_dt);
         solve_particle_collisions(sub_dt);
 
         for (int it = 0; it < constraint_iterations; ++it) {
