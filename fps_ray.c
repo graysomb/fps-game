@@ -63,8 +63,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define COLLISION_RELAXATION 0.9f
 #define CENTER_RELAXATION 0.9f
 #define VELOCITY_DAMPING 0.99f
-#define FACE_TENSILE_LIMIT .35f
-#define FACE_COMPRESS_LIMIT -.35f
+#define FACE_TENSILE_LIMIT 3.5f
+#define FACE_COMPRESS_LIMIT -3.5f
 #define MAX_FACE_CONSTRAINTS_PER_AXIS (MAX_VOXELS * 2)
 #define FACE_CONTACT_BIAS 1e-4f
 #define FACE_VOLUME_EPS 1e-8f
@@ -154,6 +154,8 @@ static const float PARTICLE_DEBUG_MARKER_RADIUS = 0.6f;
 static const float PARTICLE_DEBUG_MAX_SPEED = 20.0f;
 static bool debugPbdLogging = true;
 static bool debugLogStages = false;
+static bool debugLogFaceConstraints = false;
+static bool faceConstraintsAllowFracture = false;
 static Vector3 debugPrevParticlePos[16];
 static bool debugPrevValid = false;
 
@@ -185,6 +187,41 @@ static const int corner_signs[8][3] = {
     { -1,  1,  1 }, {  1,  1,  1 }
 };
 
+static void face_indices_for_axis(int axis, int dx, int dy, int dz, int *out_face0, int *out_face1) {
+    int face0_ix = axis * 2;
+    int face1_ix = axis * 2 + 1;
+
+    if (axis == 0) {
+        if (dx > 0) { face0_ix = 1; face1_ix = 0; }
+        else if (dx < 0) { face0_ix = 0; face1_ix = 1; }
+    } else if (axis == 1) {
+        if (dy > 0) { face0_ix = 3; face1_ix = 2; }
+        else if (dy < 0) { face0_ix = 2; face1_ix = 3; }
+    } else if (axis == 2) {
+        if (dz > 0) { face0_ix = 5; face1_ix = 4; }
+        else if (dz < 0) { face0_ix = 4; face1_ix = 5; }
+    }
+
+    if (out_face0) *out_face0 = face0_ix;
+    if (out_face1) *out_face1 = face1_ix;
+}
+
+static float compute_face_rest_distance(int axis, int voxelA_idx, int voxelB_idx) {
+    (void)axis;
+    if (voxelA_idx < 0 || voxelA_idx >= voxel_count || voxelB_idx < 0 || voxelB_idx >= voxel_count) {
+        return VOXEL_SIZE;
+    }
+
+    Voxel *va = &voxels[voxelA_idx];
+    Voxel *vb = &voxels[voxelB_idx];
+    Vector3 center_delta = pbd_v3_sub(vb->pos, va->pos);
+    float rest = pbd_v3_length(center_delta);
+    if (rest <= 0.0f) {
+        rest = voxel_rest_edge_value(va);
+    }
+    return rest;
+}
+
 static int table_get(int x, int y, int z);
 
 static void face_constraints_reset(void) {
@@ -197,6 +234,7 @@ static void face_constraints_reset(void) {
             face_constraints[axis][i].faceIndex = -1;
             face_constraints[axis][i].strain_min = FACE_COMPRESS_LIMIT;
             face_constraints[axis][i].strain_max = FACE_TENSILE_LIMIT;
+            face_constraints[axis][i].rest_distance = 0.0f;
         }
     }
 }
@@ -215,6 +253,7 @@ static void add_face_constraint_internal(int axis, int a, int b) {
             fc->active = 1;
             fc->strain_min = FACE_COMPRESS_LIMIT;
             fc->strain_max = FACE_TENSILE_LIMIT;
+            fc->rest_distance = compute_face_rest_distance(axis, a, b);
             return;
         }
     }
@@ -226,6 +265,7 @@ static void add_face_constraint_internal(int axis, int a, int b) {
         fc->faceIndex = axis;
         fc->strain_min = FACE_COMPRESS_LIMIT;
         fc->strain_max = FACE_TENSILE_LIMIT;
+        fc->rest_distance = compute_face_rest_distance(axis, a, b);
         fc->active = 1;
     }
 }
@@ -543,7 +583,7 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     int idx = voxel_count++;
     Voxel *v = &voxels[idx];
     v->pos = (Vector3){ px, py, pz };
-    v->vel = (Vector3){ 0,-1.0,0 };
+    v->vel = (Vector3){ 0,0.0,0 };
     v->fixed = fixed;
     v->simulate = simulate;
     v->color = color;
@@ -567,7 +607,7 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
         };
         p->prev_pos = p->pos;
         p->predicted_pos = p->pos;
-        p->vel = (Vector3){ 0.0f, -1.0f, 0.0f };
+        p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
         p->inv_mass = (fixed || !simulate) ? 0.0f : 1.0f;
         p->radius = v->particle_radius;
         p->friction = 0.0f;
@@ -617,8 +657,8 @@ static void buildDemo(void) {
     //}
 
     // Central platform
-    int platform_size = 1;
-    int platform_height =1; // 15 / 3
+    int platform_size = 2;
+    int platform_height =2; // 15 / 3
     int platform_base_height = 1; // to keep top at same level (21)
     for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
         for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
@@ -982,9 +1022,17 @@ static Particle *particle_lookup(int index, void *ctx) {
 }
 
 static bool skip_particle_pair(int particleA, int particleB, void *ctx) {
-    (void)particleA;
-    (void)particleB;
     (void)ctx;
+
+    int voxelA = particleA / 8;
+    int voxelB = particleB / 8;
+    if (voxelA == voxelB) {
+        return true;
+    }
+    if (voxelA < 0 || voxelA >= voxel_count || voxelB < 0 || voxelB >= voxel_count) {
+        return true;
+    }
+
     return false;
 }
 
@@ -1133,6 +1181,8 @@ static void update_particle_velocities(float dt) {
 static bool project_face_constraint(FaceConstraint *fc, int axis) {
     if (!fc->active) return false;
 
+    const bool logConstraint = debugPbdLogging && debugLogFaceConstraints;
+
     Voxel *voxelA = &voxels[fc->voxelA];
     Voxel *voxelB = &voxels[fc->voxelB];
     if ((!voxelA->simulate && !voxelB->simulate) || fc->voxelA == fc->voxelB) {
@@ -1145,21 +1195,7 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
 
     int face0_ix = -1;
     int face1_ix = -1;
-    if (axis == 0) {
-        if (dx > 0) { face0_ix = 1; face1_ix = 0; }
-        else if (dx < 0) { face0_ix = 0; face1_ix = 1; }
-    } else if (axis == 1) {
-        if (dy > 0) { face0_ix = 3; face1_ix = 2; }
-        else if (dy < 0) { face0_ix = 2; face1_ix = 3; }
-    } else if (axis == 2) {
-        if (dz > 0) { face0_ix = 5; face1_ix = 4; }
-        else if (dz < 0) { face0_ix = 4; face1_ix = 5; }
-    }
-
-    if (face0_ix < 0 || face1_ix < 0) {
-        face0_ix = axis * 2;
-        face1_ix = axis * 2 + 1;
-    }
+    face_indices_for_axis(axis, dx, dy, dz, &face0_ix, &face1_ix);
 
     Particle *face0_parts[4];
     Particle *face1_parts[4];
@@ -1167,6 +1203,8 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
     Vector3 face1_positions[4];
     float face0_inv_mass[4];
     float face1_inv_mass[4];
+    Vector3 face0_before[4];
+    Vector3 face1_before[4];
 
     for (int i = 0; i < 4; ++i) {
         int idx0 = face_corner_table[face0_ix][i];
@@ -1177,11 +1215,15 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
         face1_positions[i] = face1_parts[i]->predicted_pos;
         face0_inv_mass[i] = face0_parts[i]->inv_mass;
         face1_inv_mass[i] = face1_parts[i]->inv_mass;
+        face0_before[i] = face0_positions[i];
+        face1_before[i] = face1_positions[i];
     }
 
-    float radiusA = PARTICLE_RADIUS;
-    float radiusB = PARTICLE_RADIUS;
-    float active_radius = (radiusA + radiusB) * 0.5f;
+    float rest_distance = fc->rest_distance;
+    if (rest_distance <= 0.0f) {
+        rest_distance = VOXEL_SIZE;
+    }
+    float active_radius = 0.5f * rest_distance;
 
     PbdFaceConstraintParams params = {
         .face0_positions = face0_positions,
@@ -1194,7 +1236,7 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
         .face_index = face0_ix,
         .alpha = FACE_VGS_ALPHA,
         .alpha_len = FACE_VGS_ALPHA_LEN,
-        .enable_fracture = true,
+        .enable_fracture = faceConstraintsAllowFracture,
         .seed = (uint32_t)(fc->voxelA * 73856093u ^ fc->voxelB * 19349663u ^ axis * 83492791u)
     };
 
@@ -1203,7 +1245,26 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
 
     if (broken) {
         fc->active = false;
+        if (logConstraint) {
+            printf("[PBD][face] break axis=%d voxA=%d voxB=%d\n",
+                   axis, fc->voxelA, fc->voxelB);
+        }
         return false;
+    }
+
+    if (logConstraint && applied) {
+        float beforeDist = v_length(v_sub(face1_before[0], face0_before[0]));
+        float afterDist = v_length(v_sub(face1_positions[0], face0_positions[0]));
+        printf("[PBD][face] axis=%d voxA=%d voxB=%d face0=%d face1=%d dist %.4f->%.4f\n",
+               axis, fc->voxelA, fc->voxelB, face0_ix, face1_ix, beforeDist, afterDist);
+        for (int i = 0; i < 4; ++i) {
+            Vector3 delta0 = v_sub(face0_positions[i], face0_before[i]);
+            Vector3 delta1 = v_sub(face1_positions[i], face1_before[i]);
+            printf("    corner %d d0=(%.4f, %.4f, %.4f) d1=(%.4f, %.4f, %.4f)\n",
+                   i,
+                   delta0.x, delta0.y, delta0.z,
+                   delta1.x, delta1.y, delta1.z);
+        }
     }
 
     for (int i = 0; i < 4; ++i) {
@@ -1219,8 +1280,8 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
 }
 
 void simulate_voxel_pbd(float dt) {
-    const int substeps = 3;
-    const int constraint_iterations = 6;
+    const int substeps = 6;
+    const int constraint_iterations = 12;
     const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
 
     for (int step = 0; step < substeps; ++step) {

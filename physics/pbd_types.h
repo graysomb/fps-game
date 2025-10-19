@@ -26,6 +26,7 @@ typedef struct {
     int faceIndex; // axis-aligned face id (0..5)
     float strain_min;
     float strain_max;
+    float rest_distance;
     int active;
 } PbdFaceConstraint;
 
