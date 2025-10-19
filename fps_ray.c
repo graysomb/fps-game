@@ -152,6 +152,10 @@ static bool debugDrawParticles = false;
 static bool debugColorParticlesByVelocity = false;
 static const float PARTICLE_DEBUG_MARKER_RADIUS = 0.6f;
 static const float PARTICLE_DEBUG_MAX_SPEED = 20.0f;
+static bool debugPbdLogging = true;
+static bool debugLogStages = false;
+static Vector3 debugPrevParticlePos[16];
+static bool debugPrevValid = false;
 
 static const int face_pairs[3][4][2] = {
     { {1,0}, {3,2}, {5,4}, {7,6} },
@@ -859,7 +863,7 @@ static void solve_voxel_shape(Voxel *voxel) {
     PbdVoxelShapeParams params = {
         .positions = positions,
         .inv_mass = inv_mass,
-        .radius = voxel_particle_radius(voxel),
+        .radius = PARTICLE_RADIUS,
         .alpha = FACE_VGS_ALPHA,
         .alpha_len = FACE_VGS_ALPHA_LEN,
         .iterations = VGS_ITERS,
@@ -901,6 +905,74 @@ static inline int total_particle_count(void) {
     return voxel_count * 8;
 }
 
+static void debug_capture_state(void) {
+    if (!debugPbdLogging) return;
+    if (voxel_count < 2) return;
+    for (int v = 0; v < 2; ++v) {
+        Voxel *vox = &voxels[v];
+        for (int i = 0; i < 8; ++i) {
+            debugPrevParticlePos[v * 8 + i] = vox->particles[i].predicted_pos;
+        }
+    }
+    debugPrevValid = true;
+}
+
+static void debug_log_stage(const char *tag) {
+    if (!debugPbdLogging) return;
+    if (!debugLogStages) return;
+    if (voxel_count < 2) return;
+
+    Voxel *a = &voxels[0];
+    Voxel *b = &voxels[1];
+
+    Vector3 centerA = {0};
+    Vector3 centerB = {0};
+    for (int i = 0; i < 8; ++i) {
+        centerA = v_add(centerA, a->particles[i].predicted_pos);
+        centerB = v_add(centerB, b->particles[i].predicted_pos);
+    }
+    centerA = v_mul(centerA, 1.0f / 8.0f);
+    centerB = v_mul(centerB, 1.0f / 8.0f);
+    Vector3 centerDelta = v_sub(centerA, centerB);
+    float centerDist = v_length(centerDelta);
+
+    printf("[PBD] %s centerDist=%.6f\n", tag, centerDist);
+
+    if (debugPrevValid) {
+        printf("        particle deltas:\n");
+        for (int v = 0; v < 2; ++v) {
+            Voxel *vox = &voxels[v];
+            for (int i = 0; i < 8; ++i) {
+                int idx = v * 8 + i;
+                Vector3 curr = vox->particles[i].predicted_pos;
+                Vector3 prev = debugPrevParticlePos[idx];
+                Vector3 diff = v_sub(curr, prev);
+                float len = v_length(diff);
+                printf("          voxel%d[%d] d=(%.6f, %.6f, %.6f) |d|=%.6f\n",
+                       v, i, diff.x, diff.y, diff.z, len);
+            }
+        }
+    } else {
+        printf("        (no previous state captured)\n");
+    }
+
+    debugPrevValid = false;
+}
+
+static void debug_log_velocities(const char *tag) {
+    if (!debugPbdLogging) return;
+    if (!debugLogStages) return;
+    if (voxel_count < 2) return;
+    printf("[PBD] %s velocities:\n", tag);
+    for (int v = 0; v < 2; ++v) {
+        Voxel *vox = &voxels[v];
+        for (int i = 0; i < 8; ++i) {
+            Vector3 vel = vox->particles[i].vel;
+            printf("          voxel%d[%d] vel=(%.6f, %.6f, %.6f)\n", v, i, vel.x, vel.y, vel.z);
+        }
+    }
+}
+
 static Particle *particle_lookup(int index, void *ctx) {
     (void)ctx;
     int vox = index / 8;
@@ -925,7 +997,7 @@ static void apply_environment_collisions(float dt) {
 
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
-        float voxel_radius = voxel_particle_radius(voxel);
+        float voxel_radius = PARTICLE_RADIUS;
         float terrain_limit = FLOOR_SIZE - voxel_radius;
 
         for (int j = 0; j < 8; ++j) {
@@ -1011,13 +1083,17 @@ static void solve_particle_collisions(float dt) {
         return;
     }
 
+    if (debugPbdLogging) {
+        printf("[PBD] collide grid cells=%d\n", gPbdSystem.numCells);
+    }
+
     pbd_project_collisions_with_grid(&gPbdGrid,
                                      &gPbdSystem,
                                      total_particle_count(),
                                      particle_lookup,
                                      NULL,
                                      skip_particle_pair,
-                                     NULL);
+                                     &debugPbdLogging);
 }
 
 static void update_particle_velocities(float dt) {
@@ -1103,8 +1179,8 @@ static bool project_face_constraint(FaceConstraint *fc, int axis) {
         face1_inv_mass[i] = face1_parts[i]->inv_mass;
     }
 
-    float radiusA = voxel_particle_radius(voxelA);
-    float radiusB = voxel_particle_radius(voxelB);
+    float radiusA = PARTICLE_RADIUS;
+    float radiusB = PARTICLE_RADIUS;
     float active_radius = (radiusA + radiusB) * 0.5f;
 
     PbdFaceConstraintParams params = {
@@ -1148,17 +1224,24 @@ void simulate_voxel_pbd(float dt) {
     const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
 
     for (int step = 0; step < substeps; ++step) {
+        debug_capture_state();
         integrate_particles(sub_dt);
+        debug_log_stage("after integrate");
         
 
         for (int it = 0; it < constraint_iterations; ++it) {
+            debug_capture_state();
             for (int i = 0; i < voxel_count; ++i) {
                 Voxel *voxel = &voxels[i];
                 if (!voxel->simulate)
                     continue;
-                //solve_voxel_shape(voxel);
+                solve_voxel_shape(voxel);
             }
+            char stageShape[64];
+            snprintf(stageShape, sizeof(stageShape), "after shape iter %d", it);
+            debug_log_stage(stageShape);
             for (int axis = 0; axis < 3; ++axis) {
+                debug_capture_state();
                 for (int ci = 0; ci < face_constraint_count[axis]; ++ci) {
                     FaceConstraint *fc = &face_constraints[axis][ci];
                     if (!fc->active) continue;
@@ -1168,10 +1251,16 @@ void simulate_voxel_pbd(float dt) {
                     // printf("[simulate_voxel_pbd] step=%d iteration=%d axis=%d constraintIndex=%d result=%d\n",
                     //        step, it, axis, ci, applied);
                 }
+                char stageFace[64];
+                snprintf(stageFace, sizeof(stageFace), "after face axis %d iter %d", axis, it);
+                debug_log_stage(stageFace);
             }
         }
+        debug_capture_state();
         solve_particle_collisions(sub_dt);
+        debug_log_stage("after collisions");
         update_particle_velocities(sub_dt);
+        debug_log_velocities("after velocity update");
     }
 }
 
@@ -1323,7 +1412,7 @@ static void draw_particle_debug(void)
     for (int i = 0; i < voxel_count; ++i) {
         const Voxel *voxel = &voxels[i];
         if (!voxel->simulate) continue;
-        float baseRadius = voxel_particle_radius(voxel);
+        float baseRadius = PARTICLE_RADIUS;
         float markerRadius = fmaxf(baseRadius * PARTICLE_DEBUG_MARKER_RADIUS, 0.02f);
         for (int j = 0; j < 8; ++j) {
             const Particle *p = &voxel->particles[j];

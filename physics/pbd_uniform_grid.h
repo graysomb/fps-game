@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <math.h>
+#include <stdio.h>
 #include "pbd_types.h"
 #include "pbd_math.h"
 #include "pbd_collisions.h"
@@ -206,6 +207,8 @@ static inline void pbd_project_collisions_with_grid(const PbdUniformGridCPU *gri
         cy_max = cy_max < 0 ? 0 : (cy_max >= ry ? ry - 1 : cy_max);
         cz_max = cz_max < 0 ? 0 : (cz_max >= rz ? rz - 1 : cz_max);
 
+        Vector3 dx_total = { 0.0f, 0.0f, 0.0f };
+
         for (int cx = cx_min; cx <= cx_max; ++cx) {
             for (int cy = cy_min; cy <= cy_max; ++cy) {
                 for (int cz = cz_min; cz <= cz_max; ++cz) {
@@ -214,13 +217,12 @@ static inline void pbd_project_collisions_with_grid(const PbdUniformGridCPU *gri
                     int count = grid->counts[cell];
                     for (int t = 0; t < count; ++t) {
                         int jx = grid->content[start + t];
-                        if (jx <= ix) continue; // process each pair once
+                        if (jx <= ix) continue;
                         if (skipFn && skipFn(ix, jx, skipCtx)) continue;
 
                         PbdParticle *pj = lookup(jx, lookupCtx);
                         if (!pj) continue;
                         float wj = pj->inv_mass;
-                        if (wj == 0.0f && wi == 0.0f) continue;
 
                         float rj = pj->radius;
                         Vector3 nij = pbd_v3_sub(pi->predicted_pos, pj->predicted_pos);
@@ -236,19 +238,19 @@ static inline void pbd_project_collisions_with_grid(const PbdUniformGridCPU *gri
                         if (denom <= 0.0f) continue;
 
                         float h = 0.5f * pen;
-                        float scale = system->omega_collision * h / denom;
-
-                        if (wi > 0.0f) {
-                            Vector3 dx_i = pbd_v3_scale(uij, scale * wi);
-                            pi->predicted_pos = pbd_v3_add(pi->predicted_pos, dx_i);
+                        Vector3 contrib = pbd_v3_scale(uij, wi * system->omega_collision * h / denom);
+                        if (skipCtx && *((const bool*)skipCtx)) {
+                            printf("    [pair] ix=%d jx=%d pen=%.6f wi=%.6f wj=%.6f contrib=(%.6f, %.6f, %.6f)\n",
+                                   ix, jx, pen, wi, wj, contrib.x, contrib.y, contrib.z);
                         }
-                        if (wj > 0.0f) {
-                            Vector3 dx_j = pbd_v3_scale(uij, scale * wj);
-                            pj->predicted_pos = pbd_v3_sub(pj->predicted_pos, dx_j);
-                        }
+                        dx_total = pbd_v3_add(dx_total, contrib);
                     }
                 }
             }
+        }
+
+        if (wi > 0.0f) {
+            pi->predicted_pos = pbd_v3_add(pi->predicted_pos, dx_total);
         }
     }
 }
