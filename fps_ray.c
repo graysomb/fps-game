@@ -45,14 +45,14 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define FLOOR_SIZE     20.0f    // half-size of floor in world units
 #define PLAYER_SIZE 0.5f
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
-#define VGS_ALPHA 0.5f
-#define VGS_BETA 0.5f
+#define VGS_ALPHA 0.001f // 0 means no shear correction 1 means complete shear correction
+#define VGS_BETA 0.001f // 0 means no tension correction 1 means total tension correction
 #define VGS_ITERS 3
 #define VGS_EPS 1e-6f
 #define PBD_MAX_STEP_DT 0.005f
 #define PBD_SUBSTEPS 3
 #define PBD_CONSTRAINT_ITERS 5
-#define COLLISION_RELAXATION 0.9f
+#define COLLISION_RELAXATION 0.5f
 #define CENTER_RELAXATION 0.9f
 #define VELOCITY_DAMPING 0.99f
 
@@ -505,7 +505,7 @@ static void get_adjacent_voxel_directions(Vector3 pos, bool neighbors[6]) {
 }
 
 // Add a voxel (static or dynamic)
-static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Color color, int type) {
+static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Color color, int type, float invm) {
     if (voxel_count >= MAX_VOXELS) return -1;
     int idx = voxel_count++;
     Voxel *v = &voxels[idx];
@@ -533,7 +533,7 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
             py + corner_signs[i][1] * half,
             pz + corner_signs[i][2] * half
         };
-        float inv_mass = (fixed || !simulate) ? 0.0f : 1.0f;
+        float inv_mass = (fixed || !simulate) ? 0.0f : invm;
         Particle *p = particle_create(pos, inv_mass);
         if (!p) {
             for (int j = 0; j < i; ++j) {
@@ -695,20 +695,27 @@ static void buildDemo(void) {
     //}
 
     // Central platform
-    int platform_size = 2;
-    int platform_height =2; // 15 / 3
-    int platform_base_height = 1; // to keep top at same level (21)
-    for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
-        for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
-            for (int z = M/2 - platform_size/2; z <= M/2 + platform_size/2; z++) {
-                float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                float py = (y + 0.5f) * VOXEL_SIZE;
-                float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                addVoxel(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0);
-            }
-        }
-    }
-
+    // int platform_size = 1;
+    // int platform_height =1; // 15 / 3
+    // int platform_base_height = 1; // to keep top at same level (21)
+    // for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
+    //     for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
+    //         for (int z = M/2 - platform_size/2; z <= M/2 + platform_size/2; z++) {
+    //             float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    //             float py = (y + 0.5f) * VOXEL_SIZE;
+    //             float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    //             addVoxel(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0, 1.0f);
+    //         }
+    //     }
+    // }
+    float px1 = (M/2 + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    float py1 = (0.5f + 0.5f) * VOXEL_SIZE;
+    float pz1 = (M/2 + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    addVoxel(px1, py1, pz1, false, true, (Color){ 100, 200, 100, 255 }, 0, 0.0f);
+    float px2 = (M/2 + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    float py2 = (1.5f + 0.5f) * VOXEL_SIZE;
+    float pz2 = (M/2 + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    addVoxel(px2, py2, pz2, false, true, (Color){ 100, 200, 100, 255 }, 0, 1.0f);
     glue_neighbor_faces();
 }
 
@@ -1080,8 +1087,8 @@ static void solve_particle_collisions(float dt) {
                 pos.y = voxel_radius;
             }
 
-            pos.x = clampf(pos.x, -terrain_limit, terrain_limit);
-            pos.z = clampf(pos.z, -terrain_limit, terrain_limit);
+            // pos.x = clampf(pos.x, -terrain_limit, terrain_limit);
+            // pos.z = clampf(pos.z, -terrain_limit, terrain_limit);
 
             // Interactions with player bounding boxes (kept for gameplay parity).
             for (int player_idx = 0; player_idx < 2; ++player_idx) {
@@ -1233,8 +1240,8 @@ static void update_particle_velocities(float dt) {
 }
 
 void simulate_voxel_pbd(float dt) {
-    const int substeps = 5;
-    const int constraint_iterations = 3;
+    const int substeps = 3;
+    const int constraint_iterations = 1;
     const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
 
     for (int step = 0; step < substeps; ++step) {
@@ -1291,7 +1298,7 @@ static void FireVoxel(int idx) {
     Vector3 dir = { sinf(-yawRad)*cosf(pitchRad), sinf(pitchRad), -cosf(yawRad)*cosf(pitchRad) };
     Vector3 start = v_add(p->pos, v_mul(dir, 0.8f));
     Color col = (p->vType==0? RED : BLUE);
-    int vix = addVoxel(start.x, start.y, start.z, false, true, col, p->vType);
+    int vix = addVoxel(start.x, start.y, start.z, false, true, col, p->vType,1.0f);
     if (vix >= 0) {
         Voxel *shot = &voxels[vix];
         Vector3 vel = v_mul(dir, 50.0f);
@@ -1967,7 +1974,7 @@ static void HandleGamepadInput(int i, float dt);
 int main(void) {
     // init window and render textures
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Split-Screen FPS (raylib)");
-    SetTargetFPS(120);
+    SetTargetFPS(60);
     // seed RNG
     srand((unsigned)time(NULL));
     // reset game state
