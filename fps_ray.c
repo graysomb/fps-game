@@ -66,6 +66,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define MAX_VOXELS    131072
 #define HASH_SIZE     131072    // must be power of two
 #define VOXEL_SIZE     0.5f    // size of each voxel cube
+#define MAX_PARTICLES (MAX_VOXELS * 8)
 
 // Tunable voxel edit brush (per-axis span of the add/remove operation)
 static int voxelBrushSpan = 4;
@@ -95,6 +96,9 @@ typedef struct {
     Vector3 predicted_pos;
     Vector3 vel;
     float inv_mass;
+    int   refcount;
+    bool  active;
+    int   active_index;
 } Particle;
 
 // Voxel structure
@@ -110,13 +114,71 @@ typedef struct {
        0=+X,1=-X,2=+Y,3=-Y,4=+Z,5=-Z */
     bool surface[6];
     int  gx, gy, gz;
-    Particle particles[8];
+    Particle *particles[8];
     float rest_volume;
     float rest_edge;
     float particle_radius;
 } Voxel;
 static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
+
+static Particle particles_pool[MAX_PARTICLES];
+static Particle *active_particles[MAX_PARTICLES];
+static int particle_pool_count = 0;
+static int active_particle_count = 0;
+
+static void reset_particle_pool(void) {
+    particle_pool_count = 0;
+    active_particle_count = 0;
+    memset(particles_pool, 0, sizeof(particles_pool));
+    memset(active_particles, 0, sizeof(active_particles));
+}
+
+static Particle *particle_create(Vector3 pos, float inv_mass) {
+    if (particle_pool_count >= MAX_PARTICLES) {
+        return NULL;
+    }
+
+    Particle *p = &particles_pool[particle_pool_count++];
+    p->pos = pos;
+    p->prev_pos = pos;
+    p->predicted_pos = pos;
+    p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+    p->inv_mass = inv_mass;
+    p->refcount = 1;
+    p->active = true;
+    p->active_index = active_particle_count;
+    active_particles[active_particle_count++] = p;
+    return p;
+}
+
+static void particle_retain(Particle *p) {
+    if (!p) {
+        return;
+    }
+    p->refcount++;
+}
+
+static void particle_release(Particle *p) {
+    if (!p || p->refcount <= 0) {
+        return;
+    }
+
+    p->refcount--;
+    if (p->refcount == 0 && p->active) {
+        int idx = p->active_index;
+        int last = --active_particle_count;
+        if (last >= 0) {
+            if (idx != last) {
+                active_particles[idx] = active_particles[last];
+                active_particles[idx]->active_index = idx;
+            }
+            active_particles[last] = NULL;
+        }
+        p->active = false;
+        p->active_index = -1;
+    }
+}
 
 static inline float voxel_particle_radius(const Voxel *v) {
     return (v->particle_radius > 0.0f) ? v->particle_radius : PARTICLE_RADIUS;
@@ -132,6 +194,15 @@ static const int corner_signs[8][3] = {
     { -1,  1, -1 }, {  1,  1, -1 },
     { -1, -1,  1 }, {  1, -1,  1 },
     { -1,  1,  1 }, {  1,  1,  1 }
+};
+
+static const int face_corner_indices[6][4] = {
+    { 1, 3, 5, 7 }, // +X
+    { 0, 2, 4, 6 }, // -X
+    { 2, 3, 6, 7 }, // +Y
+    { 0, 1, 4, 5 }, // -Y
+    { 4, 5, 6, 7 }, // +Z
+    { 0, 1, 2, 3 }  // -Z
 };
 
 static int table_get(int x, int y, int z);
@@ -424,19 +495,69 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     v->particle_radius = PARTICLE_RADIUS;
     const float half = VOXEL_SIZE * 0.5f;
     for (int i = 0; i < 8; ++i) {
-        Particle *p = &v->particles[i];
-        p->pos = (Vector3){
+        Vector3 pos = {
             px + corner_signs[i][0] * half,
             py + corner_signs[i][1] * half,
             pz + corner_signs[i][2] * half
         };
-        p->prev_pos = p->pos;
-        p->predicted_pos = p->pos;
-        p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
-        p->inv_mass = (fixed || !simulate) ? 0.0f : 1.0f;
+        float inv_mass = (fixed || !simulate) ? 0.0f : 1.0f;
+        Particle *p = particle_create(pos, inv_mass);
+        if (!p) {
+            for (int j = 0; j < i; ++j) {
+                particle_release(v->particles[j]);
+                v->particles[j] = NULL;
+            }
+            voxel_count--;
+            return -1;
+        }
+        v->particles[i] = p;
     }
     table_set(v->gx, v->gy, v->gz, idx);
     return idx;
+}
+
+static void glue_neighbor_faces(void) {
+    static const int axis_offsets[3][3] = {
+        { 1, 0, 0 },
+        { 0, 1, 0 },
+        { 0, 0, 1 }
+    };
+    static const int positive_face[3] = { 0, 2, 4 };
+    static const int negative_face[3] = { 1, 3, 5 };
+
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *a = &voxels[i];
+        for (int axis = 0; axis < 3; ++axis) {
+            int nx = a->gx + axis_offsets[axis][0];
+            int ny = a->gy + axis_offsets[axis][1];
+            int nz = a->gz + axis_offsets[axis][2];
+
+            int neighbor_idx = table_get(nx, ny, nz);
+            if (neighbor_idx < 0) {
+                continue;
+            }
+
+            Voxel *b = &voxels[neighbor_idx];
+            int faceA = positive_face[axis];
+            int faceB = negative_face[axis];
+
+            for (int c = 0; c < 4; ++c) {
+                int ia = face_corner_indices[faceA][c];
+                int ib = face_corner_indices[faceB][c];
+
+                Particle *shared = a->particles[ia];
+                Particle *old = b->particles[ib];
+
+                if (shared == old) {
+                    continue;
+                }
+
+                particle_release(old);
+                particle_retain(shared);
+                b->particles[ib] = shared;
+            }
+        }
+    }
 }
 
 // Build static demo cube of voxels
@@ -491,6 +612,8 @@ static void buildDemo(void) {
             }
         }
     }
+
+    glue_neighbor_faces();
 }
 
 
@@ -520,6 +643,7 @@ static void ResetGame(void) {
     }
     // clear voxels
     voxel_count = 0;
+    reset_particle_pool();
     // clear hash
     memset(table, 0, sizeof(table));
     // build static blocks
@@ -678,25 +802,21 @@ static void integrate_particles(float dt) {
     const Vector3 gravity = { 0.0f, -GRAVITY*0.0f, 0.0f };
     const float dt_sq = dt * dt;
 
-    for (int i = 0; i < voxel_count; ++i) {
-        Voxel *voxel = &voxels[i];
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
 
-        for (int j = 0; j < 8; ++j) {
-            Particle *p = &voxel->particles[j];
+        p->prev_pos = p->pos;
+        p->predicted_pos = p->pos;
 
-            p->prev_pos = p->pos;
-            p->predicted_pos = p->pos;
-
-            if (p->inv_mass == 0.0f) {
-                continue;
-            }
-
-            // Damped semi-implicit Euler: carry over velocity and integrate constant gravity.
-            p->vel = v_mul(p->vel, VELOCITY_DAMPING);
-            Vector3 step = v_mul(p->vel, dt);
-            Vector3 accel = v_mul(gravity, dt_sq);
-            p->predicted_pos = v_add(p->predicted_pos, v_add(step, accel));
+        if (p->inv_mass == 0.0f) {
+            continue;
         }
+
+        // Damped semi-implicit Euler: carry over velocity and integrate constant gravity.
+        p->vel = v_mul(p->vel, VELOCITY_DAMPING);
+        Vector3 step = v_mul(p->vel, dt);
+        Vector3 accel = v_mul(gravity, dt_sq);
+        p->predicted_pos = v_add(p->predicted_pos, v_add(step, accel));
     }
 }
 
@@ -716,7 +836,7 @@ static void solve_voxel_shape(Voxel *voxel) {
     float w[8];
 
     for (int i = 0; i < 8; ++i) {
-        Particle *part = &voxel->particles[i];
+        Particle *part = voxel->particles[i];
         p[i] = part->predicted_pos;
         w[i] = part->inv_mass;
         if (w[i] > 0.0f) {
@@ -803,7 +923,7 @@ static void solve_voxel_shape(Voxel *voxel) {
 
     voxel->pos = centroid;
     for (int i = 0; i < 8; ++i) {
-        voxel->particles[i].predicted_pos = p[i];
+        voxel->particles[i]->predicted_pos = p[i];
     }
 }
 
@@ -812,7 +932,7 @@ static void compute_voxel_center_and_mass(const Voxel *voxel, Vector3 *center, f
     float sum = 0.0f;
 
     for (int i = 0; i < 8; ++i) {
-        const Particle *p = &voxel->particles[i];
+        const Particle *p = voxel->particles[i];
         c = v_add(c, p->predicted_pos);
         sum += p->inv_mass;
     }
@@ -840,7 +960,7 @@ static void solve_particle_collisions(float dt) {
         float terrain_limit = FLOOR_SIZE - voxel_radius;
 
         for (int j = 0; j < 8; ++j) {
-            Particle *p = &voxel->particles[j];
+            Particle *p = voxel->particles[j];
 
             Vector3 pos = p->predicted_pos;
 
@@ -894,7 +1014,7 @@ static void solve_particle_collisions(float dt) {
         float radiusA = voxel_particle_radius(voxelA);
 
         for (int j = 0; j < 8; ++j) {
-            Particle *pa = &voxelA->particles[j];
+            Particle *pa = voxelA->particles[j];
             float wa = pa->inv_mass;
 
             for (int dx = -1; dx <= 1; ++dx) {
@@ -920,7 +1040,11 @@ static void solve_particle_collisions(float dt) {
                                 continue;
                             }
 
-                            Particle *pb = &voxelB->particles[q];
+                            Particle *pb = voxelB->particles[q];
+                            if (pa == pb) {
+                                continue;
+                            }
+
                             float wb = pb->inv_mass;
 
                             float w_sum = wa + wb;
@@ -973,7 +1097,7 @@ static void update_particle_velocities(float dt) {
         Vector3 prev_centroid = { 0.0f, 0.0f, 0.0f };
 
         for (int j = 0; j < 8; ++j) {
-            Particle *p = &voxel->particles[j];
+            Particle *p = voxel->particles[j];
             centroid = v_add(centroid, p->predicted_pos);
             prev_centroid = v_add(prev_centroid, p->prev_pos);
 
@@ -1060,7 +1184,7 @@ static void FireVoxel(int idx) {
         shot->vel = vel;
         shot->owner = idx;
         for (int i = 0; i < 8; ++i) {
-            shot->particles[i].vel = vel;
+            shot->particles[i]->vel = vel;
         }
     }
 }
@@ -1068,7 +1192,7 @@ static void FireVoxel(int idx) {
 static void drawCubeEdges(const Voxel *voxel)
 {
     Vector3 v[8];
-    for (int i = 0; i < 8; ++i) v[i] = voxel->particles[i].pos;
+    for (int i = 0; i < 8; ++i) v[i] = voxel->particles[i]->pos;
 
     static const int edge_indices[12][2] = {
         {0,1},{1,3},{3,2},{2,0},
@@ -1087,7 +1211,7 @@ static void drawCubeEdges(const Voxel *voxel)
 static void drawCubeMan(const Voxel *voxel)
 {
     Vector3 v[8];
-    for (int i = 0; i < 8; ++i) v[i] = voxel->particles[i].pos;
+    for (int i = 0; i < 8; ++i) v[i] = voxel->particles[i]->pos;
 
     rlColor4ub(voxel->color.r, voxel->color.g, voxel->color.b, voxel->color.a);
 
@@ -1159,7 +1283,7 @@ static void draw_particle_debug(void)
         float baseRadius = voxel_particle_radius(voxel);
         float markerRadius = fmaxf(baseRadius * PARTICLE_DEBUG_MARKER_RADIUS, 0.02f);
         for (int j = 0; j < 8; ++j) {
-            const Particle *p = &voxel->particles[j];
+            const Particle *p = voxel->particles[j];
             Color markerColor = baseColor;
             if (debugColorParticlesByVelocity && p->inv_mass > 0.0f) {
                 float speed = v_length(p->vel);
