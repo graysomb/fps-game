@@ -67,7 +67,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define HASH_SIZE     131072    // must be power of two
 #define VOXEL_SIZE     0.5f    // size of each voxel cube
 #define MAX_PARTICLES (MAX_VOXELS * 8)
-#define STRAIN_BREAK_THRESHOLD 0.2f
+#define STRAIN_BREAK_THRESHOLD 0.1f
 
 // Tunable voxel edit brush (per-axis span of the add/remove operation)
 static int voxelBrushSpan = 4;
@@ -120,7 +120,7 @@ typedef struct {
     float rest_edge;
     float particle_radius;
     bool glued_faces[6];
-    uint8_t pending_strain_break;
+    bool pending_full_break;
 } Voxel;
 static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
@@ -525,7 +525,7 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     v->rest_edge = VOXEL_SIZE;
     v->particle_radius = PARTICLE_RADIUS;
     memset(v->glued_faces, 0, sizeof(v->glued_faces));
-    v->pending_strain_break = 0;
+    v->pending_full_break = false;
     const float half = VOXEL_SIZE * 0.5f;
     for (int i = 0; i < 8; ++i) {
         Vector3 pos = {
@@ -641,31 +641,18 @@ static void break_face_link(Voxel *voxel, int face_index) {
     neighbor->glued_faces[opposite] = false;
 }
 
-static void process_pending_strain_breaks(void) {
-    const uint8_t AXIS_BITS[3] = { 1u << 0, 1u << 1, 1u << 2 };
-    const int faces_per_axis[3][2] = {
-        { 0, 1 },
-        { 2, 3 },
-        { 4, 5 }
-    };
-
+static void process_pending_breaks(void) {
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
-        uint8_t flags = voxel->pending_strain_break;
-        if (!flags) {
+        if (!voxel->pending_full_break) {
             continue;
         }
 
-        for (int axis = 0; axis < 3; ++axis) {
-            if ((flags & AXIS_BITS[axis]) == 0) {
-                continue;
-            }
-
-            break_face_link(voxel, faces_per_axis[axis][0]);
-            break_face_link(voxel, faces_per_axis[axis][1]);
+        for (int face = 0; face < 6; ++face) {
+            break_face_link(voxel, face);
         }
 
-        voxel->pending_strain_break = 0;
+        voxel->pending_full_break = false;
     }
 }
 
@@ -908,7 +895,7 @@ static void physics_step(float dt) {    // Rebuild spatial hash
 
 // Predict positions for the next step (equivalent to the GPU PredictPositions kernel).
 static void integrate_particles(float dt) {
-    const Vector3 gravity = { 0.0f, -GRAVITY*0.0f, 0.0f };
+    const Vector3 gravity = { 0.0f, -GRAVITY*1.0f, 0.0f };
     const float dt_sq = dt * dt;
 
     for (int i = 0; i < active_particle_count; ++i) {
@@ -981,19 +968,19 @@ static void solve_voxel_shape(Voxel *voxel) {
                            v_add(v_sub(p[6], p[2]), v_sub(p[7], p[3])));
         v2 = v_mul(v2, 0.25f);
 
-        if (voxel->rest_edge > 0.0f) {
+        if (!voxel->pending_full_break && voxel->rest_edge > 0.0f) {
             float strain_x = fabsf(v_length(v0) - voxel->rest_edge) / voxel->rest_edge;
             float strain_y = fabsf(v_length(v1) - voxel->rest_edge) / voxel->rest_edge;
             float strain_z = fabsf(v_length(v2) - voxel->rest_edge) / voxel->rest_edge;
 
-            if (strain_x > STRAIN_BREAK_THRESHOLD && (voxel->glued_faces[0] || voxel->glued_faces[1])) {
-                voxel->pending_strain_break |= (1u << 0);
+            if ((voxel->glued_faces[0] || voxel->glued_faces[1]) && strain_x > STRAIN_BREAK_THRESHOLD) {
+                voxel->pending_full_break = true;
             }
-            if (strain_y > STRAIN_BREAK_THRESHOLD && (voxel->glued_faces[2] || voxel->glued_faces[3])) {
-                voxel->pending_strain_break |= (1u << 1);
+            if ((voxel->glued_faces[2] || voxel->glued_faces[3]) && strain_y > STRAIN_BREAK_THRESHOLD) {
+                voxel->pending_full_break = true;
             }
-            if (strain_z > STRAIN_BREAK_THRESHOLD && (voxel->glued_faces[4] || voxel->glued_faces[5])) {
-                voxel->pending_strain_break |= (1u << 2);
+            if ((voxel->glued_faces[4] || voxel->glued_faces[5]) && strain_z > STRAIN_BREAK_THRESHOLD) {
+                voxel->pending_full_break = true;
             }
         }
 
@@ -1246,8 +1233,8 @@ static void update_particle_velocities(float dt) {
 }
 
 void simulate_voxel_pbd(float dt) {
-    const int substeps = 2;
-    const int constraint_iterations = 4;
+    const int substeps = 5;
+    const int constraint_iterations = 3;
     const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
 
     for (int step = 0; step < substeps; ++step) {
@@ -1263,7 +1250,7 @@ void simulate_voxel_pbd(float dt) {
             }
         }
 
-        process_pending_strain_breaks();
+        process_pending_breaks();
 
         update_particle_velocities(sub_dt);
     }
