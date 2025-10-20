@@ -67,6 +67,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define HASH_SIZE     131072    // must be power of two
 #define VOXEL_SIZE     0.5f    // size of each voxel cube
 #define MAX_PARTICLES (MAX_VOXELS * 8)
+#define STRAIN_BREAK_THRESHOLD 0.35f
 
 // Tunable voxel edit brush (per-axis span of the add/remove operation)
 static int voxelBrushSpan = 4;
@@ -118,6 +119,8 @@ typedef struct {
     float rest_volume;
     float rest_edge;
     float particle_radius;
+    bool glued_faces[6];
+    uint8_t pending_strain_break;
 } Voxel;
 static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
@@ -145,6 +148,23 @@ static Particle *particle_create(Vector3 pos, float inv_mass) {
     p->predicted_pos = pos;
     p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
     p->inv_mass = inv_mass;
+    p->refcount = 1;
+    p->active = true;
+    p->active_index = active_particle_count;
+    active_particles[active_particle_count++] = p;
+    return p;
+}
+
+static Particle *particle_clone(const Particle *src) {
+    if (!src) {
+        return NULL;
+    }
+    if (particle_pool_count >= MAX_PARTICLES) {
+        return NULL;
+    }
+
+    Particle *p = &particles_pool[particle_pool_count++];
+    *p = *src;
     p->refcount = 1;
     p->active = true;
     p->active_index = active_particle_count;
@@ -204,6 +224,17 @@ static const int face_corner_indices[6][4] = {
     { 4, 5, 6, 7 }, // +Z
     { 0, 1, 2, 3 }  // -Z
 };
+
+static const int face_offsets[6][3] = {
+    { 1, 0, 0 },
+    { -1, 0, 0 },
+    { 0, 1, 0 },
+    { 0, -1, 0 },
+    { 0, 0, 1 },
+    { 0, 0, -1 }
+};
+
+static const int opposite_face[6] = { 1, 0, 3, 2, 5, 4 };
 
 static int table_get(int x, int y, int z);
 
@@ -493,6 +524,8 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     v->rest_volume = VOXEL_SIZE * VOXEL_SIZE * VOXEL_SIZE;
     v->rest_edge = VOXEL_SIZE;
     v->particle_radius = PARTICLE_RADIUS;
+    memset(v->glued_faces, 0, sizeof(v->glued_faces));
+    v->pending_strain_break = 0;
     const float half = VOXEL_SIZE * 0.5f;
     for (int i = 0; i < 8; ++i) {
         Vector3 pos = {
@@ -556,7 +589,83 @@ static void glue_neighbor_faces(void) {
                 particle_retain(shared);
                 b->particles[ib] = shared;
             }
+
+            a->glued_faces[faceA] = true;
+            b->glued_faces[faceB] = true;
         }
+    }
+}
+
+static void detach_face_particles(Voxel *voxel, int face_index) {
+    if (!voxel) {
+        return;
+    }
+
+    for (int c = 0; c < 4; ++c) {
+        int corner = face_corner_indices[face_index][c];
+        Particle *p_old = voxel->particles[corner];
+        if (!p_old || p_old->refcount <= 1) {
+            continue;
+        }
+
+        Particle *p_new = particle_clone(p_old);
+        if (!p_new) {
+            continue;
+        }
+
+        voxel->particles[corner] = p_new;
+        particle_release(p_old);
+    }
+}
+
+static void break_face_link(Voxel *voxel, int face_index) {
+    if (!voxel || !voxel->glued_faces[face_index]) {
+        return;
+    }
+
+    int nx = voxel->gx + face_offsets[face_index][0];
+    int ny = voxel->gy + face_offsets[face_index][1];
+    int nz = voxel->gz + face_offsets[face_index][2];
+    int neighbor_idx = table_get(nx, ny, nz);
+
+    detach_face_particles(voxel, face_index);
+    voxel->glued_faces[face_index] = false;
+
+    if (neighbor_idx < 0) {
+        return;
+    }
+
+    Voxel *neighbor = &voxels[neighbor_idx];
+    int opposite = opposite_face[face_index];
+    detach_face_particles(neighbor, opposite);
+    neighbor->glued_faces[opposite] = false;
+}
+
+static void process_pending_strain_breaks(void) {
+    const uint8_t AXIS_BITS[3] = { 1u << 0, 1u << 1, 1u << 2 };
+    const int faces_per_axis[3][2] = {
+        { 0, 1 },
+        { 2, 3 },
+        { 4, 5 }
+    };
+
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        uint8_t flags = voxel->pending_strain_break;
+        if (!flags) {
+            continue;
+        }
+
+        for (int axis = 0; axis < 3; ++axis) {
+            if ((flags & AXIS_BITS[axis]) == 0) {
+                continue;
+            }
+
+            break_face_link(voxel, faces_per_axis[axis][0]);
+            break_face_link(voxel, faces_per_axis[axis][1]);
+        }
+
+        voxel->pending_strain_break = 0;
     }
 }
 
@@ -599,8 +708,8 @@ static void buildDemo(void) {
     //}
 
     // Central platform
-    int platform_size = 1;
-    int platform_height =1; // 15 / 3
+    int platform_size = 2;
+    int platform_height =2; // 15 / 3
     int platform_base_height = 1; // to keep top at same level (21)
     for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
         for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
@@ -872,6 +981,22 @@ static void solve_voxel_shape(Voxel *voxel) {
                            v_add(v_sub(p[6], p[2]), v_sub(p[7], p[3])));
         v2 = v_mul(v2, 0.25f);
 
+        if (voxel->rest_edge > 0.0f) {
+            float strain_x = fabsf(v_length(v0) - voxel->rest_edge) / voxel->rest_edge;
+            float strain_y = fabsf(v_length(v1) - voxel->rest_edge) / voxel->rest_edge;
+            float strain_z = fabsf(v_length(v2) - voxel->rest_edge) / voxel->rest_edge;
+
+            if (strain_x > STRAIN_BREAK_THRESHOLD && (voxel->glued_faces[0] || voxel->glued_faces[1])) {
+                voxel->pending_strain_break |= (1u << 0);
+            }
+            if (strain_y > STRAIN_BREAK_THRESHOLD && (voxel->glued_faces[2] || voxel->glued_faces[3])) {
+                voxel->pending_strain_break |= (1u << 1);
+            }
+            if (strain_z > STRAIN_BREAK_THRESHOLD && (voxel->glued_faces[4] || voxel->glued_faces[5])) {
+                voxel->pending_strain_break |= (1u << 2);
+            }
+        }
+
         Vector3 u0 = v_sub(v0, v_mul(v_add(vgs_project(v1, v0), vgs_project(v2, v0)), VGS_ALPHA));
         Vector3 u1 = v_sub(v1, v_mul(v_add(vgs_project(v2, v1), vgs_project(v0, v1)), VGS_ALPHA));
         Vector3 u2 = v_sub(v2, v_mul(v_add(vgs_project(v0, v2), vgs_project(v1, v2)), VGS_ALPHA));
@@ -1137,6 +1262,8 @@ void simulate_voxel_pbd(float dt) {
                 solve_voxel_shape(voxel);
             }
         }
+
+        process_pending_strain_breaks();
 
         update_particle_velocities(sub_dt);
     }
