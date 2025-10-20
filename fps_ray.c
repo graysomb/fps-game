@@ -55,6 +55,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define COLLISION_RELAXATION 0.9f
 #define CENTER_RELAXATION 0.9f
 #define VELOCITY_DAMPING 0.99f
+#define GLUE_RELAXATION 1.0f
+#define GLUE_EPS 1e-6f
 
 // KD-stats constants
 #define BASE_HEALTH 100
@@ -807,6 +809,64 @@ static void solve_voxel_shape(Voxel *voxel) {
     }
 }
 
+typedef struct {
+    int dx, dy, dz;
+    int faceA[4];
+    int faceB[4];
+} GlueDirection;
+
+static void solve_glue_pair(Particle *pa, Particle *pb) {
+    float wa = pa->inv_mass;
+    float wb = pb->inv_mass;
+    float w_sum = wa + wb;
+    if (w_sum <= 0.0f) {
+        return;
+    }
+
+    Vector3 delta = v_sub(pb->predicted_pos, pa->predicted_pos);
+    float dist_sq = v_dot(delta, delta);
+    if (dist_sq < GLUE_EPS) {
+        return;
+    }
+
+    Vector3 step = v_mul(delta, GLUE_RELAXATION / w_sum);
+    if (wa > 0.0f) {
+        pa->predicted_pos = v_add(pa->predicted_pos, v_mul(step, wa));
+    }
+    if (wb > 0.0f) {
+        pb->predicted_pos = v_sub(pb->predicted_pos, v_mul(step, wb));
+    }
+}
+
+static void solve_voxel_glue(int voxel_idx) {
+    static const GlueDirection directions[3] = {
+        { 1, 0, 0, { 1, 3, 5, 7 }, { 0, 2, 4, 6 } },
+        { 0, 1, 0, { 2, 3, 6, 7 }, { 0, 1, 4, 5 } },
+        { 0, 0, 1, { 4, 5, 6, 7 }, { 0, 1, 2, 3 } },
+    };
+
+    Voxel *voxelA = &voxels[voxel_idx];
+    int gx = voxelA->gx;
+    int gy = voxelA->gy;
+    int gz = voxelA->gz;
+
+    for (int d = 0; d < 3; ++d) {
+        const GlueDirection *dir = &directions[d];
+        int neighbor_idx = table_get(gx + dir->dx, gy + dir->dy, gz + dir->dz);
+        if (neighbor_idx < 0) {
+            continue;
+        }
+
+        Voxel *voxelB = &voxels[neighbor_idx];
+
+        for (int k = 0; k < 4; ++k) {
+            Particle *pa = &voxelA->particles[dir->faceA[k]];
+            Particle *pb = &voxelB->particles[dir->faceB[k]];
+            solve_glue_pair(pa, pb);
+        }
+    }
+}
+
 static void compute_voxel_center_and_mass(const Voxel *voxel, Vector3 *center, float *inv_mass_sum) {
     Vector3 c = { 0.0f, 0.0f, 0.0f };
     float sum = 0.0f;
@@ -1011,6 +1071,10 @@ void simulate_voxel_pbd(float dt) {
                 if (!voxel->simulate)
                     continue;
                 solve_voxel_shape(voxel);
+            }
+
+            for (int i = 0; i < voxel_count; ++i) {
+                solve_voxel_glue(i);
             }
         }
 
