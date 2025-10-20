@@ -504,8 +504,8 @@ static void buildDemo(void) {
     //}
 
     // Central platform
-    int platform_size = 1;
-    int platform_height =1; // 15 / 3
+    int platform_size = 2;
+    int platform_height =2; // 15 / 3
     int platform_base_height = 1; // to keep top at same level (21)
     for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
         for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
@@ -702,7 +702,7 @@ static void physics_step(float dt) {    // Rebuild spatial hash
 
 // Predict positions for the next step (equivalent to the GPU PredictPositions kernel).
 static void integrate_particles(float dt) {
-    const Vector3 gravity = { 0.0f, -GRAVITY*0.0f, 0.0f };
+    const Vector3 gravity = { 0.0f, -GRAVITY*1.0f, 0.0f };
     const float dt_sq = dt * dt;
 
     for (int i = 0; i < voxel_count; ++i) {
@@ -1094,7 +1094,7 @@ static void update_particle_velocities(float dt) {
 
 void simulate_voxel_pbd(float dt) {
     const int substeps = 2;
-    const int constraint_iterations = 4;
+    const int constraint_iterations = 12;
     const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
 
     for (int step = 0; step < substeps; ++step) {
