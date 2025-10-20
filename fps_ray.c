@@ -67,7 +67,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define HASH_SIZE     131072    // must be power of two
 #define VOXEL_SIZE     0.5f    // size of each voxel cube
 #define MAX_PARTICLES (MAX_VOXELS * 8)
-#define STRAIN_BREAK_THRESHOLD 0.1f
+#define STRAIN_BREAK_THRESHOLD 0.15f
 
 // Tunable voxel edit brush (per-axis span of the add/remove operation)
 static int voxelBrushSpan = 4;
@@ -695,27 +695,31 @@ static void buildDemo(void) {
     //}
 
     // Central platform
-    // int platform_size = 1;
-    // int platform_height =1; // 15 / 3
-    // int platform_base_height = 1; // to keep top at same level (21)
-    // for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
-    //     for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
-    //         for (int z = M/2 - platform_size/2; z <= M/2 + platform_size/2; z++) {
-    //             float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //             float py = (y + 0.5f) * VOXEL_SIZE;
-    //             float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //             addVoxel(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0, 1.0f);
-    //         }
-    //     }
-    // }
-    float px1 = (M/2 + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    float py1 = (0.5f + 0.5f) * VOXEL_SIZE;
-    float pz1 = (M/2 + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    addVoxel(px1, py1, pz1, false, true, (Color){ 100, 200, 100, 255 }, 0, 0.0f);
-    float px2 = (M/2 + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    float py2 = (1.5f + 0.5f) * VOXEL_SIZE;
-    float pz2 = (M/2 + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    addVoxel(px2, py2, pz2, false, true, (Color){ 100, 200, 100, 255 }, 0, 1.0f);
+    int platform_size = 2;
+    int platform_height =2; // 15 / 3
+    int platform_base_height = 1; // to keep top at same level (21)
+    for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
+        for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
+            for (int z = M/2 - platform_size/2; z <= M/2 + platform_size/2; z++) {
+                float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                float py = (y + 0.5f) * VOXEL_SIZE;
+                float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                if (y==platform_base_height){
+                    addVoxel(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0, 0.0f);
+                }else{
+                addVoxel(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0, 1.0f);
+                }
+            }
+        }
+    }
+    // float px1 = (M/2 + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    // float py1 = (0.5f + 0.5f) * VOXEL_SIZE;
+    // float pz1 = (M/2 + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    // addVoxel(px1, py1, pz1, false, true, (Color){ 100, 200, 100, 255 }, 0, 0.0f);
+    // float px2 = (M/2 + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    // float py2 = (1.5f + 0.5f) * VOXEL_SIZE;
+    // float pz2 = (M/2 + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    // addVoxel(px2, py2, pz2, false, true, (Color){ 100, 200, 100, 255 }, 0, 1.0f);
     glue_neighbor_faces();
 }
 
