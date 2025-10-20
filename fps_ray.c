@@ -137,6 +137,20 @@ static const int corner_signs[8][3] = {
 };
 
 static int table_get(int x, int y, int z);
+static void rebuild_glue_constraints(void);
+static void solve_voxel_glue(void);
+
+typedef struct {
+    int dx, dy, dz;
+    int faceA[4];
+    int faceB[4];
+} GlueDirection;
+
+static const GlueDirection glueDirections[3] = {
+    { 1, 0, 0, { 1, 3, 5, 7 }, { 0, 2, 4, 6 } },
+    { 0, 1, 0, { 2, 3, 6, 7 }, { 0, 1, 4, 5 } },
+    { 0, 0, 1, { 4, 5, 6, 7 }, { 0, 1, 2, 3 } },
+};
 
 
 // Utility functions
@@ -199,6 +213,16 @@ static Patch patches[MAX_VOXELS];
 static int   patchCount = 0;
 static Mesh  greedyMesh = { 0 };
 static bool  meshDirty  = true;
+
+typedef struct {
+    int voxelA;
+    int voxelB;
+    int cornerA[4];
+    int cornerB[4];
+} GlueConstraint;
+
+static GlueConstraint glueConstraints[MAX_VOXELS * 3];
+static int glueConstraintCount = 0;
 
 
 
@@ -529,9 +553,10 @@ static void ResetGame(void) {
     for (int i = 0; i < voxel_count; i++) {
         mark_surface(i);
     }
+    rebuild_glue_constraints();
     meshDirty = true;
 
-} 
+}
 
 static void UpdateKdRatio(int player_index) {
     Player *p = &players[player_index];
@@ -809,12 +834,6 @@ static void solve_voxel_shape(Voxel *voxel) {
     }
 }
 
-typedef struct {
-    int dx, dy, dz;
-    int faceA[4];
-    int faceB[4];
-} GlueDirection;
-
 static void solve_glue_pair(Particle *pa, Particle *pb) {
     float wa = pa->inv_mass;
     float wb = pb->inv_mass;
@@ -838,31 +857,48 @@ static void solve_glue_pair(Particle *pa, Particle *pb) {
     }
 }
 
-static void solve_voxel_glue(int voxel_idx) {
-    static const GlueDirection directions[3] = {
-        { 1, 0, 0, { 1, 3, 5, 7 }, { 0, 2, 4, 6 } },
-        { 0, 1, 0, { 2, 3, 6, 7 }, { 0, 1, 4, 5 } },
-        { 0, 0, 1, { 4, 5, 6, 7 }, { 0, 1, 2, 3 } },
-    };
-
-    Voxel *voxelA = &voxels[voxel_idx];
-    int gx = voxelA->gx;
-    int gy = voxelA->gy;
-    int gz = voxelA->gz;
-
-    for (int d = 0; d < 3; ++d) {
-        const GlueDirection *dir = &directions[d];
-        int neighbor_idx = table_get(gx + dir->dx, gy + dir->dy, gz + dir->dz);
-        if (neighbor_idx < 0) {
-            continue;
-        }
-
-        Voxel *voxelB = &voxels[neighbor_idx];
+static void solve_voxel_glue(void) {
+    for (int i = 0; i < glueConstraintCount; ++i) {
+        const GlueConstraint *gc = &glueConstraints[i];
+        Voxel *voxelA = &voxels[gc->voxelA];
+        Voxel *voxelB = &voxels[gc->voxelB];
 
         for (int k = 0; k < 4; ++k) {
-            Particle *pa = &voxelA->particles[dir->faceA[k]];
-            Particle *pb = &voxelB->particles[dir->faceB[k]];
+            Particle *pa = &voxelA->particles[gc->cornerA[k]];
+            Particle *pb = &voxelB->particles[gc->cornerB[k]];
             solve_glue_pair(pa, pb);
+        }
+    }
+}
+
+static void rebuild_glue_constraints(void) {
+    glueConstraintCount = 0;
+
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxelA = &voxels[i];
+
+        int gx = voxelA->gx;
+        int gy = voxelA->gy;
+        int gz = voxelA->gz;
+
+        for (int d = 0; d < 3; ++d) {
+            const GlueDirection *dir = &glueDirections[d];
+            int neighbor_idx = table_get(gx + dir->dx, gy + dir->dy, gz + dir->dz);
+            if (neighbor_idx < 0) {
+                continue;
+            }
+
+            if (glueConstraintCount >= (int)(sizeof(glueConstraints) / sizeof(glueConstraints[0]))) {
+                continue;
+            }
+
+            GlueConstraint *gc = &glueConstraints[glueConstraintCount++];
+            gc->voxelA = i;
+            gc->voxelB = neighbor_idx;
+            for (int k = 0; k < 4; ++k) {
+                gc->cornerA[k] = dir->faceA[k];
+                gc->cornerB[k] = dir->faceB[k];
+            }
         }
     }
 }
@@ -1073,9 +1109,7 @@ void simulate_voxel_pbd(float dt) {
                 solve_voxel_shape(voxel);
             }
 
-            for (int i = 0; i < voxel_count; ++i) {
-                solve_voxel_glue(i);
-            }
+            solve_voxel_glue();
         }
 
         update_particle_velocities(sub_dt);
