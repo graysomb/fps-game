@@ -57,6 +57,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define VELOCITY_DAMPING 0.99f
 #define GLUE_RELAXATION 1.0f
 #define GLUE_EPS 1e-6f
+#define GLUE_BREAK_STRAIN .8f
 
 // KD-stats constants
 #define BASE_HEALTH 100
@@ -219,6 +220,7 @@ typedef struct {
     int voxelB;
     int cornerA[4];
     int cornerB[4];
+    bool active;
 } GlueConstraint;
 
 static GlueConstraint glueConstraints[MAX_VOXELS * 3];
@@ -858,10 +860,32 @@ static void solve_glue_pair(Particle *pa, Particle *pb) {
 }
 
 static void solve_voxel_glue(void) {
+    const float break_distance = GLUE_BREAK_STRAIN * VOXEL_SIZE;
+
     for (int i = 0; i < glueConstraintCount; ++i) {
-        const GlueConstraint *gc = &glueConstraints[i];
+        GlueConstraint *gc = &glueConstraints[i];
+        if (!gc->active) {
+            continue;
+        }
+
         Voxel *voxelA = &voxels[gc->voxelA];
         Voxel *voxelB = &voxels[gc->voxelB];
+
+        float max_dist = 0.0f;
+        for (int k = 0; k < 4; ++k) {
+            Particle *pa = &voxelA->particles[gc->cornerA[k]];
+            Particle *pb = &voxelB->particles[gc->cornerB[k]];
+            Vector3 delta = v_sub(pb->predicted_pos, pa->predicted_pos);
+            float dist = v_length(delta);
+            if (dist > max_dist) {
+                max_dist = dist;
+            }
+        }
+
+        if (max_dist > break_distance) {
+            gc->active = false;
+            continue;
+        }
 
         for (int k = 0; k < 4; ++k) {
             Particle *pa = &voxelA->particles[gc->cornerA[k]];
@@ -899,6 +923,7 @@ static void rebuild_glue_constraints(void) {
                 gc->cornerA[k] = dir->faceA[k];
                 gc->cornerB[k] = dir->faceB[k];
             }
+            gc->active = true;
         }
     }
 }
@@ -1094,7 +1119,7 @@ static void update_particle_velocities(float dt) {
 
 void simulate_voxel_pbd(float dt) {
     const int substeps = 2;
-    const int constraint_iterations = 12;
+    const int constraint_iterations = 6;
     const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
 
     for (int step = 0; step < substeps; ++step) {
