@@ -67,7 +67,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define HASH_SIZE     131072    // must be power of two
 #define VOXEL_SIZE     0.5f    // size of each voxel cube
 #define MAX_PARTICLES (MAX_VOXELS * 8)
-#define STRAIN_BREAK_THRESHOLD 0.15f
+#define STRAIN_BREAK_THRESHOLD 1.0f
+#define SHEAR_BREAK_THRESHOLD 0.5f
 
 // Tunable voxel edit brush (per-axis span of the add/remove operation)
 static int voxelBrushSpan = 4;
@@ -979,10 +980,14 @@ static void solve_voxel_shape(Voxel *voxel) {
                            v_add(v_sub(p[6], p[2]), v_sub(p[7], p[3])));
         v2 = v_mul(v2, 0.25f);
 
+        float len_v0 = v_length(v0);
+        float len_v1 = v_length(v1);
+        float len_v2 = v_length(v2);
+
         if (!voxel->pending_full_break && voxel->rest_edge > 0.0f) {
-            float strain_x = fabsf(v_length(v0) - voxel->rest_edge) / voxel->rest_edge;
-            float strain_y = fabsf(v_length(v1) - voxel->rest_edge) / voxel->rest_edge;
-            float strain_z = fabsf(v_length(v2) - voxel->rest_edge) / voxel->rest_edge;
+            float strain_x = fabsf(len_v0 - voxel->rest_edge) / voxel->rest_edge;
+            float strain_y = fabsf(len_v1 - voxel->rest_edge) / voxel->rest_edge;
+            float strain_z = fabsf(len_v2 - voxel->rest_edge) / voxel->rest_edge;
 
             if ((voxel->glued_faces[0] || voxel->glued_faces[1]) && strain_x > STRAIN_BREAK_THRESHOLD) {
                 voxel->pending_full_break = true;
@@ -992,6 +997,32 @@ static void solve_voxel_shape(Voxel *voxel) {
             }
             if ((voxel->glued_faces[4] || voxel->glued_faces[5]) && strain_z > STRAIN_BREAK_THRESHOLD) {
                 voxel->pending_full_break = true;
+            }
+
+            if (!voxel->pending_full_break) {
+                float inv_len0 = (len_v0 > VGS_EPS) ? 1.0f / len_v0 : 0.0f;
+                float inv_len1 = (len_v1 > VGS_EPS) ? 1.0f / len_v1 : 0.0f;
+                float inv_len2 = (len_v2 > VGS_EPS) ? 1.0f / len_v2 : 0.0f;
+
+                float shear_xy = (inv_len0 > 0.0f && inv_len1 > 0.0f)
+                    ? fabsf(v_dot(v0, v1)) * inv_len0 * inv_len1
+                    : 0.0f;
+                float shear_xz = (inv_len0 > 0.0f && inv_len2 > 0.0f)
+                    ? fabsf(v_dot(v0, v2)) * inv_len0 * inv_len2
+                    : 0.0f;
+                float shear_yz = (inv_len1 > 0.0f && inv_len2 > 0.0f)
+                    ? fabsf(v_dot(v1, v2)) * inv_len1 * inv_len2
+                    : 0.0f;
+
+                if ((voxel->glued_faces[4] || voxel->glued_faces[5]) && shear_xy > SHEAR_BREAK_THRESHOLD) {
+                    voxel->pending_full_break = true;
+                }
+                if ((voxel->glued_faces[2] || voxel->glued_faces[3]) && shear_xz > SHEAR_BREAK_THRESHOLD) {
+                    voxel->pending_full_break = true;
+                }
+                if ((voxel->glued_faces[0] || voxel->glued_faces[1]) && shear_yz > SHEAR_BREAK_THRESHOLD) {
+                    voxel->pending_full_break = true;
+                }
             }
         }
 
@@ -1003,9 +1034,9 @@ static void solve_voxel_shape(Voxel *voxel) {
         float len1 = v_length(u1);
         float len2 = v_length(u2);
 
-        float target0 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * v_length(v0));
-        float target1 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * v_length(v1));
-        float target2 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * v_length(v2));
+        float target0 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * len_v0);
+        float target1 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * len_v1);
+        float target2 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * len_v2);
 
         if (len0 > VGS_EPS) u0 = v_mul(u0, target0 / len0);
         if (len1 > VGS_EPS) u1 = v_mul(u1, target1 / len1);
