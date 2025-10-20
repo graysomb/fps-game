@@ -45,8 +45,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define FLOOR_SIZE     20.0f    // half-size of floor in world units
 #define PLAYER_SIZE 0.5f
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
-#define VGS_ALPHA 0.5f
-#define VGS_BETA 0.5f
+#define VGS_ALPHA 0.1f
+#define VGS_BETA 0.1f
 #define VGS_ITERS 3
 #define VGS_EPS 1e-6f
 #define PBD_MAX_STEP_DT 0.005f
@@ -57,7 +57,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define VELOCITY_DAMPING 0.99f
 #define GLUE_RELAXATION 1.0f
 #define GLUE_EPS 1e-6f
-#define GLUE_BREAK_STRAIN .8f
+#define GLUE_BREAK_STRAIN 1.0f
 
 // KD-stats constants
 #define BASE_HEALTH 100
@@ -1118,8 +1118,8 @@ static void update_particle_velocities(float dt) {
 }
 
 void simulate_voxel_pbd(float dt) {
-    const int substeps = 2;
-    const int constraint_iterations = 6;
+    const int substeps = 3;
+    const int constraint_iterations = 1;
     const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
 
     for (int step = 0; step < substeps; ++step) {
@@ -1850,9 +1850,10 @@ static void HandleKeyboardInput(int i, float dt);
 static void HandleGamepadInput(int i, float dt);
 
 int main(void) {
+    int countFrame = 0;
     // init window and render textures
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Split-Screen FPS (raylib)");
-    SetTargetFPS(120);
+    SetTargetFPS(60);
     // seed RNG
     srand((unsigned)time(NULL));
     // reset game state
@@ -1982,11 +1983,42 @@ int main(void) {
             p->pos.z = clampf(p->pos.z, -FLOOR_SIZE+PLAYER_RADIUS, FLOOR_SIZE-PLAYER_RADIUS);
         }
         // update voxel physics
-        int subStep = 3;
-        for( int i = 0; i < subStep; i++){
-            physics_step(dt/subStep);
+        // int subStep = 3;
+        // for( int i = 0; i < subStep; i++){
+        //     physics_step(dt/subStep);
+        // }
+        //  simulate_voxel_pbd(dt);
+
+        // frame by frame debug
+        if(countFrame==0){
+        integrate_particles(dt/3);
+        solve_particle_collisions(dt/3);
         }
-         simulate_voxel_pbd(dt);
+
+        if(countFrame==1){
+        for (int i = 0; i < voxel_count; ++i) {
+            Voxel *voxel = &voxels[i];
+            if (!voxel->simulate)
+                continue;
+            solve_voxel_shape(voxel);
+        }
+        }
+
+        if(countFrame==2){
+        solve_voxel_glue();
+        }
+
+        if(countFrame==3){
+        update_particle_velocities(dt/3);
+        }
+
+        countFrame += 1;
+
+        if(countFrame>3){
+        countFrame = 0;
+        }
+
+
         // setup cameras
         Camera3D cam0 = {0}, cam1 = {0};
         cam0.up = cam1.up = (Vector3){0,1,0};
