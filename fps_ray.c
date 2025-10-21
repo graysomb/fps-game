@@ -789,9 +789,20 @@ static void solve_voxel_shape(Voxel *voxel) {
         float len1 = v_length(u1);
         float len2 = v_length(u2);
 
-        float target0 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * v_length(v0));
-        float target1 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * v_length(v1));
-        float target2 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * v_length(v2));
+        float lenp0 = 4.0f * v_length(v0);
+        float lenp1 = 4.0f * v_length(v1);
+        float lenp2 = 4.0f * v_length(v2);
+        float r_v = 1.0f;
+        float denom = lenp0 * lenp1 * lenp2;
+        if (denom > VGS_EPS) {
+            float ratio = (rest_edge * rest_edge * rest_edge) / denom;
+            float root = cbrtf(fabsf(ratio));
+            r_v = (ratio < 0.0f) ? -root : root;
+        }
+
+        float target0 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * (lenp0 * r_v));
+        float target1 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * (lenp1 * r_v));
+        float target2 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * (lenp2 * r_v));
 
         if (len0 > VGS_EPS) u0 = v_mul(u0, target0 / len0);
         if (len1 > VGS_EPS) u1 = v_mul(u1, target1 / len1);
@@ -805,10 +816,9 @@ static void solve_voxel_shape(Voxel *voxel) {
             if (scale < 0.0f) {
                 root = -root;
             }
-            float factor = 0.5f * root;
-            u0 = v_mul(u0, factor);
-            u1 = v_mul(u1, factor);
-            u2 = v_mul(u2, factor);
+            u0 = v_mul(u0, root);
+            u1 = v_mul(u1, root);
+            u2 = v_mul(u2, root);
         }
 
         // Rebuild the voxel corners from the orthogonal frame and push dynamic particles only.
