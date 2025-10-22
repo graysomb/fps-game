@@ -45,8 +45,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define FLOOR_SIZE     20.0f    // half-size of floor in world units
 #define PLAYER_SIZE 0.5f
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
-#define VGS_ALPHA 0.1f
-#define VGS_BETA 0.1f
+#define VGS_ALPHA 0.5f
+#define VGS_BETA 0.5f
 #define VGS_ITERS 3
 #define VGS_EPS 1e-6f
 #define PBD_MAX_STEP_DT 0.005f
@@ -57,7 +57,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define VELOCITY_DAMPING 0.99f
 #define GLUE_RELAXATION 1.0f
 #define GLUE_EPS 1e-6f
-#define GLUE_BREAK_STRAIN 1.0f
+#define GLUE_BREAK_STRAIN 10.0f
 
 // KD-stats constants
 #define BASE_HEALTH 100
@@ -1992,41 +1992,41 @@ int main(void) {
             p->pos.x = clampf(p->pos.x, -FLOOR_SIZE+PLAYER_RADIUS, FLOOR_SIZE-PLAYER_RADIUS);
             p->pos.z = clampf(p->pos.z, -FLOOR_SIZE+PLAYER_RADIUS, FLOOR_SIZE-PLAYER_RADIUS);
         }
-        // update voxel physics
-        // int subStep = 3;
-        // for( int i = 0; i < subStep; i++){
-        //     physics_step(dt/subStep);
+        //update voxel physics
+        int subStep = 3;
+        for( int i = 0; i < subStep; i++){
+            physics_step(dt/subStep);
+        }
+        simulate_voxel_pbd(dt);
+
+        // // frame by frame debug
+        // if(countFrame==0){
+        // integrate_particles(dt/3);
+        // //solve_particle_collisions(dt/3);
         // }
-        //  simulate_voxel_pbd(dt);
 
-        // frame by frame debug
-        if(countFrame==0){
-        integrate_particles(dt/3);
-        solve_particle_collisions(dt/3);
-        }
+        // if(countFrame==1){
+        // for (int i = 0; i < voxel_count; ++i) {
+        //     Voxel *voxel = &voxels[i];
+        //     if (!voxel->simulate)
+        //         continue;
+        //     solve_voxel_shape(voxel);
+        // }
+        // }
 
-        if(countFrame==1){
-        for (int i = 0; i < voxel_count; ++i) {
-            Voxel *voxel = &voxels[i];
-            if (!voxel->simulate)
-                continue;
-            solve_voxel_shape(voxel);
-        }
-        }
+        // if(countFrame==2){
+        // solve_voxel_glue();
+        // }
 
-        if(countFrame==2){
-        solve_voxel_glue();
-        }
+        // if(countFrame==3){
+        // update_particle_velocities(dt/3);
+        // }
 
-        if(countFrame==3){
-        update_particle_velocities(dt/3);
-        }
+        // countFrame += 1;
 
-        countFrame += 1;
-
-        if(countFrame>3){
-        countFrame = 0;
-        }
+        // if(countFrame>3){
+        // countFrame = 0;
+        // }
 
 
         // setup cameras
