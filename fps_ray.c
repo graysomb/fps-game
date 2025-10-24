@@ -47,7 +47,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
 #define VGS_ALPHA 0.5f
 #define VGS_BETA 0.5f
-#define VGS_ITERS 3
+#define VGS_ITERS 6
 #define VGS_EPS 1e-6f
 #define PBD_MAX_STEP_DT 0.005f
 #define PBD_SUBSTEPS 3
@@ -794,7 +794,8 @@ static void solve_voxel_shape(Voxel *voxel) {
         float lenp2 = 4.0f * v_length(v2);
         float r_v = 1.0f;
         float denom = lenp0 * lenp1 * lenp2;
-        if (denom > VGS_EPS) {
+        float rest_demom = rest_edge * rest_edge * rest_edge;
+        if (fabs(denom-rest_demom) > VGS_EPS) {
             float ratio = (rest_edge * rest_edge * rest_edge) / denom;
             float root = cbrtf(fabsf(ratio));
             r_v = (ratio < 0.0f) ? -root : root;
@@ -804,13 +805,13 @@ static void solve_voxel_shape(Voxel *voxel) {
         float target1 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * (lenp1 * r_v));
         float target2 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * (lenp2 * r_v));
 
-        if (len0 > VGS_EPS) u0 = v_mul(u0, target0 / len0);
-        if (len1 > VGS_EPS) u1 = v_mul(u1, target1 / len1);
-        if (len2 > VGS_EPS) u2 = v_mul(u2, target2 / len2);
+        if (fabs(len0-target0) > VGS_EPS) u0 = v_mul(u0, target0 / len0);
+        if (fabs(len1-target1) > VGS_EPS) u1 = v_mul(u1, target1 / len1);
+        if (fabs(len2-target2) > VGS_EPS) u2 = v_mul(u2, target2 / len2);
 
         // Volume correction mirrors the GPU "ResizeVoxelBasis" stage.
         float volume = v_dot(v_cross(u0, u1), u2);
-        if (fabsf(volume) > VGS_EPS) {
+        if (fabsf(volume-rest_volume) > VGS_EPS) {
             float scale = rest_volume / volume;
             float root = cbrtf(fabsf(scale));
             if (scale < 0.0f) {
@@ -1129,7 +1130,7 @@ static void update_particle_velocities(float dt) {
 
 void simulate_voxel_pbd(float dt) {
     const int substeps = 3;
-    const int constraint_iterations = 1;
+    const int constraint_iterations = 20;
     const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
 
     for (int step = 0; step < substeps; ++step) {
