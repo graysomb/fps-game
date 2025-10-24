@@ -47,12 +47,12 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
 #define VGS_ALPHA 0.5f
 #define VGS_BETA 0.5f
-#define VGS_ITERS 6
+#define VGS_ITERS 10
 #define VGS_EPS 1e-6f
 #define PBD_MAX_STEP_DT 0.005f
 #define PBD_SUBSTEPS 3
-#define PBD_CONSTRAINT_ITERS 5
-#define COLLISION_RELAXATION 0.9f
+#define PBD_CONSTRAINT_ITERS 10
+#define COLLISION_RELAXATION 0.1f
 #define CENTER_RELAXATION 0.9f
 #define VELOCITY_DAMPING 0.99f
 #define GLUE_RELAXATION 1.0f
@@ -823,6 +823,9 @@ static void solve_voxel_shape(Voxel *voxel) {
         }
 
         // Rebuild the voxel corners from the orthogonal frame and push dynamic particles only.
+        u0 = v_mul(u0, 0.5f);
+        u1 = v_mul(u1, 0.5f);
+        u2 = v_mul(u2, 0.5f);
         Vector3 new_p[8];
         new_p[0] = v_sub(v_sub(v_sub(centroid, u0), u1), u2);
         new_p[1] = v_sub(v_sub(v_add(centroid, u0), u1), u2);
@@ -957,7 +960,7 @@ static void compute_voxel_center_and_mass(const Voxel *voxel, Vector3 *center, f
     }
 }
 
-// Resolve collisions against the scene and neighbouring voxels (mirrors ResolveCollisions compute pass).
+// Resolve collisions against the scene and neighbouring voxels (mirrors ResolveCollisions compute pass). need to filter based on glue
 static void solve_particle_collisions(float dt) {
     (void)dt;
 
@@ -1129,8 +1132,8 @@ static void update_particle_velocities(float dt) {
 }
 
 void simulate_voxel_pbd(float dt) {
-    const int substeps = 3;
-    const int constraint_iterations = 20;
+    const int substeps = PBD_SUBSTEPS;
+    const int constraint_iterations = PBD_CONSTRAINT_ITERS;
     const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
 
     for (int step = 0; step < substeps; ++step) {
