@@ -507,8 +507,8 @@ static void buildDemo(void) {
 
     // Central platform
     int platform_size = 2;
-    int platform_height =2; // 15 / 3
-    int platform_base_height = 1; // to keep top at same level (21)
+    int platform_height = 1; // 15 / 3
+    int platform_base_height = 10; // to keep top at same level (21)
     for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
         for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
             for (int z = M/2 - platform_size/2; z <= M/2 + platform_size/2; z++) {
@@ -1143,10 +1143,8 @@ void simulate_voxel_pbd(float dt) {
                     continue;
                 solve_voxel_shape(voxel);
             }
-
-            solve_voxel_glue();
+        solve_voxel_glue();
         }
-
         update_particle_velocities(sub_dt);
     }
 }
@@ -1999,10 +1997,11 @@ int main(void) {
         }
         simulate_voxel_pbd(dt);
 
-        // // frame by frame debug
+        // frame by frame debug
+        // int frac = 3;
         // if(countFrame==0){
-        // integrate_particles(dt/3);
-        // //solve_particle_collisions(dt/3);
+        // integrate_particles(dt);
+        // solve_particle_collisions(dt);
         // }
 
         // if(countFrame==1){
@@ -2019,7 +2018,7 @@ int main(void) {
         // }
 
         // if(countFrame==3){
-        // update_particle_velocities(dt/3);
+        // update_particle_velocities(dt);
         // }
 
         // countFrame += 1;
