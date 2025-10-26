@@ -47,11 +47,11 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
 #define VGS_ALPHA 0.5f
 #define VGS_BETA 0.5f
-#define VGS_ITERS 10
+#define VGS_ITERS 3
 #define VGS_EPS 1e-6f
 #define PBD_MAX_STEP_DT 0.005f
 #define PBD_SUBSTEPS 3
-#define PBD_CONSTRAINT_ITERS 10
+#define PBD_CONSTRAINT_ITERS 3
 #define COLLISION_RELAXATION 0.1f
 #define CENTER_RELAXATION 0.9f
 #define VELOCITY_DAMPING 0.99f
@@ -942,6 +942,33 @@ static void rebuild_glue_constraints(void) {
     }
 }
 
+// Returns true when the provided voxel/corner pair is part of an active glue constraint.
+static bool particles_are_glued_pair(int voxel_idx_a, int corner_idx_a,
+                                     int voxel_idx_b, int corner_idx_b) {
+    for (int g = 0; g < glueConstraintCount; ++g) {
+        const GlueConstraint *gc = &glueConstraints[g];
+        if (!gc->active) {
+            continue;
+        }
+
+        if (gc->voxelA == voxel_idx_a && gc->voxelB == voxel_idx_b) {
+            for (int k = 0; k < 4; ++k) {
+                if (gc->cornerA[k] == corner_idx_a && gc->cornerB[k] == corner_idx_b) {
+                    return true;
+                }
+            }
+        } else if (gc->voxelA == voxel_idx_b && gc->voxelB == voxel_idx_a) {
+            for (int k = 0; k < 4; ++k) {
+                if (gc->cornerA[k] == corner_idx_b && gc->cornerB[k] == corner_idx_a) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
 static void compute_voxel_center_and_mass(const Voxel *voxel, Vector3 *center, float *inv_mass_sum) {
     Vector3 c = { 0.0f, 0.0f, 0.0f };
     float sum = 0.0f;
@@ -1052,6 +1079,10 @@ static void solve_particle_collisions(float dt) {
 
                         for (int q = 0; q < 8; ++q) {
                             if (neighbor_idx == i && q <= j) {
+                                continue;
+                            }
+
+                            if (particles_are_glued_pair(i, j, neighbor_idx, q)) {
                                 continue;
                             }
 
