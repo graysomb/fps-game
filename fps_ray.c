@@ -47,17 +47,17 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
 #define VGS_ALPHA 0.5f
 #define VGS_BETA 0.5f
-#define VGS_ITERS 10
+#define VGS_ITERS 1
 #define VGS_EPS 1e-6f
 #define PBD_MAX_STEP_DT 0.005f
 #define PBD_SUBSTEPS 6
-#define PBD_CONSTRAINT_ITERS 13
-#define COLLISION_RELAXATION 0.9f
+#define PBD_CONSTRAINT_ITERS 6
+#define COLLISION_RELAXATION 0.99f
 #define CENTER_RELAXATION 0.9f
 #define VELOCITY_DAMPING 0.99f
 #define GLUE_RELAXATION 1.0f
 #define GLUE_EPS 1e-6f
-#define GLUE_BREAK_STRAIN 10.0f
+#define GLUE_BREAK_STRAIN 0.2f
 
 // KD-stats constants
 #define BASE_HEALTH 100
