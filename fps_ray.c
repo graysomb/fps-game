@@ -969,6 +969,42 @@ static bool particles_are_glued_pair(int voxel_idx_a, int corner_idx_a,
     return false;
 }
 
+// True when two voxels share any active glue constraint (face coupling).
+static bool voxels_are_glued(int voxel_idx_a, int voxel_idx_b) {
+    if (voxel_idx_a == voxel_idx_b) {
+        return false;
+    }
+
+    for (int g = 0; g < glueConstraintCount; ++g) {
+        const GlueConstraint *gc = &glueConstraints[g];
+        if (!gc->active) {
+            continue;
+        }
+
+        bool forward = (gc->voxelA == voxel_idx_a && gc->voxelB == voxel_idx_b);
+        bool reverse = (gc->voxelA == voxel_idx_b && gc->voxelB == voxel_idx_a);
+        if (forward || reverse) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// Edge/corner adjacency causes constraints to overlap; skip collisions for those pairs as well.
+static bool voxels_share_edge_or_corner(const Voxel *voxel_a, const Voxel *voxel_b) {
+    int dx = abs(voxel_a->gx - voxel_b->gx);
+    int dy = abs(voxel_a->gy - voxel_b->gy);
+    int dz = abs(voxel_a->gz - voxel_b->gz);
+
+    if (dx > 1 || dy > 1 || dz > 1) {
+        return false;
+    }
+
+    int manhattan = dx + dy + dz;
+    return manhattan >= 2; // 2 => edge neighbors, 3 => corner neighbors.
+}
+
 static void compute_voxel_center_and_mass(const Voxel *voxel, Vector3 *center, float *inv_mass_sum) {
     Vector3 c = { 0.0f, 0.0f, 0.0f };
     float sum = 0.0f;
@@ -1076,6 +1112,12 @@ static void solve_particle_collisions(float dt) {
 
                         Voxel *voxelB = &voxels[neighbor_idx];
                         float radiusB = voxel_particle_radius(voxelB);
+
+                        if (voxels_are_glued(i, neighbor_idx) ||
+                            voxels_share_edge_or_corner(voxelA, voxelB)) {
+                            // Avoid fighting deterministic constraints on adjacent voxels.
+                            continue;
+                        }
 
                         for (int q = 0; q < 8; ++q) {
                             if (neighbor_idx == i && q <= j) {
