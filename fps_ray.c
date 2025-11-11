@@ -57,7 +57,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define VELOCITY_DAMPING 0.99f
 #define GLUE_RELAXATION 1.0f
 #define GLUE_EPS 1e-6f
-#define GLUE_BREAK_STRAIN 0.2f
+#define GLUE_BREAK_STRAIN 10.2f
 
 // KD-stats constants
 #define BASE_HEALTH 100
@@ -140,6 +140,9 @@ static const int corner_signs[8][3] = {
 static int table_get(int x, int y, int z);
 static void rebuild_glue_constraints(void);
 static void solve_voxel_glue(void);
+static void mark_whitney_decomposition_dirty(void);
+static void rebuild_whitney_decomposition(void);
+static void ensure_whitney_decomposition(void);
 
 typedef struct {
     int dx, dy, dz;
@@ -225,6 +228,65 @@ typedef struct {
 
 static GlueConstraint glueConstraints[MAX_VOXELS * 3];
 static int glueConstraintCount = 0;
+
+#define MAX_GLUE_NEIGHBORS 6
+#define MAX_WHITNEY_CELLS  MAX_VOXELS
+#define WHITNEY_CELL_HASH_SIZE (1 << 18)
+#define WHITNEY_MAX_CELL_SIZE 32
+
+typedef struct {
+    int x, y, z;
+} Int3;
+
+typedef struct {
+    int componentIndex;
+    Int3 origin;
+    int size;
+    int voxelCount;
+    int firstVoxelEntry;
+} WhitneyCell;
+
+typedef struct {
+    int voxelStart;
+    int voxelCount;
+    int cellStart;
+    int cellCount;
+    Int3 minCorner;
+    Int3 maxCorner;
+} WhitneyComponent;
+
+typedef struct {
+    int voxelIndex;
+    int next;
+} WhitneyCellVoxelEntry;
+
+typedef struct {
+    uint64_t key;
+    int index;
+} WhitneyCellHashEntry;
+
+static unsigned char glueAdjacencyCount[MAX_VOXELS];
+static int glueAdjacencyList[MAX_VOXELS * MAX_GLUE_NEIGHBORS];
+
+static WhitneyComponent whitneyComponents[MAX_VOXELS];
+static WhitneyCell whitneyCells[MAX_WHITNEY_CELLS];
+static WhitneyCellVoxelEntry whitneyCellEntries[MAX_VOXELS];
+static WhitneyCellHashEntry whitneyCellHash[WHITNEY_CELL_HASH_SIZE];
+static uint32_t whitneyCellHashStamp[WHITNEY_CELL_HASH_SIZE];
+static uint32_t whitneyCellHashGeneration = 0;
+
+static int whitneyComponentCount = 0;
+static int whitneyCellCount = 0;
+static int whitneyCellEntryCount = 0;
+
+static int componentVoxelList[MAX_VOXELS];
+static unsigned short componentVoxelDistances[MAX_VOXELS];
+static int componentVoxelOffsets[MAX_VOXELS];
+static int componentVoxelListCount = 0;
+static int componentQueue[MAX_VOXELS];
+static int voxelComponentId[MAX_VOXELS];
+
+static bool whitneyDecompositionDirty = true;
 
 
 
@@ -464,6 +526,7 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
         p->inv_mass = (fixed || !simulate) ? 0.0f : 1.0f;
     }
     table_set(v->gx, v->gy, v->gz, idx);
+    mark_whitney_decomposition_dirty();
     return idx;
 }
 
@@ -506,8 +569,8 @@ static void buildDemo(void) {
     //}
 
     // Central platform
-    int platform_size = 2;
-    int platform_height = 1; // 15 / 3
+    int platform_size = 6;
+    int platform_height = 6; // 15 / 3
     int platform_base_height = 10; // to keep top at same level (21)
     for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
         for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
@@ -898,6 +961,7 @@ static void solve_voxel_glue(void) {
 
         if (max_dist > break_distance) {
             gc->active = false;
+            mark_whitney_decomposition_dirty();
             continue;
         }
 
@@ -940,6 +1004,8 @@ static void rebuild_glue_constraints(void) {
             gc->active = true;
         }
     }
+
+    mark_whitney_decomposition_dirty();
 }
 
 // Returns true when the provided voxel/corner pair is part of an active glue constraint.
@@ -989,6 +1055,357 @@ static bool voxels_are_glued(int voxel_idx_a, int voxel_idx_b) {
     }
 
     return false;
+}
+
+static inline void mark_whitney_decomposition_dirty(void) {
+    whitneyDecompositionDirty = true;
+}
+
+static inline int align_down_to_multiple(int value, int multiple) {
+    if (multiple <= 1) {
+        return value;
+    }
+    int remainder = value % multiple;
+    if (remainder < 0) {
+        remainder += multiple;
+    }
+    return value - remainder;
+}
+
+static int whitney_cell_size_from_distance(unsigned short dist) {
+    if (dist <= 1) {
+        return 1;
+    }
+    int size = 1;
+    while ((size << 1) <= dist && size < WHITNEY_MAX_CELL_SIZE) {
+        size <<= 1;
+    }
+    return size;
+}
+
+static void begin_whitney_cell_hash_pass(void) {
+    whitneyCellHashGeneration++;
+    if (whitneyCellHashGeneration == 0) {
+        memset(whitneyCellHashStamp, 0, sizeof(whitneyCellHashStamp));
+        whitneyCellHashGeneration = 1;
+    }
+}
+
+static uint64_t whitney_cell_key(Int3 origin, int size) {
+    uint64_t base = mortonKey(origin.x, origin.y, origin.z);
+    return (base << 6) ^ (uint64_t)size;
+}
+
+static int find_or_create_whitney_cell(int componentIndex, Int3 origin, int size) {
+    uint64_t key = whitney_cell_key(origin, size);
+    size_t mask = WHITNEY_CELL_HASH_SIZE - 1;
+    size_t h = (size_t)(key & mask);
+
+    while (true) {
+        if (whitneyCellHashStamp[h] != whitneyCellHashGeneration) {
+            whitneyCellHashStamp[h] = whitneyCellHashGeneration;
+            whitneyCellHash[h].key = key;
+            whitneyCellHash[h].index = -1;
+        }
+        if (whitneyCellHash[h].key == key) {
+            if (whitneyCellHash[h].index == -1) {
+                if (whitneyCellCount >= MAX_WHITNEY_CELLS) {
+                    return -1;
+                }
+                int idx = whitneyCellCount++;
+                WhitneyCell *cell = &whitneyCells[idx];
+                cell->componentIndex = componentIndex;
+                cell->origin = origin;
+                cell->size = size;
+                cell->voxelCount = 0;
+                cell->firstVoxelEntry = -1;
+                whitneyCellHash[h].index = idx;
+            }
+            return whitneyCellHash[h].index;
+        }
+        h = (h + 1) & mask;
+    }
+}
+
+static void add_glue_neighbor(int voxel_idx, int neighbor_idx) {
+    if (voxel_idx < 0 || neighbor_idx < 0) {
+        return;
+    }
+    if (voxel_idx >= voxel_count || neighbor_idx >= voxel_count) {
+        return;
+    }
+
+    Voxel *voxel = &voxels[voxel_idx];
+    Voxel *neighbor = &voxels[neighbor_idx];
+    if (!voxel->simulate || !neighbor->simulate) {
+        return;
+    }
+
+    unsigned char *count = &glueAdjacencyCount[voxel_idx];
+    int base = voxel_idx * MAX_GLUE_NEIGHBORS;
+
+    for (unsigned char i = 0; i < *count; ++i) {
+        if (glueAdjacencyList[base + i] == neighbor_idx) {
+            return;
+        }
+    }
+
+    if (*count >= MAX_GLUE_NEIGHBORS) {
+        return;
+    }
+
+    glueAdjacencyList[base + (*count)] = neighbor_idx;
+    (*count)++;
+}
+
+static void build_glue_adjacency(void) {
+    memset(glueAdjacencyCount, 0, sizeof(glueAdjacencyCount));
+
+    for (int i = 0; i < glueConstraintCount; ++i) {
+        const GlueConstraint *gc = &glueConstraints[i];
+        if (!gc->active) {
+            continue;
+        }
+        add_glue_neighbor(gc->voxelA, gc->voxelB);
+        add_glue_neighbor(gc->voxelB, gc->voxelA);
+    }
+}
+
+static void compute_component_distances(const WhitneyComponent *component) {
+    if (component->voxelCount <= 0) {
+        return;
+    }
+
+    int start = component->voxelStart;
+    int end = start + component->voxelCount;
+    int queue_head = 0;
+    int queue_tail = 0;
+
+    for (int i = start; i < end; ++i) {
+        int voxelIndex = componentVoxelList[i];
+        bool boundary = (glueAdjacencyCount[voxelIndex] < 6);
+        componentVoxelDistances[i] = boundary ? 1 : USHRT_MAX;
+        if (boundary && queue_tail < MAX_VOXELS) {
+            componentQueue[queue_tail++] = voxelIndex;
+        }
+    }
+
+    if (queue_tail == 0) {
+        for (int i = start; i < end; ++i) {
+            componentVoxelDistances[i] = 1;
+        }
+        return;
+    }
+
+    while (queue_head < queue_tail) {
+        int voxelIndex = componentQueue[queue_head++];
+        int localIndex = componentVoxelOffsets[voxelIndex];
+        if (localIndex < start || localIndex >= end) {
+            continue;
+        }
+        unsigned short currentDist = componentVoxelDistances[localIndex];
+        unsigned char neighborCount = glueAdjacencyCount[voxelIndex];
+        int base = voxelIndex * MAX_GLUE_NEIGHBORS;
+        for (int n = 0; n < neighborCount; ++n) {
+            int neighbor = glueAdjacencyList[base + n];
+            int neighborLocal = componentVoxelOffsets[neighbor];
+            if (neighborLocal < start || neighborLocal >= end) {
+                continue;
+            }
+            unsigned short *target = &componentVoxelDistances[neighborLocal];
+            if (*target > currentDist + 1) {
+                *target = currentDist + 1;
+                if (queue_tail < MAX_VOXELS) {
+                    componentQueue[queue_tail++] = neighbor;
+                }
+            }
+        }
+    }
+
+    for (int i = start; i < end; ++i) {
+        if (componentVoxelDistances[i] == USHRT_MAX) {
+            componentVoxelDistances[i] = 1;
+        }
+    }
+}
+
+static void build_component_cells(int componentIndex) {
+    WhitneyComponent *component = &whitneyComponents[componentIndex];
+    component->cellStart = whitneyCellCount;
+
+    begin_whitney_cell_hash_pass();
+
+    int start = component->voxelStart;
+    int end = start + component->voxelCount;
+
+    for (int i = start; i < end; ++i) {
+        int voxelIndex = componentVoxelList[i];
+        unsigned short dist = componentVoxelDistances[i];
+        int cellSize = whitney_cell_size_from_distance(dist);
+
+        Int3 origin = {
+            align_down_to_multiple(voxels[voxelIndex].gx, cellSize),
+            align_down_to_multiple(voxels[voxelIndex].gy, cellSize),
+            align_down_to_multiple(voxels[voxelIndex].gz, cellSize)
+        };
+
+        int cellIdx = find_or_create_whitney_cell(componentIndex, origin, cellSize);
+        if (cellIdx < 0) {
+            continue;
+        }
+
+        if (whitneyCellEntryCount >= MAX_VOXELS) {
+            break;
+        }
+
+        WhitneyCell *cell = &whitneyCells[cellIdx];
+        int entryIndex = whitneyCellEntryCount++;
+        WhitneyCellVoxelEntry *entry = &whitneyCellEntries[entryIndex];
+        entry->voxelIndex = voxelIndex;
+        entry->next = cell->firstVoxelEntry;
+        cell->firstVoxelEntry = entryIndex;
+        cell->voxelCount++;
+    }
+
+    component->cellCount = whitneyCellCount - component->cellStart;
+}
+
+static void build_component_from_seed(int seed) {
+    WhitneyComponent *component = &whitneyComponents[whitneyComponentCount];
+    component->voxelStart = componentVoxelListCount;
+    component->cellStart = whitneyCellCount;
+    component->voxelCount = 0;
+    component->cellCount = 0;
+    component->minCorner = (Int3){ 0, 0, 0 };
+    component->maxCorner = (Int3){ 0, 0, 0 };
+
+    int queue_head = 0;
+    int queue_tail = 0;
+    if (queue_tail < MAX_VOXELS) {
+        componentQueue[queue_tail++] = seed;
+    }
+    voxelComponentId[seed] = -2;
+    bool boundsInit = false;
+
+    while (queue_head < queue_tail) {
+        int idx = componentQueue[queue_head++];
+        if (voxelComponentId[idx] >= 0) {
+            continue;
+        }
+
+        Voxel *voxel = &voxels[idx];
+        if (!voxel->simulate) {
+            continue;
+        }
+
+        voxelComponentId[idx] = whitneyComponentCount;
+        int absoluteIndex = componentVoxelListCount++;
+        componentVoxelList[absoluteIndex] = idx;
+        component->voxelCount++;
+
+        if (!boundsInit) {
+            component->minCorner = (Int3){ voxel->gx, voxel->gy, voxel->gz };
+            component->maxCorner = component->minCorner;
+            boundsInit = true;
+        } else {
+            if (voxel->gx < component->minCorner.x) component->minCorner.x = voxel->gx;
+            if (voxel->gy < component->minCorner.y) component->minCorner.y = voxel->gy;
+            if (voxel->gz < component->minCorner.z) component->minCorner.z = voxel->gz;
+            if (voxel->gx > component->maxCorner.x) component->maxCorner.x = voxel->gx;
+            if (voxel->gy > component->maxCorner.y) component->maxCorner.y = voxel->gy;
+            if (voxel->gz > component->maxCorner.z) component->maxCorner.z = voxel->gz;
+        }
+
+        unsigned char neighborCount = glueAdjacencyCount[idx];
+        int base = idx * MAX_GLUE_NEIGHBORS;
+        for (int n = 0; n < neighborCount; ++n) {
+            int neighbor = glueAdjacencyList[base + n];
+            if (neighbor < 0) {
+                continue;
+            }
+            if (!voxels[neighbor].simulate) {
+                continue;
+            }
+            if (voxelComponentId[neighbor] == -1) {
+                voxelComponentId[neighbor] = -2;
+                if (queue_tail < MAX_VOXELS) {
+                    componentQueue[queue_tail++] = neighbor;
+                }
+            }
+        }
+    }
+
+    if (component->voxelCount <= 0) {
+        return;
+    }
+
+    int start = component->voxelStart;
+    int end = start + component->voxelCount;
+    for (int i = start; i < end; ++i) {
+        int voxelIndex = componentVoxelList[i];
+        componentVoxelOffsets[voxelIndex] = i;
+    }
+
+    compute_component_distances(component);
+    build_component_cells(whitneyComponentCount);
+
+    for (int i = start; i < end; ++i) {
+        int voxelIndex = componentVoxelList[i];
+        componentVoxelOffsets[voxelIndex] = -1;
+    }
+
+    whitneyComponentCount++;
+}
+
+static void rebuild_whitney_decomposition(void) {
+    whitneyComponentCount = 0;
+    whitneyCellCount = 0;
+    whitneyCellEntryCount = 0;
+    componentVoxelListCount = 0;
+
+    for (int i = 0; i < voxel_count; ++i) {
+        voxelComponentId[i] = -1;
+        componentVoxelOffsets[i] = -1;
+    }
+
+    build_glue_adjacency();
+
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (!voxel->simulate) {
+            continue;
+        }
+        if (voxelComponentId[i] != -1) {
+            continue;
+        }
+        build_component_from_seed(i);
+    }
+
+    whitneyDecompositionDirty = false;
+}
+
+static void ensure_whitney_decomposition(void) {
+    if (!whitneyDecompositionDirty) {
+        return;
+    }
+    rebuild_whitney_decomposition();
+}
+
+static void solve_whitney_component_shapes(void) {
+    for (int comp = 0; comp < whitneyComponentCount; ++comp) {
+        const WhitneyComponent *component = &whitneyComponents[comp];
+        for (int cellOffset = 0; cellOffset < component->cellCount; ++cellOffset) {
+            const WhitneyCell *cell = &whitneyCells[component->cellStart + cellOffset];
+            for (int entry = cell->firstVoxelEntry; entry != -1; entry = whitneyCellEntries[entry].next) {
+                int voxelIndex = whitneyCellEntries[entry].voxelIndex;
+                Voxel *voxel = &voxels[voxelIndex];
+                if (!voxel->simulate) {
+                    continue;
+                }
+                solve_voxel_shape(voxel);
+            }
+        }
+    }
 }
 
 // Edge/corner adjacency causes constraints to overlap; skip collisions for those pairs as well.
@@ -1210,18 +1627,14 @@ void simulate_voxel_pbd(float dt) {
     const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
 
     for (int step = 0; step < substeps; ++step) {
+        ensure_whitney_decomposition();
         integrate_particles(sub_dt);
         solve_particle_collisions(sub_dt);
 
         for (int it = 0; it < constraint_iterations; ++it) {
-            for (int i = 0; i < voxel_count; ++i) {
-                Voxel *voxel = &voxels[i];
-                if (!voxel->simulate)
-                    continue;
-                solve_voxel_shape(voxel);
-            }
-        solve_voxel_glue();
+            solve_whitney_component_shapes();
         }
+        solve_voxel_glue();
         update_particle_velocities(sub_dt);
     }
 }
