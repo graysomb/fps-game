@@ -166,6 +166,17 @@ static void voxel_grid_bounds(const Voxel *v,
                               int *miny, int *maxy,
                               int *minz, int *maxz)
 {
+    int span = (v->span > 0) ? v->span : 1;
+    if (span == 1) {
+        if (minx) *minx = v->gx;
+        if (maxx) *maxx = v->gx;
+        if (miny) *miny = v->gy;
+        if (maxy) *maxy = v->gy;
+        if (minz) *minz = v->gz;
+        if (maxz) *maxz = v->gz;
+        return;
+    }
+
     const float half = 0.5f * v->rest_edge;
     if (minx) *minx = (int)floorf((v->pos.x - half + GRID_EPSILON) / VOXEL_SIZE);
     if (maxx) *maxx = (int)floorf((v->pos.x + half - GRID_EPSILON) / VOXEL_SIZE);
