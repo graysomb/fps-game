@@ -47,11 +47,11 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
 #define VGS_ALPHA 0.5f
 #define VGS_BETA 0.5f
-#define VGS_ITERS 24
+#define VGS_ITERS 6
 #define VGS_EPS 1e-6f
 #define PBD_MAX_STEP_DT 0.005f
 #define PBD_SUBSTEPS 3
-#define PBD_CONSTRAINT_ITERS 24
+#define PBD_CONSTRAINT_ITERS 12
 #define COLLISION_RELAXATION 0.99f
 #define CENTER_RELAXATION 0.9f
 #define VELOCITY_DAMPING 0.99f
@@ -121,6 +121,9 @@ typedef struct {
     int  min_gx, max_gx;
     int  min_gy, max_gy;
     int  min_gz, max_gz;
+    int  rest_min_gx, rest_max_gx;
+    int  rest_min_gy, rest_max_gy;
+    int  rest_min_gz, rest_max_gz;
     Particle particles[8];
     float rest_volume;
     float rest_edge;
@@ -145,6 +148,20 @@ static bool debugDrawParticles = false;
 static bool debugColorParticlesByVelocity = false;
 static const float PARTICLE_DEBUG_MARKER_RADIUS = 0.6f;
 static const float PARTICLE_DEBUG_MAX_SPEED = 20.0f;
+static bool debugLogSpanCollisions = true;
+static int debugSpanEdgeLogBudget = 0;
+static int debugSpanCollisionLogBudget = 0;
+
+static bool debug_should_log_span_pair(const Voxel *a, const Voxel *b, int *budget) {
+    if (!debugLogSpanCollisions || budget == NULL || *budget <= 0) {
+        return false;
+    }
+    if (a->span <= 1 && b->span <= 1) {
+        return false;
+    }
+    --(*budget);
+    return true;
+}
 
 static const int corner_signs[8][3] = {
     { -1, -1, -1 }, {  1, -1, -1 },
@@ -152,6 +169,126 @@ static const int corner_signs[8][3] = {
     { -1, -1,  1 }, {  1, -1,  1 },
     { -1,  1,  1 }, {  1,  1,  1 }
 };
+
+typedef struct {
+    float minx, maxx;
+    float miny, maxy;
+    float minz, maxz;
+} VoxelWorldBounds;
+
+static void voxel_world_bounds(const Voxel *v, VoxelWorldBounds *out) {
+    if (!out || !v) {
+        return;
+    }
+    float half = 0.5f * v->rest_edge;
+    out->minx = v->pos.x - half;
+    out->maxx = v->pos.x + half;
+    out->miny = v->pos.y - half;
+    out->maxy = v->pos.y + half;
+    out->minz = v->pos.z - half;
+    out->maxz = v->pos.z + half;
+}
+
+static bool axis_contact_state(float minA, float maxA,
+                               float minB, float maxB,
+                               float eps, bool *touch, bool *overlap)
+{
+    if (maxA < minB - eps || maxB < minA - eps) {
+        if (touch) *touch = false;
+        if (overlap) *overlap = false;
+        return false;
+    }
+
+    float overlapMin = fmaxf(minA, minB);
+    float overlapMax = fminf(maxA, maxB);
+    bool touching = (overlapMax - overlapMin) <= eps;
+
+    if (touch) *touch = touching;
+    if (overlap) *overlap = !touching;
+    return true;
+}
+
+static int voxel_touching_axes(const Voxel *a, const Voxel *b,
+                               int *overlap_axes, float eps)
+{
+    if (!a || !b) {
+        if (overlap_axes) *overlap_axes = 0;
+        return 0;
+    }
+
+    VoxelWorldBounds boundsA, boundsB;
+    voxel_world_bounds(a, &boundsA);
+    voxel_world_bounds(b, &boundsB);
+
+    bool touchX = false, overlapX = false;
+    bool touchY = false, overlapY = false;
+    bool touchZ = false, overlapZ = false;
+
+    if (!axis_contact_state(boundsA.minx, boundsA.maxx,
+                            boundsB.minx, boundsB.maxx, eps,
+                            &touchX, &overlapX)) {
+        if (overlap_axes) *overlap_axes = 0;
+        return 0;
+    }
+
+    if (!axis_contact_state(boundsA.miny, boundsA.maxy,
+                            boundsB.miny, boundsB.maxy, eps,
+                            &touchY, &overlapY)) {
+        if (overlap_axes) *overlap_axes = 0;
+        return 0;
+    }
+
+    if (!axis_contact_state(boundsA.minz, boundsA.maxz,
+                            boundsB.minz, boundsB.maxz, eps,
+                            &touchZ, &overlapZ)) {
+        if (overlap_axes) *overlap_axes = 0;
+        return 0;
+    }
+
+    if (overlap_axes) {
+        *overlap_axes = (overlapX ? 1 : 0) +
+                        (overlapY ? 1 : 0) +
+                        (overlapZ ? 1 : 0);
+    }
+
+    return (touchX ? 1 : 0) +
+           (touchY ? 1 : 0) +
+           (touchZ ? 1 : 0);
+}
+
+static bool ranges_touch_int(int minA, int maxA, int minB, int maxB) {
+    return (maxA + 1 == minB) || (maxB + 1 == minA);
+}
+
+static bool ranges_overlap_int(int minA, int maxA, int minB, int maxB) {
+    return !(maxA < minB || maxB < minA);
+}
+
+static bool voxels_share_edge_or_corner_rest(const Voxel *voxel_a, const Voxel *voxel_b) {
+    int aMinX = voxel_a->rest_min_gx, aMaxX = voxel_a->rest_max_gx;
+    int aMinY = voxel_a->rest_min_gy, aMaxY = voxel_a->rest_max_gy;
+    int aMinZ = voxel_a->rest_min_gz, aMaxZ = voxel_a->rest_max_gz;
+    int bMinX = voxel_b->rest_min_gx, bMaxX = voxel_b->rest_max_gx;
+    int bMinY = voxel_b->rest_min_gy, bMaxY = voxel_b->rest_max_gy;
+    int bMinZ = voxel_b->rest_min_gz, bMaxZ = voxel_b->rest_max_gz;
+
+    bool touchX = ranges_touch_int(aMinX, aMaxX, bMinX, bMaxX);
+    bool touchY = ranges_touch_int(aMinY, aMaxY, bMinY, bMaxY);
+    bool touchZ = ranges_touch_int(aMinZ, aMaxZ, bMinZ, bMaxZ);
+
+    bool overlapX = ranges_overlap_int(aMinX, aMaxX, bMinX, bMaxX);
+    bool overlapY = ranges_overlap_int(aMinY, aMaxY, bMinY, bMaxY);
+    bool overlapZ = ranges_overlap_int(aMinZ, aMaxZ, bMinZ, bMaxZ);
+
+    if ((!touchX && !overlapX) ||
+        (!touchY && !overlapY) ||
+        (!touchZ && !overlapZ)) {
+        return false;
+    }
+
+    int touching_axes = (touchX ? 1 : 0) + (touchY ? 1 : 0) + (touchZ ? 1 : 0);
+    return touching_axes >= 2;
+}
 
 static int table_get(int x, int y, int z);
 static void rebuild_glue_constraints(void);
@@ -581,6 +718,8 @@ static int addVoxelSized(float px, float py, float pz, bool fixed, bool simulate
     memset(v->surface, 0, sizeof v->surface);
     v->min_gx = v->min_gy = v->min_gz = INT_MAX;
     v->max_gx = v->max_gy = v->max_gz = INT_MIN;
+    v->rest_min_gx = v->rest_min_gy = v->rest_min_gz = INT_MAX;
+    v->rest_max_gx = v->rest_max_gy = v->rest_max_gz = INT_MIN;
     // compute grid coords
     v->gx = (int)floorf(px / VOXEL_SIZE);
     v->gy = (int)floorf(py / VOXEL_SIZE);
@@ -607,6 +746,14 @@ static int addVoxelSized(float px, float py, float pz, bool fixed, bool simulate
             p->inv_mass = 1.0f / mass_scale;
         }
     }
+    int rest_minx, rest_maxx, rest_miny, rest_maxy, rest_minz, rest_maxz;
+    voxel_compute_bounds(v, &rest_minx, &rest_maxx, &rest_miny, &rest_maxy, &rest_minz, &rest_maxz);
+    v->rest_min_gx = rest_minx;
+    v->rest_max_gx = rest_maxx;
+    v->rest_min_gy = rest_miny;
+    v->rest_max_gy = rest_maxy;
+    v->rest_min_gz = rest_minz;
+    v->rest_max_gz = rest_maxz;
     voxel_table_register(v, idx);
     return idx;
 }
@@ -654,7 +801,7 @@ static void buildDemo(void) {
     //     }
     //}
 
-    // Central platform
+    // Central platform (n=1)
     // int platform_size = 2;
     // int platform_height = 1; // 15 / 3
     // int platform_base_height = 10; // to keep top at same level (21)
@@ -665,11 +812,12 @@ static void buildDemo(void) {
     //             float py = (y + 0.5f) * VOXEL_SIZE;
     //             float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
     //             addVoxel(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0);
+    //             //addVoxelSized(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0, 1);
     //         }
     //     }
     // }
 
-    // Spawn a 2x2x2 cluster of span-2 voxels to exercise larger glued blocks.
+    // Spawn a 2x2x2 cluster of span-2 voxels to exercise larger glued blocks. (n=2)
     const int cluster_span = 2;
     const float cell_spacing = cluster_span * VOXEL_SIZE;
     Vector3 cluster_origin = { -6.0f, cell_spacing * 0.5f, -6.0f };
@@ -1252,36 +1400,28 @@ static bool voxels_are_glued(int voxel_idx_a, int voxel_idx_b) {
 }
 
 // Edge/corner adjacency causes constraints to overlap; skip collisions for those pairs as well.
-static bool ranges_touch(int minA, int maxA, int minB, int maxB) {
-    return (maxA + 1 == minB) || (maxB + 1 == minA);
-}
-
-static bool ranges_overlap(int minA, int maxA, int minB, int maxB) {
-    return !(maxA < minB || maxB < minA);
-}
-
+// Returns false when intervals are separated by more than eps.
+// Sets *touch when they meet (within eps) but do not overlap.
 static bool voxels_share_edge_or_corner(const Voxel *voxel_a, const Voxel *voxel_b) {
-    int aMinX, aMaxX, aMinY, aMaxY, aMinZ, aMaxZ;
-    int bMinX, bMaxX, bMinY, bMaxY, bMinZ, bMaxZ;
-    voxel_grid_bounds(voxel_a, &aMinX, &aMaxX, &aMinY, &aMaxY, &aMinZ, &aMaxZ);
-    voxel_grid_bounds(voxel_b, &bMinX, &bMaxX, &bMinY, &bMaxY, &bMinZ, &bMaxZ);
+    const float eps = VOXEL_SIZE * 0.05f;
+    int overlap_axes = 0;
+    int touching_axes = voxel_touching_axes(voxel_a, voxel_b, &overlap_axes, eps);
+    bool share_edge = (touching_axes >= 2);
+    bool rest_share = voxels_share_edge_or_corner_rest(voxel_a, voxel_b);
 
-    bool touchX = ranges_touch(aMinX, aMaxX, bMinX, bMaxX);
-    bool touchY = ranges_touch(aMinY, aMaxY, bMinY, bMaxY);
-    bool touchZ = ranges_touch(aMinZ, aMaxZ, bMinZ, bMaxZ);
-
-    bool overlapX = ranges_overlap(aMinX, aMaxX, bMinX, bMaxX);
-    bool overlapY = ranges_overlap(aMinY, aMaxY, bMinY, bMaxY);
-    bool overlapZ = ranges_overlap(aMinZ, aMaxZ, bMinZ, bMaxZ);
-
-    if ((!touchX && !overlapX) ||
-        (!touchY && !overlapY) ||
-        (!touchZ && !overlapZ)) {
-        return false;
+    if (debug_should_log_span_pair(voxel_a, voxel_b, &debugSpanEdgeLogBudget)) {
+        TraceLog(LOG_INFO,
+                 "[SpanDebug] adjacency shareEdge=%s spans=(%d,%d) touchingAxes=%d overlapAxes=%d "
+                 "restShare=%s posA=(%.2f,%.2f,%.2f) posB=(%.2f,%.2f,%.2f)",
+                 share_edge ? "true" : "false",
+                 voxel_a->span, voxel_b->span,
+                 touching_axes, overlap_axes,
+                 rest_share ? "true" : "false",
+                 voxel_a->pos.x, voxel_a->pos.y, voxel_a->pos.z,
+                 voxel_b->pos.x, voxel_b->pos.y, voxel_b->pos.z);
     }
 
-    int touching_axes = (touchX ? 1 : 0) + (touchY ? 1 : 0) + (touchZ ? 1 : 0);
-    return touching_axes >= 2;
+    return share_edge || rest_share;
 }
 
 
@@ -1310,6 +1450,13 @@ static void solve_particle_collisions(float dt) {
     const float half_player = PLAYER_SIZE * 0.5f;
     const float omega = COLLISION_RELAXATION;
     const float eps = 1e-6f;
+    if (debugLogSpanCollisions) {
+        debugSpanCollisionLogBudget = 32;
+        debugSpanEdgeLogBudget = 32;
+    } else {
+        debugSpanCollisionLogBudget = 0;
+        debugSpanEdgeLogBudget = 0;
+    }
 
     // First, clamp predictions against static scene bounds and player capsules.
     for (int i = 0; i < voxel_count; ++i) {
@@ -1382,13 +1529,16 @@ static void solve_particle_collisions(float dt) {
                 if (neighbor_idx < i) {
                     continue;
                 }
+                if (neighbor_idx == i) {
+                    continue;
+                }
 
                 Voxel *voxelB = &voxels[neighbor_idx];
                 float radiusB = voxel_particle_radius(voxelB);
 
-                if (voxels_are_glued(i, neighbor_idx) ||
-                    (voxelA->span == 1 && voxelB->span == 1 &&
-                     voxels_share_edge_or_corner(voxelA, voxelB))) {
+                bool glued = voxels_are_glued(i, neighbor_idx);
+                bool share_edge_corner = voxels_share_edge_or_corner(voxelA, voxelB);
+                if (glued || share_edge_corner) {
                     continue;
                 }
 
@@ -1421,6 +1571,20 @@ static void solve_particle_collisions(float dt) {
                     float penetration = target_dist - dist;
                     if (penetration <= 0.0f) {
                         continue;
+                    }
+
+                    if (debug_should_log_span_pair(voxelA, voxelB, &debugSpanCollisionLogBudget)) {
+                        int overlap_axes = 0;
+                        int touching_axes = voxel_touching_axes(
+                            voxelA, voxelB, &overlap_axes, VOXEL_SIZE * 0.05f);
+                        TraceLog(LOG_INFO,
+                                 "[SpanDebug] collision voxels=(%d,%d) particles=(%d,%d) spans=(%d,%d) "
+                                 "touchingAxes=%d overlapAxes=%d glued=%d shareEdge=%d dist=%.4f target=%.4f pen=%.4f",
+                                 i, neighbor_idx, j, q,
+                                 voxelA->span, voxelB->span,
+                                 touching_axes, overlap_axes,
+                                 glued ? 1 : 0, share_edge_corner ? 1 : 0,
+                                 dist, target_dist, penetration);
                     }
 
                     Vector3 normal = (dist > eps)
