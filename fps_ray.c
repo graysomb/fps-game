@@ -148,7 +148,7 @@ static bool debugDrawParticles = false;
 static bool debugColorParticlesByVelocity = false;
 static const float PARTICLE_DEBUG_MARKER_RADIUS = 0.6f;
 static const float PARTICLE_DEBUG_MAX_SPEED = 20.0f;
-static bool debugLogSpanCollisions = true;
+static bool debugLogSpanCollisions = false;
 static int debugSpanEdgeLogBudget = 0;
 static int debugSpanCollisionLogBudget = 0;
 
