@@ -47,11 +47,11 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
 #define VGS_ALPHA 0.5f
 #define VGS_BETA 0.5f
-#define VGS_ITERS 1
+#define VGS_ITERS 24
 #define VGS_EPS 1e-6f
 #define PBD_MAX_STEP_DT 0.005f
-#define PBD_SUBSTEPS 6
-#define PBD_CONSTRAINT_ITERS 6
+#define PBD_SUBSTEPS 3
+#define PBD_CONSTRAINT_ITERS 24
 #define COLLISION_RELAXATION 0.99f
 #define CENTER_RELAXATION 0.9f
 #define VELOCITY_DAMPING 0.99f
@@ -118,6 +118,9 @@ typedef struct {
     bool surface[6];
     int  gx, gy, gz;
     int  span;
+    int  min_gx, max_gx;
+    int  min_gy, max_gy;
+    int  min_gz, max_gz;
     Particle particles[8];
     float rest_volume;
     float rest_edge;
@@ -127,10 +130,15 @@ static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
 
 static inline float voxel_particle_radius(const Voxel *v) {
-    if (v->particle_radius > 0.0f) {
-        return v->particle_radius;
+    float r = v->particle_radius;
+    if (r <= 0.0f) {
+        r = 0.5f * v->rest_edge;
     }
-    return fmaxf(0.5f * v->rest_edge, PARTICLE_RADIUS);
+    float clamp = PARTICLE_RADIUS * (float)(v->span > 0 ? v->span : 1);
+    if (clamp > 0.0f) {
+        r = fminf(r, clamp);
+    }
+    return r;
 }
 
 static bool debugDrawParticles = false;
@@ -148,6 +156,8 @@ static const int corner_signs[8][3] = {
 static int table_get(int x, int y, int z);
 static void rebuild_glue_constraints(void);
 static void solve_voxel_glue(void);
+static bool voxels_share_edge_or_corner(const Voxel *voxel_a, const Voxel *voxel_b);
+static bool voxels_share_face(const Voxel *voxel_a, const Voxel *voxel_b);
 
 typedef struct {
     int dx, dy, dz;
@@ -161,10 +171,10 @@ static const GlueDirection glueDirections[3] = {
     { 0, 0, 1, { 4, 5, 6, 7 }, { 0, 1, 2, 3 } },
 };
 
-static void voxel_grid_bounds(const Voxel *v,
-                              int *minx, int *maxx,
-                              int *miny, int *maxy,
-                              int *minz, int *maxz)
+static void voxel_compute_bounds(const Voxel *v,
+                                 int *minx, int *maxx,
+                                 int *miny, int *maxy,
+                                 int *minz, int *maxz)
 {
     int span = (v->span > 0) ? v->span : 1;
     if (span == 1) {
@@ -184,6 +194,24 @@ static void voxel_grid_bounds(const Voxel *v,
     if (maxy) *maxy = (int)floorf((v->pos.y + half - GRID_EPSILON) / VOXEL_SIZE);
     if (minz) *minz = (int)floorf((v->pos.z - half + GRID_EPSILON) / VOXEL_SIZE);
     if (maxz) *maxz = (int)floorf((v->pos.z + half - GRID_EPSILON) / VOXEL_SIZE);
+}
+
+static void voxel_grid_bounds(const Voxel *v,
+                              int *minx, int *maxx,
+                              int *miny, int *maxy,
+                              int *minz, int *maxz)
+{
+    if (v->max_gx >= v->min_gx && v->max_gy >= v->min_gy && v->max_gz >= v->min_gz) {
+        if (minx) *minx = v->min_gx;
+        if (maxx) *maxx = v->max_gx;
+        if (miny) *miny = v->min_gy;
+        if (maxy) *maxy = v->max_gy;
+        if (minz) *minz = v->min_gz;
+        if (maxz) *maxz = v->max_gz;
+        return;
+    }
+
+    voxel_compute_bounds(v, minx, maxx, miny, maxy, minz, maxz);
 }
 
 
@@ -398,10 +426,13 @@ static void table_remove(int x, int y, int z) {
     }
 }
 
-static void voxel_table_register(const Voxel *v, int idx)
+static void voxel_table_register(Voxel *v, int idx)
 {
     int minx, maxx, miny, maxy, minz, maxz;
-    voxel_grid_bounds(v, &minx, &maxx, &miny, &maxy, &minz, &maxz);
+    voxel_compute_bounds(v, &minx, &maxx, &miny, &maxy, &minz, &maxz);
+    v->min_gx = minx; v->max_gx = maxx;
+    v->min_gy = miny; v->max_gy = maxy;
+    v->min_gz = minz; v->max_gz = maxz;
     for (int x = minx; x <= maxx; ++x) {
         for (int y = miny; y <= maxy; ++y) {
             for (int z = minz; z <= maxz; ++z) {
@@ -548,6 +579,8 @@ static int addVoxelSized(float px, float py, float pz, bool fixed, bool simulate
     v->type = type;
     v->owner   = -1;
     memset(v->surface, 0, sizeof v->surface);
+    v->min_gx = v->min_gy = v->min_gz = INT_MAX;
+    v->max_gx = v->max_gy = v->max_gz = INT_MIN;
     // compute grid coords
     v->gx = (int)floorf(px / VOXEL_SIZE);
     v->gy = (int)floorf(py / VOXEL_SIZE);
@@ -566,7 +599,13 @@ static int addVoxelSized(float px, float py, float pz, bool fixed, bool simulate
         p->prev_pos = p->pos;
         p->predicted_pos = p->pos;
         p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
-        p->inv_mass = (fixed || !simulate) ? 0.0f : 1.0f;
+        if (fixed || !simulate) {
+            p->inv_mass = 0.0f;
+        } else {
+            float mass_scale = (float)(span * span * span);
+            if (mass_scale <= 0.0f) mass_scale = 1.0f;
+            p->inv_mass = 1.0f / mass_scale;
+        }
     }
     voxel_table_register(v, idx);
     return idx;
@@ -835,7 +874,7 @@ static void physics_step(float dt) {    // Rebuild spatial hash
 
 // Predict positions for the next step (equivalent to the GPU PredictPositions kernel).
 static void integrate_particles(float dt) {
-    const Vector3 gravity = { 0.0f, -GRAVITY*1.0f, 0.0f };
+    const Vector3 gravity = { 0.0f, -GRAVITY*0.0f, 0.0f };
     const float dt_sq = dt * dt;
 
     for (int i = 0; i < voxel_count; ++i) {
@@ -1245,31 +1284,6 @@ static bool voxels_share_edge_or_corner(const Voxel *voxel_a, const Voxel *voxel
     return touching_axes >= 2;
 }
 
-static bool voxels_share_face(const Voxel *voxel_a, const Voxel *voxel_b) {
-    int aMinX, aMaxX, aMinY, aMaxY, aMinZ, aMaxZ;
-    int bMinX, bMaxX, bMinY, bMaxY, bMinZ, bMaxZ;
-    voxel_grid_bounds(voxel_a, &aMinX, &aMaxX, &aMinY, &aMaxY, &aMinZ, &aMaxZ);
-    voxel_grid_bounds(voxel_b, &bMinX, &bMaxX, &bMinY, &bMaxY, &bMinZ, &bMaxZ);
-
-    bool touchX = ranges_touch(aMinX, aMaxX, bMinX, bMaxX);
-    bool touchY = ranges_touch(aMinY, aMaxY, bMinY, bMaxY);
-    bool touchZ = ranges_touch(aMinZ, aMaxZ, bMinZ, bMaxZ);
-
-    int touching_axes = (touchX ? 1 : 0) + (touchY ? 1 : 0) + (touchZ ? 1 : 0);
-    if (touching_axes != 1) {
-        return false;
-    }
-
-    bool overlapX = ranges_overlap(aMinX, aMaxX, bMinX, bMaxX);
-    bool overlapY = ranges_overlap(aMinY, aMaxY, bMinY, bMaxY);
-    bool overlapZ = ranges_overlap(aMinZ, aMaxZ, bMinZ, bMaxZ);
-
-    if (touchX && (!overlapY || !overlapZ)) return false;
-    if (touchY && (!overlapX || !overlapZ)) return false;
-    if (touchZ && (!overlapX || !overlapY)) return false;
-
-    return true;
-}
 
 static void compute_voxel_center_and_mass(const Voxel *voxel, Vector3 *center, float *inv_mass_sum) {
     Vector3 c = { 0.0f, 0.0f, 0.0f };
@@ -1373,8 +1387,8 @@ static void solve_particle_collisions(float dt) {
                 float radiusB = voxel_particle_radius(voxelB);
 
                 if (voxels_are_glued(i, neighbor_idx) ||
-                    voxels_share_face(voxelA, voxelB) ||
-                    voxels_share_edge_or_corner(voxelA, voxelB)) {
+                    (voxelA->span == 1 && voxelB->span == 1 &&
+                     voxels_share_edge_or_corner(voxelA, voxelB))) {
                     continue;
                 }
 
