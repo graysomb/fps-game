@@ -616,24 +616,40 @@ static void buildDemo(void) {
     //}
 
     // Central platform
-    int platform_size = 2;
-    int platform_height = 1; // 15 / 3
-    int platform_base_height = 10; // to keep top at same level (21)
-    for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
-        for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
-            for (int z = M/2 - platform_size/2; z <= M/2 + platform_size/2; z++) {
-                float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                float py = (y + 0.5f) * VOXEL_SIZE;
-                float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                addVoxel(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0);
+    // int platform_size = 2;
+    // int platform_height = 1; // 15 / 3
+    // int platform_base_height = 10; // to keep top at same level (21)
+    // for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
+    //     for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
+    //         for (int z = M/2 - platform_size/2; z <= M/2 + platform_size/2; z++) {
+    //             float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    //             float py = (y + 0.5f) * VOXEL_SIZE;
+    //             float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    //             addVoxel(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0);
+    //         }
+    //     }
+    // }
+
+    // Spawn a 2x2x2 cluster of span-2 voxels to exercise larger glued blocks.
+    const int cluster_span = 2;
+    const float cell_spacing = cluster_span * VOXEL_SIZE;
+    Vector3 cluster_origin = { -6.0f, cell_spacing * 0.5f, -6.0f };
+    for (int sx = 0; sx < 2; ++sx) {
+        for (int sy = 0; sy < 2; ++sy) {
+            for (int sz = 0; sz < 2; ++sz) {
+                float px = cluster_origin.x + (sx + 0.5f) * cell_spacing;
+                float py = cluster_origin.y + (sy + 0.5f) * cell_spacing;
+                float pz = cluster_origin.z + (sz + 0.5f) * cell_spacing;
+                Color col = {
+                    (unsigned char)(150 + sx * 40),
+                    (unsigned char)(120 + sy * 30),
+                    (unsigned char)(180 - sz * 30),
+                    255
+                };
+                addVoxelSized(px, py, pz, false, true, col, 0, cluster_span);
             }
         }
     }
-
-    // Example voxels of span 1, 2, and 3 to exercise the new sizing path.
-    addVoxelSized(-6.0f, VOXEL_SIZE * 0.5f, 0.0f, true, false, (Color){ 200, 200, 200, 255 }, 0, 1);
-    addVoxelSized(0.0f, VOXEL_SIZE, 6.0f, false, true, (Color){ 200, 100, 50, 255 }, 0, 2);
-    addVoxelSized(6.0f, VOXEL_SIZE * 1.5f, -6.0f, false, true, (Color){ 50, 120, 220, 255 }, 0, 3);
 }
 
 
@@ -1229,6 +1245,32 @@ static bool voxels_share_edge_or_corner(const Voxel *voxel_a, const Voxel *voxel
     return touching_axes >= 2;
 }
 
+static bool voxels_share_face(const Voxel *voxel_a, const Voxel *voxel_b) {
+    int aMinX, aMaxX, aMinY, aMaxY, aMinZ, aMaxZ;
+    int bMinX, bMaxX, bMinY, bMaxY, bMinZ, bMaxZ;
+    voxel_grid_bounds(voxel_a, &aMinX, &aMaxX, &aMinY, &aMaxY, &aMinZ, &aMaxZ);
+    voxel_grid_bounds(voxel_b, &bMinX, &bMaxX, &bMinY, &bMaxY, &bMinZ, &bMaxZ);
+
+    bool touchX = ranges_touch(aMinX, aMaxX, bMinX, bMaxX);
+    bool touchY = ranges_touch(aMinY, aMaxY, bMinY, bMaxY);
+    bool touchZ = ranges_touch(aMinZ, aMaxZ, bMinZ, bMaxZ);
+
+    int touching_axes = (touchX ? 1 : 0) + (touchY ? 1 : 0) + (touchZ ? 1 : 0);
+    if (touching_axes != 1) {
+        return false;
+    }
+
+    bool overlapX = ranges_overlap(aMinX, aMaxX, bMinX, bMaxX);
+    bool overlapY = ranges_overlap(aMinY, aMaxY, bMinY, bMaxY);
+    bool overlapZ = ranges_overlap(aMinZ, aMaxZ, bMinZ, bMaxZ);
+
+    if (touchX && (!overlapY || !overlapZ)) return false;
+    if (touchY && (!overlapX || !overlapZ)) return false;
+    if (touchZ && (!overlapX || !overlapY)) return false;
+
+    return true;
+}
+
 static void compute_voxel_center_and_mass(const Voxel *voxel, Vector3 *center, float *inv_mass_sum) {
     Vector3 c = { 0.0f, 0.0f, 0.0f };
     float sum = 0.0f;
@@ -1331,6 +1373,7 @@ static void solve_particle_collisions(float dt) {
                 float radiusB = voxel_particle_radius(voxelB);
 
                 if (voxels_are_glued(i, neighbor_idx) ||
+                    voxels_share_face(voxelA, voxelB) ||
                     voxels_share_edge_or_corner(voxelA, voxelB)) {
                     continue;
                 }
