@@ -414,15 +414,52 @@ static Mesh  greedyMesh = { 0 };
 static bool  meshDirty  = true;
 
 typedef struct {
-    int voxelA;
-    int voxelB;
-    int cornerA[4];
-    int cornerB[4];
-    bool active;
+    int   coarseVoxel;
+    int   fineVoxel;
+    int   coarseCorner[4];
+    float w[4];
+    int   fineCorner;
+    bool  active;
 } GlueConstraint;
 
-static GlueConstraint glueConstraints[MAX_VOXELS * 3];
+static GlueConstraint glueConstraints[MAX_VOXELS * 12];
 static int glueConstraintCount = 0;
+
+static inline int voxel_span_for_glue(const Voxel *v) {
+    return (v && v->span > 0) ? v->span : 1;
+}
+
+static void get_face_corners_for_direction(const GlueDirection *dir,
+                                           bool positive_side,
+                                           int outCorners[4])
+{
+    const int *src = positive_side ? dir->faceA : dir->faceB;
+    for (int i = 0; i < 4; ++i) {
+        outCorners[i] = src[i];
+    }
+}
+
+static void order_coarse_fine_pair(int negativeIdx, int positiveIdx,
+                                   int *coarseIdx, bool *coarseIsPositive,
+                                   int *fineIdx, bool *fineIsPositive)
+{
+    const Voxel *neg = &voxels[negativeIdx];
+    const Voxel *pos = &voxels[positiveIdx];
+    int spanNeg = voxel_span_for_glue(neg);
+    int spanPos = voxel_span_for_glue(pos);
+
+    if (spanNeg >= spanPos) {
+        *coarseIdx = negativeIdx;
+        *coarseIsPositive = true;
+        *fineIdx = positiveIdx;
+        *fineIsPositive = false;
+    } else {
+        *coarseIdx = positiveIdx;
+        *coarseIsPositive = false;
+        *fineIdx = negativeIdx;
+        *fineIsPositive = true;
+    }
+}
 
 
 
@@ -837,6 +874,57 @@ static void buildDemo(void) {
             }
         }
     }
+
+    // Mixed-span glue test: large span cubes with span-1 neighbors sampling different face regions.
+    {
+        const int span_large = 3;
+        const int span_small = 1;
+        const float edge_large = span_large * VOXEL_SIZE;
+        const float edge_small = span_small * VOXEL_SIZE;
+        const float face_gap = 0.5f * (edge_large + edge_small);
+
+        Vector3 large_center = { 4.0f, 0.5f * edge_large, 4.0f };
+        Color large_col = { 220, 120, 60, 255 };
+        addVoxelSized(large_center.x, large_center.y, large_center.z, false, true, large_col, 0, span_large);
+
+        Vector3 fine_centers[2] = {
+            { large_center.x + face_gap, large_center.y, large_center.z },
+            { large_center.x + face_gap,
+              large_center.y + 0.5f * VOXEL_SIZE,
+              large_center.z + 0.5f * VOXEL_SIZE }
+        };
+        Color fine_cols[2] = {
+            { 60, 180, 220, 255 },
+            { 80, 200, 150, 255 }
+        };
+        for (int i = 0; i < 2; ++i) {
+            addVoxelSized(fine_centers[i].x,
+                          fine_centers[i].y,
+                          fine_centers[i].z,
+                          false, true, fine_cols[i], 0, span_small);
+        }
+    }
+
+    // Inverted test: a small span-1 voxel glues to a larger span-3 neighbor on its +X side.
+    {
+        const int span_large = 3;
+        const int span_small = 1;
+        const float edge_large = span_large * VOXEL_SIZE;
+        const float edge_small = span_small * VOXEL_SIZE;
+        const float face_gap = 0.5f * (edge_large + edge_small);
+
+        Vector3 small_center = { 8.0f, 0.5f * edge_small, 4.5f };
+        Color small_col = { 80, 80, 220, 255 };
+        addVoxelSized(small_center.x, small_center.y, small_center.z, false, true, small_col, 0, span_small);
+
+        Vector3 large_center = {
+            small_center.x + face_gap,
+            0.5f * edge_large,
+            small_center.z + 0.5f * VOXEL_SIZE
+        };
+        Color large_col = { 200, 160, 60, 255 };
+        addVoxelSized(large_center.x, large_center.y, large_center.z, false, true, large_col, 0, span_large);
+    }
 }
 
 
@@ -1168,29 +1256,6 @@ static void solve_voxel_shape(Voxel *voxel) {
     }
 }
 
-static void solve_glue_pair(Particle *pa, Particle *pb) {
-    float wa = pa->inv_mass;
-    float wb = pb->inv_mass;
-    float w_sum = wa + wb;
-    if (w_sum <= 0.0f) {
-        return;
-    }
-
-    Vector3 delta = v_sub(pb->predicted_pos, pa->predicted_pos);
-    float dist_sq = v_dot(delta, delta);
-    if (dist_sq < GLUE_EPS) {
-        return;
-    }
-
-    Vector3 step = v_mul(delta, GLUE_RELAXATION / w_sum);
-    if (wa > 0.0f) {
-        pa->predicted_pos = v_add(pa->predicted_pos, v_mul(step, wa));
-    }
-    if (wb > 0.0f) {
-        pb->predicted_pos = v_sub(pb->predicted_pos, v_mul(step, wb));
-    }
-}
-
 static void solve_voxel_glue(void) {
     for (int i = 0; i < glueConstraintCount; ++i) {
         GlueConstraint *gc = &glueConstraints[i];
@@ -1198,32 +1263,56 @@ static void solve_voxel_glue(void) {
             continue;
         }
 
-        Voxel *voxelA = &voxels[gc->voxelA];
-        Voxel *voxelB = &voxels[gc->voxelB];
+        Voxel *coarse = &voxels[gc->coarseVoxel];
+        Voxel *fine   = &voxels[gc->fineVoxel];
 
-        float max_dist = 0.0f;
+        Particle *coarseParticles[4];
+        float weights[4];
         for (int k = 0; k < 4; ++k) {
-            Particle *pa = &voxelA->particles[gc->cornerA[k]];
-            Particle *pb = &voxelB->particles[gc->cornerB[k]];
-            Vector3 delta = v_sub(pb->predicted_pos, pa->predicted_pos);
-            float dist = v_length(delta);
-            if (dist > max_dist) {
-                max_dist = dist;
-            }
+            coarseParticles[k] = &coarse->particles[gc->coarseCorner[k]];
+            weights[k] = gc->w[k];
         }
+        Particle *fineParticle = &fine->particles[gc->fineCorner];
 
-        float break_distance = GLUE_BREAK_STRAIN *
-                               fminf(voxelA->rest_edge, voxelB->rest_edge);
-
-        if (max_dist > break_distance) {
+        Vector3 blended = { 0.0f, 0.0f, 0.0f };
+        for (int k = 0; k < 4; ++k) {
+            blended = v_add(blended, v_mul(coarseParticles[k]->predicted_pos, weights[k]));
+        }
+        Vector3 C = v_sub(blended, fineParticle->predicted_pos);
+        float violation = v_length(C);
+        float rest_edge_min = fminf(coarse->rest_edge, fine->rest_edge);
+        float break_distance = GLUE_BREAK_STRAIN * rest_edge_min;
+        if (violation > break_distance) {
             gc->active = false;
             continue;
         }
+        if (violation < GLUE_EPS) {
+            continue;
+        }
 
+        float invMassSum = fineParticle->inv_mass;
         for (int k = 0; k < 4; ++k) {
-            Particle *pa = &voxelA->particles[gc->cornerA[k]];
-            Particle *pb = &voxelB->particles[gc->cornerB[k]];
-            solve_glue_pair(pa, pb);
+            float inv_m = coarseParticles[k]->inv_mass;
+            float wk = weights[k];
+            invMassSum += wk * wk * inv_m;
+        }
+        if (invMassSum <= 0.0f) {
+            continue;
+        }
+
+        Vector3 lambda = v_mul(C, -GLUE_RELAXATION / invMassSum);
+        for (int k = 0; k < 4; ++k) {
+            float inv_m = coarseParticles[k]->inv_mass;
+            if (inv_m <= 0.0f) {
+                continue;
+            }
+            float scale = weights[k] * inv_m;
+            coarseParticles[k]->predicted_pos = v_add(coarseParticles[k]->predicted_pos,
+                                                      v_mul(lambda, scale));
+        }
+        if (fineParticle->inv_mass > 0.0f) {
+            fineParticle->predicted_pos = v_sub(fineParticle->predicted_pos,
+                                                v_mul(lambda, fineParticle->inv_mass));
         }
     }
 }
@@ -1285,30 +1374,80 @@ static int gather_face_neighbors(int voxel_idx, const GlueDirection *dir,
     return count;
 }
 
+static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positiveIdx,
+                                                   const GlueDirection *dir)
+{
+    int coarseIdx, fineIdx;
+    bool coarsePositive, finePositive;
+    order_coarse_fine_pair(negativeIdx, positiveIdx,
+                           &coarseIdx, &coarsePositive,
+                           &fineIdx, &finePositive);
+
+    Voxel *coarse = &voxels[coarseIdx];
+    Voxel *fine   = &voxels[fineIdx];
+
+    int coarseFace[4];
+    int fineFace[4];
+    get_face_corners_for_direction(dir, coarsePositive, coarseFace);
+    get_face_corners_for_direction(dir, finePositive, fineFace);
+
+    Vector3 coarsePos[4];
+    for (int k = 0; k < 4; ++k) {
+        coarsePos[k] = coarse->particles[coarseFace[k]].predicted_pos;
+    }
+
+    Vector3 U = v_sub(coarsePos[1], coarsePos[0]);
+    Vector3 V = v_sub(coarsePos[2], coarsePos[0]);
+    float Ulen2 = v_dot(U, U);
+    float Vlen2 = v_dot(V, V);
+    if (Ulen2 < 1e-8f || Vlen2 < 1e-8f) {
+        return;
+    }
+
+    for (int c = 0; c < 4; ++c) {
+        if (glueConstraintCount >= (int)(sizeof(glueConstraints) / sizeof(glueConstraints[0]))) {
+            return;
+        }
+
+        int fineCorner = fineFace[c];
+        Vector3 finePos = fine->particles[fineCorner].predicted_pos;
+        Vector3 d = v_sub(finePos, coarsePos[0]);
+        float u = v_dot(d, U) / Ulen2;
+        float v = v_dot(d, V) / Vlen2;
+        u = clampf(u, 0.0f, 1.0f);
+        v = clampf(v, 0.0f, 1.0f);
+
+        float w0 = (1.0f - u) * (1.0f - v);
+        float w1 =        u  * (1.0f - v);
+        float w2 = (1.0f - u) *        v;
+        float w3 =        u  *        v;
+
+        GlueConstraint *gc = &glueConstraints[glueConstraintCount++];
+        gc->coarseVoxel = coarseIdx;
+        gc->fineVoxel   = fineIdx;
+        for (int k = 0; k < 4; ++k) {
+            gc->coarseCorner[k] = coarseFace[k];
+        }
+        gc->w[0] = w0;
+        gc->w[1] = w1;
+        gc->w[2] = w2;
+        gc->w[3] = w3;
+        gc->fineCorner = fineCorner;
+        gc->active = true;
+    }
+}
+
 static void rebuild_glue_constraints(void) {
     glueConstraintCount = 0;
 
     for (int i = 0; i < voxel_count; ++i) {
-        Voxel *voxelA = &voxels[i];
-
         for (int d = 0; d < 3; ++d) {
             const GlueDirection *dir = &glueDirections[d];
             int neighbors[MAX_FACE_NEIGHBORS] = {0};
             int neighborCount = gather_face_neighbors(i, dir, neighbors, MAX_FACE_NEIGHBORS);
             for (int n = 0; n < neighborCount; ++n) {
                 int neighbor_idx = neighbors[n];
-                if (glueConstraintCount >= (int)(sizeof(glueConstraints) / sizeof(glueConstraints[0]))) {
-                    break;
-                }
-
-                GlueConstraint *gc = &glueConstraints[glueConstraintCount++];
-                gc->voxelA = i;
-                gc->voxelB = neighbor_idx;
-                for (int k = 0; k < 4; ++k) {
-                    gc->cornerA[k] = dir->faceA[k];
-                    gc->cornerB[k] = dir->faceB[k];
-                }
-                gc->active = true;
+                add_bilinear_glue_constraints_for_pair(i, neighbor_idx, dir);
             }
         }
     }
@@ -1323,15 +1462,21 @@ static bool particles_are_glued_pair(int voxel_idx_a, int corner_idx_a,
             continue;
         }
 
-        if (gc->voxelA == voxel_idx_a && gc->voxelB == voxel_idx_b) {
+        if (gc->coarseVoxel == voxel_idx_a && gc->fineVoxel == voxel_idx_b) {
+            if (corner_idx_b != gc->fineCorner) {
+                continue;
+            }
             for (int k = 0; k < 4; ++k) {
-                if (gc->cornerA[k] == corner_idx_a && gc->cornerB[k] == corner_idx_b) {
+                if (gc->coarseCorner[k] == corner_idx_a) {
                     return true;
                 }
             }
-        } else if (gc->voxelA == voxel_idx_b && gc->voxelB == voxel_idx_a) {
+        } else if (gc->coarseVoxel == voxel_idx_b && gc->fineVoxel == voxel_idx_a) {
+            if (corner_idx_a != gc->fineCorner) {
+                continue;
+            }
             for (int k = 0; k < 4; ++k) {
-                if (gc->cornerA[k] == corner_idx_b && gc->cornerB[k] == corner_idx_a) {
+                if (gc->coarseCorner[k] == corner_idx_b) {
                     return true;
                 }
             }
@@ -1389,8 +1534,8 @@ static bool voxels_are_glued(int voxel_idx_a, int voxel_idx_b) {
             continue;
         }
 
-        bool forward = (gc->voxelA == voxel_idx_a && gc->voxelB == voxel_idx_b);
-        bool reverse = (gc->voxelA == voxel_idx_b && gc->voxelB == voxel_idx_a);
+        bool forward = (gc->coarseVoxel == voxel_idx_a && gc->fineVoxel == voxel_idx_b);
+        bool reverse = (gc->coarseVoxel == voxel_idx_b && gc->fineVoxel == voxel_idx_a);
         if (forward || reverse) {
             return true;
         }
