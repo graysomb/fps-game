@@ -290,91 +290,6 @@ static bool voxels_share_edge_or_corner_rest(const Voxel *voxel_a, const Voxel *
     return touching_axes >= 2;
 }
 
-static void voxel_rest_axis_bounds(const Voxel *v, int axis, int *min_out, int *max_out) {
-    if (!v) {
-        if (min_out) *min_out = 0;
-        if (max_out) *max_out = 0;
-        return;
-    }
-    switch (axis) {
-        case 0:
-            if (min_out) *min_out = v->rest_min_gx;
-            if (max_out) *max_out = v->rest_max_gx;
-            break;
-        case 1:
-            if (min_out) *min_out = v->rest_min_gy;
-            if (max_out) *max_out = v->rest_max_gy;
-            break;
-        default:
-            if (min_out) *min_out = v->rest_min_gz;
-            if (max_out) *max_out = v->rest_max_gz;
-            break;
-    }
-}
-
-static int corner_index_from_signs(int sx, int sy, int sz) {
-    for (int i = 0; i < 8; ++i) {
-        if (corner_signs[i][0] == sx &&
-            corner_signs[i][1] == sy &&
-            corner_signs[i][2] == sz) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-static int axis_value_to_sign(const Voxel *v, int axis, float boundary_value) {
-    int min_cell = 0, max_cell = 0;
-    voxel_rest_axis_bounds(v, axis, &min_cell, &max_cell);
-    float min_boundary = (float)min_cell;
-    float max_boundary = (float)(max_cell + 1);
-    float center = 0.5f * (min_boundary + max_boundary);
-    if (boundary_value <= center) {
-        return -1;
-    }
-    return +1;
-}
-
-static int compute_overlap_axis_bounds(const Voxel *a, const Voxel *b,
-                                       int axis, float bounds_out[2]) {
-    int aMin, aMax, bMin, bMax;
-    voxel_rest_axis_bounds(a, axis, &aMin, &aMax);
-    voxel_rest_axis_bounds(b, axis, &bMin, &bMax);
-
-    int cell_min = (aMin > bMin) ? aMin : bMin;
-    int cell_max = (aMax < bMax) ? aMax : bMax;
-    if (cell_min > cell_max) {
-        return 0;
-    }
-
-    bounds_out[0] = (float)cell_min;
-    bounds_out[1] = (float)(cell_max + 1);
-    return 2;
-}
-
-static int build_face_corners_for_overlap(const Voxel *voxel,
-                                          int normal_axis, int normal_sign,
-                                          int axisA, const float axisA_bounds[2], int axisA_count,
-                                          int axisB, const float axisB_bounds[2], int axisB_count,
-                                          uint8_t out_indices[4]) {
-    int count = 0;
-    for (int i = 0; i < axisA_count && count < 4; ++i) {
-        int signA = axis_value_to_sign(voxel, axisA, axisA_bounds[i]);
-        for (int j = 0; j < axisB_count && count < 4; ++j) {
-            int signB = axis_value_to_sign(voxel, axisB, axisB_bounds[j]);
-            int signs[3] = { 0, 0, 0 };
-            signs[normal_axis] = normal_sign;
-            signs[axisA] = signA;
-            signs[axisB] = signB;
-            int idx = corner_index_from_signs(signs[0], signs[1], signs[2]);
-            if (idx >= 0) {
-                out_indices[count++] = (uint8_t)idx;
-            }
-        }
-    }
-    return count;
-}
-
 static int table_get(int x, int y, int z);
 static void rebuild_glue_constraints(void);
 static void solve_voxel_glue(void);
@@ -503,7 +418,6 @@ typedef struct {
     int voxelB;
     int cornerA[4];
     int cornerB[4];
-    int pairCount;
     bool active;
 } GlueConstraint;
 
@@ -1288,7 +1202,7 @@ static void solve_voxel_glue(void) {
         Voxel *voxelB = &voxels[gc->voxelB];
 
         float max_dist = 0.0f;
-        for (int k = 0; k < gc->pairCount; ++k) {
+        for (int k = 0; k < 4; ++k) {
             Particle *pa = &voxelA->particles[gc->cornerA[k]];
             Particle *pb = &voxelB->particles[gc->cornerB[k]];
             Vector3 delta = v_sub(pb->predicted_pos, pa->predicted_pos);
@@ -1306,7 +1220,7 @@ static void solve_voxel_glue(void) {
             continue;
         }
 
-        for (int k = 0; k < gc->pairCount; ++k) {
+        for (int k = 0; k < 4; ++k) {
             Particle *pa = &voxelA->particles[gc->cornerA[k]];
             Particle *pb = &voxelB->particles[gc->cornerB[k]];
             solve_glue_pair(pa, pb);
@@ -1387,62 +1301,12 @@ static void rebuild_glue_constraints(void) {
                     break;
                 }
 
-                Voxel *voxelB = &voxels[neighbor_idx];
-
-                int normal_axis = 0;
-                int axis_u = 1;
-                int axis_v = 2;
-                int normal_sign = 1;
-                if (dir->dx != 0) {
-                    normal_axis = 0;
-                    axis_u = 1;
-                    axis_v = 2;
-                    normal_sign = (dir->dx > 0) ? +1 : -1;
-                } else if (dir->dy != 0) {
-                    normal_axis = 1;
-                    axis_u = 0;
-                    axis_v = 2;
-                    normal_sign = (dir->dy > 0) ? +1 : -1;
-                } else {
-                    normal_axis = 2;
-                    axis_u = 0;
-                    axis_v = 1;
-                    normal_sign = (dir->dz > 0) ? +1 : -1;
-                }
-
-                float axis_u_bounds[2];
-                float axis_v_bounds[2];
-                int axis_u_count = compute_overlap_axis_bounds(voxelA, voxelB, axis_u, axis_u_bounds);
-                int axis_v_count = compute_overlap_axis_bounds(voxelA, voxelB, axis_v, axis_v_bounds);
-                if (axis_u_count == 0 || axis_v_count == 0) {
-                    continue;
-                }
-
-                uint8_t cornersA[4] = {0};
-                uint8_t cornersB[4] = {0};
-                int countA = build_face_corners_for_overlap(
-                    voxelA, normal_axis, normal_sign,
-                    axis_u, axis_u_bounds, axis_u_count,
-                    axis_v, axis_v_bounds, axis_v_count,
-                    cornersA);
-                int countB = build_face_corners_for_overlap(
-                    voxelB, normal_axis, -normal_sign,
-                    axis_u, axis_u_bounds, axis_u_count,
-                    axis_v, axis_v_bounds, axis_v_count,
-                    cornersB);
-
-                int pairCount = (countA < countB) ? countA : countB;
-                if (pairCount <= 0) {
-                    continue;
-                }
-
                 GlueConstraint *gc = &glueConstraints[glueConstraintCount++];
                 gc->voxelA = i;
                 gc->voxelB = neighbor_idx;
-                gc->pairCount = pairCount;
-                for (int k = 0; k < pairCount; ++k) {
-                    gc->cornerA[k] = cornersA[k];
-                    gc->cornerB[k] = cornersB[k];
+                for (int k = 0; k < 4; ++k) {
+                    gc->cornerA[k] = dir->faceA[k];
+                    gc->cornerB[k] = dir->faceB[k];
                 }
                 gc->active = true;
             }
@@ -1460,13 +1324,13 @@ static bool particles_are_glued_pair(int voxel_idx_a, int corner_idx_a,
         }
 
         if (gc->voxelA == voxel_idx_a && gc->voxelB == voxel_idx_b) {
-            for (int k = 0; k < gc->pairCount; ++k) {
+            for (int k = 0; k < 4; ++k) {
                 if (gc->cornerA[k] == corner_idx_a && gc->cornerB[k] == corner_idx_b) {
                     return true;
                 }
             }
         } else if (gc->voxelA == voxel_idx_b && gc->voxelB == voxel_idx_a) {
-            for (int k = 0; k < gc->pairCount; ++k) {
+            for (int k = 0; k < 4; ++k) {
                 if (gc->cornerA[k] == corner_idx_b && gc->cornerB[k] == corner_idx_a) {
                     return true;
                 }
