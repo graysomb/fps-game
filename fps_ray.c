@@ -398,6 +398,33 @@ static Vector3 v_norm(Vector3 v) {
     return v_mul(v, 1.0f / len);
 }
 
+static bool face_local_coords(const Vector3 origin,
+                              const Vector3 U,
+                              const Vector3 V,
+                              const Vector3 normal,
+                              float UU,
+                              float VV,
+                              float UV,
+                              float invDet,
+                              Vector3 point,
+                              float *outU,
+                              float *outV)
+{
+    Vector3 d = v_sub(point, origin);
+    float signedDistance = v_dot(normal, d);
+    Vector3 projected = v_sub(point, v_mul(normal, signedDistance));
+    Vector3 p = v_sub(projected, origin);
+
+    float du = v_dot(p, U);
+    float dv = v_dot(p, V);
+
+    float u = (du * VV - dv * UV) * invDet;
+    float v = (dv * UU - du * UV) * invDet;
+    if (outU) *outU = clampf(u, 0.0f, 1.0f);
+    if (outV) *outV = clampf(v, 0.0f, 1.0f);
+    return true;
+}
+
 // Patch for a merged quad in one of the principal planes
 typedef struct {
     int   plane;     // 0=XY,1=XZ,2=YZ
@@ -414,12 +441,14 @@ static Mesh  greedyMesh = { 0 };
 static bool  meshDirty  = true;
 
 typedef struct {
-    int   coarseVoxel;
-    int   fineVoxel;
-    int   coarseCorner[4];
-    float w[4];
-    int   fineCorner;
-    bool  active;
+    int      coarseVoxel;
+    int      fineVoxel;
+    int      coarseCorner[4];
+    float    w[4];
+    int      fineCorner;
+    uint8_t  coarseMask;
+    uint8_t  fineMask;
+    bool     active;
 } GlueConstraint;
 
 static GlueConstraint glueConstraints[MAX_VOXELS * 12];
@@ -1392,17 +1421,29 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
     get_face_corners_for_direction(dir, finePositive, fineFace);
 
     Vector3 coarsePos[4];
+    uint8_t coarseMask = 0;
     for (int k = 0; k < 4; ++k) {
-        coarsePos[k] = coarse->particles[coarseFace[k]].predicted_pos;
+        coarsePos[k] = coarse->particles[coarseFace[k]].pos;
+        coarseMask |= (uint8_t)(1u << coarseFace[k]);
     }
 
     Vector3 U = v_sub(coarsePos[1], coarsePos[0]);
     Vector3 V = v_sub(coarsePos[2], coarsePos[0]);
-    float Ulen2 = v_dot(U, U);
-    float Vlen2 = v_dot(V, V);
-    if (Ulen2 < 1e-8f || Vlen2 < 1e-8f) {
+    Vector3 normal = v_cross(U, V);
+    float normal_len_sq = v_dot(normal, normal);
+    if (normal_len_sq < 1e-10f) {
         return;
     }
+    normal = v_mul(normal, 1.0f / sqrtf(normal_len_sq));
+
+    float UU = v_dot(U, U);
+    float VV = v_dot(V, V);
+    float UV = v_dot(U, V);
+    float det = UU * VV - UV * UV;
+    if (fabsf(det) < 1e-10f) {
+        return;
+    }
+    float invDet = 1.0f / det;
 
     for (int c = 0; c < 4; ++c) {
         if (glueConstraintCount >= (int)(sizeof(glueConstraints) / sizeof(glueConstraints[0]))) {
@@ -1410,17 +1451,26 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
         }
 
         int fineCorner = fineFace[c];
-        Vector3 finePos = fine->particles[fineCorner].predicted_pos;
-        Vector3 d = v_sub(finePos, coarsePos[0]);
-        float u = v_dot(d, U) / Ulen2;
-        float v = v_dot(d, V) / Vlen2;
-        u = clampf(u, 0.0f, 1.0f);
-        v = clampf(v, 0.0f, 1.0f);
+        Vector3 finePos = fine->particles[fineCorner].pos;
+        float u = 0.0f;
+        float v = 0.0f;
+        if (!face_local_coords(coarsePos[0], U, V, normal, UU, VV, UV, invDet, finePos, &u, &v)) {
+            continue;
+        }
 
         float w0 = (1.0f - u) * (1.0f - v);
         float w1 =        u  * (1.0f - v);
         float w2 = (1.0f - u) *        v;
         float w3 =        u  *        v;
+        float w_sum = w0 + w1 + w2 + w3;
+        if (w_sum <= 0.0f) {
+            continue;
+        }
+        float inv_w_sum = 1.0f / w_sum;
+        w0 *= inv_w_sum;
+        w1 *= inv_w_sum;
+        w2 *= inv_w_sum;
+        w3 *= inv_w_sum;
 
         GlueConstraint *gc = &glueConstraints[glueConstraintCount++];
         gc->coarseVoxel = coarseIdx;
@@ -1433,6 +1483,8 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
         gc->w[2] = w2;
         gc->w[3] = w3;
         gc->fineCorner = fineCorner;
+        gc->coarseMask = coarseMask;
+        gc->fineMask = (uint8_t)(1u << fineCorner);
         gc->active = true;
     }
 }
@@ -1456,6 +1508,9 @@ static void rebuild_glue_constraints(void) {
 // Returns true when the provided voxel/corner pair is part of an active glue constraint.
 static bool particles_are_glued_pair(int voxel_idx_a, int corner_idx_a,
                                      int voxel_idx_b, int corner_idx_b) {
+    uint8_t bitA = (uint8_t)(1u << corner_idx_a);
+    uint8_t bitB = (uint8_t)(1u << corner_idx_b);
+
     for (int g = 0; g < glueConstraintCount; ++g) {
         const GlueConstraint *gc = &glueConstraints[g];
         if (!gc->active) {
@@ -1463,22 +1518,12 @@ static bool particles_are_glued_pair(int voxel_idx_a, int corner_idx_a,
         }
 
         if (gc->coarseVoxel == voxel_idx_a && gc->fineVoxel == voxel_idx_b) {
-            if (corner_idx_b != gc->fineCorner) {
-                continue;
-            }
-            for (int k = 0; k < 4; ++k) {
-                if (gc->coarseCorner[k] == corner_idx_a) {
-                    return true;
-                }
+            if ((gc->coarseMask & bitA) && (gc->fineMask & bitB)) {
+                return true;
             }
         } else if (gc->coarseVoxel == voxel_idx_b && gc->fineVoxel == voxel_idx_a) {
-            if (corner_idx_a != gc->fineCorner) {
-                continue;
-            }
-            for (int k = 0; k < 4; ++k) {
-                if (gc->coarseCorner[k] == corner_idx_b) {
-                    return true;
-                }
+            if ((gc->coarseMask & bitB) && (gc->fineMask & bitA)) {
+                return true;
             }
         }
     }
