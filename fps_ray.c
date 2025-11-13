@@ -148,9 +148,16 @@ static bool debugDrawParticles = false;
 static bool debugColorParticlesByVelocity = false;
 static const float PARTICLE_DEBUG_MARKER_RADIUS = 0.6f;
 static const float PARTICLE_DEBUG_MAX_SPEED = 20.0f;
-static bool debugLogSpanCollisions = false;
+static bool debugLogSpanCollisions = true;
 static int debugSpanEdgeLogBudget = 0;
 static int debugSpanCollisionLogBudget = 0;
+static bool debugLogGlue = true;
+static int debugGlueBuildLogBudget = 0;
+static int debugGlueSolveLogBudget = 0;
+static int debugGlueBreakLogBudget = 0;
+static const int DEBUG_GLUE_BUILD_LOG_INIT = 64;
+static const int DEBUG_GLUE_SOLVE_LOG_INIT = 64;
+static const int DEBUG_GLUE_BREAK_LOG_INIT = 16;
 
 static bool debug_should_log_span_pair(const Voxel *a, const Voxel *b, int *budget) {
     if (!debugLogSpanCollisions || budget == NULL || *budget <= 0) {
@@ -420,8 +427,8 @@ static bool face_local_coords(const Vector3 origin,
 
     float u = (du * VV - dv * UV) * invDet;
     float v = (dv * UU - du * UV) * invDet;
-    if (outU) *outU = clampf(u, 0.0f, 1.0f);
-    if (outV) *outV = clampf(v, 0.0f, 1.0f);
+    if (outU) *outU = u;
+    if (outV) *outV = v;
     return true;
 }
 
@@ -479,15 +486,14 @@ static void order_coarse_fine_pair(int negativeIdx, int positiveIdx,
 
     if (spanNeg >= spanPos) {
         *coarseIdx = negativeIdx;
-        *coarseIsPositive = true;
         *fineIdx = positiveIdx;
-        *fineIsPositive = false;
     } else {
         *coarseIdx = positiveIdx;
-        *coarseIsPositive = false;
         *fineIdx = negativeIdx;
-        *fineIsPositive = true;
     }
+
+    *coarseIsPositive = (*coarseIdx == positiveIdx);
+    *fineIsPositive = (*fineIdx == positiveIdx);
 }
 
 
@@ -884,25 +890,25 @@ static void buildDemo(void) {
     // }
 
     // Spawn a 2x2x2 cluster of span-2 voxels to exercise larger glued blocks. (n=2)
-    const int cluster_span = 2;
-    const float cell_spacing = cluster_span * VOXEL_SIZE;
-    Vector3 cluster_origin = { -6.0f, cell_spacing * 0.5f, -6.0f };
-    for (int sx = 0; sx < 2; ++sx) {
-        for (int sy = 0; sy < 2; ++sy) {
-            for (int sz = 0; sz < 2; ++sz) {
-                float px = cluster_origin.x + (sx + 0.5f) * cell_spacing;
-                float py = cluster_origin.y + (sy + 0.5f) * cell_spacing;
-                float pz = cluster_origin.z + (sz + 0.5f) * cell_spacing;
-                Color col = {
-                    (unsigned char)(150 + sx * 40),
-                    (unsigned char)(120 + sy * 30),
-                    (unsigned char)(180 - sz * 30),
-                    255
-                };
-                addVoxelSized(px, py, pz, false, true, col, 0, cluster_span);
-            }
-        }
-    }
+    // const int cluster_span = 2;
+    // const float cell_spacing = cluster_span * VOXEL_SIZE;
+    // Vector3 cluster_origin = { -6.0f, cell_spacing * 0.5f, -6.0f };
+    // for (int sx = 0; sx < 2; ++sx) {
+    //     for (int sy = 0; sy < 2; ++sy) {
+    //         for (int sz = 0; sz < 2; ++sz) {
+    //             float px = cluster_origin.x + (sx + 0.5f) * cell_spacing;
+    //             float py = cluster_origin.y + (sy + 0.5f) * cell_spacing;
+    //             float pz = cluster_origin.z + (sz + 0.5f) * cell_spacing;
+    //             Color col = {
+    //                 (unsigned char)(150 + sx * 40),
+    //                 (unsigned char)(120 + sy * 30),
+    //                 (unsigned char)(180 - sz * 30),
+    //                 255
+    //             };
+    //             addVoxelSized(px, py, pz, false, true, col, 0, cluster_span);
+    //         }
+    //     }
+    // }
 
     // Mixed-span glue test: large span cubes with span-1 neighbors sampling different face regions.
     {
@@ -935,25 +941,25 @@ static void buildDemo(void) {
     }
 
     // Inverted test: a small span-1 voxel glues to a larger span-3 neighbor on its +X side.
-    {
-        const int span_large = 3;
-        const int span_small = 1;
-        const float edge_large = span_large * VOXEL_SIZE;
-        const float edge_small = span_small * VOXEL_SIZE;
-        const float face_gap = 0.5f * (edge_large + edge_small);
+    // {
+    //     const int span_large = 3;
+    //     const int span_small = 1;
+    //     const float edge_large = span_large * VOXEL_SIZE;
+    //     const float edge_small = span_small * VOXEL_SIZE;
+    //     const float face_gap = 0.5f * (edge_large + edge_small);
 
-        Vector3 small_center = { 8.0f, 0.5f * edge_small, 4.5f };
-        Color small_col = { 80, 80, 220, 255 };
-        addVoxelSized(small_center.x, small_center.y, small_center.z, false, true, small_col, 0, span_small);
+    //     Vector3 small_center = { 8.0f, 0.5f * edge_small, 4.5f };
+    //     Color small_col = { 80, 80, 220, 255 };
+    //     addVoxelSized(small_center.x, small_center.y, small_center.z, false, true, small_col, 0, span_small);
 
-        Vector3 large_center = {
-            small_center.x + face_gap,
-            0.5f * edge_large,
-            small_center.z + 0.5f * VOXEL_SIZE
-        };
-        Color large_col = { 200, 160, 60, 255 };
-        addVoxelSized(large_center.x, large_center.y, large_center.z, false, true, large_col, 0, span_large);
-    }
+    //     Vector3 large_center = {
+    //         small_center.x + face_gap,
+    //         0.5f * edge_large,
+    //         small_center.z + 0.5f * VOXEL_SIZE
+    //     };
+    //     Color large_col = { 200, 160, 60, 255 };
+    //     addVoxelSized(large_center.x, large_center.y, large_center.z, false, true, large_col, 0, span_large);
+    // }
 }
 
 
@@ -1286,6 +1292,10 @@ static void solve_voxel_shape(Voxel *voxel) {
 }
 
 static void solve_voxel_glue(void) {
+    if (debugLogGlue) {
+        debugGlueSolveLogBudget = DEBUG_GLUE_SOLVE_LOG_INIT;
+        debugGlueBreakLogBudget = DEBUG_GLUE_BREAK_LOG_INIT;
+    }
     for (int i = 0; i < glueConstraintCount; ++i) {
         GlueConstraint *gc = &glueConstraints[i];
         if (!gc->active) {
@@ -1303,6 +1313,35 @@ static void solve_voxel_glue(void) {
         }
         Particle *fineParticle = &fine->particles[gc->fineCorner];
 
+        Vector3 coarsePred[4];
+        for (int k = 0; k < 4; ++k) {
+            coarsePred[k] = coarseParticles[k]->predicted_pos;
+        }
+        Vector3 coarseU = v_sub(coarsePred[1], coarsePred[0]);
+        Vector3 coarseV = v_sub(coarsePred[2], coarsePred[0]);
+        Vector3 coarseNormal = v_cross(coarseU, coarseV);
+        float coarseNormalLenSq = v_dot(coarseNormal, coarseNormal);
+        float baryUU = v_dot(coarseU, coarseU);
+        float baryVV = v_dot(coarseV, coarseV);
+        float baryUV = v_dot(coarseU, coarseV);
+        float baryDet = baryUU * baryVV - baryUV * baryUV;
+        bool baryValid = (coarseNormalLenSq > 1e-12f) && (fabsf(baryDet) > 1e-12f);
+        float solveRawU = 0.0f;
+        float solveRawV = 0.0f;
+        float solveU = 0.0f;
+        float solveV = 0.0f;
+        if (baryValid) {
+            Vector3 normalDir = v_mul(coarseNormal, 1.0f / sqrtf(coarseNormalLenSq));
+            baryValid = face_local_coords(coarsePred[0], coarseU, coarseV, normalDir,
+                                          baryUU, baryVV, baryUV, 1.0f / baryDet,
+                                          fineParticle->predicted_pos,
+                                          &solveRawU, &solveRawV);
+            if (baryValid) {
+                solveU = clampf(solveRawU, 0.0f, 1.0f);
+                solveV = clampf(solveRawV, 0.0f, 1.0f);
+            }
+        }
+
         Vector3 blended = { 0.0f, 0.0f, 0.0f };
         for (int k = 0; k < 4; ++k) {
             blended = v_add(blended, v_mul(coarseParticles[k]->predicted_pos, weights[k]));
@@ -1312,6 +1351,20 @@ static void solve_voxel_glue(void) {
         float rest_edge_min = fminf(coarse->rest_edge, fine->rest_edge);
         float break_distance = GLUE_BREAK_STRAIN * rest_edge_min;
         if (violation > break_distance) {
+            if (debugLogGlue && debugGlueBreakLogBudget > 0) {
+                TraceLog(LOG_INFO,
+                         "[GlueBreak] pair=(%d,%d) spans=(%d,%d) violation=%.5f break=%.5f uvPred=(%.3f,%.3f) rawUV=(%.3f,%.3f) baryValid=%s weights=(%.3f,%.3f,%.3f,%.3f) coarsePos=(%.2f,%.2f,%.2f) finePos=(%.2f,%.2f,%.2f)",
+                         gc->coarseVoxel, gc->fineVoxel,
+                         voxel_span_for_glue(coarse), voxel_span_for_glue(fine),
+                         violation, break_distance,
+                         solveU, solveV,
+                         solveRawU, solveRawV,
+                         baryValid ? "true" : "false",
+                         weights[0], weights[1], weights[2], weights[3],
+                         coarse->pos.x, coarse->pos.y, coarse->pos.z,
+                         fine->pos.x, fine->pos.y, fine->pos.z);
+                --debugGlueBreakLogBudget;
+            }
             gc->active = false;
             continue;
         }
@@ -1330,18 +1383,45 @@ static void solve_voxel_glue(void) {
         }
 
         Vector3 lambda = v_mul(C, -GLUE_RELAXATION / invMassSum);
+        float lambda_mag = v_length(lambda);
+        Vector3 coarseDeltaAccum = { 0.0f, 0.0f, 0.0f };
+        float coarseDeltaMax = 0.0f;
         for (int k = 0; k < 4; ++k) {
             float inv_m = coarseParticles[k]->inv_mass;
             if (inv_m <= 0.0f) {
                 continue;
             }
             float scale = weights[k] * inv_m;
+            Vector3 deltaMove = v_mul(lambda, scale);
             coarseParticles[k]->predicted_pos = v_add(coarseParticles[k]->predicted_pos,
-                                                      v_mul(lambda, scale));
+                                                      deltaMove);
+            coarseDeltaAccum = v_add(coarseDeltaAccum, deltaMove);
+            float deltaLen = v_length(deltaMove);
+            if (deltaLen > coarseDeltaMax) {
+                coarseDeltaMax = deltaLen;
+            }
         }
+        Vector3 fineDelta = { 0.0f, 0.0f, 0.0f };
         if (fineParticle->inv_mass > 0.0f) {
-            fineParticle->predicted_pos = v_sub(fineParticle->predicted_pos,
-                                                v_mul(lambda, fineParticle->inv_mass));
+            fineDelta = v_mul(lambda, fineParticle->inv_mass);
+            fineParticle->predicted_pos = v_sub(fineParticle->predicted_pos, fineDelta);
+        }
+
+        if (debugLogGlue && debugGlueSolveLogBudget > 0) {
+            TraceLog(LOG_INFO,
+                     "[GlueSolve] pair=(%d,%d) spans=(%d,%d) violation=%.5f break=%.5f invMass=%.5f lambda=%.5f coarseDeltaMax=%.5f fineDelta=%.5f baryValid=%s uvPred=(%.3f,%.3f) rawUV=(%.3f,%.3f) weights=(%.3f,%.3f,%.3f,%.3f) coarsePosY=%.2f finePosY=%.2f coarseVelY=%.2f fineVelY=%.2f",
+                     gc->coarseVoxel, gc->fineVoxel,
+                     voxel_span_for_glue(coarse), voxel_span_for_glue(fine),
+                     violation, break_distance,
+                     invMassSum, lambda_mag,
+                     coarseDeltaMax, v_length(fineDelta),
+                     baryValid ? "true" : "false",
+                     solveU, solveV,
+                     solveRawU, solveRawV,
+                     weights[0], weights[1], weights[2], weights[3],
+                     coarse->pos.y, fine->pos.y,
+                     coarse->vel.y, fine->vel.y);
+            --debugGlueSolveLogBudget;
         }
     }
 }
@@ -1417,8 +1497,8 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
 
     int coarseFace[4];
     int fineFace[4];
-    get_face_corners_for_direction(dir, coarsePositive, coarseFace);
-    get_face_corners_for_direction(dir, finePositive, fineFace);
+    get_face_corners_for_direction(dir, !coarsePositive, coarseFace);
+    get_face_corners_for_direction(dir, !finePositive, fineFace);
 
     Vector3 coarsePos[4];
     uint8_t coarseMask = 0;
@@ -1452,11 +1532,13 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
 
         int fineCorner = fineFace[c];
         Vector3 finePos = fine->particles[fineCorner].pos;
-        float u = 0.0f;
-        float v = 0.0f;
-        if (!face_local_coords(coarsePos[0], U, V, normal, UU, VV, UV, invDet, finePos, &u, &v)) {
+        float rawU = 0.0f;
+        float rawV = 0.0f;
+        if (!face_local_coords(coarsePos[0], U, V, normal, UU, VV, UV, invDet, finePos, &rawU, &rawV)) {
             continue;
         }
+        float u = clampf(rawU, 0.0f, 1.0f);
+        float v = clampf(rawV, 0.0f, 1.0f);
 
         float w0 = (1.0f - u) * (1.0f - v);
         float w1 =        u  * (1.0f - v);
@@ -1486,11 +1568,31 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
         gc->coarseMask = coarseMask;
         gc->fineMask = (uint8_t)(1u << fineCorner);
         gc->active = true;
+
+        if (debugLogGlue && debugGlueBuildLogBudget > 0) {
+            TraceLog(LOG_INFO,
+                     "[GlueBuild] pair=(%d,%d) spans=(%d,%d) dir=(%d,%d,%d) coarsePosSide=%s finePosSide=%s fineCorner=%d rawUV=(%.3f,%.3f) uv=(%.3f,%.3f) weights=(%.3f,%.3f,%.3f,%.3f) coarseCenter=(%.2f,%.2f,%.2f) fineCenter=(%.2f,%.2f,%.2f)",
+                     coarseIdx, fineIdx,
+                     voxel_span_for_glue(coarse), voxel_span_for_glue(fine),
+                     dir->dx, dir->dy, dir->dz,
+                     coarsePositive ? "+face" : "-face",
+                     finePositive ? "+face" : "-face",
+                     fineCorner,
+                     rawU, rawV,
+                     u, v,
+                     w0, w1, w2, w3,
+                     coarse->pos.x, coarse->pos.y, coarse->pos.z,
+                     fine->pos.x, fine->pos.y, fine->pos.z);
+            --debugGlueBuildLogBudget;
+        }
     }
 }
 
 static void rebuild_glue_constraints(void) {
     glueConstraintCount = 0;
+    if (debugLogGlue) {
+        debugGlueBuildLogBudget = DEBUG_GLUE_BUILD_LOG_INIT;
+    }
 
     for (int i = 0; i < voxel_count; ++i) {
         for (int d = 0; d < 3; ++d) {
