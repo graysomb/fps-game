@@ -1,0 +1,366 @@
+Alright, here’s a straight-shot plan for swapping your current corner-to-corner glue to the bilinear weld version, wired into **this** codebase. 
+
+I’ll go step-by-step and point at the spots you actually need to touch.
+
+---
+
+## 1. Redefine the glue constraint type
+
+Right now a `GlueConstraint` is “4 corners vs 4 corners”:
+
+```c
+typedef struct {
+    int voxelA;
+    int voxelB;
+    int cornerA[4];
+    int cornerB[4];
+    bool active;
+} GlueConstraint;
+```
+
+You want **one fine corner welded to a bilinear mix of four coarse corners**.
+
+Change it to something like:
+
+```c
+typedef struct {
+    int coarseVoxel;
+    int fineVoxel;
+
+    int  coarseCorner[4];   // indices into coarseVoxel->particles[]
+    float w[4];             // bilinear weights (sum to 1)
+
+    int  fineCorner;        // index into fineVoxel->particles[]
+
+    bool active;
+} GlueConstraint;
+```
+
+Notes:
+
+* This already works when spans are equal: then your `(u,v)` will be {0,1} so the weights just pick one coarse corner and you effectively keep a simple corner-to-corner weld.
+
+---
+
+## 2. Add a helper to choose coarse vs fine and get face corners
+
+You already have `glueDirections` that describe which 4 corners belong to a face for a given axis/direction: 
+
+```c
+typedef struct {
+    int dx, dy, dz;
+    int faceA[4];
+    int faceB[4];
+} GlueDirection;
+```
+
+Add a small helper:
+
+```c
+static void get_face_corners_for_direction(
+    int voxelIdx,
+    const GlueDirection *dir,
+    bool asPositiveSide,     // e.g. "is this voxel on +X side or -X side of the interface?"
+    int outCorners[4])
+{
+    (void)voxelIdx; // you may not actually need it
+
+    if (asPositiveSide) {
+        for (int k = 0; k < 4; ++k) outCorners[k] = dir->faceA[k];
+    } else {
+        for (int k = 0; k < 4; ++k) outCorners[k] = dir->faceB[k];
+    }
+}
+```
+
+Then another helper to pick **coarse vs fine** by span:
+
+```c
+static void order_coarse_fine(int idxA, int idxB,
+                              int *coarseIdx, int *fineIdx)
+{
+    const Voxel *a = &voxels[idxA];
+    const Voxel *b = &voxels[idxB];
+
+    int spanA = (a->span > 0) ? a->span : 1;
+    int spanB = (b->span > 0) ? b->span : 1;
+
+    if (spanA >= spanB) {
+        *coarseIdx = idxA;
+        *fineIdx   = idxB;
+    } else {
+        *coarseIdx = idxB;
+        *fineIdx   = idxA;
+    }
+}
+```
+
+Later, when you detect neighbors in `rebuild_glue_constraints`, you’ll call this to decide which side is coarse.
+
+---
+
+## 3. Add a helper to build **one** bilinear glue constraint
+
+You want something like:
+
+```c
+static void add_bilinear_glue_constraint(
+    int coarseIdx, int fineIdx,
+    const GlueDirection *dir)
+{
+    if (glueConstraintCount >= (int)(sizeof(glueConstraints)/sizeof(glueConstraints[0]))) {
+        return;
+    }
+
+    Voxel *coarse = &voxels[coarseIdx];
+    Voxel *fine   = &voxels[fineIdx];
+
+    // 1. Get the 4 coarse face corners and 4 fine face corners
+    int coarseFace[4];
+    int fineFace[4];
+
+    // Decide “which side” each voxel is on: for now, assume
+    // voxelA is on the negative side and voxelB on the positive side
+    // and then map coarse/fine appropriately.
+    // You can refine this logic if needed.
+    get_face_corners_for_direction(coarseIdx, dir, true,  coarseFace);
+    get_face_corners_for_direction(fineIdx,   dir, false, fineFace);
+
+    // 2. Build a local (u,v) basis on the coarse face using its corners
+    Particle *C0 = &coarse->particles[coarseFace[0]];
+    Particle *C1 = &coarse->particles[coarseFace[1]];
+    Particle *C2 = &coarse->particles[coarseFace[2]];
+    // C3 would be coarseFace[3]
+
+    Vector3 pC0 = C0->predicted_pos;
+    Vector3 pC1 = C1->predicted_pos;
+    Vector3 pC2 = C2->predicted_pos;
+
+    Vector3 U = v_sub(pC1, pC0);  // tangent dir 1
+    Vector3 V = v_sub(pC2, pC0);  // tangent dir 2
+
+    float Ulen2 = v_dot(U, U);
+    float Vlen2 = v_dot(V, V);
+    if (Ulen2 < 1e-8f || Vlen2 < 1e-8f) return; // degenerate
+
+    // 3. For now: just do ONE fine corner -> one constraint
+    // You can extend to all 4 fine face corners, each generating its own constraint.
+    int fc = fineFace[0];
+    Particle *S = &fine->particles[fc];
+    Vector3 pS = S->predicted_pos;
+
+    // Project S onto (U,V) to get (u,v) in [0,1]x[0,1]
+    Vector3 d = v_sub(pS, pC0);
+    float u = v_dot(d, U) / Ulen2;
+    float v = v_dot(d, V) / Vlen2;
+
+    // Clamp for safety
+    u = clampf(u, 0.0f, 1.0f);
+    v = clampf(v, 0.0f, 1.0f);
+
+    float w0 = (1.0f - u) * (1.0f - v);
+    float w1 =        u  * (1.0f - v);
+    float w2 = (1.0f - u) *        v;
+    float w3 =        u  *        v;
+
+    GlueConstraint *gc = &glueConstraints[glueConstraintCount++];
+    gc->coarseVoxel = coarseIdx;
+    gc->fineVoxel   = fineIdx;
+    gc->coarseCorner[0] = coarseFace[0];
+    gc->coarseCorner[1] = coarseFace[1];
+    gc->coarseCorner[2] = coarseFace[2];
+    gc->coarseCorner[3] = coarseFace[3];
+    gc->w[0] = w0;
+    gc->w[1] = w1;
+    gc->w[2] = w2;
+    gc->w[3] = w3;
+    gc->fineCorner = fc;
+    gc->active = true;
+}
+```
+
+**Later refinement:**
+Instead of just `fineFace[0]`, call this 4 times (once per fine face corner) with different `fc` and newly computed `(u,v)` for each. Same coarse face; different fine corners.
+
+This is the part where you can extend to truly multi-resolution: if `span(coarse) = k * span(fine)`, you’d loop over all the fine voxels that sit along that coarse face and apply this same logic to each fine face corner. The infrastructure (span, rest_min/max_gx/gy/gz) is already in the struct for you. 
+
+---
+
+## 4. Rewrite `rebuild_glue_constraints` to use bilinear helper
+
+Current version basically says: “for each voxel, for each axis, find neighbors on that face and add a 4-corner pair glue constraint”: 
+
+You want to replace that inner loop with:
+
+```c
+static void rebuild_glue_constraints(void) {
+    glueConstraintCount = 0;
+
+    for (int i = 0; i < voxel_count; ++i) {
+        for (int d = 0; d < 3; ++d) {
+            const GlueDirection *dir = &glueDirections[d];
+            int neighbors[MAX_FACE_NEIGHBORS] = {0};
+            int neighborCount = gather_face_neighbors(i, dir, neighbors, MAX_FACE_NEIGHBORS);
+
+            for (int n = 0; n < neighborCount; ++n) {
+                int j = neighbors[n];
+                int coarseIdx, fineIdx;
+                order_coarse_fine(i, j, &coarseIdx, &fineIdx);
+
+                add_bilinear_glue_constraint(coarseIdx, fineIdx, dir);
+            }
+        }
+    }
+}
+```
+
+That’s it. The “glue topology” logic stays almost identical; we just change what kind of constraint gets created.
+
+---
+
+## 5. Replace `solve_voxel_glue` with bilinear projection
+
+Right now `solve_voxel_glue`:
+
+* For each constraint:
+
+  * Find 4 corner pairs.
+  * Check max distance vs `GLUE_BREAK_STRAIN * rest_edge`.
+  * Call `solve_glue_pair` on each corner pair. 
+
+You want to:
+
+1. Compute the violation
+   [
+   C = \sum_i w_i C_i - S
+   ]
+   where `C_i` are coarse corners, `S` is fine corner.
+
+2. If `|C|` is bigger than your break strain → deactivate constraint.
+
+3. Otherwise, apply a multi-point PBD correction.
+
+Pseudo-code:
+
+```c
+static void solve_voxel_glue(void) {
+    for (int g = 0; g < glueConstraintCount; ++g) {
+        GlueConstraint *gc = &glueConstraints[g];
+        if (!gc->active) continue;
+
+        Voxel *coarse = &voxels[gc->coarseVoxel];
+        Voxel *fine   = &voxels[gc->fineVoxel];
+
+        Particle *C[4];
+        float w[4];
+        for (int k = 0; k < 4; ++k) {
+            C[k] = &coarse->particles[gc->coarseCorner[k]];
+            w[k] = gc->w[k];
+        }
+        Particle *S = &fine->particles[gc->fineCorner];
+
+        // 1. Compute constraint value
+        Vector3 blended = {0};
+        for (int k = 0; k < 4; ++k) {
+            blended = v_add(blended, v_mul(C[k]->predicted_pos, w[k]));
+        }
+        Vector3 Cval = v_sub(blended, S->predicted_pos);
+        float Cnorm = v_length(Cval);
+
+        // Break test (similar idea to max_dist previously)
+        float rest_edge_min = fminf(coarse->rest_edge, fine->rest_edge);
+        float break_dist = GLUE_BREAK_STRAIN * rest_edge_min;
+        if (Cnorm > break_dist) {
+            gc->active = false;
+            continue;
+        }
+
+        if (Cnorm < GLUE_EPS) {
+            continue;
+        }
+
+        // 2. Compute effective inverse mass
+        float W = S->inv_mass;
+        for (int k = 0; k < 4; ++k) {
+            float wk = w[k];
+            W += wk * wk * C[k]->inv_mass;
+        }
+        if (W <= 0.0f) continue;
+
+        // 3. PBD correction: move all particles to reduce Cval
+        Vector3 lambda = v_mul(Cval, -GLUE_RELAXATION / W);
+
+        for (int k = 0; k < 4; ++k) {
+            float inv_m = C[k]->inv_mass;
+            if (inv_m > 0.0f) {
+                float scale = w[k] * inv_m;
+                C[k]->predicted_pos = v_add(C[k]->predicted_pos, v_mul(lambda, scale));
+            }
+        }
+        if (S->inv_mass > 0.0f) {
+            float scale = S->inv_mass;
+            S->predicted_pos = v_sub(S->predicted_pos, v_mul(lambda, scale));
+        }
+    }
+}
+```
+
+Conceptually:
+
+* Coarse corners get nudged toward making the blended point match `S`.
+* The fine corner gets nudged in the opposite direction.
+* Heavier (lower inverse mass) particles move less automatically.
+
+---
+
+## 6. Optional: keep collision filtering the same
+
+You already treat glued voxels specially in collision code (you skip collisions if voxels are glued or share glued pairs). 
+
+The **nice bit**: none of that logic needs to change structurally:
+
+* `voxels_are_glued()` still works: it just checks if there’s an active `GlueConstraint` between voxel indices.
+* `particles_are_glued_pair()` becomes less important (since you’re not pairing 1:1 corners), but you can:
+
+  * Either leave it unused,
+  * Or treat any coarse vertex that participates in a bilinear constraint to a given fine corner as “glued” for collision-skipping.
+
+For a first pass, don’t overthink it: skip collisions using only `voxels_are_glued()` and see how it behaves.
+
+---
+
+## TL;DR plan
+
+1. **Change `GlueConstraint`** to store one fine corner, four coarse corners, and four weights.
+2. **Add helpers**:
+
+   * `order_coarse_fine` (pick which voxel is coarse vs fine by span),
+   * `get_face_corners_for_direction` (reuse `glueDirections`),
+   * `add_bilinear_glue_constraint` (compute (u,v) & weights for a fine corner on a coarse face).
+3. **Rewrite `rebuild_glue_constraints`** to call `add_bilinear_glue_constraint` instead of filling `cornerA/B`.
+4. **Replace `solve_voxel_glue`** with a multi-point PBD projection on `sum w_i*C_i - S = 0`, plus your break-strain check.
+5. Optionally extend step 3 so every fine face corner (and every fine voxel on that face) gets its own weld constraint → full multi-resolution glue.
+
+If you want, next round we can do a **minimal diff** patch: literally the smallest possible edits to your current functions to get one full bilinear weld working on a single axis, then generalize.
+
+make sure that glue constraint based collision ignorance remains the same• The particles being skipped are the four corner particles that lie on each glued face, as defined by the three GlueDirection
+  entries in fps_ray.c:305-308. When rebuild_glue_constraints() runs (fps_ray.c:1288-1314), every voxel gathers its X, Y, and Z face
+  neighbors and creates a GlueConstraint that pairs those four face-corner indices from voxel A with the opposite-face corners from
+  voxel B. The current mappings are:
+
+  - +X face: voxel A corners {1,3,5,7} (the +X side) are glued to voxel B corners {0,2,4,6} (the −X side).
+  - +Y face: voxel A corners {2,3,6,7} (+Y) are glued to voxel B corners {0,1,4,5} (−Y).
+  - +Z face: voxel A corners {4,5,6,7} (+Z) are glued to voxel B corners {0,1,2,3} (−Z).
+
+  During the collision phase (solve_particle_collisions, fps_ray.c:1538-1554), any particle pair that appears in one of these active
+  GlueConstraints triggers particles_are_glued_pair() (fps_ray.c:1317-1341) to return true, and that pair is skipped entirely. So the
+  “ignored” particles are precisely those four-per-face corner particles on each glued face between neighboring voxels along X, Y,
+  or Z.
+
+  you’re also skipping any particle interactions between voxels that merely share an edge or a corner, even if they don’t
+  have an active face glue. In solve_particle_collisions (fps_ray.c:1539-1553), after computing glued = voxels_are_glued(...) the
+  code also checks share_edge_corner = voxels_share_edge_or_corner(voxelA, voxelB). If either condition is true, the entire voxel
+  pair is skipped before looping over particle pairs. voxels_share_edge_or_corner (fps_ray.c:1388-1417) treats voxels as sharing an
+  edge whenever at least two axes are touching (within an epsilon) and as sharing a vertex if all three touch, so both pure edge and
+  vertex adjacencies get filtered. So the ignored sets are: 1) face-glued corner particles, and 2) every particle pair between voxels
+  that touch along an edge or corner, regardless of glue.

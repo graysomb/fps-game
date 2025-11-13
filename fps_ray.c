@@ -1408,6 +1408,7 @@ static bool voxels_share_edge_or_corner(const Voxel *voxel_a, const Voxel *voxel
     int touching_axes = voxel_touching_axes(voxel_a, voxel_b, &overlap_axes, eps);
     bool share_edge = (touching_axes >= 2);
     bool rest_share = voxels_share_edge_or_corner_rest(voxel_a, voxel_b);
+    
 
     if (debug_should_log_span_pair(voxel_a, voxel_b, &debugSpanEdgeLogBudget)) {
         TraceLog(LOG_INFO,
