@@ -148,10 +148,10 @@ static bool debugDrawParticles = false;
 static bool debugColorParticlesByVelocity = false;
 static const float PARTICLE_DEBUG_MARKER_RADIUS = 0.6f;
 static const float PARTICLE_DEBUG_MAX_SPEED = 20.0f;
-static bool debugLogSpanCollisions = true;
+static bool debugLogSpanCollisions = false;
 static int debugSpanEdgeLogBudget = 0;
 static int debugSpanCollisionLogBudget = 0;
-static bool debugLogGlue = true;
+static bool debugLogGlue = false;
 static int debugGlueBuildLogBudget = 0;
 static int debugGlueSolveLogBudget = 0;
 static int debugGlueBreakLogBudget = 0;
@@ -295,6 +295,50 @@ static bool voxels_share_edge_or_corner_rest(const Voxel *voxel_a, const Voxel *
 
     int touching_axes = (touchX ? 1 : 0) + (touchY ? 1 : 0) + (touchZ ? 1 : 0);
     return touching_axes >= 2;
+}
+
+static bool voxels_share_face_rest(const Voxel *voxel_a, const Voxel *voxel_b) {
+    int aMinX = voxel_a->rest_min_gx, aMaxX = voxel_a->rest_max_gx;
+    int aMinY = voxel_a->rest_min_gy, aMaxY = voxel_a->rest_max_gy;
+    int aMinZ = voxel_a->rest_min_gz, aMaxZ = voxel_a->rest_max_gz;
+    int bMinX = voxel_b->rest_min_gx, bMaxX = voxel_b->rest_max_gx;
+    int bMinY = voxel_b->rest_min_gy, bMaxY = voxel_b->rest_max_gy;
+    int bMinZ = voxel_b->rest_min_gz, bMaxZ = voxel_b->rest_max_gz;
+
+    bool overlapX = ranges_overlap_int(aMinX, aMaxX, bMinX, bMaxX);
+    bool overlapY = ranges_overlap_int(aMinY, aMaxY, bMinY, bMaxY);
+    bool overlapZ = ranges_overlap_int(aMinZ, aMaxZ, bMinZ, bMaxZ);
+
+    bool faceX = overlapY && overlapZ &&
+                 ((aMaxX + 1 == bMinX) || (bMaxX + 1 == aMinX));
+    bool faceY = overlapX && overlapZ &&
+                 ((aMaxY + 1 == bMinY) || (bMaxY + 1 == aMinY));
+    bool faceZ = overlapX && overlapY &&
+                 ((aMaxZ + 1 == bMinZ) || (bMaxZ + 1 == aMinZ));
+    return faceX || faceY || faceZ;
+}
+
+static float voxel_rest_axis_min(const Voxel *v, int axis) {
+    switch (axis) {
+        case 0: return (float)v->rest_min_gx * VOXEL_SIZE;
+        case 1: return (float)v->rest_min_gy * VOXEL_SIZE;
+        default: return (float)v->rest_min_gz * VOXEL_SIZE;
+    }
+}
+
+static float voxel_rest_axis_max(const Voxel *v, int axis) {
+    switch (axis) {
+        case 0: return (float)(v->rest_max_gx + 1) * VOXEL_SIZE;
+        case 1: return (float)(v->rest_max_gy + 1) * VOXEL_SIZE;
+        default: return (float)(v->rest_max_gz + 1) * VOXEL_SIZE;
+    }
+}
+
+static float voxel_rest_corner_axis_coord(const Voxel *v, int axis, int corner_idx) {
+    float min = voxel_rest_axis_min(v, axis);
+    float max = voxel_rest_axis_max(v, axis);
+    int sign = corner_signs[corner_idx][axis];
+    return (sign >= 0) ? max : min;
 }
 
 static int table_get(int x, int y, int z);
@@ -918,7 +962,7 @@ static void buildDemo(void) {
         const float edge_small = span_small * VOXEL_SIZE;
         const float face_gap = 0.5f * (edge_large + edge_small);
 
-        Vector3 large_center = { 4.0f, 0.5f * edge_large, 4.0f };
+        Vector3 large_center = { 4.0f, 0.5f * edge_large+10.0f, 4.0f };
         Color large_col = { 220, 120, 60, 255 };
         addVoxelSized(large_center.x, large_center.y, large_center.z, false, true, large_col, 0, span_large);
 
@@ -1145,7 +1189,7 @@ static void physics_step(float dt) {    // Rebuild spatial hash
 
 // Predict positions for the next step (equivalent to the GPU PredictPositions kernel).
 static void integrate_particles(float dt) {
-    const Vector3 gravity = { 0.0f, -GRAVITY*0.0f, 0.0f };
+    const Vector3 gravity = { 0.0f, -GRAVITY*1.0f, 0.0f };
     const float dt_sq = dt * dt;
 
     for (int i = 0; i < voxel_count; ++i) {
@@ -1500,30 +1544,30 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
     get_face_corners_for_direction(dir, !coarsePositive, coarseFace);
     get_face_corners_for_direction(dir, !finePositive, fineFace);
 
-    Vector3 coarsePos[4];
     uint8_t coarseMask = 0;
     for (int k = 0; k < 4; ++k) {
-        coarsePos[k] = coarse->particles[coarseFace[k]].pos;
         coarseMask |= (uint8_t)(1u << coarseFace[k]);
     }
 
-    Vector3 U = v_sub(coarsePos[1], coarsePos[0]);
-    Vector3 V = v_sub(coarsePos[2], coarsePos[0]);
-    Vector3 normal = v_cross(U, V);
-    float normal_len_sq = v_dot(normal, normal);
-    if (normal_len_sq < 1e-10f) {
-        return;
+    int normalAxis = (dir->dx != 0) ? 0 : ((dir->dy != 0) ? 1 : 2);
+    int axisU, axisV;
+    if (normalAxis == 0) {
+        axisU = 1; axisV = 2;
+    } else if (normalAxis == 1) {
+        axisU = 0; axisV = 2;
+    } else {
+        axisU = 0; axisV = 1;
     }
-    normal = v_mul(normal, 1.0f / sqrtf(normal_len_sq));
 
-    float UU = v_dot(U, U);
-    float VV = v_dot(V, V);
-    float UV = v_dot(U, V);
-    float det = UU * VV - UV * UV;
-    if (fabsf(det) < 1e-10f) {
+    float coarseMinU = voxel_rest_axis_min(coarse, axisU);
+    float coarseMaxU = voxel_rest_axis_max(coarse, axisU);
+    float coarseMinV = voxel_rest_axis_min(coarse, axisV);
+    float coarseMaxV = voxel_rest_axis_max(coarse, axisV);
+    float coarseExtentU = coarseMaxU - coarseMinU;
+    float coarseExtentV = coarseMaxV - coarseMinV;
+    if (coarseExtentU <= 0.0f || coarseExtentV <= 0.0f) {
         return;
     }
-    float invDet = 1.0f / det;
 
     for (int c = 0; c < 4; ++c) {
         if (glueConstraintCount >= (int)(sizeof(glueConstraints) / sizeof(glueConstraints[0]))) {
@@ -1531,12 +1575,10 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
         }
 
         int fineCorner = fineFace[c];
-        Vector3 finePos = fine->particles[fineCorner].pos;
-        float rawU = 0.0f;
-        float rawV = 0.0f;
-        if (!face_local_coords(coarsePos[0], U, V, normal, UU, VV, UV, invDet, finePos, &rawU, &rawV)) {
-            continue;
-        }
+        float fineCoordU = voxel_rest_corner_axis_coord(fine, axisU, fineCorner);
+        float fineCoordV = voxel_rest_corner_axis_coord(fine, axisV, fineCorner);
+        float rawU = (fineCoordU - coarseMinU) / coarseExtentU;
+        float rawV = (fineCoordV - coarseMinV) / coarseExtentV;
         float u = clampf(rawU, 0.0f, 1.0f);
         float v = clampf(rawV, 0.0f, 1.0f);
 
@@ -1700,21 +1742,23 @@ static bool voxels_share_edge_or_corner(const Voxel *voxel_a, const Voxel *voxel
     int touching_axes = voxel_touching_axes(voxel_a, voxel_b, &overlap_axes, eps);
     bool share_edge = (touching_axes >= 2);
     bool rest_share = voxels_share_edge_or_corner_rest(voxel_a, voxel_b);
+    bool rest_face = voxels_share_face_rest(voxel_a, voxel_b);
     
 
     if (debug_should_log_span_pair(voxel_a, voxel_b, &debugSpanEdgeLogBudget)) {
         TraceLog(LOG_INFO,
                  "[SpanDebug] adjacency shareEdge=%s spans=(%d,%d) touchingAxes=%d overlapAxes=%d "
-                 "restShare=%s posA=(%.2f,%.2f,%.2f) posB=(%.2f,%.2f,%.2f)",
+                 "restShare=%s restFace=%s posA=(%.2f,%.2f,%.2f) posB=(%.2f,%.2f,%.2f)",
                  share_edge ? "true" : "false",
                  voxel_a->span, voxel_b->span,
                  touching_axes, overlap_axes,
                  rest_share ? "true" : "false",
+                 rest_face ? "true" : "false",
                  voxel_a->pos.x, voxel_a->pos.y, voxel_a->pos.z,
                  voxel_b->pos.x, voxel_b->pos.y, voxel_b->pos.z);
     }
 
-    return share_edge || rest_share;
+    return share_edge || rest_share || rest_face;
 }
 
 
