@@ -58,6 +58,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define GLUE_RELAXATION 1.0f
 #define GLUE_EPS 1e-6f
 #define GLUE_BREAK_STRAIN 10.2f
+#define VOXEL_SPLIT_STRAIN_THRESHOLD 0.05f
+#define VOXEL_SPLIT_SHEAR_THRESHOLD 0.05f
 
 #define MAX_NEIGHBOR_VOXELS 128
 #define MAX_FACE_NEIGHBORS   64
@@ -175,6 +177,12 @@ static const int corner_signs[8][3] = {
     { -1,  1, -1 }, {  1,  1, -1 },
     { -1, -1,  1 }, {  1, -1,  1 },
     { -1,  1,  1 }, {  1,  1,  1 }
+};
+
+static const int voxel_edge_pairs[12][2] = {
+    {0,1},{1,3},{3,2},{2,0},
+    {4,5},{5,7},{7,6},{6,4},
+    {0,4},{1,5},{3,7},{2,6}
 };
 
 typedef struct {
@@ -789,6 +797,12 @@ static void mark_surface_neighbors(Vector3 pos) {
         }
     }
 }
+
+static void rebuild_all_voxel_surfaces(void) {
+    for (int i = 0; i < voxel_count; ++i) {
+        mark_surface(i);
+    }
+}
 //-----------------------------------------------------------------------------
 // Check for voxels adjacent to a given world position
 // neighbors[0] = +X, neighbors[1] = -X,
@@ -815,28 +829,31 @@ static void get_adjacent_voxel_directions(Vector3 pos, bool neighbors[6]) {
     }
 }
 
-static int addVoxelSized(float px, float py, float pz, bool fixed, bool simulate,
-                         Color color, int type, int span) {
-    if (voxel_count >= MAX_VOXELS) return -1;
+static void init_voxel_struct(Voxel *v,
+                              float px, float py, float pz,
+                              bool fixed, bool simulate,
+                              Color color, int type,
+                              int span, int owner)
+{
+    if (!v) {
+        return;
+    }
     if (span < 1) span = 1;
     float edge = VOXEL_SIZE * (float)span;
     float half = 0.5f * edge;
 
-    int idx = voxel_count++;
-    Voxel *v = &voxels[idx];
     v->pos = (Vector3){ px, py, pz };
     v->vel = (Vector3){ 0,0,0 };
     v->fixed = fixed;
     v->simulate = simulate;
     v->color = color;
     v->type = type;
-    v->owner   = -1;
+    v->owner = owner;
     memset(v->surface, 0, sizeof v->surface);
     v->min_gx = v->min_gy = v->min_gz = INT_MAX;
     v->max_gx = v->max_gy = v->max_gz = INT_MIN;
     v->rest_min_gx = v->rest_min_gy = v->rest_min_gz = INT_MAX;
     v->rest_max_gx = v->rest_max_gy = v->rest_max_gz = INT_MIN;
-    // compute grid coords
     v->gx = (int)floorf(px / VOXEL_SIZE);
     v->gy = (int)floorf(py / VOXEL_SIZE);
     v->gz = (int)floorf(pz / VOXEL_SIZE);
@@ -870,6 +887,14 @@ static int addVoxelSized(float px, float py, float pz, bool fixed, bool simulate
     v->rest_max_gy = rest_maxy;
     v->rest_min_gz = rest_minz;
     v->rest_max_gz = rest_maxz;
+}
+
+static int addVoxelSized(float px, float py, float pz, bool fixed, bool simulate,
+                         Color color, int type, int span) {
+    if (voxel_count >= MAX_VOXELS) return -1;
+    int idx = voxel_count++;
+    Voxel *v = &voxels[idx];
+    init_voxel_struct(v, px, py, pz, fixed, simulate, color, type, span, -1);
     voxel_table_register(v, idx);
     return idx;
 }
@@ -934,55 +959,55 @@ static void buildDemo(void) {
     // }
 
     // Spawn a 2x2x2 cluster of span-2 voxels to exercise larger glued blocks. (n=2)
-    // const int cluster_span = 2;
-    // const float cell_spacing = cluster_span * VOXEL_SIZE;
-    // Vector3 cluster_origin = { -6.0f, cell_spacing * 0.5f, -6.0f };
-    // for (int sx = 0; sx < 2; ++sx) {
-    //     for (int sy = 0; sy < 2; ++sy) {
-    //         for (int sz = 0; sz < 2; ++sz) {
-    //             float px = cluster_origin.x + (sx + 0.5f) * cell_spacing;
-    //             float py = cluster_origin.y + (sy + 0.5f) * cell_spacing;
-    //             float pz = cluster_origin.z + (sz + 0.5f) * cell_spacing;
-    //             Color col = {
-    //                 (unsigned char)(150 + sx * 40),
-    //                 (unsigned char)(120 + sy * 30),
-    //                 (unsigned char)(180 - sz * 30),
-    //                 255
-    //             };
-    //             addVoxelSized(px, py, pz, false, true, col, 0, cluster_span);
-    //         }
-    //     }
-    // }
-
-    // Mixed-span glue test: large span cubes with span-1 neighbors sampling different face regions.
-    {
-        const int span_large = 3;
-        const int span_small = 1;
-        const float edge_large = span_large * VOXEL_SIZE;
-        const float edge_small = span_small * VOXEL_SIZE;
-        const float face_gap = 0.5f * (edge_large + edge_small);
-
-        Vector3 large_center = { 4.0f, 0.5f * edge_large+10.0f, 4.0f };
-        Color large_col = { 220, 120, 60, 255 };
-        addVoxelSized(large_center.x, large_center.y, large_center.z, false, true, large_col, 0, span_large);
-
-        Vector3 fine_centers[2] = {
-            { large_center.x + face_gap, large_center.y, large_center.z },
-            { large_center.x + face_gap,
-              large_center.y + 0.5f * VOXEL_SIZE,
-              large_center.z + 0.5f * VOXEL_SIZE }
-        };
-        Color fine_cols[2] = {
-            { 60, 180, 220, 255 },
-            { 80, 200, 150, 255 }
-        };
-        for (int i = 0; i < 2; ++i) {
-            addVoxelSized(fine_centers[i].x,
-                          fine_centers[i].y,
-                          fine_centers[i].z,
-                          false, true, fine_cols[i], 0, span_small);
+    const int cluster_span = 2;
+    const float cell_spacing = cluster_span * VOXEL_SIZE;
+    Vector3 cluster_origin = { -6.0f, cell_spacing * 0.5f, -6.0f };
+    for (int sx = 0; sx < 1; ++sx) {
+        for (int sy = 0; sy < 1; ++sy) {
+            for (int sz = 0; sz < 1; ++sz) {
+                float px = cluster_origin.x + (sx + 0.5f) * cell_spacing;
+                float py = cluster_origin.y + (sy + 0.5f) * cell_spacing;
+                float pz = cluster_origin.z + (sz + 0.5f) * cell_spacing;
+                Color col = {
+                    (unsigned char)(150 + sx * 40),
+                    (unsigned char)(120 + sy * 30),
+                    (unsigned char)(180 - sz * 30),
+                    255
+                };
+                addVoxelSized(px, py, pz, false, true, col, 0, cluster_span);
+            }
         }
     }
+
+    // Mixed-span glue test: large span cubes with span-1 neighbors sampling different face regions.
+    // {
+    //     const int span_large = 3;
+    //     const int span_small = 1;
+    //     const float edge_large = span_large * VOXEL_SIZE;
+    //     const float edge_small = span_small * VOXEL_SIZE;
+    //     const float face_gap = 0.5f * (edge_large + edge_small);
+
+    //     Vector3 large_center = { 4.0f, 0.5f * edge_large+10.0f, 4.0f };
+    //     Color large_col = { 220, 120, 60, 255 };
+    //     addVoxelSized(large_center.x, large_center.y, large_center.z, false, true, large_col, 0, span_large);
+
+    //     Vector3 fine_centers[2] = {
+    //         { large_center.x + face_gap, large_center.y, large_center.z },
+    //         { large_center.x + face_gap,
+    //           large_center.y + 0.5f * VOXEL_SIZE,
+    //           large_center.z + 0.5f * VOXEL_SIZE }
+    //     };
+    //     Color fine_cols[2] = {
+    //         { 60, 180, 220, 255 },
+    //         { 80, 200, 150, 255 }
+    //     };
+    //     for (int i = 0; i < 2; ++i) {
+    //         addVoxelSized(fine_centers[i].x,
+    //                       fine_centers[i].y,
+    //                       fine_centers[i].z,
+    //                       false, true, fine_cols[i], 0, span_small);
+    //     }
+    // }
 
     // Inverted test: a small span-1 voxel glues to a larger span-3 neighbor on its +X side.
     // {
@@ -1037,9 +1062,7 @@ static void ResetGame(void) {
     memset(table, 0, sizeof(table));
     // build static blocks
     buildDemo();
-    for (int i = 0; i < voxel_count; i++) {
-        mark_surface(i);
-    }
+    rebuild_all_voxel_surfaces();
     rebuild_glue_constraints();
     meshDirty = true;
 
@@ -1050,17 +1073,21 @@ static void UpdateKdRatio(int player_index) {
     p->kd_ratio = (float)(p->kills + 1) / (p->deaths + 1);
 }
 
-// Physics step for voxels
-static void physics_step(float dt) {    // Rebuild spatial hash
+static void rebuild_voxel_hash(void) {
     memset(table, 0, sizeof(table));
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
-        int x = (int)floorf(v->pos.x / VOXEL_SIZE);
-        int y = (int)floorf(v->pos.y / VOXEL_SIZE);
-        int z = (int)floorf(v->pos.z / VOXEL_SIZE);
-        v->gx = x; v->gy = y; v->gz = z;
+        v->gx = (int)floorf(v->pos.x / VOXEL_SIZE);
+        v->gy = (int)floorf(v->pos.y / VOXEL_SIZE);
+        v->gz = (int)floorf(v->pos.z / VOXEL_SIZE);
         voxel_table_register(v, i);
     }
+}
+
+// Physics step for voxels
+static void physics_step(float dt) {    // Rebuild spatial hash
+    (void)dt;
+    rebuild_voxel_hash();
     // // Simulate dynamic voxels
     // for (int i = 0; i < voxel_count; i++) {
     //     Voxel *v = &voxels[i];
@@ -1975,6 +2002,155 @@ static void update_particle_velocities(float dt) {
     }
 }
 
+static void voxel_measure_strain(const Voxel *voxel,
+                                 float *out_max_strain,
+                                 float *out_max_shear)
+{
+    float max_strain = 0.0f;
+    float max_shear = 0.0f;
+    float rest_edge = voxel->rest_edge;
+    if (rest_edge <= 0.0f) {
+        rest_edge = VOXEL_SIZE;
+    }
+    float inv_rest_edge = (rest_edge > 0.0f) ? (1.0f / rest_edge) : 0.0f;
+
+    for (int e = 0; e < 12; ++e) {
+        int a_idx = voxel_edge_pairs[e][0];
+        int b_idx = voxel_edge_pairs[e][1];
+        Vector3 a = voxel->particles[a_idx].predicted_pos;
+        Vector3 b = voxel->particles[b_idx].predicted_pos;
+        float len = v_length(v_sub(a, b));
+        float strain = fabsf(len - rest_edge) * inv_rest_edge;
+        if (strain > max_strain) {
+            max_strain = strain;
+        }
+    }
+
+    Vector3 axis_vecs[3];
+    axis_vecs[0] = v_sub(voxel->particles[1].predicted_pos,
+                         voxel->particles[0].predicted_pos);
+    axis_vecs[1] = v_sub(voxel->particles[2].predicted_pos,
+                         voxel->particles[0].predicted_pos);
+    axis_vecs[2] = v_sub(voxel->particles[4].predicted_pos,
+                         voxel->particles[0].predicted_pos);
+    for (int a = 0; a < 3; ++a) {
+        float len = v_length(axis_vecs[a]);
+        if (len > 1e-6f) {
+            axis_vecs[a] = v_mul(axis_vecs[a], 1.0f / len);
+        } else {
+            axis_vecs[a] = (Vector3){ 0.0f, 0.0f, 0.0f };
+        }
+    }
+    const int shear_pairs[3][2] = { {0,1}, {0,2}, {1,2} };
+    for (int s = 0; s < 3; ++s) {
+        int i = shear_pairs[s][0];
+        int j = shear_pairs[s][1];
+        float dot_abs = fabsf(v_dot(axis_vecs[i], axis_vecs[j]));
+        if (dot_abs > max_shear) {
+            max_shear = dot_abs;
+        }
+    }
+
+    if (out_max_strain) {
+        *out_max_strain = max_strain;
+    }
+    if (out_max_shear) {
+        *out_max_shear = max_shear;
+    }
+}
+
+static void apply_uniform_velocity(Voxel *v, Vector3 vel, float dt) {
+    v->vel = vel;
+    for (int i = 0; i < 8; ++i) {
+        v->particles[i].vel = vel;
+        if (dt > 0.0f) {
+            Vector3 offset = v_mul(vel, dt);
+            v->particles[i].prev_pos = v_sub(v->particles[i].pos, offset);
+        }
+        v->particles[i].predicted_pos = v->particles[i].pos;
+    }
+}
+
+static bool split_voxel_at(int idx, float dt) {
+    if (idx < 0 || idx >= voxel_count) {
+        return false;
+    }
+
+    Voxel parent = voxels[idx];
+    if (parent.span < 2 || (parent.span % 2) != 0) {
+        return false;
+    }
+    const int additional_children = 7; // first child reuses parent slot.
+    if (voxel_count + additional_children > MAX_VOXELS) {
+        return false;
+    }
+
+    int child_span = parent.span / 2;
+    float child_edge = VOXEL_SIZE * (float)child_span;
+    float parent_half = 0.5f * parent.rest_edge;
+    float start_x = parent.pos.x - parent_half + 0.5f * child_edge;
+    float start_y = parent.pos.y - parent_half + 0.5f * child_edge;
+    float start_z = parent.pos.z - parent_half + 0.5f * child_edge;
+
+    int child_counter = 0;
+    for (int iz = 0; iz < 2; ++iz) {
+        for (int iy = 0; iy < 2; ++iy) {
+            for (int ix = 0; ix < 2; ++ix) {
+                float cx = start_x + ix * child_edge;
+                float cy = start_y + iy * child_edge;
+                float cz = start_z + iz * child_edge;
+
+                Voxel *child = NULL;
+                if (child_counter == 0) {
+                    child = &voxels[idx];
+                } else {
+                    if (voxel_count >= MAX_VOXELS) {
+                        return false;
+                    }
+                    child = &voxels[voxel_count++];
+                }
+
+                init_voxel_struct(child,
+                                  cx, cy, cz,
+                                  parent.fixed, parent.simulate,
+                                  parent.color, parent.type,
+                                  child_span, parent.owner);
+                apply_uniform_velocity(child, parent.vel, dt);
+                child_counter++;
+            }
+        }
+    }
+
+    return true;
+}
+
+static bool split_strained_voxels(float dt) {
+    bool split_any = false;
+    int i = 0;
+    while (i < voxel_count) {
+        Voxel *voxel = &voxels[i];
+        if (!voxel->simulate || voxel->span <= 1 || (voxel->span % 2) != 0) {
+            ++i;
+            continue;
+        }
+
+        float strain = 0.0f;
+        float shear = 0.0f;
+        voxel_measure_strain(voxel, &strain, &shear);
+        if (strain > VOXEL_SPLIT_STRAIN_THRESHOLD ||
+            shear > VOXEL_SPLIT_SHEAR_THRESHOLD)
+        {
+            if (split_voxel_at(i, dt)) {
+                split_any = true;
+                ++i;
+                continue;
+            }
+        }
+        ++i;
+    }
+    return split_any;
+}
+
 void simulate_voxel_pbd(float dt) {
     const int substeps = PBD_SUBSTEPS;
     const int constraint_iterations = PBD_CONSTRAINT_ITERS;
@@ -1983,6 +2159,13 @@ void simulate_voxel_pbd(float dt) {
     for (int step = 0; step < substeps; ++step) {
         integrate_particles(sub_dt);
         solve_particle_collisions(sub_dt);
+        bool split_this_step = split_strained_voxels(sub_dt);
+        if (split_this_step) {
+            rebuild_voxel_hash();
+            rebuild_all_voxel_surfaces();
+            rebuild_glue_constraints();
+            meshDirty = true;
+        }
 
         for (int it = 0; it < constraint_iterations; ++it) {
             for (int i = 0; i < voxel_count; ++i) {
