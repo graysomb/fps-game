@@ -58,8 +58,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define GLUE_RELAXATION 1.0f
 #define GLUE_EPS 1e-6f
 #define GLUE_BREAK_STRAIN 10.2f
-#define VOXEL_SPLIT_STRAIN_THRESHOLD 0.05f
-#define VOXEL_SPLIT_SHEAR_THRESHOLD 0.05f
+#define VOXEL_SPLIT_STRAIN_THRESHOLD 10.05f
+#define VOXEL_SPLIT_SHEAR_THRESHOLD 10.05f
 
 #define MAX_NEIGHBOR_VOXELS 128
 #define MAX_FACE_NEIGHBORS   64
@@ -135,6 +135,39 @@ typedef struct {
 } Voxel;
 static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
+
+typedef struct {
+    int gx, gy, gz;
+    Color color;
+} UnitVoxelSeed;
+
+typedef struct {
+    UnitVoxelSeed voxels[MAX_VOXELS];
+    int count;
+} UnitVoxelBuffer;
+
+static void unit_voxel_buffer_clear(UnitVoxelBuffer *buffer) {
+    if (!buffer) {
+        return;
+    }
+    buffer->count = 0;
+}
+
+static bool unit_voxel_buffer_push(UnitVoxelBuffer *buffer,
+                                   int gx, int gy, int gz,
+                                   Color color)
+{
+    if (!buffer || buffer->count >= MAX_VOXELS) {
+        return false;
+    }
+    buffer->voxels[buffer->count++] = (UnitVoxelSeed){
+        .gx = gx,
+        .gy = gy,
+        .gz = gz,
+        .color = color
+    };
+    return true;
+}
 
 static inline float voxel_particle_radius(const Voxel *v) {
     float r = v->particle_radius;
@@ -911,6 +944,199 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     return idx;
 }
 
+static inline size_t unit_voxel_grid_index(int x, int y, int z,
+                                           int dimx, int dimy, int dimz)
+{
+    (void)dimz;
+    return ((size_t)z * (size_t)dimy + (size_t)y) * (size_t)dimx + (size_t)x;
+}
+
+static int maximal_cube_span_at(int sx, int sy, int sz,
+                                const unsigned char *occupied,
+                                const unsigned char *consumed,
+                                int dimx, int dimy, int dimz)
+{
+    int max_span = dimx - sx;
+    int limit_y = dimy - sy;
+    int limit_z = dimz - sz;
+    if (limit_y < max_span) max_span = limit_y;
+    if (limit_z < max_span) max_span = limit_z;
+    if (max_span < 1) {
+        return 1;
+    }
+
+    int best_span = 1;
+    for (int span = 1; span <= max_span; ++span) {
+        bool ok = true;
+        for (int dz = 0; dz < span && ok; ++dz) {
+            for (int dy = 0; dy < span && ok; ++dy) {
+                for (int dx = 0; dx < span; ++dx) {
+                    size_t idx = unit_voxel_grid_index(sx + dx, sy + dy, sz + dz,
+                                                       dimx, dimy, dimz);
+                    if (!occupied[idx] || consumed[idx]) {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if (ok) {
+            best_span = span;
+        } else {
+            break;
+        }
+    }
+    return best_span;
+}
+
+static int emit_multiscale_voxels_from_units(const UnitVoxelBuffer *buffer,
+                                             bool fixed, bool simulate,
+                                             int type)
+{
+    if (!buffer || buffer->count <= 0) {
+        return 0;
+    }
+
+    int minx = INT_MAX, miny = INT_MAX, minz = INT_MAX;
+    int maxx = INT_MIN, maxy = INT_MIN, maxz = INT_MIN;
+    for (int i = 0; i < buffer->count; ++i) {
+        const UnitVoxelSeed *seed = &buffer->voxels[i];
+        if (seed->gx < minx) minx = seed->gx;
+        if (seed->gy < miny) miny = seed->gy;
+        if (seed->gz < minz) minz = seed->gz;
+        if (seed->gx > maxx) maxx = seed->gx;
+        if (seed->gy > maxy) maxy = seed->gy;
+        if (seed->gz > maxz) maxz = seed->gz;
+    }
+
+    if (minx > maxx || miny > maxy || minz > maxz) {
+        return 0;
+    }
+
+    int dimx = maxx - minx + 1;
+    int dimy = maxy - miny + 1;
+    int dimz = maxz - minz + 1;
+
+    size_t cell_count = (size_t)dimx * (size_t)dimy * (size_t)dimz;
+    if (cell_count == 0) {
+        return 0;
+    }
+
+    unsigned char *occupied = (unsigned char *)calloc(cell_count, sizeof(unsigned char));
+    unsigned char *consumed = (unsigned char *)calloc(cell_count, sizeof(unsigned char));
+    Color *color_grid = (Color *)malloc(cell_count * sizeof(Color));
+    if (!occupied || !consumed || !color_grid) {
+        free(occupied);
+        free(consumed);
+        free(color_grid);
+        TraceLog(LOG_WARNING, "[Multiscale] Failed to allocate voxel mask (%dx%dx%d)", dimx, dimy, dimz);
+        return 0;
+    }
+
+    for (int i = 0; i < buffer->count; ++i) {
+        const UnitVoxelSeed *seed = &buffer->voxels[i];
+        int local_x = seed->gx - minx;
+        int local_y = seed->gy - miny;
+        int local_z = seed->gz - minz;
+        size_t idx = unit_voxel_grid_index(local_x, local_y, local_z,
+                                           dimx, dimy, dimz);
+        occupied[idx] = 1;
+        color_grid[idx] = seed->color;
+    }
+
+    int spawned = 0;
+    for (int z = 0; z < dimz; ++z) {
+        for (int y = 0; y < dimy; ++y) {
+            for (int x = 0; x < dimx; ++x) {
+                size_t cell_idx = unit_voxel_grid_index(x, y, z, dimx, dimy, dimz);
+                if (!occupied[cell_idx] || consumed[cell_idx]) {
+                    continue;
+                }
+
+                int span = maximal_cube_span_at(x, y, z, occupied, consumed, dimx, dimy, dimz);
+                Color color = color_grid[cell_idx];
+
+                for (int dz = 0; dz < span; ++dz) {
+                    for (int dy = 0; dy < span; ++dy) {
+                        for (int dx = 0; dx < span; ++dx) {
+                            size_t idx = unit_voxel_grid_index(x + dx, y + dy, z + dz,
+                                                               dimx, dimy, dimz);
+                            consumed[idx] = 1;
+                        }
+                    }
+                }
+
+                int gx = minx + x;
+                int gy = miny + y;
+                int gz = minz + z;
+                float px = ((float)gx + 0.5f * (float)span) * VOXEL_SIZE;
+                float py = ((float)gy + 0.5f * (float)span) * VOXEL_SIZE;
+                float pz = ((float)gz + 0.5f * (float)span) * VOXEL_SIZE;
+                addVoxelSized(px, py, pz, fixed, simulate, color, type, span);
+                ++spawned;
+            }
+        }
+    }
+
+    free(occupied);
+    free(consumed);
+    free(color_grid);
+
+    TraceLog(LOG_INFO,
+             "[Multiscale] Converted %d unit voxels into %d span clusters",
+             buffer->count, spawned);
+    return spawned;
+}
+
+static unsigned char mix_color_channel(float a, float b, float t) {
+    return (unsigned char)clampf(mixf(a, b, t), 0.0f, 255.0f);
+}
+
+static void build_oblique_voxel_pyramid(UnitVoxelBuffer *buffer) {
+    if (!buffer) {
+        return;
+    }
+
+    const int pyramid_height = 3;
+    const int base_length = 4;
+    const int base_width = 4;
+    const int origin_x = -8;
+    const int origin_y = 1;
+    const int origin_z = -4;
+
+    for (int level = 0; level < pyramid_height; ++level) {
+        int layer_y = origin_y + level;
+        int shrink_forward = level;
+        int shrink_z = (level + 1) / 2;
+        int min_x = origin_x;
+        int max_x = origin_x + base_length - 1 - shrink_forward;
+        int min_z = origin_z + shrink_z;
+        int max_z = origin_z + base_width - 1 - shrink_z;
+        if (max_x < min_x || max_z < min_z) {
+            continue;
+        }
+
+        float t = (pyramid_height > 1)
+            ? ((float)level / (float)(pyramid_height - 1))
+            : 0.0f;
+        Color col = {
+            mix_color_channel(170.0f, 230.0f, t),
+            mix_color_channel(100.0f, 160.0f, t),
+            mix_color_channel(140.0f, 210.0f, t),
+            255
+        };
+
+        for (int gx = min_x; gx <= max_x; ++gx) {
+            for (int gz = min_z; gz <= max_z; ++gz) {
+                if (!unit_voxel_buffer_push(buffer, gx, layer_y, gz, col)) {
+                    TraceLog(LOG_WARNING, "[Pyramid] Unit voxel buffer full");
+                    return;
+                }
+            }
+        }
+    }
+}
+
 // Build static demo cube of voxels
 static void buildDemo(void) {
     // Floor
@@ -964,78 +1190,10 @@ static void buildDemo(void) {
     //         }
     //     }
     // }
-
-    // Spawn a 2x2x2 cluster of span-2 voxels to exercise larger glued blocks. (n=2)
-    const int cluster_span = 2;
-    const float cell_spacing = cluster_span * VOXEL_SIZE;
-    Vector3 cluster_origin = { -6.0f, cell_spacing * 0.5f, -6.0f };
-    for (int sx = 0; sx < 1; ++sx) {
-        for (int sy = 0; sy < 1; ++sy) {
-            for (int sz = 0; sz < 1; ++sz) {
-                float px = cluster_origin.x + (sx + 0.5f) * cell_spacing;
-                float py = cluster_origin.y + (sy + 0.5f) * cell_spacing;
-                float pz = cluster_origin.z + (sz + 0.5f) * cell_spacing;
-                Color col = {
-                    (unsigned char)(150 + sx * 40),
-                    (unsigned char)(120 + sy * 30),
-                    (unsigned char)(180 - sz * 30),
-                    255
-                };
-                addVoxelSized(px, py, pz, false, true, col, 0, cluster_span);
-            }
-        }
-    }
-
-    // Mixed-span glue test: large span cubes with span-1 neighbors sampling different face regions.
-    // {
-    //     const int span_large = 3;
-    //     const int span_small = 1;
-    //     const float edge_large = span_large * VOXEL_SIZE;
-    //     const float edge_small = span_small * VOXEL_SIZE;
-    //     const float face_gap = 0.5f * (edge_large + edge_small);
-
-    //     Vector3 large_center = { 4.0f, 0.5f * edge_large+10.0f, 4.0f };
-    //     Color large_col = { 220, 120, 60, 255 };
-    //     addVoxelSized(large_center.x, large_center.y, large_center.z, false, true, large_col, 0, span_large);
-
-    //     Vector3 fine_centers[2] = {
-    //         { large_center.x + face_gap, large_center.y, large_center.z },
-    //         { large_center.x + face_gap,
-    //           large_center.y + 0.5f * VOXEL_SIZE,
-    //           large_center.z + 0.5f * VOXEL_SIZE }
-    //     };
-    //     Color fine_cols[2] = {
-    //         { 60, 180, 220, 255 },
-    //         { 80, 200, 150, 255 }
-    //     };
-    //     for (int i = 0; i < 2; ++i) {
-    //         addVoxelSized(fine_centers[i].x,
-    //                       fine_centers[i].y,
-    //                       fine_centers[i].z,
-    //                       false, true, fine_cols[i], 0, span_small);
-    //     }
-    // }
-
-    // Inverted test: a small span-1 voxel glues to a larger span-3 neighbor on its +X side.
-    // {
-    //     const int span_large = 3;
-    //     const int span_small = 1;
-    //     const float edge_large = span_large * VOXEL_SIZE;
-    //     const float edge_small = span_small * VOXEL_SIZE;
-    //     const float face_gap = 0.5f * (edge_large + edge_small);
-
-    //     Vector3 small_center = { 8.0f, 0.5f * edge_small, 4.5f };
-    //     Color small_col = { 80, 80, 220, 255 };
-    //     addVoxelSized(small_center.x, small_center.y, small_center.z, false, true, small_col, 0, span_small);
-
-    //     Vector3 large_center = {
-    //         small_center.x + face_gap,
-    //         0.5f * edge_large,
-    //         small_center.z + 0.5f * VOXEL_SIZE
-    //     };
-    //     Color large_col = { 200, 160, 60, 255 };
-    //     addVoxelSized(large_center.x, large_center.y, large_center.z, false, true, large_col, 0, span_large);
-    // }
+    UnitVoxelBuffer pyramid_units;
+    unit_voxel_buffer_clear(&pyramid_units);
+    build_oblique_voxel_pyramid(&pyramid_units);
+    emit_multiscale_voxels_from_units(&pyramid_units, false, true, 0);
 }
 
 
