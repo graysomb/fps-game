@@ -63,6 +63,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 
 #define MAX_NEIGHBOR_VOXELS 128
 #define MAX_FACE_NEIGHBORS   64
+#define MAX_SPLIT_CHILDREN    8
 static const float GRID_EPSILON = 1e-4f;
 
 // KD-stats constants
@@ -112,6 +113,7 @@ typedef struct {
     Vector3 vel;
     bool simulate;
     bool fixed;
+    bool glueEligible;
     Color color;
     int type;
     int owner;
@@ -846,6 +848,7 @@ static void init_voxel_struct(Voxel *v,
     v->vel = (Vector3){ 0,0,0 };
     v->fixed = fixed;
     v->simulate = simulate;
+    v->glueEligible = true;
     v->color = color;
     v->type = type;
     v->owner = owner;
@@ -901,7 +904,11 @@ static int addVoxelSized(float px, float py, float pz, bool fixed, bool simulate
 
 // Add a voxel (static or dynamic)
 static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Color color, int type) {
-    return addVoxelSized(px, py, pz, fixed, simulate, color, type, 1);
+    int idx = addVoxelSized(px, py, pz, fixed, simulate, color, type, 1);
+    if (idx >= 0) {
+        voxels[idx].glueEligible = false;
+    }
+    return idx;
 }
 
 // Build static demo cube of voxels
@@ -1501,6 +1508,9 @@ static int gather_face_neighbors(int voxel_idx, const GlueDirection *dir,
                                  int out[], int max_out)
 {
     const Voxel *voxel = &voxels[voxel_idx];
+    if (!voxel->glueEligible) {
+        return 0;
+    }
     int minx, maxx, miny, maxy, minz, maxz;
     voxel_grid_bounds(voxel, &minx, &maxx, &miny, &maxy, &minz, &maxz);
 
@@ -1511,6 +1521,7 @@ static int gather_face_neighbors(int voxel_idx, const GlueDirection *dir,
             for (int z = minz; z <= maxz; ++z) {
                 int idx = table_get(x, y, z);
                 if (idx < 0 || idx == voxel_idx) continue;
+                if (!voxels[idx].glueEligible) continue;
                 bool seen = false;
                 for (int n = 0; n < count; ++n) {
                     if (out[n] == idx) { seen = true; break; }
@@ -1526,6 +1537,7 @@ static int gather_face_neighbors(int voxel_idx, const GlueDirection *dir,
             for (int z = minz; z <= maxz; ++z) {
                 int idx = table_get(x, y, z);
                 if (idx < 0 || idx == voxel_idx) continue;
+                if (!voxels[idx].glueEligible) continue;
                 bool seen = false;
                 for (int n = 0; n < count; ++n) {
                     if (out[n] == idx) { seen = true; break; }
@@ -1541,6 +1553,7 @@ static int gather_face_neighbors(int voxel_idx, const GlueDirection *dir,
             for (int y = miny; y <= maxy; ++y) {
                 int idx = table_get(x, y, z);
                 if (idx < 0 || idx == voxel_idx) continue;
+                if (!voxels[idx].glueEligible) continue;
                 bool seen = false;
                 for (int n = 0; n < count; ++n) {
                     if (out[n] == idx) { seen = true; break; }
@@ -1664,6 +1677,9 @@ static void rebuild_glue_constraints(void) {
     }
 
     for (int i = 0; i < voxel_count; ++i) {
+        if (!voxels[i].glueEligible) {
+            continue;
+        }
         for (int d = 0; d < 3; ++d) {
             const GlueDirection *dir = &glueDirections[d];
             int neighbors[MAX_FACE_NEIGHBORS] = {0};
@@ -1674,6 +1690,169 @@ static void rebuild_glue_constraints(void) {
             }
         }
     }
+}
+
+static void deactivate_glue_constraints_between(int a, int b) {
+    for (int g = 0; g < glueConstraintCount; ++g) {
+        GlueConstraint *gc = &glueConstraints[g];
+        if (!gc->active) {
+            continue;
+        }
+        if ((gc->coarseVoxel == a && gc->fineVoxel == b) ||
+            (gc->coarseVoxel == b && gc->fineVoxel == a))
+        {
+            gc->active = false;
+        }
+    }
+}
+
+static int gather_glued_neighbors(int voxel_idx, int *out, int max_out) {
+    if (!out || max_out <= 0) {
+        return 0;
+    }
+    int count = 0;
+    for (int g = 0; g < glueConstraintCount; ++g) {
+        const GlueConstraint *gc = &glueConstraints[g];
+        if (!gc->active) {
+            continue;
+        }
+        int neighbor = -1;
+        if (gc->coarseVoxel == voxel_idx) {
+            neighbor = gc->fineVoxel;
+        } else if (gc->fineVoxel == voxel_idx) {
+            neighbor = gc->coarseVoxel;
+        }
+        if (neighbor < 0) {
+            continue;
+        }
+        bool seen = false;
+        for (int n = 0; n < count; ++n) {
+            if (out[n] == neighbor) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen && count < max_out) {
+            out[count++] = neighbor;
+        }
+    }
+    return count;
+}
+
+static bool ranges_overlap(int minA, int maxA, int minB, int maxB) {
+    if (maxA < minB) return false;
+    if (maxB < minA) return false;
+    return true;
+}
+
+static bool voxels_face_direction(int idxA, int idxB,
+                                  const GlueDirection **out_dir,
+                                  bool *a_is_negative)
+{
+    const Voxel *a = &voxels[idxA];
+    const Voxel *b = &voxels[idxB];
+    int a_minx, a_maxx, a_miny, a_maxy, a_minz, a_maxz;
+    int b_minx, b_maxx, b_miny, b_maxy, b_minz, b_maxz;
+    voxel_grid_bounds(a, &a_minx, &a_maxx, &a_miny, &a_maxy, &a_minz, &a_maxz);
+    voxel_grid_bounds(b, &b_minx, &b_maxx, &b_miny, &b_maxy, &b_minz, &b_maxz);
+
+    if (ranges_overlap(a_miny, a_maxy, b_miny, b_maxy) &&
+        ranges_overlap(a_minz, a_maxz, b_minz, b_maxz))
+    {
+        if (a_maxx + 1 == b_minx) {
+            if (out_dir) *out_dir = &glueDirections[0];
+            if (a_is_negative) *a_is_negative = true;
+            return true;
+        }
+        if (b_maxx + 1 == a_minx) {
+            if (out_dir) *out_dir = &glueDirections[0];
+            if (a_is_negative) *a_is_negative = false;
+            return true;
+        }
+    }
+
+    if (ranges_overlap(a_minx, a_maxx, b_minx, b_maxx) &&
+        ranges_overlap(a_minz, a_maxz, b_minz, b_maxz))
+    {
+        if (a_maxy + 1 == b_miny) {
+            if (out_dir) *out_dir = &glueDirections[1];
+            if (a_is_negative) *a_is_negative = true;
+            return true;
+        }
+        if (b_maxy + 1 == a_miny) {
+            if (out_dir) *out_dir = &glueDirections[1];
+            if (a_is_negative) *a_is_negative = false;
+            return true;
+        }
+    }
+
+    if (ranges_overlap(a_minx, a_maxx, b_minx, b_maxx) &&
+        ranges_overlap(a_miny, a_maxy, b_miny, b_maxy))
+    {
+        if (a_maxz + 1 == b_minz) {
+            if (out_dir) *out_dir = &glueDirections[2];
+            if (a_is_negative) *a_is_negative = true;
+            return true;
+        }
+        if (b_maxz + 1 == a_minz) {
+            if (out_dir) *out_dir = &glueDirections[2];
+            if (a_is_negative) *a_is_negative = false;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void rebuild_glue_between_pair(int idxA, int idxB) {
+    if (!voxels[idxA].glueEligible || !voxels[idxB].glueEligible) {
+        return;
+    }
+    const GlueDirection *dir = NULL;
+    bool a_is_negative = false;
+    if (!voxels_face_direction(idxA, idxB, &dir, &a_is_negative) || !dir) {
+        return;
+    }
+    if (a_is_negative) {
+        add_bilinear_glue_constraints_for_pair(idxA, idxB, dir);
+    } else {
+        add_bilinear_glue_constraints_for_pair(idxB, idxA, dir);
+    }
+}
+
+static void rebuild_glue_children_with_neighbors(const int *children, int child_count,
+                                                 const int *neighbors, int neighbor_count)
+{
+    if (!children || !neighbors) {
+        return;
+    }
+    for (int n = 0; n < neighbor_count; ++n) {
+        int neighbor_idx = neighbors[n];
+        if (neighbor_idx < 0 || neighbor_idx >= voxel_count) {
+            continue;
+        }
+        for (int c = 0; c < child_count; ++c) {
+            int child_idx = children[c];
+            if (child_idx < 0 || child_idx >= voxel_count || child_idx == neighbor_idx) {
+                continue;
+            }
+            rebuild_glue_between_pair(child_idx, neighbor_idx);
+        }
+    }
+}
+
+static void compact_glue_constraints(void) {
+    int write = 0;
+    for (int g = 0; g < glueConstraintCount; ++g) {
+        if (!glueConstraints[g].active) {
+            continue;
+        }
+        if (write != g) {
+            glueConstraints[write] = glueConstraints[g];
+        }
+        ++write;
+    }
+    glueConstraintCount = write;
 }
 
 // Returns true when the provided voxel/corner pair is part of an active glue constraint.
@@ -2071,18 +2250,18 @@ static void apply_uniform_velocity(Voxel *v, Vector3 vel, float dt) {
     }
 }
 
-static bool split_voxel_at(int idx, float dt) {
-    if (idx < 0 || idx >= voxel_count) {
-        return false;
+static int split_voxel_at(int idx, float dt, int *out_children, int max_children) {
+    if (idx < 0 || idx >= voxel_count || !out_children || max_children < MAX_SPLIT_CHILDREN) {
+        return 0;
     }
 
     Voxel parent = voxels[idx];
     if (parent.span < 2 || (parent.span % 2) != 0) {
-        return false;
+        return 0;
     }
-    const int additional_children = 7; // first child reuses parent slot.
+    const int additional_children = MAX_SPLIT_CHILDREN - 1;
     if (voxel_count + additional_children > MAX_VOXELS) {
-        return false;
+        return 0;
     }
 
     int child_span = parent.span / 2;
@@ -2093,6 +2272,7 @@ static bool split_voxel_at(int idx, float dt) {
     float start_z = parent.pos.z - parent_half + 0.5f * child_edge;
 
     int child_counter = 0;
+    int next_index = voxel_count;
     for (int iz = 0; iz < 2; ++iz) {
         for (int iy = 0; iy < 2; ++iy) {
             for (int ix = 0; ix < 2; ++ix) {
@@ -2100,28 +2280,28 @@ static bool split_voxel_at(int idx, float dt) {
                 float cy = start_y + iy * child_edge;
                 float cz = start_z + iz * child_edge;
 
-                Voxel *child = NULL;
+                int child_idx;
                 if (child_counter == 0) {
-                    child = &voxels[idx];
+                    child_idx = idx;
                 } else {
-                    if (voxel_count >= MAX_VOXELS) {
-                        return false;
-                    }
-                    child = &voxels[voxel_count++];
+                    child_idx = next_index++;
                 }
 
+                Voxel *child = &voxels[child_idx];
                 init_voxel_struct(child,
                                   cx, cy, cz,
                                   parent.fixed, parent.simulate,
                                   parent.color, parent.type,
                                   child_span, parent.owner);
                 apply_uniform_velocity(child, parent.vel, dt);
+                out_children[child_counter] = child_idx;
                 child_counter++;
             }
         }
     }
 
-    return true;
+    voxel_count = next_index;
+    return child_counter;
 }
 
 static bool split_strained_voxels(float dt) {
@@ -2140,13 +2320,30 @@ static bool split_strained_voxels(float dt) {
         if (strain > VOXEL_SPLIT_STRAIN_THRESHOLD ||
             shear > VOXEL_SPLIT_SHEAR_THRESHOLD)
         {
-            if (split_voxel_at(i, dt)) {
+            int glued_neighbors[MAX_FACE_NEIGHBORS];
+            int glued_neighbor_count = gather_glued_neighbors(i, glued_neighbors, MAX_FACE_NEIGHBORS);
+            for (int n = 0; n < glued_neighbor_count; ++n) {
+                deactivate_glue_constraints_between(i, glued_neighbors[n]);
+            }
+
+            int children[MAX_SPLIT_CHILDREN];
+            int child_count = split_voxel_at(i, dt, children, MAX_SPLIT_CHILDREN);
+            if (child_count > 0) {
                 split_any = true;
+                rebuild_glue_children_with_neighbors(children, child_count,
+                                                     glued_neighbors, glued_neighbor_count);
                 ++i;
                 continue;
+            } else {
+                for (int n = 0; n < glued_neighbor_count; ++n) {
+                    rebuild_glue_between_pair(i, glued_neighbors[n]);
+                }
             }
         }
         ++i;
+    }
+    if (split_any) {
+        compact_glue_constraints();
     }
     return split_any;
 }
