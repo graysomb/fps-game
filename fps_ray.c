@@ -73,7 +73,6 @@ static const float GRID_EPSILON = 1e-4f;
 #define VOXEL_DEACTIVATION_FRAMES 12
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 12
 #define STATIC_RESTORE_SEARCH_RADIUS 4
-#define FLOOR_COLLISION_OFFSET 0.1f
 
 // KD-stats constants
 #define BASE_HEALTH 100
@@ -1777,10 +1776,19 @@ static void buildDemo(void) {
     //         }
     //     }
     // }
-    UnitVoxelBuffer pyramid_units;
-    unit_voxel_buffer_clear(&pyramid_units);
-    build_oblique_voxel_pyramid(&pyramid_units);
-    emit_static_voxels_from_units(&pyramid_units);
+    // UnitVoxelBuffer pyramid_units;
+    // unit_voxel_buffer_clear(&pyramid_units);
+    // build_oblique_voxel_pyramid(&pyramid_units);
+    // emit_static_voxels_from_units(&pyramid_units);
+
+    // Span-2 dynamic voxel near origin for floor collision testing
+    {
+        int span = 2;
+        float px = -2.0f * VOXEL_SIZE;
+        float pz = 2.0f * VOXEL_SIZE;
+        float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
+        addVoxelSized(px, py, pz, false, true, (Color){ 240, 160, 60, 255 }, 0, span);
+    }
 }
 
 
@@ -2843,7 +2851,9 @@ static void solve_particle_collisions(float dt) {
 
             Vector3 pos = p->predicted_pos;
 
-            float floor_limit = voxel_radius + FLOOR_COLLISION_OFFSET;
+            int span = (voxel->span > 0) ? voxel->span : 1;
+            float floor_offset = 0.5f * VOXEL_SIZE * (float)span;
+            float floor_limit = fmaxf(0.0f, floor_offset - voxel_radius);
             if (pos.y < floor_limit) {
                 pos.y = floor_limit;
             }
