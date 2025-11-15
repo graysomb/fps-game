@@ -154,6 +154,7 @@ static void voxel_measure_strain(const Voxel *voxel,
                                  float *out_max_shear);
 static int build_glue_cluster_indices(int start_idx, int *out_indices);
 static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count);
+static void solve_span_voxel_collisions(void);
 
 typedef struct {
     int gx, gy, gz;
@@ -3020,6 +3021,8 @@ static void solve_particle_collisions(float dt) {
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxelA = &voxels[i];
         float radiusA = voxel_particle_radius(voxelA);
+        int spanA = (voxelA->span > 0) ? voxelA->span : 1;
+        float spanA_extent = 0.5f * VOXEL_SIZE * (float)(spanA - 1);
         int neighbor_ids[MAX_NEIGHBOR_VOXELS];
         int neighbor_count = gather_neighbor_voxels(voxelA, i, neighbor_ids, MAX_NEIGHBOR_VOXELS);
 
@@ -3038,6 +3041,12 @@ static void solve_particle_collisions(float dt) {
 
                 Voxel *voxelB = &voxels[neighbor_idx];
                 float radiusB = voxel_particle_radius(voxelB);
+                int spanB = (voxelB->span > 0) ? voxelB->span : 1;
+                float spanB_extent = 0.5f * VOXEL_SIZE * (float)(spanB - 1);
+
+                if (spanA > 1 || spanB > 1) {
+                    continue;
+                }
 
                 bool glued = voxels_are_glued(i, neighbor_idx);
                 bool share_edge_corner = voxels_share_edge_or_corner(voxelA, voxelB);
@@ -3064,7 +3073,11 @@ static void solve_particle_collisions(float dt) {
 
                     Vector3 delta = v_sub(pa->predicted_pos, pb->predicted_pos);
                     float dist_sq = v_dot(delta, delta);
-                    float target_dist = radiusA + radiusB;
+                    float span_offset = spanA_extent + spanB_extent;
+                    float target_dist = radiusA + radiusB - span_offset;
+                    if (target_dist < 0.0f) {
+                        target_dist = 0.0f;
+                    }
 
                     if (dist_sq >= (target_dist * target_dist)) {
                         continue;
@@ -3103,6 +3116,111 @@ static void solve_particle_collisions(float dt) {
                     if (wb > 0.0f) {
                         pb->predicted_pos = v_sub(pb->predicted_pos, v_mul(normal, scale * wb));
                     }
+                }
+            }
+        }
+    }
+}
+
+static void solve_span_voxel_collisions(void) {
+    const float contact_eps = 0.0f;
+    const float omega = COLLISION_RELAXATION;
+
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxelA = &voxels[i];
+        int neighbor_ids[MAX_NEIGHBOR_VOXELS];
+        int neighbor_count = gather_neighbor_voxels(voxelA, i, neighbor_ids, MAX_NEIGHBOR_VOXELS);
+
+        for (int n = 0; n < neighbor_count; ++n) {
+            int neighbor_idx = neighbor_ids[n];
+            if (neighbor_idx <= i) {
+                continue;
+            }
+
+            Voxel *voxelB = &voxels[neighbor_idx];
+            int spanA = (voxelA->span > 0) ? voxelA->span : 1;
+            int spanB = (voxelB->span > 0) ? voxelB->span : 1;
+            if (spanA <= 1 && spanB <= 1) {
+                continue;
+            }
+            if (voxels_are_glued(i, neighbor_idx)) {
+                continue;
+            }
+            if (voxels_share_edge_or_corner(voxelA, voxelB)) {
+                continue;
+            }
+
+            VoxelWorldBounds boundsA, boundsB;
+            voxel_world_bounds(voxelA, &boundsA);
+            voxel_world_bounds(voxelB, &boundsB);
+
+            float overlapX = fminf(boundsA.maxx, boundsB.maxx) - fmaxf(boundsA.minx, boundsB.minx);
+            float overlapY = fminf(boundsA.maxy, boundsB.maxy) - fmaxf(boundsA.miny, boundsB.miny);
+            float overlapZ = fminf(boundsA.maxz, boundsB.maxz) - fmaxf(boundsA.minz, boundsB.minz);
+            if (overlapX <= contact_eps || overlapY <= contact_eps || overlapZ <= contact_eps) {
+                continue;
+            }
+
+            float overlaps[3] = { overlapX, overlapY, overlapZ };
+            int axis = 0;
+            if (overlapY < overlaps[axis]) {
+                axis = 1;
+            }
+            if (overlapZ < overlaps[axis]) {
+                axis = 2;
+            }
+
+            float penetration = overlaps[axis];
+            if (penetration <= 0.0f) {
+                continue;
+            }
+
+            Vector3 centerA = voxelA->pos;
+            Vector3 centerB = voxelB->pos;
+            float inv_massA = 0.0f;
+            float inv_massB = 0.0f;
+            compute_voxel_center_and_mass(voxelA, &centerA, &inv_massA);
+            compute_voxel_center_and_mass(voxelB, &centerB, &inv_massB);
+
+            Vector3 normal = { 0.0f, 0.0f, 0.0f };
+            if (axis == 0) {
+                normal.x = (centerA.x >= centerB.x) ? 1.0f : -1.0f;
+            } else if (axis == 1) {
+                normal.y = (centerA.y >= centerB.y) ? 1.0f : -1.0f;
+            } else {
+                normal.z = (centerA.z >= centerB.z) ? 1.0f : -1.0f;
+            }
+
+            float w_sum = inv_massA + inv_massB;
+            if (w_sum <= 0.0f) {
+                continue;
+            }
+
+            float correction = penetration * omega;
+            float moveA = (inv_massA > 0.0f) ? correction * (inv_massA / w_sum) : 0.0f;
+            float moveB = (inv_massB > 0.0f) ? correction * (inv_massB / w_sum) : 0.0f;
+
+            if (moveA > 0.0f) {
+                Vector3 delta = v_mul(normal, moveA);
+                for (int j = 0; j < 8; ++j) {
+                    Particle *pa = &voxelA->particles[j];
+                    if (pa->inv_mass <= 0.0f) {
+                        continue;
+                    }
+                    float weight = (inv_massA > 0.0f) ? (pa->inv_mass / inv_massA) : 0.0f;
+                    pa->predicted_pos = v_add(pa->predicted_pos, v_mul(delta, weight));
+                }
+            }
+
+            if (moveB > 0.0f) {
+                Vector3 delta = v_mul(normal, moveB);
+                for (int j = 0; j < 8; ++j) {
+                    Particle *pb = &voxelB->particles[j];
+                    if (pb->inv_mass <= 0.0f) {
+                        continue;
+                    }
+                    float weight = (inv_massB > 0.0f) ? (pb->inv_mass / inv_massB) : 0.0f;
+                    pb->predicted_pos = v_sub(pb->predicted_pos, v_mul(delta, weight));
                 }
             }
         }
@@ -3316,6 +3434,7 @@ void simulate_voxel_pbd(float dt) {
     for (int step = 0; step < substeps; ++step) {
         integrate_particles(sub_dt);
         solve_particle_collisions(sub_dt);
+        solve_span_voxel_collisions();
         bool split_this_step = split_strained_voxels(sub_dt);
         if (split_this_step) {
             rebuild_voxel_hash();
