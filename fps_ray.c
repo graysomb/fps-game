@@ -3021,75 +3021,8 @@ static void compute_voxel_face_visibility(int idx, bool faces[6])
     if (!faces || idx < 0 || idx >= voxel_count) {
         return;
     }
-    const Voxel *v = &voxels[idx];
-    int minx, maxx, miny, maxy, minz, maxz;
-    voxel_grid_bounds(v, &minx, &maxx, &miny, &maxy, &minz, &maxz);
-
-    faces[0] = true; // +X
-    for (int y = miny; y <= maxy && faces[0]; ++y) {
-        for (int z = minz; z <= maxz; ++z) {
-            int neighbor = table_get(maxx + 1, y, z);
-            if (neighbor >= 0 && neighbor != idx) {
-                faces[0] = false;
-                break;
-            }
-        }
-    }
-
-    faces[1] = true; // -X
-    for (int y = miny; y <= maxy && faces[1]; ++y) {
-        for (int z = minz; z <= maxz; ++z) {
-            int neighbor = table_get(minx - 1, y, z);
-            if (neighbor >= 0 && neighbor != idx) {
-                faces[1] = false;
-                break;
-            }
-        }
-    }
-
-    faces[2] = true; // +Y
-    for (int x = minx; x <= maxx && faces[2]; ++x) {
-        for (int z = minz; z <= maxz; ++z) {
-            int neighbor = table_get(x, maxy + 1, z);
-            if (neighbor >= 0 && neighbor != idx) {
-                faces[2] = false;
-                break;
-            }
-        }
-    }
-
-    faces[3] = true; // -Y
-    for (int x = minx; x <= maxx && faces[3]; ++x) {
-        for (int z = minz; z <= maxz; ++z) {
-            int neighbor = table_get(x, miny - 1, z);
-            if (neighbor >= 0 && neighbor != idx) {
-                faces[3] = false;
-                break;
-            }
-        }
-    }
-
-    faces[4] = true; // +Z
-    for (int x = minx; x <= maxx && faces[4]; ++x) {
-        for (int y = miny; y <= maxy; ++y) {
-            int neighbor = table_get(x, y, maxz + 1);
-            if (neighbor >= 0 && neighbor != idx) {
-                faces[4] = false;
-                break;
-            }
-        }
-    }
-
-    faces[5] = true; // -Z
-    for (int x = minx; x <= maxx && faces[5]; ++x) {
-        for (int y = miny; y <= maxy; ++y) {
-            int neighbor = table_get(x, y, minz - 1);
-            if (neighbor >= 0 && neighbor != idx) {
-                faces[5] = false;
-                break;
-            }
-        }
-    }
+    mark_surface(idx);
+    memcpy(faces, voxels[idx].surface, sizeof(voxels[idx].surface));
 }
 
 static void drawCubeMan(const Voxel *voxel, const bool faces[6])
