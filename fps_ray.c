@@ -58,8 +58,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define GLUE_RELAXATION 1.0f
 #define GLUE_EPS 1e-6f
 #define GLUE_BREAK_STRAIN 0.5f
-#define VOXEL_SPLIT_STRAIN_THRESHOLD 0.05f
-#define VOXEL_SPLIT_SHEAR_THRESHOLD 0.05f
+#define VOXEL_SPLIT_STRAIN_THRESHOLD 10.05f
+#define VOXEL_SPLIT_SHEAR_THRESHOLD 10.05f
 
 #define MAX_NEIGHBOR_VOXELS 128
 #define MAX_FACE_NEIGHBORS   64
@@ -67,11 +67,11 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 static const float GRID_EPSILON = 1e-4f;
 #define VOXEL_ACTIVATION_RADIUS 2
 #define VOXEL_ACTIVATION_UNIT_BUDGET 128
-#define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 0.6f
-#define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.02f
-#define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.02f
+#define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 10.0f
+#define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 10.5f
+#define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 10.5f
 #define VOXEL_DEACTIVATION_FRAMES 12
-#define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 32
+#define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 12
 #define STATIC_RESTORE_SEARCH_RADIUS 4
 #define FLOOR_COLLISION_OFFSET 0.1f
 
@@ -1582,9 +1582,9 @@ static void build_oblique_voxel_pyramid(UnitVoxelBuffer *buffer) {
         return;
     }
 
-    const int pyramid_height = 4;
-    const int base_length = 4;
-    const int base_width = 4;
+    const int pyramid_height = 6;
+    const int base_length = 6;
+    const int base_width = 6;
     const int origin_x = -8;
     const int origin_y = 1;
     const int origin_z = -4;
