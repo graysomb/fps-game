@@ -3016,60 +3016,148 @@ static void drawCubeEdges(const Voxel *voxel)
     }
 }
 
-static void drawCubeMan(const Voxel *voxel)
+static void compute_voxel_face_visibility(int idx, bool faces[6])
+{
+    if (!faces || idx < 0 || idx >= voxel_count) {
+        return;
+    }
+    const Voxel *v = &voxels[idx];
+    int minx, maxx, miny, maxy, minz, maxz;
+    voxel_grid_bounds(v, &minx, &maxx, &miny, &maxy, &minz, &maxz);
+
+    faces[0] = true; // +X
+    for (int y = miny; y <= maxy && faces[0]; ++y) {
+        for (int z = minz; z <= maxz; ++z) {
+            int neighbor = table_get(maxx + 1, y, z);
+            if (neighbor >= 0 && neighbor != idx) {
+                faces[0] = false;
+                break;
+            }
+        }
+    }
+
+    faces[1] = true; // -X
+    for (int y = miny; y <= maxy && faces[1]; ++y) {
+        for (int z = minz; z <= maxz; ++z) {
+            int neighbor = table_get(minx - 1, y, z);
+            if (neighbor >= 0 && neighbor != idx) {
+                faces[1] = false;
+                break;
+            }
+        }
+    }
+
+    faces[2] = true; // +Y
+    for (int x = minx; x <= maxx && faces[2]; ++x) {
+        for (int z = minz; z <= maxz; ++z) {
+            int neighbor = table_get(x, maxy + 1, z);
+            if (neighbor >= 0 && neighbor != idx) {
+                faces[2] = false;
+                break;
+            }
+        }
+    }
+
+    faces[3] = true; // -Y
+    for (int x = minx; x <= maxx && faces[3]; ++x) {
+        for (int z = minz; z <= maxz; ++z) {
+            int neighbor = table_get(x, miny - 1, z);
+            if (neighbor >= 0 && neighbor != idx) {
+                faces[3] = false;
+                break;
+            }
+        }
+    }
+
+    faces[4] = true; // +Z
+    for (int x = minx; x <= maxx && faces[4]; ++x) {
+        for (int y = miny; y <= maxy; ++y) {
+            int neighbor = table_get(x, y, maxz + 1);
+            if (neighbor >= 0 && neighbor != idx) {
+                faces[4] = false;
+                break;
+            }
+        }
+    }
+
+    faces[5] = true; // -Z
+    for (int x = minx; x <= maxx && faces[5]; ++x) {
+        for (int y = miny; y <= maxy; ++y) {
+            int neighbor = table_get(x, y, minz - 1);
+            if (neighbor >= 0 && neighbor != idx) {
+                faces[5] = false;
+                break;
+            }
+        }
+    }
+}
+
+static void drawCubeMan(const Voxel *voxel, const bool faces[6])
 {
     Vector3 v[8];
     for (int i = 0; i < 8; ++i) v[i] = voxel->particles[i].pos;
 
     rlColor4ub(voxel->color.r, voxel->color.g, voxel->color.b, voxel->color.a);
 
-    rlNormal3f(0.0f, 0.0f, 1.0f);
-    rlVertex3f(v[4].x, v[4].y, v[4].z);
-    rlVertex3f(v[5].x, v[5].y, v[5].z);
-    rlVertex3f(v[7].x, v[7].y, v[7].z);
-    rlVertex3f(v[4].x, v[4].y, v[4].z);
-    rlVertex3f(v[7].x, v[7].y, v[7].z);
-    rlVertex3f(v[6].x, v[6].y, v[6].z);
+    if (!faces || faces[4]) {
+        rlNormal3f(0.0f, 0.0f, 1.0f);
+        rlVertex3f(v[4].x, v[4].y, v[4].z);
+        rlVertex3f(v[5].x, v[5].y, v[5].z);
+        rlVertex3f(v[7].x, v[7].y, v[7].z);
+        rlVertex3f(v[4].x, v[4].y, v[4].z);
+        rlVertex3f(v[7].x, v[7].y, v[7].z);
+        rlVertex3f(v[6].x, v[6].y, v[6].z);
+    }
 
-    rlNormal3f(0.0f, 0.0f, -1.0f);
-    rlVertex3f(v[1].x, v[1].y, v[1].z);
-    rlVertex3f(v[0].x, v[0].y, v[0].z);
-    rlVertex3f(v[2].x, v[2].y, v[2].z);
-    rlVertex3f(v[1].x, v[1].y, v[1].z);
-    rlVertex3f(v[2].x, v[2].y, v[2].z);
-    rlVertex3f(v[3].x, v[3].y, v[3].z);
+    if (!faces || faces[5]) {
+        rlNormal3f(0.0f, 0.0f, -1.0f);
+        rlVertex3f(v[1].x, v[1].y, v[1].z);
+        rlVertex3f(v[0].x, v[0].y, v[0].z);
+        rlVertex3f(v[2].x, v[2].y, v[2].z);
+        rlVertex3f(v[1].x, v[1].y, v[1].z);
+        rlVertex3f(v[2].x, v[2].y, v[2].z);
+        rlVertex3f(v[3].x, v[3].y, v[3].z);
+    }
 
-    rlNormal3f(0.0f, 1.0f, 0.0f);
-    rlVertex3f(v[6].x, v[6].y, v[6].z);
-    rlVertex3f(v[7].x, v[7].y, v[7].z);
-    rlVertex3f(v[3].x, v[3].y, v[3].z);
-    rlVertex3f(v[6].x, v[6].y, v[6].z);
-    rlVertex3f(v[3].x, v[3].y, v[3].z);
-    rlVertex3f(v[2].x, v[2].y, v[2].z);
+    if (!faces || faces[2]) {
+        rlNormal3f(0.0f, 1.0f, 0.0f);
+        rlVertex3f(v[6].x, v[6].y, v[6].z);
+        rlVertex3f(v[7].x, v[7].y, v[7].z);
+        rlVertex3f(v[3].x, v[3].y, v[3].z);
+        rlVertex3f(v[6].x, v[6].y, v[6].z);
+        rlVertex3f(v[3].x, v[3].y, v[3].z);
+        rlVertex3f(v[2].x, v[2].y, v[2].z);
+    }
 
-    rlNormal3f(0.0f, -1.0f, 0.0f);
-    rlVertex3f(v[0].x, v[0].y, v[0].z);
-    rlVertex3f(v[1].x, v[1].y, v[1].z);
-    rlVertex3f(v[5].x, v[5].y, v[5].z);
-    rlVertex3f(v[0].x, v[0].y, v[0].z);
-    rlVertex3f(v[5].x, v[5].y, v[5].z);
-    rlVertex3f(v[4].x, v[4].y, v[4].z);
+    if (!faces || faces[3]) {
+        rlNormal3f(0.0f, -1.0f, 0.0f);
+        rlVertex3f(v[0].x, v[0].y, v[0].z);
+        rlVertex3f(v[1].x, v[1].y, v[1].z);
+        rlVertex3f(v[5].x, v[5].y, v[5].z);
+        rlVertex3f(v[0].x, v[0].y, v[0].z);
+        rlVertex3f(v[5].x, v[5].y, v[5].z);
+        rlVertex3f(v[4].x, v[4].y, v[4].z);
+    }
 
-    rlNormal3f(1.0f, 0.0f, 0.0f);
-    rlVertex3f(v[5].x, v[5].y, v[5].z);
-    rlVertex3f(v[1].x, v[1].y, v[1].z);
-    rlVertex3f(v[3].x, v[3].y, v[3].z);
-    rlVertex3f(v[5].x, v[5].y, v[5].z);
-    rlVertex3f(v[3].x, v[3].y, v[3].z);
-    rlVertex3f(v[7].x, v[7].y, v[7].z);
+    if (!faces || faces[0]) {
+        rlNormal3f(1.0f, 0.0f, 0.0f);
+        rlVertex3f(v[5].x, v[5].y, v[5].z);
+        rlVertex3f(v[1].x, v[1].y, v[1].z);
+        rlVertex3f(v[3].x, v[3].y, v[3].z);
+        rlVertex3f(v[5].x, v[5].y, v[5].z);
+        rlVertex3f(v[3].x, v[3].y, v[3].z);
+        rlVertex3f(v[7].x, v[7].y, v[7].z);
+    }
 
-    rlNormal3f(-1.0f, 0.0f, 0.0f);
-    rlVertex3f(v[0].x, v[0].y, v[0].z);
-    rlVertex3f(v[4].x, v[4].y, v[4].z);
-    rlVertex3f(v[6].x, v[6].y, v[6].z);
-    rlVertex3f(v[0].x, v[0].y, v[0].z);
-    rlVertex3f(v[6].x, v[6].y, v[6].z);
-    rlVertex3f(v[2].x, v[2].y, v[2].z);
+    if (!faces || faces[1]) {
+        rlNormal3f(-1.0f, 0.0f, 0.0f);
+        rlVertex3f(v[0].x, v[0].y, v[0].z);
+        rlVertex3f(v[4].x, v[4].y, v[4].z);
+        rlVertex3f(v[6].x, v[6].y, v[6].z);
+        rlVertex3f(v[0].x, v[0].y, v[0].z);
+        rlVertex3f(v[6].x, v[6].y, v[6].z);
+        rlVertex3f(v[2].x, v[2].y, v[2].z);
+    }
 }
 
 static Color particle_velocity_color(float speed)
@@ -3426,6 +3514,46 @@ static void DrawVoxels(Camera3D cam) {
     if (greedyMesh.vertices) {
         DrawMesh(greedyMesh, greedyMaterial, MatrixIdentity());
     }
+    rlBegin(RL_LINES);
+    rlColor4ub(0, 0, 0, 60);
+    for (int p = 0; p < patchCount; p++) {
+        Patch *pt = &patches[p];
+        Vector3 origin, iu, ju;
+        switch (pt->plane) {
+            case 0:
+                origin = (Vector3){ pt->i0*VOXEL_SIZE,
+                                    pt->j0*VOXEL_SIZE,
+                                    (pt->layer + (pt->positive?1:0))*VOXEL_SIZE };
+                iu = (Vector3){ VOXEL_SIZE, 0, 0 };
+                ju = (Vector3){ 0, VOXEL_SIZE, 0 };
+                break;
+            case 1:
+                origin = (Vector3){ pt->i0*VOXEL_SIZE,
+                                    (pt->layer + (pt->positive?1:0))*VOXEL_SIZE,
+                                    pt->j0*VOXEL_SIZE };
+                iu = (Vector3){ VOXEL_SIZE, 0, 0 };
+                ju = (Vector3){ 0, 0, VOXEL_SIZE };
+                break;
+            default:
+                origin = (Vector3){ (pt->layer + (pt->positive?1:0))*VOXEL_SIZE,
+                                    pt->i0*VOXEL_SIZE,
+                                    pt->j0*VOXEL_SIZE };
+                iu = (Vector3){ 0, VOXEL_SIZE, 0 };
+                ju = (Vector3){ 0, 0, VOXEL_SIZE };
+                break;
+        }
+        for (int ix = 0; ix <= pt->di; ++ix) {
+            Vector3 a = v_add(origin, v_mul(iu, ix));
+            Vector3 b = v_add(a, v_mul(ju, pt->dj));
+            rlVertex3f(a.x, a.y, a.z); rlVertex3f(b.x, b.y, b.z);
+        }
+        for (int iy = 0; iy <= pt->dj; ++iy) {
+            Vector3 a = v_add(origin, v_mul(ju, iy));
+            Vector3 b = v_add(a, v_mul(iu, pt->di));
+            rlVertex3f(a.x, a.y, a.z); rlVertex3f(b.x, b.y, b.z);
+        }
+    }
+    rlEnd();
     rlEnableBackfaceCulling();
 
     rlBegin(RL_TRIANGLES);
@@ -3434,7 +3562,9 @@ static void DrawVoxels(Camera3D cam) {
         if (!v->simulate) {
             continue;
         }
-        drawCubeMan(v);
+        bool faces[6];
+        compute_voxel_face_visibility(i, faces);
+        drawCubeMan(v, faces);
     }
     rlEnd();
 
@@ -3769,6 +3899,7 @@ int main(void) {
             physics_step(dt/subStep);
         }
         simulate_voxel_pbd(dt);
+        rebuild_voxel_hash();
         deactivate_sleeping_voxels();
 
         // frame by frame debug
