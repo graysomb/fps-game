@@ -57,7 +57,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define VELOCITY_DAMPING 0.99f
 #define GLUE_RELAXATION 1.0f
 #define GLUE_EPS 1e-6f
-#define GLUE_BREAK_STRAIN 10.2f
+#define GLUE_BREAK_STRAIN 0.5f
 #define VOXEL_SPLIT_STRAIN_THRESHOLD 0.05f
 #define VOXEL_SPLIT_SHEAR_THRESHOLD 0.05f
 
@@ -72,6 +72,8 @@ static const float GRID_EPSILON = 1e-4f;
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.02f
 #define VOXEL_DEACTIVATION_FRAMES 12
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 32
+#define STATIC_RESTORE_SEARCH_RADIUS 4
+#define FLOOR_COLLISION_OFFSET 0.1f
 
 // KD-stats constants
 #define BASE_HEALTH 100
@@ -799,6 +801,10 @@ static void remove_voxel_index(int idx)
     --voxel_count;
 }
 
+static bool occupied(int x, int y, int z) {
+    return table_get(x, y, z) >= 0;
+}
+
 static int add_static_voxel_at_grid(int gx, int gy, int gz, Color color, int type)
 {
     float px = ((float)gx + 0.5f) * VOXEL_SIZE;
@@ -807,18 +813,171 @@ static int add_static_voxel_at_grid(int gx, int gy, int gz, Color color, int typ
     return addVoxel(px, py, pz, true, false, color, type);
 }
 
+static bool grid_region_is_free(int minx, int maxx,
+                                int miny, int maxy,
+                                int minz, int maxz)
+{
+    if (minx > maxx || miny > maxy || minz > maxz) {
+        return false;
+    }
+    if (miny < 0) {
+        return false;
+    }
+    for (int z = minz; z <= maxz; ++z) {
+        for (int y = miny; y <= maxy; ++y) {
+            for (int x = minx; x <= maxx; ++x) {
+                if (occupied(x, y, z)) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+static bool find_nearest_free_static_region(int base_minx, int base_maxx,
+                                            int base_miny, int base_maxy,
+                                            int base_minz, int base_maxz,
+                                            int min_y_limit,
+                                            int *out_minx, int *out_maxx,
+                                            int *out_miny, int *out_maxy,
+                                            int *out_minz, int *out_maxz)
+{
+    if (!out_minx || !out_maxx || !out_miny || !out_maxy || !out_minz || !out_maxz) {
+        return false;
+    }
+    if (base_miny < min_y_limit) {
+        base_maxy += (min_y_limit - base_miny);
+        base_miny = min_y_limit;
+    }
+    if (grid_region_is_free(base_minx, base_maxx, base_miny, base_maxy, base_minz, base_maxz)) {
+        *out_minx = base_minx; *out_maxx = base_maxx;
+        *out_miny = base_miny; *out_maxy = base_maxy;
+        *out_minz = base_minz; *out_maxz = base_maxz;
+        return true;
+    }
+
+    const int search = STATIC_RESTORE_SEARCH_RADIUS;
+    for (int radius = 1; radius <= search; ++radius) {
+        bool found = false;
+        int best_dx = 0, best_dy = 0, best_dz = 0;
+        int best_dist_sq = INT_MAX;
+        int limit = radius;
+        for (int dz = -limit; dz <= limit; ++dz) {
+            for (int dy = -limit; dy <= limit; ++dy) {
+                for (int dx = -limit; dx <= limit; ++dx) {
+                    if (dx == 0 && dy == 0 && dz == 0) {
+                        continue;
+                    }
+                    int dist_sq = dx*dx + dy*dy + dz*dz;
+                    if (dist_sq > radius * radius) {
+                        continue;
+                    }
+                    int test_minx = base_minx + dx;
+                    int test_maxx = base_maxx + dx;
+                    int test_miny = base_miny + dy;
+                    int test_maxy = base_maxy + dy;
+                    int test_minz = base_minz + dz;
+                    int test_maxz = base_maxz + dz;
+                    if (test_miny < min_y_limit) {
+                        continue;
+                    }
+                    if (!grid_region_is_free(test_minx, test_maxx,
+                                             test_miny, test_maxy,
+                                             test_minz, test_maxz)) {
+                        continue;
+                    }
+                    if (dist_sq < best_dist_sq) {
+                        best_dist_sq = dist_sq;
+                        best_dx = dx;
+                        best_dy = dy;
+                        best_dz = dz;
+                        found = true;
+                    }
+                }
+            }
+        }
+
+        if (found) {
+            *out_minx = base_minx + best_dx;
+            *out_maxx = base_maxx + best_dx;
+            *out_miny = base_miny + best_dy;
+            *out_maxy = base_maxy + best_dy;
+            *out_minz = base_minz + best_dz;
+            *out_maxz = base_maxz + best_dz;
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static void spawn_static_covering_voxel(const Voxel *voxel)
 {
     if (!voxel) {
         return;
     }
-    int minx = voxel->rest_min_gx;
-    int maxx = voxel->rest_max_gx;
-    int miny = voxel->rest_min_gy;
-    int maxy = voxel->rest_max_gy;
-    int minz = voxel->rest_min_gz;
-    int maxz = voxel->rest_max_gz;
-    if (minx > maxx || miny > maxy || minz > maxz) {
+    int base_minx, base_maxx, base_miny, base_maxy, base_minz, base_maxz;
+    bool has_rest_bounds =
+        (voxel->rest_min_gx <= voxel->rest_max_gx) &&
+        (voxel->rest_min_gy <= voxel->rest_max_gy) &&
+        (voxel->rest_min_gz <= voxel->rest_max_gz);
+
+    if (has_rest_bounds) {
+        float rest_center_x = 0.5f * ((float)voxel->rest_min_gx + (float)voxel->rest_max_gx + 1.0f);
+        float rest_center_y = 0.5f * ((float)voxel->rest_min_gy + (float)voxel->rest_max_gy + 1.0f);
+        float rest_center_z = 0.5f * ((float)voxel->rest_min_gz + (float)voxel->rest_max_gz + 1.0f);
+        float current_center_x = voxel->pos.x / VOXEL_SIZE;
+        float current_center_y = voxel->pos.y / VOXEL_SIZE;
+        float current_center_z = voxel->pos.z / VOXEL_SIZE;
+
+        int shift_x = (int)roundf(current_center_x - rest_center_x);
+        int shift_y = (int)roundf(current_center_y - rest_center_y);
+        int shift_z = (int)roundf(current_center_z - rest_center_z);
+
+        base_minx = voxel->rest_min_gx + shift_x;
+        base_maxx = voxel->rest_max_gx + shift_x;
+        base_miny = voxel->rest_min_gy + shift_y;
+        base_maxy = voxel->rest_max_gy + shift_y;
+        base_minz = voxel->rest_min_gz + shift_z;
+        base_maxz = voxel->rest_max_gz + shift_z;
+    } else {
+        voxel_grid_bounds(voxel, &base_minx, &base_maxx, &base_miny, &base_maxy, &base_minz, &base_maxz);
+    }
+
+    if (base_minx > base_maxx || base_miny > base_maxy || base_minz > base_maxz) {
+        return;
+    }
+
+    int minx = base_minx;
+    int maxx = base_maxx;
+    int miny = base_miny;
+    int maxy = base_maxy;
+    int minz = base_minz;
+    int maxz = base_maxz;
+
+    bool placed = find_nearest_free_static_region(base_minx, base_maxx,
+                                                  base_miny, base_maxy,
+                                                  base_minz, base_maxz,
+                                                  base_miny,
+                                                  &minx, &maxx,
+                                                  &miny, &maxy,
+                                                  &minz, &maxz);
+    if (!placed && has_rest_bounds) {
+        int curr_minx, curr_maxx, curr_miny, curr_maxy, curr_minz, curr_maxz;
+        voxel_grid_bounds(voxel, &curr_minx, &curr_maxx, &curr_miny, &curr_maxy, &curr_minz, &curr_maxz);
+        placed = find_nearest_free_static_region(curr_minx, curr_maxx,
+                                                 curr_miny, curr_maxy,
+                                                 curr_minz, curr_maxz,
+                                                 curr_miny,
+                                                 &minx, &maxx,
+                                                 &miny, &maxy,
+                                                 &minz, &maxz);
+    }
+    if (!placed) {
+        TraceLog(LOG_WARNING,
+                 "[Multiscale] Static restore failed: no free cells near (%.2f, %.2f, %.2f)",
+                 voxel->pos.x, voxel->pos.y, voxel->pos.z);
         return;
     }
 
@@ -846,9 +1005,6 @@ static void spawn_static_covering_voxel(const Voxel *voxel)
     }
 }
 
-
-// Check occupancy
-static bool occupied(int x,int y,int z){ return  table_get(x,y,z)>=0; }
 
 static void mark_surface(int idx) {
     Voxel *v = &voxels[idx];
@@ -1426,7 +1582,7 @@ static void build_oblique_voxel_pyramid(UnitVoxelBuffer *buffer) {
         return;
     }
 
-    const int pyramid_height = 3;
+    const int pyramid_height = 4;
     const int base_length = 4;
     const int base_width = 4;
     const int origin_x = -8;
@@ -2585,8 +2741,9 @@ static void solve_particle_collisions(float dt) {
 
             Vector3 pos = p->predicted_pos;
 
-            if (pos.y < voxel_radius) {
-                pos.y = voxel_radius;
+            float floor_limit = voxel_radius + FLOOR_COLLISION_OFFSET;
+            if (pos.y < floor_limit) {
+                pos.y = floor_limit;
             }
 
             pos.x = clampf(pos.x, -terrain_limit, terrain_limit);
