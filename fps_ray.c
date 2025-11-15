@@ -1583,6 +1583,97 @@ static bool restore_dynamic_voxel_to_static(int idx)
     return true;
 }
 
+static bool cell_contains_static_voxel(int x, int y, int z)
+{
+    int idx = table_get(x, y, z);
+    if (idx < 0 || idx >= voxel_count) {
+        return false;
+    }
+    return !voxels[idx].simulate;
+}
+
+static bool voxel_connected_to_static_world(const Voxel *voxel)
+{
+    if (!voxel) {
+        return false;
+    }
+
+    VoxelWorldBounds bounds;
+    voxel_world_bounds(voxel, &bounds);
+    if (bounds.miny <= GRID_EPSILON) {
+        return true;
+    }
+
+    int minx, maxx, miny, maxy, minz, maxz;
+    voxel_grid_bounds(voxel, &minx, &maxx, &miny, &maxy, &minz, &maxz);
+    if (minx > maxx || miny > maxy || minz > maxz) {
+        return false;
+    }
+
+    for (int y = miny; y <= maxy; ++y) {
+        for (int z = minz; z <= maxz; ++z) {
+            if (cell_contains_static_voxel(maxx + 1, y, z) ||
+                cell_contains_static_voxel(minx - 1, y, z)) {
+                return true;
+            }
+        }
+    }
+    for (int x = minx; x <= maxx; ++x) {
+        for (int z = minz; z <= maxz; ++z) {
+            if (cell_contains_static_voxel(x, maxy + 1, z) ||
+                cell_contains_static_voxel(x, miny - 1, z)) {
+                return true;
+            }
+        }
+    }
+    for (int x = minx; x <= maxx; ++x) {
+        for (int y = miny; y <= maxy; ++y) {
+            if (cell_contains_static_voxel(x, y, maxz + 1) ||
+                cell_contains_static_voxel(x, y, minz - 1)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool glue_cluster_has_static_support(const int *cluster, int cluster_count)
+{
+    if (!cluster || cluster_count <= 0) {
+        return false;
+    }
+    for (int i = 0; i < cluster_count; ++i) {
+        int idx = cluster[i];
+        if (idx < 0 || idx >= voxel_count) {
+            continue;
+        }
+        if (voxel_connected_to_static_world(&voxels[idx])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void keep_cluster_awake(const int *cluster, int cluster_count)
+{
+    if (!cluster || cluster_count <= 0) {
+        return;
+    }
+    for (int i = 0; i < cluster_count; ++i) {
+        int idx = cluster[i];
+        if (idx < 0 || idx >= voxel_count) {
+            continue;
+        }
+        Voxel *member = &voxels[idx];
+        if (!member->simulate) {
+            continue;
+        }
+        member->sleepFrames = (int)fminf(
+            (float)member->sleepFrames,
+            (float)(VOXEL_DEACTIVATION_FRAMES - 1));
+    }
+}
+
 static bool deactivate_sleeping_voxels(void)
 {
     bool changed = false;
@@ -1640,14 +1731,13 @@ static bool deactivate_sleeping_voxels(void)
         }
 
         if (!cluster_ready) {
-            for (int c = 0; c < cluster_count; ++c) {
-                int cidx = glueClusterIndices[c];
-                if (cidx >= 0 && cidx < voxel_count) {
-                    voxels[cidx].sleepFrames = (int)fminf(
-                        (float)voxels[cidx].sleepFrames,
-                        (float)(VOXEL_DEACTIVATION_FRAMES - 1));
-                }
-            }
+            keep_cluster_awake(glueClusterIndices, cluster_count);
+            ++idx;
+            continue;
+        }
+
+        if (!glue_cluster_has_static_support(glueClusterIndices, cluster_count)) {
+            keep_cluster_awake(glueClusterIndices, cluster_count);
             ++idx;
             continue;
         }
@@ -1788,6 +1878,34 @@ static void buildDemo(void) {
         float pz = 2.0f * VOXEL_SIZE;
         float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
         addVoxelSized(px, py, pz, false, true, (Color){ 240, 160, 60, 255 }, 0, span);
+    }
+
+    // Static 1x4x4 pad with a span-2 block hovering above for collision testing
+    {
+        const int layer_size = 4;
+        const int layer_origin_x = 4;
+        const int layer_origin_z = -6;
+        const int layer_y = 1;
+        Color pad_color = (Color){ 80, 140, 210, 255 };
+
+        for (int lx = 0; lx < layer_size; ++lx) {
+            for (int lz = 0; lz < layer_size; ++lz) {
+                int gx = layer_origin_x + lx;
+                int gz = layer_origin_z + lz;
+                add_static_voxel_at_grid(gx, layer_y, gz, pad_color, 0);
+            }
+        }
+
+        float center_x = (layer_origin_x + 0.5f * (float)layer_size) * VOXEL_SIZE;
+        float center_z = (layer_origin_z + 0.5f * (float)layer_size) * VOXEL_SIZE;
+        float center_y = ((float)layer_y + 0.5f) * VOXEL_SIZE;
+        int span = 2;
+        float static_half = 0.5f * VOXEL_SIZE;
+        float vertical_gap = 2.0f * VOXEL_SIZE;
+        float dynamic_half = 0.5f * VOXEL_SIZE * (float)span;
+        float py = center_y + static_half + vertical_gap + dynamic_half;
+
+        addVoxelSized(center_x, py, center_z, false, true, (Color){ 230, 80, 120, 255 }, 0, span);
     }
 }
 
