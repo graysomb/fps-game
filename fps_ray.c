@@ -1397,6 +1397,109 @@ static void remove_buffered_static_voxels(const UnitVoxelBuffer *buffer)
     }
 }
 
+static bool activation_try_enqueue(int voxel_idx,
+                                   int center_gx, int center_gy, int center_gz,
+                                   float radius_sq,
+                                   UnitVoxelBuffer *buffer,
+                                   int queue[],
+                                   int *tail)
+{
+    if (!buffer || buffer->count >= VOXEL_ACTIVATION_UNIT_BUDGET) {
+        return false;
+    }
+    if (voxel_idx < 0 || voxel_idx >= voxel_count) {
+        return false;
+    }
+
+    Voxel *candidate = &voxels[voxel_idx];
+    if (candidate->simulate || candidate->span != 1 || candidate->pendingActivation) {
+        return false;
+    }
+
+    if (radius_sq >= 0.0f) {
+        float dx = (float)(candidate->gx - center_gx);
+        float dy = (float)(candidate->gy - center_gy);
+        float dz = (float)(candidate->gz - center_gz);
+        if ((dx*dx + dy*dy + dz*dz) > radius_sq) {
+            return false;
+        }
+    }
+
+    candidate->pendingActivation = true;
+    if (!unit_voxel_buffer_push(buffer,
+                                candidate->gx, candidate->gy, candidate->gz,
+                                candidate->color, candidate->type,
+                                candidate->fixed, voxel_idx))
+    {
+        candidate->pendingActivation = false;
+        return false;
+    }
+
+    if (queue && tail && *tail < VOXEL_ACTIVATION_UNIT_BUDGET) {
+        queue[(*tail)++] = voxel_idx;
+    }
+    return true;
+}
+
+static int collect_static_activation_cluster(int seed_idx,
+                                             int center_gx, int center_gy, int center_gz,
+                                             float seed_radius_sq,
+                                             UnitVoxelBuffer *buffer)
+{
+    if (!buffer || buffer->count >= VOXEL_ACTIVATION_UNIT_BUDGET) {
+        return 0;
+    }
+
+    int queue[VOXEL_ACTIVATION_UNIT_BUDGET];
+    int head = 0;
+    int tail = 0;
+    int added = 0;
+
+    if (!activation_try_enqueue(seed_idx, center_gx, center_gy, center_gz,
+                                seed_radius_sq, buffer, queue, &tail))
+    {
+        return 0;
+    }
+    added++;
+
+    static const int neighbor_dirs[6][3] = {
+        { 1,  0,  0 }, { -1,  0,  0 },
+        { 0,  1,  0 }, {  0, -1,  0 },
+        { 0,  0,  1 }, {  0,  0, -1 }
+    };
+
+    while (head < tail && buffer->count < VOXEL_ACTIVATION_UNIT_BUDGET) {
+        int current_idx = queue[head++];
+        if (current_idx < 0 || current_idx >= voxel_count) {
+            continue;
+        }
+        const Voxel *current = &voxels[current_idx];
+        int base_gx = current->gx;
+        int base_gy = current->gy;
+        int base_gz = current->gz;
+
+        for (int n = 0; n < 6 && buffer->count < VOXEL_ACTIVATION_UNIT_BUDGET; ++n) {
+            int nx = base_gx + neighbor_dirs[n][0];
+            int ny = base_gy + neighbor_dirs[n][1];
+            int nz = base_gz + neighbor_dirs[n][2];
+            int neighbor_idx = table_get(nx, ny, nz);
+            if (neighbor_idx < 0) {
+                continue;
+            }
+            if (activation_try_enqueue(neighbor_idx, center_gx, center_gy, center_gz,
+                                       -1.0f, buffer, queue, &tail))
+            {
+                added++;
+                if (buffer->count >= VOXEL_ACTIVATION_UNIT_BUDGET) {
+                    break;
+                }
+            }
+        }
+    }
+
+    return added;
+}
+
 static bool activate_static_voxels_near_dynamic(void)
 {
     UnitVoxelBuffer buffer;
@@ -1444,12 +1547,11 @@ static bool activate_static_voxels_near_dynamic(void)
                         continue;
                     }
 
-                    candidate->pendingActivation = true;
-                    if (!unit_voxel_buffer_push(&buffer, gx, gy, gz,
-                                                candidate->color, candidate->type,
-                                                candidate->fixed, idx))
-                    {
-                        candidate->pendingActivation = false;
+                    collect_static_activation_cluster(idx,
+                                                      center_gx, center_gy, center_gz,
+                                                      radius_sq,
+                                                      &buffer);
+                    if (buffer.count >= VOXEL_ACTIVATION_UNIT_BUDGET) {
                         break;
                     }
                 }
