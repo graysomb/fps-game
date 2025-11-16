@@ -1,0 +1,558 @@
+Warning:
+Please install libunwind or libdw development packages during the perf build.
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 4K of event 'cycles:Pu'
+# Event count (approx.): 10744234147
+#
+# Children      Self  Command  Shared Object           Symbol                                                                                                                                                                                                                                                                                                                                                                                                   
+# ........  ........  .......  ......................  .........................................................................................................................................................................................................................................................................................................................................................................................................
+#
+  [31m  29.87%[m  [31m  29.87%[m  fps_ray  fps_ray                 [.] table_get
+  [31m  16.16%[m  [31m  16.16%[m  fps_ray  fps_ray                 [.] solve_particle_collisions.constprop.0
+  [31m  12.48%[m  [31m  12.48%[m  fps_ray  fps_ray                 [.] voxel_touching_axes.part.0.constprop.0
+  [31m   9.78%[m  [31m   9.78%[m  fps_ray  fps_ray                 [.] voxels_share_edge_or_corner
+  [32m   3.81%[m  [32m   3.81%[m  fps_ray  fps_ray                 [.] simulate_voxel_pbd
+  [32m   3.39%[m  [32m   3.39%[m  fps_ray  fps_ray                 [.] gather_neighbor_voxels.part.0.constprop.0
+  [32m   3.37%[m  [32m   3.37%[m  fps_ray  libm.so.6               [.] __fminf
+  [32m   1.82%[m  [32m   1.82%[m  fps_ray  libm.so.6               [.] __fmaxf
+  [32m   1.60%[m  [32m   1.60%[m  fps_ray  libc.so.6               [.] __memmove_avx_unaligned_erms
+  [32m   1.52%[m  [32m   1.52%[m  fps_ray  fps_ray                 [.] voxel_table_register
+  [32m   1.15%[m  [32m   1.15%[m  fps_ray  fps_ray                 [.] solve_span_voxel_collisions
+  [32m   1.06%[m  [32m   1.06%[m  fps_ray  fps_ray                 [.] rebuild_voxel_hash
+  [32m   1.05%[m  [32m   1.05%[m  fps_ray  fps_ray                 [.] fmaxf@plt
+  [32m   0.90%[m  [32m   0.90%[m  fps_ray  ld-linux-x86-64.so.2    [.] do_lookup_x
+  [32m   0.67%[m  [32m   0.67%[m  fps_ray  fps_ray                 [.] fminf@plt
+  [32m   0.51%[m  [32m   0.51%[m  fps_ray  fps_ray                 [.] voxel_compute_bounds
+     0.46%     0.46%  fps_ray  libc.so.6               [.] __memset_avx2_unaligned_erms
+     0.36%     0.36%  fps_ray  fps_ray                 [.] voxels_are_glued.part.0
+     0.33%     0.33%  fps_ray  libc.so.6               [.] malloc
+     0.24%     0.24%  fps_ray  libc.so.6               [.] _int_free
+     0.24%     0.24%  fps_ray  ld-linux-x86-64.so.2    [.] _dl_lookup_symbol_x
+     0.19%     0.19%  fps_ray  fps_ray                 [.] voxel_grid_bounds
+     0.17%     0.17%  fps_ray  ld-linux-x86-64.so.2    [.] _dl_relocate_object
+     0.15%     0.15%  fps_ray  libX11.so.6.4.0         [.] 0x0000000000069890
+     0.15%     0.15%  fps_ray  fps_ray                 [.] main
+     0.13%     0.13%  fps_ray  libc.so.6               [.] unlink_chunk.constprop.0
+     0.12%     0.12%  fps_ray  ld-linux-x86-64.so.2    [.] check_match
+     0.12%     0.12%  fps_ray  libraylib.so.5.5.0      [.] rlVertex3f
+     0.12%     0.12%  fps_ray  fps_ray                 [.] activate_static_voxels_near_dynamic.isra.0
+     0.10%     0.10%  fps_ray  [unknown]               [k] 0xffffffffaf2013a0
+     0.10%     0.10%  fps_ray  libGLX_mesa.so.0.0.0    [.] 0x000000000002e549
+     0.10%     0.10%  fps_ray  libc.so.6               [.] cfree@GLIBC_2.2.5
+     0.10%     0.10%  fps_ray  libc.so.6               [.] _int_malloc
+     0.10%     0.10%  fps_ray  libc.so.6               [.] _IO_getc
+     0.09%     0.09%  fps_ray  fps_ray                 [.] split_strained_voxels
+     0.08%     0.08%  fps_ray  ld-linux-x86-64.so.2    [.] strcmp
+     0.08%     0.08%  fps_ray  libc.so.6               [.] pthread_mutex_unlock@@GLIBC_2.2.5
+     0.08%     0.08%  fps_ray  libc.so.6               [.] pthread_mutex_lock@@GLIBC_2.2.5
+     0.07%     0.07%  fps_ray  [unknown]               [k] 0xffffffffaf201a60
+     0.07%     0.07%  fps_ray  libc.so.6               [.] malloc_consolidate
+     0.07%     0.07%  fps_ray  libc.so.6               [.] __strlen_avx2
+     0.06%     0.06%  fps_ray  libLLVM-9.so            [.] 0x000000000073998a
+     0.06%     0.06%  fps_ray  libLLVM-9.so            [.] llvm::PMTopLevelManager::setLastUser(llvm::ArrayRef<llvm::Pass*>, llvm::Pass*)
+     0.05%     0.05%  fps_ray  fps_ray                 [.] DrawVoxels.constprop.0
+     0.05%     0.05%  fps_ray  libGLX_mesa.so.0.0.0    [.] 0x000000000003164b
+     0.05%     0.05%  fps_ray  libLLVM-9.so            [.] llvm::PMDataManager::initializeAnalysisImpl(llvm::Pass*)
+     0.05%     0.05%  fps_ray  libX11.so.6.4.0         [.] XStringToKeysym
+     0.04%     0.04%  fps_ray  libLLVM-9.so            [.] llvm::PMDataManager::removeNotPreservedAnalysis(llvm::Pass*)
+     0.04%     0.04%  fps_ray  libX11.so.6.4.0         [.] 0x0000000000069893
+     0.04%     0.04%  fps_ray  libc.so.6               [.] __libc_calloc
+     0.04%     0.04%  fps_ray  libX11.so.6.4.0         [.] 0x000000000006989b
+     0.04%     0.04%  fps_ray  libraylib.so.5.5.0      [.] parseMapping
+     0.04%     0.04%  fps_ray  libstdc++.so.6.0.30     [.] std::__detail::_List_node_base::_M_transfer(std::__detail::_List_node_base*, std::__detail::_List_node_base*)
+     0.04%     0.04%  fps_ray  libc.so.6               [.] __memcmp_avx2_movbe
+     0.04%     0.04%  fps_ray  libraylib.so.5.5.0      [.] GetGlyphIndex
+     0.04%     0.04%  fps_ray  libLLVM-9.so            [.] llvm::AttributeSet::hasAttribute(llvm::Attribute::AttrKind) const
+     0.04%     0.04%  fps_ray  libraylib.so.5.5.0      [.] rlLoadRenderBatch
+     0.04%     0.04%  fps_ray  libLLVM-9.so            [.] llvm::Value::getValueName() const
+     0.04%     0.04%  fps_ray  libstdc++.so.6.0.30     [.] std::_Rb_tree_insert_and_rebalance(bool, std::_Rb_tree_node_base*, std::_Rb_tree_node_base*, std::_Rb_tree_node_base&)
+     0.04%     0.04%  fps_ray  libLLVM-9.so            [.] 0x000000000071a0c7
+     0.04%     0.04%  fps_ray  libGLX_mesa.so.0.0.0    [.] 0x000000000002e518
+     0.03%     0.03%  fps_ray  libLLVM-9.so            [.] llvm::Instruction::getModule() const
+     0.03%     0.03%  fps_ray  libLLVM-9.so            [.] llvm::FoldingSetNodeID::AddInteger(unsigned long long)
+     0.03%     0.03%  fps_ray  libstdc++.so.6.0.30     [.] operator delete(void*)
+     0.03%     0.03%  fps_ray  libigc.so               [.] 0x0000000000bd22ff
+     0.03%     0.03%  fps_ray  libLLVM-9.so            [.] llvm::PMTopLevelManager::findAnalysisPass(void const*)
+     0.03%     0.03%  fps_ray  libLLVM-9.so            [.] 0x00000000005cfc54
+     0.03%     0.03%  fps_ray  libLLVM-9.so            [.] llvm::PMDataManager::freePass(llvm::Pass*, llvm::StringRef, llvm::PassDebuggingString)
+     0.03%     0.03%  fps_ray  libLLVM-9.so            [.] llvm::sys::RWMutexImpl::reader_acquire()
+     0.03%     0.03%  fps_ray  fps_ray                 [.] init_voxel_struct
+     0.03%     0.03%  fps_ray  libd3d12core.so         [.] 0x00000000003c8a71
+     0.03%     0.03%  fps_ray  libraylib.so.5.5.0      [.] rlDrawRenderBatch
+     0.03%     0.03%  fps_ray  swrast_dri.so           [.] 0x0000000000bd8e52
+     0.03%     0.03%  fps_ray  libigd12um64kbl.so      [.] 0x000000000014f25c
+     0.03%     0.03%  fps_ray  swrast_dri.so           [.] 0x000000000011fa51
+     0.03%     0.03%  fps_ray  libraylib.so.5.5.0      [.] rlNormal3f
+     0.03%     0.03%  fps_ray  libigd12um64kbl.so      [.] 0x0000000000061393
+     0.03%     0.03%  fps_ray  libigdgmm.so.12         [.] 0x000000000000d230
+     0.03%     0.03%  fps_ray  swrast_dri.so           [.] 0x000000000012e247
+     0.03%     0.03%  fps_ray  libd3d12core.so         [.] 0x000000000042d8d0
+     0.03%     0.03%  fps_ray  swrast_dri.so           [.] 0x0000000000c89751
+     0.03%     0.03%  fps_ray  libd3d12core.so         [.] 0x000000000048a1d3
+     0.03%     0.03%  fps_ray  libigd12um64kbl.so      [.] 0x0000000000149de6
+     0.03%     0.03%  fps_ray  swrast_dri.so           [.] 0x0000000000bb389d
+     0.03%     0.03%  fps_ray  libigd12dxva64.so       [.] 0x0000000000249890
+     0.03%     0.03%  fps_ray  swrast_dri.so           [.] 0x00000000006696cd
+     0.03%     0.03%  fps_ray  swrast_dri.so           [.] 0x00000000000b6062
+     0.03%     0.03%  fps_ray  libraylib.so.5.5.0      [.] Fade
+     0.03%     0.03%  fps_ray  libigd12um64kbl.so      [.] 0x000000000005d1b4
+     0.03%     0.03%  fps_ray  swrast_dri.so           [.] 0x0000000000151e33
+     0.03%     0.03%  fps_ray  libigdgmm.so.12         [.] 0x00000000000d8c98
+     0.03%     0.03%  fps_ray  libigd12um64kbl.so      [.] 0x0000000000063b60
+     0.03%     0.03%  fps_ray  libigd12um64kbl.so      [.] 0x00000000001a0ef0
+     0.03%     0.03%  fps_ray  libd3d12core.so         [.] 0x000000000059a280
+     0.03%     0.03%  fps_ray  libigd12um64kbl.so      [.] 0x00000000000f5270
+     0.03%     0.03%  fps_ray  libLLVM-9.so            [.] llvm::ReplaceableMetadataImpl::getIfExists(llvm::Metadata&)
+     0.03%     0.03%  fps_ray  libd3d12core.so         [.] 0x000000000038208e
+     0.03%     0.03%  fps_ray  libLLVM-9.so            [.] 0x000000000073e65f
+     0.03%     0.03%  fps_ray  swrast_dri.so           [.] 0x000000000066df2f
+     0.03%     0.03%  fps_ray  libigd12um64kbl.so      [.] 0x0000000000064819
+     0.03%     0.03%  fps_ray  libigc.so               [.] 0x0000000000a30740
+     0.03%     0.03%  fps_ray  libLLVM-9.so            [.] 0x000000000071a0c4
+     0.03%     0.03%  fps_ray  libigc.so               [.] 0x0000000000c7b199
+     0.03%     0.03%  fps_ray  libigd12um64kbl.so      [.] 0x00000000001678cc
+     0.02%     0.02%  fps_ray  libigd12um64kbl.so      [.] 0x0000000000062618
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] 0x000000000074cd4a
+     0.02%     0.02%  fps_ray  swrast_dri.so           [.] 0x000000000016fa9f
+     0.02%     0.02%  fps_ray  libc.so.6               [.] __GI___ioctl
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] llvm::SmallVectorBase::grow_pod(void*, unsigned long, unsigned long)
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x00000000007042f8
+     0.02%     0.02%  fps_ray  libc.so.6               [.] __strncmp_avx2
+     0.02%     0.02%  fps_ray  swrast_dri.so           [.] 0x0000000000bd3f2a
+     0.02%     0.02%  fps_ray  libigd12um64kbl.so      [.] 0x0000000000158d70
+     0.02%     0.02%  fps_ray  swrast_dri.so           [.] 0x000000000071003b
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000e03e33
+     0.02%     0.02%  fps_ray  libigd12um64kbl.so      [.] 0x000000000016dacf
+     0.02%     0.02%  fps_ray  libX11.so.6.4.0         [.] 0x00000000000621e0
+     0.02%     0.02%  fps_ray  libigd12um64kbl.so      [.] 0x000000000016d73d
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000af66d1
+     0.02%     0.02%  fps_ray  libX11.so.6.4.0         [.] 0x0000000000061f77
+     0.02%     0.02%  fps_ray  libLLVM-15.so.1         [.] llvm::StringMapImpl::LookupBucketFor(llvm::StringRef)
+     0.02%     0.02%  fps_ray  libd3d12core.so         [.] 0x000000000039fa52
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] llvm::Pass::getAsImmutablePass()
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000baf4ca
+     0.02%     0.02%  fps_ray  libX11.so.6.4.0         [.] 0x0000000000027217
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] 0x00000000006118b4
+     0.02%     0.02%  fps_ray  libX11.so.6.4.0         [.] 0x0000000000059a20
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000764cf0
+     0.02%     0.02%  fps_ray  swrast_dri.so           [.] 0x0000000000bfd549
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] llvm::PMDataManager::recordAvailableAnalysis(llvm::Pass*)
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000c50bda
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000a45766
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000ca43ae
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] llvm::PMTopLevelManager::collectLastUses(llvm::SmallVectorImpl<llvm::Pass*>&, llvm::Pass*)
+     0.02%     0.02%  fps_ray  libigc.so               [.] operator new(unsigned long)@plt
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000c570c4
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] 0x000000000075043c
+     0.02%     0.02%  fps_ray  libd3d12core.so         [.] 0x00000000005a2e1e
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] 0x0000000000719953
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] 0x00000000006d5d5b
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000bd19ff
+     0.02%     0.02%  fps_ray  libigd12um64kbl.so      [.] 0x00000000000ea086
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] 0x00000000006118e4
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000bb547e
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000cabe26
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] llvm::IntegerType::get(llvm::LLVMContext&, unsigned int)@plt
+     0.02%     0.02%  fps_ray  libigd12dxva64.so       [.] 0x000000000025b170
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] llvm::shouldPrintBeforePass(llvm::StringRef)
+     0.02%     0.02%  fps_ray  swrast_dri.so           [.] 0x00000000000bf060
+     0.02%     0.02%  fps_ray  libX11.so.6.4.0         [.] 0x000000000003dc3f
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000864321
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x00000000008238e1
+     0.02%     0.02%  fps_ray  libGLX_mesa.so.0.0.0    [.] 0x000000000002e788
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000c95710
+     0.02%     0.02%  fps_ray  libdxcore.so            [.] D3DKMTQueryAdapterInfo
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000cce356
+     0.02%     0.02%  fps_ray  libGLX_mesa.so.0.0.0    [.] 0x000000000002e557
+     0.02%     0.02%  fps_ray  libc.so.6               [.] __cxa_finalize
+     0.02%     0.02%  fps_ray  libexpat.so.1.8.7       [.] 0x0000000000013a08
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000c4d910
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x000000000081e005
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000bd8fbe
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] llvm::AttributeList::getImpl(llvm::LLVMContext&, llvm::ArrayRef<llvm::AttributeSet>)
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] 0x0000000000c9d154
+     0.02%     0.02%  fps_ray  libstdc++.so.6.0.30     [.] std::ios_base::_M_init()
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000bcf22c
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x00000000007c631a
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000d12521
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] llvm::DataLayout::clear()@plt
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] 0x0000000000c77c53
+     0.02%     0.02%  fps_ray  libX11.so.6.4.0         [.] 0x00000000000698a6
+     0.02%     0.02%  fps_ray  libigdgmm.so.12         [.] 0x00000000000cd19a
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x000000000081adb9
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] llvm::StringMapImpl::FindKey(llvm::StringRef) const
+     0.02%     0.02%  fps_ray  swrast_dri.so           [.] 0x0000000000bd4890
+     0.02%     0.02%  fps_ray  libigdgmm.so.12         [.] 0x00000000000ae2b0
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] 0x00000000005cfc56
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] llvm::PMDataManager::dumpPreservedSet(llvm::Pass const*) const
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000ccf034
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x000000000066e508
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] 0x00000000006056ec
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] llvm::initializeDominatorTreeWrapperPassPass(llvm::PassRegistry&)
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] void std::vector<std::pair<void const*, llvm::Pass*>, std::allocator<std::pair<void const*, llvm::Pass*> > >::_M_realloc_insert<std::pair<void const*, llvm::Pass*> const&>(__gnu_cxx::__normal_iterator<std::pair<void const*, llvm::Pass*>*, std::vector<std::pair<void const*, llvm::Pass*>, std::allocator<std::pair<void const*, llvm::Pass*> > > >, std::pair<void const*, llvm::Pass*> const&)
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] 0x0000000000b2f014
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000ac5014
+     0.02%     0.02%  fps_ray  swrast_dri.so           [.] free@plt
+     0.02%     0.02%  fps_ray  libigd12um64kbl.so      [.] 0x000000000015eb07
+     0.02%     0.02%  fps_ray  libc.so.6               [.] pthread_rwlock_wrlock@@GLIBC_2.34
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] 0x000000000071b91c
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000c02053
+     0.02%     0.02%  fps_ray  libglapi.so.0.0.0       [.] 0x0000000000011460
+     0.02%     0.02%  fps_ray  swrast_dri.so           [.] 0x0000000000655419
+     0.02%     0.02%  fps_ray  libraylib.so.5.5.0      [.] rlLoadVertexBuffer
+     0.02%     0.02%  fps_ray  libc.so.6               [.] memcpy@GLIBC_2.2.5
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x00000000009ba9b5
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000c48568
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] 0x000000000071a0da
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] llvm::LazyBranchProbabilityInfoPass::runOnFunction(llvm::Function&)
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000819ca7
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] 0x0000000000750462
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] 0x000000000070d5a4
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x000000000085a140
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000bd4ba8
+     0.02%     0.02%  fps_ray  libX11.so.6.4.0         [.] 0x0000000000061fdb
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] 0x0000000000739972
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] 0x0000000000611b1e
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] llvm::BitstreamCursor::readRecord(unsigned int, llvm::SmallVectorImpl<unsigned long>&, llvm::StringRef*)
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] llvm::Use::getImpliedUser() const
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000a4cdfb
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000af805f
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] 0x00000000006ed914
+     0.02%     0.02%  fps_ray  libX11.so.6.4.0         [.] XCheckTypedWindowEvent
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x00000000003298be
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000bd8874
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] std::vector<std::shared_ptr<llvm::BitCodeAbbrev>, std::allocator<std::shared_ptr<llvm::BitCodeAbbrev> > >::~vector()
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000753666
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] 0x00000000006ea60c
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] llvm::PMDataManager::findAnalysisPass(void const*, bool)
+     0.02%     0.02%  fps_ray  libstdc++.so.6.0.30     [.] std::__detail::_Prime_rehash_policy::_M_need_rehash(unsigned long, unsigned long, unsigned long) const
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000819d6f
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000bd3a2b
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] llvm::PMDataManager::recordAvailableAnalysis(llvm::Pass*)@plt
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] llvm::MDNode::setOperand(unsigned int, llvm::Metadata*)
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x00000000007edc31
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] 0x0000000000cf5dc9
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x000000000033b970
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] 0x000000000071b25b
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000c8500c
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] 0x0000000000cf52ac
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] 0x00000000005dd054
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] llvm::GlobalValue::isDeclaration() const
+     0.02%     0.02%  fps_ray  libLLVM-9.so            [.] llvm::Pass* llvm::callDefaultCtor<llvm::DominatorTreeWrapperPass>()
+     0.02%     0.02%  fps_ray  libigc.so               [.] 0x0000000000bcf3e8
+     0.02%     0.02%  fps_ray  libGLX.so.0.0.0         [.] 0x0000000000015c9d
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000ca8ad0
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000bb4029
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x0000000000b2d7a7
+     0.01%     0.01%  fps_ray  libigdgmm.so.12         [.] 0x00000000000adc20
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::SmallPtrSetImplBase::SmallPtrSetImplBase(void const**, unsigned int, llvm::SmallPtrSetImplBase&&)@plt
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::Value::destroyValueName()@plt
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000bcf621
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000d65b11
+     0.01%     0.01%  fps_ray  libGLX_mesa.so.0.0.0    [.] 0x0000000000033380
+     0.01%     0.01%  fps_ray  libstdc++.so.6.0.30     [.] std::basic_ios<char, std::char_traits<char> >::init(std::basic_streambuf<char, std::char_traits<char> >*)
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::hash_code llvm::hash_combine<unsigned long>(unsigned long const&)
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x0000000000f33974
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x000000000071a6e8
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x0000000000720331
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000ca01c2
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x000000000071a0bf
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::Type::getInt64Ty(llvm::LLVMContext&)
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x0000000000cf68c1
+     0.01%     0.01%  fps_ray  libd3d12core.so         [.] 0x000000000038f309
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000c420b3
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x000000000073e666
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x000000000071a7d5
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000bcb002
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000330bad
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::FoldingSetNodeID::AddInteger(unsigned int)@plt
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x00000000005cfc90
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x0000000000cf52b5
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::Use::getUser() const@plt
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x000000000074d75c
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x0000000000719892
+     0.01%     0.01%  fps_ray  libc.so.6               [.] pthread_rwlock_unlock@@GLIBC_2.34
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000bef410
+     0.01%     0.01%  fps_ray  libigc.so               [.] llvm::Use::getUser() const@plt
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x00000000006e9f27
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::User::operator new(unsigned long, unsigned int, unsigned int)
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000969d40
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000905b3a
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x0000000000718fea
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] std::unique_ptr<llvm::OptimizationRemarkEmitter, std::default_delete<llvm::OptimizationRemarkEmitter> >::~unique_ptr()
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::PMDataManager::collectRequiredAndUsedAnalyses(llvm::SmallVectorImpl<llvm::Pass*>&, llvm::SmallVectorImpl<void const*>&, llvm::Pass*)
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::APInt::tcAssign(unsigned long*, unsigned long const*, unsigned int)
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::FunctionPass::skipFunction(llvm::Function const&) const
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000d1cd6c
+     0.01%     0.01%  fps_ray  swrast_dri.so           [.] 0x000000000066b6b7
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x0000000000719a22
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::TargetTransformInfo::operator=(llvm::TargetTransformInfo&&)
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x00000000006ed870
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x0000000000ec257a
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000c55b0a
+     0.01%     0.01%  fps_ray  swrast_dri.so           [.] 0x00000000000bee00
+     0.01%     0.01%  fps_ray  libGLdispatch.so.0.0.0  [.] __glDispatchCheckMultithreaded
+     0.01%     0.01%  fps_ray  libLLVM-15.so.1         [.] std::vector<unsigned int, std::allocator<unsigned int> >::_M_default_append(unsigned long)
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::AttributeSetNode::get(llvm::LLVMContext&, llvm::ArrayRef<llvm::Attribute>)
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x00000000006c186a
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000c4853d
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::PMDataManager::dumpPassInfo(llvm::Pass*, llvm::PassDebuggingString, llvm::PassDebuggingString, llvm::StringRef)
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x000000000071a7a6
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::Instruction::mayThrow() const
+     0.01%     0.01%  fps_ray  swrast_dri.so           [.] 0x0000000000c205e9
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000b9a886
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::PMDataManager::dumpRequiredSet(llvm::Pass const*) const
+     0.01%     0.01%  fps_ray  libigc.so               [.] llvm::SymbolTableListTraits<llvm::Instruction>::addNodeToList(llvm::Instruction*)@plt
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::Use::getUser() const
+     0.01%     0.01%  fps_ray  libm.so.6               [.] __sqrtf_finite@GLIBC_2.15
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000c7afae
+     0.01%     0.01%  fps_ray  swrast_dri.so           [.] 0x0000000000bbcf44
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x00000000006ed402
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x0000000000b2ed84
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x000000000071ba1d
+     0.01%     0.01%  fps_ray  libc.so.6               [.] _int_realloc
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x0000000000c734e3
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::isGuard(llvm::User const*)
+     0.01%     0.01%  fps_ray  swrast_dri.so           [.] 0x00000000005baa68
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000cd17be
+     0.01%     0.01%  fps_ray  libc.so.6               [.] _itoa_word
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x00000000006ee9ad
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::isKnownNonZero(llvm::Value const*, llvm::DataLayout const&, unsigned int, llvm::AssumptionCache*, llvm::Instruction const*, llvm::DominatorTree const*, bool)
+     0.01%     0.01%  fps_ray  libd3d12core.so         [.] 0x0000000000468604
+     0.01%     0.01%  fps_ray  libGLX_mesa.so.0.0.0    [.] 0x0000000000031648
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000c5cc44
+     0.01%     0.01%  fps_ray  [vdso]                  [.] __vdso_clock_gettime
+     0.01%     0.01%  fps_ray  swrast_dri.so           [.] 0x0000000000569547
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::PromoteMemToReg(llvm::ArrayRef<llvm::AllocaInst*>, llvm::DominatorTree&, llvm::AssumptionCache*)
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x0000000000726630
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000bc03f3
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x000000000071a768
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000c7ba8b
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000820e07
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::SimplifyInstruction(llvm::Instruction*, llvm::SimplifyQuery const&, llvm::OptimizationRemarkEmitter*)
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000a5c4b1
+     0.01%     0.01%  fps_ray  libc.so.6               [.] __cxa_atexit
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000d9873e
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000bd0b9e
+     0.01%     0.01%  fps_ray  libglapi.so.0.0.0       [.] 0x000000000001a578
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x00000000007198fa
+     0.01%     0.01%  fps_ray  libc.so.6               [.] __strcmp_avx2
+     0.01%     0.01%  fps_ray  libc.so.6               [.] pthread_once@GLIBC_2.2.5
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x000000000071b8c0
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x00000000006118b6
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000ca016e
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::AttributeList::getNumAttrSets() const
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000bd190c
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::isGuard(llvm::User const*)@plt
+     0.01%     0.01%  fps_ray  swrast_dri.so           [.] 0x0000000000564bbc
+     0.01%     0.01%  fps_ray  libexpat.so.1.8.7       [.] 0x0000000000013b74
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x0000000000dbf900
+     0.01%     0.01%  fps_ray  libd3d12core.so         [.] 0x0000000000426b62
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000d1a1e2
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::Module::getNamedValue(llvm::StringRef) const
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::FoldingSetNodeID::ComputeHash() const
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x000000000071a0bc
+     0.01%     0.01%  fps_ray  ld-linux-x86-64.so.2    [.] _dl_close_worker.part.0.isra.0
+     0.01%     0.01%  fps_ray  libX11.so.6.4.0         [.] 0x0000000000061ffc
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000700910
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::PassRegistry::enumerateWith(llvm::PassRegistrationListener*)
+     0.01%     0.01%  fps_ray  swrast_dri.so           [.] 0x00000000004d31d0
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x000000000055cc38
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000c50d43
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::FPPassManager::runOnFunction(llvm::Function&)
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000c5b030
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x00000000007f9243
+     0.01%     0.01%  fps_ray  libc.so.6               [.] __libc_memalign
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000bcf219
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000d0a2c0
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000bd5d50
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000c4c39e
+     0.01%     0.01%  fps_ray  libigd12um64kbl.so      [.] 0x00000000000edcb9
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000ddaf90
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000bd1393
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::isInstructionTriviallyDead(llvm::Instruction*, llvm::TargetLibraryInfo const*)
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x00000000009ca183
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000bd8ac1
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x000000000071b288
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000cd29d1
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x000000000074bb77
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000daf3cc
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::FPPassManager::runOnModule(llvm::Module&)
+     0.01%     0.01%  fps_ray  libstdc++.so.6.0.30     [.] std::ctype<char> const& std::use_facet<std::ctype<char> >(std::locale const&)
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000bd3521
+     0.01%     0.01%  fps_ray  libd3d12core.so         [.] 0x0000000000437ed7
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000762488
+     0.01%     0.01%  fps_ray  libXext.so.6.4.0        [.] XShmPutImage
+     0.01%     0.01%  fps_ray  swrast_dri.so           [.] 0x0000000000c27d90
+     0.01%     0.01%  fps_ray  swrast_dri.so           [.] 0x00000000004fc834
+     0.01%     0.01%  fps_ray  libstdc++.so.6.0.30     [.] std::__detail::_Prime_rehash_policy::_M_next_bkt(unsigned long) const
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x00000000006c05b4
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000d89a50
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x0000000000719732
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] void llvm::SymbolTableListTraits<llvm::Instruction>::setSymTabObject<llvm::Function*>(llvm::Function**, llvm::Function*)
+     0.01%     0.01%  fps_ray  swrast_dri.so           [.] 0x0000000000bb70f2
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::CallBase::hasFnAttrOnCalledFunction(llvm::Attribute::AttrKind) const
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000cd892c
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000d1a3a1
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::AttributeImpl::operator<(llvm::AttributeImpl const&) const
+     0.01%     0.01%  fps_ray  libexpat.so.1.8.7       [.] 0x0000000000013488
+     0.01%     0.01%  fps_ray  libdxcore.so            [.] D3DKMTWaitForSynchronizationObjectFromCpu
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000ac6028
+     0.01%     0.01%  fps_ray  swrast_dri.so           [.] 0x00000000004702bb
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x0000000000718f15
+     0.01%     0.01%  fps_ray  libigd12um64kbl.so      [.] 0x0000000000147134
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000c8fe33
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000751889
+     0.01%     0.01%  fps_ray  libigdgmm.so.12         [.] GmmLib::GmmClientContext::IsCompressed(GMM_RESOURCE_FORMAT_ENUM)
+     0.01%     0.01%  fps_ray  libigd12um64kbl.so      [.] 0x00000000000652b0
+     0.01%     0.01%  fps_ray  libigd12um64kbl.so      [.] 0x00000000000ee768
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::initializeLazyBlockFrequencyInfoPassPass(llvm::PassRegistry&)
+     0.01%     0.01%  fps_ray  swrast_dri.so           [.] 0x000000000016b9c2
+     0.01%     0.01%  fps_ray  libigd12um64kbl.so      [.] 0x00000000000e8865
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000a9b799
+     0.01%     0.01%  fps_ray  swrast_dri.so           [.] strlen@plt
+     0.01%     0.01%  fps_ray  libigd12um64kbl.so      [.] 0x00000000000f2df0
+     0.01%     0.01%  fps_ray  swrast_dri.so           [.] 0x00000000003d05c0
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x000000000071a0d3
+     0.01%     0.01%  fps_ray  libc.so.6               [.] sysmalloc
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000cd3493
+     0.01%     0.01%  fps_ray  libd3d12core.so         [.] 0x0000000000477360
+     0.01%     0.01%  fps_ray  libigd12um64kbl.so      [.] 0x0000000000192ebf
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::AAResults::Concept::~Concept()
+     0.01%     0.01%  fps_ray  libexpat.so.1.8.7       [.] 0x0000000000004493
+     0.01%     0.01%  fps_ray  fps_ray                 [.] mark_surface
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x000000000073e653
+     0.01%     0.01%  fps_ray  libstdc++.so.6.0.30     [.] malloc@plt
+     0.01%     0.01%  fps_ray  libc.so.6               [.] _IO_old_init
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x0000000000db8ecb
+     0.01%     0.01%  fps_ray  libdxcore.so            [.] D3DKMTLock2
+     0.01%     0.01%  fps_ray  libigdgmm.so.12         [.] 0x00000000000aea5b
+     0.01%     0.01%  fps_ray  swrast_dri.so           [.] 0x00000000004b2260
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x0000000000ef17bf
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x00000000007487d1
+     0.01%     0.01%  fps_ray  libglapi.so.0.0.0       [.] 0x000000000001a56d
+     0.01%     0.01%  fps_ray  libigd12um64kbl.so      [.] 0x0000000000156f10
+     0.01%     0.01%  fps_ray  libc.so.6               [.] __libc_recvmsg
+     0.01%     0.01%  fps_ray  [unknown]               [k] 0xffffffffaf200080
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x0000000000b9d090
+     0.01%     0.01%  fps_ray  libraylib.so.5.5.0      [.] ImageFromImage
+     0.01%     0.01%  fps_ray  libX11.so.6.4.0         [.] 0x0000000000041ad0
+     0.01%     0.01%  fps_ray  libigd12um64kbl.so      [.] 0x000000000016f2ff
+     0.01%     0.01%  fps_ray  swrast_dri.so           [.] 0x000000000030a620
+     0.01%     0.01%  fps_ray  libd3d12core.so         [.] 0x00000000005a17ce
+     0.01%     0.01%  fps_ray  swrast_dri.so           [.] 0x0000000000bd29c8
+     0.01%     0.01%  fps_ray  swrast_dri.so           [.] 0x0000000000bbe91d
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::LLVMContextImpl::~LLVMContextImpl()
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::detail::hash_value(llvm::detail::IEEEFloat const&)@plt
+     0.01%     0.01%  fps_ray  libd3d12.so             [.] 0x000000000008a840
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::DataLayout::findPointerLowerBound(unsigned int)
+     0.01%     0.01%  fps_ray  libd3d12core.so         [.] 0x000000000042eb28
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::MetadataTracking::track(void*, llvm::Metadata&, llvm::PointerUnion<llvm::MetadataAsValue*, llvm::Metadata*>)
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::findScalarElement(llvm::Value*, unsigned int)@plt
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::Attribute::get(llvm::LLVMContext&, llvm::Attribute::AttrKind, unsigned long)
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x0000000000b747d3
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x000000000067c5ad
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x000000000071ba23
+     0.01%     0.01%  fps_ray  libd3d12core.so         [.] 0x000000000041a0fc
+     0.01%     0.01%  fps_ray  libd3d12core.so         [.] 0x0000000000438a2c
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::Function::getContext() const
+     0.01%     0.01%  fps_ray  libigc.so               [.] 0x00000000006576e5
+     0.01%     0.01%  fps_ray  libX11.so.6.4.0         [.] 0x000000000001a710
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] 0x000000000059ee7f
+     0.01%     0.01%  fps_ray  libc.so.6               [.] dlsym_doit
+     0.01%     0.01%  fps_ray  ld-linux-x86-64.so.2    [.] _dl_check_map_versions
+     0.01%     0.01%  fps_ray  libGLdispatch.so.0.0.0  [.] 0x0000000000040fe2
+     0.01%     0.01%  fps_ray  libLLVM-9.so            [.] llvm::detail::IEEEFloat::partCount() const
+     0.01%     0.01%  fps_ray  libc.so.6               [.] __poll
+     0.01%     0.01%  fps_ray  swrast_dri.so           [.] 0x0000000000bd21a0
+     0.00%     0.00%  fps_ray  libX11.so.6.4.0         [.] _XlcGetLocaleDataBase
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] 0x000000000071a0cd
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] 0x00000000005dd042
+     0.00%     0.00%  fps_ray  libX11.so.6.4.0         [.] 0x000000000003dc10
+     0.00%     0.00%  fps_ray  libLLVM-15.so.1         [.] std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > std::operator+<char, std::char_traits<char>, std::allocator<char> >(char const*, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] llvm::FoldingSetBase::FindNodeOrInsertPos(llvm::FoldingSetNodeID const&, void*&)
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] llvm::FoldingSetBase::InsertNode(llvm::FoldingSetBase::Node*, void*)
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] llvm::Module::getModuleFlag(llvm::StringRef) const
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] 0x00000000005d7c21
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] 0x00000000005d7d1e
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] 0x00000000005dcc58
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] 0x00000000005ec64b
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] 0x0000000000b76a21
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] 0x0000000000c93703
+     0.00%     0.00%  fps_ray  libigc.so               [.] 0x00000000006c0a01
+     0.00%     0.00%  fps_ray  libd3d12core.so         [.] pthread_mutex_lock@plt
+     0.00%     0.00%  fps_ray  libraylib.so.5.5.0      [.] createKeyTablesX11
+     0.00%     0.00%  fps_ray  libd3d12core.so         [.] 0x0000000000409cf0
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] llvm::ARM::parseArch(llvm::StringRef)
+     0.00%     0.00%  fps_ray  libX11.so.6.4.0         [.] _XrmInternalStringToQuark
+     0.00%     0.00%  fps_ray  swrast_dri.so           [.] pthread_mutex_lock@plt
+     0.00%     0.00%  fps_ray  libxcb.so.1.1.0         [.] 0x000000000000c2af
+     0.00%     0.00%  fps_ray  libc.so.6               [.] pthread_cond_destroy@@GLIBC_2.3.2
+     0.00%     0.00%  fps_ray  libxcb.so.1.1.0         [.] 0x000000000000cfdf
+     0.00%     0.00%  fps_ray  libX11.so.6.4.0         [.] 0x00000000000278f0
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] llvm::FoldingSetNodeIDRef::operator==(llvm::FoldingSetNodeIDRef) const@plt
+     0.00%     0.00%  fps_ray  libxcb.so.1.1.0         [.] 0x000000000000bea7
+     0.00%     0.00%  fps_ray  libd3d12.so             [.] 0x00000000000b9800
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] llvm::Pass::~Pass()
+     0.00%     0.00%  fps_ray  ld-linux-x86-64.so.2    [.] __tls_get_addr
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] llvm::LLVMContext::getOptPassGate() const
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] 0x00000000005d10b8
+     0.00%     0.00%  fps_ray  libigc.so               [.] llvm::AnalysisResolver::getAnalysisIfAvailable(void const*, bool) const@plt
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] llvm::cl::generic_parser_base::findOption(llvm::StringRef)
+     0.00%     0.00%  fps_ray  libc.so.6               [.] __memchr_avx2
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] llvm::AttributeList::hasFnAttribute(llvm::Attribute::AttrKind) const
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] llvm::PMTopLevelManager::findAnalysisPassInfo(void const*) const
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] llvm::Function::Function(llvm::FunctionType*, llvm::GlobalValue::LinkageTypes, unsigned int, llvm::Twine const&, llvm::Module*)
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] llvm::LLVMContext::addModule(llvm::Module*)
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] 0x000000000073e44c
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] llvm::Pass::getAdjustedAnalysisPointer(void const*)
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] llvm::Value::getName() const
+     0.00%     0.00%  fps_ray  libigc.so               [.] 0x0000000000cd09a7
+     0.00%     0.00%  fps_ray  libstdc++.so.6.0.30     [.] std::_Hash_bytes(void const*, unsigned long, unsigned long)
+     0.00%     0.00%  fps_ray  libigc.so               [.] std::vector<unsigned int, std::allocator<unsigned int> >::_M_default_append(unsigned long)@plt
+     0.00%     0.00%  fps_ray  libigc.so               [.] 0x0000000000bcf20a
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] 0x0000000000fc8744
+     0.00%     0.00%  fps_ray  libigc.so               [.] 0x000000000023f70d
+     0.00%     0.00%  fps_ray  libigc.so               [.] 0x0000000000af7e30
+     0.00%     0.00%  fps_ray  libigc.so               [.] 0x0000000000d85d01
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] llvm::APInt::tcMSB(unsigned long const*, unsigned int)
+     0.00%     0.00%  fps_ray  libigc.so               [.] 0x0000000000abe95a
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] llvm::PassRegistry::registerPass(llvm::PassInfo const&, bool)
+     0.00%     0.00%  fps_ray  libc.so.6               [.] calloc@plt
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] 0x000000000073e3e0
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] 0x00000000006b590d
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] 0x000000000071a809
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] 0x0000000000eba2f9
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] 0x0000000000dbdb0e
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] 0x0000000000719c70
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] std::vector<llvm::BasicBlock*, std::allocator<llvm::BasicBlock*> >::push_back(llvm::BasicBlock* const&)
+     0.00%     0.00%  fps_ray  libd3d12core.so         [.] 0x000000000036dffc
+     0.00%     0.00%  fps_ray  libigc.so               [.] 0x0000000000727cc8
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] llvm::BasicAAWrapperPass::BasicAAWrapperPass()
+     0.00%     0.00%  fps_ray  libc.so.6               [.] realloc
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] 0x000000000071ba55
+     0.00%     0.00%  fps_ray  libigc.so               [.] 0x00000000008d6b20
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] llvm::PMTopLevelManager::findAnalysisPass(void const*)@plt
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] 0x000000000063854e
+     0.00%     0.00%  fps_ray  libigd12um64kbl.so      [.] 0x000000000007f92f
+     0.00%     0.00%  fps_ray  libigdgmm.so.12         [.] GmmLib::GmmPageTableMgr::GmmPageTableMgr(_GMM_DEVICE_CALLBACKS_INT*, unsigned int, GmmLib::GmmClientContext*)
+     0.00%     0.00%  fps_ray  libigc.so               [.] 0x000000000068d391
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] llvm::PMDataManager::add(llvm::Pass*, bool)
+     0.00%     0.00%  fps_ray  ld-linux-x86-64.so.2    [.] _dl_map_object_from_fd
+     0.00%     0.00%  fps_ray  libigc.so               [.] 0x0000000000a99480
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] 0x000000000074cd23
+     0.00%     0.00%  fps_ray  libd3d12core.so         [.] 0x0000000000431ce0
+     0.00%     0.00%  fps_ray  ld-linux-x86-64.so.2    [.] _dl_find_dso_for_object
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] llvm::Value::getContext() const
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] 0x00000000006cd5f4
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] llvm::Instruction::isLifetimeStartOrEnd() const
+     0.00%     0.00%  fps_ray  libLLVM-9.so            [.] std::unique_ptr<llvm::AssumptionCache, std::default_delete<llvm::AssumptionCache> >::~unique_ptr()
+
+
+#
+# (Tip: Profiling branch (mis)predictions with: perf record -b / perf report)
+#

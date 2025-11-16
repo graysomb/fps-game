@@ -1818,13 +1818,13 @@ static void build_oblique_voxel_pyramid(UnitVoxelBuffer *buffer) {
 static void buildDemo(void) {
     // Floor
     int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
-    /* for (int x = 0; x <= M; x++) {
+    for (int x = 0; x <= M; x++) {
         for (int z = 0; z <= M; z++) {
             float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
             float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
             addVoxel(px, 0, pz, true, false, (Color){ 150, 150, 150, 255 }, 0);
         }
-    } */
+    } 
 
     // Pillars
     // int pillar_height = 15; // 45 - 10
@@ -1873,41 +1873,41 @@ static void buildDemo(void) {
     // emit_static_voxels_from_units(&pyramid_units);
 
     // Span-2 dynamic voxel near origin for floor collision testing
-    {
-        int span = 2;
-        float px = -2.0f * VOXEL_SIZE;
-        float pz = 2.0f * VOXEL_SIZE;
-        float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
-        addVoxelSized(px, py, pz, false, true, (Color){ 240, 160, 60, 255 }, 0, span);
-    }
+    // {
+    //     int span = 2;
+    //     float px = -2.0f * VOXEL_SIZE;
+    //     float pz = 2.0f * VOXEL_SIZE;
+    //     float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
+    //     addVoxelSized(px, py, pz, false, true, (Color){ 240, 160, 60, 255 }, 0, span);
+    // }
 
-    // Static 1x4x4 pad with a span-2 block hovering above for collision testing
-    {
-        const int layer_size = 4;
-        const int layer_origin_x = 4;
-        const int layer_origin_z = -6;
-        const int layer_y = 1;
-        Color pad_color = (Color){ 80, 140, 210, 255 };
+    // // Static 1x4x4 pad with a span-2 block hovering above for collision testing
+    // {
+    //     const int layer_size = 4;
+    //     const int layer_origin_x = 4;
+    //     const int layer_origin_z = -6;
+    //     const int layer_y = 1;
+    //     Color pad_color = (Color){ 80, 140, 210, 255 };
 
-        for (int lx = 0; lx < layer_size; ++lx) {
-            for (int lz = 0; lz < layer_size; ++lz) {
-                int gx = layer_origin_x + lx;
-                int gz = layer_origin_z + lz;
-                add_static_voxel_at_grid(gx, layer_y, gz, pad_color, 0);
-            }
-        }
+    //     for (int lx = 0; lx < layer_size; ++lx) {
+    //         for (int lz = 0; lz < layer_size; ++lz) {
+    //             int gx = layer_origin_x + lx;
+    //             int gz = layer_origin_z + lz;
+    //             add_static_voxel_at_grid(gx, layer_y, gz, pad_color, 0);
+    //         }
+    //     }
 
-        float center_x = (layer_origin_x + 0.5f * (float)layer_size) * VOXEL_SIZE;
-        float center_z = (layer_origin_z + 0.5f * (float)layer_size) * VOXEL_SIZE;
-        float center_y = ((float)layer_y + 0.5f) * VOXEL_SIZE;
-        int span = 2;
-        float static_half = 0.5f * VOXEL_SIZE;
-        float vertical_gap = 2.0f * VOXEL_SIZE;
-        float dynamic_half = 0.5f * VOXEL_SIZE * (float)span;
-        float py = center_y + static_half + vertical_gap + dynamic_half;
+    //     float center_x = (layer_origin_x + 0.5f * (float)layer_size) * VOXEL_SIZE;
+    //     float center_z = (layer_origin_z + 0.5f * (float)layer_size) * VOXEL_SIZE;
+    //     float center_y = ((float)layer_y + 0.5f) * VOXEL_SIZE;
+    //     int span = 2;
+    //     float static_half = 0.5f * VOXEL_SIZE;
+    //     float vertical_gap = 2.0f * VOXEL_SIZE;
+    //     float dynamic_half = 0.5f * VOXEL_SIZE * (float)span;
+    //     float py = center_y + static_half + vertical_gap + dynamic_half;
 
-        addVoxelSized(center_x, py, center_z, false, true, (Color){ 230, 80, 120, 255 }, 0, span);
-    }
+    //     addVoxelSized(center_x, py, center_z, false, true, (Color){ 230, 80, 120, 255 }, 0, span);
+    // }
 }
 
 
@@ -2962,6 +2962,9 @@ static void solve_particle_collisions(float dt) {
     // First, clamp predictions against static scene bounds and player capsules.
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
+        if (!(voxel->simulate)){
+            continue;
+        }
         float voxel_radius = voxel_particle_radius(voxel);
         float terrain_limit = FLOOR_SIZE - voxel_radius;
 
@@ -3020,6 +3023,9 @@ static void solve_particle_collisions(float dt) {
     // Particle-particle collisions using a symmetric correction identical to the compute shader.
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxelA = &voxels[i];
+        if (!(voxelA->simulate)){
+            continue;
+        }
         float radiusA = voxel_particle_radius(voxelA);
         int spanA = (voxelA->span > 0) ? voxelA->span : 1;
         float spanA_extent = 0.5f * VOXEL_SIZE * (float)(spanA - 1);
