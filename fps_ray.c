@@ -2100,6 +2100,9 @@ static void integrate_particles(float dt) {
 
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
+        if (!voxel->simulate) {
+            continue;
+        }
 
         for (int j = 0; j < 8; ++j) {
             Particle *p = &voxel->particles[j];
@@ -2254,6 +2257,9 @@ static void solve_voxel_glue(void) {
 
         Voxel *coarse = &voxels[gc->coarseVoxel];
         Voxel *fine   = &voxels[gc->fineVoxel];
+        if (!coarse->simulate && !fine->simulate) {
+            continue;
+        }
 
         Particle *coarseParticles[4];
         float weights[4];
@@ -3134,6 +3140,9 @@ static void solve_span_voxel_collisions(void) {
 
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxelA = &voxels[i];
+        if (!voxelA->simulate) {
+            continue;
+        }
         int neighbor_ids[MAX_NEIGHBOR_VOXELS];
         int neighbor_count = gather_neighbor_voxels(voxelA, i, neighbor_ids, MAX_NEIGHBOR_VOXELS);
 
@@ -3238,6 +3247,9 @@ static void update_particle_velocities(float dt) {
 
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
+        if (!voxel->simulate) {
+            continue;
+        }
         Vector3 centroid = { 0.0f, 0.0f, 0.0f };
         Vector3 prev_centroid = { 0.0f, 0.0f, 0.0f };
 
