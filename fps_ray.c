@@ -195,6 +195,8 @@ static bool dynamic_belief_overcomes_static(float dynamicBelief, float frozenBel
 static uint8_t compute_static_support_mask(const Voxel *voxel);
 static int gather_static_voxels_near_point(Vector3 point, float radius, int *out, int max_out);
 static bool push_particle_out_of_static(const Voxel *static_voxel, Particle *particle, float radius);
+static void glue_dynamic_voxel_to_static_neighbors(void);
+static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx);
 
 static void unit_voxel_buffer_clear(UnitVoxelBuffer *buffer) {
     if (!buffer) {
@@ -2805,6 +2807,7 @@ static void rebuild_glue_constraints(void) {
             }
         }
     }
+    glue_dynamic_voxel_to_static_neighbors();
 }
 
 static void deactivate_glue_constraints_between(int a, int b) {
@@ -3305,6 +3308,112 @@ static bool push_particle_out_of_static(const Voxel *static_voxel, Particle *par
         particle->predicted_pos = v_add(particle->predicted_pos,
                                         v_mul(normal, penetration));
         return true;
+    }
+}
+
+static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx)
+{
+    if (voxel_idx < 0 || voxel_idx >= voxel_count) {
+        return;
+    }
+    Voxel *dynamic = &voxels[voxel_idx];
+    if (!dynamic->simulate || !dynamic->glueEligible) {
+        return;
+    }
+
+    int processed[MAX_FACE_NEIGHBORS];
+    int processed_count = 0;
+
+    int minx, maxx, miny, maxy, minz, maxz;
+    voxel_grid_bounds(dynamic, &minx, &maxx, &miny, &maxy, &minz, &maxz);
+
+    for (int y = miny; y <= maxy; ++y) {
+        for (int z = minz; z <= maxz; ++z) {
+            int idx = table_get(maxx + 1, y, z);
+            if (idx < 0 || idx >= voxel_count) continue;
+            Voxel *neighbor = &voxels[idx];
+            if (neighbor->simulate || list_contains_index(processed, processed_count, idx)) continue;
+            bool prevEligible = neighbor->glueEligible;
+            neighbor->glueEligible = true;
+            rebuild_glue_between_pair(voxel_idx, idx);
+            neighbor->glueEligible = prevEligible;
+            if (processed_count < MAX_FACE_NEIGHBORS) processed[processed_count++] = idx;
+        }
+    }
+    for (int y = miny; y <= maxy; ++y) {
+        for (int z = minz; z <= maxz; ++z) {
+            int idx = table_get(minx - 1, y, z);
+            if (idx < 0 || idx >= voxel_count) continue;
+            Voxel *neighbor = &voxels[idx];
+            if (neighbor->simulate || list_contains_index(processed, processed_count, idx)) continue;
+            bool prevEligible = neighbor->glueEligible;
+            neighbor->glueEligible = true;
+            rebuild_glue_between_pair(voxel_idx, idx);
+            neighbor->glueEligible = prevEligible;
+            if (processed_count < MAX_FACE_NEIGHBORS) processed[processed_count++] = idx;
+        }
+    }
+    for (int x = minx; x <= maxx; ++x) {
+        for (int z = minz; z <= maxz; ++z) {
+            int idx = table_get(x, maxy + 1, z);
+            if (idx < 0 || idx >= voxel_count) continue;
+            Voxel *neighbor = &voxels[idx];
+            if (neighbor->simulate || list_contains_index(processed, processed_count, idx)) continue;
+            bool prevEligible = neighbor->glueEligible;
+            neighbor->glueEligible = true;
+            rebuild_glue_between_pair(voxel_idx, idx);
+            neighbor->glueEligible = prevEligible;
+            if (processed_count < MAX_FACE_NEIGHBORS) processed[processed_count++] = idx;
+        }
+    }
+    for (int x = minx; x <= maxx; ++x) {
+        for (int z = minz; z <= maxz; ++z) {
+            int idx = table_get(x, miny - 1, z);
+            if (idx < 0 || idx >= voxel_count) continue;
+            Voxel *neighbor = &voxels[idx];
+            if (neighbor->simulate || list_contains_index(processed, processed_count, idx)) continue;
+            bool prevEligible = neighbor->glueEligible;
+            neighbor->glueEligible = true;
+            rebuild_glue_between_pair(voxel_idx, idx);
+            neighbor->glueEligible = prevEligible;
+            if (processed_count < MAX_FACE_NEIGHBORS) processed[processed_count++] = idx;
+        }
+    }
+    for (int x = minx; x <= maxx; ++x) {
+        for (int y = miny; y <= maxy; ++y) {
+            int idx = table_get(x, y, maxz + 1);
+            if (idx < 0 || idx >= voxel_count) continue;
+            Voxel *neighbor = &voxels[idx];
+            if (neighbor->simulate || list_contains_index(processed, processed_count, idx)) continue;
+            bool prevEligible = neighbor->glueEligible;
+            neighbor->glueEligible = true;
+            rebuild_glue_between_pair(voxel_idx, idx);
+            neighbor->glueEligible = prevEligible;
+            if (processed_count < MAX_FACE_NEIGHBORS) processed[processed_count++] = idx;
+        }
+    }
+    for (int x = minx; x <= maxx; ++x) {
+        for (int y = miny; y <= maxy; ++y) {
+            int idx = table_get(x, y, minz - 1);
+            if (idx < 0 || idx >= voxel_count) continue;
+            Voxel *neighbor = &voxels[idx];
+            if (neighbor->simulate || list_contains_index(processed, processed_count, idx)) continue;
+            bool prevEligible = neighbor->glueEligible;
+            neighbor->glueEligible = true;
+            rebuild_glue_between_pair(voxel_idx, idx);
+            neighbor->glueEligible = prevEligible;
+            if (processed_count < MAX_FACE_NEIGHBORS) processed[processed_count++] = idx;
+        }
+    }
+}
+
+static void glue_dynamic_voxel_to_static_neighbors(void)
+{
+    for (int i = 0; i < voxel_count; ++i) {
+        if (!voxels[i].simulate) {
+            continue;
+        }
+        glue_dynamic_voxel_to_static_neighbors_for_voxel(i);
     }
 }
 
