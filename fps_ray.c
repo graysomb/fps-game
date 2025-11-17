@@ -39,8 +39,11 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define BASE_EYE_HEIGHT 1.0f    // player eye height above floor
 #define ACCELERATION   400.0f    // horizontal acceleration
 #define FREEZE_GROUND_WEIGHT       0.6f
-#define FREEZE_NEIGHBOR_WEIGHT     0.4f
+#define FREEZE_NEIGHBOR_WEIGHT     0.4f*0.0f
 #define FREEZE_GROUND_REF_HEIGHT   6.0f
+#define FREEZE_PROPAGATION_ITERATIONS 25
+#define FREEZE_PROPAGATION_ATTENUATION 1.0f
+#define FREEZE_PROPAGATION_EPSILON 1e-6f
 #define ACTIVATION_VELOCITY_WEIGHT 0.6f
 #define ACTIVATION_VELOCITY_REF_SPEED 6.0f
 #define ACTIVATION_STRAIN_WEIGHT   0.25f
@@ -165,6 +168,7 @@ static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
 static int glueClusterIndices[MAX_VOXELS];
 static unsigned char glueClusterVisited[MAX_VOXELS];
+static float freezeBeliefScratch[MAX_VOXELS];
 static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Color color, int type);
 static void rebuild_voxel_hash(void);
 static void voxel_measure_strain(const Voxel *voxel,
@@ -193,6 +197,8 @@ static float compute_cluster_freeze_belief(const UnitVoxelBuffer *buffer, int st
 static void rollback_activation_buffer(UnitVoxelBuffer *buffer, int startIndex);
 static bool dynamic_belief_overcomes_static(float dynamicBelief, float frozenBelief);
 static uint8_t compute_static_support_mask(const Voxel *voxel);
+static bool list_contains_index(const int *list, int count, int value);
+static int gather_static_face_neighbors(const Voxel *voxel, int *out, int max_out);
 static int gather_static_voxels_near_point(Vector3 point, float radius, int *out, int max_out);
 static bool push_particle_out_of_static(const Voxel *static_voxel, Particle *particle, float radius);
 static void glue_dynamic_voxel_to_static_neighbors(void);
@@ -1788,6 +1794,80 @@ static uint8_t compute_static_support_mask(const Voxel *voxel)
     return mask;
 }
 
+static bool append_static_neighbor_index(int neighbor_idx,
+                                         const Voxel *self,
+                                         int *out, int *count, int max_out)
+{
+    if (!out || !count || !self) {
+        return false;
+    }
+    if (neighbor_idx < 0 || neighbor_idx >= voxel_count) {
+        return false;
+    }
+    const Voxel *neighbor = &voxels[neighbor_idx];
+    if (neighbor == self || neighbor->simulate) {
+        return false;
+    }
+    if (list_contains_index(out, *count, neighbor_idx)) {
+        return false;
+    }
+    if (*count >= max_out) {
+        return false;
+    }
+    out[(*count)++] = neighbor_idx;
+    return true;
+}
+
+static int gather_static_face_neighbors(const Voxel *voxel, int *out, int max_out)
+{
+    if (!voxel || !out || max_out <= 0 || voxel->simulate) {
+        return 0;
+    }
+    int minx, maxx, miny, maxy, minz, maxz;
+    voxel_grid_bounds(voxel, &minx, &maxx, &miny, &maxy, &minz, &maxz);
+    if (minx > maxx || miny > maxy || minz > maxz) {
+        return 0;
+    }
+    int count = 0;
+    for (int y = miny; y <= maxy && count < max_out; ++y) {
+        for (int z = minz; z <= maxz && count < max_out; ++z) {
+            int idx = table_get(maxx + 1, y, z);
+            append_static_neighbor_index(idx, voxel, out, &count, max_out);
+        }
+    }
+    for (int y = miny; y <= maxy && count < max_out; ++y) {
+        for (int z = minz; z <= maxz && count < max_out; ++z) {
+            int idx = table_get(minx - 1, y, z);
+            append_static_neighbor_index(idx, voxel, out, &count, max_out);
+        }
+    }
+    for (int x = minx; x <= maxx && count < max_out; ++x) {
+        for (int z = minz; z <= maxz && count < max_out; ++z) {
+            int idx = table_get(x, maxy + 1, z);
+            append_static_neighbor_index(idx, voxel, out, &count, max_out);
+        }
+    }
+    for (int x = minx; x <= maxx && count < max_out; ++x) {
+        for (int z = minz; z <= maxz && count < max_out; ++z) {
+            int idx = table_get(x, miny - 1, z);
+            append_static_neighbor_index(idx, voxel, out, &count, max_out);
+        }
+    }
+    for (int x = minx; x <= maxx && count < max_out; ++x) {
+        for (int y = miny; y <= maxy && count < max_out; ++y) {
+            int idx = table_get(x, y, maxz + 1);
+            append_static_neighbor_index(idx, voxel, out, &count, max_out);
+        }
+    }
+    for (int x = minx; x <= maxx && count < max_out; ++x) {
+        for (int y = miny; y <= maxy && count < max_out; ++y) {
+            int idx = table_get(x, y, minz - 1);
+            append_static_neighbor_index(idx, voxel, out, &count, max_out);
+        }
+    }
+    return count;
+}
+
 static int bitcount_u8(uint8_t value)
 {
     int c = 0;
@@ -1808,26 +1888,11 @@ static void update_static_voxel_belief(Voxel *voxel)
     voxel->supportMask = supportMask;
     voxel->neighborSupport = (uint8_t)neighborCount;
 
-    float neighborScore = (neighborCount > 0) ? ((float)neighborCount / 6.0f) : 0.0f;
-    neighborScore = saturatef(neighborScore);
-
     VoxelWorldBounds bounds;
     voxel_world_bounds(voxel, &bounds);
-    float groundScore = 0.0f;
-    if (bounds.miny <= GRID_EPSILON || (supportMask & (1u << 3))) {
-        groundScore = 1.0f;
-    } else {
-        groundScore = saturatef(1.0f - (bounds.miny / FREEZE_GROUND_REF_HEIGHT));
-    }
+    float groundScore = (bounds.miny <= GRID_EPSILON) ? 1.0f : 0.0f;
     voxel->groundSupport = groundScore;
-
-    float weightSum = FREEZE_GROUND_WEIGHT + FREEZE_NEIGHBOR_WEIGHT;
-    if (weightSum <= 0.0f) {
-        weightSum = 1.0f;
-    }
-    float weighted = groundScore * FREEZE_GROUND_WEIGHT +
-                     neighborScore * FREEZE_NEIGHBOR_WEIGHT;
-    voxel->freezeBelief = saturatef(weighted / weightSum);
+    voxel->freezeBelief = groundScore;
 }
 
 static void refresh_static_voxel_beliefs(void)
@@ -1836,6 +1901,7 @@ static void refresh_static_voxel_beliefs(void)
         Voxel *voxel = &voxels[i];
         if (!voxel->simulate) {
             update_static_voxel_belief(voxel);
+            freezeBeliefScratch[i] = voxel->freezeBelief;
         } else {
             voxel->supportMask = 0;
             voxel->neighborSupport = 0;
@@ -1843,6 +1909,57 @@ static void refresh_static_voxel_beliefs(void)
             if (voxel->freezeBelief != 0.0f) {
                 voxel->freezeBelief = 0.0f;
             }
+            freezeBeliefScratch[i] = 0.0f;
+        }
+    }
+
+    for (int iter = 0; iter < FREEZE_PROPAGATION_ITERATIONS; ++iter) {
+        bool anyChange = false;
+        for (int i = 0; i < voxel_count; ++i) {
+            Voxel *voxel = &voxels[i];
+            if (voxel->simulate) {
+                continue;
+            }
+            if (voxel->groundSupport >= 1.0f) {
+                freezeBeliefScratch[i] = 1.0f;
+                continue;
+            }
+            if (voxel->neighborSupport <= 3) {
+                freezeBeliefScratch[i] = 0.0f;
+                continue;
+            }
+            int neighbors[MAX_STATIC_COLLISION_NEIGHBORS];
+            int neighborCount = gather_static_face_neighbors(voxel, neighbors, MAX_STATIC_COLLISION_NEIGHBORS);
+            if (neighborCount <= 0) {
+                freezeBeliefScratch[i] = 0.0f;
+                continue;
+            }
+            float sumBelief = 0.0f;
+            for (int n = 0; n < neighborCount; ++n) {
+                sumBelief += voxels[neighbors[n]].freezeBelief;
+            }
+            float average = sumBelief / (float)neighborCount;
+            freezeBeliefScratch[i] = saturatef((average * FREEZE_PROPAGATION_ATTENUATION+voxel->freezeBelief)*0.5f);
+        }
+
+        for (int i = 0; i < voxel_count; ++i) {
+            Voxel *voxel = &voxels[i];
+            if (voxel->simulate) {
+                continue;
+            }
+            if (voxel->groundSupport >= 1.0f) {
+                voxel->freezeBelief = 1.0f;
+                continue;
+            }
+            float newBelief = freezeBeliefScratch[i];
+            if (fabsf(newBelief - voxel->freezeBelief) > FREEZE_PROPAGATION_EPSILON) {
+                anyChange = true;
+            }
+            voxel->freezeBelief = newBelief;
+        }
+
+        if (!anyChange) {
+            break;
         }
     }
 }
@@ -2082,30 +2199,30 @@ static void buildDemo(void) {
     } 
 
     // Pillars
-    // int pillar_height = 15; // 45 - 10
-    // int pillar_radius = 3;
-    // int pillar_positions[4][2] = {
-    //     { M / 4, M / 4 },
-    //     { M / 4, 3 * M / 4 },
-    //     { 3 * M / 4, M / 4 },
-    //     { 3 * M / 4, 3 * M / 4 }
-    // };
+    int pillar_height = 25; // 45 - 10
+    int pillar_radius = 3;
+    int pillar_positions[4][2] = {
+        { M / 4, M / 4 },
+        { M / 4, 3 * M / 4 },
+        { 3 * M / 4, M / 4 },
+        { 3 * M / 4, 3 * M / 4 }
+    };
 
-    // for (int p = 0; p < 4; p++) {
-    //     int cx = pillar_positions[p][0];
-    //     int cz = pillar_positions[p][1];
-    //     for (int y = 1; y <= pillar_height; y++) {
-    //         for (int dx = -pillar_radius; dx <= pillar_radius; dx++) {
-    //             for (int dz = -pillar_radius; dz <= pillar_radius; dz++) {
-    //                 if (dx*dx + dz*dz > pillar_radius*pillar_radius) continue; // circular pillar
-    //                 float px = (cx + dx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //                 float py = (y + 0.5f) * VOXEL_SIZE;
-    //                 float pz = (cz + dz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //                 addVoxel(px, py, pz, false, true, (Color){ 200, 100, 50, 255 }, 0);
-    //             }
-    //         }
-    //     }
-    //}
+    for (int p = 0; p < 4; p++) {
+        int cx = pillar_positions[p][0];
+        int cz = pillar_positions[p][1];
+        for (int y = 1; y <= pillar_height; y++) {
+            for (int dx = -pillar_radius; dx <= pillar_radius; dx++) {
+                for (int dz = -pillar_radius; dz <= pillar_radius; dz++) {
+                    if (dx*dx + dz*dz > pillar_radius*pillar_radius) continue; // circular pillar
+                    float px = (cx + dx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                    float py = (y + 0.5f) * VOXEL_SIZE;
+                    float pz = (cz + dz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                    addVoxel(px, py, pz, true, false, (Color){ 200, 100, 50, 255 }, 0);
+                }
+            }
+        }
+    }
 
     // Central platform (n=1)
     // int platform_size = 2;
