@@ -41,7 +41,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define FREEZE_GROUND_WEIGHT       0.6f
 #define FREEZE_NEIGHBOR_WEIGHT     0.4f*0.0f
 #define FREEZE_GROUND_REF_HEIGHT   6.0f
-#define FREEZE_PROPAGATION_ITERATIONS 25
+#define FREEZE_PROPAGATION_ITERATIONS 100
 #define FREEZE_PROPAGATION_ATTENUATION 1.0f
 #define FREEZE_PROPAGATION_EPSILON 1e-6f
 #define ACTIVATION_VELOCITY_WEIGHT 0.6f
@@ -169,6 +169,7 @@ static int voxel_count = 0;
 static int glueClusterIndices[MAX_VOXELS];
 static unsigned char glueClusterVisited[MAX_VOXELS];
 static float freezeBeliefScratch[MAX_VOXELS];
+static uint8_t freezeBoundaryFlags[MAX_VOXELS];
 static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Color color, int type);
 static void rebuild_voxel_hash(void);
 static void voxel_measure_strain(const Voxel *voxel,
@@ -191,7 +192,7 @@ typedef struct {
 } UnitVoxelBuffer;
 
 static void refresh_static_voxel_beliefs(void);
-static void update_static_voxel_belief(Voxel *voxel);
+static void update_static_voxel_belief(int idx);
 static void update_dynamic_activation_beliefs(void);
 static float compute_cluster_freeze_belief(const UnitVoxelBuffer *buffer, int startIndex);
 static void rollback_activation_buffer(UnitVoxelBuffer *buffer, int startIndex);
@@ -1878,21 +1879,47 @@ static int bitcount_u8(uint8_t value)
     return c;
 }
 
-static void update_static_voxel_belief(Voxel *voxel)
+static void update_static_voxel_belief(int idx)
 {
-    if (!voxel || voxel->simulate) {
+    if (idx < 0 || idx >= voxel_count) {
         return;
     }
+    Voxel *voxel = &voxels[idx];
+    if (voxel->simulate) {
+        voxel->supportMask = 0;
+        voxel->neighborSupport = 0;
+        voxel->groundSupport = 0.0f;
+        freezeBoundaryFlags[idx] = 0;
+        voxel->freezeBelief = 0.0f;
+        freezeBeliefScratch[idx] = 0.0f;
+        return;
+    }
+
     uint8_t supportMask = compute_static_support_mask(voxel);
-    int neighborCount = bitcount_u8(supportMask);
     voxel->supportMask = supportMask;
-    voxel->neighborSupport = (uint8_t)neighborCount;
+    voxel->neighborSupport = (uint8_t)bitcount_u8(supportMask);
 
     VoxelWorldBounds bounds;
     voxel_world_bounds(voxel, &bounds);
-    float groundScore = (bounds.miny <= GRID_EPSILON) ? 1.0f : 0.0f;
-    voxel->groundSupport = groundScore;
-    voxel->freezeBelief = groundScore;
+    bool touchesGround = (bounds.miny <= GRID_EPSILON);
+    //bool zeroBoundary = (!touchesGround) && (voxel->gy >=3.0f) && (voxel->surface[0] || voxel->surface[1] || voxel->surface[2] || voxel->surface[3] || voxel->surface[4] || voxel->surface[5]);
+    bool zeroBoundary = (!touchesGround) && ( voxel->surface[2] || voxel->surface[3]);
+
+    voxel->groundSupport = touchesGround ? 1.0f : 0.0f;
+
+    uint8_t flags = 0;
+    if (touchesGround) flags |= 1u;
+    if (zeroBoundary)  flags |= 2u;
+    freezeBoundaryFlags[idx] = flags;
+
+    if (touchesGround) {
+        voxel->freezeBelief = 1.0f;
+    } else if (zeroBoundary) {
+        voxel->freezeBelief = 0.0f;
+    } else {
+        voxel->freezeBelief = 0.5f;
+    }
+    freezeBeliefScratch[idx] = voxel->freezeBelief;
 }
 
 static void refresh_static_voxel_beliefs(void)
@@ -1900,16 +1927,14 @@ static void refresh_static_voxel_beliefs(void)
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
         if (!voxel->simulate) {
-            update_static_voxel_belief(voxel);
-            freezeBeliefScratch[i] = voxel->freezeBelief;
+            update_static_voxel_belief(i);
         } else {
             voxel->supportMask = 0;
             voxel->neighborSupport = 0;
             voxel->groundSupport = 0.0f;
-            if (voxel->freezeBelief != 0.0f) {
-                voxel->freezeBelief = 0.0f;
-            }
+            voxel->freezeBelief = 0.0f;
             freezeBeliefScratch[i] = 0.0f;
+            freezeBoundaryFlags[i] = 0;
         }
     }
 
@@ -1920,11 +1945,12 @@ static void refresh_static_voxel_beliefs(void)
             if (voxel->simulate) {
                 continue;
             }
-            if (voxel->groundSupport >= 1.0f) {
+            uint8_t boundary = freezeBoundaryFlags[i];
+            if (boundary & 1u) {
                 freezeBeliefScratch[i] = 1.0f;
                 continue;
             }
-            if (voxel->neighborSupport <= 3) {
+            if (boundary & 2u) {
                 freezeBeliefScratch[i] = 0.0f;
                 continue;
             }
@@ -1939,7 +1965,7 @@ static void refresh_static_voxel_beliefs(void)
                 sumBelief += voxels[neighbors[n]].freezeBelief;
             }
             float average = sumBelief / (float)neighborCount;
-            freezeBeliefScratch[i] = saturatef((average * FREEZE_PROPAGATION_ATTENUATION+voxel->freezeBelief)*0.5f);
+            freezeBeliefScratch[i] = average;
         }
 
         for (int i = 0; i < voxel_count; ++i) {
@@ -1947,15 +1973,19 @@ static void refresh_static_voxel_beliefs(void)
             if (voxel->simulate) {
                 continue;
             }
-            if (voxel->groundSupport >= 1.0f) {
-                voxel->freezeBelief = 1.0f;
-                continue;
+            uint8_t boundary = freezeBoundaryFlags[i];
+            float target = 0.0f;
+            if (boundary & 1u) {
+                target = 1.0f;
+            } else if (boundary & 2u) {
+                target = 0.0f;
+            } else {
+                target = freezeBeliefScratch[i];
             }
-            float newBelief = freezeBeliefScratch[i];
-            if (fabsf(newBelief - voxel->freezeBelief) > FREEZE_PROPAGATION_EPSILON) {
+            if (fabsf(target - voxel->freezeBelief) > FREEZE_PROPAGATION_EPSILON) {
                 anyChange = true;
             }
-            voxel->freezeBelief = newBelief;
+            voxel->freezeBelief = target;
         }
 
         if (!anyChange) {
@@ -2199,7 +2229,7 @@ static void buildDemo(void) {
     } 
 
     // Pillars
-    int pillar_height = 25; // 45 - 10
+    int pillar_height = 10; // 45 - 10
     int pillar_radius = 3;
     int pillar_positions[4][2] = {
         { M / 4, M / 4 },
