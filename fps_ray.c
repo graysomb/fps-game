@@ -47,7 +47,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define ACTIVATION_STRAIN_REF      0.15f
 #define ACTIVATION_GLUE_WEIGHT     0.35f
 #define ACTIVATION_GLUE_REF_SPEED  3.0f
-#define ACTIVATION_DYNAMIC_WEIGHT  1.0f
+#define ACTIVATION_DYNAMIC_WEIGHT  0.9f
 #define FREEZE_BELIEF_IMPORTANCE   0.5f
 #define ACTIVATION_HYSTERESIS      0.1f
 #define FRICTION       400.0f    // ground friction deceleration

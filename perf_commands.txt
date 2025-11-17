@@ -1,0 +1,5 @@
+gcc -O2 -g -fno-omit-frame-pointer -fno-optimize-sibling-calls fps_ray.c -o fps_ray  $(pkg-config --cflags --libs raylib) -lm -Wl,-rpath,/usr/local/lib
+perf record --call-graph dwarf -F 999 ./fps_ray
+perf report
+
+gcc -g fps_ray.c -o fps_ray  $(pkg-config --cflags --libs raylib) -lm -Wl,-rpath,/usr/local/lib
