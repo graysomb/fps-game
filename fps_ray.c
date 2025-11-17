@@ -55,6 +55,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define TURN_FRICTION 400.0f
 #define PLAYER_RADIUS   0.5f
 #define FLOOR_SIZE     20.0f    // half-size of floor in world units
+#define MAX_STATIC_COLLISION_NEIGHBORS 64
 #define PLAYER_SIZE 0.5f
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
 #define VGS_ALPHA 0.5f
@@ -192,6 +193,8 @@ static float compute_cluster_freeze_belief(const UnitVoxelBuffer *buffer, int st
 static void rollback_activation_buffer(UnitVoxelBuffer *buffer, int startIndex);
 static bool dynamic_belief_overcomes_static(float dynamicBelief, float frozenBelief);
 static uint8_t compute_static_support_mask(const Voxel *voxel);
+static int gather_static_voxels_near_point(Vector3 point, float radius, int *out, int max_out);
+static bool push_particle_out_of_static(const Voxel *static_voxel, Particle *particle, float radius);
 
 static void unit_voxel_buffer_clear(UnitVoxelBuffer *buffer) {
     if (!buffer) {
@@ -3172,6 +3175,139 @@ static int gather_neighbor_voxels(const Voxel *voxel, int voxel_idx, int *out, i
     return count;
 }
 
+static bool list_contains_index(const int *list, int count, int value)
+{
+    if (!list || count <= 0) {
+        return false;
+    }
+    for (int i = 0; i < count; ++i) {
+        if (list[i] == value) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int gather_static_voxels_near_point(Vector3 point, float radius, int *out, int max_out)
+{
+    if (!out || max_out <= 0) {
+        return 0;
+    }
+    float minx = point.x - radius;
+    float maxx = point.x + radius;
+    float miny = point.y - radius;
+    float maxy = point.y + radius;
+    float minz = point.z - radius;
+    float maxz = point.z + radius;
+
+    int gx0 = (int)floorf(minx / VOXEL_SIZE);
+    int gx1 = (int)floorf(maxx / VOXEL_SIZE);
+    int gy0 = (int)floorf(miny / VOXEL_SIZE);
+    int gy1 = (int)floorf(maxy / VOXEL_SIZE);
+    int gz0 = (int)floorf(minz / VOXEL_SIZE);
+    int gz1 = (int)floorf(maxz / VOXEL_SIZE);
+
+    int count = 0;
+    for (int z = gz0; z <= gz1; ++z) {
+        for (int y = gy0; y <= gy1; ++y) {
+            for (int x = gx0; x <= gx1; ++x) {
+                int idx = table_get(x, y, z);
+                if (idx < 0 || idx >= voxel_count) {
+                    continue;
+                }
+                const Voxel *candidate = &voxels[idx];
+                if (candidate->simulate) {
+                    continue;
+                }
+                if (list_contains_index(out, count, idx)) {
+                    continue;
+                }
+                if (count < max_out) {
+                    out[count++] = idx;
+                } else {
+                    return count;
+                }
+            }
+        }
+    }
+    return count;
+}
+
+static bool push_particle_out_of_static(const Voxel *static_voxel, Particle *particle, float radius)
+{
+    if (!static_voxel || !particle || radius <= 0.0f) {
+        return false;
+    }
+    VoxelWorldBounds bounds;
+    voxel_world_bounds(static_voxel, &bounds);
+    Vector3 pos = particle->predicted_pos;
+
+    bool inside =
+        (pos.x >= bounds.minx && pos.x <= bounds.maxx) &&
+        (pos.y >= bounds.miny && pos.y <= bounds.maxy) &&
+        (pos.z >= bounds.minz && pos.z <= bounds.maxz);
+
+    const float eps = 1e-6f;
+    if (!inside) {
+        Vector3 closest = {
+            clampf(pos.x, bounds.minx, bounds.maxx),
+            clampf(pos.y, bounds.miny, bounds.maxy),
+            clampf(pos.z, bounds.minz, bounds.maxz)
+        };
+        Vector3 delta = v_sub(pos, closest);
+        float dist_sq = v_dot(delta, delta);
+        float radius_sq = radius * radius;
+        if (dist_sq >= radius_sq) {
+            return false;
+        }
+        float dist = sqrtf(fmaxf(dist_sq, eps));
+        float penetration = radius - dist;
+        if (penetration <= 0.0f) {
+            return false;
+        }
+        Vector3 normal = (dist > eps)
+            ? v_mul(delta, 1.0f / dist)
+            : (Vector3){ 0.0f, 1.0f, 0.0f };
+        particle->predicted_pos = v_add(particle->predicted_pos,
+                                        v_mul(normal, penetration));
+        return true;
+    } else {
+        float distances[6] = {
+            pos.x - bounds.minx,
+            bounds.maxx - pos.x,
+            pos.y - bounds.miny,
+            bounds.maxy - pos.y,
+            pos.z - bounds.minz,
+            bounds.maxz - pos.z
+        };
+        int min_idx = 0;
+        float min_dist = distances[0];
+        for (int k = 1; k < 6; ++k) {
+            if (distances[k] < min_dist) {
+                min_dist = distances[k];
+                min_idx = k;
+            }
+        }
+        Vector3 normal = { 0.0f, 0.0f, 0.0f };
+        switch (min_idx) {
+            case 0: normal.x = -1.0f; break;
+            case 1: normal.x =  1.0f; break;
+            case 2: normal.y = -1.0f; break;
+            case 3: normal.y =  1.0f; break;
+            case 4: normal.z = -1.0f; break;
+            case 5: normal.z =  1.0f; break;
+            default: normal.y = 1.0f; break;
+        }
+        float penetration = radius + min_dist;
+        if (penetration <= 0.0f) {
+            return false;
+        }
+        particle->predicted_pos = v_add(particle->predicted_pos,
+                                        v_mul(normal, penetration));
+        return true;
+    }
+}
+
 // True when two voxels share any active glue constraint (face coupling).
 static bool voxels_are_glued(int voxel_idx_a, int voxel_idx_b) {
     if (voxel_idx_a == voxel_idx_b) {
@@ -3314,6 +3450,22 @@ static void solve_particle_collisions(float dt) {
             }
 
             p->predicted_pos = pos;
+
+            int static_neighbors[MAX_STATIC_COLLISION_NEIGHBORS];
+            int static_count = gather_static_voxels_near_point(
+                p->predicted_pos, voxel_radius,
+                static_neighbors, MAX_STATIC_COLLISION_NEIGHBORS);
+            for (int s = 0; s < static_count; ++s) {
+                int static_idx = static_neighbors[s];
+                if (static_idx < 0 || static_idx >= voxel_count) {
+                    continue;
+                }
+                const Voxel *static_voxel = &voxels[static_idx];
+                if (static_voxel->simulate) {
+                    continue;
+                }
+                push_particle_out_of_static(static_voxel, p, voxel_radius);
+            }
         }
     }
 
