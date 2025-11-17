@@ -38,6 +38,18 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define GRAVITY         9.8f    // gravity acceleration
 #define BASE_EYE_HEIGHT 1.0f    // player eye height above floor
 #define ACCELERATION   400.0f    // horizontal acceleration
+#define FREEZE_GROUND_WEIGHT       0.6f
+#define FREEZE_NEIGHBOR_WEIGHT     0.4f
+#define FREEZE_GROUND_REF_HEIGHT   6.0f
+#define ACTIVATION_VELOCITY_WEIGHT 0.6f
+#define ACTIVATION_VELOCITY_REF_SPEED 6.0f
+#define ACTIVATION_STRAIN_WEIGHT   0.25f
+#define ACTIVATION_STRAIN_REF      0.15f
+#define ACTIVATION_GLUE_WEIGHT     0.35f
+#define ACTIVATION_GLUE_REF_SPEED  3.0f
+#define ACTIVATION_DYNAMIC_WEIGHT  1.0f
+#define FREEZE_BELIEF_IMPORTANCE   0.5f
+#define ACTIVATION_HYSTERESIS      0.1f
 #define FRICTION       400.0f    // ground friction deceleration
 #define TURN_ACCELERATION 400.0f
 #define TURN_FRICTION 400.0f
@@ -142,6 +154,11 @@ typedef struct {
     float rest_edge;
     float particle_radius;
     int sleepFrames;
+    float freezeBelief;
+    float activationBelief;
+    float groundSupport;
+    uint8_t neighborSupport;
+    uint8_t supportMask;
 } Voxel;
 static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
@@ -155,7 +172,6 @@ static void voxel_measure_strain(const Voxel *voxel,
 static int build_glue_cluster_indices(int start_idx, int *out_indices);
 static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count);
 static void solve_span_voxel_collisions(void);
-
 typedef struct {
     int gx, gy, gz;
     Color color;
@@ -169,9 +185,27 @@ typedef struct {
     int count;
 } UnitVoxelBuffer;
 
+static void refresh_static_voxel_beliefs(void);
+static void update_static_voxel_belief(Voxel *voxel);
+static void update_dynamic_activation_beliefs(void);
+static float compute_cluster_freeze_belief(const UnitVoxelBuffer *buffer, int startIndex);
+static void rollback_activation_buffer(UnitVoxelBuffer *buffer, int startIndex);
+static bool dynamic_belief_overcomes_static(float dynamicBelief, float frozenBelief);
+static uint8_t compute_static_support_mask(const Voxel *voxel);
+
 static void unit_voxel_buffer_clear(UnitVoxelBuffer *buffer) {
     if (!buffer) {
         return;
+    }
+    int existing = buffer->count;
+    if (existing < 0 || existing > MAX_VOXELS) {
+        existing = 0;
+    }
+    for (int i = 0; i < existing; ++i) {
+        int idx = buffer->voxels[i].voxelIndex;
+        if (idx >= 0 && idx < voxel_count) {
+            voxels[idx].pendingActivation = false;
+        }
     }
     buffer->count = 0;
 }
@@ -194,6 +228,26 @@ static bool unit_voxel_buffer_push(UnitVoxelBuffer *buffer,
         .voxelIndex = voxelIndex
     };
     return true;
+}
+
+static void rollback_activation_buffer(UnitVoxelBuffer *buffer, int startIndex)
+{
+    if (!buffer) {
+        return;
+    }
+    if (startIndex < 0) {
+        startIndex = 0;
+    }
+    if (startIndex > buffer->count) {
+        return;
+    }
+    for (int i = startIndex; i < buffer->count; ++i) {
+        int idx = buffer->voxels[i].voxelIndex;
+        if (idx >= 0 && idx < voxel_count) {
+            voxels[idx].pendingActivation = false;
+        }
+    }
+    buffer->count = startIndex;
 }
 
 static inline float voxel_particle_radius(const Voxel *v) {
@@ -481,6 +535,10 @@ static float clampf(float v, float lo, float hi) {
     if (v < lo) return lo;
     if (v > hi) return hi;
     return v;
+}
+
+static float saturatef(float v) {
+    return clampf(v, 0.0f, 1.0f);
 }
 
 static float mixf(float a, float b, float t) {
@@ -1189,6 +1247,11 @@ static void init_voxel_struct(Voxel *v,
     v->rest_min_gz = rest_minz;
     v->rest_max_gz = rest_maxz;
     v->sleepFrames = 0;
+    v->freezeBelief = 0.0f;
+    v->activationBelief = 0.0f;
+    v->groundSupport = 0.0f;
+    v->neighborSupport = 0;
+    v->supportMask = 0;
 }
 
 static int addVoxelSized(float px, float py, float pz, bool fixed, bool simulate,
@@ -1500,10 +1563,52 @@ static int collect_static_activation_cluster(int seed_idx,
     return added;
 }
 
+static float compute_cluster_freeze_belief(const UnitVoxelBuffer *buffer, int startIndex)
+{
+    if (!buffer) {
+        return 0.0f;
+    }
+    if (startIndex < 0) {
+        startIndex = 0;
+    }
+    if (startIndex >= buffer->count) {
+        return 0.0f;
+    }
+    float accum = 0.0f;
+    float minBelief = 1.0f;
+    int count = 0;
+    for (int i = startIndex; i < buffer->count; ++i) {
+        int idx = buffer->voxels[i].voxelIndex;
+        if (idx < 0 || idx >= voxel_count) {
+            continue;
+        }
+        float belief = voxels[idx].freezeBelief;
+        accum += belief;
+        if (belief < minBelief) {
+            minBelief = belief;
+        }
+        ++count;
+    }
+    if (count <= 0) {
+        return 0.0f;
+    }
+    float average = accum / (float)count;
+    return 0.5f * (average + minBelief);
+}
+
+static bool dynamic_belief_overcomes_static(float dynamicBelief, float frozenBelief)
+{
+    float weightedDynamic = dynamicBelief * ACTIVATION_DYNAMIC_WEIGHT;
+    float weightedFrozen = frozenBelief * FREEZE_BELIEF_IMPORTANCE + ACTIVATION_HYSTERESIS;
+    return weightedDynamic >= weightedFrozen;
+}
+
 static bool activate_static_voxels_near_dynamic(void)
 {
-    UnitVoxelBuffer buffer;
+    UnitVoxelBuffer buffer = { 0 };
     unit_voxel_buffer_clear(&buffer);
+    refresh_static_voxel_beliefs();
+    update_dynamic_activation_beliefs();
     float radius = (float)VOXEL_ACTIVATION_RADIUS;
     float radius_sq = radius * radius;
 
@@ -1547,10 +1652,20 @@ static bool activate_static_voxels_near_dynamic(void)
                         continue;
                     }
 
-                    collect_static_activation_cluster(idx,
-                                                      center_gx, center_gy, center_gz,
-                                                      radius_sq,
-                                                      &buffer);
+                    int previousCount = buffer.count;
+                    int added = collect_static_activation_cluster(idx,
+                                                                  center_gx, center_gy, center_gz,
+                                                                  radius_sq,
+                                                                  &buffer);
+                    if (added <= 0) {
+                        rollback_activation_buffer(&buffer, previousCount);
+                        continue;
+                    }
+                    float clusterBelief = compute_cluster_freeze_belief(&buffer, previousCount);
+                    if (!dynamic_belief_overcomes_static(dynamic->activationBelief, clusterBelief)) {
+                        rollback_activation_buffer(&buffer, previousCount);
+                        continue;
+                    }
                     if (buffer.count >= VOXEL_ACTIVATION_UNIT_BUDGET) {
                         break;
                     }
@@ -1569,6 +1684,7 @@ static bool activate_static_voxels_near_dynamic(void)
     rebuild_voxel_hash();
     rebuild_all_voxel_surfaces();
     rebuild_glue_constraints();
+    refresh_static_voxel_beliefs();
     meshDirty = true;
     return true;
 }
@@ -1591,6 +1707,123 @@ static bool cell_contains_static_voxel(int x, int y, int z)
         return false;
     }
     return !voxels[idx].simulate;
+}
+
+static bool line_contains_static_along_x(int x, int miny, int maxy, int minz, int maxz)
+{
+    for (int y = miny; y <= maxy; ++y) {
+        for (int z = minz; z <= maxz; ++z) {
+            if (cell_contains_static_voxel(x, y, z)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool line_contains_static_along_y(int y, int minx, int maxx, int minz, int maxz)
+{
+    for (int x = minx; x <= maxx; ++x) {
+        for (int z = minz; z <= maxz; ++z) {
+            if (cell_contains_static_voxel(x, y, z)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool line_contains_static_along_z(int z, int minx, int maxx, int miny, int maxy)
+{
+    for (int x = minx; x <= maxx; ++x) {
+        for (int y = miny; y <= maxy; ++y) {
+            if (cell_contains_static_voxel(x, y, z)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static uint8_t compute_static_support_mask(const Voxel *voxel)
+{
+    if (!voxel) {
+        return 0;
+    }
+    int minx, maxx, miny, maxy, minz, maxz;
+    voxel_grid_bounds(voxel, &minx, &maxx, &miny, &maxy, &minz, &maxz);
+    if (minx > maxx || miny > maxy || minz > maxz) {
+        return 0;
+    }
+
+    uint8_t mask = 0;
+    if (line_contains_static_along_x(maxx + 1, miny, maxy, minz, maxz)) mask |= (1u << 0);
+    if (line_contains_static_along_x(minx - 1, miny, maxy, minz, maxz)) mask |= (1u << 1);
+    if (line_contains_static_along_y(maxy + 1, minx, maxx, minz, maxz)) mask |= (1u << 2);
+    if (line_contains_static_along_y(miny - 1, minx, maxx, minz, maxz)) mask |= (1u << 3);
+    if (line_contains_static_along_z(maxz + 1, minx, maxx, miny, maxy)) mask |= (1u << 4);
+    if (line_contains_static_along_z(minz - 1, minx, maxx, miny, maxy)) mask |= (1u << 5);
+
+    return mask;
+}
+
+static int bitcount_u8(uint8_t value)
+{
+    int c = 0;
+    while (value) {
+        c += (value & 1u);
+        value >>= 1;
+    }
+    return c;
+}
+
+static void update_static_voxel_belief(Voxel *voxel)
+{
+    if (!voxel || voxel->simulate) {
+        return;
+    }
+    uint8_t supportMask = compute_static_support_mask(voxel);
+    int neighborCount = bitcount_u8(supportMask);
+    voxel->supportMask = supportMask;
+    voxel->neighborSupport = (uint8_t)neighborCount;
+
+    float neighborScore = (neighborCount > 0) ? ((float)neighborCount / 6.0f) : 0.0f;
+    neighborScore = saturatef(neighborScore);
+
+    VoxelWorldBounds bounds;
+    voxel_world_bounds(voxel, &bounds);
+    float groundScore = 0.0f;
+    if (bounds.miny <= GRID_EPSILON || (supportMask & (1u << 3))) {
+        groundScore = 1.0f;
+    } else {
+        groundScore = saturatef(1.0f - (bounds.miny / FREEZE_GROUND_REF_HEIGHT));
+    }
+    voxel->groundSupport = groundScore;
+
+    float weightSum = FREEZE_GROUND_WEIGHT + FREEZE_NEIGHBOR_WEIGHT;
+    if (weightSum <= 0.0f) {
+        weightSum = 1.0f;
+    }
+    float weighted = groundScore * FREEZE_GROUND_WEIGHT +
+                     neighborScore * FREEZE_NEIGHBOR_WEIGHT;
+    voxel->freezeBelief = saturatef(weighted / weightSum);
+}
+
+static void refresh_static_voxel_beliefs(void)
+{
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (!voxel->simulate) {
+            update_static_voxel_belief(voxel);
+        } else {
+            voxel->supportMask = 0;
+            voxel->neighborSupport = 0;
+            voxel->groundSupport = 0.0f;
+            if (voxel->freezeBelief != 0.0f) {
+                voxel->freezeBelief = 0.0f;
+            }
+        }
+    }
 }
 
 static bool voxel_connected_to_static_world(const Voxel *voxel)
@@ -1760,6 +1993,7 @@ static bool deactivate_sleeping_voxels(void)
         rebuild_voxel_hash();
         rebuild_all_voxel_surfaces();
         rebuild_glue_constraints();
+        refresh_static_voxel_beliefs();
         meshDirty = true;
     }
     return changed;
@@ -1872,14 +2106,14 @@ static void buildDemo(void) {
     // build_oblique_voxel_pyramid(&pyramid_units);
     // emit_static_voxels_from_units(&pyramid_units);
 
-    // Span-2 dynamic voxel near origin for floor collision testing
-    // {
-    //     int span = 2;
-    //     float px = -2.0f * VOXEL_SIZE;
-    //     float pz = 2.0f * VOXEL_SIZE;
-    //     float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
-    //     addVoxelSized(px, py, pz, false, true, (Color){ 240, 160, 60, 255 }, 0, span);
-    // }
+    //Span-2 dynamic voxel near origin for floor collision testing
+    {
+        int span = 2;
+        float px = -2.0f * VOXEL_SIZE;
+        float pz = 2.0f * VOXEL_SIZE;
+        float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
+        addVoxelSized(px, py, pz, false, true, (Color){ 240, 160, 60, 255 }, 0, span);
+    }
 
     // // Static 1x4x4 pad with a span-2 block hovering above for collision testing
     // {
@@ -2701,6 +2935,63 @@ static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count
     free(sorted);
     free(snapshots);
     return true;
+}
+
+static float compute_glue_relative_velocity_score(int voxel_idx, const Voxel *voxel)
+{
+    if (voxel_idx < 0 || voxel_idx >= voxel_count || !voxel) {
+        return 0.0f;
+    }
+    int neighbors[MAX_FACE_NEIGHBORS];
+    int neighbor_count = gather_glued_neighbors(voxel_idx, neighbors, MAX_FACE_NEIGHBORS);
+    float maxRelativeSpeed = 0.0f;
+    for (int i = 0; i < neighbor_count; ++i) {
+        int nidx = neighbors[i];
+        if (nidx < 0 || nidx >= voxel_count) {
+            continue;
+        }
+        const Voxel *neighbor = &voxels[nidx];
+        if (!neighbor->simulate) {
+            continue;
+        }
+        Vector3 rel = v_sub(voxel->vel, neighbor->vel);
+        float relSpeed = v_length(rel);
+        if (relSpeed > maxRelativeSpeed) {
+            maxRelativeSpeed = relSpeed;
+        }
+    }
+    return saturatef(maxRelativeSpeed / ACTIVATION_GLUE_REF_SPEED);
+}
+
+static void update_dynamic_activation_beliefs(void)
+{
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (!voxel->simulate) {
+            voxel->activationBelief = 0.0f;
+            continue;
+        }
+        float speed = v_length(voxel->vel);
+        float velocityScore = saturatef(speed / ACTIVATION_VELOCITY_REF_SPEED);
+
+        float strain = 0.0f;
+        float shear = 0.0f;
+        voxel_measure_strain(voxel, &strain, &shear);
+        float strainScore = saturatef(fmaxf(strain, shear) / ACTIVATION_STRAIN_REF);
+
+        float glueScore = compute_glue_relative_velocity_score(i, voxel);
+
+        float weightSum = ACTIVATION_VELOCITY_WEIGHT +
+                          ACTIVATION_STRAIN_WEIGHT +
+                          ACTIVATION_GLUE_WEIGHT;
+        if (weightSum <= 0.0f) {
+            weightSum = 1.0f;
+        }
+        float weighted = velocityScore * ACTIVATION_VELOCITY_WEIGHT +
+                         strainScore * ACTIVATION_STRAIN_WEIGHT +
+                         glueScore * ACTIVATION_GLUE_WEIGHT;
+        voxel->activationBelief = saturatef(weighted / weightSum);
+    }
 }
 
 static bool ranges_overlap(int minA, int maxA, int minB, int maxB) {
