@@ -617,6 +617,7 @@ typedef struct {
     int   di, dj;    // width/height in voxels along in-plane axes
     bool  positive;  // true => positive-facing side (+Z,+Y,+X), else negative
     Color col;       // face color
+    int   voxelIndex; // representative voxel driving this patch's debug color
 } Patch;
 
 static Patch patches[MAX_VOXELS];
@@ -625,6 +626,21 @@ static Mesh  greedyMesh = { 0 };
 static Material greedyMaterial;
 static bool greedyMaterialInit = false;
 static bool  meshDirty  = true;
+
+static Color voxel_belief_debug_color(const Voxel *voxel)
+{
+    if (!voxel) {
+        return (Color){ 255, 255, 255, 255 };
+    }
+    float belief = voxel->simulate ? voxel->activationBelief : voxel->freezeBelief;
+    belief = clampf(belief, 0.0f, 1.0f);
+    float hue = voxel->simulate ? 5.0f : 210.0f;
+    float saturation = 0.35f + 0.65f * belief;
+    float value = 0.25f + 0.75f * belief;
+    Color col = ColorFromHSV(hue, saturation, value);
+    col.a = 255;
+    return col;
+}
 
 typedef struct {
     int      coarseVoxel;
@@ -4106,7 +4122,8 @@ static void drawCubeMan(const Voxel *voxel, const bool faces[6])
     Vector3 v[8];
     for (int i = 0; i < 8; ++i) v[i] = voxel->particles[i].pos;
 
-    rlColor4ub(voxel->color.r, voxel->color.g, voxel->color.b, voxel->color.a);
+    Color debugColor = voxel_belief_debug_color(voxel);
+    rlColor4ub(debugColor.r, debugColor.g, debugColor.b, debugColor.a);
 
     if (!faces || faces[4]) {
         rlNormal3f(0.0f, 0.0f, 1.0f);
@@ -4376,13 +4393,18 @@ static void merge_rects_on_plane(int count, int *list, int plane, bool positive)
                 pt->dj = hh;
                 pt->positive = positive;
                 
-                int baseIdx = 0;
+                int baseIdx = -1;
                 switch (plane) {
                     case 0: baseIdx = table_get(pt->i0, pt->j0, layer); break;
                     case 1: baseIdx = table_get(pt->i0, layer, pt->j0); break;
                     case 2: baseIdx = table_get(layer, pt->i0, pt->j0); break;
                 }
-                pt->col = voxels[baseIdx].color;
+                pt->voxelIndex = baseIdx;
+                Color debugColor = { 60, 60, 80, 255 };
+                if (baseIdx >= 0 && baseIdx < voxel_count) {
+                    debugColor = voxel_belief_debug_color(&voxels[baseIdx]);
+                }
+                pt->col = debugColor;
             }
         }
     }
@@ -4502,6 +4524,42 @@ static Mesh gen_greedy_mesh(void) {
     return mesh;
 }
 
+static void update_static_patch_colors(void)
+{
+    if (!greedyMesh.vertices || !greedyMesh.colors || patchCount <= 0) {
+        return;
+    }
+
+    bool anyChange = false;
+    unsigned char *colorBuffer = (unsigned char *)greedyMesh.colors;
+    for (int p = 0; p < patchCount; ++p) {
+        Patch *pt = &patches[p];
+        Color newColor = pt->col;
+        if (pt->voxelIndex >= 0 && pt->voxelIndex < voxel_count) {
+            newColor = voxel_belief_debug_color(&voxels[pt->voxelIndex]);
+        }
+        if (newColor.r != pt->col.r || newColor.g != pt->col.g ||
+            newColor.b != pt->col.b || newColor.a != pt->col.a) {
+            pt->col = newColor;
+            anyChange = true;
+        }
+
+        int vofs = p * 4;
+        for (int k = 0; k < 4; ++k) {
+            unsigned char *dst = &colorBuffer[(vofs + k) * 4];
+            dst[0] = pt->col.r;
+            dst[1] = pt->col.g;
+            dst[2] = pt->col.b;
+            dst[3] = pt->col.a;
+        }
+    }
+
+    if (anyChange) {
+        UpdateMeshBuffer(greedyMesh, 3, greedyMesh.colors,
+                         greedyMesh.vertexCount * 4 * sizeof(unsigned char), 0);
+    }
+}
+
 // Draw all voxels via greedy mesh instead of per-voxel raycasting
 static void DrawVoxels(Camera3D cam) {
     (void)cam;
@@ -4517,6 +4575,10 @@ static void DrawVoxels(Camera3D cam) {
     if (!greedyMaterialInit) {
         greedyMaterial = LoadMaterialDefault();
         greedyMaterialInit = true;
+    }
+
+    if (greedyMesh.vertices) {
+        update_static_patch_colors();
     }
 
     rlDisableBackfaceCulling();
