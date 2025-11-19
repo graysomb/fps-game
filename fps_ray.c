@@ -913,13 +913,44 @@ static bool grid_region_is_free(int minx, int maxx,
     for (int z = minz; z <= maxz; ++z) {
         for (int y = miny; y <= maxy; ++y) {
             for (int x = minx; x <= maxx; ++x) {
-                if (occupied(x, y, z)) {
+                int idx = table_get(x, y, z);
+                if (idx < 0 || idx >= voxel_count) {
+                    continue;
+                }
+                Voxel *blocker = &voxels[idx];
+                if (blocker->simulate) {
                     return false;
                 }
             }
         }
     }
     return true;
+}
+
+static void remove_static_voxels_in_region(int minx, int maxx,
+                                           int miny, int maxy,
+                                           int minz, int maxz)
+{
+    if (minx > maxx || miny > maxy || minz > maxz) {
+        return;
+    }
+    for (int z = minz; z <= maxz; ++z) {
+        for (int y = miny; y <= maxy; ++y) {
+            for (int x = minx; x <= maxx; ++x) {
+                while (1) {
+                    int idx = table_get(x, y, z);
+                    if (idx < 0 || idx >= voxel_count) {
+                        break;
+                    }
+                    Voxel *candidate = &voxels[idx];
+                    if (candidate->simulate) {
+                        break;
+                    }
+                    remove_voxel_index(idx);
+                }
+            }
+        }
+    }
 }
 
 static bool find_nearest_free_static_region(int base_minx, int base_maxx,
@@ -1082,6 +1113,8 @@ static void spawn_static_covering_voxel(const Voxel *voxel)
         TraceLog(LOG_WARNING, "[Multiscale] Static restore skipped: insufficient capacity (%d needed)", cell_count);
         return;
     }
+
+    remove_static_voxels_in_region(minx, maxx, miny, maxy, minz, maxz);
 
     for (int gz = minz; gz <= maxz; ++gz) {
         for (int gy = miny; gy <= maxy; ++gy) {
@@ -1579,7 +1612,7 @@ static int collect_static_activation_cluster(int seed_idx,
                 continue;
             }
             if (activation_try_enqueue(neighbor_idx, center_gx, center_gy, center_gz,
-                                       -1.0f, buffer, queue, &tail))
+                                       seed_radius_sq, buffer, queue, &tail))
             {
                 added++;
                 if (buffer->count >= VOXEL_ACTIVATION_UNIT_BUDGET) {
@@ -2283,13 +2316,13 @@ static void buildDemo(void) {
         float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
         addVoxelSized(px, py, pz, false, true, (Color){ 240, 160, 60, 255 }, 0, span);
     }
-    {
-        int span = 4;
-        float px = -2.0f * VOXEL_SIZE;
-        float pz = 2.0f * VOXEL_SIZE;
-        float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
-        addVoxelSized(px, py*2.0f, pz, false, true, (Color){ 240, 160, 60, 255 }, 0, span);
-    }
+    // {
+    //     int span = 4;
+    //     float px = -2.0f * VOXEL_SIZE;
+    //     float pz = 2.0f * VOXEL_SIZE;
+    //     float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
+    //     addVoxelSized(px, py*2.0f, pz, false, true, (Color){ 240, 160, 60, 255 }, 0, span);
+    // }
 
     // // Static 1x4x4 pad with a span-2 block hovering above for collision testing
     // {
