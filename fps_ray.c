@@ -179,6 +179,7 @@ static void voxel_measure_strain(const Voxel *voxel,
 static int build_glue_cluster_indices(int start_idx, int *out_indices);
 static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count);
 static void solve_span_voxel_collisions(void);
+static void compute_voxel_center_and_mass(const Voxel *voxel, Vector3 *center, float *inv_mass_sum);
 typedef struct {
     int gx, gy, gz;
     Color color;
@@ -203,6 +204,10 @@ static bool list_contains_index(const int *list, int count, int value);
 static int gather_static_face_neighbors(const Voxel *voxel, int *out, int max_out);
 static int gather_static_voxels_near_point(Vector3 point, float radius, int *out, int max_out);
 static bool push_particle_out_of_static(const Voxel *static_voxel, Particle *particle, float radius);
+static int gather_static_voxels_near_voxel(const Voxel *voxel, int *out, int max_out);
+static bool resolve_span_static_overlap(int dynamic_idx, Voxel *dynamic,
+                                        int static_idx, const Voxel *static_voxel);
+static bool nudge_voxel_bottom_above_static(int voxel_idx, Voxel *voxel);
 static void glue_dynamic_voxel_to_static_neighbors(void);
 static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx);
 
@@ -279,7 +284,7 @@ static bool debugDrawParticles = false;
 static bool debugColorParticlesByVelocity = false;
 static const float PARTICLE_DEBUG_MARKER_RADIUS = 0.6f;
 static const float PARTICLE_DEBUG_MAX_SPEED = 20.0f;
-static bool debugLogSpanCollisions = false;
+static bool debugLogSpanCollisions = true;
 static int debugSpanEdgeLogBudget = 0;
 static int debugSpanCollisionLogBudget = 0;
 static bool debugLogGlue = false;
@@ -2310,14 +2315,14 @@ static void buildDemo(void) {
 
     //Span-2 dynamic voxel near origin for floor collision testing
     {
-        int span = 4;
+        int span = 3;
         float px = -2.0f * VOXEL_SIZE;
         float pz = 2.0f * VOXEL_SIZE;
         float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
         addVoxelSized(px, py, pz, false, true, (Color){ 240, 160, 60, 255 }, 0, span);
     }
     // {
-    //     int span = 4;
+    //     int span = 7;
     //     float px = -2.0f * VOXEL_SIZE;
     //     float pz = 2.0f * VOXEL_SIZE;
     //     float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
@@ -3440,6 +3445,47 @@ static int gather_static_voxels_near_point(Vector3 point, float radius, int *out
     return count;
 }
 
+static int gather_static_voxels_near_voxel(const Voxel *voxel, int *out, int max_out)
+{
+    if (!voxel || !out || max_out <= 0) {
+        return 0;
+    }
+    int minx, maxx, miny, maxy, minz, maxz;
+    voxel_grid_bounds(voxel, &minx, &maxx, &miny, &maxy, &minz, &maxz);
+    if (minx > maxx || miny > maxy || minz > maxz) {
+        return 0;
+    }
+    minx -= 1; maxx += 1;
+    miny -= 1; if (miny < 0) miny = 0;
+    maxy += 1;
+    minz -= 1; maxz += 1;
+
+    int count = 0;
+    for (int z = minz; z <= maxz; ++z) {
+        for (int y = miny; y <= maxy; ++y) {
+            for (int x = minx; x <= maxx; ++x) {
+                int idx = table_get(x, y, z);
+                if (idx < 0 || idx >= voxel_count) {
+                    continue;
+                }
+                const Voxel *candidate = &voxels[idx];
+                if (candidate->simulate) {
+                    continue;
+                }
+                if (list_contains_index(out, count, idx)) {
+                    continue;
+                }
+                if (count < max_out) {
+                    out[count++] = idx;
+                } else {
+                    return count;
+                }
+            }
+        }
+    }
+    return count;
+}
+
 static bool push_particle_out_of_static(const Voxel *static_voxel, Particle *particle, float radius)
 {
     if (!static_voxel || !particle || radius <= 0.0f) {
@@ -3479,6 +3525,27 @@ static bool push_particle_out_of_static(const Voxel *static_voxel, Particle *par
                                         v_mul(normal, penetration));
         return true;
     } else {
+        float topGap = bounds.maxy - pos.y;
+        float bottomGap = pos.y - bounds.miny;
+        const float verticalBias = VOXEL_SIZE * 0.25f;
+        bool preferTop = (pos.y >= static_voxel->pos.y) &&
+                         (topGap <= radius + verticalBias);
+        bool preferBottom = (pos.y < static_voxel->pos.y) &&
+                            (bottomGap <= radius + verticalBias);
+        if (preferTop || preferBottom) {
+            bool top = preferTop && (!preferBottom || topGap <= bottomGap);
+            Vector3 normal = top ? (Vector3){ 0.0f,  1.0f, 0.0f }
+                                 : (Vector3){ 0.0f, -1.0f, 0.0f };
+            float gap = top ? topGap : bottomGap;
+            float penetration = radius - gap;
+            if (penetration < 0.0f) {
+                penetration = radius;
+            }
+            particle->predicted_pos = v_add(particle->predicted_pos,
+                                            v_mul(normal, penetration));
+            return true;
+        }
+
         float distances[6] = {
             pos.x - bounds.minx,
             bounds.maxx - pos.x,
@@ -3513,6 +3580,131 @@ static bool push_particle_out_of_static(const Voxel *static_voxel, Particle *par
                                         v_mul(normal, penetration));
         return true;
     }
+}
+
+static bool resolve_span_static_overlap(int dynamic_idx, Voxel *dynamic,
+                                        int static_idx, const Voxel *static_voxel)
+{
+    if (!dynamic || !static_voxel || !dynamic->simulate || dynamic->span <= 1) {
+        return false;
+    }
+    VoxelWorldBounds boundsA, boundsB;
+    voxel_world_bounds(dynamic, &boundsA);
+    voxel_world_bounds(static_voxel, &boundsB);
+
+    float overlapX = fminf(boundsA.maxx, boundsB.maxx) - fmaxf(boundsA.minx, boundsB.minx);
+    float overlapY = fminf(boundsA.maxy, boundsB.maxy) - fmaxf(boundsA.miny, boundsB.miny);
+    float overlapZ = fminf(boundsA.maxz, boundsB.maxz) - fmaxf(boundsA.minz, boundsB.minz);
+    if (overlapX <= 0.0f || overlapY <= 0.0f || overlapZ <= 0.0f) {
+        return false;
+    }
+
+    float overlaps[3] = { overlapX, overlapY, overlapZ };
+    int axis = 0;
+    if (overlapY < overlaps[axis]) axis = 1;
+    if (overlapZ < overlaps[axis]) axis = 2;
+    float penetration = overlaps[axis];
+    if (penetration <= 0.0f) {
+        return false;
+    }
+
+    Vector3 centerA = dynamic->pos;
+    Vector3 centerB = static_voxel->pos;
+    float inv_mass_sum = 0.0f;
+    compute_voxel_center_and_mass(dynamic, &centerA, &inv_mass_sum);
+    if (inv_mass_sum <= 0.0f) {
+        return false;
+    }
+
+    Vector3 normal = { 0.0f, 0.0f, 0.0f };
+    if (axis == 0) {
+        normal.x = (centerA.x >= centerB.x) ? 1.0f : -1.0f;
+    } else if (axis == 1) {
+        normal.y = (centerA.y >= centerB.y) ? 1.0f : -1.0f;
+    } else {
+        normal.z = (centerA.z >= centerB.z) ? 1.0f : -1.0f;
+    }
+
+    if (debugLogSpanCollisions) {
+        TraceLog(LOG_INFO,
+                 "[SpanStatic] overlap dyn=%d span=%d static=%d axis=%d pen=%.4f overlaps=(%.4f,%.4f,%.4f) "
+                 "centersA=(%.2f,%.2f,%.2f) centersB=(%.2f,%.2f,%.2f) normal=(%.1f,%.1f,%.1f)",
+                 dynamic_idx, dynamic->span, static_idx, axis, penetration,
+                 overlapX, overlapY, overlapZ,
+                 centerA.x, centerA.y, centerA.z,
+                 centerB.x, centerB.y, centerB.z,
+                 normal.x, normal.y, normal.z);
+    }
+
+    const float omega = COLLISION_RELAXATION;
+    Vector3 delta = v_mul(normal, penetration * omega);
+    for (int j = 0; j < 8; ++j) {
+        Particle *p = &dynamic->particles[j];
+        if (p->inv_mass <= 0.0f) {
+            continue;
+        }
+        float weight = p->inv_mass / inv_mass_sum;
+        p->predicted_pos = v_add(p->predicted_pos, v_mul(delta, weight));
+    }
+
+    return true;
+}
+
+static bool nudge_voxel_bottom_above_static(int voxel_idx, Voxel *voxel)
+{
+    if (!voxel || !voxel->simulate || voxel->span <= 1) {
+        return false;
+    }
+
+    int minx, maxx, miny, maxy, minz, maxz;
+    voxel_grid_bounds(voxel, &minx, &maxx, &miny, &maxy, &minz, &maxz);
+    int support_y = miny - 1;
+    if (support_y < 0) {
+        return false;
+    }
+
+    float half_edge = 0.5f * voxel->rest_edge;
+    Vector3 center = voxel->pos;
+    compute_voxel_center_and_mass(voxel, &center, NULL);
+    float current_bottom = center.y - half_edge;
+    float required_bottom = current_bottom;
+    bool found_support = false;
+
+    for (int z = minz; z <= maxz; ++z) {
+        for (int x = minx; x <= maxx; ++x) {
+            int idx = table_get(x, support_y, z);
+            if (idx < 0 || idx >= voxel_count) {
+                continue;
+            }
+            const Voxel *support = &voxels[idx];
+            if (support->simulate) {
+                continue;
+            }
+            float top = ((float)(support_y + 1)) * VOXEL_SIZE;
+            if (top > required_bottom) {
+                required_bottom = top;
+            }
+            found_support = true;
+        }
+    }
+
+    float lift = required_bottom - current_bottom;
+    if (!found_support || lift <= 0.0f) {
+        return false;
+    }
+
+    Vector3 delta = { 0.0f, lift, 0.0f };
+    voxel->pos = v_add(voxel->pos, delta);
+    for (int j = 0; j < 8; ++j) {
+        voxel->particles[j].predicted_pos = v_add(voxel->particles[j].predicted_pos, delta);
+    }
+
+    if (debugLogSpanCollisions) {
+        TraceLog(LOG_INFO,
+                 "[SpanStaticLift] voxel=%d span=%d lift=%.4f bottom=%.4f target=%.4f",
+                 voxel_idx, voxel->span, lift, current_bottom, required_bottom);
+    }
+    return true;
 }
 
 static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx)
@@ -3716,8 +3908,9 @@ static void solve_particle_collisions(float dt) {
         int span = (voxel->span > 0) ? voxel->span : 1;
         float span_extent = 0.5f * VOXEL_SIZE * (float)(span - 1);
         float static_collision_radius = voxel_radius - span_extent;
-        if (static_collision_radius < 0.0f) {
-            static_collision_radius = 0.0f;
+        float min_static_radius = 0.5f * VOXEL_SIZE;
+        if (static_collision_radius < min_static_radius) {
+            static_collision_radius = min_static_radius;
         }
 
         for (int j = 0; j < 8; ++j) {
@@ -3784,6 +3977,24 @@ static void solve_particle_collisions(float dt) {
                 }
                 push_particle_out_of_static(static_voxel, p, static_collision_radius);
             }
+        }
+
+        if (span > 1) {
+            int static_indices[MAX_STATIC_COLLISION_NEIGHBORS];
+            int static_count = gather_static_voxels_near_voxel(voxel, static_indices,
+                                                               MAX_STATIC_COLLISION_NEIGHBORS);
+            for (int s = 0; s < static_count; ++s) {
+                int static_idx = static_indices[s];
+                if (static_idx < 0 || static_idx >= voxel_count) {
+                    continue;
+                }
+                const Voxel *static_voxel = &voxels[static_idx];
+                if (static_voxel->simulate) {
+                    continue;
+                }
+                resolve_span_static_overlap(i, voxel, static_idx, static_voxel);
+            }
+            nudge_voxel_bottom_above_static(i, voxel);
         }
     }
 
