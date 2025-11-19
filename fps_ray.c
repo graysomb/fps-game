@@ -1104,6 +1104,39 @@ static void spawn_static_covering_voxel(const Voxel *voxel)
         return;
     }
 
+    int desired_span = (voxel->span > 0) ? voxel->span : 1;
+    if (desired_span > 1) {
+        float half_span = 0.5f * (float)desired_span;
+        float center_x_cells = voxel->pos.x / VOXEL_SIZE;
+        float center_y_cells = voxel->pos.y / VOXEL_SIZE;
+        float center_z_cells = voxel->pos.z / VOXEL_SIZE;
+
+        int width_x = maxx - minx + 1;
+        if (width_x != desired_span) {
+            int forced_minx = (int)floorf(center_x_cells - half_span + GRID_EPSILON);
+            minx = forced_minx;
+            maxx = forced_minx + desired_span - 1;
+        }
+
+        int width_y = maxy - miny + 1;
+        if (width_y != desired_span) {
+            int forced_miny = (int)floorf(center_y_cells - half_span + GRID_EPSILON);
+            miny = forced_miny;
+            maxy = forced_miny + desired_span - 1;
+            if (miny < 0) {
+                maxy += -miny;
+                miny = 0;
+            }
+        }
+
+        int width_z = maxz - minz + 1;
+        if (width_z != desired_span) {
+            int forced_minz = (int)floorf(center_z_cells - half_span + GRID_EPSILON);
+            minz = forced_minz;
+            maxz = forced_minz + desired_span - 1;
+        }
+    }
+
     int span_count_x = maxx - minx + 1;
     int span_count_y = maxy - miny + 1;
     int span_count_z = maxz - minz + 1;
@@ -2315,7 +2348,7 @@ static void buildDemo(void) {
 
     //Span-2 dynamic voxel near origin for floor collision testing
     {
-        int span = 3;
+        int span = 5;
         float px = -2.0f * VOXEL_SIZE;
         float pz = 2.0f * VOXEL_SIZE;
         float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
