@@ -50,7 +50,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define ACTIVATION_STRAIN_REF      0.15f
 #define ACTIVATION_GLUE_WEIGHT     0.35f
 #define ACTIVATION_GLUE_REF_SPEED  3.0f
-#define ACTIVATION_DYNAMIC_WEIGHT  0.8f
+#define ACTIVATION_DYNAMIC_WEIGHT  0.9f
 #define FREEZE_BELIEF_IMPORTANCE   0.9f
 #define ACTIVATION_HYSTERESIS      0.1f
 #define FRICTION       400.0f    // ground friction deceleration
@@ -83,10 +83,10 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 static const float GRID_EPSILON = 1e-4f;
 #define VOXEL_ACTIVATION_RADIUS 2
 //#define VOXEL_ACTIVATION_UNIT_BUDGET 128
-#define VOXEL_ACTIVATION_UNIT_BUDGET 4
-#define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 0.0f
-#define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.0f
-#define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.0f
+#define VOXEL_ACTIVATION_UNIT_BUDGET 128
+#define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 20.0f
+#define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 20.0f
+#define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 20.0f
 #define VOXEL_DEACTIVATION_FRAMES 64
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 64
 #define STATIC_RESTORE_SEARCH_RADIUS 4
@@ -2229,31 +2229,31 @@ static void buildDemo(void) {
         }
     } 
 
-    // Pillars
-    int pillar_height = 10; // 45 - 10
-    int pillar_radius = 3;
-    int pillar_positions[4][2] = {
-        { M / 4, M / 4 },
-        { M / 4, 3 * M / 4 },
-        { 3 * M / 4, M / 4 },
-        { 3 * M / 4, 3 * M / 4 }
-    };
+    // // Pillars
+    // int pillar_height = 10; // 45 - 10
+    // int pillar_radius = 3;
+    // int pillar_positions[4][2] = {
+    //     { M / 4, M / 4 },
+    //     { M / 4, 3 * M / 4 },
+    //     { 3 * M / 4, M / 4 },
+    //     { 3 * M / 4, 3 * M / 4 }
+    // };
 
-    for (int p = 0; p < 4; p++) {
-        int cx = pillar_positions[p][0];
-        int cz = pillar_positions[p][1];
-        for (int y = 1; y <= pillar_height; y++) {
-            for (int dx = -pillar_radius; dx <= pillar_radius; dx++) {
-                for (int dz = -pillar_radius; dz <= pillar_radius; dz++) {
-                    if (dx*dx + dz*dz > pillar_radius*pillar_radius) continue; // circular pillar
-                    float px = (cx + dx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                    float py = (y + 0.5f) * VOXEL_SIZE;
-                    float pz = (cz + dz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                    addVoxel(px, py, pz, true, false, (Color){ 200, 100, 50, 255 }, 0);
-                }
-            }
-        }
-    }
+    // for (int p = 0; p < 4; p++) {
+    //     int cx = pillar_positions[p][0];
+    //     int cz = pillar_positions[p][1];
+    //     for (int y = 1; y <= pillar_height; y++) {
+    //         for (int dx = -pillar_radius; dx <= pillar_radius; dx++) {
+    //             for (int dz = -pillar_radius; dz <= pillar_radius; dz++) {
+    //                 if (dx*dx + dz*dz > pillar_radius*pillar_radius) continue; // circular pillar
+    //                 float px = (cx + dx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    //                 float py = (y + 0.5f) * VOXEL_SIZE;
+    //                 float pz = (cz + dz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    //                 addVoxel(px, py, pz, true, false, (Color){ 200, 100, 50, 255 }, 0);
+    //             }
+    //         }
+    //     }
+    // }
 
     // Central platform (n=1)
     // int platform_size = 2;
@@ -2276,13 +2276,20 @@ static void buildDemo(void) {
     // emit_static_voxels_from_units(&pyramid_units);
 
     //Span-2 dynamic voxel near origin for floor collision testing
-    // {
-    //     int span = 2;
-    //     float px = -2.0f * VOXEL_SIZE;
-    //     float pz = 2.0f * VOXEL_SIZE;
-    //     float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
-    //     addVoxelSized(px, py, pz, false, true, (Color){ 240, 160, 60, 255 }, 0, span);
-    // }
+    {
+        int span = 4;
+        float px = -2.0f * VOXEL_SIZE;
+        float pz = 2.0f * VOXEL_SIZE;
+        float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
+        addVoxelSized(px, py, pz, false, true, (Color){ 240, 160, 60, 255 }, 0, span);
+    }
+    {
+        int span = 4;
+        float px = -2.0f * VOXEL_SIZE;
+        float pz = 2.0f * VOXEL_SIZE;
+        float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
+        addVoxelSized(px, py*2.0f, pz, false, true, (Color){ 240, 160, 60, 255 }, 0, span);
+    }
 
     // // Static 1x4x4 pad with a span-2 block hovering above for collision testing
     // {
@@ -4773,7 +4780,6 @@ static void DrawVoxels(Camera3D cam) {
         }
     }
     rlEnd();
-    rlEnableBackfaceCulling();
 
     rlBegin(RL_TRIANGLES);
     for (int i = 0; i < voxel_count; i++) {
@@ -4797,6 +4803,7 @@ static void DrawVoxels(Camera3D cam) {
         drawCubeEdges(v);
     }
     rlEnd();
+    rlEnableBackfaceCulling();
 
     if (debugDrawParticles) {
         draw_particle_debug();
