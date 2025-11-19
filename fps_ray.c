@@ -3680,13 +3680,18 @@ static void solve_particle_collisions(float dt) {
         }
         float voxel_radius = voxel_particle_radius(voxel);
         float terrain_limit = FLOOR_SIZE - voxel_radius;
+        int span = (voxel->span > 0) ? voxel->span : 1;
+        float span_extent = 0.5f * VOXEL_SIZE * (float)(span - 1);
+        float static_collision_radius = voxel_radius - span_extent;
+        if (static_collision_radius < 0.0f) {
+            static_collision_radius = 0.0f;
+        }
 
         for (int j = 0; j < 8; ++j) {
             Particle *p = &voxel->particles[j];
 
             Vector3 pos = p->predicted_pos;
 
-            int span = (voxel->span > 0) ? voxel->span : 1;
             float floor_offset = 0.5f * VOXEL_SIZE * (float)span;
             float floor_limit = fmaxf(0.0f, floor_offset - voxel_radius);
             if (pos.y < floor_limit) {
@@ -3744,7 +3749,7 @@ static void solve_particle_collisions(float dt) {
                 if (static_voxel->simulate) {
                     continue;
                 }
-                push_particle_out_of_static(static_voxel, p, voxel_radius);
+                push_particle_out_of_static(static_voxel, p, static_collision_radius);
             }
         }
     }
