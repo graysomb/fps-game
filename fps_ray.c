@@ -51,7 +51,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define ACTIVATION_GLUE_WEIGHT     0.35f
 #define ACTIVATION_GLUE_REF_SPEED  3.0f
 #define ACTIVATION_DYNAMIC_WEIGHT  0.9f
-#define FREEZE_BELIEF_IMPORTANCE   0.9f
+#define FREEZE_BELIEF_IMPORTANCE   0.1f
 #define ACTIVATION_HYSTERESIS      0.1f
 #define FRICTION       400.0f    // ground friction deceleration
 #define TURN_ACCELERATION 400.0f
@@ -61,21 +61,21 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define MAX_STATIC_COLLISION_NEIGHBORS 64
 #define PLAYER_SIZE 0.5f
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
-#define VGS_ALPHA 0.5f
-#define VGS_BETA 0.5f
+#define VGS_ALPHA 0.01f
+#define VGS_BETA 0.01f
 #define VGS_ITERS 6
 #define VGS_EPS 1e-6f
 #define PBD_MAX_STEP_DT 0.005f
-#define PBD_SUBSTEPS 3
+#define PBD_SUBSTEPS 6
 #define PBD_CONSTRAINT_ITERS 12
 #define COLLISION_RELAXATION 0.99f
 #define CENTER_RELAXATION 0.9f
 #define VELOCITY_DAMPING 0.99f
 #define GLUE_RELAXATION 1.0f
 #define GLUE_EPS 1e-6f
-#define GLUE_BREAK_STRAIN 10.5f
-#define VOXEL_SPLIT_STRAIN_THRESHOLD 10.05f
-#define VOXEL_SPLIT_SHEAR_THRESHOLD 10.05f
+#define GLUE_BREAK_STRAIN .5f
+#define VOXEL_SPLIT_STRAIN_THRESHOLD .05f
+#define VOXEL_SPLIT_SHEAR_THRESHOLD .05f
 
 #define MAX_NEIGHBOR_VOXELS 128
 #define MAX_FACE_NEIGHBORS   64
@@ -284,7 +284,7 @@ static bool debugDrawParticles = false;
 static bool debugColorParticlesByVelocity = false;
 static const float PARTICLE_DEBUG_MARKER_RADIUS = 0.6f;
 static const float PARTICLE_DEBUG_MAX_SPEED = 20.0f;
-static bool debugLogSpanCollisions = true;
+static bool debugLogSpanCollisions = false;
 static int debugSpanEdgeLogBudget = 0;
 static int debugSpanCollisionLogBudget = 0;
 static bool debugLogGlue = false;
@@ -668,6 +668,51 @@ typedef struct {
 
 static GlueConstraint glueConstraints[MAX_VOXELS * 12];
 static int glueConstraintCount = 0;
+static uint8_t gluedNeighborCounts[MAX_VOXELS];
+static int gluedNeighborList[MAX_VOXELS][MAX_FACE_NEIGHBORS];
+static bool glueAdjacencyDirty = true;
+
+static void mark_glue_adjacency_dirty(void) {
+    glueAdjacencyDirty = true;
+}
+
+static void add_glued_neighbor_entry(int voxel_idx, int neighbor_idx) {
+    if (voxel_idx < 0 || voxel_idx >= MAX_VOXELS ||
+        neighbor_idx < 0 || neighbor_idx >= MAX_VOXELS) {
+        return;
+    }
+    int count = gluedNeighborCounts[voxel_idx];
+    for (int i = 0; i < count; ++i) {
+        if (gluedNeighborList[voxel_idx][i] == neighbor_idx) {
+            return;
+        }
+    }
+    if (count < MAX_FACE_NEIGHBORS) {
+        gluedNeighborList[voxel_idx][count] = neighbor_idx;
+        gluedNeighborCounts[voxel_idx] = (uint8_t)(count + 1);
+    }
+}
+
+static void rebuild_glue_adjacency_if_dirty(void) {
+    if (!glueAdjacencyDirty) {
+        return;
+    }
+    memset(gluedNeighborCounts, 0, sizeof(gluedNeighborCounts));
+    for (int i = 0; i < voxel_count; ++i) {
+        for (int j = 0; j < MAX_FACE_NEIGHBORS; ++j) {
+            gluedNeighborList[i][j] = -1;
+        }
+    }
+    for (int g = 0; g < glueConstraintCount; ++g) {
+        const GlueConstraint *gc = &glueConstraints[g];
+        if (!gc->active) {
+            continue;
+        }
+        add_glued_neighbor_entry(gc->coarseVoxel, gc->fineVoxel);
+        add_glued_neighbor_entry(gc->fineVoxel, gc->coarseVoxel);
+    }
+    glueAdjacencyDirty = false;
+}
 
 static inline int voxel_span_for_glue(const Voxel *v) {
     return (v && v->span > 0) ? v->span : 1;
@@ -857,6 +902,7 @@ static void voxel_table_register(Voxel *v, int idx)
             }
         }
     }
+    mark_glue_adjacency_dirty();
 }
 
 static void voxel_table_unregister(const Voxel *v)
@@ -2291,14 +2337,14 @@ static void build_oblique_voxel_pyramid(UnitVoxelBuffer *buffer) {
 // Build static demo cube of voxels
 static void buildDemo(void) {
     // Floor
-    int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
-    for (int x = 0; x <= M; x++) {
-        for (int z = 0; z <= M; z++) {
-            float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-            float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-            addVoxel(px, 0, pz, true, false, (Color){ 150, 150, 150, 255 }, 0);
-        }
-    } 
+    // int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
+    // for (int x = 0; x <= M; x++) {
+    //     for (int z = 0; z <= M; z++) {
+    //         float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    //         float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    //         addVoxel(px, 0, pz, true, false, (Color){ 150, 150, 150, 255 }, 0);
+    //     }
+    // } 
 
     // // Pillars
     // int pillar_height = 10; // 45 - 10
@@ -3050,6 +3096,7 @@ static void rebuild_glue_constraints(void) {
         }
     }
     glue_dynamic_voxel_to_static_neighbors();
+    mark_glue_adjacency_dirty();
 }
 
 static void deactivate_glue_constraints_between(int a, int b) {
@@ -3064,37 +3111,20 @@ static void deactivate_glue_constraints_between(int a, int b) {
             gc->active = false;
         }
     }
+    mark_glue_adjacency_dirty();
 }
 
 static int gather_glued_neighbors(int voxel_idx, int *out, int max_out) {
-    if (!out || max_out <= 0) {
+    if (!out || max_out <= 0 || voxel_idx < 0 || voxel_idx >= voxel_count) {
         return 0;
     }
-    int count = 0;
-    for (int g = 0; g < glueConstraintCount; ++g) {
-        const GlueConstraint *gc = &glueConstraints[g];
-        if (!gc->active) {
-            continue;
-        }
-        int neighbor = -1;
-        if (gc->coarseVoxel == voxel_idx) {
-            neighbor = gc->fineVoxel;
-        } else if (gc->fineVoxel == voxel_idx) {
-            neighbor = gc->coarseVoxel;
-        }
-        if (neighbor < 0) {
-            continue;
-        }
-        bool seen = false;
-        for (int n = 0; n < count; ++n) {
-            if (out[n] == neighbor) {
-                seen = true;
-                break;
-            }
-        }
-        if (!seen && count < max_out) {
-            out[count++] = neighbor;
-        }
+    rebuild_glue_adjacency_if_dirty();
+    int count = gluedNeighborCounts[voxel_idx];
+    if (count > max_out) {
+        count = max_out;
+    }
+    for (int i = 0; i < count; ++i) {
+        out[i] = gluedNeighborList[voxel_idx][i];
     }
     return count;
 }
@@ -3356,6 +3386,7 @@ static void compact_glue_constraints(void) {
         ++write;
     }
     glueConstraintCount = write;
+    mark_glue_adjacency_dirty();
 }
 
 // Returns true when the provided voxel/corner pair is part of an active glue constraint.
@@ -3852,19 +3883,16 @@ static bool voxels_are_glued(int voxel_idx_a, int voxel_idx_b) {
         return false;
     }
 
-    for (int g = 0; g < glueConstraintCount; ++g) {
-        const GlueConstraint *gc = &glueConstraints[g];
-        if (!gc->active) {
-            continue;
-        }
-
-        bool forward = (gc->coarseVoxel == voxel_idx_a && gc->fineVoxel == voxel_idx_b);
-        bool reverse = (gc->coarseVoxel == voxel_idx_b && gc->fineVoxel == voxel_idx_a);
-        if (forward || reverse) {
+    rebuild_glue_adjacency_if_dirty();
+    if (voxel_idx_a < 0 || voxel_idx_a >= voxel_count) {
+        return false;
+    }
+    int count = gluedNeighborCounts[voxel_idx_a];
+    for (int i = 0; i < count; ++i) {
+        if (gluedNeighborList[voxel_idx_a][i] == voxel_idx_b) {
             return true;
         }
     }
-
     return false;
 }
 
