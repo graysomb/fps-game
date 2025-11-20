@@ -51,7 +51,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define ACTIVATION_GLUE_WEIGHT     0.35f
 #define ACTIVATION_GLUE_REF_SPEED  3.0f
 #define ACTIVATION_DYNAMIC_WEIGHT  0.9f
-#define FREEZE_BELIEF_IMPORTANCE   0.1f
+#define FREEZE_BELIEF_IMPORTANCE   0.5f
 #define ACTIVATION_HYSTERESIS      0.1f
 #define FRICTION       400.0f    // ground friction deceleration
 #define TURN_ACCELERATION 400.0f
@@ -87,8 +87,8 @@ static const float GRID_EPSILON = 1e-4f;
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 20.0f
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 20.0f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 20.0f
-#define VOXEL_DEACTIVATION_FRAMES 64
-#define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 64
+#define VOXEL_DEACTIVATION_FRAMES 4
+#define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128
 #define STATIC_RESTORE_SEARCH_RADIUS 4
 
 // KD-stats constants
@@ -294,6 +294,7 @@ static int debugGlueBreakLogBudget = 0;
 static const int DEBUG_GLUE_BUILD_LOG_INIT = 64;
 static const int DEBUG_GLUE_SOLVE_LOG_INIT = 64;
 static const int DEBUG_GLUE_BREAK_LOG_INIT = 16;
+static bool debugLogVoxelDeactivation = false;
 
 static bool debug_should_log_span_pair(const Voxel *a, const Voxel *b, int *budget) {
     if (!debugLogSpanCollisions || budget == NULL || *budget <= 0) {
@@ -1019,7 +1020,10 @@ static bool find_nearest_free_static_region(int base_minx, int base_maxx,
         base_maxy += (min_y_limit - base_miny);
         base_miny = min_y_limit;
     }
-    if (grid_region_is_free(base_minx, base_maxx, base_miny, base_maxy, base_minz, base_maxz)) {
+    if (grid_region_is_free(base_minx, base_maxx,
+                            base_miny, base_maxy,
+                            base_minz, base_maxz))
+    {
         *out_minx = base_minx; *out_maxx = base_maxx;
         *out_miny = base_miny; *out_maxy = base_maxy;
         *out_minz = base_minz; *out_maxz = base_maxz;
@@ -1081,10 +1085,10 @@ static bool find_nearest_free_static_region(int base_minx, int base_maxx,
     return false;
 }
 
-static void spawn_static_covering_voxel(const Voxel *voxel)
+static bool spawn_static_covering_voxel(const Voxel *voxel)
 {
     if (!voxel) {
-        return;
+        return false;
     }
     int base_minx, base_maxx, base_miny, base_maxy, base_minz, base_maxz;
     bool has_rest_bounds =
@@ -1115,7 +1119,7 @@ static void spawn_static_covering_voxel(const Voxel *voxel)
     }
 
     if (base_minx > base_maxx || base_miny > base_maxy || base_minz > base_maxz) {
-        return;
+        return false;
     }
 
     int minx = base_minx;
@@ -1147,7 +1151,7 @@ static void spawn_static_covering_voxel(const Voxel *voxel)
         TraceLog(LOG_WARNING,
                  "[Multiscale] Static restore failed: no free cells near (%.2f, %.2f, %.2f)",
                  voxel->pos.x, voxel->pos.y, voxel->pos.z);
-        return;
+        return false;
     }
 
     int desired_span = (voxel->span > 0) ? voxel->span : 1;
@@ -1187,15 +1191,15 @@ static void spawn_static_covering_voxel(const Voxel *voxel)
     int span_count_y = maxy - miny + 1;
     int span_count_z = maxz - minz + 1;
     if (span_count_x <= 0 || span_count_y <= 0 || span_count_z <= 0) {
-        return;
+        return false;
     }
     int cell_count = span_count_x * span_count_y * span_count_z;
     if (cell_count <= 0) {
-        return;
+        return false;
     }
     if (voxel_count + cell_count > MAX_VOXELS) {
         TraceLog(LOG_WARNING, "[Multiscale] Static restore skipped: insufficient capacity (%d needed)", cell_count);
-        return;
+        return false;
     }
 
     remove_static_voxels_in_region(minx, maxx, miny, maxy, minz, maxz);
@@ -1203,10 +1207,18 @@ static void spawn_static_covering_voxel(const Voxel *voxel)
     for (int gz = minz; gz <= maxz; ++gz) {
         for (int gy = miny; gy <= maxy; ++gy) {
             for (int gx = minx; gx <= maxx; ++gx) {
-                add_static_voxel_at_grid(gx, gy, gz, voxel->color, voxel->type);
+                int idx = add_static_voxel_at_grid(gx, gy, gz, voxel->color, voxel->type);
+                if (idx < 0) {
+                    TraceLog(LOG_WARNING,
+                             "[Multiscale] Static restore aborted: failed to spawn voxel at (%d,%d,%d)",
+                             gx, gy, gz);
+                    remove_static_voxels_in_region(minx, maxx, miny, maxy, minz, maxz);
+                    return false;
+                }
             }
         }
     }
+    return true;
 }
 
 
@@ -1842,7 +1854,21 @@ static bool restore_dynamic_voxel_to_static(int idx)
     }
     Voxel voxel = voxels[idx];
     remove_voxel_index(idx);
-    spawn_static_covering_voxel(&voxel);
+    return spawn_static_covering_voxel(&voxel);
+}
+
+static bool restore_dynamic_snapshot(const Voxel *snapshot)
+{
+    if (!snapshot) {
+        return false;
+    }
+    if (voxel_count >= MAX_VOXELS) {
+        TraceLog(LOG_WARNING, "[Multiscale] Dynamic restore skipped: capacity exceeded");
+        return false;
+    }
+    voxels[voxel_count] = *snapshot;
+    voxel_table_register(&voxels[voxel_count], voxel_count);
+    ++voxel_count;
     return true;
 }
 
@@ -2221,52 +2247,94 @@ static bool deactivate_sleeping_voxels(void)
             voxel->sleepFrames = 0;
         }
     }
-
     int idx = 0;
     while (idx < voxel_count && remaining_budget > 0) {
         Voxel *voxel = &voxels[idx];
-        if (!voxel->simulate || voxel->sleepFrames < VOXEL_DEACTIVATION_FRAMES) {
+        if (!voxel->simulate) {
+            ++idx;
+            continue;
+        }
+        if (voxel->sleepFrames < VOXEL_DEACTIVATION_FRAMES) {
+            if (debugLogVoxelDeactivation && voxel->sleepFrames > 0) {
+                TraceLog(LOG_INFO,
+                         "[Deactivate] voxel=%d span=%d sleep=%d/%d waiting",
+                         idx, voxel->span, voxel->sleepFrames, VOXEL_DEACTIVATION_FRAMES);
+            }
             ++idx;
             continue;
         }
 
         int cluster_count = build_glue_cluster_indices(idx, glueClusterIndices);
         if (cluster_count <= 0) {
+            if (debugLogVoxelDeactivation) {
+                TraceLog(LOG_INFO,
+                         "[Deactivate] voxel=%d span=%d sleep=%d cluster-empty",
+                         idx, voxel->span, voxel->sleepFrames);
+            }
             ++idx;
             continue;
         }
 
         bool cluster_ready = true;
+        int cluster_fail_idx = -1;
+        int cluster_fail_sleep = 0;
+        const char *cluster_fail_reason = NULL;
         for (int c = 0; c < cluster_count; ++c) {
             int cidx = glueClusterIndices[c];
             if (cidx < 0 || cidx >= voxel_count) {
                 cluster_ready = false;
+                cluster_fail_idx = cidx;
+                cluster_fail_reason = "invalid-index";
                 break;
             }
             Voxel *member = &voxels[cidx];
             if (!member->simulate || member->sleepFrames < VOXEL_DEACTIVATION_FRAMES) {
                 cluster_ready = false;
+                cluster_fail_idx = cidx;
+                cluster_fail_sleep = member->sleepFrames;
+                cluster_fail_reason = member->simulate ? "insufficient-sleep" : "static-member";
                 break;
             }
         }
 
         if (!cluster_ready) {
+            if (debugLogVoxelDeactivation) {
+                TraceLog(LOG_INFO,
+                         "[Deactivate] voxel=%d cluster_ready=false fail_idx=%d sleep=%d reason=%s",
+                         idx, cluster_fail_idx, cluster_fail_sleep,
+                         cluster_fail_reason ? cluster_fail_reason : "unknown");
+            }
             keep_cluster_awake(glueClusterIndices, cluster_count);
             ++idx;
             continue;
         }
 
         if (!glue_cluster_has_static_support(glueClusterIndices, cluster_count)) {
+            if (debugLogVoxelDeactivation) {
+                TraceLog(LOG_INFO,
+                         "[Deactivate] voxel=%d cluster=%d lacks static support",
+                         idx, cluster_count);
+            }
             keep_cluster_awake(glueClusterIndices, cluster_count);
             ++idx;
             continue;
         }
 
         if (!restore_glue_cluster_to_static(glueClusterIndices, cluster_count)) {
+            if (debugLogVoxelDeactivation) {
+                TraceLog(LOG_WARNING,
+                         "[Deactivate] voxel=%d cluster=%d restore failed",
+                         idx, cluster_count);
+            }
             ++idx;
             continue;
         }
 
+        if (debugLogVoxelDeactivation) {
+            TraceLog(LOG_INFO,
+                     "[Deactivate] restored cluster starting=%d count=%d remaining_budget_before=%d",
+                     idx, cluster_count, remaining_budget);
+        }
         remaining_budget -= cluster_count;
         if (remaining_budget < 0) {
             remaining_budget = 0;
@@ -3134,6 +3202,9 @@ static int build_glue_cluster_indices(int start_idx, int *out_indices)
     if (start_idx < 0 || start_idx >= voxel_count || !out_indices) {
         return 0;
     }
+    if (!voxels[start_idx].simulate) {
+        return 0;
+    }
 
     memset(glueClusterVisited, 0, sizeof(unsigned char) * (size_t)voxel_count);
 
@@ -3151,6 +3222,9 @@ static int build_glue_cluster_indices(int start_idx, int *out_indices)
             if (neighbor < 0 || neighbor >= voxel_count) {
                 continue;
             }
+             if (!voxels[neighbor].simulate) {
+                 continue;
+             }
             if (glueClusterVisited[neighbor]) {
                 continue;
             }
@@ -3206,13 +3280,18 @@ static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count
     for (int i = 0; i < cluster_count; ++i) {
         remove_voxel_index(sorted[i]);
     }
+    bool converted = false;
     for (int i = 0; i < cluster_count; ++i) {
-        spawn_static_covering_voxel(&snapshots[i]);
+        if (spawn_static_covering_voxel(&snapshots[i])) {
+            converted = true;
+        } else {
+            restore_dynamic_snapshot(&snapshots[i]);
+        }
     }
 
     free(sorted);
     free(snapshots);
-    return true;
+    return converted;
 }
 
 static float compute_glue_relative_velocity_score(int voxel_idx, const Voxel *voxel)
