@@ -61,19 +61,20 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define MAX_STATIC_COLLISION_NEIGHBORS 64
 #define PLAYER_SIZE 0.5f
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
-#define VGS_ALPHA 0.01f
-#define VGS_BETA 0.01f
+#define VGS_ALPHA 0.03f
+#define VGS_BETA 0.03f
 #define VGS_ITERS 6
 #define VGS_EPS 1e-6f
 #define PBD_MAX_STEP_DT 0.005f
 #define PBD_SUBSTEPS 6
 #define PBD_CONSTRAINT_ITERS 12
 #define COLLISION_RELAXATION 0.99f
-#define CENTER_RELAXATION 0.9f
-#define VELOCITY_DAMPING 0.99f
-#define GLUE_RELAXATION 1.0f
+#define CENTER_RELAXATION 0.99f
+#define VELOCITY_DAMPING 1.00f
+#define GLUE_RELAXATION 0.3f
 #define GLUE_EPS 1e-6f
-#define GLUE_BREAK_STRAIN .5f
+#define GLUE_BREAK_STRAIN .45f
+#define GLUE_BREAK_VELOCITY_SKIP_FRAMES 4
 #define VOXEL_SPLIT_STRAIN_THRESHOLD .05f
 #define VOXEL_SPLIT_SHEAR_THRESHOLD .05f
 
@@ -87,7 +88,7 @@ static const float GRID_EPSILON = 1e-4f;
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 20.0f
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 20.0f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 20.0f
-#define VOXEL_DEACTIVATION_FRAMES 4
+#define VOXEL_DEACTIVATION_FRAMES 8
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128
 #define STATIC_RESTORE_SEARCH_RADIUS 4
 
@@ -164,6 +165,7 @@ typedef struct {
     float groundSupport;
     uint8_t neighborSupport;
     uint8_t supportMask;
+    uint8_t skipCollisionVelocityFrames;
 } Voxel;
 static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
@@ -1410,6 +1412,7 @@ static void init_voxel_struct(Voxel *v,
     v->groundSupport = 0.0f;
     v->neighborSupport = 0;
     v->supportMask = 0;
+    v->skipCollisionVelocityFrames = 0;
 }
 
 static int addVoxelSized(float px, float py, float pz, bool fixed, bool simulate,
@@ -2916,6 +2919,12 @@ static void solve_voxel_glue(void) {
                          fine->pos.x, fine->pos.y, fine->pos.z);
                 --debugGlueBreakLogBudget;
             }
+            if (coarse->simulate) {
+                coarse->skipCollisionVelocityFrames = GLUE_BREAK_VELOCITY_SKIP_FRAMES;
+            }
+            if (fine->simulate) {
+                fine->skipCollisionVelocityFrames = GLUE_BREAK_VELOCITY_SKIP_FRAMES;
+            }
             gc->active = false;
             continue;
         }
@@ -4362,6 +4371,10 @@ static void update_particle_velocities(float dt) {
         if (!voxel->simulate) {
             continue;
         }
+        bool skipVelocity = (voxel->skipCollisionVelocityFrames > 0);
+        if (skipVelocity && voxel->skipCollisionVelocityFrames > 0) {
+            voxel->skipCollisionVelocityFrames--;
+        }
         Vector3 centroid = { 0.0f, 0.0f, 0.0f };
         Vector3 prev_centroid = { 0.0f, 0.0f, 0.0f };
 
@@ -4373,10 +4386,12 @@ static void update_particle_velocities(float dt) {
             Vector3 new_pos = p->predicted_pos;
             Vector3 delta = v_sub(new_pos, p->prev_pos);
 
-            if (p->inv_mass > 0.0f) {
-                p->vel = v_mul(delta, inv_dt);
-            } else {
-                p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+            if (!skipVelocity) {
+                if (p->inv_mass > 0.0f) {
+                    p->vel = v_mul(delta, inv_dt);
+                } else {
+                    p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+                }
             }
 
             p->pos = new_pos;
@@ -4384,7 +4399,9 @@ static void update_particle_velocities(float dt) {
 
         centroid = v_mul(centroid, 1.0f / 8.0f);
         prev_centroid = v_mul(prev_centroid, 1.0f / 8.0f);
-        voxel->vel = v_mul(v_sub(centroid, prev_centroid), inv_dt);
+        if (!skipVelocity) {
+            voxel->vel = v_mul(v_sub(centroid, prev_centroid), inv_dt);
+        }
         voxel->pos = centroid;
     }
 }
@@ -4624,7 +4641,7 @@ static void FireVoxel(int idx) {
     int vix = addVoxel(start.x, start.y, start.z, false, true, col, p->vType);
     if (vix >= 0) {
         Voxel *shot = &voxels[vix];
-        Vector3 vel = v_mul(dir, 50.0f);
+        Vector3 vel = v_mul(dir, 60.0f);
         shot->vel = vel;
         shot->owner = idx;
         for (int i = 0; i < 8; ++i) {
