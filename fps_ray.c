@@ -3257,6 +3257,62 @@ static void apply_damage_to_player(int player_index, int attacker_index, int dam
     }
 }
 
+static bool activate_static_neighbors_of_region(int minx, int maxx,
+                                                int miny, int maxy,
+                                                int minz, int maxz)
+{
+    UnitVoxelBuffer buffer = { 0 };
+    unit_voxel_buffer_clear(&buffer);
+
+    int ex_minx = minx - 1;
+    int ex_maxx = maxx + 1;
+    int ex_miny = miny - 1;
+    int ex_maxy = maxy + 1;
+    int ex_minz = minz - 1;
+    int ex_maxz = maxz + 1;
+
+    if (ex_miny < 0) {
+        ex_miny = 0;
+    }
+
+    for (int z = ex_minz; z <= ex_maxz && buffer.count < VOXEL_ACTIVATION_UNIT_BUDGET; ++z) {
+        for (int y = ex_miny; y <= ex_maxy && buffer.count < VOXEL_ACTIVATION_UNIT_BUDGET; ++y) {
+            for (int x = ex_minx; x <= ex_maxx && buffer.count < VOXEL_ACTIVATION_UNIT_BUDGET; ++x) {
+                if (x >= minx && x <= maxx &&
+                    y >= miny && y <= maxy &&
+                    z >= minz && z <= maxz) {
+                    continue;
+                }
+                int idx = table_get(x, y, z);
+                if (idx < 0 || idx >= voxel_count) {
+                    continue;
+                }
+                Voxel *candidate = &voxels[idx];
+                if (candidate->simulate || candidate->span != 1 || candidate->pendingActivation) {
+                    continue;
+                }
+                candidate->pendingActivation = true;
+                if (!unit_voxel_buffer_push(&buffer,
+                                            candidate->gx, candidate->gy, candidate->gz,
+                                            candidate->color, candidate->type,
+                                            candidate->fixed, idx))
+                {
+                    candidate->pendingActivation = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (buffer.count <= 0) {
+        return false;
+    }
+
+    remove_buffered_static_voxels(&buffer);
+    emit_multiscale_voxels_from_units(&buffer, false, true, -1);
+    return true;
+}
+
 static void rebuild_voxel_hash(void) {
     table_cache_invalidate();
     memset(table, 0, sizeof(table));
@@ -3459,11 +3515,15 @@ static void update_projectiles(float dt)
                 int anchorX = hit_voxel->gx - halfBrush;
                 int anchorY = hit_voxel->gy - halfBrush;
                 int anchorZ = hit_voxel->gz - halfBrush;
+                int minx = anchorX;
+                int maxx = anchorX + brushExtent - 1;
+                int miny = anchorY;
+                int maxy = anchorY + brushExtent - 1;
+                int minz = anchorZ;
+                int maxz = anchorZ + brushExtent - 1;
 
                 if (v->type == 1) {
-                    remove_static_voxels_in_region(anchorX, anchorX + brushExtent - 1,
-                                                   anchorY, anchorY + brushExtent - 1,
-                                                   anchorZ, anchorZ + brushExtent - 1);
+                    remove_static_voxels_in_region(minx, maxx, miny, maxy, minz, maxz);
                     static_changed = true;
                 } else if (v->type == 2) {
                     for (int dx = 0; dx < brushExtent; ++dx) {
@@ -3479,6 +3539,10 @@ static void update_projectiles(float dt)
                             }
                         }
                     }
+                }
+
+                if (activate_static_neighbors_of_region(minx, maxx, miny, maxy, minz, maxz)) {
+                    static_changed = true;
                 }
             }
 
