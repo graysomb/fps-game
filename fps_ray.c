@@ -3412,7 +3412,10 @@ static void update_projectiles(float dt)
             continue;
         }
 
-        Vector3 displacement = v_mul(v->vel, dt);
+        Vector3 gravity = { 0.0f, -GRAVITY, 0.0f };
+        v->vel = v_mul(v->vel, VELOCITY_DAMPING);
+        Vector3 displacement = v_add(v_mul(v->vel, dt), v_mul(gravity, dt * dt));
+        v->vel = v_add(v->vel, v_mul(gravity, dt));
         float distance = v_length(displacement);
         if (distance <= 1e-6f) {
             ++i;
