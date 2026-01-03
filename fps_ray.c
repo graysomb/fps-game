@@ -230,6 +230,9 @@ static bool nudge_voxel_bottom_above_static(int voxel_idx, Voxel *voxel);
 static void glue_dynamic_voxel_to_static_neighbors(void);
 static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx);
 static void update_projectiles(float dt);
+static void handle_pbd_projectile_hits(void);
+static Vector3 v_add(Vector3 a, Vector3 b);
+static Vector3 v_sub(Vector3 a, Vector3 b);
 
 static void unit_voxel_buffer_clear(UnitVoxelBuffer *buffer) {
     if (!buffer) {
@@ -3445,28 +3448,30 @@ static void update_projectiles(float dt)
 
         Ray ray = { start, v_norm(v->vel) };
         int hit_id = first_voxel_hit(ray, distance, i);
-        if (hit_id >= 0 && hit_id < voxel_count && !voxels[hit_id].simulate) {
-            int brushExtent = (voxelBrushSpan < 1) ? 1 : voxelBrushSpan;
-            Voxel *hit_voxel = &voxels[hit_id];
-            int anchorX = hit_voxel->gx;
-            int anchorY = hit_voxel->gy;
-            int anchorZ = hit_voxel->gz;
+        if (hit_id >= 0 && hit_id < voxel_count) {
+            if (!voxels[hit_id].simulate) {
+                int brushExtent = (voxelBrushSpan < 1) ? 1 : voxelBrushSpan;
+                Voxel *hit_voxel = &voxels[hit_id];
+                int anchorX = hit_voxel->gx;
+                int anchorY = hit_voxel->gy;
+                int anchorZ = hit_voxel->gz;
 
-            if (v->type == 1) {
-                remove_static_voxels_in_region(anchorX, anchorX + brushExtent - 1,
-                                               anchorY, anchorY + brushExtent - 1,
-                                               anchorZ, anchorZ + brushExtent - 1);
-                static_changed = true;
-            } else if (v->type == 2) {
-                for (int dx = 0; dx < brushExtent; ++dx) {
-                    for (int dy = 0; dy < brushExtent; ++dy) {
-                        for (int dz = 0; dz < brushExtent; ++dz) {
-                            int targetX = anchorX + dx;
-                            int targetY = anchorY + dy;
-                            int targetZ = anchorZ + dz;
-                            if (!occupied(targetX, targetY, targetZ)) {
-                                add_static_voxel_at_grid(targetX, targetY, targetZ, v->color, 0);
-                                static_changed = true;
+                if (v->type == 1) {
+                    remove_static_voxels_in_region(anchorX, anchorX + brushExtent - 1,
+                                                   anchorY, anchorY + brushExtent - 1,
+                                                   anchorZ, anchorZ + brushExtent - 1);
+                    static_changed = true;
+                } else if (v->type == 2) {
+                    for (int dx = 0; dx < brushExtent; ++dx) {
+                        for (int dy = 0; dy < brushExtent; ++dy) {
+                            for (int dz = 0; dz < brushExtent; ++dz) {
+                                int targetX = anchorX + dx;
+                                int targetY = anchorY + dy;
+                                int targetZ = anchorZ + dz;
+                                if (!occupied(targetX, targetY, targetZ)) {
+                                    add_static_voxel_at_grid(targetX, targetY, targetZ, v->color, 0);
+                                    static_changed = true;
+                                }
                             }
                         }
                     }
@@ -3487,6 +3492,36 @@ static void update_projectiles(float dt)
         rebuild_all_voxel_surfaces();
         rebuild_glue_constraints();
         meshDirty = true;
+    }
+}
+
+static void handle_pbd_projectile_hits(void)
+{
+    int i = 0;
+    while (i < voxel_count) {
+        Voxel *v = &voxels[i];
+        if (!v->simulate || v->type != 0) {
+            ++i;
+            continue;
+        }
+        bool removed = false;
+        for (int j = 0; j < 2; ++j) {
+            if (v->owner == j) {
+                continue;
+            }
+            float dx = v->pos.x - players[j].pos.x;
+            float dy = v->pos.y - players[j].pos.y;
+            float dz = v->pos.z - players[j].pos.z;
+            if (fabsf(dx) < PLAYER_SIZE && fabsf(dy) < PLAYER_SIZE && fabsf(dz) < PLAYER_SIZE) {
+                apply_damage_to_player(j, v->owner, VOXEL_DAMAGE);
+                remove_voxel_index(i);
+                removed = true;
+                break;
+            }
+        }
+        if (!removed) {
+            ++i;
+        }
     }
 }
 
@@ -6681,6 +6716,7 @@ int main(void) {
         }
         update_projectiles(dt);
         simulate_voxel_pbd(dt);
+        handle_pbd_projectile_hits();
         voxelHashFramesSinceRebuild++;
         if (voxelHashFramesSinceRebuild >= VOXEL_HASH_REBUILD_INTERVAL) {
             rebuild_voxel_hash();
