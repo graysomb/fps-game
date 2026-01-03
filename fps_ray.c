@@ -79,6 +79,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 3
 #define VOXEL_SPLIT_STRAIN_THRESHOLD 0.5f
 #define VOXEL_SPLIT_SHEAR_THRESHOLD 0.5f
+#define VOXEL_HASH_REBUILD_INTERVAL 2
+#define TABLE_CACHE_SIZE 4
 
 #define MAX_NEIGHBOR_VOXELS 128
 #define MAX_FACE_NEIGHBORS   64
@@ -881,6 +883,23 @@ typedef struct {
 } Bucket;
 
 static Bucket table[HASH_SIZE];
+typedef struct {
+    uint64_t key;
+    int idx;
+    uint32_t gen;
+} TableCacheEntry;
+static TableCacheEntry tableCache[TABLE_CACHE_SIZE];
+static uint32_t tableCacheGeneration = 1;
+static uint32_t tableCacheCursor = 0;
+static int voxelHashFramesSinceRebuild = 0;
+
+static inline void table_cache_invalidate(void)
+{
+    ++tableCacheGeneration;
+    if (tableCacheGeneration == 0) {
+        tableCacheGeneration = 1;
+    }
+}
 
 static inline size_t hashVoxelKey(uint64_t k)
 /*  SplitMix64 finalizer—fast avalanche, single multiply.
@@ -919,12 +938,30 @@ static int table_get(int x, int y, int z)
 /*  Returns voxel index or –1 if empty */
 {
     uint64_t k = mortonKey(x, y, z);
+    for (int i = 0; i < TABLE_CACHE_SIZE; ++i) {
+        if (tableCache[i].gen == tableCacheGeneration && tableCache[i].key == k) {
+            return tableCache[i].idx;
+        }
+    }
     size_t   h = hashVoxelKey(k);
 
     while (1) {
         uint64_t bk = table[h].key;
-        if (bk == 0)      return -1;          // empty bucket ⇒ miss
-        if (bk == k)      return table[h].idx;  // exact key ⇒ hit
+        if (bk == 0) {
+            tableCache[tableCacheCursor].key = k;
+            tableCache[tableCacheCursor].idx = -1;
+            tableCache[tableCacheCursor].gen = tableCacheGeneration;
+            tableCacheCursor = (tableCacheCursor + 1) & (TABLE_CACHE_SIZE - 1);
+            return -1;          // empty bucket ⇒ miss
+        }
+        if (bk == k) {
+            int idx = table[h].idx;
+            tableCache[tableCacheCursor].key = k;
+            tableCache[tableCacheCursor].idx = idx;
+            tableCache[tableCacheCursor].gen = tableCacheGeneration;
+            tableCacheCursor = (tableCacheCursor + 1) & (TABLE_CACHE_SIZE - 1);
+            return idx;  // exact key ⇒ hit
+        }
         h = (h + 1) & (HASH_SIZE - 1);        // step to next bucket
     }
 }
@@ -996,6 +1033,7 @@ static void remove_voxel_index(int idx)
     if (idx < 0 || idx >= voxel_count) {
         return;
     }
+    table_cache_invalidate();
     int voxel_count_before = voxel_count;
     Voxel *victim = &voxels[idx];
     if (!victim->simulate) {
@@ -1510,6 +1548,7 @@ static int addVoxelSized(float px, float py, float pz, bool fixed, bool simulate
     int idx = voxel_count++;
     Voxel *v = &voxels[idx];
     init_voxel_struct(v, px, py, pz, fixed, simulate, color, type, span, -1);
+    table_cache_invalidate();
     voxel_table_register(v, idx);
     if (!simulate) {
         mark_static_beliefs_dirty_for_voxel(v);
@@ -2058,6 +2097,7 @@ static bool restore_dynamic_snapshot(const Voxel *snapshot)
         return false;
     }
     voxels[voxel_count] = *snapshot;
+    table_cache_invalidate();
     voxel_table_register(&voxels[voxel_count], voxel_count);
     ++voxel_count;
     return true;
@@ -2990,7 +3030,9 @@ static void UpdateKdRatio(int player_index) {
 }
 
 static void rebuild_voxel_hash(void) {
+    table_cache_invalidate();
     memset(table, 0, sizeof(table));
+    table_cache_invalidate();
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
         v->gx = (int)floorf(v->pos.x / VOXEL_SIZE);
@@ -2998,6 +3040,7 @@ static void rebuild_voxel_hash(void) {
         v->gz = (int)floorf(v->pos.z / VOXEL_SIZE);
         voxel_table_register(v, i);
     }
+    voxelHashFramesSinceRebuild = 0;
 }
 
 // Physics step for voxels
@@ -6198,7 +6241,10 @@ int main(void) {
             physics_step(dt/subStep);
         }
         simulate_voxel_pbd(dt);
-        rebuild_voxel_hash();
+        voxelHashFramesSinceRebuild++;
+        if (voxelHashFramesSinceRebuild >= VOXEL_HASH_REBUILD_INTERVAL) {
+            rebuild_voxel_hash();
+        }
         deactivate_sleeping_voxels();
         {
             int fall_log_budget = DEBUG_FALL_LOG_BUDGET;
