@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <limits.h>
 #include <float.h>
+#include <stdarg.h>
 
 // Game state enum
 typedef enum {
@@ -296,7 +297,58 @@ static int debugGlueBreakLogBudget = 0;
 static const int DEBUG_GLUE_BUILD_LOG_INIT = 64;
 static const int DEBUG_GLUE_SOLVE_LOG_INIT = 64;
 static const int DEBUG_GLUE_BREAK_LOG_INIT = 16;
-static bool debugLogVoxelDeactivation = false;
+static bool debugLogVoxelDeactivation = true;
+static FILE *debugLogFile = NULL;
+static int debugSupportLogBudget = 512;
+static const float DEBUG_FALL_LOG_THRESHOLD = -5.0f;
+static const int DEBUG_FALL_LOG_BUDGET = 32;
+
+static const char *trace_level_label(int level) {
+    switch (level) {
+        case LOG_TRACE: return "TRACE";
+        case LOG_DEBUG: return "DEBUG";
+        case LOG_INFO: return "INFO";
+        case LOG_WARNING: return "WARN";
+        case LOG_ERROR: return "ERROR";
+        case LOG_FATAL: return "FATAL";
+        default: return "LOG";
+    }
+}
+
+static void DebugTraceLogCallback(int logLevel, const char *text, va_list args) {
+    FILE *console = (logLevel >= LOG_WARNING) ? stderr : stdout;
+    va_list console_args;
+    va_copy(console_args, args);
+    vfprintf(console, text, console_args);
+    fprintf(console, "\n");
+    va_end(console_args);
+
+    if (!debugLogFile) {
+        return;
+    }
+
+    va_list file_args;
+    va_copy(file_args, args);
+    fprintf(debugLogFile, "[%s] ", trace_level_label(logLevel));
+    vfprintf(debugLogFile, text, file_args);
+    fprintf(debugLogFile, "\n");
+    fflush(debugLogFile);
+    va_end(file_args);
+}
+
+static void InitDebugLogging(void) {
+    const char *log_path = getenv("FPS_RAY_LOG");
+    if (!log_path || log_path[0] == '\0') {
+        log_path = "fps_ray.log";
+    }
+    debugLogFile = fopen(log_path, "w");
+    SetTraceLogCallback(DebugTraceLogCallback);
+    if (debugLogFile) {
+        TraceLog(LOG_INFO, "Logging TraceLog output to %s", log_path);
+    } else {
+        TraceLog(LOG_WARNING, "Failed to open log file at %s", log_path);
+    }
+}
 
 static bool debug_should_log_span_pair(const Voxel *a, const Voxel *b, int *budget) {
     if (!debugLogSpanCollisions || budget == NULL || *budget <= 0) {
@@ -929,6 +981,7 @@ static void remove_voxel_index(int idx)
     if (idx < 0 || idx >= voxel_count) {
         return;
     }
+    int voxel_count_before = voxel_count;
     Voxel *victim = &voxels[idx];
     voxel_table_unregister(victim);
 
@@ -940,6 +993,11 @@ static void remove_voxel_index(int idx)
         voxel_table_register(&voxels[idx], idx);
     }
     --voxel_count;
+    if (debugLogVoxelDeactivation) {
+        TraceLog(LOG_INFO,
+                 "[RemoveVoxel] idx=%d voxel_count_before=%d moved_from=%d voxel_count_after=%d",
+                 idx, voxel_count_before, (idx != last) ? last : -1, voxel_count);
+    }
 }
 
 static bool occupied(int x, int y, int z) {
@@ -1090,6 +1148,7 @@ static bool find_nearest_free_static_region(int base_minx, int base_maxx,
 static bool spawn_static_covering_voxel(const Voxel *voxel)
 {
     if (!voxel) {
+        TraceLog(LOG_WARNING, "[Multiscale] Static restore failed: null voxel");
         return false;
     }
     int base_minx, base_maxx, base_miny, base_maxy, base_minz, base_maxz;
@@ -1121,6 +1180,9 @@ static bool spawn_static_covering_voxel(const Voxel *voxel)
     }
 
     if (base_minx > base_maxx || base_miny > base_maxy || base_minz > base_maxz) {
+        TraceLog(LOG_WARNING,
+                 "[Multiscale] Static restore failed: invalid bounds (%d..%d,%d..%d,%d..%d)",
+                 base_minx, base_maxx, base_miny, base_maxy, base_minz, base_maxz);
         return false;
     }
 
@@ -1193,10 +1255,16 @@ static bool spawn_static_covering_voxel(const Voxel *voxel)
     int span_count_y = maxy - miny + 1;
     int span_count_z = maxz - minz + 1;
     if (span_count_x <= 0 || span_count_y <= 0 || span_count_z <= 0) {
+        TraceLog(LOG_WARNING,
+                 "[Multiscale] Static restore failed: empty span (%d,%d,%d)",
+                 span_count_x, span_count_y, span_count_z);
         return false;
     }
     int cell_count = span_count_x * span_count_y * span_count_z;
     if (cell_count <= 0) {
+        TraceLog(LOG_WARNING,
+                 "[Multiscale] Static restore failed: invalid cell count %d",
+                 cell_count);
         return false;
     }
     if (voxel_count + cell_count > MAX_VOXELS) {
@@ -1567,6 +1635,13 @@ static int emit_multiscale_voxels_from_units(const UnitVoxelBuffer *buffer,
                 float py = ((float)gy + 0.5f * (float)span) * VOXEL_SIZE;
                 float pz = ((float)gz + 0.5f * (float)span) * VOXEL_SIZE;
                 addVoxelSized(px, py, pz, fixed, simulate, color, spawn_type, span);
+                TraceLog(LOG_INFO,
+                         "[Multiscale] Emit span=%d grid=(%d..%d,%d..%d,%d..%d) pos=(%.2f,%.2f,%.2f)",
+                         span,
+                         gx, gx + span - 1,
+                         gy, gy + span - 1,
+                         gz, gz + span - 1,
+                         px, py, pz);
                 ++spawned;
             }
         }
@@ -2156,34 +2231,65 @@ static bool voxel_connected_to_static_world(const Voxel *voxel)
     int minx, maxx, miny, maxy, minz, maxz;
     voxel_grid_bounds(voxel, &minx, &maxx, &miny, &maxy, &minz, &maxz);
     if (minx > maxx || miny > maxy || minz > maxz) {
+        if (debugSupportLogBudget > 0) {
+            TraceLog(LOG_INFO,
+                     "[Support] voxel bounds invalid pos=(%.2f,%.2f,%.2f) bounds=(%d..%d,%d..%d,%d..%d)",
+                     voxel->pos.x, voxel->pos.y, voxel->pos.z,
+                     minx, maxx, miny, maxy, minz, maxz);
+            --debugSupportLogBudget;
+        }
         return false;
     }
 
+    bool adjacent_static = false;
     for (int y = miny; y <= maxy; ++y) {
         for (int z = minz; z <= maxz; ++z) {
             if (cell_contains_static_voxel(maxx + 1, y, z) ||
                 cell_contains_static_voxel(minx - 1, y, z)) {
-                return true;
+                adjacent_static = true;
+                break;
+            }
+        }
+        if (adjacent_static) {
+            break;
+        }
+    }
+    if (!adjacent_static) {
+        for (int x = minx; x <= maxx; ++x) {
+            for (int z = minz; z <= maxz; ++z) {
+                if (cell_contains_static_voxel(x, maxy + 1, z) ||
+                    cell_contains_static_voxel(x, miny - 1, z)) {
+                    adjacent_static = true;
+                    break;
+                }
+            }
+            if (adjacent_static) {
+                break;
             }
         }
     }
-    for (int x = minx; x <= maxx; ++x) {
-        for (int z = minz; z <= maxz; ++z) {
-            if (cell_contains_static_voxel(x, maxy + 1, z) ||
-                cell_contains_static_voxel(x, miny - 1, z)) {
-                return true;
+    if (!adjacent_static) {
+        for (int x = minx; x <= maxx; ++x) {
+            for (int y = miny; y <= maxy; ++y) {
+                if (cell_contains_static_voxel(x, y, maxz + 1) ||
+                    cell_contains_static_voxel(x, y, minz - 1)) {
+                    adjacent_static = true;
+                    break;
+                }
+            }
+            if (adjacent_static) {
+                break;
             }
         }
     }
-    for (int x = minx; x <= maxx; ++x) {
-        for (int y = miny; y <= maxy; ++y) {
-            if (cell_contains_static_voxel(x, y, maxz + 1) ||
-                cell_contains_static_voxel(x, y, minz - 1)) {
-                return true;
-            }
-        }
+    if (!adjacent_static && debugSupportLogBudget > 0) {
+        TraceLog(LOG_INFO,
+                 "[Support] no-static-connection pos=(%.2f,%.2f,%.2f) bounds=(%d..%d,%d..%d,%d..%d)",
+                 voxel->pos.x, voxel->pos.y, voxel->pos.z,
+                 minx, maxx, miny, maxy, minz, maxz);
+        --debugSupportLogBudget;
     }
-    return false;
+    return adjacent_static;
 }
 
 static bool glue_cluster_has_static_support(const int *cluster, int cluster_count)
@@ -2191,15 +2297,22 @@ static bool glue_cluster_has_static_support(const int *cluster, int cluster_coun
     if (!cluster || cluster_count <= 0) {
         return false;
     }
+    int invalid_indices = 0;
+    int checked = 0;
     for (int i = 0; i < cluster_count; ++i) {
         int idx = cluster[i];
         if (idx < 0 || idx >= voxel_count) {
+            ++invalid_indices;
             continue;
         }
+        ++checked;
         if (voxel_connected_to_static_world(&voxels[idx])) {
             return true;
         }
     }
+    TraceLog(LOG_INFO,
+             "[Deactivate] cluster_support=false count=%d checked=%d invalid=%d reason=no-static-connection",
+             cluster_count, checked, invalid_indices);
     return false;
 }
 
@@ -3257,6 +3370,7 @@ static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count
         return false;
     }
 
+    int voxel_count_before = voxel_count;
     Voxel *snapshots = (Voxel *)malloc(sizeof(Voxel) * (size_t)cluster_count);
     int *sorted = (int *)malloc(sizeof(int) * (size_t)cluster_count);
     if (!snapshots || !sorted) {
@@ -3289,15 +3403,21 @@ static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count
     for (int i = 0; i < cluster_count; ++i) {
         remove_voxel_index(sorted[i]);
     }
+    int voxel_count_after_removal = voxel_count;
+    int static_success = 0;
     bool converted = false;
     for (int i = 0; i < cluster_count; ++i) {
         if (spawn_static_covering_voxel(&snapshots[i])) {
             converted = true;
+            ++static_success;
         } else {
             restore_dynamic_snapshot(&snapshots[i]);
         }
     }
 
+    TraceLog(LOG_INFO,
+             "[RestoreCluster] count=%d voxel_count before=%d after_removal=%d after_restore=%d static_success=%d",
+             cluster_count, voxel_count_before, voxel_count_after_removal, voxel_count, static_success);
     free(sorted);
     free(snapshots);
     return converted;
@@ -5392,6 +5512,7 @@ static void HandleGamepadInput(int i, float dt);
 
 int main(void) {
     int countFrame = 0;
+    InitDebugLogging();
     // init window and render textures
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Split-Screen FPS (raylib)");
     SetTargetFPS(60);
@@ -5533,6 +5654,23 @@ int main(void) {
         simulate_voxel_pbd(dt);
         rebuild_voxel_hash();
         deactivate_sleeping_voxels();
+        {
+            int fall_log_budget = DEBUG_FALL_LOG_BUDGET;
+            for (int i = 0; i < voxel_count && fall_log_budget > 0; ++i) {
+                Voxel *v = &voxels[i];
+                if (!v->simulate) {
+                    continue;
+                }
+                if (v->pos.y < DEBUG_FALL_LOG_THRESHOLD) {
+                    TraceLog(LOG_WARNING,
+                             "[Fall] voxel=%d span=%d pos=(%.2f,%.2f,%.2f) vel=(%.2f,%.2f,%.2f)",
+                             i, v->span,
+                             v->pos.x, v->pos.y, v->pos.z,
+                             v->vel.x, v->vel.y, v->vel.z);
+                    --fall_log_budget;
+                }
+            }
+        }
 
         // frame by frame debug
         // int frac = 3;
@@ -5674,5 +5812,9 @@ int main(void) {
         greedyMaterialInit = false;
     }
     CloseWindow();
+    if (debugLogFile) {
+        fclose(debugLogFile);
+        debugLogFile = NULL;
+    }
     return 0;
 }
