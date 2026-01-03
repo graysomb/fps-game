@@ -81,6 +81,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define VOXEL_SPLIT_SHEAR_THRESHOLD 0.5f
 #define VOXEL_HASH_REBUILD_INTERVAL 2
 #define TABLE_CACHE_SIZE 4
+#define FACE_BLOCK_MIN_OVERLAP (VOXEL_SIZE * 0.25f)
 
 #define MAX_NEIGHBOR_VOXELS 128
 #define MAX_FACE_NEIGHBORS   64
@@ -184,6 +185,9 @@ static uint8_t staticBeliefQueued[MAX_VOXELS];
 static int staticBeliefQueue[MAX_VOXELS];
 static bool staticBeliefsInitialized = false;
 static bool staticBeliefsForceFullRefresh = false;
+static const int DEBUG_SPAN2_FACE_LOG_INIT = 32;
+static int debugSpan2FaceLogBudget = 0;
+static bool debugLogSpan2Faces = true;
 static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Color color, int type);
 static void rebuild_voxel_hash(void);
 static void voxel_measure_strain(const Voxel *voxel,
@@ -410,6 +414,44 @@ static void voxel_world_bounds(const Voxel *v, VoxelWorldBounds *out) {
     out->maxz = v->pos.z + half;
 }
 
+static void voxel_particle_world_bounds(const Voxel *v, VoxelWorldBounds *out)
+{
+    if (!out || !v) {
+        return;
+    }
+    Vector3 p = v->particles[0].pos;
+    float minx = p.x, maxx = p.x;
+    float miny = p.y, maxy = p.y;
+    float minz = p.z, maxz = p.z;
+    for (int i = 1; i < 8; ++i) {
+        p = v->particles[i].pos;
+        if (p.x < minx) minx = p.x;
+        if (p.x > maxx) maxx = p.x;
+        if (p.y < miny) miny = p.y;
+        if (p.y > maxy) maxy = p.y;
+        if (p.z < minz) minz = p.z;
+        if (p.z > maxz) maxz = p.z;
+    }
+    out->minx = minx;
+    out->maxx = maxx;
+    out->miny = miny;
+    out->maxy = maxy;
+    out->minz = minz;
+    out->maxz = maxz;
+}
+
+static void voxel_visibility_bounds(const Voxel *v, VoxelWorldBounds *out)
+{
+    if (!v || !out) {
+        return;
+    }
+    if (v->simulate) {
+        voxel_particle_world_bounds(v, out);
+    } else {
+        voxel_world_bounds(v, out);
+    }
+}
+
 static bool axis_contact_state(float minA, float maxA,
                                float minB, float maxB,
                                float eps, bool *touch, bool *overlap)
@@ -427,6 +469,99 @@ static bool axis_contact_state(float minA, float maxA,
     if (touch) *touch = touching;
     if (overlap) *overlap = !touching;
     return true;
+}
+
+static bool bounds_overlap(float minA, float maxA,
+                           float minB, float maxB, float eps)
+{
+    return !(maxA < minB - eps || maxB < minA - eps);
+}
+
+static float bounds_overlap_length(float minA, float maxA,
+                                   float minB, float maxB)
+{
+    float lo = fmaxf(minA, minB);
+    float hi = fminf(maxA, maxB);
+    float len = hi - lo;
+    return (len > 0.0f) ? len : 0.0f;
+}
+
+static bool face_blocked_by_voxel(const Voxel *self, const Voxel *neighbor, int face)
+{
+    if (!self || !neighbor) {
+        return false;
+    }
+    VoxelWorldBounds a, b;
+    voxel_visibility_bounds(self, &a);
+    voxel_visibility_bounds(neighbor, &b);
+    const float eps = VOXEL_SIZE * 0.05f;
+
+    switch (face) {
+        case 0: // +X
+            if (b.minx > a.maxx + eps || b.maxx < a.maxx - eps) return false;
+            return bounds_overlap(a.miny, a.maxy, b.miny, b.maxy, eps) &&
+                   bounds_overlap(a.minz, a.maxz, b.minz, b.maxz, eps) &&
+                   bounds_overlap_length(a.miny, a.maxy, b.miny, b.maxy) >= FACE_BLOCK_MIN_OVERLAP &&
+                   bounds_overlap_length(a.minz, a.maxz, b.minz, b.maxz) >= FACE_BLOCK_MIN_OVERLAP;
+        case 1: // -X
+            if (b.maxx < a.minx - eps || b.minx > a.minx + eps) return false;
+            return bounds_overlap(a.miny, a.maxy, b.miny, b.maxy, eps) &&
+                   bounds_overlap(a.minz, a.maxz, b.minz, b.maxz, eps) &&
+                   bounds_overlap_length(a.miny, a.maxy, b.miny, b.maxy) >= FACE_BLOCK_MIN_OVERLAP &&
+                   bounds_overlap_length(a.minz, a.maxz, b.minz, b.maxz) >= FACE_BLOCK_MIN_OVERLAP;
+        case 2: // +Y
+            if (b.miny > a.maxy + eps || b.maxy < a.maxy - eps) return false;
+            return bounds_overlap(a.minx, a.maxx, b.minx, b.maxx, eps) &&
+                   bounds_overlap(a.minz, a.maxz, b.minz, b.maxz, eps) &&
+                   bounds_overlap_length(a.minx, a.maxx, b.minx, b.maxx) >= FACE_BLOCK_MIN_OVERLAP &&
+                   bounds_overlap_length(a.minz, a.maxz, b.minz, b.maxz) >= FACE_BLOCK_MIN_OVERLAP;
+        case 3: // -Y
+            if (b.maxy < a.miny - eps || b.miny > a.miny + eps) return false;
+            return bounds_overlap(a.minx, a.maxx, b.minx, b.maxx, eps) &&
+                   bounds_overlap(a.minz, a.maxz, b.minz, b.maxz, eps) &&
+                   bounds_overlap_length(a.minx, a.maxx, b.minx, b.maxx) >= FACE_BLOCK_MIN_OVERLAP &&
+                   bounds_overlap_length(a.minz, a.maxz, b.minz, b.maxz) >= FACE_BLOCK_MIN_OVERLAP;
+        case 4: // +Z
+            if (b.minz > a.maxz + eps || b.maxz < a.maxz - eps) return false;
+            return bounds_overlap(a.minx, a.maxx, b.minx, b.maxx, eps) &&
+                   bounds_overlap(a.miny, a.maxy, b.miny, b.maxy, eps) &&
+                   bounds_overlap_length(a.minx, a.maxx, b.minx, b.maxx) >= FACE_BLOCK_MIN_OVERLAP &&
+                   bounds_overlap_length(a.miny, a.maxy, b.miny, b.maxy) >= FACE_BLOCK_MIN_OVERLAP;
+        case 5: // -Z
+            if (b.maxz < a.minz - eps || b.minz > a.minz + eps) return false;
+            return bounds_overlap(a.minx, a.maxx, b.minx, b.maxx, eps) &&
+                   bounds_overlap(a.miny, a.maxy, b.miny, b.maxy, eps) &&
+                   bounds_overlap_length(a.minx, a.maxx, b.minx, b.maxx) >= FACE_BLOCK_MIN_OVERLAP &&
+                   bounds_overlap_length(a.miny, a.maxy, b.miny, b.maxy) >= FACE_BLOCK_MIN_OVERLAP;
+        default:
+            return false;
+    }
+}
+
+static void log_span2_face_cull(const Voxel *self, int self_idx,
+                                const Voxel *neighbor, int neighbor_idx,
+                                int face)
+{
+    if (!debugLogSpan2Faces || debugSpan2FaceLogBudget <= 0) {
+        return;
+    }
+    if (!self || !neighbor) {
+        return;
+    }
+    if (self->span != 2 && neighbor->span != 2) {
+        return;
+    }
+    VoxelWorldBounds a, b;
+    voxel_visibility_bounds(self, &a);
+    voxel_visibility_bounds(neighbor, &b);
+    TraceLog(LOG_INFO,
+             "[FaceCull] face=%d self=%d span=%d neighbor=%d span=%d "
+             "self=(%.2f,%.2f,%.2f)-(%.2f,%.2f,%.2f) "
+             "neighbor=(%.2f,%.2f,%.2f)-(%.2f,%.2f,%.2f)",
+             face, self_idx, self->span, neighbor_idx, neighbor->span,
+             a.minx, a.miny, a.minz, a.maxx, a.maxy, a.maxz,
+             b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz);
+    --debugSpan2FaceLogBudget;
 }
 
 static int voxel_touching_axes(const Voxel *a, const Voxel *b,
@@ -5377,9 +5512,123 @@ static void drawCubeEdges(const Voxel *voxel)
     }
 }
 
+static void compute_dynamic_face_visibility(int idx, bool faces[6])
+{
+    if (!faces || idx < 0 || idx >= voxel_count) {
+        return;
+    }
+    Voxel *v = &voxels[idx];
+    VoxelWorldBounds bounds;
+    voxel_particle_world_bounds(v, &bounds);
+    int minx = (int)floorf((bounds.minx + GRID_EPSILON) / VOXEL_SIZE);
+    int maxx = (int)floorf((bounds.maxx - GRID_EPSILON) / VOXEL_SIZE);
+    int miny = (int)floorf((bounds.miny + GRID_EPSILON) / VOXEL_SIZE);
+    int maxy = (int)floorf((bounds.maxy - GRID_EPSILON) / VOXEL_SIZE);
+    int minz = (int)floorf((bounds.minz + GRID_EPSILON) / VOXEL_SIZE);
+    int maxz = (int)floorf((bounds.maxz - GRID_EPSILON) / VOXEL_SIZE);
+
+    for (int f = 0; f < 6; ++f) {
+        faces[f] = true;
+    }
+
+    for (int y = miny; y <= maxy && faces[0]; ++y) {
+        for (int z = minz; z <= maxz; ++z) {
+            int nidx = table_get(maxx + 1, y, z);
+            if (nidx < 0 || nidx >= voxel_count || nidx == idx) {
+                continue;
+            }
+            Voxel *neighbor = &voxels[nidx];
+            if (face_blocked_by_voxel(v, neighbor, 0)) {
+                faces[0] = false;
+                log_span2_face_cull(v, idx, neighbor, nidx, 0);
+                break;
+            }
+        }
+    }
+
+    for (int y = miny; y <= maxy && faces[1]; ++y) {
+        for (int z = minz; z <= maxz; ++z) {
+            int nidx = table_get(minx - 1, y, z);
+            if (nidx < 0 || nidx >= voxel_count || nidx == idx) {
+                continue;
+            }
+            Voxel *neighbor = &voxels[nidx];
+            if (face_blocked_by_voxel(v, neighbor, 1)) {
+                faces[1] = false;
+                log_span2_face_cull(v, idx, neighbor, nidx, 1);
+                break;
+            }
+        }
+    }
+
+    for (int x = minx; x <= maxx && faces[2]; ++x) {
+        for (int z = minz; z <= maxz; ++z) {
+            int nidx = table_get(x, maxy + 1, z);
+            if (nidx < 0 || nidx >= voxel_count || nidx == idx) {
+                continue;
+            }
+            Voxel *neighbor = &voxels[nidx];
+            if (face_blocked_by_voxel(v, neighbor, 2)) {
+                faces[2] = false;
+                log_span2_face_cull(v, idx, neighbor, nidx, 2);
+                break;
+            }
+        }
+    }
+
+    for (int x = minx; x <= maxx && faces[3]; ++x) {
+        for (int z = minz; z <= maxz; ++z) {
+            int nidx = table_get(x, miny - 1, z);
+            if (nidx < 0 || nidx >= voxel_count || nidx == idx) {
+                continue;
+            }
+            Voxel *neighbor = &voxels[nidx];
+            if (face_blocked_by_voxel(v, neighbor, 3)) {
+                faces[3] = false;
+                log_span2_face_cull(v, idx, neighbor, nidx, 3);
+                break;
+            }
+        }
+    }
+
+    for (int x = minx; x <= maxx && faces[4]; ++x) {
+        for (int y = miny; y <= maxy; ++y) {
+            int nidx = table_get(x, y, maxz + 1);
+            if (nidx < 0 || nidx >= voxel_count || nidx == idx) {
+                continue;
+            }
+            Voxel *neighbor = &voxels[nidx];
+            if (face_blocked_by_voxel(v, neighbor, 4)) {
+                faces[4] = false;
+                log_span2_face_cull(v, idx, neighbor, nidx, 4);
+                break;
+            }
+        }
+    }
+
+    for (int x = minx; x <= maxx && faces[5]; ++x) {
+        for (int y = miny; y <= maxy; ++y) {
+            int nidx = table_get(x, y, minz - 1);
+            if (nidx < 0 || nidx >= voxel_count || nidx == idx) {
+                continue;
+            }
+            Voxel *neighbor = &voxels[nidx];
+            if (face_blocked_by_voxel(v, neighbor, 5)) {
+                faces[5] = false;
+                log_span2_face_cull(v, idx, neighbor, nidx, 5);
+                break;
+            }
+        }
+    }
+}
+
 static void compute_voxel_face_visibility(int idx, bool faces[6])
 {
     if (!faces || idx < 0 || idx >= voxel_count) {
+        return;
+    }
+    if (voxels[idx].simulate) {
+        compute_dynamic_face_visibility(idx, faces);
         return;
     }
     mark_surface(idx);
@@ -5832,6 +6081,10 @@ static void update_static_patch_colors(void)
 // Draw all voxels via greedy mesh instead of per-voxel raycasting
 static void DrawVoxels(Camera3D cam) {
     (void)cam;
+
+    if (debugLogSpan2Faces) {
+        debugSpan2FaceLogBudget = DEBUG_SPAN2_FACE_LOG_INIT;
+    }
 
     if (meshDirty) {
         if (greedyMesh.vertices) {
