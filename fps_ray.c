@@ -52,7 +52,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define ACTIVATION_GLUE_WEIGHT     0.35f
 #define ACTIVATION_GLUE_REF_SPEED  3.0f
 #define ACTIVATION_DYNAMIC_WEIGHT  0.9f
-#define FREEZE_BELIEF_IMPORTANCE   0.0005f
+#define FREEZE_BELIEF_IMPORTANCE   0.5f
 #define ACTIVATION_HYSTERESIS      0.1f
 #define FRICTION       400.0f    // ground friction deceleration
 #define TURN_ACCELERATION 400.0f
@@ -74,18 +74,18 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define VELOCITY_DAMPING 1.00f
 #define GLUE_RELAXATION 0.9f
 #define GLUE_EPS 1e-6f
-#define GLUE_BREAK_STRAIN 10.45f
+#define GLUE_BREAK_STRAIN .45f
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 3
-#define VOXEL_SPLIT_STRAIN_THRESHOLD 10.05f
-#define VOXEL_SPLIT_SHEAR_THRESHOLD 10.05f
+#define VOXEL_SPLIT_STRAIN_THRESHOLD 0.5f
+#define VOXEL_SPLIT_SHEAR_THRESHOLD 0.5f
 
 #define MAX_NEIGHBOR_VOXELS 128
 #define MAX_FACE_NEIGHBORS   64
 #define MAX_SPLIT_CHILDREN    8
 static const float GRID_EPSILON = 1e-4f;
-#define VOXEL_ACTIVATION_RADIUS 2*2
+#define VOXEL_ACTIVATION_RADIUS 2
 //#define VOXEL_ACTIVATION_UNIT_BUDGET 128
-#define VOXEL_ACTIVATION_UNIT_BUDGET 128*2
+#define VOXEL_ACTIVATION_UNIT_BUDGET 128
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 20.0f
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 20.0f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 20.0f
@@ -180,6 +180,7 @@ static void voxel_measure_strain(const Voxel *voxel,
                                  float *out_max_strain,
                                  float *out_max_shear);
 static int build_glue_cluster_indices(int start_idx, int *out_indices);
+static int gather_glued_neighbors(int voxel_idx, int *out, int max_out);
 static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count);
 static void solve_span_voxel_collisions(void);
 static void compute_voxel_center_and_mass(const Voxel *voxel, Vector3 *center, float *inv_mass_sum);
@@ -297,6 +298,11 @@ static int debugGlueBreakLogBudget = 0;
 static const int DEBUG_GLUE_BUILD_LOG_INIT = 64;
 static const int DEBUG_GLUE_SOLVE_LOG_INIT = 64;
 static const int DEBUG_GLUE_BREAK_LOG_INIT = 16;
+static bool debugLogActivation = true;
+static const int DEBUG_ACTIVATION_LOG_INIT = 64;
+static int activationGlueLogBudget = 0;
+static int activationLogStart = -1;
+static int activationLogEnd = -1;
 static bool debugLogVoxelDeactivation = true;
 static FILE *debugLogFile = NULL;
 static int debugSupportLogBudget = 512;
@@ -1839,6 +1845,80 @@ static bool dynamic_belief_overcomes_static(float dynamicBelief, float frozenBel
     return weightedDynamic >= weightedFrozen;
 }
 
+static bool activation_range_contains(int idx)
+{
+    if (activationLogStart < 0 || activationLogEnd <= activationLogStart) {
+        return false;
+    }
+    return idx >= activationLogStart && idx < activationLogEnd;
+}
+
+static void log_activation_new_spans(int start_idx, int end_idx)
+{
+    int budget = DEBUG_ACTIVATION_LOG_INIT;
+    for (int i = start_idx; i < end_idx && budget > 0; ++i) {
+        Voxel *v = &voxels[i];
+        if (!v->simulate) {
+            continue;
+        }
+        if (v->span <= 1) {
+            continue;
+        }
+        int minx, maxx, miny, maxy, minz, maxz;
+        voxel_grid_bounds(v, &minx, &maxx, &miny, &maxy, &minz, &maxz);
+        float target_x = 0.5f * ((float)minx + (float)maxx + 1.0f) * VOXEL_SIZE;
+        float target_y = 0.5f * ((float)miny + (float)maxy + 1.0f) * VOXEL_SIZE;
+        float target_z = 0.5f * ((float)minz + (float)maxz + 1.0f) * VOXEL_SIZE;
+        float dx = v->pos.x - target_x;
+        float dy = v->pos.y - target_y;
+        float dz = v->pos.z - target_z;
+        TraceLog(LOG_INFO,
+                 "[Activation] new span=%d idx=%d grid=(%d..%d,%d..%d,%d..%d) pos=(%.2f,%.2f,%.2f) "
+                 "offset=(%.3f,%.3f,%.3f)",
+                 v->span, i,
+                 minx, maxx, miny, maxy, minz, maxz,
+                 v->pos.x, v->pos.y, v->pos.z,
+                 dx, dy, dz);
+        --budget;
+    }
+}
+
+static void log_activation_glue_mismatches(int start_idx, int end_idx)
+{
+    int budget = DEBUG_ACTIVATION_LOG_INIT;
+    for (int i = start_idx; i < end_idx && budget > 0; ++i) {
+        if (i < 0 || i >= voxel_count) {
+            continue;
+        }
+        Voxel *v = &voxels[i];
+        if (!v->simulate) {
+            continue;
+        }
+        int neighbors[MAX_FACE_NEIGHBORS];
+        int neighbor_count = gather_glued_neighbors(i, neighbors, MAX_FACE_NEIGHBORS);
+        for (int n = 0; n < neighbor_count && budget > 0; ++n) {
+            int nidx = neighbors[n];
+            if (nidx < 0 || nidx >= voxel_count) {
+                continue;
+            }
+            Voxel *neighbor = &voxels[nidx];
+            if (!neighbor->simulate) {
+                continue;
+            }
+            if (neighbor->span == v->span) {
+                continue;
+            }
+            TraceLog(LOG_INFO,
+                     "[Activation] glue span mismatch a=%d span=%d b=%d span=%d "
+                     "posA=(%.2f,%.2f,%.2f) posB=(%.2f,%.2f,%.2f)",
+                     i, v->span, nidx, neighbor->span,
+                     v->pos.x, v->pos.y, v->pos.z,
+                     neighbor->pos.x, neighbor->pos.y, neighbor->pos.z);
+            --budget;
+        }
+    }
+}
+
 static bool activate_static_voxels_near_dynamic(void)
 {
     UnitVoxelBuffer buffer = { 0 };
@@ -1915,11 +1995,26 @@ static bool activate_static_voxels_near_dynamic(void)
     }
 
     remove_buffered_static_voxels(&buffer);
-    emit_multiscale_voxels_from_units(&buffer, false, true, -1);
+    int activation_base = voxel_count;
+    int spawned = emit_multiscale_voxels_from_units(&buffer, false, true, -1);
+    if (debugLogActivation) {
+        TraceLog(LOG_INFO,
+                 "[Activation] static->dynamic units=%d spawned=%d base=%d after=%d",
+                 buffer.count, spawned, activation_base, voxel_count);
+    }
 
+    activationLogStart = activation_base;
+    activationLogEnd = voxel_count;
+    activationGlueLogBudget = DEBUG_ACTIVATION_LOG_INIT;
     rebuild_voxel_hash();
     rebuild_all_voxel_surfaces();
     rebuild_glue_constraints();
+    if (debugLogActivation) {
+        log_activation_new_spans(activation_base, voxel_count);
+        log_activation_glue_mismatches(activation_base, voxel_count);
+    }
+    activationLogStart = -1;
+    activationLogEnd = -1;
     refresh_static_voxel_beliefs();
     meshDirty = true;
     return true;
@@ -2521,69 +2616,93 @@ static void build_oblique_voxel_pyramid(UnitVoxelBuffer *buffer) {
 // Build static demo cube of voxels
 static void buildDemo(void) {
     // Floor
-    // int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
-    // for (int x = 0; x <= M; x++) {
-    //     for (int z = 0; z <= M; z++) {
-    //         float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //         float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //         addVoxel(px, 0, pz, true, false, (Color){ 150, 150, 150, 255 }, 0);
-    //     }
-    // } 
+    int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
+    for (int x = 0; x <= M; x++) {
+        for (int z = 0; z <= M; z++) {
+            float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+            float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+            addVoxel(px, 0, pz, true, false, (Color){ 150, 150, 150, 255 }, 0);
+        }
+    } 
 
     // // Pillars
-    // int pillar_height = 10; // 45 - 10
-    // int pillar_radius = 3;
-    // int pillar_positions[4][2] = {
-    //     { M / 4, M / 4 },
-    //     { M / 4, 3 * M / 4 },
-    //     { 3 * M / 4, M / 4 },
-    //     { 3 * M / 4, 3 * M / 4 }
-    // };
+    int pillar_height = 10; // 45 - 10
+    int pillar_radius = 3;
+    int pillar_positions[4][2] = {
+        { M / 4, M / 4 },
+        { M / 4, 3 * M / 4 },
+        { 3 * M / 4, M / 4 },
+        { 3 * M / 4, 3 * M / 4 }
+    };
 
-    // for (int p = 0; p < 4; p++) {
-    //     int cx = pillar_positions[p][0];
-    //     int cz = pillar_positions[p][1];
-    //     for (int y = 1; y <= pillar_height; y++) {
-    //         for (int dx = -pillar_radius; dx <= pillar_radius; dx++) {
-    //             for (int dz = -pillar_radius; dz <= pillar_radius; dz++) {
-    //                 if (dx*dx + dz*dz > pillar_radius*pillar_radius) continue; // circular pillar
-    //                 float px = (cx + dx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //                 float py = (y + 0.5f) * VOXEL_SIZE;
-    //                 float pz = (cz + dz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //                 addVoxel(px, py, pz, true, false, (Color){ 200, 100, 50, 255 }, 0);
-    //             }
-    //         }
-    //     }
-    // }
+    for (int p = 0; p < 4; p++) {
+        int cx = pillar_positions[p][0];
+        int cz = pillar_positions[p][1];
+        for (int y = 1; y <= pillar_height; y++) {
+            for (int dx = -pillar_radius; dx <= pillar_radius; dx++) {
+                for (int dz = -pillar_radius; dz <= pillar_radius; dz++) {
+                    if (dx*dx + dz*dz > pillar_radius*pillar_radius) continue; // circular pillar
+                    float px = (cx + dx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                    float py = (y + 0.5f) * VOXEL_SIZE;
+                    float pz = (cz + dz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                    addVoxel(px, py, pz, true, false, (Color){ 200, 100, 50, 255 }, 0);
+                }
+            }
+        }
+    }
 
-    // Central platform (n=1)
-    // int platform_size = 2;
-    // int platform_height = 1; // 15 / 3
-    // int platform_base_height = 10; // to keep top at same level (21)
-    // for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
-    //     for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
-    //         for (int z = M/2 - platform_size/2; z <= M/2 + platform_size/2; z++) {
-    //             float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //             float py = (y + 0.5f) * VOXEL_SIZE;
-    //             float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //             addVoxel(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0);
-    //             //addVoxelSized(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0, 1);
-    //         }
-    //     }
-    // }
+    //Central platform (n=1)
+    int platform_size = 10;
+    int platform_height = 1; // 15 / 3
+    int platform_base_height = 4; // to keep top at same level (21)
+    for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
+        for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
+            for (int z = M/2 - platform_size/2; z <= M/2 + platform_size/2; z++) {
+                float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                float py = (y + 0.5f) * VOXEL_SIZE;
+                float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                addVoxel(px, py, pz, true, false, (Color){ 100, 200, 100, 255 }, 0);
+                //addVoxelSized(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0, 1);
+            }
+        }
+    }
+
+    // Platform legs: 2x2 columns at each corner down to the floor.
+    int platform_min = M/2 - platform_size/2;
+    int platform_max = M/2 + platform_size/2;
+    int leg_min_y = 1;
+    int leg_max_y = platform_base_height;
+    if (leg_max_y >= leg_min_y) {
+        int leg_x[4] = { platform_min, platform_min, platform_max - 1, platform_max - 1 };
+        int leg_z[4] = { platform_min, platform_max - 1, platform_min, platform_max - 1 };
+        for (int corner = 0; corner < 4; ++corner) {
+            for (int y = leg_min_y; y <= leg_max_y; ++y) {
+                for (int dx = 0; dx < 2; ++dx) {
+                    for (int dz = 0; dz < 2; ++dz) {
+                        int x = leg_x[corner] + dx;
+                        int z = leg_z[corner] + dz;
+                        float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                        float py = (y + 0.5f) * VOXEL_SIZE;
+                        float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                        addVoxel(px, py, pz, true, false, (Color){ 120, 160, 90, 255 }, 0);
+                    }
+                }
+            }
+        }
+    }
     // UnitVoxelBuffer pyramid_units;
     // unit_voxel_buffer_clear(&pyramid_units);
     // build_oblique_voxel_pyramid(&pyramid_units);
     // emit_static_voxels_from_units(&pyramid_units);
 
     //Span-2 dynamic voxel near origin for floor collision testing
-    {
-        int span = 2;
-        float px = -2.0f * VOXEL_SIZE;
-        float pz = 2.0f * VOXEL_SIZE;
-        float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
-        addVoxelSized(px, py, pz, false, true, (Color){ 240, 160, 60, 255 }, 0, span);
-    }
+    // {
+    //     int span = 4;
+    //     float px = -2.0f * VOXEL_SIZE;
+    //     float pz = 2.0f * VOXEL_SIZE;
+    //     float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
+    //     addVoxelSized(px, py, pz, false, true, (Color){ 240, 160, 60, 255 }, 0, span);
+    // }
     // {
     //     int span = 7;
     //     float px = -2.0f * VOXEL_SIZE;
@@ -3261,6 +3380,28 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
                      coarse->pos.x, coarse->pos.y, coarse->pos.z,
                      fine->pos.x, fine->pos.y, fine->pos.z);
             --debugGlueBuildLogBudget;
+        }
+        if (debugLogActivation && activationGlueLogBudget > 0) {
+            int spanA = voxel_span_for_glue(coarse);
+            int spanB = voxel_span_for_glue(fine);
+            if (spanA != spanB &&
+                (activation_range_contains(coarseIdx) ||
+                 activation_range_contains(fineIdx)))
+            {
+                TraceLog(LOG_INFO,
+                         "[Activation] glue build mismatch pair=(%d,%d) spans=(%d,%d) dir=(%d,%d,%d) "
+                         "rawUV=(%.3f,%.3f) uv=(%.3f,%.3f) weights=(%.3f,%.3f,%.3f,%.3f) "
+                         "coarseCenter=(%.2f,%.2f,%.2f) fineCenter=(%.2f,%.2f,%.2f)",
+                         coarseIdx, fineIdx,
+                         spanA, spanB,
+                         dir->dx, dir->dy, dir->dz,
+                         rawU, rawV,
+                         u, v,
+                         w0, w1, w2, w3,
+                         coarse->pos.x, coarse->pos.y, coarse->pos.z,
+                         fine->pos.x, fine->pos.y, fine->pos.z);
+                --activationGlueLogBudget;
+            }
         }
     }
 }
