@@ -52,7 +52,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define ACTIVATION_GLUE_WEIGHT     0.35f
 #define ACTIVATION_GLUE_REF_SPEED  3.0f
 #define ACTIVATION_DYNAMIC_WEIGHT  0.9f
-#define FREEZE_BELIEF_IMPORTANCE   0.5f
+#define FREEZE_BELIEF_IMPORTANCE   0.0005f
 #define ACTIVATION_HYSTERESIS      0.1f
 #define FRICTION       400.0f    // ground friction deceleration
 #define TURN_ACCELERATION 400.0f
@@ -74,18 +74,18 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define VELOCITY_DAMPING 1.00f
 #define GLUE_RELAXATION 0.9f
 #define GLUE_EPS 1e-6f
-#define GLUE_BREAK_STRAIN .45f
+#define GLUE_BREAK_STRAIN 10.45f
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 3
-#define VOXEL_SPLIT_STRAIN_THRESHOLD .05f
-#define VOXEL_SPLIT_SHEAR_THRESHOLD .05f
+#define VOXEL_SPLIT_STRAIN_THRESHOLD 10.05f
+#define VOXEL_SPLIT_SHEAR_THRESHOLD 10.05f
 
 #define MAX_NEIGHBOR_VOXELS 128
 #define MAX_FACE_NEIGHBORS   64
 #define MAX_SPLIT_CHILDREN    8
 static const float GRID_EPSILON = 1e-4f;
-#define VOXEL_ACTIVATION_RADIUS 2
+#define VOXEL_ACTIVATION_RADIUS 2*2
 //#define VOXEL_ACTIVATION_UNIT_BUDGET 128
-#define VOXEL_ACTIVATION_UNIT_BUDGET 128
+#define VOXEL_ACTIVATION_UNIT_BUDGET 128*2
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 20.0f
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 20.0f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 20.0f
@@ -2578,7 +2578,7 @@ static void buildDemo(void) {
 
     //Span-2 dynamic voxel near origin for floor collision testing
     {
-        int span = 5;
+        int span = 2;
         float px = -2.0f * VOXEL_SIZE;
         float pz = 2.0f * VOXEL_SIZE;
         float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
@@ -3362,6 +3362,192 @@ static int build_glue_cluster_indices(int start_idx, int *out_indices)
     }
 
     return tail;
+}
+
+static void set_voxel_velocity(Voxel *voxel, Vector3 vel)
+{
+    if (!voxel) {
+        return;
+    }
+    voxel->vel = vel;
+    for (int i = 0; i < 8; ++i) {
+        Particle *p = &voxel->particles[i];
+        if (p->inv_mass > 0.0f) {
+            p->vel = vel;
+        } else {
+            p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+        }
+    }
+}
+
+static bool voxel_center_near_grid(const Voxel *voxel, float epsilon)
+{
+    if (!voxel) {
+        return false;
+    }
+    int minx, maxx, miny, maxy, minz, maxz;
+    voxel_grid_bounds(voxel, &minx, &maxx, &miny, &maxy, &minz, &maxz);
+    float target_x = 0.5f * ((float)minx + (float)maxx + 1.0f) * VOXEL_SIZE;
+    float target_y = 0.5f * ((float)miny + (float)maxy + 1.0f) * VOXEL_SIZE;
+    float target_z = 0.5f * ((float)minz + (float)maxz + 1.0f) * VOXEL_SIZE;
+    return (fabsf(voxel->pos.x - target_x) <= epsilon) &&
+           (fabsf(voxel->pos.y - target_y) <= epsilon) &&
+           (fabsf(voxel->pos.z - target_z) <= epsilon);
+}
+
+static bool batch_glued_dynamic_voxels(void)
+{
+    if (voxel_count <= 0) {
+        return false;
+    }
+
+    unsigned char clusterVisited[MAX_VOXELS] = { 0 };
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *seed = &voxels[i];
+        if (!seed->simulate || clusterVisited[i]) {
+            continue;
+        }
+
+        int cluster_count = build_glue_cluster_indices(i, glueClusterIndices);
+        if (cluster_count <= 1) {
+            clusterVisited[i] = 1;
+            continue;
+        }
+
+        for (int c = 0; c < cluster_count; ++c) {
+            int idx = glueClusterIndices[c];
+            if (idx >= 0 && idx < voxel_count) {
+                clusterVisited[idx] = 1;
+            }
+        }
+
+        UnitVoxelBuffer buffer = { 0 };
+        buffer.count = 0;
+        Vector3 sum_vel = { 0.0f, 0.0f, 0.0f };
+        float vel_weight = 0.0f;
+        int min_sleep = INT_MAX;
+        bool eligible = true;
+        float align_epsilon = VOXEL_SIZE * 0.1f;
+
+        for (int c = 0; c < cluster_count; ++c) {
+            int idx = glueClusterIndices[c];
+            if (idx < 0 || idx >= voxel_count) {
+                eligible = false;
+                break;
+            }
+            Voxel *voxel = &voxels[idx];
+            if (!voxel->simulate) {
+                eligible = false;
+                break;
+            }
+            if (!voxel_center_near_grid(voxel, align_epsilon)) {
+                eligible = false;
+                break;
+            }
+
+            int minx, maxx, miny, maxy, minz, maxz;
+            voxel_grid_bounds(voxel, &minx, &maxx, &miny, &maxy, &minz, &maxz);
+            int span_count_x = maxx - minx + 1;
+            int span_count_y = maxy - miny + 1;
+            int span_count_z = maxz - minz + 1;
+            int cell_count = span_count_x * span_count_y * span_count_z;
+            if (cell_count <= 0) {
+                eligible = false;
+                break;
+            }
+
+            for (int gx = minx; gx <= maxx; ++gx) {
+                for (int gy = miny; gy <= maxy; ++gy) {
+                    for (int gz = minz; gz <= maxz; ++gz) {
+                        if (!unit_voxel_buffer_push(&buffer, gx, gy, gz,
+                                                    voxel->color, voxel->type, voxel->fixed, -1)) {
+                            eligible = false;
+                            break;
+                        }
+                    }
+                    if (!eligible) {
+                        break;
+                    }
+                }
+                if (!eligible) {
+                    break;
+                }
+            }
+            if (!eligible) {
+                break;
+            }
+
+            sum_vel = v_add(sum_vel, v_mul(voxel->vel, (float)cell_count));
+            vel_weight += (float)cell_count;
+            if (voxel->sleepFrames < min_sleep) {
+                min_sleep = voxel->sleepFrames;
+            }
+        }
+
+        if (!eligible || buffer.count <= 1) {
+            continue;
+        }
+
+        if (vel_weight <= 0.0f) {
+            vel_weight = 1.0f;
+        }
+        Vector3 avg_vel = v_mul(sum_vel, 1.0f / vel_weight);
+        if (min_sleep == INT_MAX) {
+            min_sleep = 0;
+        }
+
+        Voxel *snapshots = (Voxel *)malloc(sizeof(Voxel) * (size_t)cluster_count);
+        int *sorted = (int *)malloc(sizeof(int) * (size_t)cluster_count);
+        if (!snapshots || !sorted) {
+            free(snapshots);
+            free(sorted);
+            ++i;
+            continue;
+        }
+        for (int c = 0; c < cluster_count; ++c) {
+            int idx = glueClusterIndices[c];
+            snapshots[c] = voxels[idx];
+            sorted[c] = idx;
+        }
+        for (int a = 0; a < cluster_count - 1; ++a) {
+            for (int b = a + 1; b < cluster_count; ++b) {
+                if (sorted[a] < sorted[b]) {
+                    int tmp = sorted[a];
+                    sorted[a] = sorted[b];
+                    sorted[b] = tmp;
+                }
+            }
+        }
+        for (int c = 0; c < cluster_count; ++c) {
+            remove_voxel_index(sorted[c]);
+        }
+
+        int before = voxel_count;
+        int spawned = emit_multiscale_voxels_from_units(&buffer, false, true, -1);
+        if (spawned <= 0) {
+            for (int c = 0; c < cluster_count; ++c) {
+                restore_dynamic_snapshot(&snapshots[c]);
+            }
+            free(sorted);
+            free(snapshots);
+            continue;
+        }
+
+        for (int v = before; v < voxel_count; ++v) {
+            set_voxel_velocity(&voxels[v], avg_vel);
+            voxels[v].sleepFrames = min_sleep;
+        }
+
+        free(sorted);
+        free(snapshots);
+        rebuild_voxel_hash();
+        rebuild_all_voxel_surfaces();
+        rebuild_glue_constraints();
+        meshDirty = true;
+        return true;
+    }
+
+    return false;
 }
 
 static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count)
@@ -5646,6 +5832,7 @@ int main(void) {
         }
 
         activate_static_voxels_near_dynamic();
+        batch_glued_dynamic_voxels();
         //update voxel physics
         int subStep = 3;
         for( int i = 0; i < subStep; i++){
