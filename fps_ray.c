@@ -229,6 +229,7 @@ static bool resolve_span_static_overlap(int dynamic_idx, Voxel *dynamic,
 static bool nudge_voxel_bottom_above_static(int voxel_idx, Voxel *voxel);
 static void glue_dynamic_voxel_to_static_neighbors(void);
 static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx);
+static void update_projectiles(float dt);
 
 static void unit_voxel_buffer_clear(UnitVoxelBuffer *buffer) {
     if (!buffer) {
@@ -484,6 +485,57 @@ static float bounds_overlap_length(float minA, float maxA,
     float hi = fminf(maxA, maxB);
     float len = hi - lo;
     return (len > 0.0f) ? len : 0.0f;
+}
+
+static void translate_voxel_particles(Voxel *voxel, Vector3 delta)
+{
+    if (!voxel) {
+        return;
+    }
+    for (int i = 0; i < 8; ++i) {
+        voxel->particles[i].pos = v_add(voxel->particles[i].pos, delta);
+        voxel->particles[i].prev_pos = v_add(voxel->particles[i].prev_pos, delta);
+        voxel->particles[i].predicted_pos = v_add(voxel->particles[i].predicted_pos, delta);
+    }
+}
+
+static bool segment_intersects_aabb(Vector3 start, Vector3 end,
+                                    Vector3 box_min, Vector3 box_max)
+{
+    Vector3 dir = v_sub(end, start);
+    float tmin = 0.0f;
+    float tmax = 1.0f;
+    const float eps = 1e-6f;
+
+    float min_vals[3] = { box_min.x, box_min.y, box_min.z };
+    float max_vals[3] = { box_max.x, box_max.y, box_max.z };
+    float start_vals[3] = { start.x, start.y, start.z };
+    float dir_vals[3] = { dir.x, dir.y, dir.z };
+
+    for (int axis = 0; axis < 3; ++axis) {
+        float d = dir_vals[axis];
+        float s = start_vals[axis];
+        if (fabsf(d) < eps) {
+            if (s < min_vals[axis] || s > max_vals[axis]) {
+                return false;
+            }
+            continue;
+        }
+        float inv_d = 1.0f / d;
+        float t1 = (min_vals[axis] - s) * inv_d;
+        float t2 = (max_vals[axis] - s) * inv_d;
+        if (t1 > t2) {
+            float tmp = t1;
+            t1 = t2;
+            t2 = tmp;
+        }
+        if (t1 > tmin) tmin = t1;
+        if (t2 < tmax) tmax = t2;
+        if (tmin > tmax) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static bool face_blocked_by_voxel(const Voxel *self, const Voxel *neighbor, int face)
@@ -2819,6 +2871,10 @@ static bool deactivate_sleeping_voxels(void)
             voxel->sleepFrames = 0;
             continue;
         }
+        if (voxel->type != 0) {
+            voxel->sleepFrames = 0;
+            continue;
+        }
 
         float speed = v_length(voxel->vel);
         float strain = 0.0f;
@@ -3164,6 +3220,40 @@ static void UpdateKdRatio(int player_index) {
     p->kd_ratio = (float)(p->kills + 1) / (p->deaths + 1);
 }
 
+static void apply_damage_to_player(int player_index, int attacker_index, int damage)
+{
+    if (player_index < 0 || player_index >= 2) {
+        return;
+    }
+    Player *player = &players[player_index];
+    player->last_damage_time = (float)GetTime();
+    if (player->shield > 0) {
+        player->shield -= damage;
+        if (player->shield < 0) {
+            player->health += player->shield;
+            player->shield = 0;
+        }
+    } else {
+        player->health -= damage;
+    }
+
+    if (player->health <= 0) {
+        if (attacker_index >= 0 && attacker_index < 2 && attacker_index != player_index) {
+            players[attacker_index].kills++;
+            player->deaths++;
+            UpdateKdRatio(attacker_index);
+            UpdateKdRatio(player_index);
+        }
+        player->pos = (Vector3){ randomInRange(-9, 9), BASE_EYE_HEIGHT, randomInRange(-9, 9) };
+        player->vel = (Vector3){ 0, 0, 0 };
+        player->onGround = true;
+        player->yaw = (player_index == 0) ? 0 : 180;
+        player->pitch = 0;
+        player->health = BASE_HEALTH / player->kd_ratio;
+        player->shield = BASE_SHIELD;
+    }
+}
+
 static void rebuild_voxel_hash(void) {
     table_cache_invalidate();
     memset(table, 0, sizeof(table));
@@ -3308,6 +3398,98 @@ static void physics_step(float dt) {    // Rebuild spatial hash
     // }
 }
 
+static void update_projectiles(float dt)
+{
+    bool static_changed = false;
+    int i = 0;
+    while (i < voxel_count) {
+        Voxel *v = &voxels[i];
+        if (!v->simulate || v->type == 0) {
+            ++i;
+            continue;
+        }
+
+        Vector3 displacement = v_mul(v->vel, dt);
+        float distance = v_length(displacement);
+        if (distance <= 1e-6f) {
+            ++i;
+            continue;
+        }
+
+        Vector3 start = v->pos;
+        Vector3 end = v_add(start, displacement);
+
+        bool handled = false;
+        for (int j = 0; j < 2; ++j) {
+            Player *pl = &players[j];
+            Vector3 box_min = {
+                pl->pos.x - PLAYER_SIZE * 0.5f,
+                pl->pos.y - PLAYER_SIZE * 0.5f,
+                pl->pos.z - PLAYER_SIZE * 0.5f
+            };
+            Vector3 box_max = {
+                pl->pos.x + PLAYER_SIZE * 0.5f,
+                pl->pos.y + PLAYER_SIZE * 0.5f,
+                pl->pos.z + PLAYER_SIZE * 0.5f
+            };
+            if (segment_intersects_aabb(start, end, box_min, box_max)) {
+                apply_damage_to_player(j, v->owner, VOXEL_DAMAGE);
+                remove_voxel_index(i);
+                handled = true;
+                break;
+            }
+        }
+        if (handled) {
+            continue;
+        }
+
+        Ray ray = { start, v_norm(v->vel) };
+        int hit_id = first_voxel_hit(ray, distance, i);
+        if (hit_id >= 0 && hit_id < voxel_count && !voxels[hit_id].simulate) {
+            int brushExtent = (voxelBrushSpan < 1) ? 1 : voxelBrushSpan;
+            Voxel *hit_voxel = &voxels[hit_id];
+            int anchorX = hit_voxel->gx;
+            int anchorY = hit_voxel->gy;
+            int anchorZ = hit_voxel->gz;
+
+            if (v->type == 1) {
+                remove_static_voxels_in_region(anchorX, anchorX + brushExtent - 1,
+                                               anchorY, anchorY + brushExtent - 1,
+                                               anchorZ, anchorZ + brushExtent - 1);
+                static_changed = true;
+            } else if (v->type == 2) {
+                for (int dx = 0; dx < brushExtent; ++dx) {
+                    for (int dy = 0; dy < brushExtent; ++dy) {
+                        for (int dz = 0; dz < brushExtent; ++dz) {
+                            int targetX = anchorX + dx;
+                            int targetY = anchorY + dy;
+                            int targetZ = anchorZ + dz;
+                            if (!occupied(targetX, targetY, targetZ)) {
+                                add_static_voxel_at_grid(targetX, targetY, targetZ, v->color, 0);
+                                static_changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            remove_voxel_index(i);
+            continue;
+        }
+
+        v->pos = end;
+        translate_voxel_particles(v, displacement);
+        ++i;
+    }
+
+    if (static_changed) {
+        rebuild_voxel_hash();
+        rebuild_all_voxel_surfaces();
+        rebuild_glue_constraints();
+        meshDirty = true;
+    }
+}
+
 // Predict positions for the next step (equivalent to the GPU PredictPositions kernel).
 static void integrate_particles(float dt) {
     const Vector3 gravity = { 0.0f, -GRAVITY*1.0f, 0.0f };
@@ -3315,7 +3497,7 @@ static void integrate_particles(float dt) {
 
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
-        if (!voxel->simulate) {
+        if (!voxel->simulate || voxel->type != 0) {
             continue;
         }
 
@@ -4892,7 +5074,7 @@ static void solve_particle_collisions(float dt) {
     // First, clamp predictions against static scene bounds and player capsules.
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
-        if (!(voxel->simulate)){
+        if (!(voxel->simulate) || voxel->type != 0){
             continue;
         }
         float voxel_radius = voxel_particle_radius(voxel);
@@ -4993,7 +5175,7 @@ static void solve_particle_collisions(float dt) {
     // Particle-particle collisions using a symmetric correction identical to the compute shader.
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxelA = &voxels[i];
-        if (!(voxelA->simulate)){
+        if (!(voxelA->simulate) || voxelA->type != 0){
             continue;
         }
         float radiusA = voxel_particle_radius(voxelA);
@@ -5104,7 +5286,7 @@ static void solve_span_voxel_collisions(void) {
 
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxelA = &voxels[i];
-        if (!voxelA->simulate) {
+        if (!voxelA->simulate || voxelA->type != 0) {
             continue;
         }
         int neighbor_ids[MAX_NEIGHBOR_VOXELS];
@@ -5211,7 +5393,7 @@ static void update_particle_velocities(float dt) {
 
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
-        if (!voxel->simulate) {
+        if (!voxel->simulate || voxel->type != 0) {
             continue;
         }
         bool skipVelocity = (voxel->skipCollisionVelocityFrames > 0);
@@ -5377,7 +5559,7 @@ static bool split_strained_voxels(float dt) {
     int i = 0;
     while (i < voxel_count) {
         Voxel *voxel = &voxels[i];
-        if (!voxel->simulate || voxel->span <= 1 || (voxel->span % 2) != 0) {
+        if (!voxel->simulate || voxel->type != 0 || voxel->span <= 1 || (voxel->span % 2) != 0) {
             ++i;
             continue;
         }
@@ -5436,7 +5618,7 @@ void simulate_voxel_pbd(float dt) {
         for (int it = 0; it < constraint_iterations; ++it) {
             for (int i = 0; i < voxel_count; ++i) {
                 Voxel *voxel = &voxels[i];
-                if (!voxel->simulate)
+                if (!voxel->simulate || voxel->type != 0)
                     continue;
                 solve_voxel_shape(voxel);
             }
@@ -6489,10 +6671,11 @@ int main(void) {
         activate_static_voxels_near_dynamic();
         batch_glued_dynamic_voxels();
         //update voxel physics
-        int subStep = 3;
+        int subStep = 1;
         for( int i = 0; i < subStep; i++){
             physics_step(dt/subStep);
         }
+        update_projectiles(dt);
         simulate_voxel_pbd(dt);
         voxelHashFramesSinceRebuild++;
         if (voxelHashFramesSinceRebuild >= VOXEL_HASH_REBUILD_INTERVAL) {
