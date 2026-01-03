@@ -3455,9 +3455,10 @@ static void update_projectiles(float dt)
             if (!voxels[hit_id].simulate) {
                 int brushExtent = (voxelBrushSpan < 1) ? 1 : voxelBrushSpan;
                 Voxel *hit_voxel = &voxels[hit_id];
-                int anchorX = hit_voxel->gx;
-                int anchorY = hit_voxel->gy;
-                int anchorZ = hit_voxel->gz;
+                int halfBrush = brushExtent / 2;
+                int anchorX = hit_voxel->gx - halfBrush;
+                int anchorY = hit_voxel->gy - halfBrush;
+                int anchorZ = hit_voxel->gz - halfBrush;
 
                 if (v->type == 1) {
                     remove_static_voxels_in_region(anchorX, anchorX + brushExtent - 1,
