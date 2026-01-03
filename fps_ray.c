@@ -66,6 +66,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define VGS_BETA 0.3f
 #define VGS_ITERS 6
 #define VGS_EPS 1e-6f
+#define VGS_EARLY_OUT_EPS 0.002f
 #define PBD_MAX_STEP_DT 0.005f
 #define PBD_SUBSTEPS 6
 #define PBD_CONSTRAINT_ITERS 12
@@ -3234,6 +3235,17 @@ static void solve_voxel_shape(Voxel *voxel) {
         float target0 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * (lenp0 * r_v));
         float target1 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * (lenp1 * r_v));
         float target2 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * (lenp2 * r_v));
+
+        float edge_eps = VGS_EARLY_OUT_EPS * rest_edge;
+        float volume_eps = VGS_EARLY_OUT_EPS * rest_volume;
+        float d0 = fabsf(len0 - target0);
+        float d1 = fabsf(len1 - target1);
+        float d2 = fabsf(len2 - target2);
+        float raw_volume = v_dot(v_cross(u0, u1), u2);
+        if (d0 <= edge_eps && d1 <= edge_eps && d2 <= edge_eps &&
+            fabsf(raw_volume - rest_volume) <= volume_eps) {
+            break;
+        }
 
         if (fabs(len0-target0) > VGS_EPS) u0 = v_mul(u0, target0 / len0);
         if (fabs(len1-target1) > VGS_EPS) u1 = v_mul(u1, target1 / len1);
