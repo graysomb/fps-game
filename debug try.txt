@@ -1,0 +1,16 @@
+  - Added new test clusters (tags 25–28) to isolate mixed‑span glue vs split‑strain effects in buildDemo() and expanded
+    tag offsets.
+  - Added a [SplitStrain] log in split_strained_voxels() and allowed it through the log filter, which showed strain=1.0
+    at rest across many tags (zero velocity).
+  - Recomputed rest_edge from actual corner distances during init_voxel_struct() and moved splitting after shape/glue
+    solve in simulate_voxel_pbd() to avoid pre‑solve splits. This removed the immediate split‑strain trigger.
+  - Adjusted glue to be less fragile: break distance based on average edge, and added a break grace period
+    (GLUE_BREAK_FRAMES) so a single spike doesn’t break constraints.
+  - Tested a clamped face‑projection target, but it made stability worse (likely due to corner ordering assumptions), so
+    reverted to original weights.
+  - Added build‑time glue filters to skip constraints with rawUV outside [0,1] (small epsilon) and skip constraints
+    whose initial violation is already large (> 0.25 * avg rest edge).
+  - Implemented consistent UV corner ordering for coarse and fine faces in add_bilinear_glue_constraints_for_pair() to
+    fix weight↔corner mismatches.
+  - Reintroduced projection‑based weights in the solver (only when barycentric projection is valid) so the target and
+    gradients align with the actual face geometry.
