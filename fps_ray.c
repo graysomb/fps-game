@@ -837,6 +837,17 @@ static const GlueDirection glueDirections[3] = {
     { 0, 0, 1, { 4, 5, 6, 7 }, { 0, 1, 2, 3 } },
 };
 
+static const char *glue_direction_label_from_delta(int dx, int dy, int dz)
+{
+    if (dx > 0) return "+X";
+    if (dx < 0) return "-X";
+    if (dy > 0) return "+Y";
+    if (dy < 0) return "-Y";
+    if (dz > 0) return "+Z";
+    if (dz < 0) return "-Z";
+    return "unknown";
+}
+
 static void voxel_compute_bounds(const Voxel *v,
                                  int *minx, int *maxx,
                                  int *miny, int *maxy,
@@ -999,6 +1010,9 @@ typedef struct {
     int      fineCorner;
     uint8_t  coarseMask;
     uint8_t  fineMask;
+    int      dirX;
+    int      dirY;
+    int      dirZ;
     bool     active;
 } GlueConstraint;
 
@@ -3236,7 +3250,8 @@ static void buildDemo(void) {
     // Debug tags: 1=corner chunk, 2=stacked pillar, 3=three-span bar, 4=plate+cap,
     // 5=step chain, 6=solid cube, 7=long beam, 8=brace frame, 9=staggered stack,
     // 10=unit cube control, 11=single span control, 12=thin slab, 13=flat cross, 14=vertical column,
-    // 15=slab as units, 16=slab as span-4, 17=beam as units, 18=beam as span-4, 19=checker slab.
+    // 15=slab as units, 16=slab as span-4, 17=beam as units, 18=beam as span-4, 19=checker slab,
+    // 20=vertical beam (Y), 21=depth beam (Z), 22=YZ wall, 23=XZ slab, 24=stacked span-2 (Y).
     {
         int bx = -16, by = 10, bz = -12;
         int tag = 1;
@@ -3371,6 +3386,32 @@ static void buildDemo(void) {
                 }
             }
         }
+    }
+    {
+        int bx = -22, by = 34, bz = -12;
+        int tag = 20;
+        add_dynamic_unit_block_tag(bx, by, bz, 1, 6, 1, (Color){ 160, 190, 230, 255 }, tag);
+    }
+    {
+        int bx = -14, by = 34, bz = -12;
+        int tag = 21;
+        add_dynamic_unit_block_tag(bx, by, bz, 1, 1, 6, (Color){ 180, 210, 170, 255 }, tag);
+    }
+    {
+        int bx = -6, by = 34, bz = -12;
+        int tag = 22;
+        add_dynamic_unit_block_tag(bx, by, bz, 1, 4, 4, (Color){ 140, 170, 200, 255 }, tag);
+    }
+    {
+        int bx = 2, by = 34, bz = -12;
+        int tag = 23;
+        add_dynamic_unit_block_tag(bx, by, bz, 4, 1, 4, (Color){ 200, 170, 140, 255 }, tag);
+    }
+    {
+        int bx = 12, by = 34, bz = -12;
+        int tag = 24;
+        add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 2, (Color){ 170, 140, 200, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx, by + 2, bz, 2, (Color){ 170, 140, 200, 255 }, tag);
     }
     // Floor
     //int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
@@ -4167,16 +4208,22 @@ static void solve_voxel_glue(void) {
                                                                neighborsA,
                                                                MAX_FACE_NEIGHBORS);
                     Vector3 rel = v_sub(coarse->vel, fine->vel);
+                    const int uvOutU = (solveRawU < 0.0f || solveRawU > 1.0f) ? 1 : 0;
+                    const int uvOutV = (solveRawV < 0.0f || solveRawV > 1.0f) ? 1 : 0;
                     TraceLog(LOG_INFO,
                              "[GlueTagBreak] tag=%d label=%s voxel=%d span=%d neighborCount=%d "
                              "violation=%.5f break=%.5f relVel=%.4f glueConstraints=%d "
-                             "coarseEdge=%.4f fineEdge=%.4f rawUV=(%.4f,%.4f) uv=(%.4f,%.4f) baryValid=%d",
+                             "coarseEdge=%.4f fineEdge=%.4f rawUV=(%.4f,%.4f) uv=(%.4f,%.4f) "
+                             "uvOut=(%d,%d) baryValid=%d dir=%s normalLen=%.6f baryDet=%.6f",
                              tagA, debug_cluster_tag_label(tagA),
                              gc->coarseVoxel, voxel_span_for_glue(coarse),
                              neighborCountA, violation, break_distance,
                              v_length(rel), glueConstraintCount,
                              coarse->rest_edge, fine->rest_edge,
-                             solveRawU, solveRawV, solveU, solveV, baryValid ? 1 : 0);
+                             solveRawU, solveRawV, solveU, solveV,
+                             uvOutU, uvOutV, baryValid ? 1 : 0,
+                             glue_direction_label_from_delta(gc->dirX, gc->dirY, gc->dirZ),
+                             sqrtf(coarseNormalLenSq), baryDet);
                     debugTagBreakLogged[tagA] = 1;
                 }
                 if (debug_should_log_tag_break(tagB)) {
@@ -4185,16 +4232,22 @@ static void solve_voxel_glue(void) {
                                                                neighborsB,
                                                                MAX_FACE_NEIGHBORS);
                     Vector3 rel = v_sub(fine->vel, coarse->vel);
+                    const int uvOutU = (solveRawU < 0.0f || solveRawU > 1.0f) ? 1 : 0;
+                    const int uvOutV = (solveRawV < 0.0f || solveRawV > 1.0f) ? 1 : 0;
                     TraceLog(LOG_INFO,
                              "[GlueTagBreak] tag=%d label=%s voxel=%d span=%d neighborCount=%d "
                              "violation=%.5f break=%.5f relVel=%.4f glueConstraints=%d "
-                             "coarseEdge=%.4f fineEdge=%.4f rawUV=(%.4f,%.4f) uv=(%.4f,%.4f) baryValid=%d",
+                             "coarseEdge=%.4f fineEdge=%.4f rawUV=(%.4f,%.4f) uv=(%.4f,%.4f) "
+                             "uvOut=(%d,%d) baryValid=%d dir=%s normalLen=%.6f baryDet=%.6f",
                              tagB, debug_cluster_tag_label(tagB),
                              gc->fineVoxel, voxel_span_for_glue(fine),
                              neighborCountB, violation, break_distance,
                              v_length(rel), glueConstraintCount,
                              coarse->rest_edge, fine->rest_edge,
-                             solveRawU, solveRawV, solveU, solveV, baryValid ? 1 : 0);
+                             solveRawU, solveRawV, solveU, solveV,
+                             uvOutU, uvOutV, baryValid ? 1 : 0,
+                             glue_direction_label_from_delta(gc->dirX, gc->dirY, gc->dirZ),
+                             sqrtf(coarseNormalLenSq), baryDet);
                     debugTagBreakLogged[tagB] = 1;
                 }
             }
@@ -4414,6 +4467,9 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
         gc->fineCorner = fineCorner;
         gc->coarseMask = coarseMask;
         gc->fineMask = (uint8_t)(1u << fineCorner);
+        gc->dirX = dir->dx;
+        gc->dirY = dir->dy;
+        gc->dirZ = dir->dz;
         gc->active = true;
 
         if (debugLogGlue && debugGlueBuildLogBudget > 0) {

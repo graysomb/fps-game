@@ -1,26 +1,27 @@
 [INFO] Logging TraceLog output to fps_ray.log
-[INFO] [GlueClusterBreak] cluster=0 tag=18 size=72 new_clusters=3 primary=0 tag=18 size=1 secondary=1 tag=18 size=1
-[INFO] [GlueClusterBreak] cluster=153 tag=16 size=64 new_clusters=3 primary=10 tag=16 size=1 secondary=11 tag=16 size=1
-[INFO] [GlueClusterBreak] cluster=104 tag=11 size=8 new_clusters=3 primary=104 tag=11 size=1 secondary=212 tag=11 size=1
-[INFO] [GlueTagBreak] tag=1 label=corner-chunk voxel=162 span=2 neighborCount=2 violation=1.00000 break=0.60000 relVel=0.0000 glueConstraints=72 coarseEdge=1.0000 fineEdge=1.0000 rawUV=(-1.0000,0.0000) uv=(0.0000,0.0000) baryValid=1
-[INFO] [GlueTagBreak] tag=2 label=stacked-pillar voxel=65 span=4 neighborCount=2 violation=1.50000 break=0.60000 relVel=0.0001 glueConstraints=80 coarseEdge=2.0000 fineEdge=1.0000 rawUV=(1.0000,0.2500) uv=(1.0000,0.2500) baryValid=1
-[INFO] [GlueTagBreak] tag=3 label=three-span-bar voxel=15 span=2 neighborCount=3 violation=0.50000 break=0.30000 relVel=0.0387 glueConstraints=100 coarseEdge=1.0000 fineEdge=0.5000 rawUV=(1.5002,0.0000) uv=(1.0000,0.0000) baryValid=1
-[INFO] [GlueClusterBreak] cluster=15 tag=3 size=5 new_clusters=2 primary=15 tag=3 size=3 secondary=18 tag=3 size=2
-[INFO] [GlueClusterBreak] cluster=18 tag=3 size=2 new_clusters=2 primary=18 tag=3 size=1 secondary=15 tag=3 size=4
-[INFO] [GlueClusterBreak] cluster=15 tag=3 size=4 new_clusters=2 primary=15 tag=3 size=2 secondary=16 tag=3 size=3
+[INFO] [GlueClusterBreak] cluster=160 tag=18 size=72 new_clusters=3 primary=0 tag=18 size=1 secondary=1 tag=18 size=1
+[INFO] [GlueClusterBreak] cluster=104 tag=11 size=8 new_clusters=3 primary=104 tag=11 size=1 secondary=244 tag=11 size=1
+[INFO] [GlueClusterBreak] cluster=153 tag=16 size=64 new_clusters=3 primary=153 tag=16 size=1 secondary=251 tag=16 size=1
+[INFO] [GlueTagBreak] tag=2 label=stacked-pillar voxel=10 span=4 neighborCount=2 violation=1.50000 break=0.60000 relVel=0.0000 glueConstraints=316 coarseEdge=2.0000 fineEdge=1.0000 rawUV=(1.0000,0.2500) uv=(1.0000,0.2500) uvOut=(0,0) baryValid=1 dir=+X normalLen=4.000000 baryDet=16.000000
+[INFO] [GlueTagBreak] tag=1 label=corner-chunk voxel=208 span=2 neighborCount=2 violation=1.00000 break=0.60000 relVel=0.0000 glueConstraints=316 coarseEdge=1.0000 fineEdge=1.0000 rawUV=(-1.0000,0.0000) uv=(0.0000,0.0000) uvOut=(1,0) baryValid=1 dir=+X normalLen=1.000000 baryDet=1.000000
+[INFO] [GlueTagBreak] tag=3 label=three-span-bar voxel=15 span=2 neighborCount=3 violation=0.99902 break=0.60000 relVel=0.0302 glueConstraints=344 coarseEdge=1.0000 fineEdge=1.0000 rawUV=(-0.0001,-0.0000) uv=(0.0000,0.0000) uvOut=(1,1) baryValid=1 dir=+X normalLen=0.999706 baryDet=0.999413
 [INFO] [GlueClusterBreak] cluster=15 tag=3 size=5 new_clusters=2 primary=15 tag=3 size=4 secondary=19 tag=3 size=1
-[INFO] [GlueClusterBreak] cluster=15 tag=3 size=4 new_clusters=2 primary=15 tag=3 size=3 secondary=17 tag=3 size=1
-[INFO] [GlueClusterBreak] cluster=15 tag=3 size=3 new_clusters=2 primary=15 tag=3 size=3 secondary=16 tag=3 size=1
-[INFO] [GlueClusterBreak] cluster=15 tag=3 size=3 new_clusters=2 primary=15 tag=3 size=1 secondary=18 tag=3 size=2
+[INFO] [GlueClusterBreak] cluster=10 tag=2 size=5 new_clusters=2 primary=10 tag=2 size=4 secondary=14 tag=2 size=1
+[INFO] [GlueClusterBreak] cluster=15 tag=3 size=5 new_clusters=2 primary=15 tag=3 size=4 secondary=19 tag=3 size=1
+[INFO] [GlueClusterBreak] cluster=10 tag=2 size=4 new_clusters=2 primary=10 tag=2 size=3 secondary=13 tag=2 size=1
+[INFO] [GlueClusterBreak] cluster=15 tag=3 size=4 new_clusters=2 primary=15 tag=3 size=3 secondary=18 tag=3 size=1
+[INFO] [GlueClusterBreak] cluster=15 tag=3 size=5 new_clusters=3 primary=15 tag=3 size=2 secondary=16 tag=3 size=2
+[INFO] [GlueClusterBreak] cluster=15 tag=3 size=2 new_clusters=2 primary=15 tag=3 size=1 secondary=18 tag=3 size=2
+[INFO] [GlueClusterBreak] cluster=18 tag=3 size=2 new_clusters=2 primary=18 tag=3 size=1 secondary=15 tag=3 size=2
+[INFO] [GlueClusterBreak] cluster=15 tag=3 size=2 new_clusters=2 primary=15 tag=3 size=1 secondary=18 tag=3 size=2
+[INFO] [GlueClusterBreak] cluster=206 tag=1 size=3 new_clusters=2 primary=206 tag=1 size=1 secondary=207 tag=1 size=2
+[INFO] [GlueClusterBreak] cluster=16 tag=3 size=2 new_clusters=2 primary=16 tag=3 size=1 secondary=17 tag=3 size=1
 [INFO] [GlueClusterBreak] cluster=18 tag=3 size=2 new_clusters=2 primary=18 tag=3 size=1 secondary=19 tag=3 size=1
-[INFO] [GlueClusterBreak] cluster=15 tag=3 size=2 new_clusters=2 primary=15 tag=3 size=1 secondary=19 tag=3 size=1
-[INFO] [GlueClusterBreak] cluster=15 tag=3 size=2 new_clusters=2 primary=15 tag=3 size=1 secondary=19 tag=3 size=1
-[INFO] [GlueClusterBreak] cluster=15 tag=3 size=2 new_clusters=2 primary=15 tag=3 size=1 secondary=19 tag=3 size=1
-[INFO] [GlueClusterBreak] cluster=65 tag=2 size=5 new_clusters=2 primary=65 tag=2 size=4 secondary=68 tag=2 size=1
-[INFO] [GlueClusterBreak] cluster=160 tag=1 size=3 new_clusters=2 primary=160 tag=1 size=1 secondary=161 tag=1 size=2
-[INFO] [GlueClusterBreak] cluster=16 tag=3 size=2 new_clusters=2 primary=16 tag=3 size=1 secondary=18 tag=3 size=1
-[INFO] [GlueClusterBreak] cluster=161 tag=1 size=2 new_clusters=2 primary=161 tag=1 size=1 secondary=162 tag=1 size=1
-[INFO] [GlueClusterBreak] cluster=161 tag=1 size=2 new_clusters=2 primary=161 tag=1 size=1 secondary=162 tag=1 size=1
-[INFO] [GlueClusterBreak] cluster=65 tag=2 size=5 new_clusters=2 primary=65 tag=2 size=4 secondary=69 tag=2 size=1
-[INFO] [GlueClusterBreak] cluster=65 tag=2 size=4 new_clusters=2 primary=65 tag=2 size=3 secondary=68 tag=2 size=1
-[INFO] [GlueClusterBreak] cluster=65 tag=2 size=4 new_clusters=3 primary=65 tag=2 size=2 secondary=67 tag=2 size=1
+[INFO] [GlueClusterBreak] cluster=10 tag=2 size=4 new_clusters=2 primary=10 tag=2 size=4 secondary=14 tag=2 size=1
+[INFO] [GlueClusterBreak] cluster=18 tag=3 size=2 new_clusters=2 primary=18 tag=3 size=1 secondary=19 tag=3 size=1
+[INFO] [GlueClusterBreak] cluster=10 tag=2 size=4 new_clusters=2 primary=10 tag=2 size=3 secondary=13 tag=2 size=1
+[INFO] [GlueClusterBreak] cluster=10 tag=2 size=4 new_clusters=2 primary=10 tag=2 size=3 secondary=14 tag=2 size=1
+[INFO] [GlueClusterBreak] cluster=10 tag=2 size=5 new_clusters=2 primary=10 tag=2 size=4 secondary=13 tag=2 size=1
+[INFO] [GlueClusterBreak] cluster=18 tag=3 size=2 new_clusters=2 primary=18 tag=3 size=1 secondary=19 tag=3 size=1
+[INFO] [GlueClusterBreak] cluster=15 tag=3 size=3 new_clusters=2 primary=15 tag=3 size=2 secondary=17 tag=3 size=1
+[INFO] [GlueClusterBreak] cluster=18 tag=3 size=2 new_clusters=2 primary=18 tag=3 size=1 secondary=19 tag=3 size=1
