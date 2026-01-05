@@ -78,6 +78,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 //#define GLUE_EPS 0.002f
 #define GLUE_BREAK_STRAIN 0.6f
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 4
+#define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
+#define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
 #define VOXEL_SPLIT_STRAIN_THRESHOLD 0.6f
 #define VOXEL_SPLIT_SHEAR_THRESHOLD 0.6f
 #define VOXEL_HASH_REBUILD_INTERVAL 2
@@ -819,6 +821,14 @@ static float voxel_rest_corner_axis_coord(const Voxel *v, int axis, int corner_i
     return (sign >= 0) ? max : min;
 }
 
+static Vector3 voxel_rest_corner_world(const Voxel *v, int corner_idx) {
+    return (Vector3){
+        voxel_rest_corner_axis_coord(v, 0, corner_idx),
+        voxel_rest_corner_axis_coord(v, 1, corner_idx),
+        voxel_rest_corner_axis_coord(v, 2, corner_idx)
+    };
+}
+
 static int table_get(int x, int y, int z);
 static void rebuild_glue_constraints(void);
 static void solve_voxel_glue(void);
@@ -1010,13 +1020,15 @@ typedef struct {
     int      fineCorner;
     uint8_t  coarseMask;
     uint8_t  fineMask;
+    Vector3  restOffset;
+    float    strength;
     int      dirX;
     int      dirY;
     int      dirZ;
     bool     active;
 } GlueConstraint;
 
-static GlueConstraint glueConstraints[MAX_VOXELS * 12];
+static GlueConstraint glueConstraints[MAX_VOXELS * 48];
 static int glueConstraintCount = 0;
 static uint8_t gluedNeighborCounts[MAX_VOXELS];
 static int gluedNeighborList[MAX_VOXELS][MAX_FACE_NEIGHBORS];
@@ -4180,7 +4192,8 @@ static void solve_voxel_glue(void) {
         for (int k = 0; k < 4; ++k) {
             blended = v_add(blended, v_mul(coarseParticles[k]->predicted_pos, weights[k]));
         }
-        Vector3 C = v_sub(blended, fineParticle->predicted_pos);
+        Vector3 target = v_add(blended, gc->restOffset);
+        Vector3 C = v_sub(target, fineParticle->predicted_pos);
         float violation = v_length(C);
         float rest_edge_min = fminf(coarse->rest_edge, fine->rest_edge);
         float break_distance = GLUE_BREAK_STRAIN * rest_edge_min;
@@ -4275,7 +4288,7 @@ static void solve_voxel_glue(void) {
             continue;
         }
 
-        Vector3 lambda = v_mul(C, -GLUE_RELAXATION / invMassSum);
+        Vector3 lambda = v_mul(C, -GLUE_RELAXATION * gc->strength / invMassSum);
         float lambda_mag = v_length(lambda);
         Vector3 coarseDeltaAccum = { 0.0f, 0.0f, 0.0f };
         float coarseDeltaMax = 0.0f;
@@ -4427,6 +4440,11 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
         return;
     }
 
+    Vector3 coarseRest[4];
+    for (int k = 0; k < 4; ++k) {
+        coarseRest[k] = voxel_rest_corner_world(coarse, coarseFace[k]);
+    }
+
     for (int c = 0; c < 4; ++c) {
         if (glueConstraintCount >= (int)(sizeof(glueConstraints) / sizeof(glueConstraints[0]))) {
             return;
@@ -4454,6 +4472,11 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
         w2 *= inv_w_sum;
         w3 *= inv_w_sum;
 
+        Vector3 fineRest = voxel_rest_corner_world(fine, fineCorner);
+        Vector3 restTarget = v_add(v_add(v_mul(coarseRest[0], w0), v_mul(coarseRest[1], w1)),
+                                   v_add(v_mul(coarseRest[2], w2), v_mul(coarseRest[3], w3)));
+        Vector3 restOffset = v_sub(fineRest, restTarget);
+
         GlueConstraint *gc = &glueConstraints[glueConstraintCount++];
         gc->coarseVoxel = coarseIdx;
         gc->fineVoxel   = fineIdx;
@@ -4467,10 +4490,119 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
         gc->fineCorner = fineCorner;
         gc->coarseMask = coarseMask;
         gc->fineMask = (uint8_t)(1u << fineCorner);
+        gc->restOffset = restOffset;
+        gc->strength = 1.0f;
         gc->dirX = dir->dx;
         gc->dirY = dir->dy;
         gc->dirZ = dir->dz;
         gc->active = true;
+
+        float edgeStrengthU = (u < 0.5f) ? (1.0f - u) : u;
+        float edgeStrengthV = (v < 0.5f) ? (1.0f - v) : v;
+        float centerStrength = 0.25f + 0.75f *
+                               (1.0f - fabsf(u - 0.5f) * 2.0f) *
+                               (1.0f - fabsf(v - 0.5f) * 2.0f);
+        edgeStrengthU = clampf(edgeStrengthU, 0.0f, 1.0f) * GLUE_VIRTUAL_EDGE_STRENGTH;
+        edgeStrengthV = clampf(edgeStrengthV, 0.0f, 1.0f) * GLUE_VIRTUAL_EDGE_STRENGTH;
+        centerStrength = clampf(centerStrength, 0.0f, 1.0f) * GLUE_VIRTUAL_CENTER_STRENGTH;
+
+        if (edgeStrengthU > 0.0f &&
+            glueConstraintCount < (int)(sizeof(glueConstraints) / sizeof(glueConstraints[0])))
+        {
+            float e0 = 0.0f, e1 = 0.0f, e2 = 0.0f, e3 = 0.0f;
+            if (u < 0.5f) {
+                e0 = 0.5f;
+                e2 = 0.5f;
+            } else {
+                e1 = 0.5f;
+                e3 = 0.5f;
+            }
+            Vector3 edgeTarget = v_add(v_add(v_mul(coarseRest[0], e0), v_mul(coarseRest[1], e1)),
+                                       v_add(v_mul(coarseRest[2], e2), v_mul(coarseRest[3], e3)));
+            Vector3 edgeOffset = v_sub(fineRest, edgeTarget);
+            GlueConstraint *edgeGc = &glueConstraints[glueConstraintCount++];
+            edgeGc->coarseVoxel = coarseIdx;
+            edgeGc->fineVoxel   = fineIdx;
+            for (int k = 0; k < 4; ++k) {
+                edgeGc->coarseCorner[k] = coarseFace[k];
+            }
+            edgeGc->w[0] = e0;
+            edgeGc->w[1] = e1;
+            edgeGc->w[2] = e2;
+            edgeGc->w[3] = e3;
+            edgeGc->fineCorner = fineCorner;
+            edgeGc->coarseMask = coarseMask;
+            edgeGc->fineMask = (uint8_t)(1u << fineCorner);
+            edgeGc->restOffset = edgeOffset;
+            edgeGc->strength = edgeStrengthU;
+            edgeGc->dirX = dir->dx;
+            edgeGc->dirY = dir->dy;
+            edgeGc->dirZ = dir->dz;
+            edgeGc->active = true;
+        }
+
+        if (edgeStrengthV > 0.0f &&
+            glueConstraintCount < (int)(sizeof(glueConstraints) / sizeof(glueConstraints[0])))
+        {
+            float e0 = 0.0f, e1 = 0.0f, e2 = 0.0f, e3 = 0.0f;
+            if (v < 0.5f) {
+                e0 = 0.5f;
+                e1 = 0.5f;
+            } else {
+                e2 = 0.5f;
+                e3 = 0.5f;
+            }
+            Vector3 edgeTarget = v_add(v_add(v_mul(coarseRest[0], e0), v_mul(coarseRest[1], e1)),
+                                       v_add(v_mul(coarseRest[2], e2), v_mul(coarseRest[3], e3)));
+            Vector3 edgeOffset = v_sub(fineRest, edgeTarget);
+            GlueConstraint *edgeGc = &glueConstraints[glueConstraintCount++];
+            edgeGc->coarseVoxel = coarseIdx;
+            edgeGc->fineVoxel   = fineIdx;
+            for (int k = 0; k < 4; ++k) {
+                edgeGc->coarseCorner[k] = coarseFace[k];
+            }
+            edgeGc->w[0] = e0;
+            edgeGc->w[1] = e1;
+            edgeGc->w[2] = e2;
+            edgeGc->w[3] = e3;
+            edgeGc->fineCorner = fineCorner;
+            edgeGc->coarseMask = coarseMask;
+            edgeGc->fineMask = (uint8_t)(1u << fineCorner);
+            edgeGc->restOffset = edgeOffset;
+            edgeGc->strength = edgeStrengthV;
+            edgeGc->dirX = dir->dx;
+            edgeGc->dirY = dir->dy;
+            edgeGc->dirZ = dir->dz;
+            edgeGc->active = true;
+        }
+
+        if (centerStrength > 0.0f &&
+            glueConstraintCount < (int)(sizeof(glueConstraints) / sizeof(glueConstraints[0])))
+        {
+            float c0 = 0.25f, c1 = 0.25f, c2 = 0.25f, c3 = 0.25f;
+            Vector3 centerTarget = v_add(v_add(v_mul(coarseRest[0], c0), v_mul(coarseRest[1], c1)),
+                                         v_add(v_mul(coarseRest[2], c2), v_mul(coarseRest[3], c3)));
+            Vector3 centerOffset = v_sub(fineRest, centerTarget);
+            GlueConstraint *centerGc = &glueConstraints[glueConstraintCount++];
+            centerGc->coarseVoxel = coarseIdx;
+            centerGc->fineVoxel   = fineIdx;
+            for (int k = 0; k < 4; ++k) {
+                centerGc->coarseCorner[k] = coarseFace[k];
+            }
+            centerGc->w[0] = c0;
+            centerGc->w[1] = c1;
+            centerGc->w[2] = c2;
+            centerGc->w[3] = c3;
+            centerGc->fineCorner = fineCorner;
+            centerGc->coarseMask = coarseMask;
+            centerGc->fineMask = (uint8_t)(1u << fineCorner);
+            centerGc->restOffset = centerOffset;
+            centerGc->strength = centerStrength;
+            centerGc->dirX = dir->dx;
+            centerGc->dirY = dir->dy;
+            centerGc->dirZ = dir->dz;
+            centerGc->active = true;
+        }
 
         if (debugLogGlue && debugGlueBuildLogBudget > 0) {
             TraceLog(LOG_DEBUG,
