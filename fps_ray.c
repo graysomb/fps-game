@@ -346,7 +346,11 @@ static int debugSpanCollisionLogBudget = 0;
 static bool debugLogGlue = false;
 static bool debugLogGlueClusters = false;
 static bool debugLogDynamicVoxels = false;
-static bool debugLogVoxelRecycle = true;
+static bool debugLogVoxelRecycle = false;
+static bool debugLogActivationFailures = true;
+static bool debugLogRestoreFailures = true;
+static bool debugLogVoxelBlowup = true;
+static int debugBlowupLogBudget = 0;
 static bool debugLogClusterBreaksOnly = true;
 static int debugGlueBuildLogBudget = 0;
 static int debugGlueSolveLogBudget = 0;
@@ -423,6 +427,15 @@ static bool debug_should_log_message(const char *text) {
         return true;
     }
     if (strstr(text, "[Recycle]")) {
+        return true;
+    }
+    if (strstr(text, "[ActivationFail]")) {
+        return true;
+    }
+    if (strstr(text, "[RestoreFail]")) {
+        return true;
+    }
+    if (strstr(text, "[VoxelBlowup]")) {
         return true;
     }
     if (strstr(text, "[DynamicVoxel]")) {
@@ -962,6 +975,10 @@ static Vector3 v_cross(Vector3 a, Vector3 b) {
         a.z * b.x - a.x * b.z,
         a.x * b.y - a.y * b.x
     };
+}
+
+static bool v_isfinite(Vector3 v) {
+    return isfinite(v.x) && isfinite(v.y) && isfinite(v.z);
 }
 
 static float v_length(Vector3 v) {
@@ -1875,7 +1892,14 @@ static void init_voxel_struct(Voxel *v,
 
 static int addVoxelSized(float px, float py, float pz, bool fixed, bool simulate,
                          Color color, int type, int span) {
-    if (voxel_count >= MAX_VOXELS) return -1;
+    if (voxel_count >= MAX_VOXELS) {
+        if (debugLogActivationFailures) {
+            TraceLog(LOG_WARNING,
+                     "[ActivationFail] addVoxelSized capacity full simulate=%d span=%d pos=(%.2f,%.2f,%.2f)",
+                     simulate ? 1 : 0, span, px, py, pz);
+        }
+        return -1;
+    }
     int idx = voxel_count++;
     Voxel *v = &voxels[idx];
     init_voxel_struct(v, px, py, pz, fixed, simulate, color, type, span, -1);
@@ -2450,7 +2474,12 @@ static bool restore_dynamic_snapshot(const Voxel *snapshot)
         return false;
     }
     if (voxel_count >= MAX_VOXELS) {
-        TraceLog(LOG_WARNING, "[Multiscale] Dynamic restore skipped: capacity exceeded");
+        if (debugLogRestoreFailures) {
+            TraceLog(LOG_WARNING,
+                     "[RestoreFail] dynamic restore capacity exceeded span=%d pos=(%.2f,%.2f,%.2f)",
+                     snapshot->span,
+                     snapshot->pos.x, snapshot->pos.y, snapshot->pos.z);
+        }
         return false;
     }
     voxels[voxel_count] = *snapshot;
@@ -4275,6 +4304,9 @@ static void solve_voxel_shape(Voxel *voxel) {
 
     for (int i = 0; i < 8; ++i) {
         Particle *part = &voxel->particles[i];
+        if (!v_isfinite(part->predicted_pos)) {
+            part->predicted_pos = part->pos;
+        }
         p[i] = part->predicted_pos;
         w[i] = part->inv_mass;
         if (w[i] > 0.0f) {
@@ -4324,6 +4356,9 @@ static void solve_voxel_shape(Voxel *voxel) {
         float r_v = 1.0f;
         float denom = lenp0 * lenp1 * lenp2;
         float rest_demom = rest_edge * rest_edge * rest_edge;
+        if (fabsf(denom) < VGS_EPS || !isfinite(denom)) {
+            break;
+        }
         if (fabs(denom-rest_demom) > VGS_EPS) {
             float ratio = (rest_edge * rest_edge * rest_edge) / denom;
             float root = cbrtf(fabsf(ratio));
@@ -4351,7 +4386,7 @@ static void solve_voxel_shape(Voxel *voxel) {
 
         // Volume correction mirrors the GPU "ResizeVoxelBasis" stage.
         float volume = v_dot(v_cross(u0, u1), u2);
-        if (fabsf(volume-rest_volume) > VGS_EPS) {
+        if (fabsf(volume) > VGS_EPS && fabsf(volume-rest_volume) > VGS_EPS) {
             float scale = rest_volume / volume;
             float root = cbrtf(fabsf(scale));
             if (scale < 0.0f) {
@@ -4419,6 +4454,11 @@ static void solve_voxel_glue(void) {
         Vector3 coarsePred[4];
         for (int k = 0; k < 4; ++k) {
             coarsePred[k] = coarseParticles[k]->predicted_pos;
+        }
+        if (!v_isfinite(coarsePred[0]) || !v_isfinite(coarsePred[1]) ||
+            !v_isfinite(coarsePred[2]) || !v_isfinite(coarsePred[3]) ||
+            !v_isfinite(fineParticle->predicted_pos)) {
+            continue;
         }
         Vector3 coarseU = v_sub(coarsePred[1], coarsePred[0]);
         Vector3 coarseV = v_sub(coarsePred[2], coarsePred[0]);
@@ -5443,6 +5483,14 @@ static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count
             converted = true;
             ++static_success;
         } else {
+            if (debugLogRestoreFailures) {
+                TraceLog(LOG_WARNING,
+                         "[RestoreFail] static restore failed voxel=%d span=%d rest=(%d..%d,%d..%d,%d..%d)",
+                         i, snapshots[i].span,
+                         snapshots[i].rest_min_gx, snapshots[i].rest_max_gx,
+                         snapshots[i].rest_min_gy, snapshots[i].rest_max_gy,
+                         snapshots[i].rest_min_gz, snapshots[i].rest_max_gz);
+            }
             restore_dynamic_snapshot(&snapshots[i]);
         }
     }
@@ -6732,6 +6780,9 @@ void simulate_voxel_pbd(float dt) {
     const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
 
     for (int step = 0; step < substeps; ++step) {
+        if (debugLogVoxelBlowup) {
+            debugBlowupLogBudget = 32;
+        }
         integrate_particles(sub_dt);
         solve_particle_collisions(sub_dt);
         solve_span_voxel_collisions();
@@ -6753,6 +6804,25 @@ void simulate_voxel_pbd(float dt) {
         solve_voxel_glue();
         }
         update_particle_velocities(sub_dt);
+        if (debugLogVoxelBlowup && debugBlowupLogBudget > 0) {
+            for (int i = 0; i < voxel_count && debugBlowupLogBudget > 0; ++i) {
+                Voxel *voxel = &voxels[i];
+                if (!voxel->simulate) {
+                    continue;
+                }
+                Vector3 pos = voxel->pos;
+                if (!isfinite(pos.x) || !isfinite(pos.y) || !isfinite(pos.z) ||
+                    fabsf(pos.x) > 1e4f || fabsf(pos.y) > 1e4f || fabsf(pos.z) > 1e4f)
+                {
+                    TraceLog(LOG_WARNING,
+                             "[VoxelBlowup] voxel=%d span=%d pos=(%.3f,%.3f,%.3f) vel=(%.3f,%.3f,%.3f)",
+                             i, voxel->span,
+                             pos.x, pos.y, pos.z,
+                             voxel->vel.x, voxel->vel.y, voxel->vel.z);
+                    --debugBlowupLogBudget;
+                }
+            }
+        }
     }
 
     log_dynamic_voxel_positions();
