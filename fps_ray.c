@@ -36,7 +36,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define MOVE_SPEED      5.0f    // units per second (unused: using acceleration)
 #define TURN_SPEED     90.0f    // degrees per second
 #define JUMP_SPEED     10.0f    // initial jump velocity
-#define GRAVITY         9.8f*0.001f    // gravity acceleration
+#define GRAVITY         9.8f    // gravity acceleration
 #define BASE_EYE_HEIGHT 1.0f    // player eye height above floor
 #define ACCELERATION   400.0f    // horizontal acceleration
 #define FREEZE_GROUND_WEIGHT       0.6f
@@ -90,15 +90,15 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define MAX_FACE_NEIGHBORS   64
 #define MAX_SPLIT_CHILDREN    8
 static const float GRID_EPSILON = 1e-4f;
-#define VOXEL_ACTIVATION_RADIUS 2*2
+#define VOXEL_ACTIVATION_RADIUS 2*5
 //#define VOXEL_ACTIVATION_UNIT_BUDGET 128
-#define VOXEL_ACTIVATION_UNIT_BUDGET 128*2
+#define VOXEL_ACTIVATION_UNIT_BUDGET 128*5
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 1.0f
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.2f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.2f
 #define VOXEL_DEACTIVATION_FRAMES 20
-#define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*2
-#define STATIC_RESTORE_SEARCH_RADIUS 4
+#define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
+#define STATIC_RESTORE_SEARCH_RADIUS 2*5
 
 // KD-stats constants
 #define BASE_HEALTH 100
@@ -3257,176 +3257,176 @@ static void add_dynamic_unit_block(int minx, int miny, int minz,
 
 // Build static demo cube of voxels
 static void buildDemo(void) {
-    init_debug_tag_offsets();
+    //init_debug_tag_offsets();
     // Floating dynamic test clusters (mixed span sizes, zero initial glue stress).
     // Debug tags: 1=corner chunk, 2=stacked pillar, 3=three-span bar, 4=plate+cap,
     // 5=step chain, 6=solid cube, 7=long beam, 8=brace frame, 9=staggered stack,
     // 10=unit cube control, 11=single span control, 12=thin slab, 13=flat cross, 14=vertical column,
     // 15=slab as units, 16=slab as span-4, 17=beam as units, 18=beam as span-4, 19=checker slab,
     // 20=vertical beam (Y), 21=depth beam (Z), 22=YZ wall, 23=XZ slab, 24=stacked span-2 (Y).
-    {
-        int bx = -16, by = 10, bz = -12;
-        int tag = 1;
-        add_dynamic_unit_block_tag(bx, by, bz, 2, 2, 2, (Color){ 210, 120, 90, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 2, by, bz, 2, (Color){ 240, 160, 100, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx, by + 2, bz, 2, (Color){ 200, 90, 140, 255 }, tag);
-    }
-    {
-        int bx = 6, by = 12, bz = -10;
-        int tag = 2;
-        add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 4, (Color){ 180, 150, 80, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 4, by, bz, 2, (Color){ 220, 180, 90, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 4, bz + 1, 2, (Color){ 250, 210, 130, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 6, bz + 1, 1, (Color){ 240, 200, 120, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 6, bz + 2, 1, (Color){ 240, 200, 120, 255 }, tag);
-    }
-    {
-        int bx = -8, by = 16, bz = 6;
-        int tag = 3;
-        add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 2, (Color){ 90, 170, 230, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 2, by, bz, 2, (Color){ 70, 140, 210, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 4, by, bz, 2, (Color){ 60, 120, 190, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 2, bz, 1, (Color){ 120, 200, 250, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 2, bz + 1, 1, (Color){ 120, 200, 250, 255 }, tag);
-    }
-    {
-        int bx = 10, by = 8, bz = 8;
-        int tag = 4;
-        add_dynamic_unit_block_tag(bx, by, bz, 3, 1, 3, (Color){ 140, 200, 140, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 1, bz + 1, 2, (Color){ 90, 170, 120, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 3, bz + 1, 1, (Color){ 60, 140, 90, 255 }, tag);
-    }
-    {
-        int bx = -2, by = 20, bz = -2;
-        int tag = 5;
-        add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 2, (Color){ 200, 120, 210, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 2, by, bz, 2, (Color){ 170, 90, 180, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx, by + 2, bz, 1, (Color){ 210, 140, 230, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 2, bz, 1, (Color){ 210, 140, 230, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 2, bz, 1, (Color){ 210, 140, 230, 255 }, tag);
-    }
-    {
-        int bx = -14, by = 24, bz = 6;
-        int tag = 6;
-        add_dynamic_unit_block_tag(bx, by, bz, 3, 3, 3, (Color){ 200, 170, 110, 255 }, tag);
-    }
-    {
-        int bx = 2, by = 22, bz = 12;
-        int tag = 7;
-        add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 1, (Color){ 160, 210, 120, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 1, by, bz, 1, (Color){ 160, 210, 120, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 2, by, bz, 1, (Color){ 160, 210, 120, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 3, by, bz, 1, (Color){ 160, 210, 120, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 4, by, bz, 1, (Color){ 160, 210, 120, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 1, bz, 1, (Color){ 120, 170, 90, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 2, by - 1, bz, 1, (Color){ 120, 170, 90, 255 }, tag);
-    }
-    {
-        int bx = 12, by = 18, bz = -6;
-        int tag = 8;
-        add_dynamic_unit_block_tag(bx, by, bz, 3, 1, 3, (Color){ 120, 150, 220, 255 }, tag);
-        add_dynamic_unit_block_tag(bx, by + 2, bz, 3, 1, 3, (Color){ 120, 150, 220, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx, by + 1, bz, 1, (Color){ 80, 110, 200, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 1, bz, 1, (Color){ 80, 110, 200, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx, by + 1, bz + 2, 1, (Color){ 80, 110, 200, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 1, bz + 2, 1, (Color){ 80, 110, 200, 255 }, tag);
-    }
-    {
-        int bx = -6, by = 26, bz = -14;
-        int tag = 9;
-        add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 2, (Color){ 210, 140, 120, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 1, bz, 2, (Color){ 190, 120, 100, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 3, bz + 1, 1, (Color){ 230, 160, 130, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 3, by + 3, bz + 1, 1, (Color){ 230, 160, 130, 255 }, tag);
-    }
-    {
-        int bx = -20, by = 30, bz = 12;
-        int tag = 10;
-        add_dynamic_unit_block_tag(bx, by, bz, 2, 2, 2, (Color){ 200, 200, 200, 255 }, tag);
-    }
-    {
-        int bx = -10, by = 30, bz = 12;
-        int tag = 11;
-        add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 2, (Color){ 180, 180, 200, 255 }, tag);
-    }
-    {
-        int bx = 0, by = 30, bz = 12;
-        int tag = 12;
-        add_dynamic_unit_block_tag(bx, by, bz, 4, 1, 4, (Color){ 160, 180, 220, 255 }, tag);
-    }
-    {
-        int bx = 8, by = 30, bz = 14;
-        int tag = 13;
-        add_dynamic_unit_block_tag(bx, by, bz, 3, 1, 3, (Color){ 150, 160, 230, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 1, bz + 1, 1, (Color){ 110, 130, 210, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 1, by - 1, bz + 1, 1, (Color){ 110, 130, 210, 255 }, tag);
-    }
-    {
-        int bx = 18, by = 30, bz = 12;
-        int tag = 14;
-        add_dynamic_unit_block_tag(bx, by, bz, 1, 5, 1, (Color){ 200, 150, 130, 255 }, tag);
-    }
-    {
-        int bx = -22, by = 34, bz = -2;
-        int tag = 15;
-        add_dynamic_unit_block_tag(bx, by, bz, 4, 1, 4, (Color){ 130, 170, 210, 255 }, tag);
-    }
-    {
-        int bx = -14, by = 34, bz = -2;
-        int tag = 16;
-        add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 4, (Color){ 110, 150, 190, 255 }, tag);
-    }
-    {
-        int bx = -6, by = 34, bz = -2;
-        int tag = 17;
-        add_dynamic_unit_block_tag(bx, by, bz, 6, 1, 1, (Color){ 140, 200, 160, 255 }, tag);
-    }
-    {
-        int bx = 2, by = 34, bz = -2;
-        int tag = 18;
-        add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 4, (Color){ 120, 180, 140, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx + 4, by, bz, 2, (Color){ 120, 180, 140, 255 }, tag);
-    }
-    {
-        int bx = 10, by = 34, bz = -4;
-        int tag = 19;
-        for (int x = 0; x < 4; ++x) {
-            for (int z = 0; z < 4; ++z) {
-                if (((x + z) & 1) == 0) {
-                    add_dynamic_span_voxel_at_grid_tag(bx + x, by, bz + z, 1,
-                                                       (Color){ 180, 140, 160, 255 }, tag);
-                }
-            }
-        }
-    }
-    {
-        int bx = -22, by = 34, bz = -12;
-        int tag = 20;
-        add_dynamic_unit_block_tag(bx, by, bz, 1, 6, 1, (Color){ 160, 190, 230, 255 }, tag);
-    }
-    {
-        int bx = -14, by = 34, bz = -12;
-        int tag = 21;
-        add_dynamic_unit_block_tag(bx, by, bz, 1, 1, 6, (Color){ 180, 210, 170, 255 }, tag);
-    }
-    {
-        int bx = -6, by = 34, bz = -12;
-        int tag = 22;
-        add_dynamic_unit_block_tag(bx, by, bz, 1, 4, 4, (Color){ 140, 170, 200, 255 }, tag);
-    }
-    {
-        int bx = 2, by = 34, bz = -12;
-        int tag = 23;
-        add_dynamic_unit_block_tag(bx, by, bz, 4, 1, 4, (Color){ 200, 170, 140, 255 }, tag);
-    }
-    {
-        int bx = 12, by = 34, bz = -12;
-        int tag = 24;
-        add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 2, (Color){ 170, 140, 200, 255 }, tag);
-        add_dynamic_span_voxel_at_grid_tag(bx, by + 2, bz, 2, (Color){ 170, 140, 200, 255 }, tag);
-    }
+    // {
+    //     int bx = -16, by = 10, bz = -12;
+    //     int tag = 1;
+    //     add_dynamic_unit_block_tag(bx, by, bz, 2, 2, 2, (Color){ 210, 120, 90, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by, bz, 2, (Color){ 240, 160, 100, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx, by + 2, bz, 2, (Color){ 200, 90, 140, 255 }, tag);
+    // }
+    // {
+    //     int bx = 6, by = 12, bz = -10;
+    //     int tag = 2;
+    //     add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 4, (Color){ 180, 150, 80, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 4, by, bz, 2, (Color){ 220, 180, 90, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 4, bz + 1, 2, (Color){ 250, 210, 130, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 6, bz + 1, 1, (Color){ 240, 200, 120, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 6, bz + 2, 1, (Color){ 240, 200, 120, 255 }, tag);
+    // }
+    // {
+    //     int bx = -8, by = 16, bz = 6;
+    //     int tag = 3;
+    //     add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 2, (Color){ 90, 170, 230, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by, bz, 2, (Color){ 70, 140, 210, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 4, by, bz, 2, (Color){ 60, 120, 190, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 2, bz, 1, (Color){ 120, 200, 250, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 2, bz + 1, 1, (Color){ 120, 200, 250, 255 }, tag);
+    // }
+    // {
+    //     int bx = 10, by = 8, bz = 8;
+    //     int tag = 4;
+    //     add_dynamic_unit_block_tag(bx, by, bz, 3, 1, 3, (Color){ 140, 200, 140, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 1, bz + 1, 2, (Color){ 90, 170, 120, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 3, bz + 1, 1, (Color){ 60, 140, 90, 255 }, tag);
+    // }
+    // {
+    //     int bx = -2, by = 20, bz = -2;
+    //     int tag = 5;
+    //     add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 2, (Color){ 200, 120, 210, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by, bz, 2, (Color){ 170, 90, 180, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx, by + 2, bz, 1, (Color){ 210, 140, 230, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 2, bz, 1, (Color){ 210, 140, 230, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 2, bz, 1, (Color){ 210, 140, 230, 255 }, tag);
+    // }
+    // {
+    //     int bx = -14, by = 24, bz = 6;
+    //     int tag = 6;
+    //     add_dynamic_unit_block_tag(bx, by, bz, 3, 3, 3, (Color){ 200, 170, 110, 255 }, tag);
+    // }
+    // {
+    //     int bx = 2, by = 22, bz = 12;
+    //     int tag = 7;
+    //     add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 1, (Color){ 160, 210, 120, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 1, by, bz, 1, (Color){ 160, 210, 120, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by, bz, 1, (Color){ 160, 210, 120, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 3, by, bz, 1, (Color){ 160, 210, 120, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 4, by, bz, 1, (Color){ 160, 210, 120, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 1, bz, 1, (Color){ 120, 170, 90, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by - 1, bz, 1, (Color){ 120, 170, 90, 255 }, tag);
+    // }
+    // {
+    //     int bx = 12, by = 18, bz = -6;
+    //     int tag = 8;
+    //     add_dynamic_unit_block_tag(bx, by, bz, 3, 1, 3, (Color){ 120, 150, 220, 255 }, tag);
+    //     add_dynamic_unit_block_tag(bx, by + 2, bz, 3, 1, 3, (Color){ 120, 150, 220, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx, by + 1, bz, 1, (Color){ 80, 110, 200, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 1, bz, 1, (Color){ 80, 110, 200, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx, by + 1, bz + 2, 1, (Color){ 80, 110, 200, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 1, bz + 2, 1, (Color){ 80, 110, 200, 255 }, tag);
+    // }
+    // {
+    //     int bx = -6, by = 26, bz = -14;
+    //     int tag = 9;
+    //     add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 2, (Color){ 210, 140, 120, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 1, bz, 2, (Color){ 190, 120, 100, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 3, bz + 1, 1, (Color){ 230, 160, 130, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 3, by + 3, bz + 1, 1, (Color){ 230, 160, 130, 255 }, tag);
+    // }
+    // {
+    //     int bx = -20, by = 30, bz = 12;
+    //     int tag = 10;
+    //     add_dynamic_unit_block_tag(bx, by, bz, 2, 2, 2, (Color){ 200, 200, 200, 255 }, tag);
+    // }
+    // {
+    //     int bx = -10, by = 30, bz = 12;
+    //     int tag = 11;
+    //     add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 2, (Color){ 180, 180, 200, 255 }, tag);
+    // }
+    // {
+    //     int bx = 0, by = 30, bz = 12;
+    //     int tag = 12;
+    //     add_dynamic_unit_block_tag(bx, by, bz, 4, 1, 4, (Color){ 160, 180, 220, 255 }, tag);
+    // }
+    // {
+    //     int bx = 8, by = 30, bz = 14;
+    //     int tag = 13;
+    //     add_dynamic_unit_block_tag(bx, by, bz, 3, 1, 3, (Color){ 150, 160, 230, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 1, bz + 1, 1, (Color){ 110, 130, 210, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 1, by - 1, bz + 1, 1, (Color){ 110, 130, 210, 255 }, tag);
+    // }
+    // {
+    //     int bx = 18, by = 30, bz = 12;
+    //     int tag = 14;
+    //     add_dynamic_unit_block_tag(bx, by, bz, 1, 5, 1, (Color){ 200, 150, 130, 255 }, tag);
+    // }
+    // {
+    //     int bx = -22, by = 34, bz = -2;
+    //     int tag = 15;
+    //     add_dynamic_unit_block_tag(bx, by, bz, 4, 1, 4, (Color){ 130, 170, 210, 255 }, tag);
+    // }
+    // {
+    //     int bx = -14, by = 34, bz = -2;
+    //     int tag = 16;
+    //     add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 4, (Color){ 110, 150, 190, 255 }, tag);
+    // }
+    // {
+    //     int bx = -6, by = 34, bz = -2;
+    //     int tag = 17;
+    //     add_dynamic_unit_block_tag(bx, by, bz, 6, 1, 1, (Color){ 140, 200, 160, 255 }, tag);
+    // }
+    // {
+    //     int bx = 2, by = 34, bz = -2;
+    //     int tag = 18;
+    //     add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 4, (Color){ 120, 180, 140, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx + 4, by, bz, 2, (Color){ 120, 180, 140, 255 }, tag);
+    // }
+    // {
+    //     int bx = 10, by = 34, bz = -4;
+    //     int tag = 19;
+    //     for (int x = 0; x < 4; ++x) {
+    //         for (int z = 0; z < 4; ++z) {
+    //             if (((x + z) & 1) == 0) {
+    //                 add_dynamic_span_voxel_at_grid_tag(bx + x, by, bz + z, 1,
+    //                                                    (Color){ 180, 140, 160, 255 }, tag);
+    //             }
+    //         }
+    //     }
+    // }
+    // {
+    //     int bx = -22, by = 34, bz = -12;
+    //     int tag = 20;
+    //     add_dynamic_unit_block_tag(bx, by, bz, 1, 6, 1, (Color){ 160, 190, 230, 255 }, tag);
+    // }
+    // {
+    //     int bx = -14, by = 34, bz = -12;
+    //     int tag = 21;
+    //     add_dynamic_unit_block_tag(bx, by, bz, 1, 1, 6, (Color){ 180, 210, 170, 255 }, tag);
+    // }
+    // {
+    //     int bx = -6, by = 34, bz = -12;
+    //     int tag = 22;
+    //     add_dynamic_unit_block_tag(bx, by, bz, 1, 4, 4, (Color){ 140, 170, 200, 255 }, tag);
+    // }
+    // {
+    //     int bx = 2, by = 34, bz = -12;
+    //     int tag = 23;
+    //     add_dynamic_unit_block_tag(bx, by, bz, 4, 1, 4, (Color){ 200, 170, 140, 255 }, tag);
+    // }
+    // {
+    //     int bx = 12, by = 34, bz = -12;
+    //     int tag = 24;
+    //     add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 2, (Color){ 170, 140, 200, 255 }, tag);
+    //     add_dynamic_span_voxel_at_grid_tag(bx, by + 2, bz, 2, (Color){ 170, 140, 200, 255 }, tag);
+    // }
     // Floor
-    //int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
+    int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
     // for (int x = 0; x <= M; x++) {
     //     for (int z = 0; z <= M; z++) {
     //         float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
@@ -3436,30 +3436,30 @@ static void buildDemo(void) {
     // } 
 
     // Pillars
-    // int pillar_height = 10; // 45 - 10
-    // int pillar_radius = 3;
-    // int pillar_positions[4][2] = {
-    //     { M / 4, M / 4 },
-    //     { M / 4, 3 * M / 4 },
-    //     { 3 * M / 4, M / 4 },
-    //     { 3 * M / 4, 3 * M / 4 }
-    // };
+    int pillar_height = 10; // 45 - 10
+    int pillar_radius = 3;
+    int pillar_positions[4][2] = {
+        { M / 4, M / 4 },
+        { M / 4, 3 * M / 4 },
+        { 3 * M / 4, M / 4 },
+        { 3 * M / 4, 3 * M / 4 }
+    };
 
-    // for (int p = 0; p < 4; p++) {
-    //     int cx = pillar_positions[p][0];
-    //     int cz = pillar_positions[p][1];
-    //     for (int y = 1; y <= pillar_height; y++) {
-    //         for (int dx = -pillar_radius; dx <= pillar_radius; dx++) {
-    //             for (int dz = -pillar_radius; dz <= pillar_radius; dz++) {
-    //                 if (dx*dx + dz*dz > pillar_radius*pillar_radius) continue; // circular pillar
-    //                 float px = (cx + dx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //                 float py = (y + 0.5f) * VOXEL_SIZE;
-    //                 float pz = (cz + dz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //                 addVoxel(px, py, pz, true, false, (Color){ 200, 100, 50, 255 }, 0);
-    //             }
-    //         }
-    //     }
-    // }
+    for (int p = 0; p < 4; p++) {
+        int cx = pillar_positions[p][0];
+        int cz = pillar_positions[p][1];
+        for (int y = 1; y <= pillar_height; y++) {
+            for (int dx = -pillar_radius; dx <= pillar_radius; dx++) {
+                for (int dz = -pillar_radius; dz <= pillar_radius; dz++) {
+                    if (dx*dx + dz*dz > pillar_radius*pillar_radius) continue; // circular pillar
+                    float px = (cx + dx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                    float py = (y + 0.5f) * VOXEL_SIZE;
+                    float pz = (cz + dz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                    addVoxel(px, py, pz, true, false, (Color){ 200, 100, 50, 255 }, 0);
+                }
+            }
+        }
+    }
 
     //Central platform (n=1)
     // int platform_size = 10;
