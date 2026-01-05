@@ -1,4 +1,23 @@
 [INFO] Logging TraceLog output to fps_ray.log
-[INFO] [GlueClusterBreak] cluster=886 tag=0 size=125 new_clusters=3 primary=0 tag=0 size=1 secondary=1 tag=0 size=1
-[INFO] [GlueClusterBreak] cluster=984 tag=0 size=2 new_clusters=2 primary=984 tag=0 size=1 secondary=1000 tag=0 size=1
-[INFO] [GlueClusterBreak] cluster=1009 tag=0 size=33 new_clusters=2 primary=1000 tag=0 size=1 secondary=1009 tag=0 size=32
+[INFO] [Recycle] dynamic->static voxel=7389 owner=-1 life=3
+[INFO] [Recycle] dynamic->static voxel=7414 owner=-1 life=3
+[INFO] [Recycle] dynamic->static voxel=7418 owner=-1 life=3
+[INFO] [Recycle] dynamic->static voxel=7423 owner=-1 life=3
+[INFO] [Recycle] dynamic->static voxel=7424 owner=-1 life=3
+[INFO] [Recycle] dynamic->static voxel=7428 owner=-1 life=3
+[INFO] [Recycle] dynamic->static voxel=7444 owner=-1 life=3
+[INFO] [Recycle] dynamic->static voxel=7451 owner=-1 life=3
+[INFO] [Recycle] dynamic->static voxel=7481 owner=-1 life=3
+[INFO] [Recycle] dynamic->static voxel=7495 owner=-1 life=3
+[INFO] [Recycle] dynamic->static voxel=7500 owner=-1 life=3
+[INFO] [Recycle] dynamic->static voxel=7508 owner=-1 life=3
+[INFO] [Recycle] dynamic->static voxel=7509 owner=-1 life=3
+[INFO] [Recycle] dynamic->static voxel=7510 owner=-1 life=3
+[INFO] [Recycle] dynamic->static voxel=7511 owner=-1 life=3
+[INFO] [Recycle] dynamic->static voxel=7403 owner=-1 life=4
+[INFO] [Recycle] dynamic->static voxel=7496 owner=-1 life=4
+[INFO] [Recycle] dynamic->static voxel=7385 owner=-1 life=5
+[INFO] [Recycle] dynamic->static voxel=7388 owner=-1 life=5
+[INFO] [Recycle] dynamic->static voxel=7452 owner=-1 life=5
+[INFO] [Recycle] dynamic->static voxel=7475 owner=-1 life=5
+[INFO] [Recycle] dynamic->static voxel=7507 owner=-1 life=5

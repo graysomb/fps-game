@@ -52,7 +52,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define ACTIVATION_GLUE_WEIGHT     0.35f
 #define ACTIVATION_GLUE_REF_SPEED  3.0f
 #define ACTIVATION_DYNAMIC_WEIGHT  0.9f
-#define FREEZE_BELIEF_IMPORTANCE   0.1f
+#define FREEZE_BELIEF_IMPORTANCE   0.9f
 #define ACTIVATION_HYSTERESIS      0.1f
 #define FRICTION       400.0f    // ground friction deceleration
 #define TURN_ACCELERATION 400.0f
@@ -80,6 +80,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 4
 #define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
 #define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
+#define RECYCLE_DYNAMIC_MAX_FRAMES (60 * 30)
+#define RECYCLE_STATIC_RESTORE_INTERVAL 60
 #define VOXEL_SPLIT_STRAIN_THRESHOLD 0.6f
 #define VOXEL_SPLIT_SHEAR_THRESHOLD 0.6f
 #define VOXEL_HASH_REBUILD_INTERVAL 2
@@ -90,15 +92,15 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define MAX_FACE_NEIGHBORS   64
 #define MAX_SPLIT_CHILDREN    8
 static const float GRID_EPSILON = 1e-4f;
-#define VOXEL_ACTIVATION_RADIUS 2*3
+#define VOXEL_ACTIVATION_RADIUS 2*1
 //#define VOXEL_ACTIVATION_UNIT_BUDGET 128
-#define VOXEL_ACTIVATION_UNIT_BUDGET 128*3
-#define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 1.0f
-#define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.2f
-#define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.2f
+#define VOXEL_ACTIVATION_UNIT_BUDGET 128*1
+#define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 2.0f
+#define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.4f
+#define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.4f
 #define VOXEL_DEACTIVATION_FRAMES 10
-#define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*3
-#define STATIC_RESTORE_SEARCH_RADIUS 2*3
+#define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*1
+#define STATIC_RESTORE_SEARCH_RADIUS 2*1
 
 // KD-stats constants
 #define BASE_HEALTH 100
@@ -163,6 +165,9 @@ typedef struct {
     int  rest_min_gx, rest_max_gx;
     int  rest_min_gy, rest_max_gy;
     int  rest_min_gz, rest_max_gz;
+    int  orig_min_gx, orig_max_gx;
+    int  orig_min_gy, orig_max_gy;
+    int  orig_min_gz, orig_max_gz;
     Particle particles[8];
     float rest_volume;
     float rest_edge;
@@ -174,6 +179,7 @@ typedef struct {
     uint8_t neighborSupport;
     uint8_t supportMask;
     uint8_t skipCollisionVelocityFrames;
+    int lifeFrames;
     int debugClusterTag;
     int prevGlueClusterId;
     int prevGlueClusterSize;
@@ -199,6 +205,11 @@ static bool staticBeliefsForceFullRefresh = false;
 static const int DEBUG_SPAN2_FACE_LOG_INIT = 32;
 static int debugSpan2FaceLogBudget = 0;
 static bool debugLogSpan2Faces = false;
+static Voxel recycleQueue[MAX_VOXELS];
+static int recycleQueueHead = 0;
+static int recycleQueueTail = 0;
+static int recycleQueueCount = 0;
+static int recycleFrameCounter = 0;
 static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Color color, int type);
 static void rebuild_voxel_hash(void);
 static void voxel_measure_strain(const Voxel *voxel,
@@ -327,7 +338,9 @@ static bool debugLogSpanCollisions = false;
 static int debugSpanEdgeLogBudget = 0;
 static int debugSpanCollisionLogBudget = 0;
 static bool debugLogGlue = false;
-static bool debugLogGlueClusters = true;
+static bool debugLogGlueClusters = false;
+static bool debugLogDynamicVoxels = false;
+static bool debugLogVoxelRecycle = true;
 static bool debugLogClusterBreaksOnly = true;
 static int debugGlueBuildLogBudget = 0;
 static int debugGlueSolveLogBudget = 0;
@@ -401,6 +414,12 @@ static bool debug_should_log_message(const char *text) {
         return true;
     }
     if (strstr(text, "[GlueTagBreak]")) {
+        return true;
+    }
+    if (strstr(text, "[Recycle]")) {
+        return true;
+    }
+    if (strstr(text, "[DynamicVoxel]")) {
         return true;
     }
     if (strstr(text, "Logging TraceLog output to")) {
@@ -1790,6 +1809,8 @@ static void init_voxel_struct(Voxel *v,
     v->max_gx = v->max_gy = v->max_gz = INT_MIN;
     v->rest_min_gx = v->rest_min_gy = v->rest_min_gz = INT_MAX;
     v->rest_max_gx = v->rest_max_gy = v->rest_max_gz = INT_MIN;
+    v->orig_min_gx = v->orig_min_gy = v->orig_min_gz = INT_MAX;
+    v->orig_max_gx = v->orig_max_gy = v->orig_max_gz = INT_MIN;
     v->gx = (int)floorf(px / VOXEL_SIZE);
     v->gy = (int)floorf(py / VOXEL_SIZE);
     v->gz = (int)floorf(pz / VOXEL_SIZE);
@@ -1823,6 +1844,12 @@ static void init_voxel_struct(Voxel *v,
     v->rest_max_gy = rest_maxy;
     v->rest_min_gz = rest_minz;
     v->rest_max_gz = rest_maxz;
+    v->orig_min_gx = rest_minx;
+    v->orig_max_gx = rest_maxx;
+    v->orig_min_gy = rest_miny;
+    v->orig_max_gy = rest_maxy;
+    v->orig_min_gz = rest_minz;
+    v->orig_max_gz = rest_maxz;
     v->sleepFrames = 0;
     v->freezeBelief = 0.0f;
     v->activationBelief = 0.0f;
@@ -1830,6 +1857,7 @@ static void init_voxel_struct(Voxel *v,
     v->neighborSupport = 0;
     v->supportMask = 0;
     v->skipCollisionVelocityFrames = 0;
+    v->lifeFrames = 0;
     v->debugClusterTag = 0;
     v->prevGlueClusterId = -1;
     v->prevGlueClusterSize = 0;
@@ -2404,6 +2432,9 @@ static bool restore_dynamic_snapshot(const Voxel *snapshot)
         return false;
     }
     voxels[voxel_count] = *snapshot;
+    if (voxels[voxel_count].simulate) {
+        voxels[voxel_count].lifeFrames = 0;
+    }
     table_cache_invalidate();
     voxel_table_register(&voxels[voxel_count], voxel_count);
     ++voxel_count;
@@ -2417,6 +2448,210 @@ static bool cell_contains_static_voxel(int x, int y, int z)
         return false;
     }
     return !voxels[idx].simulate;
+}
+
+static bool recycle_queue_push(const Voxel *voxel) {
+    if (!voxel || recycleQueueCount >= MAX_VOXELS) {
+        return false;
+    }
+    recycleQueue[recycleQueueTail] = *voxel;
+    recycleQueueTail = (recycleQueueTail + 1) % MAX_VOXELS;
+    ++recycleQueueCount;
+    return true;
+}
+
+static bool recycle_queue_pop(Voxel *out) {
+    if (!out || recycleQueueCount <= 0) {
+        return false;
+    }
+    *out = recycleQueue[recycleQueueHead];
+    recycleQueueHead = (recycleQueueHead + 1) % MAX_VOXELS;
+    --recycleQueueCount;
+    return true;
+}
+
+static bool voxel_is_at_rest_location(const Voxel *voxel) {
+    if (!voxel) {
+        return true;
+    }
+    int minx, maxx, miny, maxy, minz, maxz;
+    voxel_grid_bounds(voxel, &minx, &maxx, &miny, &maxy, &minz, &maxz);
+    if (voxel->orig_min_gx <= voxel->orig_max_gx &&
+        voxel->orig_min_gy <= voxel->orig_max_gy &&
+        voxel->orig_min_gz <= voxel->orig_max_gz) {
+        return (minx == voxel->orig_min_gx && maxx == voxel->orig_max_gx &&
+                miny == voxel->orig_min_gy && maxy == voxel->orig_max_gy &&
+                minz == voxel->orig_min_gz && maxz == voxel->orig_max_gz);
+    }
+    return (minx == voxel->rest_min_gx && maxx == voxel->rest_max_gx &&
+            miny == voxel->rest_min_gy && maxy == voxel->rest_max_gy &&
+            minz == voxel->rest_min_gz && maxz == voxel->rest_max_gz);
+}
+
+static bool voxel_outside_world_bounds(const Voxel *voxel) {
+    if (!voxel) {
+        return false;
+    }
+    VoxelWorldBounds bounds;
+    voxel_world_bounds(voxel, &bounds);
+    if (bounds.maxx < -FLOOR_SIZE || bounds.minx > FLOOR_SIZE) {
+        return true;
+    }
+    if (bounds.maxz < -FLOOR_SIZE || bounds.minz > FLOOR_SIZE) {
+        return true;
+    }
+    if (bounds.maxy < -VOXEL_SIZE || bounds.miny > (FLOOR_SIZE * 2.0f)) {
+        return true;
+    }
+    return false;
+}
+
+static bool spawn_static_at_rest(const Voxel *snapshot) {
+    if (!snapshot) {
+        return false;
+    }
+    int minx = snapshot->rest_min_gx;
+    int maxx = snapshot->rest_max_gx;
+    int miny = snapshot->rest_min_gy;
+    int maxy = snapshot->rest_max_gy;
+    int minz = snapshot->rest_min_gz;
+    int maxz = snapshot->rest_max_gz;
+    if (snapshot->orig_min_gx <= snapshot->orig_max_gx &&
+        snapshot->orig_min_gy <= snapshot->orig_max_gy &&
+        snapshot->orig_min_gz <= snapshot->orig_max_gz) {
+        minx = snapshot->orig_min_gx;
+        maxx = snapshot->orig_max_gx;
+        miny = snapshot->orig_min_gy;
+        maxy = snapshot->orig_max_gy;
+        minz = snapshot->orig_min_gz;
+        maxz = snapshot->orig_max_gz;
+    }
+    if (minx > maxx || miny > maxy || minz > maxz) {
+        return false;
+    }
+    if (!grid_region_is_free(minx, maxx, miny, maxy, minz, maxz)) {
+        return false;
+    }
+
+    float center_x = 0.5f * ((float)minx + (float)maxx + 1.0f);
+    float center_y = 0.5f * ((float)miny + (float)maxy + 1.0f);
+    float center_z = 0.5f * ((float)minz + (float)maxz + 1.0f);
+    float px = center_x * VOXEL_SIZE;
+    float py = center_y * VOXEL_SIZE;
+    float pz = center_z * VOXEL_SIZE;
+    int span = (snapshot->span > 0) ? snapshot->span : 1;
+
+    int idx = addVoxelSized(px, py, pz, true, false, snapshot->color, snapshot->type, span);
+    if (idx < 0) {
+        return false;
+    }
+    voxels[idx].owner = snapshot->owner;
+    if (snapshot->orig_min_gx <= snapshot->orig_max_gx &&
+        snapshot->orig_min_gy <= snapshot->orig_max_gy &&
+        snapshot->orig_min_gz <= snapshot->orig_max_gz) {
+        voxels[idx].orig_min_gx = snapshot->orig_min_gx;
+        voxels[idx].orig_max_gx = snapshot->orig_max_gx;
+        voxels[idx].orig_min_gy = snapshot->orig_min_gy;
+        voxels[idx].orig_max_gy = snapshot->orig_max_gy;
+        voxels[idx].orig_min_gz = snapshot->orig_min_gz;
+        voxels[idx].orig_max_gz = snapshot->orig_max_gz;
+    }
+    return true;
+}
+
+static void recycle_dead_voxels(void) {
+    recycleFrameCounter++;
+    bool changed = false;
+
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (!voxel->simulate) {
+            continue;
+        }
+        voxel->lifeFrames++;
+        if (voxel->lifeFrames > RECYCLE_DYNAMIC_MAX_FRAMES ||
+            voxel_outside_world_bounds(voxel))
+        {
+            if (debugLogVoxelRecycle) {
+                TraceLog(LOG_INFO,
+                         "[Recycle] dynamic->static voxel=%d owner=%d life=%d",
+                         i, voxel->owner, voxel->lifeFrames);
+            }
+            restore_dynamic_voxel_to_static(i);
+            changed = true;
+            --i;
+        }
+    }
+
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (voxel->simulate) {
+            continue;
+        }
+        if (voxel->owner != -1) {
+            if (debugLogVoxelRecycle) {
+                TraceLog(LOG_INFO,
+                         "[Recycle] remove-owned-static voxel=%d owner=%d",
+                         i, voxel->owner);
+            }
+            remove_voxel_index(i);
+            changed = true;
+            --i;
+            continue;
+        }
+        if (!voxel_is_at_rest_location(voxel)) {
+            if (recycle_queue_push(voxel)) {
+                if (debugLogVoxelRecycle) {
+                    TraceLog(LOG_INFO,
+                             "[Recycle] enqueue-static voxel=%d span=%d rest=(%d..%d,%d..%d,%d..%d)",
+                             i, voxel->span,
+                             voxel->rest_min_gx, voxel->rest_max_gx,
+                             voxel->rest_min_gy, voxel->rest_max_gy,
+                             voxel->rest_min_gz, voxel->rest_max_gz);
+                }
+                remove_voxel_index(i);
+                changed = true;
+                --i;
+            }
+        }
+    }
+
+    if ((recycleFrameCounter % RECYCLE_STATIC_RESTORE_INTERVAL) == 0 &&
+        recycleQueueCount > 0)
+    {
+        Voxel snapshot;
+        if (recycle_queue_pop(&snapshot)) {
+            if (!spawn_static_at_rest(&snapshot)) {
+                if (debugLogVoxelRecycle) {
+                    TraceLog(LOG_INFO,
+                             "[Recycle] restore-failed span=%d rest=(%d..%d,%d..%d,%d..%d) queue=%d",
+                             snapshot.span,
+                             snapshot.rest_min_gx, snapshot.rest_max_gx,
+                             snapshot.rest_min_gy, snapshot.rest_max_gy,
+                             snapshot.rest_min_gz, snapshot.rest_max_gz,
+                             recycleQueueCount);
+                }
+                recycle_queue_push(&snapshot);
+            } else {
+                if (debugLogVoxelRecycle) {
+                    TraceLog(LOG_INFO,
+                             "[Recycle] restore-ok span=%d rest=(%d..%d,%d..%d,%d..%d) queue=%d",
+                             snapshot.span,
+                             snapshot.rest_min_gx, snapshot.rest_max_gx,
+                             snapshot.rest_min_gy, snapshot.rest_max_gy,
+                             snapshot.rest_min_gz, snapshot.rest_max_gz,
+                             recycleQueueCount);
+                }
+                changed = true;
+            }
+        }
+    }
+
+    if (changed) {
+        rebuild_voxel_hash();
+        rebuild_all_voxel_surfaces();
+        meshDirty = true;
+    }
 }
 
 static bool line_contains_static_along_x(int x, int miny, int maxy, int minz, int maxz)
@@ -3427,13 +3662,13 @@ static void buildDemo(void) {
     // }
     // Floor
     int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
-    // for (int x = 0; x <= M; x++) {
-    //     for (int z = 0; z <= M; z++) {
-    //         float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //         float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //         addVoxel(px, 0, pz, true, false, (Color){ 150, 150, 150, 255 }, 0);
-    //     }
-    // } 
+    for (int x = 0; x <= M; x++) {
+        for (int z = 0; z <= M; z++) {
+            float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+            float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+            addVoxel(px, 0, pz, true, false, (Color){ 150, 150, 150, 255 }, 0);
+        }
+    } 
 
     // Pillars
     int pillar_height = 10; // 45 - 10
@@ -4332,6 +4567,24 @@ static void solve_voxel_glue(void) {
     }
     if (glue_break) {
         mark_glue_adjacency_dirty();
+    }
+}
+
+static void log_dynamic_voxel_positions(void) {
+    if (!debugLogDynamicVoxels) {
+        return;
+    }
+    for (int i = 0; i < voxel_count; ++i) {
+        const Voxel *voxel = &voxels[i];
+        if (!voxel->simulate) {
+            continue;
+        }
+        TraceLog(LOG_INFO,
+                 "[DynamicVoxel] voxel=%d pos=(%.3f,%.3f,%.3f) vel=(%.3f,%.3f,%.3f) span=%d",
+                 i,
+                 voxel->pos.x, voxel->pos.y, voxel->pos.z,
+                 voxel->vel.x, voxel->vel.y, voxel->vel.z,
+                 voxel->span);
     }
 }
 
@@ -6449,6 +6702,8 @@ void simulate_voxel_pbd(float dt) {
         }
         update_particle_velocities(sub_dt);
     }
+
+    log_dynamic_voxel_positions();
 }
 
 /*
@@ -7505,6 +7760,7 @@ int main(void) {
         }
         update_projectiles(dt);
         simulate_voxel_pbd(dt);
+        recycle_dead_voxels();
         log_dynamic_glue_cluster_breaks();
         handle_pbd_projectile_hits();
         voxelHashFramesSinceRebuild++;
