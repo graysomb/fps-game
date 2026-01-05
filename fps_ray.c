@@ -172,14 +172,19 @@ typedef struct {
     uint8_t neighborSupport;
     uint8_t supportMask;
     uint8_t skipCollisionVelocityFrames;
+    int debugClusterTag;
+    int prevGlueClusterId;
+    int prevGlueClusterSize;
+    int prevGlueClusterTag;
+    uint8_t prevGlueClusterValid;
 } Voxel;
 static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
 static int glueClusterIndices[MAX_VOXELS];
 static unsigned char glueClusterVisited[MAX_VOXELS];
-static int prevDynamicGlueClusterId[MAX_VOXELS];
-static int prevDynamicGlueClusterSize[MAX_VOXELS];
 static bool dynamicGlueClustersInitialized = false;
+#define DEBUG_CLUSTER_TAG_MAX 64
+static int debugTagOffset[DEBUG_CLUSTER_TAG_MAX][3];
 static float freezeBeliefScratch[MAX_VOXELS];
 static uint8_t freezeBoundaryFlags[MAX_VOXELS];
 static uint8_t staticBeliefDirty[MAX_VOXELS];
@@ -209,6 +214,7 @@ typedef struct {
     int type;
     bool fixed;
     int voxelIndex;
+    int debugTag;
 } UnitVoxelSeed;
 
 typedef struct {
@@ -260,7 +266,8 @@ static void unit_voxel_buffer_clear(UnitVoxelBuffer *buffer) {
 static bool unit_voxel_buffer_push(UnitVoxelBuffer *buffer,
                                    int gx, int gy, int gz,
                                    Color color, int type,
-                                   bool fixed, int voxelIndex)
+                                   bool fixed, int voxelIndex,
+                                   int debugTag)
 {
     if (!buffer || buffer->count >= MAX_VOXELS) {
         return false;
@@ -272,7 +279,8 @@ static bool unit_voxel_buffer_push(UnitVoxelBuffer *buffer,
         .color = color,
         .type = type,
         .fixed = fixed,
-        .voxelIndex = voxelIndex
+        .voxelIndex = voxelIndex,
+        .debugTag = debugTag
     };
     return true;
 }
@@ -335,6 +343,7 @@ static FILE *debugLogFile = NULL;
 static int debugSupportLogBudget = 512;
 static const float DEBUG_FALL_LOG_THRESHOLD = -5.0f;
 static const int DEBUG_FALL_LOG_BUDGET = 32;
+static unsigned char debugTagBreakLogged[DEBUG_CLUSTER_TAG_MAX];
 
 static const char *trace_level_label(int level) {
     switch (level) {
@@ -348,6 +357,26 @@ static const char *trace_level_label(int level) {
     }
 }
 
+static const char *debug_cluster_tag_label(int tag) {
+    switch (tag) {
+        case 1: return "corner-chunk";
+        case 2: return "stacked-pillar";
+        case 3: return "three-span-bar";
+        case 4: return "plate-cap";
+        case 5: return "step-chain";
+        case 6: return "solid-cube";
+        case 7: return "long-beam";
+        case 8: return "brace-frame";
+        case 9: return "staggered-stack";
+        case 10: return "unit-cube-control";
+        case 11: return "single-span-control";
+        case 12: return "thin-slab";
+        case 13: return "flat-cross";
+        case 14: return "vertical-column";
+        default: return "unlabeled";
+    }
+}
+
 static bool debug_should_log_message(const char *text) {
     if (!debugLogClusterBreaksOnly) {
         return true;
@@ -356,6 +385,9 @@ static bool debug_should_log_message(const char *text) {
         return false;
     }
     if (strstr(text, "[GlueClusterBreak]")) {
+        return true;
+    }
+    if (strstr(text, "[GlueTagBreak]")) {
         return true;
     }
     if (strstr(text, "Logging TraceLog output to")) {
@@ -1761,6 +1793,11 @@ static void init_voxel_struct(Voxel *v,
     v->neighborSupport = 0;
     v->supportMask = 0;
     v->skipCollisionVelocityFrames = 0;
+    v->debugClusterTag = 0;
+    v->prevGlueClusterId = -1;
+    v->prevGlueClusterSize = 0;
+    v->prevGlueClusterTag = 0;
+    v->prevGlueClusterValid = 0;
 }
 
 static int addVoxelSized(float px, float py, float pz, bool fixed, bool simulate,
@@ -1868,11 +1905,13 @@ static int emit_multiscale_voxels_from_units(const UnitVoxelBuffer *buffer,
     unsigned char *consumed = (unsigned char *)calloc(cell_count, sizeof(unsigned char));
     Color *color_grid = (Color *)malloc(cell_count * sizeof(Color));
     int *type_grid = (int *)malloc(cell_count * sizeof(int));
-    if (!occupied || !consumed || !color_grid || !type_grid) {
+    int *tag_grid = (int *)malloc(cell_count * sizeof(int));
+    if (!occupied || !consumed || !color_grid || !type_grid || !tag_grid) {
         free(occupied);
         free(consumed);
         free(color_grid);
         free(type_grid);
+        free(tag_grid);
         TraceLog(LOG_WARNING, "[Multiscale] Failed to allocate voxel mask (%dx%dx%d)", dimx, dimy, dimz);
         return 0;
     }
@@ -1887,6 +1926,7 @@ static int emit_multiscale_voxels_from_units(const UnitVoxelBuffer *buffer,
         occupied[idx] = 1;
         color_grid[idx] = seed->color;
         type_grid[idx] = (type_override >= 0) ? type_override : seed->type;
+        tag_grid[idx] = seed->debugTag;
     }
 
     int spawned = 0;
@@ -1901,6 +1941,7 @@ static int emit_multiscale_voxels_from_units(const UnitVoxelBuffer *buffer,
                 int span = maximal_cube_span_at(x, y, z, occupied, consumed, dimx, dimy, dimz);
                 Color color = color_grid[cell_idx];
                 int spawn_type = type_grid[cell_idx];
+                int spawn_tag = tag_grid[cell_idx];
 
                 for (int dz = 0; dz < span; ++dz) {
                     for (int dy = 0; dy < span; ++dy) {
@@ -1918,7 +1959,10 @@ static int emit_multiscale_voxels_from_units(const UnitVoxelBuffer *buffer,
                 float px = ((float)gx + 0.5f * (float)span) * VOXEL_SIZE;
                 float py = ((float)gy + 0.5f * (float)span) * VOXEL_SIZE;
                 float pz = ((float)gz + 0.5f * (float)span) * VOXEL_SIZE;
-                addVoxelSized(px, py, pz, fixed, simulate, color, spawn_type, span);
+                int new_idx = addVoxelSized(px, py, pz, fixed, simulate, color, spawn_type, span);
+                if (new_idx >= 0) {
+                    voxels[new_idx].debugClusterTag = spawn_tag;
+                }
                 TraceLog(LOG_INFO,
                          "[Multiscale] Emit span=%d grid=(%d..%d,%d..%d,%d..%d) pos=(%.2f,%.2f,%.2f)",
                          span,
@@ -1935,6 +1979,7 @@ static int emit_multiscale_voxels_from_units(const UnitVoxelBuffer *buffer,
     free(consumed);
     free(color_grid);
     free(type_grid);
+    free(tag_grid);
 
     TraceLog(LOG_INFO,
              "[Multiscale] Converted %d unit voxels into %d span clusters",
@@ -1949,7 +1994,10 @@ static void emit_static_voxels_from_units(const UnitVoxelBuffer *buffer)
     }
     for (int i = 0; i < buffer->count; ++i) {
         const UnitVoxelSeed *seed = &buffer->voxels[i];
-        add_static_voxel_at_grid(seed->gx, seed->gy, seed->gz, seed->color, seed->type);
+        int idx = add_static_voxel_at_grid(seed->gx, seed->gy, seed->gz, seed->color, seed->type);
+        if (idx >= 0) {
+            voxels[idx].debugClusterTag = seed->debugTag;
+        }
     }
 }
 
@@ -2012,7 +2060,8 @@ static bool activation_try_enqueue(int voxel_idx,
     if (!unit_voxel_buffer_push(buffer,
                                 candidate->gx, candidate->gy, candidate->gz,
                                 candidate->color, candidate->type,
-                                candidate->fixed, voxel_idx))
+                                candidate->fixed, voxel_idx,
+                                candidate->debugClusterTag))
     {
         candidate->pendingActivation = false;
         return false;
@@ -3089,7 +3138,7 @@ static void build_oblique_voxel_pyramid(UnitVoxelBuffer *buffer) {
 
         for (int gx = min_x; gx <= max_x; ++gx) {
             for (int gz = min_z; gz <= max_z; ++gz) {
-                if (!unit_voxel_buffer_push(buffer, gx, layer_y, gz, col, 0, true, -1)) {
+                if (!unit_voxel_buffer_push(buffer, gx, layer_y, gz, col, 0, true, -1, 0)) {
                     TraceLog(LOG_WARNING, "[Pyramid] Unit voxel buffer full");
                     return;
                 }
@@ -3102,65 +3151,215 @@ static float grid_span_center(int min_g, int span) {
     return (min_g + 0.5f * (float)span) * VOXEL_SIZE;
 }
 
-static void add_dynamic_span_voxel_at_grid(int minx, int miny, int minz,
-                                           int span, Color color)
+static void apply_debug_tag_offset(int tag, int *x, int *y, int *z)
 {
+    if (tag <= 0 || tag >= DEBUG_CLUSTER_TAG_MAX) {
+        return;
+    }
+    if (x) *x += debugTagOffset[tag][0];
+    if (y) *y += debugTagOffset[tag][1];
+    if (z) *z += debugTagOffset[tag][2];
+}
+
+static void init_debug_tag_offsets(void)
+{
+    memset(debugTagOffset, 0, sizeof(debugTagOffset));
+    const int spacing = 16;
+    const int cols = 5;
+    const int max_tag = 19;
+    for (int tag = 1; tag <= max_tag; ++tag) {
+        int idx = tag - 1;
+        int col = idx % cols;
+        int row = idx / cols;
+        debugTagOffset[tag][0] = col * spacing;
+        debugTagOffset[tag][1] = 0;
+        debugTagOffset[tag][2] = row * spacing;
+    }
+}
+
+static int add_dynamic_span_voxel_at_grid_tag(int minx, int miny, int minz,
+                                              int span, Color color, int debugTag)
+{
+    apply_debug_tag_offset(debugTag, &minx, &miny, &minz);
     float px = grid_span_center(minx, span);
     float py = grid_span_center(miny, span);
     float pz = grid_span_center(minz, span);
-    addVoxelSized(px, py, pz, false, true, color, 0, span);
+    int idx = addVoxelSized(px, py, pz, false, true, color, 0, span);
+    if (idx >= 0) {
+        voxels[idx].debugClusterTag = debugTag;
+    }
+    return idx;
 }
 
-static void add_dynamic_unit_block(int minx, int miny, int minz,
-                                   int sx, int sy, int sz, Color color)
+static void add_dynamic_span_voxel_at_grid(int minx, int miny, int minz,
+                                           int span, Color color)
 {
+    add_dynamic_span_voxel_at_grid_tag(minx, miny, minz, span, color, 0);
+}
+
+static void add_dynamic_unit_block_tag(int minx, int miny, int minz,
+                                       int sx, int sy, int sz, Color color,
+                                       int debugTag)
+{
+    apply_debug_tag_offset(debugTag, &minx, &miny, &minz);
     for (int x = 0; x < sx; ++x) {
         for (int y = 0; y < sy; ++y) {
             for (int z = 0; z < sz; ++z) {
-                add_dynamic_span_voxel_at_grid(minx + x, miny + y, minz + z, 1, color);
+                add_dynamic_span_voxel_at_grid_tag(minx + x, miny + y, minz + z,
+                                                   1, color, debugTag);
             }
         }
     }
 }
 
+static void add_dynamic_unit_block(int minx, int miny, int minz,
+                                   int sx, int sy, int sz, Color color)
+{
+    add_dynamic_unit_block_tag(minx, miny, minz, sx, sy, sz, color, 0);
+}
+
 // Build static demo cube of voxels
 static void buildDemo(void) {
+    init_debug_tag_offsets();
     // Floating dynamic test clusters (mixed span sizes, zero initial glue stress).
+    // Debug tags: 1=corner chunk, 2=stacked pillar, 3=three-span bar, 4=plate+cap,
+    // 5=step chain, 6=solid cube, 7=long beam, 8=brace frame, 9=staggered stack,
+    // 10=unit cube control, 11=single span control, 12=thin slab, 13=flat cross, 14=vertical column,
+    // 15=slab as units, 16=slab as span-4, 17=beam as units, 18=beam as span-4, 19=checker slab.
     {
         int bx = -16, by = 10, bz = -12;
-        add_dynamic_unit_block(bx, by, bz, 2, 2, 2, (Color){ 210, 120, 90, 255 });
-        add_dynamic_span_voxel_at_grid(bx + 2, by, bz, 2, (Color){ 240, 160, 100, 255 });
-        add_dynamic_span_voxel_at_grid(bx, by + 2, bz, 2, (Color){ 200, 90, 140, 255 });
+        int tag = 1;
+        add_dynamic_unit_block_tag(bx, by, bz, 2, 2, 2, (Color){ 210, 120, 90, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 2, by, bz, 2, (Color){ 240, 160, 100, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx, by + 2, bz, 2, (Color){ 200, 90, 140, 255 }, tag);
     }
     {
         int bx = 6, by = 12, bz = -10;
-        add_dynamic_span_voxel_at_grid(bx, by, bz, 4, (Color){ 180, 150, 80, 255 });
-        add_dynamic_span_voxel_at_grid(bx + 4, by, bz, 2, (Color){ 220, 180, 90, 255 });
-        add_dynamic_span_voxel_at_grid(bx + 1, by + 4, bz + 1, 2, (Color){ 250, 210, 130, 255 });
-        add_dynamic_span_voxel_at_grid(bx + 1, by + 6, bz + 1, 1, (Color){ 240, 200, 120, 255 });
-        add_dynamic_span_voxel_at_grid(bx + 2, by + 6, bz + 2, 1, (Color){ 240, 200, 120, 255 });
+        int tag = 2;
+        add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 4, (Color){ 180, 150, 80, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 4, by, bz, 2, (Color){ 220, 180, 90, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 4, bz + 1, 2, (Color){ 250, 210, 130, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 6, bz + 1, 1, (Color){ 240, 200, 120, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 6, bz + 2, 1, (Color){ 240, 200, 120, 255 }, tag);
     }
     {
         int bx = -8, by = 16, bz = 6;
-        add_dynamic_span_voxel_at_grid(bx, by, bz, 2, (Color){ 90, 170, 230, 255 });
-        add_dynamic_span_voxel_at_grid(bx + 2, by, bz, 2, (Color){ 70, 140, 210, 255 });
-        add_dynamic_span_voxel_at_grid(bx + 4, by, bz, 2, (Color){ 60, 120, 190, 255 });
-        add_dynamic_span_voxel_at_grid(bx + 2, by + 2, bz, 1, (Color){ 120, 200, 250, 255 });
-        add_dynamic_span_voxel_at_grid(bx + 2, by + 2, bz + 1, 1, (Color){ 120, 200, 250, 255 });
+        int tag = 3;
+        add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 2, (Color){ 90, 170, 230, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 2, by, bz, 2, (Color){ 70, 140, 210, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 4, by, bz, 2, (Color){ 60, 120, 190, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 2, bz, 1, (Color){ 120, 200, 250, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 2, bz + 1, 1, (Color){ 120, 200, 250, 255 }, tag);
     }
     {
         int bx = 10, by = 8, bz = 8;
-        add_dynamic_unit_block(bx, by, bz, 3, 1, 3, (Color){ 140, 200, 140, 255 });
-        add_dynamic_span_voxel_at_grid(bx + 1, by + 1, bz + 1, 2, (Color){ 90, 170, 120, 255 });
-        add_dynamic_span_voxel_at_grid(bx + 1, by + 3, bz + 1, 1, (Color){ 60, 140, 90, 255 });
+        int tag = 4;
+        add_dynamic_unit_block_tag(bx, by, bz, 3, 1, 3, (Color){ 140, 200, 140, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 1, bz + 1, 2, (Color){ 90, 170, 120, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 3, bz + 1, 1, (Color){ 60, 140, 90, 255 }, tag);
     }
     {
         int bx = -2, by = 20, bz = -2;
-        add_dynamic_span_voxel_at_grid(bx, by, bz, 2, (Color){ 200, 120, 210, 255 });
-        add_dynamic_span_voxel_at_grid(bx + 2, by, bz, 2, (Color){ 170, 90, 180, 255 });
-        add_dynamic_span_voxel_at_grid(bx, by + 2, bz, 1, (Color){ 210, 140, 230, 255 });
-        add_dynamic_span_voxel_at_grid(bx + 1, by + 2, bz, 1, (Color){ 210, 140, 230, 255 });
-        add_dynamic_span_voxel_at_grid(bx + 2, by + 2, bz, 1, (Color){ 210, 140, 230, 255 });
+        int tag = 5;
+        add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 2, (Color){ 200, 120, 210, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 2, by, bz, 2, (Color){ 170, 90, 180, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx, by + 2, bz, 1, (Color){ 210, 140, 230, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 2, bz, 1, (Color){ 210, 140, 230, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 2, bz, 1, (Color){ 210, 140, 230, 255 }, tag);
+    }
+    {
+        int bx = -14, by = 24, bz = 6;
+        int tag = 6;
+        add_dynamic_unit_block_tag(bx, by, bz, 3, 3, 3, (Color){ 200, 170, 110, 255 }, tag);
+    }
+    {
+        int bx = 2, by = 22, bz = 12;
+        int tag = 7;
+        add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 1, (Color){ 160, 210, 120, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 1, by, bz, 1, (Color){ 160, 210, 120, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 2, by, bz, 1, (Color){ 160, 210, 120, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 3, by, bz, 1, (Color){ 160, 210, 120, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 4, by, bz, 1, (Color){ 160, 210, 120, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 1, bz, 1, (Color){ 120, 170, 90, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 2, by - 1, bz, 1, (Color){ 120, 170, 90, 255 }, tag);
+    }
+    {
+        int bx = 12, by = 18, bz = -6;
+        int tag = 8;
+        add_dynamic_unit_block_tag(bx, by, bz, 3, 1, 3, (Color){ 120, 150, 220, 255 }, tag);
+        add_dynamic_unit_block_tag(bx, by + 2, bz, 3, 1, 3, (Color){ 120, 150, 220, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx, by + 1, bz, 1, (Color){ 80, 110, 200, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 1, bz, 1, (Color){ 80, 110, 200, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx, by + 1, bz + 2, 1, (Color){ 80, 110, 200, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 1, bz + 2, 1, (Color){ 80, 110, 200, 255 }, tag);
+    }
+    {
+        int bx = -6, by = 26, bz = -14;
+        int tag = 9;
+        add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 2, (Color){ 210, 140, 120, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 1, bz, 2, (Color){ 190, 120, 100, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 3, bz + 1, 1, (Color){ 230, 160, 130, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 3, by + 3, bz + 1, 1, (Color){ 230, 160, 130, 255 }, tag);
+    }
+    {
+        int bx = -20, by = 30, bz = 12;
+        int tag = 10;
+        add_dynamic_unit_block_tag(bx, by, bz, 2, 2, 2, (Color){ 200, 200, 200, 255 }, tag);
+    }
+    {
+        int bx = -10, by = 30, bz = 12;
+        int tag = 11;
+        add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 2, (Color){ 180, 180, 200, 255 }, tag);
+    }
+    {
+        int bx = 0, by = 30, bz = 12;
+        int tag = 12;
+        add_dynamic_unit_block_tag(bx, by, bz, 4, 1, 4, (Color){ 160, 180, 220, 255 }, tag);
+    }
+    {
+        int bx = 8, by = 30, bz = 14;
+        int tag = 13;
+        add_dynamic_unit_block_tag(bx, by, bz, 3, 1, 3, (Color){ 150, 160, 230, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 1, bz + 1, 1, (Color){ 110, 130, 210, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 1, by - 1, bz + 1, 1, (Color){ 110, 130, 210, 255 }, tag);
+    }
+    {
+        int bx = 18, by = 30, bz = 12;
+        int tag = 14;
+        add_dynamic_unit_block_tag(bx, by, bz, 1, 5, 1, (Color){ 200, 150, 130, 255 }, tag);
+    }
+    {
+        int bx = -22, by = 34, bz = -2;
+        int tag = 15;
+        add_dynamic_unit_block_tag(bx, by, bz, 4, 1, 4, (Color){ 130, 170, 210, 255 }, tag);
+    }
+    {
+        int bx = -14, by = 34, bz = -2;
+        int tag = 16;
+        add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 4, (Color){ 110, 150, 190, 255 }, tag);
+    }
+    {
+        int bx = -6, by = 34, bz = -2;
+        int tag = 17;
+        add_dynamic_unit_block_tag(bx, by, bz, 6, 1, 1, (Color){ 140, 200, 160, 255 }, tag);
+    }
+    {
+        int bx = 2, by = 34, bz = -2;
+        int tag = 18;
+        add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 4, (Color){ 120, 180, 140, 255 }, tag);
+        add_dynamic_span_voxel_at_grid_tag(bx + 4, by, bz, 2, (Color){ 120, 180, 140, 255 }, tag);
+    }
+    {
+        int bx = 10, by = 34, bz = -4;
+        int tag = 19;
+        for (int x = 0; x < 4; ++x) {
+            for (int z = 0; z < 4; ++z) {
+                if (((x + z) & 1) == 0) {
+                    add_dynamic_span_voxel_at_grid_tag(bx + x, by, bz + z, 1,
+                                                       (Color){ 180, 140, 160, 255 }, tag);
+                }
+            }
+        }
     }
     // Floor
     //int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
@@ -3319,6 +3518,7 @@ static void ResetGame(void) {
     staticBeliefsForceFullRefresh = false;
     staticBeliefDirtyCount = 0;
     dynamicGlueClustersInitialized = false;
+    memset(debugTagBreakLogged, 0, sizeof(debugTagBreakLogged));
     memset(staticBeliefDirty, 0, sizeof(staticBeliefDirty));
     memset(staticBeliefQueued, 0, sizeof(staticBeliefQueued));
     // clear hash
@@ -3408,7 +3608,8 @@ static bool activate_static_neighbors_of_region(int minx, int maxx,
                 if (!unit_voxel_buffer_push(&buffer,
                                             candidate->gx, candidate->gy, candidate->gz,
                                             candidate->color, candidate->type,
-                                            candidate->fixed, idx))
+                                            candidate->fixed, idx,
+                                            candidate->debugClusterTag))
                 {
                     candidate->pendingActivation = false;
                     break;
@@ -3946,6 +4147,40 @@ static void solve_voxel_glue(void) {
                          fine->pos.x, fine->pos.y, fine->pos.z);
                 --debugGlueBreakLogBudget;
             }
+            if (debugLogGlueClusters) {
+                int tagA = coarse->debugClusterTag;
+                int tagB = fine->debugClusterTag;
+                if (tagA >= 0 && tagA < DEBUG_CLUSTER_TAG_MAX && !debugTagBreakLogged[tagA]) {
+                    int neighborsA[MAX_FACE_NEIGHBORS];
+                    int neighborCountA = gather_glued_neighbors(gc->coarseVoxel,
+                                                               neighborsA,
+                                                               MAX_FACE_NEIGHBORS);
+                    Vector3 rel = v_sub(coarse->vel, fine->vel);
+                    TraceLog(LOG_INFO,
+                             "[GlueTagBreak] tag=%d label=%s voxel=%d span=%d neighborCount=%d "
+                             "violation=%.5f break=%.5f relVel=%.4f glueConstraints=%d",
+                             tagA, debug_cluster_tag_label(tagA),
+                             gc->coarseVoxel, voxel_span_for_glue(coarse),
+                             neighborCountA, violation, break_distance,
+                             v_length(rel), glueConstraintCount);
+                    debugTagBreakLogged[tagA] = 1;
+                }
+                if (tagB >= 0 && tagB < DEBUG_CLUSTER_TAG_MAX && !debugTagBreakLogged[tagB]) {
+                    int neighborsB[MAX_FACE_NEIGHBORS];
+                    int neighborCountB = gather_glued_neighbors(gc->fineVoxel,
+                                                               neighborsB,
+                                                               MAX_FACE_NEIGHBORS);
+                    Vector3 rel = v_sub(fine->vel, coarse->vel);
+                    TraceLog(LOG_INFO,
+                             "[GlueTagBreak] tag=%d label=%s voxel=%d span=%d neighborCount=%d "
+                             "violation=%.5f break=%.5f relVel=%.4f glueConstraints=%d",
+                             tagB, debug_cluster_tag_label(tagB),
+                             gc->fineVoxel, voxel_span_for_glue(fine),
+                             neighborCountB, violation, break_distance,
+                             v_length(rel), glueConstraintCount);
+                    debugTagBreakLogged[tagB] = 1;
+                }
+            }
             if (coarse->simulate) {
                 coarse->skipCollisionVelocityFrames = GLUE_BREAK_VELOCITY_SKIP_FRAMES;
             }
@@ -4316,6 +4551,7 @@ static void log_dynamic_glue_cluster_breaks(void)
     static int oldClusterPrimary[MAX_VOXELS];
     static int oldClusterSecondary[MAX_VOXELS];
     static int oldClusterNewCount[MAX_VOXELS];
+    static int oldClusterTag[MAX_VOXELS];
     static unsigned char oldClusterLogged[MAX_VOXELS];
 
     for (int i = 0; i < voxel_count; ++i) {
@@ -4379,6 +4615,7 @@ static void log_dynamic_glue_cluster_breaks(void)
             oldClusterPrimary[i] = -1;
             oldClusterSecondary[i] = -1;
             oldClusterNewCount[i] = 0;
+            oldClusterTag[i] = 0;
             oldClusterLogged[i] = 0;
         }
 
@@ -4386,12 +4623,19 @@ static void log_dynamic_glue_cluster_breaks(void)
             if (!voxels[i].simulate || !voxels[i].glueEligible) {
                 continue;
             }
-            int oldId = prevDynamicGlueClusterId[i];
+            Voxel *voxel = &voxels[i];
+            if (!voxel->prevGlueClusterValid) {
+                continue;
+            }
+            int oldId = voxel->prevGlueClusterId;
             int newId = currentClusterId[i];
             if (oldId < 0 || newId < 0) {
                 continue;
             }
 
+            if (oldClusterTag[oldId] == 0) {
+                oldClusterTag[oldId] = voxel->prevGlueClusterTag;
+            }
             if (oldClusterPrimary[oldId] == -1) {
                 oldClusterPrimary[oldId] = newId;
                 oldClusterNewCount[oldId] = 1;
@@ -4406,7 +4650,11 @@ static void log_dynamic_glue_cluster_breaks(void)
         }
 
         for (int i = 0; i < voxel_count; ++i) {
-            int oldId = prevDynamicGlueClusterId[i];
+            const Voxel *voxel = &voxels[i];
+            if (!voxel->prevGlueClusterValid) {
+                continue;
+            }
+            int oldId = voxel->prevGlueClusterId;
             if (oldId < 0 || oldId >= voxel_count) {
                 continue;
             }
@@ -4414,7 +4662,7 @@ static void log_dynamic_glue_cluster_breaks(void)
                 continue;
             }
             oldClusterLogged[oldId] = 1;
-            int oldSize = prevDynamicGlueClusterSize[i];
+            int oldSize = voxel->prevGlueClusterSize;
             if (oldSize <= 1) {
                 continue;
             }
@@ -4424,20 +4672,28 @@ static void log_dynamic_glue_cluster_breaks(void)
                 int secondary = oldClusterSecondary[oldId];
                 int primarySize = (primary >= 0) ? currentClusterSize[primary] : 0;
                 int secondarySize = (secondary >= 0) ? currentClusterSize[secondary] : 0;
+                int primaryTag = (primary >= 0 && primary < voxel_count) ? voxels[primary].debugClusterTag : 0;
+                int secondaryTag = (secondary >= 0 && secondary < voxel_count) ? voxels[secondary].debugClusterTag : 0;
                 TraceLog(LOG_INFO,
-                         "[GlueClusterBreak] cluster=%d size=%d new_clusters=%d primary=%d size=%d secondary=%d size=%d",
-                         oldId, oldSize, newCount,
-                         primary, primarySize, secondary, secondarySize);
+                         "[GlueClusterBreak] cluster=%d tag=%d size=%d new_clusters=%d primary=%d tag=%d size=%d secondary=%d tag=%d size=%d",
+                         oldId, oldClusterTag[oldId], oldSize, newCount,
+                         primary, primaryTag, primarySize,
+                         secondary, secondaryTag, secondarySize);
             }
         }
     }
 
     for (int i = 0; i < voxel_count; ++i) {
-        prevDynamicGlueClusterId[i] = currentClusterId[i];
+        Voxel *voxel = &voxels[i];
+        voxel->prevGlueClusterId = currentClusterId[i];
         if (currentClusterId[i] >= 0) {
-            prevDynamicGlueClusterSize[i] = currentClusterSize[currentClusterId[i]];
+            voxel->prevGlueClusterSize = currentClusterSize[currentClusterId[i]];
+            voxel->prevGlueClusterTag = voxel->debugClusterTag;
+            voxel->prevGlueClusterValid = 1;
         } else {
-            prevDynamicGlueClusterSize[i] = 0;
+            voxel->prevGlueClusterSize = 0;
+            voxel->prevGlueClusterTag = 0;
+            voxel->prevGlueClusterValid = 0;
         }
     }
     dynamicGlueClustersInitialized = true;
@@ -4539,7 +4795,8 @@ static bool batch_glued_dynamic_voxels(void)
                 for (int gy = miny; gy <= maxy; ++gy) {
                     for (int gz = minz; gz <= maxz; ++gz) {
                         if (!unit_voxel_buffer_push(&buffer, gx, gy, gz,
-                                                    voxel->color, voxel->type, voxel->fixed, -1)) {
+                                                    voxel->color, voxel->type, voxel->fixed, -1,
+                                                    voxel->debugClusterTag)) {
                             eligible = false;
                             break;
                         }
@@ -5903,6 +6160,7 @@ static int split_voxel_at(int idx, float dt, int *out_children, int max_children
                                   parent.fixed, parent.simulate,
                                   parent.color, parent.type,
                                   child_span, parent.owner);
+                child->debugClusterTag = parent.debugClusterTag;
                 apply_uniform_velocity(child, parent.vel, dt);
                 out_children[child_counter] = child_idx;
                 child_counter++;

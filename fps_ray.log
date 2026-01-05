@@ -1,51 +1,18 @@
 [INFO] Logging TraceLog output to fps_ray.log
-[INFO] [GlueClusterBreak] cluster=0 size=11 new_clusters=3 primary=0 size=5 secondary=2 size=3
-[INFO] [GlueClusterBreak] cluster=15 size=5 new_clusters=2 primary=0 size=5 secondary=18 size=11
-[INFO] [GlueClusterBreak] cluster=18 size=11 new_clusters=2 primary=0 size=11 secondary=24 size=5
-[INFO] [GlueClusterBreak] cluster=0 size=11 new_clusters=2 primary=0 size=5 secondary=18 size=11
-[INFO] [GlueClusterBreak] cluster=18 size=11 new_clusters=2 primary=0 size=11 secondary=24 size=5
-[INFO] [GlueClusterBreak] cluster=0 size=11 new_clusters=2 primary=0 size=5 secondary=18 size=11
-[INFO] [GlueClusterBreak] cluster=18 size=11 new_clusters=2 primary=0 size=11 secondary=24 size=5
-[INFO] [GlueClusterBreak] cluster=0 size=11 new_clusters=2 primary=0 size=5 secondary=18 size=11
-[INFO] [GlueClusterBreak] cluster=18 size=11 new_clusters=2 primary=0 size=11 secondary=24 size=5
-[INFO] [GlueClusterBreak] cluster=0 size=11 new_clusters=2 primary=0 size=5 secondary=18 size=11
-[INFO] [GlueClusterBreak] cluster=18 size=11 new_clusters=2 primary=0 size=11 secondary=24 size=5
-[INFO] [GlueClusterBreak] cluster=0 size=11 new_clusters=2 primary=0 size=5 secondary=18 size=11
-[INFO] [GlueClusterBreak] cluster=18 size=11 new_clusters=2 primary=0 size=11 secondary=24 size=5
-[INFO] [GlueClusterBreak] cluster=0 size=11 new_clusters=2 primary=0 size=5 secondary=18 size=11
-[INFO] [GlueClusterBreak] cluster=18 size=11 new_clusters=2 primary=0 size=11 secondary=24 size=5
-[INFO] [GlueClusterBreak] cluster=0 size=11 new_clusters=2 primary=0 size=10 secondary=17 size=1
-[INFO] [GlueClusterBreak] cluster=0 size=10 new_clusters=2 primary=0 size=9 secondary=1 size=1
-[INFO] [GlueClusterBreak] cluster=0 size=9 new_clusters=2 primary=0 size=8 secondary=16 size=1
-[INFO] [GlueClusterBreak] cluster=0 size=9 new_clusters=2 primary=0 size=8 secondary=1 size=1
-[INFO] [GlueClusterBreak] cluster=0 size=9 new_clusters=2 primary=0 size=8 secondary=18 size=1
-[INFO] [GlueClusterBreak] cluster=0 size=8 new_clusters=2 primary=0 size=1 secondary=1 size=7
-[INFO] [GlueClusterBreak] cluster=0 size=8 new_clusters=2 primary=0 size=1 secondary=1 size=7
-[INFO] [GlueClusterBreak] cluster=1 size=7 new_clusters=2 primary=1 size=1 secondary=15 size=6
-[INFO] [GlueClusterBreak] cluster=0 size=3 new_clusters=2 primary=0 size=2 secondary=1 size=1
-[INFO] [GlueClusterBreak] cluster=10 size=5 new_clusters=2 primary=10 size=4 secondary=13 size=1
-[INFO] [GlueClusterBreak] cluster=15 size=6 new_clusters=2 primary=15 size=1 secondary=19 size=5
-[INFO] [GlueClusterBreak] cluster=0 size=3 new_clusters=2 primary=0 size=2 secondary=1 size=1
-[INFO] [GlueClusterBreak] cluster=19 size=5 new_clusters=2 primary=19 size=4 secondary=0 size=3
-[INFO] [GlueClusterBreak] cluster=0 size=3 new_clusters=2 primary=0 size=2 secondary=19 size=5
-[INFO] [GlueClusterBreak] cluster=19 size=5 new_clusters=2 primary=19 size=4 secondary=0 size=3
-[INFO] [GlueClusterBreak] cluster=0 size=3 new_clusters=3 primary=0 size=1 secondary=17 size=1
-[INFO] [GlueClusterBreak] cluster=19 size=5 new_clusters=2 primary=19 size=4 secondary=23 size=1
-[INFO] [GlueClusterBreak] cluster=0 size=2 new_clusters=2 primary=0 size=1 secondary=23 size=1
-[INFO] [GlueClusterBreak] cluster=19 size=4 new_clusters=2 primary=19 size=3 secondary=21 size=1
-[INFO] [GlueClusterBreak] cluster=0 size=2 new_clusters=2 primary=0 size=1 secondary=23 size=1
-[INFO] [GlueClusterBreak] cluster=19 size=3 new_clusters=3 primary=19 size=1 secondary=20 size=1
-[INFO] [GlueClusterBreak] cluster=10 size=4 new_clusters=2 primary=10 size=3 secondary=13 size=2
-[INFO] [GlueClusterBreak] cluster=13 size=2 new_clusters=2 primary=13 size=1 secondary=10 size=4
-[INFO] [GlueClusterBreak] cluster=10 size=4 new_clusters=2 primary=10 size=3 secondary=13 size=2
-[INFO] [GlueClusterBreak] cluster=17 size=2 new_clusters=2 primary=17 size=1 secondary=23 size=1
-[INFO] [GlueClusterBreak] cluster=0 size=2 new_clusters=2 primary=0 size=1 secondary=23 size=1
-[INFO] [GlueClusterBreak] cluster=21 size=2 new_clusters=2 primary=21 size=1 secondary=22 size=1
-[INFO] [GlueClusterBreak] cluster=19 size=4 new_clusters=3 primary=19 size=1 secondary=20 size=1
-[INFO] [GlueClusterBreak] cluster=13 size=2 new_clusters=2 primary=13 size=1 secondary=10 size=4
-[INFO] [GlueClusterBreak] cluster=10 size=5 new_clusters=2 primary=10 size=4 secondary=13 size=1
-[INFO] [GlueClusterBreak] cluster=19 size=3 new_clusters=2 primary=19 size=2 secondary=21 size=1
-[INFO] [GlueClusterBreak] cluster=10 size=5 new_clusters=3 primary=10 size=3 secondary=13 size=1
-[INFO] [GlueClusterBreak] cluster=19 size=2 new_clusters=2 primary=19 size=1 secondary=22 size=1
-[INFO] [GlueClusterBreak] cluster=13 size=2 new_clusters=2 primary=13 size=1 secondary=14 size=1
-[INFO] [GlueClusterBreak] cluster=10 size=3 new_clusters=2 primary=10 size=2 secondary=12 size=1
+[INFO] [GlueClusterBreak] cluster=0 tag=18 size=72 new_clusters=3 primary=0 tag=18 size=1 secondary=1 tag=18 size=1
+[INFO] [GlueClusterBreak] cluster=153 tag=16 size=64 new_clusters=3 primary=10 tag=16 size=1 secondary=11 tag=16 size=1
+[INFO] [GlueClusterBreak] cluster=104 tag=11 size=8 new_clusters=3 primary=104 tag=11 size=1 secondary=212 tag=11 size=1
+[INFO] [GlueTagBreak] tag=1 label=corner-chunk voxel=162 span=2 neighborCount=2 violation=1.00000 break=0.60000 relVel=0.0000 glueConstraints=72
+[INFO] [GlueTagBreak] tag=2 label=stacked-pillar voxel=65 span=4 neighborCount=2 violation=1.50000 break=0.60000 relVel=0.0001 glueConstraints=80
+[INFO] [GlueTagBreak] tag=3 label=three-span-bar voxel=16 span=2 neighborCount=4 violation=0.99952 break=0.60000 relVel=0.1232 glueConstraints=92
+[INFO] [GlueClusterBreak] cluster=15 tag=3 size=5 new_clusters=2 primary=15 tag=3 size=4 secondary=18 tag=3 size=1
+[INFO] [GlueClusterBreak] cluster=15 tag=3 size=5 new_clusters=2 primary=15 tag=3 size=4 secondary=18 tag=3 size=1
+[INFO] [GlueClusterBreak] cluster=15 tag=3 size=5 new_clusters=2 primary=15 tag=3 size=4 secondary=18 tag=3 size=1
+[INFO] [GlueClusterBreak] cluster=15 tag=3 size=5 new_clusters=2 primary=15 tag=3 size=4 secondary=18 tag=3 size=1
+[INFO] [GlueClusterBreak] cluster=65 tag=2 size=5 new_clusters=2 primary=65 tag=2 size=4 secondary=68 tag=2 size=1
+[INFO] [GlueClusterBreak] cluster=15 tag=3 size=4 new_clusters=2 primary=15 tag=3 size=3 secondary=19 tag=3 size=1
+[INFO] [GlueClusterBreak] cluster=65 tag=2 size=4 new_clusters=2 primary=65 tag=2 size=3 secondary=69 tag=2 size=1
+[INFO] [GlueClusterBreak] cluster=18 tag=3 size=2 new_clusters=2 primary=18 tag=3 size=1 secondary=19 tag=3 size=1
+[INFO] [GlueClusterBreak] cluster=15 tag=3 size=3 new_clusters=2 primary=15 tag=3 size=1 secondary=16 tag=3 size=2
+[INFO] [GlueClusterBreak] cluster=65 tag=2 size=4 new_clusters=2 primary=65 tag=2 size=4 secondary=68 tag=2 size=1
+[INFO] [GlueClusterBreak] cluster=65 tag=2 size=5 new_clusters=2 primary=65 tag=2 size=4 secondary=69 tag=2 size=1
