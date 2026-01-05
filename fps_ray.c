@@ -39,7 +39,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define GRAVITY         9.8f    // gravity acceleration
 #define BASE_EYE_HEIGHT 1.0f    // player eye height above floor
 #define ACCELERATION   400.0f    // horizontal acceleration
-#define FREEZE_GROUND_WEIGHT       0.6f
+#define FREEZE_GROUND_WEIGHT       0.9f
 #define FREEZE_NEIGHBOR_WEIGHT     0.4f*0.0f
 #define FREEZE_GROUND_REF_HEIGHT   6.0f
 #define FREEZE_PROPAGATION_ITERATIONS 100
@@ -52,7 +52,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define ACTIVATION_GLUE_WEIGHT     0.35f
 #define ACTIVATION_GLUE_REF_SPEED  3.0f
 #define ACTIVATION_DYNAMIC_WEIGHT  0.9f
-#define FREEZE_BELIEF_IMPORTANCE   0.5f
+#define FREEZE_BELIEF_IMPORTANCE   0.1f
 #define ACTIVATION_HYSTERESIS      0.1f
 #define FRICTION       400.0f    // ground friction deceleration
 #define TURN_ACCELERATION 400.0f
@@ -90,15 +90,15 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define MAX_FACE_NEIGHBORS   64
 #define MAX_SPLIT_CHILDREN    8
 static const float GRID_EPSILON = 1e-4f;
-#define VOXEL_ACTIVATION_RADIUS 2*5
+#define VOXEL_ACTIVATION_RADIUS 2*3
 //#define VOXEL_ACTIVATION_UNIT_BUDGET 128
-#define VOXEL_ACTIVATION_UNIT_BUDGET 128*5
+#define VOXEL_ACTIVATION_UNIT_BUDGET 128*3
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 1.0f
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.2f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.2f
-#define VOXEL_DEACTIVATION_FRAMES 20
-#define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
-#define STATIC_RESTORE_SEARCH_RADIUS 2*5
+#define VOXEL_DEACTIVATION_FRAMES 10
+#define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*3
+#define STATIC_RESTORE_SEARCH_RADIUS 2*3
 
 // KD-stats constants
 #define BASE_HEALTH 100
@@ -3448,7 +3448,7 @@ static void buildDemo(void) {
     for (int p = 0; p < 4; p++) {
         int cx = pillar_positions[p][0];
         int cz = pillar_positions[p][1];
-        for (int y = 1; y <= pillar_height; y++) {
+        for (int y = 0; y <= pillar_height; y++) {
             for (int dx = -pillar_radius; dx <= pillar_radius; dx++) {
                 for (int dz = -pillar_radius; dz <= pillar_radius; dz++) {
                     if (dx*dx + dz*dz > pillar_radius*pillar_radius) continue; // circular pillar
@@ -3461,7 +3461,7 @@ static void buildDemo(void) {
         }
     }
 
-    //Central platform (n=1)
+    // //Central platform (n=1)
     // int platform_size = 10;
     // int platform_height = 1; // 15 / 3
     // int platform_base_height = 4; // to keep top at same level (21)
@@ -3477,7 +3477,7 @@ static void buildDemo(void) {
     //     }
     // }
 
-    // Platform legs: 2x2 columns at each corner down to the floor.
+    // // Platform legs: 2x2 columns at each corner down to the floor.
     // int platform_min = M/2 - platform_size/2;
     // int platform_max = M/2 + platform_size/2;
     // int leg_min_y = 1;

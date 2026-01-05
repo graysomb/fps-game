@@ -1,1 +1,4 @@
 [INFO] Logging TraceLog output to fps_ray.log
+[INFO] [GlueClusterBreak] cluster=886 tag=0 size=125 new_clusters=3 primary=0 tag=0 size=1 secondary=1 tag=0 size=1
+[INFO] [GlueClusterBreak] cluster=984 tag=0 size=2 new_clusters=2 primary=984 tag=0 size=1 secondary=1000 tag=0 size=1
+[INFO] [GlueClusterBreak] cluster=1009 tag=0 size=33 new_clusters=2 primary=1000 tag=0 size=1 secondary=1009 tag=0 size=32
