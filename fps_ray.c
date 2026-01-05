@@ -377,6 +377,17 @@ static const char *debug_cluster_tag_label(int tag) {
     }
 }
 
+static bool debug_should_log_tag_break(int tag)
+{
+    if (tag <= 0 || tag >= DEBUG_CLUSTER_TAG_MAX) {
+        return false;
+    }
+    if (debugTagBreakLogged[tag]) {
+        return false;
+    }
+    return true;
+}
+
 static bool debug_should_log_message(const char *text) {
     if (!debugLogClusterBreaksOnly) {
         return true;
@@ -4150,7 +4161,7 @@ static void solve_voxel_glue(void) {
             if (debugLogGlueClusters) {
                 int tagA = coarse->debugClusterTag;
                 int tagB = fine->debugClusterTag;
-                if (tagA >= 0 && tagA < DEBUG_CLUSTER_TAG_MAX && !debugTagBreakLogged[tagA]) {
+                if (debug_should_log_tag_break(tagA)) {
                     int neighborsA[MAX_FACE_NEIGHBORS];
                     int neighborCountA = gather_glued_neighbors(gc->coarseVoxel,
                                                                neighborsA,
@@ -4158,14 +4169,17 @@ static void solve_voxel_glue(void) {
                     Vector3 rel = v_sub(coarse->vel, fine->vel);
                     TraceLog(LOG_INFO,
                              "[GlueTagBreak] tag=%d label=%s voxel=%d span=%d neighborCount=%d "
-                             "violation=%.5f break=%.5f relVel=%.4f glueConstraints=%d",
+                             "violation=%.5f break=%.5f relVel=%.4f glueConstraints=%d "
+                             "coarseEdge=%.4f fineEdge=%.4f rawUV=(%.4f,%.4f) uv=(%.4f,%.4f) baryValid=%d",
                              tagA, debug_cluster_tag_label(tagA),
                              gc->coarseVoxel, voxel_span_for_glue(coarse),
                              neighborCountA, violation, break_distance,
-                             v_length(rel), glueConstraintCount);
+                             v_length(rel), glueConstraintCount,
+                             coarse->rest_edge, fine->rest_edge,
+                             solveRawU, solveRawV, solveU, solveV, baryValid ? 1 : 0);
                     debugTagBreakLogged[tagA] = 1;
                 }
-                if (tagB >= 0 && tagB < DEBUG_CLUSTER_TAG_MAX && !debugTagBreakLogged[tagB]) {
+                if (debug_should_log_tag_break(tagB)) {
                     int neighborsB[MAX_FACE_NEIGHBORS];
                     int neighborCountB = gather_glued_neighbors(gc->fineVoxel,
                                                                neighborsB,
@@ -4173,11 +4187,14 @@ static void solve_voxel_glue(void) {
                     Vector3 rel = v_sub(fine->vel, coarse->vel);
                     TraceLog(LOG_INFO,
                              "[GlueTagBreak] tag=%d label=%s voxel=%d span=%d neighborCount=%d "
-                             "violation=%.5f break=%.5f relVel=%.4f glueConstraints=%d",
+                             "violation=%.5f break=%.5f relVel=%.4f glueConstraints=%d "
+                             "coarseEdge=%.4f fineEdge=%.4f rawUV=(%.4f,%.4f) uv=(%.4f,%.4f) baryValid=%d",
                              tagB, debug_cluster_tag_label(tagB),
                              gc->fineVoxel, voxel_span_for_glue(fine),
                              neighborCountB, violation, break_distance,
-                             v_length(rel), glueConstraintCount);
+                             v_length(rel), glueConstraintCount,
+                             coarse->rest_edge, fine->rest_edge,
+                             solveRawU, solveRawV, solveU, solveV, baryValid ? 1 : 0);
                     debugTagBreakLogged[tagB] = 1;
                 }
             }
