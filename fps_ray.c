@@ -36,7 +36,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define MOVE_SPEED      5.0f    // units per second (unused: using acceleration)
 #define TURN_SPEED     90.0f    // degrees per second
 #define JUMP_SPEED     10.0f    // initial jump velocity
-#define GRAVITY         9.8f    // gravity acceleration
+#define GRAVITY         9.8f*0.1f    // gravity acceleration
 #define BASE_EYE_HEIGHT 1.0f    // player eye height above floor
 #define ACCELERATION   400.0f    // horizontal acceleration
 #define FREEZE_GROUND_WEIGHT       0.9f
@@ -92,15 +92,15 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define MAX_FACE_NEIGHBORS   64
 #define MAX_SPLIT_CHILDREN    8
 static const float GRID_EPSILON = 1e-4f;
-#define VOXEL_ACTIVATION_RADIUS 2*1
+#define VOXEL_ACTIVATION_RADIUS 2*5
 //#define VOXEL_ACTIVATION_UNIT_BUDGET 128
-#define VOXEL_ACTIVATION_UNIT_BUDGET 128*1
+#define VOXEL_ACTIVATION_UNIT_BUDGET 128*5
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 2.0f
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.4f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.4f
 #define VOXEL_DEACTIVATION_FRAMES 10
-#define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*1
-#define STATIC_RESTORE_SEARCH_RADIUS 2*1
+#define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
+#define STATIC_RESTORE_SEARCH_RADIUS 2*5
 
 // KD-stats constants
 #define BASE_HEALTH 100
@@ -1045,7 +1045,9 @@ typedef struct {
     int      fineCorner;
     uint8_t  coarseMask;
     uint8_t  fineMask;
-    Vector3  restOffset;
+    float    restLocalU;
+    float    restLocalV;
+    float    restLocalN;
     float    strength;
     int      dirX;
     int      dirY;
@@ -3682,13 +3684,13 @@ static void buildDemo(void) {
     // }
     // Floor
     int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
-    for (int x = 0; x <= M; x++) {
-        for (int z = 0; z <= M; z++) {
-            float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-            float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-            addVoxel(px, 0, pz, true, false, (Color){ 150, 150, 150, 255 }, 0);
-        }
-    } 
+    // for (int x = 0; x <= M; x++) {
+    //     for (int z = 0; z <= M; z++) {
+    //         float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    //         float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    //         addVoxel(px, 0, pz, true, false, (Color){ 150, 150, 150, 255 }, 0);
+    //     }
+    // } 
 
     // Pillars
     int pillar_height = 10; // 45 - 10
@@ -3703,7 +3705,7 @@ static void buildDemo(void) {
     for (int p = 0; p < 4; p++) {
         int cx = pillar_positions[p][0];
         int cz = pillar_positions[p][1];
-        for (int y = 0; y <= pillar_height; y++) {
+        for (int y = 1; y <= pillar_height; y++) {
             for (int dx = -pillar_radius; dx <= pillar_radius; dx++) {
                 for (int dz = -pillar_radius; dz <= pillar_radius; dz++) {
                     if (dx*dx + dz*dz > pillar_radius*pillar_radius) continue; // circular pillar
@@ -4443,11 +4445,23 @@ static void solve_voxel_glue(void) {
             }
         }
 
-        Vector3 blended = { 0.0f, 0.0f, 0.0f };
-        for (int k = 0; k < 4; ++k) {
-            blended = v_add(blended, v_mul(coarseParticles[k]->predicted_pos, weights[k]));
+        Vector3 basisU = v_norm(coarseU);
+        Vector3 basisV = v_sub(coarseV, v_mul(basisU, v_dot(coarseV, basisU)));
+        float basisVLen = v_length(basisV);
+        if (basisVLen < 1e-6f) {
+            continue;
         }
-        Vector3 target = v_add(blended, gc->restOffset);
+        basisV = v_mul(basisV, 1.0f / basisVLen);
+        Vector3 basisN = v_norm(v_cross(basisU, basisV));
+
+        Vector3 anchor = { 0.0f, 0.0f, 0.0f };
+        for (int k = 0; k < 4; ++k) {
+            anchor = v_add(anchor, v_mul(coarseParticles[k]->predicted_pos, weights[k]));
+        }
+        Vector3 target = v_add(anchor,
+                               v_add(v_mul(basisU, gc->restLocalU),
+                                     v_add(v_mul(basisV, gc->restLocalV),
+                                           v_mul(basisN, gc->restLocalN))));
         Vector3 C = v_sub(target, fineParticle->predicted_pos);
         float violation = v_length(C);
         float rest_edge_min = fminf(coarse->rest_edge, fine->rest_edge);
@@ -4717,6 +4731,16 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
     for (int k = 0; k < 4; ++k) {
         coarseRest[k] = voxel_rest_corner_world(coarse, coarseFace[k]);
     }
+    Vector3 restUVec = v_sub(coarseRest[1], coarseRest[0]);
+    Vector3 restVVec = v_sub(coarseRest[2], coarseRest[0]);
+    Vector3 restBasisU = v_norm(restUVec);
+    Vector3 restBasisV = v_sub(restVVec, v_mul(restBasisU, v_dot(restVVec, restBasisU)));
+    float restBasisVLen = v_length(restBasisV);
+    if (restBasisVLen < 1e-6f) {
+        return;
+    }
+    restBasisV = v_mul(restBasisV, 1.0f / restBasisVLen);
+    Vector3 restBasisN = v_norm(v_cross(restBasisU, restBasisV));
 
     for (int c = 0; c < 4; ++c) {
         if (glueConstraintCount >= (int)(sizeof(glueConstraints) / sizeof(glueConstraints[0]))) {
@@ -4746,9 +4770,9 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
         w3 *= inv_w_sum;
 
         Vector3 fineRest = voxel_rest_corner_world(fine, fineCorner);
-        Vector3 restTarget = v_add(v_add(v_mul(coarseRest[0], w0), v_mul(coarseRest[1], w1)),
+        Vector3 restAnchor = v_add(v_add(v_mul(coarseRest[0], w0), v_mul(coarseRest[1], w1)),
                                    v_add(v_mul(coarseRest[2], w2), v_mul(coarseRest[3], w3)));
-        Vector3 restOffset = v_sub(fineRest, restTarget);
+        Vector3 restDelta = v_sub(fineRest, restAnchor);
 
         GlueConstraint *gc = &glueConstraints[glueConstraintCount++];
         gc->coarseVoxel = coarseIdx;
@@ -4763,7 +4787,9 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
         gc->fineCorner = fineCorner;
         gc->coarseMask = coarseMask;
         gc->fineMask = (uint8_t)(1u << fineCorner);
-        gc->restOffset = restOffset;
+        gc->restLocalU = v_dot(restDelta, restBasisU);
+        gc->restLocalV = v_dot(restDelta, restBasisV);
+        gc->restLocalN = v_dot(restDelta, restBasisN);
         gc->strength = 1.0f;
         gc->dirX = dir->dx;
         gc->dirY = dir->dy;
@@ -4790,9 +4816,9 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
                 e1 = 0.5f;
                 e3 = 0.5f;
             }
-            Vector3 edgeTarget = v_add(v_add(v_mul(coarseRest[0], e0), v_mul(coarseRest[1], e1)),
+            Vector3 edgeAnchor = v_add(v_add(v_mul(coarseRest[0], e0), v_mul(coarseRest[1], e1)),
                                        v_add(v_mul(coarseRest[2], e2), v_mul(coarseRest[3], e3)));
-            Vector3 edgeOffset = v_sub(fineRest, edgeTarget);
+            Vector3 edgeDelta = v_sub(fineRest, edgeAnchor);
             GlueConstraint *edgeGc = &glueConstraints[glueConstraintCount++];
             edgeGc->coarseVoxel = coarseIdx;
             edgeGc->fineVoxel   = fineIdx;
@@ -4806,7 +4832,9 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
             edgeGc->fineCorner = fineCorner;
             edgeGc->coarseMask = coarseMask;
             edgeGc->fineMask = (uint8_t)(1u << fineCorner);
-            edgeGc->restOffset = edgeOffset;
+            edgeGc->restLocalU = v_dot(edgeDelta, restBasisU);
+            edgeGc->restLocalV = v_dot(edgeDelta, restBasisV);
+            edgeGc->restLocalN = v_dot(edgeDelta, restBasisN);
             edgeGc->strength = edgeStrengthU;
             edgeGc->dirX = dir->dx;
             edgeGc->dirY = dir->dy;
@@ -4825,9 +4853,9 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
                 e2 = 0.5f;
                 e3 = 0.5f;
             }
-            Vector3 edgeTarget = v_add(v_add(v_mul(coarseRest[0], e0), v_mul(coarseRest[1], e1)),
+            Vector3 edgeAnchor = v_add(v_add(v_mul(coarseRest[0], e0), v_mul(coarseRest[1], e1)),
                                        v_add(v_mul(coarseRest[2], e2), v_mul(coarseRest[3], e3)));
-            Vector3 edgeOffset = v_sub(fineRest, edgeTarget);
+            Vector3 edgeDelta = v_sub(fineRest, edgeAnchor);
             GlueConstraint *edgeGc = &glueConstraints[glueConstraintCount++];
             edgeGc->coarseVoxel = coarseIdx;
             edgeGc->fineVoxel   = fineIdx;
@@ -4841,7 +4869,9 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
             edgeGc->fineCorner = fineCorner;
             edgeGc->coarseMask = coarseMask;
             edgeGc->fineMask = (uint8_t)(1u << fineCorner);
-            edgeGc->restOffset = edgeOffset;
+            edgeGc->restLocalU = v_dot(edgeDelta, restBasisU);
+            edgeGc->restLocalV = v_dot(edgeDelta, restBasisV);
+            edgeGc->restLocalN = v_dot(edgeDelta, restBasisN);
             edgeGc->strength = edgeStrengthV;
             edgeGc->dirX = dir->dx;
             edgeGc->dirY = dir->dy;
@@ -4853,9 +4883,9 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
             glueConstraintCount < (int)(sizeof(glueConstraints) / sizeof(glueConstraints[0])))
         {
             float c0 = 0.25f, c1 = 0.25f, c2 = 0.25f, c3 = 0.25f;
-            Vector3 centerTarget = v_add(v_add(v_mul(coarseRest[0], c0), v_mul(coarseRest[1], c1)),
+            Vector3 centerAnchor = v_add(v_add(v_mul(coarseRest[0], c0), v_mul(coarseRest[1], c1)),
                                          v_add(v_mul(coarseRest[2], c2), v_mul(coarseRest[3], c3)));
-            Vector3 centerOffset = v_sub(fineRest, centerTarget);
+            Vector3 centerDelta = v_sub(fineRest, centerAnchor);
             GlueConstraint *centerGc = &glueConstraints[glueConstraintCount++];
             centerGc->coarseVoxel = coarseIdx;
             centerGc->fineVoxel   = fineIdx;
@@ -4869,7 +4899,9 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
             centerGc->fineCorner = fineCorner;
             centerGc->coarseMask = coarseMask;
             centerGc->fineMask = (uint8_t)(1u << fineCorner);
-            centerGc->restOffset = centerOffset;
+            centerGc->restLocalU = v_dot(centerDelta, restBasisU);
+            centerGc->restLocalV = v_dot(centerDelta, restBasisV);
+            centerGc->restLocalN = v_dot(centerDelta, restBasisN);
             centerGc->strength = centerStrength;
             centerGc->dirX = dir->dx;
             centerGc->dirY = dir->dy;
