@@ -36,7 +36,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define MOVE_SPEED      5.0f    // units per second (unused: using acceleration)
 #define TURN_SPEED     90.0f    // degrees per second
 #define JUMP_SPEED     10.0f    // initial jump velocity
-#define GRAVITY         9.8f*0.0f    // gravity acceleration
+#define GRAVITY         9.8f*0.001f    // gravity acceleration
 #define BASE_EYE_HEIGHT 1.0f    // player eye height above floor
 #define ACCELERATION   400.0f    // horizontal acceleration
 #define FREEZE_GROUND_WEIGHT       0.6f
@@ -74,8 +74,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define CENTER_RELAXATION 0.99f
 #define VELOCITY_DAMPING 1.00f
 #define GLUE_RELAXATION 0.9f
-//#define GLUE_EPS 1e-6f
-#define GLUE_EPS 0.002f
+#define GLUE_EPS 1e-6f
+//#define GLUE_EPS 0.002f
 #define GLUE_BREAK_STRAIN 0.6f
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 4
 #define VOXEL_SPLIT_STRAIN_THRESHOLD 0.6f
@@ -94,7 +94,7 @@ static const float GRID_EPSILON = 1e-4f;
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 1.0f
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.2f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.2f
-#define VOXEL_DEACTIVATION_FRAMES 4
+#define VOXEL_DEACTIVATION_FRAMES 20
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*2
 #define STATIC_RESTORE_SEARCH_RADIUS 4
 
@@ -177,6 +177,9 @@ static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
 static int glueClusterIndices[MAX_VOXELS];
 static unsigned char glueClusterVisited[MAX_VOXELS];
+static int prevDynamicGlueClusterId[MAX_VOXELS];
+static int prevDynamicGlueClusterSize[MAX_VOXELS];
+static bool dynamicGlueClustersInitialized = false;
 static float freezeBeliefScratch[MAX_VOXELS];
 static uint8_t freezeBoundaryFlags[MAX_VOXELS];
 static uint8_t staticBeliefDirty[MAX_VOXELS];
@@ -198,6 +201,7 @@ static int build_glue_cluster_indices(int start_idx, int *out_indices);
 static int gather_glued_neighbors(int voxel_idx, int *out, int max_out);
 static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count);
 static void solve_span_voxel_collisions(void);
+static void log_dynamic_glue_cluster_breaks(void);
 static void compute_voxel_center_and_mass(const Voxel *voxel, Vector3 *center, float *inv_mass_sum);
 typedef struct {
     int gx, gy, gz;
@@ -313,6 +317,8 @@ static bool debugLogSpanCollisions = false;
 static int debugSpanEdgeLogBudget = 0;
 static int debugSpanCollisionLogBudget = 0;
 static bool debugLogGlue = false;
+static bool debugLogGlueClusters = true;
+static bool debugLogClusterBreaksOnly = true;
 static int debugGlueBuildLogBudget = 0;
 static int debugGlueSolveLogBudget = 0;
 static int debugGlueBreakLogBudget = 0;
@@ -342,7 +348,29 @@ static const char *trace_level_label(int level) {
     }
 }
 
+static bool debug_should_log_message(const char *text) {
+    if (!debugLogClusterBreaksOnly) {
+        return true;
+    }
+    if (!text) {
+        return false;
+    }
+    if (strstr(text, "[GlueClusterBreak]")) {
+        return true;
+    }
+    if (strstr(text, "Logging TraceLog output to")) {
+        return true;
+    }
+    if (strstr(text, "Failed to open log file")) {
+        return true;
+    }
+    return false;
+}
+
 static void DebugTraceLogCallback(int logLevel, const char *text, va_list args) {
+    if (!debug_should_log_message(text)) {
+        return;
+    }
     FILE *console = (logLevel >= LOG_WARNING) ? stderr : stdout;
     //FILE *console = (logLevel >= LOG_FATAL) ? stderr : stdout;
     va_list console_args;
@@ -2863,6 +2891,7 @@ static bool glue_cluster_has_static_support(const int *cluster, int cluster_coun
     return false;
 }
 
+
 static void keep_cluster_awake(const int *cluster, int cluster_count)
 {
     if (!cluster || cluster_count <= 0) {
@@ -3069,8 +3098,70 @@ static void build_oblique_voxel_pyramid(UnitVoxelBuffer *buffer) {
     }
 }
 
+static float grid_span_center(int min_g, int span) {
+    return (min_g + 0.5f * (float)span) * VOXEL_SIZE;
+}
+
+static void add_dynamic_span_voxel_at_grid(int minx, int miny, int minz,
+                                           int span, Color color)
+{
+    float px = grid_span_center(minx, span);
+    float py = grid_span_center(miny, span);
+    float pz = grid_span_center(minz, span);
+    addVoxelSized(px, py, pz, false, true, color, 0, span);
+}
+
+static void add_dynamic_unit_block(int minx, int miny, int minz,
+                                   int sx, int sy, int sz, Color color)
+{
+    for (int x = 0; x < sx; ++x) {
+        for (int y = 0; y < sy; ++y) {
+            for (int z = 0; z < sz; ++z) {
+                add_dynamic_span_voxel_at_grid(minx + x, miny + y, minz + z, 1, color);
+            }
+        }
+    }
+}
+
 // Build static demo cube of voxels
 static void buildDemo(void) {
+    // Floating dynamic test clusters (mixed span sizes, zero initial glue stress).
+    {
+        int bx = -16, by = 10, bz = -12;
+        add_dynamic_unit_block(bx, by, bz, 2, 2, 2, (Color){ 210, 120, 90, 255 });
+        add_dynamic_span_voxel_at_grid(bx + 2, by, bz, 2, (Color){ 240, 160, 100, 255 });
+        add_dynamic_span_voxel_at_grid(bx, by + 2, bz, 2, (Color){ 200, 90, 140, 255 });
+    }
+    {
+        int bx = 6, by = 12, bz = -10;
+        add_dynamic_span_voxel_at_grid(bx, by, bz, 4, (Color){ 180, 150, 80, 255 });
+        add_dynamic_span_voxel_at_grid(bx + 4, by, bz, 2, (Color){ 220, 180, 90, 255 });
+        add_dynamic_span_voxel_at_grid(bx + 1, by + 4, bz + 1, 2, (Color){ 250, 210, 130, 255 });
+        add_dynamic_span_voxel_at_grid(bx + 1, by + 6, bz + 1, 1, (Color){ 240, 200, 120, 255 });
+        add_dynamic_span_voxel_at_grid(bx + 2, by + 6, bz + 2, 1, (Color){ 240, 200, 120, 255 });
+    }
+    {
+        int bx = -8, by = 16, bz = 6;
+        add_dynamic_span_voxel_at_grid(bx, by, bz, 2, (Color){ 90, 170, 230, 255 });
+        add_dynamic_span_voxel_at_grid(bx + 2, by, bz, 2, (Color){ 70, 140, 210, 255 });
+        add_dynamic_span_voxel_at_grid(bx + 4, by, bz, 2, (Color){ 60, 120, 190, 255 });
+        add_dynamic_span_voxel_at_grid(bx + 2, by + 2, bz, 1, (Color){ 120, 200, 250, 255 });
+        add_dynamic_span_voxel_at_grid(bx + 2, by + 2, bz + 1, 1, (Color){ 120, 200, 250, 255 });
+    }
+    {
+        int bx = 10, by = 8, bz = 8;
+        add_dynamic_unit_block(bx, by, bz, 3, 1, 3, (Color){ 140, 200, 140, 255 });
+        add_dynamic_span_voxel_at_grid(bx + 1, by + 1, bz + 1, 2, (Color){ 90, 170, 120, 255 });
+        add_dynamic_span_voxel_at_grid(bx + 1, by + 3, bz + 1, 1, (Color){ 60, 140, 90, 255 });
+    }
+    {
+        int bx = -2, by = 20, bz = -2;
+        add_dynamic_span_voxel_at_grid(bx, by, bz, 2, (Color){ 200, 120, 210, 255 });
+        add_dynamic_span_voxel_at_grid(bx + 2, by, bz, 2, (Color){ 170, 90, 180, 255 });
+        add_dynamic_span_voxel_at_grid(bx, by + 2, bz, 1, (Color){ 210, 140, 230, 255 });
+        add_dynamic_span_voxel_at_grid(bx + 1, by + 2, bz, 1, (Color){ 210, 140, 230, 255 });
+        add_dynamic_span_voxel_at_grid(bx + 2, by + 2, bz, 1, (Color){ 210, 140, 230, 255 });
+    }
     // Floor
     //int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
     // for (int x = 0; x <= M; x++) {
@@ -3194,6 +3285,7 @@ static void buildDemo(void) {
 
     //     addVoxelSized(center_x, py, center_z, false, true, (Color){ 230, 80, 120, 255 }, 0, span);
     // }
+    rebuild_glue_constraints();
 }
 
 
@@ -3226,6 +3318,7 @@ static void ResetGame(void) {
     staticBeliefsInitialized = false;
     staticBeliefsForceFullRefresh = false;
     staticBeliefDirtyCount = 0;
+    dynamicGlueClustersInitialized = false;
     memset(staticBeliefDirty, 0, sizeof(staticBeliefDirty));
     memset(staticBeliefQueued, 0, sizeof(staticBeliefQueued));
     // clear hash
@@ -3776,6 +3869,7 @@ static void solve_voxel_shape(Voxel *voxel) {
 }
 
 static void solve_voxel_glue(void) {
+    bool glue_break = false;
     if (debugLogGlue) {
         debugGlueSolveLogBudget = DEBUG_GLUE_SOLVE_LOG_INIT;
         debugGlueBreakLogBudget = DEBUG_GLUE_BREAK_LOG_INIT;
@@ -3859,6 +3953,7 @@ static void solve_voxel_glue(void) {
                 fine->skipCollisionVelocityFrames = GLUE_BREAK_VELOCITY_SKIP_FRAMES;
             }
             gc->active = false;
+            glue_break = true;
             continue;
         }
         if (violation < GLUE_EPS) {
@@ -3916,6 +4011,9 @@ static void solve_voxel_glue(void) {
                      coarse->vel.y, fine->vel.y);
             --debugGlueSolveLogBudget;
         }
+    }
+    if (glue_break) {
+        mark_glue_adjacency_dirty();
     }
 }
 
@@ -4204,6 +4302,145 @@ static int build_glue_cluster_indices(int start_idx, int *out_indices)
     }
 
     return tail;
+}
+
+static void log_dynamic_glue_cluster_breaks(void)
+{
+    if (!debugLogGlueClusters || voxel_count <= 0) {
+        return;
+    }
+
+    static int currentClusterId[MAX_VOXELS];
+    static int currentClusterSize[MAX_VOXELS];
+    static int clusterMembers[MAX_VOXELS];
+    static int oldClusterPrimary[MAX_VOXELS];
+    static int oldClusterSecondary[MAX_VOXELS];
+    static int oldClusterNewCount[MAX_VOXELS];
+    static unsigned char oldClusterLogged[MAX_VOXELS];
+
+    for (int i = 0; i < voxel_count; ++i) {
+        currentClusterId[i] = -1;
+        currentClusterSize[i] = 0;
+    }
+
+    for (int i = 0; i < voxel_count; ++i) {
+        if (!voxels[i].simulate || !voxels[i].glueEligible) {
+            continue;
+        }
+        if (currentClusterId[i] != -1) {
+            continue;
+        }
+
+        int head = 0;
+        int tail = 0;
+        clusterMembers[tail++] = i;
+        currentClusterId[i] = -2;
+
+        while (head < tail) {
+            int idx = clusterMembers[head++];
+            int neighbors[MAX_FACE_NEIGHBORS];
+            int neighbor_count = gather_glued_neighbors(idx, neighbors, MAX_FACE_NEIGHBORS);
+            for (int n = 0; n < neighbor_count; ++n) {
+                int neighbor = neighbors[n];
+                if (neighbor < 0 || neighbor >= voxel_count) {
+                    continue;
+                }
+                if (!voxels[neighbor].simulate || !voxels[neighbor].glueEligible) {
+                    continue;
+                }
+                if (currentClusterId[neighbor] != -1) {
+                    continue;
+                }
+                currentClusterId[neighbor] = -2;
+                clusterMembers[tail++] = neighbor;
+                if (tail >= MAX_VOXELS) {
+                    break;
+                }
+            }
+            if (tail >= MAX_VOXELS) {
+                break;
+            }
+        }
+
+        int rep = clusterMembers[0];
+        for (int m = 1; m < tail; ++m) {
+            if (clusterMembers[m] < rep) {
+                rep = clusterMembers[m];
+            }
+        }
+        for (int m = 0; m < tail; ++m) {
+            currentClusterId[clusterMembers[m]] = rep;
+        }
+        currentClusterSize[rep] = tail;
+    }
+
+    if (dynamicGlueClustersInitialized) {
+        for (int i = 0; i < voxel_count; ++i) {
+            oldClusterPrimary[i] = -1;
+            oldClusterSecondary[i] = -1;
+            oldClusterNewCount[i] = 0;
+            oldClusterLogged[i] = 0;
+        }
+
+        for (int i = 0; i < voxel_count; ++i) {
+            if (!voxels[i].simulate || !voxels[i].glueEligible) {
+                continue;
+            }
+            int oldId = prevDynamicGlueClusterId[i];
+            int newId = currentClusterId[i];
+            if (oldId < 0 || newId < 0) {
+                continue;
+            }
+
+            if (oldClusterPrimary[oldId] == -1) {
+                oldClusterPrimary[oldId] = newId;
+                oldClusterNewCount[oldId] = 1;
+            } else if (oldClusterPrimary[oldId] != newId) {
+                if (oldClusterSecondary[oldId] == -1) {
+                    oldClusterSecondary[oldId] = newId;
+                    oldClusterNewCount[oldId] = 2;
+                } else if (oldClusterSecondary[oldId] != newId) {
+                    oldClusterNewCount[oldId] = 3;
+                }
+            }
+        }
+
+        for (int i = 0; i < voxel_count; ++i) {
+            int oldId = prevDynamicGlueClusterId[i];
+            if (oldId < 0 || oldId >= voxel_count) {
+                continue;
+            }
+            if (oldClusterLogged[oldId]) {
+                continue;
+            }
+            oldClusterLogged[oldId] = 1;
+            int oldSize = prevDynamicGlueClusterSize[i];
+            if (oldSize <= 1) {
+                continue;
+            }
+            int newCount = oldClusterNewCount[oldId];
+            if (newCount > 1) {
+                int primary = oldClusterPrimary[oldId];
+                int secondary = oldClusterSecondary[oldId];
+                int primarySize = (primary >= 0) ? currentClusterSize[primary] : 0;
+                int secondarySize = (secondary >= 0) ? currentClusterSize[secondary] : 0;
+                TraceLog(LOG_INFO,
+                         "[GlueClusterBreak] cluster=%d size=%d new_clusters=%d primary=%d size=%d secondary=%d size=%d",
+                         oldId, oldSize, newCount,
+                         primary, primarySize, secondary, secondarySize);
+            }
+        }
+    }
+
+    for (int i = 0; i < voxel_count; ++i) {
+        prevDynamicGlueClusterId[i] = currentClusterId[i];
+        if (currentClusterId[i] >= 0) {
+            prevDynamicGlueClusterSize[i] = currentClusterSize[currentClusterId[i]];
+        } else {
+            prevDynamicGlueClusterSize[i] = 0;
+        }
+    }
+    dynamicGlueClustersInitialized = true;
 }
 
 static void set_voxel_velocity(Voxel *voxel, Vector3 vel)
@@ -6805,6 +7042,7 @@ int main(void) {
         }
         update_projectiles(dt);
         simulate_voxel_pbd(dt);
+        log_dynamic_glue_cluster_breaks();
         handle_pbd_projectile_hits();
         voxelHashFramesSinceRebuild++;
         if (voxelHashFramesSinceRebuild >= VOXEL_HASH_REBUILD_INTERVAL) {
