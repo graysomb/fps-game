@@ -254,6 +254,12 @@ static bool resolve_span_static_overlap(int dynamic_idx, Voxel *dynamic,
 static bool nudge_voxel_bottom_above_static(int voxel_idx, Voxel *voxel);
 static void glue_dynamic_voxel_to_static_neighbors(void);
 static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx);
+static bool recycle_queue_push(const Voxel *voxel);
+static bool recycle_queue_pop(Voxel *out);
+static bool voxel_is_at_rest_location(const Voxel *voxel);
+static bool voxel_outside_world_bounds(const Voxel *voxel);
+static bool spawn_static_at_rest(const Voxel *snapshot);
+static void recycle_dead_voxels(void);
 static void update_projectiles(float dt);
 static void handle_pbd_projectile_hits(void);
 static Vector3 v_add(Vector3 a, Vector3 b);
@@ -2089,7 +2095,21 @@ static void remove_buffered_static_voxels(const UnitVoxelBuffer *buffer)
         }
     }
     for (int i = 0; i < idx_count; ++i) {
-        remove_voxel_index(indices[i]);
+        int idx = indices[i];
+        if (idx >= 0 && idx < voxel_count) {
+            Voxel *voxel = &voxels[idx];
+            if (!voxel->simulate && voxel->owner == -1) {
+                if (recycle_queue_push(voxel) && debugLogVoxelRecycle) {
+                    TraceLog(LOG_INFO,
+                             "[Recycle] enqueue-activation voxel=%d span=%d rest=(%d..%d,%d..%d,%d..%d)",
+                             idx, voxel->span,
+                             voxel->orig_min_gx, voxel->orig_max_gx,
+                             voxel->orig_min_gy, voxel->orig_max_gy,
+                             voxel->orig_min_gz, voxel->orig_max_gz);
+                }
+            }
+            remove_voxel_index(idx);
+        }
     }
 }
 
