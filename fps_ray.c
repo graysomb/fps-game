@@ -92,8 +92,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define RECYCLE_STATIC_RESTORE_DELAY (60 * 10)
 #define RECYCLE_OWNED_STATIC_MAX_FRAMES (60 * 10)
 #define STATIC_DEBRIS_OWNER (-2)
-#define VOXEL_SPLIT_STRAIN_THRESHOLD 0.0001f
-#define VOXEL_SPLIT_SHEAR_THRESHOLD 0.0001f
+#define VOXEL_SPLIT_STRAIN_THRESHOLD 0.1f
+#define VOXEL_SPLIT_SHEAR_THRESHOLD 0.1f
 #define VOXEL_HASH_REBUILD_INTERVAL 2
 #define TABLE_CACHE_SIZE 4
 #define FACE_BLOCK_MIN_OVERLAP (VOXEL_SIZE * 0.25f)
@@ -3901,15 +3901,15 @@ static void buildDemo(void) {
     // }
     // Floor
     int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
-    for (int x = 0; x <= M; x++) {
-        for (int z = 0; z <= M; z++) {
-            float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-            float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-            addVoxel(px, 0, pz, true, false, (Color){ 150, 150, 150, 255 }, 0);
-        }
-    } 
+    // for (int x = 0; x <= M; x++) {
+    //     for (int z = 0; z <= M; z++) {
+    //         float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    //         float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    //         addVoxel(px, 0, pz, true, false, (Color){ 150, 150, 150, 255 }, 0);
+    //     }
+    // } 
 
-    // Pillars
+    // // Pillars
     int pillar_height = 10; // 45 - 10
     int pillar_radius = 3;
     int pillar_positions[4][2] = {
@@ -3935,45 +3935,45 @@ static void buildDemo(void) {
         }
     }
 
-    // //Central platform (n=1)
-    int platform_size = 10;
-    int platform_height = 1; // 15 / 3
-    int platform_base_height = 4; // to keep top at same level (21)
-    for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
-        for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
-            for (int z = M/2 - platform_size/2; z <= M/2 + platform_size/2; z++) {
-                float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                float py = (y + 0.5f) * VOXEL_SIZE;
-                float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                addVoxel(px, py, pz, true, false, (Color){ 100, 200, 100, 255 }, 0);
-                //addVoxelSized(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0, 1);
-            }
-        }
-    }
+    // // //Central platform (n=1)
+    // int platform_size = 10;
+    // int platform_height = 1; // 15 / 3
+    // int platform_base_height = 4; // to keep top at same level (21)
+    // for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
+    //     for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
+    //         for (int z = M/2 - platform_size/2; z <= M/2 + platform_size/2; z++) {
+    //             float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    //             float py = (y + 0.5f) * VOXEL_SIZE;
+    //             float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    //             addVoxel(px, py, pz, true, false, (Color){ 100, 200, 100, 255 }, 0);
+    //             //addVoxelSized(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0, 1);
+    //         }
+    //     }
+    // }
 
-    // // Platform legs: 2x2 columns at each corner down to the floor.
-    int platform_min = M/2 - platform_size/2;
-    int platform_max = M/2 + platform_size/2;
-    int leg_min_y = 1;
-    int leg_max_y = platform_base_height;
-    if (leg_max_y >= leg_min_y) {
-        int leg_x[4] = { platform_min, platform_min, platform_max - 1, platform_max - 1 };
-        int leg_z[4] = { platform_min, platform_max - 1, platform_min, platform_max - 1 };
-        for (int corner = 0; corner < 4; ++corner) {
-            for (int y = leg_min_y; y <= leg_max_y; ++y) {
-                for (int dx = 0; dx < 2; ++dx) {
-                    for (int dz = 0; dz < 2; ++dz) {
-                        int x = leg_x[corner] + dx;
-                        int z = leg_z[corner] + dz;
-                        float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                        float py = (y + 0.5f) * VOXEL_SIZE;
-                        float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                        addVoxel(px, py, pz, true, false, (Color){ 120, 160, 90, 255 }, 0);
-                    }
-                }
-            }
-        }
-    }
+    // // // Platform legs: 2x2 columns at each corner down to the floor.
+    // int platform_min = M/2 - platform_size/2;
+    // int platform_max = M/2 + platform_size/2;
+    // int leg_min_y = 1;
+    // int leg_max_y = platform_base_height;
+    // if (leg_max_y >= leg_min_y) {
+    //     int leg_x[4] = { platform_min, platform_min, platform_max - 1, platform_max - 1 };
+    //     int leg_z[4] = { platform_min, platform_max - 1, platform_min, platform_max - 1 };
+    //     for (int corner = 0; corner < 4; ++corner) {
+    //         for (int y = leg_min_y; y <= leg_max_y; ++y) {
+    //             for (int dx = 0; dx < 2; ++dx) {
+    //                 for (int dz = 0; dz < 2; ++dz) {
+    //                     int x = leg_x[corner] + dx;
+    //                     int z = leg_z[corner] + dz;
+    //                     float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    //                     float py = (y + 0.5f) * VOXEL_SIZE;
+    //                     float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    //                     addVoxel(px, py, pz, true, false, (Color){ 120, 160, 90, 255 }, 0);
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
     // UnitVoxelBuffer pyramid_units;
     // unit_voxel_buffer_clear(&pyramid_units);
     // build_oblique_voxel_pyramid(&pyramid_units);
@@ -7072,7 +7072,7 @@ static int split_voxel_at(int idx, float dt, int *out_children, int max_children
     }
 
     Voxel parent = voxels[idx];
-    if (parent.span < 2 || (parent.span % 2) != 0) {
+    if (parent.span < 2) {
         return 0;
     }
     const int additional_children = MAX_SPLIT_CHILDREN - 1;
@@ -7081,11 +7081,15 @@ static int split_voxel_at(int idx, float dt, int *out_children, int max_children
     }
 
     int child_span = parent.span / 2;
+    if (child_span < 1) {
+        return 0;
+    }
     float child_edge = VOXEL_SIZE * (float)child_span;
     float parent_half = 0.5f * parent.rest_edge;
-    float start_x = parent.pos.x - parent_half + 0.5f * child_edge;
-    float start_y = parent.pos.y - parent_half + 0.5f * child_edge;
-    float start_z = parent.pos.z - parent_half + 0.5f * child_edge;
+    float child_offset = parent_half - 0.5f * child_edge;
+    if (child_offset < 0.0f) {
+        child_offset = 0.0f;
+    }
     Vector3 split_vel = v_mul(parent.vel, SPLIT_VELOCITY_DAMP);
 
     int child_counter = 0;
@@ -7093,9 +7097,9 @@ static int split_voxel_at(int idx, float dt, int *out_children, int max_children
     for (int iz = 0; iz < 2; ++iz) {
         for (int iy = 0; iy < 2; ++iy) {
             for (int ix = 0; ix < 2; ++ix) {
-                float cx = start_x + ix * child_edge;
-                float cy = start_y + iy * child_edge;
-                float cz = start_z + iz * child_edge;
+                float cx = parent.pos.x + (ix ? child_offset : -child_offset);
+                float cy = parent.pos.y + (iy ? child_offset : -child_offset);
+                float cz = parent.pos.z + (iz ? child_offset : -child_offset);
 
                 int child_idx;
                 if (child_counter == 0) {
@@ -7127,7 +7131,7 @@ static bool split_strained_voxels(float dt) {
     int i = 0;
     while (i < voxel_count) {
         Voxel *voxel = &voxels[i];
-        if (!voxel->simulate || voxel->type != 0 || voxel->span <= 1 || (voxel->span % 2) != 0) {
+        if (!voxel->simulate || voxel->type != 0 || voxel->span <= 1) {
             ++i;
             continue;
         }
