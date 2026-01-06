@@ -36,7 +36,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define MOVE_SPEED      5.0f    // units per second (unused: using acceleration)
 #define TURN_SPEED     90.0f    // degrees per second
 #define JUMP_SPEED     10.0f    // initial jump velocity
-#define GRAVITY         9.8f*0.1f    // gravity acceleration
+#define GRAVITY         9.8f*1.0f    // gravity acceleration
 #define BASE_EYE_HEIGHT 1.0f    // player eye height above floor
 #define ACCELERATION   400.0f    // horizontal acceleration
 #define FREEZE_GROUND_WEIGHT       0.9f
@@ -62,8 +62,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define MAX_STATIC_COLLISION_NEIGHBORS 64
 #define PLAYER_SIZE 0.5f
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
-#define VGS_ALPHA 0.6f
-#define VGS_BETA 0.6f
+#define VGS_ALPHA 0.9f
+#define VGS_BETA 0.35f
 #define VGS_ITERS 6
 #define VGS_EPS 1e-6f
 #define VGS_EARLY_OUT_EPS 0.002f
@@ -76,14 +76,14 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define GLUE_RELAXATION 0.9f
 #define GLUE_EPS 1e-6f
 //#define GLUE_EPS 0.002f
-#define GLUE_BREAK_STRAIN 0.6f
+#define GLUE_BREAK_STRAIN 0.3f
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 4
 #define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
 #define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
 #define RECYCLE_DYNAMIC_MAX_FRAMES (60 * 30)
 #define RECYCLE_STATIC_RESTORE_INTERVAL 60
-#define VOXEL_SPLIT_STRAIN_THRESHOLD 0.6f
-#define VOXEL_SPLIT_SHEAR_THRESHOLD 0.6f
+#define VOXEL_SPLIT_STRAIN_THRESHOLD 0.0002f
+#define VOXEL_SPLIT_SHEAR_THRESHOLD 0.0002f
 #define VOXEL_HASH_REBUILD_INTERVAL 2
 #define TABLE_CACHE_SIZE 4
 #define FACE_BLOCK_MIN_OVERLAP (VOXEL_SIZE * 0.25f)
@@ -4296,9 +4296,32 @@ static Vector3 vgs_project(Vector3 onto, Vector3 vec) {
     return v_mul(onto, scale);
 }
 
+static void reset_voxel_shape_to_rest(const Voxel *voxel, Vector3 *p, const float *w,
+                                      Vector3 centroid) {
+    float edge = voxel->rest_edge;
+    if (edge <= 0.0f) {
+        edge = VOXEL_SIZE;
+    }
+    if (!v_isfinite(centroid)) {
+        centroid = voxel->pos;
+    }
+    float half = 0.5f * edge;
+    for (int i = 0; i < 8; ++i) {
+        if (w[i] == 0.0f) {
+            continue;
+        }
+        p[i] = (Vector3){
+            centroid.x + corner_signs[i][0] * half,
+            centroid.y + corner_signs[i][1] * half,
+            centroid.z + corner_signs[i][2] * half
+        };
+    }
+}
+
 // Voxel Gram-Schmidt shape matching (Algorithm 1 in the paper) keeps each cell near-rest.
 static void solve_voxel_shape(Voxel *voxel) {
     bool has_dynamic = false;
+    bool needs_reset = false;
     Vector3 p[8];
     float w[8];
 
@@ -4306,6 +4329,7 @@ static void solve_voxel_shape(Voxel *voxel) {
         Particle *part = &voxel->particles[i];
         if (!v_isfinite(part->predicted_pos)) {
             part->predicted_pos = part->pos;
+            needs_reset = true;
         }
         p[i] = part->predicted_pos;
         w[i] = part->inv_mass;
@@ -4321,6 +4345,19 @@ static void solve_voxel_shape(Voxel *voxel) {
     const float rest_volume = voxel->rest_volume;
     const float rest_edge = voxel->rest_edge;
     Vector3 centroid = { 0.0f, 0.0f, 0.0f };
+
+    if (needs_reset) {
+        for (int i = 0; i < 8; ++i) {
+            centroid = v_add(centroid, p[i]);
+        }
+        centroid = v_mul(centroid, 1.0f / 8.0f);
+        reset_voxel_shape_to_rest(voxel, p, w, centroid);
+        voxel->pos = centroid;
+        for (int i = 0; i < 8; ++i) {
+            voxel->particles[i].predicted_pos = p[i];
+        }
+        return;
+    }
 
     for (int iter = 0; iter < VGS_ITERS; ++iter) {
         centroid = (Vector3){ 0.0f, 0.0f, 0.0f };
@@ -4349,6 +4386,11 @@ static void solve_voxel_shape(Voxel *voxel) {
         float len0 = v_length(u0);
         float len1 = v_length(u1);
         float len2 = v_length(u2);
+        if (!isfinite(len0) || !isfinite(len1) || !isfinite(len2) ||
+            len0 < VGS_EPS || len1 < VGS_EPS || len2 < VGS_EPS) {
+            needs_reset = true;
+            break;
+        }
 
         float lenp0 = 4.0f * v_length(v0);
         float lenp1 = 4.0f * v_length(v1);
@@ -4357,6 +4399,7 @@ static void solve_voxel_shape(Voxel *voxel) {
         float denom = lenp0 * lenp1 * lenp2;
         float rest_demom = rest_edge * rest_edge * rest_edge;
         if (fabsf(denom) < VGS_EPS || !isfinite(denom)) {
+            needs_reset = true;
             break;
         }
         if (fabs(denom-rest_demom) > VGS_EPS) {
@@ -4375,6 +4418,10 @@ static void solve_voxel_shape(Voxel *voxel) {
         float d1 = fabsf(len1 - target1);
         float d2 = fabsf(len2 - target2);
         float raw_volume = v_dot(v_cross(u0, u1), u2);
+        if (!isfinite(raw_volume) || fabsf(raw_volume) < VGS_EPS) {
+            needs_reset = true;
+            break;
+        }
         if (d0 <= edge_eps && d1 <= edge_eps && d2 <= edge_eps &&
             fabsf(raw_volume - rest_volume) <= volume_eps) {
             break;
@@ -4386,6 +4433,10 @@ static void solve_voxel_shape(Voxel *voxel) {
 
         // Volume correction mirrors the GPU "ResizeVoxelBasis" stage.
         float volume = v_dot(v_cross(u0, u1), u2);
+        if (!isfinite(volume) || fabsf(volume) < VGS_EPS) {
+            needs_reset = true;
+            break;
+        }
         if (fabsf(volume) > VGS_EPS && fabsf(volume-rest_volume) > VGS_EPS) {
             float scale = rest_volume / volume;
             float root = cbrtf(fabsf(scale));
@@ -4417,6 +4468,15 @@ static void solve_voxel_shape(Voxel *voxel) {
             p[i] = new_p[i];
         }
 
+    }
+
+    if (needs_reset) {
+        centroid = (Vector3){ 0.0f, 0.0f, 0.0f };
+        for (int i = 0; i < 8; ++i) {
+            centroid = v_add(centroid, p[i]);
+        }
+        centroid = v_mul(centroid, 1.0f / 8.0f);
+        reset_voxel_shape_to_rest(voxel, p, w, centroid);
     }
 
     voxel->pos = centroid;
