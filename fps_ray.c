@@ -47,11 +47,11 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define FREEZE_PROPAGATION_EPSILON 1e-6f
 #define ACTIVATION_VELOCITY_WEIGHT 0.6f
 #define ACTIVATION_VELOCITY_REF_SPEED 6.0f
-#define ACTIVATION_STRAIN_WEIGHT   0.25f
-#define ACTIVATION_STRAIN_REF      0.15f
-#define ACTIVATION_GLUE_WEIGHT     0.35f
+#define ACTIVATION_STRAIN_WEIGHT   0.1f
+#define ACTIVATION_STRAIN_REF      0.1f
+#define ACTIVATION_GLUE_WEIGHT     0.1f
 #define ACTIVATION_GLUE_REF_SPEED  3.0f
-#define ACTIVATION_DYNAMIC_WEIGHT  0.9f
+#define ACTIVATION_DYNAMIC_WEIGHT  0.1f
 #define FREEZE_BELIEF_IMPORTANCE   0.9f
 #define ACTIVATION_HYSTERESIS      0.1f
 #define FRICTION       400.0f    // ground friction deceleration
@@ -85,8 +85,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 4
 #define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
 #define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
-#define RECYCLE_DYNAMIC_MAX_FRAMES (60 * 1)
-#define RECYCLE_STATIC_RESTORE_INTERVAL 1
+#define RECYCLE_DYNAMIC_MAX_FRAMES (60 * 10)
+#define RECYCLE_STATIC_RESTORE_INTERVAL 60
 #define VOXEL_SPLIT_STRAIN_THRESHOLD 0.0002f
 #define VOXEL_SPLIT_SHEAR_THRESHOLD 0.0002f
 #define VOXEL_HASH_REBUILD_INTERVAL 2
@@ -97,15 +97,15 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define MAX_FACE_NEIGHBORS   64
 #define MAX_SPLIT_CHILDREN    8
 static const float GRID_EPSILON = 1e-4f;
-#define VOXEL_ACTIVATION_RADIUS 2*5
+#define VOXEL_ACTIVATION_RADIUS 2*1
 //#define VOXEL_ACTIVATION_UNIT_BUDGET 128
 #define VOXEL_ACTIVATION_UNIT_BUDGET 128*5
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 5.0f
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 10.4f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 10.4f
-#define VOXEL_DEACTIVATION_FRAMES 10
+#define VOXEL_DEACTIVATION_FRAMES 20
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
-#define STATIC_RESTORE_SEARCH_RADIUS 2*5
+#define STATIC_RESTORE_SEARCH_RADIUS 2*1
 
 // KD-stats constants
 #define BASE_HEALTH 100
@@ -2264,6 +2264,74 @@ static int collect_static_activation_cluster(int seed_idx,
     return added;
 }
 
+static int expand_activation_cluster_unbounded(UnitVoxelBuffer *buffer, int startIndex,
+                                               float dynamicBelief)
+{
+    if (!buffer) {
+        return 0;
+    }
+    if (startIndex < 0) {
+        startIndex = 0;
+    }
+    if (startIndex >= buffer->count) {
+        return 0;
+    }
+
+    int queue[VOXEL_ACTIVATION_UNIT_BUDGET];
+    int head = 0;
+    int tail = 0;
+    for (int i = startIndex; i < buffer->count && tail < VOXEL_ACTIVATION_UNIT_BUDGET; ++i) {
+        int idx = buffer->voxels[i].voxelIndex;
+        if (idx >= 0 && idx < voxel_count) {
+            queue[tail++] = idx;
+        }
+    }
+
+    static const int neighbor_dirs[6][3] = {
+        { 1,  0,  0 }, { -1,  0,  0 },
+        { 0,  1,  0 }, {  0, -1,  0 },
+        { 0,  0,  1 }, {  0,  0, -1 }
+    };
+
+    int added = 0;
+    while (head < tail && buffer->count < VOXEL_ACTIVATION_UNIT_BUDGET) {
+        int current_idx = queue[head++];
+        if (current_idx < 0 || current_idx >= voxel_count) {
+            continue;
+        }
+        const Voxel *current = &voxels[current_idx];
+        int base_gx = current->gx;
+        int base_gy = current->gy;
+        int base_gz = current->gz;
+
+        for (int n = 0; n < 6 && buffer->count < VOXEL_ACTIVATION_UNIT_BUDGET; ++n) {
+            int nx = base_gx + neighbor_dirs[n][0];
+            int ny = base_gy + neighbor_dirs[n][1];
+            int nz = base_gz + neighbor_dirs[n][2];
+            int neighbor_idx = table_get(nx, ny, nz);
+            if (neighbor_idx < 0) {
+                continue;
+            }
+            if (neighbor_idx >= 0 && neighbor_idx < voxel_count) {
+                Voxel *neighbor = &voxels[neighbor_idx];
+                if (dynamicBelief < neighbor->freezeBelief) {
+                    continue;
+                }
+            }
+            if (activation_try_enqueue(neighbor_idx, 0, 0, 0,
+                                       -1.0f, buffer, queue, &tail))
+            {
+                ++added;
+                if (buffer->count >= VOXEL_ACTIVATION_UNIT_BUDGET) {
+                    break;
+                }
+            }
+        }
+    }
+
+    return added;
+}
+
 static float compute_cluster_freeze_belief(const UnitVoxelBuffer *buffer, int startIndex)
 {
     if (!buffer) {
@@ -2441,6 +2509,8 @@ static bool activate_static_voxels_near_dynamic(void)
                         rollback_activation_buffer(&buffer, previousCount);
                         continue;
                     }
+                    expand_activation_cluster_unbounded(&buffer, previousCount,
+                                                        dynamic->activationBelief);
                     if (buffer.count >= VOXEL_ACTIVATION_UNIT_BUDGET) {
                         break;
                     }
@@ -3734,13 +3804,13 @@ static void buildDemo(void) {
     // }
     // Floor
     int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
-    // for (int x = 0; x <= M; x++) {
-    //     for (int z = 0; z <= M; z++) {
-    //         float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //         float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //         addVoxel(px, 0, pz, true, false, (Color){ 150, 150, 150, 255 }, 0);
-    //     }
-    // } 
+    for (int x = 0; x <= M; x++) {
+        for (int z = 0; z <= M; z++) {
+            float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+            float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+            addVoxel(px, 0, pz, true, false, (Color){ 150, 150, 150, 255 }, 0);
+        }
+    } 
 
     // Pillars
     int pillar_height = 10; // 45 - 10
@@ -3752,10 +3822,10 @@ static void buildDemo(void) {
         { 3 * M / 4, 3 * M / 4 }
     };
 
-    for (int p = 0; p < 1; p++) {
+    for (int p = 0; p < 4; p++) {
         int cx = pillar_positions[p][0];
         int cz = pillar_positions[p][1];
-        for (int y = 5; y <= pillar_height; y++) {
+        for (int y = 1; y <= pillar_height; y++) {
             for (int dx = -pillar_radius; dx <= pillar_radius; dx++) {
                 for (int dz = -pillar_radius; dz <= pillar_radius; dz++) {
                     if (dx*dx + dz*dz > pillar_radius*pillar_radius) continue; // circular pillar
@@ -3769,44 +3839,44 @@ static void buildDemo(void) {
     }
 
     // //Central platform (n=1)
-    // int platform_size = 10;
-    // int platform_height = 1; // 15 / 3
-    // int platform_base_height = 4; // to keep top at same level (21)
-    // for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
-    //     for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
-    //         for (int z = M/2 - platform_size/2; z <= M/2 + platform_size/2; z++) {
-    //             float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //             float py = (y + 0.5f) * VOXEL_SIZE;
-    //             float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //             addVoxel(px, py, pz, true, false, (Color){ 100, 200, 100, 255 }, 0);
-    //             //addVoxelSized(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0, 1);
-    //         }
-    //     }
-    // }
+    int platform_size = 10;
+    int platform_height = 1; // 15 / 3
+    int platform_base_height = 4; // to keep top at same level (21)
+    for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
+        for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
+            for (int z = M/2 - platform_size/2; z <= M/2 + platform_size/2; z++) {
+                float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                float py = (y + 0.5f) * VOXEL_SIZE;
+                float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                addVoxel(px, py, pz, true, false, (Color){ 100, 200, 100, 255 }, 0);
+                //addVoxelSized(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0, 1);
+            }
+        }
+    }
 
     // // Platform legs: 2x2 columns at each corner down to the floor.
-    // int platform_min = M/2 - platform_size/2;
-    // int platform_max = M/2 + platform_size/2;
-    // int leg_min_y = 1;
-    // int leg_max_y = platform_base_height;
-    // if (leg_max_y >= leg_min_y) {
-    //     int leg_x[4] = { platform_min, platform_min, platform_max - 1, platform_max - 1 };
-    //     int leg_z[4] = { platform_min, platform_max - 1, platform_min, platform_max - 1 };
-    //     for (int corner = 0; corner < 4; ++corner) {
-    //         for (int y = leg_min_y; y <= leg_max_y; ++y) {
-    //             for (int dx = 0; dx < 2; ++dx) {
-    //                 for (int dz = 0; dz < 2; ++dz) {
-    //                     int x = leg_x[corner] + dx;
-    //                     int z = leg_z[corner] + dz;
-    //                     float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //                     float py = (y + 0.5f) * VOXEL_SIZE;
-    //                     float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //                     addVoxel(px, py, pz, true, false, (Color){ 120, 160, 90, 255 }, 0);
-    //                 }
-    //             }
-    //         }
-    //     }
-    // }
+    int platform_min = M/2 - platform_size/2;
+    int platform_max = M/2 + platform_size/2;
+    int leg_min_y = 1;
+    int leg_max_y = platform_base_height;
+    if (leg_max_y >= leg_min_y) {
+        int leg_x[4] = { platform_min, platform_min, platform_max - 1, platform_max - 1 };
+        int leg_z[4] = { platform_min, platform_max - 1, platform_min, platform_max - 1 };
+        for (int corner = 0; corner < 4; ++corner) {
+            for (int y = leg_min_y; y <= leg_max_y; ++y) {
+                for (int dx = 0; dx < 2; ++dx) {
+                    for (int dz = 0; dz < 2; ++dz) {
+                        int x = leg_x[corner] + dx;
+                        int z = leg_z[corner] + dz;
+                        float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                        float py = (y + 0.5f) * VOXEL_SIZE;
+                        float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                        addVoxel(px, py, pz, true, false, (Color){ 120, 160, 90, 255 }, 0);
+                    }
+                }
+            }
+        }
+    }
     // UnitVoxelBuffer pyramid_units;
     // unit_voxel_buffer_clear(&pyramid_units);
     // build_oblique_voxel_pyramid(&pyramid_units);
