@@ -62,7 +62,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define MAX_STATIC_COLLISION_NEIGHBORS 64
 #define PLAYER_SIZE 0.5f
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
-#define VGS_ALPHA 0.9f
+#define VGS_ALPHA 0.75f
 #define VGS_BETA 0.35f
 #define VGS_ITERS 6
 #define VGS_EPS 1e-6f
@@ -75,12 +75,13 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define PBD_CONSTRAINT_ITERS 12
 #define COLLISION_RELAXATION 0.99f
 #define COLLISION_CENTROID_ONLY_DT 0.02f
+#define SPLIT_VELOCITY_DAMP 0.1f
 #define CENTER_RELAXATION 0.99f
-#define VELOCITY_DAMPING 1.00f
+#define VELOCITY_DAMPING .99f
 #define GLUE_RELAXATION 0.9f
 #define GLUE_EPS 1e-6f
 //#define GLUE_EPS 0.002f
-#define GLUE_BREAK_STRAIN 0.3f
+#define GLUE_BREAK_STRAIN 0.6f
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 4
 #define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
 #define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
@@ -99,10 +100,10 @@ static const float GRID_EPSILON = 1e-4f;
 #define VOXEL_ACTIVATION_RADIUS 2*5
 //#define VOXEL_ACTIVATION_UNIT_BUDGET 128
 #define VOXEL_ACTIVATION_UNIT_BUDGET 128*5
-#define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 2.0f
-#define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.4f
-#define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.4f
-#define VOXEL_DEACTIVATION_FRAMES 10
+#define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 5.0f
+#define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 10.4f
+#define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 10.4f
+#define VOXEL_DEACTIVATION_FRAMES 1
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
 #define STATIC_RESTORE_SEARCH_RADIUS 2*5
 
@@ -3751,7 +3752,7 @@ static void buildDemo(void) {
         { 3 * M / 4, 3 * M / 4 }
     };
 
-    for (int p = 0; p < 4; p++) {
+    for (int p = 0; p < 1; p++) {
         int cx = pillar_positions[p][0];
         int cz = pillar_positions[p][1];
         for (int y = 1; y <= pillar_height; y++) {
@@ -6791,6 +6792,7 @@ static int split_voxel_at(int idx, float dt, int *out_children, int max_children
     float start_x = parent.pos.x - parent_half + 0.5f * child_edge;
     float start_y = parent.pos.y - parent_half + 0.5f * child_edge;
     float start_z = parent.pos.z - parent_half + 0.5f * child_edge;
+    Vector3 split_vel = v_mul(parent.vel, SPLIT_VELOCITY_DAMP);
 
     int child_counter = 0;
     int next_index = voxel_count;
@@ -6815,7 +6817,7 @@ static int split_voxel_at(int idx, float dt, int *out_children, int max_children
                                   parent.color, parent.type,
                                   child_span, parent.owner);
                 child->debugClusterTag = parent.debugClusterTag;
-                apply_uniform_velocity(child, parent.vel, dt);
+                apply_uniform_velocity(child, split_vel, dt);
                 out_children[child_counter] = child_idx;
                 child_counter++;
             }
