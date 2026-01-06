@@ -87,7 +87,9 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
 #define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
 #define RECYCLE_DYNAMIC_MAX_FRAMES (60 * 10)
-#define RECYCLE_STATIC_RESTORE_INTERVAL 60
+#define RECYCLE_STATIC_RESTORE_INTERVAL 1
+#define RECYCLE_STATIC_RESTORE_DELAY (60 * 10)
+#define RECYCLE_OWNED_STATIC_MAX_FRAMES (60 * 10)
 #define VOXEL_SPLIT_STRAIN_THRESHOLD 0.0002f
 #define VOXEL_SPLIT_SHEAR_THRESHOLD 0.0002f
 #define VOXEL_HASH_REBUILD_INTERVAL 2
@@ -1417,6 +1419,19 @@ static int add_static_voxel_at_grid(int gx, int gy, int gz, Color color, int typ
     return addVoxel(px, py, pz, true, false, color, type);
 }
 
+static void tag_owned_static_voxel(int idx, int owner)
+{
+    if (idx < 0 || idx >= voxel_count) {
+        return;
+    }
+    Voxel *voxel = &voxels[idx];
+    if (voxel->simulate) {
+        return;
+    }
+    voxel->owner = owner;
+    voxel->lifeFrames = 0;
+}
+
 static bool grid_region_is_free(int minx, int maxx,
                                 int miny, int maxy,
                                 int minz, int maxz)
@@ -1462,6 +1477,42 @@ static void remove_static_voxels_in_region(int minx, int maxx,
                     Voxel *candidate = &voxels[idx];
                     if (candidate->simulate) {
                         break;
+                    }
+                    remove_voxel_index(idx);
+                }
+            }
+        }
+    }
+}
+
+static void remove_static_voxels_in_region_recycle(int minx, int maxx,
+                                                   int miny, int maxy,
+                                                   int minz, int maxz)
+{
+    if (minx > maxx || miny > maxy || minz > maxz) {
+        return;
+    }
+    for (int z = minz; z <= maxz; ++z) {
+        for (int y = miny; y <= maxy; ++y) {
+            for (int x = minx; x <= maxx; ++x) {
+                while (1) {
+                    int idx = table_get(x, y, z);
+                    if (idx < 0 || idx >= voxel_count) {
+                        break;
+                    }
+                    Voxel *candidate = &voxels[idx];
+                    if (candidate->simulate) {
+                        break;
+                    }
+                    if (candidate->owner == -1) {
+                        if (recycle_queue_push(candidate) && debugLogVoxelRecycle) {
+                            TraceLog(LOG_INFO,
+                                     "[Recycle] enqueue-bullet voxel=%d span=%d rest=(%d..%d,%d..%d,%d..%d)",
+                                     idx, candidate->span,
+                                     candidate->rest_min_gx, candidate->rest_max_gx,
+                                     candidate->rest_min_gy, candidate->rest_max_gy,
+                                     candidate->rest_min_gz, candidate->rest_max_gz);
+                        }
                     }
                     remove_voxel_index(idx);
                 }
@@ -2598,7 +2649,9 @@ static bool recycle_queue_push(const Voxel *voxel) {
     if (!voxel || recycleQueueCount >= MAX_VOXELS) {
         return false;
     }
-    recycleQueue[recycleQueueTail] = *voxel;
+    Voxel snapshot = *voxel;
+    snapshot.lifeFrames = recycleFrameCounter;
+    recycleQueue[recycleQueueTail] = snapshot;
     recycleQueueTail = (recycleQueueTail + 1) % MAX_VOXELS;
     ++recycleQueueCount;
     return true;
@@ -2733,14 +2786,17 @@ static void recycle_dead_voxels(void) {
             continue;
         }
         if (voxel->owner != -1) {
-            if (debugLogVoxelRecycle) {
-                TraceLog(LOG_INFO,
-                         "[Recycle] remove-owned-static voxel=%d owner=%d",
-                         i, voxel->owner);
+            voxel->lifeFrames++;
+            if (voxel->lifeFrames > RECYCLE_OWNED_STATIC_MAX_FRAMES) {
+                if (debugLogVoxelRecycle) {
+                    TraceLog(LOG_INFO,
+                             "[Recycle] remove-owned-static voxel=%d owner=%d life=%d",
+                             i, voxel->owner, voxel->lifeFrames);
+                }
+                remove_voxel_index(i);
+                changed = true;
+                --i;
             }
-            remove_voxel_index(i);
-            changed = true;
-            --i;
             continue;
         }
         if (!voxel_is_at_rest_location(voxel)) {
@@ -2761,7 +2817,8 @@ static void recycle_dead_voxels(void) {
     }
 
     if ((recycleFrameCounter % RECYCLE_STATIC_RESTORE_INTERVAL) == 0 &&
-        recycleQueueCount > 0)
+        recycleQueueCount > 0 &&
+        (recycleFrameCounter - recycleQueue[recycleQueueHead].lifeFrames) >= RECYCLE_STATIC_RESTORE_DELAY)
     {
         Voxel snapshot;
         if (recycle_queue_pop(&snapshot)) {
@@ -4178,7 +4235,7 @@ static void update_projectiles(float dt)
                 int maxz = anchorZ + brushExtent - 1;
 
                 if (v->type == 1) {
-                    remove_static_voxels_in_region(minx, maxx, miny, maxy, minz, maxz);
+                    remove_static_voxels_in_region_recycle(minx, maxx, miny, maxy, minz, maxz);
                     static_changed = true;
                 } else if (v->type == 2) {
                     int min_g = (int)ceilf((-FLOOR_SIZE / VOXEL_SIZE) - 0.5f);
@@ -4197,7 +4254,10 @@ static void update_projectiles(float dt)
                                     continue;
                                 }
                                 if (!occupied(targetX, targetY, targetZ)) {
-                                    add_static_voxel_at_grid(targetX, targetY, targetZ, v->color, 0);
+                                    int idx = add_static_voxel_at_grid(targetX, targetY, targetZ, v->color, 0);
+                                    if (idx >= 0) {
+                                        tag_owned_static_voxel(idx, v->owner);
+                                    }
                                     static_changed = true;
                                 }
                             }
@@ -4249,7 +4309,10 @@ static void update_projectiles(float dt)
                             continue;
                         }
                         if (!occupied(targetX, targetY, targetZ)) {
-                            add_static_voxel_at_grid(targetX, targetY, targetZ, v->color, 0);
+                            int idx = add_static_voxel_at_grid(targetX, targetY, targetZ, v->color, 0);
+                            if (idx >= 0) {
+                                tag_owned_static_voxel(idx, v->owner);
+                            }
                             static_changed = true;
                         }
                     }
