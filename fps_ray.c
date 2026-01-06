@@ -2392,7 +2392,7 @@ static bool activate_static_voxels_near_dynamic(void)
             break;
         }
         Voxel *dynamic = &voxels[i];
-        if (!dynamic->simulate) {
+        if (!dynamic->simulate || dynamic->type == 2) {
             continue;
         }
         int center_gx = (int)floorf(dynamic->pos.x / VOXEL_SIZE);
@@ -4226,8 +4226,10 @@ static void update_projectiles(float dt)
                     }
                 }
 
-                if (activate_static_neighbors_of_region(minx, maxx, miny, maxy, minz, maxz)) {
-                    static_changed = true;
+                if (v->type != 2) {
+                    if (activate_static_neighbors_of_region(minx, maxx, miny, maxy, minz, maxz)) {
+                        static_changed = true;
+                    }
                 }
             }
 
