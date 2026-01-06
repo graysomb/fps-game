@@ -83,6 +83,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define GLUE_EPS 1e-6f
 //#define GLUE_EPS 0.002f
 #define GLUE_BREAK_STRAIN 0.2f
+#define GLUE_BREAK_HINGE_ANGLE_DEG 25.0f
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 30
 #define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
 #define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
@@ -1073,6 +1074,7 @@ typedef struct {
     int      coarseVoxel;
     int      fineVoxel;
     int      coarseCorner[4];
+    int      fineCornerFace[4];
     float    w[4];
     int      fineCorner;
     uint8_t  coarseMask;
@@ -1080,6 +1082,7 @@ typedef struct {
     float    restLocalU;
     float    restLocalV;
     float    restLocalN;
+    float    restNormalAngle;
     float    strength;
     int      dirX;
     int      dirY;
@@ -1133,6 +1136,41 @@ static void rebuild_glue_adjacency_if_dirty(void) {
         add_glued_neighbor_entry(gc->fineVoxel, gc->coarseVoxel);
     }
     glueAdjacencyDirty = false;
+}
+
+static bool face_normal_predicted(const Voxel *voxel, const int corners[4],
+                                  Vector3 *out_normal) {
+    Vector3 p0 = voxel->particles[corners[0]].predicted_pos;
+    Vector3 p1 = voxel->particles[corners[1]].predicted_pos;
+    Vector3 p2 = voxel->particles[corners[2]].predicted_pos;
+    if (!v_isfinite(p0) || !v_isfinite(p1) || !v_isfinite(p2)) {
+        return false;
+    }
+    Vector3 u = v_sub(p1, p0);
+    Vector3 v = v_sub(p2, p0);
+    Vector3 n = v_cross(u, v);
+    float len = v_length(n);
+    if (len < 1e-6f) {
+        return false;
+    }
+    *out_normal = v_mul(n, 1.0f / len);
+    return true;
+}
+
+static bool face_normal_rest(const Voxel *voxel, const int corners[4],
+                             Vector3 *out_normal) {
+    Vector3 p0 = voxel_rest_corner_world(voxel, corners[0]);
+    Vector3 p1 = voxel_rest_corner_world(voxel, corners[1]);
+    Vector3 p2 = voxel_rest_corner_world(voxel, corners[2]);
+    Vector3 u = v_sub(p1, p0);
+    Vector3 v = v_sub(p2, p0);
+    Vector3 n = v_cross(u, v);
+    float len = v_length(n);
+    if (len < 1e-6f) {
+        return false;
+    }
+    *out_normal = v_mul(n, 1.0f / len);
+    return true;
 }
 
 static inline int voxel_span_for_glue(const Voxel *v) {
@@ -4690,6 +4728,7 @@ static void solve_voxel_shape(Voxel *voxel) {
 
 static void solve_voxel_glue(bool allow_break) {
     bool glue_break = false;
+    const float hinge_break_angle = GLUE_BREAK_HINGE_ANGLE_DEG * DEG2RAD;
     if (debugLogGlue) {
         debugGlueSolveLogBudget = DEBUG_GLUE_SOLVE_LOG_INIT;
         debugGlueBreakLogBudget = DEBUG_GLUE_BREAK_LOG_INIT;
@@ -4769,13 +4808,27 @@ static void solve_voxel_glue(bool allow_break) {
         float violation = v_length(C);
         float rest_edge_min = fminf(coarse->rest_edge, fine->rest_edge);
         float break_distance = GLUE_BREAK_STRAIN * rest_edge_min;
-        if (allow_break && violation > break_distance) {
+        bool hinge_break = false;
+        if (allow_break && hinge_break_angle > 0.0f) {
+            Vector3 n_coarse = { 0.0f, 0.0f, 0.0f };
+            Vector3 n_fine = { 0.0f, 0.0f, 0.0f };
+            if (face_normal_predicted(coarse, gc->coarseCorner, &n_coarse) &&
+                face_normal_predicted(fine, gc->fineCornerFace, &n_fine)) {
+                float cur_dot = clampf(v_dot(n_coarse, n_fine), -1.0f, 1.0f);
+                float cur_angle = acosf(cur_dot);
+                if (fabsf(cur_angle - gc->restNormalAngle) > hinge_break_angle) {
+                    hinge_break = true;
+                }
+            }
+        }
+        if (allow_break && (violation > break_distance || hinge_break)) {
             if (debugLogGlue && debugGlueBreakLogBudget > 0) {
                 TraceLog(LOG_DEBUG,
-                         "[GlueBreak] pair=(%d,%d) spans=(%d,%d) violation=%.5f break=%.5f uvPred=(%.3f,%.3f) rawUV=(%.3f,%.3f) baryValid=%s weights=(%.3f,%.3f,%.3f,%.3f) coarsePos=(%.2f,%.2f,%.2f) finePos=(%.2f,%.2f,%.2f)",
+                         "[GlueBreak] pair=(%d,%d) spans=(%d,%d) violation=%.5f break=%.5f hinge=%d uvPred=(%.3f,%.3f) rawUV=(%.3f,%.3f) baryValid=%s weights=(%.3f,%.3f,%.3f,%.3f) coarsePos=(%.2f,%.2f,%.2f) finePos=(%.2f,%.2f,%.2f)",
                          gc->coarseVoxel, gc->fineVoxel,
                          voxel_span_for_glue(coarse), voxel_span_for_glue(fine),
                          violation, break_distance,
+                         hinge_break ? 1 : 0,
                          solveU, solveV,
                          solveRawU, solveRawV,
                          baryValid ? "true" : "false",
@@ -5044,6 +5097,14 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
     }
     restBasisV = v_mul(restBasisV, 1.0f / restBasisVLen);
     Vector3 restBasisN = v_norm(v_cross(restBasisU, restBasisV));
+    float restNormalAngle = PI;
+    Vector3 restNormalCoarse = { 0.0f, 0.0f, 0.0f };
+    Vector3 restNormalFine = { 0.0f, 0.0f, 0.0f };
+    if (face_normal_rest(coarse, coarseFace, &restNormalCoarse) &&
+        face_normal_rest(fine, fineFace, &restNormalFine)) {
+        float rest_dot = clampf(v_dot(restNormalCoarse, restNormalFine), -1.0f, 1.0f);
+        restNormalAngle = acosf(rest_dot);
+    }
 
     for (int c = 0; c < 4; ++c) {
         if (glueConstraintCount >= (int)(sizeof(glueConstraints) / sizeof(glueConstraints[0]))) {
@@ -5093,10 +5154,14 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
         gc->restLocalU = v_dot(restDelta, restBasisU);
         gc->restLocalV = v_dot(restDelta, restBasisV);
         gc->restLocalN = v_dot(restDelta, restBasisN);
+        gc->restNormalAngle = restNormalAngle;
         gc->strength = 1.0f;
         gc->dirX = dir->dx;
         gc->dirY = dir->dy;
         gc->dirZ = dir->dz;
+        for (int k = 0; k < 4; ++k) {
+            gc->fineCornerFace[k] = fineFace[k];
+        }
         gc->active = true;
 
         float edgeStrengthU = (u < 0.5f) ? (1.0f - u) : u;
@@ -5138,10 +5203,14 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
             edgeGc->restLocalU = v_dot(edgeDelta, restBasisU);
             edgeGc->restLocalV = v_dot(edgeDelta, restBasisV);
             edgeGc->restLocalN = v_dot(edgeDelta, restBasisN);
+            edgeGc->restNormalAngle = restNormalAngle;
             edgeGc->strength = edgeStrengthU;
             edgeGc->dirX = dir->dx;
             edgeGc->dirY = dir->dy;
             edgeGc->dirZ = dir->dz;
+            for (int k = 0; k < 4; ++k) {
+                edgeGc->fineCornerFace[k] = fineFace[k];
+            }
             edgeGc->active = true;
         }
 
@@ -5175,10 +5244,14 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
             edgeGc->restLocalU = v_dot(edgeDelta, restBasisU);
             edgeGc->restLocalV = v_dot(edgeDelta, restBasisV);
             edgeGc->restLocalN = v_dot(edgeDelta, restBasisN);
+            edgeGc->restNormalAngle = restNormalAngle;
             edgeGc->strength = edgeStrengthV;
             edgeGc->dirX = dir->dx;
             edgeGc->dirY = dir->dy;
             edgeGc->dirZ = dir->dz;
+            for (int k = 0; k < 4; ++k) {
+                edgeGc->fineCornerFace[k] = fineFace[k];
+            }
             edgeGc->active = true;
         }
 
@@ -5205,10 +5278,14 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
             centerGc->restLocalU = v_dot(centerDelta, restBasisU);
             centerGc->restLocalV = v_dot(centerDelta, restBasisV);
             centerGc->restLocalN = v_dot(centerDelta, restBasisN);
+            centerGc->restNormalAngle = restNormalAngle;
             centerGc->strength = centerStrength;
             centerGc->dirX = dir->dx;
             centerGc->dirY = dir->dy;
             centerGc->dirZ = dir->dz;
+            for (int k = 0; k < 4; ++k) {
+                centerGc->fineCornerFace[k] = fineFace[k];
+            }
             centerGc->active = true;
         }
 
