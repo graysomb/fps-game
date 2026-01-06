@@ -74,6 +74,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define PBD_SUBSTEPS 6
 #define PBD_CONSTRAINT_ITERS 12
 #define COLLISION_RELAXATION 0.99f
+#define COLLISION_CENTROID_ONLY_DT 0.02f
 #define CENTER_RELAXATION 0.99f
 #define VELOCITY_DAMPING 1.00f
 #define GLUE_RELAXATION 0.9f
@@ -6312,11 +6313,12 @@ static void compute_voxel_center_and_mass(const Voxel *voxel, Vector3 *center, f
 
 // Resolve collisions against the scene and neighbouring voxels (mirrors ResolveCollisions compute pass). need to filter based on glue
 static void solve_particle_collisions(float dt) {
-    (void)dt;
-
     const float half_player = PLAYER_SIZE * 0.5f;
     const float omega = COLLISION_RELAXATION;
     const float eps = 1e-6f;
+    const bool centroid_only = (dt > COLLISION_CENTROID_ONLY_DT);
+    const int particle_start = centroid_only ? VOXEL_CENTER_INDEX : 0;
+    const int particle_end = centroid_only ? (VOXEL_CENTER_INDEX + 1) : VOXEL_PARTICLE_COUNT;
     if (debugLogSpanCollisions) {
         debugSpanCollisionLogBudget = 32;
         debugSpanEdgeLogBudget = 32;
@@ -6341,7 +6343,7 @@ static void solve_particle_collisions(float dt) {
             static_collision_radius = min_static_radius;
         }
 
-        for (int j = 0; j < VOXEL_PARTICLE_COUNT; ++j) {
+        for (int j = particle_start; j < particle_end; ++j) {
             Particle *p = voxel_particle_at(voxel, j);
 
             Vector3 pos = p->predicted_pos;
@@ -6438,7 +6440,7 @@ static void solve_particle_collisions(float dt) {
         int neighbor_ids[MAX_NEIGHBOR_VOXELS];
         int neighbor_count = gather_neighbor_voxels(voxelA, i, neighbor_ids, MAX_NEIGHBOR_VOXELS);
 
-        for (int j = 0; j < VOXEL_PARTICLE_COUNT; ++j) {
+        for (int j = particle_start; j < particle_end; ++j) {
             Particle *pa = voxel_particle_at(voxelA, j);
             float wa = pa->inv_mass;
 
@@ -6456,7 +6458,7 @@ static void solve_particle_collisions(float dt) {
                 int spanB = (voxelB->span > 0) ? voxelB->span : 1;
                 float spanB_extent = 0.5f * VOXEL_SIZE * (float)(spanB - 1);
 
-                if (spanA > 1 || spanB > 1) {
+                if (!centroid_only && (spanA > 1 || spanB > 1)) {
                     continue;
                 }
 
@@ -6466,7 +6468,7 @@ static void solve_particle_collisions(float dt) {
                     continue;
                 }
 
-                for (int q = 0; q < VOXEL_PARTICLE_COUNT; ++q) {
+                for (int q = particle_start; q < particle_end; ++q) {
                     if (neighbor_idx == i && q <= j) {
                         continue;
                     }
