@@ -85,8 +85,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 4
 #define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
 #define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
-#define RECYCLE_DYNAMIC_MAX_FRAMES (60 * 30)
-#define RECYCLE_STATIC_RESTORE_INTERVAL 60
+#define RECYCLE_DYNAMIC_MAX_FRAMES (60 * 1)
+#define RECYCLE_STATIC_RESTORE_INTERVAL 1
 #define VOXEL_SPLIT_STRAIN_THRESHOLD 0.0002f
 #define VOXEL_SPLIT_SHEAR_THRESHOLD 0.0002f
 #define VOXEL_HASH_REBUILD_INTERVAL 2
@@ -103,7 +103,7 @@ static const float GRID_EPSILON = 1e-4f;
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 5.0f
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 10.4f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 10.4f
-#define VOXEL_DEACTIVATION_FRAMES 1
+#define VOXEL_DEACTIVATION_FRAMES 10
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
 #define STATIC_RESTORE_SEARCH_RADIUS 2*5
 
@@ -3755,7 +3755,7 @@ static void buildDemo(void) {
     for (int p = 0; p < 1; p++) {
         int cx = pillar_positions[p][0];
         int cz = pillar_positions[p][1];
-        for (int y = 1; y <= pillar_height; y++) {
+        for (int y = 5; y <= pillar_height; y++) {
             for (int dx = -pillar_radius; dx <= pillar_radius; dx++) {
                 for (int dz = -pillar_radius; dz <= pillar_radius; dz++) {
                     if (dx*dx + dz*dz > pillar_radius*pillar_radius) continue; // circular pillar
