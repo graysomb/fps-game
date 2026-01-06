@@ -1580,6 +1580,22 @@ static void remove_debris_static_in_columns(int minx, int maxx,
     }
 }
 
+static bool remove_all_debris_static(void)
+{
+    bool removed = false;
+    int i = 0;
+    while (i < voxel_count) {
+        Voxel *voxel = &voxels[i];
+        if (!voxel->simulate && voxel->owner == STATIC_DEBRIS_OWNER) {
+            remove_voxel_index(i);
+            removed = true;
+            continue;
+        }
+        ++i;
+    }
+    return removed;
+}
+
 static bool find_nearest_free_static_region(int base_minx, int base_maxx,
                                             int base_miny, int base_maxy,
                                             int base_minz, int base_maxz,
@@ -2917,6 +2933,9 @@ static void recycle_dead_voxels(void) {
                              snapshot.rest_min_gy, snapshot.rest_max_gy,
                              snapshot.rest_min_gz, snapshot.rest_max_gz,
                              recycleQueueCount);
+                }
+                if (remove_all_debris_static()) {
+                    changed = true;
                 }
                 changed = true;
             }
