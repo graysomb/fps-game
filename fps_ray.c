@@ -100,6 +100,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 
 #define MAX_NEIGHBOR_VOXELS 128
 #define MAX_FACE_NEIGHBORS   64
+#define GLUE_NEIGHBOR_HASH_SIZE 128
 #define MAX_SPLIT_CHILDREN    8
 static const float GRID_EPSILON = 1e-4f;
 #define VOXEL_ACTIVATION_RADIUS 2*1
@@ -1097,48 +1098,248 @@ static GlueConstraint glueConstraints[MAX_VOXELS * 48];
 static int glueConstraintCount = 0;
 static uint8_t gluedNeighborCounts[MAX_VOXELS];
 static int gluedNeighborList[MAX_VOXELS][MAX_FACE_NEIGHBORS];
-static bool glueAdjacencyDirty = true;
+static uint16_t gluedNeighborRefCounts[MAX_VOXELS][MAX_FACE_NEIGHBORS];
+static int gluedNeighborHashKeys[MAX_VOXELS][GLUE_NEIGHBOR_HASH_SIZE];
+static uint8_t gluedNeighborHashIndex[MAX_VOXELS][GLUE_NEIGHBOR_HASH_SIZE];
+static uint32_t gluedNeighborHashStamp[MAX_VOXELS][GLUE_NEIGHBOR_HASH_SIZE];
+static uint32_t gluedNeighborEpoch[MAX_VOXELS];
+static uint8_t glueAdjacencyDirtyFlags[MAX_VOXELS];
+static int glueAdjacencyDirtyList[MAX_VOXELS];
+static int glueAdjacencyDirtyCount = 0;
+static bool glueAdjacencyDirtyAll = true;
 
-static void mark_glue_adjacency_dirty(void) {
-    glueAdjacencyDirty = true;
+static void mark_glue_adjacency_dirty_for_voxel(int voxel_idx) {
+    if (glueAdjacencyDirtyAll) {
+        return;
+    }
+    if (voxel_idx < 0 || voxel_idx >= MAX_VOXELS) {
+        return;
+    }
+    if (glueAdjacencyDirtyFlags[voxel_idx]) {
+        return;
+    }
+    glueAdjacencyDirtyFlags[voxel_idx] = 1;
+    if (glueAdjacencyDirtyCount < MAX_VOXELS) {
+        glueAdjacencyDirtyList[glueAdjacencyDirtyCount++] = voxel_idx;
+    } else {
+        glueAdjacencyDirtyAll = true;
+        glueAdjacencyDirtyCount = 0;
+    }
 }
 
-static void add_glued_neighbor_entry(int voxel_idx, int neighbor_idx) {
+static void glue_neighbor_hash_reset(int voxel_idx) {
+    uint32_t epoch = ++gluedNeighborEpoch[voxel_idx];
+    if (epoch == 0) {
+        memset(gluedNeighborHashStamp[voxel_idx], 0, sizeof(gluedNeighborHashStamp[voxel_idx]));
+        gluedNeighborEpoch[voxel_idx] = 1;
+    }
+}
+
+static unsigned glue_neighbor_hash_seed(int neighbor_idx) {
+    return (unsigned)neighbor_idx * 2654435761u;
+}
+
+static bool glue_neighbor_hash_find(int voxel_idx, int neighbor_idx,
+                                    int *slot_out, int *list_index_out) {
+    uint32_t epoch = gluedNeighborEpoch[voxel_idx];
+    if (epoch == 0) {
+        glue_neighbor_hash_reset(voxel_idx);
+        epoch = gluedNeighborEpoch[voxel_idx];
+    }
+    unsigned mask = GLUE_NEIGHBOR_HASH_SIZE - 1;
+    unsigned h = glue_neighbor_hash_seed(neighbor_idx);
+    for (unsigned probe = 0; probe < GLUE_NEIGHBOR_HASH_SIZE; ++probe) {
+        unsigned slot = (h + probe) & mask;
+        if (gluedNeighborHashStamp[voxel_idx][slot] != epoch) {
+            if (slot_out) {
+                *slot_out = (int)slot;
+            }
+            if (list_index_out) {
+                *list_index_out = -1;
+            }
+            return false;
+        }
+        if (gluedNeighborHashKeys[voxel_idx][slot] == neighbor_idx) {
+            if (slot_out) {
+                *slot_out = (int)slot;
+            }
+            if (list_index_out) {
+                *list_index_out = (int)gluedNeighborHashIndex[voxel_idx][slot];
+            }
+            return true;
+        }
+    }
+    if (slot_out) {
+        *slot_out = -1;
+    }
+    if (list_index_out) {
+        *list_index_out = -1;
+    }
+    return false;
+}
+
+static bool glue_neighbor_hash_insert(int voxel_idx, int neighbor_idx, int list_index) {
+    int slot = -1;
+    int ignored = -1;
+    if (glue_neighbor_hash_find(voxel_idx, neighbor_idx, &slot, &ignored)) {
+        return true;
+    }
+    if (slot < 0) {
+        return false;
+    }
+    gluedNeighborHashStamp[voxel_idx][slot] = gluedNeighborEpoch[voxel_idx];
+    gluedNeighborHashKeys[voxel_idx][slot] = neighbor_idx;
+    gluedNeighborHashIndex[voxel_idx][slot] = (uint8_t)list_index;
+    return true;
+}
+
+static void glue_neighbor_hash_rebuild(int voxel_idx) {
+    glue_neighbor_hash_reset(voxel_idx);
+    int count = gluedNeighborCounts[voxel_idx];
+    for (int i = 0; i < count; ++i) {
+        int neighbor_idx = gluedNeighborList[voxel_idx][i];
+        glue_neighbor_hash_insert(voxel_idx, neighbor_idx, i);
+    }
+}
+
+static void glue_adjacency_reset_voxel(int voxel_idx) {
+    gluedNeighborCounts[voxel_idx] = 0;
+    for (int i = 0; i < MAX_FACE_NEIGHBORS; ++i) {
+        gluedNeighborList[voxel_idx][i] = -1;
+        gluedNeighborRefCounts[voxel_idx][i] = 0;
+    }
+    glue_neighbor_hash_reset(voxel_idx);
+}
+
+static void glue_adjacency_clear_all(void) {
+    for (int i = 0; i < voxel_count; ++i) {
+        glue_adjacency_reset_voxel(i);
+    }
+    memset(glueAdjacencyDirtyFlags, 0, sizeof(glueAdjacencyDirtyFlags));
+    glueAdjacencyDirtyCount = 0;
+    glueAdjacencyDirtyAll = false;
+}
+
+static void glue_adjacency_add_ref_oneway(int voxel_idx, int neighbor_idx, int ref_count) {
     if (voxel_idx < 0 || voxel_idx >= MAX_VOXELS ||
         neighbor_idx < 0 || neighbor_idx >= MAX_VOXELS) {
         return;
     }
-    int count = gluedNeighborCounts[voxel_idx];
-    for (int i = 0; i < count; ++i) {
-        if (gluedNeighborList[voxel_idx][i] == neighbor_idx) {
-            return;
-        }
+    if (ref_count <= 0) {
+        return;
     }
-    if (count < MAX_FACE_NEIGHBORS) {
-        gluedNeighborList[voxel_idx][count] = neighbor_idx;
-        gluedNeighborCounts[voxel_idx] = (uint8_t)(count + 1);
+    int slot = -1;
+    int list_index = -1;
+    if (glue_neighbor_hash_find(voxel_idx, neighbor_idx, &slot, &list_index)) {
+        if (list_index >= 0 && list_index < MAX_FACE_NEIGHBORS) {
+            uint32_t sum = (uint32_t)gluedNeighborRefCounts[voxel_idx][list_index] +
+                           (uint32_t)ref_count;
+            if (sum > UINT16_MAX) {
+                sum = UINT16_MAX;
+            }
+            gluedNeighborRefCounts[voxel_idx][list_index] = (uint16_t)sum;
+        }
+        return;
+    }
+    int count = gluedNeighborCounts[voxel_idx];
+    if (count >= MAX_FACE_NEIGHBORS) {
+        mark_glue_adjacency_dirty_for_voxel(voxel_idx);
+        return;
+    }
+    gluedNeighborList[voxel_idx][count] = neighbor_idx;
+    gluedNeighborRefCounts[voxel_idx][count] = (uint16_t)ref_count;
+    gluedNeighborCounts[voxel_idx] = (uint8_t)(count + 1);
+    if (!glue_neighbor_hash_insert(voxel_idx, neighbor_idx, count)) {
+        mark_glue_adjacency_dirty_for_voxel(voxel_idx);
     }
 }
 
-static void rebuild_glue_adjacency_if_dirty(void) {
-    if (!glueAdjacencyDirty) {
+static void glue_adjacency_add_ref_pair(int voxel_a, int voxel_b, int ref_count) {
+    glue_adjacency_add_ref_oneway(voxel_a, voxel_b, ref_count);
+    glue_adjacency_add_ref_oneway(voxel_b, voxel_a, ref_count);
+}
+
+static void glue_adjacency_remove_ref_oneway(int voxel_idx, int neighbor_idx, int ref_count) {
+    if (voxel_idx < 0 || voxel_idx >= MAX_VOXELS ||
+        neighbor_idx < 0 || neighbor_idx >= MAX_VOXELS) {
         return;
     }
-    memset(gluedNeighborCounts, 0, sizeof(gluedNeighborCounts));
-    for (int i = 0; i < voxel_count; ++i) {
-        for (int j = 0; j < MAX_FACE_NEIGHBORS; ++j) {
-            gluedNeighborList[i][j] = -1;
+    if (ref_count <= 0) {
+        return;
+    }
+    int slot = -1;
+    int list_index = -1;
+    if (!glue_neighbor_hash_find(voxel_idx, neighbor_idx, &slot, &list_index)) {
+        mark_glue_adjacency_dirty_for_voxel(voxel_idx);
+        return;
+    }
+    if (list_index < 0 || list_index >= MAX_FACE_NEIGHBORS) {
+        mark_glue_adjacency_dirty_for_voxel(voxel_idx);
+        return;
+    }
+    uint16_t current = gluedNeighborRefCounts[voxel_idx][list_index];
+    if (ref_count >= current) {
+        int last = gluedNeighborCounts[voxel_idx] - 1;
+        if (last < 0) {
+            gluedNeighborCounts[voxel_idx] = 0;
+        } else if (list_index != last) {
+            gluedNeighborList[voxel_idx][list_index] = gluedNeighborList[voxel_idx][last];
+            gluedNeighborRefCounts[voxel_idx][list_index] = gluedNeighborRefCounts[voxel_idx][last];
         }
+        if (last >= 0) {
+            gluedNeighborList[voxel_idx][last] = -1;
+            gluedNeighborRefCounts[voxel_idx][last] = 0;
+        }
+        if (gluedNeighborCounts[voxel_idx] > 0) {
+            gluedNeighborCounts[voxel_idx] = (uint8_t)last;
+        }
+        glue_neighbor_hash_rebuild(voxel_idx);
+    } else {
+        gluedNeighborRefCounts[voxel_idx][list_index] = (uint16_t)(current - ref_count);
+    }
+}
+
+static void glue_adjacency_remove_ref_pair(int voxel_a, int voxel_b, int ref_count) {
+    glue_adjacency_remove_ref_oneway(voxel_a, voxel_b, ref_count);
+    glue_adjacency_remove_ref_oneway(voxel_b, voxel_a, ref_count);
+}
+
+static void rebuild_glue_adjacency_if_dirty(void) {
+    if (!glueAdjacencyDirtyAll && glueAdjacencyDirtyCount == 0) {
+        return;
+    }
+    bool rebuild_all = glueAdjacencyDirtyAll;
+    if (rebuild_all) {
+        glue_adjacency_clear_all();
+    } else {
+        for (int i = 0; i < glueAdjacencyDirtyCount; ++i) {
+            int voxel_idx = glueAdjacencyDirtyList[i];
+            glue_adjacency_reset_voxel(voxel_idx);
+        }
+        glueAdjacencyDirtyCount = 0;
     }
     for (int g = 0; g < glueConstraintCount; ++g) {
         const GlueConstraint *gc = &glueConstraints[g];
         if (!gc->active) {
             continue;
         }
-        add_glued_neighbor_entry(gc->coarseVoxel, gc->fineVoxel);
-        add_glued_neighbor_entry(gc->fineVoxel, gc->coarseVoxel);
+        if (rebuild_all) {
+            glue_adjacency_add_ref_pair(gc->coarseVoxel, gc->fineVoxel, 1);
+        } else {
+            if (gc->coarseVoxel >= 0 && gc->coarseVoxel < MAX_VOXELS &&
+                glueAdjacencyDirtyFlags[gc->coarseVoxel]) {
+                glue_adjacency_add_ref_oneway(gc->coarseVoxel, gc->fineVoxel, 1);
+            }
+            if (gc->fineVoxel >= 0 && gc->fineVoxel < MAX_VOXELS &&
+                glueAdjacencyDirtyFlags[gc->fineVoxel]) {
+                glue_adjacency_add_ref_oneway(gc->fineVoxel, gc->coarseVoxel, 1);
+            }
+        }
     }
-    glueAdjacencyDirty = false;
+    if (!rebuild_all) {
+        memset(glueAdjacencyDirtyFlags, 0, sizeof(glueAdjacencyDirtyFlags));
+    }
+    glueAdjacencyDirtyAll = false;
 }
 
 static bool face_normal_predicted(const Voxel *voxel, const int corners[4],
@@ -1399,7 +1600,7 @@ static void voxel_table_register(Voxel *v, int idx)
             }
         }
     }
-    mark_glue_adjacency_dirty();
+    mark_glue_adjacency_dirty_for_voxel(idx);
 }
 
 static void voxel_table_unregister(const Voxel *v)
@@ -3910,70 +4111,70 @@ static void buildDemo(void) {
     // } 
 
     // // Pillars
-    int pillar_height = 10; // 45 - 10
-    int pillar_radius = 3;
-    int pillar_positions[4][2] = {
-        { M / 4, M / 4 },
-        { M / 4, 3 * M / 4 },
-        { 3 * M / 4, M / 4 },
-        { 3 * M / 4, 3 * M / 4 }
-    };
+    // int pillar_height = 10; // 45 - 10
+    // int pillar_radius = 3;
+    // int pillar_positions[4][2] = {
+    //     { M / 4, M / 4 },
+    //     { M / 4, 3 * M / 4 },
+    //     { 3 * M / 4, M / 4 },
+    //     { 3 * M / 4, 3 * M / 4 }
+    // };
 
-    for (int p = 0; p < 4; p++) {
-        int cx = pillar_positions[p][0];
-        int cz = pillar_positions[p][1];
-        for (int y = 1; y <= pillar_height; y++) {
-            for (int dx = -pillar_radius; dx <= pillar_radius; dx++) {
-                for (int dz = -pillar_radius; dz <= pillar_radius; dz++) {
-                    if (dx*dx + dz*dz > pillar_radius*pillar_radius) continue; // circular pillar
-                    float px = (cx + dx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                    float py = (y + 0.5f) * VOXEL_SIZE;
-                    float pz = (cz + dz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                    addVoxel(px, py, pz, true, false, (Color){ 200, 100, 50, 255 }, 0);
-                }
-            }
-        }
-    }
-
-    // // //Central platform (n=1)
-    // int platform_size = 10;
-    // int platform_height = 1; // 15 / 3
-    // int platform_base_height = 4; // to keep top at same level (21)
-    // for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
-    //     for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
-    //         for (int z = M/2 - platform_size/2; z <= M/2 + platform_size/2; z++) {
-    //             float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //             float py = (y + 0.5f) * VOXEL_SIZE;
-    //             float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //             addVoxel(px, py, pz, true, false, (Color){ 100, 200, 100, 255 }, 0);
-    //             //addVoxelSized(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0, 1);
-    //         }
-    //     }
-    // }
-
-    // // // Platform legs: 2x2 columns at each corner down to the floor.
-    // int platform_min = M/2 - platform_size/2;
-    // int platform_max = M/2 + platform_size/2;
-    // int leg_min_y = 1;
-    // int leg_max_y = platform_base_height;
-    // if (leg_max_y >= leg_min_y) {
-    //     int leg_x[4] = { platform_min, platform_min, platform_max - 1, platform_max - 1 };
-    //     int leg_z[4] = { platform_min, platform_max - 1, platform_min, platform_max - 1 };
-    //     for (int corner = 0; corner < 4; ++corner) {
-    //         for (int y = leg_min_y; y <= leg_max_y; ++y) {
-    //             for (int dx = 0; dx < 2; ++dx) {
-    //                 for (int dz = 0; dz < 2; ++dz) {
-    //                     int x = leg_x[corner] + dx;
-    //                     int z = leg_z[corner] + dz;
-    //                     float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //                     float py = (y + 0.5f) * VOXEL_SIZE;
-    //                     float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //                     addVoxel(px, py, pz, true, false, (Color){ 120, 160, 90, 255 }, 0);
-    //                 }
+    // for (int p = 0; p < 4; p++) {
+    //     int cx = pillar_positions[p][0];
+    //     int cz = pillar_positions[p][1];
+    //     for (int y = 1; y <= pillar_height; y++) {
+    //         for (int dx = -pillar_radius; dx <= pillar_radius; dx++) {
+    //             for (int dz = -pillar_radius; dz <= pillar_radius; dz++) {
+    //                 if (dx*dx + dz*dz > pillar_radius*pillar_radius) continue; // circular pillar
+    //                 float px = (cx + dx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    //                 float py = (y + 0.5f) * VOXEL_SIZE;
+    //                 float pz = (cz + dz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    //                 addVoxel(px, py, pz, true, false, (Color){ 200, 100, 50, 255 }, 0);
     //             }
     //         }
     //     }
     // }
+
+    // //Central platform (n=1)
+    int platform_size = 20;
+    int platform_height = 2; // 15 / 3
+    int platform_base_height = 4; // to keep top at same level (21)
+    for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
+        for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
+            for (int z = M/2 - platform_size/2; z <= M/2 + platform_size/2; z++) {
+                float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                float py = (y + 0.5f) * VOXEL_SIZE;
+                float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                addVoxel(px, py, pz, true, false, (Color){ 100, 200, 100, 255 }, 0);
+                //addVoxelSized(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0, 1);
+            }
+        }
+    }
+
+    // // // Platform legs: 2x2 columns at each corner down to the floor.
+    int platform_min = M/2 - platform_size/2;
+    int platform_max = M/2 + platform_size/2;
+    int leg_min_y = 1;
+    int leg_max_y = platform_base_height;
+    if (leg_max_y >= leg_min_y) {
+        int leg_x[4] = { platform_min, platform_min, platform_max - 1, platform_max - 1 };
+        int leg_z[4] = { platform_min, platform_max - 1, platform_min, platform_max - 1 };
+        for (int corner = 0; corner < 4; ++corner) {
+            for (int y = leg_min_y; y <= leg_max_y; ++y) {
+                for (int dx = 0; dx < 2; ++dx) {
+                    for (int dz = 0; dz < 2; ++dz) {
+                        int x = leg_x[corner] + dx;
+                        int z = leg_z[corner] + dz;
+                        float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                        float py = (y + 0.5f) * VOXEL_SIZE;
+                        float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                        addVoxel(px, py, pz, true, false, (Color){ 120, 160, 90, 255 }, 0);
+                    }
+                }
+            }
+        }
+    }
     // UnitVoxelBuffer pyramid_units;
     // unit_voxel_buffer_clear(&pyramid_units);
     // build_oblique_voxel_pyramid(&pyramid_units);
@@ -4907,10 +5108,10 @@ static void solve_voxel_glue(bool allow_break) {
                 fine->skipCollisionVelocityFrames = GLUE_BREAK_VELOCITY_SKIP_FRAMES;
             }
             gc->active = false;
+            glue_adjacency_remove_ref_pair(gc->coarseVoxel, gc->fineVoxel, 1);
             glue_break = true;
             if (DEBRIS_ACTIVATION_COOLDOWN_FRAMES > 0) {
                 int neighbors[MAX_FACE_NEIGHBORS];
-                mark_glue_adjacency_dirty();
                 if (coarse->simulate) {
                     int count = gather_glued_neighbors(gc->coarseVoxel,
                                                        neighbors,
@@ -4987,7 +5188,7 @@ static void solve_voxel_glue(bool allow_break) {
         }
     }
     if (glue_break) {
-        mark_glue_adjacency_dirty();
+        /* adjacency updates applied incrementally per constraint */
     }
 }
 
@@ -5194,6 +5395,7 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
             gc->fineCornerFace[k] = fineFace[k];
         }
         gc->active = true;
+        glue_adjacency_add_ref_pair(coarseIdx, fineIdx, 1);
 
         float edgeStrengthU = (u < 0.5f) ? (1.0f - u) : u;
         float edgeStrengthV = (v < 0.5f) ? (1.0f - v) : v;
@@ -5243,6 +5445,7 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
                 edgeGc->fineCornerFace[k] = fineFace[k];
             }
             edgeGc->active = true;
+            glue_adjacency_add_ref_pair(coarseIdx, fineIdx, 1);
         }
 
         if (edgeStrengthV > 0.0f &&
@@ -5284,6 +5487,7 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
                 edgeGc->fineCornerFace[k] = fineFace[k];
             }
             edgeGc->active = true;
+            glue_adjacency_add_ref_pair(coarseIdx, fineIdx, 1);
         }
 
         if (centerStrength > 0.0f &&
@@ -5318,6 +5522,7 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
                 centerGc->fineCornerFace[k] = fineFace[k];
             }
             centerGc->active = true;
+            glue_adjacency_add_ref_pair(coarseIdx, fineIdx, 1);
         }
 
         if (debugLogGlue && debugGlueBuildLogBudget > 0) {
@@ -5363,6 +5568,7 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
 
 static void rebuild_glue_constraints(void) {
     glueConstraintCount = 0;
+    glue_adjacency_clear_all();
     if (debugLogGlue) {
         debugGlueBuildLogBudget = DEBUG_GLUE_BUILD_LOG_INIT;
     }
@@ -5382,10 +5588,10 @@ static void rebuild_glue_constraints(void) {
         }
     }
     glue_dynamic_voxel_to_static_neighbors();
-    mark_glue_adjacency_dirty();
 }
 
 static void deactivate_glue_constraints_between(int a, int b) {
+    int removed = 0;
     for (int g = 0; g < glueConstraintCount; ++g) {
         GlueConstraint *gc = &glueConstraints[g];
         if (!gc->active) {
@@ -5395,9 +5601,12 @@ static void deactivate_glue_constraints_between(int a, int b) {
             (gc->coarseVoxel == b && gc->fineVoxel == a))
         {
             gc->active = false;
+            ++removed;
         }
     }
-    mark_glue_adjacency_dirty();
+    if (removed > 0) {
+        glue_adjacency_remove_ref_pair(a, b, removed);
+    }
 }
 
 static int gather_glued_neighbors(int voxel_idx, int *out, int max_out) {
@@ -6049,7 +6258,6 @@ static void compact_glue_constraints(void) {
         ++write;
     }
     glueConstraintCount = write;
-    mark_glue_adjacency_dirty();
 }
 
 // Returns true when the provided voxel/corner pair is part of an active glue constraint.
