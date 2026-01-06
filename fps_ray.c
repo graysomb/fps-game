@@ -2392,7 +2392,7 @@ static bool activate_static_voxels_near_dynamic(void)
             break;
         }
         Voxel *dynamic = &voxels[i];
-        if (!dynamic->simulate || dynamic->type == 2) {
+        if (!dynamic->simulate || dynamic->type == 1 || dynamic->type == 2) {
             continue;
         }
         int center_gx = (int)floorf(dynamic->pos.x / VOXEL_SIZE);
@@ -4200,6 +4200,9 @@ static void update_projectiles(float dt)
                 int anchorX = hit_voxel->gx - halfBrush;
                 int anchorY = hit_voxel->gy - halfBrush;
                 int anchorZ = hit_voxel->gz - halfBrush;
+                if (v->type == 2 && hit_voxel->gy <= 0) {
+                    anchorY = hit_voxel->gy + 1;
+                }
                 int minx = anchorX;
                 int maxx = anchorX + brushExtent - 1;
                 int miny = anchorY;
@@ -4211,12 +4214,21 @@ static void update_projectiles(float dt)
                     remove_static_voxels_in_region(minx, maxx, miny, maxy, minz, maxz);
                     static_changed = true;
                 } else if (v->type == 2) {
+                    int min_g = (int)ceilf((-FLOOR_SIZE / VOXEL_SIZE) - 0.5f);
+                    int max_g = (int)floorf((FLOOR_SIZE / VOXEL_SIZE) - 0.5f);
                     for (int dx = 0; dx < brushExtent; ++dx) {
                         for (int dy = 0; dy < brushExtent; ++dy) {
+                            int targetY = anchorY + dy;
+                            if (targetY < 0) {
+                                continue;
+                            }
                             for (int dz = 0; dz < brushExtent; ++dz) {
                                 int targetX = anchorX + dx;
-                                int targetY = anchorY + dy;
                                 int targetZ = anchorZ + dz;
+                                if (targetX < min_g || targetX > max_g ||
+                                    targetZ < min_g || targetZ > max_g) {
+                                    continue;
+                                }
                                 if (!occupied(targetX, targetY, targetZ)) {
                                     add_static_voxel_at_grid(targetX, targetY, targetZ, v->color, 0);
                                     static_changed = true;
@@ -4226,9 +4238,53 @@ static void update_projectiles(float dt)
                     }
                 }
 
-                if (v->type != 2) {
+                if (v->type != 1 && v->type != 2) {
                     if (activate_static_neighbors_of_region(minx, maxx, miny, maxy, minz, maxz)) {
                         static_changed = true;
+                    }
+                }
+            }
+
+            remove_voxel_index(i);
+            continue;
+        }
+
+        if (v->type == 2 && start.y > 0.0f && end.y <= 0.0f) {
+            float t = start.y / (start.y - end.y);
+            Vector3 hit_pos = v_add(start, v_mul(displacement, t));
+            int brushExtent = (voxelBrushSpan < 1) ? 1 : voxelBrushSpan;
+            int halfBrush = brushExtent / 2;
+            int hit_gx = (int)floorf(hit_pos.x / VOXEL_SIZE);
+            int hit_gz = (int)floorf(hit_pos.z / VOXEL_SIZE);
+            int anchorX = hit_gx - halfBrush;
+            int anchorY = 0;
+            int anchorZ = hit_gz - halfBrush;
+            int minx = anchorX;
+            int maxx = anchorX + brushExtent - 1;
+            int miny = anchorY;
+            int maxy = anchorY + brushExtent - 1;
+            int minz = anchorZ;
+            int maxz = anchorZ + brushExtent - 1;
+            int min_g = (int)ceilf((-FLOOR_SIZE / VOXEL_SIZE) - 0.5f);
+            int max_g = (int)floorf((FLOOR_SIZE / VOXEL_SIZE) - 0.5f);
+
+            for (int dx = 0; dx < brushExtent; ++dx) {
+                for (int dy = 0; dy < brushExtent; ++dy) {
+                    int targetY = anchorY + dy;
+                    if (targetY < 0) {
+                        continue;
+                    }
+                    for (int dz = 0; dz < brushExtent; ++dz) {
+                        int targetX = anchorX + dx;
+                        int targetZ = anchorZ + dz;
+                        if (targetX < min_g || targetX > max_g ||
+                            targetZ < min_g || targetZ > max_g) {
+                            continue;
+                        }
+                        if (!occupied(targetX, targetY, targetZ)) {
+                            add_static_voxel_at_grid(targetX, targetY, targetZ, v->color, 0);
+                            static_changed = true;
+                        }
                     }
                 }
             }
