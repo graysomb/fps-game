@@ -67,7 +67,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define VGS_BETA 0.35f
 #define VGS_ITERS 6
 #define VGS_EPS 1e-6f
-#define VGS_EARLY_OUT_EPS 0.002f
+#define VGS_EARLY_OUT_EPS 0.0002f
 #define VOXEL_CORNER_COUNT 8
 #define VOXEL_CENTER_INDEX 8
 #define VOXEL_PARTICLE_COUNT 9
