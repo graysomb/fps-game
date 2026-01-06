@@ -45,13 +45,14 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define FREEZE_PROPAGATION_ITERATIONS 100
 #define FREEZE_PROPAGATION_ATTENUATION 1.0f
 #define FREEZE_PROPAGATION_EPSILON 1e-6f
+#define FREEZE_PATH_DECAY 0.85f
 #define ACTIVATION_VELOCITY_WEIGHT 0.6f
 #define ACTIVATION_VELOCITY_REF_SPEED 6.0f
 #define ACTIVATION_STRAIN_WEIGHT   0.1f
 #define ACTIVATION_STRAIN_REF      0.1f
 #define ACTIVATION_GLUE_WEIGHT     0.1f
 #define ACTIVATION_GLUE_REF_SPEED  3.0f
-#define ACTIVATION_DYNAMIC_WEIGHT  0.1f
+#define ACTIVATION_DYNAMIC_WEIGHT  0.5f
 #define FREEZE_BELIEF_IMPORTANCE   0.9f
 #define ACTIVATION_HYSTERESIS      0.1f
 #define FRICTION       400.0f    // ground friction deceleration
@@ -200,6 +201,7 @@ static bool dynamicGlueClustersInitialized = false;
 #define DEBUG_CLUSTER_TAG_MAX 64
 static int debugTagOffset[DEBUG_CLUSTER_TAG_MAX][3];
 static float freezeBeliefScratch[MAX_VOXELS];
+static int freezeDistance[MAX_VOXELS];
 static uint8_t freezeBoundaryFlags[MAX_VOXELS];
 static uint8_t staticBeliefDirty[MAX_VOXELS];
 static int staticBeliefDirtyList[MAX_VOXELS];
@@ -2314,7 +2316,7 @@ static int expand_activation_cluster_unbounded(UnitVoxelBuffer *buffer, int star
             }
             if (neighbor_idx >= 0 && neighbor_idx < voxel_count) {
                 Voxel *neighbor = &voxels[neighbor_idx];
-                if (dynamicBelief < neighbor->freezeBelief) {
+                if (!dynamic_belief_overcomes_static(dynamicBelief, neighbor->freezeBelief)) {
                     continue;
                 }
             }
@@ -3043,76 +3045,91 @@ static void update_static_voxel_belief(int idx)
     freezeBeliefScratch[idx] = voxel->freezeBelief;
 }
 
-static void full_refresh_static_voxel_beliefs(void)
+static void recompute_static_freeze_beliefs_path_length(void)
 {
+    int queue[MAX_VOXELS];
+    int head = 0;
+    int tail = 0;
+
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
-        if (!voxel->simulate) {
-            update_static_voxel_belief(i);
-        } else {
+        if (voxel->simulate) {
             voxel->supportMask = 0;
             voxel->neighborSupport = 0;
             voxel->groundSupport = 0.0f;
             voxel->freezeBelief = 0.0f;
             freezeBeliefScratch[i] = 0.0f;
             freezeBoundaryFlags[i] = 0;
+            freezeDistance[i] = INT_MAX;
+            continue;
+        }
+
+        uint8_t supportMask = compute_static_support_mask(voxel);
+        voxel->supportMask = supportMask;
+        voxel->neighborSupport = (uint8_t)bitcount_u8(supportMask);
+
+        VoxelWorldBounds bounds;
+        voxel_world_bounds(voxel, &bounds);
+        bool touchesGround = (bounds.miny <= GRID_EPSILON);
+        voxel->groundSupport = touchesGround ? 1.0f : 0.0f;
+
+        freezeBoundaryFlags[i] = touchesGround ? 1u : 0u;
+        if (touchesGround) {
+            freezeDistance[i] = 0;
+            if (tail < MAX_VOXELS) {
+                queue[tail++] = i;
+            }
+        } else {
+            freezeDistance[i] = INT_MAX;
         }
     }
 
-    for (int iter = 0; iter < FREEZE_PROPAGATION_ITERATIONS; ++iter) {
-        bool anyChange = false;
-        for (int i = 0; i < voxel_count; ++i) {
-            Voxel *voxel = &voxels[i];
-            if (voxel->simulate) {
-                continue;
-            }
-            uint8_t boundary = freezeBoundaryFlags[i];
-            if (boundary & 1u) {
-                freezeBeliefScratch[i] = 1.0f;
-                continue;
-            }
-            if (boundary & 2u) {
-                freezeBeliefScratch[i] = 0.0f;
-                continue;
-            }
-            int neighbors[MAX_STATIC_COLLISION_NEIGHBORS];
-            int neighborCount = gather_static_face_neighbors(voxel, neighbors, MAX_STATIC_COLLISION_NEIGHBORS);
-            if (neighborCount <= 0) {
-                freezeBeliefScratch[i] = 0.0f;
-                continue;
-            }
-            float sumBelief = 0.0f;
-            for (int n = 0; n < neighborCount; ++n) {
-                sumBelief += voxels[neighbors[n]].freezeBelief;
-            }
-            float average = sumBelief / (float)neighborCount;
-            freezeBeliefScratch[i] = average;
+    while (head < tail) {
+        int idx = queue[head++];
+        if (idx < 0 || idx >= voxel_count) {
+            continue;
         }
-
-        for (int i = 0; i < voxel_count; ++i) {
-            Voxel *voxel = &voxels[i];
-            if (voxel->simulate) {
+        const Voxel *voxel = &voxels[idx];
+        if (voxel->simulate) {
+            continue;
+        }
+        int neighbors[MAX_STATIC_COLLISION_NEIGHBORS];
+        int neighborCount = gather_static_face_neighbors(voxel, neighbors, MAX_STATIC_COLLISION_NEIGHBORS);
+        for (int n = 0; n < neighborCount; ++n) {
+            int nidx = neighbors[n];
+            if (nidx < 0 || nidx >= voxel_count) {
                 continue;
             }
-            uint8_t boundary = freezeBoundaryFlags[i];
-            float target = 0.0f;
-            if (boundary & 1u) {
-                target = 1.0f;
-            } else if (boundary & 2u) {
-                target = 0.0f;
-            } else {
-                target = freezeBeliefScratch[i];
+            if (voxels[nidx].simulate) {
+                continue;
             }
-            if (fabsf(target - voxel->freezeBelief) > FREEZE_PROPAGATION_EPSILON) {
-                anyChange = true;
+            int nextDist = freezeDistance[idx] + 1;
+            if (nextDist < freezeDistance[nidx]) {
+                freezeDistance[nidx] = nextDist;
+                if (tail < MAX_VOXELS) {
+                    queue[tail++] = nidx;
+                }
             }
-            voxel->freezeBelief = target;
-        }
-
-        if (!anyChange) {
-            break;
         }
     }
+
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (voxel->simulate) {
+            continue;
+        }
+        if (freezeDistance[i] == INT_MAX) {
+            voxel->freezeBelief = 0.0f;
+        } else {
+            voxel->freezeBelief = powf(FREEZE_PATH_DECAY, (float)freezeDistance[i]);
+        }
+        freezeBeliefScratch[i] = voxel->freezeBelief;
+    }
+}
+
+static void full_refresh_static_voxel_beliefs(void)
+{
+    recompute_static_freeze_beliefs_path_length();
 }
 
 static void refresh_static_voxel_beliefs(void)
@@ -3128,129 +3145,9 @@ static void refresh_static_voxel_beliefs(void)
     if (staticBeliefDirtyCount <= 0) {
         return;
     }
-
-    int queueCount = 0;
-    int queueHead = 0;
-
-    for (int i = 0; i < staticBeliefDirtyCount; ++i) {
-        int idx = staticBeliefDirtyList[i];
-        if (idx < 0 || idx >= voxel_count) {
-            continue;
-        }
-        Voxel *voxel = &voxels[idx];
-        if (voxel->simulate) {
-            voxel->supportMask = 0;
-            voxel->neighborSupport = 0;
-            voxel->groundSupport = 0.0f;
-            voxel->freezeBelief = 0.0f;
-            freezeBeliefScratch[idx] = 0.0f;
-            freezeBoundaryFlags[idx] = 0;
-            continue;
-        }
-        update_static_voxel_belief(idx);
-        if (!staticBeliefQueued[idx] && queueCount < MAX_VOXELS) {
-            staticBeliefQueued[idx] = 1;
-            staticBeliefQueue[queueCount++] = idx;
-        }
-        int neighbors[MAX_STATIC_COLLISION_NEIGHBORS];
-        int neighborCount = gather_static_face_neighbors(voxel, neighbors, MAX_STATIC_COLLISION_NEIGHBORS);
-        for (int n = 0; n < neighborCount; ++n) {
-            int nidx = neighbors[n];
-            if (nidx < 0 || nidx >= voxel_count || staticBeliefQueued[nidx]) {
-                continue;
-            }
-            staticBeliefQueued[nidx] = 1;
-            if (queueCount < MAX_VOXELS) {
-                staticBeliefQueue[queueCount++] = nidx;
-            } else {
-                staticBeliefsForceFullRefresh = true;
-                break;
-            }
-        }
-        if (staticBeliefsForceFullRefresh) {
-            break;
-        }
-    }
-
-    if (staticBeliefsForceFullRefresh) {
-        for (int i = 0; i < queueCount; ++i) {
-            staticBeliefQueued[staticBeliefQueue[i]] = 0;
-        }
-        clear_static_belief_dirty();
-        full_refresh_static_voxel_beliefs();
-        staticBeliefsInitialized = true;
-        staticBeliefsForceFullRefresh = false;
-        return;
-    }
-
-    int safety = voxel_count * FREEZE_PROPAGATION_ITERATIONS;
-    int steps = 0;
-    while (queueHead < queueCount && steps < safety) {
-        int idx = staticBeliefQueue[queueHead++];
-        ++steps;
-        if (idx < 0 || idx >= voxel_count) {
-            continue;
-        }
-        Voxel *voxel = &voxels[idx];
-        if (voxel->simulate) {
-            continue;
-        }
-        uint8_t boundary = freezeBoundaryFlags[idx];
-        float target = 0.0f;
-        if (boundary & 1u) {
-            target = 1.0f;
-        } else if (boundary & 2u) {
-            target = 0.0f;
-        } else {
-            int neighbors[MAX_STATIC_COLLISION_NEIGHBORS];
-            int neighborCount = gather_static_face_neighbors(voxel, neighbors, MAX_STATIC_COLLISION_NEIGHBORS);
-            if (neighborCount <= 0) {
-                target = 0.0f;
-            } else {
-                float sumBelief = 0.0f;
-                for (int n = 0; n < neighborCount; ++n) {
-                    sumBelief += voxels[neighbors[n]].freezeBelief;
-                }
-                target = sumBelief / (float)neighborCount;
-            }
-        }
-        if (fabsf(target - voxel->freezeBelief) > FREEZE_PROPAGATION_EPSILON) {
-            voxel->freezeBelief = target;
-            int neighbors[MAX_STATIC_COLLISION_NEIGHBORS];
-            int neighborCount = gather_static_face_neighbors(voxel, neighbors, MAX_STATIC_COLLISION_NEIGHBORS);
-            for (int n = 0; n < neighborCount; ++n) {
-                int nidx = neighbors[n];
-                if (nidx < 0 || nidx >= voxel_count || staticBeliefQueued[nidx]) {
-                    continue;
-                }
-                staticBeliefQueued[nidx] = 1;
-                if (queueCount < MAX_VOXELS) {
-                    staticBeliefQueue[queueCount++] = nidx;
-                } else {
-                    staticBeliefsForceFullRefresh = true;
-                    break;
-                }
-            }
-            if (staticBeliefsForceFullRefresh) {
-                break;
-            }
-        }
-    }
-
-    if (staticBeliefsForceFullRefresh) {
-        for (int i = 0; i < queueCount; ++i) {
-            staticBeliefQueued[staticBeliefQueue[i]] = 0;
-        }
-        clear_static_belief_dirty();
-        full_refresh_static_voxel_beliefs();
-        staticBeliefsInitialized = true;
-        staticBeliefsForceFullRefresh = false;
-        return;
-    }
-
-    for (int i = 0; i < queueCount; ++i) {
-        staticBeliefQueued[staticBeliefQueue[i]] = 0;
-    }
+    full_refresh_static_voxel_beliefs();
+    staticBeliefsInitialized = true;
+    staticBeliefsForceFullRefresh = false;
     clear_static_belief_dirty();
 }
 
