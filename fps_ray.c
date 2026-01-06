@@ -82,8 +82,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define GLUE_RELAXATION 0.9f
 #define GLUE_EPS 1e-6f
 //#define GLUE_EPS 0.002f
-#define GLUE_BREAK_STRAIN 0.6f
-#define GLUE_BREAK_VELOCITY_SKIP_FRAMES 4
+#define GLUE_BREAK_STRAIN 0.2f
+#define GLUE_BREAK_VELOCITY_SKIP_FRAMES 30
 #define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
 #define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
 #define RECYCLE_DYNAMIC_MAX_FRAMES (60 * 10)
@@ -880,7 +880,7 @@ static Vector3 voxel_rest_corner_world(const Voxel *v, int corner_idx) {
 
 static int table_get(int x, int y, int z);
 static void rebuild_glue_constraints(void);
-static void solve_voxel_glue(void);
+static void solve_voxel_glue(bool allow_break);
 static bool voxels_share_edge_or_corner(const Voxel *voxel_a, const Voxel *voxel_b);
 static bool voxels_share_face(const Voxel *voxel_a, const Voxel *voxel_b);
 
@@ -4688,7 +4688,7 @@ static void solve_voxel_shape(Voxel *voxel) {
     }
 }
 
-static void solve_voxel_glue(void) {
+static void solve_voxel_glue(bool allow_break) {
     bool glue_break = false;
     if (debugLogGlue) {
         debugGlueSolveLogBudget = DEBUG_GLUE_SOLVE_LOG_INIT;
@@ -4769,7 +4769,7 @@ static void solve_voxel_glue(void) {
         float violation = v_length(C);
         float rest_edge_min = fminf(coarse->rest_edge, fine->rest_edge);
         float break_distance = GLUE_BREAK_STRAIN * rest_edge_min;
-        if (violation > break_distance) {
+        if (allow_break && violation > break_distance) {
             if (debugLogGlue && debugGlueBreakLogBudget > 0) {
                 TraceLog(LOG_DEBUG,
                          "[GlueBreak] pair=(%d,%d) spans=(%d,%d) violation=%.5f break=%.5f uvPred=(%.3f,%.3f) rawUV=(%.3f,%.3f) baryValid=%s weights=(%.3f,%.3f,%.3f,%.3f) coarsePos=(%.2f,%.2f,%.2f) finePos=(%.2f,%.2f,%.2f)",
@@ -7082,8 +7082,9 @@ void simulate_voxel_pbd(float dt) {
                     continue;
                 solve_voxel_shape(voxel);
             }
-        solve_voxel_glue();
+        solve_voxel_glue(false);
         }
+        solve_voxel_glue(true);
         update_particle_velocities(sub_dt);
         if (debugLogVoxelBlowup && debugBlowupLogBudget > 0) {
             for (int i = 0; i < voxel_count && debugBlowupLogBudget > 0; ++i) {

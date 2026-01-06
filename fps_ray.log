@@ -1,1 +1,2 @@
 [INFO] Logging TraceLog output to fps_ray.log
+[WARN] [RestoreFail] static restore failed voxel=1 span=1 rest=(3..3,5..5,-2..-2)
