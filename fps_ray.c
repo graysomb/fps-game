@@ -67,6 +67,9 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define VGS_ITERS 6
 #define VGS_EPS 1e-6f
 #define VGS_EARLY_OUT_EPS 0.002f
+#define VOXEL_CORNER_COUNT 8
+#define VOXEL_CENTER_INDEX 8
+#define VOXEL_PARTICLE_COUNT 9
 #define PBD_MAX_STEP_DT 0.005f
 #define PBD_SUBSTEPS 6
 #define PBD_CONSTRAINT_ITERS 12
@@ -169,6 +172,7 @@ typedef struct {
     int  orig_min_gy, orig_max_gy;
     int  orig_min_gz, orig_max_gz;
     Particle particles[8];
+    Particle center_particle;
     float rest_volume;
     float rest_edge;
     float particle_radius;
@@ -979,6 +983,10 @@ static Vector3 v_cross(Vector3 a, Vector3 b) {
 
 static bool v_isfinite(Vector3 v) {
     return isfinite(v.x) && isfinite(v.y) && isfinite(v.z);
+}
+
+static Particle *voxel_particle_at(Voxel *voxel, int idx) {
+    return (idx == VOXEL_CENTER_INDEX) ? &voxel->center_particle : &voxel->particles[idx];
 }
 
 static float v_length(Vector3 v) {
@@ -1843,7 +1851,7 @@ static void init_voxel_struct(Voxel *v,
     v->rest_edge = edge;
     v->rest_volume = edge * edge * edge;
     v->particle_radius = 0.5f * edge;
-    for (int i = 0; i < 8; ++i) {
+    for (int i = 0; i < VOXEL_CORNER_COUNT; ++i) {
         Particle *p = &v->particles[i];
         p->pos = (Vector3){
             px + corner_signs[i][0] * half,
@@ -1860,6 +1868,17 @@ static void init_voxel_struct(Voxel *v,
             if (mass_scale <= 0.0f) mass_scale = 1.0f;
             p->inv_mass = 1.0f / mass_scale;
         }
+    }
+    v->center_particle.pos = v->pos;
+    v->center_particle.prev_pos = v->pos;
+    v->center_particle.predicted_pos = v->pos;
+    v->center_particle.vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+    if (fixed || !simulate) {
+        v->center_particle.inv_mass = 0.0f;
+    } else {
+        float mass_scale = (float)(span * span * span);
+        if (mass_scale <= 0.0f) mass_scale = 1.0f;
+        v->center_particle.inv_mass = 1.0f / mass_scale;
     }
     int rest_minx, rest_maxx, rest_miny, rest_maxy, rest_minz, rest_maxz;
     voxel_compute_bounds(v, &rest_minx, &rest_maxx, &rest_miny, &rest_maxy, &rest_minz, &rest_maxz);
@@ -4268,8 +4287,8 @@ static void integrate_particles(float dt) {
             continue;
         }
 
-        for (int j = 0; j < 8; ++j) {
-            Particle *p = &voxel->particles[j];
+        for (int j = 0; j < VOXEL_PARTICLE_COUNT; ++j) {
+            Particle *p = voxel_particle_at(voxel, j);
 
             p->prev_pos = p->pos;
             p->predicted_pos = p->pos;
@@ -6322,8 +6341,8 @@ static void solve_particle_collisions(float dt) {
             static_collision_radius = min_static_radius;
         }
 
-        for (int j = 0; j < 8; ++j) {
-            Particle *p = &voxel->particles[j];
+        for (int j = 0; j < VOXEL_PARTICLE_COUNT; ++j) {
+            Particle *p = voxel_particle_at(voxel, j);
 
             Vector3 pos = p->predicted_pos;
 
@@ -6419,8 +6438,8 @@ static void solve_particle_collisions(float dt) {
         int neighbor_ids[MAX_NEIGHBOR_VOXELS];
         int neighbor_count = gather_neighbor_voxels(voxelA, i, neighbor_ids, MAX_NEIGHBOR_VOXELS);
 
-        for (int j = 0; j < 8; ++j) {
-            Particle *pa = &voxelA->particles[j];
+        for (int j = 0; j < VOXEL_PARTICLE_COUNT; ++j) {
+            Particle *pa = voxel_particle_at(voxelA, j);
             float wa = pa->inv_mass;
 
             for (int n = 0; n < neighbor_count; ++n) {
@@ -6447,16 +6466,18 @@ static void solve_particle_collisions(float dt) {
                     continue;
                 }
 
-                for (int q = 0; q < 8; ++q) {
+                for (int q = 0; q < VOXEL_PARTICLE_COUNT; ++q) {
                     if (neighbor_idx == i && q <= j) {
                         continue;
                     }
 
-                    if (particles_are_glued_pair(i, j, neighbor_idx, q)) {
-                        continue;
+                    if (j < VOXEL_CORNER_COUNT && q < VOXEL_CORNER_COUNT) {
+                        if (particles_are_glued_pair(i, j, neighbor_idx, q)) {
+                            continue;
+                        }
                     }
 
-                    Particle *pb = &voxelB->particles[q];
+                    Particle *pb = voxel_particle_at(voxelB, q);
                     float wb = pb->inv_mass;
 
                     float w_sum = wa + wb;
@@ -6663,6 +6684,12 @@ static void update_particle_velocities(float dt) {
             voxel->vel = v_mul(v_sub(centroid, prev_centroid), inv_dt);
         }
         voxel->pos = centroid;
+
+        Particle *center = &voxel->center_particle;
+        center->prev_pos = prev_centroid;
+        center->predicted_pos = centroid;
+        center->pos = centroid;
+        center->vel = voxel->vel;
     }
 }
 
@@ -6733,6 +6760,13 @@ static void apply_uniform_velocity(Voxel *v, Vector3 vel, float dt) {
         }
         v->particles[i].predicted_pos = v->particles[i].pos;
     }
+    v->center_particle.vel = vel;
+    if (dt > 0.0f) {
+        Vector3 offset = v_mul(vel, dt);
+        v->center_particle.prev_pos = v_sub(v->pos, offset);
+    }
+    v->center_particle.predicted_pos = v->pos;
+    v->center_particle.pos = v->pos;
 }
 
 static int split_voxel_at(int idx, float dt, int *out_children, int max_children) {
