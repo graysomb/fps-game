@@ -1551,6 +1551,35 @@ static void remove_unowned_static_voxels_in_region(int minx, int maxx,
     }
 }
 
+static void remove_debris_static_in_columns(int minx, int maxx,
+                                            int minz, int maxz,
+                                            int miny, int maxy)
+{
+    if (minx > maxx || minz > maxz || miny > maxy) {
+        return;
+    }
+    for (int z = minz; z <= maxz; ++z) {
+        for (int y = miny; y <= maxy; ++y) {
+            for (int x = minx; x <= maxx; ++x) {
+                while (1) {
+                    int idx = table_get(x, y, z);
+                    if (idx < 0 || idx >= voxel_count) {
+                        break;
+                    }
+                    Voxel *candidate = &voxels[idx];
+                    if (candidate->simulate) {
+                        break;
+                    }
+                    if (candidate->owner != STATIC_DEBRIS_OWNER) {
+                        break;
+                    }
+                    remove_voxel_index(idx);
+                }
+            }
+        }
+    }
+}
+
 static bool find_nearest_free_static_region(int base_minx, int base_maxx,
                                             int base_miny, int base_maxy,
                                             int base_minz, int base_maxz,
@@ -2763,6 +2792,8 @@ static bool spawn_static_at_rest(const Voxel *snapshot) {
     if (minx > maxx || miny > maxy || minz > maxz) {
         return false;
     }
+    int max_world_y = (int)ceilf((FLOOR_SIZE * 2.0f) / VOXEL_SIZE);
+    remove_debris_static_in_columns(minx, maxx, minz, maxz, 0, max_world_y);
     remove_unowned_static_voxels_in_region(minx, maxx, miny, maxy, minz, maxz);
     if (!grid_region_is_free(minx, maxx, miny, maxy, minz, maxz)) {
         return false;
