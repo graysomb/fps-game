@@ -64,9 +64,11 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
 #define VGS_ALPHA 0.6f
 #define VGS_BETA 0.6f
-#define VGS_ITERS 6
+#define VGS_ITERS 12
 #define VGS_EPS 1e-6f
 #define VGS_EARLY_OUT_EPS 0.002f
+#define VGS_RECOVER_VOLUME_FRAC 0.2f
+#define VGS_RECOVER_MIN_EDGE_FRAC 0.05f
 #define PBD_MAX_STEP_DT 0.005f
 #define PBD_SUBSTEPS 6
 #define PBD_CONSTRAINT_ITERS 12
@@ -76,12 +78,15 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define GLUE_RELAXATION 0.9f
 #define GLUE_EPS 1e-6f
 //#define GLUE_EPS 0.002f
-#define GLUE_BREAK_STRAIN 0.6f
+#define GLUE_BREAK_STRAIN 0.1f
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 4
 #define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
 #define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
 #define RECYCLE_DYNAMIC_MAX_FRAMES (60 * 30)
 #define RECYCLE_STATIC_RESTORE_INTERVAL 60
+#define PHYSICS_FIXED_DT (1.0f / 60.0f)
+#define PHYSICS_MAX_STEPS 6
+#define PHYSICS_MAX_FRAME_DT 0.1f
 #define VOXEL_SPLIT_STRAIN_THRESHOLD 0.6f
 #define VOXEL_SPLIT_SHEAR_THRESHOLD 0.6f
 #define VOXEL_HASH_REBUILD_INTERVAL 2
@@ -984,6 +989,7 @@ static bool v_isfinite(Vector3 v) {
 static float v_length(Vector3 v) {
     return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
 }
+
 
 static Vector3 v_norm(Vector3 v) {
     float len = v_length(v);
@@ -4271,6 +4277,16 @@ static void integrate_particles(float dt) {
         for (int j = 0; j < 8; ++j) {
             Particle *p = &voxel->particles[j];
 
+            if (!v_isfinite(p->pos)) {
+                p->pos = p->prev_pos;
+            }
+            if (!v_isfinite(p->prev_pos)) {
+                p->prev_pos = p->pos;
+            }
+            if (!v_isfinite(p->vel)) {
+                p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+            }
+
             p->prev_pos = p->pos;
             p->predicted_pos = p->pos;
 
@@ -4375,6 +4391,54 @@ static void solve_voxel_shape(Voxel *voxel) {
         float d1 = fabsf(len1 - target1);
         float d2 = fabsf(len2 - target2);
         float raw_volume = v_dot(v_cross(u0, u1), u2);
+        if (fabsf(raw_volume) < (rest_volume * VGS_RECOVER_VOLUME_FRAC)) {
+            float min_len = rest_edge * VGS_RECOVER_MIN_EDGE_FRAC;
+            Vector3 b0 = v0;
+            Vector3 b1 = v1;
+            float b0_len = v_length(b0);
+            float b1_len = v_length(b1);
+            if (b0_len < min_len || b1_len < min_len) {
+                b0 = (Vector3){ 1.0f, 0.0f, 0.0f };
+                b1 = (Vector3){ 0.0f, 1.0f, 0.0f };
+            } else {
+                b0 = v_mul(b0, 1.0f / b0_len);
+                b1 = v_sub(b1, v_mul(b0, v_dot(b1, b0)));
+                b1_len = v_length(b1);
+                if (b1_len < min_len) {
+                    b0 = (Vector3){ 1.0f, 0.0f, 0.0f };
+                    b1 = (Vector3){ 0.0f, 1.0f, 0.0f };
+                } else {
+                    b1 = v_mul(b1, 1.0f / b1_len);
+                }
+            }
+            Vector3 b2 = v_norm(v_cross(b0, b1));
+            if (v_length(b2) < min_len) {
+                b0 = (Vector3){ 1.0f, 0.0f, 0.0f };
+                b1 = (Vector3){ 0.0f, 1.0f, 0.0f };
+                b2 = (Vector3){ 0.0f, 0.0f, 1.0f };
+            }
+            b0 = v_mul(b0, 0.5f * rest_edge);
+            b1 = v_mul(b1, 0.5f * rest_edge);
+            b2 = v_mul(b2, 0.5f * rest_edge);
+
+            Vector3 recovered[8];
+            recovered[0] = v_sub(v_sub(v_sub(centroid, b0), b1), b2);
+            recovered[1] = v_sub(v_sub(v_add(centroid, b0), b1), b2);
+            recovered[2] = v_sub(v_add(v_sub(centroid, b0), b1), b2);
+            recovered[3] = v_sub(v_add(v_add(centroid, b0), b1), b2);
+            recovered[4] = v_add(v_sub(v_sub(centroid, b0), b1), b2);
+            recovered[5] = v_add(v_sub(v_add(centroid, b0), b1), b2);
+            recovered[6] = v_add(v_add(v_sub(centroid, b0), b1), b2);
+            recovered[7] = v_add(v_add(v_add(centroid, b0), b1), b2);
+
+            for (int i = 0; i < 8; ++i) {
+                if (w[i] == 0.0f) {
+                    continue;
+                }
+                p[i] = recovered[i];
+            }
+            break;
+        }
         if (d0 <= edge_eps && d1 <= edge_eps && d2 <= edge_eps &&
             fabsf(raw_volume - rest_volume) <= volume_eps) {
             break;
@@ -7768,7 +7832,7 @@ int main(void) {
                 }
                 break;
             case GAME_STATE_PLAYING:
-        float dt = GetFrameTime();
+        float frame_dt = clampf(GetFrameTime(), 0.0f, PHYSICS_MAX_FRAME_DT);
         // input: shooting and jump
         if (playerInput[0] == INPUT_TYPE_KEYBOARD && IsKeyPressed(KEY_LEFT_CONTROL))  FireVoxel(0);
         if (playerInput[0] == INPUT_TYPE_GAMEPAD && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_TRIGGER_2)) FireVoxel(0);
@@ -7821,9 +7885,9 @@ int main(void) {
         // update players
         for (int i = 0; i < 2; i++) {
             if (playerInput[i] == INPUT_TYPE_KEYBOARD) {
-                HandleKeyboardInput(i, dt);
+                HandleKeyboardInput(i, frame_dt);
             } else if (playerInput[i] == INPUT_TYPE_GAMEPAD) {
-                HandleGamepadInput(i, dt);
+                HandleGamepadInput(i, frame_dt);
             }
             Player *p = &players[i];
             
@@ -7840,7 +7904,7 @@ int main(void) {
             // Block velocity where a neighbor voxel exists in movement direction
             {
                 bool neigh[6];
-                get_adjacent_voxel_directions(v_add(p->pos,v_mul(p->vel,dt)), neigh);
+                get_adjacent_voxel_directions(v_add(p->pos,v_mul(p->vel,frame_dt)), neigh);
                 // X-axis (+X/neigh[0], -X/neigh[1])
                 if ((p->vel.x > 0 && neigh[0]) || (p->vel.x < 0 && neigh[1])) p->vel.x = 0;
                 // Y-axis (+Y/neigh[2], -Y/neigh[3])
@@ -7849,7 +7913,7 @@ int main(void) {
                 if ((p->vel.z > 0 && neigh[4]) || (p->vel.z < 0 && neigh[5])) p->vel.z = 0;
                 if (!neigh[3]){
                     // apply gravity
-                    p->vel.y -= GRAVITY*dt;
+                    p->vel.y -= GRAVITY*frame_dt;
                     p->onGround = false;
                 }else{
                     p->onGround = true;
@@ -7858,9 +7922,9 @@ int main(void) {
             
 
             // apply movement
-            p->pos.x += p->vel.x*dt;
-            p->pos.y += p->vel.y*dt;
-            p->pos.z += p->vel.z*dt;
+            p->pos.x += p->vel.x*frame_dt;
+            p->pos.y += p->vel.y*frame_dt;
+            p->pos.z += p->vel.z*frame_dt;
 
             // ground clamp
             if (p->pos.y <= BASE_EYE_HEIGHT) {
@@ -7876,15 +7940,22 @@ int main(void) {
         activate_static_voxels_near_dynamic();
         batch_glued_dynamic_voxels();
         //update voxel physics
-        int subStep = 1;
-        for( int i = 0; i < subStep; i++){
-            physics_step(dt/subStep);
+        static float physics_accumulator = 0.0f;
+        physics_accumulator += frame_dt;
+        int steps = 0;
+        while (physics_accumulator >= PHYSICS_FIXED_DT && steps < PHYSICS_MAX_STEPS) {
+            physics_step(PHYSICS_FIXED_DT);
+            update_projectiles(PHYSICS_FIXED_DT);
+            simulate_voxel_pbd(PHYSICS_FIXED_DT);
+            recycle_dead_voxels();
+            log_dynamic_glue_cluster_breaks();
+            handle_pbd_projectile_hits();
+            physics_accumulator -= PHYSICS_FIXED_DT;
+            ++steps;
         }
-        update_projectiles(dt);
-        simulate_voxel_pbd(dt);
-        recycle_dead_voxels();
-        log_dynamic_glue_cluster_breaks();
-        handle_pbd_projectile_hits();
+        if (steps >= PHYSICS_MAX_STEPS) {
+            physics_accumulator = 0.0f;
+        }
         voxelHashFramesSinceRebuild++;
         if (voxelHashFramesSinceRebuild >= VOXEL_HASH_REBUILD_INTERVAL) {
             rebuild_voxel_hash();
