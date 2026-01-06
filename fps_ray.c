@@ -90,6 +90,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define RECYCLE_STATIC_RESTORE_INTERVAL 1
 #define RECYCLE_STATIC_RESTORE_DELAY (60 * 10)
 #define RECYCLE_OWNED_STATIC_MAX_FRAMES (60 * 10)
+#define STATIC_DEBRIS_OWNER (-2)
 #define VOXEL_SPLIT_STRAIN_THRESHOLD 0.0002f
 #define VOXEL_SPLIT_SHEAR_THRESHOLD 0.0002f
 #define VOXEL_HASH_REBUILD_INTERVAL 2
@@ -1521,6 +1522,35 @@ static void remove_static_voxels_in_region_recycle(int minx, int maxx,
     }
 }
 
+static void remove_unowned_static_voxels_in_region(int minx, int maxx,
+                                                   int miny, int maxy,
+                                                   int minz, int maxz)
+{
+    if (minx > maxx || miny > maxy || minz > maxz) {
+        return;
+    }
+    for (int z = minz; z <= maxz; ++z) {
+        for (int y = miny; y <= maxy; ++y) {
+            for (int x = minx; x <= maxx; ++x) {
+                while (1) {
+                    int idx = table_get(x, y, z);
+                    if (idx < 0 || idx >= voxel_count) {
+                        break;
+                    }
+                    Voxel *candidate = &voxels[idx];
+                    if (candidate->simulate) {
+                        break;
+                    }
+                    if (candidate->owner >= 0) {
+                        break;
+                    }
+                    remove_voxel_index(idx);
+                }
+            }
+        }
+    }
+}
+
 static bool find_nearest_free_static_region(int base_minx, int base_maxx,
                                             int base_miny, int base_maxy,
                                             int base_minz, int base_maxz,
@@ -1740,6 +1770,13 @@ static bool spawn_static_covering_voxel(const Voxel *voxel)
                              gx, gy, gz);
                     remove_static_voxels_in_region(minx, maxx, miny, maxy, minz, maxz);
                     return false;
+                }
+                if (voxel->owner == -1) {
+                    voxels[idx].owner = STATIC_DEBRIS_OWNER;
+                    voxels[idx].lifeFrames = 0;
+                } else {
+                    voxels[idx].owner = voxel->owner;
+                    voxels[idx].lifeFrames = 0;
                 }
             }
         }
@@ -2726,6 +2763,7 @@ static bool spawn_static_at_rest(const Voxel *snapshot) {
     if (minx > maxx || miny > maxy || minz > maxz) {
         return false;
     }
+    remove_unowned_static_voxels_in_region(minx, maxx, miny, maxy, minz, maxz);
     if (!grid_region_is_free(minx, maxx, miny, maxy, minz, maxz)) {
         return false;
     }
@@ -2774,6 +2812,12 @@ static void recycle_dead_voxels(void) {
                          "[Recycle] dynamic->static voxel=%d owner=%d life=%d",
                          i, voxel->owner, voxel->lifeFrames);
             }
+            if (voxel->owner != -1) {
+                remove_voxel_index(i);
+                changed = true;
+                --i;
+                continue;
+            }
             restore_dynamic_voxel_to_static(i);
             changed = true;
             --i;
@@ -2785,7 +2829,7 @@ static void recycle_dead_voxels(void) {
         if (voxel->simulate) {
             continue;
         }
-        if (voxel->owner != -1) {
+        if (voxel->owner >= 0) {
             voxel->lifeFrames++;
             if (voxel->lifeFrames > RECYCLE_OWNED_STATIC_MAX_FRAMES) {
                 if (debugLogVoxelRecycle) {
@@ -5666,7 +5710,8 @@ static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count
 
     TraceLog(LOG_INFO,
              "[RestoreCluster] count=%d voxel_count before=%d after_removal=%d after_restore=%d static_success=%d",
-             cluster_count, voxel_count_before, voxel_count_after_removal, voxel_count, static_success);
+             cluster_count, voxel_count_before, voxel_count_after_removal, voxel_count,
+             static_success);
     free(sorted);
     free(snapshots);
     return converted;
