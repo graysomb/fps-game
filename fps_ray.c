@@ -92,8 +92,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define RECYCLE_STATIC_RESTORE_DELAY (60 * 10)
 #define RECYCLE_OWNED_STATIC_MAX_FRAMES (60 * 10)
 #define STATIC_DEBRIS_OWNER (-2)
-#define VOXEL_SPLIT_STRAIN_THRESHOLD 0.0002f
-#define VOXEL_SPLIT_SHEAR_THRESHOLD 0.0002f
+#define VOXEL_SPLIT_STRAIN_THRESHOLD 0.0001f
+#define VOXEL_SPLIT_SHEAR_THRESHOLD 0.0001f
 #define VOXEL_HASH_REBUILD_INTERVAL 2
 #define TABLE_CACHE_SIZE 4
 #define FACE_BLOCK_MIN_OVERLAP (VOXEL_SIZE * 0.25f)
@@ -112,6 +112,7 @@ static const float GRID_EPSILON = 1e-4f;
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
 #define STATIC_RESTORE_SEARCH_RADIUS 2*1
 #define DEBRIS_ACTIVATION_COOLDOWN_FRAMES (60 * 10)
+#define STATIC_REBUILD_ACTIVATION_COOLDOWN_FRAMES (60 * 10)
 
 // KD-stats constants
 #define BASE_HEALTH 100
@@ -2670,7 +2671,8 @@ static bool activate_static_voxels_near_dynamic(void)
                         continue;
                     }
                     Voxel *candidate = &voxels[idx];
-                    if (candidate->simulate || candidate->span != 1 || candidate->pendingActivation) {
+                    if (candidate->simulate || candidate->span != 1 ||
+                        candidate->pendingActivation || candidate->activationCooldownFrames > 0) {
                         continue;
                     }
 
@@ -2870,6 +2872,9 @@ static bool spawn_static_at_rest(const Voxel *snapshot) {
     int idx = addVoxelSized(px, py, pz, true, false, snapshot->color, snapshot->type, span);
     if (idx < 0) {
         return false;
+    }
+    if (STATIC_REBUILD_ACTIVATION_COOLDOWN_FRAMES > 0) {
+        voxels[idx].activationCooldownFrames = STATIC_REBUILD_ACTIVATION_COOLDOWN_FRAMES;
     }
     voxels[idx].owner = snapshot->owner;
     if (snapshot->orig_min_gx <= snapshot->orig_max_gx &&
