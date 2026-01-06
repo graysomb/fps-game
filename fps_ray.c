@@ -87,7 +87,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 30
 #define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
 #define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
-#define RECYCLE_DYNAMIC_MAX_FRAMES (60 * 10)
+#define RECYCLE_DYNAMIC_MAX_FRAMES (60 * 15)
 #define RECYCLE_STATIC_RESTORE_INTERVAL 1
 #define RECYCLE_STATIC_RESTORE_DELAY (60 * 10)
 #define RECYCLE_OWNED_STATIC_MAX_FRAMES (60 * 10)
@@ -105,12 +105,13 @@ static const float GRID_EPSILON = 1e-4f;
 #define VOXEL_ACTIVATION_RADIUS 2*1
 //#define VOXEL_ACTIVATION_UNIT_BUDGET 128
 #define VOXEL_ACTIVATION_UNIT_BUDGET 128*5
-#define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 5.0f
-#define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 10.4f
-#define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 10.4f
+#define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 1.0f
+#define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.2f
+#define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.2f
 #define VOXEL_DEACTIVATION_FRAMES 20
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
 #define STATIC_RESTORE_SEARCH_RADIUS 2*1
+#define DEBRIS_ACTIVATION_COOLDOWN_FRAMES (60 * 10)
 
 // KD-stats constants
 #define BASE_HEALTH 100
@@ -161,6 +162,7 @@ typedef struct {
     bool fixed;
     bool glueEligible;
     bool pendingActivation;
+    int activationCooldownFrames;
     Color color;
     int type;
     int owner;
@@ -2009,6 +2011,7 @@ static void init_voxel_struct(Voxel *v,
     v->simulate = simulate;
     v->glueEligible = true;
     v->pendingActivation = false;
+    v->activationCooldownFrames = 0;
     v->color = color;
     v->type = type;
     v->owner = owner;
@@ -2634,6 +2637,9 @@ static bool activate_static_voxels_near_dynamic(void)
         }
         Voxel *dynamic = &voxels[i];
         if (!dynamic->simulate || dynamic->type == 1 || dynamic->type == 2) {
+            continue;
+        }
+        if (dynamic->activationCooldownFrames > 0) {
             continue;
         }
         int center_gx = (int)floorf(dynamic->pos.x / VOXEL_SIZE);
@@ -4897,6 +4903,26 @@ static void solve_voxel_glue(bool allow_break) {
             }
             gc->active = false;
             glue_break = true;
+            if (DEBRIS_ACTIVATION_COOLDOWN_FRAMES > 0) {
+                int neighbors[MAX_FACE_NEIGHBORS];
+                mark_glue_adjacency_dirty();
+                if (coarse->simulate) {
+                    int count = gather_glued_neighbors(gc->coarseVoxel,
+                                                       neighbors,
+                                                       MAX_FACE_NEIGHBORS);
+                    if (count == 0) {
+                        coarse->activationCooldownFrames = DEBRIS_ACTIVATION_COOLDOWN_FRAMES;
+                    }
+                }
+                if (fine->simulate) {
+                    int count = gather_glued_neighbors(gc->fineVoxel,
+                                                       neighbors,
+                                                       MAX_FACE_NEIGHBORS);
+                    if (count == 0) {
+                        fine->activationCooldownFrames = DEBRIS_ACTIVATION_COOLDOWN_FRAMES;
+                    }
+                }
+            }
             continue;
         }
         if (violation < GLUE_EPS) {
@@ -5874,6 +5900,9 @@ static void update_dynamic_activation_beliefs(void)
 {
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
+        if (voxel->activationCooldownFrames > 0) {
+            voxel->activationCooldownFrames--;
+        }
         if (!voxel->simulate) {
             voxel->activationBelief = 0.0f;
             continue;
