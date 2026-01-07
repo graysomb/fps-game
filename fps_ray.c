@@ -4588,7 +4588,7 @@ static void update_projectiles(float dt)
         int hit_id = first_voxel_hit(ray, distance, i);
         if (hit_id >= 0 && hit_id < voxel_count) {
             if (!voxels[hit_id].simulate) {
-                int brushExtent = (voxelBrushSpan < 1) ? 1 : voxelBrushSpan;
+                int brushExtent = brush_extent_for_voxel(v);
                 Voxel *hit_voxel = &voxels[hit_id];
                 int halfBrush = brushExtent / 2;
                 int anchorX = hit_voxel->gx - halfBrush;
@@ -4649,7 +4649,7 @@ static void update_projectiles(float dt)
         if (v->type == 2 && start.y > 0.0f && end.y <= 0.0f) {
             float t = start.y / (start.y - end.y);
             Vector3 hit_pos = v_add(start, v_mul(displacement, t));
-            int brushExtent = (voxelBrushSpan < 1) ? 1 : voxelBrushSpan;
+            int brushExtent = brush_extent_for_voxel(v);
             int halfBrush = brushExtent / 2;
             int hit_gx = (int)floorf(hit_pos.x / VOXEL_SIZE);
             int hit_gz = (int)floorf(hit_pos.z / VOXEL_SIZE);
@@ -7584,6 +7584,26 @@ static void ensure_render_targets(RenderTexture2D *screens,
     *current_players = player_count;
     *current_w = view_w;
     *current_h = view_h;
+}
+
+static int brush_extent_for_voxel(const Voxel *v) {
+    int base = (voxelBrushSpan < 1) ? 1 : voxelBrushSpan;
+    if (!v || (v->type != 1 && v->type != 2)) {
+        return base;
+    }
+    int owner = v->owner;
+    if (owner < 0 || owner >= activePlayers) {
+        return base;
+    }
+    float ratio = fmaxf(players[owner].kd_ratio, 0.1f);
+    float scaled = (float)base / ratio;
+    int extent = (int)roundf(scaled);
+    if (extent < 1) {
+        extent = 1;
+    } else if (extent > 5) {
+        extent = 5;
+    }
+    return extent;
 }
 
 static int player_max_health(const Player *p) {
