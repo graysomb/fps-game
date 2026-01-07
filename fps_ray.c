@@ -115,6 +115,8 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define STATIC_DEBRIS_OWNER (-2)
 #define VOXEL_SPLIT_STRAIN_THRESHOLD 0.9f
 #define VOXEL_SPLIT_SHEAR_THRESHOLD 0.9f
+#define VOXEL_DUST_STRAIN_THRESHOLD 2.0f
+#define VOXEL_DUST_SHEAR_THRESHOLD 0.98f
 #define VOXEL_HASH_REBUILD_INTERVAL 2
 #define TABLE_CACHE_SIZE 4
 #define FACE_BLOCK_MIN_OVERLAP (VOXEL_SIZE * 0.25f)
@@ -8209,7 +8211,7 @@ static bool split_strained_voxels(float dt) {
     int i = 0;
     while (i < voxel_count) {
         Voxel *voxel = &voxels[i];
-        if (!voxel->simulate || voxel->type != 0 || voxel->span <= 1) {
+        if (!voxel->simulate || voxel->type != 0) {
             ++i;
             continue;
         }
@@ -8217,6 +8219,27 @@ static bool split_strained_voxels(float dt) {
         float strain = 0.0f;
         float shear = 0.0f;
         voxel_measure_strain(voxel, &strain, &shear);
+        if (strain > VOXEL_DUST_STRAIN_THRESHOLD ||
+            shear > VOXEL_DUST_SHEAR_THRESHOLD)
+        {
+            int glued_neighbors[MAX_FACE_NEIGHBORS];
+            int glued_neighbor_count = gather_glued_neighbors(i, glued_neighbors, MAX_FACE_NEIGHBORS);
+            for (int n = 0; n < glued_neighbor_count; ++n) {
+                deactivate_glue_constraints_between(i, glued_neighbors[n]);
+            }
+            if (recycle_queue_push(voxel) && debugLogVoxelRecycle) {
+                TraceLog(LOG_INFO,
+                         "[Dust] enqueue-voxel idx=%d span=%d strain=%.3f shear=%.3f queue=%d",
+                         i, voxel->span, strain, shear, recycleQueueCount);
+            }
+            remove_voxel_index(i);
+            split_any = true;
+            continue;
+        }
+        if (voxel->span <= 1) {
+            ++i;
+            continue;
+        }
         if (strain > VOXEL_SPLIT_STRAIN_THRESHOLD ||
             shear > VOXEL_SPLIT_SHEAR_THRESHOLD)
         {
