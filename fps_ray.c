@@ -200,6 +200,7 @@ typedef struct {
     bool fixed;
     bool glueEligible;
     bool pendingActivation;
+    bool isBullet;
     int activationCooldownFrames;
     Color color;
     int type;
@@ -2307,6 +2308,7 @@ static void init_voxel_struct(Voxel *v,
     v->simulate = simulate;
     v->glueEligible = true;
     v->pendingActivation = false;
+    v->isBullet = false;
     v->activationCooldownFrames = 0;
     v->color = color;
     v->type = type;
@@ -2957,7 +2959,7 @@ static bool activate_static_voxels_near_dynamic(void)
             break;
         }
         Voxel *dynamic = &voxels[i];
-        if (!dynamic->simulate || dynamic->type == 1 || dynamic->type == 2) {
+        if (!dynamic->simulate || dynamic->type == 1 || dynamic->type == 2 || dynamic->isBullet) {
             continue;
         }
         if (dynamic->activationCooldownFrames > 0) {
@@ -3864,7 +3866,7 @@ static bool deactivate_sleeping_voxels(void)
             voxel->sleepFrames = 0;
             continue;
         }
-        if (voxel->type != 0) {
+        if (voxel->type != 0 || voxel->isBullet) {
             voxel->sleepFrames = 0;
             continue;
         }
@@ -5189,7 +5191,7 @@ static void update_projectiles(float dt)
     int i = 0;
     while (i < voxel_count) {
         Voxel *v = &voxels[i];
-        if (!v->simulate || v->type == 0) {
+        if (!v->simulate || (v->type == 0 && !v->isBullet)) {
             ++i;
             continue;
         }
@@ -5410,7 +5412,7 @@ static void handle_pbd_projectile_hits(void)
     int i = 0;
     while (i < voxel_count) {
         Voxel *v = &voxels[i];
-        if (!v->simulate || v->type != 0) {
+        if (!v->simulate || v->type != 0 || v->isBullet) {
             ++i;
             continue;
         }
@@ -5470,7 +5472,7 @@ static void integrate_particles(float dt) {
 
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
-        if (!voxel->simulate || voxel->type != 0) {
+        if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
             continue;
         }
 
@@ -6950,6 +6952,10 @@ static void update_dynamic_activation_beliefs(void)
             voxel->activationBelief = 0.0f;
             continue;
         }
+        if (voxel->isBullet) {
+            voxel->activationBelief = 0.0f;
+            continue;
+        }
         float speed = v_length(voxel->vel);
         float velocityScore = saturatef(speed / ACTIVATION_VELOCITY_REF_SPEED);
 
@@ -7666,7 +7672,7 @@ static void solve_particle_collisions(float dt) {
     // First, clamp predictions against static scene bounds and player capsules.
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
-        if (!(voxel->simulate) || voxel->type != 0){
+        if (!(voxel->simulate) || voxel->type != 0 || voxel->isBullet){
             continue;
         }
         float voxel_radius = voxel_particle_radius(voxel);
@@ -7767,7 +7773,7 @@ static void solve_particle_collisions(float dt) {
     // Particle-particle collisions using a symmetric correction identical to the compute shader.
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxelA = &voxels[i];
-        if (!(voxelA->simulate) || voxelA->type != 0){
+        if (!(voxelA->simulate) || voxelA->type != 0 || voxelA->isBullet){
             continue;
         }
         float radiusA = voxel_particle_radius(voxelA);
@@ -7901,7 +7907,7 @@ static void solve_span_voxel_collisions(void) {
 
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxelA = &voxels[i];
-        if (!voxelA->simulate || voxelA->type != 0) {
+        if (!voxelA->simulate || voxelA->type != 0 || voxelA->isBullet) {
             continue;
         }
         VoxelWorldBounds boundsA_pred;
@@ -8025,7 +8031,7 @@ static void update_particle_velocities(float dt) {
 
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
-        if (!voxel->simulate || voxel->type != 0) {
+        if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
             continue;
         }
         bool skipVelocity = (voxel->skipCollisionVelocityFrames > 0);
@@ -8211,7 +8217,7 @@ static bool split_strained_voxels(float dt) {
     int i = 0;
     while (i < voxel_count) {
         Voxel *voxel = &voxels[i];
-        if (!voxel->simulate || voxel->type != 0) {
+        if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
             ++i;
             continue;
         }
@@ -8294,7 +8300,7 @@ void simulate_voxel_pbd(float dt) {
         for (int it = 0; it < constraint_iterations; ++it) {
             for (int i = 0; i < voxel_count; ++i) {
                 Voxel *voxel = &voxels[i];
-                if (!voxel->simulate || voxel->type != 0)
+                if (!voxel->simulate || voxel->type != 0 || voxel->isBullet)
                     continue;
                 solve_voxel_shape(voxel);
             }
@@ -8378,6 +8384,10 @@ static void FireVoxel(int idx) {
         shot->vel = vel;
         shot->owner = idx;
         shot->activator = idx;
+        if (p->vType == 0) {
+            shot->isBullet = true;
+            shot->glueEligible = false;
+        }
         for (int i = 0; i < 8; ++i) {
             shot->particles[i].vel = vel;
         }
