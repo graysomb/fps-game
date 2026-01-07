@@ -100,10 +100,10 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define CENTER_RELAXATION 0.99f
 #define VELOCITY_DAMPING .99f
 #define GLUE_RELAXATION 0.9f
-#define GLUE_EPS 1e-6f
-//#define GLUE_EPS 0.002f
-#define GLUE_BREAK_STRAIN 0.4f
-#define GLUE_BREAK_HINGE_ANGLE_DEG 25.0f
+//#define GLUE_EPS 1e-6f
+#define GLUE_EPS 0.0002f
+#define GLUE_BREAK_STRAIN 0.2f
+#define GLUE_BREAK_HINGE_ANGLE_DEG 10.0f
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 30
 #define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
 #define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
@@ -112,8 +112,8 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define RECYCLE_STATIC_RESTORE_DELAY (60 * 10)
 #define RECYCLE_OWNED_STATIC_MAX_FRAMES (60 * 10)
 #define STATIC_DEBRIS_OWNER (-2)
-#define VOXEL_SPLIT_STRAIN_THRESHOLD 0.1f
-#define VOXEL_SPLIT_SHEAR_THRESHOLD 0.1f
+#define VOXEL_SPLIT_STRAIN_THRESHOLD 0.4f
+#define VOXEL_SPLIT_SHEAR_THRESHOLD 0.4f
 #define VOXEL_HASH_REBUILD_INTERVAL 2
 #define TABLE_CACHE_SIZE 4
 #define FACE_BLOCK_MIN_OVERLAP (VOXEL_SIZE * 0.25f)
@@ -610,6 +610,32 @@ static void voxel_particle_world_bounds(const Voxel *v, VoxelWorldBounds *out)
     float minz = p.z, maxz = p.z;
     for (int i = 1; i < 8; ++i) {
         p = v->particles[i].pos;
+        if (p.x < minx) minx = p.x;
+        if (p.x > maxx) maxx = p.x;
+        if (p.y < miny) miny = p.y;
+        if (p.y > maxy) maxy = p.y;
+        if (p.z < minz) minz = p.z;
+        if (p.z > maxz) maxz = p.z;
+    }
+    out->minx = minx;
+    out->maxx = maxx;
+    out->miny = miny;
+    out->maxy = maxy;
+    out->minz = minz;
+    out->maxz = maxz;
+}
+
+static void voxel_predicted_bounds(const Voxel *v, VoxelWorldBounds *out)
+{
+    if (!out || !v) {
+        return;
+    }
+    Vector3 p = v->particles[0].predicted_pos;
+    float minx = p.x, maxx = p.x;
+    float miny = p.y, maxy = p.y;
+    float minz = p.z, maxz = p.z;
+    for (int i = 1; i < 8; ++i) {
+        p = v->particles[i].predicted_pos;
         if (p.x < minx) minx = p.x;
         if (p.x > maxx) maxx = p.x;
         if (p.y < miny) miny = p.y;
@@ -4747,8 +4773,8 @@ static void buildDebugWorld(void) {
 
 // Build static demo cube of voxels
 static void buildDemo(void) {
-    //buildTestWorld();
-    buildBloodWorld();
+    buildTestWorld();
+    //buildBloodWorld();
     //buildDebugWorld();
     rebuild_glue_constraints();
 }
@@ -7615,6 +7641,8 @@ static void solve_particle_collisions(float dt) {
         float radiusA = voxel_particle_radius(voxelA);
         int spanA = (voxelA->span > 0) ? voxelA->span : 1;
         float spanA_extent = 0.5f * VOXEL_SIZE * (float)(spanA - 1);
+        VoxelWorldBounds boundsA;
+        voxel_predicted_bounds(voxelA, &boundsA);
         int neighbor_ids[MAX_NEIGHBOR_VOXELS];
         int neighbor_count = gather_neighbor_voxels(voxelA, i, neighbor_ids, MAX_NEIGHBOR_VOXELS);
 
@@ -7635,6 +7663,17 @@ static void solve_particle_collisions(float dt) {
                 float radiusB = voxel_particle_radius(voxelB);
                 int spanB = (voxelB->span > 0) ? voxelB->span : 1;
                 float spanB_extent = 0.5f * VOXEL_SIZE * (float)(spanB - 1);
+                VoxelWorldBounds boundsB;
+                voxel_predicted_bounds(voxelB, &boundsB);
+
+                if (boundsA.maxx + radiusA < boundsB.minx - radiusB ||
+                    boundsB.maxx + radiusB < boundsA.minx - radiusA ||
+                    boundsA.maxy + radiusA < boundsB.miny - radiusB ||
+                    boundsB.maxy + radiusB < boundsA.miny - radiusA ||
+                    boundsA.maxz + radiusA < boundsB.minz - radiusB ||
+                    boundsB.maxz + radiusB < boundsA.minz - radiusA) {
+                    continue;
+                }
 
                 if (!centroid_only && (spanA > 1 || spanB > 1)) {
                     continue;
@@ -7725,6 +7764,8 @@ static void solve_span_voxel_collisions(void) {
         if (!voxelA->simulate || voxelA->type != 0) {
             continue;
         }
+        VoxelWorldBounds boundsA_pred;
+        voxel_predicted_bounds(voxelA, &boundsA_pred);
         int neighbor_ids[MAX_NEIGHBOR_VOXELS];
         int neighbor_count = gather_neighbor_voxels(voxelA, i, neighbor_ids, MAX_NEIGHBOR_VOXELS);
 
@@ -7744,6 +7785,17 @@ static void solve_span_voxel_collisions(void) {
                 continue;
             }
             if (voxels_share_edge_or_corner(voxelA, voxelB)) {
+                continue;
+            }
+
+            VoxelWorldBounds boundsB_pred;
+            voxel_predicted_bounds(voxelB, &boundsB_pred);
+            if (boundsA_pred.maxx < boundsB_pred.minx - contact_eps ||
+                boundsB_pred.maxx < boundsA_pred.minx - contact_eps ||
+                boundsA_pred.maxy < boundsB_pred.miny - contact_eps ||
+                boundsB_pred.maxy < boundsA_pred.miny - contact_eps ||
+                boundsA_pred.maxz < boundsB_pred.minz - contact_eps ||
+                boundsB_pred.maxz < boundsA_pred.minz - contact_eps) {
                 continue;
             }
 
