@@ -74,7 +74,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define TURN_ACCELERATION 400.0f
 #define TURN_FRICTION 400.0f
 #define PLAYER_RADIUS   0.5f
-#define FLOOR_SIZE     20.0f    // half-size of floor in world units
+#define FLOOR_SIZE     20.0f*1.0f    // half-size of floor in world units
 #define MAX_STATIC_COLLISION_NEIGHBORS 64
 #define PLAYER_SIZE 0.5f
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
@@ -4013,8 +4013,498 @@ static void add_dynamic_unit_block(int minx, int miny, int minz,
     add_dynamic_unit_block_tag(minx, miny, minz, sx, sy, sz, color, 0);
 }
 
-// Build static demo cube of voxels
-static void buildDemo(void) {
+static inline void addVoxelAt(int gx, int gy, int gz, Color c) {
+    float px = (gx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    float py = (gy + 0.5f) * VOXEL_SIZE;
+    float pz = (gz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    addVoxel(px, py, pz, true, false, c, 0);
+}
+
+static inline int grid_to_world_g(int g) {
+    return g - (int)floorf(FLOOR_SIZE / VOXEL_SIZE);
+}
+
+static void add_static_box_at_grid(int minx, int maxx,
+                                   int miny, int maxy,
+                                   int minz, int maxz,
+                                   Color color)
+{
+    for (int y = miny; y <= maxy; ++y) {
+        for (int x = minx; x <= maxx; ++x) {
+            for (int z = minz; z <= maxz; ++z) {
+                add_static_voxel_at_grid(x, y, z, color, 0);
+            }
+        }
+    }
+}
+
+static void add_static_disc_at_grid(int cx, int cz, int radius, int y, Color color)
+{
+    int r2 = radius * radius;
+    for (int dx = -radius; dx <= radius; ++dx) {
+        for (int dz = -radius; dz <= radius; ++dz) {
+            if (dx * dx + dz * dz > r2) {
+                continue;
+            }
+            add_static_voxel_at_grid(cx + dx, y, cz + dz, color, 0);
+        }
+    }
+}
+
+static void add_static_cylinder_at_grid(int cx, int cz, int radius,
+                                        int miny, int maxy,
+                                        Color color)
+{
+    for (int y = miny; y <= maxy; ++y) {
+        add_static_disc_at_grid(cx, cz, radius, y, color);
+    }
+}
+
+static void add_static_ring_at_grid(int cx, int cz,
+                                    int radius_outer, int radius_inner,
+                                    int miny, int maxy,
+                                    Color color)
+{
+    int outer2 = radius_outer * radius_outer;
+    int inner2 = radius_inner * radius_inner;
+    for (int y = miny; y <= maxy; ++y) {
+        for (int dx = -radius_outer; dx <= radius_outer; ++dx) {
+            for (int dz = -radius_outer; dz <= radius_outer; ++dz) {
+                int dist2 = dx * dx + dz * dz;
+                if (dist2 > outer2 || dist2 < inner2) {
+                    continue;
+                }
+                add_static_voxel_at_grid(cx + dx, y, cz + dz, color, 0);
+            }
+        }
+    }
+}
+
+static void add_static_boulder_at_grid(int cx, int cz, int base_y,
+                                       int radius, Color color)
+{
+    static const int offsets[5][2] = {
+        { 0, 0 }, { 1, 0 }, { 0, 1 }, { -1, 0 }, { 0, -1 }
+    };
+    int layers = radius;
+    for (int y = 0; y <= layers; ++y) {
+        int layer_radius = radius - (y / 2);
+        if (layer_radius < 1) {
+            layer_radius = 1;
+        }
+        int oi = y % 5;
+        add_static_disc_at_grid(cx + offsets[oi][0],
+                                cz + offsets[oi][1],
+                                layer_radius, base_y + y, color);
+    }
+}
+
+static void add_static_ring_with_door_at_grid(int cx, int cz,
+                                              int radius_outer, int radius_inner,
+                                              int miny, int maxy,
+                                              Color color,
+                                              int door_dir_x,
+                                              int door_width, int door_height)
+{
+    int outer2 = radius_outer * radius_outer;
+    int inner2 = radius_inner * radius_inner;
+    for (int y = miny; y <= maxy; ++y) {
+        bool door_row = (y <= door_height);
+        for (int dx = -radius_outer; dx <= radius_outer; ++dx) {
+            for (int dz = -radius_outer; dz <= radius_outer; ++dz) {
+                int dist2 = dx * dx + dz * dz;
+                if (dist2 > outer2 || dist2 < inner2) {
+                    continue;
+                }
+                if (door_row && abs(dz) <= door_width) {
+                    if ((door_dir_x > 0 && dx >= radius_inner) ||
+                        (door_dir_x < 0 && dx <= -radius_inner)) {
+                        continue;
+                    }
+                }
+                add_static_voxel_at_grid(cx + dx, y, cz + dz, color, 0);
+            }
+        }
+    }
+}
+
+static void add_static_hollow_cylinder_at_grid(int cx, int cz,
+                                               int radius_outer, int radius_inner,
+                                               int miny, int maxy,
+                                               Color color)
+{
+    if (radius_inner < 0) {
+        radius_inner = 0;
+    }
+    if (radius_inner >= radius_outer) {
+        radius_inner = radius_outer - 1;
+    }
+    add_static_ring_at_grid(cx, cz, radius_outer, radius_inner, miny, maxy, color);
+}
+
+static void add_static_arch_at_grid(int cx, int cz, int base_y,
+                                    int span, int height, int thickness,
+                                    Color color)
+{
+    int radius = span / 2;
+    if (radius < 2) {
+        return;
+    }
+    float radius_f = (float)radius;
+    int half = span / 2;
+    for (int dx = -half; dx <= half; ++dx) {
+        float xf = (float)dx;
+        float y_arc = 0.0f;
+        float inside = radius_f * radius_f - xf * xf;
+        if (inside > 0.0f) {
+            y_arc = radius_f - sqrtf(inside);
+        }
+        int y = base_y + height - (int)roundf(y_arc);
+        for (int t = 0; t < thickness; ++t) {
+            add_static_box_at_grid(cx + dx, cx + dx,
+                                   y + t, y + t,
+                                   cz - thickness, cz + thickness,
+                                   color);
+        }
+    }
+}
+
+static void buildStackedPillar(int cx, int cz, int r,
+                               int segH, int segCount, int gapH,
+                               int faultY, Color c) {
+    int yBase = 0;
+    for (int s = 0; s < segCount; ++s) {
+        for (int y = 0; y < segH; ++y) {
+            for (int dx = -r; dx <= r; ++dx) {
+                for (int dz = -r; dz <= r; ++dz) {
+                    if (abs(dx) > r || abs(dz) > r) continue;
+                    if (abs(dx) == r && abs(dz) == r) continue;
+                    int worldY = yBase + y;
+                    if (faultY >= 0 && worldY == faultY) {
+                        if (abs(dx) <= r - 1 && abs(dz) <= r - 1) {
+                            continue;
+                        }
+                    }
+                    addVoxelAt(cx + dx, worldY, cz + dz, c);
+                }
+            }
+        }
+        yBase += segH + gapH;
+    }
+}
+
+static void buildSplitPlatform(int centerX, int centerZ,
+                               int baseY, int size, int seamHalf,
+                               Color deckC, Color ribC) {
+    int half = size / 2;
+    int x0 = centerX - half;
+    int z0 = centerZ - half;
+    int x1 = x0 + size;
+    int z1 = z0 + size;
+
+    int midX = centerX;
+    int midZ = centerZ;
+
+    for (int x = x0; x < x1; ++x) {
+        for (int z = z0; z < z1; ++z) {
+            if (seamHalf > 0 &&
+                (abs(x - midX) <= seamHalf || abs(z - midZ) <= seamHalf)) {
+                continue;
+            }
+            addVoxelAt(x, baseY, z, deckC);
+        }
+    }
+
+    int ribY = baseY - 1;
+    if (ribY >= 0) {
+        for (int x = x0; x < x1; ++x) {
+            if (x == midX) continue;
+            addVoxelAt(x, ribY, centerZ - 2, ribC);
+            addVoxelAt(x, ribY, centerZ + 0, ribC);
+            addVoxelAt(x, ribY, centerZ + 2, ribC);
+        }
+    }
+
+    if (seamHalf > 0) {
+        int capY = baseY + 2;
+        for (int dz = -2; dz <= 2; ++dz) {
+            if (dz == 0) {
+                addVoxelAt(centerX, capY, centerZ + dz, deckC);
+            }
+        }
+        for (int dx = -2; dx <= 2; ++dx) {
+            if (dx == 0) {
+                addVoxelAt(centerX + dx, capY, centerZ, deckC);
+            }
+        }
+    }
+}
+
+static void buildLeg2x2Notched(int gx, int gz, int y0, int y1, int topY, Color c) {
+    for (int y = y0; y <= y1; ++y) {
+        for (int dx = 0; dx < 2; ++dx) {
+            for (int dz = 0; dz < 2; ++dz) {
+                if (y == topY && dx == 1 && dz == 1) continue;
+                addVoxelAt(gx + dx, y, gz + dz, c);
+            }
+        }
+    }
+}
+
+static void buildBox(int cx, int cy, int cz, int sx, int sy, int sz, Color c) {
+    int x0 = cx - sx / 2, x1 = x0 + sx;
+    int y0 = cy,       y1 = y0 + sy;
+    int z0 = cz - sz / 2, z1 = z0 + sz;
+    for (int x = x0; x < x1; ++x) {
+        for (int y = y0; y < y1; ++y) {
+            for (int z = z0; z < z1; ++z) {
+                addVoxelAt(x, y, z, c);
+            }
+        }
+    }
+}
+
+static void buildFortWalls(int cx, int cz, int w, int d, int h, Color c) {
+    int x0 = cx - w/2, x1 = x0 + w;
+    int z0 = cz - d/2, z1 = z0 + d;
+    for (int y = 0; y < h; ++y) {
+        for (int x = x0; x < x1; ++x) {
+            addVoxelAt(x, y, z0, c);
+            addVoxelAt(x, y, z1 - 1, c);
+        }
+        for (int z = z0; z < z1; ++z) {
+            addVoxelAt(x0, y, z, c);
+            addVoxelAt(x1 - 1, y, z, c);
+        }
+    }
+}
+
+static void carveFortGate(int cx, int cz, int w, int d, int gate_w, int gate_h) {
+    int x0 = cx - w/2, x1 = x0 + w;
+    int z0 = cz - d/2;
+    int midX = cx;
+    int halfGate = gate_w / 2;
+    for (int y = 0; y <= gate_h; ++y) {
+        for (int x = midX - halfGate; x <= midX + halfGate; ++x) {
+            int gx = grid_to_world_g(x);
+            int gz = grid_to_world_g(z0);
+            int idx = table_get(gx, y, gz);
+            if (idx >= 0 && idx < voxel_count) {
+                remove_voxel_index(idx);
+            }
+        }
+    }
+}
+
+static void carveFortWindows(int cx, int cz, int w, int d,
+                             int y0, int y1, int window_w) {
+    int x0 = cx - w/2, x1 = x0 + w;
+    int z0 = cz - d/2, z1 = z0 + d;
+    int midX = cx;
+    int midZ = cz;
+    int halfWin = window_w / 2;
+    for (int y = y0; y <= y1; ++y) {
+        for (int x = midX - halfWin; x <= midX + halfWin; ++x) {
+            int idx = table_get(grid_to_world_g(x), y, grid_to_world_g(z0));
+            if (idx >= 0 && idx < voxel_count) remove_voxel_index(idx);
+            idx = table_get(grid_to_world_g(x), y, grid_to_world_g(z1 - 1));
+            if (idx >= 0 && idx < voxel_count) remove_voxel_index(idx);
+        }
+        for (int z = midZ - halfWin; z <= midZ + halfWin; ++z) {
+            int idx = table_get(grid_to_world_g(x0), y, grid_to_world_g(z));
+            if (idx >= 0 && idx < voxel_count) remove_voxel_index(idx);
+            idx = table_get(grid_to_world_g(x1 - 1), y, grid_to_world_g(z));
+            if (idx >= 0 && idx < voxel_count) remove_voxel_index(idx);
+        }
+    }
+}
+
+static void buildFortRoof(int cx, int cz, int w, int d, int y, Color c) {
+    int x0 = cx - w/2, x1 = x0 + w;
+    int z0 = cz - d/2, z1 = z0 + d;
+    for (int x = x0; x < x1; ++x) {
+        for (int z = z0; z < z1; ++z) {
+            addVoxelAt(x, y, z, c);
+        }
+    }
+}
+
+static void buildGateFrame(int cx, int cz, int w, int h, int depth, Color c) {
+    int x0 = cx - w / 2;
+    int x1 = x0 + w;
+    int z0 = cz - depth / 2;
+    int z1 = z0 + depth;
+    for (int y = 0; y < h; ++y) {
+        addVoxelAt(x0, y, z0, c);
+        addVoxelAt(x1 - 1, y, z0, c);
+        addVoxelAt(x0, y, z1 - 1, c);
+        addVoxelAt(x1 - 1, y, z1 - 1, c);
+    }
+    for (int x = x0; x < x1; ++x) {
+        for (int z = z0; z < z1; ++z) {
+            addVoxelAt(x, h, z, c);
+        }
+    }
+}
+
+static void buildTestWorld(void) {
+    // Floor
+    int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
+
+    // Pillars
+    int pillar_height = 15; // 45 - 10
+    int pillar_radius = 3;
+    int pillar_positions[4][2] = {
+        { M / 4, M / 4 },
+        { M / 4, 3 * M / 4 },
+        { 3 * M / 4, M / 4 },
+        { 3 * M / 4, 3 * M / 4 }
+    };
+
+    for (int p = 0; p < 4; p++) {
+        int cx = pillar_positions[p][0];
+        int cz = pillar_positions[p][1];
+        for (int y = 0; y <= pillar_height; y++) {
+            for (int dx = -pillar_radius; dx <= pillar_radius; dx++) {
+                for (int dz = -pillar_radius; dz <= pillar_radius; dz++) {
+                    if (dx*dx + dz*dz > pillar_radius*pillar_radius) continue; // circular pillar
+                    float px = (cx + dx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                    float py = (y + 0.5f) * VOXEL_SIZE;
+                    float pz = (cz + dz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                    addVoxel(px, py, pz, true, false, (Color){ 200, 100, 50, 255 }, 0);
+                }
+            }
+        }
+    }
+
+    // Central platform (n=1)
+    int platform_size = 10;
+    int platform_height = 1; // 15 / 3
+    int platform_base_height = 5; // to keep top at same level (21)
+    for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
+        for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
+            for (int z = M/2 - platform_size/2; z <= M/2 + platform_size/2; z++) {
+                float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                float py = (y + 0.5f) * VOXEL_SIZE;
+                float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                addVoxel(px, py, pz, true, false, (Color){ 100, 200, 100, 255 }, 0);
+                //addVoxelSized(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0, 1);
+            }
+        }
+    }
+
+    // Platform legs: 2x2 columns at each corner down to the floor.
+    int platform_min = M/2 - platform_size/2;
+    int platform_max = M/2 + platform_size/2;
+    int leg_min_y = 0;
+    int leg_max_y = platform_base_height;
+    if (leg_max_y >= leg_min_y) {
+        int leg_x[4] = { platform_min, platform_min, platform_max - 1, platform_max - 1 };
+        int leg_z[4] = { platform_min, platform_max - 1, platform_min, platform_max - 1 };
+        for (int corner = 0; corner < 4; ++corner) {
+            for (int y = leg_min_y; y <= leg_max_y; ++y) {
+                for (int dx = 0; dx < 2; ++dx) {
+                    for (int dz = 0; dz < 2; ++dz) {
+                        int x = leg_x[corner] + dx;
+                        int z = leg_z[corner] + dz;
+                        float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                        float py = (y + 0.5f) * VOXEL_SIZE;
+                        float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+                        addVoxel(px, py, pz, true, false, (Color){ 120, 160, 90, 255 }, 0);
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void buildBloodWorld(void) {
+    int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
+    int center = M / 2;
+    int map_radius_cells = center - 2;
+
+    int pillar_radius = 3;
+    int pillar_seg_height = 6;
+    int pillar_seg_count = 3;
+    int pillar_gap = 0;
+
+    int platform_size = (int)roundf(0.25f * (float)map_radius_cells);
+    int platform_base_height = (int)roundf(0.10f * (float)map_radius_cells);
+    if (platform_size < 12) platform_size = 12;
+    if (platform_base_height < 5) platform_base_height = 5;
+
+    int pillar_offset = (int)roundf(0.45f * (float)map_radius_cells);
+    if (pillar_offset < 20) pillar_offset = 20;
+
+    int base_offset = (int)roundf(0.55f * (float)map_radius_cells);
+    if (base_offset < 24) base_offset = 24;
+
+    Color pillar_color = (Color){ 140, 120, 90, 255 };
+    Color deck_color = (Color){ 100, 180, 120, 255 };
+    Color rib_color = (Color){ 90, 130, 90, 255 };
+    Color leg_color = (Color){ 120, 160, 90, 255 };
+    Color cover_color = (Color){ 110, 110, 120, 255 };
+    Color wall_color = (Color){ 140, 120, 100, 255 };
+
+    int pillar_fault = pillar_seg_height;
+    buildStackedPillar(center - pillar_offset, center - pillar_offset,
+                       pillar_radius, pillar_seg_height, pillar_seg_count, pillar_gap,
+                       pillar_fault, pillar_color);
+    buildStackedPillar(center - pillar_offset, center + pillar_offset,
+                       pillar_radius, pillar_seg_height, pillar_seg_count, pillar_gap,
+                       pillar_fault, pillar_color);
+    buildStackedPillar(center + pillar_offset, center - pillar_offset,
+                       pillar_radius, pillar_seg_height, pillar_seg_count, pillar_gap,
+                       pillar_fault, pillar_color);
+    buildStackedPillar(center + pillar_offset, center + pillar_offset,
+                       pillar_radius, pillar_seg_height, pillar_seg_count, pillar_gap,
+                       pillar_fault, pillar_color);
+
+    buildSplitPlatform(center, center, platform_base_height,
+                       platform_size, 0, deck_color, rib_color);
+
+    int half = platform_size / 2;
+    int leg_min_y = 0;
+    int leg_max_y = platform_base_height - 1;
+    int topY = leg_max_y;
+    buildLeg2x2Notched(center - half, center - half, leg_min_y, leg_max_y, topY, leg_color);
+    buildLeg2x2Notched(center - half, center + half - 1, leg_min_y, leg_max_y, topY, leg_color);
+    buildLeg2x2Notched(center + half - 1, center - half, leg_min_y, leg_max_y, topY, leg_color);
+    buildLeg2x2Notched(center + half - 1, center + half - 1, leg_min_y, leg_max_y, topY, leg_color);
+
+    int base_height = 9;
+    int base_w = 16;
+    int base_d = 12;
+    int gate_w = 5;
+    int gate_h = 5;
+    int window_w = 3;
+    int window_y0 = 3;
+    int window_y1 = 4;
+    buildFortWalls(center - base_offset, center, base_w, base_d, base_height, wall_color);
+    buildFortWalls(center + base_offset, center, base_w, base_d, base_height, wall_color);
+    buildFortRoof(center - base_offset, center, base_w, base_d, base_height, wall_color);
+    buildFortRoof(center + base_offset, center, base_w, base_d, base_height, wall_color);
+    carveFortGate(center - base_offset, center, base_w, base_d, gate_w, gate_h);
+    carveFortGate(center + base_offset, center, base_w, base_d, gate_w, gate_h);
+    carveFortWindows(center - base_offset, center, base_w, base_d, window_y0, window_y1, window_w);
+    carveFortWindows(center + base_offset, center, base_w, base_d, window_y0, window_y1, window_w);
+
+    buildBox(center - base_offset + 2, 1, center + 3, 4, 4, 4, cover_color);
+    buildBox(center + base_offset - 2, 1, center - 3, 4, 4, 4, cover_color);
+    buildGateFrame(center - base_offset, center + 4, 3, 6, 3, wall_color);
+    buildGateFrame(center + base_offset, center - 4, 3, 6, 3, wall_color);
+
+    int lane_len = 28;
+    int lane_height = 5;
+    for (int y = 0; y < lane_height; ++y) {
+        for (int x = center - lane_len; x <= center + lane_len; ++x) {
+            addVoxelAt(x, y, center + 12, wall_color);
+            addVoxelAt(x, y, center - 12, wall_color);
+        }
+    }
+}
+
+static void buildDebugWorld(void) {
     //init_debug_tag_offsets();
     // Floating dynamic test clusters (mixed span sizes, zero initial glue stress).
     // Debug tags: 1=corner chunk, 2=stacked pillar, 3=three-span bar, 4=plate+cap,
@@ -4183,86 +4673,17 @@ static void buildDemo(void) {
     //     add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 2, (Color){ 170, 140, 200, 255 }, tag);
     //     add_dynamic_span_voxel_at_grid_tag(bx, by + 2, bz, 2, (Color){ 170, 140, 200, 255 }, tag);
     // }
-    // Floor
-    int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
     // for (int x = 0; x <= M; x++) {
     //     for (int z = 0; z <= M; z++) {
     //         float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
     //         float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
     //         addVoxel(px, 0, pz, true, false, (Color){ 150, 150, 150, 255 }, 0);
     //     }
-    // } 
-
-    // // Pillars
-    int pillar_height = 10; // 45 - 10
-    int pillar_radius = 3;
-    int pillar_positions[4][2] = {
-        { M / 4, M / 4 },
-        { M / 4, 3 * M / 4 },
-        { 3 * M / 4, M / 4 },
-        { 3 * M / 4, 3 * M / 4 }
-    };
-
-    for (int p = 0; p < 4; p++) {
-        int cx = pillar_positions[p][0];
-        int cz = pillar_positions[p][1];
-        for (int y = 0; y <= pillar_height; y++) {
-            for (int dx = -pillar_radius; dx <= pillar_radius; dx++) {
-                for (int dz = -pillar_radius; dz <= pillar_radius; dz++) {
-                    if (dx*dx + dz*dz > pillar_radius*pillar_radius) continue; // circular pillar
-                    float px = (cx + dx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                    float py = (y + 0.5f) * VOXEL_SIZE;
-                    float pz = (cz + dz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                    addVoxel(px, py, pz, true, false, (Color){ 200, 100, 50, 255 }, 0);
-                }
-            }
-        }
-    }
-
-    // //Central platform (n=1)
-    int platform_size = 10;
-    int platform_height = 1; // 15 / 3
-    int platform_base_height = 5; // to keep top at same level (21)
-    for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
-        for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
-            for (int z = M/2 - platform_size/2; z <= M/2 + platform_size/2; z++) {
-                float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                float py = (y + 0.5f) * VOXEL_SIZE;
-                float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                addVoxel(px, py, pz, true, false, (Color){ 100, 200, 100, 255 }, 0);
-                //addVoxelSized(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0, 1);
-            }
-        }
-    }
-
-    // // // Platform legs: 2x2 columns at each corner down to the floor.
-    int platform_min = M/2 - platform_size/2;
-    int platform_max = M/2 + platform_size/2;
-    int leg_min_y = 0;
-    int leg_max_y = platform_base_height;
-    if (leg_max_y >= leg_min_y) {
-        int leg_x[4] = { platform_min, platform_min, platform_max - 1, platform_max - 1 };
-        int leg_z[4] = { platform_min, platform_max - 1, platform_min, platform_max - 1 };
-        for (int corner = 0; corner < 4; ++corner) {
-            for (int y = leg_min_y; y <= leg_max_y; ++y) {
-                for (int dx = 0; dx < 2; ++dx) {
-                    for (int dz = 0; dz < 2; ++dz) {
-                        int x = leg_x[corner] + dx;
-                        int z = leg_z[corner] + dz;
-                        float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                        float py = (y + 0.5f) * VOXEL_SIZE;
-                        float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                        addVoxel(px, py, pz, true, false, (Color){ 120, 160, 90, 255 }, 0);
-                    }
-                }
-            }
-        }
-    }
+    // }
     // UnitVoxelBuffer pyramid_units;
     // unit_voxel_buffer_clear(&pyramid_units);
     // build_oblique_voxel_pyramid(&pyramid_units);
     // emit_static_voxels_from_units(&pyramid_units);
-
     //Span-2 dynamic voxel near origin for floor collision testing
     // {
     //     int span = 4;
@@ -4278,7 +4699,6 @@ static void buildDemo(void) {
     //     float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
     //     addVoxelSized(px, py*2.0f, pz, false, true, (Color){ 240, 160, 60, 255 }, 0, span);
     // }
-
     // // Static 1x4x4 pad with a span-2 block hovering above for collision testing
     // {
     //     const int layer_size = 4;
@@ -4286,7 +4706,6 @@ static void buildDemo(void) {
     //     const int layer_origin_z = -6;
     //     const int layer_y = 1;
     //     Color pad_color = (Color){ 80, 140, 210, 255 };
-
     //     for (int lx = 0; lx < layer_size; ++lx) {
     //         for (int lz = 0; lz < layer_size; ++lz) {
     //             int gx = layer_origin_x + lx;
@@ -4294,7 +4713,6 @@ static void buildDemo(void) {
     //             add_static_voxel_at_grid(gx, layer_y, gz, pad_color, 0);
     //         }
     //     }
-
     //     float center_x = (layer_origin_x + 0.5f * (float)layer_size) * VOXEL_SIZE;
     //     float center_z = (layer_origin_z + 0.5f * (float)layer_size) * VOXEL_SIZE;
     //     float center_y = ((float)layer_y + 0.5f) * VOXEL_SIZE;
@@ -4303,9 +4721,15 @@ static void buildDemo(void) {
     //     float vertical_gap = 2.0f * VOXEL_SIZE;
     //     float dynamic_half = 0.5f * VOXEL_SIZE * (float)span;
     //     float py = center_y + static_half + vertical_gap + dynamic_half;
-
     //     addVoxelSized(center_x, py, center_z, false, true, (Color){ 230, 80, 120, 255 }, 0, span);
     // }
+}
+
+// Build static demo cube of voxels
+static void buildDemo(void) {
+    //buildTestWorld();
+    buildBloodWorld();
+    //buildDebugWorld();
     rebuild_glue_constraints();
 }
 
