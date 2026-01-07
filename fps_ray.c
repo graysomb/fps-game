@@ -4253,6 +4253,7 @@ static void buildDemo(void) {
 
 static int first_voxel_hit(Ray ray, float t_max, int ignore_id);
 static void UpdateKdRatio(int player_index);
+static int brush_extent_for_voxel(const Voxel *v);
 static int player_max_health(const Player *p);
 static int player_max_shield(const Player *p);
 
@@ -8810,8 +8811,14 @@ int main(void) {
                                     i + 1, players[i].kills, players[i].deaths),
                          HUD_PADDING_X, HUD_PADDING_Y, HUD_FONT_SIZE, WHITE);
                 draw_hud_bars(&players[i], view_w, view_h);
-                DrawLine(view_w/2-10, view_h/2, view_w/2+10, view_h/2, WHITE);
-                DrawLine(view_w/2, view_h/2-10, view_w/2, view_h/2+10, WHITE);
+                {
+                    int cx = view_w / 2;
+                    int cy = view_h / 2;
+                    int cross = 9;
+                    Color cross_color = Fade(RED, 0.45f);
+                    DrawLine(cx - cross, cy, cx + cross, cy, cross_color);
+                    DrawLine(cx, cy - cross, cx, cy + cross, cross_color);
+                }
             EndTextureMode();
         }
 
