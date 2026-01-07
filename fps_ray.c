@@ -94,20 +94,20 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define VOXEL_PARTICLE_COUNT 9
 #define PBD_MAX_STEP_DT 0.005f
 #define PBD_SUBSTEPS 2
-#define PBD_CONSTRAINT_ITERS 3
+#define PBD_CONSTRAINT_ITERS 6
 #define COLLISION_RELAXATION 0.99f
 #define COLLISION_CENTROID_ONLY_DT 0.02f
 #define SPLIT_VELOCITY_DAMP 0.1f
 #define CENTER_RELAXATION 0.99f
 #define VELOCITY_DAMPING .999f
-#define GLUE_RELAXATION 0.9f*0.1f
+#define GLUE_RELAXATION 0.9f*0.4f
 //#define GLUE_EPS 1e-6f
 #define GLUE_EPS 0.0002f
 #define GLUE_BREAK_STRAIN 0.4f
 #define GLUE_BREAK_HINGE_ANGLE_DEG 20.0f
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 30
-#define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f*0.1f
-#define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f*0.1f
+#define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f*0.4f
+#define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f*0.4f
 #define RECYCLE_DYNAMIC_MAX_FRAMES (60 * 10)
 #define RECYCLE_STATIC_RESTORE_INTERVAL 1
 #define RECYCLE_STATIC_RESTORE_DELAY (60 * 10)
@@ -401,6 +401,7 @@ static int debugSpanCollisionLogBudget = 0;
 static bool debugLogGlue = false;
 static bool debugLogGlueClusters = false;
 static bool skipGlueClusterCollisions = true;
+static bool renderAllDynamicFaces = false;
 static bool debugLogDynamicVoxels = false;
 static bool debugLogVoxelRecycle = false;
 static bool debugLogActivationFailures = true;
@@ -8757,6 +8758,12 @@ static void compute_voxel_face_visibility(int idx, bool faces[6])
         return;
     }
     if (voxels[idx].simulate) {
+        if (renderAllDynamicFaces) {
+            for (int f = 0; f < 6; ++f) {
+                faces[f] = true;
+            }
+            return;
+        }
         compute_dynamic_face_visibility(idx, faces);
         return;
     }
