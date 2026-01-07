@@ -97,7 +97,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define GLUE_RELAXATION 0.9f
 #define GLUE_EPS 1e-6f
 //#define GLUE_EPS 0.002f
-#define GLUE_BREAK_STRAIN 0.2f
+#define GLUE_BREAK_STRAIN 0.4f
 #define GLUE_BREAK_HINGE_ANGLE_DEG 25.0f
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 30
 #define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
@@ -142,7 +142,7 @@ static const float GRID_EPSILON = 1e-4f;
 #define VOXEL_SIZE     0.5f    // size of each voxel cube
 
 // Tunable voxel edit brush (per-axis span of the add/remove operation)
-static int voxelBrushSpan = 4;
+static int voxelBrushSpan = 3;
 
 // Player structure
 typedef struct {
@@ -4279,15 +4279,17 @@ static void buildFortWalls(int cx, int cz, int w, int d, int h, Color c) {
     }
 }
 
-static void carveFortGate(int cx, int cz, int w, int d, int gate_w, int gate_h) {
+static void carveFortGateOnX(int cx, int cz, int w, int d,
+                             int gate_w, int gate_h, int side) {
     int x0 = cx - w/2, x1 = x0 + w;
-    int z0 = cz - d/2;
-    int midX = cx;
+    int z0 = cz - d/2, z1 = z0 + d;
+    int midZ = cz;
+    int xWall = (side < 0) ? x0 : (x1 - 1);
     int halfGate = gate_w / 2;
     for (int y = 0; y <= gate_h; ++y) {
-        for (int x = midX - halfGate; x <= midX + halfGate; ++x) {
-            int gx = grid_to_world_g(x);
-            int gz = grid_to_world_g(z0);
+        for (int z = midZ - halfGate; z <= midZ + halfGate; ++z) {
+            int gx = grid_to_world_g(xWall);
+            int gz = grid_to_world_g(z);
             int idx = table_get(gx, y, gz);
             if (idx >= 0 && idx < voxel_count) {
                 remove_voxel_index(idx);
@@ -4433,18 +4435,18 @@ static void buildBloodWorld(void) {
     if (platform_size < 12) platform_size = 12;
     if (platform_base_height < 5) platform_base_height = 5;
 
-    int pillar_offset = (int)roundf(0.45f * (float)map_radius_cells);
-    if (pillar_offset < 20) pillar_offset = 20;
+    int pillar_offset = (int)roundf(0.50f * (float)map_radius_cells);
+    if (pillar_offset < 26) pillar_offset = 26;
 
-    int base_offset = (int)roundf(0.55f * (float)map_radius_cells);
-    if (base_offset < 24) base_offset = 24;
+    int base_offset = (int)roundf(0.62f * (float)map_radius_cells);
+    if (base_offset < 30) base_offset = 30;
 
-    Color pillar_color = (Color){ 140, 120, 90, 255 };
-    Color deck_color = (Color){ 100, 180, 120, 255 };
-    Color rib_color = (Color){ 90, 130, 90, 255 };
-    Color leg_color = (Color){ 120, 160, 90, 255 };
-    Color cover_color = (Color){ 110, 110, 120, 255 };
-    Color wall_color = (Color){ 140, 120, 100, 255 };
+    Color pillar_color = (Color){ 230, 160, 70, 255 };
+    Color deck_color = (Color){ 90, 220, 150, 255 };
+    Color rib_color = (Color){ 70, 190, 230, 255 };
+    Color leg_color = (Color){ 200, 210, 70, 255 };
+    Color cover_color = (Color){ 170, 110, 220, 255 };
+    Color wall_color = (Color){ 220, 120, 120, 255 };
 
     int pillar_fault = pillar_seg_height;
     buildStackedPillar(center - pillar_offset, center - pillar_offset,
@@ -4476,32 +4478,42 @@ static void buildBloodWorld(void) {
     int base_w = 16;
     int base_d = 12;
     int gate_w = 5;
-    int gate_h = 5;
+    int gate_h = 6;
     int window_w = 3;
     int window_y0 = 3;
-    int window_y1 = 4;
+    int window_y1 = 5;
     buildFortWalls(center - base_offset, center, base_w, base_d, base_height, wall_color);
     buildFortWalls(center + base_offset, center, base_w, base_d, base_height, wall_color);
     buildFortRoof(center - base_offset, center, base_w, base_d, base_height, wall_color);
     buildFortRoof(center + base_offset, center, base_w, base_d, base_height, wall_color);
-    carveFortGate(center - base_offset, center, base_w, base_d, gate_w, gate_h);
-    carveFortGate(center + base_offset, center, base_w, base_d, gate_w, gate_h);
+    carveFortGateOnX(center - base_offset, center, base_w, base_d, gate_w, gate_h, 1);
+    carveFortGateOnX(center + base_offset, center, base_w, base_d, gate_w, gate_h, -1);
     carveFortWindows(center - base_offset, center, base_w, base_d, window_y0, window_y1, window_w);
     carveFortWindows(center + base_offset, center, base_w, base_d, window_y0, window_y1, window_w);
 
-    buildBox(center - base_offset + 2, 1, center + 3, 4, 4, 4, cover_color);
-    buildBox(center + base_offset - 2, 1, center - 3, 4, 4, 4, cover_color);
-    buildGateFrame(center - base_offset, center + 4, 3, 6, 3, wall_color);
-    buildGateFrame(center + base_offset, center - 4, 3, 6, 3, wall_color);
+    buildBox(center - pillar_offset + 4, 0, center + 14, 4, 4, 4, cover_color);
+    buildBox(center + pillar_offset - 4, 0, center - 14, 4, 4, 4, cover_color);
+    buildBox(center - pillar_offset + 4, 0, center - 14, 4, 4, 4, cover_color);
+    buildBox(center + pillar_offset - 4, 0, center + 14, 4, 4, 4, cover_color);
 
-    int lane_len = 28;
+    int lane_len = 34;
     int lane_height = 5;
     for (int y = 0; y < lane_height; ++y) {
         for (int x = center - lane_len; x <= center + lane_len; ++x) {
-            addVoxelAt(x, y, center + 12, wall_color);
-            addVoxelAt(x, y, center - 12, wall_color);
+            addVoxelAt(x, y, center + 18, wall_color);
+            addVoxelAt(x, y, center - 18, wall_color);
         }
     }
+
+    buildGateFrame(center - pillar_offset - 8, center + 18, 5, 6, 3, wall_color);
+    buildGateFrame(center + pillar_offset + 8, center + 18, 5, 6, 3, wall_color);
+    buildGateFrame(center - pillar_offset - 8, center - 18, 5, 6, 3, wall_color);
+    buildGateFrame(center + pillar_offset + 8, center - 18, 5, 6, 3, wall_color);
+
+    buildBox(center - pillar_offset - 10, 0, center + 18, 4, 4, 4, cover_color);
+    buildBox(center + pillar_offset + 10, 0, center + 18, 4, 4, 4, cover_color);
+    buildBox(center - pillar_offset - 10, 0, center - 18, 4, 4, 4, cover_color);
+    buildBox(center + pillar_offset + 10, 0, center - 18, 4, 4, 4, cover_color);
 }
 
 static void buildDebugWorld(void) {
@@ -4727,8 +4739,8 @@ static void buildDebugWorld(void) {
 
 // Build static demo cube of voxels
 static void buildDemo(void) {
-    buildTestWorld();
-    //buildBloodWorld();
+    //buildTestWorld();
+    buildBloodWorld();
     //buildDebugWorld();
     rebuild_glue_constraints();
 }
