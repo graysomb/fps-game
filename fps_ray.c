@@ -38,6 +38,15 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define JUMP_SPEED     10.0f    // initial jump velocity
 #define GRAVITY         9.8f*1.0f    // gravity acceleration
 #define BASE_EYE_HEIGHT 1.0f    // player eye height above floor
+#define HUD_FONT_SIZE      28
+#define HUD_BAR_HEIGHT      6
+#define HUD_PADDING_X      10
+#define HUD_PADDING_Y       8
+#define HUD_BAR_WIDTH     320
+#define HUD_BAR_THICKNESS  30
+#define HUD_BAR_SPACING     8
+#define HUD_BAR_TEXT_SIZE  22
+#define HUD_BULLET_TEXT_SIZE 78
 #define ACCELERATION   400.0f    // horizontal acceleration
 #define FREEZE_GROUND_WEIGHT       0.9f
 #define FREEZE_NEIGHBOR_WEIGHT     0.4f*0.0f
@@ -7479,6 +7488,107 @@ static void FireVoxel(int idx) {
         }
     }
 }
+
+static const char *bullet_type_symbol(int type) {
+    switch (type) {
+        case 0: return "O";
+        case 1: return "-";
+        case 2: return "+";
+        default: return "?";
+    }
+}
+
+static int player_max_health(const Player *p) {
+    float ratio = fmaxf(p ? p->kd_ratio : 1.0f, 0.1f);
+    int value = (int)roundf((float)BASE_HEALTH / ratio);
+    return (value < 1) ? 1 : value;
+}
+
+static int player_max_shield(const Player *p) {
+    float ratio = fmaxf(p ? p->kd_ratio : 1.0f, 0.1f);
+    int value = (int)roundf((float)BASE_SHIELD / ratio);
+    return (value < 1) ? 1 : value;
+}
+
+static void draw_hud_bars(const Player *p, int viewport_w, int viewport_h) {
+    if (!p || viewport_w <= 0 || viewport_h <= 0) {
+        return;
+    }
+
+    int max_w = viewport_w - HUD_PADDING_X * 2;
+    int bar_w = HUD_BAR_WIDTH;
+    float health_max_ratio = (float)player_max_health(p) / (float)BASE_HEALTH;
+    float shield_max_ratio = (float)player_max_shield(p) / (float)BASE_SHIELD;
+    float max_ratio = fmaxf(health_max_ratio, shield_max_ratio);
+    if (max_ratio < 0.1f) {
+        max_ratio = 0.1f;
+    }
+    if ((float)bar_w * max_ratio > (float)max_w) {
+        bar_w = (int)floorf((float)max_w / max_ratio);
+    }
+    if (bar_w < 1) {
+        bar_w = 1;
+    }
+
+    int bullet_gap = HUD_BAR_SPACING;
+    int total_h = HUD_BAR_THICKNESS * 2 + HUD_BAR_SPACING + HUD_BULLET_TEXT_SIZE + bullet_gap;
+    int y = viewport_h - HUD_PADDING_Y - total_h;
+
+    int health_max = player_max_health(p);
+    int shield_max = player_max_shield(p);
+    float health_ratio = clampf((float)p->health / (float)health_max, 0.0f, 1.0f);
+    float shield_ratio = clampf((float)p->shield / (float)shield_max, 0.0f, 1.0f);
+    int health_bar_w = (int)roundf((float)bar_w * health_max_ratio);
+    int shield_bar_w = (int)roundf((float)bar_w * shield_max_ratio);
+    int max_bar_w = (health_bar_w > shield_bar_w) ? health_bar_w : shield_bar_w;
+    int x_max = viewport_w - HUD_PADDING_X - max_bar_w;
+
+    Color bar_bg = (Color){ 25, 25, 25, 200 };
+    Color health_color = (Color){ 210, 70, 70, 230 };
+    Color shield_color = (Color){ 70, 140, 220, 230 };
+
+    Color bullet_color = BLACK;
+    const char *bullet_symbol = bullet_type_symbol(p->vType);
+    if (p->vType == 1) {
+        bullet_color = RED;
+    } else if (p->vType == 2) {
+        bullet_color = BLUE;
+    }
+    int bullet_w = MeasureText(bullet_symbol, HUD_BULLET_TEXT_SIZE);
+    int bullet_x = x_max + (max_bar_w - bullet_w) / 2;
+    DrawText(bullet_symbol, bullet_x, y, HUD_BULLET_TEXT_SIZE, bullet_color);
+
+    int bar_y = y + HUD_BULLET_TEXT_SIZE + bullet_gap;
+    int health_x = viewport_w - HUD_PADDING_X - health_bar_w;
+    DrawRectangle(health_x, bar_y, health_bar_w, HUD_BAR_THICKNESS, bar_bg);
+    DrawRectangle(health_x, bar_y, (int)roundf(health_bar_w * health_ratio), HUD_BAR_THICKNESS, health_color);
+    DrawRectangleLines(health_x, bar_y, health_bar_w, HUD_BAR_THICKNESS, BLACK);
+
+    int shield_y = bar_y + HUD_BAR_THICKNESS + HUD_BAR_SPACING;
+    int shield_x = viewport_w - HUD_PADDING_X - shield_bar_w;
+    DrawRectangle(shield_x, shield_y, shield_bar_w, HUD_BAR_THICKNESS, bar_bg);
+    DrawRectangle(shield_x, shield_y, (int)roundf(shield_bar_w * shield_ratio), HUD_BAR_THICKNESS, shield_color);
+    DrawRectangleLines(shield_x, shield_y, shield_bar_w, HUD_BAR_THICKNESS, BLACK);
+
+    int health_display = p->health;
+    if (health_display > health_max) {
+        health_display = health_max;
+    }
+    int shield_display = p->shield;
+    if (shield_display > shield_max) {
+        shield_display = shield_max;
+    }
+    const char *health_text = TextFormat("HP %d/%d", health_display, health_max);
+    const char *shield_text = TextFormat("SH %d/%d", shield_display, shield_max);
+    int health_text_w = MeasureText(health_text, HUD_BAR_TEXT_SIZE);
+    int shield_text_w = MeasureText(shield_text, HUD_BAR_TEXT_SIZE);
+    int health_text_x = health_x + (health_bar_w - health_text_w) / 2;
+    int shield_text_x = shield_x + (shield_bar_w - shield_text_w) / 2;
+    int text_y = bar_y + (HUD_BAR_THICKNESS - HUD_BAR_TEXT_SIZE) / 2;
+    int shield_text_y = shield_y + (HUD_BAR_THICKNESS - HUD_BAR_TEXT_SIZE) / 2;
+    DrawText(health_text, health_text_x, text_y, HUD_BAR_TEXT_SIZE, WHITE);
+    DrawText(shield_text, shield_text_x, shield_text_y, HUD_BAR_TEXT_SIZE, WHITE);
+}
 // Append the 12 edges (24 vertices) of a cube to the current RL_LINES batch
 static void drawCubeEdges(const Voxel *voxel)
 {
@@ -8570,8 +8680,11 @@ int main(void) {
                 draw_players();
             EndMode3D();
             // UI p1
-            DrawRectangle(0,0, SCREEN_WIDTH/2, 4.0f, Fade(BLACK, 0.5f));
-            DrawText(TextFormat("P1 | Kills: %d Deaths: %d | Health: %d | Shield: %d", players[0].kills, players[0].deaths, players[0].health, players[0].shield), 10, 10, 20, WHITE);
+            DrawRectangle(0, 0, SCREEN_WIDTH / 2, HUD_BAR_HEIGHT, Fade(BLACK, 0.5f));
+            DrawText(TextFormat("P1 | Kills: %d Deaths: %d",
+                                players[0].kills, players[0].deaths),
+                     HUD_PADDING_X, HUD_PADDING_Y, HUD_FONT_SIZE, WHITE);
+            draw_hud_bars(&players[0], SCREEN_WIDTH / 2, SCREEN_HEIGHT);
             DrawLine(SCREEN_WIDTH/4-10, SCREEN_HEIGHT/2, SCREEN_WIDTH/4+10, SCREEN_HEIGHT/2, WHITE);
             DrawLine(SCREEN_WIDTH/4, SCREEN_HEIGHT/2-10, SCREEN_WIDTH/4, SCREEN_HEIGHT/2+10, WHITE);
         EndTextureMode();
@@ -8583,8 +8696,11 @@ int main(void) {
                 draw_players();
             EndMode3D();
             // UI p2
-            DrawRectangle(0,0, SCREEN_WIDTH/2, 4.0f, Fade(BLACK, 0.5f));
-            DrawText(TextFormat("P2 | Kills: %d Deaths: %d | Health: %d | Shield: %d", players[1].kills, players[1].deaths, players[1].health, players[1].shield), 10, 10, 20, WHITE);
+            DrawRectangle(0, 0, SCREEN_WIDTH / 2, HUD_BAR_HEIGHT, Fade(BLACK, 0.5f));
+            DrawText(TextFormat("P2 | Kills: %d Deaths: %d",
+                                players[1].kills, players[1].deaths),
+                     HUD_PADDING_X, HUD_PADDING_Y, HUD_FONT_SIZE, WHITE);
+            draw_hud_bars(&players[1], SCREEN_WIDTH / 2, SCREEN_HEIGHT);
             DrawLine(SCREEN_WIDTH/4-10, SCREEN_HEIGHT/2, SCREEN_WIDTH/4+10, SCREEN_HEIGHT/2, WHITE);
             DrawLine(SCREEN_WIDTH/4, SCREEN_HEIGHT/2-10, SCREEN_WIDTH/4, SCREEN_HEIGHT/2+10, WHITE);
         EndTextureMode();
@@ -8594,10 +8710,7 @@ int main(void) {
             DrawTextureRec(screen0.texture, screenRec, (Vector2){0,0}, WHITE);
             DrawTextureRec(screen1.texture, screenRec, (Vector2){SCREEN_WIDTH/2,0}, WHITE);
             DrawRectangle(SCREEN_WIDTH/2-2, 0, 4, SCREEN_HEIGHT, LIGHTGRAY);
-            DrawText(TextFormat("Particles (F3): %s", debugDrawParticles ? "ON" : "OFF"), 20, 20, 20, LIGHTGRAY);
-            if (debugDrawParticles) {
-                DrawText(TextFormat("Velocity Heatmap (F4): %s", debugColorParticlesByVelocity ? "ON" : "OFF"), 20, 44, 20, LIGHTGRAY);
-            }
+            // particle debug text removed
         EndDrawing();
         break;
             case GAME_STATE_PAUSED:
