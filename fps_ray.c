@@ -420,6 +420,7 @@ static int debugSupportLogBudget = 512;
 static const float DEBUG_FALL_LOG_THRESHOLD = -5.0f;
 static const int DEBUG_FALL_LOG_BUDGET = 32;
 static bool debugLogFall = false;
+static bool debugShowBeliefColors = false;
 static unsigned char debugTagBreakLogged[DEBUG_CLUSTER_TAG_MAX];
 
 static const char *trace_level_label(int level) {
@@ -1114,6 +1115,17 @@ static Color voxel_belief_debug_color(const Voxel *voxel)
     Color col = ColorFromHSV(hue, saturation, value);
     col.a = 255;
     return col;
+}
+
+static Color voxel_display_color(const Voxel *voxel)
+{
+    if (!voxel) {
+        return (Color){ 160, 160, 160, 255 };
+    }
+    if (debugShowBeliefColors) {
+        return voxel_belief_debug_color(voxel);
+    }
+    return voxel->color;
 }
 
 typedef struct {
@@ -8053,8 +8065,8 @@ static void drawCubeMan(const Voxel *voxel, const bool faces[6])
     Vector3 v[8];
     for (int i = 0; i < 8; ++i) v[i] = voxel->particles[i].pos;
 
-    Color debugColor = voxel_belief_debug_color(voxel);
-    rlColor4ub(debugColor.r, debugColor.g, debugColor.b, debugColor.a);
+    Color displayColor = voxel_display_color(voxel);
+    rlColor4ub(displayColor.r, displayColor.g, displayColor.b, displayColor.a);
 
     if (!faces || faces[4]) {
         rlNormal3f(0.0f, 0.0f, 1.0f);
@@ -8331,11 +8343,11 @@ static void merge_rects_on_plane(int count, int *list, int plane, bool positive)
                     case 2: baseIdx = table_get(layer, pt->i0, pt->j0); break;
                 }
                 pt->voxelIndex = baseIdx;
-                Color debugColor = { 60, 60, 80, 255 };
+                Color baseColor = { 160, 160, 160, 255 };
                 if (baseIdx >= 0 && baseIdx < voxel_count) {
-                    debugColor = voxel_belief_debug_color(&voxels[baseIdx]);
+                    baseColor = voxel_display_color(&voxels[baseIdx]);
                 }
-                pt->col = debugColor;
+                pt->col = baseColor;
             }
         }
     }
@@ -8467,7 +8479,7 @@ static void update_static_patch_colors(void)
         Patch *pt = &patches[p];
         Color newColor = pt->col;
         if (pt->voxelIndex >= 0 && pt->voxelIndex < voxel_count) {
-            newColor = voxel_belief_debug_color(&voxels[pt->voxelIndex]);
+            newColor = voxel_display_color(&voxels[pt->voxelIndex]);
         }
         if (newColor.r != pt->col.r || newColor.g != pt->col.g ||
             newColor.b != pt->col.b || newColor.a != pt->col.a) {
