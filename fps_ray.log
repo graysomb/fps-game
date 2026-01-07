@@ -1,1 +1,3 @@
 [INFO] Logging TraceLog output to fps_ray.log
+[WARN] [Multiscale] Static restore failed: no free cells near (10.25, -3.27, 12.75)
+[WARN] [Multiscale] Static restore failed: no free cells near (11.79, -1.35, 14.19)

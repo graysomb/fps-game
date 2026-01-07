@@ -53,6 +53,11 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define HUD_BAR_SPACING     8
 #define HUD_BAR_TEXT_SIZE  22
 #define HUD_BULLET_TEXT_SIZE 78
+#define AMMO_MAX 6
+#define AMMO_RECHARGE_SECONDS 2.0f
+#define HUD_AMMO_SIZE 12
+#define HUD_AMMO_GAP 4
+#define BULLET_COOLDOWN_SECONDS 0.25f
 #define ACCELERATION   400.0f    // horizontal acceleration
 #define FREEZE_GROUND_WEIGHT       0.9f
 #define FREEZE_NEIGHBOR_WEIGHT     0.4f*0.0f
@@ -161,6 +166,9 @@ typedef struct {
     int health;
     int shield;
     float last_damage_time;
+    int ammo;
+    float ammo_recharge_timer;
+    float last_shot_time;
 } Player;
 static Player players[MAX_PLAYERS];
 static int activePlayers = 2;
@@ -4753,6 +4761,7 @@ static Vector3 pick_player_spawn(int player_index);
 static int brush_extent_for_voxel(const Voxel *v);
 static int player_max_health(const Player *p);
 static int player_max_shield(const Player *p);
+static void update_player_ammo(float dt);
 
 // Reset game: players and voxels
 static void ResetGame(void) {
@@ -4773,6 +4782,9 @@ static void ResetGame(void) {
         players[i].health = BASE_HEALTH;
         players[i].shield = BASE_SHIELD;
         players[i].last_damage_time = 0.0f;
+        players[i].ammo = AMMO_MAX;
+        players[i].ammo_recharge_timer = 0.0f;
+        players[i].last_shot_time = -1000.0f;
     }
     // clear voxels
     voxel_count = 0;
@@ -4791,6 +4803,22 @@ static void ResetGame(void) {
     //rebuild_glue_constraints();
     meshDirty = true;
 
+}
+
+static void update_player_ammo(float dt) {
+    for (int i = 0; i < activePlayers; ++i) {
+        Player *p = &players[i];
+        if (p->ammo >= AMMO_MAX) {
+            p->ammo = AMMO_MAX;
+            p->ammo_recharge_timer = 0.0f;
+            continue;
+        }
+        p->ammo_recharge_timer += dt;
+        while (p->ammo < AMMO_MAX && p->ammo_recharge_timer >= AMMO_RECHARGE_SECONDS) {
+            p->ammo++;
+            p->ammo_recharge_timer -= AMMO_RECHARGE_SECONDS;
+        }
+    }
 }
 
 static void UpdateKdRatio(int player_index) {
@@ -8111,6 +8139,16 @@ void simulate_voxel_pbd(float dt) {
 // Fire a voxel bullet
 static void FireVoxel(int idx) {
     Player *p = &players[idx];
+    float now = (float)GetTime();
+    if (now - p->last_shot_time < BULLET_COOLDOWN_SECONDS) {
+        return;
+    }
+    if (p->vType == 1 || p->vType == 2) {
+        if (p->ammo <= 0) {
+            return;
+        }
+        p->ammo--;
+    }
     float yawRad = DEG2RAD * p->yaw;
     float pitchRad = DEG2RAD * p->pitch;
     Vector3 dir = { sinf(-yawRad)*cosf(pitchRad), sinf(pitchRad), -cosf(yawRad)*cosf(pitchRad) };
@@ -8127,6 +8165,7 @@ static void FireVoxel(int idx) {
             shot->particles[i].vel = vel;
         }
     }
+    p->last_shot_time = now;
 }
 
 static const char *bullet_type_symbol(int type) {
@@ -8374,6 +8413,20 @@ static void draw_hud_bars(const Player *p, int viewport_w, int viewport_h) {
     int shield_text_y = shield_y + (HUD_BAR_THICKNESS - HUD_BAR_TEXT_SIZE) / 2;
     DrawText(health_text, health_text_x, text_y, HUD_BAR_TEXT_SIZE, WHITE);
     DrawText(shield_text, shield_text_x, shield_text_y, HUD_BAR_TEXT_SIZE, WHITE);
+
+    int ammo_size = HUD_AMMO_SIZE * 3;
+    int ammo_gap = HUD_AMMO_GAP * 3;
+    int ammo_w = AMMO_MAX * ammo_size + (AMMO_MAX - 1) * ammo_gap;
+    int ammo_x = HUD_PADDING_X;
+    int ammo_y = viewport_h - HUD_PADDING_Y - ammo_size;
+    Color ammo_full = (Color){ 230, 230, 230, 220 };
+    Color ammo_empty = (Color){ 60, 60, 60, 200 };
+    for (int i = 0; i < AMMO_MAX; ++i) {
+        int x = ammo_x + i * (ammo_size + ammo_gap);
+        Color fill = (i < p->ammo) ? ammo_full : ammo_empty;
+        DrawRectangle(x, ammo_y, ammo_size, ammo_size, fill);
+        DrawRectangleLines(x, ammo_y, ammo_size, ammo_size, BLACK);
+    }
 }
 // Append the 12 edges (24 vertices) of a cube to the current RL_LINES batch
 static void drawCubeEdges(const Voxel *voxel)
@@ -9295,6 +9348,7 @@ int main(void) {
                 break;
             case GAME_STATE_PLAYING:
         float dt = GetFrameTime();
+        update_player_ammo(dt);
         // input: shooting, bullet type, jump
         for (int i = 0; i < activePlayers; ++i) {
             if (playerInput[i] == INPUT_TYPE_GAMEPAD) {
