@@ -41,7 +41,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define SCREEN_HEIGHT    900
 #define MOVE_SPEED      5.0f    // units per second (unused: using acceleration)
 #define TURN_SPEED     90.0f    // degrees per second
-#define JUMP_SPEED     10.0f    // initial jump velocity
+#define JUMP_SPEED     7.5f    // initial jump velocity
 #define GRAVITY         9.8f*1.0f    // gravity acceleration
 #define BASE_EYE_HEIGHT 1.0f    // player eye height above floor
 #define HUD_FONT_SIZE      28
@@ -4727,8 +4727,8 @@ static void buildDebugWorld(void) {
 
 // Build static demo cube of voxels
 static void buildDemo(void) {
-    //buildTestWorld();
-    buildBloodWorld();
+    buildTestWorld();
+    //buildBloodWorld();
     //buildDebugWorld();
     rebuild_glue_constraints();
 }
@@ -5257,6 +5257,22 @@ static int resolve_smush_activator(int voxel_idx)
     return -1;
 }
 
+static bool dynamic_voxel_glued_to_static(int voxel_idx)
+{
+    if (voxel_idx < 0 || voxel_idx >= voxel_count) {
+        return false;
+    }
+    Voxel *voxel = &voxels[voxel_idx];
+    if (!voxel->simulate || !voxel->glueEligible) {
+        return false;
+    }
+    int cluster_count = build_glue_cluster_indices(voxel_idx, glueClusterIndices);
+    if (cluster_count <= 0) {
+        return false;
+    }
+    return glue_cluster_has_static_support(glueClusterIndices, cluster_count);
+}
+
 static void handle_pbd_projectile_hits(void)
 {
     if (debugLogSmush) {
@@ -5269,6 +5285,7 @@ static void handle_pbd_projectile_hits(void)
             ++i;
             continue;
         }
+        bool glued_to_static = dynamic_voxel_glued_to_static(i);
         bool removed = false;
         for (int j = 0; j < activePlayers; ++j) {
             if (v->owner == j) {
@@ -5278,6 +5295,11 @@ static void handle_pbd_projectile_hits(void)
             float dy = v->pos.y - players[j].pos.y;
             float dz = v->pos.z - players[j].pos.z;
             if (fabsf(dx) < PLAYER_SIZE && fabsf(dy) < PLAYER_SIZE && fabsf(dz) < PLAYER_SIZE) {
+                if (glued_to_static) {
+                    ++i;
+                    removed = true;
+                    break;
+                }
                 bool is_projectile = !v->glueEligible;
                 int activator = is_projectile ? -1 : resolve_smush_activator(i);
                 bool debris = (!is_projectile && activator >= 0);
