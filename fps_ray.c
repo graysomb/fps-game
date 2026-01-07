@@ -398,6 +398,7 @@ static int debugSpanEdgeLogBudget = 0;
 static int debugSpanCollisionLogBudget = 0;
 static bool debugLogGlue = false;
 static bool debugLogGlueClusters = false;
+static bool skipGlueClusterCollisions = true;
 static bool debugLogDynamicVoxels = false;
 static bool debugLogVoxelRecycle = false;
 static bool debugLogActivationFailures = true;
@@ -6359,6 +6360,71 @@ static int build_glue_cluster_indices(int start_idx, int *out_indices)
     return tail;
 }
 
+static void build_glue_cluster_ids(int *out_cluster_id)
+{
+    if (!out_cluster_id || voxel_count <= 0) {
+        return;
+    }
+
+    static unsigned char cluster_visited[MAX_VOXELS];
+    static int cluster_members[MAX_VOXELS];
+
+    for (int i = 0; i < voxel_count; ++i) {
+        out_cluster_id[i] = -1;
+    }
+    memset(cluster_visited, 0, sizeof(unsigned char) * (size_t)voxel_count);
+
+    for (int i = 0; i < voxel_count; ++i) {
+        if (!voxels[i].simulate || !voxels[i].glueEligible) {
+            continue;
+        }
+        if (cluster_visited[i]) {
+            continue;
+        }
+
+        int head = 0;
+        int tail = 0;
+        cluster_members[tail++] = i;
+        cluster_visited[i] = 1;
+
+        while (head < tail) {
+            int idx = cluster_members[head++];
+            int neighbors[MAX_FACE_NEIGHBORS];
+            int neighbor_count = gather_glued_neighbors(idx, neighbors, MAX_FACE_NEIGHBORS);
+            for (int n = 0; n < neighbor_count; ++n) {
+                int neighbor = neighbors[n];
+                if (neighbor < 0 || neighbor >= voxel_count) {
+                    continue;
+                }
+                if (!voxels[neighbor].simulate || !voxels[neighbor].glueEligible) {
+                    continue;
+                }
+                if (cluster_visited[neighbor]) {
+                    continue;
+                }
+                if (tail >= MAX_VOXELS) {
+                    break;
+                }
+                cluster_visited[neighbor] = 1;
+                cluster_members[tail++] = neighbor;
+            }
+            if (tail >= MAX_VOXELS) {
+                break;
+            }
+        }
+
+        int rep = cluster_members[0];
+        for (int m = 1; m < tail; ++m) {
+            if (cluster_members[m] < rep) {
+                rep = cluster_members[m];
+            }
+        }
+        for (int m = 0; m < tail; ++m) {
+            out_cluster_id[cluster_members[m]] = rep;
+        }
+    }
+}
+
 static void log_dynamic_glue_cluster_breaks(void)
 {
     if (!debugLogGlueClusters || voxel_count <= 0) {
@@ -7523,6 +7589,10 @@ static void solve_particle_collisions(float dt) {
     const bool centroid_only = (dt > COLLISION_CENTROID_ONLY_DT);
     const int particle_start = centroid_only ? VOXEL_CENTER_INDEX : 0;
     const int particle_end = centroid_only ? (VOXEL_CENTER_INDEX + 1) : VOXEL_PARTICLE_COUNT;
+    static int glue_cluster_id[MAX_VOXELS];
+    if (skipGlueClusterCollisions) {
+        build_glue_cluster_ids(glue_cluster_id);
+    }
     if (debugLogSpanCollisions) {
         debugSpanCollisionLogBudget = 32;
         debugSpanEdgeLogBudget = 32;
@@ -7684,6 +7754,10 @@ static void solve_particle_collisions(float dt) {
                 if (glued || share_edge_corner) {
                     continue;
                 }
+                if (skipGlueClusterCollisions &&
+                    glue_cluster_id[i] >= 0 && glue_cluster_id[i] == glue_cluster_id[neighbor_idx]) {
+                    continue;
+                }
 
                 for (int q = particle_start; q < particle_end; ++q) {
                     if (neighbor_idx == i && q <= j) {
@@ -7758,6 +7832,10 @@ static void solve_particle_collisions(float dt) {
 static void solve_span_voxel_collisions(void) {
     const float contact_eps = 0.0f;
     const float omega = COLLISION_RELAXATION;
+    static int glue_cluster_id[MAX_VOXELS];
+    if (skipGlueClusterCollisions) {
+        build_glue_cluster_ids(glue_cluster_id);
+    }
 
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxelA = &voxels[i];
@@ -7785,6 +7863,10 @@ static void solve_span_voxel_collisions(void) {
                 continue;
             }
             if (voxels_share_edge_or_corner(voxelA, voxelB)) {
+                continue;
+            }
+            if (skipGlueClusterCollisions &&
+                glue_cluster_id[i] >= 0 && glue_cluster_id[i] == glue_cluster_id[neighbor_idx]) {
                 continue;
             }
 
