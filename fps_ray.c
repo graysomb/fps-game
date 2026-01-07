@@ -23,11 +23,17 @@ typedef enum {
 static GameState gameState = GAME_STATE_MENU;
 
 // Input type enum
+#define MAX_PLAYERS 4
 typedef enum {
     INPUT_TYPE_KEYBOARD,
     INPUT_TYPE_GAMEPAD
 } InputType;
-static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
+static InputType playerInput[MAX_PLAYERS] = {
+    INPUT_TYPE_KEYBOARD,
+    INPUT_TYPE_KEYBOARD,
+    INPUT_TYPE_GAMEPAD,
+    INPUT_TYPE_GAMEPAD
+};
 
 //gcc fps_ray.c -o fps_ray  $(pkg-config --cflags --libs raylib) -lm -Wl,-rpath,/usr/local/lib
 // Screen and game constants
@@ -118,7 +124,7 @@ static const float GRID_EPSILON = 1e-4f;
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 1.0f
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.2f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.2f
-#define VOXEL_DEACTIVATION_FRAMES 1
+#define VOXEL_DEACTIVATION_FRAMES 10
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
 #define STATIC_RESTORE_SEARCH_RADIUS 2*1
 #define DEBRIS_ACTIVATION_COOLDOWN_FRAMES (60 * 10)
@@ -155,7 +161,15 @@ typedef struct {
     int shield;
     float last_damage_time;
 } Player;
-static Player players[2];
+static Player players[MAX_PLAYERS];
+static int activePlayers = 2;
+static const Vector3 playerSpawnPositions[MAX_PLAYERS] = {
+    { 0.0f,  BASE_EYE_HEIGHT, -9.0f },
+    { 0.0f,  BASE_EYE_HEIGHT,  9.0f },
+    { -6.0f, BASE_EYE_HEIGHT, -6.0f },
+    {  6.0f, BASE_EYE_HEIGHT,  6.0f }
+};
+static const float playerSpawnYaw[MAX_PLAYERS] = { 0.0f, 180.0f, 45.0f, -135.0f };
 
 typedef struct {
     Vector3 pos;
@@ -4239,14 +4253,15 @@ static void buildDemo(void) {
 
 static int first_voxel_hit(Ray ray, float t_max, int ignore_id);
 static void UpdateKdRatio(int player_index);
+static int player_max_health(const Player *p);
+static int player_max_shield(const Player *p);
 
 // Reset game: players and voxels
 static void ResetGame(void) {
     // init players
-    for (int i = 0; i < 2; i++) {
-        //players[i].pos = (Vector3){ randomInRange(-9,9), BASE_EYE_HEIGHT, randomInRange(-9,9) };
-        players[i].pos = (Vector3){ 0, BASE_EYE_HEIGHT, -9 };
-        players[i].yaw = (i == 0) ? 0 : 180;
+    for (int i = 0; i < MAX_PLAYERS; i++) {
+        players[i].pos = playerSpawnPositions[i];
+        players[i].yaw = playerSpawnYaw[i];
         players[i].pitch = 0;
         players[i].yaw_vel = 0;
         players[i].pitch_vel = 0;
@@ -4286,7 +4301,7 @@ static void UpdateKdRatio(int player_index) {
 
 static void apply_damage_to_player(int player_index, int attacker_index, int damage)
 {
-    if (player_index < 0 || player_index >= 2) {
+    if (player_index < 0 || player_index >= activePlayers) {
         return;
     }
     Player *player = &players[player_index];
@@ -4302,7 +4317,7 @@ static void apply_damage_to_player(int player_index, int attacker_index, int dam
     }
 
     if (player->health <= 0) {
-        if (attacker_index >= 0 && attacker_index < 2 && attacker_index != player_index) {
+        if (attacker_index >= 0 && attacker_index < activePlayers && attacker_index != player_index) {
             players[attacker_index].kills++;
             player->deaths++;
             UpdateKdRatio(attacker_index);
@@ -4311,10 +4326,12 @@ static void apply_damage_to_player(int player_index, int attacker_index, int dam
         player->pos = (Vector3){ randomInRange(-9, 9), BASE_EYE_HEIGHT, randomInRange(-9, 9) };
         player->vel = (Vector3){ 0, 0, 0 };
         player->onGround = true;
-        player->yaw = (player_index == 0) ? 0 : 180;
+        if (player_index >= 0 && player_index < MAX_PLAYERS) {
+            player->yaw = playerSpawnYaw[player_index];
+        }
         player->pitch = 0;
-        player->health = BASE_HEALTH / player->kd_ratio;
-        player->shield = BASE_SHIELD;
+        player->health = player_max_health(player);
+        player->shield = player_max_shield(player);
     }
 }
 
@@ -4544,7 +4561,7 @@ static void update_projectiles(float dt)
         Vector3 end = v_add(start, displacement);
 
         bool handled = false;
-        for (int j = 0; j < 2; ++j) {
+        for (int j = 0; j < activePlayers; ++j) {
             Player *pl = &players[j];
             Vector3 box_min = {
                 pl->pos.x - PLAYER_SIZE * 0.5f,
@@ -4699,7 +4716,7 @@ static void handle_pbd_projectile_hits(void)
             continue;
         }
         bool removed = false;
-        for (int j = 0; j < 2; ++j) {
+        for (int j = 0; j < activePlayers; ++j) {
             if (v->owner == j) {
                 continue;
             }
@@ -6870,7 +6887,7 @@ static void solve_particle_collisions(float dt) {
             pos.z = clampf(pos.z, -terrain_limit, terrain_limit);
 
             // Interactions with player bounding boxes (kept for gameplay parity).
-            for (int player_idx = 0; player_idx < 2; ++player_idx) {
+            for (int player_idx = 0; player_idx < activePlayers; ++player_idx) {
                 Player *pl = &players[player_idx];
                 Vector3 box_min = {
                     pl->pos.x - half_player,
@@ -7496,6 +7513,77 @@ static const char *bullet_type_symbol(int type) {
         case 2: return "+";
         default: return "?";
     }
+}
+
+static int clamp_active_players(int count) {
+    if (count < 1) {
+        return 1;
+    }
+    if (count > MAX_PLAYERS) {
+        return MAX_PLAYERS;
+    }
+    return count;
+}
+
+static bool keyboard_player_index(int index) {
+    return index == 0 || index == 1;
+}
+
+static void get_view_layout(int player_count, int *w, int *h) {
+    if (player_count <= 1) {
+        *w = SCREEN_WIDTH;
+        *h = SCREEN_HEIGHT;
+    } else if (player_count == 2) {
+        *w = SCREEN_WIDTH / 2;
+        *h = SCREEN_HEIGHT;
+    } else {
+        *w = SCREEN_WIDTH / 2;
+        *h = SCREEN_HEIGHT / 2;
+    }
+}
+
+static void get_viewport(int index, int player_count, int *x, int *y, int *w, int *h) {
+    get_view_layout(player_count, w, h);
+    if (player_count <= 1) {
+        *x = 0;
+        *y = 0;
+    } else if (player_count == 2) {
+        *x = index * (*w);
+        *y = 0;
+    } else {
+        *x = (index % 2) * (*w);
+        *y = (index / 2) * (*h);
+    }
+}
+
+static void ensure_render_targets(RenderTexture2D *screens,
+                                  int *current_players,
+                                  int *current_w,
+                                  int *current_h,
+                                  int player_count)
+{
+    int view_w = 0;
+    int view_h = 0;
+    get_view_layout(player_count, &view_w, &view_h);
+    if (player_count == *current_players &&
+        view_w == *current_w &&
+        view_h == *current_h) {
+        return;
+    }
+
+    for (int i = 0; i < *current_players; ++i) {
+        if (screens[i].id != 0) {
+            UnloadRenderTexture(screens[i]);
+        }
+        screens[i] = (RenderTexture2D){ 0 };
+    }
+
+    for (int i = 0; i < player_count; ++i) {
+        screens[i] = LoadRenderTexture(view_w, view_h);
+    }
+    *current_players = player_count;
+    *current_w = view_w;
+    *current_h = view_h;
 }
 
 static int player_max_health(const Player *p) {
@@ -8275,12 +8363,13 @@ static void DrawVoxels(Camera3D cam) {
 }
 
 static void draw_players(void) {
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < activePlayers; i++) {
         Player *p = &players[i];
         DrawCube(p->pos, PLAYER_SIZE,PLAYER_SIZE, PLAYER_SIZE, BLACK);
         DrawCubeWires(p->pos, PLAYER_SIZE,PLAYER_SIZE,PLAYER_SIZE, BLACK);
         if (p->shield > 0) {
-            float shield_percentage = (float)p->shield / BASE_SHIELD;
+            int max_shield = player_max_shield(p);
+            float shield_percentage = (float)p->shield / (float)max_shield;
             float fluctuation = (1.0f - shield_percentage) * 100.0f;
             Color shield_color = {
                 (unsigned char)randomInRange(0, fluctuation),
@@ -8295,6 +8384,9 @@ static void draw_players(void) {
 }
 
 static void HandleKeyboardInput(int i, float dt) {
+    if (!keyboard_player_index(i)) {
+        return;
+    }
     Player *p = &players[i];
     // turn
     float yaw_accel = 0.0f;
@@ -8460,9 +8552,10 @@ int main(void) {
     // reset game state
     ResetGame();
     // prepare split-screen render textures
-    RenderTexture2D screen0 = LoadRenderTexture(SCREEN_WIDTH/2, SCREEN_HEIGHT);
-    RenderTexture2D screen1 = LoadRenderTexture(SCREEN_WIDTH/2, SCREEN_HEIGHT);
-    Rectangle screenRec = { 0, 0, (float)screen0.texture.width, (float)-screen0.texture.height };
+    RenderTexture2D screens[MAX_PLAYERS] = { 0 };
+    int renderPlayers = 0;
+    int renderW = 0;
+    int renderH = 0;
     // main loop
     while (!WindowShouldClose()) {
         switch (gameState) {
@@ -8484,25 +8577,38 @@ int main(void) {
                 break;
             case GAME_STATE_PLAYING:
         float dt = GetFrameTime();
-        // input: shooting and jump
-        if (playerInput[0] == INPUT_TYPE_KEYBOARD && IsKeyPressed(KEY_LEFT_CONTROL))  FireVoxel(0);
-        if (playerInput[0] == INPUT_TYPE_GAMEPAD && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_TRIGGER_2)) FireVoxel(0);
-        if (playerInput[1] == INPUT_TYPE_KEYBOARD && IsKeyPressed(KEY_RIGHT_CONTROL)) FireVoxel(1);
-        if (playerInput[1] == INPUT_TYPE_GAMEPAD && IsGamepadButtonPressed(1, GAMEPAD_BUTTON_RIGHT_TRIGGER_2)) FireVoxel(1);
-
-        if (IsKeyPressed(KEY_Q)) players[0].vType = (players[0].vType + 1) % 3;
-        if (IsKeyPressed(KEY_U)) players[0].vType = (players[0].vType + 1) % 3;
-        if (playerInput[0] == INPUT_TYPE_GAMEPAD && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_TRIGGER_1)) {
-            players[0].vType = (players[0].vType + 1) % 3;
+        // input: shooting, bullet type, jump
+        for (int i = 0; i < activePlayers; ++i) {
+            if (playerInput[i] == INPUT_TYPE_GAMEPAD) {
+                if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_RIGHT_TRIGGER_2)) {
+                    FireVoxel(i);
+                }
+                if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_LEFT_TRIGGER_1)) {
+                    players[i].vType = (players[i].vType + 1) % 3;
+                }
+                if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_RIGHT_FACE_DOWN) && players[i].onGround) {
+                    players[i].vel.y = JUMP_SPEED;
+                    players[i].onGround = false;
+                }
+            }
         }
-        if (playerInput[1] == INPUT_TYPE_GAMEPAD && IsGamepadButtonPressed(1, GAMEPAD_BUTTON_LEFT_TRIGGER_1)) {
-            players[1].vType = (players[1].vType + 1) % 3;
-        }
 
-        if (playerInput[0] == INPUT_TYPE_KEYBOARD && IsKeyPressed(KEY_SPACE) && players[0].onGround) { players[0].vel.y = JUMP_SPEED; players[0].onGround = false; }
-        if (playerInput[0] == INPUT_TYPE_GAMEPAD && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN) && players[0].onGround) { players[0].vel.y = JUMP_SPEED; players[0].onGround = false; }
-        if (playerInput[1] == INPUT_TYPE_KEYBOARD && IsKeyPressed(KEY_RIGHT_SHIFT) && players[1].onGround) { players[1].vel.y = JUMP_SPEED; players[1].onGround = false; }
-        if (playerInput[1] == INPUT_TYPE_GAMEPAD && IsGamepadButtonPressed(1, GAMEPAD_BUTTON_RIGHT_FACE_DOWN) && players[1].onGround) { players[1].vel.y = JUMP_SPEED; players[1].onGround = false; }
+        if (playerInput[0] == INPUT_TYPE_KEYBOARD) {
+            if (IsKeyPressed(KEY_LEFT_CONTROL))  FireVoxel(0);
+            if (IsKeyPressed(KEY_Q)) players[0].vType = (players[0].vType + 1) % 3;
+            if (IsKeyPressed(KEY_SPACE) && players[0].onGround) {
+                players[0].vel.y = JUMP_SPEED;
+                players[0].onGround = false;
+            }
+        }
+        if (playerInput[1] == INPUT_TYPE_KEYBOARD) {
+            if (IsKeyPressed(KEY_RIGHT_CONTROL)) FireVoxel(1);
+            if (IsKeyPressed(KEY_U)) players[1].vType = (players[1].vType + 1) % 3;
+            if (IsKeyPressed(KEY_RIGHT_SHIFT) && players[1].onGround) {
+                players[1].vel.y = JUMP_SPEED;
+                players[1].onGround = false;
+            }
+        }
 
         if (IsKeyPressed(KEY_P)) {
             gameState = GAME_STATE_PAUSED;
@@ -8522,19 +8628,20 @@ int main(void) {
         }
 
         // Shield regeneration
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < activePlayers; i++) {
             if ((float)GetTime() - players[i].last_damage_time > SHIELD_REGEN_DELAY) {
-                if (players[i].shield < BASE_SHIELD) {
+                int max_shield = player_max_shield(&players[i]);
+                if (players[i].shield < max_shield) {
                     players[i].shield += 1; // Regenerate 1 shield point per frame
                 }
-                if (players[i].shield > BASE_SHIELD) {
-                    players[i].shield = BASE_SHIELD;
+                if (players[i].shield > max_shield) {
+                    players[i].shield = max_shield;
                 }
             }
         }
 
         // update players
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < activePlayers; i++) {
             if (playerInput[i] == INPUT_TYPE_KEYBOARD) {
                 HandleKeyboardInput(i, dt);
             } else if (playerInput[i] == INPUT_TYPE_GAMEPAD) {
@@ -8654,62 +8761,53 @@ int main(void) {
         // }
 
 
-        // setup cameras
-        Camera3D cam0 = {0}, cam1 = {0};
-        cam0.up = cam1.up = (Vector3){0,1,0};
-        cam0.fovy = cam1.fovy = 60;
-        cam0.projection = cam1.projection = CAMERA_PERSPECTIVE;
-        // camera 0
-        cam0.position = players[0].pos;
-        {
-            float yr = DEG2RAD*players[0].yaw, pr = DEG2RAD*players[0].pitch;
-            cam0.target = v_add(players[0].pos, (Vector3){ sinf(-yr)*cosf(pr), sinf(pr), -cosf(yr)*cosf(pr) });
+        activePlayers = clamp_active_players(activePlayers);
+        ensure_render_targets(screens, &renderPlayers, &renderW, &renderH, activePlayers);
+        Rectangle screenRec = { 0, 0, (float)renderW, (float)-renderH };
+
+        Camera3D cams[MAX_PLAYERS] = { 0 };
+        for (int i = 0; i < activePlayers; ++i) {
+            cams[i].up = (Vector3){0,1,0};
+            cams[i].fovy = 60;
+            cams[i].projection = CAMERA_PERSPECTIVE;
+            cams[i].position = players[i].pos;
+            float yr = DEG2RAD*players[i].yaw, pr = DEG2RAD*players[i].pitch;
+            cams[i].target = v_add(players[i].pos, (Vector3){ sinf(-yr)*cosf(pr), sinf(pr), -cosf(yr)*cosf(pr) });
         }
-        // camera 1
-        cam1.position = players[1].pos;
-        {
-            float yr = DEG2RAD*players[1].yaw, pr = DEG2RAD*players[1].pitch;
-            cam1.target = v_add(players[1].pos, (Vector3){ sinf(-yr)*cosf(pr), sinf(pr), -cosf(yr)*cosf(pr) });
+
+        for (int i = 0; i < activePlayers; ++i) {
+            BeginTextureMode(screens[i]);
+                ClearBackground(SKYBLUE);
+                BeginMode3D(cams[i]);
+                    DrawPlane((Vector3){0,0,0}, (Vector2){FLOOR_SIZE*2, FLOOR_SIZE*2}, DARKGRAY);
+                    DrawVoxels(cams[i]);
+                    draw_players();
+                EndMode3D();
+                int view_x = 0, view_y = 0, view_w = 0, view_h = 0;
+                get_viewport(i, activePlayers, &view_x, &view_y, &view_w, &view_h);
+                DrawRectangle(0, 0, view_w, HUD_BAR_HEIGHT, Fade(BLACK, 0.5f));
+                DrawText(TextFormat("P%d | Kills: %d Deaths: %d",
+                                    i + 1, players[i].kills, players[i].deaths),
+                         HUD_PADDING_X, HUD_PADDING_Y, HUD_FONT_SIZE, WHITE);
+                draw_hud_bars(&players[i], view_w, view_h);
+                DrawLine(view_w/2-10, view_h/2, view_w/2+10, view_h/2, WHITE);
+                DrawLine(view_w/2, view_h/2-10, view_w/2, view_h/2+10, WHITE);
+            EndTextureMode();
         }
-        // render to textures
-        BeginTextureMode(screen0);
-            ClearBackground(SKYBLUE);
-            BeginMode3D(cam0);
-                DrawPlane((Vector3){0,0,0}, (Vector2){FLOOR_SIZE*2, FLOOR_SIZE*2}, DARKGRAY);
-                DrawVoxels(cam0);
-                draw_players();
-            EndMode3D();
-            // UI p1
-            DrawRectangle(0, 0, SCREEN_WIDTH / 2, HUD_BAR_HEIGHT, Fade(BLACK, 0.5f));
-            DrawText(TextFormat("P1 | Kills: %d Deaths: %d",
-                                players[0].kills, players[0].deaths),
-                     HUD_PADDING_X, HUD_PADDING_Y, HUD_FONT_SIZE, WHITE);
-            draw_hud_bars(&players[0], SCREEN_WIDTH / 2, SCREEN_HEIGHT);
-            DrawLine(SCREEN_WIDTH/4-10, SCREEN_HEIGHT/2, SCREEN_WIDTH/4+10, SCREEN_HEIGHT/2, WHITE);
-            DrawLine(SCREEN_WIDTH/4, SCREEN_HEIGHT/2-10, SCREEN_WIDTH/4, SCREEN_HEIGHT/2+10, WHITE);
-        EndTextureMode();
-        BeginTextureMode(screen1);
-            ClearBackground(SKYBLUE);
-            BeginMode3D(cam1);
-                DrawPlane((Vector3){0,0,0}, (Vector2){FLOOR_SIZE*2, FLOOR_SIZE*2}, DARKGRAY);
-                DrawVoxels(cam1);
-                draw_players();
-            EndMode3D();
-            // UI p2
-            DrawRectangle(0, 0, SCREEN_WIDTH / 2, HUD_BAR_HEIGHT, Fade(BLACK, 0.5f));
-            DrawText(TextFormat("P2 | Kills: %d Deaths: %d",
-                                players[1].kills, players[1].deaths),
-                     HUD_PADDING_X, HUD_PADDING_Y, HUD_FONT_SIZE, WHITE);
-            draw_hud_bars(&players[1], SCREEN_WIDTH / 2, SCREEN_HEIGHT);
-            DrawLine(SCREEN_WIDTH/4-10, SCREEN_HEIGHT/2, SCREEN_WIDTH/4+10, SCREEN_HEIGHT/2, WHITE);
-            DrawLine(SCREEN_WIDTH/4, SCREEN_HEIGHT/2-10, SCREEN_WIDTH/4, SCREEN_HEIGHT/2+10, WHITE);
-        EndTextureMode();
-        // draw both splits
+
         BeginDrawing();
             ClearBackground(BLACK);
-            DrawTextureRec(screen0.texture, screenRec, (Vector2){0,0}, WHITE);
-            DrawTextureRec(screen1.texture, screenRec, (Vector2){SCREEN_WIDTH/2,0}, WHITE);
-            DrawRectangle(SCREEN_WIDTH/2-2, 0, 4, SCREEN_HEIGHT, LIGHTGRAY);
+            for (int i = 0; i < activePlayers; ++i) {
+                int view_x = 0, view_y = 0, view_w = 0, view_h = 0;
+                get_viewport(i, activePlayers, &view_x, &view_y, &view_w, &view_h);
+                DrawTextureRec(screens[i].texture, screenRec, (Vector2){(float)view_x, (float)view_y}, WHITE);
+            }
+            if (activePlayers == 2) {
+                DrawRectangle(SCREEN_WIDTH/2-2, 0, 4, SCREEN_HEIGHT, LIGHTGRAY);
+            } else if (activePlayers > 2) {
+                DrawRectangle(SCREEN_WIDTH/2-2, 0, 4, SCREEN_HEIGHT, LIGHTGRAY);
+                DrawRectangle(0, SCREEN_HEIGHT/2-2, SCREEN_WIDTH, 4, LIGHTGRAY);
+            }
             // particle debug text removed
         EndDrawing();
         break;
@@ -8734,11 +8832,14 @@ int main(void) {
                 BeginDrawing();
                     ClearBackground(RAYWHITE);
                     DrawText("Settings", SCREEN_WIDTH / 2 - MeasureText("Settings", 40) / 2, 100, 40, BLACK);
-                    DrawText(TextFormat("Player 1 Input: %s", playerInput[0] == INPUT_TYPE_KEYBOARD ? "Keyboard" : "Gamepad"), 100, 200, 20, DARKGRAY);
+                    DrawText(TextFormat("Active Players: %d", activePlayers), 100, 170, 20, DARKGRAY);
+                    DrawText(TextFormat("Player 1 Input: %s", playerInput[0] == INPUT_TYPE_KEYBOARD ? "Keyboard" : "Gamepad"), 100, 220, 20, DARKGRAY);
                     DrawText(TextFormat("Player 2 Input: %s", playerInput[1] == INPUT_TYPE_KEYBOARD ? "Keyboard" : "Gamepad"), 100, 250, 20, DARKGRAY);
-                    DrawText("Press 1 to toggle Player 1 input", 100, 350, 20, DARKGRAY);
-                    DrawText("Press 2 to toggle Player 2 input", 100, 400, 20, DARKGRAY);
-                    DrawText("Press M to return to Main Menu", 100, 500, 20, DARKGRAY);
+                    DrawText(TextFormat("Player 3 Input: %s", playerInput[2] == INPUT_TYPE_KEYBOARD ? "Keyboard" : "Gamepad"), 100, 280, 20, DARKGRAY);
+                    DrawText(TextFormat("Player 4 Input: %s", playerInput[3] == INPUT_TYPE_KEYBOARD ? "Keyboard" : "Gamepad"), 100, 310, 20, DARKGRAY);
+                    DrawText("Press +/- to change active player count", 100, 360, 20, DARKGRAY);
+                    DrawText("Press 1-4 to toggle player input", 100, 390, 20, DARKGRAY);
+                    DrawText("Press M to return to Main Menu", 100, 440, 20, DARKGRAY);
                 EndDrawing();
 
                 if (IsKeyPressed(KEY_ONE)) {
@@ -8746,6 +8847,18 @@ int main(void) {
                 }
                 if (IsKeyPressed(KEY_TWO)) {
                     playerInput[1] = 1 - playerInput[1];
+                }
+                if (IsKeyPressed(KEY_THREE)) {
+                    playerInput[2] = 1 - playerInput[2];
+                }
+                if (IsKeyPressed(KEY_FOUR)) {
+                    playerInput[3] = 1 - playerInput[3];
+                }
+                if (IsKeyPressed(KEY_EQUAL) || IsKeyPressed(KEY_KP_ADD)) {
+                    activePlayers = clamp_active_players(activePlayers + 1);
+                }
+                if (IsKeyPressed(KEY_MINUS) || IsKeyPressed(KEY_KP_SUBTRACT)) {
+                    activePlayers = clamp_active_players(activePlayers - 1);
                 }
                 if (IsKeyPressed(KEY_M)) {
                     gameState = GAME_STATE_MENU;
@@ -8755,8 +8868,11 @@ int main(void) {
         }
     }
     // cleanup
-    UnloadRenderTexture(screen0);
-    UnloadRenderTexture(screen1);
+    for (int i = 0; i < renderPlayers; ++i) {
+        if (screens[i].id != 0) {
+            UnloadRenderTexture(screens[i]);
+        }
+    }
     if (greedyMesh.vertices) {
         UnloadMesh(greedyMesh);
         greedyMesh = (Mesh){ 0 };
