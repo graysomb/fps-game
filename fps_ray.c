@@ -66,6 +66,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define FREEZE_PROPAGATION_ATTENUATION 1.0f
 #define FREEZE_PROPAGATION_EPSILON 1e-6f
 #define FREEZE_PATH_DECAY 0.85f
+#define FREEZE_OVERHANG_DECAY 0.7f
 #define ACTIVATION_VELOCITY_WEIGHT 0.6f
 #define ACTIVATION_VELOCITY_REF_SPEED 6.0f
 #define ACTIVATION_STRAIN_WEIGHT   0.1f
@@ -83,8 +84,8 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define MAX_STATIC_COLLISION_NEIGHBORS 64
 #define PLAYER_SIZE 0.5f
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
-#define VGS_ALPHA 0.75f
-#define VGS_BETA 0.35f
+#define VGS_ALPHA 0.65f
+#define VGS_BETA 0.45f
 #define VGS_ITERS 6
 #define VGS_EPS 1e-6f
 #define VGS_EARLY_OUT_EPS 0.0002f
@@ -103,7 +104,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 //#define GLUE_EPS 1e-6f
 #define GLUE_EPS 0.0002f
 #define GLUE_BREAK_STRAIN 0.2f
-#define GLUE_BREAK_HINGE_ANGLE_DEG 10.0f
+#define GLUE_BREAK_HINGE_ANGLE_DEG 5.0f
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 30
 #define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
 #define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
@@ -244,6 +245,7 @@ static bool dynamicGlueClustersInitialized = false;
 static int debugTagOffset[DEBUG_CLUSTER_TAG_MAX][3];
 static float freezeBeliefScratch[MAX_VOXELS];
 static int freezeDistance[MAX_VOXELS];
+static int overhangDistance[MAX_VOXELS];
 static uint8_t freezeBoundaryFlags[MAX_VOXELS];
 static uint8_t staticBeliefDirty[MAX_VOXELS];
 static int staticBeliefDirtyList[MAX_VOXELS];
@@ -3580,6 +3582,7 @@ static void recompute_static_freeze_beliefs_path_length(void)
             freezeBeliefScratch[i] = 0.0f;
             freezeBoundaryFlags[i] = 0;
             freezeDistance[i] = INT_MAX;
+            overhangDistance[i] = INT_MAX;
             continue;
         }
 
@@ -3601,6 +3604,7 @@ static void recompute_static_freeze_beliefs_path_length(void)
         } else {
             freezeDistance[i] = INT_MAX;
         }
+        overhangDistance[i] = INT_MAX;
     }
 
     while (head < tail) {
@@ -3632,6 +3636,57 @@ static void recompute_static_freeze_beliefs_path_length(void)
         }
     }
 
+    head = 0;
+    tail = 0;
+    for (int i = 0; i < voxel_count; ++i) {
+        if (voxels[i].simulate) {
+            continue;
+        }
+        bool touchesGround = (freezeBoundaryFlags[i] & 1u) != 0;
+        bool hasBelow = (voxels[i].supportMask & (1u << 3)) != 0;
+        if (touchesGround || hasBelow) {
+            continue;
+        }
+        overhangDistance[i] = 0;
+        if (tail < MAX_VOXELS) {
+            queue[tail++] = i;
+        }
+    }
+
+    while (head < tail) {
+        int idx = queue[head++];
+        if (idx < 0 || idx >= voxel_count) {
+            continue;
+        }
+        const Voxel *voxel = &voxels[idx];
+        if (voxel->simulate) {
+            continue;
+        }
+        int neighbors[MAX_STATIC_COLLISION_NEIGHBORS];
+        int neighborCount = gather_static_face_neighbors(voxel, neighbors, MAX_STATIC_COLLISION_NEIGHBORS);
+        for (int n = 0; n < neighborCount; ++n) {
+            int nidx = neighbors[n];
+            if (nidx < 0 || nidx >= voxel_count) {
+                continue;
+            }
+            if (voxels[nidx].simulate) {
+                continue;
+            }
+            bool touchesGround = (freezeBoundaryFlags[nidx] & 1u) != 0;
+            bool hasBelow = (voxels[nidx].supportMask & (1u << 3)) != 0;
+            if (touchesGround || hasBelow) {
+                continue;
+            }
+            int nextDist = overhangDistance[idx] + 1;
+            if (nextDist < overhangDistance[nidx]) {
+                overhangDistance[nidx] = nextDist;
+                if (tail < MAX_VOXELS) {
+                    queue[tail++] = nidx;
+                }
+            }
+        }
+    }
+
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
         if (voxel->simulate) {
@@ -3641,6 +3696,10 @@ static void recompute_static_freeze_beliefs_path_length(void)
             voxel->freezeBelief = 0.0f;
         } else {
             voxel->freezeBelief = powf(FREEZE_PATH_DECAY, (float)freezeDistance[i]);
+        }
+        if (overhangDistance[i] != INT_MAX) {
+            voxel->freezeBelief *= powf(FREEZE_OVERHANG_DECAY,
+                                        (float)(overhangDistance[i] + 1));
         }
         freezeBeliefScratch[i] = voxel->freezeBelief;
     }
