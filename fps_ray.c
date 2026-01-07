@@ -155,6 +155,7 @@ typedef struct {
     bool onGround;
     int vType;
     int kills;
+    int debrisKills;
     int deaths;
     float kd_ratio;
     int health;
@@ -163,6 +164,7 @@ typedef struct {
 } Player;
 static Player players[MAX_PLAYERS];
 static int activePlayers = 2;
+static bool randomSpawnEnabled = true;
 static const Vector3 playerSpawnPositions[MAX_PLAYERS] = {
     { 0.0f,  BASE_EYE_HEIGHT, -9.0f },
     { 0.0f,  BASE_EYE_HEIGHT,  9.0f },
@@ -191,6 +193,7 @@ typedef struct {
     Color color;
     int type;
     int owner;
+    int activator;
     /* Visible faces mask: surface[i]=true if face i is visible:
        0=+X,1=-X,2=+Y,3=-Y,4=+Z,5=-Z */
     bool surface[6];
@@ -243,6 +246,7 @@ static bool staticBeliefsInitialized = false;
 static bool staticBeliefsForceFullRefresh = false;
 static const int DEBUG_SPAN2_FACE_LOG_INIT = 32;
 static int debugSpan2FaceLogBudget = 0;
+static int debugSmushLogBudget = 0;
 static bool debugLogSpan2Faces = false;
 static Voxel recycleQueue[MAX_VOXELS];
 static int recycleQueueHead = 0;
@@ -267,6 +271,7 @@ typedef struct {
     bool fixed;
     int voxelIndex;
     int debugTag;
+    int activator;
 } UnitVoxelSeed;
 
 typedef struct {
@@ -325,7 +330,7 @@ static bool unit_voxel_buffer_push(UnitVoxelBuffer *buffer,
                                    int gx, int gy, int gz,
                                    Color color, int type,
                                    bool fixed, int voxelIndex,
-                                   int debugTag)
+                                   int debugTag, int activator)
 {
     if (!buffer || buffer->count >= MAX_VOXELS) {
         return false;
@@ -338,7 +343,8 @@ static bool unit_voxel_buffer_push(UnitVoxelBuffer *buffer,
         .type = type,
         .fixed = fixed,
         .voxelIndex = voxelIndex,
-        .debugTag = debugTag
+        .debugTag = debugTag,
+        .activator = activator
     };
     return true;
 }
@@ -389,6 +395,12 @@ static bool debugLogVoxelRecycle = false;
 static bool debugLogActivationFailures = true;
 static bool debugLogRestoreFailures = true;
 static bool debugLogVoxelBlowup = true;
+static bool debugLogSmush = true;
+static bool debugLogSmushSpawns = false;
+static bool debugLogSmushHits = false;
+static bool debugLogSmushDeaths = false;
+static bool debugLogMultiscale = false;
+static bool debugLogRestoreClusters = false;
 static int debugBlowupLogBudget = 0;
 static bool debugLogClusterBreaksOnly = true;
 static int debugGlueBuildLogBudget = 0;
@@ -397,7 +409,7 @@ static int debugGlueBreakLogBudget = 0;
 static const int DEBUG_GLUE_BUILD_LOG_INIT = 64;
 static const int DEBUG_GLUE_SOLVE_LOG_INIT = 64;
 static const int DEBUG_GLUE_BREAK_LOG_INIT = 16;
-static bool debugLogActivation = true;
+static bool debugLogActivation = false;
 static const int DEBUG_ACTIVATION_LOG_INIT = 64;
 static int activationGlueLogBudget = 0;
 static int activationLogStart = -1;
@@ -407,6 +419,7 @@ static FILE *debugLogFile = NULL;
 static int debugSupportLogBudget = 512;
 static const float DEBUG_FALL_LOG_THRESHOLD = -5.0f;
 static const int DEBUG_FALL_LOG_BUDGET = 32;
+static bool debugLogFall = false;
 static unsigned char debugTagBreakLogged[DEBUG_CLUSTER_TAG_MAX];
 
 static const char *trace_level_label(int level) {
@@ -478,6 +491,12 @@ static bool debug_should_log_message(const char *text) {
         return true;
     }
     if (strstr(text, "[DynamicVoxel]")) {
+        return true;
+    }
+    if (strstr(text, "[Smush]")) {
+        return true;
+    }
+    if (text[0] == '[') {
         return true;
     }
     if (strstr(text, "Logging TraceLog output to")) {
@@ -2240,6 +2259,7 @@ static void init_voxel_struct(Voxel *v,
     v->color = color;
     v->type = type;
     v->owner = owner;
+    v->activator = -1;
     memset(v->surface, 0, sizeof v->surface);
     v->min_gx = v->min_gy = v->min_gz = INT_MAX;
     v->max_gx = v->max_gy = v->max_gz = INT_MIN;
@@ -2425,12 +2445,14 @@ static int emit_multiscale_voxels_from_units(const UnitVoxelBuffer *buffer,
     Color *color_grid = (Color *)malloc(cell_count * sizeof(Color));
     int *type_grid = (int *)malloc(cell_count * sizeof(int));
     int *tag_grid = (int *)malloc(cell_count * sizeof(int));
-    if (!occupied || !consumed || !color_grid || !type_grid || !tag_grid) {
+    int *activator_grid = (int *)malloc(cell_count * sizeof(int));
+    if (!occupied || !consumed || !color_grid || !type_grid || !tag_grid || !activator_grid) {
         free(occupied);
         free(consumed);
         free(color_grid);
         free(type_grid);
         free(tag_grid);
+        free(activator_grid);
         TraceLog(LOG_WARNING, "[Multiscale] Failed to allocate voxel mask (%dx%dx%d)", dimx, dimy, dimz);
         return 0;
     }
@@ -2446,6 +2468,7 @@ static int emit_multiscale_voxels_from_units(const UnitVoxelBuffer *buffer,
         color_grid[idx] = seed->color;
         type_grid[idx] = (type_override >= 0) ? type_override : seed->type;
         tag_grid[idx] = seed->debugTag;
+        activator_grid[idx] = seed->activator;
     }
 
     int spawned = 0;
@@ -2461,6 +2484,7 @@ static int emit_multiscale_voxels_from_units(const UnitVoxelBuffer *buffer,
                 Color color = color_grid[cell_idx];
                 int spawn_type = type_grid[cell_idx];
                 int spawn_tag = tag_grid[cell_idx];
+                int spawn_activator = activator_grid[cell_idx];
 
                 for (int dz = 0; dz < span; ++dz) {
                     for (int dy = 0; dy < span; ++dy) {
@@ -2481,14 +2505,29 @@ static int emit_multiscale_voxels_from_units(const UnitVoxelBuffer *buffer,
                 int new_idx = addVoxelSized(px, py, pz, fixed, simulate, color, spawn_type, span);
                 if (new_idx >= 0) {
                     voxels[new_idx].debugClusterTag = spawn_tag;
+                    voxels[new_idx].activator = spawn_activator;
+                    if (debugLogSmush && debugLogSmushSpawns &&
+                        spawn_activator >= 0 && debugSmushLogBudget > 0) {
+                        TraceLog(LOG_INFO,
+                                 "[Smush] spawn dynamic voxel=%d span=%d activator=%d",
+                                 new_idx, span, spawn_activator);
+                        --debugSmushLogBudget;
+                    }
+                } else if (debugLogSmush && debugLogSmushSpawns && debugSmushLogBudget > 0) {
+                    TraceLog(LOG_INFO,
+                             "[Smush] spawn failed span=%d activator=%d",
+                             span, spawn_activator);
+                    --debugSmushLogBudget;
                 }
-                TraceLog(LOG_INFO,
-                         "[Multiscale] Emit span=%d grid=(%d..%d,%d..%d,%d..%d) pos=(%.2f,%.2f,%.2f)",
-                         span,
-                         gx, gx + span - 1,
-                         gy, gy + span - 1,
-                         gz, gz + span - 1,
-                         px, py, pz);
+                if (debugLogMultiscale) {
+                    TraceLog(LOG_INFO,
+                             "[Multiscale] Emit span=%d grid=(%d..%d,%d..%d,%d..%d) pos=(%.2f,%.2f,%.2f)",
+                             span,
+                             gx, gx + span - 1,
+                             gy, gy + span - 1,
+                             gz, gz + span - 1,
+                             px, py, pz);
+                }
                 ++spawned;
             }
         }
@@ -2499,10 +2538,13 @@ static int emit_multiscale_voxels_from_units(const UnitVoxelBuffer *buffer,
     free(color_grid);
     free(type_grid);
     free(tag_grid);
+    free(activator_grid);
 
-    TraceLog(LOG_INFO,
-             "[Multiscale] Converted %d unit voxels into %d span clusters",
-             buffer->count, spawned);
+    if (debugLogMultiscale) {
+        TraceLog(LOG_INFO,
+                 "[Multiscale] Converted %d unit voxels into %d span clusters",
+                 buffer->count, spawned);
+    }
     return spawned;
 }
 
@@ -2562,6 +2604,7 @@ static void remove_buffered_static_voxels(const UnitVoxelBuffer *buffer)
 }
 
 static bool activation_try_enqueue(int voxel_idx,
+                                   int activator,
                                    int center_gx, int center_gy, int center_gz,
                                    float radius_sq,
                                    UnitVoxelBuffer *buffer,
@@ -2594,7 +2637,7 @@ static bool activation_try_enqueue(int voxel_idx,
                                 candidate->gx, candidate->gy, candidate->gz,
                                 candidate->color, candidate->type,
                                 candidate->fixed, voxel_idx,
-                                candidate->debugClusterTag))
+                                candidate->debugClusterTag, activator))
     {
         candidate->pendingActivation = false;
         return false;
@@ -2607,6 +2650,7 @@ static bool activation_try_enqueue(int voxel_idx,
 }
 
 static int collect_static_activation_cluster(int seed_idx,
+                                             int activator,
                                              int center_gx, int center_gy, int center_gz,
                                              float seed_radius_sq,
                                              UnitVoxelBuffer *buffer)
@@ -2620,7 +2664,7 @@ static int collect_static_activation_cluster(int seed_idx,
     int tail = 0;
     int added = 0;
 
-    if (!activation_try_enqueue(seed_idx, center_gx, center_gy, center_gz,
+    if (!activation_try_enqueue(seed_idx, activator, center_gx, center_gy, center_gz,
                                 seed_radius_sq, buffer, queue, &tail))
     {
         return 0;
@@ -2651,7 +2695,7 @@ static int collect_static_activation_cluster(int seed_idx,
             if (neighbor_idx < 0) {
                 continue;
             }
-            if (activation_try_enqueue(neighbor_idx, center_gx, center_gy, center_gz,
+            if (activation_try_enqueue(neighbor_idx, activator, center_gx, center_gy, center_gz,
                                        seed_radius_sq, buffer, queue, &tail))
             {
                 added++;
@@ -2666,7 +2710,7 @@ static int collect_static_activation_cluster(int seed_idx,
 }
 
 static int expand_activation_cluster_unbounded(UnitVoxelBuffer *buffer, int startIndex,
-                                               float dynamicBelief)
+                                               float dynamicBelief, int activator)
 {
     if (!buffer) {
         return 0;
@@ -2719,7 +2763,7 @@ static int expand_activation_cluster_unbounded(UnitVoxelBuffer *buffer, int star
                     continue;
                 }
             }
-            if (activation_try_enqueue(neighbor_idx, 0, 0, 0,
+            if (activation_try_enqueue(neighbor_idx, activator, 0, 0, 0,
                                        -1.0f, buffer, queue, &tail))
             {
                 ++added;
@@ -2871,6 +2915,10 @@ static bool activate_static_voxels_near_dynamic(void)
         int center_gy = (int)floorf(dynamic->pos.y / VOXEL_SIZE);
         int center_gz = (int)floorf(dynamic->pos.z / VOXEL_SIZE);
 
+        int activator = dynamic->activator;
+        if (activator < 0) {
+            activator = dynamic->owner;
+        }
         for (int gz = center_gz - VOXEL_ACTIVATION_RADIUS;
              gz <= center_gz + VOXEL_ACTIVATION_RADIUS && buffer.count < VOXEL_ACTIVATION_UNIT_BUDGET;
              ++gz)
@@ -2901,7 +2949,7 @@ static bool activate_static_voxels_near_dynamic(void)
                     }
 
                     int previousCount = buffer.count;
-                    int added = collect_static_activation_cluster(idx,
+                    int added = collect_static_activation_cluster(idx, activator,
                                                                   center_gx, center_gy, center_gz,
                                                                   radius_sq,
                                                                   &buffer);
@@ -2915,7 +2963,7 @@ static bool activate_static_voxels_near_dynamic(void)
                         continue;
                     }
                     expand_activation_cluster_unbounded(&buffer, previousCount,
-                                                        dynamic->activationBelief);
+                                                        dynamic->activationBelief, activator);
                     if (buffer.count >= VOXEL_ACTIVATION_UNIT_BUDGET) {
                         break;
                     }
@@ -3873,7 +3921,7 @@ static void build_oblique_voxel_pyramid(UnitVoxelBuffer *buffer) {
 
         for (int gx = min_x; gx <= max_x; ++gx) {
             for (int gz = min_z; gz <= max_z; ++gz) {
-                if (!unit_voxel_buffer_push(buffer, gx, layer_y, gz, col, 0, true, -1, 0)) {
+                if (!unit_voxel_buffer_push(buffer, gx, layer_y, gz, col, 0, true, -1, 0, -1)) {
                     TraceLog(LOG_WARNING, "[Pyramid] Unit voxel buffer full");
                     return;
                 }
@@ -4125,13 +4173,13 @@ static void buildDemo(void) {
     // }
     // Floor
     int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
-    for (int x = 0; x <= M; x++) {
-        for (int z = 0; z <= M; z++) {
-            float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-            float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-            addVoxel(px, 0, pz, true, false, (Color){ 150, 150, 150, 255 }, 0);
-        }
-    } 
+    // for (int x = 0; x <= M; x++) {
+    //     for (int z = 0; z <= M; z++) {
+    //         float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    //         float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+    //         addVoxel(px, 0, pz, true, false, (Color){ 150, 150, 150, 255 }, 0);
+    //     }
+    // } 
 
     // // Pillars
     int pillar_height = 10; // 45 - 10
@@ -4146,7 +4194,7 @@ static void buildDemo(void) {
     for (int p = 0; p < 4; p++) {
         int cx = pillar_positions[p][0];
         int cz = pillar_positions[p][1];
-        for (int y = 1; y <= pillar_height; y++) {
+        for (int y = 0; y <= pillar_height; y++) {
             for (int dx = -pillar_radius; dx <= pillar_radius; dx++) {
                 for (int dz = -pillar_radius; dz <= pillar_radius; dz++) {
                     if (dx*dx + dz*dz > pillar_radius*pillar_radius) continue; // circular pillar
@@ -4178,7 +4226,7 @@ static void buildDemo(void) {
     // // // Platform legs: 2x2 columns at each corner down to the floor.
     int platform_min = M/2 - platform_size/2;
     int platform_max = M/2 + platform_size/2;
-    int leg_min_y = 1;
+    int leg_min_y = 0;
     int leg_max_y = platform_base_height;
     if (leg_max_y >= leg_min_y) {
         int leg_x[4] = { platform_min, platform_min, platform_max - 1, platform_max - 1 };
@@ -4253,6 +4301,7 @@ static void buildDemo(void) {
 
 static int first_voxel_hit(Ray ray, float t_max, int ignore_id);
 static void UpdateKdRatio(int player_index);
+static Vector3 pick_player_spawn(int player_index);
 static int brush_extent_for_voxel(const Voxel *v);
 static int player_max_health(const Player *p);
 static int player_max_shield(const Player *p);
@@ -4261,7 +4310,7 @@ static int player_max_shield(const Player *p);
 static void ResetGame(void) {
     // init players
     for (int i = 0; i < MAX_PLAYERS; i++) {
-        players[i].pos = playerSpawnPositions[i];
+        players[i].pos = pick_player_spawn(i);
         players[i].yaw = playerSpawnYaw[i];
         players[i].pitch = 0;
         players[i].yaw_vel = 0;
@@ -4270,6 +4319,7 @@ static void ResetGame(void) {
         players[i].onGround = true;
         players[i].vType = 0;
         players[i].kills = 0;
+        players[i].debrisKills = 0;
         players[i].deaths = 0;
         UpdateKdRatio(i);
         players[i].health = BASE_HEALTH;
@@ -4300,7 +4350,8 @@ static void UpdateKdRatio(int player_index) {
     p->kd_ratio = (float)(p->kills + 1) / (p->deaths + 1);
 }
 
-static void apply_damage_to_player(int player_index, int attacker_index, int damage)
+static void apply_damage_to_player(int player_index, int attacker_index, int damage,
+                                   bool award_kill, bool award_debris)
 {
     if (player_index < 0 || player_index >= activePlayers) {
         return;
@@ -4318,13 +4369,30 @@ static void apply_damage_to_player(int player_index, int attacker_index, int dam
     }
 
     if (player->health <= 0) {
-        if (attacker_index >= 0 && attacker_index < activePlayers && attacker_index != player_index) {
-            players[attacker_index].kills++;
-            player->deaths++;
-            UpdateKdRatio(attacker_index);
-            UpdateKdRatio(player_index);
+        if (debugLogSmush && debugLogSmushDeaths) {
+            TraceLog(LOG_WARNING,
+                     "[Smush] death victim=%d attacker=%d awardKill=%d awardDebris=%d hp=%d shield=%d",
+                     player_index, attacker_index,
+                     award_kill ? 1 : 0, award_debris ? 1 : 0,
+                     player->health, player->shield);
         }
-        player->pos = (Vector3){ randomInRange(-9, 9), BASE_EYE_HEIGHT, randomInRange(-9, 9) };
+        player->deaths++;
+        UpdateKdRatio(player_index);
+        if (attacker_index >= 0 && attacker_index < activePlayers && attacker_index != player_index) {
+            if (award_kill) {
+                players[attacker_index].kills++;
+                UpdateKdRatio(attacker_index);
+            }
+            if (award_debris) {
+                players[attacker_index].debrisKills++;
+                if (debugLogSmush && debugLogSmushDeaths) {
+                    TraceLog(LOG_INFO,
+                             "[Smush] credit attacker=%d victim=%d debrisKills=%d",
+                             attacker_index, player_index, players[attacker_index].debrisKills);
+                }
+            }
+        }
+        player->pos = pick_player_spawn(player_index);
         player->vel = (Vector3){ 0, 0, 0 };
         player->onGround = true;
         if (player_index >= 0 && player_index < MAX_PLAYERS) {
@@ -4338,7 +4406,8 @@ static void apply_damage_to_player(int player_index, int attacker_index, int dam
 
 static bool activate_static_neighbors_of_region(int minx, int maxx,
                                                 int miny, int maxy,
-                                                int minz, int maxz)
+                                                int minz, int maxz,
+                                                int activator)
 {
     UnitVoxelBuffer buffer = { 0 };
     unit_voxel_buffer_clear(&buffer);
@@ -4375,7 +4444,7 @@ static bool activate_static_neighbors_of_region(int minx, int maxx,
                                             candidate->gx, candidate->gy, candidate->gz,
                                             candidate->color, candidate->type,
                                             candidate->fixed, idx,
-                                            candidate->debugClusterTag))
+                                            candidate->debugClusterTag, activator))
                 {
                     candidate->pendingActivation = false;
                     break;
@@ -4389,7 +4458,16 @@ static bool activate_static_neighbors_of_region(int minx, int maxx,
     }
 
     remove_buffered_static_voxels(&buffer);
+    if (debugLogSmush) {
+        debugSmushLogBudget = 32;
+    }
     emit_multiscale_voxels_from_units(&buffer, false, true, -1);
+    if (debugLogSmush && debugSmushLogBudget > 0) {
+        TraceLog(LOG_INFO,
+                 "[Smush] activated units=%d activator=%d region=(%d..%d,%d..%d,%d..%d)",
+                 buffer.count, activator, minx, maxx, miny, maxy, minz, maxz);
+        --debugSmushLogBudget;
+    }
     return true;
 }
 
@@ -4539,6 +4617,9 @@ static void physics_step(float dt) {    // Rebuild spatial hash
 
 static void update_projectiles(float dt)
 {
+    if (debugLogSmush) {
+        debugSmushLogBudget = 32;
+    }
     bool static_changed = false;
     int i = 0;
     while (i < voxel_count) {
@@ -4575,7 +4656,7 @@ static void update_projectiles(float dt)
                 pl->pos.z + PLAYER_SIZE * 0.5f
             };
             if (segment_intersects_aabb(start, end, box_min, box_max)) {
-                apply_damage_to_player(j, v->owner, VOXEL_DAMAGE);
+                apply_damage_to_player(j, v->owner, VOXEL_DAMAGE, true, false);
                 remove_voxel_index(i);
                 handled = true;
                 break;
@@ -4637,7 +4718,11 @@ static void update_projectiles(float dt)
                 }
 
                 if (v->type != 1 && v->type != 2) {
-                    if (activate_static_neighbors_of_region(minx, maxx, miny, maxy, minz, maxz)) {
+                    int activator = v->activator;
+                    if (activator < 0) {
+                        activator = v->owner;
+                    }
+                    if (activate_static_neighbors_of_region(minx, maxx, miny, maxy, minz, maxz, activator)) {
                         static_changed = true;
                     }
                 }
@@ -4707,8 +4792,40 @@ static void update_projectiles(float dt)
     }
 }
 
+static int resolve_smush_activator(int voxel_idx)
+{
+    if (voxel_idx < 0 || voxel_idx >= voxel_count) {
+        return -1;
+    }
+    Voxel *voxel = &voxels[voxel_idx];
+    if (voxel->activator >= 0) {
+        return voxel->activator;
+    }
+    if (voxel->owner >= 0) {
+        return voxel->owner;
+    }
+    int cluster_count = build_glue_cluster_indices(voxel_idx, glueClusterIndices);
+    for (int c = 0; c < cluster_count; ++c) {
+        int idx = glueClusterIndices[c];
+        if (idx < 0 || idx >= voxel_count) {
+            continue;
+        }
+        Voxel *member = &voxels[idx];
+        if (member->activator >= 0) {
+            return member->activator;
+        }
+        if (member->owner >= 0) {
+            return member->owner;
+        }
+    }
+    return -1;
+}
+
 static void handle_pbd_projectile_hits(void)
 {
+    if (debugLogSmush) {
+        debugSmushLogBudget = 32;
+    }
     int i = 0;
     while (i < voxel_count) {
         Voxel *v = &voxels[i];
@@ -4725,7 +4842,29 @@ static void handle_pbd_projectile_hits(void)
             float dy = v->pos.y - players[j].pos.y;
             float dz = v->pos.z - players[j].pos.z;
             if (fabsf(dx) < PLAYER_SIZE && fabsf(dy) < PLAYER_SIZE && fabsf(dz) < PLAYER_SIZE) {
-                apply_damage_to_player(j, v->owner, VOXEL_DAMAGE);
+                bool is_projectile = !v->glueEligible;
+                int activator = is_projectile ? -1 : resolve_smush_activator(i);
+                bool debris = (!is_projectile && activator >= 0);
+                int attacker = debris ? activator : v->owner;
+                bool award_kill = !debris;
+                bool award_debris = debris;
+                if (debugLogSmush && debugLogSmushHits && debugSmushLogBudget > 0) {
+                    TraceLog(LOG_INFO,
+                             "[Smush] hit-check victim=%d voxel=%d owner=%d activator=%d simulate=%d span=%d projectile=%d debris=%d",
+                             j, i, v->owner, activator, v->simulate ? 1 : 0, v->span,
+                             is_projectile ? 1 : 0, debris ? 1 : 0);
+                    --debugSmushLogBudget;
+                }
+                if (debris && v->activator < 0) {
+                    v->activator = activator;
+                }
+                if (debugLogSmush && debugLogSmushHits && debris && debugSmushLogBudget > 0) {
+                    TraceLog(LOG_INFO,
+                             "[Smush] hit victim=%d attacker=%d voxel=%d span=%d",
+                             j, attacker, i, v->span);
+                    --debugSmushLogBudget;
+                }
+                apply_damage_to_player(j, attacker, VOXEL_DAMAGE, award_kill, award_debris);
                 remove_voxel_index(i);
                 removed = true;
                 break;
@@ -5920,6 +6059,7 @@ static bool batch_glued_dynamic_voxels(void)
         int min_sleep = INT_MAX;
         bool eligible = true;
         float align_epsilon = VOXEL_SIZE * 0.1f;
+        int cluster_activator = -1;
 
         for (int c = 0; c < cluster_count; ++c) {
             int idx = glueClusterIndices[c];
@@ -5931,6 +6071,9 @@ static bool batch_glued_dynamic_voxels(void)
             if (!voxel->simulate) {
                 eligible = false;
                 break;
+            }
+            if (cluster_activator < 0 && voxel->activator >= 0) {
+                cluster_activator = voxel->activator;
             }
             if (!voxel_center_near_grid(voxel, align_epsilon)) {
                 eligible = false;
@@ -5953,7 +6096,7 @@ static bool batch_glued_dynamic_voxels(void)
                     for (int gz = minz; gz <= maxz; ++gz) {
                         if (!unit_voxel_buffer_push(&buffer, gx, gy, gz,
                                                     voxel->color, voxel->type, voxel->fixed, -1,
-                                                    voxel->debugClusterTag)) {
+                                                    voxel->debugClusterTag, -1)) {
                             eligible = false;
                             break;
                         }
@@ -5979,6 +6122,11 @@ static bool batch_glued_dynamic_voxels(void)
 
         if (!eligible || buffer.count <= 1) {
             continue;
+        }
+        if (cluster_activator >= 0) {
+            for (int b = 0; b < buffer.count; ++b) {
+                buffer.voxels[b].activator = cluster_activator;
+            }
         }
 
         if (vel_weight <= 0.0f) {
@@ -6102,10 +6250,12 @@ static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count
         }
     }
 
-    TraceLog(LOG_INFO,
-             "[RestoreCluster] count=%d voxel_count before=%d after_removal=%d after_restore=%d static_success=%d",
-             cluster_count, voxel_count_before, voxel_count_after_removal, voxel_count,
-             static_success);
+    if (debugLogRestoreClusters) {
+        TraceLog(LOG_INFO,
+                 "[RestoreCluster] count=%d voxel_count before=%d after_removal=%d after_restore=%d static_success=%d",
+                 cluster_count, voxel_count_before, voxel_count_after_removal, voxel_count,
+                 static_success);
+    }
     free(sorted);
     free(snapshots);
     return converted;
@@ -7349,6 +7499,7 @@ static int split_voxel_at(int idx, float dt, int *out_children, int max_children
                                   parent.fixed, parent.simulate,
                                   parent.color, parent.type,
                                   child_span, parent.owner);
+                child->activator = parent.activator;
                 child->debugClusterTag = parent.debugClusterTag;
                 apply_uniform_velocity(child, split_vel, dt);
                 out_children[child_counter] = child_idx;
@@ -7501,6 +7652,7 @@ static void FireVoxel(int idx) {
         Vector3 vel = v_mul(dir, 60.0f);
         shot->vel = vel;
         shot->owner = idx;
+        shot->activator = idx;
         for (int i = 0; i < 8; ++i) {
             shot->particles[i].vel = vel;
         }
@@ -7585,6 +7737,61 @@ static void ensure_render_targets(RenderTexture2D *screens,
     *current_players = player_count;
     *current_w = view_w;
     *current_h = view_h;
+}
+
+static bool spawn_position_clear(Vector3 pos, float min_dist) {
+    float half = PLAYER_SIZE * 0.5f;
+    int minx = (int)floorf((pos.x - half) / VOXEL_SIZE);
+    int maxx = (int)floorf((pos.x + half) / VOXEL_SIZE);
+    int miny = (int)floorf((pos.y - half) / VOXEL_SIZE);
+    int maxy = (int)floorf((pos.y + half) / VOXEL_SIZE);
+    int minz = (int)floorf((pos.z - half) / VOXEL_SIZE);
+    int maxz = (int)floorf((pos.z + half) / VOXEL_SIZE);
+
+    for (int x = minx; x <= maxx; ++x) {
+        for (int y = miny; y <= maxy; ++y) {
+            for (int z = minz; z <= maxz; ++z) {
+                if (occupied(x, y, z)) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    if (min_dist > 0.0f) {
+        float min_dist_sq = min_dist * min_dist;
+        for (int i = 0; i < activePlayers; ++i) {
+            Vector3 delta = v_sub(pos, players[i].pos);
+            if (v_dot(delta, delta) < min_dist_sq) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static Vector3 pick_player_spawn(int player_index) {
+    if (!randomSpawnEnabled) {
+        return playerSpawnPositions[0];
+    }
+
+    float min_distance = PLAYER_SIZE * 2.5f;
+    float min_pos = -FLOOR_SIZE + PLAYER_RADIUS;
+    float max_pos = FLOOR_SIZE - PLAYER_RADIUS;
+    for (int attempt = 0; attempt < 64; ++attempt) {
+        Vector3 pos = {
+            randomInRange(min_pos, max_pos),
+            BASE_EYE_HEIGHT,
+            randomInRange(min_pos, max_pos)
+        };
+        if (spawn_position_clear(pos, min_distance)) {
+            return pos;
+        }
+    }
+    if (player_index >= 0 && player_index < MAX_PLAYERS) {
+        return playerSpawnPositions[player_index];
+    }
+    return (Vector3){ 0.0f, BASE_EYE_HEIGHT, 0.0f };
 }
 
 static int brush_extent_for_voxel(const Voxel *v) {
@@ -8383,21 +8590,41 @@ static void DrawVoxels(Camera3D cam) {
     }
 }
 
+static Color scale_color(Color c, float scale, unsigned char alpha) {
+    Color out = {
+        (unsigned char)clampf(c.r * scale, 0.0f, 255.0f),
+        (unsigned char)clampf(c.g * scale, 0.0f, 255.0f),
+        (unsigned char)clampf(c.b * scale, 0.0f, 255.0f),
+        alpha
+    };
+    return out;
+}
+
+static Color player_palette_color(int index) {
+    static const Color palette[MAX_PLAYERS] = {
+        { 230, 80, 80, 255 },
+        { 80, 200, 120, 255 },
+        { 80, 140, 230, 255 },
+        { 230, 180, 70, 255 }
+    };
+    if (index < 0 || index >= MAX_PLAYERS) {
+        return (Color){ 200, 200, 200, 255 };
+    }
+    return palette[index];
+}
+
 static void draw_players(void) {
     for (int i = 0; i < activePlayers; i++) {
         Player *p = &players[i];
-        DrawCube(p->pos, PLAYER_SIZE,PLAYER_SIZE, PLAYER_SIZE, BLACK);
-        DrawCubeWires(p->pos, PLAYER_SIZE,PLAYER_SIZE,PLAYER_SIZE, BLACK);
+        Color base = player_palette_color(i);
+        Color base_dark = scale_color(base, 0.35f, 255);
+        DrawCube(p->pos, PLAYER_SIZE,PLAYER_SIZE, PLAYER_SIZE, base_dark);
+        DrawCubeWires(p->pos, PLAYER_SIZE,PLAYER_SIZE,PLAYER_SIZE, base_dark);
         if (p->shield > 0) {
             int max_shield = player_max_shield(p);
             float shield_percentage = (float)p->shield / (float)max_shield;
-            float fluctuation = (1.0f - shield_percentage) * 100.0f;
-            Color shield_color = {
-                (unsigned char)randomInRange(0, fluctuation),
-                (unsigned char)randomInRange(0, fluctuation),
-                (unsigned char)clampf(255 - randomInRange(0, fluctuation), 0, 255),
-                128
-            };
+            unsigned char alpha = (unsigned char)clampf(90.0f + 90.0f * shield_percentage, 80.0f, 180.0f);
+            Color shield_color = scale_color(base, 1.0f, alpha);
             DrawCube(p->pos, PLAYER_SIZE + 0.2f, PLAYER_SIZE + 0.2f, PLAYER_SIZE + 0.2f, shield_color);
             DrawCubeWires(p->pos, PLAYER_SIZE + 0.2f, PLAYER_SIZE + 0.2f, PLAYER_SIZE + 0.2f, Fade(shield_color, 0.8f));
         }
@@ -8733,7 +8960,7 @@ int main(void) {
             rebuild_voxel_hash();
         }
         deactivate_sleeping_voxels();
-        {
+        if (debugLogFall) {
             int fall_log_budget = DEBUG_FALL_LOG_BUDGET;
             for (int i = 0; i < voxel_count && fall_log_budget > 0; ++i) {
                 Voxel *v = &voxels[i];
@@ -8807,8 +9034,8 @@ int main(void) {
                 int view_x = 0, view_y = 0, view_w = 0, view_h = 0;
                 get_viewport(i, activePlayers, &view_x, &view_y, &view_w, &view_h);
                 DrawRectangle(0, 0, view_w, HUD_BAR_HEIGHT, Fade(BLACK, 0.5f));
-                DrawText(TextFormat("P%d | Kills: %d Deaths: %d",
-                                    i + 1, players[i].kills, players[i].deaths),
+                DrawText(TextFormat("P%d | Shmush: %d | Kills: %d Deaths: %d",
+                                    i + 1, players[i].debrisKills, players[i].kills, players[i].deaths),
                          HUD_PADDING_X, HUD_PADDING_Y, HUD_FONT_SIZE, WHITE);
                 draw_hud_bars(&players[i], view_w, view_h);
                 {
@@ -8864,9 +9091,11 @@ int main(void) {
                     DrawText(TextFormat("Player 2 Input: %s", playerInput[1] == INPUT_TYPE_KEYBOARD ? "Keyboard" : "Gamepad"), 100, 250, 20, DARKGRAY);
                     DrawText(TextFormat("Player 3 Input: %s", playerInput[2] == INPUT_TYPE_KEYBOARD ? "Keyboard" : "Gamepad"), 100, 280, 20, DARKGRAY);
                     DrawText(TextFormat("Player 4 Input: %s", playerInput[3] == INPUT_TYPE_KEYBOARD ? "Keyboard" : "Gamepad"), 100, 310, 20, DARKGRAY);
-                    DrawText("Press +/- to change active player count", 100, 360, 20, DARKGRAY);
-                    DrawText("Press 1-4 to toggle player input", 100, 390, 20, DARKGRAY);
-                    DrawText("Press M to return to Main Menu", 100, 440, 20, DARKGRAY);
+                    DrawText(TextFormat("Random Spawn: %s", randomSpawnEnabled ? "ON" : "OFF"), 100, 340, 20, DARKGRAY);
+                    DrawText("Press R to toggle random spawns", 100, 370, 20, DARKGRAY);
+                    DrawText("Press +/- to change active player count", 100, 400, 20, DARKGRAY);
+                    DrawText("Press 1-4 to toggle player input", 100, 430, 20, DARKGRAY);
+                    DrawText("Press M to return to Main Menu", 100, 480, 20, DARKGRAY);
                 EndDrawing();
 
                 if (IsKeyPressed(KEY_ONE)) {
@@ -8880,6 +9109,9 @@ int main(void) {
                 }
                 if (IsKeyPressed(KEY_FOUR)) {
                     playerInput[3] = 1 - playerInput[3];
+                }
+                if (IsKeyPressed(KEY_R)) {
+                    randomSpawnEnabled = !randomSpawnEnabled;
                 }
                 if (IsKeyPressed(KEY_EQUAL) || IsKeyPressed(KEY_KP_ADD)) {
                     activePlayers = clamp_active_players(activePlayers + 1);
