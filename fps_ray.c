@@ -197,6 +197,7 @@ static const float GRID_EPSILON = 1e-4f;
 #define BASE_SHIELD 150
 #define SHIELD_REGEN_DELAY 5.0f
 #define VOXEL_DAMAGE 50
+#define VOID_INVULN_DURATION 30.0f
 
 // Voxel physics constants
 #define MAX_VOXELS    131072
@@ -226,6 +227,7 @@ typedef struct {
     int ammo;
     float ammo_recharge_timer;
     float last_shot_time;
+    float invuln_timer;
 } Player;
 static Player players[MAX_PLAYERS];
 static int activePlayers = 2;
@@ -3319,6 +3321,49 @@ static bool activate_static_voxels_near_dynamic(void)
     return true;
 }
 
+static bool activate_all_static_voxels(int activator)
+{
+    bool activated = false;
+    for (;;) {
+        UnitVoxelBuffer buffer = { 0 };
+        unit_voxel_buffer_clear(&buffer);
+
+        for (int i = 0; i < voxel_count && buffer.count < VOXEL_ACTIVATION_UNIT_BUDGET; ++i) {
+            Voxel *candidate = &voxels[i];
+            if (candidate->simulate || candidate->span != 1 || candidate->pendingActivation) {
+                continue;
+            }
+            candidate->pendingActivation = true;
+            if (!unit_voxel_buffer_push(&buffer,
+                                        candidate->gx, candidate->gy, candidate->gz,
+                                        candidate->color, candidate->type,
+                                        candidate->fixed, i,
+                                        candidate->debugClusterTag, activator))
+            {
+                candidate->pendingActivation = false;
+                break;
+            }
+        }
+
+        if (buffer.count <= 0) {
+            break;
+        }
+
+        remove_buffered_static_voxels(&buffer);
+        emit_multiscale_voxels_from_units(&buffer, false, true, -1);
+        activated = true;
+    }
+
+    if (activated) {
+        rebuild_voxel_hash();
+        rebuild_all_voxel_surfaces();
+        rebuild_glue_constraints();
+        refresh_static_voxel_beliefs();
+        meshDirty = true;
+    }
+    return activated;
+}
+
 static bool restore_dynamic_voxel_to_static(int idx)
 {
     if (idx < 0 || idx >= voxel_count) {
@@ -5170,6 +5215,7 @@ static void update_player_ammo(float dt);
 // Pickups
 #define MAX_PICKUPS 4
 #define PICKUP_RESPAWN_TIME 30.0f
+#define PICKUP_VOID_RESPAWN_TIME 300.0f
 #define PICKUP_SIZE 0.4f
 
 typedef enum {
@@ -5246,14 +5292,13 @@ static void update_pickups(float dt) {
                     pl->health = BASE_HEALTH;
                     play_sfx(SFX_SHIELD);
                 } else if (p->type == PICKUP_VOID) {
-                    pl->kills += 5; // Mega points
-                    pl->shield = player_max_shield(pl);
-                    pl->health = player_max_health(pl);
+                    pl->invuln_timer = fmaxf(pl->invuln_timer, VOID_INVULN_DURATION);
+                    activate_all_static_voxels(j);
                     play_sfx(SFX_WIN); // Special sound
                 }
                 
                 p->active = false;
-                p->respawnTimer = PICKUP_RESPAWN_TIME;
+                p->respawnTimer = (p->type == PICKUP_VOID) ? PICKUP_VOID_RESPAWN_TIME : PICKUP_RESPAWN_TIME;
             }
         }
     }
@@ -5371,6 +5416,7 @@ static void ResetGame(void) {
         players[i].ammo = AMMO_MAX;
         players[i].ammo_recharge_timer = 0.0f;
         players[i].last_shot_time = -1000.0f;
+        players[i].invuln_timer = 0.0f;
     }
     // clear voxels
     voxel_count = 0;
@@ -5419,6 +5465,9 @@ static void apply_damage_to_player(int player_index, int attacker_index, int dam
         return;
     }
     Player *player = &players[player_index];
+    if (player->invuln_timer > 0.0f) {
+        return;
+    }
     int prev_shield = player->shield;
     int prev_health = player->health;
     player->last_damage_time = (float)GetTime();
@@ -5473,6 +5522,7 @@ static void apply_damage_to_player(int player_index, int attacker_index, int dam
         player->pitch = 0;
         player->health = player_max_health(player);
         player->shield = player_max_shield(player);
+        player->invuln_timer = 0.0f;
     }
 }
 
@@ -9161,6 +9211,11 @@ static void draw_hud_bars(const Player *p, int viewport_w, int viewport_h) {
     Color bar_bg = (Color){ 25, 25, 25, 200 };
     Color health_color = (Color){ 210, 70, 70, 230 };
     Color shield_color = (Color){ 70, 140, 220, 230 };
+    Color shield_border = BLACK;
+    if (p->invuln_timer > 0.0f) {
+        shield_color = (Color){ 235, 200, 70, 230 };
+        shield_border = (Color){ 240, 215, 90, 255 };
+    }
 
     Color bullet_color = BLACK;
     const char *bullet_symbol = bullet_type_symbol(p->vType);
@@ -9183,7 +9238,7 @@ static void draw_hud_bars(const Player *p, int viewport_w, int viewport_h) {
     int shield_x = viewport_w - HUD_PADDING_X - shield_bar_w;
     DrawRectangle(shield_x, shield_y, shield_bar_w, HUD_BAR_THICKNESS, bar_bg);
     DrawRectangle(shield_x, shield_y, (int)roundf(shield_bar_w * shield_ratio), HUD_BAR_THICKNESS, shield_color);
-    DrawRectangleLines(shield_x, shield_y, shield_bar_w, HUD_BAR_THICKNESS, BLACK);
+    DrawRectangleLines(shield_x, shield_y, shield_bar_w, HUD_BAR_THICKNESS, shield_border);
 
     int health_display = p->health;
     if (health_display > health_max) {
@@ -9947,6 +10002,13 @@ static void draw_players(void) {
             DrawCube(p->pos, PLAYER_SIZE + 0.2f, PLAYER_SIZE + 0.2f, PLAYER_SIZE + 0.2f, shield_color);
             DrawCubeWires(p->pos, PLAYER_SIZE + 0.2f, PLAYER_SIZE + 0.2f, PLAYER_SIZE + 0.2f, Fade(shield_color, 0.8f));
         }
+        if (p->invuln_timer > 0.0f) {
+            float pulse = 0.6f + 0.4f * sinf((float)GetTime() * 6.0f);
+            unsigned char alpha = (unsigned char)clampf(120.0f + 80.0f * pulse, 90.0f, 220.0f);
+            Color invuln_color = (Color){ 235, 200, 70, alpha };
+            DrawCube(p->pos, PLAYER_SIZE + 0.35f, PLAYER_SIZE + 0.35f, PLAYER_SIZE + 0.35f, invuln_color);
+            DrawCubeWires(p->pos, PLAYER_SIZE + 0.35f, PLAYER_SIZE + 0.35f, PLAYER_SIZE + 0.35f, Fade(invuln_color, 0.8f));
+        }
     }
 }
 
@@ -10260,6 +10322,14 @@ int main(void) {
                 gameState = GAME_STATE_GAMEOVER;
                 play_sfx(SFX_WIN);
                 init_confetti();
+            }
+        }
+        for (int i = 0; i < activePlayers; ++i) {
+            if (players[i].invuln_timer > 0.0f) {
+                players[i].invuln_timer -= dt;
+                if (players[i].invuln_timer < 0.0f) {
+                    players[i].invuln_timer = 0.0f;
+                }
             }
         }
         if (smushBannerTimer > 0.0f) {
