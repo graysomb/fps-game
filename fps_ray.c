@@ -5022,7 +5022,7 @@ static void ResetGame(void) {
     // init players
     for (int i = 0; i < MAX_PLAYERS; i++) {
         players[i].pos = pick_player_spawn(i);
-        players[i].yaw = playerSpawnYaw[i];
+        players[i].yaw = atan2f(players[i].pos.x, players[i].pos.z) * RAD2DEG;
         players[i].pitch = 0;
         players[i].yaw_vel = 0;
         players[i].pitch_vel = 0;
@@ -5136,7 +5136,7 @@ static void apply_damage_to_player(int player_index, int attacker_index, int dam
         player->vel = (Vector3){ 0, 0, 0 };
         player->onGround = true;
         if (player_index >= 0 && player_index < MAX_PLAYERS) {
-            player->yaw = playerSpawnYaw[player_index];
+            player->yaw = atan2f(player->pos.x, player->pos.z) * RAD2DEG;
         }
         player->pitch = 0;
         player->health = player_max_health(player);
