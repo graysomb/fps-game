@@ -448,6 +448,7 @@ static const float sfxVolumes[SFX_COUNT] = {
     1.00f   // smush
 };
 static bool sfxReady = false;
+static float smushBannerTimer = 0.0f;
 static bool debugLogDynamicVoxels = false;
 static bool debugLogVoxelRecycle = false;
 static bool debugLogActivationFailures = true;
@@ -825,7 +826,7 @@ static void init_sfx(void)
     sfxSounds[SFX_SHIELD] = LoadSoundFromWave(wave);
     UnloadWave(wave);
 
-    wave = make_sfx_wave(260.0f, 140.0f, 0.18f, 0.7f, 0.25f, 12.0f);
+    wave = make_sfx_wave(640.0f, 960.0f, 0.22f, 0.8f, 0.08f, 8.0f);
     sfxSounds[SFX_SMUSH] = LoadSoundFromWave(wave);
     UnloadWave(wave);
 
@@ -5648,6 +5649,7 @@ static void handle_pbd_projectile_hits(void)
                     --debugSmushLogBudget;
                 }
                 play_sfx(SFX_SMUSH);
+                smushBannerTimer = 1.0f;
                 apply_damage_to_player(j, attacker, VOXEL_DAMAGE, award_kill, award_debris);
                 remove_voxel_index(i);
                 removed = true;
@@ -9808,6 +9810,12 @@ int main(void) {
             case GAME_STATE_PLAYING:
         float dt = GetFrameTime();
         update_player_ammo(dt);
+        if (smushBannerTimer > 0.0f) {
+            smushBannerTimer -= dt;
+            if (smushBannerTimer < 0.0f) {
+                smushBannerTimer = 0.0f;
+            }
+        }
         // input: shooting, bullet type, jump
         for (int i = 0; i < activePlayers; ++i) {
             if (playerInput[i] == INPUT_TYPE_GAMEPAD) {
@@ -10020,6 +10028,16 @@ int main(void) {
                 DrawText(TextFormat("P%d | Shmush: %d | Kills: %d Deaths: %d",
                                     i + 1, players[i].debrisKills, players[i].kills, players[i].deaths),
                          HUD_PADDING_X, HUD_PADDING_Y, HUD_FONT_SIZE, WHITE);
+                if (smushBannerTimer > 0.0f) {
+                    int banner_size = 48;
+                    float alpha = clampf(smushBannerTimer / 1.0f, 0.0f, 1.0f);
+                    Color banner_color = Fade(RED, 0.8f * alpha);
+                    const char *banner_text = "SMUSH!!!";
+                    int banner_w = MeasureText(banner_text, banner_size);
+                    int banner_x = (view_w - banner_w) / 2;
+                    int banner_y = (view_h / 5);
+                    DrawText(banner_text, banner_x, banner_y, banner_size, banner_color);
+                }
                 draw_hud_bars(&players[i], view_w, view_h);
                 {
                     int cx = view_w / 2;
