@@ -5168,13 +5168,14 @@ static void update_player_ammo(float dt);
 
 // Reset game: players and voxels
 // Pickups
-#define MAX_PICKUPS 3
+#define MAX_PICKUPS 4
 #define PICKUP_RESPAWN_TIME 30.0f
 #define PICKUP_SIZE 0.4f
 
 typedef enum {
     PICKUP_AMMO,
-    PICKUP_HEALTH
+    PICKUP_HEALTH,
+    PICKUP_VOID
 } PickupType;
 
 typedef struct {
@@ -5188,16 +5189,18 @@ typedef struct {
 static Pickup pickups[MAX_PICKUPS];
 
 static void init_pickups(void) {
-    // 0: Ammo (Center), 1: Health (Edge -X), 2: Health (Edge +X)
+    // 0: Ammo (Center), 1: Health (Edge -X), 2: Health (Edge +X), 3: Void (High Center)
     Vector3 locs[MAX_PICKUPS] = {
         { 0.0f, 1.0f, 0.0f },
         { -18.0f, 1.0f, 2.0f },
-        { 18.0f, 1.0f, 2.0f }
+        { 18.0f, 1.0f, 2.0f },
+        { 0.0f, 15.0f, 0.0f }
     };
     PickupType types[MAX_PICKUPS] = {
         PICKUP_AMMO,
         PICKUP_HEALTH,
-        PICKUP_HEALTH
+        PICKUP_HEALTH,
+        PICKUP_VOID
     };
 
     for (int i = 0; i < MAX_PICKUPS; i++) {
@@ -5231,14 +5234,22 @@ static void update_pickups(float dt) {
             float dz = p->pos.z - pl->pos.z;
             float distSq = dx*dx + dy*dy + dz*dz;
             
-            if (distSq < (PLAYER_RADIUS + PICKUP_SIZE)*(PLAYER_RADIUS + PICKUP_SIZE)) {
+            float hitRad = PLAYER_RADIUS + PICKUP_SIZE;
+            if (p->type == PICKUP_VOID) hitRad += 1.0f; // Larger hitbox for void
+
+            if (distSq < hitRad*hitRad) {
                 // Collect
                 if (p->type == PICKUP_AMMO) {
                     pl->ammo = AMMO_MAX;
                     play_sfx(SFX_SHIELD); 
                 } else if (p->type == PICKUP_HEALTH) {
-                    pl->health = BASE_HEALTH; // Full heal
-                    play_sfx(SFX_SHIELD); // Same sound for now
+                    pl->health = BASE_HEALTH;
+                    play_sfx(SFX_SHIELD);
+                } else if (p->type == PICKUP_VOID) {
+                    pl->kills += 5; // Mega points
+                    pl->shield = player_max_shield(pl);
+                    pl->health = player_max_health(pl);
+                    play_sfx(SFX_WIN); // Special sound
                 }
                 
                 p->active = false;
@@ -5248,9 +5259,11 @@ static void update_pickups(float dt) {
     }
 }
 
-static void draw_pickups(void) {
+static void draw_pickups(Camera cam) {
     Color dewGreen = (Color){ 100, 255, 0, 200 };
     Color healthRed = (Color){ 230, 40, 40, 200 };
+    Color voidBlack = (Color){ 10, 10, 10, 255 };
+    Color voidRing = (Color){ 255, 165, 0, 255 }; // Orange
     
     for (int i = 0; i < MAX_PICKUPS; i++) {
         if (!pickups[i].active) continue;
@@ -5281,7 +5294,7 @@ static void draw_pickups(void) {
                 rlVertex3f(sinf(angle) * lineLen, 0.0f, cosf(angle) * lineLen);
             }
             rlEnd();
-        } else {
+        } else if (p->type == PICKUP_HEALTH) {
             // Health: Red Sphere + Orbiting mini spheres
             DrawSphere((Vector3){0,0,0}, PICKUP_SIZE * 0.6f, healthRed);
             DrawSphereWires((Vector3){0,0,0}, PICKUP_SIZE * 0.65f, 8, 8, Fade(WHITE, 0.5f));
@@ -5299,6 +5312,35 @@ static void draw_pickups(void) {
                 
                 DrawSphere((Vector3){ox, oy, oz}, PICKUP_SIZE * 0.2f, healthRed);
             }
+        } else if (p->type == PICKUP_VOID) {
+            // Void: Black Sphere
+            DrawSphere((Vector3){0,0,0}, PICKUP_SIZE * 1.5f, voidBlack);
+            DrawSphereWires((Vector3){0,0,0}, PICKUP_SIZE * 1.5f, 8, 8, LIGHTGRAY);
+            
+            // Billboarded Orange Ring
+            rlPushMatrix();
+                // Get rotation part of view matrix to face camera
+                Matrix mat = MatrixInvert(GetCameraMatrix(cam));
+                // Only use rotation
+                mat.m12 = 0; mat.m13 = 0; mat.m14 = 0;
+                rlMultMatrixf(MatrixToFloat(mat));
+                
+                // Draw Ring
+                rlBegin(RL_QUADS);
+                rlColor4ub(voidRing.r, voidRing.g, voidRing.b, voidRing.a);
+                float rInner = PICKUP_SIZE * 1.6f;
+                float rOuter = PICKUP_SIZE * 1.8f;
+                int segs = 32;
+                for (int k=0; k<segs; k++) {
+                    float a1 = ((float)k/(float)segs)*2.0f*PI;
+                    float a2 = ((float)(k+1)/(float)segs)*2.0f*PI;
+                    rlVertex3f(cosf(a1)*rInner, sinf(a1)*rInner, 0);
+                    rlVertex3f(cosf(a1)*rOuter, sinf(a1)*rOuter, 0);
+                    rlVertex3f(cosf(a2)*rOuter, sinf(a2)*rOuter, 0);
+                    rlVertex3f(cosf(a2)*rInner, sinf(a2)*rInner, 0);
+                }
+                rlEnd();
+            rlPopMatrix();
         }
         
         rlPopMatrix();
@@ -10107,7 +10149,7 @@ int main(void) {
                     BeginMode3D(menuCam);
                         DrawPlane((Vector3){0,0,0}, (Vector2){FLOOR_SIZE*2, FLOOR_SIZE*2}, DARKGRAY);
                         DrawVoxels(menuCam);
-                        draw_pickups();
+                        draw_pickups(menuCam);
                         for (int i = 0; i < activePlayers; i++) {
                              Player *p = &players[i];
                              Color base = player_palette_color(i);
@@ -10164,7 +10206,7 @@ int main(void) {
                     BeginMode3D(droneCam);
                         DrawPlane((Vector3){0,0,0}, (Vector2){FLOOR_SIZE*2, FLOOR_SIZE*2}, DARKGRAY);
                         DrawVoxels(droneCam);
-                        draw_pickups();
+                        draw_pickups(droneCam);
                         // Draw players
                         for (int i = 0; i < activePlayers; i++) {
                             Player *p = &players[i];
@@ -10431,7 +10473,7 @@ int main(void) {
                 BeginMode3D(cams[i]);
                     DrawPlane((Vector3){0,0,0}, (Vector2){FLOOR_SIZE*2, FLOOR_SIZE*2}, DARKGRAY);
                     DrawVoxels(cams[i]);
-                    draw_pickups();
+                    draw_pickups(cams[i]);
                     draw_players();
                 EndMode3D();
                 int view_x = 0, view_y = 0, view_w = 0, view_h = 0;
