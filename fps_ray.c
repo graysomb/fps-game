@@ -405,6 +405,49 @@ static bool debugLogGlue = false;
 static bool debugLogGlueClusters = false;
 static bool skipGlueClusterCollisions = true;
 static bool renderAllDynamicFaces = true;
+static bool sfxEnabled = true;
+
+typedef enum {
+    SFX_FIRE = 0,
+    SFX_IMPACT,
+    SFX_GLUE_BREAK,
+    SFX_KILL,
+    SFX_DEATH,
+    SFX_SHIELD,
+    SFX_SMUSH,
+    SFX_COUNT
+} SfxId;
+
+static Sound sfxSounds[SFX_COUNT];
+static float sfxLastPlay[SFX_COUNT];
+static const float sfxCooldowns[SFX_COUNT] = {
+    0.05f,  // fire
+    0.08f,  // impact
+    0.12f,  // glue break
+    0.25f,  // kill
+    0.35f,  // death
+    0.08f,  // shield
+    0.12f   // smush
+};
+static const float sfxChances[SFX_COUNT] = {
+    1.00f,  // fire
+    0.45f,  // impact
+    0.35f,  // glue break
+    1.00f,  // kill
+    1.00f,  // death
+    0.70f,  // shield
+    0.60f   // smush
+};
+static const float sfxVolumes[SFX_COUNT] = {
+    0.35f,  // fire
+    0.45f,  // impact
+    0.35f,  // glue break
+    0.50f,  // kill
+    0.55f,  // death
+    0.35f,  // shield
+    0.45f   // smush
+};
+static bool sfxReady = false;
 static bool debugLogDynamicVoxels = false;
 static bool debugLogVoxelRecycle = false;
 static bool debugLogActivationFailures = true;
@@ -702,6 +745,125 @@ static float bounds_overlap_length(float minA, float maxA,
     float hi = fminf(maxA, maxB);
     float len = hi - lo;
     return (len > 0.0f) ? len : 0.0f;
+}
+
+static float randf_range(float min_val, float max_val)
+{
+    float t = (float)rand() / (float)RAND_MAX;
+    return min_val + (max_val - min_val) * t;
+}
+
+static Wave make_sfx_wave(float freq1, float freq2, float duration,
+                          float amp, float noise_amp, float decay)
+{
+    const int sample_rate = 44100;
+    int frame_count = (int)(duration * (float)sample_rate);
+    if (frame_count < 1) {
+        frame_count = 1;
+    }
+    short *data = (short *)malloc((size_t)frame_count * sizeof(short));
+    if (!data) {
+        return (Wave){ 0 };
+    }
+
+    const float two_pi = 2.0f * PI;
+    for (int i = 0; i < frame_count; ++i) {
+        float t = (float)i / (float)sample_rate;
+        float env = expf(-decay * t);
+        float tone = sinf(two_pi * freq1 * t);
+        if (freq2 > 0.0f) {
+            tone += 0.5f * sinf(two_pi * freq2 * t);
+        }
+        float noise = noise_amp * randf_range(-1.0f, 1.0f);
+        float sample = (amp * env * tone) + (env * noise);
+        if (sample > 1.0f) sample = 1.0f;
+        if (sample < -1.0f) sample = -1.0f;
+        data[i] = (short)(sample * 32767.0f);
+    }
+
+    Wave wave = { 0 };
+    wave.frameCount = frame_count;
+    wave.sampleRate = sample_rate;
+    wave.sampleSize = 16;
+    wave.channels = 1;
+    wave.data = data;
+    return wave;
+}
+
+static void init_sfx(void)
+{
+    if (sfxReady) {
+        return;
+    }
+    InitAudioDevice();
+    for (int i = 0; i < SFX_COUNT; ++i) {
+        sfxLastPlay[i] = -1000.0f;
+    }
+
+    Wave wave = { 0 };
+    wave = make_sfx_wave(900.0f, 1400.0f, 0.06f, 0.7f, 0.05f, 35.0f);
+    sfxSounds[SFX_FIRE] = LoadSoundFromWave(wave);
+    UnloadWave(wave);
+
+    wave = make_sfx_wave(180.0f, 0.0f, 0.12f, 0.6f, 0.4f, 22.0f);
+    sfxSounds[SFX_IMPACT] = LoadSoundFromWave(wave);
+    UnloadWave(wave);
+
+    wave = make_sfx_wave(650.0f, 1200.0f, 0.08f, 0.6f, 0.1f, 28.0f);
+    sfxSounds[SFX_GLUE_BREAK] = LoadSoundFromWave(wave);
+    UnloadWave(wave);
+
+    wave = make_sfx_wave(900.0f, 1200.0f, 0.18f, 0.7f, 0.05f, 14.0f);
+    sfxSounds[SFX_KILL] = LoadSoundFromWave(wave);
+    UnloadWave(wave);
+
+    wave = make_sfx_wave(220.0f, 120.0f, 0.25f, 0.7f, 0.15f, 8.0f);
+    sfxSounds[SFX_DEATH] = LoadSoundFromWave(wave);
+    UnloadWave(wave);
+
+    wave = make_sfx_wave(700.0f, 1400.0f, 0.12f, 0.6f, 0.15f, 18.0f);
+    sfxSounds[SFX_SHIELD] = LoadSoundFromWave(wave);
+    UnloadWave(wave);
+
+    wave = make_sfx_wave(120.0f, 80.0f, 0.16f, 0.7f, 0.2f, 10.0f);
+    sfxSounds[SFX_SMUSH] = LoadSoundFromWave(wave);
+    UnloadWave(wave);
+
+    for (int i = 0; i < SFX_COUNT; ++i) {
+        SetSoundVolume(sfxSounds[i], sfxVolumes[i]);
+    }
+    sfxReady = true;
+}
+
+static void shutdown_sfx(void)
+{
+    if (!sfxReady) {
+        return;
+    }
+    for (int i = 0; i < SFX_COUNT; ++i) {
+        UnloadSound(sfxSounds[i]);
+    }
+    CloseAudioDevice();
+    sfxReady = false;
+}
+
+static void play_sfx(SfxId id)
+{
+    if (!sfxReady || !sfxEnabled) {
+        return;
+    }
+    float now = (float)GetTime();
+    if ((now - sfxLastPlay[id]) < sfxCooldowns[id]) {
+        return;
+    }
+    if (sfxChances[id] < 1.0f && randf_range(0.0f, 1.0f) > sfxChances[id]) {
+        return;
+    }
+    if (id == SFX_FIRE || id == SFX_IMPACT || id == SFX_GLUE_BREAK) {
+        SetSoundPitch(sfxSounds[id], randf_range(0.95f, 1.05f));
+    }
+    PlaySound(sfxSounds[id]);
+    sfxLastPlay[id] = now;
 }
 
 static void translate_voxel_particles(Voxel *voxel, Vector3 delta)
@@ -4924,6 +5086,8 @@ static void apply_damage_to_player(int player_index, int attacker_index, int dam
         return;
     }
     Player *player = &players[player_index];
+    int prev_shield = player->shield;
+    int prev_health = player->health;
     player->last_damage_time = (float)GetTime();
     if (player->shield > 0) {
         player->shield -= damage;
@@ -4933,6 +5097,12 @@ static void apply_damage_to_player(int player_index, int attacker_index, int dam
         }
     } else {
         player->health -= damage;
+    }
+
+    if (player->shield < prev_shield && prev_shield > 0) {
+        play_sfx(SFX_SHIELD);
+    } else if (player->health < prev_health) {
+        play_sfx(SFX_IMPACT);
     }
 
     if (player->health <= 0) {
@@ -4949,6 +5119,7 @@ static void apply_damage_to_player(int player_index, int attacker_index, int dam
             if (award_kill) {
                 players[attacker_index].kills++;
                 UpdateKdRatio(attacker_index);
+                play_sfx(SFX_KILL);
             }
             if (award_debris) {
                 players[attacker_index].debrisKills++;
@@ -4959,6 +5130,7 @@ static void apply_damage_to_player(int player_index, int attacker_index, int dam
                 }
             }
         }
+        play_sfx(SFX_DEATH);
         player->pos = pick_player_spawn(player_index);
         player->vel = (Vector3){ 0, 0, 0 };
         player->onGround = true;
@@ -5236,6 +5408,7 @@ static void update_projectiles(float dt)
         Ray ray = { start, v_norm(v->vel) };
         int hit_id = first_voxel_hit(ray, distance, i);
         if (hit_id >= 0 && hit_id < voxel_count) {
+            play_sfx(SFX_IMPACT);
             if (!voxels[hit_id].simulate) {
                 int brushExtent = brush_extent_for_voxel(v);
                 Voxel *hit_voxel = &voxels[hit_id];
@@ -5320,6 +5493,7 @@ static void update_projectiles(float dt)
         }
 
         if (v->type == 2 && start.y > 0.0f && end.y <= 0.0f) {
+            play_sfx(SFX_IMPACT);
             float t = start.y / (start.y - end.y);
             Vector3 hit_pos = v_add(start, v_mul(displacement, t));
             int brushExtent = brush_extent_for_voxel(v);
@@ -5473,6 +5647,7 @@ static void handle_pbd_projectile_hits(void)
                              j, attacker, i, v->span);
                     --debugSmushLogBudget;
                 }
+                play_sfx(SFX_SMUSH);
                 apply_damage_to_player(j, attacker, VOXEL_DAMAGE, award_kill, award_debris);
                 remove_voxel_index(i);
                 removed = true;
@@ -5824,6 +5999,7 @@ static void solve_voxel_glue(bool allow_break) {
                          fine->pos.x, fine->pos.y, fine->pos.z);
                 --debugGlueBreakLogBudget;
             }
+            play_sfx(SFX_GLUE_BREAK);
             if (debugLogGlueClusters) {
                 int tagA = coarse->debugClusterTag;
                 int tagB = fine->debugClusterTag;
@@ -8439,6 +8615,7 @@ static void FireVoxel(int idx) {
         for (int i = 0; i < 8; ++i) {
             shot->particles[i].vel = vel;
         }
+        play_sfx(SFX_FIRE);
     }
     p->last_shot_time = now;
 }
@@ -9598,6 +9775,7 @@ int main(void) {
     SetTraceLogLevel(LOG_DEBUG);
     // init window and render textures
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Split-Screen FPS (raylib)");
+    init_sfx();
     SetTargetFPS(60);
     // seed RNG
     srand((unsigned)time(NULL));
@@ -9945,6 +10123,7 @@ int main(void) {
         UnloadMaterial(greedyMaterial);
         greedyMaterialInit = false;
     }
+    shutdown_sfx();
     CloseWindow();
     if (debugLogFile) {
         fclose(debugLogFile);
