@@ -19,13 +19,16 @@ typedef enum {
     GAME_STATE_PLAYING,
     GAME_STATE_PAUSED,
     GAME_STATE_SETTINGS,
-    GAME_STATE_GAMEOVER
+    GAME_STATE_GAMEOVER,
+    GAME_STATE_DRONE_INTRO
 } GameState;
 static GameState gameState = GAME_STATE_MENU;
 
 // Win condition globals
 static int winningScore = 20;
 static int winnerId = -1;
+static bool droneIntroEnabled = true;
+static float droneTimer = 0.0f;
 
 // Confetti system
 typedef struct {
@@ -9889,33 +9892,99 @@ int main(void) {
     int renderPlayers = 0;
     int renderW = 0;
     int renderH = 0;
+    
+    ResetGame(); // Init for menu background
+
     // main loop
     while (!WindowShouldClose()) {
         switch (gameState) {
             case GAME_STATE_MENU:
-                // Draw menu
                 BeginDrawing();
-                    ClearBackground(RAYWHITE);
-                    DrawText("Main Menu", SCREEN_WIDTH / 2 - MeasureText("Main Menu", 40) / 2, 100, 40, BLACK);
-                    DrawText("Press ENTER to Start", SCREEN_WIDTH / 2 - MeasureText("Press ENTER to Start", 20) / 2, 200, 20, DARKGRAY);
-                    DrawText("Press S for Settings", SCREEN_WIDTH / 2 - MeasureText("Press S for Settings", 20) / 2, 250, 20, DARKGRAY);
-                    DrawText(TextFormat("Winning Score: %d", winningScore), SCREEN_WIDTH / 2 - MeasureText(TextFormat("Winning Score: %d", winningScore), 20) / 2, 300, 20, DARKGRAY);
-                    DrawText("Use [ and ] to adjust score", SCREEN_WIDTH / 2 - MeasureText("Use [ and ] to adjust score", 18) / 2, 330, 18, LIGHTGRAY);
+                    ClearBackground(SKYBLUE);
+                    
+                    // Drone Background
+                    Camera3D menuCam = { 0 };
+                    float mTime = (float)GetTime();
+                    float mRadius = 35.0f;
+                    float mSpeed = 0.15f;
+                    menuCam.position = (Vector3){ sinf(mTime * mSpeed) * mRadius, 20.0f, cosf(mTime * mSpeed) * mRadius };
+                    menuCam.target = (Vector3){ 0.0f, 0.0f, 0.0f };
+                    menuCam.up = (Vector3){ 0.0f, 1.0f, 0.0f };
+                    menuCam.fovy = 60.0f;
+                    menuCam.projection = CAMERA_PERSPECTIVE;
+
+                    BeginMode3D(menuCam);
+                        DrawPlane((Vector3){0,0,0}, (Vector2){FLOOR_SIZE*2, FLOOR_SIZE*2}, DARKGRAY);
+                        DrawVoxels(menuCam);
+                        for (int i = 0; i < activePlayers; i++) {
+                             Player *p = &players[i];
+                             Color base = player_palette_color(i);
+                             Color base_dark = ColorBrightness(base, -0.2f);
+                             DrawCube(p->pos, PLAYER_SIZE, PLAYER_SIZE, PLAYER_SIZE, base_dark);
+                             DrawCubeWires(p->pos, PLAYER_SIZE, PLAYER_SIZE, PLAYER_SIZE, base_dark);
+                        }
+                    EndMode3D();
+
+                    // Transparent UI Window
+                    int boxW = 500;
+                    int boxH = 300;
+                    int boxX = (SCREEN_WIDTH - boxW) / 2;
+                    int boxY = (SCREEN_HEIGHT - boxH) / 2;
+                    DrawRectangle(boxX, boxY, boxW, boxH, Fade(RAYWHITE, 0.6f));
+                    DrawRectangleLines(boxX, boxY, boxW, boxH, DARKGRAY);
+
+                    DrawText("FPS Game", SCREEN_WIDTH / 2 - MeasureText("FPS Game", 50) / 2, boxY + 50, 50, BLACK);
+                    DrawText("Press ENTER to Start", SCREEN_WIDTH / 2 - MeasureText("Press ENTER to Start", 20) / 2, boxY + 150, 20, DARKGRAY);
+                    DrawText("Press S for Settings", SCREEN_WIDTH / 2 - MeasureText("Press S for Settings", 20) / 2, boxY + 200, 20, DARKGRAY);
                 EndDrawing();
 
                 if (IsKeyPressed(KEY_ENTER)) {
-                    gameState = GAME_STATE_PLAYING;
+                    ResetGame();
+                    if (droneIntroEnabled) {
+                        gameState = GAME_STATE_DRONE_INTRO;
+                        droneTimer = 3.0f;
+                    } else {
+                        gameState = GAME_STATE_PLAYING;
+                    }
                 }
                 if (IsKeyPressed(KEY_S)) {
                     gameState = GAME_STATE_SETTINGS;
                 }
-                if (IsKeyPressed(KEY_LEFT_BRACKET)) {
-                    winningScore--;
-                    if (winningScore < 1) winningScore = 1;
+                break;
+            case GAME_STATE_DRONE_INTRO:
+                droneTimer -= GetFrameTime();
+                if (droneTimer <= 0.0f || IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)) {
+                    gameState = GAME_STATE_PLAYING;
                 }
-                if (IsKeyPressed(KEY_RIGHT_BRACKET)) {
-                    winningScore++;
-                }
+                
+                BeginDrawing();
+                    ClearBackground(SKYBLUE);
+                    Camera3D droneCam = { 0 };
+                    float time = (3.0f - droneTimer);
+                    float angle = time * 0.8f; // Speed of rotation
+                    float radius = 25.0f;
+                    droneCam.position = (Vector3){ sinf(angle) * radius, 15.0f, cosf(angle) * radius };
+                    droneCam.target = (Vector3){ 0.0f, 2.0f, 0.0f }; // Look at center
+                    droneCam.up = (Vector3){ 0.0f, 1.0f, 0.0f };
+                    droneCam.fovy = 60.0f;
+                    droneCam.projection = CAMERA_PERSPECTIVE;
+                    
+                    BeginMode3D(droneCam);
+                        DrawPlane((Vector3){0,0,0}, (Vector2){FLOOR_SIZE*2, FLOOR_SIZE*2}, DARKGRAY);
+                        DrawVoxels(droneCam);
+                        // Draw players
+                        for (int i = 0; i < activePlayers; i++) {
+                            Player *p = &players[i];
+                            Color base = player_palette_color(i);
+                            Color base_dark = ColorBrightness(base, -0.2f);
+                            DrawCube(p->pos, PLAYER_SIZE,PLAYER_SIZE, PLAYER_SIZE, base_dark);
+                            DrawCubeWires(p->pos, PLAYER_SIZE,PLAYER_SIZE,PLAYER_SIZE, base_dark);
+                        }
+                    EndMode3D();
+                    
+                    DrawText("SCANNING MAP...", SCREEN_WIDTH / 2 - MeasureText("SCANNING MAP...", 30) / 2, SCREEN_HEIGHT - 100, 30, WHITE);
+                    DrawText("Press SPACE to skip", SCREEN_WIDTH / 2 - MeasureText("Press SPACE to skip", 20) / 2, SCREEN_HEIGHT - 60, 20, LIGHTGRAY);
+                EndDrawing();
                 break;
             case GAME_STATE_GAMEOVER:
                 update_draw_confetti(); // Update logic (position)
@@ -10234,42 +10303,55 @@ int main(void) {
                 // Draw settings menu
                 BeginDrawing();
                     ClearBackground(RAYWHITE);
-                    DrawText("Settings", SCREEN_WIDTH / 2 - MeasureText("Settings", 40) / 2, 100, 40, BLACK);
-                    DrawText(TextFormat("Active Players: %d", activePlayers), 100, 170, 20, DARKGRAY);
-                    DrawText(TextFormat("Player 1 Input: %s", playerInput[0] == INPUT_TYPE_KEYBOARD ? "Keyboard" : "Gamepad"), 100, 220, 20, DARKGRAY);
-                    DrawText(TextFormat("Player 2 Input: %s", playerInput[1] == INPUT_TYPE_KEYBOARD ? "Keyboard" : "Gamepad"), 100, 250, 20, DARKGRAY);
-                    DrawText(TextFormat("Player 3 Input: %s", playerInput[2] == INPUT_TYPE_KEYBOARD ? "Keyboard" : "Gamepad"), 100, 280, 20, DARKGRAY);
-                    DrawText(TextFormat("Player 4 Input: %s", playerInput[3] == INPUT_TYPE_KEYBOARD ? "Keyboard" : "Gamepad"), 100, 310, 20, DARKGRAY);
-                    DrawText(TextFormat("Random Spawn: %s", randomSpawnEnabled ? "ON" : "OFF"), 100, 340, 20, DARKGRAY);
-                    DrawText("Press R to toggle random spawns", 100, 370, 20, DARKGRAY);
-                    DrawText("Press +/- to change active player count", 100, 400, 20, DARKGRAY);
-                    DrawText("Press 1-4 to toggle player input", 100, 430, 20, DARKGRAY);
-                    DrawText("Press M to return to Main Menu", 100, 480, 20, DARKGRAY);
+                    DrawText("Settings", SCREEN_WIDTH / 2 - MeasureText("Settings", 40) / 2, 50, 40, BLACK);
+                    
+                    int startY = 120;
+                    int spacing = 35;
+                    
+                    DrawText(TextFormat("Active Players: %d (Press +/-)", activePlayers), 100, startY, 20, DARKGRAY);
+                    
+                    DrawText(TextFormat("Player 1 Input: %s (Press 1)", playerInput[0] == INPUT_TYPE_KEYBOARD ? "Keyboard" : "Gamepad"), 100, startY + spacing*1, 20, DARKGRAY);
+                    DrawText(TextFormat("Player 2 Input: %s (Press 2)", playerInput[1] == INPUT_TYPE_KEYBOARD ? "Keyboard" : "Gamepad"), 100, startY + spacing*2, 20, DARKGRAY);
+                    DrawText(TextFormat("Player 3 Input: %s (Press 3)", playerInput[2] == INPUT_TYPE_KEYBOARD ? "Keyboard" : "Gamepad"), 100, startY + spacing*3, 20, DARKGRAY);
+                    DrawText(TextFormat("Player 4 Input: %s (Press 4)", playerInput[3] == INPUT_TYPE_KEYBOARD ? "Keyboard" : "Gamepad"), 100, startY + spacing*4, 20, DARKGRAY);
+                    
+                    DrawText(TextFormat("Random Spawn: %s (Press R)", randomSpawnEnabled ? "ON" : "OFF"), 100, startY + spacing*5, 20, DARKGRAY);
+                    
+                    // New Options
+                    DrawText(TextFormat("Winning Score: %d (Press [ / ])", winningScore), 100, startY + spacing*6, 20, DARKGRAY);
+                    DrawText(TextFormat("Drone Intro: %s (Press D)", droneIntroEnabled ? "ON" : "OFF"), 100, startY + spacing*7, 20, DARKGRAY);
+
+                    DrawText("Press M to return to Main Menu", 100, SCREEN_HEIGHT - 60, 20, DARKGRAY);
                 EndDrawing();
 
-                if (IsKeyPressed(KEY_ONE)) {
-                    playerInput[0] = 1 - playerInput[0];
+                // Input handling
+                if (IsKeyPressed(KEY_M)) {
+                    gameState = GAME_STATE_MENU;
                 }
-                if (IsKeyPressed(KEY_TWO)) {
-                    playerInput[1] = 1 - playerInput[1];
-                }
-                if (IsKeyPressed(KEY_THREE)) {
-                    playerInput[2] = 1 - playerInput[2];
-                }
-                if (IsKeyPressed(KEY_FOUR)) {
-                    playerInput[3] = 1 - playerInput[3];
-                }
-                if (IsKeyPressed(KEY_R)) {
-                    randomSpawnEnabled = !randomSpawnEnabled;
-                }
+                
+                // Existing Inputs
                 if (IsKeyPressed(KEY_EQUAL) || IsKeyPressed(KEY_KP_ADD)) {
                     activePlayers = clamp_active_players(activePlayers + 1);
                 }
                 if (IsKeyPressed(KEY_MINUS) || IsKeyPressed(KEY_KP_SUBTRACT)) {
                     activePlayers = clamp_active_players(activePlayers - 1);
                 }
-                if (IsKeyPressed(KEY_M)) {
-                    gameState = GAME_STATE_MENU;
+                if (IsKeyPressed(KEY_ONE)) playerInput[0] = 1 - playerInput[0];
+                if (IsKeyPressed(KEY_TWO)) playerInput[1] = 1 - playerInput[1];
+                if (IsKeyPressed(KEY_THREE)) playerInput[2] = 1 - playerInput[2];
+                if (IsKeyPressed(KEY_FOUR)) playerInput[3] = 1 - playerInput[3];
+                if (IsKeyPressed(KEY_R)) randomSpawnEnabled = !randomSpawnEnabled;
+                
+                // New Inputs
+                if (IsKeyPressed(KEY_LEFT_BRACKET)) {
+                    winningScore--;
+                    if (winningScore < 1) winningScore = 1;
+                }
+                if (IsKeyPressed(KEY_RIGHT_BRACKET)) {
+                    winningScore++;
+                }
+                if (IsKeyPressed(KEY_D)) {
+                    droneIntroEnabled = !droneIntroEnabled;
                 }
                 break;
 
