@@ -826,7 +826,7 @@ static void init_sfx(void)
     sfxSounds[SFX_SHIELD] = LoadSoundFromWave(wave);
     UnloadWave(wave);
 
-    wave = make_sfx_wave(640.0f, 960.0f, 0.22f, 0.8f, 0.08f, 8.0f);
+    wave = make_sfx_wave(140.0f, 0.0f, 0.20f, 0.9f, 0.45f, 10.0f);
     sfxSounds[SFX_SMUSH] = LoadSoundFromWave(wave);
     UnloadWave(wave);
 
