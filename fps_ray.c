@@ -86,37 +86,37 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
 #define VGS_ALPHA 0.75f
 #define VGS_BETA 0.35f
-#define VGS_ITERS 3
+#define VGS_ITERS 6
 #define VGS_EPS 1e-6f
 #define VGS_EARLY_OUT_EPS 0.0002f
 #define VOXEL_CORNER_COUNT 8
 #define VOXEL_CENTER_INDEX 8
 #define VOXEL_PARTICLE_COUNT 9
 #define PBD_MAX_STEP_DT 0.005f
-#define PBD_SUBSTEPS 2
+#define PBD_SUBSTEPS 1
 #define PBD_CONSTRAINT_ITERS 6
 #define COLLISION_RELAXATION 0.99f
 #define COLLISION_CENTROID_ONLY_DT 0.02f
 #define SPLIT_VELOCITY_DAMP 0.1f
 #define CENTER_RELAXATION 0.99f
-#define VELOCITY_DAMPING .999f
-#define GLUE_RELAXATION 0.9f*0.4f
+#define VELOCITY_DAMPING .99f
+#define GLUE_RELAXATION 0.9f
 //#define GLUE_EPS 1e-6f
 #define GLUE_EPS 0.0002f
 #define GLUE_BREAK_STRAIN 0.4f
 #define GLUE_BREAK_HINGE_ANGLE_DEG 20.0f
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 30
-#define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f*0.4f
-#define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f*0.4f
-#define RECYCLE_DYNAMIC_MAX_FRAMES (60 * 10)
+#define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
+#define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
+#define RECYCLE_DYNAMIC_MAX_FRAMES (60 * 5)
 #define RECYCLE_STATIC_RESTORE_INTERVAL 1
 #define RECYCLE_STATIC_RESTORE_DELAY (60 * 10)
-#define RECYCLE_OWNED_STATIC_MAX_FRAMES (60 * 10)
+#define RECYCLE_OWNED_STATIC_MAX_FRAMES (60 * 20)
 #define STATIC_DEBRIS_OWNER (-2)
-#define VOXEL_SPLIT_STRAIN_THRESHOLD 0.9f
-#define VOXEL_SPLIT_SHEAR_THRESHOLD 0.9f
-#define VOXEL_DUST_STRAIN_THRESHOLD 2.0f
-#define VOXEL_DUST_SHEAR_THRESHOLD 0.98f
+#define VOXEL_SPLIT_STRAIN_THRESHOLD 1.1f
+#define VOXEL_SPLIT_SHEAR_THRESHOLD 1.1f
+#define VOXEL_DUST_STRAIN_THRESHOLD 4.0f
+#define VOXEL_DUST_SHEAR_THRESHOLD 2.0f
 #define VOXEL_HASH_REBUILD_INTERVAL 2
 #define TABLE_CACHE_SIZE 4
 #define FACE_BLOCK_MIN_OVERLAP (VOXEL_SIZE * 0.25f)
@@ -130,9 +130,9 @@ static const float GRID_EPSILON = 1e-4f;
 //#define VOXEL_ACTIVATION_UNIT_BUDGET 128
 #define VOXEL_ACTIVATION_UNIT_BUDGET 128*5
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 1.0f
-#define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.2f
-#define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.2f
-#define VOXEL_DEACTIVATION_FRAMES 10
+#define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.3f
+#define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.3f
+#define VOXEL_DEACTIVATION_FRAMES 5
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
 #define STATIC_RESTORE_SEARCH_RADIUS 2*1
 #define DEBRIS_ACTIVATION_COOLDOWN_FRAMES (60 * 10)
@@ -404,7 +404,7 @@ static int debugSpanCollisionLogBudget = 0;
 static bool debugLogGlue = false;
 static bool debugLogGlueClusters = false;
 static bool skipGlueClusterCollisions = true;
-static bool renderAllDynamicFaces = false;
+static bool renderAllDynamicFaces = true;
 static bool debugLogDynamicVoxels = false;
 static bool debugLogVoxelRecycle = false;
 static bool debugLogActivationFailures = true;
@@ -8225,23 +8225,6 @@ static bool split_strained_voxels(float dt) {
         float strain = 0.0f;
         float shear = 0.0f;
         voxel_measure_strain(voxel, &strain, &shear);
-        if (strain > VOXEL_DUST_STRAIN_THRESHOLD ||
-            shear > VOXEL_DUST_SHEAR_THRESHOLD)
-        {
-            int glued_neighbors[MAX_FACE_NEIGHBORS];
-            int glued_neighbor_count = gather_glued_neighbors(i, glued_neighbors, MAX_FACE_NEIGHBORS);
-            for (int n = 0; n < glued_neighbor_count; ++n) {
-                deactivate_glue_constraints_between(i, glued_neighbors[n]);
-            }
-            if (recycle_queue_push(voxel) && debugLogVoxelRecycle) {
-                TraceLog(LOG_INFO,
-                         "[Dust] enqueue-voxel idx=%d span=%d strain=%.3f shear=%.3f queue=%d",
-                         i, voxel->span, strain, shear, recycleQueueCount);
-            }
-            remove_voxel_index(i);
-            split_any = true;
-            continue;
-        }
         if (voxel->span <= 1) {
             ++i;
             continue;
@@ -8277,6 +8260,44 @@ static bool split_strained_voxels(float dt) {
     return split_any;
 }
 
+static bool cull_dust_voxels(void) {
+    bool removed_any = false;
+    int i = 0;
+    while (i < voxel_count) {
+        Voxel *voxel = &voxels[i];
+        if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
+            ++i;
+            continue;
+        }
+
+        float strain = 0.0f;
+        float shear = 0.0f;
+        voxel_measure_strain(voxel, &strain, &shear);
+        if (strain <= VOXEL_DUST_STRAIN_THRESHOLD &&
+            shear <= VOXEL_DUST_SHEAR_THRESHOLD) {
+            ++i;
+            continue;
+        }
+
+        int glued_neighbors[MAX_FACE_NEIGHBORS];
+        int glued_neighbor_count = gather_glued_neighbors(i, glued_neighbors, MAX_FACE_NEIGHBORS);
+        for (int n = 0; n < glued_neighbor_count; ++n) {
+            deactivate_glue_constraints_between(i, glued_neighbors[n]);
+        }
+        if (recycle_queue_push(voxel) && debugLogVoxelRecycle) {
+            TraceLog(LOG_INFO,
+                     "[Dust] enqueue-voxel idx=%d span=%d strain=%.3f shear=%.3f queue=%d",
+                     i, voxel->span, strain, shear, recycleQueueCount);
+        }
+        remove_voxel_index(i);
+        removed_any = true;
+    }
+    if (removed_any) {
+        compact_glue_constraints();
+    }
+    return removed_any;
+}
+
 void simulate_voxel_pbd(float dt) {
     const int substeps = PBD_SUBSTEPS;
     const int constraint_iterations = PBD_CONSTRAINT_ITERS;
@@ -8307,6 +8328,13 @@ void simulate_voxel_pbd(float dt) {
         solve_voxel_glue(false);
         }
         solve_voxel_glue(true);
+        bool dust_this_step = cull_dust_voxels();
+        if (dust_this_step) {
+            rebuild_voxel_hash();
+            rebuild_all_voxel_surfaces();
+            rebuild_glue_constraints();
+            meshDirty = true;
+        }
         update_particle_velocities(sub_dt);
         if (debugLogVoxelBlowup && debugBlowupLogBudget > 0) {
             for (int i = 0; i < voxel_count && debugBlowupLogBudget > 0; ++i) {
