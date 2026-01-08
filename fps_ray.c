@@ -422,8 +422,8 @@ static Sound sfxSounds[SFX_COUNT];
 static float sfxLastPlay[SFX_COUNT];
 static const float sfxCooldowns[SFX_COUNT] = {
     0.05f,  // fire
-    0.08f,  // impact
-    0.12f,  // glue break
+    0.01f,  // impact
+    0.01f,  // glue break
     0.25f,  // kill
     0.35f,  // death
     0.08f,  // shield
@@ -431,12 +431,12 @@ static const float sfxCooldowns[SFX_COUNT] = {
 };
 static const float sfxChances[SFX_COUNT] = {
     1.00f,  // fire
-    0.45f,  // impact
-    0.35f,  // glue break
+    0.5f,  // impact
+    0.5f,  // glue break
     1.00f,  // kill
     1.00f,  // death
     0.70f,  // shield
-    0.60f   // smush
+    1.00f   // smush
 };
 static const float sfxVolumes[SFX_COUNT] = {
     0.35f,  // fire
@@ -445,7 +445,7 @@ static const float sfxVolumes[SFX_COUNT] = {
     0.50f,  // kill
     0.55f,  // death
     0.35f,  // shield
-    0.45f   // smush
+    1.00f   // smush
 };
 static bool sfxReady = false;
 static bool debugLogDynamicVoxels = false;
@@ -801,31 +801,31 @@ static void init_sfx(void)
     }
 
     Wave wave = { 0 };
-    wave = make_sfx_wave(900.0f, 1400.0f, 0.06f, 0.7f, 0.05f, 35.0f);
+    wave = make_sfx_wave(1400.0f, 2200.0f, 0.05f, 0.8f, 0.02f, 45.0f);
     sfxSounds[SFX_FIRE] = LoadSoundFromWave(wave);
     UnloadWave(wave);
 
-    wave = make_sfx_wave(180.0f, 0.0f, 0.12f, 0.6f, 0.4f, 22.0f);
+    wave = make_sfx_wave(220.0f, 0.0f, 0.16f, 0.65f, 0.55f, 18.0f);
     sfxSounds[SFX_IMPACT] = LoadSoundFromWave(wave);
     UnloadWave(wave);
 
-    wave = make_sfx_wave(650.0f, 1200.0f, 0.08f, 0.6f, 0.1f, 28.0f);
+    wave = make_sfx_wave(520.0f, 900.0f, 0.10f, 0.55f, 0.08f, 24.0f);
     sfxSounds[SFX_GLUE_BREAK] = LoadSoundFromWave(wave);
     UnloadWave(wave);
 
-    wave = make_sfx_wave(900.0f, 1200.0f, 0.18f, 0.7f, 0.05f, 14.0f);
+    wave = make_sfx_wave(760.0f, 1020.0f, 0.22f, 0.7f, 0.04f, 10.0f);
     sfxSounds[SFX_KILL] = LoadSoundFromWave(wave);
     UnloadWave(wave);
 
-    wave = make_sfx_wave(220.0f, 120.0f, 0.25f, 0.7f, 0.15f, 8.0f);
+    wave = make_sfx_wave(140.0f, 90.0f, 0.30f, 0.75f, 0.20f, 6.0f);
     sfxSounds[SFX_DEATH] = LoadSoundFromWave(wave);
     UnloadWave(wave);
 
-    wave = make_sfx_wave(700.0f, 1400.0f, 0.12f, 0.6f, 0.15f, 18.0f);
+    wave = make_sfx_wave(980.0f, 2600.0f, 0.10f, 0.65f, 0.18f, 20.0f);
     sfxSounds[SFX_SHIELD] = LoadSoundFromWave(wave);
     UnloadWave(wave);
 
-    wave = make_sfx_wave(120.0f, 80.0f, 0.16f, 0.7f, 0.2f, 10.0f);
+    wave = make_sfx_wave(260.0f, 140.0f, 0.18f, 0.7f, 0.25f, 12.0f);
     sfxSounds[SFX_SMUSH] = LoadSoundFromWave(wave);
     UnloadWave(wave);
 
