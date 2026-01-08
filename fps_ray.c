@@ -4788,6 +4788,48 @@ static void buildTestWorld(void) {
     buildBox(76, 7, 44, 3, 3, 3, DARKGRAY);
 }
 
+static void buildProceduralWorld(void) {
+    int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
+    int numStructures = 20;
+    
+    for (int i = 0; i < numStructures; ++i) {
+        int cx = GetRandomValue(5, M - 5);
+        int cz = GetRandomValue(5, M - 5);
+        int cy;
+        int size;
+        
+        // At least half grounded
+        if (i < numStructures / 2) {
+            cy = 0; // Grounded at floor level
+            size = GetRandomValue(10, 40); // Larger grounded structures
+        } else {
+            cy = GetRandomValue(6, 20); // Floating
+            size = GetRandomValue(1, 16); // Normal floating debris
+        }
+        
+        Color c = (Color){ GetRandomValue(50, 200), GetRandomValue(50, 200), GetRandomValue(50, 200), 255 };
+        
+        for (int j = 0; j < size; ++j) {
+            if (cy >= 0) {
+                addVoxelAt(cx, cy, cz, c);
+            }
+            
+            // Random walk
+            int axis = GetRandomValue(0, 2);
+            int dir = GetRandomValue(0, 1) ? 1 : -1;
+            
+            if (axis == 0) cx += dir;
+            else if (axis == 1) cy += dir;
+            else cz += dir;
+            
+            // Clamp bounds
+            if (cx < 0) cx = 0; if (cx >= M) cx = M - 1;
+            if (cz < 0) cz = 0; if (cz >= M) cz = M - 1;
+            if (cy < 0) cy = 0; if (cy > 40) cy = 40; // Allow cy=0
+        }
+    }
+}
+
 static void buildBloodWorld(void) {
     int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
     int center = M / 2;
@@ -5108,6 +5150,7 @@ static void buildDebugWorld(void) {
 // Build static demo cube of voxels
 static void buildDemo(void) {
     buildTestWorld();
+    buildProceduralWorld();
     //buildBloodWorld();
     //buildDebugWorld();
     rebuild_glue_constraints();
