@@ -18,9 +18,60 @@ typedef enum {
     GAME_STATE_MENU,
     GAME_STATE_PLAYING,
     GAME_STATE_PAUSED,
-    GAME_STATE_SETTINGS
+    GAME_STATE_SETTINGS,
+    GAME_STATE_GAMEOVER
 } GameState;
 static GameState gameState = GAME_STATE_MENU;
+
+// Win condition globals
+static int winningScore = 20;
+static int winnerId = -1;
+
+// Confetti system
+typedef struct {
+    Vector2 pos;
+    Vector2 vel;
+    Color color;
+    float rotation;
+    float rotSpeed;
+    bool active;
+} Confetti;
+
+static Confetti confetti[1000];
+
+static void init_confetti(void) {
+    for (int i = 0; i < 1000; ++i) {
+        confetti[i].pos = (Vector2){ (float)GetScreenWidth() / 2.0f, (float)GetScreenHeight() + 10.0f }; // Start from bottom or center
+        confetti[i].pos = (Vector2){ (float)GetRandomValue(0, GetScreenWidth()), -10.0f }; // Rain down
+        confetti[i].vel = (Vector2){ (float)GetRandomValue(-200, 200) / 100.0f, (float)GetRandomValue(100, 500) / 100.0f };
+        confetti[i].color = (Color){ GetRandomValue(50, 255), GetRandomValue(50, 255), GetRandomValue(50, 255), 255 };
+        confetti[i].rotation = (float)GetRandomValue(0, 360);
+        confetti[i].rotSpeed = (float)GetRandomValue(-5, 5);
+        confetti[i].active = true;
+    }
+}
+
+static void update_draw_confetti(void) {
+    for (int i = 0; i < 1000; ++i) {
+        if (!confetti[i].active) continue;
+        
+        confetti[i].pos.x += confetti[i].vel.x;
+        confetti[i].pos.y += confetti[i].vel.y;
+        confetti[i].rotation += confetti[i].rotSpeed;
+        
+        if (confetti[i].pos.y > GetScreenHeight()) {
+             confetti[i].pos.y = -10.0f;
+             confetti[i].pos.x = (float)GetRandomValue(0, GetScreenWidth());
+        }
+
+        DrawRectanglePro(
+            (Rectangle){ confetti[i].pos.x, confetti[i].pos.y, 8.0f, 8.0f },
+            (Vector2){ 4.0f, 4.0f },
+            confetti[i].rotation,
+            confetti[i].color
+        );
+    }
+}
 
 // Input type enum
 #define MAX_PLAYERS 4
@@ -415,6 +466,7 @@ typedef enum {
     SFX_DEATH,
     SFX_SHIELD,
     SFX_SMUSH,
+    SFX_WIN,
     SFX_COUNT
 } SfxId;
 
@@ -427,7 +479,8 @@ static const float sfxCooldowns[SFX_COUNT] = {
     0.25f,  // kill
     0.35f,  // death
     0.08f,  // shield
-    0.12f   // smush
+    0.15f, // smush
+    2.0f   // win
 };
 static const float sfxChances[SFX_COUNT] = {
     1.00f,  // fire
@@ -791,6 +844,49 @@ static Wave make_sfx_wave(float freq1, float freq2, float duration,
     return wave;
 }
 
+static Wave make_win_song_wave(void) {
+    const int sample_rate = 44100;
+    float notes[] = { 261.63f, 329.63f, 392.00f, 523.25f, 392.00f, 523.25f };
+    float durs[] =  { 0.15f,   0.15f,   0.15f,   0.3f,    0.15f,   0.6f };
+    int count = 6;
+    
+    int total_frames = 0;
+    for(int i=0; i<count; ++i) total_frames += (int)(durs[i] * sample_rate);
+    
+    short *data = (short *)malloc((size_t)total_frames * sizeof(short));
+    if (!data) return (Wave){0};
+
+    int ptr = 0;
+    const float two_pi = 2.0f * PI;
+    
+    for (int n = 0; n < count; ++n) {
+        float freq = notes[n];
+        int frames = (int)(durs[n] * sample_rate);
+        for (int i = 0; i < frames; ++i) {
+            float t = (float)i / (float)sample_rate;
+            float env = 1.0f;
+            if (t > durs[n] - 0.05f) env = 1.0f - (t - (durs[n] - 0.05f)) / 0.05f;
+            
+            float tone = sinf(two_pi * freq * t);
+            tone += 0.5f * sinf(two_pi * freq * 2.0f * t);
+            
+            float sample = 0.5f * env * tone;
+            if (sample > 1.0f) sample = 1.0f;
+            if (sample < -1.0f) sample = -1.0f;
+
+            data[ptr++] = (short)(sample * 32767.0f);
+        }
+    }
+    
+    Wave wave = { 0 };
+    wave.frameCount = total_frames;
+    wave.sampleRate = sample_rate;
+    wave.sampleSize = 16;
+    wave.channels = 1;
+    wave.data = data;
+    return wave;
+}
+
 static void init_sfx(void)
 {
     if (sfxReady) {
@@ -817,7 +913,7 @@ static void init_sfx(void)
     wave = make_sfx_wave(760.0f, 1020.0f, 0.22f, 0.7f, 0.04f, 10.0f);
     sfxSounds[SFX_KILL] = LoadSoundFromWave(wave);
     UnloadWave(wave);
-
+    
     wave = make_sfx_wave(140.0f, 90.0f, 0.30f, 0.75f, 0.20f, 6.0f);
     sfxSounds[SFX_DEATH] = LoadSoundFromWave(wave);
     UnloadWave(wave);
@@ -829,10 +925,11 @@ static void init_sfx(void)
     wave = make_sfx_wave(140.0f, 0.0f, 0.20f, 0.9f, 0.45f, 10.0f);
     sfxSounds[SFX_SMUSH] = LoadSoundFromWave(wave);
     UnloadWave(wave);
+    
+    wave = make_win_song_wave();
+    sfxSounds[SFX_WIN] = LoadSoundFromWave(wave);
+    UnloadWave(wave);
 
-    for (int i = 0; i < SFX_COUNT; ++i) {
-        SetSoundVolume(sfxSounds[i], sfxVolumes[i]);
-    }
     sfxReady = true;
 }
 
@@ -5019,6 +5116,8 @@ static void update_player_ammo(float dt);
 
 // Reset game: players and voxels
 static void ResetGame(void) {
+    winnerId = -1;
+    init_confetti();
     // init players
     for (int i = 0; i < MAX_PLAYERS; i++) {
         players[i].pos = pick_player_spawn(i);
@@ -9800,6 +9899,8 @@ int main(void) {
                     DrawText("Main Menu", SCREEN_WIDTH / 2 - MeasureText("Main Menu", 40) / 2, 100, 40, BLACK);
                     DrawText("Press ENTER to Start", SCREEN_WIDTH / 2 - MeasureText("Press ENTER to Start", 20) / 2, 200, 20, DARKGRAY);
                     DrawText("Press S for Settings", SCREEN_WIDTH / 2 - MeasureText("Press S for Settings", 20) / 2, 250, 20, DARKGRAY);
+                    DrawText(TextFormat("Winning Score: %d", winningScore), SCREEN_WIDTH / 2 - MeasureText(TextFormat("Winning Score: %d", winningScore), 20) / 2, 300, 20, DARKGRAY);
+                    DrawText("Use [ and ] to adjust score", SCREEN_WIDTH / 2 - MeasureText("Use [ and ] to adjust score", 18) / 2, 330, 18, LIGHTGRAY);
                 EndDrawing();
 
                 if (IsKeyPressed(KEY_ENTER)) {
@@ -9808,10 +9909,55 @@ int main(void) {
                 if (IsKeyPressed(KEY_S)) {
                     gameState = GAME_STATE_SETTINGS;
                 }
+                if (IsKeyPressed(KEY_LEFT_BRACKET)) {
+                    winningScore--;
+                    if (winningScore < 1) winningScore = 1;
+                }
+                if (IsKeyPressed(KEY_RIGHT_BRACKET)) {
+                    winningScore++;
+                }
+                break;
+            case GAME_STATE_GAMEOVER:
+                update_draw_confetti(); // Update logic (position)
+                BeginDrawing();
+                    ClearBackground(RAYWHITE);
+                    
+                    // Re-draw confetti (since update_draw_confetti also draws)
+                    // Wait, update_draw_confetti draws using DrawRectanglePro which must be inside BeginDrawing
+                    // The update logic was mixed with draw logic in my previous definition.
+                    // Let's refactor: update_draw_confetti calls DrawRectanglePro. 
+                    // So we must call it INSIDE BeginDrawing.
+                    // But we also want to update the physics. Ideally separate, but for this simple effect it's fine.
+                    // However, update_draw_confetti also updates positions. Calling it inside BeginDrawing is fine for updating logic too in Raylib.
+                    
+                    const char *winText = TextFormat("PLAYER %d WINS!!!", winnerId);
+                    int fontSize = 80;
+                    int textW = MeasureText(winText, fontSize);
+                    DrawText(winText, SCREEN_WIDTH / 2 - textW / 2, SCREEN_HEIGHT / 2 - 50, fontSize, GOLD);
+                    
+                    DrawText("Press R to Restart", SCREEN_WIDTH / 2 - MeasureText("Press R to Restart", 20) / 2, SCREEN_HEIGHT / 2 + 50, 20, DARKGRAY);
+                    
+                    update_draw_confetti(); // Draw AND Update
+                    
+                EndDrawing();
+                
+                if (IsKeyPressed(KEY_R)) {
+                    ResetGame();
+                    gameState = GAME_STATE_PLAYING;
+                }
                 break;
             case GAME_STATE_PLAYING:
         float dt = GetFrameTime();
         update_player_ammo(dt);
+        // Check win condition
+        for (int i = 0; i < activePlayers; ++i) {
+            if ((players[i].debrisKills * 2 + players[i].kills) >= winningScore) {
+                winnerId = i + 1;
+                gameState = GAME_STATE_GAMEOVER;
+                play_sfx(SFX_WIN);
+                init_confetti();
+            }
+        }
         if (smushBannerTimer > 0.0f) {
             smushBannerTimer -= dt;
             if (smushBannerTimer < 0.0f) {
