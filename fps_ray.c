@@ -8750,15 +8750,17 @@ static bool keyboard_player_index(int index) {
 }
 
 static void get_view_layout(int player_count, int *w, int *h) {
+    int sw = GetScreenWidth();
+    int sh = GetScreenHeight();
     if (player_count <= 1) {
-        *w = SCREEN_WIDTH;
-        *h = SCREEN_HEIGHT;
+        *w = sw;
+        *h = sh;
     } else if (player_count == 2) {
-        *w = SCREEN_WIDTH / 2;
-        *h = SCREEN_HEIGHT;
+        *w = sw / 2;
+        *h = sh;
     } else {
-        *w = SCREEN_WIDTH / 2;
-        *h = SCREEN_HEIGHT / 2;
+        *w = sw / 2;
+        *h = sh / 2;
     }
 }
 
@@ -9881,6 +9883,7 @@ int main(void) {
     SetTraceLogLevel(LOG_DEBUG);
     // init window and render textures
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Split-Screen FPS (raylib)");
+    SetWindowState(FLAG_WINDOW_RESIZABLE);
     init_sfx();
     SetTargetFPS(60);
     // seed RNG
@@ -10275,10 +10278,10 @@ int main(void) {
                 DrawTextureRec(screens[i].texture, screenRec, (Vector2){(float)view_x, (float)view_y}, WHITE);
             }
             if (activePlayers == 2) {
-                DrawRectangle(SCREEN_WIDTH/2-2, 0, 4, SCREEN_HEIGHT, LIGHTGRAY);
+                DrawRectangle(GetScreenWidth()/2-2, 0, 4, GetScreenHeight(), LIGHTGRAY);
             } else if (activePlayers > 2) {
-                DrawRectangle(SCREEN_WIDTH/2-2, 0, 4, SCREEN_HEIGHT, LIGHTGRAY);
-                DrawRectangle(0, SCREEN_HEIGHT/2-2, SCREEN_WIDTH, 4, LIGHTGRAY);
+                DrawRectangle(GetScreenWidth()/2-2, 0, 4, GetScreenHeight(), LIGHTGRAY);
+                DrawRectangle(0, GetScreenHeight()/2-2, GetScreenWidth(), 4, LIGHTGRAY);
             }
             // particle debug text removed
         EndDrawing();
@@ -10287,9 +10290,9 @@ int main(void) {
                 // Draw pause menu
                 BeginDrawing();
                     ClearBackground(RAYWHITE);
-                    DrawText("Paused", SCREEN_WIDTH / 2 - MeasureText("Paused", 40) / 2, 100, 40, BLACK);
-                    DrawText("Press P to Resume", SCREEN_WIDTH / 2 - MeasureText("Press P to Resume", 20) / 2, 200, 20, DARKGRAY);
-                    DrawText("Press Q to Quit", SCREEN_WIDTH / 2 - MeasureText("Press Q to Quit", 20) / 2, 250, 20, DARKGRAY);
+                    DrawText("Paused", GetScreenWidth() / 2 - MeasureText("Paused", 40) / 2, 100, 40, BLACK);
+                    DrawText("Press P to Resume", GetScreenWidth() / 2 - MeasureText("Press P to Resume", 20) / 2, 200, 20, DARKGRAY);
+                    DrawText("Press Q to Quit", GetScreenWidth() / 2 - MeasureText("Press Q to Quit", 20) / 2, 250, 20, DARKGRAY);
                 EndDrawing();
 
                 if (IsKeyPressed(KEY_P)) {
