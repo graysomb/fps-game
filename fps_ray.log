@@ -1,5 +1,2 @@
 [INFO] Logging TraceLog output to fps_ray.log
-[INFO] [Smush] activated units=43 activator=0 region=(-23..-21,12..14,-19..-17)
-[INFO] [Smush] activated units=22 activator=0 region=(-5..-3,4..6,-2..0)
-[INFO] [Smush] activated units=43 activator=0 region=(16..18,8..10,19..21)
-[INFO] [Smush] activated units=43 activator=0 region=(17..19,10..12,-19..-17)
+[INFO] [Smush] activated units=43 activator=0 region=(21..23,11..13,-19..-17)

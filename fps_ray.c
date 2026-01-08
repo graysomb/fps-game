@@ -54,7 +54,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define HUD_BAR_TEXT_SIZE  22
 #define HUD_BULLET_TEXT_SIZE 78
 #define AMMO_MAX 6
-#define AMMO_RECHARGE_SECONDS 4.0f
+#define AMMO_RECHARGE_SECONDS 5.0f
 #define HUD_AMMO_SIZE 12
 #define HUD_AMMO_GAP 4
 #define BULLET_COOLDOWN_SECONDS 0.25f
@@ -5243,6 +5243,26 @@ static void update_projectiles(float dt)
                 int anchorX = hit_voxel->gx - halfBrush;
                 int anchorY = hit_voxel->gy - halfBrush;
                 int anchorZ = hit_voxel->gz - halfBrush;
+                if (v->type == 2) {
+                    Vector3 dir = ray.direction;
+                    float ax = fabsf(dir.x);
+                    float ay = fabsf(dir.y);
+                    float az = fabsf(dir.z);
+                    int nx = 0;
+                    int ny = 0;
+                    int nz = 0;
+                    if (ax >= ay && ax >= az) {
+                        nx = (dir.x >= 0.0f) ? -1 : 1;
+                    } else if (ay >= az) {
+                        ny = (dir.y >= 0.0f) ? -1 : 1;
+                    } else {
+                        nz = (dir.z >= 0.0f) ? -1 : 1;
+                    }
+                    int faceShift = halfBrush + 1;
+                    anchorX += nx * faceShift;
+                    anchorY += ny * faceShift;
+                    anchorZ += nz * faceShift;
+                }
                 if (v->type == 2 && hit_voxel->gy <= 0) {
                     anchorY = hit_voxel->gy + 1;
                 }
