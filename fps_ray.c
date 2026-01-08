@@ -93,7 +93,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define VOXEL_CENTER_INDEX 8
 #define VOXEL_PARTICLE_COUNT 9
 #define PBD_MAX_STEP_DT 0.005f
-#define PBD_SUBSTEPS 1
+#define PBD_SUBSTEPS 2
 #define PBD_CONSTRAINT_ITERS 6
 #define COLLISION_RELAXATION 0.99f
 #define COLLISION_CENTROID_ONLY_DT 0.02f
@@ -421,9 +421,9 @@ typedef enum {
 static Sound sfxSounds[SFX_COUNT];
 static float sfxLastPlay[SFX_COUNT];
 static const float sfxCooldowns[SFX_COUNT] = {
-    0.05f,  // fire
-    0.01f,  // impact
-    0.01f,  // glue break
+    0.1f,  // fire
+    0.1f,  // impact
+    0.1f,  // glue break
     0.25f,  // kill
     0.35f,  // death
     0.08f,  // shield
@@ -5620,7 +5620,9 @@ static void handle_pbd_projectile_hits(void)
             float dx = v->pos.x - players[j].pos.x;
             float dy = v->pos.y - players[j].pos.y;
             float dz = v->pos.z - players[j].pos.z;
-            if (fabsf(dx) < PLAYER_SIZE && fabsf(dy) < PLAYER_SIZE && fabsf(dz) < PLAYER_SIZE) {
+            float voxel_radius = VOXEL_SIZE * 0.5f * (float)(v->span > 0 ? v->span : 1);
+            float threshold = (PLAYER_SIZE * 0.5f) + voxel_radius + 0.1f;
+            if (fabsf(dx) < threshold && fabsf(dy) < threshold && fabsf(dz) < threshold) {
                 if (glued_to_static) {
                     ++i;
                     removed = true;
@@ -7924,7 +7926,7 @@ static void solve_particle_collisions(float dt) {
                     float dist = sqrtf(fmaxf(dist_sq, eps));
                     float penetration = voxel_radius - dist;
                     Vector3 normal = (dist > eps)
-                        ? v_mul(delta, -1.0f / dist)
+                        ? v_mul(delta, 1.0f / dist)
                         : (Vector3){ 0.0f, 1.0f, 0.0f };
                     pos = v_add(pos, v_mul(normal, penetration));
                 }
