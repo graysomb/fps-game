@@ -54,7 +54,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define HUD_BAR_TEXT_SIZE  22
 #define HUD_BULLET_TEXT_SIZE 78
 #define AMMO_MAX 6
-#define AMMO_RECHARGE_SECONDS 2.0f
+#define AMMO_RECHARGE_SECONDS 4.0f
 #define HUD_AMMO_SIZE 12
 #define HUD_AMMO_GAP 4
 #define BULLET_COOLDOWN_SECONDS 0.25f
