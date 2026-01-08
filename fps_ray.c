@@ -108,7 +108,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define HUD_BAR_TEXT_SIZE  22
 #define HUD_BULLET_TEXT_SIZE 78
 #define AMMO_MAX 6
-#define AMMO_RECHARGE_SECONDS 5.0f
+#define AMMO_RECHARGE_SECONDS 60.0f
 #define HUD_AMMO_SIZE 12
 #define HUD_AMMO_GAP 4
 #define BULLET_COOLDOWN_SECONDS 0.25f
@@ -4780,6 +4780,12 @@ static void buildTestWorld(void) {
             }
         }
     }
+
+    // Health Pickup Traps (floating 3x3 static voxel cubes)
+    // Grid coords for (-18, 3.5, 2) -> (4, 7, 44)
+    buildBox(4, 7, 44, 3, 3, 3, DARKGRAY);
+    // Grid coords for (18, 3.5, 2) -> (76, 7, 44)
+    buildBox(76, 7, 44, 3, 3, 3, DARKGRAY);
 }
 
 static void buildBloodWorld(void) {
@@ -5118,9 +5124,148 @@ static int player_max_shield(const Player *p);
 static void update_player_ammo(float dt);
 
 // Reset game: players and voxels
+// Pickups
+#define MAX_PICKUPS 3
+#define PICKUP_RESPAWN_TIME 30.0f
+#define PICKUP_SIZE 0.4f
+
+typedef enum {
+    PICKUP_AMMO,
+    PICKUP_HEALTH
+} PickupType;
+
+typedef struct {
+    Vector3 pos;
+    bool active;
+    float respawnTimer;
+    float bobTimer;
+    PickupType type;
+} Pickup;
+
+static Pickup pickups[MAX_PICKUPS];
+
+static void init_pickups(void) {
+    // 0: Ammo (Center), 1: Health (Edge -X), 2: Health (Edge +X)
+    Vector3 locs[MAX_PICKUPS] = {
+        { 0.0f, 1.0f, 0.0f },
+        { -18.0f, 1.0f, 2.0f },
+        { 18.0f, 1.0f, 2.0f }
+    };
+    PickupType types[MAX_PICKUPS] = {
+        PICKUP_AMMO,
+        PICKUP_HEALTH,
+        PICKUP_HEALTH
+    };
+
+    for (int i = 0; i < MAX_PICKUPS; i++) {
+        pickups[i].pos = locs[i];
+        pickups[i].active = true;
+        pickups[i].respawnTimer = 0.0f;
+        pickups[i].bobTimer = (float)GetRandomValue(0, 100) / 10.0f;
+        pickups[i].type = types[i];
+    }
+}
+
+static void update_pickups(float dt) {
+    for (int i = 0; i < MAX_PICKUPS; i++) {
+        Pickup *p = &pickups[i];
+        
+        if (!p->active) {
+            p->respawnTimer -= dt;
+            if (p->respawnTimer <= 0.0f) {
+                p->active = true;
+                p->respawnTimer = 0.0f;
+            }
+            continue;
+        }
+
+        p->bobTimer += dt;
+
+        for (int j = 0; j < activePlayers; j++) {
+            Player *pl = &players[j];
+            float dx = p->pos.x - pl->pos.x;
+            float dy = (p->pos.y + sinf(p->bobTimer * 2.0f) * 0.2f) - pl->pos.y;
+            float dz = p->pos.z - pl->pos.z;
+            float distSq = dx*dx + dy*dy + dz*dz;
+            
+            if (distSq < (PLAYER_RADIUS + PICKUP_SIZE)*(PLAYER_RADIUS + PICKUP_SIZE)) {
+                // Collect
+                if (p->type == PICKUP_AMMO) {
+                    pl->ammo = AMMO_MAX;
+                    play_sfx(SFX_SHIELD); 
+                } else if (p->type == PICKUP_HEALTH) {
+                    pl->health = BASE_HEALTH; // Full heal
+                    play_sfx(SFX_SHIELD); // Same sound for now
+                }
+                
+                p->active = false;
+                p->respawnTimer = PICKUP_RESPAWN_TIME;
+            }
+        }
+    }
+}
+
+static void draw_pickups(void) {
+    Color dewGreen = (Color){ 100, 255, 0, 200 };
+    Color healthRed = (Color){ 230, 40, 40, 200 };
+    
+    for (int i = 0; i < MAX_PICKUPS; i++) {
+        if (!pickups[i].active) continue;
+        
+        Pickup *p = &pickups[i];
+        float bobOffset = sinf(p->bobTimer * 2.0f) * 0.2f;
+        Vector3 drawPos = { p->pos.x, p->pos.y + bobOffset, p->pos.z };
+        
+        rlPushMatrix();
+        rlTranslatef(drawPos.x, drawPos.y, drawPos.z);
+        
+        if (p->type == PICKUP_AMMO) {
+            // Ammo: Spinning Diamond
+            rlRotatef(p->bobTimer * 90.0f, 0, 1, 0); 
+            rlRotatef(45.0f, 1, 0, 1); 
+            DrawCube((Vector3){0,0,0}, PICKUP_SIZE, PICKUP_SIZE, PICKUP_SIZE, dewGreen);
+            DrawCubeWires((Vector3){0,0,0}, PICKUP_SIZE, PICKUP_SIZE, PICKUP_SIZE, WHITE);
+            
+            // Shining lines
+            rlBegin(RL_LINES);
+            rlColor4ub(255, 255, 255, 150);
+            int numLines = 12;
+            float lineLen = PICKUP_SIZE * 2.5f;
+            float t = p->bobTimer * 2.0f;
+            for (int k = 0; k < numLines; k++) {
+                float angle = ((float)k / (float)numLines) * PI * 2.0f + t;
+                rlVertex3f(0.0f, 0.0f, 0.0f);
+                rlVertex3f(sinf(angle) * lineLen, 0.0f, cosf(angle) * lineLen);
+            }
+            rlEnd();
+        } else {
+            // Health: Red Sphere + Orbiting mini spheres
+            DrawSphere((Vector3){0,0,0}, PICKUP_SIZE * 0.6f, healthRed);
+            DrawSphereWires((Vector3){0,0,0}, PICKUP_SIZE * 0.65f, 8, 8, Fade(WHITE, 0.5f));
+            
+            // Orbiting spheres
+            int numOrbits = 3;
+            float orbitRadius = PICKUP_SIZE * 1.2f;
+            float t = p->bobTimer * 3.0f;
+            for (int k = 0; k < numOrbits; k++) {
+                float angle = ((float)k / (float)numOrbits) * PI * 2.0f + t;
+                // Inclined orbits
+                float ox = sinf(angle) * orbitRadius;
+                float oz = cosf(angle) * orbitRadius;
+                float oy = sinf(angle * 2.0f) * (orbitRadius * 0.3f);
+                
+                DrawSphere((Vector3){ox, oy, oz}, PICKUP_SIZE * 0.2f, healthRed);
+            }
+        }
+        
+        rlPopMatrix();
+    }
+}
+
 static void ResetGame(void) {
     winnerId = -1;
     init_confetti();
+    init_pickups();
     // init players
     for (int i = 0; i < MAX_PLAYERS; i++) {
         players[i].pos = pick_player_spawn(i);
@@ -9919,6 +10064,7 @@ int main(void) {
                     BeginMode3D(menuCam);
                         DrawPlane((Vector3){0,0,0}, (Vector2){FLOOR_SIZE*2, FLOOR_SIZE*2}, DARKGRAY);
                         DrawVoxels(menuCam);
+                        draw_pickups();
                         for (int i = 0; i < activePlayers; i++) {
                              Player *p = &players[i];
                              Color base = player_palette_color(i);
@@ -9975,6 +10121,7 @@ int main(void) {
                     BeginMode3D(droneCam);
                         DrawPlane((Vector3){0,0,0}, (Vector2){FLOOR_SIZE*2, FLOOR_SIZE*2}, DARKGRAY);
                         DrawVoxels(droneCam);
+                        draw_pickups();
                         // Draw players
                         for (int i = 0; i < activePlayers; i++) {
                             Player *p = &players[i];
@@ -10162,6 +10309,7 @@ int main(void) {
             physics_step(dt/subStep);
         }
         update_projectiles(dt);
+        update_pickups(dt); // Update pickups
         simulate_voxel_pbd(dt);
         recycle_dead_voxels();
         log_dynamic_glue_cluster_breaks();
@@ -10240,6 +10388,7 @@ int main(void) {
                 BeginMode3D(cams[i]);
                     DrawPlane((Vector3){0,0,0}, (Vector2){FLOOR_SIZE*2, FLOOR_SIZE*2}, DARKGRAY);
                     DrawVoxels(cams[i]);
+                    draw_pickups();
                     draw_players();
                 EndMode3D();
                 int view_x = 0, view_y = 0, view_w = 0, view_h = 0;
