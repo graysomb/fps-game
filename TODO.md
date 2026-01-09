@@ -1,5 +1,11 @@
 # Physics Performance TODO
 
+## Phase 0: Rendering Optimization (Critical Bottleneck)
+- [x] Implement `DrawMeshInstanced` for dynamic voxels to replace immediate-mode `drawCubeMan`.
+  - [x] Create a static `Mesh` for a unit cube (reuse `GenMeshCube`).
+  - [x] Implement a buffer management system to collect `Matrix` transforms and `Color` data for all dynamic voxels each frame.
+  - [x] Batch draw calls by material/color to minimize state changes, or use a shader that accepts per-instance color.
+
 ## Phase 1: Spatial Hash Architecture (The Foundation)
 - [ ] Split `table` into `static_table` and `dynamic_table`.
 - [ ] Modify `physics_step` to only rebuild `dynamic_table`.

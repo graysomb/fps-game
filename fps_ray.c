@@ -9793,9 +9793,42 @@ static void update_static_patch_colors(void)
     }
 }
 
+// Instancing Globals
+static Mesh voxelMesh = { 0 };
+static Material instancedMaterial = { 0 };
+static Shader instancedShader = { 0 };
+static Matrix *instanceTransforms = NULL;
+static int instanceTransformsCount = 0;
+static int instanceTransformsCapacity = 0;
+static bool instancingInitialized = false;
+
+static void InitInstancing(void) {
+    if (instancingInitialized) return;
+    voxelMesh = GenMeshCube(1.0f, 1.0f, 1.0f);
+    instancedShader = LoadShader("shaders/instanced_voxel_hack.vert", "shaders/instanced_voxel_hack.frag");
+    
+    // Get shader locations
+    instancedShader.locs[SHADER_LOC_MATRIX_MVP] = GetShaderLocation(instancedShader, "mvp");
+    instancedShader.locs[SHADER_LOC_VECTOR_VIEW] = GetShaderLocation(instancedShader, "viewPos");
+    instancedShader.locs[SHADER_LOC_MATRIX_MODEL] = GetShaderLocation(instancedShader, "matModel");
+    instancedShader.locs[SHADER_LOC_MATRIX_VIEW] = GetShaderLocation(instancedShader, "matView");
+    instancedShader.locs[SHADER_LOC_MATRIX_PROJECTION] = GetShaderLocation(instancedShader, "matProjection");
+
+    instancedMaterial = LoadMaterialDefault();
+    instancedMaterial.shader = instancedShader;
+    
+    instanceTransformsCapacity = MAX_VOXELS;
+    instanceTransforms = (Matrix*)RL_MALLOC(instanceTransformsCapacity * sizeof(Matrix));
+    instancingInitialized = true;
+}
+
 // Draw all voxels via greedy mesh instead of per-voxel raycasting
 static void DrawVoxels(Camera3D cam) {
     (void)cam;
+
+    if (!instancingInitialized) {
+        InitInstancing();
+    }
 
     if (debugLogSpan2Faces) {
         debugSpan2FaceLogBudget = DEBUG_SPAN2_FACE_LOG_INIT;
@@ -9811,6 +9844,7 @@ static void DrawVoxels(Camera3D cam) {
     }
     if (!greedyMaterialInit) {
         greedyMaterial = LoadMaterialDefault();
+        greedyMaterial.shader = LoadShader("shaders/voxel_simple.vert", "shaders/voxel_simple.frag");
         greedyMaterialInit = true;
     }
 
@@ -9822,69 +9856,82 @@ static void DrawVoxels(Camera3D cam) {
     if (greedyMesh.vertices) {
         DrawMesh(greedyMesh, greedyMaterial, MatrixIdentity());
     }
-    rlBegin(RL_LINES);
-    rlColor4ub(0, 0, 0, 60);
-    for (int p = 0; p < patchCount; p++) {
-        Patch *pt = &patches[p];
-        Vector3 origin, iu, ju;
-        switch (pt->plane) {
-            case 0:
-                origin = (Vector3){ pt->i0*VOXEL_SIZE,
-                                    pt->j0*VOXEL_SIZE,
-                                    (pt->layer + (pt->positive?1:0))*VOXEL_SIZE };
-                iu = (Vector3){ VOXEL_SIZE, 0, 0 };
-                ju = (Vector3){ 0, VOXEL_SIZE, 0 };
-                break;
-            case 1:
-                origin = (Vector3){ pt->i0*VOXEL_SIZE,
-                                    (pt->layer + (pt->positive?1:0))*VOXEL_SIZE,
-                                    pt->j0*VOXEL_SIZE };
-                iu = (Vector3){ VOXEL_SIZE, 0, 0 };
-                ju = (Vector3){ 0, 0, VOXEL_SIZE };
-                break;
-            default:
-                origin = (Vector3){ (pt->layer + (pt->positive?1:0))*VOXEL_SIZE,
-                                    pt->i0*VOXEL_SIZE,
-                                    pt->j0*VOXEL_SIZE };
-                iu = (Vector3){ 0, VOXEL_SIZE, 0 };
-                ju = (Vector3){ 0, 0, VOXEL_SIZE };
-                break;
-        }
-        for (int ix = 0; ix <= pt->di; ++ix) {
-            Vector3 a = v_add(origin, v_mul(iu, ix));
-            Vector3 b = v_add(a, v_mul(ju, pt->dj));
-            rlVertex3f(a.x, a.y, a.z); rlVertex3f(b.x, b.y, b.z);
-        }
-        for (int iy = 0; iy <= pt->dj; ++iy) {
-            Vector3 a = v_add(origin, v_mul(ju, iy));
-            Vector3 b = v_add(a, v_mul(iu, pt->di));
-            rlVertex3f(a.x, a.y, a.z); rlVertex3f(b.x, b.y, b.z);
-        }
-    }
-    rlEnd();
-
-    rlBegin(RL_TRIANGLES);
+    // Static grid lines loop removed for performance
+    
+    // Instanced drawing for dynamic voxels
+    instanceTransformsCount = 0;
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
         if (!v->simulate) {
             continue;
         }
-        bool faces[6];
-        compute_voxel_face_visibility(i, faces);
-        drawCubeMan(v, faces);
-    }
-    rlEnd();
+        
+        // Calculate Scale
+        float scale = VOXEL_SIZE * (float)((v->span > 0) ? v->span : 1);
+        
+        // Use the correct display color (handles beliefs/debug colors)
+        Color displayColor = voxel_display_color(v);
+        float r = (float)displayColor.r / 255.0f;
+        float g = (float)displayColor.g / 255.0f;
+        float b = (float)displayColor.b / 255.0f;
+        
+        // Calculate basis vectors from particles to support shear/rotation
+        // Voxel corners: 0=(-1,-1,-1), 1=(+1,-1,-1), 2=(-1,+1,-1), 4=(-1,-1,+1) relative to center?
+        // Let's assume particles[0] is the origin corner for the basis calculation
+        Vector3 p0 = v->particles[0].pos;
+        Vector3 p1 = v->particles[1].pos; // +X
+        Vector3 p2 = v->particles[2].pos; // +Y
+        Vector3 p4 = v->particles[4].pos; // +Z
+        
+        Vector3 xAxis = v_sub(p1, p0);
+        Vector3 yAxis = v_sub(p2, p0);
+        Vector3 zAxis = v_sub(p4, p0);
 
-    rlBegin(RL_LINES);
-    rlColor4ub(0, 0, 0, 255);
-    for (int i = 0; i < voxel_count; i++) {
-        Voxel *v = &voxels[i];
-        if (!v->simulate) {
-            continue;
+        // Center position (average of all 8 particles for stability)
+        Vector3 center = {0};
+        for(int k=0; k<8; ++k) center = v_add(center, v->particles[k].pos);
+        center = v_mul(center, 0.125f);
+        
+        Matrix m = MatrixIdentity();
+        
+        // Column 0: X Axis
+        m.m0 = xAxis.x;
+        m.m1 = xAxis.y;
+        m.m2 = xAxis.z;
+        m.m3 = r; // Store Red in 4th row
+        
+        // Column 1: Y Axis
+        m.m4 = yAxis.x;
+        m.m5 = yAxis.y;
+        m.m6 = yAxis.z;
+        m.m7 = g; // Store Green in 4th row
+        
+        // Column 2: Z Axis
+        m.m8 = zAxis.x;
+        m.m9 = zAxis.y;
+        m.m10 = zAxis.z;
+        m.m11 = b; // Store Blue in 4th row
+        
+        // Column 3: Translation (Center)
+        // Since GenMeshCube is centered at (0,0,0) and extends +/- 0.5,
+        // And our basis vectors represent the FULL edge length (e.g. -0.5 to 0.5 is length 1.0),
+        // A linear transform of the centered unit cube by these basis vectors 
+        // will result in a shape centered at (0,0,0) with those dimensions.
+        // So we just add the center translation.
+        m.m12 = center.x;
+        m.m13 = center.y;
+        m.m14 = center.z;
+        m.m15 = 1.0f;
+        
+        if (instanceTransformsCount < instanceTransformsCapacity) {
+             instanceTransforms[instanceTransformsCount++] = m;
         }
-        drawCubeEdges(v);
     }
-    rlEnd();
+    
+    if (instanceTransformsCount > 0) {
+        DrawMeshInstanced(voxelMesh, instancedMaterial, instanceTransforms, instanceTransformsCount);
+    }
+
     rlEnableBackfaceCulling();
 
     if (debugDrawParticles) {
