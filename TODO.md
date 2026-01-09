@@ -7,10 +7,11 @@
   - [x] Batch draw calls by material/color to minimize state changes, or use a shader that accepts per-instance color.
 
 ## Phase 1: Spatial Hash Architecture (The Foundation)
-- [ ] Split `table` into `static_table` and `dynamic_table`.
-- [ ] Modify `physics_step` to only rebuild `dynamic_table`.
-- [ ] Create `init_static_hash` to populate `static_table` once.
-- [ ] Update `table_get` to check both tables (or specific one via flag).
+- [x] Split `table` into `static_table` and `dynamic_table`.
+- [x] Modify `physics_step` to only rebuild `dynamic_table`.
+- [x] Create `init_static_hash` to populate `static_table` once.
+- [x] Implement incremental updates: Call `static_table_insert` / `static_table_remove` immediately when static voxels are created or destroyed, avoiding full rebuilds.
+- [x] Update `table_get` to check both tables (or specific one via flag).
 - [ ] Optimize `voxel_table_register` for Span-N: Register only the surface shell (faces) to reduce hash collisions, assuming internal volume is implied.
 
 ## Phase 2: Neighbor Discovery (Broadphase Optimization)

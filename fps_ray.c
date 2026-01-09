@@ -1857,7 +1857,10 @@ typedef struct {
     int      idx;   // index in `voxels[]`
 } Bucket;
 
-static Bucket table[HASH_SIZE];
+static Bucket table[HASH_SIZE]; // Deprecated, will be replaced by dynamic_table
+static Bucket static_table[HASH_SIZE];
+static Bucket dynamic_table[HASH_SIZE];
+
 typedef struct {
     uint64_t key;
     int idx;
@@ -1890,6 +1893,56 @@ static inline size_t hashVoxelKey(uint64_t k)
 /*  Public helpers                                          */
 /*----------------------------------------------------------*/
 
+// Forward declarations
+static void static_table_insert(int x, int y, int z, int idx);
+
+static void init_static_hash(void) {
+    memset(static_table, 0, sizeof(static_table));
+    for (int i = 0; i < voxel_count; i++) {
+        Voxel *v = &voxels[i];
+        if (v->simulate) continue;
+        
+        // Ensure grid coordinates are up to date
+        v->gx = (int)floorf(v->pos.x / VOXEL_SIZE);
+        v->gy = (int)floorf(v->pos.y / VOXEL_SIZE);
+        v->gz = (int)floorf(v->pos.z / VOXEL_SIZE);
+
+        int minx, maxx, miny, maxy, minz, maxz;
+        voxel_compute_bounds(v, &minx, &maxx, &miny, &maxy, &minz, &maxz);
+        v->min_gx = minx; v->max_gx = maxx;
+        v->min_gy = miny; v->max_gy = maxy;
+        v->min_gz = minz; v->max_gz = maxz;
+
+        for (int x = minx; x <= maxx; ++x) {
+            for (int y = miny; y <= maxy; ++y) {
+                for (int z = minz; z <= maxz; ++z) {
+                    static_table_insert(x, y, z, i);
+                }
+            }
+        }
+    }
+}
+
+static void static_table_insert(int x, int y, int z, int idx)
+{
+    uint64_t k = mortonKey(x, y, z);
+    size_t   h = hashVoxelKey(k);
+    while (static_table[h].key && static_table[h].key != k)
+        h = (h + 1) & (HASH_SIZE - 1);
+    static_table[h].key = k;
+    static_table[h].idx = idx;
+}
+
+static void dynamic_table_insert(int x, int y, int z, int idx)
+{
+    uint64_t k = mortonKey(x, y, z);
+    size_t   h = hashVoxelKey(k);
+    while (dynamic_table[h].key && dynamic_table[h].key != k)
+        h = (h + 1) & (HASH_SIZE - 1);
+    dynamic_table[h].key = k;
+    dynamic_table[h].idx = idx;
+}
+
 static int hashVoxel(int x, int y, int z)
 /*  **Only** used by table_set and table_get; keep it for API parity. */
 {
@@ -1898,15 +1951,7 @@ static int hashVoxel(int x, int y, int z)
 
 static void table_set(int x, int y, int z, int idx)
 {
-    uint64_t k = mortonKey(x, y, z);
-    size_t   h = hashVoxelKey(k);
-
-    /* linear probe until we find an empty slot or an exact key match */
-    while (table[h].key && table[h].key != k)
-        h = (h + 1) & (HASH_SIZE - 1);
-
-    table[h].key = k;      // stores the full Morton key
-    table[h].idx = idx;
+    dynamic_table_insert(x, y, z, idx);
 }
 
 static int table_get(int x, int y, int z)
@@ -1918,56 +1963,106 @@ static int table_get(int x, int y, int z)
             return tableCache[i].idx;
         }
     }
-    size_t   h = hashVoxelKey(k);
-
+    
+    // 1. Check Dynamic Table
+    size_t h = hashVoxelKey(k);
     while (1) {
-        uint64_t bk = table[h].key;
-        if (bk == 0) {
-            tableCache[tableCacheCursor].key = k;
-            tableCache[tableCacheCursor].idx = -1;
-            tableCache[tableCacheCursor].gen = tableCacheGeneration;
-            tableCacheCursor = (tableCacheCursor + 1) & (TABLE_CACHE_SIZE - 1);
-            return -1;          // empty bucket ⇒ miss
-        }
+        uint64_t bk = dynamic_table[h].key;
+        if (bk == 0) break; // Miss
         if (bk == k) {
-            int idx = table[h].idx;
+            int idx = dynamic_table[h].idx;
+            // Update Cache
             tableCache[tableCacheCursor].key = k;
             tableCache[tableCacheCursor].idx = idx;
             tableCache[tableCacheCursor].gen = tableCacheGeneration;
             tableCacheCursor = (tableCacheCursor + 1) & (TABLE_CACHE_SIZE - 1);
-            return idx;  // exact key ⇒ hit
+            return idx;
         }
-        h = (h + 1) & (HASH_SIZE - 1);        // step to next bucket
+        h = (h + 1) & (HASH_SIZE - 1);
+    }
+
+    // 2. Check Static Table
+    h = hashVoxelKey(k);
+    while (1) {
+        uint64_t bk = static_table[h].key;
+        if (bk == 0) {
+            // Full Miss
+            tableCache[tableCacheCursor].key = k;
+            tableCache[tableCacheCursor].idx = -1;
+            tableCache[tableCacheCursor].gen = tableCacheGeneration;
+            tableCacheCursor = (tableCacheCursor + 1) & (TABLE_CACHE_SIZE - 1);
+            return -1;
+        }
+        if (bk == k) {
+            int idx = static_table[h].idx;
+            // Update Cache
+            tableCache[tableCacheCursor].key = k;
+            tableCache[tableCacheCursor].idx = idx;
+            tableCache[tableCacheCursor].gen = tableCacheGeneration;
+            tableCacheCursor = (tableCacheCursor + 1) & (TABLE_CACHE_SIZE - 1);
+            return idx;
+        }
+        h = (h + 1) & (HASH_SIZE - 1);
     }
 }
-// Remove voxel entry from spatial hash and rehash subsequent cluster entries
-static void table_remove(int x, int y, int z) {
+
+static void static_table_remove(int x, int y, int z) {
     uint64_t k = mortonKey(x, y, z);
     size_t mask = HASH_SIZE - 1;
     size_t h = hashVoxelKey(k);
-    // Locate the bucket for this key
-    while (table[h].key) {
-        if (table[h].key == k) break;
+    while (static_table[h].key) {
+        if (static_table[h].key == k) break;
         h = (h + 1) & mask;
     }
-    if (!table[h].key) return; // Key not found
-    // Remove the entry
-    table[h].key = 0;
-    // Rehash any following entries in this probe cluster
+    if (!static_table[h].key) return;
+    static_table[h].key = 0;
     size_t j = (h + 1) & mask;
-    while (table[j].key) {
-        uint64_t k2 = table[j].key;
-        int idx2 = table[j].idx;
-        table[j].key = 0;
-        // Find new home for this entry
+    while (static_table[j].key) {
+        uint64_t k2 = static_table[j].key;
+        int idx2 = static_table[j].idx;
+        static_table[j].key = 0;
         size_t h2 = hashVoxelKey(k2);
-        while (table[h2].key) {
+        while (static_table[h2].key) {
             h2 = (h2 + 1) & mask;
         }
-        table[h2].key = k2;
-        table[h2].idx = idx2;
+        static_table[h2].key = k2;
+        static_table[h2].idx = idx2;
         j = (j + 1) & mask;
     }
+}
+
+static void dynamic_table_remove(int x, int y, int z) {
+    uint64_t k = mortonKey(x, y, z);
+    size_t mask = HASH_SIZE - 1;
+    size_t h = hashVoxelKey(k);
+    while (dynamic_table[h].key) {
+        if (dynamic_table[h].key == k) break;
+        h = (h + 1) & mask;
+    }
+    if (!dynamic_table[h].key) return;
+    dynamic_table[h].key = 0;
+    size_t j = (h + 1) & mask;
+    while (dynamic_table[j].key) {
+        uint64_t k2 = dynamic_table[j].key;
+        int idx2 = dynamic_table[j].idx;
+        dynamic_table[j].key = 0;
+        size_t h2 = hashVoxelKey(k2);
+        while (dynamic_table[h2].key) {
+            h2 = (h2 + 1) & mask;
+        }
+        dynamic_table[h2].key = k2;
+        dynamic_table[h2].idx = idx2;
+        j = (j + 1) & mask;
+    }
+}
+
+// Remove voxel entry from spatial hash and rehash subsequent cluster entries
+static void table_remove(int x, int y, int z) {
+    // Try remove from both to be safe, as we don't know which one it's in purely from coords
+    // unless we look it up first. Since lookups are cheap, we could check. 
+    // But blindly removing from both is also fine if they don't overlap keys (which they shouldn't).
+    static_table_remove(x, y, z);
+    dynamic_table_remove(x, y, z);
 }
 
 static void voxel_table_register(Voxel *v, int idx)
@@ -1980,7 +2075,11 @@ static void voxel_table_register(Voxel *v, int idx)
     for (int x = minx; x <= maxx; ++x) {
         for (int y = miny; y <= maxy; ++y) {
             for (int z = minz; z <= maxz; ++z) {
-                table_set(x, y, z, idx);
+                if (v->simulate) {
+                    dynamic_table_insert(x, y, z, idx);
+                } else {
+                    static_table_insert(x, y, z, idx);
+                }
             }
         }
     }
@@ -1997,7 +2096,11 @@ static void voxel_table_unregister(const Voxel *v)
     for (int x = minx; x <= maxx; ++x) {
         for (int y = miny; y <= maxy; ++y) {
             for (int z = minz; z <= maxz; ++z) {
-                table_remove(x, y, z);
+                if (v->simulate) {
+                    dynamic_table_remove(x, y, z);
+                } else {
+                    static_table_remove(x, y, z);
+                }
             }
         }
     }
@@ -5456,6 +5559,7 @@ static void ResetGame(void) {
     // build static blocks
     buildDemo();
     rebuild_all_voxel_surfaces();
+    init_static_hash();
     //rebuild_glue_constraints();
     meshDirty = true;
 
@@ -5619,10 +5723,12 @@ static bool activate_static_neighbors_of_region(int minx, int maxx,
 
 static void rebuild_voxel_hash(void) {
     table_cache_invalidate();
-    memset(table, 0, sizeof(table));
+    memset(dynamic_table, 0, sizeof(dynamic_table));
     table_cache_invalidate();
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
+        if (!v->simulate) continue; // Skip static voxels
+        
         v->gx = (int)floorf(v->pos.x / VOXEL_SIZE);
         v->gy = (int)floorf(v->pos.y / VOXEL_SIZE);
         v->gz = (int)floorf(v->pos.z / VOXEL_SIZE);
@@ -5672,11 +5778,11 @@ static void physics_step(float dt) {    // Rebuild spatial hash
     //                 for (int dx = 0; dx < brushExtent; dx++) {
     //                     for (int dy = 0; dy < brushExtent; dy++) {
     //                         for (int dz = 0; dz < brushExtent; dz++) {
-    //                             int victim_idx = table_get(anchorX + dx, anchorY + dy, anchorZ + dz);
-    //                             if (victim_idx >= 0) {
-    //                                 Voxel *victim = &voxels[victim_idx];
-    //                                 table_remove(victim->gx, victim->gy, victim->gz);
-    //                                 mark_surface_neighbors(victim->pos);
+                            int victim_idx = table_get(anchorX + dx, anchorY + dy, anchorZ + dz);
+                            if (victim_idx >= 0) {
+                                Voxel *victim = &voxels[victim_idx];
+                                voxel_table_unregister(victim);
+                                mark_surface_neighbors(victim->pos);
     //                                 victim->simulate = false;
     //                                 victim->fixed = true;
     //                                 victim->pos = (Vector3){-999.0f, -999.0f, -999.0f};
