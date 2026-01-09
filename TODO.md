@@ -1,3 +1,16 @@
+# Bugs TODO
+- [] Smush always shows for any damage, should only show for kills by smush
+- [] need a slight indication in the coloring if a static voxel cannot be activated
+- [] smush should give 4x points not just 2x, total points should appear at the top right of players hud in points/total points in gold. They should glow/jiggle when they are updated
+- [] Multi span voxels don't do multi span damage, multispan voxels should do n*voxel damage to players
+- [] The shield recharge delay is based on the first box of hot hit, not any voxel hit. every voxel hit should cause shield recharge delay to start over.
+- [] The walls and floor need some kind of generated texture so that you can tell how close you are.
+- [] higher k/d should result in higher bullet damage for players.
+- [] lower k/d should result in larger bullets with bigger hit boxes.
+
+# Feature TODO
+- [] add a grappling hook. shoots out from players as a gray bullet voxel attached by a grey line to the player, pulls the player to bullet collision location. IT does not activated voxels and works on static, dynamic, and dynamic multiscale. it lets them stick there for 5 seconds, on keyboard make it e and o, on game pad make it a bumper
+
 # Physics Performance TODO
 
 ## Phase 0: Rendering Optimization (Critical Bottleneck)
