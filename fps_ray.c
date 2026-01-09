@@ -127,7 +127,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define ACTIVATION_STRAIN_REF      0.1f
 #define ACTIVATION_GLUE_WEIGHT     0.1f
 #define ACTIVATION_GLUE_REF_SPEED  3.0f
-#define ACTIVATION_DYNAMIC_WEIGHT  0.5f
+#define ACTIVATION_DYNAMIC_WEIGHT  0.4f
 #define FREEZE_BELIEF_IMPORTANCE   0.9f
 #define ACTIVATION_HYSTERESIS      0.1f
 #define FRICTION       400.0f    // ground friction deceleration
@@ -147,7 +147,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define VOXEL_CENTER_INDEX 8
 #define VOXEL_PARTICLE_COUNT 9
 #define PBD_MAX_STEP_DT 0.005f
-#define PBD_SUBSTEPS 2
+#define PBD_SUBSTEPS 1
 #define PBD_CONSTRAINT_ITERS 6
 #define COLLISION_RELAXATION 0.99f
 #define COLLISION_CENTROID_ONLY_DT 0.02f
@@ -164,7 +164,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
 #define RECYCLE_DYNAMIC_MAX_FRAMES (60 * 5)
 #define RECYCLE_STATIC_RESTORE_INTERVAL 1
-#define RECYCLE_STATIC_RESTORE_DELAY (60 * 10)
+#define RECYCLE_STATIC_RESTORE_DELAY (60 * 30)
 #define RECYCLE_OWNED_STATIC_MAX_FRAMES (60 * 20)
 #define STATIC_DEBRIS_OWNER (-2)
 #define VOXEL_SPLIT_STRAIN_THRESHOLD 1.1f
@@ -533,6 +533,8 @@ static int activationLogStart = -1;
 static int activationLogEnd = -1;
 static bool debugLogVoxelDeactivation = false;
 static FILE *debugLogFile = NULL;
+static bool logsEnabled = false;
+static int logLevelEnabled = LOG_DEBUG;
 static int debugSupportLogBudget = 512;
 static const float DEBUG_FALL_LOG_THRESHOLD = -5.0f;
 static const int DEBUG_FALL_LOG_BUDGET = 32;
@@ -662,6 +664,25 @@ static void InitDebugLogging(void) {
         TraceLog(LOG_INFO, "Logging TraceLog output to %s", log_path);
     } else {
         TraceLog(LOG_WARNING, "Failed to open log file at %s", log_path);
+    }
+}
+
+static void SetLoggingEnabled(bool enabled) {
+    if (enabled) {
+        if (!debugLogFile) {
+            InitDebugLogging();
+        }
+        SetTraceLogLevel(logLevelEnabled);
+        logsEnabled = true;
+    } else {
+        if (logsEnabled) {
+            SetTraceLogLevel(LOG_NONE);
+            if (debugLogFile) {
+                fclose(debugLogFile);
+                debugLogFile = NULL;
+            }
+            logsEnabled = false;
+        }
     }
 }
 
@@ -10173,8 +10194,7 @@ static void HandleGamepadInput(int i, float dt);
 
 int main(void) {
     int countFrame = 0;
-    InitDebugLogging();
-    SetTraceLogLevel(LOG_DEBUG);
+    SetLoggingEnabled(true);
     // init window and render textures
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Split-Screen FPS (raylib)");
     SetWindowState(FLAG_WINDOW_RESIZABLE);
@@ -10194,6 +10214,9 @@ int main(void) {
 
     // main loop
     while (!WindowShouldClose()) {
+        if (IsKeyPressed(KEY_F2)) {
+            SetLoggingEnabled(!logsEnabled);
+        }
         switch (gameState) {
             case GAME_STATE_MENU:
                 BeginDrawing();
@@ -10569,7 +10592,7 @@ int main(void) {
                     int cx = view_w / 2;
                     int cy = view_h / 2;
                     int cross = 9;
-                    Color cross_color = Fade(RED, 0.45f);
+                    Color cross_color = Fade(WHITE,1.0f);
                     DrawLine(cx - cross, cy, cx + cross, cy, cross_color);
                     DrawLine(cx, cy - cross, cx, cy + cross, cross_color);
                 }
