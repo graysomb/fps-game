@@ -1465,6 +1465,8 @@ static uint32_t gluedNeighborHashStamp[MAX_VOXELS][GLUE_NEIGHBOR_HASH_SIZE];
 static uint32_t gluedNeighborEpoch[MAX_VOXELS];
 static uint8_t glueAdjacencyDirtyFlags[MAX_VOXELS];
 static int glueAdjacencyDirtyList[MAX_VOXELS];
+static int freezeQueue[MAX_VOXELS];
+static unsigned char glueClusterVisitedTemp[MAX_VOXELS];
 static int glueAdjacencyDirtyCount = 0;
 static bool glueAdjacencyDirtyAll = true;
 
@@ -3212,7 +3214,7 @@ static void log_activation_glue_mismatches(int start_idx, int end_idx)
 
 static bool activate_static_voxels_near_dynamic(void)
 {
-    UnitVoxelBuffer buffer = { 0 };
+    static UnitVoxelBuffer buffer;
     unit_voxel_buffer_clear(&buffer);
     refresh_static_voxel_beliefs();
     update_dynamic_activation_beliefs();
@@ -3325,7 +3327,7 @@ static bool activate_all_static_voxels(int activator)
 {
     bool activated = false;
     for (;;) {
-        UnitVoxelBuffer buffer = { 0 };
+        static UnitVoxelBuffer buffer;
         unit_voxel_buffer_clear(&buffer);
 
         for (int i = 0; i < voxel_count && buffer.count < VOXEL_ACTIVATION_UNIT_BUDGET; ++i) {
@@ -3881,7 +3883,7 @@ static void update_static_voxel_belief(int idx)
 
 static void recompute_static_freeze_beliefs_path_length(void)
 {
-    int queue[MAX_VOXELS];
+    int *queue = freezeQueue;
     int head = 0;
     int tail = 0;
 
@@ -5531,7 +5533,7 @@ static bool activate_static_neighbors_of_region(int minx, int maxx,
                                                 int minz, int maxz,
                                                 int activator)
 {
-    UnitVoxelBuffer buffer = { 0 };
+    static UnitVoxelBuffer buffer;
     unit_voxel_buffer_clear(&buffer);
 
     int ex_minx = minx - 1;
@@ -7268,28 +7270,28 @@ static bool batch_glued_dynamic_voxels(void)
         return false;
     }
 
-    unsigned char clusterVisited[MAX_VOXELS] = { 0 };
+    memset(glueClusterVisitedTemp, 0, (size_t)voxel_count * sizeof(unsigned char));
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *seed = &voxels[i];
-        if (!seed->simulate || clusterVisited[i]) {
+        if (!seed->simulate || glueClusterVisitedTemp[i]) {
             continue;
         }
 
         int cluster_count = build_glue_cluster_indices(i, glueClusterIndices);
         if (cluster_count <= 1) {
-            clusterVisited[i] = 1;
+            glueClusterVisitedTemp[i] = 1;
             continue;
         }
 
         for (int c = 0; c < cluster_count; ++c) {
             int idx = glueClusterIndices[c];
             if (idx >= 0 && idx < voxel_count) {
-                clusterVisited[idx] = 1;
+                glueClusterVisitedTemp[idx] = 1;
             }
         }
 
-        UnitVoxelBuffer buffer = { 0 };
-        buffer.count = 0;
+        static UnitVoxelBuffer buffer;
+        unit_voxel_buffer_clear(&buffer);
         Vector3 sum_vel = { 0.0f, 0.0f, 0.0f };
         float vel_weight = 0.0f;
         int min_sleep = INT_MAX;
