@@ -5778,11 +5778,11 @@ static void physics_step(float dt) {    // Rebuild spatial hash
     //                 for (int dx = 0; dx < brushExtent; dx++) {
     //                     for (int dy = 0; dy < brushExtent; dy++) {
     //                         for (int dz = 0; dz < brushExtent; dz++) {
-                            int victim_idx = table_get(anchorX + dx, anchorY + dy, anchorZ + dz);
-                            if (victim_idx >= 0) {
-                                Voxel *victim = &voxels[victim_idx];
-                                voxel_table_unregister(victim);
-                                mark_surface_neighbors(victim->pos);
+    //                             int victim_idx = table_get(anchorX + dx, anchorY + dy, anchorZ + dz);
+    //                             if (victim_idx >= 0) {
+    //                                 Voxel *victim = &voxels[victim_idx];
+    //                                 voxel_table_unregister(victim);
+    //                                 mark_surface_neighbors(victim->pos);
     //                                 victim->simulate = false;
     //                                 victim->fixed = true;
     //                                 victim->pos = (Vector3){-999.0f, -999.0f, -999.0f};
