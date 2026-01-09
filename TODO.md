@@ -26,3 +26,17 @@
 ## Phase 4: Structural Logic (Glue & Sleep)
 - [ ] Optimize `rebuild_glue_constraints`: Rewrite neighbor finding to check specific adjacent grid cells directly, skipping generic `gather_face_neighbors`.
 - [ ] Optimize `voxel_connected_to_static_world`: Replace bounds-based surface loop with direct grid lookups at the voxel's boundary cells.
+
+## Phase 5: Parallelization (CPU Multithreading)
+- [ ] **Thread Pool & Job System**: Implement a simple fixed-size thread pool (worker threads = core count) to manage task dispatch.
+- [ ] **Parallel Independent Stages**:
+  - [ ] Parallelize `integrate_particles`: Independent integration of velocity/gravity per voxel.
+  - [ ] Parallelize `solve_static_collisions`: Read-only access to static geometry allows safe parallel execution.
+  - [ ] Parallelize `solve_voxel_shape`: Shape matching constraints are internal to each voxel (no neighbor dependencies).
+  - [ ] Parallelize `update_particle_velocities`: Final velocity and position commit is independent.
+- [ ] **Parallel Inter-Voxel Stages (Jacobi Solver)**:
+  - [ ] Refactor `solve_dynamic_collisions` and `solve_voxel_glue` to use a **Jacobi** approach (Accumulate & Apply) instead of Gauss-Seidel (Immediate Apply):
+    - [ ] **Accumulate Phase**: Threads calculate constraint deltas (collision/glue) and add them to a thread-local or atomic accumulator (`delta_pos`, `constraint_count`) per particle.
+    - [ ] **Apply Phase**: Parallel loop to apply `predicted_pos += delta_pos / constraint_count` after all constraints are evaluated.
+  - [ ] *Note:* This avoids complex locking/coloring schemes but may require tuning constraint iteration counts as Jacobi convergence is different.
+- [ ] **Structural Logic Isolation**: Keep `split_strained_voxels` and `rebuild_voxel_hash` single-threaded (or strictly serialized) at the start/end of the frame to manage array resizing/reindexing safely.
