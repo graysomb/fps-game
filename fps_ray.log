@@ -1,8 +1,5 @@
 [INFO] Logging TraceLog output to fps_ray.log
-[INFO] [Smush] activated units=43 activator=0 region=(19..21,11..13,22..24)
-[INFO] [Smush] activated units=42 activator=0 region=(19..21,11..13,22..24)
-[INFO] [Smush] activated units=42 activator=0 region=(19..21,7..9,22..24)
-[INFO] [Smush] activated units=32 activator=0 region=(19..21,3..5,22..24)
-[INFO] [Smush] activated units=35 activator=0 region=(20..22,6..8,20..22)
-[WARN] [Multiscale] Static restore failed: no free cells near (11.94, -1.15, 7.07)
-[WARN] [Multiscale] Static restore failed: no free cells near (12.07, -1.38, 7.56)
+[INFO] [Smush] activated units=32 activator=1 region=(19..21,13..15,-24..-22)
+[INFO] [Smush] activated units=31 activator=1 region=(19..21,13..15,-24..-22)
+[INFO] [Smush] activated units=57 activator=1 region=(19..21,12..14,-23..-21)
+[INFO] [Smush] activated units=9 activator=1 region=(19..21,12..14,-24..-22)
