@@ -8,6 +8,9 @@
 - [x] higher k/d should result in higher bullet damage for players.
 - [x] lower k/d should result in larger bullets with bigger hit boxes.
 
+- [] lower k/d results in bigger boxes but it cuases the player to hurt themselves. prevent type 0,1,2 bullets from hitting oneself.
+
+
 # Feature TODO
 - [] add a grappling hook. shoots out from players as a gray bullet voxel attached by a grey line to the player, pulls the player to bullet collision location. IT does not activated voxels and works on static, dynamic, and dynamic multiscale. it lets them stick there for 5 seconds, on keyboard make it e and o, on game pad make it a bumper
 
