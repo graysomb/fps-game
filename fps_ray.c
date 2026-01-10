@@ -2088,9 +2088,16 @@ static void voxel_table_register(Voxel *v, int idx)
     v->min_gx = minx; v->max_gx = maxx;
     v->min_gy = miny; v->max_gy = maxy;
     v->min_gz = minz; v->max_gz = maxz;
+    bool surface_only = (v->span > 1);
     for (int x = minx; x <= maxx; ++x) {
         for (int y = miny; y <= maxy; ++y) {
             for (int z = minz; z <= maxz; ++z) {
+                if (surface_only &&
+                    x != minx && x != maxx &&
+                    y != miny && y != maxy &&
+                    z != minz && z != maxz) {
+                    continue;
+                }
                 if (v->simulate) {
                     dynamic_table_insert(x, y, z, idx);
                 } else {
