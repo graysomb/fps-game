@@ -96,7 +96,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define MOVE_SPEED      5.0f    // units per second (unused: using acceleration)
 #define TURN_SPEED     90.0f    // degrees per second
 #define JUMP_SPEED     7.5f    // initial jump velocity
-#define GRAVITY         9.8f*1.0f    // gravity acceleration
+#define GRAVITY         9.8f*2.0f    // gravity acceleration
 #define BASE_EYE_HEIGHT 1.0f    // player eye height above floor
 #define HUD_FONT_SIZE      28
 #define HUD_BAR_HEIGHT      6
@@ -119,7 +119,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define FREEZE_PROPAGATION_ITERATIONS 100
 #define FREEZE_PROPAGATION_ATTENUATION 1.0f
 #define FREEZE_PROPAGATION_EPSILON 1e-6f
-#define FREEZE_PATH_DECAY 0.85f
+#define FREEZE_PATH_DECAY 0.7f
 #define FREEZE_OVERHANG_DECAY 0.7f
 #define ACTIVATION_VELOCITY_WEIGHT 0.6f
 #define ACTIVATION_VELOCITY_REF_SPEED 6.0f
@@ -159,7 +159,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define GLUE_EPS 0.0002f
 #define GLUE_BREAK_STRAIN 0.2f
 #define GLUE_BREAK_HINGE_ANGLE_DEG 10.0f
-#define GLUE_BREAK_VELOCITY_SKIP_FRAMES 30
+#define GLUE_BREAK_VELOCITY_SKIP_FRAMES 3
 #define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
 #define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
 #define RECYCLE_DYNAMIC_MAX_FRAMES (60 * 5)
@@ -180,13 +180,13 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define GLUE_NEIGHBOR_HASH_SIZE 128
 #define MAX_SPLIT_CHILDREN    8
 static const float GRID_EPSILON = 1e-4f;
-#define VOXEL_ACTIVATION_RADIUS 2*1
+#define VOXEL_ACTIVATION_RADIUS 2*2
 //#define VOXEL_ACTIVATION_UNIT_BUDGET 128
 #define VOXEL_ACTIVATION_UNIT_BUDGET 128*5
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 1.0f
-#define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.3f
-#define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.3f
-#define VOXEL_DEACTIVATION_FRAMES 10
+#define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.4f
+#define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.4f
+#define VOXEL_DEACTIVATION_FRAMES 1
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
 #define STATIC_RESTORE_SEARCH_RADIUS 2*1
 #define DEBRIS_ACTIVATION_COOLDOWN_FRAMES (60 * 10)
