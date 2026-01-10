@@ -186,7 +186,7 @@ static const float GRID_EPSILON = 1e-4f;
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 1.0f
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.3f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.3f
-#define VOXEL_DEACTIVATION_FRAMES 1
+#define VOXEL_DEACTIVATION_FRAMES 10
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
 #define STATIC_RESTORE_SEARCH_RADIUS 2*1
 #define DEBRIS_ACTIVATION_COOLDOWN_FRAMES (60 * 10)
@@ -10941,6 +10941,17 @@ int main(void) {
                     // New Options
                     DrawText(TextFormat("Winning Score: %d (Press [ / ])", winningScore), 100, startY + spacing*6, 20, DARKGRAY);
                     DrawText(TextFormat("Drone Intro: %s (Press D)", droneIntroEnabled ? "ON" : "OFF"), 100, startY + spacing*7, 20, DARKGRAY);
+
+                    int controlsY = startY + spacing * 9;
+                    int controlsSize = 18;
+                    int controlsSpacing = 24;
+                    DrawText("Controls", 100, controlsY, 20, BLACK);
+                    DrawText("Keyboard P1: Move WASD | Look F/H (yaw), T/G (pitch) | Jump SPACE | Fire LCTRL | Cycle Q",
+                             100, controlsY + controlsSpacing * 1, controlsSize, DARKGRAY);
+                    DrawText("Keyboard P2: Move IJKL | Look Arrows | Jump RSHIFT | Fire RCTRL | Cycle U",
+                             100, controlsY + controlsSpacing * 2, controlsSize, DARKGRAY);
+                    DrawText("Gamepad: Move LS | Look RS | Jump A/Down Face | Fire RT | Cycle LT",
+                             100, controlsY + controlsSpacing * 3, controlsSize, DARKGRAY);
 
                     DrawText("Press M to return to Main Menu", 100, SCREEN_HEIGHT - 60, 20, DARKGRAY);
                 EndDrawing();
