@@ -4224,43 +4224,24 @@ static bool voxel_connected_to_static_world(const Voxel *voxel)
     }
 
     bool adjacent_static = false;
-    for (int y = miny; y <= maxy; ++y) {
-        for (int z = minz; z <= maxz; ++z) {
-            if (cell_contains_static_voxel(maxx + 1, y, z) ||
-                cell_contains_static_voxel(minx - 1, y, z)) {
-                adjacent_static = true;
-                break;
-            }
-        }
-        if (adjacent_static) {
-            break;
-        }
-    }
-    if (!adjacent_static) {
-        for (int x = minx; x <= maxx; ++x) {
+    for (int x = minx; x <= maxx && !adjacent_static; ++x) {
+        for (int y = miny; y <= maxy && !adjacent_static; ++y) {
             for (int z = minz; z <= maxz; ++z) {
-                if (cell_contains_static_voxel(x, maxy + 1, z) ||
-                    cell_contains_static_voxel(x, miny - 1, z)) {
+                bool on_boundary = (x == minx || x == maxx ||
+                                    y == miny || y == maxy ||
+                                    z == minz || z == maxz);
+                if (!on_boundary) {
+                    continue;
+                }
+                if ((x == minx && cell_contains_static_voxel(minx - 1, y, z)) ||
+                    (x == maxx && cell_contains_static_voxel(maxx + 1, y, z)) ||
+                    (y == miny && cell_contains_static_voxel(x, miny - 1, z)) ||
+                    (y == maxy && cell_contains_static_voxel(x, maxy + 1, z)) ||
+                    (z == minz && cell_contains_static_voxel(x, y, minz - 1)) ||
+                    (z == maxz && cell_contains_static_voxel(x, y, maxz + 1))) {
                     adjacent_static = true;
                     break;
                 }
-            }
-            if (adjacent_static) {
-                break;
-            }
-        }
-    }
-    if (!adjacent_static) {
-        for (int x = minx; x <= maxx; ++x) {
-            for (int y = miny; y <= maxy; ++y) {
-                if (cell_contains_static_voxel(x, y, maxz + 1) ||
-                    cell_contains_static_voxel(x, y, minz - 1)) {
-                    adjacent_static = true;
-                    break;
-                }
-            }
-            if (adjacent_static) {
-                break;
             }
         }
     }
@@ -6732,69 +6713,6 @@ static void log_dynamic_voxel_positions(void) {
     }
 }
 
-static int gather_face_neighbors(int voxel_idx, const GlueDirection *dir,
-                                 int out[], int max_out)
-{
-    const Voxel *voxel = &voxels[voxel_idx];
-    if (!voxel->glueEligible) {
-        return 0;
-    }
-    int minx, maxx, miny, maxy, minz, maxz;
-    voxel_grid_bounds(voxel, &minx, &maxx, &miny, &maxy, &minz, &maxz);
-
-    int count = 0;
-    if (dir->dx != 0) {
-        int x = (dir->dx > 0) ? (maxx + 1) : (minx - 1);
-        for (int y = miny; y <= maxy; ++y) {
-            for (int z = minz; z <= maxz; ++z) {
-                int idx = table_get(x, y, z);
-                if (idx < 0 || idx == voxel_idx) continue;
-                if (!voxels[idx].glueEligible) continue;
-                bool seen = false;
-                for (int n = 0; n < count; ++n) {
-                    if (out[n] == idx) { seen = true; break; }
-                }
-                if (!seen && count < max_out) {
-                    out[count++] = idx;
-                }
-            }
-        }
-    } else if (dir->dy != 0) {
-        int y = (dir->dy > 0) ? (maxy + 1) : (miny - 1);
-        for (int x = minx; x <= maxx; ++x) {
-            for (int z = minz; z <= maxz; ++z) {
-                int idx = table_get(x, y, z);
-                if (idx < 0 || idx == voxel_idx) continue;
-                if (!voxels[idx].glueEligible) continue;
-                bool seen = false;
-                for (int n = 0; n < count; ++n) {
-                    if (out[n] == idx) { seen = true; break; }
-                }
-                if (!seen && count < max_out) {
-                    out[count++] = idx;
-                }
-            }
-        }
-    } else {
-        int z = (dir->dz > 0) ? (maxz + 1) : (minz - 1);
-        for (int x = minx; x <= maxx; ++x) {
-            for (int y = miny; y <= maxy; ++y) {
-                int idx = table_get(x, y, z);
-                if (idx < 0 || idx == voxel_idx) continue;
-                if (!voxels[idx].glueEligible) continue;
-                bool seen = false;
-                for (int n = 0; n < count; ++n) {
-                    if (out[n] == idx) { seen = true; break; }
-                }
-                if (!seen && count < max_out) {
-                    out[count++] = idx;
-                }
-            }
-        }
-    }
-    return count;
-}
-
 static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positiveIdx,
                                                    const GlueDirection *dir)
 {
@@ -7099,13 +7017,54 @@ static void rebuild_glue_constraints(void) {
         if (!voxels[i].glueEligible) {
             continue;
         }
+        int minx, maxx, miny, maxy, minz, maxz;
+        voxel_grid_bounds(&voxels[i], &minx, &maxx, &miny, &maxy, &minz, &maxz);
         for (int d = 0; d < 3; ++d) {
             const GlueDirection *dir = &glueDirections[d];
             int neighbors[MAX_FACE_NEIGHBORS] = {0};
-            int neighborCount = gather_face_neighbors(i, dir, neighbors, MAX_FACE_NEIGHBORS);
+            int neighborCount = 0;
+            if (dir->dx != 0) {
+                int x = (dir->dx > 0) ? (maxx + 1) : (minx - 1);
+                for (int y = miny; y <= maxy; ++y) {
+                    for (int z = minz; z <= maxz; ++z) {
+                        int idx = table_get(x, y, z);
+                        if (idx < 0 || idx == i) continue;
+                        if (!voxels[idx].glueEligible) continue;
+                        if (!list_contains_index(neighbors, neighborCount, idx) &&
+                            neighborCount < MAX_FACE_NEIGHBORS) {
+                            neighbors[neighborCount++] = idx;
+                        }
+                    }
+                }
+            } else if (dir->dy != 0) {
+                int y = (dir->dy > 0) ? (maxy + 1) : (miny - 1);
+                for (int x = minx; x <= maxx; ++x) {
+                    for (int z = minz; z <= maxz; ++z) {
+                        int idx = table_get(x, y, z);
+                        if (idx < 0 || idx == i) continue;
+                        if (!voxels[idx].glueEligible) continue;
+                        if (!list_contains_index(neighbors, neighborCount, idx) &&
+                            neighborCount < MAX_FACE_NEIGHBORS) {
+                            neighbors[neighborCount++] = idx;
+                        }
+                    }
+                }
+            } else {
+                int z = (dir->dz > 0) ? (maxz + 1) : (minz - 1);
+                for (int x = minx; x <= maxx; ++x) {
+                    for (int y = miny; y <= maxy; ++y) {
+                        int idx = table_get(x, y, z);
+                        if (idx < 0 || idx == i) continue;
+                        if (!voxels[idx].glueEligible) continue;
+                        if (!list_contains_index(neighbors, neighborCount, idx) &&
+                            neighborCount < MAX_FACE_NEIGHBORS) {
+                            neighbors[neighborCount++] = idx;
+                        }
+                    }
+                }
+            }
             for (int n = 0; n < neighborCount; ++n) {
-                int neighbor_idx = neighbors[n];
-                add_bilinear_glue_constraints_for_pair(i, neighbor_idx, dir);
+                add_bilinear_glue_constraints_for_pair(i, neighbors[n], dir);
             }
         }
     }

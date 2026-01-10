@@ -40,8 +40,8 @@
 - [ ] Optimize `nudge_voxel_bottom_above_static`: Switch from full-bottom-face scanning to a sparse sampling approach (check 4 corners + center) to determine ground height.
 
 ## Phase 4: Structural Logic (Glue & Sleep)
-- [ ] Optimize `rebuild_glue_constraints`: Rewrite neighbor finding to check specific adjacent grid cells directly, skipping generic `gather_face_neighbors`.
-- [ ] Optimize `voxel_connected_to_static_world`: Replace bounds-based surface loop with direct grid lookups at the voxel's boundary cells.
+- [x] Optimize `rebuild_glue_constraints`: Rewrite neighbor finding to check specific adjacent grid cells directly, skipping generic `gather_face_neighbors`.
+- [x] Optimize `voxel_connected_to_static_world`: Replace bounds-based surface loop with direct grid lookups at the voxel's boundary cells.
 
 ## Phase 5: Parallelization (CPU Multithreading)
 - [ ] **Thread Pool & Job System**: Implement a simple fixed-size thread pool (worker threads = core count) to manage task dispatch.
