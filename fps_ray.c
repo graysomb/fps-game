@@ -9282,6 +9282,9 @@ static int bullet_span_for_player(const Player *p) {
     if (!p) {
         return 1;
     }
+    if (p->vType != 0) {
+        return 1;
+    }
     float ratio = fmaxf(p->kd_ratio, 0.1f);
     int span = (int)roundf(1.0f / ratio);
     if (span < 1) {
