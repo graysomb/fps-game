@@ -25,7 +25,7 @@ typedef enum {
 static GameState gameState = GAME_STATE_MENU;
 
 // Win condition globals
-static int winningScore = 20;
+static int winningScore = 10;
 static int winnerId = -1;
 static bool droneIntroEnabled = true;
 static float droneTimer = 0.0f;
