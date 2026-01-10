@@ -114,13 +114,13 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define BULLET_COOLDOWN_SECONDS 0.25f
 #define ACCELERATION   400.0f    // horizontal acceleration
 #define FREEZE_GROUND_WEIGHT       0.9f
-#define FREEZE_NEIGHBOR_WEIGHT     0.4f*0.0f
+#define FREEZE_NEIGHBOR_WEIGHT     0.4f
 #define FREEZE_GROUND_REF_HEIGHT   6.0f
 #define FREEZE_PROPAGATION_ITERATIONS 100
 #define FREEZE_PROPAGATION_ATTENUATION 1.0f
 #define FREEZE_PROPAGATION_EPSILON 1e-6f
-#define FREEZE_PATH_DECAY 0.7f
-#define FREEZE_OVERHANG_DECAY 0.7f
+#define FREEZE_PATH_DECAY 0.85f
+#define FREEZE_OVERHANG_DECAY 0.1f
 #define ACTIVATION_VELOCITY_WEIGHT 0.6f
 #define ACTIVATION_VELOCITY_REF_SPEED 6.0f
 #define ACTIVATION_STRAIN_WEIGHT   0.1f
@@ -128,6 +128,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define ACTIVATION_GLUE_WEIGHT     0.1f
 #define ACTIVATION_GLUE_REF_SPEED  3.0f
 #define ACTIVATION_DYNAMIC_WEIGHT  0.4f
+#define ACTIVATION_TYPE0_BULLET_BELIEF .3f
 #define FREEZE_BELIEF_IMPORTANCE   0.9f
 #define ACTIVATION_HYSTERESIS      0.1f
 #define FRICTION       400.0f    // ground friction deceleration
@@ -186,7 +187,7 @@ static const float GRID_EPSILON = 1e-4f;
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 1.0f
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.4f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.4f
-#define VOXEL_DEACTIVATION_FRAMES 1
+#define VOXEL_DEACTIVATION_FRAMES 5
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
 #define STATIC_RESTORE_SEARCH_RADIUS 2*1
 #define DEBRIS_ACTIVATION_COOLDOWN_FRAMES (60 * 10)
@@ -5683,10 +5684,12 @@ static bool apply_damage_to_player(int player_index, int attacker_index, int dam
 static bool activate_static_neighbors_of_region(int minx, int maxx,
                                                 int miny, int maxy,
                                                 int minz, int maxz,
-                                                int activator)
+                                                int activator,
+                                                float activationBelief)
 {
     static UnitVoxelBuffer buffer;
     unit_voxel_buffer_clear(&buffer);
+    refresh_static_voxel_beliefs();
 
     int ex_minx = minx - 1;
     int ex_maxx = maxx + 1;
@@ -5713,6 +5716,9 @@ static bool activate_static_neighbors_of_region(int minx, int maxx,
                 }
                 Voxel *candidate = &voxels[idx];
                 if (candidate->simulate || candidate->span != 1 || candidate->pendingActivation) {
+                    continue;
+                }
+                if (!dynamic_belief_overcomes_static(activationBelief, candidate->freezeBelief)) {
                     continue;
                 }
                 candidate->pendingActivation = true;
@@ -6027,7 +6033,9 @@ static void update_projectiles(float dt)
                     if (activator < 0) {
                         activator = v->owner;
                     }
-                    if (activate_static_neighbors_of_region(minx, maxx, miny, maxy, minz, maxz, activator)) {
+                    if (activate_static_neighbors_of_region(minx, maxx, miny, maxy, minz, maxz,
+                                                            activator,
+                                                            ACTIVATION_TYPE0_BULLET_BELIEF)) {
                         static_changed = true;
                     }
                 }
