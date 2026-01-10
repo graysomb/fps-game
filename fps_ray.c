@@ -5674,6 +5674,8 @@ static bool apply_damage_to_player(int player_index, int attacker_index, int dam
         player->onGround = true;
         player->health = 0;
         player->shield = 0;
+        player->ammo = AMMO_MAX;
+        player->ammo_recharge_timer = 0.0f;
         player->invuln_timer = 0.0f;
         player->respawn_timer = PLAYER_RESPAWN_TIME;
         return true;
