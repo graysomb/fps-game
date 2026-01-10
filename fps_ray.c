@@ -147,7 +147,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define VOXEL_CENTER_INDEX 8
 #define VOXEL_PARTICLE_COUNT 9
 #define PBD_MAX_STEP_DT 0.005f
-#define PBD_SUBSTEPS 1
+#define PBD_SUBSTEPS 2
 #define PBD_CONSTRAINT_ITERS 6
 #define COLLISION_RELAXATION 0.99f
 #define COLLISION_CENTROID_ONLY_DT 0.02f
@@ -202,6 +202,9 @@ static const float GRID_EPSILON = 1e-4f;
 #define BULLET_MAX_SPAN 4
 #define BULLET_DAMAGE_SCALE_MAX 3.0f
 #define VOID_INVULN_DURATION 30.0f
+#define PLAYER_RESPAWN_TIME 5.0f
+#define DEATH_CAM_DISTANCE 4.0f
+#define DEATH_CAM_HEIGHT 2.0f
 
 // Voxel physics constants
 #define MAX_VOXELS    131072
@@ -214,8 +217,10 @@ static int voxelBrushSpan = 3;
 // Player structure
 typedef struct {
     Vector3 pos;
+    Vector3 death_pos;
     float yaw;
     float pitch;
+    float death_yaw;
     float yaw_vel;
     float pitch_vel;
     Vector3 vel;
@@ -232,6 +237,7 @@ typedef struct {
     float ammo_recharge_timer;
     float last_shot_time;
     float invuln_timer;
+    float respawn_timer;
     int last_points;
     float points_update_timer;
     float points_jiggle_phase;
@@ -5553,8 +5559,10 @@ static void ResetGame(void) {
     // init players
     for (int i = 0; i < MAX_PLAYERS; i++) {
         players[i].pos = pick_player_spawn(i);
+        players[i].death_pos = players[i].pos;
         players[i].yaw = atan2f(players[i].pos.x, players[i].pos.z) * RAD2DEG;
         players[i].pitch = 0;
+        players[i].death_yaw = players[i].yaw;
         players[i].yaw_vel = 0;
         players[i].pitch_vel = 0;
         players[i].vel = (Vector3){0,0,0};
@@ -5571,6 +5579,7 @@ static void ResetGame(void) {
         players[i].ammo_recharge_timer = 0.0f;
         players[i].last_shot_time = -1000.0f;
         players[i].invuln_timer = 0.0f;
+        players[i].respawn_timer = 0.0f;
         players[i].last_points = player_points(&players[i]);
         players[i].points_update_timer = 0.0f;
         players[i].points_jiggle_phase = 0.0f;
@@ -5598,6 +5607,9 @@ static void ResetGame(void) {
 static void update_player_ammo(float dt) {
     for (int i = 0; i < activePlayers; ++i) {
         Player *p = &players[i];
+        if (p->respawn_timer > 0.0f) {
+            continue;
+        }
         if (p->ammo >= AMMO_MAX) {
             p->ammo = AMMO_MAX;
             p->ammo_recharge_timer = 0.0f;
@@ -5623,6 +5635,9 @@ static bool apply_damage_to_player(int player_index, int attacker_index, int dam
         return false;
     }
     Player *player = &players[player_index];
+    if (player->respawn_timer > 0.0f) {
+        return false;
+    }
     player->last_damage_time = (float)GetTime();
     if (player->invuln_timer > 0.0f) {
         return false;
@@ -5671,16 +5686,14 @@ static bool apply_damage_to_player(int player_index, int attacker_index, int dam
             }
         }
         play_sfx(SFX_DEATH);
-        player->pos = pick_player_spawn(player_index);
+        player->death_pos = player->pos;
+        player->death_yaw = player->yaw;
         player->vel = (Vector3){ 0, 0, 0 };
         player->onGround = true;
-        if (player_index >= 0 && player_index < MAX_PLAYERS) {
-            player->yaw = atan2f(player->pos.x, player->pos.z) * RAD2DEG;
-        }
-        player->pitch = 0;
-        player->health = player_max_health(player);
-        player->shield = player_max_shield(player);
+        player->health = 0;
+        player->shield = 0;
         player->invuln_timer = 0.0f;
+        player->respawn_timer = PLAYER_RESPAWN_TIME;
         return true;
     }
     return false;
@@ -8444,6 +8457,9 @@ static void solve_static_collisions(float dt) {
             // Interactions with player bounding boxes (kept for gameplay parity).
             for (int player_idx = 0; player_idx < activePlayers; ++player_idx) {
                 Player *pl = &players[player_idx];
+                if (pl->respawn_timer > 0.0f) {
+                    continue;
+                }
                 Vector3 box_min = {
                     pl->pos.x - half_player,
                     pl->pos.y - half_player,
@@ -10240,6 +10256,9 @@ static Color player_palette_color(int index) {
 static void draw_players(void) {
     for (int i = 0; i < activePlayers; i++) {
         Player *p = &players[i];
+        if (p->respawn_timer > 0.0f) {
+            continue;
+        }
         Color base = player_palette_color(i);
         Color base_dark = scale_color(base, 0.35f, 255);
         DrawCube(p->pos, PLAYER_SIZE,PLAYER_SIZE, PLAYER_SIZE, base_dark);
@@ -10585,6 +10604,25 @@ int main(void) {
                 }
             }
         }
+        for (int i = 0; i < activePlayers; ++i) {
+            if (players[i].respawn_timer > 0.0f) {
+                players[i].respawn_timer -= dt;
+                if (players[i].respawn_timer <= 0.0f) {
+                    players[i].respawn_timer = 0.0f;
+                    players[i].pos = pick_player_spawn(i);
+                    players[i].death_pos = players[i].pos;
+                    players[i].vel = (Vector3){ 0, 0, 0 };
+                    players[i].onGround = true;
+                    players[i].yaw = atan2f(players[i].pos.x, players[i].pos.z) * RAD2DEG;
+                    players[i].death_yaw = players[i].yaw;
+                    players[i].pitch = 0.0f;
+                    players[i].health = player_max_health(&players[i]);
+                    players[i].shield = player_max_shield(&players[i]);
+                    players[i].last_damage_time = (float)GetTime();
+                    players[i].invuln_timer = 0.0f;
+                }
+            }
+        }
         if (smushBannerTimer > 0.0f) {
             smushBannerTimer -= dt;
             if (smushBannerTimer < 0.0f) {
@@ -10593,6 +10631,9 @@ int main(void) {
         }
         // input: shooting, bullet type, jump
         for (int i = 0; i < activePlayers; ++i) {
+            if (players[i].respawn_timer > 0.0f) {
+                continue;
+            }
             if (playerInput[i] == INPUT_TYPE_GAMEPAD) {
                 if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_RIGHT_TRIGGER_2)) {
                     FireVoxel(i);
@@ -10607,7 +10648,7 @@ int main(void) {
             }
         }
 
-        if (playerInput[0] == INPUT_TYPE_KEYBOARD) {
+        if (playerInput[0] == INPUT_TYPE_KEYBOARD && players[0].respawn_timer <= 0.0f) {
             if (IsKeyPressed(KEY_LEFT_CONTROL))  FireVoxel(0);
             if (IsKeyPressed(KEY_Q)) players[0].vType = (players[0].vType + 1) % 3;
             if (IsKeyPressed(KEY_SPACE) && players[0].onGround) {
@@ -10615,7 +10656,7 @@ int main(void) {
                 players[0].onGround = false;
             }
         }
-        if (playerInput[1] == INPUT_TYPE_KEYBOARD) {
+        if (playerInput[1] == INPUT_TYPE_KEYBOARD && players[1].respawn_timer <= 0.0f) {
             if (IsKeyPressed(KEY_RIGHT_CONTROL)) FireVoxel(1);
             if (IsKeyPressed(KEY_U)) players[1].vType = (players[1].vType + 1) % 3;
             if (IsKeyPressed(KEY_RIGHT_SHIFT) && players[1].onGround) {
@@ -10643,6 +10684,9 @@ int main(void) {
 
         // Shield regeneration
         for (int i = 0; i < activePlayers; i++) {
+            if (players[i].respawn_timer > 0.0f) {
+                continue;
+            }
             if ((float)GetTime() - players[i].last_damage_time > SHIELD_REGEN_DELAY) {
                 int max_shield = player_max_shield(&players[i]);
                 if (players[i].shield < max_shield) {
@@ -10656,6 +10700,9 @@ int main(void) {
 
         // update players
         for (int i = 0; i < activePlayers; i++) {
+            if (players[i].respawn_timer > 0.0f) {
+                continue;
+            }
             if (playerInput[i] == INPUT_TYPE_KEYBOARD) {
                 HandleKeyboardInput(i, dt);
             } else if (playerInput[i] == INPUT_TYPE_GAMEPAD) {
@@ -10786,9 +10833,18 @@ int main(void) {
             cams[i].up = (Vector3){0,1,0};
             cams[i].fovy = 60;
             cams[i].projection = CAMERA_PERSPECTIVE;
-            cams[i].position = players[i].pos;
-            float yr = DEG2RAD*players[i].yaw, pr = DEG2RAD*players[i].pitch;
-            cams[i].target = v_add(players[i].pos, (Vector3){ sinf(-yr)*cosf(pr), sinf(pr), -cosf(yr)*cosf(pr) });
+            if (players[i].respawn_timer > 0.0f) {
+                float yr = DEG2RAD * players[i].death_yaw;
+                Vector3 forward = { sinf(-yr), 0.0f, -cosf(yr) };
+                Vector3 cam_offset = v_mul(forward, -DEATH_CAM_DISTANCE);
+                cams[i].position = v_add(players[i].death_pos,
+                                         v_add(cam_offset, (Vector3){ 0.0f, DEATH_CAM_HEIGHT, 0.0f }));
+                cams[i].target = v_add(players[i].death_pos, (Vector3){ 0.0f, 0.6f, 0.0f });
+            } else {
+                cams[i].position = players[i].pos;
+                float yr = DEG2RAD*players[i].yaw, pr = DEG2RAD*players[i].pitch;
+                cams[i].target = v_add(players[i].pos, (Vector3){ sinf(-yr)*cosf(pr), sinf(pr), -cosf(yr)*cosf(pr) });
+            }
         }
 
         for (int i = 0; i < activePlayers; ++i) {
@@ -10834,7 +10890,15 @@ int main(void) {
                     DrawText(banner_text, banner_x, banner_y, banner_size, banner_color);
                 }
                 draw_hud_bars(&players[i], view_w, view_h);
-                {
+                if (players[i].respawn_timer > 0.0f) {
+                    int seconds_left = (int)ceilf(players[i].respawn_timer);
+                    const char *respawn_text = TextFormat("RESPAWNING IN %d", seconds_left);
+                    int font_size = 36;
+                    int text_w = MeasureText(respawn_text, font_size);
+                    int text_x = (view_w - text_w) / 2;
+                    int text_y = (view_h / 2) - (font_size / 2);
+                    DrawText(respawn_text, text_x, text_y, font_size, WHITE);
+                } else {
                     int cx = view_w / 2;
                     int cy = view_h / 2;
                     int cross = 9;
