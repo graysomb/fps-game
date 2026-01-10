@@ -31,9 +31,9 @@
 - [ ] Optimize `voxel_table_register` for Span-N: Register only the surface shell (faces) to reduce hash collisions, assuming internal volume is implied.
 
 ## Phase 2: Neighbor Discovery (Broadphase Optimization)
-- [ ] Refactor `gather_neighbor_voxels` with a fast-path for `span == 1` (direct 26-neighbor offsets).
-- [ ] Refactor `gather_neighbor_voxels` for `span > 1` to iterate only the surface shell of the voxel's grid bounds, avoiding the internal volume (`O(Span^2)` vs `O(Span^3)`).
-- [ ] Replace `gather_static_voxels_near_point` (used for particle collisions) with a direct 3x3x3 grid lookup around the particle's position, eliminating the large-radius search for Span-N corners.
+- [x] Refactor `gather_neighbor_voxels` with a fast-path for `span == 1` (direct 26-neighbor offsets).
+- [x] Refactor `gather_neighbor_voxels` for `span > 1` to iterate only the surface shell of the voxel's grid bounds, avoiding the internal volume (`O(Span^2)` vs `O(Span^3)`).
+- [x] Replace `gather_static_voxels_near_point` (used for particle collisions) with a direct 3x3x3 grid lookup around the particle's position, eliminating the large-radius search for Span-N corners.
 
 ## Phase 3: Collision Resolution (Solver Simplification)
 - [ ] Simplify `solve_static_collisions` for Span-N: Gather unique static neighbors first, then compute a single aggregate "floor plane" or "wall plane" constraint instead of iterating `resolve_span_static_overlap` for every contacting static voxel.

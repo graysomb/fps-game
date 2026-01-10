@@ -7900,21 +7900,50 @@ static int gather_neighbor_voxels(const Voxel *voxel, int voxel_idx, int *out, i
     int minx, maxx, miny, maxy, minz, maxz;
     voxel_grid_bounds(voxel, &minx, &maxx, &miny, &maxy, &minz, &maxz);
 
-    for (int x = minx - 1; x <= maxx + 1; ++x) {
-        for (int y = miny - 1; y <= maxy + 1; ++y) {
-            for (int z = minz - 1; z <= maxz + 1; ++z) {
+    if (voxel->span <= 1) {
+        int gx = minx;
+        int gy = miny;
+        int gz = minz;
+        for (int dx = -1; dx <= 1; ++dx) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dz = -1; dz <= 1; ++dz) {
+                    if (dx == 0 && dy == 0 && dz == 0) {
+                        continue;
+                    }
+                    int idx = table_get(gx + dx, gy + dy, gz + dz);
+                    if (idx < 0) {
+                        continue;
+                    }
+                    if (!list_contains_index(out, count, idx) && count < max_out) {
+                        out[count++] = idx;
+                    }
+                }
+            }
+        }
+        return count;
+    }
+
+    int x0 = minx - 1;
+    int x1 = maxx + 1;
+    int y0 = miny - 1;
+    int y1 = maxy + 1;
+    int z0 = minz - 1;
+    int z1 = maxz + 1;
+
+    for (int x = x0; x <= x1; ++x) {
+        for (int y = y0; y <= y1; ++y) {
+            for (int z = z0; z <= z1; ++z) {
+                bool inside = (x >= minx && x <= maxx &&
+                               y >= miny && y <= maxy &&
+                               z >= minz && z <= maxz);
+                if (inside) {
+                    continue;
+                }
                 int idx = table_get(x, y, z);
                 if (idx < 0) {
                     continue;
                 }
-                bool seen = false;
-                for (int n = 0; n < count; ++n) {
-                    if (out[n] == idx) {
-                        seen = true;
-                        break;
-                    }
-                }
-                if (!seen && count < max_out) {
+                if (!list_contains_index(out, count, idx) && count < max_out) {
                     out[count++] = idx;
                 }
             }
@@ -7939,27 +7968,18 @@ static bool list_contains_index(const int *list, int count, int value)
 
 static int gather_static_voxels_near_point(Vector3 point, float radius, int *out, int max_out)
 {
+    (void)radius;
     if (!out || max_out <= 0) {
         return 0;
     }
-    float minx = point.x - radius;
-    float maxx = point.x + radius;
-    float miny = point.y - radius;
-    float maxy = point.y + radius;
-    float minz = point.z - radius;
-    float maxz = point.z + radius;
-
-    int gx0 = (int)floorf(minx / VOXEL_SIZE);
-    int gx1 = (int)floorf(maxx / VOXEL_SIZE);
-    int gy0 = (int)floorf(miny / VOXEL_SIZE);
-    int gy1 = (int)floorf(maxy / VOXEL_SIZE);
-    int gz0 = (int)floorf(minz / VOXEL_SIZE);
-    int gz1 = (int)floorf(maxz / VOXEL_SIZE);
+    int gx = (int)floorf(point.x / VOXEL_SIZE);
+    int gy = (int)floorf(point.y / VOXEL_SIZE);
+    int gz = (int)floorf(point.z / VOXEL_SIZE);
 
     int count = 0;
-    for (int z = gz0; z <= gz1; ++z) {
-        for (int y = gy0; y <= gy1; ++y) {
-            for (int x = gx0; x <= gx1; ++x) {
+    for (int z = gz - 1; z <= gz + 1; ++z) {
+        for (int y = gy - 1; y <= gy + 1; ++y) {
+            for (int x = gx - 1; x <= gx + 1; ++x) {
                 int idx = table_get(x, y, z);
                 if (idx < 0 || idx >= voxel_count) {
                     continue;
