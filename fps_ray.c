@@ -147,7 +147,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define VOXEL_CENTER_INDEX 8
 #define VOXEL_PARTICLE_COUNT 9
 #define PBD_MAX_STEP_DT 0.005f
-#define PBD_SUBSTEPS 2
+#define PBD_SUBSTEPS 1
 #define PBD_CONSTRAINT_ITERS 6
 #define COLLISION_RELAXATION 0.99f
 #define COLLISION_CENTROID_ONLY_DT 0.02f
@@ -10414,7 +10414,8 @@ static void HandleGamepadInput(int i, float dt);
 
 int main(void) {
     int countFrame = 0;
-    SetLoggingEnabled(true);
+    SetLoggingEnabled(false);
+    SetTraceLogLevel(LOG_NONE);
     // init window and render textures
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Split-Screen FPS (raylib)");
     SetWindowState(FLAG_WINDOW_RESIZABLE);
@@ -10435,7 +10436,7 @@ int main(void) {
     // main loop
     while (!WindowShouldClose()) {
         if (IsKeyPressed(KEY_F2)) {
-            SetLoggingEnabled(!logsEnabled);
+            //SetLoggingEnabled(!logsEnabled);
         }
         switch (gameState) {
             case GAME_STATE_MENU:
