@@ -10146,10 +10146,69 @@ static Color scale_color(Color c, float scale, unsigned char alpha) {
     return out;
 }
 
-static Texture2D worldGridTexture = { 0 };
+static Texture2D worldFloorTexture = { 0 };
+static Texture2D worldWallTexture = { 0 };
 static Model worldFloorModel = { 0 };
 static Model worldWallModel = { 0 };
 static bool worldVisualsReady = false;
+
+static void draw_crack_branch(Image *img, Color crack, int size,
+                              float x, float y, float angle, float len, int depth) {
+    if (!img || depth <= 0 || len < 1.0f) {
+        return;
+    }
+    int steps = (int)fmaxf(3.0f, len / 2.0f);
+    for (int s = 0; s < steps; ++s) {
+        float seg_len = fmaxf(1.0f, len * 0.15f);
+        int x2 = (int)roundf(x + cosf(angle) * seg_len);
+        int y2 = (int)roundf(y + sinf(angle) * seg_len);
+        if (x2 < 0) x2 = 0;
+        if (y2 < 0) y2 = 0;
+        if (x2 > size - 1) x2 = size - 1;
+        if (y2 > size - 1) y2 = size - 1;
+        ImageDrawLine(img, (int)x, (int)y, x2, y2, crack);
+
+        if (depth > 1 && GetRandomValue(0, 100) < 35) {
+            float branch_angle = angle + ((GetRandomValue(0, 1) == 0) ? 1.0f : -1.0f) * 0.9f;
+            float branch_len = len * 0.5f;
+            draw_crack_branch(img, crack, size,
+                              (float)x2, (float)y2, branch_angle, branch_len, depth - 1);
+        }
+
+        x = (float)x2;
+        y = (float)y2;
+        angle += ((float)GetRandomValue(-25, 25)) * DEG2RAD;
+    }
+}
+
+static Image make_floor_cracked_grid_image(int size, float world_units_per_texture) {
+    Image img = GenImageColor(size, size, (Color){ 170, 170, 170, 255 });
+    int grid_px = (int)roundf((VOXEL_SIZE / world_units_per_texture) * (float)size);
+    if (grid_px < 2) {
+        grid_px = 2;
+    }
+    Color grid = (Color){ 25, 25, 25, 255 };
+    for (int x = 0; x < size; x += grid_px) {
+        ImageDrawLine(&img, x, 0, x, size - 1, grid);
+    }
+    for (int y = 0; y < size; y += grid_px) {
+        ImageDrawLine(&img, 0, y, size - 1, y, grid);
+    }
+
+    Color crack = (Color){ 15, 15, 15, 255 };
+    int crack_count = size / 24;
+    if (crack_count < 8) {
+        crack_count = 8;
+    }
+    for (int c = 0; c < crack_count; ++c) {
+        float angle = (float)GetRandomValue(0, 359) * DEG2RAD;
+        float x = (float)GetRandomValue(0, size - 1);
+        float y = (float)GetRandomValue(0, size - 1);
+        float base_len = (float)GetRandomValue(size / 10, size / 6);
+        draw_crack_branch(&img, crack, size, x, y, angle, base_len, 4);
+    }
+    return img;
+}
 
 static void scale_mesh_texcoords(Mesh *mesh, float scale_u, float scale_v) {
     if (!mesh || !mesh->texcoords) {
@@ -10165,26 +10224,33 @@ static void init_world_visuals(void) {
     if (worldVisualsReady) {
         return;
     }
+    float floor_span = FLOOR_SIZE * 2.0f;
+    float floor_repeat = 12.0f;
+    float world_units_per_texture = floor_span / floor_repeat;
+    Image floor_img = make_floor_cracked_grid_image(512, world_units_per_texture);
+    worldFloorTexture = LoadTextureFromImage(floor_img);
+    UnloadImage(floor_img);
+    SetTextureWrap(worldFloorTexture, TEXTURE_WRAP_REPEAT);
+
     Image grid = GenImageChecked(256, 256, 16, 16,
                                  (Color){ 70, 70, 70, 255 },
                                  (Color){ 90, 90, 90, 255 });
-    worldGridTexture = LoadTextureFromImage(grid);
+    worldWallTexture = LoadTextureFromImage(grid);
     UnloadImage(grid);
-    SetTextureWrap(worldGridTexture, TEXTURE_WRAP_REPEAT);
+    SetTextureWrap(worldWallTexture, TEXTURE_WRAP_REPEAT);
 
-    float floor_span = FLOOR_SIZE * 2.0f;
     Mesh floor_mesh = GenMeshPlane(floor_span, floor_span, 10, 10);
-    scale_mesh_texcoords(&floor_mesh, 12.0f, 12.0f);
+    scale_mesh_texcoords(&floor_mesh, floor_repeat, floor_repeat);
     UploadMesh(&floor_mesh, false);
     worldFloorModel = LoadModelFromMesh(floor_mesh);
-    worldFloorModel.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = worldGridTexture;
+    worldFloorModel.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = worldFloorTexture;
 
     float wall_height = FLOOR_SIZE * 2.0f;
     Mesh wall_mesh = GenMeshPlane(floor_span, wall_height, 10, 10);
     scale_mesh_texcoords(&wall_mesh, 12.0f, 8.0f);
     UploadMesh(&wall_mesh, false);
     worldWallModel = LoadModelFromMesh(wall_mesh);
-    worldWallModel.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = worldGridTexture;
+    worldWallModel.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = worldWallTexture;
 
     worldVisualsReady = true;
 }
@@ -10212,10 +10278,12 @@ static void shutdown_world_visuals(void) {
     }
     UnloadModel(worldFloorModel);
     UnloadModel(worldWallModel);
-    UnloadTexture(worldGridTexture);
+    UnloadTexture(worldFloorTexture);
+    UnloadTexture(worldWallTexture);
     worldFloorModel = (Model){ 0 };
     worldWallModel = (Model){ 0 };
-    worldGridTexture = (Texture2D){ 0 };
+    worldFloorTexture = (Texture2D){ 0 };
+    worldWallTexture = (Texture2D){ 0 };
     worldVisualsReady = false;
 }
 
