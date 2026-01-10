@@ -10148,8 +10148,10 @@ static Color scale_color(Color c, float scale, unsigned char alpha) {
 
 static Texture2D worldFloorTexture = { 0 };
 static Texture2D worldWallTexture = { 0 };
+static Texture2D worldSpaceTexture = { 0 };
 static Model worldFloorModel = { 0 };
 static Model worldWallModel = { 0 };
+static Model worldCeilingModel = { 0 };
 static bool worldVisualsReady = false;
 
 static void draw_crack_branch(Image *img, Color crack, int size,
@@ -10159,9 +10161,12 @@ static void draw_crack_branch(Image *img, Color crack, int size,
     }
     int steps = (int)fmaxf(3.0f, len / 2.0f);
     for (int s = 0; s < steps; ++s) {
-        float seg_len = fmaxf(1.0f, len * 0.15f);
-        int x2 = (int)roundf(x + cosf(angle) * seg_len);
-        int y2 = (int)roundf(y + sinf(angle) * seg_len);
+        float seg_len = fmaxf(1.0f, len * 0.12f);
+        float jitter = ((float)GetRandomValue(-30, 30)) * DEG2RAD;
+        float ang = angle + jitter;
+        float jag = (float)GetRandomValue(-2, 2);
+        int x2 = (int)roundf(x + cosf(ang) * seg_len + jag);
+        int y2 = (int)roundf(y + sinf(ang) * seg_len - jag);
         if (x2 < 0) x2 = 0;
         if (y2 < 0) y2 = 0;
         if (x2 > size - 1) x2 = size - 1;
@@ -10177,7 +10182,7 @@ static void draw_crack_branch(Image *img, Color crack, int size,
 
         x = (float)x2;
         y = (float)y2;
-        angle += ((float)GetRandomValue(-25, 25)) * DEG2RAD;
+        angle += ((float)GetRandomValue(-45, 45)) * DEG2RAD;
     }
 }
 
@@ -10210,6 +10215,62 @@ static Image make_floor_cracked_grid_image(int size, float world_units_per_textu
     return img;
 }
 
+static Image make_space_image(int size) {
+    Image img = GenImageColor(size, size, (Color){ 6, 8, 16, 255 });
+    int star_count = (size * size) / 700;
+    if (star_count < 200) {
+        star_count = 200;
+    }
+    for (int i = 0; i < star_count; ++i) {
+        int x = GetRandomValue(0, size - 1);
+        int y = GetRandomValue(0, size - 1);
+        int r = GetRandomValue(1, 2);
+        unsigned char bright = (unsigned char)GetRandomValue(160, 255);
+        Color star = (Color){ bright, bright, (unsigned char)(bright + 5), 255 };
+        ImageDrawCircle(&img, x, y, r, star);
+        if (GetRandomValue(0, 100) < 20) {
+            Color glow = (Color){ bright, bright, 255, 90 };
+            ImageDrawCircle(&img, x, y, r + 2, glow);
+        }
+    }
+
+    int nebula_count = 4;
+    for (int n = 0; n < nebula_count; ++n) {
+        int cx = GetRandomValue(0, size - 1);
+        int cy = GetRandomValue(0, size - 1);
+        int radius = GetRandomValue(size / 22, size / 14);
+        Color base = (Color){ 35, (unsigned char)GetRandomValue(60, 110), 150, 100 };
+        for (int r = radius; r > 0; r -= 4) {
+            float t = (float)r / (float)radius;
+            Color c = base;
+            c.a = (unsigned char)roundf((float)base.a * t * 0.28f);
+            ImageDrawCircle(&img, cx, cy, r, c);
+        }
+    }
+
+    int galaxy_count = 4;
+    for (int g = 0; g < galaxy_count; ++g) {
+        float angle = (float)GetRandomValue(0, 359) * DEG2RAD;
+        int cx = GetRandomValue(0, size - 1);
+        int cy = GetRandomValue(0, size - 1);
+        int steps = GetRandomValue(size / 6, size / 3);
+        for (int s = 0; s < steps; ++s) {
+            float t = (float)s / (float)steps;
+            float radius = t * (float)(size / 4);
+            float swirl = angle + t * 6.0f;
+            int x = (int)roundf((float)cx + cosf(swirl) * radius);
+            int y = (int)roundf((float)cy + sinf(swirl) * radius);
+            if (x < 0 || x >= size || y < 0 || y >= size) {
+                continue;
+            }
+            Color dust = (Color){ 120, 140, 200, (unsigned char)roundf(140.0f * (1.0f - t)) };
+            ImageDrawCircle(&img, x, y, 2, dust);
+        }
+    }
+
+    return img;
+}
+
 static void scale_mesh_texcoords(Mesh *mesh, float scale_u, float scale_v) {
     if (!mesh || !mesh->texcoords) {
         return;
@@ -10232,6 +10293,11 @@ static void init_world_visuals(void) {
     UnloadImage(floor_img);
     SetTextureWrap(worldFloorTexture, TEXTURE_WRAP_REPEAT);
 
+    Image space_img = make_space_image(512);
+    worldSpaceTexture = LoadTextureFromImage(space_img);
+    UnloadImage(space_img);
+    SetTextureWrap(worldSpaceTexture, TEXTURE_WRAP_REPEAT);
+
     Image grid = GenImageChecked(256, 256, 16, 16,
                                  (Color){ 70, 70, 70, 255 },
                                  (Color){ 90, 90, 90, 255 });
@@ -10252,6 +10318,12 @@ static void init_world_visuals(void) {
     worldWallModel = LoadModelFromMesh(wall_mesh);
     worldWallModel.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = worldWallTexture;
 
+    Mesh ceiling_mesh = GenMeshPlane(floor_span, floor_span, 10, 10);
+    scale_mesh_texcoords(&ceiling_mesh, floor_repeat, floor_repeat);
+    UploadMesh(&ceiling_mesh, false);
+    worldCeilingModel = LoadModelFromMesh(ceiling_mesh);
+    worldCeilingModel.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = worldSpaceTexture;
+
     worldVisualsReady = true;
 }
 
@@ -10270,6 +10342,9 @@ static void draw_world_surfaces(void) {
                 (Vector3){ 0.0f, 0.0f, 1.0f }, 90.0f, (Vector3){ 1.0f, 1.0f, 1.0f }, WHITE);
     DrawModelEx(worldWallModel, (Vector3){ -wall_offset, wall_y, 0.0f },
                 (Vector3){ 0.0f, 0.0f, 1.0f }, -90.0f, (Vector3){ 1.0f, 1.0f, 1.0f }, WHITE);
+
+    DrawModelEx(worldCeilingModel, (Vector3){ 0.0f, wall_height, 0.0f },
+                (Vector3){ 1.0f, 0.0f, 0.0f }, 180.0f, (Vector3){ 1.0f, 1.0f, 1.0f }, WHITE);
 }
 
 static void shutdown_world_visuals(void) {
@@ -10278,12 +10353,16 @@ static void shutdown_world_visuals(void) {
     }
     UnloadModel(worldFloorModel);
     UnloadModel(worldWallModel);
+    UnloadModel(worldCeilingModel);
     UnloadTexture(worldFloorTexture);
     UnloadTexture(worldWallTexture);
+    UnloadTexture(worldSpaceTexture);
     worldFloorModel = (Model){ 0 };
     worldWallModel = (Model){ 0 };
+    worldCeilingModel = (Model){ 0 };
     worldFloorTexture = (Texture2D){ 0 };
     worldWallTexture = (Texture2D){ 0 };
+    worldSpaceTexture = (Texture2D){ 0 };
     worldVisualsReady = false;
 }
 
