@@ -197,6 +197,10 @@ static const float GRID_EPSILON = 1e-4f;
 #define BASE_SHIELD 150
 #define SHIELD_REGEN_DELAY 5.0f
 #define VOXEL_DAMAGE 50
+#define SMUSH_POINT_MULT 4
+#define POINTS_UPDATE_DURATION 0.6f
+#define BULLET_MAX_SPAN 4
+#define BULLET_DAMAGE_SCALE_MAX 3.0f
 #define VOID_INVULN_DURATION 30.0f
 
 // Voxel physics constants
@@ -228,6 +232,9 @@ typedef struct {
     float ammo_recharge_timer;
     float last_shot_time;
     float invuln_timer;
+    int last_points;
+    float points_update_timer;
+    float points_jiggle_phase;
 } Player;
 static Player players[MAX_PLAYERS];
 static int activePlayers = 2;
@@ -1453,7 +1460,16 @@ static Color voxel_display_color(const Voxel *voxel)
     if (debugShowBeliefColors) {
         return voxel_belief_debug_color(voxel);
     }
-    return voxel->color;
+    Color base = voxel->color;
+    if (!voxel->simulate && voxel->activationCooldownFrames > 0) {
+        base = (Color){
+            (unsigned char)clampf(base.r * 0.75f, 0.0f, 255.0f),
+            (unsigned char)clampf(base.g * 0.75f, 0.0f, 255.0f),
+            (unsigned char)clampf(base.b * 0.75f, 0.0f, 255.0f),
+            base.a
+        };
+    }
+    return base;
 }
 
 typedef struct {
@@ -5337,6 +5353,10 @@ static int brush_extent_for_voxel(const Voxel *v);
 static int player_max_health(const Player *p);
 static int player_max_shield(const Player *p);
 static void update_player_ammo(float dt);
+static int player_points(const Player *p);
+static int bullet_span_for_player(const Player *p);
+static int player_bullet_damage(int attacker_index);
+static void update_points_animation(float dt);
 
 // Reset game: players and voxels
 // Pickups
@@ -5544,6 +5564,9 @@ static void ResetGame(void) {
         players[i].ammo_recharge_timer = 0.0f;
         players[i].last_shot_time = -1000.0f;
         players[i].invuln_timer = 0.0f;
+        players[i].last_points = player_points(&players[i]);
+        players[i].points_update_timer = 0.0f;
+        players[i].points_jiggle_phase = 0.0f;
     }
     // clear voxels
     voxel_count = 0;
@@ -5586,19 +5609,19 @@ static void UpdateKdRatio(int player_index) {
     p->kd_ratio = (float)(p->kills + 1) / (p->deaths + 1);
 }
 
-static void apply_damage_to_player(int player_index, int attacker_index, int damage,
+static bool apply_damage_to_player(int player_index, int attacker_index, int damage,
                                    bool award_kill, bool award_debris)
 {
     if (player_index < 0 || player_index >= activePlayers) {
-        return;
+        return false;
     }
     Player *player = &players[player_index];
+    player->last_damage_time = (float)GetTime();
     if (player->invuln_timer > 0.0f) {
-        return;
+        return false;
     }
     int prev_shield = player->shield;
     int prev_health = player->health;
-    player->last_damage_time = (float)GetTime();
     if (player->shield > 0) {
         player->shield -= damage;
         if (player->shield < 0) {
@@ -5651,7 +5674,9 @@ static void apply_damage_to_player(int player_index, int attacker_index, int dam
         player->health = player_max_health(player);
         player->shield = player_max_shield(player);
         player->invuln_timer = 0.0f;
+        return true;
     }
+    return false;
 }
 
 static bool activate_static_neighbors_of_region(int minx, int maxx,
@@ -5897,18 +5922,21 @@ static void update_projectiles(float dt)
         bool handled = false;
         for (int j = 0; j < activePlayers; ++j) {
             Player *pl = &players[j];
+            float bullet_radius = VOXEL_SIZE * 0.5f * (float)(v->span > 0 ? v->span : 1);
+            float hit_extent = PLAYER_SIZE * 0.5f + bullet_radius;
             Vector3 box_min = {
-                pl->pos.x - PLAYER_SIZE * 0.5f,
-                pl->pos.y - PLAYER_SIZE * 0.5f,
-                pl->pos.z - PLAYER_SIZE * 0.5f
+                pl->pos.x - hit_extent,
+                pl->pos.y - hit_extent,
+                pl->pos.z - hit_extent
             };
             Vector3 box_max = {
-                pl->pos.x + PLAYER_SIZE * 0.5f,
-                pl->pos.y + PLAYER_SIZE * 0.5f,
-                pl->pos.z + PLAYER_SIZE * 0.5f
+                pl->pos.x + hit_extent,
+                pl->pos.y + hit_extent,
+                pl->pos.z + hit_extent
             };
             if (segment_intersects_aabb(start, end, box_min, box_max)) {
-                apply_damage_to_player(j, v->owner, VOXEL_DAMAGE, true, false);
+                int damage = player_bullet_damage(v->owner);
+                apply_damage_to_player(j, v->owner, damage, true, false);
                 remove_voxel_index(i);
                 handled = true;
                 break;
@@ -6163,8 +6191,12 @@ static void handle_pbd_projectile_hits(void)
                     --debugSmushLogBudget;
                 }
                 play_sfx(SFX_SMUSH);
-                smushBannerTimer = 1.0f;
-                apply_damage_to_player(j, attacker, VOXEL_DAMAGE, award_kill, award_debris);
+                int span = (v->span > 0) ? v->span : 1;
+                int damage = VOXEL_DAMAGE * span;
+                bool killed = apply_damage_to_player(j, attacker, damage, award_kill, award_debris);
+                if (killed) {
+                    smushBannerTimer = 1.0f;
+                }
                 remove_voxel_index(i);
                 removed = true;
                 break;
@@ -9021,7 +9053,8 @@ static void FireVoxel(int idx) {
     Vector3 dir = { sinf(-yawRad)*cosf(pitchRad), sinf(pitchRad), -cosf(yawRad)*cosf(pitchRad) };
     Vector3 start = v_add(p->pos, v_mul(dir, 0.8f));
     Color col = (p->vType==0? RED : BLUE);
-    int vix = addVoxel(start.x, start.y, start.z, false, true, col, p->vType);
+    int span = bullet_span_for_player(p);
+    int vix = addVoxelSized(start.x, start.y, start.z, false, true, col, p->vType, span);
     if (vix >= 0) {
         Voxel *shot = &voxels[vix];
         Vector3 vel = v_mul(dir, 60.0f);
@@ -9207,6 +9240,59 @@ static int player_max_shield(const Player *p) {
     float ratio = fmaxf(p ? p->kd_ratio : 1.0f, 0.1f);
     int value = (int)roundf((float)BASE_SHIELD / ratio);
     return (value < 1) ? 1 : value;
+}
+
+static int player_points(const Player *p) {
+    if (!p) {
+        return 0;
+    }
+    return p->kills + p->debrisKills * SMUSH_POINT_MULT;
+}
+
+static int bullet_span_for_player(const Player *p) {
+    if (!p) {
+        return 1;
+    }
+    float ratio = fmaxf(p->kd_ratio, 0.1f);
+    int span = (int)roundf(1.0f / ratio);
+    if (span < 1) {
+        span = 1;
+    } else if (span > BULLET_MAX_SPAN) {
+        span = BULLET_MAX_SPAN;
+    }
+    return span;
+}
+
+static int player_bullet_damage(int attacker_index) {
+    if (attacker_index < 0 || attacker_index >= activePlayers) {
+        return VOXEL_DAMAGE;
+    }
+    float scale = fmaxf(players[attacker_index].kd_ratio, 1.0f);
+    if (scale > BULLET_DAMAGE_SCALE_MAX) {
+        scale = BULLET_DAMAGE_SCALE_MAX;
+    }
+    int damage = (int)roundf((float)VOXEL_DAMAGE * scale);
+    return (damage < 1) ? 1 : damage;
+}
+
+static void update_points_animation(float dt) {
+    if (dt <= 0.0f) {
+        return;
+    }
+    for (int i = 0; i < activePlayers; ++i) {
+        int points = player_points(&players[i]);
+        if (points != players[i].last_points) {
+            players[i].last_points = points;
+            players[i].points_update_timer = POINTS_UPDATE_DURATION;
+            players[i].points_jiggle_phase = (float)GetRandomValue(0, 628) * 0.01f;
+        }
+        if (players[i].points_update_timer > 0.0f) {
+            players[i].points_update_timer -= dt;
+            if (players[i].points_update_timer < 0.0f) {
+                players[i].points_update_timer = 0.0f;
+            }
+        }
+    }
 }
 
 static void draw_hud_bars(const Player *p, int viewport_w, int viewport_h) {
@@ -10055,6 +10141,79 @@ static Color scale_color(Color c, float scale, unsigned char alpha) {
     return out;
 }
 
+static Texture2D worldGridTexture = { 0 };
+static Model worldFloorModel = { 0 };
+static Model worldWallModel = { 0 };
+static bool worldVisualsReady = false;
+
+static void scale_mesh_texcoords(Mesh *mesh, float scale_u, float scale_v) {
+    if (!mesh || !mesh->texcoords) {
+        return;
+    }
+    for (int i = 0; i < mesh->vertexCount; ++i) {
+        mesh->texcoords[i * 2 + 0] *= scale_u;
+        mesh->texcoords[i * 2 + 1] *= scale_v;
+    }
+}
+
+static void init_world_visuals(void) {
+    if (worldVisualsReady) {
+        return;
+    }
+    Image grid = GenImageChecked(256, 256, 16, 16,
+                                 (Color){ 70, 70, 70, 255 },
+                                 (Color){ 90, 90, 90, 255 });
+    worldGridTexture = LoadTextureFromImage(grid);
+    UnloadImage(grid);
+    SetTextureWrap(worldGridTexture, TEXTURE_WRAP_REPEAT);
+
+    float floor_span = FLOOR_SIZE * 2.0f;
+    Mesh floor_mesh = GenMeshPlane(floor_span, floor_span, 10, 10);
+    scale_mesh_texcoords(&floor_mesh, 12.0f, 12.0f);
+    UploadMesh(&floor_mesh, false);
+    worldFloorModel = LoadModelFromMesh(floor_mesh);
+    worldFloorModel.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = worldGridTexture;
+
+    float wall_height = FLOOR_SIZE * 2.0f;
+    Mesh wall_mesh = GenMeshPlane(floor_span, wall_height, 10, 10);
+    scale_mesh_texcoords(&wall_mesh, 12.0f, 8.0f);
+    UploadMesh(&wall_mesh, false);
+    worldWallModel = LoadModelFromMesh(wall_mesh);
+    worldWallModel.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = worldGridTexture;
+
+    worldVisualsReady = true;
+}
+
+static void draw_world_surfaces(void) {
+    init_world_visuals();
+    DrawModel(worldFloorModel, (Vector3){ 0.0f, 0.0f, 0.0f }, 1.0f, WHITE);
+
+    float wall_height = FLOOR_SIZE * 2.0f;
+    float wall_y = wall_height * 0.5f;
+    float wall_offset = FLOOR_SIZE;
+    DrawModelEx(worldWallModel, (Vector3){ 0.0f, wall_y, wall_offset },
+                (Vector3){ 1.0f, 0.0f, 0.0f }, -90.0f, (Vector3){ 1.0f, 1.0f, 1.0f }, WHITE);
+    DrawModelEx(worldWallModel, (Vector3){ 0.0f, wall_y, -wall_offset },
+                (Vector3){ 1.0f, 0.0f, 0.0f }, 90.0f, (Vector3){ 1.0f, 1.0f, 1.0f }, WHITE);
+    DrawModelEx(worldWallModel, (Vector3){ wall_offset, wall_y, 0.0f },
+                (Vector3){ 0.0f, 0.0f, 1.0f }, 90.0f, (Vector3){ 1.0f, 1.0f, 1.0f }, WHITE);
+    DrawModelEx(worldWallModel, (Vector3){ -wall_offset, wall_y, 0.0f },
+                (Vector3){ 0.0f, 0.0f, 1.0f }, -90.0f, (Vector3){ 1.0f, 1.0f, 1.0f }, WHITE);
+}
+
+static void shutdown_world_visuals(void) {
+    if (!worldVisualsReady) {
+        return;
+    }
+    UnloadModel(worldFloorModel);
+    UnloadModel(worldWallModel);
+    UnloadTexture(worldGridTexture);
+    worldFloorModel = (Model){ 0 };
+    worldWallModel = (Model){ 0 };
+    worldGridTexture = (Texture2D){ 0 };
+    worldVisualsReady = false;
+}
+
 static Color player_palette_color(int index) {
     static const Color palette[MAX_PLAYERS] = {
         { 230, 80, 80, 255 },
@@ -10292,7 +10451,7 @@ int main(void) {
                     menuCam.projection = CAMERA_PERSPECTIVE;
 
                     BeginMode3D(menuCam);
-                        DrawPlane((Vector3){0,0,0}, (Vector2){FLOOR_SIZE*2, FLOOR_SIZE*2}, DARKGRAY);
+                        draw_world_surfaces();
                         DrawVoxels(menuCam);
                         draw_pickups(menuCam);
                         for (int i = 0; i < activePlayers; i++) {
@@ -10349,7 +10508,7 @@ int main(void) {
                     droneCam.projection = CAMERA_PERSPECTIVE;
                     
                     BeginMode3D(droneCam);
-                        DrawPlane((Vector3){0,0,0}, (Vector2){FLOOR_SIZE*2, FLOOR_SIZE*2}, DARKGRAY);
+                        draw_world_surfaces();
                         DrawVoxels(droneCam);
                         draw_pickups(droneCam);
                         // Draw players
@@ -10400,7 +10559,7 @@ int main(void) {
         update_player_ammo(dt);
         // Check win condition
         for (int i = 0; i < activePlayers; ++i) {
-            if ((players[i].debrisKills * 2 + players[i].kills) >= winningScore) {
+            if (player_points(&players[i]) >= winningScore) {
                 winnerId = i + 1;
                 gameState = GAME_STATE_GAMEOVER;
                 play_sfx(SFX_WIN);
@@ -10557,6 +10716,7 @@ int main(void) {
             rebuild_voxel_hash();
         }
         deactivate_sleeping_voxels();
+        update_points_animation(dt);
         if (debugLogFall) {
             int fall_log_budget = DEBUG_FALL_LOG_BUDGET;
             for (int i = 0; i < voxel_count && fall_log_budget > 0; ++i) {
@@ -10624,7 +10784,7 @@ int main(void) {
             BeginTextureMode(screens[i]);
                 ClearBackground(SKYBLUE);
                 BeginMode3D(cams[i]);
-                    DrawPlane((Vector3){0,0,0}, (Vector2){FLOOR_SIZE*2, FLOOR_SIZE*2}, DARKGRAY);
+                    draw_world_surfaces();
                     DrawVoxels(cams[i]);
                     draw_pickups(cams[i]);
                     draw_players();
@@ -10635,6 +10795,23 @@ int main(void) {
                 DrawText(TextFormat("P%d | Shmush: %d | Kills: %d Deaths: %d",
                                     i + 1, players[i].debrisKills, players[i].kills, players[i].deaths),
                          HUD_PADDING_X, HUD_PADDING_Y, HUD_FONT_SIZE, WHITE);
+                {
+                    int points = player_points(&players[i]);
+                    const char *points_text = TextFormat("PTS %d/%d", points, winningScore);
+                    int points_w = MeasureText(points_text, HUD_FONT_SIZE);
+                    float anim = players[i].points_update_timer / POINTS_UPDATE_DURATION;
+                    int jiggle = 0;
+                    if (anim > 0.0f) {
+                        jiggle = (int)roundf(sinf((float)GetTime() * 12.0f + players[i].points_jiggle_phase) * 3.0f * anim);
+                    }
+                    int points_x = view_w - HUD_PADDING_X - points_w + jiggle;
+                    int points_y = HUD_PADDING_Y + jiggle;
+                    if (anim > 0.0f) {
+                        Color glow = Fade(GOLD, 0.4f + 0.6f * anim);
+                        DrawText(points_text, points_x + 1, points_y + 1, HUD_FONT_SIZE, glow);
+                    }
+                    DrawText(points_text, points_x, points_y, HUD_FONT_SIZE, GOLD);
+                }
                 if (smushBannerTimer > 0.0f) {
                     int banner_size = 48;
                     float alpha = clampf(smushBannerTimer / 1.0f, 0.0f, 1.0f);
@@ -10761,6 +10938,7 @@ int main(void) {
         UnloadMaterial(greedyMaterial);
         greedyMaterialInit = false;
     }
+    shutdown_world_visuals();
     shutdown_sfx();
     CloseWindow();
     if (debugLogFile) {
