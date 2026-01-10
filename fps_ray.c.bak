@@ -80,10 +80,7 @@ static void update_draw_confetti(void) {
 #define MAX_PLAYERS 4
 typedef enum {
     INPUT_TYPE_KEYBOARD,
-    INPUT_TYPE_GAMEPAD,
-    INPUT_TYPE_BOT_EASY,
-    INPUT_TYPE_BOT_MEDIUM,
-    INPUT_TYPE_BOT_HARD
+    INPUT_TYPE_GAMEPAD
 } InputType;
 static InputType playerInput[MAX_PLAYERS] = {
     INPUT_TYPE_KEYBOARD,
@@ -247,17 +244,6 @@ typedef struct {
     float points_jiggle_phase;
 } Player;
 static Player players[MAX_PLAYERS];
-
-typedef struct {
-    float reactionTimer;
-    float pathTimer;
-    float stateTimer;
-    int targetIndex; // -1 for none
-    Vector3 moveTarget;
-    bool hasTarget;
-    bool justBuilt;
-} BotState;
-static BotState botStates[MAX_PLAYERS];
 static int activePlayers = 2;
 static bool randomSpawnEnabled = true;
 static const Vector3 playerSpawnPositions[MAX_PLAYERS] = {
@@ -10588,173 +10574,6 @@ static void HandleGamepadInput(int i, float dt) {
 static void HandleKeyboardInput(int i, float dt);
 static void HandleGamepadInput(int i, float dt);
 
-static void UpdateBot(int playerIdx, float dt) {
-    Player *bot = &players[playerIdx];
-    BotState *bs = &botStates[playerIdx];
-    
-    // Difficulty Settings
-    float reactionTime = 0.5f;
-    float accuracy = 0.8f;
-    bool canBuild = false;
-    bool aggressive = false;
-    
-    if (playerInput[playerIdx] == INPUT_TYPE_BOT_EASY) {
-        reactionTime = 1.0f;
-        accuracy = 0.5f;
-        canBuild = false;
-        aggressive = false;
-    } else if (playerInput[playerIdx] == INPUT_TYPE_BOT_MEDIUM) {
-        reactionTime = 0.5f;
-        accuracy = 0.8f;
-        canBuild = true;
-        aggressive = false;
-    } else if (playerInput[playerIdx] == INPUT_TYPE_BOT_HARD) {
-        reactionTime = 0.1f;
-        accuracy = 0.98f;
-        canBuild = true;
-        aggressive = true;
-    }
-
-    bs->reactionTimer -= dt;
-    bs->pathTimer -= dt;
-    bs->stateTimer -= dt;
-
-    // 1. Find Target (Player or Pickup)
-    Vector3 targetPos = {0};
-    bool targetingEntity = false; 
-    
-    bool needHealth = bot->health < 50;
-    bool needAmmo = bot->ammo <= 0;
-    int bestPickup = -1;
-    float minDistSq = FLT_MAX;
-
-    // Priority: Pickup if needed
-    if (needHealth || needAmmo || (aggressive && bot->ammo < AMMO_MAX)) {
-        for (int i = 0; i < MAX_PICKUPS; i++) {
-            if (!pickups[i].active) continue;
-            if (needHealth && pickups[i].type != PICKUP_HEALTH) continue;
-            if (needAmmo && pickups[i].type != PICKUP_AMMO) continue;
-            
-            float dx = bot->pos.x - pickups[i].pos.x;
-            float dy = bot->pos.y - pickups[i].pos.y;
-            float dz = bot->pos.z - pickups[i].pos.z;
-            float d2 = dx*dx + dy*dy + dz*dz;
-            
-            if (d2 < minDistSq) {
-                minDistSq = d2;
-                bestPickup = i;
-            }
-        }
-    }
-
-    if (bestPickup != -1) {
-        targetPos = pickups[bestPickup].pos;
-        bs->targetIndex = -1;
-    } else {
-        // Find enemy
-        int bestEnemy = -1;
-        minDistSq = FLT_MAX;
-        for (int i = 0; i < activePlayers; i++) {
-            if (i == playerIdx) continue;
-            if (players[i].respawn_timer > 0.0f) continue;
-            
-            float dx = bot->pos.x - players[i].pos.x;
-            float dy = bot->pos.y - players[i].pos.y;
-            float dz = bot->pos.z - players[i].pos.z;
-            float d2 = dx*dx + dy*dy + dz*dz;
-            
-            if (d2 < minDistSq) {
-                minDistSq = d2;
-                bestEnemy = i;
-            }
-        }
-        
-        if (bestEnemy != -1) {
-            bs->targetIndex = bestEnemy;
-            targetPos = players[bestEnemy].pos;
-            targetingEntity = true;
-        } else {
-            // Wander
-            if (bs->stateTimer <= 0) {
-                bs->moveTarget = (Vector3){ 
-                    (float)GetRandomValue((int)(-FLOOR_SIZE), (int)(FLOOR_SIZE)), 
-                    bot->pos.y, 
-                    (float)GetRandomValue((int)(-FLOOR_SIZE), (int)(FLOOR_SIZE)) 
-                };
-                bs->stateTimer = 5.0f;
-            }
-            targetPos = bs->moveTarget;
-            targetingEntity = false;
-        }
-    }
-
-    // 2. Movement Logic
-    Vector3 dir = { targetPos.x - bot->pos.x, 0, targetPos.z - bot->pos.z };
-    float distToTarget = sqrtf(dir.x*dir.x + dir.z*dir.z);
-    
-    // Normalize dir
-    if (distToTarget > 0.01f) {
-        dir.x /= distToTarget;
-        dir.z /= distToTarget;
-    }
-
-    // Look at target
-    if (targetingEntity || bestPickup != -1) {
-        Vector3 lookDir = { targetPos.x - bot->pos.x, targetPos.y - bot->pos.y, targetPos.z - bot->pos.z };
-        float yaw = atan2f(lookDir.x, lookDir.z) * RAD2DEG + 180.0f;
-        float dist = sqrtf(lookDir.x*lookDir.x + lookDir.y*lookDir.y + lookDir.z*lookDir.z);
-        float pitch = asinf(lookDir.y / (dist + 0.001f)) * RAD2DEG;
-        
-        // Simple smoothing
-        bot->yaw += (yaw - bot->yaw) * 10.0f * dt;
-        bot->pitch += (pitch - bot->pitch) * 10.0f * dt;
-        
-        if (targetingEntity) {
-             // Noise
-             bot->yaw += (float)GetRandomValue(-100, 100) * (1.0f - accuracy) * 0.05f;
-             bot->pitch += (float)GetRandomValue(-100, 100) * (1.0f - accuracy) * 0.05f;
-        }
-    }
-
-    // Move
-    float moveSpeed = 1.0f;
-    if (targetingEntity && distToTarget < 5.0f && !needHealth) moveSpeed = 0.0f;
-    
-    if (moveSpeed > 0) {
-        bot->vel.x = dir.x * MOVE_SPEED; // Simple velocity set
-        bot->vel.z = dir.z * MOVE_SPEED;
-    } else {
-        bot->vel.x = 0;
-        bot->vel.z = 0;
-    }
-
-    // 3. Action Logic (Fire / Build)
-    if (targetingEntity && bs->reactionTimer <= 0.0f) {
-         bot->vType = 0; // Bullet
-         FireVoxel(playerIdx);
-         bs->reactionTimer = reactionTime + (float)GetRandomValue(0, 50)/100.0f;
-    }
-    
-    // Building (Panic wall)
-    if (canBuild && !bs->justBuilt && bot->health < 40 && targetingEntity && bot->ammo > 0) {
-        float oldPitch = bot->pitch;
-        bot->pitch = -45.0f; // Look down
-        bot->vType = 1; // Structure
-        FireVoxel(playerIdx);
-        bot->pitch = oldPitch;
-        bs->justBuilt = true;
-        bs->stateTimer = 2.0f; // Cooldown
-    }
-    
-    if (bs->stateTimer <= 0) bs->justBuilt = false;
-    
-    // Jump if stuck (simple)
-    if (moveSpeed > 0 && bot->onGround && GetRandomValue(0, 100) < 5) {
-         bot->vel.y = JUMP_SPEED;
-         bot->onGround = false;
-    }
-}
-
 int main(void) {
     int countFrame = 0;
     SetLoggingEnabled(false);
@@ -11024,8 +10843,6 @@ int main(void) {
                 HandleKeyboardInput(i, dt);
             } else if (playerInput[i] == INPUT_TYPE_GAMEPAD) {
                 HandleGamepadInput(i, dt);
-            } else {
-                UpdateBot(i, dt);
             }
             Player *p = &players[i];
             
@@ -11271,11 +11088,11 @@ int main(void) {
                     
                     DrawText(TextFormat("Active Players: %d (Press +/-)", activePlayers), 100, startY, 20, DARKGRAY);
                     
-                                    const char* inputNames[] = { "Keyboard", "Gamepad", "Bot (Easy)", "Bot (Medium)", "Bot (Hard)" };
-                                    DrawText(TextFormat("Player 1 Input: %s (Press 1)", inputNames[playerInput[0]]), 100, startY + spacing*1, 20, DARKGRAY);
-                                    DrawText(TextFormat("Player 2 Input: %s (Press 2)", inputNames[playerInput[1]]), 100, startY + spacing*2, 20, DARKGRAY);
-                                    DrawText(TextFormat("Player 3 Input: %s (Press 3)", inputNames[playerInput[2]]), 100, startY + spacing*3, 20, DARKGRAY);
-                                    DrawText(TextFormat("Player 4 Input: %s (Press 4)", inputNames[playerInput[3]]), 100, startY + spacing*4, 20, DARKGRAY);                    
+                    DrawText(TextFormat("Player 1 Input: %s (Press 1)", playerInput[0] == INPUT_TYPE_KEYBOARD ? "Keyboard" : "Gamepad"), 100, startY + spacing*1, 20, DARKGRAY);
+                    DrawText(TextFormat("Player 2 Input: %s (Press 2)", playerInput[1] == INPUT_TYPE_KEYBOARD ? "Keyboard" : "Gamepad"), 100, startY + spacing*2, 20, DARKGRAY);
+                    DrawText(TextFormat("Player 3 Input: %s (Press 3)", playerInput[2] == INPUT_TYPE_KEYBOARD ? "Keyboard" : "Gamepad"), 100, startY + spacing*3, 20, DARKGRAY);
+                    DrawText(TextFormat("Player 4 Input: %s (Press 4)", playerInput[3] == INPUT_TYPE_KEYBOARD ? "Keyboard" : "Gamepad"), 100, startY + spacing*4, 20, DARKGRAY);
+                    
                     DrawText(TextFormat("Random Spawn: %s (Press R)", randomSpawnEnabled ? "ON" : "OFF"), 100, startY + spacing*5, 20, DARKGRAY);
                     
                     // New Options
@@ -11308,10 +11125,11 @@ int main(void) {
                 if (IsKeyPressed(KEY_MINUS) || IsKeyPressed(KEY_KP_SUBTRACT)) {
                     activePlayers = clamp_active_players(activePlayers - 1);
                 }
-                        if (IsKeyPressed(KEY_ONE)) playerInput[0] = (InputType)((playerInput[0] + 1) % 5);
-                        if (IsKeyPressed(KEY_TWO)) playerInput[1] = (InputType)((playerInput[1] + 1) % 5);
-                        if (IsKeyPressed(KEY_THREE)) playerInput[2] = (InputType)((playerInput[2] + 1) % 5);
-                        if (IsKeyPressed(KEY_FOUR)) playerInput[3] = (InputType)((playerInput[3] + 1) % 5);                if (IsKeyPressed(KEY_R)) randomSpawnEnabled = !randomSpawnEnabled;
+                if (IsKeyPressed(KEY_ONE)) playerInput[0] = 1 - playerInput[0];
+                if (IsKeyPressed(KEY_TWO)) playerInput[1] = 1 - playerInput[1];
+                if (IsKeyPressed(KEY_THREE)) playerInput[2] = 1 - playerInput[2];
+                if (IsKeyPressed(KEY_FOUR)) playerInput[3] = 1 - playerInput[3];
+                if (IsKeyPressed(KEY_R)) randomSpawnEnabled = !randomSpawnEnabled;
                 
                 // New Inputs
                 if (IsKeyPressed(KEY_LEFT_BRACKET)) {
