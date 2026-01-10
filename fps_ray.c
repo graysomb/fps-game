@@ -5921,6 +5921,9 @@ static void update_projectiles(float dt)
 
         bool handled = false;
         for (int j = 0; j < activePlayers; ++j) {
+            if (v->owner == j) {
+                continue;
+            }
             Player *pl = &players[j];
             float bullet_radius = VOXEL_SIZE * 0.5f * (float)(v->span > 0 ? v->span : 1);
             float hit_extent = PLAYER_SIZE * 0.5f + bullet_radius;
