@@ -156,8 +156,8 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define GLUE_RELAXATION 0.9f
 //#define GLUE_EPS 1e-6f
 #define GLUE_EPS 0.0002f
-#define GLUE_BREAK_STRAIN 0.2f
-#define GLUE_BREAK_HINGE_ANGLE_DEG 10.0f
+#define GLUE_BREAK_STRAIN 0.4f
+#define GLUE_BREAK_HINGE_ANGLE_DEG 20.0f
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 3
 #define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
 #define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
@@ -200,7 +200,7 @@ static const float GRID_EPSILON = 1e-4f;
 #define MELEE_RANGE 2.0f
 #define TETHER_RANGE 800.0f
 #define TETHER_SPRING 200.0f
-#define TETHER_DAMPING 0.0f
+#define TETHER_DAMPING 0.1f
 #define TETHER_THROW_IMPULSE 50.0f
 #define SMUSH_EXPOSED_SPEED 8.0f
 #define SMUSH_POINT_MULT 4
@@ -1520,6 +1520,7 @@ typedef struct {
 } GlueConstraint;
 
 static GlueConstraint glueConstraints[MAX_VOXELS * 48];
+static float glueConstraintPeakViolation[MAX_VOXELS * 48];
 static int glueConstraintCount = 0;
 static uint8_t gluedNeighborCounts[MAX_VOXELS];
 static int gluedNeighborList[MAX_VOXELS][MAX_FACE_NEIGHBORS];
@@ -1534,6 +1535,10 @@ static int freezeQueue[MAX_VOXELS];
 static unsigned char glueClusterVisitedTemp[MAX_VOXELS];
 static int glueAdjacencyDirtyCount = 0;
 static bool glueAdjacencyDirtyAll = true;
+
+static void reset_glue_constraint_peaks(void) {
+    memset(glueConstraintPeakViolation, 0, sizeof(glueConstraintPeakViolation));
+}
 
 static void mark_glue_adjacency_dirty_for_voxel(int voxel_idx) {
     if (glueAdjacencyDirtyAll) {
@@ -6313,6 +6318,14 @@ static void integrate_particles(float dt) {
             p->vel = v_mul(p->vel, VELOCITY_DAMPING);
             Vector3 step = v_mul(p->vel, dt);
             Vector3 accel = v_mul(gravity, dt_sq);
+            // if (tether_player >= 0) {
+            //      Vector3 tether_delta = v_sub(tether_target, p->predicted_pos);
+            //      Vector3 tether_accel = v_mul(v_norm(tether_delta), TETHER_SPRING);
+            //      accel = v_add(v_mul(tether_accel, dt_sq),accel);
+            //      float tether_damp = clampf(TETHER_DAMPING * dt, 0.0f, 0.9f);
+            //      p->vel = v_mul(p->vel, 1.0f-tether_damp);
+            // }
+
             p->predicted_pos = v_add(p->predicted_pos, v_add(step, accel));
 
             if (tether_player >= 0) {
@@ -6543,6 +6556,7 @@ static void solve_voxel_glue(bool allow_break) {
         if (!coarse->simulate && !fine->simulate) {
             continue;
         }
+        bool tethered = (tetherTag[gc->coarseVoxel] > 0 || tetherTag[gc->fineVoxel] > 0);
 
         Particle *coarseParticles[4];
         float weights[4];
@@ -6607,6 +6621,11 @@ static void solve_voxel_glue(bool allow_break) {
         float violation = v_length(C);
         float rest_edge_min = fminf(coarse->rest_edge, fine->rest_edge);
         float break_distance = GLUE_BREAK_STRAIN * rest_edge_min;
+        if (!allow_break && tethered) {
+            if (violation > glueConstraintPeakViolation[i]) {
+                glueConstraintPeakViolation[i] = violation;
+            }
+        }
         bool hinge_break = false;
         if (allow_break && hinge_break_angle > 0.0f) {
             Vector3 n_coarse = { 0.0f, 0.0f, 0.0f };
@@ -6620,7 +6639,11 @@ static void solve_voxel_glue(bool allow_break) {
                 }
             }
         }
-        if (allow_break && (violation > break_distance || hinge_break)) {
+        float max_violation = violation;
+        if (tethered && glueConstraintPeakViolation[i] > max_violation) {
+            max_violation = glueConstraintPeakViolation[i];
+        }
+        if (allow_break && (max_violation > break_distance || hinge_break)) {
             if (debugLogGlue && debugGlueBreakLogBudget > 0) {
                 TraceLog(LOG_DEBUG,
                          "[GlueBreak] pair=(%d,%d) spans=(%d,%d) violation=%.5f break=%.5f hinge=%d uvPred=(%.3f,%.3f) rawUV=(%.3f,%.3f) baryValid=%s weights=(%.3f,%.3f,%.3f,%.3f) coarsePos=(%.2f,%.2f,%.2f) finePos=(%.2f,%.2f,%.2f)",
@@ -7756,12 +7779,10 @@ static void update_dynamic_activation_beliefs(void)
 {
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
-        if (tetherTag[i] > 0) {
-            voxel->activationBelief = 1.0f;
+        bool tethered = (tetherTag[i] > 0);
+        if (tethered) {
             voxel->activationCooldownFrames = 0;
-            continue;
-        }
-        if (voxel->activationCooldownFrames > 0) {
+        } else if (voxel->activationCooldownFrames > 0) {
             voxel->activationCooldownFrames--;
         }
         if (!voxel->simulate) {
@@ -9050,6 +9071,7 @@ void simulate_voxel_pbd(float dt) {
         if (debugLogVoxelBlowup) {
             debugBlowupLogBudget = 32;
         }
+        reset_glue_constraint_peaks();
         integrate_particles(sub_dt);
         solve_static_collisions(sub_dt);
         solve_dynamic_collisions(sub_dt);
@@ -9058,6 +9080,7 @@ void simulate_voxel_pbd(float dt) {
             rebuild_voxel_hash();
             rebuild_all_voxel_surfaces();
             rebuild_glue_constraints();
+            reset_glue_constraint_peaks();
             meshDirty = true;
         }
 
@@ -9076,6 +9099,7 @@ void simulate_voxel_pbd(float dt) {
             rebuild_voxel_hash();
             rebuild_all_voxel_surfaces();
             rebuild_glue_constraints();
+            reset_glue_constraint_peaks();
             meshDirty = true;
         }
         update_particle_velocities(sub_dt);
