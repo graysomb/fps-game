@@ -126,7 +126,8 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define ACTIVATION_GLUE_WEIGHT     0.1f
 #define ACTIVATION_GLUE_REF_SPEED  3.0f
 #define ACTIVATION_DYNAMIC_WEIGHT  0.4f
-#define ACTIVATION_TYPE0_BULLET_BELIEF 20.0f
+#define ACTIVATION_TYPE0_BULLET_BELIEF 0.3f
+#define ACTIVATION_TETHER_BELIEF 20.0f
 #define FREEZE_BELIEF_IMPORTANCE   0.9f
 #define ACTIVATION_HYSTERESIS      0.1f
 #define FRICTION       400.0f    // ground friction deceleration
@@ -185,14 +186,14 @@ static const float GRID_EPSILON = 1e-4f;
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 1.0f
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.4f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.4f
-#define VOXEL_DEACTIVATION_FRAMES 50
+#define VOXEL_DEACTIVATION_FRAMES 5
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
 #define STATIC_RESTORE_SEARCH_RADIUS 2*1
 #define DEBRIS_ACTIVATION_COOLDOWN_FRAMES (60 * 10)
 #define STATIC_REBUILD_ACTIVATION_COOLDOWN_FRAMES (60 * 10)
 
 // KD-stats constants
-#define VOXEL_DAMAGE 50
+#define VOXEL_DAMAGE 10
 #define MATTER_MAX_DEFAULT 100.0f
 #define MATTER_MELEE_HARVEST 10.0f
 #define MATTER_SHOT_COST 1.0f
@@ -9550,7 +9551,7 @@ static void start_tether(int idx) {
     Voxel *hit = &voxels[hit_id];
     Vector3 hit_pos = hit->pos;
     if (!hit->simulate) {
-        activate_static_voxel_for_tether(hit_id, idx, ACTIVATION_TYPE0_BULLET_BELIEF);
+        activate_static_voxel_for_tether(hit_id, idx, ACTIVATION_TETHER_BELIEF);
     }
     int tether_idx = hit->simulate ? hit_id : find_closest_dynamic_voxel(hit_pos, 2.5f);
     if (tether_idx < 0 || tether_idx >= voxel_count) {
