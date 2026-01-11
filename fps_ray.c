@@ -109,11 +109,6 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define HUD_BAR_THICKNESS  30
 #define HUD_BAR_SPACING     8
 #define HUD_BAR_TEXT_SIZE  22
-#define HUD_BULLET_TEXT_SIZE 78
-#define AMMO_MAX 6
-#define AMMO_RECHARGE_SECONDS 60.0f
-#define HUD_AMMO_SIZE 12
-#define HUD_AMMO_GAP 4
 #define BULLET_COOLDOWN_SECONDS 0.25f
 #define ACCELERATION   400.0f    // horizontal acceleration
 #define FREEZE_GROUND_WEIGHT       0.9f
@@ -131,7 +126,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define ACTIVATION_GLUE_WEIGHT     0.1f
 #define ACTIVATION_GLUE_REF_SPEED  3.0f
 #define ACTIVATION_DYNAMIC_WEIGHT  0.4f
-#define ACTIVATION_TYPE0_BULLET_BELIEF .3f
+#define ACTIVATION_TYPE0_BULLET_BELIEF 20.0f
 #define FREEZE_BELIEF_IMPORTANCE   0.9f
 #define ACTIVATION_HYSTERESIS      0.1f
 #define FRICTION       400.0f    // ground friction deceleration
@@ -169,7 +164,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define RECYCLE_DYNAMIC_MAX_FRAMES (60 * 5)
 #define RECYCLE_STATIC_RESTORE_INTERVAL 1
 #define RECYCLE_STATIC_RESTORE_DELAY (60 * 30)
-#define RECYCLE_OWNED_STATIC_MAX_FRAMES (60 * 20)
+#define RECYCLE_OWNED_STATIC_MAX_FRAMES (60 * 60)
 #define STATIC_DEBRIS_OWNER (-2)
 #define VOXEL_SPLIT_STRAIN_THRESHOLD 2.1f
 #define VOXEL_SPLIT_SHEAR_THRESHOLD 2.1f
@@ -190,17 +185,24 @@ static const float GRID_EPSILON = 1e-4f;
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 1.0f
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.4f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.4f
-#define VOXEL_DEACTIVATION_FRAMES 5
+#define VOXEL_DEACTIVATION_FRAMES 50
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
 #define STATIC_RESTORE_SEARCH_RADIUS 2*1
 #define DEBRIS_ACTIVATION_COOLDOWN_FRAMES (60 * 10)
 #define STATIC_REBUILD_ACTIVATION_COOLDOWN_FRAMES (60 * 10)
 
 // KD-stats constants
-#define BASE_HEALTH 100
-#define BASE_SHIELD 150
-#define SHIELD_REGEN_DELAY 5.0f
 #define VOXEL_DAMAGE 50
+#define MATTER_MAX_DEFAULT 100.0f
+#define MATTER_MELEE_HARVEST 10.0f
+#define MATTER_SHOT_COST 1.0f
+#define MATTER_BUILD_COST 10.0f
+#define MELEE_RANGE 2.0f
+#define TETHER_RANGE 800.0f
+#define TETHER_SPRING 200.0f
+#define TETHER_DAMPING 0.0f
+#define TETHER_THROW_IMPULSE 50.0f
+#define SMUSH_EXPOSED_SPEED 8.0f
 #define SMUSH_POINT_MULT 4
 #define POINTS_UPDATE_DURATION 0.6f
 #define BULLET_MAX_SPAN 4
@@ -229,24 +231,28 @@ typedef struct {
     float pitch_vel;
     Vector3 vel;
     bool onGround;
-    int vType;
     int kills;
     int debrisKills;
     int deaths;
     float kd_ratio;
-    int health;
-    int shield;
+    float matter;
+    float matterMax;
+    bool isExposed;
     float last_damage_time;
-    int ammo;
-    float ammo_recharge_timer;
     float last_shot_time;
     float invuln_timer;
     float respawn_timer;
     int last_points;
     float points_update_timer;
     float points_jiggle_phase;
+    float matter_flash_timer;
+    float exposed_flash_timer;
+    bool tetherHolding;
+    int tetherVoxel;
 } Player;
 static Player players[MAX_PLAYERS];
+static int tetherTag[MAX_VOXELS];
+static Vector3 tetherTargetByPlayer[MAX_PLAYERS];
 
 typedef struct {
     float reactionTimer;
@@ -5359,13 +5365,14 @@ static int first_voxel_hit(Ray ray, float t_max, int ignore_id);
 static void UpdateKdRatio(int player_index);
 static Vector3 pick_player_spawn(int player_index);
 static int brush_extent_for_voxel(const Voxel *v);
-static int player_max_health(const Player *p);
-static int player_max_shield(const Player *p);
-static void update_player_ammo(float dt);
+static float player_max_matter(const Player *p);
+static void add_player_matter(Player *p, float amount);
 static int player_points(const Player *p);
 static int bullet_span_for_player(const Player *p);
 static int player_bullet_damage(int attacker_index);
 static void update_points_animation(float dt);
+static Color player_palette_color(int index);
+static Vector3 player_hand_position(const Player *p);
 
 // Reset game: players and voxels
 // Pickups
@@ -5442,10 +5449,10 @@ static void update_pickups(float dt) {
             if (distSq < hitRad*hitRad) {
                 // Collect
                 if (p->type == PICKUP_AMMO) {
-                    pl->ammo = AMMO_MAX;
+                    add_player_matter(pl, 25.0f);
                     play_sfx(SFX_SHIELD); 
                 } else if (p->type == PICKUP_HEALTH) {
-                    pl->health = BASE_HEALTH;
+                    add_player_matter(pl, 50.0f);
                     play_sfx(SFX_SHIELD);
                 } else if (p->type == PICKUP_VOID) {
                     pl->invuln_timer = fmaxf(pl->invuln_timer, VOID_INVULN_DURATION);
@@ -5563,22 +5570,24 @@ static void ResetGame(void) {
         players[i].pitch_vel = 0;
         players[i].vel = (Vector3){0,0,0};
         players[i].onGround = true;
-        players[i].vType = 0;
         players[i].kills = 0;
         players[i].debrisKills = 0;
         players[i].deaths = 0;
         UpdateKdRatio(i);
-        players[i].health = BASE_HEALTH;
-        players[i].shield = BASE_SHIELD;
+        players[i].matterMax = MATTER_MAX_DEFAULT;
+        players[i].matter = players[i].matterMax;
+        players[i].isExposed = false;
         players[i].last_damage_time = 0.0f;
-        players[i].ammo = AMMO_MAX;
-        players[i].ammo_recharge_timer = 0.0f;
         players[i].last_shot_time = -1000.0f;
         players[i].invuln_timer = 0.0f;
         players[i].respawn_timer = 0.0f;
         players[i].last_points = player_points(&players[i]);
         players[i].points_update_timer = 0.0f;
         players[i].points_jiggle_phase = 0.0f;
+        players[i].matter_flash_timer = 0.0f;
+        players[i].exposed_flash_timer = 0.0f;
+        players[i].tetherHolding = false;
+        players[i].tetherVoxel = -1;
     }
     // clear voxels
     voxel_count = 0;
@@ -5600,101 +5609,131 @@ static void ResetGame(void) {
 
 }
 
-static void update_player_ammo(float dt) {
-    for (int i = 0; i < activePlayers; ++i) {
-        Player *p = &players[i];
-        if (p->respawn_timer > 0.0f) {
-            continue;
-        }
-        if (p->ammo >= AMMO_MAX) {
-            p->ammo = AMMO_MAX;
-            p->ammo_recharge_timer = 0.0f;
-            continue;
-        }
-        p->ammo_recharge_timer += dt;
-        while (p->ammo < AMMO_MAX && p->ammo_recharge_timer >= AMMO_RECHARGE_SECONDS) {
-            p->ammo++;
-            p->ammo_recharge_timer -= AMMO_RECHARGE_SECONDS;
-        }
-    }
-}
-
 static void UpdateKdRatio(int player_index) {
     Player *p = &players[player_index];
     p->kd_ratio = (float)(p->kills + 1) / (p->deaths + 1);
 }
 
-static bool apply_damage_to_player(int player_index, int attacker_index, int damage,
-                                   bool award_kill, bool award_debris)
+static void add_player_matter(Player *p, float amount) {
+    if (!p) {
+        return;
+    }
+    float max_matter = player_max_matter(p);
+    p->matter = clampf(p->matter + amount, 0.0f, max_matter);
+    if (p->matter > 0.0f) {
+        p->isExposed = false;
+    }
+}
+
+static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float activationBelief) {
+    static UnitVoxelBuffer buffer;
+    unit_voxel_buffer_clear(&buffer);
+    refresh_static_voxel_beliefs();
+
+    if (voxel_idx < 0 || voxel_idx >= voxel_count) {
+        return false;
+    }
+    Voxel *seed = &voxels[voxel_idx];
+    if (seed->simulate || seed->span != 1 || seed->pendingActivation) {
+        return false;
+    }
+
+    int previousCount = buffer.count;
+    int added = collect_static_activation_cluster(voxel_idx, activator,
+                                                  seed->gx, seed->gy, seed->gz,
+                                                  0.0f,
+                                                  &buffer);
+    if (added <= 0) {
+        rollback_activation_buffer(&buffer, previousCount);
+        return false;
+    }
+    float clusterBelief = compute_cluster_freeze_belief(&buffer, previousCount);
+    if (!dynamic_belief_overcomes_static(activationBelief, clusterBelief)) {
+        rollback_activation_buffer(&buffer, previousCount);
+        return false;
+    }
+
+    remove_buffered_static_voxels(&buffer);
+    emit_multiscale_voxels_from_units(&buffer, false, true, -1);
+    rebuild_voxel_hash();
+    rebuild_all_voxel_surfaces();
+    rebuild_glue_constraints();
+    refresh_static_voxel_beliefs();
+    meshDirty = true;
+    return true;
+}
+
+static void kill_player(int player_index, int attacker_index,
+                        bool award_kill, bool award_debris)
 {
     if (player_index < 0 || player_index >= activePlayers) {
-        return false;
+        return;
     }
     Player *player = &players[player_index];
     if (player->respawn_timer > 0.0f) {
-        return false;
+        return;
+    }
+    if (debugLogSmush && debugLogSmushDeaths) {
+        TraceLog(LOG_WARNING,
+                 "[Smush] death victim=%d attacker=%d awardKill=%d awardDebris=%d matter=%.2f exposed=%d",
+                 player_index, attacker_index,
+                 award_kill ? 1 : 0, award_debris ? 1 : 0,
+                 player->matter, player->isExposed ? 1 : 0);
+    }
+    player->deaths++;
+    UpdateKdRatio(player_index);
+    if (attacker_index >= 0 && attacker_index < activePlayers && attacker_index != player_index) {
+        if (award_kill) {
+            players[attacker_index].kills++;
+            UpdateKdRatio(attacker_index);
+            play_sfx(SFX_KILL);
+        }
+        if (award_debris) {
+            players[attacker_index].debrisKills++;
+            if (debugLogSmush && debugLogSmushDeaths) {
+                TraceLog(LOG_INFO,
+                         "[Smush] credit attacker=%d victim=%d debrisKills=%d",
+                         attacker_index, player_index, players[attacker_index].debrisKills);
+            }
+        }
+    }
+    play_sfx(SFX_DEATH);
+    player->death_pos = player->pos;
+    player->death_yaw = player->yaw;
+    player->vel = (Vector3){ 0, 0, 0 };
+    player->onGround = true;
+    player->matter = 0.0f;
+    player->isExposed = true;
+    player->exposed_flash_timer = 0.35f;
+    player->invuln_timer = 0.0f;
+    player->respawn_timer = PLAYER_RESPAWN_TIME;
+    player->tetherHolding = false;
+    player->tetherVoxel = -1;
+}
+
+static void apply_matter_damage(int player_index, int attacker_index, float damage)
+{
+    if (player_index < 0 || player_index >= activePlayers) {
+        return;
+    }
+    Player *player = &players[player_index];
+    if (player->respawn_timer > 0.0f) {
+        return;
     }
     player->last_damage_time = (float)GetTime();
-    if (player->invuln_timer > 0.0f) {
-        return false;
+    if (player->invuln_timer > 0.0f || player->isExposed) {
+        return;
     }
-    int prev_shield = player->shield;
-    int prev_health = player->health;
-    if (player->shield > 0) {
-        player->shield -= damage;
-        if (player->shield < 0) {
-            player->health += player->shield;
-            player->shield = 0;
-        }
-    } else {
-        player->health -= damage;
+    player->matter = fmaxf(0.0f, player->matter - damage);
+    player->matter_flash_timer = 0.2f;
+    play_sfx(SFX_IMPACT);
+    if (player->matter <= 0.0f) {
+        player->isExposed = true;
+        player->exposed_flash_timer = 0.35f;
     }
-
-    if (player->shield < prev_shield && prev_shield > 0) {
-        play_sfx(SFX_SHIELD);
-    } else if (player->health < prev_health) {
-        play_sfx(SFX_IMPACT);
+    if (attacker_index >= 0 && attacker_index < activePlayers && attacker_index != player_index) {
+        players[attacker_index].last_damage_time = (float)GetTime();
     }
-
-    if (player->health <= 0) {
-        if (debugLogSmush && debugLogSmushDeaths) {
-            TraceLog(LOG_WARNING,
-                     "[Smush] death victim=%d attacker=%d awardKill=%d awardDebris=%d hp=%d shield=%d",
-                     player_index, attacker_index,
-                     award_kill ? 1 : 0, award_debris ? 1 : 0,
-                     player->health, player->shield);
-        }
-        player->deaths++;
-        UpdateKdRatio(player_index);
-        if (attacker_index >= 0 && attacker_index < activePlayers && attacker_index != player_index) {
-            if (award_kill) {
-                players[attacker_index].kills++;
-                UpdateKdRatio(attacker_index);
-                play_sfx(SFX_KILL);
-            }
-            if (award_debris) {
-                players[attacker_index].debrisKills++;
-                if (debugLogSmush && debugLogSmushDeaths) {
-                    TraceLog(LOG_INFO,
-                             "[Smush] credit attacker=%d victim=%d debrisKills=%d",
-                             attacker_index, player_index, players[attacker_index].debrisKills);
-                }
-            }
-        }
-        play_sfx(SFX_DEATH);
-        player->death_pos = player->pos;
-        player->death_yaw = player->yaw;
-        player->vel = (Vector3){ 0, 0, 0 };
-        player->onGround = true;
-        player->health = 0;
-        player->shield = 0;
-        player->ammo = AMMO_MAX;
-        player->ammo_recharge_timer = 0.0f;
-        player->invuln_timer = 0.0f;
-        player->respawn_timer = PLAYER_RESPAWN_TIME;
-        return true;
-    }
-    return false;
 }
 
 static bool activate_static_neighbors_of_region(int minx, int maxx,
@@ -5947,6 +5986,9 @@ static void update_projectiles(float dt)
             if (v->owner == j) {
                 continue;
             }
+            if (v->activator == j) {
+                continue;
+            }
             Player *pl = &players[j];
             float bullet_radius = VOXEL_SIZE * 0.5f * (float)(v->span > 0 ? v->span : 1);
             float hit_extent = PLAYER_SIZE * 0.5f + bullet_radius;
@@ -5962,7 +6004,7 @@ static void update_projectiles(float dt)
             };
             if (segment_intersects_aabb(start, end, box_min, box_max)) {
                 int damage = player_bullet_damage(v->owner);
-                apply_damage_to_player(j, v->owner, damage, true, false);
+                apply_matter_damage(j, v->owner, (float)damage);
                 remove_voxel_index(i);
                 handled = true;
                 break;
@@ -6182,7 +6224,7 @@ static void handle_pbd_projectile_hits(void)
         bool glued_to_static = dynamic_voxel_glued_to_static(i);
         bool removed = false;
         for (int j = 0; j < activePlayers; ++j) {
-            if (v->owner == j) {
+            if (v->owner == j || v->activator == j) {
                 continue;
             }
             float dx = v->pos.x - players[j].pos.x;
@@ -6219,11 +6261,14 @@ static void handle_pbd_projectile_hits(void)
                     --debugSmushLogBudget;
                 }
                 play_sfx(SFX_SMUSH);
+                float speed = v_length(v->vel);
                 int span = (v->span > 0) ? v->span : 1;
-                int damage = VOXEL_DAMAGE * span;
-                bool killed = apply_damage_to_player(j, attacker, damage, award_kill, award_debris);
-                if (killed) {
+                float damage = (float)(VOXEL_DAMAGE * span);
+                if (speed >= SMUSH_EXPOSED_SPEED && players[j].isExposed) {
+                    kill_player(j, attacker, award_kill, award_debris);
                     smushBannerTimer = 1.0f;
+                } else {
+                    apply_matter_damage(j, attacker, damage);
                 }
                 remove_voxel_index(i);
                 removed = true;
@@ -6247,6 +6292,13 @@ static void integrate_particles(float dt) {
             continue;
         }
 
+        int tether_player = -1;
+        Vector3 tether_target = { 0.0f, 0.0f, 0.0f };
+        if (tetherTag[i] > 0) {
+            tether_player = tetherTag[i] - 1;
+            tether_target = tetherTargetByPlayer[tether_player];
+        }
+
         for (int j = 0; j < VOXEL_PARTICLE_COUNT; ++j) {
             Particle *p = voxel_particle_at(voxel, j);
 
@@ -6262,6 +6314,15 @@ static void integrate_particles(float dt) {
             Vector3 step = v_mul(p->vel, dt);
             Vector3 accel = v_mul(gravity, dt_sq);
             p->predicted_pos = v_add(p->predicted_pos, v_add(step, accel));
+
+            if (tether_player >= 0) {
+                Vector3 tether_delta = v_sub(tether_target, p->predicted_pos);
+                Vector3 tether_accel = v_mul(tether_delta, TETHER_SPRING);
+                p->predicted_pos = v_add(p->predicted_pos, v_mul(tether_accel, dt_sq));
+                p->vel = v_add(p->vel, v_mul(tether_accel, dt));
+                float tether_damp = clampf(TETHER_DAMPING * dt, 0.0f, 0.9f);
+                p->vel = v_mul(p->vel, 1.0f - tether_damp);
+            }
         }
     }
 }
@@ -7695,6 +7756,11 @@ static void update_dynamic_activation_beliefs(void)
 {
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
+        if (tetherTag[i] > 0) {
+            voxel->activationBelief = 1.0f;
+            voxel->activationCooldownFrames = 0;
+            continue;
+        }
         if (voxel->activationCooldownFrames > 0) {
             voxel->activationCooldownFrames--;
         }
@@ -9071,44 +9137,31 @@ static void FireVoxel(int idx) {
     if (now - p->last_shot_time < BULLET_COOLDOWN_SECONDS) {
         return;
     }
-    if (p->vType == 1 || p->vType == 2) {
-        if (p->ammo <= 0) {
-            return;
-        }
-        p->ammo--;
+    if (p->matter < MATTER_SHOT_COST || p->isExposed) {
+        return;
     }
+    p->matter = fmaxf(0.0f, p->matter - MATTER_SHOT_COST);
     float yawRad = DEG2RAD * p->yaw;
     float pitchRad = DEG2RAD * p->pitch;
     Vector3 dir = { sinf(-yawRad)*cosf(pitchRad), sinf(pitchRad), -cosf(yawRad)*cosf(pitchRad) };
     Vector3 start = v_add(p->pos, v_mul(dir, 0.8f));
-    Color col = (p->vType==0? RED : BLUE);
+    Color col = player_palette_color(idx);
     int span = bullet_span_for_player(p);
-    int vix = addVoxelSized(start.x, start.y, start.z, false, true, col, p->vType, span);
+    int vix = addVoxelSized(start.x, start.y, start.z, false, true, col, 0, span);
     if (vix >= 0) {
         Voxel *shot = &voxels[vix];
         Vector3 vel = v_mul(dir, 60.0f);
         shot->vel = vel;
         shot->owner = idx;
         shot->activator = idx;
-        if (p->vType == 0) {
-            shot->isBullet = true;
-            shot->glueEligible = false;
-        }
+        shot->isBullet = true;
+        shot->glueEligible = false;
         for (int i = 0; i < 8; ++i) {
             shot->particles[i].vel = vel;
         }
         play_sfx(SFX_FIRE);
     }
     p->last_shot_time = now;
-}
-
-static const char *bullet_type_symbol(int type) {
-    switch (type) {
-        case 0: return "O";
-        case 1: return "-";
-        case 2: return "+";
-        default: return "?";
-    }
 }
 
 static int clamp_active_players(int count) {
@@ -9259,16 +9312,11 @@ static int brush_extent_for_voxel(const Voxel *v) {
     return extent;
 }
 
-static int player_max_health(const Player *p) {
-    float ratio = fmaxf(p ? p->kd_ratio : 1.0f, 0.1f);
-    int value = (int)roundf((float)BASE_HEALTH / ratio);
-    return (value < 1) ? 1 : value;
-}
-
-static int player_max_shield(const Player *p) {
-    float ratio = fmaxf(p ? p->kd_ratio : 1.0f, 0.1f);
-    int value = (int)roundf((float)BASE_SHIELD / ratio);
-    return (value < 1) ? 1 : value;
+static float player_max_matter(const Player *p) {
+    if (!p) {
+        return MATTER_MAX_DEFAULT;
+    }
+    return (p->matterMax > 0.0f) ? p->matterMax : MATTER_MAX_DEFAULT;
 }
 
 static int player_points(const Player *p) {
@@ -9280,9 +9328,6 @@ static int player_points(const Player *p) {
 
 static int bullet_span_for_player(const Player *p) {
     if (!p) {
-        return 1;
-    }
-    if (p->vType != 0) {
         return 1;
     }
     float ratio = fmaxf(p->kd_ratio, 0.1f);
@@ -9327,102 +9372,314 @@ static void update_points_animation(float dt) {
     }
 }
 
-static void draw_hud_bars(const Player *p, int viewport_w, int viewport_h) {
+static Vector3 player_forward(const Player *p) {
+    float yawRad = DEG2RAD * p->yaw;
+    float pitchRad = DEG2RAD * p->pitch;
+    Vector3 dir = { sinf(-yawRad) * cosf(pitchRad), sinf(pitchRad), -cosf(yawRad) * cosf(pitchRad) };
+    return v_norm(dir);
+}
+
+static Vector3 player_hand_position(const Player *p) {
+    Vector3 dir = player_forward(p);
+    return v_add(p->pos, v_add(v_mul(dir, 1.0f), (Vector3){ 0.0f, 0.35f, 0.0f }));
+}
+
+static int find_closest_dynamic_voxel(Vector3 pos, float radius) {
+    float best = radius * radius;
+    int best_idx = -1;
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (!v->simulate || v->type != 0 || v->isBullet) {
+            continue;
+        }
+        Vector3 delta = v_sub(v->pos, pos);
+        float d2 = v_dot(delta, delta);
+        if (d2 <= best) {
+            best = d2;
+            best_idx = i;
+        }
+    }
+    return best_idx;
+}
+
+static void perform_melee(int idx) {
+    Player *p = &players[idx];
+    if (p->respawn_timer > 0.0f) {
+        return;
+    }
+    Vector3 dir = player_forward(p);
+    Vector3 start = p->pos;
+    Vector3 end = v_add(start, v_mul(dir, MELEE_RANGE));
+    for (int j = 0; j < activePlayers; ++j) {
+        if (j == idx || players[j].respawn_timer > 0.0f) {
+            continue;
+        }
+        float hit_extent = PLAYER_SIZE * 0.5f;
+        Vector3 box_min = {
+            players[j].pos.x - hit_extent,
+            players[j].pos.y - hit_extent,
+            players[j].pos.z - hit_extent
+        };
+        Vector3 box_max = {
+            players[j].pos.x + hit_extent,
+            players[j].pos.y + hit_extent,
+            players[j].pos.z + hit_extent
+        };
+        if (segment_intersects_aabb(start, end, box_min, box_max)) {
+            players[j].vel = v_add(players[j].vel, v_mul(dir, 10.0f));
+            players[j].vel.y += 3.5f;
+            if (players[j].isExposed) {
+                kill_player(j, idx, true, false);
+            }
+            play_sfx(SFX_IMPACT);
+            return;
+        }
+    }
+
+    Ray ray = { start, dir };
+    int hit_id = first_voxel_hit(ray, MELEE_RANGE, -1);
+    if (hit_id >= 0 && hit_id < voxel_count) {
+        Voxel *hit = &voxels[hit_id];
+        if (hit->simulate) {
+            remove_voxel_index(hit_id);
+        } else {
+            remove_static_voxels_in_region_recycle(hit->gx, hit->gx, hit->gy, hit->gy, hit->gz, hit->gz);
+            rebuild_all_voxel_surfaces();
+            meshDirty = true;
+        }
+        add_player_matter(p, MATTER_MELEE_HARVEST);
+        play_sfx(SFX_IMPACT);
+    }
+}
+
+static void perform_build(int idx) {
+    Player *p = &players[idx];
+    if (p->respawn_timer > 0.0f || p->isExposed) {
+        return;
+    }
+    if (p->matter < MATTER_BUILD_COST) {
+        return;
+    }
+    Vector3 dir = player_forward(p);
+    Ray ray = { p->pos, dir };
+    int hit_id = first_voxel_hit(ray, TETHER_RANGE, -1);
+    if (hit_id < 0 || hit_id >= voxel_count) {
+        return;
+    }
+    Voxel *hit = &voxels[hit_id];
+    int anchorX = hit->gx;
+    int anchorY = hit->gy;
+    int anchorZ = hit->gz;
+
+    Vector3 ray_dir = ray.direction;
+    float ax = fabsf(ray_dir.x);
+    float ay = fabsf(ray_dir.y);
+    float az = fabsf(ray_dir.z);
+    int nx = 0;
+    int ny = 0;
+    int nz = 0;
+    if (ax >= ay && ax >= az) {
+        nx = (ray_dir.x >= 0.0f) ? -1 : 1;
+    } else if (ay >= az) {
+        ny = (ray_dir.y >= 0.0f) ? -1 : 1;
+    } else {
+        nz = (ray_dir.z >= 0.0f) ? -1 : 1;
+    }
+
+    int targetX = anchorX + nx;
+    int targetY = anchorY + ny;
+    int targetZ = anchorZ + nz;
+    if (targetY < 0) {
+        return;
+    }
+    int min_g = (int)ceilf((-FLOOR_SIZE / VOXEL_SIZE) - 0.5f);
+    int max_g = (int)floorf((FLOOR_SIZE / VOXEL_SIZE) - 0.5f);
+    if (targetX < min_g || targetX > max_g ||
+        targetZ < min_g || targetZ > max_g) {
+        return;
+    }
+    if (occupied(targetX, targetY, targetZ)) {
+        return;
+    }
+    int idx_added = add_static_voxel_at_grid(targetX, targetY, targetZ, player_palette_color(idx), 0);
+    if (idx_added >= 0) {
+        tag_owned_static_voxel(idx_added, idx);
+        mark_surface(idx_added);
+        mark_surface_neighbors(voxels[idx_added].pos);
+        meshDirty = true;
+        p->matter = fmaxf(0.0f, p->matter - MATTER_BUILD_COST);
+        play_sfx(SFX_SHIELD);
+    }
+}
+
+static void start_tether(int idx) {
+    Player *p = &players[idx];
+    if (p->respawn_timer > 0.0f || p->tetherHolding) {
+        return;
+    }
+    Vector3 dir = player_forward(p);
+    Ray ray = { p->pos, dir };
+    int hit_id = first_voxel_hit(ray, TETHER_RANGE, -1);
+    if (hit_id < 0 || hit_id >= voxel_count) {
+        return;
+    }
+    Voxel *hit = &voxels[hit_id];
+    Vector3 hit_pos = hit->pos;
+    if (!hit->simulate) {
+        activate_static_voxel_for_tether(hit_id, idx, ACTIVATION_TYPE0_BULLET_BELIEF);
+    }
+    int tether_idx = hit->simulate ? hit_id : find_closest_dynamic_voxel(hit_pos, 2.5f);
+    if (tether_idx < 0 || tether_idx >= voxel_count) {
+        return;
+    }
+    int cluster_count = build_glue_cluster_indices(tether_idx, glueClusterIndices);
+    if (cluster_count > 0) {
+        for (int c = 0; c < cluster_count; ++c) {
+            int v_idx = glueClusterIndices[c];
+            if (v_idx < 0 || v_idx >= voxel_count) {
+                continue;
+            }
+            voxels[v_idx].owner = idx;
+            voxels[v_idx].activator = idx;
+        }
+    } else {
+        voxels[tether_idx].owner = idx;
+        voxels[tether_idx].activator = idx;
+    }
+    p->tetherHolding = true;
+    p->tetherVoxel = tether_idx;
+}
+
+static void prepare_tether_forces(void) {
+    memset(tetherTag, 0, sizeof(tetherTag));
+    for (int i = 0; i < activePlayers; ++i) {
+        Player *p = &players[i];
+        if (!p->tetherHolding) {
+            continue;
+        }
+        if (p->tetherVoxel < 0 || p->tetherVoxel >= voxel_count) {
+            p->tetherHolding = false;
+            p->tetherVoxel = -1;
+            continue;
+        }
+        Voxel *v = &voxels[p->tetherVoxel];
+        if (!v->simulate) {
+            p->tetherHolding = false;
+            p->tetherVoxel = -1;
+            continue;
+        }
+        tetherTargetByPlayer[i] = player_hand_position(p);
+        int cluster_count = build_glue_cluster_indices(p->tetherVoxel, glueClusterIndices);
+        if (cluster_count > 0) {
+            for (int c = 0; c < cluster_count; ++c) {
+                int v_idx = glueClusterIndices[c];
+                if (v_idx < 0 || v_idx >= voxel_count) {
+                    continue;
+                }
+                tetherTag[v_idx] = i + 1;
+                voxels[v_idx].activationBelief = 1.0f;
+                voxels[v_idx].activationCooldownFrames = 0;
+            }
+        } else {
+            tetherTag[p->tetherVoxel] = i + 1;
+            voxels[p->tetherVoxel].activationBelief = 1.0f;
+            voxels[p->tetherVoxel].activationCooldownFrames = 0;
+        }
+    }
+}
+
+static void release_tether(int idx) {
+    Player *p = &players[idx];
+    if (!p->tetherHolding) {
+        return;
+    }
+    if (p->tetherVoxel >= 0 && p->tetherVoxel < voxel_count) {
+        Voxel *v = &voxels[p->tetherVoxel];
+        if (v->simulate) {
+            Vector3 dir = player_forward(p);
+            Vector3 impulse = v_mul(dir, TETHER_THROW_IMPULSE);
+            v->vel = v_add(v->vel, impulse);
+            for (int j = 0; j < VOXEL_PARTICLE_COUNT; ++j) {
+                Particle *particle = voxel_particle_at(v, j);
+                if (particle->inv_mass == 0.0f) {
+                    continue;
+                }
+                particle->vel = v_add(particle->vel, impulse);
+            }
+        }
+    }
+    p->tetherHolding = false;
+    p->tetherVoxel = -1;
+}
+
+static bool tether_cluster_center(int voxel_idx, Vector3 *out_center) {
+    if (!out_center || voxel_idx < 0 || voxel_idx >= voxel_count) {
+        return false;
+    }
+    int cluster_count = build_glue_cluster_indices(voxel_idx, glueClusterIndices);
+    if (cluster_count <= 0) {
+        *out_center = voxels[voxel_idx].pos;
+        return true;
+    }
+    Vector3 accum = { 0.0f, 0.0f, 0.0f };
+    int count = 0;
+    for (int i = 0; i < cluster_count; ++i) {
+        int idx = glueClusterIndices[i];
+        if (idx < 0 || idx >= voxel_count) {
+            continue;
+        }
+        accum = v_add(accum, voxels[idx].pos);
+        ++count;
+    }
+    if (count <= 0) {
+        return false;
+    }
+    *out_center = v_mul(accum, 1.0f / (float)count);
+    return true;
+}
+
+static void draw_hud_bars(int player_index, const Player *p, int viewport_w, int viewport_h) {
     if (!p || viewport_w <= 0 || viewport_h <= 0) {
         return;
     }
 
     int max_w = viewport_w - HUD_PADDING_X * 2;
-    int bar_w = HUD_BAR_WIDTH;
-    float health_max_ratio = (float)player_max_health(p) / (float)BASE_HEALTH;
-    float shield_max_ratio = (float)player_max_shield(p) / (float)BASE_SHIELD;
-    float max_ratio = fmaxf(health_max_ratio, shield_max_ratio);
-    if (max_ratio < 0.1f) {
-        max_ratio = 0.1f;
-    }
-    if ((float)bar_w * max_ratio > (float)max_w) {
-        bar_w = (int)floorf((float)max_w / max_ratio);
+    int bar_w = HUD_BAR_WIDTH * 2;
+    if (bar_w > max_w) {
+        bar_w = max_w;
     }
     if (bar_w < 1) {
         bar_w = 1;
     }
 
-    int bullet_gap = HUD_BAR_SPACING;
-    int total_h = HUD_BAR_THICKNESS * 2 + HUD_BAR_SPACING + HUD_BULLET_TEXT_SIZE + bullet_gap;
-    int y = viewport_h - HUD_PADDING_Y - total_h;
-
-    int health_max = player_max_health(p);
-    int shield_max = player_max_shield(p);
-    float health_ratio = clampf((float)p->health / (float)health_max, 0.0f, 1.0f);
-    float shield_ratio = clampf((float)p->shield / (float)shield_max, 0.0f, 1.0f);
-    int health_bar_w = (int)roundf((float)bar_w * health_max_ratio);
-    int shield_bar_w = (int)roundf((float)bar_w * shield_max_ratio);
-    int max_bar_w = (health_bar_w > shield_bar_w) ? health_bar_w : shield_bar_w;
-    int x_max = viewport_w - HUD_PADDING_X - max_bar_w;
+    int bar_x = viewport_w - HUD_PADDING_X - bar_w;
+    int bar_y = viewport_h - HUD_PADDING_Y - HUD_BAR_THICKNESS;
+    float matter_ratio = clampf(p->matter / player_max_matter(p), 0.0f, 1.0f);
 
     Color bar_bg = (Color){ 25, 25, 25, 200 };
-    Color health_color = (Color){ 210, 70, 70, 230 };
-    Color shield_color = (Color){ 70, 140, 220, 230 };
-    Color shield_border = BLACK;
-    if (p->invuln_timer > 0.0f) {
-        shield_color = (Color){ 235, 200, 70, 230 };
-        shield_border = (Color){ 240, 215, 90, 255 };
+    Color matter_color = player_palette_color(player_index);
+    if (p->isExposed) {
+        matter_color = (Color){ 220, 60, 60, 230 };
     }
 
-    Color bullet_color = BLACK;
-    const char *bullet_symbol = bullet_type_symbol(p->vType);
-    if (p->vType == 1) {
-        bullet_color = RED;
-    } else if (p->vType == 2) {
-        bullet_color = BLUE;
-    }
-    int bullet_w = MeasureText(bullet_symbol, HUD_BULLET_TEXT_SIZE);
-    int bullet_x = x_max + (max_bar_w - bullet_w) / 2;
-    DrawText(bullet_symbol, bullet_x, y, HUD_BULLET_TEXT_SIZE, bullet_color);
+    DrawRectangle(bar_x, bar_y, bar_w, HUD_BAR_THICKNESS, bar_bg);
+    DrawRectangle(bar_x, bar_y, (int)roundf(bar_w * matter_ratio), HUD_BAR_THICKNESS, matter_color);
+    DrawRectangleLines(bar_x, bar_y, bar_w, HUD_BAR_THICKNESS, BLACK);
 
-    int bar_y = y + HUD_BULLET_TEXT_SIZE + bullet_gap;
-    int health_x = viewport_w - HUD_PADDING_X - health_bar_w;
-    DrawRectangle(health_x, bar_y, health_bar_w, HUD_BAR_THICKNESS, bar_bg);
-    DrawRectangle(health_x, bar_y, (int)roundf(health_bar_w * health_ratio), HUD_BAR_THICKNESS, health_color);
-    DrawRectangleLines(health_x, bar_y, health_bar_w, HUD_BAR_THICKNESS, BLACK);
-
-    int shield_y = bar_y + HUD_BAR_THICKNESS + HUD_BAR_SPACING;
-    int shield_x = viewport_w - HUD_PADDING_X - shield_bar_w;
-    DrawRectangle(shield_x, shield_y, shield_bar_w, HUD_BAR_THICKNESS, bar_bg);
-    DrawRectangle(shield_x, shield_y, (int)roundf(shield_bar_w * shield_ratio), HUD_BAR_THICKNESS, shield_color);
-    DrawRectangleLines(shield_x, shield_y, shield_bar_w, HUD_BAR_THICKNESS, shield_border);
-
-    int health_display = p->health;
-    if (health_display > health_max) {
-        health_display = health_max;
-    }
-    int shield_display = p->shield;
-    if (shield_display > shield_max) {
-        shield_display = shield_max;
-    }
-    const char *health_text = TextFormat("HP %d/%d", health_display, health_max);
-    const char *shield_text = TextFormat("SH %d/%d", shield_display, shield_max);
-    int health_text_w = MeasureText(health_text, HUD_BAR_TEXT_SIZE);
-    int shield_text_w = MeasureText(shield_text, HUD_BAR_TEXT_SIZE);
-    int health_text_x = health_x + (health_bar_w - health_text_w) / 2;
-    int shield_text_x = shield_x + (shield_bar_w - shield_text_w) / 2;
+    const char *matter_text = TextFormat("MATTER %d/%d",
+                                         (int)roundf(p->matter),
+                                         (int)roundf(player_max_matter(p)));
+    int text_w = MeasureText(matter_text, HUD_BAR_TEXT_SIZE);
+    int text_x = bar_x + (bar_w - text_w) / 2;
     int text_y = bar_y + (HUD_BAR_THICKNESS - HUD_BAR_TEXT_SIZE) / 2;
-    int shield_text_y = shield_y + (HUD_BAR_THICKNESS - HUD_BAR_TEXT_SIZE) / 2;
-    DrawText(health_text, health_text_x, text_y, HUD_BAR_TEXT_SIZE, WHITE);
-    DrawText(shield_text, shield_text_x, shield_text_y, HUD_BAR_TEXT_SIZE, WHITE);
+    DrawText(matter_text, text_x, text_y, HUD_BAR_TEXT_SIZE, WHITE);
 
-    int ammo_size = HUD_AMMO_SIZE * 3;
-    int ammo_gap = HUD_AMMO_GAP * 3;
-    int ammo_w = AMMO_MAX * ammo_size + (AMMO_MAX - 1) * ammo_gap;
-    int ammo_x = HUD_PADDING_X;
-    int ammo_y = viewport_h - HUD_PADDING_Y - ammo_size;
-    Color ammo_full = (Color){ 230, 230, 230, 220 };
-    Color ammo_empty = (Color){ 60, 60, 60, 200 };
-    for (int i = 0; i < AMMO_MAX; ++i) {
-        int x = ammo_x + i * (ammo_size + ammo_gap);
-        Color fill = (i < p->ammo) ? ammo_full : ammo_empty;
-        DrawRectangle(x, ammo_y, ammo_size, ammo_size, fill);
-        DrawRectangleLines(x, ammo_y, ammo_size, ammo_size, BLACK);
+    if (p->isExposed) {
+        int crack_y = bar_y + HUD_BAR_THICKNESS / 2;
+        for (int i = 0; i < 5; ++i) {
+            int x = bar_x + (bar_w / 6) * (i + 1);
+            DrawLine(x - 6, crack_y - 6, x + 6, crack_y + 6, Fade(BLACK, 0.6f));
+        }
     }
 }
 // Append the 12 edges (24 vertices) of a cube to the current RL_LINES batch
@@ -10416,13 +10673,12 @@ static void draw_players(void) {
         Color base_dark = scale_color(base, 0.35f, 255);
         DrawCube(p->pos, PLAYER_SIZE,PLAYER_SIZE, PLAYER_SIZE, base_dark);
         DrawCubeWires(p->pos, PLAYER_SIZE,PLAYER_SIZE,PLAYER_SIZE, base_dark);
-        if (p->shield > 0) {
-            int max_shield = player_max_shield(p);
-            float shield_percentage = (float)p->shield / (float)max_shield;
-            unsigned char alpha = (unsigned char)clampf(90.0f + 90.0f * shield_percentage, 80.0f, 180.0f);
-            Color shield_color = scale_color(base, 1.0f, alpha);
-            DrawCube(p->pos, PLAYER_SIZE + 0.2f, PLAYER_SIZE + 0.2f, PLAYER_SIZE + 0.2f, shield_color);
-            DrawCubeWires(p->pos, PLAYER_SIZE + 0.2f, PLAYER_SIZE + 0.2f, PLAYER_SIZE + 0.2f, Fade(shield_color, 0.8f));
+        if (p->isExposed) {
+            float pulse = 0.5f + 0.5f * sinf((float)GetTime() * 6.0f);
+            unsigned char alpha = (unsigned char)clampf(120.0f + 80.0f * pulse, 90.0f, 220.0f);
+            Color exposed_color = (Color){ 220, 60, 60, alpha };
+            DrawCube(p->pos, PLAYER_SIZE + 0.25f, PLAYER_SIZE + 0.25f, PLAYER_SIZE + 0.25f, exposed_color);
+            DrawCubeWires(p->pos, PLAYER_SIZE + 0.25f, PLAYER_SIZE + 0.25f, PLAYER_SIZE + 0.25f, Fade(exposed_color, 0.8f));
         }
         if (p->invuln_timer > 0.0f) {
             float pulse = 0.6f + 0.4f * sinf((float)GetTime() * 6.0f);
@@ -10626,17 +10882,15 @@ static void UpdateBot(int playerIdx, float dt) {
     Vector3 targetPos = {0};
     bool targetingEntity = false; 
     
-    bool needHealth = bot->health < 50;
-    bool needAmmo = bot->ammo <= 0;
+    bool needMatter = bot->matter < 40.0f;
     int bestPickup = -1;
     float minDistSq = FLT_MAX;
 
     // Priority: Pickup if needed
-    if (needHealth || needAmmo || (aggressive && bot->ammo < AMMO_MAX)) {
+    if (needMatter || (aggressive && bot->matter < bot->matterMax)) {
         for (int i = 0; i < MAX_PICKUPS; i++) {
             if (!pickups[i].active) continue;
-            if (needHealth && pickups[i].type != PICKUP_HEALTH) continue;
-            if (needAmmo && pickups[i].type != PICKUP_AMMO) continue;
+            if (needMatter && pickups[i].type == PICKUP_VOID) continue;
             
             float dx = bot->pos.x - pickups[i].pos.x;
             float dy = bot->pos.y - pickups[i].pos.y;
@@ -10721,7 +10975,7 @@ static void UpdateBot(int playerIdx, float dt) {
 
     // Move
     float moveSpeed = 1.0f;
-    if (targetingEntity && distToTarget < 5.0f && !needHealth) moveSpeed = 0.0f;
+    if (targetingEntity && distToTarget < 5.0f && !needMatter) moveSpeed = 0.0f;
     
     if (moveSpeed > 0) {
         bot->vel.x = dir.x * MOVE_SPEED; // Simple velocity set
@@ -10732,19 +10986,14 @@ static void UpdateBot(int playerIdx, float dt) {
     }
 
     // 3. Action Logic (Fire / Build)
-    if (targetingEntity && bs->reactionTimer <= 0.0f) {
-         bot->vType = 0; // Bullet
+    if (targetingEntity && bs->reactionTimer <= 0.0f && bot->matter >= MATTER_SHOT_COST) {
          FireVoxel(playerIdx);
          bs->reactionTimer = reactionTime + (float)GetRandomValue(0, 50)/100.0f;
     }
     
     // Building (Panic wall)
-    if (canBuild && !bs->justBuilt && bot->health < 40 && targetingEntity && bot->ammo > 0) {
-        float oldPitch = bot->pitch;
-        bot->pitch = -45.0f; // Look down
-        bot->vType = 1; // Structure
-        FireVoxel(playerIdx);
-        bot->pitch = oldPitch;
+    if (canBuild && !bs->justBuilt && bot->matter >= MATTER_BUILD_COST) {
+        perform_build(playerIdx);
         bs->justBuilt = true;
         bs->stateTimer = 2.0f; // Cooldown
     }
@@ -10906,7 +11155,6 @@ int main(void) {
                 break;
             case GAME_STATE_PLAYING:
         float dt = GetFrameTime();
-        update_player_ammo(dt);
         // Check win condition
         for (int i = 0; i < activePlayers; ++i) {
             if (player_points(&players[i]) >= winningScore) {
@@ -10923,6 +11171,18 @@ int main(void) {
                     players[i].invuln_timer = 0.0f;
                 }
             }
+            if (players[i].matter_flash_timer > 0.0f) {
+                players[i].matter_flash_timer -= dt;
+                if (players[i].matter_flash_timer < 0.0f) {
+                    players[i].matter_flash_timer = 0.0f;
+                }
+            }
+            if (players[i].exposed_flash_timer > 0.0f) {
+                players[i].exposed_flash_timer -= dt;
+                if (players[i].exposed_flash_timer < 0.0f) {
+                    players[i].exposed_flash_timer = 0.0f;
+                }
+            }
         }
         for (int i = 0; i < activePlayers; ++i) {
             if (players[i].respawn_timer > 0.0f) {
@@ -10936,10 +11196,21 @@ int main(void) {
                     players[i].yaw = atan2f(players[i].pos.x, players[i].pos.z) * RAD2DEG;
                     players[i].death_yaw = players[i].yaw;
                     players[i].pitch = 0.0f;
-                    players[i].health = player_max_health(&players[i]);
-                    players[i].shield = player_max_shield(&players[i]);
+                    players[i].matterMax = MATTER_MAX_DEFAULT;
+                    players[i].matter = players[i].matterMax;
+                    players[i].isExposed = false;
                     players[i].last_damage_time = (float)GetTime();
                     players[i].invuln_timer = 0.0f;
+                    players[i].matter_flash_timer = 0.0f;
+                    players[i].exposed_flash_timer = 0.0f;
+                    players[i].tetherHolding = false;
+                    players[i].tetherVoxel = -1;
+                }
+            } else {
+                if (players[i].tetherHolding &&
+                    (players[i].tetherVoxel < 0 || players[i].tetherVoxel >= voxel_count)) {
+                    players[i].tetherHolding = false;
+                    players[i].tetherVoxel = -1;
                 }
             }
         }
@@ -10958,8 +11229,17 @@ int main(void) {
                 if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_RIGHT_TRIGGER_2)) {
                     FireVoxel(i);
                 }
-                if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_LEFT_TRIGGER_1)) {
-                    players[i].vType = (players[i].vType + 1) % 3;
+                if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT)) {
+                    perform_melee(i);
+                }
+                if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_RIGHT_FACE_LEFT)) {
+                    perform_build(i);
+                }
+                if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_RIGHT_FACE_UP)) {
+                    start_tether(i);
+                }
+                if (IsGamepadButtonReleased(i, GAMEPAD_BUTTON_RIGHT_FACE_UP)) {
+                    release_tether(i);
                 }
                 if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_RIGHT_FACE_DOWN) && players[i].onGround) {
                     players[i].vel.y = JUMP_SPEED;
@@ -10970,7 +11250,10 @@ int main(void) {
 
         if (playerInput[0] == INPUT_TYPE_KEYBOARD && players[0].respawn_timer <= 0.0f) {
             if (IsKeyPressed(KEY_LEFT_CONTROL))  FireVoxel(0);
-            if (IsKeyPressed(KEY_Q)) players[0].vType = (players[0].vType + 1) % 3;
+            if (IsKeyPressed(KEY_Z)) perform_melee(0);
+            if (IsKeyPressed(KEY_E)) perform_build(0);
+            if (IsKeyPressed(KEY_R)) start_tether(0);
+            if (IsKeyReleased(KEY_R)) release_tether(0);
             if (IsKeyPressed(KEY_SPACE) && players[0].onGround) {
                 players[0].vel.y = JUMP_SPEED;
                 players[0].onGround = false;
@@ -10978,14 +11261,17 @@ int main(void) {
         }
         if (playerInput[1] == INPUT_TYPE_KEYBOARD && players[1].respawn_timer <= 0.0f) {
             if (IsKeyPressed(KEY_RIGHT_CONTROL)) FireVoxel(1);
-            if (IsKeyPressed(KEY_U)) players[1].vType = (players[1].vType + 1) % 3;
+            if (IsKeyPressed(KEY_M)) perform_melee(1);
+            if (IsKeyPressed(KEY_O)) perform_build(1);
+            if (IsKeyPressed(KEY_P)) start_tether(1);
+            if (IsKeyReleased(KEY_P)) release_tether(1);
             if (IsKeyPressed(KEY_RIGHT_SHIFT) && players[1].onGround) {
                 players[1].vel.y = JUMP_SPEED;
                 players[1].onGround = false;
             }
         }
 
-        if (IsKeyPressed(KEY_P)) {
+        if (IsKeyPressed(KEY_PAUSE)) {
             gameState = GAME_STATE_PAUSED;
         }
 
@@ -10999,22 +11285,6 @@ int main(void) {
             debugColorParticlesByVelocity = !debugColorParticlesByVelocity;
             if (debugColorParticlesByVelocity) {
                 debugDrawParticles = true;
-            }
-        }
-
-        // Shield regeneration
-        for (int i = 0; i < activePlayers; i++) {
-            if (players[i].respawn_timer > 0.0f) {
-                continue;
-            }
-            if ((float)GetTime() - players[i].last_damage_time > SHIELD_REGEN_DELAY) {
-                int max_shield = player_max_shield(&players[i]);
-                if (players[i].shield < max_shield) {
-                    players[i].shield += 1; // Regenerate 1 shield point per frame
-                }
-                if (players[i].shield > max_shield) {
-                    players[i].shield = max_shield;
-                }
             }
         }
 
@@ -11087,6 +11357,7 @@ int main(void) {
         }
         update_projectiles(dt);
         update_pickups(dt); // Update pickups
+        prepare_tether_forces();
         simulate_voxel_pbd(dt);
         recycle_dead_voxels();
         log_dynamic_glue_cluster_breaks();
@@ -11177,6 +11448,14 @@ int main(void) {
                     DrawVoxels(cams[i]);
                     draw_pickups(cams[i]);
                     draw_players();
+                    if (players[i].tetherHolding && players[i].tetherVoxel >= 0) {
+                        Vector3 hand = player_hand_position(&players[i]);
+                        Vector3 center = { 0.0f, 0.0f, 0.0f };
+                        if (tether_cluster_center(players[i].tetherVoxel, &center)) {
+                            DrawLine3D(hand, center, (Color){ 80, 170, 255, 220 });
+                            DrawSphere(center, 0.08f, (Color){ 80, 170, 255, 180 });
+                        }
+                    }
                 EndMode3D();
                 int view_x = 0, view_y = 0, view_w = 0, view_h = 0;
                 get_viewport(i, activePlayers, &view_x, &view_y, &view_w, &view_h);
@@ -11211,7 +11490,18 @@ int main(void) {
                     int banner_y = (view_h / 5);
                     DrawText(banner_text, banner_x, banner_y, banner_size, banner_color);
                 }
-                draw_hud_bars(&players[i], view_w, view_h);
+                draw_hud_bars(i, &players[i], view_w, view_h);
+                if (players[i].matter_flash_timer > 0.0f) {
+                    float alpha = clampf(players[i].matter_flash_timer / 0.2f, 0.0f, 1.0f);
+                    DrawRectangle(0, 0, view_w, view_h, Fade(BLUE, 0.25f * alpha));
+                }
+                if (players[i].exposed_flash_timer > 0.0f) {
+                    float alpha = clampf(players[i].exposed_flash_timer / 0.35f, 0.0f, 1.0f);
+                    DrawRectangle(0, 0, view_w, view_h, Fade(RED, 0.25f * alpha));
+                }
+                if (players[i].isExposed) {
+                    DrawRectangle(0, 0, view_w, view_h, Fade(RED, 0.08f));
+                }
                 if (players[i].respawn_timer > 0.0f) {
                     int seconds_left = (int)ceilf(players[i].respawn_timer);
                     const char *respawn_text = TextFormat("RESPAWNING IN %d", seconds_left);
@@ -11252,11 +11542,11 @@ int main(void) {
                 BeginDrawing();
                     ClearBackground(RAYWHITE);
                     DrawText("Paused", GetScreenWidth() / 2 - MeasureText("Paused", 40) / 2, 100, 40, BLACK);
-                    DrawText("Press P to Resume", GetScreenWidth() / 2 - MeasureText("Press P to Resume", 20) / 2, 200, 20, DARKGRAY);
+                    DrawText("Press Pause to Resume", GetScreenWidth() / 2 - MeasureText("Press Pause to Resume", 20) / 2, 200, 20, DARKGRAY);
                     DrawText("Press Q to Quit", GetScreenWidth() / 2 - MeasureText("Press Q to Quit", 20) / 2, 250, 20, DARKGRAY);
                 EndDrawing();
 
-                if (IsKeyPressed(KEY_P)) {
+                if (IsKeyPressed(KEY_PAUSE)) {
                     gameState = GAME_STATE_PLAYING;
                 }
                 if (IsKeyPressed(KEY_Q)) {
@@ -11289,11 +11579,11 @@ int main(void) {
                     int controlsSize = 18;
                     int controlsSpacing = 24;
                     DrawText("Controls", 100, controlsY, 20, BLACK);
-                    DrawText("Keyboard P1: Move WASD | Look F/H (yaw), T/G (pitch) | Jump SPACE | Fire LCTRL | Cycle Q",
+                    DrawText("Keyboard P1: Move WASD | Look F/H (yaw), T/G (pitch) | Jump SPACE | Shoot LCTRL | Melee Z | Build E | Tether R",
                              100, controlsY + controlsSpacing * 1, controlsSize, DARKGRAY);
-                    DrawText("Keyboard P2: Move IJKL | Look Arrows | Jump RSHIFT | Fire RCTRL | Cycle U",
+                    DrawText("Keyboard P2: Move IJKL | Look Arrows | Jump RSHIFT | Shoot RCTRL | Melee M | Build O | Tether P",
                              100, controlsY + controlsSpacing * 2, controlsSize, DARKGRAY);
-                    DrawText("Gamepad: Move LS | Look RS | Jump A/Down Face | Fire RT | Cycle LT",
+                    DrawText("Gamepad: Move LS | Look RS | Jump A/Down Face | Shoot RT | Melee B | Build X | Tether Y",
                              100, controlsY + controlsSpacing * 3, controlsSize, DARKGRAY);
 
                     DrawText("Press M to return to Main Menu", 100, SCREEN_HEIGHT - 60, 20, DARKGRAY);
