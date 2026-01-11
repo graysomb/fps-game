@@ -6230,7 +6230,7 @@ static void handle_pbd_projectile_hits(void)
         bool glued_to_static = dynamic_voxel_glued_to_static(i);
         bool removed = false;
         for (int j = 0; j < activePlayers; ++j) {
-            if (v->owner == j || v->activator == j) {
+            if (players[j].tetherHolding && players[j].tetherVoxel == i) {
                 continue;
             }
             float dx = v->pos.x - players[j].pos.x;
@@ -9170,7 +9170,7 @@ static void FireVoxel(int idx) {
     float pitchRad = DEG2RAD * p->pitch;
     Vector3 dir = { sinf(-yawRad)*cosf(pitchRad), sinf(pitchRad), -cosf(yawRad)*cosf(pitchRad) };
     Vector3 start = v_add(p->pos, v_mul(dir, 0.8f));
-    Color col = player_palette_color(idx);
+    Color col = (Color){ 80, 170, 255, 255 };
     int span = bullet_span_for_player(p);
     int vix = addVoxelSized(start.x, start.y, start.z, false, true, col, 0, span);
     if (vix >= 0) {
@@ -10438,6 +10438,24 @@ static void DrawVoxels(Camera3D cam) {
         DrawMeshInstanced(voxelMesh, instancedMaterial, instanceTransforms, instanceTransformsCount);
     }
 
+    // Add glow shells for type-0 bullets so they read as blue orbs.
+    for (int i = 0; i < voxel_count; i++) {
+        Voxel *v = &voxels[i];
+        if (!v->simulate || !v->isBullet || v->type != 0) {
+            continue;
+        }
+        Vector3 center = { 0 };
+        for (int k = 0; k < 8; ++k) {
+            center = v_add(center, v->particles[k].pos);
+        }
+        center = v_mul(center, 0.125f);
+        float span = (float)((v->span > 0) ? v->span : 1);
+        float core_radius = 0.2f * VOXEL_SIZE * span;
+        float glow_radius = core_radius * 1.8f;
+        DrawSphere(center, glow_radius, (Color){ 80, 170, 255, 80 });
+        DrawSphere(center, core_radius, (Color){ 120, 200, 255, 220 });
+    }
+
     rlEnableBackfaceCulling();
 
     if (debugDrawParticles) {
@@ -11477,7 +11495,11 @@ int main(void) {
                         Vector3 hand = player_hand_position(&players[i]);
                         Vector3 center = { 0.0f, 0.0f, 0.0f };
                         if (tether_cluster_center(players[i].tetherVoxel, &center)) {
-                            DrawLine3D(hand, center, (Color){ 80, 170, 255, 220 });
+                            float tether_radius = 0.05f;
+                            DrawCylinderEx(hand, center, tether_radius * 1.6f, tether_radius * 1.6f, 6,
+                                           (Color){ 80, 170, 255, 80 });
+                            DrawCylinderEx(hand, center, tether_radius, tether_radius, 6,
+                                           (Color){ 120, 200, 255, 220 });
                             DrawSphere(center, 0.08f, (Color){ 80, 170, 255, 180 });
                         }
                     }
