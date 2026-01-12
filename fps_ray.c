@@ -119,7 +119,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define FREEZE_PROPAGATION_EPSILON 1e-6f
 #define FREEZE_PATH_DECAY 0.85f
 #define FREEZE_OVERHANG_DECAY 0.1f
-#define ACTIVATION_VELOCITY_WEIGHT 0.6f
+#define ACTIVATION_VELOCITY_WEIGHT 0.1f
 #define ACTIVATION_VELOCITY_REF_SPEED 6.0f
 #define ACTIVATION_STRAIN_WEIGHT   0.1f
 #define ACTIVATION_STRAIN_REF      0.1f
@@ -9465,6 +9465,127 @@ static int find_closest_dynamic_voxel(Vector3 pos, float radius) {
     return best_idx;
 }
 
+static bool find_world_build_plane_hit(const Ray *ray,
+                                       int min_g, int max_g, int max_y,
+                                       int *out_anchorX, int *out_anchorY, int *out_anchorZ,
+                                       int *out_nx, int *out_ny, int *out_nz)
+{
+    if (!ray || !out_anchorX || !out_anchorY || !out_anchorZ ||
+        !out_nx || !out_ny || !out_nz) {
+        return false;
+    }
+    float best_t = FLT_MAX;
+    Vector3 best_pos = { 0 };
+    int best_plane = -1;
+    float wall_height = FLOOR_SIZE * 2.0f;
+
+    if (fabsf(ray->direction.y) > 1e-6f) {
+        float t = (0.0f - ray->position.y) / ray->direction.y;
+        if (t > 0.0f && t < best_t) {
+            Vector3 pos = v_add(ray->position, v_mul(ray->direction, t));
+            if (pos.x >= -FLOOR_SIZE && pos.x <= FLOOR_SIZE &&
+                pos.z >= -FLOOR_SIZE && pos.z <= FLOOR_SIZE) {
+                best_t = t;
+                best_pos = pos;
+                best_plane = 0;
+            }
+        }
+    }
+    if (fabsf(ray->direction.x) > 1e-6f) {
+        float t = (FLOOR_SIZE - ray->position.x) / ray->direction.x;
+        if (t > 0.0f && t < best_t) {
+            Vector3 pos = v_add(ray->position, v_mul(ray->direction, t));
+            if (pos.z >= -FLOOR_SIZE && pos.z <= FLOOR_SIZE &&
+                pos.y >= 0.0f && pos.y <= wall_height) {
+                best_t = t;
+                best_pos = pos;
+                best_plane = 1;
+            }
+        }
+        t = (-FLOOR_SIZE - ray->position.x) / ray->direction.x;
+        if (t > 0.0f && t < best_t) {
+            Vector3 pos = v_add(ray->position, v_mul(ray->direction, t));
+            if (pos.z >= -FLOOR_SIZE && pos.z <= FLOOR_SIZE &&
+                pos.y >= 0.0f && pos.y <= wall_height) {
+                best_t = t;
+                best_pos = pos;
+                best_plane = 2;
+            }
+        }
+    }
+    if (fabsf(ray->direction.z) > 1e-6f) {
+        float t = (FLOOR_SIZE - ray->position.z) / ray->direction.z;
+        if (t > 0.0f && t < best_t) {
+            Vector3 pos = v_add(ray->position, v_mul(ray->direction, t));
+            if (pos.x >= -FLOOR_SIZE && pos.x <= FLOOR_SIZE &&
+                pos.y >= 0.0f && pos.y <= wall_height) {
+                best_t = t;
+                best_pos = pos;
+                best_plane = 3;
+            }
+        }
+        t = (-FLOOR_SIZE - ray->position.z) / ray->direction.z;
+        if (t > 0.0f && t < best_t) {
+            Vector3 pos = v_add(ray->position, v_mul(ray->direction, t));
+            if (pos.x >= -FLOOR_SIZE && pos.x <= FLOOR_SIZE &&
+                pos.y >= 0.0f && pos.y <= wall_height) {
+                best_t = t;
+                best_pos = pos;
+                best_plane = 4;
+            }
+        }
+    }
+
+    if (best_plane < 0) {
+        return false;
+    }
+
+    int gx = (int)floorf(best_pos.x / VOXEL_SIZE);
+    int gy = (int)floorf(best_pos.y / VOXEL_SIZE);
+    int gz = (int)floorf(best_pos.z / VOXEL_SIZE);
+    if (gx < min_g) gx = min_g;
+    if (gx > max_g) gx = max_g;
+    if (gz < min_g) gz = min_g;
+    if (gz > max_g) gz = max_g;
+    if (gy < 0) gy = 0;
+    if (gy > max_y) gy = max_y;
+
+    if (best_plane == 0) {
+        *out_anchorX = gx;
+        *out_anchorY = -1;
+        *out_anchorZ = gz;
+        *out_nx = 0;
+        *out_ny = 1;
+        *out_nz = 0;
+        return true;
+    }
+    if (best_plane == 1) {
+        *out_anchorX = max_g + 1;
+        *out_nx = -1;
+    } else if (best_plane == 2) {
+        *out_anchorX = min_g - 1;
+        *out_nx = 1;
+    } else {
+        *out_anchorX = gx;
+        *out_nx = 0;
+    }
+
+    if (best_plane == 3) {
+        *out_anchorZ = max_g + 1;
+        *out_nz = -1;
+    } else if (best_plane == 4) {
+        *out_anchorZ = min_g - 1;
+        *out_nz = 1;
+    } else {
+        *out_anchorZ = gz;
+        *out_nz = 0;
+    }
+
+    *out_anchorY = gy;
+    *out_ny = 0;
+    return true;
+}
+
 static void perform_melee(int idx) {
     Player *p = &players[idx];
     if (p->respawn_timer > 0.0f) {
@@ -9553,27 +9674,37 @@ static void perform_build(int idx) {
     Vector3 dir = player_forward(p);
     Ray ray = { p->pos, dir };
     int hit_id = first_voxel_hit(ray, TETHER_RANGE, -1);
-    if (hit_id < 0 || hit_id >= voxel_count) {
-        return;
-    }
-    Voxel *hit = &voxels[hit_id];
-    int anchorX = hit->gx;
-    int anchorY = hit->gy;
-    int anchorZ = hit->gz;
-
-    Vector3 ray_dir = ray.direction;
-    float ax = fabsf(ray_dir.x);
-    float ay = fabsf(ray_dir.y);
-    float az = fabsf(ray_dir.z);
+    int min_g = (int)ceilf((-FLOOR_SIZE / VOXEL_SIZE) - 0.5f);
+    int max_g = (int)floorf((FLOOR_SIZE / VOXEL_SIZE) - 0.5f);
+    int max_y = (int)floorf((FLOOR_SIZE * 2.0f) / VOXEL_SIZE - 1.0f);
+    int anchorX = 0;
+    int anchorY = 0;
+    int anchorZ = 0;
     int nx = 0;
     int ny = 0;
     int nz = 0;
-    if (ax >= ay && ax >= az) {
-        nx = (ray_dir.x >= 0.0f) ? -1 : 1;
-    } else if (ay >= az) {
-        ny = (ray_dir.y >= 0.0f) ? -1 : 1;
+    if (hit_id >= 0 && hit_id < voxel_count) {
+        Voxel *hit = &voxels[hit_id];
+        anchorX = hit->gx;
+        anchorY = hit->gy;
+        anchorZ = hit->gz;
+        Vector3 ray_dir = ray.direction;
+        float ax = fabsf(ray_dir.x);
+        float ay = fabsf(ray_dir.y);
+        float az = fabsf(ray_dir.z);
+        if (ax >= ay && ax >= az) {
+            nx = (ray_dir.x >= 0.0f) ? -1 : 1;
+        } else if (ay >= az) {
+            ny = (ray_dir.y >= 0.0f) ? -1 : 1;
+        } else {
+            nz = (ray_dir.z >= 0.0f) ? -1 : 1;
+        }
     } else {
-        nz = (ray_dir.z >= 0.0f) ? -1 : 1;
+        if (!find_world_build_plane_hit(&ray, min_g, max_g, max_y,
+                                        &anchorX, &anchorY, &anchorZ,
+                                        &nx, &ny, &nz)) {
+            return;
+        }
     }
 
     int brushExtent = (voxelBrushSpan < 1) ? 1 : voxelBrushSpan;
@@ -9598,8 +9729,6 @@ static void perform_build(int idx) {
     if (miny < 0) {
         miny = 0;
     }
-    int min_g = (int)ceilf((-FLOOR_SIZE / VOXEL_SIZE) - 0.5f);
-    int max_g = (int)floorf((FLOOR_SIZE / VOXEL_SIZE) - 0.5f);
     if (maxx < min_g || minx > max_g || maxz < min_g || minz > max_g) {
         return;
     }
@@ -9607,6 +9736,7 @@ static void perform_build(int idx) {
     if (maxx > max_g) maxx = max_g;
     if (minz < min_g) minz = min_g;
     if (maxz > max_g) maxz = max_g;
+    if (maxy > max_y) maxy = max_y;
 
     int placed = 0;
     for (int x = minx; x <= maxx; ++x) {
