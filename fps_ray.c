@@ -9451,8 +9451,8 @@ static void perform_melee(int idx) {
             players[j].pos.z + hit_extent
         };
         if (segment_intersects_aabb(start, end, box_min, box_max)) {
-            players[j].vel = v_add(players[j].vel, v_mul(dir, 10.0f));
-            players[j].vel.y += 3.5f;
+            players[j].vel = v_add(players[j].vel, v_mul(dir, 100.0f));
+            players[j].vel.y += 10.0f;
             if (players[j].isExposed) {
                 kill_player(j, idx, true, false);
             }
@@ -10374,6 +10374,9 @@ static void DrawVoxels(Camera3D cam) {
         
         // Calculate Scale
         float scale = VOXEL_SIZE * (float)((v->span > 0) ? v->span : 1);
+        if (v->isBullet && v->type == 0) {
+            scale *= 0.25f;
+        }
         
         // Use the correct display color (handles beliefs/debug colors)
         Color displayColor = voxel_display_color(v);
@@ -10450,8 +10453,8 @@ static void DrawVoxels(Camera3D cam) {
         }
         center = v_mul(center, 0.125f);
         float span = (float)((v->span > 0) ? v->span : 1);
-        float core_radius = 0.2f * VOXEL_SIZE * span;
-        float glow_radius = core_radius * 1.8f;
+        float core_radius = 0.35f * VOXEL_SIZE * span;
+        float glow_radius = core_radius * 2.2f;
         DrawSphere(center, glow_radius, (Color){ 80, 170, 255, 80 });
         DrawSphere(center, core_radius, (Color){ 120, 200, 255, 220 });
     }
