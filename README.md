@@ -77,12 +77,60 @@ The engine implements three primary types of constraints:
 
 ## Controls
 
-*   **Move:** WASD / Left Stick
-*   **Look:** Mouse / Right Stick
-*   **Jump:** Space / A Button
-*   **Shoot:** Left Click / Right Trigger
-*   **Change Weapon:** Q / Y Button
-*   **Reset:** R
+### Player 1 (Keyboard)
+*   **Move:** WASD
+*   **Look:** F/H (yaw), T/G (pitch)
+*   **Jump:** Space
+*   **Shoot:** Left Ctrl (Cost: 1 Matter)
+*   **Melee:** Z (Harvests 10 Matter from voxels)
+*   **Build:** E (Cost: 10 Matter)
+*   **Gravity Tether:** R (Hold to grab, release to throw)
+
+### Player 2 (Keyboard)
+*   **Move:** IJKL
+*   **Look:** Arrow Keys
+*   **Jump:** Right Shift
+*   **Shoot:** Right Ctrl (Cost: 1 Matter)
+*   **Melee:** M (Harvests 10 Matter from voxels)
+*   **Build:** O (Cost: 10 Matter)
+*   **Gravity Tether:** P (Hold to grab, release to throw)
+
+### Gamepad
+*   **Move:** Left Stick
+*   **Look:** Right Stick
+*   **Jump:** A / Down Face Button
+*   **Shoot:** Right Trigger
+*   **Melee:** B / Right Face Button
+*   **Build:** X / Left Face Button
+*   **Gravity Tether:** Y / Top Face Button
+
+### Global
+*   **Reset Game:** R (Main Menu / Game Over)
+*   **Settings:** +/- (Active Players), 1-4 (Input Type), [ / ] (Winning Score), D (Drone Intro)
+
+## Constructor-Brawler Gameplay Loop
+
+This section outlines the planned "Constructor-Brawler" gameplay loop.
+
+### Phase 1: Matter Core & Melee Harvest
+*   **Player Stats:** Health and Ammo are replaced by a single **Matter** resource (0-100).
+*   **Exposed State:** When Matter reaches 0, the player becomes **Exposed**.
+*   **Melee:** Short-range raycast. 
+    *   Hitting a voxel destroys it and grants +10 Matter.
+    *   Hitting an enemy applies knockback. If the enemy is Exposed, they are killed.
+*   **HUD:** Large Matter bar. Flashes transparent blue on damage to shields (Matter > 0) and transparent red when Exposed.
+
+### Phase 2: Gun & Build Mechanics
+*   **Shooting:** Consumes Matter. Prevented if Matter is 0.
+    *   Bullets deal damage to enemy Matter.
+    *   Bullets deal 0 damage to Exposed players (must use Melee or Physics).
+*   **Building:** Consumes 10 Matter to place a static voxel. Edits regenerate through the recycle pipeline but last longer than dynamic debris.
+
+### Phase 3: Physics Finisher (Gravity Tether)
+*   **Gravity Tether:** 
+    *   **Grab:** Raycast to find a dynamic voxel or pull a chunk off a static structure. Applies spring force towards the player's hand.
+    *   **Throw:** Release to apply a massive impulse in the look direction.
+*   **Physics Damage:** High-velocity objects hitting an Exposed player will kill them.
 
 ## Building
 

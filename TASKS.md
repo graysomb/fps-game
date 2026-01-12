@@ -2,17 +2,48 @@
 
 This file tracks the current and future development tasks for the voxel FPS game.
 
-## Gameplay Features
+## Gameplay Features (Constructor-Brawler Loop)
 
-- [ ] Implement more weapon types (e.g., shotgun, grenade launcher).
-- [ ] Add power-ups (e.g., speed boost, invincibility, quad damage).
-- [ ] Implement more game modes (e.g., Capture the Flag, King of the Hill, Team Deathmatch).
-- [ ] Add AI-controlled bots to play against.
-- [ ] sliding, grappling hooks
-- [ ] tune jump height with k/d
-- [ ] what other stuff can be tuned?
-- [ ] add sheilds
-- [ ] health is add to the winner not the loser
+### Phase 1: Matter Core & Melee Harvest
+- [ ] **Refactor Player Struct** (fps_ray.c)
+    - Remove: `health`, `shield`, `ammo`.
+    - Add: `float matter` (0-100), `bool isExposed`, `float matterMax`.
+    - Initialize `matter` to 100 on spawn.
+- [ ] **Implement Melee()**
+    - Input: `Z` (Player 0), `M` (Player 1).
+    - Logic: Raycast forward (short range, e.g., 2.0 units).
+    - Hit Voxel: `DestroyVoxel()`, `matter += 10` (clamp to max). matter edits regenerate through recycle pipline
+    - Hit Enemy: Apply Knockback force. If `enemy.isExposed`, trigger `KillPlayer()`.
+- [ ] **Update HUD**
+    - Replace Health/Shield/Ammo bars with a single large "Matter" bar.
+    - Visual feedback for "Exposed" state (e.g., bar turns red/cracked).
+    - damage to sheilds cuases players screen to flash transparent blue
+    - exposed cuases players screen to flash transparent red
+
+### Phase 2: Gun & Build Mechanics
+- [ ] **Update Shoot()**
+    - Input: `Left Ctrl` (Player 0), `Right Ctrl` (Player 1).
+    - Cost: `matter -= 1` per shot. Prevent shooting if `matter <= 0`.
+    - Damage: Deal `damage` to `enemy.matter`. feedback that player was hit
+    - **Logic:** If `enemy.matter <= 0`, set `isExposed = true`. Bullets deal 0 damage to `isExposed` players.
+- [ ] **Implement Build()**
+    - Input: `E` (Player 0), `O` (Player 1).
+    - Logic: Raycast to find placement target.
+    - Cost: `matter -= 10`.
+    - Effect: Place a static voxel 
+    - keep the current recycle loop but make players edits last longer
+
+### Phase 3: Physics Finisher (Gravity Tether)
+- [ ] **Implement Gravity Tether**
+    - Input: `R` (Player 0), `P` (Player 1).
+    - State: `Holding` vs `Idle`.
+    - **Grab:** Raycast to find voxel (pull dynamic voxel/cluster, or activate and pull off chunk of static voxels). Apply spring force to pull towards player's "hand" position.
+    - **Throw:** On release, apply massive impulse to object in look direction.
+- [ ] **Physics Damage Logic** (should largely exist in smush pipline)
+    - In `UpdateParticles()` or collision resolution:
+    - If Object Velocity > Threshold AND hits Player: 
+    - If `Player.isExposed`: `KillPlayer()`.
+    - keep respawn timer and screen
 
 
 

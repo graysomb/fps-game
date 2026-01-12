@@ -1,4 +1,25 @@
 // Raylib split-screen FPS prototype (port of fps_game.c)
+/*
+ * # Constructor-Brawler Gameplay Loop
+ *
+ * ## Core Mechanics:
+ * - Matter: A single resource (0-100) replacing Health and Ammo.
+ * - Exposed State: When Matter is 0, the player is vulnerable to one-hit kills via Melee or Physics.
+ *
+ * ## Player Actions:
+ * - Melee (Z/M): Short range. Destroys voxels to harvest Matter (+10). 
+ *   Applies knockback to enemies. Kills Exposed enemies.
+ * - Shoot (LCTRL/RCTRL): Consumes 1 Matter. Deals damage to enemy Matter.
+ *   Deals 0 damage to Exposed players.
+ * - Build (E/O): Consumes 10 Matter. Places a static voxel.
+ * - Gravity Tether (R/P): Hold to grab dynamic voxels or chunks. Release to throw.
+ *   High-velocity impacts kill Exposed players.
+ *
+ * ## Controls:
+ * P1 (Keyboard): WASD (Move), F/H/T/G (Look), Space (Jump), LCtrl (Shoot), Z (Melee), E (Build), R (Tether)
+ * P2 (Keyboard): IJKL (Move), Arrows (Look), RShift (Jump), RCtrl (Shoot), M (Melee), O (Build), P (Tether)
+ * Gamepad: LS (Move), RS (Look), A (Jump), RT (Shoot), B (Melee), X (Build), Y (Tether)
+ */
 #include "raylib.h"
 #include "rlgl.h" // for rlBegin/rlEnd
 #include "raymath.h" // for MatrixIdentity()
@@ -11129,16 +11150,119 @@ static void HandleGamepadInput(int i, float dt) {
 static void HandleKeyboardInput(int i, float dt);
 static void HandleGamepadInput(int i, float dt);
 
+typedef enum {
+    BOT_INTENT_WANDER = 0,
+    BOT_INTENT_HARVEST,
+    BOT_INTENT_COMBAT,
+    BOT_INTENT_FLEE
+} BotIntent;
+
+static int find_nearest_enemy(int playerIdx, float *out_dist_sq) {
+    int bestEnemy = -1;
+    float minDistSq = FLT_MAX;
+    for (int i = 0; i < activePlayers; i++) {
+        if (i == playerIdx) {
+            continue;
+        }
+        if (players[i].respawn_timer > 0.0f) {
+            continue;
+        }
+        float dx = players[i].pos.x - players[playerIdx].pos.x;
+        float dy = players[i].pos.y - players[playerIdx].pos.y;
+        float dz = players[i].pos.z - players[playerIdx].pos.z;
+        float d2 = dx*dx + dy*dy + dz*dz;
+        if (d2 < minDistSq) {
+            minDistSq = d2;
+            bestEnemy = i;
+        }
+    }
+    if (out_dist_sq) {
+        *out_dist_sq = minDistSq;
+    }
+    return bestEnemy;
+}
+
+static int find_nearest_static_voxel(const Vector3 *pos, float *out_dist_sq) {
+    int best = -1;
+    float minDistSq = FLT_MAX;
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (v->simulate || v->isBullet) {
+            continue;
+        }
+        if (v->type != 0 || v->pendingActivation) {
+            continue;
+        }
+        float dx = v->pos.x - pos->x;
+        float dy = v->pos.y - pos->y;
+        float dz = v->pos.z - pos->z;
+        float d2 = dx*dx + dy*dy + dz*dz;
+        if (d2 < minDistSq) {
+            minDistSq = d2;
+            best = i;
+        }
+    }
+    if (out_dist_sq) {
+        *out_dist_sq = minDistSq;
+    }
+    return best;
+}
+
+static int find_nearest_dynamic_voxel(const Vector3 *pos, float max_dist_sq, float *out_dist_sq) {
+    int best = -1;
+    float minDistSq = max_dist_sq;
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (!v->simulate || v->isBullet) {
+            continue;
+        }
+        float dx = v->pos.x - pos->x;
+        float dy = v->pos.y - pos->y;
+        float dz = v->pos.z - pos->z;
+        float d2 = dx*dx + dy*dy + dz*dz;
+        if (d2 < minDistSq) {
+            minDistSq = d2;
+            best = i;
+        }
+    }
+    if (out_dist_sq) {
+        *out_dist_sq = minDistSq;
+    }
+    return best;
+}
+
+static float CalculateUtility_Harvest(const Player *bot, int harvestVoxelIdx) {
+    if (!bot || harvestVoxelIdx < 0) {
+        return 0.0f;
+    }
+    float ratio = clampf(bot->matter / fmaxf(1.0f, bot->matterMax), 0.0f, 1.0f);
+    return 1.0f - ratio;
+}
+
+static float CalculateUtility_Combat(const Player *bot, int enemyIdx) {
+    if (!bot || enemyIdx < 0) {
+        return 0.0f;
+    }
+    return bot->isExposed ? 0.0f : 0.75f;
+}
+
+static float CalculateUtility_Flee(const Player *bot, int enemyIdx) {
+    if (!bot || enemyIdx < 0) {
+        return 0.0f;
+    }
+    return bot->isExposed ? 1.0f : 0.35f;
+}
+
 static void UpdateBot(int playerIdx, float dt) {
     Player *bot = &players[playerIdx];
     BotState *bs = &botStates[playerIdx];
-    
+
     // Difficulty Settings
     float reactionTime = 0.5f;
     float accuracy = 0.8f;
     bool canBuild = false;
     bool aggressive = false;
-    
+
     if (playerInput[playerIdx] == INPUT_TYPE_BOT_EASY) {
         reactionTime = 1.0f;
         accuracy = 0.5f;
@@ -11160,132 +11284,196 @@ static void UpdateBot(int playerIdx, float dt) {
     bs->pathTimer -= dt;
     bs->stateTimer -= dt;
 
-    // 1. Find Target (Player or Pickup)
-    Vector3 targetPos = {0};
-    bool targetingEntity = false; 
-    
-    bool needMatter = bot->matter < 40.0f;
-    int bestPickup = -1;
-    float minDistSq = FLT_MAX;
+    float enemyDistSq = FLT_MAX;
+    int enemyIdx = find_nearest_enemy(playerIdx, &enemyDistSq);
+    bool hasEnemy = (enemyIdx >= 0);
+    float enemyDist = hasEnemy ? sqrtf(enemyDistSq) : FLT_MAX;
 
-    // Priority: Pickup if needed
-    if (needMatter || (aggressive && bot->matter < bot->matterMax)) {
-        for (int i = 0; i < MAX_PICKUPS; i++) {
-            if (!pickups[i].active) continue;
-            if (needMatter && pickups[i].type == PICKUP_VOID) continue;
-            
-            float dx = bot->pos.x - pickups[i].pos.x;
-            float dy = bot->pos.y - pickups[i].pos.y;
-            float dz = bot->pos.z - pickups[i].pos.z;
-            float d2 = dx*dx + dy*dy + dz*dz;
-            
-            if (d2 < minDistSq) {
-                minDistSq = d2;
-                bestPickup = i;
-            }
+    float harvestDistSq = FLT_MAX;
+    int harvestVoxelIdx = find_nearest_static_voxel(&bot->pos, &harvestDistSq);
+    float harvestDist = (harvestVoxelIdx >= 0) ? sqrtf(harvestDistSq) : FLT_MAX;
+
+    bool needMatter = (bot->matter < bot->matterMax * 0.25f) ||
+                      (bot->matter < MATTER_SHOT_COST * 5.0f);
+
+    float utilityHarvest = CalculateUtility_Harvest(bot, harvestVoxelIdx);
+    float utilityCombat = CalculateUtility_Combat(bot, enemyIdx);
+    float utilityFlee = CalculateUtility_Flee(bot, enemyIdx);
+
+    BotIntent intent = BOT_INTENT_WANDER;
+    if (bot->isExposed) {
+        if (utilityFlee > 0.0f) {
+            intent = BOT_INTENT_FLEE;
         }
+    } else if (needMatter && harvestVoxelIdx >= 0 && utilityHarvest >= utilityCombat) {
+        intent = BOT_INTENT_HARVEST;
+    } else if (hasEnemy) {
+        intent = BOT_INTENT_COMBAT;
     }
 
-    if (bestPickup != -1) {
-        targetPos = pickups[bestPickup].pos;
-        bs->targetIndex = -1;
-    } else {
-        // Find enemy
-        int bestEnemy = -1;
-        minDistSq = FLT_MAX;
-        for (int i = 0; i < activePlayers; i++) {
-            if (i == playerIdx) continue;
-            if (players[i].respawn_timer > 0.0f) continue;
-            
-            float dx = bot->pos.x - players[i].pos.x;
-            float dy = bot->pos.y - players[i].pos.y;
-            float dz = bot->pos.z - players[i].pos.z;
-            float d2 = dx*dx + dy*dy + dz*dz;
-            
-            if (d2 < minDistSq) {
-                minDistSq = d2;
-                bestEnemy = i;
+    Vector3 lookTarget = bot->pos;
+    Vector3 moveDir = (Vector3){ 0.0f, 0.0f, 0.0f };
+    bool moving = false;
+    bool aimingAtEnemy = false;
+    bool doMelee = false;
+    bool doShoot = false;
+    bool doBuild = false;
+    bool doStartTether = false;
+    bool doReleaseTether = false;
+
+    if (intent == BOT_INTENT_WANDER) {
+        if (bs->pathTimer <= 0.0f) {
+            bs->moveTarget = (Vector3){
+                (float)GetRandomValue((int)(-FLOOR_SIZE), (int)(FLOOR_SIZE)),
+                bot->pos.y,
+                (float)GetRandomValue((int)(-FLOOR_SIZE), (int)(FLOOR_SIZE))
+            };
+            bs->pathTimer = 5.0f;
+        }
+        lookTarget = bs->moveTarget;
+        moveDir = v_sub(bs->moveTarget, bot->pos);
+        moveDir.y = 0.0f;
+        moving = true;
+    } else if (intent == BOT_INTENT_HARVEST && harvestVoxelIdx >= 0) {
+        lookTarget = voxels[harvestVoxelIdx].pos;
+        moveDir = v_sub(lookTarget, bot->pos);
+        moveDir.y = 0.0f;
+        moving = (harvestDist > MELEE_RANGE * 0.85f);
+        if (harvestDist <= MELEE_RANGE * 0.95f && bs->reactionTimer <= 0.0f) {
+            doMelee = true;
+        }
+    } else if (intent == BOT_INTENT_FLEE && hasEnemy) {
+        Vector3 away = v_sub(bot->pos, players[enemyIdx].pos);
+        away.y = 0.0f;
+        if (v_length(away) > 1e-3f) {
+            moveDir = v_norm(away);
+        }
+        lookTarget = players[enemyIdx].pos;
+        moving = true;
+
+        if (harvestVoxelIdx >= 0 && harvestDist <= 8.0f) {
+            lookTarget = voxels[harvestVoxelIdx].pos;
+            moveDir = v_sub(lookTarget, bot->pos);
+            moveDir.y = 0.0f;
+            moving = true;
+            if (harvestDist <= MELEE_RANGE * 0.95f && bs->reactionTimer <= 0.0f) {
+                doMelee = true;
             }
         }
-        
-        if (bestEnemy != -1) {
-            bs->targetIndex = bestEnemy;
-            targetPos = players[bestEnemy].pos;
-            targetingEntity = true;
+
+        if (canBuild && bot->matter >= MATTER_BUILD_COST && !bs->justBuilt) {
+            if (!bot->isExposed && GetRandomValue(0, 100) < 20) {
+                doBuild = true;
+            }
+        }
+    } else if (intent == BOT_INTENT_COMBAT && hasEnemy) {
+        Player *target = &players[enemyIdx];
+        aimingAtEnemy = true;
+        lookTarget = target->pos;
+
+        if (target->isExposed) {
+            moveDir = v_sub(target->pos, bot->pos);
+            moveDir.y = 0.0f;
+            moving = (enemyDist > MELEE_RANGE * 0.85f);
+
+            if (aggressive && !bot->tetherHolding && enemyDist > MELEE_RANGE * 1.25f) {
+                float debrisDistSq = FLT_MAX;
+                int debrisIdx = find_nearest_dynamic_voxel(&bot->pos,
+                                                          TETHER_RANGE * TETHER_RANGE,
+                                                          &debrisDistSq);
+                if (debrisIdx >= 0 && bs->reactionTimer <= 0.0f) {
+                    lookTarget = voxels[debrisIdx].pos;
+                    aimingAtEnemy = false;
+                    doStartTether = true;
+                }
+            } else if (bot->tetherHolding && bs->reactionTimer <= 0.0f && enemyDist < TETHER_RANGE) {
+                doReleaseTether = true;
+            }
+
+            if (enemyDist <= MELEE_RANGE * 0.95f && bs->reactionTimer <= 0.0f) {
+                doMelee = true;
+            }
         } else {
-            // Wander
-            if (bs->stateTimer <= 0) {
-                bs->moveTarget = (Vector3){ 
-                    (float)GetRandomValue((int)(-FLOOR_SIZE), (int)(FLOOR_SIZE)), 
-                    bot->pos.y, 
-                    (float)GetRandomValue((int)(-FLOOR_SIZE), (int)(FLOOR_SIZE)) 
-                };
-                bs->stateTimer = 5.0f;
+            const float desiredMin = 5.0f;
+            const float desiredMax = 9.0f;
+            if (enemyDist < desiredMin) {
+                moveDir = v_sub(bot->pos, target->pos);
+                moveDir.y = 0.0f;
+                moving = true;
+            } else if (enemyDist > desiredMax) {
+                moveDir = v_sub(target->pos, bot->pos);
+                moveDir.y = 0.0f;
+                moving = true;
+            } else {
+                moving = false;
             }
-            targetPos = bs->moveTarget;
-            targetingEntity = false;
+
+            float reserve = fmaxf(MATTER_SHOT_COST * 3.0f, bot->matterMax * 0.2f);
+            bool criticalMatter = bot->matter < reserve;
+            if (!criticalMatter && bs->reactionTimer <= 0.0f) {
+                doShoot = true;
+            }
         }
     }
 
-    // 2. Movement Logic
-    Vector3 dir = { targetPos.x - bot->pos.x, 0, targetPos.z - bot->pos.z };
-    float distToTarget = sqrtf(dir.x*dir.x + dir.z*dir.z);
-    
-    // Normalize dir
-    if (distToTarget > 0.01f) {
-        dir.x /= distToTarget;
-        dir.z /= distToTarget;
+    if (bs->stateTimer <= 0.0f) {
+        bs->justBuilt = false;
     }
 
-    // Look at target
-    if (targetingEntity || bestPickup != -1) {
-        Vector3 lookDir = { targetPos.x - bot->pos.x, targetPos.y - bot->pos.y, targetPos.z - bot->pos.z };
+    if (moving) {
+        float len = v_length(moveDir);
+        if (len > 0.01f) {
+            moveDir = v_mul(moveDir, 1.0f / len);
+            bot->vel.x = moveDir.x * MOVE_SPEED;
+            bot->vel.z = moveDir.z * MOVE_SPEED;
+        } else {
+            bot->vel.x = 0.0f;
+            bot->vel.z = 0.0f;
+        }
+    } else {
+        bot->vel.x = 0.0f;
+        bot->vel.z = 0.0f;
+    }
+
+    if (intent != BOT_INTENT_WANDER || aimingAtEnemy) {
+        Vector3 lookDir = v_sub(lookTarget, bot->pos);
         float yaw = atan2f(lookDir.x, lookDir.z) * RAD2DEG + 180.0f;
-        float dist = sqrtf(lookDir.x*lookDir.x + lookDir.y*lookDir.y + lookDir.z*lookDir.z);
+        float dist = v_length(lookDir);
         float pitch = asinf(lookDir.y / (dist + 0.001f)) * RAD2DEG;
-        
-        // Simple smoothing
         bot->yaw += (yaw - bot->yaw) * 10.0f * dt;
         bot->pitch += (pitch - bot->pitch) * 10.0f * dt;
-        
-        if (targetingEntity) {
-             // Noise
-             bot->yaw += (float)GetRandomValue(-100, 100) * (1.0f - accuracy) * 0.05f;
-             bot->pitch += (float)GetRandomValue(-100, 100) * (1.0f - accuracy) * 0.05f;
+        if (aimingAtEnemy) {
+            bot->yaw += (float)GetRandomValue(-100, 100) * (1.0f - accuracy) * 0.05f;
+            bot->pitch += (float)GetRandomValue(-100, 100) * (1.0f - accuracy) * 0.05f;
         }
     }
 
-    // Move
-    float moveSpeed = 1.0f;
-    if (targetingEntity && distToTarget < 5.0f && !needMatter) moveSpeed = 0.0f;
-    
-    if (moveSpeed > 0) {
-        bot->vel.x = dir.x * MOVE_SPEED; // Simple velocity set
-        bot->vel.z = dir.z * MOVE_SPEED;
-    } else {
-        bot->vel.x = 0;
-        bot->vel.z = 0;
+    if (doMelee) {
+        perform_melee(playerIdx);
+        bs->reactionTimer = reactionTime;
     }
-
-    // 3. Action Logic (Fire / Build)
-    if (targetingEntity && bs->reactionTimer <= 0.0f && bot->matter >= MATTER_SHOT_COST) {
-         FireVoxel(playerIdx);
-         bs->reactionTimer = reactionTime + (float)GetRandomValue(0, 50)/100.0f;
+    if (doShoot) {
+        FireVoxel(playerIdx);
+        bs->reactionTimer = reactionTime + (float)GetRandomValue(0, 50) / 100.0f;
     }
-    
-    // Building (Panic wall)
-    if (canBuild && !bs->justBuilt && bot->matter >= MATTER_BUILD_COST) {
+    if (doBuild) {
         perform_build(playerIdx);
         bs->justBuilt = true;
-        bs->stateTimer = 2.0f; // Cooldown
+        bs->stateTimer = 1.5f;
     }
-    
-    if (bs->stateTimer <= 0) bs->justBuilt = false;
-    
+    if (doStartTether) {
+        start_tether(playerIdx);
+        bs->reactionTimer = reactionTime;
+    }
+    if (doReleaseTether) {
+        release_tether(playerIdx);
+        bs->reactionTimer = reactionTime;
+    }
+
     // Jump if stuck (simple)
-    if (moveSpeed > 0 && bot->onGround && GetRandomValue(0, 100) < 5) {
-         bot->vel.y = JUMP_SPEED;
-         bot->onGround = false;
+    if (moving && bot->onGround && GetRandomValue(0, 100) < 5) {
+        bot->vel.y = JUMP_SPEED;
+        bot->onGround = false;
     }
 }
 
