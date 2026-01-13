@@ -6285,7 +6285,11 @@ static void handle_pbd_projectile_hits(void)
     int i = 0;
     while (i < voxel_count) {
         Voxel *v = &voxels[i];
-        if (!v->simulate || v->type != 0 || v->isBullet) {
+        if (!v->simulate) {
+            ++i;
+            continue;
+        }
+        if (v->type == 0 && v->isBullet) {
             ++i;
             continue;
         }
