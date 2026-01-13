@@ -120,7 +120,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define MOVE_SPEED      5.0f    // units per second (unused: using acceleration)
 #define TURN_SPEED     90.0f    // degrees per second
 #define JUMP_SPEED     7.5f    // initial jump velocity
-#define GRAVITY         9.8f*2.0f    // gravity acceleration
+#define GRAVITY         9.8f*1.0f    // gravity acceleration
 #define BASE_EYE_HEIGHT 1.0f    // player eye height above floor
 #define HUD_FONT_SIZE      28
 #define HUD_BAR_HEIGHT      6
@@ -133,21 +133,21 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define BULLET_COOLDOWN_SECONDS 0.25f
 #define ACCELERATION   400.0f    // horizontal acceleration
 #define FREEZE_GROUND_WEIGHT       0.9f
-#define FREEZE_NEIGHBOR_WEIGHT     0.4f
+#define FREEZE_NEIGHBOR_WEIGHT     0.4f*0.0f
 #define FREEZE_GROUND_REF_HEIGHT   6.0f
 #define FREEZE_PROPAGATION_ITERATIONS 100
 #define FREEZE_PROPAGATION_ATTENUATION 1.0f
 #define FREEZE_PROPAGATION_EPSILON 1e-6f
 #define FREEZE_PATH_DECAY 0.85f
-#define FREEZE_OVERHANG_DECAY 0.1f
-#define ACTIVATION_VELOCITY_WEIGHT 0.1f
+#define FREEZE_OVERHANG_DECAY 0.7f
+#define ACTIVATION_VELOCITY_WEIGHT 0.6f
 #define ACTIVATION_VELOCITY_REF_SPEED 6.0f
 #define ACTIVATION_STRAIN_WEIGHT   0.1f
 #define ACTIVATION_STRAIN_REF      0.1f
 #define ACTIVATION_GLUE_WEIGHT     0.1f
 #define ACTIVATION_GLUE_REF_SPEED  3.0f
 #define ACTIVATION_DYNAMIC_WEIGHT  0.4f
-#define ACTIVATION_TYPE0_BULLET_BELIEF 0.3f
+#define ACTIVATION_TYPE0_BULLET_BELIEF 20.3f
 #define ACTIVATION_TETHER_BELIEF 20.0f
 #define FREEZE_BELIEF_IMPORTANCE   0.9f
 #define ACTIVATION_HYSTERESIS      0.1f
@@ -169,7 +169,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define VOXEL_PARTICLE_COUNT 9
 #define PBD_MAX_STEP_DT 0.005f
 #define PBD_SUBSTEPS 1
-#define PBD_CONSTRAINT_ITERS 12
+#define PBD_CONSTRAINT_ITERS 6
 #define COLLISION_RELAXATION 0.99f
 #define COLLISION_CENTROID_ONLY_DT 0.02f
 #define SPLIT_VELOCITY_DAMP 0.1f
@@ -178,8 +178,8 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define GLUE_RELAXATION 0.9f
 //#define GLUE_EPS 1e-6f
 #define GLUE_EPS 0.0002f
-#define GLUE_BREAK_STRAIN 0.4f
-#define GLUE_BREAK_HINGE_ANGLE_DEG 20.0f
+#define GLUE_BREAK_STRAIN 0.2f
+#define GLUE_BREAK_HINGE_ANGLE_DEG 10.0f
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 3
 #define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
 #define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
