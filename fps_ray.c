@@ -33,6 +33,9 @@
 #include <limits.h>
 #include <float.h>
 #include <stdarg.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 // Game state enum
 typedef enum {
@@ -1553,6 +1556,9 @@ typedef struct {
 
 static GlueConstraint glueConstraints[MAX_VOXELS * 48];
 static float glueConstraintPeakViolation[MAX_VOXELS * 48];
+static float glueDeltaX[MAX_VOXELS * VOXEL_CORNER_COUNT];
+static float glueDeltaY[MAX_VOXELS * VOXEL_CORNER_COUNT];
+static float glueDeltaZ[MAX_VOXELS * VOXEL_CORNER_COUNT];
 static int glueConstraintCount = 0;
 static uint8_t gluedNeighborCounts[MAX_VOXELS];
 static int gluedNeighborList[MAX_VOXELS][MAX_FACE_NEIGHBORS];
@@ -6605,7 +6611,170 @@ static void solve_voxel_shape(Voxel *voxel) {
     }
 }
 
+static void solve_voxel_glue_parallel(void) {
+    const int total_particles = voxel_count * VOXEL_CORNER_COUNT;
+    if (total_particles <= 0) {
+        return;
+    }
+
+    for (int i = 0; i < total_particles; ++i) {
+        glueDeltaX[i] = 0.0f;
+        glueDeltaY[i] = 0.0f;
+        glueDeltaZ[i] = 0.0f;
+    }
+
+#pragma omp parallel for schedule(static)
+    for (int i = 0; i < glueConstraintCount; ++i) {
+        GlueConstraint *gc = &glueConstraints[i];
+        if (!gc->active) {
+            continue;
+        }
+
+        Voxel *coarse = &voxels[gc->coarseVoxel];
+        Voxel *fine   = &voxels[gc->fineVoxel];
+        if (!coarse->simulate && !fine->simulate) {
+            continue;
+        }
+        bool tethered = (tetherTag[gc->coarseVoxel] > 0 || tetherTag[gc->fineVoxel] > 0);
+
+        Particle *coarseParticles[4];
+        float weights[4];
+        for (int k = 0; k < 4; ++k) {
+            coarseParticles[k] = &coarse->particles[gc->coarseCorner[k]];
+            weights[k] = gc->w[k];
+        }
+        Particle *fineParticle = &fine->particles[gc->fineCorner];
+
+        Vector3 coarsePred[4];
+        for (int k = 0; k < 4; ++k) {
+            coarsePred[k] = coarseParticles[k]->predicted_pos;
+        }
+        if (!v_isfinite(coarsePred[0]) || !v_isfinite(coarsePred[1]) ||
+            !v_isfinite(coarsePred[2]) || !v_isfinite(coarsePred[3]) ||
+            !v_isfinite(fineParticle->predicted_pos)) {
+            continue;
+        }
+
+        Vector3 coarseU = v_sub(coarsePred[1], coarsePred[0]);
+        Vector3 coarseV = v_sub(coarsePred[2], coarsePred[0]);
+        Vector3 coarseNormal = v_cross(coarseU, coarseV);
+        float coarseNormalLenSq = v_dot(coarseNormal, coarseNormal);
+        float baryUU = v_dot(coarseU, coarseU);
+        float baryVV = v_dot(coarseV, coarseV);
+        float baryUV = v_dot(coarseU, coarseV);
+        float baryDet = baryUU * baryVV - baryUV * baryUV;
+        bool baryValid = (coarseNormalLenSq > 1e-12f) && (fabsf(baryDet) > 1e-12f);
+        float solveRawU = 0.0f;
+        float solveRawV = 0.0f;
+        float solveU = 0.0f;
+        float solveV = 0.0f;
+        if (baryValid) {
+            Vector3 normalDir = v_mul(coarseNormal, 1.0f / sqrtf(coarseNormalLenSq));
+            baryValid = face_local_coords(coarsePred[0], coarseU, coarseV, normalDir,
+                                          baryUU, baryVV, baryUV, 1.0f / baryDet,
+                                          fineParticle->predicted_pos,
+                                          &solveRawU, &solveRawV);
+            if (baryValid) {
+                solveU = clampf(solveRawU, 0.0f, 1.0f);
+                solveV = clampf(solveRawV, 0.0f, 1.0f);
+            }
+        }
+
+        Vector3 basisU = v_norm(coarseU);
+        Vector3 basisV = v_sub(coarseV, v_mul(basisU, v_dot(coarseV, basisU)));
+        float basisVLen = v_length(basisV);
+        if (basisVLen < 1e-6f) {
+            continue;
+        }
+        basisV = v_mul(basisV, 1.0f / basisVLen);
+        Vector3 basisN = v_norm(v_cross(basisU, basisV));
+
+        Vector3 anchor = { 0.0f, 0.0f, 0.0f };
+        for (int k = 0; k < 4; ++k) {
+            anchor = v_add(anchor, v_mul(coarseParticles[k]->predicted_pos, weights[k]));
+        }
+        Vector3 target = v_add(anchor,
+                               v_add(v_mul(basisU, gc->restLocalU),
+                                     v_add(v_mul(basisV, gc->restLocalV),
+                                           v_mul(basisN, gc->restLocalN))));
+        Vector3 C = v_sub(target, fineParticle->predicted_pos);
+        float violation = v_length(C);
+        if (tethered) {
+#pragma omp critical(glue_peak)
+            {
+                if (violation > glueConstraintPeakViolation[i]) {
+                    glueConstraintPeakViolation[i] = violation;
+                }
+            }
+        }
+        if (violation < GLUE_EPS) {
+            continue;
+        }
+
+        float invMassSum = fineParticle->inv_mass;
+        for (int k = 0; k < 4; ++k) {
+            float inv_m = coarseParticles[k]->inv_mass;
+            float wk = weights[k];
+            invMassSum += wk * wk * inv_m;
+        }
+        if (invMassSum <= 0.0f) {
+            continue;
+        }
+
+        Vector3 lambda = v_mul(C, -GLUE_RELAXATION * gc->strength / invMassSum);
+        for (int k = 0; k < 4; ++k) {
+            float inv_m = coarseParticles[k]->inv_mass;
+            if (inv_m <= 0.0f) {
+                continue;
+            }
+            float scale = weights[k] * inv_m;
+            Vector3 deltaMove = v_mul(lambda, scale);
+            int idx = gc->coarseVoxel * VOXEL_CORNER_COUNT + gc->coarseCorner[k];
+#pragma omp atomic
+            glueDeltaX[idx] += deltaMove.x;
+#pragma omp atomic
+            glueDeltaY[idx] += deltaMove.y;
+#pragma omp atomic
+            glueDeltaZ[idx] += deltaMove.z;
+        }
+        if (fineParticle->inv_mass > 0.0f) {
+            Vector3 fineDelta = v_mul(lambda, -fineParticle->inv_mass);
+            int idx = gc->fineVoxel * VOXEL_CORNER_COUNT + gc->fineCorner;
+#pragma omp atomic
+            glueDeltaX[idx] += fineDelta.x;
+#pragma omp atomic
+            glueDeltaY[idx] += fineDelta.y;
+#pragma omp atomic
+            glueDeltaZ[idx] += fineDelta.z;
+        }
+    }
+
+    for (int v = 0; v < voxel_count; ++v) {
+        Voxel *voxel = &voxels[v];
+        for (int c = 0; c < VOXEL_CORNER_COUNT; ++c) {
+            int idx = v * VOXEL_CORNER_COUNT + c;
+            float dx = glueDeltaX[idx];
+            float dy = glueDeltaY[idx];
+            float dz = glueDeltaZ[idx];
+            if (dx == 0.0f && dy == 0.0f && dz == 0.0f) {
+                continue;
+            }
+            Particle *p = &voxel->particles[c];
+            if (p->inv_mass <= 0.0f) {
+                continue;
+            }
+            p->predicted_pos.x += dx;
+            p->predicted_pos.y += dy;
+            p->predicted_pos.z += dz;
+        }
+    }
+}
+
 static void solve_voxel_glue(bool allow_break) {
+    if (!allow_break && !debugLogGlue) {
+        solve_voxel_glue_parallel();
+        return;
+    }
     bool glue_break = false;
     const float hinge_break_angle = GLUE_BREAK_HINGE_ANGLE_DEG * DEG2RAD;
     if (debugLogGlue) {
@@ -9152,6 +9321,7 @@ void simulate_voxel_pbd(float dt) {
         }
 
         for (int it = 0; it < constraint_iterations; ++it) {
+#pragma omp parallel for schedule(static)
             for (int i = 0; i < voxel_count; ++i) {
                 Voxel *voxel = &voxels[i];
                 if (!voxel->simulate || voxel->type != 0 || voxel->isBullet)
