@@ -168,7 +168,8 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define VOXEL_CORNER_COUNT 8
 #define VOXEL_CENTER_INDEX 8
 #define VOXEL_PARTICLE_COUNT 9
-#define PBD_MAX_STEP_DT 0.05f
+#define TARGET_FRAME_RATE 60
+#define PBD_MAX_STEP_DT 1.0f/TARGET_FRAME_RATE
 #define PBD_SUBSTEPS 1
 #define PBD_CONSTRAINT_ITERS 6
 #define PBD_MAX_ACCUM_STEPS 8
@@ -9142,16 +9143,17 @@ void simulate_voxel_pbd(float dt) {
         integrate_particles(sub_dt);
         solve_static_collisions(sub_dt);
         solve_dynamic_collisions(sub_dt);
-        bool split_this_step = split_strained_voxels(sub_dt);
-        if (split_this_step) {
-            rebuild_voxel_hash();
-            rebuild_all_voxel_surfaces();
-            rebuild_glue_constraints();
-            reset_glue_constraint_peaks();
-            meshDirty = true;
-        }
+        // bool split_this_step = split_strained_voxels(sub_dt);
+        // if (split_this_step) {
+        //     rebuild_voxel_hash();
+        //     rebuild_all_voxel_surfaces();
+        //     rebuild_glue_constraints();
+        //     reset_glue_constraint_peaks();
+        //     meshDirty = true;
+        // }
 
         for (int it = 0; it < constraint_iterations; ++it) {
+            #pragma omp parallel for schedule(dynamic)
             for (int i = 0; i < voxel_count; ++i) {
                 Voxel *voxel = &voxels[i];
                 if (!voxel->simulate || voxel->type != 0 || voxel->isBullet)
@@ -9161,14 +9163,14 @@ void simulate_voxel_pbd(float dt) {
         solve_voxel_glue(false);
         }
         solve_voxel_glue(true);
-        bool dust_this_step = cull_dust_voxels();
-        if (dust_this_step) {
-            rebuild_voxel_hash();
-            rebuild_all_voxel_surfaces();
-            rebuild_glue_constraints();
-            reset_glue_constraint_peaks();
-            meshDirty = true;
-        }
+        // bool dust_this_step = cull_dust_voxels();
+        // if (dust_this_step) {
+        //     rebuild_voxel_hash();
+        //     rebuild_all_voxel_surfaces();
+        //     rebuild_glue_constraints();
+        //     reset_glue_constraint_peaks();
+        //     meshDirty = true;
+        // }
         update_particle_velocities(sub_dt);
         if (debugLogVoxelBlowup && debugBlowupLogBudget > 0) {
             for (int i = 0; i < voxel_count && debugBlowupLogBudget > 0; ++i) {
@@ -11492,7 +11494,7 @@ int main(void) {
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Split-Screen FPS (raylib)");
     SetWindowState(FLAG_WINDOW_RESIZABLE);
     init_sfx();
-    SetTargetFPS(40);
+    SetTargetFPS(TARGET_FRAME_RATE);
     // seed RNG
     srand((unsigned)time(NULL));
     // reset game state
