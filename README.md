@@ -136,9 +136,9 @@ This section outlines the planned "Constructor-Brawler" gameplay loop.
 
 ### Linux
 ```bash
-gcc -fopenmp fps_ray.c -o fps_ray $(pkg-config --cflags --libs raylib) -lGL -lm -lpthread -ldl -lrt -lX11
+gcc fps_ray.c -o fps_ray $(pkg-config --cflags --libs raylib) -lGL -lm -lpthread -ldl -lrt -lX11
 ```
 ### Windows (MSYS2)
 ```bash
-gcc -fopenmp fps_ray.c -o fps_ray.exe -I/mingw64/include -L/mingw64/lib -lraylib -lopengl32 -lgdi32 -lwinmm
+gcc fps_ray.c -o fps_ray.exe -I/mingw64/include -L/mingw64/lib -lraylib -lopengl32 -lgdi32 -lwinmm
 ```
