@@ -147,7 +147,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define ACTIVATION_GLUE_WEIGHT     0.1f
 #define ACTIVATION_GLUE_REF_SPEED  3.0f
 #define ACTIVATION_DYNAMIC_WEIGHT  0.4f
-#define ACTIVATION_TYPE0_BULLET_BELIEF 20.3f
+#define ACTIVATION_TYPE0_BULLET_BELIEF 0.3f
 #define ACTIVATION_TETHER_BELIEF 20.0f
 #define FREEZE_BELIEF_IMPORTANCE   0.9f
 #define ACTIVATION_HYSTERESIS      0.1f
@@ -224,7 +224,7 @@ static const float GRID_EPSILON = 1e-4f;
 #define MELEE_UPWARD_BOOST 6.0f
 #define MELEE_COOLDOWN_SECONDS 0.6f
 #define BUILD_COOLDOWN_SECONDS 0.5f
-#define TETHER_RANGE 800.0f
+#define TETHER_RANGE 8.0f
 #define TETHER_SPRING 200.0f
 #define TETHER_DAMPING 0.1f
 #define TETHER_THROW_IMPULSE 50.0f
@@ -240,7 +240,7 @@ static const float GRID_EPSILON = 1e-4f;
 
 // Voxel physics constants
 #define MAX_VOXELS    131072
-#define HASH_SIZE     131072    // must be power of two
+#define HASH_SIZE     524288    // must be power of two
 #define VOXEL_SIZE     0.5f    // size of each voxel cube
 
 // Tunable voxel edit brush (per-axis span of the add/remove operation)
