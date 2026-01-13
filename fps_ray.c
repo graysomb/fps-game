@@ -168,8 +168,9 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define VOXEL_CORNER_COUNT 8
 #define VOXEL_CENTER_INDEX 8
 #define VOXEL_PARTICLE_COUNT 9
-#define PBD_MAX_STEP_DT 0.05f
-#define PBD_SUBSTEPS 1
+#define TARGET_FRAME_RATE 60
+#define PBD_MAX_STEP_DT 1.0f/60
+#define PBD_SUBSTEPS 2
 #define PBD_CONSTRAINT_ITERS 6
 #define PBD_MAX_ACCUM_STEPS 8
 #define COLLISION_RELAXATION 0.99f
@@ -6605,112 +6606,102 @@ static void solve_voxel_shape(Voxel *voxel) {
     }
 }
 
-static void solve_voxel_glue(bool allow_break) {
-    bool glue_break = false;
-    const float hinge_break_angle = GLUE_BREAK_HINGE_ANGLE_DEG * DEG2RAD;
-    if (debugLogGlue) {
-        debugGlueSolveLogBudget = DEBUG_GLUE_SOLVE_LOG_INIT;
-        debugGlueBreakLogBudget = DEBUG_GLUE_BREAK_LOG_INIT;
+static void solve_glue_constraint_single(GlueConstraint *gc, bool allow_break, int i, float hinge_break_angle) {
+    Voxel *coarse = &voxels[gc->coarseVoxel];
+    Voxel *fine   = &voxels[gc->fineVoxel];
+    if (!coarse->simulate && !fine->simulate) {
+        return;
     }
-    for (int i = 0; i < glueConstraintCount; ++i) {
-        GlueConstraint *gc = &glueConstraints[i];
-        if (!gc->active) {
-            continue;
-        }
+    bool tethered = (tetherTag[gc->coarseVoxel] > 0 || tetherTag[gc->fineVoxel] > 0);
 
-        Voxel *coarse = &voxels[gc->coarseVoxel];
-        Voxel *fine   = &voxels[gc->fineVoxel];
-        if (!coarse->simulate && !fine->simulate) {
-            continue;
-        }
-        bool tethered = (tetherTag[gc->coarseVoxel] > 0 || tetherTag[gc->fineVoxel] > 0);
+    Particle *coarseParticles[4];
+    float weights[4];
+    for (int k = 0; k < 4; ++k) {
+        coarseParticles[k] = &coarse->particles[gc->coarseCorner[k]];
+        weights[k] = gc->w[k];
+    }
+    Particle *fineParticle = &fine->particles[gc->fineCorner];
 
-        Particle *coarseParticles[4];
-        float weights[4];
-        for (int k = 0; k < 4; ++k) {
-            coarseParticles[k] = &coarse->particles[gc->coarseCorner[k]];
-            weights[k] = gc->w[k];
-        }
-        Particle *fineParticle = &fine->particles[gc->fineCorner];
-
-        Vector3 coarsePred[4];
-        for (int k = 0; k < 4; ++k) {
-            coarsePred[k] = coarseParticles[k]->predicted_pos;
-        }
-        if (!v_isfinite(coarsePred[0]) || !v_isfinite(coarsePred[1]) ||
-            !v_isfinite(coarsePred[2]) || !v_isfinite(coarsePred[3]) ||
-            !v_isfinite(fineParticle->predicted_pos)) {
-            continue;
-        }
-        Vector3 coarseU = v_sub(coarsePred[1], coarsePred[0]);
-        Vector3 coarseV = v_sub(coarsePred[2], coarsePred[0]);
-        Vector3 coarseNormal = v_cross(coarseU, coarseV);
-        float coarseNormalLenSq = v_dot(coarseNormal, coarseNormal);
-        float baryUU = v_dot(coarseU, coarseU);
-        float baryVV = v_dot(coarseV, coarseV);
-        float baryUV = v_dot(coarseU, coarseV);
-        float baryDet = baryUU * baryVV - baryUV * baryUV;
-        bool baryValid = (coarseNormalLenSq > 1e-12f) && (fabsf(baryDet) > 1e-12f);
-        float solveRawU = 0.0f;
-        float solveRawV = 0.0f;
-        float solveU = 0.0f;
-        float solveV = 0.0f;
+    Vector3 coarsePred[4];
+    for (int k = 0; k < 4; ++k) {
+        coarsePred[k] = coarseParticles[k]->predicted_pos;
+    }
+    if (!v_isfinite(coarsePred[0]) || !v_isfinite(coarsePred[1]) ||
+        !v_isfinite(coarsePred[2]) || !v_isfinite(coarsePred[3]) ||
+        !v_isfinite(fineParticle->predicted_pos)) {
+        return;
+    }
+    Vector3 coarseU = v_sub(coarsePred[1], coarsePred[0]);
+    Vector3 coarseV = v_sub(coarsePred[2], coarsePred[0]);
+    Vector3 coarseNormal = v_cross(coarseU, coarseV);
+    float coarseNormalLenSq = v_dot(coarseNormal, coarseNormal);
+    float baryUU = v_dot(coarseU, coarseU);
+    float baryVV = v_dot(coarseV, coarseV);
+    float baryUV = v_dot(coarseU, coarseV);
+    float baryDet = baryUU * baryVV - baryUV * baryUV;
+    bool baryValid = (coarseNormalLenSq > 1e-12f) && (fabsf(baryDet) > 1e-12f);
+    float solveRawU = 0.0f;
+    float solveRawV = 0.0f;
+    float solveU = 0.0f;
+    float solveV = 0.0f;
+    if (baryValid) {
+        Vector3 normalDir = v_mul(coarseNormal, 1.0f / sqrtf(coarseNormalLenSq));
+        baryValid = face_local_coords(coarsePred[0], coarseU, coarseV, normalDir,
+                                      baryUU, baryVV, baryUV, 1.0f / baryDet,
+                                      fineParticle->predicted_pos,
+                                      &solveRawU, &solveRawV);
         if (baryValid) {
-            Vector3 normalDir = v_mul(coarseNormal, 1.0f / sqrtf(coarseNormalLenSq));
-            baryValid = face_local_coords(coarsePred[0], coarseU, coarseV, normalDir,
-                                          baryUU, baryVV, baryUV, 1.0f / baryDet,
-                                          fineParticle->predicted_pos,
-                                          &solveRawU, &solveRawV);
-            if (baryValid) {
-                solveU = clampf(solveRawU, 0.0f, 1.0f);
-                solveV = clampf(solveRawV, 0.0f, 1.0f);
-            }
+            solveU = clampf(solveRawU, 0.0f, 1.0f);
+            solveV = clampf(solveRawV, 0.0f, 1.0f);
         }
+    }
 
-        Vector3 basisU = v_norm(coarseU);
-        Vector3 basisV = v_sub(coarseV, v_mul(basisU, v_dot(coarseV, basisU)));
-        float basisVLen = v_length(basisV);
-        if (basisVLen < 1e-6f) {
-            continue;
-        }
-        basisV = v_mul(basisV, 1.0f / basisVLen);
-        Vector3 basisN = v_norm(v_cross(basisU, basisV));
+    Vector3 basisU = v_norm(coarseU);
+    Vector3 basisV = v_sub(coarseV, v_mul(basisU, v_dot(coarseV, basisU)));
+    float basisVLen = v_length(basisV);
+    if (basisVLen < 1e-6f) {
+        return;
+    }
+    basisV = v_mul(basisV, 1.0f / basisVLen);
+    Vector3 basisN = v_norm(v_cross(basisU, basisV));
 
-        Vector3 anchor = { 0.0f, 0.0f, 0.0f };
-        for (int k = 0; k < 4; ++k) {
-            anchor = v_add(anchor, v_mul(coarseParticles[k]->predicted_pos, weights[k]));
+    Vector3 anchor = { 0.0f, 0.0f, 0.0f };
+    for (int k = 0; k < 4; ++k) {
+        anchor = v_add(anchor, v_mul(coarseParticles[k]->predicted_pos, weights[k]));
+    }
+    Vector3 target = v_add(anchor,
+                           v_add(v_mul(basisU, gc->restLocalU),
+                                 v_add(v_mul(basisV, gc->restLocalV),
+                                       v_mul(basisN, gc->restLocalN))));
+    Vector3 C = v_sub(target, fineParticle->predicted_pos);
+    float violation = v_length(C);
+    float rest_edge_min = fminf(coarse->rest_edge, fine->rest_edge);
+    float break_distance = GLUE_BREAK_STRAIN * rest_edge_min;
+    if (!allow_break && tethered) {
+        if (violation > glueConstraintPeakViolation[i]) {
+            glueConstraintPeakViolation[i] = violation;
         }
-        Vector3 target = v_add(anchor,
-                               v_add(v_mul(basisU, gc->restLocalU),
-                                     v_add(v_mul(basisV, gc->restLocalV),
-                                           v_mul(basisN, gc->restLocalN))));
-        Vector3 C = v_sub(target, fineParticle->predicted_pos);
-        float violation = v_length(C);
-        float rest_edge_min = fminf(coarse->rest_edge, fine->rest_edge);
-        float break_distance = GLUE_BREAK_STRAIN * rest_edge_min;
-        if (!allow_break && tethered) {
-            if (violation > glueConstraintPeakViolation[i]) {
-                glueConstraintPeakViolation[i] = violation;
+    }
+    bool hinge_break = false;
+    if (allow_break && hinge_break_angle > 0.0f) {
+        Vector3 n_coarse = { 0.0f, 0.0f, 0.0f };
+        Vector3 n_fine = { 0.0f, 0.0f, 0.0f };
+        if (face_normal_predicted(coarse, gc->coarseCorner, &n_coarse) &&
+            face_normal_predicted(fine, gc->fineCornerFace, &n_fine)) {
+            float cur_dot = clampf(v_dot(n_coarse, n_fine), -1.0f, 1.0f);
+            float cur_angle = acosf(cur_dot);
+            if (fabsf(cur_angle - gc->restNormalAngle) > hinge_break_angle) {
+                hinge_break = true;
             }
         }
-        bool hinge_break = false;
-        if (allow_break && hinge_break_angle > 0.0f) {
-            Vector3 n_coarse = { 0.0f, 0.0f, 0.0f };
-            Vector3 n_fine = { 0.0f, 0.0f, 0.0f };
-            if (face_normal_predicted(coarse, gc->coarseCorner, &n_coarse) &&
-                face_normal_predicted(fine, gc->fineCornerFace, &n_fine)) {
-                float cur_dot = clampf(v_dot(n_coarse, n_fine), -1.0f, 1.0f);
-                float cur_angle = acosf(cur_dot);
-                if (fabsf(cur_angle - gc->restNormalAngle) > hinge_break_angle) {
-                    hinge_break = true;
-                }
-            }
-        }
-        float max_violation = violation;
-        if (tethered && glueConstraintPeakViolation[i] > max_violation) {
-            max_violation = glueConstraintPeakViolation[i];
-        }
-        if (allow_break && (max_violation > break_distance || hinge_break)) {
+    }
+    float max_violation = violation;
+    if (tethered && glueConstraintPeakViolation[i] > max_violation) {
+        max_violation = glueConstraintPeakViolation[i];
+    }
+    if (allow_break && (max_violation > break_distance || hinge_break)) {
+        #pragma omp critical(GlueBreak)
+        {
             if (debugLogGlue && debugGlueBreakLogBudget > 0) {
                 TraceLog(LOG_DEBUG,
                          "[GlueBreak] pair=(%d,%d) spans=(%d,%d) violation=%.5f break=%.5f hinge=%d uvPred=(%.3f,%.3f) rawUV=(%.3f,%.3f) baryValid=%s weights=(%.3f,%.3f,%.3f,%.3f) coarsePos=(%.2f,%.2f,%.2f) finePos=(%.2f,%.2f,%.2f)",
@@ -6779,6 +6770,7 @@ static void solve_voxel_glue(bool allow_break) {
                     debugTagBreakLogged[tagB] = 1;
                 }
             }
+        
             if (coarse->simulate) {
                 coarse->skipCollisionVelocityFrames = GLUE_BREAK_VELOCITY_SKIP_FRAMES;
             }
@@ -6787,7 +6779,7 @@ static void solve_voxel_glue(bool allow_break) {
             }
             gc->active = false;
             glue_adjacency_remove_ref_pair(gc->coarseVoxel, gc->fineVoxel, 1);
-            glue_break = true;
+            
             if (DEBRIS_ACTIVATION_COOLDOWN_FRAMES > 0) {
                 int neighbors[MAX_FACE_NEIGHBORS];
                 if (coarse->simulate) {
@@ -6807,47 +6799,50 @@ static void solve_voxel_glue(bool allow_break) {
                     }
                 }
             }
+        }
+        return;
+    }
+    if (violation < GLUE_EPS) {
+        return;
+    }
+
+    float invMassSum = fineParticle->inv_mass;
+    for (int k = 0; k < 4; ++k) {
+        float inv_m = coarseParticles[k]->inv_mass;
+        float wk = weights[k];
+        invMassSum += wk * wk * inv_m;
+    }
+    if (invMassSum <= 0.0f) {
+        return;
+    }
+
+    Vector3 lambda = v_mul(C, -GLUE_RELAXATION * gc->strength / invMassSum);
+    float lambda_mag = v_length(lambda);
+    Vector3 coarseDeltaAccum = { 0.0f, 0.0f, 0.0f };
+    float coarseDeltaMax = 0.0f;
+    for (int k = 0; k < 4; ++k) {
+        float inv_m = coarseParticles[k]->inv_mass;
+        if (inv_m <= 0.0f) {
             continue;
         }
-        if (violation < GLUE_EPS) {
-            continue;
+        float scale = weights[k] * inv_m;
+        Vector3 deltaMove = v_mul(lambda, scale);
+        coarseParticles[k]->predicted_pos = v_add(coarseParticles[k]->predicted_pos,
+                                                  deltaMove);
+        coarseDeltaAccum = v_add(coarseDeltaAccum, deltaMove);
+        float deltaLen = v_length(deltaMove);
+        if (deltaLen > coarseDeltaMax) {
+            coarseDeltaMax = deltaLen;
         }
+    }
+    Vector3 fineDelta = { 0.0f, 0.0f, 0.0f };
+    if (fineParticle->inv_mass > 0.0f) {
+        fineDelta = v_mul(lambda, fineParticle->inv_mass);
+        fineParticle->predicted_pos = v_sub(fineParticle->predicted_pos, fineDelta);
+    }
 
-        float invMassSum = fineParticle->inv_mass;
-        for (int k = 0; k < 4; ++k) {
-            float inv_m = coarseParticles[k]->inv_mass;
-            float wk = weights[k];
-            invMassSum += wk * wk * inv_m;
-        }
-        if (invMassSum <= 0.0f) {
-            continue;
-        }
-
-        Vector3 lambda = v_mul(C, -GLUE_RELAXATION * gc->strength / invMassSum);
-        float lambda_mag = v_length(lambda);
-        Vector3 coarseDeltaAccum = { 0.0f, 0.0f, 0.0f };
-        float coarseDeltaMax = 0.0f;
-        for (int k = 0; k < 4; ++k) {
-            float inv_m = coarseParticles[k]->inv_mass;
-            if (inv_m <= 0.0f) {
-                continue;
-            }
-            float scale = weights[k] * inv_m;
-            Vector3 deltaMove = v_mul(lambda, scale);
-            coarseParticles[k]->predicted_pos = v_add(coarseParticles[k]->predicted_pos,
-                                                      deltaMove);
-            coarseDeltaAccum = v_add(coarseDeltaAccum, deltaMove);
-            float deltaLen = v_length(deltaMove);
-            if (deltaLen > coarseDeltaMax) {
-                coarseDeltaMax = deltaLen;
-            }
-        }
-        Vector3 fineDelta = { 0.0f, 0.0f, 0.0f };
-        if (fineParticle->inv_mass > 0.0f) {
-            fineDelta = v_mul(lambda, fineParticle->inv_mass);
-            fineParticle->predicted_pos = v_sub(fineParticle->predicted_pos, fineDelta);
-        }
-
+    #pragma omp critical(GlueLog)
+    {
         if (debugLogGlue && debugGlueSolveLogBudget > 0) {
             TraceLog(LOG_DEBUG,
                      "[GlueSolve] pair=(%d,%d) spans=(%d,%d) violation=%.5f break=%.5f invMass=%.5f lambda=%.5f coarseDeltaMax=%.5f fineDelta=%.5f baryValid=%s uvPred=(%.3f,%.3f) rawUV=(%.3f,%.3f) weights=(%.3f,%.3f,%.3f,%.3f) coarsePosY=%.2f finePosY=%.2f coarseVelY=%.2f fineVelY=%.2f",
@@ -6865,11 +6860,51 @@ static void solve_voxel_glue(bool allow_break) {
             --debugGlueSolveLogBudget;
         }
     }
-    if (glue_break) {
-        /* adjacency updates applied incrementally per constraint */
-    }
 }
 
+static void solve_voxel_glue(bool allow_break) {
+    const float hinge_break_angle = GLUE_BREAK_HINGE_ANGLE_DEG * DEG2RAD;
+    if (debugLogGlue) {
+        debugGlueSolveLogBudget = DEBUG_GLUE_SOLVE_LOG_INIT;
+        debugGlueBreakLogBudget = DEBUG_GLUE_BREAK_LOG_INIT;
+    }
+
+    #pragma omp parallel
+    {
+        for (int dir = 0; dir < 3; ++dir) {
+            for (int color = 0; color < 8; ++color) {
+                int pX = (color & 1);
+                int pY = (color & 2) >> 1;
+                int pZ = (color & 4) >> 2;
+
+                #pragma omp for schedule(dynamic)
+                for (int i = 0; i < glueConstraintCount; ++i) {
+                    GlueConstraint *gc = &glueConstraints[i];
+                    if (!gc->active) {
+                        continue;
+                    }
+
+                    // Filter by Direction
+                    bool isDirX = (gc->dirX != 0);
+                    bool isDirY = (gc->dirY != 0);
+                    bool isDirZ = (gc->dirZ != 0);
+                    
+                    if (dir == 0 && !isDirX) continue;
+                    if (dir == 1 && !isDirY) continue;
+                    if (dir == 2 && !isDirZ) continue;
+
+                    // Filter by Parity of FINE voxel (always single span interface)
+                    Voxel *fine = &voxels[gc->fineVoxel];
+                    if ((fine->gx & 1) != pX) continue;
+                    if ((fine->gy & 1) != pY) continue;
+                    if ((fine->gz & 1) != pZ) continue;
+                    
+                    solve_glue_constraint_single(gc, allow_break, i, hinge_break_angle);
+                }
+            }
+        }
+    }
+}
 static void log_dynamic_voxel_positions(void) {
     if (!debugLogDynamicVoxels) {
         return;
@@ -9142,16 +9177,17 @@ void simulate_voxel_pbd(float dt) {
         integrate_particles(sub_dt);
         solve_static_collisions(sub_dt);
         solve_dynamic_collisions(sub_dt);
-        bool split_this_step = split_strained_voxels(sub_dt);
-        if (split_this_step) {
-            rebuild_voxel_hash();
-            rebuild_all_voxel_surfaces();
-            rebuild_glue_constraints();
-            reset_glue_constraint_peaks();
-            meshDirty = true;
-        }
+        //bool split_this_step = split_strained_voxels(sub_dt);
+        // if (split_this_step) {
+        //     rebuild_voxel_hash();
+        //     rebuild_all_voxel_surfaces();
+        //     rebuild_glue_constraints();
+        //     reset_glue_constraint_peaks();
+        //     meshDirty = true;
+        // }
 
         for (int it = 0; it < constraint_iterations; ++it) {
+            #pragma omp parallel for schedule(dynamic)
             for (int i = 0; i < voxel_count; ++i) {
                 Voxel *voxel = &voxels[i];
                 if (!voxel->simulate || voxel->type != 0 || voxel->isBullet)
@@ -9161,34 +9197,34 @@ void simulate_voxel_pbd(float dt) {
         solve_voxel_glue(false);
         }
         solve_voxel_glue(true);
-        bool dust_this_step = cull_dust_voxels();
-        if (dust_this_step) {
-            rebuild_voxel_hash();
-            rebuild_all_voxel_surfaces();
-            rebuild_glue_constraints();
-            reset_glue_constraint_peaks();
-            meshDirty = true;
-        }
+        // bool dust_this_step = cull_dust_voxels();
+        // if (dust_this_step) {
+        //     rebuild_voxel_hash();
+        //     rebuild_all_voxel_surfaces();
+        //     rebuild_glue_constraints();
+        //     reset_glue_constraint_peaks();
+        //     meshDirty = true;
+        // }
         update_particle_velocities(sub_dt);
-        if (debugLogVoxelBlowup && debugBlowupLogBudget > 0) {
-            for (int i = 0; i < voxel_count && debugBlowupLogBudget > 0; ++i) {
-                Voxel *voxel = &voxels[i];
-                if (!voxel->simulate) {
-                    continue;
-                }
-                Vector3 pos = voxel->pos;
-                if (!isfinite(pos.x) || !isfinite(pos.y) || !isfinite(pos.z) ||
-                    fabsf(pos.x) > 1e4f || fabsf(pos.y) > 1e4f || fabsf(pos.z) > 1e4f)
-                {
-                    TraceLog(LOG_WARNING,
-                             "[VoxelBlowup] voxel=%d span=%d pos=(%.3f,%.3f,%.3f) vel=(%.3f,%.3f,%.3f)",
-                             i, voxel->span,
-                             pos.x, pos.y, pos.z,
-                             voxel->vel.x, voxel->vel.y, voxel->vel.z);
-                    --debugBlowupLogBudget;
-                }
-            }
-        }
+        // if (debugLogVoxelBlowup && debugBlowupLogBudget > 0) {
+        //     for (int i = 0; i < voxel_count && debugBlowupLogBudget > 0; ++i) {
+        //         Voxel *voxel = &voxels[i];
+        //         if (!voxel->simulate) {
+        //             continue;
+        //         }
+        //         Vector3 pos = voxel->pos;
+        //         if (!isfinite(pos.x) || !isfinite(pos.y) || !isfinite(pos.z) ||
+        //             fabsf(pos.x) > 1e4f || fabsf(pos.y) > 1e4f || fabsf(pos.z) > 1e4f)
+        //         {
+        //             TraceLog(LOG_WARNING,
+        //                      "[VoxelBlowup] voxel=%d span=%d pos=(%.3f,%.3f,%.3f) vel=(%.3f,%.3f,%.3f)",
+        //                      i, voxel->span,
+        //                      pos.x, pos.y, pos.z,
+        //                      voxel->vel.x, voxel->vel.y, voxel->vel.z);
+        //             --debugBlowupLogBudget;
+        //         }
+        //     }
+        // }
     }
 
     log_dynamic_voxel_positions();
@@ -11492,7 +11528,7 @@ int main(void) {
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Split-Screen FPS (raylib)");
     SetWindowState(FLAG_WINDOW_RESIZABLE);
     init_sfx();
-    SetTargetFPS(40);
+    SetTargetFPS(60);
     // seed RNG
     srand((unsigned)time(NULL));
     // reset game state
@@ -11853,7 +11889,7 @@ int main(void) {
         update_pickups(dt); // Update pickups
         prepare_tether_forces();
         pbdTimeAccumulator += dt;
-        float pbd_fixed_dt = PBD_MAX_STEP_DT;
+        float pbd_fixed_dt = 1.0f/TARGET_FRAME_RATE;
         float pbd_max_accum = pbd_fixed_dt * (float)PBD_MAX_ACCUM_STEPS;
         if (pbdTimeAccumulator > pbd_max_accum) {
             pbdTimeAccumulator = pbd_max_accum;
