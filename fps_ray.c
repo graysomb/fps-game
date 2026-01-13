@@ -12025,6 +12025,18 @@ int main(void) {
                 DrawRectangle(GetScreenWidth()/2-2, 0, 4, GetScreenHeight(), LIGHTGRAY);
                 DrawRectangle(0, GetScreenHeight()/2-2, GetScreenWidth(), 4, LIGHTGRAY);
             }
+            {
+                const int fps_font = 18;
+                const int fps_pad = 20;
+                const char *fps_text = TextFormat("FPS %d", GetFPS());
+                int text_w = MeasureText(fps_text, fps_font);
+                int box_w = text_w + fps_pad * 2;
+                int box_h = fps_font + fps_pad * 2 - 2;
+                int box_x = (GetScreenWidth() - box_w) / 2;
+                int box_y = 6;
+                DrawRectangle(box_x, box_y, box_w, box_h, Fade(BLACK, 0.6f));
+                DrawText(fps_text, box_x + fps_pad, box_y + fps_pad - 2, fps_font, RAYWHITE);
+            }
             // particle debug text removed
         EndDrawing();
         break;
