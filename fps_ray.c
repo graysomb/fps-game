@@ -50,6 +50,7 @@ static int winningScore = 10;
 static int winnerId = -1;
 static bool droneIntroEnabled = true;
 static float droneTimer = 0.0f;
+static float pbdTimeAccumulator = 0.0f;
 
 // Confetti system
 typedef struct {
@@ -167,9 +168,10 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define VOXEL_CORNER_COUNT 8
 #define VOXEL_CENTER_INDEX 8
 #define VOXEL_PARTICLE_COUNT 9
-#define PBD_MAX_STEP_DT 0.005f
+#define PBD_MAX_STEP_DT 0.05f
 #define PBD_SUBSTEPS 1
 #define PBD_CONSTRAINT_ITERS 6
+#define PBD_MAX_ACCUM_STEPS 8
 #define COLLISION_RELAXATION 0.99f
 #define COLLISION_CENTROID_ONLY_DT 0.02f
 #define SPLIT_VELOCITY_DAMP 0.1f
@@ -178,8 +180,8 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define GLUE_RELAXATION 0.9f
 //#define GLUE_EPS 1e-6f
 #define GLUE_EPS 0.0002f
-#define GLUE_BREAK_STRAIN 0.2f
-#define GLUE_BREAK_HINGE_ANGLE_DEG 10.0f
+#define GLUE_BREAK_STRAIN 0.4f
+#define GLUE_BREAK_HINGE_ANGLE_DEG 20.0f
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 3
 #define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
 #define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
@@ -5618,6 +5620,7 @@ static void draw_pickups(Camera cam) {
 
 static void ResetGame(void) {
     winnerId = -1;
+    pbdTimeAccumulator = 0.0f;
     init_confetti();
     init_pickups();
     // init players
@@ -11485,7 +11488,7 @@ int main(void) {
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Split-Screen FPS (raylib)");
     SetWindowState(FLAG_WINDOW_RESIZABLE);
     init_sfx();
-    SetTargetFPS(120);
+    SetTargetFPS(40);
     // seed RNG
     srand((unsigned)time(NULL));
     // reset game state
@@ -11845,7 +11848,16 @@ int main(void) {
         update_projectiles(dt);
         update_pickups(dt); // Update pickups
         prepare_tether_forces();
-        simulate_voxel_pbd(dt);
+        pbdTimeAccumulator += dt;
+        float pbd_fixed_dt = PBD_MAX_STEP_DT;
+        float pbd_max_accum = pbd_fixed_dt * (float)PBD_MAX_ACCUM_STEPS;
+        if (pbdTimeAccumulator > pbd_max_accum) {
+            pbdTimeAccumulator = pbd_max_accum;
+        }
+        while (pbdTimeAccumulator >= pbd_fixed_dt) {
+            simulate_voxel_pbd(pbd_fixed_dt);
+            pbdTimeAccumulator -= pbd_fixed_dt;
+        }
         recycle_dead_voxels();
         log_dynamic_glue_cluster_breaks();
         handle_pbd_projectile_hits();
