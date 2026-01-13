@@ -542,7 +542,7 @@ void SolveConstraintsGrid(int ix)
 				{
 					int jx = mContent[list_index];
 
-					if (jx / 8 == ix / 8) continue; // no self-interactions within the same voxel
+					//if(jx/8==ix/8) continue; //no self-interactions
 					if (jx == ix) continue;
 
 					XpbdParticle pj = particles_in[jx];
