@@ -47,11 +47,11 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
 #define VGS_ALPHA 0.01f // 0 means no shear correction 1 means complete shear correction
 #define VGS_BETA 0.01f // 0 means no tension correction 1 means total tension correction
-#define VGS_ITERS 3
+#define VGS_ITERS 6
 #define VGS_EPS 1e-6f
 #define PBD_MAX_STEP_DT 0.005f
 #define PBD_SUBSTEPS 3
-#define PBD_CONSTRAINT_ITERS 5
+#define PBD_CONSTRAINT_ITERS 3
 #define COLLISION_RELAXATION 0.9f
 #define CENTER_RELAXATION 0.9f
 #define VELOCITY_DAMPING 0.99f
@@ -68,8 +68,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define HASH_SIZE     131072    // must be power of two
 #define VOXEL_SIZE     0.5f    // size of each voxel cube
 #define MAX_PARTICLES (MAX_VOXELS * 8)
-#define STRAIN_BREAK_THRESHOLD 0.15f
-#define SHEAR_BREAK_THRESHOLD 0.15f
+#define STRAIN_BREAK_THRESHOLD 0.2f
+#define SHEAR_BREAK_THRESHOLD 0.2f
 #define BREAK_DAMP_FRAMES 50
 #define COARSENING_WAKE_FRAMES 30
 #define COARSENING_MASS_SCALE 1.0f
@@ -276,6 +276,7 @@ static const int face_offsets[6][3] = {
 static const int opposite_face[6] = { 1, 0, 3, 2, 5, 4 };
 
 static int table_get(int x, int y, int z);
+static void break_face_link(Voxel *voxel, int face_index);
 
 
 // Utility functions
