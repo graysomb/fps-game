@@ -68,8 +68,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define HASH_SIZE     131072    // must be power of two
 #define VOXEL_SIZE     0.5f    // size of each voxel cube
 #define MAX_PARTICLES (MAX_VOXELS * 8)
-#define STRAIN_BREAK_THRESHOLD 0.1f
-#define SHEAR_BREAK_THRESHOLD 0.1f
+#define STRAIN_BREAK_THRESHOLD 0.15f
+#define SHEAR_BREAK_THRESHOLD 0.15f
 #define BREAK_DAMP_FRAMES 50
 
 // Tunable voxel edit brush (per-axis span of the add/remove operation)
