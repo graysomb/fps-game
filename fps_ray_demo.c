@@ -43,7 +43,7 @@ typedef enum {
     GAME_STATE_GAMEOVER,
     GAME_STATE_DRONE_INTRO
 } GameState;
-static GameState gameState = GAME_STATE_MENU;
+static GameState gameState = GAME_STATE_DRONE_INTRO;
 
 // Win condition globals
 static int winningScore = 10;
@@ -170,7 +170,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define VOXEL_PARTICLE_COUNT 9
 #define TARGET_FRAME_RATE 40
 #define PBD_MAX_STEP_DT 1.0f/TARGET_FRAME_RATE
-#define PBD_SUBSTEPS 1
+#define PBD_SUBSTEPS 2
 #define PBD_CONSTRAINT_ITERS 6
 #define PBD_MAX_ACCUM_STEPS 8
 #define COLLISION_RELAXATION 0.99f
@@ -181,8 +181,8 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define GLUE_RELAXATION 0.9f
 //#define GLUE_EPS 1e-6f
 #define GLUE_EPS 0.0002f
-#define GLUE_BREAK_STRAIN 0.2f
-#define GLUE_BREAK_HINGE_ANGLE_DEG 10.0f
+#define GLUE_BREAK_STRAIN 20.2f
+#define GLUE_BREAK_HINGE_ANGLE_DEG 100.0f
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 3
 #define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
 #define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
@@ -4978,6 +4978,92 @@ static void buildGateFrame(int cx, int cz, int w, int h, int depth, Color c) {
     }
 }
 
+static int currentDemoIndex = 0;
+static float demoDisplayTimer = 0.0f;
+#define DEMO_DURATION 15.0f
+#define NUM_DEMOS 3
+
+static void buildUnstableTower(UnitVoxelBuffer *buffer) {
+    // A tall tower with a chunk missing at the bottom
+    int cx = 0;
+    int cz = 0;
+    int height = 30;
+    int width = 5;
+    
+    for (int y = 0; y < height; y++) {
+        for (int x = -width/2; x <= width/2; x++) {
+            for (int z = -width/2; z <= width/2; z++) {
+                // Cut out a chunk at the bottom corner
+                if (y < 5 && x > 0 && z > 0) continue;
+                
+                unit_voxel_buffer_push(buffer, cx + x, y, cz + z, (Color){ 200, 100, 50, 255 }, 0, false, -1, 0, -1);
+            }
+        }
+    }
+}
+
+static void buildPlatformMissingLegs(UnitVoxelBuffer *buffer) {
+    // A platform with only 2 diagonal legs
+    int cx = 0;
+    int cz = 0;
+    int platform_y = 10;
+    int size = 10;
+    
+    // Platform
+    for (int x = -size/2; x <= size/2; x++) {
+        for (int z = -size/2; z <= size/2; z++) {
+            unit_voxel_buffer_push(buffer, cx + x, platform_y, cz + z, (Color){ 100, 200, 100, 255 }, 0, false, -1, 0, -1);
+        }
+    }
+    
+    // Legs (Diagonal only)
+    for (int y = 0; y < platform_y; y++) {
+        // Leg 1: +X, +Z
+        {
+            unit_voxel_buffer_push(buffer, cx + size/2 - 1, y, cz + size/2 - 1, (Color){ 120, 160, 90, 255 }, 0, false, -1, 0, -1);
+        }
+        // Leg 2: -X, -Z
+        {
+            unit_voxel_buffer_push(buffer, cx - size/2 + 1, y, cz - size/2 + 1, (Color){ 120, 160, 90, 255 }, 0, false, -1, 0, -1);
+        }
+    }
+}
+
+static void buildHollowPillar(UnitVoxelBuffer *buffer) {
+    // A hollow pillar that crumbles
+    int cx = 0;
+    int cz = 0;
+    int height = 25;
+    int radius = 4;
+    
+    for (int y = 0; y < height; y++) {
+        for (int x = -radius; x <= radius; x++) {
+            for (int z = -radius; z <= radius; z++) {
+                if (x*x + z*z > radius*radius) continue;
+                if (x*x + z*z < (radius-1)*(radius-1)) continue; // Hollow center
+                
+                // Randomly skip blocks to weaken it
+                if (GetRandomValue(0, 10) < 2) continue;
+
+                unit_voxel_buffer_push(buffer, cx + x, y, cz + z, (Color){ 150, 150, 150, 255 }, 0, false, -1, 0, -1);
+            }
+        }
+    }
+}
+
+static void buildDemoStructure(int index) {
+    UnitVoxelBuffer buffer;
+    unit_voxel_buffer_clear(&buffer);
+
+    switch(index % NUM_DEMOS) {
+        case 0: buildUnstableTower(&buffer); break;
+        case 1: buildPlatformMissingLegs(&buffer); break;
+        case 2: buildHollowPillar(&buffer); break;
+    }
+
+    emit_multiscale_voxels_from_units(&buffer, false, true, 0);
+}
+
 static void buildTestWorld(void) {
     // Floor
     int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
@@ -5669,7 +5755,8 @@ static void ResetGame(void) {
     // clear hash
     memset(table, 0, sizeof(table));
     // build static blocks
-    buildDemo();
+    buildDemoStructure(currentDemoIndex);
+    rebuild_glue_constraints();
     rebuild_all_voxel_surfaces();
     init_static_hash();
     //rebuild_glue_constraints();
@@ -11568,40 +11655,62 @@ int main(void) {
                 }
                 break;
             case GAME_STATE_DRONE_INTRO:
-                droneTimer -= GetFrameTime();
-                if (droneTimer <= 0.0f || IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)) {
-                    gameState = GAME_STATE_PLAYING;
+                {
+                    float dt = GetFrameTime();
+                    demoDisplayTimer += dt;
+                    if (demoDisplayTimer >= DEMO_DURATION || IsKeyPressed(KEY_SPACE)) {
+                        demoDisplayTimer = 0.0f;
+                        currentDemoIndex++;
+                        ResetGame();
+                    }
+
+                    // Physics Updates
+                    activate_static_voxels_near_dynamic();
+                    batch_glued_dynamic_voxels();
+                    int subStep = 1;
+                    for( int i = 0; i < subStep; i++){
+                        physics_step(dt/subStep);
+                    }
+                    pbdTimeAccumulator += dt;
+                    float pbd_fixed_dt = PBD_MAX_STEP_DT;
+                    float pbd_max_accum = pbd_fixed_dt * (float)PBD_MAX_ACCUM_STEPS;
+                    if (pbdTimeAccumulator > pbd_max_accum) {
+                        pbdTimeAccumulator = pbd_max_accum;
+                    }
+                    while (pbdTimeAccumulator >= pbd_fixed_dt) {
+                        simulate_voxel_pbd(pbd_fixed_dt);
+                        pbdTimeAccumulator -= pbd_fixed_dt;
+                    }
+                    recycle_dead_voxels();
+                    log_dynamic_glue_cluster_breaks();
+                    voxelHashFramesSinceRebuild++;
+                    if (voxelHashFramesSinceRebuild >= VOXEL_HASH_REBUILD_INTERVAL) {
+                        rebuild_voxel_hash();
+                    }
+                    deactivate_sleeping_voxels();
+
+                    BeginDrawing();
+                        ClearBackground(SKYBLUE);
+                        Camera3D droneCam = { 0 };
+                        // Continuous rotation based on total time (or demo timer)
+                        float time = demoDisplayTimer;
+                        float angle = time * 0.4f; // Slower rotation
+                        float radius = 35.0f; // Further out
+                        droneCam.position = (Vector3){ sinf(angle) * radius, 20.0f, cosf(angle) * radius };
+                        droneCam.target = (Vector3){ 0.0f, 5.0f, 0.0f }; // Look at center
+                        droneCam.up = (Vector3){ 0.0f, 1.0f, 0.0f };
+                        droneCam.fovy = 60.0f;
+                        droneCam.projection = CAMERA_PERSPECTIVE;
+                        
+                        BeginMode3D(droneCam);
+                            draw_world_surfaces();
+                            DrawVoxels(droneCam);
+                        EndMode3D();
+                        
+                        DrawText(TextFormat("DEMO %d/%d", (currentDemoIndex % NUM_DEMOS) + 1, NUM_DEMOS), 20, 20, 30, WHITE);
+                        DrawText("Press SPACE for next", 20, 60, 20, LIGHTGRAY);
+                    EndDrawing();
                 }
-                
-                BeginDrawing();
-                    ClearBackground(SKYBLUE);
-                    Camera3D droneCam = { 0 };
-                    float time = (3.0f - droneTimer);
-                    float angle = time * 0.8f; // Speed of rotation
-                    float radius = 25.0f;
-                    droneCam.position = (Vector3){ sinf(angle) * radius, 15.0f, cosf(angle) * radius };
-                    droneCam.target = (Vector3){ 0.0f, 2.0f, 0.0f }; // Look at center
-                    droneCam.up = (Vector3){ 0.0f, 1.0f, 0.0f };
-                    droneCam.fovy = 60.0f;
-                    droneCam.projection = CAMERA_PERSPECTIVE;
-                    
-                    BeginMode3D(droneCam);
-                        draw_world_surfaces();
-                        DrawVoxels(droneCam);
-                        draw_pickups(droneCam);
-                        // Draw players
-                        for (int i = 0; i < activePlayers; i++) {
-                            Player *p = &players[i];
-                            Color base = player_palette_color(i);
-                            Color base_dark = ColorBrightness(base, -0.2f);
-                            DrawCube(p->pos, PLAYER_SIZE,PLAYER_SIZE, PLAYER_SIZE, base_dark);
-                            DrawCubeWires(p->pos, PLAYER_SIZE,PLAYER_SIZE,PLAYER_SIZE, base_dark);
-                        }
-                    EndMode3D();
-                    
-                    DrawText("SCANNING MAP...", SCREEN_WIDTH / 2 - MeasureText("SCANNING MAP...", 30) / 2, SCREEN_HEIGHT - 100, 30, WHITE);
-                    DrawText("Press SPACE to skip", SCREEN_WIDTH / 2 - MeasureText("Press SPACE to skip", 20) / 2, SCREEN_HEIGHT - 60, 20, LIGHTGRAY);
-                EndDrawing();
                 break;
             case GAME_STATE_GAMEOVER:
                 update_draw_confetti(); // Update logic (position)
