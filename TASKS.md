@@ -63,9 +63,9 @@ This file tracks the current and future development tasks for the voxel FPS game
 - [ ] Implement rigid body physics (floating bodies fall)
 - [ ] Implement torque
 - [ ] Implement intervoxel sticking
-- [ ] Coarsening: effective mass on shell voxels for interior ballast
-- [ ] Coarsening: wake logic based on local strain/shear thresholds with cooldown
-- [ ] Coarsening: interior sync via per-corner average delta from shell
+- [x] Coarsening: effective mass on shell voxels for interior ballast
+- [x] Coarsening: wake logic based on local strain/shear thresholds with cooldown
+- [x] Coarsening: interior sync via per-corner average delta from shell
 
 # voxel types
 - [ ] goop you move slowly throught

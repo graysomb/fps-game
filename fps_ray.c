@@ -71,6 +71,8 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define STRAIN_BREAK_THRESHOLD 0.15f
 #define SHEAR_BREAK_THRESHOLD 0.15f
 #define BREAK_DAMP_FRAMES 50
+#define COARSENING_WAKE_FRAMES 30
+#define COARSENING_MASS_SCALE 1.0f
 
 // Tunable voxel edit brush (per-axis span of the add/remove operation)
 static int voxelBrushSpan = 4;
@@ -100,10 +102,14 @@ typedef struct {
     Vector3 predicted_pos;
     Vector3 vel;
     float inv_mass;
+    float base_inv_mass;
     int   refcount;
     bool  active;
     int   active_index;
     int   break_timer;
+    int   extra_mass;
+    bool  touched_by_simulated;
+    int   sync_stamp;
 } Particle;
 
 // Voxel structure
@@ -124,6 +130,10 @@ typedef struct {
     float rest_edge;
     float particle_radius;
     bool glued_faces[6];
+    bool full_neighbors;
+    bool simulate_dofs;
+    int wake_timer;
+    bool wake_source;
 } Voxel;
 static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
@@ -132,6 +142,7 @@ static Particle particles_pool[MAX_PARTICLES];
 static Particle *active_particles[MAX_PARTICLES];
 static int particle_pool_count = 0;
 static int active_particle_count = 0;
+static int particle_sync_stamp = 1;
 
 static void reset_particle_pool(void) {
     particle_pool_count = 0;
@@ -151,11 +162,15 @@ static Particle *particle_create(Vector3 pos, float inv_mass) {
     p->predicted_pos = pos;
     p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
     p->inv_mass = inv_mass;
+    p->base_inv_mass = inv_mass;
     p->refcount = 1;
     p->active = true;
     p->active_index = active_particle_count;
     active_particles[active_particle_count++] = p;
     p->break_timer = 0;
+    p->extra_mass = 0;
+    p->touched_by_simulated = false;
+    p->sync_stamp = 0;
     return p;
 }
 
@@ -174,6 +189,9 @@ static Particle *particle_clone(const Particle *src) {
     p->active_index = active_particle_count;
     active_particles[active_particle_count++] = p;
     p->break_timer = 0;
+    p->extra_mass = 0;
+    p->touched_by_simulated = false;
+    p->sync_stamp = 0;
     return p;
 }
 
@@ -288,6 +306,154 @@ static Vector3 v_norm(Vector3 v) {
         return (Vector3){ 0.0f, 0.0f, 0.0f };
     }
     return v_mul(v, 1.0f / len);
+}
+
+static void update_voxel_coarsening_state(void) {
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (!v->simulate) {
+            v->full_neighbors = false;
+            v->simulate_dofs = false;
+            v->wake_source = false;
+            continue;
+        }
+
+        bool full = true;
+        for (int face = 0; face < 6; ++face) {
+            int nx = v->gx + face_offsets[face][0];
+            int ny = v->gy + face_offsets[face][1];
+            int nz = v->gz + face_offsets[face][2];
+            if (table_get(nx, ny, nz) < 0) {
+                full = false;
+                break;
+            }
+        }
+
+        v->full_neighbors = full;
+        v->simulate_dofs = (!full) || (v->wake_timer > 0);
+        v->wake_source = false;
+    }
+}
+
+static void reset_particle_mass_and_flags(void) {
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+        p->inv_mass = p->base_inv_mass;
+        p->extra_mass = 0;
+        p->touched_by_simulated = false;
+    }
+}
+
+static void apply_shell_effective_mass(void) {
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (!v->simulate || v->simulate_dofs) {
+            continue;
+        }
+
+        for (int c = 0; c < 8; ++c) {
+            Particle *p = v->particles[c];
+            p->extra_mass += 1;
+        }
+    }
+
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+        if (p->base_inv_mass <= 0.0f || p->extra_mass <= 0) {
+            p->inv_mass = p->base_inv_mass;
+            continue;
+        }
+        float scale = 1.0f + (COARSENING_MASS_SCALE * (float)p->extra_mass);
+        p->inv_mass = p->base_inv_mass / scale;
+    }
+}
+
+static void update_wake_timers(void) {
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (!v->simulate) {
+            continue;
+        }
+
+        bool neighbor_wake = v->wake_source;
+        if (!neighbor_wake) {
+            for (int face = 0; face < 6; ++face) {
+                int nx = v->gx + face_offsets[face][0];
+                int ny = v->gy + face_offsets[face][1];
+                int nz = v->gz + face_offsets[face][2];
+                int nidx = table_get(nx, ny, nz);
+                if (nidx >= 0 && voxels[nidx].wake_source) {
+                    neighbor_wake = true;
+                    break;
+                }
+            }
+        }
+
+        int timer = (v->wake_timer > 0) ? (v->wake_timer - 1) : 0;
+        if (neighbor_wake) {
+            timer = COARSENING_WAKE_FRAMES;
+        }
+        v->wake_timer = timer;
+    }
+}
+
+static void accumulate_simulated_corner_deltas(Vector3 sum_delta[8], int counts[8]) {
+    for (int i = 0; i < 8; ++i) {
+        sum_delta[i] = (Vector3){ 0.0f, 0.0f, 0.0f };
+        counts[i] = 0;
+    }
+
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (!v->simulate || !v->simulate_dofs) {
+            continue;
+        }
+
+        for (int c = 0; c < 8; ++c) {
+            Particle *p = v->particles[c];
+            Vector3 delta = v_sub(p->predicted_pos, p->prev_pos);
+            sum_delta[c] = v_add(sum_delta[c], delta);
+            counts[c] += 1;
+        }
+    }
+}
+
+static void mark_simulated_particles(void) {
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (!v->simulate || !v->simulate_dofs) {
+            continue;
+        }
+        for (int c = 0; c < 8; ++c) {
+            v->particles[c]->touched_by_simulated = true;
+        }
+    }
+}
+
+static void apply_interior_sync(const Vector3 avg_delta[8], const int counts[8]) {
+    particle_sync_stamp++;
+    if (particle_sync_stamp == 0) {
+        particle_sync_stamp = 1;
+    }
+
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (!v->simulate || v->simulate_dofs) {
+            continue;
+        }
+
+        for (int c = 0; c < 8; ++c) {
+            if (counts[c] == 0) {
+                continue;
+            }
+            Particle *p = v->particles[c];
+            if (p->touched_by_simulated || p->sync_stamp == particle_sync_stamp) {
+                continue;
+            }
+            p->predicted_pos = v_add(p->predicted_pos, avg_delta[c]);
+            p->sync_stamp = particle_sync_stamp;
+        }
+    }
 }
 
 // Patch for a merged quad in one of the principal planes
@@ -530,6 +696,10 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     v->rest_edge = VOXEL_SIZE;
     v->particle_radius = PARTICLE_RADIUS;
     memset(v->glued_faces, 0, sizeof(v->glued_faces));
+    v->full_neighbors = false;
+    v->simulate_dofs = false;
+    v->wake_timer = 0;
+    v->wake_source = false;
     const float half = VOXEL_SIZE * 0.5f;
     for (int i = 0; i < 8; ++i) {
         Vector3 pos = {
@@ -979,15 +1149,20 @@ static void solve_voxel_shape(Voxel *voxel) {
             float strain_y = fabsf(len_v1 - voxel->rest_edge) / voxel->rest_edge;
             float strain_z = fabsf(len_v2 - voxel->rest_edge) / voxel->rest_edge;
 
+            bool exceeded = false;
+
             if (strain_x > STRAIN_BREAK_THRESHOLD) {
+                exceeded = true;
                 if (voxel->glued_faces[0]) break_face_link(voxel, 0);
                 if (voxel->glued_faces[1]) break_face_link(voxel, 1);
             }
             if (strain_y > STRAIN_BREAK_THRESHOLD) {
+                exceeded = true;
                 if (voxel->glued_faces[2]) break_face_link(voxel, 2);
                 if (voxel->glued_faces[3]) break_face_link(voxel, 3);
             }
             if (strain_z > STRAIN_BREAK_THRESHOLD) {
+                exceeded = true;
                 if (voxel->glued_faces[4]) break_face_link(voxel, 4);
                 if (voxel->glued_faces[5]) break_face_link(voxel, 5);
             }
@@ -1007,16 +1182,23 @@ static void solve_voxel_shape(Voxel *voxel) {
                 : 0.0f;
 
             if (shear_xy > SHEAR_BREAK_THRESHOLD) {
+                exceeded = true;
                 if (voxel->glued_faces[4]) break_face_link(voxel, 4);
                 if (voxel->glued_faces[5]) break_face_link(voxel, 5);
             }
             if (shear_xz > SHEAR_BREAK_THRESHOLD) {
+                exceeded = true;
                 if (voxel->glued_faces[2]) break_face_link(voxel, 2);
                 if (voxel->glued_faces[3]) break_face_link(voxel, 3);
             }
             if (shear_yz > SHEAR_BREAK_THRESHOLD) {
+                exceeded = true;
                 if (voxel->glued_faces[0]) break_face_link(voxel, 0);
                 if (voxel->glued_faces[1]) break_face_link(voxel, 1);
+            }
+
+            if (exceeded) {
+                voxel->wake_source = true;
             }
         }
 
@@ -1287,19 +1469,40 @@ void simulate_voxel_pbd(float dt) {
     const int substeps = PBD_SUBSTEPS;
     const int constraint_iterations = PBD_CONSTRAINT_ITERS;
     const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
+    Vector3 sum_delta[8];
+    Vector3 avg_delta[8];
+    int counts[8];
 
     for (int step = 0; step < substeps; ++step) {
+        update_voxel_coarsening_state();
+        reset_particle_mass_and_flags();
+        apply_shell_effective_mass();
+
         integrate_particles(sub_dt);
         solve_particle_collisions(sub_dt);
 
         for (int it = 0; it < constraint_iterations; ++it) {
             for (int i = 0; i < voxel_count; ++i) {
                 Voxel *voxel = &voxels[i];
-                if (!voxel->simulate)
+                if (!voxel->simulate || !voxel->simulate_dofs)
                     continue;
                 solve_voxel_shape(voxel);
             }
         }
+
+        update_wake_timers();
+
+        accumulate_simulated_corner_deltas(sum_delta, counts);
+        for (int i = 0; i < 8; ++i) {
+            if (counts[i] > 0) {
+                avg_delta[i] = v_mul(sum_delta[i], 1.0f / (float)counts[i]);
+            } else {
+                avg_delta[i] = (Vector3){ 0.0f, 0.0f, 0.0f };
+            }
+        }
+
+        mark_simulated_particles();
+        apply_interior_sync(avg_delta, counts);
 
         decrement_particle_timers();
 
