@@ -331,10 +331,12 @@ static inline int particle_hash(int x, int y, int z) {
 }
 
 static void build_particle_hash(void) {
+    #pragma omp parallel for
     for (int i = 0; i < PARTICLE_HASH_SIZE; ++i) {
         particle_hash_head[i] = -1;
     }
 
+    #pragma omp parallel for
     for (int i = 0; i < active_particle_count; ++i) {
         Particle *p = active_particles[i];
         int gx = (int)floorf(p->predicted_pos.x / VOXEL_SIZE);
@@ -344,8 +346,10 @@ static void build_particle_hash(void) {
         p->cell_y = gy;
         p->cell_z = gz;
         int h = particle_hash(gx, gy, gz);
-        particle_hash_next[i] = particle_hash_head[h];
-        particle_hash_head[h] = i;
+        int old_head;
+        #pragma omp atomic capture
+        { old_head = particle_hash_head[h]; particle_hash_head[h] = i; }
+        particle_hash_next[i] = old_head;
     }
 }
 
@@ -353,11 +357,24 @@ static inline void accumulate_particle_correction(Particle *p, Vector3 delta, fl
     if (weight <= 0.0f) {
         return;
     }
-    p->corr_sum = v_add(p->corr_sum, v_mul(delta, weight));
+    Vector3 weighted = v_mul(delta, weight);
+    #ifdef _OPENMP
+    #pragma omp atomic update
+    p->corr_sum.x += weighted.x;
+    #pragma omp atomic update
+    p->corr_sum.y += weighted.y;
+    #pragma omp atomic update
+    p->corr_sum.z += weighted.z;
+    #pragma omp atomic update
     p->corr_weight += weight;
+    #else
+    p->corr_sum = v_add(p->corr_sum, weighted);
+    p->corr_weight += weight;
+    #endif
 }
 
 static void reset_particle_accumulators(void) {
+    #pragma omp parallel for
     for (int i = 0; i < active_particle_count; ++i) {
         Particle *p = active_particles[i];
         p->corr_sum = (Vector3){ 0.0f, 0.0f, 0.0f };
@@ -366,6 +383,194 @@ static void reset_particle_accumulators(void) {
 }
 
 static void apply_particle_accumulators(void) {
+    #pragma omp parallel for
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+        if (p->corr_weight <= 0.0f) {
+            continue;
+        }
+        Vector3 delta = v_mul(p->corr_sum, 1.0f / p->corr_weight);
+        p->predicted_pos = v_add(p->predicted_pos, delta);
+        p->corr_sum = (Vector3){ 0.0f, 0.0f, 0.0f };
+        p->corr_weight = 0.0f;
+    }
+}
+
+// Parallel-region variants used to avoid repeated fork/join inside constraint iterations.
+static void reset_particle_accumulators_parallel(void) {
+    #pragma omp for
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+        p->corr_sum = (Vector3){ 0.0f, 0.0f, 0.0f };
+        p->corr_weight = 0.0f;
+    }
+}
+
+static void build_particle_hash_parallel(void) {
+    #pragma omp for
+    for (int i = 0; i < PARTICLE_HASH_SIZE; ++i) {
+        particle_hash_head[i] = -1;
+    }
+
+    #pragma omp for
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+        int gx = (int)floorf(p->predicted_pos.x / VOXEL_SIZE);
+        int gy = (int)floorf(p->predicted_pos.y / VOXEL_SIZE);
+        int gz = (int)floorf(p->predicted_pos.z / VOXEL_SIZE);
+        p->cell_x = gx;
+        p->cell_y = gy;
+        p->cell_z = gz;
+        int h = particle_hash(gx, gy, gz);
+        int old_head;
+        #pragma omp atomic capture
+        { old_head = particle_hash_head[h]; particle_hash_head[h] = i; }
+        particle_hash_next[i] = old_head;
+    }
+}
+
+static void gather_particle_collisions_parallel(float dt) {
+    (void)dt;
+    const float half_player = PLAYER_SIZE * 0.5f;
+    const float omega = COLLISION_RELAXATION;
+    const float eps = 1e-6f;
+    const float voxel_radius = PARTICLE_RADIUS;
+    const float radius_sq = voxel_radius * voxel_radius;
+
+    #pragma omp for
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+        if (p->inv_mass <= 0.0f) {
+            continue;
+        }
+
+        Vector3 pos = p->predicted_pos;
+
+        if (pos.y < voxel_radius) {
+            pos.y = voxel_radius;
+        }
+
+        for (int player_idx = 0; player_idx < 2; ++player_idx) {
+            Player *pl = &players[player_idx];
+            Vector3 box_min = {
+                pl->pos.x - half_player,
+                pl->pos.y - half_player,
+                pl->pos.z - half_player
+            };
+            Vector3 box_max = {
+                pl->pos.x + half_player,
+                pl->pos.y + half_player,
+                pl->pos.z + half_player
+            };
+
+            Vector3 nearest = {
+                clampf(pos.x, box_min.x, box_max.x),
+                clampf(pos.y, box_min.y, box_max.y),
+                clampf(pos.z, box_min.z, box_max.z)
+            };
+
+            Vector3 delta = v_sub(pos, nearest);
+            float dist_sq = v_dot(delta, delta);
+            if (dist_sq < radius_sq) {
+                float dist = sqrtf(fmaxf(dist_sq, eps));
+                float penetration = voxel_radius - dist;
+                Vector3 normal = (dist > eps)
+                    ? v_mul(delta, -1.0f / dist)
+                    : (Vector3){ 0.0f, 1.0f, 0.0f };
+                pos = v_add(pos, v_mul(normal, penetration));
+            }
+        }
+
+        Vector3 delta = v_sub(pos, p->predicted_pos);
+        if (fabsf(delta.x) > 0.0f || fabsf(delta.y) > 0.0f || fabsf(delta.z) > 0.0f) {
+            accumulate_particle_correction(p, delta, 1.0f);
+        }
+    }
+
+    #pragma omp for
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *pa = active_particles[i];
+        float wa = pa->inv_mass;
+        if (wa <= 0.0f) {
+            continue;
+        }
+
+        int ax = pa->cell_x;
+        int ay = pa->cell_y;
+        int az = pa->cell_z;
+
+        for (int dx = -1; dx <= 1; ++dx) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dz = -1; dz <= 1; ++dz) {
+                    int nx = ax + dx;
+                    int ny = ay + dy;
+                    int nz = az + dz;
+                    int h = particle_hash(nx, ny, nz);
+
+                    for (int idx = particle_hash_head[h]; idx != -1; idx = particle_hash_next[idx]) {
+                        Particle *pb = active_particles[idx];
+                        if (pb == pa) {
+                            continue;
+                        }
+                        if (idx <= i) {
+                            continue;
+                        }
+                        if (pb->cell_x != nx || pb->cell_y != ny || pb->cell_z != nz) {
+                            continue;
+                        }
+
+                        float wb = pb->inv_mass;
+                        float w_sum = wa + wb;
+                        if (w_sum <= 0.0f) {
+                            continue;
+                        }
+
+                        float radiusA = pa->radius;
+                        float radiusB = pb->radius;
+                        Vector3 delta = v_sub(pa->predicted_pos, pb->predicted_pos);
+                        float dist_sq = v_dot(delta, delta);
+                        float target_dist = radiusA + radiusB;
+
+                        if (dist_sq >= (target_dist * target_dist)) {
+                            continue;
+                        }
+
+                        float dist = sqrtf(fmaxf(dist_sq, eps));
+                        float penetration = target_dist - dist;
+                        if (penetration <= 0.0f) {
+                            continue;
+                        }
+
+                        Vector3 normal = (dist > eps)
+                            ? v_mul(delta, 1.0f / dist)
+                            : (Vector3){ 1.0f, 0.0f, 0.0f };
+
+                        float h_corr = 0.5f * penetration;
+                        float scale = omega * h_corr / w_sum;
+
+                        float damp_factor = 1.0f;
+                        if (pa->break_timer > 0 || pb->break_timer > 0) {
+                            int max_timer = (pa->break_timer > pb->break_timer) ? pa->break_timer : pb->break_timer;
+                            damp_factor = 1.0f - (float)max_timer / (float)BREAK_DAMP_FRAMES;
+                        }
+
+                        if (wa > 0.0f) {
+                            Vector3 da = v_mul(normal, scale * wa * damp_factor);
+                            accumulate_particle_correction(pa, da, 1.0f);
+                        }
+                        if (wb > 0.0f) {
+                            Vector3 db = v_mul(normal, -scale * wb * damp_factor);
+                            accumulate_particle_correction(pb, db, 1.0f);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void apply_particle_accumulators_parallel(void) {
+    #pragma omp for
     for (int i = 0; i < active_particle_count; ++i) {
         Particle *p = active_particles[i];
         if (p->corr_weight <= 0.0f) {
@@ -1152,6 +1357,7 @@ static void integrate_particles(float dt) {
     const Vector3 gravity = { 0.0f, -GRAVITY*1.0f, 0.0f };
     const float dt_sq = dt * dt;
 
+    #pragma omp parallel for
     for (int i = 0; i < active_particle_count; ++i) {
         Particle *p = active_particles[i];
 
@@ -1373,6 +1579,7 @@ static void gather_particle_collisions(float dt) {
     const float voxel_radius = PARTICLE_RADIUS;
     const float radius_sq = voxel_radius * voxel_radius;
 
+    #pragma omp parallel for
     for (int i = 0; i < active_particle_count; ++i) {
         Particle *p = active_particles[i];
         if (p->inv_mass <= 0.0f) {
@@ -1424,6 +1631,7 @@ static void gather_particle_collisions(float dt) {
     }
 
     // Particle-particle collisions using a symmetric correction identical to the compute shader.
+    #pragma omp parallel for
     for (int i = 0; i < active_particle_count; ++i) {
         Particle *pa = active_particles[i];
         float wa = pa->inv_mass;
@@ -1507,6 +1715,7 @@ static void gather_particle_collisions(float dt) {
 }
 
 static void decrement_particle_timers(void) {
+    #pragma omp parallel for
     for (int i = 0; i < active_particle_count; ++i) {
         Particle *p = active_particles[i];
         if (p->break_timer > 0) {
@@ -1518,6 +1727,7 @@ static void decrement_particle_timers(void) {
 static void update_particle_velocities(float dt) {
     float inv_dt = (dt > 0.0f) ? 1.0f / dt : 0.0f;
 
+    #pragma omp parallel for
     for (int i = 0; i < active_particle_count; ++i) {
         Particle *p = active_particles[i];
         Vector3 new_pos = p->predicted_pos;
@@ -1532,6 +1742,7 @@ static void update_particle_velocities(float dt) {
         p->pos = new_pos;
     }
 
+    #pragma omp parallel for
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
         Vector3 centroid = { 0.0f, 0.0f, 0.0f };
@@ -1577,16 +1788,24 @@ void simulate_voxel_pbd(float dt) {
         integrate_particles(sub_dt);
 
         for (int it = 0; it < constraint_iterations; ++it) {
-            reset_particle_accumulators();
-            build_particle_hash();
-            gather_particle_collisions(sub_dt);
-            for (int i = 0; i < voxel_count; ++i) {
-                Voxel *voxel = &voxels[i];
-                if (!voxel->simulate /*|| !voxel->simulate_dofs*/)
-                    continue;
-                gather_voxel_shape_constraints(voxel);
+            #pragma omp parallel
+            {
+                reset_particle_accumulators_parallel();
+                #pragma omp barrier
+                build_particle_hash_parallel();
+                #pragma omp barrier
+                gather_particle_collisions_parallel(sub_dt);
+                #pragma omp barrier
+                #pragma omp for
+                for (int i = 0; i < voxel_count; ++i) {
+                    Voxel *voxel = &voxels[i];
+                    if (!voxel->simulate /*|| !voxel->simulate_dofs*/)
+                        continue;
+                    gather_voxel_shape_constraints(voxel);
+                }
+                #pragma omp barrier
+                apply_particle_accumulators_parallel();
             }
-            apply_particle_accumulators();
         }
 
         process_break_masks();
