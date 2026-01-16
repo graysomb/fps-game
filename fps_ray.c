@@ -103,6 +103,8 @@ typedef struct {
     Vector3 vel;
     float inv_mass;
     float base_inv_mass;
+    Vector3 corr_sum;
+    float corr_weight;
     int   refcount;
     bool  active;
     int   active_index;
@@ -110,6 +112,7 @@ typedef struct {
     int   extra_mass;
     bool  touched_by_simulated;
     int   sync_stamp;
+    int   collision_stamp;
 } Particle;
 
 // Voxel structure
@@ -134,6 +137,7 @@ typedef struct {
     bool simulate_dofs;
     int wake_timer;
     bool wake_source;
+    uint8_t break_mask;
 } Voxel;
 static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
@@ -143,6 +147,7 @@ static Particle *active_particles[MAX_PARTICLES];
 static int particle_pool_count = 0;
 static int active_particle_count = 0;
 static int particle_sync_stamp = 1;
+static int particle_collision_stamp = 1;
 
 static void reset_particle_pool(void) {
     particle_pool_count = 0;
@@ -163,6 +168,8 @@ static Particle *particle_create(Vector3 pos, float inv_mass) {
     p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
     p->inv_mass = inv_mass;
     p->base_inv_mass = inv_mass;
+    p->corr_sum = (Vector3){ 0.0f, 0.0f, 0.0f };
+    p->corr_weight = 0.0f;
     p->refcount = 1;
     p->active = true;
     p->active_index = active_particle_count;
@@ -171,6 +178,7 @@ static Particle *particle_create(Vector3 pos, float inv_mass) {
     p->extra_mass = 0;
     p->touched_by_simulated = false;
     p->sync_stamp = 0;
+    p->collision_stamp = 0;
     return p;
 }
 
@@ -189,9 +197,12 @@ static Particle *particle_clone(const Particle *src) {
     p->active_index = active_particle_count;
     active_particles[active_particle_count++] = p;
     p->break_timer = 0;
+    p->corr_sum = (Vector3){ 0.0f, 0.0f, 0.0f };
+    p->corr_weight = 0.0f;
     p->extra_mass = 0;
     p->touched_by_simulated = false;
     p->sync_stamp = 0;
+    p->collision_stamp = 0;
     return p;
 }
 
@@ -308,6 +319,44 @@ static Vector3 v_norm(Vector3 v) {
     return v_mul(v, 1.0f / len);
 }
 
+static inline void accumulate_particle_correction(Particle *p, Vector3 delta, float weight) {
+    if (weight <= 0.0f) {
+        return;
+    }
+    p->corr_sum = v_add(p->corr_sum, v_mul(delta, weight));
+    p->corr_weight += weight;
+}
+
+static void reset_particle_accumulators(void) {
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+        p->corr_sum = (Vector3){ 0.0f, 0.0f, 0.0f };
+        p->corr_weight = 0.0f;
+        p->collision_stamp = 0;
+    }
+}
+
+static void apply_particle_accumulators(void) {
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+        if (p->corr_weight <= 0.0f) {
+            continue;
+        }
+        Vector3 delta = v_mul(p->corr_sum, 1.0f / p->corr_weight);
+        p->predicted_pos = v_add(p->predicted_pos, delta);
+        p->corr_sum = (Vector3){ 0.0f, 0.0f, 0.0f };
+        p->corr_weight = 0.0f;
+    }
+}
+
+static inline bool should_process_collision(Particle *p) {
+    if (p->collision_stamp == particle_collision_stamp) {
+        return false;
+    }
+    p->collision_stamp = particle_collision_stamp;
+    return true;
+}
+
 static void update_voxel_coarsening_state(void) {
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *v = &voxels[i];
@@ -315,6 +364,7 @@ static void update_voxel_coarsening_state(void) {
             v->full_neighbors = false;
             v->simulate_dofs = false;
             v->wake_source = false;
+            v->break_mask = 0;
             continue;
         }
 
@@ -341,6 +391,8 @@ static void reset_particle_mass_and_flags(void) {
         p->inv_mass = p->base_inv_mass;
         p->extra_mass = 0;
         p->touched_by_simulated = false;
+        p->corr_sum = (Vector3){ 0.0f, 0.0f, 0.0f };
+        p->corr_weight = 0.0f;
     }
 }
 
@@ -394,6 +446,21 @@ static void update_wake_timers(void) {
             timer = COARSENING_WAKE_FRAMES;
         }
         v->wake_timer = timer;
+    }
+}
+
+static void process_break_masks(void) {
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (v->break_mask == 0) {
+            continue;
+        }
+        for (int face = 0; face < 6; ++face) {
+            if (v->break_mask & (uint8_t)(1u << face)) {
+                break_face_link(v, face);
+            }
+        }
+        v->break_mask = 0;
     }
 }
 
@@ -700,6 +767,7 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     v->simulate_dofs = false;
     v->wake_timer = 0;
     v->wake_source = false;
+    v->break_mask = 0;
     const float half = VOXEL_SIZE * 0.5f;
     for (int i = 0; i < 8; ++i) {
         Vector3 pos = {
@@ -1097,15 +1165,17 @@ static Vector3 vgs_project(Vector3 onto, Vector3 vec) {
     return v_mul(onto, scale);
 }
 
-// Voxel Gram-Schmidt shape matching (Algorithm 1 in the paper) keeps each cell near-rest.
-static void solve_voxel_shape(Voxel *voxel) {
+// Voxel Gram-Schmidt shape matching (Algorithm 1 in the paper) gathers corrections for Jacobi updates.
+static void gather_voxel_shape_constraints(Voxel *voxel) {
     bool has_dynamic = false;
     Vector3 p[8];
+    Vector3 orig[8];
     float w[8];
 
     for (int i = 0; i < 8; ++i) {
         Particle *part = voxel->particles[i];
         p[i] = part->predicted_pos;
+        orig[i] = part->predicted_pos;
         w[i] = part->inv_mass;
         if (w[i] > 0.0f) {
             has_dynamic = true;
@@ -1153,18 +1223,18 @@ static void solve_voxel_shape(Voxel *voxel) {
 
             if (strain_x > STRAIN_BREAK_THRESHOLD) {
                 exceeded = true;
-                if (voxel->glued_faces[0]) break_face_link(voxel, 0);
-                if (voxel->glued_faces[1]) break_face_link(voxel, 1);
+                if (voxel->glued_faces[0]) voxel->break_mask |= (uint8_t)(1u << 0);
+                if (voxel->glued_faces[1]) voxel->break_mask |= (uint8_t)(1u << 1);
             }
             if (strain_y > STRAIN_BREAK_THRESHOLD) {
                 exceeded = true;
-                if (voxel->glued_faces[2]) break_face_link(voxel, 2);
-                if (voxel->glued_faces[3]) break_face_link(voxel, 3);
+                if (voxel->glued_faces[2]) voxel->break_mask |= (uint8_t)(1u << 2);
+                if (voxel->glued_faces[3]) voxel->break_mask |= (uint8_t)(1u << 3);
             }
             if (strain_z > STRAIN_BREAK_THRESHOLD) {
                 exceeded = true;
-                if (voxel->glued_faces[4]) break_face_link(voxel, 4);
-                if (voxel->glued_faces[5]) break_face_link(voxel, 5);
+                if (voxel->glued_faces[4]) voxel->break_mask |= (uint8_t)(1u << 4);
+                if (voxel->glued_faces[5]) voxel->break_mask |= (uint8_t)(1u << 5);
             }
 
             float inv_len0 = (len_v0 > VGS_EPS) ? 1.0f / len_v0 : 0.0f;
@@ -1183,18 +1253,18 @@ static void solve_voxel_shape(Voxel *voxel) {
 
             if (shear_xy > SHEAR_BREAK_THRESHOLD) {
                 exceeded = true;
-                if (voxel->glued_faces[4]) break_face_link(voxel, 4);
-                if (voxel->glued_faces[5]) break_face_link(voxel, 5);
+                if (voxel->glued_faces[4]) voxel->break_mask |= (uint8_t)(1u << 4);
+                if (voxel->glued_faces[5]) voxel->break_mask |= (uint8_t)(1u << 5);
             }
             if (shear_xz > SHEAR_BREAK_THRESHOLD) {
                 exceeded = true;
-                if (voxel->glued_faces[2]) break_face_link(voxel, 2);
-                if (voxel->glued_faces[3]) break_face_link(voxel, 3);
+                if (voxel->glued_faces[2]) voxel->break_mask |= (uint8_t)(1u << 2);
+                if (voxel->glued_faces[3]) voxel->break_mask |= (uint8_t)(1u << 3);
             }
             if (shear_yz > SHEAR_BREAK_THRESHOLD) {
                 exceeded = true;
-                if (voxel->glued_faces[0]) break_face_link(voxel, 0);
-                if (voxel->glued_faces[1]) break_face_link(voxel, 1);
+                if (voxel->glued_faces[0]) voxel->break_mask |= (uint8_t)(1u << 0);
+                if (voxel->glued_faces[1]) voxel->break_mask |= (uint8_t)(1u << 1);
             }
 
             if (exceeded) {
@@ -1232,7 +1302,7 @@ static void solve_voxel_shape(Voxel *voxel) {
             u2 = v_mul(u2, factor);
         }
 
-        // Rebuild the voxel corners from the orthogonal frame and push dynamic particles only.
+        // Rebuild the voxel corners from the orthogonal frame and update the local copy.
         Vector3 new_p[8];
         new_p[0] = v_sub(v_sub(v_sub(centroid, u0), u1), u2);
         new_p[1] = v_sub(v_sub(v_add(centroid, u0), u1), u2);
@@ -1248,12 +1318,14 @@ static void solve_voxel_shape(Voxel *voxel) {
                 continue;
             p[i] = new_p[i];
         }
-
     }
 
-    voxel->pos = centroid;
     for (int i = 0; i < 8; ++i) {
-        voxel->particles[i]->predicted_pos = p[i];
+        if (w[i] == 0.0f) {
+            continue;
+        }
+        Vector3 delta = v_sub(p[i], orig[i]);
+        accumulate_particle_correction(voxel->particles[i], delta, w[i]);
     }
 }
 
@@ -1275,15 +1347,20 @@ static void compute_voxel_center_and_mass(const Voxel *voxel, Vector3 *center, f
     }
 }
 
-// Resolve collisions against the scene and neighbouring voxels (mirrors ResolveCollisions compute pass).
-static void solve_particle_collisions(float dt) {
+// Gather collision corrections against the scene and neighbouring voxels (Jacobi form).
+static void gather_particle_collisions(float dt) {
     (void)dt;
 
     const float half_player = PLAYER_SIZE * 0.5f;
     const float omega = COLLISION_RELAXATION;
     const float eps = 1e-6f;
 
-    // First, clamp predictions against static scene bounds and player capsules.
+    particle_collision_stamp++;
+    if (particle_collision_stamp == 0) {
+        particle_collision_stamp = 1;
+    }
+
+    // First, gather corrections against static scene bounds and player capsules.
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
         float voxel_radius = voxel_particle_radius(voxel);
@@ -1291,6 +1368,14 @@ static void solve_particle_collisions(float dt) {
 
         for (int j = 0; j < 8; ++j) {
             Particle *p = voxel->particles[j];
+
+            if (p->inv_mass <= 0.0f) {
+                continue;
+            }
+
+            if (!should_process_collision(p)) {
+                continue;
+            }
 
             Vector3 pos = p->predicted_pos;
 
@@ -1334,7 +1419,10 @@ static void solve_particle_collisions(float dt) {
                 }
             }
 
-            p->predicted_pos = pos;
+            Vector3 delta = v_sub(pos, p->predicted_pos);
+            if (fabsf(delta.x) > 0.0f || fabsf(delta.y) > 0.0f || fabsf(delta.z) > 0.0f) {
+                accumulate_particle_correction(p, delta, 1.0f);
+            }
         }
     }
 
@@ -1409,12 +1497,14 @@ static void solve_particle_collisions(float dt) {
                                 damp_factor = 1.0f - (float)max_timer / (float)BREAK_DAMP_FRAMES;
                             }
 
-                            // Apply equal-and-opposite displacements weighted by inverse mass.
+                            // Accumulate equal-and-opposite displacements weighted by inverse mass.
                             if (wa > 0.0f) {
-                                pa->predicted_pos = v_add(pa->predicted_pos, v_mul(normal, scale * wa * damp_factor));
+                                Vector3 da = v_mul(normal, scale * wa * damp_factor);
+                                accumulate_particle_correction(pa, da, 1.0f);
                             }
                             if (wb > 0.0f) {
-                                pb->predicted_pos = v_sub(pb->predicted_pos, v_mul(normal, scale * wb * damp_factor));
+                                Vector3 db = v_mul(normal, -scale * wb * damp_factor);
+                                accumulate_particle_correction(pb, db, 1.0f);
                             }
                         }
                     }
@@ -1479,17 +1569,20 @@ void simulate_voxel_pbd(float dt) {
         apply_shell_effective_mass();
 
         integrate_particles(sub_dt);
-        solve_particle_collisions(sub_dt);
 
         for (int it = 0; it < constraint_iterations; ++it) {
+            reset_particle_accumulators();
+            gather_particle_collisions(sub_dt);
             for (int i = 0; i < voxel_count; ++i) {
                 Voxel *voxel = &voxels[i];
                 if (!voxel->simulate || !voxel->simulate_dofs)
                     continue;
-                solve_voxel_shape(voxel);
+                gather_voxel_shape_constraints(voxel);
             }
+            apply_particle_accumulators();
         }
 
+        process_break_masks();
         update_wake_timers();
 
         accumulate_simulated_corner_deltas(sum_delta, counts);
@@ -1518,16 +1611,18 @@ void simulate_voxel_pbd(float dt) {
  *     const float sub_dt = dt / (float)substeps;
  *
  *     for (int step = 0; step < substeps; ++step) {
- *         // 1. Kinematics + collisions for all particles (predict positions).
+ *         // 1. Kinematics for all particles (predict positions).
  *         integrate_particles(sub_dt);
- *         solve_particle_collisions(sub_dt);
  *
- *         // 2. Constraint iterations (Gauss-Seidel order).
+ *         // 2. Constraint iterations (Jacobi gather/apply).
  *         for (int it = 0; it < get_constraint_iterations(); ++it) {
+ *             reset_particle_accumulators();
+ *             gather_particle_collisions(sub_dt);
  *             // 2a. Voxel Gram-Schmidt shape matching (Algorithm 1).
  *             for_each_voxel(voxel_count, [&](Voxel *v) {
- *                 solve_voxel_shape(v, sub_dt);
+ *                 gather_voxel_shape_constraints(v);
  *             });
+ *             apply_particle_accumulators();
  *             // Face-constraint pass removed in this CPU prototype.
  *         }
  *
