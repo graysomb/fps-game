@@ -6,9 +6,8 @@ The simulation is broken down into a series of steps, each of which is further b
 
 1.  **`integrate_particles(sub_dt)`**: This function predicts the next position of each particle based on its current velocity and external forces (gravity). This is the "dynamics" part of PBD.
 2.  **`solve_particle_collisions(sub_dt)`**: This function resolves collisions between particles and with the environment. It adjusts the predicted positions of particles to prevent them from interpenetrating.
-3.  **`solve_voxel_shape(voxel)`**: This is the core of the voxel simulation. It applies shape-matching constraints to each voxel. The goal is to preserve the original shape of the voxel, even as it deforms. This is where the "glue" and "shape constraints" come into play. The `solve_voxel_shape` function uses a technique called Voxel Gram-Schmidt shape matching to keep each cell near its rest state. It also checks for strain and shear, and if they exceed a certain threshold, it will break the "glue" between voxels by setting `pending_full_break` to true.
-4.  **`process_pending_breaks()`**: This function processes the breaks that were flagged in the `solve_voxel_shape` function. It detaches the particles of the broken faces, effectively breaking the "glue" between voxels.
-5.  **`update_particle_velocities(sub_dt)`**: After the particle positions have been adjusted to satisfy all constraints, this function updates the particle velocities based on the change in position.
+3.  **`solve_voxel_shape(voxel)`**: This is the core of the voxel simulation. It applies shape-matching constraints to each voxel. The goal is to preserve the original shape of the voxel, even as it deforms. This is where the "glue" and "shape constraints" come into play. The `solve_voxel_shape` function uses a technique called Voxel Gram-Schmidt shape matching to keep each cell near its rest state. It also checks for strain and shear, and if they exceed a certain threshold, it breaks only the affected faces by detaching their shared particles.
+4.  **`update_particle_velocities(sub_dt)`**: After the particle positions have been adjusted to satisfy all constraints, this function updates the particle velocities based on the change in position.
 
 Now, let's look at each of the sub-functions in more detail:
 
@@ -24,11 +23,7 @@ This function resolves collisions between particles and between particles and th
 
 This function is the heart of the voxel simulation. It implements a shape-matching constraint that tries to preserve the original shape of each voxel. It does this by computing the current principal axes of the voxel and then comparing them to the rest shape. If the voxel has deformed, the function computes a correction that will move the particles back towards their rest positions.
 
-The `solve_voxel_shape` function also implements the "glue" constraint. It checks the strain and shear on each face of the voxel. If the strain or shear exceeds a certain threshold, it flags the face for breaking. The `process_pending_breaks` function then breaks the "glue" by detaching the particles of the broken faces.
-
-### `process_pending_breaks()`
-
-This function iterates through all the voxels and checks if they have any pending breaks. If a voxel has a pending break, this function calls `break_face_link` to break the "glue" between the voxel and its neighbors.
+The `solve_voxel_shape` function also implements the "glue" constraint. It checks the strain and shear on each face of the voxel. If the strain or shear exceeds a certain threshold, it immediately breaks the affected face by detaching the shared particles with `break_face_link`.
 
 ### `update_particle_velocities(sub_dt)`
 

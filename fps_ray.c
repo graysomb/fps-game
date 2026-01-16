@@ -124,7 +124,6 @@ typedef struct {
     float rest_edge;
     float particle_radius;
     bool glued_faces[6];
-    bool pending_full_break;
 } Voxel;
 static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
@@ -531,7 +530,6 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     v->rest_edge = VOXEL_SIZE;
     v->particle_radius = PARTICLE_RADIUS;
     memset(v->glued_faces, 0, sizeof(v->glued_faces));
-    v->pending_full_break = false;
     const float half = VOXEL_SIZE * 0.5f;
     for (int i = 0; i < 8; ++i) {
         Vector3 pos = {
@@ -647,21 +645,6 @@ static void break_face_link(Voxel *voxel, int face_index) {
     Voxel *neighbor = &voxels[neighbor_idx];
     int opposite = opposite_face[face_index];
     neighbor->glued_faces[opposite] = false;
-}
-
-static void process_pending_breaks(void) {
-    for (int i = 0; i < voxel_count; ++i) {
-        Voxel *voxel = &voxels[i];
-        if (!voxel->pending_full_break) {
-            continue;
-        }
-
-        for (int face = 0; face < 6; ++face) {
-            break_face_link(voxel, face);
-        }
-
-        voxel->pending_full_break = false;
-    }
 }
 
 // Build static demo cube of voxels
@@ -991,45 +974,49 @@ static void solve_voxel_shape(Voxel *voxel) {
         float len_v1 = v_length(v1);
         float len_v2 = v_length(v2);
 
-        if (!voxel->pending_full_break && voxel->rest_edge > 0.0f) {
+        if (voxel->rest_edge > 0.0f) {
             float strain_x = fabsf(len_v0 - voxel->rest_edge) / voxel->rest_edge;
             float strain_y = fabsf(len_v1 - voxel->rest_edge) / voxel->rest_edge;
             float strain_z = fabsf(len_v2 - voxel->rest_edge) / voxel->rest_edge;
 
-            if ((voxel->glued_faces[0] || voxel->glued_faces[1]) && strain_x > STRAIN_BREAK_THRESHOLD) {
-                voxel->pending_full_break = true;
+            if (strain_x > STRAIN_BREAK_THRESHOLD) {
+                if (voxel->glued_faces[0]) break_face_link(voxel, 0);
+                if (voxel->glued_faces[1]) break_face_link(voxel, 1);
             }
-            if ((voxel->glued_faces[2] || voxel->glued_faces[3]) && strain_y > STRAIN_BREAK_THRESHOLD) {
-                voxel->pending_full_break = true;
+            if (strain_y > STRAIN_BREAK_THRESHOLD) {
+                if (voxel->glued_faces[2]) break_face_link(voxel, 2);
+                if (voxel->glued_faces[3]) break_face_link(voxel, 3);
             }
-            if ((voxel->glued_faces[4] || voxel->glued_faces[5]) && strain_z > STRAIN_BREAK_THRESHOLD) {
-                voxel->pending_full_break = true;
+            if (strain_z > STRAIN_BREAK_THRESHOLD) {
+                if (voxel->glued_faces[4]) break_face_link(voxel, 4);
+                if (voxel->glued_faces[5]) break_face_link(voxel, 5);
             }
 
-            if (!voxel->pending_full_break) {
-                float inv_len0 = (len_v0 > VGS_EPS) ? 1.0f / len_v0 : 0.0f;
-                float inv_len1 = (len_v1 > VGS_EPS) ? 1.0f / len_v1 : 0.0f;
-                float inv_len2 = (len_v2 > VGS_EPS) ? 1.0f / len_v2 : 0.0f;
+            float inv_len0 = (len_v0 > VGS_EPS) ? 1.0f / len_v0 : 0.0f;
+            float inv_len1 = (len_v1 > VGS_EPS) ? 1.0f / len_v1 : 0.0f;
+            float inv_len2 = (len_v2 > VGS_EPS) ? 1.0f / len_v2 : 0.0f;
 
-                float shear_xy = (inv_len0 > 0.0f && inv_len1 > 0.0f)
-                    ? fabsf(v_dot(v0, v1)) * inv_len0 * inv_len1
-                    : 0.0f;
-                float shear_xz = (inv_len0 > 0.0f && inv_len2 > 0.0f)
-                    ? fabsf(v_dot(v0, v2)) * inv_len0 * inv_len2
-                    : 0.0f;
-                float shear_yz = (inv_len1 > 0.0f && inv_len2 > 0.0f)
-                    ? fabsf(v_dot(v1, v2)) * inv_len1 * inv_len2
-                    : 0.0f;
+            float shear_xy = (inv_len0 > 0.0f && inv_len1 > 0.0f)
+                ? fabsf(v_dot(v0, v1)) * inv_len0 * inv_len1
+                : 0.0f;
+            float shear_xz = (inv_len0 > 0.0f && inv_len2 > 0.0f)
+                ? fabsf(v_dot(v0, v2)) * inv_len0 * inv_len2
+                : 0.0f;
+            float shear_yz = (inv_len1 > 0.0f && inv_len2 > 0.0f)
+                ? fabsf(v_dot(v1, v2)) * inv_len1 * inv_len2
+                : 0.0f;
 
-                if ((voxel->glued_faces[4] || voxel->glued_faces[5]) && shear_xy > SHEAR_BREAK_THRESHOLD) {
-                    voxel->pending_full_break = true;
-                }
-                if ((voxel->glued_faces[2] || voxel->glued_faces[3]) && shear_xz > SHEAR_BREAK_THRESHOLD) {
-                    voxel->pending_full_break = true;
-                }
-                if ((voxel->glued_faces[0] || voxel->glued_faces[1]) && shear_yz > SHEAR_BREAK_THRESHOLD) {
-                    voxel->pending_full_break = true;
-                }
+            if (shear_xy > SHEAR_BREAK_THRESHOLD) {
+                if (voxel->glued_faces[4]) break_face_link(voxel, 4);
+                if (voxel->glued_faces[5]) break_face_link(voxel, 5);
+            }
+            if (shear_xz > SHEAR_BREAK_THRESHOLD) {
+                if (voxel->glued_faces[2]) break_face_link(voxel, 2);
+                if (voxel->glued_faces[3]) break_face_link(voxel, 3);
+            }
+            if (shear_yz > SHEAR_BREAK_THRESHOLD) {
+                if (voxel->glued_faces[0]) break_face_link(voxel, 0);
+                if (voxel->glued_faces[1]) break_face_link(voxel, 1);
             }
         }
 
@@ -1314,7 +1301,6 @@ void simulate_voxel_pbd(float dt) {
             }
         }
 
-        process_pending_breaks();
         decrement_particle_timers();
 
         update_particle_velocities(sub_dt);

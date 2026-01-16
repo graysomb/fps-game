@@ -6,7 +6,7 @@ The question of whether the number of voxels and particles is conserved when a v
 
 The number of **voxels is conserved** during the breaking process.
 
-When a voxel is flagged for a break (`pending_full_break = true`), the `process_pending_breaks()` and `break_face_link()` functions are called. These functions only deal with the particles at the corners of the voxel's faces. They do not create or destroy any `Voxel` structs. The `voxel_count` remains unchanged throughout this process. A voxel is only ever added with `addVoxel()` and there is no corresponding `removeVoxel()` function called during a break (destruction of voxels happens in other parts of the code, for example when a bullet hits a voxel).
+When a voxel face exceeds the strain or shear thresholds, `break_face_link()` is called directly to detach that face. These functions only deal with the particles at the corners of the voxel's faces. They do not create or destroy any `Voxel` structs. The `voxel_count` remains unchanged throughout this process. A voxel is only ever added with `addVoxel()` and there is no corresponding `removeVoxel()` function called during a break (destruction of voxels happens in other parts of the code, for example when a bullet hits a voxel).
 
 ### Particle Conservation: No
 
