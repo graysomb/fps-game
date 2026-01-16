@@ -947,8 +947,8 @@ static void buildDemo(void) {
     //}
 
     // Central platform
-    int platform_size = 5;
-    int platform_height =5; // 15 / 3
+    int platform_size = 8;
+    int platform_height =8; // 15 / 3
     int platform_base_height = 1; // to keep top at same level (21)
     for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
         for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
