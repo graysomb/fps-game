@@ -45,16 +45,17 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define FLOOR_SIZE     20.0f    // half-size of floor in world units
 #define PLAYER_SIZE 0.5f
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
-#define VGS_ALPHA 0.001f // 0 means no shear correction 1 means complete shear correction
-#define VGS_BETA 0.001f // 0 means no tension correction 1 means total tension correction
+#define VGS_ALPHA 0.01f // 0 means no shear correction 1 means complete shear correction
+#define VGS_BETA 0.01f // 0 means no tension correction 1 means total tension correction
 #define VGS_ITERS 3
 #define VGS_EPS 1e-6f
 #define PBD_MAX_STEP_DT 0.005f
 #define PBD_SUBSTEPS 3
 #define PBD_CONSTRAINT_ITERS 5
-#define COLLISION_RELAXATION 0.5f
+#define COLLISION_RELAXATION 0.9f
 #define CENTER_RELAXATION 0.9f
 #define VELOCITY_DAMPING 0.99f
+#define FIXED_PHYSICS_DT (1.0f / 60.0f)
 
 // KD-stats constants
 #define BASE_HEALTH 100
@@ -67,8 +68,9 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define HASH_SIZE     131072    // must be power of two
 #define VOXEL_SIZE     0.5f    // size of each voxel cube
 #define MAX_PARTICLES (MAX_VOXELS * 8)
-#define STRAIN_BREAK_THRESHOLD 1.0f
-#define SHEAR_BREAK_THRESHOLD 0.5f
+#define STRAIN_BREAK_THRESHOLD 0.1f
+#define SHEAR_BREAK_THRESHOLD 0.1f
+#define BREAK_DAMP_FRAMES 50
 
 // Tunable voxel edit brush (per-axis span of the add/remove operation)
 static int voxelBrushSpan = 4;
@@ -101,6 +103,7 @@ typedef struct {
     int   refcount;
     bool  active;
     int   active_index;
+    int   break_timer;
 } Particle;
 
 // Voxel structure
@@ -153,6 +156,7 @@ static Particle *particle_create(Vector3 pos, float inv_mass) {
     p->active = true;
     p->active_index = active_particle_count;
     active_particles[active_particle_count++] = p;
+    p->break_timer = 0;
     return p;
 }
 
@@ -170,6 +174,7 @@ static Particle *particle_clone(const Particle *src) {
     p->active = true;
     p->active_index = active_particle_count;
     active_particles[active_particle_count++] = p;
+    p->break_timer = 0;
     return p;
 }
 
@@ -614,6 +619,9 @@ static void detach_face_particles(Voxel *voxel, int face_index) {
             continue;
         }
 
+        p_new->break_timer = BREAK_DAMP_FRAMES;
+        p_old->break_timer = BREAK_DAMP_FRAMES;
+
         voxel->particles[corner] = p_new;
         particle_release(p_old);
     }
@@ -638,7 +646,6 @@ static void break_face_link(Voxel *voxel, int face_index) {
 
     Voxel *neighbor = &voxels[neighbor_idx];
     int opposite = opposite_face[face_index];
-    detach_face_particles(neighbor, opposite);
     neighbor->glued_faces[opposite] = false;
 }
 
@@ -706,7 +713,7 @@ static void buildDemo(void) {
                 float py = (y + 0.5f) * VOXEL_SIZE;
                 float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
                 if (y==platform_base_height){
-                    addVoxel(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0, 0.0f);
+                    addVoxel(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0, 1.0f);
                 }else{
                 addVoxel(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0, 1.0f);
                 }
@@ -1227,17 +1234,32 @@ static void solve_particle_collisions(float dt) {
                             float h = 0.5f * penetration;
                             float scale = omega * h / w_sum;
 
+                            float damp_factor = 1.0f;
+                            if (pa->break_timer > 0 || pb->break_timer > 0) {
+                                int max_timer = (pa->break_timer > pb->break_timer) ? pa->break_timer : pb->break_timer;
+                                damp_factor = 1.0f - (float)max_timer / (float)BREAK_DAMP_FRAMES;
+                            }
+
                             // Apply equal-and-opposite displacements weighted by inverse mass.
                             if (wa > 0.0f) {
-                                pa->predicted_pos = v_add(pa->predicted_pos, v_mul(normal, scale * wa));
+                                pa->predicted_pos = v_add(pa->predicted_pos, v_mul(normal, scale * wa * damp_factor));
                             }
                             if (wb > 0.0f) {
-                                pb->predicted_pos = v_sub(pb->predicted_pos, v_mul(normal, scale * wb));
+                                pb->predicted_pos = v_sub(pb->predicted_pos, v_mul(normal, scale * wb * damp_factor));
                             }
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+static void decrement_particle_timers(void) {
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+        if (p->break_timer > 0) {
+            p->break_timer--;
         }
     }
 }
@@ -1275,8 +1297,8 @@ static void update_particle_velocities(float dt) {
 }
 
 void simulate_voxel_pbd(float dt) {
-    const int substeps = 3;
-    const int constraint_iterations = 1;
+    const int substeps = PBD_SUBSTEPS;
+    const int constraint_iterations = PBD_CONSTRAINT_ITERS;
     const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
 
     for (int step = 0; step < substeps; ++step) {
@@ -1293,6 +1315,7 @@ void simulate_voxel_pbd(float dt) {
         }
 
         process_pending_breaks();
+        decrement_particle_timers();
 
         update_particle_velocities(sub_dt);
     }
@@ -1345,10 +1368,13 @@ static void FireVoxel(int idx) {
     }
 }
 // Append the 12 edges (24 vertices) of a cube to the current RL_LINES batch
-static void drawCubeEdges(const Voxel *voxel)
+static void drawCubeEdges(const Voxel *voxel, float alpha)
 {
     Vector3 v[8];
-    for (int i = 0; i < 8; ++i) v[i] = voxel->particles[i]->pos;
+    for (int i = 0; i < 8; ++i) {
+        Particle *p = voxel->particles[i];
+        v[i] = v_add(v_mul(p->pos, alpha), v_mul(p->prev_pos, 1.0f - alpha));
+    }
 
     static const int edge_indices[12][2] = {
         {0,1},{1,3},{3,2},{2,0},
@@ -1364,10 +1390,13 @@ static void drawCubeEdges(const Voxel *voxel)
     }
 }
 
-static void drawCubeMan(const Voxel *voxel)
+static void drawCubeMan(const Voxel *voxel, float alpha)
 {
     Vector3 v[8];
-    for (int i = 0; i < 8; ++i) v[i] = voxel->particles[i]->pos;
+    for (int i = 0; i < 8; ++i) {
+        Particle *p = voxel->particles[i];
+        v[i] = v_add(v_mul(p->pos, alpha), v_mul(p->prev_pos, 1.0f - alpha));
+    }
 
     rlColor4ub(voxel->color.r, voxel->color.g, voxel->color.b, voxel->color.a);
 
@@ -1754,7 +1783,7 @@ static Mesh gen_greedy_mesh(void) {
 }
 
 // Draw all voxels via greedy mesh instead of per-voxel raycasting
-static void DrawVoxels(Camera3D cam) {
+static void DrawVoxels(Camera3D cam, float alpha) {
     /* (void)cam;
     if (meshDirty) {
         if (greedyMesh.vertices) UnloadMesh(greedyMesh);
@@ -1816,14 +1845,14 @@ static void DrawVoxels(Camera3D cam) {
     }*/
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
-        drawCubeMan(v);
+        drawCubeMan(v, alpha);
     }
     rlEnd();
     rlBegin(RL_LINES);
     rlColor4ub(0, 0, 0, 255);
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
-        drawCubeEdges(v);
+        drawCubeEdges(v, alpha);
     }
     rlEnd();
 
@@ -2006,6 +2035,8 @@ static void HandleGamepadInput(int i, float dt) {
 static void HandleKeyboardInput(int i, float dt);
 static void HandleGamepadInput(int i, float dt);
 
+static float physics_accumulator = 0.0f;
+
 int main(void) {
     // init window and render textures
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Split-Screen FPS (raylib)");
@@ -2138,12 +2169,18 @@ int main(void) {
             p->pos.x = clampf(p->pos.x, -FLOOR_SIZE+PLAYER_RADIUS, FLOOR_SIZE-PLAYER_RADIUS);
             p->pos.z = clampf(p->pos.z, -FLOOR_SIZE+PLAYER_RADIUS, FLOOR_SIZE-PLAYER_RADIUS);
         }
-        // update voxel physics
-        int subStep = 3;
-        for( int i = 0; i < subStep; i++){
-            physics_step(dt/subStep);
+        // Fixed-timestep physics update
+        physics_accumulator += dt;
+        while (physics_accumulator >= FIXED_PHYSICS_DT) {
+            int subStep = 3;
+            for( int i = 0; i < subStep; i++){
+                physics_step(FIXED_PHYSICS_DT/subStep);
+            }
+            simulate_voxel_pbd(FIXED_PHYSICS_DT);
+
+            physics_accumulator -= FIXED_PHYSICS_DT;
         }
-         simulate_voxel_pbd(dt);
+        const float alpha = physics_accumulator / FIXED_PHYSICS_DT;
         // setup cameras
         Camera3D cam0 = {0}, cam1 = {0};
         cam0.up = cam1.up = (Vector3){0,1,0};
@@ -2166,11 +2203,11 @@ int main(void) {
             ClearBackground(SKYBLUE);
             BeginMode3D(cam0);
                 DrawPlane((Vector3){0,0,0}, (Vector2){FLOOR_SIZE*2, FLOOR_SIZE*2}, DARKGRAY);
-                DrawVoxels(cam0);
+                DrawVoxels(cam0, alpha);
                 draw_players();
             EndMode3D();
             // UI p1
-            DrawRectangle(0,0, SCREEN_WIDTH/2, 4.0f, Fade(BLACK, 0.5f));
+            DrawRectangle(0,0, SCREEN_WIDTH/2, 40, Fade(BLACK, 0.5f));
             DrawText(TextFormat("P1 | Kills: %d Deaths: %d | Health: %d | Shield: %d", players[0].kills, players[0].deaths, players[0].health, players[0].shield), 10, 10, 20, WHITE);
             DrawLine(SCREEN_WIDTH/4-10, SCREEN_HEIGHT/2, SCREEN_WIDTH/4+10, SCREEN_HEIGHT/2, WHITE);
             DrawLine(SCREEN_WIDTH/4, SCREEN_HEIGHT/2-10, SCREEN_WIDTH/4, SCREEN_HEIGHT/2+10, WHITE);
@@ -2179,11 +2216,11 @@ int main(void) {
             ClearBackground(SKYBLUE);
             BeginMode3D(cam1);
                 DrawPlane((Vector3){0,0,0}, (Vector2){FLOOR_SIZE*2, FLOOR_SIZE*2}, DARKGRAY);
-                DrawVoxels(cam1);
+                DrawVoxels(cam1, alpha);
                 draw_players();
             EndMode3D();
             // UI p2
-            DrawRectangle(0,0, SCREEN_WIDTH/2, 4.0f, Fade(BLACK, 0.5f));
+            DrawRectangle(0,0, SCREEN_WIDTH/2, 40, Fade(BLACK, 0.5f));
             DrawText(TextFormat("P2 | Kills: %d Deaths: %d | Health: %d | Shield: %d", players[1].kills, players[1].deaths, players[1].health, players[1].shield), 10, 10, 20, WHITE);
             DrawLine(SCREEN_WIDTH/4-10, SCREEN_HEIGHT/2, SCREEN_WIDTH/4+10, SCREEN_HEIGHT/2, WHITE);
             DrawLine(SCREEN_WIDTH/4, SCREEN_HEIGHT/2-10, SCREEN_WIDTH/4, SCREEN_HEIGHT/2+10, WHITE);
