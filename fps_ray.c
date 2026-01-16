@@ -1526,6 +1526,20 @@ static void decrement_particle_timers(void) {
 static void update_particle_velocities(float dt) {
     float inv_dt = (dt > 0.0f) ? 1.0f / dt : 0.0f;
 
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+        Vector3 new_pos = p->predicted_pos;
+        Vector3 delta = v_sub(new_pos, p->prev_pos);
+
+        if (p->inv_mass > 0.0f) {
+            p->vel = v_mul(delta, inv_dt);
+        } else {
+            p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+        }
+
+        p->pos = new_pos;
+    }
+
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
         Vector3 centroid = { 0.0f, 0.0f, 0.0f };
@@ -1535,17 +1549,6 @@ static void update_particle_velocities(float dt) {
             Particle *p = voxel->particles[j];
             centroid = v_add(centroid, p->predicted_pos);
             prev_centroid = v_add(prev_centroid, p->prev_pos);
-
-            Vector3 new_pos = p->predicted_pos;
-            Vector3 delta = v_sub(new_pos, p->prev_pos);
-
-            if (p->inv_mass > 0.0f) {
-                p->vel = v_mul(delta, inv_dt);
-            } else {
-                p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
-            }
-
-            p->pos = new_pos;
         }
 
         centroid = v_mul(centroid, 1.0f / 8.0f);
