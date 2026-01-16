@@ -112,7 +112,6 @@ typedef struct {
     int   extra_mass;
     bool  touched_by_simulated;
     int   sync_stamp;
-    int   collision_stamp;
 } Particle;
 
 // Voxel structure
@@ -147,7 +146,6 @@ static Particle *active_particles[MAX_PARTICLES];
 static int particle_pool_count = 0;
 static int active_particle_count = 0;
 static int particle_sync_stamp = 1;
-static int particle_collision_stamp = 1;
 
 static void reset_particle_pool(void) {
     particle_pool_count = 0;
@@ -178,7 +176,6 @@ static Particle *particle_create(Vector3 pos, float inv_mass) {
     p->extra_mass = 0;
     p->touched_by_simulated = false;
     p->sync_stamp = 0;
-    p->collision_stamp = 0;
     return p;
 }
 
@@ -202,7 +199,6 @@ static Particle *particle_clone(const Particle *src) {
     p->extra_mass = 0;
     p->touched_by_simulated = false;
     p->sync_stamp = 0;
-    p->collision_stamp = 0;
     return p;
 }
 
@@ -332,7 +328,6 @@ static void reset_particle_accumulators(void) {
         Particle *p = active_particles[i];
         p->corr_sum = (Vector3){ 0.0f, 0.0f, 0.0f };
         p->corr_weight = 0.0f;
-        p->collision_stamp = 0;
     }
 }
 
@@ -349,13 +344,6 @@ static void apply_particle_accumulators(void) {
     }
 }
 
-static inline bool should_process_collision(Particle *p) {
-    if (p->collision_stamp == particle_collision_stamp) {
-        return false;
-    }
-    p->collision_stamp = particle_collision_stamp;
-    return true;
-}
 
 static void update_voxel_coarsening_state(void) {
     for (int i = 0; i < voxel_count; ++i) {
@@ -1355,74 +1343,57 @@ static void gather_particle_collisions(float dt) {
     const float omega = COLLISION_RELAXATION;
     const float eps = 1e-6f;
 
-    particle_collision_stamp++;
-    if (particle_collision_stamp == 0) {
-        particle_collision_stamp = 1;
-    }
-
     // First, gather corrections against static scene bounds and player capsules.
-    for (int i = 0; i < voxel_count; ++i) {
-        Voxel *voxel = &voxels[i];
-        float voxel_radius = voxel_particle_radius(voxel);
-        float terrain_limit = FLOOR_SIZE - voxel_radius;
+    const float voxel_radius = PARTICLE_RADIUS;
+    const float radius_sq = voxel_radius * voxel_radius;
 
-        for (int j = 0; j < 8; ++j) {
-            Particle *p = voxel->particles[j];
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+        if (p->inv_mass <= 0.0f) {
+            continue;
+        }
 
-            if (p->inv_mass <= 0.0f) {
-                continue;
+        Vector3 pos = p->predicted_pos;
+
+        if (pos.y < voxel_radius) {
+            pos.y = voxel_radius;
+        }
+
+        // Interactions with player bounding boxes (kept for gameplay parity).
+        for (int player_idx = 0; player_idx < 2; ++player_idx) {
+            Player *pl = &players[player_idx];
+            Vector3 box_min = {
+                pl->pos.x - half_player,
+                pl->pos.y - half_player,
+                pl->pos.z - half_player
+            };
+            Vector3 box_max = {
+                pl->pos.x + half_player,
+                pl->pos.y + half_player,
+                pl->pos.z + half_player
+            };
+
+            Vector3 nearest = {
+                clampf(pos.x, box_min.x, box_max.x),
+                clampf(pos.y, box_min.y, box_max.y),
+                clampf(pos.z, box_min.z, box_max.z)
+            };
+
+            Vector3 delta = v_sub(pos, nearest);
+            float dist_sq = v_dot(delta, delta);
+            if (dist_sq < radius_sq) {
+                float dist = sqrtf(fmaxf(dist_sq, eps));
+                float penetration = voxel_radius - dist;
+                Vector3 normal = (dist > eps)
+                    ? v_mul(delta, -1.0f / dist)
+                    : (Vector3){ 0.0f, 1.0f, 0.0f };
+                pos = v_add(pos, v_mul(normal, penetration));
             }
+        }
 
-            if (!should_process_collision(p)) {
-                continue;
-            }
-
-            Vector3 pos = p->predicted_pos;
-
-            if (pos.y < voxel_radius) {
-                pos.y = voxel_radius;
-            }
-
-            // pos.x = clampf(pos.x, -terrain_limit, terrain_limit);
-            // pos.z = clampf(pos.z, -terrain_limit, terrain_limit);
-
-            // Interactions with player bounding boxes (kept for gameplay parity).
-            for (int player_idx = 0; player_idx < 2; ++player_idx) {
-                Player *pl = &players[player_idx];
-                Vector3 box_min = {
-                    pl->pos.x - half_player,
-                    pl->pos.y - half_player,
-                    pl->pos.z - half_player
-                };
-                Vector3 box_max = {
-                    pl->pos.x + half_player,
-                    pl->pos.y + half_player,
-                    pl->pos.z + half_player
-                };
-
-                Vector3 nearest = {
-                    clampf(pos.x, box_min.x, box_max.x),
-                    clampf(pos.y, box_min.y, box_max.y),
-                    clampf(pos.z, box_min.z, box_max.z)
-                };
-
-                Vector3 delta = v_sub(pos, nearest);
-                float dist_sq = v_dot(delta, delta);
-                float radius_sq = voxel_radius * voxel_radius;
-                if (dist_sq < radius_sq) {
-                    float dist = sqrtf(fmaxf(dist_sq, eps));
-                    float penetration = voxel_radius - dist;
-                    Vector3 normal = (dist > eps)
-                        ? v_mul(delta, -1.0f / dist)
-                        : (Vector3){ 0.0f, 1.0f, 0.0f };
-                    pos = v_add(pos, v_mul(normal, penetration));
-                }
-            }
-
-            Vector3 delta = v_sub(pos, p->predicted_pos);
-            if (fabsf(delta.x) > 0.0f || fabsf(delta.y) > 0.0f || fabsf(delta.z) > 0.0f) {
-                accumulate_particle_correction(p, delta, 1.0f);
-            }
+        Vector3 delta = v_sub(pos, p->predicted_pos);
+        if (fabsf(delta.x) > 0.0f || fabsf(delta.y) > 0.0f || fabsf(delta.z) > 0.0f) {
+            accumulate_particle_correction(p, delta, 1.0f);
         }
     }
 
