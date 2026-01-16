@@ -73,6 +73,7 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define BREAK_DAMP_FRAMES 50
 #define COARSENING_WAKE_FRAMES 30
 #define COARSENING_MASS_SCALE 1.0f
+#define PARTICLE_HASH_SIZE 262144
 
 // Tunable voxel edit brush (per-axis span of the add/remove operation)
 static int voxelBrushSpan = 4;
@@ -101,6 +102,7 @@ typedef struct {
     Vector3 prev_pos;
     Vector3 predicted_pos;
     Vector3 vel;
+    float radius;
     float inv_mass;
     float base_inv_mass;
     Vector3 corr_sum;
@@ -112,6 +114,9 @@ typedef struct {
     int   extra_mass;
     bool  touched_by_simulated;
     int   sync_stamp;
+    int   cell_x;
+    int   cell_y;
+    int   cell_z;
 } Particle;
 
 // Voxel structure
@@ -146,6 +151,8 @@ static Particle *active_particles[MAX_PARTICLES];
 static int particle_pool_count = 0;
 static int active_particle_count = 0;
 static int particle_sync_stamp = 1;
+static int particle_hash_head[PARTICLE_HASH_SIZE];
+static int particle_hash_next[MAX_PARTICLES];
 
 static void reset_particle_pool(void) {
     particle_pool_count = 0;
@@ -164,6 +171,7 @@ static Particle *particle_create(Vector3 pos, float inv_mass) {
     p->prev_pos = pos;
     p->predicted_pos = pos;
     p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+    p->radius = PARTICLE_RADIUS;
     p->inv_mass = inv_mass;
     p->base_inv_mass = inv_mass;
     p->corr_sum = (Vector3){ 0.0f, 0.0f, 0.0f };
@@ -199,6 +207,7 @@ static Particle *particle_clone(const Particle *src) {
     p->extra_mass = 0;
     p->touched_by_simulated = false;
     p->sync_stamp = 0;
+    p->radius = PARTICLE_RADIUS;
     return p;
 }
 
@@ -313,6 +322,30 @@ static Vector3 v_norm(Vector3 v) {
         return (Vector3){ 0.0f, 0.0f, 0.0f };
     }
     return v_mul(v, 1.0f / len);
+}
+
+static inline int particle_hash(int x, int y, int z) {
+    unsigned int h = (unsigned int)(x * 73856093u ^ y * 19349663u ^ z * 83492791u);
+    return (int)(h & (PARTICLE_HASH_SIZE - 1));
+}
+
+static void build_particle_hash(void) {
+    for (int i = 0; i < PARTICLE_HASH_SIZE; ++i) {
+        particle_hash_head[i] = -1;
+    }
+
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+        int gx = (int)floorf(p->predicted_pos.x / VOXEL_SIZE);
+        int gy = (int)floorf(p->predicted_pos.y / VOXEL_SIZE);
+        int gz = (int)floorf(p->predicted_pos.z / VOXEL_SIZE);
+        p->cell_x = gx;
+        p->cell_y = gy;
+        p->cell_z = gz;
+        int h = particle_hash(gx, gy, gz);
+        particle_hash_next[i] = particle_hash_head[h];
+        particle_hash_head[h] = i;
+    }
 }
 
 static inline void accumulate_particle_correction(Particle *p, Vector3 delta, float weight) {
@@ -773,6 +806,7 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
             voxel_count--;
             return -1;
         }
+        p->radius = voxel_particle_radius(v);
         v->particles[i] = p;
     }
     table_set(v->gx, v->gy, v->gz, idx);
@@ -1398,85 +1432,80 @@ static void gather_particle_collisions(float dt) {
     }
 
     // Particle-particle collisions using a symmetric correction identical to the compute shader.
-    for (int i = 0; i < voxel_count; ++i) {
-        Voxel *voxelA = &voxels[i];
-        float radiusA = voxel_particle_radius(voxelA);
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *pa = active_particles[i];
+        float wa = pa->inv_mass;
+        if (wa <= 0.0f) {
+            continue;
+        }
 
-        for (int j = 0; j < 8; ++j) {
-            Particle *pa = voxelA->particles[j];
-            float wa = pa->inv_mass;
+        int ax = pa->cell_x;
+        int ay = pa->cell_y;
+        int az = pa->cell_z;
 
-            for (int dx = -1; dx <= 1; ++dx) {
-                for (int dy = -1; dy <= 1; ++dy) {
-                    for (int dz = -1; dz <= 1; ++dz) {
-                        int nx = voxelA->gx + dx;
-                        int ny = voxelA->gy + dy;
-                        int nz = voxelA->gz + dz;
-                        int neighbor_idx = table_get(nx, ny, nz);
-                        if (neighbor_idx < 0) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dz = -1; dz <= 1; ++dz) {
+                    int nx = ax + dx;
+                    int ny = ay + dy;
+                    int nz = az + dz;
+                    int h = particle_hash(nx, ny, nz);
+
+                    for (int idx = particle_hash_head[h]; idx != -1; idx = particle_hash_next[idx]) {
+                        Particle *pb = active_particles[idx];
+                        if (pb == pa) {
+                            continue;
+                        }
+                        if (idx <= i) {
+                            continue;
+                        }
+                        if (pb->cell_x != nx || pb->cell_y != ny || pb->cell_z != nz) {
                             continue;
                         }
 
-                        if (neighbor_idx < i) {
+                        float wb = pb->inv_mass;
+                        float w_sum = wa + wb;
+                        if (w_sum <= 0.0f) {
                             continue;
                         }
 
-                        Voxel *voxelB = &voxels[neighbor_idx];
-                        float radiusB = voxel_particle_radius(voxelB);
+                        float radiusA = pa->radius;
+                        float radiusB = pb->radius;
+                        Vector3 delta = v_sub(pa->predicted_pos, pb->predicted_pos);
+                        float dist_sq = v_dot(delta, delta);
+                        float target_dist = radiusA + radiusB;
 
-                        for (int q = 0; q < 8; ++q) {
-                            if (neighbor_idx == i && q <= j) {
-                                continue;
-                            }
+                        if (dist_sq >= (target_dist * target_dist)) {
+                            continue;
+                        }
 
-                            Particle *pb = voxelB->particles[q];
-                            if (pa == pb) {
-                                continue;
-                            }
+                        float dist = sqrtf(fmaxf(dist_sq, eps));
+                        float penetration = target_dist - dist;
+                        if (penetration <= 0.0f) {
+                            continue;
+                        }
 
-                            float wb = pb->inv_mass;
+                        Vector3 normal = (dist > eps)
+                            ? v_mul(delta, 1.0f / dist)
+                            : (Vector3){ 1.0f, 0.0f, 0.0f };
 
-                            float w_sum = wa + wb;
-                            if (w_sum <= 0.0f) {
-                                continue;
-                            }
+                        float h_corr = 0.5f * penetration;
+                        float scale = omega * h_corr / w_sum;
 
-                            Vector3 delta = v_sub(pa->predicted_pos, pb->predicted_pos);
-                            float dist_sq = v_dot(delta, delta);
-                            float target_dist = radiusA + radiusB;
+                        float damp_factor = 1.0f;
+                        if (pa->break_timer > 0 || pb->break_timer > 0) {
+                            int max_timer = (pa->break_timer > pb->break_timer) ? pa->break_timer : pb->break_timer;
+                            damp_factor = 1.0f - (float)max_timer / (float)BREAK_DAMP_FRAMES;
+                        }
 
-                            if (dist_sq >= (target_dist * target_dist)) {
-                                continue;
-                            }
-
-                            float dist = sqrtf(fmaxf(dist_sq, eps));
-                            float penetration = target_dist - dist;
-                            if (penetration <= 0.0f) {
-                                continue;
-                            }
-
-                            Vector3 normal = (dist > eps)
-                                ? v_mul(delta, 1.0f / dist)
-                                : (Vector3){ 1.0f, 0.0f, 0.0f };
-
-                            float h = 0.5f * penetration;
-                            float scale = omega * h / w_sum;
-
-                            float damp_factor = 1.0f;
-                            if (pa->break_timer > 0 || pb->break_timer > 0) {
-                                int max_timer = (pa->break_timer > pb->break_timer) ? pa->break_timer : pb->break_timer;
-                                damp_factor = 1.0f - (float)max_timer / (float)BREAK_DAMP_FRAMES;
-                            }
-
-                            // Accumulate equal-and-opposite displacements weighted by inverse mass.
-                            if (wa > 0.0f) {
-                                Vector3 da = v_mul(normal, scale * wa * damp_factor);
-                                accumulate_particle_correction(pa, da, 1.0f);
-                            }
-                            if (wb > 0.0f) {
-                                Vector3 db = v_mul(normal, -scale * wb * damp_factor);
-                                accumulate_particle_correction(pb, db, 1.0f);
-                            }
+                        // Accumulate equal-and-opposite displacements weighted by inverse mass.
+                        if (wa > 0.0f) {
+                            Vector3 da = v_mul(normal, scale * wa * damp_factor);
+                            accumulate_particle_correction(pa, da, 1.0f);
+                        }
+                        if (wb > 0.0f) {
+                            Vector3 db = v_mul(normal, -scale * wb * damp_factor);
+                            accumulate_particle_correction(pb, db, 1.0f);
                         }
                     }
                 }
@@ -1543,6 +1572,7 @@ void simulate_voxel_pbd(float dt) {
 
         for (int it = 0; it < constraint_iterations; ++it) {
             reset_particle_accumulators();
+            build_particle_hash();
             gather_particle_collisions(sub_dt);
             for (int i = 0; i < voxel_count; ++i) {
                 Voxel *voxel = &voxels[i];
