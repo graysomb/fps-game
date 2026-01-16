@@ -947,8 +947,8 @@ static void buildDemo(void) {
     //}
 
     // Central platform
-    int platform_size = 2;
-    int platform_height =2; // 15 / 3
+    int platform_size = 5;
+    int platform_height =5; // 15 / 3
     int platform_base_height = 1; // to keep top at same level (21)
     for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
         for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
@@ -1021,15 +1021,6 @@ static void UpdateKdRatio(int player_index) {
 
 // Physics step for voxels
 static void physics_step(float dt) {    // Rebuild spatial hash
-    memset(table, 0, sizeof(table));
-    for (int i = 0; i < voxel_count; i++) {
-        Voxel *v = &voxels[i];
-        int x = (int)floorf(v->pos.x / VOXEL_SIZE);
-        int y = (int)floorf(v->pos.y / VOXEL_SIZE);
-        int z = (int)floorf(v->pos.z / VOXEL_SIZE);
-        v->gx = x; v->gy = y; v->gz = z;
-        table_set(x, y, z, i);
-    }
     // // Simulate dynamic voxels
     // for (int i = 0; i < voxel_count; i++) {
     //     Voxel *v = &voxels[i];
@@ -1567,10 +1558,21 @@ void simulate_voxel_pbd(float dt) {
     Vector3 avg_delta[8];
     int counts[8];
 
+    //build voxel hash
+    memset(table, 0, sizeof(table));
+    for (int i = 0; i < voxel_count; i++) {
+        Voxel *v = &voxels[i];
+        int x = (int)floorf(v->pos.x / VOXEL_SIZE);
+        int y = (int)floorf(v->pos.y / VOXEL_SIZE);
+        int z = (int)floorf(v->pos.z / VOXEL_SIZE);
+        v->gx = x; v->gy = y; v->gz = z;
+        table_set(x, y, z, i);
+    }
+
     for (int step = 0; step < substeps; ++step) {
-        update_voxel_coarsening_state();
-        reset_particle_mass_and_flags();
-        apply_shell_effective_mass();
+        //update_voxel_coarsening_state();
+        //reset_particle_mass_and_flags();
+        //apply_shell_effective_mass();
 
         integrate_particles(sub_dt);
 
@@ -1587,22 +1589,22 @@ void simulate_voxel_pbd(float dt) {
             apply_particle_accumulators();
         }
 
-        process_break_masks();
-        update_wake_timers();
+        //process_break_masks();
+        //update_wake_timers();
 
-        accumulate_simulated_corner_deltas(sum_delta, counts);
-        for (int i = 0; i < 8; ++i) {
-            if (counts[i] > 0) {
-                avg_delta[i] = v_mul(sum_delta[i], 1.0f / (float)counts[i]);
-            } else {
-                avg_delta[i] = (Vector3){ 0.0f, 0.0f, 0.0f };
-            }
-        }
+        // accumulate_simulated_corner_deltas(sum_delta, counts);
+        // for (int i = 0; i < 8; ++i) {
+        //     if (counts[i] > 0) {
+        //         avg_delta[i] = v_mul(sum_delta[i], 1.0f / (float)counts[i]);
+        //     } else {
+        //         avg_delta[i] = (Vector3){ 0.0f, 0.0f, 0.0f };
+        //     }
+        // }
 
-        mark_simulated_particles();
-        apply_interior_sync(avg_delta, counts);
+        // mark_simulated_particles();
+        // apply_interior_sync(avg_delta, counts);
 
-        decrement_particle_timers();
+        // decrement_particle_timers();
 
         update_particle_velocities(sub_dt);
     }
@@ -2325,6 +2327,11 @@ static void HandleKeyboardInput(int i, float dt);
 static void HandleGamepadInput(int i, float dt);
 
 static float physics_accumulator = 0.0f;
+static void draw_frame_rate(Color color) {
+    const char *fpsText = TextFormat("FPS: %d", GetFPS());
+    int fpsWidth = MeasureText(fpsText, 18);
+    DrawText(fpsText, SCREEN_WIDTH - fpsWidth - 10, 6, 18, color);
+}
 
 int main(void) {
     // init window and render textures
@@ -2348,6 +2355,7 @@ int main(void) {
                     DrawText("Main Menu", SCREEN_WIDTH / 2 - MeasureText("Main Menu", 40) / 2, 100, 40, BLACK);
                     DrawText("Press ENTER to Start", SCREEN_WIDTH / 2 - MeasureText("Press ENTER to Start", 20) / 2, 200, 20, DARKGRAY);
                     DrawText("Press S for Settings", SCREEN_WIDTH / 2 - MeasureText("Press S for Settings", 20) / 2, 250, 20, DARKGRAY);
+                    draw_frame_rate(DARKGRAY);
                 EndDrawing();
 
                 if (IsKeyPressed(KEY_ENTER)) {
@@ -2524,6 +2532,7 @@ int main(void) {
             if (debugDrawParticles) {
                 DrawText(TextFormat("Velocity Heatmap (F4): %s", debugColorParticlesByVelocity ? "ON" : "OFF"), 20, 44, 20, LIGHTGRAY);
             }
+            draw_frame_rate(LIGHTGRAY);
         EndDrawing();
         break;
             case GAME_STATE_PAUSED:
@@ -2533,6 +2542,7 @@ int main(void) {
                     DrawText("Paused", SCREEN_WIDTH / 2 - MeasureText("Paused", 40) / 2, 100, 40, BLACK);
                     DrawText("Press P to Resume", SCREEN_WIDTH / 2 - MeasureText("Press P to Resume", 20) / 2, 200, 20, DARKGRAY);
                     DrawText("Press Q to Quit", SCREEN_WIDTH / 2 - MeasureText("Press Q to Quit", 20) / 2, 250, 20, DARKGRAY);
+                    draw_frame_rate(DARKGRAY);
                 EndDrawing();
 
                 if (IsKeyPressed(KEY_P)) {
@@ -2552,6 +2562,7 @@ int main(void) {
                     DrawText("Press 1 to toggle Player 1 input", 100, 350, 20, DARKGRAY);
                     DrawText("Press 2 to toggle Player 2 input", 100, 400, 20, DARKGRAY);
                     DrawText("Press M to return to Main Menu", 100, 500, 20, DARKGRAY);
+                    draw_frame_rate(DARKGRAY);
                 EndDrawing();
 
                 if (IsKeyPressed(KEY_ONE)) {
