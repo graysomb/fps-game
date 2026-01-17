@@ -1,98 +1,70 @@
-# Optimization Plan: Hybrid CPU/GPU Physics Pipeline
+# Multithreading Plan for PBD Loop (CPU & Future GPU)
 
-## Overview
-We aim to maximize performance by leveraging both the CPU (multithreading) and GPU (Compute Shaders) in parallel.
-**Key Insight:** Voxels in this engine **do not share corner particles** (each voxel owns its 8 corners).
-- **Consequence:** `solve_voxel_shape` is "embarrassingly parallel." No race conditions between voxels.
-- **Goal:** Move heavy math to GPU, keep complex logic on CPU.
+## Goal
+Safe multithreading of the PBD physics loop with minimal overhead, preparing for a future Compute Shader migration.
+The loop uses a Jacobi solver approach (Accumulate -> Apply), which is inherently parallel-friendly compared to Gauss-Seidel.
 
-## 1. Immediate CPU Multithreading (The "Brain")
-Since voxels are independent, we can immediately parallelize the shape matching loop on the CPU without complex synchronization.
+## 1. Infrastructure & Helpers
+- [ ] **Thread Pool**: Implement a lightweight, persistent thread pool (worker threads spin/wait on condition variable). Avoid spawning/joining threads per frame.
+- [ ] **Atomic Float Add**: Implement `atomic_add_float(volatile float* target, float value)` using a CAS (Compare-And-Swap) loop.
+    - *Why*: Standard `stdatomic.h` does not support `atomic_fetch_add` for floats.
+    - *Shader Parity*: Maps to `atomicAdd` (GLSL) or `InterlockedAdd` (HLSL) for floats (often needing a CAS loop implementation in shaders too, or extensions).
 
-- [ ] **Parallelize `solve_voxel_shape`:**
-    - Use OpenMP (`#pragma omp parallel for`) or a thread pool for the main loop in `simulate_voxel_pbd`.
-    - **Target:** `for (int i = 0; i < voxel_count; ++i) { solve_voxel_shape(&voxels[i]); }`
-- [ ] **Parallelize Glue Logic:**
-    - `solve_voxel_glue` updates shared particle positions between different voxels.
-    - **Strategy:** Use "Graph Coloring" or Atomic operations if moved to GPU. On CPU, use a "Gather-Scatter" approach or simply thread the independent clusters.
+## 2. Kernel B: Particle Operations (Thread over Active Particles)
+*Scope: Operations iterating `active_particles` array.*
 
-## 2. GPU Compute Shaders (The "Muscle")
-Move the dense floating-point operations to Compute Shaders to relieve the CPU and bypass memory bottlenecks.
+### 2.1 Integration & Reset
+- [ ] **Parallelize `integrate_particles`**: Simple parallel-for. No dependencies.
+- [ ] **Parallelize `reset_particle_accumulators`**: Simple parallel-for. Clears `corr_sum` and `corr_weight`.
 
-### A. Data Structure Setup (SSBOs)
-- [ ] **Particle Buffer:** Linear array of `struct Particle { vec4 pos; vec4 prev_pos; ... }`.
-- [ ] **Voxel Buffer:** Linear array of Voxel indices/properties.
-- [ ] **Grid/Table Buffer:** Flatten the `table_get` 3D lookup into a 1D SSBO or 3D Texture to accelerate neighbor lookups.
+### 2.2 Spatial Hashing (`build_particle_hash`)
+- [ ] **Parallel Clear**: Parallel-for to set `particle_hash_head[]` to -1.
+- [ ] **Parallel Build**: Parallel-for over particles.
+    - Calculate hash `h`.
+    - **Atomic Insert**: Use `atomic_exchange` (or `atomic_compare_exchange`) on `particle_hash_head[h]` to safely insert the particle into the linked list.
+    - *Note*: Order of particles in the bin will become non-deterministic, which is acceptable.
 
-### B. Shader Porting
-- [ ] **`solve_voxel_shape.comp`:**
-    - **Input:** Voxel SSBO.
-    - **Logic:** Compute centroid, principal axes, and target positions for the 8 owned particles.
-    - **Output:** Write new `predicted_pos` to Particle SSBO.
-    - **Benefit:** Massive parallelism (1 thread per voxel).
-- [ ] **`solve_dynamic_collisions.comp`:**
-    - **Status:** Partially implemented in `particle_collision.comp`.
-    - **Task:** Finalize the "Grid Constraint" mode to replace the slow CPU `table_get` loop.
-    - **Logic:** Each particle checks its cell neighbors in the SSBO/Texture grid.
-- [ ] **`solve_voxel_glue.comp`:**
-    - **Input:** Glue Constraint SSBO (pairs of particle indices).
-    - **Logic:** Apply distance constraints.
-    - **Safety:** Use `atomicAdd` for position deltas to handle race conditions where multiple constraints pull the same particle.
+### 2.3 Collision Gathering (`gather_particle_collisions`)
+- [ ] **Parallel Loop**: Iterate particles in chunks.
+- [ ] **Read Phase**: Read neighbors via `particle_hash` (safe, read-only during this phase).
+- [ ] **Write Phase**:
+    - When a collision is found, calculate correction `delta`.
+    - **Atomic Accumulate**: Use `atomic_add_float` to update `p->corr_sum` (x, y, z) and `p->corr_weight` for *both* particles involved.
+    - *Optimization*: Compute `delta` locally, only lock/atomic-add once per interaction.
 
-## 3. The Hybrid Pipeline
-- [ ] **Execution Flow:**
-    1.  **CPU:** Dispatch Compute Shaders (`Integrate` -> `Shape` -> `Collisions` -> `Glue`).
-    2.  **CPU (Parallel):** While GPU crunches physics, CPU performs:
-        - AI / Bot Logic.
-        - Input processing.
-        - **Glue Cluster Analysis:** Check for broken constraints (readback from GPU or calculated lazily) to determine if chunks need to split.
-    3.  **Sync:** Barrier wait for Physics Compute to finish before Rendering.
+### 2.4 Apply Accumulators (`apply_particle_accumulators`)
+- [ ] **Parallelize**: Simple parallel-for.
+    - Read `corr_sum` / `corr_weight`.
+    - Update `predicted_pos`.
+    - Reset accumulators here (optimization to merge with Reset step, reducing memory passes).
 
-## 4. Specific Refactoring Tasks
-- [ ] **`fps_ray.c`**: Isolate `solve_voxel_shape` into a clean function that can be wrapped in a compute dispatch.
-- [ ] **`particle_collision.comp`**: Ensure the grid structure matches the CPU's `table_get` logic for seamless transition.
+## 3. Kernel A: Voxel Operations (Thread over Active Voxels)
+*Scope: Operations iterating `voxels` array.*
 
----
+### 3.1 Shape Constraints (`gather_voxel_shape_constraints`)
+- [ ] **Parallel Loop**: Iterate active voxels (skip inactive/air).
+- [ ] **Read Phase**: Read positions of the 8 corner particles.
+- [ ] **Compute**: Run VGS (Volume/Gradient/Strain) constraint logic logic locally.
+- [ ] **Write Phase**:
+    - Calculate corrections for the 8 particles.
+    - **Atomic Accumulate**: Use `atomic_add_float` to update `corr_sum` and `corr_weight` on the shared corner particles.
 
-# CPU AI Refactor (Constructor-Brawler Update)
+## 4. Execution Flow (Per Frame)
+1. `Dispatch(Kernel_B_Integrate)`
+2. `Dispatch(Kernel_Hash_Clear)`
+3. `Dispatch(Kernel_Hash_Build)`
+4. **Loop (Constraint Iterations)**:
+    a. `Dispatch(Kernel_B_Reset_Accumulators)` (Or merged into Apply)
+    b. `Dispatch(Kernel_B_Collisions)`  <-- *Heavy contention potential*
+    c. `Dispatch(Kernel_A_Constraints)` <-- *Heavy contention potential*
+    d. `Barrier` (Wait for all accumulators to be finalized)
+    e. `Dispatch(Kernel_B_Apply)`
+5. `Dispatch(Kernel_B_Update_Velocities)`
 
-The current CPU AI logic in `fps_ray.c` (`UpdateBot`) is designed for a traditional Health/Ammo pickup loop. It needs to be overhauled to support the new Matter-based economy and "Exposed" death mechanics.
-
-## 1. Resource Management (Harvesting)
-- [ ] **Deprecate Pickup Seeking:** Remove the loop that searches for `pickups[]` array (Ammo/Health boxes).
-- [ ] **Implement "Harvest" State:**
-    - **Trigger:** When `bot->matter` is low (e.g., < 25% or < `MATTER_SHOT_COST * 5`).
-    - **Search:** Scan for the nearest active **Static Voxel** (Environment).
-    - **Pathing:** Move within `MELEE_RANGE` (2.0 units) of the target voxel.
-    - **Action:** Synthesize Melee Input (`KEY_Z` equivalent) to destroy the voxel and gain +10 Matter.
-
-## 2. Combat Logic Upgrade
-The bot must distinguish between "Shielded" enemies (Matter > 0) and "Exposed" enemies (Matter == 0).
-
-### Phase A: Shield Breaking (Target Matter > 0)
-- [ ] **Behavior:** Maintain medium range.
-- [ ] **Action:** Use `FireVoxel` (Shoot) to deplete enemy Matter.
-- [ ] **Constraint:** Stop shooting if `bot->matter` is critical (save reserve for Panic Builds or Shield buffer).
-
-### Phase B: Finisher (Target `isExposed` == true)
-- [ ] **Behavior:** Aggressive closing of distance. Shooting deals 0 damage now, so behavior must change.
-- [ ] **Melee Kill:** Move to close range (< 2.0 units) and trigger Melee to knockback/kill.
-- [ ] **Physics Kill (Hard Bots):**
-    - Identify loose debris or rip a chunk from the wall using Gravity Tether (`KEY_R`).
-    - Aim and throw object at the exposed player.
-
-## 3. Self-Preservation (Exposed State)
-- [ ] **Trigger:** High priority override when `bot->isExposed` is true.
-- [ ] **Flee:** Move directly away from nearest enemy.
-- [ ] **Panic Build:** Occasionally trigger `perform_build` while fleeing to place blocks behind (breaking line of sight).
-- [ ] **Emergency Harvest:** Aggressively seek any nearby voxel to Melee harvest, restoring Matter to > 0 to regain "Shields".
-
-## 4. Architecture Refactor
-- [ ] **State Machine / Utility System:** Refactor the monolithic `UpdateBot` function into weighted utility functions:
-    - `CalculateUtility_Harvest()`
-    - `CalculateUtility_Combat()`
-    - `CalculateUtility_Flee()`
-- [ ] **Input Synthesis:** Ensure the bot function can simulate the new key inputs:
-    - Melee (`KEY_Z` / `KEY_M`)
-    - Build (`KEY_E` / `KEY_O`)
-    - Tether (`KEY_R` / `KEY_P`)
+## 5. Future Shader Migration Strategy
+- **Data Layout**: Transition `Particle` structs to SoA (Structure of Arrays) in usage (e.g., `pos_x[]`, `pos_y[]`, `pos_z[]`). This is cache-friendly for CPU and required for coalesced access on GPU.
+- **Compute Shaders**:
+    - `Kernel A` becomes a Compute Shader dispatching `(VOXEL_COUNT / 64, 1, 1)`.
+    - `Kernel B` becomes a Compute Shader dispatching `(PARTICLE_COUNT / 64, 1, 1)`.
+    - **SSBOs**: Particles and Voxels reside in Shader Storage Buffer Objects.
+    - **Grid**: Use a standard Grid/Binning compute shader approach (e.g., Counting Sort or Atomic binning).
