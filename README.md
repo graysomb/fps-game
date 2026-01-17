@@ -12,6 +12,17 @@ The physics simulation follows a standard PBD loop:
 2.  **Constraint Solving:** The solver iteratively corrects particle positions to satisfy physical constraints (Shape, Glue, Collision).
 3.  **Integration:** Velocities are updated based on the corrected positions.
 
+### Multithreading Architecture (PBD)
+The PBD loop is multithreaded with a lightweight, persistent thread pool to avoid per-frame thread creation.
+Key ideas:
+*   **Parallel-for dispatcher:** A small worker pool runs chunked ranges over arrays (particles/voxels).
+*   **Jacobi-style accumulators:** Constraints write into per-particle correction accumulators (`corr_sum`, `corr_weight`) using atomic float adds. A later “apply” pass updates positions, preserving determinism within a single iteration.
+*   **Stable particle snapshots:** Each constraint iteration snapshots `active_particles` into a local array before building the spatial hash and gathering collisions, avoiding concurrent mutation while workers read.
+*   **Thread-safe spatial hash:** Particle hash buckets are cleared and built in parallel; inserts use atomic exchange for lock-free binning.
+*   **Execution order:** Integrate → Hash Clear/Build → (Collision + Voxel Shape Constraints) → Apply → Velocity update, repeated per constraint iteration.
+
+This layout mirrors a GPU compute pipeline and keeps contention low while remaining safe on CPU.
+
 ### Key Global Definitions & Tuning
 The physics behavior is controlled by several preprocessor definitions in `fps_ray.c`. Tweaking these values allows you to trade off performance for simulation quality.
 
