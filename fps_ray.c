@@ -1570,9 +1570,9 @@ void simulate_voxel_pbd(float dt) {
     }
 
     for (int step = 0; step < substeps; ++step) {
-        // update_voxel_coarsening_state();
-        // reset_particle_mass_and_flags();
-        // apply_shell_effective_mass();
+        update_voxel_coarsening_state();
+        reset_particle_mass_and_flags();
+        apply_shell_effective_mass();
 
         integrate_particles(sub_dt);
 
@@ -1582,7 +1582,7 @@ void simulate_voxel_pbd(float dt) {
             gather_particle_collisions(sub_dt);
             for (int i = 0; i < voxel_count; ++i) {
                 Voxel *voxel = &voxels[i];
-                if (!voxel->simulate /*|| !voxel->simulate_dofs*/)
+                if (!voxel->simulate || !voxel->simulate_dofs)
                     continue;
                 gather_voxel_shape_constraints(voxel);
             }
@@ -1590,19 +1590,19 @@ void simulate_voxel_pbd(float dt) {
         }
 
         process_break_masks();
-        // update_wake_timers();
+        update_wake_timers();
 
-        // accumulate_simulated_corner_deltas(sum_delta, counts);
-        // for (int i = 0; i < 8; ++i) {
-        //     if (counts[i] > 0) {
-        //         avg_delta[i] = v_mul(sum_delta[i], 1.0f / (float)counts[i]);
-        //     } else {
-        //         avg_delta[i] = (Vector3){ 0.0f, 0.0f, 0.0f };
-        //     }
-        // }
-        //
-        // mark_simulated_particles();
-        // apply_interior_sync(avg_delta, counts);
+        accumulate_simulated_corner_deltas(sum_delta, counts);
+        for (int i = 0; i < 8; ++i) {
+            if (counts[i] > 0) {
+                avg_delta[i] = v_mul(sum_delta[i], 1.0f / (float)counts[i]);
+            } else {
+                avg_delta[i] = (Vector3){ 0.0f, 0.0f, 0.0f };
+            }
+        }
+
+        mark_simulated_particles();
+        apply_interior_sync(avg_delta, counts);
 
         decrement_particle_timers();
 
