@@ -50,11 +50,11 @@ static InputType playerInput[2] = { INPUT_TYPE_KEYBOARD, INPUT_TYPE_KEYBOARD };
 #define VGS_ITERS 6
 #define VGS_EPS 1e-6f
 #define PBD_MAX_STEP_DT 0.005f
-#define PBD_SUBSTEPS 3
+#define PBD_SUBSTEPS 48
 #define PBD_CONSTRAINT_ITERS 3
-#define COLLISION_RELAXATION 0.9f
-#define CENTER_RELAXATION 0.9f
-#define VELOCITY_DAMPING 0.99f
+#define COLLISION_RELAXATION 1.0f
+#define CENTER_RELAXATION 1.0f
+#define VELOCITY_DAMPING 1.0f
 #define FIXED_PHYSICS_DT (1.0f / 60.0f)
 
 // KD-stats constants
@@ -1152,8 +1152,8 @@ static void buildDemo(void) {
     //}
 
     // Central platform
-    int platform_size = 8;
-    int platform_height =8; // 15 / 3
+    int platform_size = 3;
+    int platform_height =3; // 15 / 3
     int platform_base_height = 1; // to keep top at same level (21)
     for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
         for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
@@ -1357,7 +1357,6 @@ static void integrate_particles(float dt) {
     const Vector3 gravity = { 0.0f, -GRAVITY*1.0f, 0.0f };
     const float dt_sq = dt * dt;
 
-    #pragma omp parallel for
     for (int i = 0; i < active_particle_count; ++i) {
         Particle *p = active_particles[i];
 
@@ -1715,7 +1714,6 @@ static void gather_particle_collisions(float dt) {
 }
 
 static void decrement_particle_timers(void) {
-    #pragma omp parallel for
     for (int i = 0; i < active_particle_count; ++i) {
         Particle *p = active_particles[i];
         if (p->break_timer > 0) {
@@ -1724,10 +1722,42 @@ static void decrement_particle_timers(void) {
     }
 }
 
-static void update_particle_velocities(float dt) {
+static void integrate_particles_parallel(float dt) {
+    const Vector3 gravity = { 0.0f, -GRAVITY*1.0f, 0.0f };
+    const float dt_sq = dt * dt;
+
+    #pragma omp for
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+
+        p->prev_pos = p->pos;
+        p->predicted_pos = p->pos;
+
+        if (p->inv_mass == 0.0f) {
+            continue;
+        }
+
+        p->vel = v_mul(p->vel, VELOCITY_DAMPING);
+        Vector3 step = v_mul(p->vel, dt);
+        Vector3 accel = v_mul(gravity, dt_sq);
+        p->predicted_pos = v_add(p->predicted_pos, v_add(step, accel));
+    }
+}
+
+static void decrement_particle_timers_parallel(void) {
+    #pragma omp for
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+        if (p->break_timer > 0) {
+            p->break_timer--;
+        }
+    }
+}
+
+static void update_particle_velocities_parallel(float dt) {
     float inv_dt = (dt > 0.0f) ? 1.0f / dt : 0.0f;
 
-    #pragma omp parallel for
+    #pragma omp for
     for (int i = 0; i < active_particle_count; ++i) {
         Particle *p = active_particles[i];
         Vector3 new_pos = p->predicted_pos;
@@ -1742,7 +1772,42 @@ static void update_particle_velocities(float dt) {
         p->pos = new_pos;
     }
 
-    #pragma omp parallel for
+    #pragma omp for
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        Vector3 centroid = { 0.0f, 0.0f, 0.0f };
+        Vector3 prev_centroid = { 0.0f, 0.0f, 0.0f };
+
+        for (int j = 0; j < 8; ++j) {
+            Particle *p = voxel->particles[j];
+            centroid = v_add(centroid, p->predicted_pos);
+            prev_centroid = v_add(prev_centroid, p->prev_pos);
+        }
+
+        centroid = v_mul(centroid, 1.0f / 8.0f);
+        prev_centroid = v_mul(prev_centroid, 1.0f / 8.0f);
+        voxel->vel = v_mul(v_sub(centroid, prev_centroid), inv_dt);
+        voxel->pos = centroid;
+    }
+}
+
+static void update_particle_velocities(float dt) {
+    float inv_dt = (dt > 0.0f) ? 1.0f / dt : 0.0f;
+
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+        Vector3 new_pos = p->predicted_pos;
+        Vector3 delta = v_sub(new_pos, p->prev_pos);
+
+        if (p->inv_mass > 0.0f) {
+            p->vel = v_mul(delta, inv_dt);
+        } else {
+            p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+        }
+
+        p->pos = new_pos;
+    }
+
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
         Vector3 centroid = { 0.0f, 0.0f, 0.0f };
@@ -1785,7 +1850,10 @@ void simulate_voxel_pbd(float dt) {
         // reset_particle_mass_and_flags();
         // apply_shell_effective_mass();
 
-        integrate_particles(sub_dt);
+        #pragma omp parallel
+        {
+            integrate_particles_parallel(sub_dt);
+        }
 
         for (int it = 0; it < constraint_iterations; ++it) {
             #pragma omp parallel
@@ -1823,9 +1891,15 @@ void simulate_voxel_pbd(float dt) {
         // mark_simulated_particles();
         // apply_interior_sync(avg_delta, counts);
 
-        decrement_particle_timers();
+        #pragma omp parallel
+        {
+            decrement_particle_timers_parallel();
+        }
 
-        update_particle_velocities(sub_dt);
+        #pragma omp parallel
+        {
+            update_particle_velocities_parallel(sub_dt);
+        }
     }
 }
 
