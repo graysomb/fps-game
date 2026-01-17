@@ -37,6 +37,18 @@
 #include <stdatomic.h>
 #include <unistd.h>
 
+static inline uint32_t float_to_bits(float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static inline float bits_to_float(uint32_t bits) {
+    float value;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
 // Game state enum
 typedef enum {
     GAME_STATE_MENU,
@@ -325,8 +337,10 @@ typedef struct {
     float radius;
     float inv_mass;
     float base_inv_mass;
-    Vector3 corr_sum;
-    float corr_weight;
+    _Atomic uint32_t corr_sum_x;
+    _Atomic uint32_t corr_sum_y;
+    _Atomic uint32_t corr_sum_z;
+    _Atomic uint32_t corr_weight_bits;
     int refcount;
     bool active;
     int active_index;
@@ -404,6 +418,7 @@ static int particle_sync_stamp = 1;
 static int tether_apply_stamp = 1;
 static _Atomic int particle_hash_head[PARTICLE_HASH_SIZE];
 static int particle_hash_next[MAX_PARTICLES];
+static Particle *particle_snapshot[MAX_PARTICLES];
 static int glueClusterIndices[MAX_VOXELS];
 static unsigned char glueClusterVisited[MAX_VOXELS];
 static bool dynamicGlueClustersInitialized = false;
@@ -475,8 +490,8 @@ typedef struct {
     pthread_mutex_t mutex;
     pthread_cond_t cond;
     pthread_cond_t done;
-    bool job_active;
     bool shutdown;
+    int job_epoch;
     int range_start;
     int range_end;
     int chunk;
@@ -493,42 +508,54 @@ typedef struct PbdWorkerCtx {
 
 static PbdThreadPool pbd_pool = { 0 };
 
-static void pbd_threadpool_run(PbdThreadPool *pool, int worker_id) {
+static void pbd_threadpool_run_job(PbdThreadPool *pool,
+                                   int worker_id,
+                                   PbdParallelFn fn,
+                                   void *user,
+                                   int range_end,
+                                   int chunk) {
     (void)worker_id;
     for (;;) {
-        int start = atomic_fetch_add_explicit(&pool->next_index, pool->chunk, memory_order_relaxed);
-        if (start >= pool->range_end) {
+        int start = atomic_fetch_add_explicit(&pool->next_index, chunk, memory_order_relaxed);
+        if (start >= range_end) {
             break;
         }
-        int end = start + pool->chunk;
-        if (end > pool->range_end) {
-            end = pool->range_end;
+        int end = start + chunk;
+        if (end > range_end) {
+            end = range_end;
         }
-        pool->fn(start, end, worker_id, pool->user);
+        fn(start, end, worker_id, user);
     }
 }
 
 static void *pbd_worker_main(void *arg) {
     PbdWorkerCtx *ctx = (PbdWorkerCtx *)arg;
     PbdThreadPool *pool = ctx->pool;
+    int last_epoch = 0;
     for (;;) {
         pthread_mutex_lock(&pool->mutex);
-        while (!pool->job_active && !pool->shutdown) {
+        while (!pool->shutdown && pool->job_epoch == last_epoch) {
             pthread_cond_wait(&pool->cond, &pool->mutex);
         }
         if (pool->shutdown) {
             pthread_mutex_unlock(&pool->mutex);
             break;
         }
+        PbdParallelFn fn = pool->fn;
+        void *user = pool->user;
+        int range_end = pool->range_end;
+        int chunk = pool->chunk;
+        int epoch = pool->job_epoch;
         pthread_mutex_unlock(&pool->mutex);
 
-        pbd_threadpool_run(pool, ctx->id);
+        pbd_threadpool_run_job(pool, ctx->id, fn, user, range_end, chunk);
 
         pthread_mutex_lock(&pool->mutex);
         pool->pending--;
         if (pool->pending == 0) {
             pthread_cond_signal(&pool->done);
         }
+        last_epoch = epoch;
         pthread_mutex_unlock(&pool->mutex);
     }
     return NULL;
@@ -560,8 +587,8 @@ static void init_pbd_thread_pool(void) {
     pthread_mutex_init(&pbd_pool.mutex, NULL);
     pthread_cond_init(&pbd_pool.cond, NULL);
     pthread_cond_init(&pbd_pool.done, NULL);
-    pbd_pool.job_active = false;
     pbd_pool.shutdown = false;
+    pbd_pool.job_epoch = 0;
     pbd_pool.pending = 0;
     for (int i = 0; i < workers; ++i) {
         pbd_pool.ctxs[i].pool = &pbd_pool;
@@ -589,7 +616,6 @@ static void shutdown_pbd_thread_pool(void) {
     pbd_pool.threads = NULL;
     pbd_pool.ctxs = NULL;
     pbd_pool.thread_count = 0;
-    pbd_pool.job_active = false;
     pbd_pool.shutdown = false;
 }
 
@@ -617,18 +643,20 @@ static void pbd_parallel_for(int start, int end, PbdParallelFn fn, void *user) {
     pbd_pool.range_end = end;
     pbd_pool.chunk = chunk;
     pbd_pool.pending = pbd_pool.thread_count;
-    pbd_pool.job_active = true;
+    pbd_pool.job_epoch++;
+    if (pbd_pool.job_epoch == 0) {
+        pbd_pool.job_epoch = 1;
+    }
     atomic_store_explicit(&pbd_pool.next_index, start, memory_order_relaxed);
     pthread_cond_broadcast(&pbd_pool.cond);
     pthread_mutex_unlock(&pbd_pool.mutex);
 
-    pbd_threadpool_run(&pbd_pool, -1);
+    pbd_threadpool_run_job(&pbd_pool, -1, fn, user, end, chunk);
 
     pthread_mutex_lock(&pbd_pool.mutex);
     while (pbd_pool.pending > 0) {
         pthread_cond_wait(&pbd_pool.done, &pbd_pool.mutex);
     }
-    pbd_pool.job_active = false;
     pthread_mutex_unlock(&pbd_pool.mutex);
 }
 static float compute_cluster_freeze_belief(const UnitVoxelBuffer *buffer, int startIndex);
@@ -1717,8 +1745,10 @@ static Particle *particle_create(Vector3 pos, float inv_mass) {
     p->radius = PARTICLE_RADIUS;
     p->inv_mass = inv_mass;
     p->base_inv_mass = inv_mass;
-    p->corr_sum = (Vector3){ 0.0f, 0.0f, 0.0f };
-    p->corr_weight = 0.0f;
+    atomic_store_explicit(&p->corr_sum_x, float_to_bits(0.0f), memory_order_relaxed);
+    atomic_store_explicit(&p->corr_sum_y, float_to_bits(0.0f), memory_order_relaxed);
+    atomic_store_explicit(&p->corr_sum_z, float_to_bits(0.0f), memory_order_relaxed);
+    atomic_store_explicit(&p->corr_weight_bits, float_to_bits(0.0f), memory_order_relaxed);
     p->refcount = 1;
     p->active = true;
     p->active_index = active_particle_count;
@@ -1756,8 +1786,10 @@ static Particle *particle_clone(const Particle *src) {
     p->active = true;
     p->active_index = active_particle_count;
     active_particles[active_particle_count++] = p;
-    p->corr_sum = (Vector3){ 0.0f, 0.0f, 0.0f };
-    p->corr_weight = 0.0f;
+    atomic_store_explicit(&p->corr_sum_x, float_to_bits(0.0f), memory_order_relaxed);
+    atomic_store_explicit(&p->corr_sum_y, float_to_bits(0.0f), memory_order_relaxed);
+    atomic_store_explicit(&p->corr_sum_z, float_to_bits(0.0f), memory_order_relaxed);
+    atomic_store_explicit(&p->corr_weight_bits, float_to_bits(0.0f), memory_order_relaxed);
     p->tether_stamp = 0;
     return p;
 }
@@ -1802,22 +1834,24 @@ static inline int particle_hash(int x, int y, int z) {
     return (int)(h & (PARTICLE_HASH_SIZE - 1));
 }
 
-static inline float atomic_add_float(volatile float *target, float value) {
-    _Atomic uint32_t *bits = (_Atomic uint32_t *)(void *)target;
-    uint32_t expected = atomic_load_explicit(bits, memory_order_relaxed);
+static inline float atomic_add_float(_Atomic uint32_t *target, float value) {
+    uint32_t expected = atomic_load_explicit(target, memory_order_relaxed);
     for (;;) {
-        float expected_f;
-        memcpy(&expected_f, &expected, sizeof(expected_f));
+        float expected_f = bits_to_float(expected);
         float desired_f = expected_f + value;
-        uint32_t desired;
-        memcpy(&desired, &desired_f, sizeof(desired));
-        if (atomic_compare_exchange_weak_explicit(bits, &expected, desired,
+        uint32_t desired = float_to_bits(desired_f);
+        if (atomic_compare_exchange_weak_explicit(target, &expected, desired,
                                                   memory_order_relaxed,
                                                   memory_order_relaxed)) {
             return expected_f;
         }
     }
 }
+
+typedef struct {
+    Particle **list;
+    int count;
+} ParticleHashBuildJob;
 
 static void particle_hash_clear_range(int start, int end, int worker_id, void *user) {
     (void)worker_id;
@@ -1829,9 +1863,13 @@ static void particle_hash_clear_range(int start, int end, int worker_id, void *u
 
 static void particle_hash_build_range(int start, int end, int worker_id, void *user) {
     (void)worker_id;
-    (void)user;
+    ParticleHashBuildJob *job = (ParticleHashBuildJob *)user;
+    Particle **list = job->list;
     for (int i = start; i < end; ++i) {
-        Particle *p = active_particles[i];
+        Particle *p = list[i];
+        if (!p) {
+            continue;
+        }
         int gx = (int)floorf(p->predicted_pos.x / VOXEL_SIZE);
         int gy = (int)floorf(p->predicted_pos.y / VOXEL_SIZE);
         int gz = (int)floorf(p->predicted_pos.z / VOXEL_SIZE);
@@ -1844,9 +1882,10 @@ static void particle_hash_build_range(int start, int end, int worker_id, void *u
     }
 }
 
-static void build_particle_hash(void) {
+static void build_particle_hash(Particle **list, int count) {
+    ParticleHashBuildJob job = { .list = list, .count = count };
     pbd_parallel_for(0, PARTICLE_HASH_SIZE, particle_hash_clear_range, NULL);
-    pbd_parallel_for(0, active_particle_count, particle_hash_build_range, NULL);
+    pbd_parallel_for(0, count, particle_hash_build_range, &job);
 }
 
 static inline void accumulate_particle_correction(Particle *p, Vector3 delta, float weight) {
@@ -1856,10 +1895,10 @@ static inline void accumulate_particle_correction(Particle *p, Vector3 delta, fl
     float dx = delta.x * weight;
     float dy = delta.y * weight;
     float dz = delta.z * weight;
-    atomic_add_float(&p->corr_sum.x, dx);
-    atomic_add_float(&p->corr_sum.y, dy);
-    atomic_add_float(&p->corr_sum.z, dz);
-    atomic_add_float(&p->corr_weight, weight);
+    atomic_add_float(&p->corr_sum_x, dx);
+    atomic_add_float(&p->corr_sum_y, dy);
+    atomic_add_float(&p->corr_sum_z, dz);
+    atomic_add_float(&p->corr_weight_bits, weight);
 }
 
 static void reset_particle_accumulators_range(int start, int end, int worker_id, void *user) {
@@ -1867,8 +1906,10 @@ static void reset_particle_accumulators_range(int start, int end, int worker_id,
     (void)user;
     for (int i = start; i < end; ++i) {
         Particle *p = active_particles[i];
-        p->corr_sum = (Vector3){ 0.0f, 0.0f, 0.0f };
-        p->corr_weight = 0.0f;
+        atomic_store_explicit(&p->corr_sum_x, float_to_bits(0.0f), memory_order_relaxed);
+        atomic_store_explicit(&p->corr_sum_y, float_to_bits(0.0f), memory_order_relaxed);
+        atomic_store_explicit(&p->corr_sum_z, float_to_bits(0.0f), memory_order_relaxed);
+        atomic_store_explicit(&p->corr_weight_bits, float_to_bits(0.0f), memory_order_relaxed);
     }
 }
 
@@ -1881,15 +1922,25 @@ static void apply_particle_accumulators_range(int start, int end, int worker_id,
     (void)user;
     for (int i = start; i < end; ++i) {
         Particle *p = active_particles[i];
-        if (p->corr_weight <= 0.0f) {
-            p->corr_sum = (Vector3){ 0.0f, 0.0f, 0.0f };
-            p->corr_weight = 0.0f;
+        float corr_weight = bits_to_float(atomic_load_explicit(&p->corr_weight_bits, memory_order_relaxed));
+        if (corr_weight <= 0.0f) {
+            atomic_store_explicit(&p->corr_sum_x, float_to_bits(0.0f), memory_order_relaxed);
+            atomic_store_explicit(&p->corr_sum_y, float_to_bits(0.0f), memory_order_relaxed);
+            atomic_store_explicit(&p->corr_sum_z, float_to_bits(0.0f), memory_order_relaxed);
+            atomic_store_explicit(&p->corr_weight_bits, float_to_bits(0.0f), memory_order_relaxed);
             continue;
         }
-        Vector3 delta = v_mul(p->corr_sum, 1.0f / p->corr_weight);
+        Vector3 corr_sum = {
+            bits_to_float(atomic_load_explicit(&p->corr_sum_x, memory_order_relaxed)),
+            bits_to_float(atomic_load_explicit(&p->corr_sum_y, memory_order_relaxed)),
+            bits_to_float(atomic_load_explicit(&p->corr_sum_z, memory_order_relaxed))
+        };
+        Vector3 delta = v_mul(corr_sum, 1.0f / corr_weight);
         p->predicted_pos = v_add(p->predicted_pos, delta);
-        p->corr_sum = (Vector3){ 0.0f, 0.0f, 0.0f };
-        p->corr_weight = 0.0f;
+        atomic_store_explicit(&p->corr_sum_x, float_to_bits(0.0f), memory_order_relaxed);
+        atomic_store_explicit(&p->corr_sum_y, float_to_bits(0.0f), memory_order_relaxed);
+        atomic_store_explicit(&p->corr_sum_z, float_to_bits(0.0f), memory_order_relaxed);
+        atomic_store_explicit(&p->corr_weight_bits, float_to_bits(0.0f), memory_order_relaxed);
     }
 }
 
@@ -6839,8 +6890,10 @@ static void reset_particle_mass_and_flags(void) {
         p->inv_mass = p->base_inv_mass;
         p->extra_mass = 0;
         p->touched_by_simulated = false;
-        p->corr_sum = (Vector3){ 0.0f, 0.0f, 0.0f };
-        p->corr_weight = 0.0f;
+        atomic_store_explicit(&p->corr_sum_x, float_to_bits(0.0f), memory_order_relaxed);
+        atomic_store_explicit(&p->corr_sum_y, float_to_bits(0.0f), memory_order_relaxed);
+        atomic_store_explicit(&p->corr_sum_z, float_to_bits(0.0f), memory_order_relaxed);
+        atomic_store_explicit(&p->corr_weight_bits, float_to_bits(0.0f), memory_order_relaxed);
     }
 }
 
@@ -7414,6 +7467,8 @@ static void gather_voxel_shape_constraints(Voxel *voxel) {
 }
 
 typedef struct {
+    Particle **list;
+    int count;
     float half_player;
     float omega;
     float eps;
@@ -7429,8 +7484,16 @@ static void gather_particle_scene_collisions_range(int start, int end, int worke
     const float voxel_radius = job->voxel_radius;
     const float radius_sq = job->radius_sq;
 
+    Particle **list = job->list;
+    int count = job->count;
+    if (end > count) {
+        end = count;
+    }
     for (int i = start; i < end; ++i) {
-        Particle *p = active_particles[i];
+        Particle *p = list[i];
+        if (!p) {
+            continue;
+        }
         if (p->inv_mass <= 0.0f) {
             continue;
         }
@@ -7488,8 +7551,16 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
     const float omega = job->omega;
     const float eps = job->eps;
 
+    Particle **list = job->list;
+    int count = job->count;
+    if (end > count) {
+        end = count;
+    }
     for (int i = start; i < end; ++i) {
-        Particle *pa = active_particles[i];
+        Particle *pa = list[i];
+        if (!pa) {
+            continue;
+        }
         float wa = pa->inv_mass;
         if (wa <= 0.0f) {
             continue;
@@ -7509,7 +7580,13 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
 
                     int head = atomic_load_explicit(&particle_hash_head[h], memory_order_relaxed);
                     for (int idx = head; idx != -1; idx = particle_hash_next[idx]) {
-                        Particle *pb = active_particles[idx];
+                        if (idx < 0 || idx >= active_particle_count) {
+                            break;
+                        }
+                        Particle *pb = list[idx];
+                        if (!pb) {
+                            continue;
+                        }
                         if (pb == pa) {
                             continue;
                         }
@@ -7571,7 +7648,7 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
 }
 
 // Gather collision corrections against the scene and neighbouring voxels (Jacobi form).
-static void gather_particle_collisions(float dt) {
+static void gather_particle_collisions(float dt, Particle **list, int count) {
     (void)dt;
 
     const float half_player = PLAYER_SIZE * 0.5f;
@@ -7581,14 +7658,16 @@ static void gather_particle_collisions(float dt) {
     const float radius_sq = voxel_radius * voxel_radius;
 
     ParticleCollisionJob job = {
+        .list = list,
+        .count = count,
         .half_player = half_player,
         .omega = omega,
         .eps = eps,
         .voxel_radius = voxel_radius,
         .radius_sq = radius_sq
     };
-    pbd_parallel_for(0, active_particle_count, gather_particle_scene_collisions_range, &job);
-    pbd_parallel_for(0, active_particle_count, gather_particle_pair_collisions_range, &job);
+    pbd_parallel_for(0, count, gather_particle_scene_collisions_range, &job);
+    pbd_parallel_for(0, count, gather_particle_pair_collisions_range, &job);
 }
 
 static void gather_voxel_shape_constraints_range(int start, int end, int worker_id, void *user) {
@@ -10084,9 +10163,16 @@ void simulate_voxel_pbd(float dt) {
         integrate_particles(sub_dt);
 
         for (int it = 0; it < constraint_iterations; ++it) {
+            int snapshot_count = active_particle_count;
+            if (snapshot_count > MAX_PARTICLES) {
+                snapshot_count = MAX_PARTICLES;
+            }
+            for (int i = 0; i < snapshot_count; ++i) {
+                particle_snapshot[i] = active_particles[i];
+            }
             reset_particle_accumulators();
-            build_particle_hash();
-            gather_particle_collisions(sub_dt);
+            build_particle_hash(particle_snapshot, snapshot_count);
+            gather_particle_collisions(sub_dt, particle_snapshot, snapshot_count);
             pbd_parallel_for(0, voxel_count, gather_voxel_shape_constraints_range, NULL);
             apply_particle_accumulators();
         }
