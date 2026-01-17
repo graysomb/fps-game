@@ -172,6 +172,11 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define PBD_MAX_STEP_DT 1.0f/TARGET_FRAME_RATE
 #define PBD_SUBSTEPS 1
 #define PBD_CONSTRAINT_ITERS 6
+#define BREAK_DAMP_FRAMES 50
+#define COARSENING_WAKE_FRAMES 30
+#define COARSENING_MASS_SCALE 1.0f
+#define STRAIN_BREAK_THRESHOLD 0.2f
+#define SHEAR_BREAK_THRESHOLD 0.2f
 #define PBD_MAX_ACCUM_STEPS 8
 #define COLLISION_RELAXATION 0.99f
 #define COLLISION_CENTROID_ONLY_DT 0.02f
@@ -245,6 +250,9 @@ static const float GRID_EPSILON = 1e-4f;
 #define MAX_VOXELS    131072
 #define HASH_SIZE     524288    // must be power of two
 #define VOXEL_SIZE     0.5f    // size of each voxel cube
+#define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
+#define MAX_PARTICLES (MAX_VOXELS * 8)
+#define PARTICLE_HASH_SIZE 262144
 
 // Tunable voxel edit brush (per-axis span of the add/remove operation)
 static int voxelBrushSpan = 3;
@@ -311,7 +319,22 @@ typedef struct {
     Vector3 prev_pos;
     Vector3 predicted_pos;
     Vector3 vel;
+    float radius;
     float inv_mass;
+    float base_inv_mass;
+    Vector3 corr_sum;
+    float corr_weight;
+    int refcount;
+    bool active;
+    int active_index;
+    int break_timer;
+    int extra_mass;
+    bool touched_by_simulated;
+    int sync_stamp;
+    int tether_stamp;
+    int cell_x;
+    int cell_y;
+    int cell_z;
 } Particle;
 
 // Voxel structure
@@ -342,11 +365,16 @@ typedef struct {
     int  orig_min_gx, orig_max_gx;
     int  orig_min_gy, orig_max_gy;
     int  orig_min_gz, orig_max_gz;
-    Particle particles[8];
-    Particle center_particle;
+    Particle *particles[8];
     float rest_volume;
     float rest_edge;
     float particle_radius;
+    bool glued_faces[6];
+    bool full_neighbors;
+    bool simulate_dofs;
+    int wake_timer;
+    bool wake_source;
+    uint8_t break_mask;
     int sleepFrames;
     float freezeBelief;
     float activationBelief;
@@ -363,6 +391,14 @@ typedef struct {
 } Voxel;
 static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
+static Particle particles_pool[MAX_PARTICLES];
+static Particle *active_particles[MAX_PARTICLES];
+static int particle_pool_count = 0;
+static int active_particle_count = 0;
+static int particle_sync_stamp = 1;
+static int tether_apply_stamp = 1;
+static int particle_hash_head[PARTICLE_HASH_SIZE];
+static int particle_hash_next[MAX_PARTICLES];
 static int glueClusterIndices[MAX_VOXELS];
 static unsigned char glueClusterVisited[MAX_VOXELS];
 static bool dynamicGlueClustersInitialized = false;
@@ -772,6 +808,26 @@ static const int corner_signs[8][3] = {
     { -1,  1,  1 }, {  1,  1,  1 }
 };
 
+static const int face_corner_indices[6][4] = {
+    { 1, 3, 5, 7 }, // +X
+    { 0, 2, 4, 6 }, // -X
+    { 2, 3, 6, 7 }, // +Y
+    { 0, 1, 4, 5 }, // -Y
+    { 4, 5, 6, 7 }, // +Z
+    { 0, 1, 2, 3 }  // -Z
+};
+
+static const int face_offsets[6][3] = {
+    { 1, 0, 0 },
+    { -1, 0, 0 },
+    { 0, 1, 0 },
+    { 0, -1, 0 },
+    { 0, 0, 1 },
+    { 0, 0, -1 }
+};
+
+static const int opposite_face[6] = { 1, 0, 3, 2, 5, 4 };
+
 static const int voxel_edge_pairs[12][2] = {
     {0,1},{1,3},{3,2},{2,0},
     {4,5},{5,7},{7,6},{6,4},
@@ -802,12 +858,12 @@ static void voxel_particle_world_bounds(const Voxel *v, VoxelWorldBounds *out)
     if (!out || !v) {
         return;
     }
-    Vector3 p = v->particles[0].pos;
+    Vector3 p = v->particles[0]->pos;
     float minx = p.x, maxx = p.x;
     float miny = p.y, maxy = p.y;
     float minz = p.z, maxz = p.z;
     for (int i = 1; i < 8; ++i) {
-        p = v->particles[i].pos;
+        p = v->particles[i]->pos;
         if (p.x < minx) minx = p.x;
         if (p.x > maxx) maxx = p.x;
         if (p.y < miny) miny = p.y;
@@ -828,12 +884,12 @@ static void voxel_predicted_bounds(const Voxel *v, VoxelWorldBounds *out)
     if (!out || !v) {
         return;
     }
-    Vector3 p = v->particles[0].predicted_pos;
+    Vector3 p = v->particles[0]->predicted_pos;
     float minx = p.x, maxx = p.x;
     float miny = p.y, maxy = p.y;
     float minz = p.z, maxz = p.z;
     for (int i = 1; i < 8; ++i) {
-        p = v->particles[i].predicted_pos;
+        p = v->particles[i]->predicted_pos;
         if (p.x < minx) minx = p.x;
         if (p.x > maxx) maxx = p.x;
         if (p.y < miny) miny = p.y;
@@ -1064,9 +1120,9 @@ static void translate_voxel_particles(Voxel *voxel, Vector3 delta)
         return;
     }
     for (int i = 0; i < 8; ++i) {
-        voxel->particles[i].pos = v_add(voxel->particles[i].pos, delta);
-        voxel->particles[i].prev_pos = v_add(voxel->particles[i].prev_pos, delta);
-        voxel->particles[i].predicted_pos = v_add(voxel->particles[i].predicted_pos, delta);
+        voxel->particles[i]->pos = v_add(voxel->particles[i]->pos, delta);
+        voxel->particles[i]->prev_pos = v_add(voxel->particles[i]->prev_pos, delta);
+        voxel->particles[i]->predicted_pos = v_add(voxel->particles[i]->predicted_pos, delta);
     }
 }
 
@@ -1436,7 +1492,10 @@ static bool v_isfinite(Vector3 v) {
 }
 
 static Particle *voxel_particle_at(Voxel *voxel, int idx) {
-    return (idx == VOXEL_CENTER_INDEX) ? &voxel->center_particle : &voxel->particles[idx];
+    if (idx < 0 || idx >= VOXEL_CORNER_COUNT) {
+        return voxel->particles[0];
+    }
+    return voxel->particles[idx];
 }
 
 static float v_length(Vector3 v) {
@@ -1450,6 +1509,147 @@ static Vector3 v_norm(Vector3 v) {
         return (Vector3){ 0.0f, 0.0f, 0.0f };
     }
     return v_mul(v, 1.0f / len);
+}
+
+static void reset_particle_pool(void) {
+    particle_pool_count = 0;
+    active_particle_count = 0;
+    particle_sync_stamp = 1;
+    tether_apply_stamp = 1;
+    memset(particles_pool, 0, sizeof(particles_pool));
+    memset(active_particles, 0, sizeof(active_particles));
+}
+
+static Particle *particle_create(Vector3 pos, float inv_mass) {
+    if (particle_pool_count >= MAX_PARTICLES) {
+        return NULL;
+    }
+
+    Particle *p = &particles_pool[particle_pool_count++];
+    p->pos = pos;
+    p->prev_pos = pos;
+    p->predicted_pos = pos;
+    p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+    p->radius = PARTICLE_RADIUS;
+    p->inv_mass = inv_mass;
+    p->base_inv_mass = inv_mass;
+    p->corr_sum = (Vector3){ 0.0f, 0.0f, 0.0f };
+    p->corr_weight = 0.0f;
+    p->refcount = 1;
+    p->active = true;
+    p->active_index = active_particle_count;
+    active_particles[active_particle_count++] = p;
+    p->break_timer = 0;
+    p->extra_mass = 0;
+    p->touched_by_simulated = false;
+    p->sync_stamp = 0;
+    p->tether_stamp = 0;
+    p->cell_x = 0;
+    p->cell_y = 0;
+    p->cell_z = 0;
+    return p;
+}
+
+static Particle *particle_clone(const Particle *src) {
+    if (!src) {
+        return NULL;
+    }
+    if (particle_pool_count >= MAX_PARTICLES) {
+        return NULL;
+    }
+
+    Particle *p = &particles_pool[particle_pool_count++];
+    *p = *src;
+    p->refcount = 1;
+    p->active = true;
+    p->active_index = active_particle_count;
+    active_particles[active_particle_count++] = p;
+    p->corr_sum = (Vector3){ 0.0f, 0.0f, 0.0f };
+    p->corr_weight = 0.0f;
+    p->tether_stamp = 0;
+    return p;
+}
+
+static void particle_retain(Particle *p) {
+    if (!p) {
+        return;
+    }
+    p->refcount++;
+}
+
+static void particle_release(Particle *p) {
+    if (!p) {
+        return;
+    }
+    p->refcount--;
+    if (p->refcount > 0) {
+        return;
+    }
+    p->active = false;
+    int idx = p->active_index;
+    if (idx < 0 || idx >= active_particle_count) {
+        return;
+    }
+    int last_idx = active_particle_count - 1;
+    if (idx != last_idx) {
+        Particle *swap = active_particles[last_idx];
+        active_particles[idx] = swap;
+        swap->active_index = idx;
+    }
+    active_particles[last_idx] = NULL;
+    active_particle_count--;
+}
+
+static inline int particle_hash(int x, int y, int z) {
+    uint32_t h = (uint32_t)(x * 73856093) ^ (uint32_t)(y * 19349663) ^ (uint32_t)(z * 83492791);
+    return (int)(h & (PARTICLE_HASH_SIZE - 1));
+}
+
+static void build_particle_hash(void) {
+    for (int i = 0; i < PARTICLE_HASH_SIZE; ++i) {
+        particle_hash_head[i] = -1;
+    }
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+        int gx = (int)floorf(p->predicted_pos.x / VOXEL_SIZE);
+        int gy = (int)floorf(p->predicted_pos.y / VOXEL_SIZE);
+        int gz = (int)floorf(p->predicted_pos.z / VOXEL_SIZE);
+        p->cell_x = gx;
+        p->cell_y = gy;
+        p->cell_z = gz;
+        int h = particle_hash(gx, gy, gz);
+        particle_hash_next[i] = particle_hash_head[h];
+        particle_hash_head[h] = i;
+    }
+}
+
+static inline void accumulate_particle_correction(Particle *p, Vector3 delta, float weight) {
+    if (weight <= 0.0f) {
+        return;
+    }
+    p->corr_sum = v_add(p->corr_sum, v_mul(delta, weight));
+    p->corr_weight += weight;
+}
+
+static void reset_particle_accumulators(void) {
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+        p->corr_sum = (Vector3){ 0.0f, 0.0f, 0.0f };
+        p->corr_weight = 0.0f;
+    }
+}
+
+static void apply_particle_accumulators(void) {
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+        if (p->corr_weight <= 0.0f) {
+            continue;
+        }
+        Vector3 delta = v_mul(p->corr_sum, 1.0f / p->corr_weight);
+        p->predicted_pos = v_add(p->predicted_pos, delta);
+        p->corr_sum = (Vector3){ 0.0f, 0.0f, 0.0f };
+        p->corr_weight = 0.0f;
+    }
 }
 
 static bool face_local_coords(const Vector3 origin,
@@ -1809,9 +2009,9 @@ static void rebuild_glue_adjacency_if_dirty(void) {
 
 static bool face_normal_predicted(const Voxel *voxel, const int corners[4],
                                   Vector3 *out_normal) {
-    Vector3 p0 = voxel->particles[corners[0]].predicted_pos;
-    Vector3 p1 = voxel->particles[corners[1]].predicted_pos;
-    Vector3 p2 = voxel->particles[corners[2]].predicted_pos;
+    Vector3 p0 = voxel->particles[corners[0]]->predicted_pos;
+    Vector3 p1 = voxel->particles[corners[1]]->predicted_pos;
+    Vector3 p2 = voxel->particles[corners[2]]->predicted_pos;
     if (!v_isfinite(p0) || !v_isfinite(p1) || !v_isfinite(p2)) {
         return false;
     }
@@ -2171,7 +2371,6 @@ static void voxel_table_register(Voxel *v, int idx)
             }
         }
     }
-    mark_glue_adjacency_dirty_for_voxel(idx);
 }
 
 static void voxel_table_unregister(const Voxel *v)
@@ -2206,6 +2405,12 @@ static void remove_voxel_index(int idx)
         mark_static_beliefs_dirty_for_voxel(victim);
     }
     voxel_table_unregister(victim);
+    for (int j = 0; j < 8; ++j) {
+        if (victim->particles[j]) {
+            particle_release(victim->particles[j]);
+            victim->particles[j] = NULL;
+        }
+    }
 
     int last = voxel_count - 1;
     if (idx != last) {
@@ -2795,16 +3000,16 @@ static void get_adjacent_voxel_directions(Vector3 pos, bool neighbors[6]) {
     }
 }
 
-static void init_voxel_struct(Voxel *v,
+static bool init_voxel_struct(Voxel *v,
                               float px, float py, float pz,
                               bool fixed, bool simulate,
                               Color color, int type,
                               int span, int owner)
 {
     if (!v) {
-        return;
+        return false;
     }
-    if (span < 1) span = 1;
+    span = 1;
     float edge = VOXEL_SIZE * (float)span;
     float half = 0.5f * edge;
 
@@ -2812,7 +3017,7 @@ static void init_voxel_struct(Voxel *v,
     v->vel = (Vector3){ 0,0,0 };
     v->fixed = fixed;
     v->simulate = simulate;
-    v->glueEligible = true;
+    v->glueEligible = simulate;
     v->pendingActivation = false;
     v->isBullet = false;
     v->activationCooldownFrames = 0;
@@ -2834,34 +3039,29 @@ static void init_voxel_struct(Voxel *v,
     v->rest_edge = edge;
     v->rest_volume = edge * edge * edge;
     v->particle_radius = 0.5f * edge;
+    memset(v->glued_faces, 0, sizeof(v->glued_faces));
+    v->full_neighbors = false;
+    v->simulate_dofs = false;
+    v->wake_timer = 0;
+    v->wake_source = false;
+    v->break_mask = 0;
     for (int i = 0; i < VOXEL_CORNER_COUNT; ++i) {
-        Particle *p = &v->particles[i];
-        p->pos = (Vector3){
+        Vector3 p_pos = {
             px + corner_signs[i][0] * half,
             py + corner_signs[i][1] * half,
             pz + corner_signs[i][2] * half
         };
-        p->prev_pos = p->pos;
-        p->predicted_pos = p->pos;
-        p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
-        if (fixed || !simulate) {
-            p->inv_mass = 0.0f;
-        } else {
-            float mass_scale = (float)(span * span * span);
-            if (mass_scale <= 0.0f) mass_scale = 1.0f;
-            p->inv_mass = 1.0f / mass_scale;
+        float inv_mass = (fixed || !simulate) ? 0.0f : 1.0f;
+        Particle *p = particle_create(p_pos, inv_mass);
+        if (!p) {
+            for (int j = 0; j < i; ++j) {
+                particle_release(v->particles[j]);
+                v->particles[j] = NULL;
+            }
+            return false;
         }
-    }
-    v->center_particle.pos = v->pos;
-    v->center_particle.prev_pos = v->pos;
-    v->center_particle.predicted_pos = v->pos;
-    v->center_particle.vel = (Vector3){ 0.0f, 0.0f, 0.0f };
-    if (fixed || !simulate) {
-        v->center_particle.inv_mass = 0.0f;
-    } else {
-        float mass_scale = (float)(span * span * span);
-        if (mass_scale <= 0.0f) mass_scale = 1.0f;
-        v->center_particle.inv_mass = 1.0f / mass_scale;
+        p->radius = voxel_particle_radius(v);
+        v->particles[i] = p;
     }
     int rest_minx, rest_maxx, rest_miny, rest_maxy, rest_minz, rest_maxz;
     voxel_compute_bounds(v, &rest_minx, &rest_maxx, &rest_miny, &rest_maxy, &rest_minz, &rest_maxz);
@@ -2890,6 +3090,7 @@ static void init_voxel_struct(Voxel *v,
     v->prevGlueClusterSize = 0;
     v->prevGlueClusterTag = 0;
     v->prevGlueClusterValid = 0;
+    return true;
 }
 
 static int addVoxelSized(float px, float py, float pz, bool fixed, bool simulate,
@@ -2904,7 +3105,10 @@ static int addVoxelSized(float px, float py, float pz, bool fixed, bool simulate
     }
     int idx = voxel_count++;
     Voxel *v = &voxels[idx];
-    init_voxel_struct(v, px, py, pz, fixed, simulate, color, type, span, -1);
+    if (!init_voxel_struct(v, px, py, pz, fixed, simulate, color, type, span, -1)) {
+        voxel_count--;
+        return -1;
+    }
     table_cache_invalidate();
     voxel_table_register(v, idx);
     if (!simulate) {
@@ -2920,6 +3124,114 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
         voxels[idx].glueEligible = false;
     }
     return idx;
+}
+
+static void glue_neighbor_faces_for_voxel(int voxel_idx) {
+    if (voxel_idx < 0 || voxel_idx >= voxel_count) {
+        return;
+    }
+
+    Voxel *a = &voxels[voxel_idx];
+    if (!a->simulate || a->isBullet || !a->glueEligible) {
+        return;
+    }
+
+    static const int axis_offsets[3][3] = {
+        { 1, 0, 0 },
+        { 0, 1, 0 },
+        { 0, 0, 1 }
+    };
+    static const int positive_face[3] = { 0, 2, 4 };
+    static const int negative_face[3] = { 1, 3, 5 };
+
+    for (int axis = 0; axis < 3; ++axis) {
+        int nx = a->gx + axis_offsets[axis][0];
+        int ny = a->gy + axis_offsets[axis][1];
+        int nz = a->gz + axis_offsets[axis][2];
+
+        int neighbor_idx = table_get(nx, ny, nz);
+        if (neighbor_idx < 0) {
+            continue;
+        }
+
+        Voxel *b = &voxels[neighbor_idx];
+        if (!b->simulate || b->isBullet || !b->glueEligible) {
+            continue;
+        }
+
+        int faceA = positive_face[axis];
+        int faceB = negative_face[axis];
+
+        for (int c = 0; c < 4; ++c) {
+            int ia = face_corner_indices[faceA][c];
+            int ib = face_corner_indices[faceB][c];
+
+            Particle *shared = a->particles[ia];
+            Particle *old = b->particles[ib];
+            if (shared == old) {
+                continue;
+            }
+            particle_release(old);
+            particle_retain(shared);
+            b->particles[ib] = shared;
+        }
+
+        a->glued_faces[faceA] = true;
+        b->glued_faces[faceB] = true;
+    }
+}
+
+static void glue_neighbor_faces(void) {
+    for (int i = 0; i < voxel_count; ++i) {
+        glue_neighbor_faces_for_voxel(i);
+    }
+}
+
+static void detach_face_particles(Voxel *voxel, int face_index) {
+    if (!voxel) {
+        return;
+    }
+
+    for (int c = 0; c < 4; ++c) {
+        int corner = face_corner_indices[face_index][c];
+        Particle *p_old = voxel->particles[corner];
+        if (!p_old || p_old->refcount <= 1) {
+            continue;
+        }
+
+        Particle *p_new = particle_clone(p_old);
+        if (!p_new) {
+            continue;
+        }
+
+        p_new->break_timer = BREAK_DAMP_FRAMES;
+        p_old->break_timer = BREAK_DAMP_FRAMES;
+
+        voxel->particles[corner] = p_new;
+        particle_release(p_old);
+    }
+}
+
+static void break_face_link(Voxel *voxel, int face_index) {
+    if (!voxel || !voxel->glued_faces[face_index]) {
+        return;
+    }
+
+    int nx = voxel->gx + face_offsets[face_index][0];
+    int ny = voxel->gy + face_offsets[face_index][1];
+    int nz = voxel->gz + face_offsets[face_index][2];
+    int neighbor_idx = table_get(nx, ny, nz);
+
+    detach_face_particles(voxel, face_index);
+    voxel->glued_faces[face_index] = false;
+
+    if (neighbor_idx < 0) {
+        return;
+    }
+
+    Voxel *neighbor = &voxels[neighbor_idx];
+    int opposite = opposite_face[face_index];
+    neighbor->glued_faces[opposite] = false;
 }
 
 static inline size_t unit_voxel_grid_index(int x, int y, int z,
@@ -2975,136 +3287,28 @@ static int emit_multiscale_voxels_from_units(const UnitVoxelBuffer *buffer,
         return 0;
     }
 
-    int minx = INT_MAX, miny = INT_MAX, minz = INT_MAX;
-    int maxx = INT_MIN, maxy = INT_MIN, maxz = INT_MIN;
-    for (int i = 0; i < buffer->count; ++i) {
-        const UnitVoxelSeed *seed = &buffer->voxels[i];
-        if (seed->gx < minx) minx = seed->gx;
-        if (seed->gy < miny) miny = seed->gy;
-        if (seed->gz < minz) minz = seed->gz;
-        if (seed->gx > maxx) maxx = seed->gx;
-        if (seed->gy > maxy) maxy = seed->gy;
-        if (seed->gz > maxz) maxz = seed->gz;
-    }
-
-    if (minx > maxx || miny > maxy || minz > maxz) {
-        return 0;
-    }
-
-    int dimx = maxx - minx + 1;
-    int dimy = maxy - miny + 1;
-    int dimz = maxz - minz + 1;
-
-    size_t cell_count = (size_t)dimx * (size_t)dimy * (size_t)dimz;
-    if (cell_count == 0) {
-        return 0;
-    }
-
-    unsigned char *occupied = (unsigned char *)calloc(cell_count, sizeof(unsigned char));
-    unsigned char *consumed = (unsigned char *)calloc(cell_count, sizeof(unsigned char));
-    Color *color_grid = (Color *)malloc(cell_count * sizeof(Color));
-    int *type_grid = (int *)malloc(cell_count * sizeof(int));
-    int *tag_grid = (int *)malloc(cell_count * sizeof(int));
-    int *activator_grid = (int *)malloc(cell_count * sizeof(int));
-    if (!occupied || !consumed || !color_grid || !type_grid || !tag_grid || !activator_grid) {
-        free(occupied);
-        free(consumed);
-        free(color_grid);
-        free(type_grid);
-        free(tag_grid);
-        free(activator_grid);
-        TraceLog(LOG_WARNING, "[Multiscale] Failed to allocate voxel mask (%dx%dx%d)", dimx, dimy, dimz);
-        return 0;
-    }
-
-    for (int i = 0; i < buffer->count; ++i) {
-        const UnitVoxelSeed *seed = &buffer->voxels[i];
-        int local_x = seed->gx - minx;
-        int local_y = seed->gy - miny;
-        int local_z = seed->gz - minz;
-        size_t idx = unit_voxel_grid_index(local_x, local_y, local_z,
-                                           dimx, dimy, dimz);
-        occupied[idx] = 1;
-        color_grid[idx] = seed->color;
-        type_grid[idx] = (type_override >= 0) ? type_override : seed->type;
-        tag_grid[idx] = seed->debugTag;
-        activator_grid[idx] = seed->activator;
-    }
-
     int spawned = 0;
-    for (int z = 0; z < dimz; ++z) {
-        for (int y = 0; y < dimy; ++y) {
-            for (int x = 0; x < dimx; ++x) {
-                size_t cell_idx = unit_voxel_grid_index(x, y, z, dimx, dimy, dimz);
-                if (!occupied[cell_idx] || consumed[cell_idx]) {
-                    continue;
-                }
-
-                int span = maximal_cube_span_at(x, y, z, occupied, consumed, dimx, dimy, dimz);
-                Color color = color_grid[cell_idx];
-                int spawn_type = type_grid[cell_idx];
-                int spawn_tag = tag_grid[cell_idx];
-                int spawn_activator = activator_grid[cell_idx];
-
-                for (int dz = 0; dz < span; ++dz) {
-                    for (int dy = 0; dy < span; ++dy) {
-                        for (int dx = 0; dx < span; ++dx) {
-                            size_t idx = unit_voxel_grid_index(x + dx, y + dy, z + dz,
-                                                               dimx, dimy, dimz);
-                            consumed[idx] = 1;
-                        }
-                    }
-                }
-
-                int gx = minx + x;
-                int gy = miny + y;
-                int gz = minz + z;
-                float px = ((float)gx + 0.5f * (float)span) * VOXEL_SIZE;
-                float py = ((float)gy + 0.5f * (float)span) * VOXEL_SIZE;
-                float pz = ((float)gz + 0.5f * (float)span) * VOXEL_SIZE;
-                int new_idx = addVoxelSized(px, py, pz, fixed, simulate, color, spawn_type, span);
-                if (new_idx >= 0) {
-                    voxels[new_idx].debugClusterTag = spawn_tag;
-                    voxels[new_idx].activator = spawn_activator;
-                    if (debugLogSmush && debugLogSmushSpawns &&
-                        spawn_activator >= 0 && debugSmushLogBudget > 0) {
-                        TraceLog(LOG_INFO,
-                                 "[Smush] spawn dynamic voxel=%d span=%d activator=%d",
-                                 new_idx, span, spawn_activator);
-                        --debugSmushLogBudget;
-                    }
-                } else if (debugLogSmush && debugLogSmushSpawns && debugSmushLogBudget > 0) {
-                    TraceLog(LOG_INFO,
-                             "[Smush] spawn failed span=%d activator=%d",
-                             span, spawn_activator);
-                    --debugSmushLogBudget;
-                }
-                if (debugLogMultiscale) {
-                    TraceLog(LOG_INFO,
-                             "[Multiscale] Emit span=%d grid=(%d..%d,%d..%d,%d..%d) pos=(%.2f,%.2f,%.2f)",
-                             span,
-                             gx, gx + span - 1,
-                             gy, gy + span - 1,
-                             gz, gz + span - 1,
-                             px, py, pz);
-                }
-                ++spawned;
+    for (int i = 0; i < buffer->count; ++i) {
+        const UnitVoxelSeed *seed = &buffer->voxels[i];
+        int gx = seed->gx;
+        int gy = seed->gy;
+        int gz = seed->gz;
+        Color color = seed->color;
+        int spawn_type = (type_override >= 0) ? type_override : seed->type;
+        float px = ((float)gx + 0.5f) * VOXEL_SIZE;
+        float py = ((float)gy + 0.5f) * VOXEL_SIZE;
+        float pz = ((float)gz + 0.5f) * VOXEL_SIZE;
+        int new_idx = addVoxelSized(px, py, pz, fixed, simulate, color, spawn_type, 1);
+        if (new_idx >= 0) {
+            voxels[new_idx].debugClusterTag = seed->debugTag;
+            voxels[new_idx].activator = seed->activator;
+            if (simulate) {
+                glue_neighbor_faces_for_voxel(new_idx);
             }
+            ++spawned;
         }
     }
 
-    free(occupied);
-    free(consumed);
-    free(color_grid);
-    free(type_grid);
-    free(tag_grid);
-    free(activator_grid);
-
-    if (debugLogMultiscale) {
-        TraceLog(LOG_INFO,
-                 "[Multiscale] Converted %d unit voxels into %d span clusters",
-                 buffer->count, spawned);
-    }
     return spawned;
 }
 
@@ -4611,6 +4815,7 @@ static int add_dynamic_span_voxel_at_grid_tag(int minx, int miny, int minz,
     int idx = addVoxelSized(px, py, pz, false, true, color, 0, span);
     if (idx >= 0) {
         voxels[idx].debugClusterTag = debugTag;
+        glue_neighbor_faces_for_voxel(idx);
     }
     return idx;
 }
@@ -5659,6 +5864,7 @@ static void ResetGame(void) {
     }
     // clear voxels
     voxel_count = 0;
+    reset_particle_pool();
     staticBeliefsInitialized = false;
     staticBeliefsForceFullRefresh = false;
     staticBeliefDirtyCount = 0;
@@ -6268,7 +6474,7 @@ static bool dynamic_voxel_glued_to_static(int voxel_idx)
         return false;
     }
     Voxel *voxel = &voxels[voxel_idx];
-    if (!voxel->simulate || !voxel->glueEligible) {
+    if (!voxel->simulate || voxel->isBullet || !voxel->glueEligible) {
         return false;
     }
     int cluster_count = build_glue_cluster_indices(voxel_idx, glueClusterIndices);
@@ -6354,56 +6560,233 @@ static void handle_pbd_projectile_hits(void)
     }
 }
 
+static void update_voxel_coarsening_state(void) {
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (!v->simulate || v->isBullet) {
+            v->full_neighbors = false;
+            v->simulate_dofs = false;
+            v->wake_source = false;
+            v->break_mask = 0;
+            continue;
+        }
+
+        bool full = true;
+        for (int face = 0; face < 6; ++face) {
+            int nx = v->gx + face_offsets[face][0];
+            int ny = v->gy + face_offsets[face][1];
+            int nz = v->gz + face_offsets[face][2];
+            if (table_get(nx, ny, nz) < 0) {
+                full = false;
+                break;
+            }
+        }
+
+        v->full_neighbors = full;
+        v->simulate_dofs = (!full) || (v->wake_timer > 0);
+        v->wake_source = false;
+    }
+}
+
+static void reset_particle_mass_and_flags(void) {
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+        p->inv_mass = p->base_inv_mass;
+        p->extra_mass = 0;
+        p->touched_by_simulated = false;
+        p->corr_sum = (Vector3){ 0.0f, 0.0f, 0.0f };
+        p->corr_weight = 0.0f;
+    }
+}
+
+static void apply_shell_effective_mass(void) {
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (!v->simulate || v->isBullet || v->simulate_dofs) {
+            continue;
+        }
+
+        for (int c = 0; c < 8; ++c) {
+            Particle *p = v->particles[c];
+            p->extra_mass += 1;
+        }
+    }
+
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+        if (p->base_inv_mass <= 0.0f || p->extra_mass <= 0) {
+            p->inv_mass = p->base_inv_mass;
+            continue;
+        }
+        float scale = 1.0f + (COARSENING_MASS_SCALE * (float)p->extra_mass);
+        p->inv_mass = p->base_inv_mass / scale;
+    }
+}
+
+static void update_wake_timers(void) {
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (!v->simulate || v->isBullet) {
+            continue;
+        }
+
+        bool neighbor_wake = v->wake_source;
+        if (!neighbor_wake) {
+            for (int face = 0; face < 6; ++face) {
+                int nx = v->gx + face_offsets[face][0];
+                int ny = v->gy + face_offsets[face][1];
+                int nz = v->gz + face_offsets[face][2];
+                int nidx = table_get(nx, ny, nz);
+                if (nidx >= 0 && voxels[nidx].wake_source && !voxels[nidx].isBullet) {
+                    neighbor_wake = true;
+                    break;
+                }
+            }
+        }
+
+        int timer = (v->wake_timer > 0) ? (v->wake_timer - 1) : 0;
+        if (neighbor_wake) {
+            timer = COARSENING_WAKE_FRAMES;
+        }
+        v->wake_timer = timer;
+    }
+}
+
+static void process_break_masks(void) {
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (v->break_mask == 0) {
+            continue;
+        }
+        for (int face = 0; face < 6; ++face) {
+            if (v->break_mask & (uint8_t)(1u << face)) {
+                break_face_link(v, face);
+            }
+        }
+        v->break_mask = 0;
+    }
+}
+
+static void accumulate_simulated_corner_deltas(Vector3 sum_delta[8], int counts[8]) {
+    for (int i = 0; i < 8; ++i) {
+        sum_delta[i] = (Vector3){ 0.0f, 0.0f, 0.0f };
+        counts[i] = 0;
+    }
+
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (!v->simulate || v->isBullet || !v->simulate_dofs) {
+            continue;
+        }
+
+        for (int c = 0; c < 8; ++c) {
+            Particle *p = v->particles[c];
+            Vector3 delta = v_sub(p->predicted_pos, p->prev_pos);
+            sum_delta[c] = v_add(sum_delta[c], delta);
+            counts[c] += 1;
+        }
+    }
+}
+
+static void mark_simulated_particles(void) {
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (!v->simulate || v->isBullet || !v->simulate_dofs) {
+            continue;
+        }
+        for (int c = 0; c < 8; ++c) {
+            v->particles[c]->touched_by_simulated = true;
+        }
+    }
+}
+
+static void apply_interior_sync(const Vector3 avg_delta[8], const int counts[8]) {
+    particle_sync_stamp++;
+    if (particle_sync_stamp == 0) {
+        particle_sync_stamp = 1;
+    }
+
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (!v->simulate || v->isBullet || v->simulate_dofs) {
+            continue;
+        }
+
+        for (int c = 0; c < 8; ++c) {
+            if (counts[c] == 0) {
+                continue;
+            }
+            Particle *p = v->particles[c];
+            if (p->touched_by_simulated || p->sync_stamp == particle_sync_stamp) {
+                continue;
+            }
+            p->predicted_pos = v_add(p->predicted_pos, avg_delta[c]);
+            p->sync_stamp = particle_sync_stamp;
+        }
+    }
+}
+
+static void decrement_particle_timers(void) {
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+        if (p->break_timer > 0) {
+            p->break_timer--;
+        }
+    }
+}
+
 // Predict positions for the next step (equivalent to the GPU PredictPositions kernel).
 static void integrate_particles(float dt) {
     const Vector3 gravity = { 0.0f, -GRAVITY*1.0f, 0.0f };
     const float dt_sq = dt * dt;
+
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+
+        p->prev_pos = p->pos;
+        p->predicted_pos = p->pos;
+
+        if (p->inv_mass == 0.0f) {
+            continue;
+        }
+
+        p->vel = v_mul(p->vel, VELOCITY_DAMPING);
+        Vector3 step = v_mul(p->vel, dt);
+        Vector3 accel = v_mul(gravity, dt_sq);
+        p->predicted_pos = v_add(p->predicted_pos, v_add(step, accel));
+    }
+
+    int stamp = ++tether_apply_stamp;
+    if (stamp == 0) {
+        stamp = 1;
+        tether_apply_stamp = 1;
+    }
 
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
         if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
             continue;
         }
-
-        int tether_player = -1;
-        Vector3 tether_target = { 0.0f, 0.0f, 0.0f };
-        if (tetherTag[i] > 0) {
-            tether_player = tetherTag[i] - 1;
-            tether_target = tetherTargetByPlayer[tether_player];
+        if (tetherTag[i] <= 0) {
+            continue;
         }
 
-        for (int j = 0; j < VOXEL_PARTICLE_COUNT; ++j) {
-            Particle *p = voxel_particle_at(voxel, j);
+        int tether_player = tetherTag[i] - 1;
+        Vector3 tether_target = tetherTargetByPlayer[tether_player];
 
-            p->prev_pos = p->pos;
-            p->predicted_pos = p->pos;
-
-            if (p->inv_mass == 0.0f) {
+        for (int j = 0; j < 8; ++j) {
+            Particle *p = voxel->particles[j];
+            if (p->tether_stamp == stamp) {
                 continue;
             }
+            p->tether_stamp = stamp;
 
-            // Damped semi-implicit Euler: carry over velocity and integrate constant gravity.
-            p->vel = v_mul(p->vel, VELOCITY_DAMPING);
-            Vector3 step = v_mul(p->vel, dt);
-            Vector3 accel = v_mul(gravity, dt_sq);
-            // if (tether_player >= 0) {
-            //      Vector3 tether_delta = v_sub(tether_target, p->predicted_pos);
-            //      Vector3 tether_accel = v_mul(v_norm(tether_delta), TETHER_SPRING);
-            //      accel = v_add(v_mul(tether_accel, dt_sq),accel);
-            //      float tether_damp = clampf(TETHER_DAMPING * dt, 0.0f, 0.9f);
-            //      p->vel = v_mul(p->vel, 1.0f-tether_damp);
-            // }
-
-            p->predicted_pos = v_add(p->predicted_pos, v_add(step, accel));
-
-            if (tether_player >= 0) {
-                Vector3 tether_delta = v_sub(tether_target, p->predicted_pos);
-                Vector3 tether_accel = v_mul(tether_delta, TETHER_SPRING);
-                p->predicted_pos = v_add(p->predicted_pos, v_mul(tether_accel, dt_sq));
-                p->vel = v_add(p->vel, v_mul(tether_accel, dt));
-                float tether_damp = clampf(TETHER_DAMPING * dt, 0.0f, 0.9f);
-                p->vel = v_mul(p->vel, 1.0f - tether_damp);
-            }
+            Vector3 tether_delta = v_sub(tether_target, p->predicted_pos);
+            Vector3 tether_accel = v_mul(tether_delta, TETHER_SPRING);
+            p->predicted_pos = v_add(p->predicted_pos, v_mul(tether_accel, dt_sq));
+            p->vel = v_add(p->vel, v_mul(tether_accel, dt));
+            float tether_damp = clampf(TETHER_DAMPING * dt, 0.0f, 0.9f);
+            p->vel = v_mul(p->vel, 1.0f - tether_damp);
         }
     }
 }
@@ -6447,7 +6830,7 @@ static void solve_voxel_shape(Voxel *voxel) {
     float w[8];
 
     for (int i = 0; i < 8; ++i) {
-        Particle *part = &voxel->particles[i];
+        Particle *part = voxel->particles[i];
         if (!v_isfinite(part->predicted_pos)) {
             part->predicted_pos = part->pos;
             needs_reset = true;
@@ -6475,7 +6858,7 @@ static void solve_voxel_shape(Voxel *voxel) {
         reset_voxel_shape_to_rest(voxel, p, w, centroid);
         voxel->pos = centroid;
         for (int i = 0; i < 8; ++i) {
-            voxel->particles[i].predicted_pos = p[i];
+            voxel->particles[i]->predicted_pos = p[i];
         }
         return;
     }
@@ -6602,7 +6985,312 @@ static void solve_voxel_shape(Voxel *voxel) {
 
     voxel->pos = centroid;
     for (int i = 0; i < 8; ++i) {
-        voxel->particles[i].predicted_pos = p[i];
+        voxel->particles[i]->predicted_pos = p[i];
+    }
+}
+
+// Voxel Gram-Schmidt shape matching (Algorithm 1 in the paper) gathers corrections for Jacobi updates.
+static void gather_voxel_shape_constraints(Voxel *voxel) {
+    bool has_dynamic = false;
+    Vector3 p[8];
+    Vector3 orig[8];
+    float w[8];
+
+    for (int i = 0; i < 8; ++i) {
+        Particle *part = voxel->particles[i];
+        p[i] = part->predicted_pos;
+        orig[i] = part->predicted_pos;
+        w[i] = part->inv_mass;
+        if (w[i] > 0.0f) {
+            has_dynamic = true;
+        }
+    }
+
+    if (!has_dynamic) {
+        return;
+    }
+
+    const float rest_volume = voxel->rest_volume;
+    const float rest_edge = voxel->rest_edge;
+    Vector3 centroid = { 0.0f, 0.0f, 0.0f };
+
+    for (int iter = 0; iter < VGS_ITERS; ++iter) {
+        centroid = (Vector3){ 0.0f, 0.0f, 0.0f };
+        for (int i = 0; i < 8; ++i) {
+            centroid = v_add(centroid, p[i]);
+        }
+        centroid = v_mul(centroid, 1.0f / 8.0f);
+
+        Vector3 v0 = v_add(v_add(v_sub(p[1], p[0]), v_sub(p[3], p[2])),
+                           v_add(v_sub(p[5], p[4]), v_sub(p[7], p[6])));
+        v0 = v_mul(v0, 0.25f);
+
+        Vector3 v1 = v_add(v_add(v_sub(p[2], p[0]), v_sub(p[3], p[1])),
+                           v_add(v_sub(p[6], p[4]), v_sub(p[7], p[5])));
+        v1 = v_mul(v1, 0.25f);
+
+        Vector3 v2 = v_add(v_add(v_sub(p[4], p[0]), v_sub(p[5], p[1])),
+                           v_add(v_sub(p[6], p[2]), v_sub(p[7], p[3])));
+        v2 = v_mul(v2, 0.25f);
+
+        float len_v0 = v_length(v0);
+        float len_v1 = v_length(v1);
+        float len_v2 = v_length(v2);
+
+        if (voxel->rest_edge > 0.0f) {
+            float strain_x = fabsf(len_v0 - voxel->rest_edge) / voxel->rest_edge;
+            float strain_y = fabsf(len_v1 - voxel->rest_edge) / voxel->rest_edge;
+            float strain_z = fabsf(len_v2 - voxel->rest_edge) / voxel->rest_edge;
+
+            bool exceeded = false;
+
+            if (strain_x > STRAIN_BREAK_THRESHOLD) {
+                exceeded = true;
+                if (voxel->glued_faces[0]) voxel->break_mask |= (uint8_t)(1u << 0);
+                if (voxel->glued_faces[1]) voxel->break_mask |= (uint8_t)(1u << 1);
+            }
+            if (strain_y > STRAIN_BREAK_THRESHOLD) {
+                exceeded = true;
+                if (voxel->glued_faces[2]) voxel->break_mask |= (uint8_t)(1u << 2);
+                if (voxel->glued_faces[3]) voxel->break_mask |= (uint8_t)(1u << 3);
+            }
+            if (strain_z > STRAIN_BREAK_THRESHOLD) {
+                exceeded = true;
+                if (voxel->glued_faces[4]) voxel->break_mask |= (uint8_t)(1u << 4);
+                if (voxel->glued_faces[5]) voxel->break_mask |= (uint8_t)(1u << 5);
+            }
+
+            float inv_len0 = (len_v0 > VGS_EPS) ? 1.0f / len_v0 : 0.0f;
+            float inv_len1 = (len_v1 > VGS_EPS) ? 1.0f / len_v1 : 0.0f;
+            float inv_len2 = (len_v2 > VGS_EPS) ? 1.0f / len_v2 : 0.0f;
+
+            float shear_xy = (inv_len0 > 0.0f && inv_len1 > 0.0f)
+                ? fabsf(v_dot(v0, v1)) * inv_len0 * inv_len1
+                : 0.0f;
+            float shear_xz = (inv_len0 > 0.0f && inv_len2 > 0.0f)
+                ? fabsf(v_dot(v0, v2)) * inv_len0 * inv_len2
+                : 0.0f;
+            float shear_yz = (inv_len1 > 0.0f && inv_len2 > 0.0f)
+                ? fabsf(v_dot(v1, v2)) * inv_len1 * inv_len2
+                : 0.0f;
+
+            if (shear_xy > SHEAR_BREAK_THRESHOLD) {
+                exceeded = true;
+                if (voxel->glued_faces[4]) voxel->break_mask |= (uint8_t)(1u << 4);
+                if (voxel->glued_faces[5]) voxel->break_mask |= (uint8_t)(1u << 5);
+            }
+            if (shear_xz > SHEAR_BREAK_THRESHOLD) {
+                exceeded = true;
+                if (voxel->glued_faces[2]) voxel->break_mask |= (uint8_t)(1u << 2);
+                if (voxel->glued_faces[3]) voxel->break_mask |= (uint8_t)(1u << 3);
+            }
+            if (shear_yz > SHEAR_BREAK_THRESHOLD) {
+                exceeded = true;
+                if (voxel->glued_faces[0]) voxel->break_mask |= (uint8_t)(1u << 0);
+                if (voxel->glued_faces[1]) voxel->break_mask |= (uint8_t)(1u << 1);
+            }
+
+            if (exceeded) {
+                voxel->wake_source = true;
+            }
+        }
+
+        Vector3 u0 = v_sub(v0, v_mul(v_add(vgs_project(v1, v0), vgs_project(v2, v0)), VGS_ALPHA));
+        Vector3 u1 = v_sub(v1, v_mul(v_add(vgs_project(v2, v1), vgs_project(v0, v1)), VGS_ALPHA));
+        Vector3 u2 = v_sub(v2, v_mul(v_add(vgs_project(v0, v2), vgs_project(v1, v2)), VGS_ALPHA));
+
+        float len0 = v_length(u0);
+        float len1 = v_length(u1);
+        float len2 = v_length(u2);
+
+        float target0 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * len_v0);
+        float target1 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * len_v1);
+        float target2 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * len_v2);
+
+        if (len0 > VGS_EPS) u0 = v_mul(u0, target0 / len0);
+        if (len1 > VGS_EPS) u1 = v_mul(u1, target1 / len1);
+        if (len2 > VGS_EPS) u2 = v_mul(u2, target2 / len2);
+
+        float volume = v_dot(v_cross(u0, u1), u2);
+        if (fabsf(volume) > VGS_EPS) {
+            float scale = rest_volume / volume;
+            float root = cbrtf(fabsf(scale));
+            if (scale < 0.0f) {
+                root = -root;
+            }
+            float factor = 0.5f * root;
+            u0 = v_mul(u0, factor);
+            u1 = v_mul(u1, factor);
+            u2 = v_mul(u2, factor);
+        }
+
+        Vector3 new_p[8];
+        new_p[0] = v_sub(v_sub(v_sub(centroid, u0), u1), u2);
+        new_p[1] = v_sub(v_sub(v_add(centroid, u0), u1), u2);
+        new_p[2] = v_sub(v_add(v_sub(centroid, u0), u1), u2);
+        new_p[3] = v_sub(v_add(v_add(centroid, u0), u1), u2);
+        new_p[4] = v_add(v_sub(v_sub(centroid, u0), u1), u2);
+        new_p[5] = v_add(v_sub(v_add(centroid, u0), u1), u2);
+        new_p[6] = v_add(v_add(v_sub(centroid, u0), u1), u2);
+        new_p[7] = v_add(v_add(v_add(centroid, u0), u1), u2);
+
+        for (int i = 0; i < 8; ++i) {
+            if (w[i] == 0.0f) {
+                continue;
+            }
+            p[i] = new_p[i];
+        }
+    }
+
+    for (int i = 0; i < 8; ++i) {
+        if (w[i] == 0.0f) {
+            continue;
+        }
+        Vector3 delta = v_sub(p[i], orig[i]);
+        accumulate_particle_correction(voxel->particles[i], delta, w[i]);
+    }
+}
+
+// Gather collision corrections against the scene and neighbouring voxels (Jacobi form).
+static void gather_particle_collisions(float dt) {
+    (void)dt;
+
+    const float half_player = PLAYER_SIZE * 0.5f;
+    const float omega = COLLISION_RELAXATION;
+    const float eps = 1e-6f;
+    const float voxel_radius = PARTICLE_RADIUS;
+    const float radius_sq = voxel_radius * voxel_radius;
+
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+        if (p->inv_mass <= 0.0f) {
+            continue;
+        }
+
+        Vector3 pos = p->predicted_pos;
+
+        if (pos.y < voxel_radius) {
+            pos.y = voxel_radius;
+        }
+
+        for (int player_idx = 0; player_idx < activePlayers; ++player_idx) {
+            Player *pl = &players[player_idx];
+            if (pl->respawn_timer > 0.0f) {
+                continue;
+            }
+            Vector3 box_min = {
+                pl->pos.x - half_player,
+                pl->pos.y - half_player,
+                pl->pos.z - half_player
+            };
+            Vector3 box_max = {
+                pl->pos.x + half_player,
+                pl->pos.y + half_player,
+                pl->pos.z + half_player
+            };
+
+            Vector3 nearest = {
+                clampf(pos.x, box_min.x, box_max.x),
+                clampf(pos.y, box_min.y, box_max.y),
+                clampf(pos.z, box_min.z, box_max.z)
+            };
+
+            Vector3 delta = v_sub(pos, nearest);
+            float dist_sq = v_dot(delta, delta);
+            if (dist_sq < radius_sq) {
+                float dist = sqrtf(fmaxf(dist_sq, eps));
+                float penetration = voxel_radius - dist;
+                Vector3 normal = (dist > eps)
+                    ? v_mul(delta, -1.0f / dist)
+                    : (Vector3){ 0.0f, 1.0f, 0.0f };
+                pos = v_add(pos, v_mul(normal, penetration));
+            }
+        }
+
+        Vector3 delta = v_sub(pos, p->predicted_pos);
+        if (fabsf(delta.x) > 0.0f || fabsf(delta.y) > 0.0f || fabsf(delta.z) > 0.0f) {
+            accumulate_particle_correction(p, delta, 1.0f);
+        }
+    }
+
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *pa = active_particles[i];
+        float wa = pa->inv_mass;
+        if (wa <= 0.0f) {
+            continue;
+        }
+
+        int ax = pa->cell_x;
+        int ay = pa->cell_y;
+        int az = pa->cell_z;
+
+        for (int dx = -1; dx <= 1; ++dx) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dz = -1; dz <= 1; ++dz) {
+                    int nx = ax + dx;
+                    int ny = ay + dy;
+                    int nz = az + dz;
+                    int h = particle_hash(nx, ny, nz);
+
+                    for (int idx = particle_hash_head[h]; idx != -1; idx = particle_hash_next[idx]) {
+                        Particle *pb = active_particles[idx];
+                        if (pb == pa) {
+                            continue;
+                        }
+                        if (idx <= i) {
+                            continue;
+                        }
+                        if (pb->cell_x != nx || pb->cell_y != ny || pb->cell_z != nz) {
+                            continue;
+                        }
+
+                        float wb = pb->inv_mass;
+                        float w_sum = wa + wb;
+                        if (w_sum <= 0.0f) {
+                            continue;
+                        }
+
+                        float radiusA = pa->radius;
+                        float radiusB = pb->radius;
+                        Vector3 delta = v_sub(pa->predicted_pos, pb->predicted_pos);
+                        float dist_sq = v_dot(delta, delta);
+                        float target_dist = radiusA + radiusB;
+
+                        if (dist_sq >= (target_dist * target_dist)) {
+                            continue;
+                        }
+
+                        float dist = sqrtf(fmaxf(dist_sq, eps));
+                        float penetration = target_dist - dist;
+                        if (penetration <= 0.0f) {
+                            continue;
+                        }
+
+                        Vector3 normal = (dist > eps)
+                            ? v_mul(delta, 1.0f / dist)
+                            : (Vector3){ 1.0f, 0.0f, 0.0f };
+
+                        float h_corr = 0.5f * penetration;
+                        float scale = omega * h_corr / w_sum;
+
+                        float damp_factor = 1.0f;
+                        if (pa->break_timer > 0 || pb->break_timer > 0) {
+                            int max_timer = (pa->break_timer > pb->break_timer) ? pa->break_timer : pb->break_timer;
+                            damp_factor = 1.0f - (float)max_timer / (float)BREAK_DAMP_FRAMES;
+                        }
+
+                        if (wa > 0.0f) {
+                            Vector3 da = v_mul(normal, scale * wa * damp_factor);
+                            accumulate_particle_correction(pa, da, 1.0f);
+                        }
+                        if (wb > 0.0f) {
+                            Vector3 db = v_mul(normal, -scale * wb * damp_factor);
+                            accumulate_particle_correction(pb, db, 1.0f);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -6629,10 +7317,10 @@ static void solve_voxel_glue(bool allow_break) {
         Particle *coarseParticles[4];
         float weights[4];
         for (int k = 0; k < 4; ++k) {
-            coarseParticles[k] = &coarse->particles[gc->coarseCorner[k]];
+            coarseParticles[k] = coarse->particles[gc->coarseCorner[k]];
             weights[k] = gc->w[k];
         }
-        Particle *fineParticle = &fine->particles[gc->fineCorner];
+        Particle *fineParticle = fine->particles[gc->fineCorner];
 
         Vector3 coarsePred[4];
         for (int k = 0; k < 4; ++k) {
@@ -7185,100 +7873,42 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
 static void rebuild_glue_constraints(void) {
     glueConstraintCount = 0;
     glue_adjacency_clear_all();
-    if (debugLogGlue) {
-        debugGlueBuildLogBudget = DEBUG_GLUE_BUILD_LOG_INIT;
-    }
-
     for (int i = 0; i < voxel_count; ++i) {
-        if (!voxels[i].glueEligible) {
-            continue;
-        }
-        int minx, maxx, miny, maxy, minz, maxz;
-        voxel_grid_bounds(&voxels[i], &minx, &maxx, &miny, &maxy, &minz, &maxz);
-        for (int d = 0; d < 3; ++d) {
-            const GlueDirection *dir = &glueDirections[d];
-            int neighbors[MAX_FACE_NEIGHBORS] = {0};
-            int neighborCount = 0;
-            if (dir->dx != 0) {
-                int x = (dir->dx > 0) ? (maxx + 1) : (minx - 1);
-                for (int y = miny; y <= maxy; ++y) {
-                    for (int z = minz; z <= maxz; ++z) {
-                        int idx = table_get(x, y, z);
-                        if (idx < 0 || idx == i) continue;
-                        if (!voxels[idx].glueEligible) continue;
-                        if (!list_contains_index(neighbors, neighborCount, idx) &&
-                            neighborCount < MAX_FACE_NEIGHBORS) {
-                            neighbors[neighborCount++] = idx;
-                        }
-                    }
-                }
-            } else if (dir->dy != 0) {
-                int y = (dir->dy > 0) ? (maxy + 1) : (miny - 1);
-                for (int x = minx; x <= maxx; ++x) {
-                    for (int z = minz; z <= maxz; ++z) {
-                        int idx = table_get(x, y, z);
-                        if (idx < 0 || idx == i) continue;
-                        if (!voxels[idx].glueEligible) continue;
-                        if (!list_contains_index(neighbors, neighborCount, idx) &&
-                            neighborCount < MAX_FACE_NEIGHBORS) {
-                            neighbors[neighborCount++] = idx;
-                        }
-                    }
-                }
-            } else {
-                int z = (dir->dz > 0) ? (maxz + 1) : (minz - 1);
-                for (int x = minx; x <= maxx; ++x) {
-                    for (int y = miny; y <= maxy; ++y) {
-                        int idx = table_get(x, y, z);
-                        if (idx < 0 || idx == i) continue;
-                        if (!voxels[idx].glueEligible) continue;
-                        if (!list_contains_index(neighbors, neighborCount, idx) &&
-                            neighborCount < MAX_FACE_NEIGHBORS) {
-                            neighbors[neighborCount++] = idx;
-                        }
-                    }
-                }
-            }
-            for (int n = 0; n < neighborCount; ++n) {
-                add_bilinear_glue_constraints_for_pair(i, neighbors[n], dir);
-            }
-        }
+        memset(voxels[i].glued_faces, 0, sizeof(voxels[i].glued_faces));
     }
-    glue_dynamic_voxel_to_static_neighbors();
-}
-
-static void deactivate_glue_constraints_between(int a, int b) {
-    int removed = 0;
-    for (int g = 0; g < glueConstraintCount; ++g) {
-        GlueConstraint *gc = &glueConstraints[g];
-        if (!gc->active) {
-            continue;
-        }
-        if ((gc->coarseVoxel == a && gc->fineVoxel == b) ||
-            (gc->coarseVoxel == b && gc->fineVoxel == a))
-        {
-            gc->active = false;
-            ++removed;
-        }
-    }
-    if (removed > 0) {
-        glue_adjacency_remove_ref_pair(a, b, removed);
-    }
+    glue_neighbor_faces();
 }
 
 static int gather_glued_neighbors(int voxel_idx, int *out, int max_out) {
     if (!out || max_out <= 0 || voxel_idx < 0 || voxel_idx >= voxel_count) {
         return 0;
     }
-    rebuild_glue_adjacency_if_dirty();
-    int count = gluedNeighborCounts[voxel_idx];
-    if (count > max_out) {
-        count = max_out;
-    }
-    for (int i = 0; i < count; ++i) {
-        out[i] = gluedNeighborList[voxel_idx][i];
+    Voxel *v = &voxels[voxel_idx];
+    int count = 0;
+    for (int face = 0; face < 6; ++face) {
+        if (!v->glued_faces[face]) {
+            continue;
+        }
+        int nx = v->gx + face_offsets[face][0];
+        int ny = v->gy + face_offsets[face][1];
+        int nz = v->gz + face_offsets[face][2];
+        int nidx = table_get(nx, ny, nz);
+        if (nidx < 0 || nidx >= voxel_count) {
+            continue;
+        }
+        if (!voxels[nidx].simulate || voxels[nidx].isBullet) {
+            continue;
+        }
+        if (count < max_out) {
+            out[count++] = nidx;
+        }
     }
     return count;
+}
+
+static void deactivate_glue_constraints_between(int a, int b) {
+    (void)a;
+    (void)b;
 }
 
 static int build_glue_cluster_indices(int start_idx, int *out_indices)
@@ -7286,7 +7916,7 @@ static int build_glue_cluster_indices(int start_idx, int *out_indices)
     if (start_idx < 0 || start_idx >= voxel_count || !out_indices) {
         return 0;
     }
-    if (!voxels[start_idx].simulate) {
+    if (!voxels[start_idx].simulate || voxels[start_idx].isBullet) {
         return 0;
     }
 
@@ -7306,7 +7936,7 @@ static int build_glue_cluster_indices(int start_idx, int *out_indices)
             if (neighbor < 0 || neighbor >= voxel_count) {
                 continue;
             }
-             if (!voxels[neighbor].simulate) {
+             if (!voxels[neighbor].simulate || voxels[neighbor].isBullet) {
                  continue;
              }
             if (glueClusterVisited[neighbor]) {
@@ -7558,7 +8188,7 @@ static void set_voxel_velocity(Voxel *voxel, Vector3 vel)
     }
     voxel->vel = vel;
     for (int i = 0; i < 8; ++i) {
-        Particle *p = &voxel->particles[i];
+        Particle *p = voxel->particles[i];
         if (p->inv_mass > 0.0f) {
             p->vel = vel;
         } else {
@@ -8334,7 +8964,7 @@ static bool resolve_span_static_overlap(int dynamic_idx, Voxel *dynamic,
     const float omega = COLLISION_RELAXATION;
     Vector3 delta = v_mul(normal, penetration * omega);
     for (int j = 0; j < 8; ++j) {
-        Particle *p = &dynamic->particles[j];
+        Particle *p = dynamic->particles[j];
         if (p->inv_mass <= 0.0f) {
             continue;
         }
@@ -8391,7 +9021,7 @@ static bool nudge_voxel_bottom_above_static(int voxel_idx, Voxel *voxel)
     Vector3 delta = { 0.0f, lift, 0.0f };
     voxel->pos = v_add(voxel->pos, delta);
     for (int j = 0; j < 8; ++j) {
-        voxel->particles[j].predicted_pos = v_add(voxel->particles[j].predicted_pos, delta);
+        voxel->particles[j]->predicted_pos = v_add(voxel->particles[j]->predicted_pos, delta);
     }
 
     if (debugLogSpanCollisions) {
@@ -8513,14 +9143,23 @@ static bool voxels_are_glued(int voxel_idx_a, int voxel_idx_b) {
     if (voxel_idx_a == voxel_idx_b) {
         return false;
     }
-
-    rebuild_glue_adjacency_if_dirty();
-    if (voxel_idx_a < 0 || voxel_idx_a >= voxel_count) {
+    if (voxel_idx_a < 0 || voxel_idx_a >= voxel_count ||
+        voxel_idx_b < 0 || voxel_idx_b >= voxel_count) {
         return false;
     }
-    int count = gluedNeighborCounts[voxel_idx_a];
-    for (int i = 0; i < count; ++i) {
-        if (gluedNeighborList[voxel_idx_a][i] == voxel_idx_b) {
+    Voxel *a = &voxels[voxel_idx_a];
+    if (!a->simulate) {
+        return false;
+    }
+    for (int face = 0; face < 6; ++face) {
+        if (!a->glued_faces[face]) {
+            continue;
+        }
+        int nx = a->gx + face_offsets[face][0];
+        int ny = a->gy + face_offsets[face][1];
+        int nz = a->gz + face_offsets[face][2];
+        int nidx = table_get(nx, ny, nz);
+        if (nidx == voxel_idx_b) {
             return true;
         }
     }
@@ -8561,7 +9200,7 @@ static void compute_voxel_center_and_mass(const Voxel *voxel, Vector3 *center, f
     float sum = 0.0f;
 
     for (int i = 0; i < 8; ++i) {
-        const Particle *p = &voxel->particles[i];
+        const Particle *p = voxel->particles[i];
         c = v_add(c, p->predicted_pos);
         sum += p->inv_mass;
     }
@@ -8838,7 +9477,7 @@ static void solve_dynamic_collisions(float dt) {
                 if (moveA > 0.0f) {
                     Vector3 delta = v_mul(normal, moveA);
                     for (int j = 0; j < 8; ++j) {
-                        Particle *pa = &voxelA->particles[j];
+                        Particle *pa = voxelA->particles[j];
                         if (pa->inv_mass <= 0.0f) continue;
                         float weight = (inv_massA > 0.0f) ? (pa->inv_mass / inv_massA) : 0.0f;
                         pa->predicted_pos = v_add(pa->predicted_pos, v_mul(delta, weight));
@@ -8847,7 +9486,7 @@ static void solve_dynamic_collisions(float dt) {
                 if (moveB > 0.0f) {
                      Vector3 delta = v_mul(normal, moveB);
                     for (int j = 0; j < 8; ++j) {
-                        Particle *pb = &voxelB->particles[j];
+                        Particle *pb = voxelB->particles[j];
                         if (pb->inv_mass <= 0.0f) continue;
                         float weight = (inv_massB > 0.0f) ? (pb->inv_mass / inv_massB) : 0.0f;
                         pb->predicted_pos = v_sub(pb->predicted_pos, v_mul(delta, weight));
@@ -8860,6 +9499,20 @@ static void solve_dynamic_collisions(float dt) {
 
 static void update_particle_velocities(float dt) {
     float inv_dt = (dt > 0.0f) ? 1.0f / dt : 0.0f;
+
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+        Vector3 new_pos = p->predicted_pos;
+        Vector3 delta = v_sub(new_pos, p->prev_pos);
+
+        if (p->inv_mass > 0.0f) {
+            p->vel = v_mul(delta, inv_dt);
+        } else {
+            p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+        }
+
+        p->pos = new_pos;
+    }
 
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
@@ -8874,22 +9527,9 @@ static void update_particle_velocities(float dt) {
         Vector3 prev_centroid = { 0.0f, 0.0f, 0.0f };
 
         for (int j = 0; j < 8; ++j) {
-            Particle *p = &voxel->particles[j];
+            Particle *p = voxel->particles[j];
             centroid = v_add(centroid, p->predicted_pos);
             prev_centroid = v_add(prev_centroid, p->prev_pos);
-
-            Vector3 new_pos = p->predicted_pos;
-            Vector3 delta = v_sub(new_pos, p->prev_pos);
-
-            if (!skipVelocity) {
-                if (p->inv_mass > 0.0f) {
-                    p->vel = v_mul(delta, inv_dt);
-                } else {
-                    p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
-                }
-            }
-
-            p->pos = new_pos;
         }
 
         centroid = v_mul(centroid, 1.0f / 8.0f);
@@ -8898,12 +9538,6 @@ static void update_particle_velocities(float dt) {
             voxel->vel = v_mul(v_sub(centroid, prev_centroid), inv_dt);
         }
         voxel->pos = centroid;
-
-        Particle *center = &voxel->center_particle;
-        center->prev_pos = prev_centroid;
-        center->predicted_pos = centroid;
-        center->pos = centroid;
-        center->vel = voxel->vel;
     }
 }
 
@@ -8922,8 +9556,8 @@ static void voxel_measure_strain(const Voxel *voxel,
     for (int e = 0; e < 12; ++e) {
         int a_idx = voxel_edge_pairs[e][0];
         int b_idx = voxel_edge_pairs[e][1];
-        Vector3 a = voxel->particles[a_idx].predicted_pos;
-        Vector3 b = voxel->particles[b_idx].predicted_pos;
+        Vector3 a = voxel->particles[a_idx]->predicted_pos;
+        Vector3 b = voxel->particles[b_idx]->predicted_pos;
         float len = v_length(v_sub(a, b));
         float strain = fabsf(len - rest_edge) * inv_rest_edge;
         if (strain > max_strain) {
@@ -8932,12 +9566,12 @@ static void voxel_measure_strain(const Voxel *voxel,
     }
 
     Vector3 axis_vecs[3];
-    axis_vecs[0] = v_sub(voxel->particles[1].predicted_pos,
-                         voxel->particles[0].predicted_pos);
-    axis_vecs[1] = v_sub(voxel->particles[2].predicted_pos,
-                         voxel->particles[0].predicted_pos);
-    axis_vecs[2] = v_sub(voxel->particles[4].predicted_pos,
-                         voxel->particles[0].predicted_pos);
+    axis_vecs[0] = v_sub(voxel->particles[1]->predicted_pos,
+                         voxel->particles[0]->predicted_pos);
+    axis_vecs[1] = v_sub(voxel->particles[2]->predicted_pos,
+                         voxel->particles[0]->predicted_pos);
+    axis_vecs[2] = v_sub(voxel->particles[4]->predicted_pos,
+                         voxel->particles[0]->predicted_pos);
     for (int a = 0; a < 3; ++a) {
         float len = v_length(axis_vecs[a]);
         if (len > 1e-6f) {
@@ -8967,20 +9601,13 @@ static void voxel_measure_strain(const Voxel *voxel,
 static void apply_uniform_velocity(Voxel *v, Vector3 vel, float dt) {
     v->vel = vel;
     for (int i = 0; i < 8; ++i) {
-        v->particles[i].vel = vel;
+        v->particles[i]->vel = vel;
         if (dt > 0.0f) {
             Vector3 offset = v_mul(vel, dt);
-            v->particles[i].prev_pos = v_sub(v->particles[i].pos, offset);
+            v->particles[i]->prev_pos = v_sub(v->particles[i]->pos, offset);
         }
-        v->particles[i].predicted_pos = v->particles[i].pos;
+        v->particles[i]->predicted_pos = v->particles[i]->pos;
     }
-    v->center_particle.vel = vel;
-    if (dt > 0.0f) {
-        Vector3 offset = v_mul(vel, dt);
-        v->center_particle.prev_pos = v_sub(v->pos, offset);
-    }
-    v->center_particle.predicted_pos = v->pos;
-    v->center_particle.pos = v->pos;
 }
 
 static int split_voxel_at(int idx, float dt, int *out_children, int max_children) {
@@ -9134,43 +9761,49 @@ void simulate_voxel_pbd(float dt) {
     const int substeps = PBD_SUBSTEPS;
     const int constraint_iterations = PBD_CONSTRAINT_ITERS;
     const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
+    Vector3 sum_delta[8];
+    Vector3 avg_delta[8];
+    int counts[8];
 
     for (int step = 0; step < substeps; ++step) {
         if (debugLogVoxelBlowup) {
             debugBlowupLogBudget = 32;
         }
-        reset_glue_constraint_peaks();
+        //update_voxel_coarsening_state();
+        //reset_particle_mass_and_flags();
+        //apply_shell_effective_mass();
         integrate_particles(sub_dt);
-        solve_static_collisions(sub_dt);
-        solve_dynamic_collisions(sub_dt);
-        // bool split_this_step = split_strained_voxels(sub_dt);
-        // if (split_this_step) {
-        //     rebuild_voxel_hash();
-        //     rebuild_all_voxel_surfaces();
-        //     rebuild_glue_constraints();
-        //     reset_glue_constraint_peaks();
-        //     meshDirty = true;
-        // }
 
         for (int it = 0; it < constraint_iterations; ++it) {
-            #pragma omp parallel for schedule(dynamic)
+            reset_particle_accumulators();
+            build_particle_hash();
+            gather_particle_collisions(sub_dt);
             for (int i = 0; i < voxel_count; ++i) {
                 Voxel *voxel = &voxels[i];
-                if (!voxel->simulate || voxel->type != 0 || voxel->isBullet)
+                if (!voxel->simulate || voxel->isBullet || !voxel->simulate_dofs || voxel->type != 0) {
                     continue;
-                solve_voxel_shape(voxel);
+                }
+                gather_voxel_shape_constraints(voxel);
             }
-        solve_voxel_glue(false);
+            apply_particle_accumulators();
         }
-        solve_voxel_glue(true);
-        // bool dust_this_step = cull_dust_voxels();
-        // if (dust_this_step) {
-        //     rebuild_voxel_hash();
-        //     rebuild_all_voxel_surfaces();
-        //     rebuild_glue_constraints();
-        //     reset_glue_constraint_peaks();
-        //     meshDirty = true;
+
+        process_break_masks();
+        update_wake_timers();
+
+        // accumulate_simulated_corner_deltas(sum_delta, counts);
+        // for (int i = 0; i < 8; ++i) {
+        //     if (counts[i] > 0) {
+        //         avg_delta[i] = v_mul(sum_delta[i], 1.0f / (float)counts[i]);
+        //     } else {
+        //         avg_delta[i] = (Vector3){ 0.0f, 0.0f, 0.0f };
+        //     }
         // }
+
+        //mark_simulated_particles();
+        //apply_interior_sync(avg_delta, counts);
+
+        decrement_particle_timers();
         update_particle_velocities(sub_dt);
         if (debugLogVoxelBlowup && debugBlowupLogBudget > 0) {
             for (int i = 0; i < voxel_count && debugBlowupLogBudget > 0; ++i) {
@@ -9250,7 +9883,9 @@ static void FireVoxel(int idx) {
         shot->isBullet = true;
         shot->glueEligible = false;
         for (int i = 0; i < 8; ++i) {
-            shot->particles[i].vel = vel;
+            shot->particles[i]->vel = vel;
+            shot->particles[i]->inv_mass = 0.0f;
+            shot->particles[i]->base_inv_mass = 0.0f;
         }
         play_sfx(SFX_FIRE);
     }
@@ -9420,17 +10055,8 @@ static int player_points(const Player *p) {
 }
 
 static int bullet_span_for_player(const Player *p) {
-    if (!p) {
-        return 1;
-    }
-    float ratio = fmaxf(p->kd_ratio, 0.1f);
-    int span = (int)roundf(1.0f / ratio);
-    if (span < 1) {
-        span = 1;
-    } else if (span > BULLET_MAX_SPAN) {
-        span = BULLET_MAX_SPAN;
-    }
-    return span;
+    (void)p;
+    return 1;
 }
 
 static int player_bullet_damage(int attacker_index) {
@@ -9967,7 +10593,7 @@ static void draw_hud_bars(int player_index, const Player *p, int viewport_w, int
 static void drawCubeEdges(const Voxel *voxel)
 {
     Vector3 v[8];
-    for (int i = 0; i < 8; ++i) v[i] = voxel->particles[i].pos;
+    for (int i = 0; i < 8; ++i) v[i] = voxel->particles[i]->pos;
 
     static const int edge_indices[12][2] = {
         {0,1},{1,3},{3,2},{2,0},
@@ -10115,7 +10741,7 @@ static void compute_voxel_face_visibility(int idx, bool faces[6])
 static void drawCubeMan(const Voxel *voxel, const bool faces[6])
 {
     Vector3 v[8];
-    for (int i = 0; i < 8; ++i) v[i] = voxel->particles[i].pos;
+    for (int i = 0; i < 8; ++i) v[i] = voxel->particles[i]->pos;
 
     Color displayColor = voxel_display_color(voxel);
     rlColor4ub(displayColor.r, displayColor.g, displayColor.b, displayColor.a);
@@ -10200,7 +10826,7 @@ static void draw_particle_debug(void)
         float baseRadius = voxel_particle_radius(voxel);
         float markerRadius = fmaxf(baseRadius * PARTICLE_DEBUG_MARKER_RADIUS, 0.02f);
         for (int j = 0; j < 8; ++j) {
-            const Particle *p = &voxel->particles[j];
+            const Particle *p = voxel->particles[j];
             Color markerColor = baseColor;
             if (debugColorParticlesByVelocity && p->inv_mass > 0.0f) {
                 float speed = v_length(p->vel);
@@ -10643,10 +11269,10 @@ static void DrawVoxels(Camera3D cam) {
         // Calculate basis vectors from particles to support shear/rotation
         // Voxel corners: 0=(-1,-1,-1), 1=(+1,-1,-1), 2=(-1,+1,-1), 4=(-1,-1,+1) relative to center?
         // Let's assume particles[0] is the origin corner for the basis calculation
-        Vector3 p0 = v->particles[0].pos;
-        Vector3 p1 = v->particles[1].pos; // +X
-        Vector3 p2 = v->particles[2].pos; // +Y
-        Vector3 p4 = v->particles[4].pos; // +Z
+        Vector3 p0 = v->particles[0]->pos;
+        Vector3 p1 = v->particles[1]->pos; // +X
+        Vector3 p2 = v->particles[2]->pos; // +Y
+        Vector3 p4 = v->particles[4]->pos; // +Z
         
         Vector3 xAxis = v_sub(p1, p0);
         Vector3 yAxis = v_sub(p2, p0);
@@ -10654,7 +11280,7 @@ static void DrawVoxels(Camera3D cam) {
 
         // Center position (average of all 8 particles for stability)
         Vector3 center = {0};
-        for(int k=0; k<8; ++k) center = v_add(center, v->particles[k].pos);
+        for(int k=0; k<8; ++k) center = v_add(center, v->particles[k]->pos);
         center = v_mul(center, 0.125f);
         
         Matrix m = MatrixIdentity();
@@ -10705,7 +11331,7 @@ static void DrawVoxels(Camera3D cam) {
         }
         Vector3 center = { 0 };
         for (int k = 0; k < 8; ++k) {
-            center = v_add(center, v->particles[k].pos);
+            center = v_add(center, v->particles[k]->pos);
         }
         center = v_mul(center, 0.125f);
         float span = (float)((v->span > 0) ? v->span : 1);
