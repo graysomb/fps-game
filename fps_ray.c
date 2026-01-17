@@ -1581,6 +1581,7 @@ static Vector3 voxel_rest_corner_world(const Voxel *v, int corner_idx) {
 }
 
 static int table_get(int x, int y, int z);
+static int table_get_static_only(int x, int y, int z);
 static void rebuild_glue_constraints(void);
 static void solve_voxel_glue(bool allow_break);
 static bool voxels_share_edge_or_corner(const Voxel *voxel_a, const Voxel *voxel_b);
@@ -4141,7 +4142,7 @@ static bool restore_dynamic_snapshot(const Voxel *snapshot)
 
 static bool cell_contains_static_voxel(int x, int y, int z)
 {
-    int idx = table_get(x, y, z);
+    int idx = table_get_static_only(x, y, z);
     if (idx < 0 || idx >= voxel_count) {
         return false;
     }
@@ -4468,37 +4469,37 @@ static int gather_static_face_neighbors(const Voxel *voxel, int *out, int max_ou
     int count = 0;
     for (int y = miny; y <= maxy && count < max_out; ++y) {
         for (int z = minz; z <= maxz && count < max_out; ++z) {
-            int idx = table_get(maxx + 1, y, z);
+            int idx = table_get_static_only(maxx + 1, y, z);
             append_static_neighbor_index(idx, voxel, out, &count, max_out);
         }
     }
     for (int y = miny; y <= maxy && count < max_out; ++y) {
         for (int z = minz; z <= maxz && count < max_out; ++z) {
-            int idx = table_get(minx - 1, y, z);
+            int idx = table_get_static_only(minx - 1, y, z);
             append_static_neighbor_index(idx, voxel, out, &count, max_out);
         }
     }
     for (int x = minx; x <= maxx && count < max_out; ++x) {
         for (int z = minz; z <= maxz && count < max_out; ++z) {
-            int idx = table_get(x, maxy + 1, z);
+            int idx = table_get_static_only(x, maxy + 1, z);
             append_static_neighbor_index(idx, voxel, out, &count, max_out);
         }
     }
     for (int x = minx; x <= maxx && count < max_out; ++x) {
         for (int z = minz; z <= maxz && count < max_out; ++z) {
-            int idx = table_get(x, miny - 1, z);
+            int idx = table_get_static_only(x, miny - 1, z);
             append_static_neighbor_index(idx, voxel, out, &count, max_out);
         }
     }
     for (int x = minx; x <= maxx && count < max_out; ++x) {
         for (int y = miny; y <= maxy && count < max_out; ++y) {
-            int idx = table_get(x, y, maxz + 1);
+            int idx = table_get_static_only(x, y, maxz + 1);
             append_static_neighbor_index(idx, voxel, out, &count, max_out);
         }
     }
     for (int x = minx; x <= maxx && count < max_out; ++x) {
         for (int y = miny; y <= maxy && count < max_out; ++y) {
-            int idx = table_get(x, y, minz - 1);
+            int idx = table_get_static_only(x, y, minz - 1);
             append_static_neighbor_index(idx, voxel, out, &count, max_out);
         }
     }
@@ -6897,6 +6898,23 @@ static void reset_particle_mass_and_flags(void) {
     }
 }
 
+static int table_get_static_only(int x, int y, int z)
+/* Returns static voxel index or -1 if empty. Does not consult dynamic table. */
+{
+    uint64_t k = mortonKey(x, y, z);
+    size_t h = hashVoxelKey(k);
+    while (1) {
+        uint64_t bk = static_table[h].key;
+        if (bk == 0) {
+            return -1;
+        }
+        if (bk == k) {
+            return static_table[h].idx;
+        }
+        h = (h + 1) & (HASH_SIZE - 1);
+    }
+}
+
 static void apply_shell_effective_mass(void) {
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *v = &voxels[i];
@@ -9136,7 +9154,7 @@ static int gather_static_voxels_near_point(Vector3 point, float radius, int *out
     for (int z = gz - 1; z <= gz + 1; ++z) {
         for (int y = gy - 1; y <= gy + 1; ++y) {
             for (int x = gx - 1; x <= gx + 1; ++x) {
-                int idx = table_get(x, y, z);
+                int idx = table_get_static_only(x, y, z);
                 if (idx < 0 || idx >= voxel_count) {
                     continue;
                 }
@@ -9177,7 +9195,7 @@ static int gather_static_voxels_near_voxel(const Voxel *voxel, int *out, int max
     for (int z = minz; z <= maxz; ++z) {
         for (int y = miny; y <= maxy; ++y) {
             for (int x = minx; x <= maxx; ++x) {
-                int idx = table_get(x, y, z);
+                int idx = table_get_static_only(x, y, z);
                 if (idx < 0 || idx >= voxel_count) {
                     continue;
                 }
@@ -9385,7 +9403,7 @@ static bool nudge_voxel_bottom_above_static(int voxel_idx, Voxel *voxel)
 
     for (int z = minz; z <= maxz; ++z) {
         for (int x = minx; x <= maxx; ++x) {
-            int idx = table_get(x, support_y, z);
+            int idx = table_get_static_only(x, support_y, z);
             if (idx < 0 || idx >= voxel_count) {
                 continue;
             }
@@ -9438,7 +9456,7 @@ static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx)
 
     for (int y = miny; y <= maxy; ++y) {
         for (int z = minz; z <= maxz; ++z) {
-            int idx = table_get(maxx + 1, y, z);
+            int idx = table_get_static_only(maxx + 1, y, z);
             if (idx < 0 || idx >= voxel_count) continue;
             Voxel *neighbor = &voxels[idx];
             if (neighbor->simulate || list_contains_index(processed, processed_count, idx)) continue;
@@ -9451,7 +9469,7 @@ static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx)
     }
     for (int y = miny; y <= maxy; ++y) {
         for (int z = minz; z <= maxz; ++z) {
-            int idx = table_get(minx - 1, y, z);
+            int idx = table_get_static_only(minx - 1, y, z);
             if (idx < 0 || idx >= voxel_count) continue;
             Voxel *neighbor = &voxels[idx];
             if (neighbor->simulate || list_contains_index(processed, processed_count, idx)) continue;
@@ -9464,7 +9482,7 @@ static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx)
     }
     for (int x = minx; x <= maxx; ++x) {
         for (int z = minz; z <= maxz; ++z) {
-            int idx = table_get(x, maxy + 1, z);
+            int idx = table_get_static_only(x, maxy + 1, z);
             if (idx < 0 || idx >= voxel_count) continue;
             Voxel *neighbor = &voxels[idx];
             if (neighbor->simulate || list_contains_index(processed, processed_count, idx)) continue;
@@ -9477,7 +9495,7 @@ static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx)
     }
     for (int x = minx; x <= maxx; ++x) {
         for (int z = minz; z <= maxz; ++z) {
-            int idx = table_get(x, miny - 1, z);
+            int idx = table_get_static_only(x, miny - 1, z);
             if (idx < 0 || idx >= voxel_count) continue;
             Voxel *neighbor = &voxels[idx];
             if (neighbor->simulate || list_contains_index(processed, processed_count, idx)) continue;
@@ -9490,7 +9508,7 @@ static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx)
     }
     for (int x = minx; x <= maxx; ++x) {
         for (int y = miny; y <= maxy; ++y) {
-            int idx = table_get(x, y, maxz + 1);
+            int idx = table_get_static_only(x, y, maxz + 1);
             if (idx < 0 || idx >= voxel_count) continue;
             Voxel *neighbor = &voxels[idx];
             if (neighbor->simulate || list_contains_index(processed, processed_count, idx)) continue;
@@ -9503,7 +9521,7 @@ static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx)
     }
     for (int x = minx; x <= maxx; ++x) {
         for (int y = miny; y <= maxy; ++y) {
-            int idx = table_get(x, y, minz - 1);
+            int idx = table_get_static_only(x, y, minz - 1);
             if (idx < 0 || idx >= voxel_count) continue;
             Voxel *neighbor = &voxels[idx];
             if (neighbor->simulate || list_contains_index(processed, processed_count, idx)) continue;
@@ -10161,6 +10179,7 @@ void simulate_voxel_pbd(float dt) {
         //reset_particle_mass_and_flags();
         //apply_shell_effective_mass();
         integrate_particles(sub_dt);
+        solve_static_collisions(sub_dt);
 
         for (int it = 0; it < constraint_iterations; ++it) {
             int snapshot_count = active_particle_count;
@@ -10176,6 +10195,8 @@ void simulate_voxel_pbd(float dt) {
             pbd_parallel_for(0, voxel_count, gather_voxel_shape_constraints_range, NULL);
             apply_particle_accumulators();
         }
+
+        solve_static_collisions(sub_dt);
 
         process_break_masks();
         update_wake_timers();
