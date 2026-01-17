@@ -395,6 +395,8 @@ static Particle particles_pool[MAX_PARTICLES];
 static Particle *active_particles[MAX_PARTICLES];
 static int particle_pool_count = 0;
 static int active_particle_count = 0;
+static int free_particle_indices[MAX_PARTICLES];
+static int free_particle_count = 0;
 static int particle_sync_stamp = 1;
 static int tether_apply_stamp = 1;
 static int particle_hash_head[PARTICLE_HASH_SIZE];
@@ -1514,6 +1516,7 @@ static Vector3 v_norm(Vector3 v) {
 static void reset_particle_pool(void) {
     particle_pool_count = 0;
     active_particle_count = 0;
+    free_particle_count = 0;
     particle_sync_stamp = 1;
     tether_apply_stamp = 1;
     memset(particles_pool, 0, sizeof(particles_pool));
@@ -1521,11 +1524,19 @@ static void reset_particle_pool(void) {
 }
 
 static Particle *particle_create(Vector3 pos, float inv_mass) {
-    if (particle_pool_count >= MAX_PARTICLES) {
-        return NULL;
+    Particle *p = NULL;
+    if (free_particle_count > 0) {
+        int idx = free_particle_indices[--free_particle_count];
+        if (idx >= 0 && idx < particle_pool_count) {
+            p = &particles_pool[idx];
+        }
     }
-
-    Particle *p = &particles_pool[particle_pool_count++];
+    if (!p) {
+        if (particle_pool_count >= MAX_PARTICLES) {
+            return NULL;
+        }
+        p = &particles_pool[particle_pool_count++];
+    }
     p->pos = pos;
     p->prev_pos = pos;
     p->predicted_pos = pos;
@@ -1554,11 +1565,19 @@ static Particle *particle_clone(const Particle *src) {
     if (!src) {
         return NULL;
     }
-    if (particle_pool_count >= MAX_PARTICLES) {
-        return NULL;
+    Particle *p = NULL;
+    if (free_particle_count > 0) {
+        int idx = free_particle_indices[--free_particle_count];
+        if (idx >= 0 && idx < particle_pool_count) {
+            p = &particles_pool[idx];
+        }
     }
-
-    Particle *p = &particles_pool[particle_pool_count++];
+    if (!p) {
+        if (particle_pool_count >= MAX_PARTICLES) {
+            return NULL;
+        }
+        p = &particles_pool[particle_pool_count++];
+    }
     *p = *src;
     p->refcount = 1;
     p->active = true;
@@ -1598,6 +1617,11 @@ static void particle_release(Particle *p) {
     }
     active_particles[last_idx] = NULL;
     active_particle_count--;
+    int pool_idx = (int)(p - particles_pool);
+    if (pool_idx >= 0 && pool_idx < particle_pool_count &&
+        free_particle_count < MAX_PARTICLES) {
+        free_particle_indices[free_particle_count++] = pool_idx;
+    }
 }
 
 static inline int particle_hash(int x, int y, int z) {
@@ -9780,7 +9804,7 @@ void simulate_voxel_pbd(float dt) {
             gather_particle_collisions(sub_dt);
             for (int i = 0; i < voxel_count; ++i) {
                 Voxel *voxel = &voxels[i];
-                if (!voxel->simulate || voxel->isBullet || !voxel->simulate_dofs || voxel->type != 0) {
+                if (!voxel->simulate || voxel->isBullet || /*!voxel->simulate_dofs ||*/ voxel->type != 0) {
                     continue;
                 }
                 gather_voxel_shape_constraints(voxel);
