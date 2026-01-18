@@ -194,7 +194,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define SHEAR_BREAK_THRESHOLD 100.2f
 #define PBD_MAX_ACCUM_STEPS 8
 #define COLLISION_RELAXATION 0.99f
-#define COLLISION_CENTROID_ONLY_DT 0.02f
+#define COLLISION_CENTROID_ONLY_DT 10.2f
 #define SPLIT_VELOCITY_DAMP 0.1f
 #define CENTER_RELAXATION 0.99f
 #define VELOCITY_DAMPING .99f
@@ -224,10 +224,11 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define GLUE_NEIGHBOR_HASH_SIZE 128
 #define MAX_SPLIT_CHILDREN    8
 static const float GRID_EPSILON = 1e-4f;
+static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define VOXEL_ACTIVATION_RADIUS 2*2
 //#define VOXEL_ACTIVATION_UNIT_BUDGET 128
 #define VOXEL_ACTIVATION_UNIT_BUDGET 128*5
-#define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 1.0f
+#define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 2.0f
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.4f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.4f
 #define VOXEL_DEACTIVATION_FRAMES 5
@@ -836,15 +837,15 @@ static int debugGlueBreakLogBudget = 0;
 static const int DEBUG_GLUE_BUILD_LOG_INIT = 64;
 static const int DEBUG_GLUE_SOLVE_LOG_INIT = 64;
 static const int DEBUG_GLUE_BREAK_LOG_INIT = 16;
-static bool debugLogActivation = false;
+static bool debugLogActivation = true;
 static const int DEBUG_ACTIVATION_LOG_INIT = 64;
 static int activationGlueLogBudget = 0;
 static int activationLogStart = -1;
 static int activationLogEnd = -1;
-static bool debugLogVoxelDeactivation = false;
+static bool debugLogVoxelDeactivation = true;
 static FILE *debugLogFile = NULL;
-static bool logsEnabled = false;
-static int logLevelEnabled = LOG_DEBUG;
+static bool logsEnabled = true;
+static int logLevelEnabled = LOG_ALL;
 static int debugSupportLogBudget = 512;
 static const float DEBUG_FALL_LOG_THRESHOLD = -5.0f;
 static const int DEBUG_FALL_LOG_BUDGET = 32;
@@ -4830,9 +4831,11 @@ static bool voxel_connected_to_static_world(const Voxel *voxel)
         return false;
     }
 
+    // Use particle bounds so ground contact reflects actual PBD state.
     VoxelWorldBounds bounds;
-    voxel_world_bounds(voxel, &bounds);
-    if (bounds.miny <= GRID_EPSILON) {
+    voxel_particle_world_bounds(voxel, &bounds);
+    float contact_miny = bounds.miny;
+    if (contact_miny <= STATIC_SUPPORT_GROUND_EPS) {
         return true;
     }
 
@@ -5921,7 +5924,7 @@ static void buildDebugWorld(void) {
         float px = -2.0f * VOXEL_SIZE;
         float pz = 2.0f * VOXEL_SIZE;
         float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
-        addVoxelSized(px, py, pz, false, true, (Color){ 240, 160, 60, 255 }, 0, span);
+        addVoxel(px, py, pz, false, true, (Color){ 240, 160, 60, 255 }, 0);
     }
     // {
     //     int span = 7;
@@ -7561,7 +7564,7 @@ static void gather_particle_scene_collisions_range(int start, int end, int worke
         Vector3 pos = p->predicted_pos;
 
         if (pos.y < voxel_radius) {
-            pos.y = voxel_radius;
+            //pos.y = voxel_radius;
         }
 
         for (int player_idx = 0; player_idx < activePlayers; ++player_idx) {
@@ -10181,7 +10184,6 @@ void simulate_voxel_pbd(float dt) {
         //reset_particle_mass_and_flags();
         //apply_shell_effective_mass();
         integrate_particles(sub_dt);
-        solve_static_collisions(sub_dt);
 
         for (int it = 0; it < constraint_iterations; ++it) {
             int snapshot_count = sim_particle_count;
@@ -10198,7 +10200,6 @@ void simulate_voxel_pbd(float dt) {
             apply_particle_accumulators();
         }
 
-        solve_static_collisions(sub_dt);
 
         process_break_masks();
         update_wake_timers();
@@ -12528,7 +12529,7 @@ static void UpdateBot(int playerIdx, float dt) {
 int main(void) {
     int countFrame = 0;
     SetLoggingEnabled(false);
-    SetTraceLogLevel(LOG_NONE);
+    SetTraceLogLevel(LOG_ALL);
     // init window and render textures
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Split-Screen FPS (raylib)");
     SetWindowState(FLAG_WINDOW_RESIZABLE);
