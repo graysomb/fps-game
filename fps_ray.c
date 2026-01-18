@@ -3324,6 +3324,8 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     return idx;
 }
 
+static void glue_dynamic_face_to_static(Voxel *dynamic, Voxel *stat, int face_dynamic, int face_static);
+
 static void glue_neighbor_faces_for_voxel(int voxel_idx) {
     if (voxel_idx < 0 || voxel_idx >= voxel_count) {
         return;
@@ -3334,44 +3336,49 @@ static void glue_neighbor_faces_for_voxel(int voxel_idx) {
         return;
     }
 
-    static const int axis_offsets[3][3] = {
-        { 1, 0, 0 },
-        { 0, 1, 0 },
-        { 0, 0, 1 }
-    };
-    static const int positive_face[3] = { 0, 2, 4 };
-    static const int negative_face[3] = { 1, 3, 5 };
+    for (int f = 0; f < 6; ++f) {
+        int nx = a->gx + face_offsets[f][0];
+        int ny = a->gy + face_offsets[f][1];
+        int nz = a->gz + face_offsets[f][2];
 
-    for (int axis = 0; axis < 3; ++axis) {
-        int nx = a->gx + axis_offsets[axis][0];
-        int ny = a->gy + axis_offsets[axis][1];
-        int nz = a->gz + axis_offsets[axis][2];
-
+        // Check static neighbors first (fast path for mixed clusters)
         int neighbor_idx = table_get(nx, ny, nz);
         if (neighbor_idx < 0) {
+            // Also check pure static table if dynamic table missed (e.g. during build)
+            neighbor_idx = table_get_static_only(nx, ny, nz);
+        }
+        
+        if (neighbor_idx < 0 || neighbor_idx >= voxel_count) {
             continue;
         }
 
         Voxel *b = &voxels[neighbor_idx];
-        if (!b->simulate || b->isBullet || !b->glueEligible) {
+        int faceA = f;
+        int faceB = opposite_face[f];
+
+        if (!b->simulate) {
+            glue_dynamic_face_to_static(a, b, faceA, faceB);
             continue;
         }
 
-        int faceA = positive_face[axis];
-        int faceB = negative_face[axis];
+        if (b->isBullet || !b->glueEligible) {
+            continue;
+        }
 
+        // Dynamic-Dynamic Glue
+        // 'a' adopts 'b's particles to merge into existing cluster
         for (int c = 0; c < 4; ++c) {
             int ia = face_corner_indices[faceA][c];
             int ib = face_corner_indices[faceB][c];
 
-            Particle *shared = a->particles[ia];
-            Particle *old = b->particles[ib];
+            Particle *shared = b->particles[ib]; // Existing neighbor particle
+            Particle *old = a->particles[ia];    // My new particle
             if (shared == old) {
                 continue;
             }
             particle_release(old);
             particle_retain(shared);
-            b->particles[ib] = shared;
+            a->particles[ia] = shared;
         }
 
         a->glued_faces[faceA] = true;
@@ -6965,8 +6972,11 @@ static void solve_voxel_shape(Voxel *voxel) {
             needs_reset = true;
         }
         p[i] = part->predicted_pos;
-        w[i] = part->inv_mass;
-        if (w[i] > 0.0f) {
+        
+        if (part->inv_mass <= 0.0f) {
+            w[i] = 1.0f; // Anchor
+        } else {
+            w[i] = part->inv_mass;
             has_dynamic = true;
         }
     }
@@ -7129,8 +7139,11 @@ static void gather_voxel_shape_constraints(Voxel *voxel) {
         Particle *part = voxel->particles[i];
         p[i] = part->predicted_pos;
         orig[i] = part->predicted_pos;
-        w[i] = part->inv_mass;
-        if (w[i] > 0.0f) {
+        
+        if (part->inv_mass <= 0.0f) {
+            w[i] = 1.0f; // Anchor static particles so they influence the shape fit!
+        } else {
+            w[i] = part->inv_mass;
             has_dynamic = true;
         }
     }
@@ -8565,11 +8578,8 @@ static void solve_static_collisions(float dt) {
         }
         float voxel_radius = voxel_particle_radius(voxel);
         float terrain_limit = FLOOR_SIZE - voxel_radius;
-        float static_collision_radius = voxel_radius;
-        float min_static_radius = 0.5f * VOXEL_SIZE;
-        if (static_collision_radius < min_static_radius) {
-            static_collision_radius = min_static_radius;
-        }
+        // Reduce static collision radius to allow flush seating of corners
+        float static_collision_radius = 0.01f * VOXEL_SIZE;
 
         for (int j = particle_start; j < particle_end; ++j) {
             Particle *p = voxel_particle_at(voxel, j);
