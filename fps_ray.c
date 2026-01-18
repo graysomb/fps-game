@@ -3463,9 +3463,9 @@ static int emit_unit_voxels_from_units(const UnitVoxelBuffer *buffer,
             voxels[new_idx].debugClusterTag = seed->debugTag;
             voxels[new_idx].activator = seed->activator;;
 
-            // if (simulate) {
-                //glue_neighbor_faces_for_voxel(new_idx); // I think that I'm doing this per voxel is the issue
-            // }
+            if (simulate) {
+                glue_neighbor_faces_for_voxel(new_idx); 
+            }
             ++spawned;
         }
     }
@@ -5672,7 +5672,8 @@ static void buildDebugWorld(void) {
             for ( int z = 0; z < span; z++){
                 for ( int y = 0; y < span; y++){
             addVoxel(px + x * VOXEL_SIZE, py + y * VOXEL_SIZE, pz + z * VOXEL_SIZE,
-                     true, false, (Color){ 240, 160, 60, 255 }, 0);
+                     //true, false, (Color){ 240, 160, 60, 255 }, 0);
+                     false, true, (Color){ 240, 160, 60, 255 }, 0);
                 }
             }
 
