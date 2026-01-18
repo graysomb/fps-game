@@ -822,9 +822,9 @@ static int debugGlueBreakLogBudget = 0;
 static const int DEBUG_GLUE_BUILD_LOG_INIT = 64;
 static const int DEBUG_GLUE_SOLVE_LOG_INIT = 64;
 static const int DEBUG_GLUE_BREAK_LOG_INIT = 16;
-static bool debugLogActivation = true;
+static bool debugLogActivation = false;
 static const int DEBUG_ACTIVATION_LOG_INIT = 64;
-static bool debugLogVoxelDeactivation = true;
+static bool debugLogVoxelDeactivation = false;
 static FILE *debugLogFile = NULL;
 static bool logsEnabled = true;
 static int logLevelEnabled = LOG_ALL;
@@ -3461,10 +3461,11 @@ static int emit_unit_voxels_from_units(const UnitVoxelBuffer *buffer,
         int new_idx = addVoxel(px, py, pz, fixed, simulate, color, spawn_type);
         if (new_idx >= 0) {
             voxels[new_idx].debugClusterTag = seed->debugTag;
-            voxels[new_idx].activator = seed->activator;
-            if (simulate) {
-                glue_neighbor_faces_for_voxel(new_idx);
-            }
+            voxels[new_idx].activator = seed->activator;;
+
+            // if (simulate) {
+                //glue_neighbor_faces_for_voxel(new_idx); // I think that I'm doing this per voxel is the issue
+            // }
             ++spawned;
         }
     }
@@ -3741,6 +3742,14 @@ static bool dynamic_belief_overcomes_static(float dynamicBelief, float frozenBel
     return weightedDynamic >= weightedFrozen;
 }
 
+static int compare_unit_voxel_seed(const void *a, const void *b) {
+    const UnitVoxelSeed *ua = (const UnitVoxelSeed *)a;
+    const UnitVoxelSeed *ub = (const UnitVoxelSeed *)b;
+    if (ua->gz != ub->gz) return ua->gz - ub->gz;
+    if (ua->gy != ub->gy) return ua->gy - ub->gy;
+    return ua->gx - ub->gx;
+}
+
 static bool activate_static_voxels_near_dynamic(void)
 {
     static UnitVoxelBuffer buffer;
@@ -3755,7 +3764,7 @@ static bool activate_static_voxels_near_dynamic(void)
             break;
         }
         Voxel *dynamic = &voxels[i];
-        if (!dynamic->simulate || dynamic->type == 1 || dynamic->type == 2 || dynamic->isBullet) {
+        if (!dynamic->simulate || dynamic->type == 1 || dynamic->type == 2) {
             continue;
         }
         if (dynamic->activationCooldownFrames > 0) {
@@ -3825,6 +3834,8 @@ static bool activate_static_voxels_near_dynamic(void)
     if (buffer.count <= 0) {
         return false;
     }
+
+    qsort(buffer.voxels, (size_t)buffer.count, sizeof(UnitVoxelSeed), compare_unit_voxel_seed);
 
     remove_buffered_static_voxels(&buffer);
     int activation_base = voxel_count;
@@ -5661,7 +5672,7 @@ static void buildDebugWorld(void) {
             for ( int z = 0; z < span; z++){
                 for ( int y = 0; y < span; y++){
             addVoxel(px + x * VOXEL_SIZE, py + y * VOXEL_SIZE, pz + z * VOXEL_SIZE,
-                     false, true, (Color){ 240, 160, 60, 255 }, 0);
+                     true, false, (Color){ 240, 160, 60, 255 }, 0);
                 }
             }
 
@@ -6447,11 +6458,11 @@ static void update_projectiles(float dt)
                     if (activator < 0) {
                         activator = v->owner;
                     }
-                    if (activate_static_neighbors_of_region(minx, maxx, miny, maxy, minz, maxz,
-                                                            activator,
-                                                            ACTIVATION_TYPE0_BULLET_BELIEF)) {
-                        static_changed = true;
-                    }
+                    // if (activate_static_neighbors_of_region(minx, maxx, miny, maxy, minz, maxz,
+                    //                                         activator,
+                    //                                         ACTIVATION_TYPE0_BULLET_BELIEF)) {
+                    //     static_changed = true;
+                    // }
                 }
             }
 
@@ -9006,15 +9017,18 @@ static void FireVoxel(int idx) {
         Voxel *shot = &voxels[vix];
         Vector3 vel = v_mul(dir, 60.0f);
         shot->vel = vel;
-        shot->owner = idx;
-        shot->activator = idx;
-        shot->isBullet = true;
-        shot->glueEligible = false;
+        // shot->owner = idx;
+        // shot->activator = idx;
+        // shot->isBullet = false;
+        // shot->glueEligible = false;
+        // shot->simulate = true;
+        // shot->activationBelief = ACTIVATION_TYPE0_BULLET_BELIEF;
         for (int i = 0; i < 8; ++i) {
             shot->particles[i]->vel = vel;
-            shot->particles[i]->inv_mass = 0.0f;
-            shot->particles[i]->base_inv_mass = 0.0f;
-            sim_particles_remove(shot->particles[i]);
+            shot->particles[i]->inv_mass = 1.0f;
+            shot->particles[i]->base_inv_mass = 1.0f;
+            // shot->particles[i]->active = true;
+            // sim_particles_remove(shot->particles[i]);
         }
         play_sfx(SFX_FIRE);
     }
@@ -11585,7 +11599,7 @@ int main(void) {
         }
 
         activate_static_voxels_near_dynamic();
-        batch_glued_dynamic_voxels();
+        //batch_glued_dynamic_voxels();
         //update voxel physics
         int subStep = 1;
         for( int i = 0; i < subStep; i++){
