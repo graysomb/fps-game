@@ -3891,7 +3891,7 @@ static bool activate_all_static_voxels(int activator)
     if (activated) {
         rebuild_voxel_hash();
         rebuild_all_voxel_surfaces();
-        rebuild_glue_constraints();
+        //rebuild_glue_constraints();
         glue_dynamic_voxel_to_static_neighbors();
         refresh_static_voxel_beliefs();
         meshDirty = true;
@@ -8645,87 +8645,8 @@ static void solve_static_collisions(float dt) {
 
 // Unified solver for dynamic-dynamic collisions
 static void solve_dynamic_collisions(float dt) {
-    const float omega = COLLISION_RELAXATION;
-    const float eps = 1e-6f;
-    const bool centroid_only = (dt > COLLISION_CENTROID_ONLY_DT);
-    const int particle_start = centroid_only ? VOXEL_CENTER_INDEX : 0;
-    const int particle_end = centroid_only ? (VOXEL_CENTER_INDEX + 1) : VOXEL_PARTICLE_COUNT;
-
-    static int glue_cluster_id[MAX_VOXELS];
-    if (skipGlueClusterCollisions) {
-        build_glue_cluster_ids(glue_cluster_id);
-    }
-    
-    for (int i = 0; i < voxel_count; ++i) {
-        Voxel *voxelA = &voxels[i];
-        if (!voxelA->simulate || voxelA->type != 0 || voxelA->isBullet) {
-            continue;
-        }
-
-        int neighbor_ids[MAX_NEIGHBOR_VOXELS];
-        int neighbor_count = gather_neighbor_voxels(voxelA, i, neighbor_ids, MAX_NEIGHBOR_VOXELS);
-
-        for (int n = 0; n < neighbor_count; ++n) {
-            int neighbor_idx = neighbor_ids[n];
-            if (neighbor_idx <= i) continue;
-
-            Voxel *voxelB = &voxels[neighbor_idx];
-            
-            if (voxels_are_glued(i, neighbor_idx)) continue;
-            if (voxels_share_edge_or_corner(voxelA, voxelB)) continue;
-            if (skipGlueClusterCollisions &&
-                glue_cluster_id[i] >= 0 && glue_cluster_id[i] == glue_cluster_id[neighbor_idx]) continue;
-
-            VoxelWorldBounds boundsA;
-            voxel_predicted_bounds(voxelA, &boundsA);
-            VoxelWorldBounds boundsB;
-            voxel_predicted_bounds(voxelB, &boundsB);
-            float radiusA = voxel_particle_radius(voxelA);
-            float radiusB = voxel_particle_radius(voxelB);
-
-            if (boundsA.maxx + radiusA < boundsB.minx - radiusB ||
-                boundsB.maxx + radiusB < boundsA.minx - radiusA ||
-                boundsA.maxy + radiusA < boundsB.miny - radiusB ||
-                boundsB.maxy + radiusB < boundsA.miny - radiusA ||
-                boundsA.maxz + radiusA < boundsB.minz - radiusB ||
-                boundsB.maxz + radiusB < boundsA.minz - radiusA) {
-                continue;
-            }
-
-            float target_dist_base = radiusA + radiusB;
-
-            for (int j = particle_start; j < particle_end; ++j) {
-                Particle *pa = voxel_particle_at(voxelA, j);
-                float wa = pa->inv_mass;
-
-                for (int q = particle_start; q < particle_end; ++q) {
-                    if (j < VOXEL_CORNER_COUNT && q < VOXEL_CORNER_COUNT) {
-                        if (particles_are_glued_pair(i, j, neighbor_idx, q)) continue;
-                    }
-
-                    Particle *pb = voxel_particle_at(voxelB, q);
-                    float wb = pb->inv_mass;
-                    float w_sum = wa + wb;
-                    if (w_sum <= 0.0f) continue;
-
-                    Vector3 delta = v_sub(pa->predicted_pos, pb->predicted_pos);
-                    float dist_sq = v_dot(delta, delta);
-
-                    if (dist_sq >= (target_dist_base * target_dist_base)) continue;
-
-                    float dist = sqrtf(fmaxf(dist_sq, eps));
-                    float penetration = target_dist_base - dist;
-                    if (penetration <= 0.0f) continue;
-
-                    Vector3 normal = (dist > eps) ? v_mul(delta, 1.0f / dist) : (Vector3){ 1.0f, 0.0f, 0.0f };
-                    float h = 0.5f * penetration;
-                    float scale = omega * h / w_sum;
-                    if (wa > 0.0f) pa->predicted_pos = v_add(pa->predicted_pos, v_mul(normal, scale * wa));
-                    if (wb > 0.0f) pb->predicted_pos = v_sub(pb->predicted_pos, v_mul(normal, scale * wb));
-                }
-            }
-        }
-    }
+    // Redundant: gather_particle_collisions handles this via spatial hashing.
+    (void)dt;
 }
 
 static void update_particle_velocities(float dt) {
