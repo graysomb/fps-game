@@ -163,7 +163,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define ACTIVATION_GLUE_WEIGHT     0.1f
 #define ACTIVATION_GLUE_REF_SPEED  3.0f
 #define ACTIVATION_DYNAMIC_WEIGHT  0.5f
-#define ACTIVATION_TYPE0_BULLET_BELIEF 0.3f
+#define ACTIVATION_TYPE0_BULLET_BELIEF 1000.3f
 #define ACTIVATION_TETHER_BELIEF 20.0f
 #define FREEZE_BELIEF_IMPORTANCE   0.8f
 #define ACTIVATION_HYSTERESIS      0.1f
@@ -201,8 +201,8 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define GLUE_RELAXATION 0.9f
 //#define GLUE_EPS 1e-6f
 #define GLUE_EPS 0.0002f
-#define GLUE_BREAK_STRAIN 0.2f
-#define GLUE_BREAK_HINGE_ANGLE_DEG 10.0f
+#define GLUE_BREAK_STRAIN 100.2f
+#define GLUE_BREAK_HINGE_ANGLE_DEG 100.0f
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 3
 #define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
 #define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
@@ -344,6 +344,7 @@ typedef struct {
     int refcount;
     bool active;
     int active_index;
+    int sim_index;
     int break_timer;
     int extra_mass;
     bool touched_by_simulated;
@@ -410,8 +411,10 @@ static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
 static Particle particles_pool[MAX_PARTICLES];
 static Particle *active_particles[MAX_PARTICLES];
+static Particle *sim_particles[MAX_PARTICLES];
 static int particle_pool_count = 0;
 static int active_particle_count = 0;
+static int sim_particle_count = 0;
 static int free_particle_indices[MAX_PARTICLES];
 static int free_particle_count = 0;
 static int particle_sync_stamp = 1;
@@ -1718,11 +1721,37 @@ static Vector3 v_norm(Vector3 v) {
 static void reset_particle_pool(void) {
     particle_pool_count = 0;
     active_particle_count = 0;
+    sim_particle_count = 0;
     free_particle_count = 0;
     particle_sync_stamp = 1;
     tether_apply_stamp = 1;
     memset(particles_pool, 0, sizeof(particles_pool));
     memset(active_particles, 0, sizeof(active_particles));
+    memset(sim_particles, 0, sizeof(sim_particles));
+}
+
+static void sim_particles_add(Particle *p) {
+    if (!p || p->sim_index >= 0) {
+        return;
+    }
+    p->sim_index = sim_particle_count;
+    sim_particles[sim_particle_count++] = p;
+}
+
+static void sim_particles_remove(Particle *p) {
+    if (!p || p->sim_index < 0 || p->sim_index >= sim_particle_count) {
+        return;
+    }
+    int idx = p->sim_index;
+    int last_idx = sim_particle_count - 1;
+    if (idx != last_idx) {
+        Particle *swap = sim_particles[last_idx];
+        sim_particles[idx] = swap;
+        swap->sim_index = idx;
+    }
+    sim_particles[last_idx] = NULL;
+    sim_particle_count--;
+    p->sim_index = -1;
 }
 
 static Particle *particle_create(Vector3 pos, float inv_mass) {
@@ -1753,7 +1782,11 @@ static Particle *particle_create(Vector3 pos, float inv_mass) {
     p->refcount = 1;
     p->active = true;
     p->active_index = active_particle_count;
+    p->sim_index = -1;
     active_particles[active_particle_count++] = p;
+    if (inv_mass > 0.0f) {
+        sim_particles_add(p);
+    }
     p->break_timer = 0;
     p->extra_mass = 0;
     p->touched_by_simulated = false;
@@ -1786,7 +1819,11 @@ static Particle *particle_clone(const Particle *src) {
     p->refcount = 1;
     p->active = true;
     p->active_index = active_particle_count;
+    p->sim_index = -1;
     active_particles[active_particle_count++] = p;
+    if (p->base_inv_mass > 0.0f) {
+        sim_particles_add(p);
+    }
     atomic_store_explicit(&p->corr_sum_x, float_to_bits(0.0f), memory_order_relaxed);
     atomic_store_explicit(&p->corr_sum_y, float_to_bits(0.0f), memory_order_relaxed);
     atomic_store_explicit(&p->corr_sum_z, float_to_bits(0.0f), memory_order_relaxed);
@@ -1811,6 +1848,7 @@ static void particle_release(Particle *p) {
         return;
     }
     p->active = false;
+    sim_particles_remove(p);
     int idx = p->active_index;
     if (idx < 0 || idx >= active_particle_count) {
         return;
@@ -1906,7 +1944,7 @@ static void reset_particle_accumulators_range(int start, int end, int worker_id,
     (void)worker_id;
     (void)user;
     for (int i = start; i < end; ++i) {
-        Particle *p = active_particles[i];
+        Particle *p = sim_particles[i];
         atomic_store_explicit(&p->corr_sum_x, float_to_bits(0.0f), memory_order_relaxed);
         atomic_store_explicit(&p->corr_sum_y, float_to_bits(0.0f), memory_order_relaxed);
         atomic_store_explicit(&p->corr_sum_z, float_to_bits(0.0f), memory_order_relaxed);
@@ -1915,14 +1953,14 @@ static void reset_particle_accumulators_range(int start, int end, int worker_id,
 }
 
 static void reset_particle_accumulators(void) {
-    pbd_parallel_for(0, active_particle_count, reset_particle_accumulators_range, NULL);
+    pbd_parallel_for(0, sim_particle_count, reset_particle_accumulators_range, NULL);
 }
 
 static void apply_particle_accumulators_range(int start, int end, int worker_id, void *user) {
     (void)worker_id;
     (void)user;
     for (int i = start; i < end; ++i) {
-        Particle *p = active_particles[i];
+        Particle *p = sim_particles[i];
         float corr_weight = bits_to_float(atomic_load_explicit(&p->corr_weight_bits, memory_order_relaxed));
         if (corr_weight <= 0.0f) {
             atomic_store_explicit(&p->corr_sum_x, float_to_bits(0.0f), memory_order_relaxed);
@@ -1946,7 +1984,7 @@ static void apply_particle_accumulators_range(int start, int end, int worker_id,
 }
 
 static void apply_particle_accumulators(void) {
-    pbd_parallel_for(0, active_particle_count, apply_particle_accumulators_range, NULL);
+    pbd_parallel_for(0, sim_particle_count, apply_particle_accumulators_range, NULL);
 }
 
 static bool face_local_coords(const Vector3 origin,
@@ -4052,6 +4090,7 @@ static bool activate_static_voxels_near_dynamic(void)
     rebuild_voxel_hash();
     rebuild_all_voxel_surfaces();
     rebuild_glue_constraints();
+    glue_dynamic_voxel_to_static_neighbors();
     if (debugLogActivation) {
         log_activation_new_spans(activation_base, voxel_count);
         log_activation_glue_mismatches(activation_base, voxel_count);
@@ -4100,6 +4139,7 @@ static bool activate_all_static_voxels(int activator)
         rebuild_voxel_hash();
         rebuild_all_voxel_surfaces();
         rebuild_glue_constraints();
+        glue_dynamic_voxel_to_static_neighbors();
         refresh_static_voxel_beliefs();
         meshDirty = true;
     }
@@ -6229,6 +6269,7 @@ static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float
     rebuild_voxel_hash();
     rebuild_all_voxel_surfaces();
     rebuild_glue_constraints();
+    glue_dynamic_voxel_to_static_neighbors();
     refresh_static_voxel_beliefs();
     meshDirty = true;
     return true;
@@ -6731,7 +6772,8 @@ static void update_projectiles(float dt)
     if (static_changed) {
         rebuild_voxel_hash();
         rebuild_all_voxel_surfaces();
-        //rebuild_glue_constraints();
+        rebuild_glue_constraints();
+        glue_dynamic_voxel_to_static_neighbors();
         meshDirty = true;
     }
 }
@@ -6886,8 +6928,8 @@ static void update_voxel_coarsening_state(void) {
 }
 
 static void reset_particle_mass_and_flags(void) {
-    for (int i = 0; i < active_particle_count; ++i) {
-        Particle *p = active_particles[i];
+    for (int i = 0; i < sim_particle_count; ++i) {
+        Particle *p = sim_particles[i];
         p->inv_mass = p->base_inv_mass;
         p->extra_mass = 0;
         p->touched_by_simulated = false;
@@ -6928,8 +6970,8 @@ static void apply_shell_effective_mass(void) {
         }
     }
 
-    for (int i = 0; i < active_particle_count; ++i) {
-        Particle *p = active_particles[i];
+    for (int i = 0; i < sim_particle_count; ++i) {
+        Particle *p = sim_particles[i];
         if (p->base_inv_mass <= 0.0f || p->extra_mass <= 0) {
             p->inv_mass = p->base_inv_mass;
             continue;
@@ -7043,8 +7085,8 @@ static void apply_interior_sync(const Vector3 avg_delta[8], const int counts[8])
 }
 
 static void decrement_particle_timers(void) {
-    for (int i = 0; i < active_particle_count; ++i) {
-        Particle *p = active_particles[i];
+    for (int i = 0; i < sim_particle_count; ++i) {
+        Particle *p = sim_particles[i];
         if (p->break_timer > 0) {
             p->break_timer--;
         }
@@ -7065,7 +7107,7 @@ static void integrate_particles_range(int start, int end, int worker_id, void *u
     const float dt_sq = job->dt_sq;
 
     for (int i = start; i < end; ++i) {
-        Particle *p = active_particles[i];
+        Particle *p = sim_particles[i];
 
         p->prev_pos = p->pos;
         p->predicted_pos = p->pos;
@@ -7087,7 +7129,7 @@ static void integrate_particles(float dt) {
     const float dt_sq = dt * dt;
 
     IntegrateParticlesJob job = { .gravity = gravity, .dt = dt, .dt_sq = dt_sq };
-    pbd_parallel_for(0, active_particle_count, integrate_particles_range, &job);
+    pbd_parallel_for(0, sim_particle_count, integrate_particles_range, &job);
 
     int stamp = ++tether_apply_stamp;
     if (stamp == 0) {
@@ -7598,7 +7640,7 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
 
                     int head = atomic_load_explicit(&particle_hash_head[h], memory_order_relaxed);
                     for (int idx = head; idx != -1; idx = particle_hash_next[idx]) {
-                        if (idx < 0 || idx >= active_particle_count) {
+                        if (idx < 0 || idx >= count) {
                             break;
                         }
                         Particle *pb = list[idx];
@@ -9438,6 +9480,30 @@ static bool nudge_voxel_bottom_above_static(int voxel_idx, Voxel *voxel)
     return true;
 }
 
+static void glue_dynamic_face_to_static(Voxel *dynamic, Voxel *stat,
+                                        int face_dynamic, int face_static)
+{
+    if (!dynamic || !stat) {
+        return;
+    }
+    for (int c = 0; c < 4; ++c) {
+        int dyn_corner = face_corner_indices[face_dynamic][c];
+        int stat_corner = face_corner_indices[face_static][c];
+        Particle *shared = stat->particles[stat_corner];
+        Particle *old = dynamic->particles[dyn_corner];
+        if (shared == old) {
+            continue;
+        }
+        if (old) {
+            particle_release(old);
+        }
+        particle_retain(shared);
+        dynamic->particles[dyn_corner] = shared;
+    }
+    dynamic->glued_faces[face_dynamic] = true;
+    stat->glued_faces[face_static] = true;
+}
+
 static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx)
 {
     if (voxel_idx < 0 || voxel_idx >= voxel_count) {
@@ -9448,89 +9514,22 @@ static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx)
         return;
     }
 
-    int processed[MAX_FACE_NEIGHBORS];
-    int processed_count = 0;
-
-    int minx, maxx, miny, maxy, minz, maxz;
-    voxel_grid_bounds(dynamic, &minx, &maxx, &miny, &maxy, &minz, &maxz);
-
-    for (int y = miny; y <= maxy; ++y) {
-        for (int z = minz; z <= maxz; ++z) {
-            int idx = table_get_static_only(maxx + 1, y, z);
-            if (idx < 0 || idx >= voxel_count) continue;
-            Voxel *neighbor = &voxels[idx];
-            if (neighbor->simulate || list_contains_index(processed, processed_count, idx)) continue;
-            bool prevEligible = neighbor->glueEligible;
-            neighbor->glueEligible = true;
-            rebuild_glue_between_pair(voxel_idx, idx);
-            neighbor->glueEligible = prevEligible;
-            if (processed_count < MAX_FACE_NEIGHBORS) processed[processed_count++] = idx;
+    for (int face = 0; face < 6; ++face) {
+        int nx = dynamic->gx + face_offsets[face][0];
+        int ny = dynamic->gy + face_offsets[face][1];
+        int nz = dynamic->gz + face_offsets[face][2];
+        int idx = table_get_static_only(nx, ny, nz);
+        if (idx < 0 || idx >= voxel_count) {
+            continue;
         }
-    }
-    for (int y = miny; y <= maxy; ++y) {
-        for (int z = minz; z <= maxz; ++z) {
-            int idx = table_get_static_only(minx - 1, y, z);
-            if (idx < 0 || idx >= voxel_count) continue;
-            Voxel *neighbor = &voxels[idx];
-            if (neighbor->simulate || list_contains_index(processed, processed_count, idx)) continue;
-            bool prevEligible = neighbor->glueEligible;
-            neighbor->glueEligible = true;
-            rebuild_glue_between_pair(voxel_idx, idx);
-            neighbor->glueEligible = prevEligible;
-            if (processed_count < MAX_FACE_NEIGHBORS) processed[processed_count++] = idx;
+        Voxel *neighbor = &voxels[idx];
+        if (neighbor->simulate) {
+            continue;
         }
-    }
-    for (int x = minx; x <= maxx; ++x) {
-        for (int z = minz; z <= maxz; ++z) {
-            int idx = table_get_static_only(x, maxy + 1, z);
-            if (idx < 0 || idx >= voxel_count) continue;
-            Voxel *neighbor = &voxels[idx];
-            if (neighbor->simulate || list_contains_index(processed, processed_count, idx)) continue;
-            bool prevEligible = neighbor->glueEligible;
-            neighbor->glueEligible = true;
-            rebuild_glue_between_pair(voxel_idx, idx);
-            neighbor->glueEligible = prevEligible;
-            if (processed_count < MAX_FACE_NEIGHBORS) processed[processed_count++] = idx;
+        if (dynamic->span != neighbor->span) {
+            continue;
         }
-    }
-    for (int x = minx; x <= maxx; ++x) {
-        for (int z = minz; z <= maxz; ++z) {
-            int idx = table_get_static_only(x, miny - 1, z);
-            if (idx < 0 || idx >= voxel_count) continue;
-            Voxel *neighbor = &voxels[idx];
-            if (neighbor->simulate || list_contains_index(processed, processed_count, idx)) continue;
-            bool prevEligible = neighbor->glueEligible;
-            neighbor->glueEligible = true;
-            rebuild_glue_between_pair(voxel_idx, idx);
-            neighbor->glueEligible = prevEligible;
-            if (processed_count < MAX_FACE_NEIGHBORS) processed[processed_count++] = idx;
-        }
-    }
-    for (int x = minx; x <= maxx; ++x) {
-        for (int y = miny; y <= maxy; ++y) {
-            int idx = table_get_static_only(x, y, maxz + 1);
-            if (idx < 0 || idx >= voxel_count) continue;
-            Voxel *neighbor = &voxels[idx];
-            if (neighbor->simulate || list_contains_index(processed, processed_count, idx)) continue;
-            bool prevEligible = neighbor->glueEligible;
-            neighbor->glueEligible = true;
-            rebuild_glue_between_pair(voxel_idx, idx);
-            neighbor->glueEligible = prevEligible;
-            if (processed_count < MAX_FACE_NEIGHBORS) processed[processed_count++] = idx;
-        }
-    }
-    for (int x = minx; x <= maxx; ++x) {
-        for (int y = miny; y <= maxy; ++y) {
-            int idx = table_get_static_only(x, y, minz - 1);
-            if (idx < 0 || idx >= voxel_count) continue;
-            Voxel *neighbor = &voxels[idx];
-            if (neighbor->simulate || list_contains_index(processed, processed_count, idx)) continue;
-            bool prevEligible = neighbor->glueEligible;
-            neighbor->glueEligible = true;
-            rebuild_glue_between_pair(voxel_idx, idx);
-            neighbor->glueEligible = prevEligible;
-            if (processed_count < MAX_FACE_NEIGHBORS) processed[processed_count++] = idx;
-        }
+        glue_dynamic_face_to_static(dynamic, neighbor, face, opposite_face[face]);
     }
 }
 
@@ -9906,8 +9905,8 @@ static void solve_dynamic_collisions(float dt) {
 static void update_particle_velocities(float dt) {
     float inv_dt = (dt > 0.0f) ? 1.0f / dt : 0.0f;
 
-    for (int i = 0; i < active_particle_count; ++i) {
-        Particle *p = active_particles[i];
+    for (int i = 0; i < sim_particle_count; ++i) {
+        Particle *p = sim_particles[i];
         Vector3 new_pos = p->predicted_pos;
         Vector3 delta = v_sub(new_pos, p->prev_pos);
 
@@ -10164,6 +10163,9 @@ static bool cull_dust_voxels(void) {
 }
 
 void simulate_voxel_pbd(float dt) {
+    if (sim_particle_count <= 0) {
+        return;
+    }
     const int substeps = PBD_SUBSTEPS;
     const int constraint_iterations = PBD_CONSTRAINT_ITERS;
     const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
@@ -10182,12 +10184,12 @@ void simulate_voxel_pbd(float dt) {
         solve_static_collisions(sub_dt);
 
         for (int it = 0; it < constraint_iterations; ++it) {
-            int snapshot_count = active_particle_count;
+            int snapshot_count = sim_particle_count;
             if (snapshot_count > MAX_PARTICLES) {
                 snapshot_count = MAX_PARTICLES;
             }
             for (int i = 0; i < snapshot_count; ++i) {
-                particle_snapshot[i] = active_particles[i];
+                particle_snapshot[i] = sim_particles[i];
             }
             reset_particle_accumulators();
             build_particle_hash(particle_snapshot, snapshot_count);
@@ -10296,6 +10298,7 @@ static void FireVoxel(int idx) {
             shot->particles[i]->vel = vel;
             shot->particles[i]->inv_mass = 0.0f;
             shot->particles[i]->base_inv_mass = 0.0f;
+            sim_particles_remove(shot->particles[i]);
         }
         play_sfx(SFX_FIRE);
     }
