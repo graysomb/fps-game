@@ -228,7 +228,7 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define VOXEL_ACTIVATION_RADIUS 2*2
 //#define VOXEL_ACTIVATION_UNIT_BUDGET 128
 #define VOXEL_ACTIVATION_UNIT_BUDGET 128*5
-#define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 2.0f
+#define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 0.5f
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.4f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.4f
 #define VOXEL_DEACTIVATION_FRAMES 5
@@ -5924,7 +5924,14 @@ static void buildDebugWorld(void) {
         float px = -2.0f * VOXEL_SIZE;
         float pz = 2.0f * VOXEL_SIZE;
         float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
-        addVoxel(px, py, pz, false, true, (Color){ 240, 160, 60, 255 }, 0);
+        for ( int x = 0; x < span; x++){
+            for ( int z = 0; z < span; z++){
+                for ( int y = 0; y < span; y++){
+            addVoxelSized(px+x*VOXEL_SIZE, py+y*VOXEL_SIZE, pz+z*VOXEL_SIZE, false, true, (Color){ 240, 160, 60, 255 }, 0,1);
+                }
+            }
+
+        }
     }
     // {
     //     int span = 7;

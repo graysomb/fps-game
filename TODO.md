@@ -1,70 +1,38 @@
-# Multithreading Plan for PBD Loop (CPU & Future GPU)
+# Plan for Integrating Physics Engine & Cleaning Codebase
 
-## Goal
-Safe multithreading of the PBD physics loop with minimal overhead, preparing for a future Compute Shader migration.
-The loop uses a Jacobi solver approach (Accumulate -> Apply), which is inherently parallel-friendly compared to Gauss-Seidel.
+## Overview
+The goal is to fully integrate the new PBD physics engine from `new_physics_engine.c` into `fps_ray.c` while restoring critical gameplay systems (activation/deactivation, recycling) and removing obsolete multiscale voxel logic.
 
-## 1. Infrastructure & Helpers
-- [ ] **Thread Pool**: Implement a lightweight, persistent thread pool (worker threads spin/wait on condition variable). Avoid spawning/joining threads per frame.
-- [ ] **Atomic Float Add**: Implement `atomic_add_float(volatile float* target, float value)` using a CAS (Compare-And-Swap) loop.
-    - *Why*: Standard `stdatomic.h` does not support `atomic_fetch_add` for floats.
-    - *Shader Parity*: Maps to `atomicAdd` (GLSL) or `InterlockedAdd` (HLSL) for floats (often needing a CAS loop implementation in shaders too, or extensions).
+## 1. Cleanup: Remove Multiscale Voxel Logic (`fps_ray.c`)
+- [ ] **Remove `span` from `Voxel` struct**: The `int span` field is obsolete. All voxels should be uniform size.
+- [ ] **Remove `addVoxelSized`**: Replace usages with `addVoxel` (assuming span=1). however still needs to work with `glue_neighbor_faces_for_voxel`
+- [ ] **Remove `emit_multiscale_voxels_from_units`**: Simplify to just emitting single unit voxels.
+- [ ] **Remove Multiscale/Span Debug Logging**: Remove all code blocks guarded by `if (v->span > 1)` or logging "span".
+- [ ] **Simplify Voxel Initialization**: Update `init_voxel_struct` to remove span calculation and bounding box logic related to variable sizes.
 
-## 2. Kernel B: Particle Operations (Thread over Active Particles)
-*Scope: Operations iterating `active_particles` array.*
+## 2. Integration: Activation & Deactivation (Sleep/Wake)
+- [ ] **Verify `Voxel` struct**: Ensure `fps_ray.c`'s `Voxel` struct has necessary fields for the belief system (`activationBelief`, `freezeBelief`, `sleepFrames`, etc.) consistent with the desired logic.
+- [ ] **Port/Fix Belief System**: Ensure `update_static_voxel_belief` and `update_dynamic_activation_beliefs` are correctly implemented and called in the main loop.
+- [ ] **Integrate with New Solver**:
+    - Ensure the new PBD solver (`simulate_voxel_pbd`) respects the `simulate` flag managed by the activation system.
+    - Ensure voxels transitioning from static to dynamic (and vice-versa) properly initialize/reset their particle states (positions, velocities) in the new solver.
+- [ ] **Fix `check_voxel_sleeping`**: Ensure the condition for putting a voxel to sleep (velocity checks, support checks) works with the new particle velocities.
 
-### 2.1 Integration & Reset
-- [ ] **Parallelize `integrate_particles`**: Simple parallel-for. No dependencies.
-- [ ] **Parallelize `reset_particle_accumulators`**: Simple parallel-for. Clears `corr_sum` and `corr_weight`.
+## 3. Integration: Recycling Pipeline
+- [ ] **Fix `RecycleQueue`**: Ensure the `recycleQueue` is properly managed (push/pop).
+- [ ] **Implement `recycle_dead_voxels`**: Ensure voxels that fall out of bounds or are "dead" are recycled or reset correctly.
+- [ ] **Restore Debris Logic**: Ensure `STATIC_DEBRIS_OWNER` logic works for temporary static voxels (debris) to be cleaned up or recycled.
 
-### 2.2 Spatial Hashing (`build_particle_hash`)
-- [ ] **Parallel Clear**: Parallel-for to set `particle_hash_head[]` to -1.
-- [ ] **Parallel Build**: Parallel-for over particles.
-    - Calculate hash `h`.
-    - **Atomic Insert**: Use `atomic_exchange` (or `atomic_compare_exchange`) on `particle_hash_head[h]` to safely insert the particle into the linked list.
-    - *Note*: Order of particles in the bin will become non-deterministic, which is acceptable.
+## 4. Physics: Static Collision
+- [ ] **Implement Static Collision**: The new engine currently lacks collision between dynamic particles and static voxels.
+    - Add `solve_static_collisions` (or similar) to the PBD loop.
+    - This should check dynamic particles against the `static_table` (spatial hash) and apply position corrections.
 
-### 2.3 Collision Gathering (`gather_particle_collisions`)
-- [ ] **Parallel Loop**: Iterate particles in chunks.
-- [ ] **Read Phase**: Read neighbors via `particle_hash` (safe, read-only during this phase).
-- [ ] **Write Phase**:
-    - When a collision is found, calculate correction `delta`.
-    - **Atomic Accumulate**: Use `atomic_add_float` to update `p->corr_sum` (x, y, z) and `p->corr_weight` for *both* particles involved.
-    - *Optimization*: Compute `delta` locally, only lock/atomic-add once per interaction.
-
-### 2.4 Apply Accumulators (`apply_particle_accumulators`)
-- [ ] **Parallelize**: Simple parallel-for.
-    - Read `corr_sum` / `corr_weight`.
-    - Update `predicted_pos`.
-    - Reset accumulators here (optimization to merge with Reset step, reducing memory passes).
-
-## 3. Kernel A: Voxel Operations (Thread over Active Voxels)
-*Scope: Operations iterating `voxels` array.*
-
-### 3.1 Shape Constraints (`gather_voxel_shape_constraints`)
-- [ ] **Parallel Loop**: Iterate active voxels (skip inactive/air).
-- [ ] **Read Phase**: Read positions of the 8 corner particles.
-- [ ] **Compute**: Run VGS (Volume/Gradient/Strain) constraint logic logic locally.
-- [ ] **Write Phase**:
-    - Calculate corrections for the 8 particles.
-    - **Atomic Accumulate**: Use `atomic_add_float` to update `corr_sum` and `corr_weight` on the shared corner particles.
-
-## 4. Execution Flow (Per Frame)
-1. `Dispatch(Kernel_B_Integrate)`
-2. `Dispatch(Kernel_Hash_Clear)`
-3. `Dispatch(Kernel_Hash_Build)`
-4. **Loop (Constraint Iterations)**:
-    a. `Dispatch(Kernel_B_Reset_Accumulators)` (Or merged into Apply)
-    b. `Dispatch(Kernel_B_Collisions)`  <-- *Heavy contention potential*
-    c. `Dispatch(Kernel_A_Constraints)` <-- *Heavy contention potential*
-    d. `Barrier` (Wait for all accumulators to be finalized)
-    e. `Dispatch(Kernel_B_Apply)`
-5. `Dispatch(Kernel_B_Update_Velocities)`
-
-## 5. Future Shader Migration Strategy
-- **Data Layout**: Transition `Particle` structs to SoA (Structure of Arrays) in usage (e.g., `pos_x[]`, `pos_y[]`, `pos_z[]`). This is cache-friendly for CPU and required for coalesced access on GPU.
-- **Compute Shaders**:
-    - `Kernel A` becomes a Compute Shader dispatching `(VOXEL_COUNT / 64, 1, 1)`.
-    - `Kernel B` becomes a Compute Shader dispatching `(PARTICLE_COUNT / 64, 1, 1)`.
-    - **SSBOs**: Particles and Voxels reside in Shader Storage Buffer Objects.
-    - **Grid**: Use a standard Grid/Binning compute shader approach (e.g., Counting Sort or Atomic binning).
+## 5. Final Verification
+- [ ] **Verify Build**: Ensure `fps_ray.c` compiles without errors.
+- [ ] **Verify Gameplay**:
+    - Voxels should fall and stack.
+    - Voxels should go to sleep (turn static) when stable.
+    - Voxels should wake up (turn dynamic) when disturbed.
+    - Static voxels should collide with dynamic ones (no falling through floor).
+    - Multiscale artifacts should be gone.

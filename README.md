@@ -57,14 +57,9 @@ The engine implements three primary types of constraints:
 *   **Method:** Uses **Voxel Gram-Schmidt (VGS)** orthogonalization. It computes the best-fit rotation and volume for the deformed particles and pulls them back towards a valid cube configuration.
 *   **Simplifications:** Assumes uniform mass distribution for stability.
 
-### 2. Glue Constraints
-*   **Function:** `solve_voxel_glue`
-*   **Description:** Connects adjacent voxels together to form larger structures.
-*   **Method:**
-    *   Uses **Barycentric Coordinates** to attach a "fine" voxel corner to a specific point on a "coarse" voxel's face.
-    *   Includes a **Hinge Limit** to prevent unnatural bending.
-    *   Supports **Multiscale Connections** (e.g., attaching a small voxel to a large 2x2x2 voxel).
-*   **Breaking:** Bonds break if they are stretched beyond `GLUE_BREAK_STRAIN` or bent beyond `GLUE_BREAK_HINGE_ANGLE_DEG`.
+### 2. Voxel Glue
+*   **Function** `glue_neighbor_faces_for_voxel`
+*   **Description** forces voxels sharing a glue constraint to share corner particles
 
 ### 3. Collision Constraints
 *   **Function:** `solve_particle_collisions`
@@ -73,17 +68,12 @@ The engine implements three primary types of constraints:
     *   **Particle-vs-Static:** Checks dynamic particles against the static voxel grid map.
     *   **Particle-vs-Player:** Pushes particles out of player bounding boxes (and deals damage).
     *   **Particle-vs-Particle:** Simple sphere-based collision between dynamic voxels.
-*   **Optimizations:**
-    *   **Skip Internal:** Collisions between glued voxels are skipped to improve performance.
-    *   **Span Awareness:** Collision detection adjusts for the size (span) of the voxel.
 
 ## Optimizations & Assumptions
 
 *   **Static "Sleeping" System:** Voxels that come to rest on the ground or against static walls are "frozen" and removed from the active simulation list to save performance. They wake up if their support is destroyed.
-*   **Multiscale Voxels:** The engine supports voxels of different sizes (Spans). A span-2 voxel represents a 2x2x2 block but is simulated as a single rigid body, significantly reducing the particle count for large debris.
 *   **Early Outs:**
     *   Shape matching skips if the voxel is not deformed.
-    *   Glue solving skips if the connected voxels are both static.
 *   **Approximations:** Collisions use predicted positions for stability, effectively "looking ahead" to prevent tunneling.
 
 ## Controls
