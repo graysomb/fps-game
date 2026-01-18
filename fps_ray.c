@@ -2984,8 +2984,32 @@ static bool spawn_static_covering_voxel(const Voxel *voxel)
         return false;
     }
     int base_minx, base_maxx, base_miny, base_maxy, base_minz, base_maxz;
-    voxel_grid_bounds(voxel, &base_minx, &base_maxx, &base_miny, &base_maxy, &base_minz, &base_maxz);
-    bool has_rest_bounds = false;
+    bool has_rest_bounds =
+        (voxel->rest_min_gx <= voxel->rest_max_gx) &&
+        (voxel->rest_min_gy <= voxel->rest_max_gy) &&
+        (voxel->rest_min_gz <= voxel->rest_max_gz);
+
+    if (has_rest_bounds) {
+        float rest_center_x = 0.5f * ((float)voxel->rest_min_gx + (float)voxel->rest_max_gx + 1.0f);
+        float rest_center_y = 0.5f * ((float)voxel->rest_min_gy + (float)voxel->rest_max_gy + 1.0f);
+        float rest_center_z = 0.5f * ((float)voxel->rest_min_gz + (float)voxel->rest_max_gz + 1.0f);
+        float current_center_x = voxel->pos.x / VOXEL_SIZE;
+        float current_center_y = voxel->pos.y / VOXEL_SIZE;
+        float current_center_z = voxel->pos.z / VOXEL_SIZE;
+
+        int shift_x = (int)roundf(current_center_x - rest_center_x);
+        int shift_y = (int)roundf(current_center_y - rest_center_y);
+        int shift_z = (int)roundf(current_center_z - rest_center_z);
+
+        base_minx = voxel->rest_min_gx + shift_x;
+        base_maxx = voxel->rest_max_gx + shift_x;
+        base_miny = voxel->rest_min_gy + shift_y;
+        base_maxy = voxel->rest_max_gy + shift_y;
+        base_minz = voxel->rest_min_gz + shift_z;
+        base_maxz = voxel->rest_max_gz + shift_z;
+    } else {
+        voxel_grid_bounds(voxel, &base_minx, &base_maxx, &base_miny, &base_maxy, &base_minz, &base_maxz);
+    }
 
     if (base_minx > base_maxx || base_miny > base_maxy || base_minz > base_maxz) {
         TraceLog(LOG_WARNING,
@@ -3008,7 +3032,17 @@ static bool spawn_static_covering_voxel(const Voxel *voxel)
                                                   &minx, &maxx,
                                                   &miny, &maxy,
                                                   &minz, &maxz);
-    (void)has_rest_bounds;
+    if (!placed && has_rest_bounds) {
+        int curr_minx, curr_maxx, curr_miny, curr_maxy, curr_minz, curr_maxz;
+        voxel_grid_bounds(voxel, &curr_minx, &curr_maxx, &curr_miny, &curr_maxy, &curr_minz, &curr_maxz);
+        placed = find_nearest_free_static_region(curr_minx, curr_maxx,
+                                                 curr_miny, curr_maxy,
+                                                 curr_minz, curr_maxz,
+                                                 curr_miny,
+                                                 &minx, &maxx,
+                                                 &miny, &maxy,
+                                                 &minz, &maxz);
+    }
     if (!placed) {
         TraceLog(LOG_WARNING,
                  "[StaticRestore] failed: no free cells near (%.2f, %.2f, %.2f)",
