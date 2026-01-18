@@ -5672,8 +5672,8 @@ static void buildDebugWorld(void) {
             for ( int z = 0; z < span; z++){
                 for ( int y = 0; y < span; y++){
             addVoxel(px + x * VOXEL_SIZE, py + y * VOXEL_SIZE, pz + z * VOXEL_SIZE,
-                     //true, false, (Color){ 240, 160, 60, 255 }, 0);
-                     false, true, (Color){ 240, 160, 60, 255 }, 0);
+                     true, false, (Color){ 240, 160, 60, 255 }, 0);
+                     //false, true, (Color){ 240, 160, 60, 255 }, 0);
                 }
             }
 
@@ -5714,10 +5714,10 @@ static void buildDebugWorld(void) {
 
 // Build static demo cube of voxels
 static void buildDemo(void) {
-    //buildTestWorld();
+    buildTestWorld();
     //buildProceduralWorld();
     //buildBloodWorld();
-    buildDebugWorld();
+    //buildDebugWorld();
     rebuild_glue_constraints();
 }
 
@@ -8842,9 +8842,21 @@ void simulate_voxel_pbd(float dt) {
                 particle_snapshot[i] = sim_particles[i];
             }
             reset_particle_accumulators();
+            pbd_parallel_for(0, voxel_count, gather_voxel_shape_constraints_range, NULL);
+            apply_particle_accumulators();
+        }
+
+        for (int it = 0; it < 1; ++it) {
+            int snapshot_count = sim_particle_count;
+            if (snapshot_count > MAX_PARTICLES) {
+                snapshot_count = MAX_PARTICLES;
+            }
+            for (int i = 0; i < snapshot_count; ++i) {
+                particle_snapshot[i] = sim_particles[i];
+            }
+            reset_particle_accumulators();
             build_particle_hash(particle_snapshot, snapshot_count);
             gather_particle_collisions(sub_dt, particle_snapshot, snapshot_count);
-            pbd_parallel_for(0, voxel_count, gather_voxel_shape_constraints_range, NULL);
             apply_particle_accumulators();
         }
 
@@ -11164,7 +11176,7 @@ static void UpdateBot(int playerIdx, float dt) {
 int main(void) {
     int countFrame = 0;
     SetLoggingEnabled(false);
-    SetTraceLogLevel(LOG_ALL);
+    SetTraceLogLevel(LOG_NONE);
     // init window and render textures
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Split-Screen FPS (raylib)");
     SetWindowState(FLAG_WINDOW_RESIZABLE);
@@ -11523,10 +11535,10 @@ int main(void) {
         activate_static_voxels_near_dynamic();
         //batch_glued_dynamic_voxels();
         //update voxel physics
-        int subStep = 1;
-        for( int i = 0; i < subStep; i++){
-            physics_step(dt/subStep);
-        }
+        // int subStep = 1;
+        // for( int i = 0; i < subStep; i++){
+        //     physics_step(dt/subStep);
+        // }
         update_projectiles(dt);
         update_pickups(dt); // Update pickups
         prepare_tether_forces();
