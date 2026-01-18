@@ -374,7 +374,6 @@ typedef struct {
        0=+X,1=-X,2=+Y,3=-Y,4=+Z,5=-Z */
     bool surface[6];
     int  gx, gy, gz;
-    int  span;
     int  min_gx, max_gx;
     int  min_gy, max_gy;
     int  min_gz, max_gz;
@@ -439,10 +438,7 @@ static uint8_t staticBeliefQueued[MAX_VOXELS];
 static int staticBeliefQueue[MAX_VOXELS];
 static bool staticBeliefsInitialized = false;
 static bool staticBeliefsForceFullRefresh = false;
-static const int DEBUG_SPAN2_FACE_LOG_INIT = 32;
-static int debugSpan2FaceLogBudget = 0;
 static int debugSmushLogBudget = 0;
-static bool debugLogSpan2Faces = false;
 static Voxel recycleQueue[MAX_VOXELS];
 static int recycleQueueHead = 0;
 static int recycleQueueTail = 0;
@@ -672,10 +668,6 @@ static bool list_contains_index(const int *list, int count, int value);
 static int gather_static_face_neighbors(const Voxel *voxel, int *out, int max_out);
 static int gather_static_voxels_near_point(Vector3 point, float radius, int *out, int max_out);
 static bool push_particle_out_of_static(const Voxel *static_voxel, Particle *particle, float radius);
-static int gather_static_voxels_near_voxel(const Voxel *voxel, int *out, int max_out);
-static bool resolve_span_static_overlap(int dynamic_idx, Voxel *dynamic,
-                                        int static_idx, const Voxel *static_voxel);
-static bool nudge_voxel_bottom_above_static(int voxel_idx, Voxel *voxel);
 static void glue_dynamic_voxel_to_static_neighbors(void);
 static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx);
 static bool recycle_queue_push(const Voxel *voxel);
@@ -754,10 +746,6 @@ static inline float voxel_particle_radius(const Voxel *v) {
     if (r <= 0.0f) {
         r = 0.5f * v->rest_edge;
     }
-    float clamp = PARTICLE_RADIUS * (float)(v->span > 0 ? v->span : 1);
-    if (clamp > 0.0f) {
-        r = fminf(r, clamp);
-    }
     return r;
 }
 
@@ -765,8 +753,6 @@ static bool debugDrawParticles = false;
 static bool debugColorParticlesByVelocity = false;
 static const float PARTICLE_DEBUG_MARKER_RADIUS = 0.6f;
 static const float PARTICLE_DEBUG_MAX_SPEED = 20.0f;
-static bool debugLogSpanCollisions = false;
-static int debugSpanEdgeLogBudget = 0;
 static int debugSpanCollisionLogBudget = 0;
 static bool debugLogGlue = false;
 static bool debugLogGlueClusters = false;
@@ -827,7 +813,6 @@ static bool debugLogSmush = false;
 static bool debugLogSmushSpawns = false;
 static bool debugLogSmushHits = false;
 static bool debugLogSmushDeaths = false;
-static bool debugLogMultiscale = false;
 static bool debugLogRestoreClusters = false;
 static int debugBlowupLogBudget = 0;
 static bool debugLogClusterBreaksOnly = false;
@@ -839,9 +824,6 @@ static const int DEBUG_GLUE_SOLVE_LOG_INIT = 64;
 static const int DEBUG_GLUE_BREAK_LOG_INIT = 16;
 static bool debugLogActivation = true;
 static const int DEBUG_ACTIVATION_LOG_INIT = 64;
-static int activationGlueLogBudget = 0;
-static int activationLogStart = -1;
-static int activationLogEnd = -1;
 static bool debugLogVoxelDeactivation = true;
 static FILE *debugLogFile = NULL;
 static bool logsEnabled = true;
@@ -995,17 +977,6 @@ static void SetLoggingEnabled(bool enabled) {
             logsEnabled = false;
         }
     }
-}
-
-static bool debug_should_log_span_pair(const Voxel *a, const Voxel *b, int *budget) {
-    if (!debugLogSpanCollisions || budget == NULL || *budget <= 0) {
-        return false;
-    }
-    if (a->span <= 1 && b->span <= 1) {
-        return false;
-    }
-    --(*budget);
-    return true;
 }
 
 static const int corner_signs[8][3] = {
@@ -1424,32 +1395,6 @@ static bool face_blocked_by_voxel(const Voxel *self, const Voxel *neighbor, int 
     }
 }
 
-static void log_span2_face_cull(const Voxel *self, int self_idx,
-                                const Voxel *neighbor, int neighbor_idx,
-                                int face)
-{
-    if (!debugLogSpan2Faces || debugSpan2FaceLogBudget <= 0) {
-        return;
-    }
-    if (!self || !neighbor) {
-        return;
-    }
-    if (self->span != 2 && neighbor->span != 2) {
-        return;
-    }
-    VoxelWorldBounds a, b;
-    voxel_visibility_bounds(self, &a);
-    voxel_visibility_bounds(neighbor, &b);
-    TraceLog(LOG_INFO,
-             "[FaceCull] face=%d self=%d span=%d neighbor=%d span=%d "
-             "self=(%.2f,%.2f,%.2f)-(%.2f,%.2f,%.2f) "
-             "neighbor=(%.2f,%.2f,%.2f)-(%.2f,%.2f,%.2f)",
-             face, self_idx, self->span, neighbor_idx, neighbor->span,
-             a.minx, a.miny, a.minz, a.maxx, a.maxy, a.maxz,
-             b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz);
-    --debugSpan2FaceLogBudget;
-}
-
 static int voxel_touching_axes(const Voxel *a, const Voxel *b,
                                int *overlap_axes, float eps)
 {
@@ -1619,24 +1564,12 @@ static void voxel_compute_bounds(const Voxel *v,
                                  int *miny, int *maxy,
                                  int *minz, int *maxz)
 {
-    int span = (v->span > 0) ? v->span : 1;
-    if (span == 1) {
-        if (minx) *minx = v->gx;
-        if (maxx) *maxx = v->gx;
-        if (miny) *miny = v->gy;
-        if (maxy) *maxy = v->gy;
-        if (minz) *minz = v->gz;
-        if (maxz) *maxz = v->gz;
-        return;
-    }
-
-    const float half = 0.5f * v->rest_edge;
-    if (minx) *minx = (int)floorf((v->pos.x - half + GRID_EPSILON) / VOXEL_SIZE);
-    if (maxx) *maxx = (int)floorf((v->pos.x + half - GRID_EPSILON) / VOXEL_SIZE);
-    if (miny) *miny = (int)floorf((v->pos.y - half + GRID_EPSILON) / VOXEL_SIZE);
-    if (maxy) *maxy = (int)floorf((v->pos.y + half - GRID_EPSILON) / VOXEL_SIZE);
-    if (minz) *minz = (int)floorf((v->pos.z - half + GRID_EPSILON) / VOXEL_SIZE);
-    if (maxz) *maxz = (int)floorf((v->pos.z + half - GRID_EPSILON) / VOXEL_SIZE);
+    if (minx) *minx = v->gx;
+    if (maxx) *maxx = v->gx;
+    if (miny) *miny = v->gy;
+    if (maxy) *maxy = v->gy;
+    if (minz) *minz = v->gz;
+    if (maxz) *maxz = v->gz;
 }
 
 static void voxel_grid_bounds(const Voxel *v,
@@ -2378,10 +2311,6 @@ static bool face_normal_rest(const Voxel *voxel, const int corners[4],
     return true;
 }
 
-static inline int voxel_span_for_glue(const Voxel *v) {
-    return (v && v->span > 0) ? v->span : 1;
-}
-
 static void get_face_corners_for_direction(const GlueDirection *dir,
                                            bool positive_side,
                                            int outCorners[4])
@@ -2396,21 +2325,10 @@ static void order_coarse_fine_pair(int negativeIdx, int positiveIdx,
                                    int *coarseIdx, bool *coarseIsPositive,
                                    int *fineIdx, bool *fineIsPositive)
 {
-    const Voxel *neg = &voxels[negativeIdx];
-    const Voxel *pos = &voxels[positiveIdx];
-    int spanNeg = voxel_span_for_glue(neg);
-    int spanPos = voxel_span_for_glue(pos);
-
-    if (spanNeg >= spanPos) {
-        *coarseIdx = negativeIdx;
-        *fineIdx = positiveIdx;
-    } else {
-        *coarseIdx = positiveIdx;
-        *fineIdx = negativeIdx;
-    }
-
-    *coarseIsPositive = (*coarseIdx == positiveIdx);
-    *fineIsPositive = (*fineIdx == positiveIdx);
+    *coarseIdx = negativeIdx;
+    *fineIdx = positiveIdx;
+    *coarseIsPositive = false;
+    *fineIsPositive = true;
 }
 
 
@@ -2689,7 +2607,7 @@ static void voxel_table_register(Voxel *v, int idx)
     v->min_gx = minx; v->max_gx = maxx;
     v->min_gy = miny; v->max_gy = maxy;
     v->min_gz = minz; v->max_gz = maxz;
-    bool surface_only = (v->span > 1);
+    bool surface_only = false;
     for (int x = minx; x <= maxx; ++x) {
         for (int y = miny; y <= maxy; ++y) {
             for (int z = minz; z <= maxz; ++z) {
@@ -2866,8 +2784,8 @@ static void remove_static_voxels_in_region_recycle(int minx, int maxx,
                     if (candidate->owner == -1) {
                         if (recycle_queue_push(candidate) && debugLogVoxelRecycle) {
                             TraceLog(LOG_INFO,
-                                     "[Recycle] enqueue-bullet voxel=%d span=%d rest=(%d..%d,%d..%d,%d..%d)",
-                                     idx, candidate->span,
+                                     "[Recycle] enqueue-bullet voxel=%d rest=(%d..%d,%d..%d,%d..%d)",
+                                     idx,
                                      candidate->rest_min_gx, candidate->rest_max_gx,
                                      candidate->rest_min_gy, candidate->rest_max_gy,
                                      candidate->rest_min_gz, candidate->rest_max_gz);
@@ -3063,7 +2981,7 @@ static bool find_nearest_free_static_region(int base_minx, int base_maxx,
 static bool spawn_static_covering_voxel(const Voxel *voxel)
 {
     if (!voxel) {
-        TraceLog(LOG_WARNING, "[Multiscale] Static restore failed: null voxel");
+        TraceLog(LOG_WARNING, "[StaticRestore] failed: null voxel");
         return false;
     }
     int base_minx, base_maxx, base_miny, base_maxy, base_minz, base_maxz;
@@ -3096,7 +3014,7 @@ static bool spawn_static_covering_voxel(const Voxel *voxel)
 
     if (base_minx > base_maxx || base_miny > base_maxy || base_minz > base_maxz) {
         TraceLog(LOG_WARNING,
-                 "[Multiscale] Static restore failed: invalid bounds (%d..%d,%d..%d,%d..%d)",
+                 "[StaticRestore] failed: invalid bounds (%d..%d,%d..%d,%d..%d)",
                  base_minx, base_maxx, base_miny, base_maxy, base_minz, base_maxz);
         return false;
     }
@@ -3128,42 +3046,9 @@ static bool spawn_static_covering_voxel(const Voxel *voxel)
     }
     if (!placed) {
         TraceLog(LOG_WARNING,
-                 "[Multiscale] Static restore failed: no free cells near (%.2f, %.2f, %.2f)",
+                 "[StaticRestore] failed: no free cells near (%.2f, %.2f, %.2f)",
                  voxel->pos.x, voxel->pos.y, voxel->pos.z);
         return false;
-    }
-
-    int desired_span = (voxel->span > 0) ? voxel->span : 1;
-    if (desired_span > 1) {
-        float half_span = 0.5f * (float)desired_span;
-        float center_x_cells = voxel->pos.x / VOXEL_SIZE;
-        float center_y_cells = voxel->pos.y / VOXEL_SIZE;
-        float center_z_cells = voxel->pos.z / VOXEL_SIZE;
-
-        int width_x = maxx - minx + 1;
-        if (width_x != desired_span) {
-            int forced_minx = (int)floorf(center_x_cells - half_span + GRID_EPSILON);
-            minx = forced_minx;
-            maxx = forced_minx + desired_span - 1;
-        }
-
-        int width_y = maxy - miny + 1;
-        if (width_y != desired_span) {
-            int forced_miny = (int)floorf(center_y_cells - half_span + GRID_EPSILON);
-            miny = forced_miny;
-            maxy = forced_miny + desired_span - 1;
-            if (miny < 0) {
-                maxy += -miny;
-                miny = 0;
-            }
-        }
-
-        int width_z = maxz - minz + 1;
-        if (width_z != desired_span) {
-            int forced_minz = (int)floorf(center_z_cells - half_span + GRID_EPSILON);
-            minz = forced_minz;
-            maxz = forced_minz + desired_span - 1;
-        }
     }
 
     int span_count_x = maxx - minx + 1;
@@ -3171,19 +3056,19 @@ static bool spawn_static_covering_voxel(const Voxel *voxel)
     int span_count_z = maxz - minz + 1;
     if (span_count_x <= 0 || span_count_y <= 0 || span_count_z <= 0) {
         TraceLog(LOG_WARNING,
-                 "[Multiscale] Static restore failed: empty span (%d,%d,%d)",
+                 "[StaticRestore] failed: empty bounds (%d,%d,%d)",
                  span_count_x, span_count_y, span_count_z);
         return false;
     }
     int cell_count = span_count_x * span_count_y * span_count_z;
     if (cell_count <= 0) {
         TraceLog(LOG_WARNING,
-                 "[Multiscale] Static restore failed: invalid cell count %d",
+                 "[StaticRestore] failed: invalid cell count %d",
                  cell_count);
         return false;
     }
     if (voxel_count + cell_count > MAX_VOXELS) {
-        TraceLog(LOG_WARNING, "[Multiscale] Static restore skipped: insufficient capacity (%d needed)", cell_count);
+        TraceLog(LOG_WARNING, "[StaticRestore] skipped: insufficient capacity (%d needed)", cell_count);
         return false;
     }
 
@@ -3195,7 +3080,7 @@ static bool spawn_static_covering_voxel(const Voxel *voxel)
                 int idx = add_static_voxel_at_grid(gx, gy, gz, voxel->color, voxel->type);
                 if (idx < 0) {
                     TraceLog(LOG_WARNING,
-                             "[Multiscale] Static restore aborted: failed to spawn voxel at (%d,%d,%d)",
+                             "[StaticRestore] aborted: failed to spawn voxel at (%d,%d,%d)",
                              gx, gy, gz);
                     remove_static_voxels_in_region(minx, maxx, miny, maxy, minz, maxz);
                     return false;
@@ -3340,13 +3225,12 @@ static bool init_voxel_struct(Voxel *v,
                               float px, float py, float pz,
                               bool fixed, bool simulate,
                               Color color, int type,
-                              int span, int owner)
+                              int owner)
 {
     if (!v) {
         return false;
     }
-    span = 1;
-    float edge = VOXEL_SIZE * (float)span;
+    float edge = VOXEL_SIZE;
     float half = 0.5f * edge;
 
     v->pos = (Vector3){ px, py, pz };
@@ -3362,16 +3246,18 @@ static bool init_voxel_struct(Voxel *v,
     v->owner = owner;
     v->activator = -1;
     memset(v->surface, 0, sizeof v->surface);
-    v->min_gx = v->min_gy = v->min_gz = INT_MAX;
-    v->max_gx = v->max_gy = v->max_gz = INT_MIN;
-    v->rest_min_gx = v->rest_min_gy = v->rest_min_gz = INT_MAX;
-    v->rest_max_gx = v->rest_max_gy = v->rest_max_gz = INT_MIN;
-    v->orig_min_gx = v->orig_min_gy = v->orig_min_gz = INT_MAX;
-    v->orig_max_gx = v->orig_max_gy = v->orig_max_gz = INT_MIN;
     v->gx = (int)floorf(px / VOXEL_SIZE);
     v->gy = (int)floorf(py / VOXEL_SIZE);
     v->gz = (int)floorf(pz / VOXEL_SIZE);
-    v->span = span;
+    v->min_gx = v->max_gx = v->gx;
+    v->min_gy = v->max_gy = v->gy;
+    v->min_gz = v->max_gz = v->gz;
+    v->rest_min_gx = v->rest_max_gx = v->gx;
+    v->rest_min_gy = v->rest_max_gy = v->gy;
+    v->rest_min_gz = v->rest_max_gz = v->gz;
+    v->orig_min_gx = v->orig_max_gx = v->gx;
+    v->orig_min_gy = v->orig_max_gy = v->gy;
+    v->orig_min_gz = v->orig_max_gz = v->gz;
     v->rest_edge = edge;
     v->rest_volume = edge * edge * edge;
     v->particle_radius = 0.5f * edge;
@@ -3399,20 +3285,6 @@ static bool init_voxel_struct(Voxel *v,
         p->radius = voxel_particle_radius(v);
         v->particles[i] = p;
     }
-    int rest_minx, rest_maxx, rest_miny, rest_maxy, rest_minz, rest_maxz;
-    voxel_compute_bounds(v, &rest_minx, &rest_maxx, &rest_miny, &rest_maxy, &rest_minz, &rest_maxz);
-    v->rest_min_gx = rest_minx;
-    v->rest_max_gx = rest_maxx;
-    v->rest_min_gy = rest_miny;
-    v->rest_max_gy = rest_maxy;
-    v->rest_min_gz = rest_minz;
-    v->rest_max_gz = rest_maxz;
-    v->orig_min_gx = rest_minx;
-    v->orig_max_gx = rest_maxx;
-    v->orig_min_gy = rest_miny;
-    v->orig_max_gy = rest_maxy;
-    v->orig_min_gz = rest_minz;
-    v->orig_max_gz = rest_maxz;
     v->sleepFrames = 0;
     v->freezeBelief = 0.0f;
     v->activationBelief = 0.0f;
@@ -3429,19 +3301,19 @@ static bool init_voxel_struct(Voxel *v,
     return true;
 }
 
-static int addVoxelSized(float px, float py, float pz, bool fixed, bool simulate,
-                         Color color, int type, int span) {
+// Add a voxel (static or dynamic)
+static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Color color, int type) {
     if (voxel_count >= MAX_VOXELS) {
         if (debugLogActivationFailures) {
             TraceLog(LOG_WARNING,
-                     "[ActivationFail] addVoxelSized capacity full simulate=%d span=%d pos=(%.2f,%.2f,%.2f)",
-                     simulate ? 1 : 0, span, px, py, pz);
+                     "[ActivationFail] addVoxel capacity full simulate=%d pos=(%.2f,%.2f,%.2f)",
+                     simulate ? 1 : 0, px, py, pz);
         }
         return -1;
     }
     int idx = voxel_count++;
     Voxel *v = &voxels[idx];
-    if (!init_voxel_struct(v, px, py, pz, fixed, simulate, color, type, span, -1)) {
+    if (!init_voxel_struct(v, px, py, pz, fixed, simulate, color, type, -1)) {
         voxel_count--;
         return -1;
     }
@@ -3449,15 +3321,6 @@ static int addVoxelSized(float px, float py, float pz, bool fixed, bool simulate
     voxel_table_register(v, idx);
     if (!simulate) {
         mark_static_beliefs_dirty_for_voxel(v);
-    }
-    return idx;
-}
-
-// Add a voxel (static or dynamic)
-static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Color color, int type) {
-    int idx = addVoxelSized(px, py, pz, fixed, simulate, color, type, 1);
-    if (idx >= 0) {
-        voxels[idx].glueEligible = false;
     }
     return idx;
 }
@@ -3577,47 +3440,9 @@ static inline size_t unit_voxel_grid_index(int x, int y, int z,
     return ((size_t)z * (size_t)dimy + (size_t)y) * (size_t)dimx + (size_t)x;
 }
 
-static int maximal_cube_span_at(int sx, int sy, int sz,
-                                const unsigned char *occupied,
-                                const unsigned char *consumed,
-                                int dimx, int dimy, int dimz)
-{
-    int max_span = dimx - sx;
-    int limit_y = dimy - sy;
-    int limit_z = dimz - sz;
-    if (limit_y < max_span) max_span = limit_y;
-    if (limit_z < max_span) max_span = limit_z;
-    if (max_span < 1) {
-        return 1;
-    }
-
-    int best_span = 1;
-    for (int span = 1; span <= max_span; ++span) {
-        bool ok = true;
-        for (int dz = 0; dz < span && ok; ++dz) {
-            for (int dy = 0; dy < span && ok; ++dy) {
-                for (int dx = 0; dx < span; ++dx) {
-                    size_t idx = unit_voxel_grid_index(sx + dx, sy + dy, sz + dz,
-                                                       dimx, dimy, dimz);
-                    if (!occupied[idx] || consumed[idx]) {
-                        ok = false;
-                        break;
-                    }
-                }
-            }
-        }
-        if (ok) {
-            best_span = span;
-        } else {
-            break;
-        }
-    }
-    return best_span;
-}
-
-static int emit_multiscale_voxels_from_units(const UnitVoxelBuffer *buffer,
-                                             bool fixed, bool simulate,
-                                             int type_override)
+static int emit_unit_voxels_from_units(const UnitVoxelBuffer *buffer,
+                                       bool fixed, bool simulate,
+                                       int type_override)
 {
     if (!buffer || buffer->count <= 0) {
         return 0;
@@ -3634,7 +3459,7 @@ static int emit_multiscale_voxels_from_units(const UnitVoxelBuffer *buffer,
         float px = ((float)gx + 0.5f) * VOXEL_SIZE;
         float py = ((float)gy + 0.5f) * VOXEL_SIZE;
         float pz = ((float)gz + 0.5f) * VOXEL_SIZE;
-        int new_idx = addVoxelSized(px, py, pz, fixed, simulate, color, spawn_type, 1);
+        int new_idx = addVoxel(px, py, pz, fixed, simulate, color, spawn_type);
         if (new_idx >= 0) {
             voxels[new_idx].debugClusterTag = seed->debugTag;
             voxels[new_idx].activator = seed->activator;
@@ -3691,8 +3516,8 @@ static void remove_buffered_static_voxels(const UnitVoxelBuffer *buffer)
             if (!voxel->simulate && voxel->owner == -1) {
                 if (recycle_queue_push(voxel) && debugLogVoxelRecycle) {
                     TraceLog(LOG_INFO,
-                             "[Recycle] enqueue-activation voxel=%d span=%d rest=(%d..%d,%d..%d,%d..%d)",
-                             idx, voxel->span,
+                             "[Recycle] enqueue-activation voxel=%d rest=(%d..%d,%d..%d,%d..%d)",
+                             idx,
                              voxel->orig_min_gx, voxel->orig_max_gx,
                              voxel->orig_min_gy, voxel->orig_max_gy,
                              voxel->orig_min_gz, voxel->orig_max_gz);
@@ -3719,7 +3544,7 @@ static bool activation_try_enqueue(int voxel_idx,
     }
 
     Voxel *candidate = &voxels[voxel_idx];
-    if (candidate->simulate || candidate->span != 1 || candidate->pendingActivation) {
+    if (candidate->simulate || candidate->pendingActivation) {
         return false;
     }
 
@@ -3917,80 +3742,6 @@ static bool dynamic_belief_overcomes_static(float dynamicBelief, float frozenBel
     return weightedDynamic >= weightedFrozen;
 }
 
-static bool activation_range_contains(int idx)
-{
-    if (activationLogStart < 0 || activationLogEnd <= activationLogStart) {
-        return false;
-    }
-    return idx >= activationLogStart && idx < activationLogEnd;
-}
-
-static void log_activation_new_spans(int start_idx, int end_idx)
-{
-    int budget = DEBUG_ACTIVATION_LOG_INIT;
-    for (int i = start_idx; i < end_idx && budget > 0; ++i) {
-        Voxel *v = &voxels[i];
-        if (!v->simulate) {
-            continue;
-        }
-        if (v->span <= 1) {
-            continue;
-        }
-        int minx, maxx, miny, maxy, minz, maxz;
-        voxel_grid_bounds(v, &minx, &maxx, &miny, &maxy, &minz, &maxz);
-        float target_x = 0.5f * ((float)minx + (float)maxx + 1.0f) * VOXEL_SIZE;
-        float target_y = 0.5f * ((float)miny + (float)maxy + 1.0f) * VOXEL_SIZE;
-        float target_z = 0.5f * ((float)minz + (float)maxz + 1.0f) * VOXEL_SIZE;
-        float dx = v->pos.x - target_x;
-        float dy = v->pos.y - target_y;
-        float dz = v->pos.z - target_z;
-        TraceLog(LOG_INFO,
-                 "[Activation] new span=%d idx=%d grid=(%d..%d,%d..%d,%d..%d) pos=(%.2f,%.2f,%.2f) "
-                 "offset=(%.3f,%.3f,%.3f)",
-                 v->span, i,
-                 minx, maxx, miny, maxy, minz, maxz,
-                 v->pos.x, v->pos.y, v->pos.z,
-                 dx, dy, dz);
-        --budget;
-    }
-}
-
-static void log_activation_glue_mismatches(int start_idx, int end_idx)
-{
-    int budget = DEBUG_ACTIVATION_LOG_INIT;
-    for (int i = start_idx; i < end_idx && budget > 0; ++i) {
-        if (i < 0 || i >= voxel_count) {
-            continue;
-        }
-        Voxel *v = &voxels[i];
-        if (!v->simulate) {
-            continue;
-        }
-        int neighbors[MAX_FACE_NEIGHBORS];
-        int neighbor_count = gather_glued_neighbors(i, neighbors, MAX_FACE_NEIGHBORS);
-        for (int n = 0; n < neighbor_count && budget > 0; ++n) {
-            int nidx = neighbors[n];
-            if (nidx < 0 || nidx >= voxel_count) {
-                continue;
-            }
-            Voxel *neighbor = &voxels[nidx];
-            if (!neighbor->simulate) {
-                continue;
-            }
-            if (neighbor->span == v->span) {
-                continue;
-            }
-            TraceLog(LOG_INFO,
-                     "[Activation] glue span mismatch a=%d span=%d b=%d span=%d "
-                     "posA=(%.2f,%.2f,%.2f) posB=(%.2f,%.2f,%.2f)",
-                     i, v->span, nidx, neighbor->span,
-                     v->pos.x, v->pos.y, v->pos.z,
-                     neighbor->pos.x, neighbor->pos.y, neighbor->pos.z);
-            --budget;
-        }
-    }
-}
-
 static bool activate_static_voxels_near_dynamic(void)
 {
     static UnitVoxelBuffer buffer;
@@ -4043,7 +3794,7 @@ static bool activate_static_voxels_near_dynamic(void)
                         continue;
                     }
                     Voxel *candidate = &voxels[idx];
-                    if (candidate->simulate || candidate->span != 1 ||
+                    if (candidate->simulate ||
                         candidate->pendingActivation || candidate->activationCooldownFrames > 0) {
                         continue;
                     }
@@ -4078,26 +3829,17 @@ static bool activate_static_voxels_near_dynamic(void)
 
     remove_buffered_static_voxels(&buffer);
     int activation_base = voxel_count;
-    int spawned = emit_multiscale_voxels_from_units(&buffer, false, true, -1);
+    int spawned = emit_unit_voxels_from_units(&buffer, false, true, -1);
     if (debugLogActivation) {
         TraceLog(LOG_INFO,
                  "[Activation] static->dynamic units=%d spawned=%d base=%d after=%d",
                  buffer.count, spawned, activation_base, voxel_count);
     }
 
-    activationLogStart = activation_base;
-    activationLogEnd = voxel_count;
-    activationGlueLogBudget = DEBUG_ACTIVATION_LOG_INIT;
     rebuild_voxel_hash();
     rebuild_all_voxel_surfaces();
     rebuild_glue_constraints();
     glue_dynamic_voxel_to_static_neighbors();
-    if (debugLogActivation) {
-        log_activation_new_spans(activation_base, voxel_count);
-        log_activation_glue_mismatches(activation_base, voxel_count);
-    }
-    activationLogStart = -1;
-    activationLogEnd = -1;
     refresh_static_voxel_beliefs();
     meshDirty = true;
     return true;
@@ -4112,7 +3854,7 @@ static bool activate_all_static_voxels(int activator)
 
         for (int i = 0; i < voxel_count && buffer.count < VOXEL_ACTIVATION_UNIT_BUDGET; ++i) {
             Voxel *candidate = &voxels[i];
-            if (candidate->simulate || candidate->span != 1 || candidate->pendingActivation) {
+            if (candidate->simulate || candidate->pendingActivation) {
                 continue;
             }
             candidate->pendingActivation = true;
@@ -4132,7 +3874,7 @@ static bool activate_all_static_voxels(int activator)
         }
 
         remove_buffered_static_voxels(&buffer);
-        emit_multiscale_voxels_from_units(&buffer, false, true, -1);
+        emit_unit_voxels_from_units(&buffer, false, true, -1);
         activated = true;
     }
 
@@ -4165,8 +3907,7 @@ static bool restore_dynamic_snapshot(const Voxel *snapshot)
     if (voxel_count >= MAX_VOXELS) {
         if (debugLogRestoreFailures) {
             TraceLog(LOG_WARNING,
-                     "[RestoreFail] dynamic restore capacity exceeded span=%d pos=(%.2f,%.2f,%.2f)",
-                     snapshot->span,
+                     "[RestoreFail] dynamic restore capacity exceeded pos=(%.2f,%.2f,%.2f)",
                      snapshot->pos.x, snapshot->pos.y, snapshot->pos.z);
         }
         return false;
@@ -4284,9 +4025,7 @@ static bool spawn_static_at_rest(const Voxel *snapshot) {
     float px = center_x * VOXEL_SIZE;
     float py = center_y * VOXEL_SIZE;
     float pz = center_z * VOXEL_SIZE;
-    int span = (snapshot->span > 0) ? snapshot->span : 1;
-
-    int idx = addVoxelSized(px, py, pz, true, false, snapshot->color, snapshot->type, span);
+    int idx = addVoxel(px, py, pz, true, false, snapshot->color, snapshot->type);
     if (idx < 0) {
         return false;
     }
@@ -4360,8 +4099,8 @@ static void recycle_dead_voxels(void) {
             if (recycle_queue_push(voxel)) {
                 if (debugLogVoxelRecycle) {
                     TraceLog(LOG_INFO,
-                             "[Recycle] enqueue-static voxel=%d span=%d rest=(%d..%d,%d..%d,%d..%d)",
-                             i, voxel->span,
+                             "[Recycle] enqueue-static voxel=%d rest=(%d..%d,%d..%d,%d..%d)",
+                             i,
                              voxel->rest_min_gx, voxel->rest_max_gx,
                              voxel->rest_min_gy, voxel->rest_max_gy,
                              voxel->rest_min_gz, voxel->rest_max_gz);
@@ -4382,8 +4121,7 @@ static void recycle_dead_voxels(void) {
             if (!spawn_static_at_rest(&snapshot)) {
                 if (debugLogVoxelRecycle) {
                     TraceLog(LOG_INFO,
-                             "[Recycle] restore-failed span=%d rest=(%d..%d,%d..%d,%d..%d) queue=%d",
-                             snapshot.span,
+                             "[Recycle] restore-failed rest=(%d..%d,%d..%d,%d..%d) queue=%d",
                              snapshot.rest_min_gx, snapshot.rest_max_gx,
                              snapshot.rest_min_gy, snapshot.rest_max_gy,
                              snapshot.rest_min_gz, snapshot.rest_max_gz,
@@ -4393,8 +4131,7 @@ static void recycle_dead_voxels(void) {
             } else {
                 if (debugLogVoxelRecycle) {
                     TraceLog(LOG_INFO,
-                             "[Recycle] restore-ok span=%d rest=(%d..%d,%d..%d,%d..%d) queue=%d",
-                             snapshot.span,
+                             "[Recycle] restore-ok rest=(%d..%d,%d..%d,%d..%d) queue=%d",
                              snapshot.rest_min_gx, snapshot.rest_max_gx,
                              snapshot.rest_min_gy, snapshot.rest_max_gy,
                              snapshot.rest_min_gz, snapshot.rest_max_gz,
@@ -4970,8 +4707,8 @@ static bool deactivate_sleeping_voxels(void)
         if (voxel->sleepFrames < VOXEL_DEACTIVATION_FRAMES) {
             if (debugLogVoxelDeactivation && voxel->sleepFrames > 0) {
                 TraceLog(LOG_INFO,
-                         "[Deactivate] voxel=%d span=%d sleep=%d/%d waiting",
-                         idx, voxel->span, voxel->sleepFrames, VOXEL_DEACTIVATION_FRAMES);
+                         "[Deactivate] voxel=%d sleep=%d/%d waiting",
+                         idx, voxel->sleepFrames, VOXEL_DEACTIVATION_FRAMES);
             }
             ++idx;
             continue;
@@ -4981,8 +4718,8 @@ static bool deactivate_sleeping_voxels(void)
         if (cluster_count <= 0) {
             if (debugLogVoxelDeactivation) {
                 TraceLog(LOG_INFO,
-                         "[Deactivate] voxel=%d span=%d sleep=%d cluster-empty",
-                         idx, voxel->span, voxel->sleepFrames);
+                         "[Deactivate] voxel=%d sleep=%d cluster-empty",
+                         idx, voxel->sleepFrames);
             }
             ++idx;
             continue;
@@ -5115,10 +4852,6 @@ static void build_oblique_voxel_pyramid(UnitVoxelBuffer *buffer) {
     }
 }
 
-static float grid_span_center(int min_g, int span) {
-    return (min_g + 0.5f * (float)span) * VOXEL_SIZE;
-}
-
 static void apply_debug_tag_offset(int tag, int *x, int *y, int *z)
 {
     if (tag <= 0 || tag >= DEBUG_CLUSTER_TAG_MAX) {
@@ -5148,11 +4881,12 @@ static void init_debug_tag_offsets(void)
 static int add_dynamic_span_voxel_at_grid_tag(int minx, int miny, int minz,
                                               int span, Color color, int debugTag)
 {
+    (void)span;
     apply_debug_tag_offset(debugTag, &minx, &miny, &minz);
-    float px = grid_span_center(minx, span);
-    float py = grid_span_center(miny, span);
-    float pz = grid_span_center(minz, span);
-    int idx = addVoxelSized(px, py, pz, false, true, color, 0, span);
+    float px = ((float)minx + 0.5f) * VOXEL_SIZE;
+    float py = ((float)miny + 0.5f) * VOXEL_SIZE;
+    float pz = ((float)minz + 0.5f) * VOXEL_SIZE;
+    int idx = addVoxel(px, py, pz, false, true, color, 0);
     if (idx >= 0) {
         voxels[idx].debugClusterTag = debugTag;
         glue_neighbor_faces_for_voxel(idx);
@@ -5927,7 +5661,8 @@ static void buildDebugWorld(void) {
         for ( int x = 0; x < span; x++){
             for ( int z = 0; z < span; z++){
                 for ( int y = 0; y < span; y++){
-            addVoxelSized(px+x*VOXEL_SIZE, py+y*VOXEL_SIZE, pz+z*VOXEL_SIZE, false, true, (Color){ 240, 160, 60, 255 }, 0,1);
+            addVoxel(px + x * VOXEL_SIZE, py + y * VOXEL_SIZE, pz + z * VOXEL_SIZE,
+                     false, true, (Color){ 240, 160, 60, 255 }, 0);
                 }
             }
 
@@ -5984,7 +5719,6 @@ static int brush_extent_for_voxel(const Voxel *v);
 static float player_max_matter(const Player *p);
 static void add_player_matter(Player *p, float amount);
 static int player_points(const Player *p);
-static int bullet_span_for_player(const Player *p);
 static int player_bullet_damage(int attacker_index);
 static void update_points_animation(float dt);
 static Color player_palette_color(int index);
@@ -6255,7 +5989,7 @@ static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float
         return false;
     }
     Voxel *seed = &voxels[voxel_idx];
-    if (seed->simulate || seed->span != 1 || seed->pendingActivation) {
+    if (seed->simulate || seed->pendingActivation) {
         return false;
     }
 
@@ -6275,7 +6009,7 @@ static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float
     }
 
     remove_buffered_static_voxels(&buffer);
-    emit_multiscale_voxels_from_units(&buffer, false, true, -1);
+    emit_unit_voxels_from_units(&buffer, false, true, -1);
     rebuild_voxel_hash();
     rebuild_all_voxel_surfaces();
     rebuild_glue_constraints();
@@ -6393,7 +6127,7 @@ static bool activate_static_neighbors_of_region(int minx, int maxx,
                     continue;
                 }
                 Voxel *candidate = &voxels[idx];
-                if (candidate->simulate || candidate->span != 1 || candidate->pendingActivation) {
+                if (candidate->simulate || candidate->pendingActivation) {
                     continue;
                 }
                 if (!dynamic_belief_overcomes_static(activationBelief, candidate->freezeBelief)) {
@@ -6421,7 +6155,7 @@ static bool activate_static_neighbors_of_region(int minx, int maxx,
     if (debugLogSmush) {
         debugSmushLogBudget = 32;
     }
-    emit_multiscale_voxels_from_units(&buffer, false, true, -1);
+    emit_unit_voxels_from_units(&buffer, false, true, -1);
     if (debugLogSmush && debugSmushLogBudget > 0) {
         TraceLog(LOG_INFO,
                  "[Smush] activated units=%d activator=%d region=(%d..%d,%d..%d,%d..%d)",
@@ -6613,7 +6347,7 @@ static void update_projectiles(float dt)
                 continue;
             }
             Player *pl = &players[j];
-            float bullet_radius = VOXEL_SIZE * 0.5f * (float)(v->span > 0 ? v->span : 1);
+            float bullet_radius = VOXEL_SIZE * 0.5f;
             float hit_extent = PLAYER_SIZE * 0.5f + bullet_radius;
             Vector3 box_min = {
                 pl->pos.x - hit_extent,
@@ -6858,7 +6592,7 @@ static void handle_pbd_projectile_hits(void)
             float dx = v->pos.x - players[j].pos.x;
             float dy = v->pos.y - players[j].pos.y;
             float dz = v->pos.z - players[j].pos.z;
-            float voxel_radius = VOXEL_SIZE * 0.5f * (float)(v->span > 0 ? v->span : 1);
+            float voxel_radius = VOXEL_SIZE * 0.5f;
             float threshold = (PLAYER_SIZE * 0.5f) + voxel_radius + 0.1f;
             if (fabsf(dx) < threshold && fabsf(dy) < threshold && fabsf(dz) < threshold) {
                 if (glued_to_static) {
@@ -6874,8 +6608,8 @@ static void handle_pbd_projectile_hits(void)
                 bool award_debris = debris;
                 if (debugLogSmush && debugLogSmushHits && debugSmushLogBudget > 0) {
                     TraceLog(LOG_INFO,
-                             "[Smush] hit-check victim=%d voxel=%d owner=%d activator=%d simulate=%d span=%d projectile=%d debris=%d",
-                             j, i, v->owner, activator, v->simulate ? 1 : 0, v->span,
+                             "[Smush] hit-check victim=%d voxel=%d owner=%d activator=%d simulate=%d projectile=%d debris=%d",
+                             j, i, v->owner, activator, v->simulate ? 1 : 0,
                              is_projectile ? 1 : 0, debris ? 1 : 0);
                     --debugSmushLogBudget;
                 }
@@ -6884,14 +6618,13 @@ static void handle_pbd_projectile_hits(void)
                 }
                 if (debugLogSmush && debugLogSmushHits && debris && debugSmushLogBudget > 0) {
                     TraceLog(LOG_INFO,
-                             "[Smush] hit victim=%d attacker=%d voxel=%d span=%d",
-                             j, attacker, i, v->span);
+                             "[Smush] hit victim=%d attacker=%d voxel=%d",
+                             j, attacker, i);
                     --debugSmushLogBudget;
                 }
                 play_sfx(SFX_SMUSH);
                 float speed = v_length(v->vel);
-                int span = (v->span > 0) ? v->span : 1;
-                float damage = (float)(VOXEL_DAMAGE * span);
+                float damage = (float)VOXEL_DAMAGE;
                 if (speed >= SMUSH_EXPOSED_SPEED && players[j].isExposed) {
                     kill_player(j, attacker, award_kill, award_debris);
                     smushBannerTimer = 1.0f;
@@ -7860,9 +7593,8 @@ static void solve_voxel_glue(bool allow_break) {
         if (allow_break && (max_violation > break_distance || hinge_break)) {
             if (debugLogGlue && debugGlueBreakLogBudget > 0) {
                 TraceLog(LOG_DEBUG,
-                         "[GlueBreak] pair=(%d,%d) spans=(%d,%d) violation=%.5f break=%.5f hinge=%d uvPred=(%.3f,%.3f) rawUV=(%.3f,%.3f) baryValid=%s weights=(%.3f,%.3f,%.3f,%.3f) coarsePos=(%.2f,%.2f,%.2f) finePos=(%.2f,%.2f,%.2f)",
+                         "[GlueBreak] pair=(%d,%d) violation=%.5f break=%.5f hinge=%d uvPred=(%.3f,%.3f) rawUV=(%.3f,%.3f) baryValid=%s weights=(%.3f,%.3f,%.3f,%.3f) coarsePos=(%.2f,%.2f,%.2f) finePos=(%.2f,%.2f,%.2f)",
                          gc->coarseVoxel, gc->fineVoxel,
-                         voxel_span_for_glue(coarse), voxel_span_for_glue(fine),
                          violation, break_distance,
                          hinge_break ? 1 : 0,
                          solveU, solveV,
@@ -7886,12 +7618,12 @@ static void solve_voxel_glue(bool allow_break) {
                     const int uvOutU = (solveRawU < 0.0f || solveRawU > 1.0f) ? 1 : 0;
                     const int uvOutV = (solveRawV < 0.0f || solveRawV > 1.0f) ? 1 : 0;
                     TraceLog(LOG_INFO,
-                             "[GlueTagBreak] tag=%d label=%s voxel=%d span=%d neighborCount=%d "
+                             "[GlueTagBreak] tag=%d label=%s voxel=%d neighborCount=%d "
                              "violation=%.5f break=%.5f relVel=%.4f glueConstraints=%d "
                              "coarseEdge=%.4f fineEdge=%.4f rawUV=(%.4f,%.4f) uv=(%.4f,%.4f) "
                              "uvOut=(%d,%d) baryValid=%d dir=%s normalLen=%.6f baryDet=%.6f",
                              tagA, debug_cluster_tag_label(tagA),
-                             gc->coarseVoxel, voxel_span_for_glue(coarse),
+                             gc->coarseVoxel,
                              neighborCountA, violation, break_distance,
                              v_length(rel), glueConstraintCount,
                              coarse->rest_edge, fine->rest_edge,
@@ -7910,12 +7642,12 @@ static void solve_voxel_glue(bool allow_break) {
                     const int uvOutU = (solveRawU < 0.0f || solveRawU > 1.0f) ? 1 : 0;
                     const int uvOutV = (solveRawV < 0.0f || solveRawV > 1.0f) ? 1 : 0;
                     TraceLog(LOG_INFO,
-                             "[GlueTagBreak] tag=%d label=%s voxel=%d span=%d neighborCount=%d "
+                             "[GlueTagBreak] tag=%d label=%s voxel=%d neighborCount=%d "
                              "violation=%.5f break=%.5f relVel=%.4f glueConstraints=%d "
                              "coarseEdge=%.4f fineEdge=%.4f rawUV=(%.4f,%.4f) uv=(%.4f,%.4f) "
                              "uvOut=(%d,%d) baryValid=%d dir=%s normalLen=%.6f baryDet=%.6f",
                              tagB, debug_cluster_tag_label(tagB),
-                             gc->fineVoxel, voxel_span_for_glue(fine),
+                             gc->fineVoxel,
                              neighborCountB, violation, break_distance,
                              v_length(rel), glueConstraintCount,
                              coarse->rest_edge, fine->rest_edge,
@@ -7997,9 +7729,8 @@ static void solve_voxel_glue(bool allow_break) {
 
         if (debugLogGlue && debugGlueSolveLogBudget > 0) {
             TraceLog(LOG_DEBUG,
-                     "[GlueSolve] pair=(%d,%d) spans=(%d,%d) violation=%.5f break=%.5f invMass=%.5f lambda=%.5f coarseDeltaMax=%.5f fineDelta=%.5f baryValid=%s uvPred=(%.3f,%.3f) rawUV=(%.3f,%.3f) weights=(%.3f,%.3f,%.3f,%.3f) coarsePosY=%.2f finePosY=%.2f coarseVelY=%.2f fineVelY=%.2f",
+                     "[GlueSolve] pair=(%d,%d) violation=%.5f break=%.5f invMass=%.5f lambda=%.5f coarseDeltaMax=%.5f fineDelta=%.5f baryValid=%s uvPred=(%.3f,%.3f) rawUV=(%.3f,%.3f) weights=(%.3f,%.3f,%.3f,%.3f) coarsePosY=%.2f finePosY=%.2f coarseVelY=%.2f fineVelY=%.2f",
                      gc->coarseVoxel, gc->fineVoxel,
-                     voxel_span_for_glue(coarse), voxel_span_for_glue(fine),
                      violation, break_distance,
                      invMassSum, lambda_mag,
                      coarseDeltaMax, v_length(fineDelta),
@@ -8027,11 +7758,10 @@ static void log_dynamic_voxel_positions(void) {
             continue;
         }
         TraceLog(LOG_INFO,
-                 "[DynamicVoxel] voxel=%d pos=(%.3f,%.3f,%.3f) vel=(%.3f,%.3f,%.3f) span=%d",
+                 "[DynamicVoxel] voxel=%d pos=(%.3f,%.3f,%.3f) vel=(%.3f,%.3f,%.3f)",
                  i,
                  voxel->pos.x, voxel->pos.y, voxel->pos.z,
-                 voxel->vel.x, voxel->vel.y, voxel->vel.z,
-                 voxel->span);
+                 voxel->vel.x, voxel->vel.y, voxel->vel.z);
     }
 }
 
@@ -8289,9 +8019,8 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
 
         if (debugLogGlue && debugGlueBuildLogBudget > 0) {
             TraceLog(LOG_DEBUG,
-                     "[GlueBuild] pair=(%d,%d) spans=(%d,%d) dir=(%d,%d,%d) coarsePosSide=%s finePosSide=%s fineCorner=%d rawUV=(%.3f,%.3f) uv=(%.3f,%.3f) weights=(%.3f,%.3f,%.3f,%.3f) coarseCenter=(%.2f,%.2f,%.2f) fineCenter=(%.2f,%.2f,%.2f)",
+                     "[GlueBuild] pair=(%d,%d) dir=(%d,%d,%d) coarsePosSide=%s finePosSide=%s fineCorner=%d rawUV=(%.3f,%.3f) uv=(%.3f,%.3f) weights=(%.3f,%.3f,%.3f,%.3f) coarseCenter=(%.2f,%.2f,%.2f) fineCenter=(%.2f,%.2f,%.2f)",
                      coarseIdx, fineIdx,
-                     voxel_span_for_glue(coarse), voxel_span_for_glue(fine),
                      dir->dx, dir->dy, dir->dz,
                      coarsePositive ? "+face" : "-face",
                      finePositive ? "+face" : "-face",
@@ -8302,28 +8031,6 @@ static void add_bilinear_glue_constraints_for_pair(int negativeIdx, int positive
                      coarse->pos.x, coarse->pos.y, coarse->pos.z,
                      fine->pos.x, fine->pos.y, fine->pos.z);
             --debugGlueBuildLogBudget;
-        }
-        if (debugLogActivation && activationGlueLogBudget > 0) {
-            int spanA = voxel_span_for_glue(coarse);
-            int spanB = voxel_span_for_glue(fine);
-            if (spanA != spanB &&
-                (activation_range_contains(coarseIdx) ||
-                 activation_range_contains(fineIdx)))
-            {
-                TraceLog(LOG_INFO,
-                         "[Activation] glue build mismatch pair=(%d,%d) spans=(%d,%d) dir=(%d,%d,%d) "
-                         "rawUV=(%.3f,%.3f) uv=(%.3f,%.3f) weights=(%.3f,%.3f,%.3f,%.3f) "
-                         "coarseCenter=(%.2f,%.2f,%.2f) fineCenter=(%.2f,%.2f,%.2f)",
-                         coarseIdx, fineIdx,
-                         spanA, spanB,
-                         dir->dx, dir->dy, dir->dz,
-                         rawU, rawV,
-                         u, v,
-                         w0, w1, w2, w3,
-                         coarse->pos.x, coarse->pos.y, coarse->pos.z,
-                         fine->pos.x, fine->pos.y, fine->pos.z);
-                --activationGlueLogBudget;
-            }
         }
     }
 }
@@ -8808,7 +8515,7 @@ static bool batch_glued_dynamic_voxels(void)
         }
 
         int before = voxel_count;
-        int spawned = emit_multiscale_voxels_from_units(&buffer, false, true, -1);
+        int spawned = emit_unit_voxels_from_units(&buffer, false, true, -1);
         if (spawned <= 0) {
             for (int c = 0; c < cluster_count; ++c) {
                 restore_dynamic_snapshot(&snapshots[c]);
@@ -8884,8 +8591,8 @@ static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count
         } else {
             if (debugLogRestoreFailures) {
                 TraceLog(LOG_WARNING,
-                         "[RestoreFail] static restore failed voxel=%d span=%d rest=(%d..%d,%d..%d,%d..%d)",
-                         i, snapshots[i].span,
+                         "[RestoreFail] static restore failed voxel=%d rest=(%d..%d,%d..%d,%d..%d)",
+                         i,
                          snapshots[i].rest_min_gx, snapshots[i].rest_max_gx,
                          snapshots[i].rest_min_gy, snapshots[i].rest_max_gy,
                          snapshots[i].rest_min_gz, snapshots[i].rest_max_gz);
@@ -9126,46 +8833,16 @@ static int gather_neighbor_voxels(const Voxel *voxel, int voxel_idx, int *out, i
     int minx, maxx, miny, maxy, minz, maxz;
     voxel_grid_bounds(voxel, &minx, &maxx, &miny, &maxy, &minz, &maxz);
 
-    if (voxel->span <= 1) {
-        int gx = minx;
-        int gy = miny;
-        int gz = minz;
-        for (int dx = -1; dx <= 1; ++dx) {
-            for (int dy = -1; dy <= 1; ++dy) {
-                for (int dz = -1; dz <= 1; ++dz) {
-                    if (dx == 0 && dy == 0 && dz == 0) {
-                        continue;
-                    }
-                    int idx = table_get(gx + dx, gy + dy, gz + dz);
-                    if (idx < 0) {
-                        continue;
-                    }
-                    if (!list_contains_index(out, count, idx) && count < max_out) {
-                        out[count++] = idx;
-                    }
-                }
-            }
-        }
-        return count;
-    }
-
-    int x0 = minx - 1;
-    int x1 = maxx + 1;
-    int y0 = miny - 1;
-    int y1 = maxy + 1;
-    int z0 = minz - 1;
-    int z1 = maxz + 1;
-
-    for (int x = x0; x <= x1; ++x) {
-        for (int y = y0; y <= y1; ++y) {
-            for (int z = z0; z <= z1; ++z) {
-                bool inside = (x >= minx && x <= maxx &&
-                               y >= miny && y <= maxy &&
-                               z >= minz && z <= maxz);
-                if (inside) {
+    int gx = minx;
+    int gy = miny;
+    int gz = minz;
+    for (int dx = -1; dx <= 1; ++dx) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dz = -1; dz <= 1; ++dz) {
+                if (dx == 0 && dy == 0 && dz == 0) {
                     continue;
                 }
-                int idx = table_get(x, y, z);
+                int idx = table_get(gx + dx, gy + dy, gz + dz);
                 if (idx < 0) {
                     continue;
                 }
@@ -9206,47 +8883,6 @@ static int gather_static_voxels_near_point(Vector3 point, float radius, int *out
     for (int z = gz - 1; z <= gz + 1; ++z) {
         for (int y = gy - 1; y <= gy + 1; ++y) {
             for (int x = gx - 1; x <= gx + 1; ++x) {
-                int idx = table_get_static_only(x, y, z);
-                if (idx < 0 || idx >= voxel_count) {
-                    continue;
-                }
-                const Voxel *candidate = &voxels[idx];
-                if (candidate->simulate) {
-                    continue;
-                }
-                if (list_contains_index(out, count, idx)) {
-                    continue;
-                }
-                if (count < max_out) {
-                    out[count++] = idx;
-                } else {
-                    return count;
-                }
-            }
-        }
-    }
-    return count;
-}
-
-static int gather_static_voxels_near_voxel(const Voxel *voxel, int *out, int max_out)
-{
-    if (!voxel || !out || max_out <= 0) {
-        return 0;
-    }
-    int minx, maxx, miny, maxy, minz, maxz;
-    voxel_grid_bounds(voxel, &minx, &maxx, &miny, &maxy, &minz, &maxz);
-    if (minx > maxx || miny > maxy || minz > maxz) {
-        return 0;
-    }
-    minx -= 1; maxx += 1;
-    miny -= 1; if (miny < 0) miny = 0;
-    maxy += 1;
-    minz -= 1; maxz += 1;
-
-    int count = 0;
-    for (int z = minz; z <= maxz; ++z) {
-        for (int y = miny; y <= maxy; ++y) {
-            for (int x = minx; x <= maxx; ++x) {
                 int idx = table_get_static_only(x, y, z);
                 if (idx < 0 || idx >= voxel_count) {
                     continue;
@@ -9365,131 +9001,6 @@ static bool push_particle_out_of_static(const Voxel *static_voxel, Particle *par
     }
 }
 
-static bool resolve_span_static_overlap(int dynamic_idx, Voxel *dynamic,
-                                        int static_idx, const Voxel *static_voxel)
-{
-    if (!dynamic || !static_voxel || !dynamic->simulate || dynamic->span <= 1) {
-        return false;
-    }
-    VoxelWorldBounds boundsA, boundsB;
-    voxel_world_bounds(dynamic, &boundsA);
-    voxel_world_bounds(static_voxel, &boundsB);
-
-    float overlapX = fminf(boundsA.maxx, boundsB.maxx) - fmaxf(boundsA.minx, boundsB.minx);
-    float overlapY = fminf(boundsA.maxy, boundsB.maxy) - fmaxf(boundsA.miny, boundsB.miny);
-    float overlapZ = fminf(boundsA.maxz, boundsB.maxz) - fmaxf(boundsA.minz, boundsB.minz);
-    if (overlapX <= 0.0f || overlapY <= 0.0f || overlapZ <= 0.0f) {
-        return false;
-    }
-
-    float overlaps[3] = { overlapX, overlapY, overlapZ };
-    int axis = 0;
-    if (overlapY < overlaps[axis]) axis = 1;
-    if (overlapZ < overlaps[axis]) axis = 2;
-    float penetration = overlaps[axis];
-    if (penetration <= 0.0f) {
-        return false;
-    }
-
-    Vector3 centerA = dynamic->pos;
-    Vector3 centerB = static_voxel->pos;
-    float inv_mass_sum = 0.0f;
-    compute_voxel_center_and_mass(dynamic, &centerA, &inv_mass_sum);
-    if (inv_mass_sum <= 0.0f) {
-        return false;
-    }
-
-    Vector3 normal = { 0.0f, 0.0f, 0.0f };
-    if (axis == 0) {
-        normal.x = (centerA.x >= centerB.x) ? 1.0f : -1.0f;
-    } else if (axis == 1) {
-        normal.y = (centerA.y >= centerB.y) ? 1.0f : -1.0f;
-    } else {
-        normal.z = (centerA.z >= centerB.z) ? 1.0f : -1.0f;
-    }
-
-    if (debugLogSpanCollisions) {
-        TraceLog(LOG_INFO,
-                 "[SpanStatic] overlap dyn=%d span=%d static=%d axis=%d pen=%.4f overlaps=(%.4f,%.4f,%.4f) "
-                 "centersA=(%.2f,%.2f,%.2f) centersB=(%.2f,%.2f,%.2f) normal=(%.1f,%.1f,%.1f)",
-                 dynamic_idx, dynamic->span, static_idx, axis, penetration,
-                 overlapX, overlapY, overlapZ,
-                 centerA.x, centerA.y, centerA.z,
-                 centerB.x, centerB.y, centerB.z,
-                 normal.x, normal.y, normal.z);
-    }
-
-    const float omega = COLLISION_RELAXATION;
-    Vector3 delta = v_mul(normal, penetration * omega);
-    for (int j = 0; j < 8; ++j) {
-        Particle *p = dynamic->particles[j];
-        if (p->inv_mass <= 0.0f) {
-            continue;
-        }
-        float weight = p->inv_mass / inv_mass_sum;
-        p->predicted_pos = v_add(p->predicted_pos, v_mul(delta, weight));
-    }
-
-    return true;
-}
-
-static bool nudge_voxel_bottom_above_static(int voxel_idx, Voxel *voxel)
-{
-    if (!voxel || !voxel->simulate || voxel->span <= 1) {
-        return false;
-    }
-
-    int minx, maxx, miny, maxy, minz, maxz;
-    voxel_grid_bounds(voxel, &minx, &maxx, &miny, &maxy, &minz, &maxz);
-    int support_y = miny - 1;
-    if (support_y < 0) {
-        return false;
-    }
-
-    float half_edge = 0.5f * voxel->rest_edge;
-    Vector3 center = voxel->pos;
-    compute_voxel_center_and_mass(voxel, &center, NULL);
-    float current_bottom = center.y - half_edge;
-    float required_bottom = current_bottom;
-    bool found_support = false;
-
-    for (int z = minz; z <= maxz; ++z) {
-        for (int x = minx; x <= maxx; ++x) {
-            int idx = table_get_static_only(x, support_y, z);
-            if (idx < 0 || idx >= voxel_count) {
-                continue;
-            }
-            const Voxel *support = &voxels[idx];
-            if (support->simulate) {
-                continue;
-            }
-            float top = ((float)(support_y + 1)) * VOXEL_SIZE;
-            if (top > required_bottom) {
-                required_bottom = top;
-            }
-            found_support = true;
-        }
-    }
-
-    float lift = required_bottom - current_bottom;
-    if (!found_support || lift <= 0.0f) {
-        return false;
-    }
-
-    Vector3 delta = { 0.0f, lift, 0.0f };
-    voxel->pos = v_add(voxel->pos, delta);
-    for (int j = 0; j < 8; ++j) {
-        voxel->particles[j]->predicted_pos = v_add(voxel->particles[j]->predicted_pos, delta);
-    }
-
-    if (debugLogSpanCollisions) {
-        TraceLog(LOG_INFO,
-                 "[SpanStaticLift] voxel=%d span=%d lift=%.4f bottom=%.4f target=%.4f",
-                 voxel_idx, voxel->span, lift, current_bottom, required_bottom);
-    }
-    return true;
-}
-
 static void glue_dynamic_face_to_static(Voxel *dynamic, Voxel *stat,
                                         int face_dynamic, int face_static)
 {
@@ -9534,9 +9045,6 @@ static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx)
         }
         Voxel *neighbor = &voxels[idx];
         if (neighbor->simulate) {
-            continue;
-        }
-        if (dynamic->span != neighbor->span) {
             continue;
         }
         glue_dynamic_face_to_static(dynamic, neighbor, face, opposite_face[face]);
@@ -9593,19 +9101,6 @@ static bool voxels_share_edge_or_corner(const Voxel *voxel_a, const Voxel *voxel
     bool rest_face = voxels_share_face_rest(voxel_a, voxel_b);
     
 
-    if (debug_should_log_span_pair(voxel_a, voxel_b, &debugSpanEdgeLogBudget)) {
-        TraceLog(LOG_INFO,
-                 "[SpanDebug] adjacency shareEdge=%s spans=(%d,%d) touchingAxes=%d overlapAxes=%d "
-                 "restShare=%s restFace=%s posA=(%.2f,%.2f,%.2f) posB=(%.2f,%.2f,%.2f)",
-                 share_edge ? "true" : "false",
-                 voxel_a->span, voxel_b->span,
-                 touching_axes, overlap_axes,
-                 rest_share ? "true" : "false",
-                 rest_face ? "true" : "false",
-                 voxel_a->pos.x, voxel_a->pos.y, voxel_a->pos.z,
-                 voxel_b->pos.x, voxel_b->pos.y, voxel_b->pos.z);
-    }
-
     return share_edge || rest_share || rest_face;
 }
 
@@ -9644,9 +9139,7 @@ static void solve_static_collisions(float dt) {
         }
         float voxel_radius = voxel_particle_radius(voxel);
         float terrain_limit = FLOOR_SIZE - voxel_radius;
-        int span = (voxel->span > 0) ? voxel->span : 1;
-        float span_extent = 0.5f * VOXEL_SIZE * (float)(span - 1);
-        float static_collision_radius = voxel_radius - span_extent;
+        float static_collision_radius = voxel_radius;
         float min_static_radius = 0.5f * VOXEL_SIZE;
         if (static_collision_radius < min_static_radius) {
             static_collision_radius = min_static_radius;
@@ -9657,7 +9150,7 @@ static void solve_static_collisions(float dt) {
 
             Vector3 pos = p->predicted_pos;
 
-            float floor_offset = 0.5f * VOXEL_SIZE * (float)span;
+            float floor_offset = 0.5f * VOXEL_SIZE;
             float floor_limit = fmaxf(0.0f, floor_offset - voxel_radius);
             if (pos.y < floor_limit) {
                 pos.y = floor_limit;
@@ -9721,29 +9214,11 @@ static void solve_static_collisions(float dt) {
             }
         }
 
-        if (span > 1) {
-            int static_indices[MAX_STATIC_COLLISION_NEIGHBORS];
-            int static_count = gather_static_voxels_near_voxel(voxel, static_indices,
-                                                               MAX_STATIC_COLLISION_NEIGHBORS);
-            for (int s = 0; s < static_count; ++s) {
-                int static_idx = static_indices[s];
-                if (static_idx < 0 || static_idx >= voxel_count) {
-                    continue;
-                }
-                const Voxel *static_voxel = &voxels[static_idx];
-                if (static_voxel->simulate) {
-                    continue;
-                }
-                resolve_span_static_overlap(i, voxel, static_idx, static_voxel);
-            }
-            nudge_voxel_bottom_above_static(i, voxel);
-        }
     }
 }
 
 // Unified solver for dynamic-dynamic collisions
 static void solve_dynamic_collisions(float dt) {
-    const float contact_eps = 0.0f;
     const float omega = COLLISION_RELAXATION;
     const float eps = 1e-6f;
     const bool centroid_only = (dt > COLLISION_CENTROID_ONLY_DT);
@@ -9764,10 +9239,6 @@ static void solve_dynamic_collisions(float dt) {
         int neighbor_ids[MAX_NEIGHBOR_VOXELS];
         int neighbor_count = gather_neighbor_voxels(voxelA, i, neighbor_ids, MAX_NEIGHBOR_VOXELS);
 
-        // Precompute A properties for box solver
-        VoxelWorldBounds boundsA_pred;
-        voxel_predicted_bounds(voxelA, &boundsA_pred);
-
         for (int n = 0; n < neighbor_count; ++n) {
             int neighbor_idx = neighbor_ids[n];
             if (neighbor_idx <= i) continue;
@@ -9779,133 +9250,52 @@ static void solve_dynamic_collisions(float dt) {
             if (skipGlueClusterCollisions &&
                 glue_cluster_id[i] >= 0 && glue_cluster_id[i] == glue_cluster_id[neighbor_idx]) continue;
 
-            int spanA = (voxelA->span > 0) ? voxelA->span : 1;
-            int spanB = (voxelB->span > 0) ? voxelB->span : 1;
+            VoxelWorldBounds boundsA;
+            voxel_predicted_bounds(voxelA, &boundsA);
+            VoxelWorldBounds boundsB;
+            voxel_predicted_bounds(voxelB, &boundsB);
+            float radiusA = voxel_particle_radius(voxelA);
+            float radiusB = voxel_particle_radius(voxelB);
 
-            if (spanA <= 1 && spanB <= 1) {
-                // *** Small-Small Solver (Particle-based) ***
-                
-                VoxelWorldBounds boundsA; 
-                voxel_predicted_bounds(voxelA, &boundsA);
-                VoxelWorldBounds boundsB;
-                voxel_predicted_bounds(voxelB, &boundsB);
-                float radiusA = voxel_particle_radius(voxelA);
-                float radiusB = voxel_particle_radius(voxelB);
-                
-                if (boundsA.maxx + radiusA < boundsB.minx - radiusB ||
-                    boundsB.maxx + radiusB < boundsA.minx - radiusA ||
-                    boundsA.maxy + radiusA < boundsB.miny - radiusB ||
-                    boundsB.maxy + radiusB < boundsA.miny - radiusA ||
-                    boundsA.maxz + radiusA < boundsB.minz - radiusB ||
-                    boundsB.maxz + radiusB < boundsA.minz - radiusA) {
-                    continue;
-                }
-                
-                float spanA_extent = 0.5f * VOXEL_SIZE * (float)(spanA - 1);
-                float spanB_extent = 0.5f * VOXEL_SIZE * (float)(spanB - 1);
-                float span_offset = spanA_extent + spanB_extent;
-                float target_dist_base = radiusA + radiusB - span_offset;
-                if (target_dist_base < 0.0f) target_dist_base = 0.0f;
+            if (boundsA.maxx + radiusA < boundsB.minx - radiusB ||
+                boundsB.maxx + radiusB < boundsA.minx - radiusA ||
+                boundsA.maxy + radiusA < boundsB.miny - radiusB ||
+                boundsB.maxy + radiusB < boundsA.miny - radiusA ||
+                boundsA.maxz + radiusA < boundsB.minz - radiusB ||
+                boundsB.maxz + radiusB < boundsA.minz - radiusA) {
+                continue;
+            }
 
-                for (int j = particle_start; j < particle_end; ++j) {
-                    Particle *pa = voxel_particle_at(voxelA, j);
-                    float wa = pa->inv_mass;
-                    
-                    for (int q = particle_start; q < particle_end; ++q) {
-                        if (j < VOXEL_CORNER_COUNT && q < VOXEL_CORNER_COUNT) {
-                            if (particles_are_glued_pair(i, j, neighbor_idx, q)) continue;
-                        }
+            float target_dist_base = radiusA + radiusB;
 
-                        Particle *pb = voxel_particle_at(voxelB, q);
-                        float wb = pb->inv_mass;
-                        float w_sum = wa + wb;
-                        if (w_sum <= 0.0f) continue;
+            for (int j = particle_start; j < particle_end; ++j) {
+                Particle *pa = voxel_particle_at(voxelA, j);
+                float wa = pa->inv_mass;
 
-                        Vector3 delta = v_sub(pa->predicted_pos, pb->predicted_pos);
-                        float dist_sq = v_dot(delta, delta);
-                        
-                        if (dist_sq >= (target_dist_base * target_dist_base)) continue;
-
-                        float dist = sqrtf(fmaxf(dist_sq, eps));
-                        float penetration = target_dist_base - dist;
-                        if (penetration <= 0.0f) continue;
-
-                        Vector3 normal = (dist > eps) ? v_mul(delta, 1.0f / dist) : (Vector3){ 1.0f, 0.0f, 0.0f };
-                        float h = 0.5f * penetration;
-                        float scale = omega * h / w_sum;
-                        if (wa > 0.0f) pa->predicted_pos = v_add(pa->predicted_pos, v_mul(normal, scale * wa));
-                        if (wb > 0.0f) pb->predicted_pos = v_sub(pb->predicted_pos, v_mul(normal, scale * wb));
+                for (int q = particle_start; q < particle_end; ++q) {
+                    if (j < VOXEL_CORNER_COUNT && q < VOXEL_CORNER_COUNT) {
+                        if (particles_are_glued_pair(i, j, neighbor_idx, q)) continue;
                     }
-                }
 
-            } else {
-                // *** Large/Mixed Solver (Box-based) ***
-                
-                VoxelWorldBounds boundsB_pred;
-                voxel_predicted_bounds(voxelB, &boundsB_pred);
-                
-                if (boundsA_pred.maxx < boundsB_pred.minx - contact_eps ||
-                    boundsB_pred.maxx < boundsA_pred.minx - contact_eps ||
-                    boundsA_pred.maxy < boundsB_pred.miny - contact_eps ||
-                    boundsB_pred.maxy < boundsA_pred.miny - contact_eps ||
-                    boundsA_pred.maxz < boundsB_pred.minz - contact_eps ||
-                    boundsB_pred.maxz < boundsA_pred.minz - contact_eps) {
-                    continue;
-                }
+                    Particle *pb = voxel_particle_at(voxelB, q);
+                    float wb = pb->inv_mass;
+                    float w_sum = wa + wb;
+                    if (w_sum <= 0.0f) continue;
 
-                VoxelWorldBounds boundsA, boundsB;
-                voxel_world_bounds(voxelA, &boundsA);
-                voxel_world_bounds(voxelB, &boundsB);
+                    Vector3 delta = v_sub(pa->predicted_pos, pb->predicted_pos);
+                    float dist_sq = v_dot(delta, delta);
 
-                float overlapX = fminf(boundsA.maxx, boundsB.maxx) - fmaxf(boundsA.minx, boundsB.minx);
-                float overlapY = fminf(boundsA.maxy, boundsB.maxy) - fmaxf(boundsA.miny, boundsB.miny);
-                float overlapZ = fminf(boundsA.maxz, boundsB.maxz) - fmaxf(boundsA.minz, boundsB.minz);
-                
-                if (overlapX <= contact_eps || overlapY <= contact_eps || overlapZ <= contact_eps) continue;
-                
-                float overlaps[3] = { overlapX, overlapY, overlapZ };
-                int axis = 0;
-                if (overlapY < overlaps[axis]) axis = 1;
-                if (overlapZ < overlaps[axis]) axis = 2;
-                
-                float penetration = overlaps[axis];
-                if (penetration <= 0.0f) continue;
-                
-                Vector3 centerA = voxelA->pos;
-                Vector3 centerB = voxelB->pos;
-                float inv_massA = 0.0f; float inv_massB = 0.0f;
-                compute_voxel_center_and_mass(voxelA, &centerA, &inv_massA);
-                compute_voxel_center_and_mass(voxelB, &centerB, &inv_massB);
-                
-                Vector3 normal = {0};
-                if (axis == 0) normal.x = (centerA.x >= centerB.x) ? 1.0f : -1.0f;
-                else if (axis == 1) normal.y = (centerA.y >= centerB.y) ? 1.0f : -1.0f;
-                else normal.z = (centerA.z >= centerB.z) ? 1.0f : -1.0f;
-                
-                float w_sum = inv_massA + inv_massB;
-                if (w_sum <= 0.0f) continue;
-                
-                float correction = penetration * omega;
-                float moveA = (inv_massA > 0.0f) ? correction * (inv_massA / w_sum) : 0.0f;
-                float moveB = (inv_massB > 0.0f) ? correction * (inv_massB / w_sum) : 0.0f;
-                
-                if (moveA > 0.0f) {
-                    Vector3 delta = v_mul(normal, moveA);
-                    for (int j = 0; j < 8; ++j) {
-                        Particle *pa = voxelA->particles[j];
-                        if (pa->inv_mass <= 0.0f) continue;
-                        float weight = (inv_massA > 0.0f) ? (pa->inv_mass / inv_massA) : 0.0f;
-                        pa->predicted_pos = v_add(pa->predicted_pos, v_mul(delta, weight));
-                    }
-                }
-                if (moveB > 0.0f) {
-                     Vector3 delta = v_mul(normal, moveB);
-                    for (int j = 0; j < 8; ++j) {
-                        Particle *pb = voxelB->particles[j];
-                        if (pb->inv_mass <= 0.0f) continue;
-                        float weight = (inv_massB > 0.0f) ? (pb->inv_mass / inv_massB) : 0.0f;
-                        pb->predicted_pos = v_sub(pb->predicted_pos, v_mul(delta, weight));
-                    }
+                    if (dist_sq >= (target_dist_base * target_dist_base)) continue;
+
+                    float dist = sqrtf(fmaxf(dist_sq, eps));
+                    float penetration = target_dist_base - dist;
+                    if (penetration <= 0.0f) continue;
+
+                    Vector3 normal = (dist > eps) ? v_mul(delta, 1.0f / dist) : (Vector3){ 1.0f, 0.0f, 0.0f };
+                    float h = 0.5f * penetration;
+                    float scale = omega * h / w_sum;
+                    if (wa > 0.0f) pa->predicted_pos = v_add(pa->predicted_pos, v_mul(normal, scale * wa));
+                    if (wb > 0.0f) pb->predicted_pos = v_sub(pb->predicted_pos, v_mul(normal, scale * wb));
                 }
             }
         }
@@ -10026,112 +9416,16 @@ static void apply_uniform_velocity(Voxel *v, Vector3 vel, float dt) {
 }
 
 static int split_voxel_at(int idx, float dt, int *out_children, int max_children) {
-    if (idx < 0 || idx >= voxel_count || !out_children || max_children < MAX_SPLIT_CHILDREN) {
-        return 0;
-    }
-
-    Voxel parent = voxels[idx];
-    if (parent.span < 2) {
-        return 0;
-    }
-    const int additional_children = MAX_SPLIT_CHILDREN - 1;
-    if (voxel_count + additional_children > MAX_VOXELS) {
-        return 0;
-    }
-
-    int child_span = parent.span / 2;
-    if (child_span < 1) {
-        return 0;
-    }
-    float child_edge = VOXEL_SIZE * (float)child_span;
-    float parent_half = 0.5f * parent.rest_edge;
-    float child_offset = parent_half - 0.5f * child_edge;
-    if (child_offset < 0.0f) {
-        child_offset = 0.0f;
-    }
-    Vector3 split_vel = v_mul(parent.vel, SPLIT_VELOCITY_DAMP);
-
-    int child_counter = 0;
-    int next_index = voxel_count;
-    for (int iz = 0; iz < 2; ++iz) {
-        for (int iy = 0; iy < 2; ++iy) {
-            for (int ix = 0; ix < 2; ++ix) {
-                float cx = parent.pos.x + (ix ? child_offset : -child_offset);
-                float cy = parent.pos.y + (iy ? child_offset : -child_offset);
-                float cz = parent.pos.z + (iz ? child_offset : -child_offset);
-
-                int child_idx;
-                if (child_counter == 0) {
-                    child_idx = idx;
-                } else {
-                    child_idx = next_index++;
-                }
-
-                Voxel *child = &voxels[child_idx];
-                init_voxel_struct(child,
-                                  cx, cy, cz,
-                                  parent.fixed, parent.simulate,
-                                  parent.color, parent.type,
-                                  child_span, parent.owner);
-                child->activator = parent.activator;
-                child->debugClusterTag = parent.debugClusterTag;
-                apply_uniform_velocity(child, split_vel, dt);
-                out_children[child_counter] = child_idx;
-                child_counter++;
-            }
-        }
-    }
-
-    voxel_count = next_index;
-    return child_counter;
+    (void)idx;
+    (void)dt;
+    (void)out_children;
+    (void)max_children;
+    return 0;
 }
 
 static bool split_strained_voxels(float dt) {
-    bool split_any = false;
-    int i = 0;
-    while (i < voxel_count) {
-        Voxel *voxel = &voxels[i];
-        if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
-            ++i;
-            continue;
-        }
-
-        float strain = 0.0f;
-        float shear = 0.0f;
-        voxel_measure_strain(voxel, &strain, &shear);
-        if (voxel->span <= 1) {
-            ++i;
-            continue;
-        }
-        if (strain > VOXEL_SPLIT_STRAIN_THRESHOLD ||
-            shear > VOXEL_SPLIT_SHEAR_THRESHOLD)
-        {
-            int glued_neighbors[MAX_FACE_NEIGHBORS];
-            int glued_neighbor_count = gather_glued_neighbors(i, glued_neighbors, MAX_FACE_NEIGHBORS);
-            for (int n = 0; n < glued_neighbor_count; ++n) {
-                deactivate_glue_constraints_between(i, glued_neighbors[n]);
-            }
-
-            int children[MAX_SPLIT_CHILDREN];
-            int child_count = split_voxel_at(i, dt, children, MAX_SPLIT_CHILDREN);
-            if (child_count > 0) {
-                split_any = true;
-                rebuild_glue_children_with_neighbors(children, child_count,
-                                                     glued_neighbors, glued_neighbor_count);
-                ++i;
-                continue;
-            } else {
-                for (int n = 0; n < glued_neighbor_count; ++n) {
-                    rebuild_glue_between_pair(i, glued_neighbors[n]);
-                }
-            }
-        }
-        ++i;
-    }
-    if (split_any) {
-        compact_glue_constraints();
-    }
-    return split_any;
+    (void)dt;
+    return false;
 }
 
 static bool cull_dust_voxels(void) {
@@ -10160,8 +9454,8 @@ static bool cull_dust_voxels(void) {
         }
         if (recycle_queue_push(voxel) && debugLogVoxelRecycle) {
             TraceLog(LOG_INFO,
-                     "[Dust] enqueue-voxel idx=%d span=%d strain=%.3f shear=%.3f queue=%d",
-                     i, voxel->span, strain, shear, recycleQueueCount);
+                     "[Dust] enqueue-voxel idx=%d strain=%.3f shear=%.3f queue=%d",
+                     i, strain, shear, recycleQueueCount);
         }
         remove_voxel_index(i);
         removed_any = true;
@@ -10207,6 +9501,7 @@ void simulate_voxel_pbd(float dt) {
             apply_particle_accumulators();
         }
 
+        solve_static_collisions(sub_dt);
 
         process_break_masks();
         update_wake_timers();
@@ -10236,8 +9531,8 @@ void simulate_voxel_pbd(float dt) {
                     fabsf(pos.x) > 1e4f || fabsf(pos.y) > 1e4f || fabsf(pos.z) > 1e4f)
                 {
                     TraceLog(LOG_WARNING,
-                             "[VoxelBlowup] voxel=%d span=%d pos=(%.3f,%.3f,%.3f) vel=(%.3f,%.3f,%.3f)",
-                             i, voxel->span,
+                             "[VoxelBlowup] voxel=%d pos=(%.3f,%.3f,%.3f) vel=(%.3f,%.3f,%.3f)",
+                             i,
                              pos.x, pos.y, pos.z,
                              voxel->vel.x, voxel->vel.y, voxel->vel.z);
                     --debugBlowupLogBudget;
@@ -10292,8 +9587,7 @@ static void FireVoxel(int idx) {
     Vector3 dir = { sinf(-yawRad)*cosf(pitchRad), sinf(pitchRad), -cosf(yawRad)*cosf(pitchRad) };
     Vector3 start = v_add(p->pos, v_mul(dir, 0.8f));
     Color col = (Color){ 80, 170, 255, 255 };
-    int span = bullet_span_for_player(p);
-    int vix = addVoxelSized(start.x, start.y, start.z, false, true, col, 0, span);
+    int vix = addVoxel(start.x, start.y, start.z, false, true, col, 0);
     if (vix >= 0) {
         Voxel *shot = &voxels[vix];
         Vector3 vel = v_mul(dir, 60.0f);
@@ -10473,11 +9767,6 @@ static int player_points(const Player *p) {
         return 0;
     }
     return p->kills + p->debrisKills * SMUSH_POINT_MULT;
-}
-
-static int bullet_span_for_player(const Player *p) {
-    (void)p;
-    return 1;
 }
 
 static int player_bullet_damage(int attacker_index) {
@@ -11058,7 +10347,6 @@ static void compute_dynamic_face_visibility(int idx, bool faces[6])
             Voxel *neighbor = &voxels[nidx];
             if (face_blocked_by_voxel(v, neighbor, 0)) {
                 faces[0] = false;
-                log_span2_face_cull(v, idx, neighbor, nidx, 0);
                 break;
             }
         }
@@ -11073,7 +10361,6 @@ static void compute_dynamic_face_visibility(int idx, bool faces[6])
             Voxel *neighbor = &voxels[nidx];
             if (face_blocked_by_voxel(v, neighbor, 1)) {
                 faces[1] = false;
-                log_span2_face_cull(v, idx, neighbor, nidx, 1);
                 break;
             }
         }
@@ -11088,7 +10375,6 @@ static void compute_dynamic_face_visibility(int idx, bool faces[6])
             Voxel *neighbor = &voxels[nidx];
             if (face_blocked_by_voxel(v, neighbor, 2)) {
                 faces[2] = false;
-                log_span2_face_cull(v, idx, neighbor, nidx, 2);
                 break;
             }
         }
@@ -11103,7 +10389,6 @@ static void compute_dynamic_face_visibility(int idx, bool faces[6])
             Voxel *neighbor = &voxels[nidx];
             if (face_blocked_by_voxel(v, neighbor, 3)) {
                 faces[3] = false;
-                log_span2_face_cull(v, idx, neighbor, nidx, 3);
                 break;
             }
         }
@@ -11118,7 +10403,6 @@ static void compute_dynamic_face_visibility(int idx, bool faces[6])
             Voxel *neighbor = &voxels[nidx];
             if (face_blocked_by_voxel(v, neighbor, 4)) {
                 faces[4] = false;
-                log_span2_face_cull(v, idx, neighbor, nidx, 4);
                 break;
             }
         }
@@ -11133,7 +10417,6 @@ static void compute_dynamic_face_visibility(int idx, bool faces[6])
             Voxel *neighbor = &voxels[nidx];
             if (face_blocked_by_voxel(v, neighbor, 5)) {
                 faces[5] = false;
-                log_span2_face_cull(v, idx, neighbor, nidx, 5);
                 break;
             }
         }
@@ -11639,10 +10922,6 @@ static void DrawVoxels(Camera3D cam) {
         InitInstancing();
     }
 
-    if (debugLogSpan2Faces) {
-        debugSpan2FaceLogBudget = DEBUG_SPAN2_FACE_LOG_INIT;
-    }
-
     if (meshDirty) {
         if (greedyMesh.vertices) {
             UnloadMesh(greedyMesh);
@@ -11676,7 +10955,7 @@ static void DrawVoxels(Camera3D cam) {
         }
         
         // Calculate Scale
-        float scale = VOXEL_SIZE * (float)((v->span > 0) ? v->span : 1);
+        float scale = VOXEL_SIZE;
         if (v->isBullet && v->type == 0) {
             scale *= 0.25f;
         }
@@ -11755,8 +11034,7 @@ static void DrawVoxels(Camera3D cam) {
             center = v_add(center, v->particles[k]->pos);
         }
         center = v_mul(center, 0.125f);
-        float span = (float)((v->span > 0) ? v->span : 1);
-        float core_radius = 0.35f * VOXEL_SIZE * span;
+        float core_radius = 0.35f * VOXEL_SIZE;
         float glow_radius = core_radius * 2.2f;
         DrawSphere(center, glow_radius, (Color){ 80, 170, 255, 80 });
         DrawSphere(center, core_radius, (Color){ 120, 200, 255, 220 });
@@ -12930,8 +12208,8 @@ int main(void) {
                 }
                 if (v->pos.y < DEBUG_FALL_LOG_THRESHOLD) {
                     TraceLog(LOG_WARNING,
-                             "[Fall] voxel=%d span=%d pos=(%.2f,%.2f,%.2f) vel=(%.2f,%.2f,%.2f)",
-                             i, v->span,
+                             "[Fall] voxel=%d pos=(%.2f,%.2f,%.2f) vel=(%.2f,%.2f,%.2f)",
+                             i,
                              v->pos.x, v->pos.y, v->pos.z,
                              v->vel.x, v->vel.y, v->vel.z);
                     --fall_log_budget;
