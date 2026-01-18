@@ -186,7 +186,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define TARGET_FRAME_RATE 30
 #define PBD_MAX_STEP_DT 1.0f/TARGET_FRAME_RATE
 #define PBD_SUBSTEPS 1
-#define PBD_CONSTRAINT_ITERS 1
+#define PBD_CONSTRAINT_ITERS 6
 #define BREAK_DAMP_FRAMES 50
 #define COARSENING_WAKE_FRAMES 30
 #define COARSENING_MASS_SCALE 1.0f
@@ -849,7 +849,7 @@ static int debugSupportLogBudget = 512;
 static const float DEBUG_FALL_LOG_THRESHOLD = -5.0f;
 static const int DEBUG_FALL_LOG_BUDGET = 32;
 static bool debugLogFall = false;
-static bool debugShowBeliefColors = false;
+static bool debugShowBeliefColors = true;
 static unsigned char debugTagBreakLogged[DEBUG_CLUSTER_TAG_MAX];
 
 static const char *trace_level_label(int level) {
@@ -5916,13 +5916,13 @@ static void buildDebugWorld(void) {
     // build_oblique_voxel_pyramid(&pyramid_units);
     // emit_static_voxels_from_units(&pyramid_units);
     //Span-2 dynamic voxel near origin for floor collision testing
-    // {
-    //     int span = 4;
-    //     float px = -2.0f * VOXEL_SIZE;
-    //     float pz = 2.0f * VOXEL_SIZE;
-    //     float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
-    //     addVoxelSized(px, py, pz, false, true, (Color){ 240, 160, 60, 255 }, 0, span);
-    // }
+    {
+        int span = 4;
+        float px = -2.0f * VOXEL_SIZE;
+        float pz = 2.0f * VOXEL_SIZE;
+        float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
+        addVoxelSized(px, py, pz, false, true, (Color){ 240, 160, 60, 255 }, 0, span);
+    }
     // {
     //     int span = 7;
     //     float px = -2.0f * VOXEL_SIZE;
@@ -5958,10 +5958,10 @@ static void buildDebugWorld(void) {
 
 // Build static demo cube of voxels
 static void buildDemo(void) {
-    buildTestWorld();
-    buildProceduralWorld();
+    //buildTestWorld();
+    //buildProceduralWorld();
     //buildBloodWorld();
-    //buildDebugWorld();
+    buildDebugWorld();
     rebuild_glue_constraints();
 }
 
