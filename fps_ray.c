@@ -8650,95 +8650,92 @@ static void compute_voxel_center_and_mass(const Voxel *voxel, Vector3 *center, f
     }
 }
 
+typedef struct {
+    float half_player;
+} StaticCollisionJob;
+
+static void solve_static_collisions_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    StaticCollisionJob *job = (StaticCollisionJob *)user;
+    float half_player = job->half_player;
+    const float eps = 1e-6f;
+    const float static_collision_radius = 0.01f * VOXEL_SIZE;
+
+    for (int i = start; i < end; ++i) {
+        Particle *p = sim_particles[i];
+        if (!p || p->inv_mass == 0.0f) continue;
+
+        // p->radius holds the voxel radius (0.25)
+        float voxel_radius = p->radius;
+        float terrain_limit = FLOOR_SIZE - voxel_radius;
+        
+        // Floor collision
+        Vector3 pos = p->predicted_pos;
+        float floor_offset = 0.5f * VOXEL_SIZE;
+        float floor_limit = fmaxf(0.0f, floor_offset - voxel_radius);
+        if (pos.y < floor_limit) {
+            pos.y = floor_limit;
+        }
+        pos.x = clampf(pos.x, -terrain_limit, terrain_limit);
+        pos.z = clampf(pos.z, -terrain_limit, terrain_limit);
+
+        // Player collision
+        for (int player_idx = 0; player_idx < activePlayers; ++player_idx) {
+            Player *pl = &players[player_idx];
+            if (pl->respawn_timer > 0.0f) {
+                continue;
+            }
+            Vector3 box_min = {
+                pl->pos.x - half_player,
+                pl->pos.y - half_player,
+                pl->pos.z - half_player
+            };
+            Vector3 box_max = {
+                pl->pos.x + half_player,
+                pl->pos.y + half_player,
+                pl->pos.z + half_player
+            };
+            Vector3 nearest = {
+                clampf(pos.x, box_min.x, box_max.x),
+                clampf(pos.y, box_min.y, box_max.y),
+                clampf(pos.z, box_min.z, box_max.z)
+            };
+            Vector3 delta = v_sub(pos, nearest);
+            float dist_sq = v_dot(delta, delta);
+            float radius_sq = voxel_radius * voxel_radius;
+            if (dist_sq < radius_sq) {
+                float dist = sqrtf(fmaxf(dist_sq, eps));
+                float penetration = voxel_radius - dist;
+                Vector3 normal = (dist > eps) ? v_mul(delta, 1.0f / dist) : (Vector3){ 0.0f, 1.0f, 0.0f };
+                pos = v_add(pos, v_mul(normal, penetration));
+            }
+        }
+        p->predicted_pos = pos;
+
+        // Static voxel collision
+        int static_neighbors[MAX_STATIC_COLLISION_NEIGHBORS];
+        int static_count = gather_static_voxels_near_point(
+            p->predicted_pos, voxel_radius,
+            static_neighbors, MAX_STATIC_COLLISION_NEIGHBORS);
+        for (int s = 0; s < static_count; ++s) {
+            int static_idx = static_neighbors[s];
+            if (static_idx < 0 || static_idx >= voxel_count) {
+                continue;
+            }
+            const Voxel *static_voxel = &voxels[static_idx];
+            if (static_voxel->simulate) {
+                continue;
+            }
+            push_particle_out_of_static(static_voxel, p, static_collision_radius);
+        }
+    }
+}
+
 // Resolve collisions against the scene (floor, static voxels, players).
 static void solve_static_collisions(float dt) {
-    const float half_player = PLAYER_SIZE * 0.5f;
-    const float eps = 1e-6f;
-    const bool centroid_only = (dt > COLLISION_CENTROID_ONLY_DT);
-    const int particle_start = centroid_only ? VOXEL_CENTER_INDEX : 0;
-    const int particle_end = centroid_only ? (VOXEL_CENTER_INDEX + 1) : VOXEL_PARTICLE_COUNT;
-
-    // First, clamp predictions against static scene bounds and player capsules.
-    for (int i = 0; i < voxel_count; ++i) {
-        Voxel *voxel = &voxels[i];
-        if (!(voxel->simulate) || voxel->type != 0 || voxel->isBullet){
-            continue;
-        }
-        float voxel_radius = voxel_particle_radius(voxel);
-        float terrain_limit = FLOOR_SIZE - voxel_radius;
-        // Reduce static collision radius to allow flush seating of corners
-        float static_collision_radius = 0.01f * VOXEL_SIZE;
-
-        for (int j = particle_start; j < particle_end; ++j) {
-            Particle *p = voxel_particle_at(voxel, j);
-
-            Vector3 pos = p->predicted_pos;
-
-            float floor_offset = 0.5f * VOXEL_SIZE;
-            float floor_limit = fmaxf(0.0f, floor_offset - voxel_radius);
-            if (pos.y < floor_limit) {
-                pos.y = floor_limit;
-            }
-
-            pos.x = clampf(pos.x, -terrain_limit, terrain_limit);
-            pos.z = clampf(pos.z, -terrain_limit, terrain_limit);
-
-            // Interactions with player bounding boxes (kept for gameplay parity).
-            for (int player_idx = 0; player_idx < activePlayers; ++player_idx) {
-                Player *pl = &players[player_idx];
-                if (pl->respawn_timer > 0.0f) {
-                    continue;
-                }
-                Vector3 box_min = {
-                    pl->pos.x - half_player,
-                    pl->pos.y - half_player,
-                    pl->pos.z - half_player
-                };
-                Vector3 box_max = {
-                    pl->pos.x + half_player,
-                    pl->pos.y + half_player,
-                    pl->pos.z + half_player
-                };
-
-                Vector3 nearest = {
-                    clampf(pos.x, box_min.x, box_max.x),
-                    clampf(pos.y, box_min.y, box_max.y),
-                    clampf(pos.z, box_min.z, box_max.z)
-                };
-
-                Vector3 delta = v_sub(pos, nearest);
-                float dist_sq = v_dot(delta, delta);
-                float radius_sq = voxel_radius * voxel_radius;
-                if (dist_sq < radius_sq) {
-                    float dist = sqrtf(fmaxf(dist_sq, eps));
-                    float penetration = voxel_radius - dist;
-                    Vector3 normal = (dist > eps)
-                        ? v_mul(delta, 1.0f / dist)
-                        : (Vector3){ 0.0f, 1.0f, 0.0f };
-                    pos = v_add(pos, v_mul(normal, penetration));
-                }
-            }
-
-            p->predicted_pos = pos;
-
-            int static_neighbors[MAX_STATIC_COLLISION_NEIGHBORS];
-            int static_count = gather_static_voxels_near_point(
-                p->predicted_pos, voxel_radius,
-                static_neighbors, MAX_STATIC_COLLISION_NEIGHBORS);
-            for (int s = 0; s < static_count; ++s) {
-                int static_idx = static_neighbors[s];
-                if (static_idx < 0 || static_idx >= voxel_count) {
-                    continue;
-                }
-                const Voxel *static_voxel = &voxels[static_idx];
-                if (static_voxel->simulate) {
-                    continue;
-                }
-                push_particle_out_of_static(static_voxel, p, static_collision_radius);
-            }
-        }
-
-    }
+    (void)dt;
+    StaticCollisionJob job = { .half_player = PLAYER_SIZE * 0.5f };
+    pbd_parallel_for(0, sim_particle_count, solve_static_collisions_range, &job);
 }
 
 // Unified solver for dynamic-dynamic collisions
