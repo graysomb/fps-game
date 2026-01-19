@@ -3516,6 +3516,17 @@ static void remove_buffered_static_voxels(const UnitVoxelBuffer *buffer)
             }
         }
     }
+    // Deduplicate indices (must be done after sort, descending order)
+    if (idx_count > 0) {
+        int write = 0;
+        for (int read = 1; read < idx_count; ++read) {
+            if (indices[read] != indices[write]) {
+                write++;
+                indices[write] = indices[read];
+            }
+        }
+        idx_count = write + 1;
+    }
     for (int i = 0; i < idx_count; ++i) {
         int idx = indices[i];
         if (idx >= 0 && idx < voxel_count) {
@@ -3623,7 +3634,7 @@ static int collect_static_activation_cluster(int seed_idx,
             int nx = base_gx + neighbor_dirs[n][0];
             int ny = base_gy + neighbor_dirs[n][1];
             int nz = base_gz + neighbor_dirs[n][2];
-            int neighbor_idx = table_get(nx, ny, nz);
+            int neighbor_idx = table_get_static_only(nx, ny, nz);
             if (neighbor_idx < 0) {
                 continue;
             }
@@ -3685,7 +3696,7 @@ static int expand_activation_cluster_unbounded(UnitVoxelBuffer *buffer, int star
             int nx = base_gx + neighbor_dirs[n][0];
             int ny = base_gy + neighbor_dirs[n][1];
             int nz = base_gz + neighbor_dirs[n][2];
-            int neighbor_idx = table_get(nx, ny, nz);
+            int neighbor_idx = table_get_static_only(nx, ny, nz);
             if (neighbor_idx < 0) {
                 continue;
             }
@@ -3757,17 +3768,22 @@ static int compare_unit_voxel_seed(const void *a, const void *b) {
     return ua->gx - ub->gx;
 }
 
-static bool activate_static_voxels_near_dynamic(void)
-{
-    static UnitVoxelBuffer buffer;
-    unit_voxel_buffer_clear(&buffer);
-    refresh_static_voxel_beliefs();
-    update_dynamic_activation_beliefs();
-    float radius = (float)VOXEL_ACTIVATION_RADIUS;
-    float radius_sq = radius * radius;
+static UnitVoxelBuffer activate_thread_buffers[PBD_MAX_THREADS + 1];
 
-    for (int i = 0; i < voxel_count; ++i) {
-        if (buffer.count >= VOXEL_ACTIVATION_UNIT_BUDGET) {
+typedef struct {
+    float radius_sq;
+    int radius;
+} ActivateJob;
+
+static void activate_static_worker(int start, int end, int worker_id, void *user) {
+    ActivateJob *job = (ActivateJob *)user;
+    int buf_idx = (worker_id < 0) ? 0 : (worker_id + 1);
+    UnitVoxelBuffer *buffer = &activate_thread_buffers[buf_idx];
+    float radius_sq = job->radius_sq;
+    int radius = job->radius;
+
+    for (int i = start; i < end; ++i) {
+        if (buffer->count >= VOXEL_ACTIVATION_UNIT_BUDGET) {
             break;
         }
         Voxel *dynamic = &voxels[i];
@@ -3785,16 +3801,16 @@ static bool activate_static_voxels_near_dynamic(void)
         if (activator < 0) {
             activator = dynamic->owner;
         }
-        for (int gz = center_gz - VOXEL_ACTIVATION_RADIUS;
-             gz <= center_gz + VOXEL_ACTIVATION_RADIUS && buffer.count < VOXEL_ACTIVATION_UNIT_BUDGET;
+        for (int gz = center_gz - radius;
+             gz <= center_gz + radius && buffer->count < VOXEL_ACTIVATION_UNIT_BUDGET;
              ++gz)
         {
-            for (int gy = center_gy - VOXEL_ACTIVATION_RADIUS;
-                 gy <= center_gy + VOXEL_ACTIVATION_RADIUS && buffer.count < VOXEL_ACTIVATION_UNIT_BUDGET;
+            for (int gy = center_gy - radius;
+                 gy <= center_gy + radius && buffer->count < VOXEL_ACTIVATION_UNIT_BUDGET;
                  ++gy)
             {
-                for (int gx = center_gx - VOXEL_ACTIVATION_RADIUS;
-                     gx <= center_gx + VOXEL_ACTIVATION_RADIUS && buffer.count < VOXEL_ACTIVATION_UNIT_BUDGET;
+                for (int gx = center_gx - radius;
+                     gx <= center_gx + radius && buffer->count < VOXEL_ACTIVATION_UNIT_BUDGET;
                      ++gx)
                 {
                     float dx = (float)(gx - center_gx);
@@ -3804,7 +3820,7 @@ static bool activate_static_voxels_near_dynamic(void)
                         continue;
                     }
 
-                    int idx = table_get(gx, gy, gz);
+                    int idx = table_get_static_only(gx, gy, gz);
                     if (idx < 0 || idx >= voxel_count) {
                         continue;
                     }
@@ -3814,27 +3830,52 @@ static bool activate_static_voxels_near_dynamic(void)
                         continue;
                     }
 
-                    int previousCount = buffer.count;
+                    int previousCount = buffer->count;
                     int added = collect_static_activation_cluster(idx, activator,
                                                                   center_gx, center_gy, center_gz,
                                                                   radius_sq,
-                                                                  &buffer);
+                                                                  buffer);
                     if (added <= 0) {
-                        rollback_activation_buffer(&buffer, previousCount);
+                        rollback_activation_buffer(buffer, previousCount);
                         continue;
                     }
-                    float clusterBelief = compute_cluster_freeze_belief(&buffer, previousCount);
+                    float clusterBelief = compute_cluster_freeze_belief(buffer, previousCount);
                     if (!dynamic_belief_overcomes_static(dynamic->activationBelief, clusterBelief)) {
-                        rollback_activation_buffer(&buffer, previousCount);
+                        rollback_activation_buffer(buffer, previousCount);
                         continue;
                     }
-                    expand_activation_cluster_unbounded(&buffer, previousCount,
+                    expand_activation_cluster_unbounded(buffer, previousCount,
                                                         dynamic->activationBelief, activator);
-                    if (buffer.count >= VOXEL_ACTIVATION_UNIT_BUDGET) {
+                    if (buffer->count >= VOXEL_ACTIVATION_UNIT_BUDGET) {
                         break;
                     }
                 }
             }
+        }
+    }
+}
+
+static bool activate_static_voxels_near_dynamic(void)
+{
+    static UnitVoxelBuffer buffer;
+    unit_voxel_buffer_clear(&buffer);
+    refresh_static_voxel_beliefs();
+    update_dynamic_activation_beliefs();
+    float radius = (float)VOXEL_ACTIVATION_RADIUS;
+    float radius_sq = radius * radius;
+
+    for (int i = 0; i < PBD_MAX_THREADS + 1; ++i) {
+        activate_thread_buffers[i].count = 0;
+    }
+
+    ActivateJob job = { .radius_sq = radius_sq, .radius = VOXEL_ACTIVATION_RADIUS };
+    pbd_parallel_for(0, voxel_count, activate_static_worker, &job);
+
+    for (int i = 0; i < PBD_MAX_THREADS + 1; ++i) {
+        UnitVoxelBuffer *tb = &activate_thread_buffers[i];
+        for (int k = 0; k < tb->count; ++k) {
+            if (buffer.count >= MAX_VOXELS) break;
+            buffer.voxels[buffer.count++] = tb->voxels[k];
         }
     }
 
@@ -3853,13 +3894,16 @@ static bool activate_static_voxels_near_dynamic(void)
                  buffer.count, spawned, activation_base, voxel_count);
     }
 
-    rebuild_voxel_hash();
-    rebuild_all_voxel_surfaces();
-    rebuild_glue_constraints();
-    glue_dynamic_voxel_to_static_neighbors();
-    refresh_static_voxel_beliefs();
-    meshDirty = true;
-    return true;
+    if (spawned > 0) {
+        rebuild_voxel_hash();
+        rebuild_all_voxel_surfaces();
+        //rebuild_glue_constraints();
+        glue_dynamic_voxel_to_static_neighbors();
+        refresh_static_voxel_beliefs();
+        meshDirty = true;
+        return true;
+    }
+    return false;
 }
 
 static bool activate_all_static_voxels(int activator)
