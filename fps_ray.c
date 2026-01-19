@@ -5671,7 +5671,7 @@ static void buildDebugWorld(void) {
     // emit_static_voxels_from_units(&pyramid_units);
     //Span-2 dynamic voxel near origin for floor collision testing
     {
-        int span = 4;
+        int span = 8;
         float px = -2.0f * VOXEL_SIZE;
         float pz = 2.0f * VOXEL_SIZE;
         float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
@@ -5721,10 +5721,10 @@ static void buildDebugWorld(void) {
 
 // Build static demo cube of voxels
 static void buildDemo(void) {
-    buildTestWorld();
+    //buildTestWorld();
     //buildProceduralWorld();
     //buildBloodWorld();
-    //buildDebugWorld();
+    buildDebugWorld();
     rebuild_glue_constraints();
 }
 
@@ -8838,9 +8838,9 @@ void simulate_voxel_pbd(float dt) {
         if (debugLogVoxelBlowup) {
             debugBlowupLogBudget = 32;
         }
-        //update_voxel_coarsening_state();
-        //reset_particle_mass_and_flags();
-        //apply_shell_effective_mass();
+        // update_voxel_coarsening_state();
+        // reset_particle_mass_and_flags();
+        // apply_shell_effective_mass();
         integrate_particles(sub_dt);
 
         for (int it = 0; it < 1; ++it) {
@@ -8884,8 +8884,8 @@ void simulate_voxel_pbd(float dt) {
         //     }
         // }
 
-        //mark_simulated_particles();
-        //apply_interior_sync(avg_delta, counts);
+        // mark_simulated_particles();
+        // apply_interior_sync(avg_delta, counts);
 
         decrement_particle_timers();
         update_particle_velocities(sub_dt);
