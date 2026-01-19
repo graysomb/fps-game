@@ -189,9 +189,9 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define PBD_CONSTRAINT_ITERS 3
 #define BREAK_DAMP_FRAMES 50
 #define COARSENING_WAKE_FRAMES 30
-#define COARSENING_MASS_SCALE 1.0f
-#define STRAIN_BREAK_THRESHOLD 0.4f
-#define SHEAR_BREAK_THRESHOLD 0.4f
+#define COARSENING_MASS_SCALE 0.1f
+#define STRAIN_BREAK_THRESHOLD 1000.4f
+#define SHEAR_BREAK_THRESHOLD 1000.4f
 #define PBD_MAX_ACCUM_STEPS 8
 #define COLLISION_RELAXATION 0.99f
 #define COLLISION_CENTROID_ONLY_DT 10.2f
@@ -8842,9 +8842,9 @@ void simulate_voxel_pbd(float dt) {
         if (debugLogVoxelBlowup) {
             debugBlowupLogBudget = 32;
         }
-        update_voxel_coarsening_state();
-        reset_particle_mass_and_flags();
-        apply_shell_effective_mass();
+        // update_voxel_coarsening_state();
+        // reset_particle_mass_and_flags();
+        // apply_shell_effective_mass();
         integrate_particles(sub_dt);
 
         for (int it = 0; it < 1; ++it) {
