@@ -6705,6 +6705,7 @@ static void handle_pbd_projectile_hits(void)
 }
 
 static void update_voxel_coarsening_state(void) {
+    // 1. Determine initial active state (Shell vs Interior)
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *v = &voxels[i];
         if (!v->simulate || v->isBullet) {
@@ -6727,8 +6728,48 @@ static void update_voxel_coarsening_state(void) {
         }
 
         v->full_neighbors = full;
+        // Active if surface (not full) OR recently woken
         v->simulate_dofs = (!full) || (v->wake_timer > 0);
         v->wake_source = false;
+    }
+
+    // 2. Identify supported particles (those part of at least one active voxel)
+    // We assume 'touched_by_simulated' was cleared by reset_particle_mass_and_flags in the previous frame
+    // or we can clear it here to be safe.
+    for (int i = 0; i < sim_particle_count; ++i) {
+        sim_particles[i]->touched_by_simulated = false;
+    }
+
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (v->simulate && !v->isBullet && v->simulate_dofs) {
+            for (int c = 0; c < 8; ++c) {
+                v->particles[c]->touched_by_simulated = true;
+            }
+        }
+    }
+
+    // 3. Rescue orphan particles (Deep Interior)
+    // If a voxel is inactive but contains an unsupported particle, wake it up to provide support.
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (v->simulate && !v->isBullet && !v->simulate_dofs) {
+            bool has_orphan = false;
+            for (int c = 0; c < 8; ++c) {
+                if (!v->particles[c]->touched_by_simulated) {
+                    has_orphan = true;
+                    break;
+                }
+            }
+            if (has_orphan) {
+                v->simulate_dofs = true;
+                // Mark particles as supported now so we don't wake up neighbors unnecessarily?
+                // Actually, redundancy is fine, we just need connectivity.
+                for (int c = 0; c < 8; ++c) {
+                    v->particles[c]->touched_by_simulated = true;
+                }
+            }
+        }
     }
 }
 
@@ -8886,9 +8927,9 @@ void simulate_voxel_pbd(float dt) {
         if (debugLogVoxelBlowup) {
             debugBlowupLogBudget = 32;
         }
-        // update_voxel_coarsening_state();
-        // reset_particle_mass_and_flags();
-        // apply_shell_effective_mass();
+        update_voxel_coarsening_state();
+        reset_particle_mass_and_flags();
+        apply_shell_effective_mass();
         integrate_particles(sub_dt);
 
         for (int it = 0; it < 1; ++it) {
