@@ -35,7 +35,26 @@
 #include <stdarg.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef NOGDI
+#define NOGDI
+#endif
+#ifndef NOUSER
+#define NOUSER
+#endif
+#ifndef NOSOUND
+#define NOSOUND
+#endif
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 
 static inline uint32_t float_to_bits(float value) {
     uint32_t bits;
@@ -562,11 +581,26 @@ static void *pbd_worker_main(void *arg) {
 }
 
 static int pbd_worker_count_from_system(void) {
+#ifdef _WIN32
+    DWORD cores = 0;
+#if defined(_WIN32_WINNT) && _WIN32_WINNT >= 0x0601
+    cores = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+#else
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    cores = info.dwNumberOfProcessors;
+#endif
+    if (cores < 2) {
+        return 0;
+    }
+    int workers = (int)cores - 1;
+#else
     long cores = sysconf(_SC_NPROCESSORS_ONLN);
     if (cores < 2) {
         return 0;
     }
     int workers = (int)cores - 1;
+#endif
     if (workers > PBD_MAX_THREADS) {
         workers = PBD_MAX_THREADS;
     }
