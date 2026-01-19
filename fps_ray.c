@@ -177,16 +177,16 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
 #define VGS_ALPHA 0.9f
 #define VGS_BETA 0.35f
-#define VGS_ITERS 6
+#define VGS_ITERS 3
 #define VGS_EPS 1e-6f
-#define VGS_EARLY_OUT_EPS 0.0002f
+#define VGS_EARLY_OUT_EPS 0.00002f
 #define VOXEL_CORNER_COUNT 8
 #define VOXEL_CENTER_INDEX 8
 #define VOXEL_PARTICLE_COUNT 9
 #define TARGET_FRAME_RATE 30
 #define PBD_MAX_STEP_DT 1.0f/TARGET_FRAME_RATE
-#define PBD_SUBSTEPS 1
-#define PBD_CONSTRAINT_ITERS 6
+#define PBD_SUBSTEPS 2
+#define PBD_CONSTRAINT_ITERS 3
 #define BREAK_DAMP_FRAMES 50
 #define COARSENING_WAKE_FRAMES 30
 #define COARSENING_MASS_SCALE 1.0f
@@ -228,7 +228,7 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define VOXEL_ACTIVATION_RADIUS 2*2
 //#define VOXEL_ACTIVATION_UNIT_BUDGET 128
 #define VOXEL_ACTIVATION_UNIT_BUDGET 128*5
-#define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 0.5f
+#define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 2.0f
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.4f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.4f
 #define VOXEL_DEACTIVATION_FRAMES 5
@@ -8843,19 +8843,6 @@ void simulate_voxel_pbd(float dt) {
         //apply_shell_effective_mass();
         integrate_particles(sub_dt);
 
-        for (int it = 0; it < constraint_iterations; ++it) {
-            int snapshot_count = sim_particle_count;
-            if (snapshot_count > MAX_PARTICLES) {
-                snapshot_count = MAX_PARTICLES;
-            }
-            for (int i = 0; i < snapshot_count; ++i) {
-                particle_snapshot[i] = sim_particles[i];
-            }
-            reset_particle_accumulators();
-            pbd_parallel_for(0, voxel_count, gather_voxel_shape_constraints_range, NULL);
-            apply_particle_accumulators();
-        }
-
         for (int it = 0; it < 1; ++it) {
             int snapshot_count = sim_particle_count;
             if (snapshot_count > MAX_PARTICLES) {
@@ -8867,6 +8854,19 @@ void simulate_voxel_pbd(float dt) {
             reset_particle_accumulators();
             build_particle_hash(particle_snapshot, snapshot_count);
             gather_particle_collisions(sub_dt, particle_snapshot, snapshot_count);
+            apply_particle_accumulators();
+        }
+
+        for (int it = 0; it < constraint_iterations; ++it) {
+            int snapshot_count = sim_particle_count;
+            if (snapshot_count > MAX_PARTICLES) {
+                snapshot_count = MAX_PARTICLES;
+            }
+            for (int i = 0; i < snapshot_count; ++i) {
+                particle_snapshot[i] = sim_particles[i];
+            }
+            reset_particle_accumulators();
+            pbd_parallel_for(0, voxel_count, gather_voxel_shape_constraints_range, NULL);
             apply_particle_accumulators();
         }
 
