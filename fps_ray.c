@@ -177,7 +177,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
 #define VGS_ALPHA 0.9f
 #define VGS_BETA 0.35f
-#define VGS_ITERS 3
+#define VGS_ITERS 6
 #define VGS_EPS 1e-6f
 #define VGS_EARLY_OUT_EPS 0.00002f
 #define VOXEL_CORNER_COUNT 8
@@ -186,12 +186,12 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define TARGET_FRAME_RATE 30
 #define PBD_MAX_STEP_DT 1.0f/TARGET_FRAME_RATE
 #define PBD_SUBSTEPS 2
-#define PBD_CONSTRAINT_ITERS 3
+#define PBD_CONSTRAINT_ITERS 6
 #define BREAK_DAMP_FRAMES 50
 #define COARSENING_WAKE_FRAMES 30
 #define COARSENING_MASS_SCALE 0.1f
-#define STRAIN_BREAK_THRESHOLD 1000.4f
-#define SHEAR_BREAK_THRESHOLD 1000.4f
+#define STRAIN_BREAK_THRESHOLD 0.4f
+#define SHEAR_BREAK_THRESHOLD 0.4f
 #define PBD_MAX_ACCUM_STEPS 8
 #define COLLISION_RELAXATION 0.99f
 #define COLLISION_CENTROID_ONLY_DT 10.2f
@@ -5765,10 +5765,10 @@ static void buildDebugWorld(void) {
 
 // Build static demo cube of voxels
 static void buildDemo(void) {
-    //buildTestWorld();
+    buildTestWorld();
     //buildProceduralWorld();
     //buildBloodWorld();
-    buildDebugWorld();
+    //buildDebugWorld();
     rebuild_glue_constraints();
 }
 
