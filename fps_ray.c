@@ -3262,7 +3262,7 @@ static bool init_voxel_struct(Voxel *v,
     v->particle_radius = 0.5f * edge;
     memset(v->glued_faces, 0, sizeof(v->glued_faces));
     v->full_neighbors = false;
-    v->simulate_dofs = false;
+    v->simulate_dofs = true;
     v->wake_timer = 0;
     v->wake_source = false;
     v->break_mask = 0;
@@ -7237,6 +7237,10 @@ static void gather_voxel_shape_constraints(Voxel *voxel) {
             }
         }
 
+        if (!voxel->simulate_dofs) {
+            return;
+        }
+
         Vector3 u0 = v_sub(v0, v_mul(v_add(vgs_project(v1, v0), vgs_project(v2, v0)), VGS_ALPHA));
         Vector3 u1 = v_sub(v1, v_mul(v_add(vgs_project(v2, v1), vgs_project(v0, v1)), VGS_ALPHA));
         Vector3 u2 = v_sub(v2, v_mul(v_add(vgs_project(v0, v2), vgs_project(v1, v2)), VGS_ALPHA));
@@ -8838,9 +8842,9 @@ void simulate_voxel_pbd(float dt) {
         if (debugLogVoxelBlowup) {
             debugBlowupLogBudget = 32;
         }
-        // update_voxel_coarsening_state();
-        // reset_particle_mass_and_flags();
-        // apply_shell_effective_mass();
+        update_voxel_coarsening_state();
+        reset_particle_mass_and_flags();
+        apply_shell_effective_mass();
         integrate_particles(sub_dt);
 
         for (int it = 0; it < 1; ++it) {
