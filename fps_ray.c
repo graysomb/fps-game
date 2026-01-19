@@ -6645,7 +6645,6 @@ static void handle_pbd_projectile_hits(void)
             ++i;
             continue;
         }
-        bool glued_to_static = dynamic_voxel_glued_to_static(i);
         bool removed = false;
         for (int j = 0; j < activePlayers; ++j) {
             if (players[j].tetherHolding && players[j].tetherVoxel == i) {
@@ -6657,7 +6656,7 @@ static void handle_pbd_projectile_hits(void)
             float voxel_radius = VOXEL_SIZE * 0.5f;
             float threshold = (PLAYER_SIZE * 0.5f) + voxel_radius + 0.1f;
             if (fabsf(dx) < threshold && fabsf(dy) < threshold && fabsf(dz) < threshold) {
-                if (glued_to_static) {
+                if (dynamic_voxel_glued_to_static(i)) {
                     ++i;
                     removed = true;
                     break;
