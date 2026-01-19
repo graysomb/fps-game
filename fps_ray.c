@@ -8923,9 +8923,9 @@ void simulate_voxel_pbd(float dt) {
         if (debugLogVoxelBlowup) {
             debugBlowupLogBudget = 32;
         }
-        update_voxel_coarsening_state();
-        reset_particle_mass_and_flags();
-        apply_shell_effective_mass();
+        // update_voxel_coarsening_state();
+        // reset_particle_mass_and_flags();
+        // apply_shell_effective_mass();
         integrate_particles(sub_dt);
 
         for (int it = 0; it < 1; ++it) {
