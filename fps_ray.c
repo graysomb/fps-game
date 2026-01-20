@@ -3824,6 +3824,9 @@ static void activate_static_worker(int start, int end, int worker_id, void *user
         if (!dynamic->simulate || dynamic->type == 1 || dynamic->type == 2) {
             continue;
         }
+        if (dynamic->isBullet) {
+            continue;
+        }
         if (dynamic->activationCooldownFrames > 0) {
             continue;
         }
@@ -6422,6 +6425,9 @@ static void update_projectiles(float dt)
         }
 
         Vector3 gravity = { 0.0f, -GRAVITY, 0.0f };
+        if (v->isBullet) {
+            gravity = (Vector3){ 0.0f, 0.0f, 0.0f };
+        }
         v->vel = v_mul(v->vel, VELOCITY_DAMPING);
         Vector3 displacement = v_add(v_mul(v->vel, dt), v_mul(gravity, dt * dt));
         v->vel = v_add(v->vel, v_mul(gravity, dt));
@@ -6471,6 +6477,22 @@ static void update_projectiles(float dt)
         int hit_id = first_voxel_hit(ray, distance, i);
         if (hit_id >= 0 && hit_id < voxel_count) {
             play_sfx(SFX_IMPACT);
+            
+            // Bullet vs Static Voxel
+            if (v->isBullet && !voxels[hit_id].simulate) {
+                 remove_voxel_index(hit_id);
+                 // We need to re-fetch/adjust i because remove_voxel_index shifts
+                 // If hit_id < i, then i shifts down by 1.
+                 // If hit_id > i, i stays same (but points to next? No).
+                 // We are removing 'i' (the bullet) too.
+                 if (hit_id < i) {
+                     i--; 
+                 }
+                 remove_voxel_index(i);
+                 // No need to increment i, as the next voxel is now at i.
+                 continue;
+            }
+
             if (!voxels[hit_id].simulate) {
                 int brushExtent = brush_extent_for_voxel(v);
                 Voxel *hit_voxel = &voxels[hit_id];
@@ -8240,7 +8262,9 @@ static void update_dynamic_activation_beliefs(void)
         Voxel *voxel = &voxels[i];
         bool tethered = (tetherTag[i] > 0);
         if (tethered) {
+            voxel->activationBelief = 0.0f;
             voxel->activationCooldownFrames = 0;
+            continue;
         } else if (voxel->activationCooldownFrames > 0) {
             voxel->activationCooldownFrames--;
         }
@@ -9080,18 +9104,21 @@ static void FireVoxel(int idx) {
         Voxel *shot = &voxels[vix];
         Vector3 vel = v_mul(dir, 60.0f);
         shot->vel = vel;
-        // shot->owner = idx;
-        // shot->activator = idx;
-        // shot->isBullet = false;
-        // shot->glueEligible = false;
-        // shot->simulate = true;
-        // shot->activationBelief = ACTIVATION_TYPE0_BULLET_BELIEF;
+        shot->owner = idx;
+        shot->activator = idx;
+        shot->isBullet = true;
+        shot->glueEligible = false;
+        shot->simulate = true;
+        shot->activationBelief = ACTIVATION_TYPE0_BULLET_BELIEF;
         for (int i = 0; i < 8; ++i) {
             shot->particles[i]->vel = vel;
             shot->particles[i]->inv_mass = 1.0f;
             shot->particles[i]->base_inv_mass = 1.0f;
-            // shot->particles[i]->active = true;
-            // sim_particles_remove(shot->particles[i]);
+            shot->particles[i]->active = true;
+            // sim_particles_remove(shot->particles[i]); // Keep them in sim? Or remove?
+            // If we remove them, they won't collide. But bullets need to collide.
+            // Original code had it commented out, but maybe because it wasn't working.
+            // If simulate is true, particles should be active.
         }
         play_sfx(SFX_FIRE);
     }
@@ -9620,6 +9647,20 @@ static void perform_build(int idx) {
     }
 }
 
+static int rip_single_static_voxel(int voxel_idx, int activator) {
+    if (voxel_idx < 0 || voxel_idx >= voxel_count) return -1;
+    Voxel v = voxels[voxel_idx]; // Copy data
+    
+    remove_voxel_index(voxel_idx);
+    
+    int new_idx = addVoxel(v.pos.x, v.pos.y, v.pos.z, false, true, v.color, v.type);
+    if (new_idx >= 0) {
+        voxels[new_idx].owner = activator;
+        voxels[new_idx].activator = activator;
+    }
+    return new_idx;
+}
+
 static void start_tether(int idx) {
     Player *p = &players[idx];
     if (p->respawn_timer > 0.0f || p->tetherHolding) {
@@ -9632,28 +9673,38 @@ static void start_tether(int idx) {
         return;
     }
     Voxel *hit = &voxels[hit_id];
-    Vector3 hit_pos = hit->pos;
+    
+    int tether_idx = -1;
     if (!hit->simulate) {
-        activate_static_voxel_for_tether(hit_id, idx, ACTIVATION_TETHER_BELIEF);
+        // Rip single voxel
+        tether_idx = rip_single_static_voxel(hit_id, idx);
+    } else {
+        Vector3 hit_pos = hit->pos;
+        tether_idx = hit->simulate ? hit_id : find_closest_dynamic_voxel(hit_pos, 2.5f);
     }
-    int tether_idx = hit->simulate ? hit_id : find_closest_dynamic_voxel(hit_pos, 2.5f);
+
     if (tether_idx < 0 || tether_idx >= voxel_count) {
         return;
     }
-    int cluster_count = build_glue_cluster_indices(tether_idx, glueClusterIndices);
-    if (cluster_count > 0) {
-        for (int c = 0; c < cluster_count; ++c) {
-            int v_idx = glueClusterIndices[c];
-            if (v_idx < 0 || v_idx >= voxel_count) {
-                continue;
+    
+    // For already dynamic voxels, we might grab a cluster
+    if (voxels[tether_idx].simulate) { // It should be simulate by now
+         int cluster_count = build_glue_cluster_indices(tether_idx, glueClusterIndices);
+        if (cluster_count > 0) {
+            for (int c = 0; c < cluster_count; ++c) {
+                int v_idx = glueClusterIndices[c];
+                if (v_idx < 0 || v_idx >= voxel_count) {
+                    continue;
+                }
+                voxels[v_idx].owner = idx;
+                voxels[v_idx].activator = idx;
             }
-            voxels[v_idx].owner = idx;
-            voxels[v_idx].activator = idx;
+        } else {
+            voxels[tether_idx].owner = idx;
+            voxels[tether_idx].activator = idx;
         }
-    } else {
-        voxels[tether_idx].owner = idx;
-        voxels[tether_idx].activator = idx;
     }
+
     p->tetherHolding = true;
     p->tetherVoxel = tether_idx;
 }
@@ -10380,6 +10431,8 @@ static void update_static_patch_colors(void)
 static Mesh voxelMesh = { 0 };
 static Material instancedMaterial = { 0 };
 static Shader instancedShader = { 0 };
+static Shader orbShader = { 0 };
+static Mesh sphereMesh = { 0 };
 static Matrix *instanceTransforms = NULL;
 static int instanceTransformsCount = 0;
 static int instanceTransformsCapacity = 0;
@@ -10390,6 +10443,9 @@ static void InitInstancing(void) {
     voxelMesh = GenMeshCube(1.0f, 1.0f, 1.0f);
     instancedShader = LoadShader("shaders/instanced_voxel_hack.vert", "shaders/instanced_voxel_hack.frag");
     
+    orbShader = LoadShader("shaders/orb.vert", "shaders/orb.frag");
+    sphereMesh = GenMeshSphere(VOXEL_SIZE * 0.25f, 16, 16);
+
     // Get shader locations
     instancedShader.locs[SHADER_LOC_MATRIX_MVP] = GetShaderLocation(instancedShader, "mvp");
     instancedShader.locs[SHADER_LOC_VECTOR_VIEW] = GetShaderLocation(instancedShader, "viewPos");
@@ -10445,11 +10501,21 @@ static void DrawVoxels(Camera3D cam) {
             continue;
         }
         
+        // Draw Bullet with Orb Shader
+        if (v->isBullet && v->type == 0) {
+            Vector3 center = {0};
+            for(int k=0; k<8; ++k) center = v_add(center, v->particles[k]->pos);
+            center = v_mul(center, 0.125f);
+            
+            Matrix matModel = MatrixTranslate(center.x, center.y, center.z);
+            Material mat = LoadMaterialDefault();
+            mat.shader = orbShader;
+            DrawMesh(sphereMesh, mat, matModel);
+            continue;
+        }
+        
         // Calculate Scale
         float scale = VOXEL_SIZE;
-        if (v->isBullet && v->type == 0) {
-            scale *= 0.25f;
-        }
         
         // Use the correct display color (handles beliefs/debug colors)
         Color displayColor = voxel_display_color(v);
