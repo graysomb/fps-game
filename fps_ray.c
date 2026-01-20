@@ -6480,6 +6480,7 @@ static void update_projectiles(float dt)
             
             // Bullet vs Static Voxel
             if (v->isBullet && !voxels[hit_id].simulate) {
+                 Vector3 hit_pos = voxels[hit_id].pos;
                  remove_voxel_index(hit_id);
                  // We need to re-fetch/adjust i because remove_voxel_index shifts
                  // If hit_id < i, then i shifts down by 1.
@@ -6490,6 +6491,8 @@ static void update_projectiles(float dt)
                  }
                  remove_voxel_index(i);
                  // No need to increment i, as the next voxel is now at i.
+                 mark_surface_neighbors(hit_pos);
+                 static_changed = true;
                  continue;
             }
 
@@ -9652,6 +9655,8 @@ static int rip_single_static_voxel(int voxel_idx, int activator) {
     Voxel v = voxels[voxel_idx]; // Copy data
     
     remove_voxel_index(voxel_idx);
+    mark_surface_neighbors(v.pos);
+    meshDirty = true;
     
     int new_idx = addVoxel(v.pos.x, v.pos.y, v.pos.z, false, true, v.color, v.type);
     if (new_idx >= 0) {
