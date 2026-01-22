@@ -385,6 +385,7 @@ typedef struct {
     bool glueEligible;
     bool pendingActivation;
     bool isBullet;
+    bool wasTethered;
     int activationCooldownFrames;
     Color color;
     int type;
@@ -3303,6 +3304,7 @@ static bool init_voxel_struct(Voxel *v,
     v->glueEligible = simulate;
     v->pendingActivation = false;
     v->isBullet = false;
+    v->wasTethered = false;
     v->activationCooldownFrames = 0;
     v->color = color;
     v->type = type;
@@ -3854,7 +3856,7 @@ static void activate_static_worker(int start, int end, int worker_id, void *user
         if (!dynamic->simulate || dynamic->type == 1 || dynamic->type == 2) {
             continue;
         }
-        if (dynamic->isBullet) {
+        if (dynamic->isBullet || !dynamic->wasTethered) {
             continue;
         }
         if (dynamic->activationCooldownFrames > 0) {
@@ -9722,10 +9724,12 @@ static void start_tether(int idx) {
                 }
                 voxels[v_idx].owner = idx;
                 voxels[v_idx].activator = idx;
+                voxels[v_idx].wasTethered = true;
             }
         } else {
             voxels[tether_idx].owner = idx;
             voxels[tether_idx].activator = idx;
+            voxels[tether_idx].wasTethered = true;
         }
     }
 
@@ -11678,10 +11682,10 @@ int main(void) {
                 if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_RIGHT_FACE_LEFT)) {
                     perform_build(i);
                 }
-                if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_RIGHT_FACE_UP)) {
+                if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_LEFT_TRIGGER_2)) {
                     start_tether(i);
                 }
-                if (IsGamepadButtonReleased(i, GAMEPAD_BUTTON_RIGHT_FACE_UP)) {
+                if (IsGamepadButtonReleased(i, GAMEPAD_BUTTON_LEFT_TRIGGER_2)) {
                     release_tether(i);
                 }
                 if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_RIGHT_FACE_DOWN) && players[i].onGround) {
@@ -12064,7 +12068,7 @@ int main(void) {
                              100, controlsY + controlsSpacing * 1, controlsSize, DARKGRAY);
                     DrawText("Keyboard P2: Move IJKL | Look Arrows | Jump RSHIFT | Shoot RCTRL | Melee M | Build O | Tether P",
                              100, controlsY + controlsSpacing * 2, controlsSize, DARKGRAY);
-                    DrawText("Gamepad: Move LS | Look RS | Jump A/Down Face | Shoot RT | Melee B | Build X | Tether Y",
+                    DrawText("Gamepad: Move LS | Look RS | Jump A/Down Face | Shoot RT | Melee B | Build X | Tether LT",
                              100, controlsY + controlsSpacing * 3, controlsSize, DARKGRAY);
 
                     DrawText("Press M to return to Main Menu", 100, SCREEN_HEIGHT - 60, 20, DARKGRAY);
