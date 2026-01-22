@@ -805,6 +805,7 @@ typedef enum {
     SFX_DEATH,
     SFX_SHIELD,
     SFX_SMUSH,
+    SFX_EXPLOSION,
     SFX_WIN,
     SFX_COUNT
 } SfxId;
@@ -1289,6 +1290,10 @@ static void init_sfx(void)
 
     wave = make_sfx_wave(140.0f, 0.0f, 0.20f, 0.9f, 0.45f, 10.0f);
     sfxSounds[SFX_SMUSH] = LoadSoundFromWave(wave);
+    UnloadWave(wave);
+
+    wave = make_sfx_wave(100.0f, 20.0f, 0.10f, 1.2f, 0.4f, 20.0f);
+    sfxSounds[SFX_EXPLOSION] = LoadSoundFromWave(wave);
     UnloadWave(wave);
     
     wave = make_win_song_wave();
@@ -6151,6 +6156,29 @@ static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float
     return true;
 }
 
+static void spawn_player_explosion(Vector3 pos, Color color) {
+    play_sfx(SFX_EXPLOSION);
+    for (int i = 0; i < 4; ++i) {
+        float vx = (float)GetRandomValue(-200, 200) / 10.0f;
+        float vy = (float)GetRandomValue(50, 250) / 10.0f;
+        float vz = (float)GetRandomValue(-200, 200) / 10.0f;
+        float off_x = (float)GetRandomValue(-5, 5) * 0.1f;
+        float off_y = (float)GetRandomValue(-5, 5) * 0.1f;
+        float off_z = (float)GetRandomValue(-5, 5) * 0.1f;
+
+        int idx = addVoxel(pos.x + off_x, pos.y + off_y, pos.z + off_z, false, true, color, 0);
+        if (idx >= 0) {
+            voxels[idx].vel = (Vector3){ vx, vy, vz };
+            voxels[idx].lifeFrames = RECYCLE_DYNAMIC_MAX_FRAMES - GetRandomValue(60, 120);
+            for (int p = 0; p < 8; ++p) {
+                if (voxels[idx].particles[p]) {
+                    voxels[idx].particles[p]->vel = voxels[idx].vel;
+                }
+            }
+        }
+    }
+}
+
 static void kill_player(int player_index, int attacker_index,
                         bool award_kill, bool award_debris)
 {
@@ -6185,7 +6213,8 @@ static void kill_player(int player_index, int attacker_index,
             }
         }
     }
-    play_sfx(SFX_DEATH);
+    // play_sfx(SFX_DEATH);
+    spawn_player_explosion(player->pos, player_palette_color(player_index));
     player->death_pos = player->pos;
     player->death_yaw = player->yaw;
     player->vel = (Vector3){ 0, 0, 0 };
