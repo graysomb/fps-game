@@ -1,0 +1,1 @@
+gcc fps_ray.c -o fps_ray.exe   -I/d/raylib-master/raylib-master/src   -L/d/raylib-master/raylib-master/src   -lraylib -lopengl32 -lgdi32 -lwinmm -lpthread
