@@ -6008,7 +6008,7 @@ static void ResetGame(void) {
     winnerId = -1;
     pbdTimeAccumulator = 0.0f;
     init_confetti();
-    init_pickups();
+    // init_pickups();
     // init players
     for (int i = 0; i < MAX_PLAYERS; i++) {
         players[i].pos = pick_player_spawn(i);
@@ -11408,7 +11408,7 @@ int main(void) {
                     BeginMode3D(menuCam);
                         draw_world_surfaces();
                         DrawVoxels(menuCam);
-                        draw_pickups(menuCam);
+                        // draw_pickups(menuCam);
                         for (int i = 0; i < activePlayers; i++) {
                              Player *p = &players[i];
                              Color base = player_palette_color(i);
@@ -11465,7 +11465,7 @@ int main(void) {
                     BeginMode3D(droneCam);
                         draw_world_surfaces();
                         DrawVoxels(droneCam);
-                        draw_pickups(droneCam);
+                        // draw_pickups(droneCam);
                         // Draw players
                         for (int i = 0; i < activePlayers; i++) {
                             Player *p = &players[i];
@@ -11729,7 +11729,7 @@ int main(void) {
         //     physics_step(dt/subStep);
         // }
         update_projectiles(dt);
-        update_pickups(dt); // Update pickups
+        // update_pickups(dt); // Update pickups
         prepare_tether_forces();
         pbdTimeAccumulator += dt;
         float pbd_fixed_dt = PBD_MAX_STEP_DT;
@@ -11828,7 +11828,7 @@ int main(void) {
                 BeginMode3D(cams[i]);
                     draw_world_surfaces();
                     DrawVoxels(cams[i]);
-                    draw_pickups(cams[i]);
+                    // draw_pickups(cams[i]);
                     draw_players();
                     if (players[i].tetherHolding && players[i].tetherVoxel >= 0) {
                         Vector3 hand = player_hand_position(&players[i]);
