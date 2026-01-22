@@ -281,6 +281,7 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define PLAYER_RESPAWN_TIME 5.0f
 #define DEATH_CAM_DISTANCE 4.0f
 #define DEATH_CAM_HEIGHT 2.0f
+#define GAMEPAD_DEADZONE 0.15f
 
 // Voxel physics constants
 #define MAX_VOXELS    131072
@@ -11044,7 +11045,7 @@ static void HandleGamepadInput(int i, float dt) {
     // turn (right stick horizontal)
     float yaw_accel = 0.0f;
     float yaw_axis = GetGamepadAxisMovement(i, GAMEPAD_AXIS_RIGHT_X);
-    if (fabsf(yaw_axis) > 0.1f) {
+    if (fabsf(yaw_axis) > GAMEPAD_DEADZONE) {
         yaw_accel = -yaw_axis * TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
     }
 
@@ -11066,7 +11067,7 @@ static void HandleGamepadInput(int i, float dt) {
     // look up/down (right stick vertical)
     float pitch_accel = 0.0f;
     float pitch_axis = GetGamepadAxisMovement(i, GAMEPAD_AXIS_RIGHT_Y);
-    if (fabsf(pitch_axis) > 0.1f) {
+    if (fabsf(pitch_axis) > GAMEPAD_DEADZONE) {
         pitch_accel = -pitch_axis * TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
     }
 
@@ -11096,10 +11097,10 @@ static void HandleGamepadInput(int i, float dt) {
     float accel_x = GetGamepadAxisMovement(i, GAMEPAD_AXIS_LEFT_X);
     float accel_y = GetGamepadAxisMovement(i, GAMEPAD_AXIS_LEFT_Y);
 
-    if (fabsf(accel_y) > 0.1f) {
+    if (fabsf(accel_y) > GAMEPAD_DEADZONE) {
         accel = v_add(accel, v_mul(forward, -accel_y));
     }
-    if (fabsf(accel_x) > 0.1f) {
+    if (fabsf(accel_x) > GAMEPAD_DEADZONE) {
         accel = v_add(accel, v_mul(right, accel_x));
     }
 
