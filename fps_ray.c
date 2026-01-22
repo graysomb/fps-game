@@ -2035,6 +2035,35 @@ static Color voxel_display_color(const Voxel *voxel)
     return base;
 }
 
+static bool emit_patch(int plane, int layer, int i0, int j0, int di, int dj, bool positive)
+{
+    if (patchCount >= MAX_VOXELS) {
+        return false;
+    }
+    Patch *pt = &patches[patchCount++];
+    pt->plane = plane;
+    pt->layer = layer;
+    pt->i0 = i0;
+    pt->j0 = j0;
+    pt->di = di;
+    pt->dj = dj;
+    pt->positive = positive;
+
+    int baseIdx = -1;
+    switch (plane) {
+        case 0: baseIdx = table_get(pt->i0, pt->j0, layer); break;
+        case 1: baseIdx = table_get(pt->i0, layer, pt->j0); break;
+        case 2: baseIdx = table_get(layer, pt->i0, pt->j0); break;
+    }
+    pt->voxelIndex = baseIdx;
+    Color baseColor = { 160, 160, 160, 255 };
+    if (baseIdx >= 0 && baseIdx < voxel_count) {
+        baseColor = voxel_display_color(&voxels[baseIdx]);
+    }
+    pt->col = baseColor;
+    return true;
+}
+
 typedef struct {
     int      coarseVoxel;
     int      fineVoxel;
@@ -10156,12 +10185,20 @@ static int first_voxel_hit(Ray ray, float t_max, int ignore_id) {
 // Only one layer is drawn per voxel, this makes layers disappear on the individual voxel level
 
 static void merge_rects_on_plane(int count, int *list, int plane, bool positive) {
-    if (!count) return;
+    if (!list || count <= 0) return;
+    if (count > voxel_count) {
+        count = voxel_count;
+    }
 
     // Group voxels by layer
-    int layers[count], layerCount = 0;
+    int *layers = (int *)malloc((size_t)count * sizeof(int));
+    if (!layers) return;
+    int layerCount = 0;
     for (int i = 0; i < count; i++) {
         int idx = list[i];
+        if (idx < 0 || idx >= voxel_count) {
+            continue;
+        }
         int layer = 0;
         switch (plane) {
             case 0: layer = voxels[idx].gz; break; // XY-plane, group by z
@@ -10177,6 +10214,10 @@ static void merge_rects_on_plane(int count, int *list, int plane, bool positive)
         }
         if (!seen) layers[layerCount++] = layer;
     }
+    if (layerCount <= 0) {
+        free(layers);
+        return;
+    }
 
     // For each layer, find and merge rectangles
     for (int l = 0; l < layerCount; l++) {
@@ -10184,8 +10225,13 @@ static void merge_rects_on_plane(int count, int *list, int plane, bool positive)
 
         // Find the bounds of the current layer
         int minI = INT_MAX, maxI = INT_MIN, minJ = INT_MAX, maxJ = INT_MIN;
+        bool anyInLayer = false;
         for (int i = 0; i < count; i++) {
-            Voxel *v = &voxels[list[i]];
+            int idx = list[i];
+            if (idx < 0 || idx >= voxel_count) {
+                continue;
+            }
+            Voxel *v = &voxels[idx];
             int vLayer = 0, vI = 0, vJ = 0;
             switch (plane) {
                 case 0: vLayer = v->gz; vI = v->gx; vJ = v->gy; break;
@@ -10194,19 +10240,61 @@ static void merge_rects_on_plane(int count, int *list, int plane, bool positive)
             }
 
             if (vLayer != layer) continue;
+            anyInLayer = true;
             if (vI < minI) minI = vI;
             if (vI > maxI) maxI = vI;
             if (vJ < minJ) minJ = vJ;
             if (vJ > maxJ) maxJ = vJ;
         }
+        if (!anyInLayer) {
+            continue;
+        }
 
         int w = maxI - minI + 1;
         int h = maxJ - minJ + 1;
-        bool mask[w][h];
-        memset(mask, 0, sizeof(mask));
+        if (w <= 0 || h <= 0) {
+            continue;
+        }
+
+        if ((size_t)w > SIZE_MAX / (size_t)h) {
+            continue;
+        }
+        size_t area = (size_t)w * (size_t)h;
+
+        size_t max_area = (size_t)count * 64u;
+        if (area > max_area) {
+            for (int i = 0; i < count; i++) {
+                int idx = list[i];
+                if (idx < 0 || idx >= voxel_count) {
+                    continue;
+                }
+                Voxel *v = &voxels[idx];
+                int vLayer = 0, vI = 0, vJ = 0;
+                switch (plane) {
+                    case 0: vLayer = v->gz; vI = v->gx; vJ = v->gy; break;
+                    case 1: vLayer = v->gy; vI = v->gx; vJ = v->gz; break;
+                    case 2: vLayer = v->gx; vI = v->gy; vJ = v->gz; break;
+                }
+                if (vLayer != layer) continue;
+                if (!emit_patch(plane, layer, vI, vJ, 1, 1, positive)) {
+                    free(layers);
+                    return;
+                }
+            }
+            continue;
+        }
+
+        bool *mask = (bool *)calloc(area, sizeof(bool));
+        if (!mask) {
+            continue;
+        }
 
         for (int i = 0; i < count; i++) {
-            Voxel *v = &voxels[list[i]];
+            int idx = list[i];
+            if (idx < 0 || idx >= voxel_count) {
+                continue;
+            }
+            Voxel *v = &voxels[idx];
             int vLayer = 0, vI = 0, vJ = 0;
             switch (plane) {
                 case 0: vLayer = v->gz; vI = v->gx; vJ = v->gy; break;
@@ -10214,22 +10302,30 @@ static void merge_rects_on_plane(int count, int *list, int plane, bool positive)
                 case 2: vLayer = v->gx; vI = v->gy; vJ = v->gz; break;
             }
             if (vLayer != layer) continue;
-            mask[vI - minI][vJ - minJ] = true;
+            size_t mi = (size_t)(vI - minI);
+            size_t mj = (size_t)(vJ - minJ);
+            if (mi < (size_t)w && mj < (size_t)h) {
+                mask[mi * (size_t)h + mj] = true;
+            }
         }
 
         for (int j = 0; j < h; j++) {
             for (int i = 0; i < w; i++) {
-                if (!mask[i][j]) continue;
+                if (!mask[(size_t)i * (size_t)h + (size_t)j]) continue;
 
                 int si = i, sj = j;
                 int ww = 1;
-                while (si + ww < w && mask[si + ww][sj]) ww++;
+                while (si + ww < w &&
+                       mask[(size_t)(si + ww) * (size_t)h + (size_t)sj]) {
+                    ww++;
+                }
 
                 int hh = 1;
                 for (;;) {
                     bool block = false;
                     for (int k = 0; k < ww; k++) {
-                        if (sj + hh >= h || !mask[si + k][sj + hh]) {
+                        if (sj + hh >= h ||
+                            !mask[(size_t)(si + k) * (size_t)h + (size_t)(sj + hh)]) {
                             block = true;
                             break;
                         }
@@ -10240,36 +10336,22 @@ static void merge_rects_on_plane(int count, int *list, int plane, bool positive)
                 
                 for (int dj = 0; dj < hh; dj++) {
                     for (int di = 0; di < ww; di++) {
-                        mask[si + di][sj + dj] = false;
+                        mask[(size_t)(si + di) * (size_t)h + (size_t)(sj + dj)] = false;
                     }
                 }
-                
+
                 i = si + ww - 1;
                 
-                Patch *pt = &patches[patchCount++];
-                pt->plane = plane;
-                pt->layer = layer;
-                pt->i0 = minI + si;
-                pt->j0 = minJ + sj;
-                pt->di = ww;
-                pt->dj = hh;
-                pt->positive = positive;
-                
-                int baseIdx = -1;
-                switch (plane) {
-                    case 0: baseIdx = table_get(pt->i0, pt->j0, layer); break;
-                    case 1: baseIdx = table_get(pt->i0, layer, pt->j0); break;
-                    case 2: baseIdx = table_get(layer, pt->i0, pt->j0); break;
+                if (!emit_patch(plane, layer, minI + si, minJ + sj, ww, hh, positive)) {
+                    free(mask);
+                    free(layers);
+                    return;
                 }
-                pt->voxelIndex = baseIdx;
-                Color baseColor = { 160, 160, 160, 255 };
-                if (baseIdx >= 0 && baseIdx < voxel_count) {
-                    baseColor = voxel_display_color(&voxels[baseIdx]);
-                }
-                pt->col = baseColor;
             }
         }
+        free(mask);
     }
+    free(layers);
 }
 
 
