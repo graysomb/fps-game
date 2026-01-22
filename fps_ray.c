@@ -867,7 +867,7 @@ static int debugSupportLogBudget = 512;
 static const float DEBUG_FALL_LOG_THRESHOLD = -5.0f;
 static const int DEBUG_FALL_LOG_BUDGET = 32;
 static bool debugLogFall = false;
-static bool debugShowBeliefColors = true;
+static bool debugShowBeliefColors = false;
 static unsigned char debugTagBreakLogged[DEBUG_CLUSTER_TAG_MAX];
 
 static const char *trace_level_label(int level) {
