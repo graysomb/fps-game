@@ -6062,7 +6062,6 @@ static void ResetGame(void) {
         players[i].debrisKills = 0;
         players[i].deaths = 0;
         UpdateKdRatio(i);
-        players[i].matterMax = MATTER_MAX_DEFAULT;
         players[i].matter = players[i].matterMax;
         players[i].isExposed = false;
         players[i].last_damage_time = 0.0f;
@@ -6102,8 +6101,21 @@ static void ResetGame(void) {
 }
 
 static void UpdateKdRatio(int player_index) {
+    if (player_index < 0 || player_index >= activePlayers) return;
     Player *p = &players[player_index];
     p->kd_ratio = (float)(p->kills + 1) / (p->deaths + 1);
+    
+    // Scale matter max based on K/D: Lower K/D -> More Matter
+    // Base 100 at K/D 1.0. Max ~200 at K/D 0. Min ~20 at K/D 9.
+    p->matterMax = 200.0f / (1.0f + p->kd_ratio);
+    
+    // Ensure valid range
+    if (p->matterMax < 10.0f) p->matterMax = 10.0f;
+    
+    // Clamp current matter to new max
+    if (p->matter > p->matterMax) {
+        p->matter = p->matterMax;
+    }
 }
 
 static void add_player_matter(Player *p, float amount) {
@@ -11002,42 +11014,42 @@ static void HandleKeyboardInput(int i, float dt) {
     Player *p = &players[i];
     // turn
     float yaw_accel = 0.0f;
-    if ((i==0 && IsKeyDown(KEY_F)) || (i==1 && IsKeyDown(KEY_LEFT)))  yaw_accel += TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
-    if ((i==0 && IsKeyDown(KEY_H)) || (i==1 && IsKeyDown(KEY_RIGHT))) yaw_accel -= TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
+    if ((i==0 && IsKeyDown(KEY_F)) || (i==1 && IsKeyDown(KEY_LEFT)))  yaw_accel += TURN_ACCELERATION;
+    if ((i==0 && IsKeyDown(KEY_H)) || (i==1 && IsKeyDown(KEY_RIGHT))) yaw_accel -= TURN_ACCELERATION;
 
     if (yaw_accel != 0.0f) {
         p->yaw_vel += yaw_accel * dt;
     } else {
         // friction
         if (p->yaw_vel > 0) {
-            p->yaw_vel -= TURN_FRICTION * fmaxf(p->kd_ratio,1) * dt;
+            p->yaw_vel -= TURN_FRICTION * dt;
             if (p->yaw_vel < 0) p->yaw_vel = 0;
         } else if (p->yaw_vel < 0) {
-            p->yaw_vel += TURN_FRICTION * fmaxf(p->kd_ratio,1) * dt;
+            p->yaw_vel += TURN_FRICTION * dt;
             if (p->yaw_vel > 0) p->yaw_vel = 0;
         }
     }
-    p->yaw_vel = clampf(p->yaw_vel, -TURN_SPEED * fmaxf(p->kd_ratio,1), TURN_SPEED * fmaxf(p->kd_ratio,1));
+    p->yaw_vel = clampf(p->yaw_vel, -TURN_SPEED, TURN_SPEED);
     p->yaw += p->yaw_vel * dt;
 
     // look up/down
     float pitch_accel = 0.0f;
-    if ((i==0 && IsKeyDown(KEY_T)) || (i==1 && IsKeyDown(KEY_UP)))   pitch_accel += TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
-    if ((i==0 && IsKeyDown(KEY_G)) || (i==1 && IsKeyDown(KEY_DOWN))) pitch_accel -= TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
+    if ((i==0 && IsKeyDown(KEY_T)) || (i==1 && IsKeyDown(KEY_UP)))   pitch_accel += TURN_ACCELERATION;
+    if ((i==0 && IsKeyDown(KEY_G)) || (i==1 && IsKeyDown(KEY_DOWN))) pitch_accel -= TURN_ACCELERATION;
 
     if (pitch_accel != 0.0f) {
         p->pitch_vel += pitch_accel * dt;
     } else {
         // friction
         if (p->pitch_vel > 0) {
-            p->pitch_vel -= TURN_FRICTION * fmaxf(p->kd_ratio,1) * dt;
+            p->pitch_vel -= TURN_FRICTION * dt;
             if (p->pitch_vel < 0) p->pitch_vel = 0;
         } else if (p->pitch_vel < 0) {
-            p->pitch_vel += TURN_FRICTION * fmaxf(p->kd_ratio,1) * dt;
+            p->pitch_vel += TURN_FRICTION * dt;
             if (p->pitch_vel > 0) p->pitch_vel = 0;
         }
     }
-    p->pitch_vel = clampf(p->pitch_vel, -TURN_SPEED * fmaxf(p->kd_ratio,1), TURN_SPEED * fmaxf(p->kd_ratio,1));
+    p->pitch_vel = clampf(p->pitch_vel, -TURN_SPEED, TURN_SPEED);
     p->pitch += p->pitch_vel * dt;
     p->pitch = clampf(p->pitch, -89, 89);
     // compute forward/right
@@ -11053,12 +11065,12 @@ static void HandleKeyboardInput(int i, float dt) {
     if (!p->meleeKnockbackActive && (accel.x!=0 || accel.z!=0)) {
         float len = sqrtf(accel.x*accel.x + accel.z*accel.z);
         accel = v_mul(accel, 1/len);
-        p->vel = v_add(p->vel, v_mul(accel, ACCELERATION * fmaxf(p->kd_ratio,1) * dt));
+        p->vel = v_add(p->vel, v_mul(accel, ACCELERATION * dt));
     } else if (!p->meleeKnockbackActive) {
         // friction
         float sp = sqrtf(p->vel.x*p->vel.x + p->vel.z*p->vel.z);
         if (sp > 0) {
-            float dec = FRICTION * fmaxf(p->kd_ratio,1) * dt;
+            float dec = FRICTION * dt;
             float ns = sp - dec; if (ns < 0) ns = 0;
             p->vel.x *= ns/sp;
             p->vel.z *= ns/sp;
@@ -11075,7 +11087,7 @@ static void HandleGamepadInput(int i, float dt) {
     float yaw_accel = 0.0f;
     float yaw_axis = GetGamepadAxisMovement(i, GAMEPAD_AXIS_RIGHT_X);
     if (fabsf(yaw_axis) > GAMEPAD_DEADZONE) {
-        yaw_accel = -yaw_axis * TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
+        yaw_accel = -yaw_axis * TURN_ACCELERATION;
     }
 
     if (yaw_accel != 0.0f) {
@@ -11083,21 +11095,21 @@ static void HandleGamepadInput(int i, float dt) {
     } else {
         // friction
         if (p->yaw_vel > 0) {
-            p->yaw_vel -= TURN_FRICTION * fmaxf(p->kd_ratio,1) * dt;
+            p->yaw_vel -= TURN_FRICTION * dt;
             if (p->yaw_vel < 0) p->yaw_vel = 0;
         } else if (p->yaw_vel < 0) {
-            p->yaw_vel += TURN_FRICTION * fmaxf(p->kd_ratio,1) * dt;
+            p->yaw_vel += TURN_FRICTION * dt;
             if (p->yaw_vel > 0) p->yaw_vel = 0;
         }
     }
-    p->yaw_vel = clampf(p->yaw_vel, -TURN_SPEED * fmaxf(p->kd_ratio,1), TURN_SPEED * fmaxf(p->kd_ratio,1));
+    p->yaw_vel = clampf(p->yaw_vel, -TURN_SPEED, TURN_SPEED);
     p->yaw += p->yaw_vel * dt;
 
     // look up/down (right stick vertical)
     float pitch_accel = 0.0f;
     float pitch_axis = GetGamepadAxisMovement(i, GAMEPAD_AXIS_RIGHT_Y);
     if (fabsf(pitch_axis) > GAMEPAD_DEADZONE) {
-        pitch_accel = -pitch_axis * TURN_ACCELERATION * fmaxf(p->kd_ratio,1);
+        pitch_accel = -pitch_axis * TURN_ACCELERATION;
     }
 
     if (pitch_accel != 0.0f) {
@@ -11105,14 +11117,14 @@ static void HandleGamepadInput(int i, float dt) {
     } else {
         // friction
         if (p->pitch_vel > 0) {
-            p->pitch_vel -= TURN_FRICTION * fmaxf(p->kd_ratio,1) * dt;
+            p->pitch_vel -= TURN_FRICTION * dt;
             if (p->pitch_vel < 0) p->pitch_vel = 0;
         } else if (p->pitch_vel < 0) {
-            p->pitch_vel += TURN_FRICTION * fmaxf(p->kd_ratio,1) * dt;
+            p->pitch_vel += TURN_FRICTION * dt;
             if (p->pitch_vel > 0) p->pitch_vel = 0;
         }
     }
-    p->pitch_vel = clampf(p->pitch_vel, -TURN_SPEED * fmaxf(p->kd_ratio,1), TURN_SPEED * fmaxf(p->kd_ratio,1));
+    p->pitch_vel = clampf(p->pitch_vel, -TURN_SPEED, TURN_SPEED);
     p->pitch += p->pitch_vel * dt;
     p->pitch = clampf(p->pitch, -89, 89);
 
@@ -11136,12 +11148,12 @@ static void HandleGamepadInput(int i, float dt) {
     if (accel.x!=0 || accel.z!=0) {
         float len = sqrtf(accel.x*accel.x + accel.z*accel.z);
         accel = v_mul(accel, 1/len);
-        p->vel = v_add(p->vel, v_mul(accel, ACCELERATION * fmaxf(p->kd_ratio,1) * dt));
+        p->vel = v_add(p->vel, v_mul(accel, ACCELERATION * dt));
     } else {
         // friction
         float sp = sqrtf(p->vel.x*p->vel.x + p->vel.z*p->vel.z);
         if (sp > 0) {
-            float dec = FRICTION * fmaxf(p->kd_ratio,1) * dt;
+            float dec = FRICTION * dt;
             float ns = sp - dec; if (ns < 0) ns = 0;
             p->vel.x *= ns/sp;
             p->vel.z *= ns/sp;
@@ -11669,7 +11681,7 @@ int main(void) {
                     players[i].yaw = atan2f(players[i].pos.x, players[i].pos.z) * RAD2DEG;
                     players[i].death_yaw = players[i].yaw;
                     players[i].pitch = 0.0f;
-                    players[i].matterMax = MATTER_MAX_DEFAULT;
+                    UpdateKdRatio(i);
                     players[i].matter = players[i].matterMax;
                     players[i].isExposed = false;
                     players[i].last_damage_time = (float)GetTime();
@@ -11784,9 +11796,9 @@ int main(void) {
             // clamp horizontal speed
             {
                 float speed = sqrtf(p->vel.x*p->vel.x + p->vel.z*p->vel.z);
-                if (!p->meleeKnockbackActive && speed > MOVE_SPEED * fmaxf(p->kd_ratio,1)) {
-                    p->vel.x *= MOVE_SPEED * fmaxf(p->kd_ratio,1) / speed;
-                    p->vel.z *= MOVE_SPEED * fmaxf(p->kd_ratio,1) / speed;
+                if (!p->meleeKnockbackActive && speed > MOVE_SPEED) {
+                    p->vel.x *= MOVE_SPEED / speed;
+                    p->vel.z *= MOVE_SPEED / speed;
                 }
             }
 
