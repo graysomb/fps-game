@@ -195,17 +195,18 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define PLAYER_SIZE 0.5f
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
 #define VGS_ALPHA 0.9f
-#define VGS_BETA 0.35f
+#define VGS_BETA 0.9f
 #define VGS_ITERS 6
 #define VGS_EPS 1e-6f
-#define VGS_EARLY_OUT_EPS 0.00002f
+#define VGS_EARLY_OUT_EPS 0.0002f
 #define VOXEL_CORNER_COUNT 8
 #define VOXEL_CENTER_INDEX 8
 #define VOXEL_PARTICLE_COUNT 9
 #define TARGET_FRAME_RATE 30
 #define PBD_MAX_STEP_DT 1.0f/TARGET_FRAME_RATE
 #define PBD_SUBSTEPS 2
-#define PBD_CONSTRAINT_ITERS 6
+#define PBD_CONSTRAINT_ITERS 3
+#define PBD_SOR_FACTOR 1.3f
 #define BREAK_DAMP_FRAMES 50
 #define COARSENING_WAKE_FRAMES 30
 #define COARSENING_MASS_SCALE 0.1f
@@ -1941,7 +1942,7 @@ static void apply_particle_accumulators_range(int start, int end, int worker_id,
             bits_to_float(atomic_load_explicit(&p->corr_sum_y, memory_order_relaxed)),
             bits_to_float(atomic_load_explicit(&p->corr_sum_z, memory_order_relaxed))
         };
-        Vector3 delta = v_mul(corr_sum, 1.0f / corr_weight);
+        Vector3 delta = v_mul(corr_sum, PBD_SOR_FACTOR / corr_weight);
         p->predicted_pos = v_add(p->predicted_pos, delta);
         atomic_store_explicit(&p->corr_sum_x, float_to_bits(0.0f), memory_order_relaxed);
         atomic_store_explicit(&p->corr_sum_y, float_to_bits(0.0f), memory_order_relaxed);
