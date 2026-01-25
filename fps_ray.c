@@ -290,6 +290,8 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define AIM_ASSIST_MAX_DISTANCE 18.0f
 #define AIM_ASSIST_MAX_ANGLE_DEG 12.0f
 #define AIM_ASSIST_TURN_RATE 10.0f
+#define AIM_ASSIST_RATE_MIN_MULT 0.6f
+#define AIM_ASSIST_RATE_MAX_MULT 1.4f
 #define AIM_ASSIST_MIN_INPUT 0.05f
 
 // Voxel physics constants
@@ -9594,7 +9596,9 @@ static void apply_aim_assist(int idx, float dt, float input_strength) {
 
     float angle_factor = 1.0f - clampf(target_angle / (DEG2RAD * AIM_ASSIST_MAX_ANGLE_DEG), 0.0f, 1.0f);
     float input_factor = (input_strength > AIM_ASSIST_MIN_INPUT) ? (0.6f + 0.4f * input_strength) : 0.35f;
-    float max_step = AIM_ASSIST_TURN_RATE * dt * angle_factor * input_factor;
+    float kd_norm = clampf((p->kd_ratio - 0.5f) / 3.0f, 0.0f, 1.0f);
+    float kd_mult = mixf(AIM_ASSIST_RATE_MAX_MULT, AIM_ASSIST_RATE_MIN_MULT, kd_norm);
+    float max_step = AIM_ASSIST_TURN_RATE * kd_mult * dt * angle_factor * input_factor;
     if (max_step <= 0.0f) {
         return;
     }
