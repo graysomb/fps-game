@@ -808,6 +808,7 @@ static bool sfxEnabled = true;
 typedef enum {
     SFX_FIRE = 0,
     SFX_IMPACT,
+    SFX_MELEE,
     SFX_GLUE_BREAK,
     SFX_KILL,
     SFX_DEATH,
@@ -824,6 +825,7 @@ static float sfxLastPlay[SFX_COUNT];
 static const float sfxCooldowns[SFX_COUNT] = {
     0.0f,  // fire
     0.1f,  // impact
+    0.05f, // melee
     0.1f,  // glue break
     0.0f,  // kill
     0.0f,  // death
@@ -836,6 +838,7 @@ static const float sfxCooldowns[SFX_COUNT] = {
 static const float sfxChances[SFX_COUNT] = {
     1.00f,  // fire
     0.5f,  // impact
+    1.00f,  // melee
     0.5f,  // glue break
     1.00f,  // kill
     1.00f,  // death
@@ -848,6 +851,7 @@ static const float sfxChances[SFX_COUNT] = {
 static const float sfxVolumes[SFX_COUNT] = {
     0.35f,  // fire
     0.45f,  // impact
+    0.55f,  // melee
     0.35f,  // glue break
     0.50f,  // kill
     0.55f,  // death
@@ -1289,6 +1293,10 @@ static void init_sfx(void)
     sfxSounds[SFX_IMPACT] = LoadSoundFromWave(wave);
     UnloadWave(wave);
 
+    wave = make_sfx_wave(320.0f, 640.0f, 0.12f, 0.7f, 0.25f, 16.0f);
+    sfxSounds[SFX_MELEE] = LoadSoundFromWave(wave);
+    UnloadWave(wave);
+
     wave = make_sfx_wave(520.0f, 900.0f, 0.10f, 0.55f, 0.08f, 24.0f);
     sfxSounds[SFX_GLUE_BREAK] = LoadSoundFromWave(wave);
     UnloadWave(wave);
@@ -1348,7 +1356,7 @@ static void play_sfx(SfxId id)
     if (sfxChances[id] < 1.0f && randf_range(0.0f, 1.0f) > sfxChances[id]) {
         return;
     }
-    if (id == SFX_FIRE || id == SFX_IMPACT || id == SFX_GLUE_BREAK) {
+    if (id == SFX_FIRE || id == SFX_IMPACT || id == SFX_MELEE || id == SFX_GLUE_BREAK) {
         SetSoundPitch(sfxSounds[id], randf_range(0.95f, 1.05f));
     }
     PlaySound(sfxSounds[id]);
@@ -9737,7 +9745,7 @@ static bool melee_hit_players(int attacker_idx, Vector3 start, Vector3 end, Vect
         if (players[j].isExposed) {
             kill_player(j, attacker_idx, true, false);
         }
-        play_sfx(SFX_IMPACT);
+        play_sfx(SFX_MELEE);
         return true;
     }
     return false;
@@ -9768,7 +9776,7 @@ static bool melee_hit_voxels(Player *p, Vector3 start, Vector3 dir, float reach)
         meshDirty = true;
     }
     add_player_matter(p, MATTER_MELEE_HARVEST);
-    play_sfx(SFX_IMPACT);
+    play_sfx(SFX_MELEE);
     return true;
 }
 
