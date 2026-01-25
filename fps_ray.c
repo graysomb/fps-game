@@ -362,10 +362,10 @@ static BotState botStates[MAX_PLAYERS];
 static int activePlayers = 2;
 static bool randomSpawnEnabled = true;
 static const Vector3 playerSpawnPositions[MAX_PLAYERS] = {
-    { 0.0f,  BASE_EYE_HEIGHT, -9.0f },
-    { 0.0f,  BASE_EYE_HEIGHT,  9.0f },
-    { -6.0f, BASE_EYE_HEIGHT, -6.0f },
-    {  6.0f, BASE_EYE_HEIGHT,  6.0f }
+    { 0.0f,  BASE_EYE_HEIGHT, -14.0f },
+    { 0.0f,  BASE_EYE_HEIGHT,  14.0f },
+    { -12.0f, BASE_EYE_HEIGHT, -12.0f },
+    {  12.0f, BASE_EYE_HEIGHT,  12.0f }
 };
 static const float playerSpawnYaw[MAX_PLAYERS] = { 0.0f, 180.0f, 45.0f, -135.0f };
 
@@ -9432,7 +9432,7 @@ static Vector3 pick_player_spawn(int player_index) {
         return playerSpawnPositions[0];
     }
 
-    float min_distance = PLAYER_SIZE * 2.5f;
+    float min_distance = FLOOR_SIZE*0.5f;
     float min_pos = -FLOOR_SIZE + PLAYER_RADIUS;
     float max_pos = FLOOR_SIZE - PLAYER_RADIUS;
     for (int attempt = 0; attempt < 64; ++attempt) {
