@@ -19,6 +19,7 @@
  * P1 (Keyboard): WASD (Move), F/H/T/G (Look), Space (Jump), LCtrl (Shoot), Z (Melee), E (Build), R (Tether)
  * P2 (Keyboard): IJKL (Move), Arrows (Look), RShift (Jump), RCtrl (Shoot), M (Melee), O (Build), P (Tether)
  * Gamepad: LS (Move), RS (Look), A (Jump), RT (Shoot), B (Melee), X (Build), Y (Tether)
+ * gcc fps_ray.c -o fps_ray.exe   -I /c/raylib/src -L /c/raylib/src   -lraylib -lopengl32 -lgdi32 -lwinmm -lpthread   -static -static-libgcc
  */
 #include "raylib.h"
 #include "rlgl.h" // for rlBegin/rlEnd
@@ -209,12 +210,12 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define PBD_MAX_STEP_DT 1.0f/TARGET_FRAME_RATE
 #define PBD_SUBSTEPS 2
 #define PBD_CONSTRAINT_ITERS 3
-#define PBD_SOR_FACTOR 1.3f
+#define PBD_SOR_FACTOR 1.0f
 #define BREAK_DAMP_FRAMES 50
 #define COARSENING_WAKE_FRAMES 30
 #define COARSENING_MASS_SCALE 0.1f
-#define STRAIN_BREAK_THRESHOLD 0.4f
-#define SHEAR_BREAK_THRESHOLD 0.4f
+#define STRAIN_BREAK_THRESHOLD 0.3f
+#define SHEAR_BREAK_THRESHOLD 0.3f
 #define PBD_MAX_ACCUM_STEPS 8
 #define COLLISION_RELAXATION 0.99f
 #define COLLISION_CENTROID_ONLY_DT 10.2f
@@ -252,9 +253,9 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 //#define VOXEL_ACTIVATION_UNIT_BUDGET 128
 #define VOXEL_ACTIVATION_UNIT_BUDGET 128*5
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 2.0f
-#define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.4f
-#define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.4f
-#define VOXEL_DEACTIVATION_FRAMES 5
+#define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.15f
+#define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.15f
+#define VOXEL_DEACTIVATION_FRAMES 10
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
 #define STATIC_RESTORE_SEARCH_RADIUS 2*1
 #define DEBRIS_ACTIVATION_COOLDOWN_FRAMES (60 * 10)
@@ -5552,6 +5553,11 @@ static void buildTestWorld(void) {
     buildBox(4, 7, 44, 3, 3, 3, DARKGRAY);
     // Grid coords for (18, 3.5, 2) -> (76, 7, 44)
     buildBox(76, 7, 44, 3, 3, 3, DARKGRAY);
+    int center = M/2;
+    buildBox(center - 20, 0, center + 6, 10, 6, 3, DARKGRAY);
+    buildBox(center + 20, 0, center - 6, 10, 6, 3, DARKGRAY);
+    buildBox(center - 6, 0, center - 20, 3, 6, 10, DARKGRAY);
+    buildBox(center + 6, 0, center + 20, 3, 6, 10, DARKGRAY);
 }
 
 static void buildProceduralWorld(void) {
@@ -5680,6 +5686,12 @@ static void buildBloodWorld(void) {
             addVoxelAt(x, y, center - 18, wall_color);
         }
     }
+
+    // Extra low cover to break up long sight lines near the center.
+    buildBox(center - 10, 0, center + 6, 8, 3, 2, cover_color);
+    buildBox(center + 10, 0, center - 6, 8, 3, 2, cover_color);
+    buildBox(center - 6, 0, center - 10, 2, 3, 8, cover_color);
+    buildBox(center + 6, 0, center + 10, 2, 3, 8, cover_color);
 
     buildGateFrame(center - pillar_offset - 8, center + 18, 5, 6, 3, wall_color);
     buildGateFrame(center + pillar_offset + 8, center + 18, 5, 6, 3, wall_color);
