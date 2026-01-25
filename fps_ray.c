@@ -165,6 +165,9 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define HUD_BAR_THICKNESS  30
 #define HUD_BAR_SPACING     8
 #define HUD_BAR_TEXT_SIZE  22
+#define RADAR_PIXEL_RADIUS 64
+#define RADAR_WORLD_RADIUS 18.0f
+#define RADAR_MOVE_SPEED_THRESHOLD 0.35f
 #define BULLET_COOLDOWN_SECONDS 0.25f
 #define ACCELERATION   400.0f    // horizontal acceleration
 #define FREEZE_GROUND_WEIGHT       0.9f
@@ -10288,6 +10291,65 @@ static void draw_hud_bars(int player_index, const Player *p, int viewport_w, int
         }
     }
 }
+
+static void draw_player_radar(int player_index, int viewport_w, int viewport_h) {
+    if (player_index < 0 || player_index >= activePlayers) {
+        return;
+    }
+    Player *p = &players[player_index];
+    if (p->respawn_timer > 0.0f) {
+        return;
+    }
+    int radius_px = RADAR_PIXEL_RADIUS;
+    int cx = HUD_PADDING_X + radius_px + 4;
+    int cy = viewport_h - HUD_PADDING_Y - radius_px - HUD_BAR_THICKNESS - 6;
+    if (cy - radius_px < HUD_PADDING_Y + HUD_BAR_HEIGHT) {
+        cy = HUD_PADDING_Y + HUD_BAR_HEIGHT + radius_px + 4;
+    }
+
+    Color ring = (Color){ 80, 160, 255, 200 };
+    Color fill = (Color){ 30, 60, 110, 120 };
+    DrawCircle(cx, cy, radius_px, fill);
+    DrawCircleLines(cx, cy, radius_px, ring);
+    DrawCircleLines(cx, cy, radius_px / 2, Fade(ring, 0.5f));
+
+    Vector3 forward = player_forward(p);
+    Vector2 forward_xz = { forward.x, forward.z };
+    float forward_len = sqrtf(forward_xz.x * forward_xz.x + forward_xz.y * forward_xz.y);
+    if (forward_len < 1e-4f) {
+        forward_xz = (Vector2){ 0.0f, -1.0f };
+    } else {
+        forward_xz.x /= forward_len;
+        forward_xz.y /= forward_len;
+    }
+    Vector2 right_xz = { -forward_xz.y, forward_xz.x };
+
+    for (int j = 0; j < activePlayers; ++j) {
+        if (j == player_index) {
+            continue;
+        }
+        Player *other = &players[j];
+        if (other->respawn_timer > 0.0f) {
+            continue;
+        }
+        float speed = sqrtf(other->vel.x * other->vel.x + other->vel.z * other->vel.z);
+        if (speed < RADAR_MOVE_SPEED_THRESHOLD) {
+            continue;
+        }
+        Vector3 delta = v_sub(other->pos, p->pos);
+        float dist = sqrtf(delta.x * delta.x + delta.z * delta.z);
+        if (dist > RADAR_WORLD_RADIUS || dist <= 0.001f) {
+            continue;
+        }
+        float rx = delta.x * right_xz.x + delta.z * right_xz.y;
+        float ry = delta.x * forward_xz.x + delta.z * forward_xz.y;
+        float nx = rx / RADAR_WORLD_RADIUS;
+        float ny = ry / RADAR_WORLD_RADIUS;
+        int blip_x = (int)roundf(cx + nx * radius_px);
+        int blip_y = (int)roundf(cy - ny * radius_px);
+        DrawCircle(blip_x, blip_y, 3, (Color){ 120, 200, 255, 230 });
+    }
+}
 // Append the 12 edges (24 vertices) of a cube to the current RL_LINES batch
 static void drawCubeEdges(const Voxel *voxel)
 {
@@ -12412,6 +12474,7 @@ int main(void) {
                     DrawText(banner_text, banner_x, banner_y, banner_size, banner_color);
                 }
                 draw_hud_bars(i, &players[i], view_w, view_h);
+                draw_player_radar(i, view_w, view_h);
                 if (players[i].matter_flash_timer > 0.0f &&
                     !players[i].isExposed && players[i].matter > 0.0f) {
                     float alpha = clampf(players[i].matter_flash_timer / 0.2f, 0.0f, 1.0f);
