@@ -7036,7 +7036,6 @@ static void process_break_masks(void) {
         if (v->break_mask == 0) {
             continue;
         }
-        play_sfx(SFX_GLUE_BREAK);
         for (int face = 0; face < 6; ++face) {
             if (v->break_mask & (uint8_t)(1u << face)) {
                 break_face_link(v, face);
