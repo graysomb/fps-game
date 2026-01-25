@@ -1682,6 +1682,20 @@ static Vector3 v_cross(Vector3 a, Vector3 b) {
     };
 }
 
+static float point_segment_distance_sq(Vector3 point, Vector3 a, Vector3 b) {
+    Vector3 ab = v_sub(b, a);
+    float ab_len_sq = v_dot(ab, ab);
+    if (ab_len_sq <= 1e-6f) {
+        Vector3 delta = v_sub(point, a);
+        return v_dot(delta, delta);
+    }
+    float t = v_dot(v_sub(point, a), ab) / ab_len_sq;
+    t = clampf(t, 0.0f, 1.0f);
+    Vector3 closest = v_add(a, v_mul(ab, t));
+    Vector3 delta = v_sub(point, closest);
+    return v_dot(delta, delta);
+}
+
 static bool v_isfinite(Vector3 v) {
     return isfinite(v.x) && isfinite(v.y) && isfinite(v.z);
 }
@@ -9634,7 +9648,10 @@ static bool melee_hit_players(int attacker_idx, Vector3 start, Vector3 end, Vect
             players[j].pos.y + hit_extent,
             players[j].pos.z + hit_extent
         };
-        if (!segment_intersects_aabb(start, end, box_min, box_max)) {
+        float hit_radius = PLAYER_RADIUS * 1.05f;
+        float dist_sq = point_segment_distance_sq(players[j].pos, start, end);
+        if (dist_sq > hit_radius * hit_radius &&
+            !segment_intersects_aabb(start, end, box_min, box_max)) {
             continue;
         }
         Vector3 knock_dir = { dir.x, 0.0f, dir.z };
