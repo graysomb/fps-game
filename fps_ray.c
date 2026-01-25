@@ -287,6 +287,10 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define DEATH_CAM_DISTANCE 4.0f
 #define DEATH_CAM_HEIGHT 2.0f
 #define GAMEPAD_DEADZONE 0.15f
+#define AIM_ASSIST_MAX_DISTANCE 18.0f
+#define AIM_ASSIST_MAX_ANGLE_DEG 12.0f
+#define AIM_ASSIST_TURN_RATE 10.0f
+#define AIM_ASSIST_MIN_INPUT 0.05f
 
 // Voxel physics constants
 #define MAX_VOXELS    131072
@@ -876,6 +880,10 @@ static bool debugLogRestoreClusters = false;
 static int debugBlowupLogBudget = 0;
 static bool debugLogClusterBreaksOnly = false;
 static bool debugSfxKeysEnabled = false;
+static bool aimAssistEnabled = true;
+static bool aimAssistDebugDraw = false;
+static Vector3 aimAssistDebugTarget[MAX_PLAYERS];
+static bool aimAssistDebugHasTarget[MAX_PLAYERS];
 static int debugGlueBuildLogBudget = 0;
 static int debugGlueSolveLogBudget = 0;
 static int debugGlueBreakLogBudget = 0;
@@ -1700,6 +1708,11 @@ static float smoothstepf(float t) {
 
 static float mixf(float a, float b, float t) {
     return a * (1.0f - t) + b * t;
+}
+
+static float angle_diff_deg(float from, float to) {
+    float diff = fmodf(to - from + 540.0f, 360.0f) - 180.0f;
+    return diff;
 }
 static Vector3 v_add(Vector3 a, Vector3 b) {
     return (Vector3){ a.x + b.x, a.y + b.y, a.z + b.z };
@@ -9494,6 +9507,108 @@ static Vector3 player_forward(const Player *p) {
     return v_norm(dir);
 }
 
+static void dir_to_yaw_pitch(Vector3 dir, float *out_yaw, float *out_pitch) {
+    dir = v_norm(dir);
+    if (out_yaw) {
+        *out_yaw = atan2f(dir.x, dir.z) * RAD2DEG + 180.0f;
+    }
+    if (out_pitch) {
+        *out_pitch = asinf(clampf(dir.y, -1.0f, 1.0f)) * RAD2DEG;
+    }
+}
+
+static bool find_aim_assist_target(int idx, Vector3 *out_dir, float *out_angle) {
+    Player *p = &players[idx];
+    Vector3 forward = player_forward(p);
+    float max_dist = AIM_ASSIST_MAX_DISTANCE;
+    float max_angle_rad = DEG2RAD * AIM_ASSIST_MAX_ANGLE_DEG;
+    float cos_max = cosf(max_angle_rad);
+
+    float best_score = 1e9f;
+    Vector3 best_dir = { 0 };
+    float best_angle = 0.0f;
+    bool found = false;
+
+    for (int j = 0; j < activePlayers; ++j) {
+        if (j == idx) {
+            continue;
+        }
+        Player *target = &players[j];
+        if (target->respawn_timer > 0.0f) {
+            continue;
+        }
+        float aim_height = 0.35f - (PLAYER_SIZE * 0.5f);
+        Vector3 target_pos = v_add(target->pos, (Vector3){ 0.0f, aim_height, 0.0f });
+        Vector3 to_target = v_sub(target_pos, p->pos);
+        float dist = v_length(to_target);
+        if (dist <= 0.001f || dist > max_dist) {
+            continue;
+        }
+        Vector3 dir = v_mul(to_target, 1.0f / dist);
+        float dot = v_dot(forward, dir);
+        if (dot < cos_max) {
+            continue;
+        }
+        float angle = acosf(clampf(dot, -1.0f, 1.0f));
+        float score = angle * 1.8f + dist * 0.05f;
+        if (score < best_score) {
+            best_score = score;
+            best_dir = dir;
+            best_angle = angle;
+            found = true;
+        }
+    }
+
+    if (out_dir) {
+        *out_dir = best_dir;
+    }
+    if (out_angle) {
+        *out_angle = best_angle;
+    }
+    return found;
+}
+
+static void apply_aim_assist(int idx, float dt, float input_strength) {
+    if (!aimAssistEnabled) {
+        return;
+    }
+    if (playerInput[idx] != INPUT_TYPE_KEYBOARD &&
+        playerInput[idx] != INPUT_TYPE_GAMEPAD) {
+        return;
+    }
+    Player *p = &players[idx];
+    if (p->respawn_timer > 0.0f) {
+        return;
+    }
+
+    Vector3 target_dir = { 0 };
+    float target_angle = 0.0f;
+    if (!find_aim_assist_target(idx, &target_dir, &target_angle)) {
+        aimAssistDebugHasTarget[idx] = false;
+        return;
+    }
+
+    float target_yaw = 0.0f;
+    float target_pitch = 0.0f;
+    dir_to_yaw_pitch(target_dir, &target_yaw, &target_pitch);
+
+    float angle_factor = 1.0f - clampf(target_angle / (DEG2RAD * AIM_ASSIST_MAX_ANGLE_DEG), 0.0f, 1.0f);
+    float input_factor = (input_strength > AIM_ASSIST_MIN_INPUT) ? (0.6f + 0.4f * input_strength) : 0.35f;
+    float max_step = AIM_ASSIST_TURN_RATE * dt * angle_factor * input_factor;
+    if (max_step <= 0.0f) {
+        return;
+    }
+
+    float yaw_delta = angle_diff_deg(p->yaw, target_yaw);
+    float pitch_delta = target_pitch - p->pitch;
+    p->yaw += clampf(yaw_delta, -max_step, max_step);
+    p->pitch += clampf(pitch_delta, -max_step, max_step);
+    p->pitch = clampf(p->pitch, -89.0f, 89.0f);
+
+    aimAssistDebugTarget[idx] = v_add(p->pos, v_mul(target_dir, AIM_ASSIST_MAX_DISTANCE * 0.4f));
+    aimAssistDebugHasTarget[idx] = true;
+}
+
 static Vector3 player_hand_position(const Player *p) {
     Vector3 dir = player_forward(p);
     return v_add(p->pos, v_add(v_mul(dir, 1.0f), (Vector3){ 0.0f, 0.35f, 0.0f }));
@@ -11263,6 +11378,12 @@ static void draw_players(void) {
             DrawCube(p->pos, PLAYER_SIZE + 0.35f, PLAYER_SIZE + 0.35f, PLAYER_SIZE + 0.35f, invuln_color);
             DrawCubeWires(p->pos, PLAYER_SIZE + 0.35f, PLAYER_SIZE + 0.35f, PLAYER_SIZE + 0.35f, Fade(invuln_color, 0.8f));
         }
+        if (aimAssistDebugDraw && aimAssistDebugHasTarget[i]) {
+            Vector3 hand = player_hand_position(p);
+            Vector3 target = aimAssistDebugTarget[i];
+            DrawLine3D(hand, target, (Color){ 255, 220, 120, 180 });
+            DrawSphere(target, 0.12f, (Color){ 255, 200, 120, 120 });
+        }
     }
 }
 
@@ -11311,6 +11432,9 @@ static void HandleKeyboardInput(int i, float dt) {
     p->pitch_vel = clampf(p->pitch_vel, -TURN_SPEED, TURN_SPEED);
     p->pitch += p->pitch_vel * dt;
     p->pitch = clampf(p->pitch, -89, 89);
+
+    float input_strength = (fabsf(yaw_accel) > 0.0f || fabsf(pitch_accel) > 0.0f) ? 1.0f : 0.0f;
+    apply_aim_assist(i, dt, input_strength);
     // compute forward/right
     float yr = DEG2RAD * p->yaw;
     Vector3 forward = { sinf(-yr), 0, -cosf(yr) };
@@ -11386,6 +11510,9 @@ static void HandleGamepadInput(int i, float dt) {
     p->pitch_vel = clampf(p->pitch_vel, -TURN_SPEED, TURN_SPEED);
     p->pitch += p->pitch_vel * dt;
     p->pitch = clampf(p->pitch, -89, 89);
+
+    float input_strength = fmaxf(fabsf(yaw_axis), fabsf(pitch_axis));
+    apply_aim_assist(i, dt, input_strength);
 
     // compute forward/right
     float yr = DEG2RAD * p->yaw;
@@ -12040,6 +12167,12 @@ int main(void) {
         }
         if (IsKeyPressed(KEY_F6)) {
             debugSfxKeysEnabled = !debugSfxKeysEnabled;
+        }
+        if (IsKeyPressed(KEY_F7)) {
+            aimAssistDebugDraw = !aimAssistDebugDraw;
+        }
+        if (IsKeyPressed(KEY_F8)) {
+            aimAssistEnabled = !aimAssistEnabled;
         }
         handle_sfx_debug_keys();
 
