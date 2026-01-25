@@ -814,6 +814,7 @@ typedef enum {
     SFX_SHIELD,
     SFX_SMUSH,
     SFX_EXPLOSION,
+    SFX_TETHER,
     SFX_WIN,
     SFX_COUNT
 } SfxId;
@@ -821,14 +822,16 @@ typedef enum {
 static Sound sfxSounds[SFX_COUNT];
 static float sfxLastPlay[SFX_COUNT];
 static const float sfxCooldowns[SFX_COUNT] = {
-    0.1f,  // fire
+    0.0f,  // fire
     0.1f,  // impact
     0.1f,  // glue break
-    0.25f,  // kill
-    0.35f,  // death
-    0.08f,  // shield
-    0.15f, // smush
-    2.0f   // win
+    0.0f,  // kill
+    0.0f,  // death
+    0.00f, // shield
+    0.0f,  // smush
+    0.0f,  // explosion
+    0.1f,  // tether
+    0.0f   // win
 };
 static const float sfxChances[SFX_COUNT] = {
     1.00f,  // fire
@@ -836,8 +839,11 @@ static const float sfxChances[SFX_COUNT] = {
     0.5f,  // glue break
     1.00f,  // kill
     1.00f,  // death
-    0.70f,  // shield
-    1.00f   // smush
+    1.00f,  // shield
+    1.00f,  // smush
+    1.00f,  // explosion
+    1.00f,  // tether
+    1.00f   // win
 };
 static const float sfxVolumes[SFX_COUNT] = {
     0.35f,  // fire
@@ -846,7 +852,10 @@ static const float sfxVolumes[SFX_COUNT] = {
     0.50f,  // kill
     0.55f,  // death
     0.35f,  // shield
-    1.00f   // smush
+    1.00f,  // smush
+    0.70f,  // explosion
+    0.55f,  // tether
+    0.70f   // win
 };
 static bool sfxReady = false;
 static float smushBannerTimer = 0.0f;
@@ -1302,6 +1311,10 @@ static void init_sfx(void)
 
     wave = make_sfx_wave(100.0f, 20.0f, 0.10f, 1.2f, 0.4f, 20.0f);
     sfxSounds[SFX_EXPLOSION] = LoadSoundFromWave(wave);
+    UnloadWave(wave);
+
+    wave = make_sfx_wave(520.0f, 1200.0f, 0.12f, 0.75f, 0.10f, 18.0f);
+    sfxSounds[SFX_TETHER] = LoadSoundFromWave(wave);
     UnloadWave(wave);
     
     wave = make_win_song_wave();
@@ -10002,6 +10015,7 @@ static void start_tether(int idx) {
 
     p->tetherHolding = true;
     p->tetherVoxel = tether_idx;
+    play_sfx(SFX_TETHER);
 }
 
 static void prepare_tether_forces(void) {
@@ -10054,6 +10068,7 @@ static void release_tether(int idx) {
             }
         }
     }
+    play_sfx(SFX_TETHER);
     p->tetherHolding = false;
     p->tetherVoxel = -1;
 }
