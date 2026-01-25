@@ -7339,7 +7339,8 @@ static void gather_voxel_shape_constraints(Voxel *voxel) {
     bool has_dynamic = false;
     Vector3 p[8];
     Vector3 orig[8];
-    float w[8];
+    float fit_w[8];
+    float apply_w[8];
 
     for (int i = 0; i < 8; ++i) {
         Particle *part = voxel->particles[i];
@@ -7347,9 +7348,13 @@ static void gather_voxel_shape_constraints(Voxel *voxel) {
         orig[i] = part->predicted_pos;
         
         if (part->inv_mass <= 0.0f) {
-            w[i] = 1.0f; // Anchor static particles so they influence the shape fit!
+            // Fixed/glued corners should influence the shape fit but not receive
+            // accumulated corrections (they are not in sim_particles).
+            fit_w[i] = 1.0f;
+            apply_w[i] = 0.0f;
         } else {
-            w[i] = part->inv_mass;
+            fit_w[i] = part->inv_mass;
+            apply_w[i] = part->inv_mass;
             has_dynamic = true;
         }
     }
@@ -7487,7 +7492,7 @@ static void gather_voxel_shape_constraints(Voxel *voxel) {
         new_p[7] = v_add(v_add(v_add(centroid, u0), u1), u2);
 
         for (int i = 0; i < 8; ++i) {
-            if (w[i] == 0.0f) {
+            if (fit_w[i] == 0.0f) {
                 continue;
             }
             p[i] = new_p[i];
@@ -7495,11 +7500,11 @@ static void gather_voxel_shape_constraints(Voxel *voxel) {
     }
 
     for (int i = 0; i < 8; ++i) {
-        if (w[i] == 0.0f) {
+        if (apply_w[i] == 0.0f) {
             continue;
         }
         Vector3 delta = v_sub(p[i], orig[i]);
-        accumulate_particle_correction(voxel->particles[i], delta, w[i]);
+        accumulate_particle_correction(voxel->particles[i], delta, apply_w[i]);
     }
 }
 
