@@ -7793,8 +7793,34 @@ static int gather_glued_neighbors(int voxel_idx, int *out, int max_out) {
 }
 
 static void deactivate_glue_constraints_between(int a, int b) {
-    (void)a;
-    (void)b;
+    if (a < 0 || b < 0 || a >= voxel_count || b >= voxel_count) {
+        return;
+    }
+    bool removed_any = false;
+    for (int g = 0; g < glueConstraintCount; ++g) {
+        GlueConstraint *gc = &glueConstraints[g];
+        if (!gc->active) {
+            continue;
+        }
+        if ((gc->coarseVoxel == a && gc->fineVoxel == b) ||
+            (gc->coarseVoxel == b && gc->fineVoxel == a)) {
+            gc->active = false;
+            removed_any = true;
+        }
+    }
+
+    if (removed_any) {
+        for (int face = 0; face < 6; ++face) {
+            int nx = voxels[a].gx + face_offsets[face][0];
+            int ny = voxels[a].gy + face_offsets[face][1];
+            int nz = voxels[a].gz + face_offsets[face][2];
+            int neighbor_idx = table_get(nx, ny, nz);
+            if (neighbor_idx == b) {
+                break_face_link(&voxels[a], face);
+                break;
+            }
+        }
+    }
 }
 
 static int build_glue_cluster_indices(int start_idx, int *out_indices)
@@ -9581,6 +9607,37 @@ static float melee_anim_progress(const Player *p, float now) {
     return saturatef(t);
 }
 
+static void deactivate_glue_constraints_for_voxel(int voxel_idx) {
+    if (voxel_idx < 0 || voxel_idx >= voxel_count) {
+        return;
+    }
+    bool removed_any = false;
+    for (int g = 0; g < glueConstraintCount; ++g) {
+        GlueConstraint *gc = &glueConstraints[g];
+        if (!gc->active) {
+            continue;
+        }
+        if (gc->coarseVoxel == voxel_idx || gc->fineVoxel == voxel_idx) {
+            gc->active = false;
+            removed_any = true;
+        }
+    }
+    if (removed_any) {
+        compact_glue_constraints();
+    }
+}
+
+static void detach_all_glue_faces(int voxel_idx) {
+    if (voxel_idx < 0 || voxel_idx >= voxel_count) {
+        return;
+    }
+    for (int face = 0; face < 6; ++face) {
+        if (voxels[voxel_idx].glued_faces[face]) {
+            break_face_link(&voxels[voxel_idx], face);
+        }
+    }
+}
+
 static float melee_reach_fraction(float progress) {
     progress = saturatef(progress);
     if (progress <= MELEE_ACTIVE_START_NORM) {
@@ -9934,24 +9991,13 @@ static void start_tether(int idx) {
         return;
     }
     
-    // For already dynamic voxels, we might grab a cluster
-    if (voxels[tether_idx].simulate) { // It should be simulate by now
-         int cluster_count = build_glue_cluster_indices(tether_idx, glueClusterIndices);
-        if (cluster_count > 0) {
-            for (int c = 0; c < cluster_count; ++c) {
-                int v_idx = glueClusterIndices[c];
-                if (v_idx < 0 || v_idx >= voxel_count) {
-                    continue;
-                }
-                voxels[v_idx].owner = idx;
-                voxels[v_idx].activator = idx;
-                voxels[v_idx].wasTethered = true;
-            }
-        } else {
-            voxels[tether_idx].owner = idx;
-            voxels[tether_idx].activator = idx;
-            voxels[tether_idx].wasTethered = true;
-        }
+    // For dynamic voxels, detach glue so we pull only a single voxel
+    if (voxels[tether_idx].simulate) {
+        detach_all_glue_faces(tether_idx);
+        deactivate_glue_constraints_for_voxel(tether_idx);
+        voxels[tether_idx].owner = idx;
+        voxels[tether_idx].activator = idx;
+        voxels[tether_idx].wasTethered = true;
     }
 
     p->tetherHolding = true;
@@ -9972,27 +10018,19 @@ static void prepare_tether_forces(void) {
         }
         Voxel *v = &voxels[p->tetherVoxel];
         if (!v->simulate) {
-            p->tetherHolding = false;
-            p->tetherVoxel = -1;
-            continue;
+            int new_idx = rip_single_static_voxel(p->tetherVoxel, i);
+            if (new_idx < 0 || new_idx >= voxel_count) {
+                p->tetherHolding = false;
+                p->tetherVoxel = -1;
+                continue;
+            }
+            p->tetherVoxel = new_idx;
+            v = &voxels[new_idx];
         }
         tetherTargetByPlayer[i] = player_hand_position(p);
-        int cluster_count = build_glue_cluster_indices(p->tetherVoxel, glueClusterIndices);
-        if (cluster_count > 0) {
-            for (int c = 0; c < cluster_count; ++c) {
-                int v_idx = glueClusterIndices[c];
-                if (v_idx < 0 || v_idx >= voxel_count) {
-                    continue;
-                }
-                tetherTag[v_idx] = i + 1;
-                voxels[v_idx].activationBelief = 1.0f;
-                voxels[v_idx].activationCooldownFrames = 0;
-            }
-        } else {
-            tetherTag[p->tetherVoxel] = i + 1;
-            voxels[p->tetherVoxel].activationBelief = 1.0f;
-            voxels[p->tetherVoxel].activationCooldownFrames = 0;
-        }
+        tetherTag[p->tetherVoxel] = i + 1;
+        voxels[p->tetherVoxel].activationBelief = 1.0f;
+        voxels[p->tetherVoxel].activationCooldownFrames = 0;
     }
 }
 
