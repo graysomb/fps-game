@@ -11336,10 +11336,10 @@ static void shutdown_world_visuals(void) {
 
 static Color player_palette_color(int index) {
     static const Color palette[MAX_PLAYERS] = {
-        { 230, 80, 80, 255 },
-        { 80, 200, 120, 255 },
-        { 80, 140, 230, 255 },
-        { 230, 180, 70, 255 }
+        { 255, 70, 70, 255 },
+        { 70, 235, 120, 255 },
+        { 70, 160, 255, 255 },
+        { 255, 210, 70, 255 }
     };
     if (index < 0 || index >= MAX_PLAYERS) {
         return (Color){ 200, 200, 200, 255 };
@@ -11354,8 +11354,8 @@ static void draw_players(void) {
             continue;
         }
         Color base = player_palette_color(i);
-        Color base_dark = scale_color(base, 0.35f, 255);
-        DrawCube(p->pos, PLAYER_SIZE,PLAYER_SIZE, PLAYER_SIZE, base_dark);
+        Color base_dark = scale_color(base, 0.75f, 255);
+        DrawCube(p->pos, PLAYER_SIZE,PLAYER_SIZE, PLAYER_SIZE, base);
         DrawCubeWires(p->pos, PLAYER_SIZE,PLAYER_SIZE,PLAYER_SIZE, base_dark);
         draw_melee_arm_world(i);
         if (p->matter_flash_timer > 0.0f && !p->isExposed && p->matter > 0.0f) {
