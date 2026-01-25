@@ -5871,6 +5871,7 @@ static void add_player_matter(Player *p, float amount);
 static int player_points(const Player *p);
 static int player_bullet_damage(int attacker_index);
 static Color scale_color(Color c, float scale, unsigned char alpha);
+static void draw_melee_arm_world(int player_index);
 static void update_points_animation(float dt);
 static Color player_palette_color(int index);
 static Vector3 player_hand_position(const Player *p);
@@ -9588,6 +9589,35 @@ static bool melee_is_active_window(float progress) {
     return progress >= MELEE_ACTIVE_START_NORM && progress <= MELEE_ACTIVE_END_NORM;
 }
 
+static void melee_swing_basis(const Player *p, Vector3 *out_forward, Vector3 *out_right, Vector3 *out_up) {
+    Vector3 forward = player_forward(p);
+    Vector3 world_up = { 0.0f, 1.0f, 0.0f };
+    Vector3 right = v_norm(v_cross(forward, world_up));
+    Vector3 up = v_norm(v_cross(right, forward));
+    *out_forward = forward;
+    *out_right = right;
+    *out_up = up;
+}
+
+static Vector3 melee_swing_origin(const Player *p, float reach_frac) {
+    Vector3 forward, right, up;
+    melee_swing_basis(p, &forward, &right, &up);
+    Vector3 origin = player_hand_position(p);
+    origin = v_add(origin, v_mul(right, 0.35f));
+    origin = v_add(origin, v_mul(up, -0.15f));
+    origin = v_add(origin, v_mul(forward, 0.08f * reach_frac));
+    return origin;
+}
+
+static Vector3 melee_swing_direction(const Player *p, float reach_frac) {
+    Vector3 forward, right, up;
+    melee_swing_basis(p, &forward, &right, &up);
+    Vector3 dir = forward;
+    dir = v_add(dir, v_mul(right, -0.35f * reach_frac));
+    dir = v_add(dir, v_mul(up, -0.25f * reach_frac));
+    return v_norm(dir);
+}
+
 static bool melee_hit_players(int attacker_idx, Vector3 start, Vector3 end, Vector3 dir) {
     for (int j = 0; j < activePlayers; ++j) {
         if (j == attacker_idx || players[j].respawn_timer > 0.0f) {
@@ -9655,39 +9685,7 @@ static bool melee_hit_voxels(Player *p, Vector3 start, Vector3 dir, float reach)
     return true;
 }
 
-static Shader armOverlayShader = { 0 };
-static int armOverlayLocProgress = -1;
-static int armOverlayLocReach = -1;
-static int armOverlayLocColor = -1;
-static bool armOverlayShaderReady = false;
-
-static void init_arm_overlay_shader(void) {
-    if (armOverlayShaderReady) {
-        return;
-    }
-    armOverlayShader = LoadShader(0, "shaders/arm_overlay.frag");
-    if (armOverlayShader.id == 0) {
-        return;
-    }
-    armOverlayLocProgress = GetShaderLocation(armOverlayShader, "progress");
-    armOverlayLocReach = GetShaderLocation(armOverlayShader, "reach");
-    armOverlayLocColor = GetShaderLocation(armOverlayShader, "armColor");
-    armOverlayShaderReady = true;
-}
-
-static void shutdown_arm_overlay_shader(void) {
-    if (!armOverlayShaderReady) {
-        return;
-    }
-    UnloadShader(armOverlayShader);
-    armOverlayShader = (Shader){ 0 };
-    armOverlayLocProgress = -1;
-    armOverlayLocReach = -1;
-    armOverlayLocColor = -1;
-    armOverlayShaderReady = false;
-}
-
-static void draw_melee_arm_overlay(int playerIdx, int view_w, int view_h) {
+static void draw_melee_arm_world(int playerIdx) {
     Player *p = &players[playerIdx];
     if (p->respawn_timer > 0.0f || !p->meleeSwingActive) {
         return;
@@ -9698,50 +9696,24 @@ static void draw_melee_arm_overlay(int playerIdx, int view_w, int view_h) {
         return;
     }
     float progress = saturatef(raw_progress);
-    float reach = melee_reach_fraction(progress);
-    float active_alpha = melee_is_active_window(progress) ? 1.0f : 0.65f;
-
-    float arm_w = view_w * 0.26f;
-    float arm_h = view_h * 0.085f;
-    Vector2 base_pos = { view_w * 0.82f, view_h * 0.86f };
-    Vector2 swing_offset = { -view_w * 0.34f * reach, -view_h * 0.26f * reach };
-    float swing_angle = -18.0f - 82.0f * reach;
-    Rectangle arm_rect = {
-        base_pos.x + swing_offset.x,
-        base_pos.y + swing_offset.y,
-        arm_w,
-        arm_h
-    };
-    Vector2 origin = { arm_w * 0.12f, arm_h * 0.5f };
-
-    Color base = player_palette_color(playerIdx);
-    Color arm_color = scale_color(base, 0.85f, (unsigned char)(200.0f * active_alpha));
-    float arm_color_vec[4] = {
-        arm_color.r / 255.0f,
-        arm_color.g / 255.0f,
-        arm_color.b / 255.0f,
-        arm_color.a / 255.0f
-    };
-
-    init_arm_overlay_shader();
-    if (!armOverlayShaderReady) {
-        DrawRectanglePro(arm_rect, origin, swing_angle, arm_color);
+    float reach_frac = melee_reach_fraction(progress);
+    float reach = MELEE_RANGE * reach_frac;
+    if (reach <= 0.05f) {
         return;
     }
 
-    if (armOverlayLocProgress >= 0) {
-        SetShaderValue(armOverlayShader, armOverlayLocProgress, &progress, SHADER_UNIFORM_FLOAT);
-    }
-    if (armOverlayLocReach >= 0) {
-        SetShaderValue(armOverlayShader, armOverlayLocReach, &reach, SHADER_UNIFORM_FLOAT);
-    }
-    if (armOverlayLocColor >= 0) {
-        SetShaderValue(armOverlayShader, armOverlayLocColor, arm_color_vec, SHADER_UNIFORM_VEC4);
-    }
+    Vector3 start = melee_swing_origin(p, reach_frac);
+    Vector3 dir = melee_swing_direction(p, reach_frac);
+    Vector3 end = v_add(start, v_mul(dir, reach));
 
-    BeginShaderMode(armOverlayShader);
-    DrawRectanglePro(arm_rect, origin, swing_angle, WHITE);
-    EndShaderMode();
+    Color base = player_palette_color(playerIdx);
+    float alpha_scale = melee_is_active_window(progress) ? 1.0f : 0.85f;
+    unsigned char alpha = (unsigned char)clampf(235.0f * alpha_scale, 0.0f, 255.0f);
+    Color arm_color = scale_color(base, 0.8f, alpha);
+
+    float radius = PLAYER_RADIUS * (0.22f + 0.12f * reach_frac);
+    DrawCylinderEx(start, end, radius, radius * 0.92f, 8, arm_color);
+    DrawSphere(end, radius * 1.15f, Fade(arm_color, 0.9f));
 }
 
 static void perform_melee(int idx) {
@@ -9781,12 +9753,13 @@ static void update_melee_swings(void) {
         if (progress < 0.0f || !melee_is_active_window(progress) || p->meleeSwingHitApplied) {
             continue;
         }
-        float reach = MELEE_RANGE * melee_reach_fraction(progress);
+        float reach_frac = melee_reach_fraction(progress);
+        float reach = MELEE_RANGE * reach_frac;
         if (reach <= 0.05f) {
             continue;
         }
-        Vector3 dir = player_forward(p);
-        Vector3 start = p->pos;
+        Vector3 dir = melee_swing_direction(p, reach_frac);
+        Vector3 start = melee_swing_origin(p, reach_frac);
         Vector3 end = v_add(start, v_mul(dir, reach));
         if (melee_hit_players(i, start, end, dir)) {
             p->meleeSwingHitApplied = true;
@@ -11169,6 +11142,7 @@ static void draw_players(void) {
         Color base_dark = scale_color(base, 0.35f, 255);
         DrawCube(p->pos, PLAYER_SIZE,PLAYER_SIZE, PLAYER_SIZE, base_dark);
         DrawCubeWires(p->pos, PLAYER_SIZE,PLAYER_SIZE,PLAYER_SIZE, base_dark);
+        draw_melee_arm_world(i);
         if (p->matter_flash_timer > 0.0f && !p->isExposed && p->matter > 0.0f) {
             float flash = clampf(p->matter_flash_timer / 0.2f, 0.0f, 1.0f);
             float pulse = 0.5f + 0.5f * sinf((float)GetTime() * 8.0f);
@@ -12201,7 +12175,6 @@ int main(void) {
                     DrawText(banner_text, banner_x, banner_y, banner_size, banner_color);
                 }
                 draw_hud_bars(i, &players[i], view_w, view_h);
-                draw_melee_arm_overlay(i, view_w, view_h);
                 if (players[i].matter_flash_timer > 0.0f &&
                     !players[i].isExposed && players[i].matter > 0.0f) {
                     float alpha = clampf(players[i].matter_flash_timer / 0.2f, 0.0f, 1.0f);
@@ -12359,7 +12332,6 @@ int main(void) {
         UnloadMaterial(greedyMaterial);
         greedyMaterialInit = false;
     }
-    shutdown_arm_overlay_shader();
     shutdown_world_visuals();
     shutdown_sfx();
     CloseWindow();
