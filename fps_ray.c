@@ -875,6 +875,7 @@ static bool debugLogSmushDeaths = false;
 static bool debugLogRestoreClusters = false;
 static int debugBlowupLogBudget = 0;
 static bool debugLogClusterBreaksOnly = false;
+static bool debugSfxKeysEnabled = false;
 static int debugGlueBuildLogBudget = 0;
 static int debugGlueSolveLogBudget = 0;
 static int debugGlueBreakLogBudget = 0;
@@ -1361,6 +1362,23 @@ static void play_sfx(SfxId id)
     }
     PlaySound(sfxSounds[id]);
     sfxLastPlay[id] = now;
+}
+
+static void handle_sfx_debug_keys(void) {
+    if (!debugSfxKeysEnabled) {
+        return;
+    }
+    if (IsKeyPressed(KEY_ONE)) play_sfx(SFX_FIRE);
+    if (IsKeyPressed(KEY_TWO)) play_sfx(SFX_IMPACT);
+    if (IsKeyPressed(KEY_THREE)) play_sfx(SFX_MELEE);
+    if (IsKeyPressed(KEY_FOUR)) play_sfx(SFX_GLUE_BREAK);
+    if (IsKeyPressed(KEY_FIVE)) play_sfx(SFX_KILL);
+    if (IsKeyPressed(KEY_SIX)) play_sfx(SFX_DEATH);
+    if (IsKeyPressed(KEY_SEVEN)) play_sfx(SFX_SHIELD);
+    if (IsKeyPressed(KEY_EIGHT)) play_sfx(SFX_SMUSH);
+    if (IsKeyPressed(KEY_NINE)) play_sfx(SFX_EXPLOSION);
+    if (IsKeyPressed(KEY_ZERO)) play_sfx(SFX_TETHER);
+    if (IsKeyPressed(KEY_MINUS) || IsKeyPressed(KEY_KP_SUBTRACT)) play_sfx(SFX_WIN);
 }
 
 static void translate_voxel_particles(Voxel *voxel, Vector3 delta)
@@ -12020,6 +12038,10 @@ int main(void) {
                 debugDrawParticles = true;
             }
         }
+        if (IsKeyPressed(KEY_F6)) {
+            debugSfxKeysEnabled = !debugSfxKeysEnabled;
+        }
+        handle_sfx_debug_keys();
 
         // advance melee swing state and resolve hits during the active window
         update_melee_swings();
