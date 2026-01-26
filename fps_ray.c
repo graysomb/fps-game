@@ -82,7 +82,7 @@ typedef enum {
 static GameState gameState = GAME_STATE_MENU;
 
 // Win condition globals
-static int winningScore = 10;
+static int winningScore = 7;
 static int winnerId = -1;
 static bool droneIntroEnabled = true;
 static float droneTimer = 0.0f;
@@ -271,7 +271,7 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define VOXEL_DAMAGE 20
 #define MATTER_MAX_DEFAULT 100.0f
 #define MATTER_MELEE_HARVEST 10.0f
-#define MATTER_SHOT_COST 5.0f
+#define MATTER_SHOT_COST 2.0f
 #define MATTER_BUILD_COST 10.0f
 #define MELEE_RANGE 2.0f
 #define MELEE_KNOCKBACK_SPEED 14.0f
@@ -285,7 +285,7 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define BUILD_COOLDOWN_SECONDS 0.5f
 #define TETHER_RANGE 8.0f
 #define TETHER_SPRING 200.0f
-#define TETHER_DAMPING 0.1f
+#define TETHER_DAMPING 0.2f
 #define TETHER_THROW_IMPULSE 50.0f
 #define SMUSH_EXPOSED_SPEED 8.0f
 #define SMUSH_POINT_MULT 4
@@ -300,8 +300,8 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define AIM_ASSIST_MAX_DISTANCE 18.0f
 #define AIM_ASSIST_MAX_ANGLE_DEG 12.0f
 #define AIM_ASSIST_TURN_RATE 10.0f
-#define AIM_ASSIST_RATE_MIN_MULT 0.6f
-#define AIM_ASSIST_RATE_MAX_MULT 1.4f
+#define AIM_ASSIST_RATE_MIN_MULT 0.1f
+#define AIM_ASSIST_RATE_MAX_MULT 10.0f
 #define AIM_ASSIST_MIN_INPUT 0.05f
 
 // Voxel physics constants
@@ -902,6 +902,7 @@ static int creativeBrushSpan = 3;
 static int creativePickupType = 0;
 static int creativeMapSlot = 0;
 static bool useCustomMap = false;
+static int creativeBlockColorIndex = 0;
 static int debugGlueBuildLogBudget = 0;
 static int debugGlueSolveLogBudget = 0;
 static int debugGlueBreakLogBudget = 0;
@@ -1710,6 +1711,12 @@ static float randomInRange(float min, float max) {
     return min + ((float)rand()/ (float)RAND_MAX) * (max - min);
 }
 static float clampf(float v, float lo, float hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static int clampi(int v, int lo, int hi) {
     if (v < lo) return lo;
     if (v > hi) return hi;
     return v;
@@ -6010,13 +6017,31 @@ static const char *pickup_type_label(PickupType type) {
     }
 }
 
+static Color creative_block_palette(int index) {
+    static const Color colors[] = {
+        { 255, 80, 80, 255 },
+        { 80, 255, 140, 255 },
+        { 90, 170, 255, 255 },
+        { 255, 210, 90, 255 },
+        { 200, 120, 255, 255 },
+        { 255, 140, 60, 255 }
+    };
+    int count = (int)(sizeof(colors) / sizeof(colors[0]));
+    if (count <= 0) {
+        return (Color){ 200, 200, 200, 255 };
+    }
+    int idx = index % count;
+    if (idx < 0) idx += count;
+    return colors[idx];
+}
+
 static void clear_pickups(void) {
     for (int i = 0; i < MAX_PICKUPS; ++i) {
-        pickups[i].pos = (Vector3){ 0.0f, 0.0f, 0.0f };
+        pickups[i].pos = (Vector3){ 0.0f, -10.0f, 0.0f };
         pickups[i].active = false;
         pickups[i].respawnTimer = 0.0f;
         pickups[i].bobTimer = 0.0f;
-        pickups[i].type = PICKUP_DYNAMIC_SHOT;
+        // pickups[i].type = PICKUP_DYNAMIC_SHOT;
     }
 }
 
@@ -6379,6 +6404,7 @@ static void ResetCreative(void) {
     creativeModeActive = true;
     creativeBrushSpan = 3;
     creativePickupType = PICKUP_DYNAMIC_SHOT;
+    creativeBlockColorIndex = 0;
     clear_world_voxels();
     clear_pickups();
     reset_players_for_creative();
@@ -6493,7 +6519,7 @@ static void creative_place_voxels(int player_idx) {
         }
     }
 
-    int brushExtent = clampf((float)creativeBrushSpan, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
+    int brushExtent = clampi(creativeBrushSpan, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
     int halfBrush = brushExtent / 2;
     int anchorBaseX = anchorX - halfBrush;
     int anchorBaseY = anchorY - halfBrush;
@@ -6525,7 +6551,7 @@ static void creative_place_voxels(int player_idx) {
     if (maxy > max_y) maxy = max_y;
 
     int placed = 0;
-    Color c = player_palette_color(player_idx);
+    Color c = creative_block_palette(creativeBlockColorIndex);
     for (int x = minx; x <= maxx; ++x) {
         for (int y = miny; y <= maxy; ++y) {
             for (int z = minz; z <= maxz; ++z) {
@@ -6557,7 +6583,7 @@ static void creative_remove_voxels(int player_idx) {
         return;
     }
     Voxel *hit = &voxels[hit_id];
-    int brushExtent = clampf((float)creativeBrushSpan, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
+    int brushExtent = clampi(creativeBrushSpan, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
     int halfBrush = brushExtent / 2;
     int minx = hit->gx - halfBrush;
     int maxx = minx + brushExtent - 1;
@@ -6678,14 +6704,20 @@ static void update_creative_mode(float dt) {
     }
 
     if (IsKeyPressed(KEY_LEFT_BRACKET)) {
-        creativeBrushSpan = clampf((float)(creativeBrushSpan - 1), CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
+        creativeBrushSpan = clampi(creativeBrushSpan - 1, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
     }
     if (IsKeyPressed(KEY_RIGHT_BRACKET)) {
-        creativeBrushSpan = clampf((float)(creativeBrushSpan + 1), CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
+        creativeBrushSpan = clampi(creativeBrushSpan + 1, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
     }
 
     if (IsKeyPressed(KEY_TAB)) {
         creativePickupType = (creativePickupType + 1) % 4;
+    }
+    if (IsKeyPressed(KEY_V)) {
+        creativeBlockColorIndex++;
+    }
+    if (IsKeyPressed(KEY_B)) {
+        creativeBlockColorIndex--;
     }
 
     if (IsKeyPressed(KEY_LEFT_CONTROL)) {
@@ -12538,9 +12570,13 @@ static void render_gameplay_view(RenderTexture2D *screens,
             get_viewport(i, activePlayers, &view_x, &view_y, &view_w, &view_h);
             DrawRectangle(0, 0, view_w, HUD_BAR_HEIGHT, Fade(BLACK, 0.5f));
             if (creative_mode) {
-                const char *label = TextFormat("CREATIVE | Brush %d | Pickup %s", creativeBrushSpan,
-                                               pickup_type_label((PickupType)creativePickupType));
+                Color c = creative_block_palette(creativeBlockColorIndex);
+                const char *label = TextFormat("CREATIVE | Brush %d | Pickup %s | Color %d",
+                                               creativeBrushSpan,
+                                               pickup_type_label((PickupType)creativePickupType),
+                                               (creativeBlockColorIndex % 6 + 6) % 6 + 1);
                 DrawText(label, HUD_PADDING_X, HUD_PADDING_Y, HUD_FONT_SIZE, WHITE);
+                DrawRectangle(HUD_PADDING_X + 8, HUD_PADDING_Y + HUD_FONT_SIZE + 4, 36, 14, c);
             } else {
                 DrawText(TextFormat("P%d | Shmush: %d | Kills: %d Deaths: %d",
                                     i + 1, players[i].debrisKills, players[i].kills, players[i].deaths),

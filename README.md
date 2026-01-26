@@ -108,6 +108,31 @@ The engine implements three primary types of constraints:
 ### Global
 *   **Reset Game:** R (Main Menu / Game Over)
 *   **Settings:** +/- (Active Players), 1-4 (Input Type), [ / ] (Winning Score), D (Drone Intro)
+*   **Creative Mode:** C (from Main Menu)
+
+## Creative Mode
+
+Creative mode lets you fly around an empty world and build voxel maps that can be saved and loaded for multiplayer.
+
+### Creative Controls
+*   **Move:** WASD
+*   **Look:** F/H (yaw), T/G (pitch)
+*   **Up/Down:** E / Q
+*   **Faster Fly:** Left Shift
+*   **Brush Size:** [ / ] (1–20)
+*   **Place Voxels:** Left Ctrl (grid-aligned)
+*   **Remove Voxels:** Left Alt
+*   **Cycle Block Color:** V (next) / B (prev)
+*   **Cycle Pickup Type:** Tab
+*   **Place Pickup:** P
+*   **Remove Nearest Pickup:** Backspace
+*   **Save Map Slot:** Ctrl + 1/2/3
+*   **Load Map Slot:** Alt + 1/2/3
+*   **Exit Creative:** M or Esc
+
+### Custom Map in Multiplayer
+*   **Toggle Custom Map:** U (Main Menu)
+*   **Cycle Slot:** L (Main Menu)
 
 ## Constructor-Brawler Gameplay Loop
 
