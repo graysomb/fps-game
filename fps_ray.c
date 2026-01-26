@@ -344,6 +344,7 @@ typedef struct {
     bool meleeSwingActive;
     bool meleeSwingHitApplied;
     float meleeSwingStartTime;
+    bool dynamicShotActive;
 } Player;
 static Player players[MAX_PLAYERS];
 static int tetherTag[MAX_VOXELS];
@@ -5961,7 +5962,7 @@ static Vector3 player_hand_position(const Player *p);
 
 // Reset game: players and voxels
 // Pickups
-#define MAX_PICKUPS 4
+#define MAX_PICKUPS 1
 #define PICKUP_RESPAWN_TIME 30.0f
 #define PICKUP_VOID_RESPAWN_TIME 300.0f
 #define PICKUP_SIZE 0.4f
@@ -5969,7 +5970,8 @@ static Vector3 player_hand_position(const Player *p);
 typedef enum {
     PICKUP_AMMO,
     PICKUP_HEALTH,
-    PICKUP_VOID
+    PICKUP_VOID,
+    PICKUP_DYNAMIC_SHOT
 } PickupType;
 
 typedef struct {
@@ -5983,18 +5985,20 @@ typedef struct {
 static Pickup pickups[MAX_PICKUPS];
 
 static void init_pickups(void) {
-    // 0: Ammo (Center), 1: Health (Edge -X), 2: Health (Edge +X), 3: Void (High Center)
+    int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
+    int center = M / 2;
+    int map_radius_cells = center - 2;
+    int platform_base_height = (int)roundf(0.10f * (float)map_radius_cells);
+    if (platform_base_height < 5) platform_base_height = 5;
+    float platform_y = (platform_base_height + 0.5f) * VOXEL_SIZE;
+    float jump_height = (JUMP_SPEED * JUMP_SPEED) / (2.0f * GRAVITY);
+    float pickup_y = platform_y + jump_height + (2.0f * VOXEL_SIZE) + (platform_base_height * VOXEL_SIZE);
+
     Vector3 locs[MAX_PICKUPS] = {
-        { 0.0f, 1.0f, 0.0f },
-        { -18.0f, 1.0f, 2.0f },
-        { 18.0f, 1.0f, 2.0f },
-        { 0.0f, 15.0f, 0.0f }
+        { 0.0f, pickup_y, 0.0f }
     };
     PickupType types[MAX_PICKUPS] = {
-        PICKUP_AMMO,
-        PICKUP_HEALTH,
-        PICKUP_HEALTH,
-        PICKUP_VOID
+        PICKUP_DYNAMIC_SHOT
     };
 
     for (int i = 0; i < MAX_PICKUPS; i++) {
@@ -6043,6 +6047,9 @@ static void update_pickups(float dt) {
                     pl->invuln_timer = fmaxf(pl->invuln_timer, VOID_INVULN_DURATION);
                     activate_all_static_voxels(j);
                     play_sfx(SFX_WIN); // Special sound
+                } else if (p->type == PICKUP_DYNAMIC_SHOT) {
+                    pl->dynamicShotActive = true;
+                    play_sfx(SFX_SHIELD);
                 }
                 
                 p->active = false;
@@ -6057,6 +6064,8 @@ static void draw_pickups(Camera cam) {
     Color healthRed = (Color){ 230, 40, 40, 200 };
     Color voidBlack = (Color){ 10, 10, 10, 255 };
     Color voidRing = (Color){ 255, 165, 0, 255 }; // Orange
+    Color dynamicGold = (Color){ 255, 210, 90, 230 };
+    Color dynamicBlue = (Color){ 80, 160, 255, 200 };
     
     for (int i = 0; i < MAX_PICKUPS; i++) {
         if (!pickups[i].active) continue;
@@ -6134,6 +6143,31 @@ static void draw_pickups(Camera cam) {
                 }
                 rlEnd();
             rlPopMatrix();
+        } else if (p->type == PICKUP_DYNAMIC_SHOT) {
+            // Dynamic shot: Gold core + blue orbit ring
+            DrawSphere((Vector3){0,0,0}, PICKUP_SIZE * 0.9f, dynamicGold);
+            DrawSphereWires((Vector3){0,0,0}, PICKUP_SIZE * 1.0f, 10, 10, Fade(WHITE, 0.4f));
+
+            rlPushMatrix();
+                Matrix mat = MatrixInvert(GetCameraMatrix(cam));
+                mat.m12 = 0; mat.m13 = 0; mat.m14 = 0;
+                rlMultMatrixf(MatrixToFloat(mat));
+
+                rlBegin(RL_QUADS);
+                rlColor4ub(dynamicBlue.r, dynamicBlue.g, dynamicBlue.b, dynamicBlue.a);
+                float rInner = PICKUP_SIZE * 1.2f;
+                float rOuter = PICKUP_SIZE * 1.45f;
+                int segs = 28;
+                for (int k = 0; k < segs; k++) {
+                    float a1 = ((float)k/(float)segs)*2.0f*PI;
+                    float a2 = ((float)(k+1)/(float)segs)*2.0f*PI;
+                    rlVertex3f(cosf(a1)*rInner, sinf(a1)*rInner, 0);
+                    rlVertex3f(cosf(a1)*rOuter, sinf(a1)*rOuter, 0);
+                    rlVertex3f(cosf(a2)*rOuter, sinf(a2)*rOuter, 0);
+                    rlVertex3f(cosf(a2)*rInner, sinf(a2)*rInner, 0);
+                }
+                rlEnd();
+            rlPopMatrix();
         }
         
         rlPopMatrix();
@@ -6144,7 +6178,7 @@ static void ResetGame(void) {
     winnerId = -1;
     pbdTimeAccumulator = 0.0f;
     init_confetti();
-    // init_pickups();
+    init_pickups();
     // init players
     for (int i = 0; i < MAX_PLAYERS; i++) {
         players[i].pos = pick_player_spawn(i);
@@ -6179,6 +6213,7 @@ static void ResetGame(void) {
         players[i].meleeSwingActive = false;
         players[i].meleeSwingHitApplied = false;
         players[i].meleeSwingStartTime = -1000.0f;
+        players[i].dynamicShotActive = false;
     }
     // clear voxels
     voxel_count = 0;
@@ -6339,6 +6374,7 @@ static void kill_player(int player_index, int attacker_index,
     player->respawn_timer = PLAYER_RESPAWN_TIME;
     player->tetherHolding = false;
     player->tetherVoxel = -1;
+    player->dynamicShotActive = false;
 }
 
 static void apply_matter_damage(int player_index, int attacker_index, float damage)
@@ -9296,7 +9332,8 @@ static void FireVoxel(int idx) {
     float pitchRad = DEG2RAD * p->pitch;
     Vector3 dir = { sinf(-yawRad)*cosf(pitchRad), sinf(pitchRad), -cosf(yawRad)*cosf(pitchRad) };
     Vector3 start = v_add(p->pos, v_mul(dir, 0.8f));
-    Color col = (Color){ 80, 170, 255, 255 };
+    bool dynamic_shot = p->dynamicShotActive;
+    Color col = dynamic_shot ? (Color){ 255, 210, 90, 255 } : (Color){ 80, 170, 255, 255 };
     int vix = addVoxel(start.x, start.y, start.z, false, true, col, 0);
     if (vix >= 0) {
         Voxel *shot = &voxels[vix];
@@ -9304,10 +9341,11 @@ static void FireVoxel(int idx) {
         shot->vel = vel;
         shot->owner = idx;
         shot->activator = idx;
-        shot->isBullet = true;
-        shot->glueEligible = false;
+        shot->isBullet = !dynamic_shot;
+        shot->glueEligible = dynamic_shot;
         shot->simulate = true;
-        shot->activationBelief = ACTIVATION_TYPE0_BULLET_BELIEF;
+        shot->activationBelief = dynamic_shot ? 1.0f : ACTIVATION_TYPE0_BULLET_BELIEF;
+        shot->wasTethered = dynamic_shot;
         for (int i = 0; i < 8; ++i) {
             shot->particles[i]->vel = vel;
             shot->particles[i]->inv_mass = 1.0f;
@@ -11449,6 +11487,13 @@ static void draw_players(void) {
             DrawCube(p->pos, PLAYER_SIZE + 0.25f, PLAYER_SIZE + 0.25f, PLAYER_SIZE + 0.25f, exposed_color);
             DrawCubeWires(p->pos, PLAYER_SIZE + 0.25f, PLAYER_SIZE + 0.25f, PLAYER_SIZE + 0.25f, Fade(exposed_color, 0.8f));
         }
+        if (p->dynamicShotActive) {
+            float pulse = 0.5f + 0.5f * sinf((float)GetTime() * 7.0f);
+            unsigned char alpha = (unsigned char)clampf(140.0f + 80.0f * pulse, 120.0f, 220.0f);
+            Color glow = (Color){ 255, 215, 90, alpha };
+            DrawCube(p->pos, PLAYER_SIZE + 0.30f, PLAYER_SIZE + 0.30f, PLAYER_SIZE + 0.30f, glow);
+            DrawCubeWires(p->pos, PLAYER_SIZE + 0.30f, PLAYER_SIZE + 0.30f, PLAYER_SIZE + 0.30f, Fade(glow, 0.8f));
+        }
         if (p->invuln_timer > 0.0f) {
             float pulse = 0.6f + 0.4f * sinf((float)GetTime() * 6.0f);
             unsigned char alpha = (unsigned char)clampf(120.0f + 80.0f * pulse, 90.0f, 220.0f);
@@ -12161,6 +12206,7 @@ int main(void) {
                     players[i].meleeSwingActive = false;
                     players[i].meleeSwingHitApplied = false;
                     players[i].meleeSwingStartTime = -1000.0f;
+                    players[i].dynamicShotActive = false;
                 }
             } else {
                 if (players[i].tetherHolding &&
@@ -12270,6 +12316,9 @@ int main(void) {
                 UpdateBot(i, dt);
             }
             Player *p = &players[i];
+            if (p->dynamicShotActive && p->matter <= 0.0f) {
+                p->dynamicShotActive = false;
+            }
             
             bool collided = false;
 
@@ -12338,7 +12387,7 @@ int main(void) {
         //     physics_step(dt/subStep);
         // }
         update_projectiles(dt);
-        // update_pickups(dt); // Update pickups
+        update_pickups(dt); // Update pickups
         prepare_tether_forces();
         pbdTimeAccumulator += dt;
         float pbd_fixed_dt = PBD_MAX_STEP_DT;
@@ -12437,7 +12486,7 @@ int main(void) {
                 BeginMode3D(cams[i]);
                     draw_world_surfaces();
                     DrawVoxels(cams[i]);
-                    // draw_pickups(cams[i]);
+                    draw_pickups(cams[i]);
                     draw_players();
                     if (players[i].tetherHolding && players[i].tetherVoxel >= 0) {
                         Vector3 hand = player_hand_position(&players[i]);
