@@ -487,6 +487,7 @@ static bool staticBeliefsInitialized = false;
 static bool staticBeliefsForceFullRefresh = false;
 static int debugSmushLogBudget = 0;
 static Voxel recycleQueue[MAX_VOXELS];
+static Voxel recycleQueueScratch[MAX_VOXELS];
 static int recycleQueueHead = 0;
 static int recycleQueueTail = 0;
 static int recycleQueueCount = 0;
@@ -736,6 +737,9 @@ static void glue_dynamic_voxel_to_static_neighbors(void);
 static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx);
 static bool recycle_queue_push(const Voxel *voxel);
 static bool recycle_queue_pop(Voxel *out);
+static void recycle_queue_remove_region(int minx, int maxx,
+                                        int miny, int maxy,
+                                        int minz, int maxz);
 static bool voxel_is_at_rest_location(const Voxel *voxel);
 static bool voxel_outside_world_bounds(const Voxel *voxel);
 static bool spawn_static_at_rest(const Voxel *snapshot);
@@ -4199,6 +4203,38 @@ static bool recycle_queue_pop(Voxel *out) {
     return true;
 }
 
+static void recycle_queue_remove_region(int minx, int maxx,
+                                        int miny, int maxy,
+                                        int minz, int maxz) {
+    if (recycleQueueCount <= 0) {
+        return;
+    }
+    int keep = 0;
+    int count = recycleQueueCount;
+    for (int i = 0; i < count; ++i) {
+        int idx = (recycleQueueHead + i) % MAX_VOXELS;
+        Voxel *snap = &recycleQueue[idx];
+        int vminx = snap->rest_min_gx;
+        int vmaxx = snap->rest_max_gx;
+        int vminy = snap->rest_min_gy;
+        int vmaxy = snap->rest_max_gy;
+        int vminz = snap->rest_min_gz;
+        int vmaxz = snap->rest_max_gz;
+        bool overlaps = ranges_overlap(minx, maxx, vminx, vmaxx) &&
+                        ranges_overlap(miny, maxy, vminy, vmaxy) &&
+                        ranges_overlap(minz, maxz, vminz, vmaxz);
+        if (!overlaps) {
+            recycleQueueScratch[keep++] = *snap;
+        }
+    }
+    for (int i = 0; i < keep; ++i) {
+        recycleQueue[i] = recycleQueueScratch[i];
+    }
+    recycleQueueHead = 0;
+    recycleQueueTail = keep % MAX_VOXELS;
+    recycleQueueCount = keep;
+}
+
 static bool voxel_is_at_rest_location(const Voxel *voxel) {
     if (!voxel) {
         return true;
@@ -6601,7 +6637,8 @@ static void creative_remove_voxels(int player_idx) {
     int minz = hit->gz - halfBrush;
     int maxz = minz + brushExtent - 1;
     bool removed_dynamic = remove_dynamic_voxels_in_region(minx, maxx, miny, maxy, minz, maxz);
-    remove_static_voxels_in_region_recycle(minx, maxx, miny, maxy, minz, maxz);
+    remove_static_voxels_in_region(minx, maxx, miny, maxy, minz, maxz);
+    recycle_queue_remove_region(minx, maxx, miny, maxy, minz, maxz);
     if (removed_dynamic) {
         rebuild_voxel_hash();
     }
