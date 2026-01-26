@@ -76,7 +76,8 @@ typedef enum {
     GAME_STATE_PAUSED,
     GAME_STATE_SETTINGS,
     GAME_STATE_GAMEOVER,
-    GAME_STATE_DRONE_INTRO
+    GAME_STATE_DRONE_INTRO,
+    GAME_STATE_CREATIVE
 } GameState;
 static GameState gameState = GAME_STATE_MENU;
 
@@ -169,6 +170,11 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define RADAR_PIXEL_RADIUS 64
 #define RADAR_WORLD_RADIUS 18.0f
 #define RADAR_MOVE_SPEED_THRESHOLD 0.35f
+#define CREATIVE_BRUSH_MIN 1
+#define CREATIVE_BRUSH_MAX 20
+#define CREATIVE_FLY_SPEED 10.0f
+#define CREATIVE_FLY_SPEED_FAST 22.0f
+#define CREATIVE_RAY_RANGE 40.0f
 #define BULLET_COOLDOWN_SECONDS 0.25f
 #define ACCELERATION   400.0f    // horizontal acceleration
 #define FREEZE_GROUND_WEIGHT       0.9f
@@ -891,6 +897,11 @@ static bool aimAssistEnabled = true;
 static bool aimAssistDebugDraw = false;
 static Vector3 aimAssistDebugTarget[MAX_PLAYERS];
 static bool aimAssistDebugHasTarget[MAX_PLAYERS];
+static bool creativeModeActive = false;
+static int creativeBrushSpan = 3;
+static int creativePickupType = 0;
+static int creativeMapSlot = 0;
+static bool useCustomMap = false;
 static int debugGlueBuildLogBudget = 0;
 static int debugGlueSolveLogBudget = 0;
 static int debugGlueBreakLogBudget = 0;
@@ -5959,10 +5970,15 @@ static void draw_melee_arm_world(int player_index);
 static void update_points_animation(float dt);
 static Color player_palette_color(int index);
 static Vector3 player_hand_position(const Player *p);
+static Vector3 player_forward(const Player *p);
+static bool find_world_build_plane_hit(const Ray *ray,
+                                       int min_g, int max_g, int max_y,
+                                       int *out_anchorX, int *out_anchorY, int *out_anchorZ,
+                                       int *out_nx, int *out_ny, int *out_nz);
 
 // Reset game: players and voxels
 // Pickups
-#define MAX_PICKUPS 1
+#define MAX_PICKUPS 32
 #define PICKUP_RESPAWN_TIME 30.0f
 #define PICKUP_VOID_RESPAWN_TIME 300.0f
 #define PICKUP_SIZE 0.4f
@@ -5984,6 +6000,160 @@ typedef struct {
 
 static Pickup pickups[MAX_PICKUPS];
 
+static const char *pickup_type_label(PickupType type) {
+    switch (type) {
+        case PICKUP_AMMO: return "Ammo";
+        case PICKUP_HEALTH: return "Health";
+        case PICKUP_VOID: return "Void";
+        case PICKUP_DYNAMIC_SHOT: return "Dynamic";
+        default: return "Unknown";
+    }
+}
+
+static void clear_pickups(void) {
+    for (int i = 0; i < MAX_PICKUPS; ++i) {
+        pickups[i].pos = (Vector3){ 0.0f, 0.0f, 0.0f };
+        pickups[i].active = false;
+        pickups[i].respawnTimer = 0.0f;
+        pickups[i].bobTimer = 0.0f;
+        pickups[i].type = PICKUP_DYNAMIC_SHOT;
+    }
+}
+
+static void clear_world_voxels(void) {
+    voxel_count = 0;
+    reset_particle_pool();
+    staticBeliefsInitialized = false;
+    staticBeliefsForceFullRefresh = false;
+    staticBeliefDirtyCount = 0;
+    dynamicGlueClustersInitialized = false;
+    memset(debugTagBreakLogged, 0, sizeof(debugTagBreakLogged));
+    memset(staticBeliefDirty, 0, sizeof(staticBeliefDirty));
+    memset(staticBeliefQueued, 0, sizeof(staticBeliefQueued));
+    memset(table, 0, sizeof(table));
+    memset(static_table, 0, sizeof(static_table));
+    memset(dynamic_table, 0, sizeof(dynamic_table));
+    meshDirty = true;
+}
+
+static const char *map_slot_path(int slot) {
+    static char path[64];
+    int s = clampf((float)slot, 0.0f, 2.0f);
+    snprintf(path, sizeof(path), "creative_map_slot_%d.map", s + 1);
+    return path;
+}
+
+static bool save_map_slot(int slot) {
+    const char *path = map_slot_path(slot);
+    FILE *fp = fopen(path, "w");
+    if (!fp) {
+        return false;
+    }
+    fprintf(fp, "FPSMAP1\n");
+    int static_count = 0;
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (!v->simulate && !v->isBullet) {
+            static_count++;
+        }
+    }
+    fprintf(fp, "VOXELS %d\n", static_count);
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (!v->simulate && !v->isBullet) {
+            fprintf(fp, "%d %d %d %d %d %d %d %d\n",
+                    v->gx, v->gy, v->gz,
+                    v->color.r, v->color.g, v->color.b, v->color.a,
+                    v->type);
+        }
+    }
+    int pickup_count = 0;
+    for (int i = 0; i < MAX_PICKUPS; ++i) {
+        if (pickups[i].active || pickups[i].respawnTimer > 0.0f) {
+            pickup_count++;
+        }
+    }
+    fprintf(fp, "PICKUPS %d\n", pickup_count);
+    for (int i = 0; i < MAX_PICKUPS; ++i) {
+        if (pickups[i].active || pickups[i].respawnTimer > 0.0f) {
+            fprintf(fp, "%.3f %.3f %.3f %d %d %.3f\n",
+                    pickups[i].pos.x, pickups[i].pos.y, pickups[i].pos.z,
+                    (int)pickups[i].type, pickups[i].active ? 1 : 0,
+                    pickups[i].respawnTimer);
+        }
+    }
+    fclose(fp);
+    return true;
+}
+
+static bool load_map_slot(int slot) {
+    const char *path = map_slot_path(slot);
+    FILE *fp = fopen(path, "r");
+    if (!fp) {
+        return false;
+    }
+    char header[32];
+    if (!fgets(header, sizeof(header), fp)) {
+        fclose(fp);
+        return false;
+    }
+    if (strncmp(header, "FPSMAP1", 7) != 0) {
+        fclose(fp);
+        return false;
+    }
+
+    clear_world_voxels();
+    clear_pickups();
+
+    int voxel_count_in = 0;
+    if (fscanf(fp, "VOXELS %d\n", &voxel_count_in) != 1) {
+        fclose(fp);
+        return false;
+    }
+    for (int i = 0; i < voxel_count_in; ++i) {
+        int gx, gy, gz;
+        int r, g, b, a;
+        int type = 0;
+        if (fscanf(fp, "%d %d %d %d %d %d %d %d\n",
+                   &gx, &gy, &gz, &r, &g, &b, &a, &type) != 8) {
+            break;
+        }
+        add_static_voxel_at_grid(gx, gy, gz, (Color){ (unsigned char)r, (unsigned char)g, (unsigned char)b, (unsigned char)a }, type);
+    }
+
+    int pickup_count = 0;
+    if (fscanf(fp, "PICKUPS %d\n", &pickup_count) == 1) {
+        for (int i = 0; i < pickup_count; ++i) {
+            float px, py, pz;
+            int type, active;
+            float respawn;
+            if (fscanf(fp, "%f %f %f %d %d %f\n", &px, &py, &pz, &type, &active, &respawn) != 6) {
+                break;
+            }
+            int slot_idx = -1;
+            for (int k = 0; k < MAX_PICKUPS; ++k) {
+                if (!pickups[k].active && pickups[k].respawnTimer <= 0.0f) {
+                    slot_idx = k;
+                    break;
+                }
+            }
+            if (slot_idx >= 0) {
+                pickups[slot_idx].pos = (Vector3){ px, py, pz };
+                pickups[slot_idx].type = (PickupType)type;
+                pickups[slot_idx].active = active != 0;
+                pickups[slot_idx].respawnTimer = respawn;
+                pickups[slot_idx].bobTimer = (float)GetRandomValue(0, 100) / 10.0f;
+            }
+        }
+    }
+    fclose(fp);
+
+    rebuild_all_voxel_surfaces();
+    init_static_hash();
+    meshDirty = true;
+    return true;
+}
+
 static void init_pickups(void) {
     int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
     int center = M / 2;
@@ -5994,20 +6164,12 @@ static void init_pickups(void) {
     float jump_height = (JUMP_SPEED * JUMP_SPEED) / (2.0f * GRAVITY);
     float pickup_y = platform_y + jump_height + (2.0f * VOXEL_SIZE) + (platform_base_height * VOXEL_SIZE);
 
-    Vector3 locs[MAX_PICKUPS] = {
-        { 0.0f, pickup_y, 0.0f }
-    };
-    PickupType types[MAX_PICKUPS] = {
-        PICKUP_DYNAMIC_SHOT
-    };
-
-    for (int i = 0; i < MAX_PICKUPS; i++) {
-        pickups[i].pos = locs[i];
-        pickups[i].active = true;
-        pickups[i].respawnTimer = 0.0f;
-        pickups[i].bobTimer = (float)GetRandomValue(0, 100) / 10.0f;
-        pickups[i].type = types[i];
-    }
+    clear_pickups();
+    pickups[0].pos = (Vector3){ 0.0f, pickup_y, 0.0f };
+    pickups[0].active = true;
+    pickups[0].respawnTimer = 0.0f;
+    pickups[0].bobTimer = (float)GetRandomValue(0, 100) / 10.0f;
+    pickups[0].type = PICKUP_DYNAMIC_SHOT;
 }
 
 static void update_pickups(float dt) {
@@ -6174,7 +6336,59 @@ static void draw_pickups(Camera cam) {
     }
 }
 
+static void reset_players_for_creative(void) {
+    activePlayers = 1;
+    for (int i = 0; i < MAX_PLAYERS; ++i) {
+        players[i].pos = (Vector3){ 0.0f, BASE_EYE_HEIGHT + 3.0f, 0.0f };
+        players[i].death_pos = players[i].pos;
+        players[i].yaw = 0.0f;
+        players[i].pitch = 0.0f;
+        players[i].death_yaw = players[i].yaw;
+        players[i].yaw_vel = 0.0f;
+        players[i].pitch_vel = 0.0f;
+        players[i].vel = (Vector3){0,0,0};
+        players[i].onGround = false;
+        players[i].kills = 0;
+        players[i].debrisKills = 0;
+        players[i].deaths = 0;
+        UpdateKdRatio(i);
+        players[i].matter = players[i].matterMax;
+        players[i].isExposed = false;
+        players[i].last_damage_time = 0.0f;
+        players[i].last_shot_time = -1000.0f;
+        players[i].last_melee_time = -1000.0f;
+        players[i].last_build_time = -1000.0f;
+        players[i].invuln_timer = 0.0f;
+        players[i].respawn_timer = 0.0f;
+        players[i].last_points = 0;
+        players[i].points_update_timer = 0.0f;
+        players[i].points_jiggle_phase = 0.0f;
+        players[i].matter_flash_timer = 0.0f;
+        players[i].exposed_flash_timer = 0.0f;
+        players[i].tetherHolding = false;
+        players[i].tetherVoxel = -1;
+        players[i].meleeKnockbackActive = false;
+        players[i].meleeSwingActive = false;
+        players[i].meleeSwingHitApplied = false;
+        players[i].meleeSwingStartTime = -1000.0f;
+        players[i].dynamicShotActive = false;
+    }
+}
+
+static void ResetCreative(void) {
+    creativeModeActive = true;
+    creativeBrushSpan = 3;
+    creativePickupType = PICKUP_DYNAMIC_SHOT;
+    clear_world_voxels();
+    clear_pickups();
+    reset_players_for_creative();
+    rebuild_all_voxel_surfaces();
+    init_static_hash();
+    meshDirty = true;
+}
+
 static void ResetGame(void) {
+    creativeModeActive = false;
     winnerId = -1;
     pbdTimeAccumulator = 0.0f;
     init_confetti();
@@ -6234,6 +6448,277 @@ static void ResetGame(void) {
     //rebuild_glue_constraints();
     meshDirty = true;
 
+    if (useCustomMap) {
+        load_map_slot(creativeMapSlot);
+    }
+
+}
+
+static void creative_place_voxels(int player_idx) {
+    Player *p = &players[player_idx];
+    Vector3 dir = player_forward(p);
+    Ray ray = { p->pos, dir };
+    int hit_id = first_voxel_hit(ray, CREATIVE_RAY_RANGE, -1);
+    int min_g = (int)ceilf((-FLOOR_SIZE / VOXEL_SIZE) - 0.5f);
+    int max_g = (int)floorf((FLOOR_SIZE / VOXEL_SIZE) - 0.5f);
+    int max_y = (int)floorf((FLOOR_SIZE * 2.0f) / VOXEL_SIZE - 1.0f);
+    int anchorX = 0;
+    int anchorY = 0;
+    int anchorZ = 0;
+    int nx = 0;
+    int ny = 0;
+    int nz = 0;
+
+    if (hit_id >= 0 && hit_id < voxel_count) {
+        Voxel *hit = &voxels[hit_id];
+        anchorX = hit->gx;
+        anchorY = hit->gy;
+        anchorZ = hit->gz;
+        Vector3 ray_dir = ray.direction;
+        float ax = fabsf(ray_dir.x);
+        float ay = fabsf(ray_dir.y);
+        float az = fabsf(ray_dir.z);
+        if (ax >= ay && ax >= az) {
+            nx = (ray_dir.x >= 0.0f) ? -1 : 1;
+        } else if (ay >= az) {
+            ny = (ray_dir.y >= 0.0f) ? -1 : 1;
+        } else {
+            nz = (ray_dir.z >= 0.0f) ? -1 : 1;
+        }
+    } else {
+        if (!find_world_build_plane_hit(&ray, min_g, max_g, max_y,
+                                        &anchorX, &anchorY, &anchorZ,
+                                        &nx, &ny, &nz)) {
+            return;
+        }
+    }
+
+    int brushExtent = clampf((float)creativeBrushSpan, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
+    int halfBrush = brushExtent / 2;
+    int anchorBaseX = anchorX - halfBrush;
+    int anchorBaseY = anchorY - halfBrush;
+    int anchorBaseZ = anchorZ - halfBrush;
+    int faceShift = halfBrush + 1;
+    int targetX = anchorBaseX + (nx * faceShift);
+    int targetY = anchorBaseY + (ny * faceShift);
+    int targetZ = anchorBaseZ + (nz * faceShift);
+    int minx = targetX;
+    int maxx = targetX + brushExtent - 1;
+    int miny = targetY;
+    int maxy = targetY + brushExtent - 1;
+    int minz = targetZ;
+    int maxz = targetZ + brushExtent - 1;
+
+    if (maxy < 0) {
+        return;
+    }
+    if (miny < 0) {
+        miny = 0;
+    }
+    if (maxx < min_g || minx > max_g || maxz < min_g || minz > max_g) {
+        return;
+    }
+    if (minx < min_g) minx = min_g;
+    if (maxx > max_g) maxx = max_g;
+    if (minz < min_g) minz = min_g;
+    if (maxz > max_g) maxz = max_g;
+    if (maxy > max_y) maxy = max_y;
+
+    int placed = 0;
+    Color c = player_palette_color(player_idx);
+    for (int x = minx; x <= maxx; ++x) {
+        for (int y = miny; y <= maxy; ++y) {
+            for (int z = minz; z <= maxz; ++z) {
+                if (occupied(x, y, z)) {
+                    continue;
+                }
+                int idx_added = add_static_voxel_at_grid(x, y, z, c, 0);
+                if (idx_added >= 0) {
+                    mark_surface(idx_added);
+                    mark_surface_neighbors(voxels[idx_added].pos);
+                    placed++;
+                }
+            }
+        }
+    }
+    if (placed > 0) {
+        rebuild_all_voxel_surfaces();
+        init_static_hash();
+        meshDirty = true;
+    }
+}
+
+static void creative_remove_voxels(int player_idx) {
+    Player *p = &players[player_idx];
+    Vector3 dir = player_forward(p);
+    Ray ray = { p->pos, dir };
+    int hit_id = first_voxel_hit(ray, CREATIVE_RAY_RANGE, -1);
+    if (hit_id < 0 || hit_id >= voxel_count) {
+        return;
+    }
+    Voxel *hit = &voxels[hit_id];
+    int brushExtent = clampf((float)creativeBrushSpan, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
+    int halfBrush = brushExtent / 2;
+    int minx = hit->gx - halfBrush;
+    int maxx = minx + brushExtent - 1;
+    int miny = hit->gy - halfBrush;
+    int maxy = miny + brushExtent - 1;
+    int minz = hit->gz - halfBrush;
+    int maxz = minz + brushExtent - 1;
+    bool removed_dynamic = remove_dynamic_voxels_in_region(minx, maxx, miny, maxy, minz, maxz);
+    remove_static_voxels_in_region_recycle(minx, maxx, miny, maxy, minz, maxz);
+    if (removed_dynamic) {
+        rebuild_voxel_hash();
+    }
+    rebuild_all_voxel_surfaces();
+    init_static_hash();
+    meshDirty = true;
+}
+
+static void creative_place_pickup(int player_idx) {
+    Player *p = &players[player_idx];
+    Vector3 dir = player_forward(p);
+    Ray ray = { p->pos, dir };
+    int hit_id = first_voxel_hit(ray, CREATIVE_RAY_RANGE, -1);
+    Vector3 pos = v_add(p->pos, v_mul(dir, 4.0f));
+    if (hit_id >= 0 && hit_id < voxel_count) {
+        Voxel *hit = &voxels[hit_id];
+        pos = v_add(hit->pos, v_mul(dir, VOXEL_SIZE * 0.8f));
+    }
+    int slot = -1;
+    for (int i = 0; i < MAX_PICKUPS; ++i) {
+        if (!pickups[i].active && pickups[i].respawnTimer <= 0.0f) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        slot = 0;
+    }
+    pickups[slot].pos = pos;
+    pickups[slot].type = (PickupType)creativePickupType;
+    pickups[slot].active = true;
+    pickups[slot].respawnTimer = 0.0f;
+    pickups[slot].bobTimer = (float)GetRandomValue(0, 100) / 10.0f;
+}
+
+static void creative_remove_pickup(int player_idx) {
+    Player *p = &players[player_idx];
+    float best = 2.0f * 2.0f;
+    int best_idx = -1;
+    for (int i = 0; i < MAX_PICKUPS; ++i) {
+        if (!pickups[i].active) {
+            continue;
+        }
+        Vector3 delta = v_sub(pickups[i].pos, p->pos);
+        float d2 = v_dot(delta, delta);
+        if (d2 < best) {
+            best = d2;
+            best_idx = i;
+        }
+    }
+    if (best_idx >= 0) {
+        pickups[best_idx].active = false;
+        pickups[best_idx].respawnTimer = 0.0f;
+    }
+}
+
+static void update_creative_mode(float dt) {
+    Player *p = &players[0];
+    float yaw_accel = 0.0f;
+    if (IsKeyDown(KEY_F)) yaw_accel += TURN_ACCELERATION;
+    if (IsKeyDown(KEY_H)) yaw_accel -= TURN_ACCELERATION;
+    if (yaw_accel != 0.0f) {
+        p->yaw_vel += yaw_accel * dt;
+    } else {
+        if (p->yaw_vel > 0) {
+            p->yaw_vel -= TURN_FRICTION * dt;
+            if (p->yaw_vel < 0) p->yaw_vel = 0;
+        } else if (p->yaw_vel < 0) {
+            p->yaw_vel += TURN_FRICTION * dt;
+            if (p->yaw_vel > 0) p->yaw_vel = 0;
+        }
+    }
+    p->yaw_vel = clampf(p->yaw_vel, -TURN_SPEED, TURN_SPEED);
+    p->yaw += p->yaw_vel * dt;
+
+    float pitch_accel = 0.0f;
+    if (IsKeyDown(KEY_T)) pitch_accel += TURN_ACCELERATION;
+    if (IsKeyDown(KEY_G)) pitch_accel -= TURN_ACCELERATION;
+    if (pitch_accel != 0.0f) {
+        p->pitch_vel += pitch_accel * dt;
+    } else {
+        if (p->pitch_vel > 0) {
+            p->pitch_vel -= TURN_FRICTION * dt;
+            if (p->pitch_vel < 0) p->pitch_vel = 0;
+        } else if (p->pitch_vel < 0) {
+            p->pitch_vel += TURN_FRICTION * dt;
+            if (p->pitch_vel > 0) p->pitch_vel = 0;
+        }
+    }
+    p->pitch_vel = clampf(p->pitch_vel, -TURN_SPEED, TURN_SPEED);
+    p->pitch += p->pitch_vel * dt;
+    p->pitch = clampf(p->pitch, -89, 89);
+
+    float speed = IsKeyDown(KEY_LEFT_SHIFT) ? CREATIVE_FLY_SPEED_FAST : CREATIVE_FLY_SPEED;
+    Vector3 forward = player_forward(p);
+    Vector3 right = v_norm(v_cross(forward, (Vector3){ 0.0f, 1.0f, 0.0f }));
+    Vector3 up = (Vector3){ 0.0f, 1.0f, 0.0f };
+    Vector3 move = { 0 };
+    if (IsKeyDown(KEY_W)) move = v_add(move, forward);
+    if (IsKeyDown(KEY_S)) move = v_add(move, v_mul(forward, -1.0f));
+    if (IsKeyDown(KEY_A)) move = v_add(move, v_mul(right, -1.0f));
+    if (IsKeyDown(KEY_D)) move = v_add(move, right);
+    if (IsKeyDown(KEY_Q)) move = v_add(move, v_mul(up, -1.0f));
+    if (IsKeyDown(KEY_E)) move = v_add(move, up);
+    float len = v_length(move);
+    if (len > 0.01f) {
+        move = v_mul(move, 1.0f / len);
+        p->pos = v_add(p->pos, v_mul(move, speed * dt));
+    }
+
+    if (IsKeyPressed(KEY_LEFT_BRACKET)) {
+        creativeBrushSpan = clampf((float)(creativeBrushSpan - 1), CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
+    }
+    if (IsKeyPressed(KEY_RIGHT_BRACKET)) {
+        creativeBrushSpan = clampf((float)(creativeBrushSpan + 1), CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
+    }
+
+    if (IsKeyPressed(KEY_TAB)) {
+        creativePickupType = (creativePickupType + 1) % 4;
+    }
+
+    if (IsKeyPressed(KEY_LEFT_CONTROL)) {
+        creative_place_voxels(0);
+    }
+    if (IsKeyPressed(KEY_LEFT_ALT)) {
+        creative_remove_voxels(0);
+    }
+    if (IsKeyPressed(KEY_P)) {
+        creative_place_pickup(0);
+    }
+    if (IsKeyPressed(KEY_BACKSPACE)) {
+        creative_remove_pickup(0);
+    }
+
+    if (IsKeyDown(KEY_LEFT_CONTROL) && IsKeyPressed(KEY_ONE)) {
+        save_map_slot(0);
+    }
+    if (IsKeyDown(KEY_LEFT_CONTROL) && IsKeyPressed(KEY_TWO)) {
+        save_map_slot(1);
+    }
+    if (IsKeyDown(KEY_LEFT_CONTROL) && IsKeyPressed(KEY_THREE)) {
+        save_map_slot(2);
+    }
+    if (IsKeyDown(KEY_LEFT_ALT) && IsKeyPressed(KEY_ONE)) {
+        load_map_slot(0);
+    }
+    if (IsKeyDown(KEY_LEFT_ALT) && IsKeyPressed(KEY_TWO)) {
+        load_map_slot(1);
+    }
+    if (IsKeyDown(KEY_LEFT_ALT) && IsKeyPressed(KEY_THREE)) {
+        load_map_slot(2);
+    }
 }
 
 static void UpdateKdRatio(int player_index) {
@@ -12000,6 +12485,154 @@ static void UpdateBot(int playerIdx, float dt) {
     }
 }
 
+static void render_gameplay_view(RenderTexture2D *screens,
+                                 int *renderPlayers,
+                                 int *renderW,
+                                 int *renderH,
+                                 bool creative_mode) {
+    activePlayers = clamp_active_players(activePlayers);
+    ensure_render_targets(screens, renderPlayers, renderW, renderH, activePlayers);
+    Rectangle screenRec = { 0, 0, (float)(*renderW), (float)-(*renderH) };
+
+    Camera3D cams[MAX_PLAYERS] = { 0 };
+    for (int i = 0; i < activePlayers; ++i) {
+        cams[i].up = (Vector3){0,1,0};
+        cams[i].fovy = 60;
+        cams[i].projection = CAMERA_PERSPECTIVE;
+        if (players[i].respawn_timer > 0.0f) {
+            float yr = DEG2RAD * players[i].death_yaw;
+            Vector3 forward = { sinf(-yr), 0.0f, -cosf(yr) };
+            Vector3 cam_offset = v_mul(forward, -DEATH_CAM_DISTANCE);
+            cams[i].position = v_add(players[i].death_pos,
+                                     v_add(cam_offset, (Vector3){ 0.0f, DEATH_CAM_HEIGHT, 0.0f }));
+            cams[i].target = v_add(players[i].death_pos, (Vector3){ 0.0f, 0.6f, 0.0f });
+        } else {
+            cams[i].position = players[i].pos;
+            float yr = DEG2RAD*players[i].yaw, pr = DEG2RAD*players[i].pitch;
+            cams[i].target = v_add(players[i].pos, (Vector3){ sinf(-yr)*cosf(pr), sinf(pr), -cosf(yr)*cosf(pr) });
+        }
+    }
+
+    for (int i = 0; i < activePlayers; ++i) {
+        BeginTextureMode(screens[i]);
+            ClearBackground(SKYBLUE);
+            BeginMode3D(cams[i]);
+                draw_world_surfaces();
+                DrawVoxels(cams[i]);
+                draw_pickups(cams[i]);
+                draw_players();
+                if (players[i].tetherHolding && players[i].tetherVoxel >= 0) {
+                    Vector3 hand = player_hand_position(&players[i]);
+                    Vector3 center = { 0.0f, 0.0f, 0.0f };
+                    if (tether_cluster_center(players[i].tetherVoxel, &center)) {
+                        float tether_radius = 0.05f;
+                        DrawCylinderEx(hand, center, tether_radius * 1.6f, tether_radius * 1.6f, 6,
+                                       (Color){ 80, 170, 255, 80 });
+                        DrawCylinderEx(hand, center, tether_radius, tether_radius, 6,
+                                       (Color){ 120, 200, 255, 220 });
+                        DrawSphere(center, 0.08f, (Color){ 80, 170, 255, 180 });
+                    }
+                }
+            EndMode3D();
+            int view_x = 0, view_y = 0, view_w = 0, view_h = 0;
+            get_viewport(i, activePlayers, &view_x, &view_y, &view_w, &view_h);
+            DrawRectangle(0, 0, view_w, HUD_BAR_HEIGHT, Fade(BLACK, 0.5f));
+            if (creative_mode) {
+                const char *label = TextFormat("CREATIVE | Brush %d | Pickup %s", creativeBrushSpan,
+                                               pickup_type_label((PickupType)creativePickupType));
+                DrawText(label, HUD_PADDING_X, HUD_PADDING_Y, HUD_FONT_SIZE, WHITE);
+            } else {
+                DrawText(TextFormat("P%d | Shmush: %d | Kills: %d Deaths: %d",
+                                    i + 1, players[i].debrisKills, players[i].kills, players[i].deaths),
+                         HUD_PADDING_X, HUD_PADDING_Y, HUD_FONT_SIZE, WHITE);
+                {
+                    int points = player_points(&players[i]);
+                    const char *points_text = TextFormat("PTS %d/%d", points, winningScore);
+                    int points_w = MeasureText(points_text, HUD_FONT_SIZE);
+                    float anim = players[i].points_update_timer / POINTS_UPDATE_DURATION;
+                    int jiggle = 0;
+                    if (anim > 0.0f) {
+                        jiggle = (int)roundf(sinf((float)GetTime() * 12.0f + players[i].points_jiggle_phase) * 3.0f * anim);
+                    }
+                    int points_x = view_w - HUD_PADDING_X - points_w + jiggle;
+                    int points_y = HUD_PADDING_Y + jiggle;
+                    if (anim > 0.0f) {
+                        Color glow = Fade(GOLD, 0.4f + 0.6f * anim);
+                        DrawText(points_text, points_x + 1, points_y + 1, HUD_FONT_SIZE, glow);
+                    }
+                    DrawText(points_text, points_x, points_y, HUD_FONT_SIZE, GOLD);
+                }
+                if (smushBannerTimer > 0.0f) {
+                    int banner_size = 48;
+                    float alpha = clampf(smushBannerTimer / 1.0f, 0.0f, 1.0f);
+                    Color banner_color = Fade(RED, 0.8f * alpha);
+                    const char *banner_text = "SMUSH!!!";
+                    int banner_w = MeasureText(banner_text, banner_size);
+                    int banner_x = (view_w - banner_w) / 2;
+                    int banner_y = (view_h / 5);
+                    DrawText(banner_text, banner_x, banner_y, banner_size, banner_color);
+                }
+            }
+            draw_hud_bars(i, &players[i], view_w, view_h);
+            draw_player_radar(i, view_w, view_h);
+            if (players[i].matter_flash_timer > 0.0f &&
+                !players[i].isExposed && players[i].matter > 0.0f) {
+                float alpha = clampf(players[i].matter_flash_timer / 0.2f, 0.0f, 1.0f);
+                Color flash = player_palette_color(i);
+                flash.a = 255;
+                DrawRectangle(0, 0, view_w, view_h, Fade(flash, 0.25f * alpha));
+            }
+            if (players[i].exposed_flash_timer > 0.0f) {
+                float alpha = clampf(players[i].exposed_flash_timer / 0.35f, 0.0f, 1.0f);
+                DrawRectangle(0, 0, view_w, view_h, Fade(RED, 0.25f * alpha));
+            }
+            if (!creative_mode && players[i].respawn_timer > 0.0f) {
+                int seconds_left = (int)ceilf(players[i].respawn_timer);
+                const char *respawn_text = TextFormat("RESPAWNING IN %d", seconds_left);
+                int font_size = 36;
+                int text_w = MeasureText(respawn_text, font_size);
+                int text_x = (view_w - text_w) / 2;
+                int text_y = (view_h / 2) - (font_size / 2);
+                DrawText(respawn_text, text_x, text_y, font_size, WHITE);
+            } else {
+                int cx = view_w / 2;
+                int cy = view_h / 2;
+                int cross = 9;
+                Color cross_color = Fade(WHITE,1.0f);
+                DrawLine(cx - cross, cy, cx + cross, cy, cross_color);
+                DrawLine(cx, cy - cross, cx, cy + cross, cross_color);
+            }
+        EndTextureMode();
+    }
+
+    BeginDrawing();
+        ClearBackground(BLACK);
+        for (int i = 0; i < activePlayers; ++i) {
+            int view_x = 0, view_y = 0, view_w = 0, view_h = 0;
+            get_viewport(i, activePlayers, &view_x, &view_y, &view_w, &view_h);
+            DrawTextureRec(screens[i].texture, screenRec, (Vector2){(float)view_x, (float)view_y}, WHITE);
+        }
+        if (activePlayers == 2) {
+            DrawRectangle(GetScreenWidth()/2-2, 0, 4, GetScreenHeight(), LIGHTGRAY);
+        } else if (activePlayers > 2) {
+            DrawRectangle(GetScreenWidth()/2-2, 0, 4, GetScreenHeight(), LIGHTGRAY);
+            DrawRectangle(0, GetScreenHeight()/2-2, GetScreenWidth(), 4, LIGHTGRAY);
+        }
+        {
+            const int fps_font = 18;
+            const int fps_pad = 20;
+            const char *fps_text = TextFormat("FPS %d", GetFPS());
+            int text_w = MeasureText(fps_text, fps_font);
+            int box_w = text_w + fps_pad * 2;
+            int box_h = fps_font + fps_pad * 2 - 2;
+            int box_x = (GetScreenWidth() - box_w) / 2;
+            int box_y = 6;
+            DrawRectangle(box_x, box_y, box_w, box_h, Fade(BLACK, 0.6f));
+            DrawText(fps_text, box_x + fps_pad, box_y + fps_pad - 2, fps_font, RAYWHITE);
+        }
+    EndDrawing();
+}
+
 int main(void) {
     int countFrame = 0;
     SetLoggingEnabled(false);
@@ -12067,6 +12700,11 @@ int main(void) {
                     DrawText("FPS Game", SCREEN_WIDTH / 2 - MeasureText("FPS Game", 50) / 2, boxY + 50, 50, BLACK);
                     DrawText("Press ENTER to Start", SCREEN_WIDTH / 2 - MeasureText("Press ENTER to Start", 20) / 2, boxY + 150, 20, DARKGRAY);
                     DrawText("Press S for Settings", SCREEN_WIDTH / 2 - MeasureText("Press S for Settings", 20) / 2, boxY + 200, 20, DARKGRAY);
+                    DrawText("Press C for Creative Mode", SCREEN_WIDTH / 2 - MeasureText("Press C for Creative Mode", 20) / 2, boxY + 230, 20, DARKGRAY);
+                    DrawText(TextFormat("Custom Map: %s (Slot %d) - Press U to Toggle, L to Cycle",
+                                        useCustomMap ? "ON" : "OFF", creativeMapSlot + 1),
+                             SCREEN_WIDTH / 2 - MeasureText("Custom Map: ON (Slot 1) - Press U to Toggle, L to Cycle", 20) / 2,
+                             boxY + 260, 20, DARKGRAY);
                 EndDrawing();
 
                 if (IsKeyPressed(KEY_ENTER)) {
@@ -12080,6 +12718,16 @@ int main(void) {
                 }
                 if (IsKeyPressed(KEY_S)) {
                     gameState = GAME_STATE_SETTINGS;
+                }
+                if (IsKeyPressed(KEY_C)) {
+                    ResetCreative();
+                    gameState = GAME_STATE_CREATIVE;
+                }
+                if (IsKeyPressed(KEY_U)) {
+                    useCustomMap = !useCustomMap;
+                }
+                if (IsKeyPressed(KEY_L)) {
+                    creativeMapSlot = (creativeMapSlot + 1) % 3;
                 }
                 break;
             case GAME_STATE_DRONE_INTRO:
@@ -12457,143 +13105,18 @@ int main(void) {
         // }
 
 
-        activePlayers = clamp_active_players(activePlayers);
-        ensure_render_targets(screens, &renderPlayers, &renderW, &renderH, activePlayers);
-        Rectangle screenRec = { 0, 0, (float)renderW, (float)-renderH };
-
-        Camera3D cams[MAX_PLAYERS] = { 0 };
-        for (int i = 0; i < activePlayers; ++i) {
-            cams[i].up = (Vector3){0,1,0};
-            cams[i].fovy = 60;
-            cams[i].projection = CAMERA_PERSPECTIVE;
-            if (players[i].respawn_timer > 0.0f) {
-                float yr = DEG2RAD * players[i].death_yaw;
-                Vector3 forward = { sinf(-yr), 0.0f, -cosf(yr) };
-                Vector3 cam_offset = v_mul(forward, -DEATH_CAM_DISTANCE);
-                cams[i].position = v_add(players[i].death_pos,
-                                         v_add(cam_offset, (Vector3){ 0.0f, DEATH_CAM_HEIGHT, 0.0f }));
-                cams[i].target = v_add(players[i].death_pos, (Vector3){ 0.0f, 0.6f, 0.0f });
-            } else {
-                cams[i].position = players[i].pos;
-                float yr = DEG2RAD*players[i].yaw, pr = DEG2RAD*players[i].pitch;
-                cams[i].target = v_add(players[i].pos, (Vector3){ sinf(-yr)*cosf(pr), sinf(pr), -cosf(yr)*cosf(pr) });
-            }
-        }
-
-        for (int i = 0; i < activePlayers; ++i) {
-            BeginTextureMode(screens[i]);
-                ClearBackground(SKYBLUE);
-                BeginMode3D(cams[i]);
-                    draw_world_surfaces();
-                    DrawVoxels(cams[i]);
-                    draw_pickups(cams[i]);
-                    draw_players();
-                    if (players[i].tetherHolding && players[i].tetherVoxel >= 0) {
-                        Vector3 hand = player_hand_position(&players[i]);
-                        Vector3 center = { 0.0f, 0.0f, 0.0f };
-                        if (tether_cluster_center(players[i].tetherVoxel, &center)) {
-                            float tether_radius = 0.05f;
-                            DrawCylinderEx(hand, center, tether_radius * 1.6f, tether_radius * 1.6f, 6,
-                                           (Color){ 80, 170, 255, 80 });
-                            DrawCylinderEx(hand, center, tether_radius, tether_radius, 6,
-                                           (Color){ 120, 200, 255, 220 });
-                            DrawSphere(center, 0.08f, (Color){ 80, 170, 255, 180 });
-                        }
-                    }
-                EndMode3D();
-                int view_x = 0, view_y = 0, view_w = 0, view_h = 0;
-                get_viewport(i, activePlayers, &view_x, &view_y, &view_w, &view_h);
-                DrawRectangle(0, 0, view_w, HUD_BAR_HEIGHT, Fade(BLACK, 0.5f));
-                DrawText(TextFormat("P%d | Shmush: %d | Kills: %d Deaths: %d",
-                                    i + 1, players[i].debrisKills, players[i].kills, players[i].deaths),
-                         HUD_PADDING_X, HUD_PADDING_Y, HUD_FONT_SIZE, WHITE);
-                {
-                    int points = player_points(&players[i]);
-                    const char *points_text = TextFormat("PTS %d/%d", points, winningScore);
-                    int points_w = MeasureText(points_text, HUD_FONT_SIZE);
-                    float anim = players[i].points_update_timer / POINTS_UPDATE_DURATION;
-                    int jiggle = 0;
-                    if (anim > 0.0f) {
-                        jiggle = (int)roundf(sinf((float)GetTime() * 12.0f + players[i].points_jiggle_phase) * 3.0f * anim);
-                    }
-                    int points_x = view_w - HUD_PADDING_X - points_w + jiggle;
-                    int points_y = HUD_PADDING_Y + jiggle;
-                    if (anim > 0.0f) {
-                        Color glow = Fade(GOLD, 0.4f + 0.6f * anim);
-                        DrawText(points_text, points_x + 1, points_y + 1, HUD_FONT_SIZE, glow);
-                    }
-                    DrawText(points_text, points_x, points_y, HUD_FONT_SIZE, GOLD);
-                }
-                if (smushBannerTimer > 0.0f) {
-                    int banner_size = 48;
-                    float alpha = clampf(smushBannerTimer / 1.0f, 0.0f, 1.0f);
-                    Color banner_color = Fade(RED, 0.8f * alpha);
-                    const char *banner_text = "SMUSH!!!";
-                    int banner_w = MeasureText(banner_text, banner_size);
-                    int banner_x = (view_w - banner_w) / 2;
-                    int banner_y = (view_h / 5);
-                    DrawText(banner_text, banner_x, banner_y, banner_size, banner_color);
-                }
-                draw_hud_bars(i, &players[i], view_w, view_h);
-                draw_player_radar(i, view_w, view_h);
-                if (players[i].matter_flash_timer > 0.0f &&
-                    !players[i].isExposed && players[i].matter > 0.0f) {
-                    float alpha = clampf(players[i].matter_flash_timer / 0.2f, 0.0f, 1.0f);
-                    Color flash = player_palette_color(i);
-                    flash.a = 255;
-                    DrawRectangle(0, 0, view_w, view_h, Fade(flash, 0.25f * alpha));
-                }
-                if (players[i].exposed_flash_timer > 0.0f) {
-                    float alpha = clampf(players[i].exposed_flash_timer / 0.35f, 0.0f, 1.0f);
-                    DrawRectangle(0, 0, view_w, view_h, Fade(RED, 0.25f * alpha));
-                }
-                if (players[i].respawn_timer > 0.0f) {
-                    int seconds_left = (int)ceilf(players[i].respawn_timer);
-                    const char *respawn_text = TextFormat("RESPAWNING IN %d", seconds_left);
-                    int font_size = 36;
-                    int text_w = MeasureText(respawn_text, font_size);
-                    int text_x = (view_w - text_w) / 2;
-                    int text_y = (view_h / 2) - (font_size / 2);
-                    DrawText(respawn_text, text_x, text_y, font_size, WHITE);
-                } else {
-                    int cx = view_w / 2;
-                    int cy = view_h / 2;
-                    int cross = 9;
-                    Color cross_color = Fade(WHITE,1.0f);
-                    DrawLine(cx - cross, cy, cx + cross, cy, cross_color);
-                    DrawLine(cx, cy - cross, cx, cy + cross, cross_color);
-                }
-            EndTextureMode();
-        }
-
-        BeginDrawing();
-            ClearBackground(BLACK);
-            for (int i = 0; i < activePlayers; ++i) {
-                int view_x = 0, view_y = 0, view_w = 0, view_h = 0;
-                get_viewport(i, activePlayers, &view_x, &view_y, &view_w, &view_h);
-                DrawTextureRec(screens[i].texture, screenRec, (Vector2){(float)view_x, (float)view_y}, WHITE);
-            }
-            if (activePlayers == 2) {
-                DrawRectangle(GetScreenWidth()/2-2, 0, 4, GetScreenHeight(), LIGHTGRAY);
-            } else if (activePlayers > 2) {
-                DrawRectangle(GetScreenWidth()/2-2, 0, 4, GetScreenHeight(), LIGHTGRAY);
-                DrawRectangle(0, GetScreenHeight()/2-2, GetScreenWidth(), 4, LIGHTGRAY);
-            }
-            {
-                const int fps_font = 18;
-                const int fps_pad = 20;
-                const char *fps_text = TextFormat("FPS %d", GetFPS());
-                int text_w = MeasureText(fps_text, fps_font);
-                int box_w = text_w + fps_pad * 2;
-                int box_h = fps_font + fps_pad * 2 - 2;
-                int box_x = (GetScreenWidth() - box_w) / 2;
-                int box_y = 6;
-                DrawRectangle(box_x, box_y, box_w, box_h, Fade(BLACK, 0.6f));
-                DrawText(fps_text, box_x + fps_pad, box_y + fps_pad - 2, fps_font, RAYWHITE);
-            }
-            // particle debug text removed
-        EndDrawing();
+        render_gameplay_view(screens, &renderPlayers, &renderW, &renderH, false);
         break;
+            case GAME_STATE_CREATIVE: {
+                float dt = GetFrameTime();
+                update_pickups(dt);
+                update_creative_mode(dt);
+                if (IsKeyPressed(KEY_M) || IsKeyPressed(KEY_ESCAPE)) {
+                    gameState = GAME_STATE_MENU;
+                }
+                render_gameplay_view(screens, &renderPlayers, &renderW, &renderH, true);
+                break;
+            }
             case GAME_STATE_PAUSED:
                 // Draw pause menu
                 BeginDrawing();
