@@ -523,6 +523,8 @@ static void update_static_voxel_belief(int idx);
 static void mark_static_beliefs_dirty_for_voxel(const Voxel *voxel);
 static void mark_static_beliefs_dirty_column_above(int gx, int gz, int gy);
 static void update_dynamic_activation_beliefs(void);
+static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float activationBelief);
+static int rip_single_static_voxel(int voxel_idx, int activator);
 
 #define PBD_MAX_THREADS 8
 #define PBD_PARALLEL_MIN_WORK 128
@@ -742,6 +744,9 @@ static void update_projectiles(float dt);
 static void handle_pbd_projectile_hits(void);
 static Vector3 v_add(Vector3 a, Vector3 b);
 static Vector3 v_sub(Vector3 a, Vector3 b);
+static bool keyboard_player_index(int index);
+static void set_voxel_velocity(Voxel *voxel, Vector3 vel);
+static void draw_creative_help_overlay(int player_idx, int view_w, int view_h);
 
 static void unit_voxel_buffer_clear(UnitVoxelBuffer *buffer) {
     if (!buffer) {
@@ -898,11 +903,12 @@ static bool aimAssistDebugDraw = false;
 static Vector3 aimAssistDebugTarget[MAX_PLAYERS];
 static bool aimAssistDebugHasTarget[MAX_PLAYERS];
 static bool creativeModeActive = false;
-static int creativeBrushSpan = 3;
-static int creativePickupType = 0;
+static int creativeBrushSpan[MAX_PLAYERS] = { 3, 3, 3, 3 };
+static int creativePickupType[MAX_PLAYERS] = { 0, 0, 0, 0 };
 static int creativeMapSlot = 0;
 static bool useCustomMap = false;
-static int creativeBlockColorIndex = 0;
+static int creativeBlockColorIndex[MAX_PLAYERS] = { 0, 0, 0, 0 };
+static bool creativeHelpVisible[MAX_PLAYERS] = { true, true, true, true };
 static int debugGlueBuildLogBudget = 0;
 static int debugGlueSolveLogBudget = 0;
 static int debugGlueBreakLogBudget = 0;
@@ -5956,7 +5962,7 @@ static void buildDebugWorld(void) {
 // Build static demo cube of voxels
 static void buildDemo(void) {
     buildTestWorld();
-    //buildProceduralWorld();
+    buildProceduralWorld();
     //buildBloodWorld();
     //buildDebugWorld();
     rebuild_glue_constraints();
@@ -6362,7 +6368,7 @@ static void draw_pickups(Camera cam) {
 }
 
 static void reset_players_for_creative(void) {
-    activePlayers = 1;
+    activePlayers = 2;
     for (int i = 0; i < MAX_PLAYERS; ++i) {
         players[i].pos = (Vector3){ 0.0f, BASE_EYE_HEIGHT + 3.0f, 0.0f };
         players[i].death_pos = players[i].pos;
@@ -6402,9 +6408,12 @@ static void reset_players_for_creative(void) {
 
 static void ResetCreative(void) {
     creativeModeActive = true;
-    creativeBrushSpan = 3;
-    creativePickupType = PICKUP_DYNAMIC_SHOT;
-    creativeBlockColorIndex = 0;
+    for (int i = 0; i < MAX_PLAYERS; ++i) {
+        creativeBrushSpan[i] = 3;
+        creativePickupType[i] = PICKUP_DYNAMIC_SHOT;
+        creativeBlockColorIndex[i] = 0;
+        creativeHelpVisible[i] = true;
+    }
     clear_world_voxels();
     clear_pickups();
     reset_players_for_creative();
@@ -6519,7 +6528,7 @@ static void creative_place_voxels(int player_idx) {
         }
     }
 
-    int brushExtent = clampi(creativeBrushSpan, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
+    int brushExtent = clampi(creativeBrushSpan[player_idx], CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
     int halfBrush = brushExtent / 2;
     int anchorBaseX = anchorX - halfBrush;
     int anchorBaseY = anchorY - halfBrush;
@@ -6551,7 +6560,7 @@ static void creative_place_voxels(int player_idx) {
     if (maxy > max_y) maxy = max_y;
 
     int placed = 0;
-    Color c = creative_block_palette(creativeBlockColorIndex);
+    Color c = creative_block_palette(creativeBlockColorIndex[player_idx]);
     for (int x = minx; x <= maxx; ++x) {
         for (int y = miny; y <= maxy; ++y) {
             for (int z = minz; z <= maxz; ++z) {
@@ -6583,7 +6592,7 @@ static void creative_remove_voxels(int player_idx) {
         return;
     }
     Voxel *hit = &voxels[hit_id];
-    int brushExtent = clampi(creativeBrushSpan, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
+    int brushExtent = clampi(creativeBrushSpan[player_idx], CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
     int halfBrush = brushExtent / 2;
     int minx = hit->gx - halfBrush;
     int maxx = minx + brushExtent - 1;
@@ -6622,7 +6631,7 @@ static void creative_place_pickup(int player_idx) {
         slot = 0;
     }
     pickups[slot].pos = pos;
-    pickups[slot].type = (PickupType)creativePickupType;
+    pickups[slot].type = (PickupType)creativePickupType[player_idx];
     pickups[slot].active = true;
     pickups[slot].respawnTimer = 0.0f;
     pickups[slot].bobTimer = (float)GetRandomValue(0, 100) / 10.0f;
@@ -6649,11 +6658,135 @@ static void creative_remove_pickup(int player_idx) {
     }
 }
 
-static void update_creative_mode(float dt) {
-    Player *p = &players[0];
+static void creative_activate_structure(int player_idx) {
+    Player *p = &players[player_idx];
+    Vector3 dir = player_forward(p);
+    Ray ray = { p->pos, dir };
+    int hit_id = first_voxel_hit(ray, CREATIVE_RAY_RANGE, -1);
+    if (hit_id < 0 || hit_id >= voxel_count) {
+        return;
+    }
+    Voxel *hit = &voxels[hit_id];
+    if (hit->simulate) {
+        return;
+    }
+    int new_idx = rip_single_static_voxel(hit_id, player_idx);
+    if (new_idx >= 0 && new_idx < voxel_count) {
+        Voxel *moved = &voxels[new_idx];
+        Vector3 vel = v_mul(v_norm(dir), 60.0f);
+        set_voxel_velocity(moved, vel);
+        moved->glueEligible = true;
+        moved->isBullet = false;
+        moved->activationBelief = 1.0f;
+        moved->wasTethered = true;
+    }
+}
+
+static void update_creative_player_keyboard(int player_idx, float dt) {
+    if (!keyboard_player_index(player_idx)) {
+        return;
+    }
+    Player *p = &players[player_idx];
     float yaw_accel = 0.0f;
-    if (IsKeyDown(KEY_F)) yaw_accel += TURN_ACCELERATION;
-    if (IsKeyDown(KEY_H)) yaw_accel -= TURN_ACCELERATION;
+    float pitch_accel = 0.0f;
+    Vector3 move = { 0 };
+    float speed = IsKeyDown(KEY_LEFT_SHIFT) ? CREATIVE_FLY_SPEED_FAST : CREATIVE_FLY_SPEED;
+    Vector3 forward = player_forward(p);
+    Vector3 right = v_norm(v_cross(forward, (Vector3){ 0.0f, 1.0f, 0.0f }));
+    Vector3 up = (Vector3){ 0.0f, 1.0f, 0.0f };
+
+    if (player_idx == 0) {
+        if (IsKeyDown(KEY_F)) yaw_accel += TURN_ACCELERATION;
+        if (IsKeyDown(KEY_H)) yaw_accel -= TURN_ACCELERATION;
+        if (IsKeyDown(KEY_T)) pitch_accel += TURN_ACCELERATION;
+        if (IsKeyDown(KEY_G)) pitch_accel -= TURN_ACCELERATION;
+        if (IsKeyDown(KEY_W)) move = v_add(move, forward);
+        if (IsKeyDown(KEY_S)) move = v_add(move, v_mul(forward, -1.0f));
+        if (IsKeyDown(KEY_A)) move = v_add(move, v_mul(right, -1.0f));
+        if (IsKeyDown(KEY_D)) move = v_add(move, right);
+        if (IsKeyDown(KEY_Q)) move = v_add(move, v_mul(up, -1.0f));
+        if (IsKeyDown(KEY_E)) move = v_add(move, up);
+
+        if (IsKeyPressed(KEY_LEFT_BRACKET)) {
+            creativeBrushSpan[player_idx] = clampi(creativeBrushSpan[player_idx] - 1, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
+        }
+        if (IsKeyPressed(KEY_RIGHT_BRACKET)) {
+            creativeBrushSpan[player_idx] = clampi(creativeBrushSpan[player_idx] + 1, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
+        }
+        if (IsKeyPressed(KEY_TAB)) {
+            creativePickupType[player_idx] = (creativePickupType[player_idx] + 1) % 4;
+        }
+        if (IsKeyPressed(KEY_V)) {
+            creativeBlockColorIndex[player_idx]++;
+        }
+        if (IsKeyPressed(KEY_B)) {
+            creativeBlockColorIndex[player_idx]--;
+        }
+        if (IsKeyPressed(KEY_LEFT_CONTROL)) {
+            creative_place_voxels(player_idx);
+        }
+        if (IsKeyPressed(KEY_LEFT_ALT)) {
+            creative_remove_voxels(player_idx);
+        }
+        if (IsKeyPressed(KEY_P)) {
+            creative_place_pickup(player_idx);
+        }
+        if (IsKeyPressed(KEY_BACKSPACE)) {
+            creative_remove_pickup(player_idx);
+        }
+        if (IsKeyPressed(KEY_K)) {
+            creative_activate_structure(player_idx);
+        }
+        if (IsKeyPressed(KEY_SLASH)) {
+            creativeHelpVisible[player_idx] = !creativeHelpVisible[player_idx];
+        }
+    } else {
+        if (IsKeyDown(KEY_LEFT)) yaw_accel += TURN_ACCELERATION;
+        if (IsKeyDown(KEY_RIGHT)) yaw_accel -= TURN_ACCELERATION;
+        if (IsKeyDown(KEY_UP)) pitch_accel += TURN_ACCELERATION;
+        if (IsKeyDown(KEY_DOWN)) pitch_accel -= TURN_ACCELERATION;
+        if (IsKeyDown(KEY_I)) move = v_add(move, forward);
+        if (IsKeyDown(KEY_K)) move = v_add(move, v_mul(forward, -1.0f));
+        if (IsKeyDown(KEY_J)) move = v_add(move, v_mul(right, -1.0f));
+        if (IsKeyDown(KEY_L)) move = v_add(move, right);
+        if (IsKeyDown(KEY_U)) move = v_add(move, v_mul(up, -1.0f));
+        if (IsKeyDown(KEY_O)) move = v_add(move, up);
+
+        if (IsKeyPressed(KEY_KP_SUBTRACT)) {
+            creativeBrushSpan[player_idx] = clampi(creativeBrushSpan[player_idx] - 1, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
+        }
+        if (IsKeyPressed(KEY_KP_ADD)) {
+            creativeBrushSpan[player_idx] = clampi(creativeBrushSpan[player_idx] + 1, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
+        }
+        if (IsKeyPressed(KEY_KP_MULTIPLY)) {
+            creativePickupType[player_idx] = (creativePickupType[player_idx] + 1) % 4;
+        }
+        if (IsKeyPressed(KEY_KP_1)) {
+            creativeBlockColorIndex[player_idx]--;
+        }
+        if (IsKeyPressed(KEY_KP_2)) {
+            creativeBlockColorIndex[player_idx]++;
+        }
+        if (IsKeyPressed(KEY_RIGHT_CONTROL)) {
+            creative_place_voxels(player_idx);
+        }
+        if (IsKeyPressed(KEY_RIGHT_SHIFT)) {
+            creative_remove_voxels(player_idx);
+        }
+        if (IsKeyPressed(KEY_KP_0)) {
+            creative_place_pickup(player_idx);
+        }
+        if (IsKeyPressed(KEY_KP_DECIMAL)) {
+            creative_remove_pickup(player_idx);
+        }
+        if (IsKeyPressed(KEY_KP_ENTER)) {
+            creative_activate_structure(player_idx);
+        }
+        if (IsKeyPressed(KEY_KP_DIVIDE)) {
+            creativeHelpVisible[player_idx] = !creativeHelpVisible[player_idx];
+        }
+    }
+
     if (yaw_accel != 0.0f) {
         p->yaw_vel += yaw_accel * dt;
     } else {
@@ -6668,9 +6801,6 @@ static void update_creative_mode(float dt) {
     p->yaw_vel = clampf(p->yaw_vel, -TURN_SPEED, TURN_SPEED);
     p->yaw += p->yaw_vel * dt;
 
-    float pitch_accel = 0.0f;
-    if (IsKeyDown(KEY_T)) pitch_accel += TURN_ACCELERATION;
-    if (IsKeyDown(KEY_G)) pitch_accel -= TURN_ACCELERATION;
     if (pitch_accel != 0.0f) {
         p->pitch_vel += pitch_accel * dt;
     } else {
@@ -6686,51 +6816,124 @@ static void update_creative_mode(float dt) {
     p->pitch += p->pitch_vel * dt;
     p->pitch = clampf(p->pitch, -89, 89);
 
-    float speed = IsKeyDown(KEY_LEFT_SHIFT) ? CREATIVE_FLY_SPEED_FAST : CREATIVE_FLY_SPEED;
+    float len = v_length(move);
+    if (len > 0.01f) {
+        move = v_mul(move, 1.0f / len);
+        p->pos = v_add(p->pos, v_mul(move, speed * dt));
+    }
+}
+
+static void update_creative_player_gamepad(int player_idx, float dt) {
+    if (!IsGamepadAvailable(player_idx)) {
+        return;
+    }
+    Player *p = &players[player_idx];
+    float yaw_axis = GetGamepadAxisMovement(player_idx, GAMEPAD_AXIS_RIGHT_X);
+    float pitch_axis = GetGamepadAxisMovement(player_idx, GAMEPAD_AXIS_RIGHT_Y);
+    float yaw_accel = 0.0f;
+    float pitch_accel = 0.0f;
+    if (fabsf(yaw_axis) > GAMEPAD_DEADZONE) {
+        yaw_accel = -yaw_axis * TURN_ACCELERATION;
+    }
+    if (fabsf(pitch_axis) > GAMEPAD_DEADZONE) {
+        pitch_accel = -pitch_axis * TURN_ACCELERATION;
+    }
+    if (yaw_accel != 0.0f) {
+        p->yaw_vel += yaw_accel * dt;
+    } else {
+        if (p->yaw_vel > 0) {
+            p->yaw_vel -= TURN_FRICTION * dt;
+            if (p->yaw_vel < 0) p->yaw_vel = 0;
+        } else if (p->yaw_vel < 0) {
+            p->yaw_vel += TURN_FRICTION * dt;
+            if (p->yaw_vel > 0) p->yaw_vel = 0;
+        }
+    }
+    p->yaw_vel = clampf(p->yaw_vel, -TURN_SPEED, TURN_SPEED);
+    p->yaw += p->yaw_vel * dt;
+
+    if (pitch_accel != 0.0f) {
+        p->pitch_vel += pitch_accel * dt;
+    } else {
+        if (p->pitch_vel > 0) {
+            p->pitch_vel -= TURN_FRICTION * dt;
+            if (p->pitch_vel < 0) p->pitch_vel = 0;
+        } else if (p->pitch_vel < 0) {
+            p->pitch_vel += TURN_FRICTION * dt;
+            if (p->pitch_vel > 0) p->pitch_vel = 0;
+        }
+    }
+    p->pitch_vel = clampf(p->pitch_vel, -TURN_SPEED, TURN_SPEED);
+    p->pitch += p->pitch_vel * dt;
+    p->pitch = clampf(p->pitch, -89, 89);
+
+    float speed = IsGamepadButtonDown(player_idx, GAMEPAD_BUTTON_RIGHT_TRIGGER_2) ? CREATIVE_FLY_SPEED_FAST : CREATIVE_FLY_SPEED;
     Vector3 forward = player_forward(p);
     Vector3 right = v_norm(v_cross(forward, (Vector3){ 0.0f, 1.0f, 0.0f }));
     Vector3 up = (Vector3){ 0.0f, 1.0f, 0.0f };
     Vector3 move = { 0 };
-    if (IsKeyDown(KEY_W)) move = v_add(move, forward);
-    if (IsKeyDown(KEY_S)) move = v_add(move, v_mul(forward, -1.0f));
-    if (IsKeyDown(KEY_A)) move = v_add(move, v_mul(right, -1.0f));
-    if (IsKeyDown(KEY_D)) move = v_add(move, right);
-    if (IsKeyDown(KEY_Q)) move = v_add(move, v_mul(up, -1.0f));
-    if (IsKeyDown(KEY_E)) move = v_add(move, up);
+    float move_x = GetGamepadAxisMovement(player_idx, GAMEPAD_AXIS_LEFT_X);
+    float move_y = GetGamepadAxisMovement(player_idx, GAMEPAD_AXIS_LEFT_Y);
+    if (fabsf(move_y) > GAMEPAD_DEADZONE) {
+        move = v_add(move, v_mul(forward, -move_y));
+    }
+    if (fabsf(move_x) > GAMEPAD_DEADZONE) {
+        move = v_add(move, v_mul(right, move_x));
+    }
+    if (IsGamepadButtonDown(player_idx, GAMEPAD_BUTTON_LEFT_TRIGGER_1)) {
+        move = v_add(move, v_mul(up, -1.0f));
+    }
+    if (IsGamepadButtonDown(player_idx, GAMEPAD_BUTTON_RIGHT_TRIGGER_1)) {
+        move = v_add(move, up);
+    }
     float len = v_length(move);
     if (len > 0.01f) {
         move = v_mul(move, 1.0f / len);
         p->pos = v_add(p->pos, v_mul(move, speed * dt));
     }
 
-    if (IsKeyPressed(KEY_LEFT_BRACKET)) {
-        creativeBrushSpan = clampi(creativeBrushSpan - 1, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
+    if (IsGamepadButtonPressed(player_idx, GAMEPAD_BUTTON_LEFT_FACE_LEFT)) {
+        creativeBrushSpan[player_idx] = clampi(creativeBrushSpan[player_idx] - 1, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
     }
-    if (IsKeyPressed(KEY_RIGHT_BRACKET)) {
-        creativeBrushSpan = clampi(creativeBrushSpan + 1, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
+    if (IsGamepadButtonPressed(player_idx, GAMEPAD_BUTTON_LEFT_FACE_RIGHT)) {
+        creativeBrushSpan[player_idx] = clampi(creativeBrushSpan[player_idx] + 1, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
     }
+    if (IsGamepadButtonPressed(player_idx, GAMEPAD_BUTTON_LEFT_FACE_UP)) {
+        creativeBlockColorIndex[player_idx]--;
+    }
+    if (IsGamepadButtonPressed(player_idx, GAMEPAD_BUTTON_LEFT_FACE_DOWN)) {
+        creativeBlockColorIndex[player_idx]++;
+    }
+    if (IsGamepadButtonPressed(player_idx, GAMEPAD_BUTTON_RIGHT_FACE_DOWN)) {
+        creativePickupType[player_idx] = (creativePickupType[player_idx] + 1) % 4;
+    }
+    if (IsGamepadButtonPressed(player_idx, GAMEPAD_BUTTON_RIGHT_TRIGGER_2)) {
+        creative_place_voxels(player_idx);
+    }
+    if (IsGamepadButtonPressed(player_idx, GAMEPAD_BUTTON_LEFT_TRIGGER_2)) {
+        creative_remove_voxels(player_idx);
+    }
+    if (IsGamepadButtonPressed(player_idx, GAMEPAD_BUTTON_RIGHT_FACE_LEFT)) {
+        creative_place_pickup(player_idx);
+    }
+    if (IsGamepadButtonPressed(player_idx, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT)) {
+        creative_remove_pickup(player_idx);
+    }
+    if (IsGamepadButtonPressed(player_idx, GAMEPAD_BUTTON_RIGHT_FACE_UP)) {
+        creative_activate_structure(player_idx);
+    }
+    if (IsGamepadButtonPressed(player_idx, GAMEPAD_BUTTON_RIGHT_THUMB)) {
+        creativeHelpVisible[player_idx] = !creativeHelpVisible[player_idx];
+    }
+}
 
-    if (IsKeyPressed(KEY_TAB)) {
-        creativePickupType = (creativePickupType + 1) % 4;
-    }
-    if (IsKeyPressed(KEY_V)) {
-        creativeBlockColorIndex++;
-    }
-    if (IsKeyPressed(KEY_B)) {
-        creativeBlockColorIndex--;
-    }
-
-    if (IsKeyPressed(KEY_LEFT_CONTROL)) {
-        creative_place_voxels(0);
-    }
-    if (IsKeyPressed(KEY_LEFT_ALT)) {
-        creative_remove_voxels(0);
-    }
-    if (IsKeyPressed(KEY_P)) {
-        creative_place_pickup(0);
-    }
-    if (IsKeyPressed(KEY_BACKSPACE)) {
-        creative_remove_pickup(0);
+static void update_creative_mode(float dt) {
+    for (int i = 0; i < activePlayers; ++i) {
+        if (playerInput[i] == INPUT_TYPE_KEYBOARD) {
+            update_creative_player_keyboard(i, dt);
+        } else if (playerInput[i] == INPUT_TYPE_GAMEPAD) {
+            update_creative_player_gamepad(i, dt);
+        }
     }
 
     if (IsKeyDown(KEY_LEFT_CONTROL) && IsKeyPressed(KEY_ONE)) {
@@ -6750,6 +6953,86 @@ static void update_creative_mode(float dt) {
     }
     if (IsKeyDown(KEY_LEFT_ALT) && IsKeyPressed(KEY_THREE)) {
         load_map_slot(2);
+    }
+}
+
+static void draw_creative_help_overlay(int player_idx, int view_w, int view_h) {
+    if (!creativeHelpVisible[player_idx]) {
+        return;
+    }
+
+    const int font = 18;
+    const int pad = 12;
+    const int line_gap = 6;
+    const int max_lines = 16;
+    const char *lines[max_lines];
+    int count = 0;
+    char title[64];
+
+    if (playerInput[player_idx] == INPUT_TYPE_GAMEPAD) {
+        snprintf(title, sizeof(title), "Creative Help (toggle: R3)");
+        lines[count++] = title;
+        lines[count++] = "Move: Left Stick";
+        lines[count++] = "Look: Right Stick";
+        lines[count++] = "Up/Down: RB/LB";
+        lines[count++] = "Fast Fly: Hold RT";
+        lines[count++] = "Brush: D-pad Left/Right";
+        lines[count++] = "Color: D-pad Up/Down";
+        lines[count++] = "Pickup Type: A";
+        lines[count++] = "Place Voxels: RT";
+        lines[count++] = "Remove Voxels: LT";
+        lines[count++] = "Place Pickup: X";
+        lines[count++] = "Remove Pickup: B";
+        lines[count++] = "Activate: Y";
+    } else if (player_idx == 0) {
+        snprintf(title, sizeof(title), "Creative Help (toggle: /)");
+        lines[count++] = title;
+        lines[count++] = "Move: WASD";
+        lines[count++] = "Look: F/H, T/G";
+        lines[count++] = "Up/Down: Q/E";
+        lines[count++] = "Fast Fly: Left Shift";
+        lines[count++] = "Brush: [ ]";
+        lines[count++] = "Color: V/B";
+        lines[count++] = "Pickup Type: Tab";
+        lines[count++] = "Place Voxels: Left Ctrl";
+        lines[count++] = "Remove Voxels: Left Alt";
+        lines[count++] = "Place Pickup: P";
+        lines[count++] = "Remove Pickup: Backspace";
+        lines[count++] = "Activate: K";
+    } else {
+        snprintf(title, sizeof(title), "Creative Help (toggle: KP /)");
+        lines[count++] = title;
+        lines[count++] = "Move: IJKL";
+        lines[count++] = "Look: Arrows";
+        lines[count++] = "Up/Down: U/O";
+        lines[count++] = "Fast Fly: Left Shift";
+        lines[count++] = "Brush: KP -/+";
+        lines[count++] = "Color: KP 1/2";
+        lines[count++] = "Pickup Type: KP *";
+        lines[count++] = "Place Voxels: Right Ctrl";
+        lines[count++] = "Remove Voxels: Right Shift";
+        lines[count++] = "Place Pickup: KP 0";
+        lines[count++] = "Remove Pickup: KP .";
+        lines[count++] = "Activate: KP Enter";
+    }
+
+    int max_w = 0;
+    for (int i = 0; i < count; ++i) {
+        int w = MeasureText(lines[i], font);
+        if (w > max_w) max_w = w;
+    }
+
+    int box_w = max_w + pad * 2;
+    int box_h = count * font + (count - 1) * line_gap + pad * 2;
+    int x = HUD_PADDING_X;
+    int y = HUD_PADDING_Y + HUD_FONT_SIZE + 26;
+    if (y + box_h > view_h - 10) {
+        y = view_h - box_h - 10;
+    }
+
+    DrawRectangle(x - pad, y - pad, box_w, box_h, Fade(BLACK, 0.55f));
+    for (int i = 0; i < count; ++i) {
+        DrawText(lines[i], x, y + i * (font + line_gap), font, WHITE);
     }
 }
 
@@ -12570,13 +12853,15 @@ static void render_gameplay_view(RenderTexture2D *screens,
             get_viewport(i, activePlayers, &view_x, &view_y, &view_w, &view_h);
             DrawRectangle(0, 0, view_w, HUD_BAR_HEIGHT, Fade(BLACK, 0.5f));
             if (creative_mode) {
-                Color c = creative_block_palette(creativeBlockColorIndex);
-                const char *label = TextFormat("CREATIVE | Brush %d | Pickup %s | Color %d",
-                                               creativeBrushSpan,
-                                               pickup_type_label((PickupType)creativePickupType),
-                                               (creativeBlockColorIndex % 6 + 6) % 6 + 1);
+                Color c = creative_block_palette(creativeBlockColorIndex[i]);
+                const char *label = TextFormat("P%d CREATIVE | Brush %d | Pickup %s | Color %d",
+                                               i + 1,
+                                               creativeBrushSpan[i],
+                                               pickup_type_label((PickupType)creativePickupType[i]),
+                                               (creativeBlockColorIndex[i] % 6 + 6) % 6 + 1);
                 DrawText(label, HUD_PADDING_X, HUD_PADDING_Y, HUD_FONT_SIZE, WHITE);
                 DrawRectangle(HUD_PADDING_X + 8, HUD_PADDING_Y + HUD_FONT_SIZE + 4, 36, 14, c);
+                draw_creative_help_overlay(i, view_w, view_h);
             } else {
                 DrawText(TextFormat("P%d | Shmush: %d | Kills: %d Deaths: %d",
                                     i + 1, players[i].debrisKills, players[i].kills, players[i].deaths),
@@ -13147,6 +13432,27 @@ int main(void) {
                 float dt = GetFrameTime();
                 update_pickups(dt);
                 update_creative_mode(dt);
+                activate_static_voxels_near_dynamic();
+                update_projectiles(dt);
+                prepare_tether_forces();
+                pbdTimeAccumulator += dt;
+                float pbd_fixed_dt = PBD_MAX_STEP_DT;
+                float pbd_max_accum = pbd_fixed_dt * (float)PBD_MAX_ACCUM_STEPS;
+                if (pbdTimeAccumulator > pbd_max_accum) {
+                    pbdTimeAccumulator = pbd_max_accum;
+                }
+                while (pbdTimeAccumulator >= pbd_fixed_dt) {
+                    simulate_voxel_pbd(pbd_fixed_dt);
+                    pbdTimeAccumulator -= pbd_fixed_dt;
+                }
+                recycle_dead_voxels();
+                log_dynamic_glue_cluster_breaks();
+                handle_pbd_projectile_hits();
+                voxelHashFramesSinceRebuild++;
+                if (voxelHashFramesSinceRebuild >= VOXEL_HASH_REBUILD_INTERVAL) {
+                    rebuild_voxel_hash();
+                }
+                deactivate_sleeping_voxels();
                 if (IsKeyPressed(KEY_M) || IsKeyPressed(KEY_ESCAPE)) {
                     gameState = GAME_STATE_MENU;
                 }

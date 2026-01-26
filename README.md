@@ -126,9 +126,37 @@ Creative mode lets you fly around an empty world and build voxel maps that can b
 *   **Cycle Pickup Type:** Tab
 *   **Place Pickup:** P
 *   **Remove Nearest Pickup:** Backspace
+*   **Activate Structure (Make Dynamic):** K
 *   **Save Map Slot:** Ctrl + 1/2/3
 *   **Load Map Slot:** Alt + 1/2/3
 *   **Exit Creative:** M or Esc
+
+### Creative Controls (Player 2 Keyboard)
+*   **Move:** IJKL
+*   **Look:** Arrow Keys
+*   **Up/Down:** O / U
+*   **Brush Size:** Numpad - / +
+*   **Cycle Block Color:** Numpad 1/2
+*   **Cycle Pickup Type:** Numpad *
+*   **Place Voxels:** Right Ctrl
+*   **Remove Voxels:** Right Shift
+*   **Place Pickup:** Numpad 0
+*   **Remove Nearest Pickup:** Numpad .
+*   **Activate Structure:** Numpad Enter
+
+### Creative Controls (Gamepad)
+*   **Move:** Left Stick
+*   **Look:** Right Stick
+*   **Up/Down:** RB / LB
+*   **Faster Fly:** RT (hold)
+*   **Brush Size:** D-pad Left/Right
+*   **Cycle Block Color:** D-pad Up/Down
+*   **Cycle Pickup Type:** A
+*   **Place Voxels:** RT (press)
+*   **Remove Voxels:** LT (press)
+*   **Place Pickup:** X
+*   **Remove Nearest Pickup:** B
+*   **Activate Structure:** Y
 
 ### Custom Map in Multiplayer
 *   **Toggle Custom Map:** U (Main Menu)
