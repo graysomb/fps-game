@@ -204,8 +204,8 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define MAX_STATIC_COLLISION_NEIGHBORS 64
 #define PLAYER_SIZE 0.5f
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
-#define VGS_ALPHA 0.5f
-#define VGS_BETA 0.5f
+#define VGS_ALPHA 0.9f
+#define VGS_BETA 0.9f
 #define VGS_ITERS 2
 #define VGS_EPS 1e-6f
 #define VGS_EARLY_OUT_EPS 0.0002f
@@ -214,10 +214,10 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define VOXEL_PARTICLE_COUNT 9
 #define TARGET_FRAME_RATE 60
 #define PBD_MAX_STEP_DT 1.0f/TARGET_FRAME_RATE
-#define PBD_SUBSTEPS 4
-#define PBD_CONSTRAINT_ITERS 1
+#define PBD_SUBSTEPS 2
+#define PBD_CONSTRAINT_ITERS 3
 #define PBD_SOR_FACTOR 1.0f
-#define BREAK_DAMP_FRAMES 10
+#define BREAK_DAMP_FRAMES 0
 #define COARSENING_WAKE_FRAMES 30
 #define COARSENING_MASS_SCALE 0.1f
 #define STRAIN_BREAK_THRESHOLD 0.2f
@@ -236,7 +236,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 3
 #define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
 #define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
-#define RECYCLE_DYNAMIC_MAX_FRAMES (60 * 5)
+#define RECYCLE_DYNAMIC_MAX_FRAMES (60 * 10)
 #define RECYCLE_STATIC_RESTORE_INTERVAL 1
 #define RECYCLE_STATIC_RESTORE_DELAY (60 * 30)
 #define RECYCLE_OWNED_STATIC_MAX_FRAMES (60 * 60)
@@ -258,9 +258,9 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define VOXEL_ACTIVATION_RADIUS 2*1
 //#define VOXEL_ACTIVATION_UNIT_BUDGET 128
 #define VOXEL_ACTIVATION_UNIT_BUDGET 128*5
-#define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 2.0f
-#define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.15f
-#define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.15f
+#define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 1.0f
+#define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.05f
+#define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.05f
 #define VOXEL_DEACTIVATION_FRAMES 100
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
 #define STATIC_RESTORE_SEARCH_RADIUS 2*1
@@ -3608,17 +3608,17 @@ static void break_face_link(Voxel *voxel, int face_index) {
         return;
     }
 
-    int nx = voxel->gx + face_offsets[face_index][0];
-    int ny = voxel->gy + face_offsets[face_index][1];
-    int nz = voxel->gz + face_offsets[face_index][2];
-    int neighbor_idx = table_get(nx, ny, nz);
+    // int nx = voxel->gx + face_offsets[face_index][0];
+    // int ny = voxel->gy + face_offsets[face_index][1];
+    // int nz = voxel->gz + face_offsets[face_index][2];
+    // int neighbor_idx = table_get(nx, ny, nz);
 
     detach_face_particles(voxel, face_index);
     voxel->glued_faces[face_index] = false;
 
-    if (neighbor_idx < 0) {
-        return;
-    }
+    // if (neighbor_idx < 0) {
+    //     return;
+    // }
 
     // Voxel *neighbor = &voxels[neighbor_idx];
     // int opposite = opposite_face[face_index];
@@ -8035,6 +8035,103 @@ static void decrement_particle_timers(void) {
     }
 }
 
+static void gather_voxel_break_masks(Voxel *voxel) {
+    if (!voxel->simulate || voxel->isBullet || voxel->type != 0) {
+        return;
+    }
+    if (voxel->rest_edge <= 0.0f) {
+        return;
+    }
+
+    Vector3 p[8];
+    for (int i = 0; i < 8; ++i) {
+        Particle *part = voxel->particles[i];
+        p[i] = part->predicted_pos;
+    }
+
+    Vector3 v0 = v_add(v_add(v_sub(p[1], p[0]), v_sub(p[3], p[2])),
+                       v_add(v_sub(p[5], p[4]), v_sub(p[7], p[6])));
+    v0 = v_mul(v0, 0.25f);
+
+    Vector3 v1 = v_add(v_add(v_sub(p[2], p[0]), v_sub(p[3], p[1])),
+                       v_add(v_sub(p[6], p[4]), v_sub(p[7], p[5])));
+    v1 = v_mul(v1, 0.25f);
+
+    Vector3 v2 = v_add(v_add(v_sub(p[4], p[0]), v_sub(p[5], p[1])),
+                       v_add(v_sub(p[6], p[2]), v_sub(p[7], p[3])));
+    v2 = v_mul(v2, 0.25f);
+
+    float len_v0 = v_length(v0);
+    float len_v1 = v_length(v1);
+    float len_v2 = v_length(v2);
+
+    float strain_x = fabsf(len_v0 - voxel->rest_edge) / voxel->rest_edge;
+    float strain_y = fabsf(len_v1 - voxel->rest_edge) / voxel->rest_edge;
+    float strain_z = fabsf(len_v2 - voxel->rest_edge) / voxel->rest_edge;
+
+    bool exceeded = false;
+    voxel->break_mask = 0;
+
+    if (strain_x > STRAIN_BREAK_THRESHOLD) {
+        exceeded = true;
+        if (voxel->glued_faces[0]) voxel->break_mask |= (uint8_t)(1u << 0);
+        if (voxel->glued_faces[1]) voxel->break_mask |= (uint8_t)(1u << 1);
+    }
+    if (strain_y > STRAIN_BREAK_THRESHOLD) {
+        exceeded = true;
+        if (voxel->glued_faces[2]) voxel->break_mask |= (uint8_t)(1u << 2);
+        if (voxel->glued_faces[3]) voxel->break_mask |= (uint8_t)(1u << 3);
+    }
+    if (strain_z > STRAIN_BREAK_THRESHOLD) {
+        exceeded = true;
+        if (voxel->glued_faces[4]) voxel->break_mask |= (uint8_t)(1u << 4);
+        if (voxel->glued_faces[5]) voxel->break_mask |= (uint8_t)(1u << 5);
+    }
+
+    float inv_len0 = (len_v0 > VGS_EPS) ? 1.0f / len_v0 : 0.0f;
+    float inv_len1 = (len_v1 > VGS_EPS) ? 1.0f / len_v1 : 0.0f;
+    float inv_len2 = (len_v2 > VGS_EPS) ? 1.0f / len_v2 : 0.0f;
+
+    float shear_xy = (inv_len0 > 0.0f && inv_len1 > 0.0f)
+        ? fabsf(v_dot(v0, v1)) * inv_len0 * inv_len1
+        : 0.0f;
+    float shear_xz = (inv_len0 > 0.0f && inv_len2 > 0.0f)
+        ? fabsf(v_dot(v0, v2)) * inv_len0 * inv_len2
+        : 0.0f;
+    float shear_yz = (inv_len1 > 0.0f && inv_len2 > 0.0f)
+        ? fabsf(v_dot(v1, v2)) * inv_len1 * inv_len2
+        : 0.0f;
+
+    if (shear_xy > SHEAR_BREAK_THRESHOLD) {
+        exceeded = true;
+        if (voxel->glued_faces[4]) voxel->break_mask |= (uint8_t)(1u << 4);
+        if (voxel->glued_faces[5]) voxel->break_mask |= (uint8_t)(1u << 5);
+    }
+    if (shear_xz > SHEAR_BREAK_THRESHOLD) {
+        exceeded = true;
+        if (voxel->glued_faces[2]) voxel->break_mask |= (uint8_t)(1u << 2);
+        if (voxel->glued_faces[3]) voxel->break_mask |= (uint8_t)(1u << 3);
+    }
+    if (shear_yz > SHEAR_BREAK_THRESHOLD) {
+        exceeded = true;
+        if (voxel->glued_faces[0]) voxel->break_mask |= (uint8_t)(1u << 0);
+        if (voxel->glued_faces[1]) voxel->break_mask |= (uint8_t)(1u << 1);
+    }
+
+    if (exceeded) {
+        voxel->wake_source = true;
+    }
+}
+
+static void gather_voxel_break_masks_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    (void)user;
+    for (int i = start; i < end; ++i) {
+        Voxel *voxel = &voxels[i];
+        gather_voxel_break_masks(voxel);
+    }
+}
+
 typedef struct {
     Vector3 gravity;
     float dt;
@@ -8364,64 +8461,6 @@ static void gather_voxel_shape_constraints(Voxel *voxel) {
         float len_v0 = v_length(v0);
         float len_v1 = v_length(v1);
         float len_v2 = v_length(v2);
-
-        if (voxel->rest_edge > 0.0f) {
-            float strain_x = fabsf(len_v0 - voxel->rest_edge) / voxel->rest_edge;
-            float strain_y = fabsf(len_v1 - voxel->rest_edge) / voxel->rest_edge;
-            float strain_z = fabsf(len_v2 - voxel->rest_edge) / voxel->rest_edge;
-
-            bool exceeded = false;
-
-            if (strain_x > STRAIN_BREAK_THRESHOLD) {
-                exceeded = true;
-                if (voxel->glued_faces[0]) voxel->break_mask |= (uint8_t)(1u << 0);
-                if (voxel->glued_faces[1]) voxel->break_mask |= (uint8_t)(1u << 1);
-            }
-            if (strain_y > STRAIN_BREAK_THRESHOLD) {
-                exceeded = true;
-                if (voxel->glued_faces[2]) voxel->break_mask |= (uint8_t)(1u << 2);
-                if (voxel->glued_faces[3]) voxel->break_mask |= (uint8_t)(1u << 3);
-            }
-            if (strain_z > STRAIN_BREAK_THRESHOLD) {
-                exceeded = true;
-                if (voxel->glued_faces[4]) voxel->break_mask |= (uint8_t)(1u << 4);
-                if (voxel->glued_faces[5]) voxel->break_mask |= (uint8_t)(1u << 5);
-            }
-
-            float inv_len0 = (len_v0 > VGS_EPS) ? 1.0f / len_v0 : 0.0f;
-            float inv_len1 = (len_v1 > VGS_EPS) ? 1.0f / len_v1 : 0.0f;
-            float inv_len2 = (len_v2 > VGS_EPS) ? 1.0f / len_v2 : 0.0f;
-
-            float shear_xy = (inv_len0 > 0.0f && inv_len1 > 0.0f)
-                ? fabsf(v_dot(v0, v1)) * inv_len0 * inv_len1
-                : 0.0f;
-            float shear_xz = (inv_len0 > 0.0f && inv_len2 > 0.0f)
-                ? fabsf(v_dot(v0, v2)) * inv_len0 * inv_len2
-                : 0.0f;
-            float shear_yz = (inv_len1 > 0.0f && inv_len2 > 0.0f)
-                ? fabsf(v_dot(v1, v2)) * inv_len1 * inv_len2
-                : 0.0f;
-
-            if (shear_xy > SHEAR_BREAK_THRESHOLD) {
-                exceeded = true;
-                if (voxel->glued_faces[4]) voxel->break_mask |= (uint8_t)(1u << 4);
-                if (voxel->glued_faces[5]) voxel->break_mask |= (uint8_t)(1u << 5);
-            }
-            if (shear_xz > SHEAR_BREAK_THRESHOLD) {
-                exceeded = true;
-                if (voxel->glued_faces[2]) voxel->break_mask |= (uint8_t)(1u << 2);
-                if (voxel->glued_faces[3]) voxel->break_mask |= (uint8_t)(1u << 3);
-            }
-            if (shear_yz > SHEAR_BREAK_THRESHOLD) {
-                exceeded = true;
-                if (voxel->glued_faces[0]) voxel->break_mask |= (uint8_t)(1u << 0);
-                if (voxel->glued_faces[1]) voxel->break_mask |= (uint8_t)(1u << 1);
-            }
-
-            if (exceeded) {
-                voxel->wake_source = true;
-            }
-        }
 
         if (!voxel->simulate_dofs) {
             return;
@@ -10087,6 +10126,7 @@ void simulate_voxel_pbd(float dt) {
 
         solve_static_collisions(sub_dt);
 
+        pbd_parallel_for(0, voxel_count, gather_voxel_break_masks_range, NULL);
         process_break_masks();
         update_wake_timers();
 
