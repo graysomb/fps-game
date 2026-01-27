@@ -2582,6 +2582,7 @@ typedef struct {
 static Bucket table[HASH_SIZE]; // Deprecated, will be replaced by dynamic_table
 static Bucket static_table[HASH_SIZE];
 static Bucket dynamic_table[HASH_SIZE];
+static bool staticHashDirty = false;
 
 typedef struct {
     uint64_t key;
@@ -2643,6 +2644,19 @@ static void init_static_hash(void) {
             }
         }
     }
+}
+
+static void mark_static_hash_dirty(void) {
+    staticHashDirty = true;
+}
+
+static void rebuild_static_hash_if_dirty(void) {
+    if (!staticHashDirty) {
+        return;
+    }
+    init_static_hash();
+    table_cache_invalidate();
+    staticHashDirty = false;
 }
 
 static void static_table_insert(int x, int y, int z, int idx)
@@ -2844,6 +2858,7 @@ static void remove_voxel_index(int idx)
     Voxel *victim = &voxels[idx];
     if (!victim->simulate) {
         mark_static_beliefs_dirty_for_voxel(victim);
+        mark_static_hash_dirty();
     }
     voxel_table_unregister(victim);
     for (int j = 0; j < 8; ++j) {
@@ -3509,6 +3524,7 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     voxel_table_register(v, idx);
     if (!simulate) {
         mark_static_beliefs_dirty_for_voxel(v);
+        mark_static_hash_dirty();
     }
     return idx;
 }
@@ -9910,7 +9926,7 @@ static void solve_static_collisions_range(int start, int end, int worker_id, voi
     StaticCollisionJob *job = (StaticCollisionJob *)user;
     float half_player = job->half_player;
     const float eps = 1e-6f;
-    const float static_collision_radius = 0.01f * VOXEL_SIZE;
+    const float static_collision_radius = 0.25f * VOXEL_SIZE;
 
     for (int i = start; i < end; ++i) {
         Particle *p = sim_particles[i];
@@ -13518,6 +13534,7 @@ int main(void) {
         update_projectiles(dt);
         update_pickups(dt); // Update pickups
         prepare_tether_forces();
+        rebuild_static_hash_if_dirty();
         pbdTimeAccumulator += dt;
         float pbd_fixed_dt = PBD_MAX_STEP_DT;
         float pbd_max_accum = pbd_fixed_dt * (float)PBD_MAX_ACCUM_STEPS;
@@ -13536,6 +13553,7 @@ int main(void) {
             rebuild_voxel_hash();
         }
         deactivate_sleeping_voxels();
+        rebuild_static_hash_if_dirty();
         update_points_animation(dt);
         if (debugLogFall) {
             int fall_log_budget = DEBUG_FALL_LOG_BUDGET;
@@ -13595,6 +13613,7 @@ int main(void) {
                 activate_static_voxels_near_dynamic();
                 update_projectiles(dt);
                 prepare_tether_forces();
+                rebuild_static_hash_if_dirty();
                 pbdTimeAccumulator += dt;
                 float pbd_fixed_dt = PBD_MAX_STEP_DT;
                 float pbd_max_accum = pbd_fixed_dt * (float)PBD_MAX_ACCUM_STEPS;
@@ -13613,6 +13632,7 @@ int main(void) {
                     rebuild_voxel_hash();
                 }
                 deactivate_sleeping_voxels();
+                rebuild_static_hash_if_dirty();
                 if (IsKeyPressed(KEY_M) || IsKeyPressed(KEY_ESCAPE)) {
                     gameState = GAME_STATE_MENU;
                 }
