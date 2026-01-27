@@ -204,8 +204,8 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define MAX_STATIC_COLLISION_NEIGHBORS 64
 #define PLAYER_SIZE 0.5f
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
-#define VGS_ALPHA 0.9f
-#define VGS_BETA 0.9f
+#define VGS_ALPHA 0.5f
+#define VGS_BETA 0.5f
 #define VGS_ITERS 2
 #define VGS_EPS 1e-6f
 #define VGS_EARLY_OUT_EPS 0.0002f
@@ -214,14 +214,14 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define VOXEL_PARTICLE_COUNT 9
 #define TARGET_FRAME_RATE 60
 #define PBD_MAX_STEP_DT 1.0f/TARGET_FRAME_RATE
-#define PBD_SUBSTEPS 2
-#define PBD_CONSTRAINT_ITERS 3
+#define PBD_SUBSTEPS 4
+#define PBD_CONSTRAINT_ITERS 1
 #define PBD_SOR_FACTOR 1.0f
-#define BREAK_DAMP_FRAMES 50
+#define BREAK_DAMP_FRAMES 10
 #define COARSENING_WAKE_FRAMES 30
 #define COARSENING_MASS_SCALE 0.1f
-#define STRAIN_BREAK_THRESHOLD 0.3f
-#define SHEAR_BREAK_THRESHOLD 0.3f
+#define STRAIN_BREAK_THRESHOLD 0.2f
+#define SHEAR_BREAK_THRESHOLD 0.2f
 #define PBD_MAX_ACCUM_STEPS 8
 #define COLLISION_RELAXATION 0.99f
 #define COLLISION_CENTROID_ONLY_DT 10.2f
@@ -261,7 +261,7 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 2.0f
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.15f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.15f
-#define VOXEL_DEACTIVATION_FRAMES 10
+#define VOXEL_DEACTIVATION_FRAMES 100
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
 #define STATIC_RESTORE_SEARCH_RADIUS 2*1
 #define DEBRIS_ACTIVATION_COOLDOWN_FRAMES (60 * 10)
@@ -3620,9 +3620,9 @@ static void break_face_link(Voxel *voxel, int face_index) {
         return;
     }
 
-    Voxel *neighbor = &voxels[neighbor_idx];
-    int opposite = opposite_face[face_index];
-    neighbor->glued_faces[opposite] = false;
+    // Voxel *neighbor = &voxels[neighbor_idx];
+    // int opposite = opposite_face[face_index];
+    // neighbor->glued_faces[opposite] = false;
 }
 
 static inline size_t unit_voxel_grid_index(int x, int y, int z,
@@ -5947,13 +5947,14 @@ static void buildDebugWorld(void) {
     // emit_static_voxels_from_units(&pyramid_units);
     //Span-2 dynamic voxel near origin for floor collision testing
     {
-        int span = 8;
+        int span1 = 3;
+        int span2 = 30;
         float px = -2.0f * VOXEL_SIZE;
         float pz = 2.0f * VOXEL_SIZE;
-        float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
-        for ( int x = 0; x < span; x++){
-            for ( int z = 0; z < span; z++){
-                for ( int y = 0; y < span; y++){
+        float py = 0.0f;
+        for ( int x = 0; x < span1; x++){
+            for ( int z = 0; z < span1; z++){
+                for ( int y = 0; y < span2; y++){
             addVoxel(px + x * VOXEL_SIZE, py + y * VOXEL_SIZE, pz + z * VOXEL_SIZE,
                      true, false, (Color){ 240, 160, 60, 255 }, 0);
                      //false, true, (Color){ 240, 160, 60, 255 }, 0);
@@ -5997,10 +5998,10 @@ static void buildDebugWorld(void) {
 
 // Build static demo cube of voxels
 static void buildDemo(void) {
-    buildTestWorld();
-    buildProceduralWorld();
+    //buildTestWorld();
+    //buildProceduralWorld();
     //buildBloodWorld();
-    //buildDebugWorld();
+    buildDebugWorld();
     rebuild_glue_constraints();
 }
 
