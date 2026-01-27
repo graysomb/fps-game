@@ -5998,10 +5998,10 @@ static void buildDebugWorld(void) {
 
 // Build static demo cube of voxels
 static void buildDemo(void) {
-    //buildTestWorld();
+    buildTestWorld();
     //buildProceduralWorld();
     //buildBloodWorld();
-    buildDebugWorld();
+    //buildDebugWorld();
     rebuild_glue_constraints();
 }
 
