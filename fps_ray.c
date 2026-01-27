@@ -471,6 +471,8 @@ static int particle_hash_next[MAX_PARTICLES];
 static Particle *particle_snapshot[MAX_PARTICLES];
 static int glueClusterIndices[MAX_VOXELS];
 static unsigned char glueClusterVisited[MAX_VOXELS];
+static unsigned char sleepClusterVisited[MAX_VOXELS];
+static unsigned char voxelCalmFlags[MAX_VOXELS];
 static bool dynamicGlueClustersInitialized = false;
 #define DEBUG_CLUSTER_TAG_MAX 64
 static int debugTagOffset[DEBUG_CLUSTER_TAG_MAX][3];
@@ -499,6 +501,7 @@ static void voxel_measure_strain(const Voxel *voxel,
                                  float *out_max_shear);
 static int build_glue_cluster_indices(int start_idx, int *out_indices);
 static int gather_glued_neighbors(int voxel_idx, int *out, int max_out);
+static int gather_glued_neighbors_symmetric(int voxel_idx, int *out, int max_out);
 static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count);
 static void solve_static_collisions(float dt);
 static void solve_dynamic_collisions(float dt);
@@ -4955,12 +4958,9 @@ static bool deactivate_sleeping_voxels(void)
 
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
-        if (!voxel->simulate) {
+        if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
             voxel->sleepFrames = 0;
-            continue;
-        }
-        if (voxel->type != 0 || voxel->isBullet) {
-            voxel->sleepFrames = 0;
+            voxelCalmFlags[i] = 0;
             continue;
         }
 
@@ -4970,19 +4970,73 @@ static bool deactivate_sleeping_voxels(void)
         voxel_measure_strain(voxel, &strain, &shear);
         bool calm = (speed < VOXEL_DEACTIVATION_VELOCITY_THRESHOLD) &&
                     (strain < VOXEL_DEACTIVATION_STRAIN_THRESHOLD) &&
-                    (shear < VOXEL_DEACTIVATION_SHEAR_THRESHOLD);
-        if (calm) {
-            if (voxel->sleepFrames < INT_MAX) {
-                voxel->sleepFrames++;
+                    (shear < VOXEL_DEACTIVATION_SHEAR_THRESHOLD) &&
+                    (voxel->wake_timer <= 0);
+        voxelCalmFlags[i] = calm ? 1u : 0u;
+    }
+
+    memset(sleepClusterVisited, 0, sizeof(unsigned char) * (size_t)voxel_count);
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
+            continue;
+        }
+        if (sleepClusterVisited[i]) {
+            continue;
+        }
+
+        int head = 0;
+        int tail = 0;
+        glueClusterIndices[tail++] = i;
+        sleepClusterVisited[i] = 1;
+
+        bool cluster_calm = (voxelCalmFlags[i] != 0);
+        int min_sleep = voxel->sleepFrames;
+
+        while (head < tail) {
+            int idx = glueClusterIndices[head++];
+            Voxel *member = &voxels[idx];
+            if (!voxelCalmFlags[idx]) {
+                cluster_calm = false;
             }
-        } else {
-            voxel->sleepFrames = 0;
+            if (member->sleepFrames < min_sleep) {
+                min_sleep = member->sleepFrames;
+            }
+            int neighbors[MAX_FACE_NEIGHBORS];
+            int neighbor_count = gather_glued_neighbors_symmetric(idx, neighbors, MAX_FACE_NEIGHBORS);
+            for (int n = 0; n < neighbor_count; ++n) {
+                int neighbor = neighbors[n];
+                if (neighbor < 0 || neighbor >= voxel_count) {
+                    continue;
+                }
+                if (sleepClusterVisited[neighbor]) {
+                    continue;
+                }
+                sleepClusterVisited[neighbor] = 1;
+                if (tail < MAX_VOXELS) {
+                    glueClusterIndices[tail++] = neighbor;
+                }
+            }
+        }
+
+        int next_sleep = cluster_calm ? min_sleep + 1 : 0;
+        if (cluster_calm && min_sleep >= INT_MAX) {
+            next_sleep = INT_MAX;
+        } else if (cluster_calm && next_sleep < min_sleep) {
+            next_sleep = INT_MAX;
+        }
+
+        for (int c = 0; c < tail; ++c) {
+            int member_idx = glueClusterIndices[c];
+            Voxel *member = &voxels[member_idx];
+            member->sleepFrames = next_sleep;
         }
     }
+
     int idx = 0;
     while (idx < voxel_count && remaining_budget > 0) {
         Voxel *voxel = &voxels[idx];
-        if (!voxel->simulate) {
+        if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
             ++idx;
             continue;
         }
@@ -4996,68 +5050,65 @@ static bool deactivate_sleeping_voxels(void)
             continue;
         }
 
-        int cluster_count = build_glue_cluster_indices(idx, glueClusterIndices);
-        if (cluster_count <= 0) {
-            if (debugLogVoxelDeactivation) {
-                TraceLog(LOG_INFO,
-                         "[Deactivate] voxel=%d sleep=%d cluster-empty",
-                         idx, voxel->sleepFrames);
+        memset(sleepClusterVisited, 0, sizeof(unsigned char) * (size_t)voxel_count);
+        int head = 0;
+        int tail = 0;
+        glueClusterIndices[tail++] = idx;
+        sleepClusterVisited[idx] = 1;
+
+        while (head < tail) {
+            int current = glueClusterIndices[head++];
+            int neighbors[MAX_FACE_NEIGHBORS];
+            int neighbor_count = gather_glued_neighbors_symmetric(current, neighbors, MAX_FACE_NEIGHBORS);
+            for (int n = 0; n < neighbor_count; ++n) {
+                int neighbor = neighbors[n];
+                if (neighbor < 0 || neighbor >= voxel_count) {
+                    continue;
+                }
+                if (sleepClusterVisited[neighbor]) {
+                    continue;
+                }
+                sleepClusterVisited[neighbor] = 1;
+                if (tail < MAX_VOXELS) {
+                    glueClusterIndices[tail++] = neighbor;
+                }
             }
+        }
+
+        int cluster_count = tail;
+        if (cluster_count <= 0) {
             ++idx;
             continue;
         }
 
         bool cluster_ready = true;
-        int cluster_fail_idx = -1;
-        int cluster_fail_sleep = 0;
-        const char *cluster_fail_reason = NULL;
         for (int c = 0; c < cluster_count; ++c) {
             int cidx = glueClusterIndices[c];
             if (cidx < 0 || cidx >= voxel_count) {
                 cluster_ready = false;
-                cluster_fail_idx = cidx;
-                cluster_fail_reason = "invalid-index";
                 break;
             }
             Voxel *member = &voxels[cidx];
-            if (!member->simulate || member->sleepFrames < VOXEL_DEACTIVATION_FRAMES) {
+            if (!member->simulate || member->type != 0 || member->isBullet ||
+                member->sleepFrames < VOXEL_DEACTIVATION_FRAMES) {
                 cluster_ready = false;
-                cluster_fail_idx = cidx;
-                cluster_fail_sleep = member->sleepFrames;
-                cluster_fail_reason = member->simulate ? "insufficient-sleep" : "static-member";
                 break;
             }
         }
 
         if (!cluster_ready) {
-            if (debugLogVoxelDeactivation) {
-                TraceLog(LOG_INFO,
-                         "[Deactivate] voxel=%d cluster_ready=false fail_idx=%d sleep=%d reason=%s",
-                         idx, cluster_fail_idx, cluster_fail_sleep,
-                         cluster_fail_reason ? cluster_fail_reason : "unknown");
-            }
             keep_cluster_awake(glueClusterIndices, cluster_count);
             ++idx;
             continue;
         }
 
         if (!glue_cluster_has_static_support(glueClusterIndices, cluster_count)) {
-            if (debugLogVoxelDeactivation) {
-                TraceLog(LOG_INFO,
-                         "[Deactivate] voxel=%d cluster=%d lacks static support",
-                         idx, cluster_count);
-            }
             keep_cluster_awake(glueClusterIndices, cluster_count);
             ++idx;
             continue;
         }
 
         if (!restore_glue_cluster_to_static(glueClusterIndices, cluster_count)) {
-            if (debugLogVoxelDeactivation) {
-                TraceLog(LOG_WARNING,
-                         "[Deactivate] voxel=%d cluster=%d restore failed",
-                         idx, cluster_count);
-            }
             ++idx;
             continue;
         }
@@ -8765,6 +8816,37 @@ static int gather_glued_neighbors(int voxel_idx, int *out, int max_out) {
             continue;
         }
         if (!voxels[nidx].simulate || voxels[nidx].isBullet) {
+            continue;
+        }
+        if (count < max_out) {
+            out[count++] = nidx;
+        }
+    }
+    return count;
+}
+
+static int gather_glued_neighbors_symmetric(int voxel_idx, int *out, int max_out) {
+    if (!out || max_out <= 0 || voxel_idx < 0 || voxel_idx >= voxel_count) {
+        return 0;
+    }
+    Voxel *v = &voxels[voxel_idx];
+    int count = 0;
+    for (int face = 0; face < 6; ++face) {
+        if (!v->glued_faces[face]) {
+            continue;
+        }
+        int nx = v->gx + face_offsets[face][0];
+        int ny = v->gy + face_offsets[face][1];
+        int nz = v->gz + face_offsets[face][2];
+        int nidx = table_get(nx, ny, nz);
+        if (nidx < 0 || nidx >= voxel_count) {
+            continue;
+        }
+        Voxel *neighbor = &voxels[nidx];
+        if (!neighbor->simulate || neighbor->isBullet || neighbor->type != 0) {
+            continue;
+        }
+        if (!neighbor->glued_faces[opposite_face[face]]) {
             continue;
         }
         if (count < max_out) {
