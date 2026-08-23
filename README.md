@@ -5,6 +5,8 @@ This is a vibe coded physics engine I made. Its kinda like Minecraft but fully s
 
 Currently the game motives interaction with the physics by requiring environment based kills or melee
 
+runs in linux and windows so far
+
 # Warning SLOP
 
 
