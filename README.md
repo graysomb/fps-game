@@ -1,7 +1,9 @@
 
 
 
-This is a vibe coded physics engine I made. Its kinda like Minecraft but fully simulated. I wanted it to be an FPS game but i'm not sure if thats going to work out
+This is a vibe coded physics engine I made. Its kinda like Minecraft but fully simulated. I wanted it to be an FPS game but i'm not sure if thats going to work out. Writing the physics was fun though! its currently a jacobi style PBD simulation with voxel gram-schmidt shape corrections ([paper] (https://dl.acm.org/doi/10.1145/3677388.3696322)) and glue. The voxels have a life cycle where they are greedily meshed (just like minecraft) until physically active, after which they enter the PBD loop.
+
+Currently the game motives interaction with the physics by requiring environment based kills or melee
 
 # Warning SLOP
 
