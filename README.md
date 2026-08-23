@@ -1,3 +1,11 @@
+
+
+
+This is a vibe coded physics engine I made. Its kinda like Minecraft but fully simulated. I wanted it to be an FPS game but i'm not sure if thats going to work out
+
+# Warning SLOP
+
+
 # Raylib Split-Screen FPS with Voxel PBD Physics
 
 This project is a split-screen First Person Shooter (FPS) prototype built using [Raylib](https://www.raylib.com/). It features a custom Voxel-based Position Based Dynamics (PBD) physics engine that supports destructible environments, multiscale voxels, and structural integrity.
