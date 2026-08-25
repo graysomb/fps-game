@@ -69,6 +69,11 @@ static bool physicsReportRequested = false;
 static int physicsSmokeSteps = 0;
 static int physicsSmokeVoxels = 2;
 
+static int debug_parse_argument(int argc, char **argv, int *index);
+static bool debug_run_requested(void);
+static bool debug_show_window_requested(void);
+static int run_debug_harness(void);
+
 const char *physics_backend_name(PhysicsBackendKind kind) {
     switch (kind) {
         case PHYSICS_BACKEND_AUTO: return "auto";
@@ -111,6 +116,13 @@ static bool parse_physics_arguments(int argc, char **argv) {
             physicsSmokeVoxels = atoi(arg + 23);
             if (physicsSmokeVoxels < 1) physicsSmokeVoxels = 1;
             if (physicsSmokeVoxels > 4096) physicsSmokeVoxels = 4096;
+            continue;
+        }
+        int debug_parse_result = debug_parse_argument(argc, argv, &i);
+        if (debug_parse_result < 0) {
+            return false;
+        }
+        if (debug_parse_result > 0) {
             continue;
         }
         const char *value = NULL;
@@ -3396,6 +3408,7 @@ static bool spawn_static_covering_voxel(const Voxel *voxel)
                     voxels[idx].owner = voxel->owner;
                     voxels[idx].lifeFrames = 0;
                 }
+                voxels[idx].debugClusterTag = voxel->debugClusterTag;
             }
         }
     }
@@ -7308,7 +7321,7 @@ static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float
     int previousCount = buffer.count;
     int added = collect_static_activation_cluster(voxel_idx, activator,
                                                   seed->gx, seed->gy, seed->gz,
-                                                  0.0f,
+                                                  -1.0f,
                                                   &buffer);
     if (added <= 0) {
         rollback_activation_buffer(&buffer, previousCount);
@@ -13421,14 +13434,20 @@ static bool run_physics_smoke_test(int steps) {
     return true;
 }
 
+#include "debug_harness.inc"
+
 #define FPS_EXIT_GPU_CONTEXT_UNAVAILABLE 78
 #define FPS_EXIT_GPU_INITIALIZATION_FAILED 79
 
 int main(int argc, char **argv) {
     if (!parse_physics_arguments(argc, argv)) return 2;
+    bool automatedRun = physicsSmokeSteps > 0 || debug_run_requested();
     int countFrame = 0;
     SetLoggingEnabled(false);
     SetTraceLogLevel(physicsReportRequested ? LOG_ALL : LOG_NONE);
+    if (debug_run_requested() && !debug_show_window_requested()) {
+        SetConfigFlags(FLAG_WINDOW_HIDDEN);
+    }
     // init window and render textures
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Split-Screen FPS (raylib)");
     if (!IsWindowReady()) {
@@ -13436,19 +13455,28 @@ int main(int argc, char **argv) {
         return FPS_EXIT_GPU_CONTEXT_UNAVAILABLE;
     }
     SetWindowState(FLAG_WINDOW_RESIZABLE);
-    init_sfx();
+    if (!automatedRun) init_sfx();
     SetTargetFPS(TARGET_FRAME_RATE);
     // seed RNG
-    srand(physicsSmokeSteps > 0 ? 1u : (unsigned)time(NULL));
-    // reset game state
-    ResetGame();
+    unsigned int randomSeed = automatedRun ? 1u : (unsigned int)time(NULL);
+    srand(randomSeed);
+    SetRandomSeed(randomSeed);
     // prepare split-screen render textures
     RenderTexture2D screens[MAX_PLAYERS] = { 0 };
     int renderPlayers = 0;
     int renderW = 0;
     int renderH = 0;
-    
-    ResetGame(); // Init for menu background
+
+    if (automatedRun) {
+        activePlayers = 0;
+        clear_world_voxels();
+        clear_pickups();
+        staticHashDirty = false;
+        init_static_hash();
+    } else {
+        ResetGame();
+        ResetGame(); // Init for menu background
+    }
     init_pbd_thread_pool();
     if (!initialize_physics_backend()) {
         fprintf(stderr, "Requested physics backend '%s' is unavailable: %s\n",
@@ -13464,6 +13492,23 @@ int main(int argc, char **argv) {
         shutdown_sfx();
         CloseWindow();
         return ok ? 0 : 3;
+    }
+    if (debug_run_requested()) {
+        int status = run_debug_harness();
+        shutdown_pbd_thread_pool();
+        gpu_physics_shutdown();
+        if (greedyMesh.vertices) {
+            UnloadMesh(greedyMesh);
+            greedyMesh = (Mesh){ 0 };
+        }
+        if (greedyMaterialInit) {
+            UnloadMaterial(greedyMaterial);
+            greedyMaterialInit = false;
+        }
+        shutdown_world_visuals();
+        shutdown_sfx();
+        CloseWindow();
+        return status;
     }
 
     // main loop

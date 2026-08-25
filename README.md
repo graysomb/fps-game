@@ -263,3 +263,43 @@ fps_ray --physics=cpu-mt --physics-smoke=60 --physics-smoke-voxels=256
 
 `FPS_FORCE_GPU_INIT_FAILURE`, `FPS_FORCE_GPU_STEP_FAILURE`, and
 `FPS_FORCE_CPU_ST` are available for testing the fallback paths.
+
+### Automated visual physics debugging
+
+Named debug scenarios build isolated voxel structures, run a deterministic fixed-step
+simulation, capture diagnostic PNGs, write a JSON report, and exit without requiring
+gameplay input. The window is hidden by default but an OpenGL context is still created
+for GPU physics and off-screen rendering.
+
+```bash
+fps_ray --physics=gpu --debug-scenario=sleep-wake-floating
+fps_ray --physics=cpu-st --debug-scenario=activation-floating --debug-show-window
+fps_ray --physics=cpu-mt --debug-scenario=dynamic-freefall --debug-steps=120 \
+  --debug-capture-steps=0,1,30,60,120 --debug-output=debug-artifacts/custom-run
+```
+
+Available scenarios are:
+
+* `dynamic-freefall`: creates an already-dynamic cluster to isolate basic integration.
+* `activation-floating`: activates an unsupported static cluster through the tether path.
+* `sleep-wake-floating`: sleeps a supported dynamic cluster, removes its support, then
+  activates it through the tether path.
+
+Without `--debug-output`, artifacts are written beneath
+`.build/bin/debug-artifacts/<scenario>/<active-backend>`. Each backend directory contains
+`report.json`, named setup-phase images when applicable, and images for simulation steps
+`0,1,5,15,30,60` by default. Debug runs require at least 60 steps so the report can make
+a meaningful fall assertion.
+
+Run all backends sequentially through the launcher with:
+
+```bash
+fps_ray --debug-matrix --debug-scenario=sleep-wake-floating
+```
+
+Matrix mode creates `gpu-gl43`, `cpu-mt`, and `cpu-st` subdirectories plus a combined
+`matrix.json`. An unavailable GPU is reported as `UNAVAILABLE`; assertion, capture, or
+execution failures from an available backend fail the matrix. The per-backend reports
+include activation and sleep-transition results, centroid motion, particle mass and
+simulation membership checks, static glue counts, hash generations, backend fallback
+details, timing samples, failures, and capture paths.
