@@ -24,6 +24,10 @@
 #include "raylib.h"
 #include "rlgl.h" // for rlBegin/rlEnd
 #include "raymath.h" // for MatrixIdentity()
+#include "physics_backend.h"
+#if defined(GRAPHICS_API_OPENGL_43)
+#include "external/glad.h"
+#endif
 #include <math.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -56,6 +60,69 @@
 #else
 #include <unistd.h>
 #endif
+
+static PhysicsBackendStatus physicsBackend = {
+    .requested = PHYSICS_BACKEND_AUTO,
+    .active = PHYSICS_BACKEND_CPU_ST
+};
+static bool physicsReportRequested = false;
+static int physicsSmokeSteps = 0;
+static int physicsSmokeVoxels = 2;
+
+const char *physics_backend_name(PhysicsBackendKind kind) {
+    switch (kind) {
+        case PHYSICS_BACKEND_AUTO: return "auto";
+        case PHYSICS_BACKEND_GPU_GL43: return "gpu-gl43";
+        case PHYSICS_BACKEND_CPU_MT: return "cpu-mt";
+        case PHYSICS_BACKEND_CPU_ST: return "cpu-st";
+        default: return "unknown";
+    }
+}
+
+bool physics_backend_parse(const char *value, PhysicsBackendKind *out) {
+    if (!value || !out) return false;
+    if (strcmp(value, "auto") == 0) *out = PHYSICS_BACKEND_AUTO;
+    else if (strcmp(value, "gpu") == 0 || strcmp(value, "gpu-gl43") == 0) *out = PHYSICS_BACKEND_GPU_GL43;
+    else if (strcmp(value, "cpu-mt") == 0 || strcmp(value, "mt") == 0) *out = PHYSICS_BACKEND_CPU_MT;
+    else if (strcmp(value, "cpu-st") == 0 || strcmp(value, "st") == 0) *out = PHYSICS_BACKEND_CPU_ST;
+    else return false;
+    return true;
+}
+
+static bool parse_physics_arguments(int argc, char **argv) {
+    physicsBackend.requested = PHYSICS_BACKEND_AUTO;
+    for (int i = 1; i < argc; ++i) {
+        const char *arg = argv[i];
+        if (strcmp(arg, "--physics-report") == 0) {
+            physicsReportRequested = true;
+            continue;
+        }
+        if (strcmp(arg, "--physics-smoke") == 0) {
+            physicsSmokeSteps = 30;
+            continue;
+        }
+        if (strncmp(arg, "--physics-smoke=", 16) == 0) {
+            physicsSmokeSteps = atoi(arg + 16);
+            if (physicsSmokeSteps < 1) physicsSmokeSteps = 1;
+            if (physicsSmokeSteps > 10000) physicsSmokeSteps = 10000;
+            continue;
+        }
+        if (strncmp(arg, "--physics-smoke-voxels=", 23) == 0) {
+            physicsSmokeVoxels = atoi(arg + 23);
+            if (physicsSmokeVoxels < 1) physicsSmokeVoxels = 1;
+            if (physicsSmokeVoxels > 4096) physicsSmokeVoxels = 4096;
+            continue;
+        }
+        const char *value = NULL;
+        if (strncmp(arg, "--physics=", 10) == 0) value = arg + 10;
+        else if (strcmp(arg, "--physics") == 0 && i + 1 < argc) value = argv[++i];
+        if (value && !physics_backend_parse(value, &physicsBackend.requested)) {
+            fprintf(stderr, "Unknown physics backend '%s' (expected auto, gpu, cpu-mt, or cpu-st)\n", value);
+            return false;
+        }
+    }
+    return true;
+}
 
 static inline uint32_t float_to_bits(float value) {
     uint32_t bits;
@@ -473,6 +540,7 @@ static int glueClusterIndices[MAX_VOXELS];
 static unsigned char glueClusterVisited[MAX_VOXELS];
 static unsigned char sleepClusterVisited[MAX_VOXELS];
 static unsigned char voxelCalmFlags[MAX_VOXELS];
+static _Atomic unsigned char activationClaims[MAX_VOXELS];
 static bool dynamicGlueClustersInitialized = false;
 #define DEBUG_CLUSTER_TAG_MAX 64
 static int debugTagOffset[DEBUG_CLUSTER_TAG_MAX][3];
@@ -560,6 +628,7 @@ typedef struct PbdWorkerCtx {
 } PbdWorkerCtx;
 
 static PbdThreadPool pbd_pool = { 0 };
+static bool physics_force_single_cpu = false;
 
 static void pbd_threadpool_run_job(PbdThreadPool *pool,
                                    int worker_id,
@@ -615,6 +684,7 @@ static void *pbd_worker_main(void *arg) {
 }
 
 static int pbd_worker_count_from_system(void) {
+    if (getenv("FPS_FORCE_CPU_ST") != NULL) return 0;
 #ifdef _WIN32
     DWORD cores = 0;
 #if defined(_WIN32_WINNT) && _WIN32_WINNT >= 0x0601
@@ -646,12 +716,23 @@ static void init_pbd_thread_pool(void) {
         return;
     }
     int workers = pbd_worker_count_from_system();
-    if (workers <= 0) {
+    if (workers <= 0 || physicsBackend.requested == PHYSICS_BACKEND_CPU_ST) {
+        physicsBackend.cpu_workers = 0;
         return;
     }
-    pbd_pool.thread_count = workers;
+    pbd_pool.thread_count = 0;
     pbd_pool.threads = (pthread_t *)calloc((size_t)workers, sizeof(pthread_t));
     pbd_pool.ctxs = (PbdWorkerCtx *)calloc((size_t)workers, sizeof(PbdWorkerCtx));
+    if (!pbd_pool.threads || !pbd_pool.ctxs) {
+        free(pbd_pool.threads);
+        free(pbd_pool.ctxs);
+        pbd_pool.threads = NULL;
+        pbd_pool.ctxs = NULL;
+        physicsBackend.cpu_workers = 0;
+        snprintf(physicsBackend.fallback_reason, sizeof(physicsBackend.fallback_reason),
+                 "CPU worker allocation failed; using single-threaded physics");
+        return;
+    }
     pthread_mutex_init(&pbd_pool.mutex, NULL);
     pthread_cond_init(&pbd_pool.cond, NULL);
     pthread_cond_init(&pbd_pool.done, NULL);
@@ -661,7 +742,22 @@ static void init_pbd_thread_pool(void) {
     for (int i = 0; i < workers; ++i) {
         pbd_pool.ctxs[i].pool = &pbd_pool;
         pbd_pool.ctxs[i].id = i;
-        pthread_create(&pbd_pool.threads[i], NULL, pbd_worker_main, &pbd_pool.ctxs[i]);
+        if (pthread_create(&pbd_pool.threads[i], NULL, pbd_worker_main, &pbd_pool.ctxs[i]) != 0) {
+            snprintf(physicsBackend.fallback_reason, sizeof(physicsBackend.fallback_reason),
+                     "created %d of %d requested CPU workers", pbd_pool.thread_count, workers);
+            break;
+        }
+        pbd_pool.thread_count++;
+    }
+    physicsBackend.cpu_workers = pbd_pool.thread_count;
+    if (pbd_pool.thread_count <= 0) {
+        pthread_cond_destroy(&pbd_pool.cond);
+        pthread_cond_destroy(&pbd_pool.done);
+        pthread_mutex_destroy(&pbd_pool.mutex);
+        free(pbd_pool.threads);
+        free(pbd_pool.ctxs);
+        pbd_pool.threads = NULL;
+        pbd_pool.ctxs = NULL;
     }
 }
 
@@ -684,6 +780,7 @@ static void shutdown_pbd_thread_pool(void) {
     pbd_pool.threads = NULL;
     pbd_pool.ctxs = NULL;
     pbd_pool.thread_count = 0;
+    physicsBackend.cpu_workers = 0;
     pbd_pool.shutdown = false;
 }
 
@@ -692,7 +789,7 @@ static void pbd_parallel_for(int start, int end, PbdParallelFn fn, void *user) {
         return;
     }
     int range = end - start;
-    if (!pbd_pool.threads || pbd_pool.thread_count <= 0 || range < PBD_PARALLEL_MIN_WORK) {
+    if (physics_force_single_cpu || !pbd_pool.threads || pbd_pool.thread_count <= 0 || range < PBD_PARALLEL_MIN_WORK) {
         fn(start, end, -1, user);
         return;
     }
@@ -767,6 +864,7 @@ static void unit_voxel_buffer_clear(UnitVoxelBuffer *buffer) {
         int idx = buffer->voxels[i].voxelIndex;
         if (idx >= 0 && idx < voxel_count) {
             voxels[idx].pendingActivation = false;
+            atomic_store_explicit(&activationClaims[idx], 0, memory_order_release);
         }
     }
     buffer->count = 0;
@@ -810,6 +908,7 @@ static void rollback_activation_buffer(UnitVoxelBuffer *buffer, int startIndex)
         int idx = buffer->voxels[i].voxelIndex;
         if (idx >= 0 && idx < voxel_count) {
             voxels[idx].pendingActivation = false;
+            atomic_store_explicit(&activationClaims[idx], 0, memory_order_release);
         }
     }
     buffer->count = startIndex;
@@ -2583,6 +2682,7 @@ static Bucket table[HASH_SIZE]; // Deprecated, will be replaced by dynamic_table
 static Bucket static_table[HASH_SIZE];
 static Bucket dynamic_table[HASH_SIZE];
 static bool staticHashDirty = false;
+static uint64_t staticHashGeneration = 1;
 
 typedef struct {
     uint64_t key;
@@ -2648,6 +2748,8 @@ static void init_static_hash(void) {
 
 static void mark_static_hash_dirty(void) {
     staticHashDirty = true;
+    staticHashGeneration++;
+    if (staticHashGeneration == 0) staticHashGeneration = 1;
 }
 
 static void rebuild_static_hash_if_dirty(void) {
@@ -3767,7 +3869,16 @@ static bool activation_try_enqueue(int voxel_idx,
     }
 
     Voxel *candidate = &voxels[voxel_idx];
+    if (candidate->simulate) {
+        return false;
+    }
+    unsigned char expected_claim = 0;
+    if (!atomic_compare_exchange_strong_explicit(&activationClaims[voxel_idx],
+                                                  &expected_claim, 1,
+                                                  memory_order_acq_rel,
+                                                  memory_order_acquire)) return false;
     if (candidate->simulate || candidate->pendingActivation) {
+        atomic_store_explicit(&activationClaims[voxel_idx], 0, memory_order_release);
         return false;
     }
 
@@ -3788,6 +3899,7 @@ static bool activation_try_enqueue(int voxel_idx,
                                 candidate->debugClusterTag, activator))
     {
         candidate->pendingActivation = false;
+        atomic_store_explicit(&activationClaims[voxel_idx], 0, memory_order_release);
         return false;
     }
 
@@ -4033,8 +4145,7 @@ static void activate_static_worker(int start, int end, int worker_id, void *user
                         continue;
                     }
                     Voxel *candidate = &voxels[idx];
-                    if (candidate->simulate ||
-                        candidate->pendingActivation || candidate->activationCooldownFrames > 0) {
+                    if (candidate->simulate || candidate->activationCooldownFrames > 0) {
                         continue;
                     }
 
@@ -4071,6 +4182,10 @@ static bool activate_static_voxels_near_dynamic(void)
     update_dynamic_activation_beliefs();
     float radius = (float)VOXEL_ACTIVATION_RADIUS;
     float radius_sq = radius * radius;
+
+    for (int i = 0; i < voxel_count; ++i) {
+        atomic_store_explicit(&activationClaims[i], 0, memory_order_relaxed);
+    }
 
     for (int i = 0; i < PBD_MAX_THREADS + 1; ++i) {
         activate_thread_buffers[i].count = 0;
@@ -4967,12 +5082,11 @@ static void keep_cluster_awake(const int *cluster, int cluster_count)
     }
 }
 
-static bool deactivate_sleeping_voxels(void)
+static void evaluate_voxel_calm_range(int start, int end, int worker_id, void *user)
 {
-    bool changed = false;
-    int remaining_budget = VOXEL_MAX_DEACTIVATIONS_PER_FRAME;
-
-    for (int i = 0; i < voxel_count; ++i) {
+    (void)worker_id;
+    (void)user;
+    for (int i = start; i < end; ++i) {
         Voxel *voxel = &voxels[i];
         if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
             voxel->sleepFrames = 0;
@@ -4990,8 +5104,16 @@ static bool deactivate_sleeping_voxels(void)
                     (voxel->wake_timer <= 0);
         voxelCalmFlags[i] = calm ? 1u : 0u;
     }
+}
 
-    memset(sleepClusterVisited, 0, sizeof(unsigned char) * (size_t)voxel_count);
+static bool deactivate_sleeping_voxels(void)
+{
+    bool changed = false;
+    int remaining_budget = VOXEL_MAX_DEACTIVATIONS_PER_FRAME;
+
+    pbd_parallel_for(0, voxel_count, evaluate_voxel_calm_range, NULL);
+
+    memset(sleepClusterVisited, 0, sizeof(sleepClusterVisited));
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
         if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
@@ -7990,8 +8112,25 @@ static void apply_shell_effective_mass(void) {
     }
 }
 
-static void update_wake_timers(void) {
-    for (int i = 0; i < voxel_count; ++i) {
+static int table_get_uncached_for_physics(int x, int y, int z) {
+    uint64_t key = mortonKey(x, y, z);
+    size_t h = hashVoxelKey(key);
+    while (dynamic_table[h].key != 0) {
+        if (dynamic_table[h].key == key) return dynamic_table[h].idx;
+        h = (h + 1) & (HASH_SIZE - 1);
+    }
+    h = hashVoxelKey(key);
+    while (static_table[h].key != 0) {
+        if (static_table[h].key == key) return static_table[h].idx;
+        h = (h + 1) & (HASH_SIZE - 1);
+    }
+    return -1;
+}
+
+static void update_wake_timers_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    (void)user;
+    for (int i = start; i < end; ++i) {
         Voxel *v = &voxels[i];
         if (!v->simulate || v->isBullet) {
             continue;
@@ -8003,7 +8142,7 @@ static void update_wake_timers(void) {
                 int nx = v->gx + face_offsets[face][0];
                 int ny = v->gy + face_offsets[face][1];
                 int nz = v->gz + face_offsets[face][2];
-                int nidx = table_get(nx, ny, nz);
+                int nidx = table_get_uncached_for_physics(nx, ny, nz);
                 if (nidx >= 0 && voxels[nidx].wake_source && !voxels[nidx].isBullet) {
                     neighbor_wake = true;
                     break;
@@ -8017,6 +8156,10 @@ static void update_wake_timers(void) {
         }
         v->wake_timer = timer;
     }
+}
+
+static void update_wake_timers(void) {
+    pbd_parallel_for(0, voxel_count, update_wake_timers_range, NULL);
 }
 
 static void process_break_masks(void) {
@@ -8093,8 +8236,10 @@ static void apply_interior_sync(const Vector3 avg_delta[8], const int counts[8])
     }
 }
 
-static void decrement_particle_timers(void) {
-    for (int i = 0; i < sim_particle_count; ++i) {
+static void decrement_particle_timers_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    (void)user;
+    for (int i = start; i < end; ++i) {
         Particle *p = sim_particles[i];
         if (p->break_timer > 0) {
             p->break_timer--;
@@ -9444,11 +9589,15 @@ static float compute_glue_relative_velocity_score(int voxel_idx, const Voxel *vo
     if (voxel_idx < 0 || voxel_idx >= voxel_count || !voxel) {
         return 0.0f;
     }
-    int neighbors[MAX_FACE_NEIGHBORS];
-    int neighbor_count = gather_glued_neighbors(voxel_idx, neighbors, MAX_FACE_NEIGHBORS);
     float maxRelativeSpeed = 0.0f;
-    for (int i = 0; i < neighbor_count; ++i) {
-        int nidx = neighbors[i];
+    for (int face = 0; face < 6; ++face) {
+        if (!voxel->glued_faces[face]) {
+            continue;
+        }
+        int nx = voxel->gx + face_offsets[face][0];
+        int ny = voxel->gy + face_offsets[face][1];
+        int nz = voxel->gz + face_offsets[face][2];
+        int nidx = table_get_uncached_for_physics(nx, ny, nz);
         if (nidx < 0 || nidx >= voxel_count) {
             continue;
         }
@@ -9465,9 +9614,11 @@ static float compute_glue_relative_velocity_score(int voxel_idx, const Voxel *vo
     return saturatef(maxRelativeSpeed / ACTIVATION_GLUE_REF_SPEED);
 }
 
-static void update_dynamic_activation_beliefs(void)
+static void update_dynamic_activation_beliefs_range(int start, int end, int worker_id, void *user)
 {
-    for (int i = 0; i < voxel_count; ++i) {
+    (void)worker_id;
+    (void)user;
+    for (int i = start; i < end; ++i) {
         Voxel *voxel = &voxels[i];
         bool tethered = (tetherTag[i] > 0);
         if (tethered) {
@@ -9506,6 +9657,11 @@ static void update_dynamic_activation_beliefs(void)
                          glueScore * ACTIVATION_GLUE_WEIGHT;
         voxel->activationBelief = saturatef(weighted / weightSum);
     }
+}
+
+static void update_dynamic_activation_beliefs(void)
+{
+    pbd_parallel_for(0, voxel_count, update_dynamic_activation_beliefs_range, NULL);
 }
 
 static bool ranges_overlap(int minA, int maxA, int minB, int maxB) {
@@ -10011,24 +10167,30 @@ static void solve_dynamic_collisions(float dt) {
     (void)dt;
 }
 
-static void update_particle_velocities(float dt) {
-    float inv_dt = (dt > 0.0f) ? 1.0f / dt : 0.0f;
+typedef struct { float inv_dt; } VelocityUpdateJob;
 
-    for (int i = 0; i < sim_particle_count; ++i) {
+static void update_particle_velocity_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    VelocityUpdateJob *job = (VelocityUpdateJob *)user;
+    for (int i = start; i < end; ++i) {
         Particle *p = sim_particles[i];
         Vector3 new_pos = p->predicted_pos;
         Vector3 delta = v_sub(new_pos, p->prev_pos);
 
         if (p->inv_mass > 0.0f) {
-            p->vel = v_mul(delta, inv_dt);
+            p->vel = v_mul(delta, job->inv_dt);
         } else {
             p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
         }
 
         p->pos = new_pos;
     }
+}
 
-    for (int i = 0; i < voxel_count; ++i) {
+static void update_voxel_velocity_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    VelocityUpdateJob *job = (VelocityUpdateJob *)user;
+    for (int i = start; i < end; ++i) {
         Voxel *voxel = &voxels[i];
         if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
             continue;
@@ -10049,10 +10211,16 @@ static void update_particle_velocities(float dt) {
         centroid = v_mul(centroid, 1.0f / 8.0f);
         prev_centroid = v_mul(prev_centroid, 1.0f / 8.0f);
         if (!skipVelocity) {
-            voxel->vel = v_mul(v_sub(centroid, prev_centroid), inv_dt);
+            voxel->vel = v_mul(v_sub(centroid, prev_centroid), job->inv_dt);
         }
         voxel->pos = centroid;
     }
+}
+
+static void update_particle_velocities(float dt) {
+    VelocityUpdateJob job = { .inv_dt = (dt > 0.0f) ? 1.0f / dt : 0.0f };
+    pbd_parallel_for(0, sim_particle_count, update_particle_velocity_range, &job);
+    pbd_parallel_for(0, voxel_count, update_voxel_velocity_range, &job);
 }
 
 static void voxel_measure_strain(const Voxel *voxel,
@@ -10175,16 +10343,65 @@ static bool cull_dust_voxels(void) {
     return removed_any;
 }
 
-void simulate_voxel_pbd(float dt) {
+#include "physics_gpu_gl.inc"
+
+static void select_cpu_physics_backend(void) {
+    if (physicsBackend.requested == PHYSICS_BACKEND_CPU_ST ||
+        !pbd_pool.threads || pbd_pool.thread_count <= 0) {
+        physicsBackend.active = PHYSICS_BACKEND_CPU_ST;
+        physics_force_single_cpu = true;
+    } else {
+        physicsBackend.active = PHYSICS_BACKEND_CPU_MT;
+        physics_force_single_cpu = false;
+    }
+}
+
+static void decrement_particle_timers(void) {
+    pbd_parallel_for(0, sim_particle_count, decrement_particle_timers_range, NULL);
+}
+
+static bool initialize_physics_backend(void) {
+    physicsBackend.initialized = false;
+    physicsBackend.sticky_fallback = false;
+    physicsBackend.fallback_reason[0] = '\0';
+    if (physicsBackend.requested == PHYSICS_BACKEND_AUTO ||
+        physicsBackend.requested == PHYSICS_BACKEND_GPU_GL43) {
+        if (gpu_physics_init()) {
+            physicsBackend.active = PHYSICS_BACKEND_GPU_GL43;
+            physics_force_single_cpu = false;
+            physicsBackend.initialized = true;
+        } else if (physicsBackend.requested == PHYSICS_BACKEND_GPU_GL43) {
+            return false;
+        } else {
+            physicsBackend.sticky_fallback = true;
+        }
+    }
+    if (!physicsBackend.initialized) {
+        select_cpu_physics_backend();
+        physicsBackend.initialized = true;
+    }
+    if (physicsReportRequested) {
+        fprintf(stderr, "physics requested=%s active=%s workers=%d gpuCompiled=%d gpuAvailable=%d%s%s\n",
+                physics_backend_name(physicsBackend.requested), physics_backend_name(physicsBackend.active),
+                physicsBackend.cpu_workers, physicsBackend.gpu_compiled ? 1 : 0,
+                physicsBackend.gpu_available ? 1 : 0,
+                physicsBackend.fallback_reason[0] ? " reason=" : "",
+                physicsBackend.fallback_reason);
+    }
+    return true;
+}
+
+static void copy_particle_snapshot_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    (void)user;
+    for (int i = start; i < end; ++i) particle_snapshot[i] = sim_particles[i];
+}
+
+static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
     if (sim_particle_count <= 0) {
         return;
     }
-    const int substeps = PBD_SUBSTEPS;
     const int constraint_iterations = PBD_CONSTRAINT_ITERS;
-    const float sub_dt = (substeps > 0) ? dt / (float)substeps : dt;
-    Vector3 sum_delta[8];
-    Vector3 avg_delta[8];
-    int counts[8];
 
     for (int step = 0; step < substeps; ++step) {
         if (debugLogVoxelBlowup) {
@@ -10200,9 +10417,7 @@ void simulate_voxel_pbd(float dt) {
             if (snapshot_count > MAX_PARTICLES) {
                 snapshot_count = MAX_PARTICLES;
             }
-            for (int i = 0; i < snapshot_count; ++i) {
-                particle_snapshot[i] = sim_particles[i];
-            }
+            pbd_parallel_for(0, snapshot_count, copy_particle_snapshot_range, NULL);
             reset_particle_accumulators();
             build_particle_hash(particle_snapshot, snapshot_count);
             gather_particle_collisions(sub_dt, particle_snapshot, snapshot_count);
@@ -10210,13 +10425,6 @@ void simulate_voxel_pbd(float dt) {
         }
 
         for (int it = 0; it < constraint_iterations; ++it) {
-            int snapshot_count = sim_particle_count;
-            if (snapshot_count > MAX_PARTICLES) {
-                snapshot_count = MAX_PARTICLES;
-            }
-            for (int i = 0; i < snapshot_count; ++i) {
-                particle_snapshot[i] = sim_particles[i];
-            }
             reset_particle_accumulators();
             pbd_parallel_for(0, voxel_count, gather_voxel_shape_constraints_range, NULL);
             apply_particle_accumulators();
@@ -10264,6 +10472,27 @@ void simulate_voxel_pbd(float dt) {
     }
 
     //log_dynamic_voxel_positions();
+}
+
+void simulate_voxel_pbd(float dt) {
+    if (sim_particle_count <= 0) return;
+    double started = GetTime();
+    const float sub_dt = dt / (float)PBD_SUBSTEPS;
+    if (physicsBackend.active == PHYSICS_BACKEND_GPU_GL43 && gpuPhysics.ready) {
+        int completed = gpu_physics_step(dt);
+        if (completed >= PBD_SUBSTEPS) {
+            physicsBackend.last_step_ms = (GetTime() - started) * 1000.0;
+            return;
+        }
+        gpu_fail("GPU dispatch/readback validation failed; continuing on CPU");
+        select_cpu_physics_backend();
+        simulate_voxel_pbd_cpu_steps(sub_dt, PBD_SUBSTEPS - completed);
+        physicsBackend.last_step_ms = (GetTime() - started) * 1000.0;
+        return;
+    }
+    physics_force_single_cpu = (physicsBackend.active == PHYSICS_BACKEND_CPU_ST);
+    simulate_voxel_pbd_cpu_steps(sub_dt, PBD_SUBSTEPS);
+    physicsBackend.last_step_ms = (GetTime() - started) * 1000.0;
 }
 
 /*
@@ -13118,7 +13347,11 @@ static void render_gameplay_view(RenderTexture2D *screens,
         {
             const int fps_font = 18;
             const int fps_pad = 20;
-            const char *fps_text = TextFormat("FPS %d", GetFPS());
+            const char *fps_text = TextFormat("FPS %d | PHYS %s %.2fms%s",
+                                              GetFPS(),
+                                              physics_backend_name(physicsBackend.active),
+                                              physicsBackend.last_step_ms,
+                                              physicsBackend.sticky_fallback ? " (fallback)" : "");
             int text_w = MeasureText(fps_text, fps_font);
             int box_w = text_w + fps_pad * 2;
             int box_h = fps_font + fps_pad * 2 - 2;
@@ -13130,17 +13363,83 @@ static void render_gameplay_view(RenderTexture2D *screens,
     EndDrawing();
 }
 
-int main(void) {
+static bool run_physics_smoke_test(int steps) {
+    int side = 1;
+    while (side * side * side < physicsSmokeVoxels) ++side;
+    int first = -1;
+    int created = 0;
+    for (int y = 0; y < side && created < physicsSmokeVoxels; ++y) {
+        for (int z = 0; z < side && created < physicsSmokeVoxels; ++z) {
+            for (int x = 0; x < side && created < physicsSmokeVoxels; ++x) {
+                float px = ((float)x - 0.5f * (float)(side - 1)) * VOXEL_SIZE;
+                float py = 8.0f + (float)y * VOXEL_SIZE;
+                float pz = ((float)z - 0.5f * (float)(side - 1)) * VOXEL_SIZE;
+                Color color = ((x + y + z) & 1) ? BLUE : RED;
+                int idx = addVoxel(px, py, pz, false, true, color, 0);
+                if (idx < 0) {
+                    fprintf(stderr, "physics-smoke: unable to create test voxel %d/%d\n",
+                            created + 1, physicsSmokeVoxels);
+                    return false;
+                }
+                if (first < 0) first = idx;
+                ++created;
+            }
+        }
+    }
+    if (first < 0) {
+        fprintf(stderr, "physics-smoke: unable to create test voxels\n");
+        return false;
+    }
+    for (int i = first; i < first + created; ++i) glue_neighbor_faces_for_voxel(i);
+    rebuild_voxel_hash();
+    rebuild_static_hash_if_dirty();
+    double started = GetTime();
+    for (int i = 0; i < steps; ++i) {
+        prepare_tether_forces();
+        simulate_voxel_pbd(PBD_MAX_STEP_DT);
+        for (int p = 0; p < sim_particle_count; ++p) {
+            Particle *particle = sim_particles[p];
+            if (!particle || !v_isfinite(particle->pos) || !v_isfinite(particle->vel)) {
+                fprintf(stderr, "physics-smoke: invalid particle at step=%d index=%d\n", i, p);
+                return false;
+            }
+        }
+    }
+    if (physicsBackend.requested == PHYSICS_BACKEND_GPU_GL43 &&
+        physicsBackend.active != PHYSICS_BACKEND_GPU_GL43) {
+        fprintf(stderr, "physics-smoke: forced GPU fell back: %s\n", physicsBackend.fallback_reason);
+        return false;
+    }
+    double elapsed_ms = (GetTime() - started) * 1000.0;
+    int glued_faces = 0;
+    for (int i = first; i < first + created && i < voxel_count; ++i) {
+        for (int face = 0; face < 6; ++face) glued_faces += voxels[i].glued_faces[face] ? 1 : 0;
+    }
+    fprintf(stderr, "physics-smoke backend=%s steps=%d testVoxels=%d simParticles=%d voxels=%d gluedFaces=%d y=%.6f msPerStep=%.4f fallback=%d\n",
+            physics_backend_name(physicsBackend.active), steps, created, sim_particle_count, voxel_count, glued_faces,
+            voxels[first].pos.y, elapsed_ms / (double)steps, physicsBackend.sticky_fallback ? 1 : 0);
+    return true;
+}
+
+#define FPS_EXIT_GPU_CONTEXT_UNAVAILABLE 78
+#define FPS_EXIT_GPU_INITIALIZATION_FAILED 79
+
+int main(int argc, char **argv) {
+    if (!parse_physics_arguments(argc, argv)) return 2;
     int countFrame = 0;
     SetLoggingEnabled(false);
-    SetTraceLogLevel(LOG_NONE);
+    SetTraceLogLevel(physicsReportRequested ? LOG_ALL : LOG_NONE);
     // init window and render textures
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Split-Screen FPS (raylib)");
+    if (!IsWindowReady()) {
+        fprintf(stderr, "Unable to create the requested graphics context\n");
+        return FPS_EXIT_GPU_CONTEXT_UNAVAILABLE;
+    }
     SetWindowState(FLAG_WINDOW_RESIZABLE);
     init_sfx();
     SetTargetFPS(TARGET_FRAME_RATE);
     // seed RNG
-    srand((unsigned)time(NULL));
+    srand(physicsSmokeSteps > 0 ? 1u : (unsigned)time(NULL));
     // reset game state
     ResetGame();
     // prepare split-screen render textures
@@ -13151,6 +13450,21 @@ int main(void) {
     
     ResetGame(); // Init for menu background
     init_pbd_thread_pool();
+    if (!initialize_physics_backend()) {
+        fprintf(stderr, "Requested physics backend '%s' is unavailable: %s\n",
+                physics_backend_name(physicsBackend.requested), physicsBackend.fallback_reason);
+        shutdown_pbd_thread_pool();
+        CloseWindow();
+        return FPS_EXIT_GPU_INITIALIZATION_FAILED;
+    }
+    if (physicsSmokeSteps > 0) {
+        bool ok = run_physics_smoke_test(physicsSmokeSteps);
+        shutdown_pbd_thread_pool();
+        gpu_physics_shutdown();
+        shutdown_sfx();
+        CloseWindow();
+        return ok ? 0 : 3;
+    }
 
     // main loop
     while (!WindowShouldClose()) {
@@ -13724,6 +14038,7 @@ int main(void) {
         }
     }
     shutdown_pbd_thread_pool();
+    gpu_physics_shutdown();
     // cleanup
     for (int i = 0; i < renderPlayers; ++i) {
         if (screens[i].id != 0) {

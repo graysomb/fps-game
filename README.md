@@ -24,14 +24,30 @@ The physics simulation follows a standard PBD loop:
 2.  **Constraint Solving:** The solver iteratively corrects particle positions to satisfy physical constraints (Shape, Glue, Collision).
 3.  **Integration:** Velocities are updated based on the corrected positions.
 
-### Multithreading Architecture (PBD)
-The PBD loop is multithreaded with a lightweight, persistent thread pool to avoid per-frame thread creation.
+### Physics backend architecture
+
+The solver has three execution backends: OpenGL 4.3 compute, a persistent CPU
+worker pool, and single-threaded CPU. All three implement the same ordered PBD
+stages. The CPU-owned voxel and particle arrays remain canonical, so a failed GPU
+dispatch can be validated, read back, and continued by the CPU without restarting
+the frame.
+
+The GPU path packs only particles referenced by active voxels into SSBOs. Stable
+particle-pool IDs are mapped to compact indices, preserving shared corners created
+by glue. Static voxels are uploaded only when the static-grid generation changes.
+Each substep dispatches prediction, dynamic hash construction, scene and particle
+collisions, Jacobi apply passes, VGS iterations, static collisions, glue-break
+evaluation, and velocity finalization. Topology mutations such as actually breaking
+glue or converting a sleeping cluster back to static remain ordered CPU commits.
+
+The CPU PBD loop uses a lightweight, persistent thread pool to avoid per-frame
+thread creation.
 Key ideas:
 *   **Parallel-for dispatcher:** A small worker pool runs chunked ranges over arrays (particles/voxels).
 *   **Jacobi-style accumulators:** Constraints write into per-particle correction accumulators (`corr_sum`, `corr_weight`) using atomic float adds. A later “apply” pass updates positions, preserving determinism within a single iteration.
 *   **Stable particle snapshots:** Each constraint iteration snapshots `active_particles` into a local array before building the spatial hash and gathering collisions, avoiding concurrent mutation while workers read.
 *   **Thread-safe spatial hash:** Particle hash buckets are cleared and built in parallel; inserts use atomic exchange for lock-free binning.
-*   **Execution order:** Integrate → Hash Clear/Build → (Collision + Voxel Shape Constraints) → Apply → Velocity update, repeated per constraint iteration.
+*   **Execution order:** Integrate → Hash Clear/Build → Collisions → Apply → VGS/Apply iterations → Static collisions → Glue/lifecycle commit → Velocity update.
 
 This layout mirrors a GPU compute pipeline and keeps contention low while remaining safe on CPU.
 
@@ -200,11 +216,50 @@ This section outlines the planned "Constructor-Brawler" gameplay loop.
 
 ## Building
 
+The release layout contains a launcher plus two game binaries. The launcher tries
+OpenGL 4.3 compute first, then the multithreaded CPU backend, then the single-threaded
+CPU backend. GPU and CPU game binaries use separate raylib builds because raylib
+selects its OpenGL API at compile time.
+
+### Windows (MSYS2/UCRT64)
+
+Point `RAYLIB_SOURCE_DIR` at a raylib 5.5 source tree or pass `-RaylibSource`:
+
+```powershell
+$env:RAYLIB_SOURCE_DIR = "D:\raylib-master\raylib-master"
+.\build.ps1 -Configuration release
+```
+
 ### Linux
+
 ```bash
-gcc fps_ray.c -o fps_ray $(pkg-config --cflags --libs raylib) -lGL -lm -lpthread -ldl -lrt -lX11
+RAYLIB_SOURCE_DIR=/path/to/raylib ./build.sh release
 ```
-### Windows (MSYS2)
+
+Both scripts place `fps_ray`, `fps_ray_gpu`, `fps_ray_cpu`, and the shader assets in
+`.build/bin` (with `.exe` suffixes on Windows).
+
+### Physics backend controls
+
 ```bash
-gcc fps_ray.c -o fps_ray.exe -I/mingw64/include -L/mingw64/lib -lraylib -lopengl32 -lgdi32 -lwinmm
+fps_ray --physics=auto --physics-report
+fps_ray --physics=gpu
+fps_ray --physics=cpu-mt
+fps_ray --physics=cpu-st
 ```
+
+`auto` is the normal fallback chain. The forced GPU mode fails instead of silently
+selecting another backend. CPU MT still degrades to CPU ST when no worker can be
+created. The active backend and its last-step time are displayed beside the FPS
+counter.
+
+Smoke runs still create a short-lived window because the GPU backend needs a
+graphics context:
+
+```bash
+fps_ray --physics=gpu --physics-smoke=60 --physics-smoke-voxels=256
+fps_ray --physics=cpu-mt --physics-smoke=60 --physics-smoke-voxels=256
+```
+
+`FPS_FORCE_GPU_INIT_FAILURE`, `FPS_FORCE_GPU_STEP_FAILURE`, and
+`FPS_FORCE_CPU_ST` are available for testing the fallback paths.

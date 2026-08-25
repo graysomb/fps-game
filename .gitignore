@@ -10,3 +10,4 @@ profile.sh
 counts.txt
 Flamegraph/
 fps_ray.log
+.build/

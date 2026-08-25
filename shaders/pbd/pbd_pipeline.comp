@@ -1,0 +1,441 @@
+#version 430
+
+// Compute implementation of the Jacobi pipeline in fps_ray.c.  The C side
+// deliberately supplies explicit particle indices: glued voxels share slots.
+layout(local_size_x = 128) in;
+
+struct ParticleState {
+    vec4 pos_radius;
+    vec4 prev_inv_mass;
+    vec4 predicted_base_inv_mass;
+    vec4 velocity;
+};
+
+struct VoxelState {
+    uvec4 particle_0_3;
+    uvec4 particle_4_7;
+    vec4 pos_rest_edge;
+    vec4 velocity_rest_volume;
+    ivec4 flags;       // simulate, isBullet, type, simulateDOFs
+    vec4 bounds_min;
+    vec4 bounds_max;
+    uvec4 lifecycle;   // skipVelocityFrames, wakeSource, gluedFaceMask, breakMask
+};
+
+layout(std430, binding = 0) buffer ParticleBuffer { ParticleState particle[]; };
+layout(std430, binding = 1) buffer CorrectionBuffer { uvec4 correction[]; };
+layout(std430, binding = 2) buffer CellBuffer { ivec4 cell[]; };
+layout(std430, binding = 3) readonly buffer SimIdBuffer { uint simId[]; };
+layout(std430, binding = 4) buffer VoxelBuffer { VoxelState voxel[]; };
+layout(std430, binding = 5) buffer HashHeadBuffer { int hashHead[]; };
+layout(std430, binding = 6) buffer HashNextBuffer { int hashNext[]; };
+layout(std430, binding = 7) readonly buffer StaticCellBuffer { ivec4 staticCell[]; };
+layout(std430, binding = 8) readonly buffer TetherBuffer { vec4 tetherTarget[]; };
+
+uniform int uMode;
+uniform int uParticleCount;
+uniform int uSimCount;
+uniform int uVoxelCount;
+uniform int uHashSize;
+uniform int uStaticHashSize;
+uniform int uActivePlayers;
+uniform float uDt;
+uniform float uVoxelSize;
+uniform float uFloorSize;
+uniform float uGravity;
+uniform float uVelocityDamping;
+uniform float uSor;
+uniform float uCollisionRelaxation;
+uniform float uVgsAlpha;
+uniform float uVgsBeta;
+uniform float uVgsEpsilon;
+uniform float uStrainBreakThreshold;
+uniform float uShearBreakThreshold;
+uniform float uTetherSpring;
+uniform float uTetherDamping;
+uniform vec4 uPlayerPosHalf[4]; // xyz position, w < 0 when inactive
+
+const int MODE_RESET = 0;
+const int MODE_INTEGRATE = 1;
+const int MODE_HASH_CLEAR = 2;
+const int MODE_HASH_BUILD = 3;
+const int MODE_SCENE_COLLISIONS = 4;
+const int MODE_PAIR_COLLISIONS = 5;
+const int MODE_APPLY = 6;
+const int MODE_VGS = 7;
+const int MODE_STATIC_COLLISIONS = 8;
+const int MODE_BREAK_MASK = 9;
+const int MODE_FINALIZE_PARTICLES = 10;
+const int MODE_FINALIZE_VOXELS = 11;
+
+uint voxelParticle(VoxelState v, int corner) {
+    return (corner < 4) ? v.particle_0_3[corner] : v.particle_4_7[corner - 4];
+}
+
+uint hashCoord(ivec3 c, int size) {
+    uint h = uint(c.x) * 73856093u;
+    h ^= uint(c.y) * 19349663u;
+    h ^= uint(c.z) * 83492791u;
+    return h & uint(size - 1);
+}
+
+void atomicAddCorrection(uint id, int component, float value) {
+    if (value == 0.0) return;
+    uint expected = correction[id][component];
+    for (;;) {
+        float current = uintBitsToFloat(expected);
+        uint desired = floatBitsToUint(current + value);
+        uint observed = atomicCompSwap(correction[id][component], expected, desired);
+        if (observed == expected) return;
+        expected = observed;
+    }
+}
+
+void accumulate(uint id, vec3 delta, float weight) {
+    if (weight <= 0.0 || id >= uint(uParticleCount)) return;
+    atomicAddCorrection(id, 0, delta.x * weight);
+    atomicAddCorrection(id, 1, delta.y * weight);
+    atomicAddCorrection(id, 2, delta.z * weight);
+    atomicAddCorrection(id, 3, weight);
+}
+
+vec3 projectOnto(vec3 onto, vec3 value) {
+    float denom = dot(onto, onto);
+    return (denom < uVgsEpsilon) ? vec3(0.0) : onto * (dot(onto, value) / denom);
+}
+
+void resetCorrections(uint gid) {
+    if (gid >= uint(uSimCount)) return;
+    correction[simId[gid]] = uvec4(0u);
+}
+
+void integrateParticle(uint gid) {
+    if (gid >= uint(uSimCount)) return;
+    uint id = simId[gid];
+    ParticleState p = particle[id];
+    p.prev_inv_mass.xyz = p.pos_radius.xyz;
+    p.predicted_base_inv_mass.xyz = p.pos_radius.xyz;
+    if (p.prev_inv_mass.w > 0.0) {
+        p.velocity.xyz *= uVelocityDamping;
+        p.predicted_base_inv_mass.xyz += p.velocity.xyz * uDt;
+        p.predicted_base_inv_mass.y -= uGravity * uDt * uDt;
+        vec4 tether = tetherTarget[id];
+        if (tether.w > 0.5) {
+            vec3 accel = (tether.xyz - p.predicted_base_inv_mass.xyz) * uTetherSpring;
+            p.predicted_base_inv_mass.xyz += accel * uDt * uDt;
+            p.velocity.xyz += accel * uDt;
+            float damp = clamp(uTetherDamping * uDt, 0.0, 0.9);
+            p.velocity.xyz *= 1.0 - damp;
+        }
+    }
+    particle[id] = p;
+}
+
+void clearHash(uint gid) {
+    if (gid < uint(uHashSize)) hashHead[gid] = -1;
+}
+
+void buildHash(uint gid) {
+    if (gid >= uint(uSimCount)) return;
+    uint id = simId[gid];
+    ivec3 c = ivec3(floor(particle[id].predicted_base_inv_mass.xyz / uVoxelSize));
+    cell[id].xyz = c;
+    uint h = hashCoord(c, uHashSize);
+    hashNext[gid] = atomicExchange(hashHead[h], int(gid));
+}
+
+void sceneCollisions(uint gid) {
+    if (gid >= uint(uSimCount)) return;
+    uint id = simId[gid];
+    ParticleState p = particle[id];
+    if (p.prev_inv_mass.w <= 0.0) return;
+    vec3 pos = p.predicted_base_inv_mass.xyz;
+    float radius = p.pos_radius.w;
+    const float eps = 1e-6;
+    for (int i = 0; i < uActivePlayers && i < 4; ++i) {
+        if (uPlayerPosHalf[i].w < 0.0) continue;
+        float halfSize = uPlayerPosHalf[i].w;
+        vec3 nearest = clamp(pos, uPlayerPosHalf[i].xyz - vec3(halfSize),
+                                  uPlayerPosHalf[i].xyz + vec3(halfSize));
+        vec3 delta = pos - nearest;
+        float distSq = dot(delta, delta);
+        if (distSq < radius * radius) {
+            float dist = sqrt(max(distSq, eps));
+            float penetration = radius - dist;
+            vec3 normal = (dist > eps) ? -delta / dist : vec3(0.0, 1.0, 0.0);
+            pos += normal * penetration;
+        }
+    }
+    accumulate(id, pos - p.predicted_base_inv_mass.xyz, 1.0);
+}
+
+void pairCollisions(uint gid) {
+    if (gid >= uint(uSimCount)) return;
+    uint aid = simId[gid];
+    ParticleState a = particle[aid];
+    float wa = a.prev_inv_mass.w;
+    if (wa <= 0.0) return;
+    ivec3 ac = cell[aid].xyz;
+    const float eps = 1e-6;
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                ivec3 nc = ac + ivec3(dx, dy, dz);
+                int item = hashHead[hashCoord(nc, uHashSize)];
+                while (item >= 0 && item < uSimCount) {
+                    if (uint(item) > gid) {
+                        uint bid = simId[item];
+                        if (all(equal(cell[bid].xyz, nc))) {
+                            ParticleState b = particle[bid];
+                            float wb = b.prev_inv_mass.w;
+                            float wsum = wa + wb;
+                            vec3 delta = a.predicted_base_inv_mass.xyz - b.predicted_base_inv_mass.xyz;
+                            float distSq = dot(delta, delta);
+                            float target = a.pos_radius.w + b.pos_radius.w;
+                            if (wsum > 0.0 && distSq < target * target) {
+                                float dist = sqrt(max(distSq, eps));
+                                float penetration = target - dist;
+                                if (penetration > 0.0) {
+                                    vec3 normal = (dist > eps) ? delta / dist : vec3(1.0, 0.0, 0.0);
+                                    float scale = uCollisionRelaxation * (0.5 * penetration) / wsum;
+                                    if (wa > 0.0) accumulate(aid, normal * (scale * wa), 1.0);
+                                    if (wb > 0.0) accumulate(bid, normal * (-scale * wb), 1.0);
+                                }
+                            }
+                        }
+                    }
+                    item = hashNext[item];
+                }
+            }
+        }
+    }
+}
+
+void applyCorrections(uint gid) {
+    if (gid >= uint(uSimCount)) return;
+    uint id = simId[gid];
+    uvec4 bits = correction[id];
+    float weight = uintBitsToFloat(bits.w);
+    if (weight > 0.0) {
+        vec3 sum = vec3(uintBitsToFloat(bits.x), uintBitsToFloat(bits.y), uintBitsToFloat(bits.z));
+        particle[id].predicted_base_inv_mass.xyz += sum * (uSor / weight);
+    }
+    correction[id] = uvec4(0u);
+}
+
+void solveVgs(uint gid) {
+    if (gid >= uint(uVoxelCount)) return;
+    VoxelState v = voxel[gid];
+    if (v.flags.x == 0 || v.flags.y != 0 || v.flags.z != 0 || v.flags.w == 0) return;
+    vec3 p[8];
+    vec3 original[8];
+    float applyWeight[8];
+    bool dynamicParticle = false;
+    for (int i = 0; i < 8; ++i) {
+        uint id = voxelParticle(v, i);
+        if (id >= uint(uParticleCount)) return;
+        p[i] = particle[id].predicted_base_inv_mass.xyz;
+        original[i] = p[i];
+        float w = particle[id].prev_inv_mass.w;
+        applyWeight[i] = (w > 0.0) ? w : 0.0;
+        dynamicParticle = dynamicParticle || (w > 0.0);
+    }
+    if (!dynamicParticle) return;
+
+    float restEdge = v.pos_rest_edge.w;
+    float restVolume = v.velocity_rest_volume.w;
+    for (int iteration = 0; iteration < 3; ++iteration) {
+        vec3 centerPos = vec3(0.0);
+        for (int i = 0; i < 8; ++i) centerPos += p[i];
+        centerPos *= 0.125;
+        vec3 v0 = ((p[1]-p[0]) + (p[3]-p[2]) + (p[5]-p[4]) + (p[7]-p[6])) * 0.25;
+        vec3 v1 = ((p[2]-p[0]) + (p[3]-p[1]) + (p[6]-p[4]) + (p[7]-p[5])) * 0.25;
+        vec3 v2 = ((p[4]-p[0]) + (p[5]-p[1]) + (p[6]-p[2]) + (p[7]-p[3])) * 0.25;
+        vec3 u0 = v0 - uVgsAlpha * (projectOnto(v1, v0) + projectOnto(v2, v0));
+        vec3 u1 = v1 - uVgsAlpha * (projectOnto(v2, v1) + projectOnto(v0, v1));
+        vec3 u2 = v2 - uVgsAlpha * (projectOnto(v0, v2) + projectOnto(v1, v2));
+        float target0 = mix(restEdge, length(v0), uVgsBeta);
+        float target1 = mix(restEdge, length(v1), uVgsBeta);
+        float target2 = mix(restEdge, length(v2), uVgsBeta);
+        if (length(u0) > uVgsEpsilon) u0 *= target0 / length(u0);
+        if (length(u1) > uVgsEpsilon) u1 *= target1 / length(u1);
+        if (length(u2) > uVgsEpsilon) u2 *= target2 / length(u2);
+        float volume = dot(cross(u0, u1), u2);
+        if (abs(volume) > uVgsEpsilon) {
+            float scale = restVolume / volume;
+            float root = pow(abs(scale), 1.0/3.0) * ((scale < 0.0) ? -1.0 : 1.0);
+            u0 *= 0.5 * root; u1 *= 0.5 * root; u2 *= 0.5 * root;
+        }
+        vec3 nextP[8];
+        nextP[0]=centerPos-u0-u1-u2; nextP[1]=centerPos+u0-u1-u2;
+        nextP[2]=centerPos-u0+u1-u2; nextP[3]=centerPos+u0+u1-u2;
+        nextP[4]=centerPos-u0-u1+u2; nextP[5]=centerPos+u0-u1+u2;
+        nextP[6]=centerPos-u0+u1+u2; nextP[7]=centerPos+u0+u1+u2;
+        for (int i = 0; i < 8; ++i) p[i] = nextP[i];
+    }
+    for (int i = 0; i < 8; ++i) {
+        if (applyWeight[i] > 0.0) accumulate(voxelParticle(v, i), p[i] - original[i], applyWeight[i]);
+    }
+}
+
+int findStaticCell(ivec3 coord) {
+    uint h = hashCoord(coord, uStaticHashSize);
+    for (int probe = 0; probe < uStaticHashSize; ++probe) {
+        ivec4 entry = staticCell[h];
+        if (entry.w < 0) return -1;
+        if (all(equal(entry.xyz, coord))) return entry.w;
+        h = (h + 1u) & uint(uStaticHashSize - 1);
+    }
+    return -1;
+}
+
+vec3 pushOutOfBox(vec3 pos, float radius, VoxelState box) {
+    vec3 bmin = box.bounds_min.xyz;
+    vec3 bmax = box.bounds_max.xyz;
+    bool inside = all(greaterThanEqual(pos, bmin)) && all(lessThanEqual(pos, bmax));
+    const float eps = 1e-6;
+    if (!inside) {
+        vec3 closest = clamp(pos, bmin, bmax);
+        vec3 delta = pos - closest;
+        float distSq = dot(delta, delta);
+        if (distSq >= radius * radius) return pos;
+        float dist = sqrt(max(distSq, eps));
+        float penetration = radius - dist;
+        vec3 normal = (dist > eps) ? delta / dist : vec3(0.0, 1.0, 0.0);
+        return pos + normal * max(penetration, 0.0);
+    }
+    float topGap = bmax.y - pos.y;
+    float bottomGap = pos.y - bmin.y;
+    float verticalBias = uVoxelSize * 0.25;
+    bool preferTop = (pos.y >= box.pos_rest_edge.y) && (topGap <= radius + verticalBias);
+    bool preferBottom = (pos.y < box.pos_rest_edge.y) && (bottomGap <= radius + verticalBias);
+    if (preferTop || preferBottom) {
+        bool top = preferTop && (!preferBottom || topGap <= bottomGap);
+        vec3 normal = top ? vec3(0.0, 1.0, 0.0) : vec3(0.0, -1.0, 0.0);
+        float gap = top ? topGap : bottomGap;
+        float penetration = radius - gap;
+        if (penetration < 0.0) penetration = radius;
+        return pos + normal * penetration;
+    }
+    vec3 low = pos - bmin;
+    vec3 high = bmax - pos;
+    float distances[6] = float[6](low.x, high.x, low.y, high.y, low.z, high.z);
+    int best = 0;
+    for (int i = 1; i < 6; ++i) if (distances[i] < distances[best]) best = i;
+    vec3 normal = vec3(0.0);
+    if (best == 0) normal.x=-1.0; else if (best == 1) normal.x=1.0;
+    else if (best == 2) normal.y=-1.0; else if (best == 3) normal.y=1.0;
+    else if (best == 4) normal.z=-1.0; else normal.z=1.0;
+    return pos + normal * (radius + distances[best]);
+}
+
+void staticCollisions(uint gid) {
+    if (gid >= uint(uSimCount)) return;
+    uint id = simId[gid];
+    ParticleState p = particle[id];
+    if (p.prev_inv_mass.w <= 0.0) return;
+    float radius = p.pos_radius.w;
+    vec3 pos = p.predicted_base_inv_mass.xyz;
+    float terrainLimit = uFloorSize - radius;
+    float floorLimit = max(0.0, 0.5 * uVoxelSize - radius);
+    pos.y = max(pos.y, floorLimit);
+    pos.xz = clamp(pos.xz, vec2(-terrainLimit), vec2(terrainLimit));
+    const float eps = 1e-6;
+    for (int i = 0; i < uActivePlayers && i < 4; ++i) {
+        if (uPlayerPosHalf[i].w < 0.0) continue;
+        float halfSize = uPlayerPosHalf[i].w;
+        vec3 nearest = clamp(pos, uPlayerPosHalf[i].xyz - vec3(halfSize),
+                                  uPlayerPosHalf[i].xyz + vec3(halfSize));
+        vec3 delta = pos - nearest;
+        float distSq = dot(delta, delta);
+        if (distSq < radius * radius) {
+            float dist = sqrt(max(distSq, eps));
+            vec3 normal = (dist > eps) ? delta / dist : vec3(0.0, 1.0, 0.0);
+            pos += normal * (radius - dist);
+        }
+    }
+    ivec3 center = ivec3(floor(pos / uVoxelSize));
+    int seen[27]; int seenCount = 0;
+    for (int z=-1; z<=1; ++z) for (int y=-1; y<=1; ++y) for (int x=-1; x<=1; ++x) {
+        int voxelId = findStaticCell(center + ivec3(x,y,z));
+        if (voxelId < 0 || voxelId >= uVoxelCount) continue;
+        bool duplicate = false;
+        for (int s=0; s<seenCount; ++s) duplicate = duplicate || (seen[s] == voxelId);
+        if (duplicate) continue;
+        seen[seenCount++] = voxelId;
+        pos = pushOutOfBox(pos, 0.25 * uVoxelSize, voxel[voxelId]);
+    }
+    particle[id].predicted_base_inv_mass.xyz = pos;
+}
+
+void gatherBreakMask(uint gid) {
+    if (gid >= uint(uVoxelCount)) return;
+    VoxelState v = voxel[gid];
+    v.lifecycle.w = 0u;
+    if (v.flags.x == 0 || v.flags.y != 0 || v.flags.z != 0 || v.pos_rest_edge.w <= 0.0) {
+        voxel[gid] = v; return;
+    }
+    vec3 p[8];
+    for (int i=0; i<8; ++i) {
+        uint id=voxelParticle(v,i); if (id>=uint(uParticleCount)) return;
+        p[i]=particle[id].predicted_base_inv_mass.xyz;
+    }
+    vec3 axis0=((p[1]-p[0])+(p[3]-p[2])+(p[5]-p[4])+(p[7]-p[6]))*0.25;
+    vec3 axis1=((p[2]-p[0])+(p[3]-p[1])+(p[6]-p[4])+(p[7]-p[5]))*0.25;
+    vec3 axis2=((p[4]-p[0])+(p[5]-p[1])+(p[6]-p[2])+(p[7]-p[3]))*0.25;
+    vec3 lengths=vec3(length(axis0),length(axis1),length(axis2));
+    vec3 strain=abs(lengths-vec3(v.pos_rest_edge.w))/v.pos_rest_edge.w;
+    uint glued=v.lifecycle.z; uint mask=0u; bool exceeded=false;
+    if (strain.x>uStrainBreakThreshold) { exceeded=true; mask |= glued & ((1u<<0)|(1u<<1)); }
+    if (strain.y>uStrainBreakThreshold) { exceeded=true; mask |= glued & ((1u<<2)|(1u<<3)); }
+    if (strain.z>uStrainBreakThreshold) { exceeded=true; mask |= glued & ((1u<<4)|(1u<<5)); }
+    vec3 n0=(lengths.x>uVgsEpsilon)?axis0/lengths.x:vec3(0.0);
+    vec3 n1=(lengths.y>uVgsEpsilon)?axis1/lengths.y:vec3(0.0);
+    vec3 n2=(lengths.z>uVgsEpsilon)?axis2/lengths.z:vec3(0.0);
+    if (abs(dot(n0,n1))>uShearBreakThreshold) { exceeded=true; mask |= glued & ((1u<<4)|(1u<<5)); }
+    if (abs(dot(n0,n2))>uShearBreakThreshold) { exceeded=true; mask |= glued & ((1u<<2)|(1u<<3)); }
+    if (abs(dot(n1,n2))>uShearBreakThreshold) { exceeded=true; mask |= glued & ((1u<<0)|(1u<<1)); }
+    v.lifecycle.w=mask; if (exceeded) v.lifecycle.y=1u; voxel[gid]=v;
+}
+
+void finalizeParticle(uint gid) {
+    if (gid >= uint(uSimCount)) return;
+    uint id=simId[gid]; ParticleState p=particle[id];
+    vec3 delta=p.predicted_base_inv_mass.xyz-p.prev_inv_mass.xyz;
+    p.velocity.xyz=(p.prev_inv_mass.w>0.0 && uDt>0.0)?delta/uDt:vec3(0.0);
+    p.pos_radius.xyz=p.predicted_base_inv_mass.xyz;
+    if (cell[id].w>0) cell[id].w--;
+    particle[id]=p;
+}
+
+void finalizeVoxel(uint gid) {
+    if (gid >= uint(uVoxelCount)) return;
+    VoxelState v=voxel[gid];
+    if (v.flags.x==0 || v.flags.y!=0 || v.flags.z!=0) return;
+    vec3 centerPos=vec3(0.0), previous=vec3(0.0);
+    for (int i=0;i<8;++i) {
+        uint id=voxelParticle(v,i); if(id>=uint(uParticleCount)) return;
+        centerPos+=particle[id].predicted_base_inv_mass.xyz;
+        previous+=particle[id].prev_inv_mass.xyz;
+    }
+    centerPos*=0.125; previous*=0.125;
+    if (v.lifecycle.x==0u && uDt>0.0) v.velocity_rest_volume.xyz=(centerPos-previous)/uDt;
+    else if (v.lifecycle.x>0u) v.lifecycle.x--;
+    v.pos_rest_edge.xyz=centerPos; voxel[gid]=v;
+}
+
+void main() {
+    uint gid=gl_GlobalInvocationID.x;
+    if (uMode==MODE_RESET) resetCorrections(gid);
+    else if (uMode==MODE_INTEGRATE) integrateParticle(gid);
+    else if (uMode==MODE_HASH_CLEAR) clearHash(gid);
+    else if (uMode==MODE_HASH_BUILD) buildHash(gid);
+    else if (uMode==MODE_SCENE_COLLISIONS) sceneCollisions(gid);
+    else if (uMode==MODE_PAIR_COLLISIONS) pairCollisions(gid);
+    else if (uMode==MODE_APPLY) applyCorrections(gid);
+    else if (uMode==MODE_VGS) solveVgs(gid);
+    else if (uMode==MODE_STATIC_COLLISIONS) staticCollisions(gid);
+    else if (uMode==MODE_BREAK_MASK) gatherBreakMask(gid);
+    else if (uMode==MODE_FINALIZE_PARTICLES) finalizeParticle(gid);
+    else if (uMode==MODE_FINALIZE_VOXELS) finalizeVoxel(gid);
+}
