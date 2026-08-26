@@ -60,8 +60,10 @@ The physics behavior is controlled by several preprocessor definitions in `fps_r
 *   **`PBD_CONSTRAINT_ITERS` (Default: 6)**
     *   Number of solver iterations per sub-step.
     *   **Effect:** Higher values make materials "stiffer" (less rubbery) but increase computational cost.
-*   **`VOXEL_SIZE` (Default: 0.5f)**
+*   **`VOXEL_SIZE` (Default: 0.25f)**
     *   The world-space size of a single voxel unit.
+    *   Built-in worlds remain authored on the original 0.5 m grid; each authored
+        cell is refined into eight runtime voxels so map dimensions stay unchanged.
 *   **`VGS_ALPHA` (0.75) & `VGS_BETA` (0.35)**
     *   Parameters for the Voxel Gram-Schmidt (VGS) shape matching.
     *   **Effect:** Control how strictly voxels maintain their cubic shape and volume.
@@ -141,6 +143,8 @@ The engine implements three primary types of constraints:
 ## Creative Mode
 
 Creative mode lets you fly around an empty world and build voxel maps that can be saved and loaded for multiplayer.
+New saves record their voxel size (`FPSMAP2`). Legacy `FPSMAP1` saves are treated as
+0.5 m maps and refined on load, preserving their world-space dimensions.
 
 ### Creative Controls
 *   **Move:** WASD

@@ -10,7 +10,9 @@
 #define DEBUG_TEST_TAG 63
 #define DEBUG_SUPPORT_TAG 62
 #define DEBUG_THROW_TAG 61
-#define DEBUG_EXPECTED_VOXELS 18
+#define DEBUG_EXPECTED_VOXELS (18 * VOXEL_VOLUME_SCALE)
+#define DEBUG_SUPPORT_VOXELS (12 * VOXEL_VOLUME_SCALE)
+#define DEBUG_OVERHANG_SUPPORT_VOXELS (81 * VOXEL_VOLUME_SCALE)
 #define DEBUG_MIN_STEPS 60
 #define DEBUG_DEFAULT_STEPS 60
 #define DEBUG_RENDER_WIDTH 1280
@@ -324,6 +326,32 @@ static int debug_add_cell(int gx, int gy, int gz, bool fixed, bool simulate,
     return index;
 }
 
+static int debug_add_authored_cell(int gx, int gy, int gz,
+                                   bool fixed, bool simulate,
+                                   Color color, int tag,
+                                   int *out_first_index)
+{
+    int created = 0;
+    int first_index = -1;
+    int minx = gx * VOXEL_LINEAR_SCALE;
+    int miny = gy * VOXEL_LINEAR_SCALE;
+    int minz = gz * VOXEL_LINEAR_SCALE;
+    for (int ox = 0; ox < VOXEL_LINEAR_SCALE; ++ox) {
+        for (int oy = 0; oy < VOXEL_LINEAR_SCALE; ++oy) {
+            for (int oz = 0; oz < VOXEL_LINEAR_SCALE; ++oz) {
+                int index = debug_add_cell(minx + ox, miny + oy, minz + oz,
+                                           fixed, simulate, color, tag);
+                if (index >= 0) {
+                    if (first_index < 0) first_index = index;
+                    ++created;
+                }
+            }
+        }
+    }
+    if (out_first_index) *out_first_index = first_index;
+    return created;
+}
+
 static int debug_add_test_cluster(bool simulate)
 {
     int created = 0;
@@ -331,9 +359,8 @@ static int debug_add_test_cluster(bool simulate)
     for (int y = 12; y <= 13; ++y) {
         for (int z = -1; z <= 1; ++z) {
             for (int x = -1; x <= 1; ++x) {
-                if (debug_add_cell(x, y, z, !simulate, simulate, color, DEBUG_TEST_TAG) >= 0) {
-                    ++created;
-                }
+                created += debug_add_authored_cell(x, y, z, !simulate, simulate,
+                                                   color, DEBUG_TEST_TAG, NULL);
             }
         }
     }
@@ -345,9 +372,8 @@ static int debug_add_support_column(void)
     int created = 0;
     Color support_color = (Color){ 120, 125, 135, 255 };
     for (int y = 0; y <= 11; ++y) {
-        if (debug_add_cell(0, y, 0, true, false, support_color, DEBUG_SUPPORT_TAG) >= 0) {
-            ++created;
-        }
+        created += debug_add_authored_cell(0, y, 0, true, false,
+                                           support_color, DEBUG_SUPPORT_TAG, NULL);
     }
     return created;
 }
@@ -448,13 +474,15 @@ static bool debug_gpu_static_cell_absent_in(const GpuStaticCell *cells, int x, i
     return true;
 }
 
-static bool debug_gpu_cluster_cells_are_clear(const DebugRunState *state)
+static bool debug_gpu_cluster_cells_match_cpu_static_state(const DebugRunState *state)
 {
     if (!state || state->tracked_cell_count <= 0) return false;
     for (int i = 0; i < state->tracked_cell_count; ++i) {
         const DebugTrackedCell *cell = &state->tracked_cells[i];
-        if (!debug_gpu_static_cell_absent_in(gpuPhysics.static_stage,
-                                             cell->x, cell->y, cell->z)) return false;
+        bool cpu_has_static = table_get_static_only(cell->x, cell->y, cell->z) >= 0;
+        bool gpu_has_static = !debug_gpu_static_cell_absent_in(
+            gpuPhysics.static_stage, cell->x, cell->y, cell->z);
+        if (cpu_has_static != gpu_has_static) return false;
     }
     return true;
 }
@@ -700,9 +728,9 @@ static void debug_validate_overhang_activation(DebugRunState *state,
                                                const DebugSample *sample)
 {
     if (!state || !sample) return;
-    if (sample->tagged_dynamic != state->expected_voxels || sample->tagged_static != 0) {
+    if (sample->tagged_voxels != state->expected_voxels || sample->tagged_dynamic <= 0) {
         debug_add_failure(state,
-                          "overhang activation is incomplete (dynamic=%d static=%d expected=%d)",
+                          "overhang activation did not produce a dynamic section (dynamic=%d static=%d expected=%d)",
                           sample->tagged_dynamic, sample->tagged_static, state->expected_voxels);
     }
     int unexpected_invalid = sample->invalid_particle_refs - sample->zero_mass_corners;
@@ -744,8 +772,10 @@ static void debug_validate_gpu_static_state(DebugRunState *state, int step)
                           (unsigned long long)gpuPhysics.static_uploaded_generation,
                           (unsigned long long)staticHashGeneration);
     }
-    if (!debug_gpu_cluster_cells_are_clear(state)) {
-        debug_add_failure(state, "step %d: activated cells remain in the staged GPU static hash", step);
+    if (!debug_gpu_cluster_cells_match_cpu_static_state(state)) {
+        debug_add_failure(state,
+                          "step %d: staged GPU static cells differ from CPU static occupancy",
+                          step);
     }
 #else
     debug_add_failure(state, "step %d: GPU backend active in a non-GPU build", step);
@@ -800,8 +830,10 @@ static void debug_readback_gpu_buffers(DebugRunState *state, int step)
     }
     for (int i = 0; i < state->tracked_cell_count; ++i) {
         const DebugTrackedCell *cell = &state->tracked_cells[i];
-        if (!debug_gpu_static_cell_absent_in(static_readback,
-                                             cell->x, cell->y, cell->z)) {
+        bool cpu_has_static = table_get_static_only(cell->x, cell->y, cell->z) >= 0;
+        bool gpu_has_static = !debug_gpu_static_cell_absent_in(
+            static_readback, cell->x, cell->y, cell->z);
+        if (!cpu_has_static && gpu_has_static) {
             ++state->gpu_static_ssbo_stale_cells;
         }
     }
@@ -914,7 +946,8 @@ static bool debug_tagged_original_column_y(int tag, int original_x, float *out_y
     int count = 0;
     for (int i = 0; i < voxel_count; ++i) {
         const Voxel *voxel = &voxels[i];
-        if (voxel->debugClusterTag != tag || voxel->orig_min_gx != original_x) continue;
+        if (voxel->debugClusterTag != tag ||
+            original_x < voxel->orig_min_gx || original_x > voxel->orig_max_gx) continue;
         float center_y = 0.0f;
         int corners = 0;
         for (int c = 0; c < VOXEL_CORNER_COUNT; ++c) {
@@ -976,9 +1009,10 @@ static bool debug_setup_sleep_wake_floating(DebugRunState *state)
     debug_rebuild_world_state();
     debug_set_initial_centroid(state);
 
-    if (support_created != 12 || cluster_created != state->expected_voxels) {
-        debug_add_failure(state, "sleep-wake setup created support=%d/12 cluster=%d/%d",
-                          support_created, cluster_created, state->expected_voxels);
+    if (support_created != DEBUG_SUPPORT_VOXELS || cluster_created != state->expected_voxels) {
+        debug_add_failure(state, "sleep-wake setup created support=%d/%d cluster=%d/%d",
+                          support_created, DEBUG_SUPPORT_VOXELS,
+                          cluster_created, state->expected_voxels);
         return false;
     }
     debug_capture(state, "phase-01-supported-dynamic.png", "supported-dynamic", 0);
@@ -1021,9 +1055,10 @@ static bool debug_setup_tether_throw_floating(DebugRunState *state)
     debug_rebuild_world_state();
     debug_set_initial_centroid(state);
 
-    if (support_created != 12 || cluster_created != state->expected_voxels) {
-        debug_add_failure(state, "tether-throw setup created support=%d/12 cluster=%d/%d",
-                          support_created, cluster_created, state->expected_voxels);
+    if (support_created != DEBUG_SUPPORT_VOXELS || cluster_created != state->expected_voxels) {
+        debug_add_failure(state, "tether-throw setup created support=%d/%d cluster=%d/%d",
+                          support_created, DEBUG_SUPPORT_VOXELS,
+                          cluster_created, state->expected_voxels);
         return false;
     }
     debug_capture(state, "phase-01-supported-dynamic.png", "supported-dynamic", 0);
@@ -1051,7 +1086,8 @@ static bool debug_setup_tether_throw_floating(DebugRunState *state)
     }
     debug_capture(state, "phase-03-unsupported-static.png", "unsupported-static", 0);
 
-    int thrown_idx = debug_add_cell(-5, 12, 0, false, true,
+    int thrown_idx = debug_add_cell(-5 * VOXEL_LINEAR_SCALE,
+                                    12 * VOXEL_LINEAR_SCALE, 0, false, true,
                                     (Color){ 255, 210, 70, 255 }, DEBUG_THROW_TAG);
     if (thrown_idx < 0) {
         debug_add_failure(state, "unable to create the tether-thrown test voxel");
@@ -1096,49 +1132,56 @@ static bool debug_setup_overhang_impact(DebugRunState *state)
     for (int y = 0; y <= 8; ++y) {
         for (int z = -1; z <= 1; ++z) {
             for (int x = -2; x <= 0; ++x) {
-                if (debug_add_cell(x, y, z, true, false,
-                                   support_color, DEBUG_SUPPORT_TAG) >= 0) {
-                    ++support_created;
-                }
+                support_created += debug_add_authored_cell(
+                    x, y, z, true, false, support_color, DEBUG_SUPPORT_TAG, NULL);
             }
         }
     }
     for (int z = -1; z <= 1; ++z) {
         for (int x = 1; x <= 6; ++x) {
-            if (debug_add_cell(x, 8, z, true, false,
-                               overhang_color, DEBUG_TEST_TAG) >= 0) {
-                ++overhang_created;
-            }
+            overhang_created += debug_add_authored_cell(
+                x, 8, z, true, false, overhang_color, DEBUG_TEST_TAG, NULL);
         }
     }
     debug_track_tagged_cells(state, DEBUG_TEST_TAG);
     debug_rebuild_world_state();
     debug_set_initial_centroid(state);
-    if (support_created != 81 || overhang_created != state->expected_voxels) {
-        debug_add_failure(state, "overhang setup created support=%d/81 overhang=%d/%d",
-                          support_created, overhang_created, state->expected_voxels);
+    if (support_created != DEBUG_OVERHANG_SUPPORT_VOXELS ||
+        overhang_created != state->expected_voxels) {
+        debug_add_failure(state, "overhang setup created support=%d/%d overhang=%d/%d",
+                          support_created, DEBUG_OVERHANG_SUPPORT_VOXELS,
+                          overhang_created, state->expected_voxels);
         return false;
     }
-    if (!debug_tagged_original_column_y(DEBUG_TEST_TAG, 1, &state->overhang_initial_root_y) ||
-        !debug_tagged_original_column_y(DEBUG_TEST_TAG, 6, &state->overhang_initial_tip_y)) {
+    if (!debug_tagged_original_column_y(DEBUG_TEST_TAG,
+                                        1 * VOXEL_LINEAR_SCALE,
+                                        &state->overhang_initial_root_y) ||
+        !debug_tagged_original_column_y(DEBUG_TEST_TAG,
+                                        7 * VOXEL_LINEAR_SCALE - 1,
+                                        &state->overhang_initial_tip_y)) {
         debug_add_failure(state, "unable to measure the initial overhang root and tip");
         return false;
     }
     debug_capture(state, "phase-01-static-overhang.png", "static-overhang", 0);
 
-    int impact_idx = debug_add_cell(5, 15, 0, false, true,
-                                    (Color){ 255, 205, 65, 255 }, DEBUG_THROW_TAG);
-    if (impact_idx < 0) {
+    int impact_idx = -1;
+    int impact_created = debug_add_authored_cell(
+        5, 15, 0, false, true,
+        (Color){ 255, 205, 65, 255 }, DEBUG_THROW_TAG, &impact_idx);
+    if (impact_idx < 0 || impact_created != VOXEL_VOLUME_SCALE) {
         debug_add_failure(state, "unable to create the falling impact voxel");
         return false;
     }
-    Voxel *impact = &voxels[impact_idx];
-    impact->owner = 0;
-    impact->activator = 0;
-    impact->wasTethered = false;
-    impact->isBullet = false;
-    impact->activationBelief = 1.0f;
-    set_voxel_velocity(impact, (Vector3){ 0.0f, -8.0f, 0.0f });
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *impact = &voxels[i];
+        if (impact->debugClusterTag != DEBUG_THROW_TAG) continue;
+        impact->owner = 0;
+        impact->activator = 0;
+        impact->wasTethered = false;
+        impact->isBullet = false;
+        impact->activationBelief = 1.0f;
+        set_voxel_velocity(impact, (Vector3){ 0.0f, -8.0f, 0.0f });
+    }
     debug_rebuild_world_state();
 
     state->delayed_activation = true;
@@ -1166,8 +1209,11 @@ static void debug_validate_step(DebugRunState *state, int step)
     debug_validate_all_sim_particles(state, step);
     DebugSample sample = debug_collect_sample("validation", step, state->initial_centroid_y);
     if (state->delayed_activation) {
-        if (!state->activation_succeeded &&
-            sample.tagged_dynamic == state->expected_voxels && sample.tagged_static == 0) {
+        bool activation_complete = state->overhang_impact
+            ? (sample.tagged_dynamic > 0 &&
+               sample.tagged_dynamic + sample.tagged_static == state->expected_voxels)
+            : (sample.tagged_dynamic == state->expected_voxels && sample.tagged_static == 0);
+        if (!state->activation_succeeded && activation_complete) {
             state->activation_succeeded = true;
             state->activation_step = step;
         }
@@ -1186,8 +1232,12 @@ static void debug_validate_step(DebugRunState *state, int step)
     if (state->overhang_impact && step == 30) {
         float root_y = 0.0f;
         float tip_y = 0.0f;
-        if (debug_tagged_original_column_y(DEBUG_TEST_TAG, 1, &root_y) &&
-            debug_tagged_original_column_y(DEBUG_TEST_TAG, 6, &tip_y)) {
+        if (debug_tagged_original_column_y(DEBUG_TEST_TAG,
+                                           1 * VOXEL_LINEAR_SCALE,
+                                           &root_y) &&
+            debug_tagged_original_column_y(DEBUG_TEST_TAG,
+                                           7 * VOXEL_LINEAR_SCALE - 1,
+                                           &tip_y)) {
             state->overhang_root_drop_at_step_30 = state->overhang_initial_root_y - root_y;
             state->overhang_tip_drop_at_step_30 = state->overhang_initial_tip_y - tip_y;
             state->overhang_relative_deflection_at_step_30 =

@@ -250,7 +250,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define RADAR_WORLD_RADIUS 18.0f
 #define RADAR_MOVE_SPEED_THRESHOLD 0.35f
 #define CREATIVE_BRUSH_MIN 1
-#define CREATIVE_BRUSH_MAX 20
+#define CREATIVE_BRUSH_MAX 40
 #define CREATIVE_FLY_SPEED 10.0f
 #define CREATIVE_FLY_SPEED_FAST 22.0f
 #define CREATIVE_RAY_RANGE 40.0f
@@ -262,8 +262,10 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define FREEZE_PROPAGATION_ITERATIONS 100
 #define FREEZE_PROPAGATION_ATTENUATION 1.0f
 #define FREEZE_PROPAGATION_EPSILON 1e-6f
-#define FREEZE_PATH_DECAY 0.85f
-#define FREEZE_OVERHANG_DECAY 0.7f
+// These are per-grid-cell attenuation values.  The square roots preserve the
+// old attenuation over the same physical distance after halving VOXEL_SIZE.
+#define FREEZE_PATH_DECAY 0.92195445f
+#define FREEZE_OVERHANG_DECAY 0.83666003f
 #define ACTIVATION_VELOCITY_WEIGHT 0.6f
 #define ACTIVATION_VELOCITY_REF_SPEED 12.0f
 #define ACTIVATION_STRAIN_WEIGHT   0.1f
@@ -280,7 +282,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define TURN_FRICTION 400.0f
 #define PLAYER_RADIUS   0.5f
 #define FLOOR_SIZE     20.0f*1.0f    // half-size of floor in world units
-#define MAX_STATIC_COLLISION_NEIGHBORS 64
+#define MAX_STATIC_COLLISION_NEIGHBORS (64 * 4)
 #define PLAYER_SIZE 0.5f
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
 #define VGS_ALPHA 0.9f
@@ -328,21 +330,21 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define TABLE_CACHE_SIZE 4
 #define FACE_BLOCK_MIN_OVERLAP (VOXEL_SIZE * 0.25f)
 
-#define MAX_NEIGHBOR_VOXELS 128
+#define MAX_NEIGHBOR_VOXELS (128 * 4)
 #define MAX_FACE_NEIGHBORS   64
 #define GLUE_NEIGHBOR_HASH_SIZE 128
 #define MAX_SPLIT_CHILDREN    8
 static const float GRID_EPSILON = 1e-4f;
 static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
-#define VOXEL_ACTIVATION_RADIUS 2*1
+#define VOXEL_ACTIVATION_RADIUS (2 * 2)
 //#define VOXEL_ACTIVATION_UNIT_BUDGET 128
-#define VOXEL_ACTIVATION_UNIT_BUDGET 128*5
+#define VOXEL_ACTIVATION_UNIT_BUDGET (128 * 5 * 8)
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 1.5f
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.15f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.15f
 #define VOXEL_DEACTIVATION_FRAMES 5
-#define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
-#define STATIC_RESTORE_SEARCH_RADIUS 2*1
+#define VOXEL_MAX_DEACTIVATIONS_PER_FRAME (128 * 5 * 8)
+#define STATIC_RESTORE_SEARCH_RADIUS (2 * 2)
 #define DEBRIS_ACTIVATION_COOLDOWN_FRAMES (60 * 10)
 #define STATIC_REBUILD_ACTIVATION_COOLDOWN_FRAMES (60 * 10)
 
@@ -386,13 +388,18 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 // Voxel physics constants
 #define MAX_VOXELS    131072
 #define HASH_SIZE     524288    // must be power of two
-#define VOXEL_SIZE     0.5f    // size of each voxel cube
+#define LEGACY_VOXEL_SIZE 0.5f // authored world/map resolution before the high-res pass
+#define VOXEL_SIZE     0.25f   // size of each runtime voxel cube
+#define VOXEL_LINEAR_SCALE 2
+#define VOXEL_AREA_SCALE   4
+#define VOXEL_VOLUME_SCALE 8
+#define DEFAULT_PARTICLE_INV_MASS ((float)VOXEL_VOLUME_SCALE)
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
 #define MAX_PARTICLES (MAX_VOXELS * 8)
-#define PARTICLE_HASH_SIZE 262144
+#define PARTICLE_HASH_SIZE 1048576
 
 // Tunable voxel edit brush (per-axis span of the add/remove operation)
-static int voxelBrushSpan = 3;
+static int voxelBrushSpan = 3 * VOXEL_LINEAR_SCALE;
 
 // Player structure
 typedef struct {
@@ -1021,7 +1028,10 @@ static bool aimAssistDebugDraw = false;
 static Vector3 aimAssistDebugTarget[MAX_PLAYERS];
 static bool aimAssistDebugHasTarget[MAX_PLAYERS];
 static bool creativeModeActive = false;
-static int creativeBrushSpan[MAX_PLAYERS] = { 3, 3, 3, 3 };
+static int creativeBrushSpan[MAX_PLAYERS] = {
+    3 * VOXEL_LINEAR_SCALE, 3 * VOXEL_LINEAR_SCALE,
+    3 * VOXEL_LINEAR_SCALE, 3 * VOXEL_LINEAR_SCALE
+};
 static int creativePickupType[MAX_PLAYERS] = { 0, 0, 0, 0 };
 static int creativeMapSlot = 0;
 static bool useCustomMap = false;
@@ -3591,7 +3601,9 @@ static bool init_voxel_struct(Voxel *v,
             py + corner_signs[i][1] * half,
             pz + corner_signs[i][2] * half
         };
-        float inv_mass = (fixed || !simulate) ? 0.0f : 1.0f;
+        // A refined voxel has 1/8 the volume of an authored 0.5 m voxel.
+        // Raising inverse mass by the reciprocal keeps mass density stable.
+        float inv_mass = (fixed || !simulate) ? 0.0f : DEFAULT_PARTICLE_INV_MASS;
         Particle *p = particle_create(p_pos, inv_mass);
         if (!p) {
             for (int j = 0; j < i; ++j) {
@@ -5406,15 +5418,59 @@ static void add_dynamic_unit_block(int minx, int miny, int minz,
     add_dynamic_unit_block_tag(minx, miny, minz, sx, sy, sz, color, 0);
 }
 
-static inline void addVoxelAt(int gx, int gy, int gz, Color c) {
-    float px = (gx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    float py = (gy + 0.5f) * VOXEL_SIZE;
-    float pz = (gz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    addVoxel(px, py, pz, true, false, c, 0);
+// Built-in worlds remain authored on the original 0.5 m grid.  Each authored
+// cell is emitted as a 2x2x2 block on the 0.25 m runtime grid, preserving the
+// dimensions and silhouettes of the existing maps.
+static inline int authored_grid_to_runtime_min(int g) {
+    return g * VOXEL_LINEAR_SCALE;
 }
 
-static inline int grid_to_world_g(int g) {
-    return g - (int)floorf(FLOOR_SIZE / VOXEL_SIZE);
+static inline int authored_xz_to_runtime_min(int g) {
+    return authored_grid_to_runtime_min(g) - (int)floorf(FLOOR_SIZE / VOXEL_SIZE);
+}
+
+static inline void addVoxelAt(int gx, int gy, int gz, Color c) {
+    int minx = authored_xz_to_runtime_min(gx);
+    int miny = authored_grid_to_runtime_min(gy);
+    int minz = authored_xz_to_runtime_min(gz);
+    for (int ox = 0; ox < VOXEL_LINEAR_SCALE; ++ox) {
+        for (int oy = 0; oy < VOXEL_LINEAR_SCALE; ++oy) {
+            for (int oz = 0; oz < VOXEL_LINEAR_SCALE; ++oz) {
+                add_static_voxel_at_grid(minx + ox, miny + oy, minz + oz, c, 0);
+            }
+        }
+    }
+}
+
+static void remove_authored_voxel_at(int gx, int gy, int gz) {
+    int minx = authored_xz_to_runtime_min(gx);
+    int miny = authored_grid_to_runtime_min(gy);
+    int minz = authored_xz_to_runtime_min(gz);
+    for (int ox = 0; ox < VOXEL_LINEAR_SCALE; ++ox) {
+        for (int oy = 0; oy < VOXEL_LINEAR_SCALE; ++oy) {
+            for (int oz = 0; oz < VOXEL_LINEAR_SCALE; ++oz) {
+                int idx = table_get(minx + ox, miny + oy, minz + oz);
+                if (idx >= 0 && idx < voxel_count) {
+                    remove_voxel_index(idx);
+                }
+            }
+        }
+    }
+}
+
+static void add_authored_static_cell_at_grid(int gx, int gy, int gz,
+                                             Color color) {
+    int minx = authored_grid_to_runtime_min(gx);
+    int miny = authored_grid_to_runtime_min(gy);
+    int minz = authored_grid_to_runtime_min(gz);
+    for (int ox = 0; ox < VOXEL_LINEAR_SCALE; ++ox) {
+        for (int oy = 0; oy < VOXEL_LINEAR_SCALE; ++oy) {
+            for (int oz = 0; oz < VOXEL_LINEAR_SCALE; ++oz) {
+                add_static_voxel_at_grid(minx + ox, miny + oy, minz + oz,
+                                         color, 0);
+            }
+        }
+    }
 }
 
 static void add_static_box_at_grid(int minx, int maxx,
@@ -5425,7 +5481,7 @@ static void add_static_box_at_grid(int minx, int maxx,
     for (int y = miny; y <= maxy; ++y) {
         for (int x = minx; x <= maxx; ++x) {
             for (int z = minz; z <= maxz; ++z) {
-                add_static_voxel_at_grid(x, y, z, color, 0);
+                add_authored_static_cell_at_grid(x, y, z, color);
             }
         }
     }
@@ -5439,7 +5495,7 @@ static void add_static_disc_at_grid(int cx, int cz, int radius, int y, Color col
             if (dx * dx + dz * dz > r2) {
                 continue;
             }
-            add_static_voxel_at_grid(cx + dx, y, cz + dz, color, 0);
+            add_authored_static_cell_at_grid(cx + dx, y, cz + dz, color);
         }
     }
 }
@@ -5467,7 +5523,7 @@ static void add_static_ring_at_grid(int cx, int cz,
                 if (dist2 > outer2 || dist2 < inner2) {
                     continue;
                 }
-                add_static_voxel_at_grid(cx + dx, y, cz + dz, color, 0);
+                add_authored_static_cell_at_grid(cx + dx, y, cz + dz, color);
             }
         }
     }
@@ -5515,7 +5571,7 @@ static void add_static_ring_with_door_at_grid(int cx, int cz,
                         continue;
                     }
                 }
-                add_static_voxel_at_grid(cx + dx, y, cz + dz, color, 0);
+                add_authored_static_cell_at_grid(cx + dx, y, cz + dz, color);
             }
         }
     }
@@ -5681,12 +5737,7 @@ static void carveFortGateOnX(int cx, int cz, int w, int d,
     int halfGate = gate_w / 2;
     for (int y = 0; y <= gate_h; ++y) {
         for (int z = midZ - halfGate; z <= midZ + halfGate; ++z) {
-            int gx = grid_to_world_g(xWall);
-            int gz = grid_to_world_g(z);
-            int idx = table_get(gx, y, gz);
-            if (idx >= 0 && idx < voxel_count) {
-                remove_voxel_index(idx);
-            }
+            remove_authored_voxel_at(xWall, y, z);
         }
     }
 }
@@ -5700,16 +5751,12 @@ static void carveFortWindows(int cx, int cz, int w, int d,
     int halfWin = window_w / 2;
     for (int y = y0; y <= y1; ++y) {
         for (int x = midX - halfWin; x <= midX + halfWin; ++x) {
-            int idx = table_get(grid_to_world_g(x), y, grid_to_world_g(z0));
-            if (idx >= 0 && idx < voxel_count) remove_voxel_index(idx);
-            idx = table_get(grid_to_world_g(x), y, grid_to_world_g(z1 - 1));
-            if (idx >= 0 && idx < voxel_count) remove_voxel_index(idx);
+            remove_authored_voxel_at(x, y, z0);
+            remove_authored_voxel_at(x, y, z1 - 1);
         }
         for (int z = midZ - halfWin; z <= midZ + halfWin; ++z) {
-            int idx = table_get(grid_to_world_g(x0), y, grid_to_world_g(z));
-            if (idx >= 0 && idx < voxel_count) remove_voxel_index(idx);
-            idx = table_get(grid_to_world_g(x1 - 1), y, grid_to_world_g(z));
-            if (idx >= 0 && idx < voxel_count) remove_voxel_index(idx);
+            remove_authored_voxel_at(x0, y, z);
+            remove_authored_voxel_at(x1 - 1, y, z);
         }
     }
 }
@@ -5744,7 +5791,7 @@ static void buildGateFrame(int cx, int cz, int w, int h, int depth, Color c) {
 
 static void buildTestWorld(void) {
     // Floor
-    int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
+    int M = (int)(2.0f * FLOOR_SIZE / LEGACY_VOXEL_SIZE);
 
     // Pillars
     int pillar_height = 15; // 45 - 10
@@ -5763,10 +5810,7 @@ static void buildTestWorld(void) {
             for (int dx = -pillar_radius; dx <= pillar_radius; dx++) {
                 for (int dz = -pillar_radius; dz <= pillar_radius; dz++) {
                     if (dx*dx + dz*dz > pillar_radius*pillar_radius) continue; // circular pillar
-                    float px = (cx + dx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                    float py = (y + 0.5f) * VOXEL_SIZE;
-                    float pz = (cz + dz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                    addVoxel(px, py, pz, true, false, (Color){ 200, 100, 50, 255 }, 0);
+                    addVoxelAt(cx + dx, y, cz + dz, (Color){ 200, 100, 50, 255 });
                 }
             }
         }
@@ -5779,10 +5823,7 @@ static void buildTestWorld(void) {
     for (int y = platform_base_height; y <= platform_base_height + platform_height; y++) {
         for (int x = M/2 - platform_size/2; x <= M/2 + platform_size/2; x++) {
             for (int z = M/2 - platform_size/2; z <= M/2 + platform_size/2; z++) {
-                float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                float py = (y + 0.5f) * VOXEL_SIZE;
-                float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                addVoxel(px, py, pz, true, false, (Color){ 100, 200, 100, 255 }, 0);
+                addVoxelAt(x, y, z, (Color){ 100, 200, 100, 255 });
                 //addVoxelSized(px, py, pz, false, true, (Color){ 100, 200, 100, 255 }, 0, 1);
             }
         }
@@ -5802,10 +5843,7 @@ static void buildTestWorld(void) {
                     for (int dz = 0; dz < 2; ++dz) {
                         int x = leg_x[corner] + dx;
                         int z = leg_z[corner] + dz;
-                        float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                        float py = (y + 0.5f) * VOXEL_SIZE;
-                        float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-                        addVoxel(px, py, pz, true, false, (Color){ 120, 160, 90, 255 }, 0);
+                        addVoxelAt(x, y, z, (Color){ 120, 160, 90, 255 });
                     }
                 }
             }
@@ -5825,7 +5863,7 @@ static void buildTestWorld(void) {
 }
 
 static void buildProceduralWorld(void) {
-    int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
+    int M = (int)(2.0f * FLOOR_SIZE / LEGACY_VOXEL_SIZE);
     int numStructures = 20;
     
     for (int i = 0; i < numStructures; ++i) {
@@ -5867,7 +5905,7 @@ static void buildProceduralWorld(void) {
 }
 
 static void buildBloodWorld(void) {
-    int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
+    int M = (int)(2.0f * FLOOR_SIZE / LEGACY_VOXEL_SIZE);
     int center = M / 2;
     int map_radius_cells = center - 2;
 
@@ -6150,10 +6188,10 @@ static void buildDebugWorld(void) {
     // emit_static_voxels_from_units(&pyramid_units);
     //Span-2 dynamic voxel near origin for floor collision testing
     {
-        int span1 = 3;
-        int span2 = 30;
-        float px = -2.0f * VOXEL_SIZE;
-        float pz = 2.0f * VOXEL_SIZE;
+        int span1 = 3 * VOXEL_LINEAR_SCALE;
+        int span2 = 30 * VOXEL_LINEAR_SCALE;
+        float px = -2.0f * LEGACY_VOXEL_SIZE;
+        float pz = 2.0f * LEGACY_VOXEL_SIZE;
         float py = 0.0f;
         for ( int x = 0; x < span1; x++){
             for ( int z = 0; z < span1; z++){
@@ -6320,7 +6358,8 @@ static bool save_map_slot(int slot) {
     if (!fp) {
         return false;
     }
-    fprintf(fp, "FPSMAP1\n");
+    fprintf(fp, "FPSMAP2\n");
+    fprintf(fp, "VOXEL_SIZE %.6f\n", VOXEL_SIZE);
     int static_count = 0;
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *v = &voxels[i];
@@ -6368,8 +6407,25 @@ static bool load_map_slot(int slot) {
         fclose(fp);
         return false;
     }
-    if (strncmp(header, "FPSMAP1", 7) != 0) {
+    bool legacy_map = strncmp(header, "FPSMAP1", 7) == 0;
+    bool sized_map = strncmp(header, "FPSMAP2", 7) == 0;
+    if (!legacy_map && !sized_map) {
         fclose(fp);
+        return false;
+    }
+
+    float source_voxel_size = LEGACY_VOXEL_SIZE;
+    if (sized_map && fscanf(fp, "VOXEL_SIZE %f\n", &source_voxel_size) != 1) {
+        fclose(fp);
+        return false;
+    }
+    int map_refinement = (int)roundf(source_voxel_size / VOXEL_SIZE);
+    if (map_refinement < 1 ||
+        fabsf(source_voxel_size - (float)map_refinement * VOXEL_SIZE) > 1e-4f) {
+        fclose(fp);
+        TraceLog(LOG_WARNING,
+                 "Map voxel size %.3f cannot be represented by %.3f m runtime voxels",
+                 source_voxel_size, VOXEL_SIZE);
         return false;
     }
 
@@ -6389,7 +6445,19 @@ static bool load_map_slot(int slot) {
                    &gx, &gy, &gz, &r, &g, &b, &a, &type) != 8) {
             break;
         }
-        add_static_voxel_at_grid(gx, gy, gz, (Color){ (unsigned char)r, (unsigned char)g, (unsigned char)b, (unsigned char)a }, type);
+        Color color = (Color){ (unsigned char)r, (unsigned char)g,
+                               (unsigned char)b, (unsigned char)a };
+        int minx = gx * map_refinement;
+        int miny = gy * map_refinement;
+        int minz = gz * map_refinement;
+        for (int ox = 0; ox < map_refinement; ++ox) {
+            for (int oy = 0; oy < map_refinement; ++oy) {
+                for (int oz = 0; oz < map_refinement; ++oz) {
+                    add_static_voxel_at_grid(minx + ox, miny + oy, minz + oz,
+                                             color, type);
+                }
+            }
+        }
     }
 
     int pickup_count = 0;
@@ -6426,14 +6494,15 @@ static bool load_map_slot(int slot) {
 }
 
 static void init_pickups(void) {
-    int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
+    int M = (int)(2.0f * FLOOR_SIZE / LEGACY_VOXEL_SIZE);
     int center = M / 2;
     int map_radius_cells = center - 2;
     int platform_base_height = (int)roundf(0.10f * (float)map_radius_cells);
     if (platform_base_height < 5) platform_base_height = 5;
-    float platform_y = (platform_base_height + 0.5f) * VOXEL_SIZE;
+    float platform_y = (platform_base_height + 0.5f) * LEGACY_VOXEL_SIZE;
     float jump_height = (JUMP_SPEED * JUMP_SPEED) / (2.0f * GRAVITY);
-    float pickup_y = platform_y + jump_height + (2.0f * VOXEL_SIZE) + (platform_base_height * VOXEL_SIZE);
+    float pickup_y = platform_y + jump_height + (2.0f * LEGACY_VOXEL_SIZE) +
+                     (platform_base_height * LEGACY_VOXEL_SIZE);
 
     clear_pickups();
     pickups[0].pos = (Vector3){ 0.0f, pickup_y, 0.0f };
@@ -6649,7 +6718,7 @@ static void reset_players_for_creative(void) {
 static void ResetCreative(void) {
     creativeModeActive = true;
     for (int i = 0; i < MAX_PLAYERS; ++i) {
-        creativeBrushSpan[i] = 3;
+        creativeBrushSpan[i] = 3 * VOXEL_LINEAR_SCALE;
         creativePickupType[i] = PICKUP_DYNAMIC_SHOT;
         creativeBlockColorIndex[i] = 0;
         creativeHelpVisible[i] = true;
@@ -10567,8 +10636,8 @@ static void FireVoxel(int idx) {
         shot->wasTethered = dynamic_shot;
         for (int i = 0; i < 8; ++i) {
             shot->particles[i]->vel = vel;
-            shot->particles[i]->inv_mass = 1.0f;
-            shot->particles[i]->base_inv_mass = 1.0f;
+            shot->particles[i]->inv_mass = DEFAULT_PARTICLE_INV_MASS;
+            shot->particles[i]->base_inv_mass = DEFAULT_PARTICLE_INV_MASS;
             shot->particles[i]->active = true;
             // sim_particles_remove(shot->particles[i]); // Keep them in sim? Or remove?
             // If we remove them, they won't collide. But bullets need to collide.
@@ -10722,8 +10791,8 @@ static int brush_extent_for_voxel(const Voxel *v) {
     int extent = (int)roundf(scaled);
     if (extent < 1) {
         extent = 1;
-    } else if (extent > 5) {
-        extent = 5;
+    } else if (extent > 5 * VOXEL_LINEAR_SCALE) {
+        extent = 5 * VOXEL_LINEAR_SCALE;
     }
     return extent;
 }
