@@ -3900,6 +3900,7 @@ static bool activation_try_enqueue(int voxel_idx,
         float dy = (float)(candidate->gy - center_gy);
         float dz = (float)(candidate->gz - center_gz);
         if ((dx*dx + dy*dy + dz*dz) > radius_sq) {
+            atomic_store_explicit(&activationClaims[voxel_idx], 0, memory_order_release);
             return false;
         }
     }
@@ -4120,7 +4121,7 @@ static void activate_static_worker(int start, int end, int worker_id, void *user
         if (!dynamic->simulate || dynamic->type == 1 || dynamic->type == 2) {
             continue;
         }
-        if (dynamic->isBullet || !dynamic->wasTethered) {
+        if (dynamic->isBullet) {
             continue;
         }
         if (dynamic->activationCooldownFrames > 0) {

@@ -5,9 +5,11 @@
 #define DEBUG_MAX_SAMPLES 96
 #define DEBUG_MAX_CAPTURES 96
 #define DEBUG_MAX_FAILURES 32
+#define DEBUG_MAX_TRACKED_CELLS 1024
 #define DEBUG_MESSAGE_CAPACITY 256
 #define DEBUG_TEST_TAG 63
 #define DEBUG_SUPPORT_TAG 62
+#define DEBUG_THROW_TAG 61
 #define DEBUG_EXPECTED_VOXELS 18
 #define DEBUG_MIN_STEPS 60
 #define DEBUG_DEFAULT_STEPS 60
@@ -45,6 +47,12 @@ typedef struct DebugSample {
     double physics_step_ms;
 } DebugSample;
 
+typedef struct DebugTrackedCell {
+    int x;
+    int y;
+    int z;
+} DebugTrackedCell;
+
 typedef struct DebugRunState {
     RenderTexture2D target;
     Camera3D camera;
@@ -53,8 +61,26 @@ typedef struct DebugRunState {
     bool sleeping_conversion_succeeded;
     bool support_removal_succeeded;
     bool drop_sampled;
+    bool delayed_activation;
+    bool overhang_impact;
+    bool overhang_anchor_observed;
+    bool overhang_deflection_sampled;
+    bool gpu_readback_performed;
+    int activation_step;
     float initial_centroid_y;
     float drop_at_step_60;
+    float overhang_initial_root_y;
+    float overhang_initial_tip_y;
+    float overhang_root_drop_at_step_30;
+    float overhang_tip_drop_at_step_30;
+    float overhang_relative_deflection_at_step_30;
+    int gpu_static_ssbo_diff_entries;
+    int gpu_static_ssbo_stale_cells;
+    int gpu_sim_id_mismatches;
+    int gpu_tagged_corners_missing_from_sim_ids;
+    int gpu_zero_mass_corners;
+    DebugTrackedCell tracked_cells[DEBUG_MAX_TRACKED_CELLS];
+    int tracked_cell_count;
     DebugSample samples[DEBUG_MAX_SAMPLES];
     int sample_count;
     char captures[DEBUG_MAX_CAPTURES][DEBUG_PATH_CAPACITY];
@@ -80,11 +106,15 @@ static DebugRunConfig debugRunConfig = {
 static bool debug_setup_dynamic_freefall(DebugRunState *state);
 static bool debug_setup_activation_floating(DebugRunState *state);
 static bool debug_setup_sleep_wake_floating(DebugRunState *state);
+static bool debug_setup_tether_throw_floating(DebugRunState *state);
+static bool debug_setup_overhang_impact(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall },
     { "activation-floating", "Static cluster activated while unsupported", debug_setup_activation_floating },
-    { "sleep-wake-floating", "Supported cluster sleeps, loses support, then activates", debug_setup_sleep_wake_floating }
+    { "sleep-wake-floating", "Supported cluster sleeps, loses support, then activates", debug_setup_sleep_wake_floating },
+    { "tether-throw-floating", "Released tether voxel wakes an unsupported sleeping cluster", debug_setup_tether_throw_floating },
+    { "overhang-impact", "Falling dynamic voxel activates and bends a supported static overhang", debug_setup_overhang_impact }
 };
 
 static const int debugScenarioCount = (int)(sizeof(debugScenarios) / sizeof(debugScenarios[0]));
@@ -333,6 +363,19 @@ static int debug_count_tagged(int tag, int simulate_filter)
     return count;
 }
 
+static void debug_track_tagged_cells(DebugRunState *state, int tag)
+{
+    if (!state) return;
+    state->tracked_cell_count = 0;
+    for (int i = 0; i < voxel_count && state->tracked_cell_count < DEBUG_MAX_TRACKED_CELLS; ++i) {
+        const Voxel *voxel = &voxels[i];
+        if (voxel->debugClusterTag != tag) continue;
+        state->tracked_cells[state->tracked_cell_count++] = (DebugTrackedCell){
+            voxel->gx, voxel->gy, voxel->gz
+        };
+    }
+}
+
 static int debug_find_tagged_voxel(int tag, bool require_static)
 {
     for (int i = 0; i < voxel_count; ++i) {
@@ -381,25 +424,23 @@ static bool debug_remove_tagged_voxels(int tag)
     return removed;
 }
 
-static bool debug_original_cluster_cells_are_clear(void)
+static bool debug_original_cluster_cells_are_clear(const DebugRunState *state)
 {
-    for (int y = 12; y <= 13; ++y) {
-        for (int z = -1; z <= 1; ++z) {
-            for (int x = -1; x <= 1; ++x) {
-                if (table_get_static_only(x, y, z) >= 0) return false;
-            }
-        }
+    if (!state || state->tracked_cell_count <= 0) return false;
+    for (int i = 0; i < state->tracked_cell_count; ++i) {
+        const DebugTrackedCell *cell = &state->tracked_cells[i];
+        if (table_get_static_only(cell->x, cell->y, cell->z) >= 0) return false;
     }
     return true;
 }
 
 #if defined(GRAPHICS_API_OPENGL_43)
-static bool debug_gpu_static_cell_absent(int x, int y, int z)
+static bool debug_gpu_static_cell_absent_in(const GpuStaticCell *cells, int x, int y, int z)
 {
-    if (!gpuPhysics.static_stage) return false;
+    if (!cells) return false;
     uint32_t hash = gpu_static_hash_coord(x, y, z);
     for (int probe = 0; probe < HASH_SIZE; ++probe) {
-        const GpuStaticCell *entry = &gpuPhysics.static_stage[hash];
+        const GpuStaticCell *entry = &cells[hash];
         if (entry->value[3] < 0) return true;
         if (entry->value[0] == x && entry->value[1] == y && entry->value[2] == z) return false;
         hash = (hash + 1u) & (HASH_SIZE - 1u);
@@ -407,14 +448,13 @@ static bool debug_gpu_static_cell_absent(int x, int y, int z)
     return true;
 }
 
-static bool debug_gpu_cluster_cells_are_clear(void)
+static bool debug_gpu_cluster_cells_are_clear(const DebugRunState *state)
 {
-    for (int y = 12; y <= 13; ++y) {
-        for (int z = -1; z <= 1; ++z) {
-            for (int x = -1; x <= 1; ++x) {
-                if (!debug_gpu_static_cell_absent(x, y, z)) return false;
-            }
-        }
+    if (!state || state->tracked_cell_count <= 0) return false;
+    for (int i = 0; i < state->tracked_cell_count; ++i) {
+        const DebugTrackedCell *cell = &state->tracked_cells[i];
+        if (!debug_gpu_static_cell_absent_in(gpuPhysics.static_stage,
+                                             cell->x, cell->y, cell->z)) return false;
     }
     return true;
 }
@@ -503,7 +543,10 @@ static DebugSample *debug_record_sample(DebugRunState *state, const char *phase,
 static void debug_draw_overlay(const DebugRunState *state, const DebugSample *sample)
 {
     if (!state || !sample) return;
-    DrawRectangle(18, 18, 570, 180, Fade(BLACK, 0.78f));
+    int box_height = 180;
+    if (state->gpu_readback_performed) box_height += 30;
+    if (state->overhang_impact) box_height += 30;
+    DrawRectangle(18, 18, 650, box_height, Fade(BLACK, 0.78f));
     DrawText(TextFormat("SCENARIO %s", debugRunConfig.scenario), 34, 32, 22, RAYWHITE);
     DrawText(TextFormat("BACKEND requested=%s active=%s",
                         physics_backend_name(physicsBackend.requested),
@@ -526,6 +569,24 @@ static void debug_draw_overlay(const DebugRunState *state, const DebugSample *sa
                         sample->invalid_particle_refs, sample->zero_mass_corners,
                         sample->static_glued_faces),
              34, 166, 19, result_color);
+    if (state->gpu_readback_performed) {
+        DrawText(TextFormat("GPU SSBO staticStale=%d staticDiff=%d simMismatch=%d missing=%d gpuZeroMass=%d",
+                            state->gpu_static_ssbo_stale_cells,
+                            state->gpu_static_ssbo_diff_entries,
+                            state->gpu_sim_id_mismatches,
+                            state->gpu_tagged_corners_missing_from_sim_ids,
+                            state->gpu_zero_mass_corners),
+                 34, 192, 17, result_color);
+    }
+    if (state->overhang_impact) {
+        int y = state->gpu_readback_performed ? 222 : 192;
+        DrawText(TextFormat("OVERHANG rootDrop30=%.3f tipDrop30=%.3f relative=%.3f anchor=%s",
+                            state->overhang_root_drop_at_step_30,
+                            state->overhang_tip_drop_at_step_30,
+                            state->overhang_relative_deflection_at_step_30,
+                            state->overhang_anchor_observed ? "yes" : "no"),
+                 34, y, 17, result_color);
+    }
 }
 
 static void debug_render_scene(DebugRunState *state, const DebugSample *sample)
@@ -635,6 +696,29 @@ static void debug_validate_tagged_dynamic(DebugRunState *state, const DebugSampl
     }
 }
 
+static void debug_validate_overhang_activation(DebugRunState *state,
+                                               const DebugSample *sample)
+{
+    if (!state || !sample) return;
+    if (sample->tagged_dynamic != state->expected_voxels || sample->tagged_static != 0) {
+        debug_add_failure(state,
+                          "overhang activation is incomplete (dynamic=%d static=%d expected=%d)",
+                          sample->tagged_dynamic, sample->tagged_static, state->expected_voxels);
+    }
+    int unexpected_invalid = sample->invalid_particle_refs - sample->zero_mass_corners;
+    if (unexpected_invalid > 0) {
+        debug_add_failure(state, "overhang activation has %d non-anchor particle reference errors",
+                          unexpected_invalid);
+    }
+    if (sample->zero_mass_corners <= 0 || sample->static_glued_faces <= 0) {
+        debug_add_failure(state,
+                          "overhang activation did not preserve its static root anchor (zeroMass=%d staticGlue=%d)",
+                          sample->zero_mass_corners, sample->static_glued_faces);
+    } else {
+        state->overhang_anchor_observed = true;
+    }
+}
+
 static void debug_validate_all_sim_particles(DebugRunState *state, int step)
 {
     for (int i = 0; i < sim_particle_count; ++i) {
@@ -650,7 +734,8 @@ static void debug_validate_all_sim_particles(DebugRunState *state, int step)
 
 static void debug_validate_gpu_static_state(DebugRunState *state, int step)
 {
-    if (physicsBackend.active != PHYSICS_BACKEND_GPU_GL43 || step < 1) return;
+    if (physicsBackend.active != PHYSICS_BACKEND_GPU_GL43 || step < 1 ||
+        !state || !state->activation_succeeded || state->gpu_readback_performed) return;
 #if defined(GRAPHICS_API_OPENGL_43)
     if (gpuPhysics.static_uploaded_generation != staticHashGeneration) {
         debug_add_failure(state,
@@ -659,11 +744,140 @@ static void debug_validate_gpu_static_state(DebugRunState *state, int step)
                           (unsigned long long)gpuPhysics.static_uploaded_generation,
                           (unsigned long long)staticHashGeneration);
     }
-    if (!debug_gpu_cluster_cells_are_clear()) {
+    if (!debug_gpu_cluster_cells_are_clear(state)) {
         debug_add_failure(state, "step %d: activated cells remain in the staged GPU static hash", step);
     }
 #else
     debug_add_failure(state, "step %d: GPU backend active in a non-GPU build", step);
+#endif
+}
+
+static void debug_readback_gpu_buffers(DebugRunState *state, int step)
+{
+    if (!state || physicsBackend.active != PHYSICS_BACKEND_GPU_GL43 || step < 1 ||
+        !state->activation_succeeded || state->gpu_readback_performed) return;
+#if defined(GRAPHICS_API_OPENGL_43)
+    state->gpu_readback_performed = true;
+    if (gpuPhysics.static_cell_buffer.id == 0 || gpuPhysics.sim_id_buffer.id == 0 ||
+        gpuPhysics.particle_buffer.id == 0 ||
+        !gpuPhysics.static_stage || !gpuPhysics.sim_ids || !gpuPhysics.particle_stage ||
+        !gpuPhysics.pool_to_compact) {
+        debug_add_failure(state, "step %d: GPU diagnostic buffers are not initialized", step);
+        return;
+    }
+
+    size_t static_bytes = (size_t)HASH_SIZE * sizeof(GpuStaticCell);
+    GpuStaticCell *static_readback = malloc(static_bytes);
+    size_t sim_bytes = (size_t)sim_particle_count * sizeof(uint32_t);
+    uint32_t *sim_id_readback = sim_bytes ? malloc(sim_bytes) : NULL;
+    size_t particle_bytes = (size_t)gpuPhysics.compact_count * sizeof(GpuParticleState);
+    GpuParticleState *particle_readback = particle_bytes ? malloc(particle_bytes) : NULL;
+    if (!static_readback || (sim_bytes && !sim_id_readback) ||
+        (particle_bytes && !particle_readback)) {
+        free(static_readback);
+        free(sim_id_readback);
+        free(particle_readback);
+        debug_add_failure(state, "step %d: unable to allocate GPU diagnostic readback storage", step);
+        return;
+    }
+
+    rlReadShaderBuffer(gpuPhysics.static_cell_buffer.id, static_readback,
+                       (unsigned int)static_bytes, 0);
+    if (sim_bytes) {
+        rlReadShaderBuffer(gpuPhysics.sim_id_buffer.id, sim_id_readback,
+                           (unsigned int)sim_bytes, 0);
+    }
+    if (particle_bytes) {
+        rlReadShaderBuffer(gpuPhysics.particle_buffer.id, particle_readback,
+                           (unsigned int)particle_bytes, 0);
+    }
+
+    for (int i = 0; i < HASH_SIZE; ++i) {
+        if (memcmp(&static_readback[i], &gpuPhysics.static_stage[i],
+                   sizeof(static_readback[i])) != 0) {
+            ++state->gpu_static_ssbo_diff_entries;
+        }
+    }
+    for (int i = 0; i < state->tracked_cell_count; ++i) {
+        const DebugTrackedCell *cell = &state->tracked_cells[i];
+        if (!debug_gpu_static_cell_absent_in(static_readback,
+                                             cell->x, cell->y, cell->z)) {
+            ++state->gpu_static_ssbo_stale_cells;
+        }
+    }
+
+    for (int i = 0; i < sim_particle_count; ++i) {
+        uint32_t actual = sim_id_readback[i];
+        if (actual != gpuPhysics.sim_ids[i] || actual >= (uint32_t)gpuPhysics.compact_count) {
+            ++state->gpu_sim_id_mismatches;
+        }
+    }
+    for (int i = 0; i < voxel_count; ++i) {
+        const Voxel *voxel = &voxels[i];
+        if (!voxel->simulate || voxel->debugClusterTag != DEBUG_TEST_TAG) continue;
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            const Particle *particle = voxel->particles[corner];
+            if (!particle) {
+                ++state->gpu_tagged_corners_missing_from_sim_ids;
+                continue;
+            }
+            ptrdiff_t pool_id = particle - particles_pool;
+            if (pool_id < 0 || pool_id >= particle_pool_count) {
+                ++state->gpu_tagged_corners_missing_from_sim_ids;
+                continue;
+            }
+            int compact_id = gpuPhysics.pool_to_compact[pool_id];
+            if (compact_id < 0 || compact_id >= gpuPhysics.compact_count) {
+                ++state->gpu_tagged_corners_missing_from_sim_ids;
+                continue;
+            }
+            bool zero_mass =
+                particle_readback[compact_id].predicted_base_inv_mass[3] <= 0.0f;
+            if (zero_mass) {
+                ++state->gpu_zero_mass_corners;
+                if (state->overhang_impact) continue;
+            }
+            bool found = false;
+            for (int sim = 0; sim < sim_particle_count; ++sim) {
+                if (sim_id_readback[sim] == (uint32_t)compact_id) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) ++state->gpu_tagged_corners_missing_from_sim_ids;
+        }
+    }
+
+    free(static_readback);
+    free(sim_id_readback);
+    free(particle_readback);
+
+    if (state->gpu_static_ssbo_diff_entries > 0) {
+        debug_add_failure(state, "step %d: %d GPU static SSBO entries differ from the CPU staging table",
+                          step, state->gpu_static_ssbo_diff_entries);
+    }
+    if (state->gpu_static_ssbo_stale_cells > 0) {
+        debug_add_failure(state, "step %d: %d activated cluster cells remain in the GPU static SSBO",
+                          step, state->gpu_static_ssbo_stale_cells);
+    }
+    if (state->gpu_sim_id_mismatches > 0) {
+        debug_add_failure(state, "step %d: %d uploaded simId values are invalid or differ from staging",
+                          step, state->gpu_sim_id_mismatches);
+    }
+    if (state->gpu_tagged_corners_missing_from_sim_ids > 0) {
+        debug_add_failure(state, "step %d: %d tagged dynamic corners are missing from the uploaded simId list",
+                          step, state->gpu_tagged_corners_missing_from_sim_ids);
+    }
+    if (!state->overhang_impact && state->gpu_zero_mass_corners > 0) {
+        debug_add_failure(state, "step %d: %d tagged dynamic corners have zero mass in the GPU particle SSBO",
+                          step, state->gpu_zero_mass_corners);
+    } else if (state->overhang_impact && state->gpu_zero_mass_corners <= 0) {
+        debug_add_failure(state, "step %d: GPU particle SSBO does not retain the overhang root anchors",
+                          step);
+    }
+#else
+    (void)state;
+    (void)step;
 #endif
 }
 
@@ -681,7 +895,7 @@ static bool debug_activate_test_cluster(DebugRunState *state)
         return false;
     }
     rebuild_static_hash_if_dirty();
-    if (!debug_original_cluster_cells_are_clear()) {
+    if (!debug_original_cluster_cells_are_clear(state)) {
         debug_add_failure(state, "activated cells remain in the CPU static hash");
     }
     return true;
@@ -693,10 +907,36 @@ static void debug_set_initial_centroid(DebugRunState *state)
     state->initial_centroid_y = sample.centroid_y;
 }
 
+static bool debug_tagged_original_column_y(int tag, int original_x, float *out_y)
+{
+    if (!out_y) return false;
+    float sum = 0.0f;
+    int count = 0;
+    for (int i = 0; i < voxel_count; ++i) {
+        const Voxel *voxel = &voxels[i];
+        if (voxel->debugClusterTag != tag || voxel->orig_min_gx != original_x) continue;
+        float center_y = 0.0f;
+        int corners = 0;
+        for (int c = 0; c < VOXEL_CORNER_COUNT; ++c) {
+            const Particle *particle = voxel->particles[c];
+            if (!particle || !particle->active || !v_isfinite(particle->pos)) continue;
+            center_y += particle->pos.y;
+            ++corners;
+        }
+        if (corners <= 0) continue;
+        sum += center_y / (float)corners;
+        ++count;
+    }
+    if (count <= 0) return false;
+    *out_y = sum / (float)count;
+    return true;
+}
+
 static bool debug_setup_dynamic_freefall(DebugRunState *state)
 {
     debug_reset_world();
     int created = debug_add_test_cluster(true);
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
     debug_rebuild_world_state();
     state->activation_succeeded = true;
     debug_set_initial_centroid(state);
@@ -712,6 +952,7 @@ static bool debug_setup_activation_floating(DebugRunState *state)
 {
     debug_reset_world();
     int created = debug_add_test_cluster(false);
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
     debug_rebuild_world_state();
     debug_set_initial_centroid(state);
     if (created != state->expected_voxels) {
@@ -731,6 +972,7 @@ static bool debug_setup_sleep_wake_floating(DebugRunState *state)
     int support_created = debug_add_support_column();
     debug_rebuild_world_state();
     int cluster_created = debug_add_test_cluster(true);
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
     debug_rebuild_world_state();
     debug_set_initial_centroid(state);
 
@@ -769,8 +1011,147 @@ static bool debug_setup_sleep_wake_floating(DebugRunState *state)
     return true;
 }
 
+static bool debug_setup_tether_throw_floating(DebugRunState *state)
+{
+    debug_reset_world();
+    int support_created = debug_add_support_column();
+    debug_rebuild_world_state();
+    int cluster_created = debug_add_test_cluster(true);
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_rebuild_world_state();
+    debug_set_initial_centroid(state);
+
+    if (support_created != 12 || cluster_created != state->expected_voxels) {
+        debug_add_failure(state, "tether-throw setup created support=%d/12 cluster=%d/%d",
+                          support_created, cluster_created, state->expected_voxels);
+        return false;
+    }
+    debug_capture(state, "phase-01-supported-dynamic.png", "supported-dynamic", 0);
+
+    for (int i = 0; i < voxel_count; ++i) {
+        if (voxels[i].debugClusterTag == DEBUG_TEST_TAG && voxels[i].simulate) {
+            voxels[i].sleepFrames = VOXEL_DEACTIVATION_FRAMES - 1;
+            set_voxel_velocity(&voxels[i], (Vector3){ 0.0f, 0.0f, 0.0f });
+        }
+    }
+    state->sleeping_conversion_succeeded = deactivate_sleeping_voxels();
+    rebuild_static_hash_if_dirty();
+    if (!state->sleeping_conversion_succeeded ||
+        debug_count_tagged(DEBUG_TEST_TAG, 0) != state->expected_voxels) {
+        debug_add_failure(state, "sleep conversion did not produce %d tagged static voxels",
+                          state->expected_voxels);
+        return false;
+    }
+    debug_capture(state, "phase-02-sleeping-static.png", "sleeping-static", 0);
+
+    state->support_removal_succeeded = debug_remove_tagged_voxels(DEBUG_SUPPORT_TAG);
+    if (!state->support_removal_succeeded || debug_count_tagged(DEBUG_SUPPORT_TAG, -1) != 0) {
+        debug_add_failure(state, "temporary support column was not completely removed");
+        return false;
+    }
+    debug_capture(state, "phase-03-unsupported-static.png", "unsupported-static", 0);
+
+    int thrown_idx = debug_add_cell(-5, 12, 0, false, true,
+                                    (Color){ 255, 210, 70, 255 }, DEBUG_THROW_TAG);
+    if (thrown_idx < 0) {
+        debug_add_failure(state, "unable to create the tether-thrown test voxel");
+        return false;
+    }
+    debug_rebuild_world_state();
+    Voxel *thrown = &voxels[thrown_idx];
+    detach_all_glue_faces(thrown_idx);
+    deactivate_glue_constraints_for_voxel(thrown_idx);
+    thrown->owner = 0;
+    thrown->activator = 0;
+    thrown->wasTethered = true;
+    thrown->activationBelief = 1.0f;
+
+    memset(tetherTag, 0, sizeof(tetherTag));
+    for (int i = 0; i < MAX_PLAYERS; ++i) {
+        players[i].tetherHolding = false;
+        players[i].tetherVoxel = -1;
+    }
+    players[0].yaw = -90.0f;
+    players[0].pitch = 0.0f;
+    players[0].tetherHolding = true;
+    players[0].tetherVoxel = thrown_idx;
+    prepare_tether_forces();
+    release_tether(0);
+
+    state->delayed_activation = true;
+    state->activation_step = -1;
+    debug_set_initial_centroid(state);
+    debug_capture(state, "phase-04-tether-released.png", "tether-released", 0);
+    return true;
+}
+
+static bool debug_setup_overhang_impact(DebugRunState *state)
+{
+    debug_reset_world();
+    int support_created = 0;
+    int overhang_created = 0;
+    Color support_color = (Color){ 115, 120, 135, 255 };
+    Color overhang_color = (Color){ 80, 175, 245, 255 };
+
+    for (int y = 0; y <= 8; ++y) {
+        for (int z = -1; z <= 1; ++z) {
+            for (int x = -2; x <= 0; ++x) {
+                if (debug_add_cell(x, y, z, true, false,
+                                   support_color, DEBUG_SUPPORT_TAG) >= 0) {
+                    ++support_created;
+                }
+            }
+        }
+    }
+    for (int z = -1; z <= 1; ++z) {
+        for (int x = 1; x <= 6; ++x) {
+            if (debug_add_cell(x, 8, z, true, false,
+                               overhang_color, DEBUG_TEST_TAG) >= 0) {
+                ++overhang_created;
+            }
+        }
+    }
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_rebuild_world_state();
+    debug_set_initial_centroid(state);
+    if (support_created != 81 || overhang_created != state->expected_voxels) {
+        debug_add_failure(state, "overhang setup created support=%d/81 overhang=%d/%d",
+                          support_created, overhang_created, state->expected_voxels);
+        return false;
+    }
+    if (!debug_tagged_original_column_y(DEBUG_TEST_TAG, 1, &state->overhang_initial_root_y) ||
+        !debug_tagged_original_column_y(DEBUG_TEST_TAG, 6, &state->overhang_initial_tip_y)) {
+        debug_add_failure(state, "unable to measure the initial overhang root and tip");
+        return false;
+    }
+    debug_capture(state, "phase-01-static-overhang.png", "static-overhang", 0);
+
+    int impact_idx = debug_add_cell(5, 15, 0, false, true,
+                                    (Color){ 255, 205, 65, 255 }, DEBUG_THROW_TAG);
+    if (impact_idx < 0) {
+        debug_add_failure(state, "unable to create the falling impact voxel");
+        return false;
+    }
+    Voxel *impact = &voxels[impact_idx];
+    impact->owner = 0;
+    impact->activator = 0;
+    impact->wasTethered = false;
+    impact->isBullet = false;
+    impact->activationBelief = 1.0f;
+    set_voxel_velocity(impact, (Vector3){ 0.0f, -8.0f, 0.0f });
+    debug_rebuild_world_state();
+
+    state->delayed_activation = true;
+    state->overhang_impact = true;
+    state->activation_step = -1;
+    debug_set_initial_centroid(state);
+    debug_capture(state, "phase-02-falling-voxel.png", "falling-voxel", 0);
+    return true;
+}
+
 static void debug_physics_step(void)
 {
+    activate_static_voxels_near_dynamic();
     prepare_tether_forces();
     rebuild_static_hash_if_dirty();
     simulate_voxel_pbd(PBD_MAX_STEP_DT);
@@ -784,10 +1165,38 @@ static void debug_validate_step(DebugRunState *state, int step)
 {
     debug_validate_all_sim_particles(state, step);
     DebugSample sample = debug_collect_sample("validation", step, state->initial_centroid_y);
-    if (step <= 1) {
+    if (state->delayed_activation) {
+        if (!state->activation_succeeded &&
+            sample.tagged_dynamic == state->expected_voxels && sample.tagged_static == 0) {
+            state->activation_succeeded = true;
+            state->activation_step = step;
+        }
+        if (state->activation_succeeded && step <= state->activation_step + 1) {
+            if (state->overhang_impact) {
+                debug_validate_overhang_activation(state, &sample);
+            } else {
+                debug_validate_tagged_dynamic(state, &sample, "gameplay-path activation");
+            }
+        }
+    } else if (step <= 1) {
         debug_validate_tagged_dynamic(state, &sample, step == 0 ? "after activation" : "first physics step");
     }
     debug_validate_gpu_static_state(state, step);
+    debug_readback_gpu_buffers(state, step);
+    if (state->overhang_impact && step == 30) {
+        float root_y = 0.0f;
+        float tip_y = 0.0f;
+        if (debug_tagged_original_column_y(DEBUG_TEST_TAG, 1, &root_y) &&
+            debug_tagged_original_column_y(DEBUG_TEST_TAG, 6, &tip_y)) {
+            state->overhang_root_drop_at_step_30 = state->overhang_initial_root_y - root_y;
+            state->overhang_tip_drop_at_step_30 = state->overhang_initial_tip_y - tip_y;
+            state->overhang_relative_deflection_at_step_30 =
+                state->overhang_tip_drop_at_step_30 - state->overhang_root_drop_at_step_30;
+            state->overhang_deflection_sampled = true;
+        } else {
+            debug_add_failure(state, "step 30: unable to measure overhang deflection");
+        }
+    }
     if (step == 60) {
         state->drop_sampled = true;
         state->drop_at_step_60 = sample.centroid_drop;
@@ -807,11 +1216,25 @@ static void debug_finalize_validation(DebugRunState *state)
     }
     if (!state->drop_sampled) {
         debug_add_failure(state, "scenario did not reach the required 60-step drop sample");
-    } else if (!isfinite(state->drop_at_step_60) || state->drop_at_step_60 < 0.5f) {
+    } else if (!state->overhang_impact &&
+               (!isfinite(state->drop_at_step_60) || state->drop_at_step_60 < 0.5f)) {
         debug_add_failure(state, "cluster dropped only %.3f metres after 60 steps (minimum 0.500)",
                           state->drop_at_step_60);
     }
-    if (strcmp(debugRunConfig.scenario, "sleep-wake-floating") == 0) {
+    if (state->overhang_impact) {
+        if (!state->overhang_anchor_observed) {
+            debug_add_failure(state, "overhang never retained a static root anchor after activation");
+        }
+        if (!state->overhang_deflection_sampled ||
+            !isfinite(state->overhang_relative_deflection_at_step_30) ||
+            state->overhang_relative_deflection_at_step_30 < 0.05f) {
+            debug_add_failure(state,
+                              "overhang relative tip deflection at step 30 was only %.3f metres (minimum 0.050)",
+                              state->overhang_relative_deflection_at_step_30);
+        }
+    }
+    if (strcmp(debugRunConfig.scenario, "sleep-wake-floating") == 0 ||
+        (state->delayed_activation && !state->overhang_impact)) {
         if (!state->sleeping_conversion_succeeded) {
             debug_add_failure(state, "sleep-wake scenario never converted the cluster to static");
         }
@@ -866,11 +1289,36 @@ static bool debug_write_report(DebugRunState *state)
     debug_write_json_string(file, physicsBackend.fallback_reason);
     fprintf(file,
             ",\n  \"activationSucceeded\": %s,\n  \"sleepingConversionSucceeded\": %s,\n"
-            "  \"supportRemovalSucceeded\": %s,\n  \"dropAtStep60\": %.9g,\n",
+            "  \"supportRemovalSucceeded\": %s,\n  \"activationStep\": %d,"
+            "\n  \"dropAtStep60\": %.9g,\n",
             state->activation_succeeded ? "true" : "false",
             state->sleeping_conversion_succeeded ? "true" : "false",
             state->support_removal_succeeded ? "true" : "false",
+            state->activation_step,
             (double)state->drop_at_step_60);
+
+    fprintf(file,
+            "  \"gpuDiagnostics\": {\"readbackPerformed\": %s,"
+            " \"staticSsboDiffEntries\": %d, \"staticSsboStaleClusterCells\": %d,"
+            " \"simIdMismatches\": %d, \"taggedCornersMissingFromSimIds\": %d,"
+            " \"zeroMassTaggedCorners\": %d},\n",
+            state->gpu_readback_performed ? "true" : "false",
+            state->gpu_static_ssbo_diff_entries,
+            state->gpu_static_ssbo_stale_cells,
+            state->gpu_sim_id_mismatches,
+            state->gpu_tagged_corners_missing_from_sim_ids,
+            state->gpu_zero_mass_corners);
+
+    fprintf(file,
+            "  \"overhangDiagnostics\": {\"enabled\": %s, \"anchorObserved\": %s,"
+            " \"deflectionSampled\": %s, \"rootDropAtStep30\": %.9g,"
+            " \"tipDropAtStep30\": %.9g, \"relativeTipDeflectionAtStep30\": %.9g},\n",
+            state->overhang_impact ? "true" : "false",
+            state->overhang_anchor_observed ? "true" : "false",
+            state->overhang_deflection_sampled ? "true" : "false",
+            (double)state->overhang_root_drop_at_step_30,
+            (double)state->overhang_tip_drop_at_step_30,
+            (double)state->overhang_relative_deflection_at_step_30);
 
     fputs("  \"failures\": [", file);
     for (int i = 0; i < state->failure_count; ++i) {
@@ -973,7 +1421,15 @@ static int run_debug_harness(void)
     if (setup_ok) {
         debug_validate_step(&state, 0);
         if (debug_should_capture_step(0)) {
-            debug_capture(&state, "step-0000-activated.png", "activated", 0);
+            if (state.delayed_activation) {
+                if (state.overhang_impact) {
+                    debug_capture(&state, "step-0000-falling-voxel.png", "falling-voxel", 0);
+                } else {
+                    debug_capture(&state, "step-0000-tether-released.png", "tether-released", 0);
+                }
+            } else {
+                debug_capture(&state, "step-0000-activated.png", "activated", 0);
+            }
         }
         for (int step = 1; step <= debugRunConfig.steps; ++step) {
             debug_physics_step();

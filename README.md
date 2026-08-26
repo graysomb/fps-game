@@ -284,6 +284,10 @@ Available scenarios are:
 * `activation-floating`: activates an unsupported static cluster through the tether path.
 * `sleep-wake-floating`: sleeps a supported dynamic cluster, removes its support, then
   activates it through the tether path.
+* `tether-throw-floating`: sleeps a supported cluster, removes its support, then releases
+  a tether-held voxel toward it through the same proximity-activation path used by gameplay.
+* `overhang-impact`: drops an ordinary active voxel onto the unsupported end of a static
+  cantilever and checks that the overhang activates and deflects while its root stays supported.
 
 Without `--debug-output`, artifacts are written beneath
 `.build/bin/debug-artifacts/<scenario>/<active-backend>`. Each backend directory contains
@@ -302,4 +306,8 @@ Matrix mode creates `gpu-gl43`, `cpu-mt`, and `cpu-st` subdirectories plus a com
 execution failures from an available backend fail the matrix. The per-backend reports
 include activation and sleep-transition results, centroid motion, particle mass and
 simulation membership checks, static glue counts, hash generations, backend fallback
-details, timing samples, failures, and capture paths.
+details, timing samples, failures, and capture paths. GPU scenario reports also read back
+the first-step SSBOs and record static-hash differences or stale cluster cells, uploaded
+`simId` mismatches or missing corners, and zero-mass tagged corners. The same counters
+appear in the capture overlay. Overhang reports additionally compare root and tip motion
+at step 30, require a retained static root anchor, and assert measurable relative bending.
