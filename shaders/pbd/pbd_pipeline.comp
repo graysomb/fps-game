@@ -278,20 +278,21 @@ void solveVgs(uint gid) {
     }
 }
 
-int findStaticCell(ivec3 coord) {
+int findStaticCellSlot(ivec3 coord) {
     uint h = hashCoord(coord, uStaticHashSize);
     for (int probe = 0; probe < uStaticHashSize; ++probe) {
         ivec4 entry = staticCell[h];
         if (entry.w < 0) return -1;
-        if (all(equal(entry.xyz, coord))) return entry.w;
+        if (all(equal(entry.xyz, coord))) return int(h);
         h = (h + 1u) & uint(uStaticHashSize - 1);
     }
     return -1;
 }
 
-vec3 pushOutOfBox(vec3 pos, float radius, VoxelState box) {
-    vec3 bmin = box.bounds_min.xyz;
-    vec3 bmax = box.bounds_max.xyz;
+vec3 pushOutOfStaticCell(vec3 pos, float radius, ivec3 coord) {
+    vec3 bmin = vec3(coord) * uVoxelSize;
+    vec3 bmax = vec3(coord + ivec3(1)) * uVoxelSize;
+    vec3 boxCenter = 0.5 * (bmin + bmax);
     bool inside = all(greaterThanEqual(pos, bmin)) && all(lessThanEqual(pos, bmax));
     const float eps = 1e-6;
     if (!inside) {
@@ -307,8 +308,8 @@ vec3 pushOutOfBox(vec3 pos, float radius, VoxelState box) {
     float topGap = bmax.y - pos.y;
     float bottomGap = pos.y - bmin.y;
     float verticalBias = uVoxelSize * 0.25;
-    bool preferTop = (pos.y >= box.pos_rest_edge.y) && (topGap <= radius + verticalBias);
-    bool preferBottom = (pos.y < box.pos_rest_edge.y) && (bottomGap <= radius + verticalBias);
+    bool preferTop = (pos.y >= boxCenter.y) && (topGap <= radius + verticalBias);
+    bool preferBottom = (pos.y < boxCenter.y) && (bottomGap <= radius + verticalBias);
     if (preferTop || preferBottom) {
         bool top = preferTop && (!preferBottom || topGap <= bottomGap);
         vec3 normal = top ? vec3(0.0, 1.0, 0.0) : vec3(0.0, -1.0, 0.0);
@@ -357,13 +358,14 @@ void staticCollisions(uint gid) {
     ivec3 center = ivec3(floor(pos / uVoxelSize));
     int seen[27]; int seenCount = 0;
     for (int z=-1; z<=1; ++z) for (int y=-1; y<=1; ++y) for (int x=-1; x<=1; ++x) {
-        int voxelId = findStaticCell(center + ivec3(x,y,z));
-        if (voxelId < 0 || voxelId >= uVoxelCount) continue;
+        int cellSlot = findStaticCellSlot(center + ivec3(x,y,z));
+        if (cellSlot < 0 || cellSlot >= uStaticHashSize) continue;
+        ivec3 staticCoord = staticCell[cellSlot].xyz;
         bool duplicate = false;
-        for (int s=0; s<seenCount; ++s) duplicate = duplicate || (seen[s] == voxelId);
+        for (int s=0; s<seenCount; ++s) duplicate = duplicate || (seen[s] == cellSlot);
         if (duplicate) continue;
-        seen[seenCount++] = voxelId;
-        pos = pushOutOfBox(pos, 0.25 * uVoxelSize, voxel[voxelId]);
+        seen[seenCount++] = cellSlot;
+        pos = pushOutOfStaticCell(pos, 0.25 * uVoxelSize, staticCoord);
     }
     particle[id].predicted_base_inv_mass.xyz = pos;
 }

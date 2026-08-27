@@ -36,8 +36,17 @@ typedef struct DebugSample {
     int tagged_dynamic;
     int tagged_static;
     int sim_particles;
+    int total_voxels;
+    int dynamic_voxels;
+    int gpu_compact_voxels;
+    int gpu_hash_size;
+    uint64_t gpu_upload_batches;
+    uint64_t gpu_readback_batches;
+    size_t gpu_upload_bytes;
+    size_t gpu_readback_bytes;
     int zero_mass_corners;
     int invalid_particle_refs;
+    int invalid_dynamic_index_refs;
     int static_glued_faces;
     float centroid_y;
     float centroid_drop;
@@ -110,13 +119,15 @@ static bool debug_setup_activation_floating(DebugRunState *state);
 static bool debug_setup_sleep_wake_floating(DebugRunState *state);
 static bool debug_setup_tether_throw_floating(DebugRunState *state);
 static bool debug_setup_overhang_impact(DebugRunState *state);
+static bool debug_setup_adaptive_refinement(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall },
     { "activation-floating", "Static cluster activated while unsupported", debug_setup_activation_floating },
     { "sleep-wake-floating", "Supported cluster sleeps, loses support, then activates", debug_setup_sleep_wake_floating },
     { "tether-throw-floating", "Released tether voxel wakes an unsupported sleeping cluster", debug_setup_tether_throw_floating },
-    { "overhang-impact", "Falling dynamic voxel activates and bends a supported static overhang", debug_setup_overhang_impact }
+    { "overhang-impact", "Falling dynamic voxel activates and bends a supported static overhang", debug_setup_overhang_impact },
+    { "adaptive-refinement", "One coarse static cell refines into eight dynamic unit voxels", debug_setup_adaptive_refinement }
 };
 
 static const int debugScenarioCount = (int)(sizeof(debugScenarios) / sizeof(debugScenarios[0]));
@@ -331,11 +342,25 @@ static int debug_add_authored_cell(int gx, int gy, int gz,
                                    Color color, int tag,
                                    int *out_first_index)
 {
-    int created = 0;
-    int first_index = -1;
     int minx = gx * VOXEL_LINEAR_SCALE;
     int miny = gy * VOXEL_LINEAR_SCALE;
     int minz = gz * VOXEL_LINEAR_SCALE;
+    if (!simulate) {
+        int index = add_static_span_voxel_at_grid(minx, miny, minz,
+                                                  VOXEL_LINEAR_SCALE,
+                                                  color, 0);
+        if (index >= 0) {
+            voxels[index].fixed = fixed;
+            voxels[index].debugClusterTag = tag;
+            if (out_first_index) *out_first_index = index;
+            return VOXEL_VOLUME_SCALE;
+        }
+        if (out_first_index) *out_first_index = -1;
+        return 0;
+    }
+
+    int created = 0;
+    int first_index = -1;
     for (int ox = 0; ox < VOXEL_LINEAR_SCALE; ++ox) {
         for (int oy = 0; oy < VOXEL_LINEAR_SCALE; ++oy) {
             for (int oz = 0; oz < VOXEL_LINEAR_SCALE; ++oz) {
@@ -396,9 +421,12 @@ static void debug_track_tagged_cells(DebugRunState *state, int tag)
     for (int i = 0; i < voxel_count && state->tracked_cell_count < DEBUG_MAX_TRACKED_CELLS; ++i) {
         const Voxel *voxel = &voxels[i];
         if (voxel->debugClusterTag != tag) continue;
-        state->tracked_cells[state->tracked_cell_count++] = (DebugTrackedCell){
-            voxel->gx, voxel->gy, voxel->gz
-        };
+        int minx, maxx, miny, maxy, minz, maxz;
+        voxel_grid_bounds(voxel, &minx, &maxx, &miny, &maxy, &minz, &maxz);
+        for (int z = minz; z <= maxz && state->tracked_cell_count < DEBUG_MAX_TRACKED_CELLS; ++z)
+            for (int y = miny; y <= maxy && state->tracked_cell_count < DEBUG_MAX_TRACKED_CELLS; ++y)
+                for (int x = minx; x <= maxx && state->tracked_cell_count < DEBUG_MAX_TRACKED_CELLS; ++x)
+                    state->tracked_cells[state->tracked_cell_count++] = (DebugTrackedCell){ x, y, z };
     }
 }
 
@@ -494,23 +522,39 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
     snprintf(sample.phase, sizeof(sample.phase), "%s", phase ? phase : "simulation");
     sample.step = step;
     sample.sim_particles = sim_particle_count;
+    sample.total_voxels = voxel_count;
+    sample.dynamic_voxels = dynamicVoxelCount;
     sample.min_y = FLT_MAX;
     sample.max_y = -FLT_MAX;
     sample.static_hash_generation = staticHashGeneration;
 #if defined(GRAPHICS_API_OPENGL_43)
     sample.gpu_static_uploaded_generation = gpuPhysics.static_uploaded_generation;
+    sample.gpu_compact_voxels = gpuPhysics.voxel_compact_count;
+    sample.gpu_hash_size = gpuPhysics.active_hash_size;
+    sample.gpu_upload_batches = gpuPhysics.upload_batches;
+    sample.gpu_readback_batches = gpuPhysics.readback_batches;
+    sample.gpu_upload_bytes = gpuPhysics.last_upload_bytes;
+    sample.gpu_readback_bytes = gpuPhysics.last_readback_bytes;
 #else
     sample.gpu_static_uploaded_generation = 0;
 #endif
 
     float centroid_sum = 0.0f;
     float velocity_sum = 0.0f;
+    int scanned_dynamic = 0;
     for (int i = 0; i < voxel_count; ++i) {
         const Voxel *voxel = &voxels[i];
+        if (voxel->simulate) ++scanned_dynamic;
         if (voxel->debugClusterTag != DEBUG_TEST_TAG) continue;
-        ++sample.tagged_voxels;
-        if (voxel->simulate) ++sample.tagged_dynamic;
-        else ++sample.tagged_static;
+        int minx, maxx, miny, maxy, minz, maxz;
+        voxel_grid_bounds(voxel, &minx, &maxx, &miny, &maxy, &minz, &maxz);
+        int logical_cells = (maxx - minx + 1) *
+                            (maxy - miny + 1) *
+                            (maxz - minz + 1);
+        if (logical_cells < 1) logical_cells = 1;
+        sample.tagged_voxels += logical_cells;
+        if (voxel->simulate) sample.tagged_dynamic += logical_cells;
+        else sample.tagged_static += logical_cells;
 
         Vector3 center = { 0.0f, 0.0f, 0.0f };
         int valid_corners = 0;
@@ -533,8 +577,8 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
             }
         }
         if (valid_corners > 0) center = v_mul(center, 1.0f / (float)valid_corners);
-        centroid_sum += center.y;
-        velocity_sum += voxel->vel.y;
+        centroid_sum += center.y * (float)logical_cells;
+        velocity_sum += voxel->vel.y * (float)logical_cells;
         if (center.y < sample.min_y) sample.min_y = center.y;
         if (center.y > sample.max_y) sample.max_y = center.y;
 
@@ -547,6 +591,14 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
                 if (table_get_static_only(nx, ny, nz) >= 0) ++sample.static_glued_faces;
             }
         }
+    }
+    if (scanned_dynamic != dynamicVoxelCount)
+        sample.invalid_dynamic_index_refs += abs(scanned_dynamic - dynamicVoxelCount);
+    for (int slot = 0; slot < dynamicVoxelCount; ++slot) {
+        int idx = dynamicVoxelIndices[slot];
+        if (idx < 0 || idx >= voxel_count || !voxels[idx].simulate ||
+            dynamicVoxelSlots[idx] != slot)
+            ++sample.invalid_dynamic_index_refs;
     }
     if (sample.tagged_voxels > 0) {
         sample.centroid_y = centroid_sum / (float)sample.tagged_voxels;
@@ -714,6 +766,10 @@ static void debug_validate_tagged_dynamic(DebugRunState *state, const DebugSampl
         debug_add_failure(state, "%s: %d invalid particle or sim-index references",
                           context, sample->invalid_particle_refs);
     }
+    if (sample->invalid_dynamic_index_refs > 0) {
+        debug_add_failure(state, "%s: %d invalid dynamic-index list entries",
+                          context, sample->invalid_dynamic_index_refs);
+    }
     if (sample->zero_mass_corners > 0) {
         debug_add_failure(state, "%s: %d activated corners have zero base inverse mass",
                           context, sample->zero_mass_corners);
@@ -737,6 +793,10 @@ static void debug_validate_overhang_activation(DebugRunState *state,
     if (unexpected_invalid > 0) {
         debug_add_failure(state, "overhang activation has %d non-anchor particle reference errors",
                           unexpected_invalid);
+    }
+    if (sample->invalid_dynamic_index_refs > 0) {
+        debug_add_failure(state, "overhang activation has %d invalid dynamic-index list entries",
+                          sample->invalid_dynamic_index_refs);
     }
     if (sample->zero_mass_corners <= 0 || sample->static_glued_faces <= 0) {
         debug_add_failure(state,
@@ -995,6 +1055,37 @@ static bool debug_setup_activation_floating(DebugRunState *state)
     }
     debug_capture(state, "phase-01-floating-static.png", "floating-static", 0);
     if (!debug_activate_test_cluster(state)) return false;
+    debug_set_initial_centroid(state);
+    return true;
+}
+
+static bool debug_setup_adaptive_refinement(DebugRunState *state)
+{
+    debug_reset_world();
+    state->expected_voxels = VOXEL_VOLUME_SCALE;
+    int idx = add_static_span_voxel_at_grid(-1, 12, -1, VOXEL_LINEAR_SCALE,
+                                             (Color){ 210, 150, 70, 255 }, 0);
+    if (idx < 0) {
+        debug_add_failure(state, "adaptive-refinement could not create the coarse source cell");
+        return false;
+    }
+    voxels[idx].debugClusterTag = DEBUG_TEST_TAG;
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_rebuild_world_state();
+    debug_set_initial_centroid(state);
+    if (voxel_count != 1 || state->tracked_cell_count != state->expected_voxels) {
+        debug_add_failure(state,
+                          "adaptive-refinement source records=%d/1 covered-cells=%d/%d",
+                          voxel_count, state->tracked_cell_count, state->expected_voxels);
+        return false;
+    }
+    debug_capture(state, "phase-01-coarse-static.png", "coarse-static", 0);
+    if (!debug_activate_test_cluster(state)) return false;
+    if (debug_count_tagged(DEBUG_TEST_TAG, 1) != state->expected_voxels) {
+        debug_add_failure(state, "adaptive-refinement produced %d/%d dynamic unit voxels",
+                          debug_count_tagged(DEBUG_TEST_TAG, 1), state->expected_voxels);
+        return false;
+    }
     debug_set_initial_centroid(state);
     return true;
 }
@@ -1388,14 +1479,26 @@ static bool debug_write_report(DebugRunState *state)
         fprintf(file,
                 ", \"step\": %d, \"taggedVoxels\": %d, \"taggedDynamic\": %d,"
                 " \"taggedStatic\": %d, \"simParticles\": %d,"
+                " \"totalVoxels\": %d, \"dynamicVoxels\": %d,"
+                " \"gpuCompactVoxels\": %d, \"gpuHashSize\": %d,"
+                " \"gpuUploadBatches\": %llu, \"gpuReadbackBatches\": %llu,"
+                " \"gpuUploadBytes\": %llu, \"gpuReadbackBytes\": %llu,"
                 " \"zeroMassCorners\": %d, \"invalidParticleRefs\": %d,"
+                " \"invalidDynamicIndexRefs\": %d,"
                 " \"staticGluedFaces\": %d, \"centroidY\": %.9g,"
                 " \"centroidDrop\": %.9g, \"minY\": %.9g, \"maxY\": %.9g,"
                 " \"meanVelocityY\": %.9g, \"staticHashGeneration\": %llu,"
                 " \"gpuStaticUploadedGeneration\": %llu, \"physicsStepMs\": %.9g}%s\n",
                 sample->step, sample->tagged_voxels, sample->tagged_dynamic,
                 sample->tagged_static, sample->sim_particles,
+                sample->total_voxels, sample->dynamic_voxels,
+                sample->gpu_compact_voxels, sample->gpu_hash_size,
+                (unsigned long long)sample->gpu_upload_batches,
+                (unsigned long long)sample->gpu_readback_batches,
+                (unsigned long long)sample->gpu_upload_bytes,
+                (unsigned long long)sample->gpu_readback_bytes,
                 sample->zero_mass_corners, sample->invalid_particle_refs,
+                sample->invalid_dynamic_index_refs,
                 sample->static_glued_faces, (double)sample->centroid_y,
                 (double)sample->centroid_drop, (double)sample->min_y,
                 (double)sample->max_y, (double)sample->mean_velocity_y,

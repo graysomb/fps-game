@@ -32,13 +32,18 @@ stages. The CPU-owned voxel and particle arrays remain canonical, so a failed GP
 dispatch can be validated, read back, and continued by the CPU without restarting
 the frame.
 
-The GPU path packs only particles referenced by active voxels into SSBOs. Stable
-particle-pool IDs are mapped to compact indices, preserving shared corners created
-by glue. Static voxels are uploaded only when the static-grid generation changes.
-Each substep dispatches prediction, dynamic hash construction, scene and particle
-collisions, Jacobi apply passes, VGS iterations, static collisions, glue-break
-evaluation, and velocity finalization. Topology mutations such as actually breaking
-glue or converting a sleeping cluster back to static remain ordered CPU commits.
+The GPU path packs only dynamic voxels and their referenced particles into SSBOs.
+Stable particle-pool IDs are mapped to compact indices, preserving shared corners
+created by glue. Static occupancy is uploaded only when the static-grid generation
+changes. The particle hash is a power of two selected from the current simulated
+particle count rather than a fixed million-entry clear.
+
+All PBD substeps execute from one upload and are committed by one synchronized
+readback per frame. Each substep still dispatches prediction, dynamic hash
+construction, scene and particle collisions, Jacobi apply passes, VGS iterations,
+static collisions, glue-break evaluation, and velocity finalization. Topology
+mutations such as actually breaking glue or converting a sleeping cluster back to
+static remain ordered CPU commits.
 
 The CPU PBD loop uses a lightweight, persistent thread pool to avoid per-frame
 thread creation.
@@ -62,8 +67,9 @@ The physics behavior is controlled by several preprocessor definitions in `fps_r
     *   **Effect:** Higher values make materials "stiffer" (less rubbery) but increase computational cost.
 *   **`VOXEL_SIZE` (Default: 0.25f)**
     *   The world-space size of a single voxel unit.
-    *   Built-in worlds remain authored on the original 0.5 m grid; each authored
-        cell is refined into eight runtime voxels so map dimensions stay unchanged.
+    *   Built-in worlds remain authored on the original 0.5 m grid. Undamaged
+        authored cells stay as one coarse static record covering eight fine-grid
+        cells and refine into 0.25 m voxels when activated or edited.
 *   **`VGS_ALPHA` (0.75) & `VGS_BETA` (0.35)**
     *   Parameters for the Voxel Gram-Schmidt (VGS) shape matching.
     *   **Effect:** Control how strictly voxels maintain their cubic shape and volume.
@@ -143,8 +149,9 @@ The engine implements three primary types of constraints:
 ## Creative Mode
 
 Creative mode lets you fly around an empty world and build voxel maps that can be saved and loaded for multiplayer.
-New saves record their voxel size (`FPSMAP2`). Legacy `FPSMAP1` saves are treated as
-0.5 m maps and refined on load, preserving their world-space dimensions.
+New saves use `FPSMAP3`, which records each static voxel's fine-grid bounds so
+coarse and refined cells round-trip. `FPSMAP1` and `FPSMAP2` remain loadable;
+0.5 m legacy cells are retained coarsely until they are damaged or activated.
 
 ### Creative Controls
 *   **Move:** WASD
@@ -292,6 +299,8 @@ Available scenarios are:
   a tether-held voxel toward it through the same proximity-activation path used by gameplay.
 * `overhang-impact`: drops an ordinary active voxel onto the unsupported end of a static
   cantilever and checks that the overhang activates and deflects while its root stays supported.
+* `adaptive-refinement`: creates one coarse 0.5 m static record, activates it into eight
+  0.25 m dynamic voxels, and runs the fall assertions on all three backends.
 
 Without `--debug-output`, artifacts are written beneath
 `.build/bin/debug-artifacts/<scenario>/<active-backend>`. Each backend directory contains
@@ -313,5 +322,7 @@ simulation membership checks, static glue counts, hash generations, backend fall
 details, timing samples, failures, and capture paths. GPU scenario reports also read back
 the first-step SSBOs and record static-hash differences or stale cluster cells, uploaded
 `simId` mismatches or missing corners, and zero-mass tagged corners. The same counters
-appear in the capture overlay. Overhang reports additionally compare root and tip motion
+appear in the capture overlay. Reports also record the maintained dynamic-index count,
+compact GPU voxel count, active GPU hash size, transfer byte counts, and upload/readback
+batch counts. Overhang reports additionally compare root and tip motion
 at step 30, require a retained static root anchor, and assert measurable relative bending.

@@ -542,6 +542,13 @@ typedef struct {
 } Voxel;
 static Voxel voxels[MAX_VOXELS];
 static int voxel_count = 0;
+// Dense indirection for work that only applies to simulated voxels.  Slots are
+// maintained across swap-removal so hot physics/render paths never need to scan
+// the (usually much larger) static population.
+static int dynamicVoxelIndices[MAX_VOXELS];
+static int dynamicVoxelSlots[MAX_VOXELS];
+static int dynamicVoxelCount = 0;
+static bool dynamicVoxelTrackingInitialized = false;
 static Particle particles_pool[MAX_PARTICLES];
 static Particle *active_particles[MAX_PARTICLES];
 static Particle *sim_particles[MAX_PARTICLES];
@@ -582,6 +589,10 @@ static int recycleQueueTail = 0;
 static int recycleQueueCount = 0;
 static int recycleFrameCounter = 0;
 static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Color color, int type);
+static bool refine_static_voxel_to_units(int voxel_idx);
+static void refine_static_neighbors_of_region(int minx, int maxx,
+                                              int miny, int maxy,
+                                              int minz, int maxz);
 static void rebuild_voxel_hash(void);
 static void voxel_measure_strain(const Voxel *voxel,
                                  float *out_max_strain,
@@ -616,6 +627,54 @@ static void mark_static_beliefs_dirty_column_above(int gx, int gz, int gy);
 static void update_dynamic_activation_beliefs(void);
 static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float activationBelief);
 static int rip_single_static_voxel(int voxel_idx, int activator);
+
+static void dynamic_voxel_tracking_reset(void)
+{
+    memset(dynamicVoxelSlots, 0xff, sizeof(dynamicVoxelSlots));
+    dynamicVoxelCount = 0;
+    dynamicVoxelTrackingInitialized = true;
+}
+
+static void dynamic_voxel_tracking_ensure(void)
+{
+    if (!dynamicVoxelTrackingInitialized) dynamic_voxel_tracking_reset();
+}
+
+static void dynamic_voxel_index_add(int voxel_idx)
+{
+    dynamic_voxel_tracking_ensure();
+    if (voxel_idx < 0 || voxel_idx >= MAX_VOXELS || dynamicVoxelCount >= MAX_VOXELS) return;
+    int existing = dynamicVoxelSlots[voxel_idx];
+    if (existing >= 0 && existing < dynamicVoxelCount && dynamicVoxelIndices[existing] == voxel_idx) return;
+    dynamicVoxelSlots[voxel_idx] = dynamicVoxelCount;
+    dynamicVoxelIndices[dynamicVoxelCount++] = voxel_idx;
+}
+
+static void dynamic_voxel_index_remove(int voxel_idx)
+{
+    dynamic_voxel_tracking_ensure();
+    if (voxel_idx < 0 || voxel_idx >= MAX_VOXELS) return;
+    int slot = dynamicVoxelSlots[voxel_idx];
+    if (slot < 0 || slot >= dynamicVoxelCount || dynamicVoxelIndices[slot] != voxel_idx) return;
+    int tail_slot = --dynamicVoxelCount;
+    int tail_idx = dynamicVoxelIndices[tail_slot];
+    if (slot != tail_slot) {
+        dynamicVoxelIndices[slot] = tail_idx;
+        dynamicVoxelSlots[tail_idx] = slot;
+    }
+    dynamicVoxelSlots[voxel_idx] = -1;
+}
+
+static void dynamic_voxel_index_move(int from_idx, int to_idx)
+{
+    dynamic_voxel_tracking_ensure();
+    if (from_idx < 0 || from_idx >= MAX_VOXELS || to_idx < 0 || to_idx >= MAX_VOXELS) return;
+    int slot = dynamicVoxelSlots[from_idx];
+    if (slot < 0 || slot >= dynamicVoxelCount || dynamicVoxelIndices[slot] != from_idx) return;
+    dynamicVoxelIndices[slot] = to_idx;
+    dynamicVoxelSlots[to_idx] = slot;
+    dynamicVoxelSlots[from_idx] = -1;
+}
 
 #define PBD_MAX_THREADS 8
 #define PBD_PARALLEL_MIN_WORK 128
@@ -1813,6 +1872,16 @@ static void voxel_compute_bounds(const Voxel *v,
                                  int *miny, int *maxy,
                                  int *minz, int *maxz)
 {
+    if (!v->simulate &&
+        v->max_gx >= v->min_gx && v->max_gy >= v->min_gy && v->max_gz >= v->min_gz) {
+        if (minx) *minx = v->min_gx;
+        if (maxx) *maxx = v->max_gx;
+        if (miny) *miny = v->min_gy;
+        if (maxy) *maxy = v->max_gy;
+        if (minz) *minz = v->min_gz;
+        if (maxz) *maxz = v->max_gz;
+        return;
+    }
     if (minx) *minx = v->gx;
     if (maxx) *maxx = v->gx;
     if (miny) *miny = v->gy;
@@ -2703,6 +2772,9 @@ typedef struct {
 static Bucket table[HASH_SIZE]; // Deprecated, will be replaced by dynamic_table
 static Bucket static_table[HASH_SIZE];
 static Bucket dynamic_table[HASH_SIZE];
+static uint32_t dynamicOccupiedBuckets[HASH_SIZE];
+static uint8_t dynamicBucketTracked[HASH_SIZE];
+static int dynamicOccupiedBucketCount = 0;
 static bool staticHashDirty = false;
 static uint64_t staticHashGeneration = 1;
 
@@ -2747,11 +2819,6 @@ static void init_static_hash(void) {
         Voxel *v = &voxels[i];
         if (v->simulate) continue;
         
-        // Ensure grid coordinates are up to date
-        v->gx = (int)floorf(v->pos.x / VOXEL_SIZE);
-        v->gy = (int)floorf(v->pos.y / VOXEL_SIZE);
-        v->gz = (int)floorf(v->pos.z / VOXEL_SIZE);
-
         int minx, maxx, miny, maxy, minz, maxz;
         voxel_compute_bounds(v, &minx, &maxx, &miny, &maxy, &minz, &maxz);
         v->min_gx = minx; v->max_gx = maxx;
@@ -2799,8 +2866,23 @@ static void dynamic_table_insert(int x, int y, int z, int idx)
     size_t   h = hashVoxelKey(k);
     while (dynamic_table[h].key && dynamic_table[h].key != k)
         h = (h + 1) & (HASH_SIZE - 1);
+    if (!dynamicBucketTracked[h] && dynamicOccupiedBucketCount < HASH_SIZE) {
+        dynamicBucketTracked[h] = 1;
+        dynamicOccupiedBuckets[dynamicOccupiedBucketCount++] = (uint32_t)h;
+    }
     dynamic_table[h].key = k;
     dynamic_table[h].idx = idx;
+}
+
+static void dynamic_table_clear_tracked(void)
+{
+    for (int i = 0; i < dynamicOccupiedBucketCount; ++i) {
+        uint32_t h = dynamicOccupiedBuckets[i];
+        dynamic_table[h].key = 0;
+        dynamic_table[h].idx = 0;
+        dynamicBucketTracked[h] = 0;
+    }
+    dynamicOccupiedBucketCount = 0;
 }
 
 static int hashVoxel(int x, int y, int z)
@@ -2910,6 +2992,10 @@ static void dynamic_table_remove(int x, int y, int z) {
         while (dynamic_table[h2].key) {
             h2 = (h2 + 1) & mask;
         }
+        if (!dynamicBucketTracked[h2] && dynamicOccupiedBucketCount < HASH_SIZE) {
+            dynamicBucketTracked[h2] = 1;
+            dynamicOccupiedBuckets[dynamicOccupiedBucketCount++] = (uint32_t)h2;
+        }
         dynamic_table[h2].key = k2;
         dynamic_table[h2].idx = idx2;
         j = (j + 1) & mask;
@@ -2980,11 +3066,13 @@ static void remove_voxel_index(int idx)
     table_cache_invalidate();
     int voxel_count_before = voxel_count;
     Voxel *victim = &voxels[idx];
+    bool victim_dynamic = victim->simulate;
     if (!victim->simulate) {
         mark_static_beliefs_dirty_for_voxel(victim);
         mark_static_hash_dirty();
     }
     voxel_table_unregister(victim);
+    if (victim_dynamic) dynamic_voxel_index_remove(idx);
     for (int j = 0; j < 8; ++j) {
         if (victim->particles[j]) {
             particle_release(victim->particles[j]);
@@ -2993,15 +3081,31 @@ static void remove_voxel_index(int idx)
     }
 
     int last = voxel_count - 1;
+    for (int player = 0; player < activePlayers; ++player) {
+        if (players[player].tetherVoxel == idx) {
+            players[player].tetherHolding = false;
+            players[player].tetherVoxel = -1;
+        } else if (idx != last && players[player].tetherVoxel == last) {
+            players[player].tetherVoxel = idx;
+        }
+    }
     if (idx != last) {
         Voxel *moved = &voxels[last];
+        bool moved_dynamic = moved->simulate;
         voxel_table_unregister(moved);
         voxels[idx] = *moved;
+        tetherTag[idx] = tetherTag[last];
+        atomic_store_explicit(&activationClaims[idx],
+                              atomic_load_explicit(&activationClaims[last], memory_order_relaxed),
+                              memory_order_relaxed);
+        if (moved_dynamic) dynamic_voxel_index_move(last, idx);
         voxel_table_register(&voxels[idx], idx);
         if (!voxels[idx].simulate) {
             mark_static_beliefs_dirty_for_voxel(&voxels[idx]);
         }
     }
+    tetherTag[last] = 0;
+    atomic_store_explicit(&activationClaims[last], 0, memory_order_relaxed);
     --voxel_count;
     if (debugLogVoxelDeactivation) {
         TraceLog(LOG_INFO,
@@ -3081,11 +3185,18 @@ static void remove_static_voxels_in_region(int minx, int maxx,
                     if (candidate->simulate) {
                         break;
                     }
+                    if ((candidate->max_gx > candidate->min_gx ||
+                         candidate->max_gy > candidate->min_gy ||
+                         candidate->max_gz > candidate->min_gz) &&
+                        refine_static_voxel_to_units(idx)) {
+                        continue;
+                    }
                     remove_voxel_index(idx);
                 }
             }
         }
     }
+    refine_static_neighbors_of_region(minx, maxx, miny, maxy, minz, maxz);
 }
 
 static void remove_static_voxels_in_region_recycle(int minx, int maxx,
@@ -3107,6 +3218,12 @@ static void remove_static_voxels_in_region_recycle(int minx, int maxx,
                     if (candidate->simulate) {
                         break;
                     }
+                    if ((candidate->max_gx > candidate->min_gx ||
+                         candidate->max_gy > candidate->min_gy ||
+                         candidate->max_gz > candidate->min_gz) &&
+                        refine_static_voxel_to_units(idx)) {
+                        continue;
+                    }
                     if (candidate->owner == -1) {
                         if (recycle_queue_push(candidate) && debugLogVoxelRecycle) {
                             TraceLog(LOG_INFO,
@@ -3122,6 +3239,7 @@ static void remove_static_voxels_in_region_recycle(int minx, int maxx,
             }
         }
     }
+    refine_static_neighbors_of_region(minx, maxx, miny, maxy, minz, maxz);
 }
 
 static bool remove_dynamic_voxels_in_region(int minx, int maxx,
@@ -3548,16 +3666,18 @@ static void get_adjacent_voxel_directions(Vector3 pos, bool neighbors[6]) {
     }
 }
 
-static bool init_voxel_struct(Voxel *v,
-                              float px, float py, float pz,
-                              bool fixed, bool simulate,
-                              Color color, int type,
-                              int owner)
+static bool init_voxel_struct_sized(Voxel *v,
+                                    float px, float py, float pz,
+                                    bool fixed, bool simulate,
+                                    Color color, int type,
+                                    int owner, float edge,
+                                    int min_gx, int max_gx,
+                                    int min_gy, int max_gy,
+                                    int min_gz, int max_gz)
 {
     if (!v) {
         return false;
     }
-    float edge = VOXEL_SIZE;
     float half = 0.5f * edge;
 
     v->pos = (Vector3){ px, py, pz };
@@ -3574,18 +3694,18 @@ static bool init_voxel_struct(Voxel *v,
     v->owner = owner;
     v->activator = -1;
     memset(v->surface, 0, sizeof v->surface);
-    v->gx = (int)floorf(px / VOXEL_SIZE);
-    v->gy = (int)floorf(py / VOXEL_SIZE);
-    v->gz = (int)floorf(pz / VOXEL_SIZE);
-    v->min_gx = v->max_gx = v->gx;
-    v->min_gy = v->max_gy = v->gy;
-    v->min_gz = v->max_gz = v->gz;
-    v->rest_min_gx = v->rest_max_gx = v->gx;
-    v->rest_min_gy = v->rest_max_gy = v->gy;
-    v->rest_min_gz = v->rest_max_gz = v->gz;
-    v->orig_min_gx = v->orig_max_gx = v->gx;
-    v->orig_min_gy = v->orig_max_gy = v->gy;
-    v->orig_min_gz = v->orig_max_gz = v->gz;
+    v->gx = min_gx;
+    v->gy = min_gy;
+    v->gz = min_gz;
+    v->min_gx = min_gx; v->max_gx = max_gx;
+    v->min_gy = min_gy; v->max_gy = max_gy;
+    v->min_gz = min_gz; v->max_gz = max_gz;
+    v->rest_min_gx = min_gx; v->rest_max_gx = max_gx;
+    v->rest_min_gy = min_gy; v->rest_max_gy = max_gy;
+    v->rest_min_gz = min_gz; v->rest_max_gz = max_gz;
+    v->orig_min_gx = min_gx; v->orig_max_gx = max_gx;
+    v->orig_min_gy = min_gy; v->orig_max_gy = max_gy;
+    v->orig_min_gz = min_gz; v->orig_max_gz = max_gz;
     v->rest_edge = edge;
     v->rest_volume = edge * edge * edge;
     v->particle_radius = 0.5f * edge;
@@ -3631,6 +3751,20 @@ static bool init_voxel_struct(Voxel *v,
     return true;
 }
 
+static bool init_voxel_struct(Voxel *v,
+                              float px, float py, float pz,
+                              bool fixed, bool simulate,
+                              Color color, int type,
+                              int owner)
+{
+    int gx = (int)floorf(px / VOXEL_SIZE);
+    int gy = (int)floorf(py / VOXEL_SIZE);
+    int gz = (int)floorf(pz / VOXEL_SIZE);
+    return init_voxel_struct_sized(v, px, py, pz, fixed, simulate, color, type,
+                                   owner, VOXEL_SIZE,
+                                   gx, gx, gy, gy, gz, gz);
+}
+
 // Add a voxel (static or dynamic)
 static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Color color, int type) {
     if (voxel_count >= MAX_VOXELS) {
@@ -3649,11 +3783,88 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     }
     table_cache_invalidate();
     voxel_table_register(v, idx);
+    if (simulate) dynamic_voxel_index_add(idx);
     if (!simulate) {
         mark_static_beliefs_dirty_for_voxel(v);
         mark_static_hash_dirty();
     }
     return idx;
+}
+
+static int add_static_span_voxel_at_grid(int minx, int miny, int minz,
+                                         int span, Color color, int type)
+{
+    if (span <= 1) return add_static_voxel_at_grid(minx, miny, minz, color, type);
+    if (voxel_count >= MAX_VOXELS) return -1;
+    int maxx = minx + span - 1;
+    int maxy = miny + span - 1;
+    int maxz = minz + span - 1;
+    float edge = (float)span * VOXEL_SIZE;
+    float px = ((float)minx + 0.5f * (float)span) * VOXEL_SIZE;
+    float py = ((float)miny + 0.5f * (float)span) * VOXEL_SIZE;
+    float pz = ((float)minz + 0.5f * (float)span) * VOXEL_SIZE;
+    int idx = voxel_count++;
+    Voxel *v = &voxels[idx];
+    if (!init_voxel_struct_sized(v, px, py, pz, true, false, color, type, -1,
+                                 edge, minx, maxx, miny, maxy, minz, maxz)) {
+        --voxel_count;
+        return -1;
+    }
+    table_cache_invalidate();
+    voxel_table_register(v, idx);
+    mark_static_beliefs_dirty_for_voxel(v);
+    mark_static_hash_dirty();
+    return idx;
+}
+
+static bool refine_static_voxel_to_units(int voxel_idx)
+{
+    if (voxel_idx < 0 || voxel_idx >= voxel_count) return false;
+    Voxel snapshot = voxels[voxel_idx];
+    if (snapshot.simulate) return false;
+    int minx, maxx, miny, maxy, minz, maxz;
+    voxel_grid_bounds(&snapshot, &minx, &maxx, &miny, &maxy, &minz, &maxz);
+    if (minx == maxx && miny == maxy && minz == maxz) return true;
+    int units = (maxx - minx + 1) * (maxy - miny + 1) * (maxz - minz + 1);
+    if (voxel_count - 1 + units > MAX_VOXELS) return false;
+
+    remove_voxel_index(voxel_idx);
+    for (int z = minz; z <= maxz; ++z) {
+        for (int y = miny; y <= maxy; ++y) {
+            for (int x = minx; x <= maxx; ++x) {
+                int idx = add_static_voxel_at_grid(x, y, z, snapshot.color, snapshot.type);
+                if (idx < 0) return false;
+                voxels[idx].owner = snapshot.owner;
+                voxels[idx].lifeFrames = snapshot.lifeFrames;
+                voxels[idx].debugClusterTag = snapshot.debugClusterTag;
+                voxels[idx].freezeBelief = snapshot.freezeBelief;
+            }
+        }
+    }
+    meshDirty = true;
+    return true;
+}
+
+static void refine_static_neighbors_of_region(int minx, int maxx,
+                                              int miny, int maxy,
+                                              int minz, int maxz)
+{
+    for (int z = minz - 1; z <= maxz + 1; ++z) {
+        for (int y = miny - 1; y <= maxy + 1; ++y) {
+            for (int x = minx - 1; x <= maxx + 1; ++x) {
+                if (x >= minx && x <= maxx &&
+                    y >= miny && y <= maxy &&
+                    z >= minz && z <= maxz) continue;
+                int idx = table_get_static_only(x, y, z);
+                if (idx < 0 || idx >= voxel_count) continue;
+                Voxel *v = &voxels[idx];
+                if (v->max_gx > v->min_gx ||
+                    v->max_gy > v->min_gy ||
+                    v->max_gz > v->min_gz)
+                    refine_static_voxel_to_units(idx);
+            }
+        }
+    }
 }
 
 static void glue_dynamic_face_to_static(Voxel *dynamic, Voxel *stat, int face_dynamic, int face_static);
@@ -3719,8 +3930,8 @@ static void glue_neighbor_faces_for_voxel(int voxel_idx) {
 }
 
 static void glue_neighbor_faces(void) {
-    for (int i = 0; i < voxel_count; ++i) {
-        glue_neighbor_faces_for_voxel(i);
+    for (int slot = 0; slot < dynamicVoxelCount; ++slot) {
+        glue_neighbor_faces_for_voxel(dynamicVoxelIndices[slot]);
     }
 }
 
@@ -3878,6 +4089,35 @@ static void remove_buffered_static_voxels(const UnitVoxelBuffer *buffer)
     }
 }
 
+// Dynamic unit voxels can only share face particles with unit-sized static
+// voxels. Refine coarse cells immediately across an activation boundary before
+// the dynamic units are emitted and glued, while the buffer's stable grid
+// coordinates are still available.
+static void refine_coarse_static_neighbors_of_units(const UnitVoxelBuffer *buffer)
+{
+    if (!buffer) {
+        return;
+    }
+    for (int i = 0; i < buffer->count; ++i) {
+        const UnitVoxelSeed *seed = &buffer->voxels[i];
+        for (int face = 0; face < 6; ++face) {
+            int nx = seed->gx + face_offsets[face][0];
+            int ny = seed->gy + face_offsets[face][1];
+            int nz = seed->gz + face_offsets[face][2];
+            int idx = table_get_static_only(nx, ny, nz);
+            if (idx < 0 || idx >= voxel_count) {
+                continue;
+            }
+            Voxel *neighbor = &voxels[idx];
+            if (neighbor->max_gx > neighbor->min_gx ||
+                neighbor->max_gy > neighbor->min_gy ||
+                neighbor->max_gz > neighbor->min_gz) {
+                refine_static_voxel_to_units(idx);
+            }
+        }
+    }
+}
+
 static bool activation_try_enqueue(int voxel_idx,
                                    int activator,
                                    int center_gx, int center_gy, int center_gz,
@@ -3907,10 +4147,23 @@ static bool activation_try_enqueue(int voxel_idx,
         return false;
     }
 
+    int minx, maxx, miny, maxy, minz, maxz;
+    voxel_grid_bounds(candidate, &minx, &maxx, &miny, &maxy, &minz, &maxz);
+    int unit_count = (maxx - minx + 1) * (maxy - miny + 1) * (maxz - minz + 1);
+    if (unit_count <= 0 ||
+        buffer->count + unit_count > VOXEL_ACTIVATION_UNIT_BUDGET ||
+        buffer->count + unit_count > MAX_VOXELS) {
+        atomic_store_explicit(&activationClaims[voxel_idx], 0, memory_order_release);
+        return false;
+    }
+
     if (radius_sq >= 0.0f) {
-        float dx = (float)(candidate->gx - center_gx);
-        float dy = (float)(candidate->gy - center_gy);
-        float dz = (float)(candidate->gz - center_gz);
+        int nearest_x = clampi(center_gx, minx, maxx);
+        int nearest_y = clampi(center_gy, miny, maxy);
+        int nearest_z = clampi(center_gz, minz, maxz);
+        float dx = (float)(nearest_x - center_gx);
+        float dy = (float)(nearest_y - center_gy);
+        float dz = (float)(nearest_z - center_gz);
         if ((dx*dx + dy*dy + dz*dz) > radius_sq) {
             atomic_store_explicit(&activationClaims[voxel_idx], 0, memory_order_release);
             return false;
@@ -3918,15 +4171,21 @@ static bool activation_try_enqueue(int voxel_idx,
     }
 
     candidate->pendingActivation = true;
-    if (!unit_voxel_buffer_push(buffer,
-                                candidate->gx, candidate->gy, candidate->gz,
-                                candidate->color, candidate->type,
-                                candidate->fixed, voxel_idx,
-                                candidate->debugClusterTag, activator))
-    {
-        candidate->pendingActivation = false;
-        atomic_store_explicit(&activationClaims[voxel_idx], 0, memory_order_release);
-        return false;
+    int buffer_start = buffer->count;
+    for (int z = minz; z <= maxz; ++z) {
+        for (int y = miny; y <= maxy; ++y) {
+            for (int x = minx; x <= maxx; ++x) {
+                if (!unit_voxel_buffer_push(buffer, x, y, z,
+                                            candidate->color, candidate->type,
+                                            candidate->fixed, voxel_idx,
+                                            candidate->debugClusterTag, activator)) {
+                    buffer->count = buffer_start;
+                    candidate->pendingActivation = false;
+                    atomic_store_explicit(&activationClaims[voxel_idx], 0, memory_order_release);
+                    return false;
+                }
+            }
+        }
     }
 
     if (queue && tail && *tail < VOXEL_ACTIVATION_UNIT_BUDGET) {
@@ -3957,30 +4216,16 @@ static int collect_static_activation_cluster(int seed_idx,
     }
     added++;
 
-    static const int neighbor_dirs[6][3] = {
-        { 1,  0,  0 }, { -1,  0,  0 },
-        { 0,  1,  0 }, {  0, -1,  0 },
-        { 0,  0,  1 }, {  0,  0, -1 }
-    };
-
     while (head < tail && buffer->count < VOXEL_ACTIVATION_UNIT_BUDGET) {
         int current_idx = queue[head++];
         if (current_idx < 0 || current_idx >= voxel_count) {
             continue;
         }
-        const Voxel *current = &voxels[current_idx];
-        int base_gx = current->gx;
-        int base_gy = current->gy;
-        int base_gz = current->gz;
-
-        for (int n = 0; n < 6 && buffer->count < VOXEL_ACTIVATION_UNIT_BUDGET; ++n) {
-            int nx = base_gx + neighbor_dirs[n][0];
-            int ny = base_gy + neighbor_dirs[n][1];
-            int nz = base_gz + neighbor_dirs[n][2];
-            int neighbor_idx = table_get_static_only(nx, ny, nz);
-            if (neighbor_idx < 0) {
-                continue;
-            }
+        int neighbors[MAX_FACE_NEIGHBORS];
+        int neighbor_count = gather_static_face_neighbors(&voxels[current_idx],
+                                                          neighbors, MAX_FACE_NEIGHBORS);
+        for (int n = 0; n < neighbor_count && buffer->count < VOXEL_ACTIVATION_UNIT_BUDGET; ++n) {
+            int neighbor_idx = neighbors[n];
             if (activation_try_enqueue(neighbor_idx, activator, center_gx, center_gy, center_gz,
                                        seed_radius_sq, buffer, queue, &tail))
             {
@@ -4013,16 +4258,10 @@ static int expand_activation_cluster_unbounded(UnitVoxelBuffer *buffer, int star
     int tail = 0;
     for (int i = startIndex; i < buffer->count && tail < VOXEL_ACTIVATION_UNIT_BUDGET; ++i) {
         int idx = buffer->voxels[i].voxelIndex;
-        if (idx >= 0 && idx < voxel_count) {
+        if (idx >= 0 && idx < voxel_count && !list_contains_index(queue, tail, idx)) {
             queue[tail++] = idx;
         }
     }
-
-    static const int neighbor_dirs[6][3] = {
-        { 1,  0,  0 }, { -1,  0,  0 },
-        { 0,  1,  0 }, {  0, -1,  0 },
-        { 0,  0,  1 }, {  0,  0, -1 }
-    };
 
     int added = 0;
     while (head < tail && buffer->count < VOXEL_ACTIVATION_UNIT_BUDGET) {
@@ -4030,19 +4269,11 @@ static int expand_activation_cluster_unbounded(UnitVoxelBuffer *buffer, int star
         if (current_idx < 0 || current_idx >= voxel_count) {
             continue;
         }
-        const Voxel *current = &voxels[current_idx];
-        int base_gx = current->gx;
-        int base_gy = current->gy;
-        int base_gz = current->gz;
-
-        for (int n = 0; n < 6 && buffer->count < VOXEL_ACTIVATION_UNIT_BUDGET; ++n) {
-            int nx = base_gx + neighbor_dirs[n][0];
-            int ny = base_gy + neighbor_dirs[n][1];
-            int nz = base_gz + neighbor_dirs[n][2];
-            int neighbor_idx = table_get_static_only(nx, ny, nz);
-            if (neighbor_idx < 0) {
-                continue;
-            }
+        int neighbors[MAX_FACE_NEIGHBORS];
+        int neighbor_count = gather_static_face_neighbors(&voxels[current_idx],
+                                                          neighbors, MAX_FACE_NEIGHBORS);
+        for (int n = 0; n < neighbor_count && buffer->count < VOXEL_ACTIVATION_UNIT_BUDGET; ++n) {
+            int neighbor_idx = neighbors[n];
             if (neighbor_idx >= 0 && neighbor_idx < voxel_count) {
                 Voxel *neighbor = &voxels[neighbor_idx];
                 if (!dynamic_belief_overcomes_static(dynamicBelief, neighbor->freezeBelief)) {
@@ -4125,10 +4356,11 @@ static void activate_static_worker(int start, int end, int worker_id, void *user
     float radius_sq = job->radius_sq;
     int radius = job->radius;
 
-    for (int i = start; i < end; ++i) {
+    for (int slot = start; slot < end; ++slot) {
         if (buffer->count >= VOXEL_ACTIVATION_UNIT_BUDGET) {
             break;
         }
+        int i = dynamicVoxelIndices[slot];
         Voxel *dynamic = &voxels[i];
         if (!dynamic->simulate || dynamic->type == 1 || dynamic->type == 2) {
             continue;
@@ -4218,7 +4450,7 @@ static bool activate_static_voxels_near_dynamic(void)
     }
 
     ActivateJob job = { .radius_sq = radius_sq, .radius = VOXEL_ACTIVATION_RADIUS };
-    pbd_parallel_for(0, voxel_count, activate_static_worker, &job);
+    pbd_parallel_for(0, dynamicVoxelCount, activate_static_worker, &job);
 
     for (int i = 0; i < PBD_MAX_THREADS + 1; ++i) {
         UnitVoxelBuffer *tb = &activate_thread_buffers[i];
@@ -4235,6 +4467,7 @@ static bool activate_static_voxels_near_dynamic(void)
     qsort(buffer.voxels, (size_t)buffer.count, sizeof(UnitVoxelSeed), compare_unit_voxel_seed);
 
     remove_buffered_static_voxels(&buffer);
+    refine_coarse_static_neighbors_of_units(&buffer);
     int activation_base = voxel_count;
     int spawned = emit_unit_voxels_from_units(&buffer, false, true, -1);
     if (debugLogActivation) {
@@ -4261,22 +4494,16 @@ static bool activate_all_static_voxels(int activator)
     for (;;) {
         static UnitVoxelBuffer buffer;
         unit_voxel_buffer_clear(&buffer);
+        for (int i = 0; i < voxel_count; ++i)
+            atomic_store_explicit(&activationClaims[i], 0, memory_order_relaxed);
 
         for (int i = 0; i < voxel_count && buffer.count < VOXEL_ACTIVATION_UNIT_BUDGET; ++i) {
             Voxel *candidate = &voxels[i];
             if (candidate->simulate || candidate->pendingActivation) {
                 continue;
             }
-            candidate->pendingActivation = true;
-            if (!unit_voxel_buffer_push(&buffer,
-                                        candidate->gx, candidate->gy, candidate->gz,
-                                        candidate->color, candidate->type,
-                                        candidate->fixed, i,
-                                        candidate->debugClusterTag, activator))
-            {
-                candidate->pendingActivation = false;
-                break;
-            }
+            if (!activation_try_enqueue(i, activator, 0, 0, 0, -1.0f,
+                                        &buffer, NULL, NULL)) break;
         }
 
         if (buffer.count <= 0) {
@@ -4284,6 +4511,7 @@ static bool activate_all_static_voxels(int activator)
         }
 
         remove_buffered_static_voxels(&buffer);
+        refine_coarse_static_neighbors_of_units(&buffer);
         emit_unit_voxels_from_units(&buffer, false, true, -1);
         activated = true;
     }
@@ -4328,6 +4556,7 @@ static bool restore_dynamic_snapshot(const Voxel *snapshot)
     }
     table_cache_invalidate();
     voxel_table_register(&voxels[voxel_count], voxel_count);
+    if (voxels[voxel_count].simulate) dynamic_voxel_index_add(voxel_count);
     ++voxel_count;
     return true;
 }
@@ -4492,11 +4721,10 @@ static void recycle_dead_voxels(void) {
     recycleFrameCounter++;
     bool changed = false;
 
-    for (int i = 0; i < voxel_count; ++i) {
+    int dynamic_slot = 0;
+    while (dynamic_slot < dynamicVoxelCount) {
+        int i = dynamicVoxelIndices[dynamic_slot];
         Voxel *voxel = &voxels[i];
-        if (!voxel->simulate) {
-            continue;
-        }
         voxel->lifeFrames++;
         if (voxel->lifeFrames > RECYCLE_DYNAMIC_MAX_FRAMES ||
             voxel_outside_world_bounds(voxel))
@@ -4509,13 +4737,13 @@ static void recycle_dead_voxels(void) {
             if (voxel->owner != -1) {
                 remove_voxel_index(i);
                 changed = true;
-                --i;
                 continue;
             }
             restore_dynamic_voxel_to_static(i);
             changed = true;
-            --i;
+            continue;
         }
+        ++dynamic_slot;
     }
 
     for (int i = 0; i < voxel_count; ++i) {
@@ -4774,10 +5002,11 @@ static void mark_static_beliefs_dirty_column_above(int gx, int gz, int gy)
         if (voxel->simulate) {
             continue;
         }
-        if (voxel->gx != gx || voxel->gz != gz) {
+        if (gx < voxel->min_gx || gx > voxel->max_gx ||
+            gz < voxel->min_gz || gz > voxel->max_gz) {
             continue;
         }
-        if (voxel->gy >= gy) {
+        if (voxel->max_gy >= gy) {
             mark_static_belief_dirty_index(i);
         }
     }
@@ -5112,7 +5341,8 @@ static void evaluate_voxel_calm_range(int start, int end, int worker_id, void *u
 {
     (void)worker_id;
     (void)user;
-    for (int i = start; i < end; ++i) {
+    for (int slot = start; slot < end; ++slot) {
+        int i = dynamicVoxelIndices[slot];
         Voxel *voxel = &voxels[i];
         if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
             voxel->sleepFrames = 0;
@@ -5137,10 +5367,11 @@ static bool deactivate_sleeping_voxels(void)
     bool changed = false;
     int remaining_budget = VOXEL_MAX_DEACTIVATIONS_PER_FRAME;
 
-    pbd_parallel_for(0, voxel_count, evaluate_voxel_calm_range, NULL);
+    pbd_parallel_for(0, dynamicVoxelCount, evaluate_voxel_calm_range, NULL);
 
     memset(sleepClusterVisited, 0, sizeof(sleepClusterVisited));
-    for (int i = 0; i < voxel_count; ++i) {
+    for (int slot = 0; slot < dynamicVoxelCount; ++slot) {
+        int i = dynamicVoxelIndices[slot];
         Voxel *voxel = &voxels[i];
         if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
             continue;
@@ -5197,11 +5428,12 @@ static bool deactivate_sleeping_voxels(void)
         }
     }
 
-    int idx = 0;
-    while (idx < voxel_count && remaining_budget > 0) {
+    int dynamic_slot = 0;
+    while (dynamic_slot < dynamicVoxelCount && remaining_budget > 0) {
+        int idx = dynamicVoxelIndices[dynamic_slot];
         Voxel *voxel = &voxels[idx];
         if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
-            ++idx;
+            ++dynamic_slot;
             continue;
         }
         if (voxel->sleepFrames < VOXEL_DEACTIVATION_FRAMES) {
@@ -5210,7 +5442,7 @@ static bool deactivate_sleeping_voxels(void)
                          "[Deactivate] voxel=%d sleep=%d/%d waiting",
                          idx, voxel->sleepFrames, VOXEL_DEACTIVATION_FRAMES);
             }
-            ++idx;
+            ++dynamic_slot;
             continue;
         }
 
@@ -5241,7 +5473,7 @@ static bool deactivate_sleeping_voxels(void)
 
         int cluster_count = tail;
         if (cluster_count <= 0) {
-            ++idx;
+            ++dynamic_slot;
             continue;
         }
 
@@ -5262,18 +5494,18 @@ static bool deactivate_sleeping_voxels(void)
 
         if (!cluster_ready) {
             keep_cluster_awake(glueClusterIndices, cluster_count);
-            ++idx;
+            ++dynamic_slot;
             continue;
         }
 
         if (!glue_cluster_has_static_support(glueClusterIndices, cluster_count)) {
             keep_cluster_awake(glueClusterIndices, cluster_count);
-            ++idx;
+            ++dynamic_slot;
             continue;
         }
 
         if (!restore_glue_cluster_to_static(glueClusterIndices, cluster_count)) {
-            ++idx;
+            ++dynamic_slot;
             continue;
         }
 
@@ -5418,9 +5650,9 @@ static void add_dynamic_unit_block(int minx, int miny, int minz,
     add_dynamic_unit_block_tag(minx, miny, minz, sx, sy, sz, color, 0);
 }
 
-// Built-in worlds remain authored on the original 0.5 m grid.  Each authored
-// cell is emitted as a 2x2x2 block on the 0.25 m runtime grid, preserving the
-// dimensions and silhouettes of the existing maps.
+// Built-in worlds remain authored on the original 0.5 m grid. Undamaged cells
+// stay as one coarse static record covering 2x2x2 fine lookup cells; activation
+// and editing refine them to 0.25 m unit voxels.
 static inline int authored_grid_to_runtime_min(int g) {
     return g * VOXEL_LINEAR_SCALE;
 }
@@ -5433,13 +5665,7 @@ static inline void addVoxelAt(int gx, int gy, int gz, Color c) {
     int minx = authored_xz_to_runtime_min(gx);
     int miny = authored_grid_to_runtime_min(gy);
     int minz = authored_xz_to_runtime_min(gz);
-    for (int ox = 0; ox < VOXEL_LINEAR_SCALE; ++ox) {
-        for (int oy = 0; oy < VOXEL_LINEAR_SCALE; ++oy) {
-            for (int oz = 0; oz < VOXEL_LINEAR_SCALE; ++oz) {
-                add_static_voxel_at_grid(minx + ox, miny + oy, minz + oz, c, 0);
-            }
-        }
-    }
+    add_static_span_voxel_at_grid(minx, miny, minz, VOXEL_LINEAR_SCALE, c, 0);
 }
 
 static void remove_authored_voxel_at(int gx, int gy, int gz) {
@@ -5463,14 +5689,7 @@ static void add_authored_static_cell_at_grid(int gx, int gy, int gz,
     int minx = authored_grid_to_runtime_min(gx);
     int miny = authored_grid_to_runtime_min(gy);
     int minz = authored_grid_to_runtime_min(gz);
-    for (int ox = 0; ox < VOXEL_LINEAR_SCALE; ++ox) {
-        for (int oy = 0; oy < VOXEL_LINEAR_SCALE; ++oy) {
-            for (int oz = 0; oz < VOXEL_LINEAR_SCALE; ++oz) {
-                add_static_voxel_at_grid(minx + ox, miny + oy, minz + oz,
-                                         color, 0);
-            }
-        }
-    }
+    add_static_span_voxel_at_grid(minx, miny, minz, VOXEL_LINEAR_SCALE, color, 0);
 }
 
 static void add_static_box_at_grid(int minx, int maxx,
@@ -6331,6 +6550,7 @@ static void clear_pickups(void) {
 
 static void clear_world_voxels(void) {
     voxel_count = 0;
+    dynamic_voxel_tracking_reset();
     reset_particle_pool();
     staticBeliefsInitialized = false;
     staticBeliefsForceFullRefresh = false;
@@ -6341,7 +6561,7 @@ static void clear_world_voxels(void) {
     memset(staticBeliefQueued, 0, sizeof(staticBeliefQueued));
     memset(table, 0, sizeof(table));
     memset(static_table, 0, sizeof(static_table));
-    memset(dynamic_table, 0, sizeof(dynamic_table));
+    dynamic_table_clear_tracked();
     meshDirty = true;
 }
 
@@ -6358,7 +6578,7 @@ static bool save_map_slot(int slot) {
     if (!fp) {
         return false;
     }
-    fprintf(fp, "FPSMAP2\n");
+    fprintf(fp, "FPSMAP3\n");
     fprintf(fp, "VOXEL_SIZE %.6f\n", VOXEL_SIZE);
     int static_count = 0;
     for (int i = 0; i < voxel_count; ++i) {
@@ -6371,8 +6591,8 @@ static bool save_map_slot(int slot) {
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *v = &voxels[i];
         if (!v->simulate && !v->isBullet) {
-            fprintf(fp, "%d %d %d %d %d %d %d %d\n",
-                    v->gx, v->gy, v->gz,
+            fprintf(fp, "%d %d %d %d %d %d %d %d %d %d %d\n",
+                    v->min_gx, v->max_gx, v->min_gy, v->max_gy, v->min_gz, v->max_gz,
                     v->color.r, v->color.g, v->color.b, v->color.a,
                     v->type);
         }
@@ -6409,13 +6629,14 @@ static bool load_map_slot(int slot) {
     }
     bool legacy_map = strncmp(header, "FPSMAP1", 7) == 0;
     bool sized_map = strncmp(header, "FPSMAP2", 7) == 0;
-    if (!legacy_map && !sized_map) {
+    bool span_map = strncmp(header, "FPSMAP3", 7) == 0;
+    if (!legacy_map && !sized_map && !span_map) {
         fclose(fp);
         return false;
     }
 
     float source_voxel_size = LEGACY_VOXEL_SIZE;
-    if (sized_map && fscanf(fp, "VOXEL_SIZE %f\n", &source_voxel_size) != 1) {
+    if ((sized_map || span_map) && fscanf(fp, "VOXEL_SIZE %f\n", &source_voxel_size) != 1) {
         fclose(fp);
         return false;
     }
@@ -6439,23 +6660,39 @@ static bool load_map_slot(int slot) {
     }
     for (int i = 0; i < voxel_count_in; ++i) {
         int gx, gy, gz;
+        int maxx = 0, maxy = 0, maxz = 0;
         int r, g, b, a;
         int type = 0;
-        if (fscanf(fp, "%d %d %d %d %d %d %d %d\n",
-                   &gx, &gy, &gz, &r, &g, &b, &a, &type) != 8) {
-            break;
+        if (span_map) {
+            if (fscanf(fp, "%d %d %d %d %d %d %d %d %d %d %d\n",
+                       &gx, &maxx, &gy, &maxy, &gz, &maxz,
+                       &r, &g, &b, &a, &type) != 11) break;
+        } else {
+            if (fscanf(fp, "%d %d %d %d %d %d %d %d\n",
+                       &gx, &gy, &gz, &r, &g, &b, &a, &type) != 8) break;
         }
         Color color = (Color){ (unsigned char)r, (unsigned char)g,
                                (unsigned char)b, (unsigned char)a };
-        int minx = gx * map_refinement;
-        int miny = gy * map_refinement;
-        int minz = gz * map_refinement;
-        for (int ox = 0; ox < map_refinement; ++ox) {
-            for (int oy = 0; oy < map_refinement; ++oy) {
-                for (int oz = 0; oz < map_refinement; ++oz) {
-                    add_static_voxel_at_grid(minx + ox, miny + oy, minz + oz,
-                                             color, type);
-                }
+        if (span_map) {
+            int span_x = maxx - gx + 1;
+            int span_y = maxy - gy + 1;
+            int span_z = maxz - gz + 1;
+            if (span_x == span_y && span_y == span_z && span_x > 1) {
+                add_static_span_voxel_at_grid(gx, gy, gz, span_x, color, type);
+            } else {
+                for (int x = gx; x <= maxx; ++x)
+                    for (int y = gy; y <= maxy; ++y)
+                        for (int z = gz; z <= maxz; ++z)
+                            add_static_voxel_at_grid(x, y, z, color, type);
+            }
+        } else {
+            int minx = gx * map_refinement;
+            int miny = gy * map_refinement;
+            int minz = gz * map_refinement;
+            if (map_refinement > 1) {
+                add_static_span_voxel_at_grid(minx, miny, minz, map_refinement, color, type);
+            } else {
+                add_static_voxel_at_grid(minx, miny, minz, color, type);
             }
         }
     }
@@ -6773,20 +7010,23 @@ static void ResetGame(void) {
         players[i].meleeSwingStartTime = -1000.0f;
         players[i].dynamicShotActive = false;
     }
-    // clear voxels
-    voxel_count = 0;
-    reset_particle_pool();
-    staticBeliefsInitialized = false;
-    staticBeliefsForceFullRefresh = false;
-    staticBeliefDirtyCount = 0;
-    dynamicGlueClustersInitialized = false;
-    memset(debugTagBreakLogged, 0, sizeof(debugTagBreakLogged));
-    memset(staticBeliefDirty, 0, sizeof(staticBeliefDirty));
-    memset(staticBeliefQueued, 0, sizeof(staticBeliefQueued));
-    // clear hash
-    memset(table, 0, sizeof(table));
+    clear_world_voxels();
     // build static blocks
     buildDemo();
+    int covered_static_cells = 0;
+    int coarse_static_records = 0;
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (v->simulate) continue;
+        int cells = (v->max_gx - v->min_gx + 1) *
+                    (v->max_gy - v->min_gy + 1) *
+                    (v->max_gz - v->min_gz + 1);
+        if (cells > 0) covered_static_cells += cells;
+        if (cells > 1) ++coarse_static_records;
+    }
+    TraceLog(LOG_INFO,
+             "[WorldLayout] records=%d coarse=%d dynamic=%d coveredFineCells=%d",
+             voxel_count, coarse_static_records, dynamicVoxelCount, covered_static_cells);
     rebuild_all_voxel_surfaces();
     init_static_hash();
     //rebuild_glue_constraints();
@@ -7379,6 +7619,8 @@ static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float
     static UnitVoxelBuffer buffer;
     unit_voxel_buffer_clear(&buffer);
     refresh_static_voxel_beliefs();
+    for (int i = 0; i < voxel_count; ++i)
+        atomic_store_explicit(&activationClaims[i], 0, memory_order_relaxed);
 
     if (voxel_idx < 0 || voxel_idx >= voxel_count) {
         return false;
@@ -7404,6 +7646,7 @@ static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float
     }
 
     remove_buffered_static_voxels(&buffer);
+    refine_coarse_static_neighbors_of_units(&buffer);
     emit_unit_voxels_from_units(&buffer, false, true, -1);
     rebuild_voxel_hash();
     rebuild_all_voxel_surfaces();
@@ -7553,16 +7796,8 @@ static bool activate_static_neighbors_of_region(int minx, int maxx,
                 if (!dynamic_belief_overcomes_static(activationBelief, candidate->freezeBelief)) {
                     continue;
                 }
-                candidate->pendingActivation = true;
-                if (!unit_voxel_buffer_push(&buffer,
-                                            candidate->gx, candidate->gy, candidate->gz,
-                                            candidate->color, candidate->type,
-                                            candidate->fixed, idx,
-                                            candidate->debugClusterTag, activator))
-                {
-                    candidate->pendingActivation = false;
-                    break;
-                }
+                if (!activation_try_enqueue(idx, activator, 0, 0, 0, -1.0f,
+                                            &buffer, NULL, NULL)) break;
             }
         }
     }
@@ -7572,6 +7807,7 @@ static bool activate_static_neighbors_of_region(int minx, int maxx,
     }
 
     remove_buffered_static_voxels(&buffer);
+    refine_coarse_static_neighbors_of_units(&buffer);
     if (debugLogSmush) {
         debugSmushLogBudget = 32;
     }
@@ -7587,11 +7823,11 @@ static bool activate_static_neighbors_of_region(int minx, int maxx,
 
 static void rebuild_voxel_hash(void) {
     table_cache_invalidate();
-    memset(dynamic_table, 0, sizeof(dynamic_table));
+    dynamic_table_clear_tracked();
     table_cache_invalidate();
-    for (int i = 0; i < voxel_count; i++) {
+    for (int slot = 0; slot < dynamicVoxelCount; ++slot) {
+        int i = dynamicVoxelIndices[slot];
         Voxel *v = &voxels[i];
-        if (!v->simulate) continue; // Skip static voxels
         
         v->gx = (int)floorf(v->pos.x / VOXEL_SIZE);
         v->gy = (int)floorf(v->pos.y / VOXEL_SIZE);
@@ -7737,11 +7973,12 @@ static void update_projectiles(float dt)
         debugSmushLogBudget = 32;
     }
     bool static_changed = false;
-    int i = 0;
-    while (i < voxel_count) {
+    int dynamic_slot = 0;
+    while (dynamic_slot < dynamicVoxelCount) {
+        int i = dynamicVoxelIndices[dynamic_slot];
         Voxel *v = &voxels[i];
         if (!v->simulate || (v->type == 0 && !v->isBullet)) {
-            ++i;
+            ++dynamic_slot;
             continue;
         }
 
@@ -7754,7 +7991,7 @@ static void update_projectiles(float dt)
         v->vel = v_add(v->vel, v_mul(gravity, dt));
         float distance = v_length(displacement);
         if (distance <= 1e-6f) {
-            ++i;
+            ++dynamic_slot;
             continue;
         }
 
@@ -7941,7 +8178,7 @@ static void update_projectiles(float dt)
 
         v->pos = end;
         translate_voxel_particles(v, displacement);
-        ++i;
+        ++dynamic_slot;
     }
 
     if (static_changed) {
@@ -8003,15 +8240,16 @@ static void handle_pbd_projectile_hits(void)
     if (debugLogSmush) {
         debugSmushLogBudget = 32;
     }
-    int i = 0;
-    while (i < voxel_count) {
+    int dynamic_slot = 0;
+    while (dynamic_slot < dynamicVoxelCount) {
+        int i = dynamicVoxelIndices[dynamic_slot];
         Voxel *v = &voxels[i];
         if (!v->simulate) {
-            ++i;
+            ++dynamic_slot;
             continue;
         }
         if (v->type == 0 && v->isBullet) {
-            ++i;
+            ++dynamic_slot;
             continue;
         }
         bool removed = false;
@@ -8026,7 +8264,7 @@ static void handle_pbd_projectile_hits(void)
             float threshold = (PLAYER_SIZE * 0.5f) + voxel_radius + 0.1f;
             if (fabsf(dx) < threshold && fabsf(dy) < threshold && fabsf(dz) < threshold) {
                 if (dynamic_voxel_glued_to_static(i)) {
-                    ++i;
+                    ++dynamic_slot;
                     removed = true;
                     break;
                 }
@@ -8067,7 +8305,7 @@ static void handle_pbd_projectile_hits(void)
             }
         }
         if (!removed) {
-            ++i;
+            ++dynamic_slot;
         }
     }
 }
@@ -8213,7 +8451,8 @@ static int table_get_uncached_for_physics(int x, int y, int z) {
 static void update_wake_timers_range(int start, int end, int worker_id, void *user) {
     (void)worker_id;
     (void)user;
-    for (int i = start; i < end; ++i) {
+    for (int slot = start; slot < end; ++slot) {
+        int i = dynamicVoxelIndices[slot];
         Voxel *v = &voxels[i];
         if (!v->simulate || v->isBullet) {
             continue;
@@ -8242,11 +8481,12 @@ static void update_wake_timers_range(int start, int end, int worker_id, void *us
 }
 
 static void update_wake_timers(void) {
-    pbd_parallel_for(0, voxel_count, update_wake_timers_range, NULL);
+    pbd_parallel_for(0, dynamicVoxelCount, update_wake_timers_range, NULL);
 }
 
 static void process_break_masks(void) {
-    for (int i = 0; i < voxel_count; ++i) {
+    for (int slot = 0; slot < dynamicVoxelCount; ++slot) {
+        int i = dynamicVoxelIndices[slot];
         Voxel *v = &voxels[i];
         if (v->break_mask == 0) {
             continue;
@@ -8421,7 +8661,8 @@ static void gather_voxel_break_masks(Voxel *voxel) {
 static void gather_voxel_break_masks_range(int start, int end, int worker_id, void *user) {
     (void)worker_id;
     (void)user;
-    for (int i = start; i < end; ++i) {
+    for (int slot = start; slot < end; ++slot) {
+        int i = dynamicVoxelIndices[slot];
         Voxel *voxel = &voxels[i];
         gather_voxel_break_masks(voxel);
     }
@@ -8471,7 +8712,8 @@ static void integrate_particles(float dt) {
         tether_apply_stamp = 1;
     }
 
-    for (int i = 0; i < voxel_count; ++i) {
+    for (int slot = 0; slot < dynamicVoxelCount; ++slot) {
+        int i = dynamicVoxelIndices[slot];
         Voxel *voxel = &voxels[i];
         if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
             continue;
@@ -9024,7 +9266,8 @@ static void gather_particle_collisions(float dt, Particle **list, int count) {
 static void gather_voxel_shape_constraints_range(int start, int end, int worker_id, void *user) {
     (void)worker_id;
     (void)user;
-    for (int i = start; i < end; ++i) {
+    for (int slot = start; slot < end; ++slot) {
+        int i = dynamicVoxelIndices[slot];
         Voxel *voxel = &voxels[i];
         if (!voxel->simulate || voxel->isBullet || voxel->type != 0) {
             continue;
@@ -9701,7 +9944,8 @@ static void update_dynamic_activation_beliefs_range(int start, int end, int work
 {
     (void)worker_id;
     (void)user;
-    for (int i = start; i < end; ++i) {
+    for (int slot = start; slot < end; ++slot) {
+        int i = dynamicVoxelIndices[slot];
         Voxel *voxel = &voxels[i];
         bool tethered = (tetherTag[i] > 0);
         if (tethered) {
@@ -9744,7 +9988,7 @@ static void update_dynamic_activation_beliefs_range(int start, int end, int work
 
 static void update_dynamic_activation_beliefs(void)
 {
-    pbd_parallel_for(0, voxel_count, update_dynamic_activation_beliefs_range, NULL);
+    pbd_parallel_for(0, dynamicVoxelCount, update_dynamic_activation_beliefs_range, NULL);
 }
 
 static bool ranges_overlap(int minA, int maxA, int minB, int maxB) {
@@ -10040,6 +10284,13 @@ static void glue_dynamic_face_to_static(Voxel *dynamic, Voxel *stat,
     if (!dynamic || !stat) {
         return;
     }
+    // A small face cannot share the four outer corner particles of a larger
+    // coarse face without collapsing or stretching the dynamic voxel. Normal
+    // activation refines these neighbors first; keep this guard for other
+    // dynamic-spawn paths.
+    if (fabsf(dynamic->rest_edge - stat->rest_edge) > 1e-5f) {
+        return;
+    }
     for (int c = 0; c < 4; ++c) {
         int dyn_corner = face_corner_indices[face_dynamic][c];
         int stat_corner = face_corner_indices[face_static][c];
@@ -10086,11 +10337,8 @@ static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx)
 
 static void glue_dynamic_voxel_to_static_neighbors(void)
 {
-    for (int i = 0; i < voxel_count; ++i) {
-        if (!voxels[i].simulate) {
-            continue;
-        }
-        glue_dynamic_voxel_to_static_neighbors_for_voxel(i);
+    for (int slot = 0; slot < dynamicVoxelCount; ++slot) {
+        glue_dynamic_voxel_to_static_neighbors_for_voxel(dynamicVoxelIndices[slot]);
     }
 }
 
@@ -10273,7 +10521,8 @@ static void update_particle_velocity_range(int start, int end, int worker_id, vo
 static void update_voxel_velocity_range(int start, int end, int worker_id, void *user) {
     (void)worker_id;
     VelocityUpdateJob *job = (VelocityUpdateJob *)user;
-    for (int i = start; i < end; ++i) {
+    for (int slot = start; slot < end; ++slot) {
+        int i = dynamicVoxelIndices[slot];
         Voxel *voxel = &voxels[i];
         if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
             continue;
@@ -10303,7 +10552,7 @@ static void update_voxel_velocity_range(int start, int end, int worker_id, void 
 static void update_particle_velocities(float dt) {
     VelocityUpdateJob job = { .inv_dt = (dt > 0.0f) ? 1.0f / dt : 0.0f };
     pbd_parallel_for(0, sim_particle_count, update_particle_velocity_range, &job);
-    pbd_parallel_for(0, voxel_count, update_voxel_velocity_range, &job);
+    pbd_parallel_for(0, dynamicVoxelCount, update_voxel_velocity_range, &job);
 }
 
 static void voxel_measure_strain(const Voxel *voxel,
@@ -10509,13 +10758,13 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
 
         for (int it = 0; it < constraint_iterations; ++it) {
             reset_particle_accumulators();
-            pbd_parallel_for(0, voxel_count, gather_voxel_shape_constraints_range, NULL);
+            pbd_parallel_for(0, dynamicVoxelCount, gather_voxel_shape_constraints_range, NULL);
             apply_particle_accumulators();
         }
 
         solve_static_collisions(sub_dt);
 
-        pbd_parallel_for(0, voxel_count, gather_voxel_break_masks_range, NULL);
+        pbd_parallel_for(0, dynamicVoxelCount, gather_voxel_break_masks_range, NULL);
         process_break_masks();
         update_wake_timers();
 
@@ -10962,7 +11211,8 @@ static Vector3 player_hand_position(const Player *p) {
 static int find_closest_dynamic_voxel(Vector3 pos, float radius) {
     float best = radius * radius;
     int best_idx = -1;
-    for (int i = 0; i < voxel_count; ++i) {
+    for (int slot = 0; slot < dynamicVoxelCount; ++slot) {
+        int i = dynamicVoxelIndices[slot];
         Voxel *v = &voxels[i];
         if (!v->simulate || v->type != 0 || v->isBullet) {
             continue;
@@ -11450,6 +11700,17 @@ static void perform_build(int idx) {
 
 static int rip_single_static_voxel(int voxel_idx, int activator) {
     if (voxel_idx < 0 || voxel_idx >= voxel_count) return -1;
+    if (!voxels[voxel_idx].simulate &&
+        (voxels[voxel_idx].max_gx > voxels[voxel_idx].min_gx ||
+         voxels[voxel_idx].max_gy > voxels[voxel_idx].min_gy ||
+         voxels[voxel_idx].max_gz > voxels[voxel_idx].min_gz)) {
+        int target_x = voxels[voxel_idx].gx;
+        int target_y = voxels[voxel_idx].gy;
+        int target_z = voxels[voxel_idx].gz;
+        if (!refine_static_voxel_to_units(voxel_idx)) return -1;
+        voxel_idx = table_get_static_only(target_x, target_y, target_z);
+        if (voxel_idx < 0 || voxel_idx >= voxel_count) return -1;
+    }
     Voxel v = voxels[voxel_idx]; // Copy data
     
     remove_voxel_index(voxel_idx);
@@ -11913,7 +12174,8 @@ static void draw_particle_debug(void)
 {
     const Color baseColor = { 255, 200, 80, 255 };
 
-    for (int i = 0; i < voxel_count; ++i) {
+    for (int slot = 0; slot < dynamicVoxelCount; ++slot) {
+        int i = dynamicVoxelIndices[slot];
         const Voxel *voxel = &voxels[i];
         if (!voxel->simulate) continue;
         float baseRadius = voxel_particle_radius(voxel);
@@ -12007,6 +12269,24 @@ static int first_voxel_hit(Ray ray, float t_max, int ignore_id) {
 // Generate a greedy mesh of all visible voxels ( i think the bug where single voxels are not drawn right is somewhere in here)
 // Only one layer is drawn per voxel, this makes layers disappear on the individual voxel level
 
+static void voxel_face_grid_rect(const Voxel *v, int plane, bool positive,
+                                 int *layer, int *min_i, int *max_i,
+                                 int *min_j, int *max_j)
+{
+    int minx, maxx, miny, maxy, minz, maxz;
+    voxel_grid_bounds(v, &minx, &maxx, &miny, &maxy, &minz, &maxz);
+    if (plane == 0) {
+        *layer = positive ? maxz : minz;
+        *min_i = minx; *max_i = maxx; *min_j = miny; *max_j = maxy;
+    } else if (plane == 1) {
+        *layer = positive ? maxy : miny;
+        *min_i = minx; *max_i = maxx; *min_j = minz; *max_j = maxz;
+    } else {
+        *layer = positive ? maxx : minx;
+        *min_i = miny; *max_i = maxy; *min_j = minz; *max_j = maxz;
+    }
+}
+
 static void merge_rects_on_plane(int count, int *list, int plane, bool positive) {
     if (!list || count <= 0) return;
     if (count > voxel_count) {
@@ -12022,12 +12302,9 @@ static void merge_rects_on_plane(int count, int *list, int plane, bool positive)
         if (idx < 0 || idx >= voxel_count) {
             continue;
         }
-        int layer = 0;
-        switch (plane) {
-            case 0: layer = voxels[idx].gz; break; // XY-plane, group by z
-            case 1: layer = voxels[idx].gy; break; // XZ-plane, group by y
-            case 2: layer = voxels[idx].gx; break; // YZ-plane, group by x
-        }
+        int layer, min_i, max_i, min_j, max_j;
+        voxel_face_grid_rect(&voxels[idx], plane, positive,
+                             &layer, &min_i, &max_i, &min_j, &max_j);
         bool seen = false;
         for (int j = 0; j < layerCount; j++) {
             if (layers[j] == layer) {
@@ -12055,19 +12332,16 @@ static void merge_rects_on_plane(int count, int *list, int plane, bool positive)
                 continue;
             }
             Voxel *v = &voxels[idx];
-            int vLayer = 0, vI = 0, vJ = 0;
-            switch (plane) {
-                case 0: vLayer = v->gz; vI = v->gx; vJ = v->gy; break;
-                case 1: vLayer = v->gy; vI = v->gx; vJ = v->gz; break;
-                case 2: vLayer = v->gx; vI = v->gy; vJ = v->gz; break;
-            }
+            int vLayer, vMinI, vMaxI, vMinJ, vMaxJ;
+            voxel_face_grid_rect(v, plane, positive,
+                                 &vLayer, &vMinI, &vMaxI, &vMinJ, &vMaxJ);
 
             if (vLayer != layer) continue;
             anyInLayer = true;
-            if (vI < minI) minI = vI;
-            if (vI > maxI) maxI = vI;
-            if (vJ < minJ) minJ = vJ;
-            if (vJ > maxJ) maxJ = vJ;
+            if (vMinI < minI) minI = vMinI;
+            if (vMaxI > maxI) maxI = vMaxI;
+            if (vMinJ < minJ) minJ = vMinJ;
+            if (vMaxJ > maxJ) maxJ = vMaxJ;
         }
         if (!anyInLayer) {
             continue;
@@ -12092,14 +12366,12 @@ static void merge_rects_on_plane(int count, int *list, int plane, bool positive)
                     continue;
                 }
                 Voxel *v = &voxels[idx];
-                int vLayer = 0, vI = 0, vJ = 0;
-                switch (plane) {
-                    case 0: vLayer = v->gz; vI = v->gx; vJ = v->gy; break;
-                    case 1: vLayer = v->gy; vI = v->gx; vJ = v->gz; break;
-                    case 2: vLayer = v->gx; vI = v->gy; vJ = v->gz; break;
-                }
+                int vLayer, vMinI, vMaxI, vMinJ, vMaxJ;
+                voxel_face_grid_rect(v, plane, positive,
+                                     &vLayer, &vMinI, &vMaxI, &vMinJ, &vMaxJ);
                 if (vLayer != layer) continue;
-                if (!emit_patch(plane, layer, vI, vJ, 1, 1, positive)) {
+                if (!emit_patch(plane, layer, vMinI, vMinJ,
+                                vMaxI - vMinI + 1, vMaxJ - vMinJ + 1, positive)) {
                     free(layers);
                     return;
                 }
@@ -12118,17 +12390,17 @@ static void merge_rects_on_plane(int count, int *list, int plane, bool positive)
                 continue;
             }
             Voxel *v = &voxels[idx];
-            int vLayer = 0, vI = 0, vJ = 0;
-            switch (plane) {
-                case 0: vLayer = v->gz; vI = v->gx; vJ = v->gy; break;
-                case 1: vLayer = v->gy; vI = v->gx; vJ = v->gz; break;
-                case 2: vLayer = v->gx; vI = v->gy; vJ = v->gz; break;
-            }
+            int vLayer, vMinI, vMaxI, vMinJ, vMaxJ;
+            voxel_face_grid_rect(v, plane, positive,
+                                 &vLayer, &vMinI, &vMaxI, &vMinJ, &vMaxJ);
             if (vLayer != layer) continue;
-            size_t mi = (size_t)(vI - minI);
-            size_t mj = (size_t)(vJ - minJ);
-            if (mi < (size_t)w && mj < (size_t)h) {
-                mask[mi * (size_t)h + mj] = true;
+            for (int vi = vMinI; vi <= vMaxI; ++vi) {
+                for (int vj = vMinJ; vj <= vMaxJ; ++vj) {
+                    size_t mi = (size_t)(vi - minI);
+                    size_t mj = (size_t)(vj - minJ);
+                    if (mi < (size_t)w && mj < (size_t)h)
+                        mask[mi * (size_t)h + mj] = true;
+                }
             }
         }
 
@@ -12395,11 +12667,9 @@ static void DrawVoxels(Camera3D cam) {
     
     // Instanced drawing for dynamic voxels
     instanceTransformsCount = 0;
-    for (int i = 0; i < voxel_count; i++) {
+    for (int slot = 0; slot < dynamicVoxelCount; ++slot) {
+        int i = dynamicVoxelIndices[slot];
         Voxel *v = &voxels[i];
-        if (!v->simulate) {
-            continue;
-        }
         
         // Draw Bullet with Orb Shader
         if (v->isBullet && v->type == 0) {
@@ -12481,7 +12751,8 @@ static void DrawVoxels(Camera3D cam) {
     }
 
     // Add glow shells for type-0 bullets so they read as blue orbs.
-    for (int i = 0; i < voxel_count; i++) {
+    for (int slot = 0; slot < dynamicVoxelCount; ++slot) {
+        int i = dynamicVoxelIndices[slot];
         Voxel *v = &voxels[i];
         if (!v->simulate || !v->isBullet || v->type != 0) {
             continue;
@@ -13022,7 +13293,8 @@ static int find_nearest_static_voxel(const Vector3 *pos, float *out_dist_sq) {
 static int find_nearest_dynamic_voxel(const Vector3 *pos, float max_dist_sq, float *out_dist_sq) {
     int best = -1;
     float minDistSq = max_dist_sq;
-    for (int i = 0; i < voxel_count; ++i) {
+    for (int slot = 0; slot < dynamicVoxelCount; ++slot) {
+        int i = dynamicVoxelIndices[slot];
         Voxel *v = &voxels[i];
         if (!v->simulate || v->isBullet) {
             continue;
