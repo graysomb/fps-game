@@ -61,6 +61,13 @@
 #include <unistd.h>
 #endif
 
+typedef enum {
+    FLUID_RENDER_PARTICLES = 0,
+    FLUID_RENDER_SURFACE = 1
+} FluidRenderMode;
+
+static FluidRenderMode fluidRenderMode = FLUID_RENDER_SURFACE;
+
 static PhysicsBackendStatus physicsBackend = {
     .requested = PHYSICS_BACKEND_AUTO,
     .active = PHYSICS_BACKEND_CPU_ST
@@ -116,6 +123,24 @@ static bool parse_physics_arguments(int argc, char **argv) {
             physicsSmokeVoxels = atoi(arg + 23);
             if (physicsSmokeVoxels < 1) physicsSmokeVoxels = 1;
             if (physicsSmokeVoxels > 4096) physicsSmokeVoxels = 4096;
+            continue;
+        }
+        const char *fluid_render_value = NULL;
+        if (strncmp(arg, "--fluid-render=", 15) == 0) {
+            fluid_render_value = arg + 15;
+        } else if (strcmp(arg, "--fluid-render") == 0 && i + 1 < argc) {
+            fluid_render_value = argv[++i];
+        }
+        if (fluid_render_value) {
+            if (strcmp(fluid_render_value, "particles") == 0) {
+                fluidRenderMode = FLUID_RENDER_PARTICLES;
+            } else if (strcmp(fluid_render_value, "surface") == 0) {
+                fluidRenderMode = FLUID_RENDER_SURFACE;
+            } else {
+                fprintf(stderr, "Unknown fluid render mode '%s' (expected particles or surface)\n",
+                        fluid_render_value);
+                return false;
+            }
             continue;
         }
         int debug_parse_result = debug_parse_argument(argc, argv, &i);
@@ -391,6 +416,32 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define MAX_PARTICLES (MAX_VOXELS * 8)
 #define PARTICLE_HASH_SIZE 262144
 
+#define VOXEL_TYPE_SOLID 0
+#define VOXEL_TYPE_FLUID 3
+#define PBF_PARTICLE_SPACING (VOXEL_SIZE * 0.5f)
+#define PBF_PARTICLE_RADIUS (PBF_PARTICLE_SPACING * 0.45f)
+#define PBF_SMOOTHING_RADIUS VOXEL_SIZE
+#define PBF_REST_DENSITY 1000.0f
+#define PBF_PARTICLE_MASS (PBF_REST_DENSITY * PBF_PARTICLE_SPACING * PBF_PARTICLE_SPACING * PBF_PARTICLE_SPACING)
+#define PBF_DENSITY_ITERS 4
+#define PBF_LAMBDA_EPSILON 1e-6f
+#define PBF_SCORR_K 0.2f
+#define PBF_SCORR_N 4.0f
+#define PBF_SCORR_DELTA_Q (PBF_SMOOTHING_RADIUS * 0.2f)
+#define PBF_XSPH_VISCOSITY 0.15f
+#define PBF_SURFACE_SPLAT_RADIUS (PBF_PARTICLE_SPACING * 0.9f)
+#define PBF_MAX_POSITION_CORRECTION (PBF_PARTICLE_SPACING * 0.025f)
+
+typedef enum {
+    PARTICLE_MATERIAL_SOLID = 0,
+    PARTICLE_MATERIAL_FLUID = 1
+} ParticleMaterial;
+
+typedef enum {
+    CREATIVE_MATERIAL_SOLID = 0,
+    CREATIVE_MATERIAL_FLUID = 1
+} CreativeMaterial;
+
 // Tunable voxel edit brush (per-axis span of the add/remove operation)
 static int voxelBrushSpan = 3;
 
@@ -479,6 +530,11 @@ typedef struct {
     int cell_x;
     int cell_y;
     int cell_z;
+    ParticleMaterial material;
+    int fluid_index;
+    float pbf_density;
+    float pbf_lambda;
+    Vector3 pbf_delta;
 } Particle;
 
 // Voxel structure
@@ -538,9 +594,11 @@ static int voxel_count = 0;
 static Particle particles_pool[MAX_PARTICLES];
 static Particle *active_particles[MAX_PARTICLES];
 static Particle *sim_particles[MAX_PARTICLES];
+static Particle *fluid_particles[MAX_PARTICLES];
 static int particle_pool_count = 0;
 static int active_particle_count = 0;
 static int sim_particle_count = 0;
+static int fluid_particle_count = 0;
 static int free_particle_indices[MAX_PARTICLES];
 static int free_particle_count = 0;
 static int particle_sync_stamp = 1;
@@ -575,6 +633,7 @@ static int recycleQueueTail = 0;
 static int recycleQueueCount = 0;
 static int recycleFrameCounter = 0;
 static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Color color, int type);
+static int add_fluid_cell(float px, float py, float pz, Color color);
 static void rebuild_voxel_hash(void);
 static void voxel_measure_strain(const Voxel *voxel,
                                  float *out_max_strain,
@@ -584,6 +643,7 @@ static int gather_glued_neighbors(int voxel_idx, int *out, int max_out);
 static int gather_glued_neighbors_symmetric(int voxel_idx, int *out, int max_out);
 static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count);
 static void solve_static_collisions(float dt);
+static void solve_fluid_static_collisions(void);
 static void solve_dynamic_collisions(float dt);
 static void log_dynamic_glue_cluster_breaks(void);
 static void compute_voxel_center_and_mass(const Voxel *voxel, Vector3 *center, float *inv_mass_sum);
@@ -1023,6 +1083,10 @@ static bool aimAssistDebugHasTarget[MAX_PLAYERS];
 static bool creativeModeActive = false;
 static int creativeBrushSpan[MAX_PLAYERS] = { 3, 3, 3, 3 };
 static int creativePickupType[MAX_PLAYERS] = { 0, 0, 0, 0 };
+static CreativeMaterial creativeMaterial[MAX_PLAYERS] = {
+    CREATIVE_MATERIAL_SOLID, CREATIVE_MATERIAL_SOLID,
+    CREATIVE_MATERIAL_SOLID, CREATIVE_MATERIAL_SOLID
+};
 static int creativeMapSlot = 0;
 static bool useCustomMap = false;
 static int creativeBlockColorIndex[MAX_PLAYERS] = { 0, 0, 0, 0 };
@@ -1925,12 +1989,76 @@ static void reset_particle_pool(void) {
     particle_pool_count = 0;
     active_particle_count = 0;
     sim_particle_count = 0;
+    fluid_particle_count = 0;
     free_particle_count = 0;
     particle_sync_stamp = 1;
     tether_apply_stamp = 1;
     memset(particles_pool, 0, sizeof(particles_pool));
     memset(active_particles, 0, sizeof(active_particles));
     memset(sim_particles, 0, sizeof(sim_particles));
+    memset(fluid_particles, 0, sizeof(fluid_particles));
+}
+
+static inline bool voxel_is_fluid(const Voxel *voxel) {
+    return voxel && voxel->type == VOXEL_TYPE_FLUID;
+}
+
+static inline int dynamic_particle_count(void) {
+    return sim_particle_count + fluid_particle_count;
+}
+
+static inline Particle *dynamic_particle_at(int index) {
+    if (index < 0) return NULL;
+    if (index < sim_particle_count) return sim_particles[index];
+    index -= sim_particle_count;
+    return (index < fluid_particle_count) ? fluid_particles[index] : NULL;
+}
+
+static inline bool voxel_uses_spatial_hash(const Voxel *voxel) {
+    return voxel && !voxel_is_fluid(voxel);
+}
+
+static void fluid_particles_add(Particle *p) {
+    if (!p || p->fluid_index >= 0 || fluid_particle_count >= MAX_PARTICLES) {
+        return;
+    }
+    p->fluid_index = fluid_particle_count;
+    fluid_particles[fluid_particle_count++] = p;
+}
+
+static void fluid_particles_remove(Particle *p) {
+    if (!p || p->fluid_index < 0 || p->fluid_index >= fluid_particle_count) {
+        return;
+    }
+    int index = p->fluid_index;
+    int last = fluid_particle_count - 1;
+    if (index != last) {
+        Particle *moved = fluid_particles[last];
+        fluid_particles[index] = moved;
+        moved->fluid_index = index;
+    }
+    fluid_particles[last] = NULL;
+    fluid_particle_count--;
+    p->fluid_index = -1;
+}
+
+static void sim_particles_add(Particle *p);
+static void sim_particles_remove(Particle *p);
+
+static void particle_set_material(Particle *p, ParticleMaterial material) {
+    if (!p || p->material == material) {
+        return;
+    }
+    if (p->material == PARTICLE_MATERIAL_FLUID) {
+        fluid_particles_remove(p);
+    }
+    p->material = material;
+    if (material == PARTICLE_MATERIAL_FLUID) {
+        sim_particles_remove(p);
+        fluid_particles_add(p);
+    } else if (p->base_inv_mass > 0.0f) {
+        sim_particles_add(p);
+    }
 }
 
 static void sim_particles_add(Particle *p) {
@@ -1998,6 +2126,11 @@ static Particle *particle_create(Vector3 pos, float inv_mass) {
     p->cell_x = 0;
     p->cell_y = 0;
     p->cell_z = 0;
+    p->material = PARTICLE_MATERIAL_SOLID;
+    p->fluid_index = -1;
+    p->pbf_density = 0.0f;
+    p->pbf_lambda = 0.0f;
+    p->pbf_delta = (Vector3){ 0.0f, 0.0f, 0.0f };
     return p;
 }
 
@@ -2023,8 +2156,9 @@ static Particle *particle_clone(const Particle *src) {
     p->active = true;
     p->active_index = active_particle_count;
     p->sim_index = -1;
+    p->fluid_index = -1;
     active_particles[active_particle_count++] = p;
-    if (p->base_inv_mass > 0.0f) {
+    if (p->base_inv_mass > 0.0f && p->material != PARTICLE_MATERIAL_FLUID) {
         sim_particles_add(p);
     }
     atomic_store_explicit(&p->corr_sum_x, float_to_bits(0.0f), memory_order_relaxed);
@@ -2032,6 +2166,9 @@ static Particle *particle_clone(const Particle *src) {
     atomic_store_explicit(&p->corr_sum_z, float_to_bits(0.0f), memory_order_relaxed);
     atomic_store_explicit(&p->corr_weight_bits, float_to_bits(0.0f), memory_order_relaxed);
     p->tether_stamp = 0;
+    if (p->material == PARTICLE_MATERIAL_FLUID) {
+        fluid_particles_add(p);
+    }
     return p;
 }
 
@@ -2051,6 +2188,7 @@ static void particle_release(Particle *p) {
         return;
     }
     p->active = false;
+    fluid_particles_remove(p);
     sim_particles_remove(p);
     int idx = p->active_index;
     if (idx < 0 || idx >= active_particle_count) {
@@ -2130,6 +2268,204 @@ static void build_particle_hash(Particle **list, int count) {
     pbd_parallel_for(0, count, particle_hash_build_range, &job);
 }
 
+typedef struct {
+    Particle **hash_list;
+    int hash_count;
+} PbfJob;
+
+static inline float pbf_poly6(float distance_sq) {
+    const float h = PBF_SMOOTHING_RADIUS;
+    const float h_sq = h * h;
+    if (distance_sq < 0.0f || distance_sq >= h_sq) return 0.0f;
+    float term = h_sq - distance_sq;
+    float coefficient = 315.0f / (64.0f * PI * powf(h, 9.0f));
+    return coefficient * term * term * term;
+}
+
+static inline Vector3 pbf_spiky_gradient(Vector3 delta) {
+    const float h = PBF_SMOOTHING_RADIUS;
+    float distance_sq = v_dot(delta, delta);
+    if (distance_sq <= 1e-12f || distance_sq >= h * h) {
+        return (Vector3){ 0.0f, 0.0f, 0.0f };
+    }
+    float distance = sqrtf(distance_sq);
+    float term = h - distance;
+    float coefficient = -45.0f / (PI * powf(h, 6.0f));
+    return v_mul(delta, coefficient * term * term / distance);
+}
+
+static void pbf_compute_lambda_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    PbfJob *job = (PbfJob *)user;
+    const float volume = PBF_PARTICLE_MASS / PBF_REST_DENSITY;
+    for (int fluid_index = start; fluid_index < end; ++fluid_index) {
+        Particle *particle = fluid_particles[fluid_index];
+        if (!particle) continue;
+        float density = 0.0f;
+        Vector3 gradient_i = { 0.0f, 0.0f, 0.0f };
+        float gradient_sum_sq = 0.0f;
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    int nx = particle->cell_x + dx;
+                    int ny = particle->cell_y + dy;
+                    int nz = particle->cell_z + dz;
+                    int item = atomic_load_explicit(
+                        &particle_hash_head[particle_hash(nx, ny, nz)], memory_order_relaxed);
+                    for (; item != -1; item = particle_hash_next[item]) {
+                        if (item < 0 || item >= job->hash_count) break;
+                        Particle *neighbor = job->hash_list[item];
+                        if (!neighbor || neighbor->material != PARTICLE_MATERIAL_FLUID ||
+                            neighbor->cell_x != nx || neighbor->cell_y != ny || neighbor->cell_z != nz) {
+                            continue;
+                        }
+                        Vector3 separation = v_sub(particle->predicted_pos, neighbor->predicted_pos);
+                        float distance_sq = v_dot(separation, separation);
+                        density += PBF_PARTICLE_MASS * pbf_poly6(distance_sq);
+                        if (neighbor != particle) {
+                            Vector3 gradient_j = v_mul(pbf_spiky_gradient(separation), -volume);
+                            gradient_sum_sq += v_dot(gradient_j, gradient_j);
+                            gradient_i = v_sub(gradient_i, gradient_j);
+                        }
+                    }
+                }
+            }
+        }
+        gradient_sum_sq += v_dot(gradient_i, gradient_i);
+        float constraint = density / PBF_REST_DENSITY - 1.0f;
+        particle->pbf_density = density;
+        particle->pbf_lambda = -constraint / (gradient_sum_sq + PBF_LAMBDA_EPSILON);
+    }
+}
+
+static void pbf_compute_delta_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    PbfJob *job = (PbfJob *)user;
+    const float volume = PBF_PARTICLE_MASS / PBF_REST_DENSITY;
+    const float reference_kernel = pbf_poly6(PBF_SCORR_DELTA_Q * PBF_SCORR_DELTA_Q);
+    for (int fluid_index = start; fluid_index < end; ++fluid_index) {
+        Particle *particle = fluid_particles[fluid_index];
+        if (!particle) continue;
+        Vector3 delta_sum = { 0.0f, 0.0f, 0.0f };
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    int nx = particle->cell_x + dx;
+                    int ny = particle->cell_y + dy;
+                    int nz = particle->cell_z + dz;
+                    int item = atomic_load_explicit(
+                        &particle_hash_head[particle_hash(nx, ny, nz)], memory_order_relaxed);
+                    for (; item != -1; item = particle_hash_next[item]) {
+                        if (item < 0 || item >= job->hash_count) break;
+                        Particle *neighbor = job->hash_list[item];
+                        if (!neighbor || neighbor == particle ||
+                            neighbor->material != PARTICLE_MATERIAL_FLUID ||
+                            neighbor->cell_x != nx || neighbor->cell_y != ny || neighbor->cell_z != nz) {
+                            continue;
+                        }
+                        Vector3 separation = v_sub(particle->predicted_pos, neighbor->predicted_pos);
+                        float distance_sq = v_dot(separation, separation);
+                        float kernel = pbf_poly6(distance_sq);
+                        if (kernel <= 0.0f) continue;
+                        float ratio = (reference_kernel > 0.0f) ? kernel / reference_kernel : 0.0f;
+                        // k is dimensionless in the normalized paper formulation; spacing^2
+                        // keeps it commensurate with lambda in world-space metre units.
+                        float scorr = -PBF_SCORR_K *
+                                      (PBF_PARTICLE_SPACING * PBF_PARTICLE_SPACING) *
+                                      powf(ratio, PBF_SCORR_N);
+                        float scale = volume * (particle->pbf_lambda + neighbor->pbf_lambda + scorr);
+                        delta_sum = v_add(delta_sum, v_mul(pbf_spiky_gradient(separation), scale));
+                    }
+                }
+            }
+        }
+        float delta_length = v_length(delta_sum);
+        // Dense boundary layers can otherwise cross in one Jacobi iteration and
+        // turn a constraint correction into an explosive velocity on the next step.
+        if (delta_length > PBF_MAX_POSITION_CORRECTION) {
+            delta_sum = v_mul(delta_sum, PBF_MAX_POSITION_CORRECTION / delta_length);
+        }
+        particle->pbf_delta = delta_sum;
+    }
+}
+
+static void pbf_apply_position_delta_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    (void)user;
+    for (int i = start; i < end; ++i) {
+        Particle *particle = fluid_particles[i];
+        if (!particle) continue;
+        particle->predicted_pos = v_add(particle->predicted_pos, particle->pbf_delta);
+        particle->pbf_delta = (Vector3){ 0.0f, 0.0f, 0.0f };
+    }
+}
+
+static void solve_pbf_density_constraints(Particle **hash_list, int hash_count) {
+    if (fluid_particle_count <= 0) return;
+    PbfJob job = { .hash_list = hash_list, .hash_count = hash_count };
+    for (int iteration = 0; iteration < PBF_DENSITY_ITERS; ++iteration) {
+        pbd_parallel_for(0, fluid_particle_count, pbf_compute_lambda_range, &job);
+        pbd_parallel_for(0, fluid_particle_count, pbf_compute_delta_range, &job);
+        pbd_parallel_for(0, fluid_particle_count, pbf_apply_position_delta_range, NULL);
+        solve_fluid_static_collisions();
+    }
+}
+
+static void pbf_compute_viscosity_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    PbfJob *job = (PbfJob *)user;
+    for (int fluid_index = start; fluid_index < end; ++fluid_index) {
+        Particle *particle = fluid_particles[fluid_index];
+        if (!particle) continue;
+        Vector3 velocity_delta = { 0.0f, 0.0f, 0.0f };
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    int nx = particle->cell_x + dx;
+                    int ny = particle->cell_y + dy;
+                    int nz = particle->cell_z + dz;
+                    int item = atomic_load_explicit(
+                        &particle_hash_head[particle_hash(nx, ny, nz)], memory_order_relaxed);
+                    for (; item != -1; item = particle_hash_next[item]) {
+                        if (item < 0 || item >= job->hash_count) break;
+                        Particle *neighbor = job->hash_list[item];
+                        if (!neighbor || neighbor == particle ||
+                            neighbor->material != PARTICLE_MATERIAL_FLUID ||
+                            neighbor->cell_x != nx || neighbor->cell_y != ny || neighbor->cell_z != nz) {
+                            continue;
+                        }
+                        Vector3 separation = v_sub(particle->pos, neighbor->pos);
+                        float kernel = pbf_poly6(v_dot(separation, separation));
+                        float density = fmaxf(neighbor->pbf_density, PBF_REST_DENSITY * 0.1f);
+                        float scale = PBF_XSPH_VISCOSITY * PBF_PARTICLE_MASS * kernel / density;
+                        velocity_delta = v_add(velocity_delta,
+                                               v_mul(v_sub(neighbor->vel, particle->vel), scale));
+                    }
+                }
+            }
+        }
+        particle->pbf_delta = velocity_delta;
+    }
+}
+
+static void pbf_apply_viscosity_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    (void)user;
+    for (int i = start; i < end; ++i) {
+        Particle *particle = fluid_particles[i];
+        if (!particle) continue;
+        particle->vel = v_add(particle->vel, particle->pbf_delta);
+        particle->pbf_delta = (Vector3){ 0.0f, 0.0f, 0.0f };
+    }
+}
+
+static void apply_pbf_viscosity(Particle **hash_list, int hash_count) {
+    if (fluid_particle_count <= 0) return;
+    PbfJob job = { .hash_list = hash_list, .hash_count = hash_count };
+    pbd_parallel_for(0, fluid_particle_count, pbf_compute_viscosity_range, &job);
+    pbd_parallel_for(0, fluid_particle_count, pbf_apply_viscosity_range, NULL);
+}
+
 static inline void accumulate_particle_correction(Particle *p, Vector3 delta, float weight) {
     if (weight <= 0.0f) {
         return;
@@ -2147,7 +2483,8 @@ static void reset_particle_accumulators_range(int start, int end, int worker_id,
     (void)worker_id;
     (void)user;
     for (int i = start; i < end; ++i) {
-        Particle *p = sim_particles[i];
+        Particle *p = dynamic_particle_at(i);
+        if (!p) continue;
         atomic_store_explicit(&p->corr_sum_x, float_to_bits(0.0f), memory_order_relaxed);
         atomic_store_explicit(&p->corr_sum_y, float_to_bits(0.0f), memory_order_relaxed);
         atomic_store_explicit(&p->corr_sum_z, float_to_bits(0.0f), memory_order_relaxed);
@@ -2156,14 +2493,15 @@ static void reset_particle_accumulators_range(int start, int end, int worker_id,
 }
 
 static void reset_particle_accumulators(void) {
-    pbd_parallel_for(0, sim_particle_count, reset_particle_accumulators_range, NULL);
+    pbd_parallel_for(0, dynamic_particle_count(), reset_particle_accumulators_range, NULL);
 }
 
 static void apply_particle_accumulators_range(int start, int end, int worker_id, void *user) {
     (void)worker_id;
     (void)user;
     for (int i = start; i < end; ++i) {
-        Particle *p = sim_particles[i];
+        Particle *p = dynamic_particle_at(i);
+        if (!p) continue;
         float corr_weight = bits_to_float(atomic_load_explicit(&p->corr_weight_bits, memory_order_relaxed));
         if (corr_weight <= 0.0f) {
             atomic_store_explicit(&p->corr_sum_x, float_to_bits(0.0f), memory_order_relaxed);
@@ -2187,7 +2525,7 @@ static void apply_particle_accumulators_range(int start, int end, int worker_id,
 }
 
 static void apply_particle_accumulators(void) {
-    pbd_parallel_for(0, sim_particle_count, apply_particle_accumulators_range, NULL);
+    pbd_parallel_for(0, dynamic_particle_count(), apply_particle_accumulators_range, NULL);
 }
 
 static bool face_local_coords(const Vector3 origin,
@@ -2917,6 +3255,9 @@ static void table_remove(int x, int y, int z) {
 
 static void voxel_table_register(Voxel *v, int idx)
 {
+    if (!voxel_uses_spatial_hash(v)) {
+        return;
+    }
     int minx, maxx, miny, maxy, minz, maxz;
     voxel_compute_bounds(v, &minx, &maxx, &miny, &maxy, &minz, &maxz);
     v->min_gx = minx; v->max_gx = maxx;
@@ -2944,7 +3285,7 @@ static void voxel_table_register(Voxel *v, int idx)
 
 static void voxel_table_unregister(const Voxel *v)
 {
-    if (!v) {
+    if (!voxel_uses_spatial_hash(v)) {
         return;
     }
     int minx, maxx, miny, maxy, minz, maxz;
@@ -3122,7 +3463,7 @@ static bool remove_dynamic_voxels_in_region(int minx, int maxx,
     int i = 0;
     while (i < voxel_count) {
         Voxel *v = &voxels[i];
-        if (!v->simulate) {
+        if (!v->simulate || voxel_is_fluid(v)) {
             ++i;
             continue;
         }
@@ -3644,6 +3985,38 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     return idx;
 }
 
+static int add_fluid_cell(float px, float py, float pz, Color color) {
+    int index = addVoxel(px, py, pz, false, true, color, VOXEL_TYPE_FLUID);
+    if (index < 0) {
+        return -1;
+    }
+    Voxel *voxel = &voxels[index];
+    voxel->glueEligible = false;
+    voxel->simulate_dofs = false;
+    voxel->particle_radius = PBF_PARTICLE_RADIUS;
+    voxel->rest_edge = PBF_PARTICLE_SPACING;
+    voxel->rest_volume = PBF_PARTICLE_SPACING * PBF_PARTICLE_SPACING * PBF_PARTICLE_SPACING;
+    float offset = 0.5f * PBF_PARTICLE_SPACING;
+    float inv_mass = 1.0f / PBF_PARTICLE_MASS;
+    for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+        Particle *particle = voxel->particles[corner];
+        Vector3 position = {
+            px + (float)corner_signs[corner][0] * offset,
+            py + (float)corner_signs[corner][1] * offset,
+            pz + (float)corner_signs[corner][2] * offset
+        };
+        particle->pos = position;
+        particle->prev_pos = position;
+        particle->predicted_pos = position;
+        particle->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+        particle->radius = PBF_PARTICLE_RADIUS;
+        particle->inv_mass = inv_mass;
+        particle->base_inv_mass = inv_mass;
+        particle_set_material(particle, PARTICLE_MATERIAL_FLUID);
+    }
+    return index;
+}
+
 static void glue_dynamic_face_to_static(Voxel *dynamic, Voxel *stat, int face_dynamic, int face_static);
 
 static void glue_neighbor_faces_for_voxel(int voxel_idx) {
@@ -4118,7 +4491,8 @@ static void activate_static_worker(int start, int end, int worker_id, void *user
             break;
         }
         Voxel *dynamic = &voxels[i];
-        if (!dynamic->simulate || dynamic->type == 1 || dynamic->type == 2) {
+        if (!dynamic->simulate || dynamic->type == 1 || dynamic->type == 2 ||
+            voxel_is_fluid(dynamic)) {
             continue;
         }
         if (dynamic->isBullet) {
@@ -4483,6 +4857,9 @@ static void recycle_dead_voxels(void) {
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
         if (!voxel->simulate) {
+            continue;
+        }
+        if (voxel_is_fluid(voxel)) {
             continue;
         }
         voxel->lifeFrames++;
@@ -6729,6 +7106,19 @@ static void ResetGame(void) {
 
 }
 
+static bool fluid_occupies_current_grid_cell(int gx, int gy, int gz) {
+    for (int i = 0; i < voxel_count; ++i) {
+        const Voxel *voxel = &voxels[i];
+        if (!voxel_is_fluid(voxel)) continue;
+        if ((int)floorf(voxel->pos.x / VOXEL_SIZE) == gx &&
+            (int)floorf(voxel->pos.y / VOXEL_SIZE) == gy &&
+            (int)floorf(voxel->pos.z / VOXEL_SIZE) == gz) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void creative_place_voxels(int player_idx) {
     Player *p = &players[player_idx];
     Vector3 dir = player_forward(p);
@@ -6800,27 +7190,66 @@ static void creative_place_voxels(int player_idx) {
     if (maxy > max_y) maxy = max_y;
 
     int placed = 0;
-    Color c = creative_block_palette(creativeBlockColorIndex[player_idx]);
+    bool place_fluid = creativeMaterial[player_idx] == CREATIVE_MATERIAL_FLUID;
+    Color c = place_fluid
+        ? (Color){ 55, 155, 235, 220 }
+        : creative_block_palette(creativeBlockColorIndex[player_idx]);
     for (int x = minx; x <= maxx; ++x) {
         for (int y = miny; y <= maxy; ++y) {
             for (int z = minz; z <= maxz; ++z) {
-                if (occupied(x, y, z)) {
+                if (occupied(x, y, z) ||
+                    (place_fluid && fluid_occupies_current_grid_cell(x, y, z))) {
                     continue;
                 }
-                int idx_added = add_static_voxel_at_grid(x, y, z, c, 0);
+                int idx_added = -1;
+                if (place_fluid) {
+                    idx_added = add_fluid_cell(((float)x + 0.5f) * VOXEL_SIZE,
+                                               ((float)y + 0.5f) * VOXEL_SIZE,
+                                               ((float)z + 0.5f) * VOXEL_SIZE,
+                                               c);
+                } else {
+                    idx_added = add_static_voxel_at_grid(x, y, z, c, VOXEL_TYPE_SOLID);
+                }
                 if (idx_added >= 0) {
-                    mark_surface(idx_added);
-                    mark_surface_neighbors(voxels[idx_added].pos);
+                    if (!place_fluid) {
+                        mark_surface(idx_added);
+                        mark_surface_neighbors(voxels[idx_added].pos);
+                    }
                     placed++;
                 }
             }
         }
     }
-    if (placed > 0) {
+    if (placed > 0 && !place_fluid) {
         rebuild_all_voxel_surfaces();
         init_static_hash();
         meshDirty = true;
     }
+}
+
+static bool creative_remove_fluid_region(int minx, int maxx,
+                                         int miny, int maxy,
+                                         int minz, int maxz) {
+    bool removed = false;
+    int index = 0;
+    while (index < voxel_count) {
+        Voxel *voxel = &voxels[index];
+        if (!voxel_is_fluid(voxel)) {
+            ++index;
+            continue;
+        }
+        int gx = (int)floorf(voxel->pos.x / VOXEL_SIZE);
+        int gy = (int)floorf(voxel->pos.y / VOXEL_SIZE);
+        int gz = (int)floorf(voxel->pos.z / VOXEL_SIZE);
+        if (gx >= minx && gx <= maxx && gy >= miny && gy <= maxy &&
+            gz >= minz && gz <= maxz) {
+            remove_voxel_index(index);
+            removed = true;
+            continue;
+        }
+        ++index;
+    }
+    return removed;
 }
 
 static void creative_remove_voxels(int player_idx) {
@@ -6828,6 +7257,19 @@ static void creative_remove_voxels(int player_idx) {
     Vector3 dir = player_forward(p);
     Ray ray = { p->pos, dir };
     int hit_id = first_voxel_hit(ray, CREATIVE_RAY_RANGE, -1);
+    if (creativeMaterial[player_idx] == CREATIVE_MATERIAL_FLUID) {
+        Vector3 target = (hit_id >= 0 && hit_id < voxel_count)
+            ? voxels[hit_id].pos : v_add(p->pos, v_mul(dir, 4.0f));
+        int brush = clampi(creativeBrushSpan[player_idx], CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
+        int half = brush / 2;
+        int gx = (int)floorf(target.x / VOXEL_SIZE);
+        int gy = (int)floorf(target.y / VOXEL_SIZE);
+        int gz = (int)floorf(target.z / VOXEL_SIZE);
+        creative_remove_fluid_region(gx - half, gx - half + brush - 1,
+                                     gy - half, gy - half + brush - 1,
+                                     gz - half, gz - half + brush - 1);
+        return;
+    }
     if (hit_id < 0 || hit_id >= voxel_count) {
         return;
     }
@@ -6957,6 +7399,10 @@ static void update_creative_player_keyboard(int player_idx, float dt) {
         if (IsKeyPressed(KEY_TAB)) {
             creativePickupType[player_idx] = (creativePickupType[player_idx] + 1) % 4;
         }
+        if (IsKeyPressed(KEY_C)) {
+            creativeMaterial[player_idx] = (creativeMaterial[player_idx] == CREATIVE_MATERIAL_SOLID)
+                ? CREATIVE_MATERIAL_FLUID : CREATIVE_MATERIAL_SOLID;
+        }
         if (IsKeyPressed(KEY_V)) {
             creativeBlockColorIndex[player_idx]++;
         }
@@ -7001,6 +7447,10 @@ static void update_creative_player_keyboard(int player_idx, float dt) {
         }
         if (IsKeyPressed(KEY_KP_MULTIPLY)) {
             creativePickupType[player_idx] = (creativePickupType[player_idx] + 1) % 4;
+        }
+        if (IsKeyPressed(KEY_KP_3)) {
+            creativeMaterial[player_idx] = (creativeMaterial[player_idx] == CREATIVE_MATERIAL_SOLID)
+                ? CREATIVE_MATERIAL_FLUID : CREATIVE_MATERIAL_SOLID;
         }
         if (IsKeyPressed(KEY_KP_1)) {
             creativeBlockColorIndex[player_idx]--;
@@ -7148,6 +7598,10 @@ static void update_creative_player_gamepad(int player_idx, float dt) {
     if (IsGamepadButtonPressed(player_idx, GAMEPAD_BUTTON_RIGHT_FACE_DOWN)) {
         creativePickupType[player_idx] = (creativePickupType[player_idx] + 1) % 4;
     }
+    if (IsGamepadButtonPressed(player_idx, GAMEPAD_BUTTON_LEFT_THUMB)) {
+        creativeMaterial[player_idx] = (creativeMaterial[player_idx] == CREATIVE_MATERIAL_SOLID)
+            ? CREATIVE_MATERIAL_FLUID : CREATIVE_MATERIAL_SOLID;
+    }
     if (IsGamepadButtonPressed(player_idx, GAMEPAD_BUTTON_RIGHT_TRIGGER_2)) {
         creative_place_voxels(player_idx);
     }
@@ -7219,6 +7673,7 @@ static void draw_creative_help_overlay(int player_idx, int view_w, int view_h) {
         lines[count++] = "Fast Fly: Hold RT";
         lines[count++] = "Brush: D-pad Left/Right";
         lines[count++] = "Color: D-pad Up/Down";
+        lines[count++] = "Material: L3";
         lines[count++] = "Pickup Type: A";
         lines[count++] = "Place Voxels: RT";
         lines[count++] = "Remove Voxels: LT";
@@ -7234,6 +7689,7 @@ static void draw_creative_help_overlay(int player_idx, int view_w, int view_h) {
         lines[count++] = "Fast Fly: Left Shift";
         lines[count++] = "Brush: [ ]";
         lines[count++] = "Color: V/B";
+        lines[count++] = "Material: C";
         lines[count++] = "Pickup Type: Tab";
         lines[count++] = "Place Voxels: Left Ctrl";
         lines[count++] = "Remove Voxels: Left Alt";
@@ -7249,6 +7705,7 @@ static void draw_creative_help_overlay(int player_idx, int view_w, int view_h) {
         lines[count++] = "Fast Fly: Left Shift";
         lines[count++] = "Brush: KP -/+";
         lines[count++] = "Color: KP 1/2";
+        lines[count++] = "Material: KP 3";
         lines[count++] = "Pickup Type: KP *";
         lines[count++] = "Place Voxels: Right Ctrl";
         lines[count++] = "Remove Voxels: Right Shift";
@@ -7522,7 +7979,7 @@ static void rebuild_voxel_hash(void) {
     table_cache_invalidate();
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
-        if (!v->simulate) continue; // Skip static voxels
+        if (!v->simulate || !voxel_uses_spatial_hash(v)) continue; // Skip static/fluid ownership voxels
         
         v->gx = (int)floorf(v->pos.x / VOXEL_SIZE);
         v->gy = (int)floorf(v->pos.y / VOXEL_SIZE);
@@ -7671,7 +8128,7 @@ static void update_projectiles(float dt)
     int i = 0;
     while (i < voxel_count) {
         Voxel *v = &voxels[i];
-        if (!v->simulate || (v->type == 0 && !v->isBullet)) {
+        if (!v->simulate || voxel_is_fluid(v) || (v->type == 0 && !v->isBullet)) {
             ++i;
             continue;
         }
@@ -7937,7 +8394,7 @@ static void handle_pbd_projectile_hits(void)
     int i = 0;
     while (i < voxel_count) {
         Voxel *v = &voxels[i];
-        if (!v->simulate) {
+        if (!v->simulate || voxel_is_fluid(v)) {
             ++i;
             continue;
         }
@@ -8372,7 +8829,8 @@ static void integrate_particles_range(int start, int end, int worker_id, void *u
     const float dt_sq = job->dt_sq;
 
     for (int i = start; i < end; ++i) {
-        Particle *p = sim_particles[i];
+        Particle *p = dynamic_particle_at(i);
+        if (!p) continue;
 
         p->prev_pos = p->pos;
         p->predicted_pos = p->pos;
@@ -8394,7 +8852,7 @@ static void integrate_particles(float dt) {
     const float dt_sq = dt * dt;
 
     IntegrateParticlesJob job = { .gravity = gravity, .dt = dt, .dt_sq = dt_sq };
-    pbd_parallel_for(0, sim_particle_count, integrate_particles_range, &job);
+    pbd_parallel_for(0, dynamic_particle_count(), integrate_particles_range, &job);
 
     int stamp = ++tether_apply_stamp;
     if (stamp == 0) {
@@ -8781,8 +9239,10 @@ static void gather_particle_scene_collisions_range(int start, int end, int worke
         }
 
         Vector3 pos = p->predicted_pos;
+        float particle_radius = p->radius;
+        float particle_radius_sq = particle_radius * particle_radius;
 
-        if (pos.y < voxel_radius) {
+        if (pos.y < particle_radius) {
             //pos.y = voxel_radius;
         }
 
@@ -8810,9 +9270,9 @@ static void gather_particle_scene_collisions_range(int start, int end, int worke
 
             Vector3 delta = v_sub(pos, nearest);
             float dist_sq = v_dot(delta, delta);
-            if (dist_sq < radius_sq) {
+            if (dist_sq < particle_radius_sq) {
                 float dist = sqrtf(fmaxf(dist_sq, eps));
-                float penetration = voxel_radius - dist;
+                float penetration = particle_radius - dist;
                 Vector3 normal = (dist > eps)
                     ? v_mul(delta, -1.0f / dist)
                     : (Vector3){ 0.0f, 1.0f, 0.0f };
@@ -8870,6 +9330,10 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
                             continue;
                         }
                         if (pb == pa) {
+                            continue;
+                        }
+                        if (pa->material == PARTICLE_MATERIAL_FLUID &&
+                            pb->material == PARTICLE_MATERIAL_FLUID) {
                             continue;
                         }
                         if (idx <= i) {
@@ -9635,6 +10099,11 @@ static void update_dynamic_activation_beliefs_range(int start, int end, int work
     for (int i = start; i < end; ++i) {
         Voxel *voxel = &voxels[i];
         bool tethered = (tetherTag[i] > 0);
+        if (voxel_is_fluid(voxel)) {
+            voxel->activationBelief = 0.0f;
+            voxel->activationCooldownFrames = 0;
+            continue;
+        }
         if (tethered) {
             voxel->activationBelief = 0.0f;
             voxel->activationCooldownFrames = 0;
@@ -9908,6 +10377,31 @@ static bool push_particle_out_of_static(const Voxel *static_voxel, Particle *par
                                         v_mul(normal, penetration));
         return true;
     } else {
+        Vector3 previous = particle->prev_pos;
+        if (previous.y > bounds.maxy + eps) {
+            particle->predicted_pos.y = bounds.maxy + radius;
+            return true;
+        }
+        if (previous.y < bounds.miny - eps) {
+            particle->predicted_pos.y = bounds.miny - radius;
+            return true;
+        }
+        if (previous.x > bounds.maxx + eps) {
+            particle->predicted_pos.x = bounds.maxx + radius;
+            return true;
+        }
+        if (previous.x < bounds.minx - eps) {
+            particle->predicted_pos.x = bounds.minx - radius;
+            return true;
+        }
+        if (previous.z > bounds.maxz + eps) {
+            particle->predicted_pos.z = bounds.maxz + radius;
+            return true;
+        }
+        if (previous.z < bounds.minz - eps) {
+            particle->predicted_pos.z = bounds.minz - radius;
+            return true;
+        }
         float topGap = bounds.maxy - pos.y;
         float bottomGap = pos.y - bounds.miny;
         const float verticalBias = VOXEL_SIZE * 0.25f;
@@ -10091,81 +10585,80 @@ typedef struct {
     float half_player;
 } StaticCollisionJob;
 
+static void solve_static_collision_particle(Particle *p, float half_player) {
+    if (!p || p->inv_mass == 0.0f) return;
+    const float eps = 1e-6f;
+    float particle_radius = p->radius;
+    float terrain_limit = FLOOR_SIZE - particle_radius;
+        
+    Vector3 pos = p->predicted_pos;
+    float floor_offset = 0.5f * VOXEL_SIZE;
+    float floor_limit = fmaxf(0.0f, floor_offset - particle_radius);
+    if (pos.y < floor_limit) {
+        pos.y = floor_limit;
+    }
+    pos.x = clampf(pos.x, -terrain_limit, terrain_limit);
+    pos.z = clampf(pos.z, -terrain_limit, terrain_limit);
+
+    for (int player_idx = 0; player_idx < activePlayers; ++player_idx) {
+        Player *pl = &players[player_idx];
+        if (pl->respawn_timer > 0.0f) continue;
+        Vector3 box_min = {
+            pl->pos.x - half_player, pl->pos.y - half_player, pl->pos.z - half_player
+        };
+        Vector3 box_max = {
+            pl->pos.x + half_player, pl->pos.y + half_player, pl->pos.z + half_player
+        };
+        Vector3 nearest = {
+            clampf(pos.x, box_min.x, box_max.x),
+            clampf(pos.y, box_min.y, box_max.y),
+            clampf(pos.z, box_min.z, box_max.z)
+        };
+        Vector3 delta = v_sub(pos, nearest);
+        float dist_sq = v_dot(delta, delta);
+        float radius_sq = particle_radius * particle_radius;
+        if (dist_sq < radius_sq) {
+            float dist = sqrtf(fmaxf(dist_sq, eps));
+            float penetration = particle_radius - dist;
+            Vector3 normal = (dist > eps) ? v_mul(delta, 1.0f / dist) : (Vector3){ 0.0f, 1.0f, 0.0f };
+            pos = v_add(pos, v_mul(normal, penetration));
+        }
+    }
+    p->predicted_pos = pos;
+
+    int static_neighbors[MAX_STATIC_COLLISION_NEIGHBORS];
+    int static_count = gather_static_voxels_near_point(
+        p->predicted_pos, particle_radius,
+        static_neighbors, MAX_STATIC_COLLISION_NEIGHBORS);
+    for (int s = 0; s < static_count; ++s) {
+        int static_idx = static_neighbors[s];
+        if (static_idx < 0 || static_idx >= voxel_count) continue;
+        const Voxel *static_voxel = &voxels[static_idx];
+        if (static_voxel->simulate) continue;
+        push_particle_out_of_static(static_voxel, p, particle_radius);
+    }
+}
+
 static void solve_static_collisions_range(int start, int end, int worker_id, void *user) {
     (void)worker_id;
     StaticCollisionJob *job = (StaticCollisionJob *)user;
-    float half_player = job->half_player;
-    const float eps = 1e-6f;
-    const float static_collision_radius = 0.25f * VOXEL_SIZE;
-
     for (int i = start; i < end; ++i) {
-        Particle *p = sim_particles[i];
-        if (!p || p->inv_mass == 0.0f) continue;
-
-        // p->radius holds the voxel radius (0.25)
-        float voxel_radius = p->radius;
-        float terrain_limit = FLOOR_SIZE - voxel_radius;
-        
-        // Floor collision
-        Vector3 pos = p->predicted_pos;
-        float floor_offset = 0.5f * VOXEL_SIZE;
-        float floor_limit = fmaxf(0.0f, floor_offset - voxel_radius);
-        if (pos.y < floor_limit) {
-            pos.y = floor_limit;
-        }
-        pos.x = clampf(pos.x, -terrain_limit, terrain_limit);
-        pos.z = clampf(pos.z, -terrain_limit, terrain_limit);
-
-        // Player collision
-        for (int player_idx = 0; player_idx < activePlayers; ++player_idx) {
-            Player *pl = &players[player_idx];
-            if (pl->respawn_timer > 0.0f) {
-                continue;
-            }
-            Vector3 box_min = {
-                pl->pos.x - half_player,
-                pl->pos.y - half_player,
-                pl->pos.z - half_player
-            };
-            Vector3 box_max = {
-                pl->pos.x + half_player,
-                pl->pos.y + half_player,
-                pl->pos.z + half_player
-            };
-            Vector3 nearest = {
-                clampf(pos.x, box_min.x, box_max.x),
-                clampf(pos.y, box_min.y, box_max.y),
-                clampf(pos.z, box_min.z, box_max.z)
-            };
-            Vector3 delta = v_sub(pos, nearest);
-            float dist_sq = v_dot(delta, delta);
-            float radius_sq = voxel_radius * voxel_radius;
-            if (dist_sq < radius_sq) {
-                float dist = sqrtf(fmaxf(dist_sq, eps));
-                float penetration = voxel_radius - dist;
-                Vector3 normal = (dist > eps) ? v_mul(delta, 1.0f / dist) : (Vector3){ 0.0f, 1.0f, 0.0f };
-                pos = v_add(pos, v_mul(normal, penetration));
-            }
-        }
-        p->predicted_pos = pos;
-
-        // Static voxel collision
-        int static_neighbors[MAX_STATIC_COLLISION_NEIGHBORS];
-        int static_count = gather_static_voxels_near_point(
-            p->predicted_pos, voxel_radius,
-            static_neighbors, MAX_STATIC_COLLISION_NEIGHBORS);
-        for (int s = 0; s < static_count; ++s) {
-            int static_idx = static_neighbors[s];
-            if (static_idx < 0 || static_idx >= voxel_count) {
-                continue;
-            }
-            const Voxel *static_voxel = &voxels[static_idx];
-            if (static_voxel->simulate) {
-                continue;
-            }
-            push_particle_out_of_static(static_voxel, p, static_collision_radius);
-        }
+        solve_static_collision_particle(sim_particles[i], job->half_player);
     }
+}
+
+static void solve_fluid_static_collisions_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    StaticCollisionJob *job = (StaticCollisionJob *)user;
+    for (int i = start; i < end; ++i) {
+        solve_static_collision_particle(fluid_particles[i], job->half_player);
+    }
+}
+
+static void solve_fluid_static_collisions(void) {
+    if (fluid_particle_count <= 0) return;
+    StaticCollisionJob job = { .half_player = PLAYER_SIZE * 0.5f };
+    pbd_parallel_for(0, fluid_particle_count, solve_fluid_static_collisions_range, &job);
 }
 
 // Resolve collisions against the scene (floor, static voxels, players).
@@ -10187,7 +10680,8 @@ static void update_particle_velocity_range(int start, int end, int worker_id, vo
     (void)worker_id;
     VelocityUpdateJob *job = (VelocityUpdateJob *)user;
     for (int i = start; i < end; ++i) {
-        Particle *p = sim_particles[i];
+        Particle *p = dynamic_particle_at(i);
+        if (!p) continue;
         Vector3 new_pos = p->predicted_pos;
         Vector3 delta = v_sub(new_pos, p->prev_pos);
 
@@ -10206,7 +10700,8 @@ static void update_voxel_velocity_range(int start, int end, int worker_id, void 
     VelocityUpdateJob *job = (VelocityUpdateJob *)user;
     for (int i = start; i < end; ++i) {
         Voxel *voxel = &voxels[i];
-        if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
+        if (!voxel->simulate || voxel->isBullet ||
+            (voxel->type != VOXEL_TYPE_SOLID && !voxel_is_fluid(voxel))) {
             continue;
         }
         bool skipVelocity = (voxel->skipCollisionVelocityFrames > 0);
@@ -10233,7 +10728,8 @@ static void update_voxel_velocity_range(int start, int end, int worker_id, void 
 
 static void update_particle_velocities(float dt) {
     VelocityUpdateJob job = { .inv_dt = (dt > 0.0f) ? 1.0f / dt : 0.0f };
-    pbd_parallel_for(0, sim_particle_count, update_particle_velocity_range, &job);
+    pbd_parallel_for(0, dynamic_particle_count(), update_particle_velocity_range, &job);
+    apply_pbf_viscosity(particle_snapshot, dynamic_particle_count());
     pbd_parallel_for(0, voxel_count, update_voxel_velocity_range, &job);
 }
 
@@ -10408,11 +10904,11 @@ static bool initialize_physics_backend(void) {
 static void copy_particle_snapshot_range(int start, int end, int worker_id, void *user) {
     (void)worker_id;
     (void)user;
-    for (int i = start; i < end; ++i) particle_snapshot[i] = sim_particles[i];
+    for (int i = start; i < end; ++i) particle_snapshot[i] = dynamic_particle_at(i);
 }
 
 static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
-    if (sim_particle_count <= 0) {
+    if (dynamic_particle_count() <= 0) {
         return;
     }
     const int constraint_iterations = PBD_CONSTRAINT_ITERS;
@@ -10427,7 +10923,7 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
         integrate_particles(sub_dt);
 
         for (int it = 0; it < 1; ++it) {
-            int snapshot_count = sim_particle_count;
+            int snapshot_count = dynamic_particle_count();
             if (snapshot_count > MAX_PARTICLES) {
                 snapshot_count = MAX_PARTICLES;
             }
@@ -10436,6 +10932,7 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
             build_particle_hash(particle_snapshot, snapshot_count);
             gather_particle_collisions(sub_dt, particle_snapshot, snapshot_count);
             apply_particle_accumulators();
+            solve_pbf_density_constraints(particle_snapshot, snapshot_count);
         }
 
         for (int it = 0; it < constraint_iterations; ++it) {
@@ -10489,7 +10986,7 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
 }
 
 void simulate_voxel_pbd(float dt) {
-    if (sim_particle_count <= 0) return;
+    if (dynamic_particle_count() <= 0) return;
     double started = GetTime();
     const float sub_dt = dt / (float)PBD_SUBSTEPS;
     if (physicsBackend.active == PHYSICS_BACKEND_GPU_GL43 && gpuPhysics.ready) {
@@ -11846,7 +12343,7 @@ static void draw_particle_debug(void)
 
     for (int i = 0; i < voxel_count; ++i) {
         const Voxel *voxel = &voxels[i];
-        if (!voxel->simulate) continue;
+        if (!voxel->simulate || voxel_is_fluid(voxel)) continue;
         float baseRadius = voxel_particle_radius(voxel);
         float markerRadius = fmaxf(baseRadius * PARTICLE_DEBUG_MARKER_RADIUS, 0.02f);
         for (int j = 0; j < 8; ++j) {
@@ -12263,10 +12760,15 @@ static Mesh voxelMesh = { 0 };
 static Material instancedMaterial = { 0 };
 static Shader instancedShader = { 0 };
 static Shader orbShader = { 0 };
+static Shader fluidShader = { 0 };
 static Mesh sphereMesh = { 0 };
+static Material fluidMaterial = { 0 };
 static Matrix *instanceTransforms = NULL;
 static int instanceTransformsCount = 0;
 static int instanceTransformsCapacity = 0;
+static Matrix *fluidInstanceTransforms = NULL;
+static int fluidInstanceCapacity = 0;
+static int fluidSurfaceModeLocation = -1;
 static bool instancingInitialized = false;
 
 static void InitInstancing(void) {
@@ -12275,6 +12777,7 @@ static void InitInstancing(void) {
     instancedShader = LoadShader("shaders/instanced_voxel_hack.vert", "shaders/instanced_voxel_hack.frag");
     
     orbShader = LoadShader("shaders/orb.vert", "shaders/orb.frag");
+    fluidShader = LoadShader("shaders/fluid_instanced.vert", "shaders/fluid_instanced.frag");
     sphereMesh = GenMeshSphere(VOXEL_SIZE * 0.25f, 16, 16);
 
     // Get shader locations
@@ -12286,16 +12789,67 @@ static void InitInstancing(void) {
 
     instancedMaterial = LoadMaterialDefault();
     instancedMaterial.shader = instancedShader;
+    fluidMaterial = LoadMaterialDefault();
+    fluidMaterial.shader = fluidShader;
+    fluidShader.locs[SHADER_LOC_VECTOR_VIEW] = GetShaderLocation(fluidShader, "viewPos");
+    fluidShader.locs[SHADER_LOC_MATRIX_VIEW] = GetShaderLocation(fluidShader, "matView");
+    fluidShader.locs[SHADER_LOC_MATRIX_PROJECTION] = GetShaderLocation(fluidShader, "matProjection");
+    fluidSurfaceModeLocation = GetShaderLocation(fluidShader, "uSurfaceMode");
     
     instanceTransformsCapacity = MAX_VOXELS;
     instanceTransforms = (Matrix*)RL_MALLOC(instanceTransformsCapacity * sizeof(Matrix));
     instancingInitialized = true;
 }
 
+static bool ensure_fluid_instance_capacity(int needed) {
+    if (needed <= fluidInstanceCapacity) return true;
+    int capacity = fluidInstanceCapacity > 0 ? fluidInstanceCapacity : 256;
+    while (capacity < needed) {
+        if (capacity > MAX_PARTICLES / 2) {
+            capacity = MAX_PARTICLES;
+            break;
+        }
+        capacity *= 2;
+    }
+    Matrix *next = (Matrix *)RL_REALLOC(fluidInstanceTransforms,
+                                        (size_t)capacity * sizeof(Matrix));
+    if (!next) return false;
+    fluidInstanceTransforms = next;
+    fluidInstanceCapacity = capacity;
+    return true;
+}
+
+static void draw_fluid_particles(Camera3D camera) {
+    if (fluid_particle_count <= 0 || !ensure_fluid_instance_capacity(fluid_particle_count)) {
+        return;
+    }
+    float desired_radius = (fluidRenderMode == FLUID_RENDER_SURFACE)
+        ? PBF_SURFACE_SPLAT_RADIUS : PBF_PARTICLE_RADIUS;
+    float mesh_radius = VOXEL_SIZE * 0.25f;
+    float scale = desired_radius / mesh_radius;
+    int count = 0;
+    for (int i = 0; i < fluid_particle_count; ++i) {
+        const Particle *particle = fluid_particles[i];
+        if (!particle || !particle->active || !v_isfinite(particle->pos)) continue;
+        Matrix transform = MatrixIdentity();
+        transform.m0 = scale;
+        transform.m5 = scale;
+        transform.m10 = scale;
+        transform.m12 = particle->pos.x;
+        transform.m13 = particle->pos.y;
+        transform.m14 = particle->pos.z;
+        fluidInstanceTransforms[count++] = transform;
+    }
+    if (count <= 0) return;
+    int surface_mode = (fluidRenderMode == FLUID_RENDER_SURFACE) ? 1 : 0;
+    SetShaderValue(fluidShader, fluidSurfaceModeLocation, &surface_mode, SHADER_UNIFORM_INT);
+    SetShaderValue(fluidShader, fluidShader.locs[SHADER_LOC_VECTOR_VIEW],
+                   &camera.position, SHADER_UNIFORM_VEC3);
+    DrawMeshInstanced(sphereMesh, fluidMaterial, fluidInstanceTransforms, count);
+}
+
 // Draw all voxels via greedy mesh instead of per-voxel raycasting
 static void DrawVoxels(Camera3D cam) {
-    (void)cam;
-
     if (!instancingInitialized) {
         InitInstancing();
     }
@@ -12328,7 +12882,7 @@ static void DrawVoxels(Camera3D cam) {
     instanceTransformsCount = 0;
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
-        if (!v->simulate) {
+        if (!v->simulate || voxel_is_fluid(v)) {
             continue;
         }
         
@@ -12410,6 +12964,8 @@ static void DrawVoxels(Camera3D cam) {
     if (instanceTransformsCount > 0) {
         DrawMeshInstanced(voxelMesh, instancedMaterial, instanceTransforms, instanceTransformsCount);
     }
+
+    draw_fluid_particles(cam);
 
     // Add glow shells for type-0 bullets so they read as blue orbs.
     for (int i = 0; i < voxel_count; i++) {
@@ -12955,7 +13511,7 @@ static int find_nearest_dynamic_voxel(const Vector3 *pos, float max_dist_sq, flo
     float minDistSq = max_dist_sq;
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *v = &voxels[i];
-        if (!v->simulate || v->isBullet) {
+        if (!v->simulate || v->isBullet || voxel_is_fluid(v)) {
             continue;
         }
         float dx = v->pos.x - pos->x;
@@ -13272,10 +13828,18 @@ static void render_gameplay_view(RenderTexture2D *screens,
             get_viewport(i, activePlayers, &view_x, &view_y, &view_w, &view_h);
             DrawRectangle(0, 0, view_w, HUD_BAR_HEIGHT, Fade(BLACK, 0.5f));
             if (creative_mode) {
-                Color c = creative_block_palette(creativeBlockColorIndex[i]);
-                const char *label = TextFormat("P%d CREATIVE | Brush %d | Pickup %s | Color %d",
+                Color c = (creativeMaterial[i] == CREATIVE_MATERIAL_FLUID)
+                    ? (Color){ 55, 155, 235, 255 }
+                    : creative_block_palette(creativeBlockColorIndex[i]);
+                const char *material_label = (creativeMaterial[i] == CREATIVE_MATERIAL_FLUID)
+                    ? "FLUID" : "SOLID";
+                const char *render_label = (fluidRenderMode == FLUID_RENDER_SURFACE)
+                    ? "SURFACE" : "PARTICLES";
+                const char *label = TextFormat("P%d CREATIVE | Brush %d | %s | Fluid %s | Pickup %s | Color %d",
                                                i + 1,
                                                creativeBrushSpan[i],
+                                               material_label,
+                                               render_label,
                                                pickup_type_label((PickupType)creativePickupType[i]),
                                                (creativeBlockColorIndex[i] % 6 + 6) % 6 + 1);
                 DrawText(label, HUD_PADDING_X, HUD_PADDING_Y, HUD_FONT_SIZE, WHITE);
@@ -13514,6 +14078,10 @@ int main(int argc, char **argv) {
 
     // main loop
     while (!WindowShouldClose()) {
+        if (IsKeyPressed(KEY_F5)) {
+            fluidRenderMode = (fluidRenderMode == FLUID_RENDER_SURFACE)
+                ? FLUID_RENDER_PARTICLES : FLUID_RENDER_SURFACE;
+        }
         if (IsKeyPressed(KEY_F2)) {
             //SetLoggingEnabled(!logsEnabled);
         }

@@ -10,6 +10,8 @@
 #define DEBUG_TEST_TAG 63
 #define DEBUG_SUPPORT_TAG 62
 #define DEBUG_THROW_TAG 61
+#define DEBUG_CONTAINER_TAG 60
+#define DEBUG_FLUID_TAG 59
 #define DEBUG_EXPECTED_VOXELS 18
 #define DEBUG_MIN_STEPS 60
 #define DEBUG_DEFAULT_STEPS 60
@@ -19,6 +21,7 @@
 typedef struct DebugRunConfig {
     bool requested;
     bool show_window;
+    bool steps_explicit;
     bool capture_steps_explicit;
     int steps;
     int capture_steps[DEBUG_MAX_CAPTURE_STEPS];
@@ -45,6 +48,12 @@ typedef struct DebugSample {
     uint64_t static_hash_generation;
     uint64_t gpu_static_uploaded_generation;
     double physics_step_ms;
+    int fluid_particles;
+    int invalid_fluid_particles;
+    float fluid_centroid_y;
+    float mean_density_ratio;
+    float max_density_ratio;
+    float mean_fluid_speed;
 } DebugSample;
 
 typedef struct DebugTrackedCell {
@@ -79,6 +88,18 @@ typedef struct DebugRunState {
     int gpu_sim_id_mismatches;
     int gpu_tagged_corners_missing_from_sim_ids;
     int gpu_zero_mass_corners;
+    bool pbf_container;
+    int expected_fluid_particles;
+    int expected_container_voxels;
+    float initial_fluid_centroid_y;
+    float fluid_drop_at_step_120;
+    float container_min_x;
+    float container_max_x;
+    float container_min_z;
+    float container_max_z;
+    float container_floor_top;
+    int escaped_fluid_particles;
+    int below_container_particles;
     DebugTrackedCell tracked_cells[DEBUG_MAX_TRACKED_CELLS];
     int tracked_cell_count;
     DebugSample samples[DEBUG_MAX_SAMPLES];
@@ -97,6 +118,8 @@ typedef struct DebugScenarioDefinition {
     const char *name;
     const char *description;
     DebugScenarioSetupFn setup;
+    int default_steps;
+    int minimum_steps;
 } DebugScenarioDefinition;
 
 static DebugRunConfig debugRunConfig = {
@@ -108,13 +131,15 @@ static bool debug_setup_activation_floating(DebugRunState *state);
 static bool debug_setup_sleep_wake_floating(DebugRunState *state);
 static bool debug_setup_tether_throw_floating(DebugRunState *state);
 static bool debug_setup_overhang_impact(DebugRunState *state);
+static bool debug_setup_pbf_container(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
-    { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall },
-    { "activation-floating", "Static cluster activated while unsupported", debug_setup_activation_floating },
-    { "sleep-wake-floating", "Supported cluster sleeps, loses support, then activates", debug_setup_sleep_wake_floating },
-    { "tether-throw-floating", "Released tether voxel wakes an unsupported sleeping cluster", debug_setup_tether_throw_floating },
-    { "overhang-impact", "Falling dynamic voxel activates and bends a supported static overhang", debug_setup_overhang_impact }
+    { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall, 60, 60 },
+    { "activation-floating", "Static cluster activated while unsupported", debug_setup_activation_floating, 60, 60 },
+    { "sleep-wake-floating", "Supported cluster sleeps, loses support, then activates", debug_setup_sleep_wake_floating, 60, 60 },
+    { "tether-throw-floating", "Released tether voxel wakes an unsupported sleeping cluster", debug_setup_tether_throw_floating, 60, 60 },
+    { "overhang-impact", "Falling dynamic voxel activates and bends a supported static overhang", debug_setup_overhang_impact, 60, 60 },
+    { "pbf-container", "High-viscosity PBF falls into an immutable container", debug_setup_pbf_container, 240, 120 }
 };
 
 static const int debugScenarioCount = (int)(sizeof(debugScenarios) / sizeof(debugScenarios[0]));
@@ -247,6 +272,7 @@ static int debug_parse_argument(int argc, char **argv, int *index)
     if (value != (const char *)(uintptr_t)1) {
         if (!debug_parse_integer(value, DEBUG_MIN_STEPS, 10000,
                                  &debugRunConfig.steps, "--debug-steps")) return -1;
+        debugRunConfig.steps_explicit = true;
         return 1;
     }
 
@@ -528,6 +554,35 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
         sample.max_y = 0.0f;
     }
     sample.centroid_drop = initial_centroid_y - sample.centroid_y;
+
+    float fluid_y_sum = 0.0f;
+    float density_ratio_sum = 0.0f;
+    float speed_sum = 0.0f;
+    for (int i = 0; i < fluid_particle_count; ++i) {
+        Particle *particle = fluid_particles[i];
+        ++sample.fluid_particles;
+        if (!particle || !particle->active || particle->material != PARTICLE_MATERIAL_FLUID ||
+            particle->fluid_index != i || !v_isfinite(particle->pos) ||
+            !v_isfinite(particle->vel) || !isfinite(particle->pbf_density)) {
+            ++sample.invalid_fluid_particles;
+            continue;
+        }
+        float density_ratio = particle->pbf_density / PBF_REST_DENSITY;
+        float speed = v_length(particle->vel);
+        fluid_y_sum += particle->pos.y;
+        density_ratio_sum += density_ratio;
+        speed_sum += speed;
+        if (density_ratio > sample.max_density_ratio) {
+            sample.max_density_ratio = density_ratio;
+        }
+    }
+    int valid_fluid = sample.fluid_particles - sample.invalid_fluid_particles;
+    if (valid_fluid > 0) {
+        float inverse_count = 1.0f / (float)valid_fluid;
+        sample.fluid_centroid_y = fluid_y_sum * inverse_count;
+        sample.mean_density_ratio = density_ratio_sum * inverse_count;
+        sample.mean_fluid_speed = speed_sum * inverse_count;
+    }
     sample.physics_step_ms = physicsBackend.last_step_ms;
     return sample;
 }
@@ -546,6 +601,7 @@ static void debug_draw_overlay(const DebugRunState *state, const DebugSample *sa
     int box_height = 180;
     if (state->gpu_readback_performed) box_height += 30;
     if (state->overhang_impact) box_height += 30;
+    if (state->pbf_container) box_height += 52;
     DrawRectangle(18, 18, 650, box_height, Fade(BLACK, 0.78f));
     DrawText(TextFormat("SCENARIO %s", debugRunConfig.scenario), 34, 32, 22, RAYWHITE);
     DrawText(TextFormat("BACKEND requested=%s active=%s",
@@ -586,6 +642,17 @@ static void debug_draw_overlay(const DebugRunState *state, const DebugSample *sa
                             state->overhang_relative_deflection_at_step_30,
                             state->overhang_anchor_observed ? "yes" : "no"),
                  34, y, 17, result_color);
+    }
+    if (state->pbf_container) {
+        int y = 192;
+        DrawText(TextFormat("PBF particles=%d invalid=%d centroidY=%.3f meanSpeed=%.3f",
+                            sample->fluid_particles, sample->invalid_fluid_particles,
+                            sample->fluid_centroid_y, sample->mean_fluid_speed),
+                 34, y, 17, result_color);
+        DrawText(TextFormat("PBF density/rest mean=%.3f max=%.3f render=%s",
+                            sample->mean_density_ratio, sample->max_density_ratio,
+                            fluidRenderMode == FLUID_RENDER_SURFACE ? "surface" : "particles"),
+                 34, y + 26, 17, result_color);
     }
 }
 
@@ -638,6 +705,20 @@ static bool debug_capture(DebugRunState *state, const char *file_name,
     return true;
 }
 
+static void debug_capture_fluid_pair(DebugRunState *state, int step, const char *phase)
+{
+    if (!state) return;
+    FluidRenderMode saved_mode = fluidRenderMode;
+    char file_name[96];
+    fluidRenderMode = FLUID_RENDER_PARTICLES;
+    snprintf(file_name, sizeof(file_name), "step-%04d-particles.png", step);
+    debug_capture(state, file_name, phase, step);
+    fluidRenderMode = FLUID_RENDER_SURFACE;
+    snprintf(file_name, sizeof(file_name), "step-%04d-surface.png", step);
+    debug_capture(state, file_name, phase, step);
+    fluidRenderMode = saved_mode;
+}
+
 static bool debug_should_capture_step(int step)
 {
     for (int i = 0; i < debugRunConfig.capture_step_count; ++i) {
@@ -649,7 +730,7 @@ static bool debug_should_capture_step(int step)
 static bool debug_prepare_capture_steps(void)
 {
     if (!debugRunConfig.capture_steps_explicit) {
-        const int defaults[] = { 0, 1, 5, 15, 30, 60 };
+        const int defaults[] = { 0, 1, 5, 15, 30, 60, 120, 240 };
         debugRunConfig.capture_step_count = 0;
         for (int i = 0; i < (int)(sizeof(defaults) / sizeof(defaults[0])); ++i) {
             if (defaults[i] <= debugRunConfig.steps) {
@@ -1149,6 +1230,90 @@ static bool debug_setup_overhang_impact(DebugRunState *state)
     return true;
 }
 
+static bool debug_setup_pbf_container(DebugRunState *state)
+{
+    debug_reset_world();
+    activePlayers = 0;
+    const Color container_color = { 125, 135, 150, 255 };
+    const Color fluid_color = { 45, 145, 235, 210 };
+    int container_created = 0;
+    int fluid_cells_created = 0;
+
+    for (int z = -4; z <= 4; ++z) {
+        for (int x = -4; x <= 4; ++x) {
+            if (debug_add_cell(x, 0, z, true, false,
+                               container_color, DEBUG_CONTAINER_TAG) >= 0) {
+                ++container_created;
+            }
+        }
+    }
+    for (int y = 1; y <= 20; ++y) {
+        for (int z = -4; z <= 4; ++z) {
+            if (debug_add_cell(-4, y, z, true, false,
+                               container_color, DEBUG_CONTAINER_TAG) >= 0) {
+                ++container_created;
+            }
+            if (debug_add_cell(4, y, z, true, false,
+                               container_color, DEBUG_CONTAINER_TAG) >= 0) {
+                ++container_created;
+            }
+        }
+        for (int x = -3; x <= 3; ++x) {
+            if (debug_add_cell(x, y, -4, true, false,
+                               container_color, DEBUG_CONTAINER_TAG) >= 0) {
+                ++container_created;
+            }
+            if (debug_add_cell(x, y, 4, true, false,
+                               container_color, DEBUG_CONTAINER_TAG) >= 0) {
+                ++container_created;
+            }
+        }
+    }
+
+    for (int y = 8; y <= 11; ++y) {
+        for (int z = -2; z <= 1; ++z) {
+            for (int x = -2; x <= 1; ++x) {
+                float px = ((float)x + 0.5f) * VOXEL_SIZE;
+                float py = ((float)y + 0.5f) * VOXEL_SIZE;
+                float pz = ((float)z + 0.5f) * VOXEL_SIZE;
+                int index = add_fluid_cell(px, py, pz, fluid_color);
+                if (index >= 0) {
+                    voxels[index].debugClusterTag = DEBUG_FLUID_TAG;
+                    ++fluid_cells_created;
+                }
+            }
+        }
+    }
+
+    debug_rebuild_world_state();
+    state->pbf_container = true;
+    state->activation_succeeded = true;
+    state->expected_container_voxels = 721;
+    state->expected_fluid_particles = 4 * 4 * 4 * VOXEL_CORNER_COUNT;
+    state->container_min_x = -1.5f + PBF_PARTICLE_RADIUS;
+    state->container_max_x = 2.0f - PBF_PARTICLE_RADIUS;
+    state->container_min_z = -1.5f + PBF_PARTICLE_RADIUS;
+    state->container_max_z = 2.0f - PBF_PARTICLE_RADIUS;
+    state->container_floor_top = VOXEL_SIZE;
+    state->camera.position = (Vector3){ 3.0f, 18.0f, 3.0f };
+    state->camera.target = (Vector3){ 0.25f, 1.0f, 0.25f };
+
+    DebugSample initial = debug_collect_sample("initial-fluid", 0, 0.0f);
+    state->initial_fluid_centroid_y = initial.fluid_centroid_y;
+    if (container_created != state->expected_container_voxels) {
+        debug_add_failure(state, "pbf-container created %d/%d immutable container voxels",
+                          container_created, state->expected_container_voxels);
+    }
+    if (fluid_cells_created != 64 ||
+        fluid_particle_count != state->expected_fluid_particles) {
+        debug_add_failure(state,
+                          "pbf-container created cells=%d/64 particles=%d/%d",
+                          fluid_cells_created, fluid_particle_count,
+                          state->expected_fluid_particles);
+    }
+    return state->failure_count == 0;
+}
+
 static void debug_physics_step(void)
 {
     activate_static_voxels_near_dynamic();
@@ -1165,6 +1330,42 @@ static void debug_validate_step(DebugRunState *state, int step)
 {
     debug_validate_all_sim_particles(state, step);
     DebugSample sample = debug_collect_sample("validation", step, state->initial_centroid_y);
+    if (state->pbf_container) {
+        if (sample.sim_particles != 0) {
+            debug_add_failure(state,
+                              "step %d: %d fluid particles leaked into the solid sim list",
+                              step, sample.sim_particles);
+        }
+        if (sample.fluid_particles != state->expected_fluid_particles) {
+            debug_add_failure(state, "step %d: fluid particle count changed to %d (expected %d)",
+                              step, sample.fluid_particles, state->expected_fluid_particles);
+        }
+        if (sample.invalid_fluid_particles > 0) {
+            debug_add_failure(state, "step %d: %d fluid particles are invalid or mis-indexed",
+                              step, sample.invalid_fluid_particles);
+        }
+        int container_count = 0;
+        for (int i = 0; i < voxel_count; ++i) {
+            const Voxel *voxel = &voxels[i];
+            if (voxel->debugClusterTag != DEBUG_CONTAINER_TAG) continue;
+            ++container_count;
+            if (voxel->simulate || voxel->pendingActivation) {
+                debug_add_failure(state,
+                                  "step %d: fluid activated an immutable container voxel",
+                                  step);
+                break;
+            }
+        }
+        if (container_count != state->expected_container_voxels) {
+            debug_add_failure(state, "step %d: container voxel count changed to %d (expected %d)",
+                              step, container_count, state->expected_container_voxels);
+        }
+        if (step == 120) {
+            state->fluid_drop_at_step_120 =
+                state->initial_fluid_centroid_y - sample.fluid_centroid_y;
+        }
+        return;
+    }
     if (state->delayed_activation) {
         if (!state->activation_succeeded &&
             sample.tagged_dynamic == state->expected_voxels && sample.tagged_static == 0) {
@@ -1210,6 +1411,57 @@ static void debug_finalize_validation(DebugRunState *state)
         debug_add_failure(state, "forced GPU run fell back to %s: %s",
                           physics_backend_name(physicsBackend.active),
                           physicsBackend.fallback_reason);
+    }
+    if (state->pbf_container) {
+        DebugSample final_sample = debug_collect_sample("final", debugRunConfig.steps, 0.0f);
+        state->escaped_fluid_particles = 0;
+        state->below_container_particles = 0;
+        for (int i = 0; i < fluid_particle_count; ++i) {
+            const Particle *particle = fluid_particles[i];
+            if (!particle || !particle->active || !v_isfinite(particle->pos)) continue;
+            if (particle->pos.x < state->container_min_x ||
+                particle->pos.x > state->container_max_x ||
+                particle->pos.z < state->container_min_z ||
+                particle->pos.z > state->container_max_z) {
+                ++state->escaped_fluid_particles;
+            }
+            if (particle->pos.y < state->container_floor_top - 0.01f) {
+                ++state->below_container_particles;
+            }
+        }
+        int maximum_escaped = (state->expected_fluid_particles + 19) / 20;
+        if (!isfinite(state->fluid_drop_at_step_120) || state->fluid_drop_at_step_120 < 2.0f) {
+            debug_add_failure(state,
+                              "fluid dropped only %.3f metres after 120 steps (minimum 2.000)",
+                              state->fluid_drop_at_step_120);
+        }
+        if (state->escaped_fluid_particles > maximum_escaped) {
+            debug_add_failure(state, "%d fluid particles escaped the container (maximum %d)",
+                              state->escaped_fluid_particles, maximum_escaped);
+        }
+        if (state->below_container_particles > 0) {
+            debug_add_failure(state, "%d fluid particles penetrated below the container floor",
+                              state->below_container_particles);
+        }
+        if (!isfinite(final_sample.mean_density_ratio) ||
+            final_sample.mean_density_ratio < 0.70f ||
+            final_sample.mean_density_ratio > 1.15f) {
+            debug_add_failure(state,
+                              "final mean density/rest ratio %.3f is outside 0.70..1.15",
+                              final_sample.mean_density_ratio);
+        }
+        if (!isfinite(final_sample.max_density_ratio) ||
+            final_sample.max_density_ratio > 1.35f) {
+            debug_add_failure(state,
+                              "final maximum density/rest ratio %.3f exceeds 1.35",
+                              final_sample.max_density_ratio);
+        }
+        if (!isfinite(final_sample.mean_fluid_speed) || final_sample.mean_fluid_speed > 0.75f) {
+            debug_add_failure(state,
+                              "final mean fluid speed %.3f m/s exceeds 0.75",
+                              final_sample.mean_fluid_speed);
+        }
+        return;
     }
     if (!state->activation_succeeded) {
         debug_add_failure(state, "scenario did not complete its activation stage");
@@ -1276,7 +1528,7 @@ static bool debug_write_report(DebugRunState *state)
         return false;
     }
     bool passed = state->failure_count == 0;
-    fputs("{\n  \"schemaVersion\": 1,\n  \"scenario\": ", file);
+    fputs("{\n  \"schemaVersion\": 2,\n  \"scenario\": ", file);
     debug_write_json_string(file, debugRunConfig.scenario);
     fputs(",\n  \"requestedBackend\": ", file);
     debug_write_json_string(file, physics_backend_name(physicsBackend.requested));
@@ -1320,6 +1572,16 @@ static bool debug_write_report(DebugRunState *state)
             (double)state->overhang_tip_drop_at_step_30,
             (double)state->overhang_relative_deflection_at_step_30);
 
+    fprintf(file,
+            "  \"pbfDiagnostics\": {\"enabled\": %s, \"expectedParticles\": %d,"
+            " \"dropAtStep120\": %.9g, \"escapedParticles\": %d,"
+            " \"belowContainerParticles\": %d},\n",
+            state->pbf_container ? "true" : "false",
+            state->expected_fluid_particles,
+            (double)state->fluid_drop_at_step_120,
+            state->escaped_fluid_particles,
+            state->below_container_particles);
+
     fputs("  \"failures\": [", file);
     for (int i = 0; i < state->failure_count; ++i) {
         if (i > 0) fputs(", ", file);
@@ -1342,7 +1604,10 @@ static bool debug_write_report(DebugRunState *state)
                 " \"staticGluedFaces\": %d, \"centroidY\": %.9g,"
                 " \"centroidDrop\": %.9g, \"minY\": %.9g, \"maxY\": %.9g,"
                 " \"meanVelocityY\": %.9g, \"staticHashGeneration\": %llu,"
-                " \"gpuStaticUploadedGeneration\": %llu, \"physicsStepMs\": %.9g}%s\n",
+                " \"gpuStaticUploadedGeneration\": %llu, \"physicsStepMs\": %.9g,"
+                " \"fluidParticles\": %d, \"invalidFluidParticles\": %d,"
+                " \"fluidCentroidY\": %.9g, \"meanDensityRatio\": %.9g,"
+                " \"maxDensityRatio\": %.9g, \"meanFluidSpeed\": %.9g}%s\n",
                 sample->step, sample->tagged_voxels, sample->tagged_dynamic,
                 sample->tagged_static, sample->sim_particles,
                 sample->zero_mass_corners, sample->invalid_particle_refs,
@@ -1352,6 +1617,11 @@ static bool debug_write_report(DebugRunState *state)
                 (unsigned long long)sample->static_hash_generation,
                 (unsigned long long)sample->gpu_static_uploaded_generation,
                 sample->physics_step_ms,
+                sample->fluid_particles, sample->invalid_fluid_particles,
+                (double)sample->fluid_centroid_y,
+                (double)sample->mean_density_ratio,
+                (double)sample->max_density_ratio,
+                (double)sample->mean_fluid_speed,
                 (i + 1 < state->sample_count) ? "," : "");
     }
     fputs("  ]\n}\n", file);
@@ -1396,6 +1666,14 @@ static int run_debug_harness(void)
         }
         return 2;
     }
+    if (!debugRunConfig.steps_explicit) {
+        debugRunConfig.steps = scenario->default_steps;
+    }
+    if (debugRunConfig.steps < scenario->minimum_steps) {
+        fprintf(stderr, "Debug scenario '%s' requires at least %d steps (received %d)\n",
+                scenario->name, scenario->minimum_steps, debugRunConfig.steps);
+        return 2;
+    }
     if (!debug_prepare_capture_steps()) return 2;
 
     DebugRunState state = { 0 };
@@ -1421,7 +1699,9 @@ static int run_debug_harness(void)
     if (setup_ok) {
         debug_validate_step(&state, 0);
         if (debug_should_capture_step(0)) {
-            if (state.delayed_activation) {
+            if (state.pbf_container) {
+                debug_capture_fluid_pair(&state, 0, "fluid-initial");
+            } else if (state.delayed_activation) {
                 if (state.overhang_impact) {
                     debug_capture(&state, "step-0000-falling-voxel.png", "falling-voxel", 0);
                 } else {
@@ -1435,9 +1715,13 @@ static int run_debug_harness(void)
             debug_physics_step();
             debug_validate_step(&state, step);
             if (debug_should_capture_step(step)) {
-                char file_name[64];
-                snprintf(file_name, sizeof(file_name), "step-%04d.png", step);
-                debug_capture(&state, file_name, "simulation", step);
+                if (state.pbf_container) {
+                    debug_capture_fluid_pair(&state, step, "fluid-simulation");
+                } else {
+                    char file_name[64];
+                    snprintf(file_name, sizeof(file_name), "step-%04d.png", step);
+                    debug_capture(&state, file_name, "simulation", step);
+                }
             }
         }
         debug_finalize_validation(&state);
@@ -1446,12 +1730,12 @@ static int run_debug_harness(void)
     bool report_ok = debug_write_report(&state);
     bool passed = setup_ok && report_ok && state.failure_count == 0;
     fprintf(stderr,
-            "debug-run scenario=%s requested=%s active=%s result=%s steps=%d drop60=%.6f captures=%d report=%s\n",
+            "debug-run scenario=%s requested=%s active=%s result=%s steps=%d drop60=%.6f fluidDrop120=%.6f captures=%d report=%s\n",
             debugRunConfig.scenario,
             physics_backend_name(physicsBackend.requested),
             physics_backend_name(physicsBackend.active),
             passed ? "PASS" : "FAIL",
-            debugRunConfig.steps, state.drop_at_step_60,
+            debugRunConfig.steps, state.drop_at_step_60, state.fluid_drop_at_step_120,
             state.capture_count, state.report_path);
     for (int i = 0; i < state.failure_count; ++i) {
         fprintf(stderr, "debug-failure: %s\n", state.failures[i]);

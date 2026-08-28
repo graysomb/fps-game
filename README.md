@@ -253,6 +253,31 @@ selecting another backend. CPU MT still degrades to CPU ST when no worker can be
 created. The active backend and its last-step time are displayed beside the FPS
 counter.
 
+### Position-based fluids
+
+Creative mode can place runtime PBF cells that reuse the voxel corner-particle
+storage. Press `C` for player one, keypad `3` for player two, or the left stick
+button on a controller to switch the creative brush between `SOLID` and `FLUID`.
+Fluid cells are intentionally excluded from saved map occupancy, glue, sleep,
+activation, projectile, and recycle paths. They collide with immutable static
+geometry without waking it and exchange collision corrections with solids that
+are already active.
+
+The implementation follows the density constraint, artificial-pressure surface
+correction, and XSPH viscosity stages from Macklin and Mueller's *Position Based
+Fluids*. A 0.5 m fluid cell contains eight independent particles on a 0.25 m
+lattice. Each physics substep runs four PBF Jacobi iterations with rest density
+1000 kg/m3, `k=0.2`, `n=4`, `dq=0.2h`, and XSPH viscosity 0.15. The same stages
+run through the normal GPU -> CPU MT -> CPU ST fallback chain.
+
+Press `F5` to switch between exact particle spheres and a fast overlapping-sphere
+surface preview. The startup mode can also be selected with:
+
+```bash
+fps_ray --fluid-render=particles
+fps_ray --fluid-render=surface
+```
+
 Smoke runs still create a short-lived window because the GPU backend needs a
 graphics context:
 
@@ -288,12 +313,17 @@ Available scenarios are:
   a tether-held voxel toward it through the same proximity-activation path used by gameplay.
 * `overhang-impact`: drops an ordinary active voxel onto the unsupported end of a static
   cantilever and checks that the overhang activates and deflects while its root stays supported.
+* `pbf-container`: drops 512 fluid particles into a tall immutable voxel container, captures
+  both render modes, and checks particle membership, density, settling, containment, and that
+  fluid never activates the container.
 
 Without `--debug-output`, artifacts are written beneath
 `.build/bin/debug-artifacts/<scenario>/<active-backend>`. Each backend directory contains
 `report.json`, named setup-phase images when applicable, and images for simulation steps
-`0,1,5,15,30,60` by default. Debug runs require at least 60 steps so the report can make
-a meaningful fall assertion.
+`0,1,5,15,30,60` by default. The PBF scenario defaults to 240 steps and additionally
+captures steps 120 and 240. Its paired images are named `step-NNNN-particles.png` and
+`step-NNNN-surface.png`. Other runs require at least 60 steps; `pbf-container` requires
+at least 120.
 
 Run all backends sequentially through the launcher with:
 
@@ -311,3 +341,5 @@ the first-step SSBOs and record static-hash differences or stale cluster cells, 
 `simId` mismatches or missing corners, and zero-mass tagged corners. The same counters
 appear in the capture overlay. Overhang reports additionally compare root and tip motion
 at step 30, require a retained static root anchor, and assert measurable relative bending.
+PBF reports add rest-density ratios, mean fluid speed, centroid fall, escaped/penetrating
+particle counts, and compact fluid-list integrity.
