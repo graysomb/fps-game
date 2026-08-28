@@ -653,6 +653,12 @@ static void debug_draw_overlay(const DebugRunState *state, const DebugSample *sa
                             sample->mean_density_ratio, sample->max_density_ratio,
                             fluidRenderMode == FLUID_RENDER_SURFACE ? "surface" : "particles"),
                  34, y + 26, 17, result_color);
+        if (fluidRenderMode == FLUID_RENDER_SURFACE) {
+            DrawText(TextFormat("HULL cells=%d triangles=%d grid=%.3fm",
+                                fluidHullCellCount, fluidHullMesh.triangleCount,
+                                PBF_HULL_CELL_SIZE),
+                     34, y + 52, 17, result_color);
+        }
     }
 }
 

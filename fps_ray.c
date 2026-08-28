@@ -433,6 +433,8 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define PBF_MAX_POSITION_CORRECTION (PBF_PARTICLE_SPACING * 0.025f)
 #define PBF_RENDER_SPHERE_RINGS 6
 #define PBF_RENDER_SPHERE_SLICES 8
+#define PBF_HULL_CELL_SIZE VOXEL_SIZE
+#define PBF_HULL_ISO_LEVEL 0.5f
 #define PBF_SETTLE_REQUIRED_STEPS 90
 #define PBF_SETTLE_MEAN_SPEED 0.65f
 #define PBF_SETTLE_MAX_SPEED 2.0f
@@ -12925,14 +12927,21 @@ static Material instancedMaterial = { 0 };
 static Shader instancedShader = { 0 };
 static Shader orbShader = { 0 };
 static Shader fluidShader = { 0 };
+static Shader fluidHullShader = { 0 };
 static Mesh sphereMesh = { 0 };
+static Mesh fluidHullMesh = { 0 };
 static Material fluidMaterial = { 0 };
+static Material fluidHullMaterial = { 0 };
 static Matrix *instanceTransforms = NULL;
 static int instanceTransformsCount = 0;
 static int instanceTransformsCapacity = 0;
 static Matrix *fluidInstanceTransforms = NULL;
 static int fluidInstanceCapacity = 0;
 static int fluidSurfaceModeLocation = -1;
+static uint64_t fluidHullSignature = 0;
+static bool fluidHullSignatureValid = false;
+static uint64_t fluidHullParticleSignature = 0;
+static bool fluidHullParticleSignatureValid = false;
 static bool instancingInitialized = false;
 
 static void InitInstancing(void) {
@@ -12942,6 +12951,7 @@ static void InitInstancing(void) {
     
     orbShader = LoadShader("shaders/orb.vert", "shaders/orb.frag");
     fluidShader = LoadShader("shaders/fluid_instanced.vert", "shaders/fluid_instanced.frag");
+    fluidHullShader = LoadShader("shaders/fluid_hull.vert", "shaders/fluid_hull.frag");
     // Fluid instances dominate this mesh's draw count. The interpolated normals
     // retain a round appearance while using one sixth as many triangles.
     sphereMesh = GenMeshSphere(VOXEL_SIZE * 0.25f,
@@ -12959,6 +12969,8 @@ static void InitInstancing(void) {
     instancedMaterial.shader = instancedShader;
     fluidMaterial = LoadMaterialDefault();
     fluidMaterial.shader = fluidShader;
+    fluidHullMaterial = LoadMaterialDefault();
+    fluidHullMaterial.shader = fluidHullShader;
     fluidShader.locs[SHADER_LOC_VECTOR_VIEW] = GetShaderLocation(fluidShader, "viewPos");
     fluidShader.locs[SHADER_LOC_MATRIX_VIEW] = GetShaderLocation(fluidShader, "matView");
     fluidShader.locs[SHADER_LOC_MATRIX_PROJECTION] = GetShaderLocation(fluidShader, "matProjection");
@@ -12987,12 +12999,368 @@ static bool ensure_fluid_instance_capacity(int needed) {
     return true;
 }
 
-static void draw_fluid_particles(Camera3D camera) {
-    if (fluid_particle_count <= 0 || !ensure_fluid_instance_capacity(fluid_particle_count)) {
+typedef struct {
+    int x, y, z;
+    unsigned char occupied;
+} FluidHullCell;
+
+static FluidHullCell *fluidHullCells = NULL;
+static int fluidHullCellCapacity = 0;
+static int fluidHullCellCount = 0;
+
+static uint64_t fluid_hull_cell_hash(int x, int y, int z) {
+    uint64_t h = (uint32_t)x * UINT64_C(0x9e3779b185ebca87);
+    h ^= (uint32_t)y * UINT64_C(0xc2b2ae3d27d4eb4f);
+    h ^= (uint32_t)z * UINT64_C(0x165667b19e3779f9);
+    h ^= h >> 29;
+    h *= UINT64_C(0xbf58476d1ce4e5b9);
+    return h ^ (h >> 32);
+}
+
+static bool ensure_fluid_hull_cell_capacity(int particle_count) {
+    int needed = 16;
+    while (needed < particle_count * 2 && needed < (1 << 29)) needed <<= 1;
+    if (needed <= fluidHullCellCapacity) return true;
+    FluidHullCell *next = (FluidHullCell *)RL_REALLOC(
+        fluidHullCells, (size_t)needed * sizeof(FluidHullCell));
+    if (!next) return false;
+    fluidHullCells = next;
+    fluidHullCellCapacity = needed;
+    return true;
+}
+
+static FluidHullCell *fluid_hull_find_cell(int x, int y, int z, bool insert) {
+    if (!fluidHullCells || fluidHullCellCapacity <= 0) return NULL;
+    int mask = fluidHullCellCapacity - 1;
+    int slot = (int)(fluid_hull_cell_hash(x, y, z) & (uint64_t)mask);
+    for (int probe = 0; probe < fluidHullCellCapacity; ++probe) {
+        FluidHullCell *cell = &fluidHullCells[slot];
+        if (!cell->occupied) {
+            if (!insert) return NULL;
+            cell->x = x;
+            cell->y = y;
+            cell->z = z;
+            cell->occupied = 1;
+            fluidHullCellCount++;
+            return cell;
+        }
+        if (cell->x == x && cell->y == y && cell->z == z) return cell;
+        slot = (slot + 1) & mask;
+    }
+    return NULL;
+}
+
+static bool fluid_hull_has_cell(int x, int y, int z) {
+    return fluid_hull_find_cell(x, y, z, false) != NULL;
+}
+
+typedef struct {
+    float *vertices;
+    float *normals;
+    int vertex_count;
+    int vertex_capacity;
+    bool failed;
+} FluidHullBuilder;
+
+static bool fluid_hull_builder_reserve(FluidHullBuilder *builder, int additional) {
+    if (!builder || builder->failed) return false;
+    int needed = builder->vertex_count + additional;
+    if (needed <= builder->vertex_capacity) return true;
+    int capacity = builder->vertex_capacity > 0 ? builder->vertex_capacity : 1536;
+    while (capacity < needed) {
+        if (capacity > INT_MAX / 2) {
+            builder->failed = true;
+            return false;
+        }
+        capacity *= 2;
+    }
+    float *vertices = (float *)RL_REALLOC(
+        builder->vertices, (size_t)capacity * 3 * sizeof(float));
+    if (!vertices) {
+        builder->failed = true;
+        return false;
+    }
+    builder->vertices = vertices;
+    float *normals = (float *)RL_REALLOC(
+        builder->normals, (size_t)capacity * 3 * sizeof(float));
+    if (!normals) {
+        builder->failed = true;
+        return false;
+    }
+    builder->normals = normals;
+    builder->vertex_capacity = capacity;
+    return true;
+}
+
+static void fluid_hull_emit_triangle(FluidHullBuilder *builder,
+                                     Vector3 a, Vector3 b, Vector3 c,
+                                     Vector3 outward_hint) {
+    Vector3 normal = v_cross(v_sub(b, a), v_sub(c, a));
+    float normal_length = v_length(normal);
+    if (normal_length <= 1e-7f || !fluid_hull_builder_reserve(builder, 3)) return;
+    if (v_dot(normal, outward_hint) < 0.0f) {
+        Vector3 swap = b;
+        b = c;
+        c = swap;
+        normal = v_mul(normal, -1.0f);
+    }
+    normal = v_mul(normal, 1.0f / normal_length);
+    Vector3 points[3] = { a, b, c };
+    for (int i = 0; i < 3; ++i) {
+        int vertex = builder->vertex_count++;
+        builder->vertices[vertex * 3 + 0] = points[i].x;
+        builder->vertices[vertex * 3 + 1] = points[i].y;
+        builder->vertices[vertex * 3 + 2] = points[i].z;
+        builder->normals[vertex * 3 + 0] = normal.x;
+        builder->normals[vertex * 3 + 1] = normal.y;
+        builder->normals[vertex * 3 + 2] = normal.z;
+    }
+}
+
+static Vector3 fluid_hull_edge_intersection(Vector3 a, Vector3 b,
+                                            float value_a, float value_b) {
+    float denominator = value_b - value_a;
+    float t = fabsf(denominator) > 1e-6f
+        ? (PBF_HULL_ISO_LEVEL - value_a) / denominator : 0.5f;
+    return v_add(a, v_mul(v_sub(b, a), clampf(t, 0.0f, 1.0f)));
+}
+
+static void fluid_hull_emit_quad(FluidHullBuilder *builder,
+                                 Vector3 a, Vector3 b, Vector3 c, Vector3 d,
+                                 Vector3 outward_hint) {
+    fluid_hull_emit_triangle(builder, a, b, c, outward_hint);
+    fluid_hull_emit_triangle(builder, a, c, d, outward_hint);
+}
+
+static float fluid_hull_scalar(int grid_x, int grid_y, int grid_z) {
+    float value = 0.0f;
+    for (int dz = -1; dz <= 0; ++dz) {
+        for (int dy = -1; dy <= 0; ++dy) {
+            for (int dx = -1; dx <= 0; ++dx) {
+                if (fluid_hull_has_cell(grid_x + dx, grid_y + dy, grid_z + dz)) {
+                    value += 1.0f;
+                }
+            }
+        }
+    }
+    return value;
+}
+
+static void rebuild_fluid_hull(void) {
+    uint64_t particle_signature = (uint64_t)fluid_particle_count * UINT64_C(0x94d049bb133111eb);
+    int renderable_particles = 0;
+    for (int i = 0; i < fluid_particle_count; ++i) {
+        const Particle *particle = fluid_particles[i];
+        if (!particle || !particle->active || !v_isfinite(particle->pos)) continue;
+        int x = (int)floorf(particle->pos.x / PBF_HULL_CELL_SIZE);
+        int y = (int)floorf(particle->pos.y / PBF_HULL_CELL_SIZE);
+        int z = (int)floorf(particle->pos.z / PBF_HULL_CELL_SIZE);
+        uint64_t cell_hash = fluid_hull_cell_hash(x, y, z);
+        particle_signature += cell_hash;
+        particle_signature ^= (cell_hash << (i & 15)) | (cell_hash >> ((64 - (i & 15)) & 63));
+        renderable_particles++;
+    }
+    particle_signature ^= (uint64_t)renderable_particles * UINT64_C(0xbf58476d1ce4e5b9);
+    if (fluidHullParticleSignatureValid && particle_signature == fluidHullParticleSignature) return;
+    fluidHullParticleSignature = particle_signature;
+    fluidHullParticleSignatureValid = true;
+
+    if (!ensure_fluid_hull_cell_capacity(fluid_particle_count)) return;
+    memset(fluidHullCells, 0, (size_t)fluidHullCellCapacity * sizeof(FluidHullCell));
+    fluidHullCellCount = 0;
+
+    for (int i = 0; i < fluid_particle_count; ++i) {
+        const Particle *particle = fluid_particles[i];
+        if (!particle || !particle->active || !v_isfinite(particle->pos)) continue;
+        int x = (int)floorf(particle->pos.x / PBF_HULL_CELL_SIZE);
+        int y = (int)floorf(particle->pos.y / PBF_HULL_CELL_SIZE);
+        int z = (int)floorf(particle->pos.z / PBF_HULL_CELL_SIZE);
+        fluid_hull_find_cell(x, y, z, true);
+    }
+
+    uint64_t signature = (uint64_t)fluidHullCellCount * UINT64_C(0x9e3779b185ebca87);
+    int min_x = INT_MAX, min_y = INT_MAX, min_z = INT_MAX;
+    int max_x = INT_MIN, max_y = INT_MIN, max_z = INT_MIN;
+    for (int i = 0; i < fluidHullCellCapacity; ++i) {
+        FluidHullCell *cell = &fluidHullCells[i];
+        if (!cell->occupied) continue;
+        signature ^= fluid_hull_cell_hash(cell->x, cell->y, cell->z);
+        if (cell->x < min_x) min_x = cell->x;
+        if (cell->y < min_y) min_y = cell->y;
+        if (cell->z < min_z) min_z = cell->z;
+        if (cell->x > max_x) max_x = cell->x;
+        if (cell->y > max_y) max_y = cell->y;
+        if (cell->z > max_z) max_z = cell->z;
+    }
+    if (fluidHullSignatureValid && signature == fluidHullSignature) return;
+    fluidHullSignature = signature;
+    fluidHullSignatureValid = true;
+
+    FluidHullBuilder builder = { 0 };
+    if (fluidHullCellCount > 0) {
+        static const int corner_offset[8][3] = {
+            { 0, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 }, { 1, 1, 0 },
+            { 0, 0, 1 }, { 1, 0, 1 }, { 0, 1, 1 }, { 1, 1, 1 }
+        };
+        static const int cube_edges[12][2] = {
+            { 0, 1 }, { 2, 3 }, { 4, 5 }, { 6, 7 },
+            { 0, 2 }, { 1, 3 }, { 4, 6 }, { 5, 7 },
+            { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 }
+        };
+        int cube_min_x = min_x - 1, cube_max_x = max_x + 1;
+        int cube_min_y = min_y - 1, cube_max_y = max_y + 1;
+        int cube_min_z = min_z - 1, cube_max_z = max_z + 1;
+        int net_x = cube_max_x - cube_min_x + 1;
+        int net_y = cube_max_y - cube_min_y + 1;
+        int net_z = cube_max_z - cube_min_z + 1;
+        size_t net_count = (size_t)net_x * (size_t)net_y * (size_t)net_z;
+        Vector3 *net_vertex = (Vector3 *)RL_CALLOC(net_count, sizeof(Vector3));
+        unsigned char *net_active = (unsigned char *)RL_CALLOC(net_count, 1);
+        if (!net_vertex || !net_active) builder.failed = true;
+
+#define FLUID_NET_INDEX(x, y, z) \
+    (((size_t)((z) - cube_min_z) * (size_t)net_y + (size_t)((y) - cube_min_y)) * \
+     (size_t)net_x + (size_t)((x) - cube_min_x))
+
+        for (int z = cube_min_z; z <= cube_max_z && !builder.failed; ++z) {
+            for (int y = cube_min_y; y <= cube_max_y && !builder.failed; ++y) {
+                for (int x = cube_min_x; x <= cube_max_x && !builder.failed; ++x) {
+                    Vector3 cube_position[8];
+                    float cube_value[8];
+                    float minimum = FLT_MAX;
+                    float maximum = -FLT_MAX;
+                    for (int corner = 0; corner < 8; ++corner) {
+                        int gx = x + corner_offset[corner][0];
+                        int gy = y + corner_offset[corner][1];
+                        int gz = z + corner_offset[corner][2];
+                        cube_position[corner] = (Vector3){
+                            (float)gx * PBF_HULL_CELL_SIZE,
+                            (float)gy * PBF_HULL_CELL_SIZE,
+                            (float)gz * PBF_HULL_CELL_SIZE
+                        };
+                        cube_value[corner] = fluid_hull_scalar(gx, gy, gz);
+                        if (cube_value[corner] < minimum) minimum = cube_value[corner];
+                        if (cube_value[corner] > maximum) maximum = cube_value[corner];
+                    }
+                    if (minimum >= PBF_HULL_ISO_LEVEL || maximum < PBF_HULL_ISO_LEVEL) continue;
+                    Vector3 average = { 0 };
+                    int intersection_count = 0;
+                    for (int edge = 0; edge < 12; ++edge) {
+                        int a = cube_edges[edge][0];
+                        int b = cube_edges[edge][1];
+                        bool inside_a = cube_value[a] >= PBF_HULL_ISO_LEVEL;
+                        bool inside_b = cube_value[b] >= PBF_HULL_ISO_LEVEL;
+                        if (inside_a != inside_b) {
+                            average = v_add(average, fluid_hull_edge_intersection(
+                                cube_position[a], cube_position[b], cube_value[a], cube_value[b]));
+                            intersection_count++;
+                        }
+                    }
+                    if (intersection_count > 0) {
+                        size_t index = FLUID_NET_INDEX(x, y, z);
+                        net_vertex[index] = v_mul(average, 1.0f / (float)intersection_count);
+                        net_active[index] = 1;
+                    }
+                }
+            }
+        }
+
+        // A sign-changing scalar-grid edge is surrounded by four surface cells.
+        // Connect their averaged vertices into a quad, yielding two triangles.
+        for (int z = cube_min_z + 1; z <= cube_max_z; ++z) {
+            for (int y = cube_min_y + 1; y <= cube_max_y; ++y) {
+                for (int x = cube_min_x; x <= cube_max_x; ++x) {
+                    float a = fluid_hull_scalar(x, y, z);
+                    float b = fluid_hull_scalar(x + 1, y, z);
+                    if ((a >= PBF_HULL_ISO_LEVEL) == (b >= PBF_HULL_ISO_LEVEL)) continue;
+                    size_t ia = FLUID_NET_INDEX(x, y - 1, z - 1);
+                    size_t ib = FLUID_NET_INDEX(x, y, z - 1);
+                    size_t ic = FLUID_NET_INDEX(x, y, z);
+                    size_t id = FLUID_NET_INDEX(x, y - 1, z);
+                    if (net_active[ia] && net_active[ib] && net_active[ic] && net_active[id]) {
+                        Vector3 outward = { a >= PBF_HULL_ISO_LEVEL ? 1.0f : -1.0f, 0, 0 };
+                        fluid_hull_emit_quad(&builder, net_vertex[ia], net_vertex[ib],
+                                             net_vertex[ic], net_vertex[id], outward);
+                    }
+                }
+            }
+        }
+        for (int z = cube_min_z + 1; z <= cube_max_z; ++z) {
+            for (int y = cube_min_y; y <= cube_max_y; ++y) {
+                for (int x = cube_min_x + 1; x <= cube_max_x; ++x) {
+                    float a = fluid_hull_scalar(x, y, z);
+                    float b = fluid_hull_scalar(x, y + 1, z);
+                    if ((a >= PBF_HULL_ISO_LEVEL) == (b >= PBF_HULL_ISO_LEVEL)) continue;
+                    size_t ia = FLUID_NET_INDEX(x - 1, y, z - 1);
+                    size_t ib = FLUID_NET_INDEX(x, y, z - 1);
+                    size_t ic = FLUID_NET_INDEX(x, y, z);
+                    size_t id = FLUID_NET_INDEX(x - 1, y, z);
+                    if (net_active[ia] && net_active[ib] && net_active[ic] && net_active[id]) {
+                        Vector3 outward = { 0, a >= PBF_HULL_ISO_LEVEL ? 1.0f : -1.0f, 0 };
+                        fluid_hull_emit_quad(&builder, net_vertex[ia], net_vertex[ib],
+                                             net_vertex[ic], net_vertex[id], outward);
+                    }
+                }
+            }
+        }
+        for (int z = cube_min_z; z <= cube_max_z; ++z) {
+            for (int y = cube_min_y + 1; y <= cube_max_y; ++y) {
+                for (int x = cube_min_x + 1; x <= cube_max_x; ++x) {
+                    float a = fluid_hull_scalar(x, y, z);
+                    float b = fluid_hull_scalar(x, y, z + 1);
+                    if ((a >= PBF_HULL_ISO_LEVEL) == (b >= PBF_HULL_ISO_LEVEL)) continue;
+                    size_t ia = FLUID_NET_INDEX(x - 1, y - 1, z);
+                    size_t ib = FLUID_NET_INDEX(x, y - 1, z);
+                    size_t ic = FLUID_NET_INDEX(x, y, z);
+                    size_t id = FLUID_NET_INDEX(x - 1, y, z);
+                    if (net_active[ia] && net_active[ib] && net_active[ic] && net_active[id]) {
+                        Vector3 outward = { 0, 0, a >= PBF_HULL_ISO_LEVEL ? 1.0f : -1.0f };
+                        fluid_hull_emit_quad(&builder, net_vertex[ia], net_vertex[ib],
+                                             net_vertex[ic], net_vertex[id], outward);
+                    }
+                }
+            }
+        }
+
+#undef FLUID_NET_INDEX
+        RL_FREE(net_vertex);
+        RL_FREE(net_active);
+    }
+
+    if (builder.failed) {
+        RL_FREE(builder.vertices);
+        RL_FREE(builder.normals);
         return;
     }
-    float desired_radius = (fluidRenderMode == FLUID_RENDER_SURFACE)
-        ? PBF_SURFACE_SPLAT_RADIUS : PBF_PARTICLE_RADIUS;
+    if (fluidHullMesh.vertices) {
+        UnloadMesh(fluidHullMesh);
+        fluidHullMesh = (Mesh){ 0 };
+    }
+    if (builder.vertex_count <= 0) {
+        RL_FREE(builder.vertices);
+        RL_FREE(builder.normals);
+        return;
+    }
+    fluidHullMesh.vertexCount = builder.vertex_count;
+    fluidHullMesh.triangleCount = builder.vertex_count / 3;
+    fluidHullMesh.vertices = builder.vertices;
+    fluidHullMesh.normals = builder.normals;
+    UploadMesh(&fluidHullMesh, false);
+}
+
+static void draw_fluid_particles(Camera3D camera) {
+    if (fluid_particle_count <= 0) return;
+    if (fluidRenderMode == FLUID_RENDER_SURFACE) {
+        rebuild_fluid_hull();
+        if (fluidHullMesh.vertices) {
+            rlDisableBackfaceCulling();
+            DrawMesh(fluidHullMesh, fluidHullMaterial, MatrixIdentity());
+            rlEnableBackfaceCulling();
+        }
+        return;
+    }
+    if (!ensure_fluid_instance_capacity(fluid_particle_count)) return;
+    float desired_radius = PBF_PARTICLE_RADIUS;
     float mesh_radius = VOXEL_SIZE * 0.25f;
     float scale = desired_radius / mesh_radius;
     int count = 0;
@@ -13009,7 +13377,7 @@ static void draw_fluid_particles(Camera3D camera) {
         fluidInstanceTransforms[count++] = transform;
     }
     if (count <= 0) return;
-    int surface_mode = (fluidRenderMode == FLUID_RENDER_SURFACE) ? 1 : 0;
+    int surface_mode = 0;
     SetShaderValue(fluidShader, fluidSurfaceModeLocation, &surface_mode, SHADER_UNIFORM_INT);
     SetShaderValue(fluidShader, fluidShader.locs[SHADER_LOC_VECTOR_VIEW],
                    &camera.position, SHADER_UNIFORM_VEC3);

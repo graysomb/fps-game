@@ -272,9 +272,12 @@ lattice. Each physics substep runs two PBF Jacobi iterations with rest density
 1000 kg/m3, `k=0.2`, `n=4`, `dq=0.2h`, and XSPH viscosity 0.15. The same stages
 run through the normal GPU -> CPU MT -> CPU ST fallback chain.
 
-Press `F5` to switch between low-poly particle spheres and a fast overlapping-sphere
-surface preview. The preview uses enlarged splats rather than reconstructing a true
-surface. The startup mode can also be selected with:
+Press `F5` to switch between low-poly particle spheres and a faceted approximate
+hull. Surface mode bins particles into 0.25 m cells, builds a coarse scalar density
+field, averages its edge crossings into one surface-net vertex per boundary cell,
+and connects those vertices with flat-shaded triangles. The hull is cached while
+quantized occupancy is unchanged and reused by every split-screen view. The startup
+mode can also be selected with:
 
 ```bash
 fps_ray --fluid-render=particles
