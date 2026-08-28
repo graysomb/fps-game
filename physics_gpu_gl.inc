@@ -77,9 +77,10 @@ enum {
     GPU_LOC_PBF_PARTICLE_MASS,
     GPU_LOC_PBF_LAMBDA_EPSILON,
     GPU_LOC_PBF_SCORR_K,
-    GPU_LOC_PBF_SCORR_N,
-    GPU_LOC_PBF_SCORR_DELTA_Q,
     GPU_LOC_PBF_VISCOSITY,
+    GPU_LOC_PBF_POLY6_COEFFICIENT,
+    GPU_LOC_PBF_SPIKY_GRADIENT_COEFFICIENT,
+    GPU_LOC_PBF_SCORR_REFERENCE_KERNEL,
     GPU_LOC_PLAYERS,
     GPU_LOC_COUNT
 };
@@ -461,17 +462,21 @@ static void gpu_set_uniforms(float dt) {
     float pbf_particle_mass = PBF_PARTICLE_MASS;
     float pbf_lambda_epsilon = PBF_LAMBDA_EPSILON;
     float pbf_scorr_k = PBF_SCORR_K;
-    float pbf_scorr_n = PBF_SCORR_N;
-    float pbf_scorr_delta_q = PBF_SCORR_DELTA_Q;
     float pbf_viscosity = PBF_XSPH_VISCOSITY;
+    float pbf_poly6_coefficient = PBF_POLY6_COEFFICIENT;
+    float pbf_spiky_gradient_coefficient = PBF_SPIKY_GRADIENT_COEFFICIENT;
+    float pbf_scorr_reference_kernel = pbf_poly6(PBF_SCORR_DELTA_Q * PBF_SCORR_DELTA_Q);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_PBF_H], &pbf_h, SHADER_UNIFORM_FLOAT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_PBF_REST_DENSITY], &pbf_rest_density, SHADER_UNIFORM_FLOAT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_PBF_PARTICLE_MASS], &pbf_particle_mass, SHADER_UNIFORM_FLOAT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_PBF_LAMBDA_EPSILON], &pbf_lambda_epsilon, SHADER_UNIFORM_FLOAT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_PBF_SCORR_K], &pbf_scorr_k, SHADER_UNIFORM_FLOAT, 1);
-    rlSetUniform(gpuPhysics.loc[GPU_LOC_PBF_SCORR_N], &pbf_scorr_n, SHADER_UNIFORM_FLOAT, 1);
-    rlSetUniform(gpuPhysics.loc[GPU_LOC_PBF_SCORR_DELTA_Q], &pbf_scorr_delta_q, SHADER_UNIFORM_FLOAT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_PBF_VISCOSITY], &pbf_viscosity, SHADER_UNIFORM_FLOAT, 1);
+    rlSetUniform(gpuPhysics.loc[GPU_LOC_PBF_POLY6_COEFFICIENT], &pbf_poly6_coefficient, SHADER_UNIFORM_FLOAT, 1);
+    rlSetUniform(gpuPhysics.loc[GPU_LOC_PBF_SPIKY_GRADIENT_COEFFICIENT],
+                 &pbf_spiky_gradient_coefficient, SHADER_UNIFORM_FLOAT, 1);
+    rlSetUniform(gpuPhysics.loc[GPU_LOC_PBF_SCORR_REFERENCE_KERNEL],
+                 &pbf_scorr_reference_kernel, SHADER_UNIFORM_FLOAT, 1);
     float player_data[MAX_PLAYERS][4];
     for (int i = 0; i < MAX_PLAYERS; ++i) {
         player_data[i][0] = players[i].pos.x; player_data[i][1] = players[i].pos.y; player_data[i][2] = players[i].pos.z;
@@ -544,9 +549,13 @@ static bool gpu_run_substep(float sub_dt) {
               gpu_dispatch(GPU_MODE_RESET, dynamic_count) &&
               gpu_dispatch(GPU_MODE_HASH_CLEAR, PARTICLE_HASH_SIZE) &&
               gpu_dispatch(GPU_MODE_HASH_BUILD, dynamic_count) &&
-              gpu_dispatch(GPU_MODE_SCENE_COLLISIONS, dynamic_count) &&
-              gpu_dispatch(GPU_MODE_PAIR_COLLISIONS, dynamic_count) &&
-              gpu_dispatch(GPU_MODE_APPLY, dynamic_count);
+              gpu_dispatch(GPU_MODE_SCENE_COLLISIONS, dynamic_count);
+    // PBF already provides fluid/fluid separation. When there are no solid
+    // simulation particles this pass only walks hash chains to reject every pair.
+    if (ok && sim_particle_count > 0) {
+        ok = gpu_dispatch(GPU_MODE_PAIR_COLLISIONS, dynamic_count);
+    }
+    if (ok) ok = gpu_dispatch(GPU_MODE_APPLY, dynamic_count);
     for (int it = 0; ok && it < PBF_DENSITY_ITERS; ++it) {
         ok = gpu_dispatch(GPU_MODE_PBF_LAMBDA, fluid_particle_count) &&
              gpu_dispatch(GPU_MODE_PBF_DELTA, fluid_particle_count) &&
@@ -558,7 +567,9 @@ static bool gpu_run_substep(float sub_dt) {
              gpu_dispatch(GPU_MODE_VGS, voxel_count) &&
              gpu_dispatch(GPU_MODE_APPLY, dynamic_count);
     }
-    ok = ok && gpu_dispatch(GPU_MODE_STATIC_COLLISIONS, dynamic_count) &&
+    // Each PBF iteration ends with a boundary projection, so only solid
+    // particles require the pipeline's final static-collision pass.
+    ok = ok && gpu_dispatch(GPU_MODE_STATIC_COLLISIONS, sim_particle_count) &&
          gpu_dispatch(GPU_MODE_BREAK_MASK, voxel_count) &&
          gpu_dispatch(GPU_MODE_FINALIZE_PARTICLES, dynamic_count) &&
          gpu_dispatch(GPU_MODE_PBF_VISCOSITY, fluid_particle_count) &&
@@ -632,7 +643,8 @@ static bool gpu_physics_init(void) {
         "uSor", "uCollisionRelaxation", "uVgsAlpha", "uVgsBeta", "uVgsEpsilon",
         "uStrainBreakThreshold", "uShearBreakThreshold", "uTetherSpring", "uTetherDamping",
         "uPbfH", "uPbfRestDensity", "uPbfParticleMass", "uPbfLambdaEpsilon",
-        "uPbfScorrK", "uPbfScorrN", "uPbfScorrDeltaQ", "uPbfViscosity",
+        "uPbfScorrK", "uPbfViscosity", "uPbfPoly6Coefficient",
+        "uPbfSpikyGradientCoefficient", "uPbfScorrReferenceKernel",
         "uPlayerPosHalf"
     };
     for (int i = 0; i < GPU_LOC_COUNT; ++i) {

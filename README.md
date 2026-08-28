@@ -258,20 +258,23 @@ counter.
 Creative mode can place runtime PBF cells that reuse the voxel corner-particle
 storage. Press `C` for player one, keypad `3` for player two, or the left stick
 button on a controller to switch the creative brush between `SOLID` and `FLUID`.
-Fluid cells are intentionally excluded from saved map occupancy, glue, sleep,
-activation, projectile, and recycle paths. They collide with immutable static
+Fluid cells are intentionally excluded from saved map occupancy, glue, solid-voxel
+sleep, activation, projectile, and recycle paths. They collide with immutable static
 geometry without waking it and exchange collision corrections with solids that
-are already active.
+are already active. A settled fluid-only scene runs at one quarter rate after a
+conservative stability window and immediately returns to full rate when a player
+approaches or any solid physics particle becomes active.
 
 The implementation follows the density constraint, artificial-pressure surface
 correction, and XSPH viscosity stages from Macklin and Mueller's *Position Based
 Fluids*. A 0.5 m fluid cell contains eight independent particles on a 0.25 m
-lattice. Each physics substep runs four PBF Jacobi iterations with rest density
+lattice. Each physics substep runs two PBF Jacobi iterations with rest density
 1000 kg/m3, `k=0.2`, `n=4`, `dq=0.2h`, and XSPH viscosity 0.15. The same stages
 run through the normal GPU -> CPU MT -> CPU ST fallback chain.
 
-Press `F5` to switch between exact particle spheres and a fast overlapping-sphere
-surface preview. The startup mode can also be selected with:
+Press `F5` to switch between low-poly particle spheres and a fast overlapping-sphere
+surface preview. The preview uses enlarged splats rather than reconstructing a true
+surface. The startup mode can also be selected with:
 
 ```bash
 fps_ray --fluid-render=particles

@@ -423,7 +423,7 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define PBF_SMOOTHING_RADIUS VOXEL_SIZE
 #define PBF_REST_DENSITY 1000.0f
 #define PBF_PARTICLE_MASS (PBF_REST_DENSITY * PBF_PARTICLE_SPACING * PBF_PARTICLE_SPACING * PBF_PARTICLE_SPACING)
-#define PBF_DENSITY_ITERS 4
+#define PBF_DENSITY_ITERS 2
 #define PBF_LAMBDA_EPSILON 1e-6f
 #define PBF_SCORR_K 0.2f
 #define PBF_SCORR_N 4.0f
@@ -431,6 +431,19 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define PBF_XSPH_VISCOSITY 0.15f
 #define PBF_SURFACE_SPLAT_RADIUS (PBF_PARTICLE_SPACING * 0.9f)
 #define PBF_MAX_POSITION_CORRECTION (PBF_PARTICLE_SPACING * 0.025f)
+#define PBF_RENDER_SPHERE_RINGS 6
+#define PBF_RENDER_SPHERE_SLICES 8
+#define PBF_SETTLE_REQUIRED_STEPS 90
+#define PBF_SETTLE_MEAN_SPEED 0.65f
+#define PBF_SETTLE_MAX_SPEED 2.0f
+#define PBF_SETTLE_CENTROID_SPEED 0.08f
+#define PBF_REDUCED_RATE_DIVISOR 4
+#define PBF_WAKE_PLAYER_RADIUS 1.5f
+#define PBF_H2 (PBF_SMOOTHING_RADIUS * PBF_SMOOTHING_RADIUS)
+#define PBF_H6 (PBF_H2 * PBF_H2 * PBF_H2)
+#define PBF_H9 (PBF_H6 * PBF_H2 * PBF_SMOOTHING_RADIUS)
+#define PBF_POLY6_COEFFICIENT (315.0f / (64.0f * PI * PBF_H9))
+#define PBF_SPIKY_GRADIENT_COEFFICIENT (-45.0f / (PI * PBF_H6))
 
 typedef enum {
     PARTICLE_MATERIAL_SOLID = 0,
@@ -599,6 +612,11 @@ static int particle_pool_count = 0;
 static int active_particle_count = 0;
 static int sim_particle_count = 0;
 static int fluid_particle_count = 0;
+static int fluidSettleSteps = 0;
+static int fluidReducedRatePhase = 0;
+static bool fluidReducedRate = false;
+static bool fluidPreviousCentroidValid = false;
+static Vector3 fluidPreviousCentroid = { 0.0f, 0.0f, 0.0f };
 static int free_particle_indices[MAX_PARTICLES];
 static int free_particle_count = 0;
 static int particle_sync_stamp = 1;
@@ -1993,6 +2011,11 @@ static void reset_particle_pool(void) {
     free_particle_count = 0;
     particle_sync_stamp = 1;
     tether_apply_stamp = 1;
+    fluidSettleSteps = 0;
+    fluidReducedRatePhase = 0;
+    fluidReducedRate = false;
+    fluidPreviousCentroidValid = false;
+    fluidPreviousCentroid = (Vector3){ 0.0f, 0.0f, 0.0f };
     memset(particles_pool, 0, sizeof(particles_pool));
     memset(active_particles, 0, sizeof(active_particles));
     memset(sim_particles, 0, sizeof(sim_particles));
@@ -2018,12 +2041,119 @@ static inline bool voxel_uses_spatial_hash(const Voxel *voxel) {
     return voxel && !voxel_is_fluid(voxel);
 }
 
+static void fluid_reset_reduced_rate_state(void) {
+    fluidSettleSteps = 0;
+    fluidReducedRatePhase = 0;
+    fluidReducedRate = false;
+    fluidPreviousCentroidValid = false;
+}
+
+static bool fluid_near_active_player(void) {
+    if (fluid_particle_count <= 0 || activePlayers <= 0) return false;
+    const float wake_radius_sq = PBF_WAKE_PLAYER_RADIUS * PBF_WAKE_PLAYER_RADIUS;
+    for (int player = 0; player < activePlayers; ++player) {
+        if (players[player].respawn_timer > 0.0f) continue;
+        for (int i = 0; i < fluid_particle_count; ++i) {
+            Particle *particle = fluid_particles[i];
+            if (!particle) continue;
+            Vector3 delta = v_sub(particle->pos, players[player].pos);
+            if (v_dot(delta, delta) <= wake_radius_sq) return true;
+        }
+    }
+    return false;
+}
+
+static bool fluid_has_wake_activity(void) {
+    return sim_particle_count > 0 || fluid_near_active_player();
+}
+
+static void fluid_zero_motion(void) {
+    for (int i = 0; i < fluid_particle_count; ++i) {
+        Particle *particle = fluid_particles[i];
+        if (!particle) continue;
+        particle->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+        particle->prev_pos = particle->pos;
+        particle->predicted_pos = particle->pos;
+        particle->pbf_delta = (Vector3){ 0.0f, 0.0f, 0.0f };
+    }
+    for (int i = 0; i < voxel_count; ++i) {
+        if (voxel_is_fluid(&voxels[i])) {
+            voxels[i].vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+        }
+    }
+}
+
+static bool fluid_should_skip_reduced_rate_step(void) {
+    if (!fluidReducedRate || fluid_particle_count <= 0) return false;
+    if (fluid_has_wake_activity()) {
+        fluid_reset_reduced_rate_state();
+        return false;
+    }
+    fluidReducedRatePhase = (fluidReducedRatePhase + 1) % PBF_REDUCED_RATE_DIVISOR;
+    return fluidReducedRatePhase != 0;
+}
+
+static void fluid_note_completed_step(float dt) {
+    if (fluid_particle_count <= 0) {
+        fluid_reset_reduced_rate_state();
+        return;
+    }
+    if (fluid_has_wake_activity()) {
+        fluid_reset_reduced_rate_state();
+        return;
+    }
+    if (fluidReducedRate) {
+        fluid_zero_motion();
+        return;
+    }
+
+    Vector3 centroid = { 0.0f, 0.0f, 0.0f };
+    float speed_sum = 0.0f;
+    float max_speed = 0.0f;
+    int valid_count = 0;
+    for (int i = 0; i < fluid_particle_count; ++i) {
+        Particle *particle = fluid_particles[i];
+        if (!particle || !v_isfinite(particle->pos) || !v_isfinite(particle->vel)) continue;
+        float speed = v_length(particle->vel);
+        centroid = v_add(centroid, particle->pos);
+        speed_sum += speed;
+        if (speed > max_speed) max_speed = speed;
+        valid_count++;
+    }
+    if (valid_count <= 0) {
+        fluid_reset_reduced_rate_state();
+        return;
+    }
+    centroid = v_mul(centroid, 1.0f / (float)valid_count);
+    float mean_speed = speed_sum / (float)valid_count;
+    float centroid_speed = FLT_MAX;
+    if (fluidPreviousCentroidValid && dt > 0.0f) {
+        centroid_speed = v_length(v_sub(centroid, fluidPreviousCentroid)) / dt;
+    }
+    fluidPreviousCentroid = centroid;
+    fluidPreviousCentroidValid = true;
+
+    if (mean_speed <= PBF_SETTLE_MEAN_SPEED &&
+        max_speed <= PBF_SETTLE_MAX_SPEED &&
+        centroid_speed <= PBF_SETTLE_CENTROID_SPEED) {
+        fluidSettleSteps++;
+    } else {
+        fluidSettleSteps = 0;
+    }
+    if (fluidSettleSteps >= PBF_SETTLE_REQUIRED_STEPS) {
+        fluidReducedRate = true;
+        fluidReducedRatePhase = 0;
+        fluid_zero_motion();
+    }
+}
+
 static void fluid_particles_add(Particle *p) {
     if (!p || p->fluid_index >= 0 || fluid_particle_count >= MAX_PARTICLES) {
         return;
     }
     p->fluid_index = fluid_particle_count;
     fluid_particles[fluid_particle_count++] = p;
+    fluid_reset_reduced_rate_state();
 }
 
 static void fluid_particles_remove(Particle *p) {
@@ -2040,6 +2170,7 @@ static void fluid_particles_remove(Particle *p) {
     fluid_particles[last] = NULL;
     fluid_particle_count--;
     p->fluid_index = -1;
+    fluid_reset_reduced_rate_state();
 }
 
 static void sim_particles_add(Particle *p);
@@ -2274,12 +2405,9 @@ typedef struct {
 } PbfJob;
 
 static inline float pbf_poly6(float distance_sq) {
-    const float h = PBF_SMOOTHING_RADIUS;
-    const float h_sq = h * h;
-    if (distance_sq < 0.0f || distance_sq >= h_sq) return 0.0f;
-    float term = h_sq - distance_sq;
-    float coefficient = 315.0f / (64.0f * PI * powf(h, 9.0f));
-    return coefficient * term * term * term;
+    if (distance_sq < 0.0f || distance_sq >= PBF_H2) return 0.0f;
+    float term = PBF_H2 - distance_sq;
+    return PBF_POLY6_COEFFICIENT * term * term * term;
 }
 
 static inline Vector3 pbf_spiky_gradient(Vector3 delta) {
@@ -2290,8 +2418,7 @@ static inline Vector3 pbf_spiky_gradient(Vector3 delta) {
     }
     float distance = sqrtf(distance_sq);
     float term = h - distance;
-    float coefficient = -45.0f / (PI * powf(h, 6.0f));
-    return v_mul(delta, coefficient * term * term / distance);
+    return v_mul(delta, PBF_SPIKY_GRADIENT_COEFFICIENT * term * term / distance);
 }
 
 static void pbf_compute_lambda_range(int start, int end, int worker_id, void *user) {
@@ -2370,9 +2497,11 @@ static void pbf_compute_delta_range(int start, int end, int worker_id, void *use
                         float ratio = (reference_kernel > 0.0f) ? kernel / reference_kernel : 0.0f;
                         // k is dimensionless in the normalized paper formulation; spacing^2
                         // keeps it commensurate with lambda in world-space metre units.
+                        float ratio_sq = ratio * ratio;
+                        float ratio_fourth = ratio_sq * ratio_sq;
                         float scorr = -PBF_SCORR_K *
                                       (PBF_PARTICLE_SPACING * PBF_PARTICLE_SPACING) *
-                                      powf(ratio, PBF_SCORR_N);
+                                      ratio_fourth;
                         float scale = volume * (particle->pbf_lambda + neighbor->pbf_lambda + scorr);
                         delta_sum = v_add(delta_sum, v_mul(pbf_spiky_gradient(separation), scale));
                     }
@@ -6165,9 +6294,34 @@ static void buildTestWorld(void) {
         }
     }
 
-    // Platform legs: 2x2 columns at each corner down to the floor.
+    // One-voxel retaining lip and a shallow pool on the central platform.
     int platform_min = M/2 - platform_size/2;
     int platform_max = M/2 + platform_size/2;
+    int platform_lip_y = platform_base_height + platform_height + 1;
+    Color platform_lip_color = (Color){ 70, 165, 105, 255 };
+    Color platform_fluid_color = (Color){ 45, 145, 235, 220 };
+    for (int x = platform_min; x <= platform_max; ++x) {
+        for (int z = platform_min; z <= platform_max; ++z) {
+            if (x != platform_min && x != platform_max &&
+                z != platform_min && z != platform_max) {
+                continue;
+            }
+            float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+            float py = (platform_lip_y + 0.5f) * VOXEL_SIZE;
+            float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+            addVoxel(px, py, pz, true, false, platform_lip_color, VOXEL_TYPE_SOLID);
+        }
+    }
+    for (int x = platform_min + 2; x <= platform_max - 2; ++x) {
+        for (int z = platform_min + 2; z <= platform_max - 2; ++z) {
+            float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+            float py = (platform_lip_y + 0.5f) * VOXEL_SIZE;
+            float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+            add_fluid_cell(px, py, pz, platform_fluid_color);
+        }
+    }
+
+    // Platform legs: 2x2 columns at each corner down to the floor.
     int leg_min_y = 0;
     int leg_max_y = platform_base_height;
     if (leg_max_y >= leg_min_y) {
@@ -9413,7 +9567,11 @@ static void gather_particle_collisions(float dt, Particle **list, int count) {
         .radius_sq = radius_sq
     };
     pbd_parallel_for(0, count, gather_particle_scene_collisions_range, &job);
-    pbd_parallel_for(0, count, gather_particle_pair_collisions_range, &job);
+    // A fluid-only workload has no solid/fluid pairs, and PBF handles all
+    // fluid/fluid separation. Avoid walking every neighbor chain just to reject it.
+    if (sim_particle_count > 0) {
+        pbd_parallel_for(0, count, gather_particle_pair_collisions_range, &job);
+    }
 }
 
 static void gather_voxel_shape_constraints_range(int start, int end, int worker_id, void *user) {
@@ -10987,22 +11145,28 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
 
 void simulate_voxel_pbd(float dt) {
     if (dynamic_particle_count() <= 0) return;
+    if (sim_particle_count == 0 && fluid_should_skip_reduced_rate_step()) {
+        return;
+    }
     double started = GetTime();
     const float sub_dt = dt / (float)PBD_SUBSTEPS;
     if (physicsBackend.active == PHYSICS_BACKEND_GPU_GL43 && gpuPhysics.ready) {
         int completed = gpu_physics_step(dt);
         if (completed >= PBD_SUBSTEPS) {
+            fluid_note_completed_step(dt);
             physicsBackend.last_step_ms = (GetTime() - started) * 1000.0;
             return;
         }
         gpu_fail("GPU dispatch/readback validation failed; continuing on CPU");
         select_cpu_physics_backend();
         simulate_voxel_pbd_cpu_steps(sub_dt, PBD_SUBSTEPS - completed);
+        fluid_note_completed_step(dt);
         physicsBackend.last_step_ms = (GetTime() - started) * 1000.0;
         return;
     }
     physics_force_single_cpu = (physicsBackend.active == PHYSICS_BACKEND_CPU_ST);
     simulate_voxel_pbd_cpu_steps(sub_dt, PBD_SUBSTEPS);
+    fluid_note_completed_step(dt);
     physicsBackend.last_step_ms = (GetTime() - started) * 1000.0;
 }
 
@@ -12778,7 +12942,11 @@ static void InitInstancing(void) {
     
     orbShader = LoadShader("shaders/orb.vert", "shaders/orb.frag");
     fluidShader = LoadShader("shaders/fluid_instanced.vert", "shaders/fluid_instanced.frag");
-    sphereMesh = GenMeshSphere(VOXEL_SIZE * 0.25f, 16, 16);
+    // Fluid instances dominate this mesh's draw count. The interpolated normals
+    // retain a round appearance while using one sixth as many triangles.
+    sphereMesh = GenMeshSphere(VOXEL_SIZE * 0.25f,
+                               PBF_RENDER_SPHERE_RINGS,
+                               PBF_RENDER_SPHERE_SLICES);
 
     // Get shader locations
     instancedShader.locs[SHADER_LOC_MATRIX_MVP] = GetShaderLocation(instancedShader, "mvp");
@@ -13925,11 +14093,12 @@ static void render_gameplay_view(RenderTexture2D *screens,
         {
             const int fps_font = 18;
             const int fps_pad = 20;
-            const char *fps_text = TextFormat("FPS %d | PHYS %s %.2fms%s",
+            const char *fps_text = TextFormat("FPS %d | PHYS %s %.2fms%s%s",
                                               GetFPS(),
                                               physics_backend_name(physicsBackend.active),
                                               physicsBackend.last_step_ms,
-                                              physicsBackend.sticky_fallback ? " (fallback)" : "");
+                                              physicsBackend.sticky_fallback ? " (fallback)" : "",
+                                              fluidReducedRate ? " | FLUID 1/4" : "");
             int text_w = MeasureText(fps_text, fps_font);
             int box_w = text_w + fps_pad * 2;
             int box_h = fps_font + fps_pad * 2 - 2;
