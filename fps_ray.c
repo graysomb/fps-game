@@ -66,8 +66,12 @@ static PhysicsBackendStatus physicsBackend = {
     .active = PHYSICS_BACKEND_CPU_ST
 };
 static bool physicsReportRequested = false;
+static bool gpuTransferStatsEnabled = false;
+typedef enum { GPU_TRANSFER_RESIDENT = 0, GPU_TRANSFER_LEGACY = 1 } GpuTransferMode;
+static GpuTransferMode gpuTransferMode = GPU_TRANSFER_RESIDENT;
 static int physicsSmokeSteps = 0;
 static int physicsSmokeVoxels = 2;
+static int physicsSmokeBatchSize = 1;
 
 static int debug_parse_argument(int argc, char **argv, int *index);
 static bool debug_run_requested(void);
@@ -102,6 +106,20 @@ static bool parse_physics_arguments(int argc, char **argv) {
             physicsReportRequested = true;
             continue;
         }
+        if (strcmp(arg, "--gpu-transfer-stats") == 0) {
+            gpuTransferStatsEnabled = true;
+            continue;
+        }
+        if (strncmp(arg, "--gpu-transfer-mode=", 20) == 0) {
+            const char *mode = arg + 20;
+            if (strcmp(mode, "resident") == 0) gpuTransferMode = GPU_TRANSFER_RESIDENT;
+            else if (strcmp(mode, "legacy") == 0) gpuTransferMode = GPU_TRANSFER_LEGACY;
+            else {
+                fprintf(stderr, "Unknown GPU transfer mode '%s' (expected resident or legacy)\n", mode);
+                return false;
+            }
+            continue;
+        }
         if (strcmp(arg, "--physics-smoke") == 0) {
             physicsSmokeSteps = 30;
             continue;
@@ -116,6 +134,12 @@ static bool parse_physics_arguments(int argc, char **argv) {
             physicsSmokeVoxels = atoi(arg + 23);
             if (physicsSmokeVoxels < 1) physicsSmokeVoxels = 1;
             if (physicsSmokeVoxels > 4096) physicsSmokeVoxels = 4096;
+            continue;
+        }
+        if (strncmp(arg, "--physics-smoke-batch=", 22) == 0) {
+            physicsSmokeBatchSize = atoi(arg + 22);
+            if (physicsSmokeBatchSize < 1) physicsSmokeBatchSize = 1;
+            if (physicsSmokeBatchSize > 8) physicsSmokeBatchSize = 8;
             continue;
         }
         int debug_parse_result = debug_parse_argument(argc, argv, &i);
@@ -10598,27 +10622,35 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
     //log_dynamic_voxel_positions();
 }
 
-void simulate_voxel_pbd(float dt) {
-    if (sim_particle_count <= 0) return;
+static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
+    if (sim_particle_count <= 0 || fixed_steps <= 0) return;
     rebuild_particle_collision_metadata();
     double started = GetTime();
     const float sub_dt = dt / (float)PBD_SUBSTEPS;
     if (physicsBackend.active == PHYSICS_BACKEND_GPU_GL43 && gpuPhysics.ready) {
-        int completed = gpu_physics_step(dt);
-        if (completed >= PBD_SUBSTEPS) {
+        int completed_steps = gpu_physics_steps(dt, fixed_steps);
+        if (completed_steps >= fixed_steps) {
             physicsBackend.last_step_ms = (GetTime() - started) * 1000.0;
             return;
         }
         gpu_fail("GPU dispatch/readback validation failed; continuing on CPU");
         select_cpu_physics_backend();
-        simulate_voxel_pbd_cpu_steps(sub_dt, PBD_SUBSTEPS - completed);
+        for (int fixed = 0; fixed < fixed_steps; ++fixed) {
+            rebuild_particle_collision_metadata();
+            simulate_voxel_pbd_cpu_steps(sub_dt, PBD_SUBSTEPS);
+        }
         physicsBackend.last_step_ms = (GetTime() - started) * 1000.0;
         return;
     }
     physics_force_single_cpu = (physicsBackend.active == PHYSICS_BACKEND_CPU_ST);
-    simulate_voxel_pbd_cpu_steps(sub_dt, PBD_SUBSTEPS);
+    for (int fixed = 0; fixed < fixed_steps; ++fixed) {
+        rebuild_particle_collision_metadata();
+        simulate_voxel_pbd_cpu_steps(sub_dt, PBD_SUBSTEPS);
+    }
     physicsBackend.last_step_ms = (GetTime() - started) * 1000.0;
 }
+
+void simulate_voxel_pbd(float dt) { simulate_voxel_pbd_steps(dt, 1); }
 
 /*
  * Sketch of the CPU voxel PBD loop, mirroring the paper's GPU pipeline.
@@ -13519,16 +13551,19 @@ static bool run_physics_smoke_test(int steps) {
     rebuild_voxel_hash();
     rebuild_static_hash_if_dirty();
     double started = GetTime();
-    for (int i = 0; i < steps; ++i) {
+    for (int i = 0; i < steps;) {
+        int batch = physicsSmokeBatchSize;
+        if (batch > steps - i) batch = steps - i;
         prepare_tether_forces();
-        simulate_voxel_pbd(PBD_MAX_STEP_DT);
+        simulate_voxel_pbd_steps(PBD_MAX_STEP_DT, batch);
         for (int p = 0; p < sim_particle_count; ++p) {
             Particle *particle = sim_particles[p];
             if (!particle || !v_isfinite(particle->pos) || !v_isfinite(particle->vel)) {
-                fprintf(stderr, "physics-smoke: invalid particle at step=%d index=%d\n", i, p);
+                fprintf(stderr, "physics-smoke: invalid particle at step=%d index=%d\n", i + batch, p);
                 return false;
             }
         }
+        i += batch;
     }
     if (physicsBackend.requested == PHYSICS_BACKEND_GPU_GL43 &&
         physicsBackend.active != PHYSICS_BACKEND_GPU_GL43) {
@@ -14012,9 +14047,11 @@ int main(int argc, char **argv) {
         if (pbdTimeAccumulator > pbd_max_accum) {
             pbdTimeAccumulator = pbd_max_accum;
         }
-        while (pbdTimeAccumulator >= pbd_fixed_dt) {
-            simulate_voxel_pbd(pbd_fixed_dt);
-            pbdTimeAccumulator -= pbd_fixed_dt;
+        int pbd_steps_due = (int)(pbdTimeAccumulator / pbd_fixed_dt);
+        if (pbd_steps_due > PBD_MAX_ACCUM_STEPS) pbd_steps_due = PBD_MAX_ACCUM_STEPS;
+        if (pbd_steps_due > 0) {
+            simulate_voxel_pbd_steps(pbd_fixed_dt, pbd_steps_due);
+            pbdTimeAccumulator -= pbd_fixed_dt * (float)pbd_steps_due;
         }
         recycle_dead_voxels();
         log_dynamic_glue_cluster_breaks();
@@ -14091,9 +14128,11 @@ int main(int argc, char **argv) {
                 if (pbdTimeAccumulator > pbd_max_accum) {
                     pbdTimeAccumulator = pbd_max_accum;
                 }
-                while (pbdTimeAccumulator >= pbd_fixed_dt) {
-                    simulate_voxel_pbd(pbd_fixed_dt);
-                    pbdTimeAccumulator -= pbd_fixed_dt;
+                int pbd_steps_due = (int)(pbdTimeAccumulator / pbd_fixed_dt);
+                if (pbd_steps_due > PBD_MAX_ACCUM_STEPS) pbd_steps_due = PBD_MAX_ACCUM_STEPS;
+                if (pbd_steps_due > 0) {
+                    simulate_voxel_pbd_steps(pbd_fixed_dt, pbd_steps_due);
+                    pbdTimeAccumulator -= pbd_fixed_dt * (float)pbd_steps_due;
                 }
                 recycle_dead_voxels();
                 log_dynamic_glue_cluster_breaks();

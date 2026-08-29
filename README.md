@@ -253,12 +253,25 @@ selecting another backend. CPU MT still degrades to CPU ST when no worker can be
 created. The active backend and its last-step time are displayed beside the FPS
 counter.
 
+The GPU backend keeps compact dynamic particle and voxel state resident between
+frames. It uploads static colliders only when the static hash changes, executes every
+fixed step due for the rendered frame as one batch, and performs one synchronized
+readback for that batch. Use the legacy compact-upload path for A/B comparisons and
+print cumulative transfer timings at shutdown with:
+
+```bash
+fps_ray --physics=gpu --gpu-transfer-mode=legacy --gpu-transfer-stats
+fps_ray --physics=gpu --gpu-transfer-mode=resident --gpu-transfer-stats
+```
+
 Smoke runs still create a short-lived window because the GPU backend needs a
 graphics context:
 
 ```bash
 fps_ray --physics=gpu --physics-smoke=60 --physics-smoke-voxels=256
 fps_ray --physics=cpu-mt --physics-smoke=60 --physics-smoke-voxels=256
+fps_ray --physics=gpu --physics-smoke=80 --physics-smoke-voxels=4096 \
+  --physics-smoke-batch=8 --gpu-transfer-stats
 ```
 
 `FPS_FORCE_GPU_INIT_FAILURE`, `FPS_FORCE_GPU_STEP_FAILURE`, and
