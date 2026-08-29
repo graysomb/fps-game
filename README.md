@@ -253,22 +253,6 @@ selecting another backend. CPU MT still degrades to CPU ST when no worker can be
 created. The active backend and its last-step time are displayed beside the FPS
 counter.
 
-Collision broadphase implementations can be selected independently of the physics
-backend:
-
-```bash
-fps_ray --physics=gpu --collision-profile=baseline
-fps_ray --physics=cpu-mt --collision-profile=hash --collision-hash-factor=16
-fps_ray --physics=cpu-mt --collision-profile=cell-linked
-fps_ray --physics=cpu-mt --collision-profile=cell-span
-```
-
-`wide-grid` is a benchmark control using cells twice the particle diameter.
-`baseline` is the original diameter-grid particle-linked hash. `hash` retains that
-traversal with a tunable larger hash, while `cell-linked` and `cell-span` traverse a
-compact exact occupied-cell directory. `auto` currently keeps the validated baseline.
-Add `--collision-stats` to print phase timings and traversal counters.
-
 Smoke runs still create a short-lived window because the GPU backend needs a
 graphics context:
 
@@ -276,18 +260,6 @@ graphics context:
 fps_ray --physics=gpu --physics-smoke=60 --physics-smoke-voxels=256
 fps_ray --physics=cpu-mt --physics-smoke=60 --physics-smoke-voxels=256
 ```
-
-The smoke harness also accepts `--physics-smoke-warmup=N` and
-`--physics-smoke-shape=dense|sparse|colliding|static`. A complete process-isolated
-CPU/GPU comparison can be generated with:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\benchmark_collisions.ps1
-```
-
-Reports are written under `artifacts/` as raw-run, summary, and independent-upgrade
-comparison CSV files plus aggregate JSON. Use `-DetailedCounters` for a diagnostic run;
-leave it off for timing runs so atomic counters do not perturb the results.
 
 `FPS_FORCE_GPU_INIT_FAILURE`, `FPS_FORCE_GPU_STEP_FAILURE`, and
 `FPS_FORCE_CPU_ST` are available for testing the fallback paths.

@@ -11,4 +11,3 @@ counts.txt
 Flamegraph/
 fps_ray.log
 .build/
-artifacts/

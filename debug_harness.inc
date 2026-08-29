@@ -1282,8 +1282,6 @@ static bool debug_write_report(DebugRunState *state)
     debug_write_json_string(file, physics_backend_name(physicsBackend.requested));
     fputs(",\n  \"activeBackend\": ", file);
     debug_write_json_string(file, physics_backend_name(physicsBackend.active));
-    fputs(",\n  \"collisionProfile\": ", file);
-    debug_write_json_string(file, collision_profile_name(collisionProfileActive));
     fprintf(file, ",\n  \"passed\": %s,\n  \"steps\": %d,\n  \"fixedDt\": %.9g,\n",
             passed ? "true" : "false", debugRunConfig.steps, (double)PBD_MAX_STEP_DT);
     fprintf(file, "  \"fallback\": %s,\n  \"fallbackReason\": ",
