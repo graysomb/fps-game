@@ -32,6 +32,11 @@ layout(std430, binding = 6) buffer HashNextBuffer { int hashNext[]; };
 layout(std430, binding = 7) readonly buffer StaticCellBuffer { ivec4 staticCell[]; };
 layout(std430, binding = 8) readonly buffer TetherBuffer { vec4 tetherTarget[]; };
 layout(std430, binding = 9) readonly buffer CollisionMetaBuffer { ivec4 collisionMeta[]; };
+layout(std430, binding = 10) buffer CellOwnerBuffer { int cellOwner[]; };
+layout(std430, binding = 11) buffer OccupiedCellBuffer { int occupiedCell[]; }; // [0] count, then slots
+layout(std430, binding = 12) buffer CellDataBuffer { ivec4 cellData[]; }; // head/start, count, cursor, reserved
+layout(std430, binding = 13) buffer ParticleCellSlotBuffer { int particleCellSlot[]; };
+layout(std430, binding = 14) buffer CellParticleBuffer { int cellParticle[]; };
 
 uniform int uMode;
 uniform int uParticleCount;
@@ -39,9 +44,12 @@ uniform int uSimCount;
 uniform int uVoxelCount;
 uniform int uHashSize;
 uniform int uStaticHashSize;
+uniform int uCellTableSize;
+uniform int uCollisionProfile;
 uniform int uActivePlayers;
 uniform float uDt;
 uniform float uVoxelSize;
+uniform float uCollisionCellSize;
 uniform float uFloorSize;
 uniform float uGravity;
 uniform float uVelocityDamping;
@@ -70,6 +78,19 @@ const int MODE_STATIC_COLLISIONS = 8;
 const int MODE_BREAK_MASK = 9;
 const int MODE_FINALIZE_PARTICLES = 10;
 const int MODE_FINALIZE_VOXELS = 11;
+const int MODE_CELL_CLEAR = 12;
+const int MODE_CELL_CLAIM = 13;
+const int MODE_CELL_INIT = 14;
+const int MODE_CELL_LINK = 15;
+const int MODE_CELL_COUNT = 16;
+const int MODE_CELL_SCAN = 17;
+const int MODE_CELL_SCATTER = 18;
+const int MODE_CELL_PAIR_COLLISIONS = 19;
+const int MODE_CELL_STATIC_COLLISIONS = 20;
+
+const int PROFILE_HASH = 2;
+const int PROFILE_CELL_LINKED = 3;
+const int PROFILE_CELL_SPAN = 4;
 
 uint voxelParticle(VoxelState v, int corner) {
     return (corner < 4) ? v.particle_0_3[corner] : v.particle_4_7[corner - 4];
@@ -80,6 +101,25 @@ uint hashCoord(ivec3 c, int size) {
     h ^= uint(c.y) * 19349663u;
     h ^= uint(c.z) * 83492791u;
     return h & uint(size - 1);
+}
+
+uint legacyHashCoord(ivec3 c, int size) {
+    uint h = uint(c.x) * 73856093u;
+    h ^= uint(c.y) * 19349663u;
+    h ^= uint(c.z) * 83492791u;
+    return h & uint(size - 1);
+}
+
+uint cellHashCoord(ivec3 c) {
+    uint h = uint(c.x) * 73856093u;
+    h ^= uint(c.y) * 19349663u;
+    h ^= uint(c.z) * 83492791u;
+    h ^= h >> 16;
+    h *= 0x7feb352du;
+    h ^= h >> 15;
+    h *= 0x846ca68bu;
+    h ^= h >> 16;
+    return h & uint(uCellTableSize - 1);
 }
 
 void atomicAddCorrection(uint id, int component, float value) {
@@ -141,7 +181,7 @@ void clearHash(uint gid) {
 void buildHash(uint gid) {
     if (gid >= uint(uSimCount)) return;
     uint id = simId[gid];
-    ivec3 c = ivec3(floor(particle[id].predicted_base_inv_mass.xyz / uVoxelSize));
+    ivec3 c = ivec3(floor(particle[id].predicted_base_inv_mass.xyz / uCollisionCellSize));
     cell[id].xyz = c;
     uint h = hashCoord(c, uHashSize);
     hashNext[gid] = atomicExchange(hashHead[h], int(gid));
@@ -225,6 +265,203 @@ void pairCollisions(uint gid) {
     }
 }
 
+void clearCellGrid(uint gid) {
+    if (gid < uint(uCellTableSize)) cellOwner[gid] = -1;
+    if (gid == 0u) occupiedCell[0] = 0;
+}
+
+void claimParticleCell(uint gid) {
+    if (gid >= uint(uSimCount)) return;
+    uint id = simId[gid];
+    ivec3 coord = ivec3(floor(particle[id].predicted_base_inv_mass.xyz / uCollisionCellSize));
+    cell[id].xyz = coord;
+    memoryBarrierBuffer();
+    uint slot = cellHashCoord(coord);
+    int found = -1;
+    for (int probe = 0; probe < uCellTableSize; ++probe) {
+        int owner = cellOwner[slot];
+        if (owner < 0) {
+            int previous = atomicCompSwap(cellOwner[slot], -1, int(gid));
+            if (previous == -1) {
+                int occupiedIndex = atomicAdd(occupiedCell[0], 1);
+                occupiedCell[occupiedIndex + 1] = int(slot);
+                found = int(slot);
+                break;
+            }
+            owner = previous;
+        }
+        if (owner >= 0 && owner < uSimCount) {
+            uint ownerId = simId[owner];
+            if (all(equal(cell[ownerId].xyz, coord))) {
+                found = int(slot);
+                break;
+            }
+        }
+        slot = (slot + 1u) & uint(uCellTableSize - 1);
+    }
+    particleCellSlot[gid] = found;
+}
+
+int lookupCell(ivec3 coord) {
+    uint slot = cellHashCoord(coord);
+    for (int probe = 0; probe < uCellTableSize; ++probe) {
+        int owner = cellOwner[slot];
+        if (owner < 0) return -1;
+        if (owner < uSimCount) {
+            uint ownerId = simId[owner];
+            if (all(equal(cell[ownerId].xyz, coord))) return int(slot);
+        }
+        slot = (slot + 1u) & uint(uCellTableSize - 1);
+    }
+    return -1;
+}
+
+void initOccupiedCell(uint gid) {
+    int occupiedCount = occupiedCell[0];
+    if (gid == 0u) occupiedCell[uSimCount + 1] = 0;
+    if (gid >= uint(occupiedCount)) return;
+    int slot = occupiedCell[int(gid) + 1];
+    cellData[slot] = ivec4(-1, 0, 0, 0);
+}
+
+void linkParticleCell(uint gid) {
+    if (gid >= uint(uSimCount)) return;
+    int slot = particleCellSlot[gid];
+    if (slot < 0) return;
+    hashNext[gid] = atomicExchange(cellData[slot].x, int(gid));
+    atomicAdd(cellData[slot].y, 1);
+}
+
+void countParticleCell(uint gid) {
+    if (gid >= uint(uSimCount)) return;
+    int slot = particleCellSlot[gid];
+    if (slot >= 0) atomicAdd(cellData[slot].y, 1);
+}
+
+void scanOccupiedCells(uint gid) {
+    int occupiedCount = occupiedCell[0];
+    if (gid >= uint(occupiedCount)) return;
+    int slot = occupiedCell[int(gid) + 1];
+    int offset = atomicAdd(occupiedCell[uSimCount + 1], cellData[slot].y);
+    cellData[slot].x = offset;
+    cellData[slot].z = offset;
+}
+
+void scatterParticleCell(uint gid) {
+    if (gid >= uint(uSimCount)) return;
+    int slot = particleCellSlot[gid];
+    if (slot < 0) return;
+    int target = atomicAdd(cellData[slot].z, 1);
+    cellParticle[target] = int(gid);
+}
+
+void collideCellPair(int aItem, int bItem) {
+    if (aItem < 0 || bItem < 0 || aItem >= uSimCount || bItem >= uSimCount || aItem == bItem) return;
+    uint aid = simId[aItem];
+    uint bid = simId[bItem];
+    ParticleState a = particle[aid];
+    ParticleState b = particle[bid];
+    ivec4 metaA = collisionMeta[aid];
+    ivec4 metaB = collisionMeta[bid];
+    if (metaA.w >= 0 && metaA.w == metaB.w) {
+        vec3 restDelta = vec3(metaA.xyz - metaB.xyz) * uRestGridStep;
+        float restTarget = a.pos_radius.w + b.pos_radius.w + 1e-5;
+        if (dot(restDelta, restDelta) <= restTarget * restTarget) return;
+    }
+    float wa = a.prev_inv_mass.w;
+    float wb = b.prev_inv_mass.w;
+    float weightSum = wa + wb;
+    if (weightSum <= 0.0) return;
+    const float eps = 1e-6;
+    vec3 delta = a.predicted_base_inv_mass.xyz - b.predicted_base_inv_mass.xyz;
+    float distanceSq = dot(delta, delta);
+    float target = a.pos_radius.w + b.pos_radius.w;
+    if (distanceSq >= target * target) return;
+    float distance = sqrt(max(distanceSq, eps));
+    float penetration = target - distance;
+    if (penetration <= 0.0) return;
+    vec3 normal = (distance > eps) ? delta / distance : vec3(1.0, 0.0, 0.0);
+    float scale = uCollisionRelaxation * (0.5 * penetration) / weightSum;
+    float damp = 1.0;
+    int maxTimer = max(cell[aid].w, cell[bid].w);
+    if (uBreakDampFrames > 0 && maxTimer > 0) {
+        damp = clamp(1.0 - float(maxTimer) / float(uBreakDampFrames), 0.0, 1.0);
+    }
+    if (wa > 0.0) accumulate(aid, normal * (scale * wa * damp), 1.0);
+    if (wb > 0.0) accumulate(bid, -normal * (scale * wb * damp), 1.0);
+}
+
+void collideParticleWithPlayers(int simIndex) {
+    if (simIndex < 0 || simIndex >= uSimCount) return;
+    uint id = simId[simIndex];
+    ParticleState p = particle[id];
+    if (p.prev_inv_mass.w <= 0.0) return;
+    const float eps = 1e-6;
+    vec3 scenePos = p.predicted_base_inv_mass.xyz;
+    float radius = p.pos_radius.w;
+    for (int playerIndex = 0; playerIndex < uActivePlayers && playerIndex < 4; ++playerIndex) {
+        if (uPlayerPosHalf[playerIndex].w < 0.0) continue;
+        float halfSize = uPlayerPosHalf[playerIndex].w;
+        vec3 nearest = clamp(scenePos, uPlayerPosHalf[playerIndex].xyz - vec3(halfSize),
+                                      uPlayerPosHalf[playerIndex].xyz + vec3(halfSize));
+        vec3 delta = scenePos - nearest;
+        float distanceSq = dot(delta, delta);
+        if (distanceSq < radius * radius) {
+            float distance = sqrt(max(distanceSq, eps));
+            vec3 normal = (distance > eps) ? -delta / distance : vec3(0.0, 1.0, 0.0);
+            scenePos += normal * (radius - distance);
+        }
+    }
+    accumulate(id, scenePos - p.predicted_base_inv_mass.xyz, 1.0);
+}
+
+void cellPairCollisions(uint gid) {
+    int occupiedCount = occupiedCell[0];
+    if (gid >= uint(occupiedCount)) return;
+    int sourceSlot = occupiedCell[int(gid) + 1];
+    int owner = cellOwner[sourceSlot];
+    if (owner < 0 || owner >= uSimCount) return;
+    ivec3 sourceCoord = cell[simId[owner]].xyz;
+
+    if (uCollisionProfile == PROFILE_CELL_SPAN) {
+        int sourceStart = cellData[sourceSlot].x;
+        int sourceCount = cellData[sourceSlot].y;
+        for (int a = 0; a < sourceCount; ++a) collideParticleWithPlayers(cellParticle[sourceStart + a]);
+        for (int dz=-1; dz<=1; ++dz) for (int dy=-1; dy<=1; ++dy) for (int dx=-1; dx<=1; ++dx) {
+            if (dz < 0 || (dz == 0 && dy < 0) || (dz == 0 && dy == 0 && dx < 0)) continue;
+            int neighborSlot = lookupCell(sourceCoord + ivec3(dx,dy,dz));
+            if (neighborSlot < 0) continue;
+            int neighborStart = cellData[neighborSlot].x;
+            int neighborCount = cellData[neighborSlot].y;
+            bool sameCell = neighborSlot == sourceSlot;
+            for (int a = 0; a < sourceCount; ++a) {
+                int aItem = cellParticle[sourceStart + a];
+                for (int b = 0; b < neighborCount; ++b) {
+                    int bItem = cellParticle[neighborStart + b];
+                    if (sameCell && bItem <= aItem) continue;
+                    collideCellPair(aItem, bItem);
+                }
+            }
+        }
+    } else {
+        for (int aItem = cellData[sourceSlot].x; aItem >= 0; aItem = hashNext[aItem]) {
+            collideParticleWithPlayers(aItem);
+        }
+        for (int dz=-1; dz<=1; ++dz) for (int dy=-1; dy<=1; ++dy) for (int dx=-1; dx<=1; ++dx) {
+            if (dz < 0 || (dz == 0 && dy < 0) || (dz == 0 && dy == 0 && dx < 0)) continue;
+            int neighborSlot = lookupCell(sourceCoord + ivec3(dx,dy,dz));
+            if (neighborSlot < 0) continue;
+            bool sameCell = neighborSlot == sourceSlot;
+            for (int aItem = cellData[sourceSlot].x; aItem >= 0; aItem = hashNext[aItem]) {
+                for (int bItem = cellData[neighborSlot].x; bItem >= 0; bItem = hashNext[bItem]) {
+                    if (sameCell && bItem <= aItem) continue;
+                    collideCellPair(aItem, bItem);
+                }
+            }
+        }
+    }
+}
+
 void applyCorrections(uint gid) {
     if (gid >= uint(uSimCount)) return;
     uint id = simId[gid];
@@ -293,7 +530,7 @@ void solveVgs(uint gid) {
 }
 
 int findStaticCell(ivec3 coord) {
-    uint h = hashCoord(coord, uStaticHashSize);
+    uint h = legacyHashCoord(coord, uStaticHashSize);
     for (int probe = 0; probe < uStaticHashSize; ++probe) {
         ivec4 entry = staticCell[h];
         if (entry.w < 0) return -1;
@@ -382,6 +619,81 @@ void staticCollisions(uint gid) {
     particle[id].predicted_base_inv_mass.xyz = pos;
 }
 
+void resolveCellStaticParticle(int simIndex, ivec3 sourceCenter, int candidates[27], int candidateCount) {
+    if (simIndex < 0 || simIndex >= uSimCount) return;
+    uint id = simId[simIndex];
+    ParticleState p = particle[id];
+    if (p.prev_inv_mass.w <= 0.0) return;
+    float radius = p.pos_radius.w;
+    vec3 pos = p.predicted_base_inv_mass.xyz;
+    float terrainLimit = uFloorSize - radius;
+    float floorLimit = max(0.0, 0.5 * uVoxelSize - radius);
+    pos.y = max(pos.y, floorLimit);
+    pos.xz = clamp(pos.xz, vec2(-terrainLimit), vec2(terrainLimit));
+    const float eps = 1e-6;
+    for (int i = 0; i < uActivePlayers && i < 4; ++i) {
+        if (uPlayerPosHalf[i].w < 0.0) continue;
+        float halfSize = uPlayerPosHalf[i].w;
+        vec3 nearest = clamp(pos, uPlayerPosHalf[i].xyz - vec3(halfSize),
+                                  uPlayerPosHalf[i].xyz + vec3(halfSize));
+        vec3 delta = pos - nearest;
+        float distanceSq = dot(delta, delta);
+        if (distanceSq < radius * radius) {
+            float distance = sqrt(max(distanceSq, eps));
+            vec3 normal = (distance > eps) ? delta / distance : vec3(0.0, 1.0, 0.0);
+            pos += normal * (radius - distance);
+        }
+    }
+    ivec3 currentCenter = ivec3(floor(pos / uVoxelSize));
+    if (all(equal(currentCenter, sourceCenter))) {
+        for (int i = 0; i < candidateCount; ++i) {
+            int voxelId = candidates[i];
+            if (voxelId >= 0 && voxelId < uVoxelCount) pos = pushOutOfBox(pos, 0.25 * uVoxelSize, voxel[voxelId]);
+        }
+    } else {
+        int movedCandidates[27];
+        int movedCount = 0;
+        for (int z=-1; z<=1; ++z) for (int y=-1; y<=1; ++y) for (int x=-1; x<=1; ++x) {
+            int voxelId = findStaticCell(currentCenter + ivec3(x,y,z));
+            if (voxelId < 0 || voxelId >= uVoxelCount) continue;
+            bool duplicate = false;
+            for (int i = 0; i < movedCount; ++i) duplicate = duplicate || movedCandidates[i] == voxelId;
+            if (!duplicate) movedCandidates[movedCount++] = voxelId;
+        }
+        for (int i = 0; i < movedCount; ++i) {
+            pos = pushOutOfBox(pos, 0.25 * uVoxelSize, voxel[movedCandidates[i]]);
+        }
+    }
+    particle[id].predicted_base_inv_mass.xyz = pos;
+}
+
+void cellStaticCollisions(uint gid) {
+    int occupiedCount = occupiedCell[0];
+    if (gid >= uint(occupiedCount)) return;
+    int slot = occupiedCell[int(gid) + 1];
+    int owner = cellOwner[slot];
+    if (owner < 0 || owner >= uSimCount) return;
+    ivec3 center = cell[simId[owner]].xyz;
+    int candidates[27];
+    int candidateCount = 0;
+    for (int z=-1; z<=1; ++z) for (int y=-1; y<=1; ++y) for (int x=-1; x<=1; ++x) {
+        int voxelId = findStaticCell(center + ivec3(x,y,z));
+        if (voxelId < 0 || voxelId >= uVoxelCount) continue;
+        bool duplicate = false;
+        for (int i = 0; i < candidateCount; ++i) duplicate = duplicate || candidates[i] == voxelId;
+        if (!duplicate) candidates[candidateCount++] = voxelId;
+    }
+    if (uCollisionProfile == PROFILE_CELL_SPAN) {
+        int begin = cellData[slot].x;
+        int count = cellData[slot].y;
+        for (int i = 0; i < count; ++i) resolveCellStaticParticle(cellParticle[begin + i], center, candidates, candidateCount);
+    } else {
+        for (int item = cellData[slot].x; item >= 0; item = hashNext[item]) {
+            resolveCellStaticParticle(item, center, candidates, candidateCount);
+        }
+    }
+}
+
 void gatherBreakMask(uint gid) {
     if (gid >= uint(uVoxelCount)) return;
     VoxelState v = voxel[gid];
@@ -451,4 +763,13 @@ void main() {
     else if (uMode==MODE_BREAK_MASK) gatherBreakMask(gid);
     else if (uMode==MODE_FINALIZE_PARTICLES) finalizeParticle(gid);
     else if (uMode==MODE_FINALIZE_VOXELS) finalizeVoxel(gid);
+    else if (uMode==MODE_CELL_CLEAR) clearCellGrid(gid);
+    else if (uMode==MODE_CELL_CLAIM) claimParticleCell(gid);
+    else if (uMode==MODE_CELL_INIT) initOccupiedCell(gid);
+    else if (uMode==MODE_CELL_LINK) linkParticleCell(gid);
+    else if (uMode==MODE_CELL_COUNT) countParticleCell(gid);
+    else if (uMode==MODE_CELL_SCAN) scanOccupiedCells(gid);
+    else if (uMode==MODE_CELL_SCATTER) scatterParticleCell(gid);
+    else if (uMode==MODE_CELL_PAIR_COLLISIONS) cellPairCollisions(gid);
+    else if (uMode==MODE_CELL_STATIC_COLLISIONS) cellStaticCollisions(gid);
 }

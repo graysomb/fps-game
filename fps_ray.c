@@ -68,6 +68,46 @@ static PhysicsBackendStatus physicsBackend = {
 static bool physicsReportRequested = false;
 static int physicsSmokeSteps = 0;
 static int physicsSmokeVoxels = 2;
+static int physicsSmokeWarmup = 0;
+static const char *physicsSmokeShape = "dense";
+
+typedef enum CollisionProfile {
+    COLLISION_PROFILE_WIDE_GRID = 0,
+    COLLISION_PROFILE_BASELINE,
+    COLLISION_PROFILE_HASH,
+    COLLISION_PROFILE_CELL_LINKED,
+    COLLISION_PROFILE_CELL_SPAN,
+    COLLISION_PROFILE_AUTO
+} CollisionProfile;
+
+static CollisionProfile collisionProfileRequested = COLLISION_PROFILE_AUTO;
+static CollisionProfile collisionProfileActive = COLLISION_PROFILE_BASELINE;
+static int collisionHashFactor = 16;
+static bool collisionStatsEnabled = false;
+
+static const char *collision_profile_name(CollisionProfile profile) {
+    switch (profile) {
+        case COLLISION_PROFILE_WIDE_GRID: return "wide-grid";
+        case COLLISION_PROFILE_BASELINE: return "baseline";
+        case COLLISION_PROFILE_HASH: return "hash";
+        case COLLISION_PROFILE_CELL_LINKED: return "cell-linked";
+        case COLLISION_PROFILE_CELL_SPAN: return "cell-span";
+        case COLLISION_PROFILE_AUTO: return "auto";
+        default: return "unknown";
+    }
+}
+
+static bool collision_profile_parse(const char *value, CollisionProfile *out) {
+    if (!value || !out) return false;
+    if (strcmp(value, "wide-grid") == 0) *out = COLLISION_PROFILE_WIDE_GRID;
+    else if (strcmp(value, "baseline") == 0) *out = COLLISION_PROFILE_BASELINE;
+    else if (strcmp(value, "hash") == 0) *out = COLLISION_PROFILE_HASH;
+    else if (strcmp(value, "cell-linked") == 0) *out = COLLISION_PROFILE_CELL_LINKED;
+    else if (strcmp(value, "cell-span") == 0 || strcmp(value, "contiguous") == 0) *out = COLLISION_PROFILE_CELL_SPAN;
+    else if (strcmp(value, "auto") == 0) *out = COLLISION_PROFILE_AUTO;
+    else return false;
+    return true;
+}
 
 static int debug_parse_argument(int argc, char **argv, int *index);
 static bool debug_run_requested(void);
@@ -116,6 +156,46 @@ static bool parse_physics_arguments(int argc, char **argv) {
             physicsSmokeVoxels = atoi(arg + 23);
             if (physicsSmokeVoxels < 1) physicsSmokeVoxels = 1;
             if (physicsSmokeVoxels > 4096) physicsSmokeVoxels = 4096;
+            continue;
+        }
+        if (strncmp(arg, "--physics-smoke-warmup=", 23) == 0) {
+            physicsSmokeWarmup = atoi(arg + 23);
+            if (physicsSmokeWarmup < 0) physicsSmokeWarmup = 0;
+            if (physicsSmokeWarmup > 10000) physicsSmokeWarmup = 10000;
+            continue;
+        }
+        if (strncmp(arg, "--physics-smoke-shape=", 22) == 0) {
+            physicsSmokeShape = arg + 22;
+            if (strcmp(physicsSmokeShape, "dense") != 0 &&
+                strcmp(physicsSmokeShape, "sparse") != 0 &&
+                strcmp(physicsSmokeShape, "colliding") != 0 &&
+                strcmp(physicsSmokeShape, "static") != 0) {
+                fprintf(stderr, "Physics smoke shape must be dense, sparse, colliding, or static\n");
+                return false;
+            }
+            continue;
+        }
+        if (strcmp(arg, "--collision-stats") == 0) {
+            collisionStatsEnabled = true;
+            continue;
+        }
+        const char *collision_value = NULL;
+        if (strncmp(arg, "--collision-profile=", 20) == 0) collision_value = arg + 20;
+        else if (strcmp(arg, "--collision-profile") == 0 && i + 1 < argc) collision_value = argv[++i];
+        if (collision_value) {
+            if (!collision_profile_parse(collision_value, &collisionProfileRequested)) {
+                fprintf(stderr, "Unknown collision profile '%s'\n", collision_value);
+                return false;
+            }
+            continue;
+        }
+        if (strncmp(arg, "--collision-hash-factor=", 24) == 0) {
+            int factor = atoi(arg + 24);
+            if (factor != 1 && factor != 2 && factor != 4 && factor != 8 && factor != 16) {
+                fprintf(stderr, "Collision hash factor must be 1, 2, 4, 8, or 16\n");
+                return false;
+            }
+            collisionHashFactor = factor;
             continue;
         }
         int debug_parse_result = debug_parse_argument(argc, argv, &i);
@@ -389,7 +469,16 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define VOXEL_SIZE     0.5f    // size of each voxel cube
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
 #define MAX_PARTICLES (MAX_VOXELS * 8)
-#define PARTICLE_HASH_SIZE 262144
+#define PARTICLE_HASH_BASELINE_SIZE 262144
+#define PARTICLE_HASH_SIZE 1048576
+#define COLLISION_CELL_MIN_CAPACITY 1024
+
+typedef struct Particle Particle;
+
+static inline float collision_cell_size(void) {
+    const float diameter = 2.0f * PARTICLE_RADIUS;
+    return (collisionProfileActive == COLLISION_PROFILE_WIDE_GRID) ? diameter * 2.0f : diameter;
+}
 
 // Tunable voxel edit brush (per-axis span of the add/remove operation)
 static int voxelBrushSpan = 3;
@@ -455,7 +544,7 @@ static const Vector3 playerSpawnPositions[MAX_PLAYERS] = {
 };
 static const float playerSpawnYaw[MAX_PLAYERS] = { 0.0f, 180.0f, 45.0f, -135.0f };
 
-typedef struct {
+typedef struct Particle {
     Vector3 pos;
     Vector3 prev_pos;
     Vector3 predicted_pos;
@@ -554,6 +643,62 @@ static int particleHashActiveSize = 1024;
 static int tether_apply_stamp = 1;
 static _Atomic int particle_hash_head[PARTICLE_HASH_SIZE];
 static int particle_hash_next[MAX_PARTICLES];
+
+typedef struct CollisionCellGrid {
+    _Atomic int *owner;
+    _Atomic int *head;
+    _Atomic int *count;
+    _Atomic int *cursor;
+    int *start;
+    int *occupied_slots;
+    int *particle_slot;
+    int *span_ids;
+    int capacity;
+    int particle_capacity;
+    atomic_int occupied_count;
+    Particle **list;
+    int particle_count;
+    bool spans;
+} CollisionCellGrid;
+
+typedef struct CollisionStats {
+    _Atomic uint64_t hash_bucket_queries;
+    _Atomic uint64_t list_entries;
+    _Atomic uint64_t hash_aliases;
+    _Atomic uint64_t exact_candidates;
+    _Atomic uint64_t structural_rejects;
+    _Atomic uint64_t distance_tests;
+    _Atomic uint64_t contacts;
+    _Atomic uint64_t static_cell_queries;
+    _Atomic uint64_t static_candidate_tests;
+    uint64_t occupied_cells;
+    double hash_build_ms;
+    double pair_ms;
+    double static_ms;
+} CollisionStats;
+
+static CollisionCellGrid collisionGrid = { 0 };
+static CollisionStats collisionStats = { 0 };
+
+static inline void collision_stat_add(_Atomic uint64_t *counter, uint64_t value) {
+    if (collisionStatsEnabled) atomic_fetch_add_explicit(counter, value, memory_order_relaxed);
+}
+
+static void collision_stats_reset(void) {
+    atomic_store_explicit(&collisionStats.hash_bucket_queries, 0, memory_order_relaxed);
+    atomic_store_explicit(&collisionStats.list_entries, 0, memory_order_relaxed);
+    atomic_store_explicit(&collisionStats.hash_aliases, 0, memory_order_relaxed);
+    atomic_store_explicit(&collisionStats.exact_candidates, 0, memory_order_relaxed);
+    atomic_store_explicit(&collisionStats.structural_rejects, 0, memory_order_relaxed);
+    atomic_store_explicit(&collisionStats.distance_tests, 0, memory_order_relaxed);
+    atomic_store_explicit(&collisionStats.contacts, 0, memory_order_relaxed);
+    atomic_store_explicit(&collisionStats.static_cell_queries, 0, memory_order_relaxed);
+    atomic_store_explicit(&collisionStats.static_candidate_tests, 0, memory_order_relaxed);
+    collisionStats.occupied_cells = 0;
+    collisionStats.hash_build_ms = 0.0;
+    collisionStats.pair_ms = 0.0;
+    collisionStats.static_ms = 0.0;
+}
 static Particle *particle_snapshot[MAX_PARTICLES];
 typedef struct { float x, y, z, weight; } PairCorrection;
 static PairCorrection *pairCorrectionScratch = NULL;
@@ -791,6 +936,16 @@ static void shutdown_pbd_thread_pool(void) {
     pairCorrectionScratch = NULL;
     pairCorrectionScratchCapacity = 0;
     pairCorrectionScratchSlots = 0;
+    free(collisionGrid.owner); collisionGrid.owner = NULL;
+    free(collisionGrid.head); collisionGrid.head = NULL;
+    free(collisionGrid.count); collisionGrid.count = NULL;
+    free(collisionGrid.cursor); collisionGrid.cursor = NULL;
+    free(collisionGrid.start); collisionGrid.start = NULL;
+    free(collisionGrid.occupied_slots); collisionGrid.occupied_slots = NULL;
+    free(collisionGrid.particle_slot); collisionGrid.particle_slot = NULL;
+    free(collisionGrid.span_ids); collisionGrid.span_ids = NULL;
+    collisionGrid.capacity = 0;
+    collisionGrid.particle_capacity = 0;
     if (!pbd_pool.threads) {
         return;
     }
@@ -2097,17 +2252,34 @@ static void particle_release(Particle *p) {
 }
 
 static inline int particle_hash(int x, int y, int z) {
-    uint32_t h = (uint32_t)(x * 73856093) ^ (uint32_t)(y * 19349663) ^ (uint32_t)(z * 83492791);
+    uint32_t h = (uint32_t)x * 73856093u;
+    h ^= (uint32_t)y * 19349663u;
+    h ^= (uint32_t)z * 83492791u;
     return (int)(h & (uint32_t)(particleHashActiveSize - 1));
+}
+
+static inline uint32_t collision_hash_coord_size(int x, int y, int z, int size) {
+    uint32_t h = (uint32_t)x * 73856093u;
+    h ^= (uint32_t)y * 19349663u;
+    h ^= (uint32_t)z * 83492791u;
+    h ^= h >> 16;
+    h *= 0x7feb352du;
+    h ^= h >> 15;
+    h *= 0x846ca68bu;
+    h ^= h >> 16;
+    return h & (uint32_t)(size - 1);
 }
 
 static int particle_hash_size_for_count(int count) {
     // Keep hash-only chain collisions rare; exact cell checks preserve
     // correctness, but dense false chains cost more than clearing extra heads.
-    size_t target = (size_t)((count > 0) ? count : 1) * 16u;
+    int factor = (collisionProfileActive >= COLLISION_PROFILE_HASH) ? collisionHashFactor : 16;
+    int max_size = (collisionProfileActive >= COLLISION_PROFILE_HASH)
+        ? PARTICLE_HASH_SIZE : PARTICLE_HASH_BASELINE_SIZE;
+    size_t target = (size_t)((count > 0) ? count : 1) * (size_t)factor;
     int size = 1024;
-    while ((size_t)size < target && size < PARTICLE_HASH_SIZE) size <<= 1;
-    if (size > PARTICLE_HASH_SIZE) size = PARTICLE_HASH_SIZE;
+    while ((size_t)size < target && size < max_size) size <<= 1;
+    if (size > max_size) size = max_size;
     return size;
 }
 
@@ -2147,9 +2319,10 @@ static void particle_hash_build_range(int start, int end, int worker_id, void *u
         if (!p) {
             continue;
         }
-        int gx = (int)floorf(p->predicted_pos.x / VOXEL_SIZE);
-        int gy = (int)floorf(p->predicted_pos.y / VOXEL_SIZE);
-        int gz = (int)floorf(p->predicted_pos.z / VOXEL_SIZE);
+        float cell_size = collision_cell_size();
+        int gx = (int)floorf(p->predicted_pos.x / cell_size);
+        int gy = (int)floorf(p->predicted_pos.y / cell_size);
+        int gz = (int)floorf(p->predicted_pos.z / cell_size);
         p->cell_x = gx;
         p->cell_y = gy;
         p->cell_z = gz;
@@ -2160,10 +2333,202 @@ static void particle_hash_build_range(int start, int end, int worker_id, void *u
 }
 
 static void build_particle_hash(Particle **list, int count) {
+    double started = collisionStatsEnabled ? GetTime() : 0.0;
     particleHashActiveSize = particle_hash_size_for_count(count);
     ParticleHashBuildJob job = { .list = list, .count = count };
     pbd_parallel_for(0, particleHashActiveSize, particle_hash_clear_range, NULL);
     pbd_parallel_for(0, count, particle_hash_build_range, &job);
+    if (collisionStatsEnabled) collisionStats.hash_build_ms += (GetTime() - started) * 1000.0;
+}
+
+typedef struct {
+    CollisionCellGrid *grid;
+} CollisionGridJob;
+
+static int collision_next_power_of_two(int value) {
+    int result = COLLISION_CELL_MIN_CAPACITY;
+    while (result < value && result <= INT_MAX / 2) result <<= 1;
+    return result;
+}
+
+static bool collision_grid_reserve(CollisionCellGrid *grid, int particle_count) {
+    int wanted_capacity = collision_next_power_of_two((particle_count > 0 ? particle_count : 1) * 2);
+    if (wanted_capacity > grid->capacity) {
+#define RESIZE_COLLISION_FIELD(field, type, count) do { \
+        void *next_ptr = realloc(grid->field, (size_t)(count) * sizeof(type)); \
+        if (!next_ptr) return false; \
+        grid->field = next_ptr; \
+    } while (0)
+        RESIZE_COLLISION_FIELD(owner, _Atomic int, wanted_capacity);
+        RESIZE_COLLISION_FIELD(head, _Atomic int, wanted_capacity);
+        RESIZE_COLLISION_FIELD(count, _Atomic int, wanted_capacity);
+        RESIZE_COLLISION_FIELD(cursor, _Atomic int, wanted_capacity);
+        RESIZE_COLLISION_FIELD(start, int, wanted_capacity);
+        RESIZE_COLLISION_FIELD(occupied_slots, int, wanted_capacity);
+        grid->capacity = wanted_capacity;
+#undef RESIZE_COLLISION_FIELD
+    }
+    if (particle_count > grid->particle_capacity) {
+        int wanted_particles = collision_next_power_of_two(particle_count);
+        int *next_slot = realloc(grid->particle_slot, (size_t)wanted_particles * sizeof(*grid->particle_slot));
+        if (!next_slot) return false;
+        grid->particle_slot = next_slot;
+        int *next_span = realloc(grid->span_ids, (size_t)wanted_particles * sizeof(*grid->span_ids));
+        if (!next_span) return false;
+        grid->span_ids = next_span;
+        grid->particle_capacity = wanted_particles;
+    }
+    return true;
+}
+
+static void collision_grid_clear_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    CollisionGridJob *job = user;
+    for (int slot = start; slot < end; ++slot) {
+        atomic_store_explicit(&job->grid->owner[slot], -1, memory_order_relaxed);
+    }
+}
+
+static void collision_grid_claim_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    CollisionGridJob *job = user;
+    CollisionCellGrid *grid = job->grid;
+    float cell_size = collision_cell_size();
+    for (int i = start; i < end; ++i) {
+        Particle *p = grid->list[i];
+        if (!p) { grid->particle_slot[i] = -1; continue; }
+        p->cell_x = (int)floorf(p->predicted_pos.x / cell_size);
+        p->cell_y = (int)floorf(p->predicted_pos.y / cell_size);
+        p->cell_z = (int)floorf(p->predicted_pos.z / cell_size);
+        uint32_t slot = collision_hash_coord_size(p->cell_x, p->cell_y, p->cell_z, grid->capacity);
+        int found = -1;
+        for (int probe = 0; probe < grid->capacity; ++probe) {
+            int owner = atomic_load_explicit(&grid->owner[slot], memory_order_acquire);
+            if (owner < 0) {
+                int expected = -1;
+                if (atomic_compare_exchange_strong_explicit(&grid->owner[slot], &expected, i,
+                                                            memory_order_release, memory_order_relaxed)) {
+                    int occupied = atomic_fetch_add_explicit(&grid->occupied_count, 1, memory_order_relaxed);
+                    grid->occupied_slots[occupied] = (int)slot;
+                    found = (int)slot;
+                    break;
+                }
+                owner = expected;
+            }
+            if (owner >= 0 && owner < grid->particle_count) {
+                Particle *key = grid->list[owner];
+                if (key && key->cell_x == p->cell_x && key->cell_y == p->cell_y && key->cell_z == p->cell_z) {
+                    found = (int)slot;
+                    break;
+                }
+            }
+            slot = (slot + 1u) & (uint32_t)(grid->capacity - 1);
+        }
+        grid->particle_slot[i] = found;
+    }
+}
+
+static void collision_grid_init_linked_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    CollisionGridJob *job = user;
+    CollisionCellGrid *grid = job->grid;
+    int occupied = atomic_load_explicit(&grid->occupied_count, memory_order_relaxed);
+    if (end > occupied) end = occupied;
+    for (int i = start; i < end; ++i) atomic_store_explicit(&grid->head[grid->occupied_slots[i]], -1, memory_order_relaxed);
+}
+
+static void collision_grid_link_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    CollisionGridJob *job = user;
+    CollisionCellGrid *grid = job->grid;
+    for (int i = start; i < end; ++i) {
+        int slot = grid->particle_slot[i];
+        if (slot < 0) continue;
+        grid->span_ids[i] = atomic_exchange_explicit(&grid->head[slot], i, memory_order_relaxed);
+    }
+}
+
+static void collision_grid_init_counts_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    CollisionGridJob *job = user;
+    CollisionCellGrid *grid = job->grid;
+    int occupied = atomic_load_explicit(&grid->occupied_count, memory_order_relaxed);
+    if (end > occupied) end = occupied;
+    for (int i = start; i < end; ++i) atomic_store_explicit(&grid->count[grid->occupied_slots[i]], 0, memory_order_relaxed);
+}
+
+static void collision_grid_count_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    CollisionGridJob *job = user;
+    CollisionCellGrid *grid = job->grid;
+    for (int i = start; i < end; ++i) {
+        int slot = grid->particle_slot[i];
+        if (slot >= 0) atomic_fetch_add_explicit(&grid->count[slot], 1, memory_order_relaxed);
+    }
+}
+
+static void collision_grid_scatter_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    CollisionGridJob *job = user;
+    CollisionCellGrid *grid = job->grid;
+    for (int i = start; i < end; ++i) {
+        int slot = grid->particle_slot[i];
+        if (slot < 0) continue;
+        int at = atomic_fetch_add_explicit(&grid->cursor[slot], 1, memory_order_relaxed);
+        grid->span_ids[at] = i;
+    }
+}
+
+static bool build_collision_cell_grid(Particle **list, int count, bool spans) {
+    double started = collisionStatsEnabled ? GetTime() : 0.0;
+    CollisionCellGrid *grid = &collisionGrid;
+    if (!collision_grid_reserve(grid, count)) return false;
+    grid->list = list;
+    grid->particle_count = count;
+    grid->spans = spans;
+    atomic_store_explicit(&grid->occupied_count, 0, memory_order_relaxed);
+    CollisionGridJob job = { .grid = grid };
+    pbd_parallel_for(0, grid->capacity, collision_grid_clear_range, &job);
+    pbd_parallel_for(0, count, collision_grid_claim_range, &job);
+    int occupied = atomic_load_explicit(&grid->occupied_count, memory_order_relaxed);
+    if (occupied < 0 || occupied > count) return false;
+    if (!spans) {
+        pbd_parallel_for(0, occupied, collision_grid_init_linked_range, &job);
+        pbd_parallel_for(0, count, collision_grid_link_range, &job);
+    } else {
+        pbd_parallel_for(0, occupied, collision_grid_init_counts_range, &job);
+        pbd_parallel_for(0, count, collision_grid_count_range, &job);
+        int offset = 0;
+        for (int i = 0; i < occupied; ++i) {
+            int slot = grid->occupied_slots[i];
+            int cell_count = atomic_load_explicit(&grid->count[slot], memory_order_relaxed);
+            grid->start[slot] = offset;
+            atomic_store_explicit(&grid->cursor[slot], offset, memory_order_relaxed);
+            offset += cell_count;
+        }
+        if (offset != count) return false;
+        pbd_parallel_for(0, count, collision_grid_scatter_range, &job);
+    }
+    collisionStats.occupied_cells = (uint64_t)occupied;
+    if (collisionStatsEnabled) collisionStats.hash_build_ms += (GetTime() - started) * 1000.0;
+    return true;
+}
+
+static int collision_grid_lookup(const CollisionCellGrid *grid, int x, int y, int z) {
+    uint32_t slot = collision_hash_coord_size(x, y, z, grid->capacity);
+    collision_stat_add(&collisionStats.hash_bucket_queries, 1);
+    for (int probe = 0; probe < grid->capacity; ++probe) {
+        int owner = atomic_load_explicit(&grid->owner[slot], memory_order_acquire);
+        if (owner < 0) return -1;
+        collision_stat_add(&collisionStats.list_entries, 1);
+        if (owner < grid->particle_count) {
+            Particle *key = grid->list[owner];
+            if (key && key->cell_x == x && key->cell_y == y && key->cell_z == z) return (int)slot;
+        }
+        collision_stat_add(&collisionStats.hash_aliases, 1);
+        slot = (slot + 1u) & (uint32_t)(grid->capacity - 1);
+    }
+    return -1;
 }
 
 static inline void accumulate_particle_correction(Particle *p, Vector3 delta, float weight) {
@@ -8862,7 +9227,6 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
         if (wa <= 0.0f) {
             continue;
         }
-
         // Scene projection is gathered into the same Jacobi correction set as
         // particle pairs, avoiding a separate parallel pass/dispatch.
         Vector3 scene_pos = pa->predicted_pos;
@@ -8907,9 +9271,11 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
                     int ny = ay + dy;
                     int nz = az + dz;
                     int h = particle_hash(nx, ny, nz);
+                    collision_stat_add(&collisionStats.hash_bucket_queries, 1);
 
                     int head = atomic_load_explicit(&particle_hash_head[h], memory_order_relaxed);
                     for (int idx = head; idx != -1; idx = particle_hash_next[idx]) {
+                        collision_stat_add(&collisionStats.list_entries, 1);
                         if (idx < 0 || idx >= count) {
                             break;
                         }
@@ -8924,9 +9290,14 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
                             continue;
                         }
                         if (pb->cell_x != nx || pb->cell_y != ny || pb->cell_z != nz) {
+                            collision_stat_add(&collisionStats.hash_aliases, 1);
                             continue;
                         }
-                        if (particles_are_local_structural_neighbors(pa, pb)) continue;
+                        collision_stat_add(&collisionStats.exact_candidates, 1);
+                        if (particles_are_local_structural_neighbors(pa, pb)) {
+                            collision_stat_add(&collisionStats.structural_rejects, 1);
+                            continue;
+                        }
 
                         float wb = pb->inv_mass;
                         float w_sum = wa + wb;
@@ -8939,6 +9310,7 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
                         Vector3 delta = v_sub(pa->predicted_pos, pb->predicted_pos);
                         float dist_sq = v_dot(delta, delta);
                         float target_dist = radiusA + radiusB;
+                        collision_stat_add(&collisionStats.distance_tests, 1);
 
                         if (dist_sq >= (target_dist * target_dist)) {
                             continue;
@@ -8949,6 +9321,7 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
                         if (penetration <= 0.0f) {
                             continue;
                         }
+                        collision_stat_add(&collisionStats.contacts, 1);
 
                         Vector3 normal = (dist > eps)
                             ? v_mul(delta, 1.0f / dist)
@@ -8971,6 +9344,149 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
                         if (wb > 0.0f) {
                             Vector3 db = v_mul(normal, -scale * wb * damp_factor);
                             accumulate_pair_correction(job, worker_id, idx, pb, db, 1.0f);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+typedef struct CollisionCellIterator {
+    const CollisionCellGrid *grid;
+    int current;
+    int remaining;
+} CollisionCellIterator;
+
+static CollisionCellIterator collision_cell_iterator(const CollisionCellGrid *grid, int slot) {
+    CollisionCellIterator it = { .grid = grid, .current = -1, .remaining = 0 };
+    if (slot < 0) return it;
+    if (grid->spans) {
+        it.current = grid->start[slot];
+        it.remaining = atomic_load_explicit(&grid->count[slot], memory_order_relaxed);
+    } else {
+        it.current = atomic_load_explicit(&grid->head[slot], memory_order_relaxed);
+        it.remaining = grid->particle_count;
+    }
+    return it;
+}
+
+static int collision_cell_iterator_next(CollisionCellIterator *it) {
+    if (!it || it->remaining <= 0 || it->current < 0) return -1;
+    int id;
+    if (it->grid->spans) {
+        id = it->grid->span_ids[it->current++];
+    } else {
+        id = it->current;
+        if (id < 0 || id >= it->grid->particle_count) return -1;
+        it->current = it->grid->span_ids[id];
+    }
+    --it->remaining;
+    return id;
+}
+
+static void gather_particle_scene_correction(ParticleCollisionJob *job, int worker_id, int index) {
+    Particle *particle = job->list[index];
+    if (!particle || particle->inv_mass <= 0.0f) return;
+    Vector3 scene_pos = particle->predicted_pos;
+    float radius_sq = particle->radius * particle->radius;
+    for (int player_idx = 0; player_idx < activePlayers; ++player_idx) {
+        Player *pl = &players[player_idx];
+        if (pl->respawn_timer > 0.0f) continue;
+        Vector3 box_min = { pl->pos.x - job->half_player, pl->pos.y - job->half_player,
+                            pl->pos.z - job->half_player };
+        Vector3 box_max = { pl->pos.x + job->half_player, pl->pos.y + job->half_player,
+                            pl->pos.z + job->half_player };
+        Vector3 nearest = { clampf(scene_pos.x, box_min.x, box_max.x),
+                            clampf(scene_pos.y, box_min.y, box_max.y),
+                            clampf(scene_pos.z, box_min.z, box_max.z) };
+        Vector3 delta = v_sub(scene_pos, nearest);
+        float dist_sq = v_dot(delta, delta);
+        if (dist_sq < radius_sq) {
+            float dist = sqrtf(fmaxf(dist_sq, job->eps));
+            float penetration = particle->radius - dist;
+            Vector3 normal = (dist > job->eps) ? v_mul(delta, -1.0f / dist)
+                                                : (Vector3){ 0.0f, 1.0f, 0.0f };
+            scene_pos = v_add(scene_pos, v_mul(normal, penetration));
+        }
+    }
+    Vector3 correction = v_sub(scene_pos, particle->predicted_pos);
+    if (correction.x != 0.0f || correction.y != 0.0f || correction.z != 0.0f) {
+        accumulate_pair_correction(job, worker_id, index, particle, correction, 1.0f);
+    }
+}
+
+static void gather_one_particle_pair(ParticleCollisionJob *job, int worker_id, int ia, int ib) {
+    if (ia < 0 || ib < 0 || ia >= job->count || ib >= job->count || ia == ib) return;
+    Particle *pa = job->list[ia];
+    Particle *pb = job->list[ib];
+    if (!pa || !pb) return;
+    collision_stat_add(&collisionStats.exact_candidates, 1);
+    if (particles_are_local_structural_neighbors(pa, pb)) {
+        collision_stat_add(&collisionStats.structural_rejects, 1);
+        return;
+    }
+    float wa = pa->inv_mass;
+    float wb = pb->inv_mass;
+    float weight_sum = wa + wb;
+    if (weight_sum <= 0.0f) return;
+    Vector3 delta = v_sub(pa->predicted_pos, pb->predicted_pos);
+    float distance_sq = v_dot(delta, delta);
+    float target = pa->radius + pb->radius;
+    collision_stat_add(&collisionStats.distance_tests, 1);
+    if (distance_sq >= target * target) return;
+    float distance = sqrtf(fmaxf(distance_sq, job->eps));
+    float penetration = target - distance;
+    if (penetration <= 0.0f) return;
+    collision_stat_add(&collisionStats.contacts, 1);
+    Vector3 normal = (distance > job->eps) ? v_mul(delta, 1.0f / distance)
+                                           : (Vector3){ 1.0f, 0.0f, 0.0f };
+    float scale = job->omega * (0.5f * penetration) / weight_sum;
+    float damp = 1.0f;
+    if (BREAK_DAMP_FRAMES > 0 && (pa->break_timer > 0 || pb->break_timer > 0)) {
+        int timer = pa->break_timer > pb->break_timer ? pa->break_timer : pb->break_timer;
+        damp = clampf(1.0f - (float)timer / (float)BREAK_DAMP_FRAMES, 0.0f, 1.0f);
+    }
+    if (wa > 0.0f) {
+        accumulate_pair_correction(job, worker_id, ia, pa, v_mul(normal, scale * wa * damp), 1.0f);
+    }
+    if (wb > 0.0f) {
+        accumulate_pair_correction(job, worker_id, ib, pb, v_mul(normal, -scale * wb * damp), 1.0f);
+    }
+}
+
+static void gather_particle_cell_collisions_range(int start, int end, int worker_id, void *user) {
+    ParticleCollisionJob *job = user;
+    CollisionCellGrid *grid = &collisionGrid;
+    int occupied = atomic_load_explicit(&grid->occupied_count, memory_order_relaxed);
+    if (end > occupied) end = occupied;
+    for (int occupied_index = start; occupied_index < end; ++occupied_index) {
+        int source_slot = grid->occupied_slots[occupied_index];
+        int owner = atomic_load_explicit(&grid->owner[source_slot], memory_order_acquire);
+        if (owner < 0 || owner >= grid->particle_count || !grid->list[owner]) continue;
+        Particle *key = grid->list[owner];
+
+        CollisionCellIterator scene_it = collision_cell_iterator(grid, source_slot);
+        for (int ia; (ia = collision_cell_iterator_next(&scene_it)) >= 0;) {
+            gather_particle_scene_correction(job, worker_id, ia);
+        }
+
+        for (int dx = -1; dx <= 1; ++dx) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dz = -1; dz <= 1; ++dz) {
+                    if (dz < 0 || (dz == 0 && dy < 0) ||
+                        (dz == 0 && dy == 0 && dx < 0)) continue;
+                    int neighbor_slot = collision_grid_lookup(grid, key->cell_x + dx,
+                                                              key->cell_y + dy,
+                                                              key->cell_z + dz);
+                    if (neighbor_slot < 0) continue;
+                    bool same_cell = neighbor_slot == source_slot;
+                    CollisionCellIterator a_it = collision_cell_iterator(grid, source_slot);
+                    for (int ia; (ia = collision_cell_iterator_next(&a_it)) >= 0;) {
+                        CollisionCellIterator b_it = collision_cell_iterator(grid, neighbor_slot);
+                        for (int ib; (ib = collision_cell_iterator_next(&b_it)) >= 0;) {
+                            if (same_cell && ib <= ia) continue;
+                            gather_one_particle_pair(job, worker_id, ia, ib);
                         }
                     }
                 }
@@ -9023,7 +9539,13 @@ static void gather_particle_collisions(float dt, Particle **list, int count) {
         .local_corrections = use_local_corrections ? pairCorrectionScratch : NULL,
         .correction_slots = use_local_corrections ? pairCorrectionScratchSlots : 0
     };
-    pbd_parallel_for(0, count, gather_particle_pair_collisions_range, &job);
+    double pair_started = collisionStatsEnabled ? GetTime() : 0.0;
+    if (collisionProfileActive >= COLLISION_PROFILE_CELL_LINKED) {
+        int occupied = atomic_load_explicit(&collisionGrid.occupied_count, memory_order_relaxed);
+        pbd_parallel_for(0, occupied, gather_particle_cell_collisions_range, &job);
+    } else {
+        pbd_parallel_for(0, count, gather_particle_pair_collisions_range, &job);
+    }
     if (use_local_corrections) {
         PairCorrectionApplyJob apply_job = {
             .list = list, .count = count, .corrections = pairCorrectionScratch,
@@ -9033,6 +9555,7 @@ static void gather_particle_collisions(float dt, Particle **list, int count) {
     } else {
         apply_particle_accumulators();
     }
+    if (collisionStatsEnabled) collisionStats.pair_ms += (GetTime() - pair_started) * 1000.0;
 }
 
 static void gather_voxel_shape_constraints_range(int start, int end, int worker_id, void *user) {
@@ -10203,6 +10726,36 @@ typedef struct {
     float half_player;
 } StaticCollisionJob;
 
+static void project_particle_against_scene(Particle *p, float half_player) {
+    if (!p || p->inv_mass == 0.0f) return;
+    const float eps = 1e-6f;
+    float radius = p->radius;
+    float terrain_limit = FLOOR_SIZE - radius;
+    Vector3 pos = p->predicted_pos;
+    float floor_limit = fmaxf(0.0f, 0.5f * VOXEL_SIZE - radius);
+    if (pos.y < floor_limit) pos.y = floor_limit;
+    pos.x = clampf(pos.x, -terrain_limit, terrain_limit);
+    pos.z = clampf(pos.z, -terrain_limit, terrain_limit);
+    for (int player_idx = 0; player_idx < activePlayers; ++player_idx) {
+        Player *pl = &players[player_idx];
+        if (pl->respawn_timer > 0.0f) continue;
+        Vector3 box_min = { pl->pos.x - half_player, pl->pos.y - half_player, pl->pos.z - half_player };
+        Vector3 box_max = { pl->pos.x + half_player, pl->pos.y + half_player, pl->pos.z + half_player };
+        Vector3 nearest = { clampf(pos.x, box_min.x, box_max.x),
+                            clampf(pos.y, box_min.y, box_max.y),
+                            clampf(pos.z, box_min.z, box_max.z) };
+        Vector3 delta = v_sub(pos, nearest);
+        float dist_sq = v_dot(delta, delta);
+        if (dist_sq < radius * radius) {
+            float dist = sqrtf(fmaxf(dist_sq, eps));
+            Vector3 normal = (dist > eps) ? v_mul(delta, 1.0f / dist)
+                                          : (Vector3){ 0.0f, 1.0f, 0.0f };
+            pos = v_add(pos, v_mul(normal, radius - dist));
+        }
+    }
+    p->predicted_pos = pos;
+}
+
 static void solve_static_collisions_range(int start, int end, int worker_id, void *user) {
     (void)worker_id;
     StaticCollisionJob *job = (StaticCollisionJob *)user;
@@ -10280,11 +10833,80 @@ static void solve_static_collisions_range(int start, int end, int worker_id, voi
     }
 }
 
+static void solve_static_cell_collisions_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    StaticCollisionJob *job = user;
+    CollisionCellGrid *grid = &collisionGrid;
+    const float static_collision_radius = 0.25f * VOXEL_SIZE;
+    int occupied = atomic_load_explicit(&grid->occupied_count, memory_order_relaxed);
+    if (end > occupied) end = occupied;
+    for (int occupied_index = start; occupied_index < end; ++occupied_index) {
+        int slot = grid->occupied_slots[occupied_index];
+        int owner = atomic_load_explicit(&grid->owner[slot], memory_order_acquire);
+        if (owner < 0 || owner >= grid->particle_count || !grid->list[owner]) continue;
+        Particle *key = grid->list[owner];
+        int static_neighbors[MAX_STATIC_COLLISION_NEIGHBORS];
+        int static_count = 0;
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    collision_stat_add(&collisionStats.static_cell_queries, 1);
+                    int voxel_id = table_get_static_only(key->cell_x + dx,
+                                                         key->cell_y + dy,
+                                                         key->cell_z + dz);
+                    if (voxel_id < 0 || voxel_id >= voxel_count || voxels[voxel_id].simulate) continue;
+                    bool duplicate = false;
+                    for (int i = 0; i < static_count; ++i) {
+                        if (static_neighbors[i] == voxel_id) { duplicate = true; break; }
+                    }
+                    if (!duplicate && static_count < MAX_STATIC_COLLISION_NEIGHBORS) {
+                        static_neighbors[static_count++] = voxel_id;
+                    }
+                }
+            }
+        }
+        CollisionCellIterator it = collision_cell_iterator(grid, slot);
+        for (int particle_index; (particle_index = collision_cell_iterator_next(&it)) >= 0;) {
+            Particle *p = grid->list[particle_index];
+            if (!p || p->inv_mass == 0.0f) continue;
+            project_particle_against_scene(p, job->half_player);
+            int current_x = (int)floorf(p->predicted_pos.x / VOXEL_SIZE);
+            int current_y = (int)floorf(p->predicted_pos.y / VOXEL_SIZE);
+            int current_z = (int)floorf(p->predicted_pos.z / VOXEL_SIZE);
+            if (current_x == key->cell_x && current_y == key->cell_y && current_z == key->cell_z) {
+                for (int s = 0; s < static_count; ++s) {
+                    collision_stat_add(&collisionStats.static_candidate_tests, 1);
+                    push_particle_out_of_static(&voxels[static_neighbors[s]], p, static_collision_radius);
+                }
+            } else {
+                int moved_neighbors[MAX_STATIC_COLLISION_NEIGHBORS];
+                int moved_count = gather_static_voxels_near_point(
+                    p->predicted_pos, p->radius, moved_neighbors, MAX_STATIC_COLLISION_NEIGHBORS);
+                for (int s = 0; s < moved_count; ++s) {
+                    int voxel_id = moved_neighbors[s];
+                    if (voxel_id >= 0 && voxel_id < voxel_count && !voxels[voxel_id].simulate) {
+                        collision_stat_add(&collisionStats.static_candidate_tests, 1);
+                        push_particle_out_of_static(&voxels[voxel_id], p, static_collision_radius);
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Resolve collisions against the scene (floor, static voxels, players).
 static void solve_static_collisions(float dt) {
     (void)dt;
+    double started = collisionStatsEnabled ? GetTime() : 0.0;
     StaticCollisionJob job = { .half_player = PLAYER_SIZE * 0.5f };
-    pbd_parallel_for(0, sim_particle_count, solve_static_collisions_range, &job);
+    if (collisionProfileActive >= COLLISION_PROFILE_CELL_LINKED &&
+        collisionGrid.list != NULL && collisionGrid.particle_count == sim_particle_count) {
+        int occupied = atomic_load_explicit(&collisionGrid.occupied_count, memory_order_relaxed);
+        pbd_parallel_for(0, occupied, solve_static_cell_collisions_range, &job);
+    } else {
+        pbd_parallel_for(0, sim_particle_count, solve_static_collisions_range, &job);
+    }
+    if (collisionStatsEnabled) collisionStats.static_ms += (GetTime() - started) * 1000.0;
 }
 
 // Unified solver for dynamic-dynamic collisions
@@ -10544,7 +11166,16 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
                 snapshot_count = MAX_PARTICLES;
             }
             pbd_parallel_for(0, snapshot_count, copy_particle_snapshot_range, NULL);
-            build_particle_hash(particle_snapshot, snapshot_count);
+            if (collisionProfileActive >= COLLISION_PROFILE_CELL_LINKED) {
+                bool spans = collisionProfileActive == COLLISION_PROFILE_CELL_SPAN;
+                if (!build_collision_cell_grid(particle_snapshot, snapshot_count, spans)) {
+                    fprintf(stderr, "collision-grid: allocation or construction failed; using hash profile\n");
+                    collisionProfileActive = COLLISION_PROFILE_HASH;
+                    build_particle_hash(particle_snapshot, snapshot_count);
+                }
+            } else {
+                build_particle_hash(particle_snapshot, snapshot_count);
+            }
             gather_particle_collisions(sub_dt, particle_snapshot, snapshot_count);
         }
 
@@ -13489,25 +14120,73 @@ static void render_gameplay_view(RenderTexture2D *screens,
 }
 
 static bool run_physics_smoke_test(int steps) {
-    int side = 1;
-    while (side * side * side < physicsSmokeVoxels) ++side;
+    collision_stats_reset();
     int first = -1;
     int created = 0;
-    for (int y = 0; y < side && created < physicsSmokeVoxels; ++y) {
-        for (int z = 0; z < side && created < physicsSmokeVoxels; ++z) {
-            for (int x = 0; x < side && created < physicsSmokeVoxels; ++x) {
-                float px = ((float)x - 0.5f * (float)(side - 1)) * VOXEL_SIZE;
-                float py = 8.0f + (float)y * VOXEL_SIZE;
-                float pz = ((float)z - 0.5f * (float)(side - 1)) * VOXEL_SIZE;
-                Color color = ((x + y + z) & 1) ? BLUE : RED;
-                int idx = addVoxel(px, py, pz, false, true, color, 0);
-                if (idx < 0) {
-                    fprintf(stderr, "physics-smoke: unable to create test voxel %d/%d\n",
-                            created + 1, physicsSmokeVoxels);
-                    return false;
+    if (strcmp(physicsSmokeShape, "colliding") == 0) {
+        int cluster_counts[2] = { physicsSmokeVoxels / 2, physicsSmokeVoxels - physicsSmokeVoxels / 2 };
+        int cluster_first[2] = { -1, -1 };
+        for (int cluster = 0; cluster < 2; ++cluster) {
+            int side = 1;
+            while (side * side * side < cluster_counts[cluster]) ++side;
+            float width = (float)side * VOXEL_SIZE;
+            float center_x = (cluster == 0 ? -1.0f : 1.0f) * (0.5f * width + VOXEL_SIZE);
+            int local = 0;
+            for (int y = 0; y < side && local < cluster_counts[cluster]; ++y) {
+                for (int z = 0; z < side && local < cluster_counts[cluster]; ++z) {
+                    for (int x = 0; x < side && local < cluster_counts[cluster]; ++x) {
+                        float px = center_x + ((float)x - 0.5f * (float)(side - 1)) * VOXEL_SIZE;
+                        float py = 8.0f + (float)y * VOXEL_SIZE;
+                        float pz = ((float)z - 0.5f * (float)(side - 1)) * VOXEL_SIZE;
+                        int idx = addVoxel(px, py, pz, false, true, cluster == 0 ? BLUE : RED, 0);
+                        if (idx < 0) return false;
+                        if (first < 0) first = idx;
+                        if (cluster_first[cluster] < 0) cluster_first[cluster] = idx;
+                        ++local; ++created;
+                    }
                 }
-                if (first < 0) first = idx;
-                ++created;
+            }
+        }
+        for (int i = first; i < first + created; ++i) glue_neighbor_faces_for_voxel(i);
+        for (int cluster = 0; cluster < 2; ++cluster) {
+            float vx = cluster == 0 ? 4.0f : -4.0f;
+            int begin = cluster_first[cluster];
+            int finish = begin + cluster_counts[cluster];
+            for (int i = begin; i < finish; ++i) {
+                for (int corner = 0; corner < 8; ++corner) voxels[i].particles[corner]->vel.x = vx;
+            }
+        }
+    } else {
+        int side = 1;
+        while (side * side * side < physicsSmokeVoxels) ++side;
+        float spacing = strcmp(physicsSmokeShape, "sparse") == 0 ? VOXEL_SIZE * 2.5f : VOXEL_SIZE;
+        for (int y = 0; y < side && created < physicsSmokeVoxels; ++y) {
+            for (int z = 0; z < side && created < physicsSmokeVoxels; ++z) {
+                for (int x = 0; x < side && created < physicsSmokeVoxels; ++x) {
+                    float px = ((float)x - 0.5f * (float)(side - 1)) * spacing;
+                    float py = 8.0f + (float)y * spacing;
+                    float pz = ((float)z - 0.5f * (float)(side - 1)) * spacing;
+                    Color color = ((x + y + z) & 1) ? BLUE : RED;
+                    int idx = addVoxel(px, py, pz, false, true, color, 0);
+                    if (idx < 0) {
+                        fprintf(stderr, "physics-smoke: unable to create test voxel %d/%d\n",
+                                created + 1, physicsSmokeVoxels);
+                        return false;
+                    }
+                    if (first < 0) first = idx;
+                    ++created;
+                }
+            }
+        }
+        if (strcmp(physicsSmokeShape, "sparse") != 0) {
+            for (int i = first; i < first + created; ++i) glue_neighbor_faces_for_voxel(i);
+        }
+        if (strcmp(physicsSmokeShape, "static") == 0) {
+            for (int z = -side; z <= side; ++z) {
+                for (int x = -side; x <= side; ++x) {
+                    addVoxel((float)x * VOXEL_SIZE, 7.0f, (float)z * VOXEL_SIZE,
+                             true, false, GRAY, 0);
+                }
             }
         }
     }
@@ -13515,9 +14194,13 @@ static bool run_physics_smoke_test(int steps) {
         fprintf(stderr, "physics-smoke: unable to create test voxels\n");
         return false;
     }
-    for (int i = first; i < first + created; ++i) glue_neighbor_faces_for_voxel(i);
     rebuild_voxel_hash();
     rebuild_static_hash_if_dirty();
+    for (int i = 0; i < physicsSmokeWarmup; ++i) {
+        prepare_tether_forces();
+        simulate_voxel_pbd(PBD_MAX_STEP_DT);
+    }
+    collision_stats_reset();
     double started = GetTime();
     for (int i = 0; i < steps; ++i) {
         prepare_tether_forces();
@@ -13540,9 +14223,25 @@ static bool run_physics_smoke_test(int steps) {
     for (int i = first; i < first + created && i < voxel_count; ++i) {
         for (int face = 0; face < 6; ++face) glued_faces += voxels[i].glued_faces[face] ? 1 : 0;
     }
-    fprintf(stderr, "physics-smoke backend=%s steps=%d testVoxels=%d simParticles=%d voxels=%d gluedFaces=%d y=%.6f msPerStep=%.4f fallback=%d\n",
-            physics_backend_name(physicsBackend.active), steps, created, sim_particle_count, voxel_count, glued_faces,
+    fprintf(stderr, "physics-smoke backend=%s collision=%s hashFactor=%d shape=%s warmup=%d steps=%d testVoxels=%d simParticles=%d voxels=%d gluedFaces=%d y=%.6f msPerStep=%.4f fallback=%d\n",
+            physics_backend_name(physicsBackend.active), collision_profile_name(collisionProfileActive), collisionHashFactor,
+            physicsSmokeShape, physicsSmokeWarmup, steps, created, sim_particle_count, voxel_count, glued_faces,
             voxels[first].pos.y, elapsed_ms / (double)steps, physicsBackend.sticky_fallback ? 1 : 0);
+    if (collisionStatsEnabled) {
+        fprintf(stderr,
+                "collision-stats occupied=%llu buildMs=%.4f pairMs=%.4f staticMs=%.4f bucketQueries=%llu listEntries=%llu aliases=%llu exact=%llu structural=%llu distance=%llu contacts=%llu staticQueries=%llu staticTests=%llu\n",
+                (unsigned long long)collisionStats.occupied_cells,
+                collisionStats.hash_build_ms, collisionStats.pair_ms, collisionStats.static_ms,
+                (unsigned long long)atomic_load_explicit(&collisionStats.hash_bucket_queries, memory_order_relaxed),
+                (unsigned long long)atomic_load_explicit(&collisionStats.list_entries, memory_order_relaxed),
+                (unsigned long long)atomic_load_explicit(&collisionStats.hash_aliases, memory_order_relaxed),
+                (unsigned long long)atomic_load_explicit(&collisionStats.exact_candidates, memory_order_relaxed),
+                (unsigned long long)atomic_load_explicit(&collisionStats.structural_rejects, memory_order_relaxed),
+                (unsigned long long)atomic_load_explicit(&collisionStats.distance_tests, memory_order_relaxed),
+                (unsigned long long)atomic_load_explicit(&collisionStats.contacts, memory_order_relaxed),
+                (unsigned long long)atomic_load_explicit(&collisionStats.static_cell_queries, memory_order_relaxed),
+                (unsigned long long)atomic_load_explicit(&collisionStats.static_candidate_tests, memory_order_relaxed));
+    }
     return true;
 }
 
@@ -13553,6 +14252,8 @@ static bool run_physics_smoke_test(int steps) {
 
 int main(int argc, char **argv) {
     if (!parse_physics_arguments(argc, argv)) return 2;
+    collisionProfileActive = (collisionProfileRequested == COLLISION_PROFILE_AUTO)
+        ? COLLISION_PROFILE_BASELINE : collisionProfileRequested;
     bool automatedRun = physicsSmokeSteps > 0 || debug_run_requested();
     int countFrame = 0;
     SetLoggingEnabled(false);
