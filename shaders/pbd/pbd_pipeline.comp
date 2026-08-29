@@ -37,6 +37,7 @@ layout(std430, binding = 6) buffer HashNextBuffer { int hashNext[]; };
 layout(std430, binding = 7) readonly buffer StaticCellBuffer { ivec4 staticCell[]; };
 layout(std430, binding = 8) readonly buffer TetherBuffer { vec4 tetherTarget[]; };
 layout(std430, binding = 9) buffer FluidBuffer { FluidState fluid[]; };
+layout(std430, binding = 10) readonly buffer DynamicVoxelIdBuffer { uint dynamicVoxelId[]; };
 
 uniform int uMode;
 uniform int uParticleCount;
@@ -69,6 +70,7 @@ uniform float uPbfViscosity;
 uniform float uPbfPoly6Coefficient;
 uniform float uPbfSpikyGradientCoefficient;
 uniform float uPbfScorrReferenceKernel;
+uniform int uDynamicVoxelCount;
 uniform vec4 uPlayerPosHalf[4]; // xyz position, w < 0 when inactive
 
 const int MODE_RESET = 0;
@@ -89,6 +91,8 @@ const int MODE_PBF_APPLY = 14;
 const int MODE_PBF_STATIC_COLLISIONS = 15;
 const int MODE_PBF_VISCOSITY = 16;
 const int MODE_PBF_APPLY_VISCOSITY = 17;
+const int MODE_PBF_DYNAMIC_SOLID_COLLISIONS = 18;
+const int MODE_PBF_DYNAMIC_SOLID_FINAL = 19;
 
 const float PI_VALUE = 3.14159265358979323846;
 const float PARTICLE_MATERIAL_FLUID = 1.0;
@@ -392,6 +396,135 @@ void pbfApplyViscosity(uint gid) {
     fluid[id].delta = vec4(0.0);
 }
 
+void pbfDynamicSolidCollisions(uint gid, bool react) {
+    if (gid >= uint(uFluidCount)) return;
+    uint id = fluidId(gid);
+    float radius = particle[id].pos_radius.w;
+    vec3 position = particle[id].predicted_base_inv_mass.xyz;
+    vec3 previous = particle[id].prev_inv_mass.xyz;
+    const ivec4 faceCorner[6] = ivec4[6](
+        ivec4(0, 2, 6, 4), ivec4(1, 5, 7, 3),
+        ivec4(0, 4, 5, 1), ivec4(2, 3, 7, 6),
+        ivec4(0, 1, 3, 2), ivec4(4, 6, 7, 5));
+
+    for (int dynamicIndex = 0; dynamicIndex < uDynamicVoxelCount; ++dynamicIndex) {
+        uint voxelId = dynamicVoxelId[dynamicIndex];
+        if (voxelId >= uint(uVoxelCount)) continue;
+        VoxelState solid = voxel[voxelId];
+        if (solid.flags.x == 0 || solid.flags.y != 0 || solid.flags.z != 0) continue;
+
+        vec3 corner[8];
+        vec3 boundsMin = vec3(3.402823e38);
+        vec3 boundsMax = vec3(-3.402823e38);
+        bool valid = true;
+        for (int i = 0; i < 8; ++i) {
+            uint cornerId = voxelParticle(solid, i);
+            if (cornerId >= uint(uParticleCount)) { valid = false; break; }
+            corner[i] = particle[cornerId].predicted_base_inv_mass.xyz;
+            boundsMin = min(boundsMin, corner[i]);
+            boundsMax = max(boundsMax, corner[i]);
+        }
+        if (!valid) continue;
+        vec3 expandedMin = boundsMin - vec3(radius);
+        vec3 expandedMax = boundsMax + vec3(radius);
+        bool recoverBelow = position.x >= expandedMin.x && position.x <= expandedMax.x &&
+                            position.z >= expandedMin.z && position.z <= expandedMax.z &&
+                            position.y < expandedMin.y &&
+                            position.y >= expandedMin.y - max(2.0 * radius, 2.0 * uVoxelSize);
+        if (!recoverBelow && (any(bvec3(
+                position.x < boundsMin.x - radius && previous.x < boundsMin.x - radius,
+                position.y < boundsMin.y - radius && previous.y < boundsMin.y - radius,
+                position.z < boundsMin.z - radius && previous.z < boundsMin.z - radius)) ||
+            any(bvec3(
+                position.x > boundsMax.x + radius && previous.x > boundsMax.x + radius,
+                position.y > boundsMax.y + radius && previous.y > boundsMax.y + radius,
+                position.z > boundsMax.z + radius && previous.z > boundsMax.z + radius)))) continue;
+
+        bool currentInside = all(greaterThanEqual(position, expandedMin)) &&
+                             all(lessThanEqual(position, expandedMax));
+        bool previousInside = all(greaterThanEqual(previous, expandedMin)) &&
+                              all(lessThanEqual(previous, expandedMax));
+        int nearestFace = -1;
+        float entryT = 0.0;
+        float exitT = 1.0;
+        vec3 movement = position - previous;
+        bool segmentHits = true;
+        for (int axis = 0; axis < 3; ++axis) {
+            float origin = previous[axis];
+            float direction = movement[axis];
+            if (abs(direction) <= 1e-8) {
+                if (origin < expandedMin[axis] || origin > expandedMax[axis]) {
+                    segmentHits = false;
+                    break;
+                }
+                continue;
+            }
+            float tMin = (expandedMin[axis] - origin) / direction;
+            float tMax = (expandedMax[axis] - origin) / direction;
+            int minFace = axis * 2;
+            int maxFace = minFace + 1;
+            if (tMin > tMax) {
+                float swapT = tMin; tMin = tMax; tMax = swapT;
+                int swapFace = minFace; minFace = maxFace; maxFace = swapFace;
+            }
+            if (tMin > entryT) {
+                entryT = tMin;
+                nearestFace = minFace;
+            }
+            exitT = min(exitT, tMax);
+            if (entryT > exitT) {
+                segmentHits = false;
+                break;
+            }
+        }
+        if (!recoverBelow && !currentInside &&
+            (!segmentHits || previousInside || entryT < 0.0 || entryT > 1.0)) {
+            continue;
+        }
+        if (recoverBelow) {
+            nearestFace = 3;
+        } else if (nearestFace < 0 || previousInside) {
+            vec3 sideSample = previousInside ? previous : position;
+            float distance[6] = float[6](
+                abs(sideSample.x - expandedMin.x), abs(expandedMax.x - sideSample.x),
+                abs(sideSample.y - expandedMin.y), abs(expandedMax.y - sideSample.y),
+                abs(sideSample.z - expandedMin.z), abs(expandedMax.z - sideSample.z));
+            float nearest = 3.402823e38;
+            for (int face = 0; face < 6; ++face) {
+                if (distance[face] < nearest) {
+                    nearest = distance[face];
+                    nearestFace = face;
+                }
+            }
+        }
+        if (nearestFace < 0) continue;
+
+        vec3 correctionDelta = vec3(0.0);
+        if (nearestFace == 0) correctionDelta.x = expandedMin.x - position.x - 1e-4;
+        else if (nearestFace == 1) correctionDelta.x = expandedMax.x - position.x + 1e-4;
+        else if (nearestFace == 2) correctionDelta.y = expandedMin.y - position.y - 1e-4;
+        else if (nearestFace == 3) correctionDelta.y = expandedMax.y - position.y + 1e-4;
+        else if (nearestFace == 4) correctionDelta.z = expandedMin.z - position.z - 1e-4;
+        else correctionDelta.z = expandedMax.z - position.z + 1e-4;
+        position += correctionDelta;
+        if (nearestFace <= 1) previous.x = position.x;
+        else if (nearestFace <= 3) previous.y = position.y;
+        else previous.z = position.z;
+        if (react) {
+            ivec4 fc = faceCorner[nearestFace];
+            vec3 cornerReaction = -correctionDelta * (0.02 * 0.25);
+            for (int i = 0; i < 4; ++i) {
+                uint cornerId = voxelParticle(solid, fc[i]);
+                if (cornerId < uint(uParticleCount) && particle[cornerId].prev_inv_mass.w > 0.0) {
+                    accumulate(cornerId, cornerReaction, 1.0);
+                }
+            }
+        }
+    }
+    particle[id].predicted_base_inv_mass.xyz = position;
+    particle[id].prev_inv_mass.xyz = previous;
+}
+
 void solveVgs(uint gid) {
     if (gid >= uint(uVoxelCount)) return;
     VoxelState v = voxel[gid];
@@ -627,4 +760,6 @@ void main() {
     else if (uMode==MODE_PBF_STATIC_COLLISIONS) pbfStaticCollisions(gid);
     else if (uMode==MODE_PBF_VISCOSITY) pbfViscosity(gid);
     else if (uMode==MODE_PBF_APPLY_VISCOSITY) pbfApplyViscosity(gid);
+    else if (uMode==MODE_PBF_DYNAMIC_SOLID_COLLISIONS) pbfDynamicSolidCollisions(gid, true);
+    else if (uMode==MODE_PBF_DYNAMIC_SOLID_FINAL) pbfDynamicSolidCollisions(gid, false);
 }

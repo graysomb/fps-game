@@ -322,6 +322,8 @@ Available scenarios are:
 * `pbf-container`: drops 512 fluid particles into a tall immutable voxel container, captures
   both render modes, and checks particle membership, density, settling, containment, and that
   fluid never activates the container.
+* `pbf-dynamic-container`: drops the same fluid volume onto an elevated active PBD floor and
+  checks that the deforming solid supports it on GPU, multi-threaded CPU, and single-threaded CPU.
 
 Without `--debug-output`, artifacts are written beneath
 `.build/bin/debug-artifacts/<scenario>/<active-backend>`. Each backend directory contains
