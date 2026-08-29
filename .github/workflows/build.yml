@@ -10,14 +10,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Linux dependencies
-        run: sudo apt update && sudo apt install -y libsdl2-dev libsdl2-ttf-dev libglu1-mesa-dev libsdl2-image-dev
-      - name: Compile for Linux
-        run: gcc fps_game.c -o fps_game $(sdl2-config --cflags --libs) -lGL -lGLU -lSDL2_ttf -lm
+        run: sudo apt update && sudo apt install -y build-essential git libasound2-dev libgl1-mesa-dev libglu1-mesa-dev libx11-dev libxrandr-dev libxi-dev libxcursor-dev libxinerama-dev
+      - name: Fetch raylib 5.5
+        run: git clone --depth 1 --branch 5.5 https://github.com/raysan5/raylib.git "$RUNNER_TEMP/raylib"
+      - name: Compile Linux CPU and OpenGL GPU builds
+        run: RAYLIB_SOURCE_DIR="$RUNNER_TEMP/raylib" sh ./build.sh release
       - name: Upload Linux build
         uses: actions/upload-artifact@v4
         with:
           name: fps_game-linux
-          path: fps_game
+          path: |
+            .build/bin/fps_ray
+            .build/bin/fps_ray_gpu
+            .build/bin/fps_ray_cpu
+            .build/bin/shaders
 
   build-windows:
     runs-on: windows-latest
@@ -26,45 +32,47 @@ jobs:
       - name: Setup MSYS2 and dependencies
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: UCRT64
           update: true
           install: |
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-SDL2
-            mingw-w64-x86_64-SDL2_ttf
-            mingw-w64-x86_64-SDL2_image
-      - name: Compile for Windows
+            git
+            make
+            mingw-w64-ucrt-x86_64-gcc
+      - name: Fetch raylib 5.5
         shell: msys2 {0}
-        run: |
-          gcc fps_game.c -o fps_game.exe \
-            -I/mingw64/include \
-            -L/mingw64/lib \
-            -lmingw32 -lSDL2main -lSDL2 -lSDL2_ttf \
-            -lopengl32 -lglu32 \
-            -lm
+        run: git clone --depth 1 --branch 5.5 https://github.com/raysan5/raylib.git "$RUNNER_TEMP/raylib"
+      - name: Compile Windows CPU and OpenGL GPU builds
+        shell: powershell
+        run: ./build.ps1 -RaylibSource "$env:RUNNER_TEMP/raylib" -ToolchainBin "C:\msys64\ucrt64\bin" -Configuration release
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
           name: fps_game-win
-          path: fps_game.exe
+          path: |
+            .build/bin/fps_ray.exe
+            .build/bin/fps_ray_gpu.exe
+            .build/bin/fps_ray_cpu.exe
+            .build/bin/shaders
 
   build-macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install macOS dependencies
-        run: brew install sdl2 sdl2_ttf sdl2_image
-      - name: Compile for macOS
+      - name: Fetch raylib 5.5
+        run: git clone --depth 1 --branch 5.5 https://github.com/raysan5/raylib.git "$RUNNER_TEMP/raylib"
+      - name: Validate shared GPU layout
+        run: python3 tools/validate_gpu_layout.py
+      - name: Compile native macOS game and Metal physics
         run: |
-          prefix=$(brew --prefix)
-          gcc fps_game.c -o fps_game \
-            -I${prefix}/include \
-            $(sdl2-config --cflags --libs) \
-            -lSDL2_ttf \
-            -framework OpenGL \
-            -lm
+          export RAYLIB_SOURCE_DIR="$RUNNER_TEMP/raylib"
+          sh ./build-macos.sh release native
       - name: Upload macOS build
         uses: actions/upload-artifact@v4
         with:
           name: fps_game-mac
-          path: fps_game
+          path: |
+            .build/bin/fps_ray
+            .build/bin/fps_ray_gpu
+            .build/bin/fps_ray_cpu
+            .build/bin/shaders
+            .build/FPS Game.app

@@ -89,6 +89,8 @@ const int MODE_PREPARE_INDIRECT = 13;
 const int MODE_WAKE_GATHER = 14;
 const int MODE_WAKE_APPLY = 15;
 const int MODE_TOPOLOGY_REBUILD_SERIAL = 16;
+const int CONTROL_FLAG_OVERFLOW = 1;
+const int CONTROL_FLAG_TOPOLOGY_DIRTY = 2;
 
 uint voxelParticle(VoxelState v, int corner) {
     return (corner < 4) ? v.particle_0_3[corner] : v.particle_4_7[corner - 4];
@@ -444,7 +446,7 @@ uint allocateParticleClone(uint parent) {
     for (;;) {
         int current = gpuControl.x;
         if (current >= gpuControl.z) {
-            atomicExchange(gpuControl.w, 1);
+            atomicExchange(gpuControl.w, CONTROL_FLAG_OVERFLOW);
             return uint(-1);
         }
         if (atomicCompSwap(gpuControl.x, current, current + 1) == current) {
@@ -464,7 +466,7 @@ uint allocateParticleClone(uint parent) {
     if (particle[id].predicted_base_inv_mass.w > 0.0) {
         int simSlot = atomicAdd(gpuControl.y, 1);
         if (simSlot < gpuControl.z) simId[simSlot] = id;
-        else atomicExchange(gpuControl.w, 1);
+        else atomicExchange(gpuControl.w, CONTROL_FLAG_OVERFLOW);
     }
     return id;
 }
@@ -497,7 +499,7 @@ void splitBrokenFaces(uint gid) {
     VoxelState v = voxel[gid];
     uint mask = v.lifecycle.w & 0x3fu;
     if (mask == 0u) return;
-    atomicOr(gpuControl.w, 2);
+    atomicOr(gpuControl.w, CONTROL_FLAG_TOPOLOGY_DIRTY);
     const int faceCorners[24] = int[24](
         1,3,5,7, 0,2,4,6, 2,3,6,7,
         0,1,4,5, 4,5,6,7, 0,1,2,3);
@@ -526,7 +528,7 @@ int topologyRoot(int voxelId) {
 }
 
 void topologyUnion(uint gid) {
-    if ((gpuControl.w & 2) == 0 || gid >= uint(uVoxelCount)) return;
+    if ((gpuControl.w & CONTROL_FLAG_TOPOLOGY_DIRTY) == 0 || gid >= uint(uVoxelCount)) return;
     VoxelState v = voxel[gid];
     if ((v.lifecycle.z & 0x80000000u) == 0u) return;
     for (int face = 0; face < 6; ++face) {
@@ -555,7 +557,7 @@ void assignParticleGroup(uint id, int group) {
 }
 
 void topologyAssignParticles(uint gid) {
-    if ((gpuControl.w & 2) == 0 || gid >= uint(uVoxelCount)) return;
+    if ((gpuControl.w & CONTROL_FLAG_TOPOLOGY_DIRTY) == 0 || gid >= uint(uVoxelCount)) return;
     VoxelState v = voxel[gid];
     if ((v.lifecycle.z & 0x80000000u) == 0u || v.flags.y != 0 || v.flags.z != 0) return;
     int group = topologyRoot(int(gid));
@@ -567,7 +569,7 @@ void topologyAssignParticles(uint gid) {
 }
 
 void topologyRebuildSerial(uint gid) {
-    if (gid != 0u || (gpuControl.w & 2) == 0) return;
+    if (gid != 0u || (gpuControl.w & CONTROL_FLAG_TOPOLOGY_DIRTY) == 0) return;
     for (int i = 0; i < uVoxelCount; ++i) topology[i * 2 + 1].z = i;
     for (int i = 0; i < uVoxelCount; ++i) topologyUnion(uint(i));
     for (int pass = 0; pass < 18; ++pass)
@@ -581,7 +583,7 @@ void topologyRebuildSerial(uint gid) {
         uint id = simId[i];
         if (particleRefcount[id] > 0 && collisionMeta[id].w == -2) collisionMeta[id].w = -1;
     }
-    gpuControl.w &= ~2;
+    gpuControl.w &= ~CONTROL_FLAG_TOPOLOGY_DIRTY;
 }
 
 void wakeGather(uint gid) {

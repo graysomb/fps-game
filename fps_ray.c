@@ -82,16 +82,31 @@ const char *physics_backend_name(PhysicsBackendKind kind) {
     switch (kind) {
         case PHYSICS_BACKEND_AUTO: return "auto";
         case PHYSICS_BACKEND_GPU_GL43: return "gpu-gl43";
+        case PHYSICS_BACKEND_GPU_METAL: return "gpu-metal";
         case PHYSICS_BACKEND_CPU_MT: return "cpu-mt";
         case PHYSICS_BACKEND_CPU_ST: return "cpu-st";
         default: return "unknown";
     }
 }
 
+static PhysicsBackendKind physics_native_gpu_backend(void) {
+#if defined(__APPLE__)
+    return PHYSICS_BACKEND_GPU_METAL;
+#else
+    return PHYSICS_BACKEND_GPU_GL43;
+#endif
+}
+
+static bool physics_backend_is_gpu(PhysicsBackendKind kind) {
+    return kind == PHYSICS_BACKEND_GPU_GL43 || kind == PHYSICS_BACKEND_GPU_METAL;
+}
+
 bool physics_backend_parse(const char *value, PhysicsBackendKind *out) {
     if (!value || !out) return false;
     if (strcmp(value, "auto") == 0) *out = PHYSICS_BACKEND_AUTO;
-    else if (strcmp(value, "gpu") == 0 || strcmp(value, "gpu-gl43") == 0) *out = PHYSICS_BACKEND_GPU_GL43;
+    else if (strcmp(value, "gpu") == 0) *out = physics_native_gpu_backend();
+    else if (strcmp(value, "gpu-gl43") == 0) *out = PHYSICS_BACKEND_GPU_GL43;
+    else if (strcmp(value, "gpu-metal") == 0) *out = PHYSICS_BACKEND_GPU_METAL;
     else if (strcmp(value, "cpu-mt") == 0 || strcmp(value, "mt") == 0) *out = PHYSICS_BACKEND_CPU_MT;
     else if (strcmp(value, "cpu-st") == 0 || strcmp(value, "st") == 0) *out = PHYSICS_BACKEND_CPU_ST;
     else return false;
@@ -153,7 +168,7 @@ static bool parse_physics_arguments(int argc, char **argv) {
         if (strncmp(arg, "--physics=", 10) == 0) value = arg + 10;
         else if (strcmp(arg, "--physics") == 0 && i + 1 < argc) value = argv[++i];
         if (value && !physics_backend_parse(value, &physicsBackend.requested)) {
-            fprintf(stderr, "Unknown physics backend '%s' (expected auto, gpu, cpu-mt, or cpu-st)\n", value);
+            fprintf(stderr, "Unknown physics backend '%s' (expected auto, gpu, gpu-gl43, gpu-metal, cpu-mt, or cpu-st)\n", value);
             return false;
         }
     }
@@ -10493,7 +10508,7 @@ static bool cull_dust_voxels(void) {
     return removed_any;
 }
 
-#include "physics_gpu_gl.inc"
+#include "physics_gpu_common.inc"
 
 static void select_cpu_physics_backend(void) {
     if (physicsBackend.requested == PHYSICS_BACKEND_CPU_ST ||
@@ -10514,13 +10529,21 @@ static bool initialize_physics_backend(void) {
     physicsBackend.initialized = false;
     physicsBackend.sticky_fallback = false;
     physicsBackend.fallback_reason[0] = '\0';
+    PhysicsBackendKind native_gpu = physics_native_gpu_backend();
+    if (physics_backend_is_gpu(physicsBackend.requested) &&
+        physicsBackend.requested != native_gpu) {
+        snprintf(physicsBackend.fallback_reason, sizeof(physicsBackend.fallback_reason),
+                 "%s is not available in this platform build",
+                 physics_backend_name(physicsBackend.requested));
+        return false;
+    }
     if (physicsBackend.requested == PHYSICS_BACKEND_AUTO ||
-        physicsBackend.requested == PHYSICS_BACKEND_GPU_GL43) {
+        physicsBackend.requested == native_gpu) {
         if (gpu_physics_init()) {
-            physicsBackend.active = PHYSICS_BACKEND_GPU_GL43;
+            physicsBackend.active = native_gpu;
             physics_force_single_cpu = false;
             physicsBackend.initialized = true;
-        } else if (physicsBackend.requested == PHYSICS_BACKEND_GPU_GL43) {
+        } else if (physicsBackend.requested == native_gpu) {
             return false;
         } else {
             physicsBackend.sticky_fallback = true;
@@ -10627,7 +10650,7 @@ static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
     rebuild_particle_collision_metadata();
     double started = GetTime();
     const float sub_dt = dt / (float)PBD_SUBSTEPS;
-    if (physicsBackend.active == PHYSICS_BACKEND_GPU_GL43 && gpuPhysics.ready) {
+    if (physics_backend_is_gpu(physicsBackend.active) && gpuPhysics.ready) {
         int completed_steps = gpu_physics_steps(dt, fixed_steps);
         if (completed_steps >= fixed_steps) {
             physicsBackend.last_step_ms = (GetTime() - started) * 1000.0;
@@ -13565,8 +13588,8 @@ static bool run_physics_smoke_test(int steps) {
         }
         i += batch;
     }
-    if (physicsBackend.requested == PHYSICS_BACKEND_GPU_GL43 &&
-        physicsBackend.active != PHYSICS_BACKEND_GPU_GL43) {
+    if (physics_backend_is_gpu(physicsBackend.requested) &&
+        physicsBackend.active != physicsBackend.requested) {
         fprintf(stderr, "physics-smoke: forced GPU fell back: %s\n", physicsBackend.fallback_reason);
         return false;
     }

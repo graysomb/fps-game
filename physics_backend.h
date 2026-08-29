@@ -6,6 +6,7 @@
 typedef enum PhysicsBackendKind {
     PHYSICS_BACKEND_AUTO = 0,
     PHYSICS_BACKEND_GPU_GL43,
+    PHYSICS_BACKEND_GPU_METAL,
     PHYSICS_BACKEND_CPU_MT,
     PHYSICS_BACKEND_CPU_ST
 } PhysicsBackendKind;

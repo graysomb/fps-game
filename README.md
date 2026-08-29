@@ -26,9 +26,10 @@ The physics simulation follows a standard PBD loop:
 
 ### Physics backend architecture
 
-The solver has three execution backends: OpenGL 4.3 compute, a persistent CPU
-worker pool, and single-threaded CPU. All three implement the same ordered PBD
-stages. The CPU-owned voxel and particle arrays remain canonical, so a failed GPU
+The solver has four platform implementations behind three runtime tiers: OpenGL
+4.3 compute on Windows/Linux, Metal compute on macOS, a persistent CPU worker pool,
+and single-threaded CPU. They implement the same ordered PBD stages. The CPU-owned
+voxel and particle arrays remain canonical, so a failed GPU
 dispatch can be validated, read back, and continued by the CPU without restarting
 the frame.
 
@@ -37,8 +38,9 @@ particle-pool IDs are mapped to compact indices, preserving shared corners creat
 by glue. Static voxels are uploaded only when the static-grid generation changes.
 Each substep dispatches prediction, dynamic hash construction, scene and particle
 collisions, Jacobi apply passes, VGS iterations, static collisions, glue-break
-evaluation, and velocity finalization. Topology mutations such as actually breaking
-glue or converting a sleeping cluster back to static remain ordered CPU commits.
+evaluation, GPU particle splitting, topology rebuilding, wake propagation, and
+velocity finalization. The compact result is committed back to the canonical CPU
+arrays once per rendered-frame batch.
 
 The CPU PBD loop uses a lightweight, persistent thread pool to avoid per-frame
 thread creation.
@@ -216,10 +218,10 @@ This section outlines the planned "Constructor-Brawler" gameplay loop.
 
 ## Building
 
-The release layout contains a launcher plus two game binaries. The launcher tries
-OpenGL 4.3 compute first, then the multithreaded CPU backend, then the single-threaded
-CPU backend. GPU and CPU game binaries use separate raylib builds because raylib
-selects its OpenGL API at compile time.
+The release layout contains a launcher plus GPU-capable and CPU-only game binaries.
+The launcher tries the platform-native GPU backend first, then multithreaded CPU,
+then single-threaded CPU. Windows/Linux use OpenGL 4.3 compute. macOS uses Metal
+compute alongside raylib's OpenGL 3.3 renderer.
 
 ### Windows (MSYS2/UCRT64)
 
@@ -236,7 +238,27 @@ $env:RAYLIB_SOURCE_DIR = "D:\raylib-master\raylib-master"
 RAYLIB_SOURCE_DIR=/path/to/raylib ./build.sh release
 ```
 
-Both scripts place `fps_ray`, `fps_ray_gpu`, `fps_ray_cpu`, and the shader assets in
+### macOS
+
+Install the Xcode command-line tools and point `RAYLIB_SOURCE_DIR` at raylib 5.5:
+
+```bash
+export RAYLIB_SOURCE_DIR=/path/to/raylib
+sh ./build-macos.sh release native
+open ".build/FPS Game.app"
+```
+
+Use `universal` instead of `native` to build arm64 and x86_64 slices together:
+
+```bash
+sh ./build-macos.sh release universal
+```
+
+The Mac GPU binary links Metal physics with the same CPU MT and CPU ST fallbacks.
+The app bundle is ad-hoc signed for local play; distribution outside the local Mac
+still requires a Developer ID signature and notarization.
+
+The build scripts place `fps_ray`, `fps_ray_gpu`, `fps_ray_cpu`, and the shader assets in
 `.build/bin` (with `.exe` suffixes on Windows).
 
 ### Physics backend controls
@@ -244,11 +266,14 @@ Both scripts place `fps_ray`, `fps_ray_gpu`, `fps_ray_cpu`, and the shader asset
 ```bash
 fps_ray --physics=auto --physics-report
 fps_ray --physics=gpu
+fps_ray --physics=gpu-gl43
+fps_ray --physics=gpu-metal
 fps_ray --physics=cpu-mt
 fps_ray --physics=cpu-st
 ```
 
-`auto` is the normal fallback chain. The forced GPU mode fails instead of silently
+`gpu` selects the native GPU implementation (`gpu-gl43` or `gpu-metal`). `auto` is
+the normal fallback chain. An explicitly forced GPU mode fails instead of silently
 selecting another backend. CPU MT still degrades to CPU ST when no worker can be
 created. The active backend and its last-step time are displayed beside the FPS
 counter.
@@ -281,8 +306,8 @@ fps_ray --physics=gpu --physics-smoke=80 --physics-smoke-voxels=4096 \
 
 Named debug scenarios build isolated voxel structures, run a deterministic fixed-step
 simulation, capture diagnostic PNGs, write a JSON report, and exit without requiring
-gameplay input. The window is hidden by default but an OpenGL context is still created
-for GPU physics and off-screen rendering.
+gameplay input. The window is hidden by default but a graphics context is still
+created for off-screen rendering.
 
 ```bash
 fps_ray --physics=gpu --debug-scenario=sleep-wake-floating
@@ -314,7 +339,7 @@ Run all backends sequentially through the launcher with:
 fps_ray --debug-matrix --debug-scenario=sleep-wake-floating
 ```
 
-Matrix mode creates `gpu-gl43`, `cpu-mt`, and `cpu-st` subdirectories plus a combined
+Matrix mode creates `gpu-gl43` (Windows/Linux) or `gpu-metal` (macOS), `cpu-mt`, and `cpu-st` subdirectories plus a combined
 `matrix.json`. An unavailable GPU is reported as `UNAVAILABLE`; assertion, capture, or
 execution failures from an available backend fail the matrix. The per-backend reports
 include activation and sleep-transition results, centroid motion, particle mass and

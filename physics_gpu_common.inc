@@ -1,4 +1,5 @@
 /* Included by fps_ray.c after the voxel/PBD helpers are defined. */
+#include "physics_gpu_metal.h"
 
 typedef struct { float pos_radius[4], prev_inv_mass[4], predicted_base_inv_mass[4], velocity[4]; } GpuParticleState;
 typedef struct { uint32_t bits[4]; } GpuCorrectionState;
@@ -33,29 +34,9 @@ _Static_assert(sizeof(GpuStaticCollider) == 48, "GpuStaticCollider/std430 mismat
 _Static_assert(sizeof(GpuControlState) == 16, "GpuControlState/std430 mismatch");
 
 typedef struct {
-    unsigned int id;
+    uintptr_t id;
     size_t capacity;
 } GpuBuffer;
-
-enum {
-    GPU_MODE_RESET = 0,
-    GPU_MODE_INTEGRATE,
-    GPU_MODE_HASH_CLEAR,
-    GPU_MODE_HASH_BUILD,
-    GPU_MODE_SCENE_COLLISIONS,
-    GPU_MODE_PAIR_COLLISIONS,
-    GPU_MODE_APPLY,
-    GPU_MODE_VGS,
-    GPU_MODE_STATIC_COLLISIONS,
-    GPU_MODE_BREAK_MASK,
-    GPU_MODE_FINALIZE_PARTICLES,
-    GPU_MODE_FINALIZE_VOXELS,
-    GPU_MODE_SPLIT_BREAKS,
-    GPU_MODE_PREPARE_INDIRECT,
-    GPU_MODE_WAKE_GATHER,
-    GPU_MODE_WAKE_APPLY,
-    GPU_MODE_TOPOLOGY_REBUILD_SERIAL
-};
 
 enum {
     GPU_LOC_MODE = 0,
@@ -163,7 +144,13 @@ static bool gpu_resize_array(void **ptr, size_t count, size_t item_size) {
 }
 
 static void gpu_buffer_destroy(GpuBuffer *buffer) {
-    if (buffer->id != 0) rlUnloadShaderBuffer(buffer->id);
+    if (buffer->id != 0) {
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+        fps_metal_buffer_destroy((void *)buffer->id);
+#else
+        rlUnloadShaderBuffer((unsigned int)buffer->id);
+#endif
+    }
     buffer->id = 0;
     buffer->capacity = 0;
 }
@@ -181,10 +168,32 @@ static bool gpu_buffer_ensure(GpuBuffer *buffer, size_t size) {
     }
     if (gpuPhysics.max_ssbo_size > 0 && (long long)capacity > gpuPhysics.max_ssbo_size) return false;
     gpu_buffer_destroy(buffer);
-    buffer->id = rlLoadShaderBuffer((unsigned int)capacity, NULL, RL_DYNAMIC_COPY);
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+    buffer->id = (uintptr_t)fps_metal_buffer_create(capacity);
+#else
+    buffer->id = (uintptr_t)rlLoadShaderBuffer((unsigned int)capacity, NULL, RL_DYNAMIC_COPY);
+#endif
     if (buffer->id == 0) return false;
     buffer->capacity = capacity;
     return true;
+}
+
+static void gpu_buffer_update(GpuBuffer *buffer, const void *data, size_t size, size_t offset) {
+    if (!buffer || !buffer->id || !data || size == 0) return;
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+    (void)fps_metal_buffer_update((void *)buffer->id, data, size, offset);
+#else
+    rlUpdateShaderBuffer((unsigned int)buffer->id, data, (unsigned int)size, (unsigned int)offset);
+#endif
+}
+
+static void gpu_buffer_read(GpuBuffer *buffer, void *data, size_t size, size_t offset) {
+    if (!buffer || !buffer->id || !data || size == 0) return;
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+    (void)fps_metal_buffer_read((void *)buffer->id, data, size, offset);
+#else
+    rlReadShaderBuffer((unsigned int)buffer->id, data, (unsigned int)size, (unsigned int)offset);
+#endif
 }
 
 static void gpu_physics_release_resources(void) {
@@ -204,7 +213,11 @@ static void gpu_physics_release_resources(void) {
     gpu_buffer_destroy(&gpuPhysics.topology_buffer);
     gpu_buffer_destroy(&gpuPhysics.tether_buffer);
     gpu_buffer_destroy(&gpuPhysics.collision_meta_buffer);
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+    fps_metal_shutdown();
+#else
     if (gpuPhysics.program != 0) rlUnloadShaderProgram(gpuPhysics.program);
+#endif
     gpuPhysics.program = 0;
     gpuPhysics.ready = false;
     gpuPhysics.resident_valid = false;
@@ -500,22 +513,35 @@ static bool gpu_rebuild_static_cells(void) {
 }
 
 static void gpu_bind_world_buffers(void) {
-    rlBindShaderBuffer(gpuPhysics.particle_buffer.id, 0);
-    rlBindShaderBuffer(gpuPhysics.correction_buffer.id, 1);
-    rlBindShaderBuffer(gpuPhysics.cell_buffer.id, 2);
-    rlBindShaderBuffer(gpuPhysics.sim_id_buffer.id, 3);
-    rlBindShaderBuffer(gpuPhysics.voxel_buffer.id, 4);
-    rlBindShaderBuffer(gpuPhysics.hash_head_buffer.id, 5);
-    rlBindShaderBuffer(gpuPhysics.hash_next_buffer.id, 6);
-    rlBindShaderBuffer(gpuPhysics.static_cell_buffer.id, 7);
-    rlBindShaderBuffer(gpuPhysics.tether_buffer.id, 8);
-    rlBindShaderBuffer(gpuPhysics.collision_meta_buffer.id, 9);
-    rlBindShaderBuffer(gpuPhysics.static_collider_buffer.id, 10);
-    rlBindShaderBuffer(gpuPhysics.refcount_buffer.id, 11);
-    rlBindShaderBuffer(gpuPhysics.control_buffer.id, 12);
-    rlBindShaderBuffer(gpuPhysics.clone_parent_buffer.id, 13);
-    rlBindShaderBuffer(gpuPhysics.dispatch_buffer.id, 14);
-    rlBindShaderBuffer(gpuPhysics.topology_buffer.id, 15);
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+    GpuBuffer *buffers[FPS_GPU_BUFFER_COUNT] = {
+        &gpuPhysics.particle_buffer, &gpuPhysics.correction_buffer, &gpuPhysics.cell_buffer,
+        &gpuPhysics.sim_id_buffer, &gpuPhysics.voxel_buffer, &gpuPhysics.hash_head_buffer,
+        &gpuPhysics.hash_next_buffer, &gpuPhysics.static_cell_buffer, &gpuPhysics.tether_buffer,
+        &gpuPhysics.collision_meta_buffer, &gpuPhysics.static_collider_buffer,
+        &gpuPhysics.refcount_buffer, &gpuPhysics.control_buffer, &gpuPhysics.clone_parent_buffer,
+        &gpuPhysics.dispatch_buffer, &gpuPhysics.topology_buffer
+    };
+    for (int i = 0; i < FPS_GPU_BUFFER_COUNT; ++i)
+        fps_metal_bind_buffer(i, (void *)buffers[i]->id);
+#else
+    rlBindShaderBuffer((unsigned int)gpuPhysics.particle_buffer.id, 0);
+    rlBindShaderBuffer((unsigned int)gpuPhysics.correction_buffer.id, 1);
+    rlBindShaderBuffer((unsigned int)gpuPhysics.cell_buffer.id, 2);
+    rlBindShaderBuffer((unsigned int)gpuPhysics.sim_id_buffer.id, 3);
+    rlBindShaderBuffer((unsigned int)gpuPhysics.voxel_buffer.id, 4);
+    rlBindShaderBuffer((unsigned int)gpuPhysics.hash_head_buffer.id, 5);
+    rlBindShaderBuffer((unsigned int)gpuPhysics.hash_next_buffer.id, 6);
+    rlBindShaderBuffer((unsigned int)gpuPhysics.static_cell_buffer.id, 7);
+    rlBindShaderBuffer((unsigned int)gpuPhysics.tether_buffer.id, 8);
+    rlBindShaderBuffer((unsigned int)gpuPhysics.collision_meta_buffer.id, 9);
+    rlBindShaderBuffer((unsigned int)gpuPhysics.static_collider_buffer.id, 10);
+    rlBindShaderBuffer((unsigned int)gpuPhysics.refcount_buffer.id, 11);
+    rlBindShaderBuffer((unsigned int)gpuPhysics.control_buffer.id, 12);
+    rlBindShaderBuffer((unsigned int)gpuPhysics.clone_parent_buffer.id, 13);
+    rlBindShaderBuffer((unsigned int)gpuPhysics.dispatch_buffer.id, 14);
+    rlBindShaderBuffer((unsigned int)gpuPhysics.topology_buffer.id, 15);
+#endif
 }
 
 static bool gpu_upload_world(void) {
@@ -551,32 +577,31 @@ static bool gpu_upload_world(void) {
         !gpu_buffer_ensure(&gpuPhysics.dispatch_buffer, 12) ||
         !gpu_buffer_ensure(&gpuPhysics.topology_buffer,
                            (size_t)gpuPhysics.dynamic_voxel_count * 2u * sizeof(GpuTopologyState))) return false;
-    if (particle_bytes) rlUpdateShaderBuffer(gpuPhysics.particle_buffer.id, gpuPhysics.particle_stage, (unsigned int)particle_bytes, 0);
-    if (cell_bytes) rlUpdateShaderBuffer(gpuPhysics.cell_buffer.id, gpuPhysics.cell_stage, (unsigned int)cell_bytes, 0);
-    if (sim_bytes) rlUpdateShaderBuffer(gpuPhysics.sim_id_buffer.id, gpuPhysics.sim_ids, (unsigned int)sim_bytes, 0);
-    if (voxel_bytes) rlUpdateShaderBuffer(gpuPhysics.voxel_buffer.id, gpuPhysics.voxel_stage, (unsigned int)voxel_bytes, 0);
-    if (gpuPhysics.compact_count) rlUpdateShaderBuffer(gpuPhysics.tether_buffer.id, gpuPhysics.tether_stage,
-                                                       (unsigned int)((size_t)gpuPhysics.compact_count * sizeof(GpuTetherState)), 0);
-    if (collision_meta_bytes) rlUpdateShaderBuffer(gpuPhysics.collision_meta_buffer.id,
-                                                   gpuPhysics.collision_meta_stage,
-                                                   (unsigned int)collision_meta_bytes, 0);
+    if (particle_bytes) gpu_buffer_update(&gpuPhysics.particle_buffer, gpuPhysics.particle_stage, particle_bytes, 0);
+    if (cell_bytes) gpu_buffer_update(&gpuPhysics.cell_buffer, gpuPhysics.cell_stage, cell_bytes, 0);
+    if (sim_bytes) gpu_buffer_update(&gpuPhysics.sim_id_buffer, gpuPhysics.sim_ids, sim_bytes, 0);
+    if (voxel_bytes) gpu_buffer_update(&gpuPhysics.voxel_buffer, gpuPhysics.voxel_stage, voxel_bytes, 0);
+    if (gpuPhysics.compact_count) gpu_buffer_update(&gpuPhysics.tether_buffer, gpuPhysics.tether_stage,
+                                                    (size_t)gpuPhysics.compact_count * sizeof(GpuTetherState), 0);
+    if (collision_meta_bytes) gpu_buffer_update(&gpuPhysics.collision_meta_buffer,
+                                                gpuPhysics.collision_meta_stage, collision_meta_bytes, 0);
     if (gpuPhysics.compact_count) {
-        rlUpdateShaderBuffer(gpuPhysics.refcount_buffer.id, gpuPhysics.refcount_stage,
-                             (unsigned int)((size_t)gpuPhysics.compact_count * sizeof(int32_t)), 0);
-        rlUpdateShaderBuffer(gpuPhysics.clone_parent_buffer.id, gpuPhysics.clone_parent_stage,
-                             (unsigned int)((size_t)gpuPhysics.compact_count * sizeof(int32_t)), 0);
+        gpu_buffer_update(&gpuPhysics.refcount_buffer, gpuPhysics.refcount_stage,
+                          (size_t)gpuPhysics.compact_count * sizeof(int32_t), 0);
+        gpu_buffer_update(&gpuPhysics.clone_parent_buffer, gpuPhysics.clone_parent_stage,
+                          (size_t)gpuPhysics.compact_count * sizeof(int32_t), 0);
     }
-    rlUpdateShaderBuffer(gpuPhysics.control_buffer.id, &gpuPhysics.control_stage,
-                         (unsigned int)sizeof(gpuPhysics.control_stage), 0);
+    gpu_buffer_update(&gpuPhysics.control_buffer, &gpuPhysics.control_stage,
+                      sizeof(gpuPhysics.control_stage), 0);
     if (gpuPhysics.dynamic_voxel_count) {
-        rlUpdateShaderBuffer(gpuPhysics.topology_buffer.id, gpuPhysics.topology_stage,
-                             (unsigned int)((size_t)gpuPhysics.dynamic_voxel_count * 2u * sizeof(GpuTopologyState)), 0);
+        gpu_buffer_update(&gpuPhysics.topology_buffer, gpuPhysics.topology_stage,
+                          (size_t)gpuPhysics.dynamic_voxel_count * 2u * sizeof(GpuTopologyState), 0);
     }
     if (static_changed) {
-        rlUpdateShaderBuffer(gpuPhysics.static_cell_buffer.id, gpuPhysics.static_stage, (unsigned int)static_bytes, 0);
-        if (static_collider_bytes) rlUpdateShaderBuffer(gpuPhysics.static_collider_buffer.id,
-                                                        gpuPhysics.static_collider_stage,
-                                                        (unsigned int)static_collider_bytes, 0);
+        gpu_buffer_update(&gpuPhysics.static_cell_buffer, gpuPhysics.static_stage, static_bytes, 0);
+        if (static_collider_bytes) gpu_buffer_update(&gpuPhysics.static_collider_buffer,
+                                                     gpuPhysics.static_collider_stage,
+                                                     static_collider_bytes, 0);
         gpuPhysics.static_uploaded_generation = staticHashGeneration;
         gpuPhysics.static_uploads++;
     }
@@ -591,7 +616,13 @@ static bool gpu_upload_world(void) {
     return true;
 }
 
-#if defined(GRAPHICS_API_OPENGL_43)
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+static bool gpu_dispatch(int mode, int count) { return fps_metal_dispatch(mode, count); }
+static bool gpu_dispatch_indirect_offset(int mode, size_t offset) {
+    return fps_metal_dispatch_indirect(mode, (void *)gpuPhysics.dispatch_buffer.id, offset);
+}
+static bool gpu_dispatch_indirect(int mode) { return gpu_dispatch_indirect_offset(mode, 0); }
+#elif defined(GRAPHICS_API_OPENGL_43)
 static bool gpu_dispatch(int mode, int count) {
     if (count <= 0) return true;
     while (glGetError() != GL_NO_ERROR) { }
@@ -605,7 +636,7 @@ static bool gpu_dispatch(int mode, int count) {
 static bool gpu_dispatch_indirect_offset(int mode, size_t offset) {
     while (glGetError() != GL_NO_ERROR) { }
     rlSetUniform(gpuPhysics.loc[GPU_LOC_MODE], &mode, SHADER_UNIFORM_INT, 1);
-    glBindBuffer(GL_DISPATCH_INDIRECT_BUFFER, gpuPhysics.dispatch_buffer.id);
+    glBindBuffer(GL_DISPATCH_INDIRECT_BUFFER, (unsigned int)gpuPhysics.dispatch_buffer.id);
     glDispatchComputeIndirect((GLintptr)offset);
     glBindBuffer(GL_DISPATCH_INDIRECT_BUFFER, 0);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_COMMAND_BARRIER_BIT);
@@ -624,6 +655,39 @@ static void gpu_set_uniforms(float dt) {
     int static_collider_count = gpuPhysics.static_collider_count;
     int hash_size = particle_hash_size_for_count(gpuPhysics.sim_slot_capacity);
     int static_hash_size = HASH_SIZE;
+    float voxel_size = VOXEL_SIZE, floor_size = FLOOR_SIZE, gravity = GRAVITY;
+    float damping = VELOCITY_DAMPING, sor = PBD_SOR_FACTOR, collision = COLLISION_RELAXATION;
+    float alpha = VGS_ALPHA, beta = VGS_BETA, eps = VGS_EPS;
+    float strain = STRAIN_BREAK_THRESHOLD, shear = SHEAR_BREAK_THRESHOLD;
+    float tether_spring = TETHER_SPRING, tether_damping = TETHER_DAMPING;
+    int break_damp_frames = BREAK_DAMP_FRAMES;
+    float rest_grid_step = VOXEL_SIZE * 0.5f;
+    float player_data[MAX_PLAYERS][4];
+    float tether_data[MAX_PLAYERS][4];
+    for (int i = 0; i < MAX_PLAYERS; ++i) {
+        player_data[i][0] = players[i].pos.x; player_data[i][1] = players[i].pos.y; player_data[i][2] = players[i].pos.z;
+        player_data[i][3] = (i < activePlayers && players[i].respawn_timer <= 0.0f) ? PLAYER_SIZE * 0.5f : -1.0f;
+        tether_data[i][0] = tetherTargetByPlayer[i].x;
+        tether_data[i][1] = tetherTargetByPlayer[i].y;
+        tether_data[i][2] = tetherTargetByPlayer[i].z;
+        tether_data[i][3] = 1.0f;
+    }
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+    FpsGpuUniforms uniforms = { 0 };
+    uniforms.particle_count = particle_count; uniforms.sim_count = sim_particle_count;
+    uniforms.voxel_count = dynamic_voxel_count; uniforms.static_collider_count = static_collider_count;
+    uniforms.hash_size = hash_size; uniforms.static_hash_size = static_hash_size;
+    uniforms.active_players = activePlayers; uniforms.break_damp_frames = break_damp_frames;
+    uniforms.dt = dt; uniforms.voxel_size = voxel_size; uniforms.floor_size = floor_size;
+    uniforms.gravity = gravity; uniforms.velocity_damping = damping; uniforms.sor = sor;
+    uniforms.collision_relaxation = collision; uniforms.vgs_alpha = alpha; uniforms.vgs_beta = beta;
+    uniforms.vgs_epsilon = eps; uniforms.strain_threshold = strain; uniforms.shear_threshold = shear;
+    uniforms.tether_spring = tether_spring; uniforms.tether_damping = tether_damping;
+    uniforms.rest_grid_step = rest_grid_step;
+    memcpy(uniforms.players, player_data, sizeof(player_data));
+    memcpy(uniforms.tether_targets, tether_data, sizeof(tether_data));
+    fps_metal_set_uniforms(&uniforms);
+#else
     rlSetUniform(gpuPhysics.loc[GPU_LOC_PARTICLE_COUNT], &particle_count, SHADER_UNIFORM_INT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_SIM_COUNT], &sim_particle_count, SHADER_UNIFORM_INT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_VOXEL_COUNT], &dynamic_voxel_count, SHADER_UNIFORM_INT, 1);
@@ -632,13 +696,6 @@ static void gpu_set_uniforms(float dt) {
     rlSetUniform(gpuPhysics.loc[GPU_LOC_STATIC_HASH_SIZE], &static_hash_size, SHADER_UNIFORM_INT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_ACTIVE_PLAYERS], &activePlayers, SHADER_UNIFORM_INT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_DT], &dt, SHADER_UNIFORM_FLOAT, 1);
-    float voxel_size = VOXEL_SIZE, floor_size = FLOOR_SIZE, gravity = GRAVITY;
-    float damping = VELOCITY_DAMPING, sor = PBD_SOR_FACTOR, collision = COLLISION_RELAXATION;
-    float alpha = VGS_ALPHA, beta = VGS_BETA, eps = VGS_EPS;
-    float strain = STRAIN_BREAK_THRESHOLD, shear = SHEAR_BREAK_THRESHOLD;
-    float tether_spring = TETHER_SPRING, tether_damping = TETHER_DAMPING;
-    int break_damp_frames = BREAK_DAMP_FRAMES;
-    float rest_grid_step = VOXEL_SIZE * 0.5f;
     rlSetUniform(gpuPhysics.loc[GPU_LOC_VOXEL_SIZE], &voxel_size, SHADER_UNIFORM_FLOAT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_FLOOR_SIZE], &floor_size, SHADER_UNIFORM_FLOAT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_GRAVITY], &gravity, SHADER_UNIFORM_FLOAT, 1);
@@ -654,42 +711,33 @@ static void gpu_set_uniforms(float dt) {
     rlSetUniform(gpuPhysics.loc[GPU_LOC_TETHER_DAMPING], &tether_damping, SHADER_UNIFORM_FLOAT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_BREAK_DAMP_FRAMES], &break_damp_frames, SHADER_UNIFORM_INT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_REST_GRID_STEP], &rest_grid_step, SHADER_UNIFORM_FLOAT, 1);
-    float player_data[MAX_PLAYERS][4];
-    float tether_data[MAX_PLAYERS][4];
-    for (int i = 0; i < MAX_PLAYERS; ++i) {
-        player_data[i][0] = players[i].pos.x; player_data[i][1] = players[i].pos.y; player_data[i][2] = players[i].pos.z;
-        player_data[i][3] = (i < activePlayers && players[i].respawn_timer <= 0.0f) ? PLAYER_SIZE * 0.5f : -1.0f;
-        tether_data[i][0] = tetherTargetByPlayer[i].x;
-        tether_data[i][1] = tetherTargetByPlayer[i].y;
-        tether_data[i][2] = tetherTargetByPlayer[i].z;
-        tether_data[i][3] = 1.0f;
-    }
     rlSetUniform(gpuPhysics.loc[GPU_LOC_PLAYERS], player_data, SHADER_UNIFORM_VEC4, MAX_PLAYERS);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_TETHER_TARGETS], tether_data, SHADER_UNIFORM_VEC4, MAX_PLAYERS);
+#endif
 }
 
 static bool gpu_validate_and_commit(void) {
     double read_started = GetTime();
-    rlReadShaderBuffer(gpuPhysics.control_buffer.id, &gpuPhysics.control_stage,
-                       (unsigned int)sizeof(gpuPhysics.control_stage), 0);
+    gpu_buffer_read(&gpuPhysics.control_buffer, &gpuPhysics.control_stage,
+                    sizeof(gpuPhysics.control_stage), 0);
     int used_particles = gpuPhysics.control_stage.particle_count;
     if (used_particles < gpuPhysics.uploaded_particle_count ||
         used_particles > gpuPhysics.particle_slot_capacity ||
         gpuPhysics.control_stage.sim_count < 0 ||
         gpuPhysics.control_stage.sim_count > gpuPhysics.sim_slot_capacity ||
-        (gpuPhysics.control_stage.overflow & 1) != 0) return false;
+        (gpuPhysics.control_stage.overflow & FPS_GPU_CONTROL_OVERFLOW) != 0) return false;
     size_t particle_bytes = (size_t)used_particles * sizeof(GpuParticleState);
     size_t cell_bytes = (size_t)used_particles * sizeof(GpuCellState);
     size_t voxel_bytes = (size_t)gpuPhysics.dynamic_voxel_count * sizeof(GpuVoxelState);
-    if (particle_bytes) rlReadShaderBuffer(gpuPhysics.particle_buffer.id, gpuPhysics.particle_stage, (unsigned int)particle_bytes, 0);
-    if (cell_bytes) rlReadShaderBuffer(gpuPhysics.cell_buffer.id, gpuPhysics.cell_stage, (unsigned int)cell_bytes, 0);
-    if (voxel_bytes) rlReadShaderBuffer(gpuPhysics.voxel_buffer.id, gpuPhysics.voxel_stage, (unsigned int)voxel_bytes, 0);
+    if (particle_bytes) gpu_buffer_read(&gpuPhysics.particle_buffer, gpuPhysics.particle_stage, particle_bytes, 0);
+    if (cell_bytes) gpu_buffer_read(&gpuPhysics.cell_buffer, gpuPhysics.cell_stage, cell_bytes, 0);
+    if (voxel_bytes) gpu_buffer_read(&gpuPhysics.voxel_buffer, gpuPhysics.voxel_stage, voxel_bytes, 0);
     if (used_particles > gpuPhysics.uploaded_particle_count) {
         size_t offset = (size_t)gpuPhysics.uploaded_particle_count * sizeof(int32_t);
         size_t bytes = (size_t)(used_particles - gpuPhysics.uploaded_particle_count) * sizeof(int32_t);
-        rlReadShaderBuffer(gpuPhysics.clone_parent_buffer.id,
-                           gpuPhysics.clone_parent_stage + gpuPhysics.uploaded_particle_count,
-                           (unsigned int)bytes, (unsigned int)offset);
+        gpu_buffer_read(&gpuPhysics.clone_parent_buffer,
+                        gpuPhysics.clone_parent_stage + gpuPhysics.uploaded_particle_count,
+                        bytes, offset);
     }
     gpuPhysics.sync_count++;
     gpuPhysics.readback_bytes += (uint64_t)(sizeof(GpuControlState) + particle_bytes + cell_bytes + voxel_bytes +
@@ -832,8 +880,8 @@ static bool gpu_refresh_tethers(void) {
     bool changed = memcmp(gpuPhysics.tether_compare_stage, gpuPhysics.tether_stage,
                           (size_t)gpuPhysics.compact_count * sizeof(*gpuPhysics.tether_compare_stage)) != 0;
     if (changed) {
-        rlUpdateShaderBuffer(gpuPhysics.tether_buffer.id, gpuPhysics.tether_stage,
-                             (unsigned int)((size_t)gpuPhysics.compact_count * sizeof(GpuTetherState)), 0);
+        gpu_buffer_update(&gpuPhysics.tether_buffer, gpuPhysics.tether_stage,
+                          (size_t)gpuPhysics.compact_count * sizeof(GpuTetherState), 0);
         gpuPhysics.upload_bytes += (uint64_t)((size_t)gpuPhysics.compact_count * sizeof(GpuTetherState));
     }
     gpu_bind_world_buffers();
@@ -883,7 +931,11 @@ static int gpu_physics_steps(float dt, int fixed_steps) {
         if (!gpu_upload_world()) return 0;
     }
     float sub_dt = dt / (float)PBD_SUBSTEPS;
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+    if (!fps_metal_begin_batch()) return 0;
+#else
     rlEnableShader(gpuPhysics.program);
+#endif
     double dispatch_started = GetTime();
     bool ok = true;
     for (int fixed = 0; ok && fixed < fixed_steps; ++fixed) {
@@ -893,15 +945,44 @@ static int gpu_physics_steps(float dt, int fixed_steps) {
         if (ok) ok = gpu_rebuild_topology_if_needed();
     }
     gpuPhysics.dispatch_ms += (GetTime() - dispatch_started) * 1000.0;
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+    bool batch_finished = fps_metal_end_batch();
+#else
     rlDisableShader();
-    if (!ok || !gpu_validate_and_commit()) return 0;
+    bool batch_finished = true;
+#endif
+    if (!ok || !batch_finished || !gpu_validate_and_commit()) return 0;
     return fixed_steps;
 }
 
 static bool gpu_physics_init(void) {
-#if !defined(GRAPHICS_API_OPENGL_43)
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+    physicsBackend.gpu_compiled = true;
+    if (getenv("FPS_FORCE_GPU_INIT_FAILURE") != NULL) {
+        snprintf(physicsBackend.fallback_reason, sizeof(physicsBackend.fallback_reason), "forced GPU initialization failure");
+        return false;
+    }
+    if (!fps_metal_initialize("shaders/pbd/pbd_pipeline.metallib", &gpuPhysics.max_ssbo_size,
+                              physicsBackend.fallback_reason, sizeof(physicsBackend.fallback_reason))) {
+        return false;
+    }
+    gpuPhysics.pool_to_compact = malloc((size_t)MAX_PARTICLES * sizeof(*gpuPhysics.pool_to_compact));
+    if (!gpuPhysics.pool_to_compact) {
+        snprintf(physicsBackend.fallback_reason, sizeof(physicsBackend.fallback_reason), "GPU particle map allocation failed");
+        gpu_physics_release_resources();
+        return false;
+    }
+    gpuPhysics.ready = true;
+    gpuPhysics.static_uploaded_generation = 0;
+    physicsBackend.gpu_available = true;
+    return true;
+#elif !defined(GRAPHICS_API_OPENGL_43)
     physicsBackend.gpu_compiled = false;
+#if defined(__APPLE__)
+    snprintf(physicsBackend.fallback_reason, sizeof(physicsBackend.fallback_reason), "binary was built without Metal compute support");
+#else
     snprintf(physicsBackend.fallback_reason, sizeof(physicsBackend.fallback_reason), "binary was built without OpenGL 4.3 compute support");
+#endif
     return false;
 #else
     physicsBackend.gpu_compiled = true;
