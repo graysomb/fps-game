@@ -479,6 +479,10 @@ typedef struct {
     int cell_x;
     int cell_y;
     int cell_z;
+    int rest_cell_x;
+    int rest_cell_y;
+    int rest_cell_z;
+    int collision_group;
 } Particle;
 
 // Voxel structure
@@ -544,10 +548,17 @@ static int sim_particle_count = 0;
 static int free_particle_indices[MAX_PARTICLES];
 static int free_particle_count = 0;
 static int particle_sync_stamp = 1;
+static bool collisionTopologyDirty = true;
+static int collisionVoxelClusterIds[MAX_VOXELS];
+static int particleHashActiveSize = 1024;
 static int tether_apply_stamp = 1;
 static _Atomic int particle_hash_head[PARTICLE_HASH_SIZE];
 static int particle_hash_next[MAX_PARTICLES];
 static Particle *particle_snapshot[MAX_PARTICLES];
+typedef struct { float x, y, z, weight; } PairCorrection;
+static PairCorrection *pairCorrectionScratch = NULL;
+static size_t pairCorrectionScratchCapacity = 0;
+static int pairCorrectionScratchSlots = 0;
 static int glueClusterIndices[MAX_VOXELS];
 static unsigned char glueClusterVisited[MAX_VOXELS];
 static unsigned char sleepClusterVisited[MAX_VOXELS];
@@ -580,6 +591,8 @@ static void voxel_measure_strain(const Voxel *voxel,
                                  float *out_max_strain,
                                  float *out_max_shear);
 static int build_glue_cluster_indices(int start_idx, int *out_indices);
+static void build_glue_cluster_ids(int *out_cluster_id);
+static void rebuild_particle_collision_metadata(void);
 static int gather_glued_neighbors(int voxel_idx, int *out, int max_out);
 static int gather_glued_neighbors_symmetric(int voxel_idx, int *out, int max_out);
 static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count);
@@ -774,6 +787,10 @@ static void init_pbd_thread_pool(void) {
 }
 
 static void shutdown_pbd_thread_pool(void) {
+    free(pairCorrectionScratch);
+    pairCorrectionScratch = NULL;
+    pairCorrectionScratchCapacity = 0;
+    pairCorrectionScratchSlots = 0;
     if (!pbd_pool.threads) {
         return;
     }
@@ -1928,6 +1945,7 @@ static void reset_particle_pool(void) {
     free_particle_count = 0;
     particle_sync_stamp = 1;
     tether_apply_stamp = 1;
+    collisionTopologyDirty = true;
     memset(particles_pool, 0, sizeof(particles_pool));
     memset(active_particles, 0, sizeof(active_particles));
     memset(sim_particles, 0, sizeof(sim_particles));
@@ -1939,6 +1957,7 @@ static void sim_particles_add(Particle *p) {
     }
     p->sim_index = sim_particle_count;
     sim_particles[sim_particle_count++] = p;
+    collisionTopologyDirty = true;
 }
 
 static void sim_particles_remove(Particle *p) {
@@ -1955,6 +1974,7 @@ static void sim_particles_remove(Particle *p) {
     sim_particles[last_idx] = NULL;
     sim_particle_count--;
     p->sim_index = -1;
+    collisionTopologyDirty = true;
 }
 
 static Particle *particle_create(Vector3 pos, float inv_mass) {
@@ -1998,6 +2018,11 @@ static Particle *particle_create(Vector3 pos, float inv_mass) {
     p->cell_x = 0;
     p->cell_y = 0;
     p->cell_z = 0;
+    const float rest_grid_step = VOXEL_SIZE * 0.5f;
+    p->rest_cell_x = (int)lroundf(pos.x / rest_grid_step);
+    p->rest_cell_y = (int)lroundf(pos.y / rest_grid_step);
+    p->rest_cell_z = (int)lroundf(pos.z / rest_grid_step);
+    p->collision_group = -1;
     return p;
 }
 
@@ -2073,7 +2098,17 @@ static void particle_release(Particle *p) {
 
 static inline int particle_hash(int x, int y, int z) {
     uint32_t h = (uint32_t)(x * 73856093) ^ (uint32_t)(y * 19349663) ^ (uint32_t)(z * 83492791);
-    return (int)(h & (PARTICLE_HASH_SIZE - 1));
+    return (int)(h & (uint32_t)(particleHashActiveSize - 1));
+}
+
+static int particle_hash_size_for_count(int count) {
+    // Keep hash-only chain collisions rare; exact cell checks preserve
+    // correctness, but dense false chains cost more than clearing extra heads.
+    size_t target = (size_t)((count > 0) ? count : 1) * 16u;
+    int size = 1024;
+    while ((size_t)size < target && size < PARTICLE_HASH_SIZE) size <<= 1;
+    if (size > PARTICLE_HASH_SIZE) size = PARTICLE_HASH_SIZE;
+    return size;
 }
 
 static inline float atomic_add_float(_Atomic uint32_t *target, float value) {
@@ -2125,8 +2160,9 @@ static void particle_hash_build_range(int start, int end, int worker_id, void *u
 }
 
 static void build_particle_hash(Particle **list, int count) {
+    particleHashActiveSize = particle_hash_size_for_count(count);
     ParticleHashBuildJob job = { .list = list, .count = count };
-    pbd_parallel_for(0, PARTICLE_HASH_SIZE, particle_hash_clear_range, NULL);
+    pbd_parallel_for(0, particleHashActiveSize, particle_hash_clear_range, NULL);
     pbd_parallel_for(0, count, particle_hash_build_range, &job);
 }
 
@@ -2341,6 +2377,7 @@ static void reset_glue_constraint_peaks(void) {
 }
 
 static void mark_glue_adjacency_dirty_for_voxel(int voxel_idx) {
+    collisionTopologyDirty = true;
     if (glueAdjacencyDirtyAll) {
         return;
     }
@@ -3703,6 +3740,7 @@ static void glue_neighbor_faces_for_voxel(int voxel_idx) {
 
         a->glued_faces[faceA] = true;
         b->glued_faces[faceB] = true;
+        collisionTopologyDirty = true;
     }
 }
 
@@ -3749,6 +3787,7 @@ static void break_face_link(Voxel *voxel, int face_index) {
 
     detach_face_particles(voxel, face_index);
     voxel->glued_faces[face_index] = false;
+    collisionTopologyDirty = true;
 
     // if (neighbor_idx < 0) {
     //     return;
@@ -8754,81 +8793,57 @@ typedef struct {
     float half_player;
     float omega;
     float eps;
-    float voxel_radius;
-    float radius_sq;
+    PairCorrection *local_corrections;
+    int correction_slots;
 } ParticleCollisionJob;
 
-static void gather_particle_scene_collisions_range(int start, int end, int worker_id, void *user) {
-    (void)worker_id;
-    ParticleCollisionJob *job = (ParticleCollisionJob *)user;
-    const float half_player = job->half_player;
-    const float eps = job->eps;
-    const float voxel_radius = job->voxel_radius;
-    const float radius_sq = job->radius_sq;
-
-    Particle **list = job->list;
-    int count = job->count;
-    if (end > count) {
-        end = count;
+static bool reserve_pair_correction_scratch(int count) {
+    int slots = pbd_pool.thread_count + 1;
+    if (slots < 1) slots = 1;
+    size_t needed = (size_t)count * (size_t)slots;
+    if (needed > SIZE_MAX / sizeof(PairCorrection)) return false;
+    if (needed > pairCorrectionScratchCapacity || slots != pairCorrectionScratchSlots) {
+        PairCorrection *next = realloc(pairCorrectionScratch, needed * sizeof(*next));
+        if (!next) return false;
+        pairCorrectionScratch = next;
+        pairCorrectionScratchCapacity = needed;
+        pairCorrectionScratchSlots = slots;
     }
-    for (int i = start; i < end; ++i) {
-        Particle *p = list[i];
-        if (!p) {
-            continue;
-        }
-        if (p->inv_mass <= 0.0f) {
-            continue;
-        }
+    memset(pairCorrectionScratch, 0, needed * sizeof(*pairCorrectionScratch));
+    return true;
+}
 
-        Vector3 pos = p->predicted_pos;
-
-        if (pos.y < voxel_radius) {
-            //pos.y = voxel_radius;
-        }
-
-        for (int player_idx = 0; player_idx < activePlayers; ++player_idx) {
-            Player *pl = &players[player_idx];
-            if (pl->respawn_timer > 0.0f) {
-                continue;
-            }
-            Vector3 box_min = {
-                pl->pos.x - half_player,
-                pl->pos.y - half_player,
-                pl->pos.z - half_player
-            };
-            Vector3 box_max = {
-                pl->pos.x + half_player,
-                pl->pos.y + half_player,
-                pl->pos.z + half_player
-            };
-
-            Vector3 nearest = {
-                clampf(pos.x, box_min.x, box_max.x),
-                clampf(pos.y, box_min.y, box_max.y),
-                clampf(pos.z, box_min.z, box_max.z)
-            };
-
-            Vector3 delta = v_sub(pos, nearest);
-            float dist_sq = v_dot(delta, delta);
-            if (dist_sq < radius_sq) {
-                float dist = sqrtf(fmaxf(dist_sq, eps));
-                float penetration = voxel_radius - dist;
-                Vector3 normal = (dist > eps)
-                    ? v_mul(delta, -1.0f / dist)
-                    : (Vector3){ 0.0f, 1.0f, 0.0f };
-                pos = v_add(pos, v_mul(normal, penetration));
-            }
-        }
-
-        Vector3 delta = v_sub(pos, p->predicted_pos);
-        if (fabsf(delta.x) > 0.0f || fabsf(delta.y) > 0.0f || fabsf(delta.z) > 0.0f) {
-            accumulate_particle_correction(p, delta, 1.0f);
-        }
+static inline void accumulate_pair_correction(ParticleCollisionJob *job, int worker_id,
+                                              int particle_index, Particle *particle,
+                                              Vector3 delta, float weight) {
+    if (weight <= 0.0f) return;
+    if (!job->local_corrections) {
+        accumulate_particle_correction(particle, delta, weight);
+        return;
     }
+    int slot = (worker_id >= 0 && worker_id < job->correction_slots - 1)
+        ? worker_id : job->correction_slots - 1;
+    PairCorrection *correction = &job->local_corrections[(size_t)slot * (size_t)job->count +
+                                                         (size_t)particle_index];
+    correction->x += delta.x * weight;
+    correction->y += delta.y * weight;
+    correction->z += delta.z * weight;
+    correction->weight += weight;
+}
+
+static bool particles_are_local_structural_neighbors(const Particle *a, const Particle *b) {
+    if (!a || !b || a->collision_group < 0 || a->collision_group != b->collision_group) {
+        return false;
+    }
+    const float step = VOXEL_SIZE * 0.5f;
+    float dx = (float)(a->rest_cell_x - b->rest_cell_x) * step;
+    float dy = (float)(a->rest_cell_y - b->rest_cell_y) * step;
+    float dz = (float)(a->rest_cell_z - b->rest_cell_z) * step;
+    float target = a->radius + b->radius + 1e-5f;
+    return dx * dx + dy * dy + dz * dz <= target * target;
 }
 
 static void gather_particle_pair_collisions_range(int start, int end, int worker_id, void *user) {
-    (void)worker_id;
     ParticleCollisionJob *job = (ParticleCollisionJob *)user;
     const float omega = job->omega;
     const float eps = job->eps;
@@ -8848,6 +8863,37 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
             continue;
         }
 
+        // Scene projection is gathered into the same Jacobi correction set as
+        // particle pairs, avoiding a separate parallel pass/dispatch.
+        Vector3 scene_pos = pa->predicted_pos;
+        float scene_radius_sq = pa->radius * pa->radius;
+        for (int player_idx = 0; player_idx < activePlayers; ++player_idx) {
+            Player *pl = &players[player_idx];
+            if (pl->respawn_timer > 0.0f) continue;
+            Vector3 box_min = { pl->pos.x - job->half_player, pl->pos.y - job->half_player,
+                                pl->pos.z - job->half_player };
+            Vector3 box_max = { pl->pos.x + job->half_player, pl->pos.y + job->half_player,
+                                pl->pos.z + job->half_player };
+            Vector3 nearest = { clampf(scene_pos.x, box_min.x, box_max.x),
+                                clampf(scene_pos.y, box_min.y, box_max.y),
+                                clampf(scene_pos.z, box_min.z, box_max.z) };
+            Vector3 scene_delta = v_sub(scene_pos, nearest);
+            float scene_dist_sq = v_dot(scene_delta, scene_delta);
+            if (scene_dist_sq < scene_radius_sq) {
+                float scene_dist = sqrtf(fmaxf(scene_dist_sq, eps));
+                float penetration = pa->radius - scene_dist;
+                Vector3 normal = (scene_dist > eps)
+                    ? v_mul(scene_delta, -1.0f / scene_dist)
+                    : (Vector3){ 0.0f, 1.0f, 0.0f };
+                scene_pos = v_add(scene_pos, v_mul(normal, penetration));
+            }
+        }
+        Vector3 scene_correction = v_sub(scene_pos, pa->predicted_pos);
+        if (scene_correction.x != 0.0f || scene_correction.y != 0.0f ||
+            scene_correction.z != 0.0f) {
+            accumulate_pair_correction(job, worker_id, i, pa, scene_correction, 1.0f);
+        }
+
         int ax = pa->cell_x;
         int ay = pa->cell_y;
         int az = pa->cell_z;
@@ -8855,6 +8901,8 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
         for (int dx = -1; dx <= 1; ++dx) {
             for (int dy = -1; dy <= 1; ++dy) {
                 for (int dz = -1; dz <= 1; ++dz) {
+                    if (dz < 0 || (dz == 0 && dy < 0) ||
+                        (dz == 0 && dy == 0 && dx < 0)) continue;
                     int nx = ax + dx;
                     int ny = ay + dy;
                     int nz = az + dz;
@@ -8872,12 +8920,13 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
                         if (pb == pa) {
                             continue;
                         }
-                        if (idx <= i) {
+                        if (dx == 0 && dy == 0 && dz == 0 && idx <= i) {
                             continue;
                         }
                         if (pb->cell_x != nx || pb->cell_y != ny || pb->cell_z != nz) {
                             continue;
                         }
+                        if (particles_are_local_structural_neighbors(pa, pb)) continue;
 
                         float wb = pb->inv_mass;
                         float w_sum = wa + wb;
@@ -8911,21 +8960,47 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
                         float damp_factor = 1.0f;
                         if (pa->break_timer > 0 || pb->break_timer > 0) {
                             int max_timer = (pa->break_timer > pb->break_timer) ? pa->break_timer : pb->break_timer;
-                            damp_factor = 1.0f - (float)max_timer / (float)BREAK_DAMP_FRAMES;
+                            damp_factor = clampf(1.0f - (float)max_timer / (float)BREAK_DAMP_FRAMES,
+                                                 0.0f, 1.0f);
                         }
 
                         if (wa > 0.0f) {
                             Vector3 da = v_mul(normal, scale * wa * damp_factor);
-                            accumulate_particle_correction(pa, da, 1.0f);
+                            accumulate_pair_correction(job, worker_id, i, pa, da, 1.0f);
                         }
                         if (wb > 0.0f) {
                             Vector3 db = v_mul(normal, -scale * wb * damp_factor);
-                            accumulate_particle_correction(pb, db, 1.0f);
+                            accumulate_pair_correction(job, worker_id, idx, pb, db, 1.0f);
                         }
                     }
                 }
             }
         }
+    }
+}
+
+typedef struct {
+    Particle **list;
+    int count;
+    PairCorrection *corrections;
+    int slots;
+} PairCorrectionApplyJob;
+
+static void apply_pair_corrections_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    PairCorrectionApplyJob *job = (PairCorrectionApplyJob *)user;
+    for (int i = start; i < end; ++i) {
+        PairCorrection total = { 0 };
+        for (int slot = 0; slot < job->slots; ++slot) {
+            PairCorrection value = job->corrections[(size_t)slot * (size_t)job->count + (size_t)i];
+            total.x += value.x; total.y += value.y; total.z += value.z;
+            total.weight += value.weight;
+        }
+        Particle *particle = job->list[i];
+        if (!particle || total.weight <= 0.0f) continue;
+        float scale = PBD_SOR_FACTOR / total.weight;
+        particle->predicted_pos = v_add(particle->predicted_pos,
+            (Vector3){ total.x * scale, total.y * scale, total.z * scale });
     }
 }
 
@@ -8936,8 +9011,8 @@ static void gather_particle_collisions(float dt, Particle **list, int count) {
     const float half_player = PLAYER_SIZE * 0.5f;
     const float omega = COLLISION_RELAXATION;
     const float eps = 1e-6f;
-    const float voxel_radius = PARTICLE_RADIUS;
-    const float radius_sq = voxel_radius * voxel_radius;
+    bool use_local_corrections = reserve_pair_correction_scratch(count);
+    if (!use_local_corrections) reset_particle_accumulators();
 
     ParticleCollisionJob job = {
         .list = list,
@@ -8945,11 +9020,19 @@ static void gather_particle_collisions(float dt, Particle **list, int count) {
         .half_player = half_player,
         .omega = omega,
         .eps = eps,
-        .voxel_radius = voxel_radius,
-        .radius_sq = radius_sq
+        .local_corrections = use_local_corrections ? pairCorrectionScratch : NULL,
+        .correction_slots = use_local_corrections ? pairCorrectionScratchSlots : 0
     };
-    pbd_parallel_for(0, count, gather_particle_scene_collisions_range, &job);
     pbd_parallel_for(0, count, gather_particle_pair_collisions_range, &job);
+    if (use_local_corrections) {
+        PairCorrectionApplyJob apply_job = {
+            .list = list, .count = count, .corrections = pairCorrectionScratch,
+            .slots = pairCorrectionScratchSlots
+        };
+        pbd_parallel_for(0, count, apply_pair_corrections_range, &apply_job);
+    } else {
+        apply_particle_accumulators();
+    }
 }
 
 static void gather_voxel_shape_constraints_range(int start, int end, int worker_id, void *user) {
@@ -8965,6 +9048,7 @@ static void gather_voxel_shape_constraints_range(int start, int end, int worker_
 }
 
 static void rebuild_glue_constraints(void) {
+    collisionTopologyDirty = true;
     glueConstraintCount = 0;
     glue_adjacency_clear_all();
     for (int i = 0; i < voxel_count; ++i) {
@@ -9170,6 +9254,33 @@ static void build_glue_cluster_ids(int *out_cluster_id)
             out_cluster_id[cluster_members[m]] = rep;
         }
     }
+}
+
+static void rebuild_particle_collision_metadata(void)
+{
+    if (!collisionTopologyDirty) return;
+    for (int i = 0; i < sim_particle_count; ++i) {
+        if (sim_particles[i]) sim_particles[i]->collision_group = -1;
+    }
+    build_glue_cluster_ids(collisionVoxelClusterIds);
+    for (int voxel_index = 0; voxel_index < voxel_count; ++voxel_index) {
+        Voxel *voxel = &voxels[voxel_index];
+        if (!voxel->simulate || voxel->isBullet || voxel->type != 0) continue;
+        int group = collisionVoxelClusterIds[voxel_index];
+        if (group < 0) group = voxel_index;
+        for (int corner = 0; corner < 8; ++corner) {
+            Particle *particle = voxel->particles[corner];
+            if (!particle || particle->sim_index < 0) continue;
+            if (particle->collision_group == -1) particle->collision_group = group;
+            else if (particle->collision_group != group) particle->collision_group = -2;
+        }
+    }
+    for (int i = 0; i < sim_particle_count; ++i) {
+        if (sim_particles[i] && sim_particles[i]->collision_group == -2) {
+            sim_particles[i]->collision_group = -1;
+        }
+    }
+    collisionTopologyDirty = false;
 }
 
 static void log_dynamic_glue_cluster_breaks(void)
@@ -9987,6 +10098,7 @@ static void glue_dynamic_face_to_static(Voxel *dynamic, Voxel *stat,
     }
     dynamic->glued_faces[face_dynamic] = true;
     stat->glued_faces[face_static] = true;
+    collisionTopologyDirty = true;
 }
 
 static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx)
@@ -10432,10 +10544,8 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
                 snapshot_count = MAX_PARTICLES;
             }
             pbd_parallel_for(0, snapshot_count, copy_particle_snapshot_range, NULL);
-            reset_particle_accumulators();
             build_particle_hash(particle_snapshot, snapshot_count);
             gather_particle_collisions(sub_dt, particle_snapshot, snapshot_count);
-            apply_particle_accumulators();
         }
 
         for (int it = 0; it < constraint_iterations; ++it) {
@@ -10490,6 +10600,7 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
 
 void simulate_voxel_pbd(float dt) {
     if (sim_particle_count <= 0) return;
+    rebuild_particle_collision_metadata();
     double started = GetTime();
     const float sub_dt = dt / (float)PBD_SUBSTEPS;
     if (physicsBackend.active == PHYSICS_BACKEND_GPU_GL43 && gpuPhysics.ready) {
