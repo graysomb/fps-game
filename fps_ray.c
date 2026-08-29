@@ -12446,7 +12446,7 @@ static void InitInstancing(void) {
     // Get shader locations
     instancedShader.locs[SHADER_LOC_MATRIX_MVP] = GetShaderLocation(instancedShader, "mvp");
     instancedShader.locs[SHADER_LOC_VECTOR_VIEW] = GetShaderLocation(instancedShader, "viewPos");
-    instancedShader.locs[SHADER_LOC_MATRIX_MODEL] = GetShaderLocation(instancedShader, "matModel");
+    instancedShader.locs[SHADER_LOC_MATRIX_MODEL] = GetShaderLocationAttrib(instancedShader, "instanceTransform");
     instancedShader.locs[SHADER_LOC_MATRIX_VIEW] = GetShaderLocation(instancedShader, "matView");
     instancedShader.locs[SHADER_LOC_MATRIX_PROJECTION] = GetShaderLocation(instancedShader, "matProjection");
 
@@ -13821,7 +13821,7 @@ int main(int argc, char **argv) {
                     gameState = GAME_STATE_PLAYING;
                 }
                 break;
-            case GAME_STATE_PLAYING:
+            case GAME_STATE_PLAYING: {
         float dt = GetFrameTime();
         // Check win condition
         for (int i = 0; i < activePlayers; ++i) {
@@ -14137,6 +14137,7 @@ int main(int argc, char **argv) {
 
         render_gameplay_view(screens, &renderPlayers, &renderW, &renderH, false);
         break;
+            }
             case GAME_STATE_CREATIVE: {
                 float dt = GetFrameTime();
                 update_pickups(dt);

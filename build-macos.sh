@@ -42,7 +42,7 @@ fi
 
 make -C "$raylib_build/src" clean PLATFORM=PLATFORM_DESKTOP GRAPHICS=GRAPHICS_API_OPENGL_33 RAYLIB_LIBTYPE=STATIC
 make -C "$raylib_build/src" PLATFORM=PLATFORM_DESKTOP GRAPHICS=GRAPHICS_API_OPENGL_33 RAYLIB_LIBTYPE=STATIC \
-    CFLAGS="$arch_flags -mmacosx-version-min=$deployment_target"
+    CUSTOM_CFLAGS="$arch_flags -mmacosx-version-min=$deployment_target"
 
 if [ "$configuration" = debug ]; then
     opt_flags="-O0 -g"
