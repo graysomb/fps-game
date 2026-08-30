@@ -434,7 +434,7 @@ static bool debug_original_cluster_cells_are_clear(const DebugRunState *state)
     return true;
 }
 
-#if defined(GRAPHICS_API_OPENGL_43)
+#if defined(GRAPHICS_API_OPENGL_43) || (defined(__APPLE__) && defined(FPS_GPU_METAL))
 static bool debug_gpu_static_cell_absent_in(const GpuStaticCell *cells, int x, int y, int z)
 {
     if (!cells) return false;
@@ -469,7 +469,7 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
     sample.min_y = FLT_MAX;
     sample.max_y = -FLT_MAX;
     sample.static_hash_generation = staticHashGeneration;
-#if defined(GRAPHICS_API_OPENGL_43)
+#if defined(GRAPHICS_API_OPENGL_43) || (defined(__APPLE__) && defined(FPS_GPU_METAL))
     sample.gpu_static_uploaded_generation = gpuPhysics.static_uploaded_generation;
 #else
     sample.gpu_static_uploaded_generation = 0;
@@ -734,9 +734,9 @@ static void debug_validate_all_sim_particles(DebugRunState *state, int step)
 
 static void debug_validate_gpu_static_state(DebugRunState *state, int step)
 {
-    if (physicsBackend.active != PHYSICS_BACKEND_GPU_GL43 || step < 1 ||
+    if (!physics_backend_is_gpu(physicsBackend.active) || step < 1 ||
         !state || !state->activation_succeeded || state->gpu_readback_performed) return;
-#if defined(GRAPHICS_API_OPENGL_43)
+#if defined(GRAPHICS_API_OPENGL_43) || (defined(__APPLE__) && defined(FPS_GPU_METAL))
     if (gpuPhysics.static_uploaded_generation != staticHashGeneration) {
         debug_add_failure(state,
                           "step %d: GPU static generation %llu does not match CPU generation %llu",
@@ -754,9 +754,9 @@ static void debug_validate_gpu_static_state(DebugRunState *state, int step)
 
 static void debug_readback_gpu_buffers(DebugRunState *state, int step)
 {
-    if (!state || physicsBackend.active != PHYSICS_BACKEND_GPU_GL43 || step < 1 ||
+    if (!state || !physics_backend_is_gpu(physicsBackend.active) || step < 1 ||
         !state->activation_succeeded || state->gpu_readback_performed) return;
-#if defined(GRAPHICS_API_OPENGL_43)
+#if defined(GRAPHICS_API_OPENGL_43) || (defined(__APPLE__) && defined(FPS_GPU_METAL))
     state->gpu_readback_performed = true;
     if (gpuPhysics.static_cell_buffer.id == 0 || gpuPhysics.sim_id_buffer.id == 0 ||
         gpuPhysics.particle_buffer.id == 0 ||
@@ -781,15 +781,12 @@ static void debug_readback_gpu_buffers(DebugRunState *state, int step)
         return;
     }
 
-    rlReadShaderBuffer(gpuPhysics.static_cell_buffer.id, static_readback,
-                       (unsigned int)static_bytes, 0);
+    gpu_buffer_read(&gpuPhysics.static_cell_buffer, static_readback, static_bytes, 0);
     if (sim_bytes) {
-        rlReadShaderBuffer(gpuPhysics.sim_id_buffer.id, sim_id_readback,
-                           (unsigned int)sim_bytes, 0);
+        gpu_buffer_read(&gpuPhysics.sim_id_buffer, sim_id_readback, sim_bytes, 0);
     }
     if (particle_bytes) {
-        rlReadShaderBuffer(gpuPhysics.particle_buffer.id, particle_readback,
-                           (unsigned int)particle_bytes, 0);
+        gpu_buffer_read(&gpuPhysics.particle_buffer, particle_readback, particle_bytes, 0);
     }
 
     for (int i = 0; i < HASH_SIZE; ++i) {
@@ -1205,8 +1202,8 @@ static void debug_validate_step(DebugRunState *state, int step)
 
 static void debug_finalize_validation(DebugRunState *state)
 {
-    if (physicsBackend.requested == PHYSICS_BACKEND_GPU_GL43 &&
-        physicsBackend.active != PHYSICS_BACKEND_GPU_GL43) {
+    if (physics_backend_is_gpu(physicsBackend.requested) &&
+        physicsBackend.active != physicsBackend.requested) {
         debug_add_failure(state, "forced GPU run fell back to %s: %s",
                           physics_backend_name(physicsBackend.active),
                           physicsBackend.fallback_reason);

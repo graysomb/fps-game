@@ -17,6 +17,9 @@
 #define CPU_BINARY "fps_ray_cpu.exe"
 #else
 #include <limits.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -24,6 +27,14 @@
 #define PATH_SEPARATOR '/'
 #define GPU_BINARY "fps_ray_gpu"
 #define CPU_BINARY "fps_ray_cpu"
+#endif
+
+#if defined(__APPLE__)
+#define GPU_BACKEND_DIRECTORY "gpu-metal"
+#define GPU_BACKEND_NAME "gpu-metal"
+#else
+#define GPU_BACKEND_DIRECTORY "gpu-gl43"
+#define GPU_BACKEND_NAME "gpu-gl43"
 #endif
 
 #define MATRIX_PATH_CAPACITY 4096
@@ -100,7 +111,8 @@ static bool forces_gpu(int argc, char **argv) {
         const char *value = NULL;
         if (strncmp(argv[i], "--physics=", 10) == 0) value = argv[i] + 10;
         else if (strcmp(argv[i], "--physics") == 0 && i + 1 < argc) value = argv[++i];
-        if (value && (strcmp(value, "gpu") == 0 || strcmp(value, "gpu-gl43") == 0)) return true;
+        if (value && (strcmp(value, "gpu") == 0 || strcmp(value, "gpu-gl43") == 0 ||
+                      strcmp(value, "gpu-metal") == 0)) return true;
     }
     return false;
 }
@@ -147,6 +159,14 @@ static bool executable_directory(char *out, size_t capacity) {
 #ifdef _WIN32
     DWORD length = GetModuleFileNameA(NULL, out, (DWORD)capacity);
     if (length == 0 || length >= capacity) return false;
+#elif defined(__APPLE__)
+    uint32_t required = (uint32_t)capacity;
+    if (_NSGetExecutablePath(out, &required) != 0) return false;
+    char resolved[PATH_MAX];
+    if (!realpath(out, resolved)) return false;
+    size_t length = strlen(resolved);
+    if (length >= capacity) return false;
+    memcpy(out, resolved, length + 1);
 #else
     ssize_t length = readlink("/proc/self/exe", out, capacity - 1);
     if (length <= 0 || (size_t)length >= capacity) return false;
@@ -327,7 +347,7 @@ static int run_debug_matrix(const char *directory, int argc, char **argv) {
     }
 
     MatrixResult results[] = {
-        { .backend = "gpu", .binary = GPU_BINARY, .exit_status = -1 },
+        { .backend = GPU_BACKEND_NAME, .binary = GPU_BINARY, .exit_status = -1 },
         { .backend = "cpu-mt", .binary = CPU_BINARY, .exit_status = -1 },
         { .backend = "cpu-st", .binary = CPU_BINARY, .exit_status = -1 }
     };
@@ -335,7 +355,7 @@ static int run_debug_matrix(const char *directory, int argc, char **argv) {
     bool any_passed = false;
     bool any_failed = false;
     for (int i = 0; i < result_count; ++i) {
-        const char *directory_name = (i == 0) ? "gpu-gl43" : results[i].backend;
+        const char *directory_name = (i == 0) ? GPU_BACKEND_DIRECTORY : results[i].backend;
         if (!join_path(results[i].output_dir, sizeof(results[i].output_dir),
                        matrix_root, directory_name) ||
             !join_path(results[i].report_path, sizeof(results[i].report_path),
@@ -367,7 +387,13 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Unable to locate FPS game binaries\n");
         return 1;
     }
-#ifdef _WIN32
+#if defined(__APPLE__)
+    char resource_directory[4096];
+    bool has_app_resources = snprintf(resource_directory, sizeof(resource_directory),
+                                      "%s/../Resources", directory) > 0 &&
+                             access(resource_directory, F_OK) == 0;
+    if (chdir(has_app_resources ? resource_directory : directory) != 0) {
+#elif defined(_WIN32)
     if (_chdir(directory) != 0) {
 #else
     if (chdir(directory) != 0) {
