@@ -326,10 +326,6 @@ Available scenarios are:
   a tether-held voxel toward it through the same proximity-activation path used by gameplay.
 * `overhang-impact`: drops an ordinary active voxel onto the unsupported end of a static
   cantilever and checks that the overhang activates and deflects while its root stays supported.
-* `large-fall-restoration`: releases a 360-voxel pillar above a static pad, waits for
-  the dynamic-to-static restoration attempt, and records partial conversion, post-restore
-  speed, spatial spread, and any subsequent reactivation. It automatically runs at least
-  650 fixed steps because the failure happens after the structure appears to settle.
 
 Without `--debug-output`, artifacts are written beneath
 `.build/bin/debug-artifacts/<scenario>/<active-backend>`. Each backend directory contains
