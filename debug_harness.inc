@@ -42,6 +42,10 @@ typedef struct DebugSample {
     float min_y;
     float max_y;
     float mean_velocity_y;
+    float max_speed;
+    float extent_x;
+    float extent_y;
+    float extent_z;
     uint64_t static_hash_generation;
     uint64_t gpu_static_uploaded_generation;
     double physics_step_ms;
@@ -65,8 +69,17 @@ typedef struct DebugRunState {
     bool overhang_impact;
     bool overhang_anchor_observed;
     bool overhang_deflection_sampled;
+    bool restoration_stress;
+    bool restoration_observed;
+    bool restoration_completed;
+    bool restoration_reactivated;
+    bool restoration_post_step_captured;
     bool gpu_readback_performed;
     int activation_step;
+    int restoration_step;
+    int restoration_reactivation_step;
+    int restoration_static_count;
+    int restoration_reglued_corners;
     float initial_centroid_y;
     float drop_at_step_60;
     float overhang_initial_root_y;
@@ -74,6 +87,9 @@ typedef struct DebugRunState {
     float overhang_root_drop_at_step_30;
     float overhang_tip_drop_at_step_30;
     float overhang_relative_deflection_at_step_30;
+    float restoration_peak_post_speed;
+    float restoration_peak_post_extent;
+    float restoration_max_anchor_jump;
     int gpu_static_ssbo_diff_entries;
     int gpu_static_ssbo_stale_cells;
     int gpu_sim_id_mismatches;
@@ -108,13 +124,15 @@ static bool debug_setup_activation_floating(DebugRunState *state);
 static bool debug_setup_sleep_wake_floating(DebugRunState *state);
 static bool debug_setup_tether_throw_floating(DebugRunState *state);
 static bool debug_setup_overhang_impact(DebugRunState *state);
+static bool debug_setup_large_fall_restoration(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall },
     { "activation-floating", "Static cluster activated while unsupported", debug_setup_activation_floating },
     { "sleep-wake-floating", "Supported cluster sleeps, loses support, then activates", debug_setup_sleep_wake_floating },
     { "tether-throw-floating", "Released tether voxel wakes an unsupported sleeping cluster", debug_setup_tether_throw_floating },
-    { "overhang-impact", "Falling dynamic voxel activates and bends a supported static overhang", debug_setup_overhang_impact }
+    { "overhang-impact", "Falling dynamic voxel activates and bends a supported static overhang", debug_setup_overhang_impact },
+    { "large-fall-restoration", "Large pillar falls, settles, and restores to static", debug_setup_large_fall_restoration }
 };
 
 static const int debugScenarioCount = (int)(sizeof(debugScenarios) / sizeof(debugScenarios[0]));
@@ -468,6 +486,8 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
     sample.sim_particles = sim_particle_count;
     sample.min_y = FLT_MAX;
     sample.max_y = -FLT_MAX;
+    float min_x = FLT_MAX, max_x = -FLT_MAX;
+    float min_z = FLT_MAX, max_z = -FLT_MAX;
     sample.static_hash_generation = staticHashGeneration;
 #if defined(GRAPHICS_API_OPENGL_43) || (defined(__APPLE__) && defined(FPS_GPU_METAL))
     sample.gpu_static_uploaded_generation = gpuPhysics.static_uploaded_generation;
@@ -507,8 +527,14 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
         if (valid_corners > 0) center = v_mul(center, 1.0f / (float)valid_corners);
         centroid_sum += center.y;
         velocity_sum += voxel->vel.y;
+        float speed = v_length(voxel->vel);
+        if (speed > sample.max_speed) sample.max_speed = speed;
+        if (center.x < min_x) min_x = center.x;
+        if (center.x > max_x) max_x = center.x;
         if (center.y < sample.min_y) sample.min_y = center.y;
         if (center.y > sample.max_y) sample.max_y = center.y;
+        if (center.z < min_z) min_z = center.z;
+        if (center.z > max_z) max_z = center.z;
 
         if (voxel->simulate) {
             for (int face = 0; face < 6; ++face) {
@@ -523,6 +549,9 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
     if (sample.tagged_voxels > 0) {
         sample.centroid_y = centroid_sum / (float)sample.tagged_voxels;
         sample.mean_velocity_y = velocity_sum / (float)sample.tagged_voxels;
+        sample.extent_x = max_x - min_x;
+        sample.extent_y = sample.max_y - sample.min_y;
+        sample.extent_z = max_z - min_z;
     } else {
         sample.min_y = 0.0f;
         sample.max_y = 0.0f;
@@ -1146,6 +1175,62 @@ static bool debug_setup_overhang_impact(DebugRunState *state)
     return true;
 }
 
+static bool debug_setup_large_fall_restoration(DebugRunState *state)
+{
+    debug_reset_world();
+    Color pad_color = (Color){ 105, 112, 125, 255 };
+    Color pillar_color = (Color){ 225, 145, 55, 255 };
+    int pad_created = 0;
+    int pillar_created = 0;
+
+    for (int z = -6; z <= 6; ++z) {
+        for (int x = -6; x <= 6; ++x) {
+            if (debug_add_cell(x, 0, z, true, false,
+                               pad_color, DEBUG_SUPPORT_TAG) >= 0) {
+                ++pad_created;
+            }
+        }
+    }
+    for (int y = 4; y <= 11; ++y) {
+        for (int z = -3; z <= 3; ++z) {
+            for (int x = -3; x <= 3; ++x) {
+                if (abs(x) == 3 && abs(z) == 3) continue;
+                if (debug_add_cell(x, y, z, true, false,
+                                   pillar_color, DEBUG_TEST_TAG) >= 0) {
+                    ++pillar_created;
+                }
+            }
+        }
+    }
+
+    state->expected_voxels = pillar_created;
+    state->restoration_stress = true;
+    debugLogGlueClusters = true;
+    debugLogRestoreClusters = true;
+    debugLogRestoreFailures = true;
+    debugLogVoxelBlowup = true;
+    SetLoggingEnabled(true);
+    state->restoration_step = -1;
+    state->restoration_reactivation_step = -1;
+    state->camera.position = (Vector3){ 12.0f, 9.0f, 15.0f };
+    state->camera.target = (Vector3){ 0.0f, 5.0f, 0.0f };
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_rebuild_world_state();
+    debug_set_initial_centroid(state);
+
+    if (pad_created != 169 || pillar_created != 360) {
+        debug_add_failure(state,
+                          "large-fall setup created pad=%d/169 pillar=%d/360",
+                          pad_created, pillar_created);
+        return false;
+    }
+    debug_capture(state, "phase-01-undercut-pillar.png", "undercut-static", 0);
+    if (!debug_activate_test_cluster(state)) return false;
+    debug_set_initial_centroid(state);
+    debug_capture(state, "phase-02-pillar-released.png", "released-dynamic", 0);
+    return true;
+}
+
 static void debug_physics_step(void)
 {
     activate_static_voxels_near_dynamic();
@@ -1162,6 +1247,57 @@ static void debug_validate_step(DebugRunState *state, int step)
 {
     debug_validate_all_sim_particles(state, step);
     DebugSample sample = debug_collect_sample("validation", step, state->initial_centroid_y);
+    if (state->restoration_stress) {
+        if (!state->restoration_observed && sample.tagged_static > 0) {
+            state->restoration_observed = true;
+            state->restoration_step = step;
+            state->restoration_static_count = sample.tagged_static;
+            state->restoration_reglued_corners = debugRestoreReglueCorners;
+            state->restoration_max_anchor_jump = debugRestoreReglueMaxJump;
+            debug_capture(state, "phase-03-restoration-attempt.png", "restoration-attempt", step);
+            if (sample.tagged_dynamic != 0 || sample.tagged_static != state->expected_voxels) {
+                debug_add_failure(state,
+                                  "step %d: one fragment restored while the original structure remained mixed (dynamic=%d static=%d expected=%d)",
+                                  step, sample.tagged_dynamic, sample.tagged_static,
+                                  state->expected_voxels);
+            }
+        }
+        if (sample.tagged_dynamic == 0 && sample.tagged_static == state->expected_voxels) {
+            state->restoration_completed = true;
+        }
+        if (state->restoration_observed) {
+            float extent = fmaxf(sample.extent_x, fmaxf(sample.extent_y, sample.extent_z));
+            if (sample.max_speed > state->restoration_peak_post_speed) {
+                state->restoration_peak_post_speed = sample.max_speed;
+            }
+            if (extent > state->restoration_peak_post_extent) {
+                state->restoration_peak_post_extent = extent;
+            }
+            if (state->restoration_completed && !state->restoration_reactivated &&
+                sample.tagged_dynamic > 0) {
+                state->restoration_reactivated = true;
+                state->restoration_reactivation_step = step;
+                debug_capture(state, "phase-04-post-restore-reactivation.png",
+                              "post-restore-reactivation", step);
+                debug_add_failure(state,
+                                  "step %d: %d pillar voxels reactivated after static restoration (maxSpeed=%.3f)",
+                                  step, sample.tagged_dynamic, sample.max_speed);
+            }
+            if (!state->restoration_post_step_captured &&
+                step == state->restoration_step + 1) {
+                state->restoration_post_step_captured = true;
+                debug_capture(state, "phase-04-first-post-restoration-step.png",
+                              "first-post-restoration-step", step);
+                if (sample.max_speed > 50.0f) {
+                    debug_add_failure(state,
+                                      "step %d: restore re-glue injected energy (maxSpeed=%.3f, corners=%d, maxAnchorJump=%.3f)",
+                                      step, sample.max_speed,
+                                      state->restoration_reglued_corners,
+                                      state->restoration_max_anchor_jump);
+                }
+            }
+        }
+    }
     if (state->delayed_activation) {
         if (!state->activation_succeeded &&
             sample.tagged_dynamic == state->expected_voxels && sample.tagged_static == 0) {
@@ -1228,6 +1364,19 @@ static void debug_finalize_validation(DebugRunState *state)
             debug_add_failure(state,
                               "overhang relative tip deflection at step 30 was only %.3f metres (minimum 0.050)",
                               state->overhang_relative_deflection_at_step_30);
+        }
+    }
+    if (state->restoration_stress) {
+        if (!state->restoration_observed) {
+            debug_add_failure(state, "large falling pillar never attempted static restoration");
+        } else if (!state->restoration_completed) {
+            debug_add_failure(state,
+                              "large falling pillar never completed static restoration (first static count=%d/%d)",
+                              state->restoration_static_count, state->expected_voxels);
+        }
+        if (!isfinite(state->restoration_peak_post_speed) ||
+            !isfinite(state->restoration_peak_post_extent)) {
+            debug_add_failure(state, "post-restoration diagnostics became non-finite");
         }
     }
     if (strcmp(debugRunConfig.scenario, "sleep-wake-floating") == 0 ||
@@ -1317,6 +1466,24 @@ static bool debug_write_report(DebugRunState *state)
             (double)state->overhang_tip_drop_at_step_30,
             (double)state->overhang_relative_deflection_at_step_30);
 
+    fprintf(file,
+            "  \"restorationDiagnostics\": {\"enabled\": %s, \"observed\": %s,"
+            " \"completed\": %s, \"reactivated\": %s, \"restorationStep\": %d,"
+            " \"reactivationStep\": %d, \"firstStaticCount\": %d,"
+            " \"regluedCorners\": %d, \"maxAnchorJump\": %.9g,"
+            " \"peakPostSpeed\": %.9g, \"peakPostExtent\": %.9g},\n",
+            state->restoration_stress ? "true" : "false",
+            state->restoration_observed ? "true" : "false",
+            state->restoration_completed ? "true" : "false",
+            state->restoration_reactivated ? "true" : "false",
+            state->restoration_step,
+            state->restoration_reactivation_step,
+            state->restoration_static_count,
+            state->restoration_reglued_corners,
+            (double)state->restoration_max_anchor_jump,
+            (double)state->restoration_peak_post_speed,
+            (double)state->restoration_peak_post_extent);
+
     fputs("  \"failures\": [", file);
     for (int i = 0; i < state->failure_count; ++i) {
         if (i > 0) fputs(", ", file);
@@ -1338,7 +1505,9 @@ static bool debug_write_report(DebugRunState *state)
                 " \"zeroMassCorners\": %d, \"invalidParticleRefs\": %d,"
                 " \"staticGluedFaces\": %d, \"centroidY\": %.9g,"
                 " \"centroidDrop\": %.9g, \"minY\": %.9g, \"maxY\": %.9g,"
-                " \"meanVelocityY\": %.9g, \"staticHashGeneration\": %llu,"
+                " \"meanVelocityY\": %.9g, \"maxSpeed\": %.9g,"
+                " \"extentX\": %.9g, \"extentY\": %.9g, \"extentZ\": %.9g,"
+                " \"staticHashGeneration\": %llu,"
                 " \"gpuStaticUploadedGeneration\": %llu, \"physicsStepMs\": %.9g}%s\n",
                 sample->step, sample->tagged_voxels, sample->tagged_dynamic,
                 sample->tagged_static, sample->sim_particles,
@@ -1346,6 +1515,9 @@ static bool debug_write_report(DebugRunState *state)
                 sample->static_glued_faces, (double)sample->centroid_y,
                 (double)sample->centroid_drop, (double)sample->min_y,
                 (double)sample->max_y, (double)sample->mean_velocity_y,
+                (double)sample->max_speed,
+                (double)sample->extent_x, (double)sample->extent_y,
+                (double)sample->extent_z,
                 (unsigned long long)sample->static_hash_generation,
                 (unsigned long long)sample->gpu_static_uploaded_generation,
                 sample->physics_step_ms,
@@ -1392,6 +1564,10 @@ static int run_debug_harness(void)
             fprintf(stderr, "  %s - %s\n", debugScenarios[i].name, debugScenarios[i].description);
         }
         return 2;
+    }
+    if (strcmp(debugRunConfig.scenario, "large-fall-restoration") == 0 &&
+        debugRunConfig.steps < 650) {
+        debugRunConfig.steps = 650;
     }
     if (!debug_prepare_capture_steps()) return 2;
 

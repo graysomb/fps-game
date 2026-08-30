@@ -647,6 +647,7 @@ typedef struct {
     int voxelIndex;
     int debugTag;
     int activator;
+    int owner;
 } UnitVoxelSeed;
 
 typedef struct {
@@ -956,7 +957,8 @@ static bool unit_voxel_buffer_push(UnitVoxelBuffer *buffer,
         .fixed = fixed,
         .voxelIndex = voxelIndex,
         .debugTag = debugTag,
-        .activator = activator
+        .activator = activator,
+        .owner = -1
     };
     return true;
 }
@@ -1069,6 +1071,9 @@ static bool debugLogSmushSpawns = false;
 static bool debugLogSmushHits = false;
 static bool debugLogSmushDeaths = false;
 static bool debugLogRestoreClusters = false;
+static bool debugRestoreReglueActive = false;
+static int debugRestoreReglueCorners = 0;
+static float debugRestoreReglueMaxJump = 0.0f;
 static int debugBlowupLogBudget = 0;
 static bool debugLogClusterBreaksOnly = false;
 static bool debugSfxKeysEnabled = false;
@@ -2766,7 +2771,7 @@ typedef struct {
     int      idx;   // index in `voxels[]`
 } Bucket;
 
-static Bucket table[HASH_SIZE]; // Deprecated, will be replaced by dynamic_table
+static Bucket restoration_rest_table[HASH_SIZE];
 static Bucket static_table[HASH_SIZE];
 static Bucket dynamic_table[HASH_SIZE];
 static bool staticHashDirty = false;
@@ -4564,8 +4569,16 @@ static void recycle_dead_voxels(void) {
             continue;
         }
         voxel->lifeFrames++;
-        if (voxel->lifeFrames > RECYCLE_DYNAMIC_MAX_FRAMES ||
-            voxel_outside_world_bounds(voxel))
+        bool outside_world = voxel_outside_world_bounds(voxel);
+        bool age_expired = voxel->lifeFrames > RECYCLE_DYNAMIC_MAX_FRAMES;
+        if (age_expired && voxel->type == 0 && !voxel->isBullet && !outside_world) {
+            // Structural voxels must use atomic contact-island restoration.
+            // Recycling one member at a time can create a static anchor inside
+            // an otherwise moving component and inject explosive PBD energy.
+            voxel->lifeFrames = RECYCLE_DYNAMIC_MAX_FRAMES;
+            continue;
+        }
+        if (age_expired || outside_world)
         {
             if (debugLogVoxelRecycle) {
                 TraceLog(LOG_INFO,
@@ -5153,6 +5166,219 @@ static bool glue_cluster_has_static_support(const int *cluster, int cluster_coun
     return false;
 }
 
+static bool restoration_voxels_in_contact(const Voxel *a, const Voxel *b)
+{
+    if (!a || !b || a == b || !a->simulate || !b->simulate ||
+        a->type != 0 || b->type != 0 || a->isBullet || b->isBullet) {
+        return false;
+    }
+
+    VoxelWorldBounds bounds_a;
+    VoxelWorldBounds bounds_b;
+    voxel_particle_world_bounds(a, &bounds_a);
+    voxel_particle_world_bounds(b, &bounds_b);
+
+    const float contact_epsilon = VOXEL_SIZE * 0.15f;
+    const float min_face_overlap = VOXEL_SIZE * 0.20f;
+    float gap_x = fmaxf(bounds_b.minx - bounds_a.maxx,
+                        bounds_a.minx - bounds_b.maxx);
+    float gap_y = fmaxf(bounds_b.miny - bounds_a.maxy,
+                        bounds_a.miny - bounds_b.maxy);
+    float gap_z = fmaxf(bounds_b.minz - bounds_a.maxz,
+                        bounds_a.minz - bounds_b.maxz);
+    if (gap_x > contact_epsilon || gap_y > contact_epsilon ||
+        gap_z > contact_epsilon) {
+        return false;
+    }
+
+    float overlap_x = bounds_overlap_length(bounds_a.minx, bounds_a.maxx,
+                                             bounds_b.minx, bounds_b.maxx);
+    float overlap_y = bounds_overlap_length(bounds_a.miny, bounds_a.maxy,
+                                             bounds_b.miny, bounds_b.maxy);
+    float overlap_z = bounds_overlap_length(bounds_a.minz, bounds_a.maxz,
+                                             bounds_b.minz, bounds_b.maxz);
+    int face_axes = (overlap_x >= min_face_overlap ? 1 : 0) +
+                    (overlap_y >= min_face_overlap ? 1 : 0) +
+                    (overlap_z >= min_face_overlap ? 1 : 0);
+    return face_axes >= 2;
+}
+
+static void rebuild_restoration_rest_table(void)
+{
+    memset(restoration_rest_table, 0, sizeof(restoration_rest_table));
+    for (int i = 0; i < voxel_count; ++i) {
+        const Voxel *voxel = &voxels[i];
+        if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) continue;
+        for (int x = voxel->rest_min_gx; x <= voxel->rest_max_gx; ++x) {
+            for (int y = voxel->rest_min_gy; y <= voxel->rest_max_gy; ++y) {
+                for (int z = voxel->rest_min_gz; z <= voxel->rest_max_gz; ++z) {
+                    uint64_t key = mortonKey(x, y, z);
+                    size_t h = hashVoxelKey(key);
+                    while (restoration_rest_table[h].key &&
+                           restoration_rest_table[h].key != key) {
+                        h = (h + 1) & (HASH_SIZE - 1);
+                    }
+                    restoration_rest_table[h].key = key;
+                    restoration_rest_table[h].idx = i;
+                }
+            }
+        }
+    }
+}
+
+static int restoration_rest_table_get(int x, int y, int z)
+{
+    uint64_t key = mortonKey(x, y, z);
+    size_t h = hashVoxelKey(key);
+    while (restoration_rest_table[h].key) {
+        if (restoration_rest_table[h].key == key) {
+            return restoration_rest_table[h].idx;
+        }
+        h = (h + 1) & (HASH_SIZE - 1);
+    }
+    return -1;
+}
+
+static bool restoration_rest_neighbors_still_coherent(const Voxel *a,
+                                                       const Voxel *b)
+{
+    if (!a || !b) return false;
+    Vector3 rest_a = {
+        0.5f * ((float)a->rest_min_gx + (float)a->rest_max_gx + 1.0f) * VOXEL_SIZE,
+        0.5f * ((float)a->rest_min_gy + (float)a->rest_max_gy + 1.0f) * VOXEL_SIZE,
+        0.5f * ((float)a->rest_min_gz + (float)a->rest_max_gz + 1.0f) * VOXEL_SIZE
+    };
+    Vector3 rest_b = {
+        0.5f * ((float)b->rest_min_gx + (float)b->rest_max_gx + 1.0f) * VOXEL_SIZE,
+        0.5f * ((float)b->rest_min_gy + (float)b->rest_max_gy + 1.0f) * VOXEL_SIZE,
+        0.5f * ((float)b->rest_min_gz + (float)b->rest_max_gz + 1.0f) * VOXEL_SIZE
+    };
+    Vector3 displacement_delta = v_sub(v_sub(a->pos, rest_a),
+                                       v_sub(b->pos, rest_b));
+    return v_length(displacement_delta) <= VOXEL_SIZE;
+}
+
+// Builds the dynamic island that must be restored as one unit.  Broken glue
+// fragments still belong to the same island while their voxel faces remain in
+// contact, so one calm fragment cannot turn into an anchor inside a moving body.
+static int build_restoration_contact_island(int start_idx, int *out_indices)
+{
+    if (!out_indices || start_idx < 0 || start_idx >= voxel_count) {
+        return 0;
+    }
+    Voxel *start = &voxels[start_idx];
+    if (!start->simulate || start->type != 0 || start->isBullet) {
+        return 0;
+    }
+
+    rebuild_restoration_rest_table();
+    memset(sleepClusterVisited, 0, sizeof(sleepClusterVisited));
+    int head = 0;
+    int tail = 0;
+    out_indices[tail++] = start_idx;
+    sleepClusterVisited[start_idx] = 1;
+
+    while (head < tail) {
+        int current_idx = out_indices[head++];
+        Voxel *current = &voxels[current_idx];
+
+        int glued[MAX_FACE_NEIGHBORS];
+        int glued_count = gather_glued_neighbors_symmetric(
+            current_idx, glued, MAX_FACE_NEIGHBORS);
+        for (int n = 0; n < glued_count && tail < MAX_VOXELS; ++n) {
+            int neighbor_idx = glued[n];
+            if (neighbor_idx < 0 || neighbor_idx >= voxel_count ||
+                sleepClusterVisited[neighbor_idx]) {
+                continue;
+            }
+            sleepClusterVisited[neighbor_idx] = 1;
+            out_indices[tail++] = neighbor_idx;
+        }
+
+        // Grid-face connectivity is deliberately broader than deformed AABB
+        // contact. A settled voxel can be slightly pulled away from its face
+        // while still occupying the neighboring structural cell; rebuilding
+        // glue after a partial restore would immediately reconnect that exact
+        // pair as dynamic-to-static anchors.
+        for (int face = 0; face < 6 && tail < MAX_VOXELS; ++face) {
+            int neighbor_idx = table_get(
+                current->gx + face_offsets[face][0],
+                current->gy + face_offsets[face][1],
+                current->gz + face_offsets[face][2]);
+            if (neighbor_idx < 0 || neighbor_idx >= voxel_count ||
+                sleepClusterVisited[neighbor_idx]) {
+                continue;
+            }
+            Voxel *neighbor = &voxels[neighbor_idx];
+            if (!neighbor->simulate || neighbor->type != 0 || neighbor->isBullet) {
+                continue;
+            }
+            sleepClusterVisited[neighbor_idx] = 1;
+            out_indices[tail++] = neighbor_idx;
+        }
+
+        int rmin[3] = { current->rest_min_gx, current->rest_min_gy, current->rest_min_gz };
+        int rmax[3] = { current->rest_max_gx, current->rest_max_gy, current->rest_max_gz };
+        for (int face = 0; face < 6 && tail < MAX_VOXELS; ++face) {
+            int axis = face / 2;
+            int side = (face % 2 == 0) ? 1 : -1;
+            int fixed_coord = (side > 0 ? rmax[axis] : rmin[axis]) + side;
+            int axis_a = (axis + 1) % 3;
+            int axis_b = (axis + 2) % 3;
+            for (int a = rmin[axis_a]; a <= rmax[axis_a] && tail < MAX_VOXELS; ++a) {
+                for (int b = rmin[axis_b]; b <= rmax[axis_b] && tail < MAX_VOXELS; ++b) {
+                    int coord[3];
+                    coord[axis] = fixed_coord;
+                    coord[axis_a] = a;
+                    coord[axis_b] = b;
+                    int neighbor_idx = restoration_rest_table_get(
+                        coord[0], coord[1], coord[2]);
+                    if (neighbor_idx < 0 || neighbor_idx >= voxel_count ||
+                        sleepClusterVisited[neighbor_idx]) {
+                        continue;
+                    }
+                    if (!restoration_rest_neighbors_still_coherent(
+                            current, &voxels[neighbor_idx])) {
+                        continue;
+                    }
+                    sleepClusterVisited[neighbor_idx] = 1;
+                    out_indices[tail++] = neighbor_idx;
+                }
+            }
+        }
+
+        VoxelWorldBounds bounds;
+        voxel_particle_world_bounds(current, &bounds);
+        const float broadphase_pad = VOXEL_SIZE * 0.20f;
+        int minx = (int)floorf((bounds.minx - broadphase_pad) / VOXEL_SIZE) - 1;
+        int maxx = (int)floorf((bounds.maxx + broadphase_pad) / VOXEL_SIZE) + 1;
+        int miny = (int)floorf((bounds.miny - broadphase_pad) / VOXEL_SIZE) - 1;
+        int maxy = (int)floorf((bounds.maxy + broadphase_pad) / VOXEL_SIZE) + 1;
+        int minz = (int)floorf((bounds.minz - broadphase_pad) / VOXEL_SIZE) - 1;
+        int maxz = (int)floorf((bounds.maxz + broadphase_pad) / VOXEL_SIZE) + 1;
+
+        for (int z = minz; z <= maxz && tail < MAX_VOXELS; ++z) {
+            for (int y = miny; y <= maxy && tail < MAX_VOXELS; ++y) {
+                for (int x = minx; x <= maxx && tail < MAX_VOXELS; ++x) {
+                    int neighbor_idx = table_get(x, y, z);
+                    if (neighbor_idx < 0 || neighbor_idx >= voxel_count ||
+                        neighbor_idx == current_idx ||
+                        sleepClusterVisited[neighbor_idx]) {
+                        continue;
+                    }
+                    Voxel *neighbor = &voxels[neighbor_idx];
+                    if (!restoration_voxels_in_contact(current, neighbor)) {
+                        continue;
+                    }
+                    sleepClusterVisited[neighbor_idx] = 1;
+                    out_indices[tail++] = neighbor_idx;
+                }
+            }
+        }
+    }
+    return tail;
+}
+
 
 static void keep_cluster_awake(const int *cluster, int cluster_count)
 {
@@ -5263,10 +5489,15 @@ static bool deactivate_sleeping_voxels(void)
         }
     }
 
+    memset(glueClusterVisited, 0, sizeof(glueClusterVisited));
     int idx = 0;
     while (idx < voxel_count && remaining_budget > 0) {
         Voxel *voxel = &voxels[idx];
         if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
+            ++idx;
+            continue;
+        }
+        if (glueClusterVisited[idx]) {
             ++idx;
             continue;
         }
@@ -5280,37 +5511,23 @@ static bool deactivate_sleeping_voxels(void)
             continue;
         }
 
-        memset(sleepClusterVisited, 0, sizeof(unsigned char) * (size_t)voxel_count);
-        int head = 0;
-        int tail = 0;
-        glueClusterIndices[tail++] = idx;
-        sleepClusterVisited[idx] = 1;
-
-        while (head < tail) {
-            int current = glueClusterIndices[head++];
-            int neighbors[MAX_FACE_NEIGHBORS];
-            int neighbor_count = gather_glued_neighbors_symmetric(current, neighbors, MAX_FACE_NEIGHBORS);
-            for (int n = 0; n < neighbor_count; ++n) {
-                int neighbor = neighbors[n];
-                if (neighbor < 0 || neighbor >= voxel_count) {
-                    continue;
-                }
-                if (sleepClusterVisited[neighbor]) {
-                    continue;
-                }
-                sleepClusterVisited[neighbor] = 1;
-                if (tail < MAX_VOXELS) {
-                    glueClusterIndices[tail++] = neighbor;
-                }
-            }
-        }
-
-        int cluster_count = tail;
+        int cluster_count = build_restoration_contact_island(
+            idx, glueClusterIndices);
         if (cluster_count <= 0) {
             ++idx;
             continue;
         }
+        for (int c = 0; c < cluster_count; ++c) {
+            int member_idx = glueClusterIndices[c];
+            if (member_idx >= 0 && member_idx < voxel_count) {
+                glueClusterVisited[member_idx] = 1;
+            }
+        }
 
+        // The calm seed has already met the sleep threshold. Once it does,
+        // freeze the entire currently connected active component together;
+        // requiring every broken glue fragment to independently accumulate
+        // sleep frames can leave a settled contact island active forever.
         bool cluster_ready = true;
         for (int c = 0; c < cluster_count; ++c) {
             int cidx = glueClusterIndices[c];
@@ -5319,8 +5536,7 @@ static bool deactivate_sleeping_voxels(void)
                 break;
             }
             Voxel *member = &voxels[cidx];
-            if (!member->simulate || member->type != 0 || member->isBullet ||
-                member->sleepFrames < VOXEL_DEACTIVATION_FRAMES) {
+            if (!member->simulate || member->type != 0 || member->isBullet) {
                 cluster_ready = false;
                 break;
             }
@@ -5353,13 +5569,26 @@ static bool deactivate_sleeping_voxels(void)
             remaining_budget = 0;
         }
         changed = true;
+        // Indices may have been moved by removal. Re-scan the compacted array;
+        // all restored members are now static and will be skipped.
+        memset(glueClusterVisited, 0, sizeof(glueClusterVisited));
+        idx = 0;
         continue;
     }
 
     if (changed) {
         rebuild_voxel_hash();
         rebuild_all_voxel_surfaces();
+        debugRestoreReglueActive = debugLogRestoreClusters;
+        debugRestoreReglueCorners = 0;
+        debugRestoreReglueMaxJump = 0.0f;
         rebuild_glue_constraints();
+        debugRestoreReglueActive = false;
+        if (debugLogRestoreClusters) {
+            TraceLog(LOG_INFO,
+                     "[RestoreReglue] replaced_dynamic_corners=%d max_anchor_jump=%.6f",
+                     debugRestoreReglueCorners, debugRestoreReglueMaxJump);
+        }
         refresh_static_voxel_beliefs();
         meshDirty = true;
     }
@@ -6379,7 +6608,7 @@ static void clear_world_voxels(void) {
     memset(debugTagBreakLogged, 0, sizeof(debugTagBreakLogged));
     memset(staticBeliefDirty, 0, sizeof(staticBeliefDirty));
     memset(staticBeliefQueued, 0, sizeof(staticBeliefQueued));
-    memset(table, 0, sizeof(table));
+    memset(restoration_rest_table, 0, sizeof(restoration_rest_table));
     memset(static_table, 0, sizeof(static_table));
     memset(dynamic_table, 0, sizeof(dynamic_table));
     meshDirty = true;
@@ -6793,7 +7022,7 @@ static void ResetGame(void) {
     memset(staticBeliefDirty, 0, sizeof(staticBeliefDirty));
     memset(staticBeliefQueued, 0, sizeof(staticBeliefQueued));
     // clear hash
-    memset(table, 0, sizeof(table));
+    memset(restoration_rest_table, 0, sizeof(restoration_rest_table));
     // build static blocks
     buildDemo();
     rebuild_all_voxel_surfaces();
@@ -9684,7 +9913,6 @@ static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count
         return false;
     }
 
-    int voxel_count_before = voxel_count;
     Voxel *snapshots = (Voxel *)malloc(sizeof(Voxel) * (size_t)cluster_count);
     int *sorted = (int *)malloc(sizeof(int) * (size_t)cluster_count);
     if (!snapshots || !sorted) {
@@ -9704,48 +9932,141 @@ static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count
         sorted[i] = idx;
     }
 
-    for (int i = 0; i < cluster_count - 1; ++i) {
-        for (int j = i + 1; j < cluster_count; ++j) {
-            if (sorted[i] < sorted[j]) {
-                int tmp = sorted[i];
-                sorted[i] = sorted[j];
-                sorted[j] = tmp;
+    // A restoration island is snapped with one shared translation.  This keeps
+    // its original topology and guarantees one output cell per input cell;
+    // independently rounding deformed fragments can otherwise overlap and
+    // silently erase voxels while the island is being restored.
+    {
+        static UnitVoxelBuffer restore_plan;
+        double shift_sum_x = 0.0;
+        double shift_sum_y = 0.0;
+        double shift_sum_z = 0.0;
+        for (int i = 0; i < cluster_count; ++i) {
+            const Voxel *snapshot = &snapshots[i];
+            float rest_center_x = 0.5f * ((float)snapshot->rest_min_gx +
+                                          (float)snapshot->rest_max_gx + 1.0f);
+            float rest_center_y = 0.5f * ((float)snapshot->rest_min_gy +
+                                          (float)snapshot->rest_max_gy + 1.0f);
+            float rest_center_z = 0.5f * ((float)snapshot->rest_min_gz +
+                                          (float)snapshot->rest_max_gz + 1.0f);
+            shift_sum_x += (double)(snapshot->pos.x / VOXEL_SIZE - rest_center_x);
+            shift_sum_y += (double)(snapshot->pos.y / VOXEL_SIZE - rest_center_y);
+            shift_sum_z += (double)(snapshot->pos.z / VOXEL_SIZE - rest_center_z);
+        }
+        int base_shift_x = (int)lround(shift_sum_x / (double)cluster_count);
+        int base_shift_y = (int)lround(shift_sum_y / (double)cluster_count);
+        int base_shift_z = (int)lround(shift_sum_z / (double)cluster_count);
+        bool planned = false;
+
+        for (int radius = 0; radius <= STATIC_RESTORE_SEARCH_RADIUS && !planned; ++radius) {
+            for (int dz = -radius; dz <= radius && !planned; ++dz) {
+                for (int dy = -radius; dy <= radius && !planned; ++dy) {
+                    for (int dx = -radius; dx <= radius && !planned; ++dx) {
+                        if (radius > 0 && dx*dx + dy*dy + dz*dz > radius*radius) {
+                            continue;
+                        }
+                        restore_plan.count = 0;
+                        bool valid = true;
+                        int shift_x = base_shift_x + dx;
+                        int shift_y = base_shift_y + dy;
+                        int shift_z = base_shift_z + dz;
+                        for (int i = 0; i < cluster_count && valid; ++i) {
+                            const Voxel *snapshot = &snapshots[i];
+                            for (int gz = snapshot->rest_min_gz + shift_z;
+                                 gz <= snapshot->rest_max_gz + shift_z && valid; ++gz) {
+                                for (int gy = snapshot->rest_min_gy + shift_y;
+                                     gy <= snapshot->rest_max_gy + shift_y && valid; ++gy) {
+                                    if (gy < 0) {
+                                        valid = false;
+                                        break;
+                                    }
+                                    for (int gx = snapshot->rest_min_gx + shift_x;
+                                         gx <= snapshot->rest_max_gx + shift_x; ++gx) {
+                                        if (table_get_static_only(gx, gy, gz) >= 0 ||
+                                            !unit_voxel_buffer_push(&restore_plan,
+                                                                    gx, gy, gz,
+                                                                    snapshot->color,
+                                                                    snapshot->type,
+                                                                    snapshot->fixed,
+                                                                    -1,
+                                                                    snapshot->debugClusterTag,
+                                                                    snapshot->activator)) {
+                                            valid = false;
+                                            break;
+                                        }
+                                        restore_plan.voxels[restore_plan.count - 1].owner =
+                                            snapshot->owner;
+                                    }
+                                }
+                            }
+                        }
+                        if (!valid || voxel_count - cluster_count + restore_plan.count > MAX_VOXELS) {
+                            continue;
+                        }
+                        qsort(restore_plan.voxels, (size_t)restore_plan.count,
+                              sizeof(UnitVoxelSeed), compare_unit_voxel_seed);
+                        for (int i = 1; i < restore_plan.count; ++i) {
+                            const UnitVoxelSeed *a = &restore_plan.voxels[i - 1];
+                            const UnitVoxelSeed *b = &restore_plan.voxels[i];
+                            if (a->gx == b->gx && a->gy == b->gy && a->gz == b->gz) {
+                                valid = false;
+                                break;
+                            }
+                        }
+                        planned = valid;
+                    }
+                }
             }
         }
-    }
 
-    for (int i = 0; i < cluster_count; ++i) {
-        remove_voxel_index(sorted[i]);
-    }
-    int voxel_count_after_removal = voxel_count;
-    int static_success = 0;
-    bool converted = false;
-    for (int i = 0; i < cluster_count; ++i) {
-        if (spawn_static_covering_voxel(&snapshots[i])) {
-            converted = true;
-            ++static_success;
-        } else {
+        if (!planned) {
             if (debugLogRestoreFailures) {
                 TraceLog(LOG_WARNING,
-                         "[RestoreFail] static restore failed voxel=%d rest=(%d..%d,%d..%d,%d..%d)",
-                         i,
-                         snapshots[i].rest_min_gx, snapshots[i].rest_max_gx,
-                         snapshots[i].rest_min_gy, snapshots[i].rest_max_gy,
-                         snapshots[i].rest_min_gz, snapshots[i].rest_max_gz);
+                         "[RestoreFail] atomic contact island count=%d has no collision-free grid placement",
+                         cluster_count);
             }
-            restore_dynamic_snapshot(&snapshots[i]);
+            free(sorted);
+            free(snapshots);
+            return false;
         }
-    }
 
-    if (debugLogRestoreClusters) {
-        TraceLog(LOG_INFO,
-                 "[RestoreCluster] count=%d voxel_count before=%d after_removal=%d after_restore=%d static_success=%d",
-                 cluster_count, voxel_count_before, voxel_count_after_removal, voxel_count,
-                 static_success);
+        for (int i = 0; i < cluster_count - 1; ++i) {
+            for (int j = i + 1; j < cluster_count; ++j) {
+                if (sorted[i] < sorted[j]) {
+                    int tmp = sorted[i];
+                    sorted[i] = sorted[j];
+                    sorted[j] = tmp;
+                }
+            }
+        }
+        for (int i = 0; i < cluster_count; ++i) {
+            remove_voxel_index(sorted[i]);
+        }
+
+        int static_success = 0;
+        for (int i = 0; i < restore_plan.count; ++i) {
+            const UnitVoxelSeed *seed = &restore_plan.voxels[i];
+            int new_idx = add_static_voxel_at_grid(seed->gx, seed->gy, seed->gz,
+                                                   seed->color, seed->type);
+            if (new_idx < 0) {
+                break;
+            }
+            voxels[new_idx].debugClusterTag = seed->debugTag;
+            voxels[new_idx].activator = seed->activator;
+            voxels[new_idx].owner = (seed->owner == -1)
+                ? STATIC_DEBRIS_OWNER : seed->owner;
+            voxels[new_idx].lifeFrames = 0;
+            ++static_success;
+        }
+        if (debugLogRestoreClusters) {
+            TraceLog(LOG_INFO,
+                     "[RestoreCluster] atomic contact island count=%d static_success=%d",
+                     cluster_count, static_success);
+        }
+        free(sorted);
+        free(snapshots);
+        return static_success == restore_plan.count;
     }
-    free(sorted);
-    free(snapshots);
-    return converted;
 }
 
 static float compute_glue_relative_velocity_score(int voxel_idx, const Voxel *voxel)
@@ -10128,6 +10449,11 @@ static void glue_dynamic_face_to_static(Voxel *dynamic, Voxel *stat,
         Particle *old = dynamic->particles[dyn_corner];
         if (shared == old) {
             continue;
+        }
+        if (debugRestoreReglueActive && shared && old) {
+            float jump = v_length(v_sub(shared->predicted_pos, old->predicted_pos));
+            ++debugRestoreReglueCorners;
+            if (jump > debugRestoreReglueMaxJump) debugRestoreReglueMaxJump = jump;
         }
         if (old) {
             particle_release(old);

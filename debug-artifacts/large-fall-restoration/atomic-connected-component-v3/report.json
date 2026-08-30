@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "scenario": "large-fall-restoration",
+  "requestedBackend": "cpu-st",
+  "activeBackend": "cpu-st",
+  "passed": false,
+  "steps": 1200,
+  "fixedDt": 0.0166666667,
+  "fallback": false,
+  "fallbackReason": "",
+  "activationSucceeded": true,
+  "sleepingConversionSucceeded": false,
+  "supportRemovalSucceeded": false,
+  "activationStep": 0,
+  "dropAtStep60": 1.55177641,
+  "gpuDiagnostics": {"readbackPerformed": false, "staticSsboDiffEntries": 0, "staticSsboStaleClusterCells": 0, "simIdMismatches": 0, "taggedCornersMissingFromSimIds": 0, "zeroMassTaggedCorners": 0},
+  "overhangDiagnostics": {"enabled": false, "anchorObserved": false, "deflectionSampled": false, "rootDropAtStep30": 0, "tipDropAtStep30": 0, "relativeTipDeflectionAtStep30": 0},
+  "restorationDiagnostics": {"enabled": true, "observed": false, "completed": false, "reactivated": false, "restorationStep": -1, "reactivationStep": -1, "firstStaticCount": 0, "regluedCorners": 0, "maxAnchorJump": 0, "peakPostSpeed": 0, "peakPostExtent": 0},
+  "failures": ["large falling pillar never attempted static restoration"],
+  "captures": ["debug-artifacts/large-fall-restoration/atomic-connected-component-v3/phase-01-undercut-pillar.png", "debug-artifacts/large-fall-restoration/atomic-connected-component-v3/phase-02-pillar-released.png", "debug-artifacts/large-fall-restoration/atomic-connected-component-v3/step-0000-activated.png", "debug-artifacts/large-fall-restoration/atomic-connected-component-v3/step-0001.png", "debug-artifacts/large-fall-restoration/atomic-connected-component-v3/step-0005.png", "debug-artifacts/large-fall-restoration/atomic-connected-component-v3/step-0015.png", "debug-artifacts/large-fall-restoration/atomic-connected-component-v3/step-0030.png", "debug-artifacts/large-fall-restoration/atomic-connected-component-v3/step-0060.png", "debug-artifacts/large-fall-restoration/atomic-connected-component-v3/step-1200.png"],
+  "samples": [
+    {"phase": "undercut-static", "step": 0, "taggedVoxels": 360, "taggedDynamic": 0, "taggedStatic": 360, "simParticles": 0, "zeroMassCorners": 0, "invalidParticleRefs": 0, "staticGluedFaces": 0, "centroidY": 4, "centroidDrop": 0, "minY": 2.25, "maxY": 5.75, "meanVelocityY": 0, "maxSpeed": 0, "extentX": 3, "extentY": 3.5, "extentZ": 3, "staticHashGeneration": 530, "gpuStaticUploadedGeneration": 0, "physicsStepMs": 0},
+    {"phase": "released-dynamic", "step": 0, "taggedVoxels": 360, "taggedDynamic": 360, "taggedStatic": 0, "simParticles": 540, "zeroMassCorners": 0, "invalidParticleRefs": 0, "staticGluedFaces": 0, "centroidY": 4, "centroidDrop": 0, "minY": 2.25, "maxY": 5.75, "meanVelocityY": 0, "maxSpeed": 0, "extentX": 3, "extentY": 3.5, "extentZ": 3, "staticHashGeneration": 890, "gpuStaticUploadedGeneration": 0, "physicsStepMs": 0},
+    {"phase": "activated", "step": 0, "taggedVoxels": 360, "taggedDynamic": 360, "taggedStatic": 0, "simParticles": 540, "zeroMassCorners": 0, "invalidParticleRefs": 0, "staticGluedFaces": 0, "centroidY": 4, "centroidDrop": 0, "minY": 2.25, "maxY": 5.75, "meanVelocityY": 0, "maxSpeed": 0, "extentX": 3, "extentY": 3.5, "extentZ": 3, "staticHashGeneration": 890, "gpuStaticUploadedGeneration": 0, "physicsStepMs": 0},
+    {"phase": "simulation", "step": 1, "taggedVoxels": 360, "taggedDynamic": 360, "taggedStatic": 0, "simParticles": 540, "zeroMassCorners": 0, "invalidParticleRefs": 0, "staticGluedFaces": 0, "centroidY": 3.99796152, "centroidDrop": 0.00203847885, "minY": 2.24796486, "maxY": 5.74796724, "meanVelocityY": -0.162484452, "maxSpeed": 0.162534699, "extentX": 3, "extentY": 3.50000238, "extentZ": 3, "staticHashGeneration": 890, "gpuStaticUploadedGeneration": 0, "physicsStepMs": 2.7319},
+    {"phase": "simulation", "step": 5, "taggedVoxels": 360, "taggedDynamic": 360, "taggedStatic": 0, "simParticles": 540, "zeroMassCorners": 0, "invalidParticleRefs": 0, "staticGluedFaces": 0, "centroidY": 3.96366334, "centroidDrop": 0.0363366604, "minY": 2.21366692, "maxY": 5.71367645, "meanVelocityY": -0.780869961, "maxSpeed": 0.780973375, "extentX": 3, "extentY": 3.50000954, "extentZ": 3, "staticHashGeneration": 890, "gpuStaticUploadedGeneration": 0, "physicsStepMs": 2.7282},
+    {"phase": "simulation", "step": 15, "taggedVoxels": 360, "taggedDynamic": 360, "taggedStatic": 0, "simParticles": 540, "zeroMassCorners": 0, "invalidParticleRefs": 0, "staticGluedFaces": 0, "centroidY": 3.71211171, "centroidDrop": 0.287888288, "minY": 1.96210742, "maxY": 5.46210527, "meanVelocityY": -2.12572432, "maxSpeed": 2.12591147, "extentX": 3.00000358, "extentY": 3.49999785, "extentZ": 3.0000031, "staticHashGeneration": 890, "gpuStaticUploadedGeneration": 0, "physicsStepMs": 5.4614},
+    {"phase": "simulation", "step": 30, "taggedVoxels": 360, "taggedDynamic": 360, "taggedStatic": 0, "simParticles": 540, "zeroMassCorners": 0, "invalidParticleRefs": 0, "staticGluedFaces": 0, "centroidY": 2.96771502, "centroidDrop": 1.03228498, "minY": 1.21770334, "maxY": 4.71772671, "meanVelocityY": -3.69816685, "maxSpeed": 3.69832969, "extentX": 3.00001192, "extentY": 3.50002337, "extentZ": 2.99999928, "staticHashGeneration": 890, "gpuStaticUploadedGeneration": 0, "physicsStepMs": 5.6484},
+    {"phase": "simulation", "step": 60, "taggedVoxels": 360, "taggedDynamic": 360, "taggedStatic": 0, "simParticles": 720, "zeroMassCorners": 0, "invalidParticleRefs": 0, "staticGluedFaces": 0, "centroidY": 2.44822359, "centroidDrop": 1.55177641, "minY": 0.870594263, "maxY": 4.22273064, "meanVelocityY": 0.605991542, "maxSpeed": 2.77119279, "extentX": 3.26044035, "extentY": 3.35213637, "extentZ": 3.26290798, "staticHashGeneration": 890, "gpuStaticUploadedGeneration": 0, "physicsStepMs": 5.4811},
+    {"phase": "simulation", "step": 1200, "taggedVoxels": 360, "taggedDynamic": 360, "taggedStatic": 0, "simParticles": 880, "zeroMassCorners": 0, "invalidParticleRefs": 0, "staticGluedFaces": 21, "centroidY": 1.61854351, "centroidDrop": 2.38145638, "minY": 0.235263824, "maxY": 3.34729147, "meanVelocityY": -0.0155055812, "maxSpeed": 3.72736526, "extentX": 32.097435, "extentY": 3.11202765, "extentZ": 33.8596992, "staticHashGeneration": 890, "gpuStaticUploadedGeneration": 0, "physicsStepMs": 3.3006}
+  ]
+}
