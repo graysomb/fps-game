@@ -15,12 +15,17 @@
 #define DEBUG_DEFAULT_STEPS 60
 #define DEBUG_RENDER_WIDTH 1280
 #define DEBUG_RENDER_HEIGHT 720
+#define DEBUG_GIF_WIDTH 640
+#define DEBUG_GIF_HEIGHT 360
+#define DEBUG_GIF_HASH_SIZE 8191
 
 typedef struct DebugRunConfig {
     bool requested;
     bool show_window;
+    bool record_gif;
     bool capture_steps_explicit;
     int steps;
+    int gif_fps;
     int capture_steps[DEBUG_MAX_CAPTURE_STEPS];
     int capture_step_count;
     char scenario[64];
@@ -95,6 +100,12 @@ typedef struct DebugRunState {
     int failure_count;
     char output_dir[DEBUG_PATH_CAPACITY];
     char report_path[DEBUG_PATH_CAPACITY];
+    char gif_path[DEBUG_PATH_CAPACITY];
+    FILE *gif_file;
+    int gif_frame_count;
+    int gif_step_stride;
+    int gif_delay_cs;
+    bool gif_failed;
 } DebugRunState;
 
 typedef bool (*DebugScenarioSetupFn)(DebugRunState *state);
@@ -106,7 +117,8 @@ typedef struct DebugScenarioDefinition {
 } DebugScenarioDefinition;
 
 static DebugRunConfig debugRunConfig = {
-    .steps = DEBUG_DEFAULT_STEPS
+    .steps = DEBUG_DEFAULT_STEPS,
+    .gif_fps = 20
 };
 
 static bool debug_setup_dynamic_freefall(DebugRunState *state);
@@ -238,6 +250,10 @@ static int debug_parse_argument(int argc, char **argv, int *index)
         debugRunConfig.show_window = true;
         return 1;
     }
+    if (strcmp(argument, "--debug-gif") == 0) {
+        debugRunConfig.record_gif = true;
+        return 1;
+    }
     if (strcmp(argument, "--debug-matrix") == 0) {
         fprintf(stderr, "--debug-matrix must be run through the fps_ray launcher\n");
         return -1;
@@ -264,6 +280,15 @@ static int debug_parse_argument(int argc, char **argv, int *index)
                                "--debug-capture-steps=", "--debug-capture-steps");
     if (value != (const char *)(uintptr_t)1) {
         return debug_parse_capture_steps(value) ? 1 : -1;
+    }
+
+    value = debug_option_value(argc, argv, index, argument,
+                               "--debug-gif-fps=", "--debug-gif-fps");
+    if (value != (const char *)(uintptr_t)1) {
+        if (!debug_parse_integer(value, 1, 60,
+                                 &debugRunConfig.gif_fps, "--debug-gif-fps")) return -1;
+        debugRunConfig.record_gif = true;
+        return 1;
     }
 
     value = debug_option_value(argc, argv, index, argument,
@@ -688,6 +713,243 @@ static void debug_render_scene(DebugRunState *state, const DebugSample *sample)
         EndMode3D();
         debug_draw_overlay(state, sample);
     EndTextureMode();
+}
+
+typedef struct DebugGifBitWriter {
+    FILE *file;
+    unsigned char block[255];
+    int block_size;
+    uint32_t bits;
+    int bit_count;
+    bool failed;
+} DebugGifBitWriter;
+
+static int debugGifHashPrefix[DEBUG_GIF_HASH_SIZE];
+static int debugGifHashCode[DEBUG_GIF_HASH_SIZE];
+static unsigned char debugGifHashSuffix[DEBUG_GIF_HASH_SIZE];
+
+static void debug_gif_write_u16(FILE *file, int value)
+{
+    fputc(value & 0xff, file);
+    fputc((value >> 8) & 0xff, file);
+}
+
+static void debug_gif_flush_block(DebugGifBitWriter *writer)
+{
+    if (!writer || writer->failed || writer->block_size <= 0) return;
+    if (fputc(writer->block_size, writer->file) == EOF ||
+        fwrite(writer->block, 1, (size_t)writer->block_size, writer->file) !=
+            (size_t)writer->block_size) {
+        writer->failed = true;
+    }
+    writer->block_size = 0;
+}
+
+static void debug_gif_write_data_byte(DebugGifBitWriter *writer, unsigned char value)
+{
+    if (!writer || writer->failed) return;
+    writer->block[writer->block_size++] = value;
+    if (writer->block_size == 255) debug_gif_flush_block(writer);
+}
+
+static void debug_gif_write_code(DebugGifBitWriter *writer, int code, int code_bits)
+{
+    writer->bits |= ((uint32_t)code) << writer->bit_count;
+    writer->bit_count += code_bits;
+    while (writer->bit_count >= 8) {
+        debug_gif_write_data_byte(writer, (unsigned char)(writer->bits & 0xffu));
+        writer->bits >>= 8;
+        writer->bit_count -= 8;
+    }
+}
+
+static void debug_gif_dictionary_reset(void)
+{
+    memset(debugGifHashCode, 0xff, sizeof(debugGifHashCode));
+}
+
+static int debug_gif_dictionary_find(int prefix, unsigned char suffix, int *slot_out)
+{
+    unsigned int slot = ((unsigned int)prefix * 257u + (unsigned int)suffix * 17u) %
+                        DEBUG_GIF_HASH_SIZE;
+    for (;;) {
+        if (debugGifHashCode[slot] < 0) {
+            if (slot_out) *slot_out = (int)slot;
+            return -1;
+        }
+        if (debugGifHashPrefix[slot] == prefix && debugGifHashSuffix[slot] == suffix) {
+            if (slot_out) *slot_out = (int)slot;
+            return debugGifHashCode[slot];
+        }
+        slot = (slot + 1u) % DEBUG_GIF_HASH_SIZE;
+    }
+}
+
+static bool debug_gif_write_lzw(FILE *file, const unsigned char *pixels, size_t count)
+{
+    if (!file || !pixels || count == 0) return false;
+    const int clear_code = 256;
+    const int end_code = 257;
+    int next_code = 258;
+    int code_bits = 9;
+    int code_limit = 1 << code_bits;
+    DebugGifBitWriter writer = { .file = file };
+    fputc(8, file); // minimum LZW code size for the 256-colour palette
+    debug_gif_dictionary_reset();
+    debug_gif_write_code(&writer, clear_code, code_bits);
+
+    int prefix = pixels[0];
+    for (size_t i = 1; i < count; ++i) {
+        unsigned char suffix = pixels[i];
+        int slot = -1;
+        int found = debug_gif_dictionary_find(prefix, suffix, &slot);
+        if (found >= 0) {
+            prefix = found;
+            continue;
+        }
+
+        debug_gif_write_code(&writer, prefix, code_bits);
+        if (next_code < 4096) {
+            debugGifHashPrefix[slot] = prefix;
+            debugGifHashSuffix[slot] = suffix;
+            debugGifHashCode[slot] = next_code++;
+            // The decoder learns a dictionary entry one emitted code after the
+            // encoder, so widen only after crossing the current code boundary.
+            if (next_code > code_limit && code_bits < 12) {
+                ++code_bits;
+                code_limit <<= 1;
+            }
+        } else {
+            debug_gif_write_code(&writer, clear_code, code_bits);
+            debug_gif_dictionary_reset();
+            next_code = 258;
+            code_bits = 9;
+            code_limit = 1 << code_bits;
+        }
+        prefix = suffix;
+    }
+    debug_gif_write_code(&writer, prefix, code_bits);
+    debug_gif_write_code(&writer, end_code, code_bits);
+    if (writer.bit_count > 0) {
+        debug_gif_write_data_byte(&writer, (unsigned char)(writer.bits & 0xffu));
+    }
+    debug_gif_flush_block(&writer);
+    fputc(0, file); // end of image data sub-blocks
+    return !writer.failed && !ferror(file);
+}
+
+static bool debug_gif_begin(DebugRunState *state)
+{
+    if (!debugRunConfig.record_gif) return true;
+    if (!debug_join_path(state->gif_path, sizeof(state->gif_path),
+                         state->output_dir, "simulation.gif")) {
+        debug_add_failure(state, "GIF output path is too long");
+        return false;
+    }
+    state->gif_file = fopen(state->gif_path, "wb");
+    if (!state->gif_file) {
+        debug_add_failure(state, "unable to create GIF %s: %s",
+                          state->gif_path, strerror(errno));
+        return false;
+    }
+
+    float source_fps = 1.0f / (PBD_MAX_STEP_DT);
+    state->gif_step_stride = (int)roundf(source_fps / (float)debugRunConfig.gif_fps);
+    if (state->gif_step_stride < 1) state->gif_step_stride = 1;
+    state->gif_delay_cs = (int)roundf(100.0f * PBD_MAX_STEP_DT *
+                                     (float)state->gif_step_stride);
+    if (state->gif_delay_cs < 1) state->gif_delay_cs = 1;
+
+    fwrite("GIF89a", 1, 6, state->gif_file);
+    debug_gif_write_u16(state->gif_file, DEBUG_GIF_WIDTH);
+    debug_gif_write_u16(state->gif_file, DEBUG_GIF_HEIGHT);
+    fputc(0xf7, state->gif_file); // global 256-entry colour table
+    fputc(0, state->gif_file);
+    fputc(0, state->gif_file);
+    for (int i = 0; i < 256; ++i) {
+        fputc(((i >> 5) & 7) * 255 / 7, state->gif_file);
+        fputc(((i >> 2) & 7) * 255 / 7, state->gif_file);
+        fputc((i & 3) * 255 / 3, state->gif_file);
+    }
+    const unsigned char loop_extension[] = {
+        0x21, 0xff, 0x0b, 'N','E','T','S','C','A','P','E','2','.','0',
+        0x03, 0x01, 0x00, 0x00, 0x00
+    };
+    fwrite(loop_extension, 1, sizeof(loop_extension), state->gif_file);
+    if (ferror(state->gif_file)) {
+        debug_add_failure(state, "unable to write GIF header %s", state->gif_path);
+        fclose(state->gif_file);
+        state->gif_file = NULL;
+        return false;
+    }
+    return true;
+}
+
+static bool debug_gif_capture(DebugRunState *state, int step)
+{
+    if (!state || !state->gif_file || state->gif_failed) {
+        return false;
+    }
+    if (step != 0 && step != debugRunConfig.steps &&
+        (step % state->gif_step_stride) != 0) return true;
+
+    DebugSample sample = debug_collect_sample("animation", step, state->initial_centroid_y);
+    debug_render_scene(state, &sample);
+    Image frame = LoadImageFromTexture(state->target.texture);
+    if (!IsImageValid(frame)) {
+        debug_add_failure(state, "unable to read GIF frame at step %d", step);
+        state->gif_failed = true;
+        return false;
+    }
+    ImageFlipVertical(&frame);
+    ImageResize(&frame, DEBUG_GIF_WIDTH, DEBUG_GIF_HEIGHT);
+    ImageFormat(&frame, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+    unsigned char *rgba = (unsigned char *)frame.data;
+    size_t pixel_count = (size_t)DEBUG_GIF_WIDTH * (size_t)DEBUG_GIF_HEIGHT;
+    unsigned char *indexed = (unsigned char *)malloc(pixel_count);
+    if (!indexed) {
+        UnloadImage(frame);
+        debug_add_failure(state, "unable to allocate GIF frame buffer");
+        state->gif_failed = true;
+        return false;
+    }
+    for (size_t i = 0; i < pixel_count; ++i) {
+        indexed[i] = (unsigned char)((rgba[i * 4 + 0] & 0xe0u) |
+                                     ((rgba[i * 4 + 1] & 0xe0u) >> 3) |
+                                     (rgba[i * 4 + 2] >> 6));
+    }
+    UnloadImage(frame);
+
+    fputc(0x21, state->gif_file); fputc(0xf9, state->gif_file); fputc(0x04, state->gif_file);
+    fputc(0x00, state->gif_file);
+    debug_gif_write_u16(state->gif_file, state->gif_delay_cs);
+    fputc(0x00, state->gif_file); fputc(0x00, state->gif_file);
+    fputc(0x2c, state->gif_file);
+    debug_gif_write_u16(state->gif_file, 0); debug_gif_write_u16(state->gif_file, 0);
+    debug_gif_write_u16(state->gif_file, DEBUG_GIF_WIDTH);
+    debug_gif_write_u16(state->gif_file, DEBUG_GIF_HEIGHT);
+    fputc(0x00, state->gif_file);
+    bool written = debug_gif_write_lzw(state->gif_file, indexed, pixel_count);
+    free(indexed);
+    if (!written) {
+        debug_add_failure(state, "unable to encode GIF frame at step %d", step);
+        state->gif_failed = true;
+        return false;
+    }
+    ++state->gif_frame_count;
+    return true;
+}
+
+static bool debug_gif_end(DebugRunState *state)
+{
+    if (!state || !state->gif_file) return !debugRunConfig.record_gif || state->gif_failed;
+    fputc(0x3b, state->gif_file);
+    bool ok = !state->gif_failed && !ferror(state->gif_file) && fclose(state->gif_file) == 0;
+    state->gif_file = NULL;
+    if (!ok && !state->gif_failed) {
+        debug_add_failure(state, "unable to finalize GIF %s", state->gif_path);
+    }
+    return ok;
 }
 
 static bool debug_capture(DebugRunState *state, const char *file_name,
@@ -1607,6 +1869,13 @@ static bool debug_write_report(DebugRunState *state)
     debug_write_json_string(file, physics_backend_name(physicsBackend.active));
     fprintf(file, ",\n  \"passed\": %s,\n  \"steps\": %d,\n  \"fixedDt\": %.9g,\n",
             passed ? "true" : "false", debugRunConfig.steps, (double)PBD_MAX_STEP_DT);
+    fprintf(file,
+            "  \"animation\": {\"requested\": %s, \"format\": \"gif\","
+            " \"frames\": %d, \"fpsRequested\": %d, \"stepStride\": %d, \"path\": ",
+            debugRunConfig.record_gif ? "true" : "false",
+            state->gif_frame_count, debugRunConfig.gif_fps, state->gif_step_stride);
+    debug_write_json_string(file, state->gif_path);
+    fputs("},\n", file);
     fprintf(file, "  \"fallback\": %s,\n  \"fallbackReason\": ",
             physicsBackend.sticky_fallback ? "true" : "false");
     debug_write_json_string(file, physicsBackend.fallback_reason);
@@ -1742,7 +2011,9 @@ static int run_debug_harness(void)
     }
 
     if (setup_ok) {
+        debug_gif_begin(&state);
         debug_validate_step(&state, 0);
+        debug_gif_capture(&state, 0);
         if (debug_should_capture_step(0)) {
             if (state.delayed_activation) {
                 if (state.overhang_impact) {
@@ -1757,6 +2028,7 @@ static int run_debug_harness(void)
         for (int step = 1; step <= debugRunConfig.steps; ++step) {
             debug_physics_step();
             debug_validate_step(&state, step);
+            debug_gif_capture(&state, step);
             if (debug_should_capture_step(step)) {
                 char file_name[64];
                 snprintf(file_name, sizeof(file_name), "step-%04d.png", step);
@@ -1766,16 +2038,19 @@ static int run_debug_harness(void)
         debug_finalize_validation(&state);
     }
 
+    debug_gif_end(&state);
     bool report_ok = debug_write_report(&state);
     bool passed = setup_ok && report_ok && state.failure_count == 0;
     fprintf(stderr,
-            "debug-run scenario=%s requested=%s active=%s result=%s steps=%d drop60=%.6f captures=%d report=%s\n",
+            "debug-run scenario=%s requested=%s active=%s result=%s steps=%d drop60=%.6f captures=%d gif=%s frames=%d report=%s\n",
             debugRunConfig.scenario,
             physics_backend_name(physicsBackend.requested),
             physics_backend_name(physicsBackend.active),
             passed ? "PASS" : "FAIL",
             debugRunConfig.steps, state.drop_at_step_60,
-            state.capture_count, state.report_path);
+            state.capture_count,
+            debugRunConfig.record_gif ? state.gif_path : "disabled",
+            state.gif_frame_count, state.report_path);
     for (int i = 0; i < state.failure_count; ++i) {
         fprintf(stderr, "debug-failure: %s\n", state.failures[i]);
     }
