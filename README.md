@@ -302,6 +302,14 @@ fps_ray --physics=gpu --physics-smoke=80 --physics-smoke-voxels=4096 \
 `FPS_FORCE_GPU_INIT_FAILURE`, `FPS_FORCE_GPU_STEP_FAILURE`, and
 `FPS_FORCE_CPU_ST` are available for testing the fallback paths.
 
+Collision filtering can be measured independently on every backend. Set
+`FPS_COLLISION_DYNAMIC_LEGACY=1` to put every simulated particle back into the
+dynamic pair/static-collision passes, or `FPS_COLLISION_STATIC_LEGACY=1` to use
+per-voxel static AABBs instead of the shared greedy surface cache. Setting both
+provides the pre-filter baseline. Debug JSON samples report simulated versus
+collision particles and static occupied-cell, surface-cell, patch, and patch-reference
+counts.
+
 ### Automated visual physics debugging
 
 Named debug scenarios build isolated voxel structures, run a deterministic fixed-step
@@ -355,7 +363,8 @@ Matrix mode creates `gpu-gl43` (Windows/Linux) or `gpu-metal` (macOS), `cpu-mt`,
 execution failures from an available backend fail the matrix. The per-backend reports
 include activation and sleep-transition results, centroid motion, particle mass and
 simulation membership checks, static glue counts, hash generations, backend fallback
-details, timing samples, failures, and capture paths. GPU scenario reports also read back
+details, collision-shell and static-surface counts, timing samples, failures, and capture
+paths. GPU scenario reports also read back
 the first-step SSBOs and record static-hash differences or stale cluster cells, uploaded
 `simId` mismatches or missing corners, and zero-mass tagged corners. The same counters
 appear in the capture overlay. Overhang reports additionally compare root and tip motion

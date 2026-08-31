@@ -163,8 +163,8 @@ void clearHash(uint gid) {
 }
 
 void buildHash(uint gid) {
-    if (gid >= uint(gpuControl.y)) return;
-    uint id = simId[gid];
+    if (gid >= dispatchArgs[8]) return;
+    uint id = simId[uint(gpuControl.z) + gid];
     if (particleRefcount[id] <= 0) return;
     ivec3 c = ivec3(floor(particle[id].predicted_base_inv_mass.xyz / uVoxelSize));
     cell[id].xyz = c;
@@ -173,8 +173,8 @@ void buildHash(uint gid) {
 }
 
 void pairCollisions(uint gid) {
-    if (gid >= uint(gpuControl.y)) return;
-    uint aid = simId[gid];
+    if (gid >= dispatchArgs[8]) return;
+    uint aid = simId[uint(gpuControl.z) + gid];
     if (particleRefcount[aid] <= 0) return;
     ParticleState a = particle[aid];
     float wa = a.prev_inv_mass.w;
@@ -207,10 +207,12 @@ void pairCollisions(uint gid) {
                     (dz == 0 && dy == 0 && dx < 0)) continue;
                 ivec3 nc = ac + ivec3(dx, dy, dz);
                 int item = hashHead[hashCoord(nc, uHashSize)];
-                while (item >= 0 && item < gpuControl.y) {
+                int traversed = 0;
+                while (item >= 0 && item < int(dispatchArgs[8]) && traversed < int(dispatchArgs[8])) {
+                    ++traversed;
                     bool sameCell = (dx == 0 && dy == 0 && dz == 0);
                     if (!sameCell || uint(item) > gid) {
-                            uint bid = simId[item];
+                            uint bid = simId[uint(gpuControl.z) + uint(item)];
                             if (particleRefcount[bid] <= 0) { item = hashNext[item]; continue; }
                         if (all(equal(cell[bid].xyz, nc))) {
                             ParticleState b = particle[bid];
@@ -247,6 +249,7 @@ void pairCollisions(uint gid) {
                     }
                     item = hashNext[item];
                 }
+                if (item >= 0 && item < int(dispatchArgs[8])) atomicAdd(dispatchArgs[11], 1u);
             }
         }
     }
@@ -324,7 +327,7 @@ int findStaticCell(ivec3 coord) {
     uint h = hashCoord(coord, uStaticHashSize);
     for (int probe = 0; probe < uStaticHashSize; ++probe) {
         ivec4 entry = staticCell[h];
-        if (entry.w < 0) return -1;
+        if (entry.w == -1) return -1;
         if (all(equal(entry.xyz, coord))) return entry.w;
         h = (h + 1u) & uint(uStaticHashSize - 1);
     }
@@ -371,9 +374,27 @@ vec3 pushOutOfBox(vec3 pos, float radius, StaticCollider box) {
     return pos + normal * (radius + distances[best]);
 }
 
+vec3 pushOutOfPatch(vec3 pos, float radius, StaticCollider surfacePatch) {
+    vec3 closest = clamp(pos, surfacePatch.bounds_min.xyz, surfacePatch.bounds_max.xyz);
+    vec3 normal = surfacePatch.center.xyz;
+    vec3 delta = pos - closest;
+    float signedDistance = dot(delta, normal);
+    bool projectedInside;
+    if (normal.x != 0.0) projectedInside = pos.y >= surfacePatch.bounds_min.y && pos.y <= surfacePatch.bounds_max.y && pos.z >= surfacePatch.bounds_min.z && pos.z <= surfacePatch.bounds_max.z;
+    else if (normal.y != 0.0) projectedInside = pos.x >= surfacePatch.bounds_min.x && pos.x <= surfacePatch.bounds_max.x && pos.z >= surfacePatch.bounds_min.z && pos.z <= surfacePatch.bounds_max.z;
+    else projectedInside = pos.x >= surfacePatch.bounds_min.x && pos.x <= surfacePatch.bounds_max.x && pos.y >= surfacePatch.bounds_min.y && pos.y <= surfacePatch.bounds_max.y;
+    if (projectedInside && signedDistance < 0.0 && signedDistance >= -radius) return pos + normal * (radius - signedDistance);
+    if (signedDistance < 0.0) return pos;
+    float distanceSq = dot(delta, delta);
+    if (distanceSq >= radius * radius) return pos;
+    float distance = sqrt(max(distanceSq, 1e-6));
+    vec3 direction = distance > 1e-6 ? delta / distance : normal;
+    return pos + direction * (radius - distance);
+}
+
 void staticCollisions(uint gid) {
-    if (gid >= uint(gpuControl.y)) return;
-    uint id = simId[gid];
+    if (gid >= dispatchArgs[8]) return;
+    uint id = simId[uint(gpuControl.z) + gid];
     if (particleRefcount[id] <= 0) return;
     ParticleState p = particle[id];
     if (p.prev_inv_mass.w <= 0.0) return;
@@ -398,15 +419,33 @@ void staticCollisions(uint gid) {
         }
     }
     ivec3 center = ivec3(floor(pos / uVoxelSize));
-    int seen[27]; int seenCount = 0;
+    int seen[128]; int seenCount = 0;
     for (int z=-1; z<=1; ++z) for (int y=-1; y<=1; ++y) for (int x=-1; x<=1; ++x) {
-        int voxelId = findStaticCell(center + ivec3(x,y,z));
-        if (voxelId < 0 || voxelId >= uStaticColliderCount) continue;
-        bool duplicate = false;
-        for (int s=0; s<seenCount; ++s) duplicate = duplicate || (seen[s] == voxelId);
-        if (duplicate) continue;
-        seen[seenCount++] = voxelId;
-        pos = pushOutOfBox(pos, 0.25 * uVoxelSize, staticCollider[voxelId]);
+        int item = findStaticCell(center + ivec3(x,y,z));
+        if (dispatchArgs[12] == 0u && item <= -2) {
+            int colliderId = -item - 2;
+            if (colliderId >= 0 && colliderId < uStaticColliderCount)
+                pos = pushOutOfBox(pos, 0.25 * uVoxelSize, staticCollider[colliderId]);
+            continue;
+        }
+        while (item >= 0 && item < uStaticColliderCount) {
+            StaticCollider surfacePatch = staticCollider[item];
+            int patchId = floatBitsToInt(surfacePatch.bounds_min.w);
+            bool duplicate = false;
+            for (int s=0; s<seenCount; ++s) duplicate = duplicate || (seen[s] == patchId);
+            if (!duplicate && seenCount < 128) {
+                seen[seenCount++] = patchId;
+                pos = pushOutOfPatch(pos, 0.25 * uVoxelSize, surfacePatch);
+            }
+            item = floatBitsToInt(surfacePatch.center.w);
+        }
+    }
+    center = ivec3(floor(pos / uVoxelSize));
+    int recovery = findStaticCell(center);
+    if (recovery <= -2) {
+        int colliderId = -recovery - 2;
+        if (colliderId >= 0 && colliderId < uStaticColliderCount)
+            pos = pushOutOfBox(pos, 0.25 * uVoxelSize, staticCollider[colliderId]);
     }
     particle[id].predicted_base_inv_mass.xyz = pos;
 }
@@ -471,6 +510,18 @@ uint allocateParticleClone(uint parent) {
     return id;
 }
 
+void includeCollisionParticle(uint id) {
+    if (id >= uint(gpuControl.z)) return;
+    int previous = atomicOr(cloneParent[id], int(0x80000000u));
+    if ((uint(previous) & 0x80000000u) != 0u) return;
+    uint slot = atomicAdd(dispatchArgs[8], 1u);
+    if (slot < dispatchArgs[9]) simId[uint(gpuControl.z) + slot] = id;
+    else {
+        atomicExchange(dispatchArgs[10], 1u);
+        atomicOr(gpuControl.w, CONTROL_FLAG_OVERFLOW);
+    }
+}
+
 void setVoxelParticle(inout VoxelState v, int corner, uint id) {
     if (corner < 4) v.particle_0_3[corner] = id;
     else v.particle_4_7[corner - 4] = id;
@@ -479,6 +530,7 @@ void setVoxelParticle(inout VoxelState v, int corner, uint id) {
 void detachVoxelCorner(inout VoxelState v, int corner) {
     uint oldId = voxelParticle(v, corner);
     if (oldId >= uint(gpuControl.x)) return;
+    includeCollisionParticle(oldId);
     for (;;) {
         int refs = particleRefcount[oldId];
         if (refs <= 1) return;
@@ -489,6 +541,7 @@ void detachVoxelCorner(inout VoxelState v, int corner) {
             return;
         }
         cell[oldId].w = uBreakDampFrames;
+        includeCollisionParticle(newId);
         setVoxelParticle(v, corner, newId);
         return;
     }
@@ -617,6 +670,10 @@ void prepareIndirect(uint gid) {
     dispatchArgs[1] = 1u;
     dispatchArgs[2] = 1u;
     dispatchArgs[3] = 0u;
+    dispatchArgs[4] = (dispatchArgs[8] + 127u) / 128u;
+    dispatchArgs[5] = 1u;
+    dispatchArgs[6] = 1u;
+    dispatchArgs[7] = 0u;
 }
 
 void finalizeParticle(uint gid) {

@@ -40,6 +40,12 @@ typedef struct DebugSample {
     int tagged_static;
     int tagged_sleeping;
     int sim_particles;
+    int collision_particles;
+    int collision_particles_culled;
+    int static_occupied_cells;
+    int static_surface_patches;
+    int static_surface_cells;
+    int static_surface_patch_refs;
     int zero_mass_corners;
     int invalid_particle_refs;
     int static_glued_faces;
@@ -557,8 +563,13 @@ static bool debug_gpu_static_cell_absent_in(const GpuStaticCell *cells, int x, i
     uint32_t hash = gpu_static_hash_coord(x, y, z);
     for (int probe = 0; probe < HASH_SIZE; ++probe) {
         const GpuStaticCell *entry = &cells[hash];
-        if (entry->value[3] < 0) return true;
-        if (entry->value[0] == x && entry->value[1] == y && entry->value[2] == z) return false;
+        if (entry->value[3] == -1) return true;
+        if (entry->value[0] == x && entry->value[1] == y && entry->value[2] == z) {
+            // Non-negative values are exterior surface-patch chains indexed in
+            // the empty cell beside a solid.  Only <= -2 encodes authoritative
+            // static occupancy for embedded-particle recovery.
+            return entry->value[3] >= 0;
+        }
         hash = (hash + 1u) & (HASH_SIZE - 1u);
     }
     return true;
@@ -569,6 +580,10 @@ static bool debug_gpu_cluster_cells_are_clear(const DebugRunState *state)
     if (!state || state->tracked_cell_count <= 0) return false;
     for (int i = 0; i < state->tracked_cell_count; ++i) {
         const DebugTrackedCell *cell = &state->tracked_cells[i];
+        // Some activation scenarios deliberately retain a static anchor.  Only
+        // require cells that are absent from authoritative CPU occupancy to be
+        // absent from the staged GPU table.
+        if (table_get_static_only(cell->x, cell->y, cell->z) >= 0) continue;
         if (!debug_gpu_static_cell_absent_in(gpuPhysics.static_stage,
                                              cell->x, cell->y, cell->z)) return false;
     }
@@ -582,6 +597,14 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
     snprintf(sample.phase, sizeof(sample.phase), "%s", phase ? phase : "simulation");
     sample.step = step;
     sample.sim_particles = sim_particle_count;
+    if (collisionTopologyDirty) rebuild_particle_collision_metadata();
+    (void)ensure_static_surface_cache();
+    sample.collision_particles = collision_particle_count;
+    sample.collision_particles_culled = sim_particle_count - collision_particle_count;
+    sample.static_occupied_cells = staticSurfaceOccupiedCellCount;
+    sample.static_surface_patches = patchCount;
+    sample.static_surface_cells = staticSurfaceCellCount;
+    sample.static_surface_patch_refs = staticSurfacePatchRefCount;
     sample.min_y = FLT_MAX;
     sample.max_y = -FLT_MAX;
     sample.static_hash_generation = staticHashGeneration;
@@ -672,9 +695,10 @@ static void debug_draw_overlay(const DebugRunState *state, const DebugSample *sa
     DrawText(TextFormat("PHASE %s | STEP %d/%d", sample->phase, sample->step,
                         debugRunConfig.steps),
              34, 88, 19, LIGHTGRAY);
-    DrawText(TextFormat("TAGGED %d dyn=%d static=%d | SIM PARTICLES %d",
+    DrawText(TextFormat("TAGGED %d dyn=%d static=%d | COLLISION %d/%d",
                         sample->tagged_voxels, sample->tagged_dynamic,
-                        sample->tagged_static, sample->sim_particles),
+                        sample->tagged_static, sample->collision_particles,
+                        sample->sim_particles),
              34, 114, 19, LIGHTGRAY);
     DrawText(TextFormat("CENTROID Y %.3f | DROP %.3f | VEL Y %.3f",
                         sample->centroid_y, sample->centroid_drop,
@@ -1155,6 +1179,7 @@ static void debug_readback_gpu_buffers(DebugRunState *state, int step)
     }
     for (int i = 0; i < state->tracked_cell_count; ++i) {
         const DebugTrackedCell *cell = &state->tracked_cells[i];
+        if (table_get_static_only(cell->x, cell->y, cell->z) >= 0) continue;
         if (!debug_gpu_static_cell_absent_in(static_readback,
                                              cell->x, cell->y, cell->z)) {
             ++state->gpu_static_ssbo_stale_cells;
@@ -2046,6 +2071,9 @@ static bool debug_write_report(DebugRunState *state)
         fprintf(file,
                 ", \"step\": %d, \"taggedVoxels\": %d, \"taggedDynamic\": %d,"
                 " \"taggedStatic\": %d, \"taggedSleeping\": %d, \"simParticles\": %d,"
+                " \"collisionParticles\": %d, \"collisionParticlesCulled\": %d,"
+                " \"staticOccupiedCells\": %d, \"staticSurfacePatches\": %d,"
+                " \"staticSurfaceCells\": %d, \"staticSurfacePatchRefs\": %d,"
                 " \"zeroMassCorners\": %d, \"invalidParticleRefs\": %d,"
                 " \"staticGluedFaces\": %d, \"centroidY\": %.9g,"
                 " \"centroidDrop\": %.9g, \"minY\": %.9g, \"maxY\": %.9g,"
@@ -2053,6 +2081,9 @@ static bool debug_write_report(DebugRunState *state)
                 " \"gpuStaticUploadedGeneration\": %llu, \"physicsStepMs\": %.9g}%s\n",
                 sample->step, sample->tagged_voxels, sample->tagged_dynamic,
                 sample->tagged_static, sample->tagged_sleeping, sample->sim_particles,
+                sample->collision_particles, sample->collision_particles_culled,
+                sample->static_occupied_cells, sample->static_surface_patches,
+                sample->static_surface_cells, sample->static_surface_patch_refs,
                 sample->zero_mass_corners, sample->invalid_particle_refs,
                 sample->static_glued_faces, (double)sample->centroid_y,
                 (double)sample->centroid_drop, (double)sample->min_y,

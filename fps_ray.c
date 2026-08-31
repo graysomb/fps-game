@@ -591,13 +591,21 @@ static int voxel_count = 0;
 static Particle particles_pool[MAX_PARTICLES];
 static Particle *active_particles[MAX_PARTICLES];
 static Particle *sim_particles[MAX_PARTICLES];
+// Collision traversal is intentionally independent from the full simulation
+// list.  Interior structural particles still integrate and participate in VGS,
+// but do not need to be hashed or projected against scene geometry.
+static Particle *collision_particles[MAX_PARTICLES];
 static int particle_pool_count = 0;
 static int active_particle_count = 0;
 static int sim_particle_count = 0;
+static int collision_particle_count = 0;
+static uint16_t collision_particle_structural_refs[MAX_PARTICLES];
+static uint16_t collision_particle_shell_refs[MAX_PARTICLES];
 static int free_particle_indices[MAX_PARTICLES];
 static int free_particle_count = 0;
 static int particle_sync_stamp = 1;
 static bool collisionTopologyDirty = true;
+static uint64_t collisionMetadataGeneration = 1;
 
 static inline bool voxel_is_awake_dynamic(const Voxel *voxel)
 {
@@ -2017,6 +2025,7 @@ static void reset_particle_pool(void) {
     particle_pool_count = 0;
     active_particle_count = 0;
     sim_particle_count = 0;
+    collision_particle_count = 0;
     free_particle_count = 0;
     particle_sync_stamp = 1;
     tether_apply_stamp = 1;
@@ -2024,6 +2033,7 @@ static void reset_particle_pool(void) {
     memset(particles_pool, 0, sizeof(particles_pool));
     memset(active_particles, 0, sizeof(active_particles));
     memset(sim_particles, 0, sizeof(sim_particles));
+    memset(collision_particles, 0, sizeof(collision_particles));
 }
 
 static void sim_particles_add(Particle *p) {
@@ -2339,8 +2349,35 @@ typedef struct {
     int   voxelIndex; // representative voxel driving this patch's debug color
 } Patch;
 
-static Patch patches[MAX_VOXELS];
+typedef struct {
+    int plane, layer, i, j;
+    bool positive;
+    bool used;
+} StaticSurfaceFace;
+
+typedef struct {
+    int x, y, z;
+    int patch;
+} StaticSurfaceRef;
+
+typedef struct {
+    int x, y, z;
+    int start, count;
+} StaticSurfaceCell;
+
+static Patch *patches = NULL;
 static int   patchCount = 0;
+static int   patchCapacity = 0;
+static StaticSurfaceCell *staticSurfaceCells = NULL;
+static int staticSurfaceCellCount = 0;
+static int staticSurfaceCellCapacity = 0;
+static int *staticSurfacePatchRefs = NULL;
+static int staticSurfacePatchRefCount = 0;
+static int staticSurfacePatchRefCapacity = 0;
+static int *staticSurfaceHash = NULL;
+static int staticSurfaceHashSize = 0;
+static uint64_t staticSurfaceGeneration = 0;
+static int staticSurfaceOccupiedCellCount = 0;
 static Mesh  greedyMesh = { 0 };
 static Material greedyMaterial;
 static bool greedyMaterialInit = false;
@@ -2383,8 +2420,12 @@ static Color voxel_display_color(const Voxel *voxel)
 
 static bool emit_patch(int plane, int layer, int i0, int j0, int di, int dj, bool positive)
 {
-    if (patchCount >= MAX_VOXELS) {
-        return false;
+    if (patchCount >= patchCapacity) {
+        int next_capacity = patchCapacity ? patchCapacity * 2 : 1024;
+        Patch *next = realloc(patches, (size_t)next_capacity * sizeof(*next));
+        if (!next) return false;
+        patches = next;
+        patchCapacity = next_capacity;
     }
     Patch *pt = &patches[patchCount++];
     pt->plane = plane;
@@ -2397,9 +2438,9 @@ static bool emit_patch(int plane, int layer, int i0, int j0, int di, int dj, boo
 
     int baseIdx = -1;
     switch (plane) {
-        case 0: baseIdx = table_get(pt->i0, pt->j0, layer); break;
-        case 1: baseIdx = table_get(pt->i0, layer, pt->j0); break;
-        case 2: baseIdx = table_get(layer, pt->i0, pt->j0); break;
+        case 0: baseIdx = table_get_static_only(pt->i0, pt->j0, layer); break;
+        case 1: baseIdx = table_get_static_only(pt->i0, layer, pt->j0); break;
+        case 2: baseIdx = table_get_static_only(layer, pt->i0, pt->j0); break;
     }
     pt->voxelIndex = baseIdx;
     Color baseColor = { 160, 160, 160, 255 };
@@ -9767,6 +9808,312 @@ static void build_glue_cluster_ids(int *out_cluster_id)
     }
 }
 
+static bool dynamic_voxel_is_collision_shell(int voxel_index)
+{
+    if (voxel_index < 0 || voxel_index >= voxel_count) return true;
+    const Voxel *voxel = &voxels[voxel_index];
+    if (!voxel->simulate || voxel->isBullet || voxel->type != 0 || !voxel->glueEligible) {
+        return true;
+    }
+
+    // Only cull a voxel when topology proves that every face is covered by a
+    // reciprocal, same-resolution structural neighbour.  Mixed-resolution and
+    // otherwise ambiguous joins remain shell collision geometry.
+    const float edge_epsilon = VOXEL_SIZE * 0.01f;
+    for (int face = 0; face < 6; ++face) {
+        if (!voxel->glued_faces[face]) return true;
+        int nx = voxel->gx + face_offsets[face][0];
+        int ny = voxel->gy + face_offsets[face][1];
+        int nz = voxel->gz + face_offsets[face][2];
+        int neighbor_index = table_get(nx, ny, nz);
+        if (neighbor_index < 0 || neighbor_index >= voxel_count ||
+            neighbor_index == voxel_index) return true;
+        const Voxel *neighbor = &voxels[neighbor_index];
+        if (!neighbor->simulate || neighbor->isBullet || neighbor->type != 0 ||
+            !neighbor->glueEligible ||
+            !neighbor->glued_faces[opposite_face[face]] ||
+            fabsf(neighbor->rest_edge - voxel->rest_edge) > edge_epsilon) return true;
+    }
+    return false;
+}
+
+static int compare_static_surface_faces(const void *left, const void *right)
+{
+    const StaticSurfaceFace *a = left;
+    const StaticSurfaceFace *b = right;
+    if (a->plane != b->plane) return (a->plane > b->plane) - (a->plane < b->plane);
+    if (a->positive != b->positive) return (a->positive > b->positive) - (a->positive < b->positive);
+    if (a->layer != b->layer) return (a->layer > b->layer) - (a->layer < b->layer);
+    if (a->j != b->j) return (a->j > b->j) - (a->j < b->j);
+    return (a->i > b->i) - (a->i < b->i);
+}
+
+static int compare_static_surface_refs(const void *left, const void *right)
+{
+    const StaticSurfaceRef *a = left;
+    const StaticSurfaceRef *b = right;
+    if (a->x != b->x) return (a->x > b->x) - (a->x < b->x);
+    if (a->y != b->y) return (a->y > b->y) - (a->y < b->y);
+    if (a->z != b->z) return (a->z > b->z) - (a->z < b->z);
+    return (a->patch > b->patch) - (a->patch < b->patch);
+}
+
+static int find_static_surface_face(StaticSurfaceFace *faces, int count,
+                                    int plane, bool positive, int layer, int i, int j)
+{
+    StaticSurfaceFace key = { .plane = plane, .layer = layer, .i = i, .j = j,
+                              .positive = positive };
+    int low = 0, high = count - 1;
+    while (low <= high) {
+        int middle = low + (high - low) / 2;
+        int order = compare_static_surface_faces(&faces[middle], &key);
+        if (order < 0) low = middle + 1;
+        else if (order > 0) high = middle - 1;
+        else return middle;
+    }
+    return -1;
+}
+
+static bool append_static_surface_face(StaticSurfaceFace **faces, int *count, int *capacity,
+                                       int plane, bool positive, int layer, int i, int j)
+{
+    if (*count >= *capacity) {
+        int next_capacity = *capacity ? *capacity * 2 : 4096;
+        StaticSurfaceFace *next = realloc(*faces, (size_t)next_capacity * sizeof(*next));
+        if (!next) return false;
+        *faces = next;
+        *capacity = next_capacity;
+    }
+    (*faces)[(*count)++] = (StaticSurfaceFace){
+        .plane = plane, .layer = layer, .i = i, .j = j, .positive = positive
+    };
+    return true;
+}
+
+static bool append_static_surface_ref(StaticSurfaceRef **refs, int *count, int *capacity,
+                                      int x, int y, int z, int patch)
+{
+    if (*count >= *capacity) {
+        int next_capacity = *capacity ? *capacity * 2 : 4096;
+        StaticSurfaceRef *next = realloc(*refs, (size_t)next_capacity * sizeof(*next));
+        if (!next) return false;
+        *refs = next;
+        *capacity = next_capacity;
+    }
+    (*refs)[(*count)++] = (StaticSurfaceRef){ x, y, z, patch };
+    return true;
+}
+
+static uint32_t static_surface_hash_coord(int x, int y, int z, int size)
+{
+    uint32_t h = (uint32_t)x * 73856093u;
+    h ^= (uint32_t)y * 19349663u;
+    h ^= (uint32_t)z * 83492791u;
+    return h & (uint32_t)(size - 1);
+}
+
+static bool rebuild_static_surface_cache(void)
+{
+    StaticSurfaceFace *faces = NULL;
+    StaticSurfaceRef *refs = NULL;
+    int face_count = 0, face_capacity = 0;
+    int ref_count = 0, ref_capacity = 0;
+    staticSurfaceOccupiedCellCount = 0;
+    patchCount = 0;
+
+    for (int voxel_index = 0; voxel_index < voxel_count; ++voxel_index) {
+        const Voxel *voxel = &voxels[voxel_index];
+        if (voxel->simulate) continue;
+        for (int z = voxel->min_gz; z <= voxel->max_gz; ++z) {
+            for (int y = voxel->min_gy; y <= voxel->max_gy; ++y) {
+                for (int x = voxel->min_gx; x <= voxel->max_gx; ++x) {
+                    if (table_get_static_only(x, y, z) != voxel_index) continue;
+                    ++staticSurfaceOccupiedCellCount;
+                    if (table_get_static_only(x + 1, y, z) < 0 &&
+                        !append_static_surface_face(&faces, &face_count, &face_capacity, 2, true, x, y, z)) goto fail;
+                    if (table_get_static_only(x - 1, y, z) < 0 &&
+                        !append_static_surface_face(&faces, &face_count, &face_capacity, 2, false, x, y, z)) goto fail;
+                    if (table_get_static_only(x, y + 1, z) < 0 &&
+                        !append_static_surface_face(&faces, &face_count, &face_capacity, 1, true, y, x, z)) goto fail;
+                    if (table_get_static_only(x, y - 1, z) < 0 &&
+                        !append_static_surface_face(&faces, &face_count, &face_capacity, 1, false, y, x, z)) goto fail;
+                    if (table_get_static_only(x, y, z + 1) < 0 &&
+                        !append_static_surface_face(&faces, &face_count, &face_capacity, 0, true, z, x, y)) goto fail;
+                    if (table_get_static_only(x, y, z - 1) < 0 &&
+                        !append_static_surface_face(&faces, &face_count, &face_capacity, 0, false, z, x, y)) goto fail;
+                }
+            }
+        }
+    }
+
+    qsort(faces, (size_t)face_count, sizeof(*faces), compare_static_surface_faces);
+    for (int index = 0; index < face_count; ++index) {
+        StaticSurfaceFace *face = &faces[index];
+        if (face->used) continue;
+        int width = 1;
+        for (;;) {
+            int found = find_static_surface_face(faces, face_count, face->plane, face->positive,
+                                                 face->layer, face->i + width, face->j);
+            if (found < 0 || faces[found].used) break;
+            ++width;
+        }
+        int height = 1;
+        for (;;) {
+            bool complete = true;
+            for (int di = 0; di < width; ++di) {
+                int found = find_static_surface_face(faces, face_count, face->plane, face->positive,
+                                                     face->layer, face->i + di, face->j + height);
+                if (found < 0 || faces[found].used) { complete = false; break; }
+            }
+            if (!complete) break;
+            ++height;
+        }
+        for (int dj = 0; dj < height; ++dj) {
+            for (int di = 0; di < width; ++di) {
+                int found = find_static_surface_face(faces, face_count, face->plane, face->positive,
+                                                     face->layer, face->i + di, face->j + dj);
+                if (found >= 0) faces[found].used = true;
+            }
+        }
+        if (!emit_patch(face->plane, face->layer, face->i, face->j,
+                        width, height, face->positive)) goto fail;
+    }
+
+    for (int patch_index = 0; patch_index < patchCount; ++patch_index) {
+        const Patch *patch = &patches[patch_index];
+        for (int dj = 0; dj < patch->dj; ++dj) {
+            for (int di = 0; di < patch->di; ++di) {
+                int i = patch->i0 + di, j = patch->j0 + dj;
+                int x, y, z;
+                if (patch->plane == 0) {
+                    x = i; y = j; z = patch->layer + (patch->positive ? 1 : -1);
+                } else if (patch->plane == 1) {
+                    x = i; y = patch->layer + (patch->positive ? 1 : -1); z = j;
+                } else {
+                    x = patch->layer + (patch->positive ? 1 : -1); y = i; z = j;
+                }
+                if (!append_static_surface_ref(&refs, &ref_count, &ref_capacity,
+                                               x, y, z, patch_index)) goto fail;
+            }
+        }
+    }
+    qsort(refs, (size_t)ref_count, sizeof(*refs), compare_static_surface_refs);
+
+    if (ref_count > staticSurfacePatchRefCapacity) {
+        int *next = realloc(staticSurfacePatchRefs, (size_t)ref_count * sizeof(*next));
+        if (!next) goto fail;
+        staticSurfacePatchRefs = next;
+        staticSurfacePatchRefCapacity = ref_count;
+    }
+    if (ref_count > staticSurfaceCellCapacity) {
+        StaticSurfaceCell *next = realloc(staticSurfaceCells, (size_t)ref_count * sizeof(*next));
+        if (!next) goto fail;
+        staticSurfaceCells = next;
+        staticSurfaceCellCapacity = ref_count;
+    }
+    staticSurfaceCellCount = 0;
+    staticSurfacePatchRefCount = 0;
+    for (int i = 0; i < ref_count;) {
+        int start = staticSurfacePatchRefCount;
+        int x = refs[i].x, y = refs[i].y, z = refs[i].z;
+        do {
+            staticSurfacePatchRefs[staticSurfacePatchRefCount++] = refs[i].patch;
+            ++i;
+        } while (i < ref_count && refs[i].x == x && refs[i].y == y && refs[i].z == z);
+        staticSurfaceCells[staticSurfaceCellCount++] = (StaticSurfaceCell){
+            x, y, z, start, staticSurfacePatchRefCount - start
+        };
+    }
+
+    int hash_size = 1024;
+    while (hash_size < staticSurfaceCellCount * 2) hash_size <<= 1;
+    if (hash_size != staticSurfaceHashSize) {
+        int *next = realloc(staticSurfaceHash, (size_t)hash_size * sizeof(*next));
+        if (!next) goto fail;
+        staticSurfaceHash = next;
+        staticSurfaceHashSize = hash_size;
+    }
+    for (int i = 0; i < staticSurfaceHashSize; ++i) staticSurfaceHash[i] = -1;
+    for (int i = 0; i < staticSurfaceCellCount; ++i) {
+        StaticSurfaceCell *cell = &staticSurfaceCells[i];
+        uint32_t slot = static_surface_hash_coord(cell->x, cell->y, cell->z,
+                                                  staticSurfaceHashSize);
+        while (staticSurfaceHash[slot] >= 0) slot = (slot + 1u) & (uint32_t)(staticSurfaceHashSize - 1);
+        staticSurfaceHash[slot] = i;
+    }
+    staticSurfaceGeneration = staticHashGeneration;
+    free(faces);
+    free(refs);
+    return true;
+
+fail:
+    free(faces);
+    free(refs);
+    return false;
+}
+
+static bool ensure_static_surface_cache(void)
+{
+    rebuild_static_hash_if_dirty();
+    return staticSurfaceGeneration == staticHashGeneration || rebuild_static_surface_cache();
+}
+
+static const StaticSurfaceCell *find_static_surface_cell(int x, int y, int z)
+{
+    if (staticSurfaceHashSize <= 0 || !staticSurfaceHash) return NULL;
+    uint32_t slot = static_surface_hash_coord(x, y, z, staticSurfaceHashSize);
+    for (int probe = 0; probe < staticSurfaceHashSize; ++probe) {
+        int index = staticSurfaceHash[slot];
+        if (index < 0) return NULL;
+        const StaticSurfaceCell *cell = &staticSurfaceCells[index];
+        if (cell->x == x && cell->y == y && cell->z == z) return cell;
+        slot = (slot + 1u) & (uint32_t)(staticSurfaceHashSize - 1);
+    }
+    return NULL;
+}
+
+static void rebuild_dynamic_collision_particles(void)
+{
+    if (particle_pool_count > 0) {
+        memset(collision_particle_structural_refs, 0,
+               (size_t)particle_pool_count * sizeof(collision_particle_structural_refs[0]));
+        memset(collision_particle_shell_refs, 0,
+               (size_t)particle_pool_count * sizeof(collision_particle_shell_refs[0]));
+    }
+
+    for (int voxel_index = 0; voxel_index < voxel_count; ++voxel_index) {
+        const Voxel *voxel = &voxels[voxel_index];
+        if (!voxel->simulate || voxel->isBullet || voxel->type != 0) continue;
+        bool shell = dynamic_voxel_is_collision_shell(voxel_index);
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            Particle *particle = voxel->particles[corner];
+            if (!particle) continue;
+            ptrdiff_t pool_index = particle - particles_pool;
+            if (pool_index < 0 || pool_index >= particle_pool_count) continue;
+            uint16_t *structural = &collision_particle_structural_refs[pool_index];
+            if (*structural != UINT16_MAX) ++(*structural);
+            if (shell) {
+                uint16_t *shell_refs = &collision_particle_shell_refs[pool_index];
+                if (*shell_refs != UINT16_MAX) ++(*shell_refs);
+            }
+        }
+    }
+
+    collision_particle_count = 0;
+    for (int i = 0; i < sim_particle_count; ++i) {
+        Particle *particle = sim_particles[i];
+        if (!particle) continue;
+        ptrdiff_t pool_index = particle - particles_pool;
+        bool include = getenv("FPS_COLLISION_DYNAMIC_LEGACY") != NULL ||
+                       pool_index < 0 || pool_index >= particle_pool_count ||
+                       collision_particle_structural_refs[pool_index] == 0 ||
+                       collision_particle_shell_refs[pool_index] > 0;
+        if (include && collision_particle_count < MAX_PARTICLES) {
+            collision_particles[collision_particle_count++] = particle;
+        }
+    }
+}
+
 static void rebuild_particle_collision_metadata(void)
 {
     if (!collisionTopologyDirty) return;
@@ -9791,6 +10138,9 @@ static void rebuild_particle_collision_metadata(void)
             sim_particles[i]->collision_group = -1;
         }
     }
+    rebuild_dynamic_collision_particles();
+    ++collisionMetadataGeneration;
+    if (collisionMetadataGeneration == 0) collisionMetadataGeneration = 1;
     collisionTopologyDirty = false;
 }
 
@@ -10587,6 +10937,106 @@ static bool push_particle_out_of_static(const Voxel *static_voxel, Particle *par
     }
 }
 
+static bool push_particle_out_of_static_patch(const Patch *patch, Particle *particle, float radius)
+{
+    if (!patch || !particle || radius <= 0.0f) return false;
+    Vector3 position = particle->predicted_pos;
+    Vector3 closest = position;
+    Vector3 normal = { 0.0f, 0.0f, 0.0f };
+    float plane_position = (float)(patch->layer + (patch->positive ? 1 : 0)) * VOXEL_SIZE;
+    float min_i = (float)patch->i0 * VOXEL_SIZE;
+    float max_i = (float)(patch->i0 + patch->di) * VOXEL_SIZE;
+    float min_j = (float)patch->j0 * VOXEL_SIZE;
+    float max_j = (float)(patch->j0 + patch->dj) * VOXEL_SIZE;
+    bool projected_inside = false;
+
+    if (patch->plane == 0) {
+        closest.x = clampf(position.x, min_i, max_i);
+        closest.y = clampf(position.y, min_j, max_j);
+        closest.z = plane_position;
+        normal.z = patch->positive ? 1.0f : -1.0f;
+        projected_inside = position.x >= min_i && position.x <= max_i &&
+                           position.y >= min_j && position.y <= max_j;
+    } else if (patch->plane == 1) {
+        closest.x = clampf(position.x, min_i, max_i);
+        closest.y = plane_position;
+        closest.z = clampf(position.z, min_j, max_j);
+        normal.y = patch->positive ? 1.0f : -1.0f;
+        projected_inside = position.x >= min_i && position.x <= max_i &&
+                           position.z >= min_j && position.z <= max_j;
+    } else {
+        closest.x = plane_position;
+        closest.y = clampf(position.y, min_i, max_i);
+        closest.z = clampf(position.z, min_j, max_j);
+        normal.x = patch->positive ? 1.0f : -1.0f;
+        projected_inside = position.y >= min_i && position.y <= max_i &&
+                           position.z >= min_j && position.z <= max_j;
+    }
+
+    Vector3 from_surface = v_sub(position, closest);
+    float signed_distance = v_dot(from_surface, normal);
+    const float eps = 1e-6f;
+    if (projected_inside && signed_distance < 0.0f && signed_distance >= -radius) {
+        particle->predicted_pos = v_add(position,
+            v_mul(normal, radius - signed_distance));
+        return true;
+    }
+    if (signed_distance < 0.0f) return false;
+    float distance_sq = v_dot(from_surface, from_surface);
+    if (distance_sq >= radius * radius) return false;
+    float distance = sqrtf(fmaxf(distance_sq, eps));
+    Vector3 direction = distance > eps ? v_mul(from_surface, 1.0f / distance) : normal;
+    particle->predicted_pos = v_add(position, v_mul(direction, radius - distance));
+    return true;
+}
+
+static void collide_particle_with_static_surface(Particle *particle, float radius)
+{
+    enum { MAX_PATCH_CANDIDATES = 256 };
+    int candidates[MAX_PATCH_CANDIDATES];
+    int candidate_count = 0;
+    Vector3 position = particle->predicted_pos;
+    int gx = (int)floorf(position.x / VOXEL_SIZE);
+    int gy = (int)floorf(position.y / VOXEL_SIZE);
+    int gz = (int)floorf(position.z / VOXEL_SIZE);
+
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                const StaticSurfaceCell *cell = find_static_surface_cell(gx + dx, gy + dy, gz + dz);
+                if (!cell) continue;
+                for (int item = 0; item < cell->count; ++item) {
+                    int patch_index = staticSurfacePatchRefs[cell->start + item];
+                    bool duplicate = false;
+                    for (int i = 0; i < candidate_count; ++i) {
+                        if (candidates[i] == patch_index) { duplicate = true; break; }
+                    }
+                    if (!duplicate && candidate_count < MAX_PATCH_CANDIDATES) {
+                        candidates[candidate_count++] = patch_index;
+                    }
+                }
+            }
+        }
+    }
+    for (int i = 0; i < candidate_count; ++i) {
+        int patch_index = candidates[i];
+        if (patch_index >= 0 && patch_index < patchCount) {
+            push_particle_out_of_static_patch(&patches[patch_index], particle, radius);
+        }
+    }
+
+    // Surface patches are the normal path.  The complete occupancy table is
+    // retained only to recover teleported or deeply embedded particles.
+    position = particle->predicted_pos;
+    gx = (int)floorf(position.x / VOXEL_SIZE);
+    gy = (int)floorf(position.y / VOXEL_SIZE);
+    gz = (int)floorf(position.z / VOXEL_SIZE);
+    int embedded_index = table_get_static_only(gx, gy, gz);
+    if (embedded_index >= 0 && embedded_index < voxel_count && !voxels[embedded_index].simulate) {
+        push_particle_out_of_static(&voxels[embedded_index], particle, radius);
+    }
+}
+
 static void glue_dynamic_face_to_static(Voxel *dynamic, Voxel *stat,
                                         int face_dynamic, int face_static)
 {
@@ -10722,7 +11172,7 @@ static void solve_static_collisions_range(int start, int end, int worker_id, voi
     const float static_collision_radius = 0.25f * VOXEL_SIZE;
 
     for (int i = start; i < end; ++i) {
-        Particle *p = sim_particles[i];
+        Particle *p = collision_particles[i];
         if (!p || p->inv_mass == 0.0f) continue;
 
         // p->radius holds the voxel radius (0.25)
@@ -10772,21 +11222,18 @@ static void solve_static_collisions_range(int start, int end, int worker_id, voi
         }
         p->predicted_pos = pos;
 
-        // Static voxel collision
-        int static_neighbors[MAX_STATIC_COLLISION_NEIGHBORS];
-        int static_count = gather_static_voxels_near_point(
-            p->predicted_pos, voxel_radius,
-            static_neighbors, MAX_STATIC_COLLISION_NEIGHBORS);
-        for (int s = 0; s < static_count; ++s) {
-            int static_idx = static_neighbors[s];
-            if (static_idx < 0 || static_idx >= voxel_count) {
-                continue;
+        if (getenv("FPS_COLLISION_STATIC_LEGACY")) {
+            int static_neighbors[MAX_STATIC_COLLISION_NEIGHBORS];
+            int static_count = gather_static_voxels_near_point(
+                p->predicted_pos, voxel_radius,
+                static_neighbors, MAX_STATIC_COLLISION_NEIGHBORS);
+            for (int s = 0; s < static_count; ++s) {
+                int static_idx = static_neighbors[s];
+                if (static_idx < 0 || static_idx >= voxel_count || voxels[static_idx].simulate) continue;
+                push_particle_out_of_static(&voxels[static_idx], p, static_collision_radius);
             }
-            const Voxel *static_voxel = &voxels[static_idx];
-            if (static_voxel->simulate) {
-                continue;
-            }
-            push_particle_out_of_static(static_voxel, p, static_collision_radius);
+        } else {
+            collide_particle_with_static_surface(p, static_collision_radius);
         }
     }
 }
@@ -10794,8 +11241,9 @@ static void solve_static_collisions_range(int start, int end, int worker_id, voi
 // Resolve collisions against the scene (floor, static voxels, players).
 static void solve_static_collisions(float dt) {
     (void)dt;
+    if (!getenv("FPS_COLLISION_STATIC_LEGACY") && !ensure_static_surface_cache()) return;
     StaticCollisionJob job = { .half_player = PLAYER_SIZE * 0.5f };
-    pbd_parallel_for(0, sim_particle_count, solve_static_collisions_range, &job);
+    pbd_parallel_for(0, collision_particle_count, solve_static_collisions_range, &job);
 }
 
 // Unified solver for dynamic-dynamic collisions
@@ -11062,11 +11510,17 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
         integrate_particles(sub_dt);
 
         for (int it = 0; it < 1; ++it) {
-            int snapshot_count = sim_particle_count;
+            // The collision list is stable for this substep.  Break processing
+            // below dirties topology and the next substep rebuilds it.
+            if (collisionTopologyDirty) rebuild_particle_collision_metadata();
+            int snapshot_count = collision_particle_count;
             if (snapshot_count > MAX_PARTICLES) {
                 snapshot_count = MAX_PARTICLES;
             }
-            pbd_parallel_for(0, snapshot_count, copy_particle_snapshot_range, NULL);
+            if (snapshot_count > 0) {
+                memcpy(particle_snapshot, collision_particles,
+                       (size_t)snapshot_count * sizeof(particle_snapshot[0]));
+            }
             build_particle_hash(particle_snapshot, snapshot_count);
             gather_particle_collisions(sub_dt, particle_snapshot, snapshot_count);
         }
@@ -12773,32 +13227,10 @@ static int xyPosList[MAX_VOXELS], xyNegList[MAX_VOXELS];
 
 static Mesh gen_greedy_mesh(void) {
     Mesh mesh = { 0 };
-    patchCount = 0;
+    if (!ensure_static_surface_cache()) return mesh;
 
-    // Collect all static (non-simulated) voxels by visible faces (principal planes)
-    int yzPosCount = 0, yzNegCount = 0; // +X, -X
-    int xzPosCount = 0, xzNegCount = 0; // +Y, -Y
-    int xyPosCount = 0, xyNegCount = 0; // +Z, -Z
-    for (int i = 0; i < voxel_count; i++) {
-        Voxel *v = &voxels[i];
-        if (v->simulate) continue;
-        if (v->surface[0]) yzPosList[yzPosCount++] = i; // +X face
-        if (v->surface[1]) yzNegList[yzNegCount++] = i; // -X face
-        if (v->surface[2]) xzPosList[xzPosCount++] = i; // +Y face
-        if (v->surface[3]) xzNegList[xzNegCount++] = i; // -Y face
-        if (v->surface[4]) xyPosList[xyPosCount++] = i; // +Z face
-        if (v->surface[5]) xyNegList[xyNegCount++] = i; // -Z face
-    }
-
-    // Merge rectangles in each principal plane
-    merge_rects_on_plane(xyPosCount, xyPosList, 0, true); // XY-plane, +Z
-    merge_rects_on_plane(xyNegCount, xyNegList, 0, false); // XY-plane, -Z
-    merge_rects_on_plane(xzPosCount, xzPosList, 1, true); // XZ-plane, +Y
-    merge_rects_on_plane(xzNegCount, xzNegList, 1, false); // XZ-plane, -Y
-    merge_rects_on_plane(yzPosCount, yzPosList, 2, true); // YZ-plane, +X
-    merge_rects_on_plane(yzNegCount, yzNegList, 2, false); // YZ-plane, -X
-
-    // Build Raylib mesh from collected patches
+    // Rendering consumes the same generation-tracked patches as physics; only
+    // the GPU vertex upload remains render-specific.
     int vCount = patchCount * 4;
     int iCount = patchCount * 6;
     float *verts  = calloc(vCount*3, sizeof(float));
@@ -14105,7 +14537,7 @@ int main(int argc, char **argv) {
     if (!parse_physics_arguments(argc, argv)) return 2;
     bool automatedRun = physicsSmokeSteps > 0 || debug_run_requested();
     int countFrame = 0;
-    SetLoggingEnabled(false);
+    SetLoggingEnabled(getenv("FPS_SHADER_LOG") != NULL);
     SetTraceLogLevel(physicsReportRequested ? LOG_ALL : LOG_NONE);
     if (debug_run_requested() && !debug_show_window_requested()) {
         SetConfigFlags(FLAG_WINDOW_HIDDEN);

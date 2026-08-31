@@ -160,7 +160,7 @@ static bool fps_metal_encode(int mode, int count, id<MTLBuffer> indirect, size_t
             [encoder setBuffer:metal_state.bound[i] offset:0 atIndex:(NSUInteger)i];
         }
         metal_state.uniforms.mode = mode;
-        [encoder setBytes:&metal_state.uniforms length:sizeof(metal_state.uniforms) atIndex:16];
+        [encoder setBytes:&metal_state.uniforms length:sizeof(metal_state.uniforms) atIndex:FPS_GPU_BUFFER_COUNT];
         MTLSize threads = MTLSizeMake(128, 1, 1);
         if (indirect) {
             [encoder dispatchThreadgroupsWithIndirectBuffer:indirect
