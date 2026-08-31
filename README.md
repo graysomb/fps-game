@@ -329,6 +329,8 @@ fps_ray --physics=gpu --debug-scenario=falling-pillar-sleep --debug-steps=1250 \
 Available scenarios are:
 
 * `dynamic-freefall`: creates an already-dynamic cluster to isolate basic integration.
+* `creative-reset-cache`: populates the shared static surface cache, enters the empty
+  creative world, and verifies that no render or collision patches survive the reset.
 * `activation-floating`: activates an unsupported static cluster through the tether path.
 * `sleep-wake-floating`: sleeps a supported dynamic cluster, removes its support, then
   activates it through the tether path.

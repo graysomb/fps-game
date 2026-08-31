@@ -6891,6 +6891,12 @@ static void clear_world_voxels(void) {
     memset(table, 0, sizeof(table));
     memset(static_table, 0, sizeof(static_table));
     memset(dynamic_table, 0, sizeof(dynamic_table));
+    // Clearing the world changes authoritative static occupancy just as much as
+    // adding or removing one voxel.  Advance the shared generation so the
+    // greedy render mesh, CPU collision patches, and GPU static buffers cannot
+    // reuse geometry from the previous gameplay/creative world.
+    table_cache_invalidate();
+    mark_static_hash_dirty();
     meshDirty = true;
 }
 
@@ -7245,7 +7251,7 @@ static void ResetCreative(void) {
     clear_pickups();
     reset_players_for_creative();
     rebuild_all_voxel_surfaces();
-    init_static_hash();
+    rebuild_static_hash_if_dirty();
     meshDirty = true;
 }
 

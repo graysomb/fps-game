@@ -134,6 +134,7 @@ static DebugRunConfig debugRunConfig = {
 };
 
 static bool debug_setup_dynamic_freefall(DebugRunState *state);
+static bool debug_setup_creative_reset_cache(DebugRunState *state);
 static bool debug_setup_activation_floating(DebugRunState *state);
 static bool debug_setup_sleep_wake_floating(DebugRunState *state);
 static bool debug_setup_sleep_recycle(DebugRunState *state);
@@ -144,6 +145,7 @@ static bool debug_setup_overhang_impact(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall },
+    { "creative-reset-cache", "Creative reset invalidates cached static render and collision surfaces", debug_setup_creative_reset_cache },
     { "activation-floating", "Static cluster activated while unsupported", debug_setup_activation_floating },
     { "sleep-wake-floating", "Supported cluster sleeps, loses support, then activates", debug_setup_sleep_wake_floating },
     { "sleep-recycle", "Sleeping dynamic island enters delayed restoration atomically", debug_setup_sleep_recycle },
@@ -1435,6 +1437,41 @@ static bool debug_setup_sleep_wake_floating(DebugRunState *state)
     if (!debug_activate_test_cluster(state)) return false;
     debug_set_initial_centroid(state);
     return true;
+}
+
+static bool debug_setup_creative_reset_cache(DebugRunState *state)
+{
+    debug_reset_world();
+    int created = debug_add_test_cluster(false);
+    debug_rebuild_world_state();
+    if (created != state->expected_voxels || !ensure_static_surface_cache() ||
+        patchCount <= 0 || staticSurfaceOccupiedCellCount <= 0) {
+        debug_add_failure(state, "unable to populate the pre-reset static surface cache");
+        return false;
+    }
+
+    uint64_t populated_generation = staticSurfaceGeneration;
+    ResetCreative();
+    if (!ensure_static_surface_cache()) {
+        debug_add_failure(state, "creative reset could not rebuild the empty surface cache");
+        return false;
+    }
+    if (staticSurfaceGeneration == populated_generation) {
+        debug_add_failure(state, "creative reset did not advance the static surface generation");
+        return false;
+    }
+    if (voxel_count != 0 || patchCount != 0 || staticSurfaceOccupiedCellCount != 0 ||
+        staticSurfaceCellCount != 0 || staticSurfacePatchRefCount != 0) {
+        debug_add_failure(state,
+                          "creative reset retained stale geometry: voxels=%d patches=%d occupied=%d cells=%d refs=%d",
+                          voxel_count, patchCount, staticSurfaceOccupiedCellCount,
+                          staticSurfaceCellCount, staticSurfacePatchRefCount);
+        return false;
+    }
+
+    // Finish as a normal deterministic simulation so the scenario also checks
+    // that rebuilding the world after the empty creative reset remains valid.
+    return debug_setup_dynamic_freefall(state);
 }
 
 static bool debug_setup_sleep_recycle(DebugRunState *state)
