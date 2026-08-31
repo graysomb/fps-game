@@ -314,6 +314,8 @@ fps_ray --physics=gpu --debug-scenario=sleep-wake-floating
 fps_ray --physics=cpu-st --debug-scenario=activation-floating --debug-show-window
 fps_ray --physics=cpu-mt --debug-scenario=dynamic-freefall --debug-steps=120 \
   --debug-capture-steps=0,1,30,60,120 --debug-output=debug-artifacts/custom-run
+fps_ray --physics=gpu --debug-scenario=falling-pillar-sleep --debug-steps=1250 \
+  --debug-gif --debug-gif-fps=20 --debug-output=debug-artifacts/pillar-video
 ```
 
 Available scenarios are:
@@ -336,6 +338,11 @@ Without `--debug-output`, artifacts are written beneath
 `report.json`, named setup-phase images when applicable, and images for simulation steps
 `0,1,5,15,30,60` by default. Debug runs require at least 60 steps so the report can make
 a meaningful fall assertion.
+
+Pass `--debug-gif` to additionally stream a 640x360 looping `simulation.gif` into the
+backend output directory. `--debug-gif-fps=N` selects 1-60 playback frames per second
+(20 by default) and automatically enables GIF recording. The encoder is built into the
+harness, so it does not require FFmpeg, Python, or ImageMagick.
 
 Run all backends sequentially through the launcher with:
 

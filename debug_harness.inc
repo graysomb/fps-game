@@ -1463,6 +1463,7 @@ static bool debug_setup_falling_pillar_sleep(DebugRunState *state)
 {
     debug_reset_world();
     state->falling_pillar_test = true;
+    state->recycle_queue_before = recycleQueueCount;
     const int min_y = 1;
     const int height = 10;
     int created = 0;
@@ -1715,7 +1716,9 @@ static void debug_validate_step(DebugRunState *state, int step)
 {
     debug_validate_all_sim_particles(state, step);
     DebugSample sample = debug_collect_sample("validation", step, state->initial_centroid_y);
-    if (state->falling_pillar_test && step > RECYCLE_DYNAMIC_MAX_FRAMES) {
+    if (state->falling_pillar_test &&
+        step > RECYCLE_DYNAMIC_MAX_FRAMES &&
+        step < RECYCLE_DYNAMIC_MAX_FRAMES * 2 + 2) {
         int tagged_total = sample.tagged_dynamic + sample.tagged_static;
         if (sample.tagged_static != 0 || tagged_total != state->expected_voxels) {
             debug_add_failure(state,
@@ -1728,6 +1731,16 @@ static void debug_validate_step(DebugRunState *state, int step)
             debug_add_failure(state,
                               "step %d: lifetime pipeline slept %d/%d pillar voxels",
                               step, sample.tagged_sleeping, state->expected_voxels);
+        }
+    }
+    if (state->falling_pillar_test &&
+        step == RECYCLE_DYNAMIC_MAX_FRAMES * 2 + 2) {
+        int tagged_total = sample.tagged_dynamic + sample.tagged_static;
+        int queued = recycleQueueCount - state->recycle_queue_before;
+        if (tagged_total != 0 || queued != state->expected_voxels) {
+            debug_add_failure(state,
+                              "step %d: sleeping pillar recycle left %d voxels and queued %d/%d",
+                              step, tagged_total, queued, state->expected_voxels);
         }
     }
     if (state->recycle_test) {

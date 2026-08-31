@@ -609,14 +609,14 @@ static int pairCorrectionScratchSlots = 0;
 static int glueClusterIndices[MAX_VOXELS];
 static unsigned char glueClusterVisited[MAX_VOXELS];
 static unsigned char sleepClusterVisited[MAX_VOXELS];
-static unsigned char recycleSleepVisited[MAX_VOXELS];
 static unsigned char recycleSleepReady[MAX_VOXELS];
 static int recycleLifetimeParent[MAX_VOXELS];
 static int recycleLifetimeHead[MAX_VOXELS];
 static int recycleLifetimeNext[MAX_VOXELS];
 static int recycleLifetimeParticleVoxel[MAX_PARTICLES];
 static unsigned char recycleLifetimeExpired[MAX_VOXELS];
-static unsigned char recycleLifetimeSupported[MAX_VOXELS];
+static unsigned char recycleLifetimeOutside[MAX_VOXELS];
+static int recycleComponentRestoreCount[MAX_VOXELS];
 static unsigned char voxelCalmFlags[MAX_VOXELS];
 static _Atomic unsigned char activationClaims[MAX_VOXELS];
 static bool dynamicGlueClustersInitialized = false;
@@ -653,6 +653,8 @@ static int gather_glued_neighbors_symmetric(int voxel_idx, int *out, int max_out
 static bool voxel_connected_to_static_world(const Voxel *voxel);
 static bool glue_cluster_has_static_support(const int *cluster, int cluster_count);
 static bool freeze_dynamic_cluster_in_place(const int *cluster, int cluster_count);
+static int recycle_lifetime_find_root(int voxel_idx);
+static void recycle_lifetime_union(int a, int b);
 static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count);
 static void solve_static_collisions(float dt);
 static void solve_dynamic_collisions(float dt);
@@ -4580,64 +4582,71 @@ static bool spawn_static_at_rest(const Voxel *snapshot) {
 // their restoration queue entries, then enqueue and remove them atomically.
 static bool recycle_sleeping_voxel_islands(void)
 {
-    size_t recycle_bytes = voxel_count > 0 ? (size_t)voxel_count : 0;
-    if (recycle_bytes > sizeof(recycleSleepVisited)) {
-        recycle_bytes = sizeof(recycleSleepVisited);
+    if (voxel_count <= 0) return false;
+    size_t voxel_count_size = (size_t)voxel_count;
+    memset(recycleSleepReady, 0, voxel_count_size);
+    memset(recycleLifetimeHead, 0xff, voxel_count_size * sizeof(int));
+    memset(recycleLifetimeNext, 0xff, voxel_count_size * sizeof(int));
+    memset(recycleLifetimeExpired, 1, voxel_count_size);
+    memset(recycleLifetimeOutside, 0, voxel_count_size);
+    memset(recycleComponentRestoreCount, 0, voxel_count_size * sizeof(int));
+    for (int i = 0; i < voxel_count; ++i) {
+        recycleLifetimeParent[i] =
+            (voxels[i].simulate && voxels[i].sleeping) ? i : -1;
     }
-    memset(recycleSleepVisited, 0, recycle_bytes);
-    memset(recycleSleepReady, 0, recycle_bytes);
+
+    size_t particle_count = particle_pool_count > 0 ? (size_t)particle_pool_count : 0;
+    if (particle_count > MAX_PARTICLES) particle_count = MAX_PARTICLES;
+    memset(recycleLifetimeParticleVoxel, 0xff, particle_count * sizeof(int));
+    for (int i = 0; i < voxel_count; ++i) {
+        if (recycleLifetimeParent[i] < 0) continue;
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            Particle *particle = voxels[i].particles[corner];
+            ptrdiff_t pool_id = particle ? particle - particles_pool : -1;
+            if (pool_id < 0 || (size_t)pool_id >= particle_count) continue;
+            int previous = recycleLifetimeParticleVoxel[pool_id];
+            if (previous >= 0) recycle_lifetime_union(i, previous);
+            else recycleLifetimeParticleVoxel[pool_id] = i;
+        }
+    }
+    for (int g = 0; g < glueConstraintCount; ++g) {
+        GlueConstraint *constraint = &glueConstraints[g];
+        int a = constraint->coarseVoxel;
+        int b = constraint->fineVoxel;
+        if (!constraint->active || a < 0 || b < 0 ||
+            a >= voxel_count || b >= voxel_count ||
+            recycleLifetimeParent[a] < 0 || recycleLifetimeParent[b] < 0) {
+            continue;
+        }
+        recycle_lifetime_union(a, b);
+    }
+
+    for (int i = 0; i < voxel_count; ++i) {
+        if (recycleLifetimeParent[i] < 0) continue;
+        int root = recycle_lifetime_find_root(i);
+        if (voxels[i].lifeFrames <= RECYCLE_DYNAMIC_MAX_FRAMES) {
+            recycleLifetimeExpired[root] = 0;
+        }
+        if (voxel_outside_world_bounds(&voxels[i])) {
+            recycleLifetimeOutside[root] = 1;
+        }
+        if (voxels[i].owner == -1) {
+            ++recycleComponentRestoreCount[root];
+        }
+        recycleLifetimeNext[i] = recycleLifetimeHead[root];
+        recycleLifetimeHead[root] = i;
+    }
 
     int reserved_restore_slots = 0;
     int ready_islands = 0;
     int ready_voxels = 0;
-
-    for (int start = 0; start < voxel_count; ++start) {
-        if (recycleSleepVisited[start] ||
-            !voxels[start].simulate || !voxels[start].sleeping) {
-            continue;
-        }
-
-        int head = 0;
-        int tail = 0;
-        int restore_count = 0;
-        bool all_expired = true;
-        bool any_outside = false;
-        glueClusterIndices[tail++] = start;
-        recycleSleepVisited[start] = 1;
-
-        while (head < tail) {
-            int idx = glueClusterIndices[head++];
-            Voxel *voxel = &voxels[idx];
-            if (voxel->owner == -1) {
-                ++restore_count;
-            }
-            if (voxel->lifeFrames <= RECYCLE_DYNAMIC_MAX_FRAMES) {
-                all_expired = false;
-            }
-            if (voxel_outside_world_bounds(voxel)) {
-                any_outside = true;
-            }
-
-            int neighbors[MAX_FACE_NEIGHBORS];
-            int neighbor_count = gather_glued_neighbors_symmetric(
-                idx, neighbors, MAX_FACE_NEIGHBORS);
-            for (int n = 0; n < neighbor_count; ++n) {
-                int neighbor = neighbors[n];
-                if (neighbor < 0 || neighbor >= voxel_count ||
-                    recycleSleepVisited[neighbor] ||
-                    !voxels[neighbor].simulate || !voxels[neighbor].sleeping) {
-                    continue;
-                }
-                recycleSleepVisited[neighbor] = 1;
-                if (tail < MAX_VOXELS) {
-                    glueClusterIndices[tail++] = neighbor;
-                }
-            }
-        }
-
-        if (!all_expired && !any_outside) {
-            continue;
-        }
+    for (int root = 0; root < voxel_count; ++root) {
+        if (recycleLifetimeParent[root] != root ||
+            (!recycleLifetimeExpired[root] && !recycleLifetimeOutside[root])) continue;
+        int restore_count = recycleComponentRestoreCount[root];
+        int component_count = 0;
+        for (int idx = recycleLifetimeHead[root]; idx >= 0;
+             idx = recycleLifetimeNext[idx]) ++component_count;
 
         // Do not partially recycle an island when the delayed restoration
         // queue cannot hold every original-world voxel in it.
@@ -4645,16 +4654,17 @@ static bool recycle_sleeping_voxel_islands(void)
             if (debugLogVoxelRecycle) {
                 TraceLog(LOG_WARNING,
                          "[Recycle] sleeping-island deferred count=%d restore=%d queue=%d",
-                         tail, restore_count, recycleQueueCount);
+                         component_count, restore_count, recycleQueueCount);
             }
             continue;
         }
 
-        for (int c = 0; c < tail; ++c) {
-            recycleSleepReady[glueClusterIndices[c]] = 1;
+        for (int idx = recycleLifetimeHead[root]; idx >= 0;
+             idx = recycleLifetimeNext[idx]) {
+            recycleSleepReady[idx] = 1;
         }
         reserved_restore_slots += restore_count;
-        ready_voxels += tail;
+        ready_voxels += component_count;
         ++ready_islands;
     }
 
@@ -4721,7 +4731,6 @@ static bool freeze_lifetime_expired_islands(void)
     memset(recycleLifetimeHead, 0xff, voxel_bytes * sizeof(int));
     memset(recycleLifetimeNext, 0xff, voxel_bytes * sizeof(int));
     memset(recycleLifetimeExpired, 1, voxel_bytes);
-    memset(recycleLifetimeSupported, 0, voxel_bytes);
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
         recycleLifetimeParent[i] =
@@ -4767,9 +4776,6 @@ static bool freeze_lifetime_expired_islands(void)
         if (voxels[i].lifeFrames <= RECYCLE_DYNAMIC_MAX_FRAMES) {
             recycleLifetimeExpired[root] = 0;
         }
-        if (voxel_connected_to_static_world(&voxels[i])) {
-            recycleLifetimeSupported[root] = 1;
-        }
         recycleLifetimeNext[i] = recycleLifetimeHead[root];
         recycleLifetimeHead[root] = i;
     }
@@ -4777,7 +4783,7 @@ static bool freeze_lifetime_expired_islands(void)
     bool changed = false;
     for (int root = 0; root < voxel_count; ++root) {
         if (recycleLifetimeParent[root] != root ||
-            !recycleLifetimeExpired[root] || !recycleLifetimeSupported[root]) {
+            !recycleLifetimeExpired[root]) {
             continue;
         }
         int count = 0;
