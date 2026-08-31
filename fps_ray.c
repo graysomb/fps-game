@@ -625,6 +625,7 @@ static unsigned char recycleLifetimeExpired[MAX_VOXELS];
 static unsigned char recycleLifetimeOutside[MAX_VOXELS];
 static unsigned char recycleRestorationDue[MAX_VOXELS];
 static unsigned char recycleComponentAllSleeping[MAX_VOXELS];
+static unsigned char recycleComponentAllAwake[MAX_VOXELS];
 static int recycleComponentRestoreCount[MAX_VOXELS];
 static unsigned char voxelCalmFlags[MAX_VOXELS];
 static _Atomic unsigned char activationClaims[MAX_VOXELS];
@@ -664,6 +665,7 @@ static bool glue_cluster_has_static_support(const int *cluster, int cluster_coun
 static bool freeze_dynamic_cluster_in_place(const int *cluster, int cluster_count);
 static int recycle_lifetime_find_root(int voxel_idx);
 static void recycle_lifetime_union(int a, int b);
+static bool build_recycle_physical_island_graph(void);
 static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count);
 static void solve_static_collisions(float dt);
 static void solve_dynamic_collisions(float dt);
@@ -4613,44 +4615,11 @@ static bool recycle_sleeping_voxel_islands(void)
     if (voxel_count <= 0) return false;
     size_t voxel_count_size = (size_t)voxel_count;
     memset(recycleSleepReady, 0, voxel_count_size);
-    memset(recycleLifetimeHead, 0xff, voxel_count_size * sizeof(int));
-    memset(recycleLifetimeNext, 0xff, voxel_count_size * sizeof(int));
     memset(recycleLifetimeExpired, 1, voxel_count_size);
     memset(recycleLifetimeOutside, 0, voxel_count_size);
     memset(recycleRestorationDue, 0, voxel_count_size);
     memset(recycleComponentAllSleeping, 1, voxel_count_size);
     memset(recycleComponentRestoreCount, 0, voxel_count_size * sizeof(int));
-    for (int i = 0; i < voxel_count; ++i) {
-        Voxel *voxel = &voxels[i];
-        recycleLifetimeParent[i] =
-            (voxel->simulate && voxel->type == 0 && !voxel->isBullet) ? i : -1;
-    }
-
-    size_t particle_count = particle_pool_count > 0 ? (size_t)particle_pool_count : 0;
-    if (particle_count > MAX_PARTICLES) particle_count = MAX_PARTICLES;
-    memset(recycleLifetimeParticleVoxel, 0xff, particle_count * sizeof(int));
-    for (int i = 0; i < voxel_count; ++i) {
-        if (recycleLifetimeParent[i] < 0) continue;
-        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
-            Particle *particle = voxels[i].particles[corner];
-            ptrdiff_t pool_id = particle ? particle - particles_pool : -1;
-            if (pool_id < 0 || (size_t)pool_id >= particle_count) continue;
-            int previous = recycleLifetimeParticleVoxel[pool_id];
-            if (previous >= 0) recycle_lifetime_union(i, previous);
-            else recycleLifetimeParticleVoxel[pool_id] = i;
-        }
-    }
-    for (int g = 0; g < glueConstraintCount; ++g) {
-        GlueConstraint *constraint = &glueConstraints[g];
-        int a = constraint->coarseVoxel;
-        int b = constraint->fineVoxel;
-        if (!constraint->active || a < 0 || b < 0 ||
-            a >= voxel_count || b >= voxel_count ||
-            recycleLifetimeParent[a] < 0 || recycleLifetimeParent[b] < 0) {
-            continue;
-        }
-        recycle_lifetime_union(a, b);
-    }
 
     for (int i = 0; i < voxel_count; ++i) {
         if (recycleLifetimeParent[i] < 0) continue;
@@ -4672,8 +4641,6 @@ static bool recycle_sleeping_voxel_islands(void)
         if (voxels[i].owner == -1 && !voxels[i].restorationQueued) {
             ++recycleComponentRestoreCount[root];
         }
-        recycleLifetimeNext[i] = recycleLifetimeHead[root];
-        recycleLifetimeHead[root] = i;
     }
 
     int reserved_restore_slots = 0;
@@ -4772,30 +4739,31 @@ static void recycle_lifetime_union(int a, int b)
     else recycleLifetimeParent[root_a] = root_b;
 }
 
-static bool freeze_lifetime_expired_islands(void)
+// Build the physical topology once for this lifecycle update. Both lifetime
+// sleeping and recycling aggregate their own state over these same islands.
+static bool build_recycle_physical_island_graph(void)
 {
     if (voxel_count <= 0) return false;
-    size_t voxel_bytes = (size_t)voxel_count;
-    memset(recycleLifetimeHead, 0xff, voxel_bytes * sizeof(int));
-    memset(recycleLifetimeNext, 0xff, voxel_bytes * sizeof(int));
-    // A connected active island has a maximum awake lifetime.  Newly activated
-    // neighbors must not perpetually postpone an older island by resetting the
-    // whole component's age requirement.  Once any member reaches the limit we
-    // freeze the complete physical island atomically.
-    memset(recycleLifetimeExpired, 0, voxel_bytes);
+
+    size_t voxel_count_size = (size_t)voxel_count;
+    memset(recycleLifetimeHead, 0xff, voxel_count_size * sizeof(int));
+    memset(recycleLifetimeNext, 0xff, voxel_count_size * sizeof(int));
+
+    bool has_islands = false;
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
-        recycleLifetimeParent[i] =
-            (voxel_is_awake_dynamic(voxel) && voxel->type == 0 && !voxel->isBullet)
-            ? i : -1;
+        bool eligible = voxel->simulate && voxel->type == 0 && !voxel->isBullet;
+        recycleLifetimeParent[i] = eligible ? i : -1;
+        has_islands = has_islands || eligible;
     }
+    if (!has_islands) return false;
 
     size_t particle_count = particle_pool_count > 0 ? (size_t)particle_pool_count : 0;
     if (particle_count > MAX_PARTICLES) particle_count = MAX_PARTICLES;
     memset(recycleLifetimeParticleVoxel, 0xff, particle_count * sizeof(int));
 
-    // Unit voxels are physically connected by shared corner particles even
-    // when their grid coordinates no longer line up after a large rotation.
+    // Shared corner particles remain authoritative after an island rotates away
+    // from its original grid coordinates.
     for (int i = 0; i < voxel_count; ++i) {
         if (recycleLifetimeParent[i] < 0) continue;
         for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
@@ -4808,8 +4776,8 @@ static bool freeze_lifetime_expired_islands(void)
         }
     }
 
-    // Mixed-resolution joins may use explicit glue constraints rather than
-    // shared particle pointers, so union those into the same physical graph.
+    // Mixed-resolution joins can be connected by explicit glue rather than a
+    // shared particle pointer.
     for (int g = 0; g < glueConstraintCount; ++g) {
         GlueConstraint *constraint = &glueConstraints[g];
         int a = constraint->coarseVoxel;
@@ -4825,17 +4793,37 @@ static bool freeze_lifetime_expired_islands(void)
     for (int i = 0; i < voxel_count; ++i) {
         if (recycleLifetimeParent[i] < 0) continue;
         int root = recycle_lifetime_find_root(i);
-        if (voxels[i].lifeFrames > RECYCLE_DYNAMIC_MAX_FRAMES) {
-            recycleLifetimeExpired[root] = 1;
-        }
         recycleLifetimeNext[i] = recycleLifetimeHead[root];
         recycleLifetimeHead[root] = i;
+    }
+    return true;
+}
+
+static bool freeze_lifetime_expired_islands(void)
+{
+    if (voxel_count <= 0) return false;
+    size_t voxel_bytes = (size_t)voxel_count;
+    // A connected active island has a maximum awake lifetime.  Newly activated
+    // neighbors must not perpetually postpone an older island by resetting the
+    // whole component's age requirement.  Once any member reaches the limit we
+    // freeze the complete physical island atomically.
+    memset(recycleLifetimeExpired, 0, voxel_bytes);
+    memset(recycleComponentAllAwake, 1, voxel_bytes);
+
+    for (int i = 0; i < voxel_count; ++i) {
+        if (recycleLifetimeParent[i] < 0) continue;
+        int root = recycle_lifetime_find_root(i);
+        if (!voxel_is_awake_dynamic(&voxels[i])) {
+            recycleComponentAllAwake[root] = 0;
+        } else if (voxels[i].lifeFrames > RECYCLE_DYNAMIC_MAX_FRAMES) {
+            recycleLifetimeExpired[root] = 1;
+        }
     }
 
     bool changed = false;
     for (int root = 0; root < voxel_count; ++root) {
         if (recycleLifetimeParent[root] != root ||
-            !recycleLifetimeExpired[root]) {
+            !recycleComponentAllAwake[root] || !recycleLifetimeExpired[root]) {
             continue;
         }
         int count = 0;
@@ -4897,12 +4885,13 @@ static void recycle_dead_voxels(void) {
         }
     }
 
-    if (freeze_lifetime_expired_islands()) {
+    bool has_physical_islands = build_recycle_physical_island_graph();
+    if (has_physical_islands && freeze_lifetime_expired_islands()) {
         has_sleeping_voxels = true;
         changed = true;
     }
 
-    if ((has_sleeping_voxels || has_due_restoration) &&
+    if (has_physical_islands && (has_sleeping_voxels || has_due_restoration) &&
         recycle_sleeping_voxel_islands()) {
         changed = true;
     }
