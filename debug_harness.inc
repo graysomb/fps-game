@@ -66,6 +66,7 @@ typedef struct DebugRunState {
     bool overhang_impact;
     bool recycle_test;
     bool recycle_succeeded;
+    bool falling_pillar_test;
     bool overhang_anchor_observed;
     bool overhang_deflection_sampled;
     bool gpu_readback_performed;
@@ -112,6 +113,7 @@ static bool debug_setup_dynamic_freefall(DebugRunState *state);
 static bool debug_setup_activation_floating(DebugRunState *state);
 static bool debug_setup_sleep_wake_floating(DebugRunState *state);
 static bool debug_setup_sleep_recycle(DebugRunState *state);
+static bool debug_setup_falling_pillar_sleep(DebugRunState *state);
 static bool debug_setup_tether_throw_floating(DebugRunState *state);
 static bool debug_setup_overhang_impact(DebugRunState *state);
 
@@ -120,6 +122,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "activation-floating", "Static cluster activated while unsupported", debug_setup_activation_floating },
     { "sleep-wake-floating", "Supported cluster sleeps, loses support, then activates", debug_setup_sleep_wake_floating },
     { "sleep-recycle", "Sleeping dynamic island enters delayed restoration atomically", debug_setup_sleep_recycle },
+    { "falling-pillar-sleep", "Rotated pillar falls, settles, and sleeps without changing pose", debug_setup_falling_pillar_sleep },
     { "tether-throw-floating", "Released tether voxel wakes an unsupported sleeping cluster", debug_setup_tether_throw_floating },
     { "overhang-impact", "Falling dynamic voxel activates and bends a supported static overhang", debug_setup_overhang_impact }
 };
@@ -1194,6 +1197,107 @@ static bool debug_setup_sleep_recycle(DebugRunState *state)
     return true;
 }
 
+static bool debug_setup_falling_pillar_sleep(DebugRunState *state)
+{
+    debug_reset_world();
+    state->falling_pillar_test = true;
+    const int min_y = 1;
+    const int height = 10;
+    int created = 0;
+    Color pillar_color = (Color){ 225, 155, 65, 255 };
+    for (int y = min_y; y < min_y + height; ++y) {
+        for (int z = -1; z <= 1; ++z) {
+            for (int x = -1; x <= 1; ++x) {
+                if (debug_add_cell(x, y, z, false, true,
+                                   pillar_color, DEBUG_TEST_TAG) >= 0) {
+                    ++created;
+                }
+            }
+        }
+    }
+    state->expected_voxels = created;
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_rebuild_world_state();
+
+    if (created != 3 * height * 3) {
+        debug_add_failure(state, "falling-pillar setup created %d/%d voxels",
+                          created, 3 * height * 3);
+        return false;
+    }
+
+    Vector3 pivot = { 0.0f, 0.0f, 0.0f };
+    int pivot_count = 0;
+    int stamp = ++particle_sync_stamp;
+    if (stamp == 0) {
+        stamp = 1;
+        particle_sync_stamp = 1;
+    }
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (voxel->debugClusterTag != DEBUG_TEST_TAG) continue;
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            Particle *particle = voxel->particles[corner];
+            if (!particle || particle->sync_stamp == stamp) continue;
+            particle->sync_stamp = stamp;
+            pivot = v_add(pivot, particle->pos);
+            ++pivot_count;
+        }
+    }
+    if (pivot_count <= 0) {
+        debug_add_failure(state, "falling-pillar setup found no particles");
+        return false;
+    }
+    pivot = v_mul(pivot, 1.0f / (float)pivot_count);
+
+    const float angle = 0.0f;
+    const float cs = cosf(angle);
+    const float sn = sinf(angle);
+    const float angular_speed = 0.75f;
+    stamp = ++particle_sync_stamp;
+    if (stamp == 0) {
+        stamp = 1;
+        particle_sync_stamp = 1;
+    }
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (voxel->debugClusterTag != DEBUG_TEST_TAG) continue;
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            Particle *particle = voxel->particles[corner];
+            if (!particle || particle->sync_stamp == stamp) continue;
+            particle->sync_stamp = stamp;
+            Vector3 local = v_sub(particle->pos, pivot);
+            Vector3 rotated = {
+                cs * local.x - sn * local.y,
+                sn * local.x + cs * local.y,
+                local.z
+            };
+            particle->pos = v_add(pivot, rotated);
+            particle->prev_pos = particle->pos;
+            particle->predicted_pos = particle->pos;
+            particle->vel = (Vector3){
+                -angular_speed * rotated.y,
+                 angular_speed * rotated.x,
+                 0.0f
+            };
+        }
+        Vector3 center = { 0.0f, 0.0f, 0.0f };
+        Vector3 velocity = { 0.0f, 0.0f, 0.0f };
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            center = v_add(center, voxel->particles[corner]->pos);
+            velocity = v_add(velocity, voxel->particles[corner]->vel);
+        }
+        voxel->pos = v_mul(center, 1.0f / (float)VOXEL_CORNER_COUNT);
+        voxel->vel = v_mul(velocity, 1.0f / (float)VOXEL_CORNER_COUNT);
+        voxel->wake_timer = 0;
+    }
+    rebuild_voxel_hash();
+    state->activation_succeeded = true;
+    debug_set_initial_centroid(state);
+    debug_capture(state, "phase-01-elevated-rotated-pillar.png",
+                  "elevated-rotated-pillar", 0);
+    return true;
+}
+
 static bool debug_setup_tether_throw_floating(DebugRunState *state)
 {
     debug_reset_world();
@@ -1349,6 +1453,21 @@ static void debug_validate_step(DebugRunState *state, int step)
 {
     debug_validate_all_sim_particles(state, step);
     DebugSample sample = debug_collect_sample("validation", step, state->initial_centroid_y);
+    if (state->falling_pillar_test && step > RECYCLE_DYNAMIC_MAX_FRAMES) {
+        int tagged_total = sample.tagged_dynamic + sample.tagged_static;
+        if (sample.tagged_static != 0 || tagged_total != state->expected_voxels) {
+            debug_add_failure(state,
+                              "step %d: falling pillar lifetime conversion snapped/lost voxels dynamic=%d static=%d total=%d/%d",
+                              step, sample.tagged_dynamic, sample.tagged_static,
+                              tagged_total, state->expected_voxels);
+        }
+        if (step == RECYCLE_DYNAMIC_MAX_FRAMES + 1 &&
+            sample.tagged_sleeping != state->expected_voxels) {
+            debug_add_failure(state,
+                              "step %d: lifetime pipeline slept %d/%d pillar voxels",
+                              step, sample.tagged_sleeping, state->expected_voxels);
+        }
+    }
     if (state->recycle_test) {
         if (sample.tagged_dynamic != 0 || sample.tagged_static != 0 ||
             sample.tagged_sleeping != 0) {

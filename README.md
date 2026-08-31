@@ -324,6 +324,8 @@ Available scenarios are:
   activates it through the tether path.
 * `sleep-recycle`: ages a sleeping dynamic island into the delayed restoration queue and
   verifies that the complete island is removed atomically.
+* `falling-pillar-sleep`: tips a 90-voxel pillar, lets it bend and settle, then runs past
+  the legacy 10-second dynamic lifetime boundary to catch pose-snapping conversions.
 * `tether-throw-floating`: sleeps a supported cluster, removes its support, then releases
   a tether-held voxel toward it through the same proximity-activation path used by gameplay.
 * `overhang-impact`: drops an ordinary active voxel onto the unsupported end of a static

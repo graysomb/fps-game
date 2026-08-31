@@ -611,6 +611,12 @@ static unsigned char glueClusterVisited[MAX_VOXELS];
 static unsigned char sleepClusterVisited[MAX_VOXELS];
 static unsigned char recycleSleepVisited[MAX_VOXELS];
 static unsigned char recycleSleepReady[MAX_VOXELS];
+static int recycleLifetimeParent[MAX_VOXELS];
+static int recycleLifetimeHead[MAX_VOXELS];
+static int recycleLifetimeNext[MAX_VOXELS];
+static int recycleLifetimeParticleVoxel[MAX_PARTICLES];
+static unsigned char recycleLifetimeExpired[MAX_VOXELS];
+static unsigned char recycleLifetimeSupported[MAX_VOXELS];
 static unsigned char voxelCalmFlags[MAX_VOXELS];
 static _Atomic unsigned char activationClaims[MAX_VOXELS];
 static bool dynamicGlueClustersInitialized = false;
@@ -644,6 +650,9 @@ static void build_glue_cluster_ids(int *out_cluster_id);
 static void rebuild_particle_collision_metadata(void);
 static int gather_glued_neighbors(int voxel_idx, int *out, int max_out);
 static int gather_glued_neighbors_symmetric(int voxel_idx, int *out, int max_out);
+static bool voxel_connected_to_static_world(const Voxel *voxel);
+static bool glue_cluster_has_static_support(const int *cluster, int cluster_count);
+static bool freeze_dynamic_cluster_in_place(const int *cluster, int cluster_count);
 static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count);
 static void solve_static_collisions(float dt);
 static void solve_dynamic_collisions(float dt);
@@ -4680,6 +4689,114 @@ static bool recycle_sleeping_voxel_islands(void)
     return true;
 }
 
+static int recycle_lifetime_find_root(int voxel_idx)
+{
+    int root = voxel_idx;
+    while (root >= 0 && root < voxel_count &&
+           recycleLifetimeParent[root] != root) {
+        root = recycleLifetimeParent[root];
+    }
+    while (voxel_idx >= 0 && voxel_idx < voxel_count &&
+           recycleLifetimeParent[voxel_idx] != voxel_idx) {
+        int next = recycleLifetimeParent[voxel_idx];
+        recycleLifetimeParent[voxel_idx] = root;
+        voxel_idx = next;
+    }
+    return root;
+}
+
+static void recycle_lifetime_union(int a, int b)
+{
+    int root_a = recycle_lifetime_find_root(a);
+    int root_b = recycle_lifetime_find_root(b);
+    if (root_a < 0 || root_b < 0 || root_a == root_b) return;
+    if (root_a < root_b) recycleLifetimeParent[root_b] = root_a;
+    else recycleLifetimeParent[root_a] = root_b;
+}
+
+static bool freeze_lifetime_expired_islands(void)
+{
+    if (voxel_count <= 0) return false;
+    size_t voxel_bytes = (size_t)voxel_count;
+    memset(recycleLifetimeHead, 0xff, voxel_bytes * sizeof(int));
+    memset(recycleLifetimeNext, 0xff, voxel_bytes * sizeof(int));
+    memset(recycleLifetimeExpired, 1, voxel_bytes);
+    memset(recycleLifetimeSupported, 0, voxel_bytes);
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        recycleLifetimeParent[i] =
+            (voxel_is_awake_dynamic(voxel) && voxel->type == 0 && !voxel->isBullet)
+            ? i : -1;
+    }
+
+    size_t particle_count = particle_pool_count > 0 ? (size_t)particle_pool_count : 0;
+    if (particle_count > MAX_PARTICLES) particle_count = MAX_PARTICLES;
+    memset(recycleLifetimeParticleVoxel, 0xff, particle_count * sizeof(int));
+
+    // Unit voxels are physically connected by shared corner particles even
+    // when their grid coordinates no longer line up after a large rotation.
+    for (int i = 0; i < voxel_count; ++i) {
+        if (recycleLifetimeParent[i] < 0) continue;
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            Particle *particle = voxels[i].particles[corner];
+            ptrdiff_t pool_id = particle ? particle - particles_pool : -1;
+            if (pool_id < 0 || (size_t)pool_id >= particle_count) continue;
+            int previous = recycleLifetimeParticleVoxel[pool_id];
+            if (previous >= 0) recycle_lifetime_union(i, previous);
+            else recycleLifetimeParticleVoxel[pool_id] = i;
+        }
+    }
+
+    // Mixed-resolution joins may use explicit glue constraints rather than
+    // shared particle pointers, so union those into the same physical graph.
+    for (int g = 0; g < glueConstraintCount; ++g) {
+        GlueConstraint *constraint = &glueConstraints[g];
+        int a = constraint->coarseVoxel;
+        int b = constraint->fineVoxel;
+        if (!constraint->active || a < 0 || b < 0 ||
+            a >= voxel_count || b >= voxel_count ||
+            recycleLifetimeParent[a] < 0 || recycleLifetimeParent[b] < 0) {
+            continue;
+        }
+        recycle_lifetime_union(a, b);
+    }
+
+    for (int i = 0; i < voxel_count; ++i) {
+        if (recycleLifetimeParent[i] < 0) continue;
+        int root = recycle_lifetime_find_root(i);
+        if (voxels[i].lifeFrames <= RECYCLE_DYNAMIC_MAX_FRAMES) {
+            recycleLifetimeExpired[root] = 0;
+        }
+        if (voxel_connected_to_static_world(&voxels[i])) {
+            recycleLifetimeSupported[root] = 1;
+        }
+        recycleLifetimeNext[i] = recycleLifetimeHead[root];
+        recycleLifetimeHead[root] = i;
+    }
+
+    bool changed = false;
+    for (int root = 0; root < voxel_count; ++root) {
+        if (recycleLifetimeParent[root] != root ||
+            !recycleLifetimeExpired[root] || !recycleLifetimeSupported[root]) {
+            continue;
+        }
+        int count = 0;
+        for (int idx = recycleLifetimeHead[root]; idx >= 0;
+             idx = recycleLifetimeNext[idx]) {
+            if (count < MAX_VOXELS) glueClusterIndices[count++] = idx;
+        }
+        if (count > 0 && freeze_dynamic_cluster_in_place(glueClusterIndices, count)) {
+            changed = true;
+            if (debugLogVoxelRecycle) {
+                TraceLog(LOG_INFO,
+                         "[Recycle] lifetime->sleep island_start=%d count=%d",
+                         root, count);
+            }
+        }
+    }
+    return changed;
+}
+
 static void recycle_dead_voxels(void) {
     recycleFrameCounter++;
     bool changed = false;
@@ -4695,8 +4812,10 @@ static void recycle_dead_voxels(void) {
             has_sleeping_voxels = true;
             continue;
         }
-        if (voxel->lifeFrames > RECYCLE_DYNAMIC_MAX_FRAMES ||
-            voxel_outside_world_bounds(voxel))
+        // Out-of-world cleanup remains immediate. Lifetime expiry is handled
+        // component-wise below through the same in-place sleep pipeline used by
+        // calm structures, never through per-voxel grid conversion.
+        if (voxel_outside_world_bounds(voxel))
         {
             if (debugLogVoxelRecycle) {
                 TraceLog(LOG_INFO,
@@ -4713,6 +4832,11 @@ static void recycle_dead_voxels(void) {
             changed = true;
             --i;
         }
+    }
+
+    if (freeze_lifetime_expired_islands()) {
+        has_sleeping_voxels = true;
+        changed = true;
     }
 
     if (has_sleeping_voxels && recycle_sleeping_voxel_islands()) {
@@ -5215,7 +5339,10 @@ static bool voxel_connected_to_static_world(const Voxel *voxel)
     VoxelWorldBounds bounds;
     voxel_particle_world_bounds(voxel, &bounds);
     float contact_miny = bounds.miny;
-    if (contact_miny <= STATIC_SUPPORT_GROUND_EPS) {
+    // Particle positions are sphere centers. Static floor collision leaves the
+    // lowest centers one particle radius above y=0, so include that radius when
+    // deciding whether the voxel has ground support.
+    if (contact_miny <= STATIC_SUPPORT_GROUND_EPS + voxel_particle_radius(voxel)) {
         return true;
     }
 
