@@ -12,3 +12,4 @@ Flamegraph/
 fps_ray.log
 .build/
 artifacts/
+debug-artifacts/

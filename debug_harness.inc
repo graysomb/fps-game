@@ -33,6 +33,7 @@ typedef struct DebugSample {
     int tagged_voxels;
     int tagged_dynamic;
     int tagged_static;
+    int tagged_sleeping;
     int sim_particles;
     int zero_mass_corners;
     int invalid_particle_refs;
@@ -63,10 +64,14 @@ typedef struct DebugRunState {
     bool drop_sampled;
     bool delayed_activation;
     bool overhang_impact;
+    bool recycle_test;
+    bool recycle_succeeded;
     bool overhang_anchor_observed;
     bool overhang_deflection_sampled;
     bool gpu_readback_performed;
     int activation_step;
+    int recycle_queue_before;
+    int recycle_queue_after;
     float initial_centroid_y;
     float drop_at_step_60;
     float overhang_initial_root_y;
@@ -106,6 +111,7 @@ static DebugRunConfig debugRunConfig = {
 static bool debug_setup_dynamic_freefall(DebugRunState *state);
 static bool debug_setup_activation_floating(DebugRunState *state);
 static bool debug_setup_sleep_wake_floating(DebugRunState *state);
+static bool debug_setup_sleep_recycle(DebugRunState *state);
 static bool debug_setup_tether_throw_floating(DebugRunState *state);
 static bool debug_setup_overhang_impact(DebugRunState *state);
 
@@ -113,6 +119,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall },
     { "activation-floating", "Static cluster activated while unsupported", debug_setup_activation_floating },
     { "sleep-wake-floating", "Supported cluster sleeps, loses support, then activates", debug_setup_sleep_wake_floating },
+    { "sleep-recycle", "Sleeping dynamic island enters delayed restoration atomically", debug_setup_sleep_recycle },
     { "tether-throw-floating", "Released tether voxel wakes an unsupported sleeping cluster", debug_setup_tether_throw_floating },
     { "overhang-impact", "Falling dynamic voxel activates and bends a supported static overhang", debug_setup_overhang_impact }
 };
@@ -363,6 +370,79 @@ static int debug_count_tagged(int tag, int simulate_filter)
     return count;
 }
 
+static int debug_count_tagged_sleeping(int tag)
+{
+    int count = 0;
+    for (int i = 0; i < voxel_count; ++i) {
+        if (voxels[i].debugClusterTag == tag && voxels[i].simulate && voxels[i].sleeping) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+static void debug_transform_tagged_cluster_off_grid(int tag)
+{
+    Vector3 pivot = { 0.0f, 0.0f, 0.0f };
+    int pivot_count = 0;
+    int stamp = ++particle_sync_stamp;
+    if (stamp == 0) {
+        stamp = 1;
+        particle_sync_stamp = 1;
+    }
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (voxel->debugClusterTag != tag || !voxel->simulate) continue;
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            Particle *particle = voxel->particles[corner];
+            if (!particle || particle->sync_stamp == stamp) continue;
+            particle->sync_stamp = stamp;
+            pivot = v_add(pivot, particle->pos);
+            ++pivot_count;
+        }
+    }
+    if (pivot_count <= 0) return;
+    pivot = v_mul(pivot, 1.0f / (float)pivot_count);
+
+    // Keep the current grid-derived glue graph connected while still proving
+    // that the sleep transition preserves a genuinely non-grid pose.
+    const float angle = 3.0f * DEG2RAD;
+    const float cs = cosf(angle);
+    const float sn = sinf(angle);
+    const Vector3 offset = { VOXEL_SIZE * 0.18f, 0.0f, VOXEL_SIZE * 0.13f };
+    stamp = ++particle_sync_stamp;
+    if (stamp == 0) {
+        stamp = 1;
+        particle_sync_stamp = 1;
+    }
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (voxel->debugClusterTag != tag || !voxel->simulate) continue;
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            Particle *particle = voxel->particles[corner];
+            if (!particle || particle->sync_stamp == stamp) continue;
+            particle->sync_stamp = stamp;
+            Vector3 local = v_sub(particle->pos, pivot);
+            Vector3 rotated = {
+                cs * local.x - sn * local.z,
+                local.y,
+                sn * local.x + cs * local.z
+            };
+            particle->pos = v_add(v_add(pivot, rotated), offset);
+            particle->prev_pos = particle->pos;
+            particle->predicted_pos = particle->pos;
+            particle->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+        }
+        Vector3 center = { 0.0f, 0.0f, 0.0f };
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            center = v_add(center, voxel->particles[corner]->pos);
+        }
+        voxel->pos = v_mul(center, 1.0f / (float)VOXEL_CORNER_COUNT);
+        voxel->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+    }
+    rebuild_voxel_hash();
+}
+
 static void debug_track_tagged_cells(DebugRunState *state, int tag)
 {
     if (!state) return;
@@ -483,6 +563,7 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
         ++sample.tagged_voxels;
         if (voxel->simulate) ++sample.tagged_dynamic;
         else ++sample.tagged_static;
+        if (voxel->simulate && voxel->sleeping) ++sample.tagged_sleeping;
 
         Vector3 center = { 0.0f, 0.0f, 0.0f };
         int valid_corners = 0;
@@ -682,6 +763,10 @@ static void debug_validate_tagged_dynamic(DebugRunState *state, const DebugSampl
         debug_add_failure(state, "%s: tagged cluster is not fully dynamic (dynamic=%d static=%d)",
                           context, sample->tagged_dynamic, sample->tagged_static);
     }
+    if (sample->tagged_sleeping != 0) {
+        debug_add_failure(state, "%s: %d tagged voxels remain sleeping", context,
+                          sample->tagged_sleeping);
+    }
     if (sample->invalid_particle_refs > 0) {
         debug_add_failure(state, "%s: %d invalid particle or sim-index references",
                           context, sample->invalid_particle_refs);
@@ -880,6 +965,23 @@ static void debug_readback_gpu_buffers(DebugRunState *state, int step)
 
 static bool debug_activate_test_cluster(DebugRunState *state)
 {
+    int sleeping_seed = -1;
+    for (int i = 0; i < voxel_count; ++i) {
+        if (voxels[i].debugClusterTag == DEBUG_TEST_TAG &&
+            voxels[i].simulate && voxels[i].sleeping) {
+            sleeping_seed = i;
+            break;
+        }
+    }
+    if (sleeping_seed >= 0) {
+        bool activated = wake_sleeping_cluster_in_place(sleeping_seed);
+        state->activation_succeeded = activated;
+        if (!activated) {
+            debug_add_failure(state, "unable to wake sleeping test cluster in place");
+        }
+        return activated;
+    }
+
     int seed = debug_find_tagged_voxel(DEBUG_TEST_TAG, true);
     if (seed < 0) {
         debug_add_failure(state, "unable to find a static test-cluster seed for activation");
@@ -978,7 +1080,17 @@ static bool debug_setup_sleep_wake_floating(DebugRunState *state)
                           support_created, cluster_created, state->expected_voxels);
         return false;
     }
-    debug_capture(state, "phase-01-supported-dynamic.png", "supported-dynamic", 0);
+    debug_transform_tagged_cluster_off_grid(DEBUG_TEST_TAG);
+    debug_capture(state, "phase-01-supported-dynamic.png", "supported-off-grid-dynamic", 0);
+
+    Vector3 *positions_before_sleep = malloc((size_t)particle_pool_count * sizeof(*positions_before_sleep));
+    if (!positions_before_sleep) {
+        debug_add_failure(state, "unable to allocate no-snap pose snapshot");
+        return false;
+    }
+    for (int i = 0; i < particle_pool_count; ++i) {
+        positions_before_sleep[i] = particles_pool[i].pos;
+    }
 
     for (int i = 0; i < voxel_count; ++i) {
         if (voxels[i].debugClusterTag == DEBUG_TEST_TAG && voxels[i].simulate) {
@@ -989,12 +1101,31 @@ static bool debug_setup_sleep_wake_floating(DebugRunState *state)
     state->sleeping_conversion_succeeded = deactivate_sleeping_voxels();
     rebuild_static_hash_if_dirty();
     if (!state->sleeping_conversion_succeeded ||
-        debug_count_tagged(DEBUG_TEST_TAG, 0) != state->expected_voxels) {
-        debug_add_failure(state, "sleep conversion did not produce %d tagged static voxels",
+        debug_count_tagged_sleeping(DEBUG_TEST_TAG) != state->expected_voxels) {
+        debug_add_failure(state, "sleep conversion did not produce %d frozen dynamic voxels",
                           state->expected_voxels);
+        free(positions_before_sleep);
         return false;
     }
-    debug_capture(state, "phase-02-sleeping-static.png", "sleeping-static", 0);
+    float max_sleep_pose_delta = 0.0f;
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (voxel->debugClusterTag != DEBUG_TEST_TAG) continue;
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            Particle *particle = voxel->particles[corner];
+            ptrdiff_t pool_id = particle ? particle - particles_pool : -1;
+            if (pool_id < 0 || pool_id >= particle_pool_count) continue;
+            float delta = v_length(v_sub(particle->pos, positions_before_sleep[pool_id]));
+            if (delta > max_sleep_pose_delta) max_sleep_pose_delta = delta;
+        }
+    }
+    free(positions_before_sleep);
+    if (max_sleep_pose_delta > 1e-6f) {
+        debug_add_failure(state, "sleep transition changed the preserved pose by %.9g metres",
+                          (double)max_sleep_pose_delta);
+        return false;
+    }
+    debug_capture(state, "phase-02-sleeping-dynamic.png", "sleeping-dynamic", 0);
 
     state->support_removal_succeeded = debug_remove_tagged_voxels(DEBUG_SUPPORT_TAG);
     if (!state->support_removal_succeeded || debug_count_tagged(DEBUG_SUPPORT_TAG, -1) != 0) {
@@ -1005,6 +1136,61 @@ static bool debug_setup_sleep_wake_floating(DebugRunState *state)
 
     if (!debug_activate_test_cluster(state)) return false;
     debug_set_initial_centroid(state);
+    return true;
+}
+
+static bool debug_setup_sleep_recycle(DebugRunState *state)
+{
+    debug_reset_world();
+    state->recycle_test = true;
+    int support_created = debug_add_support_column();
+    debug_rebuild_world_state();
+    int cluster_created = debug_add_test_cluster(true);
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_rebuild_world_state();
+
+    if (support_created != 12 || cluster_created != state->expected_voxels) {
+        debug_add_failure(state, "sleep-recycle setup created support=%d/12 cluster=%d/%d",
+                          support_created, cluster_created, state->expected_voxels);
+        return false;
+    }
+
+    debug_transform_tagged_cluster_off_grid(DEBUG_TEST_TAG);
+    for (int i = 0; i < voxel_count; ++i) {
+        if (voxels[i].debugClusterTag == DEBUG_TEST_TAG && voxels[i].simulate) {
+            voxels[i].sleepFrames = VOXEL_DEACTIVATION_FRAMES - 1;
+            set_voxel_velocity(&voxels[i], (Vector3){ 0.0f, 0.0f, 0.0f });
+        }
+    }
+    state->sleeping_conversion_succeeded = deactivate_sleeping_voxels();
+    if (!state->sleeping_conversion_succeeded ||
+        debug_count_tagged_sleeping(DEBUG_TEST_TAG) != state->expected_voxels) {
+        debug_add_failure(state, "sleep-recycle did not freeze %d dynamic voxels",
+                          state->expected_voxels);
+        return false;
+    }
+    debug_capture(state, "phase-01-sleeping-island.png", "sleeping-before-recycle", 0);
+
+    for (int i = 0; i < voxel_count; ++i) {
+        if (voxels[i].debugClusterTag == DEBUG_TEST_TAG && voxels[i].sleeping) {
+            voxels[i].lifeFrames = RECYCLE_DYNAMIC_MAX_FRAMES;
+        }
+    }
+    state->recycle_queue_before = recycleQueueCount;
+    recycle_dead_voxels();
+    state->recycle_queue_after = recycleQueueCount;
+    state->recycle_succeeded =
+        debug_count_tagged(DEBUG_TEST_TAG, -1) == 0 &&
+        (state->recycle_queue_after - state->recycle_queue_before) == state->expected_voxels;
+    if (!state->recycle_succeeded) {
+        debug_add_failure(state,
+                          "sleep-recycle left tagged=%d and queued=%d/%d snapshots",
+                          debug_count_tagged(DEBUG_TEST_TAG, -1),
+                          state->recycle_queue_after - state->recycle_queue_before,
+                          state->expected_voxels);
+        return false;
+    }
+    debug_capture(state, "phase-02-recycled-island.png", "after-atomic-recycle", 0);
     return true;
 }
 
@@ -1034,12 +1220,12 @@ static bool debug_setup_tether_throw_floating(DebugRunState *state)
     state->sleeping_conversion_succeeded = deactivate_sleeping_voxels();
     rebuild_static_hash_if_dirty();
     if (!state->sleeping_conversion_succeeded ||
-        debug_count_tagged(DEBUG_TEST_TAG, 0) != state->expected_voxels) {
-        debug_add_failure(state, "sleep conversion did not produce %d tagged static voxels",
+        debug_count_tagged_sleeping(DEBUG_TEST_TAG) != state->expected_voxels) {
+        debug_add_failure(state, "sleep conversion did not produce %d frozen dynamic voxels",
                           state->expected_voxels);
         return false;
     }
-    debug_capture(state, "phase-02-sleeping-static.png", "sleeping-static", 0);
+    debug_capture(state, "phase-02-sleeping-dynamic.png", "sleeping-dynamic", 0);
 
     state->support_removal_succeeded = debug_remove_tagged_voxels(DEBUG_SUPPORT_TAG);
     if (!state->support_removal_succeeded || debug_count_tagged(DEBUG_SUPPORT_TAG, -1) != 0) {
@@ -1150,6 +1336,7 @@ static void debug_physics_step(void)
 {
     activate_static_voxels_near_dynamic();
     prepare_tether_forces();
+    wake_sleeping_voxels_near_awake();
     rebuild_static_hash_if_dirty();
     simulate_voxel_pbd(PBD_MAX_STEP_DT);
     recycle_dead_voxels();
@@ -1162,9 +1349,19 @@ static void debug_validate_step(DebugRunState *state, int step)
 {
     debug_validate_all_sim_particles(state, step);
     DebugSample sample = debug_collect_sample("validation", step, state->initial_centroid_y);
+    if (state->recycle_test) {
+        if (sample.tagged_dynamic != 0 || sample.tagged_static != 0 ||
+            sample.tagged_sleeping != 0) {
+            debug_add_failure(state, "step %d: recycled sleeping island reappeared", step);
+        }
+        debug_validate_gpu_static_state(state, step);
+        debug_readback_gpu_buffers(state, step);
+        return;
+    }
     if (state->delayed_activation) {
         if (!state->activation_succeeded &&
-            sample.tagged_dynamic == state->expected_voxels && sample.tagged_static == 0) {
+            sample.tagged_dynamic == state->expected_voxels && sample.tagged_static == 0 &&
+            sample.tagged_sleeping == 0) {
             state->activation_succeeded = true;
             state->activation_step = step;
         }
@@ -1208,6 +1405,16 @@ static void debug_finalize_validation(DebugRunState *state)
                           physics_backend_name(physicsBackend.active),
                           physicsBackend.fallback_reason);
     }
+    if (state->recycle_test) {
+        if (!state->sleeping_conversion_succeeded || !state->recycle_succeeded) {
+            debug_add_failure(state, "sleeping island did not complete atomic recycling");
+        }
+        if ((state->recycle_queue_after - state->recycle_queue_before) !=
+            state->expected_voxels) {
+            debug_add_failure(state, "sleeping island restoration snapshots were not preserved");
+        }
+        return;
+    }
     if (!state->activation_succeeded) {
         debug_add_failure(state, "scenario did not complete its activation stage");
     }
@@ -1233,7 +1440,7 @@ static void debug_finalize_validation(DebugRunState *state)
     if (strcmp(debugRunConfig.scenario, "sleep-wake-floating") == 0 ||
         (state->delayed_activation && !state->overhang_impact)) {
         if (!state->sleeping_conversion_succeeded) {
-            debug_add_failure(state, "sleep-wake scenario never converted the cluster to static");
+            debug_add_failure(state, "sleep-wake scenario never froze the cluster in place");
         }
         if (!state->support_removal_succeeded) {
             debug_add_failure(state, "sleep-wake scenario never removed its support");
@@ -1334,14 +1541,14 @@ static bool debug_write_report(DebugRunState *state)
         debug_write_json_string(file, sample->phase);
         fprintf(file,
                 ", \"step\": %d, \"taggedVoxels\": %d, \"taggedDynamic\": %d,"
-                " \"taggedStatic\": %d, \"simParticles\": %d,"
+                " \"taggedStatic\": %d, \"taggedSleeping\": %d, \"simParticles\": %d,"
                 " \"zeroMassCorners\": %d, \"invalidParticleRefs\": %d,"
                 " \"staticGluedFaces\": %d, \"centroidY\": %.9g,"
                 " \"centroidDrop\": %.9g, \"minY\": %.9g, \"maxY\": %.9g,"
                 " \"meanVelocityY\": %.9g, \"staticHashGeneration\": %llu,"
                 " \"gpuStaticUploadedGeneration\": %llu, \"physicsStepMs\": %.9g}%s\n",
                 sample->step, sample->tagged_voxels, sample->tagged_dynamic,
-                sample->tagged_static, sample->sim_particles,
+                sample->tagged_static, sample->tagged_sleeping, sample->sim_particles,
                 sample->zero_mass_corners, sample->invalid_particle_refs,
                 sample->static_glued_faces, (double)sample->centroid_y,
                 (double)sample->centroid_drop, (double)sample->min_y,

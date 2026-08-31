@@ -589,7 +589,7 @@ void topologyRebuildSerial(uint gid) {
 void wakeGather(uint gid) {
     if (gid >= uint(uVoxelCount)) return;
     VoxelState v = voxel[gid];
-    if (v.flags.y != 0) return;
+    if (v.flags.x == 0 || v.flags.y != 0) return;
     bool wake = v.lifecycle.y != 0u;
     if (!wake) {
         for (int face = 0; face < 6; ++face) {

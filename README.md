@@ -322,6 +322,8 @@ Available scenarios are:
 * `activation-floating`: activates an unsupported static cluster through the tether path.
 * `sleep-wake-floating`: sleeps a supported dynamic cluster, removes its support, then
   activates it through the tether path.
+* `sleep-recycle`: ages a sleeping dynamic island into the delayed restoration queue and
+  verifies that the complete island is removed atomically.
 * `tether-throw-floating`: sleeps a supported cluster, removes its support, then releases
   a tether-held voxel toward it through the same proximity-activation path used by gameplay.
 * `overhang-impact`: drops an ordinary active voxel onto the unsupported end of a static

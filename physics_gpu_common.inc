@@ -403,7 +403,9 @@ static bool gpu_pack_world(void) {
         g->pos_rest_edge[0] = v->pos.x; g->pos_rest_edge[1] = v->pos.y; g->pos_rest_edge[2] = v->pos.z; g->pos_rest_edge[3] = v->rest_edge;
         g->velocity_rest_volume[0] = v->vel.x; g->velocity_rest_volume[1] = v->vel.y;
         g->velocity_rest_volume[2] = v->vel.z; g->velocity_rest_volume[3] = v->rest_volume;
-        g->flags[0] = 1; g->flags[1] = v->isBullet ? 1 : 0;
+        // flags.x means awake dynamic. Sleeping dynamics remain packed as
+        // zero-mass collision anchors but skip voxel-level simulation kernels.
+        g->flags[0] = v->sleeping ? 0 : 1; g->flags[1] = v->isBullet ? 1 : 0;
         g->flags[2] = v->type; g->flags[3] = v->simulate_dofs ? 1 : 0;
         VoxelWorldBounds bounds;
         voxel_world_bounds(v, &bounds);
@@ -841,7 +843,8 @@ static bool gpu_resident_matches_cpu(void) {
         if (world_id < 0 || world_id >= voxel_count || !voxels[world_id].simulate) return false;
         Voxel *v = &voxels[world_id];
         GpuVoxelState *g = &gpuPhysics.voxel_stage[i];
-        if (v->type != g->flags[2] || (v->isBullet ? 1 : 0) != g->flags[1] ||
+        if ((v->sleeping ? 0 : 1) != g->flags[0] ||
+            v->type != g->flags[2] || (v->isBullet ? 1 : 0) != g->flags[1] ||
             (v->simulate_dofs ? 1 : 0) != g->flags[3]) return false;
         uint32_t glue_mask = gpu_glued_face_mask(v);
         if ((g->lifecycle[2] & 0x3fu) != glue_mask) return false;

@@ -529,6 +529,9 @@ typedef struct {
     Vector3 pos;
     Vector3 vel;
     bool simulate;
+    // Dynamic voxels have a separate sleep state.  Sleeping voxels retain their
+    // exact particle-space transform instead of being rebuilt on the world grid.
+    bool sleeping;
     bool fixed;
     bool glueEligible;
     bool pendingActivation;
@@ -588,6 +591,11 @@ static int free_particle_indices[MAX_PARTICLES];
 static int free_particle_count = 0;
 static int particle_sync_stamp = 1;
 static bool collisionTopologyDirty = true;
+
+static inline bool voxel_is_awake_dynamic(const Voxel *voxel)
+{
+    return voxel && voxel->simulate && !voxel->sleeping;
+}
 static int collisionVoxelClusterIds[MAX_VOXELS];
 static int particleHashActiveSize = 1024;
 static int tether_apply_stamp = 1;
@@ -601,6 +609,8 @@ static int pairCorrectionScratchSlots = 0;
 static int glueClusterIndices[MAX_VOXELS];
 static unsigned char glueClusterVisited[MAX_VOXELS];
 static unsigned char sleepClusterVisited[MAX_VOXELS];
+static unsigned char recycleSleepVisited[MAX_VOXELS];
+static unsigned char recycleSleepReady[MAX_VOXELS];
 static unsigned char voxelCalmFlags[MAX_VOXELS];
 static _Atomic unsigned char activationClaims[MAX_VOXELS];
 static bool dynamicGlueClustersInitialized = false;
@@ -3630,6 +3640,7 @@ static bool init_voxel_struct(Voxel *v,
     v->vel = (Vector3){ 0,0,0 };
     v->fixed = fixed;
     v->simulate = simulate;
+    v->sleeping = false;
     v->glueEligible = simulate;
     v->pendingActivation = false;
     v->isBullet = false;
@@ -4196,7 +4207,7 @@ static void activate_static_worker(int start, int end, int worker_id, void *user
             break;
         }
         Voxel *dynamic = &voxels[i];
-        if (!dynamic->simulate || dynamic->type == 1 || dynamic->type == 2) {
+        if (!voxel_is_awake_dynamic(dynamic) || dynamic->type == 1 || dynamic->type == 2) {
             continue;
         }
         if (dynamic->isBullet) {
@@ -4554,9 +4565,125 @@ static bool spawn_static_at_rest(const Voxel *snapshot) {
     return true;
 }
 
+// Sleeping voxels retain their deformed particle positions, so recycling them
+// one at a time would tear a connected island apart and could leave shared
+// particles behind.  Select complete sleeping islands first, reserve all of
+// their restoration queue entries, then enqueue and remove them atomically.
+static bool recycle_sleeping_voxel_islands(void)
+{
+    size_t recycle_bytes = voxel_count > 0 ? (size_t)voxel_count : 0;
+    if (recycle_bytes > sizeof(recycleSleepVisited)) {
+        recycle_bytes = sizeof(recycleSleepVisited);
+    }
+    memset(recycleSleepVisited, 0, recycle_bytes);
+    memset(recycleSleepReady, 0, recycle_bytes);
+
+    int reserved_restore_slots = 0;
+    int ready_islands = 0;
+    int ready_voxels = 0;
+
+    for (int start = 0; start < voxel_count; ++start) {
+        if (recycleSleepVisited[start] ||
+            !voxels[start].simulate || !voxels[start].sleeping) {
+            continue;
+        }
+
+        int head = 0;
+        int tail = 0;
+        int restore_count = 0;
+        bool all_expired = true;
+        bool any_outside = false;
+        glueClusterIndices[tail++] = start;
+        recycleSleepVisited[start] = 1;
+
+        while (head < tail) {
+            int idx = glueClusterIndices[head++];
+            Voxel *voxel = &voxels[idx];
+            if (voxel->owner == -1) {
+                ++restore_count;
+            }
+            if (voxel->lifeFrames <= RECYCLE_DYNAMIC_MAX_FRAMES) {
+                all_expired = false;
+            }
+            if (voxel_outside_world_bounds(voxel)) {
+                any_outside = true;
+            }
+
+            int neighbors[MAX_FACE_NEIGHBORS];
+            int neighbor_count = gather_glued_neighbors_symmetric(
+                idx, neighbors, MAX_FACE_NEIGHBORS);
+            for (int n = 0; n < neighbor_count; ++n) {
+                int neighbor = neighbors[n];
+                if (neighbor < 0 || neighbor >= voxel_count ||
+                    recycleSleepVisited[neighbor] ||
+                    !voxels[neighbor].simulate || !voxels[neighbor].sleeping) {
+                    continue;
+                }
+                recycleSleepVisited[neighbor] = 1;
+                if (tail < MAX_VOXELS) {
+                    glueClusterIndices[tail++] = neighbor;
+                }
+            }
+        }
+
+        if (!all_expired && !any_outside) {
+            continue;
+        }
+
+        // Do not partially recycle an island when the delayed restoration
+        // queue cannot hold every original-world voxel in it.
+        if (recycleQueueCount + reserved_restore_slots + restore_count > MAX_VOXELS) {
+            if (debugLogVoxelRecycle) {
+                TraceLog(LOG_WARNING,
+                         "[Recycle] sleeping-island deferred count=%d restore=%d queue=%d",
+                         tail, restore_count, recycleQueueCount);
+            }
+            continue;
+        }
+
+        for (int c = 0; c < tail; ++c) {
+            recycleSleepReady[glueClusterIndices[c]] = 1;
+        }
+        reserved_restore_slots += restore_count;
+        ready_voxels += tail;
+        ++ready_islands;
+    }
+
+    if (ready_voxels <= 0) {
+        return false;
+    }
+
+    // Queue snapshots while every voxel index still refers to the selected
+    // island.  The capacity check above makes these pushes deterministic.
+    for (int i = 0; i < voxel_count; ++i) {
+        if (recycleSleepReady[i] && voxels[i].owner == -1) {
+            if (!recycle_queue_push(&voxels[i])) {
+                TraceLog(LOG_ERROR,
+                         "[Recycle] sleeping-island queue reservation failed unexpectedly");
+                return false;
+            }
+        }
+    }
+
+    // Descending removal keeps all not-yet-removed selected indices stable.
+    for (int i = voxel_count - 1; i >= 0; --i) {
+        if (recycleSleepReady[i]) {
+            remove_voxel_index(i);
+        }
+    }
+
+    if (debugLogVoxelRecycle) {
+        TraceLog(LOG_INFO,
+                 "[Recycle] sleeping-islands=%d voxels=%d restore=%d queue=%d",
+                 ready_islands, ready_voxels, reserved_restore_slots, recycleQueueCount);
+    }
+    return true;
+}
+
 static void recycle_dead_voxels(void) {
     recycleFrameCounter++;
     bool changed = false;
+    bool has_sleeping_voxels = false;
 
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
@@ -4564,6 +4691,10 @@ static void recycle_dead_voxels(void) {
             continue;
         }
         voxel->lifeFrames++;
+        if (voxel->sleeping) {
+            has_sleeping_voxels = true;
+            continue;
+        }
         if (voxel->lifeFrames > RECYCLE_DYNAMIC_MAX_FRAMES ||
             voxel_outside_world_bounds(voxel))
         {
@@ -4582,6 +4713,10 @@ static void recycle_dead_voxels(void) {
             changed = true;
             --i;
         }
+    }
+
+    if (has_sleeping_voxels && recycle_sleeping_voxel_islands()) {
+        changed = true;
     }
 
     for (int i = 0; i < voxel_count; ++i) {
@@ -5153,6 +5288,162 @@ static bool glue_cluster_has_static_support(const int *cluster, int cluster_coun
     return false;
 }
 
+static bool freeze_dynamic_cluster_in_place(const int *cluster, int cluster_count)
+{
+    if (!cluster || cluster_count <= 0) {
+        return false;
+    }
+
+    memset(sleepClusterVisited, 0, sizeof(unsigned char) * (size_t)voxel_count);
+    int membership_stamp = ++particle_sync_stamp;
+    if (membership_stamp == 0) {
+        membership_stamp = 1;
+        particle_sync_stamp = 1;
+    }
+
+    for (int i = 0; i < cluster_count; ++i) {
+        int idx = cluster[i];
+        if (idx < 0 || idx >= voxel_count || !voxel_is_awake_dynamic(&voxels[idx])) {
+            return false;
+        }
+        sleepClusterVisited[idx] = 1;
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            Particle *particle = voxels[idx].particles[corner];
+            if (particle) particle->sync_stamp = membership_stamp;
+        }
+    }
+
+    // Never turn a particle shared with an awake voxel outside this island into
+    // an anchor.  This should be rare, but protects partially rebuilt glue graphs.
+    for (int i = 0; i < voxel_count; ++i) {
+        if (sleepClusterVisited[i] || !voxel_is_awake_dynamic(&voxels[i])) continue;
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            Particle *particle = voxels[i].particles[corner];
+            if (particle && particle->sync_stamp == membership_stamp) {
+                return false;
+            }
+        }
+    }
+
+    int frozen_stamp = ++particle_sync_stamp;
+    if (frozen_stamp == 0) {
+        frozen_stamp = 1;
+        particle_sync_stamp = 1;
+    }
+    for (int i = 0; i < cluster_count; ++i) {
+        Voxel *voxel = &voxels[cluster[i]];
+        voxel->sleeping = true;
+        voxel->sleepFrames = VOXEL_DEACTIVATION_FRAMES;
+        voxel->wake_source = false;
+        voxel->wake_timer = 0;
+        voxel->break_mask = 0;
+        voxel->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+        voxel->lifeFrames = 0;
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            Particle *particle = voxel->particles[corner];
+            if (!particle || particle->sync_stamp == frozen_stamp) continue;
+            particle->sync_stamp = frozen_stamp;
+            particle->prev_pos = particle->pos;
+            particle->predicted_pos = particle->pos;
+            particle->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+            particle->inv_mass = 0.0f;
+        }
+    }
+    collisionTopologyDirty = true;
+    return true;
+}
+
+static bool wake_sleeping_cluster_in_place(int start_idx)
+{
+    if (start_idx < 0 || start_idx >= voxel_count ||
+        !voxels[start_idx].simulate || !voxels[start_idx].sleeping) {
+        return false;
+    }
+
+    int cluster_count = build_glue_cluster_indices(start_idx, glueClusterIndices);
+    if (cluster_count <= 0) {
+        glueClusterIndices[0] = start_idx;
+        cluster_count = 1;
+    }
+
+    int wake_stamp = ++particle_sync_stamp;
+    if (wake_stamp == 0) {
+        wake_stamp = 1;
+        particle_sync_stamp = 1;
+    }
+    bool woke = false;
+    for (int i = 0; i < cluster_count; ++i) {
+        int idx = glueClusterIndices[i];
+        if (idx < 0 || idx >= voxel_count) continue;
+        Voxel *voxel = &voxels[idx];
+        if (!voxel->simulate || !voxel->sleeping) continue;
+        voxel->sleeping = false;
+        voxel->sleepFrames = 0;
+        voxel->wake_timer = COARSENING_WAKE_FRAMES;
+        voxel->wake_source = false;
+        voxel->break_mask = 0;
+        voxel->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+        voxel->lifeFrames = 0;
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            Particle *particle = voxel->particles[corner];
+            if (!particle || particle->sync_stamp == wake_stamp) continue;
+            particle->sync_stamp = wake_stamp;
+            particle->prev_pos = particle->pos;
+            particle->predicted_pos = particle->pos;
+            particle->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+            particle->inv_mass = particle->base_inv_mass;
+        }
+        woke = true;
+    }
+    if (woke) collisionTopologyDirty = true;
+    return woke;
+}
+
+static bool voxel_bounds_within_margin(const Voxel *a, const Voxel *b, float margin)
+{
+    VoxelWorldBounds aa, bb;
+    voxel_particle_world_bounds(a, &aa);
+    voxel_particle_world_bounds(b, &bb);
+    return aa.maxx + margin >= bb.minx && bb.maxx + margin >= aa.minx &&
+           aa.maxy + margin >= bb.miny && bb.maxy + margin >= aa.miny &&
+           aa.maxz + margin >= bb.minz && bb.maxz + margin >= aa.minz;
+}
+
+static bool wake_sleeping_voxels_near_awake(void)
+{
+    bool changed = false;
+    const float contact_margin = VOXEL_SIZE * 0.15f;
+    const float wake_speed = VOXEL_DEACTIVATION_VELOCITY_THRESHOLD * 0.25f;
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *sleeper = &voxels[i];
+        if (!sleeper->simulate || !sleeper->sleeping) continue;
+
+        bool should_wake = false;
+        for (int dz = -2; dz <= 2 && !should_wake; ++dz) {
+            for (int dy = -2; dy <= 2 && !should_wake; ++dy) {
+                for (int dx = -2; dx <= 2; ++dx) {
+                    int other_idx = table_get(sleeper->gx + dx,
+                                              sleeper->gy + dy,
+                                              sleeper->gz + dz);
+                    if (other_idx < 0 || other_idx >= voxel_count || other_idx == i) continue;
+                    Voxel *other = &voxels[other_idx];
+                    if (!voxel_is_awake_dynamic(other)) continue;
+                    bool energetic = other->isBullet || other->wasTethered ||
+                                     v_length(other->vel) >= wake_speed;
+                    if (energetic && voxel_bounds_within_margin(sleeper, other, contact_margin)) {
+                        should_wake = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (should_wake && wake_sleeping_cluster_in_place(i)) {
+            changed = true;
+        }
+    }
+    return changed;
+}
+
 
 static void keep_cluster_awake(const int *cluster, int cluster_count)
 {
@@ -5180,7 +5471,11 @@ static void evaluate_voxel_calm_range(int start, int end, int worker_id, void *u
     (void)user;
     for (int i = start; i < end; ++i) {
         Voxel *voxel = &voxels[i];
-        if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
+        if (voxel->simulate && voxel->sleeping) {
+            voxelCalmFlags[i] = 0;
+            continue;
+        }
+        if (!voxel_is_awake_dynamic(voxel) || voxel->type != 0 || voxel->isBullet) {
             voxel->sleepFrames = 0;
             voxelCalmFlags[i] = 0;
             continue;
@@ -5208,7 +5503,7 @@ static bool deactivate_sleeping_voxels(void)
     memset(sleepClusterVisited, 0, sizeof(sleepClusterVisited));
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
-        if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
+        if (!voxel_is_awake_dynamic(voxel) || voxel->type != 0 || voxel->isBullet) {
             continue;
         }
         if (sleepClusterVisited[i]) {
@@ -5266,7 +5561,7 @@ static bool deactivate_sleeping_voxels(void)
     int idx = 0;
     while (idx < voxel_count && remaining_budget > 0) {
         Voxel *voxel = &voxels[idx];
-        if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
+        if (!voxel_is_awake_dynamic(voxel) || voxel->type != 0 || voxel->isBullet) {
             ++idx;
             continue;
         }
@@ -5319,7 +5614,7 @@ static bool deactivate_sleeping_voxels(void)
                 break;
             }
             Voxel *member = &voxels[cidx];
-            if (!member->simulate || member->type != 0 || member->isBullet ||
+            if (!voxel_is_awake_dynamic(member) || member->type != 0 || member->isBullet ||
                 member->sleepFrames < VOXEL_DEACTIVATION_FRAMES) {
                 cluster_ready = false;
                 break;
@@ -5338,14 +5633,14 @@ static bool deactivate_sleeping_voxels(void)
             continue;
         }
 
-        if (!restore_glue_cluster_to_static(glueClusterIndices, cluster_count)) {
+        if (!freeze_dynamic_cluster_in_place(glueClusterIndices, cluster_count)) {
             ++idx;
             continue;
         }
 
         if (debugLogVoxelDeactivation) {
             TraceLog(LOG_INFO,
-                     "[Deactivate] restored cluster starting=%d count=%d remaining_budget_before=%d",
+                     "[Deactivate] froze cluster in place starting=%d count=%d remaining_budget_before=%d",
                      idx, cluster_count, remaining_budget);
         }
         remaining_budget -= cluster_count;
@@ -5356,13 +5651,6 @@ static bool deactivate_sleeping_voxels(void)
         continue;
     }
 
-    if (changed) {
-        rebuild_voxel_hash();
-        rebuild_all_voxel_surfaces();
-        rebuild_glue_constraints();
-        refresh_static_voxel_beliefs();
-        meshDirty = true;
-    }
     return changed;
 }
 
@@ -7807,6 +8095,9 @@ static void update_projectiles(float dt)
         int hit_id = first_voxel_hit(ray, distance, i);
         if (hit_id >= 0 && hit_id < voxel_count) {
             play_sfx(SFX_IMPACT);
+            if (voxels[hit_id].simulate && voxels[hit_id].sleeping) {
+                wake_sleeping_cluster_in_place(hit_id);
+            }
             
             // Bullet vs Static Voxel
             if (v->isBullet && !voxels[hit_id].simulate) {
@@ -8015,7 +8306,7 @@ static void handle_pbd_projectile_hits(void)
     int i = 0;
     while (i < voxel_count) {
         Voxel *v = &voxels[i];
-        if (!v->simulate) {
+        if (!v->simulate || v->sleeping) {
             ++i;
             continue;
         }
@@ -8224,7 +8515,7 @@ static void update_wake_timers_range(int start, int end, int worker_id, void *us
     (void)user;
     for (int i = start; i < end; ++i) {
         Voxel *v = &voxels[i];
-        if (!v->simulate || v->isBullet) {
+        if (!voxel_is_awake_dynamic(v) || v->isBullet) {
             continue;
         }
 
@@ -8432,6 +8723,7 @@ static void gather_voxel_break_masks_range(int start, int end, int worker_id, vo
     (void)user;
     for (int i = start; i < end; ++i) {
         Voxel *voxel = &voxels[i];
+        if (!voxel_is_awake_dynamic(voxel)) continue;
         gather_voxel_break_masks(voxel);
     }
 }
@@ -8482,7 +8774,7 @@ static void integrate_particles(float dt) {
 
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
-        if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
+        if (!voxel_is_awake_dynamic(voxel) || voxel->type != 0 || voxel->isBullet) {
             continue;
         }
         if (tetherTag[i] <= 0) {
@@ -9079,7 +9371,7 @@ static void gather_voxel_shape_constraints_range(int start, int end, int worker_
     (void)user;
     for (int i = start; i < end; ++i) {
         Voxel *voxel = &voxels[i];
-        if (!voxel->simulate || voxel->isBullet || voxel->type != 0) {
+        if (!voxel_is_awake_dynamic(voxel) || voxel->isBullet || voxel->type != 0) {
             continue;
         }
         gather_voxel_shape_constraints(voxel);
@@ -10357,7 +10649,7 @@ static void update_voxel_velocity_range(int start, int end, int worker_id, void 
     VelocityUpdateJob *job = (VelocityUpdateJob *)user;
     for (int i = start; i < end; ++i) {
         Voxel *voxel = &voxels[i];
-        if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
+        if (!voxel_is_awake_dynamic(voxel) || voxel->type != 0 || voxel->isBullet) {
             continue;
         }
         bool skipVelocity = (voxel->skipCollisionVelocityFrames > 0);
@@ -10475,7 +10767,7 @@ static bool cull_dust_voxels(void) {
     int i = 0;
     while (i < voxel_count) {
         Voxel *voxel = &voxels[i];
-        if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) {
+        if (!voxel_is_awake_dynamic(voxel) || voxel->type != 0 || voxel->isBullet) {
             ++i;
             continue;
         }
@@ -11333,6 +11625,10 @@ static bool melee_hit_voxels(Player *p, Vector3 start, Vector3 dir, float reach)
         return false;
     }
     Voxel *hit = &voxels[hit_id];
+    if (hit->simulate && hit->sleeping) {
+        wake_sleeping_cluster_in_place(hit_id);
+        hit = &voxels[hit_id];
+    }
     int brushExtent = (voxelBrushSpan < 1) ? 1 : voxelBrushSpan;
     int halfBrush = brushExtent / 2;
     int minx = hit->gx - halfBrush;
@@ -11573,6 +11869,10 @@ static void start_tether(int idx) {
         return;
     }
     Voxel *hit = &voxels[hit_id];
+    if (hit->simulate && hit->sleeping) {
+        wake_sleeping_cluster_in_place(hit_id);
+        hit = &voxels[hit_id];
+    }
     
     int tether_idx = -1;
     if (!hit->simulate) {
@@ -11614,6 +11914,10 @@ static void prepare_tether_forces(void) {
             continue;
         }
         Voxel *v = &voxels[p->tetherVoxel];
+        if (v->simulate && v->sleeping) {
+            wake_sleeping_cluster_in_place(p->tetherVoxel);
+            v = &voxels[p->tetherVoxel];
+        }
         if (!v->simulate) {
             int new_idx = rip_single_static_voxel(p->tetherVoxel, i);
             if (new_idx < 0 || new_idx >= voxel_count) {
@@ -11638,6 +11942,10 @@ static void release_tether(int idx) {
     }
     if (p->tetherVoxel >= 0 && p->tetherVoxel < voxel_count) {
         Voxel *v = &voxels[p->tetherVoxel];
+        if (v->simulate && v->sleeping) {
+            wake_sleeping_cluster_in_place(p->tetherVoxel);
+            v = &voxels[p->tetherVoxel];
+        }
         if (v->simulate) {
             Vector3 dir = player_forward(p);
             Vector3 impulse = v_mul(dir, TETHER_THROW_IMPULSE);
@@ -14063,6 +14371,7 @@ int main(int argc, char **argv) {
         update_projectiles(dt);
         update_pickups(dt); // Update pickups
         prepare_tether_forces();
+        wake_sleeping_voxels_near_awake();
         rebuild_static_hash_if_dirty();
         pbdTimeAccumulator += dt;
         float pbd_fixed_dt = PBD_MAX_STEP_DT;
@@ -14145,6 +14454,7 @@ int main(int argc, char **argv) {
                 activate_static_voxels_near_dynamic();
                 update_projectiles(dt);
                 prepare_tether_forces();
+                wake_sleeping_voxels_near_awake();
                 rebuild_static_hash_if_dirty();
                 pbdTimeAccumulator += dt;
                 float pbd_fixed_dt = PBD_MAX_STEP_DT;
