@@ -73,6 +73,8 @@ typedef struct DebugRunState {
     bool recycle_succeeded;
     bool falling_pillar_test;
     bool platform_lifecycle_test;
+    bool restoration_deadline_test;
+    bool restoration_deadline_hold_applied;
     bool overhang_anchor_observed;
     bool overhang_deflection_sampled;
     bool gpu_readback_performed;
@@ -109,6 +111,7 @@ typedef struct DebugRunState {
     bool gif_failed;
     int lifecycle_sleep_step;
     int lifecycle_recycle_step;
+    int restoration_deadline_frame;
 } DebugRunState;
 
 typedef bool (*DebugScenarioSetupFn)(DebugRunState *state);
@@ -1580,6 +1583,7 @@ static bool debug_setup_three_leg_cut_platform(DebugRunState *state)
 {
     debug_reset_world();
     state->platform_lifecycle_test = true;
+    state->restoration_deadline_test = true;
     state->recycle_queue_before = recycleQueueCount;
     state->lifecycle_sleep_step = -1;
     state->lifecycle_recycle_step = -1;
@@ -1621,6 +1625,8 @@ static bool debug_setup_three_leg_cut_platform(DebugRunState *state)
         return false;
     }
     if (!debug_activate_test_cluster(state)) return false;
+    state->restoration_deadline_frame =
+        recycleFrameCounter + RECYCLE_STATIC_RESTORE_DELAY;
     int dynamic_count = debug_count_tagged(DEBUG_TEST_TAG, 1);
     if (dynamic_count != state->expected_voxels) {
         debug_add_failure(state, "three-leg platform activated %d/%d voxels",
@@ -1795,6 +1801,19 @@ static void debug_validate_step(DebugRunState *state, int step)
         if (state->lifecycle_sleep_step < 0 &&
             sample.tagged_sleeping == state->expected_voxels) {
             state->lifecycle_sleep_step = step;
+            if (state->restoration_deadline_test &&
+                !state->restoration_deadline_hold_applied) {
+                // Keep this island sleeping beyond its ordinary recycle age.
+                // Its queued-original deadline must still remove it before the
+                // first static source voxel is restored.
+                for (int i = 0; i < voxel_count; ++i) {
+                    if (voxels[i].debugClusterTag == DEBUG_TEST_TAG &&
+                        voxels[i].simulate && voxels[i].sleeping) {
+                        voxels[i].lifeFrames = -RECYCLE_STATIC_RESTORE_DELAY;
+                    }
+                }
+                state->restoration_deadline_hold_applied = true;
+            }
         }
         if (state->lifecycle_recycle_step < 0 && step > 0 && tagged_total == 0) {
             state->lifecycle_recycle_step = step;
@@ -1810,7 +1829,8 @@ static void debug_validate_step(DebugRunState *state, int step)
                               "step %d: active lifecycle group never entered sleep",
                               step);
         }
-        if (state->lifecycle_sleep_step >= 0 &&
+        if (!state->restoration_deadline_test &&
+            state->lifecycle_sleep_step >= 0 &&
             step == state->lifecycle_sleep_step + RECYCLE_DYNAMIC_MAX_FRAMES + 1) {
             int queued = recycleQueueCount - state->recycle_queue_before;
             if (tagged_total != 0 || queued != state->expected_voxels) {
@@ -1818,6 +1838,12 @@ static void debug_validate_step(DebugRunState *state, int step)
                                   "step %d: sleeping lifecycle recycle left %d voxels and queued %d/%d",
                                   step, tagged_total, queued, state->expected_voxels);
             }
+        }
+        if (state->restoration_deadline_test &&
+            step == state->restoration_deadline_frame && tagged_total != 0) {
+            debug_add_failure(state,
+                              "step %d: restoration deadline left %d dynamic source voxels",
+                              step, tagged_total);
         }
     }
     if (state->recycle_test) {

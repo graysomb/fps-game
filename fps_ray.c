@@ -578,6 +578,9 @@ typedef struct {
     // descendants carrying this flag must not enqueue a second restoration
     // snapshot when their sleeping island is recycled.
     bool restorationQueued;
+    // Absolute recycleFrameCounter deadline for the queued original.  The
+    // dynamic island must be gone before restoration starts at this frame.
+    int restorationDeadlineFrame;
     int prevGlueClusterId;
     int prevGlueClusterSize;
     int prevGlueClusterTag;
@@ -620,6 +623,8 @@ static int recycleLifetimeNext[MAX_VOXELS];
 static int recycleLifetimeParticleVoxel[MAX_PARTICLES];
 static unsigned char recycleLifetimeExpired[MAX_VOXELS];
 static unsigned char recycleLifetimeOutside[MAX_VOXELS];
+static unsigned char recycleRestorationDue[MAX_VOXELS];
+static unsigned char recycleComponentAllSleeping[MAX_VOXELS];
 static int recycleComponentRestoreCount[MAX_VOXELS];
 static unsigned char voxelCalmFlags[MAX_VOXELS];
 static _Atomic unsigned char activationClaims[MAX_VOXELS];
@@ -673,6 +678,7 @@ typedef struct {
     int debugTag;
     int activator;
     bool restorationQueued;
+    int restorationDeadlineFrame;
 } UnitVoxelSeed;
 
 typedef struct {
@@ -983,7 +989,8 @@ static bool unit_voxel_buffer_push(UnitVoxelBuffer *buffer,
         .voxelIndex = voxelIndex,
         .debugTag = debugTag,
         .activator = activator,
-        .restorationQueued = false
+        .restorationQueued = false,
+        .restorationDeadlineFrame = 0
     };
     return true;
 }
@@ -3896,6 +3903,7 @@ static int emit_unit_voxels_from_units(const UnitVoxelBuffer *buffer,
             voxels[new_idx].debugClusterTag = seed->debugTag;
             voxels[new_idx].activator = seed->activator;;
             voxels[new_idx].restorationQueued = seed->restorationQueued;
+            voxels[new_idx].restorationDeadlineFrame = seed->restorationDeadlineFrame;
 
             if (simulate) {
                 glue_neighbor_faces_for_voxel(new_idx); 
@@ -3966,6 +3974,8 @@ static void remove_buffered_static_voxels(UnitVoxelBuffer *buffer)
                     for (int seed_idx = 0; seed_idx < buffer->count; ++seed_idx) {
                         if (buffer->voxels[seed_idx].voxelIndex == idx) {
                             buffer->voxels[seed_idx].restorationQueued = true;
+                            buffer->voxels[seed_idx].restorationDeadlineFrame =
+                                recycleFrameCounter + RECYCLE_STATIC_RESTORE_DELAY;
                         }
                     }
                     if (debugLogVoxelRecycle) {
@@ -4595,8 +4605,9 @@ static bool spawn_static_at_rest(const Voxel *snapshot) {
 
 // Sleeping voxels retain their deformed particle positions, so recycling them
 // one at a time would tear a connected island apart and could leave shared
-// particles behind.  Select complete sleeping islands first, reserve all of
-// their restoration queue entries, then enqueue and remove them atomically.
+// particles behind. Select complete physical islands. Normally every member
+// must be sleeping and aged; a queued-original deadline instead removes the
+// complete island unconditionally before its static source begins rebuilding.
 static bool recycle_sleeping_voxel_islands(void)
 {
     if (voxel_count <= 0) return false;
@@ -4606,10 +4617,13 @@ static bool recycle_sleeping_voxel_islands(void)
     memset(recycleLifetimeNext, 0xff, voxel_count_size * sizeof(int));
     memset(recycleLifetimeExpired, 1, voxel_count_size);
     memset(recycleLifetimeOutside, 0, voxel_count_size);
+    memset(recycleRestorationDue, 0, voxel_count_size);
+    memset(recycleComponentAllSleeping, 1, voxel_count_size);
     memset(recycleComponentRestoreCount, 0, voxel_count_size * sizeof(int));
     for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
         recycleLifetimeParent[i] =
-            (voxels[i].simulate && voxels[i].sleeping) ? i : -1;
+            (voxel->simulate && voxel->type == 0 && !voxel->isBullet) ? i : -1;
     }
 
     size_t particle_count = particle_pool_count > 0 ? (size_t)particle_pool_count : 0;
@@ -4641,11 +4655,19 @@ static bool recycle_sleeping_voxel_islands(void)
     for (int i = 0; i < voxel_count; ++i) {
         if (recycleLifetimeParent[i] < 0) continue;
         int root = recycle_lifetime_find_root(i);
+        if (!voxels[i].sleeping) {
+            recycleComponentAllSleeping[root] = 0;
+        }
         if (voxels[i].lifeFrames <= RECYCLE_DYNAMIC_MAX_FRAMES) {
             recycleLifetimeExpired[root] = 0;
         }
         if (voxel_outside_world_bounds(&voxels[i])) {
             recycleLifetimeOutside[root] = 1;
+        }
+        if (voxels[i].restorationQueued &&
+            voxels[i].restorationDeadlineFrame > 0 &&
+            recycleFrameCounter >= voxels[i].restorationDeadlineFrame) {
+            recycleRestorationDue[root] = 1;
         }
         if (voxels[i].owner == -1 && !voxels[i].restorationQueued) {
             ++recycleComponentRestoreCount[root];
@@ -4658,14 +4680,20 @@ static bool recycle_sleeping_voxel_islands(void)
     int ready_islands = 0;
     int ready_voxels = 0;
     for (int root = 0; root < voxel_count; ++root) {
-        if (recycleLifetimeParent[root] != root ||
-            (!recycleLifetimeExpired[root] && !recycleLifetimeOutside[root])) continue;
-        int restore_count = recycleComponentRestoreCount[root];
+        if (recycleLifetimeParent[root] != root) continue;
+        bool deadline_due = recycleRestorationDue[root] != 0;
+        bool normal_ready = recycleComponentAllSleeping[root] &&
+                            (recycleLifetimeExpired[root] || recycleLifetimeOutside[root]);
+        if (!deadline_due && !normal_ready) continue;
+        // At the hard deadline, disappearance takes priority over preserving
+        // newly attached, unqueued debris. The queued originals already own
+        // restoration for the structure that is about to rebuild.
+        int restore_count = deadline_due ? 0 : recycleComponentRestoreCount[root];
         int component_count = 0;
         for (int idx = recycleLifetimeHead[root]; idx >= 0;
              idx = recycleLifetimeNext[idx]) ++component_count;
 
-        // Do not partially recycle an island when the delayed restoration
+        // Do not partially recycle a normal island when the delayed restoration
         // queue cannot hold every original-world voxel in it.
         if (recycleQueueCount + reserved_restore_slots + restore_count > MAX_VOXELS) {
             if (debugLogVoxelRecycle) {
@@ -4692,7 +4720,9 @@ static bool recycle_sleeping_voxel_islands(void)
     // Queue snapshots while every voxel index still refers to the selected
     // island.  The capacity check above makes these pushes deterministic.
     for (int i = 0; i < voxel_count; ++i) {
-        if (recycleSleepReady[i] && voxels[i].owner == -1 &&
+        int root = recycleLifetimeParent[i] >= 0 ? recycle_lifetime_find_root(i) : -1;
+        bool deadline_due = root >= 0 && recycleRestorationDue[root];
+        if (recycleSleepReady[i] && !deadline_due && voxels[i].owner == -1 &&
             !voxels[i].restorationQueued) {
             if (!recycle_queue_push(&voxels[i])) {
                 TraceLog(LOG_ERROR,
@@ -4829,6 +4859,7 @@ static void recycle_dead_voxels(void) {
     recycleFrameCounter++;
     bool changed = false;
     bool has_sleeping_voxels = false;
+    bool has_due_restoration = false;
 
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
@@ -4836,6 +4867,10 @@ static void recycle_dead_voxels(void) {
             continue;
         }
         voxel->lifeFrames++;
+        if (voxel->restorationQueued && voxel->restorationDeadlineFrame > 0 &&
+            recycleFrameCounter >= voxel->restorationDeadlineFrame) {
+            has_due_restoration = true;
+        }
         if (voxel->sleeping) {
             has_sleeping_voxels = true;
             continue;
@@ -4867,7 +4902,8 @@ static void recycle_dead_voxels(void) {
         changed = true;
     }
 
-    if (has_sleeping_voxels && recycle_sleeping_voxel_islands()) {
+    if ((has_sleeping_voxels || has_due_restoration) &&
+        recycle_sleeping_voxel_islands()) {
         changed = true;
     }
 
