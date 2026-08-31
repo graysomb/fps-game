@@ -574,6 +574,10 @@ typedef struct {
     uint8_t skipCollisionVelocityFrames;
     int lifeFrames;
     int debugClusterTag;
+    // The original static voxel was already captured by activation.  Dynamic
+    // descendants carrying this flag must not enqueue a second restoration
+    // snapshot when their sleeping island is recycled.
+    bool restorationQueued;
     int prevGlueClusterId;
     int prevGlueClusterSize;
     int prevGlueClusterTag;
@@ -668,6 +672,7 @@ typedef struct {
     int voxelIndex;
     int debugTag;
     int activator;
+    bool restorationQueued;
 } UnitVoxelSeed;
 
 typedef struct {
@@ -977,7 +982,8 @@ static bool unit_voxel_buffer_push(UnitVoxelBuffer *buffer,
         .fixed = fixed,
         .voxelIndex = voxelIndex,
         .debugTag = debugTag,
-        .activator = activator
+        .activator = activator,
+        .restorationQueued = false
     };
     return true;
 }
@@ -3889,6 +3895,7 @@ static int emit_unit_voxels_from_units(const UnitVoxelBuffer *buffer,
         if (new_idx >= 0) {
             voxels[new_idx].debugClusterTag = seed->debugTag;
             voxels[new_idx].activator = seed->activator;;
+            voxels[new_idx].restorationQueued = seed->restorationQueued;
 
             if (simulate) {
                 glue_neighbor_faces_for_voxel(new_idx); 
@@ -3914,7 +3921,7 @@ static void emit_static_voxels_from_units(const UnitVoxelBuffer *buffer)
     }
 }
 
-static void remove_buffered_static_voxels(const UnitVoxelBuffer *buffer)
+static void remove_buffered_static_voxels(UnitVoxelBuffer *buffer)
 {
     if (!buffer) {
         return;
@@ -3952,13 +3959,23 @@ static void remove_buffered_static_voxels(const UnitVoxelBuffer *buffer)
         if (idx >= 0 && idx < voxel_count) {
             Voxel *voxel = &voxels[idx];
             if (!voxel->simulate && voxel->owner == -1) {
-                if (recycle_queue_push(voxel) && debugLogVoxelRecycle) {
-                    TraceLog(LOG_INFO,
-                             "[Recycle] enqueue-activation voxel=%d rest=(%d..%d,%d..%d,%d..%d)",
-                             idx,
-                             voxel->orig_min_gx, voxel->orig_max_gx,
-                             voxel->orig_min_gy, voxel->orig_max_gy,
-                             voxel->orig_min_gz, voxel->orig_max_gz);
+                if (recycle_queue_push(voxel)) {
+                    // A greedy static voxel may expand into several unit seeds.
+                    // Mark every descendant: the one queued coarse snapshot owns
+                    // restoration for all of them.
+                    for (int seed_idx = 0; seed_idx < buffer->count; ++seed_idx) {
+                        if (buffer->voxels[seed_idx].voxelIndex == idx) {
+                            buffer->voxels[seed_idx].restorationQueued = true;
+                        }
+                    }
+                    if (debugLogVoxelRecycle) {
+                        TraceLog(LOG_INFO,
+                                 "[Recycle] enqueue-activation voxel=%d rest=(%d..%d,%d..%d,%d..%d)",
+                                 idx,
+                                 voxel->orig_min_gx, voxel->orig_max_gx,
+                                 voxel->orig_min_gy, voxel->orig_max_gy,
+                                 voxel->orig_min_gz, voxel->orig_max_gz);
+                    }
                 }
             }
             remove_voxel_index(idx);
@@ -4630,7 +4647,7 @@ static bool recycle_sleeping_voxel_islands(void)
         if (voxel_outside_world_bounds(&voxels[i])) {
             recycleLifetimeOutside[root] = 1;
         }
-        if (voxels[i].owner == -1) {
+        if (voxels[i].owner == -1 && !voxels[i].restorationQueued) {
             ++recycleComponentRestoreCount[root];
         }
         recycleLifetimeNext[i] = recycleLifetimeHead[root];
@@ -4675,7 +4692,8 @@ static bool recycle_sleeping_voxel_islands(void)
     // Queue snapshots while every voxel index still refers to the selected
     // island.  The capacity check above makes these pushes deterministic.
     for (int i = 0; i < voxel_count; ++i) {
-        if (recycleSleepReady[i] && voxels[i].owner == -1) {
+        if (recycleSleepReady[i] && voxels[i].owner == -1 &&
+            !voxels[i].restorationQueued) {
             if (!recycle_queue_push(&voxels[i])) {
                 TraceLog(LOG_ERROR,
                          "[Recycle] sleeping-island queue reservation failed unexpectedly");
@@ -4730,7 +4748,11 @@ static bool freeze_lifetime_expired_islands(void)
     size_t voxel_bytes = (size_t)voxel_count;
     memset(recycleLifetimeHead, 0xff, voxel_bytes * sizeof(int));
     memset(recycleLifetimeNext, 0xff, voxel_bytes * sizeof(int));
-    memset(recycleLifetimeExpired, 1, voxel_bytes);
+    // A connected active island has a maximum awake lifetime.  Newly activated
+    // neighbors must not perpetually postpone an older island by resetting the
+    // whole component's age requirement.  Once any member reaches the limit we
+    // freeze the complete physical island atomically.
+    memset(recycleLifetimeExpired, 0, voxel_bytes);
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
         recycleLifetimeParent[i] =
@@ -4773,8 +4795,8 @@ static bool freeze_lifetime_expired_islands(void)
     for (int i = 0; i < voxel_count; ++i) {
         if (recycleLifetimeParent[i] < 0) continue;
         int root = recycle_lifetime_find_root(i);
-        if (voxels[i].lifeFrames <= RECYCLE_DYNAMIC_MAX_FRAMES) {
-            recycleLifetimeExpired[root] = 0;
+        if (voxels[i].lifeFrames > RECYCLE_DYNAMIC_MAX_FRAMES) {
+            recycleLifetimeExpired[root] = 1;
         }
         recycleLifetimeNext[i] = recycleLifetimeHead[root];
         recycleLifetimeHead[root] = i;
@@ -4828,7 +4850,7 @@ static void recycle_dead_voxels(void) {
                          "[Recycle] dynamic->static voxel=%d owner=%d life=%d",
                          i, voxel->owner, voxel->lifeFrames);
             }
-            if (voxel->owner != -1) {
+            if (voxel->owner != -1 || voxel->restorationQueued) {
                 remove_voxel_index(i);
                 changed = true;
                 --i;
@@ -10919,10 +10941,14 @@ static bool cull_dust_voxels(void) {
         for (int n = 0; n < glued_neighbor_count; ++n) {
             deactivate_glue_constraints_between(i, glued_neighbors[n]);
         }
-        if (recycle_queue_push(voxel) && debugLogVoxelRecycle) {
+        bool queued_snapshot = voxel->restorationQueued || voxel->owner != -1;
+        if (!queued_snapshot) {
+            queued_snapshot = recycle_queue_push(voxel);
+        }
+        if (queued_snapshot && debugLogVoxelRecycle) {
             TraceLog(LOG_INFO,
-                     "[Dust] enqueue-voxel idx=%d strain=%.3f shear=%.3f queue=%d",
-                     i, strain, shear, recycleQueueCount);
+                     "[Dust] remove-voxel idx=%d strain=%.3f shear=%.3f original_queued=%d queue=%d",
+                     i, strain, shear, voxel->restorationQueued ? 1 : 0, recycleQueueCount);
         }
         remove_voxel_index(i);
         removed_any = true;

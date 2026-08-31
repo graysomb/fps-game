@@ -72,6 +72,7 @@ typedef struct DebugRunState {
     bool recycle_test;
     bool recycle_succeeded;
     bool falling_pillar_test;
+    bool platform_lifecycle_test;
     bool overhang_anchor_observed;
     bool overhang_deflection_sampled;
     bool gpu_readback_performed;
@@ -106,6 +107,8 @@ typedef struct DebugRunState {
     int gif_step_stride;
     int gif_delay_cs;
     bool gif_failed;
+    int lifecycle_sleep_step;
+    int lifecycle_recycle_step;
 } DebugRunState;
 
 typedef bool (*DebugScenarioSetupFn)(DebugRunState *state);
@@ -126,6 +129,7 @@ static bool debug_setup_activation_floating(DebugRunState *state);
 static bool debug_setup_sleep_wake_floating(DebugRunState *state);
 static bool debug_setup_sleep_recycle(DebugRunState *state);
 static bool debug_setup_falling_pillar_sleep(DebugRunState *state);
+static bool debug_setup_three_leg_cut_platform(DebugRunState *state);
 static bool debug_setup_tether_throw_floating(DebugRunState *state);
 static bool debug_setup_overhang_impact(DebugRunState *state);
 
@@ -135,6 +139,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "sleep-wake-floating", "Supported cluster sleeps, loses support, then activates", debug_setup_sleep_wake_floating },
     { "sleep-recycle", "Sleeping dynamic island enters delayed restoration atomically", debug_setup_sleep_recycle },
     { "falling-pillar-sleep", "Rotated pillar falls, settles, and sleeps without changing pose", debug_setup_falling_pillar_sleep },
+    { "three-leg-cut-platform", "Four-legged platform with three legs removed completes sleep and recycling", debug_setup_three_leg_cut_platform },
     { "tether-throw-floating", "Released tether voxel wakes an unsupported sleeping cluster", debug_setup_tether_throw_floating },
     { "overhang-impact", "Falling dynamic voxel activates and bends a supported static overhang", debug_setup_overhang_impact }
 };
@@ -1464,6 +1469,8 @@ static bool debug_setup_falling_pillar_sleep(DebugRunState *state)
     debug_reset_world();
     state->falling_pillar_test = true;
     state->recycle_queue_before = recycleQueueCount;
+    state->lifecycle_sleep_step = -1;
+    state->lifecycle_recycle_step = -1;
     const int min_y = 1;
     const int height = 10;
     int created = 0;
@@ -1553,11 +1560,77 @@ static bool debug_setup_falling_pillar_sleep(DebugRunState *state)
         voxel->vel = v_mul(velocity, 1.0f / (float)VOXEL_CORNER_COUNT);
         voxel->wake_timer = 0;
     }
+    // Model a late activation joining an older unsupported island.  The young
+    // member must not extend the maximum awake lifetime of the whole structure.
+    for (int i = 0; i < voxel_count; ++i) {
+        if (voxels[i].debugClusterTag == DEBUG_TEST_TAG) {
+            voxels[i].lifeFrames = -RECYCLE_DYNAMIC_MAX_FRAMES;
+            break;
+        }
+    }
     rebuild_voxel_hash();
     state->activation_succeeded = true;
     debug_set_initial_centroid(state);
     debug_capture(state, "phase-01-elevated-rotated-pillar.png",
                   "elevated-rotated-pillar", 0);
+    return true;
+}
+
+static bool debug_setup_three_leg_cut_platform(DebugRunState *state)
+{
+    debug_reset_world();
+    state->platform_lifecycle_test = true;
+    state->recycle_queue_before = recycleQueueCount;
+    state->lifecycle_sleep_step = -1;
+    state->lifecycle_recycle_step = -1;
+    Color deck_color = (Color){ 90, 220, 150, 255 };
+    Color leg_color = (Color){ 200, 210, 70, 255 };
+    int created = 0;
+
+    // Exact gameplay construction: one-cell 12x12 deck, three underside ribs,
+    // and only the southwest notched 2x2 leg after the other three are cut.
+    for (int z = -6; z <= 5; ++z) {
+        for (int x = -6; x <= 5; ++x) {
+            if (debug_add_cell(x, 5, z, true, false,
+                               deck_color, DEBUG_TEST_TAG) >= 0) ++created;
+        }
+    }
+    for (int x = -6; x <= 5; ++x) {
+        if (x == 0) continue;
+        for (int z = -2; z <= 2; z += 2) {
+            if (debug_add_cell(x, 4, z, true, false,
+                               deck_color, DEBUG_TEST_TAG) >= 0) ++created;
+        }
+    }
+    for (int y = 0; y <= 4; ++y) {
+        for (int z = -6; z <= -5; ++z) {
+            for (int x = -6; x <= -5; ++x) {
+                if (y == 4 && x == -5 && z == -5) continue;
+                if (debug_add_cell(x, y, z, true, false,
+                                   leg_color, DEBUG_TEST_TAG) >= 0) ++created;
+            }
+        }
+    }
+    state->expected_voxels = created;
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_rebuild_world_state();
+    debug_set_initial_centroid(state);
+    debug_capture(state, "phase-01-three-legs-cut.png", "three-legs-cut-static", 0);
+    if (created != 196) {
+        debug_add_failure(state, "three-leg platform created %d/196 voxels", created);
+        return false;
+    }
+    if (!debug_activate_test_cluster(state)) return false;
+    int dynamic_count = debug_count_tagged(DEBUG_TEST_TAG, 1);
+    if (dynamic_count != state->expected_voxels) {
+        debug_add_failure(state, "three-leg platform activated %d/%d voxels",
+                          dynamic_count, state->expected_voxels);
+        return false;
+    }
+    debug_set_initial_centroid(state);
+    state->camera.position = (Vector3){ 7.0f, 6.0f, 9.0f };
+    state->camera.target = (Vector3){ 0.0f, 1.0f, 0.0f };
+    debug_capture(state, "phase-02-platform-activated.png", "platform-activated", 0);
     return true;
 }
 
@@ -1716,31 +1789,35 @@ static void debug_validate_step(DebugRunState *state, int step)
 {
     debug_validate_all_sim_particles(state, step);
     DebugSample sample = debug_collect_sample("validation", step, state->initial_centroid_y);
-    if (state->falling_pillar_test &&
-        step > RECYCLE_DYNAMIC_MAX_FRAMES &&
-        step < RECYCLE_DYNAMIC_MAX_FRAMES * 2 + 2) {
+    bool lifecycle_test = state->falling_pillar_test || state->platform_lifecycle_test;
+    if (lifecycle_test) {
         int tagged_total = sample.tagged_dynamic + sample.tagged_static;
-        if (sample.tagged_static != 0 || tagged_total != state->expected_voxels) {
+        if (state->lifecycle_sleep_step < 0 &&
+            sample.tagged_sleeping == state->expected_voxels) {
+            state->lifecycle_sleep_step = step;
+        }
+        if (state->lifecycle_recycle_step < 0 && step > 0 && tagged_total == 0) {
+            state->lifecycle_recycle_step = step;
+        }
+        if (tagged_total > 0 && sample.tagged_static != 0) {
             debug_add_failure(state,
-                              "step %d: falling pillar lifetime conversion snapped/lost voxels dynamic=%d static=%d total=%d/%d",
-                              step, sample.tagged_dynamic, sample.tagged_static,
-                              tagged_total, state->expected_voxels);
+                              "step %d: lifecycle conversion produced %d grid-static voxels",
+                              step, sample.tagged_static);
         }
         if (step == RECYCLE_DYNAMIC_MAX_FRAMES + 1 &&
-            sample.tagged_sleeping != state->expected_voxels) {
+            state->lifecycle_sleep_step < 0 && state->lifecycle_recycle_step < 0) {
             debug_add_failure(state,
-                              "step %d: lifetime pipeline slept %d/%d pillar voxels",
-                              step, sample.tagged_sleeping, state->expected_voxels);
+                              "step %d: active lifecycle group never entered sleep",
+                              step);
         }
-    }
-    if (state->falling_pillar_test &&
-        step == RECYCLE_DYNAMIC_MAX_FRAMES * 2 + 2) {
-        int tagged_total = sample.tagged_dynamic + sample.tagged_static;
-        int queued = recycleQueueCount - state->recycle_queue_before;
-        if (tagged_total != 0 || queued != state->expected_voxels) {
-            debug_add_failure(state,
-                              "step %d: sleeping pillar recycle left %d voxels and queued %d/%d",
-                              step, tagged_total, queued, state->expected_voxels);
+        if (state->lifecycle_sleep_step >= 0 &&
+            step == state->lifecycle_sleep_step + RECYCLE_DYNAMIC_MAX_FRAMES + 1) {
+            int queued = recycleQueueCount - state->recycle_queue_before;
+            if (tagged_total != 0 || queued != state->expected_voxels) {
+                debug_add_failure(state,
+                                  "step %d: sleeping lifecycle recycle left %d voxels and queued %d/%d",
+                                  step, tagged_total, queued, state->expected_voxels);
+            }
         }
     }
     if (state->recycle_test) {
@@ -1814,7 +1891,7 @@ static void debug_finalize_validation(DebugRunState *state)
     }
     if (!state->drop_sampled) {
         debug_add_failure(state, "scenario did not reach the required 60-step drop sample");
-    } else if (!state->overhang_impact &&
+    } else if (!state->overhang_impact && !state->platform_lifecycle_test &&
                (!isfinite(state->drop_at_step_60) || state->drop_at_step_60 < 0.5f)) {
         debug_add_failure(state, "cluster dropped only %.3f metres after 60 steps (minimum 0.500)",
                           state->drop_at_step_60);
