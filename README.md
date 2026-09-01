@@ -346,6 +346,8 @@ Available scenarios are:
   and displacement.
 * `single-corner-hinge`: verifies that a one-corner glue remnant breaks at the configured
   hinge-angle limit.
+* `tether-active-then-static`: tethers an active voxel and then a static cluster voxel,
+  verifying that activation/array compaction does not lose or redirect the tether target.
 
 Without `--debug-output`, artifacts are written beneath
 `.build/bin/debug-artifacts/<scenario>/<active-backend>`. Each backend directory contains

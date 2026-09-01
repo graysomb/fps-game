@@ -465,6 +465,7 @@ typedef struct {
     float exposed_flash_timer;
     bool tetherHolding;
     int tetherVoxel;
+    uint64_t tetherVoxelIdentity;
     bool meleeKnockbackActive;
     bool meleeSwingActive;
     bool meleeSwingHitApplied;
@@ -547,6 +548,7 @@ typedef struct {
        0=+X,1=-X,2=+Y,3=-Y,4=+Z,5=-Z */
     bool surface[6];
     int  gx, gy, gz;
+    uint64_t identity;
     int  min_gx, max_gx;
     int  min_gy, max_gy;
     int  min_gz, max_gz;
@@ -588,6 +590,7 @@ typedef struct {
     uint8_t prevGlueClusterValid;
 } Voxel;
 static Voxel voxels[MAX_VOXELS];
+static uint64_t nextVoxelIdentity = 1;
 static int voxel_count = 0;
 static Particle particles_pool[MAX_PARTICLES];
 static Particle *active_particles[MAX_PARTICLES];
@@ -3142,6 +3145,23 @@ static void remove_voxel_index(int idx)
     }
 
     int last = voxel_count - 1;
+    for (int player_index = 0; player_index < activePlayers; ++player_index) {
+        Player *player = &players[player_index];
+        if (!player->tetherHolding) continue;
+        if (player->tetherVoxel == idx) {
+            player->tetherHolding = false;
+            player->tetherVoxel = -1;
+            player->tetherVoxelIdentity = 0;
+        } else if (idx != last && player->tetherVoxel == last) {
+            player->tetherVoxel = idx;
+        }
+    }
+    if (idx != last) {
+        tetherTag[idx] = tetherTag[last];
+    } else {
+        tetherTag[idx] = 0;
+    }
+    tetherTag[last] = 0;
     if (idx != last) {
         Voxel *moved = &voxels[last];
         voxel_table_unregister(moved);
@@ -3727,6 +3747,8 @@ static bool init_voxel_struct(Voxel *v,
     v->gx = (int)floorf(px / VOXEL_SIZE);
     v->gy = (int)floorf(py / VOXEL_SIZE);
     v->gz = (int)floorf(pz / VOXEL_SIZE);
+    v->identity = nextVoxelIdentity++;
+    if (nextVoxelIdentity == 0) nextVoxelIdentity = 1;
     v->min_gx = v->max_gx = v->gx;
     v->min_gy = v->max_gy = v->gy;
     v->min_gz = v->max_gz = v->gz;
@@ -7237,6 +7259,7 @@ static void reset_players_for_creative(void) {
         players[i].exposed_flash_timer = 0.0f;
         players[i].tetherHolding = false;
         players[i].tetherVoxel = -1;
+        players[i].tetherVoxelIdentity = 0;
         players[i].meleeKnockbackActive = false;
         players[i].meleeSwingActive = false;
         players[i].meleeSwingHitApplied = false;
@@ -7297,6 +7320,7 @@ static void ResetGame(void) {
         players[i].exposed_flash_timer = 0.0f;
         players[i].tetherHolding = false;
         players[i].tetherVoxel = -1;
+        players[i].tetherVoxelIdentity = 0;
         players[i].meleeKnockbackActive = false;
         players[i].meleeSwingActive = false;
         players[i].meleeSwingHitApplied = false;
@@ -8014,6 +8038,7 @@ static void kill_player(int player_index, int attacker_index,
     player->respawn_timer = PLAYER_RESPAWN_TIME;
     player->tetherHolding = false;
     player->tetherVoxel = -1;
+    player->tetherVoxelIdentity = 0;
     player->dynamicShotActive = false;
 }
 
@@ -12608,6 +12633,27 @@ static int rip_single_static_voxel(int voxel_idx, int activator) {
     return new_idx;
 }
 
+static bool resolve_tether_voxel(Player *player)
+{
+    if (!player || !player->tetherHolding || player->tetherVoxelIdentity == 0) {
+        return false;
+    }
+    if (player->tetherVoxel >= 0 && player->tetherVoxel < voxel_count &&
+        voxels[player->tetherVoxel].identity == player->tetherVoxelIdentity) {
+        return true;
+    }
+    for (int i = 0; i < voxel_count; ++i) {
+        if (voxels[i].identity == player->tetherVoxelIdentity) {
+            player->tetherVoxel = i;
+            return true;
+        }
+    }
+    player->tetherHolding = false;
+    player->tetherVoxel = -1;
+    player->tetherVoxelIdentity = 0;
+    return false;
+}
+
 static void start_tether(int idx) {
     Player *p = &players[idx];
     if (p->respawn_timer > 0.0f || p->tetherHolding) {
@@ -12649,6 +12695,7 @@ static void start_tether(int idx) {
 
     p->tetherHolding = true;
     p->tetherVoxel = tether_idx;
+    p->tetherVoxelIdentity = voxels[tether_idx].identity;
     play_sfx(SFX_TETHER);
 }
 
@@ -12659,9 +12706,7 @@ static void prepare_tether_forces(void) {
         if (!p->tetherHolding) {
             continue;
         }
-        if (p->tetherVoxel < 0 || p->tetherVoxel >= voxel_count) {
-            p->tetherHolding = false;
-            p->tetherVoxel = -1;
+        if (!resolve_tether_voxel(p)) {
             continue;
         }
         Voxel *v = &voxels[p->tetherVoxel];
@@ -12674,9 +12719,11 @@ static void prepare_tether_forces(void) {
             if (new_idx < 0 || new_idx >= voxel_count) {
                 p->tetherHolding = false;
                 p->tetherVoxel = -1;
+                p->tetherVoxelIdentity = 0;
                 continue;
             }
             p->tetherVoxel = new_idx;
+            p->tetherVoxelIdentity = voxels[new_idx].identity;
             v = &voxels[new_idx];
         }
         tetherTargetByPlayer[i] = player_hand_position(p);
@@ -12691,6 +12738,7 @@ static void release_tether(int idx) {
     if (!p->tetherHolding) {
         return;
     }
+    if (!resolve_tether_voxel(p)) return;
     if (p->tetherVoxel >= 0 && p->tetherVoxel < voxel_count) {
         Voxel *v = &voxels[p->tetherVoxel];
         if (v->simulate && v->sleeping) {
@@ -12713,6 +12761,7 @@ static void release_tether(int idx) {
     play_sfx(SFX_TETHER);
     p->tetherHolding = false;
     p->tetherVoxel = -1;
+    p->tetherVoxelIdentity = 0;
 }
 
 static bool tether_cluster_center(int voxel_idx, Vector3 *out_center) {
@@ -14913,6 +14962,7 @@ int main(int argc, char **argv) {
                     players[i].exposed_flash_timer = 0.0f;
                     players[i].tetherHolding = false;
                     players[i].tetherVoxel = -1;
+                    players[i].tetherVoxelIdentity = 0;
                     players[i].meleeKnockbackActive = false;
                     players[i].meleeSwingActive = false;
                     players[i].meleeSwingHitApplied = false;
@@ -14920,11 +14970,7 @@ int main(int argc, char **argv) {
                     players[i].dynamicShotActive = false;
                 }
             } else {
-                if (players[i].tetherHolding &&
-                    (players[i].tetherVoxel < 0 || players[i].tetherVoxel >= voxel_count)) {
-                    players[i].tetherHolding = false;
-                    players[i].tetherVoxel = -1;
-                }
+                if (players[i].tetherHolding) resolve_tether_voxel(&players[i]);
             }
         }
         if (smushBannerTimer > 0.0f) {

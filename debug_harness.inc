@@ -77,6 +77,9 @@ typedef struct DebugRunState {
     bool overhang_impact;
     bool pillar_impact_drift_test;
     bool single_corner_hinge_test;
+    bool tether_active_then_static_test;
+    bool tether_second_started;
+    bool tether_second_survived;
     bool recycle_test;
     bool recycle_succeeded;
     bool falling_pillar_test;
@@ -101,6 +104,13 @@ typedef struct DebugRunState {
     float drift_window_speed;
     float max_hinge_angle_deg;
     bool hinge_broken;
+    int tether_voxel_count_before_static;
+    int tether_static_remaining;
+    int tether_index_mismatch_step;
+    int tether_expected_index;
+    int tether_selected_index;
+    Vector3 tether_static_start;
+    float tether_static_pull_distance;
     int gpu_static_ssbo_diff_entries;
     int gpu_static_ssbo_stale_cells;
     int gpu_sim_id_mismatches;
@@ -151,6 +161,7 @@ static bool debug_setup_tether_throw_floating(DebugRunState *state);
 static bool debug_setup_overhang_impact(DebugRunState *state);
 static bool debug_setup_pillar_impact_drift(DebugRunState *state);
 static bool debug_setup_single_corner_hinge(DebugRunState *state);
+static bool debug_setup_tether_active_then_static(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall },
@@ -163,7 +174,8 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "tether-throw-floating", "Released tether voxel wakes an unsupported sleeping cluster", debug_setup_tether_throw_floating },
     { "overhang-impact", "Falling dynamic voxel activates and bends a supported static overhang", debug_setup_overhang_impact },
     { "pillar-impact-drift", "Large undercut pillar impact exposes post-contact sliding and wiggle", debug_setup_pillar_impact_drift },
-    { "single-corner-hinge", "A one-corner glue remnant must break beyond the hinge-angle limit", debug_setup_single_corner_hinge }
+    { "single-corner-hinge", "A one-corner glue remnant must break beyond the hinge-angle limit", debug_setup_single_corner_hinge },
+    { "tether-active-then-static", "Tethering an active voxel then a static voxel preserves and pulls both", debug_setup_tether_active_then_static }
 };
 
 static const int debugScenarioCount = (int)(sizeof(debugScenarios) / sizeof(debugScenarios[0]));
@@ -1772,11 +1784,13 @@ static bool debug_setup_tether_throw_floating(DebugRunState *state)
     for (int i = 0; i < MAX_PLAYERS; ++i) {
         players[i].tetherHolding = false;
         players[i].tetherVoxel = -1;
+        players[i].tetherVoxelIdentity = 0;
     }
     players[0].yaw = -90.0f;
     players[0].pitch = 0.0f;
     players[0].tetherHolding = true;
     players[0].tetherVoxel = thrown_idx;
+    players[0].tetherVoxelIdentity = voxels[thrown_idx].identity;
     prepare_tether_forces();
     release_tether(0);
 
@@ -2028,6 +2042,57 @@ static bool debug_setup_single_corner_hinge(DebugRunState *state)
     return true;
 }
 
+static bool debug_setup_tether_active_then_static(DebugRunState *state)
+{
+    debug_reset_world();
+    state->tether_active_then_static_test = true;
+    state->tether_index_mismatch_step = -1;
+    Color static_color = (Color){ 75, 175, 245, 255 };
+    for (int z = -1; z <= 1; ++z) {
+        if (debug_add_cell(8, 8, z, true, false, static_color, DEBUG_SUPPORT_TAG) < 0) {
+            debug_add_failure(state, "tether sequence could not create static target %d", z);
+            return false;
+        }
+    }
+    int active_idx = debug_add_cell(0, 8, 0, false, true,
+                                    (Color){ 245, 145, 45, 255 }, DEBUG_THROW_TAG);
+    if (active_idx < 0) {
+        debug_add_failure(state, "tether sequence could not create active target");
+        return false;
+    }
+    debug_track_tagged_cells(state, DEBUG_SUPPORT_TAG);
+    debug_rebuild_world_state();
+
+    memset(tetherTag, 0, sizeof(tetherTag));
+    for (int i = 0; i < MAX_PLAYERS; ++i) {
+        players[i].tetherHolding = false;
+        players[i].tetherVoxel = -1;
+        players[i].tetherVoxelIdentity = 0;
+        players[i].respawn_timer = (i == 0) ? 0.0f : 1000.0f;
+    }
+    players[0].pos = (Vector3){ 0.0f, 2.0f, 2.0f };
+    Vector3 first_aim = v_norm(v_sub(voxels[active_idx].pos, players[0].pos));
+    dir_to_yaw_pitch(first_aim, &players[0].yaw, &players[0].pitch);
+    int first_ray_hit = first_voxel_hit((Ray){ players[0].pos, player_forward(&players[0]) },
+                                        TETHER_RANGE, -1);
+    start_tether(0);
+    if (!players[0].tetherHolding || players[0].tetherVoxel != active_idx) {
+        debug_add_failure(state,
+                          "first tether did not select the active voxel (ray=%d selected=%d expected=%d table=%d)",
+                          first_ray_hit, players[0].tetherVoxel, active_idx,
+                          table_get(0, 8, 0));
+        return false;
+    }
+    prepare_tether_forces();
+    state->expected_voxels = 0;
+    state->activation_succeeded = true;
+    debug_set_initial_centroid(state);
+    state->camera.position = (Vector3){ 4.0f, 3.4f, 5.0f };
+    state->camera.target = (Vector3){ 1.0f, 2.1f, 0.0f };
+    debug_capture(state, "phase-01-active-tethered.png", "active-tethered", 0);
+    return true;
+}
+
 static void debug_physics_step(void)
 {
     activate_static_voxels_near_dynamic();
@@ -2045,6 +2110,55 @@ static void debug_validate_step(DebugRunState *state, int step)
 {
     debug_validate_all_sim_particles(state, step);
     DebugSample sample = debug_collect_sample("validation", step, state->initial_centroid_y);
+    if (state->tether_active_then_static_test) {
+        if (step == 4) {
+            release_tether(0);
+            prepare_tether_forces();
+            players[0].pos = (Vector3){ 0.0f, 2.0f, 0.0f };
+            Vector3 second_target = { 8.5f * VOXEL_SIZE, 8.5f * VOXEL_SIZE,
+                                      0.5f * VOXEL_SIZE };
+            Vector3 second_aim = v_norm(v_sub(second_target, players[0].pos));
+            dir_to_yaw_pitch(second_aim, &players[0].yaw, &players[0].pitch);
+            state->tether_voxel_count_before_static = voxel_count;
+            start_tether(0);
+            state->tether_second_started = players[0].tetherHolding &&
+                players[0].tetherVoxel >= 0 && players[0].tetherVoxel < voxel_count;
+            if (state->tether_second_started) {
+                prepare_tether_forces();
+                if (!resolve_tether_voxel(&players[0])) {
+                    debug_add_failure(state, "second tether lost its target during static conversion");
+                    return;
+                }
+                Voxel *selected = &voxels[players[0].tetherVoxel];
+                state->tether_static_start = selected->pos;
+                selected->debugClusterTag = DEBUG_TEST_TAG;
+                state->tether_static_remaining = debug_count_tagged(DEBUG_SUPPORT_TAG, 0);
+                // Move the hand well beyond its initial hold point so the test
+                // distinguishes a live tether from a merely surviving voxel.
+                players[0].pos = (Vector3){ -2.0f, 2.0f, 0.0f };
+                prepare_tether_forces();
+            }
+        } else if (step > 4 && step <= 24 && state->tether_second_started) {
+            resolve_tether_voxel(&players[0]);
+            int selected = players[0].tetherVoxel;
+            int actual = debug_find_tagged_voxel(DEBUG_TEST_TAG, false);
+            state->tether_expected_index = actual;
+            state->tether_selected_index = selected;
+            if (selected != actual && state->tether_index_mismatch_step < 0)
+                state->tether_index_mismatch_step = step;
+            if (players[0].tetherHolding && selected >= 0 && selected < voxel_count &&
+                selected == actual && voxels[selected].simulate) {
+                state->tether_second_survived = true;
+                Vector3 travel = v_sub(voxels[selected].pos, state->tether_static_start);
+                float distance = v_length(travel);
+                if (distance > state->tether_static_pull_distance)
+                    state->tether_static_pull_distance = distance;
+            }
+        } else if (step == 25 && players[0].tetherHolding) {
+            release_tether(0);
+            prepare_tether_forces();
+        }
+    }
     bool lifecycle_test = state->falling_pillar_test || state->platform_lifecycle_test;
     if (lifecycle_test) {
         int tagged_total = sample.tagged_dynamic + sample.tagged_static;
@@ -2119,7 +2233,7 @@ static void debug_validate_step(DebugRunState *state, int step)
                 debug_validate_tagged_dynamic(state, &sample, "gameplay-path activation");
             }
         }
-    } else if (step <= 1) {
+    } else if (step <= 1 && !state->tether_active_then_static_test) {
         debug_validate_tagged_dynamic(state, &sample, step == 0 ? "after activation" : "first physics step");
     }
     if (!state->single_corner_hinge_test) {
@@ -2186,6 +2300,27 @@ static void debug_finalize_validation(DebugRunState *state)
             debug_add_failure(state,
                               "settled pillar retained %.3f m/s mean horizontal speed (maximum 0.150)",
                               state->drift_window_speed);
+        }
+        return;
+    }
+    if (state->tether_active_then_static_test) {
+        if (!state->tether_second_started) {
+            debug_add_failure(state, "second tether did not acquire the static voxel");
+        }
+        if (!state->tether_second_survived || voxel_count != state->tether_voxel_count_before_static) {
+            debug_add_failure(state,
+                              "static tether target disappeared (survived=%d voxels=%d/%d)",
+                              state->tether_second_survived ? 1 : 0, voxel_count,
+                              state->tether_voxel_count_before_static);
+        }
+        if (state->tether_static_remaining != 2) {
+            debug_add_failure(state, "static tether removed %d neighbouring voxels (remaining=%d/2)",
+                              2 - state->tether_static_remaining, state->tether_static_remaining);
+        }
+        if (!isfinite(state->tether_static_pull_distance) ||
+            state->tether_static_pull_distance < 0.25f) {
+            debug_add_failure(state, "second tether pulled its target only %.3f metres",
+                              state->tether_static_pull_distance);
         }
         return;
     }
@@ -2337,6 +2472,20 @@ static bool debug_write_report(DebugRunState *state)
             state->single_corner_hinge_test ? "true" : "false",
             (double)state->max_hinge_angle_deg,
             state->hinge_broken ? "true" : "false");
+
+    fprintf(file,
+            "  \"tetherSequenceDiagnostics\": {\"enabled\": %s,"
+            " \"secondStarted\": %s, \"secondSurvived\": %s,"
+            " \"staticRemaining\": %d, \"pullDistance\": %.9g,"
+            " \"indexMismatchStep\": %d, \"expectedIndex\": %d,"
+            " \"selectedIndex\": %d},\n",
+            state->tether_active_then_static_test ? "true" : "false",
+            state->tether_second_started ? "true" : "false",
+            state->tether_second_survived ? "true" : "false",
+            state->tether_static_remaining,
+            (double)state->tether_static_pull_distance,
+            state->tether_index_mismatch_step, state->tether_expected_index,
+            state->tether_selected_index);
 
     fputs("  \"failures\": [", file);
     for (int i = 0; i < state->failure_count; ++i) {
