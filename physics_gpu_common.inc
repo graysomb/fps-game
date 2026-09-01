@@ -450,9 +450,12 @@ static bool gpu_pack_world(void) {
         GpuTopologyState *a = &gpuPhysics.topology_stage[dynamic_id * 2];
         GpuTopologyState *b = &gpuPhysics.topology_stage[dynamic_id * 2 + 1];
         for (int face = 0; face < 6; ++face) {
-            int neighbor_world = table_get(v->gx + face_offsets[face][0],
+            int neighbor_world = collisionVoxelGlueNeighbors[world_id][face];
+            if (neighbor_world < 0) {
+                neighbor_world = table_get(v->gx + face_offsets[face][0],
                                            v->gy + face_offsets[face][1],
                                            v->gz + face_offsets[face][2]);
+            }
             int neighbor_dynamic = (neighbor_world >= 0 && neighbor_world < voxel_count)
                 ? gpuPhysics.world_to_dynamic[neighbor_world] : -1;
             if (face < 4) a->value[face] = neighbor_dynamic;

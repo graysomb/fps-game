@@ -351,6 +351,7 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define GLUE_EPS 0.0002f
 #define GLUE_BREAK_STRAIN 0.4f
 #define GLUE_BREAK_HINGE_ANGLE_DEG 20.0f
+#define FLOOR_TANGENTIAL_VELOCITY_RETENTION 0.05f
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 3
 #define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
 #define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
@@ -612,6 +613,11 @@ static inline bool voxel_is_awake_dynamic(const Voxel *voxel)
     return voxel && voxel->simulate && !voxel->sleeping;
 }
 static int collisionVoxelClusterIds[MAX_VOXELS];
+static int collisionVoxelGlueNeighbors[MAX_VOXELS][6];
+static int glueTopologyHashVoxel[HASH_SIZE];
+static int glueTopologyHashX[HASH_SIZE];
+static int glueTopologyHashY[HASH_SIZE];
+static int glueTopologyHashZ[HASH_SIZE];
 static int particleHashActiveSize = 1024;
 static int tether_apply_stamp = 1;
 static _Atomic int particle_hash_head[PARTICLE_HASH_SIZE];
@@ -8940,6 +8946,53 @@ static void gather_voxel_break_masks(Voxel *voxel) {
         if (voxel->glued_faces[1]) voxel->break_mask |= (uint8_t)(1u << 1);
     }
 
+    // Internal strain cannot detect a rigid region rotating around one
+    // surviving shared corner. Compare each glued neighbour's local frame so
+    // the configured hinge limit also covers that degenerate attachment.
+    Vector3 axes[3] = { v_mul(v0, inv_len0), v_mul(v1, inv_len1), v_mul(v2, inv_len2) };
+    const float hinge_cos_limit = cosf(GLUE_BREAK_HINGE_ANGLE_DEG * DEG2RAD);
+    for (int face = 0; face < 6; ++face) {
+        if (!voxel->glued_faces[face]) continue;
+        int shared_corner_count = 0;
+        for (int face_corner = 0; face_corner < 4; ++face_corner) {
+            Particle *particle = voxel->particles[face_corner_indices[face][face_corner]];
+            if (particle && particle->refcount > 1) ++shared_corner_count;
+        }
+        if (shared_corner_count > 1) continue;
+        int voxel_idx = (int)(voxel - voxels);
+        int neighbor_idx = (voxel_idx >= 0 && voxel_idx < voxel_count)
+            ? collisionVoxelGlueNeighbors[voxel_idx][face] : -1;
+        if (neighbor_idx < 0 || neighbor_idx >= voxel_count) continue;
+        Voxel *neighbor = &voxels[neighbor_idx];
+        if (!neighbor->simulate || neighbor->isBullet || neighbor->type != 0) continue;
+        Vector3 q[8];
+        for (int corner = 0; corner < 8; ++corner) {
+            q[corner] = neighbor->particles[corner]->predicted_pos;
+        }
+        Vector3 neighbor_axes[3] = {
+            v_mul(v_add(v_add(v_sub(q[1], q[0]), v_sub(q[3], q[2])),
+                        v_add(v_sub(q[5], q[4]), v_sub(q[7], q[6]))), 0.25f),
+            v_mul(v_add(v_add(v_sub(q[2], q[0]), v_sub(q[3], q[1])),
+                        v_add(v_sub(q[6], q[4]), v_sub(q[7], q[5]))), 0.25f),
+            v_mul(v_add(v_add(v_sub(q[4], q[0]), v_sub(q[5], q[1])),
+                        v_add(v_sub(q[6], q[2]), v_sub(q[7], q[3]))), 0.25f)
+        };
+        bool hinge_exceeded = false;
+        for (int axis = 0; axis < 3; ++axis) {
+            float neighbor_length = v_length(neighbor_axes[axis]);
+            if (v_length(axes[axis]) <= VGS_EPS || neighbor_length <= VGS_EPS) continue;
+            Vector3 neighbor_axis = v_mul(neighbor_axes[axis], 1.0f / neighbor_length);
+            if (v_dot(axes[axis], neighbor_axis) < hinge_cos_limit) {
+                hinge_exceeded = true;
+                break;
+            }
+        }
+        if (hinge_exceeded) {
+            exceeded = true;
+            voxel->break_mask |= (uint8_t)(1u << face);
+        }
+    }
+
     if (exceeded) {
         voxel->wake_source = true;
     }
@@ -10078,6 +10131,55 @@ static const StaticSurfaceCell *find_static_surface_cell(int x, int y, int z)
     return NULL;
 }
 
+static int glue_topology_hash_lookup(int x, int y, int z)
+{
+    uint32_t slot = static_surface_hash_coord(x, y, z, HASH_SIZE);
+    for (int probe = 0; probe < HASH_SIZE; ++probe) {
+        int voxel_index = glueTopologyHashVoxel[slot];
+        if (voxel_index < 0) return -1;
+        if (glueTopologyHashX[slot] == x && glueTopologyHashY[slot] == y &&
+            glueTopologyHashZ[slot] == z) return voxel_index;
+        slot = (slot + 1u) & (HASH_SIZE - 1u);
+    }
+    return -1;
+}
+
+static void rebuild_glue_topology_neighbors(void)
+{
+    memset(glueTopologyHashVoxel, 0xff, sizeof(glueTopologyHashVoxel));
+    memset(collisionVoxelGlueNeighbors, 0xff,
+           (size_t)voxel_count * sizeof(collisionVoxelGlueNeighbors[0]));
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (!voxel->simulate || voxel->isBullet || voxel->type != 0) continue;
+        int x = voxel->orig_min_gx;
+        int y = voxel->orig_min_gy;
+        int z = voxel->orig_min_gz;
+        uint32_t slot = static_surface_hash_coord(x, y, z, HASH_SIZE);
+        for (int probe = 0; probe < HASH_SIZE; ++probe) {
+            if (glueTopologyHashVoxel[slot] < 0) {
+                glueTopologyHashVoxel[slot] = i;
+                glueTopologyHashX[slot] = x;
+                glueTopologyHashY[slot] = y;
+                glueTopologyHashZ[slot] = z;
+                break;
+            }
+            slot = (slot + 1u) & (HASH_SIZE - 1u);
+        }
+    }
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (!voxel->simulate || voxel->isBullet || voxel->type != 0) continue;
+        for (int face = 0; face < 6; ++face) {
+            if (!voxel->glued_faces[face]) continue;
+            collisionVoxelGlueNeighbors[i][face] = glue_topology_hash_lookup(
+                voxel->orig_min_gx + face_offsets[face][0],
+                voxel->orig_min_gy + face_offsets[face][1],
+                voxel->orig_min_gz + face_offsets[face][2]);
+        }
+    }
+}
+
 static void rebuild_dynamic_collision_particles(void)
 {
     if (particle_pool_count > 0) {
@@ -10126,6 +10228,7 @@ static void rebuild_particle_collision_metadata(void)
     for (int i = 0; i < sim_particle_count; ++i) {
         if (sim_particles[i]) sim_particles[i]->collision_group = -1;
     }
+    rebuild_glue_topology_neighbors();
     build_glue_cluster_ids(collisionVoxelClusterIds);
     for (int voxel_index = 0; voxel_index < voxel_count; ++voxel_index) {
         Voxel *voxel = &voxels[voxel_index];
@@ -11189,8 +11292,12 @@ static void solve_static_collisions_range(int start, int end, int worker_id, voi
         Vector3 pos = p->predicted_pos;
         float floor_offset = 0.5f * VOXEL_SIZE;
         float floor_limit = fmaxf(0.0f, floor_offset - voxel_radius);
-        if (pos.y < floor_limit) {
+        bool floor_contact = pos.y < floor_limit;
+        if (floor_contact) {
             pos.y = floor_limit;
+            Vector3 travel = v_sub(pos, p->prev_pos);
+            p->prev_pos.x = pos.x - travel.x * FLOOR_TANGENTIAL_VELOCITY_RETENTION;
+            p->prev_pos.z = pos.z - travel.z * FLOOR_TANGENTIAL_VELOCITY_RETENTION;
         }
         pos.x = clampf(pos.x, -terrain_limit, terrain_limit);
         pos.z = clampf(pos.z, -terrain_limit, terrain_limit);

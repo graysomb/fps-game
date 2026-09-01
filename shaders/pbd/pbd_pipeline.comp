@@ -402,7 +402,10 @@ void staticCollisions(uint gid) {
     vec3 pos = p.predicted_base_inv_mass.xyz;
     float terrainLimit = uFloorSize - radius;
     float floorLimit = max(0.0, 0.5 * uVoxelSize - radius);
+    bool floorContact = pos.y < floorLimit;
     pos.y = max(pos.y, floorLimit);
+    if (floorContact) p.prev_inv_mass.xz = pos.xz -
+        (pos.xz - p.prev_inv_mass.xz) * 0.05;
     pos.xz = clamp(pos.xz, vec2(-terrainLimit), vec2(terrainLimit));
     const float eps = 1e-6;
     for (int i = 0; i < uActivePlayers && i < 4; ++i) {
@@ -447,8 +450,11 @@ void staticCollisions(uint gid) {
         if (colliderId >= 0 && colliderId < uStaticColliderCount)
             pos = pushOutOfBox(pos, 0.25 * uVoxelSize, staticCollider[colliderId]);
     }
-    particle[id].predicted_base_inv_mass.xyz = pos;
+    p.predicted_base_inv_mass.xyz = pos;
+    particle[id] = p;
 }
+
+int topologyNeighbor(int voxelId, int face);
 
 void gatherBreakMask(uint gid) {
     if (gid >= uint(uVoxelCount)) return;
@@ -477,6 +483,35 @@ void gatherBreakMask(uint gid) {
     if (abs(dot(n0,n1))>uShearBreakThreshold) { exceeded=true; mask |= glued & ((1u<<4)|(1u<<5)); }
     if (abs(dot(n0,n2))>uShearBreakThreshold) { exceeded=true; mask |= glued & ((1u<<2)|(1u<<3)); }
     if (abs(dot(n1,n2))>uShearBreakThreshold) { exceeded=true; mask |= glued & ((1u<<0)|(1u<<1)); }
+    const float hingeCosLimit = 0.9396926208; // cos(20 degrees)
+    const int faceCorners[24] = int[24](
+        1,3,5,7, 0,2,4,6, 2,3,6,7,
+        0,1,4,5, 4,5,6,7, 0,1,2,3);
+    for (int face=0; face<6; ++face) {
+        if ((glued & (1u<<face)) == 0u) continue;
+        int sharedCornerCount = 0;
+        for (int c=0; c<4; ++c) {
+            uint sharedId = voxelParticle(v, faceCorners[face*4+c]);
+            if (sharedId < uint(gpuControl.x) && particleRefcount[sharedId] > 1)
+                ++sharedCornerCount;
+        }
+        if (sharedCornerCount > 1) continue;
+        int neighborId = topologyNeighbor(int(gid), face);
+        if (neighborId < 0 || neighborId >= uVoxelCount) continue;
+        VoxelState neighbor = voxel[neighborId];
+        if (neighbor.flags.x == 0 || neighbor.flags.y != 0 || neighbor.flags.z != 0) continue;
+        vec3 q[8];
+        for (int i=0; i<8; ++i) {
+            uint id=voxelParticle(neighbor,i); if (id>=uint(gpuControl.x)) return;
+            q[i]=particle[id].predicted_base_inv_mass.xyz;
+        }
+        vec3 m0=normalize(((q[1]-q[0])+(q[3]-q[2])+(q[5]-q[4])+(q[7]-q[6]))*0.25);
+        vec3 m1=normalize(((q[2]-q[0])+(q[3]-q[1])+(q[6]-q[4])+(q[7]-q[5]))*0.25);
+        vec3 m2=normalize(((q[4]-q[0])+(q[5]-q[1])+(q[6]-q[2])+(q[7]-q[3]))*0.25);
+        if (dot(n0,m0)<hingeCosLimit || dot(n1,m1)<hingeCosLimit || dot(n2,m2)<hingeCosLimit) {
+            exceeded=true; mask |= 1u<<face;
+        }
+    }
     v.lifecycle.w=mask; if (exceeded) v.lifecycle.y=1u; voxel[gid]=v;
 }
 

@@ -75,6 +75,8 @@ typedef struct DebugRunState {
     bool drop_sampled;
     bool delayed_activation;
     bool overhang_impact;
+    bool pillar_impact_drift_test;
+    bool single_corner_hinge_test;
     bool recycle_test;
     bool recycle_succeeded;
     bool falling_pillar_test;
@@ -94,6 +96,11 @@ typedef struct DebugRunState {
     float overhang_root_drop_at_step_30;
     float overhang_tip_drop_at_step_30;
     float overhang_relative_deflection_at_step_30;
+    Vector3 drift_window_centroid;
+    float drift_window_distance;
+    float drift_window_speed;
+    float max_hinge_angle_deg;
+    bool hinge_broken;
     int gpu_static_ssbo_diff_entries;
     int gpu_static_ssbo_stale_cells;
     int gpu_sim_id_mismatches;
@@ -142,6 +149,8 @@ static bool debug_setup_falling_pillar_sleep(DebugRunState *state);
 static bool debug_setup_three_leg_cut_platform(DebugRunState *state);
 static bool debug_setup_tether_throw_floating(DebugRunState *state);
 static bool debug_setup_overhang_impact(DebugRunState *state);
+static bool debug_setup_pillar_impact_drift(DebugRunState *state);
+static bool debug_setup_single_corner_hinge(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall },
@@ -152,7 +161,9 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "falling-pillar-sleep", "Rotated pillar falls, settles, and sleeps without changing pose", debug_setup_falling_pillar_sleep },
     { "three-leg-cut-platform", "Four-legged platform with three legs removed completes sleep and recycling", debug_setup_three_leg_cut_platform },
     { "tether-throw-floating", "Released tether voxel wakes an unsupported sleeping cluster", debug_setup_tether_throw_floating },
-    { "overhang-impact", "Falling dynamic voxel activates and bends a supported static overhang", debug_setup_overhang_impact }
+    { "overhang-impact", "Falling dynamic voxel activates and bends a supported static overhang", debug_setup_overhang_impact },
+    { "pillar-impact-drift", "Large undercut pillar impact exposes post-contact sliding and wiggle", debug_setup_pillar_impact_drift },
+    { "single-corner-hinge", "A one-corner glue remnant must break beyond the hinge-angle limit", debug_setup_single_corner_hinge }
 };
 
 static const int debugScenarioCount = (int)(sizeof(debugScenarios) / sizeof(debugScenarios[0]));
@@ -1840,6 +1851,183 @@ static bool debug_setup_overhang_impact(DebugRunState *state)
     return true;
 }
 
+static bool debug_tagged_centroid_and_horizontal_speed(int tag, Vector3 *centroid_out,
+                                                        float *speed_out)
+{
+    Vector3 centroid = { 0.0f, 0.0f, 0.0f };
+    float speed_sum = 0.0f;
+    int count = 0;
+    for (int i = 0; i < voxel_count; ++i) {
+        const Voxel *voxel = &voxels[i];
+        if (voxel->debugClusterTag != tag || !voxel->simulate) continue;
+        centroid = v_add(centroid, voxel->pos);
+        speed_sum += sqrtf(voxel->vel.x * voxel->vel.x + voxel->vel.z * voxel->vel.z);
+        ++count;
+    }
+    if (count <= 0) return false;
+    if (centroid_out) *centroid_out = v_mul(centroid, 1.0f / (float)count);
+    if (speed_out) *speed_out = speed_sum / (float)count;
+    return true;
+}
+
+static Vector3 debug_voxel_axis(const Voxel *voxel, int axis)
+{
+    Vector3 result = { 0.0f, 0.0f, 0.0f };
+    if (!voxel || axis < 0 || axis > 2) return result;
+    const int pairs[3][4][2] = {
+        { {0,1}, {2,3}, {4,5}, {6,7} },
+        { {0,2}, {1,3}, {4,6}, {5,7} },
+        { {0,4}, {1,5}, {2,6}, {3,7} }
+    };
+    for (int pair = 0; pair < 4; ++pair) {
+        Particle *a = voxel->particles[pairs[axis][pair][0]];
+        Particle *b = voxel->particles[pairs[axis][pair][1]];
+        if (a && b) result = v_add(result, v_sub(b->pos, a->pos));
+    }
+    return v_norm(result);
+}
+
+static float debug_voxel_relative_angle_deg(const Voxel *a, const Voxel *b)
+{
+    float minimum_dot = 1.0f;
+    for (int axis = 0; axis < 3; ++axis) {
+        float dot = clampf(v_dot(debug_voxel_axis(a, axis), debug_voxel_axis(b, axis)),
+                           -1.0f, 1.0f);
+        if (dot < minimum_dot) minimum_dot = dot;
+    }
+    return acosf(minimum_dot) / DEG2RAD;
+}
+
+static bool debug_setup_pillar_impact_drift(DebugRunState *state)
+{
+    debug_reset_world();
+    state->pillar_impact_drift_test = true;
+    Color color = (Color){ 225, 145, 55, 255 };
+    int created = 0;
+    for (int y = 12; y < 32; ++y) {
+        for (int z = -2; z <= 2; ++z) {
+            for (int x = -2; x <= 2; ++x) {
+                if (debug_add_cell(x, y, z, true, false, color, DEBUG_TEST_TAG) >= 0) {
+                    ++created;
+                }
+            }
+        }
+    }
+    state->expected_voxels = created;
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_rebuild_world_state();
+    if (created != 500 || !debug_activate_test_cluster(state)) {
+        debug_add_failure(state, "pillar-impact setup activated %d/500 voxels", created);
+        return false;
+    }
+
+    Vector3 pivot = { 0.0f, 3.0f, 0.0f };
+    const float angle = 4.0f * DEG2RAD;
+    const float cs = cosf(angle), sn = sinf(angle);
+    const float angular_speed = 0.45f;
+    int stamp = ++particle_sync_stamp;
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (voxel->debugClusterTag != DEBUG_TEST_TAG || !voxel->simulate) continue;
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            Particle *particle = voxel->particles[corner];
+            if (!particle || particle->sync_stamp == stamp) continue;
+            particle->sync_stamp = stamp;
+            Vector3 local = v_sub(particle->pos, pivot);
+            Vector3 rotated = { cs * local.x - sn * local.y,
+                                sn * local.x + cs * local.y, local.z };
+            particle->pos = v_add(pivot, rotated);
+            particle->prev_pos = particle->pos;
+            particle->predicted_pos = particle->pos;
+            particle->vel = (Vector3){ -angular_speed * rotated.y,
+                                       angular_speed * rotated.x, 0.0f };
+        }
+        Vector3 center = { 0.0f, 0.0f, 0.0f };
+        Vector3 velocity = { 0.0f, 0.0f, 0.0f };
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            center = v_add(center, voxel->particles[corner]->pos);
+            velocity = v_add(velocity, voxel->particles[corner]->vel);
+        }
+        voxel->pos = v_mul(center, 0.125f);
+        voxel->vel = v_mul(velocity, 0.125f);
+    }
+    collisionTopologyDirty = true;
+    rebuild_voxel_hash();
+    debug_set_initial_centroid(state);
+    state->camera.position = (Vector3){ 10.0f, 6.0f, 13.0f };
+    state->camera.target = (Vector3){ 0.0f, 3.5f, 0.0f };
+    debug_capture(state, "phase-01-undercut-pillar.png", "undercut-pillar", 0);
+    return true;
+}
+
+static bool debug_setup_single_corner_hinge(DebugRunState *state)
+{
+    debug_reset_world();
+    state->single_corner_hinge_test = true;
+    int lower_idx = debug_add_cell(0, 8, 0, true, true,
+                                   (Color){ 105, 120, 145, 255 }, DEBUG_SUPPORT_TAG);
+    int upper_idx = debug_add_cell(0, 9, 0, false, true,
+                                   (Color){ 245, 150, 55, 255 }, DEBUG_TEST_TAG);
+    if (lower_idx < 0 || upper_idx < 0) {
+        debug_add_failure(state, "single-corner hinge could not create its two voxels");
+        return false;
+    }
+    debug_rebuild_world_state();
+    Voxel *lower = &voxels[lower_idx];
+    Voxel *upper = &voxels[upper_idx];
+    const int upper_face = 3;
+    const int lower_face = 2;
+    int pivot_corner = face_corner_indices[upper_face][0];
+    Particle *pivot_particle = upper->particles[pivot_corner];
+    for (int c = 1; c < 4; ++c) {
+        int corner = face_corner_indices[upper_face][c];
+        Particle *old = upper->particles[corner];
+        Particle *clone = particle_clone(old);
+        if (!clone) {
+            debug_add_failure(state, "single-corner hinge could not split face corner %d", c);
+            return false;
+        }
+        clone->inv_mass = 1.0f;
+        clone->base_inv_mass = 1.0f;
+        if (clone->sim_index < 0) sim_particles_add(clone);
+        upper->particles[corner] = clone;
+        particle_release(old);
+    }
+    upper->glued_faces[upper_face] = true;
+    lower->glued_faces[lower_face] = true;
+
+    const float angle = 75.0f * DEG2RAD;
+    const float cs = cosf(angle), sn = sinf(angle);
+    Vector3 pivot = pivot_particle->pos;
+    for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+        Particle *particle = upper->particles[corner];
+        if (!particle || particle == pivot_particle) continue;
+        Vector3 local = v_sub(particle->pos, pivot);
+        Vector3 rotated = { cs * local.x - sn * local.y,
+                            sn * local.x + cs * local.y, local.z };
+        particle->pos = v_add(pivot, rotated);
+        particle->prev_pos = particle->pos;
+        particle->predicted_pos = particle->pos;
+        particle->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+    }
+    Vector3 center = { 0.0f, 0.0f, 0.0f };
+    for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+        center = v_add(center, upper->particles[corner]->pos);
+    }
+    upper->pos = v_mul(center, 0.125f);
+    upper->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+    state->expected_voxels = 1;
+    state->activation_succeeded = true;
+    state->max_hinge_angle_deg = debug_voxel_relative_angle_deg(lower, upper);
+    collisionTopologyDirty = true;
+    rebuild_voxel_hash();
+    debug_set_initial_centroid(state);
+    state->camera.position = (Vector3){ 2.2f, 2.6f, 3.0f };
+    state->camera.target = (Vector3){ 0.15f, 2.25f, 0.15f };
+    debug_capture(state, "phase-01-single-corner-hinge.png", "single-corner-hinge", 0);
+    return true;
+}
+
 static void debug_physics_step(void)
 {
     activate_static_voxels_near_dynamic();
@@ -1934,8 +2122,10 @@ static void debug_validate_step(DebugRunState *state, int step)
     } else if (step <= 1) {
         debug_validate_tagged_dynamic(state, &sample, step == 0 ? "after activation" : "first physics step");
     }
-    debug_validate_gpu_static_state(state, step);
-    debug_readback_gpu_buffers(state, step);
+    if (!state->single_corner_hinge_test) {
+        debug_validate_gpu_static_state(state, step);
+        debug_readback_gpu_buffers(state, step);
+    }
     if (state->overhang_impact && step == 30) {
         float root_y = 0.0f;
         float tip_y = 0.0f;
@@ -1954,6 +2144,28 @@ static void debug_validate_step(DebugRunState *state, int step)
         state->drop_sampled = true;
         state->drop_at_step_60 = sample.centroid_drop;
     }
+    if (state->pillar_impact_drift_test && step >= 240) {
+        Vector3 centroid = { 0.0f, 0.0f, 0.0f };
+        float horizontal_speed = 0.0f;
+        if (debug_tagged_centroid_and_horizontal_speed(DEBUG_TEST_TAG, &centroid,
+                                                       &horizontal_speed)) {
+            if (step == 240) state->drift_window_centroid = centroid;
+            float dx = centroid.x - state->drift_window_centroid.x;
+            float dz = centroid.z - state->drift_window_centroid.z;
+            state->drift_window_distance = sqrtf(dx * dx + dz * dz);
+            state->drift_window_speed = horizontal_speed;
+        }
+    }
+    if (state->single_corner_hinge_test) {
+        int lower_idx = debug_find_tagged_voxel(DEBUG_SUPPORT_TAG, false);
+        int upper_idx = debug_find_tagged_voxel(DEBUG_TEST_TAG, false);
+        if (lower_idx >= 0 && upper_idx >= 0) {
+            float angle = debug_voxel_relative_angle_deg(&voxels[lower_idx], &voxels[upper_idx]);
+            if (angle > state->max_hinge_angle_deg) state->max_hinge_angle_deg = angle;
+            state->hinge_broken = !voxels[lower_idx].glued_faces[2] ||
+                                  !voxels[upper_idx].glued_faces[3];
+        }
+    }
 }
 
 static void debug_finalize_validation(DebugRunState *state)
@@ -1963,6 +2175,31 @@ static void debug_finalize_validation(DebugRunState *state)
         debug_add_failure(state, "forced GPU run fell back to %s: %s",
                           physics_backend_name(physicsBackend.active),
                           physicsBackend.fallback_reason);
+    }
+    if (state->pillar_impact_drift_test) {
+        if (!isfinite(state->drift_window_distance) || state->drift_window_distance > 1.00f) {
+            debug_add_failure(state,
+                              "settled pillar drifted %.3f metres after step 240 (maximum 1.000)",
+                              state->drift_window_distance);
+        }
+        if (!isfinite(state->drift_window_speed) || state->drift_window_speed > 0.15f) {
+            debug_add_failure(state,
+                              "settled pillar retained %.3f m/s mean horizontal speed (maximum 0.150)",
+                              state->drift_window_speed);
+        }
+        return;
+    }
+    if (state->single_corner_hinge_test) {
+        if (state->max_hinge_angle_deg <= GLUE_BREAK_HINGE_ANGLE_DEG) {
+            debug_add_failure(state, "hinge reached only %.1f degrees; reproduction was not exercised",
+                              state->max_hinge_angle_deg);
+        }
+        if (!state->hinge_broken) {
+            debug_add_failure(state,
+                              "single-corner glue survived %.1f degrees (limit %.1f)",
+                              state->max_hinge_angle_deg, (double)GLUE_BREAK_HINGE_ANGLE_DEG);
+        }
+        return;
     }
     if (state->recycle_test) {
         if (!state->sleeping_conversion_succeeded || !state->recycle_succeeded) {
@@ -2089,6 +2326,17 @@ static bool debug_write_report(DebugRunState *state)
             (double)state->overhang_root_drop_at_step_30,
             (double)state->overhang_tip_drop_at_step_30,
             (double)state->overhang_relative_deflection_at_step_30);
+
+    fprintf(file,
+            "  \"impactDiagnostics\": {\"pillarDriftEnabled\": %s,"
+            " \"driftAfterStep240\": %.9g, \"meanHorizontalSpeed\": %.9g,"
+            " \"singleCornerHingeEnabled\": %s, \"maxHingeAngleDeg\": %.9g,"
+            " \"hingeBroken\": %s},\n",
+            state->pillar_impact_drift_test ? "true" : "false",
+            (double)state->drift_window_distance, (double)state->drift_window_speed,
+            state->single_corner_hinge_test ? "true" : "false",
+            (double)state->max_hinge_angle_deg,
+            state->hinge_broken ? "true" : "false");
 
     fputs("  \"failures\": [", file);
     for (int i = 0; i < state->failure_count; ++i) {

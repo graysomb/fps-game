@@ -342,6 +342,10 @@ Available scenarios are:
   a tether-held voxel toward it through the same proximity-activation path used by gameplay.
 * `overhang-impact`: drops an ordinary active voxel onto the unsupported end of a static
   cantilever and checks that the overhang activates and deflects while its root stays supported.
+* `pillar-impact-drift`: drops a 500-voxel undercut pillar and bounds its late sliding speed
+  and displacement.
+* `single-corner-hinge`: verifies that a one-corner glue remnant breaks at the configured
+  hinge-angle limit.
 
 Without `--debug-output`, artifacts are written beneath
 `.build/bin/debug-artifacts/<scenario>/<active-backend>`. Each backend directory contains
