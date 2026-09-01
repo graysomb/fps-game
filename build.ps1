@@ -42,10 +42,18 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "OpenGL 4.3 raylib build failed" }
 
     $Optimization = if ($Configuration -eq "debug") { "-O0", "-g" } else { "-O2", "-DNDEBUG" }
-    $Common = @("-std=c11") + $Optimization + @("-I$ProjectRoot", "-lopengl32", "-lgdi32", "-lwinmm", "-lpthread", "-lm")
-    & $Gcc (Join-Path $ProjectRoot "fps_ray.c") "-I$(Join-Path $Raylib33 'src')" "-L$(Join-Path $Raylib33 'src')" "-o$(Join-Path $BinDir 'fps_ray_cpu.exe')" "-lraylib" @Common
+    $EnetRoot = Join-Path $ProjectRoot "third_party\enet"
+    $NetworkSources = @(
+        (Join-Path $ProjectRoot "net_protocol.c"), (Join-Path $ProjectRoot "net_transport.c"),
+        (Join-Path $EnetRoot "callbacks.c"), (Join-Path $EnetRoot "compress.c"),
+        (Join-Path $EnetRoot "host.c"), (Join-Path $EnetRoot "list.c"),
+        (Join-Path $EnetRoot "packet.c"), (Join-Path $EnetRoot "peer.c"),
+        (Join-Path $EnetRoot "protocol.c"), (Join-Path $EnetRoot "win32.c")
+    )
+    $Common = @("-std=c11") + $Optimization + @("-I$ProjectRoot", "-I$(Join-Path $EnetRoot 'include')", "-lopengl32", "-lgdi32", "-lwinmm", "-lws2_32", "-lpthread", "-lm")
+    & $Gcc (Join-Path $ProjectRoot "fps_ray.c") @NetworkSources "-I$(Join-Path $Raylib33 'src')" "-L$(Join-Path $Raylib33 'src')" "-o$(Join-Path $BinDir 'fps_ray_cpu.exe')" "-lraylib" @Common
     if ($LASTEXITCODE -ne 0) { throw "CPU game build failed" }
-    & $Gcc (Join-Path $ProjectRoot "fps_ray.c") "-DGRAPHICS_API_OPENGL_43" "-I$(Join-Path $Raylib43 'src')" "-L$(Join-Path $Raylib43 'src')" "-o$(Join-Path $BinDir 'fps_ray_gpu.exe')" "-lraylib" @Common
+    & $Gcc (Join-Path $ProjectRoot "fps_ray.c") @NetworkSources "-DGRAPHICS_API_OPENGL_43" "-I$(Join-Path $Raylib43 'src')" "-L$(Join-Path $Raylib43 'src')" "-o$(Join-Path $BinDir 'fps_ray_gpu.exe')" "-lraylib" @Common
     if ($LASTEXITCODE -ne 0) { throw "GPU game build failed" }
     & $Gcc (Join-Path $ProjectRoot "fps_launcher.c") "-std=c11" "-O2" "-o$(Join-Path $BinDir 'fps_ray.exe')"
     if ($LASTEXITCODE -ne 0) { throw "Launcher build failed" }

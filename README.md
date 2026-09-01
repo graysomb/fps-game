@@ -258,6 +258,31 @@ The Mac GPU binary links Metal physics with the same CPU MT and CPU ST fallbacks
 The app bundle is ad-hoc signed for local play; distribution outside the local Mac
 still requires a Developer ID signature and notarization.
 
+## LAN multiplayer
+
+LAN play uses a host-authoritative ENet session with up to four machines and one
+local player per machine. The host alone runs voxel physics; clients receive the
+static world and compact dynamic-voxel transforms. Player input and snapshots run
+at 60 Hz. Clients predict only their own movement/look, then reconcile and replay
+unacknowledged inputs. Shooting, melee, building, tethering, creative edits,
+pickups, scores, and voxel physics remain authoritative on the host.
+
+From the menu, press `H` to host on port 27015 or `J` to join a host on the same
+machine. Direct-IP and alternate-port startup is available from the command line:
+
+```text
+fps_ray --lan-host
+fps_ray --lan-host=27125
+fps_ray --lan-connect=192.168.1.25:27125
+fps_ray --lan-host --lan-creative
+fps_ray --lan-connect=192.168.1.25:27015 --lan-creative
+```
+
+Add `--net-stats` to print per-second tick, peer, RTT, and byte counters. The wire
+format uses explicit endian-safe field encoding, so Windows, Linux, Intel macOS,
+and Apple Silicon macOS can share a session. ENet 1.3.18 is vendored under
+`third_party/enet` and built by all three platform scripts.
+
 The build scripts place `fps_ray`, `fps_ray_gpu`, `fps_ray_cpu`, and the shader assets in
 `.build/bin` (with `.exe` suffixes on Windows).
 
