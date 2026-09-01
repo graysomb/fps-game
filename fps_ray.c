@@ -11642,9 +11642,9 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
         if (debugLogVoxelBlowup) {
             debugBlowupLogBudget = 32;
         }
-        // update_voxel_coarsening_state();
-        // reset_particle_mass_and_flags();
-        // apply_shell_effective_mass();
+        update_voxel_coarsening_state();
+        reset_particle_mass_and_flags();
+        apply_shell_effective_mass();
         integrate_particles(sub_dt);
 
         for (int it = 0; it < 1; ++it) {
@@ -11719,6 +11719,12 @@ static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
     double started = GetTime();
     const float sub_dt = dt / (float)PBD_SUBSTEPS;
     if (physics_backend_is_gpu(physicsBackend.active) && gpuPhysics.ready) {
+        // The GPU VGS kernel consumes simulate_dofs from the packed voxel flags,
+        // so refresh the shell/interior classification before resident-state
+        // validation and upload.
+        update_voxel_coarsening_state();
+        reset_particle_mass_and_flags();
+        apply_shell_effective_mass();
         int completed_steps = gpu_physics_steps(dt, fixed_steps);
         if (completed_steps >= fixed_steps) {
             physicsBackend.last_step_ms = (GetTime() - started) * 1000.0;
