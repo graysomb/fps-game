@@ -12619,6 +12619,11 @@ static void perform_build(int idx) {
 
 static int rip_single_static_voxel(int voxel_idx, int activator) {
     if (voxel_idx < 0 || voxel_idx >= voxel_count) return -1;
+    // Restored static spans deliberately reject activation for a short time.
+    // Honor that protection before removing anything: removing a regenerated
+    // span here and then failing the tether would make the whole span vanish.
+    if (!voxels[voxel_idx].simulate &&
+        voxels[voxel_idx].activationCooldownFrames > 0) return -1;
     Voxel v = voxels[voxel_idx]; // Copy data
     
     remove_voxel_index(voxel_idx);
