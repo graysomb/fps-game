@@ -250,6 +250,7 @@ static inline float bits_to_float(uint32_t bits) {
 // Game state enum
 typedef enum {
     GAME_STATE_MENU,
+    GAME_STATE_LOBBY,
     GAME_STATE_PLAYING,
     GAME_STATE_PAUSED,
     GAME_STATE_SETTINGS,
@@ -543,6 +544,8 @@ static bool netHasPendingInput[MAX_PLAYERS] = { false };
 static double netTickAccumulator = 0.0;
 static double netLastStatsTime = 0.0;
 static bool netWorldReady = false;
+static bool netLobbyStarted = false;
+static bool netPlayerReady[MAX_PLAYERS] = { false };
 
 #define NET_PREDICTION_HISTORY 256
 typedef struct NetPredictedCommand {
@@ -14883,6 +14886,58 @@ static void net_send_hello(void) {
     net_transport_send(&netTransport, 0, FPS_NET_CHANNEL_CONTROL, packet, writer.length, true);
 }
 
+static void net_broadcast_lobby_state(void) {
+    if (netTransport.role != NET_ROLE_HOST) return;
+    uint8_t packet[96];
+    NetWriter writer;
+    net_writer_init(&writer, packet, sizeof(packet));
+    net_write_header(&writer, NET_MSG_SESSION_STATE, 0, netTransport.session_id, netServerTick);
+    net_write_u8(&writer, netRequestedCreative ? 1 : 0);
+    net_write_u8(&writer, netLobbyStarted ? 1 : 0);
+    for (int i = 0; i < MAX_PLAYERS; ++i) {
+        net_write_u8(&writer, netPlayerPresent[i] ? 1 : 0);
+        net_write_u8(&writer, netPlayerReady[i] ? 1 : 0);
+    }
+    net_transport_broadcast(&netTransport, FPS_NET_CHANNEL_CONTROL, packet, writer.length, true);
+}
+
+static void net_send_ready(bool ready) {
+    if (netTransport.role != NET_ROLE_CLIENT || netTransport.local_player_slot < 0) return;
+    uint8_t packet[48];
+    NetWriter writer;
+    net_writer_init(&writer, packet, sizeof(packet));
+    net_write_header(&writer, NET_MSG_READY, 0, netTransport.session_id, netServerTick);
+    net_write_u8(&writer, ready ? 1 : 0);
+    net_transport_send(&netTransport, 0, FPS_NET_CHANNEL_CONTROL, packet, writer.length, true);
+}
+
+static bool net_lobby_can_start(void) {
+    for (int i = 1; i < MAX_PLAYERS; ++i)
+        if (netPlayerPresent[i] && !netPlayerReady[i]) return false;
+    return true;
+}
+
+static void net_host_start_match(void) {
+    if (netTransport.role != NET_ROLE_HOST || netLobbyStarted) return;
+    netLobbyStarted = true;
+    if (netRequestedCreative) ResetCreative(); else ResetGame();
+    activePlayers = 1;
+    for (int i = 1; i < MAX_PLAYERS; ++i) {
+        if (netPlayerPresent[i]) activePlayers = i + 1;
+    }
+    uint8_t packet[48];
+    NetWriter writer;
+    net_writer_init(&writer, packet, sizeof(packet));
+    net_write_header(&writer, NET_MSG_START, 0, netTransport.session_id, netServerTick);
+    net_write_u8(&writer, netRequestedCreative ? 1 : 0);
+    net_transport_broadcast(&netTransport, FPS_NET_CHANNEL_CONTROL, packet, writer.length, true);
+    for (int slot = 1; slot < MAX_PLAYERS; ++slot) {
+        if (netTransport.peers[slot].welcomed) net_send_world_to(slot);
+    }
+    netLastStaticGenerationSent = staticHashGeneration;
+    gameState = netRequestedCreative ? GAME_STATE_CREATIVE : GAME_STATE_PLAYING;
+}
+
 static void net_write_player_state(NetWriter *writer, int slot) {
     Player *p = &players[slot];
     net_write_u8(writer, (uint8_t)slot);
@@ -14938,7 +14993,9 @@ static void net_on_connect(NetTransport *transport, int slot, bool connected, vo
     if (transport->role == NET_ROLE_CLIENT && connected) net_send_hello();
     if (transport->role == NET_ROLE_HOST && !connected && slot >= 1 && slot < MAX_PLAYERS) {
         netPlayerPresent[slot] = false;
+        netPlayerReady[slot] = false;
         while (activePlayers > 1 && !netPlayerPresent[activePlayers - 1]) --activePlayers;
+        net_broadcast_lobby_state();
     }
 }
 
@@ -14962,7 +15019,13 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
         net_write_header(&writer, NET_MSG_WELCOME, 0, transport->session_id, netServerTick);
         net_write_u8(&writer, (uint8_t)peer_slot); net_write_u8(&writer, creative ? 1 : 0);
         net_transport_send(transport, peer_slot, FPS_NET_CHANNEL_CONTROL, packet, writer.length, true);
-        net_send_world_to(peer_slot);
+        net_broadcast_lobby_state();
+        return;
+    }
+    if (transport->role == NET_ROLE_HOST && header.type == NET_MSG_READY && peer_slot >= 1) {
+        if (header.session_id != transport->session_id || netLobbyStarted) return;
+        netPlayerReady[peer_slot] = net_read_u8(&reader) != 0;
+        if (!reader.failed) net_broadcast_lobby_state();
         return;
     }
     if (transport->role == NET_ROLE_HOST && header.type == NET_MSG_INPUT && peer_slot >= 1) {
@@ -14991,10 +15054,25 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
         transport->local_player_slot = net_read_u8(&reader);
         netRequestedCreative = net_read_u8(&reader) != 0;
         activePlayers = clamp_active_players(transport->local_player_slot + 1);
+        gameState = GAME_STATE_LOBBY;
         return;
     }
     if (header.session_id != transport->session_id) return;
-    if (header.type == NET_MSG_WORLD_BEGIN) {
+    if (header.type == NET_MSG_SESSION_STATE) {
+        netRequestedCreative = net_read_u8(&reader) != 0;
+        netLobbyStarted = net_read_u8(&reader) != 0;
+        activePlayers = 1;
+        for (int i = 0; i < MAX_PLAYERS; ++i) {
+            netPlayerPresent[i] = net_read_u8(&reader) != 0;
+            netPlayerReady[i] = net_read_u8(&reader) != 0;
+            if (netPlayerPresent[i]) activePlayers = i + 1;
+        }
+        if (!netLobbyStarted) gameState = GAME_STATE_LOBBY;
+    } else if (header.type == NET_MSG_START) {
+        netLobbyStarted = true;
+        netRequestedCreative = net_read_u8(&reader) != 0;
+        netWorldReady = false;
+    } else if (header.type == NET_MSG_WORLD_BEGIN) {
         (void)net_read_u32(&reader); netRequestedCreative = net_read_u8(&reader) != 0;
         clear_world_voxels(); clear_pickups(); net_proxy_map_clear(); netWorldReady = false;
     } else if (header.type == NET_MSG_WORLD_STATIC) {
@@ -15097,6 +15175,10 @@ static void net_host_send_dynamic_poses(void) {
 
 static void net_host_tick(void) {
     ++netServerTick;
+    if (!netLobbyStarted) {
+        if ((netServerTick % 15u) == 0u) net_broadcast_lobby_state();
+        return;
+    }
     for (int slot = 1; slot < MAX_PLAYERS; ++slot) {
         if (!netPlayerPresent[slot] || !netHasPendingInput[slot]) continue;
         NetInputCommand command = netPendingInput[slot];
@@ -15454,12 +15536,13 @@ int main(int argc, char **argv) {
             CloseWindow();
             return 4;
         }
-        if (netRequestedCreative) ResetCreative(); else ResetGame();
         activePlayers = 1;
         memset(netPlayerPresent, 0, sizeof(netPlayerPresent));
+        memset(netPlayerReady, 0, sizeof(netPlayerReady));
         netPlayerPresent[0] = true;
-        netLastStaticGenerationSent = staticHashGeneration;
-        gameState = netRequestedCreative ? GAME_STATE_CREATIVE : GAME_STATE_PLAYING;
+        netPlayerReady[0] = true;
+        netLobbyStarted = false;
+        gameState = GAME_STATE_LOBBY;
         fprintf(stderr, "LAN host listening on port %u\n", (unsigned)netRequestedPort);
     } else if (!automatedRun && netRequestedRole == NET_ROLE_CLIENT) {
         if (!net_transport_connect(&netTransport, netConnectHost, netRequestedPort)) {
@@ -15468,6 +15551,8 @@ int main(int argc, char **argv) {
             return 4;
         }
         memset(netPlayerPresent, 0, sizeof(netPlayerPresent));
+        memset(netPlayerReady, 0, sizeof(netPlayerReady));
+        netLobbyStarted = false;
         gameState = GAME_STATE_MENU;
         fprintf(stderr, "Connecting to %s:%u\n", netConnectHost, (unsigned)netRequestedPort);
     }
@@ -15605,10 +15690,11 @@ int main(int argc, char **argv) {
                     netRequestedRole = NET_ROLE_HOST;
                     netRequestedCreative = false;
                     if (net_transport_host(&netTransport, netRequestedPort)) {
-                        ResetGame(); activePlayers = 1;
+                        activePlayers = 1;
                         memset(netPlayerPresent, 0, sizeof(netPlayerPresent)); netPlayerPresent[0] = true;
-                        netLastStaticGenerationSent = staticHashGeneration;
-                        gameState = GAME_STATE_PLAYING;
+                        memset(netPlayerReady, 0, sizeof(netPlayerReady)); netPlayerReady[0] = true;
+                        netLobbyStarted = false;
+                        gameState = GAME_STATE_LOBBY;
                     }
                 }
                 if (netTransport.role == NET_ROLE_OFFLINE && IsKeyPressed(KEY_J)) {
@@ -15616,9 +15702,61 @@ int main(int argc, char **argv) {
                     netRequestedCreative = false;
                     if (net_transport_connect(&netTransport, "127.0.0.1", netRequestedPort)) {
                         memset(netPlayerPresent, 0, sizeof(netPlayerPresent)); netWorldReady = false;
+                        memset(netPlayerReady, 0, sizeof(netPlayerReady)); netLobbyStarted = false;
                     }
                 }
                 break;
+            case GAME_STATE_LOBBY: {
+                BeginDrawing();
+                    ClearBackground((Color){ 28, 34, 44, 255 });
+                    const char *title = netTransport.role == NET_ROLE_HOST ? "LAN LOBBY - HOST" : "LAN LOBBY";
+                    DrawText(title, GetScreenWidth()/2 - MeasureText(title, 44)/2, 70, 44, RAYWHITE);
+                    DrawText(TextFormat("Mode: %s | Port: %u",
+                                        netRequestedCreative ? "Creative" : "Gameplay",
+                                        (unsigned)netRequestedPort),
+                             GetScreenWidth()/2 - 150, 135, 22, LIGHTGRAY);
+                    int row_y = 210;
+                    for (int i = 0; i < MAX_PLAYERS; ++i) {
+                        Color color = netPlayerPresent[i] ? player_palette_color(i) : GRAY;
+                        const char *status = !netPlayerPresent[i] ? "OPEN" :
+                                             (i == 0 ? "HOST" : (netPlayerReady[i] ? "READY" : "NOT READY"));
+                        DrawRectangle(GetScreenWidth()/2 - 250, row_y - 8, 500, 48, Fade(color, 0.25f));
+                        DrawText(TextFormat("Player %d", i + 1), GetScreenWidth()/2 - 225, row_y, 24, color);
+                        DrawText(status, GetScreenWidth()/2 + 70, row_y, 24,
+                                 netPlayerPresent[i] ? RAYWHITE : LIGHTGRAY);
+                        row_y += 62;
+                    }
+                    if (netTransport.role == NET_ROLE_HOST) {
+                        const char *host_help = net_lobby_can_start() ?
+                            "Press ENTER to start | ESC to close lobby" :
+                            "Waiting for players to ready | ESC to close lobby";
+                        DrawText(host_help,
+                                 GetScreenWidth()/2 - MeasureText(host_help, 22)/2,
+                                 GetScreenHeight() - 90, 22, RAYWHITE);
+                    } else {
+                        int slot = netTransport.local_player_slot;
+                        const char *ready_text = (slot >= 0 && netPlayerReady[slot]) ?
+                            "Press R to unready | ESC to leave" : "Press R when ready | ESC to leave";
+                        DrawText(ready_text, GetScreenWidth()/2 - MeasureText(ready_text, 22)/2,
+                                 GetScreenHeight() - 90, 22, RAYWHITE);
+                    }
+                EndDrawing();
+                if (netTransport.role == NET_ROLE_HOST && net_lobby_can_start() && IsKeyPressed(KEY_ENTER)) {
+                    net_host_start_match();
+                } else if (netTransport.role == NET_ROLE_CLIENT && IsKeyPressed(KEY_R) &&
+                           netTransport.local_player_slot >= 0) {
+                    int slot = netTransport.local_player_slot;
+                    netPlayerReady[slot] = !netPlayerReady[slot];
+                    net_send_ready(netPlayerReady[slot]);
+                }
+                if (IsKeyPressed(KEY_ESCAPE)) {
+                    net_transport_shutdown(&netTransport);
+                    netRequestedRole = NET_ROLE_OFFLINE;
+                    netLobbyStarted = false;
+                    gameState = GAME_STATE_MENU;
+                }
+                break;
+            }
             case GAME_STATE_DRONE_INTRO:
                 droneTimer -= GetFrameTime();
                 if (droneTimer <= 0.0f || IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)) {

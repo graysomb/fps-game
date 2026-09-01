@@ -267,8 +267,10 @@ at 60 Hz. Clients predict only their own movement/look, then reconcile and repla
 unacknowledged inputs. Shooting, melee, building, tethering, creative edits,
 pickups, scores, and voxel physics remain authoritative on the host.
 
-From the menu, press `H` to host on port 27015 or `J` to join a host on the same
-machine. Direct-IP and alternate-port startup is available from the command line:
+From the menu, press `H` to create a lobby on port 27015 or `J` to join a host on
+the same machine. Clients can toggle ready with `R`; the host starts the match
+with `Enter` after everyone has joined. Direct-IP and alternate-port startup is
+available from the command line:
 
 ```text
 fps_ray --lan-host
