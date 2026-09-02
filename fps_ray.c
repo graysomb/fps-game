@@ -599,10 +599,16 @@ static Particle *sim_particles[MAX_PARTICLES];
 // list.  Interior structural particles still integrate and participate in VGS,
 // but do not need to be hashed or projected against scene geometry.
 static Particle *collision_particles[MAX_PARTICLES];
+// Particles touched by fine VGS voxels.  Keeping this separate prevents
+// coarsened interiors from paying the Jacobi reset/apply cost.
+static Particle *vgs_particles[MAX_PARTICLES];
 static int particle_pool_count = 0;
 static int active_particle_count = 0;
 static int sim_particle_count = 0;
 static int collision_particle_count = 0;
+static int vgs_particle_count = 0;
+static uint32_t vgs_particle_marks[MAX_PARTICLES];
+static uint32_t vgs_particle_generation = 1;
 static uint16_t collision_particle_structural_refs[MAX_PARTICLES];
 static uint16_t collision_particle_shell_refs[MAX_PARTICLES];
 static int free_particle_indices[MAX_PARTICLES];
@@ -2035,6 +2041,7 @@ static void reset_particle_pool(void) {
     active_particle_count = 0;
     sim_particle_count = 0;
     collision_particle_count = 0;
+    vgs_particle_count = 0;
     free_particle_count = 0;
     particle_sync_stamp = 1;
     tether_apply_stamp = 1;
@@ -2043,6 +2050,9 @@ static void reset_particle_pool(void) {
     memset(active_particles, 0, sizeof(active_particles));
     memset(sim_particles, 0, sizeof(sim_particles));
     memset(collision_particles, 0, sizeof(collision_particles));
+    memset(vgs_particles, 0, sizeof(vgs_particles));
+    memset(vgs_particle_marks, 0, sizeof(vgs_particle_marks));
+    vgs_particle_generation = 1;
 }
 
 static void sim_particles_add(Particle *p) {
@@ -2273,11 +2283,13 @@ static inline void accumulate_particle_correction(Particle *p, Vector3 delta, fl
     atomic_add_float(&p->corr_weight_bits, weight);
 }
 
+typedef struct { Particle **list; } ParticleListJob;
+
 static void reset_particle_accumulators_range(int start, int end, int worker_id, void *user) {
     (void)worker_id;
-    (void)user;
+    ParticleListJob *job = (ParticleListJob *)user;
     for (int i = start; i < end; ++i) {
-        Particle *p = sim_particles[i];
+        Particle *p = job->list[i];
         atomic_store_explicit(&p->corr_sum_x, float_to_bits(0.0f), memory_order_relaxed);
         atomic_store_explicit(&p->corr_sum_y, float_to_bits(0.0f), memory_order_relaxed);
         atomic_store_explicit(&p->corr_sum_z, float_to_bits(0.0f), memory_order_relaxed);
@@ -2285,15 +2297,16 @@ static void reset_particle_accumulators_range(int start, int end, int worker_id,
     }
 }
 
-static void reset_particle_accumulators(void) {
-    pbd_parallel_for(0, sim_particle_count, reset_particle_accumulators_range, NULL);
+static void reset_particle_accumulators_for(Particle **list, int count) {
+    ParticleListJob job = { .list = list };
+    pbd_parallel_for(0, count, reset_particle_accumulators_range, &job);
 }
 
 static void apply_particle_accumulators_range(int start, int end, int worker_id, void *user) {
     (void)worker_id;
-    (void)user;
+    ParticleListJob *job = (ParticleListJob *)user;
     for (int i = start; i < end; ++i) {
-        Particle *p = sim_particles[i];
+        Particle *p = job->list[i];
         float corr_weight = bits_to_float(atomic_load_explicit(&p->corr_weight_bits, memory_order_relaxed));
         if (corr_weight <= 0.0f) {
             atomic_store_explicit(&p->corr_sum_x, float_to_bits(0.0f), memory_order_relaxed);
@@ -2316,8 +2329,9 @@ static void apply_particle_accumulators_range(int start, int end, int worker_id,
     }
 }
 
-static void apply_particle_accumulators(void) {
-    pbd_parallel_for(0, sim_particle_count, apply_particle_accumulators_range, NULL);
+static void apply_particle_accumulators_for(Particle **list, int count) {
+    ParticleListJob job = { .list = list };
+    pbd_parallel_for(0, count, apply_particle_accumulators_range, &job);
 }
 
 static bool face_local_coords(const Vector3 origin,
@@ -8647,7 +8661,18 @@ static void update_voxel_coarsening_state(void) {
             int nx = v->gx + face_offsets[face][0];
             int ny = v->gy + face_offsets[face][1];
             int nz = v->gz + face_offsets[face][2];
-            if (table_get(nx, ny, nz) < 0) {
+            int neighbor_idx = table_get(nx, ny, nz);
+            if (neighbor_idx < 0 || neighbor_idx >= voxel_count || neighbor_idx == i) {
+                full = false;
+                break;
+            }
+            Voxel *neighbor = &voxels[neighbor_idx];
+            // Coarsening is a structural optimization, not an occupancy test.
+            // Static cells, bullets, unrelated contact voxels, and one-sided
+            // glue remnants cannot provide the constraints needed to slave an
+            // interior cell safely.
+            if (!voxel_is_awake_dynamic(neighbor) || neighbor->isBullet ||
+                !v->glued_faces[face] || !neighbor->glued_faces[opposite_face[face]]) {
                 full = false;
                 break;
             }
@@ -8709,6 +8734,30 @@ static void reset_particle_mass_and_flags(void) {
         atomic_store_explicit(&p->corr_sum_y, float_to_bits(0.0f), memory_order_relaxed);
         atomic_store_explicit(&p->corr_sum_z, float_to_bits(0.0f), memory_order_relaxed);
         atomic_store_explicit(&p->corr_weight_bits, float_to_bits(0.0f), memory_order_relaxed);
+    }
+}
+
+static void rebuild_vgs_particles(void) {
+    ++vgs_particle_generation;
+    if (vgs_particle_generation == 0) {
+        memset(vgs_particle_marks, 0, sizeof(vgs_particle_marks));
+        vgs_particle_generation = 1;
+    }
+    vgs_particle_count = 0;
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (!voxel_is_awake_dynamic(voxel) || voxel->isBullet ||
+            voxel->type != 0 || !voxel->simulate_dofs) continue;
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            Particle *particle = voxel->particles[corner];
+            if (!particle || particle->sim_index < 0 || particle->inv_mass <= 0.0f) continue;
+            ptrdiff_t pool_index = particle - particles_pool;
+            if (pool_index < 0 || pool_index >= particle_pool_count) continue;
+            if (vgs_particle_marks[pool_index] == vgs_particle_generation) continue;
+            vgs_particle_marks[pool_index] = vgs_particle_generation;
+            if (vgs_particle_count < MAX_PARTICLES)
+                vgs_particles[vgs_particle_count++] = particle;
+        }
     }
 }
 
@@ -8811,6 +8860,26 @@ static void process_break_masks(void) {
         }
         for (int face = 0; face < 6; ++face) {
             if (v->break_mask & (uint8_t)(1u << face)) {
+                int nx = v->gx + face_offsets[face][0];
+                int ny = v->gy + face_offsets[face][1];
+                int nz = v->gz + face_offsets[face][2];
+                int neighbor_idx = table_get_uncached_for_physics(nx, ny, nz);
+                if (neighbor_idx >= 0 && neighbor_idx < voxel_count && neighbor_idx != i) {
+                    Voxel *neighbor = &voxels[neighbor_idx];
+                    if (voxel_is_awake_dynamic(neighbor) && !neighbor->isBullet &&
+                        (!v->simulate_dofs || !neighbor->simulate_dofs)) {
+                        // A skipped fine VGS constraint is allowed to wake its
+                        // local region, but it must not manufacture a fracture.
+                        // Give both sides one full wake window; the ordinary
+                        // strain/hinge test can break the face later if the
+                        // deformation remains after fine constraints return.
+                        v->wake_source = true;
+                        neighbor->wake_source = true;
+                        v->wake_timer = COARSENING_WAKE_FRAMES;
+                        neighbor->wake_timer = COARSENING_WAKE_FRAMES;
+                        continue;
+                    }
+                }
                 break_face_link(v, face);
             }
         }
@@ -9648,7 +9717,7 @@ static void gather_particle_collisions(float dt, Particle **list, int count) {
     const float omega = COLLISION_RELAXATION;
     const float eps = 1e-6f;
     bool use_local_corrections = reserve_pair_correction_scratch(count);
-    if (!use_local_corrections) reset_particle_accumulators();
+    if (!use_local_corrections) reset_particle_accumulators_for(list, count);
 
     ParticleCollisionJob job = {
         .list = list,
@@ -9667,7 +9736,7 @@ static void gather_particle_collisions(float dt, Particle **list, int count) {
         };
         pbd_parallel_for(0, count, apply_pair_corrections_range, &apply_job);
     } else {
-        apply_particle_accumulators();
+        apply_particle_accumulators_for(list, count);
     }
 }
 
@@ -9676,7 +9745,8 @@ static void gather_voxel_shape_constraints_range(int start, int end, int worker_
     (void)user;
     for (int i = start; i < end; ++i) {
         Voxel *voxel = &voxels[i];
-        if (!voxel_is_awake_dynamic(voxel) || voxel->isBullet || voxel->type != 0) {
+        if (!voxel_is_awake_dynamic(voxel) || voxel->isBullet ||
+            voxel->type != 0 || !voxel->simulate_dofs) {
             continue;
         }
         gather_voxel_shape_constraints(voxel);
@@ -11645,6 +11715,7 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
         update_voxel_coarsening_state();
         reset_particle_mass_and_flags();
         apply_shell_effective_mass();
+        rebuild_vgs_particles();
         integrate_particles(sub_dt);
 
         for (int it = 0; it < 1; ++it) {
@@ -11664,9 +11735,8 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
         }
 
         for (int it = 0; it < constraint_iterations; ++it) {
-            reset_particle_accumulators();
             pbd_parallel_for(0, voxel_count, gather_voxel_shape_constraints_range, NULL);
-            apply_particle_accumulators();
+            apply_particle_accumulators_for(vgs_particles, vgs_particle_count);
         }
 
         solve_static_collisions(sub_dt);

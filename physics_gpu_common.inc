@@ -651,8 +651,9 @@ static bool gpu_upload_world(void) {
     size_t sim_capacity_bytes = (size_t)gpuPhysics.sim_slot_capacity * sizeof(uint32_t);
     size_t collision_id_bytes = (size_t)gpuPhysics.collision_count * sizeof(uint32_t);
     size_t collision_meta_capacity_bytes = (size_t)gpuPhysics.particle_slot_capacity * sizeof(GpuCollisionMeta);
+    size_t vgs_work_bytes = ((size_t)gpuPhysics.particle_slot_capacity * 2u + 4u) * sizeof(uint32_t);
     if (!gpu_buffer_ensure(&gpuPhysics.particle_buffer, particle_capacity_bytes) ||
-        !gpu_buffer_ensure(&gpuPhysics.correction_buffer, correction_capacity_bytes) ||
+        !gpu_buffer_ensure(&gpuPhysics.correction_buffer, correction_capacity_bytes + vgs_work_bytes) ||
         !gpu_buffer_ensure(&gpuPhysics.cell_buffer, cell_capacity_bytes) ||
         !gpu_buffer_ensure(&gpuPhysics.sim_id_buffer, sim_capacity_bytes * 2u) ||
         !gpu_buffer_ensure(&gpuPhysics.voxel_buffer, voxel_bytes) ||
@@ -692,6 +693,12 @@ static bool gpu_upload_world(void) {
     }
     gpu_buffer_update(&gpuPhysics.control_buffer, &gpuPhysics.control_stage,
                       sizeof(gpuPhysics.control_stage), 0);
+    uint32_t *vgs_work_zero = calloc(1, vgs_work_bytes);
+    if (!vgs_work_zero) return false;
+    vgs_work_zero[3] = (uint32_t)gpuPhysics.particle_slot_capacity;
+    gpu_buffer_update(&gpuPhysics.correction_buffer, vgs_work_zero, vgs_work_bytes,
+                      correction_capacity_bytes);
+    free(vgs_work_zero);
     if (gpuPhysics.dynamic_voxel_count) {
         gpu_buffer_update(&gpuPhysics.topology_buffer, gpuPhysics.topology_stage,
                           (size_t)gpuPhysics.dynamic_voxel_count * 2u * sizeof(GpuTopologyState), 0);
@@ -711,6 +718,7 @@ static bool gpu_upload_world(void) {
         (size_t)gpuPhysics.compact_count * sizeof(int32_t) * 2u + sizeof(GpuControlState) +
         (size_t)gpuPhysics.dynamic_voxel_count * 2u * sizeof(GpuTopologyState) +
         collision_id_bytes + sizeof(dispatch_stage));
+    gpuPhysics.upload_bytes += (uint64_t)vgs_work_bytes;
     if (static_changed) gpuPhysics.upload_bytes += (uint64_t)(static_bytes + static_collider_bytes);
     gpuPhysics.full_uploads++;
     gpuPhysics.upload_ms += (GetTime() - upload_started) * 1000.0;
@@ -1033,10 +1041,14 @@ static bool gpu_dispatch_substep(float sub_dt) {
               gpu_dispatch_indirect_offset(GPU_MODE_HASH_BUILD, 16) &&
               gpu_dispatch_indirect_offset(GPU_MODE_PAIR_COLLISIONS, 16) &&
               gpu_dispatch_indirect(GPU_MODE_APPLY);
+    if (ok) {
+        ok = gpu_dispatch(GPU_MODE_VGS_LIST_PREPARE, 1) &&
+             gpu_dispatch(GPU_MODE_VGS_LIST_BUILD, gpuPhysics.dynamic_voxel_count) &&
+             gpu_dispatch(GPU_MODE_VGS_LIST_FINALIZE, 1);
+    }
     for (int it = 0; ok && it < PBD_CONSTRAINT_ITERS; ++it) {
-        ok = gpu_dispatch_indirect(GPU_MODE_RESET) &&
-             gpu_dispatch(GPU_MODE_VGS, gpuPhysics.dynamic_voxel_count) &&
-             gpu_dispatch_indirect(GPU_MODE_APPLY);
+        ok = gpu_dispatch(GPU_MODE_VGS, gpuPhysics.dynamic_voxel_count) &&
+             gpu_dispatch_indirect_offset(GPU_MODE_VGS_APPLY, 52);
     }
     ok = ok && gpu_dispatch_indirect_offset(GPU_MODE_STATIC_COLLISIONS, 16) &&
          gpu_dispatch(GPU_MODE_BREAK_MASK, gpuPhysics.dynamic_voxel_count) &&

@@ -89,6 +89,10 @@ const int MODE_PREPARE_INDIRECT = 13;
 const int MODE_WAKE_GATHER = 14;
 const int MODE_WAKE_APPLY = 15;
 const int MODE_TOPOLOGY_REBUILD_SERIAL = 16;
+const int MODE_VGS_LIST_PREPARE = 17;
+const int MODE_VGS_LIST_BUILD = 18;
+const int MODE_VGS_LIST_FINALIZE = 19;
+const int MODE_VGS_APPLY = 20;
 const int CONTROL_FLAG_OVERFLOW = 1;
 const int CONTROL_FLAG_TOPOLOGY_DIRTY = 2;
 
@@ -259,6 +263,82 @@ void applyCorrections(uint gid) {
     if (gid >= uint(gpuControl.y)) return;
     uint id = simId[gid];
     if (particleRefcount[id] <= 0) return;
+    uvec4 bits = correction[id];
+    float weight = uintBitsToFloat(bits.w);
+    if (weight > 0.0) {
+        vec3 sum = vec3(uintBitsToFloat(bits.x), uintBitsToFloat(bits.y), uintBitsToFloat(bits.z));
+        particle[id].predicted_base_inv_mass.xyz += sum * (uSor / weight);
+    }
+    correction[id] = uvec4(0u);
+}
+
+uint vgsLoad(uint index) {
+    uint word = uint(gpuControl.z) * 4u + index;
+    return correction[word >> 2u][int(word & 3u)];
+}
+
+void vgsStore(uint index, uint value) {
+    uint word = uint(gpuControl.z) * 4u + index;
+    correction[word >> 2u][int(word & 3u)] = value;
+}
+
+uint vgsExchange(uint index, uint value) {
+    uint word = uint(gpuControl.z) * 4u + index;
+    return atomicExchange(correction[word >> 2u][int(word & 3u)], value);
+}
+
+uint vgsAdd(uint index, uint value) {
+    uint word = uint(gpuControl.z) * 4u + index;
+    return atomicAdd(correction[word >> 2u][int(word & 3u)], value);
+}
+
+uint vgsParticleId(uint gid) {
+    return vgsLoad(4u + gid);
+}
+
+void prepareVgsList(uint gid) {
+    if (gid != 0u) return;
+    uint generation = vgsLoad(1u) + 1u;
+    if (generation == 0u) generation = 1u;
+    vgsStore(0u, 0u);
+    vgsStore(1u, generation);
+    vgsStore(2u, 0u);
+    dispatchArgs[13] = 0u;
+    dispatchArgs[14] = 1u;
+    dispatchArgs[15] = 1u;
+}
+
+void buildVgsList(uint gid) {
+    if (gid >= uint(uVoxelCount)) return;
+    VoxelState v = voxel[gid];
+    if (v.flags.x == 0 || v.flags.y != 0 || v.flags.z != 0 || v.flags.w == 0) return;
+    uint capacity = vgsLoad(3u);
+    uint generation = vgsLoad(1u);
+    for (int corner = 0; corner < 8; ++corner) {
+        uint id = voxelParticle(v, corner);
+        if (id >= uint(gpuControl.x) || id >= capacity ||
+            particle[id].prev_inv_mass.w <= 0.0) continue;
+        uint previous = vgsExchange(4u + capacity + id, generation);
+        if (previous == generation) continue;
+        uint slot = vgsAdd(0u, 1u);
+        if (slot < capacity) vgsStore(4u + slot, id);
+        else vgsExchange(2u, 1u);
+    }
+}
+
+void finalizeVgsList(uint gid) {
+    if (gid != 0u) return;
+    uint capacity = vgsLoad(3u);
+    uint count = min(vgsLoad(0u), capacity);
+    vgsStore(0u, count);
+    dispatchArgs[13] = (count + 127u) / 128u;
+    if (vgsLoad(2u) != 0u) atomicOr(gpuControl.w, CONTROL_FLAG_OVERFLOW);
+}
+
+void applyVgsCorrections(uint gid) {
+    if (gid >= vgsLoad(0u)) return;
+    uint id = vgsParticleId(gid);
+    if (id >= uint(gpuControl.x) || particleRefcount[id] <= 0) return;
     uvec4 bits = correction[id];
     float weight = uintBitsToFloat(bits.w);
     if (weight > 0.0) {
@@ -757,4 +837,8 @@ void main() {
     else if (uMode==MODE_WAKE_GATHER) wakeGather(gid);
     else if (uMode==MODE_WAKE_APPLY) wakeApply(gid);
     else if (uMode==MODE_TOPOLOGY_REBUILD_SERIAL) topologyRebuildSerial(gid);
+    else if (uMode==MODE_VGS_LIST_PREPARE) prepareVgsList(gid);
+    else if (uMode==MODE_VGS_LIST_BUILD) buildVgsList(gid);
+    else if (uMode==MODE_VGS_LIST_FINALIZE) finalizeVgsList(gid);
+    else if (uMode==MODE_VGS_APPLY) applyVgsCorrections(gid);
 }

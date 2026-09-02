@@ -76,6 +76,7 @@ typedef struct DebugRunState {
     bool delayed_activation;
     bool overhang_impact;
     bool pillar_impact_drift_test;
+    bool vgs_coarsening_test;
     bool single_corner_hinge_test;
     bool tether_active_then_static_test;
     bool tether_second_started;
@@ -103,6 +104,10 @@ typedef struct DebugRunState {
     float drift_window_distance;
     float drift_window_speed;
     float max_hinge_angle_deg;
+    int initial_glued_face_links;
+    int minimum_glued_face_links;
+    int maximum_coarsened_voxels;
+    float maximum_coarsened_strain;
     bool hinge_broken;
     int tether_voxel_count_before_static;
     int tether_static_remaining;
@@ -160,6 +165,7 @@ static bool debug_setup_three_leg_cut_platform(DebugRunState *state);
 static bool debug_setup_tether_throw_floating(DebugRunState *state);
 static bool debug_setup_overhang_impact(DebugRunState *state);
 static bool debug_setup_pillar_impact_drift(DebugRunState *state);
+static bool debug_setup_vgs_coarsened_pillar(DebugRunState *state);
 static bool debug_setup_single_corner_hinge(DebugRunState *state);
 static bool debug_setup_tether_active_then_static(DebugRunState *state);
 
@@ -174,6 +180,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "tether-throw-floating", "Released tether voxel wakes an unsupported sleeping cluster", debug_setup_tether_throw_floating },
     { "overhang-impact", "Falling dynamic voxel activates and bends a supported static overhang", debug_setup_overhang_impact },
     { "pillar-impact-drift", "Large undercut pillar impact exposes post-contact sliding and wiggle", debug_setup_pillar_impact_drift },
+    { "vgs-coarsened-pillar", "Thick activated pillar retains its interior while VGS constraints are coarsened", debug_setup_vgs_coarsened_pillar },
     { "single-corner-hinge", "A one-corner glue remnant must break beyond the hinge-angle limit", debug_setup_single_corner_hinge },
     { "tether-active-then-static", "Tethering an active voxel then a static voxel preserves and pulls both", debug_setup_tether_active_then_static }
 };
@@ -1974,6 +1981,35 @@ static bool debug_setup_pillar_impact_drift(DebugRunState *state)
     return true;
 }
 
+static int debug_count_tagged_glued_face_links(int tag)
+{
+    int count = 0;
+    for (int i = 0; i < voxel_count; ++i) {
+        const Voxel *voxel = &voxels[i];
+        if (voxel->debugClusterTag != tag || !voxel->simulate) continue;
+        for (int face = 0; face < 6; ++face) {
+            if (voxel->glued_faces[face]) ++count;
+        }
+    }
+    return count;
+}
+
+static bool debug_setup_vgs_coarsened_pillar(DebugRunState *state)
+{
+    if (!debug_setup_pillar_impact_drift(state)) return false;
+    state->pillar_impact_drift_test = false;
+    state->vgs_coarsening_test = true;
+    state->initial_glued_face_links = debug_count_tagged_glued_face_links(DEBUG_TEST_TAG);
+    state->minimum_glued_face_links = state->initial_glued_face_links;
+    state->maximum_coarsened_voxels = 0;
+    state->maximum_coarsened_strain = 0.0f;
+    if (state->initial_glued_face_links <= 0) {
+        debug_add_failure(state, "VGS coarsening pillar has no initial glue links");
+        return false;
+    }
+    return true;
+}
+
 static bool debug_setup_single_corner_hinge(DebugRunState *state)
 {
     debug_reset_world();
@@ -2110,6 +2146,26 @@ static void debug_validate_step(DebugRunState *state, int step)
 {
     debug_validate_all_sim_particles(state, step);
     DebugSample sample = debug_collect_sample("validation", step, state->initial_centroid_y);
+    if (state->vgs_coarsening_test) {
+        int coarsened = 0;
+        float maximum_strain = 0.0f;
+        for (int i = 0; i < voxel_count; ++i) {
+            Voxel *voxel = &voxels[i];
+            if (voxel->debugClusterTag != DEBUG_TEST_TAG || !voxel->simulate) continue;
+            if (!voxel->simulate_dofs) ++coarsened;
+            float strain = 0.0f, shear = 0.0f;
+            voxel_measure_strain(voxel, &strain, &shear);
+            if (strain > maximum_strain) maximum_strain = strain;
+            if (shear > maximum_strain) maximum_strain = shear;
+        }
+        if (coarsened > state->maximum_coarsened_voxels)
+            state->maximum_coarsened_voxels = coarsened;
+        if (maximum_strain > state->maximum_coarsened_strain)
+            state->maximum_coarsened_strain = maximum_strain;
+        int glue_links = debug_count_tagged_glued_face_links(DEBUG_TEST_TAG);
+        if (glue_links < state->minimum_glued_face_links)
+            state->minimum_glued_face_links = glue_links;
+    }
     if (state->tether_active_then_static_test) {
         if (step == 4) {
             release_tether(0);
@@ -2289,6 +2345,28 @@ static void debug_finalize_validation(DebugRunState *state)
         debug_add_failure(state, "forced GPU run fell back to %s: %s",
                           physics_backend_name(physicsBackend.active),
                           physicsBackend.fallback_reason);
+    }
+    if (state->vgs_coarsening_test) {
+        if (state->maximum_coarsened_voxels <= 0) {
+            debug_add_failure(state, "pillar never exercised an interior coarsened VGS cell");
+        }
+        int minimum_links = (state->initial_glued_face_links * 3) / 4;
+        if (state->minimum_glued_face_links < minimum_links) {
+            debug_add_failure(state,
+                              "coarsened pillar retained only %d/%d glue-face links (minimum %d)",
+                              state->minimum_glued_face_links,
+                              state->initial_glued_face_links, minimum_links);
+        }
+        if (!isfinite(state->maximum_coarsened_strain) ||
+            state->maximum_coarsened_strain > 2.0f) {
+            debug_add_failure(state,
+                              "coarsened pillar reached invalid/excessive strain %.3f",
+                              state->maximum_coarsened_strain);
+        }
+        if (!state->drop_sampled) {
+            debug_add_failure(state, "coarsened pillar did not reach its 60-step drop sample");
+        }
+        return;
     }
     if (state->pillar_impact_drift_test) {
         if (!isfinite(state->drift_window_distance) || state->drift_window_distance > 1.00f) {
@@ -2472,6 +2550,16 @@ static bool debug_write_report(DebugRunState *state)
             state->single_corner_hinge_test ? "true" : "false",
             (double)state->max_hinge_angle_deg,
             state->hinge_broken ? "true" : "false");
+
+    fprintf(file,
+            "  \"vgsCoarseningDiagnostics\": {\"enabled\": %s,"
+            " \"maximumCoarsenedVoxels\": %d, \"initialGlueFaceLinks\": %d,"
+            " \"minimumGlueFaceLinks\": %d, \"maximumStrainOrShear\": %.9g},\n",
+            state->vgs_coarsening_test ? "true" : "false",
+            state->maximum_coarsened_voxels,
+            state->initial_glued_face_links,
+            state->minimum_glued_face_links,
+            (double)state->maximum_coarsened_strain);
 
     fprintf(file,
             "  \"tetherSequenceDiagnostics\": {\"enabled\": %s,"
