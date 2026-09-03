@@ -56,10 +56,6 @@ constant int MODE_PREPARE_INDIRECT = 13;
 constant int MODE_WAKE_GATHER = 14;
 constant int MODE_WAKE_APPLY = 15;
 constant int MODE_TOPOLOGY_REBUILD_SERIAL = 16;
-constant int MODE_VGS_LIST_PREPARE = 17;
-constant int MODE_VGS_LIST_BUILD = 18;
-constant int MODE_VGS_LIST_FINALIZE = 19;
-constant int MODE_VGS_APPLY = 20;
 constant int CONTROL_FLAG_OVERFLOW = 1;
 constant int CONTROL_FLAG_TOPOLOGY_DIRTY = 2;
 
@@ -265,74 +261,6 @@ inline void applyCorrections(uint gid, device ParticleState *particle,
     for (int c = 0; c < 4; ++c) atomic_store_explicit(base + c, 0u, memory_order_relaxed);
 }
 
-inline uint vgsLoad(device atomic_uint *vgsWork, uint index) {
-    return atomic_load_explicit(vgsWork + index, memory_order_relaxed);
-}
-
-inline void prepareVgsList(uint gid, device atomic_uint *vgsWork,
-                           device uint *dispatchArgs) {
-    if (gid != 0u) return;
-    uint generation = vgsLoad(vgsWork, 1u) + 1u;
-    if (generation == 0u) generation = 1u;
-    atomic_store_explicit(vgsWork + 0u, 0u, memory_order_relaxed);
-    atomic_store_explicit(vgsWork + 1u, generation, memory_order_relaxed);
-    atomic_store_explicit(vgsWork + 2u, 0u, memory_order_relaxed);
-    dispatchArgs[13] = 0u; dispatchArgs[14] = 1u; dispatchArgs[15] = 1u;
-}
-
-inline void buildVgsList(uint gid, device ParticleState *particle,
-                         device VoxelState *voxel, device atomic_int *control,
-                         device atomic_uint *vgsWork, constant GpuUniforms &u) {
-    if (gid >= uint(u.voxel_count)) return;
-    VoxelState v = voxel[gid];
-    if (v.flags.x == 0 || v.flags.y != 0 || v.flags.z != 0 || v.flags.w == 0) return;
-    uint capacity = vgsLoad(vgsWork, 3u);
-    uint generation = vgsLoad(vgsWork, 1u);
-    for (int corner = 0; corner < 8; ++corner) {
-        uint id = voxelParticle(v, corner);
-        if (id >= uint(controlLoad(control, 0)) || id >= capacity ||
-            particle[id].prev_inv_mass.w <= 0.0f) continue;
-        uint previous = atomic_exchange_explicit(vgsWork + 4u + capacity + id,
-                                                 generation, memory_order_relaxed);
-        if (previous == generation) continue;
-        uint slot = atomic_fetch_add_explicit(vgsWork + 0u, 1u, memory_order_relaxed);
-        if (slot < capacity)
-            atomic_store_explicit(vgsWork + 4u + slot, id, memory_order_relaxed);
-        else atomic_store_explicit(vgsWork + 2u, 1u, memory_order_relaxed);
-    }
-}
-
-inline void finalizeVgsList(uint gid, device atomic_uint *vgsWork,
-                            device atomic_int *control, device uint *dispatchArgs) {
-    if (gid != 0u) return;
-    uint capacity = vgsLoad(vgsWork, 3u);
-    uint count = min(vgsLoad(vgsWork, 0u), capacity);
-    atomic_store_explicit(vgsWork + 0u, count, memory_order_relaxed);
-    dispatchArgs[13] = (count + 127u) / 128u;
-    if (vgsLoad(vgsWork, 2u) != 0u)
-        atomic_fetch_or_explicit(control + 3, CONTROL_FLAG_OVERFLOW, memory_order_relaxed);
-}
-
-inline void applyVgsCorrections(uint gid, device ParticleState *particle,
-                                device atomic_uint *correction, device atomic_uint *vgsWork,
-                                device atomic_int *refcount, device atomic_int *control,
-                                constant GpuUniforms &u) {
-    if (gid >= vgsLoad(vgsWork, 0u)) return;
-    uint id = vgsLoad(vgsWork, 4u + gid);
-    if (id >= uint(controlLoad(control, 0)) ||
-        atomic_load_explicit(refcount + id, memory_order_relaxed) <= 0) return;
-    device atomic_uint *base = correction + id * 4u;
-    float weight = as_type<float>(atomic_load_explicit(base + 3, memory_order_relaxed));
-    if (weight > 0.0f) {
-        float3 sum(as_type<float>(atomic_load_explicit(base + 0, memory_order_relaxed)),
-                   as_type<float>(atomic_load_explicit(base + 1, memory_order_relaxed)),
-                   as_type<float>(atomic_load_explicit(base + 2, memory_order_relaxed)));
-        particle[id].predicted_base_inv_mass.xyz += sum * (u.sor / weight);
-    }
-    for (int c = 0; c < 4; ++c)
-        atomic_store_explicit(base + c, 0u, memory_order_relaxed);
-}
-
 inline void solveVgs(uint gid, device ParticleState *particle,
                      device atomic_uint *correction, device VoxelState *voxel,
                      device atomic_int *control, constant GpuUniforms &u) {
@@ -519,7 +447,6 @@ kernel void pbd_pipeline(
     constant GpuUniforms &u [[buffer(16)]],
     uint gid [[thread_position_in_grid]]) {
     device uint *collisionId=simId+uint(controlLoad(control,2));
-    device atomic_uint *vgsWork=correction+uint(controlLoad(control,2))*4u;
     device atomic_int *collisionMember=reinterpret_cast<device atomic_int *>(cloneParent);
     device atomic_uint *collisionControl=reinterpret_cast<device atomic_uint *>(dispatchArgs+8);
     switch(u.mode){
@@ -539,9 +466,5 @@ kernel void pbd_pipeline(
         case MODE_WAKE_GATHER:wakeGather(gid,voxel,topology,u);break;
         case MODE_WAKE_APPLY:wakeApply(gid,voxel,u);break;
         case MODE_TOPOLOGY_REBUILD_SERIAL:topologyRebuild(gid,particle,simId,voxel,collisionMeta,refcount,control,topology,u);break;
-        case MODE_VGS_LIST_PREPARE:prepareVgsList(gid,vgsWork,dispatchArgs);break;
-        case MODE_VGS_LIST_BUILD:buildVgsList(gid,particle,voxel,control,vgsWork,u);break;
-        case MODE_VGS_LIST_FINALIZE:finalizeVgsList(gid,vgsWork,control,dispatchArgs);break;
-        case MODE_VGS_APPLY:applyVgsCorrections(gid,particle,correction,vgsWork,refcount,control,u);break;
     }
 }
