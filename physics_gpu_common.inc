@@ -133,9 +133,22 @@ typedef struct {
     double dispatch_ms;
     double readback_ms;
     double commit_ms;
+    PhysicsGpuFailureKind step_failure_kind;
+    char step_failure_reason[160];
 } GpuPhysicsState;
 
 static GpuPhysicsState gpuPhysics = { 0 };
+
+static void gpu_set_step_failure(PhysicsGpuFailureKind kind, const char *reason) {
+    gpuPhysics.step_failure_kind = kind;
+    snprintf(gpuPhysics.step_failure_reason, sizeof(gpuPhysics.step_failure_reason), "%s",
+             reason ? reason : "GPU step failed");
+}
+
+static void gpu_clear_step_failure(void) {
+    gpuPhysics.step_failure_kind = PHYSICS_GPU_FAILURE_NONE;
+    gpuPhysics.step_failure_reason[0] = '\0';
+}
 
 static bool gpu_resize_array(void **ptr, size_t count, size_t item_size) {
     if (count == 0) count = 1;
@@ -1053,20 +1066,45 @@ static bool gpu_rebuild_topology_if_needed(void) {
     return gpu_dispatch(GPU_MODE_TOPOLOGY_REBUILD_SERIAL, 1);
 }
 
+static bool gpu_forced_step_failure_consumed = false;
+static bool gpu_forced_validation_failure_consumed = false;
+
 static int gpu_physics_steps(float dt, int fixed_steps) {
-    if (fixed_steps <= 0 || getenv("FPS_FORCE_GPU_STEP_FAILURE") != NULL) return 0;
+    gpu_clear_step_failure();
+    if (fixed_steps <= 0) return 0;
+    if (getenv("FPS_FORCE_GPU_STEP_FAILURE") != NULL) {
+        gpu_set_step_failure(PHYSICS_GPU_FAILURE_TRANSIENT, "forced GPU step failure");
+        return 0;
+    }
+    if (getenv("FPS_FORCE_GPU_STEP_FAILURE_ONCE") != NULL && !gpu_forced_step_failure_consumed) {
+        gpu_forced_step_failure_consumed = true;
+        gpu_set_step_failure(PHYSICS_GPU_FAILURE_TRANSIENT, "forced one-time GPU step failure");
+        return 0;
+    }
     if (gpuTransferMode == GPU_TRANSFER_RESIDENT && gpu_resident_matches_cpu()) {
-        if (!gpu_refresh_tethers()) return 0;
+        if (!gpu_refresh_tethers()) {
+            gpu_set_step_failure(PHYSICS_GPU_FAILURE_VALIDATION, "GPU resident tether mapping validation failed");
+            return 0;
+        }
     } else {
         gpuPhysics.resident_valid = false;
         double pack_started = GetTime();
-        if (!gpu_pack_world()) return 0;
+        if (!gpu_pack_world()) {
+            gpu_set_step_failure(PHYSICS_GPU_FAILURE_TRANSIENT, "GPU world packing or staging allocation failed");
+            return 0;
+        }
         gpuPhysics.pack_ms += (GetTime() - pack_started) * 1000.0;
-        if (!gpu_upload_world()) return 0;
+        if (!gpu_upload_world()) {
+            gpu_set_step_failure(PHYSICS_GPU_FAILURE_TRANSIENT, "GPU buffer allocation or world upload failed");
+            return 0;
+        }
     }
     float sub_dt = dt / (float)PBD_SUBSTEPS;
 #if defined(__APPLE__) && defined(FPS_GPU_METAL)
-    if (!fps_metal_begin_batch()) return 0;
+    if (!fps_metal_begin_batch()) {
+        gpu_set_step_failure(PHYSICS_GPU_FAILURE_TRANSIENT, "Metal failed to begin a compute batch");
+        return 0;
+    }
 #else
     rlEnableShader(gpuPhysics.program);
 #endif
@@ -1085,24 +1123,46 @@ static int gpu_physics_steps(float dt, int fixed_steps) {
     rlDisableShader();
     bool batch_finished = true;
 #endif
-    if (!ok || !batch_finished || !gpu_validate_and_commit()) return 0;
+    if (!ok) {
+        gpu_set_step_failure(PHYSICS_GPU_FAILURE_TRANSIENT, "GPU compute dispatch failed");
+        return 0;
+    }
+    if (!batch_finished) {
+        gpu_set_step_failure(PHYSICS_GPU_FAILURE_TRANSIENT, "Metal compute batch completion failed");
+        return 0;
+    }
+    if (getenv("FPS_FORCE_GPU_VALIDATION_FAILURE_ONCE") != NULL &&
+        !gpu_forced_validation_failure_consumed) {
+        gpu_forced_validation_failure_consumed = true;
+        gpu_set_step_failure(PHYSICS_GPU_FAILURE_VALIDATION, "forced one-time GPU validation failure");
+        return 0;
+    }
+    if (!gpu_validate_and_commit()) {
+        gpu_set_step_failure(PHYSICS_GPU_FAILURE_VALIDATION, "GPU readback or state validation failed");
+        return 0;
+    }
     return fixed_steps;
 }
 
 static bool gpu_physics_init(void) {
+    gpu_clear_step_failure();
 #if defined(__APPLE__) && defined(FPS_GPU_METAL)
     physicsBackend.gpu_compiled = true;
     if (getenv("FPS_FORCE_GPU_INIT_FAILURE") != NULL) {
         snprintf(physicsBackend.fallback_reason, sizeof(physicsBackend.fallback_reason), "forced GPU initialization failure");
+        gpu_set_step_failure(PHYSICS_GPU_FAILURE_TRANSIENT, physicsBackend.fallback_reason);
         return false;
     }
     if (!fps_metal_initialize("shaders/pbd/pbd_pipeline.metallib", &gpuPhysics.max_ssbo_size,
                               physicsBackend.fallback_reason, sizeof(physicsBackend.fallback_reason))) {
+        gpu_set_step_failure(PHYSICS_GPU_FAILURE_TRANSIENT, physicsBackend.fallback_reason);
         return false;
     }
-    gpuPhysics.pool_to_compact = malloc((size_t)MAX_PARTICLES * sizeof(*gpuPhysics.pool_to_compact));
+    if (!gpuPhysics.pool_to_compact)
+        gpuPhysics.pool_to_compact = malloc((size_t)MAX_PARTICLES * sizeof(*gpuPhysics.pool_to_compact));
     if (!gpuPhysics.pool_to_compact) {
         snprintf(physicsBackend.fallback_reason, sizeof(physicsBackend.fallback_reason), "GPU particle map allocation failed");
+        gpu_set_step_failure(PHYSICS_GPU_FAILURE_TRANSIENT, physicsBackend.fallback_reason);
         gpu_physics_release_resources();
         return false;
     }
@@ -1117,15 +1177,18 @@ static bool gpu_physics_init(void) {
 #else
     snprintf(physicsBackend.fallback_reason, sizeof(physicsBackend.fallback_reason), "binary was built without OpenGL 4.3 compute support");
 #endif
+    gpu_set_step_failure(PHYSICS_GPU_FAILURE_PERMANENT, physicsBackend.fallback_reason);
     return false;
 #else
     physicsBackend.gpu_compiled = true;
     if (getenv("FPS_FORCE_GPU_INIT_FAILURE") != NULL) {
         snprintf(physicsBackend.fallback_reason, sizeof(physicsBackend.fallback_reason), "forced GPU initialization failure");
+        gpu_set_step_failure(PHYSICS_GPU_FAILURE_TRANSIENT, physicsBackend.fallback_reason);
         return false;
     }
     if (rlGetVersion() != RL_OPENGL_43) {
         snprintf(physicsBackend.fallback_reason, sizeof(physicsBackend.fallback_reason), "raylib did not create an OpenGL 4.3 context");
+        gpu_set_step_failure(PHYSICS_GPU_FAILURE_PERMANENT, physicsBackend.fallback_reason);
         return false;
     }
     GLint max_bindings = 0, max_invocations = 0;
@@ -1137,12 +1200,14 @@ static bool gpu_physics_init(void) {
         snprintf(physicsBackend.fallback_reason, sizeof(physicsBackend.fallback_reason),
                  "insufficient compute limits (bindings=%d invocations=%d block=%lld)",
                  max_bindings, max_invocations, (long long)max_block);
+        gpu_set_step_failure(PHYSICS_GPU_FAILURE_PERMANENT, physicsBackend.fallback_reason);
         return false;
     }
     gpuPhysics.max_ssbo_size = (long long)max_block;
     char *source = LoadFileText("shaders/pbd/pbd_pipeline.comp");
     if (!source) {
         snprintf(physicsBackend.fallback_reason, sizeof(physicsBackend.fallback_reason), "missing shaders/pbd/pbd_pipeline.comp");
+        gpu_set_step_failure(PHYSICS_GPU_FAILURE_PERMANENT, physicsBackend.fallback_reason);
         return false;
     }
     unsigned int shader = glCreateShader(GL_COMPUTE_SHADER);
@@ -1163,6 +1228,7 @@ static bool gpu_physics_init(void) {
     if (shader == 0) {
         if (!physicsBackend.fallback_reason[0])
             snprintf(physicsBackend.fallback_reason, sizeof(physicsBackend.fallback_reason), "PBD compute shader compilation failed");
+        gpu_set_step_failure(PHYSICS_GPU_FAILURE_PERMANENT, physicsBackend.fallback_reason);
         return false;
     }
     gpuPhysics.program = glCreateProgram();
@@ -1182,6 +1248,7 @@ static bool gpu_physics_init(void) {
     if (gpuPhysics.program == 0) {
         if (!physicsBackend.fallback_reason[0])
             snprintf(physicsBackend.fallback_reason, sizeof(physicsBackend.fallback_reason), "PBD compute shader link failed");
+        gpu_set_step_failure(PHYSICS_GPU_FAILURE_PERMANENT, physicsBackend.fallback_reason);
         return false;
     }
     static const char *names[GPU_LOC_COUNT] = {
@@ -1195,13 +1262,16 @@ static bool gpu_physics_init(void) {
         gpuPhysics.loc[i] = rlGetLocationUniform(gpuPhysics.program, names[i]);
         if (gpuPhysics.loc[i] < 0) {
             snprintf(physicsBackend.fallback_reason, sizeof(physicsBackend.fallback_reason), "compute shader uniform missing: %s", names[i]);
+            gpu_set_step_failure(PHYSICS_GPU_FAILURE_PERMANENT, physicsBackend.fallback_reason);
             gpu_physics_release_resources();
             return false;
         }
     }
-    gpuPhysics.pool_to_compact = malloc((size_t)MAX_PARTICLES * sizeof(*gpuPhysics.pool_to_compact));
+    if (!gpuPhysics.pool_to_compact)
+        gpuPhysics.pool_to_compact = malloc((size_t)MAX_PARTICLES * sizeof(*gpuPhysics.pool_to_compact));
     if (!gpuPhysics.pool_to_compact) {
         snprintf(physicsBackend.fallback_reason, sizeof(physicsBackend.fallback_reason), "GPU particle map allocation failed");
+        gpu_set_step_failure(PHYSICS_GPU_FAILURE_TRANSIENT, physicsBackend.fallback_reason);
         gpu_physics_release_resources();
         return false;
     }

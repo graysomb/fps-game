@@ -11831,6 +11831,12 @@ static void decrement_particle_timers(void) {
 static bool initialize_physics_backend(void) {
     physicsBackend.initialized = false;
     physicsBackend.sticky_fallback = false;
+    physicsBackend.gpu_recovery_pending = false;
+    physicsBackend.gpu_recovery_probe = false;
+    physicsBackend.gpu_retry_attempts = 0;
+    physicsBackend.gpu_retry_limit = 0;
+    physicsBackend.gpu_retry_at = 0.0;
+    physicsBackend.last_gpu_failure = PHYSICS_GPU_FAILURE_NONE;
     physicsBackend.fallback_reason[0] = '\0';
     PhysicsBackendKind native_gpu = physics_native_gpu_backend();
     if (physics_backend_is_gpu(physicsBackend.requested) &&
@@ -11850,6 +11856,7 @@ static bool initialize_physics_backend(void) {
             return false;
         } else {
             physicsBackend.sticky_fallback = true;
+            physicsBackend.last_gpu_failure = PHYSICS_GPU_FAILURE_PERMANENT;
         }
     }
     if (!physicsBackend.initialized) {
@@ -11865,6 +11872,89 @@ static bool initialize_physics_backend(void) {
                 physicsBackend.fallback_reason);
     }
     return true;
+}
+
+static double physics_gpu_retry_delay_seconds(int completed_attempts) {
+    if (getenv("FPS_GPU_RETRY_IMMEDIATE") != NULL) return 0.0;
+    static const double delays[] = { 5.0, 15.0, 60.0 };
+    int index = completed_attempts;
+    if (index < 0) index = 0;
+    if (index >= (int)(sizeof(delays) / sizeof(delays[0])))
+        index = (int)(sizeof(delays) / sizeof(delays[0])) - 1;
+    return delays[index];
+}
+
+static void physics_schedule_gpu_retry(void) {
+    if (physicsBackend.last_gpu_failure == PHYSICS_GPU_FAILURE_PERMANENT ||
+        physicsBackend.gpu_retry_attempts >= physicsBackend.gpu_retry_limit) {
+        physicsBackend.gpu_recovery_pending = false;
+        fprintf(stderr, "GPU recovery disabled after %d attempt(s): %s\n",
+                physicsBackend.gpu_retry_attempts, physicsBackend.fallback_reason);
+        return;
+    }
+    double delay = physics_gpu_retry_delay_seconds(physicsBackend.gpu_retry_attempts);
+    physicsBackend.gpu_retry_at = GetTime() + delay;
+    physicsBackend.gpu_recovery_pending = true;
+    fprintf(stderr, "GPU recovery attempt %d/%d scheduled in %.0fs: %s\n",
+            physicsBackend.gpu_retry_attempts + 1, physicsBackend.gpu_retry_limit,
+            delay, physicsBackend.fallback_reason);
+}
+
+static void physics_handle_gpu_runtime_failure(void) {
+    PhysicsGpuFailureKind kind = gpuPhysics.step_failure_kind;
+    if (kind == PHYSICS_GPU_FAILURE_NONE) kind = PHYSICS_GPU_FAILURE_TRANSIENT;
+    char reason[sizeof(physicsBackend.fallback_reason)];
+    snprintf(reason, sizeof(reason), "%s",
+             gpuPhysics.step_failure_reason[0] ? gpuPhysics.step_failure_reason :
+             "GPU dispatch/readback validation failed");
+    bool failed_probe = physicsBackend.gpu_recovery_probe;
+    gpu_fail(reason);
+    select_cpu_physics_backend();
+    physicsBackend.last_gpu_failure = kind;
+    physicsBackend.gpu_recovery_probe = false;
+    if (!failed_probe) {
+        physicsBackend.gpu_retry_attempts = 0;
+        physicsBackend.gpu_retry_limit = kind == PHYSICS_GPU_FAILURE_VALIDATION ? 1 : 3;
+    } else if (kind == PHYSICS_GPU_FAILURE_VALIDATION && physicsBackend.gpu_retry_limit > 1) {
+        /* A retry that exposes corrupt/invalid GPU state consumes the stricter budget. */
+        physicsBackend.gpu_retry_limit = 1;
+    }
+    physics_schedule_gpu_retry();
+}
+
+static void physics_try_gpu_recovery(void) {
+    if (!physicsBackend.gpu_recovery_pending || GetTime() < physicsBackend.gpu_retry_at) return;
+    physicsBackend.gpu_recovery_pending = false;
+    physicsBackend.gpu_retry_attempts++;
+    if (gpu_physics_init()) {
+        physicsBackend.active = physics_native_gpu_backend();
+        physicsBackend.gpu_recovery_probe = true;
+        physics_force_single_cpu = false;
+        fprintf(stderr, "GPU recovery attempt %d/%d initialized; validating next physics step\n",
+                physicsBackend.gpu_retry_attempts, physicsBackend.gpu_retry_limit);
+        return;
+    }
+    if (gpuPhysics.step_failure_kind == PHYSICS_GPU_FAILURE_PERMANENT) {
+        physicsBackend.last_gpu_failure = PHYSICS_GPU_FAILURE_PERMANENT;
+    }
+    gpu_physics_release_resources();
+    physicsBackend.gpu_available = false;
+    physicsBackend.sticky_fallback = true;
+    select_cpu_physics_backend();
+    physics_schedule_gpu_retry();
+}
+
+static void physics_mark_gpu_recovered(void) {
+    if (!physicsBackend.gpu_recovery_probe) return;
+    fprintf(stderr, "GPU recovery succeeded after %d attempt(s)\n", physicsBackend.gpu_retry_attempts);
+    physicsBackend.gpu_recovery_probe = false;
+    physicsBackend.gpu_recovery_pending = false;
+    physicsBackend.gpu_retry_attempts = 0;
+    physicsBackend.gpu_retry_limit = 0;
+    physicsBackend.gpu_retry_at = 0.0;
+    physicsBackend.last_gpu_failure = PHYSICS_GPU_FAILURE_NONE;
+    physicsBackend.sticky_fallback = false;
+    physicsBackend.fallback_reason[0] = '\0';
 }
 
 static void copy_particle_snapshot_range(int start, int end, int worker_id, void *user) {
@@ -11959,14 +12049,15 @@ static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
     rebuild_particle_collision_metadata();
     double started = GetTime();
     const float sub_dt = dt / (float)PBD_SUBSTEPS;
+    if (!physics_backend_is_gpu(physicsBackend.active)) physics_try_gpu_recovery();
     if (physics_backend_is_gpu(physicsBackend.active) && gpuPhysics.ready) {
         int completed_steps = gpu_physics_steps(dt, fixed_steps);
         if (completed_steps >= fixed_steps) {
+            physics_mark_gpu_recovered();
             physicsBackend.last_step_ms = (GetTime() - started) * 1000.0;
             return;
         }
-        gpu_fail("GPU dispatch/readback validation failed; continuing on CPU");
-        select_cpu_physics_backend();
+        physics_handle_gpu_runtime_failure();
         for (int fixed = 0; fixed < fixed_steps; ++fixed) {
             rebuild_particle_collision_metadata();
             simulate_voxel_pbd_cpu_steps(sub_dt, PBD_SUBSTEPS);
@@ -15587,11 +15678,13 @@ static void render_gameplay_view(RenderTexture2D *screens,
         {
             const int fps_font = 18;
             const int fps_pad = 20;
+            const char *physics_note = physicsBackend.gpu_recovery_probe ? " (GPU validating)" :
+                                       physicsBackend.gpu_recovery_pending ? " (GPU retry pending)" :
+                                       physicsBackend.sticky_fallback ? " (fallback)" : "";
             const char *fps_text = TextFormat("FPS %d | PHYS %s %.2fms%s",
                                               GetFPS(),
                                               physics_backend_name(physicsBackend.active),
-                                              physicsBackend.last_step_ms,
-                                              physicsBackend.sticky_fallback ? " (fallback)" : "");
+                                              physicsBackend.last_step_ms, physics_note);
             int text_w = MeasureText(fps_text, fps_font);
             int box_w = text_w + fps_pad * 2;
             int box_h = fps_font + fps_pad * 2 - 2;

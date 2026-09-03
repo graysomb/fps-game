@@ -330,8 +330,16 @@ fps_ray --physics=gpu --physics-smoke=80 --physics-smoke-voxels=4096 \
   --physics-smoke-batch=8 --gpu-transfer-stats
 ```
 
-`FPS_FORCE_GPU_INIT_FAILURE`, `FPS_FORCE_GPU_STEP_FAILURE`, and
-`FPS_FORCE_CPU_ST` are available for testing the fallback paths.
+Runtime GPU failures immediately continue on CPU, then retry the GPU after 5,
+15, and 60 seconds. A successful retry repacks state from the CPU and must pass
+one GPU step before fallback status is cleared. Validation failures receive one
+retry; transient dispatch/upload failures receive three. Permanent startup
+failures are not retried.
+
+`FPS_FORCE_GPU_INIT_FAILURE`, `FPS_FORCE_GPU_STEP_FAILURE`,
+`FPS_FORCE_GPU_STEP_FAILURE_ONCE`, `FPS_FORCE_GPU_VALIDATION_FAILURE_ONCE`,
+`FPS_GPU_RETRY_IMMEDIATE`, and `FPS_FORCE_CPU_ST` are available for testing the
+fallback and recovery paths.
 
 Collision filtering can be measured independently on every backend. Set
 `FPS_COLLISION_DYNAMIC_LEGACY=1` to put every simulated particle back into the
