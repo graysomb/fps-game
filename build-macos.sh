@@ -52,11 +52,13 @@ fi
 
 frameworks="-framework Foundation -framework AppKit -framework IOKit -framework CoreVideo -framework OpenGL"
 common_flags="-std=c11 $opt_flags $arch_flags -mmacosx-version-min=$deployment_target -I$project_root -I$raylib_build/src -L$raylib_build/src -lraylib -pthread -lm $frameworks"
+enet_sources="$project_root/net_protocol.c $project_root/net_transport.c $project_root/third_party/enet/callbacks.c $project_root/third_party/enet/compress.c $project_root/third_party/enet/host.c $project_root/third_party/enet/list.c $project_root/third_party/enet/packet.c $project_root/third_party/enet/peer.c $project_root/third_party/enet/protocol.c $project_root/third_party/enet/unix.c"
+common_flags="$common_flags -I$project_root/third_party/enet/include"
 
 # shellcheck disable=SC2086
-clang "$project_root/fps_ray.c" "$project_root/physics_gpu_metal.m" -DFPS_GPU_METAL -o "$bin_dir/fps_ray_gpu" $common_flags -framework Metal
+clang "$project_root/fps_ray.c" "$project_root/physics_gpu_metal.m" $enet_sources -DFPS_GPU_METAL -o "$bin_dir/fps_ray_gpu" $common_flags -framework Metal
 # shellcheck disable=SC2086
-clang "$project_root/fps_ray.c" -o "$bin_dir/fps_ray_cpu" $common_flags
+clang "$project_root/fps_ray.c" $enet_sources -o "$bin_dir/fps_ray_cpu" $common_flags
 # shellcheck disable=SC2086
 clang "$project_root/fps_launcher.c" -std=c11 $opt_flags $arch_flags \
     -mmacosx-version-min="$deployment_target" -o "$bin_dir/fps_ray"
