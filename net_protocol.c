@@ -175,3 +175,36 @@ bool net_read_input(NetReader *reader, NetInputCommand *command) {
     command->creative_pickup = net_read_u8(reader);
     return !reader->failed;
 }
+
+bool net_write_player_visual(NetWriter *writer, const NetPlayerVisualState *state) {
+    if (!writer || !state) return false;
+    net_write_u8(writer, state->flags);
+    if (state->flags & NET_PLAYER_VISUAL_MELEE) {
+        net_write_u8(writer, state->melee_progress);
+    }
+    if (state->flags & NET_PLAYER_VISUAL_TETHER) {
+        net_write_f32(writer, state->tether_x);
+        net_write_f32(writer, state->tether_y);
+        net_write_f32(writer, state->tether_z);
+    }
+    return !writer->failed;
+}
+
+bool net_read_player_visual(NetReader *reader, NetPlayerVisualState *state) {
+    if (!reader || !state) return false;
+    memset(state, 0, sizeof(*state));
+    state->flags = net_read_u8(reader);
+    if (state->flags & ~(NET_PLAYER_VISUAL_MELEE | NET_PLAYER_VISUAL_TETHER)) {
+        reader->failed = true;
+        return false;
+    }
+    if (state->flags & NET_PLAYER_VISUAL_MELEE) {
+        state->melee_progress = net_read_u8(reader);
+    }
+    if (state->flags & NET_PLAYER_VISUAL_TETHER) {
+        state->tether_x = net_read_f32(reader);
+        state->tether_y = net_read_f32(reader);
+        state->tether_z = net_read_f32(reader);
+    }
+    return !reader->failed;
+}

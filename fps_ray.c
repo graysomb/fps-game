@@ -527,6 +527,8 @@ typedef struct {
     bool tetherHolding;
     int tetherVoxel;
     uint64_t tetherVoxelIdentity;
+    bool netTetherVisualActive;
+    Vector3 netTetherVisualTarget;
     bool meleeKnockbackActive;
     bool meleeSwingActive;
     bool meleeSwingHitApplied;
@@ -537,6 +539,7 @@ static Player players[MAX_PLAYERS];
 static bool netPlayerPresent[MAX_PLAYERS] = { true, false, false, false };
 static uint32_t netServerTick = 0;
 static uint32_t netInputSequence = 0;
+static uint32_t netPredictedMeleeSequence = 0;
 static uint32_t netLastProcessedInput[MAX_PLAYERS] = { 0 };
 static uint16_t netPreviousHeld[MAX_PLAYERS] = { 0 };
 static NetInputCommand netPendingInput[MAX_PLAYERS];
@@ -570,6 +573,7 @@ typedef struct NetPlayerWireState {
     int16_t deaths;
     int16_t debris_kills;
     uint8_t flags;
+    NetPlayerVisualState visual;
 } NetPlayerWireState;
 
 #define NET_PROXY_HASH_SIZE 262144
@@ -14126,6 +14130,30 @@ static Color player_palette_color(int index) {
     return palette[index];
 }
 
+static bool player_tether_visual_target(int player_index, Vector3 *out_target) {
+    if (!out_target || player_index < 0 || player_index >= activePlayers) return false;
+    Player *p = &players[player_index];
+    if (netTransport.role == NET_ROLE_CLIENT) {
+        if (!p->netTetherVisualActive) return false;
+        *out_target = p->netTetherVisualTarget;
+        return true;
+    }
+    if (!p->tetherHolding || p->tetherVoxel < 0) return false;
+    return tether_cluster_center(p->tetherVoxel, out_target);
+}
+
+static void draw_player_tether_world(int player_index) {
+    Vector3 center;
+    if (!player_tether_visual_target(player_index, &center)) return;
+    Vector3 hand = player_hand_position(&players[player_index]);
+    float tether_radius = 0.05f;
+    DrawCylinderEx(hand, center, tether_radius * 1.6f, tether_radius * 1.6f, 6,
+                   (Color){ 80, 170, 255, 80 });
+    DrawCylinderEx(hand, center, tether_radius, tether_radius, 6,
+                   (Color){ 120, 200, 255, 220 });
+    DrawSphere(center, 0.08f, (Color){ 80, 170, 255, 180 });
+}
+
 static void draw_players(void) {
     for (int i = 0; i < activePlayers; i++) {
         Player *p = &players[i];
@@ -14137,6 +14165,7 @@ static void draw_players(void) {
         DrawCube(p->pos, PLAYER_SIZE,PLAYER_SIZE, PLAYER_SIZE, base);
         DrawCubeWires(p->pos, PLAYER_SIZE,PLAYER_SIZE,PLAYER_SIZE, base_dark);
         draw_melee_arm_world(i);
+        draw_player_tether_world(i);
         if (p->matter_flash_timer > 0.0f && !p->isExposed && p->matter > 0.0f) {
             float flash = clampf(p->matter_flash_timer / 0.2f, 0.0f, 1.0f);
             float pulse = 0.5f + 0.5f * sinf((float)GetTime() * 8.0f);
@@ -14940,6 +14969,19 @@ static void net_host_start_match(void) {
 
 static void net_write_player_state(NetWriter *writer, int slot) {
     Player *p = &players[slot];
+    NetPlayerVisualState visual = { 0 };
+    float melee_progress = melee_anim_progress(p, (float)GetTime());
+    if (melee_progress >= 0.0f && melee_progress < 1.0f) {
+        visual.flags |= NET_PLAYER_VISUAL_MELEE;
+        visual.melee_progress = (uint8_t)lrintf(saturatef(melee_progress) * 255.0f);
+    }
+    if (p->tetherHolding && p->tetherVoxel >= 0 && p->tetherVoxel < voxel_count &&
+        voxels[p->tetherVoxel].identity == p->tetherVoxelIdentity) {
+        visual.flags |= NET_PLAYER_VISUAL_TETHER;
+        visual.tether_x = voxels[p->tetherVoxel].pos.x;
+        visual.tether_y = voxels[p->tetherVoxel].pos.y;
+        visual.tether_z = voxels[p->tetherVoxel].pos.z;
+    }
     net_write_u8(writer, (uint8_t)slot);
     net_write_u32(writer, netLastProcessedInput[slot]);
     net_write_f32(writer, p->pos.x); net_write_f32(writer, p->pos.y); net_write_f32(writer, p->pos.z);
@@ -14950,6 +14992,7 @@ static void net_write_player_state(NetWriter *writer, int slot) {
     net_write_i16(writer, (int16_t)p->kills); net_write_i16(writer, (int16_t)p->deaths);
     net_write_i16(writer, (int16_t)p->debrisKills);
     net_write_u8(writer, (p->onGround ? 1u : 0u) | (p->isExposed ? 2u : 0u));
+    net_write_player_visual(writer, &visual);
 }
 
 static bool net_read_player_state(NetReader *reader, int *slot_out, NetPlayerWireState *state) {
@@ -14962,6 +15005,7 @@ static bool net_read_player_state(NetReader *reader, int *slot_out, NetPlayerWir
     state->matter = net_read_f32(reader); state->respawn_timer = net_read_f32(reader);
     state->kills = net_read_i16(reader); state->deaths = net_read_i16(reader);
     state->debris_kills = net_read_i16(reader); state->flags = net_read_u8(reader);
+    if (!net_read_player_visual(reader, &state->visual)) return false;
     *slot_out = slot;
     return !reader->failed && slot >= 0 && slot < MAX_PLAYERS;
 }
@@ -15117,6 +15161,32 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
             p->matter = state.matter; p->respawn_timer = state.respawn_timer;
             p->kills = state.kills; p->deaths = state.deaths; p->debrisKills = state.debris_kills;
             p->onGround = (state.flags & 1u) != 0; p->isExposed = (state.flags & 2u) != 0;
+            bool authoritative_melee = (state.visual.flags & NET_PLAYER_VISUAL_MELEE) != 0;
+            bool pending_local_melee = slot == transport->local_player_slot &&
+                                       netPredictedMeleeSequence != 0 &&
+                                       state.acknowledged_input < netPredictedMeleeSequence;
+            if (authoritative_melee) {
+                float progress = (float)state.visual.melee_progress / 255.0f;
+                p->meleeSwingActive = true;
+                p->meleeSwingStartTime = (float)GetTime() - progress * MELEE_ANIM_DURATION_SECONDS;
+                if (slot == transport->local_player_slot &&
+                    state.acknowledged_input >= netPredictedMeleeSequence) {
+                    netPredictedMeleeSequence = 0;
+                }
+            } else if (!pending_local_melee) {
+                p->meleeSwingActive = false;
+                p->meleeSwingHitApplied = false;
+                if (slot == transport->local_player_slot &&
+                    state.acknowledged_input >= netPredictedMeleeSequence) {
+                    netPredictedMeleeSequence = 0;
+                }
+            }
+            p->netTetherVisualActive = (state.visual.flags & NET_PLAYER_VISUAL_TETHER) != 0;
+            if (p->netTetherVisualActive) {
+                p->netTetherVisualTarget = (Vector3){ state.visual.tether_x,
+                                                      state.visual.tether_y,
+                                                      state.visual.tether_z };
+            }
         }
         net_proxy_expire(netServerTick);
     } else if (header.type == NET_MSG_DYNAMIC_POSES) {
@@ -15248,6 +15318,11 @@ static void net_client_update(float dt) {
     } else ++netPredictionCount;
     netPredictionHistory[insert] = (NetPredictedCommand){ command, dt };
     Player *local = &players[netTransport.local_player_slot];
+    if (!netRequestedCreative && (command.pressed & NET_INPUT_MELEE)) {
+        /* Cosmetic prediction only.  The host remains authoritative for hits. */
+        perform_melee(netTransport.local_player_slot);
+        netPredictedMeleeSequence = command.sequence;
+    }
     if (netRequestedCreative) net_apply_creative_command(local, &command, dt);
     else {
         net_apply_movement_command(local, &command, dt);
@@ -15261,7 +15336,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                                  int *renderH,
                                  bool creative_mode) {
     activePlayers = clamp_active_players(activePlayers);
-    int viewCount = netTransport.role == NET_ROLE_CLIENT ? 1 : activePlayers;
+    int viewCount = netTransport.role == NET_ROLE_OFFLINE ? activePlayers : 1;
     int localViewPlayer = (netTransport.role == NET_ROLE_CLIENT && netTransport.local_player_slot >= 0)
                             ? netTransport.local_player_slot : 0;
     ensure_render_targets(screens, renderPlayers, renderW, renderH, viewCount);
@@ -15296,18 +15371,6 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 DrawVoxels(cams[i]);
                 draw_pickups(cams[i]);
                 draw_players();
-                if (players[i].tetherHolding && players[i].tetherVoxel >= 0) {
-                    Vector3 hand = player_hand_position(&players[i]);
-                    Vector3 center = { 0.0f, 0.0f, 0.0f };
-                    if (tether_cluster_center(players[i].tetherVoxel, &center)) {
-                        float tether_radius = 0.05f;
-                        DrawCylinderEx(hand, center, tether_radius * 1.6f, tether_radius * 1.6f, 6,
-                                       (Color){ 80, 170, 255, 80 });
-                        DrawCylinderEx(hand, center, tether_radius, tether_radius, 6,
-                                       (Color){ 120, 200, 255, 220 });
-                        DrawSphere(center, 0.08f, (Color){ 80, 170, 255, 180 });
-                    }
-                }
             EndMode3D();
             int view_x = 0, view_y = 0, view_w = 0, view_h = 0;
             get_viewport(view, viewCount, &view_x, &view_y, &view_w, &view_h);

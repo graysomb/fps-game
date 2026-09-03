@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define FPS_NET_MAGIC 0x4650534eu /* "FPSN" */
-#define FPS_NET_PROTOCOL_VERSION 1u
+#define FPS_NET_PROTOCOL_VERSION 2u
 #define FPS_NET_DEFAULT_PORT 27015u
 #define FPS_NET_DISCOVERY_PORT 27016u
 #define FPS_NET_MAX_PACKET 1100u
@@ -72,6 +72,19 @@ typedef struct NetInputCommand {
     uint8_t creative_pickup;
 } NetInputCommand;
 
+typedef enum NetPlayerVisualFlags {
+    NET_PLAYER_VISUAL_MELEE = 1u << 0,
+    NET_PLAYER_VISUAL_TETHER = 1u << 1
+} NetPlayerVisualFlags;
+
+typedef struct NetPlayerVisualState {
+    uint8_t flags;
+    uint8_t melee_progress;
+    float tether_x;
+    float tether_y;
+    float tether_z;
+} NetPlayerVisualState;
+
 typedef struct NetWriter {
     uint8_t *data;
     size_t capacity;
@@ -112,5 +125,7 @@ void net_read_bytes(NetReader *reader, void *data, size_t length);
 
 bool net_write_input(NetWriter *writer, const NetInputCommand *command);
 bool net_read_input(NetReader *reader, NetInputCommand *command);
+bool net_write_player_visual(NetWriter *writer, const NetPlayerVisualState *state);
+bool net_read_player_visual(NetReader *reader, NetPlayerVisualState *state);
 
 #endif

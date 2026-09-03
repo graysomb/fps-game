@@ -39,6 +39,30 @@ int main(void) {
     assert(decoded.creative_color == input.creative_color);
     assert(decoded.creative_pickup == input.creative_pickup);
 
+    NetPlayerVisualState visual = {
+        .flags = NET_PLAYER_VISUAL_MELEE | NET_PLAYER_VISUAL_TETHER,
+        .melee_progress = 173,
+        .tether_x = 1.25f,
+        .tether_y = -2.5f,
+        .tether_z = 9.75f
+    };
+    net_writer_init(&writer, packet, sizeof(packet));
+    assert(net_write_player_visual(&writer, &visual));
+    NetPlayerVisualState decoded_visual;
+    net_reader_init(&reader, packet, writer.length);
+    assert(net_read_player_visual(&reader, &decoded_visual));
+    assert(decoded_visual.flags == visual.flags);
+    assert(decoded_visual.melee_progress == visual.melee_progress);
+    assert(decoded_visual.tether_x == visual.tether_x);
+    assert(decoded_visual.tether_y == visual.tether_y);
+    assert(decoded_visual.tether_z == visual.tether_z);
+
+    net_reader_init(&reader, packet, writer.length - 1);
+    assert(!net_read_player_visual(&reader, &decoded_visual));
+
+    net_writer_init(&writer, packet, sizeof(packet));
+    assert(net_write_header(&writer, NET_MSG_INPUT, 2, 77, 88));
+    assert(net_write_input(&writer, &input));
     net_reader_init(&reader, packet, writer.length - 1);
     assert(net_read_header(&reader, &header));
     assert(!net_read_input(&reader, &decoded));
