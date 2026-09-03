@@ -10,7 +10,9 @@ profile.sh
 counts.txt
 Flamegraph/
 fps_ray.log
+.DS_Store
 .build/*
+!.build/FPS Game.app/
 !.build/bin/
 .build/bin/*
 !.build/bin/fps_ray.exe
