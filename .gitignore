@@ -10,6 +10,11 @@ profile.sh
 counts.txt
 Flamegraph/
 fps_ray.log
-.build/
+.build/*
+!.build/bin/
+.build/bin/*
+!.build/bin/fps_ray.exe
+!.build/bin/fps_ray_cpu.exe
+!.build/bin/fps_ray_gpu.exe
 artifacts/
 debug-artifacts/
