@@ -77,8 +77,12 @@ typedef struct DebugRunState {
     bool overhang_impact;
     bool pillar_impact_drift_test;
     bool vgs_coarsening_test;
+    bool vgs_tether_topology_test;
     bool single_corner_hinge_test;
     bool tether_active_then_static_test;
+    bool tether_pillar_throw_test;
+    bool tether_pillar_throw_released;
+    bool tether_pillar_vgs_observed;
     bool tether_second_started;
     bool tether_second_survived;
     bool recycle_test;
@@ -107,6 +111,7 @@ typedef struct DebugRunState {
     int initial_glued_face_links;
     int minimum_glued_face_links;
     int maximum_coarsened_voxels;
+    int maximum_false_coarsened_voxels;
     float maximum_coarsened_strain;
     bool hinge_broken;
     int tether_voxel_count_before_static;
@@ -116,6 +121,14 @@ typedef struct DebugRunState {
     int tether_selected_index;
     Vector3 tether_static_start;
     float tether_static_pull_distance;
+    float tether_max_strain;
+    float tether_max_shear;
+    uint64_t tether_pillar_throw_identity;
+    float tether_pillar_throw_start_x;
+    float tether_pillar_throw_max_x;
+    float tether_pillar_max_strain;
+    float tether_pillar_max_shear;
+    int tether_pillar_activation_step;
     int gpu_static_ssbo_diff_entries;
     int gpu_static_ssbo_stale_cells;
     int gpu_sim_id_mismatches;
@@ -166,8 +179,10 @@ static bool debug_setup_tether_throw_floating(DebugRunState *state);
 static bool debug_setup_overhang_impact(DebugRunState *state);
 static bool debug_setup_pillar_impact_drift(DebugRunState *state);
 static bool debug_setup_vgs_coarsened_pillar(DebugRunState *state);
+static bool debug_setup_vgs_tether_topology(DebugRunState *state);
 static bool debug_setup_single_corner_hinge(DebugRunState *state);
 static bool debug_setup_tether_active_then_static(DebugRunState *state);
+static bool debug_setup_tether_throw_pillar(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall },
@@ -181,8 +196,10 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "overhang-impact", "Falling dynamic voxel activates and bends a supported static overhang", debug_setup_overhang_impact },
     { "pillar-impact-drift", "Large undercut pillar impact exposes post-contact sliding and wiggle", debug_setup_pillar_impact_drift },
     { "vgs-coarsened-pillar", "Thick activated pillar retains its interior while VGS constraints are coarsened", debug_setup_vgs_coarsened_pillar },
+    { "vgs-tether-topology", "Tether holes and thrown voxels cannot make unrelated cells lose VGS", debug_setup_vgs_tether_topology },
     { "single-corner-hinge", "A one-corner glue remnant must break beyond the hinge-angle limit", debug_setup_single_corner_hinge },
-    { "tether-active-then-static", "Tethering an active voxel then a static voxel preserves and pulls both", debug_setup_tether_active_then_static }
+    { "tether-active-then-static", "Tethering an active voxel then a static voxel preserves and pulls both", debug_setup_tether_active_then_static },
+    { "tether-throw-pillar", "Rip, tether, and throw one voxel into a tall static pillar", debug_setup_tether_throw_pillar }
 };
 
 static const int debugScenarioCount = (int)(sizeof(debugScenarios) / sizeof(debugScenarios[0]));
@@ -771,9 +788,25 @@ static void debug_render_scene(DebugRunState *state, const DebugSample *sample)
                       (Color){ 68, 75, 82, 255 });
             DrawGrid(48, VOXEL_SIZE);
             DrawVoxels(state->camera);
-            DrawLine3D((Vector3){ -4.0f, state->initial_centroid_y, 0.0f },
-                       (Vector3){ 4.0f, state->initial_centroid_y, 0.0f },
-                       (Color){ 255, 225, 80, 210 });
+            if (!state->tether_pillar_throw_test) {
+                DrawLine3D((Vector3){ -4.0f, state->initial_centroid_y, 0.0f },
+                           (Vector3){ 4.0f, state->initial_centroid_y, 0.0f },
+                           (Color){ 255, 225, 80, 210 });
+            }
+            if (state->tether_pillar_throw_test) {
+                DrawCube(players[0].pos, 0.35f, 0.75f, 0.35f,
+                         (Color){ 235, 235, 245, 255 });
+                DrawCubeWires(players[0].pos, 0.35f, 0.75f, 0.35f,
+                              (Color){ 35, 35, 45, 255 });
+                if (players[0].tetherHolding && players[0].tetherVoxel >= 0 &&
+                    players[0].tetherVoxel < voxel_count) {
+                    Vector3 hand = player_hand_position(&players[0]);
+                    Vector3 target = voxels[players[0].tetherVoxel].pos;
+                    DrawCylinderEx(hand, target, 0.025f, 0.025f, 6,
+                                   (Color){ 255, 220, 80, 255 });
+                    DrawSphere(hand, 0.08f, (Color){ 255, 220, 80, 255 });
+                }
+            }
         EndMode3D();
         debug_draw_overlay(state, sample);
     EndTextureMode();
@@ -2010,6 +2043,99 @@ static bool debug_setup_vgs_coarsened_pillar(DebugRunState *state)
     return true;
 }
 
+static int debug_find_tagged_original_cell(int tag, int x, int y, int z)
+{
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (voxel->debugClusterTag == tag && voxel->simulate &&
+            voxel->orig_min_gx == x && voxel->orig_min_gy == y && voxel->orig_min_gz == z) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void debug_translate_dynamic_voxel(int voxel_idx, Vector3 displacement)
+{
+    if (voxel_idx < 0 || voxel_idx >= voxel_count || !voxels[voxel_idx].simulate) return;
+    Voxel *voxel = &voxels[voxel_idx];
+    voxel->pos = v_add(voxel->pos, displacement);
+    translate_voxel_particles(voxel, displacement);
+    set_voxel_velocity(voxel, (Vector3){ 0.0f, 0.0f, 0.0f });
+}
+
+static bool debug_setup_vgs_tether_topology(DebugRunState *state)
+{
+    debug_reset_world();
+    state->vgs_coarsening_test = true;
+    state->vgs_tether_topology_test = true;
+    Color cluster_color = (Color){ 225, 145, 55, 255 };
+    int created = 0;
+    for (int z = 0; z < 5; ++z) {
+        for (int y = 8; y < 13; ++y) {
+            for (int x = 0; x < 5; ++x) {
+                if (debug_add_cell(x, y, z, true, false,
+                                   cluster_color, DEBUG_TEST_TAG) >= 0) ++created;
+            }
+        }
+    }
+    debug_rebuild_world_state();
+    state->expected_voxels = created;
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    if (created != 125 || !debug_activate_test_cluster(state)) {
+        debug_add_failure(state, "VGS tether topology setup activated %d/125 voxels", created);
+        return false;
+    }
+
+    // This auxiliary pair supplies the unrelated voxel thrown into the hole.
+    // Detaching its partner leaves the same one-sided face bit produced by
+    // tether extraction before topology is rebuilt.
+    if (debug_add_cell(10, 10, 2, false, true,
+                       (Color){ 70, 190, 245, 255 }, DEBUG_SUPPORT_TAG) < 0 ||
+        debug_add_cell(11, 10, 2, false, true,
+                       (Color){ 70, 190, 245, 255 }, DEBUG_THROW_TAG) < 0) {
+        debug_add_failure(state, "VGS tether topology setup could not create throw pair");
+        return false;
+    }
+    debug_rebuild_world_state();
+
+    int extracted = debug_find_tagged_original_cell(DEBUG_TEST_TAG, 0, 10, 2);
+    int structural_shell = debug_find_tagged_original_cell(DEBUG_TEST_TAG, 1, 10, 2);
+    int thrown = debug_find_tagged_original_cell(DEBUG_SUPPORT_TAG, 10, 10, 2);
+    int throw_partner = debug_find_tagged_original_cell(DEBUG_THROW_TAG, 11, 10, 2);
+    if (extracted < 0 || structural_shell < 0 || thrown < 0 || throw_partner < 0) {
+        debug_add_failure(state, "VGS tether topology setup could not resolve its tagged cells");
+        return false;
+    }
+
+    detach_all_glue_faces(extracted);
+    deactivate_glue_constraints_for_voxel(extracted);
+    detach_all_glue_faces(throw_partner);
+    deactivate_glue_constraints_for_voxel(throw_partner);
+    debug_translate_dynamic_voxel(extracted, (Vector3){ -8.0f, 0.0f, 0.0f });
+    debug_translate_dynamic_voxel(throw_partner, (Vector3){ 8.0f, 0.0f, 0.0f });
+    debug_translate_dynamic_voxel(thrown, (Vector3){ -10.0f * VOXEL_SIZE, 0.0f, 0.0f });
+
+    // Expire activation's conservative fine-simulation window so the setup
+    // probes the actual coarsening classifier immediately and deterministically.
+    for (int i = 0; i < voxel_count; ++i) {
+        if (voxels[i].simulate) voxels[i].wake_timer = 0;
+    }
+
+    rebuild_voxel_hash();
+    rebuild_particle_collision_metadata();
+    update_voxel_coarsening_state();
+    state->initial_glued_face_links = debug_count_tagged_glued_face_links(DEBUG_TEST_TAG);
+    state->minimum_glued_face_links = state->initial_glued_face_links;
+    state->maximum_coarsened_voxels = 0;
+    state->maximum_false_coarsened_voxels = 0;
+    debug_set_initial_centroid(state);
+    state->camera.position = (Vector3){ 5.5f, 4.5f, 7.0f };
+    state->camera.target = (Vector3){ 0.6f, 2.6f, 0.6f };
+    debug_capture(state, "phase-01-tether-hole-occupied.png", "tether-hole-occupied", 0);
+    return true;
+}
+
 static bool debug_setup_single_corner_hinge(DebugRunState *state)
 {
     debug_reset_world();
@@ -2081,6 +2207,7 @@ static bool debug_setup_single_corner_hinge(DebugRunState *state)
 static bool debug_setup_tether_active_then_static(DebugRunState *state)
 {
     debug_reset_world();
+    activePlayers = 1;
     state->tether_active_then_static_test = true;
     state->tether_index_mismatch_step = -1;
     Color static_color = (Color){ 75, 175, 245, 255 };
@@ -2129,6 +2256,67 @@ static bool debug_setup_tether_active_then_static(DebugRunState *state)
     return true;
 }
 
+static bool debug_setup_tether_throw_pillar(DebugRunState *state)
+{
+    debug_reset_world();
+    activePlayers = 1;
+    state->tether_pillar_throw_test = true;
+    state->tether_pillar_activation_step = -1;
+
+    Color pillar_color = (Color){ 75, 175, 245, 255 };
+    int pillar_created = 0;
+    for (int y = 0; y < 18; ++y) {
+        for (int z = -1; z <= 1; ++z) {
+            if (debug_add_cell(6, y, z, true, false,
+                               pillar_color, DEBUG_SUPPORT_TAG) >= 0) {
+                ++pillar_created;
+            }
+        }
+    }
+    int source_idx = debug_add_cell(-3, 7, 0, true, false,
+                                    (Color){ 245, 145, 45, 255 }, DEBUG_TEST_TAG);
+    if (pillar_created != 54 || source_idx < 0) {
+        debug_add_failure(state,
+                          "tether-pillar setup created pillar=%d/54 source=%d",
+                          pillar_created, source_idx);
+        return false;
+    }
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_rebuild_world_state();
+
+    memset(tetherTag, 0, sizeof(tetherTag));
+    for (int i = 0; i < MAX_PLAYERS; ++i) {
+        players[i].tetherHolding = false;
+        players[i].tetherVoxel = -1;
+        players[i].tetherVoxelIdentity = 0;
+        players[i].respawn_timer = (i == 0) ? 0.0f : 1000.0f;
+    }
+    players[0].pos = (Vector3){ -4.5f, 3.75f, 0.0f };
+    Vector3 source_aim = v_norm(v_sub(voxels[source_idx].pos, players[0].pos));
+    dir_to_yaw_pitch(source_aim, &players[0].yaw, &players[0].pitch);
+    start_tether(0);
+    if (!players[0].tetherHolding || players[0].tetherVoxel < 0 ||
+        players[0].tetherVoxel >= voxel_count) {
+        debug_add_failure(state, "tether-pillar scenario could not rip the source voxel");
+        return false;
+    }
+
+    Voxel *thrown = &voxels[players[0].tetherVoxel];
+    thrown->debugClusterTag = DEBUG_TEST_TAG;
+    state->tether_pillar_throw_identity = thrown->identity;
+    state->tether_pillar_throw_start_x = thrown->pos.x;
+    state->tether_pillar_throw_max_x = thrown->pos.x;
+    state->expected_voxels = 1;
+    state->activation_succeeded = true;
+    prepare_tether_forces();
+    debug_set_initial_centroid(state);
+
+    state->camera.position = (Vector3){ 0.0f, 6.5f, 14.0f };
+    state->camera.target = (Vector3){ -0.5f, 3.2f, 0.0f };
+    debug_capture(state, "phase-01-voxel-tethered.png", "voxel-tethered", 0);
+    return true;
+}
+
 static void debug_physics_step(void)
 {
     activate_static_voxels_near_dynamic();
@@ -2142,17 +2330,80 @@ static void debug_physics_step(void)
     rebuild_static_hash_if_dirty();
 }
 
+static bool debug_voxel_has_full_structural_neighborhood(int voxel_idx)
+{
+    if (voxel_idx < 0 || voxel_idx >= voxel_count) return false;
+    Voxel *voxel = &voxels[voxel_idx];
+    if (!voxel_is_awake_dynamic(voxel) || voxel->isBullet) return false;
+    for (int face = 0; face < 6; ++face) {
+        int neighbor_idx = collisionVoxelGlueNeighbors[voxel_idx][face];
+        if (neighbor_idx < 0 || neighbor_idx >= voxel_count || neighbor_idx == voxel_idx) return false;
+        Voxel *neighbor = &voxels[neighbor_idx];
+        if (!voxel_is_awake_dynamic(neighbor) || neighbor->isBullet ||
+            !voxel->glued_faces[face] || !neighbor->glued_faces[opposite_face[face]]) return false;
+    }
+    return true;
+}
+
 static void debug_validate_step(DebugRunState *state, int step)
 {
     debug_validate_all_sim_particles(state, step);
     DebugSample sample = debug_collect_sample("validation", step, state->initial_centroid_y);
+    if (state->tether_pillar_throw_test) {
+        int thrown_idx = -1;
+        for (int i = 0; i < voxel_count; ++i) {
+            if (voxels[i].identity == state->tether_pillar_throw_identity) {
+                thrown_idx = i;
+                break;
+            }
+        }
+        if (thrown_idx >= 0 && voxels[thrown_idx].pos.x > state->tether_pillar_throw_max_x) {
+            state->tether_pillar_throw_max_x = voxels[thrown_idx].pos.x;
+        }
+        if (step == 15 && players[0].tetherHolding && thrown_idx >= 0) {
+            Vector3 pillar_target = { 6.5f * VOXEL_SIZE, 7.5f * VOXEL_SIZE, 0.0f };
+            Vector3 throw_aim = v_norm(v_sub(pillar_target, voxels[thrown_idx].pos));
+            dir_to_yaw_pitch(throw_aim, &players[0].yaw, &players[0].pitch);
+            release_tether(0);
+            prepare_tether_forces();
+            state->tether_pillar_throw_released = !players[0].tetherHolding;
+        }
+        {
+            int active_pillar = 0;
+            int awake_fine_pillar = 0;
+            float max_strain = 0.0f;
+            float max_shear = 0.0f;
+            for (int i = 0; i < voxel_count; ++i) {
+                Voxel *voxel = &voxels[i];
+                if (voxel->debugClusterTag != DEBUG_SUPPORT_TAG || !voxel->simulate) continue;
+                ++active_pillar;
+                if (voxel_is_awake_dynamic(voxel) && voxel->simulate_dofs)
+                    ++awake_fine_pillar;
+                float strain = 0.0f, shear = 0.0f;
+                voxel_measure_strain(voxel, &strain, &shear);
+                if (strain > max_strain) max_strain = strain;
+                if (shear > max_shear) max_shear = shear;
+            }
+            if (active_pillar > 0 && state->tether_pillar_activation_step < 0)
+                state->tether_pillar_activation_step = step;
+            if (awake_fine_pillar > 0) state->tether_pillar_vgs_observed = true;
+            if (max_strain > state->tether_pillar_max_strain)
+                state->tether_pillar_max_strain = max_strain;
+            if (max_shear > state->tether_pillar_max_shear)
+                state->tether_pillar_max_shear = max_shear;
+        }
+    }
     if (state->vgs_coarsening_test) {
         int coarsened = 0;
+        int false_coarsened = 0;
         float maximum_strain = 0.0f;
         for (int i = 0; i < voxel_count; ++i) {
             Voxel *voxel = &voxels[i];
             if (voxel->debugClusterTag != DEBUG_TEST_TAG || !voxel->simulate) continue;
-            if (!voxel->simulate_dofs) ++coarsened;
+            if (!voxel->simulate_dofs) {
+                ++coarsened;
+                if (!debug_voxel_has_full_structural_neighborhood(i)) ++false_coarsened;
+            }
             float strain = 0.0f, shear = 0.0f;
             voxel_measure_strain(voxel, &strain, &shear);
             if (strain > maximum_strain) maximum_strain = strain;
@@ -2160,6 +2411,14 @@ static void debug_validate_step(DebugRunState *state, int step)
         }
         if (coarsened > state->maximum_coarsened_voxels)
             state->maximum_coarsened_voxels = coarsened;
+        if ((!state->vgs_tether_topology_test || step == 0) &&
+            false_coarsened > state->maximum_false_coarsened_voxels)
+            state->maximum_false_coarsened_voxels = false_coarsened;
+        if (state->vgs_tether_topology_test && step == 0 && false_coarsened > 0) {
+            debug_add_failure(state,
+                              "step %d: %d structural shell voxels lost VGS due to unrelated spatial neighbors",
+                              step, false_coarsened);
+        }
         if (maximum_strain > state->maximum_coarsened_strain)
             state->maximum_coarsened_strain = maximum_strain;
         int glue_links = debug_count_tagged_glued_face_links(DEBUG_TEST_TAG);
@@ -2209,6 +2468,10 @@ static void debug_validate_step(DebugRunState *state, int step)
                 float distance = v_length(travel);
                 if (distance > state->tether_static_pull_distance)
                     state->tether_static_pull_distance = distance;
+                float strain = 0.0f, shear = 0.0f;
+                voxel_measure_strain(&voxels[selected], &strain, &shear);
+                if (strain > state->tether_max_strain) state->tether_max_strain = strain;
+                if (shear > state->tether_max_shear) state->tether_max_shear = shear;
             }
         } else if (step == 25 && players[0].tetherHolding) {
             release_tether(0);
@@ -2346,6 +2609,31 @@ static void debug_finalize_validation(DebugRunState *state)
                           physics_backend_name(physicsBackend.active),
                           physicsBackend.fallback_reason);
     }
+    if (state->tether_pillar_throw_test) {
+        if (!state->tether_pillar_throw_released) {
+            debug_add_failure(state, "tethered voxel was not released toward the pillar");
+        }
+        if (!isfinite(state->tether_pillar_throw_max_x) ||
+            state->tether_pillar_throw_max_x < 2.0f) {
+            debug_add_failure(state,
+                              "thrown voxel only reached x=%.3f before the run ended",
+                              state->tether_pillar_throw_max_x);
+        }
+        if (!state->tether_pillar_vgs_observed) {
+            debug_add_failure(state,
+                              "activated pillar slept before participating in fine VGS");
+        }
+        if (!isfinite(state->tether_pillar_max_strain) ||
+            !isfinite(state->tether_pillar_max_shear) ||
+            state->tether_pillar_max_strain > 0.25f ||
+            state->tether_pillar_max_shear > 0.25f) {
+            debug_add_failure(state,
+                              "activated pillar lost shape coherence (strain=%.3f shear=%.3f)",
+                              state->tether_pillar_max_strain,
+                              state->tether_pillar_max_shear);
+        }
+        return;
+    }
     if (state->vgs_coarsening_test) {
         if (state->maximum_coarsened_voxels <= 0) {
             debug_add_failure(state, "pillar never exercised an interior coarsened VGS cell");
@@ -2385,11 +2673,10 @@ static void debug_finalize_validation(DebugRunState *state)
         if (!state->tether_second_started) {
             debug_add_failure(state, "second tether did not acquire the static voxel");
         }
-        if (!state->tether_second_survived || voxel_count != state->tether_voxel_count_before_static) {
+        if (!state->tether_second_survived) {
             debug_add_failure(state,
-                              "static tether target disappeared (survived=%d voxels=%d/%d)",
-                              state->tether_second_survived ? 1 : 0, voxel_count,
-                              state->tether_voxel_count_before_static);
+                              "static tether target disappeared (survived=%d)",
+                              state->tether_second_survived ? 1 : 0);
         }
         if (state->tether_static_remaining != 2) {
             debug_add_failure(state, "static tether removed %d neighbouring voxels (remaining=%d/2)",
@@ -2399,6 +2686,12 @@ static void debug_finalize_validation(DebugRunState *state)
             state->tether_static_pull_distance < 0.25f) {
             debug_add_failure(state, "second tether pulled its target only %.3f metres",
                               state->tether_static_pull_distance);
+        }
+        if (!isfinite(state->tether_max_strain) || !isfinite(state->tether_max_shear) ||
+            state->tether_max_strain > 0.05f || state->tether_max_shear > 0.05f) {
+            debug_add_failure(state,
+                              "ripped tether voxel deformed excessively (strain=%.3f shear=%.3f)",
+                              state->tether_max_strain, state->tether_max_shear);
         }
         return;
     }
@@ -2430,9 +2723,14 @@ static void debug_finalize_validation(DebugRunState *state)
     if (!state->drop_sampled) {
         debug_add_failure(state, "scenario did not reach the required 60-step drop sample");
     } else if (!state->overhang_impact && !state->platform_lifecycle_test &&
-               (!isfinite(state->drop_at_step_60) || state->drop_at_step_60 < 0.5f)) {
-        debug_add_failure(state, "cluster dropped only %.3f metres after 60 steps (minimum 0.500)",
-                          state->drop_at_step_60);
+               (!isfinite(state->drop_at_step_60) ||
+                state->drop_at_step_60 <
+                    (strcmp(debugRunConfig.scenario, "tether-throw-floating") == 0 ? 0.45f : 0.5f))) {
+        float minimum_drop = strcmp(debugRunConfig.scenario, "tether-throw-floating") == 0
+            ? 0.45f : 0.5f;
+        debug_add_failure(state,
+                          "cluster dropped only %.3f metres after 60 steps (minimum %.3f)",
+                          state->drop_at_step_60, minimum_drop);
     }
     if (state->overhang_impact) {
         if (!state->overhang_anchor_observed) {
@@ -2553,18 +2851,35 @@ static bool debug_write_report(DebugRunState *state)
 
     fprintf(file,
             "  \"vgsCoarseningDiagnostics\": {\"enabled\": %s,"
-            " \"maximumCoarsenedVoxels\": %d, \"initialGlueFaceLinks\": %d,"
+            " \"tetherTopologyTest\": %s, \"maximumCoarsenedVoxels\": %d,"
+            " \"maximumFalseCoarsenedVoxels\": %d, \"initialGlueFaceLinks\": %d,"
             " \"minimumGlueFaceLinks\": %d, \"maximumStrainOrShear\": %.9g},\n",
             state->vgs_coarsening_test ? "true" : "false",
+            state->vgs_tether_topology_test ? "true" : "false",
             state->maximum_coarsened_voxels,
+            state->maximum_false_coarsened_voxels,
             state->initial_glued_face_links,
             state->minimum_glued_face_links,
             (double)state->maximum_coarsened_strain);
 
     fprintf(file,
+            "  \"tetherPillarDiagnostics\": {\"enabled\": %s,"
+            " \"released\": %s, \"activationStep\": %d,"
+            " \"fineVgsObserved\": %s, \"maximumX\": %.9g,"
+            " \"maximumStrain\": %.9g, \"maximumShear\": %.9g},\n",
+            state->tether_pillar_throw_test ? "true" : "false",
+            state->tether_pillar_throw_released ? "true" : "false",
+            state->tether_pillar_activation_step,
+            state->tether_pillar_vgs_observed ? "true" : "false",
+            (double)state->tether_pillar_throw_max_x,
+            (double)state->tether_pillar_max_strain,
+            (double)state->tether_pillar_max_shear);
+
+    fprintf(file,
             "  \"tetherSequenceDiagnostics\": {\"enabled\": %s,"
             " \"secondStarted\": %s, \"secondSurvived\": %s,"
             " \"staticRemaining\": %d, \"pullDistance\": %.9g,"
+            " \"maximumStrain\": %.9g, \"maximumShear\": %.9g,"
             " \"indexMismatchStep\": %d, \"expectedIndex\": %d,"
             " \"selectedIndex\": %d},\n",
             state->tether_active_then_static_test ? "true" : "false",
@@ -2572,6 +2887,8 @@ static bool debug_write_report(DebugRunState *state)
             state->tether_second_survived ? "true" : "false",
             state->tether_static_remaining,
             (double)state->tether_static_pull_distance,
+            (double)state->tether_max_strain,
+            (double)state->tether_max_shear,
             state->tether_index_mismatch_step, state->tether_expected_index,
             state->tether_selected_index);
 

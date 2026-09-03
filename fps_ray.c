@@ -475,6 +475,7 @@ typedef struct {
 static Player players[MAX_PLAYERS];
 static int tetherTag[MAX_VOXELS];
 static Vector3 tetherTargetByPlayer[MAX_PLAYERS];
+static Vector3 tetherCenterByPlayer[MAX_PLAYERS];
 
 typedef struct {
     float reactionTimer;
@@ -517,6 +518,7 @@ typedef struct {
     bool touched_by_simulated;
     int sync_stamp;
     int tether_stamp;
+    int tether_owner;
     int cell_x;
     int cell_y;
     int cell_z;
@@ -2119,6 +2121,7 @@ static Particle *particle_create(Vector3 pos, float inv_mass) {
     p->touched_by_simulated = false;
     p->sync_stamp = 0;
     p->tether_stamp = 0;
+    p->tether_owner = -1;
     p->cell_x = 0;
     p->cell_y = 0;
     p->cell_z = 0;
@@ -2161,6 +2164,7 @@ static Particle *particle_clone(const Particle *src) {
     atomic_store_explicit(&p->corr_sum_z, float_to_bits(0.0f), memory_order_relaxed);
     atomic_store_explicit(&p->corr_weight_bits, float_to_bits(0.0f), memory_order_relaxed);
     p->tether_stamp = 0;
+    p->tether_owner = -1;
     return p;
 }
 
@@ -3991,6 +3995,12 @@ static int emit_unit_voxels_from_units(const UnitVoxelBuffer *buffer,
             voxels[new_idx].restorationDeadlineFrame = seed->restorationDeadlineFrame;
 
             if (simulate) {
+                // Static->dynamic emission happens just before an impact is
+                // transferred through the new particle graph.  Keep emitted
+                // voxels awake and on fine VGS long enough to receive it;
+                // otherwise their calm initial center velocity can put them
+                // to sleep while their corners are still being contacted.
+                voxels[new_idx].wake_timer = COARSENING_WAKE_FRAMES;
                 glue_neighbor_faces_for_voxel(new_idx); 
             }
             ++spawned;
@@ -8648,7 +8658,7 @@ static void update_voxel_coarsening_state(void) {
     // 1. Determine initial active state (Shell vs Interior)
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *v = &voxels[i];
-        if (!v->simulate || v->isBullet) {
+        if (!voxel_is_awake_dynamic(v) || v->isBullet) {
             v->full_neighbors = false;
             v->simulate_dofs = false;
             v->wake_source = false;
@@ -8658,10 +8668,11 @@ static void update_voxel_coarsening_state(void) {
 
         bool full = true;
         for (int face = 0; face < 6; ++face) {
-            int nx = v->gx + face_offsets[face][0];
-            int ny = v->gy + face_offsets[face][1];
-            int nz = v->gz + face_offsets[face][2];
-            int neighbor_idx = table_get(nx, ny, nz);
+            // Coarsening follows the persistent glue graph, not current world
+            // occupancy.  A tethered/thrown voxel can occupy a former hole in
+            // another island; consulting table_get() here allowed unrelated
+            // one-sided face bits to make a real shell cell look interior.
+            int neighbor_idx = collisionVoxelGlueNeighbors[i][face];
             if (neighbor_idx < 0 || neighbor_idx >= voxel_count || neighbor_idx == i) {
                 full = false;
                 break;
@@ -8727,13 +8738,29 @@ static void update_voxel_coarsening_state(void) {
 static void reset_particle_mass_and_flags(void) {
     for (int i = 0; i < sim_particle_count; ++i) {
         Particle *p = sim_particles[i];
-        p->inv_mass = p->base_inv_mass;
+        // Sleeping dynamic particles remain in sim_particles so they can be
+        // recycled or woken without rebuilding ownership.  They are anchors,
+        // however: restoring base_inv_mass here made collision passes move
+        // them while sleeping voxels were excluded from VGS.
+        p->inv_mass = 0.0f;
         p->extra_mass = 0;
         p->touched_by_simulated = false;
         atomic_store_explicit(&p->corr_sum_x, float_to_bits(0.0f), memory_order_relaxed);
         atomic_store_explicit(&p->corr_sum_y, float_to_bits(0.0f), memory_order_relaxed);
         atomic_store_explicit(&p->corr_sum_z, float_to_bits(0.0f), memory_order_relaxed);
         atomic_store_explicit(&p->corr_weight_bits, float_to_bits(0.0f), memory_order_relaxed);
+    }
+
+    // A shared particle is dynamic if any awake voxel owns it.  This also
+    // safely handles the transient case where sleeping and awake topology
+    // overlap: the awake side wins until the whole physical island is woken.
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (!voxel_is_awake_dynamic(voxel)) continue;
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            Particle *p = voxel->particles[corner];
+            if (p && p->base_inv_mass > 0.0f) p->inv_mass = p->base_inv_mass;
+        }
     }
 }
 
@@ -8793,10 +8820,12 @@ static void apply_shell_effective_mass(void) {
 
     for (int i = 0; i < sim_particle_count; ++i) {
         Particle *p = sim_particles[i];
-        if (p->base_inv_mass <= 0.0f || p->extra_mass <= 0) {
-            p->inv_mass = p->base_inv_mass;
-            continue;
-        }
+        // reset_particle_mass_and_flags() deliberately leaves sleeping
+        // particles at zero inverse mass.  Effective-mass coarsening must not
+        // accidentally reactivate them just because their persistent base
+        // mass is nonzero.
+        if (p->inv_mass <= 0.0f || p->base_inv_mass <= 0.0f) continue;
+        if (p->extra_mass <= 0) continue;
         float scale = 1.0f + (COARSENING_MASS_SCALE * (float)p->extra_mass);
         p->inv_mass = p->base_inv_mass / scale;
     }
@@ -9164,8 +9193,12 @@ static void integrate_particles(float dt) {
                 continue;
             }
             p->tether_stamp = stamp;
+            p->tether_owner = tether_player;
 
-            Vector3 tether_delta = v_sub(tether_target, p->predicted_pos);
+            // Pull the voxel's center, not every corner toward the hand.  A
+            // per-corner target collapses a freshly ripped voxel and can exceed
+            // the glue break threshold even though its VGS solve is running.
+            Vector3 tether_delta = v_sub(tether_target, tetherCenterByPlayer[tether_player]);
             Vector3 tether_accel = v_mul(tether_delta, TETHER_SPRING);
             p->predicted_pos = v_add(p->predicted_pos, v_mul(tether_accel, dt_sq));
             p->vel = v_add(p->vel, v_mul(tether_accel, dt));
@@ -9573,6 +9606,7 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
         Vector3 scene_pos = pa->predicted_pos;
         float scene_radius_sq = pa->radius * pa->radius;
         for (int player_idx = 0; player_idx < activePlayers; ++player_idx) {
+            if (pa->tether_stamp == tether_apply_stamp && pa->tether_owner == player_idx) continue;
             Player *pl = &players[player_idx];
             if (pl->respawn_timer > 0.0f) continue;
             Vector3 box_min = { pl->pos.x - job->half_player, pl->pos.y - job->half_player,
@@ -9588,7 +9622,7 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
                 float scene_dist = sqrtf(fmaxf(scene_dist_sq, eps));
                 float penetration = pa->radius - scene_dist;
                 Vector3 normal = (scene_dist > eps)
-                    ? v_mul(scene_delta, -1.0f / scene_dist)
+                    ? v_mul(scene_delta, 1.0f / scene_dist)
                     : (Vector3){ 0.0f, 1.0f, 0.0f };
                 scene_pos = v_add(scene_pos, v_mul(normal, penetration));
             }
@@ -11399,6 +11433,7 @@ static void solve_static_collisions_range(int start, int end, int worker_id, voi
 
         // Player collision
         for (int player_idx = 0; player_idx < activePlayers; ++player_idx) {
+            if (p->tether_stamp == tether_apply_stamp && p->tether_owner == player_idx) continue;
             Player *pl = &players[player_idx];
             if (pl->respawn_timer > 0.0f) {
                 continue;
@@ -11429,6 +11464,14 @@ static void solve_static_collisions_range(int start, int end, int worker_id, voi
             }
         }
         p->predicted_pos = pos;
+
+        // A freshly ripped tether voxel begins exactly between its former
+        // static neighbours.  Treating each corner as a sphere here squeezes
+        // it before it can leave the cell.  The tether owns extraction until
+        // release; floor and player contacts above still apply.
+        if (p->tether_stamp == tether_apply_stamp) {
+            continue;
+        }
 
         if (getenv("FPS_COLLISION_STATIC_LEGACY")) {
             int static_neighbors[MAX_STATIC_COLLISION_NEIGHBORS];
@@ -11712,6 +11755,10 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
         if (debugLogVoxelBlowup) {
             debugBlowupLogBudget = 32;
         }
+        // Fracture in the preceding substep dirties structural adjacency.  The
+        // coarsening classifier consumes that graph, so refresh it before
+        // deciding which cells may skip VGS.
+        if (collisionTopologyDirty) rebuild_particle_collision_metadata();
         update_voxel_coarsening_state();
         reset_particle_mass_and_flags();
         apply_shell_effective_mass();
@@ -11721,7 +11768,6 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
         for (int it = 0; it < 1; ++it) {
             // The collision list is stable for this substep.  Break processing
             // below dirties topology and the next substep rebuilds it.
-            if (collisionTopologyDirty) rebuild_particle_collision_metadata();
             int snapshot_count = collision_particle_count;
             if (snapshot_count > MAX_PARTICLES) {
                 snapshot_count = MAX_PARTICLES;
@@ -11734,12 +11780,16 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
             gather_particle_collisions(sub_dt, particle_snapshot, snapshot_count);
         }
 
+        // Static contacts move individual corners.  Resolve them before the
+        // shape solve so VGS can restore a coherent voxel before fracture is
+        // measured; doing this after VGS made freshly ripped cells look like
+        // loose particles for an entire substep.
+        solve_static_collisions(sub_dt);
+
         for (int it = 0; it < constraint_iterations; ++it) {
             pbd_parallel_for(0, voxel_count, gather_voxel_shape_constraints_range, NULL);
             apply_particle_accumulators_for(vgs_particles, vgs_particle_count);
         }
-
-        solve_static_collisions(sub_dt);
 
         pbd_parallel_for(0, voxel_count, gather_voxel_break_masks_range, NULL);
         process_break_masks();
@@ -12808,6 +12858,7 @@ static void prepare_tether_forces(void) {
             v = &voxels[new_idx];
         }
         tetherTargetByPlayer[i] = player_hand_position(p);
+        tetherCenterByPlayer[i] = v->pos;
         tetherTag[p->tetherVoxel] = i + 1;
         voxels[p->tetherVoxel].activationBelief = 1.0f;
         voxels[p->tetherVoxel].activationCooldownFrames = 0;

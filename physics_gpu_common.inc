@@ -65,6 +65,7 @@ enum {
     GPU_LOC_REST_GRID_STEP,
     GPU_LOC_PLAYERS,
     GPU_LOC_TETHER_TARGETS,
+    GPU_LOC_TETHER_CENTERS,
     GPU_LOC_COUNT
 };
 
@@ -776,6 +777,7 @@ static void gpu_set_uniforms(float dt) {
     float rest_grid_step = VOXEL_SIZE * 0.5f;
     float player_data[MAX_PLAYERS][4];
     float tether_data[MAX_PLAYERS][4];
+    float tether_center_data[MAX_PLAYERS][4];
     for (int i = 0; i < MAX_PLAYERS; ++i) {
         player_data[i][0] = players[i].pos.x; player_data[i][1] = players[i].pos.y; player_data[i][2] = players[i].pos.z;
         player_data[i][3] = (i < activePlayers && players[i].respawn_timer <= 0.0f) ? PLAYER_SIZE * 0.5f : -1.0f;
@@ -783,6 +785,10 @@ static void gpu_set_uniforms(float dt) {
         tether_data[i][1] = tetherTargetByPlayer[i].y;
         tether_data[i][2] = tetherTargetByPlayer[i].z;
         tether_data[i][3] = 1.0f;
+        tether_center_data[i][0] = tetherCenterByPlayer[i].x;
+        tether_center_data[i][1] = tetherCenterByPlayer[i].y;
+        tether_center_data[i][2] = tetherCenterByPlayer[i].z;
+        tether_center_data[i][3] = 1.0f;
     }
 #if defined(__APPLE__) && defined(FPS_GPU_METAL)
     FpsGpuUniforms uniforms = { 0 };
@@ -798,6 +804,7 @@ static void gpu_set_uniforms(float dt) {
     uniforms.rest_grid_step = rest_grid_step;
     memcpy(uniforms.players, player_data, sizeof(player_data));
     memcpy(uniforms.tether_targets, tether_data, sizeof(tether_data));
+    memcpy(uniforms.tether_centers, tether_center_data, sizeof(tether_center_data));
     fps_metal_set_uniforms(&uniforms);
 #else
     rlSetUniform(gpuPhysics.loc[GPU_LOC_PARTICLE_COUNT], &particle_count, SHADER_UNIFORM_INT, 1);
@@ -825,6 +832,7 @@ static void gpu_set_uniforms(float dt) {
     rlSetUniform(gpuPhysics.loc[GPU_LOC_REST_GRID_STEP], &rest_grid_step, SHADER_UNIFORM_FLOAT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_PLAYERS], player_data, SHADER_UNIFORM_VEC4, MAX_PLAYERS);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_TETHER_TARGETS], tether_data, SHADER_UNIFORM_VEC4, MAX_PLAYERS);
+    rlSetUniform(gpuPhysics.loc[GPU_LOC_TETHER_CENTERS], tether_center_data, SHADER_UNIFORM_VEC4, MAX_PLAYERS);
 #endif
 }
 
@@ -1040,7 +1048,8 @@ static bool gpu_dispatch_substep(float sub_dt) {
               gpu_dispatch(GPU_MODE_HASH_CLEAR, hash_size) &&
               gpu_dispatch_indirect_offset(GPU_MODE_HASH_BUILD, 16) &&
               gpu_dispatch_indirect_offset(GPU_MODE_PAIR_COLLISIONS, 16) &&
-              gpu_dispatch_indirect(GPU_MODE_APPLY);
+              gpu_dispatch_indirect(GPU_MODE_APPLY) &&
+              gpu_dispatch_indirect_offset(GPU_MODE_STATIC_COLLISIONS, 16);
     if (ok) {
         ok = gpu_dispatch(GPU_MODE_VGS_LIST_PREPARE, 1) &&
              gpu_dispatch(GPU_MODE_VGS_LIST_BUILD, gpuPhysics.dynamic_voxel_count) &&
@@ -1050,8 +1059,7 @@ static bool gpu_dispatch_substep(float sub_dt) {
         ok = gpu_dispatch(GPU_MODE_VGS, gpuPhysics.dynamic_voxel_count) &&
              gpu_dispatch_indirect_offset(GPU_MODE_VGS_APPLY, 52);
     }
-    ok = ok && gpu_dispatch_indirect_offset(GPU_MODE_STATIC_COLLISIONS, 16) &&
-         gpu_dispatch(GPU_MODE_BREAK_MASK, gpuPhysics.dynamic_voxel_count) &&
+    ok = ok && gpu_dispatch(GPU_MODE_BREAK_MASK, gpuPhysics.dynamic_voxel_count) &&
          gpu_dispatch(GPU_MODE_SPLIT_BREAKS, gpuPhysics.dynamic_voxel_count) &&
          gpu_dispatch(GPU_MODE_WAKE_GATHER, gpuPhysics.dynamic_voxel_count) &&
          gpu_dispatch(GPU_MODE_WAKE_APPLY, gpuPhysics.dynamic_voxel_count) &&
@@ -1201,7 +1209,7 @@ static bool gpu_physics_init(void) {
         "uActivePlayers", "uDt", "uVoxelSize", "uFloorSize", "uGravity", "uVelocityDamping",
         "uSor", "uCollisionRelaxation", "uVgsAlpha", "uVgsBeta", "uVgsEpsilon",
         "uStrainBreakThreshold", "uShearBreakThreshold", "uTetherSpring", "uTetherDamping",
-        "uBreakDampFrames", "uRestGridStep", "uPlayerPosHalf", "uTetherTarget"
+        "uBreakDampFrames", "uRestGridStep", "uPlayerPosHalf", "uTetherTarget", "uTetherCenter"
     };
     for (int i = 0; i < GPU_LOC_COUNT; ++i) {
         gpuPhysics.loc[i] = rlGetLocationUniform(gpuPhysics.program, names[i]);

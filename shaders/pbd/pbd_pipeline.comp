@@ -71,6 +71,7 @@ uniform int uBreakDampFrames;
 uniform float uRestGridStep;
 uniform vec4 uPlayerPosHalf[4]; // xyz position, w < 0 when inactive
 uniform vec4 uTetherTarget[4];
+uniform vec4 uTetherCenter[4];
 
 const int MODE_RESET = 0;
 const int MODE_INTEGRATE = 1;
@@ -152,7 +153,7 @@ void integrateParticle(uint gid) {
         p.predicted_base_inv_mass.y -= uGravity * uDt * uDt;
         int tetherPlayer = tetherOwner[id];
         if (tetherPlayer >= 0 && tetherPlayer < 4) {
-            vec3 accel = (uTetherTarget[tetherPlayer].xyz - p.predicted_base_inv_mass.xyz) * uTetherSpring;
+            vec3 accel = (uTetherTarget[tetherPlayer].xyz - uTetherCenter[tetherPlayer].xyz) * uTetherSpring;
             p.predicted_base_inv_mass.xyz += accel * uDt * uDt;
             p.velocity.xyz += accel * uDt;
             float damp = clamp(uTetherDamping * uDt, 0.0, 0.9);
@@ -188,6 +189,7 @@ void pairCollisions(uint gid) {
     vec3 scenePos = a.predicted_base_inv_mass.xyz;
     float sceneRadius = a.pos_radius.w;
     for (int playerIndex = 0; playerIndex < uActivePlayers && playerIndex < 4; ++playerIndex) {
+        if (tetherOwner[aid] == playerIndex) continue;
         if (uPlayerPosHalf[playerIndex].w < 0.0) continue;
         float halfSize = uPlayerPosHalf[playerIndex].w;
         vec3 nearest = clamp(scenePos, uPlayerPosHalf[playerIndex].xyz - vec3(halfSize),
@@ -197,7 +199,7 @@ void pairCollisions(uint gid) {
         if (sceneDistSq < sceneRadius * sceneRadius) {
             float sceneDist = sqrt(max(sceneDistSq, eps));
             float penetration = sceneRadius - sceneDist;
-            vec3 normal = (sceneDist > eps) ? -sceneDelta / sceneDist : vec3(0.0, 1.0, 0.0);
+            vec3 normal = (sceneDist > eps) ? sceneDelta / sceneDist : vec3(0.0, 1.0, 0.0);
             scenePos += normal * penetration;
         }
     }
@@ -489,6 +491,7 @@ void staticCollisions(uint gid) {
     pos.xz = clamp(pos.xz, vec2(-terrainLimit), vec2(terrainLimit));
     const float eps = 1e-6;
     for (int i = 0; i < uActivePlayers && i < 4; ++i) {
+        if (tetherOwner[id] == i) continue;
         if (uPlayerPosHalf[i].w < 0.0) continue;
         float halfSize = uPlayerPosHalf[i].w;
         vec3 nearest = clamp(pos, uPlayerPosHalf[i].xyz - vec3(halfSize),
@@ -500,6 +503,11 @@ void staticCollisions(uint gid) {
             vec3 normal = (dist > eps) ? delta / dist : vec3(0.0, 1.0, 0.0);
             pos += normal * (radius - dist);
         }
+    }
+    if (tetherOwner[id] >= 0) {
+        p.predicted_base_inv_mass.xyz = pos;
+        particle[id] = p;
+        return;
     }
     ivec3 center = ivec3(floor(pos / uVoxelSize));
     int seen[128]; int seenCount = 0;
