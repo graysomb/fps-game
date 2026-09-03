@@ -35,10 +35,9 @@ typedef struct FpsGpuUniforms {
     float padding;
     float players[4][4];
     float tether_targets[4][4];
-    float tether_centers[4][4];
 } FpsGpuUniforms;
 
-_Static_assert(sizeof(FpsGpuUniforms) == 304, "Metal uniform layout mismatch");
+_Static_assert(sizeof(FpsGpuUniforms) == 240, "Metal uniform layout mismatch");
 
 #if defined(FPS_GPU_METAL)
 bool fps_metal_initialize(const char *library_path, long long *max_buffer_size,

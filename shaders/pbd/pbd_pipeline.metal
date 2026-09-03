@@ -32,7 +32,6 @@ struct GpuUniforms {
     float tether_spring, tether_damping, rest_grid_step, padding;
     float4 players[4];
     float4 tether_targets[4];
-    float4 tether_centers[4];
 };
 
 static_assert(sizeof(ParticleState) == 64, "ParticleState layout mismatch");
@@ -136,7 +135,7 @@ inline void integrateParticle(uint gid, device ParticleState *particle,
         p.predicted_base_inv_mass.y -= u.gravity * u.dt * u.dt;
         int player = tetherOwner[id];
         if (player >= 0 && player < 4) {
-            float3 accel = (u.tether_targets[player].xyz - u.tether_centers[player].xyz) * u.tether_spring;
+            float3 accel = (u.tether_targets[player].xyz - p.predicted_base_inv_mass.xyz) * u.tether_spring;
             p.predicted_base_inv_mass.xyz += accel * u.dt * u.dt;
             p.velocity.xyz += accel * u.dt;
             p.velocity.xyz *= 1.0f - clamp(u.tether_damping * u.dt, 0.0f, 0.9f);
@@ -182,7 +181,6 @@ inline void pairCollisions(uint gid, device ParticleState *particle,
     float3 scenePos = a.predicted_base_inv_mass.xyz;
     float sceneRadius = a.pos_radius.w;
     for (int playerIndex = 0; playerIndex < u.active_players && playerIndex < 4; ++playerIndex) {
-        if (tetherOwner[aid] == playerIndex) continue;
         if (u.players[playerIndex].w < 0.0f) continue;
         float halfSize = u.players[playerIndex].w;
         float3 nearest = clamp(scenePos, u.players[playerIndex].xyz - float3(halfSize),
@@ -191,7 +189,7 @@ inline void pairCollisions(uint gid, device ParticleState *particle,
         float sceneDistSq = dot(sceneDelta, sceneDelta);
         if (sceneDistSq < sceneRadius * sceneRadius) {
             float sceneDist = sqrt(max(sceneDistSq, eps));
-            float3 normal = sceneDist > eps ? sceneDelta / sceneDist : float3(0.0f, 1.0f, 0.0f);
+            float3 normal = sceneDist > eps ? -sceneDelta / sceneDist : float3(0.0f, 1.0f, 0.0f);
             scenePos += normal * (sceneRadius - sceneDist);
         }
     }
@@ -394,10 +392,9 @@ inline float3 pushOutOfBox(float3 pos,float radius,StaticCollider box,constant G
 
 inline float3 pushOutOfPatch(float3 pos,float radius,StaticCollider patch){float3 closest=clamp(pos,patch.bounds_min.xyz,patch.bounds_max.xyz),normal=patch.center.xyz,delta=pos-closest;float signedDistance=dot(delta,normal);bool projectedInside;if(normal.x!=0.0f)projectedInside=pos.y>=patch.bounds_min.y&&pos.y<=patch.bounds_max.y&&pos.z>=patch.bounds_min.z&&pos.z<=patch.bounds_max.z;else if(normal.y!=0.0f)projectedInside=pos.x>=patch.bounds_min.x&&pos.x<=patch.bounds_max.x&&pos.z>=patch.bounds_min.z&&pos.z<=patch.bounds_max.z;else projectedInside=pos.x>=patch.bounds_min.x&&pos.x<=patch.bounds_max.x&&pos.y>=patch.bounds_min.y&&pos.y<=patch.bounds_max.y;if(projectedInside&&signedDistance<0.0f&&signedDistance>=-radius)return pos+normal*(radius-signedDistance);if(signedDistance<0.0f)return pos;float distanceSq=dot(delta,delta);if(distanceSq>=radius*radius)return pos;float distance=sqrt(max(distanceSq,1e-6f));float3 direction=distance>1e-6f?delta/distance:normal;return pos+direction*(radius-distance);}
 
-inline void staticCollisions(uint gid,device ParticleState *particle,device uint *collisionId,device atomic_uint *collisionControl,device int4 *staticCell,device StaticCollider *staticCollider,device int *tetherOwner,device atomic_int *refcount,device atomic_int *control,constant GpuUniforms &u){
+inline void staticCollisions(uint gid,device ParticleState *particle,device uint *collisionId,device atomic_uint *collisionControl,device int4 *staticCell,device StaticCollider *staticCollider,device atomic_int *refcount,device atomic_int *control,constant GpuUniforms &u){
     if(gid>=atomic_load_explicit(collisionControl,memory_order_relaxed))return;uint id=collisionId[gid];if(atomic_load_explicit(&refcount[id],memory_order_relaxed)<=0)return;ParticleState p=particle[id];if(p.prev_inv_mass.w<=0.0f)return;float radius=p.pos_radius.w;float3 pos=p.predicted_base_inv_mass.xyz;float terrainLimit=u.floor_size-radius,floorLimit=max(0.0f,0.5f*u.voxel_size-radius);bool floorContact=pos.y<floorLimit;pos.y=max(pos.y,floorLimit);if(floorContact)p.prev_inv_mass.xz=pos.xz-(pos.xz-p.prev_inv_mass.xz)*0.05f;pos.xz=clamp(pos.xz,float2(-terrainLimit),float2(terrainLimit));constexpr float eps=1e-6f;
-    for(int i=0;i<u.active_players&&i<4;++i){if(tetherOwner[id]==i)continue;if(u.players[i].w<0.0f)continue;float halfSize=u.players[i].w;float3 nearest=clamp(pos,u.players[i].xyz-float3(halfSize),u.players[i].xyz+float3(halfSize));float3 delta=pos-nearest;float distSq=dot(delta,delta);if(distSq<radius*radius){float dist=sqrt(max(distSq,eps));float3 normal=dist>eps?delta/dist:float3(0,1,0);pos+=normal*(radius-dist);}}
-    if(tetherOwner[id]>=0){p.predicted_base_inv_mass.xyz=pos;particle[id]=p;return;}
+    for(int i=0;i<u.active_players&&i<4;++i){if(u.players[i].w<0.0f)continue;float halfSize=u.players[i].w;float3 nearest=clamp(pos,u.players[i].xyz-float3(halfSize),u.players[i].xyz+float3(halfSize));float3 delta=pos-nearest;float distSq=dot(delta,delta);if(distSq<radius*radius){float dist=sqrt(max(distSq,eps));float3 normal=dist>eps?delta/dist:float3(0,1,0);pos+=normal*(radius-dist);}}
     bool surfaceMode=atomic_load_explicit(collisionControl+4,memory_order_relaxed)!=0u;int3 center=int3(floor(pos/u.voxel_size));int seen[128];int seenCount=0;for(int z=-1;z<=1;++z)for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x){int item=findStaticCell(center+int3(x,y,z),staticCell,u);if(!surfaceMode&&item<=-2){int colliderId=-item-2;if(colliderId>=0&&colliderId<u.static_collider_count)pos=pushOutOfBox(pos,0.25f*u.voxel_size,staticCollider[colliderId],u);continue;}while(item>=0&&item<u.static_collider_count){StaticCollider patch=staticCollider[item];int patchId=as_type<int>(patch.bounds_min.w);bool duplicate=false;for(int s=0;s<seenCount;++s)duplicate=duplicate||seen[s]==patchId;if(!duplicate&&seenCount<128){seen[seenCount++]=patchId;pos=pushOutOfPatch(pos,0.25f*u.voxel_size,patch);}item=as_type<int>(patch.center.w);}}center=int3(floor(pos/u.voxel_size));int recovery=findStaticCell(center,staticCell,u);if(recovery<=-2){int colliderId=-recovery-2;if(colliderId>=0&&colliderId<u.static_collider_count)pos=pushOutOfBox(pos,0.25f*u.voxel_size,staticCollider[colliderId],u);}p.predicted_base_inv_mass.xyz=pos;particle[id]=p;
 }
 
@@ -533,7 +530,7 @@ kernel void pbd_pipeline(
         case MODE_PAIR_COLLISIONS:pairCollisions(gid,particle,correction,cell,collisionId,collisionControl,hashHead,hashNext,collisionMeta,refcount,control,u);break;
         case MODE_APPLY:applyCorrections(gid,particle,correction,simId,refcount,control,u);break;
         case MODE_VGS:solveVgs(gid,particle,correction,voxel,control,u);break;
-        case MODE_STATIC_COLLISIONS:staticCollisions(gid,particle,collisionId,collisionControl,staticCell,staticCollider,tetherOwner,refcount,control,u);break;
+        case MODE_STATIC_COLLISIONS:staticCollisions(gid,particle,collisionId,collisionControl,staticCell,staticCollider,refcount,control,u);break;
         case MODE_BREAK_MASK:gatherBreakMask(gid,particle,voxel,topology,refcount,control,u);break;
         case MODE_FINALIZE_PARTICLES:finalizeParticle(gid,particle,cell,simId,refcount,control,u);break;
         case MODE_FINALIZE_VOXELS:finalizeVoxel(gid,particle,voxel,control,u);break;
