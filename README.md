@@ -260,15 +260,17 @@ still requires a Developer ID signature and notarization.
 
 ## LAN multiplayer
 
-LAN play uses a host-authoritative ENet session with up to four machines and one
-local player per machine. The host alone runs voxel physics; clients receive the
+LAN play uses a host-authoritative ENet session with up to four players total;
+each machine may contribute one or more local split-screen players. The host
+alone runs voxel physics; clients receive the
 static world and compact dynamic-voxel transforms. Player input and snapshots run
 at 60 Hz. Clients predict only their own movement/look, then reconcile and replay
 unacknowledged inputs. Shooting, melee, building, tethering, creative edits,
 pickups, scores, and voxel physics remain authoritative on the host.
 
-From the menu, press `H` to create a lobby on port 27015 or `J` to join a host on
-the same machine. Clients can toggle ready with `R`; the host starts the match
+Choose the number of LAN-local players with `-`/`+` on the main menu, then press
+`H` to create a lobby on port 27015 or `J` to join a host on the same machine. Clients
+can toggle ready with `R`; the host starts the match
 with `Enter` after everyone has joined. Direct-IP and alternate-port startup is
 available from the command line:
 
@@ -276,6 +278,8 @@ available from the command line:
 fps_ray --lan-host
 fps_ray --lan-host=27125
 fps_ray --lan-connect=192.168.1.25:27125
+fps_ray --lan-host --lan-local-players=2
+fps_ray --lan-connect=192.168.1.25:27125 --lan-local-players=2
 fps_ray --lan-host --lan-creative
 fps_ray --lan-connect=192.168.1.25:27015 --lan-creative
 ```

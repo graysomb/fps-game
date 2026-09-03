@@ -98,6 +98,7 @@ static char netConnectHost[256] = "127.0.0.1";
 static uint16_t netRequestedPort = FPS_NET_DEFAULT_PORT;
 static bool netRequestedCreative = false;
 static bool netStatsEnabled = false;
+static int netRequestedLocalPlayers = 1;
 
 static int debug_parse_argument(int argc, char **argv, int *index);
 static bool debug_run_requested(void);
@@ -171,6 +172,14 @@ static bool parse_physics_arguments(int argc, char **argv) {
         }
         if (strcmp(arg, "--lan-creative") == 0) {
             netRequestedCreative = true;
+            continue;
+        }
+        if (strncmp(arg, "--lan-local-players=", 20) == 0) {
+            netRequestedLocalPlayers = atoi(arg + 20);
+            if (netRequestedLocalPlayers < 1 || netRequestedLocalPlayers > (int)FPS_NET_MAX_PLAYERS) {
+                fprintf(stderr, "LAN local player count must be between 1 and %u\n", FPS_NET_MAX_PLAYERS);
+                return false;
+            }
             continue;
         }
         if (strcmp(arg, "--net-stats") == 0) {
@@ -537,9 +546,14 @@ typedef struct {
 } Player;
 static Player players[MAX_PLAYERS];
 static bool netPlayerPresent[MAX_PLAYERS] = { true, false, false, false };
+/* Each peer owns a mask of globally numbered player slots. */
+static uint8_t netPeerPlayerMask[MAX_PLAYERS] = { 1u, 0u, 0u, 0u };
+static int netLocalPlayerSlots[MAX_PLAYERS] = { 0, -1, -1, -1 };
+static int netLocalPlayerCount = 1;
+static int activePlayers = 2;
 static uint32_t netServerTick = 0;
-static uint32_t netInputSequence = 0;
-static uint32_t netPredictedMeleeSequence = 0;
+static uint32_t netInputSequence[MAX_PLAYERS] = { 0 };
+static uint32_t netPredictedMeleeSequence[MAX_PLAYERS] = { 0 };
 static uint32_t netLastProcessedInput[MAX_PLAYERS] = { 0 };
 static uint16_t netPreviousHeld[MAX_PLAYERS] = { 0 };
 static NetInputCommand netPendingInput[MAX_PLAYERS];
@@ -555,9 +569,9 @@ typedef struct NetPredictedCommand {
     NetInputCommand command;
     float dt;
 } NetPredictedCommand;
-static NetPredictedCommand netPredictionHistory[NET_PREDICTION_HISTORY];
-static int netPredictionHead = 0;
-static int netPredictionCount = 0;
+static NetPredictedCommand netPredictionHistory[MAX_PLAYERS][NET_PREDICTION_HISTORY];
+static int netPredictionHead[MAX_PLAYERS] = { 0 };
+static int netPredictionCount[MAX_PLAYERS] = { 0 };
 
 typedef struct NetPlayerWireState {
     Vector3 pos;
@@ -575,6 +589,54 @@ typedef struct NetPlayerWireState {
     uint8_t flags;
     NetPlayerVisualState visual;
 } NetPlayerWireState;
+
+static int net_local_index_for_slot(int slot) {
+    for (int i = 0; i < netLocalPlayerCount; ++i) {
+        if (netLocalPlayerSlots[i] == slot) return i;
+    }
+    return -1;
+}
+
+static bool net_player_is_local(int slot) {
+    return netTransport.role == NET_ROLE_OFFLINE || net_local_index_for_slot(slot) >= 0;
+}
+
+static void net_set_host_local_players(int count) {
+    if (count < 1) count = 1;
+    if (count > MAX_PLAYERS) count = MAX_PLAYERS;
+    memset(netPlayerPresent, 0, sizeof(netPlayerPresent));
+    memset(netPlayerReady, 0, sizeof(netPlayerReady));
+    memset(netPeerPlayerMask, 0, sizeof(netPeerPlayerMask));
+    memset(netInputSequence, 0, sizeof(netInputSequence));
+    memset(netLastProcessedInput, 0, sizeof(netLastProcessedInput));
+    memset(netPreviousHeld, 0, sizeof(netPreviousHeld));
+    memset(netHasPendingInput, 0, sizeof(netHasPendingInput));
+    memset(netPredictionHead, 0, sizeof(netPredictionHead));
+    memset(netPredictionCount, 0, sizeof(netPredictionCount));
+    memset(netPredictedMeleeSequence, 0, sizeof(netPredictedMeleeSequence));
+    netLocalPlayerCount = count;
+    netPeerPlayerMask[0] = 0;
+    for (int i = 0; i < MAX_PLAYERS; ++i) netLocalPlayerSlots[i] = -1;
+    for (int i = 0; i < count; ++i) {
+        netLocalPlayerSlots[i] = i;
+        netPlayerPresent[i] = true;
+        netPlayerReady[i] = true;
+        netPeerPlayerMask[0] |= (uint8_t)(1u << i);
+    }
+    netTransport.local_player_slot = 0;
+    activePlayers = count;
+}
+
+static void net_prepare_client_local_players(int count) {
+    if (count < 1) count = 1;
+    if (count > MAX_PLAYERS) count = MAX_PLAYERS;
+    netLocalPlayerCount = count;
+    memset(netInputSequence, 0, sizeof(netInputSequence));
+    memset(netPredictionHead, 0, sizeof(netPredictionHead));
+    memset(netPredictionCount, 0, sizeof(netPredictionCount));
+    memset(netPredictedMeleeSequence, 0, sizeof(netPredictedMeleeSequence));
+    for (int i = 0; i < MAX_PLAYERS; ++i) netLocalPlayerSlots[i] = -1;
+}
 
 #define NET_PROXY_HASH_SIZE 262144
 typedef struct NetVoxelProxy {
@@ -665,7 +727,6 @@ typedef struct {
     bool justBuilt;
 } BotState;
 static BotState botStates[MAX_PLAYERS];
-static int activePlayers = 2;
 static bool randomSpawnEnabled = true;
 static const Vector3 playerSpawnPositions[MAX_PLAYERS] = {
     { 0.0f,  BASE_EYE_HEIGHT, -14.0f },
@@ -7972,7 +8033,7 @@ static void update_creative_player_gamepad(int player_idx, float dt) {
 
 static void update_creative_mode(float dt) {
     for (int i = 0; i < activePlayers; ++i) {
-        if (netTransport.role == NET_ROLE_HOST && i > 0) continue;
+        if (netTransport.role == NET_ROLE_HOST && !net_player_is_local(i)) continue;
         if (playerInput[i] == INPUT_TYPE_KEYBOARD) {
             update_creative_player_keyboard(i, dt);
         } else if (playerInput[i] == INPUT_TYPE_GAMEPAD) {
@@ -14449,22 +14510,23 @@ static int16_t net_quantize_axis(float value) {
     return (int16_t)lrintf(value * 32767.0f);
 }
 
-static NetInputCommand net_sample_local_input(void) {
+static NetInputCommand net_sample_local_input(int local_index, int player_slot) {
     NetInputCommand command = { 0 };
-    command.sequence = ++netInputSequence;
+    command.sequence = ++netInputSequence[player_slot];
     command.client_tick = netServerTick;
     float mx = 0.0f, my = 0.0f, lx = 0.0f, ly = 0.0f;
-    if (IsGamepadAvailable(0)) {
-        mx = GetGamepadAxisMovement(0, GAMEPAD_AXIS_LEFT_X);
-        my = -GetGamepadAxisMovement(0, GAMEPAD_AXIS_LEFT_Y);
-        lx = GetGamepadAxisMovement(0, GAMEPAD_AXIS_RIGHT_X);
-        ly = GetGamepadAxisMovement(0, GAMEPAD_AXIS_RIGHT_Y);
-        if (IsGamepadButtonDown(0, GAMEPAD_BUTTON_LEFT_TRIGGER_2)) command.held |= NET_INPUT_TETHER;
-        if (IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN)) command.pressed |= NET_INPUT_JUMP;
-        if (IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_TRIGGER_2)) command.pressed |= NET_INPUT_FIRE;
-        if (IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT)) command.pressed |= NET_INPUT_MELEE;
-        if (IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_LEFT)) command.pressed |= NET_INPUT_BUILD;
-    } else {
+    bool use_gamepad = playerInput[local_index] == INPUT_TYPE_GAMEPAD && IsGamepadAvailable(local_index);
+    if (use_gamepad) {
+        mx = GetGamepadAxisMovement(local_index, GAMEPAD_AXIS_LEFT_X);
+        my = -GetGamepadAxisMovement(local_index, GAMEPAD_AXIS_LEFT_Y);
+        lx = GetGamepadAxisMovement(local_index, GAMEPAD_AXIS_RIGHT_X);
+        ly = GetGamepadAxisMovement(local_index, GAMEPAD_AXIS_RIGHT_Y);
+        if (IsGamepadButtonDown(local_index, GAMEPAD_BUTTON_LEFT_TRIGGER_2)) command.held |= NET_INPUT_TETHER;
+        if (IsGamepadButtonPressed(local_index, GAMEPAD_BUTTON_RIGHT_FACE_DOWN)) command.pressed |= NET_INPUT_JUMP;
+        if (IsGamepadButtonPressed(local_index, GAMEPAD_BUTTON_RIGHT_TRIGGER_2)) command.pressed |= NET_INPUT_FIRE;
+        if (IsGamepadButtonPressed(local_index, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT)) command.pressed |= NET_INPUT_MELEE;
+        if (IsGamepadButtonPressed(local_index, GAMEPAD_BUTTON_RIGHT_FACE_LEFT)) command.pressed |= NET_INPUT_BUILD;
+    } else if (local_index == 0) {
         mx = (IsKeyDown(KEY_D) ? 1.0f : 0.0f) - (IsKeyDown(KEY_A) ? 1.0f : 0.0f);
         my = (IsKeyDown(KEY_W) ? 1.0f : 0.0f) - (IsKeyDown(KEY_S) ? 1.0f : 0.0f);
         lx = (IsKeyDown(KEY_H) ? 1.0f : 0.0f) - (IsKeyDown(KEY_F) ? 1.0f : 0.0f);
@@ -14474,6 +14536,16 @@ static NetInputCommand net_sample_local_input(void) {
         if (IsKeyPressed(KEY_LEFT_CONTROL)) command.pressed |= NET_INPUT_FIRE;
         if (IsKeyPressed(KEY_Z)) command.pressed |= NET_INPUT_MELEE;
         if (IsKeyPressed(KEY_E)) command.pressed |= NET_INPUT_BUILD;
+    } else {
+        mx = (IsKeyDown(KEY_L) ? 1.0f : 0.0f) - (IsKeyDown(KEY_J) ? 1.0f : 0.0f);
+        my = (IsKeyDown(KEY_I) ? 1.0f : 0.0f) - (IsKeyDown(KEY_K) ? 1.0f : 0.0f);
+        lx = (IsKeyDown(KEY_RIGHT) ? 1.0f : 0.0f) - (IsKeyDown(KEY_LEFT) ? 1.0f : 0.0f);
+        ly = (IsKeyDown(KEY_DOWN) ? 1.0f : 0.0f) - (IsKeyDown(KEY_UP) ? 1.0f : 0.0f);
+        if (IsKeyDown(KEY_P)) command.held |= NET_INPUT_TETHER;
+        if (IsKeyPressed(KEY_RIGHT_SHIFT)) command.pressed |= NET_INPUT_JUMP;
+        if (IsKeyPressed(KEY_RIGHT_CONTROL)) command.pressed |= NET_INPUT_FIRE;
+        if (IsKeyPressed(KEY_M)) command.pressed |= NET_INPUT_MELEE;
+        if (IsKeyPressed(KEY_O)) command.pressed |= NET_INPUT_BUILD;
     }
     command.move_x = net_quantize_axis(mx);
     command.move_y = net_quantize_axis(my);
@@ -14489,7 +14561,7 @@ static NetInputCommand net_sample_local_input(void) {
         if (IsKeyPressed(KEY_P)) command.pressed |= NET_INPUT_CREATIVE_PICKUP;
         if (IsKeyPressed(KEY_BACKSPACE)) command.pressed |= NET_INPUT_CREATIVE_REMOVE_PICKUP;
         if (IsKeyPressed(KEY_K)) command.pressed |= NET_INPUT_CREATIVE_ACTIVATE;
-        int slot = netTransport.local_player_slot >= 0 ? netTransport.local_player_slot : 0;
+        int slot = player_slot;
         if (IsKeyPressed(KEY_LEFT_BRACKET)) creativeBrushSpan[slot] = clampi(creativeBrushSpan[slot] - 1, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
         if (IsKeyPressed(KEY_RIGHT_BRACKET)) creativeBrushSpan[slot] = clampi(creativeBrushSpan[slot] + 1, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
         if (IsKeyPressed(KEY_V)) ++creativeBlockColorIndex[slot];
@@ -14912,6 +14984,7 @@ static void net_send_hello(void) {
     net_write_header(&writer, NET_MSG_HELLO, 0, 0, 0);
     net_write_u16(&writer, FPS_NET_PROTOCOL_VERSION);
     net_write_u8(&writer, netRequestedCreative ? 1 : 0);
+    net_write_u8(&writer, (uint8_t)netRequestedLocalPlayers);
     net_transport_send(&netTransport, 0, FPS_NET_CHANNEL_CONTROL, packet, writer.length, true);
 }
 
@@ -15010,20 +15083,20 @@ static bool net_read_player_state(NetReader *reader, int *slot_out, NetPlayerWir
     return !reader->failed && slot >= 0 && slot < MAX_PLAYERS;
 }
 
-static void net_reconcile_local(const NetPlayerWireState *state) {
-    Player *p = &players[netTransport.local_player_slot];
+static void net_reconcile_local(int slot, const NetPlayerWireState *state) {
+    Player *p = &players[slot];
     p->pos = state->pos; p->vel = state->vel;
     p->yaw = state->yaw; p->pitch = state->pitch;
     p->yaw_vel = state->yaw_vel; p->pitch_vel = state->pitch_vel;
     int kept = 0;
     NetPredictedCommand replay[NET_PREDICTION_HISTORY];
-    for (int i = 0; i < netPredictionCount; ++i) {
-        NetPredictedCommand item = netPredictionHistory[(netPredictionHead + i) % NET_PREDICTION_HISTORY];
+    for (int i = 0; i < netPredictionCount[slot]; ++i) {
+        NetPredictedCommand item = netPredictionHistory[slot][(netPredictionHead[slot] + i) % NET_PREDICTION_HISTORY];
         if (item.command.sequence > state->acknowledged_input) replay[kept++] = item;
     }
-    netPredictionHead = 0; netPredictionCount = kept;
+    netPredictionHead[slot] = 0; netPredictionCount[slot] = kept;
     for (int i = 0; i < kept; ++i) {
-        netPredictionHistory[i] = replay[i];
+        netPredictionHistory[slot][i] = replay[i];
         if (netRequestedCreative) net_apply_creative_command(p, &replay[i].command, replay[i].dt);
         else {
             net_apply_movement_command(p, &replay[i].command, replay[i].dt);
@@ -15036,8 +15109,14 @@ static void net_on_connect(NetTransport *transport, int slot, bool connected, vo
     (void)user;
     if (transport->role == NET_ROLE_CLIENT && connected) net_send_hello();
     if (transport->role == NET_ROLE_HOST && !connected && slot >= 1 && slot < MAX_PLAYERS) {
-        netPlayerPresent[slot] = false;
-        netPlayerReady[slot] = false;
+        uint8_t owned = netPeerPlayerMask[slot];
+        for (int player_slot = 0; player_slot < MAX_PLAYERS; ++player_slot) {
+            if (!(owned & (1u << player_slot))) continue;
+            netPlayerPresent[player_slot] = false;
+            netPlayerReady[player_slot] = false;
+            netHasPendingInput[player_slot] = false;
+        }
+        netPeerPlayerMask[slot] = 0;
         while (activePlayers > 1 && !netPlayerPresent[activePlayers - 1]) --activePlayers;
         net_broadcast_lobby_state();
     }
@@ -15053,41 +15132,67 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
     if (transport->role == NET_ROLE_HOST && header.type == NET_MSG_HELLO) {
         uint16_t version = net_read_u16(&reader);
         bool creative = net_read_u8(&reader) != 0;
-        if (reader.failed || version != FPS_NET_PROTOCOL_VERSION || creative != netRequestedCreative) return;
+        int requested_players = net_read_u8(&reader);
+        if (reader.failed || version != FPS_NET_PROTOCOL_VERSION || creative != netRequestedCreative ||
+            requested_players < 1 || requested_players > MAX_PLAYERS || netLobbyStarted) return;
+        uint8_t assigned_mask = 0;
+        for (int player_slot = 0; player_slot < MAX_PLAYERS && requested_players > 0; ++player_slot) {
+            if (netPlayerPresent[player_slot]) continue;
+            assigned_mask |= (uint8_t)(1u << player_slot);
+            --requested_players;
+        }
+        if (requested_players > 0) return;
         transport->peers[peer_slot].welcomed = true;
-        netPlayerPresent[peer_slot] = true;
-        activePlayers = clamp_active_players((peer_slot + 1 > activePlayers) ? peer_slot + 1 : activePlayers);
-        players[peer_slot].pos = pick_player_spawn(peer_slot);
+        netPeerPlayerMask[peer_slot] = assigned_mask;
+        uint8_t assigned_count = 0;
+        for (int player_slot = 0; player_slot < MAX_PLAYERS; ++player_slot) {
+            if (!(assigned_mask & (1u << player_slot))) continue;
+            ++assigned_count;
+            netPlayerPresent[player_slot] = true;
+            netPlayerReady[player_slot] = false;
+            players[player_slot].pos = pick_player_spawn(player_slot);
+            if (player_slot + 1 > activePlayers) activePlayers = player_slot + 1;
+        }
         uint8_t packet[64]; NetWriter writer;
         net_writer_init(&writer, packet, sizeof(packet));
         net_write_header(&writer, NET_MSG_WELCOME, 0, transport->session_id, netServerTick);
-        net_write_u8(&writer, (uint8_t)peer_slot); net_write_u8(&writer, creative ? 1 : 0);
+        net_write_u8(&writer, assigned_count);
+        for (int player_slot = 0; player_slot < MAX_PLAYERS; ++player_slot)
+            if (assigned_mask & (1u << player_slot)) net_write_u8(&writer, (uint8_t)player_slot);
+        net_write_u8(&writer, creative ? 1 : 0);
         net_transport_send(transport, peer_slot, FPS_NET_CHANNEL_CONTROL, packet, writer.length, true);
+        if (netStatsEnabled) {
+            fprintf(stderr, "[net] peer=%d assigned player mask=0x%02x\n", peer_slot, assigned_mask);
+        }
         net_broadcast_lobby_state();
         return;
     }
     if (transport->role == NET_ROLE_HOST && header.type == NET_MSG_READY && peer_slot >= 1) {
         if (header.session_id != transport->session_id || netLobbyStarted) return;
-        netPlayerReady[peer_slot] = net_read_u8(&reader) != 0;
+        bool ready = net_read_u8(&reader) != 0;
+        for (int slot = 0; slot < MAX_PLAYERS; ++slot)
+            if (netPeerPlayerMask[peer_slot] & (1u << slot)) netPlayerReady[slot] = ready;
         if (!reader.failed) net_broadcast_lobby_state();
         return;
     }
     if (transport->role == NET_ROLE_HOST && header.type == NET_MSG_INPUT && peer_slot >= 1) {
         NetInputCommand command;
-        if (header.session_id == transport->session_id && net_read_input(&reader, &command)) {
-            uint16_t accumulated_pressed = netHasPendingInput[peer_slot] ? netPendingInput[peer_slot].pressed : 0;
+        int player_slot = net_read_u8(&reader);
+        if (header.session_id == transport->session_id && player_slot >= 0 && player_slot < MAX_PLAYERS &&
+            (netPeerPlayerMask[peer_slot] & (1u << player_slot)) && net_read_input(&reader, &command)) {
+            uint16_t accumulated_pressed = netHasPendingInput[player_slot] ? netPendingInput[player_slot].pressed : 0;
             accumulated_pressed |= command.pressed;
-            if (command.sequence > netLastProcessedInput[peer_slot] &&
-                (!netHasPendingInput[peer_slot] || command.sequence >= netPendingInput[peer_slot].sequence)) {
-                netPendingInput[peer_slot] = command;
+            if (command.sequence > netLastProcessedInput[player_slot] &&
+                (!netHasPendingInput[player_slot] || command.sequence >= netPendingInput[player_slot].sequence)) {
+                netPendingInput[player_slot] = command;
             }
             if (accumulated_pressed) {
-                netPendingInput[peer_slot].pressed |= accumulated_pressed;
-                if (netPendingInput[peer_slot].sequence < netLastProcessedInput[peer_slot])
-                    netPendingInput[peer_slot].sequence = netLastProcessedInput[peer_slot];
-                netHasPendingInput[peer_slot] = true;
-            } else if (command.sequence > netLastProcessedInput[peer_slot]) {
-                netHasPendingInput[peer_slot] = true;
+                netPendingInput[player_slot].pressed |= accumulated_pressed;
+                if (netPendingInput[player_slot].sequence < netLastProcessedInput[player_slot])
+                    netPendingInput[player_slot].sequence = netLastProcessedInput[player_slot];
+                netHasPendingInput[player_slot] = true;
+            } else if (command.sequence > netLastProcessedInput[player_slot]) {
+                netHasPendingInput[player_slot] = true;
             }
         }
         return;
@@ -15095,9 +15200,24 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
     if (transport->role != NET_ROLE_CLIENT) return;
     if (header.type == NET_MSG_WELCOME) {
         transport->session_id = header.session_id;
-        transport->local_player_slot = net_read_u8(&reader);
+        netLocalPlayerCount = net_read_u8(&reader);
+        if (netLocalPlayerCount < 1 || netLocalPlayerCount > MAX_PLAYERS) return;
+        for (int i = 0; i < MAX_PLAYERS; ++i) netLocalPlayerSlots[i] = -1;
+        uint8_t local_mask = 0;
+        for (int i = 0; i < netLocalPlayerCount; ++i) {
+            int local_slot = net_read_u8(&reader);
+            if (local_slot < 0 || local_slot >= MAX_PLAYERS || (local_mask & (1u << local_slot))) return;
+            local_mask |= (uint8_t)(1u << local_slot);
+            netLocalPlayerSlots[i] = local_slot;
+        }
+        transport->local_player_slot = netLocalPlayerSlots[0];
         netRequestedCreative = net_read_u8(&reader) != 0;
-        activePlayers = clamp_active_players(transport->local_player_slot + 1);
+        if (reader.failed) return;
+        activePlayers = clamp_active_players(netLocalPlayerSlots[netLocalPlayerCount - 1] + 1);
+        if (netStatsEnabled) {
+            fprintf(stderr, "[net] assigned %d local player(s), first slot=%d\n",
+                    netLocalPlayerCount, transport->local_player_slot);
+        }
         gameState = GAME_STATE_LOBBY;
         return;
     }
@@ -15151,7 +15271,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
             if (!net_read_player_state(&reader, &slot, &state)) break;
             netPlayerPresent[slot] = true;
             if (slot + 1 > activePlayers) activePlayers = slot + 1;
-            if (slot == transport->local_player_slot) net_reconcile_local(&state);
+            if (net_local_index_for_slot(slot) >= 0) net_reconcile_local(slot, &state);
             else {
                 Player *p = &players[slot];
                 p->pos = state.pos; p->vel = state.vel; p->yaw = state.yaw; p->pitch = state.pitch;
@@ -15162,23 +15282,22 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
             p->kills = state.kills; p->deaths = state.deaths; p->debrisKills = state.debris_kills;
             p->onGround = (state.flags & 1u) != 0; p->isExposed = (state.flags & 2u) != 0;
             bool authoritative_melee = (state.visual.flags & NET_PLAYER_VISUAL_MELEE) != 0;
-            bool pending_local_melee = slot == transport->local_player_slot &&
-                                       netPredictedMeleeSequence != 0 &&
-                                       state.acknowledged_input < netPredictedMeleeSequence;
+            bool local_slot = net_local_index_for_slot(slot) >= 0;
+            bool pending_local_melee = local_slot &&
+                                       netPredictedMeleeSequence[slot] != 0 &&
+                                       state.acknowledged_input < netPredictedMeleeSequence[slot];
             if (authoritative_melee) {
                 float progress = (float)state.visual.melee_progress / 255.0f;
                 p->meleeSwingActive = true;
                 p->meleeSwingStartTime = (float)GetTime() - progress * MELEE_ANIM_DURATION_SECONDS;
-                if (slot == transport->local_player_slot &&
-                    state.acknowledged_input >= netPredictedMeleeSequence) {
-                    netPredictedMeleeSequence = 0;
+                if (local_slot && state.acknowledged_input >= netPredictedMeleeSequence[slot]) {
+                    netPredictedMeleeSequence[slot] = 0;
                 }
             } else if (!pending_local_melee) {
                 p->meleeSwingActive = false;
                 p->meleeSwingHitApplied = false;
-                if (slot == transport->local_player_slot &&
-                    state.acknowledged_input >= netPredictedMeleeSequence) {
-                    netPredictedMeleeSequence = 0;
+                if (local_slot && state.acknowledged_input >= netPredictedMeleeSequence[slot]) {
+                    netPredictedMeleeSequence[slot] = 0;
                 }
             }
             p->netTetherVisualActive = (state.visual.flags & NET_PLAYER_VISUAL_TETHER) != 0;
@@ -15305,28 +15424,33 @@ static void net_host_tick(void) {
 
 static void net_client_update(float dt) {
     if (!netTransport.connected || netTransport.local_player_slot < 0 || !netWorldReady) return;
-    NetInputCommand command = net_sample_local_input();
-    uint8_t packet[128]; NetWriter writer;
-    net_writer_init(&writer, packet, sizeof(packet));
-    net_write_header(&writer, NET_MSG_INPUT, 0, netTransport.session_id, netServerTick);
-    net_write_input(&writer, &command);
-    net_transport_send(&netTransport, 0, FPS_NET_CHANNEL_INPUT, packet, writer.length, command.pressed != 0);
-    int insert = (netPredictionHead + netPredictionCount) % NET_PREDICTION_HISTORY;
-    if (netPredictionCount == NET_PREDICTION_HISTORY) {
-        netPredictionHead = (netPredictionHead + 1) % NET_PREDICTION_HISTORY;
-        insert = (netPredictionHead + netPredictionCount - 1) % NET_PREDICTION_HISTORY;
-    } else ++netPredictionCount;
-    netPredictionHistory[insert] = (NetPredictedCommand){ command, dt };
-    Player *local = &players[netTransport.local_player_slot];
-    if (!netRequestedCreative && (command.pressed & NET_INPUT_MELEE)) {
-        /* Cosmetic prediction only.  The host remains authoritative for hits. */
-        perform_melee(netTransport.local_player_slot);
-        netPredictedMeleeSequence = command.sequence;
-    }
-    if (netRequestedCreative) net_apply_creative_command(local, &command, dt);
-    else {
-        net_apply_movement_command(local, &command, dt);
-        net_integrate_player(local, dt, true);
+    for (int local_index = 0; local_index < netLocalPlayerCount; ++local_index) {
+        int player_slot = netLocalPlayerSlots[local_index];
+        if (player_slot < 0 || player_slot >= MAX_PLAYERS) continue;
+        NetInputCommand command = net_sample_local_input(local_index, player_slot);
+        uint8_t packet[128]; NetWriter writer;
+        net_writer_init(&writer, packet, sizeof(packet));
+        net_write_header(&writer, NET_MSG_INPUT, 0, netTransport.session_id, netServerTick);
+        net_write_u8(&writer, (uint8_t)player_slot);
+        net_write_input(&writer, &command);
+        net_transport_send(&netTransport, 0, FPS_NET_CHANNEL_INPUT, packet, writer.length, command.pressed != 0);
+        int insert = (netPredictionHead[player_slot] + netPredictionCount[player_slot]) % NET_PREDICTION_HISTORY;
+        if (netPredictionCount[player_slot] == NET_PREDICTION_HISTORY) {
+            netPredictionHead[player_slot] = (netPredictionHead[player_slot] + 1) % NET_PREDICTION_HISTORY;
+            insert = (netPredictionHead[player_slot] + netPredictionCount[player_slot] - 1) % NET_PREDICTION_HISTORY;
+        } else ++netPredictionCount[player_slot];
+        netPredictionHistory[player_slot][insert] = (NetPredictedCommand){ command, dt };
+        Player *local = &players[player_slot];
+        if (!netRequestedCreative && (command.pressed & NET_INPUT_MELEE)) {
+            /* Cosmetic prediction only.  The host remains authoritative for hits. */
+            perform_melee(player_slot);
+            netPredictedMeleeSequence[player_slot] = command.sequence;
+        }
+        if (netRequestedCreative) net_apply_creative_command(local, &command, dt);
+        else {
+            net_apply_movement_command(local, &command, dt);
+            net_integrate_player(local, dt, true);
+        }
     }
 }
 
@@ -15336,15 +15460,13 @@ static void render_gameplay_view(RenderTexture2D *screens,
                                  int *renderH,
                                  bool creative_mode) {
     activePlayers = clamp_active_players(activePlayers);
-    int viewCount = netTransport.role == NET_ROLE_OFFLINE ? activePlayers : 1;
-    int localViewPlayer = (netTransport.role == NET_ROLE_CLIENT && netTransport.local_player_slot >= 0)
-                            ? netTransport.local_player_slot : 0;
+    int viewCount = netTransport.role == NET_ROLE_OFFLINE ? activePlayers : netLocalPlayerCount;
     ensure_render_targets(screens, renderPlayers, renderW, renderH, viewCount);
     Rectangle screenRec = { 0, 0, (float)(*renderW), (float)-(*renderH) };
 
     Camera3D cams[MAX_PLAYERS] = { 0 };
     for (int view = 0; view < viewCount; ++view) {
-        int i = netTransport.role == NET_ROLE_CLIENT ? localViewPlayer : view;
+        int i = netTransport.role == NET_ROLE_OFFLINE ? view : netLocalPlayerSlots[view];
         cams[i].up = (Vector3){0,1,0};
         cams[i].fovy = 60;
         cams[i].projection = CAMERA_PERSPECTIVE;
@@ -15363,7 +15485,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
     }
 
     for (int view = 0; view < viewCount; ++view) {
-        int i = netTransport.role == NET_ROLE_CLIENT ? localViewPlayer : view;
+        int i = netTransport.role == NET_ROLE_OFFLINE ? view : netLocalPlayerSlots[view];
         BeginTextureMode(screens[view]);
             ClearBackground(SKYBLUE);
             BeginMode3D(cams[i]);
@@ -15599,15 +15721,12 @@ int main(int argc, char **argv) {
             CloseWindow();
             return 4;
         }
-        activePlayers = 1;
-        memset(netPlayerPresent, 0, sizeof(netPlayerPresent));
-        memset(netPlayerReady, 0, sizeof(netPlayerReady));
-        netPlayerPresent[0] = true;
-        netPlayerReady[0] = true;
+        net_set_host_local_players(netRequestedLocalPlayers);
         netLobbyStarted = false;
         gameState = GAME_STATE_LOBBY;
         fprintf(stderr, "LAN host listening on port %u\n", (unsigned)netRequestedPort);
     } else if (!automatedRun && netRequestedRole == NET_ROLE_CLIENT) {
+        net_prepare_client_local_players(netRequestedLocalPlayers);
         if (!net_transport_connect(&netTransport, netConnectHost, netRequestedPort)) {
             fprintf(stderr, "Unable to connect to LAN host: %s\n", netTransport.last_error);
             CloseWindow();
@@ -15666,9 +15785,10 @@ int main(int argc, char **argv) {
             }
             if (netStatsEnabled && GetTime() - netLastStatsTime >= 1.0) {
                 netLastStatsTime = GetTime();
-                fprintf(stderr, "[net] role=%s tick=%u peers=%d rtt=%ums rx=%llu tx=%llu\n",
+                fprintf(stderr, "[net] role=%s tick=%u peers=%d local=%d rtt=%ums rx=%llu tx=%llu\n",
                         netTransport.role == NET_ROLE_HOST ? "host" : "client", netServerTick,
-                        net_transport_connected_clients(&netTransport), net_transport_rtt_ms(&netTransport),
+                        net_transport_connected_clients(&netTransport), netLocalPlayerCount,
+                        net_transport_rtt_ms(&netTransport),
                         (unsigned long long)netTransport.bytes_received,
                         (unsigned long long)netTransport.bytes_sent);
             }
@@ -15717,7 +15837,9 @@ int main(int argc, char **argv) {
                     DrawText("Press ENTER to Start", SCREEN_WIDTH / 2 - MeasureText("Press ENTER to Start", 20) / 2, boxY + 150, 20, DARKGRAY);
                     DrawText("Press S for Settings", SCREEN_WIDTH / 2 - MeasureText("Press S for Settings", 20) / 2, boxY + 200, 20, DARKGRAY);
                     DrawText("Press C for Creative Mode", SCREEN_WIDTH / 2 - MeasureText("Press C for Creative Mode", 20) / 2, boxY + 230, 20, DARKGRAY);
-                    DrawText("Press H to Host LAN | J to Join localhost", SCREEN_WIDTH / 2 - MeasureText("Press H to Host LAN | J to Join localhost", 20) / 2, boxY + 260, 20, DARKGRAY);
+                    const char *lan_text = TextFormat("H: Host | J: Join localhost | LAN local screens: %d (-/+)",
+                                                      netRequestedLocalPlayers);
+                    DrawText(lan_text, SCREEN_WIDTH / 2 - MeasureText(lan_text, 18) / 2, boxY + 260, 18, DARKGRAY);
                     DrawText(TextFormat("Custom Map: %s (Slot %d) - Press U to Toggle, L to Cycle",
                                         useCustomMap ? "ON" : "OFF", creativeMapSlot + 1),
                              SCREEN_WIDTH / 2 - MeasureText("Custom Map: ON (Slot 1) - Press U to Toggle, L to Cycle", 20) / 2,
@@ -15743,6 +15865,14 @@ int main(int argc, char **argv) {
                     ResetCreative();
                     gameState = GAME_STATE_CREATIVE;
                 }
+                if (netTransport.role == NET_ROLE_OFFLINE &&
+                    (IsKeyPressed(KEY_EQUAL) || IsKeyPressed(KEY_KP_ADD))) {
+                    netRequestedLocalPlayers = clampi(netRequestedLocalPlayers + 1, 1, MAX_PLAYERS);
+                }
+                if (netTransport.role == NET_ROLE_OFFLINE &&
+                    (IsKeyPressed(KEY_MINUS) || IsKeyPressed(KEY_KP_SUBTRACT))) {
+                    netRequestedLocalPlayers = clampi(netRequestedLocalPlayers - 1, 1, MAX_PLAYERS);
+                }
                 if (IsKeyPressed(KEY_U)) {
                     useCustomMap = !useCustomMap;
                 }
@@ -15753,9 +15883,7 @@ int main(int argc, char **argv) {
                     netRequestedRole = NET_ROLE_HOST;
                     netRequestedCreative = false;
                     if (net_transport_host(&netTransport, netRequestedPort)) {
-                        activePlayers = 1;
-                        memset(netPlayerPresent, 0, sizeof(netPlayerPresent)); netPlayerPresent[0] = true;
-                        memset(netPlayerReady, 0, sizeof(netPlayerReady)); netPlayerReady[0] = true;
+                        net_set_host_local_players(netRequestedLocalPlayers);
                         netLobbyStarted = false;
                         gameState = GAME_STATE_LOBBY;
                     }
@@ -15763,6 +15891,7 @@ int main(int argc, char **argv) {
                 if (netTransport.role == NET_ROLE_OFFLINE && IsKeyPressed(KEY_J)) {
                     netRequestedRole = NET_ROLE_CLIENT;
                     netRequestedCreative = false;
+                    net_prepare_client_local_players(netRequestedLocalPlayers);
                     if (net_transport_connect(&netTransport, "127.0.0.1", netRequestedPort)) {
                         memset(netPlayerPresent, 0, sizeof(netPlayerPresent)); netWorldReady = false;
                         memset(netPlayerReady, 0, sizeof(netPlayerReady)); netLobbyStarted = false;
@@ -15774,15 +15903,17 @@ int main(int argc, char **argv) {
                     ClearBackground((Color){ 28, 34, 44, 255 });
                     const char *title = netTransport.role == NET_ROLE_HOST ? "LAN LOBBY - HOST" : "LAN LOBBY";
                     DrawText(title, GetScreenWidth()/2 - MeasureText(title, 44)/2, 70, 44, RAYWHITE);
-                    DrawText(TextFormat("Mode: %s | Port: %u",
+                    DrawText(TextFormat("Mode: %s | Port: %u | Local screens: %d",
                                         netRequestedCreative ? "Creative" : "Gameplay",
-                                        (unsigned)netRequestedPort),
+                                        (unsigned)netRequestedPort, netLocalPlayerCount),
                              GetScreenWidth()/2 - 150, 135, 22, LIGHTGRAY);
                     int row_y = 210;
                     for (int i = 0; i < MAX_PLAYERS; ++i) {
                         Color color = netPlayerPresent[i] ? player_palette_color(i) : GRAY;
+                        bool local_player = net_local_index_for_slot(i) >= 0;
                         const char *status = !netPlayerPresent[i] ? "OPEN" :
-                                             (i == 0 ? "HOST" : (netPlayerReady[i] ? "READY" : "NOT READY"));
+                                             (local_player ? (netTransport.role == NET_ROLE_HOST ? "HOST LOCAL" : "LOCAL") :
+                                              (netPlayerReady[i] ? "REMOTE READY" : "REMOTE NOT READY"));
                         DrawRectangle(GetScreenWidth()/2 - 250, row_y - 8, 500, 48, Fade(color, 0.25f));
                         DrawText(TextFormat("Player %d", i + 1), GetScreenWidth()/2 - 225, row_y, 24, color);
                         DrawText(status, GetScreenWidth()/2 + 70, row_y, 24,
@@ -15809,8 +15940,12 @@ int main(int argc, char **argv) {
                 } else if (netTransport.role == NET_ROLE_CLIENT && IsKeyPressed(KEY_R) &&
                            netTransport.local_player_slot >= 0) {
                     int slot = netTransport.local_player_slot;
-                    netPlayerReady[slot] = !netPlayerReady[slot];
-                    net_send_ready(netPlayerReady[slot]);
+                    bool ready = !netPlayerReady[slot];
+                    for (int local_index = 0; local_index < netLocalPlayerCount; ++local_index) {
+                        int local_slot = netLocalPlayerSlots[local_index];
+                        if (local_slot >= 0 && local_slot < MAX_PLAYERS) netPlayerReady[local_slot] = ready;
+                    }
+                    net_send_ready(ready);
                 }
                 if (IsKeyPressed(KEY_ESCAPE)) {
                     net_transport_shutdown(&netTransport);
@@ -15964,7 +16099,7 @@ int main(int argc, char **argv) {
         }
         // input: shooting, bullet type, jump
         for (int i = 0; i < activePlayers; ++i) {
-            if (netTransport.role == NET_ROLE_HOST && i > 0) continue;
+            if (netTransport.role == NET_ROLE_HOST && !net_player_is_local(i)) continue;
             if (players[i].respawn_timer > 0.0f) {
                 continue;
             }
@@ -16002,7 +16137,7 @@ int main(int argc, char **argv) {
                 players[0].onGround = false;
             }
         }
-        if (netTransport.role == NET_ROLE_OFFLINE && playerInput[1] == INPUT_TYPE_KEYBOARD && players[1].respawn_timer <= 0.0f) {
+        if (net_player_is_local(1) && playerInput[1] == INPUT_TYPE_KEYBOARD && players[1].respawn_timer <= 0.0f) {
             if (IsKeyPressed(KEY_RIGHT_CONTROL)) FireVoxel(1);
             if (IsKeyPressed(KEY_M)) perform_melee(1);
             if (IsKeyPressed(KEY_O)) perform_build(1);
@@ -16049,7 +16184,7 @@ int main(int argc, char **argv) {
             if (players[i].respawn_timer > 0.0f) {
                 continue;
             }
-            if (netTransport.role == NET_ROLE_HOST && i > 0) {
+            if (netTransport.role == NET_ROLE_HOST && !net_player_is_local(i)) {
                 /* Remote movement and integration run at the authoritative 60 Hz tick. */
                 continue;
             } else if (playerInput[i] == INPUT_TYPE_KEYBOARD) {

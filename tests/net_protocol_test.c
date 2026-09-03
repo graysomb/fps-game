@@ -20,6 +20,7 @@ int main(void) {
     NetWriter writer;
     net_writer_init(&writer, packet, sizeof(packet));
     assert(net_write_header(&writer, NET_MSG_INPUT, 2, 77, 88));
+    net_write_u8(&writer, 3);
     assert(net_write_input(&writer, &input));
     assert(!writer.failed);
 
@@ -30,6 +31,7 @@ int main(void) {
     assert(net_read_header(&reader, &header));
     assert(header.type == NET_MSG_INPUT && header.flags == 2);
     assert(header.session_id == 77 && header.server_tick == 88);
+    assert(net_read_u8(&reader) == 3);
     assert(net_read_input(&reader, &decoded));
     assert(decoded.sequence == input.sequence && decoded.client_tick == input.client_tick);
     assert(decoded.move_x == input.move_x && decoded.move_y == input.move_y);
@@ -62,9 +64,11 @@ int main(void) {
 
     net_writer_init(&writer, packet, sizeof(packet));
     assert(net_write_header(&writer, NET_MSG_INPUT, 2, 77, 88));
+    net_write_u8(&writer, 3);
     assert(net_write_input(&writer, &input));
     net_reader_init(&reader, packet, writer.length - 1);
     assert(net_read_header(&reader, &header));
+    assert(net_read_u8(&reader) == 3);
     assert(!net_read_input(&reader, &decoded));
 
     packet[0] ^= 1u;
