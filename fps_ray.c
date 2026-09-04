@@ -460,7 +460,7 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.15f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.15f
 #define VOXEL_DEACTIVATION_FRAMES 5
-#define VOXEL_SLEEP_SNAP_POSITION_TOLERANCE (VOXEL_SIZE * 0.10f)
+#define VOXEL_SLEEP_SNAP_POSITION_TOLERANCE (VOXEL_SIZE * 0.25f)
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
 #define STATIC_RESTORE_SEARCH_RADIUS 2*1
 #define DEBRIS_ACTIVATION_COOLDOWN_FRAMES (60 * 10)
@@ -966,6 +966,7 @@ static int recycle_lifetime_find_root(int voxel_idx);
 static void recycle_lifetime_union(int a, int b);
 static bool build_recycle_physical_island_graph(void);
 static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count);
+static bool cluster_is_near_original_grid_pose(const int *cluster, int cluster_count);
 static void solve_static_collisions(float dt);
 static void solve_dynamic_collisions(float dt);
 static void log_dynamic_glue_cluster_breaks(void);
@@ -5256,10 +5257,9 @@ static bool freeze_lifetime_expired_islands(void)
 {
     if (voxel_count <= 0) return false;
     size_t voxel_bytes = (size_t)voxel_count;
-    // A connected active island has a maximum awake lifetime.  Newly activated
+    // A connected active island has a maximum awake lifetime. Newly activated
     // neighbors must not perpetually postpone an older island by resetting the
-    // whole component's age requirement.  Once any member reaches the limit we
-    // freeze the complete physical island atomically.
+    // whole component's age requirement.
     memset(recycleLifetimeExpired, 0, voxel_bytes);
     memset(recycleComponentAllAwake, 1, voxel_bytes);
 
@@ -5274,6 +5274,7 @@ static bool freeze_lifetime_expired_islands(void)
     }
 
     bool changed = false;
+    bool restored_static = false;
     for (int root = 0; root < voxel_count; ++root) {
         if (recycleLifetimeParent[root] != root ||
             !recycleComponentAllAwake[root] || !recycleLifetimeExpired[root]) {
@@ -5284,14 +5285,31 @@ static bool freeze_lifetime_expired_islands(void)
              idx = recycleLifetimeNext[idx]) {
             if (count < MAX_VOXELS) glueClusterIndices[count++] = idx;
         }
-        if (count > 0 && freeze_dynamic_cluster_in_place(glueClusterIndices, count)) {
-            changed = true;
-            if (debugLogVoxelRecycle) {
-                TraceLog(LOG_INFO,
-                         "[Recycle] lifetime->sleep island_start=%d count=%d",
-                         root, count);
-            }
+        if (count <= 0) continue;
+
+        bool near_original = cluster_is_near_original_grid_pose(glueClusterIndices, count);
+        bool converted = near_original
+            ? restore_glue_cluster_to_static(glueClusterIndices, count)
+            : freeze_dynamic_cluster_in_place(glueClusterIndices, count);
+        if (!converted) continue;
+
+        changed = true;
+        restored_static = near_original;
+        if (debugLogVoxelRecycle) {
+            TraceLog(LOG_INFO,
+                     "[Recycle] lifetime->%s island_start=%d count=%d",
+                     near_original ? "static" : "sleep", root, count);
         }
+        // Static restoration compacts the voxel array, invalidating the graph.
+        // Finish processing the remaining islands on the next frame.
+        if (restored_static) break;
+    }
+    if (restored_static) {
+        rebuild_voxel_hash();
+        rebuild_all_voxel_surfaces();
+        rebuild_glue_constraints();
+        refresh_static_voxel_beliefs();
+        meshDirty = true;
     }
     return changed;
 }
@@ -5951,22 +5969,29 @@ static bool cluster_is_near_original_grid_pose(const int *cluster, int cluster_c
         if (span_x <= 0 || span_y <= 0 || span_z <= 0) return false;
         required_static_cells += (int64_t)span_x * (int64_t)span_y * (int64_t)span_z;
 
-        float min_x = (float)voxel->orig_min_gx * VOXEL_SIZE;
-        float min_y = (float)voxel->orig_min_gy * VOXEL_SIZE;
-        float min_z = (float)voxel->orig_min_gz * VOXEL_SIZE;
-        float max_x = (float)(voxel->orig_max_gx + 1) * VOXEL_SIZE;
-        float max_y = (float)(voxel->orig_max_gy + 1) * VOXEL_SIZE;
-        float max_z = (float)(voxel->orig_max_gz + 1) * VOXEL_SIZE;
-        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
-            Particle *particle = voxel_particle_at(voxel, corner);
-            if (!particle || !v_isfinite(particle->pos)) return false;
-            Vector3 original = {
-                corner_signs[corner][0] < 0 ? min_x : max_x,
-                corner_signs[corner][1] < 0 ? min_y : max_y,
-                corner_signs[corner][2] < 0 ? min_z : max_z
-            };
-            Vector3 delta = v_sub(particle->pos, original);
-            if (v_dot(delta, delta) > tolerance_sq) return false;
+        // Contact resolution intentionally deforms the corners on the floor-facing
+        // layer.  Requiring every corner to return to its exact pre-activation
+        // coordinate therefore rejects an otherwise grid-aligned, calm island.
+        // Shape strain and shear were already checked by the equilibrium gate;
+        // here we only decide whether each voxel remained in its original cell.
+        Vector3 original_center = {
+            ((float)voxel->orig_min_gx + (float)voxel->orig_max_gx + 1.0f) *
+                (VOXEL_SIZE * 0.5f),
+            ((float)voxel->orig_min_gy + (float)voxel->orig_max_gy + 1.0f) *
+                (VOXEL_SIZE * 0.5f),
+            ((float)voxel->orig_min_gz + (float)voxel->orig_max_gz + 1.0f) *
+                (VOXEL_SIZE * 0.5f)
+        };
+        if (!v_isfinite(voxel->pos)) return false;
+        Vector3 center_delta = v_sub(voxel->pos, original_center);
+        if (v_dot(center_delta, center_delta) > tolerance_sq) {
+            if (debugLogVoxelDeactivation) {
+                TraceLog(LOG_INFO,
+                         "[Deactivate] near-origin=false voxel=%d center-error=%.4f tolerance=%.4f",
+                         cluster[i], v_length(center_delta),
+                         (double)VOXEL_SLEEP_SNAP_POSITION_TOLERANCE);
+            }
+            return false;
         }
 
         // Snapping must never replace an already-static occupant or a dynamic
@@ -5974,10 +5999,22 @@ static bool cluster_is_near_original_grid_pose(const int *cluster, int cluster_c
         for (int gx = voxel->orig_min_gx; gx <= voxel->orig_max_gx; ++gx) {
             for (int gy = voxel->orig_min_gy; gy <= voxel->orig_max_gy; ++gy) {
                 for (int gz = voxel->orig_min_gz; gz <= voxel->orig_max_gz; ++gz) {
-                    if (table_get_static_only(gx, gy, gz) >= 0) return false;
+                    if (table_get_static_only(gx, gy, gz) >= 0) {
+                        if (debugLogVoxelDeactivation) {
+                            TraceLog(LOG_INFO,
+                                     "[Deactivate] near-origin=false occupied-static=(%d,%d,%d)",
+                                     gx, gy, gz);
+                        }
+                        return false;
+                    }
                     int occupant = table_get(gx, gy, gz);
                     if (occupant >= 0 &&
                         (occupant >= voxel_count || !sleepClusterVisited[occupant])) {
+                        if (debugLogVoxelDeactivation) {
+                            TraceLog(LOG_INFO,
+                                     "[Deactivate] near-origin=false occupied-dynamic=(%d,%d,%d) voxel=%d",
+                                     gx, gy, gz, occupant);
+                        }
                         return false;
                     }
                 }

@@ -74,6 +74,8 @@ typedef struct DebugRunState {
     bool sleep_snap_original_test;
     bool sleep_snap_original_succeeded;
     bool sleep_snap_active_observed;
+    bool sleep_snap_sleeping_observed;
+    bool sleep_snap_impact_activation_requested;
     bool support_removal_succeeded;
     bool drop_sampled;
     bool delayed_activation;
@@ -102,6 +104,10 @@ typedef struct DebugRunState {
     bool gpu_readback_performed;
     int activation_step;
     int sleep_snap_static_step;
+    float sleep_snap_max_original_error;
+    float sleep_snap_last_speed;
+    float sleep_snap_last_strain;
+    float sleep_snap_last_shear;
     int recycle_queue_before;
     int recycle_queue_after;
     float initial_centroid_y;
@@ -1466,6 +1472,7 @@ static bool debug_setup_sleep_snap_original(DebugRunState *state)
 {
     debug_reset_world();
     state->sleep_snap_original_test = true;
+    debugLogVoxelDeactivation = true;
     state->sleep_snap_static_step = -1;
     state->expected_voxels = 4 * 4 * 6;
     int cluster_created = 0;
@@ -1481,17 +1488,35 @@ static bool debug_setup_sleep_snap_original(DebugRunState *state)
         }
     }
     debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    int thrown_index = debug_add_cell(-5, 2, 0, false, true,
+                                      (Color){ 255, 195, 55, 255 }, DEBUG_THROW_TAG);
     debug_rebuild_world_state();
 
-    if (cluster_created != state->expected_voxels) {
-        debug_add_failure(state, "sleep-snap setup created pillar=%d/%d",
-                          cluster_created, state->expected_voxels);
+    if (cluster_created != state->expected_voxels || thrown_index < 0) {
+        debug_add_failure(state, "sleep-snap setup created pillar=%d/%d throw=%d",
+                          cluster_created, state->expected_voxels, thrown_index);
         return false;
     }
+
+    Voxel *thrown = &voxels[thrown_index];
+    thrown->owner = 0;
+    thrown->activator = 0;
+    thrown->wasTethered = true;
+    // Use the tether's direct-activation strength so this isolated grounded
+    // pillar reliably wakes when struck, matching a gameplay structure whose
+    // local support has already been weakened by damage.
+    thrown->activationBelief = ACTIVATION_TETHER_BELIEF;
+    players[0].yaw = -90.0f;
+    players[0].pitch = 0.0f;
+    players[0].tetherHolding = true;
+    players[0].tetherVoxel = thrown_index;
+    players[0].tetherVoxelIdentity = thrown->identity;
+    release_tether(0);
+    state->tether_thin_wall_hits_before = tetherThrowCcdHitCount;
     state->camera.position = (Vector3){ 6.5f, 4.5f, 8.0f };
     state->camera.target = (Vector3){ 0.0f, 1.5f, 0.0f };
     debug_set_initial_centroid(state);
-    debug_capture(state, "phase-01-original-static.png", "original-static", 0);
+    debug_capture(state, "phase-01-tether-thrown.png", "tether-thrown-static-pillar", 0);
     return true;
 }
 
@@ -2279,66 +2304,79 @@ static void debug_physics_step(void)
 static void debug_validate_step(DebugRunState *state, int step)
 {
     debug_validate_all_sim_particles(state, step);
+    // Isolate the post-impact lifecycle under test: wait for the real swept
+    // tether collision, then wake the struck pillar through the normal static
+    // activation path.  Ground support otherwise makes this compact fixture's
+    // freeze belief much higher than a damaged gameplay structure's.
+    if (state->sleep_snap_original_test &&
+        !state->sleep_snap_impact_activation_requested &&
+        tetherThrowCcdHitCount > state->tether_thin_wall_hits_before) {
+        int seed = debug_find_tagged_voxel(DEBUG_TEST_TAG, true);
+        if (seed >= 0) {
+            state->sleep_snap_impact_activation_requested =
+                activate_static_voxel_for_tether(seed, 0, ACTIVATION_TETHER_BELIEF);
+        }
+    }
     DebugSample sample = debug_collect_sample("validation", step, state->initial_centroid_y);
     if (state->sleep_snap_original_test) {
-        if (step == 1 && !state->activation_succeeded) {
-            if (!debug_activate_test_cluster(state)) return;
-            debug_rebuild_world_state();
-            debug_place_tagged_cluster_near_original(
-                DEBUG_TEST_TAG, (Vector3){ VOXEL_SIZE * 0.05f, 0.0f, 0.0f });
-            for (int i = 0; i < voxel_count; ++i) {
-                Voxel *voxel = &voxels[i];
-                if (voxel->debugClusterTag != DEBUG_TEST_TAG || !voxel->simulate) continue;
-                voxel->wake_timer = 120;
-                voxel->sleepFrames = 0;
-            }
-            state->activation_step = step;
-            state->sleep_snap_active_observed =
-                debug_count_tagged(DEBUG_TEST_TAG, 1) == state->expected_voxels;
-            debug_capture(state, "phase-02-activated-dynamic.png", "activated-dynamic", step);
-        } else if (step > 1 && !state->sleep_snap_original_succeeded) {
-            if (debug_count_tagged(DEBUG_TEST_TAG, 1) == state->expected_voxels) {
+        float max_error = 0.0f;
+        float max_speed = 0.0f;
+        float max_strain = 0.0f;
+        float max_shear = 0.0f;
+        for (int i = 0; i < voxel_count; ++i) {
+            Voxel *voxel = &voxels[i];
+            if (voxel->debugClusterTag != DEBUG_TEST_TAG || !voxel->simulate) continue;
+            max_speed = fmaxf(max_speed, v_length(voxel->vel));
+            float strain = 0.0f;
+            float shear = 0.0f;
+            voxel_measure_strain(voxel, &strain, &shear);
+            max_strain = fmaxf(max_strain, strain);
+            max_shear = fmaxf(max_shear, shear);
+            Vector3 original_center = {
+                ((float)voxel->orig_min_gx + (float)voxel->orig_max_gx + 1.0f) *
+                    (VOXEL_SIZE * 0.5f),
+                ((float)voxel->orig_min_gy + (float)voxel->orig_max_gy + 1.0f) *
+                    (VOXEL_SIZE * 0.5f),
+                ((float)voxel->orig_min_gz + (float)voxel->orig_max_gz + 1.0f) *
+                    (VOXEL_SIZE * 0.5f)
+            };
+            max_error = fmaxf(max_error,
+                              v_length(v_sub(voxel->pos, original_center)));
+        }
+        state->sleep_snap_max_original_error = max_error;
+        state->sleep_snap_last_speed = max_speed;
+        state->sleep_snap_last_strain = max_strain;
+        state->sleep_snap_last_shear = max_shear;
+
+        if (sample.tagged_dynamic == state->expected_voxels) {
+            state->activation_succeeded = true;
+            if (!state->sleep_snap_active_observed) {
                 state->sleep_snap_active_observed = true;
+                state->activation_step = step;
+                debug_capture(state, "phase-02-impact-activated.png", "impact-activated", step);
             }
-            if (step == 20) {
-                // Return the deliberately motionless test island to a small
-                // residual offset, then let the production calm-island path
-                // make the static-versus-in-place-sleep decision.
-                debug_place_tagged_cluster_near_original(
-                    DEBUG_TEST_TAG, (Vector3){ VOXEL_SIZE * 0.05f, 0.0f, 0.0f });
-                for (int i = 0; i < voxel_count; ++i) {
-                    Voxel *voxel = &voxels[i];
-                    if (voxel->debugClusterTag != DEBUG_TEST_TAG || !voxel->simulate) continue;
-                    voxel->wake_timer = 0;
-                    voxel->sleepFrames = VOXEL_DEACTIVATION_FRAMES - 1;
+        }
+        if (sample.tagged_sleeping > 0) {
+            state->sleep_snap_sleeping_observed = true;
+            state->sleeping_conversion_succeeded = true;
+        }
+        if (state->sleep_snap_active_observed &&
+            sample.tagged_static == state->expected_voxels &&
+            sample.tagged_dynamic == 0 && !state->sleep_snap_original_succeeded) {
+            bool original_cells_static = true;
+            for (int i = 0; i < state->tracked_cell_count; ++i) {
+                DebugTrackedCell *cell = &state->tracked_cells[i];
+                int idx = table_get_static_only(cell->x, cell->y, cell->z);
+                if (idx < 0 || idx >= voxel_count ||
+                    voxels[idx].debugClusterTag != DEBUG_TEST_TAG) {
+                    original_cells_static = false;
+                    break;
                 }
-                state->sleeping_conversion_succeeded = deactivate_sleeping_voxels();
-                int tagged_static = debug_count_tagged(DEBUG_TEST_TAG, 0);
-                int tagged_dynamic = debug_count_tagged(DEBUG_TEST_TAG, 1);
-                bool original_cells_static = true;
-                for (int i = 0; i < state->tracked_cell_count; ++i) {
-                    DebugTrackedCell *cell = &state->tracked_cells[i];
-                    int idx = table_get_static_only(cell->x, cell->y, cell->z);
-                    if (idx < 0 || idx >= voxel_count ||
-                        voxels[idx].debugClusterTag != DEBUG_TEST_TAG) {
-                        original_cells_static = false;
-                        break;
-                    }
-                }
-                state->sleep_snap_original_succeeded =
-                    state->sleeping_conversion_succeeded &&
-                    tagged_static == state->expected_voxels && tagged_dynamic == 0 &&
-                    original_cells_static;
-                state->sleep_snap_static_step = state->sleep_snap_original_succeeded ? step : -1;
-                if (!state->sleep_snap_original_succeeded) {
-                    debug_add_failure(state,
-                                      "near-origin island did not snap atomically "
-                                      "(static=%d/%d dynamic=%d originalCells=%s)",
-                                      tagged_static, state->expected_voxels, tagged_dynamic,
-                                      original_cells_static ? "true" : "false");
-                }
-                debug_capture(state, "phase-03-snapped-static.png", "snapped-original-static", step);
             }
+            state->sleep_snap_original_succeeded = original_cells_static;
+            state->sleeping_conversion_succeeded = original_cells_static;
+            state->sleep_snap_static_step = original_cells_static ? step : -1;
+            debug_capture(state, "phase-03-snapped-static.png", "snapped-original-static", step);
         }
         return;
     }
@@ -2657,7 +2695,14 @@ static void debug_finalize_validation(DebugRunState *state)
             debug_add_failure(state, "near-origin test never visibly entered the dynamic state");
         }
         if (!state->sleep_snap_original_succeeded) {
-            debug_add_failure(state, "near-origin sleep transition did not restore static voxels");
+            debug_add_failure(state,
+                              "tether-activated pillar did not restore static "
+                              "(sleeping=%s error=%.4f speed=%.4f strain=%.4f shear=%.4f)",
+                              state->sleep_snap_sleeping_observed ? "true" : "false",
+                              state->sleep_snap_max_original_error,
+                              state->sleep_snap_last_speed,
+                              state->sleep_snap_last_strain,
+                              state->sleep_snap_last_shear);
         }
         return;
     }
@@ -2825,15 +2870,24 @@ static bool debug_write_report(DebugRunState *state)
     fprintf(file,
             ",\n  \"activationSucceeded\": %s,\n  \"sleepingConversionSucceeded\": %s,\n"
             "  \"sleepSnapOriginalTest\": %s,\n  \"sleepSnapActiveObserved\": %s,\n"
+            "  \"sleepSnapSleepingObserved\": %s,\n"
             "  \"sleepSnapOriginalSucceeded\": %s,\n  \"sleepSnapStaticStep\": %d,\n"
+            "  \"sleepSnapMaxOriginalError\": %.9g,\n"
+            "  \"sleepSnapLastSpeed\": %.9g,\n  \"sleepSnapLastStrain\": %.9g,\n"
+            "  \"sleepSnapLastShear\": %.9g,\n"
             "  \"supportRemovalSucceeded\": %s,\n  \"activationStep\": %d,"
             "\n  \"dropAtStep60\": %.9g,\n",
             state->activation_succeeded ? "true" : "false",
             state->sleeping_conversion_succeeded ? "true" : "false",
             state->sleep_snap_original_test ? "true" : "false",
             state->sleep_snap_active_observed ? "true" : "false",
+            state->sleep_snap_sleeping_observed ? "true" : "false",
             state->sleep_snap_original_succeeded ? "true" : "false",
             state->sleep_snap_static_step,
+            (double)state->sleep_snap_max_original_error,
+            (double)state->sleep_snap_last_speed,
+            (double)state->sleep_snap_last_strain,
+            (double)state->sleep_snap_last_shear,
             state->support_removal_succeeded ? "true" : "false",
             state->activation_step,
             (double)state->drop_at_step_60);

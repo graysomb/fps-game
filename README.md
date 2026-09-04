@@ -365,10 +365,11 @@ simulation, capture diagnostic PNGs, write a JSON report, and exit without requi
 gameplay input. The window is hidden by default but a graphics context is still
 created for off-screen rendering.
 
-When a calm supported dynamic island reaches its sleep cutoff, every particle corner
-is compared with its original grid pose. Islands entirely within 0.1 voxel and whose
-original cells remain available are restored to static voxels; displaced, rotated, or
-blocked islands retain their exact particle pose and sleep in place.
+When a calm dynamic island reaches its sleep cutoff, each voxel center is compared
+with its original grid cell. Islands entirely within one quarter voxel and whose
+original cells remain available are restored to static voxels; displaced or blocked
+islands retain their exact particle pose and sleep in place. The normal equilibrium
+strain and shear limits still prevent significantly deformed islands from snapping.
 
 ```bash
 fps_ray --physics=gpu --debug-scenario=sleep-wake-floating
