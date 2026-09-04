@@ -123,19 +123,19 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			DTb2pRvhJGjXEsRH3qE4jQnQGVo=
+			8y29x1wWu1HFiuPktn0NAGk06Ik=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"0d36f6a51be12468d712c447dea1388d09d0195a" or cdhash H"4e0807c6be1dfef1ce0ea754d6af5c0c7d265611"</string>
+			<string>cdhash H"f32dbdc75c16bb51c58ae3e4b67d0d006934e889" or cdhash H"6e53de628f8cfcc5dfd8cc1f8d59b6b33facd985"</string>
 		</dict>
 		<key>MacOS/fps_ray_gpu</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			X3urjrbKoT0jYUC2cUgNyxSWdHE=
+			vy9of3GDQ9rYu6Vdp7PwZF7wVfc=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"5f7bab8eb6caa13d236140b671480dcb14967471" or cdhash H"3b641db0876a0f612f97c5944f37b273e7e1605b"</string>
+			<string>cdhash H"bf2f687f718343dad8bba55da7b3f0645ef055f7" or cdhash H"8def0ad7f458c1e864edf2d367126d636eaa3f4d"</string>
 		</dict>
 		<key>Resources/shaders/debug_AABB.frag</key>
 		<dict>
