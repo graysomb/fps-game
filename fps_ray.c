@@ -91,6 +91,7 @@ static GpuTransferMode gpuTransferMode = GPU_TRANSFER_RESIDENT;
 static int physicsSmokeSteps = 0;
 static int physicsSmokeVoxels = 2;
 static int physicsSmokeBatchSize = 1;
+static bool tetherThrowCcdEnabled = true;
 
 static NetTransport netTransport;
 static NetRole netRequestedRole = NET_ROLE_OFFLINE;
@@ -192,6 +193,14 @@ static bool parse_physics_arguments(int argc, char **argv) {
         }
         if (strcmp(arg, "--gpu-transfer-stats") == 0) {
             gpuTransferStatsEnabled = true;
+            continue;
+        }
+        if (strcmp(arg, "--tether-throw-ccd") == 0) {
+            tetherThrowCcdEnabled = true;
+            continue;
+        }
+        if (strcmp(arg, "--no-tether-throw-ccd") == 0) {
+            tetherThrowCcdEnabled = false;
             continue;
         }
         if (strncmp(arg, "--gpu-transfer-mode=", 20) == 0) {
@@ -476,6 +485,12 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define TETHER_SPRING 200.0f
 #define TETHER_DAMPING 0.2f
 #define TETHER_THROW_IMPULSE 50.0f
+#define TETHER_THROW_CCD_MIN_SPEED 30.0f
+#define TETHER_THROW_CCD_FRAMES 30
+#define TETHER_THROW_CCD_SNAPSHOT_CAPACITY (MAX_PLAYERS * TETHER_THROW_CCD_FRAMES)
+#define TETHER_THROW_CCD_SKIN (VOXEL_SIZE * 0.01f)
+#define TETHER_THROW_CCD_RESTITUTION 0.15f
+#define TETHER_THROW_IMPACT_LIFETIME_FRAMES 8
 #define SMUSH_EXPOSED_SPEED 8.0f
 #define SMUSH_POINT_MULT 4
 #define POINTS_UPDATE_DURATION 0.6f
@@ -815,6 +830,7 @@ typedef struct {
     uint8_t neighborSupport;
     uint8_t supportMask;
     uint8_t skipCollisionVelocityFrames;
+    uint8_t tetherThrowCcdFrames;
     int lifeFrames;
     int debugClusterTag;
     // The original static voxel was already captured by activation.  Dynamic
@@ -850,6 +866,31 @@ static int free_particle_count = 0;
 static int particle_sync_stamp = 1;
 static bool collisionTopologyDirty = true;
 static uint64_t collisionMetadataGeneration = 1;
+static uint64_t tetherThrowCcdHitCount = 0;
+static uint64_t tetherThrowCcdIdentities[TETHER_THROW_CCD_SNAPSHOT_CAPACITY];
+static int tetherThrowCcdActiveCount = 0;
+
+typedef struct {
+    int gx, gy, gz;
+    uint64_t source_identity;
+    Vector3 impulse;
+    int frames_remaining;
+} PendingTetherImpact;
+
+static PendingTetherImpact pendingTetherImpacts[TETHER_THROW_CCD_SNAPSHOT_CAPACITY];
+static int pendingTetherImpactCount = 0;
+
+typedef struct {
+    int id;
+    int x, y, z;
+    float t;
+    Vector3 normal;
+} VoxelHit;
+
+typedef struct {
+    uint64_t identity;
+    Vector3 particle_start[VOXEL_CORNER_COUNT];
+} TetherThrowCcdSnapshot;
 
 static inline bool voxel_is_awake_dynamic(const Voxel *voxel)
 {
@@ -4032,6 +4073,7 @@ static bool init_voxel_struct(Voxel *v,
     v->neighborSupport = 0;
     v->supportMask = 0;
     v->skipCollisionVelocityFrames = 0;
+    v->tetherThrowCcdFrames = 0;
     v->lifeFrames = 0;
     v->debugClusterTag = 0;
     v->prevGlueClusterId = -1;
@@ -4626,6 +4668,104 @@ static void activate_static_worker(int start, int end, int worker_id, void *user
     }
 }
 
+static float voxel_mass_units(const Voxel *voxel)
+{
+    const float unit_volume = VOXEL_SIZE * VOXEL_SIZE * VOXEL_SIZE;
+    if (!voxel || voxel->rest_volume <= 0.0f || unit_volume <= 0.0f) return 1.0f;
+    return fmaxf(1.0f, voxel->rest_volume / unit_volume);
+}
+
+static bool apply_tether_impact_to_dynamic_island(int target_index,
+                                                   uint64_t source_identity,
+                                                   Vector3 impulse)
+{
+    if (target_index < 0 || target_index >= voxel_count ||
+        !voxels[target_index].simulate ||
+        voxels[target_index].identity == source_identity) return false;
+
+    int cluster_count = build_glue_cluster_indices(target_index, glueClusterIndices);
+    if (cluster_count <= 0) return false;
+
+    float island_mass = 0.0f;
+    for (int i = 0; i < cluster_count; ++i) {
+        int voxel_index = glueClusterIndices[i];
+        if (voxel_index < 0 || voxel_index >= voxel_count) continue;
+        Voxel *target = &voxels[voxel_index];
+        if (!target->simulate || target->identity == source_identity) continue;
+        island_mass += voxel_mass_units(target);
+    }
+    if (island_mass <= 1e-6f) return false;
+
+    Vector3 delta_velocity = v_mul(impulse, 1.0f / island_mass);
+    int impact_stamp = ++particle_sync_stamp;
+    if (impact_stamp == 0) {
+        particle_sync_stamp = 1;
+        impact_stamp = 1;
+    }
+    bool applied = false;
+    for (int i = 0; i < cluster_count; ++i) {
+        int voxel_index = glueClusterIndices[i];
+        if (voxel_index < 0 || voxel_index >= voxel_count) continue;
+        Voxel *target = &voxels[voxel_index];
+        if (!target->simulate || target->identity == source_identity) continue;
+
+        target->vel = v_add(target->vel, delta_velocity);
+        target->sleeping = false;
+        target->sleepFrames = 0;
+        target->wake_source = true;
+        target->wake_timer = COARSENING_WAKE_FRAMES;
+        target->activationBelief = fmaxf(target->activationBelief, 1.0f);
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            Particle *particle = voxel_particle_at(target, corner);
+            if (!particle || particle->inv_mass <= 0.0f ||
+                particle->sync_stamp == impact_stamp) continue;
+            particle->vel = v_add(particle->vel, delta_velocity);
+            particle->sync_stamp = impact_stamp;
+        }
+        applied = true;
+    }
+    return applied;
+}
+
+static void queue_tether_impact(int gx, int gy, int gz,
+                                uint64_t source_identity, Vector3 impulse)
+{
+    if (!v_isfinite(impulse) || v_length(impulse) <= 1e-6f) return;
+
+    for (int i = 0; i < pendingTetherImpactCount; ++i) {
+        PendingTetherImpact *pending = &pendingTetherImpacts[i];
+        if (pending->gx == gx && pending->gy == gy && pending->gz == gz &&
+            pending->source_identity == source_identity) {
+            pending->impulse = v_add(pending->impulse, impulse);
+            pending->frames_remaining = TETHER_THROW_IMPACT_LIFETIME_FRAMES;
+            return;
+        }
+    }
+    if (pendingTetherImpactCount >= TETHER_THROW_CCD_SNAPSHOT_CAPACITY) return;
+    pendingTetherImpacts[pendingTetherImpactCount++] = (PendingTetherImpact){
+        gx, gy, gz, source_identity, impulse, TETHER_THROW_IMPACT_LIFETIME_FRAMES
+    };
+}
+
+static void apply_pending_tether_impacts(void)
+{
+    int retained = 0;
+    for (int i = 0; i < pendingTetherImpactCount; ++i) {
+        PendingTetherImpact pending = pendingTetherImpacts[i];
+        int target_index = table_get(pending.gx, pending.gy, pending.gz);
+        if (apply_tether_impact_to_dynamic_island(target_index,
+                                                  pending.source_identity,
+                                                  pending.impulse)) {
+            continue;
+        }
+        --pending.frames_remaining;
+        if (pending.frames_remaining > 0) {
+            pendingTetherImpacts[retained++] = pending;
+        }
+    }
+    pendingTetherImpactCount = retained;
+}
+
 static bool activate_static_voxels_near_dynamic(void)
 {
     static UnitVoxelBuffer buffer;
@@ -4655,6 +4795,7 @@ static bool activate_static_voxels_near_dynamic(void)
     }
 
     if (buffer.count <= 0) {
+        apply_pending_tether_impacts();
         return false;
     }
 
@@ -4676,8 +4817,10 @@ static bool activate_static_voxels_near_dynamic(void)
         glue_dynamic_voxel_to_static_neighbors();
         refresh_static_voxel_beliefs();
         meshDirty = true;
+        apply_pending_tether_impacts();
         return true;
     }
+    apply_pending_tether_impacts();
     return false;
 }
 
@@ -7066,6 +7209,8 @@ static void buildDemo(void) {
 
 
 static int first_voxel_hit(Ray ray, float t_max, int ignore_id);
+static bool first_swept_voxel_hit(Ray ray, float t_max, int ignore_id,
+                                  VoxelHit *out_hit);
 static void UpdateKdRatio(int player_index);
 static Vector3 pick_player_spawn(int player_index);
 static int brush_extent_for_voxel(const Voxel *v);
@@ -7148,6 +7293,8 @@ static void clear_pickups(void) {
 
 static void clear_world_voxels(void) {
     voxel_count = 0;
+    tetherThrowCcdActiveCount = 0;
+    pendingTetherImpactCount = 0;
     reset_particle_pool();
     staticBeliefsInitialized = false;
     staticBeliefsForceFullRefresh = false;
@@ -11963,6 +12110,171 @@ static void copy_particle_snapshot_range(int start, int end, int worker_id, void
     for (int i = start; i < end; ++i) particle_snapshot[i] = sim_particles[i];
 }
 
+static int find_voxel_by_identity(uint64_t identity)
+{
+    if (identity == 0) return -1;
+    for (int i = 0; i < voxel_count; ++i) {
+        if (voxels[i].identity == identity) return i;
+    }
+    return -1;
+}
+
+static void track_tether_throw_ccd(Voxel *voxel)
+{
+    if (!voxel || voxel->identity == 0 || voxel->tetherThrowCcdFrames == 0) return;
+    for (int i = 0; i < tetherThrowCcdActiveCount; ++i) {
+        if (tetherThrowCcdIdentities[i] == voxel->identity) return;
+    }
+    if (tetherThrowCcdActiveCount < TETHER_THROW_CCD_SNAPSHOT_CAPACITY) {
+        tetherThrowCcdIdentities[tetherThrowCcdActiveCount++] = voxel->identity;
+    }
+}
+
+static int capture_tether_throw_ccd_snapshots(TetherThrowCcdSnapshot *snapshots,
+                                              int capacity)
+{
+    if (!tetherThrowCcdEnabled || tetherThrowCcdActiveCount <= 0 ||
+        !snapshots || capacity <= 0) return 0;
+    int count = 0;
+    int retained = 0;
+    for (int tracked = 0; tracked < tetherThrowCcdActiveCount; ++tracked) {
+        uint64_t identity = tetherThrowCcdIdentities[tracked];
+        int voxel_index = find_voxel_by_identity(identity);
+        if (voxel_index < 0) continue;
+        Voxel *voxel = &voxels[voxel_index];
+        if (!voxel_is_awake_dynamic(voxel) || voxel->isBullet ||
+            voxel->tetherThrowCcdFrames == 0) continue;
+        tetherThrowCcdIdentities[retained++] = identity;
+        if (count >= capacity) continue;
+        TetherThrowCcdSnapshot *snapshot = &snapshots[count];
+        snapshot->identity = identity;
+        bool valid = true;
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            Particle *particle = voxel_particle_at(voxel, corner);
+            if (!particle || !v_isfinite(particle->pos)) {
+                valid = false;
+                break;
+            }
+            snapshot->particle_start[corner] = particle->pos;
+        }
+        if (valid) ++count;
+    }
+    tetherThrowCcdActiveCount = retained;
+    return count;
+}
+
+static bool resolve_tether_throw_ccd_snapshot(const TetherThrowCcdSnapshot *snapshot,
+                                              int fixed_steps)
+{
+    if (!snapshot) return false;
+    int voxel_index = find_voxel_by_identity(snapshot->identity);
+    if (voxel_index < 0) return false;
+    Voxel *voxel = &voxels[voxel_index];
+    if (!voxel_is_awake_dynamic(voxel) || voxel->isBullet ||
+        voxel->tetherThrowCcdFrames == 0) return false;
+
+    float earliest_fraction = 2.0f;
+    float earliest_path_length = 0.0f;
+    Vector3 collision_normal = { 0.0f, 0.0f, 0.0f };
+    VoxelHit collision_hit = { .id = -1 };
+    bool collided = false;
+    for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+        Particle *particle = voxel_particle_at(voxel, corner);
+        if (!particle || !v_isfinite(particle->pos)) continue;
+        Vector3 path = v_sub(particle->pos, snapshot->particle_start[corner]);
+        float path_length = v_length(path);
+        if (path_length <= 1e-6f) continue;
+        VoxelHit hit;
+        Ray ray = { snapshot->particle_start[corner], v_mul(path, 1.0f / path_length) };
+        if (!first_swept_voxel_hit(ray, path_length, voxel_index, &hit)) continue;
+        float fraction = clampf(hit.t / path_length, 0.0f, 1.0f);
+        if (fraction < earliest_fraction) {
+            earliest_fraction = fraction;
+            earliest_path_length = path_length;
+            collision_normal = hit.normal;
+            collision_hit = hit;
+            collided = true;
+        }
+    }
+
+    int remaining = (int)voxel->tetherThrowCcdFrames - fixed_steps;
+    voxel->tetherThrowCcdFrames = (uint8_t)(remaining > 0 ? remaining : 0);
+    if (!collided) return false;
+
+    if (earliest_path_length > 1e-6f) {
+        earliest_fraction = fmaxf(0.0f, earliest_fraction -
+            TETHER_THROW_CCD_SKIN / earliest_path_length);
+    }
+    if (v_length(collision_normal) <= 1e-6f) {
+        Vector3 centroid_path = { 0.0f, 0.0f, 0.0f };
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            Particle *particle = voxel_particle_at(voxel, corner);
+            if (!particle) continue;
+            centroid_path = v_add(centroid_path,
+                v_sub(particle->pos, snapshot->particle_start[corner]));
+        }
+        collision_normal = v_mul(v_norm(centroid_path), -1.0f);
+    }
+
+    Vector3 center = { 0.0f, 0.0f, 0.0f };
+    Vector3 velocity = { 0.0f, 0.0f, 0.0f };
+    Vector3 incoming_velocity = { 0.0f, 0.0f, 0.0f };
+    int valid_corners = 0;
+    for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+        Particle *particle = voxel_particle_at(voxel, corner);
+        if (!particle) continue;
+        incoming_velocity = v_add(incoming_velocity, particle->vel);
+        Vector3 end = particle->pos;
+        Vector3 corrected = v_add(snapshot->particle_start[corner],
+            v_mul(v_sub(end, snapshot->particle_start[corner]), earliest_fraction));
+        float normal_speed = v_dot(particle->vel, collision_normal);
+        if (normal_speed < 0.0f) {
+            particle->vel = v_sub(particle->vel,
+                                  v_mul(collision_normal,
+                                        (1.0f + TETHER_THROW_CCD_RESTITUTION) *
+                                        normal_speed));
+        }
+        particle->pos = corrected;
+        particle->predicted_pos = corrected;
+        particle->prev_pos = corrected;
+        center = v_add(center, corrected);
+        velocity = v_add(velocity, particle->vel);
+        ++valid_corners;
+    }
+    if (valid_corners > 0) {
+        float inverse_count = 1.0f / (float)valid_corners;
+        voxel->pos = v_mul(center, inverse_count);
+        voxel->vel = v_mul(velocity, inverse_count);
+        incoming_velocity = v_mul(incoming_velocity, inverse_count);
+
+        // This post-step swept correction occurs after the ordinary pair solver.
+        // Retain the projectile momentum it removed and give the equal-and-opposite
+        // impulse to the hit island once a static target has activation particles.
+        Vector3 target_impulse = v_mul(v_sub(incoming_velocity, voxel->vel),
+                                       voxel_mass_units(voxel));
+        if (collision_hit.id >= 0) {
+            queue_tether_impact(collision_hit.x, collision_hit.y, collision_hit.z,
+                                voxel->identity, target_impulse);
+            apply_pending_tether_impacts();
+        }
+    }
+    voxel->tetherThrowCcdFrames = 0;
+    voxel->skipCollisionVelocityFrames = 1;
+    voxel->wake_source = true;
+    voxel->wake_timer = COARSENING_WAKE_FRAMES;
+    ++tetherThrowCcdHitCount;
+    return true;
+}
+
+static void resolve_tether_throw_ccd_snapshots(const TetherThrowCcdSnapshot *snapshots,
+                                               int count, int fixed_steps)
+{
+    if (!tetherThrowCcdEnabled || !snapshots || count <= 0) return;
+    for (int i = 0; i < count; ++i) {
+        resolve_tether_throw_ccd_snapshot(&snapshots[i], fixed_steps);
+    }
+}
+
 static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
     if (sim_particle_count <= 0) {
         return;
@@ -12046,6 +12358,9 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
 
 static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
     if (sim_particle_count <= 0 || fixed_steps <= 0) return;
+    TetherThrowCcdSnapshot tether_ccd_snapshots[TETHER_THROW_CCD_SNAPSHOT_CAPACITY];
+    int tether_ccd_snapshot_count = capture_tether_throw_ccd_snapshots(
+        tether_ccd_snapshots, TETHER_THROW_CCD_SNAPSHOT_CAPACITY);
     rebuild_particle_collision_metadata();
     double started = GetTime();
     const float sub_dt = dt / (float)PBD_SUBSTEPS;
@@ -12054,6 +12369,8 @@ static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
         int completed_steps = gpu_physics_steps(dt, fixed_steps);
         if (completed_steps >= fixed_steps) {
             physics_mark_gpu_recovered();
+            resolve_tether_throw_ccd_snapshots(tether_ccd_snapshots,
+                                               tether_ccd_snapshot_count, fixed_steps);
             physicsBackend.last_step_ms = (GetTime() - started) * 1000.0;
             return;
         }
@@ -12062,6 +12379,8 @@ static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
             rebuild_particle_collision_metadata();
             simulate_voxel_pbd_cpu_steps(sub_dt, PBD_SUBSTEPS);
         }
+        resolve_tether_throw_ccd_snapshots(tether_ccd_snapshots,
+                                           tether_ccd_snapshot_count, fixed_steps);
         physicsBackend.last_step_ms = (GetTime() - started) * 1000.0;
         return;
     }
@@ -12070,6 +12389,8 @@ static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
         rebuild_particle_collision_metadata();
         simulate_voxel_pbd_cpu_steps(sub_dt, PBD_SUBSTEPS);
     }
+    resolve_tether_throw_ccd_snapshots(tether_ccd_snapshots,
+                                       tether_ccd_snapshot_count, fixed_steps);
     physicsBackend.last_step_ms = (GetTime() - started) * 1000.0;
 }
 
@@ -13028,6 +13349,9 @@ static void start_tether(int idx) {
         voxels[tether_idx].owner = idx;
         voxels[tether_idx].activator = idx;
         voxels[tether_idx].wasTethered = true;
+        // Keep the isolated tether target out of any structure that activates
+        // beside it while it is still being held.
+        voxels[tether_idx].glueEligible = false;
     }
 
     p->tetherHolding = true;
@@ -13086,13 +13410,21 @@ static void release_tether(int idx) {
             Vector3 dir = player_forward(p);
             Vector3 impulse = v_mul(dir, TETHER_THROW_IMPULSE);
             v->vel = v_add(v->vel, impulse);
-            for (int j = 0; j < VOXEL_PARTICLE_COUNT; ++j) {
+            for (int j = 0; j < VOXEL_CORNER_COUNT; ++j) {
                 Particle *particle = voxel_particle_at(v, j);
                 if (particle->inv_mass == 0.0f) {
                     continue;
                 }
                 particle->vel = v_add(particle->vel, impulse);
             }
+            v->tetherThrowCcdFrames =
+                tetherThrowCcdEnabled && v_length(v->vel) >= TETHER_THROW_CCD_MIN_SPEED
+                ? TETHER_THROW_CCD_FRAMES : 0;
+            // A tether throw is an impactor, not a new structural member.  If
+            // its impact wakes the target on the next frame, newly emitted
+            // dynamic wall voxels must not adopt its corner particles.
+            if (v->tetherThrowCcdFrames > 0) v->glueEligible = false;
+            track_tether_throw_ccd(v);
         }
     }
     play_sfx(SFX_TETHER);
@@ -13492,56 +13824,71 @@ static inline float ray_t_to_next_plane(float p,      // ray.position.x  (or y /
     return (nextPlane - p) / d;              // d has sign, so t is positive
 }
 
-typedef struct {
-    int id;       // voxel index in your array
-    int x, y, z;  // voxel grid coords (optional, handy for debugging)
-    float t;      // parametric distance along the ray
-} VoxelHit;
+static bool first_voxel_hit_detailed(Ray ray, float t_max, int ignore_id,
+                                     bool static_only, VoxelHit *out_hit)
+{
+    float direction_length = v_length(ray.direction);
+    if (direction_length <= 1e-8f || t_max < 0.0f) return false;
+    Vector3 dir = v_mul(ray.direction, 1.0f / direction_length);
 
-static int first_voxel_hit(Ray ray, float t_max, int ignore_id) {
-    // 1. Normalise once
-    ray.direction = v_norm(ray.direction);
-    Vector3 dir   = ray.direction;
-
-    // 2. Starting voxel indices
     int x = (int)floorf(ray.position.x / VOXEL_SIZE);
     int y = (int)floorf(ray.position.y / VOXEL_SIZE);
     int z = (int)floorf(ray.position.z / VOXEL_SIZE);
+    int step_x = (dir.x > 0.0f) ? 1 : (dir.x < 0.0f ? -1 : 0);
+    int step_y = (dir.y > 0.0f) ? 1 : (dir.y < 0.0f ? -1 : 0);
+    int step_z = (dir.z > 0.0f) ? 1 : (dir.z < 0.0f ? -1 : 0);
+    float delta_x = (step_x == 0) ? INFINITY : fabsf(VOXEL_SIZE / dir.x);
+    float delta_y = (step_y == 0) ? INFINITY : fabsf(VOXEL_SIZE / dir.y);
+    float delta_z = (step_z == 0) ? INFINITY : fabsf(VOXEL_SIZE / dir.z);
+    float next_x = ray_t_to_next_plane(ray.position.x, dir.x, x, VOXEL_SIZE);
+    float next_y = ray_t_to_next_plane(ray.position.y, dir.y, y, VOXEL_SIZE);
+    float next_z = ray_t_to_next_plane(ray.position.z, dir.z, z, VOXEL_SIZE);
+    float entry_t = 0.0f;
+    Vector3 entry_normal = { 0.0f, 0.0f, 0.0f };
 
-    // 3. Step direction per axis
-    int stepX = (dir.x > 0.0f) ?  1 : (dir.x < 0.0f ? -1 : 0);
-    int stepY = (dir.y > 0.0f) ?  1 : (dir.y < 0.0f ? -1 : 0);
-    int stepZ = (dir.z > 0.0f) ?  1 : (dir.z < 0.0f ? -1 : 0);
-
-    // 4. t delta per axis (distance to cross one voxel)
-    float txDelta = (dir.x == 0.0f) ? INFINITY : fabsf(VOXEL_SIZE / dir.x);
-    float tyDelta = (dir.y == 0.0f) ? INFINITY : fabsf(VOXEL_SIZE / dir.y);
-    float tzDelta = (dir.z == 0.0f) ? INFINITY : fabsf(VOXEL_SIZE / dir.z);
-
-    // 5. first plane crossings
-    float txNext = ray_t_to_next_plane(ray.position.x, dir.x, x, VOXEL_SIZE);
-    float tyNext = ray_t_to_next_plane(ray.position.y, dir.y, y, VOXEL_SIZE);
-    float tzNext = ray_t_to_next_plane(ray.position.z, dir.z, z, VOXEL_SIZE);
-
-    // 6. DDA walk
-    while (fminf(txNext, fminf(tyNext, tzNext)) <= t_max) {
-        int id = table_get(x, y, z);
-        if (id >= 0 && id != ignore_id) {                // hit!
-            return id;
+    while (entry_t <= t_max + 1e-6f) {
+        int id = static_only ? table_get_static_only(x, y, z) : table_get(x, y, z);
+        if (id >= 0 && id != ignore_id && id < voxel_count &&
+            (!static_only || !voxels[id].simulate)) {
+            if (out_hit) {
+                *out_hit = (VoxelHit){ id, x, y, z, entry_t, entry_normal };
+            }
+            return true;
         }
 
-        if (txNext < tyNext && txNext < tzNext) {
-            x += stepX;
-            txNext += txDelta;
-        } else if (tyNext < tzNext) {
-            y += stepY;
-            tyNext += tyDelta;
+        if (next_x <= next_y && next_x <= next_z) {
+            if (next_x > t_max) break;
+            x += step_x;
+            entry_t = next_x;
+            next_x += delta_x;
+            entry_normal = (Vector3){ (float)-step_x, 0.0f, 0.0f };
+        } else if (next_y <= next_z) {
+            if (next_y > t_max) break;
+            y += step_y;
+            entry_t = next_y;
+            next_y += delta_y;
+            entry_normal = (Vector3){ 0.0f, (float)-step_y, 0.0f };
         } else {
-            z += stepZ;
-            tzNext += tzDelta;
+            if (next_z > t_max) break;
+            z += step_z;
+            entry_t = next_z;
+            next_z += delta_z;
+            entry_normal = (Vector3){ 0.0f, 0.0f, (float)-step_z };
         }
     }
-    return -1;                        // no voxel found within t_max
+    return false;
+}
+
+static bool first_swept_voxel_hit(Ray ray, float t_max, int ignore_id,
+                                  VoxelHit *out_hit)
+{
+    return first_voxel_hit_detailed(ray, t_max, ignore_id, false, out_hit);
+}
+
+static int first_voxel_hit(Ray ray, float t_max, int ignore_id)
+{
+    VoxelHit hit;
+    return first_voxel_hit_detailed(ray, t_max, ignore_id, false, &hit) ? hit.id : -1;
 }
 
 

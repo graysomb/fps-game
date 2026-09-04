@@ -349,6 +349,15 @@ provides the pre-filter baseline. Debug JSON samples report simulated versus
 collision particles and static occupied-cell, surface-cell, patch, and patch-reference
 counts.
 
+High-speed voxels released by the tether use a short-lived swept-particle CCD
+pass against the static and active voxel grids. It is enabled by default and shared by the
+GPU, CPU MT, and CPU ST paths. Use `--no-tether-throw-ccd` for an endpoint-only
+A/B run, or `--tether-throw-ccd` to enable it explicitly. Tracked tether impactors
+remain outside the structural glue graph when their target wakes and rebound with
+15% normal restitution. The swept response queues the projectile's equal-and-opposite
+impulse for a static hit cell, then distributes it by mass across the activated wall
+island as soon as that island has dynamic particles.
+
 ### Automated visual physics debugging
 
 Named debug scenarios build isolated voxel structures, run a deterministic fixed-step
@@ -387,6 +396,9 @@ Available scenarios are:
   hinge-angle limit.
 * `tether-active-then-static`: tethers an active voxel and then a static cluster voxel,
   verifying that activation/array compaction does not lose or redirect the tether target.
+* `tether-thin-wall-ccd`: throws a tether voxel fast enough to cross a one-voxel-thick
+  wall between endpoint samples and verifies that swept particle rays stop it, rebound
+  it, transfer forward momentum to the wall, and do not join their constraint graphs.
 
 Without `--debug-output`, artifacts are written beneath
 `.build/bin/debug-artifacts/<scenario>/<active-backend>`. Each backend directory contains

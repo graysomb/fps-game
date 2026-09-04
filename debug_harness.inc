@@ -78,6 +78,14 @@ typedef struct DebugRunState {
     bool pillar_impact_drift_test;
     bool single_corner_hinge_test;
     bool tether_active_then_static_test;
+    bool tether_thin_wall_ccd_test;
+    bool tether_thin_wall_checked;
+    bool tether_thin_wall_tunneled;
+    bool tether_thin_wall_hit;
+    bool tether_thin_wall_bounced;
+    bool tether_thin_wall_wall_woke;
+    bool tether_thin_wall_separation_checked;
+    bool tether_thin_wall_received_impulse;
     bool tether_second_started;
     bool tether_second_survived;
     bool recycle_test;
@@ -111,6 +119,19 @@ typedef struct DebugRunState {
     int tether_selected_index;
     Vector3 tether_static_start;
     float tether_static_pull_distance;
+    uint64_t tether_thin_wall_identity;
+    uint64_t tether_thin_wall_hits_before;
+    float tether_thin_wall_initial_x;
+    float tether_thin_wall_final_x;
+    float tether_thin_wall_final_min_x;
+    float tether_thin_wall_final_max_x;
+    float tether_thin_wall_wall_min_x;
+    float tether_thin_wall_wall_max_x;
+    float tether_thin_wall_rebound_velocity_x;
+    float tether_thin_wall_mean_velocity_x;
+    float tether_thin_wall_momentum_x;
+    int tether_thin_wall_shared_particles;
+    int tether_thin_wall_matching_groups;
     int gpu_static_ssbo_diff_entries;
     int gpu_static_ssbo_stale_cells;
     int gpu_sim_id_mismatches;
@@ -162,6 +183,7 @@ static bool debug_setup_overhang_impact(DebugRunState *state);
 static bool debug_setup_pillar_impact_drift(DebugRunState *state);
 static bool debug_setup_single_corner_hinge(DebugRunState *state);
 static bool debug_setup_tether_active_then_static(DebugRunState *state);
+static bool debug_setup_tether_thin_wall_ccd(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall },
@@ -175,7 +197,8 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "overhang-impact", "Falling dynamic voxel activates and bends a supported static overhang", debug_setup_overhang_impact },
     { "pillar-impact-drift", "Large undercut pillar impact exposes post-contact sliding and wiggle", debug_setup_pillar_impact_drift },
     { "single-corner-hinge", "A one-corner glue remnant must break beyond the hinge-angle limit", debug_setup_single_corner_hinge },
-    { "tether-active-then-static", "Tethering an active voxel then a static voxel preserves and pulls both", debug_setup_tether_active_then_static }
+    { "tether-active-then-static", "Tethering an active voxel then a static voxel preserves and pulls both", debug_setup_tether_active_then_static },
+    { "tether-thin-wall-ccd", "High-speed tether throw uses swept particle rays against a one-voxel wall", debug_setup_tether_thin_wall_ccd }
 };
 
 static const int debugScenarioCount = (int)(sizeof(debugScenarios) / sizeof(debugScenarios[0]));
@@ -2093,6 +2116,69 @@ static bool debug_setup_tether_active_then_static(DebugRunState *state)
     return true;
 }
 
+static bool debug_setup_tether_thin_wall_ccd(DebugRunState *state)
+{
+    debug_reset_world();
+    tetherThrowCcdHitCount = 0;
+    state->tether_thin_wall_ccd_test = true;
+    state->tether_thin_wall_wall_min_x = 0.0f;
+    state->tether_thin_wall_wall_max_x = VOXEL_SIZE;
+
+    Color wall_color = (Color){ 105, 125, 155, 255 };
+    int wall_created = 0;
+    // One grid cell thick along the throw axis, but broad enough that no corner
+    // can miss around an edge.  Its front face is x=0.
+    for (int y = 1; y <= 7; ++y) {
+        for (int z = -3; z <= 3; ++z) {
+            if (debug_add_cell(0, y, z, true, false,
+                               wall_color, DEBUG_SUPPORT_TAG) >= 0) {
+                ++wall_created;
+            }
+        }
+    }
+    int thrown_index = debug_add_cell(-3, 4, 0, false, true,
+                                      (Color){ 255, 195, 55, 255 }, DEBUG_TEST_TAG);
+    if (wall_created != 49 || thrown_index < 0) {
+        debug_add_failure(state,
+                          "thin-wall setup created wall=%d/49 thrown=%d",
+                          wall_created, thrown_index);
+        return false;
+    }
+    debug_rebuild_world_state();
+
+    Voxel *thrown = &voxels[thrown_index];
+    thrown->owner = 0;
+    thrown->activator = 0;
+    thrown->wasTethered = true;
+    thrown->activationBelief = 1.0f;
+    // A strongly accelerated tether can already carry velocity when release
+    // adds its normal impulse.  300 m/s guarantees a one-cell wall lies fully
+    // between two endpoint-only collision samples.
+    set_voxel_velocity(thrown, (Vector3){ 300.0f, 0.0f, 0.0f });
+    state->tether_thin_wall_identity = thrown->identity;
+    state->tether_thin_wall_initial_x = thrown->pos.x;
+    state->tether_thin_wall_hits_before = tetherThrowCcdHitCount;
+
+    players[0].yaw = -90.0f;
+    players[0].pitch = 0.0f;
+    players[0].tetherHolding = true;
+    players[0].tetherVoxel = thrown_index;
+    players[0].tetherVoxelIdentity = thrown->identity;
+    release_tether(0);
+
+    if (tetherThrowCcdEnabled && thrown->tetherThrowCcdFrames == 0) {
+        debug_add_failure(state, "released high-speed tether voxel did not enter CCD tracking");
+        return false;
+    }
+    state->expected_voxels = 1;
+    state->activation_succeeded = true;
+    debug_set_initial_centroid(state);
+    state->camera.position = (Vector3){ -4.5f, 4.2f, 7.0f };
+    state->camera.target = (Vector3){ 0.0f, 2.2f, 0.0f };
+    debug_capture(state, "phase-01-tether-released.png", "tether-released", 0);
+    return true;
+}
+
 static void debug_physics_step(void)
 {
     activate_static_voxels_near_dynamic();
@@ -2110,6 +2196,132 @@ static void debug_validate_step(DebugRunState *state, int step)
 {
     debug_validate_all_sim_particles(state, step);
     DebugSample sample = debug_collect_sample("validation", step, state->initial_centroid_y);
+    if (state->tether_thin_wall_ccd_test) {
+        if (step == 1) {
+            state->tether_thin_wall_checked = true;
+            int thrown_index = find_voxel_by_identity(state->tether_thin_wall_identity);
+            if (thrown_index < 0) {
+                debug_add_failure(state, "tether-thrown voxel disappeared before thin-wall validation");
+                return;
+            }
+            Voxel *thrown = &voxels[thrown_index];
+            VoxelWorldBounds bounds;
+            voxel_particle_world_bounds(thrown, &bounds);
+            state->tether_thin_wall_final_x = thrown->pos.x;
+            state->tether_thin_wall_final_min_x = bounds.minx;
+            state->tether_thin_wall_final_max_x = bounds.maxx;
+            state->tether_thin_wall_tunneled =
+                bounds.minx > state->tether_thin_wall_wall_max_x + VOXEL_SIZE * 0.05f;
+            state->tether_thin_wall_hit =
+                tetherThrowCcdHitCount > state->tether_thin_wall_hits_before;
+            state->tether_thin_wall_rebound_velocity_x = thrown->vel.x;
+            state->tether_thin_wall_bounced = thrown->vel.x < -1.0f;
+
+            if (tetherThrowCcdEnabled) {
+                if (!state->tether_thin_wall_hit) {
+                    debug_add_failure(state,
+                                      "swept tether collision did not report the crossed wall");
+                }
+                if (bounds.maxx > state->tether_thin_wall_wall_min_x + VOXEL_SIZE * 0.05f) {
+                    debug_add_failure(state,
+                                      "CCD left tether voxel through wall (bounds %.3f..%.3f wall %.3f..%.3f)",
+                                      bounds.minx, bounds.maxx,
+                                      state->tether_thin_wall_wall_min_x,
+                                      state->tether_thin_wall_wall_max_x);
+                }
+                if (!state->tether_thin_wall_bounced) {
+                    debug_add_failure(state,
+                                      "CCD stopped but did not rebound tether voxel (velocityX %.3f)",
+                                      thrown->vel.x);
+                }
+            } else if (state->tether_thin_wall_tunneled) {
+                debug_add_failure(state,
+                                  "reproduced endpoint tunneling: tether voxel bounds %.3f..%.3f crossed wall %.3f..%.3f",
+                                  bounds.minx, bounds.maxx,
+                                  state->tether_thin_wall_wall_min_x,
+                                  state->tether_thin_wall_wall_max_x);
+            } else {
+                debug_add_failure(state,
+                                  "CCD-disabled run did not reproduce thin-wall tunneling");
+            }
+        }
+        if (tetherThrowCcdEnabled && step >= 2 &&
+            !state->tether_thin_wall_separation_checked) {
+            int wall_dynamic = debug_count_tagged(DEBUG_SUPPORT_TAG, 1);
+            if (wall_dynamic > 0) {
+                state->tether_thin_wall_wall_woke = true;
+                state->tether_thin_wall_separation_checked = true;
+                int thrown_index = find_voxel_by_identity(state->tether_thin_wall_identity);
+                if (thrown_index < 0) {
+                    debug_add_failure(state,
+                                      "tether voxel disappeared while the impacted wall woke");
+                    return;
+                }
+                if (collisionTopologyDirty) rebuild_particle_collision_metadata();
+                Voxel *thrown = &voxels[thrown_index];
+                float wall_velocity_x = 0.0f;
+                float wall_momentum_x = 0.0f;
+                int wall_velocity_count = 0;
+                for (int wall_index = 0; wall_index < voxel_count; ++wall_index) {
+                    Voxel *wall = &voxels[wall_index];
+                    if (!wall->simulate || wall->debugClusterTag != DEBUG_SUPPORT_TAG) continue;
+                    wall_velocity_x += wall->vel.x;
+                    wall_momentum_x += wall->vel.x * voxel_mass_units(wall);
+                    ++wall_velocity_count;
+                }
+                if (wall_velocity_count > 0) {
+                    state->tether_thin_wall_mean_velocity_x =
+                        wall_velocity_x / (float)wall_velocity_count;
+                    state->tether_thin_wall_momentum_x = wall_momentum_x;
+                    state->tether_thin_wall_received_impulse = wall_momentum_x > 1.0f;
+                }
+                for (int thrown_corner = 0; thrown_corner < VOXEL_CORNER_COUNT;
+                     ++thrown_corner) {
+                    Particle *thrown_particle = thrown->particles[thrown_corner];
+                    bool shared = false;
+                    bool matching_group = false;
+                    for (int wall_index = 0; wall_index < voxel_count; ++wall_index) {
+                        Voxel *wall = &voxels[wall_index];
+                        if (!wall->simulate || wall->debugClusterTag != DEBUG_SUPPORT_TAG) continue;
+                        for (int wall_corner = 0; wall_corner < VOXEL_CORNER_COUNT;
+                             ++wall_corner) {
+                            Particle *wall_particle = wall->particles[wall_corner];
+                            if (wall_particle == thrown_particle) shared = true;
+                            if (thrown_particle && wall_particle &&
+                                thrown_particle->collision_group >= 0 &&
+                                thrown_particle->collision_group == wall_particle->collision_group) {
+                                matching_group = true;
+                            }
+                        }
+                    }
+                    if (shared) ++state->tether_thin_wall_shared_particles;
+                    if (matching_group) ++state->tether_thin_wall_matching_groups;
+                }
+                if (state->tether_thin_wall_shared_particles != 0) {
+                    debug_add_failure(state,
+                                      "woken wall adopted %d tether-voxel particles",
+                                      state->tether_thin_wall_shared_particles);
+                }
+                if (state->tether_thin_wall_matching_groups != 0) {
+                    debug_add_failure(state,
+                                      "woken wall assigned %d tether corners to its collision group",
+                                      state->tether_thin_wall_matching_groups);
+                }
+                if (thrown->glueEligible) {
+                    debug_add_failure(state,
+                                      "tether impactor became glue-eligible during wall activation");
+                }
+                if (!state->tether_thin_wall_received_impulse) {
+                    debug_add_failure(state,
+                                      "woken wall received no forward collision impulse "
+                                      "(mean velocityX %.3f momentumX %.3f)",
+                                      state->tether_thin_wall_mean_velocity_x,
+                                      state->tether_thin_wall_momentum_x);
+                }
+            }
+        }
+        return;
+    }
     if (state->tether_active_then_static_test) {
         if (step == 4) {
             release_tether(0);
@@ -2303,6 +2515,28 @@ static void debug_finalize_validation(DebugRunState *state)
         }
         return;
     }
+    if (state->tether_thin_wall_ccd_test) {
+        if (!state->tether_thin_wall_checked) {
+            debug_add_failure(state, "thin-wall tether collision was never validated");
+        }
+        if (tetherThrowCcdEnabled &&
+            (!state->tether_thin_wall_hit || state->tether_thin_wall_tunneled)) {
+            debug_add_failure(state, "tether throw CCD did not stop the voxel at the wall");
+        }
+        if (tetherThrowCcdEnabled && !state->tether_thin_wall_bounced) {
+            debug_add_failure(state, "tether throw CCD did not produce a rebound");
+        }
+        if (tetherThrowCcdEnabled && !state->tether_thin_wall_received_impulse) {
+            debug_add_failure(state, "tether throw CCD did not transfer momentum to the wall");
+        }
+        if (tetherThrowCcdEnabled &&
+            (!state->tether_thin_wall_wall_woke ||
+             !state->tether_thin_wall_separation_checked)) {
+            debug_add_failure(state,
+                              "thin wall did not wake for post-impact group validation");
+        }
+        return;
+    }
     if (state->tether_active_then_static_test) {
         if (!state->tether_second_started) {
             debug_add_failure(state, "second tether did not acquire the static voxel");
@@ -2486,6 +2720,38 @@ static bool debug_write_report(DebugRunState *state)
             (double)state->tether_static_pull_distance,
             state->tether_index_mismatch_step, state->tether_expected_index,
             state->tether_selected_index);
+
+    fprintf(file,
+            "  \"tetherThinWallDiagnostics\": {\"enabled\": %s,"
+            " \"ccdOptionEnabled\": %s, \"checked\": %s, \"hit\": %s,"
+            " \"tunneled\": %s, \"bounced\": %s, \"wallWoke\": %s,"
+            " \"separationChecked\": %s, \"wallReceivedImpulse\": %s,"
+            " \"sharedParticles\": %d,"
+            " \"matchingCollisionGroups\": %d, \"reboundVelocityX\": %.9g,"
+            " \"wallMeanVelocityX\": %.9g, \"wallMomentumX\": %.9g,"
+            " \"initialX\": %.9g, \"finalX\": %.9g,"
+            " \"finalMinX\": %.9g, \"finalMaxX\": %.9g,"
+            " \"wallMinX\": %.9g, \"wallMaxX\": %.9g},\n",
+            state->tether_thin_wall_ccd_test ? "true" : "false",
+            tetherThrowCcdEnabled ? "true" : "false",
+            state->tether_thin_wall_checked ? "true" : "false",
+            state->tether_thin_wall_hit ? "true" : "false",
+            state->tether_thin_wall_tunneled ? "true" : "false",
+            state->tether_thin_wall_bounced ? "true" : "false",
+            state->tether_thin_wall_wall_woke ? "true" : "false",
+            state->tether_thin_wall_separation_checked ? "true" : "false",
+            state->tether_thin_wall_received_impulse ? "true" : "false",
+            state->tether_thin_wall_shared_particles,
+            state->tether_thin_wall_matching_groups,
+            (double)state->tether_thin_wall_rebound_velocity_x,
+            (double)state->tether_thin_wall_mean_velocity_x,
+            (double)state->tether_thin_wall_momentum_x,
+            (double)state->tether_thin_wall_initial_x,
+            (double)state->tether_thin_wall_final_x,
+            (double)state->tether_thin_wall_final_min_x,
+            (double)state->tether_thin_wall_final_max_x,
+            (double)state->tether_thin_wall_wall_min_x,
+            (double)state->tether_thin_wall_wall_max_x);
 
     fputs("  \"failures\": [", file);
     for (int i = 0; i < state->failure_count; ++i) {
