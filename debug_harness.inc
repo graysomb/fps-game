@@ -71,6 +71,9 @@ typedef struct DebugRunState {
     int expected_voxels;
     bool activation_succeeded;
     bool sleeping_conversion_succeeded;
+    bool sleep_snap_original_test;
+    bool sleep_snap_original_succeeded;
+    bool sleep_snap_active_observed;
     bool support_removal_succeeded;
     bool drop_sampled;
     bool delayed_activation;
@@ -98,6 +101,7 @@ typedef struct DebugRunState {
     bool overhang_deflection_sampled;
     bool gpu_readback_performed;
     int activation_step;
+    int sleep_snap_static_step;
     int recycle_queue_before;
     int recycle_queue_after;
     float initial_centroid_y;
@@ -175,6 +179,7 @@ static bool debug_setup_dynamic_freefall(DebugRunState *state);
 static bool debug_setup_creative_reset_cache(DebugRunState *state);
 static bool debug_setup_activation_floating(DebugRunState *state);
 static bool debug_setup_sleep_wake_floating(DebugRunState *state);
+static bool debug_setup_sleep_snap_original(DebugRunState *state);
 static bool debug_setup_sleep_recycle(DebugRunState *state);
 static bool debug_setup_falling_pillar_sleep(DebugRunState *state);
 static bool debug_setup_three_leg_cut_platform(DebugRunState *state);
@@ -190,6 +195,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "creative-reset-cache", "Creative reset invalidates cached static render and collision surfaces", debug_setup_creative_reset_cache },
     { "activation-floating", "Static cluster activated while unsupported", debug_setup_activation_floating },
     { "sleep-wake-floating", "Supported cluster sleeps, loses support, then activates", debug_setup_sleep_wake_floating },
+    { "sleep-snap-original", "A calm 4x4x6 pillar near its original pose snaps back to static", debug_setup_sleep_snap_original },
     { "sleep-recycle", "Sleeping dynamic island enters delayed restoration atomically", debug_setup_sleep_recycle },
     { "falling-pillar-sleep", "Rotated pillar falls, settles, and sleeps without changing pose", debug_setup_falling_pillar_sleep },
     { "three-leg-cut-platform", "Four-legged platform with three legs removed completes sleep and recycling", debug_setup_three_leg_cut_platform },
@@ -533,6 +539,38 @@ static void debug_transform_tagged_cluster_off_grid(int tag)
     rebuild_voxel_hash();
 }
 
+static void debug_place_tagged_cluster_near_original(int tag, Vector3 offset)
+{
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (voxel->debugClusterTag != tag || !voxel->simulate) continue;
+        float min_x = (float)voxel->orig_min_gx * VOXEL_SIZE;
+        float min_y = (float)voxel->orig_min_gy * VOXEL_SIZE;
+        float min_z = (float)voxel->orig_min_gz * VOXEL_SIZE;
+        float max_x = (float)(voxel->orig_max_gx + 1) * VOXEL_SIZE;
+        float max_y = (float)(voxel->orig_max_gy + 1) * VOXEL_SIZE;
+        float max_z = (float)(voxel->orig_max_gz + 1) * VOXEL_SIZE;
+        Vector3 center = { 0.0f, 0.0f, 0.0f };
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            Particle *particle = voxel->particles[corner];
+            if (!particle) continue;
+            Vector3 original = {
+                corner_signs[corner][0] < 0 ? min_x : max_x,
+                corner_signs[corner][1] < 0 ? min_y : max_y,
+                corner_signs[corner][2] < 0 ? min_z : max_z
+            };
+            particle->pos = v_add(original, offset);
+            particle->prev_pos = particle->pos;
+            particle->predicted_pos = particle->pos;
+            particle->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+            center = v_add(center, particle->pos);
+        }
+        voxel->pos = v_mul(center, 1.0f / (float)VOXEL_CORNER_COUNT);
+        voxel->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+    }
+    rebuild_voxel_hash();
+}
+
 static void debug_track_tagged_cells(DebugRunState *state, int tag)
 {
     if (!state) return;
@@ -787,6 +825,19 @@ static void debug_render_scene(DebugRunState *state, const DebugSample *sample)
                       (Color){ 68, 75, 82, 255 });
             DrawGrid(48, VOXEL_SIZE);
             DrawVoxels(state->camera);
+            if (state->sleep_snap_original_test) {
+                for (int i = 0; i < voxel_count; ++i) {
+                    Voxel *voxel = &voxels[i];
+                    if (!voxel->simulate || voxel->debugClusterTag != DEBUG_TEST_TAG) continue;
+                    for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+                        Particle *particle = voxel->particles[corner];
+                        if (particle) {
+                            DrawSphere(particle->pos, VOXEL_SIZE * 0.08f,
+                                       (Color){ 255, 75, 55, 255 });
+                        }
+                    }
+                }
+            }
             DrawLine3D((Vector3){ -4.0f, state->initial_centroid_y, 0.0f },
                        (Vector3){ 4.0f, state->initial_centroid_y, 0.0f },
                        (Color){ 255, 225, 80, 210 });
@@ -1408,6 +1459,39 @@ static bool debug_setup_activation_floating(DebugRunState *state)
     debug_capture(state, "phase-01-floating-static.png", "floating-static", 0);
     if (!debug_activate_test_cluster(state)) return false;
     debug_set_initial_centroid(state);
+    return true;
+}
+
+static bool debug_setup_sleep_snap_original(DebugRunState *state)
+{
+    debug_reset_world();
+    state->sleep_snap_original_test = true;
+    state->sleep_snap_static_step = -1;
+    state->expected_voxels = 4 * 4 * 6;
+    int cluster_created = 0;
+    Color pillar_color = (Color){ 80, 175, 245, 255 };
+    for (int y = 0; y < 6; ++y) {
+        for (int z = -2; z < 2; ++z) {
+            for (int x = -2; x < 2; ++x) {
+                if (debug_add_cell(x, y, z, true, false,
+                                   pillar_color, DEBUG_TEST_TAG) >= 0) {
+                    ++cluster_created;
+                }
+            }
+        }
+    }
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_rebuild_world_state();
+
+    if (cluster_created != state->expected_voxels) {
+        debug_add_failure(state, "sleep-snap setup created pillar=%d/%d",
+                          cluster_created, state->expected_voxels);
+        return false;
+    }
+    state->camera.position = (Vector3){ 6.5f, 4.5f, 8.0f };
+    state->camera.target = (Vector3){ 0.0f, 1.5f, 0.0f };
+    debug_set_initial_centroid(state);
+    debug_capture(state, "phase-01-original-static.png", "original-static", 0);
     return true;
 }
 
@@ -2196,6 +2280,68 @@ static void debug_validate_step(DebugRunState *state, int step)
 {
     debug_validate_all_sim_particles(state, step);
     DebugSample sample = debug_collect_sample("validation", step, state->initial_centroid_y);
+    if (state->sleep_snap_original_test) {
+        if (step == 1 && !state->activation_succeeded) {
+            if (!debug_activate_test_cluster(state)) return;
+            debug_rebuild_world_state();
+            debug_place_tagged_cluster_near_original(
+                DEBUG_TEST_TAG, (Vector3){ VOXEL_SIZE * 0.05f, 0.0f, 0.0f });
+            for (int i = 0; i < voxel_count; ++i) {
+                Voxel *voxel = &voxels[i];
+                if (voxel->debugClusterTag != DEBUG_TEST_TAG || !voxel->simulate) continue;
+                voxel->wake_timer = 120;
+                voxel->sleepFrames = 0;
+            }
+            state->activation_step = step;
+            state->sleep_snap_active_observed =
+                debug_count_tagged(DEBUG_TEST_TAG, 1) == state->expected_voxels;
+            debug_capture(state, "phase-02-activated-dynamic.png", "activated-dynamic", step);
+        } else if (step > 1 && !state->sleep_snap_original_succeeded) {
+            if (debug_count_tagged(DEBUG_TEST_TAG, 1) == state->expected_voxels) {
+                state->sleep_snap_active_observed = true;
+            }
+            if (step == 20) {
+                // Return the deliberately motionless test island to a small
+                // residual offset, then let the production calm-island path
+                // make the static-versus-in-place-sleep decision.
+                debug_place_tagged_cluster_near_original(
+                    DEBUG_TEST_TAG, (Vector3){ VOXEL_SIZE * 0.05f, 0.0f, 0.0f });
+                for (int i = 0; i < voxel_count; ++i) {
+                    Voxel *voxel = &voxels[i];
+                    if (voxel->debugClusterTag != DEBUG_TEST_TAG || !voxel->simulate) continue;
+                    voxel->wake_timer = 0;
+                    voxel->sleepFrames = VOXEL_DEACTIVATION_FRAMES - 1;
+                }
+                state->sleeping_conversion_succeeded = deactivate_sleeping_voxels();
+                int tagged_static = debug_count_tagged(DEBUG_TEST_TAG, 0);
+                int tagged_dynamic = debug_count_tagged(DEBUG_TEST_TAG, 1);
+                bool original_cells_static = true;
+                for (int i = 0; i < state->tracked_cell_count; ++i) {
+                    DebugTrackedCell *cell = &state->tracked_cells[i];
+                    int idx = table_get_static_only(cell->x, cell->y, cell->z);
+                    if (idx < 0 || idx >= voxel_count ||
+                        voxels[idx].debugClusterTag != DEBUG_TEST_TAG) {
+                        original_cells_static = false;
+                        break;
+                    }
+                }
+                state->sleep_snap_original_succeeded =
+                    state->sleeping_conversion_succeeded &&
+                    tagged_static == state->expected_voxels && tagged_dynamic == 0 &&
+                    original_cells_static;
+                state->sleep_snap_static_step = state->sleep_snap_original_succeeded ? step : -1;
+                if (!state->sleep_snap_original_succeeded) {
+                    debug_add_failure(state,
+                                      "near-origin island did not snap atomically "
+                                      "(static=%d/%d dynamic=%d originalCells=%s)",
+                                      tagged_static, state->expected_voxels, tagged_dynamic,
+                                      original_cells_static ? "true" : "false");
+                }
+                debug_capture(state, "phase-03-snapped-static.png", "snapped-original-static", step);
+            }
+        }
+        return;
+    }
     if (state->tether_thin_wall_ccd_test) {
         if (step == 1) {
             state->tether_thin_wall_checked = true;
@@ -2445,10 +2591,14 @@ static void debug_validate_step(DebugRunState *state, int step)
                 debug_validate_tagged_dynamic(state, &sample, "gameplay-path activation");
             }
         }
-    } else if (step <= 1 && !state->tether_active_then_static_test) {
+    } else if (step <= 1 && !state->tether_active_then_static_test &&
+               !state->sleep_snap_original_test) {
         debug_validate_tagged_dynamic(state, &sample, step == 0 ? "after activation" : "first physics step");
     }
-    if (!state->single_corner_hinge_test) {
+    // The snap scenario intentionally has no dynamic particles after setup, so
+    // a requested GPU backend has no dispatch that could upload the new static
+    // generation. Its assertions inspect the authoritative CPU static tables.
+    if (!state->single_corner_hinge_test && !state->sleep_snap_original_test) {
         debug_validate_gpu_static_state(state, step);
         debug_readback_gpu_buffers(state, step);
     }
@@ -2501,6 +2651,15 @@ static void debug_finalize_validation(DebugRunState *state)
         debug_add_failure(state, "forced GPU run fell back to %s: %s",
                           physics_backend_name(physicsBackend.active),
                           physicsBackend.fallback_reason);
+    }
+    if (state->sleep_snap_original_test) {
+        if (!state->sleep_snap_active_observed) {
+            debug_add_failure(state, "near-origin test never visibly entered the dynamic state");
+        }
+        if (!state->sleep_snap_original_succeeded) {
+            debug_add_failure(state, "near-origin sleep transition did not restore static voxels");
+        }
+        return;
     }
     if (state->pillar_impact_drift_test) {
         if (!isfinite(state->drift_window_distance) || state->drift_window_distance > 1.00f) {
@@ -2665,10 +2824,16 @@ static bool debug_write_report(DebugRunState *state)
     debug_write_json_string(file, physicsBackend.fallback_reason);
     fprintf(file,
             ",\n  \"activationSucceeded\": %s,\n  \"sleepingConversionSucceeded\": %s,\n"
+            "  \"sleepSnapOriginalTest\": %s,\n  \"sleepSnapActiveObserved\": %s,\n"
+            "  \"sleepSnapOriginalSucceeded\": %s,\n  \"sleepSnapStaticStep\": %d,\n"
             "  \"supportRemovalSucceeded\": %s,\n  \"activationStep\": %d,"
             "\n  \"dropAtStep60\": %.9g,\n",
             state->activation_succeeded ? "true" : "false",
             state->sleeping_conversion_succeeded ? "true" : "false",
+            state->sleep_snap_original_test ? "true" : "false",
+            state->sleep_snap_active_observed ? "true" : "false",
+            state->sleep_snap_original_succeeded ? "true" : "false",
+            state->sleep_snap_static_step,
             state->support_removal_succeeded ? "true" : "false",
             state->activation_step,
             (double)state->drop_at_step_60);

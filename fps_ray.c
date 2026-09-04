@@ -460,6 +460,7 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.15f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.15f
 #define VOXEL_DEACTIVATION_FRAMES 5
+#define VOXEL_SLEEP_SNAP_POSITION_TOLERANCE (VOXEL_SIZE * 0.10f)
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
 #define STATIC_RESTORE_SEARCH_RADIUS 2*1
 #define DEBRIS_ACTIVATION_COOLDOWN_FRAMES (60 * 10)
@@ -5920,6 +5921,74 @@ static bool glue_cluster_has_static_support(const int *cluster, int cluster_coun
     return false;
 }
 
+static bool cluster_is_near_original_grid_pose(const int *cluster, int cluster_count)
+{
+    if (!cluster || cluster_count <= 0) return false;
+
+    memset(sleepClusterVisited, 0, sizeof(unsigned char) * (size_t)voxel_count);
+    int64_t required_static_cells = 0;
+    for (int i = 0; i < cluster_count; ++i) {
+        int idx = cluster[i];
+        if (idx < 0 || idx >= voxel_count || !voxel_is_awake_dynamic(&voxels[idx])) {
+            return false;
+        }
+        sleepClusterVisited[idx] = 1;
+    }
+
+    const float tolerance_sq = VOXEL_SLEEP_SNAP_POSITION_TOLERANCE *
+                               VOXEL_SLEEP_SNAP_POSITION_TOLERANCE;
+    for (int i = 0; i < cluster_count; ++i) {
+        Voxel *voxel = &voxels[cluster[i]];
+        if (voxel->orig_min_gx > voxel->orig_max_gx ||
+            voxel->orig_min_gy > voxel->orig_max_gy ||
+            voxel->orig_min_gz > voxel->orig_max_gz) {
+            return false;
+        }
+
+        int span_x = voxel->orig_max_gx - voxel->orig_min_gx + 1;
+        int span_y = voxel->orig_max_gy - voxel->orig_min_gy + 1;
+        int span_z = voxel->orig_max_gz - voxel->orig_min_gz + 1;
+        if (span_x <= 0 || span_y <= 0 || span_z <= 0) return false;
+        required_static_cells += (int64_t)span_x * (int64_t)span_y * (int64_t)span_z;
+
+        float min_x = (float)voxel->orig_min_gx * VOXEL_SIZE;
+        float min_y = (float)voxel->orig_min_gy * VOXEL_SIZE;
+        float min_z = (float)voxel->orig_min_gz * VOXEL_SIZE;
+        float max_x = (float)(voxel->orig_max_gx + 1) * VOXEL_SIZE;
+        float max_y = (float)(voxel->orig_max_gy + 1) * VOXEL_SIZE;
+        float max_z = (float)(voxel->orig_max_gz + 1) * VOXEL_SIZE;
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            Particle *particle = voxel_particle_at(voxel, corner);
+            if (!particle || !v_isfinite(particle->pos)) return false;
+            Vector3 original = {
+                corner_signs[corner][0] < 0 ? min_x : max_x,
+                corner_signs[corner][1] < 0 ? min_y : max_y,
+                corner_signs[corner][2] < 0 ? min_z : max_z
+            };
+            Vector3 delta = v_sub(particle->pos, original);
+            if (v_dot(delta, delta) > tolerance_sq) return false;
+        }
+
+        // Snapping must never replace an already-static occupant or a dynamic
+        // voxel belonging to another island.
+        for (int gx = voxel->orig_min_gx; gx <= voxel->orig_max_gx; ++gx) {
+            for (int gy = voxel->orig_min_gy; gy <= voxel->orig_max_gy; ++gy) {
+                for (int gz = voxel->orig_min_gz; gz <= voxel->orig_max_gz; ++gz) {
+                    if (table_get_static_only(gx, gy, gz) >= 0) return false;
+                    int occupant = table_get(gx, gy, gz);
+                    if (occupant >= 0 &&
+                        (occupant >= voxel_count || !sleepClusterVisited[occupant])) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    return required_static_cells <=
+           (int64_t)MAX_VOXELS - (int64_t)(voxel_count - cluster_count);
+}
+
 static bool freeze_dynamic_cluster_in_place(const int *cluster, int cluster_count)
 {
     if (!cluster || cluster_count <= 0) {
@@ -6128,6 +6197,7 @@ static void evaluate_voxel_calm_range(int start, int end, int worker_id, void *u
 static bool deactivate_sleeping_voxels(void)
 {
     bool changed = false;
+    bool restored_static = false;
     int remaining_budget = VOXEL_MAX_DEACTIVATIONS_PER_FRAME;
 
     pbd_parallel_for(0, voxel_count, evaluate_voxel_calm_range, NULL);
@@ -6265,14 +6335,23 @@ static bool deactivate_sleeping_voxels(void)
             continue;
         }
 
-        if (!freeze_dynamic_cluster_in_place(glueClusterIndices, cluster_count)) {
+        bool near_original = cluster_is_near_original_grid_pose(glueClusterIndices,
+                                                                 cluster_count);
+        if (near_original) {
+            if (!restore_glue_cluster_to_static(glueClusterIndices, cluster_count)) {
+                ++idx;
+                continue;
+            }
+            restored_static = true;
+        } else if (!freeze_dynamic_cluster_in_place(glueClusterIndices, cluster_count)) {
             ++idx;
             continue;
         }
 
         if (debugLogVoxelDeactivation) {
             TraceLog(LOG_INFO,
-                     "[Deactivate] froze cluster in place starting=%d count=%d remaining_budget_before=%d",
+                     "[Deactivate] %s cluster starting=%d count=%d remaining_budget_before=%d",
+                     near_original ? "restored near-origin" : "froze in place",
                      idx, cluster_count, remaining_budget);
         }
         remaining_budget -= cluster_count;
@@ -6281,6 +6360,14 @@ static bool deactivate_sleeping_voxels(void)
         }
         changed = true;
         continue;
+    }
+
+    if (restored_static) {
+        rebuild_voxel_hash();
+        rebuild_all_voxel_surfaces();
+        rebuild_glue_constraints();
+        refresh_static_voxel_beliefs();
+        meshDirty = true;
     }
 
     return changed;

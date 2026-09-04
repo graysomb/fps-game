@@ -365,6 +365,11 @@ simulation, capture diagnostic PNGs, write a JSON report, and exit without requi
 gameplay input. The window is hidden by default but a graphics context is still
 created for off-screen rendering.
 
+When a calm supported dynamic island reaches its sleep cutoff, every particle corner
+is compared with its original grid pose. Islands entirely within 0.1 voxel and whose
+original cells remain available are restored to static voxels; displaced, rotated, or
+blocked islands retain their exact particle pose and sleep in place.
+
 ```bash
 fps_ray --physics=gpu --debug-scenario=sleep-wake-floating
 fps_ray --physics=cpu-st --debug-scenario=activation-floating --debug-show-window
@@ -382,6 +387,9 @@ Available scenarios are:
 * `activation-floating`: activates an unsupported static cluster through the tether path.
 * `sleep-wake-floating`: sleeps a supported dynamic cluster, removes its support, then
   activates it through the tether path.
+* `sleep-snap-original`: activates a grounded 4×4×6 static pillar, settles it within
+  the near-origin tolerance, and verifies that all 96 voxels snap back to their original
+  static cells.
 * `sleep-recycle`: ages a sleeping dynamic island into the delayed restoration queue and
   verifies that the complete island is removed atomically.
 * `falling-pillar-sleep`: tips a 90-voxel pillar, lets it bend and settle, then runs past
