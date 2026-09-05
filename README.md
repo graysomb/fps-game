@@ -391,6 +391,9 @@ Available scenarios are:
 * `sleep-snap-original`: activates a grounded 4×4×6 static pillar, settles it within
   the near-origin tolerance, and verifies that all 96 voxels snap back to their original
   static cells.
+* `sleep-snap-no-rebuild`: continues the tether-activated pillar test beyond the delayed
+  restoration deadline and verifies that its already-correct static cells are not removed
+  and rebuilt from obsolete activation snapshots.
 * `sleep-recycle`: ages a sleeping dynamic island into the delayed restoration queue and
   verifies that the complete island is removed atomically.
 * `falling-pillar-sleep`: tips a 90-voxel pillar, lets it bend and settle, then runs past

@@ -72,6 +72,7 @@ typedef struct DebugRunState {
     bool activation_succeeded;
     bool sleeping_conversion_succeeded;
     bool sleep_snap_original_test;
+    bool sleep_snap_rebuild_test;
     bool sleep_snap_original_succeeded;
     bool sleep_snap_active_observed;
     bool sleep_snap_sleeping_observed;
@@ -104,6 +105,9 @@ typedef struct DebugRunState {
     bool gpu_readback_performed;
     int activation_step;
     int sleep_snap_static_step;
+    int sleep_snap_queue_at_static;
+    uint64_t sleep_snap_static_identity_signature;
+    bool sleep_snap_rebuilt_after_static;
     float sleep_snap_max_original_error;
     float sleep_snap_last_speed;
     float sleep_snap_last_strain;
@@ -186,6 +190,7 @@ static bool debug_setup_creative_reset_cache(DebugRunState *state);
 static bool debug_setup_activation_floating(DebugRunState *state);
 static bool debug_setup_sleep_wake_floating(DebugRunState *state);
 static bool debug_setup_sleep_snap_original(DebugRunState *state);
+static bool debug_setup_sleep_snap_no_rebuild(DebugRunState *state);
 static bool debug_setup_sleep_recycle(DebugRunState *state);
 static bool debug_setup_falling_pillar_sleep(DebugRunState *state);
 static bool debug_setup_three_leg_cut_platform(DebugRunState *state);
@@ -202,6 +207,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "activation-floating", "Static cluster activated while unsupported", debug_setup_activation_floating },
     { "sleep-wake-floating", "Supported cluster sleeps, loses support, then activates", debug_setup_sleep_wake_floating },
     { "sleep-snap-original", "A calm 4x4x6 pillar near its original pose snaps back to static", debug_setup_sleep_snap_original },
+    { "sleep-snap-no-rebuild", "A restored pillar remains static after its queued rebuild deadline", debug_setup_sleep_snap_no_rebuild },
     { "sleep-recycle", "Sleeping dynamic island enters delayed restoration atomically", debug_setup_sleep_recycle },
     { "falling-pillar-sleep", "Rotated pillar falls, settles, and sleeps without changing pose", debug_setup_falling_pillar_sleep },
     { "three-leg-cut-platform", "Four-legged platform with three legs removed completes sleep and recycling", debug_setup_three_leg_cut_platform },
@@ -1520,6 +1526,15 @@ static bool debug_setup_sleep_snap_original(DebugRunState *state)
     return true;
 }
 
+static bool debug_setup_sleep_snap_no_rebuild(DebugRunState *state)
+{
+    if (!debug_setup_sleep_snap_original(state)) return false;
+    state->sleep_snap_rebuild_test = true;
+    int minimum_steps = RECYCLE_STATIC_RESTORE_DELAY + 200;
+    if (debugRunConfig.steps < minimum_steps) debugRunConfig.steps = minimum_steps;
+    return true;
+}
+
 static bool debug_setup_sleep_wake_floating(DebugRunState *state)
 {
     debug_reset_world();
@@ -2301,6 +2316,24 @@ static void debug_physics_step(void)
     rebuild_static_hash_if_dirty();
 }
 
+static uint64_t debug_tagged_static_identity_signature(int tag)
+{
+    uint64_t signature = 0;
+    for (int i = 0; i < voxel_count; ++i) {
+        const Voxel *voxel = &voxels[i];
+        if (voxel->simulate || voxel->debugClusterTag != tag) continue;
+        uint64_t value = voxel->identity;
+        value ^= (uint64_t)(uint32_t)voxel->gx * UINT64_C(0x9e3779b185ebca87);
+        value ^= (uint64_t)(uint32_t)voxel->gy * UINT64_C(0xc2b2ae3d27d4eb4f);
+        value ^= (uint64_t)(uint32_t)voxel->gz * UINT64_C(0x165667b19e3779f9);
+        value ^= value >> 30;
+        value *= UINT64_C(0xbf58476d1ce4e5b9);
+        value ^= value >> 27;
+        signature += value;
+    }
+    return signature;
+}
+
 static void debug_validate_step(DebugRunState *state, int step)
 {
     debug_validate_all_sim_particles(state, step);
@@ -2376,7 +2409,23 @@ static void debug_validate_step(DebugRunState *state, int step)
             state->sleep_snap_original_succeeded = original_cells_static;
             state->sleeping_conversion_succeeded = original_cells_static;
             state->sleep_snap_static_step = original_cells_static ? step : -1;
+            if (original_cells_static) {
+                state->sleep_snap_queue_at_static = recycleQueueCount;
+                state->sleep_snap_static_identity_signature =
+                    debug_tagged_static_identity_signature(DEBUG_TEST_TAG);
+            }
             debug_capture(state, "phase-03-snapped-static.png", "snapped-original-static", step);
+        }
+        if (state->sleep_snap_rebuild_test && state->sleep_snap_original_succeeded &&
+            step > state->sleep_snap_static_step &&
+            (sample.tagged_static != state->expected_voxels || sample.tagged_dynamic != 0 ||
+             debug_tagged_static_identity_signature(DEBUG_TEST_TAG) !=
+                state->sleep_snap_static_identity_signature)) {
+            if (!state->sleep_snap_rebuilt_after_static) {
+                state->sleep_snap_rebuilt_after_static = true;
+                debug_capture(state, "phase-04-unnecessary-rebuild.png",
+                              "unnecessary-static-rebuild", step);
+            }
         }
         return;
     }
@@ -2704,6 +2753,22 @@ static void debug_finalize_validation(DebugRunState *state)
                               state->sleep_snap_last_strain,
                               state->sleep_snap_last_shear);
         }
+        if (state->sleep_snap_rebuild_test) {
+            if (state->sleep_snap_queue_at_static != 0) {
+                debug_add_failure(state,
+                                  "static restoration left %d obsolete queued snapshots",
+                                  state->sleep_snap_queue_at_static);
+            }
+            if (state->sleep_snap_rebuilt_after_static) {
+                debug_add_failure(state,
+                                  "successfully restored static pillar was rebuilt again");
+            }
+            if (recycleQueueCount != 0) {
+                debug_add_failure(state,
+                                  "restored pillar left %d stale recycle snapshots",
+                                  recycleQueueCount);
+            }
+        }
         return;
     }
     if (state->pillar_impact_drift_test) {
@@ -2872,6 +2937,7 @@ static bool debug_write_report(DebugRunState *state)
             "  \"sleepSnapOriginalTest\": %s,\n  \"sleepSnapActiveObserved\": %s,\n"
             "  \"sleepSnapSleepingObserved\": %s,\n"
             "  \"sleepSnapOriginalSucceeded\": %s,\n  \"sleepSnapStaticStep\": %d,\n"
+            "  \"sleepSnapQueueAtStatic\": %d,\n  \"sleepSnapRebuiltAfterStatic\": %s,\n"
             "  \"sleepSnapMaxOriginalError\": %.9g,\n"
             "  \"sleepSnapLastSpeed\": %.9g,\n  \"sleepSnapLastStrain\": %.9g,\n"
             "  \"sleepSnapLastShear\": %.9g,\n"
@@ -2884,6 +2950,8 @@ static bool debug_write_report(DebugRunState *state)
             state->sleep_snap_sleeping_observed ? "true" : "false",
             state->sleep_snap_original_succeeded ? "true" : "false",
             state->sleep_snap_static_step,
+            state->sleep_snap_queue_at_static,
+            state->sleep_snap_rebuilt_after_static ? "true" : "false",
             (double)state->sleep_snap_max_original_error,
             (double)state->sleep_snap_last_speed,
             (double)state->sleep_snap_last_strain,

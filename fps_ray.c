@@ -4966,6 +4966,74 @@ static void recycle_queue_remove_region(int minx, int maxx,
     recycleQueueCount = keep;
 }
 
+static int recycle_queue_prune_fully_restored_in_region(int minx, int maxx,
+                                                        int miny, int maxy,
+                                                        int minz, int maxz)
+{
+    if (recycleQueueCount <= 0) return 0;
+
+    int keep = 0;
+    int removed = 0;
+    int count = recycleQueueCount;
+    for (int i = 0; i < count; ++i) {
+        int queue_idx = (recycleQueueHead + i) % MAX_VOXELS;
+        const Voxel *snapshot = &recycleQueue[queue_idx];
+        int sminx = snapshot->rest_min_gx;
+        int smaxx = snapshot->rest_max_gx;
+        int sminy = snapshot->rest_min_gy;
+        int smaxy = snapshot->rest_max_gy;
+        int sminz = snapshot->rest_min_gz;
+        int smaxz = snapshot->rest_max_gz;
+        if (snapshot->orig_min_gx <= snapshot->orig_max_gx &&
+            snapshot->orig_min_gy <= snapshot->orig_max_gy &&
+            snapshot->orig_min_gz <= snapshot->orig_max_gz) {
+            sminx = snapshot->orig_min_gx;
+            smaxx = snapshot->orig_max_gx;
+            sminy = snapshot->orig_min_gy;
+            smaxy = snapshot->orig_max_gy;
+            sminz = snapshot->orig_min_gz;
+            smaxz = snapshot->orig_max_gz;
+        }
+
+        bool overlaps_restored = ranges_overlap(minx, maxx, sminx, smaxx) &&
+                                 ranges_overlap(miny, maxy, sminy, smaxy) &&
+                                 ranges_overlap(minz, maxz, sminz, smaxz);
+        bool fully_restored = overlaps_restored;
+        for (int gz = sminz; fully_restored && gz <= smaxz; ++gz) {
+            for (int gy = sminy; fully_restored && gy <= smaxy; ++gy) {
+                for (int gx = sminx; gx <= smaxx; ++gx) {
+                    int static_idx = table_get_static_only(gx, gy, gz);
+                    if (static_idx < 0 || static_idx >= voxel_count) {
+                        fully_restored = false;
+                        break;
+                    }
+                    const Voxel *restored = &voxels[static_idx];
+                    if (restored->type != snapshot->type ||
+                        restored->color.r != snapshot->color.r ||
+                        restored->color.g != snapshot->color.g ||
+                        restored->color.b != snapshot->color.b ||
+                        restored->color.a != snapshot->color.a) {
+                        fully_restored = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (fully_restored) {
+            ++removed;
+        } else {
+            recycleQueueScratch[keep++] = *snapshot;
+        }
+    }
+
+    for (int i = 0; i < keep; ++i) recycleQueue[i] = recycleQueueScratch[i];
+    recycleQueueHead = 0;
+    recycleQueueTail = keep % MAX_VOXELS;
+    recycleQueueCount = keep;
+    return removed;
+}
+
 static bool voxel_is_at_rest_location(const Voxel *voxel) {
     if (!voxel) {
         return true;
@@ -11210,6 +11278,36 @@ static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count
                  "[RestoreCluster] count=%d voxel_count before=%d after_removal=%d after_restore=%d static_success=%d",
                  cluster_count, voxel_count_before, voxel_count_after_removal, voxel_count,
                  static_success);
+    }
+    if (converted) {
+        int minx = INT_MAX, miny = INT_MAX, minz = INT_MAX;
+        int maxx = INT_MIN, maxy = INT_MIN, maxz = INT_MIN;
+        for (int i = 0; i < cluster_count; ++i) {
+            const Voxel *snapshot = &snapshots[i];
+            int sminx = snapshot->orig_min_gx;
+            int smaxx = snapshot->orig_max_gx;
+            int sminy = snapshot->orig_min_gy;
+            int smaxy = snapshot->orig_max_gy;
+            int sminz = snapshot->orig_min_gz;
+            int smaxz = snapshot->orig_max_gz;
+            if (sminx > smaxx || sminy > smaxy || sminz > smaxz) {
+                voxel_grid_bounds(snapshot, &sminx, &smaxx,
+                                  &sminy, &smaxy, &sminz, &smaxz);
+            }
+            if (sminx < minx) minx = sminx;
+            if (smaxx > maxx) maxx = smaxx;
+            if (sminy < miny) miny = sminy;
+            if (smaxy > maxy) maxy = smaxy;
+            if (sminz < minz) minz = sminz;
+            if (smaxz > maxz) maxz = smaxz;
+        }
+        int cancelled = recycle_queue_prune_fully_restored_in_region(
+            minx, maxx, miny, maxy, minz, maxz);
+        if (cancelled > 0 && debugLogVoxelRecycle) {
+            TraceLog(LOG_INFO,
+                     "[Recycle] cancelled-restored snapshots=%d queue=%d",
+                     cancelled, recycleQueueCount);
+        }
     }
     free(sorted);
     free(snapshots);
