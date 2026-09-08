@@ -185,6 +185,7 @@ static DebugRunConfig debugRunConfig = {
     .gif_fps = 20
 };
 
+static bool debug_setup_sized_drop(DebugRunState *state);
 static bool debug_setup_dynamic_freefall(DebugRunState *state);
 static bool debug_setup_creative_reset_cache(DebugRunState *state);
 static bool debug_setup_activation_floating(DebugRunState *state);
@@ -202,6 +203,9 @@ static bool debug_setup_tether_active_then_static(DebugRunState *state);
 static bool debug_setup_tether_thin_wall_ccd(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
+    { "sized-drop-unit", "One unit cube", debug_setup_sized_drop },
+    { "sized-drop-double", "Eight real children driven by a coarse cube", debug_setup_sized_drop },
+    { "sized-drop-mixed-face", "Coarse children with a four-voxel attached face", debug_setup_sized_drop },
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall },
     { "creative-reset-cache", "Creative reset invalidates cached static render and collision surfaces", debug_setup_creative_reset_cache },
     { "activation-floating", "Static cluster activated while unsupported", debug_setup_activation_floating },
@@ -699,6 +703,7 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
     (void)ensure_static_surface_cache();
     sample.collision_particles = collision_particle_count;
     sample.collision_particles_culled = sim_particle_count - collision_particle_count;
+    if(coarseGroup.active){sample.collision_particles=coarseGroup.sample_count;sample.collision_particles_culled=0;}
     sample.static_occupied_cells = staticSurfaceOccupiedCellCount;
     sample.static_surface_patches = patchCount;
     sample.static_surface_cells = staticSurfaceCellCount;
@@ -733,10 +738,12 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
             }
             center = v_add(center, particle->pos);
             ++valid_corners;
-            if (voxel->simulate && particle->base_inv_mass <= 0.0f) {
+            int coarse_index=coarseGroup.active?coarse_sample_index(particle):-1;
+            bool dependent=coarse_index>=0 && coarseGroup.source_count[coarse_index]>1;
+            if (voxel->simulate && !dependent && particle->base_inv_mass <= 0.0f) {
                 ++sample.zero_mass_corners;
             }
-            if (voxel->simulate &&
+            if (voxel->simulate && !dependent &&
                 (particle->sim_index < 0 || particle->sim_index >= sim_particle_count ||
                  sim_particles[particle->sim_index] != particle)) {
                 ++sample.invalid_particle_refs;
@@ -781,6 +788,14 @@ static DebugSample *debug_record_sample(DebugRunState *state, const char *phase,
 static void debug_draw_overlay(const DebugRunState *state, const DebugSample *sample)
 {
     if (!state || !sample) return;
+    if(sizedFixture) {
+        DrawRectangle(18,18,800,112,Fade(BLACK,.78f));
+        DrawText(TextFormat("%s | %s",debugRunConfig.scenario,physics_backend_name(physicsBackend.active)),34,30,22,RAYWHITE);
+        DrawText(TextFormat("%d voxels | %d independent + %d dependent particles",
+            voxel_count,sim_particle_count,active_particle_count-sim_particle_count),34,62,20,LIGHTGRAY);
+        DrawText(TextFormat("%.2f s | step %d/%d",sample->step*(double)PBD_MAX_STEP_DT,sample->step,debugRunConfig.steps),34,94,20,LIGHTGRAY);
+        return;
+    }
     int box_height = 180;
     if (state->gpu_readback_performed) box_height += 30;
     if (state->overhang_impact) box_height += 30;
@@ -1439,6 +1454,8 @@ static bool debug_tagged_original_column_y(int tag, int original_x, float *out_y
     *out_y = sum / (float)count;
     return true;
 }
+
+#include "debug_sized.inc"
 
 static bool debug_setup_dynamic_freefall(DebugRunState *state)
 {
@@ -2305,6 +2322,12 @@ static bool debug_setup_tether_thin_wall_ccd(DebugRunState *state)
 
 static void debug_physics_step(void)
 {
+    if(sizedFixture) {
+        physics_force_single_cpu=(physicsBackend.active==PHYSICS_BACKEND_CPU_ST);
+        simulate_voxel_pbd_cpu_steps(PBD_MAX_STEP_DT/PBD_SUBSTEPS,PBD_SUBSTEPS);
+        physics_force_single_cpu=false;
+        return;
+    }
     activate_static_voxels_near_dynamic();
     prepare_tether_forces();
     wake_sleeping_voxels_near_awake();
@@ -2336,6 +2359,7 @@ static uint64_t debug_tagged_static_identity_signature(int tag)
 
 static void debug_validate_step(DebugRunState *state, int step)
 {
+    if(sizedFixture){debug_validate_sized(state,step);return;}
     debug_validate_all_sim_particles(state, step);
     // Isolate the post-impact lifecycle under test: wait for the real swept
     // tether collision, then wake the struck pillar through the normal static
@@ -2733,6 +2757,7 @@ static void debug_validate_step(DebugRunState *state, int step)
 
 static void debug_finalize_validation(DebugRunState *state)
 {
+    if(sizedFixture){debug_finalize_sized(state);return;}
     if (physics_backend_is_gpu(physicsBackend.requested) &&
         physicsBackend.active != physicsBackend.requested) {
         debug_add_failure(state, "forced GPU run fell back to %s: %s",
@@ -2922,6 +2947,7 @@ static bool debug_write_report(DebugRunState *state)
     debug_write_json_string(file, physics_backend_name(physicsBackend.active));
     fprintf(file, ",\n  \"passed\": %s,\n  \"steps\": %d,\n  \"fixedDt\": %.9g,\n",
             passed ? "true" : "false", debugRunConfig.steps, (double)PBD_MAX_STEP_DT);
+    debug_report_sized(file);
     fprintf(file,
             "  \"animation\": {\"requested\": %s, \"format\": \"gif\","
             " \"frames\": %d, \"fpsRequested\": %d, \"stepStride\": %d, \"path\": ",

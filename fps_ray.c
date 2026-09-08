@@ -1027,6 +1027,8 @@ typedef struct PbdWorkerCtx {
 
 static PbdThreadPool pbd_pool = { 0 };
 static bool physics_force_single_cpu = false;
+static bool sizedFixture;
+static _Atomic unsigned sizedWorkerCalls;
 
 static void pbd_threadpool_run_job(PbdThreadPool *pool,
                                    int worker_id,
@@ -1043,6 +1045,9 @@ static void pbd_threadpool_run_job(PbdThreadPool *pool,
         int end = start + chunk;
         if (end > range_end) {
             end = range_end;
+        }
+        if (sizedFixture && worker_id >= 0) {
+            atomic_fetch_add_explicit(&sizedWorkerCalls, 1, memory_order_relaxed);
         }
         fn(start, end, worker_id, user);
     }
@@ -1191,7 +1196,8 @@ static void pbd_parallel_for(int start, int end, PbdParallelFn fn, void *user) {
         return;
     }
     int range = end - start;
-    if (physics_force_single_cpu || !pbd_pool.threads || pbd_pool.thread_count <= 0 || range < PBD_PARALLEL_MIN_WORK) {
+    if (physics_force_single_cpu || !pbd_pool.threads || pbd_pool.thread_count <= 0 ||
+        (range < PBD_PARALLEL_MIN_WORK && !sizedFixture)) {
         fn(start, end, -1, user);
         return;
     }
@@ -1203,6 +1209,7 @@ static void pbd_parallel_for(int start, int end, PbdParallelFn fn, void *user) {
         chunk = 1;
     }
 
+    if (sizedFixture) chunk = 1;
     pthread_mutex_lock(&pbd_pool.mutex);
     pbd_pool.fn = fn;
     pbd_pool.user = user;
@@ -2313,7 +2320,10 @@ static Vector3 v_norm(Vector3 v) {
     return v_mul(v, 1.0f / len);
 }
 
+static void coarse_group_reset(void);
+
 static void reset_particle_pool(void) {
+    coarse_group_reset();
     particle_pool_count = 0;
     active_particle_count = 0;
     sim_particle_count = 0;
@@ -4004,12 +4014,12 @@ static bool init_voxel_struct(Voxel *v,
                               float px, float py, float pz,
                               bool fixed, bool simulate,
                               Color color, int type,
-                              int owner)
+                              int owner, float edge)
 {
+    if (!isfinite(edge) || edge <= 0.0f) return false;
     if (!v) {
         return false;
     }
-    float edge = VOXEL_SIZE;
     float half = 0.5f * edge;
 
     v->pos = (Vector3){ px, py, pz };
@@ -4041,6 +4051,14 @@ static bool init_voxel_struct(Voxel *v,
     v->orig_min_gx = v->orig_max_gx = v->gx;
     v->orig_min_gy = v->orig_max_gy = v->gy;
     v->orig_min_gz = v->orig_max_gz = v->gz;
+    if (edge != VOXEL_SIZE) {
+        v->rest_min_gx = v->orig_min_gx = (int)floorf((px - half) / VOXEL_SIZE + 1e-5f);
+        v->rest_min_gy = v->orig_min_gy = (int)floorf((py - half) / VOXEL_SIZE + 1e-5f);
+        v->rest_min_gz = v->orig_min_gz = (int)floorf((pz - half) / VOXEL_SIZE + 1e-5f);
+        v->rest_max_gx = v->orig_max_gx = (int)ceilf((px + half) / VOXEL_SIZE - 1e-5f) - 1;
+        v->rest_max_gy = v->orig_max_gy = (int)ceilf((py + half) / VOXEL_SIZE - 1e-5f) - 1;
+        v->rest_max_gz = v->orig_max_gz = (int)ceilf((pz + half) / VOXEL_SIZE - 1e-5f) - 1;
+    }
     v->rest_edge = edge;
     v->rest_volume = edge * edge * edge;
     v->particle_radius = 0.5f * edge;
@@ -4056,7 +4074,8 @@ static bool init_voxel_struct(Voxel *v,
             py + corner_signs[i][1] * half,
             pz + corner_signs[i][2] * half
         };
-        float inv_mass = (fixed || !simulate) ? 0.0f : 1.0f;
+        float ratio = edge / VOXEL_SIZE;
+        float inv_mass = (fixed || !simulate) ? 0.0f : 1.0f / (ratio * ratio * ratio);
         Particle *p = particle_create(p_pos, inv_mass);
         if (!p) {
             for (int j = 0; j < i; ++j) {
@@ -4086,7 +4105,8 @@ static bool init_voxel_struct(Voxel *v,
 }
 
 // Add a voxel (static or dynamic)
-static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Color color, int type) {
+static int add_voxel_sized(float px, float py, float pz, bool fixed, bool simulate,
+                           Color color, int type, float edge) {
     if (voxel_count >= MAX_VOXELS) {
         if (debugLogActivationFailures) {
             TraceLog(LOG_WARNING,
@@ -4097,7 +4117,7 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     }
     int idx = voxel_count++;
     Voxel *v = &voxels[idx];
-    if (!init_voxel_struct(v, px, py, pz, fixed, simulate, color, type, -1)) {
+    if (!init_voxel_struct(v, px, py, pz, fixed, simulate, color, type, -1, edge)) {
         voxel_count--;
         return -1;
     }
@@ -4108,6 +4128,12 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
         mark_static_hash_dirty();
     }
     return idx;
+}
+
+/* Existing callers retain the base grid size. Sized creation is initially used
+   only by CPU debug fixtures; GPU/editor/map support is a separate increment. */
+static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Color color, int type) {
+    return add_voxel_sized(px, py, pz, fixed, simulate, color, type, VOXEL_SIZE);
 }
 
 static void glue_dynamic_face_to_static(Voxel *dynamic, Voxel *stat, int face_dynamic, int face_static);
@@ -10011,6 +10037,7 @@ typedef struct {
     float eps;
     PairCorrection *local_corrections;
     int correction_slots;
+    int search_reach;
 } ParticleCollisionJob;
 
 static bool reserve_pair_correction_scratch(int count) {
@@ -10114,9 +10141,9 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
         int ay = pa->cell_y;
         int az = pa->cell_z;
 
-        for (int dx = -1; dx <= 1; ++dx) {
-            for (int dy = -1; dy <= 1; ++dy) {
-                for (int dz = -1; dz <= 1; ++dz) {
+        for (int dx = -job->search_reach; dx <= job->search_reach; ++dx) {
+            for (int dy = -job->search_reach; dy <= job->search_reach; ++dy) {
+                for (int dz = -job->search_reach; dz <= job->search_reach; ++dz) {
                     if (dz < 0 || (dz == 0 && dy < 0) ||
                         (dz == 0 && dy == 0 && dx < 0)) continue;
                     int nx = ax + dx;
@@ -10230,6 +10257,10 @@ static void gather_particle_collisions(float dt, Particle **list, int count) {
     bool use_local_corrections = reserve_pair_correction_scratch(count);
     if (!use_local_corrections) reset_particle_accumulators();
 
+    float max_radius = 0.0f;
+    for (int i = 0; i < count; ++i) {
+        if (list[i]) max_radius = fmaxf(max_radius, list[i]->radius);
+    }
     ParticleCollisionJob job = {
         .list = list,
         .count = count,
@@ -10237,7 +10268,8 @@ static void gather_particle_collisions(float dt, Particle **list, int count) {
         .omega = omega,
         .eps = eps,
         .local_corrections = use_local_corrections ? pairCorrectionScratch : NULL,
-        .correction_slots = use_local_corrections ? pairCorrectionScratchSlots : 0
+        .correction_slots = use_local_corrections ? pairCorrectionScratchSlots : 0,
+        .search_reach = (int)ceilf(2.0f * max_radius / VOXEL_SIZE)
     };
     pbd_parallel_for(0, count, gather_particle_pair_collisions_range, &job);
     if (use_local_corrections) {
@@ -11551,7 +11583,8 @@ static bool list_contains_index(const int *list, int count, int value)
 
 static int gather_static_voxels_near_point(Vector3 point, float radius, int *out, int max_out)
 {
-    (void)radius;
+    int reach = (int)ceilf(radius/VOXEL_SIZE);
+    if(reach<1) reach=1;
     if (!out || max_out <= 0) {
         return 0;
     }
@@ -11560,9 +11593,9 @@ static int gather_static_voxels_near_point(Vector3 point, float radius, int *out
     int gz = (int)floorf(point.z / VOXEL_SIZE);
 
     int count = 0;
-    for (int z = gz - 1; z <= gz + 1; ++z) {
-        for (int y = gy - 1; y <= gy + 1; ++y) {
-            for (int x = gx - 1; x <= gx + 1; ++x) {
+    for (int z = gz - reach; z <= gz + reach; ++z) {
+        for (int y = gy - reach; y <= gy + reach; ++y) {
+            for (int x = gx - reach; x <= gx + reach; ++x) {
                 int idx = table_get_static_only(x, y, z);
                 if (idx < 0 || idx >= voxel_count) {
                     continue;
@@ -11744,9 +11777,11 @@ static void collide_particle_with_static_surface(Particle *particle, float radiu
     int gy = (int)floorf(position.y / VOXEL_SIZE);
     int gz = (int)floorf(position.z / VOXEL_SIZE);
 
-    for (int dz = -1; dz <= 1; ++dz) {
-        for (int dy = -1; dy <= 1; ++dy) {
-            for (int dx = -1; dx <= 1; ++dx) {
+    int reach = (int)ceilf(radius/VOXEL_SIZE);
+    if(reach<1) reach=1;
+    for (int dz = -reach; dz <= reach; ++dz) {
+        for (int dy = -reach; dy <= reach; ++dy) {
+            for (int dx = -reach; dx <= reach; ++dx) {
                 const StaticSurfaceCell *cell = find_static_surface_cell(gx + dx, gy + dy, gz + dz);
                 if (!cell) continue;
                 for (int item = 0; item < cell->count; ++item) {
@@ -11913,20 +11948,20 @@ static void solve_static_collisions_range(int start, int end, int worker_id, voi
     StaticCollisionJob *job = (StaticCollisionJob *)user;
     float half_player = job->half_player;
     const float eps = 1e-6f;
-    const float static_collision_radius = 0.25f * VOXEL_SIZE;
+
 
     for (int i = start; i < end; ++i) {
         Particle *p = collision_particles[i];
         if (!p || p->inv_mass == 0.0f) continue;
 
-        // p->radius holds the voxel radius (0.25)
+        // Each corner carries its owning voxel's collision radius.
         float voxel_radius = p->radius;
+        float static_collision_radius = 0.5f * voxel_radius;
         float terrain_limit = FLOOR_SIZE - voxel_radius;
         
         // Floor collision
         Vector3 pos = p->predicted_pos;
-        float floor_offset = 0.5f * VOXEL_SIZE;
-        float floor_limit = fmaxf(0.0f, floor_offset - voxel_radius);
+        const float floor_limit = 0.0f; // Geometry corners meet the floor at y=0.
         bool floor_contact = pos.y < floor_limit;
         if (floor_contact) {
             pos.y = floor_limit;
@@ -12497,6 +12532,8 @@ static void resolve_tether_throw_ccd_snapshots(const TetherThrowCcdSnapshot *sna
     }
 }
 
+#include "coarse_children.inc"
+
 static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
     if (sim_particle_count <= 0) {
         return;
@@ -12504,6 +12541,10 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
     const int constraint_iterations = PBD_CONSTRAINT_ITERS;
 
     for (int step = 0; step < substeps; ++step) {
+        if (coarseGroup.active) {
+            coarse_cpu_step(sub_dt);
+            continue;
+        }
         if (debugLogVoxelBlowup) {
             debugBlowupLogBudget = 32;
         }
@@ -12536,8 +12577,10 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
 
         solve_static_collisions(sub_dt);
 
-        pbd_parallel_for(0, voxel_count, gather_voxel_break_masks_range, NULL);
-        process_break_masks();
+        if (!sizedFixture) {
+            pbd_parallel_for(0, voxel_count, gather_voxel_break_masks_range, NULL);
+            process_break_masks();
+        }
         update_wake_timers();
 
         // accumulate_simulated_corner_deltas(sum_delta, counts);
