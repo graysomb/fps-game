@@ -84,6 +84,7 @@ static PhysicsBackendStatus physicsBackend = {
     .requested = PHYSICS_BACKEND_AUTO,
     .active = PHYSICS_BACKEND_CPU_ST
 };
+static bool greedyActivationCubes;
 static bool physicsReportRequested = false;
 static bool gpuTransferStatsEnabled = false;
 typedef enum { GPU_TRANSFER_RESIDENT = 0, GPU_TRANSFER_LEGACY = 1 } GpuTransferMode;
@@ -197,6 +198,10 @@ static bool parse_physics_arguments(int argc, char **argv) {
         }
         if (strcmp(arg, "--tether-throw-ccd") == 0) {
             tetherThrowCcdEnabled = true;
+            continue;
+        }
+        if (strcmp(arg, "--activation-cubes=greedy") == 0) {
+            greedyActivationCubes = true;
             continue;
         }
         if (strcmp(arg, "--no-tether-throw-ccd") == 0) {
@@ -988,6 +993,10 @@ typedef struct {
     int count;
 } UnitVoxelBuffer;
 
+#include "greedy_cube_cover.inc"
+
+static bool emit_greedy_dynamic_from_buffer(UnitVoxelBuffer *buffer);
+
 static void refresh_static_voxel_beliefs(void);
 static void update_static_voxel_belief(int idx);
 static void mark_static_beliefs_dirty_for_voxel(const Voxel *voxel);
@@ -1028,6 +1037,7 @@ typedef struct PbdWorkerCtx {
 static PbdThreadPool pbd_pool = { 0 };
 static bool physics_force_single_cpu = false;
 static bool sizedFixture;
+static bool greedyFixture;
 static _Atomic unsigned sizedWorkerCalls;
 
 static void pbd_threadpool_run_job(PbdThreadPool *pool,
@@ -1046,7 +1056,7 @@ static void pbd_threadpool_run_job(PbdThreadPool *pool,
         if (end > range_end) {
             end = range_end;
         }
-        if (sizedFixture && worker_id >= 0) {
+        if ((sizedFixture || greedyFixture) && worker_id >= 0) {
             atomic_fetch_add_explicit(&sizedWorkerCalls, 1, memory_order_relaxed);
         }
         fn(start, end, worker_id, user);
@@ -2321,9 +2331,12 @@ static Vector3 v_norm(Vector3 v) {
 }
 
 static void coarse_group_reset(void);
+static void greedy_coarse_reset(void);
+static void greedy_coarse_materialize(void);
 
 static void reset_particle_pool(void) {
     coarse_group_reset();
+    greedy_coarse_reset();
     particle_pool_count = 0;
     active_particle_count = 0;
     sim_particle_count = 0;
@@ -3422,6 +3435,7 @@ static void remove_voxel_index(int idx)
     if (idx < 0 || idx >= voxel_count) {
         return;
     }
+    greedy_coarse_materialize();
     table_cache_invalidate();
     int voxel_count_before = voxel_count;
     Voxel *victim = &voxels[idx];
@@ -4231,6 +4245,7 @@ static void detach_face_particles(Voxel *voxel, int face_index) {
 }
 
 static void break_face_link(Voxel *voxel, int face_index) {
+    greedy_coarse_materialize();
     if (!voxel || !voxel->glued_faces[face_index]) {
         return;
     }
@@ -4315,11 +4330,12 @@ static void remove_buffered_static_voxels(UnitVoxelBuffer *buffer)
     if (!buffer) {
         return;
     }
-    int indices[VOXEL_ACTIVATION_UNIT_BUDGET];
+    int *indices = malloc((size_t)buffer->count * sizeof(*indices));
+    if (!indices) return;
     int idx_count = 0;
     for (int i = 0; i < buffer->count; ++i) {
         const UnitVoxelSeed *seed = &buffer->voxels[i];
-        if (seed->voxelIndex >= 0 && idx_count < VOXEL_ACTIVATION_UNIT_BUDGET) {
+        if (seed->voxelIndex >= 0 && idx_count < buffer->count) {
             indices[idx_count++] = seed->voxelIndex;
         }
     }
@@ -4372,6 +4388,7 @@ static void remove_buffered_static_voxels(UnitVoxelBuffer *buffer)
             remove_voxel_index(idx);
         }
     }
+    free(indices);
 }
 
 static bool activation_try_enqueue(int voxel_idx,
@@ -4557,6 +4574,27 @@ static int expand_activation_cluster_unbounded(UnitVoxelBuffer *buffer, int star
     }
 
     return added;
+}
+
+/* Greedy activation deliberately crosses the legacy 640-cell work budget so a
+ * connected structure is covered as one object rather than at batch seams. */
+static bool expand_greedy_activation_component(UnitVoxelBuffer *buffer)
+{
+    if (!buffer) return false;
+    static const int d[6][3]={{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+    for (int head=0; head<buffer->count; ++head) {
+        UnitVoxelSeed seed=buffer->voxels[head];
+        for(int n=0;n<6;n++) {
+            int idx=table_get_static_only(seed.gx+d[n][0],seed.gy+d[n][1],seed.gz+d[n][2]);
+            if(idx<0||idx>=voxel_count)continue;Voxel *v=&voxels[idx];
+            if(v->simulate||v->pendingActivation||v->owner!=-1||v->type!=seed.type)continue;
+            v->pendingActivation=true;
+            if(!unit_voxel_buffer_push(buffer,v->gx,v->gy,v->gz,v->color,v->type,v->fixed,idx,v->debugClusterTag,seed.activator)){
+                v->pendingActivation=false;return false;
+            }
+        }
+    }
+    return true;
 }
 
 static float compute_cluster_freeze_belief(const UnitVoxelBuffer *buffer, int startIndex)
@@ -4829,9 +4867,13 @@ static bool activate_static_voxels_near_dynamic(void)
 
     qsort(buffer.voxels, (size_t)buffer.count, sizeof(UnitVoxelSeed), compare_unit_voxel_seed);
 
-    remove_buffered_static_voxels(&buffer);
+    if(greedyActivationCubes&&!expand_greedy_activation_component(&buffer)){
+        rollback_activation_buffer(&buffer,0);apply_pending_tether_impacts();return false;
+    }
     int activation_base = voxel_count;
-    int spawned = emit_unit_voxels_from_units(&buffer, false, true, -1);
+    int spawned = 0;
+    if(greedyActivationCubes)spawned=emit_greedy_dynamic_from_buffer(&buffer)?buffer.count:0;
+    else {remove_buffered_static_voxels(&buffer);spawned=emit_unit_voxels_from_units(&buffer,false,true,-1);}
     if (debugLogActivation) {
         TraceLog(LOG_INFO,
                  "[Activation] static->dynamic units=%d spawned=%d base=%d after=%d",
@@ -4854,6 +4896,11 @@ static bool activate_static_voxels_near_dynamic(void)
 
 static bool activate_all_static_voxels(int activator)
 {
+    if(greedyActivationCubes){static UnitVoxelBuffer all;unit_voxel_buffer_clear(&all);
+        for(int i=0;i<voxel_count;i++){Voxel *v=&voxels[i];if(v->simulate||v->pendingActivation)continue;v->pendingActivation=true;
+            if(!unit_voxel_buffer_push(&all,v->gx,v->gy,v->gz,v->color,v->type,v->fixed,i,v->debugClusterTag,activator)){rollback_activation_buffer(&all,0);return false;}}
+        return all.count>0&&emit_greedy_dynamic_from_buffer(&all);
+    }
     bool activated = false;
     for (;;) {
         static UnitVoxelBuffer buffer;
@@ -8563,8 +8610,9 @@ static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float
         return false;
     }
 
-    remove_buffered_static_voxels(&buffer);
-    emit_unit_voxels_from_units(&buffer, false, true, -1);
+    if(greedyActivationCubes&&!expand_greedy_activation_component(&buffer)){rollback_activation_buffer(&buffer,0);return false;}
+    if(greedyActivationCubes){if(!emit_greedy_dynamic_from_buffer(&buffer))return false;}
+    else {remove_buffered_static_voxels(&buffer);emit_unit_voxels_from_units(&buffer, false, true, -1);}
     rebuild_voxel_hash();
     rebuild_all_voxel_surfaces();
     rebuild_glue_constraints();
@@ -8732,11 +8780,12 @@ static bool activate_static_neighbors_of_region(int minx, int maxx,
         return false;
     }
 
-    remove_buffered_static_voxels(&buffer);
+    if(greedyActivationCubes&&!expand_greedy_activation_component(&buffer)){rollback_activation_buffer(&buffer,0);return false;}
     if (debugLogSmush) {
         debugSmushLogBudget = 32;
     }
-    emit_unit_voxels_from_units(&buffer, false, true, -1);
+    if(greedyActivationCubes){if(!emit_greedy_dynamic_from_buffer(&buffer))return false;}
+    else {remove_buffered_static_voxels(&buffer);emit_unit_voxels_from_units(&buffer, false, true, -1);}
     if (debugLogSmush && debugSmushLogBudget > 0) {
         TraceLog(LOG_INFO,
                  "[Smush] activated units=%d activator=%d region=(%d..%d,%d..%d,%d..%d)",
@@ -12267,6 +12316,11 @@ static bool initialize_physics_backend(void) {
         select_cpu_physics_backend();
         physicsBackend.initialized = true;
     }
+    if (greedyActivationCubes && physics_backend_is_gpu(physicsBackend.active)) {
+        snprintf(physicsBackend.fallback_reason, sizeof(physicsBackend.fallback_reason),
+                 "--activation-cubes=greedy requires --physics=cpu-st or cpu-mt");
+        return false;
+    }
     if (physicsReportRequested) {
         fprintf(stderr, "physics requested=%s active=%s workers=%d gpuCompiled=%d gpuAvailable=%d%s%s\n",
                 physics_backend_name(physicsBackend.requested), physics_backend_name(physicsBackend.active),
@@ -12533,6 +12587,7 @@ static void resolve_tether_throw_ccd_snapshots(const TetherThrowCcdSnapshot *sna
 }
 
 #include "coarse_children.inc"
+#include "greedy_coarse.inc"
 
 static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
     if (sim_particle_count <= 0) {
@@ -12541,6 +12596,10 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
     const int constraint_iterations = PBD_CONSTRAINT_ITERS;
 
     for (int step = 0; step < substeps; ++step) {
+        if (greedyCoarse.active) {
+            greedy_coarse_cpu_step(sub_dt);
+            continue;
+        }
         if (coarseGroup.active) {
             coarse_cpu_step(sub_dt);
             continue;
