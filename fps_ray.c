@@ -962,6 +962,18 @@ static void voxel_measure_strain(const Voxel *voxel,
 static int build_glue_cluster_indices(int start_idx, int *out_indices);
 static void build_glue_cluster_ids(int *out_cluster_id);
 static void rebuild_particle_collision_metadata(void);
+static bool greedy_accumulate_mapped_correction(Particle *p, Vector3 delta, float weight);
+static bool greedy_particle_is_mapped(const Particle *p);
+static bool greedy_solver_active(void);
+static bool greedy_particles_share_island(const Particle *a, const Particle *b);
+static void greedy_refresh_predicted(bool all_children);
+static int greedy_physics_shape_count(void);
+static void greedy_gather_shape_constraints_range(int start, int end, int worker_id, void *user);
+static void greedy_install_collision_particles(void);
+static void greedy_solve_static_contacts(float dt);
+static void greedy_lift_floor_residual(void);
+typedef struct { bool enabled; double integration_ms,vgs_ms,dynamic_ms,static_ms,interface_ms,child_ms; } GreedyStageProfile;
+static GreedyStageProfile greedyStageProfile;
 static int gather_glued_neighbors(int voxel_idx, int *out, int max_out);
 static int gather_glued_neighbors_symmetric(int voxel_idx, int *out, int max_out);
 static bool voxel_connected_to_static_world(const Voxel *voxel);
@@ -2570,6 +2582,7 @@ static inline void accumulate_particle_correction(Particle *p, Vector3 delta, fl
     if (weight <= 0.0f) {
         return;
     }
+    if (greedy_accumulate_mapped_correction(p, delta, weight)) return;
     float dx = delta.x * weight;
     float dy = delta.y * weight;
     float dz = delta.z * weight;
@@ -10127,6 +10140,7 @@ static bool particles_are_local_structural_neighbors(const Particle *a, const Pa
     if (!a || !b || a->collision_group < 0 || a->collision_group != b->collision_group) {
         return false;
     }
+    if (greedy_particles_share_island(a, b)) return true;
     const float step = VOXEL_SIZE * 0.5f;
     float dx = (float)(a->rest_cell_x - b->rest_cell_x) * step;
     float dy = (float)(a->rest_cell_y - b->rest_cell_y) * step;
@@ -10291,8 +10305,9 @@ static void apply_pair_corrections_range(int start, int end, int worker_id, void
         Particle *particle = job->list[i];
         if (!particle || total.weight <= 0.0f) continue;
         float scale = PBD_SOR_FACTOR / total.weight;
-        particle->predicted_pos = v_add(particle->predicted_pos,
-            (Vector3){ total.x * scale, total.y * scale, total.z * scale });
+        Vector3 delta = { total.x * scale, total.y * scale, total.z * scale };
+        if (!greedy_accumulate_mapped_correction(particle, delta, 1.0f))
+            particle->predicted_pos = v_add(particle->predicted_pos, delta);
     }
 }
 
@@ -10305,6 +10320,7 @@ static void gather_particle_collisions(float dt, Particle **list, int count) {
     const float eps = 1e-6f;
     bool use_local_corrections = reserve_pair_correction_scratch(count);
     if (!use_local_corrections) reset_particle_accumulators();
+    else if (greedy_solver_active()) reset_particle_accumulators();
 
     float max_radius = 0.0f;
     for (int i = 0; i < count; ++i) {
@@ -10327,6 +10343,7 @@ static void gather_particle_collisions(float dt, Particle **list, int count) {
             .slots = pairCorrectionScratchSlots
         };
         pbd_parallel_for(0, count, apply_pair_corrections_range, &apply_job);
+        if (greedy_solver_active()) apply_particle_accumulators();
     } else {
         apply_particle_accumulators();
     }
@@ -12596,10 +12613,6 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
     const int constraint_iterations = PBD_CONSTRAINT_ITERS;
 
     for (int step = 0; step < substeps; ++step) {
-        if (greedyCoarse.active) {
-            greedy_coarse_cpu_step(sub_dt);
-            continue;
-        }
         if (coarseGroup.active) {
             coarse_cpu_step(sub_dt);
             continue;
@@ -12610,12 +12623,19 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
         // update_voxel_coarsening_state();
         // reset_particle_mass_and_flags();
         // apply_shell_effective_mass();
+        double greedy_stage_started = greedyStageProfile.enabled ? GetTime() : 0.0;
         integrate_particles(sub_dt);
+        if (greedyStageProfile.enabled) greedyStageProfile.integration_ms += (GetTime()-greedy_stage_started)*1000.0;
+        if (greedyCoarse.active) {
+            greedy_stage_started=GetTime();greedy_refresh_predicted(false);
+            greedyStageProfile.interface_ms += (GetTime()-greedy_stage_started)*1000.0;
+        }
 
         for (int it = 0; it < 1; ++it) {
             // The collision list is stable for this substep.  Break processing
             // below dirties topology and the next substep rebuilds it.
             if (collisionTopologyDirty) rebuild_particle_collision_metadata();
+            if (greedyCoarse.active) greedy_install_collision_particles();
             int snapshot_count = collision_particle_count;
             if (snapshot_count > MAX_PARTICLES) {
                 snapshot_count = MAX_PARTICLES;
@@ -12625,18 +12645,39 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
                        (size_t)snapshot_count * sizeof(particle_snapshot[0]));
             }
             build_particle_hash(particle_snapshot, snapshot_count);
+            if (greedyStageProfile.enabled) greedy_stage_started=GetTime();
             gather_particle_collisions(sub_dt, particle_snapshot, snapshot_count);
+            if (greedyStageProfile.enabled) greedyStageProfile.dynamic_ms+=(GetTime()-greedy_stage_started)*1000.0;
+            if (greedyCoarse.active) {greedy_stage_started=GetTime();greedy_refresh_predicted(false);greedyStageProfile.interface_ms+=(GetTime()-greedy_stage_started)*1000.0;}
         }
 
         for (int it = 0; it < constraint_iterations; ++it) {
+            if (greedyStageProfile.enabled) greedy_stage_started=GetTime();
             reset_particle_accumulators();
-            pbd_parallel_for(0, voxel_count, gather_voxel_shape_constraints_range, NULL);
+            if (greedyCoarse.active)
+                pbd_parallel_for(0, greedy_physics_shape_count(), greedy_gather_shape_constraints_range, NULL);
+            else
+                pbd_parallel_for(0, voxel_count, gather_voxel_shape_constraints_range, NULL);
             apply_particle_accumulators();
+            if (greedyStageProfile.enabled) greedyStageProfile.vgs_ms+=(GetTime()-greedy_stage_started)*1000.0;
+            if (greedyCoarse.active) {greedy_stage_started=GetTime();greedy_refresh_predicted(false);greedyStageProfile.interface_ms+=(GetTime()-greedy_stage_started)*1000.0;}
         }
 
-        solve_static_collisions(sub_dt);
+        if (greedyStageProfile.enabled) greedy_stage_started=GetTime();
+        if (greedyCoarse.active) greedy_solve_static_contacts(sub_dt);
+        else solve_static_collisions(sub_dt);
+        if (greedyStageProfile.enabled) greedyStageProfile.static_ms+=(GetTime()-greedy_stage_started)*1000.0;
+        if (greedyCoarse.active) {
+            if (greedyStageProfile.enabled) greedy_stage_started=GetTime();
+            reset_particle_accumulators();
+            pbd_parallel_for(0,greedy_physics_shape_count(),greedy_gather_shape_constraints_range,NULL);
+            apply_particle_accumulators();
+            greedy_refresh_predicted(false);
+            greedy_lift_floor_residual();
+            if (greedyStageProfile.enabled) greedyStageProfile.vgs_ms+=(GetTime()-greedy_stage_started)*1000.0;
+        }
 
-        if (!sizedFixture) {
+        if (!sizedFixture && !greedyFineFixture && !greedyCoarse.active) {
             pbd_parallel_for(0, voxel_count, gather_voxel_break_masks_range, NULL);
             process_break_masks();
         }
@@ -12655,7 +12696,15 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
         // apply_interior_sync(avg_delta, counts);
 
         decrement_particle_timers();
-        update_particle_velocities(sub_dt);
+        if (greedyCoarse.active) {
+            VelocityUpdateJob velocity_job = { .inv_dt = sub_dt > 0.0f ? 1.0f/sub_dt : 0.0f };
+            pbd_parallel_for(0,sim_particle_count,update_particle_velocity_range,&velocity_job);
+            greedy_stage_started=GetTime();greedy_refresh_predicted(true);
+            pbd_parallel_for(0,voxel_count,update_voxel_velocity_range,&velocity_job);
+            greedyStageProfile.child_ms+=(GetTime()-greedy_stage_started)*1000.0;
+        } else {
+            update_particle_velocities(sub_dt);
+        }
         if (debugLogVoxelBlowup && debugBlowupLogBudget > 0) {
             for (int i = 0; i < voxel_count && debugBlowupLogBudget > 0; ++i) {
                 Voxel *voxel = &voxels[i];

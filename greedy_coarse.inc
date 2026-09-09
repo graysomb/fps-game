@@ -1,15 +1,18 @@
 /* Scalable CPU coarse groups produced by GreedyCubeCover. Unit child voxels
- * remain the source of rendering and collision samples. */
+ * provide render geometry; exposed parent corners provide collision samples. */
 typedef struct {
     bool active;
     Voxel *shapes; int *sizes; int group_count;
+    Voxel **physics_shapes; int physics_shape_count;
     int *voxel_group; int voxel_capacity;
     Particle **samples; int sample_count;
-    Particle *(*sources)[64]; float (*weights)[64]; unsigned char *source_count;
+    Particle ***sources; float **weights; int *source_count;
+    float **correction_weights;
+    int *pool_to_sample;
+    unsigned char *parent_use;
     int *owner;
     int *dependent_order,dependent_count;
     Particle **collision_samples;int collision_count;
-    Vector3 *delta; float *load;
     int child_begin,child_count,independent_count;
     double cover_ms;
 } GreedyCoarseSystem;
@@ -20,9 +23,10 @@ static Color greedy_size_color(int size){static const Color p[]={{80,185,255,255
 static int greedy_sample_index(Particle *p);
 static void greedy_refresh(void);
 
-static void greedy_coarse_reset(void){free(greedyCoarse.shapes);free(greedyCoarse.sizes);free(greedyCoarse.voxel_group);
-    free(greedyCoarse.samples);free(greedyCoarse.sources);free(greedyCoarse.weights);free(greedyCoarse.source_count);free(greedyCoarse.owner);free(greedyCoarse.dependent_order);free(greedyCoarse.collision_samples);
-    free(greedyCoarse.delta);free(greedyCoarse.load);memset(&greedyCoarse,0,sizeof(greedyCoarse));}
+static void greedy_coarse_reset(void){free(greedyCoarse.shapes);free(greedyCoarse.sizes);free(greedyCoarse.voxel_group);free(greedyCoarse.physics_shapes);
+    if(greedyCoarse.sources)for(int i=0;i<greedyCoarse.sample_count;i++)free(greedyCoarse.sources[i]);if(greedyCoarse.weights)for(int i=0;i<greedyCoarse.sample_count;i++)free(greedyCoarse.weights[i]);if(greedyCoarse.correction_weights)for(int i=0;i<greedyCoarse.sample_count;i++)free(greedyCoarse.correction_weights[i]);
+    free(greedyCoarse.samples);free(greedyCoarse.sources);free(greedyCoarse.weights);free(greedyCoarse.source_count);free(greedyCoarse.correction_weights);free(greedyCoarse.pool_to_sample);free(greedyCoarse.parent_use);free(greedyCoarse.owner);free(greedyCoarse.dependent_order);free(greedyCoarse.collision_samples);
+    memset(&greedyCoarse,0,sizeof(greedyCoarse));}
 static bool greedy_solve3(float a[3][3],Vector3 b,Vector3 *out){float m[3][4]={{a[0][0],a[0][1],a[0][2],b.x},{a[1][0],a[1][1],a[1][2],b.y},{a[2][0],a[2][1],a[2][2],b.z}};
     for(int c=0;c<3;c++){int p=c;for(int r=c+1;r<3;r++)if(fabsf(m[r][c])>fabsf(m[p][c]))p=r;if(fabsf(m[p][c])<1e-9f)return false;for(int q=c;q<4;q++){float t=m[c][q];m[c][q]=m[p][q];m[p][q]=t;}float d=m[c][c];for(int q=c;q<4;q++)m[c][q]/=d;for(int r=0;r<3;r++)if(r!=c){float f=m[r][c];for(int q=c;q<4;q++)m[r][q]-=f*m[c][q];}}
     *out=(Vector3){m[0][3],m[1][3],m[2][3]};return true;}
@@ -34,11 +38,18 @@ static void greedy_coarse_materialize(void){GreedyCoarseSystem *g=&greedyCoarse;
     Vector3 dp=v_sub(target_p,now_p),u=v_mul(dp,1/fmaxf(total,1e-9f));Vector3 dl=v_sub(target_l,v_add(now_l,v_cross(center,dp)));float I[3][3]={{0}};
     for(int i=0;i<g->sample_count;i++)if(mass[i]>0){Vector3 r=v_sub(g->samples[i]->pos,center);float m=mass[i],r2=v_dot(r,r);I[0][0]+=m*(r2-r.x*r.x);I[1][1]+=m*(r2-r.y*r.y);I[2][2]+=m*(r2-r.z*r.z);I[0][1]-=m*r.x*r.y;I[0][2]-=m*r.x*r.z;I[1][2]-=m*r.y*r.z;}I[1][0]=I[0][1];I[2][0]=I[0][2];I[2][1]=I[1][2];Vector3 omega={0};greedy_solve3(I,dl,&omega);
     for(int i=0;i<g->sample_count;i++)if(mass[i]>0){Particle *p=g->samples[i];p->vel=v_add(p->vel,v_add(u,v_cross(omega,v_sub(p->pos,center))));}free(mass);greedy_coarse_reset();collisionTopologyDirty=true;}
-static int greedy_sample_index(Particle *p){for(int i=0;i<greedyCoarse.sample_count;i++)if(greedyCoarse.samples[i]==p)return i;return -1;}
+static int greedy_sample_index(Particle *p){GreedyCoarseSystem *g=&greedyCoarse;if(!p||!g->pool_to_sample)return -1;ptrdiff_t n=p-particles_pool;return n>=0&&n<particle_pool_count?g->pool_to_sample[n]:-1;}
+static bool greedy_solver_active(void){return greedyCoarse.active;}
+static bool greedy_particles_share_island(const Particle *a,const Particle *b){return greedyCoarse.active&&a&&b&&a->collision_group==MAX_VOXELS+1&&b->collision_group==MAX_VOXELS+1;}
 static void greedy_refresh(void){GreedyCoarseSystem *g=&greedyCoarse;for(int q=0;q<g->dependent_count;q++){int i=g->dependent_order[q];
     Particle *p=g->samples[i];p->pos=p->prev_pos=p->predicted_pos=p->vel=(Vector3){0};float inv=0;
     for(int k=0;k<g->source_count[i];k++){Particle *s=g->sources[i][k];float a=g->weights[i][k];p->pos=v_add(p->pos,v_mul(s->pos,a));
         p->prev_pos=v_add(p->prev_pos,v_mul(s->prev_pos,a));p->predicted_pos=v_add(p->predicted_pos,v_mul(s->predicted_pos,a));p->vel=v_add(p->vel,v_mul(s->vel,a));inv+=a*a*s->inv_mass;}p->inv_mass=inv;}}
+static void greedy_refresh_predicted(bool all_children){GreedyCoarseSystem *g=&greedyCoarse;if(!g->active)return;for(int q=0;q<g->dependent_count;q++){int i=g->dependent_order[q];if(!all_children&&!g->parent_use[i])continue;Particle *p=g->samples[i];Vector3 predicted={0},pos={0},prev={0},vel={0};for(int k=0;k<g->source_count[i];k++){Particle *s=g->sources[i][k];float a=g->weights[i][k];predicted=v_add(predicted,v_mul(s->predicted_pos,a));if(all_children){pos=v_add(pos,v_mul(s->pos,a));prev=v_add(prev,v_mul(s->prev_pos,a));vel=v_add(vel,v_mul(s->vel,a));}}p->predicted_pos=predicted;if(all_children){p->pos=pos;p->prev_pos=prev;p->vel=vel;}}}
+static bool greedy_particle_is_mapped(const Particle *p){int i=greedy_sample_index((Particle *)p);return greedyCoarse.active&&i>=0&&greedyCoarse.parent_use[i]&&greedyCoarse.source_count[i]>1;}
+static bool greedy_accumulate_mapped_correction(Particle *p,Vector3 delta,float weight){GreedyCoarseSystem *g=&greedyCoarse;int i=greedy_sample_index(p);if(!g->active||i<0||!g->parent_use[i]||g->source_count[i]<=1)return false;for(int k=0;k<g->source_count[i];k++){Particle *s=g->sources[i][k];float c=g->correction_weights[i][k];if(c<=0)continue;atomic_add_float(&s->corr_sum_x,delta.x*c*weight);atomic_add_float(&s->corr_sum_y,delta.y*c*weight);atomic_add_float(&s->corr_sum_z,delta.z*c*weight);atomic_add_float(&s->corr_weight_bits,weight);}return true;}
+static int greedy_physics_shape_count(void){return greedyCoarse.physics_shape_count;}
+static void greedy_gather_shape_constraints_range(int start,int end,int worker_id,void *user){(void)worker_id;(void)user;GreedyCoarseSystem *g=&greedyCoarse;for(int n=start;n<end;n++){Voxel *shape=g->physics_shapes[n];if(shape&&voxel_is_awake_dynamic(shape)&&!shape->isBullet&&shape->type==0)gather_voxel_shape_constraints(shape);}}
 static bool greedy_share_range(int begin,int count){int cap=count*8,n=0;Particle **list=malloc((size_t)cap*sizeof(*list));int *types=malloc((size_t)cap*sizeof(*types));if(cap&&(!list||!types)){free(list);free(types);return false;}
     for(int v=begin;v<begin+count;v++)for(int k=0;k<8;k++){Particle *old=voxels[v].particles[k],*same=NULL;for(int i=0;i<n;i++)
         if(types[i]==voxels[v].type&&list[i]->rest_cell_x==old->rest_cell_x&&list[i]->rest_cell_y==old->rest_cell_y&&list[i]->rest_cell_z==old->rest_cell_z){same=list[i];break;}
@@ -50,6 +61,11 @@ static bool greedy_group_precedes(int a,int b){if(b<0)return true;GreedyCoarseSy
     if(x->orig_min_gy!=y->orig_min_gy)return x->orig_min_gy<y->orig_min_gy;return x->orig_min_gz<y->orig_min_gz;}
 static void greedy_add_mass(float *mass,int sample,float amount,int depth){GreedyCoarseSystem *g=&greedyCoarse;if(sample<0||depth>g->group_count+1)return;
     if(g->source_count[sample]<=1){mass[sample]+=amount;return;}for(int k=0;k<g->source_count[sample];k++)greedy_add_mass(mass,greedy_sample_index(g->sources[sample][k]),amount*g->weights[sample][k],depth+1);}
+static bool greedy_flatten_sample(int sample,unsigned char *state){GreedyCoarseSystem *g=&greedyCoarse;if(sample<0||sample>=g->sample_count)return false;if(g->source_count[sample]<=1)return true;if(state[sample]==2)return true;if(state[sample]==1)return false;state[sample]=1;
+    int capacity=0;for(int k=0;k<g->source_count[sample];k++){int source=greedy_sample_index(g->sources[sample][k]);if(source<0||!greedy_flatten_sample(source,state))return false;capacity+=g->source_count[source];}
+    Particle **flat=calloc((size_t)capacity,sizeof(*flat));float *flat_weights=calloc((size_t)capacity,sizeof(*flat_weights));if(capacity&&(!flat||!flat_weights)){free(flat);free(flat_weights);return false;}int count=0;
+    for(int k=0;k<g->source_count[sample];k++){int source=greedy_sample_index(g->sources[sample][k]);float outer=g->weights[sample][k];for(int q=0;q<g->source_count[source];q++){float w=outer*g->weights[source][q];if(fabsf(w)<=1e-8f)continue;Particle *p=g->sources[source][q];int j=0;while(j<count&&flat[j]!=p)j++;if(j==count)flat[count++]=p;flat_weights[j]+=w;}}
+    free(g->sources[sample]);free(g->weights[sample]);g->sources[sample]=flat;g->weights[sample]=flat_weights;g->source_count[sample]=count;state[sample]=2;return count>0;}
 static bool greedy_coarse_bind(const GreedyCubeCover *cover,const UnitVoxelBuffer *buffer,int begin){
     greedy_coarse_reset();GreedyCoarseSystem *g=&greedyCoarse;if(!cover||!buffer||cover->cube_count<=0)return false;
     g->group_count=cover->cube_count;g->child_begin=begin;g->child_count=buffer->count;g->voxel_capacity=voxel_count;
@@ -61,42 +77,34 @@ static bool greedy_coarse_bind(const GreedyCubeCover *cover,const UnitVoxelBuffe
         shape.orig_max_gx=shape.rest_max_gx=q.x+q.size-1;shape.orig_max_gy=shape.rest_max_gy=q.y+q.size-1;shape.orig_max_gz=shape.rest_max_gz=q.z+q.size-1;
         for(int k=0;k<8;k++){int v=greedy_voxel_at(begin,buffer->count,q.x+((k&1)?q.size-1:0),q.y+((k&2)?q.size-1:0),q.z+((k&4)?q.size-1:0));if(v<0)goto fail;shape.particles[k]=voxels[v].particles[k];}g->shapes[c]=shape;}
     for(int i=0;i<buffer->count;i++){int c=cover->cell_cube[i];if(c<0||c>=g->group_count)goto fail;g->voxel_group[begin+i]=c;}
+    g->physics_shapes=malloc((size_t)(g->group_count+voxel_count)*sizeof(*g->physics_shapes));if(!g->physics_shapes)goto fail;for(int c=0;c<g->group_count;c++)g->physics_shapes[g->physics_shape_count++]=&g->shapes[c];for(int v=0;v<voxel_count;v++)if(voxels[v].simulate&&(v<begin||v>=begin+buffer->count))g->physics_shapes[g->physics_shape_count++]=&voxels[v];
     g->sample_count=active_particle_count;size_t n=(size_t)g->sample_count;g->samples=malloc(n*sizeof(*g->samples));g->sources=calloc(n,sizeof(*g->sources));g->weights=calloc(n,sizeof(*g->weights));
-    g->source_count=calloc(n,sizeof(*g->source_count));g->delta=calloc(n,sizeof(*g->delta));g->load=calloc(n,sizeof(*g->load));g->owner=malloc(n*sizeof(*g->owner));g->dependent_order=malloc(n*sizeof(*g->dependent_order));if(!g->samples||!g->sources||!g->weights||!g->source_count||!g->delta||!g->load||!g->owner||!g->dependent_order)goto fail;
-    memcpy(g->samples,active_particles,n*sizeof(*g->samples));int *owner=g->owner;for(int i=0;i<g->sample_count;i++)owner[i]=-1;
+    g->source_count=calloc(n,sizeof(*g->source_count));g->owner=malloc(n*sizeof(*g->owner));g->dependent_order=malloc(n*sizeof(*g->dependent_order));if(!g->samples||!g->sources||!g->weights||!g->source_count||!g->owner||!g->dependent_order)goto fail;
+    g->correction_weights=calloc(n,sizeof(*g->correction_weights));g->parent_use=calloc(n,1);g->pool_to_sample=malloc((size_t)particle_pool_count*sizeof(*g->pool_to_sample));if(!g->correction_weights||!g->parent_use||!g->pool_to_sample)goto fail;
+    for(int i=0;i<particle_pool_count;i++)g->pool_to_sample[i]=-1;memcpy(g->samples,active_particles,n*sizeof(*g->samples));for(int i=0;i<g->sample_count;i++){ptrdiff_t pi=g->samples[i]-particles_pool;if(pi>=0&&pi<particle_pool_count)g->pool_to_sample[pi]=i;}int *owner=g->owner;for(int i=0;i<g->sample_count;i++)owner[i]=-1;
     for(int v=begin;v<begin+buffer->count;v++){int c=g->voxel_group[v];for(int k=0;k<8;k++){int i=greedy_sample_index(voxels[v].particles[k]);if(i>=0&&greedy_group_precedes(c,owner[i]))owner[i]=c;}}
     for(int i=0;i<g->sample_count;i++){Particle *p=g->samples[i];int c=owner[i];bool control=c<0;if(c>=0)for(int k=0;k<8;k++)if(g->shapes[c].particles[k]==p)control=true;
+        int row_count=control?1:8;g->sources[i]=calloc((size_t)row_count,sizeof(*g->sources[i]));g->weights[i]=calloc((size_t)row_count,sizeof(*g->weights[i]));if(!g->sources[i]||!g->weights[i])goto fail;
         if(control){g->source_count[i]=1;g->sources[i][0]=p;g->weights[i][0]=1;}else{g->source_count[i]=8;Voxel *s=&g->shapes[c];Vector3 uv=v_mul(v_sub(p->pos,s->particles[0]->pos),1/s->rest_edge);
             for(int k=0;k<8;k++){g->sources[i][k]=s->particles[k];g->weights[i][k]=((k&1)?uv.x:1-uv.x)*((k&2)?uv.y:1-uv.y)*((k&4)?uv.z:1-uv.z);}}}
-    /* Flatten the acyclic ownership graph. Corrections and mass then reach
-     * independent controls in one sparse pass instead of recursively branching
-     * for every contact. */
-    for(int c=0;c<g->group_count;c++)for(int i=0;i<g->sample_count;i++)if(g->owner[i]==c&&g->source_count[i]>1){
-        Particle *flat[64]={0};float fw[64]={0};int fn=0;
-        for(int k=0;k<8;k++){int si=greedy_sample_index(g->sources[i][k]);float outer=g->weights[i][k];if(si<0)continue;
-            for(int q=0;q<g->source_count[si];q++){Particle *p=g->sources[si][q];float w=outer*g->weights[si][q];int j=0;while(j<fn&&flat[j]!=p)j++;if(j==fn){if(fn>=64)goto fail;flat[fn]=p;fw[fn++]=0;}fw[j]+=w;}}
-        g->source_count[i]=(unsigned char)fn;for(int k=0;k<fn;k++){g->sources[i][k]=flat[k];g->weights[i][k]=fw[k];}g->dependent_order[g->dependent_count++]=i;}
+    /* Resolve topology once. Every mapped row must terminate directly at
+     * integrated controls, independent of the greedy cover's output order. */
+    unsigned char *flatten_state=calloc(n,1);if(!flatten_state)goto fail;for(int i=0;i<g->sample_count;i++)if(g->source_count[i]>1&&!greedy_flatten_sample(i,flatten_state)){free(flatten_state);goto fail;}free(flatten_state);for(int i=0;i<g->sample_count;i++)if(g->source_count[i]>1)g->dependent_order[g->dependent_count++]=i;
+    for(int c=0;c<g->group_count;c++)for(int k=0;k<8;k++){int i=greedy_sample_index(g->shapes[c].particles[k]);if(i>=0)g->parent_use[i]=1;}
+    for(int i=0;i<g->sample_count;i++)if(g->source_count[i]>1)for(int k=0;k<g->source_count[i];k++){int source=greedy_sample_index(g->sources[i][k]);if(source<0||g->source_count[source]!=1||g->sources[source][0]!=g->sources[i][k])goto fail;}
     float *mass=calloc(n,sizeof(*mass));if(!mass)goto fail;for(int v=0;v<voxel_count;v++)if(voxels[v].simulate)for(int k=0;k<8;k++){int i=greedy_sample_index(voxels[v].particles[k]);if(i>=0)greedy_add_mass(mass,i,1,0);}
-    for(int i=0;i<g->sample_count;i++)if(g->source_count[i]>1){sim_particles_remove(g->samples[i]);g->samples[i]->base_inv_mass=0;}else if(mass[i]>0){g->samples[i]->base_inv_mass=g->samples[i]->inv_mass=1/mass[i];g->independent_count++;}free(mass);
+    for(int i=0;i<g->sample_count;i++)if(g->source_count[i]>1){sim_particles_remove(g->samples[i]);g->samples[i]->base_inv_mass=0;}else if(mass[i]>0){g->samples[i]->base_inv_mass=g->samples[i]->inv_mass=1/mass[i];g->independent_count++;}
+    for(int i=0;i<g->sample_count;i++)if(g->source_count[i]>1){g->correction_weights[i]=calloc((size_t)g->source_count[i],sizeof(*g->correction_weights[i]));if(!g->correction_weights[i]){free(mass);goto fail;}float effective=0;for(int k=0;k<g->source_count[i];k++){float a=g->weights[i][k],w=g->sources[i][k]->inv_mass;effective+=a*a*w;}g->samples[i]->inv_mass=effective;for(int k=0;k<g->source_count[i];k++)g->correction_weights[i][k]=effective>0?g->weights[i][k]*g->sources[i][k]->inv_mass/effective:0;}free(mass);
     g->active=true;greedy_refresh();collisionTopologyDirty=true;return true;
 fail:greedy_coarse_reset();return false;}
-static void greedy_begin(void){memset(greedyCoarse.delta,0,(size_t)greedyCoarse.sample_count*sizeof(*greedyCoarse.delta));memset(greedyCoarse.load,0,(size_t)greedyCoarse.sample_count*sizeof(*greedyCoarse.load));}
-static void greedy_correction_recursive(int sample,Vector3 d,float coefficient,int depth){GreedyCoarseSystem *g=&greedyCoarse;if(sample<0||depth>g->group_count+1)return;
-    if(g->source_count[sample]<=1){g->delta[sample]=v_add(g->delta[sample],v_mul(d,coefficient));g->load[sample]+=fabsf(coefficient);return;}
-    for(int k=0;k<g->source_count[sample];k++)greedy_correction_recursive(greedy_sample_index(g->sources[sample][k]),d,coefficient*g->weights[sample][k],depth+1);}
-static void greedy_correction(int sample,Vector3 d){if(sample>=0&&v_length(d)>0)greedy_correction_recursive(sample,d,1,0);}
 static void greedy_point_impulse(int sample,Vector3 impulse){GreedyCoarseSystem *g=&greedyCoarse;if(sample<0)return;for(int k=0;k<g->source_count[sample];k++){Particle *p=g->sources[sample][k];p->vel=v_add(p->vel,v_mul(impulse,g->weights[sample][k]*p->inv_mass));}greedy_refresh();}
-static void greedy_apply(void){GreedyCoarseSystem *g=&greedyCoarse;for(int i=0;i<g->sample_count;i++)if(g->source_count[i]==1&&g->load[i]>0)g->samples[i]->predicted_pos=v_add(g->samples[i]->predicted_pos,v_mul(g->delta[i],1/g->load[i]));greedy_refresh();}
-static void greedy_shape_delta(Voxel *shape,Vector3 d[8]){Voxel local=*shape;Particle p[8];for(int k=0;k<8;k++){p[k]=*local.particles[k];local.particles[k]=&p[k];atomic_store(&p[k].corr_sum_x,0);atomic_store(&p[k].corr_sum_y,0);atomic_store(&p[k].corr_sum_z,0);atomic_store(&p[k].corr_weight_bits,0);}gather_voxel_shape_constraints(&local);for(int k=0;k<8;k++){float w=bits_to_float(atomic_load(&p[k].corr_weight_bits));d[k]=w>0?v_mul((Vector3){bits_to_float(atomic_load(&p[k].corr_sum_x)),bits_to_float(atomic_load(&p[k].corr_sum_y)),bits_to_float(atomic_load(&p[k].corr_sum_z))},PBD_SOR_FACTOR/w):(Vector3){0};}}
-static void greedy_shapes(void){GreedyCoarseSystem *g=&greedyCoarse;greedy_begin();for(int c=0;c<g->group_count;c++){Vector3 d[8];greedy_shape_delta(&g->shapes[c],d);for(int k=0;k<8;k++)greedy_correction(greedy_sample_index(g->shapes[c].particles[k]),d[k]);}
-    for(int v=0;v<voxel_count;v++)if(voxels[v].simulate&&(v>=g->voxel_capacity||g->voxel_group[v]<0)){Vector3 d[8];greedy_shape_delta(&voxels[v],d);for(int k=0;k<8;k++)greedy_correction(greedy_sample_index(voxels[v].particles[k]),d[k]);}greedy_apply();}
-static void greedy_build_collision_samples(void){GreedyCoarseSystem *g=&greedyCoarse;free(g->collision_samples);g->collision_samples=malloc((size_t)g->sample_count*sizeof(*g->collision_samples));g->collision_count=0;if(!g->collision_samples)return;
-    unsigned char *seen=calloc((size_t)g->sample_count,1);if(!seen)return;for(int v=g->child_begin;v<g->child_begin+g->child_count;v++){bool shell=false;for(int f=0;f<6;f++)shell|=voxels[v].surface[f];if(!shell)continue;for(int k=0;k<8;k++){int i=greedy_sample_index(voxels[v].particles[k]);if(i>=0&&!seen[i]){seen[i]=1;g->collision_samples[g->collision_count++]=g->samples[i];}}}free(seen);}
-static void greedy_collisions(void){GreedyCoarseSystem *g=&greedyCoarse;int count=g->collision_count;Vector3 *before=malloc((size_t)count*sizeof(*before));if(!before)return;for(int i=0;i<count;i++){particle_snapshot[i]=g->collision_samples[i];before[i]=particle_snapshot[i]->predicted_pos;}
-    build_particle_hash(particle_snapshot,count);gather_particle_collisions(PBD_MAX_STEP_DT,particle_snapshot,count);greedy_begin();for(int i=0;i<count;i++){Vector3 d=v_sub(particle_snapshot[i]->predicted_pos,before[i]);particle_snapshot[i]->predicted_pos=before[i];greedy_correction(greedy_sample_index(particle_snapshot[i]),d);}free(before);greedy_apply();}
-static void greedy_scene(float dt){GreedyCoarseSystem *g=&greedyCoarse;int count=g->collision_count;Vector3 *before=malloc((size_t)count*sizeof(*before));if(!before)return;for(int i=0;i<count;i++){collision_particles[i]=g->collision_samples[i];before[i]=collision_particles[i]->predicted_pos;}collision_particle_count=count;solve_static_collisions(dt);greedy_begin();for(int i=0;i<count;i++){Particle *p=collision_particles[i];Vector3 d=v_sub(p->predicted_pos,before[i]);p->predicted_pos=before[i];greedy_correction(greedy_sample_index(p),d);}free(before);greedy_apply();}
-static void greedy_coarse_cpu_step(float dt){integrate_particles(dt);greedy_refresh();greedy_collisions();for(int i=0;i<PBD_CONSTRAINT_ITERS;i++)greedy_shapes();for(int i=0;i<3;i++)greedy_scene(dt);VelocityUpdateJob job={1/dt};pbd_parallel_for(0,sim_particle_count,update_particle_velocity_range,&job);greedy_refresh();pbd_parallel_for(0,voxel_count,update_voxel_velocity_range,&job);}
-
+static bool greedy_parent_corner_exposed(int group,Particle *point){GreedyCoarseSystem *g=&greedyCoarse;for(int v=g->child_begin;v<g->child_begin+g->child_count;v++){if(g->voxel_group[v]!=group)continue;for(int k=0;k<8;k++){if(voxels[v].particles[k]!=point)continue;if(voxels[v].surface[(k&1)?0:1]||voxels[v].surface[(k&2)?2:3]||voxels[v].surface[(k&4)?4:5])return true;}}return false;}
+static void greedy_build_collision_samples(void){GreedyCoarseSystem *g=&greedyCoarse;free(g->collision_samples);g->collision_samples=malloc((size_t)(g->sample_count+sim_particle_count)*sizeof(*g->collision_samples));g->collision_count=0;if(!g->collision_samples)return;
+    unsigned char *seen=calloc((size_t)g->sample_count,1);if(!seen)return;for(int c=0;c<g->group_count;c++){float radius=0.5f*g->sizes[c]*VOXEL_SIZE;for(int k=0;k<8;k++){Particle *p=g->shapes[c].particles[k];if(!greedy_parent_corner_exposed(c,p))continue;int i=greedy_sample_index(p);if(i>=0){p->radius=fmaxf(p->radius,radius);p->collision_group=MAX_VOXELS+1;if(!seen[i]){seen[i]=1;g->collision_samples[g->collision_count++]=p;}}}}
+    for(int i=0;i<sim_particle_count;i++){Particle *p=sim_particles[i];int s=greedy_sample_index(p);if(s>=0&&!seen[s]&&g->owner[s]<0){seen[s]=1;g->collision_samples[g->collision_count++]=p;}}free(seen);}
+static void greedy_install_collision_particles(void){GreedyCoarseSystem *g=&greedyCoarse;if(!g->active)return;for(int c=0;c<g->group_count;c++)for(int k=0;k<8;k++)if(g->shapes[c].particles[k])g->shapes[c].particles[k]->collision_group=MAX_VOXELS+1;collision_particle_count=g->collision_count;if(collision_particle_count>MAX_PARTICLES)collision_particle_count=MAX_PARTICLES;memcpy(collision_particles,g->collision_samples,(size_t)collision_particle_count*sizeof(*collision_particles));}
+static void greedy_solve_static_contacts(float dt){(void)dt;GreedyCoarseSystem *g=&greedyCoarse;greedy_install_collision_particles();if(!getenv("FPS_COLLISION_STATIC_LEGACY")&&!ensure_static_surface_cache())return;StaticCollisionJob job={.half_player=PLAYER_SIZE*0.5f};for(int i=0;i<collision_particle_count;i++){Particle *p=collision_particles[i];if(!greedy_particle_is_mapped(p)){solve_static_collisions_range(i,i+1,0,&job);continue;}int sample=greedy_sample_index(p);Vector3 predicted_before=p->predicted_pos,prev_before=p->prev_pos;solve_static_collisions_range(i,i+1,0,&job);Vector3 predicted_delta=v_sub(p->predicted_pos,predicted_before),prev_delta=v_sub(p->prev_pos,prev_before);p->predicted_pos=predicted_before;p->prev_pos=prev_before;for(int k=0;k<g->source_count[sample];k++){Particle *source=g->sources[sample][k];float coefficient=g->correction_weights[sample][k];source->predicted_pos=v_add(source->predicted_pos,v_mul(predicted_delta,coefficient));source->prev_pos=v_add(source->prev_pos,v_mul(prev_delta,coefficient));}greedy_refresh_predicted(false);}}
+static void greedy_lift_floor_residual(void){GreedyCoarseSystem *g=&greedyCoarse;float min_y=0;for(int i=0;i<g->collision_count;i++)min_y=fminf(min_y,g->collision_samples[i]->predicted_pos.y);if(min_y>=0)return;float lift=-min_y;for(int i=0;i<g->sample_count;i++)if(g->owner[i]>=0&&g->source_count[i]==1)g->samples[i]->predicted_pos.y+=lift;greedy_refresh_predicted(false);}
 static bool emit_greedy_dynamic_from_buffer(UnitVoxelBuffer *buffer){if(!buffer||buffer->count<=0)return false;if(physics_backend_is_gpu(physicsBackend.requested)||physics_backend_is_gpu(physicsBackend.active)){fprintf(stderr,"--activation-cubes=greedy requires CPU ST or MT physics\n");return false;}
     GreedyCell *cells=malloc((size_t)buffer->count*sizeof(*cells));if(!cells)return false;for(int i=0;i<buffer->count;i++)cells[i]=(GreedyCell){buffer->voxels[i].gx,buffer->voxels[i].gy,buffer->voxels[i].gz,buffer->voxels[i].type,i};
     GreedyCubeCover cover={0};double started=GetTime();bool ok=greedy_cube_cover_build(cells,buffer->count,&cover);free(cells);if(!ok)return false;cover.milliseconds=(GetTime()-started)*1000;
