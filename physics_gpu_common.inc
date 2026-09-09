@@ -131,6 +131,9 @@ typedef struct {
     double pack_ms;
     double upload_ms;
     double dispatch_ms;
+    double encode_ms;
+    double gpu_exec_ms;
+    double gpu_wait_ms;
     double readback_ms;
     double commit_ms;
     PhysicsGpuFailureKind step_failure_kind;
@@ -242,7 +245,7 @@ static void gpu_physics_release_resources(void) {
 static void gpu_physics_shutdown(void) {
     if (gpuTransferStatsEnabled && (gpuPhysics.full_uploads || gpuPhysics.sync_count)) {
         fprintf(stderr,
-                "gpu-transfer mode=%s uploads=%llu reuses=%llu staticUploads=%llu syncs=%llu clones=%llu uploadBytes=%llu readbackBytes=%llu packMs=%.3f uploadMs=%.3f dispatchMs=%.3f readbackMs=%.3f commitMs=%.3f\n",
+                "gpu-transfer mode=%s uploads=%llu reuses=%llu staticUploads=%llu syncs=%llu clones=%llu uploadBytes=%llu readbackBytes=%llu packMs=%.3f uploadMs=%.3f dispatchMs=%.3f encodeMs=%.3f gpuExecMs=%.3f waitMs=%.3f readbackMs=%.3f commitMs=%.3f\n",
                 gpuTransferMode == GPU_TRANSFER_RESIDENT ? "resident" : "legacy",
                 (unsigned long long)gpuPhysics.full_uploads,
                 (unsigned long long)gpuPhysics.resident_reuses,
@@ -252,6 +255,7 @@ static void gpu_physics_shutdown(void) {
                 (unsigned long long)gpuPhysics.upload_bytes,
                 (unsigned long long)gpuPhysics.readback_bytes,
                 gpuPhysics.pack_ms, gpuPhysics.upload_ms, gpuPhysics.dispatch_ms,
+                gpuPhysics.encode_ms, gpuPhysics.gpu_exec_ms, gpuPhysics.gpu_wait_ms,
                 gpuPhysics.readback_ms, gpuPhysics.commit_ms);
     }
     gpu_physics_release_resources();
@@ -1119,6 +1123,11 @@ static int gpu_physics_steps(float dt, int fixed_steps) {
     gpuPhysics.dispatch_ms += (GetTime() - dispatch_started) * 1000.0;
 #if defined(__APPLE__) && defined(FPS_GPU_METAL)
     bool batch_finished = fps_metal_end_batch();
+    FpsMetalProfileInfo minfo;
+    fps_metal_get_profile_info(&minfo);
+    gpuPhysics.encode_ms += minfo.last_encode_ms;
+    gpuPhysics.gpu_exec_ms += minfo.last_gpu_exec_ms;
+    gpuPhysics.gpu_wait_ms += minfo.last_wait_ms;
 #else
     rlDisableShader();
     bool batch_finished = true;

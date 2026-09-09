@@ -12,6 +12,7 @@ typedef struct FpsMetalState {
     id<MTLLibrary> library;
     id<MTLComputePipelineState> pipeline;
     id<MTLCommandBuffer> command_buffer;
+    id<MTLComputeCommandEncoder> encoder;
     id<MTLBuffer> bound[FPS_GPU_BUFFER_COUNT];
     FpsGpuUniforms uniforms;
     MTLResourceOptions resource_options;
@@ -91,9 +92,15 @@ bool fps_metal_initialize(const char *library_path, long long *max_buffer_size,
 
 void fps_metal_shutdown(void) {
     @autoreleasepool {
+        if (metal_state.encoder) {
+            [metal_state.encoder endEncoding];
+            [metal_state.encoder release];
+            metal_state.encoder = nil;
+        }
         if (metal_state.command_buffer) {
             [metal_state.command_buffer waitUntilCompleted];
             [metal_state.command_buffer release];
+            metal_state.command_buffer = nil;
         }
         [metal_state.pipeline release];
         [metal_state.library release];
@@ -113,15 +120,23 @@ void *fps_metal_buffer_create(size_t size) {
 }
 
 void fps_metal_buffer_destroy(void *handle) {
-    if (!handle) return;
-    [(id<MTLBuffer>)handle release];
+    @autoreleasepool {
+        id<MTLBuffer> buffer = (id<MTLBuffer>)handle;
+        if (!buffer) return;
+        for (int i = 0; i < FPS_GPU_BUFFER_COUNT; ++i) {
+            if (metal_state.bound[i] == buffer) metal_state.bound[i] = nil;
+        }
+        [buffer release];
+    }
 }
 
 bool fps_metal_buffer_update(void *handle, const void *data, size_t size, size_t offset) {
     id<MTLBuffer> buffer = (id<MTLBuffer>)handle;
     if (!buffer || !data || offset > buffer.length || size > buffer.length - offset) return false;
     memcpy((uint8_t *)buffer.contents + offset, data, size);
-    if (metal_state.managed) [buffer didModifyRange:NSMakeRange(offset, size)];
+    if (metal_state.managed) {
+        [buffer didModifyRange:NSMakeRange(offset, size)];
+    }
     return true;
 }
 
@@ -135,42 +150,76 @@ bool fps_metal_buffer_read(void *handle, void *data, size_t size, size_t offset)
 void fps_metal_bind_buffer(int slot, void *handle) {
     if (slot < 0 || slot >= FPS_GPU_BUFFER_COUNT) return;
     metal_state.bound[slot] = (id<MTLBuffer>)handle;
+    if (metal_state.encoder && metal_state.bound[slot]) {
+        [metal_state.encoder setBuffer:metal_state.bound[slot] offset:0 atIndex:(NSUInteger)slot];
+    }
 }
 
 void fps_metal_set_uniforms(const FpsGpuUniforms *uniforms) {
     if (uniforms) metal_state.uniforms = *uniforms;
 }
 
+static FpsMetalProfileInfo metal_profile = { 0 };
+
+static inline double metal_time_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
+void fps_metal_get_profile_info(FpsMetalProfileInfo *out) {
+    if (out) *out = metal_profile;
+}
+
 bool fps_metal_begin_batch(void) {
     @autoreleasepool {
-        if (!metal_state.queue || metal_state.command_buffer) return false;
+        if (!metal_state.queue || metal_state.command_buffer || metal_state.encoder) return false;
+        metal_profile.last_encode_ms = 0.0;
+        metal_profile.last_dispatch_count = 0;
         metal_state.command_buffer = [[metal_state.queue commandBuffer] retain];
-        return metal_state.command_buffer != nil;
+        if (!metal_state.command_buffer) return false;
+        metal_state.encoder = [[metal_state.command_buffer computeCommandEncoder] retain];
+        if (!metal_state.encoder) {
+            [metal_state.command_buffer release];
+            metal_state.command_buffer = nil;
+            return false;
+        }
+        [metal_state.encoder setComputePipelineState:metal_state.pipeline];
+        for (int i = 0; i < FPS_GPU_BUFFER_COUNT; ++i) {
+            if (!metal_state.bound[i]) {
+                [metal_state.encoder endEncoding];
+                [metal_state.encoder release];
+                metal_state.encoder = nil;
+                [metal_state.command_buffer release];
+                metal_state.command_buffer = nil;
+                return false;
+            }
+            [metal_state.encoder setBuffer:metal_state.bound[i] offset:0 atIndex:(NSUInteger)i];
+        }
+        return true;
     }
 }
 
 static bool fps_metal_encode(int mode, int count, id<MTLBuffer> indirect, size_t offset) {
     @autoreleasepool {
-        if (!metal_state.command_buffer || !metal_state.pipeline || count < 0) return false;
-        id<MTLComputeCommandEncoder> encoder = [metal_state.command_buffer computeCommandEncoder];
-        if (!encoder) return false;
-        [encoder setComputePipelineState:metal_state.pipeline];
-        for (int i = 0; i < FPS_GPU_BUFFER_COUNT; ++i) {
-            if (!metal_state.bound[i]) { [encoder endEncoding]; return false; }
-            [encoder setBuffer:metal_state.bound[i] offset:0 atIndex:(NSUInteger)i];
+        if (!metal_state.command_buffer || !metal_state.encoder || !metal_state.pipeline || count < 0) return false;
+        double t0 = metal_time_now_ms();
+        if (metal_profile.last_dispatch_count > 0) {
+            [metal_state.encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
         }
         metal_state.uniforms.mode = mode;
-        [encoder setBytes:&metal_state.uniforms length:sizeof(metal_state.uniforms) atIndex:FPS_GPU_BUFFER_COUNT];
+        [metal_state.encoder setBytes:&metal_state.uniforms length:sizeof(metal_state.uniforms) atIndex:FPS_GPU_BUFFER_COUNT];
         MTLSize threads = MTLSizeMake(128, 1, 1);
         if (indirect) {
-            [encoder dispatchThreadgroupsWithIndirectBuffer:indirect
-                                       indirectBufferOffset:offset
-                                      threadsPerThreadgroup:threads];
+            [metal_state.encoder dispatchThreadgroupsWithIndirectBuffer:indirect
+                                                   indirectBufferOffset:offset
+                                                  threadsPerThreadgroup:threads];
         } else if (count > 0) {
             MTLSize groups = MTLSizeMake(((NSUInteger)count + 127u) / 128u, 1, 1);
-            [encoder dispatchThreadgroups:groups threadsPerThreadgroup:threads];
+            [metal_state.encoder dispatchThreadgroups:groups threadsPerThreadgroup:threads];
         }
-        [encoder endEncoding];
+        metal_profile.last_encode_ms += (metal_time_now_ms() - t0);
+        metal_profile.last_dispatch_count++;
         return true;
     }
 }
@@ -186,6 +235,11 @@ bool fps_metal_dispatch_indirect(int mode, void *buffer, size_t offset) {
 bool fps_metal_end_batch(void) {
     @autoreleasepool {
         if (!metal_state.command_buffer) return false;
+        if (metal_state.encoder) {
+            [metal_state.encoder endEncoding];
+            [metal_state.encoder release];
+            metal_state.encoder = nil;
+        }
         if (metal_state.managed) {
             static const int readback_slots[] = {
                 FPS_GPU_BUFFER_PARTICLE, FPS_GPU_BUFFER_CELL, FPS_GPU_BUFFER_SIM_ID, FPS_GPU_BUFFER_VOXEL,
@@ -203,8 +257,14 @@ bool fps_metal_end_batch(void) {
             }
             [blit endEncoding];
         }
+        double t_wait_start = metal_time_now_ms();
         [metal_state.command_buffer commit];
         [metal_state.command_buffer waitUntilCompleted];
+        double t_wait_end = metal_time_now_ms();
+        metal_profile.last_wait_ms = t_wait_end - t_wait_start;
+        CFTimeInterval gpu_start = metal_state.command_buffer.GPUStartTime;
+        CFTimeInterval gpu_end = metal_state.command_buffer.GPUEndTime;
+        metal_profile.last_gpu_exec_ms = (gpu_end > gpu_start) ? (gpu_end - gpu_start) * 1000.0 : 0.0;
         bool ok = metal_state.command_buffer.status == MTLCommandBufferStatusCompleted;
         [metal_state.command_buffer release];
         metal_state.command_buffer = nil;

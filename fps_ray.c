@@ -86,6 +86,31 @@ static PhysicsBackendStatus physicsBackend = {
 };
 static bool physicsReportRequested = false;
 static bool gpuTransferStatsEnabled = false;
+static bool pbdProfileEnabled = false;
+
+typedef struct PbdCpuProfile {
+    uint64_t step_count;
+    double t_total_ms;
+    double t_integrate_ms;
+    double t_metadata_ms;
+    double t_hash_ms;
+    double t_pair_collisions_ms;
+    double t_vgs_shape_ms;
+    double t_static_collisions_ms;
+    double t_break_masks_ms;
+    double t_wake_timers_ms;
+    double t_velocities_ms;
+    double t_parallel_overhead_ms;
+} PbdCpuProfile;
+
+static PbdCpuProfile pbdCpuProfile = { 0 };
+
+static inline double pbd_time_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
 typedef enum { GPU_TRANSFER_RESIDENT = 0, GPU_TRANSFER_LEGACY = 1 } GpuTransferMode;
 static GpuTransferMode gpuTransferMode = GPU_TRANSFER_RESIDENT;
 static int physicsSmokeSteps = 0;
@@ -189,6 +214,11 @@ static bool parse_physics_arguments(int argc, char **argv) {
         }
         if (strcmp(arg, "--physics-report") == 0) {
             physicsReportRequested = true;
+            continue;
+        }
+        if (strcmp(arg, "--physics-profile") == 0) {
+            pbdProfileEnabled = true;
+            gpuTransferStatsEnabled = true;
             continue;
         }
         if (strcmp(arg, "--gpu-transfer-stats") == 0) {
@@ -997,7 +1027,7 @@ static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float
 static int rip_single_static_voxel(int voxel_idx, int activator);
 
 #define PBD_MAX_THREADS 8
-#define PBD_PARALLEL_MIN_WORK 128
+#define PBD_PARALLEL_MIN_WORK 512
 #define PBD_PARALLEL_MIN_CHUNK 32
 
 typedef void (*PbdParallelFn)(int start, int end, int worker_id, void *user);
@@ -1203,6 +1233,7 @@ static void pbd_parallel_for(int start, int end, PbdParallelFn fn, void *user) {
         chunk = 1;
     }
 
+    double t0 = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
     pthread_mutex_lock(&pbd_pool.mutex);
     pbd_pool.fn = fn;
     pbd_pool.user = user;
@@ -1217,14 +1248,20 @@ static void pbd_parallel_for(int start, int end, PbdParallelFn fn, void *user) {
     atomic_store_explicit(&pbd_pool.next_index, start, memory_order_relaxed);
     pthread_cond_broadcast(&pbd_pool.cond);
     pthread_mutex_unlock(&pbd_pool.mutex);
+    double t_dispatch = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
 
     pbd_threadpool_run_job(&pbd_pool, -1, fn, user, end, chunk);
+    double t_job = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
 
     pthread_mutex_lock(&pbd_pool.mutex);
     while (pbd_pool.pending > 0) {
         pthread_cond_wait(&pbd_pool.done, &pbd_pool.mutex);
     }
     pthread_mutex_unlock(&pbd_pool.mutex);
+    double t_wait = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
+    if (pbdProfileEnabled) {
+        pbdCpuProfile.t_parallel_overhead_ms += (t_dispatch - t0) + (t_wait - t_job);
+    }
 }
 static float compute_cluster_freeze_belief(const UnitVoxelBuffer *buffer, int startIndex);
 static void rollback_activation_buffer(UnitVoxelBuffer *buffer, int startIndex);
@@ -2538,8 +2575,8 @@ static void particle_hash_build_range(int start, int end, int worker_id, void *u
 
 static void build_particle_hash(Particle **list, int count) {
     particleHashActiveSize = particle_hash_size_for_count(count);
+    memset(particle_hash_head, 0xFF, (size_t)particleHashActiveSize * sizeof(particle_hash_head[0]));
     ParticleHashBuildJob job = { .list = list, .count = count };
-    pbd_parallel_for(0, particleHashActiveSize, particle_hash_clear_range, NULL);
     pbd_parallel_for(0, count, particle_hash_build_range, &job);
 }
 
@@ -2550,6 +2587,17 @@ static inline void accumulate_particle_correction(Particle *p, Vector3 delta, fl
     float dx = delta.x * weight;
     float dy = delta.y * weight;
     float dz = delta.z * weight;
+    if (physics_force_single_cpu || pbd_pool.thread_count <= 0) {
+        float cur_x = bits_to_float(atomic_load_explicit(&p->corr_sum_x, memory_order_relaxed));
+        float cur_y = bits_to_float(atomic_load_explicit(&p->corr_sum_y, memory_order_relaxed));
+        float cur_z = bits_to_float(atomic_load_explicit(&p->corr_sum_z, memory_order_relaxed));
+        float cur_w = bits_to_float(atomic_load_explicit(&p->corr_weight_bits, memory_order_relaxed));
+        atomic_store_explicit(&p->corr_sum_x, float_to_bits(cur_x + dx), memory_order_relaxed);
+        atomic_store_explicit(&p->corr_sum_y, float_to_bits(cur_y + dy), memory_order_relaxed);
+        atomic_store_explicit(&p->corr_sum_z, float_to_bits(cur_z + dz), memory_order_relaxed);
+        atomic_store_explicit(&p->corr_weight_bits, float_to_bits(cur_w + weight), memory_order_relaxed);
+        return;
+    }
     atomic_add_float(&p->corr_sum_x, dx);
     atomic_add_float(&p->corr_sum_y, dy);
     atomic_add_float(&p->corr_sum_z, dz);
@@ -9695,6 +9743,22 @@ static Vector3 vgs_project(Vector3 onto, Vector3 vec) {
     return v_mul(onto, scale);
 }
 
+static inline float fast_cbrtf(float x) {
+    if (x <= 0.0f) return 0.0f;
+    union {
+        float f;
+        uint32_t i;
+    } u;
+    u.f = x;
+    u.i = u.i / 3 + 709921077u;
+    float y = u.f;
+    float y3 = y * y * y;
+    y = y * (y3 + 2.0f * x) / (2.0f * y3 + x);
+    y3 = y * y * y;
+    y = y * (y3 + 2.0f * x) / (2.0f * y3 + x);
+    return y;
+}
+
 static void reset_voxel_shape_to_rest(const Voxel *voxel, Vector3 *p, const float *w,
                                       Vector3 centroid) {
     float edge = voxel->rest_edge;
@@ -9806,7 +9870,7 @@ static void solve_voxel_shape(Voxel *voxel) {
         }
         if (fabs(denom-rest_demom) > VGS_EPS) {
             float ratio = (rest_edge * rest_edge * rest_edge) / denom;
-            float root = cbrtf(fabsf(ratio));
+            float root = fast_cbrtf(fabsf(ratio));
             r_v = (ratio < 0.0f) ? -root : root;
         }
 
@@ -9841,7 +9905,7 @@ static void solve_voxel_shape(Voxel *voxel) {
         }
         if (fabsf(volume) > VGS_EPS && fabsf(volume-rest_volume) > VGS_EPS) {
             float scale = rest_volume / volume;
-            float root = cbrtf(fabsf(scale));
+            float root = fast_cbrtf(fabsf(scale));
             if (scale < 0.0f) {
                 root = -root;
             }
@@ -9966,7 +10030,7 @@ static void gather_voxel_shape_constraints(Voxel *voxel) {
         float volume = v_dot(v_cross(u0, u1), u2);
         if (fabsf(volume) > VGS_EPS) {
             float scale = rest_volume / volume;
-            float root = cbrtf(fabsf(scale));
+            float root = fast_cbrtf(fabsf(scale));
             if (scale < 0.0f) {
                 root = -root;
             }
@@ -12507,15 +12571,16 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
         if (debugLogVoxelBlowup) {
             debugBlowupLogBudget = 32;
         }
-        // update_voxel_coarsening_state();
-        // reset_particle_mass_and_flags();
-        // apply_shell_effective_mass();
+        double t0 = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
         integrate_particles(sub_dt);
+        if (pbdProfileEnabled) pbdCpuProfile.t_integrate_ms += pbd_time_now_ms() - t0;
 
         for (int it = 0; it < 1; ++it) {
-            // The collision list is stable for this substep.  Break processing
-            // below dirties topology and the next substep rebuilds it.
-            if (collisionTopologyDirty) rebuild_particle_collision_metadata();
+            if (collisionTopologyDirty) {
+                double tm = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
+                rebuild_particle_collision_metadata();
+                if (pbdProfileEnabled) pbdCpuProfile.t_metadata_ms += pbd_time_now_ms() - tm;
+            }
             int snapshot_count = collision_particle_count;
             if (snapshot_count > MAX_PARTICLES) {
                 snapshot_count = MAX_PARTICLES;
@@ -12524,36 +12589,40 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
                 memcpy(particle_snapshot, collision_particles,
                        (size_t)snapshot_count * sizeof(particle_snapshot[0]));
             }
+            double th = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
             build_particle_hash(particle_snapshot, snapshot_count);
+            if (pbdProfileEnabled) pbdCpuProfile.t_hash_ms += pbd_time_now_ms() - th;
+
+            double tc = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
             gather_particle_collisions(sub_dt, particle_snapshot, snapshot_count);
+            if (pbdProfileEnabled) pbdCpuProfile.t_pair_collisions_ms += pbd_time_now_ms() - tc;
         }
 
+        double tv = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
+        reset_particle_accumulators();
         for (int it = 0; it < constraint_iterations; ++it) {
-            reset_particle_accumulators();
             pbd_parallel_for(0, voxel_count, gather_voxel_shape_constraints_range, NULL);
             apply_particle_accumulators();
         }
+        if (pbdProfileEnabled) pbdCpuProfile.t_vgs_shape_ms += pbd_time_now_ms() - tv;
 
+        double ts = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
         solve_static_collisions(sub_dt);
+        if (pbdProfileEnabled) pbdCpuProfile.t_static_collisions_ms += pbd_time_now_ms() - ts;
 
+        double tb = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
         pbd_parallel_for(0, voxel_count, gather_voxel_break_masks_range, NULL);
         process_break_masks();
+        if (pbdProfileEnabled) pbdCpuProfile.t_break_masks_ms += pbd_time_now_ms() - tb;
+
+        double tw = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
         update_wake_timers();
+        if (pbdProfileEnabled) pbdCpuProfile.t_wake_timers_ms += pbd_time_now_ms() - tw;
 
-        // accumulate_simulated_corner_deltas(sum_delta, counts);
-        // for (int i = 0; i < 8; ++i) {
-        //     if (counts[i] > 0) {
-        //         avg_delta[i] = v_mul(sum_delta[i], 1.0f / (float)counts[i]);
-        //     } else {
-        //         avg_delta[i] = (Vector3){ 0.0f, 0.0f, 0.0f };
-        //     }
-        // }
-
-        // mark_simulated_particles();
-        // apply_interior_sync(avg_delta, counts);
-
+        double tu = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
         decrement_particle_timers();
         update_particle_velocities(sub_dt);
+        if (pbdProfileEnabled) pbdCpuProfile.t_velocities_ms += pbd_time_now_ms() - tu;
         if (debugLogVoxelBlowup && debugBlowupLogBudget > 0) {
             for (int i = 0; i < voxel_count && debugBlowupLogBudget > 0; ++i) {
                 Voxel *voxel = &voxels[i];
@@ -12583,37 +12652,61 @@ static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
     TetherThrowCcdSnapshot tether_ccd_snapshots[TETHER_THROW_CCD_SNAPSHOT_CAPACITY];
     int tether_ccd_snapshot_count = capture_tether_throw_ccd_snapshots(
         tether_ccd_snapshots, TETHER_THROW_CCD_SNAPSHOT_CAPACITY);
+    double t_meta = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
     rebuild_particle_collision_metadata();
-    double started = GetTime();
+    if (pbdProfileEnabled) pbdCpuProfile.t_metadata_ms += pbd_time_now_ms() - t_meta;
+
+    double started = pbdProfileEnabled ? pbd_time_now_ms() : GetTime();
     const float sub_dt = dt / (float)PBD_SUBSTEPS;
     if (!physics_backend_is_gpu(physicsBackend.active)) physics_try_gpu_recovery();
-    if (physics_backend_is_gpu(physicsBackend.active) && gpuPhysics.ready) {
+    static bool hybrid_prefers_gpu = false;
+    bool run_gpu = physics_backend_is_gpu(physicsBackend.active) && gpuPhysics.ready;
+    if (physicsBackend.requested == PHYSICS_BACKEND_AUTO && !debug_run_requested() && run_gpu) {
+        if (!hybrid_prefers_gpu && sim_particle_count >= 1800) {
+            hybrid_prefers_gpu = true;
+        } else if (hybrid_prefers_gpu && sim_particle_count < 1200) {
+            hybrid_prefers_gpu = false;
+        }
+        if (!hybrid_prefers_gpu) {
+            run_gpu = false;
+        }
+    }
+    if (run_gpu) {
         int completed_steps = gpu_physics_steps(dt, fixed_steps);
         if (completed_steps >= fixed_steps) {
             physics_mark_gpu_recovered();
             resolve_tether_throw_ccd_snapshots(tether_ccd_snapshots,
                                                tether_ccd_snapshot_count, fixed_steps);
-            physicsBackend.last_step_ms = (GetTime() - started) * 1000.0;
+            physicsBackend.last_step_ms = pbdProfileEnabled ? (pbd_time_now_ms() - started) : (GetTime() - started) * 1000.0;
             return;
         }
         physics_handle_gpu_runtime_failure();
         for (int fixed = 0; fixed < fixed_steps; ++fixed) {
+            double tm2 = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
             rebuild_particle_collision_metadata();
+            if (pbdProfileEnabled) pbdCpuProfile.t_metadata_ms += pbd_time_now_ms() - tm2;
             simulate_voxel_pbd_cpu_steps(sub_dt, PBD_SUBSTEPS);
         }
         resolve_tether_throw_ccd_snapshots(tether_ccd_snapshots,
                                            tether_ccd_snapshot_count, fixed_steps);
-        physicsBackend.last_step_ms = (GetTime() - started) * 1000.0;
+        double step_ms = pbdProfileEnabled ? (pbd_time_now_ms() - started) : (GetTime() - started) * 1000.0;
+        physicsBackend.last_step_ms = step_ms;
+        if (pbdProfileEnabled) { pbdCpuProfile.step_count += fixed_steps; pbdCpuProfile.t_total_ms += step_ms; }
         return;
     }
-    physics_force_single_cpu = (physicsBackend.active == PHYSICS_BACKEND_CPU_ST);
+    physics_force_single_cpu = (physicsBackend.active == PHYSICS_BACKEND_CPU_ST) ||
+                               (physicsBackend.requested == PHYSICS_BACKEND_AUTO && !debug_run_requested() && !hybrid_prefers_gpu);
     for (int fixed = 0; fixed < fixed_steps; ++fixed) {
+        double tm3 = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
         rebuild_particle_collision_metadata();
+        if (pbdProfileEnabled) pbdCpuProfile.t_metadata_ms += pbd_time_now_ms() - tm3;
         simulate_voxel_pbd_cpu_steps(sub_dt, PBD_SUBSTEPS);
     }
     resolve_tether_throw_ccd_snapshots(tether_ccd_snapshots,
                                        tether_ccd_snapshot_count, fixed_steps);
-    physicsBackend.last_step_ms = (GetTime() - started) * 1000.0;
+    double step_ms = pbdProfileEnabled ? (pbd_time_now_ms() - started) : (GetTime() - started) * 1000.0;
+    physicsBackend.last_step_ms = step_ms;
+    if (pbdProfileEnabled) { pbdCpuProfile.step_count += fixed_steps; pbdCpuProfile.t_total_ms += step_ms; }
 }
 
 void simulate_voxel_pbd(float dt) { simulate_voxel_pbd_steps(dt, 1); }
@@ -16331,6 +16424,60 @@ static bool run_physics_smoke_test(int steps) {
     fprintf(stderr, "physics-smoke backend=%s steps=%d testVoxels=%d simParticles=%d voxels=%d gluedFaces=%d y=%.6f msPerStep=%.4f fallback=%d\n",
             physics_backend_name(physicsBackend.active), steps, created, sim_particle_count, voxel_count, glued_faces,
             voxels[first].pos.y, elapsed_ms / (double)steps, physicsBackend.sticky_fallback ? 1 : 0);
+
+    if (pbdProfileEnabled && pbdCpuProfile.step_count > 0) {
+        double s = (double)pbdCpuProfile.step_count;
+        fprintf(stderr,
+            "\n================ [PBD CPU/MCPU PROFILE BREAKDOWN: %s (steps=%llu)] ================\n"
+            "  Total Step Time:        %8.4f ms/step (100.0%%)\n"
+            "  - Shape Matching (VGS): %8.4f ms/step (%5.1f%%)\n"
+            "  - Dynamic Collisions:   %8.4f ms/step (%5.1f%%)\n"
+            "  - Spatial Hash Build:   %8.4f ms/step (%5.1f%%)\n"
+            "  - Static Collisions:    %8.4f ms/step (%5.1f%%)\n"
+            "  - Integration (Euler):  %8.4f ms/step (%5.1f%%)\n"
+            "  - Velocity/Pos Commit:  %8.4f ms/step (%5.1f%%)\n"
+            "  - Break Masks/Splitting:%8.4f ms/step (%5.1f%%)\n"
+            "  - Topology Metadata:    %8.4f ms/step (%5.1f%%)\n"
+            "  - Wake Timers:          %8.4f ms/step (%5.1f%%)\n"
+            "  * Threadpool Overhead:  %8.4f ms/step (%5.1f%%)\n"
+            "===================================================================================\n\n",
+            physics_backend_name(physicsBackend.active),
+            (unsigned long long)pbdCpuProfile.step_count,
+            pbdCpuProfile.t_total_ms / s,
+            pbdCpuProfile.t_vgs_shape_ms / s, 100.0 * pbdCpuProfile.t_vgs_shape_ms / pbdCpuProfile.t_total_ms,
+            pbdCpuProfile.t_pair_collisions_ms / s, 100.0 * pbdCpuProfile.t_pair_collisions_ms / pbdCpuProfile.t_total_ms,
+            pbdCpuProfile.t_hash_ms / s, 100.0 * pbdCpuProfile.t_hash_ms / pbdCpuProfile.t_total_ms,
+            pbdCpuProfile.t_static_collisions_ms / s, 100.0 * pbdCpuProfile.t_static_collisions_ms / pbdCpuProfile.t_total_ms,
+            pbdCpuProfile.t_integrate_ms / s, 100.0 * pbdCpuProfile.t_integrate_ms / pbdCpuProfile.t_total_ms,
+            pbdCpuProfile.t_velocities_ms / s, 100.0 * pbdCpuProfile.t_velocities_ms / pbdCpuProfile.t_total_ms,
+            pbdCpuProfile.t_break_masks_ms / s, 100.0 * pbdCpuProfile.t_break_masks_ms / pbdCpuProfile.t_total_ms,
+            pbdCpuProfile.t_metadata_ms / s, 100.0 * pbdCpuProfile.t_metadata_ms / pbdCpuProfile.t_total_ms,
+            pbdCpuProfile.t_wake_timers_ms / s, 100.0 * pbdCpuProfile.t_wake_timers_ms / pbdCpuProfile.t_total_ms,
+            pbdCpuProfile.t_parallel_overhead_ms / s, 100.0 * pbdCpuProfile.t_parallel_overhead_ms / pbdCpuProfile.t_total_ms);
+    }
+    if (pbdProfileEnabled && physics_backend_is_gpu(physicsBackend.active)) {
+        double s = (double)steps;
+        fprintf(stderr,
+            "\n================== [PBD GPU PROFILE BREAKDOWN: %s (steps=%d)] ==================\n"
+            "  Total Step Time:        %8.4f ms/step (100.0%%)\n"
+            "  - GPU Kernel Execution: %8.4f ms/step (%5.1f%%)\n"
+            "  - CPU Blocked Wait:     %8.4f ms/step (%5.1f%%)\n"
+            "  - Metal Command Encode: %8.4f ms/step (%5.1f%%)\n"
+            "  - World Upload (H->D):  %8.4f ms/step (%5.1f%%)\n"
+            "  - State Readback (D->H):%8.4f ms/step (%5.1f%%)\n"
+            "  - CPU World Packing:    %8.4f ms/step (%5.1f%%)\n"
+            "  - CPU Validate & Commit:%8.4f ms/step (%5.1f%%)\n"
+            "===================================================================================\n\n",
+            physics_backend_name(physicsBackend.active), steps,
+            elapsed_ms / s,
+            gpuPhysics.gpu_exec_ms / s, 100.0 * gpuPhysics.gpu_exec_ms / elapsed_ms,
+            gpuPhysics.gpu_wait_ms / s, 100.0 * gpuPhysics.gpu_wait_ms / elapsed_ms,
+            gpuPhysics.encode_ms / s, 100.0 * gpuPhysics.encode_ms / elapsed_ms,
+            gpuPhysics.upload_ms / s, 100.0 * gpuPhysics.upload_ms / elapsed_ms,
+            gpuPhysics.readback_ms / s, 100.0 * gpuPhysics.readback_ms / elapsed_ms,
+            gpuPhysics.pack_ms / s, 100.0 * gpuPhysics.pack_ms / elapsed_ms,
+            gpuPhysics.commit_ms / s, 100.0 * gpuPhysics.commit_ms / elapsed_ms);
+    }
     return true;
 }
 

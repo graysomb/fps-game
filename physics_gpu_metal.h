@@ -39,6 +39,13 @@ typedef struct FpsGpuUniforms {
 
 _Static_assert(sizeof(FpsGpuUniforms) == 240, "Metal uniform layout mismatch");
 
+typedef struct FpsMetalProfileInfo {
+    double last_gpu_exec_ms;
+    double last_wait_ms;
+    double last_encode_ms;
+    int last_dispatch_count;
+} FpsMetalProfileInfo;
+
 #if defined(FPS_GPU_METAL)
 bool fps_metal_initialize(const char *library_path, long long *max_buffer_size,
                           char *error, size_t error_capacity);
@@ -53,6 +60,7 @@ bool fps_metal_begin_batch(void);
 bool fps_metal_dispatch(int mode, int count);
 bool fps_metal_dispatch_indirect(int mode, void *buffer, size_t offset);
 bool fps_metal_end_batch(void);
+void fps_metal_get_profile_info(FpsMetalProfileInfo *out);
 #endif
 
 #endif
