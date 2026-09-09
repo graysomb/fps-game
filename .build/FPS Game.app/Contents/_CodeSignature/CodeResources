@@ -72,17 +72,33 @@
 		<data>
 		eypQE1Zmmju/TNY+En8cbpvXfVI=
 		</data>
+		<key>Resources/shaders/pbd/adaptive_kernel.inc</key>
+		<data>
+		giVJGMyodp9mZ/19C9HMvEfIAdI=
+		</data>
+		<key>Resources/shaders/pbd/adaptive_pipeline.comp</key>
+		<data>
+		QKyXm3WHIh516temSKXoMjwDqMk=
+		</data>
+		<key>Resources/shaders/pbd/adaptive_pipeline.metal</key>
+		<data>
+		H6rakCLtWPQFVA8EJnmi4yyz144=
+		</data>
+		<key>Resources/shaders/pbd/adaptive_types.inc</key>
+		<data>
+		ftxo26vniNtMkH4ilIfgwn16Ta4=
+		</data>
 		<key>Resources/shaders/pbd/pbd_pipeline.comp</key>
 		<data>
-		2OL9uMcFIdNQWlu0AXGuEKFQslY=
+		M1GcPGA231rzAsIkDcNoBz4utdU=
 		</data>
 		<key>Resources/shaders/pbd/pbd_pipeline.metal</key>
 		<data>
-		VvP0/bNqXZWd7AGSRaKSXJze0KE=
+		Bzi7X4IZgQwaoCHFy6Ilvbr40ig=
 		</data>
 		<key>Resources/shaders/pbd/pbd_pipeline.metallib</key>
 		<data>
-		JLocVDugD4LoRa3b8gNYI7/BMSw=
+		T6RWl2DuQRRiAp2B32eludLmE7Y=
 		</data>
 		<key>Resources/shaders/skybox_shader.frag</key>
 		<data>
@@ -123,19 +139,19 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			8y29x1wWu1HFiuPktn0NAGk06Ik=
+			HQfOqmHov/yq/rvqcI+ohQq9UmI=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"f32dbdc75c16bb51c58ae3e4b67d0d006934e889" or cdhash H"6e53de628f8cfcc5dfd8cc1f8d59b6b33facd985"</string>
+			<string>cdhash H"1d07ceaa61e8bffcaafebbea708fa8850abd5262"</string>
 		</dict>
 		<key>MacOS/fps_ray_gpu</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			vy9of3GDQ9rYu6Vdp7PwZF7wVfc=
+			iHEKwQUbpP0bKsroIo0W3izwusA=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"bf2f687f718343dad8bba55da7b3f0645ef055f7" or cdhash H"8def0ad7f458c1e864edf2d367126d636eaa3f4d"</string>
+			<string>cdhash H"88710ac1051ba4fd1b2acae8228d16de2cf0bac0"</string>
 		</dict>
 		<key>Resources/shaders/debug_AABB.frag</key>
 		<dict>
@@ -249,25 +265,53 @@
 			tho8sD2ME0iJVBuCVvfdB0uPAlEPLg/5omObfADBkpQ=
 			</data>
 		</dict>
+		<key>Resources/shaders/pbd/adaptive_kernel.inc</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			pVndropl16oStiEJ7ZSs/hPlfh3IKUrlFheiVWIsU8A=
+			</data>
+		</dict>
+		<key>Resources/shaders/pbd/adaptive_pipeline.comp</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			/+uIcQJZjS0lgDTvBLmqTlD1BQHzNf9ZNN+Qg74SiQU=
+			</data>
+		</dict>
+		<key>Resources/shaders/pbd/adaptive_pipeline.metal</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			KoIviLc73k5G9O0GAgAOxdbfhmQdDFN0MCFONJNnRok=
+			</data>
+		</dict>
+		<key>Resources/shaders/pbd/adaptive_types.inc</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			9k01cXtyqix28iegrZuyGCW5Bn3AMY6OWjiZCCOqMzY=
+			</data>
+		</dict>
 		<key>Resources/shaders/pbd/pbd_pipeline.comp</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			k4TlS4tYB2EImMFk5OKqEnGhUV0O3fXpj1jlImvLwng=
+			HWkaZc80faaS2fk0F6/vGQz2cTFex1XGb5OwU+cgUV0=
 			</data>
 		</dict>
 		<key>Resources/shaders/pbd/pbd_pipeline.metal</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			cOVxXIsgguyN1FQLWBYcukENnGyubtoPya+fsmvU+Rs=
+			hNHScGyMvuexvkgzCUCTcFHoklyHKLLs9pviWajW4LI=
 			</data>
 		</dict>
 		<key>Resources/shaders/pbd/pbd_pipeline.metallib</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			gM+BTNeLUZmLv4vm9lxHi8xAAdug4/V5uoXWMuYrwjY=
+			QMVoljXApny5jhHdqLi3CVQqhoJyA6LQrccQxEYKfEg=
 			</data>
 		</dict>
 		<key>Resources/shaders/skybox_shader.frag</key>
