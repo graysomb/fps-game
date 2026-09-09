@@ -7,11 +7,13 @@ backend. Select `--physics=cpu-st`, `--physics=cpu-mt`, `--physics=gpu-gl43`, or
 The activation path collects the selected six-connected static component,
 covers each compatible voxel type with deterministic integer cubes, creates the
 ordinary unit child voxels, and binds their particles to the cube controls.
-Children remain render geometry only. Coarse parent corners provide collision
-samples with radius scaled by parent edge length; a child point participates
-only when another parent uses it as an interface corner. The implementation
-reduces integrated degrees of freedom and VGS work, but does not reduce child
-voxel allocation.
+Passive children remain render geometry only. When a child point is used as a
+neighboring parent corner, topology construction promotes that shared point to
+an independent particle and adds one interpolation attachment to the owning
+coarse cube. Parent VGS and contacts therefore use the original direct particle
+path. Coarse parent corners provide collision samples with radius scaled by
+parent edge length. The implementation reduces integrated degrees of freedom
+and VGS work, but does not reduce child voxel allocation.
 
 Run the large validation scene with:
 
@@ -28,9 +30,11 @@ Child colors identify their controlling cube size and white wireframes show
 coarse cube bounds. `greedy-activation-irregular-fine` runs the same structure
 with ordinary fine degrees of freedom for comparison.
 
-## Current benchmark
+## Pre-promotion benchmark baseline
 
-Measured on an Apple M2 Pro with the `-O2` CPU build using
+These measurements describe the former mapped-correction implementation and are
+kept as a comparison point. They must be rerun before quoting performance for
+the promoted-interface implementation. Measured on an Apple M2 Pro with the `-O2` CPU build using
 `python3 tools/benchmark_greedy.py`. Each case runs once as warm-up and three
 times for measurement. The table reports the median and range for 600 fixed
 steps after the 20-step preview; setup, rendering, validation, and activation
@@ -47,7 +51,7 @@ The cover itself takes about 190 ms once at activation. Fine mode integrates
 integrates only 177 controls, a 92.4% reduction, and evaluates 113 parent shapes
 instead of 1,692 unit shapes, a 93.3% reduction.
 
-The greedy path now uses pool-index lookup, persistent contact scratch, the
+The former greedy path used pool-index lookup, persistent contact scratch, the
 original parallel VGS accumulation, and one static-contact pass per substep.
 Its remaining largest CPU ST cost is dynamic contact generation: the median
 spends about 573 ms there, compared with 185 ms in VGS. The full per-stage
@@ -62,38 +66,64 @@ command buffer. The debug harness exposes the same control as
 `--debug-physics-batch=1..8`. Normal gameplay already passes every fixed step
 accumulated for the current rendered frame to one `gpu_physics_steps` call.
 
-The OpenGL 4.3 and Metal pipelines consume the same flattened dependency rows
-built by `greedy_coarse_bind`. Direct particles keep the original kernels;
-mapped parent corners expand corrections into their independent sources and
-refresh derived positions between collision and VGS stages. Passive children
-are refreshed only after finalizing the controls. Collision hash reach is
-computed from the largest participating parent radius. In resident mode the
-dependency buffers remain uploaded until topology changes.
+The OpenGL 4.3 and Metal pipelines consume the same compact rows built by
+`greedy_coarse_bind`. Every parent corner is now a direct solver particle. An
+interface corner keeps a short row only for its interpolation attachment to its
+owner; passive child rows are used only by final rendering refresh. VGS and
+collision kernels no longer traverse dependency rows or atomically scatter a
+corner correction. Collision hash reach is computed from the largest
+participating parent radius. In resident mode the rows remain uploaded until
+topology changes.
 
 Greedy floor contact is separate from static-grid contact. At topology upload,
 the GPU packer builds constraint islands and assigns each floor sample a compact
 conflict batch. An island with at most 512 controls is solved by one 128-thread
-workgroup: controls are cached in 16 KiB of threadgroup memory, interface points
-are derived directly from their source rows, and barriers preserve batch order.
+workgroup: controls are cached in 16 KiB of threadgroup memory, promoted interface points
+are handled as direct controls, and barriers preserve batch order.
 The controls are written back once after the island finishes. Larger islands use
 the global-memory batch path. The same analytic pass handles world bounds and
 player boxes; terrain and static blocks retain the general static-contact kernel.
 
-On the irregular fixture, the floor pack contains one island, 177 controls, 258
-contact samples, and 38 batches. With eight fixed steps per command buffer, an
-A/B run reduced Metal dispatch encoding from 97.1 ms to 30.6 ms and total debug
-physics time from 3,419.8 ms to 2,924.5 ms. The final positions differed from
-the retained fallback by at most 0.00045 voxel units.
+In the promoted topology, attachment edges are included when building floor
+islands, so floor corrections and their owning coarse controls stay in the same
+island. Interface contacts are direct contacts. The attachment solver performs
+deterministic Gauss–Seidel sweeps over only the promoted rows. Metal and OpenGL
+cache each island's controls in threadgroup memory and execute conflict-free
+attachment batches in order. They run two sweeps after each main VGS iteration
+and eight after the final contact/VGS pass, matching the CPU schedule. Oversized
+islands use a serial global-memory fallback instead of skipping attachments.
+There are no intermediate passive-child refreshes.
 
-The 600-step irregular fixture passes on native Metal with 177 controls, 2,147
-derived points, zero measured dependency error and floor penetration, and less
-than `0.003` final parent strain. OpenGL and Metal share the validated buffer-slot
-and pipeline-mode contract; native OpenGL execution must be run on a GL 4.3
-platform.
+For native Metal profiling, `FPS_METAL_GPU_TIME=1` reports command-buffer GPU
+time without inserting counter barriers. `FPS_METAL_STAGE_PROFILE=1` samples
+each compute encoder and reports time by solver mode; this deliberately changes
+scheduling and should be used for relative stage shares rather than headline
+timing. `FPS_GPU_DEPENDENCY_STATS=1` reports direct VGS fan-in and compact attachment
+work at topology upload.
+
+The former mapped topology emitted 10,316 atomic additions per VGS pass and its
+hottest control received 197 contributions. The promoted irregular topology has
+904 direct parent-corner references across 113 shapes and emits 3,616 VGS atomic
+additions; its hottest VGS particle receives six contributions. It adds 163
+interpolation attachments with 474 compact source entries. The headless 600-step
+CPU invariant keeps attachment error below `1e-5` unit edges and preserves the
+full material mass. The same invariant executes 600 actual Metal steps in
+eight-step command buffers, checks each batch, and keeps attachment error below
+`1e-5` unit edges with finite state. A direct GPU-timestamp run took 2,641.54 ms
+on the development M2 Pro; this is an invariant-run measurement rather than a
+fine-versus-greedy gameplay benchmark. OpenGL and Metal share the validated
+buffer-slot and pipeline-mode contract; native OpenGL execution must be run on
+a GL 4.3 platform. Visual validation still requires an unlocked desktop session.
+
+The corresponding stage-profile run reported 3,056.04 ms of sampled GPU time.
+Attachments used 914.15 ms (29.91%) during the two-sweep passes and 1,169.01 ms
+(38.25%) during the final eight-sweep pass. Pair contacts used 375.21 ms
+(12.28%), while direct VGS used 137.79 ms (4.51%). Stage profiling inserts
+counter sampling and is intended for proportions rather than headline timing.
 
 The Metal path now emits child instance matrices from the final GPU particle
 state. On Apple silicon, `DrawMeshInstanced` consumes the shared Metal buffer
-directly; the CPU readback contains only the 177 independent controls. OpenGL
+directly; the CPU readback contains only the 340 independent controls on the irregular fixture. OpenGL
 4.3 executes the same matrix kernel and currently stages its result for the
 OpenGL renderer.
 

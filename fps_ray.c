@@ -962,8 +962,6 @@ static void voxel_measure_strain(const Voxel *voxel,
 static int build_glue_cluster_indices(int start_idx, int *out_indices);
 static void build_glue_cluster_ids(int *out_cluster_id);
 static void rebuild_particle_collision_metadata(void);
-static bool greedy_accumulate_mapped_correction(Particle *p, Vector3 delta, float weight);
-static bool greedy_particle_is_mapped(const Particle *p);
 static bool greedy_solver_active(void);
 static bool greedy_particles_share_island(const Particle *a, const Particle *b);
 static void greedy_refresh_predicted(bool all_children);
@@ -2582,7 +2580,6 @@ static inline void accumulate_particle_correction(Particle *p, Vector3 delta, fl
     if (weight <= 0.0f) {
         return;
     }
-    if (greedy_accumulate_mapped_correction(p, delta, weight)) return;
     float dx = delta.x * weight;
     float dy = delta.y * weight;
     float dz = delta.z * weight;
@@ -10306,8 +10303,7 @@ static void apply_pair_corrections_range(int start, int end, int worker_id, void
         if (!particle || total.weight <= 0.0f) continue;
         float scale = PBD_SOR_FACTOR / total.weight;
         Vector3 delta = { total.x * scale, total.y * scale, total.z * scale };
-        if (!greedy_accumulate_mapped_correction(particle, delta, 1.0f))
-            particle->predicted_pos = v_add(particle->predicted_pos, delta);
+        particle->predicted_pos = v_add(particle->predicted_pos, delta);
     }
 }
 
@@ -12621,10 +12617,6 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
         double greedy_stage_started = greedyStageProfile.enabled ? GetTime() : 0.0;
         integrate_particles(sub_dt);
         if (greedyStageProfile.enabled) greedyStageProfile.integration_ms += (GetTime()-greedy_stage_started)*1000.0;
-        if (greedyCoarse.active) {
-            greedy_stage_started=GetTime();greedy_refresh_predicted(false);
-            greedyStageProfile.interface_ms += (GetTime()-greedy_stage_started)*1000.0;
-        }
 
         for (int it = 0; it < 1; ++it) {
             // The collision list is stable for this substep.  Break processing
@@ -12643,7 +12635,6 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
             if (greedyStageProfile.enabled) greedy_stage_started=GetTime();
             gather_particle_collisions(sub_dt, particle_snapshot, snapshot_count);
             if (greedyStageProfile.enabled) greedyStageProfile.dynamic_ms+=(GetTime()-greedy_stage_started)*1000.0;
-            if (greedyCoarse.active) {greedy_stage_started=GetTime();greedy_refresh_predicted(false);greedyStageProfile.interface_ms+=(GetTime()-greedy_stage_started)*1000.0;}
         }
 
         for (int it = 0; it < constraint_iterations; ++it) {
@@ -12655,7 +12646,11 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
                 pbd_parallel_for(0, voxel_count, gather_voxel_shape_constraints_range, NULL);
             apply_particle_accumulators();
             if (greedyStageProfile.enabled) greedyStageProfile.vgs_ms+=(GetTime()-greedy_stage_started)*1000.0;
-            if (greedyCoarse.active) {greedy_stage_started=GetTime();greedy_refresh_predicted(false);greedyStageProfile.interface_ms+=(GetTime()-greedy_stage_started)*1000.0;}
+            if (greedyCoarse.active) {
+                if (greedyStageProfile.enabled) greedy_stage_started=GetTime();
+                greedy_solve_attachments(2);
+                if (greedyStageProfile.enabled) greedyStageProfile.interface_ms+=(GetTime()-greedy_stage_started)*1000.0;
+            }
         }
 
         if (greedyStageProfile.enabled) greedy_stage_started=GetTime();
@@ -12667,9 +12662,11 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
             reset_particle_accumulators();
             pbd_parallel_for(0,greedy_physics_shape_count(),greedy_gather_shape_constraints_range,NULL);
             apply_particle_accumulators();
-            greedy_refresh_predicted(false);
-            greedy_lift_floor_residual();
             if (greedyStageProfile.enabled) greedyStageProfile.vgs_ms+=(GetTime()-greedy_stage_started)*1000.0;
+            if (greedyStageProfile.enabled) greedy_stage_started=GetTime();
+            greedy_solve_attachments(8);
+            greedy_lift_floor_residual();
+            if (greedyStageProfile.enabled) greedyStageProfile.interface_ms+=(GetTime()-greedy_stage_started)*1000.0;
         }
 
         if (!sizedFixture && !greedyFineFixture && !greedyCoarse.active) {

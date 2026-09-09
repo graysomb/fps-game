@@ -73,6 +73,9 @@ constant int MODE_RESET_STATIC_MAPPED = 20;
 constant int MODE_APPLY_STATIC_MAPPED = 21;
 constant int MODE_BUILD_RENDER_MATRICES = 22;
 constant int MODE_GREEDY_FLOOR_ISLANDS = 23;
+constant int MODE_ATTACHMENTS = 24;
+constant int MODE_ATTACHMENTS_SERIAL = 25;
+constant int MODE_ATTACHMENTS_FINAL = 26;
 constant int MODE_STATIC_GREEDY_BATCH_BASE = 100;
 constant int MODE_GREEDY_FLOOR_BATCH_BASE = 1000;
 constant uint MAX_FLOOR_ISLAND_CONTROLS = 512;
@@ -556,6 +559,43 @@ inline float3 floorIslandPoint(uint point,bool previous,uint island,
     return value;
 }
 
+inline void solveAttachmentIsland(uint island,uint lane,device ParticleState *particle,
+    device DependencyHeader *dependencyHeader,device DependencyEntry *dependencyEntry,
+    device FloorIsland *floorIsland,device uint *floorControlId,
+    device FloorContact *floorContact,device FloorControlMap *controlMap,
+    threadgroup float4 *floorState,uint passes){
+    FloorIsland header=floorIsland[island];if(header.controlCount>MAX_FLOOR_ISLAND_CONTROLS)return;
+    for(uint local=lane;local<header.controlCount;local+=128u){uint id=floorControlId[header.controlOffset+local];
+        floorState[local]=float4(particle[id].predicted_base_inv_mass.xyz,particle[id].prev_inv_mass.w);}
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for(uint pass=0u;pass<passes;++pass)for(uint batch=0u;batch<header.flags;++batch){
+        for(uint a=lane;a<header.padding1;a+=128u){FloorContact attachment=floorContact[header.padding0+a];
+            if(attachment.batch!=batch)continue;
+            uint point=attachment.particle;DependencyHeader dependency=dependencyHeader[point];
+            FloorControlMap pointMap=controlMap[point];if(pointMap.island!=island||pointMap.local>=header.controlCount)continue;
+            float wp=floorState[pointMap.local].w,denominator=wp;float3 target(0.0f);
+            for(uint k=0u;k<dependency.count;++k){DependencyEntry entry=dependencyEntry[dependency.offset+k];FloorControlMap map=controlMap[entry.source];
+                if(map.island!=island||map.local>=header.controlCount)continue;target+=floorState[map.local].xyz*entry.weight;denominator+=entry.weight*entry.weight*floorState[map.local].w;}
+            if(denominator<=1e-12f)continue;float3 error=floorState[pointMap.local].xyz-target;
+            floorState[pointMap.local].xyz-=error*(wp/denominator);
+            for(uint k=0u;k<dependency.count;++k){DependencyEntry entry=dependencyEntry[dependency.offset+k];FloorControlMap map=controlMap[entry.source];
+                if(map.island!=island||map.local>=header.controlCount)continue;floorState[map.local].xyz+=error*(entry.weight*floorState[map.local].w/denominator);}}
+        threadgroup_barrier(mem_flags::mem_threadgroup);}
+    for(uint local=lane;local<header.controlCount;local+=128u){uint id=floorControlId[header.controlOffset+local];particle[id].predicted_base_inv_mass.xyz=floorState[local].xyz;}
+}
+
+inline void solveAttachmentsSerial(uint island,uint lane,device ParticleState *particle,
+    device DependencyHeader *dependencyHeader,device DependencyEntry *dependencyEntry,
+    device FloorIsland *floorIsland,device FloorContact *floorContact){
+    if(lane!=0u)return;FloorIsland header=floorIsland[island];for(int pass=0;pass<8;++pass){
+        for(uint a=0u;a<header.padding1;++a){uint point=floorContact[header.padding0+a].particle;DependencyHeader dependency=dependencyHeader[point];
+            float wp=particle[point].prev_inv_mass.w,denominator=wp;float3 target(0.0f);for(uint k=0u;k<dependency.count;++k){DependencyEntry entry=dependencyEntry[dependency.offset+k];
+                float ws=particle[entry.source].prev_inv_mass.w;target+=particle[entry.source].predicted_base_inv_mass.xyz*entry.weight;denominator+=entry.weight*entry.weight*ws;}
+            if(denominator<=1e-12f)continue;float3 error=particle[point].predicted_base_inv_mass.xyz-target;particle[point].predicted_base_inv_mass.xyz-=error*(wp/denominator);
+            for(uint k=0u;k<dependency.count;++k){DependencyEntry entry=dependencyEntry[dependency.offset+k];float ws=particle[entry.source].prev_inv_mass.w;
+                particle[entry.source].predicted_base_inv_mass.xyz+=error*(entry.weight*ws/denominator);}}}
+}
+
 inline void greedyFloorIsland(uint island,uint lane,device ParticleState *particle,
     device DependencyHeader *dependencyHeader,device DependencyEntry *dependencyEntry,
     device FloorIsland *floorIsland,device uint *floorControlId,
@@ -754,6 +794,9 @@ kernel void pbd_pipeline(
         case MODE_APPLY_STATIC_MAPPED:applyStaticMapped(gid,particle,staticMapped,control);break;
         case MODE_BUILD_RENDER_MATRICES:buildRenderMatrix(gid,particle,renderVoxel,renderMatrix,dispatchArgs);break;
         case MODE_GREEDY_FLOOR_ISLANDS:greedyFloorIsland(island,lane,particle,dependencyHeader,dependencyEntry,floorIsland,floorControlId,floorContact,floorControlMap,floorState,u);break;
+        case MODE_ATTACHMENTS:solveAttachmentIsland(island,lane,particle,dependencyHeader,dependencyEntry,floorIsland,floorControlId,floorContact,floorControlMap,floorState,2u);break;
+        case MODE_ATTACHMENTS_SERIAL:solveAttachmentsSerial(island,lane,particle,dependencyHeader,dependencyEntry,floorIsland,floorContact);break;
+        case MODE_ATTACHMENTS_FINAL:solveAttachmentIsland(island,lane,particle,dependencyHeader,dependencyEntry,floorIsland,floorControlId,floorContact,floorControlMap,floorState,8u);break;
         default:if(u.mode>=MODE_GREEDY_FLOOR_BATCH_BASE)floorCollisionGlobal(gid,u.mode-MODE_GREEDY_FLOOR_BATCH_BASE,particle,collisionBatch,collisionId,collisionControl,dependencyHeader,dependencyEntry,refcount,control,u);
             else if(u.mode>=MODE_STATIC_GREEDY_BATCH_BASE)staticCollisions(gid,u.mode-MODE_STATIC_GREEDY_BATCH_BASE,particle,correction,staticMapped,collisionBatch,collisionId,collisionControl,staticCell,staticCollider,dependencyHeader,dependencyEntry,refcount,control,u);break;
     }
