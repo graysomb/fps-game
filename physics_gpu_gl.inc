@@ -250,7 +250,7 @@ static bool gpu_pack_world(void) {
     size_t maximum_references = (size_t)sim_particle_count + (size_t)voxel_count * 8u;
     if (maximum_references > (size_t)particle_pool_count) maximum_references = (size_t)particle_pool_count;
     if (!gpu_stage_reserve(maximum_references,
-                           (size_t)sim_particle_count + (size_t)fluid_particle_count,
+                           (size_t)sim_particle_count + (size_t)active_fluid_particle_count,
                            (size_t)voxel_count)) return false;
     if (!gpuPhysics.pool_to_compact) {
         gpuPhysics.pool_to_compact = malloc((size_t)MAX_PARTICLES * sizeof(*gpuPhysics.pool_to_compact));
@@ -264,7 +264,7 @@ static bool gpu_pack_world(void) {
         if (id < 0) return false;
         gpuPhysics.sim_ids[i] = (uint32_t)id;
     }
-    for (int i = 0; i < fluid_particle_count; ++i) {
+    for (int i = 0; i < active_fluid_particle_count; ++i) {
         Particle *particle = fluid_particles[i];
         if (!particle) return false;
         int id = gpu_add_particle(particle);
@@ -370,10 +370,10 @@ static bool gpu_upload_world(void) {
     size_t particle_bytes = (size_t)gpuPhysics.compact_count * sizeof(GpuParticleState);
     size_t correction_bytes = (size_t)gpuPhysics.compact_count * sizeof(GpuCorrectionState);
     size_t cell_bytes = (size_t)gpuPhysics.compact_count * sizeof(GpuCellState);
-    size_t sim_bytes = ((size_t)sim_particle_count + (size_t)fluid_particle_count) * sizeof(uint32_t);
+    size_t sim_bytes = ((size_t)sim_particle_count + (size_t)active_fluid_particle_count) * sizeof(uint32_t);
     size_t voxel_bytes = (size_t)voxel_count * sizeof(GpuVoxelState);
     size_t fluid_bytes = (size_t)gpuPhysics.compact_count * sizeof(GpuFluidState);
-    size_t next_bytes = ((size_t)sim_particle_count + (size_t)fluid_particle_count) * sizeof(int32_t);
+    size_t next_bytes = ((size_t)sim_particle_count + (size_t)active_fluid_particle_count) * sizeof(int32_t);
     size_t static_bytes = (size_t)HASH_SIZE * sizeof(GpuStaticCell);
     if (!gpu_buffer_ensure(&gpuPhysics.particle_buffer, particle_bytes) ||
         !gpu_buffer_ensure(&gpuPhysics.correction_buffer, correction_bytes) ||
@@ -433,7 +433,7 @@ static bool gpu_dispatch(int mode, int count) { (void)mode; (void)count; return 
 
 static void gpu_set_uniforms(float dt) {
     int particle_count = gpuPhysics.compact_count;
-    int fluid_count = fluid_particle_count;
+    int fluid_count = active_fluid_particle_count;
     int hash_size = PARTICLE_HASH_SIZE;
     int static_hash_size = HASH_SIZE;
     rlSetUniform(gpuPhysics.loc[GPU_LOC_PARTICLE_COUNT], &particle_count, SHADER_UNIFORM_INT, 1);
@@ -494,7 +494,7 @@ static bool gpu_validate_and_commit(void) {
     if (particle_bytes) rlReadShaderBuffer(gpuPhysics.particle_buffer.id, gpuPhysics.particle_stage, (unsigned int)particle_bytes, 0);
     if (cell_bytes) rlReadShaderBuffer(gpuPhysics.cell_buffer.id, gpuPhysics.cell_stage, (unsigned int)cell_bytes, 0);
     if (voxel_bytes) rlReadShaderBuffer(gpuPhysics.voxel_buffer.id, gpuPhysics.voxel_stage, (unsigned int)voxel_bytes, 0);
-    if (fluid_particle_count > 0 && fluid_bytes) {
+    if (active_fluid_particle_count > 0 && fluid_bytes) {
         rlReadShaderBuffer(gpuPhysics.fluid_buffer.id, gpuPhysics.fluid_stage, (unsigned int)fluid_bytes, 0);
     }
     for (int i = 0; i < gpuPhysics.compact_count; ++i) {
@@ -545,7 +545,7 @@ static bool gpu_run_substep(float sub_dt) {
     if (!gpu_pack_world() || !gpu_upload_world()) return false;
     rlEnableShader(gpuPhysics.program);
     gpu_set_uniforms(sub_dt);
-    int dynamic_count = sim_particle_count + fluid_particle_count;
+    int dynamic_count = sim_particle_count + active_fluid_particle_count;
     bool ok = gpu_dispatch(GPU_MODE_INTEGRATE, dynamic_count) &&
               gpu_dispatch(GPU_MODE_RESET, dynamic_count) &&
               gpu_dispatch(GPU_MODE_HASH_CLEAR, PARTICLE_HASH_SIZE) &&
@@ -553,11 +553,13 @@ static bool gpu_run_substep(float sub_dt) {
               gpu_dispatch(GPU_MODE_SCENE_COLLISIONS, dynamic_count) &&
               gpu_dispatch(GPU_MODE_PAIR_COLLISIONS, dynamic_count) &&
               gpu_dispatch(GPU_MODE_APPLY, dynamic_count);
-    for (int it = 0; ok && it < PBF_DENSITY_ITERS; ++it) {
-        ok = gpu_dispatch(GPU_MODE_PBF_LAMBDA, fluid_particle_count) &&
-             gpu_dispatch(GPU_MODE_PBF_DELTA, fluid_particle_count) &&
-             gpu_dispatch(GPU_MODE_PBF_APPLY, fluid_particle_count) &&
-             gpu_dispatch(GPU_MODE_PBF_STATIC_COLLISIONS, fluid_particle_count);
+    if (active_fluid_particle_count > 0) {
+        for (int it = 0; ok && it < PBF_DENSITY_ITERS; ++it) {
+            ok = gpu_dispatch(GPU_MODE_PBF_LAMBDA, active_fluid_particle_count) &&
+                 gpu_dispatch(GPU_MODE_PBF_DELTA, active_fluid_particle_count) &&
+                 gpu_dispatch(GPU_MODE_PBF_APPLY, active_fluid_particle_count) &&
+                 gpu_dispatch(GPU_MODE_PBF_STATIC_COLLISIONS, active_fluid_particle_count);
+        }
     }
     for (int it = 0; ok && it < PBD_CONSTRAINT_ITERS; ++it) {
         ok = gpu_dispatch(GPU_MODE_RESET, dynamic_count) &&
@@ -566,10 +568,12 @@ static bool gpu_run_substep(float sub_dt) {
     }
     ok = ok && gpu_dispatch(GPU_MODE_STATIC_COLLISIONS, dynamic_count) &&
          gpu_dispatch(GPU_MODE_BREAK_MASK, voxel_count) &&
-         gpu_dispatch(GPU_MODE_FINALIZE_PARTICLES, dynamic_count) &&
-         gpu_dispatch(GPU_MODE_PBF_VISCOSITY, fluid_particle_count) &&
-         gpu_dispatch(GPU_MODE_PBF_APPLY_VISCOSITY, fluid_particle_count) &&
-         gpu_dispatch(GPU_MODE_FINALIZE_VOXELS, voxel_count);
+         gpu_dispatch(GPU_MODE_FINALIZE_PARTICLES, dynamic_count);
+    if (ok && active_fluid_particle_count > 0) {
+        ok = gpu_dispatch(GPU_MODE_PBF_VISCOSITY, active_fluid_particle_count) &&
+             gpu_dispatch(GPU_MODE_PBF_APPLY_VISCOSITY, active_fluid_particle_count);
+    }
+    ok = ok && gpu_dispatch(GPU_MODE_FINALIZE_VOXELS, voxel_count);
     rlDisableShader();
     if (!ok || !gpu_validate_and_commit()) return false;
     process_break_masks();
