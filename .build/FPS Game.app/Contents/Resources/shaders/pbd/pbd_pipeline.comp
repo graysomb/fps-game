@@ -117,8 +117,6 @@ const int MODE_APPLY_STATIC_MAPPED = 21;
 const int MODE_BUILD_RENDER_MATRICES = 22;
 const int MODE_GREEDY_FLOOR_ISLANDS = 23;
 const int MODE_ATTACHMENTS = 24;
-const int MODE_ATTACHMENTS_SERIAL = 25;
-const int MODE_ATTACHMENTS_FINAL = 26;
 const int MODE_STATIC_GREEDY_BATCH_BASE = 100;
 const int MODE_GREEDY_FLOOR_BATCH_BASE = 1000;
 const uint MAX_FLOOR_ISLAND_CONTROLS = 512u;
@@ -464,6 +462,46 @@ void solveVgs(uint gid) {
     }
 }
 
+void solveAttachmentConstraint(uint gid) {
+    if (gid >= uint(gpuControl.x)) return;
+    DependencyHeader header = dependencyHeader[gid];
+    if ((header.flags & 8u) == 0u || header.count == 0u) return;
+    float wp = particle[gid].prev_inv_mass.w, denominator = wp;
+    vec3 target = vec3(0.0);
+    for (uint k = 0u; k < header.count; ++k) {
+        DependencyEntry entry = dependencyEntry[header.offset + k];
+        if (entry.source >= uint(gpuControl.x)) return;
+        float ws = particle[entry.source].prev_inv_mass.w;
+        target += particle[entry.source].predicted_base_inv_mass.xyz * entry.weight;
+        denominator += entry.weight * entry.weight * ws;
+    }
+    if (denominator <= 1e-12) return;
+    vec3 error = particle[gid].predicted_base_inv_mass.xyz - target;
+    if (wp > 0.0) {
+        float incidence = float(max(header.padding, 1u));
+        float relaxation = min(incidence, 2.0 * sqrt(incidence));
+        vec3 delta = -error * (wp / denominator);
+        atomicAddCorrection(gid, 0, delta.x);
+        atomicAddCorrection(gid, 1, delta.y);
+        atomicAddCorrection(gid, 2, delta.z);
+        atomicAddCorrection(gid, 3, 1.0 / relaxation);
+    }
+    for (uint k = 0u; k < header.count; ++k) {
+        DependencyEntry entry = dependencyEntry[header.offset + k];
+        float ws = particle[entry.source].prev_inv_mass.w;
+        if (ws > 0.0) {
+            DependencyHeader sourceHeader = dependencyHeader[entry.source];
+            float incidence = float(max(sourceHeader.padding, 1u));
+            float relaxation = min(incidence, 2.0 * sqrt(incidence));
+            vec3 delta = error * (entry.weight * ws / denominator);
+            atomicAddCorrection(entry.source, 0, delta.x);
+            atomicAddCorrection(entry.source, 1, delta.y);
+            atomicAddCorrection(entry.source, 2, delta.z);
+            atomicAddCorrection(entry.source, 3, 1.0 / relaxation);
+        }
+    }
+}
+
 int findStaticCell(ivec3 coord) {
     uint h = hashCoord(coord, uStaticHashSize);
     for (int probe = 0; probe < uStaticHashSize; ++probe) {
@@ -678,76 +716,6 @@ vec3 floorIslandPoint(uint point, bool previous, uint island) {
         value += floorState[(previous ? MAX_FLOOR_ISLAND_CONTROLS : 0u) + map.local].xyz * entry.weight;
     }
     return value;
-}
-
-void solveAttachmentIsland(uint island, uint lane, uint passes) {
-    FloorIsland header = floorIsland[island];
-    if (header.controlCount > MAX_FLOOR_ISLAND_CONTROLS) return;
-    for (uint local = lane; local < header.controlCount; local += 128u) {
-        uint id = floorControlId[header.controlOffset + local];
-        floorState[local] = vec4(particle[id].predicted_base_inv_mass.xyz, particle[id].prev_inv_mass.w);
-    }
-    barrier();
-    for (uint pass = 0u; pass < passes; ++pass) for (uint batch = 0u; batch < header.flags; ++batch) {
-        for (uint a = lane; a < header.padding1; a += 128u) {
-            FloorContact attachment = floorContact[header.padding0 + a];
-            if (attachment.batch != batch) continue;
-            uint point = attachment.particle;
-            DependencyHeader dependency = dependencyHeader[point];
-            FloorControlMap pointMap = floorControlMap[point];
-            if (pointMap.island != island || pointMap.local >= header.controlCount) continue;
-            float wp = floorState[pointMap.local].w, denominator = wp;
-            vec3 target = vec3(0.0);
-            for (uint k = 0u; k < dependency.count; ++k) {
-                DependencyEntry entry = dependencyEntry[dependency.offset + k];
-                FloorControlMap map = floorControlMap[entry.source];
-                if (map.island != island || map.local >= header.controlCount) continue;
-                target += floorState[map.local].xyz * entry.weight;
-                denominator += entry.weight * entry.weight * floorState[map.local].w;
-            }
-            if (denominator <= 1e-12) continue;
-            vec3 error = floorState[pointMap.local].xyz - target;
-            floorState[pointMap.local].xyz -= error * (wp / denominator);
-            for (uint k = 0u; k < dependency.count; ++k) {
-                DependencyEntry entry = dependencyEntry[dependency.offset + k];
-                FloorControlMap map = floorControlMap[entry.source];
-                if (map.island != island || map.local >= header.controlCount) continue;
-                floorState[map.local].xyz += error * (entry.weight * floorState[map.local].w / denominator);
-            }
-        }
-        barrier();
-    }
-    for (uint local = lane; local < header.controlCount; local += 128u) {
-        uint id = floorControlId[header.controlOffset + local];
-        particle[id].predicted_base_inv_mass.xyz = floorState[local].xyz;
-    }
-}
-
-void solveAttachmentsSerial(uint island, uint lane) {
-    if (lane != 0u) return;
-    FloorIsland header = floorIsland[island];
-    for (int pass = 0; pass < 8; ++pass) {
-        for (uint a = 0u; a < header.padding1; ++a) {
-            uint point = floorContact[header.padding0 + a].particle;
-            DependencyHeader dependency = dependencyHeader[point];
-            float wp = particle[point].prev_inv_mass.w, denominator = wp;
-            vec3 target = vec3(0.0);
-            for (uint k = 0u; k < dependency.count; ++k) {
-                DependencyEntry entry = dependencyEntry[dependency.offset + k];
-                float ws = particle[entry.source].prev_inv_mass.w;
-                target += particle[entry.source].predicted_base_inv_mass.xyz * entry.weight;
-                denominator += entry.weight * entry.weight * ws;
-            }
-            if (denominator <= 1e-12) continue;
-            vec3 error = particle[point].predicted_base_inv_mass.xyz - target;
-            particle[point].predicted_base_inv_mass.xyz -= error * (wp / denominator);
-            for (uint k = 0u; k < dependency.count; ++k) {
-                DependencyEntry entry = dependencyEntry[dependency.offset + k];
-                float ws = particle[entry.source].prev_inv_mass.w;
-                particle[entry.source].predicted_base_inv_mass.xyz += error * (entry.weight * ws / denominator);
-            }
-        }
-    }
 }
 
 void greedyFloorIsland(uint island, uint lane) {
@@ -1128,9 +1096,7 @@ void main() {
     else if (uMode==MODE_APPLY_STATIC_MAPPED) applyStaticMapped(gid);
     else if (uMode==MODE_BUILD_RENDER_MATRICES) buildRenderMatrix(gid);
     else if (uMode==MODE_GREEDY_FLOOR_ISLANDS) greedyFloorIsland(gl_WorkGroupID.x, gl_LocalInvocationID.x);
-    else if (uMode==MODE_ATTACHMENTS) solveAttachmentIsland(gl_WorkGroupID.x, gl_LocalInvocationID.x, 2u);
-    else if (uMode==MODE_ATTACHMENTS_SERIAL) solveAttachmentsSerial(gl_WorkGroupID.x, gl_LocalInvocationID.x);
-    else if (uMode==MODE_ATTACHMENTS_FINAL) solveAttachmentIsland(gl_WorkGroupID.x, gl_LocalInvocationID.x, 8u);
+    else if (uMode==MODE_ATTACHMENTS) solveAttachmentConstraint(gid);
     else if (uMode>=MODE_GREEDY_FLOOR_BATCH_BASE) floorCollisionGlobal(gid, uMode-MODE_GREEDY_FLOOR_BATCH_BASE);
     else if (uMode>=MODE_STATIC_GREEDY_BATCH_BASE) staticCollisions(gid, uMode-MODE_STATIC_GREEDY_BATCH_BASE);
 }

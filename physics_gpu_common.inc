@@ -540,9 +540,8 @@ static bool gpu_build_floor_islands(void) {
     int *root_to_island = malloc((size_t)count * sizeof(*root_to_island));
     int *control_count = calloc((size_t)count, sizeof(*control_count));
     int *contact_count = calloc((size_t)count, sizeof(*contact_count));
-    int *attachment_count = calloc((size_t)count, sizeof(*attachment_count));
-    if (!parent || !root_to_island || !control_count || !contact_count || !attachment_count) {
-        free(parent); free(root_to_island); free(control_count); free(contact_count); free(attachment_count);
+    if (!parent || !root_to_island || !control_count || !contact_count) {
+        free(parent); free(root_to_island); free(control_count); free(contact_count);
         return false;
     }
     for (int i = 0; i < count; ++i) { parent[i] = -1; root_to_island[i] = -1; }
@@ -551,15 +550,13 @@ static bool gpu_build_floor_islands(void) {
         if (id < (uint32_t)count) parent[id] = (int)id;
     }
 
-    /* A VGS shape couples every independent source used by its corners. */
     for (int shape = 0; shape < gpuPhysics.dynamic_voxel_count; ++shape) {
         int first = -1;
         for (int corner = 0; corner < 8; ++corner) {
             uint32_t point = gpuPhysics.voxel_stage[shape].particle[corner];
             if (point >= (uint32_t)count) continue;
             GpuDependencyHeader header = gpuPhysics.dependency_header_stage[point];
-            bool mapped = (header.flags & FPS_GPU_DEPENDENCY_MAPPED) != 0;
-            if (mapped) {
+            if ((header.flags & FPS_GPU_DEPENDENCY_MAPPED) != 0) {
                 for (uint32_t k = 0; k < header.count; ++k) {
                     int source = (int)gpuPhysics.dependency_entry_stage[header.offset + k].source;
                     if (source < 0 || source >= count || parent[source] < 0) continue;
@@ -570,7 +567,6 @@ static bool gpu_build_floor_islands(void) {
             }
         }
     }
-    /* A mapped contact itself also couples every source in its compact row. */
     for (int contact = 0; contact < gpuPhysics.collision_count; ++contact) {
         uint32_t point = gpuPhysics.collision_ids[contact];
         GpuDependencyHeader header = gpuPhysics.dependency_header_stage[point];
@@ -583,11 +579,11 @@ static bool gpu_build_floor_islands(void) {
             if (first < 0) first = source; else gpu_floor_union(parent, first, source);
         }
     }
-    /* Promoted interfaces are direct solver particles, but their attachment
-       constraints couple them to the controls of the owning coarse cube. */
+    int total_attachments = 0;
     for (int point = 0; point < count; ++point) {
         GpuDependencyHeader header = gpuPhysics.dependency_header_stage[point];
         if ((header.flags & FPS_GPU_DEPENDENCY_ATTACHMENT) == 0 || parent[point] < 0) continue;
+        total_attachments++;
         for (uint32_t k = 0; k < header.count; ++k) {
             int source = (int)gpuPhysics.dependency_entry_stage[header.offset + k].source;
             if (source >= 0 && source < count && parent[source] >= 0)
@@ -605,46 +601,36 @@ static bool gpu_build_floor_islands(void) {
         if (source >= 0 && source < count && parent[source] >= 0)
             contact_count[gpu_floor_union_find(parent, source)]++;
     }
-    for (int point = 0; point < count; ++point) {
-        GpuDependencyHeader header = gpuPhysics.dependency_header_stage[point];
-        if ((header.flags & FPS_GPU_DEPENDENCY_ATTACHMENT) != 0 && parent[point] >= 0)
-            attachment_count[gpu_floor_union_find(parent, point)]++;
-    }
-    int island_count = 0, total_controls = 0, total_contacts = 0, total_attachments = 0;
+    int island_count = 0, total_controls = 0, total_contacts = 0;
     for (int root = 0; root < count; ++root) {
         if (parent[root] != root || contact_count[root] == 0) continue;
         root_to_island[root] = island_count++;
         total_controls += control_count[root];
         total_contacts += contact_count[root];
-        total_attachments += attachment_count[root];
     }
     if (!gpu_floor_stage_reserve((size_t)island_count, (size_t)total_controls,
-                                 (size_t)(total_contacts + total_attachments), (size_t)count)) {
-        free(parent); free(root_to_island); free(control_count); free(contact_count); free(attachment_count);
+                                 (size_t)total_contacts, (size_t)count)) {
+        free(parent); free(root_to_island); free(control_count); free(contact_count);
         return false;
     }
     for (int i = 0; i < count; ++i)
         gpuPhysics.floor_control_map_stage[i] =
             (GpuFloorControlMap){UINT32_MAX, UINT32_MAX, 0, 0};
-    int control_offset = 0, contact_offset = 0, attachment_offset = total_contacts;
+    int control_offset = 0, contact_offset = 0;
     for (int root = 0; root < count; ++root) {
         int island = root_to_island[root];
         if (island < 0) continue;
         gpuPhysics.floor_island_stage[island] = (GpuFloorIslandState){
             (uint32_t)control_offset, (uint32_t)control_count[root],
-            (uint32_t)contact_offset, (uint32_t)contact_count[root], 0, 0,
-            (uint32_t)attachment_offset, (uint32_t)attachment_count[root]};
+            (uint32_t)contact_offset, (uint32_t)contact_count[root], 0, 0, 0, 0};
         control_offset += control_count[root];
         contact_offset += contact_count[root];
-        attachment_offset += attachment_count[root];
     }
     int *control_cursor = calloc((size_t)island_count, sizeof(*control_cursor));
     int *contact_cursor = calloc((size_t)island_count, sizeof(*contact_cursor));
-    int *attachment_cursor = calloc((size_t)island_count, sizeof(*attachment_cursor));
-    if (!control_cursor || !contact_cursor || !attachment_cursor) {
-        free(parent); free(root_to_island); free(control_count); free(contact_count); free(attachment_count);
+    if (!control_cursor || !contact_cursor) {
+        free(parent); free(root_to_island); free(control_count); free(contact_count);
         free(control_cursor); free(contact_cursor);
-        free(attachment_cursor);
         return false;
     }
     for (int i = 0; i < sim_particle_count; ++i) {
@@ -668,16 +654,6 @@ static bool gpu_build_floor_islands(void) {
         gpuPhysics.floor_contact_stage[header->contact_offset + (uint32_t)slot] =
             (GpuFloorContactState){point, 0, 0, 0};
     }
-    for (int point = 0; point < count; ++point) {
-        GpuDependencyHeader dependency = gpuPhysics.dependency_header_stage[point];
-        if ((dependency.flags & FPS_GPU_DEPENDENCY_ATTACHMENT) == 0 || parent[point] < 0) continue;
-        int island = root_to_island[gpu_floor_union_find(parent, point)];
-        if (island < 0) continue;
-        GpuFloorIslandState *header = &gpuPhysics.floor_island_stage[island];
-        int slot = attachment_cursor[island]++;
-        gpuPhysics.floor_contact_stage[header->padding0 + (uint32_t)slot] =
-            (GpuFloorContactState){(uint32_t)point, 0, 0, 0};
-    }
 
     int max_controls = 0;
     bool mappings_valid = true;
@@ -685,32 +661,9 @@ static bool gpu_build_floor_islands(void) {
         GpuFloorIslandState *header = &gpuPhysics.floor_island_stage[island];
         int *last_batch = malloc((size_t)header->control_count * sizeof(*last_batch));
         if (!last_batch) {
-            free(parent); free(root_to_island); free(control_count); free(contact_count); free(attachment_count);
-            free(control_cursor); free(contact_cursor); free(attachment_cursor);
+            free(parent); free(root_to_island); free(control_count); free(contact_count);
+            free(control_cursor); free(contact_cursor);
             return false;
-        }
-        for (uint32_t i = 0; i < header->control_count; ++i) last_batch[i] = -1;
-        for (uint32_t a = 0; a < header->padding1; ++a) {
-            GpuFloorContactState *attachment = &gpuPhysics.floor_contact_stage[header->padding0 + a];
-            GpuDependencyHeader dependency = gpuPhysics.dependency_header_stage[attachment->particle];
-            int batch = 0;
-            GpuFloorControlMap point_map = gpuPhysics.floor_control_map_stage[attachment->particle];
-            if (point_map.island != (uint32_t)island || point_map.local >= header->control_count) mappings_valid = false;
-            else batch = last_batch[point_map.local] + 1;
-            for (uint32_t k = 0; k < dependency.count; ++k) {
-                uint32_t source = gpuPhysics.dependency_entry_stage[dependency.offset + k].source;
-                GpuFloorControlMap map = gpuPhysics.floor_control_map_stage[source];
-                if (map.island != (uint32_t)island || map.local >= header->control_count) { mappings_valid = false; continue; }
-                if (last_batch[map.local] + 1 > batch) batch = last_batch[map.local] + 1;
-            }
-            if (point_map.island == (uint32_t)island && point_map.local < header->control_count) last_batch[point_map.local] = batch;
-            for (uint32_t k = 0; k < dependency.count; ++k) {
-                uint32_t source = gpuPhysics.dependency_entry_stage[dependency.offset + k].source;
-                GpuFloorControlMap map = gpuPhysics.floor_control_map_stage[source];
-                if (map.island == (uint32_t)island && map.local < header->control_count) last_batch[map.local] = batch;
-            }
-            attachment->batch = (uint32_t)batch;
-            if ((uint32_t)(batch + 1) > header->flags) header->flags = (uint32_t)(batch + 1);
         }
         for (uint32_t i = 0; i < header->control_count; ++i) last_batch[i] = -1;
         for (uint32_t c = 0; c < header->contact_count; ++c) {
@@ -748,7 +701,8 @@ static bool gpu_build_floor_islands(void) {
                 } else mappings_valid = false;
             }
             contact->batch = (uint32_t)batch;
-            if ((uint32_t)(batch + 1) > header->batch_count) header->batch_count = (uint32_t)(batch + 1);
+            if ((uint32_t)(batch + 1) > header->batch_count)
+                header->batch_count = (uint32_t)(batch + 1);
         }
         if ((int)header->control_count > max_controls) max_controls = (int)header->control_count;
         free(last_batch);
@@ -758,12 +712,11 @@ static bool gpu_build_floor_islands(void) {
     gpuPhysics.floor_contact_count = total_contacts;
     gpuPhysics.floor_attachment_count = total_attachments;
     gpuPhysics.floor_island_fast_path = island_count > 0 &&
-        total_contacts == gpuPhysics.collision_count &&
-        mappings_valid &&
+        total_contacts == gpuPhysics.collision_count && mappings_valid &&
         max_controls <= FPS_GPU_MAX_FLOOR_ISLAND_CONTROLS &&
         getenv("FPS_GREEDY_FLOOR_GLOBAL_BATCHES") == NULL;
-    free(parent); free(root_to_island); free(control_count); free(contact_count); free(attachment_count);
-    free(control_cursor); free(contact_cursor); free(attachment_cursor);
+    free(parent); free(root_to_island); free(control_count); free(contact_count);
+    free(control_cursor); free(contact_cursor);
     return true;
 }
 
@@ -873,6 +826,18 @@ static bool gpu_pack_world(void) {
             ptrdiff_t pool = greedyCoarse.samples[sample] - particles_pool;
             int id = pool >= 0 && pool < particle_pool_count ? gpuPhysics.pool_to_compact[pool] : -1;
             if (id >= 0) gpuPhysics.dependency_header_stage[id].flags |= FPS_GPU_DEPENDENCY_OWNER_CONTROL;
+        }
+        /* Attachment incidence is a diagonal preconditioner for the ordinary
+         * Jacobi correction apply.  It is topology data, so compute it once. */
+        for (int point = 0; point < gpuPhysics.compact_count; ++point) {
+            GpuDependencyHeader *header = &gpuPhysics.dependency_header_stage[point];
+            if ((header->flags & FPS_GPU_DEPENDENCY_ATTACHMENT) == 0) continue;
+            header->padding++;
+            for (uint32_t k = 0; k < header->count; ++k) {
+                uint32_t source = gpuPhysics.dependency_entry_stage[header->offset + k].source;
+                if (source >= (uint32_t)gpuPhysics.compact_count) return false;
+                gpuPhysics.dependency_header_stage[source].padding++;
+            }
         }
         int *last_batch = malloc((size_t)gpuPhysics.compact_count * sizeof(*last_batch));
         if (!last_batch) return false;
@@ -1288,7 +1253,7 @@ static bool gpu_upload_world(void) {
     size_t floor_control_bytes =
         (size_t)gpuPhysics.floor_control_count * sizeof(uint32_t);
     size_t floor_contact_bytes =
-        (size_t)(gpuPhysics.floor_contact_count + gpuPhysics.floor_attachment_count) * sizeof(GpuFloorContactState);
+        (size_t)gpuPhysics.floor_contact_count * sizeof(GpuFloorContactState);
     size_t floor_control_map_bytes =
         (size_t)gpuPhysics.compact_count * sizeof(GpuFloorControlMap);
     if (!gpu_buffer_ensure(&gpuPhysics.particle_buffer, particle_capacity_bytes) ||
@@ -1390,17 +1355,12 @@ static bool gpu_upload_world(void) {
         gpuPhysics.static_uploads++;
     }
     if (getenv("FPS_COLLISION_DIAGNOSTICS")) {
-        int max_attachment_batches = 0;
-        for (int i = 0; i < gpuPhysics.floor_island_count; ++i)
-            if ((int)gpuPhysics.floor_island_stage[i].flags > max_attachment_batches)
-                max_attachment_batches = (int)gpuPhysics.floor_island_stage[i].flags;
         fprintf(stderr,
-                "floor-islands=%d controls=%d contacts=%d attachments=%d fast=%d contactBatches=%d attachmentBatches=%d staticColliders=%d\n",
+                "floor-islands=%d controls=%d contacts=%d attachments=%d fast=%d contactBatches=%d staticColliders=%d\n",
                 gpuPhysics.floor_island_count, gpuPhysics.floor_control_count,
                 gpuPhysics.floor_contact_count, gpuPhysics.floor_attachment_count,
                 gpuPhysics.floor_island_fast_path ? 1 : 0,
-                gpuPhysics.static_contact_batch_count, max_attachment_batches,
-                gpuPhysics.static_collider_count);
+                gpuPhysics.static_contact_batch_count, gpuPhysics.static_collider_count);
     }
     gpu_bind_world_buffers();
     gpuPhysics.collision_uploaded_generation = collisionMetadataGeneration;
@@ -1772,13 +1732,11 @@ static bool gpu_dispatch_substep(float sub_dt) {
               gpu_dispatch_indirect_offset(GPU_MODE_PAIR_COLLISIONS, 16) &&
               gpu_dispatch_indirect(GPU_MODE_APPLY);
     for (int it = 0; ok && it < PBD_CONSTRAINT_ITERS; ++it) {
-        ok = gpu_dispatch_indirect(GPU_MODE_RESET) &&
-             gpu_dispatch(GPU_MODE_VGS, gpuPhysics.dynamic_voxel_count) &&
+        ok = gpu_dispatch(GPU_MODE_VGS, gpuPhysics.dynamic_voxel_count) &&
              gpu_dispatch_indirect(GPU_MODE_APPLY);
-        if (ok && gpuPhysics.greedy_world)
-            ok = gpu_dispatch(gpuPhysics.floor_island_fast_path ? GPU_MODE_ATTACHMENTS
-                                                                : GPU_MODE_ATTACHMENTS_SERIAL,
-                              gpuPhysics.floor_island_count * 128);
+        for (int attachment_it = 0; ok && gpuPhysics.greedy_world && attachment_it < 2; ++attachment_it)
+            ok = gpu_dispatch(GPU_MODE_ATTACHMENTS, gpuPhysics.compact_count) &&
+                 gpu_dispatch_indirect(GPU_MODE_APPLY);
     }
     if (ok && gpuPhysics.greedy_world) {
         if (gpuPhysics.floor_island_fast_path) {
@@ -1800,12 +1758,12 @@ static bool gpu_dispatch_substep(float sub_dt) {
         ok = gpu_dispatch_indirect_offset(GPU_MODE_STATIC_COLLISIONS, 16);
     }
     for (int it = 0; ok && gpuPhysics.greedy_world && it < 1; ++it) {
-        ok = gpu_dispatch_indirect(GPU_MODE_RESET) &&
-             gpu_dispatch(GPU_MODE_VGS, gpuPhysics.dynamic_voxel_count) &&
-             gpu_dispatch_indirect(GPU_MODE_APPLY) &&
-             gpu_dispatch(gpuPhysics.floor_island_fast_path ? GPU_MODE_ATTACHMENTS_FINAL
-                                                             : GPU_MODE_ATTACHMENTS_SERIAL,
-                          gpuPhysics.floor_island_count * 128);
+        ok = gpu_dispatch(GPU_MODE_VGS, gpuPhysics.dynamic_voxel_count) &&
+             gpu_dispatch_indirect(GPU_MODE_APPLY);
+    }
+    for (int it = 0; ok && gpuPhysics.greedy_world && it < 24; ++it) {
+        ok = gpu_dispatch(GPU_MODE_ATTACHMENTS, gpuPhysics.compact_count) &&
+             gpu_dispatch_indirect(GPU_MODE_APPLY);
     }
     ok = ok && (!gpuPhysics.greedy_world || gpu_dispatch(GPU_MODE_LIFT_GREEDY_FLOOR, 1)) &&
          (gpuPhysics.greedy_world || gpu_dispatch(GPU_MODE_BREAK_MASK, gpuPhysics.dynamic_voxel_count)) &&

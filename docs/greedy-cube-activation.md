@@ -86,13 +86,16 @@ player boxes; terrain and static blocks retain the general static-contact kernel
 
 In the promoted topology, attachment edges are included when building floor
 islands, so floor corrections and their owning coarse controls stay in the same
-island. Interface contacts are direct contacts. The attachment solver performs
-deterministic Gauss–Seidel sweeps over only the promoted rows. Metal and OpenGL
-cache each island's controls in threadgroup memory and execute conflict-free
-attachment batches in order. They run two sweeps after each main VGS iteration
-and eight after the final contact/VGS pass, matching the CPU schedule. Oversized
-islands use a serial global-memory fallback instead of skipping attachments.
-There are no intermediate passive-child refreshes.
+island. Interface contacts are direct contacts. GPU attachments are ordinary
+Jacobi constraints: all promoted rows evaluate in parallel, atomically emit
+mass-weighted endpoint corrections into the original correction buffer, and use
+the original correction-apply kernel. A topology-time attachment-incidence
+diagonal preconditioner prevents high-valence coarse controls from being
+under-relaxed by the apply kernel's averaging. The GPU runs two attachment
+iterations after each main VGS iteration and 24 after the final contact/VGS
+pass. Apply clears the correction buffer, so redundant reset dispatches between
+these passes are elided. Attachment conflict batches and attachment-specific
+threadgroup solvers are no longer built or executed.
 
 For native Metal profiling, `FPS_METAL_GPU_TIME=1` reports command-buffer GPU
 time without inserting counter barriers. `FPS_METAL_STAGE_PROFILE=1` samples
@@ -109,17 +112,20 @@ interpolation attachments with 474 compact source entries. The headless 600-step
 CPU invariant keeps attachment error below `1e-5` unit edges and preserves the
 full material mass. The same invariant executes 600 actual Metal steps in
 eight-step command buffers, checks each batch, and keeps attachment error below
-`1e-5` unit edges with finite state. A direct GPU-timestamp run took 2,641.54 ms
+`1e-5` unit edges with finite state. A direct GPU-timestamp run took 1,786.62 ms
 on the development M2 Pro; this is an invariant-run measurement rather than a
 fine-versus-greedy gameplay benchmark. OpenGL and Metal share the validated
 buffer-slot and pipeline-mode contract; native OpenGL execution must be run on
 a GL 4.3 platform. Visual validation still requires an unlocked desktop session.
 
-The corresponding stage-profile run reported 3,056.04 ms of sampled GPU time.
-Attachments used 914.15 ms (29.91%) during the two-sweep passes and 1,169.01 ms
-(38.25%) during the final eight-sweep pass. Pair contacts used 375.21 ms
-(12.28%), while direct VGS used 137.79 ms (4.51%). Stage profiling inserts
-counter sampling and is intended for proportions rather than headline timing.
+The corresponding stage-profile run reported 3,057.28 ms of sampled GPU time.
+Parallel attachment evaluation used 1,466.82 ms (47.98%), and its shared apply
+passes used part of the 535.62 ms (17.52%) correction-application total. Pair
+contacts used 444.36 ms (14.53%), while direct VGS used 167.26 ms (5.47%). Stage
+profiling inserts counter sampling and is intended for proportions rather than
+headline timing. Compared with the final ordered Gauss–Seidel implementation's
+2,641.54 ms direct run, ordinary Jacobi constraints reduce this invariant run by
+32.4%.
 
 The Metal path now emits child instance matrices from the final GPU particle
 state. On Apple silicon, `DrawMeshInstanced` consumes the shared Metal buffer

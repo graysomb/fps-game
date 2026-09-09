@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { FPS_METAL_PROFILE_STAGE_COUNT = 27, FPS_METAL_PROFILE_MAX_DISPATCHES = 2048 };
+enum { FPS_METAL_PROFILE_STAGE_COUNT = 25, FPS_METAL_PROFILE_MAX_DISPATCHES = 2048 };
 
 typedef struct FpsMetalState {
     id<MTLDevice> device;
@@ -58,8 +58,6 @@ static const char *fps_metal_mode_name(int mode) {
         case GPU_MODE_BUILD_RENDER_MATRICES: return "render-matrices";
         case GPU_MODE_GREEDY_FLOOR_ISLANDS: return "floor-islands";
         case GPU_MODE_ATTACHMENTS: return "attachments";
-        case GPU_MODE_ATTACHMENTS_SERIAL: return "attachments-serial";
-        case GPU_MODE_ATTACHMENTS_FINAL: return "attachments-final";
         default:
             if (mode >= GPU_MODE_GREEDY_FLOOR_BATCH_BASE) return "floor-batch";
             if (mode >= GPU_MODE_STATIC_GREEDY_BATCH_BASE) return "static-batch";
@@ -279,8 +277,7 @@ static bool fps_metal_encode(int mode, int count, id<MTLBuffer> indirect, size_t
         }
         metal_state.uniforms.mode = mode;
         [encoder setBytes:&metal_state.uniforms length:sizeof(metal_state.uniforms) atIndex:FPS_GPU_BUFFER_COUNT];
-        if (mode == GPU_MODE_GREEDY_FLOOR_ISLANDS || mode == GPU_MODE_ATTACHMENTS ||
-            mode == GPU_MODE_ATTACHMENTS_FINAL) {
+        if (mode == GPU_MODE_GREEDY_FLOOR_ISLANDS) {
             const NSUInteger floor_bytes =
                 (NSUInteger)FPS_GPU_MAX_FLOOR_ISLAND_CONTROLS * 2u * sizeof(float) * 4u;
             [encoder setThreadgroupMemoryLength:floor_bytes atIndex:0];
