@@ -414,12 +414,18 @@ static bool gpu_upload_world(void) {
 #if defined(GRAPHICS_API_OPENGL_43)
 static bool gpu_dispatch(int mode, int count) {
     if (count <= 0) return true;
+#ifndef NDEBUG
     while (glGetError() != GL_NO_ERROR) { }
+#endif
     rlSetUniform(gpuPhysics.loc[GPU_LOC_MODE], &mode, SHADER_UNIFORM_INT, 1);
     unsigned int groups = ((unsigned int)count + 127u) / 128u;
     rlComputeShaderDispatch(groups, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+#ifndef NDEBUG
     return glGetError() == GL_NO_ERROR;
+#else
+    return true;
+#endif
 }
 #else
 static bool gpu_dispatch(int mode, int count) { (void)mode; (void)count; return false; }

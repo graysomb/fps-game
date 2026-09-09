@@ -431,6 +431,13 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define PBF_XSPH_VISCOSITY 0.15f
 #define PBF_SURFACE_SPLAT_RADIUS (PBF_PARTICLE_SPACING * 0.9f)
 #define PBF_MAX_POSITION_CORRECTION (PBF_PARTICLE_SPACING * 0.025f)
+#define PBF_H_SQ (PBF_SMOOTHING_RADIUS * PBF_SMOOTHING_RADIUS)
+#define PBF_H_6 (PBF_SMOOTHING_RADIUS * PBF_SMOOTHING_RADIUS * PBF_SMOOTHING_RADIUS * PBF_SMOOTHING_RADIUS * PBF_SMOOTHING_RADIUS * PBF_SMOOTHING_RADIUS)
+#define PBF_H_9 (PBF_H_6 * PBF_SMOOTHING_RADIUS * PBF_SMOOTHING_RADIUS * PBF_SMOOTHING_RADIUS)
+#define PBF_POLY6_COEFF (315.0f / (64.0f * PI * PBF_H_9))
+#define PBF_SPIKY_COEFF (-45.0f / (PI * PBF_H_6))
+#define PBF_SCORR_COEFF (-PBF_SCORR_K * (PBF_PARTICLE_SPACING * PBF_PARTICLE_SPACING))
+#define PBF_MAX_NEIGHBORS 64
 
 typedef enum {
     PARTICLE_MATERIAL_SOLID = 0,
@@ -2269,29 +2276,33 @@ static void build_particle_hash(Particle **list, int count) {
 }
 
 typedef struct {
+    int count;
+    int neighbors[PBF_MAX_NEIGHBORS];
+} PbfNeighborCache;
+
+static PbfNeighborCache *pbf_neighbor_cache = NULL;
+static int pbf_neighbor_cache_capacity = 0;
+
+typedef struct {
     Particle **hash_list;
     int hash_count;
+    bool populate_cache;
 } PbfJob;
 
 static inline float pbf_poly6(float distance_sq) {
-    const float h = PBF_SMOOTHING_RADIUS;
-    const float h_sq = h * h;
-    if (distance_sq < 0.0f || distance_sq >= h_sq) return 0.0f;
-    float term = h_sq - distance_sq;
-    float coefficient = 315.0f / (64.0f * PI * powf(h, 9.0f));
-    return coefficient * term * term * term;
+    if (distance_sq < 0.0f || distance_sq >= PBF_H_SQ) return 0.0f;
+    float term = PBF_H_SQ - distance_sq;
+    return PBF_POLY6_COEFF * term * term * term;
 }
 
 static inline Vector3 pbf_spiky_gradient(Vector3 delta) {
-    const float h = PBF_SMOOTHING_RADIUS;
     float distance_sq = v_dot(delta, delta);
-    if (distance_sq <= 1e-12f || distance_sq >= h * h) {
+    if (distance_sq <= 1e-12f || distance_sq >= PBF_H_SQ) {
         return (Vector3){ 0.0f, 0.0f, 0.0f };
     }
     float distance = sqrtf(distance_sq);
-    float term = h - distance;
-    float coefficient = -45.0f / (PI * powf(h, 6.0f));
-    return v_mul(delta, coefficient * term * term / distance);
+    float term = PBF_SMOOTHING_RADIUS - distance;
+    return v_mul(delta, PBF_SPIKY_COEFF * term * term / distance);
 }
 
 static void pbf_compute_lambda_range(int start, int end, int worker_id, void *user) {
@@ -2304,33 +2315,60 @@ static void pbf_compute_lambda_range(int start, int end, int worker_id, void *us
         float density = 0.0f;
         Vector3 gradient_i = { 0.0f, 0.0f, 0.0f };
         float gradient_sum_sq = 0.0f;
-        for (int dz = -1; dz <= 1; ++dz) {
-            for (int dy = -1; dy <= 1; ++dy) {
-                for (int dx = -1; dx <= 1; ++dx) {
-                    int nx = particle->cell_x + dx;
-                    int ny = particle->cell_y + dy;
-                    int nz = particle->cell_z + dz;
-                    int item = atomic_load_explicit(
-                        &particle_hash_head[particle_hash(nx, ny, nz)], memory_order_relaxed);
-                    for (; item != -1; item = particle_hash_next[item]) {
-                        if (item < 0 || item >= job->hash_count) break;
-                        Particle *neighbor = job->hash_list[item];
-                        if (!neighbor || neighbor->material != PARTICLE_MATERIAL_FLUID ||
-                            neighbor->cell_x != nx || neighbor->cell_y != ny || neighbor->cell_z != nz) {
-                            continue;
-                        }
-                        Vector3 separation = v_sub(particle->predicted_pos, neighbor->predicted_pos);
-                        float distance_sq = v_dot(separation, separation);
-                        density += PBF_PARTICLE_MASS * pbf_poly6(distance_sq);
-                        if (neighbor != particle) {
-                            Vector3 gradient_j = v_mul(pbf_spiky_gradient(separation), -volume);
-                            gradient_sum_sq += v_dot(gradient_j, gradient_j);
-                            gradient_i = v_sub(gradient_i, gradient_j);
+
+        if (job->populate_cache || !pbf_neighbor_cache) {
+            int nb_count = 0;
+            for (int dz = -1; dz <= 1; ++dz) {
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        int nx = particle->cell_x + dx;
+                        int ny = particle->cell_y + dy;
+                        int nz = particle->cell_z + dz;
+                        int item = atomic_load_explicit(
+                            &particle_hash_head[particle_hash(nx, ny, nz)], memory_order_relaxed);
+                        for (; item != -1; item = particle_hash_next[item]) {
+                            if (item < 0 || item >= job->hash_count) break;
+                            Particle *neighbor = job->hash_list[item];
+                            if (!neighbor || neighbor->material != PARTICLE_MATERIAL_FLUID ||
+                                neighbor->cell_x != nx || neighbor->cell_y != ny || neighbor->cell_z != nz) {
+                                continue;
+                            }
+                            Vector3 separation = v_sub(particle->predicted_pos, neighbor->predicted_pos);
+                            float distance_sq = v_dot(separation, separation);
+                            if (distance_sq < PBF_H_SQ) {
+                                if (pbf_neighbor_cache && nb_count < PBF_MAX_NEIGHBORS) {
+                                    pbf_neighbor_cache[fluid_index].neighbors[nb_count++] = item;
+                                }
+                                density += PBF_PARTICLE_MASS * pbf_poly6(distance_sq);
+                                if (neighbor != particle) {
+                                    Vector3 gradient_j = v_mul(pbf_spiky_gradient(separation), -volume);
+                                    gradient_sum_sq += v_dot(gradient_j, gradient_j);
+                                    gradient_i = v_sub(gradient_i, gradient_j);
+                                }
+                            }
                         }
                     }
                 }
             }
+            if (pbf_neighbor_cache) pbf_neighbor_cache[fluid_index].count = nb_count;
+        } else {
+            int nb_count = pbf_neighbor_cache[fluid_index].count;
+            for (int k = 0; k < nb_count; ++k) {
+                int item = pbf_neighbor_cache[fluid_index].neighbors[k];
+                if (item < 0 || item >= job->hash_count) continue;
+                Particle *neighbor = job->hash_list[item];
+                if (!neighbor) continue;
+                Vector3 separation = v_sub(particle->predicted_pos, neighbor->predicted_pos);
+                float distance_sq = v_dot(separation, separation);
+                density += PBF_PARTICLE_MASS * pbf_poly6(distance_sq);
+                if (neighbor != particle) {
+                    Vector3 gradient_j = v_mul(pbf_spiky_gradient(separation), -volume);
+                    gradient_sum_sq += v_dot(gradient_j, gradient_j);
+                    gradient_i = v_sub(gradient_i, gradient_j);
+                }
+            }
         }
+
         gradient_sum_sq += v_dot(gradient_i, gradient_i);
         float constraint = density / PBF_REST_DENSITY - 1.0f;
         particle->pbf_density = density;
@@ -2347,41 +2385,58 @@ static void pbf_compute_delta_range(int start, int end, int worker_id, void *use
         Particle *particle = fluid_particles[fluid_index];
         if (!particle) continue;
         Vector3 delta_sum = { 0.0f, 0.0f, 0.0f };
-        for (int dz = -1; dz <= 1; ++dz) {
-            for (int dy = -1; dy <= 1; ++dy) {
-                for (int dx = -1; dx <= 1; ++dx) {
-                    int nx = particle->cell_x + dx;
-                    int ny = particle->cell_y + dy;
-                    int nz = particle->cell_z + dz;
-                    int item = atomic_load_explicit(
-                        &particle_hash_head[particle_hash(nx, ny, nz)], memory_order_relaxed);
-                    for (; item != -1; item = particle_hash_next[item]) {
-                        if (item < 0 || item >= job->hash_count) break;
-                        Particle *neighbor = job->hash_list[item];
-                        if (!neighbor || neighbor == particle ||
-                            neighbor->material != PARTICLE_MATERIAL_FLUID ||
-                            neighbor->cell_x != nx || neighbor->cell_y != ny || neighbor->cell_z != nz) {
-                            continue;
+        if (pbf_neighbor_cache) {
+            int nb_count = pbf_neighbor_cache[fluid_index].count;
+            for (int k = 0; k < nb_count; ++k) {
+                int item = pbf_neighbor_cache[fluid_index].neighbors[k];
+                if (item < 0 || item >= job->hash_count) continue;
+                Particle *neighbor = job->hash_list[item];
+                if (!neighbor || neighbor == particle ||
+                    neighbor->material != PARTICLE_MATERIAL_FLUID) {
+                    continue;
+                }
+                Vector3 separation = v_sub(particle->predicted_pos, neighbor->predicted_pos);
+                float distance_sq = v_dot(separation, separation);
+                float kernel = pbf_poly6(distance_sq);
+                if (kernel <= 0.0f) continue;
+                float ratio = (reference_kernel > 0.0f) ? kernel / reference_kernel : 0.0f;
+                float ratio_sq = ratio * ratio;
+                float scorr = PBF_SCORR_COEFF * (ratio_sq * ratio_sq);
+                float scale = volume * (particle->pbf_lambda + neighbor->pbf_lambda + scorr);
+                delta_sum = v_add(delta_sum, v_mul(pbf_spiky_gradient(separation), scale));
+            }
+        } else {
+            for (int dz = -1; dz <= 1; ++dz) {
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        int nx = particle->cell_x + dx;
+                        int ny = particle->cell_y + dy;
+                        int nz = particle->cell_z + dz;
+                        int item = atomic_load_explicit(
+                            &particle_hash_head[particle_hash(nx, ny, nz)], memory_order_relaxed);
+                        for (; item != -1; item = particle_hash_next[item]) {
+                            if (item < 0 || item >= job->hash_count) break;
+                            Particle *neighbor = job->hash_list[item];
+                            if (!neighbor || neighbor == particle ||
+                                neighbor->material != PARTICLE_MATERIAL_FLUID ||
+                                neighbor->cell_x != nx || neighbor->cell_y != ny || neighbor->cell_z != nz) {
+                                continue;
+                            }
+                            Vector3 separation = v_sub(particle->predicted_pos, neighbor->predicted_pos);
+                            float distance_sq = v_dot(separation, separation);
+                            float kernel = pbf_poly6(distance_sq);
+                            if (kernel <= 0.0f) continue;
+                            float ratio = (reference_kernel > 0.0f) ? kernel / reference_kernel : 0.0f;
+                            float ratio_sq = ratio * ratio;
+                            float scorr = PBF_SCORR_COEFF * (ratio_sq * ratio_sq);
+                            float scale = volume * (particle->pbf_lambda + neighbor->pbf_lambda + scorr);
+                            delta_sum = v_add(delta_sum, v_mul(pbf_spiky_gradient(separation), scale));
                         }
-                        Vector3 separation = v_sub(particle->predicted_pos, neighbor->predicted_pos);
-                        float distance_sq = v_dot(separation, separation);
-                        float kernel = pbf_poly6(distance_sq);
-                        if (kernel <= 0.0f) continue;
-                        float ratio = (reference_kernel > 0.0f) ? kernel / reference_kernel : 0.0f;
-                        // k is dimensionless in the normalized paper formulation; spacing^2
-                        // keeps it commensurate with lambda in world-space metre units.
-                        float scorr = -PBF_SCORR_K *
-                                      (PBF_PARTICLE_SPACING * PBF_PARTICLE_SPACING) *
-                                      powf(ratio, PBF_SCORR_N);
-                        float scale = volume * (particle->pbf_lambda + neighbor->pbf_lambda + scorr);
-                        delta_sum = v_add(delta_sum, v_mul(pbf_spiky_gradient(separation), scale));
                     }
                 }
             }
         }
         float delta_length = v_length(delta_sum);
-        // Dense boundary layers can otherwise cross in one Jacobi iteration and
-        // turn a constraint correction into an explosive velocity on the next step.
         if (delta_length > PBF_MAX_POSITION_CORRECTION) {
             delta_sum = v_mul(delta_sum, PBF_MAX_POSITION_CORRECTION / delta_length);
         }
@@ -2402,11 +2457,24 @@ static void pbf_apply_position_delta_range(int start, int end, int worker_id, vo
 
 static void solve_pbf_density_constraints(Particle **hash_list, int hash_count) {
     if (fluid_particle_count <= 0) return;
-    PbfJob job = { .hash_list = hash_list, .hash_count = hash_count };
+    if (fluid_particle_count > pbf_neighbor_cache_capacity) {
+        int new_cap = fluid_particle_count + 256;
+        PbfNeighborCache *new_cache = (PbfNeighborCache *)realloc(pbf_neighbor_cache, (size_t)new_cap * sizeof(PbfNeighborCache));
+        if (new_cache) {
+            pbf_neighbor_cache = new_cache;
+            pbf_neighbor_cache_capacity = new_cap;
+        }
+    }
+    PbfJob job = { .hash_list = hash_list, .hash_count = hash_count, .populate_cache = true };
     for (int iteration = 0; iteration < PBF_DENSITY_ITERS; ++iteration) {
+        job.populate_cache = (iteration == 0);
         pbd_parallel_for(0, fluid_particle_count, pbf_compute_lambda_range, &job);
         pbd_parallel_for(0, fluid_particle_count, pbf_compute_delta_range, &job);
-        pbd_parallel_for(0, fluid_particle_count, pbf_apply_position_delta_range, NULL);
+        if (fluid_particle_count < 1024) {
+            pbf_apply_position_delta_range(0, fluid_particle_count, -1, NULL);
+        } else {
+            pbd_parallel_for(0, fluid_particle_count, pbf_apply_position_delta_range, NULL);
+        }
         solve_fluid_static_collisions();
     }
 }
@@ -2418,28 +2486,47 @@ static void pbf_compute_viscosity_range(int start, int end, int worker_id, void 
         Particle *particle = fluid_particles[fluid_index];
         if (!particle) continue;
         Vector3 velocity_delta = { 0.0f, 0.0f, 0.0f };
-        for (int dz = -1; dz <= 1; ++dz) {
-            for (int dy = -1; dy <= 1; ++dy) {
-                for (int dx = -1; dx <= 1; ++dx) {
-                    int nx = particle->cell_x + dx;
-                    int ny = particle->cell_y + dy;
-                    int nz = particle->cell_z + dz;
-                    int item = atomic_load_explicit(
-                        &particle_hash_head[particle_hash(nx, ny, nz)], memory_order_relaxed);
-                    for (; item != -1; item = particle_hash_next[item]) {
-                        if (item < 0 || item >= job->hash_count) break;
-                        Particle *neighbor = job->hash_list[item];
-                        if (!neighbor || neighbor == particle ||
-                            neighbor->material != PARTICLE_MATERIAL_FLUID ||
-                            neighbor->cell_x != nx || neighbor->cell_y != ny || neighbor->cell_z != nz) {
-                            continue;
+        if (pbf_neighbor_cache) {
+            int nb_count = pbf_neighbor_cache[fluid_index].count;
+            for (int k = 0; k < nb_count; ++k) {
+                int item = pbf_neighbor_cache[fluid_index].neighbors[k];
+                if (item < 0 || item >= job->hash_count) continue;
+                Particle *neighbor = job->hash_list[item];
+                if (!neighbor || neighbor == particle ||
+                    neighbor->material != PARTICLE_MATERIAL_FLUID) {
+                    continue;
+                }
+                Vector3 separation = v_sub(particle->pos, neighbor->pos);
+                float kernel = pbf_poly6(v_dot(separation, separation));
+                float density = fmaxf(neighbor->pbf_density, PBF_REST_DENSITY * 0.1f);
+                float scale = PBF_XSPH_VISCOSITY * PBF_PARTICLE_MASS * kernel / density;
+                velocity_delta = v_add(velocity_delta,
+                                       v_mul(v_sub(neighbor->vel, particle->vel), scale));
+            }
+        } else {
+            for (int dz = -1; dz <= 1; ++dz) {
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        int nx = particle->cell_x + dx;
+                        int ny = particle->cell_y + dy;
+                        int nz = particle->cell_z + dz;
+                        int item = atomic_load_explicit(
+                            &particle_hash_head[particle_hash(nx, ny, nz)], memory_order_relaxed);
+                        for (; item != -1; item = particle_hash_next[item]) {
+                            if (item < 0 || item >= job->hash_count) break;
+                            Particle *neighbor = job->hash_list[item];
+                            if (!neighbor || neighbor == particle ||
+                                neighbor->material != PARTICLE_MATERIAL_FLUID ||
+                                neighbor->cell_x != nx || neighbor->cell_y != ny || neighbor->cell_z != nz) {
+                                continue;
+                            }
+                            Vector3 separation = v_sub(particle->pos, neighbor->pos);
+                            float kernel = pbf_poly6(v_dot(separation, separation));
+                            float density = fmaxf(neighbor->pbf_density, PBF_REST_DENSITY * 0.1f);
+                            float scale = PBF_XSPH_VISCOSITY * PBF_PARTICLE_MASS * kernel / density;
+                            velocity_delta = v_add(velocity_delta,
+                                                   v_mul(v_sub(neighbor->vel, particle->vel), scale));
                         }
-                        Vector3 separation = v_sub(particle->pos, neighbor->pos);
-                        float kernel = pbf_poly6(v_dot(separation, separation));
-                        float density = fmaxf(neighbor->pbf_density, PBF_REST_DENSITY * 0.1f);
-                        float scale = PBF_XSPH_VISCOSITY * PBF_PARTICLE_MASS * kernel / density;
-                        velocity_delta = v_add(velocity_delta,
-                                               v_mul(v_sub(neighbor->vel, particle->vel), scale));
                     }
                 }
             }
@@ -2461,9 +2548,13 @@ static void pbf_apply_viscosity_range(int start, int end, int worker_id, void *u
 
 static void apply_pbf_viscosity(Particle **hash_list, int hash_count) {
     if (fluid_particle_count <= 0) return;
-    PbfJob job = { .hash_list = hash_list, .hash_count = hash_count };
+    PbfJob job = { .hash_list = hash_list, .hash_count = hash_count, .populate_cache = false };
     pbd_parallel_for(0, fluid_particle_count, pbf_compute_viscosity_range, &job);
-    pbd_parallel_for(0, fluid_particle_count, pbf_apply_viscosity_range, NULL);
+    if (fluid_particle_count < 1024) {
+        pbf_apply_viscosity_range(0, fluid_particle_count, -1, NULL);
+    } else {
+        pbd_parallel_for(0, fluid_particle_count, pbf_apply_viscosity_range, NULL);
+    }
 }
 
 static inline void accumulate_particle_correction(Particle *p, Vector3 delta, float weight) {
@@ -14653,6 +14744,11 @@ int main(int argc, char **argv) {
     }
     shutdown_pbd_thread_pool();
     gpu_physics_shutdown();
+    if (pbf_neighbor_cache) {
+        free(pbf_neighbor_cache);
+        pbf_neighbor_cache = NULL;
+        pbf_neighbor_cache_capacity = 0;
+    }
     // cleanup
     for (int i = 0; i < renderPlayers; ++i) {
         if (screens[i].id != 0) {
