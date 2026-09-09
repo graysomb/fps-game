@@ -12281,6 +12281,7 @@ static bool cull_dust_voxels(void) {
     return removed_any;
 }
 
+#include "greedy_coarse.inc"
 #include "physics_gpu_common.inc"
 
 static void select_cpu_physics_backend(void) {
@@ -12332,11 +12333,6 @@ static bool initialize_physics_backend(void) {
     if (!physicsBackend.initialized) {
         select_cpu_physics_backend();
         physicsBackend.initialized = true;
-    }
-    if (greedyActivationCubes && physics_backend_is_gpu(physicsBackend.active)) {
-        snprintf(physicsBackend.fallback_reason, sizeof(physicsBackend.fallback_reason),
-                 "--activation-cubes=greedy requires --physics=cpu-st or cpu-mt");
-        return false;
     }
     if (physicsReportRequested) {
         fprintf(stderr, "physics requested=%s active=%s workers=%d gpuCompiled=%d gpuAvailable=%d%s%s\n",
@@ -12604,7 +12600,6 @@ static void resolve_tether_throw_ccd_snapshots(const TetherThrowCcdSnapshot *sna
 }
 
 #include "coarse_children.inc"
-#include "greedy_coarse.inc"
 
 static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
     if (sim_particle_count <= 0) {
@@ -14635,11 +14630,16 @@ static void DrawVoxels(Camera3D cam) {
     
     // Instanced drawing for dynamic voxels
     instanceTransformsCount = 0;
+    int residentGreedyCount = 0;
+    const Matrix *residentGreedyTransforms =
+        gpu_resident_greedy_render_matrices(&residentGreedyCount);
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
         if (!v->simulate) {
             continue;
         }
+        if (residentGreedyTransforms && i >= greedyCoarse.child_begin &&
+            i < greedyCoarse.child_begin + greedyCoarse.child_count) continue;
         
         // Draw Bullet with Orb Shader
         if (v->isBullet && v->type == 0) {
@@ -14731,6 +14731,10 @@ static void DrawVoxels(Camera3D cam) {
         }
     }
     
+    if (residentGreedyCount > 0) {
+        DrawMeshInstanced(voxelMesh, instancedMaterial,
+                          residentGreedyTransforms, residentGreedyCount);
+    }
     if (instanceTransformsCount > 0) {
         DrawMeshInstanced(voxelMesh, instancedMaterial, instanceTransforms, instanceTransformsCount);
     }

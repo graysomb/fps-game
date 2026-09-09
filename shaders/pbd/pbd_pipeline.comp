@@ -27,6 +27,16 @@ struct StaticCollider {
     vec4 bounds_min;
     vec4 bounds_max;
 };
+struct DependencyHeader { uint offset, count, flags, padding; };
+struct DependencyEntry { uint source; float weight, correctionWeight, padding; };
+struct RenderVoxel { uvec4 particle_0_3; uvec4 particle_4_7; vec4 color; };
+struct RenderMatrix { vec4 row0; vec4 row1; vec4 row2; vec4 row3; };
+struct FloorIsland {
+    uint controlOffset, controlCount, contactOffset, contactCount;
+    uint batchCount, flags, padding0, padding1;
+};
+struct FloorContact { uint particle, batch, padding0, padding1; };
+struct FloorControlMap { uint island, local, padding0, padding1; };
 
 layout(std430, binding = 0) buffer ParticleBuffer { ParticleState particle[]; };
 layout(std430, binding = 1) buffer CorrectionBuffer { uvec4 correction[]; };
@@ -44,6 +54,16 @@ layout(std430, binding = 12) buffer ControlBuffer { ivec4 gpuControl; };
 layout(std430, binding = 13) buffer CloneParentBuffer { int cloneParent[]; };
 layout(std430, binding = 14) buffer DispatchBuffer { uint dispatchArgs[]; };
 layout(std430, binding = 15) buffer TopologyBuffer { ivec4 topology[]; };
+layout(std430, binding = 16) readonly buffer DependencyHeaderBuffer { DependencyHeader dependencyHeader[]; };
+layout(std430, binding = 17) readonly buffer DependencyEntryBuffer { DependencyEntry dependencyEntry[]; };
+layout(std430, binding = 18) buffer StaticMappedCorrectionBuffer { uvec4 staticMappedCorrection[]; };
+layout(std430, binding = 19) readonly buffer RenderVoxelBuffer { RenderVoxel renderVoxel[]; };
+layout(std430, binding = 20) buffer RenderMatrixBuffer { RenderMatrix renderMatrix[]; };
+layout(std430, binding = 21) readonly buffer CollisionBatchBuffer { uint collisionBatch[]; };
+layout(std430, binding = 22) readonly buffer FloorIslandBuffer { FloorIsland floorIsland[]; };
+layout(std430, binding = 23) readonly buffer FloorControlIdBuffer { uint floorControlId[]; };
+layout(std430, binding = 24) readonly buffer FloorContactBuffer { FloorContact floorContact[]; };
+layout(std430, binding = 25) readonly buffer FloorControlMapBuffer { FloorControlMap floorControlMap[]; };
 
 uniform int uMode;
 uniform int uParticleCount;
@@ -89,11 +109,43 @@ const int MODE_PREPARE_INDIRECT = 13;
 const int MODE_WAKE_GATHER = 14;
 const int MODE_WAKE_APPLY = 15;
 const int MODE_TOPOLOGY_REBUILD_SERIAL = 16;
+const int MODE_REFRESH_DEPENDENCIES = 17;
+const int MODE_FINALIZE_DEPENDENCIES = 18;
+const int MODE_LIFT_GREEDY_FLOOR = 19;
+const int MODE_RESET_STATIC_MAPPED = 20;
+const int MODE_APPLY_STATIC_MAPPED = 21;
+const int MODE_BUILD_RENDER_MATRICES = 22;
+const int MODE_GREEDY_FLOOR_ISLANDS = 23;
+const int MODE_STATIC_GREEDY_BATCH_BASE = 100;
+const int MODE_GREEDY_FLOOR_BATCH_BASE = 1000;
+const uint MAX_FLOOR_ISLAND_CONTROLS = 512u;
 const int CONTROL_FLAG_OVERFLOW = 1;
 const int CONTROL_FLAG_TOPOLOGY_DIRTY = 2;
 
 uint voxelParticle(VoxelState v, int corner) {
     return (corner < 4) ? v.particle_0_3[corner] : v.particle_4_7[corner - 4];
+}
+
+uint renderVoxelParticle(RenderVoxel v, int corner) {
+    return (corner < 4) ? v.particle_0_3[corner] : v.particle_4_7[corner - 4];
+}
+
+void buildRenderMatrix(uint gid) {
+    if (gid >= dispatchArgs[14]) return;
+    RenderVoxel v = renderVoxel[gid];
+    vec3 p[8]; vec3 center = vec3(0.0);
+    for (int i = 0; i < 8; ++i) {
+        p[i] = particle[renderVoxelParticle(v, i)].pos_radius.xyz;
+        center += p[i];
+    }
+    center *= 0.125;
+    vec3 xAxis = p[1] - p[0], yAxis = p[2] - p[0], zAxis = p[4] - p[0];
+    RenderMatrix m;
+    m.row0 = vec4(xAxis.x, yAxis.x, zAxis.x, center.x);
+    m.row1 = vec4(xAxis.y, yAxis.y, zAxis.y, center.y);
+    m.row2 = vec4(xAxis.z, yAxis.z, zAxis.z, center.z);
+    m.row3 = vec4(v.color.rgb, 1.0);
+    renderMatrix[gid] = m;
 }
 
 uint hashCoord(ivec3 c, int size) {
@@ -115,12 +167,97 @@ void atomicAddCorrection(uint id, int component, float value) {
     }
 }
 
+void atomicAddStaticMapped(uint id, int component, float value) {
+    if (value == 0.0) return;
+    uint slot = id * 2u + uint(component >> 2);
+    int lane = component & 3;
+    uint expected = staticMappedCorrection[slot][lane];
+    for (;;) {
+        float current = uintBitsToFloat(expected);
+        uint desired = floatBitsToUint(current + value);
+        uint observed = atomicCompSwap(staticMappedCorrection[slot][lane], expected, desired);
+        if (observed == expected) return;
+        expected = observed;
+    }
+}
+
+void resetStaticMapped(uint gid) {
+    if (gid >= uint(gpuControl.x)) return;
+    staticMappedCorrection[gid * 2u] = uvec4(0u);
+    staticMappedCorrection[gid * 2u + 1u] = uvec4(0u);
+}
+
+void applyStaticMapped(uint gid) {
+    if (gid >= uint(gpuControl.x)) return;
+    ParticleState p = particle[gid];
+    uvec4 predicted = staticMappedCorrection[gid * 2u];
+    uvec4 previous = staticMappedCorrection[gid * 2u + 1u];
+    p.predicted_base_inv_mass.xyz += vec3(uintBitsToFloat(predicted.x),
+                                          uintBitsToFloat(predicted.y),
+                                          uintBitsToFloat(predicted.z));
+    p.prev_inv_mass.xyz += vec3(uintBitsToFloat(previous.x),
+                                uintBitsToFloat(previous.y),
+                                uintBitsToFloat(previous.z));
+    particle[gid] = p;
+}
+
 void accumulate(uint id, vec3 delta, float weight) {
     if (weight <= 0.0 || id >= uint(gpuControl.x)) return;
+    DependencyHeader header = dependencyHeader[id];
+    if ((header.flags & 3u) == 3u) {
+        for (uint k = 0u; k < header.count; ++k) {
+            DependencyEntry entry = dependencyEntry[header.offset + k];
+            if (entry.correctionWeight <= 0.0 || entry.source >= uint(gpuControl.x)) continue;
+            atomicAddCorrection(entry.source, 0, delta.x * weight * entry.correctionWeight);
+            atomicAddCorrection(entry.source, 1, delta.y * weight * entry.correctionWeight);
+            atomicAddCorrection(entry.source, 2, delta.z * weight * entry.correctionWeight);
+            atomicAddCorrection(entry.source, 3, weight);
+        }
+        return;
+    }
     atomicAddCorrection(id, 0, delta.x * weight);
     atomicAddCorrection(id, 1, delta.y * weight);
     atomicAddCorrection(id, 2, delta.z * weight);
     atomicAddCorrection(id, 3, weight);
+}
+
+void refreshDependency(uint gid, bool finalize) {
+    if (gid >= uint(gpuControl.x)) return;
+    DependencyHeader header = dependencyHeader[gid];
+    if ((header.flags & 1u) == 0u || (!finalize && (header.flags & 2u) == 0u)) return;
+    vec3 predicted = vec3(0.0), pos = vec3(0.0), prev = vec3(0.0), velocity = vec3(0.0);
+    for (uint k = 0u; k < header.count; ++k) {
+        DependencyEntry entry = dependencyEntry[header.offset + k];
+        ParticleState source = particle[entry.source];
+        predicted += source.predicted_base_inv_mass.xyz * entry.weight;
+        if (finalize) {
+            pos += source.pos_radius.xyz * entry.weight;
+            prev += source.prev_inv_mass.xyz * entry.weight;
+            velocity += source.velocity.xyz * entry.weight;
+        }
+    }
+    particle[gid].predicted_base_inv_mass.xyz = predicted;
+    if (finalize) {
+        particle[gid].pos_radius.xyz = pos;
+        particle[gid].prev_inv_mass.xyz = prev;
+        particle[gid].velocity.xyz = velocity;
+    }
+}
+
+void liftGreedyFloor(uint gid) {
+    if (gid != 0u) return;
+    float minY = 0.0;
+    for (uint i = 0u; i < dispatchArgs[8]; ++i) {
+        uint id = simId[uint(gpuControl.z) + i];
+        minY = min(minY, particle[id].predicted_base_inv_mass.y);
+    }
+    if (minY >= 0.0) return;
+    float lift = -minY;
+    for (uint i = 0u; i < uint(gpuControl.y); ++i) {
+        uint id = simId[i];
+        if ((dependencyHeader[id].flags & 4u) != 0u)
+            particle[id].predicted_base_inv_mass.y += lift;
+    }
 }
 
 vec3 projectOnto(vec3 onto, vec3 value) {
@@ -166,7 +303,8 @@ void buildHash(uint gid) {
     if (gid >= dispatchArgs[8]) return;
     uint id = simId[uint(gpuControl.z) + gid];
     if (particleRefcount[id] <= 0) return;
-    ivec3 c = ivec3(floor(particle[id].predicted_base_inv_mass.xyz / uVoxelSize));
+    float collisionCellSize = max(uVoxelSize, uintBitsToFloat(dispatchArgs[13]));
+    ivec3 c = ivec3(floor(particle[id].predicted_base_inv_mass.xyz / collisionCellSize));
     cell[id].xyz = c;
     uint h = hashCoord(c, uHashSize);
     hashNext[gid] = atomicExchange(hashHead[h], int(gid));
@@ -392,23 +530,26 @@ vec3 pushOutOfPatch(vec3 pos, float radius, StaticCollider surfacePatch) {
     return pos + direction * (radius - distance);
 }
 
-void staticCollisions(uint gid) {
+void staticCollisions(uint gid, int batch) {
     if (gid >= dispatchArgs[8]) return;
+    if (batch >= 0 && collisionBatch[gid] != uint(batch)) return;
     uint id = simId[uint(gpuControl.z) + gid];
     if (particleRefcount[id] <= 0) return;
     ParticleState p = particle[id];
     if (p.prev_inv_mass.w <= 0.0) return;
     float radius = p.pos_radius.w;
+    float staticRadius = 0.5 * radius;
     vec3 pos = p.predicted_base_inv_mass.xyz;
+    vec3 previousBefore = p.prev_inv_mass.xyz;
     float terrainLimit = uFloorSize - radius;
-    float floorLimit = max(0.0, 0.5 * uVoxelSize - radius);
-    bool floorContact = pos.y < floorLimit;
-    pos.y = max(pos.y, floorLimit);
+    float floorLimit = 0.0;
+    bool floorContact = batch < 0 && pos.y < floorLimit;
+    if (batch < 0) pos.y = max(pos.y, floorLimit);
     if (floorContact) p.prev_inv_mass.xz = pos.xz -
         (pos.xz - p.prev_inv_mass.xz) * 0.05;
     pos.xz = clamp(pos.xz, vec2(-terrainLimit), vec2(terrainLimit));
     const float eps = 1e-6;
-    for (int i = 0; i < uActivePlayers && i < 4; ++i) {
+    for (int i = 0; batch < 0 && i < uActivePlayers && i < 4; ++i) {
         if (uPlayerPosHalf[i].w < 0.0) continue;
         float halfSize = uPlayerPosHalf[i].w;
         vec3 nearest = clamp(pos, uPlayerPosHalf[i].xyz - vec3(halfSize),
@@ -422,13 +563,14 @@ void staticCollisions(uint gid) {
         }
     }
     ivec3 center = ivec3(floor(pos / uVoxelSize));
-    int seen[128]; int seenCount = 0;
-    for (int z=-1; z<=1; ++z) for (int y=-1; y<=1; ++y) for (int x=-1; x<=1; ++x) {
+    int seen[256]; int seenCount = 0;
+    int staticReach = max(1, int(ceil(staticRadius / uVoxelSize)));
+    for (int z=-staticReach; z<=staticReach; ++z) for (int y=-staticReach; y<=staticReach; ++y) for (int x=-staticReach; x<=staticReach; ++x) {
         int item = findStaticCell(center + ivec3(x,y,z));
         if (dispatchArgs[12] == 0u && item <= -2) {
             int colliderId = -item - 2;
             if (colliderId >= 0 && colliderId < uStaticColliderCount)
-                pos = pushOutOfBox(pos, 0.25 * uVoxelSize, staticCollider[colliderId]);
+                pos = pushOutOfBox(pos, staticRadius, staticCollider[colliderId]);
             continue;
         }
         while (item >= 0 && item < uStaticColliderCount) {
@@ -436,9 +578,9 @@ void staticCollisions(uint gid) {
             int patchId = floatBitsToInt(surfacePatch.bounds_min.w);
             bool duplicate = false;
             for (int s=0; s<seenCount; ++s) duplicate = duplicate || (seen[s] == patchId);
-            if (!duplicate && seenCount < 128) {
+            if (!duplicate && seenCount < 256) {
                 seen[seenCount++] = patchId;
-                pos = pushOutOfPatch(pos, 0.25 * uVoxelSize, surfacePatch);
+                pos = pushOutOfPatch(pos, staticRadius, surfacePatch);
             }
             item = floatBitsToInt(surfacePatch.center.w);
         }
@@ -448,10 +590,159 @@ void staticCollisions(uint gid) {
     if (recovery <= -2) {
         int colliderId = -recovery - 2;
         if (colliderId >= 0 && colliderId < uStaticColliderCount)
-            pos = pushOutOfBox(pos, 0.25 * uVoxelSize, staticCollider[colliderId]);
+            pos = pushOutOfBox(pos, staticRadius, staticCollider[colliderId]);
     }
-    p.predicted_base_inv_mass.xyz = pos;
-    particle[id] = p;
+    DependencyHeader header = dependencyHeader[id];
+    bool mapped = (header.flags & 3u) == 3u;
+    if (mapped && batch >= 0) {
+        vec3 predictedDelta = pos - p.predicted_base_inv_mass.xyz;
+        vec3 previousDelta = p.prev_inv_mass.xyz - previousBefore;
+        for (uint k = 0u; k < header.count; ++k) {
+            DependencyEntry entry = dependencyEntry[header.offset + k];
+            if (entry.correctionWeight <= 0.0 || entry.source >= uint(gpuControl.x)) continue;
+            particle[entry.source].predicted_base_inv_mass.xyz += predictedDelta * entry.correctionWeight;
+            particle[entry.source].prev_inv_mass.xyz += previousDelta * entry.correctionWeight;
+        }
+    } else if (mapped) {
+        accumulate(id, pos - p.predicted_base_inv_mass.xyz, 1.0);
+    } else {
+        p.predicted_base_inv_mass.xyz = pos;
+        particle[id] = p;
+    }
+}
+
+void floorCollisionGlobal(uint gid, int batch) {
+    if (gid >= dispatchArgs[8] || collisionBatch[gid] != uint(batch)) return;
+    uint id = simId[uint(gpuControl.z) + gid];
+    if (particleRefcount[id] <= 0) return;
+    ParticleState p = particle[id];
+    if (p.prev_inv_mass.w <= 0.0) return;
+    vec3 pos = p.predicted_base_inv_mass.xyz, previous = p.prev_inv_mass.xyz;
+    float terrainLimit = uFloorSize - p.pos_radius.w;
+    pos.xz = clamp(pos.xz, vec2(-terrainLimit), vec2(terrainLimit));
+    if (pos.y < 0.0) {
+        pos.y = 0.0;
+        previous.xz = pos.xz - (pos.xz - previous.xz) * 0.05;
+    }
+    const float eps = 1e-6;
+    for (int i = 0; i < uActivePlayers && i < 4; ++i) {
+        if (uPlayerPosHalf[i].w < 0.0) continue;
+        float halfSize = uPlayerPosHalf[i].w;
+        vec3 nearest = clamp(pos, uPlayerPosHalf[i].xyz - vec3(halfSize),
+                                  uPlayerPosHalf[i].xyz + vec3(halfSize));
+        vec3 delta = pos - nearest;
+        float distSq = dot(delta, delta);
+        if (distSq < p.pos_radius.w * p.pos_radius.w) {
+            float dist = sqrt(max(distSq, eps));
+            vec3 normal = dist > eps ? delta / dist : vec3(0.0, 1.0, 0.0);
+            pos += normal * (p.pos_radius.w - dist);
+        }
+    }
+    DependencyHeader header = dependencyHeader[id];
+    bool mapped = (header.flags & 3u) == 3u;
+    if (mapped) {
+        vec3 predictedDelta = pos - p.predicted_base_inv_mass.xyz;
+        vec3 previousDelta = previous - p.prev_inv_mass.xyz;
+        for (uint k = 0u; k < header.count; ++k) {
+            DependencyEntry entry = dependencyEntry[header.offset + k];
+            if (entry.correctionWeight <= 0.0 || entry.source >= uint(gpuControl.x)) continue;
+            particle[entry.source].predicted_base_inv_mass.xyz += predictedDelta * entry.correctionWeight;
+            particle[entry.source].prev_inv_mass.xyz += previousDelta * entry.correctionWeight;
+        }
+    } else {
+        p.predicted_base_inv_mass.xyz = pos;
+        p.prev_inv_mass.xyz = previous;
+        particle[id] = p;
+    }
+}
+
+shared vec4 floorState[1024];
+
+vec3 floorIslandPoint(uint point, bool previous, uint island) {
+    DependencyHeader header = dependencyHeader[point];
+    bool mapped = (header.flags & 3u) == 3u;
+    if (!mapped) {
+        FloorControlMap map = floorControlMap[point];
+        return map.island == island && map.local < MAX_FLOOR_ISLAND_CONTROLS
+            ? floorState[(previous ? MAX_FLOOR_ISLAND_CONTROLS : 0u) + map.local].xyz
+            : vec3(0.0);
+    }
+    vec3 value = vec3(0.0);
+    for (uint k = 0u; k < header.count; ++k) {
+        DependencyEntry entry = dependencyEntry[header.offset + k];
+        FloorControlMap map = floorControlMap[entry.source];
+        if (map.island != island || map.local >= MAX_FLOOR_ISLAND_CONTROLS) continue;
+        value += floorState[(previous ? MAX_FLOOR_ISLAND_CONTROLS : 0u) + map.local].xyz * entry.weight;
+    }
+    return value;
+}
+
+void greedyFloorIsland(uint island, uint lane) {
+    FloorIsland header = floorIsland[island];
+    if (header.controlCount > MAX_FLOOR_ISLAND_CONTROLS) return;
+    for (uint local = lane; local < header.controlCount; local += 128u) {
+        uint id = floorControlId[header.controlOffset + local];
+        floorState[local] = particle[id].predicted_base_inv_mass;
+        floorState[MAX_FLOOR_ISLAND_CONTROLS + local] = particle[id].prev_inv_mass;
+    }
+    barrier();
+    for (uint batch = 0u; batch < header.batchCount; ++batch) {
+        for (uint c = lane; c < header.contactCount; c += 128u) {
+            FloorContact contact = floorContact[header.contactOffset + c];
+            if (contact.batch != batch) continue;
+            uint point = contact.particle;
+            vec3 predicted = floorIslandPoint(point, false, island);
+            vec3 previous = floorIslandPoint(point, true, island);
+            vec3 solved = predicted, solvedPrevious = previous;
+            float radius = particle[point].pos_radius.w;
+            float terrainLimit = uFloorSize - radius;
+            solved.xz = clamp(solved.xz, vec2(-terrainLimit), vec2(terrainLimit));
+            if (solved.y < 0.0) {
+                solved.y = 0.0;
+                solvedPrevious.xz = solved.xz - (solved.xz - solvedPrevious.xz) * 0.05;
+            }
+            const float eps = 1e-6;
+            for (int i = 0; i < uActivePlayers && i < 4; ++i) {
+                if (uPlayerPosHalf[i].w < 0.0) continue;
+                float halfSize = uPlayerPosHalf[i].w;
+                vec3 nearest = clamp(solved, uPlayerPosHalf[i].xyz - vec3(halfSize),
+                                             uPlayerPosHalf[i].xyz + vec3(halfSize));
+                vec3 delta = solved - nearest;
+                float distSq = dot(delta, delta);
+                if (distSq < radius * radius) {
+                    float dist = sqrt(max(distSq, eps));
+                    vec3 normal = dist > eps ? delta / dist : vec3(0.0, 1.0, 0.0);
+                    solved += normal * (radius - dist);
+                }
+            }
+            DependencyHeader dependency = dependencyHeader[point];
+            bool mapped = (dependency.flags & 3u) == 3u;
+            if (mapped) {
+                vec3 predictedDelta = solved - predicted;
+                vec3 previousDelta = solvedPrevious - previous;
+                for (uint k = 0u; k < dependency.count; ++k) {
+                    DependencyEntry entry = dependencyEntry[dependency.offset + k];
+                    FloorControlMap map = floorControlMap[entry.source];
+                    if (map.island != island || map.local >= header.controlCount) continue;
+                    floorState[map.local].xyz += predictedDelta * entry.correctionWeight;
+                    floorState[MAX_FLOOR_ISLAND_CONTROLS + map.local].xyz +=
+                        previousDelta * entry.correctionWeight;
+                }
+            } else {
+                FloorControlMap map = floorControlMap[point];
+                if (map.island == island && map.local < header.controlCount) {
+                    floorState[map.local].xyz = solved;
+                    floorState[MAX_FLOOR_ISLAND_CONTROLS + map.local].xyz = solvedPrevious;
+                }
+            }
+        }
+        barrier();
+    }
+    for (uint local = lane; local < header.controlCount; local += 128u) {
+        uint id = floorControlId[header.controlOffset + local];
+        particle[id].predicted_base_inv_mass.xyz = floorState[local].xyz;
+        particle[id].prev_inv_mass.xyz = floorState[MAX_FLOOR_ISLAND_CONTROLS + local].xyz;
+    }
 }
 
 int topologyNeighbor(int voxelId, int face);
@@ -748,7 +1039,7 @@ void main() {
     else if (uMode==MODE_PAIR_COLLISIONS) pairCollisions(gid);
     else if (uMode==MODE_APPLY) applyCorrections(gid);
     else if (uMode==MODE_VGS) solveVgs(gid);
-    else if (uMode==MODE_STATIC_COLLISIONS) staticCollisions(gid);
+    else if (uMode==MODE_STATIC_COLLISIONS) staticCollisions(gid, -1);
     else if (uMode==MODE_BREAK_MASK) gatherBreakMask(gid);
     else if (uMode==MODE_FINALIZE_PARTICLES) finalizeParticle(gid);
     else if (uMode==MODE_FINALIZE_VOXELS) finalizeVoxel(gid);
@@ -757,4 +1048,13 @@ void main() {
     else if (uMode==MODE_WAKE_GATHER) wakeGather(gid);
     else if (uMode==MODE_WAKE_APPLY) wakeApply(gid);
     else if (uMode==MODE_TOPOLOGY_REBUILD_SERIAL) topologyRebuildSerial(gid);
+    else if (uMode==MODE_REFRESH_DEPENDENCIES) refreshDependency(gid, false);
+    else if (uMode==MODE_FINALIZE_DEPENDENCIES) refreshDependency(gid, true);
+    else if (uMode==MODE_LIFT_GREEDY_FLOOR) liftGreedyFloor(gid);
+    else if (uMode==MODE_RESET_STATIC_MAPPED) resetStaticMapped(gid);
+    else if (uMode==MODE_APPLY_STATIC_MAPPED) applyStaticMapped(gid);
+    else if (uMode==MODE_BUILD_RENDER_MATRICES) buildRenderMatrix(gid);
+    else if (uMode==MODE_GREEDY_FLOOR_ISLANDS) greedyFloorIsland(gl_WorkGroupID.x, gl_LocalInvocationID.x);
+    else if (uMode>=MODE_GREEDY_FLOOR_BATCH_BASE) floorCollisionGlobal(gid, uMode-MODE_GREEDY_FLOOR_BATCH_BASE);
+    else if (uMode>=MODE_STATIC_GREEDY_BATCH_BASE) staticCollisions(gid, uMode-MODE_STATIC_GREEDY_BATCH_BASE);
 }

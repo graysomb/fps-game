@@ -47,6 +47,7 @@ void *fps_metal_buffer_create(size_t size);
 void fps_metal_buffer_destroy(void *buffer);
 bool fps_metal_buffer_update(void *buffer, const void *data, size_t size, size_t offset);
 bool fps_metal_buffer_read(void *buffer, void *data, size_t size, size_t offset);
+const void *fps_metal_buffer_contents(void *buffer);
 void fps_metal_bind_buffer(int slot, void *buffer);
 void fps_metal_set_uniforms(const FpsGpuUniforms *uniforms);
 bool fps_metal_begin_batch(void);

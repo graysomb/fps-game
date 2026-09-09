@@ -132,6 +132,11 @@ bool fps_metal_buffer_read(void *handle, void *data, size_t size, size_t offset)
     return true;
 }
 
+const void *fps_metal_buffer_contents(void *handle) {
+    id<MTLBuffer> buffer = (id<MTLBuffer>)handle;
+    return buffer ? buffer.contents : NULL;
+}
+
 void fps_metal_bind_buffer(int slot, void *handle) {
     if (slot < 0 || slot >= FPS_GPU_BUFFER_COUNT) return;
     metal_state.bound[slot] = (id<MTLBuffer>)handle;
@@ -161,6 +166,11 @@ static bool fps_metal_encode(int mode, int count, id<MTLBuffer> indirect, size_t
         }
         metal_state.uniforms.mode = mode;
         [encoder setBytes:&metal_state.uniforms length:sizeof(metal_state.uniforms) atIndex:FPS_GPU_BUFFER_COUNT];
+        if (mode == GPU_MODE_GREEDY_FLOOR_ISLANDS) {
+            const NSUInteger floor_bytes =
+                (NSUInteger)FPS_GPU_MAX_FLOOR_ISLAND_CONTROLS * 2u * sizeof(float) * 4u;
+            [encoder setThreadgroupMemoryLength:floor_bytes atIndex:0];
+        }
         MTLSize threads = MTLSizeMake(128, 1, 1);
         if (indirect) {
             [encoder dispatchThreadgroupsWithIndirectBuffer:indirect
@@ -189,7 +199,7 @@ bool fps_metal_end_batch(void) {
         if (metal_state.managed) {
             static const int readback_slots[] = {
                 FPS_GPU_BUFFER_PARTICLE, FPS_GPU_BUFFER_CELL, FPS_GPU_BUFFER_SIM_ID, FPS_GPU_BUFFER_VOXEL,
-                FPS_GPU_BUFFER_CONTROL, FPS_GPU_BUFFER_CLONE_PARENT
+                FPS_GPU_BUFFER_CONTROL, FPS_GPU_BUFFER_CLONE_PARENT, FPS_GPU_BUFFER_RENDER_MATRIX
             };
             id<MTLBlitCommandEncoder> blit = [metal_state.command_buffer blitCommandEncoder];
             if (!blit) {

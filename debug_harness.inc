@@ -26,6 +26,7 @@ typedef struct DebugRunConfig {
     bool capture_steps_explicit;
     int steps;
     int gif_fps;
+    int physics_batch;
     int capture_steps[DEBUG_MAX_CAPTURE_STEPS];
     int capture_step_count;
     char scenario[64];
@@ -182,7 +183,8 @@ typedef struct DebugScenarioDefinition {
 
 static DebugRunConfig debugRunConfig = {
     .steps = DEBUG_DEFAULT_STEPS,
-    .gif_fps = 20
+    .gif_fps = 20,
+    .physics_batch = 1
 };
 
 static bool debug_setup_sized_drop(DebugRunState *state);
@@ -360,6 +362,15 @@ static int debug_parse_argument(int argc, char **argv, int *index)
     if (value != (const char *)(uintptr_t)1) {
         if (!debug_parse_integer(value, DEBUG_MIN_STEPS, 10000,
                                  &debugRunConfig.steps, "--debug-steps")) return -1;
+        return 1;
+    }
+
+    value = debug_option_value(argc, argv, index, argument,
+                               "--debug-physics-batch=", "--debug-physics-batch");
+    if (value != (const char *)(uintptr_t)1) {
+        if (!debug_parse_integer(value, 1, PBD_MAX_ACCUM_STEPS,
+                                 &debugRunConfig.physics_batch,
+                                 "--debug-physics-batch")) return -1;
         return 1;
     }
 
