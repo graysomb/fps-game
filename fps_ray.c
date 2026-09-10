@@ -80,6 +80,10 @@
 #include <unistd.h>
 #endif
 
+#include "greek_grammar.h"
+#include "greek_rasterizer.h"
+#include "greek_grammar.c"
+
 typedef enum {
     FLUID_RENDER_PARTICLES = 0,
     FLUID_RENDER_SURFACE = 1
@@ -8231,12 +8235,48 @@ static void buildDebugWorld(void) {
     // }
 }
 
+typedef enum {
+    WORLD_TYPE_GREEK_TEMPLE = 0,
+    WORLD_TYPE_TEST,
+    WORLD_TYPE_BLOOD,
+    WORLD_TYPE_PROCEDURAL,
+    WORLD_TYPE_COUNT
+} WorldType;
+static WorldType currentWorldType = WORLD_TYPE_GREEK_TEMPLE;
+static uint32_t templeSeed = 1337;
+static TempleStage templeTargetStage = TEMPLE_STAGE_SANCTUARY;
+
+static void plot_temple_voxel(int gx, int gy, int gz, Color c) {
+    // If it's the water color from the pool, spawn physical PBF fluid voxels!
+    if (c.r == 50 && c.g == 160 && c.b == 220) {
+        float px = (gx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+        float py = (gy + 0.5f) * VOXEL_SIZE;
+        float pz = (gz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+        add_fluid_cell(px, py, pz, c);
+    } else {
+        addVoxelAt(gx, gy, gz, c);
+    }
+}
+
+static void buildGreekTempleWorld(uint32_t seed, TempleStage stage) {
+    int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
+    int center = M / 2;
+    TemplePlan plan = generate_greek_temple(seed, stage, 2);
+    // Base at gy = 3 so stylobate steps connect seamlessly to the floor
+    rasterize_temple_plan(&plan, center, center, 3, plot_temple_voxel);
+}
+
 // Build static demo cube of voxels
 static void buildDemo(void) {
-    buildTestWorld();
-    //buildProceduralWorld();
-    //buildBloodWorld();
-    //buildDebugWorld();
+    if (currentWorldType == WORLD_TYPE_GREEK_TEMPLE) {
+        buildGreekTempleWorld(templeSeed, templeTargetStage);
+    } else if (currentWorldType == WORLD_TYPE_BLOOD) {
+        buildBloodWorld();
+    } else if (currentWorldType == WORLD_TYPE_PROCEDURAL) {
+        buildProceduralWorld();
+    } else {
+        buildTestWorld();
+    }
     rebuild_glue_constraints();
 }
 
@@ -17713,26 +17753,35 @@ int main(int argc, char **argv) {
                     EndMode3D();
 
                     // Transparent UI Window
-                    int boxW = 500;
-                    int boxH = 360;
+                    int boxW = 560;
+                    int boxH = 410;
                     int boxX = (SCREEN_WIDTH - boxW) / 2;
                     int boxY = (SCREEN_HEIGHT - boxH) / 2;
                     DrawRectangle(boxX, boxY, boxW, boxH, Fade(RAYWHITE, 0.6f));
                     DrawRectangleLines(boxX, boxY, boxW, boxH, DARKGRAY);
 
-                    DrawText("FPS Game", SCREEN_WIDTH / 2 - MeasureText("FPS Game", 50) / 2, boxY + 50, 50, BLACK);
-                    DrawText("Press ENTER to Start", SCREEN_WIDTH / 2 - MeasureText("Press ENTER to Start", 20) / 2, boxY + 150, 20, DARKGRAY);
-                    DrawText("Press S for Settings", SCREEN_WIDTH / 2 - MeasureText("Press S for Settings", 20) / 2, boxY + 200, 20, DARKGRAY);
-                    DrawText("Press C for Creative Mode", SCREEN_WIDTH / 2 - MeasureText("Press C for Creative Mode", 20) / 2, boxY + 230, 20, DARKGRAY);
+                    DrawText("FPS Game", SCREEN_WIDTH / 2 - MeasureText("FPS Game", 50) / 2, boxY + 35, 50, BLACK);
+                    DrawText("Press ENTER to Start", SCREEN_WIDTH / 2 - MeasureText("Press ENTER to Start", 20) / 2, boxY + 130, 20, DARKGRAY);
+                    DrawText("Press S for Settings", SCREEN_WIDTH / 2 - MeasureText("Press S for Settings", 20) / 2, boxY + 175, 20, DARKGRAY);
+                    DrawText("Press C for Creative Mode", SCREEN_WIDTH / 2 - MeasureText("Press C for Creative Mode", 20) / 2, boxY + 205, 20, DARKGRAY);
                     const char *lan_text = TextFormat("H: Host | J: Join localhost | LAN local screens: %d (-/+)",
                                                       netRequestedLocalPlayers);
-                    DrawText(lan_text, SCREEN_WIDTH / 2 - MeasureText(lan_text, 18) / 2, boxY + 260, 18, DARKGRAY);
+                    DrawText(lan_text, SCREEN_WIDTH / 2 - MeasureText(lan_text, 18) / 2, boxY + 235, 18, DARKGRAY);
                     DrawText(TextFormat("Custom Map: %s (Slot %d) - Press U to Toggle, L to Cycle",
                                         useCustomMap ? "ON" : "OFF", creativeMapSlot + 1),
-                             SCREEN_WIDTH / 2 - MeasureText("Custom Map: ON (Slot 1) - Press U to Toggle, L to Cycle", 20) / 2,
-                             boxY + 300, 20, DARKGRAY);
+                             SCREEN_WIDTH / 2 - MeasureText("Custom Map: ON (Slot 1) - Press U to Toggle, L to Cycle", 18) / 2,
+                             boxY + 270, 18, DARKGRAY);
+
+                    const char *stage_labels[] = { "Cella", "Prostyle", "Amphi", "Peripteral", "Sanctuary" };
+                    const char *world_names[] = { "Greek Temple", "Test", "Blood", "Procedural" };
+                    const char *world_info = (currentWorldType == WORLD_TYPE_GREEK_TEMPLE) ?
+                        TextFormat("World: Greek Temple [%s, #%u] (W to Cycle, T Seed, G Stage)",
+                                   stage_labels[templeTargetStage], templeSeed) :
+                        TextFormat("World: %s (Press W to Cycle)", world_names[currentWorldType]);
+                    DrawText(world_info, SCREEN_WIDTH / 2 - MeasureText(world_info, 18) / 2, boxY + 310, 18, DARKBLUE);
+
                     if (netTransport.role == NET_ROLE_CLIENT) {
-                        DrawText(netWorldReady ? "Connected" : "Connecting...", boxX + 20, boxY + 330, 18, DARKBLUE);
+                        DrawText(netWorldReady ? "Connected" : "Connecting...", boxX + 20, boxY + 350, 18, DARKBLUE);
                     }
                 EndDrawing();
 
@@ -17765,6 +17814,18 @@ int main(int argc, char **argv) {
                 }
                 if (IsKeyPressed(KEY_L)) {
                     creativeMapSlot = (creativeMapSlot + 1) % 3;
+                }
+                if (IsKeyPressed(KEY_W)) {
+                    currentWorldType = (WorldType)((currentWorldType + 1) % WORLD_TYPE_COUNT);
+                    ResetGame();
+                }
+                if (IsKeyPressed(KEY_T)) {
+                    templeSeed = (uint32_t)GetRandomValue(1, 99999);
+                    if (currentWorldType == WORLD_TYPE_GREEK_TEMPLE) ResetGame();
+                }
+                if (IsKeyPressed(KEY_G)) {
+                    templeTargetStage = (TempleStage)((templeTargetStage + 1) % 5);
+                    if (currentWorldType == WORLD_TYPE_GREEK_TEMPLE) ResetGame();
                 }
                 if (netTransport.role == NET_ROLE_OFFLINE && IsKeyPressed(KEY_H)) {
                     netRequestedRole = NET_ROLE_HOST;

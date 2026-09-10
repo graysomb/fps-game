@@ -50,7 +50,7 @@ else
     opt_flags="-O2 -DNDEBUG"
 fi
 
-frameworks="-framework Foundation -framework AppKit -framework IOKit -framework CoreVideo -framework OpenGL"
+frameworks="-framework Foundation -framework AppKit -framework IOKit -framework CoreVideo -framework CoreGraphics -framework QuartzCore -framework OpenGL"
 common_flags="-std=c11 $opt_flags $arch_flags -mmacosx-version-min=$deployment_target -I$project_root -I$raylib_build/src -L$raylib_build/src -lraylib -pthread -lm $frameworks"
 enet_sources="$project_root/net_protocol.c $project_root/net_transport.c $project_root/third_party/enet/callbacks.c $project_root/third_party/enet/compress.c $project_root/third_party/enet/host.c $project_root/third_party/enet/list.c $project_root/third_party/enet/packet.c $project_root/third_party/enet/peer.c $project_root/third_party/enet/protocol.c $project_root/third_party/enet/unix.c"
 common_flags="$common_flags -I$project_root/third_party/enet/include"
@@ -64,10 +64,12 @@ clang "$project_root/fps_launcher.c" -std=c11 $opt_flags $arch_flags \
     -mmacosx-version-min="$deployment_target" -o "$bin_dir/fps_ray"
 
 mkdir -p "$bin_dir/shaders/pbd"
-xcrun -sdk macosx metal -c "$project_root/shaders/pbd/pbd_pipeline.metal" \
-    -o "$build_root/pbd_pipeline.air" -mmacosx-version-min="$deployment_target"
-xcrun -sdk macosx metallib "$build_root/pbd_pipeline.air" \
-    -o "$bin_dir/shaders/pbd/pbd_pipeline.metallib"
+if xcrun -sdk macosx metal -v >/dev/null 2>&1; then
+    xcrun -sdk macosx metal -c "$project_root/shaders/pbd/pbd_pipeline.metal" \
+        -o "$build_root/pbd_pipeline.air" -mmacosx-version-min="$deployment_target"
+    xcrun -sdk macosx metallib "$build_root/pbd_pipeline.air" \
+        -o "$bin_dir/shaders/pbd/pbd_pipeline.metallib"
+fi
 cp -R "$project_root/shaders/." "$bin_dir/shaders/"
 
 cp "$bin_dir/fps_ray" "$bin_dir/fps_ray_gpu" "$bin_dir/fps_ray_cpu" "$app_dir/Contents/MacOS/"
