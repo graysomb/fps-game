@@ -361,6 +361,12 @@ typedef enum {
 static GameMode gameMode = GAME_MODE_FIREFIGHT;
 
 typedef enum {
+    ENEMY_TYPE_STANDARD = 0,
+    ENEMY_TYPE_SWARMER,
+    ENEMY_TYPE_GOLIATH
+} EnemyType;
+
+typedef enum {
     FIREFIGHT_STATE_ACTIVE = 0,
     FIREFIGHT_STATE_INTERMISSION,
     FIREFIGHT_STATE_VICTORY,
@@ -701,8 +707,45 @@ typedef struct {
     bool meleeSwingHitApplied;
     float meleeSwingStartTime;
     bool dynamicShotActive;
+    EnemyType enemyType;
+    float contactDamageTimer;
 } Player;
 static Player players[MAX_PLAYERS];
+
+#define GOLIATH_MAX_ATTACHED 18
+typedef struct {
+    uint64_t voxelIdentity;
+    Vector3 localOffset;
+} GoliathVoxelArmor;
+
+typedef struct {
+    GoliathVoxelArmor voxels[GOLIATH_MAX_ATTACHED];
+    int count;
+    float launchTimer;
+    float harvestCooldown;
+} GoliathState;
+static GoliathState goliathStates[MAX_PLAYERS];
+
+static const Vector3 goliathArmorOffsets[GOLIATH_MAX_ATTACHED] = {
+    { 0.55f, 0.0f, 0.0f },
+    { -0.55f, 0.0f, 0.0f },
+    { 0.0f, 0.55f, 0.0f },
+    { 0.0f, -0.55f, 0.0f },
+    { 0.0f, 0.0f, 0.55f },
+    { 0.0f, 0.0f, -0.55f },
+    { 0.55f, 0.55f, 0.55f },
+    { 0.55f, 0.55f, -0.55f },
+    { 0.55f, -0.55f, 0.55f },
+    { 0.55f, -0.55f, -0.55f },
+    { -0.55f, 0.55f, 0.55f },
+    { -0.55f, 0.55f, -0.55f },
+    { -0.55f, -0.55f, 0.55f },
+    { -0.55f, -0.55f, -0.55f },
+    { 0.55f, 0.0f, 0.55f },
+    { 0.55f, 0.0f, -0.55f },
+    { -0.55f, 0.0f, 0.55f },
+    { -0.55f, 0.0f, -0.55f }
+};
 static bool netPlayerPresent[MAX_PLAYERS] = { true, false, false, false };
 /* Each peer owns a mask of globally numbered player slots. */
 static uint8_t netPeerPlayerMask[MAX_PLAYERS] = { 1u, 0u, 0u, 0u };
@@ -8322,7 +8365,18 @@ static void ResetGame(void);
 static void reset_firefight_match(void);
 static void start_firefight_wave(int wave_number);
 static void update_firefight_logic(float dt);
-static Vector3 pick_enemy_wave_spawn(int bot_idx);
+static void spawn_goliath_armor(int player_idx);
+static void update_goliath_armor_positions(int player_idx);
+static void detach_goliath_armor_voxel(int voxel_idx);
+static void detach_one_goliath_armor_voxel(int player_idx);
+static int get_goliath_owner_of_voxel(int voxel_idx);
+static bool goliath_has_armor(int player_idx);
+static void goliath_launch_voxel(int bot_idx, int target_idx);
+static void goliath_consume_terrain(int bot_idx, int static_voxel_idx);
+static void explode_goliath_armor(int player_idx);
+static int find_nearest_static_voxel(const Vector3 *pos, float *out_dist_sq);
+static EnemyType pick_firefight_enemy_type(int wave, int spawn_index);
+static void init_firefight_bot_entity(int i, EnemyType etype, InputType botDiff);
 
 static uint32_t get_current_world_seed(void) {
     switch (currentWorldType) {
@@ -9002,6 +9056,9 @@ static void ResetGame(void) {
         players[i].debrisKills = 0;
         players[i].deaths = 0;
         UpdateKdRatio(i);
+        players[i].enemyType = ENEMY_TYPE_STANDARD;
+        players[i].contactDamageTimer = 0.0f;
+        players[i].matterMax = MATTER_MAX_DEFAULT;
         players[i].matter = players[i].matterMax;
         players[i].isExposed = false;
         players[i].last_damage_time = 0.0f;
@@ -9023,6 +9080,7 @@ static void ResetGame(void) {
         players[i].meleeSwingHitApplied = false;
         players[i].meleeSwingStartTime = -1000.0f;
         players[i].dynamicShotActive = false;
+        goliathStates[i].count = 0;
     }
     // clear voxels
     voxel_count = 0;
@@ -9842,6 +9900,9 @@ static void kill_player(int player_index, int attacker_index,
     player->tetherVoxel = -1;
     player->tetherVoxelIdentity = 0;
     player->dynamicShotActive = false;
+    if (player->enemyType == ENEMY_TYPE_GOLIATH) {
+        explode_goliath_armor(player_index);
+    }
 
     if (gameMode == GAME_MODE_FIREFIGHT) {
         if (is_player_bot(player_index)) {
@@ -9849,7 +9910,13 @@ static void kill_player(int player_index, int attacker_index,
                 firefightWaveEnemiesRemaining--;
             }
             firefightKillsTotal++;
-            firefightScore += (award_debris ? 150 : 100);
+            if (player->enemyType == ENEMY_TYPE_GOLIATH) {
+                firefightScore += (award_debris ? 350 : 250);
+            } else if (player->enemyType == ENEMY_TYPE_SWARMER) {
+                firefightScore += (award_debris ? 100 : 75);
+            } else {
+                firefightScore += (award_debris ? 150 : 100);
+            }
             if (firefightEnemiesSpawned < firefightWaveEnemiesTotal) {
                 player->respawn_timer = 2.5f; // Wait for reserve spawn
             } else {
@@ -9902,6 +9969,15 @@ static void apply_matter_damage(int player_index, int attacker_index, float dama
     }
     player->last_damage_time = (float)GetTime();
     if (player->invuln_timer > 0.0f || player->isExposed) {
+        return;
+    }
+    if (player->enemyType == ENEMY_TYPE_GOLIATH && goliath_has_armor(player_index)) {
+        detach_one_goliath_armor_voxel(player_index);
+        player->matter_flash_timer = 0.2f;
+        play_sfx(SFX_IMPACT);
+        if (attacker_index >= 0 && attacker_index < activePlayers && attacker_index != player_index) {
+            players[attacker_index].last_damage_time = (float)GetTime();
+        }
         return;
     }
     player->matter = fmaxf(0.0f, player->matter - damage);
@@ -10175,7 +10251,8 @@ static void update_projectiles(float dt)
             }
             Player *pl = &players[j];
             float bullet_radius = VOXEL_SIZE * 0.5f;
-            float hit_extent = PLAYER_SIZE * 0.5f + bullet_radius;
+            float body_size = (pl->enemyType == ENEMY_TYPE_SWARMER) ? (PLAYER_SIZE * 0.5f) : ((pl->enemyType == ENEMY_TYPE_GOLIATH) ? (PLAYER_SIZE * 1.5f) : PLAYER_SIZE);
+            float hit_extent = body_size * 0.5f + bullet_radius;
             Vector3 box_min = {
                 pl->pos.x - hit_extent,
                 pl->pos.y - hit_extent,
@@ -10424,6 +10501,10 @@ static void handle_pbd_projectile_hits(void)
         bool removed = false;
         for (int j = 0; j < activePlayers; ++j) {
             if (players[j].tetherHolding && players[j].tetherVoxel == i) {
+                continue;
+            }
+            int goliath_owner = get_goliath_owner_of_voxel(i);
+            if (goliath_owner >= 0 && goliath_owner == j) {
                 continue;
             }
             float dx = v->pos.x - players[j].pos.x;
@@ -14336,6 +14417,266 @@ static Vector3 pick_enemy_wave_spawn(int bot_idx) {
     return (Vector3){ 0.0f, BASE_EYE_HEIGHT, 0.0f };
 }
 
+static void spawn_goliath_armor(int player_idx) {
+    if (player_idx < 0 || player_idx >= activePlayers) return;
+    GoliathState *gs = &goliathStates[player_idx];
+    gs->count = 0;
+    gs->launchTimer = 2.0f;
+    gs->harvestCooldown = 1.0f;
+    Player *p = &players[player_idx];
+    Color armorCol = (Color){ 70, 80, 95, 255 };
+    for (int i = 0; i < GOLIATH_MAX_ATTACHED; ++i) {
+        Vector3 spawn_pos = v_add(p->pos, goliathArmorOffsets[i]);
+        int idx = addVoxel(spawn_pos.x, spawn_pos.y, spawn_pos.z, false, true, armorCol, 0);
+        if (idx >= 0) {
+            voxels[idx].owner = player_idx;
+            voxels[idx].activator = player_idx;
+            voxels[idx].glueEligible = false;
+            gs->voxels[gs->count].voxelIdentity = voxels[idx].identity;
+            gs->voxels[gs->count].localOffset = goliathArmorOffsets[i];
+            gs->count++;
+        }
+    }
+}
+
+static void update_goliath_armor_positions(int player_idx) {
+    if (player_idx < 0 || player_idx >= activePlayers) return;
+    GoliathState *gs = &goliathStates[player_idx];
+    Player *p = &players[player_idx];
+    if (p->respawn_timer > 0.0f) {
+        gs->count = 0;
+        return;
+    }
+    float half = VOXEL_SIZE * 0.5f;
+    int write = 0;
+    for (int i = 0; i < gs->count; ++i) {
+        uint64_t ident = gs->voxels[i].voxelIdentity;
+        int vix = -1;
+        for (int v = 0; v < voxel_count; ++v) {
+            if (voxels[v].identity == ident && voxels[v].simulate) {
+                vix = v;
+                break;
+            }
+        }
+        if (vix >= 0) {
+            Voxel *vox = &voxels[vix];
+            Vector3 target_pos = v_add(p->pos, gs->voxels[i].localOffset);
+            vox->pos = target_pos;
+            vox->vel = p->vel;
+            vox->sleeping = false;
+            vox->sleepFrames = 0;
+            vox->glueEligible = false;
+            vox->owner = player_idx;
+            vox->activator = player_idx;
+            for (int c = 0; c < VOXEL_CORNER_COUNT; ++c) {
+                if (vox->particles[c]) {
+                    vox->particles[c]->pos = (Vector3){
+                        target_pos.x + corner_signs[c][0] * half,
+                        target_pos.y + corner_signs[c][1] * half,
+                        target_pos.z + corner_signs[c][2] * half
+                    };
+                    vox->particles[c]->prev_pos = vox->particles[c]->pos;
+                    vox->particles[c]->vel = p->vel;
+                }
+            }
+            gs->voxels[write++] = gs->voxels[i];
+        }
+    }
+    gs->count = write;
+}
+
+static int get_goliath_owner_of_voxel(int voxel_idx) {
+    if (voxel_idx < 0 || voxel_idx >= voxel_count) return -1;
+    uint64_t ident = voxels[voxel_idx].identity;
+    for (int p = 0; p < activePlayers; ++p) {
+        if (players[p].enemyType != ENEMY_TYPE_GOLIATH) continue;
+        GoliathState *gs = &goliathStates[p];
+        for (int i = 0; i < gs->count; ++i) {
+            if (gs->voxels[i].voxelIdentity == ident) {
+                return p;
+            }
+        }
+    }
+    return -1;
+}
+
+static void detach_goliath_armor_voxel(int voxel_idx) {
+    if (voxel_idx < 0 || voxel_idx >= voxel_count) return;
+    uint64_t ident = voxels[voxel_idx].identity;
+    for (int p = 0; p < activePlayers; ++p) {
+        if (players[p].enemyType != ENEMY_TYPE_GOLIATH) continue;
+        GoliathState *gs = &goliathStates[p];
+        for (int i = 0; i < gs->count; ++i) {
+            if (gs->voxels[i].voxelIdentity == ident) {
+                for (int k = i; k < gs->count - 1; ++k) {
+                    gs->voxels[k] = gs->voxels[k + 1];
+                }
+                gs->count--;
+                voxels[voxel_idx].glueEligible = false;
+                return;
+            }
+        }
+    }
+}
+
+static void detach_one_goliath_armor_voxel(int player_idx) {
+    if (player_idx < 0 || player_idx >= activePlayers) return;
+    GoliathState *gs = &goliathStates[player_idx];
+    if (gs->count <= 0) return;
+    int last = gs->count - 1;
+    uint64_t ident = gs->voxels[last].voxelIdentity;
+    gs->count--;
+    for (int v = 0; v < voxel_count; ++v) {
+        if (voxels[v].identity == ident) {
+            voxels[v].glueEligible = true;
+            Vector3 pop = {
+                (float)GetRandomValue(-40, 40) * 0.1f,
+                (float)GetRandomValue(30, 70) * 0.1f,
+                (float)GetRandomValue(-40, 40) * 0.1f
+            };
+            voxels[v].vel = pop;
+            for (int c = 0; c < VOXEL_CORNER_COUNT; ++c) {
+                if (voxels[v].particles[c]) {
+                    voxels[v].particles[c]->vel = pop;
+                }
+            }
+            break;
+        }
+    }
+}
+
+static bool goliath_has_armor(int player_idx) {
+    if (player_idx < 0 || player_idx >= activePlayers) return false;
+    return goliathStates[player_idx].count > 0;
+}
+
+static void goliath_launch_voxel(int bot_idx, int target_idx) {
+    if (bot_idx < 0 || bot_idx >= activePlayers || target_idx < 0 || target_idx >= activePlayers) return;
+    GoliathState *gs = &goliathStates[bot_idx];
+    if (gs->count <= 0) return;
+
+    int last = gs->count - 1;
+    uint64_t ident = gs->voxels[last].voxelIdentity;
+    gs->count--;
+
+    for (int v = 0; v < voxel_count; ++v) {
+        if (voxels[v].identity == ident) {
+            Voxel *vox = &voxels[v];
+            Vector3 toTarget = v_sub(players[target_idx].pos, vox->pos);
+            toTarget.y += 0.2f;
+            Vector3 dir = v_norm(toTarget);
+            float launchSpeed = 22.0f;
+            vox->vel = v_mul(dir, launchSpeed);
+            vox->owner = bot_idx;
+            vox->activator = bot_idx;
+            vox->glueEligible = false;
+            vox->sleeping = false;
+            vox->sleepFrames = 0;
+            for (int c = 0; c < VOXEL_CORNER_COUNT; ++c) {
+                if (vox->particles[c]) {
+                    vox->particles[c]->vel = vox->vel;
+                }
+            }
+            play_sfx(SFX_TETHER);
+            break;
+        }
+    }
+}
+
+static void goliath_consume_terrain(int bot_idx, int static_voxel_idx) {
+    if (bot_idx < 0 || bot_idx >= activePlayers || static_voxel_idx < 0 || static_voxel_idx >= voxel_count) return;
+    GoliathState *gs = &goliathStates[bot_idx];
+    if (gs->count >= GOLIATH_MAX_ATTACHED) return;
+
+    int new_idx = rip_single_static_voxel(static_voxel_idx, bot_idx);
+    if (new_idx >= 0 && new_idx < voxel_count) {
+        voxels[new_idx].owner = bot_idx;
+        voxels[new_idx].activator = bot_idx;
+        voxels[new_idx].glueEligible = false;
+        gs->voxels[gs->count].voxelIdentity = voxels[new_idx].identity;
+        gs->voxels[gs->count].localOffset = goliathArmorOffsets[gs->count];
+        gs->count++;
+        play_sfx(SFX_GLUE_BREAK);
+    }
+}
+
+static void explode_goliath_armor(int player_idx) {
+    if (player_idx < 0 || player_idx >= activePlayers) return;
+    GoliathState *gs = &goliathStates[player_idx];
+    for (int i = 0; i < gs->count; ++i) {
+        uint64_t ident = gs->voxels[i].voxelIdentity;
+        for (int v = 0; v < voxel_count; ++v) {
+            if (voxels[v].identity == ident && voxels[v].simulate) {
+                voxels[v].glueEligible = true;
+                Vector3 blast = {
+                    (float)GetRandomValue(-100, 100) * 0.1f,
+                    (float)GetRandomValue(40, 120) * 0.1f,
+                    (float)GetRandomValue(-100, 100) * 0.1f
+                };
+                voxels[v].vel = blast;
+                for (int c = 0; c < VOXEL_CORNER_COUNT; ++c) {
+                    if (voxels[v].particles[c]) {
+                        voxels[v].particles[c]->vel = blast;
+                    }
+                }
+                break;
+            }
+        }
+    }
+    gs->count = 0;
+}
+
+static EnemyType pick_firefight_enemy_type(int wave, int spawn_index) {
+    if (wave <= 1) {
+        return (spawn_index % 2 == 1) ? ENEMY_TYPE_SWARMER : ENEMY_TYPE_STANDARD;
+    } else if (wave == 2) {
+        if (spawn_index % 3 == 2) return ENEMY_TYPE_GOLIATH;
+        return (spawn_index % 2 == 1) ? ENEMY_TYPE_SWARMER : ENEMY_TYPE_STANDARD;
+    } else {
+        int roll = (spawn_index + wave + GetRandomValue(0, 5)) % 6;
+        if (roll <= 1) return ENEMY_TYPE_SWARMER;
+        if (roll <= 3) return ENEMY_TYPE_STANDARD;
+        return ENEMY_TYPE_GOLIATH;
+    }
+}
+
+static void init_firefight_bot_entity(int i, EnemyType etype, InputType botDiff) {
+    playerInput[i] = botDiff;
+    Player *b = &players[i];
+    b->enemyType = etype;
+    b->contactDamageTimer = 0.0f;
+    b->respawn_timer = 0.0f;
+    b->pos = pick_enemy_wave_spawn(i);
+    b->death_pos = b->pos;
+    b->vel = (Vector3){ 0, 0, 0 };
+    b->yaw = randomInRange(-180.0f, 180.0f);
+    b->death_yaw = b->yaw;
+    b->pitch = 0.0f;
+    b->onGround = true;
+    if (etype == ENEMY_TYPE_SWARMER) {
+        b->matterMax = MATTER_MAX_DEFAULT * 0.25f;
+    } else {
+        b->matterMax = MATTER_MAX_DEFAULT;
+    }
+    b->matter = b->matterMax;
+    b->isExposed = false;
+    b->exposed_flash_timer = 0.0f;
+    b->invuln_timer = 1.0f;
+    b->tetherHolding = false;
+    b->tetherVoxel = -1;
+    b->tetherVoxelIdentity = 0;
+    b->dynamicShotActive = false;
+
+    if (etype == ENEMY_TYPE_GOLIATH) {
+        spawn_goliath_armor(i);
+    } else {
+        goliathStates[i].count = 0;
+    }
+
+    spawn_player_explosion(b->pos, player_palette_color(i));
+    play_sfx(SFX_SHIELD);
+}
+
 static void start_firefight_wave(int wave_number) {
     firefightWave = wave_number;
     firefightWaveEnemiesTotal = 3 + (firefightWave - 1) * 2;
@@ -14353,29 +14694,11 @@ static void start_firefight_wave(int wave_number) {
 
     for (int i = 0; i < activePlayers; ++i) {
         if (is_player_bot(i)) {
-            playerInput[i] = botDiff;
-            Player *b = &players[i];
-            b->pos = pick_enemy_wave_spawn(i);
-            b->death_pos = b->pos;
-            b->vel = (Vector3){ 0, 0, 0 };
-            b->yaw = randomInRange(-180.0f, 180.0f);
-            b->death_yaw = b->yaw;
-            b->pitch = 0.0f;
-            b->onGround = true;
-            b->matter = b->matterMax;
-            b->isExposed = false;
-            b->exposed_flash_timer = 0.0f;
-            b->invuln_timer = 1.0f;
-            b->respawn_timer = 0.0f;
-            b->tetherHolding = false;
-            b->tetherVoxel = -1;
-            b->tetherVoxelIdentity = 0;
-            b->dynamicShotActive = false;
-            spawn_player_explosion(b->pos, player_palette_color(i));
+            EnemyType etype = pick_firefight_enemy_type(firefightWave, firefightEnemiesSpawned);
+            init_firefight_bot_entity(i, etype, botDiff);
             firefightEnemiesSpawned++;
         }
     }
-    play_sfx(SFX_SHIELD);
 }
 
 static void reset_firefight_match(void) {
@@ -14386,6 +14709,9 @@ static void reset_firefight_match(void) {
     firefightIntermissionTimer = 0.0f;
     firefightWaveBannerTimer = 3.5f;
     firefightWaveState = FIREFIGHT_STATE_ACTIVE;
+    for (int i = 0; i < MAX_PLAYERS; ++i) {
+        goliathStates[i].count = 0;
+    }
     start_firefight_wave(1);
 }
 
@@ -14410,24 +14736,8 @@ static void update_firefight_logic(float dt) {
                     b->respawn_timer -= dt;
                     if (b->respawn_timer <= 0.0f) {
                         if (firefightEnemiesSpawned < firefightWaveEnemiesTotal) {
-                            b->respawn_timer = 0.0f;
-                            b->pos = pick_enemy_wave_spawn(i);
-                            b->death_pos = b->pos;
-                            b->vel = (Vector3){ 0, 0, 0 };
-                            b->yaw = randomInRange(-180.0f, 180.0f);
-                            b->death_yaw = b->yaw;
-                            b->pitch = 0.0f;
-                            b->onGround = true;
-                            b->matter = b->matterMax;
-                            b->isExposed = false;
-                            b->exposed_flash_timer = 0.0f;
-                            b->invuln_timer = 1.0f;
-                            b->tetherHolding = false;
-                            b->tetherVoxel = -1;
-                            b->tetherVoxelIdentity = 0;
-                            b->dynamicShotActive = false;
-                            spawn_player_explosion(b->pos, player_palette_color(i));
-                            play_sfx(SFX_SHIELD);
+                            EnemyType etype = pick_firefight_enemy_type(firefightWave, firefightEnemiesSpawned);
+                            init_firefight_bot_entity(i, etype, playerInput[i]);
                             firefightEnemiesSpawned++;
                         } else {
                             b->respawn_timer = 9999.0f;
@@ -15193,6 +15503,7 @@ static void start_tether(int idx) {
     
     // For dynamic voxels, detach glue so we pull only a single voxel
     if (voxels[tether_idx].simulate) {
+        detach_goliath_armor_voxel(tether_idx);
         detach_all_glue_faces(tether_idx);
         deactivate_glue_constraints_for_voxel(tether_idx);
         voxels[tether_idx].owner = idx;
@@ -16567,42 +16878,59 @@ static void draw_players(void) {
         if (p->respawn_timer > 0.0f) {
             continue;
         }
+        float body_size = (p->enemyType == ENEMY_TYPE_SWARMER) ? (PLAYER_SIZE * 0.5f) : PLAYER_SIZE;
         Color base = player_palette_color(i);
+        if (p->enemyType == ENEMY_TYPE_SWARMER) {
+            base = (Color){ 235, 70, 45, 255 };
+        } else if (p->enemyType == ENEMY_TYPE_GOLIATH) {
+            base = (Color){ 35, 38, 48, 255 };
+        }
         Color base_dark = scale_color(base, 0.75f, 255);
-        DrawCube(p->pos, PLAYER_SIZE,PLAYER_SIZE, PLAYER_SIZE, base);
-        DrawCubeWires(p->pos, PLAYER_SIZE,PLAYER_SIZE,PLAYER_SIZE, base_dark);
-        draw_melee_arm_world(i);
-        draw_player_tether_world(i);
+        Vector3 render_pos = p->pos;
+        if (p->enemyType == ENEMY_TYPE_SWARMER) {
+            render_pos.y += sinf((float)GetTime() * 22.0f) * 0.03f;
+        }
+        DrawCube(render_pos, body_size, body_size, body_size, base);
+        DrawCubeWires(render_pos, body_size, body_size, body_size, base_dark);
+        if (p->enemyType == ENEMY_TYPE_GOLIATH) {
+            float pulse = 0.5f + 0.5f * sinf((float)GetTime() * 5.0f);
+            Color coreEnergy = (Color){ 255, 90, 30, (unsigned char)(140 + 80 * pulse) };
+            DrawCubeWires(render_pos, body_size * 0.8f, body_size * 0.8f, body_size * 0.8f, coreEnergy);
+        }
+        if (p->enemyType != ENEMY_TYPE_SWARMER) {
+            draw_melee_arm_world(i);
+            draw_player_tether_world(i);
+        }
         if (p->matter_flash_timer > 0.0f && !p->isExposed && p->matter > 0.0f) {
             float flash = clampf(p->matter_flash_timer / 0.2f, 0.0f, 1.0f);
             float pulse = 0.5f + 0.5f * sinf((float)GetTime() * 8.0f);
             unsigned char alpha = (unsigned char)clampf(80.0f + 120.0f * flash * pulse, 60.0f, 210.0f);
             Color shield_color = base;
             shield_color.a = alpha;
-            DrawCube(p->pos, PLAYER_SIZE + 0.2f, PLAYER_SIZE + 0.2f, PLAYER_SIZE + 0.2f, shield_color);
-            DrawCubeWires(p->pos, PLAYER_SIZE + 0.2f, PLAYER_SIZE + 0.2f, PLAYER_SIZE + 0.2f,
+            DrawCube(render_pos, body_size + 0.2f, body_size + 0.2f, body_size + 0.2f, shield_color);
+            DrawCubeWires(render_pos, body_size + 0.2f, body_size + 0.2f, body_size + 0.2f,
                           Fade(shield_color, 0.8f));
         }
         if (p->isExposed) {
             float pulse = 0.5f + 0.5f * sinf((float)GetTime() * 6.0f);
             unsigned char alpha = (unsigned char)clampf(120.0f + 80.0f * pulse, 90.0f, 220.0f);
             Color exposed_color = (Color){ 220, 60, 60, alpha };
-            DrawCube(p->pos, PLAYER_SIZE + 0.25f, PLAYER_SIZE + 0.25f, PLAYER_SIZE + 0.25f, exposed_color);
-            DrawCubeWires(p->pos, PLAYER_SIZE + 0.25f, PLAYER_SIZE + 0.25f, PLAYER_SIZE + 0.25f, Fade(exposed_color, 0.8f));
+            DrawCube(render_pos, body_size + 0.25f, body_size + 0.25f, body_size + 0.25f, exposed_color);
+            DrawCubeWires(render_pos, body_size + 0.25f, body_size + 0.25f, body_size + 0.25f, Fade(exposed_color, 0.8f));
         }
         if (p->dynamicShotActive) {
             float pulse = 0.5f + 0.5f * sinf((float)GetTime() * 7.0f);
             unsigned char alpha = (unsigned char)clampf(140.0f + 80.0f * pulse, 120.0f, 220.0f);
             Color glow = (Color){ 255, 215, 90, alpha };
-            DrawCube(p->pos, PLAYER_SIZE + 0.30f, PLAYER_SIZE + 0.30f, PLAYER_SIZE + 0.30f, glow);
-            DrawCubeWires(p->pos, PLAYER_SIZE + 0.30f, PLAYER_SIZE + 0.30f, PLAYER_SIZE + 0.30f, Fade(glow, 0.8f));
+            DrawCube(render_pos, body_size + 0.30f, body_size + 0.30f, body_size + 0.30f, glow);
+            DrawCubeWires(render_pos, body_size + 0.30f, body_size + 0.30f, body_size + 0.30f, Fade(glow, 0.8f));
         }
         if (p->invuln_timer > 0.0f) {
             float pulse = 0.6f + 0.4f * sinf((float)GetTime() * 6.0f);
             unsigned char alpha = (unsigned char)clampf(120.0f + 80.0f * pulse, 90.0f, 220.0f);
             Color invuln_color = (Color){ 235, 200, 70, alpha };
-            DrawCube(p->pos, PLAYER_SIZE + 0.35f, PLAYER_SIZE + 0.35f, PLAYER_SIZE + 0.35f, invuln_color);
-            DrawCubeWires(p->pos, PLAYER_SIZE + 0.35f, PLAYER_SIZE + 0.35f, PLAYER_SIZE + 0.35f, Fade(invuln_color, 0.8f));
+            DrawCube(render_pos, body_size + 0.35f, body_size + 0.35f, body_size + 0.35f, invuln_color);
+            DrawCubeWires(render_pos, body_size + 0.35f, body_size + 0.35f, body_size + 0.35f, Fade(invuln_color, 0.8f));
         }
         if (aimAssistDebugDraw && aimAssistDebugHasTarget[i]) {
             Vector3 hand = player_hand_position(p);
@@ -17089,6 +17417,71 @@ static void UpdateBot(int playerIdx, float dt) {
     float harvestDistSq = FLT_MAX;
     int harvestVoxelIdx = find_nearest_static_voxel(&bot->pos, &harvestDistSq);
     float harvestDist = (harvestVoxelIdx >= 0) ? sqrtf(harvestDistSq) : FLT_MAX;
+
+    if (bot->enemyType == ENEMY_TYPE_SWARMER) {
+        if (hasEnemy) {
+            Vector3 toEnemy = v_sub(players[enemyIdx].pos, bot->pos);
+            toEnemy.y = 0.0f;
+            float len = v_length(toEnemy);
+            if (len > 0.05f) {
+                Vector3 moveDir = v_mul(toEnemy, 1.0f / len);
+                float swarmerSpeed = MOVE_SPEED * 1.35f;
+                bot->vel.x = moveDir.x * swarmerSpeed;
+                bot->vel.z = moveDir.z * swarmerSpeed;
+                float targetYaw = atan2f(toEnemy.x, toEnemy.z) * RAD2DEG + 180.0f;
+                bot->yaw += (targetYaw - bot->yaw) * 12.0f * dt;
+            } else {
+                bot->vel.x = 0.0f;
+                bot->vel.z = 0.0f;
+            }
+            if (bot->onGround && (GetRandomValue(0, 100) < 6 || (len < 3.0f && GetRandomValue(0, 100) < 14))) {
+                bot->vel.y = JUMP_SPEED * 0.9f;
+                bot->onGround = false;
+            }
+        }
+        return;
+    }
+
+    if (bot->enemyType == ENEMY_TYPE_GOLIATH) {
+        GoliathState *gs = &goliathStates[playerIdx];
+        if (gs->launchTimer > 0.0f) gs->launchTimer -= dt;
+        if (gs->harvestCooldown > 0.0f) gs->harvestCooldown -= dt;
+
+        if (gs->count < GOLIATH_MAX_ATTACHED && gs->harvestCooldown <= 0.0f && harvestVoxelIdx >= 0 && harvestDist <= 3.5f) {
+            goliath_consume_terrain(playerIdx, harvestVoxelIdx);
+            gs->harvestCooldown = 1.2f;
+        }
+
+        if (hasEnemy && gs->count > 0 && enemyDist < 25.0f && gs->launchTimer <= 0.0f) {
+            goliath_launch_voxel(playerIdx, enemyIdx);
+            gs->launchTimer = (enemyDist < 10.0f) ? 1.5f : 2.5f;
+        }
+
+        if (hasEnemy) {
+            Vector3 toEnemy = v_sub(players[enemyIdx].pos, bot->pos);
+            toEnemy.y = 0.0f;
+            float len = v_length(toEnemy);
+            if (len > 0.8f) {
+                Vector3 moveDir = v_mul(toEnemy, 1.0f / len);
+                float goliathSpeed = MOVE_SPEED * 0.85f;
+                bot->vel.x = moveDir.x * goliathSpeed;
+                bot->vel.z = moveDir.z * goliathSpeed;
+            } else {
+                bot->vel.x = 0.0f;
+                bot->vel.z = 0.0f;
+            }
+            float targetYaw = atan2f(toEnemy.x, toEnemy.z) * RAD2DEG + 180.0f;
+            bot->yaw += (targetYaw - bot->yaw) * 6.0f * dt;
+            if (bot->onGround && GetRandomValue(0, 100) < 3) {
+                bot->vel.y = JUMP_SPEED;
+                bot->onGround = false;
+            }
+        } else {
+            bot->vel.x = 0.0f;
+            bot->vel.z = 0.0f;
+        }
+        return;
+    }
 
     bool needMatter = (bot->matter < bot->matterMax * 0.25f) ||
                       (bot->matter < MATTER_SHOT_COST * 5.0f);
@@ -19243,6 +19636,51 @@ int main(int argc, char **argv) {
             p->pos.z = clamped_z;
             if (p->meleeKnockbackActive && collided) {
                 p->meleeKnockbackActive = false;
+            }
+        }
+
+        for (int i = 0; i < activePlayers; ++i) {
+            if (players[i].enemyType == ENEMY_TYPE_GOLIATH && players[i].respawn_timer <= 0.0f) {
+                update_goliath_armor_positions(i);
+            }
+        }
+
+        for (int i = 0; i < activePlayers; ++i) {
+            if (players[i].contactDamageTimer > 0.0f) {
+                players[i].contactDamageTimer -= dt;
+            }
+        }
+        for (int i = 0; i < activePlayers; ++i) {
+            Player *bot = &players[i];
+            if (bot->respawn_timer > 0.0f) continue;
+            if (bot->enemyType != ENEMY_TYPE_SWARMER && bot->enemyType != ENEMY_TYPE_GOLIATH) continue;
+            if (bot->contactDamageTimer > 0.0f) continue;
+
+            float contactRadius = (bot->enemyType == ENEMY_TYPE_SWARMER) ? 0.75f : 1.6f;
+            float contactDamage = (bot->enemyType == ENEMY_TYPE_SWARMER) ? 15.0f : 30.0f;
+            float knockbackImpulse = (bot->enemyType == ENEMY_TYPE_SWARMER) ? 9.0f : 16.0f;
+
+            for (int j = 0; j < activePlayers; ++j) {
+                if (i == j) continue;
+                if (gameMode == GAME_MODE_FIREFIGHT && is_player_bot(i) == is_player_bot(j)) continue;
+                Player *victim = &players[j];
+                if (victim->respawn_timer > 0.0f || victim->invuln_timer > 0.0f) continue;
+
+                Vector3 diff = v_sub(victim->pos, bot->pos);
+                float distSq = v_dot(diff, diff);
+                if (distSq <= contactRadius * contactRadius) {
+                    float dist = sqrtf(distSq);
+                    Vector3 knockDir = (dist > 1e-4f) ? v_mul(diff, 1.0f / dist) : (Vector3){ 0.0f, 0.5f, 1.0f };
+                    knockDir.y = fmaxf(knockDir.y, 0.35f);
+                    knockDir = v_norm(knockDir);
+
+                    victim->vel = v_add(victim->vel, v_mul(knockDir, knockbackImpulse));
+                    victim->meleeKnockbackActive = true;
+                    apply_matter_damage(j, i, contactDamage);
+                    bot->contactDamageTimer = (bot->enemyType == ENEMY_TYPE_SWARMER) ? 0.5f : 0.8f;
+                    play_sfx(SFX_IMPACT);
+                    break;
+                }
             }
         }
 
