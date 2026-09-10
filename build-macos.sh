@@ -76,7 +76,10 @@ cp "$bin_dir/fps_ray" "$bin_dir/fps_ray_gpu" "$bin_dir/fps_ray_cpu" "$app_dir/Co
 cp "$project_root/macos/Info.plist" "$app_dir/Contents/Info.plist"
 mkdir -p "$app_dir/Contents/Resources/shaders"
 cp -R "$bin_dir/shaders/." "$app_dir/Contents/Resources/shaders/"
+rm -rf "$app_dir/Contents/MacOS/debug-artifacts"
 codesign --force --deep --sign - "$app_dir"
+ditto -c -k --keepParent "$app_dir" "$build_root/FPS_Game_macOS.zip"
 
 echo "Built $architecture macOS binaries in $bin_dir"
 echo "Built app bundle at $app_dir"
+echo "Packaged distribution zip at $build_root/FPS_Game_macOS.zip"

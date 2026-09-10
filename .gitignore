@@ -13,6 +13,8 @@ fps_ray.log
 .DS_Store
 .build/*
 !.build/FPS Game.app/
+!.build/FPS Game.app/**
+.build/FPS Game.app/Contents/MacOS/debug-artifacts/
 !.build/bin/
 .build/bin/*
 !.build/bin/fps_ray.exe

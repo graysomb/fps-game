@@ -76,3 +76,4 @@ jobs:
             .build/bin/fps_ray_cpu
             .build/bin/shaders
             .build/FPS Game.app
+            .build/FPS_Game_macOS.zip
