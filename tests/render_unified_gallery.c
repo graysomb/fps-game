@@ -85,41 +85,41 @@ int main(void) {
 
     const char *out_dir = "/Users/migr4479/.gemini/antigravity/brain/86453e72-1dcc-4b9c-ba5a-2222f2dbe7ff";
 
-    // 1. Sprawling Aerial Panorama of the Entire Citadel Complex (Step 18)
-    render_sanctum_shot(2552, 18,
-                        (Vector3){ 34.0f, 32.0f, 34.0f },
-                        (Vector3){ 0.0f, 6.0f, 0.0f },
-                        52.0f,
+    // 1. Sprawling Aerial Panorama of the Dense Acropolis Complex (Step 20)
+    render_sanctum_shot(2552, 20,
+                        (Vector3){ 40.0f, 38.0f, 40.0f },
+                        (Vector3){ 0.0f, 8.0f, 0.0f },
+                        54.0f,
                         TextFormat("%s/unified_sanctum_overview.png", out_dir),
-                        "The Antediluvian Precursor Citadel: Aerial Panorama",
-                        "Fused Cyclopean Megaliths, Pentelic Marble Doric Peristyle, Canted Titanium Bastions & Spires");
+                        "The Dense Antediluvian Acropolis: Aerial Overview",
+                        "Stepped Bedrock Foundation, Hypostyle Basilica, Infill Courtyard Plazas & Spires");
 
-    // 2. Dramatic Hard-Light Abyss Crossing & Kinetic Colonnade
-    render_sanctum_shot(777, 14,
-                        (Vector3){ 0.0f, 12.0f, 26.0f },
-                        (Vector3){ 0.0f, 8.0f, -8.0f },
-                        55.0f,
-                        TextFormat("%s/unified_sanctum_hardlight_abyss.png", out_dir),
-                        "The Kinetic Peristyle & Abyssal Hard-Light Span",
-                        "Translucent Cyan Energy Bridge Spanning Deep Chasm Fissure Framed by Fluted Columns");
-
-    // 3. The Apex Spire Matrix & Levitating Core
-    render_sanctum_shot(343, 16,
-                        (Vector3){ 24.0f, 20.0f, 20.0f },
-                        (Vector3){ 0.0f, 14.0f, 0.0f },
+    // 2. Colossal Hypostyle Megaron Basilica & Coffered Ceiling
+    render_sanctum_shot(777, 16,
+                        (Vector3){ 22.0f, 16.0f, 22.0f },
+                        (Vector3){ 0.0f, 9.0f, 0.0f },
                         50.0f,
-                        TextFormat("%s/unified_sanctum_spire_apex.png", out_dir),
-                        "The Apex Transmission Needle & Gravimetric Core",
-                        "Towering Pinnacle Braced by Flying Buttresses with Floating Amber Matrix & Observation Balcony");
+                        TextFormat("%s/unified_sanctum_hypostyle_hall.png", out_dir),
+                        "The Colossal Hypostyle Megaron & Coffered Roof",
+                        "16 Fluted Doric Columns, Dark Titanium Coffered Ceiling Slab, Clerestory Skylight & Braziers");
 
-    // 4. Close-Up of Titanium-Clamped Megalithic Gate & Sacred Spring
-    render_sanctum_shot(117, 12,
-                        (Vector3){ 18.0f, 10.0f, 18.0f },
-                        (Vector3){ 0.0f, 6.0f, 0.0f },
-                        46.0f,
-                        TextFormat("%s/unified_sanctum_clamped_megalith.png", out_dir),
-                        "The Clamped Megalith Propylaea & Sacred Well",
-                        "Weathered Sarsen Orthostats Bound by Metallic Collars & Stepped Marble PBF Fluid Basin");
+    // 3. Paved Peristyle Courtyard Plaza & Sacred Reflecting Pool
+    render_sanctum_shot(117, 14,
+                        (Vector3){ 18.0f, 14.0f, 18.0f },
+                        (Vector3){ 6.0f, 6.0f, 6.0f },
+                        52.0f,
+                        TextFormat("%s/unified_sanctum_courtyard_plaza.png", out_dir),
+                        "The Peristyle Courtyard Plaza & Reflecting Basin",
+                        "Paved Marble Infill Quadrant with Central PBF Fluid Pool, Sarsen Stelae & Balustrades");
+
+    // 4. Heroic Low-Angle Vista of the Stepped Acropolis Foundation & Spires
+    render_sanctum_shot(343, 18,
+                        (Vector3){ 0.0f, 12.0f, 44.0f },
+                        (Vector3){ 0.0f, 12.0f, 0.0f },
+                        52.0f,
+                        TextFormat("%s/unified_sanctum_acropolis_terrace.png", out_dir),
+                        "Monumental Stepped Acropolis & Apex Transmission Spire",
+                        "Cyclopean Bedrock Terrace Podium, Grand Processional Staircase, Bastions & Y=24 Pinnacle");
 
     CloseWindow();
     return 0;

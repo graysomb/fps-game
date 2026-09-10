@@ -116,6 +116,14 @@ static inline void rasterize_sanctum_plan(const SanctumCitadelPlan *plan,
                         c = (Color){ 45, 235, 255, 255 };
                     } else if (node->prim_type == SANCTUM_PRIM_PBF_WATER) {
                         c = (Color){ 50, 160, 220, 255 };
+                    } else if (node->prim_type == SANCTUM_PRIM_COFFERED_CEILING) {
+                        int cx = (int)(dx * 2.0f);
+                        int cz = (int)(dz * 2.0f);
+                        if ((cx % 4 == 0) || (cz % 4 == 0)) {
+                            c = ColorBrightness(c, -0.15f);
+                        }
+                    } else if (node->prim_type == SANCTUM_PRIM_BRAZIER) {
+                        c = (Color){ 255, 175, 40, 255 };
                     }
 
                     plot_fn(x, y, z, c);

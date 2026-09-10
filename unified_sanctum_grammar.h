@@ -9,9 +9,9 @@
 extern "C" {
 #endif
 
-#define MAX_SANCTUM_NODES 1024
-#define MAX_SANCTUM_SOCKETS 256
-#define MAX_SANCTUM_OPPS 64
+#define MAX_SANCTUM_NODES 2048
+#define MAX_SANCTUM_SOCKETS 512
+#define MAX_SANCTUM_OPPS 96
 
 // ---------------------------------------------------------------------------
 // Architectural Socket & Frontier Typology
@@ -22,7 +22,8 @@ typedef enum {
     SANCTUM_SOCKET_PORTAL_GATE,      // Gateways, trilithons, and chevron portals
     SANCTUM_SOCKET_ROTUNDA_RADIAL,   // Circular perimeter connections (Tholos/Stone Circle)
     SANCTUM_SOCKET_VERTICAL_APEX,    // Upward (spires, pediments) or downward (crypts, pits)
-    SANCTUM_SOCKET_HYDRAULIC_GUTTER  // Fluid aqueduct and coolant channels
+    SANCTUM_SOCKET_HYDRAULIC_GUTTER, // Fluid aqueduct and coolant channels
+    SANCTUM_SOCKET_QUADRANT_INFILL   // Diagonal quadrant corner (plaza, hypostyle, rampart)
 } SanctumSocketType;
 
 typedef struct {
@@ -50,7 +51,10 @@ typedef enum {
     SANCTUM_PRIM_LIGHT_CHANNEL,      // Glowing emissive circuit groove
     SANCTUM_PRIM_GRAVITY_CORE,       // Levitating octahedral matrix
     SANCTUM_PRIM_PBF_WATER,          // Physical PBF fluid spring/channel
-    SANCTUM_PRIM_CHASM_VOID          // Bedrock excavation void
+    SANCTUM_PRIM_CHASM_VOID,         // Bedrock excavation void
+    SANCTUM_PRIM_COFFERED_CEILING,   // Vaulted coffered roof slab
+    SANCTUM_PRIM_BALUSTRADE,         // Low decorative marble parapet
+    SANCTUM_PRIM_BRAZIER             // Sacred bronze flame / telemetry beacon
 } SanctumPrimitiveType;
 
 // ---------------------------------------------------------------------------
@@ -58,6 +62,11 @@ typedef enum {
 // ---------------------------------------------------------------------------
 typedef enum {
     SANCTUM_MOTIF_CORE_NEXUS,            // Central hybrid altar & tholos
+    SANCTUM_MOTIF_ACROPOLIS_PODIUM,      // Colossal stepped bedrock foundation terrace
+    SANCTUM_MOTIF_HYPOSTYLE_HALL,        // Enclosed 4x4 monumental column basilica
+    SANCTUM_MOTIF_COURTYARD_PLAZA,       // Paved peristyle quadrangle with fountain
+    SANCTUM_MOTIF_PERIBOLOS_RAMPART,     // Fortified cyclopean curtain wall & battlements
+    SANCTUM_MOTIF_GRAND_STAIRS,          // Wide monumental stepped flight
     SANCTUM_MOTIF_MEGALITHIC_TRILITHON,  // Titanium-clamped megalithic gateway
     SANCTUM_MOTIF_DORIC_COLONNADE,       // Fluted marble colonnade with light frieze
     SANCTUM_MOTIF_CANTED_PYLON_PORTAL,   // Canted twin pylons with chevron span
