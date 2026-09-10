@@ -124,6 +124,20 @@ static inline void rasterize_sanctum_plan(const SanctumCitadelPlan *plan,
                         }
                     } else if (node->prim_type == SANCTUM_PRIM_BRAZIER) {
                         c = (Color){ 255, 175, 40, 255 };
+                    } else if (node->prim_type == SANCTUM_PRIM_OBELISK) {
+                        // Tapered needle with gold pyramidion capstone at top
+                        if (dy >= node->h - 2) {
+                            c = (Color){ 255, 215, 60, 255 }; // Electrum / Gold pyramidion
+                        } else {
+                            c = sanctum_color_variance(c, h);
+                        }
+                    } else if (node->prim_type == SANCTUM_PRIM_ALTAR) {
+                        // Stepped sacrificial plinth with glowing ember core
+                        if (dy == node->h - 1 && fabsf(dx) < 1.0f && fabsf(dz) < 1.0f) {
+                            c = (Color){ 255, 150, 30, 255 }; // Glowing sacrificial ember
+                        } else {
+                            c = ColorBrightness(c, ((y % 2 == 0) ? -0.05f : 0.05f));
+                        }
                     }
 
                     plot_fn(x, y, z, c);

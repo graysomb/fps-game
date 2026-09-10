@@ -42,10 +42,13 @@ static int sanctum_add_node(SanctumCitadelPlan *plan,
     if (is_void) plan->count_void++;
     else if (is_fluid) plan->count_fluid++;
     else if (prim_type == SANCTUM_PRIM_HARDLIGHT_BRIDGE) plan->count_hardlight++;
-    else if (prim_type == SANCTUM_PRIM_STONE_ORTHOSTAT || prim_type == SANCTUM_PRIM_STONE_LINTEL) plan->count_stone++;
+    else if (prim_type == SANCTUM_PRIM_STONE_ORTHOSTAT || prim_type == SANCTUM_PRIM_STONE_LINTEL ||
+             prim_type == SANCTUM_PRIM_OBELISK || prim_type == SANCTUM_PRIM_ALTAR) plan->count_stone++;
     else if (prim_type == SANCTUM_PRIM_MARBLE_STYLOBATE || prim_type == SANCTUM_PRIM_MARBLE_COLUMN ||
-             prim_type == SANCTUM_PRIM_MARBLE_ARCHITRAVE || prim_type == SANCTUM_PRIM_MARBLE_PEDIMENT) plan->count_marble++;
-    else if (prim_type == SANCTUM_PRIM_TITANIUM_PYLON || prim_type == SANCTUM_PRIM_TITANIUM_BUTTRESS) plan->count_titanium++;
+             prim_type == SANCTUM_PRIM_MARBLE_ARCHITRAVE || prim_type == SANCTUM_PRIM_MARBLE_PEDIMENT ||
+             prim_type == SANCTUM_PRIM_BALUSTRADE) plan->count_marble++;
+    else if (prim_type == SANCTUM_PRIM_TITANIUM_PYLON || prim_type == SANCTUM_PRIM_TITANIUM_BUTTRESS ||
+             prim_type == SANCTUM_PRIM_COFFERED_CEILING || prim_type == SANCTUM_PRIM_BRAZIER) plan->count_titanium++;
 
     return idx;
 }
@@ -89,122 +92,255 @@ void sanctum_plan_init(SanctumCitadelPlan *plan, uint32_t seed) {
     Color c_titanium = (Color){ 62, 68, 76, 255 };    // Brutalist dark pewter titanium
     Color c_cyan     = (Color){ 45, 225, 255, 255 };  // Emissive cyan conduit
     Color c_water    = (Color){ 50, 160, 220, 255 };  // Sacred PBF water
-    Color c_gold     = (Color){ 255, 185, 45, 255 };  // Sacred brazier fire
+    Color c_gold     = (Color){ 255, 185, 45, 255 };  // Sacred brazier fire / electrum
 
     // =======================================================================
-    // 1. THE MONUMENTAL ACROPOLIS PODIUM (Massive Grounding Foundation)
+    // 1. THE MONUMENTAL ACROPOLIS PODIUM (Multi-Tiered Grounding Fortress)
     // =======================================================================
-    // Lower Bedrock Retaining Base: 48 x 3 x 48 cyclopean sarsen megalith mass
+    // Tier 0 Lower Cyclopean Bedrock Base: 52 x 4 x 52 megalith mass at Y=0
     int base_podium = sanctum_add_node(plan, SANCTUM_PRIM_STONE_ORTHOSTAT, SANCTUM_MOTIF_ACROPOLIS_PODIUM,
-                                       0, 0, 0, 48, 3, 48, 0.0f, 0.0f, c_stone, false, false, false);
+                                       0, 0, 0, 52, 4, 52, 0.0f, 0.0f, c_stone, false, false, false);
 
-    // Four Massive Titanium Corner Bastions anchoring the acropolis perimeter
+    // Four Massive Fortified Pewter Titanium Corner Bastions: 8 x 8 x 8 at Y=0..8
     sanctum_add_node(plan, SANCTUM_PRIM_TITANIUM_PYLON, SANCTUM_MOTIF_ACROPOLIS_PODIUM,
-                     -22, 0, -22, 5, 5, 5, 0.0f, 0.0f, c_titanium, false, false, false);
+                     -22, 0, -22, 8, 8, 8, 0.0f, 0.0f, c_titanium, false, false, false);
     sanctum_add_node(plan, SANCTUM_PRIM_TITANIUM_PYLON, SANCTUM_MOTIF_ACROPOLIS_PODIUM,
-                      22, 0, -22, 5, 5, 5, 0.0f, 0.0f, c_titanium, false, false, false);
+                      22, 0, -22, 8, 8, 8, 0.0f, 0.0f, c_titanium, false, false, false);
     sanctum_add_node(plan, SANCTUM_PRIM_TITANIUM_PYLON, SANCTUM_MOTIF_ACROPOLIS_PODIUM,
-                     -22, 0,  22, 5, 5, 5, 0.0f, 0.0f, c_titanium, false, false, false);
+                     -22, 0,  22, 8, 8, 8, 0.0f, 0.0f, c_titanium, false, false, false);
     sanctum_add_node(plan, SANCTUM_PRIM_TITANIUM_PYLON, SANCTUM_MOTIF_ACROPOLIS_PODIUM,
-                      22, 0,  22, 5, 5, 5, 0.0f, 0.0f, c_titanium, false, false, false);
+                      22, 0,  22, 8, 8, 8, 0.0f, 0.0f, c_titanium, false, false, false);
 
-    // Upper Grand Terrace: 40 x 2 x 40 polished Pentelic marble stylobate
+    // Bastion Beacon Braziers atop corner bastions at Y=8
+    sanctum_add_node(plan, SANCTUM_PRIM_BRAZIER, SANCTUM_MOTIF_ACROPOLIS_PODIUM, -22, 8, -22, 2, 2, 2, 0.0f, 0.0f, c_gold, true, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_BRAZIER, SANCTUM_MOTIF_ACROPOLIS_PODIUM,  22, 8, -22, 2, 2, 2, 0.0f, 0.0f, c_gold, true, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_BRAZIER, SANCTUM_MOTIF_ACROPOLIS_PODIUM, -22, 8,  22, 2, 2, 2, 0.0f, 0.0f, c_gold, true, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_BRAZIER, SANCTUM_MOTIF_ACROPOLIS_PODIUM,  22, 8,  22, 2, 2, 2, 0.0f, 0.0f, c_gold, true, false, false);
+
+    // Tier 1 Grand Stylobate Terrace: 46 x 2 x 46 polished Pentelic marble at Y=4
     sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_STYLOBATE, SANCTUM_MOTIF_ACROPOLIS_PODIUM,
-                     0, 3, 0, 40, 2, 40, 0.0f, 0.0f, c_marble, false, false, false);
+                     0, 4, 0, 46, 2, 46, 0.0f, 0.0f, c_marble, false, false, false);
 
-    // Four Grand Processional Staircases descending to ground level on all cardinal axes
-    // North (+Z) stairs
-    sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_STYLOBATE, SANCTUM_MOTIF_GRAND_STAIRS,
-                     0, 1, 22, 12, 2, 4, 0.0f, 0.0f, c_marble, false, false, false);
-    // South (-Z) stairs
-    sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_STYLOBATE, SANCTUM_MOTIF_GRAND_STAIRS,
-                     0, 1, -22, 12, 2, 4, 0.0f, 0.0f, c_marble, false, false, false);
-    // East (+X) stairs
-    sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_STYLOBATE, SANCTUM_MOTIF_GRAND_STAIRS,
-                     22, 1, 0, 4, 2, 12, 0.0f, 0.0f, c_marble, false, false, false);
-    // West (-X) stairs
-    sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_STYLOBATE, SANCTUM_MOTIF_GRAND_STAIRS,
-                     -22, 1, 0, 4, 2, 12, 0.0f, 0.0f, c_marble, false, false, false);
-
-    // Four Corner Guardian Megaliths with glowing cyan steles atop the terrace
-    sanctum_add_node(plan, SANCTUM_PRIM_STONE_ORTHOSTAT, SANCTUM_MOTIF_ACROPOLIS_PODIUM,
-                     -16, 5, -16, 3, 6, 3, 0.0f, 0.0f, c_stone, false, false, false);
-    sanctum_add_node(plan, SANCTUM_PRIM_BRAZIER, SANCTUM_MOTIF_ACROPOLIS_PODIUM,
-                     -16, 11, -16, 1, 1, 1, 0.0f, 0.0f, c_gold, true, false, false);
-
-    sanctum_add_node(plan, SANCTUM_PRIM_STONE_ORTHOSTAT, SANCTUM_MOTIF_ACROPOLIS_PODIUM,
-                      16, 5, -16, 3, 6, 3, 0.0f, 0.0f, c_stone, false, false, false);
-    sanctum_add_node(plan, SANCTUM_PRIM_BRAZIER, SANCTUM_MOTIF_ACROPOLIS_PODIUM,
-                      16, 11, -16, 1, 1, 1, 0.0f, 0.0f, c_gold, true, false, false);
-
-    sanctum_add_node(plan, SANCTUM_PRIM_STONE_ORTHOSTAT, SANCTUM_MOTIF_ACROPOLIS_PODIUM,
-                     -16, 5,  16, 3, 6, 3, 0.0f, 0.0f, c_stone, false, false, false);
-    sanctum_add_node(plan, SANCTUM_PRIM_BRAZIER, SANCTUM_MOTIF_ACROPOLIS_PODIUM,
-                     -16, 11,  16, 1, 1, 1, 0.0f, 0.0f, c_gold, true, false, false);
-
-    sanctum_add_node(plan, SANCTUM_PRIM_STONE_ORTHOSTAT, SANCTUM_MOTIF_ACROPOLIS_PODIUM,
-                      16, 5,  16, 3, 6, 3, 0.0f, 0.0f, c_stone, false, false, false);
-    sanctum_add_node(plan, SANCTUM_PRIM_BRAZIER, SANCTUM_MOTIF_ACROPOLIS_PODIUM,
-                      16, 11,  16, 1, 1, 1, 0.0f, 0.0f, c_gold, true, false, false);
+    // Four Cardinal Processional Staircases descending from terrace Y=4 to ground Y=0
+    sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_STYLOBATE, SANCTUM_MOTIF_GRAND_STAIRS,  0, 1,  25, 14, 3, 6, 0.0f, 0.0f, c_marble, false, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_STYLOBATE, SANCTUM_MOTIF_GRAND_STAIRS,  0, 1, -25, 14, 3, 6, 0.0f, 0.0f, c_marble, false, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_STYLOBATE, SANCTUM_MOTIF_GRAND_STAIRS,  25, 1,  0, 6, 3, 14, 0.0f, 0.0f, c_marble, false, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_STYLOBATE, SANCTUM_MOTIF_GRAND_STAIRS, -25, 1,  0, 6, 3, 14, 0.0f, 0.0f, c_marble, false, false, false);
 
     // =======================================================================
-    // 2. THE EPICENTER SANCTUARY & THOLOS ALTAR (Raised atop the Terrace)
+    // 2. CONTINUOUS PERIMETER ENCLOSURES (Grand Doric Stoas & Curtain Walls)
     // =======================================================================
-    // Elevated Inner Sanctum Podium: 22 x 2 x 22 at Y = 5
-    sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_STYLOBATE, SANCTUM_MOTIF_CORE_NEXUS,
-                     0, 5, 0, 22, 2, 22, 0.0f, 0.0f, c_marble, false, false, false);
+    // North Perimeter Stoa: Colonnaded covered gallery along Z = 19, Y = 6..13
+    // Back Cyclopean Wall
+    sanctum_add_node(plan, SANCTUM_PRIM_STONE_ORTHOSTAT, SANCTUM_MOTIF_PERIMETER_STOA,
+                     0, 6, 21, 38, 7, 2, 0.0f, 0.0f, c_stone, false, false, false);
+    // Colonnade Front (8 Doric Columns)
+    for (int k = -3; k <= 3; ++k) {
+        sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_COLUMN, SANCTUM_MOTIF_PERIMETER_STOA,
+                         k * 5, 6, 17, 1, 6, 1, 0.0f, 0.0f, c_marble, false, false, false);
+    }
+    // Stoa Architrave & Coffered Roof
+    sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_ARCHITRAVE, SANCTUM_MOTIF_PERIMETER_STOA,
+                     0, 12, 19, 38, 1, 6, 0.0f, 0.0f, c_marble, false, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_COFFERED_CEILING, SANCTUM_MOTIF_PERIMETER_STOA,
+                     0, 13, 19, 38, 1, 6, 0.0f, 0.0f, c_titanium, false, false, false);
 
-    // Central Sunken Reflecting Water Pool: 8 x 1 x 8
-    sanctum_add_node(plan, SANCTUM_PRIM_PBF_WATER, SANCTUM_MOTIF_CORE_NEXUS,
-                     0, 7, 0, 8, 1, 8, 0.0f, 0.0f, c_water, false, false, true);
+    // South Perimeter Stoa Wings (Flanking the Grand Propylaea Avenue):
+    // West Wing (X: -19 to -7)
+    sanctum_add_node(plan, SANCTUM_PRIM_STONE_ORTHOSTAT, SANCTUM_MOTIF_PERIMETER_STOA,
+                     -13, 6, -21, 14, 7, 2, 0.0f, 0.0f, c_stone, false, false, false);
+    for (int k = 0; k < 3; ++k) {
+        sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_COLUMN, SANCTUM_MOTIF_PERIMETER_STOA,
+                         -17 + k * 4, 6, -17, 1, 6, 1, 0.0f, 0.0f, c_marble, false, false, false);
+    }
+    sanctum_add_node(plan, SANCTUM_PRIM_COFFERED_CEILING, SANCTUM_MOTIF_PERIMETER_STOA,
+                     -13, 12, -19, 14, 2, 6, 0.0f, 0.0f, c_titanium, false, false, false);
 
-    // Inner Concentric Colonnade (8 Fluted Doric Marble Columns)
-    for (int a = 0; a < 8; ++a) {
-        float rad = (float)a * (2.0f * PI / 8.0f);
-        int cx = (int)roundf(cosf(rad) * 7.0f);
-        int cz = (int)roundf(sinf(rad) * 7.0f);
-        sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_COLUMN, SANCTUM_MOTIF_CORE_NEXUS,
-                         cx, 7, cz, 2, 7, 2, 0.0f, 0.0f, c_marble, false, false, false);
+    // East Wing (X: 7 to 19)
+    sanctum_add_node(plan, SANCTUM_PRIM_STONE_ORTHOSTAT, SANCTUM_MOTIF_PERIMETER_STOA,
+                      13, 6, -21, 14, 7, 2, 0.0f, 0.0f, c_stone, false, false, false);
+    for (int k = 0; k < 3; ++k) {
+        sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_COLUMN, SANCTUM_MOTIF_PERIMETER_STOA,
+                          9 + k * 4, 6, -17, 1, 6, 1, 0.0f, 0.0f, c_marble, false, false, false);
+    }
+    sanctum_add_node(plan, SANCTUM_PRIM_COFFERED_CEILING, SANCTUM_MOTIF_PERIMETER_STOA,
+                      13, 12, -19, 14, 2, 6, 0.0f, 0.0f, c_titanium, false, false, false);
+
+    // =======================================================================
+    // 3. THE COLOSSAL MEGARON MEGASTRUCTURE (Commanding Ziggurat-Citadel, Y=6..38)
+    // =======================================================================
+    // A. Raised Temple Stylobate (28 x 2 x 28 at Y = 6)
+    sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_STYLOBATE, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                     0, 6, 0, 28, 2, 28, 0.0f, 0.0f, c_marble, false, false, false);
+
+    // B. Enclosed Cella Outer Walls: Cyclopean Stone Masses (Y=8..20, Height 12)
+    // North Back Wall (26 x 12 x 3 at Z = 11)
+    sanctum_add_node(plan, SANCTUM_PRIM_STONE_ORTHOSTAT, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                     0, 8, 11, 26, 12, 3, 0.0f, 0.0f, c_stone, false, false, false);
+    // West Flank Wall (3 x 12 x 22 at X = -12)
+    sanctum_add_node(plan, SANCTUM_PRIM_STONE_ORTHOSTAT, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                     -12, 8, 0, 3, 12, 22, 0.0f, 0.0f, c_stone, false, false, false);
+    // East Flank Wall (3 x 12 x 22 at X = 12)
+    sanctum_add_node(plan, SANCTUM_PRIM_STONE_ORTHOSTAT, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                      12, 8, 0, 3, 12, 22, 0.0f, 0.0f, c_stone, false, false, false);
+
+    // Engaged Fluted Doric Columns along East and West Exterior Walls
+    for (int k = -2; k <= 2; ++k) {
+        sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_COLUMN, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                         -14, 8, k * 5, 2, 12, 2, 0.0f, 0.0f, c_marble, false, false, false);
+        sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_COLUMN, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                          14, 8, k * 5, 2, 12, 2, 0.0f, 0.0f, c_marble, false, false, false);
     }
 
-    // Four Monolithic Megaliths flanking the cardinal entrances of the Tholos
-    sanctum_add_node(plan, SANCTUM_PRIM_STONE_ORTHOSTAT, SANCTUM_MOTIF_CORE_NEXUS,
-                     0, 7, -9, 3, 8, 2, 0.0f, 0.0f, c_stone, false, false, false);
-    sanctum_add_node(plan, SANCTUM_PRIM_STONE_ORTHOSTAT, SANCTUM_MOTIF_CORE_NEXUS,
-                     0, 7,  9, 3, 8, 2, 0.0f, 0.0f, c_stone, false, false, false);
-    sanctum_add_node(plan, SANCTUM_PRIM_STONE_ORTHOSTAT, SANCTUM_MOTIF_CORE_NEXUS,
-                     -9, 7, 0, 2, 8, 3, 0.0f, 0.0f, c_stone, false, false, false);
-    sanctum_add_node(plan, SANCTUM_PRIM_STONE_ORTHOSTAT, SANCTUM_MOTIF_CORE_NEXUS,
-                      9, 7, 0, 2, 8, 3, 0.0f, 0.0f, c_stone, false, false, false);
+    // C. South Facade Monumental Propylaea Gatehouse (Grand Entrance)
+    // Twin Canted Titanium Pylons (canted at 18 degrees)
+    sanctum_add_node(plan, SANCTUM_PRIM_TITANIUM_PYLON, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                     -7, 8, -12, 4, 14, 4, -18.0f, 0.0f, c_titanium, false, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_TITANIUM_PYLON, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                      7, 8, -12, 4, 14, 4,  18.0f, 0.0f, c_titanium, false, false, false);
+    // Monumental Inscribed Titanium Lintel Beam spanning the portal at Y=20
+    sanctum_add_node(plan, SANCTUM_PRIM_TITANIUM_PYLON, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                     0, 20, -12, 18, 3, 4, 0.0f, 0.0f, c_titanium, false, false, false);
+    // Cyan Emissive Glyph Seam across the entrance lintel
+    sanctum_add_node(plan, SANCTUM_PRIM_LIGHT_CHANNEL, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                     0, 21, -12, 14, 1, 2, 0.0f, 0.0f, c_cyan, true, false, false);
 
-    // Titanium Ring Architrave binding the colonnade tops
-    sanctum_add_node(plan, SANCTUM_PRIM_TITANIUM_PYLON, SANCTUM_MOTIF_CORE_NEXUS,
-                     0, 14, 0, 18, 2, 18, 0.0f, 0.0f, c_titanium, false, false, false);
-    sanctum_add_node(plan, SANCTUM_PRIM_LIGHT_CHANNEL, SANCTUM_MOTIF_CORE_NEXUS,
-                     0, 14, 0, 14, 1, 14, 0.0f, 0.0f, c_cyan, true, false, false);
+    // D. Interior Great Hall (Cella Interior)
+    // Two rows of 4 fluted marble columns lining the central nave
+    for (int k = -1; k <= 2; ++k) {
+        sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_COLUMN, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                         -5, 8, k * 4 - 2, 2, 10, 2, 0.0f, 0.0f, c_marble, false, false, false);
+        sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_COLUMN, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                          5, 8, k * 4 - 2, 2, 10, 2, 0.0f, 0.0f, c_marble, false, false, false);
+    }
+    // Sacred Central Reflecting Basin
+    sanctum_add_node(plan, SANCTUM_PRIM_PBF_WATER, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                     0, 8, 2, 6, 1, 10, 0.0f, 0.0f, c_water, false, false, true);
+    // Glowing cyan floor energy conduit
+    sanctum_add_node(plan, SANCTUM_PRIM_LIGHT_CHANNEL, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                     0, 8, 2, 1, 1, 14, 0.0f, 0.0f, c_cyan, true, false, false);
+    // Bronze altar braziers in the sanctuary
+    sanctum_add_node(plan, SANCTUM_PRIM_BRAZIER, SANCTUM_MOTIF_MONUMENTAL_CITADEL, -3, 8, 8, 1, 1, 1, 0.0f, 0.0f, c_gold, true, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_BRAZIER, SANCTUM_MOTIF_MONUMENTAL_CITADEL,  3, 8, 8, 1, 1, 1, 0.0f, 0.0f, c_gold, true, false, false);
 
-    // Central Levitating Amber Oracle Beacon
-    sanctum_add_node(plan, SANCTUM_PRIM_GRAVITY_CORE, SANCTUM_MOTIF_CORE_NEXUS,
-                     0, 10, 0, 2, 2, 2, 0.0f, 0.0f, c_gold, true, false, false);
+    // E. Heavy Coffered Ceiling Slab & Clerestory Skylight at Y=20
+    sanctum_add_node(plan, SANCTUM_PRIM_COFFERED_CEILING, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                     0, 20, 0, 26, 2, 26, 0.0f, 0.0f, c_titanium, false, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_CHASM_VOID, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                     0, 20, 2, 8, 2, 8, 0.0f, 0.0f, BLACK, false, true, false);
+
+    // F. Upper Sky Cella & Cantilevered Observation Gallery (Y=22..26)
+    sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_STYLOBATE, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                     0, 22, 0, 20, 2, 20, 0.0f, 0.0f, c_marble, false, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_BALUSTRADE, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                     0, 24, -9, 18, 1, 1, 0.0f, 0.0f, c_marble, false, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_BALUSTRADE, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                     0, 24,  9, 18, 1, 1, 0.0f, 0.0f, c_marble, false, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_BALUSTRADE, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                     -9, 24, 0, 1, 1, 18, 0.0f, 0.0f, c_marble, false, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_BALUSTRADE, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                      9, 24, 0, 1, 1, 18, 0.0f, 0.0f, c_marble, false, false, false);
+
+    // Upper Stepped Pyramidal Tier (14 x 2 x 14 at Y=24)
+    sanctum_add_node(plan, SANCTUM_PRIM_TITANIUM_PYLON, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                     0, 24, 0, 14, 2, 14, 0.0f, 0.0f, c_titanium, false, false, false);
+
+    // G. Apex Transmission Spire Needle & Canted Flying Buttresses (Y=26..38)
+    // Soaring Central Titanium Needle (4 x 12 x 4)
+    sanctum_add_node(plan, SANCTUM_PRIM_TITANIUM_PYLON, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                     0, 26, 0, 4, 12, 4, 0.0f, 0.0f, c_titanium, false, false, false);
+    // Four Canted Flying Buttresses anchoring the needle to the upper terrace
+    sanctum_add_node(plan, SANCTUM_PRIM_TITANIUM_BUTTRESS, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                     -4, 24, 0, 2, 6, 2, -28.0f, 0.0f, c_titanium, false, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_TITANIUM_BUTTRESS, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                      4, 24, 0, 2, 6, 2,  28.0f, 0.0f, c_titanium, false, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_TITANIUM_BUTTRESS, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                     0, 24, -4, 2, 6, 2, 0.0f, -28.0f, c_titanium, false, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_TITANIUM_BUTTRESS, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                     0, 24,  4, 2, 6, 2, 0.0f,  28.0f, c_titanium, false, false, false);
+    // Levitating Promethean Oracle Gravity Core at Y=35
+    sanctum_add_node(plan, SANCTUM_PRIM_GRAVITY_CORE, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                     0, 35, 0, 3, 3, 3, 0.0f, 0.0f, c_gold, true, false, false);
+    // Luminescent apex conduit ring
+    sanctum_add_node(plan, SANCTUM_PRIM_LIGHT_CHANNEL, SANCTUM_MOTIF_MONUMENTAL_CITADEL,
+                     0, 34, 0, 6, 1, 6, 0.0f, 0.0f, c_cyan, true, false, false);
 
     // =======================================================================
-    // 3. INITIAL BOUNDARY FRONTIER SOCKETS
+    // 4. DENSE DETAIL INFILL STRUCTURES (Filling Intermediate Spaces)
     // =======================================================================
-    // Cardinal Processional Avenues (extending outward from the grand stairs at Y=0)
-    sanctum_add_socket(plan, (Vector3){   0.0f, 0.0f,  26.0f }, (Vector3){  0.0f, 0.0f,  1.0f }, SANCTUM_SOCKET_AXIAL_PATH, base_podium, 0);
-    sanctum_add_socket(plan, (Vector3){   0.0f, 0.0f, -26.0f }, (Vector3){  0.0f, 0.0f, -1.0f }, SANCTUM_SOCKET_AXIAL_PATH, base_podium, 0);
-    sanctum_add_socket(plan, (Vector3){  26.0f, 0.0f,   0.0f }, (Vector3){  1.0f, 0.0f,  0.0f }, SANCTUM_SOCKET_AXIAL_PATH, base_podium, 0);
-    sanctum_add_socket(plan, (Vector3){ -26.0f, 0.0f,   0.0f }, (Vector3){ -1.0f, 0.0f,  0.0f }, SANCTUM_SOCKET_AXIAL_PATH, base_podium, 0);
+    // A. South Processional Stelae Avenue: Rows of orthostats with cyan glyphs
+    for (int s = 0; s < 4; ++s) {
+        int sz = -15 - s * 3;
+        sanctum_add_node(plan, SANCTUM_PRIM_STONE_ORTHOSTAT, SANCTUM_MOTIF_STELAE_AVENUE,
+                         -5, 6, sz, 1, 4, 1, 0.0f, 0.0f, c_stone, false, false, false);
+        sanctum_add_node(plan, SANCTUM_PRIM_LIGHT_CHANNEL, SANCTUM_MOTIF_STELAE_AVENUE,
+                         -5, 8, sz, 1, 1, 1, 0.0f, 0.0f, c_cyan, true, false, false);
+        sanctum_add_node(plan, SANCTUM_PRIM_STONE_ORTHOSTAT, SANCTUM_MOTIF_STELAE_AVENUE,
+                          5, 6, sz, 1, 4, 1, 0.0f, 0.0f, c_stone, false, false, false);
+        sanctum_add_node(plan, SANCTUM_PRIM_LIGHT_CHANNEL, SANCTUM_MOTIF_STELAE_AVENUE,
+                          5, 8, sz, 1, 1, 1, 0.0f, 0.0f, c_cyan, true, false, false);
+    }
+    // Processional light conduit along south avenue
+    sanctum_add_node(plan, SANCTUM_PRIM_LIGHT_CHANNEL, SANCTUM_MOTIF_STELAE_AVENUE,
+                     0, 6, -20, 1, 1, 12, 0.0f, 0.0f, c_cyan, true, false, false);
 
-    // Diagonal Quadrant Infill Sockets (filling the 4 corners of the acropolis)
-    sanctum_add_socket(plan, (Vector3){  18.0f, 5.0f,  18.0f }, (Vector3){  1.0f, 0.0f,  1.0f }, SANCTUM_SOCKET_QUADRANT_INFILL, base_podium, 5);
-    sanctum_add_socket(plan, (Vector3){ -18.0f, 5.0f,  18.0f }, (Vector3){ -1.0f, 0.0f,  1.0f }, SANCTUM_SOCKET_QUADRANT_INFILL, base_podium, 5);
-    sanctum_add_socket(plan, (Vector3){  18.0f, 5.0f, -18.0f }, (Vector3){  1.0f, 0.0f, -1.0f }, SANCTUM_SOCKET_QUADRANT_INFILL, base_podium, 5);
-    sanctum_add_socket(plan, (Vector3){ -18.0f, 5.0f, -18.0f }, (Vector3){ -1.0f, 0.0f, -1.0f }, SANCTUM_SOCKET_QUADRANT_INFILL, base_podium, 5);
+    // B. Monumental Sacrificial Hearth / Altar Plinth at South Approach (0, 6, -11)
+    sanctum_add_node(plan, SANCTUM_PRIM_ALTAR, SANCTUM_MOTIF_STELAE_AVENUE,
+                     0, 6, -11, 4, 2, 4, 0.0f, 0.0f, c_stone, false, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_BRAZIER, SANCTUM_MOTIF_STELAE_AVENUE,
+                     0, 8, -11, 2, 1, 2, 0.0f, 0.0f, c_gold, true, false, false);
 
-    // Vertical Zenith and Nadir Sockets
-    sanctum_add_socket(plan, (Vector3){ 0.0f, 16.0f, 0.0f }, (Vector3){  0.0f, 1.0f,  0.0f }, SANCTUM_SOCKET_VERTICAL_APEX, base_podium, 16);
-    sanctum_add_socket(plan, (Vector3){ 0.0f, -1.0f, 0.0f }, (Vector3){  0.0f, -1.0f, 0.0f }, SANCTUM_SOCKET_VERTICAL_APEX, base_podium, -1);
+    // C. West Monumental Obelisk Plaza (X = -17, Z = 0)
+    // Stepped Marble Base
+    sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_STYLOBATE, SANCTUM_MOTIF_OBELISK_PLAZA,
+                     -17, 6, 0, 6, 1, 6, 0.0f, 0.0f, c_marble, false, false, false);
+    // Tapered Sarsen Obelisk rising 12 voxels to Y=19
+    sanctum_add_node(plan, SANCTUM_PRIM_OBELISK, SANCTUM_MOTIF_OBELISK_PLAZA,
+                     -17, 7, 0, 2, 12, 2, 0.0f, 0.0f, c_stone, false, false, false);
+    // Four Perimeter Bronze Braziers
+    sanctum_add_node(plan, SANCTUM_PRIM_BRAZIER, SANCTUM_MOTIF_OBELISK_PLAZA, -19, 7, -2, 1, 1, 1, 0.0f, 0.0f, c_gold, true, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_BRAZIER, SANCTUM_MOTIF_OBELISK_PLAZA, -15, 7, -2, 1, 1, 1, 0.0f, 0.0f, c_gold, true, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_BRAZIER, SANCTUM_MOTIF_OBELISK_PLAZA, -19, 7,  2, 1, 1, 1, 0.0f, 0.0f, c_gold, true, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_BRAZIER, SANCTUM_MOTIF_OBELISK_PLAZA, -15, 7,  2, 1, 1, 1, 0.0f, 0.0f, c_gold, true, false, false);
+
+    // D. East Monumental Obelisk Plaza (X = 17, Z = 0)
+    sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_STYLOBATE, SANCTUM_MOTIF_OBELISK_PLAZA,
+                      17, 6, 0, 6, 1, 6, 0.0f, 0.0f, c_marble, false, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_OBELISK, SANCTUM_MOTIF_OBELISK_PLAZA,
+                      17, 7, 0, 2, 12, 2, 0.0f, 0.0f, c_stone, false, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_BRAZIER, SANCTUM_MOTIF_OBELISK_PLAZA,  15, 7, -2, 1, 1, 1, 0.0f, 0.0f, c_gold, true, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_BRAZIER, SANCTUM_MOTIF_OBELISK_PLAZA,  19, 7, -2, 1, 1, 1, 0.0f, 0.0f, c_gold, true, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_BRAZIER, SANCTUM_MOTIF_OBELISK_PLAZA,  15, 7,  2, 1, 1, 1, 0.0f, 0.0f, c_gold, true, false, false);
+    sanctum_add_node(plan, SANCTUM_PRIM_BRAZIER, SANCTUM_MOTIF_OBELISK_PLAZA,  19, 7,  2, 1, 1, 1, 0.0f, 0.0f, c_gold, true, false, false);
+
+    // E. Hydraulic Water Rills connecting the central megaron to the obelisk basins
+    sanctum_add_node(plan, SANCTUM_PRIM_PBF_WATER, SANCTUM_MOTIF_OBELISK_PLAZA,
+                     -15, 6, 0, 4, 1, 2, 0.0f, 0.0f, c_water, false, false, true);
+    sanctum_add_node(plan, SANCTUM_PRIM_PBF_WATER, SANCTUM_MOTIF_OBELISK_PLAZA,
+                      15, 6, 0, 4, 1, 2, 0.0f, 0.0f, c_water, false, false, true);
+
+    // =======================================================================
+    // 5. EXPANSION FRONTIER SOCKETS
+    // =======================================================================
+    // Cardinal Processional Avenues extending outward at ground level
+    sanctum_add_socket(plan, (Vector3){   0.0f, 0.0f,  29.0f }, (Vector3){  0.0f, 0.0f,  1.0f }, SANCTUM_SOCKET_AXIAL_PATH, base_podium, 0);
+    sanctum_add_socket(plan, (Vector3){   0.0f, 0.0f, -29.0f }, (Vector3){  0.0f, 0.0f, -1.0f }, SANCTUM_SOCKET_AXIAL_PATH, base_podium, 0);
+    sanctum_add_socket(plan, (Vector3){  29.0f, 0.0f,   0.0f }, (Vector3){  1.0f, 0.0f,  0.0f }, SANCTUM_SOCKET_AXIAL_PATH, base_podium, 0);
+    sanctum_add_socket(plan, (Vector3){ -29.0f, 0.0f,   0.0f }, (Vector3){ -1.0f, 0.0f,  0.0f }, SANCTUM_SOCKET_AXIAL_PATH, base_podium, 0);
+
+    // Terrace Quadrant Infill Sockets (North-East, North-West, South-East, South-West)
+    sanctum_add_socket(plan, (Vector3){  16.0f, 6.0f,  12.0f }, (Vector3){  1.0f, 0.0f,  1.0f }, SANCTUM_SOCKET_QUADRANT_INFILL, base_podium, 6);
+    sanctum_add_socket(plan, (Vector3){ -16.0f, 6.0f,  12.0f }, (Vector3){ -1.0f, 0.0f,  1.0f }, SANCTUM_SOCKET_QUADRANT_INFILL, base_podium, 6);
+    sanctum_add_socket(plan, (Vector3){  16.0f, 6.0f, -12.0f }, (Vector3){  1.0f, 0.0f, -1.0f }, SANCTUM_SOCKET_QUADRANT_INFILL, base_podium, 6);
+    sanctum_add_socket(plan, (Vector3){ -16.0f, 6.0f, -12.0f }, (Vector3){ -1.0f, 0.0f, -1.0f }, SANCTUM_SOCKET_QUADRANT_INFILL, base_podium, 6);
+
+    // Stoa Continuation Sockets (East and West ends of stoas)
+    sanctum_add_socket(plan, (Vector3){  20.0f, 6.0f,  19.0f }, (Vector3){  1.0f, 0.0f, 0.0f }, SANCTUM_SOCKET_STOA_CONTINUATION, base_podium, 6);
+    sanctum_add_socket(plan, (Vector3){ -20.0f, 6.0f,  19.0f }, (Vector3){ -1.0f, 0.0f, 0.0f }, SANCTUM_SOCKET_STOA_CONTINUATION, base_podium, 6);
+
+    // Vertical Apex Sockets (Apex Needle Zenith and Subterranean Crypt)
+    sanctum_add_socket(plan, (Vector3){ 0.0f, 38.0f, 0.0f }, (Vector3){ 0.0f,  1.0f, 0.0f }, SANCTUM_SOCKET_VERTICAL_APEX, base_podium, 38);
+    sanctum_add_socket(plan, (Vector3){ 0.0f, -1.0f, 0.0f }, (Vector3){ 0.0f, -1.0f, 0.0f }, SANCTUM_SOCKET_VERTICAL_APEX, base_podium, -1);
 }
 
 // ---------------------------------------------------------------------------
@@ -223,15 +359,32 @@ int sanctum_coalgebra_frontier(const SanctumCitadelPlan *plan, SanctumOpportunit
         h ^= (h << 13); h ^= (h >> 17); h ^= (h << 5);
 
         switch (s->type) {
-            case SANCTUM_SOCKET_QUADRANT_INFILL: {
-                // High-priority infill for diagonal quadrants to eliminate sparsity!
+            case SANCTUM_SOCKET_QUADRANT_INFILL:
+            case SANCTUM_SOCKET_PLAZA_INFILL: {
+                // High-priority infill for diagonal quadrants and open plaza space!
+                if (count < max_opps) {
+                    SanctumOpportunity *opp = &out_opps[count++];
+                    opp->socket_idx = i;
+                    opp->motif = SANCTUM_MOTIF_OBELISK_PLAZA;
+                    opp->spawn_pos = s->pos;
+                    opp->spawn_dir = s->dir;
+                    opp->score = 0.97f + (float)(h % 10) / 100.0f;
+                }
+                if (count < max_opps) {
+                    SanctumOpportunity *opp = &out_opps[count++];
+                    opp->socket_idx = i;
+                    opp->motif = SANCTUM_MOTIF_STELAE_AVENUE;
+                    opp->spawn_pos = s->pos;
+                    opp->spawn_dir = s->dir;
+                    opp->score = 0.95f + (float)((h >> 2) % 10) / 100.0f;
+                }
                 if (count < max_opps) {
                     SanctumOpportunity *opp = &out_opps[count++];
                     opp->socket_idx = i;
                     opp->motif = SANCTUM_MOTIF_COURTYARD_PLAZA;
                     opp->spawn_pos = s->pos;
                     opp->spawn_dir = s->dir;
-                    opp->score = 0.96f + (float)(h % 10) / 100.0f;
+                    opp->score = 0.94f + (float)((h >> 4) % 10) / 100.0f;
                 }
                 if (count < max_opps) {
                     SanctumOpportunity *opp = &out_opps[count++];
@@ -239,7 +392,7 @@ int sanctum_coalgebra_frontier(const SanctumCitadelPlan *plan, SanctumOpportunit
                     opp->motif = SANCTUM_MOTIF_HYPOSTYLE_HALL;
                     opp->spawn_pos = s->pos;
                     opp->spawn_dir = s->dir;
-                    opp->score = 0.94f + (float)((h >> 4) % 10) / 100.0f;
+                    opp->score = 0.92f;
                 }
                 if (count < max_opps) {
                     SanctumOpportunity *opp = &out_opps[count++];
@@ -248,6 +401,26 @@ int sanctum_coalgebra_frontier(const SanctumCitadelPlan *plan, SanctumOpportunit
                     opp->spawn_pos = s->pos;
                     opp->spawn_dir = s->dir;
                     opp->score = 0.88f;
+                }
+                break;
+            }
+
+            case SANCTUM_SOCKET_STOA_CONTINUATION: {
+                if (count < max_opps) {
+                    SanctumOpportunity *opp = &out_opps[count++];
+                    opp->socket_idx = i;
+                    opp->motif = SANCTUM_MOTIF_PERIMETER_STOA;
+                    opp->spawn_pos = s->pos;
+                    opp->spawn_dir = s->dir;
+                    opp->score = 0.98f;
+                }
+                if (count < max_opps) {
+                    SanctumOpportunity *opp = &out_opps[count++];
+                    opp->socket_idx = i;
+                    opp->motif = SANCTUM_MOTIF_PERIBOLOS_RAMPART;
+                    opp->spawn_pos = s->pos;
+                    opp->spawn_dir = s->dir;
+                    opp->score = 0.89f;
                 }
                 break;
             }
@@ -922,6 +1095,137 @@ bool sanctum_algebra_expand(SanctumCitadelPlan *plan, const SanctumOpportunity *
             // Forward Socket
             sanctum_add_socket(plan,
                                (Vector3){ (float)(px + step_x * (length + 2)), (float)py, (float)(pz + step_z * (length + 2)) },
+                               dir, SANCTUM_SOCKET_AXIAL_PATH, plan->node_count - 1, py);
+            break;
+        }
+
+        case SANCTUM_MOTIF_PERIMETER_STOA: {
+            int s_len = 16;
+            int s_w = 6;
+            int s_h = 7;
+            int center_x = px + step_x * (s_len / 2);
+            int center_z = pz + step_z * (s_len / 2);
+
+            int sw = along_z ? s_w : s_len;
+            int sd = along_z ? s_len : s_w;
+
+            // 1. Stepped Marble Stylobate Base
+            sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_STYLOBATE, opp->motif,
+                             center_x, py, center_z, sw, 1, sd, 0.0f, 0.0f, c_marble, false, false, false);
+
+            // 2. Back Cyclopean Retaining Wall
+            int wx = along_z ? (center_x + (dir.x > 0 ? 2 : -2)) : center_x;
+            int wz = along_z ? center_z : (center_z + (dir.z > 0 ? 2 : -2));
+            sanctum_add_node(plan, SANCTUM_PRIM_STONE_ORTHOSTAT, opp->motif,
+                             wx, py + 1, wz, along_z ? 2 : s_len, s_h - 1, along_z ? s_len : 2, 0.0f, 0.0f, c_stone, false, false, false);
+
+            // 3. Colonnade Front (4 Doric Marble Columns)
+            int fx = along_z ? (center_x - (dir.x > 0 ? 2 : -2)) : center_x;
+            int fz = along_z ? center_z : (center_z - (dir.z > 0 ? 2 : -2));
+            for (int k = -2; k <= 1; ++k) {
+                int cx = along_z ? fx : (center_x + k * 4 + 2);
+                int cz = along_z ? (center_z + k * 4 + 2) : fz;
+                sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_COLUMN, opp->motif,
+                                 cx, py + 1, cz, 1, s_h - 1, 1, 0.0f, 0.0f, c_marble, false, false, false);
+            }
+
+            // 4. Architrave & Coffered Ceiling
+            sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_ARCHITRAVE, opp->motif,
+                             center_x, py + s_h, center_z, sw, 1, sd, 0.0f, 0.0f, c_marble, false, false, false);
+            sanctum_add_node(plan, SANCTUM_PRIM_COFFERED_CEILING, opp->motif,
+                             center_x, py + s_h + 1, center_z, sw, 1, sd, 0.0f, 0.0f, c_titanium, false, false, false);
+
+            // 5. Emissive Light Channel running down aisle
+            sanctum_add_node(plan, SANCTUM_PRIM_LIGHT_CHANNEL, opp->motif,
+                             center_x, py + 1, center_z, along_z ? 1 : s_len - 2, 1, along_z ? s_len - 2 : 1, 0.0f, 0.0f, c_cyan, true, false, false);
+
+            // Forward Socket to continue stoa
+            sanctum_add_socket(plan,
+                               (Vector3){ (float)(px + step_x * (s_len + 1)), (float)py, (float)(pz + step_z * (s_len + 1)) },
+                               dir, SANCTUM_SOCKET_STOA_CONTINUATION, plan->node_count - 1, py);
+            break;
+        }
+
+        case SANCTUM_MOTIF_OBELISK_PLAZA: {
+            int p_size = 14;
+            int center_x = px + (int)roundf(dir.x * 7.0f);
+            int center_z = pz + (int)roundf(dir.z * 7.0f);
+
+            // 1. Paved Marble Stylobate Plaza
+            sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_STYLOBATE, opp->motif,
+                             center_x, py, center_z, p_size, 1, p_size, 0.0f, 0.0f, c_marble, false, false, false);
+
+            // 2. Central Sunken Pool with PBF water
+            sanctum_add_node(plan, SANCTUM_PRIM_PBF_WATER, opp->motif,
+                             center_x, py + 1, center_z, 6, 1, 6, 0.0f, 0.0f, c_water, false, false, true);
+
+            // 3. Central Monolithic Tapered Obelisk
+            sanctum_add_node(plan, SANCTUM_PRIM_OBELISK, opp->motif,
+                             center_x, py + 1, center_z, 2, 11, 2, 0.0f, 0.0f, c_stone, false, false, false);
+
+            // 4. Four Corner Braziers
+            sanctum_add_node(plan, SANCTUM_PRIM_BRAZIER, opp->motif, center_x - 5, py + 1, center_z - 5, 1, 1, 1, 0.0f, 0.0f, c_gold, true, false, false);
+            sanctum_add_node(plan, SANCTUM_PRIM_BRAZIER, opp->motif, center_x + 5, py + 1, center_z - 5, 1, 1, 1, 0.0f, 0.0f, c_gold, true, false, false);
+            sanctum_add_node(plan, SANCTUM_PRIM_BRAZIER, opp->motif, center_x - 5, py + 1, center_z + 5, 1, 1, 1, 0.0f, 0.0f, c_gold, true, false, false);
+            sanctum_add_node(plan, SANCTUM_PRIM_BRAZIER, opp->motif, center_x + 5, py + 1, center_z + 5, 1, 1, 1, 0.0f, 0.0f, c_gold, true, false, false);
+
+            // 5. Low Decorative Balustrades
+            sanctum_add_node(plan, SANCTUM_PRIM_BALUSTRADE, opp->motif,
+                             center_x, py + 1, center_z - 6, 10, 1, 1, 0.0f, 0.0f, c_marble, false, false, false);
+            sanctum_add_node(plan, SANCTUM_PRIM_BALUSTRADE, opp->motif,
+                             center_x, py + 1, center_z + 6, 10, 1, 1, 0.0f, 0.0f, c_marble, false, false, false);
+
+            // Sockets outward
+            sanctum_add_socket(plan,
+                               (Vector3){ (float)(center_x + dir.x * 8.0f), (float)py, (float)(center_z + dir.z * 8.0f) },
+                               dir, SANCTUM_SOCKET_QUADRANT_INFILL, plan->node_count - 1, py);
+            break;
+        }
+
+        case SANCTUM_MOTIF_STELAE_AVENUE: {
+            int a_len = 14;
+            int a_w = 8;
+            int center_x = px + step_x * (a_len / 2);
+            int center_z = pz + step_z * (a_len / 2);
+
+            int aw = along_z ? a_w : a_len;
+            int ad = along_z ? a_len : a_w;
+
+            // 1. Paved Marble Avenue Floor
+            sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_STYLOBATE, opp->motif,
+                             center_x, py, center_z, aw, 1, ad, 0.0f, 0.0f, c_marble, false, false, false);
+
+            // 2. Central Cyan Light Conduit
+            sanctum_add_node(plan, SANCTUM_PRIM_LIGHT_CHANNEL, opp->motif,
+                             center_x, py + 1, center_z, along_z ? 1 : a_len, 1, along_z ? a_len : 1, 0.0f, 0.0f, c_cyan, true, false, false);
+
+            // 3. Symmetrical Rows of 3 Megalithic Stelae with cyan glyph inserts
+            for (int k = -1; k <= 1; ++k) {
+                int sx1 = along_z ? (center_x - 3) : (center_x + k * 4);
+                int sz1 = along_z ? (center_z + k * 4) : (center_z - 3);
+                int sx2 = along_z ? (center_x + 3) : (center_x + k * 4);
+                int sz2 = along_z ? (center_z + k * 4) : (center_z + 3);
+
+                sanctum_add_node(plan, SANCTUM_PRIM_STONE_ORTHOSTAT, opp->motif,
+                                 sx1, py + 1, sz1, 1, 5, 1, 0.0f, 0.0f, c_stone, false, false, false);
+                sanctum_add_node(plan, SANCTUM_PRIM_LIGHT_CHANNEL, opp->motif,
+                                 sx1, py + 3, sz1, 1, 1, 1, 0.0f, 0.0f, c_cyan, true, false, false);
+
+                sanctum_add_node(plan, SANCTUM_PRIM_STONE_ORTHOSTAT, opp->motif,
+                                 sx2, py + 1, sz2, 1, 5, 1, 0.0f, 0.0f, c_stone, false, false, false);
+                sanctum_add_node(plan, SANCTUM_PRIM_LIGHT_CHANNEL, opp->motif,
+                                 sx2, py + 3, sz2, 1, 1, 1, 0.0f, 0.0f, c_cyan, true, false, false);
+            }
+
+            // 4. Stepped Altar at avenue midpoint
+            sanctum_add_node(plan, SANCTUM_PRIM_ALTAR, opp->motif,
+                             center_x, py + 1, center_z, 3, 2, 3, 0.0f, 0.0f, c_stone, false, false, false);
+            sanctum_add_node(plan, SANCTUM_PRIM_BRAZIER, opp->motif,
+                             center_x, py + 3, center_z, 1, 1, 1, 0.0f, 0.0f, c_gold, true, false, false);
+
+            // Forward Socket
+            sanctum_add_socket(plan,
+                               (Vector3){ (float)(px + step_x * (a_len + 1)), (float)py, (float)(pz + step_z * (a_len + 1)) },
                                dir, SANCTUM_SOCKET_AXIAL_PATH, plan->node_count - 1, py);
             break;
         }

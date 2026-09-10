@@ -23,7 +23,9 @@ typedef enum {
     SANCTUM_SOCKET_ROTUNDA_RADIAL,   // Circular perimeter connections (Tholos/Stone Circle)
     SANCTUM_SOCKET_VERTICAL_APEX,    // Upward (spires, pediments) or downward (crypts, pits)
     SANCTUM_SOCKET_HYDRAULIC_GUTTER, // Fluid aqueduct and coolant channels
-    SANCTUM_SOCKET_QUADRANT_INFILL   // Diagonal quadrant corner (plaza, hypostyle, rampart)
+    SANCTUM_SOCKET_QUADRANT_INFILL,  // Diagonal quadrant corner (plaza, hypostyle, rampart)
+    SANCTUM_SOCKET_STOA_CONTINUATION,// Perimeter stoa colonnade run
+    SANCTUM_SOCKET_PLAZA_INFILL      // Courtyard plaza detail cluster
 } SanctumSocketType;
 
 typedef struct {
@@ -54,7 +56,9 @@ typedef enum {
     SANCTUM_PRIM_CHASM_VOID,         // Bedrock excavation void
     SANCTUM_PRIM_COFFERED_CEILING,   // Vaulted coffered roof slab
     SANCTUM_PRIM_BALUSTRADE,         // Low decorative marble parapet
-    SANCTUM_PRIM_BRAZIER             // Sacred bronze flame / telemetry beacon
+    SANCTUM_PRIM_BRAZIER,            // Sacred bronze flame / telemetry beacon
+    SANCTUM_PRIM_OBELISK,            // Monolithic tapered needle stela
+    SANCTUM_PRIM_ALTAR               // Stepped sacrificial hearth plinth
 } SanctumPrimitiveType;
 
 // ---------------------------------------------------------------------------
@@ -75,6 +79,10 @@ typedef enum {
     SANCTUM_MOTIF_CORBELLED_CRYPT,       // Subterranean cyclopean vault
     SANCTUM_MOTIF_APEX_SPIRE_MATRIX,     // Towering pinnacle with levitating core
     SANCTUM_MOTIF_SACRED_PBF_CASCADE,    // Stepped water cascade & coolant canal
+    SANCTUM_MOTIF_MONUMENTAL_CITADEL,    // Colossal 3-tiered Ziggurat-Megaron Citadel (Y=0..36)
+    SANCTUM_MOTIF_PERIMETER_STOA,        // Continuous colonnaded covered portico
+    SANCTUM_MOTIF_STELAE_AVENUE,         // Processional double row of megalithic stelae
+    SANCTUM_MOTIF_OBELISK_PLAZA,         // Tapered needle obelisk plaza with braziers
     SANCTUM_MOTIF_COUNT
 } SanctumMotif;
 

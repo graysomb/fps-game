@@ -85,41 +85,41 @@ int main(void) {
 
     const char *out_dir = "/Users/migr4479/.gemini/antigravity/brain/86453e72-1dcc-4b9c-ba5a-2222f2dbe7ff";
 
-    // 1. Sprawling Aerial Panorama of the Dense Acropolis Complex (Step 20)
+    // 1. Sprawling Aerial Panorama of the Monumental Megaron Acropolis (Step 20)
     render_sanctum_shot(2552, 20,
-                        (Vector3){ 40.0f, 38.0f, 40.0f },
-                        (Vector3){ 0.0f, 8.0f, 0.0f },
+                        (Vector3){ 45.0f, 42.0f, 45.0f },
+                        (Vector3){ 0.0f, 16.0f, 0.0f },
                         54.0f,
                         TextFormat("%s/unified_sanctum_overview.png", out_dir),
-                        "The Dense Antediluvian Acropolis: Aerial Overview",
-                        "Stepped Bedrock Foundation, Hypostyle Basilica, Infill Courtyard Plazas & Spires");
+                        "The Monumental Precursor Citadel: Aerial Panorama",
+                        "Colossal Megaron Sanctuary (Y=38), Perimeter Stoas, Obelisk Plazas & Stelae Avenues");
 
-    // 2. Colossal Hypostyle Megaron Basilica & Coffered Ceiling
+    // 2. Colossal Propylaea Portal & Great Hypostyle Hall
     render_sanctum_shot(777, 16,
-                        (Vector3){ 22.0f, 16.0f, 22.0f },
-                        (Vector3){ 0.0f, 9.0f, 0.0f },
-                        50.0f,
+                        (Vector3){ 0.0f, 18.0f, -36.0f },
+                        (Vector3){ 0.0f, 16.0f, 0.0f },
+                        52.0f,
                         TextFormat("%s/unified_sanctum_hypostyle_hall.png", out_dir),
-                        "The Colossal Hypostyle Megaron & Coffered Roof",
-                        "16 Fluted Doric Columns, Dark Titanium Coffered Ceiling Slab, Clerestory Skylight & Braziers");
+                        "The Colossal Propylaea & Great Megaron Hall",
+                        "Twin Canted Pylons, Inscribed Lintel, Enclosed Cella Walls, Coffered Ceiling & Braziers");
 
-    // 3. Paved Peristyle Courtyard Plaza & Sacred Reflecting Pool
+    // 3. West Obelisk Plaza & Processional Stelae Avenue
     render_sanctum_shot(117, 14,
-                        (Vector3){ 18.0f, 14.0f, 18.0f },
-                        (Vector3){ 6.0f, 6.0f, 6.0f },
+                        (Vector3){ -28.0f, 18.0f, -14.0f },
+                        (Vector3){ -12.0f, 10.0f, -2.0f },
                         52.0f,
                         TextFormat("%s/unified_sanctum_courtyard_plaza.png", out_dir),
-                        "The Peristyle Courtyard Plaza & Reflecting Basin",
-                        "Paved Marble Infill Quadrant with Central PBF Fluid Pool, Sarsen Stelae & Balustrades");
+                        "The Monolithic Obelisk Plaza & Stelae Avenue",
+                        "Tapered Sarsen Needle, Sacrificial Hearth, PBF Water Rills, Megalith Rows & Braziers");
 
-    // 4. Heroic Low-Angle Vista of the Stepped Acropolis Foundation & Spires
+    // 4. Heroic Low-Angle Vista of the Towering Megastructure (Y=38)
     render_sanctum_shot(343, 18,
-                        (Vector3){ 0.0f, 12.0f, 44.0f },
-                        (Vector3){ 0.0f, 12.0f, 0.0f },
+                        (Vector3){ 0.0f, 12.0f, -48.0f },
+                        (Vector3){ 0.0f, 22.0f, 0.0f },
                         52.0f,
                         TextFormat("%s/unified_sanctum_acropolis_terrace.png", out_dir),
-                        "Monumental Stepped Acropolis & Apex Transmission Spire",
-                        "Cyclopean Bedrock Terrace Podium, Grand Processional Staircase, Bastions & Y=24 Pinnacle");
+                        "Heroic Skyline: Apex Transmission Needle & Bastions",
+                        "Multi-Tiered Ziggurat Podium, Canted Buttresses, Corner Bastions & Y=38 Oracle Core");
 
     CloseWindow();
     return 0;

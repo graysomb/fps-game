@@ -30,13 +30,18 @@ static void print_sanctum_ascii_blueprint(const SanctumCitadelPlan *plan) {
         int gz = (int)((float)(n->z + span) / (2.0f * span) * grid_h);
         if (gx < 0 || gx > grid_w || gz < 0 || gz > grid_h) continue;
 
-        char glyph = '?';
+        char glyph = '.';
         if (n->is_void) glyph = ' ';
         else if (n->is_fluid) glyph = '~';
         else if (n->prim_type == SANCTUM_PRIM_HARDLIGHT_BRIDGE) glyph = '#';
         else if (n->prim_type == SANCTUM_PRIM_STONE_ORTHOSTAT || n->prim_type == SANCTUM_PRIM_STONE_LINTEL) glyph = 'S';
-        else if (n->prim_type == SANCTUM_PRIM_MARBLE_COLUMN || n->prim_type == SANCTUM_PRIM_MARBLE_STYLOBATE) glyph = 'M';
+        else if (n->prim_type == SANCTUM_PRIM_OBELISK || n->prim_type == SANCTUM_PRIM_ALTAR) glyph = 'O';
+        else if (n->prim_type == SANCTUM_PRIM_MARBLE_COLUMN || n->prim_type == SANCTUM_PRIM_MARBLE_STYLOBATE ||
+                 n->prim_type == SANCTUM_PRIM_MARBLE_ARCHITRAVE || n->prim_type == SANCTUM_PRIM_MARBLE_PEDIMENT) glyph = 'M';
         else if (n->prim_type == SANCTUM_PRIM_TITANIUM_PYLON || n->prim_type == SANCTUM_PRIM_TITANIUM_BUTTRESS) glyph = 'T';
+        else if (n->prim_type == SANCTUM_PRIM_COFFERED_CEILING) glyph = 'C';
+        else if (n->prim_type == SANCTUM_PRIM_BALUSTRADE) glyph = 'B';
+        else if (n->prim_type == SANCTUM_PRIM_BRAZIER || n->prim_type == SANCTUM_PRIM_LIGHT_CHANNEL) glyph = '*';
         else if (n->prim_type == SANCTUM_PRIM_GRAVITY_CORE) glyph = '!';
 
         grid[gz][gx] = glyph;
