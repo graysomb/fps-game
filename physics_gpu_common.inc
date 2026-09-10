@@ -1028,8 +1028,8 @@ static bool gpu_pack_world(void) {
     gpuPhysics.render_voxel_count = 0;
     if (gpuPhysics.greedy_world) {
         if (!gpu_render_stage_reserve((size_t)greedyCoarse.child_count)) return false;
-        for (int world = greedyCoarse.child_begin;
-             world < greedyCoarse.child_begin + greedyCoarse.child_count; ++world) {
+        for (int child = 0; child < greedyCoarse.child_count; ++child) {
+            int world = greedyCoarse.children[child];
             if (world < 0 || world >= voxel_count || !voxels[world].simulate) continue;
             Voxel *v = &voxels[world];
             GpuRenderVoxelState *render =
@@ -1858,6 +1858,10 @@ static int gpu_physics_steps(float dt, int fixed_steps) {
     if (!gpu_validate_and_commit()) {
         gpu_set_step_failure(PHYSICS_GPU_FAILURE_VALIDATION, "GPU readback or state validation failed");
         return 0;
+    }
+    if (gpuPhysics.greedy_world) {
+        for (int step = 0; step < fixed_steps; ++step) update_wake_timers();
+        if (greedy_process_pending_fracture()) gpuPhysics.resident_valid = false;
     }
     return fixed_steps;
 }

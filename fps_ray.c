@@ -963,6 +963,8 @@ static int build_glue_cluster_indices(int start_idx, int *out_indices);
 static void build_glue_cluster_ids(int *out_cluster_id);
 static void rebuild_particle_collision_metadata(void);
 static bool greedy_solver_active(void);
+static bool greedy_rebuild_current(void);
+static bool greedy_process_pending_fracture(void);
 static bool greedy_particles_share_island(const Particle *a, const Particle *b);
 static void greedy_refresh_predicted(bool all_children);
 static int greedy_physics_shape_count(void);
@@ -5462,6 +5464,9 @@ static bool freeze_lifetime_expired_islands(void)
         refresh_static_voxel_beliefs();
         meshDirty = true;
     }
+    if (changed && greedy_solver_active()) {
+        greedy_rebuild_current();
+    }
     return changed;
 }
 
@@ -6329,6 +6334,9 @@ static bool wake_sleeping_voxels_near_awake(void)
         if (should_wake && wake_sleeping_cluster_in_place(i)) {
             changed = true;
         }
+    }
+    if (changed && greedy_solver_active()) {
+        greedy_rebuild_current();
     }
     return changed;
 }
@@ -12666,12 +12674,18 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
             if (greedyStageProfile.enabled) greedy_stage_started=GetTime();
             greedy_solve_attachments(8);
             greedy_lift_floor_residual();
+            greedy_solve_attachments(4);
+            greedy_lift_floor_residual();
             if (greedyStageProfile.enabled) greedyStageProfile.interface_ms+=(GetTime()-greedy_stage_started)*1000.0;
         }
 
-        if (!sizedFixture && !greedyFineFixture && !greedyCoarse.active) {
-            pbd_parallel_for(0, voxel_count, gather_voxel_break_masks_range, NULL);
-            process_break_masks();
+        if (!sizedFixture && !greedyFineFixture) {
+            if (greedyCoarse.active) {
+                greedy_process_pending_fracture();
+            } else {
+                pbd_parallel_for(0, voxel_count, gather_voxel_break_masks_range, NULL);
+                process_break_masks();
+            }
         }
         update_wake_timers();
 
@@ -14635,8 +14649,8 @@ static void DrawVoxels(Camera3D cam) {
         if (!v->simulate) {
             continue;
         }
-        if (residentGreedyTransforms && i >= greedyCoarse.child_begin &&
-            i < greedyCoarse.child_begin + greedyCoarse.child_count) continue;
+        if (residentGreedyTransforms && greedyCoarse.active &&
+            i < greedyCoarse.voxel_capacity && greedyCoarse.voxel_group[i] >= 0) continue;
         
         // Draw Bullet with Orb Shader
         if (v->isBullet && v->type == 0) {

@@ -4,7 +4,7 @@ typedef struct {
     bool active;
     Voxel *shapes; int *sizes; int group_count;
     Voxel **physics_shapes; int physics_shape_count;
-    int *voxel_group; int voxel_capacity;
+    int *voxel_group,*children; int voxel_capacity;
     Particle **samples; int sample_count;
     Particle ***sources; float **weights; int *source_count;
     int *pool_to_sample;
@@ -17,12 +17,15 @@ typedef struct {
 } GreedyCoarseSystem;
 static GreedyCoarseSystem greedyCoarse;
 static bool greedyFineFixture;
+static bool greedyFractureFixture;
 static int greedyFixtureCellCount;
 static Color greedy_size_color(int size){static const Color p[]={{80,185,255,255},{255,190,65,255},{105,220,125,255},{220,95,235,255},{255,105,95,255},{90,225,215,255},{245,235,95,255},{150,125,255,255}};return p[(size-1)&7];}
 static int greedy_sample_index(Particle *p);
 static void greedy_refresh(void);
+static void greedy_build_collision_samples(void);
+static int find_voxel_by_identity(uint64_t identity);
 
-static void greedy_coarse_reset(void){free(greedyCoarse.shapes);free(greedyCoarse.sizes);free(greedyCoarse.voxel_group);free(greedyCoarse.physics_shapes);
+static void greedy_coarse_reset(void){free(greedyCoarse.shapes);free(greedyCoarse.sizes);free(greedyCoarse.voxel_group);free(greedyCoarse.children);free(greedyCoarse.physics_shapes);
     if(greedyCoarse.sources)for(int i=0;i<greedyCoarse.sample_count;i++)free(greedyCoarse.sources[i]);if(greedyCoarse.weights)for(int i=0;i<greedyCoarse.sample_count;i++)free(greedyCoarse.weights[i]);
     free(greedyCoarse.samples);free(greedyCoarse.sources);free(greedyCoarse.weights);free(greedyCoarse.source_count);free(greedyCoarse.pool_to_sample);free(greedyCoarse.parent_use);free(greedyCoarse.promoted);free(greedyCoarse.owner);free(greedyCoarse.dependent_order);free(greedyCoarse.attachment_order);free(greedyCoarse.collision_samples);
     memset(&greedyCoarse,0,sizeof(greedyCoarse));}
@@ -54,7 +57,7 @@ static bool greedy_share_range(int begin,int count){int cap=count*8,n=0;Particle
         if(types[i]==voxels[v].type&&list[i]->rest_cell_x==old->rest_cell_x&&list[i]->rest_cell_y==old->rest_cell_y&&list[i]->rest_cell_z==old->rest_cell_z){same=list[i];break;}
         if(same&&same!=old){particle_retain(same);voxels[v].particles[k]=same;particle_release(old);}else if(!same){list[n]=old;types[n++]=voxels[v].type;}}
     free(list);free(types);collisionTopologyDirty=true;return true;}
-static int greedy_voxel_at(int begin,int count,int x,int y,int z){for(int v=begin;v<begin+count;v++)if(voxels[v].orig_min_gx==x&&voxels[v].orig_min_gy==y&&voxels[v].orig_min_gz==z)return v;return -1;}
+static int greedy_voxel_at(const GreedyCoarseSystem *g,int x,int y,int z){for(int i=0;i<g->child_count;i++){int v=g->children[i];if(v>=0&&v<voxel_count&&voxels[v].orig_min_gx==x&&voxels[v].orig_min_gy==y&&voxels[v].orig_min_gz==z)return v;}return -1;}
 static bool greedy_group_precedes(int a,int b){if(b<0)return true;GreedyCoarseSystem *g=&greedyCoarse;if(g->sizes[a]!=g->sizes[b])return g->sizes[a]>g->sizes[b];
     Voxel *x=&g->shapes[a],*y=&g->shapes[b];if(x->orig_min_gx!=y->orig_min_gx)return x->orig_min_gx<y->orig_min_gx;
     if(x->orig_min_gy!=y->orig_min_gy)return x->orig_min_gy<y->orig_min_gy;return x->orig_min_gz<y->orig_min_gz;}
@@ -68,23 +71,24 @@ static bool greedy_flatten_sample(int sample,unsigned char *state){GreedyCoarseS
 static bool greedy_coarse_bind(const GreedyCubeCover *cover,const UnitVoxelBuffer *buffer,int begin){
     greedy_coarse_reset();GreedyCoarseSystem *g=&greedyCoarse;if(!cover||!buffer||cover->cube_count<=0)return false;
     g->group_count=cover->cube_count;g->child_begin=begin;g->child_count=buffer->count;g->voxel_capacity=voxel_count;
-    g->shapes=calloc((size_t)g->group_count,sizeof(*g->shapes));g->sizes=calloc((size_t)g->group_count,sizeof(*g->sizes));g->voxel_group=malloc((size_t)voxel_count*sizeof(*g->voxel_group));
-    if(!g->shapes||!g->sizes||!g->voxel_group)goto fail;for(int i=0;i<voxel_count;i++)g->voxel_group[i]=-1;
-    for(int c=0;c<g->group_count;c++){GreedyCube q=cover->cubes[c];g->sizes[c]=q.size;int first=greedy_voxel_at(begin,buffer->count,q.x,q.y,q.z);if(first<0)goto fail;
+    g->shapes=calloc((size_t)g->group_count,sizeof(*g->shapes));g->sizes=calloc((size_t)g->group_count,sizeof(*g->sizes));g->voxel_group=malloc((size_t)voxel_count*sizeof(*g->voxel_group));g->children=malloc((size_t)g->child_count*sizeof(*g->children));
+    if(!g->shapes||!g->sizes||!g->voxel_group||!g->children)goto fail;for(int i=0;i<voxel_count;i++)g->voxel_group[i]=-1;
+    for(int i=0;i<g->child_count;i++){int v=buffer->voxels[i].voxelIndex;if(v<0||v>=voxel_count||!voxels[v].simulate||voxels[v].orig_min_gx!=buffer->voxels[i].gx||voxels[v].orig_min_gy!=buffer->voxels[i].gy||voxels[v].orig_min_gz!=buffer->voxels[i].gz)v=begin+i;if(v<0||v>=voxel_count||!voxels[v].simulate)goto fail;g->children[i]=v;}
+    for(int c=0;c<g->group_count;c++){GreedyCube q=cover->cubes[c];g->sizes[c]=q.size;int first=greedy_voxel_at(g,q.x,q.y,q.z);if(first<0)goto fail;
         Voxel shape=voxels[first];shape.rest_edge=q.size*VOXEL_SIZE;shape.rest_volume=shape.rest_edge*shape.rest_edge*shape.rest_edge;shape.simulate_dofs=true;
         shape.orig_min_gx=shape.rest_min_gx=q.x;shape.orig_min_gy=shape.rest_min_gy=q.y;shape.orig_min_gz=shape.rest_min_gz=q.z;
         shape.orig_max_gx=shape.rest_max_gx=q.x+q.size-1;shape.orig_max_gy=shape.rest_max_gy=q.y+q.size-1;shape.orig_max_gz=shape.rest_max_gz=q.z+q.size-1;
-        for(int k=0;k<8;k++){int v=greedy_voxel_at(begin,buffer->count,q.x+((k&1)?q.size-1:0),q.y+((k&2)?q.size-1:0),q.z+((k&4)?q.size-1:0));if(v<0)goto fail;shape.particles[k]=voxels[v].particles[k];}g->shapes[c]=shape;}
-    for(int i=0;i<buffer->count;i++){int c=cover->cell_cube[i];if(c<0||c>=g->group_count)goto fail;g->voxel_group[begin+i]=c;}
-    g->physics_shapes=malloc((size_t)(g->group_count+voxel_count)*sizeof(*g->physics_shapes));if(!g->physics_shapes)goto fail;for(int c=0;c<g->group_count;c++)g->physics_shapes[g->physics_shape_count++]=&g->shapes[c];for(int v=0;v<voxel_count;v++)if(voxels[v].simulate&&(v<begin||v>=begin+buffer->count))g->physics_shapes[g->physics_shape_count++]=&voxels[v];
+        for(int k=0;k<8;k++){int v=greedy_voxel_at(g,q.x+((k&1)?q.size-1:0),q.y+((k&2)?q.size-1:0),q.z+((k&4)?q.size-1:0));if(v<0)goto fail;shape.particles[k]=voxels[v].particles[k];}g->shapes[c]=shape;}
+    for(int i=0;i<buffer->count;i++){int c=cover->cell_cube[i];if(c<0||c>=g->group_count)goto fail;g->voxel_group[g->children[i]]=c;}
+    g->physics_shapes=malloc((size_t)(g->group_count+voxel_count)*sizeof(*g->physics_shapes));if(!g->physics_shapes)goto fail;for(int c=0;c<g->group_count;c++)g->physics_shapes[g->physics_shape_count++]=&g->shapes[c];for(int v=0;v<voxel_count;v++)if(voxels[v].simulate&&g->voxel_group[v]<0)g->physics_shapes[g->physics_shape_count++]=&voxels[v];
     g->sample_count=active_particle_count;size_t n=(size_t)g->sample_count;g->samples=malloc(n*sizeof(*g->samples));g->sources=calloc(n,sizeof(*g->sources));g->weights=calloc(n,sizeof(*g->weights));
     g->source_count=calloc(n,sizeof(*g->source_count));g->owner=malloc(n*sizeof(*g->owner));g->dependent_order=malloc(n*sizeof(*g->dependent_order));g->attachment_order=malloc(n*sizeof(*g->attachment_order));if(!g->samples||!g->sources||!g->weights||!g->source_count||!g->owner||!g->dependent_order||!g->attachment_order)goto fail;
     g->parent_use=calloc(n,1);g->promoted=calloc(n,1);g->pool_to_sample=malloc((size_t)particle_pool_count*sizeof(*g->pool_to_sample));if(!g->parent_use||!g->promoted||!g->pool_to_sample)goto fail;
     for(int i=0;i<particle_pool_count;i++)g->pool_to_sample[i]=-1;memcpy(g->samples,active_particles,n*sizeof(*g->samples));for(int i=0;i<g->sample_count;i++){ptrdiff_t pi=g->samples[i]-particles_pool;if(pi>=0&&pi<particle_pool_count)g->pool_to_sample[pi]=i;}int *owner=g->owner;for(int i=0;i<g->sample_count;i++)owner[i]=-1;
-    for(int v=begin;v<begin+buffer->count;v++){int c=g->voxel_group[v];for(int k=0;k<8;k++){int i=greedy_sample_index(voxels[v].particles[k]);if(i>=0&&greedy_group_precedes(c,owner[i]))owner[i]=c;}}
+    for(int n=0;n<g->child_count;n++){int v=g->children[n],c=g->voxel_group[v];for(int k=0;k<8;k++){int i=greedy_sample_index(voxels[v].particles[k]);if(i>=0&&greedy_group_precedes(c,owner[i]))owner[i]=c;}}
     for(int i=0;i<g->sample_count;i++){Particle *p=g->samples[i];int c=owner[i];bool control=c<0;if(c>=0)for(int k=0;k<8;k++)if(g->shapes[c].particles[k]==p)control=true;
         int row_count=control?1:8;g->sources[i]=calloc((size_t)row_count,sizeof(*g->sources[i]));g->weights[i]=calloc((size_t)row_count,sizeof(*g->weights[i]));if(!g->sources[i]||!g->weights[i])goto fail;
-        if(control){g->source_count[i]=1;g->sources[i][0]=p;g->weights[i][0]=1;}else{Voxel *s=&g->shapes[c];Vector3 uv=v_mul(v_sub(p->pos,s->particles[0]->pos),1/s->rest_edge);
+        if(control){g->source_count[i]=1;g->sources[i][0]=p;g->weights[i][0]=1;}else{Voxel *s=&g->shapes[c];float rest_span=2.0f*(float)g->sizes[c];Vector3 uv={(p->rest_cell_x-s->particles[0]->rest_cell_x)/rest_span,(p->rest_cell_y-s->particles[0]->rest_cell_y)/rest_span,(p->rest_cell_z-s->particles[0]->rest_cell_z)/rest_span};
             for(int k=0;k<8;k++){float w=((k&1)?uv.x:1-uv.x)*((k&2)?uv.y:1-uv.y)*((k&4)?uv.z:1-uv.z);if(fabsf(w)<=1e-8f)continue;int q=g->source_count[i]++;g->sources[i][q]=s->particles[k];g->weights[i][q]=w;}if(g->source_count[i]<2)goto fail;}}
     for(int c=0;c<g->group_count;c++)for(int k=0;k<8;k++){int i=greedy_sample_index(g->shapes[c].particles[k]);if(i>=0)g->parent_use[i]=1;}
     /* A point derived from one cube but used by another cube is promoted to an
@@ -98,8 +102,18 @@ static bool greedy_coarse_bind(const GreedyCubeCover *cover,const UnitVoxelBuffe
     for(int i=0;i<g->sample_count;i++)if(g->source_count[i]>1&&!g->promoted[i]){float effective=0;for(int k=0;k<g->source_count[i];k++){float a=g->weights[i][k],w=g->sources[i][k]->inv_mass;effective+=a*a*w;}g->samples[i]->inv_mass=effective;}free(mass);
     g->active=true;greedy_refresh();collisionTopologyDirty=true;return true;
 fail:greedy_coarse_reset();return false;}
+static void greedy_finish_topology_rebuild(void){rebuild_voxel_hash();rebuild_all_voxel_surfaces();greedy_build_collision_samples();refresh_static_voxel_beliefs();collisionTopologyDirty=true;meshDirty=true;}
+static bool greedy_bind_live_children(const int *indices,int count,double cover_ms_override){if(!indices||count<=0)return false;UnitVoxelBuffer *buffer=calloc(1,sizeof(*buffer));GreedyCell *cells=malloc((size_t)count*sizeof(*cells));if(!buffer||!cells){free(buffer);free(cells);return false;}buffer->count=count;
+    for(int i=0;i<count;i++){int v=indices[i];if(v<0||v>=voxel_count||!voxels[v].simulate){free(buffer);free(cells);return false;}Voxel *voxel=&voxels[v];buffer->voxels[i]=(UnitVoxelSeed){.gx=voxel->orig_min_gx,.gy=voxel->orig_min_gy,.gz=voxel->orig_min_gz,.color=voxel->color,.type=voxel->type,.fixed=voxel->fixed,.voxelIndex=v,.debugTag=voxel->debugClusterTag,.activator=voxel->activator,.restorationQueued=voxel->restorationQueued,.restorationDeadlineFrame=voxel->restorationDeadlineFrame};cells[i]=(GreedyCell){voxel->orig_min_gx,voxel->orig_min_gy,voxel->orig_min_gz,voxel->type,i};}
+    GreedyCubeCover cover={0};double started=GetTime();bool ok=greedy_cube_cover_build(cells,count,&cover);free(cells);if(ok){double cover_ms=cover_ms_override>=0?cover_ms_override:(GetTime()-started)*1000.0;ok=greedy_coarse_bind(&cover,buffer,-1);if(ok){greedyCoarse.cover_ms=cover_ms;greedy_finish_topology_rebuild();}}greedy_cube_cover_free(&cover);free(buffer);return ok;}
+static bool greedy_rebuild_current(void){GreedyCoarseSystem *g=&greedyCoarse;if(!g->active)return false;int count=g->child_count;uint64_t *ids=malloc((size_t)count*sizeof(*ids));int *indices=malloc((size_t)count*sizeof(*indices));if(!ids||!indices){free(ids);free(indices);return false;}for(int i=0;i<count;i++){int v=g->children[i];ids[i]=(v>=0&&v<voxel_count)?voxels[v].identity:0;}greedy_coarse_materialize();int n=0;for(int i=0;i<count;i++){int v=find_voxel_by_identity(ids[i]);if(v>=0&&voxels[v].simulate)indices[n++]=v;}bool ok=n>0&&greedy_bind_live_children(indices,n,-1);free(ids);free(indices);return ok;}
+static bool greedy_refine_pending_break_masks(void){GreedyCoarseSystem *g=&greedyCoarse;if(!g->active||greedyFineFixture)return false;bool pending=false;for(int v=0;v<voxel_count;v++)pending|=voxels[v].break_mask!=0;if(!pending)return false;
+    int count=g->child_count;unsigned char *refine=calloc((size_t)count,1);uint64_t *keep_ids=malloc((size_t)count*sizeof(*keep_ids)),*fine_ids=malloc((size_t)count*sizeof(*fine_ids));int *keep=malloc((size_t)count*sizeof(*keep));if(!refine||!keep_ids||!fine_ids||!keep){free(refine);free(keep_ids);free(fine_ids);free(keep);return false;}
+    for(int v=0;v<voxel_count;v++){Voxel *voxel=&voxels[v];if(!voxel->break_mask)continue;for(int i=0;i<count;i++){int child=g->children[i];if(child==v)refine[i]=1;if(child<0||child>=voxel_count)continue;Voxel *candidate=&voxels[child];for(int face=0;face<6;face++)if((voxel->break_mask&(uint8_t)(1u<<face))&&candidate->orig_min_gx==voxel->orig_min_gx+face_offsets[face][0]&&candidate->orig_min_gy==voxel->orig_min_gy+face_offsets[face][1]&&candidate->orig_min_gz==voxel->orig_min_gz+face_offsets[face][2])refine[i]=1;}}
+    int keep_count=0,fine_count=0;for(int i=0;i<count;i++){int v=g->children[i];uint64_t id=(v>=0&&v<voxel_count)?voxels[v].identity:0;if(refine[i])fine_ids[fine_count++]=id;else keep_ids[keep_count++]=id;}greedy_coarse_materialize();for(int i=0;i<fine_count;i++){int v=find_voxel_by_identity(fine_ids[i]);if(v<0)continue;voxels[v].sleeping=false;voxels[v].sleepFrames=0;voxels[v].wake_timer=COARSENING_WAKE_FRAMES;voxels[v].wake_source=true;}process_break_masks();rebuild_voxel_hash();rebuild_all_voxel_surfaces();refresh_static_voxel_beliefs();collisionTopologyDirty=true;int live_keep=0;for(int i=0;i<keep_count;i++){int v=find_voxel_by_identity(keep_ids[i]);if(v>=0&&voxels[v].simulate)keep[live_keep++]=v;}bool recoarsened=live_keep>0&&greedy_bind_live_children(keep,live_keep,-1);if(!recoarsened){collisionTopologyDirty=true;rebuild_particle_collision_metadata();meshDirty=true;}free(refine);free(keep_ids);free(fine_ids);free(keep);return true;}
+static bool greedy_process_pending_fracture(void){if(!greedyCoarse.active||greedyFineFixture)return false;greedy_refresh_predicted(true);for(int v=0;v<voxel_count;v++)if(voxel_is_awake_dynamic(&voxels[v]))gather_voxel_break_masks(&voxels[v]);return greedy_refine_pending_break_masks();}
 static void greedy_point_impulse(int sample,Vector3 impulse){GreedyCoarseSystem *g=&greedyCoarse;if(sample<0)return;if(g->source_count[sample]<=1||g->promoted[sample]){Particle *p=g->samples[sample];p->vel=v_add(p->vel,v_mul(impulse,p->inv_mass));}else for(int k=0;k<g->source_count[sample];k++){Particle *p=g->sources[sample][k];p->vel=v_add(p->vel,v_mul(impulse,g->weights[sample][k]*p->inv_mass));}greedy_refresh();}
-static bool greedy_parent_corner_exposed(int group,Particle *point){GreedyCoarseSystem *g=&greedyCoarse;for(int v=g->child_begin;v<g->child_begin+g->child_count;v++){if(g->voxel_group[v]!=group)continue;for(int k=0;k<8;k++){if(voxels[v].particles[k]!=point)continue;if(voxels[v].surface[(k&1)?0:1]||voxels[v].surface[(k&2)?2:3]||voxels[v].surface[(k&4)?4:5])return true;}}return false;}
+static bool greedy_parent_corner_exposed(int group,Particle *point){GreedyCoarseSystem *g=&greedyCoarse;for(int n=0;n<g->child_count;n++){int v=g->children[n];if(v<0||v>=voxel_count||g->voxel_group[v]!=group)continue;for(int k=0;k<8;k++){if(voxels[v].particles[k]!=point)continue;if(voxels[v].surface[(k&1)?0:1]||voxels[v].surface[(k&2)?2:3]||voxels[v].surface[(k&4)?4:5])return true;}}return false;}
 static void greedy_build_collision_samples(void){GreedyCoarseSystem *g=&greedyCoarse;free(g->collision_samples);g->collision_samples=malloc((size_t)(g->sample_count+sim_particle_count)*sizeof(*g->collision_samples));g->collision_count=0;if(!g->collision_samples)return;
     unsigned char *seen=calloc((size_t)g->sample_count,1);if(!seen)return;for(int c=0;c<g->group_count;c++){float radius=0.5f*g->sizes[c]*VOXEL_SIZE;for(int k=0;k<8;k++){Particle *p=g->shapes[c].particles[k];if(!greedy_parent_corner_exposed(c,p))continue;int i=greedy_sample_index(p);if(i>=0){p->radius=fmaxf(p->radius,radius);p->collision_group=MAX_VOXELS+1;if(!seen[i]){seen[i]=1;g->collision_samples[g->collision_count++]=p;}}}}
     for(int i=0;i<sim_particle_count;i++){Particle *p=sim_particles[i];int s=greedy_sample_index(p);if(s>=0&&!seen[s]&&g->owner[s]<0){seen[s]=1;g->collision_samples[g->collision_count++]=p;}}free(seen);}
@@ -107,9 +121,9 @@ static void greedy_install_collision_particles(void){GreedyCoarseSystem *g=&gree
 static void greedy_solve_static_contacts(float dt){
     greedy_install_collision_particles();solve_static_collisions(dt);
 }
-static void greedy_lift_floor_residual(void){GreedyCoarseSystem *g=&greedyCoarse;float min_y=0;for(int i=0;i<g->collision_count;i++)min_y=fminf(min_y,g->collision_samples[i]->predicted_pos.y);if(min_y>=0)return;float lift=-min_y;for(int i=0;i<g->sample_count;i++)if(g->owner[i]>=0&&(g->source_count[i]==1||g->promoted[i]))g->samples[i]->predicted_pos.y+=lift;greedy_refresh_predicted(false);}
-static bool emit_greedy_dynamic_from_buffer(UnitVoxelBuffer *buffer){if(!buffer||buffer->count<=0)return false;
-    GreedyCell *cells=malloc((size_t)buffer->count*sizeof(*cells));if(!cells)return false;for(int i=0;i<buffer->count;i++)cells[i]=(GreedyCell){buffer->voxels[i].gx,buffer->voxels[i].gy,buffer->voxels[i].gz,buffer->voxels[i].type,i};
-    GreedyCubeCover cover={0};double started=GetTime();bool ok=greedy_cube_cover_build(cells,buffer->count,&cover);free(cells);if(!ok)return false;cover.milliseconds=(GetTime()-started)*1000;
-    remove_buffered_static_voxels(buffer);int begin=voxel_count;if(emit_unit_voxels_from_units(buffer,false,true,-1)!=buffer->count||!greedy_share_range(begin,buffer->count)||!greedy_coarse_bind(&cover,buffer,begin)){while(voxel_count>begin)remove_voxel_index(voxel_count-1);emit_static_voxels_from_units(buffer);greedy_cube_cover_free(&cover);return false;}
-    greedyCoarse.cover_ms=cover.milliseconds;greedy_cube_cover_free(&cover);rebuild_voxel_hash();rebuild_all_voxel_surfaces();greedy_build_collision_samples();rebuild_glue_constraints();refresh_static_voxel_beliefs();meshDirty=true;return true;}
+static void greedy_lift_floor_residual(void){GreedyCoarseSystem *g=&greedyCoarse;float min_y=0;for(int i=0;i<g->collision_count;i++)min_y=fminf(min_y,g->collision_samples[i]->predicted_pos.y);if(min_y<0){float lift=-min_y;for(int i=0;i<g->sample_count;i++)if(g->owner[i]>=0&&(g->source_count[i]==1||g->promoted[i]))g->samples[i]->predicted_pos.y+=lift;greedy_refresh_predicted(false);}for(int i=0;i<sim_particle_count;i++){Particle *p=sim_particles[i];int sample=greedy_sample_index(p);if(sample>=0&&g->owner[sample]<0&&p->predicted_pos.y<0){float lift=-p->predicted_pos.y;p->predicted_pos.y=0;p->prev_pos.y+=lift;}}}
+static bool emit_greedy_dynamic_from_buffer(UnitVoxelBuffer *buffer){if(!buffer||buffer->count<=0)return false;int old_count=greedyCoarse.active?greedyCoarse.child_count:0;uint64_t *old_ids=old_count?malloc((size_t)old_count*sizeof(*old_ids)):NULL;if(old_count&&!old_ids)return false;
+    for(int i=0;i<old_count;i++){int v=greedyCoarse.children[i];old_ids[i]=(v>=0&&v<voxel_count)?voxels[v].identity:0;}if(greedyCoarse.active)greedy_coarse_materialize();
+    remove_buffered_static_voxels(buffer);int begin=voxel_count;if(emit_unit_voxels_from_units(buffer,false,true,-1)!=buffer->count||!greedy_share_range(begin,buffer->count)){while(voxel_count>begin)remove_voxel_index(voxel_count-1);emit_static_voxels_from_units(buffer);free(old_ids);return false;}
+    int *indices=malloc((size_t)(old_count+buffer->count)*sizeof(*indices));if(!indices){while(voxel_count>begin)remove_voxel_index(voxel_count-1);emit_static_voxels_from_units(buffer);free(old_ids);return false;}int count=0;for(int i=0;i<old_count;i++){int v=find_voxel_by_identity(old_ids[i]);if(v>=0&&voxels[v].simulate)indices[count++]=v;}for(int v=begin;v<voxel_count;v++)indices[count++]=v;free(old_ids);
+    if(!greedy_bind_live_children(indices,count,-1)){while(voxel_count>begin)remove_voxel_index(voxel_count-1);emit_static_voxels_from_units(buffer);free(indices);return false;}free(indices);return true;}

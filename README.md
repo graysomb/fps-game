@@ -36,11 +36,14 @@ the frame.
 The GPU path packs only particles referenced by active voxels into SSBOs. Stable
 particle-pool IDs are mapped to compact indices, preserving shared corners created
 by glue. Static voxels are uploaded only when the static-grid generation changes.
-Each substep dispatches prediction, dynamic hash construction, scene and particle
-collisions, Jacobi apply passes, VGS iterations, static collisions, glue-break
-evaluation, GPU particle splitting, topology rebuilding, wake propagation, and
-velocity finalization. The compact result is committed back to the canonical CPU
-arrays once per rendered-frame batch.
+Each ordinary-fine substep dispatches prediction, dynamic hash construction,
+scene and particle collisions, Jacobi apply passes, VGS iterations, static
+collisions, glue-break evaluation, GPU particle splitting, topology rebuilding,
+wake propagation, and velocity finalization. Greedy groups evaluate fracture on
+their refreshed unit children after the fixed-step GPU batch, then reuse the CPU
+pointer splitter and upload the fine topology for the next batch. The compact
+result is committed back to the canonical CPU arrays once per rendered-frame
+batch.
 
 The CPU PBD loop uses a lightweight, persistent thread pool to avoid per-frame
 thread creation.

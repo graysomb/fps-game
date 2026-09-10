@@ -145,7 +145,33 @@ The eight-step batch reduces greedy time by about 20%. Fine physics becomes
 slower with such a large command buffer on this workload, so batch size should
 remain a measured backend setting rather than a universal default.
 
-Deletion, fracture, and other topology changes materialize the coarse island
-back to fine particles first. The handoff corrects velocity to preserve total
-linear and angular momentum. A later activation may therefore materialize an
-existing coarse island before binding the new one.
+Deletion and topology changes temporarily materialize the coarse controls into
+their real unit children. The handoff corrects velocity to preserve total
+linear and angular momentum. Activation then binds the combined old and newly
+activated children. Child membership is stored explicitly and recovered through
+stable voxel identities, so voxel-pool compaction no longer invalidates a group.
+
+Wake events rebuild the current cover at the safe point between physics steps.
+The rebuilt interpolation rows use immutable rest-grid coordinates, which
+preserves a group's current translated or rotated pose. Fracture is evaluated
+on the refreshed unit children. When a child crosses the existing
+strain/shear/hinge thresholds, the two unit children adjoining each broken face
+leave the cover and remain awake. The implementation temporarily materializes
+the controls, runs the original pointer-based `break_face_link` particle-clone
+path, and immediately applies the greedy cover again to every unaffected child.
+The local seam remains ordinary fine physics while the rest of the structure
+stays coarse. Later cracks repeat the same local refinement. CPU fracture
+handoff occurs at the end of the current substep. GPU fracture handoff occurs
+after the current fixed-step command-buffer batch, invalidates resident
+topology, and uploads the mixed fine/coarse topology on the next batch.
+
+Run the deterministic visual fracture fixture with:
+
+```sh
+.build/bin/fps_ray_cpu --activation-cubes=greedy --physics=cpu-mt \
+  --debug-scenario=greedy-fracture-demo --debug-steps=300 \
+  --debug-gif-fps=20 --debug-output=.build/greedy-fracture-demo
+```
+
+Red children are the locally refined fracture seam. The other colors identify
+the sizes produced when the unaffected region is covered again.

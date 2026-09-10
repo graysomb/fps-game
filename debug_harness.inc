@@ -189,6 +189,7 @@ static DebugRunConfig debugRunConfig = {
 
 static bool debug_setup_sized_drop(DebugRunState *state);
 static bool debug_setup_greedy_irregular(DebugRunState *state);
+static bool debug_setup_greedy_fracture(DebugRunState *state);
 static bool debug_setup_dynamic_freefall(DebugRunState *state);
 static bool debug_setup_creative_reset_cache(DebugRunState *state);
 static bool debug_setup_activation_floating(DebugRunState *state);
@@ -211,6 +212,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "sized-drop-mixed-face", "Coarse children with a four-voxel attached face", debug_setup_sized_drop },
     { "greedy-activation-irregular", "Greedy multiscale activation of a tunneled irregular structure", debug_setup_greedy_irregular },
     { "greedy-activation-irregular-fine", "Ordinary fine-physics comparison for the irregular structure", debug_setup_greedy_irregular },
+    { "greedy-fracture-demo", "A local crack refines only the affected greedy seam", debug_setup_greedy_fracture },
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall },
     { "creative-reset-cache", "Creative reset invalidates cached static render and collision surfaces", debug_setup_creative_reset_cache },
     { "activation-floating", "Static cluster activated while unsupported", debug_setup_activation_floating },
@@ -809,10 +811,12 @@ static void debug_draw_overlay(const DebugRunState *state, const DebugSample *sa
         DrawRectangle(18,18,820,164,Fade(BLACK,.78f));
         DrawText(TextFormat("%s | %s",debugRunConfig.scenario,physics_backend_name(physicsBackend.active)),34,30,22,RAYWHITE);
         DrawText(greedyFineFixture?TextFormat("%d unit cells | ordinary fine physics | %d independent particles",greedyFixtureCellCount,sim_particle_count):
+            greedyFractureFixture?TextFormat("%d cells | %d coarse + %d fractured fine | %d independent",greedyFixtureCellCount,greedyCoarse.child_count,greedyFixtureCellCount-greedyCoarse.child_count,greedyCoarse.independent_count):
             TextFormat("%d unit cells -> %d cube groups | %d independent / %d samples",greedyCoarse.child_count,greedyCoarse.group_count,greedyCoarse.independent_count,greedyCoarse.sample_count),34,62,19,LIGHTGRAY);
         DrawText(TextFormat("cover %.2f ms | step %d/%d | %s",greedyCoarse.cover_ms,sample->step,debugRunConfig.steps,
             greedyCoarse.active?"dynamic":"static preview"),34,90,19,LIGHTGRAY);
         int x=34;for(int i=1;i<8;i++){int count=0;for(int q=0;q<greedyCoarse.group_count;q++)count+=greedyCoarse.sizes[q]==i;if(count){Color c=greedy_size_color(i);DrawRectangle(x,124,18,18,c);DrawText(TextFormat("%d: %d",i,count),x+24,124,17,WHITE);x+=100;}}
+        if(greedyFractureFixture){DrawRectangle(690,124,18,18,(Color){255,70,55,255});DrawText("fractured fine",714,124,17,WHITE);}
         return;
     }
     if(sizedFixture) {
