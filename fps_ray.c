@@ -96,6 +96,10 @@
 #include "forerunner_rasterizer.h"
 #include "forerunner_grammar.c"
 
+#include "unified_sanctum_grammar.h"
+#include "unified_sanctum_rasterizer.h"
+#include "unified_sanctum_grammar.c"
+
 typedef enum {
     FLUID_RENDER_PARTICLES = 0,
     FLUID_RENDER_SURFACE = 1
@@ -8252,6 +8256,7 @@ typedef enum {
     WORLD_TYPE_MEGALITH,
     WORLD_TYPE_HYPERBOREAN,
     WORLD_TYPE_FORERUNNER,
+    WORLD_TYPE_UNIFIED_SANCTUM,
     WORLD_TYPE_TEST,
     WORLD_TYPE_BLOOD,
     WORLD_TYPE_PROCEDURAL,
@@ -8271,6 +8276,9 @@ static uint32_t hyperSeed = 1337;
 static ForerunnerArchetype forerunnerArchetype = FORERUNNER_ARCHETYPE_CARTOGRAPHER;
 static ForerunnerStage forerunnerTargetStage = FORERUNNER_STAGE_CARTOGRAPHER;
 static uint32_t forerunnerSeed = 1337;
+
+static int sanctumGrowthSteps = 15;
+static uint32_t sanctumSeed = 1337;
 
 static void plot_temple_voxel(int gx, int gy, int gz, Color c) {
     // If it's the water color from the pool, spawn physical PBF fluid voxels!
@@ -8302,6 +8310,24 @@ static void plot_hyper_voxel(int gx, int gy, int gz, Color c) {
 
 static void plot_forerunner_voxel(int gx, int gy, int gz, Color c) {
     addVoxelAt(gx, gy, gz, c);
+}
+
+static void plot_sanctum_voxel(int gx, int gy, int gz, Color c) {
+    if (c.r == 50 && c.g == 160 && c.b == 220) {
+        float px = (gx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+        float py = (gy + 0.5f) * VOXEL_SIZE;
+        float pz = (gz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+        add_fluid_cell(px, py, pz, c);
+    } else {
+        addVoxelAt(gx, gy, gz, c);
+    }
+}
+
+static void void_sanctum_voxel(int gx, int gy, int gz) {
+    int idx = table_get(gx, gy, gz);
+    if (idx >= 0 && idx < voxel_count) {
+        remove_voxel_index(idx);
+    }
 }
 
 static void buildGreekTempleWorld(uint32_t seed, TempleStage stage) {
@@ -8336,6 +8362,14 @@ static void buildForerunnerWorld(uint32_t seed, ForerunnerArchetype archetype, F
     rasterize_forerunner_plan(&plan, center, center, 10, plot_forerunner_voxel);
 }
 
+static void buildUnifiedSanctumWorld(uint32_t seed, int growth_steps) {
+    int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
+    int center = M / 2;
+    SanctumCitadelPlan plan = generate_unified_sanctum(seed, growth_steps);
+    // Base at gy = 10 so subterranean crypts & chasm voids excavate down towards bedrock
+    rasterize_sanctum_plan(&plan, center, center, 10, plot_sanctum_voxel, void_sanctum_voxel);
+}
+
 // Build static demo cube of voxels
 static void buildDemo(void) {
     if (currentWorldType == WORLD_TYPE_GREEK_TEMPLE) {
@@ -8346,6 +8380,8 @@ static void buildDemo(void) {
         buildHyperboreanWorld(hyperSeed, hyperTargetStage);
     } else if (currentWorldType == WORLD_TYPE_FORERUNNER) {
         buildForerunnerWorld(forerunnerSeed, forerunnerArchetype, forerunnerTargetStage);
+    } else if (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM) {
+        buildUnifiedSanctumWorld(sanctumSeed, sanctumGrowthSteps);
     } else if (currentWorldType == WORLD_TYPE_BLOOD) {
         buildBloodWorld();
     } else if (currentWorldType == WORLD_TYPE_PROCEDURAL) {
@@ -17854,7 +17890,7 @@ int main(int argc, char **argv) {
                     const char *hyper_stages[] = { "Avenue", "Outer Henge", "Marble Peristyle", "Great Trilithons", "Full Sanctum" };
                     const char *forerunner_archetypes[] = { "Cartographer", "Crossroads", "Crucible", "Spire" };
                     const char *forerunner_stages[] = { "Chasm", "Gateway", "Skybridge", "Vault", "Cartographer" };
-                    const char *world_names[] = { "Greek Temple", "Prehistoric Megalith", "Hyperborean Sun-Henge", "Forerunner Installation", "Test", "Blood", "Procedural" };
+                    const char *world_names[] = { "Greek Temple", "Prehistoric Megalith", "Hyperborean Sun-Henge", "Forerunner Installation", "Precursor Citadel", "Test", "Blood", "Procedural" };
                     const char *world_info = (currentWorldType == WORLD_TYPE_GREEK_TEMPLE) ?
                         TextFormat("World: Greek Temple [%s, #%u] (W Cycle, T Seed, G Stage)",
                                    stage_labels[templeTargetStage], templeSeed) :
@@ -17867,6 +17903,9 @@ int main(int argc, char **argv) {
                         (currentWorldType == WORLD_TYPE_FORERUNNER) ?
                         TextFormat("World: Forerunner [%s: %s, #%u] (W Cycle, M Archetype, G Stage, T Seed)",
                                    forerunner_archetypes[forerunnerArchetype], forerunner_stages[forerunnerTargetStage], forerunnerSeed) :
+                        (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM) ?
+                        TextFormat("World: Precursor Citadel [Growth: %d steps, #%u] (W Cycle, G Grow, T Seed)",
+                                   sanctumGrowthSteps, sanctumSeed) :
                         TextFormat("World: %s (Press W to Cycle)", world_names[currentWorldType]);
                     DrawText(world_info, SCREEN_WIDTH / 2 - MeasureText(world_info, 18) / 2, boxY + 310, 18, DARKBLUE);
 
@@ -17923,8 +17962,10 @@ int main(int argc, char **argv) {
                     megalithSeed = (uint32_t)GetRandomValue(1, 99999);
                     hyperSeed = (uint32_t)GetRandomValue(1, 99999);
                     forerunnerSeed = (uint32_t)GetRandomValue(1, 99999);
+                    sanctumSeed = (uint32_t)GetRandomValue(1, 99999);
                     if (currentWorldType == WORLD_TYPE_GREEK_TEMPLE || currentWorldType == WORLD_TYPE_MEGALITH ||
-                        currentWorldType == WORLD_TYPE_HYPERBOREAN || currentWorldType == WORLD_TYPE_FORERUNNER) ResetGame();
+                        currentWorldType == WORLD_TYPE_HYPERBOREAN || currentWorldType == WORLD_TYPE_FORERUNNER ||
+                        currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM) ResetGame();
                 }
                 if (IsKeyPressed(KEY_G)) {
                     if (currentWorldType == WORLD_TYPE_GREEK_TEMPLE) {
@@ -17938,6 +17979,10 @@ int main(int argc, char **argv) {
                         ResetGame();
                     } else if (currentWorldType == WORLD_TYPE_FORERUNNER) {
                         forerunnerTargetStage = (ForerunnerStage)((forerunnerTargetStage + 1) % 5);
+                        ResetGame();
+                    } else if (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM) {
+                        sanctumGrowthSteps = (sanctumGrowthSteps + 3);
+                        if (sanctumGrowthSteps > 35) sanctumGrowthSteps = 5;
                         ResetGame();
                     }
                 }
