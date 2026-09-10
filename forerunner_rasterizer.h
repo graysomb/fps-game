@@ -57,27 +57,37 @@ static inline void rasterize_forerunner_plan(const ForerunnerPlan *plan,
         // 1. Canted Angular Pylons (15-25 degree rake)
         // -------------------------------------------------------------------
         if (n->type == FORERUNNER_PRIM_PYLON) {
-            float cant = n->cant_angle_deg * (3.14159265f / 180.0f);
-            float slope = tanf(fabsf(cant)); // ~0.46 for 25 deg
+            float cant_x = n->cant_angle_deg * (3.14159265f / 180.0f);
+            float cant_z = n->cant_angle_z * (3.14159265f / 180.0f);
+            float slope_x = tanf(fabsf(cant_x));
+            float slope_z = tanf(fabsf(cant_z));
 
             for (int y = gy0; y < gy1; ++y) {
                 int dy = y - gy0;
-                int shift = (int)(dy * slope);
+                int shift_x = (int)(dy * slope_x);
+                int shift_z = (int)(dy * slope_z);
 
                 int px0 = gx0;
                 int px1 = gx1;
                 if (n->cant_angle_deg > 0.0f) {
-                    // Leaning right toward center: shift left edge
-                    px0 = gx0 + shift;
+                    px0 = gx0 + shift_x;
                 } else if (n->cant_angle_deg < 0.0f) {
-                    // Leaning left toward center: shift right edge
-                    px1 = gx1 - shift;
+                    px1 = gx1 - shift_x;
                 }
                 if (px0 >= px1) continue;
 
-                for (int z = gz0; z < gz1; ++z) {
+                int pz0 = gz0;
+                int pz1 = gz1;
+                if (n->cant_angle_z > 0.0f) {
+                    pz0 = gz0 + shift_z;
+                } else if (n->cant_angle_z < 0.0f) {
+                    pz1 = gz1 - shift_z;
+                }
+                if (pz0 >= pz1) continue;
+
+                for (int z = pz0; z < pz1; ++z) {
                     for (int x = px0; x < px1; ++x) {
-                        bool is_chamfer = (x == px0 || x == px1 - 1 || z == gz0 || z == gz1 - 1);
+                        bool is_chamfer = (x == px0 || x == px1 - 1 || z == pz0 || z == pz1 - 1);
                         bool is_seam = ((y % 4 == 0) || ((x + z) % 6 == 0));
 
                         Color c = col_pewter_hull;

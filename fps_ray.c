@@ -8268,6 +8268,7 @@ static uint32_t megalithSeed = 1337;
 static HyperStage hyperTargetStage = HYPER_STAGE_FULL_SANCTUM;
 static uint32_t hyperSeed = 1337;
 
+static ForerunnerArchetype forerunnerArchetype = FORERUNNER_ARCHETYPE_CARTOGRAPHER;
 static ForerunnerStage forerunnerTargetStage = FORERUNNER_STAGE_CARTOGRAPHER;
 static uint32_t forerunnerSeed = 1337;
 
@@ -8327,10 +8328,10 @@ static void buildHyperboreanWorld(uint32_t seed, HyperStage stage) {
     rasterize_hyperborean_plan(&plan, center, center, 2, plot_hyper_voxel);
 }
 
-static void buildForerunnerWorld(uint32_t seed, ForerunnerStage stage) {
+static void buildForerunnerWorld(uint32_t seed, ForerunnerArchetype archetype, ForerunnerStage stage) {
     int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
     int center = M / 2;
-    ForerunnerPlan plan = generate_forerunner_structure(seed, stage);
+    ForerunnerPlan plan = generate_forerunner_structure(seed, archetype, stage);
     // Base at gy = 10 so chasm drops toward bedrock gy=2 while bridges/pylons rise above
     rasterize_forerunner_plan(&plan, center, center, 10, plot_forerunner_voxel);
 }
@@ -8344,7 +8345,7 @@ static void buildDemo(void) {
     } else if (currentWorldType == WORLD_TYPE_HYPERBOREAN) {
         buildHyperboreanWorld(hyperSeed, hyperTargetStage);
     } else if (currentWorldType == WORLD_TYPE_FORERUNNER) {
-        buildForerunnerWorld(forerunnerSeed, forerunnerTargetStage);
+        buildForerunnerWorld(forerunnerSeed, forerunnerArchetype, forerunnerTargetStage);
     } else if (currentWorldType == WORLD_TYPE_BLOOD) {
         buildBloodWorld();
     } else if (currentWorldType == WORLD_TYPE_PROCEDURAL) {
@@ -17851,6 +17852,7 @@ int main(int argc, char **argv) {
                     const char *mega_archetypes[] = { "Passage Grave", "Stone Circle" };
                     const char *mega_stages[] = { "Menhir", "Dolmen", "Chamber", "Passage", "Tumulus", "Henge" };
                     const char *hyper_stages[] = { "Avenue", "Outer Henge", "Marble Peristyle", "Great Trilithons", "Full Sanctum" };
+                    const char *forerunner_archetypes[] = { "Cartographer", "Crossroads", "Crucible", "Spire" };
                     const char *forerunner_stages[] = { "Chasm", "Gateway", "Skybridge", "Vault", "Cartographer" };
                     const char *world_names[] = { "Greek Temple", "Prehistoric Megalith", "Hyperborean Sun-Henge", "Forerunner Installation", "Test", "Blood", "Procedural" };
                     const char *world_info = (currentWorldType == WORLD_TYPE_GREEK_TEMPLE) ?
@@ -17863,8 +17865,8 @@ int main(int argc, char **argv) {
                         TextFormat("World: Hyperborean [%s, #%u] (W Cycle, G Stage, T Seed)",
                                    hyper_stages[hyperTargetStage], hyperSeed) :
                         (currentWorldType == WORLD_TYPE_FORERUNNER) ?
-                        TextFormat("World: Forerunner [%s, #%u] (W Cycle, G Stage, T Seed)",
-                                   forerunner_stages[forerunnerTargetStage], forerunnerSeed) :
+                        TextFormat("World: Forerunner [%s: %s, #%u] (W Cycle, M Archetype, G Stage, T Seed)",
+                                   forerunner_archetypes[forerunnerArchetype], forerunner_stages[forerunnerTargetStage], forerunnerSeed) :
                         TextFormat("World: %s (Press W to Cycle)", world_names[currentWorldType]);
                     DrawText(world_info, SCREEN_WIDTH / 2 - MeasureText(world_info, 18) / 2, boxY + 310, 18, DARKBLUE);
 
@@ -17910,6 +17912,9 @@ int main(int argc, char **argv) {
                 if (IsKeyPressed(KEY_M)) {
                     if (currentWorldType == WORLD_TYPE_MEGALITH) {
                         megalithArchetype = (MegalithArchetype)((megalithArchetype + 1) % 2);
+                        ResetGame();
+                    } else if (currentWorldType == WORLD_TYPE_FORERUNNER) {
+                        forerunnerArchetype = (ForerunnerArchetype)((forerunnerArchetype + 1) % FORERUNNER_ARCHETYPE_COUNT);
                         ResetGame();
                     }
                 }
