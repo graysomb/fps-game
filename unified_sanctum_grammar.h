@@ -25,8 +25,51 @@ typedef enum {
     SANCTUM_SOCKET_HYDRAULIC_GUTTER, // Fluid aqueduct and coolant channels
     SANCTUM_SOCKET_QUADRANT_INFILL,  // Diagonal quadrant corner (plaza, hypostyle, rampart)
     SANCTUM_SOCKET_STOA_CONTINUATION,// Perimeter stoa colonnade run
-    SANCTUM_SOCKET_PLAZA_INFILL      // Courtyard plaza detail cluster
+    SANCTUM_SOCKET_PLAZA_INFILL,     // Courtyard plaza detail cluster
+    SANCTUM_SOCKET_TACTICAL_CACHE,   // Forward resupply / weapon altar socket
+    SANCTUM_SOCKET_ENEMY_INLET       // Peripheral wave spawn ingress socket
 } SanctumSocketType;
+
+// ---------------------------------------------------------------------------
+// Firefight Arena Macro-Topologies
+// ---------------------------------------------------------------------------
+typedef enum {
+    SANCTUM_TOPO_STRONGHOLD = 0,    // Central elevated ziggurat holdout with 360-degree defense
+    SANCTUM_TOPO_ABYSSAL_RIFT,      // Dual-plateau fortress split by a deep chasm void with bridges
+    SANCTUM_TOPO_SUNKEN_CRUCIBLE,   // Inverted colosseum bowl with central altar and jump pads
+    SANCTUM_TOPO_ASYMMETRIC_OUTPOST,// Asymmetrical urban bunker citadel with flanking chokepoints
+    SANCTUM_TOPO_COUNT
+} SanctumTopology;
+
+// ---------------------------------------------------------------------------
+// Tactical Gameplay Data
+// ---------------------------------------------------------------------------
+#define MAX_SANCTUM_SUPPLIES 32
+#define MAX_SANCTUM_SPAWNS 16
+#define MAX_SANCTUM_JUMP_PADS 16
+
+typedef enum {
+    SANCTUM_SUPPLY_AMMO = 0,
+    SANCTUM_SUPPLY_HEALTH,
+    SANCTUM_SUPPLY_VOID,
+    SANCTUM_SUPPLY_DYNAMIC_SHOT
+} SanctumSupplyType;
+
+typedef struct {
+    Vector3 pos;
+    SanctumSupplyType type;
+} SanctumSupplyPoint;
+
+typedef struct {
+    Vector3 pos;
+    float yaw;
+    bool is_player; // true for player holdout, false for enemy wave spawn
+} SanctumCombatSpawn;
+
+typedef struct {
+    Vector3 pos;
+    float launch_power;
+} SanctumJumpPad;
 
 typedef struct {
     Vector3 pos;             // Grid center (x, y, z)
@@ -83,6 +126,12 @@ typedef enum {
     SANCTUM_MOTIF_PERIMETER_STOA,        // Continuous colonnaded covered portico
     SANCTUM_MOTIF_STELAE_AVENUE,         // Processional double row of megalithic stelae
     SANCTUM_MOTIF_OBELISK_PLAZA,         // Tapered needle obelisk plaza with braziers
+    SANCTUM_MOTIF_FIREFIGHT_HOLDOUT,     // Fortified redoubt with high/low cover & battlements
+    SANCTUM_MOTIF_SPAWN_CRYPT,           // Subterranean cyclopean tomb mouth for enemy wave ingress
+    SANCTUM_MOTIF_AMMO_CACHE,            // Hard-light ammo resupply locker
+    SANCTUM_MOTIF_WEAPON_ALTAR,          // Stepped sacrificial altar holding power weapon
+    SANCTUM_MOTIF_RECHARGER_WELL,        // Sacred PBF fluid health & shield recharge basin
+    SANCTUM_MOTIF_GRAVITY_LIFT,          // Vertical kinetic jump launcher between tiers
     SANCTUM_MOTIF_COUNT
 } SanctumMotif;
 
@@ -119,10 +168,19 @@ typedef struct {
 typedef struct {
     uint32_t seed;
     int growth_steps;
+    SanctumTopology topology;
     int node_count;
     int socket_count;
     SanctumNode nodes[MAX_SANCTUM_NODES];
     SanctumSocket sockets[MAX_SANCTUM_SOCKETS];
+
+    // Tactical Firefight Gameplay Data
+    int supply_count;
+    SanctumSupplyPoint supply_points[MAX_SANCTUM_SUPPLIES];
+    int spawn_point_count;
+    SanctumCombatSpawn spawn_points[MAX_SANCTUM_SPAWNS];
+    int jump_pad_count;
+    SanctumJumpPad jump_pads[MAX_SANCTUM_JUMP_PADS];
 
     // Bounding metrics
     int min_x, max_x;
@@ -142,7 +200,10 @@ typedef struct {
 // Bi-Algebra API
 // ---------------------------------------------------------------------------
 
-// Initialize citadel plan with central core nexus
+// Initialize citadel plan with specific or auto macro-topology (-1 for auto seed % 4)
+void sanctum_plan_init_ex(SanctumCitadelPlan *plan, uint32_t seed, int forced_topology);
+
+// Initialize citadel plan with central core nexus (auto topology seed % 4)
 void sanctum_plan_init(SanctumCitadelPlan *plan, uint32_t seed);
 
 // Coalgebra γ(S, F): Inspect open sockets and afford valid continuation motifs
@@ -150,6 +211,9 @@ int sanctum_coalgebra_frontier(const SanctumCitadelPlan *plan, SanctumOpportunit
 
 // Algebra α(S, F, opp): Snap chosen motif to socket, spawn nodes, register new sockets
 bool sanctum_algebra_expand(SanctumCitadelPlan *plan, const SanctumOpportunity *opp);
+
+// Complete open-ended generation loop with optional forced topology (-1 for auto seed % 4)
+SanctumCitadelPlan generate_unified_sanctum_ex(uint32_t seed, int growth_steps, int forced_topology);
 
 // Complete open-ended generation loop for K growth steps
 SanctumCitadelPlan generate_unified_sanctum(uint32_t seed, int growth_steps);

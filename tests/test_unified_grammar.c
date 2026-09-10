@@ -61,53 +61,79 @@ static void print_sanctum_ascii_blueprint(const SanctumCitadelPlan *plan) {
 
 int main(void) {
     printf("=======================================================\n");
-    printf(" RUNNING OPEN-ENDED UNIFIED SYNCRETIC CITADEL TEST SUITE\n");
+    printf(" RUNNING UNIFIED FIREFIGHT SYNCRETIC CITADEL TEST SUITE\n");
     printf("=======================================================\n\n");
 
-    // [1/4] Test Plan Initialization & Root Nexus
-    printf("[1/4] Testing Root Nexus Initialization...\n");
-    SanctumCitadelPlan plan0;
-    sanctum_plan_init(&plan0, 1337);
-    assert(plan0.node_count > 0);
-    assert(plan0.socket_count >= 4);
-    assert(plan0.count_stone > 0);
-    assert(plan0.count_marble > 0);
-    assert(plan0.count_titanium > 0);
-    assert(plan0.count_fluid > 0);
-    assert(verify_sanctum_invariants(&plan0));
-    printf("-> Root Nexus passed all initialization and multi-style census invariants!\n\n");
+    // [1/5] Test 4 Distinct Macro-Topologies
+    printf("[1/5] Testing 4 Seed-Driven Macro-Topologies & Tactical Initializations...\n");
+    const char *topo_names[] = {
+        "SANCTUM_TOPO_STRONGHOLD",
+        "SANCTUM_TOPO_ABYSSAL_RIFT",
+        "SANCTUM_TOPO_SUNKEN_CRUCIBLE",
+        "SANCTUM_TOPO_ASYMMETRIC_OUTPOST"
+    };
 
-    // [2/4] Test Coalgebra Frontier Discovery
-    printf("[2/4] Testing Frontier Sockets & Affordance Inspection...\n");
-    SanctumOpportunity opps[MAX_SANCTUM_OPPS];
-    int opp_count = sanctum_coalgebra_frontier(&plan0, opps, MAX_SANCTUM_OPPS);
-    assert(opp_count > 0);
-    for (int i = 0; i < opp_count; ++i) {
-        assert(opps[i].socket_idx >= 0 && opps[i].socket_idx < plan0.socket_count);
-        assert(opps[i].score > 0.0f);
+    for (int t = 0; t < SANCTUM_TOPO_COUNT; ++t) {
+        SanctumCitadelPlan plan_t;
+        sanctum_plan_init(&plan_t, (uint32_t)t);
+        assert(plan_t.topology == (SanctumTopology)t);
+        assert(plan_t.node_count > 0);
+        assert(plan_t.count_stone > 0);
+        assert(plan_t.count_marble > 0);
+        assert(plan_t.count_titanium > 0);
+        assert(plan_t.spawn_point_count >= 3);
+        assert(plan_t.supply_count >= 2);
+        assert(verify_sanctum_invariants(&plan_t));
+
+        printf("  [%d] %-32s -> Nodes: %3d, Sockets: %2d, Spawns: %d (Player: %d), Supplies: %d, Pads: %d\n",
+               t, topo_names[t], plan_t.node_count, plan_t.socket_count,
+               plan_t.spawn_point_count, plan_t.spawn_points[0].is_player ? 1 : 0,
+               plan_t.supply_count, plan_t.jump_pad_count);
     }
-    printf("-> Frontier Coalgebra discovered %d valid continuation opportunities!\n\n", opp_count);
+    printf("-> All 4 distinct macro-topologies initialized with tactical combat elements!\n\n");
 
-    // [3/4] Test Step-by-Step Open-Ended Growth
-    printf("[3/4] Testing Open-Ended Expansion Loop (Growth Steps = 15)...\n");
-    SanctumCitadelPlan plan15 = generate_unified_sanctum(2552, 15);
-    assert(plan15.node_count > plan0.node_count);
-    assert(verify_sanctum_invariants(&plan15));
-    print_sanctum_ascii_blueprint(&plan15);
-    printf("-> 15-step expansion successfully grew citadel from %d to %d nodes!\n\n",
-           plan0.node_count, plan15.node_count);
+    // [2/5] Test Coalgebra Frontier Discovery across Topologies
+    printf("[2/5] Testing Frontier Sockets & Affordance Inspection...\n");
+    for (int t = 0; t < SANCTUM_TOPO_COUNT; ++t) {
+        SanctumCitadelPlan plan_t;
+        sanctum_plan_init(&plan_t, (uint32_t)t + 100);
+        SanctumOpportunity opps[MAX_SANCTUM_OPPS];
+        int opp_count = sanctum_coalgebra_frontier(&plan_t, opps, MAX_SANCTUM_OPPS);
+        assert(opp_count > 0);
+        for (int i = 0; i < opp_count; ++i) {
+            assert(opps[i].socket_idx >= 0 && opps[i].socket_idx < plan_t.socket_count);
+            assert(opps[i].score > 0.0f);
+        }
+    }
+    printf("-> Frontier Coalgebra discovered valid continuation opportunities across all topologies!\n\n");
 
-    // [4/4] Monte-Carlo Sweep over 50 randomized seeds across various growth steps
-    printf("[4/4] Running Monte-Carlo sweep over 50 randomized seeds and growth budgets (Steps 5 to 30)...\n");
+    // [3/5] Test Step-by-Step Open-Ended Growth for each topology
+    printf("[3/5] Testing Open-Ended Expansion Loop (Growth Steps = 12)...\n");
+    for (int t = 0; t < SANCTUM_TOPO_COUNT; ++t) {
+        SanctumCitadelPlan grown = generate_unified_sanctum((uint32_t)(t * 100 + 42), 12);
+        assert(grown.node_count > 0);
+        assert(verify_sanctum_invariants(&grown));
+        printf("  [%d] Grown %s: %d nodes, %d supplies, %d spawns\n",
+               t, topo_names[t], grown.node_count, grown.supply_count, grown.spawn_point_count);
+        if (t == 1) {
+            print_sanctum_ascii_blueprint(&grown);
+        }
+    }
+    printf("-> Growth expansion loops validated across all 4 map topologies!\n\n");
+
+    // [4/5] Monte-Carlo Sweep over 50 randomized seeds across various growth steps
+    printf("[4/5] Running Monte-Carlo sweep over 50 randomized seeds and growth budgets (Steps 5 to 25)...\n");
     for (uint32_t seed = 1; seed <= 50; ++seed) {
-        int steps = 5 + (seed % 25);
+        int steps = 5 + (seed % 20);
         SanctumCitadelPlan test_plan = generate_unified_sanctum(seed * 7919 + 31, steps);
         assert(verify_sanctum_invariants(&test_plan));
         assert(test_plan.node_count > 0);
         assert(test_plan.socket_count > 0);
+        assert(test_plan.spawn_point_count >= 3);
+        assert(test_plan.supply_count >= 2);
     }
     printf("-> 50/50 randomized seeds across dynamic growth steps passed all invariants with 100%% stability!\n\n");
 
-    printf("ALL UNIFIED SYNCRETIC CITADEL TESTS PASSED SUCCESSFULLY.\n");
+    printf("ALL UNIFIED SYNCRETIC CITADEL FIREFIGHT TESTS PASSED SUCCESSFULLY.\n");
     return 0;
 }

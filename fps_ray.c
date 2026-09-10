@@ -7876,7 +7876,10 @@ static void buildTestWorld(void) {
     buildBox(center + 6, 0, center + 20, 3, 6, 10, DARKGRAY);
 }
 
+static uint32_t proceduralSeed = 1337;
+
 static void buildProceduralWorld(void) {
+    SetRandomSeed(proceduralSeed);
     int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
     int numStructures = 20;
     
@@ -8279,6 +8282,68 @@ static uint32_t forerunnerSeed = 1337;
 
 static int sanctumGrowthSteps = 15;
 static uint32_t sanctumSeed = 1337;
+static int sanctumTopologyMode = -1; // -1 = Auto (seed % 4), 0 = Stronghold, 1 = Abyssal Rift, 2 = Sunken Crucible, 3 = Asymmetric Outpost
+static bool menuEditingSeed = false;
+static char menuSeedBuffer[16] = "1337";
+
+static void ResetGame(void);
+
+static uint32_t get_current_world_seed(void) {
+    switch (currentWorldType) {
+        case WORLD_TYPE_GREEK_TEMPLE: return templeSeed;
+        case WORLD_TYPE_MEGALITH: return megalithSeed;
+        case WORLD_TYPE_HYPERBOREAN: return hyperSeed;
+        case WORLD_TYPE_FORERUNNER: return forerunnerSeed;
+        case WORLD_TYPE_UNIFIED_SANCTUM: return sanctumSeed;
+        case WORLD_TYPE_PROCEDURAL: return proceduralSeed;
+        default: return 1337;
+    }
+}
+
+static void set_current_world_seed(uint32_t s) {
+    switch (currentWorldType) {
+        case WORLD_TYPE_GREEK_TEMPLE: templeSeed = s; break;
+        case WORLD_TYPE_MEGALITH: megalithSeed = s; break;
+        case WORLD_TYPE_HYPERBOREAN: hyperSeed = s; break;
+        case WORLD_TYPE_FORERUNNER: forerunnerSeed = s; break;
+        case WORLD_TYPE_UNIFIED_SANCTUM: sanctumSeed = s; break;
+        case WORLD_TYPE_PROCEDURAL: proceduralSeed = s; break;
+        default: break;
+    }
+    snprintf(menuSeedBuffer, sizeof(menuSeedBuffer), "%u", s);
+}
+
+static void step_current_world_seed(int delta) {
+    uint32_t s = get_current_world_seed();
+    int64_t next_s = (int64_t)s + delta;
+    if (next_s < 1) next_s = 1;
+    if (next_s > 999999999) next_s = 999999999;
+    set_current_world_seed((uint32_t)next_s);
+    ResetGame();
+}
+
+static void roll_random_world_seed(void) {
+    uint32_t s = (uint32_t)GetRandomValue(1, 99999);
+    set_current_world_seed(s);
+    ResetGame();
+}
+
+static void switch_world_type(WorldType next) {
+    currentWorldType = next;
+    snprintf(menuSeedBuffer, sizeof(menuSeedBuffer), "%u", get_current_world_seed());
+    ResetGame();
+}
+
+static const char *get_sanctum_topology_name(int mode, uint32_t seed) {
+    int topo = (mode >= 0 && mode < 4) ? mode : (int)(seed % 4);
+    switch (topo) {
+        case 0: return (mode >= 0) ? "Stronghold [Forced]" : "Stronghold [Auto]";
+        case 1: return (mode >= 0) ? "Abyssal Rift [Forced]" : "Abyssal Rift [Auto]";
+        case 2: return (mode >= 0) ? "Sunken Crucible [Forced]" : "Sunken Crucible [Auto]";
+        case 3: return (mode >= 0) ? "Asymmetric Outpost [Forced]" : "Asymmetric Outpost [Auto]";
+        default: return "Unknown";
+    }
+}
 
 static void plot_temple_voxel(int gx, int gy, int gz, Color c) {
     // If it's the water color from the pool, spawn physical PBF fluid voxels!
@@ -8362,12 +8427,16 @@ static void buildForerunnerWorld(uint32_t seed, ForerunnerArchetype archetype, F
     rasterize_forerunner_plan(&plan, center, center, 10, plot_forerunner_voxel);
 }
 
+static SanctumCitadelPlan current_sanctum_plan;
+static bool current_sanctum_plan_valid = false;
+
 static void buildUnifiedSanctumWorld(uint32_t seed, int growth_steps) {
     int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
     int center = M / 2;
-    SanctumCitadelPlan plan = generate_unified_sanctum(seed, growth_steps);
+    current_sanctum_plan = generate_unified_sanctum_ex(seed, growth_steps, sanctumTopologyMode);
+    current_sanctum_plan_valid = true;
     // Base at gy = 10 so subterranean crypts & chasm voids excavate down towards bedrock
-    rasterize_sanctum_plan(&plan, center, center, 10, plot_sanctum_voxel, void_sanctum_voxel);
+    rasterize_sanctum_plan(&current_sanctum_plan, center, center, 10, plot_sanctum_voxel, void_sanctum_voxel);
 }
 
 // Build static demo cube of voxels
@@ -8620,6 +8689,25 @@ static bool load_map_slot(int slot) {
 }
 
 static void init_pickups(void) {
+    if (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM) {
+        if (!current_sanctum_plan_valid) {
+            current_sanctum_plan = generate_unified_sanctum_ex(sanctumSeed, sanctumGrowthSteps, sanctumTopologyMode);
+            current_sanctum_plan_valid = true;
+        }
+        clear_pickups();
+        for (int i = 0; i < current_sanctum_plan.supply_count && i < MAX_PICKUPS; ++i) {
+            float wx = (current_sanctum_plan.supply_points[i].pos.x + 0.5f) * VOXEL_SIZE;
+            float wy = (10 + current_sanctum_plan.supply_points[i].pos.y + 0.5f) * VOXEL_SIZE + 0.6f;
+            float wz = (current_sanctum_plan.supply_points[i].pos.z + 0.5f) * VOXEL_SIZE;
+            pickups[i].pos = (Vector3){ wx, wy, wz };
+            pickups[i].active = true;
+            pickups[i].respawnTimer = 0.0f;
+            pickups[i].bobTimer = (float)GetRandomValue(0, 100) / 10.0f;
+            pickups[i].type = (PickupType)current_sanctum_plan.supply_points[i].type;
+        }
+        return;
+    }
+
     int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
     int center = M / 2;
     int map_radius_cells = center - 2;
@@ -8916,6 +9004,16 @@ static void ResetGame(void) {
     buildDemo();
     rebuild_all_voxel_surfaces();
     init_static_hash();
+    if (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM) {
+        init_pickups();
+        for (int i = 0; i < MAX_PLAYERS; i++) {
+            players[i].pos = pick_player_spawn(i);
+            players[i].death_pos = players[i].pos;
+            if (i == 0 && current_sanctum_plan.spawn_point_count > 0) {
+                players[i].yaw = current_sanctum_plan.spawn_points[0].yaw;
+            }
+        }
+    }
     //rebuild_glue_constraints();
     meshDirty = true;
 
@@ -14046,6 +14144,34 @@ static bool spawn_position_clear(Vector3 pos, float min_dist) {
 }
 
 static Vector3 pick_player_spawn(int player_index) {
+    if (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM && current_sanctum_plan_valid && current_sanctum_plan.spawn_point_count > 0) {
+        if (player_index == 0) {
+            for (int s = 0; s < current_sanctum_plan.spawn_point_count; ++s) {
+                if (current_sanctum_plan.spawn_points[s].is_player) {
+                    float wx = (current_sanctum_plan.spawn_points[s].pos.x + 0.5f) * VOXEL_SIZE;
+                    float wy = (10 + current_sanctum_plan.spawn_points[s].pos.y + 0.5f) * VOXEL_SIZE + BASE_EYE_HEIGHT;
+                    float wz = (current_sanctum_plan.spawn_points[s].pos.z + 0.5f) * VOXEL_SIZE;
+                    return (Vector3){ wx, wy, wz };
+                }
+            }
+        } else {
+            int enemy_spawns[MAX_SANCTUM_SPAWNS];
+            int enemy_count = 0;
+            for (int s = 0; s < current_sanctum_plan.spawn_point_count; ++s) {
+                if (!current_sanctum_plan.spawn_points[s].is_player) {
+                    enemy_spawns[enemy_count++] = s;
+                }
+            }
+            if (enemy_count > 0) {
+                int s_idx = enemy_spawns[(player_index - 1) % enemy_count];
+                float wx = (current_sanctum_plan.spawn_points[s_idx].pos.x + 0.5f) * VOXEL_SIZE;
+                float wy = (10 + current_sanctum_plan.spawn_points[s_idx].pos.y + 0.5f) * VOXEL_SIZE + BASE_EYE_HEIGHT;
+                float wz = (current_sanctum_plan.spawn_points[s_idx].pos.z + 0.5f) * VOXEL_SIZE;
+                return (Vector3){ wx, wy, wz };
+            }
+        }
+    }
+
     if (!randomSpawnEnabled) {
         return playerSpawnPositions[0];
     }
@@ -17707,6 +17833,22 @@ static bool run_physics_smoke_test(int steps) {
     return true;
 }
 
+static bool DrawMenuButton(Rectangle rec, const char *text, int fontSize, bool isSelected, Color activeColor, Color idleColor, Color textColor) {
+    Vector2 mouse = GetMousePosition();
+    bool hovered = CheckCollisionPointRec(mouse, rec);
+    Color bg = isSelected ? activeColor : (hovered ? ColorBrightness(idleColor, -0.12f) : idleColor);
+    DrawRectangleRec(rec, bg);
+    DrawRectangleLines((int)rec.x, (int)rec.y, (int)rec.width, (int)rec.height, isSelected ? RAYWHITE : (hovered ? DARKGRAY : GRAY));
+    if (isSelected) {
+        DrawRectangleLines((int)rec.x + 1, (int)rec.y + 1, (int)rec.width - 2, (int)rec.height - 2, RAYWHITE);
+    }
+    int tw = MeasureText(text, fontSize);
+    int tx = (int)(rec.x + (rec.width - tw) / 2.0f);
+    int ty = (int)(rec.y + (rec.height - fontSize) / 2.0f);
+    DrawText(text, tx, ty, fontSize, isSelected ? RAYWHITE : (hovered ? BLACK : textColor));
+    return hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+}
+
 #include "debug_harness.inc"
 
 #define FPS_EXIT_GPU_CONTEXT_UNAVAILABLE 78
@@ -17836,7 +17978,13 @@ int main(int argc, char **argv) {
             //SetLoggingEnabled(!logsEnabled);
         }
         switch (gameState) {
-            case GAME_STATE_MENU:
+            case GAME_STATE_MENU: {
+                int boxW = 1040;
+                int boxH = 710;
+                int boxX = (SCREEN_WIDTH - boxW) / 2;
+                int boxY = (SCREEN_HEIGHT - boxH) / 2;
+                Rectangle sBox = { (float)(boxX + 220), (float)(boxY + 314), 300.0f, 38.0f };
+
                 BeginDrawing();
                     ClearBackground(SKYBLUE);
                     
@@ -17865,146 +18013,501 @@ int main(int argc, char **argv) {
                     EndMode3D();
 
                     // Transparent UI Window
-                    int boxW = 560;
-                    int boxH = 410;
-                    int boxX = (SCREEN_WIDTH - boxW) / 2;
-                    int boxY = (SCREEN_HEIGHT - boxH) / 2;
-                    DrawRectangle(boxX, boxY, boxW, boxH, Fade(RAYWHITE, 0.6f));
+                    DrawRectangle(boxX, boxY, boxW, boxH, Fade(RAYWHITE, 0.90f));
                     DrawRectangleLines(boxX, boxY, boxW, boxH, DARKGRAY);
+                    DrawRectangleLines(boxX + 1, boxY + 1, boxW - 2, boxH - 2, DARKGRAY);
 
-                    DrawText("FPS Game", SCREEN_WIDTH / 2 - MeasureText("FPS Game", 50) / 2, boxY + 35, 50, BLACK);
-                    DrawText("Press ENTER to Start", SCREEN_WIDTH / 2 - MeasureText("Press ENTER to Start", 20) / 2, boxY + 130, 20, DARKGRAY);
-                    DrawText("Press S for Settings", SCREEN_WIDTH / 2 - MeasureText("Press S for Settings", 20) / 2, boxY + 175, 20, DARKGRAY);
-                    DrawText("Press C for Creative Mode", SCREEN_WIDTH / 2 - MeasureText("Press C for Creative Mode", 20) / 2, boxY + 205, 20, DARKGRAY);
-                    const char *lan_text = TextFormat("H: Host | J: Join localhost | LAN local screens: %d (-/+)",
-                                                      netRequestedLocalPlayers);
-                    DrawText(lan_text, SCREEN_WIDTH / 2 - MeasureText(lan_text, 18) / 2, boxY + 235, 18, DARKGRAY);
-                    DrawText(TextFormat("Custom Map: %s (Slot %d) - Press U to Toggle, L to Cycle",
-                                        useCustomMap ? "ON" : "OFF", creativeMapSlot + 1),
-                             SCREEN_WIDTH / 2 - MeasureText("Custom Map: ON (Slot 1) - Press U to Toggle, L to Cycle", 18) / 2,
-                             boxY + 270, 18, DARKGRAY);
+                    DrawText("VOXEL COMBAT & WORLD GENERATOR", boxX + boxW / 2 - MeasureText("VOXEL COMBAT & WORLD GENERATOR", 28) / 2, boxY + 16, 28, (Color){ 25, 30, 45, 255 });
+                    const char *subHeader = "Select any architectural world archetype and customize the procedural seed live below:";
+                    DrawText(subHeader, boxX + boxW / 2 - MeasureText(subHeader, 16) / 2, boxY + 48, 16, DARKGRAY);
 
-                    const char *stage_labels[] = { "Cella", "Prostyle", "Amphi", "Peripteral", "Sanctuary" };
-                    const char *mega_archetypes[] = { "Passage Grave", "Stone Circle" };
-                    const char *mega_stages[] = { "Menhir", "Dolmen", "Chamber", "Passage", "Tumulus", "Henge" };
-                    const char *hyper_stages[] = { "Avenue", "Outer Henge", "Marble Peristyle", "Great Trilithons", "Full Sanctum" };
-                    const char *forerunner_archetypes[] = { "Cartographer", "Crossroads", "Crucible", "Spire" };
-                    const char *forerunner_stages[] = { "Chasm", "Gateway", "Skybridge", "Vault", "Cartographer" };
-                    const char *world_names[] = { "Greek Temple", "Prehistoric Megalith", "Hyperborean Sun-Henge", "Forerunner Installation", "Precursor Citadel", "Test", "Blood", "Procedural" };
-                    const char *world_info = (currentWorldType == WORLD_TYPE_GREEK_TEMPLE) ?
-                        TextFormat("World: Greek Temple [%s, #%u] (W Cycle, T Seed, G Stage)",
-                                   stage_labels[templeTargetStage], templeSeed) :
-                        (currentWorldType == WORLD_TYPE_MEGALITH) ?
-                        TextFormat("World: Megalith [%s: %s, #%u] (W Cycle, M Archetype, G Stage, T Seed)",
-                                   mega_archetypes[megalithArchetype], mega_stages[megalithTargetStage], megalithSeed) :
-                        (currentWorldType == WORLD_TYPE_HYPERBOREAN) ?
-                        TextFormat("World: Hyperborean [%s, #%u] (W Cycle, G Stage, T Seed)",
-                                   hyper_stages[hyperTargetStage], hyperSeed) :
-                        (currentWorldType == WORLD_TYPE_FORERUNNER) ?
-                        TextFormat("World: Forerunner [%s: %s, #%u] (W Cycle, M Archetype, G Stage, T Seed)",
-                                   forerunner_archetypes[forerunnerArchetype], forerunner_stages[forerunnerTargetStage], forerunnerSeed) :
-                        (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM) ?
-                        TextFormat("World: Precursor Citadel [Growth: %d steps, #%u] (W Cycle, G Grow, T Seed)",
-                                   sanctumGrowthSteps, sanctumSeed) :
-                        TextFormat("World: %s (Press W to Cycle)", world_names[currentWorldType]);
-                    DrawText(world_info, SCREEN_WIDTH / 2 - MeasureText(world_info, 18) / 2, boxY + 310, 18, DARKBLUE);
+                    // Section 1: World Archetype Selector
+                    DrawText("1. SELECT WORLD TYPE (Keys 1-8 or Click):", boxX + 28, boxY + 76, 16, (Color){ 30, 60, 120, 255 });
+                    const char *world_btn_names[WORLD_TYPE_COUNT] = {
+                        "1. Greek Temple",
+                        "2. Megalith",
+                        "3. Sun-Henge",
+                        "4. Forerunner",
+                        "5. Citadel Firefight",
+                        "6. Test Arena",
+                        "7. Blood Arena",
+                        "8. Procedural"
+                    };
+                    int gridStartX = boxX + 28;
+                    int gridStartY = boxY + 98;
+                    int btnW = 232;
+                    int btnH = 38;
+                    int gapX = 18;
+                    int gapY = 8;
+                    for (int i = 0; i < WORLD_TYPE_COUNT; ++i) {
+                        int col = i % 4;
+                        int row = i / 4;
+                        Rectangle rec = { (float)(gridStartX + col * (btnW + gapX)), (float)(gridStartY + row * (btnH + gapY)), (float)btnW, (float)btnH };
+                        bool isSel = (currentWorldType == (WorldType)i);
+                        Color actCol = (Color){ 36, 100, 195, 255 };
+                        Color idleCol = (Color){ 228, 233, 240, 240 };
+                        if (DrawMenuButton(rec, world_btn_names[i], 16, isSel, actCol, idleCol, (Color){ 30, 30, 30, 255 })) {
+                            switch_world_type((WorldType)i);
+                        }
+                    }
+
+                    // Sub-Type / Stage / Archetype / Topology Panel
+                    int panelY = boxY + 192;
+                    int panelH = 82;
+                    DrawRectangle(boxX + 28, panelY, 984, panelH, Fade(LIGHTGRAY, 0.40f));
+                    DrawRectangleLines(boxX + 28, panelY, 984, panelH, GRAY);
+
+                    if (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM) {
+                        DrawText("Firefight Topology (Key M):", boxX + 40, panelY + 14, 15, DARKBLUE);
+                        Rectangle topoPrev = { (float)(boxX + 245), (float)(panelY + 10), 32.0f, 26.0f };
+                        Rectangle topoBox  = { (float)(boxX + 281), (float)(panelY + 10), 285.0f, 26.0f };
+                        Rectangle topoNext = { (float)(boxX + 570), (float)(panelY + 10), 32.0f, 26.0f };
+                        const char *topoName = get_sanctum_topology_name(sanctumTopologyMode, sanctumSeed);
+                        if (DrawMenuButton(topoPrev, "<", 16, false, (Color){ 60, 90, 140, 255 }, (Color){ 220, 225, 235, 255 }, BLACK)) {
+                            sanctumTopologyMode = (sanctumTopologyMode + 4) % 5 - 1;
+                            ResetGame();
+                        }
+                        DrawMenuButton(topoBox, topoName, 14, true, (Color){ 50, 75, 115, 255 }, GRAY, RAYWHITE);
+                        if (DrawMenuButton(topoNext, ">", 16, false, (Color){ 60, 90, 140, 255 }, (Color){ 220, 225, 235, 255 }, BLACK)) {
+                            sanctumTopologyMode = (sanctumTopologyMode + 2) % 5 - 1;
+                            ResetGame();
+                        }
+                        if (sanctumTopologyMode != -1) {
+                            Rectangle autoRec = { (float)(boxX + 610), (float)(panelY + 10), 65.0f, 26.0f };
+                            if (DrawMenuButton(autoRec, "Auto", 13, false, (Color){ 60, 90, 140, 255 }, (Color){ 215, 230, 245, 255 }, DARKBLUE)) {
+                                sanctumTopologyMode = -1;
+                                ResetGame();
+                            }
+                        }
+
+                        DrawText("Citadel Scale / Growth (Key G):", boxX + 40, panelY + 46, 15, DARKBLUE);
+                        Rectangle gPrev = { (float)(boxX + 270), (float)(panelY + 44), 32.0f, 26.0f };
+                        Rectangle gBox  = { (float)(boxX + 306), (float)(panelY + 44), 160.0f, 26.0f };
+                        Rectangle gNext = { (float)(boxX + 470), (float)(panelY + 44), 32.0f, 26.0f };
+                        if (DrawMenuButton(gPrev, "-3", 13, false, (Color){ 60, 90, 140, 255 }, (Color){ 220, 225, 235, 255 }, BLACK)) {
+                            sanctumGrowthSteps = (sanctumGrowthSteps <= 5) ? 35 : sanctumGrowthSteps - 3;
+                            ResetGame();
+                        }
+                        DrawMenuButton(gBox, TextFormat("%d Growth Steps", sanctumGrowthSteps), 14, true, (Color){ 50, 75, 115, 255 }, GRAY, RAYWHITE);
+                        if (DrawMenuButton(gNext, "+3", 13, false, (Color){ 60, 90, 140, 255 }, (Color){ 220, 225, 235, 255 }, BLACK)) {
+                            sanctumGrowthSteps = (sanctumGrowthSteps >= 35) ? 5 : sanctumGrowthSteps + 3;
+                            ResetGame();
+                        }
+                        DrawText("Precursor layout optimized for firefight: elevated strongholds, choke points & ammo drops.", boxX + 514, panelY + 50, 12, (Color){ 70, 70, 70, 255 });
+                    } else if (currentWorldType == WORLD_TYPE_GREEK_TEMPLE) {
+                        const char *stage_labels[] = { "Cella", "Prostyle", "Amphiprostyle", "Peripteral", "Sanctuary" };
+                        DrawText("Classical Temple Stage (Key G):", boxX + 40, panelY + 16, 16, DARKBLUE);
+                        Rectangle tPrev = { (float)(boxX + 295), (float)(panelY + 12), 32.0f, 28.0f };
+                        Rectangle tBox  = { (float)(boxX + 331), (float)(panelY + 12), 180.0f, 28.0f };
+                        Rectangle tNext = { (float)(boxX + 515), (float)(panelY + 12), 32.0f, 28.0f };
+                        if (DrawMenuButton(tPrev, "<", 16, false, (Color){ 60, 90, 140, 255 }, (Color){ 220, 225, 235, 255 }, BLACK)) {
+                            templeTargetStage = (TempleStage)((templeTargetStage + 4) % 5);
+                            ResetGame();
+                        }
+                        DrawMenuButton(tBox, stage_labels[templeTargetStage], 15, true, (Color){ 50, 75, 115, 255 }, GRAY, RAYWHITE);
+                        if (DrawMenuButton(tNext, ">", 16, false, (Color){ 60, 90, 140, 255 }, (Color){ 220, 225, 235, 255 }, BLACK)) {
+                            templeTargetStage = (TempleStage)((templeTargetStage + 1) % 5);
+                            ResetGame();
+                        }
+                        DrawText("Features stylobate stepped podium, colonnade peristyle, pediment frieze & sacred fluid pool.", boxX + 40, panelY + 52, 14, (Color){ 60, 60, 60, 255 });
+                    } else if (currentWorldType == WORLD_TYPE_MEGALITH) {
+                        const char *mega_archetypes[] = { "Passage Grave", "Stone Circle" };
+                        const char *mega_stages[] = { "Menhir", "Dolmen", "Chamber", "Passage", "Tumulus", "Henge" };
+                        DrawText("Archetype (M):", boxX + 40, panelY + 16, 15, DARKBLUE);
+                        Rectangle maPrev = { (float)(boxX + 165), (float)(panelY + 12), 30.0f, 26.0f };
+                        Rectangle maBox  = { (float)(boxX + 199), (float)(panelY + 12), 160.0f, 26.0f };
+                        Rectangle maNext = { (float)(boxX + 363), (float)(panelY + 12), 30.0f, 26.0f };
+                        if (DrawMenuButton(maPrev, "<", 14, false, (Color){ 60, 90, 140, 255 }, (Color){ 220, 225, 235, 255 }, BLACK) ||
+                            DrawMenuButton(maNext, ">", 14, false, (Color){ 60, 90, 140, 255 }, (Color){ 220, 225, 235, 255 }, BLACK)) {
+                            megalithArchetype = (MegalithArchetype)((megalithArchetype + 1) % 2);
+                            ResetGame();
+                        }
+                        DrawMenuButton(maBox, mega_archetypes[megalithArchetype], 14, true, (Color){ 50, 75, 115, 255 }, GRAY, RAYWHITE);
+
+                        DrawText("Stage (G):", boxX + 415, panelY + 16, 15, DARKBLUE);
+                        Rectangle msPrev = { (float)(boxX + 495), (float)(panelY + 12), 30.0f, 26.0f };
+                        Rectangle msBox  = { (float)(boxX + 529), (float)(panelY + 12), 140.0f, 26.0f };
+                        Rectangle msNext = { (float)(boxX + 673), (float)(panelY + 12), 30.0f, 26.0f };
+                        if (DrawMenuButton(msPrev, "<", 14, false, (Color){ 60, 90, 140, 255 }, (Color){ 220, 225, 235, 255 }, BLACK)) {
+                            megalithTargetStage = (MegalithStage)((megalithTargetStage + 5) % 6);
+                            ResetGame();
+                        }
+                        DrawMenuButton(msBox, mega_stages[megalithTargetStage], 14, true, (Color){ 50, 75, 115, 255 }, GRAY, RAYWHITE);
+                        if (DrawMenuButton(msNext, ">", 14, false, (Color){ 60, 90, 140, 255 }, (Color){ 220, 225, 235, 255 }, BLACK)) {
+                            megalithTargetStage = (MegalithStage)((megalithTargetStage + 1) % 6);
+                            ResetGame();
+                        }
+                        DrawText("Neolithic monumental stone architecture: orthostats, capstones, tumulus mound & ditch henge.", boxX + 40, panelY + 52, 14, (Color){ 60, 60, 60, 255 });
+                    } else if (currentWorldType == WORLD_TYPE_HYPERBOREAN) {
+                        const char *hyper_stages[] = { "Avenue", "Outer Henge", "Marble Peristyle", "Great Trilithons", "Full Sanctum" };
+                        DrawText("Hyperborean Stage (Key G):", boxX + 40, panelY + 16, 16, DARKBLUE);
+                        Rectangle hPrev = { (float)(boxX + 265), (float)(panelY + 12), 32.0f, 28.0f };
+                        Rectangle hBox  = { (float)(boxX + 301), (float)(panelY + 12), 190.0f, 28.0f };
+                        Rectangle hNext = { (float)(boxX + 495), (float)(panelY + 12), 32.0f, 28.0f };
+                        if (DrawMenuButton(hPrev, "<", 16, false, (Color){ 60, 90, 140, 255 }, (Color){ 220, 225, 235, 255 }, BLACK)) {
+                            hyperTargetStage = (HyperStage)((hyperTargetStage + 4) % 5);
+                            ResetGame();
+                        }
+                        DrawMenuButton(hBox, hyper_stages[hyperTargetStage], 15, true, (Color){ 50, 75, 115, 255 }, GRAY, RAYWHITE);
+                        if (DrawMenuButton(hNext, ">", 16, false, (Color){ 60, 90, 140, 255 }, (Color){ 220, 225, 235, 255 }, BLACK)) {
+                            hyperTargetStage = (HyperStage)((hyperTargetStage + 1) % 5);
+                            ResetGame();
+                        }
+                        DrawText("Polar solar alignment: monumental sarsen trilithons, concentric marble ring, and fluid moat.", boxX + 40, panelY + 52, 14, (Color){ 60, 60, 60, 255 });
+                    } else if (currentWorldType == WORLD_TYPE_FORERUNNER) {
+                        const char *forerunner_archetypes[] = { "Cartographer", "Crossroads", "Crucible", "Spire" };
+                        const char *forerunner_stages[] = { "Chasm", "Gateway", "Skybridge", "Vault", "Cartographer" };
+                        DrawText("Archetype (M):", boxX + 40, panelY + 16, 15, DARKBLUE);
+                        Rectangle faPrev = { (float)(boxX + 165), (float)(panelY + 12), 30.0f, 26.0f };
+                        Rectangle faBox  = { (float)(boxX + 199), (float)(panelY + 12), 150.0f, 26.0f };
+                        Rectangle faNext = { (float)(boxX + 353), (float)(panelY + 12), 30.0f, 26.0f };
+                        if (DrawMenuButton(faPrev, "<", 14, false, (Color){ 60, 90, 140, 255 }, (Color){ 220, 225, 235, 255 }, BLACK)) {
+                            forerunnerArchetype = (ForerunnerArchetype)((forerunnerArchetype + FORERUNNER_ARCHETYPE_COUNT - 1) % FORERUNNER_ARCHETYPE_COUNT);
+                            ResetGame();
+                        }
+                        DrawMenuButton(faBox, forerunner_archetypes[forerunnerArchetype], 14, true, (Color){ 50, 75, 115, 255 }, GRAY, RAYWHITE);
+                        if (DrawMenuButton(faNext, ">", 14, false, (Color){ 60, 90, 140, 255 }, (Color){ 220, 225, 235, 255 }, BLACK)) {
+                            forerunnerArchetype = (ForerunnerArchetype)((forerunnerArchetype + 1) % FORERUNNER_ARCHETYPE_COUNT);
+                            ResetGame();
+                        }
+
+                        DrawText("Stage (G):", boxX + 405, panelY + 16, 15, DARKBLUE);
+                        Rectangle fsPrev = { (float)(boxX + 485), (float)(panelY + 12), 30.0f, 26.0f };
+                        Rectangle fsBox  = { (float)(boxX + 519), (float)(panelY + 12), 150.0f, 26.0f };
+                        Rectangle fsNext = { (float)(boxX + 673), (float)(panelY + 12), 30.0f, 26.0f };
+                        if (DrawMenuButton(fsPrev, "<", 14, false, (Color){ 60, 90, 140, 255 }, (Color){ 220, 225, 235, 255 }, BLACK)) {
+                            forerunnerTargetStage = (ForerunnerStage)((forerunnerTargetStage + 4) % 5);
+                            ResetGame();
+                        }
+                        DrawMenuButton(fsBox, forerunner_stages[forerunnerTargetStage], 14, true, (Color){ 50, 75, 115, 255 }, GRAY, RAYWHITE);
+                        if (DrawMenuButton(fsNext, ">", 14, false, (Color){ 60, 90, 140, 255 }, (Color){ 220, 225, 235, 255 }, BLACK)) {
+                            forerunnerTargetStage = (ForerunnerStage)((forerunnerTargetStage + 1) % 5);
+                            ResetGame();
+                        }
+                        DrawText("Brutalist hardlight megastructure with chasms, skybridges, energy conduits & soaring spires.", boxX + 40, panelY + 52, 14, (Color){ 60, 60, 60, 255 });
+                    } else if (currentWorldType == WORLD_TYPE_PROCEDURAL) {
+                        DrawText("Procedural Random-Walk Landscape:", boxX + 40, panelY + 16, 16, DARKBLUE);
+                        DrawText("Deterministic 3D random-walk terrain. The numeric seed controls monolith coordinates, heights & debris clusters.", boxX + 40, panelY + 48, 14, (Color){ 60, 60, 60, 255 });
+                    } else {
+                        DrawText("Static Destruction & Combat Arena:", boxX + 40, panelY + 16, 16, DARKBLUE);
+                        DrawText("Predefined geometric arena layout optimized for weapon physics benchmarking and fluid particle simulation.", boxX + 40, panelY + 48, 14, (Color){ 60, 60, 60, 255 });
+                    }
+
+                    // Section 2: World Seed Controls
+                    int seedSecY = boxY + 288;
+                    DrawText("2. WORLD SEED CONFIGURATION (Keys Left/Right, 'E' to Type, 'T' to Random):", boxX + 28, seedSecY, 16, (Color){ 30, 60, 120, 255 });
+                    int seedRowY = seedSecY + 26;
+                    Rectangle sM100 = { (float)(boxX + 28), (float)seedRowY, 66.0f, 38.0f };
+                    Rectangle sM10  = { (float)(boxX + 98), (float)seedRowY, 54.0f, 38.0f };
+                    Rectangle sM1   = { (float)(boxX + 156), (float)seedRowY, 48.0f, 38.0f };
+                    Rectangle sP1   = { (float)(boxX + 534), (float)seedRowY, 48.0f, 38.0f };
+                    Rectangle sP10  = { (float)(boxX + 586), (float)seedRowY, 54.0f, 38.0f };
+                    Rectangle sP100 = { (float)(boxX + 644), (float)seedRowY, 66.0f, 38.0f };
+                    Rectangle sRand = { (float)(boxX + 718), (float)seedRowY, 174.0f, 38.0f };
+
+                    if (DrawMenuButton(sM100, "-100", 14, false, (Color){ 60, 90, 140, 255 }, (Color){ 228, 233, 240, 240 }, BLACK)) step_current_world_seed(-100);
+                    if (DrawMenuButton(sM10, "-10", 14, false, (Color){ 60, 90, 140, 255 }, (Color){ 228, 233, 240, 240 }, BLACK)) step_current_world_seed(-10);
+                    if (DrawMenuButton(sM1, "-1", 14, false, (Color){ 60, 90, 140, 255 }, (Color){ 228, 233, 240, 240 }, BLACK)) step_current_world_seed(-1);
+                    if (DrawMenuButton(sP1, "+1", 14, false, (Color){ 60, 90, 140, 255 }, (Color){ 228, 233, 240, 240 }, BLACK)) step_current_world_seed(+1);
+                    if (DrawMenuButton(sP10, "+10", 14, false, (Color){ 60, 90, 140, 255 }, (Color){ 228, 233, 240, 240 }, BLACK)) step_current_world_seed(+10);
+                    if (DrawMenuButton(sP100, "+100", 14, false, (Color){ 60, 90, 140, 255 }, (Color){ 228, 233, 240, 240 }, BLACK)) step_current_world_seed(+100);
+                    if (DrawMenuButton(sRand, "Random Seed (T)", 14, false, (Color){ 100, 70, 160, 255 }, (Color){ 235, 230, 245, 240 }, BLACK)) roll_random_world_seed();
+
+                    // Seed text box
+                    if (menuEditingSeed) {
+                        DrawRectangleRec(sBox, RAYWHITE);
+                        DrawRectangleLines((int)sBox.x, (int)sBox.y, (int)sBox.width, (int)sBox.height, BLUE);
+                        DrawRectangleLines((int)sBox.x + 1, (int)sBox.y + 1, (int)sBox.width - 2, (int)sBox.height - 2, BLUE);
+                        bool blink = ((int)(GetTime() * 3.0f) % 2) == 0;
+                        const char *sTxt = TextFormat("Seed: %s%s", menuSeedBuffer, blink ? "_" : " ");
+                        int tw = MeasureText(sTxt, 18);
+                        DrawText(sTxt, (int)(sBox.x + (sBox.width - tw) / 2.0f), (int)(sBox.y + 10), 18, BLACK);
+                        DrawText("Type 0-9 | Press ENTER to confirm | ESC to cancel", boxX + 220, seedRowY + 41, 12, DARKBLUE);
+                    } else {
+                        bool sHovered = CheckCollisionPointRec(GetMousePosition(), sBox);
+                        Color sBg = sHovered ? (Color){ 235, 242, 255, 255 } : (Color){ 245, 248, 252, 255 };
+                        DrawRectangleRec(sBox, sBg);
+                        DrawRectangleLines((int)sBox.x, (int)sBox.y, (int)sBox.width, (int)sBox.height, sHovered ? DARKBLUE : GRAY);
+                        const char *sTxt = TextFormat("Seed: #%u", get_current_world_seed());
+                        int tw = MeasureText(sTxt, 18);
+                        DrawText(sTxt, (int)(sBox.x + (sBox.width - tw) / 2.0f), (int)(sBox.y + 10), 18, DARKBLUE);
+                        DrawText("(Click box or press 'E' to type custom seed directly)", boxX + 220, seedRowY + 41, 12, GRAY);
+                        if (sHovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                            menuEditingSeed = true;
+                            snprintf(menuSeedBuffer, sizeof(menuSeedBuffer), "%u", get_current_world_seed());
+                        }
+                    }
+
+                    // Quick Presets Row
+                    int presetRowY = boxY + 394;
+                    if (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM) {
+                        DrawText("Firefight Topologies:", boxX + 28, presetRowY + 6, 14, (Color){ 50, 50, 60, 255 });
+                        const char *presetNames[4] = { "#100 Stronghold", "#101 Abyssal Rift", "#102 Crucible", "#103 Outpost" };
+                        uint32_t presetSeeds[4] = { 100, 101, 102, 103 };
+                        int prW = 202;
+                        int prH = 32;
+                        int prStartX = boxX + 175;
+                        for (int p = 0; p < 4; ++p) {
+                            Rectangle prRec = { (float)(prStartX + p * (prW + 10)), (float)presetRowY, (float)prW, (float)prH };
+                            bool isP = (sanctumSeed == presetSeeds[p] && sanctumTopologyMode == -1);
+                            if (DrawMenuButton(prRec, presetNames[p], 14, isP, (Color){ 42, 130, 95, 255 }, (Color){ 230, 242, 235, 240 }, (Color){ 20, 60, 40, 255 })) {
+                                sanctumTopologyMode = -1;
+                                set_current_world_seed(presetSeeds[p]);
+                                ResetGame();
+                            }
+                        }
+                    } else {
+                        DrawText("Seed Presets:", boxX + 28, presetRowY + 6, 14, (Color){ 50, 50, 60, 255 });
+                        uint32_t commonSeeds[4] = { 1337, 42069, 77777, 99999 };
+                        const char *commonNames[4] = { "#1337 Standard", "#42069 Layout A", "#77777 Layout B", "#99999 Layout C" };
+                        int prW = 202;
+                        int prH = 32;
+                        int prStartX = boxX + 175;
+                        for (int p = 0; p < 4; ++p) {
+                            Rectangle prRec = { (float)(prStartX + p * (prW + 10)), (float)presetRowY, (float)prW, (float)prH };
+                            bool isP = (get_current_world_seed() == commonSeeds[p]);
+                            if (DrawMenuButton(prRec, commonNames[p], 14, isP, (Color){ 42, 130, 95, 255 }, (Color){ 230, 242, 235, 240 }, (Color){ 20, 60, 40, 255 })) {
+                                set_current_world_seed(commonSeeds[p]);
+                                ResetGame();
+                            }
+                        }
+                    }
+
+                    // Section 3: Game Mode & Multiplayer Options
+                    int mSecY = boxY + 444;
+                    DrawText("3. GAME MODE & MULTIPLAYER OPTIONS:", boxX + 28, mSecY, 16, (Color){ 30, 60, 120, 255 });
+                    int mRowY = mSecY + 24;
+                    Rectangle customMapRec = { (float)(boxX + 28), (float)mRowY, 245.0f, 34.0f };
+                    if (DrawMenuButton(customMapRec, TextFormat("Custom Map: %s (U)", useCustomMap ? "ON" : "OFF"), 14, useCustomMap, (Color){ 180, 80, 40, 255 }, (Color){ 235, 235, 240, 240 }, BLACK)) {
+                        useCustomMap = !useCustomMap;
+                    }
+
+                    Rectangle slotRec = { (float)(boxX + 285), (float)mRowY, 150.0f, 34.0f };
+                    if (DrawMenuButton(slotRec, TextFormat("Map Slot: %d (L)", creativeMapSlot + 1), 14, false, (Color){ 100, 100, 100, 255 }, (Color){ 235, 235, 240, 240 }, BLACK)) {
+                        creativeMapSlot = (creativeMapSlot + 1) % 3;
+                    }
+
+                    Rectangle hostRec = { (float)(boxX + 447), (float)mRowY, 160.0f, 34.0f };
+                    if (DrawMenuButton(hostRec, "Host LAN (H)", 14, false, (Color){ 60, 120, 60, 255 }, (Color){ 235, 235, 240, 240 }, BLACK)) {
+                        if (netTransport.role == NET_ROLE_OFFLINE) {
+                            netRequestedRole = NET_ROLE_HOST;
+                            netRequestedCreative = false;
+                            if (net_transport_host(&netTransport, netRequestedPort)) {
+                                net_set_host_local_players(netRequestedLocalPlayers);
+                                netLobbyStarted = false;
+                                gameState = GAME_STATE_LOBBY;
+                            }
+                        }
+                    }
+
+                    Rectangle joinRec = { (float)(boxX + 619), (float)mRowY, 160.0f, 34.0f };
+                    if (DrawMenuButton(joinRec, "Join LAN (J)", 14, false, (Color){ 60, 120, 60, 255 }, (Color){ 235, 235, 240, 240 }, BLACK)) {
+                        if (netTransport.role == NET_ROLE_OFFLINE) {
+                            netRequestedRole = NET_ROLE_CLIENT;
+                            netRequestedCreative = false;
+                            net_prepare_client_local_players(netRequestedLocalPlayers);
+                            if (net_transport_connect(&netTransport, "127.0.0.1", netRequestedPort)) {
+                                memset(netPlayerPresent, 0, sizeof(netPlayerPresent)); netWorldReady = false;
+                                memset(netPlayerReady, 0, sizeof(netPlayerReady)); netLobbyStarted = false;
+                            }
+                        }
+                    }
+
+                    Rectangle localPlRec = { (float)(boxX + 791), (float)mRowY, 221.0f, 34.0f };
+                    if (DrawMenuButton(localPlRec, TextFormat("LAN Players: %d (-/+)", netRequestedLocalPlayers), 14, false, (Color){ 100, 100, 100, 255 }, (Color){ 235, 235, 240, 240 }, BLACK)) {
+                        netRequestedLocalPlayers = (netRequestedLocalPlayers % MAX_PLAYERS) + 1;
+                    }
+
+                    // Primary Action Buttons
+                    int actY = boxY + 520;
+                    Rectangle startRec = { (float)(boxX + 28), (float)actY, 430.0f, 54.0f };
+                    if (DrawMenuButton(startRec, ">>>  START GAME  (ENTER)  <<<", 22, true, (Color){ 36, 140, 72, 255 }, (Color){ 36, 140, 72, 255 }, RAYWHITE)) {
+                        if (netTransport.role == NET_ROLE_OFFLINE) {
+                            ResetGame();
+                            if (droneIntroEnabled) {
+                                gameState = GAME_STATE_DRONE_INTRO;
+                                droneTimer = 3.0f;
+                            } else {
+                                gameState = GAME_STATE_PLAYING;
+                            }
+                        }
+                    }
+
+                    Rectangle setRec = { (float)(boxX + 472), (float)actY, 250.0f, 54.0f };
+                    if (DrawMenuButton(setRec, "Settings (S)", 18, false, (Color){ 80, 80, 80, 255 }, (Color){ 230, 235, 240, 240 }, BLACK)) {
+                        if (netTransport.role == NET_ROLE_OFFLINE) gameState = GAME_STATE_SETTINGS;
+                    }
+
+                    Rectangle creatRec = { (float)(boxX + 734), (float)actY, 278.0f, 54.0f };
+                    if (DrawMenuButton(creatRec, "Creative Sandbox (C)", 18, false, (Color){ 80, 80, 80, 255 }, (Color){ 230, 235, 240, 240 }, BLACK)) {
+                        if (netTransport.role == NET_ROLE_OFFLINE) {
+                            ResetCreative();
+                            gameState = GAME_STATE_CREATIVE;
+                        }
+                    }
+
+                    // Navigation & Hotkeys Guide footer
+                    DrawRectangle(boxX + 28, boxY + 590, 984, 104, Fade(DARKBLUE, 0.08f));
+                    DrawRectangleLines(boxX + 28, boxY + 590, 984, 104, Fade(DARKBLUE, 0.3f));
+                    DrawText("CONTROLS & SHORTCUTS GUIDE:", boxX + 42, boxY + 598, 14, DARKBLUE);
+                    DrawText("- [1 - 8]: Switch World Type instantly       |  [W / Q]: Cycle Next / Previous World", boxX + 42, boxY + 620, 13, (Color){ 40, 40, 55, 255 });
+                    DrawText("- [Left / Right]: Seed +/- 1                 |  [Up / Down]: Seed +/- 10", boxX + 42, boxY + 640, 13, (Color){ 40, 40, 55, 255 });
+                    DrawText("- [E]: Type Custom Seed via Keyboard         |  [T / R]: Roll Random Seed", boxX + 42, boxY + 660, 13, (Color){ 40, 40, 55, 255 });
+                    DrawText("- [M]: Cycle Archetype / Topology            |  [G]: Cycle Architecture Stage / Growth", boxX + 42, boxY + 678, 13, (Color){ 40, 40, 55, 255 });
 
                     if (netTransport.role == NET_ROLE_CLIENT) {
-                        DrawText(netWorldReady ? "Connected" : "Connecting...", boxX + 20, boxY + 350, 18, DARKBLUE);
+                        DrawText(netWorldReady ? "Connected to LAN Host" : "Connecting to LAN Host...", boxX + 700, boxY + 600, 13, DARKBLUE);
                     }
                 EndDrawing();
 
-                if (netTransport.role == NET_ROLE_OFFLINE && IsKeyPressed(KEY_ENTER)) {
-                    ResetGame();
-                    if (droneIntroEnabled) {
-                        gameState = GAME_STATE_DRONE_INTRO;
-                        droneTimer = 3.0f;
-                    } else {
-                        gameState = GAME_STATE_PLAYING;
+                if (menuEditingSeed) {
+                    int key = GetCharPressed();
+                    while (key > 0) {
+                        if (key >= '0' && key <= '9') {
+                            size_t len = strlen(menuSeedBuffer);
+                            if (len < 9) {
+                                menuSeedBuffer[len] = (char)key;
+                                menuSeedBuffer[len + 1] = '\0';
+                            }
+                        }
+                        key = GetCharPressed();
                     }
-                }
-                if (netTransport.role == NET_ROLE_OFFLINE && IsKeyPressed(KEY_S)) {
-                    gameState = GAME_STATE_SETTINGS;
-                }
-                if (netTransport.role == NET_ROLE_OFFLINE && IsKeyPressed(KEY_C)) {
-                    ResetCreative();
-                    gameState = GAME_STATE_CREATIVE;
-                }
-                if (netTransport.role == NET_ROLE_OFFLINE &&
-                    (IsKeyPressed(KEY_EQUAL) || IsKeyPressed(KEY_KP_ADD))) {
-                    netRequestedLocalPlayers = clampi(netRequestedLocalPlayers + 1, 1, MAX_PLAYERS);
-                }
-                if (netTransport.role == NET_ROLE_OFFLINE &&
-                    (IsKeyPressed(KEY_MINUS) || IsKeyPressed(KEY_KP_SUBTRACT))) {
-                    netRequestedLocalPlayers = clampi(netRequestedLocalPlayers - 1, 1, MAX_PLAYERS);
-                }
-                if (IsKeyPressed(KEY_U)) {
-                    useCustomMap = !useCustomMap;
-                }
-                if (IsKeyPressed(KEY_L)) {
-                    creativeMapSlot = (creativeMapSlot + 1) % 3;
-                }
-                if (IsKeyPressed(KEY_W)) {
-                    currentWorldType = (WorldType)((currentWorldType + 1) % WORLD_TYPE_COUNT);
-                    ResetGame();
-                }
-                if (IsKeyPressed(KEY_M)) {
-                    if (currentWorldType == WORLD_TYPE_MEGALITH) {
-                        megalithArchetype = (MegalithArchetype)((megalithArchetype + 1) % 2);
-                        ResetGame();
-                    } else if (currentWorldType == WORLD_TYPE_FORERUNNER) {
-                        forerunnerArchetype = (ForerunnerArchetype)((forerunnerArchetype + 1) % FORERUNNER_ARCHETYPE_COUNT);
+                    if (IsKeyPressed(KEY_BACKSPACE)) {
+                        size_t len = strlen(menuSeedBuffer);
+                        if (len > 0) {
+                            menuSeedBuffer[len - 1] = '\0';
+                        }
+                    }
+                    if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
+                        if (strlen(menuSeedBuffer) == 0) {
+                            snprintf(menuSeedBuffer, sizeof(menuSeedBuffer), "1");
+                        }
+                        uint32_t val = (uint32_t)strtoul(menuSeedBuffer, NULL, 10);
+                        set_current_world_seed(val);
+                        menuEditingSeed = false;
                         ResetGame();
                     }
-                }
-                if (IsKeyPressed(KEY_T)) {
-                    templeSeed = (uint32_t)GetRandomValue(1, 99999);
-                    megalithSeed = (uint32_t)GetRandomValue(1, 99999);
-                    hyperSeed = (uint32_t)GetRandomValue(1, 99999);
-                    forerunnerSeed = (uint32_t)GetRandomValue(1, 99999);
-                    sanctumSeed = (uint32_t)GetRandomValue(1, 99999);
-                    if (currentWorldType == WORLD_TYPE_GREEK_TEMPLE || currentWorldType == WORLD_TYPE_MEGALITH ||
-                        currentWorldType == WORLD_TYPE_HYPERBOREAN || currentWorldType == WORLD_TYPE_FORERUNNER ||
-                        currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM) ResetGame();
-                }
-                if (IsKeyPressed(KEY_G)) {
-                    if (currentWorldType == WORLD_TYPE_GREEK_TEMPLE) {
-                        templeTargetStage = (TempleStage)((templeTargetStage + 1) % 5);
-                        ResetGame();
-                    } else if (currentWorldType == WORLD_TYPE_MEGALITH) {
-                        megalithTargetStage = (MegalithStage)((megalithTargetStage + 1) % 6);
-                        ResetGame();
-                    } else if (currentWorldType == WORLD_TYPE_HYPERBOREAN) {
-                        hyperTargetStage = (HyperStage)((hyperTargetStage + 1) % 5);
-                        ResetGame();
-                    } else if (currentWorldType == WORLD_TYPE_FORERUNNER) {
-                        forerunnerTargetStage = (ForerunnerStage)((forerunnerTargetStage + 1) % 5);
-                        ResetGame();
-                    } else if (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM) {
-                        sanctumGrowthSteps = (sanctumGrowthSteps + 3);
-                        if (sanctumGrowthSteps > 35) sanctumGrowthSteps = 5;
+                    if (IsKeyPressed(KEY_ESCAPE)) {
+                        snprintf(menuSeedBuffer, sizeof(menuSeedBuffer), "%u", get_current_world_seed());
+                        menuEditingSeed = false;
+                    }
+                    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(GetMousePosition(), sBox)) {
+                        if (strlen(menuSeedBuffer) == 0) {
+                            snprintf(menuSeedBuffer, sizeof(menuSeedBuffer), "1");
+                        }
+                        uint32_t val = (uint32_t)strtoul(menuSeedBuffer, NULL, 10);
+                        set_current_world_seed(val);
+                        menuEditingSeed = false;
                         ResetGame();
                     }
-                }
-                if (netTransport.role == NET_ROLE_OFFLINE && IsKeyPressed(KEY_H)) {
-                    netRequestedRole = NET_ROLE_HOST;
-                    netRequestedCreative = false;
-                    if (net_transport_host(&netTransport, netRequestedPort)) {
-                        net_set_host_local_players(netRequestedLocalPlayers);
-                        netLobbyStarted = false;
-                        gameState = GAME_STATE_LOBBY;
+                } else {
+                    if (IsKeyPressed(KEY_ONE) || IsKeyPressed(KEY_KP_1)) switch_world_type(WORLD_TYPE_GREEK_TEMPLE);
+                    if (IsKeyPressed(KEY_TWO) || IsKeyPressed(KEY_KP_2)) switch_world_type(WORLD_TYPE_MEGALITH);
+                    if (IsKeyPressed(KEY_THREE) || IsKeyPressed(KEY_KP_3)) switch_world_type(WORLD_TYPE_HYPERBOREAN);
+                    if (IsKeyPressed(KEY_FOUR) || IsKeyPressed(KEY_KP_4)) switch_world_type(WORLD_TYPE_FORERUNNER);
+                    if (IsKeyPressed(KEY_FIVE) || IsKeyPressed(KEY_KP_5)) switch_world_type(WORLD_TYPE_UNIFIED_SANCTUM);
+                    if (IsKeyPressed(KEY_SIX) || IsKeyPressed(KEY_KP_6)) switch_world_type(WORLD_TYPE_TEST);
+                    if (IsKeyPressed(KEY_SEVEN) || IsKeyPressed(KEY_KP_7)) switch_world_type(WORLD_TYPE_BLOOD);
+                    if (IsKeyPressed(KEY_EIGHT) || IsKeyPressed(KEY_KP_8)) switch_world_type(WORLD_TYPE_PROCEDURAL);
+
+                    if (IsKeyPressed(KEY_W)) switch_world_type((WorldType)((currentWorldType + 1) % WORLD_TYPE_COUNT));
+                    if (IsKeyPressed(KEY_Q)) switch_world_type((WorldType)((currentWorldType + WORLD_TYPE_COUNT - 1) % WORLD_TYPE_COUNT));
+
+                    if (IsKeyPressed(KEY_LEFT)) step_current_world_seed(-1);
+                    if (IsKeyPressed(KEY_RIGHT)) step_current_world_seed(+1);
+                    if (IsKeyPressed(KEY_DOWN)) step_current_world_seed(-10);
+                    if (IsKeyPressed(KEY_UP)) step_current_world_seed(+10);
+
+                    if (IsKeyPressed(KEY_E)) {
+                        menuEditingSeed = true;
+                        snprintf(menuSeedBuffer, sizeof(menuSeedBuffer), "%u", get_current_world_seed());
                     }
-                }
-                if (netTransport.role == NET_ROLE_OFFLINE && IsKeyPressed(KEY_J)) {
-                    netRequestedRole = NET_ROLE_CLIENT;
-                    netRequestedCreative = false;
-                    net_prepare_client_local_players(netRequestedLocalPlayers);
-                    if (net_transport_connect(&netTransport, "127.0.0.1", netRequestedPort)) {
-                        memset(netPlayerPresent, 0, sizeof(netPlayerPresent)); netWorldReady = false;
-                        memset(netPlayerReady, 0, sizeof(netPlayerReady)); netLobbyStarted = false;
+                    if (IsKeyPressed(KEY_T) || IsKeyPressed(KEY_R)) roll_random_world_seed();
+
+                    if (IsKeyPressed(KEY_M)) {
+                        if (currentWorldType == WORLD_TYPE_MEGALITH) {
+                            megalithArchetype = (MegalithArchetype)((megalithArchetype + 1) % 2);
+                            ResetGame();
+                        } else if (currentWorldType == WORLD_TYPE_FORERUNNER) {
+                            forerunnerArchetype = (ForerunnerArchetype)((forerunnerArchetype + 1) % FORERUNNER_ARCHETYPE_COUNT);
+                            ResetGame();
+                        } else if (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM) {
+                            sanctumTopologyMode = (sanctumTopologyMode + 2) % 5 - 1;
+                            ResetGame();
+                        }
+                    }
+
+                    if (IsKeyPressed(KEY_G)) {
+                        if (currentWorldType == WORLD_TYPE_GREEK_TEMPLE) {
+                            templeTargetStage = (TempleStage)((templeTargetStage + 1) % 5);
+                            ResetGame();
+                        } else if (currentWorldType == WORLD_TYPE_MEGALITH) {
+                            megalithTargetStage = (MegalithStage)((megalithTargetStage + 1) % 6);
+                            ResetGame();
+                        } else if (currentWorldType == WORLD_TYPE_HYPERBOREAN) {
+                            hyperTargetStage = (HyperStage)((hyperTargetStage + 1) % 5);
+                            ResetGame();
+                        } else if (currentWorldType == WORLD_TYPE_FORERUNNER) {
+                            forerunnerTargetStage = (ForerunnerStage)((forerunnerTargetStage + 1) % 5);
+                            ResetGame();
+                        } else if (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM) {
+                            sanctumGrowthSteps = (sanctumGrowthSteps + 3);
+                            if (sanctumGrowthSteps > 35) sanctumGrowthSteps = 5;
+                            ResetGame();
+                        }
+                    }
+
+                    if (netTransport.role == NET_ROLE_OFFLINE && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))) {
+                        ResetGame();
+                        if (droneIntroEnabled) {
+                            gameState = GAME_STATE_DRONE_INTRO;
+                            droneTimer = 3.0f;
+                        } else {
+                            gameState = GAME_STATE_PLAYING;
+                        }
+                    }
+                    if (netTransport.role == NET_ROLE_OFFLINE && IsKeyPressed(KEY_S)) {
+                        gameState = GAME_STATE_SETTINGS;
+                    }
+                    if (netTransport.role == NET_ROLE_OFFLINE && IsKeyPressed(KEY_C)) {
+                        ResetCreative();
+                        gameState = GAME_STATE_CREATIVE;
+                    }
+                    if (netTransport.role == NET_ROLE_OFFLINE &&
+                        (IsKeyPressed(KEY_EQUAL) || IsKeyPressed(KEY_KP_ADD))) {
+                        netRequestedLocalPlayers = clampi(netRequestedLocalPlayers + 1, 1, MAX_PLAYERS);
+                    }
+                    if (netTransport.role == NET_ROLE_OFFLINE &&
+                        (IsKeyPressed(KEY_MINUS) || IsKeyPressed(KEY_KP_SUBTRACT))) {
+                        netRequestedLocalPlayers = clampi(netRequestedLocalPlayers - 1, 1, MAX_PLAYERS);
+                    }
+                    if (IsKeyPressed(KEY_U)) {
+                        useCustomMap = !useCustomMap;
+                    }
+                    if (IsKeyPressed(KEY_L)) {
+                        creativeMapSlot = (creativeMapSlot + 1) % 3;
+                    }
+                    if (netTransport.role == NET_ROLE_OFFLINE && IsKeyPressed(KEY_H)) {
+                        netRequestedRole = NET_ROLE_HOST;
+                        netRequestedCreative = false;
+                        if (net_transport_host(&netTransport, netRequestedPort)) {
+                            net_set_host_local_players(netRequestedLocalPlayers);
+                            netLobbyStarted = false;
+                            gameState = GAME_STATE_LOBBY;
+                        }
+                    }
+                    if (netTransport.role == NET_ROLE_OFFLINE && IsKeyPressed(KEY_J)) {
+                        netRequestedRole = NET_ROLE_CLIENT;
+                        netRequestedCreative = false;
+                        net_prepare_client_local_players(netRequestedLocalPlayers);
+                        if (net_transport_connect(&netTransport, "127.0.0.1", netRequestedPort)) {
+                            memset(netPlayerPresent, 0, sizeof(netPlayerPresent)); netWorldReady = false;
+                            memset(netPlayerReady, 0, sizeof(netPlayerReady)); netLobbyStarted = false;
+                        }
                     }
                 }
                 break;
+            }
             case GAME_STATE_LOBBY: {
                 BeginDrawing();
                     ClearBackground((Color){ 28, 34, 44, 255 });
@@ -18344,6 +18847,20 @@ int main(int argc, char **argv) {
             p->pos.x += p->vel.x*dt;
             p->pos.y += p->vel.y*dt;
             p->pos.z += p->vel.z*dt;
+
+            // Firefight Gravity Jump Lift pads
+            if (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM && current_sanctum_plan_valid) {
+                for (int j = 0; j < current_sanctum_plan.jump_pad_count; ++j) {
+                    float jx = (current_sanctum_plan.jump_pads[j].pos.x + 0.5f) * VOXEL_SIZE;
+                    float jy = (10 + current_sanctum_plan.jump_pads[j].pos.y + 0.5f) * VOXEL_SIZE;
+                    float jz = (current_sanctum_plan.jump_pads[j].pos.z + 0.5f) * VOXEL_SIZE;
+                    float dist_sq = (p->pos.x - jx)*(p->pos.x - jx) + (p->pos.z - jz)*(p->pos.z - jz);
+                    if (dist_sq < 2.5f * 2.5f && fabsf(p->pos.y - jy) < 2.5f) {
+                        p->vel.y = current_sanctum_plan.jump_pads[j].launch_power;
+                        p->onGround = false;
+                    }
+                }
+            }
 
             // ground clamp
             if (p->pos.y <= BASE_EYE_HEIGHT) {
