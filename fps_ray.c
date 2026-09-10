@@ -84,6 +84,10 @@
 #include "greek_rasterizer.h"
 #include "greek_grammar.c"
 
+#include "megalith_grammar.h"
+#include "megalith_rasterizer.h"
+#include "megalith_grammar.c"
+
 typedef enum {
     FLUID_RENDER_PARTICLES = 0,
     FLUID_RENDER_SURFACE = 1
@@ -8237,6 +8241,7 @@ static void buildDebugWorld(void) {
 
 typedef enum {
     WORLD_TYPE_GREEK_TEMPLE = 0,
+    WORLD_TYPE_MEGALITH,
     WORLD_TYPE_TEST,
     WORLD_TYPE_BLOOD,
     WORLD_TYPE_PROCEDURAL,
@@ -8245,6 +8250,10 @@ typedef enum {
 static WorldType currentWorldType = WORLD_TYPE_GREEK_TEMPLE;
 static uint32_t templeSeed = 1337;
 static TempleStage templeTargetStage = TEMPLE_STAGE_SANCTUARY;
+
+static MegalithArchetype megalithArchetype = MEGALITH_ARCHETYPE_PASSAGE_GRAVE;
+static MegalithStage megalithTargetStage = MEGALITH_STAGE_TUMULUS;
+static uint32_t megalithSeed = 1337;
 
 static void plot_temple_voxel(int gx, int gy, int gz, Color c) {
     // If it's the water color from the pool, spawn physical PBF fluid voxels!
@@ -8258,6 +8267,10 @@ static void plot_temple_voxel(int gx, int gy, int gz, Color c) {
     }
 }
 
+static void plot_megalith_voxel(int gx, int gy, int gz, Color c) {
+    addVoxelAt(gx, gy, gz, c);
+}
+
 static void buildGreekTempleWorld(uint32_t seed, TempleStage stage) {
     int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
     int center = M / 2;
@@ -8266,10 +8279,20 @@ static void buildGreekTempleWorld(uint32_t seed, TempleStage stage) {
     rasterize_temple_plan(&plan, center, center, 3, plot_temple_voxel);
 }
 
+static void buildMegalithWorld(uint32_t seed, MegalithArchetype archetype, MegalithStage stage) {
+    int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
+    int center = M / 2;
+    MegalithPlan plan = generate_megalith_structure(seed, archetype, stage);
+    // Base at gy = 2 so stones rest firmly on the ground arena
+    rasterize_megalith_plan(&plan, center, center, 2, plot_megalith_voxel);
+}
+
 // Build static demo cube of voxels
 static void buildDemo(void) {
     if (currentWorldType == WORLD_TYPE_GREEK_TEMPLE) {
         buildGreekTempleWorld(templeSeed, templeTargetStage);
+    } else if (currentWorldType == WORLD_TYPE_MEGALITH) {
+        buildMegalithWorld(megalithSeed, megalithArchetype, megalithTargetStage);
     } else if (currentWorldType == WORLD_TYPE_BLOOD) {
         buildBloodWorld();
     } else if (currentWorldType == WORLD_TYPE_PROCEDURAL) {
@@ -17773,10 +17796,15 @@ int main(int argc, char **argv) {
                              boxY + 270, 18, DARKGRAY);
 
                     const char *stage_labels[] = { "Cella", "Prostyle", "Amphi", "Peripteral", "Sanctuary" };
-                    const char *world_names[] = { "Greek Temple", "Test", "Blood", "Procedural" };
+                    const char *mega_archetypes[] = { "Passage Grave", "Stone Circle" };
+                    const char *mega_stages[] = { "Menhir", "Dolmen", "Chamber", "Passage", "Tumulus", "Henge" };
+                    const char *world_names[] = { "Greek Temple", "Prehistoric Megalith", "Test", "Blood", "Procedural" };
                     const char *world_info = (currentWorldType == WORLD_TYPE_GREEK_TEMPLE) ?
-                        TextFormat("World: Greek Temple [%s, #%u] (W to Cycle, T Seed, G Stage)",
+                        TextFormat("World: Greek Temple [%s, #%u] (W Cycle, T Seed, G Stage)",
                                    stage_labels[templeTargetStage], templeSeed) :
+                        (currentWorldType == WORLD_TYPE_MEGALITH) ?
+                        TextFormat("World: Megalith [%s: %s, #%u] (W Cycle, M Archetype, G Stage, T Seed)",
+                                   mega_archetypes[megalithArchetype], mega_stages[megalithTargetStage], megalithSeed) :
                         TextFormat("World: %s (Press W to Cycle)", world_names[currentWorldType]);
                     DrawText(world_info, SCREEN_WIDTH / 2 - MeasureText(world_info, 18) / 2, boxY + 310, 18, DARKBLUE);
 
@@ -17819,13 +17847,25 @@ int main(int argc, char **argv) {
                     currentWorldType = (WorldType)((currentWorldType + 1) % WORLD_TYPE_COUNT);
                     ResetGame();
                 }
+                if (IsKeyPressed(KEY_M)) {
+                    if (currentWorldType == WORLD_TYPE_MEGALITH) {
+                        megalithArchetype = (MegalithArchetype)((megalithArchetype + 1) % 2);
+                        ResetGame();
+                    }
+                }
                 if (IsKeyPressed(KEY_T)) {
                     templeSeed = (uint32_t)GetRandomValue(1, 99999);
-                    if (currentWorldType == WORLD_TYPE_GREEK_TEMPLE) ResetGame();
+                    megalithSeed = (uint32_t)GetRandomValue(1, 99999);
+                    if (currentWorldType == WORLD_TYPE_GREEK_TEMPLE || currentWorldType == WORLD_TYPE_MEGALITH) ResetGame();
                 }
                 if (IsKeyPressed(KEY_G)) {
-                    templeTargetStage = (TempleStage)((templeTargetStage + 1) % 5);
-                    if (currentWorldType == WORLD_TYPE_GREEK_TEMPLE) ResetGame();
+                    if (currentWorldType == WORLD_TYPE_GREEK_TEMPLE) {
+                        templeTargetStage = (TempleStage)((templeTargetStage + 1) % 5);
+                        ResetGame();
+                    } else if (currentWorldType == WORLD_TYPE_MEGALITH) {
+                        megalithTargetStage = (MegalithStage)((megalithTargetStage + 1) % 6);
+                        ResetGame();
+                    }
                 }
                 if (netTransport.role == NET_ROLE_OFFLINE && IsKeyPressed(KEY_H)) {
                     netRequestedRole = NET_ROLE_HOST;
