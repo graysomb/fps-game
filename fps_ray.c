@@ -6293,6 +6293,17 @@ static bool wake_sleeping_cluster_in_place(int start_idx)
     return woke;
 }
 
+static bool wake_sleeping_cluster_for_gameplay(int start_idx)
+{
+    bool woke = wake_sleeping_cluster_in_place(start_idx);
+    if (woke && greedy_solver_active() && !greedy_rebuild_current()) {
+        TraceLog(LOG_WARNING,
+                 "[Greedy] failed to rebuild after waking voxel %d",
+                 start_idx);
+    }
+    return woke;
+}
+
 static bool voxel_bounds_within_margin(const Voxel *a, const Voxel *b, float margin)
 {
     VoxelWorldBounds aa, bb;
@@ -9027,7 +9038,7 @@ static void update_projectiles(float dt)
         if (hit_id >= 0 && hit_id < voxel_count) {
             play_sfx(SFX_IMPACT);
             if (voxels[hit_id].simulate && voxels[hit_id].sleeping) {
-                wake_sleeping_cluster_in_place(hit_id);
+                wake_sleeping_cluster_for_gameplay(hit_id);
             }
             
             // Bullet vs Static Voxel
@@ -13434,7 +13445,7 @@ static bool melee_hit_voxels(Player *p, Vector3 start, Vector3 dir, float reach)
     }
     Voxel *hit = &voxels[hit_id];
     if (hit->simulate && hit->sleeping) {
-        wake_sleeping_cluster_in_place(hit_id);
+        wake_sleeping_cluster_for_gameplay(hit_id);
         hit = &voxels[hit_id];
     }
     int brushExtent = (voxelBrushSpan < 1) ? 1 : voxelBrushSpan;
@@ -13704,7 +13715,7 @@ static void start_tether(int idx) {
     }
     Voxel *hit = &voxels[hit_id];
     if (hit->simulate && hit->sleeping) {
-        wake_sleeping_cluster_in_place(hit_id);
+        wake_sleeping_cluster_for_gameplay(hit_id);
         hit = &voxels[hit_id];
     }
     
@@ -13751,7 +13762,7 @@ static void prepare_tether_forces(void) {
         }
         Voxel *v = &voxels[p->tetherVoxel];
         if (v->simulate && v->sleeping) {
-            wake_sleeping_cluster_in_place(p->tetherVoxel);
+            wake_sleeping_cluster_for_gameplay(p->tetherVoxel);
             v = &voxels[p->tetherVoxel];
         }
         if (!v->simulate) {
@@ -13782,7 +13793,7 @@ static void release_tether(int idx) {
     if (p->tetherVoxel >= 0 && p->tetherVoxel < voxel_count) {
         Voxel *v = &voxels[p->tetherVoxel];
         if (v->simulate && v->sleeping) {
-            wake_sleeping_cluster_in_place(p->tetherVoxel);
+            wake_sleeping_cluster_for_gameplay(p->tetherVoxel);
             v = &voxels[p->tetherVoxel];
         }
         if (v->simulate) {
