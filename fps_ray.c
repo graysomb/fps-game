@@ -88,6 +88,10 @@
 #include "megalith_rasterizer.h"
 #include "megalith_grammar.c"
 
+#include "hyperborean_grammar.h"
+#include "hyperborean_rasterizer.h"
+#include "hyperborean_grammar.c"
+
 typedef enum {
     FLUID_RENDER_PARTICLES = 0,
     FLUID_RENDER_SURFACE = 1
@@ -8242,6 +8246,7 @@ static void buildDebugWorld(void) {
 typedef enum {
     WORLD_TYPE_GREEK_TEMPLE = 0,
     WORLD_TYPE_MEGALITH,
+    WORLD_TYPE_HYPERBOREAN,
     WORLD_TYPE_TEST,
     WORLD_TYPE_BLOOD,
     WORLD_TYPE_PROCEDURAL,
@@ -8254,6 +8259,9 @@ static TempleStage templeTargetStage = TEMPLE_STAGE_SANCTUARY;
 static MegalithArchetype megalithArchetype = MEGALITH_ARCHETYPE_PASSAGE_GRAVE;
 static MegalithStage megalithTargetStage = MEGALITH_STAGE_TUMULUS;
 static uint32_t megalithSeed = 1337;
+
+static HyperStage hyperTargetStage = HYPER_STAGE_FULL_SANCTUM;
+static uint32_t hyperSeed = 1337;
 
 static void plot_temple_voxel(int gx, int gy, int gz, Color c) {
     // If it's the water color from the pool, spawn physical PBF fluid voxels!
@@ -8269,6 +8277,18 @@ static void plot_temple_voxel(int gx, int gy, int gz, Color c) {
 
 static void plot_megalith_voxel(int gx, int gy, int gz, Color c) {
     addVoxelAt(gx, gy, gz, c);
+}
+
+static void plot_hyper_voxel(int gx, int gy, int gz, Color c) {
+    // Sacred PBF fluid moat spawns dynamic physical fluid particles!
+    if (c.r == 50 && c.g == 160 && c.b == 220) {
+        float px = (gx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+        float py = (gy + 0.5f) * VOXEL_SIZE;
+        float pz = (gz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+        add_fluid_cell(px, py, pz, c);
+    } else {
+        addVoxelAt(gx, gy, gz, c);
+    }
 }
 
 static void buildGreekTempleWorld(uint32_t seed, TempleStage stage) {
@@ -8287,12 +8307,22 @@ static void buildMegalithWorld(uint32_t seed, MegalithArchetype archetype, Megal
     rasterize_megalith_plan(&plan, center, center, 2, plot_megalith_voxel);
 }
 
+static void buildHyperboreanWorld(uint32_t seed, HyperStage stage) {
+    int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
+    int center = M / 2;
+    HyperPlan plan = generate_hyperborean_structure(seed, stage);
+    // Base at gy = 2 for ground-level alignment
+    rasterize_hyperborean_plan(&plan, center, center, 2, plot_hyper_voxel);
+}
+
 // Build static demo cube of voxels
 static void buildDemo(void) {
     if (currentWorldType == WORLD_TYPE_GREEK_TEMPLE) {
         buildGreekTempleWorld(templeSeed, templeTargetStage);
     } else if (currentWorldType == WORLD_TYPE_MEGALITH) {
         buildMegalithWorld(megalithSeed, megalithArchetype, megalithTargetStage);
+    } else if (currentWorldType == WORLD_TYPE_HYPERBOREAN) {
+        buildHyperboreanWorld(hyperSeed, hyperTargetStage);
     } else if (currentWorldType == WORLD_TYPE_BLOOD) {
         buildBloodWorld();
     } else if (currentWorldType == WORLD_TYPE_PROCEDURAL) {
@@ -17798,13 +17828,17 @@ int main(int argc, char **argv) {
                     const char *stage_labels[] = { "Cella", "Prostyle", "Amphi", "Peripteral", "Sanctuary" };
                     const char *mega_archetypes[] = { "Passage Grave", "Stone Circle" };
                     const char *mega_stages[] = { "Menhir", "Dolmen", "Chamber", "Passage", "Tumulus", "Henge" };
-                    const char *world_names[] = { "Greek Temple", "Prehistoric Megalith", "Test", "Blood", "Procedural" };
+                    const char *hyper_stages[] = { "Avenue", "Outer Henge", "Marble Peristyle", "Great Trilithons", "Full Sanctum" };
+                    const char *world_names[] = { "Greek Temple", "Prehistoric Megalith", "Hyperborean Sun-Henge", "Test", "Blood", "Procedural" };
                     const char *world_info = (currentWorldType == WORLD_TYPE_GREEK_TEMPLE) ?
                         TextFormat("World: Greek Temple [%s, #%u] (W Cycle, T Seed, G Stage)",
                                    stage_labels[templeTargetStage], templeSeed) :
                         (currentWorldType == WORLD_TYPE_MEGALITH) ?
                         TextFormat("World: Megalith [%s: %s, #%u] (W Cycle, M Archetype, G Stage, T Seed)",
                                    mega_archetypes[megalithArchetype], mega_stages[megalithTargetStage], megalithSeed) :
+                        (currentWorldType == WORLD_TYPE_HYPERBOREAN) ?
+                        TextFormat("World: Hyperborean [%s, #%u] (W Cycle, G Stage, T Seed)",
+                                   hyper_stages[hyperTargetStage], hyperSeed) :
                         TextFormat("World: %s (Press W to Cycle)", world_names[currentWorldType]);
                     DrawText(world_info, SCREEN_WIDTH / 2 - MeasureText(world_info, 18) / 2, boxY + 310, 18, DARKBLUE);
 
@@ -17856,7 +17890,8 @@ int main(int argc, char **argv) {
                 if (IsKeyPressed(KEY_T)) {
                     templeSeed = (uint32_t)GetRandomValue(1, 99999);
                     megalithSeed = (uint32_t)GetRandomValue(1, 99999);
-                    if (currentWorldType == WORLD_TYPE_GREEK_TEMPLE || currentWorldType == WORLD_TYPE_MEGALITH) ResetGame();
+                    hyperSeed = (uint32_t)GetRandomValue(1, 99999);
+                    if (currentWorldType == WORLD_TYPE_GREEK_TEMPLE || currentWorldType == WORLD_TYPE_MEGALITH || currentWorldType == WORLD_TYPE_HYPERBOREAN) ResetGame();
                 }
                 if (IsKeyPressed(KEY_G)) {
                     if (currentWorldType == WORLD_TYPE_GREEK_TEMPLE) {
@@ -17864,6 +17899,9 @@ int main(int argc, char **argv) {
                         ResetGame();
                     } else if (currentWorldType == WORLD_TYPE_MEGALITH) {
                         megalithTargetStage = (MegalithStage)((megalithTargetStage + 1) % 6);
+                        ResetGame();
+                    } else if (currentWorldType == WORLD_TYPE_HYPERBOREAN) {
+                        hyperTargetStage = (HyperStage)((hyperTargetStage + 1) % 5);
                         ResetGame();
                     }
                 }
