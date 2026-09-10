@@ -353,6 +353,31 @@ typedef enum {
 } GameState;
 static GameState gameState = GAME_STATE_MENU;
 
+// Game Mode
+typedef enum {
+    GAME_MODE_DEATHMATCH = 0,
+    GAME_MODE_FIREFIGHT
+} GameMode;
+static GameMode gameMode = GAME_MODE_FIREFIGHT;
+
+typedef enum {
+    FIREFIGHT_STATE_ACTIVE = 0,
+    FIREFIGHT_STATE_INTERMISSION,
+    FIREFIGHT_STATE_VICTORY,
+    FIREFIGHT_STATE_DEFEAT
+} FirefightWaveState;
+
+static int firefightWave = 1;
+static int firefightWaveEnemiesTotal = 3;
+static int firefightWaveEnemiesRemaining = 3;
+static int firefightEnemiesSpawned = 3;
+static int firefightTeamLives = 3;
+static int firefightScore = 0;
+static int firefightKillsTotal = 0;
+static float firefightIntermissionTimer = 0.0f;
+static float firefightWaveBannerTimer = 0.0f;
+static FirefightWaveState firefightWaveState = FIREFIGHT_STATE_ACTIVE;
+
 // Win condition globals
 static int winningScore = 7;
 static int winnerId = -1;
@@ -421,6 +446,13 @@ static InputType playerInput[MAX_PLAYERS] = {
     INPUT_TYPE_GAMEPAD,
     INPUT_TYPE_GAMEPAD
 };
+
+static inline bool is_player_bot(int player_index) {
+    if (player_index < 0 || player_index >= MAX_PLAYERS) return false;
+    return (playerInput[player_index] == INPUT_TYPE_BOT_EASY ||
+            playerInput[player_index] == INPUT_TYPE_BOT_MEDIUM ||
+            playerInput[player_index] == INPUT_TYPE_BOT_HARD);
+}
 
 //gcc fps_ray.c -o fps_ray  $(pkg-config --cflags --libs raylib) -lm -Wl,-rpath,/usr/local/lib
 // Screen and game constants
@@ -8287,6 +8319,10 @@ static bool menuEditingSeed = false;
 static char menuSeedBuffer[16] = "1337";
 
 static void ResetGame(void);
+static void reset_firefight_match(void);
+static void start_firefight_wave(int wave_number);
+static void update_firefight_logic(float dt);
+static Vector3 pick_enemy_wave_spawn(int bot_idx);
 
 static uint32_t get_current_world_seed(void) {
     switch (currentWorldType) {
@@ -9021,6 +9057,16 @@ static void ResetGame(void) {
         load_map_slot(creativeMapSlot);
     }
 
+    if (gameMode == GAME_MODE_FIREFIGHT) {
+        if (netTransport.role == NET_ROLE_OFFLINE) {
+            playerInput[0] = INPUT_TYPE_KEYBOARD;
+            playerInput[1] = INPUT_TYPE_BOT_EASY;
+            playerInput[2] = INPUT_TYPE_BOT_EASY;
+            playerInput[3] = INPUT_TYPE_BOT_EASY;
+            activePlayers = 4;
+        }
+        reset_firefight_match();
+    }
 }
 
 static bool fluid_occupies_current_grid_cell(int gx, int gy, int gz) {
@@ -9749,6 +9795,11 @@ static void kill_player(int player_index, int attacker_index,
     if (player_index < 0 || player_index >= activePlayers) {
         return;
     }
+    if (gameMode == GAME_MODE_FIREFIGHT && attacker_index >= 0 && attacker_index < activePlayers) {
+        if (is_player_bot(player_index) == is_player_bot(attacker_index)) {
+            return; // Friendly fire disabled in Firefight
+        }
+    }
     Player *player = &players[player_index];
     if (player->respawn_timer > 0.0f) {
         return;
@@ -9787,17 +9838,63 @@ static void kill_player(int player_index, int attacker_index,
     player->isExposed = true;
     player->exposed_flash_timer = 0.35f;
     player->invuln_timer = 0.0f;
-    player->respawn_timer = PLAYER_RESPAWN_TIME;
     player->tetherHolding = false;
     player->tetherVoxel = -1;
     player->tetherVoxelIdentity = 0;
     player->dynamicShotActive = false;
+
+    if (gameMode == GAME_MODE_FIREFIGHT) {
+        if (is_player_bot(player_index)) {
+            if (firefightWaveEnemiesRemaining > 0) {
+                firefightWaveEnemiesRemaining--;
+            }
+            firefightKillsTotal++;
+            firefightScore += (award_debris ? 150 : 100);
+            if (firefightEnemiesSpawned < firefightWaveEnemiesTotal) {
+                player->respawn_timer = 2.5f; // Wait for reserve spawn
+            } else {
+                player->respawn_timer = 9999.0f; // No more spawns for this wave
+            }
+            if (firefightWaveEnemiesRemaining <= 0) {
+                firefightWaveState = FIREFIGHT_STATE_INTERMISSION;
+                firefightIntermissionTimer = 4.0f;
+                firefightScore += 500 * firefightWave;
+                play_sfx(SFX_WIN);
+            }
+        } else {
+            // Human player died
+            firefightTeamLives--;
+            if (firefightTeamLives > 0) {
+                player->respawn_timer = PLAYER_RESPAWN_TIME;
+            } else {
+                player->respawn_timer = 9999.0f;
+                bool any_human_alive = false;
+                for (int p = 0; p < activePlayers; ++p) {
+                    if (!is_player_bot(p) && p != player_index && players[p].respawn_timer <= 0.0f) {
+                        any_human_alive = true;
+                        break;
+                    }
+                }
+                if (!any_human_alive) {
+                    firefightWaveState = FIREFIGHT_STATE_DEFEAT;
+                    gameState = GAME_STATE_GAMEOVER;
+                }
+            }
+        }
+    } else {
+        player->respawn_timer = PLAYER_RESPAWN_TIME;
+    }
 }
 
 static void apply_matter_damage(int player_index, int attacker_index, float damage)
 {
     if (player_index < 0 || player_index >= activePlayers) {
         return;
+    }
+    if (gameMode == GAME_MODE_FIREFIGHT && attacker_index >= 0 && attacker_index < activePlayers) {
+        if (is_player_bot(player_index) == is_player_bot(attacker_index)) {
+            return; // Friendly fire disabled in Firefight
+        }
     }
     Player *player = &players[player_index];
     if (player->respawn_timer > 0.0f) {
@@ -14195,6 +14292,153 @@ static Vector3 pick_player_spawn(int player_index) {
     return (Vector3){ 0.0f, BASE_EYE_HEIGHT, 0.0f };
 }
 
+static Vector3 pick_enemy_wave_spawn(int bot_idx) {
+    if (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM && current_sanctum_plan_valid && current_sanctum_plan.spawn_point_count > 0) {
+        int enemy_spawns[MAX_SANCTUM_SPAWNS];
+        int enemy_count = 0;
+        for (int s = 0; s < current_sanctum_plan.spawn_point_count; ++s) {
+            if (!current_sanctum_plan.spawn_points[s].is_player) {
+                enemy_spawns[enemy_count++] = s;
+            }
+        }
+        if (enemy_count > 0) {
+            int s_idx = enemy_spawns[(bot_idx + GetRandomValue(0, 15)) % enemy_count];
+            float wx = (current_sanctum_plan.spawn_points[s_idx].pos.x + 0.5f) * VOXEL_SIZE;
+            float wy = (10 + current_sanctum_plan.spawn_points[s_idx].pos.y + 0.5f) * VOXEL_SIZE + BASE_EYE_HEIGHT;
+            float wz = (current_sanctum_plan.spawn_points[s_idx].pos.z + 0.5f) * VOXEL_SIZE;
+            return (Vector3){ wx, wy, wz };
+        }
+    }
+
+    float min_pos = -FLOOR_SIZE + PLAYER_RADIUS * 2.5f;
+    float max_pos = FLOOR_SIZE - PLAYER_RADIUS * 2.5f;
+    for (int attempt = 0; attempt < 40; ++attempt) {
+        Vector3 pos = {
+            randomInRange(min_pos, max_pos),
+            BASE_EYE_HEIGHT,
+            randomInRange(min_pos, max_pos)
+        };
+        bool clear = true;
+        for (int p = 0; p < activePlayers; ++p) {
+            if (!is_player_bot(p)) {
+                Vector3 diff = v_sub(pos, players[p].pos);
+                if (v_dot(diff, diff) < 14.0f * 14.0f) {
+                    clear = false;
+                    break;
+                }
+            }
+        }
+        if (clear) return pos;
+    }
+    if (bot_idx >= 0 && bot_idx < MAX_PLAYERS) {
+        return playerSpawnPositions[bot_idx];
+    }
+    return (Vector3){ 0.0f, BASE_EYE_HEIGHT, 0.0f };
+}
+
+static void start_firefight_wave(int wave_number) {
+    firefightWave = wave_number;
+    firefightWaveEnemiesTotal = 3 + (firefightWave - 1) * 2;
+    firefightWaveEnemiesRemaining = firefightWaveEnemiesTotal;
+    firefightEnemiesSpawned = 0;
+    firefightWaveState = FIREFIGHT_STATE_ACTIVE;
+    firefightWaveBannerTimer = 3.5f;
+
+    InputType botDiff = INPUT_TYPE_BOT_EASY;
+    if (firefightWave == 2) {
+        botDiff = INPUT_TYPE_BOT_MEDIUM;
+    } else if (firefightWave >= 3) {
+        botDiff = INPUT_TYPE_BOT_HARD;
+    }
+
+    for (int i = 0; i < activePlayers; ++i) {
+        if (is_player_bot(i)) {
+            playerInput[i] = botDiff;
+            Player *b = &players[i];
+            b->pos = pick_enemy_wave_spawn(i);
+            b->death_pos = b->pos;
+            b->vel = (Vector3){ 0, 0, 0 };
+            b->yaw = randomInRange(-180.0f, 180.0f);
+            b->death_yaw = b->yaw;
+            b->pitch = 0.0f;
+            b->onGround = true;
+            b->matter = b->matterMax;
+            b->isExposed = false;
+            b->exposed_flash_timer = 0.0f;
+            b->invuln_timer = 1.0f;
+            b->respawn_timer = 0.0f;
+            b->tetherHolding = false;
+            b->tetherVoxel = -1;
+            b->tetherVoxelIdentity = 0;
+            b->dynamicShotActive = false;
+            spawn_player_explosion(b->pos, player_palette_color(i));
+            firefightEnemiesSpawned++;
+        }
+    }
+    play_sfx(SFX_SHIELD);
+}
+
+static void reset_firefight_match(void) {
+    firefightWave = 1;
+    firefightScore = 0;
+    firefightKillsTotal = 0;
+    firefightTeamLives = 3;
+    firefightIntermissionTimer = 0.0f;
+    firefightWaveBannerTimer = 3.5f;
+    firefightWaveState = FIREFIGHT_STATE_ACTIVE;
+    start_firefight_wave(1);
+}
+
+static void update_firefight_logic(float dt) {
+    if (firefightWaveBannerTimer > 0.0f) {
+        firefightWaveBannerTimer -= dt;
+    }
+
+    if (firefightWaveState == FIREFIGHT_STATE_INTERMISSION) {
+        firefightIntermissionTimer -= dt;
+        if (firefightIntermissionTimer <= 0.0f) {
+            if (firefightWave % 2 == 0) {
+                firefightTeamLives++;
+            }
+            start_firefight_wave(firefightWave + 1);
+        }
+    } else if (firefightWaveState == FIREFIGHT_STATE_ACTIVE) {
+        for (int i = 0; i < activePlayers; ++i) {
+            if (is_player_bot(i)) {
+                Player *b = &players[i];
+                if (b->respawn_timer > 0.0f && b->respawn_timer < 9000.0f) {
+                    b->respawn_timer -= dt;
+                    if (b->respawn_timer <= 0.0f) {
+                        if (firefightEnemiesSpawned < firefightWaveEnemiesTotal) {
+                            b->respawn_timer = 0.0f;
+                            b->pos = pick_enemy_wave_spawn(i);
+                            b->death_pos = b->pos;
+                            b->vel = (Vector3){ 0, 0, 0 };
+                            b->yaw = randomInRange(-180.0f, 180.0f);
+                            b->death_yaw = b->yaw;
+                            b->pitch = 0.0f;
+                            b->onGround = true;
+                            b->matter = b->matterMax;
+                            b->isExposed = false;
+                            b->exposed_flash_timer = 0.0f;
+                            b->invuln_timer = 1.0f;
+                            b->tetherHolding = false;
+                            b->tetherVoxel = -1;
+                            b->tetherVoxelIdentity = 0;
+                            b->dynamicShotActive = false;
+                            spawn_player_explosion(b->pos, player_palette_color(i));
+                            play_sfx(SFX_SHIELD);
+                            firefightEnemiesSpawned++;
+                        } else {
+                            b->respawn_timer = 9999.0f;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 static int brush_extent_for_voxel(const Voxel *v) {
     int base = (voxelBrushSpan < 1) ? 1 : voxelBrushSpan;
     if (!v || (v->type != 1 && v->type != 2)) {
@@ -14610,6 +14854,11 @@ static bool melee_hit_players(int attacker_idx, Vector3 start, Vector3 end, Vect
     for (int j = 0; j < activePlayers; ++j) {
         if (j == attacker_idx || players[j].respawn_timer > 0.0f) {
             continue;
+        }
+        if (gameMode == GAME_MODE_FIREFIGHT && attacker_idx >= 0 && attacker_idx < activePlayers) {
+            if (is_player_bot(j) == is_player_bot(attacker_idx)) {
+                continue;
+            }
         }
         float hit_extent = PLAYER_SIZE * 0.5f;
         Vector3 box_min = {
@@ -16709,6 +16958,9 @@ static int find_nearest_enemy(int playerIdx, float *out_dist_sq) {
         if (i == playerIdx) {
             continue;
         }
+        if (gameMode == GAME_MODE_FIREFIGHT && is_player_bot(i) == is_player_bot(playerIdx)) {
+            continue;
+        }
         if (players[i].respawn_timer > 0.0f) {
             continue;
         }
@@ -17558,12 +17810,31 @@ static void render_gameplay_view(RenderTexture2D *screens,
                                  bool creative_mode) {
     activePlayers = clamp_active_players(activePlayers);
     int viewCount = netTransport.role == NET_ROLE_OFFLINE ? activePlayers : netLocalPlayerCount;
+    int humanPlayerSlots[MAX_PLAYERS];
+    int humanCount = 0;
+    if (gameMode == GAME_MODE_FIREFIGHT && netTransport.role == NET_ROLE_OFFLINE) {
+        for (int p = 0; p < activePlayers; ++p) {
+            if (!is_player_bot(p)) {
+                humanPlayerSlots[humanCount++] = p;
+            }
+        }
+        if (humanCount == 0) {
+            humanPlayerSlots[0] = 0;
+            humanCount = 1;
+        }
+        viewCount = humanCount;
+    }
     ensure_render_targets(screens, renderPlayers, renderW, renderH, viewCount);
     Rectangle screenRec = { 0, 0, (float)(*renderW), (float)-(*renderH) };
 
     Camera3D cams[MAX_PLAYERS] = { 0 };
     for (int view = 0; view < viewCount; ++view) {
-        int i = netTransport.role == NET_ROLE_OFFLINE ? view : netLocalPlayerSlots[view];
+        int i;
+        if (netTransport.role == NET_ROLE_OFFLINE) {
+            i = (gameMode == GAME_MODE_FIREFIGHT) ? humanPlayerSlots[view] : view;
+        } else {
+            i = netLocalPlayerSlots[view];
+        }
         cams[i].up = (Vector3){0,1,0};
         cams[i].fovy = 60;
         cams[i].projection = CAMERA_PERSPECTIVE;
@@ -17582,7 +17853,12 @@ static void render_gameplay_view(RenderTexture2D *screens,
     }
 
     for (int view = 0; view < viewCount; ++view) {
-        int i = netTransport.role == NET_ROLE_OFFLINE ? view : netLocalPlayerSlots[view];
+        int i;
+        if (netTransport.role == NET_ROLE_OFFLINE) {
+            i = (gameMode == GAME_MODE_FIREFIGHT) ? humanPlayerSlots[view] : view;
+        } else {
+            i = netLocalPlayerSlots[view];
+        }
         BeginTextureMode(screens[view]);
             ClearBackground(SKYBLUE);
             BeginMode3D(cams[i]);
@@ -17612,6 +17888,41 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 DrawText(label, HUD_PADDING_X, HUD_PADDING_Y, HUD_FONT_SIZE, WHITE);
                 DrawRectangle(HUD_PADDING_X + 8, HUD_PADDING_Y + HUD_FONT_SIZE + 4, 36, 14, c);
                 draw_creative_help_overlay(i, view_w, view_h);
+            } else if (gameMode == GAME_MODE_FIREFIGHT) {
+                DrawText(TextFormat("P%d | LIVES: %d | SCORE: %d | KILLS: %d",
+                                    i + 1, firefightTeamLives, firefightScore, firefightKillsTotal),
+                         HUD_PADDING_X, HUD_PADDING_Y, HUD_FONT_SIZE, WHITE);
+                {
+                    const char *wave_text = TextFormat("WAVE %d | HOSTILES: %d/%d",
+                                                       firefightWave, firefightWaveEnemiesRemaining, firefightWaveEnemiesTotal);
+                    int wave_w = MeasureText(wave_text, HUD_FONT_SIZE);
+                    int wave_x = view_w - HUD_PADDING_X - wave_w;
+                    int wave_y = HUD_PADDING_Y;
+                    DrawText(wave_text, wave_x, wave_y, HUD_FONT_SIZE, (firefightWaveEnemiesRemaining <= 1) ? RED : ORANGE);
+                }
+                if (firefightWaveBannerTimer > 0.0f) {
+                    int banner_size = 48;
+                    float alpha = clampf(firefightWaveBannerTimer / 1.0f, 0.0f, 1.0f);
+                    Color banner_color = Fade((firefightWave >= 3) ? RED : GOLD, 0.9f * alpha);
+                    const char *banner_text = TextFormat("WAVE %d - INCOMING!", firefightWave);
+                    int banner_w = MeasureText(banner_text, banner_size);
+                    int banner_x = (view_w - banner_w) / 2;
+                    int banner_y = (view_h / 4);
+                    DrawText(banner_text, banner_x, banner_y, banner_size, banner_color);
+                } else if (firefightWaveState == FIREFIGHT_STATE_INTERMISSION) {
+                    int banner_size = 46;
+                    Color banner_color = Fade(GREEN, 0.9f);
+                    const char *banner_text = TextFormat("WAVE %d CLEARED!", firefightWave);
+                    int banner_w = MeasureText(banner_text, banner_size);
+                    int banner_x = (view_w - banner_w) / 2;
+                    int banner_y = (view_h / 4);
+                    DrawText(banner_text, banner_x, banner_y, banner_size, banner_color);
+
+                    const char *sub_text = TextFormat("NEXT WAVE IN %.1f s", firefightIntermissionTimer);
+                    int sub_size = 26;
+                    int sub_w = MeasureText(sub_text, sub_size);
+                    DrawText(sub_text, (view_w - sub_w) / 2, banner_y + 55, sub_size, RAYWHITE);
+                }
             } else {
                 DrawText(TextFormat("P%d | Shmush: %d | Kills: %d Deaths: %d",
                                     i + 1, players[i].debrisKills, players[i].kills, players[i].deaths),
@@ -17658,13 +17969,22 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 DrawRectangle(0, 0, view_w, view_h, Fade(RED, 0.25f * alpha));
             }
             if (!creative_mode && players[i].respawn_timer > 0.0f) {
-                int seconds_left = (int)ceilf(players[i].respawn_timer);
-                const char *respawn_text = TextFormat("RESPAWNING IN %d", seconds_left);
-                int font_size = 36;
-                int text_w = MeasureText(respawn_text, font_size);
-                int text_x = (view_w - text_w) / 2;
-                int text_y = (view_h / 2) - (font_size / 2);
-                DrawText(respawn_text, text_x, text_y, font_size, WHITE);
+                if (gameMode == GAME_MODE_FIREFIGHT && firefightTeamLives <= 0) {
+                    const char *dead_text = "OUT OF LIVES - AWAITING WAVE VICTORY";
+                    int font_size = 32;
+                    int text_w = MeasureText(dead_text, font_size);
+                    int text_x = (view_w - text_w) / 2;
+                    int text_y = (view_h / 2) - (font_size / 2);
+                    DrawText(dead_text, text_x, text_y, font_size, RED);
+                } else {
+                    int seconds_left = (int)ceilf(players[i].respawn_timer);
+                    const char *respawn_text = TextFormat("RESPAWNING IN %d", seconds_left);
+                    int font_size = 36;
+                    int text_w = MeasureText(respawn_text, font_size);
+                    int text_x = (view_w - text_w) / 2;
+                    int text_y = (view_h / 2) - (font_size / 2);
+                    DrawText(respawn_text, text_x, text_y, font_size, WHITE);
+                }
             } else {
                 int cx = view_w / 2;
                 int cy = view_h / 2;
@@ -18277,18 +18597,26 @@ int main(int argc, char **argv) {
                     int mSecY = boxY + 444;
                     DrawText("3. GAME MODE & MULTIPLAYER OPTIONS:", boxX + 28, mSecY, 16, (Color){ 30, 60, 120, 255 });
                     int mRowY = mSecY + 24;
-                    Rectangle customMapRec = { (float)(boxX + 28), (float)mRowY, 245.0f, 34.0f };
-                    if (DrawMenuButton(customMapRec, TextFormat("Custom Map: %s (U)", useCustomMap ? "ON" : "OFF"), 14, useCustomMap, (Color){ 180, 80, 40, 255 }, (Color){ 235, 235, 240, 240 }, BLACK)) {
+
+                    Rectangle modeRec = { (float)(boxX + 28), (float)mRowY, 246.0f, 34.0f };
+                    const char *modeText = (gameMode == GAME_MODE_FIREFIGHT) ? "Mode: FIREFIGHT [Waves] (F)" : "Mode: DEATHMATCH [PvP] (F)";
+                    if (DrawMenuButton(modeRec, modeText, 13, gameMode == GAME_MODE_FIREFIGHT, (Color){ 180, 50, 40, 255 }, (Color){ 235, 235, 240, 240 }, (Color){ 30, 30, 40, 255 })) {
+                        gameMode = (gameMode == GAME_MODE_FIREFIGHT) ? GAME_MODE_DEATHMATCH : GAME_MODE_FIREFIGHT;
+                        ResetGame();
+                    }
+
+                    Rectangle customMapRec = { (float)(boxX + 284), (float)mRowY, 170.0f, 34.0f };
+                    if (DrawMenuButton(customMapRec, TextFormat("Custom Map: %s (U)", useCustomMap ? "ON" : "OFF"), 13, useCustomMap, (Color){ 180, 80, 40, 255 }, (Color){ 235, 235, 240, 240 }, BLACK)) {
                         useCustomMap = !useCustomMap;
                     }
 
-                    Rectangle slotRec = { (float)(boxX + 285), (float)mRowY, 150.0f, 34.0f };
-                    if (DrawMenuButton(slotRec, TextFormat("Map Slot: %d (L)", creativeMapSlot + 1), 14, false, (Color){ 100, 100, 100, 255 }, (Color){ 235, 235, 240, 240 }, BLACK)) {
+                    Rectangle slotRec = { (float)(boxX + 464), (float)mRowY, 114.0f, 34.0f };
+                    if (DrawMenuButton(slotRec, TextFormat("Slot: %d (L)", creativeMapSlot + 1), 13, false, (Color){ 100, 100, 100, 255 }, (Color){ 235, 235, 240, 240 }, BLACK)) {
                         creativeMapSlot = (creativeMapSlot + 1) % 3;
                     }
 
-                    Rectangle hostRec = { (float)(boxX + 447), (float)mRowY, 160.0f, 34.0f };
-                    if (DrawMenuButton(hostRec, "Host LAN (H)", 14, false, (Color){ 60, 120, 60, 255 }, (Color){ 235, 235, 240, 240 }, BLACK)) {
+                    Rectangle hostRec = { (float)(boxX + 588), (float)mRowY, 134.0f, 34.0f };
+                    if (DrawMenuButton(hostRec, "Host LAN (H)", 13, false, (Color){ 60, 120, 60, 255 }, (Color){ 235, 235, 240, 240 }, BLACK)) {
                         if (netTransport.role == NET_ROLE_OFFLINE) {
                             netRequestedRole = NET_ROLE_HOST;
                             netRequestedCreative = false;
@@ -18300,8 +18628,8 @@ int main(int argc, char **argv) {
                         }
                     }
 
-                    Rectangle joinRec = { (float)(boxX + 619), (float)mRowY, 160.0f, 34.0f };
-                    if (DrawMenuButton(joinRec, "Join LAN (J)", 14, false, (Color){ 60, 120, 60, 255 }, (Color){ 235, 235, 240, 240 }, BLACK)) {
+                    Rectangle joinRec = { (float)(boxX + 732), (float)mRowY, 134.0f, 34.0f };
+                    if (DrawMenuButton(joinRec, "Join LAN (J)", 13, false, (Color){ 60, 120, 60, 255 }, (Color){ 235, 235, 240, 240 }, BLACK)) {
                         if (netTransport.role == NET_ROLE_OFFLINE) {
                             netRequestedRole = NET_ROLE_CLIENT;
                             netRequestedCreative = false;
@@ -18313,15 +18641,17 @@ int main(int argc, char **argv) {
                         }
                     }
 
-                    Rectangle localPlRec = { (float)(boxX + 791), (float)mRowY, 221.0f, 34.0f };
-                    if (DrawMenuButton(localPlRec, TextFormat("LAN Players: %d (-/+)", netRequestedLocalPlayers), 14, false, (Color){ 100, 100, 100, 255 }, (Color){ 235, 235, 240, 240 }, BLACK)) {
+                    Rectangle localPlRec = { (float)(boxX + 876), (float)mRowY, 136.0f, 34.0f };
+                    if (DrawMenuButton(localPlRec, TextFormat("LAN Plrs: %d (-/+)", netRequestedLocalPlayers), 13, false, (Color){ 100, 100, 100, 255 }, (Color){ 235, 235, 240, 240 }, BLACK)) {
                         netRequestedLocalPlayers = (netRequestedLocalPlayers % MAX_PLAYERS) + 1;
                     }
 
                     // Primary Action Buttons
                     int actY = boxY + 520;
                     Rectangle startRec = { (float)(boxX + 28), (float)actY, 430.0f, 54.0f };
-                    if (DrawMenuButton(startRec, ">>>  START GAME  (ENTER)  <<<", 22, true, (Color){ 36, 140, 72, 255 }, (Color){ 36, 140, 72, 255 }, RAYWHITE)) {
+                    const char *startText = (gameMode == GAME_MODE_FIREFIGHT) ? ">>> START FIREFIGHT (ENTER) <<<" : ">>>  START GAME  (ENTER)  <<<";
+                    Color startCol = (gameMode == GAME_MODE_FIREFIGHT) ? (Color){ 195, 45, 40, 255 } : (Color){ 36, 140, 72, 255 };
+                    if (DrawMenuButton(startRec, startText, 20, true, startCol, startCol, RAYWHITE)) {
                         if (netTransport.role == NET_ROLE_OFFLINE) {
                             ResetGame();
                             if (droneIntroEnabled) {
@@ -18353,7 +18683,7 @@ int main(int argc, char **argv) {
                     DrawText("- [1 - 8]: Switch World Type instantly       |  [W / Q]: Cycle Next / Previous World", boxX + 42, boxY + 620, 13, (Color){ 40, 40, 55, 255 });
                     DrawText("- [Left / Right]: Seed +/- 1                 |  [Up / Down]: Seed +/- 10", boxX + 42, boxY + 640, 13, (Color){ 40, 40, 55, 255 });
                     DrawText("- [E]: Type Custom Seed via Keyboard         |  [T / R]: Roll Random Seed", boxX + 42, boxY + 660, 13, (Color){ 40, 40, 55, 255 });
-                    DrawText("- [M]: Cycle Archetype / Topology            |  [G]: Cycle Architecture Stage / Growth", boxX + 42, boxY + 678, 13, (Color){ 40, 40, 55, 255 });
+                    DrawText("- [F]: Toggle Firefight (Waves) / Deathmatch  |  [ENTER]: Start Selected Mode", boxX + 42, boxY + 678, 13, DARKBLUE);
 
                     if (netTransport.role == NET_ROLE_CLIENT) {
                         DrawText(netWorldReady ? "Connected to LAN Host" : "Connecting to LAN Host...", boxX + 700, boxY + 600, 13, DARKBLUE);
@@ -18487,6 +18817,10 @@ int main(int argc, char **argv) {
                     if (IsKeyPressed(KEY_L)) {
                         creativeMapSlot = (creativeMapSlot + 1) % 3;
                     }
+                    if (IsKeyPressed(KEY_F)) {
+                        gameMode = (gameMode == GAME_MODE_FIREFIGHT) ? GAME_MODE_DEATHMATCH : GAME_MODE_FIREFIGHT;
+                        ResetGame();
+                    }
                     if (netTransport.role == NET_ROLE_OFFLINE && IsKeyPressed(KEY_H)) {
                         netRequestedRole = NET_ROLE_HOST;
                         netRequestedCreative = false;
@@ -18602,32 +18936,55 @@ int main(int argc, char **argv) {
                 EndDrawing();
                 break;
             case GAME_STATE_GAMEOVER:
-                update_draw_confetti(); // Update logic (position)
-                BeginDrawing();
-                    ClearBackground(RAYWHITE);
+                if (gameMode == GAME_MODE_FIREFIGHT) {
+                    BeginDrawing();
+                        ClearBackground((Color){ 18, 20, 28, 255 });
+                        const char *title = (firefightWaveState == FIREFIGHT_STATE_VICTORY) ? "FIREFIGHT VICTORY!" : "FIREFIGHT DEFEAT";
+                        Color titleColor = (firefightWaveState == FIREFIGHT_STATE_VICTORY) ? GOLD : (Color){ 220, 60, 60, 255 };
+                        int fontSize = 64;
+                        int textW = MeasureText(title, fontSize);
+                        DrawText(title, SCREEN_WIDTH / 2 - textW / 2, SCREEN_HEIGHT / 2 - 130, fontSize, titleColor);
+
+                        const char *statsWave = TextFormat("Survived to Wave %d", firefightWave);
+                        int waveW = MeasureText(statsWave, 32);
+                        DrawText(statsWave, SCREEN_WIDTH / 2 - waveW / 2, SCREEN_HEIGHT / 2 - 40, 32, RAYWHITE);
+
+                        const char *statsScore = TextFormat("Final Score: %d   |   Hostiles Slain: %d", firefightScore, firefightKillsTotal);
+                        int scoreW = MeasureText(statsScore, 24);
+                        DrawText(statsScore, SCREEN_WIDTH / 2 - scoreW / 2, SCREEN_HEIGHT / 2 + 15, 24, LIGHTGRAY);
+
+                        const char *prompt = "Press R to Retry   |   Press M for Main Menu";
+                        int promptW = MeasureText(prompt, 22);
+                        DrawText(prompt, SCREEN_WIDTH / 2 - promptW / 2, SCREEN_HEIGHT / 2 + 80, 22, GOLD);
+                    EndDrawing();
+
+                    if (IsKeyPressed(KEY_R)) {
+                        ResetGame();
+                        gameState = GAME_STATE_PLAYING;
+                    }
+                    if (IsKeyPressed(KEY_M)) {
+                        gameState = GAME_STATE_MENU;
+                    }
+                } else {
+                    update_draw_confetti(); // Update logic (position)
+                    BeginDrawing();
+                        ClearBackground(RAYWHITE);
+                        
+                        const char *winText = TextFormat("PLAYER %d WINS!!!", winnerId);
+                        int fontSize = 80;
+                        int textW = MeasureText(winText, fontSize);
+                        DrawText(winText, SCREEN_WIDTH / 2 - textW / 2, SCREEN_HEIGHT / 2 - 50, fontSize, GOLD);
+                        
+                        DrawText("Press R to Restart", SCREEN_WIDTH / 2 - MeasureText("Press R to Restart", 20) / 2, SCREEN_HEIGHT / 2 + 50, 20, DARKGRAY);
+                        
+                        update_draw_confetti(); // Draw AND Update
+                        
+                    EndDrawing();
                     
-                    // Re-draw confetti (since update_draw_confetti also draws)
-                    // Wait, update_draw_confetti draws using DrawRectanglePro which must be inside BeginDrawing
-                    // The update logic was mixed with draw logic in my previous definition.
-                    // Let's refactor: update_draw_confetti calls DrawRectanglePro. 
-                    // So we must call it INSIDE BeginDrawing.
-                    // But we also want to update the physics. Ideally separate, but for this simple effect it's fine.
-                    // However, update_draw_confetti also updates positions. Calling it inside BeginDrawing is fine for updating logic too in Raylib.
-                    
-                    const char *winText = TextFormat("PLAYER %d WINS!!!", winnerId);
-                    int fontSize = 80;
-                    int textW = MeasureText(winText, fontSize);
-                    DrawText(winText, SCREEN_WIDTH / 2 - textW / 2, SCREEN_HEIGHT / 2 - 50, fontSize, GOLD);
-                    
-                    DrawText("Press R to Restart", SCREEN_WIDTH / 2 - MeasureText("Press R to Restart", 20) / 2, SCREEN_HEIGHT / 2 + 50, 20, DARKGRAY);
-                    
-                    update_draw_confetti(); // Draw AND Update
-                    
-                EndDrawing();
-                
-                if (IsKeyPressed(KEY_R)) {
-                    ResetGame();
-                    gameState = GAME_STATE_PLAYING;
+                    if (IsKeyPressed(KEY_R)) {
+                        ResetGame();
+                        gameState = GAME_STATE_PLAYING;
+                    }
                 }
                 break;
             case GAME_STATE_PLAYING: {
@@ -18637,13 +18994,17 @@ int main(int argc, char **argv) {
             render_gameplay_view(screens, &renderPlayers, &renderW, &renderH, false);
             break;
         }
-        // Check win condition
-        for (int i = 0; i < activePlayers; ++i) {
-            if (player_points(&players[i]) >= winningScore) {
-                winnerId = i + 1;
-                gameState = GAME_STATE_GAMEOVER;
-                play_sfx(SFX_WIN);
-                init_confetti();
+        if (gameMode == GAME_MODE_FIREFIGHT) {
+            update_firefight_logic(dt);
+        } else {
+            // Check win condition
+            for (int i = 0; i < activePlayers; ++i) {
+                if (player_points(&players[i]) >= winningScore) {
+                    winnerId = i + 1;
+                    gameState = GAME_STATE_GAMEOVER;
+                    play_sfx(SFX_WIN);
+                    init_confetti();
+                }
             }
         }
         for (int i = 0; i < activePlayers; ++i) {
@@ -18667,6 +19028,9 @@ int main(int argc, char **argv) {
             }
         }
         for (int i = 0; i < activePlayers; ++i) {
+            if (gameMode == GAME_MODE_FIREFIGHT && is_player_bot(i)) {
+                continue; // Bots are respawned exclusively by update_firefight_logic
+            }
             if (players[i].respawn_timer > 0.0f) {
                 players[i].respawn_timer -= dt;
                 if (players[i].respawn_timer <= 0.0f) {
