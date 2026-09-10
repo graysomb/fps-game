@@ -461,6 +461,9 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define VOXEL_ACTIVATION_RADIUS 2*1
 //#define VOXEL_ACTIVATION_UNIT_BUDGET 128
 #define VOXEL_ACTIVATION_UNIT_BUDGET 128*5
+/* Greedy activation may collect any number of unit children up to world
+ * capacity. Limit the resulting parent shapes instead of the fine cells. */
+#define GREEDY_ACTIVATION_PARENT_BUDGET 128*5
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 1.5f
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.15f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.15f

@@ -22,6 +22,13 @@ boundary-corner/octant candidates, grows cubes by checking the three new shell
 faces, and breaks equal-size ties by coordinate and octant order. Compatible
 voxel types are covered separately.
 
+Greedy activation collects the complete eligible fine component up to world
+capacity, then preflights the prospective cover together with any currently
+active greedy children. `GREEDY_ACTIVATION_PARENT_BUDGET` limits the resulting
+parent-cube count rather than the number of fine material cells. An oversized
+cover is rejected before static voxels are removed, leaving the component
+unchanged. Ordinary non-greedy activation retains its legacy unit-cell budget.
+
 `greedy_coarse_bind()` in `greedy_coarse.inc` constructs the runtime topology:
 
 - **Parent controls** are the eight corners of each greedy cube. They are

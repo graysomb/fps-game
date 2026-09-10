@@ -118,6 +118,13 @@ static void greedy_cover_test(void) {
     while(left){int bs=0,bx=0,by=0,bz=0;for(int i=0;i<n;i++)if(remain[i])for(int s=1;;s++){bool full=true;for(int z=odd[i].z;z<odd[i].z+s&&full;z++)for(int y=odd[i].y;y<odd[i].y+s&&full;y++)for(int x=odd[i].x;x<odd[i].x+s;x++){int found=-1;for(int q=0;q<n;q++)if(remain[q]&&odd[q].x==x&&odd[q].y==y&&odd[q].z==z){found=q;break;}if(found<0){full=false;break;}}if(!full)break;if(s>bs||(s==bs&&(odd[i].x<bx||(odd[i].x==bx&&(odd[i].y<by||(odd[i].y==by&&odd[i].z<bz)))))){bs=s;bx=odd[i].x;by=odd[i].y;bz=odd[i].z;}}
         assert(bs>0);ref[refs++]=(GreedyCube){bx,by,bz,bs,0,0,bs*bs*bs};for(int q=0;q<n;q++)if(remain[q]&&odd[q].x>=bx&&odd[q].x<bx+bs&&odd[q].y>=by&&odd[q].y<by+bs&&odd[q].z>=bz&&odd[q].z<bz+bs){remain[q]=0;left--;}}
     assert(fast.cube_count==refs);for(int i=0;i<refs;i++)assert(fast.cubes[i].x==ref[i].x&&fast.cubes[i].y==ref[i].y&&fast.cubes[i].z==ref[i].z&&fast.cubes[i].size==ref[i].size);greedy_cube_cover_free(&fast);
+
+    /* Activation budgets parent cubes, not the unit cells they cover. */
+    reset_test();static UnitVoxelBuffer activation;memset(&activation,0,sizeof(activation));
+    for(int z=0;z<4;z++)for(int y=0;y<4;y++)for(int x=0;x<4;x++)assert(unit_voxel_buffer_push(&activation,x,y,z,WHITE,0,true,-1,0,-1));
+    int parents=-1;assert(greedy_activation_fits_parent_budget(&activation,1,&parents));assert(parents==1);
+    assert(unit_voxel_buffer_push(&activation,6,0,0,WHITE,0,true,-1,0,-1));
+    assert(!greedy_activation_fits_parent_budget(&activation,1,&parents));assert(parents==2);
 }
 static void greedy_group_test(void){reset_test();UnitVoxelBuffer b={0};GreedyCell cells[28];int n=0;
     for(int z=0;z<3;z++)for(int y=4;y<7;y++)for(int x=-2;x<1;x++){int v=debug_add_cell(x,y,z,false,true,WHITE,71);assert(v>=0);b.voxels[n]=(UnitVoxelSeed){.gx=x,.gy=y,.gz=z,.type=0};cells[n]=(GreedyCell){x,y,z,0,n};n++;}
