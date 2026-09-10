@@ -204,6 +204,10 @@ static bool parse_physics_arguments(int argc, char **argv) {
             greedyActivationCubes = true;
             continue;
         }
+        if (strcmp(arg, "--activation-cubes=ordinary") == 0) {
+            greedyActivationCubes = false;
+            continue;
+        }
         if (strcmp(arg, "--no-tether-throw-ccd") == 0) {
             tetherThrowCcdEnabled = false;
             continue;
@@ -1017,7 +1021,10 @@ static void update_static_voxel_belief(int idx);
 static void mark_static_beliefs_dirty_for_voxel(const Voxel *voxel);
 static void mark_static_beliefs_dirty_column_above(int gx, int gz, int gy);
 static void update_dynamic_activation_beliefs(void);
-static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float activationBelief);
+static bool activate_static_component_greedy(int voxel_idx, int activator,
+                                             Vector3 initial_velocity);
+static bool activate_static_voxel_for_tether(int voxel_idx, int activator,
+                                             float activationBelief);
 static int rip_single_static_voxel(int voxel_idx, int activator);
 
 #define PBD_MAX_THREADS 8
@@ -4599,15 +4606,40 @@ static bool expand_greedy_activation_component(UnitVoxelBuffer *buffer)
     static const int d[6][3]={{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
     for (int head=0; head<buffer->count; ++head) {
         UnitVoxelSeed seed=buffer->voxels[head];
+        if(seed.voxelIndex<0||seed.voxelIndex>=voxel_count)continue;
+        int source_owner=voxels[seed.voxelIndex].owner;
         for(int n=0;n<6;n++) {
             int idx=table_get_static_only(seed.gx+d[n][0],seed.gy+d[n][1],seed.gz+d[n][2]);
             if(idx<0||idx>=voxel_count)continue;Voxel *v=&voxels[idx];
-            if(v->simulate||v->pendingActivation||v->owner!=-1||v->type!=seed.type)continue;
+            /* Cross the legacy fine-cell budget, but do not absorb touching
+             * terrain or another player's construction into this body. */
+            if(v->simulate||v->pendingActivation||v->activationCooldownFrames>0||
+               v->owner!=source_owner||v->type!=seed.type)continue;
             v->pendingActivation=true;
             if(!unit_voxel_buffer_push(buffer,v->gx,v->gy,v->gz,v->color,v->type,v->fixed,idx,v->debugClusterTag,seed.activator)){
                 v->pendingActivation=false;return false;
             }
         }
+    }
+    return true;
+}
+
+static bool collect_greedy_activation_component(int seed_idx, int activator,
+                                                UnitVoxelBuffer *buffer)
+{
+    if (!buffer || seed_idx < 0 || seed_idx >= voxel_count) return false;
+    Voxel *seed = &voxels[seed_idx];
+    if (seed->simulate || seed->pendingActivation || seed->activationCooldownFrames > 0) return false;
+    seed->pendingActivation = true;
+    if (!unit_voxel_buffer_push(buffer, seed->gx, seed->gy, seed->gz,
+                                seed->color, seed->type, seed->fixed, seed_idx,
+                                seed->debugClusterTag, activator)) {
+        seed->pendingActivation = false;
+        return false;
+    }
+    if (!expand_greedy_activation_component(buffer)) {
+        rollback_activation_buffer(buffer, 0);
+        return false;
     }
     return true;
 }
@@ -8218,10 +8250,14 @@ static void creative_activate_structure(int player_idx) {
     if (hit->simulate) {
         return;
     }
+    Vector3 vel = v_mul(v_norm(dir), 60.0f);
+    if (greedyActivationCubes) {
+        activate_static_component_greedy(hit_id, player_idx, vel);
+        return;
+    }
     int new_idx = rip_single_static_voxel(hit_id, player_idx);
     if (new_idx >= 0 && new_idx < voxel_count) {
         Voxel *moved = &voxels[new_idx];
-        Vector3 vel = v_mul(v_norm(dir), 60.0f);
         set_voxel_velocity(moved, vel);
         moved->glueEligible = true;
         moved->isBullet = false;
@@ -8614,7 +8650,8 @@ static void add_player_matter(Player *p, float amount) {
     }
 }
 
-static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float activationBelief) {
+static bool activate_static_component_greedy(int voxel_idx, int activator,
+                                             Vector3 initial_velocity) {
     static UnitVoxelBuffer buffer;
     unit_voxel_buffer_clear(&buffer);
     refresh_static_voxel_beliefs();
@@ -8627,14 +8664,58 @@ static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float
         return false;
     }
 
+    if(!collect_greedy_activation_component(voxel_idx,activator,&buffer))return false;
+    qsort(buffer.voxels, (size_t)buffer.count, sizeof(UnitVoxelSeed), compare_unit_voxel_seed);
+    if(!emit_greedy_dynamic_from_buffer(&buffer))return false;
+    rebuild_voxel_hash();
+    rebuild_all_voxel_surfaces();
+    rebuild_glue_constraints();
+    glue_dynamic_voxel_to_static_neighbors();
+    refresh_static_voxel_beliefs();
+    meshDirty = true;
+
+    /* The explicit creative activation launches the complete component.  Find
+     * the newly emitted unit children by their original grid cells so every
+     * independent parent control receives the same initial translation. */
+    for (int i = 0; i < buffer.count; ++i) {
+        const UnitVoxelSeed *activated = &buffer.voxels[i];
+        int idx = table_get(activated->gx, activated->gy, activated->gz);
+        if (idx < 0 || idx >= voxel_count) continue;
+        Voxel *moved = &voxels[idx];
+        if (!moved->simulate ||
+            moved->orig_min_gx != activated->gx ||
+            moved->orig_min_gy != activated->gy ||
+            moved->orig_min_gz != activated->gz) continue;
+        set_voxel_velocity(moved, initial_velocity);
+        moved->glueEligible = true;
+        moved->isBullet = false;
+        moved->activationBelief = 1.0f;
+        moved->wasTethered = true;
+    }
+    return true;
+}
+
+static bool activate_static_voxel_for_tether(int voxel_idx, int activator,
+                                             float activationBelief) {
+    static UnitVoxelBuffer buffer;
+    unit_voxel_buffer_clear(&buffer);
+    refresh_static_voxel_beliefs();
+
+    if (voxel_idx < 0 || voxel_idx >= voxel_count) return false;
+    Voxel *seed = &voxels[voxel_idx];
+    if (seed->simulate || seed->pendingActivation) return false;
+
     int previousCount = buffer.count;
-    int added = collect_static_activation_cluster(voxel_idx, activator,
-                                                  seed->gx, seed->gy, seed->gz,
-                                                  -1.0f,
-                                                  &buffer);
-    if (added <= 0) {
-        rollback_activation_buffer(&buffer, previousCount);
-        return false;
+    if (greedyActivationCubes) {
+        if (!collect_greedy_activation_component(voxel_idx, activator, &buffer)) return false;
+    } else {
+        int added = collect_static_activation_cluster(voxel_idx, activator,
+                                                      seed->gx, seed->gy, seed->gz,
+                                                      -1.0f, &buffer);
+        if (added <= 0) {
+            rollback_activation_buffer(&buffer, previousCount);
+            return false;
+        }
     }
     float clusterBelief = compute_cluster_freeze_belief(&buffer, previousCount);
     if (!dynamic_belief_overcomes_static(activationBelief, clusterBelief)) {
@@ -8642,9 +8723,12 @@ static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float
         return false;
     }
 
-    if(greedyActivationCubes&&!expand_greedy_activation_component(&buffer)){rollback_activation_buffer(&buffer,0);return false;}
-    if(greedyActivationCubes){if(!emit_greedy_dynamic_from_buffer(&buffer))return false;}
-    else {remove_buffered_static_voxels(&buffer);emit_unit_voxels_from_units(&buffer, false, true, -1);}
+    if (greedyActivationCubes) {
+        if (!emit_greedy_dynamic_from_buffer(&buffer)) return false;
+    } else {
+        remove_buffered_static_voxels(&buffer);
+        emit_unit_voxels_from_units(&buffer, false, true, -1);
+    }
     rebuild_voxel_hash();
     rebuild_all_voxel_surfaces();
     rebuild_glue_constraints();
@@ -16430,10 +16514,12 @@ static void render_gameplay_view(RenderTexture2D *screens,
             const char *physics_note = physicsBackend.gpu_recovery_probe ? " (GPU validating)" :
                                        physicsBackend.gpu_recovery_pending ? " (GPU retry pending)" :
                                        physicsBackend.sticky_fallback ? " (fallback)" : "";
-            const char *fps_text = TextFormat("FPS %d | PHYS %s %.2fms%s",
+            const char *fps_text = TextFormat("FPS %d | PHYS %s %.2fms | CUBES %s%s",
                                               GetFPS(),
                                               physics_backend_name(physicsBackend.active),
-                                              physicsBackend.last_step_ms, physics_note);
+                                              physicsBackend.last_step_ms,
+                                              greedyActivationCubes ? "greedy" : "ordinary",
+                                              physics_note);
             int text_w = MeasureText(fps_text, fps_font);
             int box_w = text_w + fps_pad * 2;
             int box_h = fps_font + fps_pad * 2 - 2;

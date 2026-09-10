@@ -117,6 +117,13 @@ static bool forces_gpu(int argc, char **argv) {
     return false;
 }
 
+static bool has_activation_cube_mode(int argc, char **argv) {
+    for (int i = 1; i < argc; ++i) {
+        if (strncmp(argv[i], "--activation-cubes=", 19) == 0) return true;
+    }
+    return false;
+}
+
 #ifdef _WIN32
 static char *quote_windows_argument(const char *argument) {
     if (!argument) return NULL;
@@ -404,20 +411,32 @@ int main(int argc, char **argv) {
     if (matrix_requested(argc, argv)) {
         return run_debug_matrix(directory, argc, argv);
     }
-    if (requests_cpu(argc, argv)) {
-        int status = run_child(directory, CPU_BINARY, argc, argv);
+    char **launch_argv = argv;
+    int launch_argc = argc;
+    if (!has_activation_cube_mode(argc, argv)) {
+        launch_argv = calloc((size_t)argc + 2, sizeof(*launch_argv));
+        if (!launch_argv) return 1;
+        for (int i = 0; i < argc; ++i) launch_argv[i] = argv[i];
+        launch_argv[launch_argc++] = "--activation-cubes=greedy";
+        launch_argv[launch_argc] = NULL;
+    }
+    if (requests_cpu(launch_argc, launch_argv)) {
+        int status = run_child(directory, CPU_BINARY, launch_argc, launch_argv);
         if (status < 0) fprintf(stderr, "Unable to start %s: %s\n", CPU_BINARY, strerror(errno));
+        if (launch_argv != argv) free(launch_argv);
         return (status < 0) ? 1 : status;
     }
-    int status = run_child(directory, GPU_BINARY, argc, argv);
-    if (forces_gpu(argc, argv)) {
+    int status = run_child(directory, GPU_BINARY, launch_argc, launch_argv);
+    if (forces_gpu(launch_argc, launch_argv)) {
         if (status < 0) fprintf(stderr, "Unable to start %s: %s\n", GPU_BINARY, strerror(errno));
+        if (launch_argv != argv) free(launch_argv);
         return (status < 0) ? 1 : status;
     }
     if (status < 0 || status == FPS_EXIT_GPU_CONTEXT_UNAVAILABLE || status == FPS_EXIT_GPU_INITIALIZATION_FAILED) {
         fprintf(stderr, "GPU build unavailable; starting CPU compatibility build\n");
-        status = run_child(directory, CPU_BINARY, argc, argv);
+        status = run_child(directory, CPU_BINARY, launch_argc, launch_argv);
     }
     if (status < 0) fprintf(stderr, "Unable to start %s: %s\n", CPU_BINARY, strerror(errno));
+    if (launch_argv != argv) free(launch_argv);
     return (status < 0) ? 1 : status;
 }

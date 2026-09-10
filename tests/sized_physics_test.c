@@ -126,6 +126,28 @@ static void greedy_cover_test(void) {
     assert(unit_voxel_buffer_push(&activation,6,0,0,WHITE,0,true,-1,0,-1));
     assert(!greedy_activation_fits_parent_budget(&activation,1,&parents));assert(parents==2);
 }
+static void greedy_component_activation_test(void) {
+    reset_test();
+    greedyActivationCubes=true;
+    int expected=0;
+    for(int z=0;z<8;z++)for(int y=10;y<18;y++)for(int x=0;x<8;x++){
+        int v=add_static_voxel_at_grid(x,y,z,WHITE,0);assert(v>=0);tag_owned_static_voxel(v,3);expected++;
+    }
+    for(int z=0;z<6;z++)for(int y=10;y<16;y++)for(int x=8;x<14;x++){
+        int v=add_static_voxel_at_grid(x,y,z,WHITE,0);assert(v>=0);tag_owned_static_voxel(v,3);expected++;
+    }
+    int unrelated=add_static_voxel_at_grid(14,10,0,BLUE,0);assert(unrelated>=0);tag_owned_static_voxel(unrelated,4);
+    debug_rebuild_world_state();
+    int seed=table_get_static_only(0,10,0);assert(seed>=0);
+    Vector3 launch={3,-2,1};assert(activate_static_component_greedy(seed,0,launch));
+    assert(expected>VOXEL_ACTIVATION_UNIT_BUDGET);
+    if(!greedyCoarse.active||greedyCoarse.child_count!=expected||greedyCoarse.group_count!=2)
+        fprintf(stderr,"component activation active=%d children=%d expected=%d parents=%d\n",greedyCoarse.active,greedyCoarse.child_count,expected,greedyCoarse.group_count);
+    assert(greedyCoarse.active&&greedyCoarse.child_count==expected&&greedyCoarse.group_count==2);
+    unrelated=table_get_static_only(14,10,0);assert(unrelated>=0&&!voxels[unrelated].simulate&&voxels[unrelated].owner==4);
+    for(int i=0;i<sim_particle_count;i++)near_vector(sim_particles[i]->vel,launch,1e-6f);
+    greedyActivationCubes=false;
+}
 static void greedy_group_test(void){reset_test();UnitVoxelBuffer b={0};GreedyCell cells[28];int n=0;
     for(int z=0;z<3;z++)for(int y=4;y<7;y++)for(int x=-2;x<1;x++){int v=debug_add_cell(x,y,z,false,true,WHITE,71);assert(v>=0);b.voxels[n]=(UnitVoxelSeed){.gx=x,.gy=y,.gz=z,.type=0};cells[n]=(GreedyCell){x,y,z,0,n};n++;}
     int v=debug_add_cell(1,4,0,false,true,WHITE,71);assert(v>=0);b.voxels[n]=(UnitVoxelSeed){.gx=1,.gy=4,.gz=0,.type=0};cells[n]=(GreedyCell){1,4,0,0,n};n++;b.count=n;
@@ -159,6 +181,6 @@ static void greedy_irregular_topology_test(void){reset_test();static UnitVoxelBu
     else for(int step=0;step<600;step++){rebuild_particle_collision_metadata();simulate_voxel_pbd_cpu_steps(PBD_MAX_STEP_DT/PBD_SUBSTEPS,PBD_SUBSTEPS);assert_greedy_attachment_state(step);}
     greedy_coarse_materialize();}
 int main(void) {
-    greedy_cover_test();greedy_group_test();greedy_lifecycle_test();greedy_repeated_activation_test();greedy_irregular_topology_test();construction_test();make_group(false);transfer_test();rigid_pose_test();broadphase_test();static_contact_test();reset_test();
+    greedy_cover_test();greedy_component_activation_test();greedy_group_test();greedy_lifecycle_test();greedy_repeated_activation_test();greedy_irregular_topology_test();construction_test();make_group(false);transfer_test();rigid_pose_test();broadphase_test();static_contact_test();reset_test();
     puts("sized construction, sharing, transfer, teardown and contact tests passed");return 0;
 }
