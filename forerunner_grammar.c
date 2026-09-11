@@ -299,11 +299,19 @@ bool forerunner_algebra_apply(ForerunnerPlan *plan, const ForerunnerOpportunity 
                                 p_bridge, 2, 0, 0, false, 0.3f);
 
             forerunner_add_node(plan, FORERUNNER_PRIM_LIGHT_CHANNEL, FORERUNNER_MAT_HARDLIGHT_CYAN,
-                                make_forerunner_box(-bw - 1, y_br + 1, -10, -bw, y_br + 2, 14),
+                                make_forerunner_box(-bw, y_br + 1, -10, -bw + 1, y_br + 2, 14),
                                 p_bridge, 2, 0, 0, false, 0.1f);
             forerunner_add_node(plan, FORERUNNER_PRIM_LIGHT_CHANNEL, FORERUNNER_MAT_HARDLIGHT_CYAN,
-                                make_forerunner_box(bw, y_br + 1, -10, bw + 1, y_br + 2, 14),
+                                make_forerunner_box(bw - 1, y_br + 1, -10, bw, y_br + 2, 14),
                                 p_bridge, 2, 0, 0, false, 0.1f);
+
+            // Anchor bridge approaches firmly to bedrock with structural support pylons
+            forerunner_add_node(plan, FORERUNNER_PRIM_PYLON, FORERUNNER_MAT_PEWTER,
+                                make_forerunner_box(-bw, 0, -10, bw, y_br, -8),
+                                NULL, 0, 0, 0, false, 0.9f);
+            forerunner_add_node(plan, FORERUNNER_PRIM_PYLON, FORERUNNER_MAT_PEWTER,
+                                make_forerunner_box(-bw, 0, 12, bw, y_br, 14),
+                                NULL, 0, 0, 0, false, 0.9f);
 
             plan->has_bridge = true;
             if (plan->stage < FORERUNNER_STAGE_TRANSIT) plan->stage = FORERUNNER_STAGE_TRANSIT;
@@ -355,9 +363,10 @@ bool forerunner_algebra_apply(ForerunnerPlan *plan, const ForerunnerOpportunity 
             forerunner_add_node(plan, FORERUNNER_PRIM_GRAVITY_CORE, FORERUNNER_MAT_HARDLIGHT_CYAN,
                                 make_forerunner_box(-2, y_core, -13, 2, y_core + 4, -9),
                                 p_spires, 2, 0, 0, false, 0.4f);
+            // Lintel beam spans across both spires to eliminate structural air gap
             forerunner_add_node(plan, FORERUNNER_PRIM_LINTEL, FORERUNNER_MAT_PEWTER,
-                                make_forerunner_box(-3, y_core + 1, -14, 3, y_core + 3, -8),
-                                p_spires, 2, 0, 0, false, 0.3f);
+                                make_forerunner_box(-sx - 1, y_core + 1, -13, sx + 1, y_core + 3, -9),
+                                p_spires, 2, 0, 0, false, 0.6f);
 
             plan->has_core = true;
             if (plan->stage < FORERUNNER_STAGE_APEX) plan->stage = FORERUNNER_STAGE_APEX;
@@ -423,9 +432,9 @@ bool forerunner_algebra_apply(ForerunnerPlan *plan, const ForerunnerOpportunity 
             int p_s[2] = { p_sw, p_se };
             int p_n[2] = { p_nw, p_ne };
             forerunner_add_node(plan, FORERUNNER_PRIM_LINTEL, FORERUNNER_MAT_PEWTER,
-                                make_forerunner_box(-c1, hp - 2, c1, c1, hp, c2), p_s, 2, 0, 0, false, 0.6f);
+                                make_forerunner_box(-c2, hp - 2, c1 - 4, c2, hp, c2), p_s, 2, 0, 0, false, 0.6f);
             forerunner_add_node(plan, FORERUNNER_PRIM_LINTEL, FORERUNNER_MAT_PEWTER,
-                                make_forerunner_box(-c1, hp - 2, -c2, c1, hp, -c1), p_n, 2, 0, 0, false, 0.6f);
+                                make_forerunner_box(-c2, hp - 2, -c2, c2, hp, -c1 + 4), p_n, 2, 0, 0, false, 0.6f);
 
             plan->pylon_count += 4;
             plan->has_gateway = true;
@@ -450,12 +459,27 @@ bool forerunner_algebra_apply(ForerunnerPlan *plan, const ForerunnerOpportunity 
             forerunner_add_node(plan, FORERUNNER_PRIM_BRIDGE_SPAN, FORERUNNER_MAT_PEWTER,
                                 make_forerunner_box(-l, 6, -2, -l + 4, 7, 2), NULL, 0, 0, 0, false, 0.7f);
 
+            // Support piers anchoring cross bridges to bedrock
+            forerunner_add_node(plan, FORERUNNER_PRIM_PYLON, FORERUNNER_MAT_PEWTER,
+                                make_forerunner_box(-2, 0, -2, 2, 6, 2), NULL, 0, 0, 0, false, 0.8f);
+            forerunner_add_node(plan, FORERUNNER_PRIM_PYLON, FORERUNNER_MAT_PEWTER,
+                                make_forerunner_box(-2, 0, -l, 2, 2, -l + 2), NULL, 0, 0, 0, false, 0.8f);
+            forerunner_add_node(plan, FORERUNNER_PRIM_PYLON, FORERUNNER_MAT_PEWTER,
+                                make_forerunner_box(-2, 0, l - 2, 2, 2, l), NULL, 0, 0, 0, false, 0.8f);
+            forerunner_add_node(plan, FORERUNNER_PRIM_PYLON, FORERUNNER_MAT_PEWTER,
+                                make_forerunner_box(-l, 0, -2, -l + 2, 6, 2), NULL, 0, 0, 0, false, 0.8f);
+            forerunner_add_node(plan, FORERUNNER_PRIM_PYLON, FORERUNNER_MAT_PEWTER,
+                                make_forerunner_box(l - 2, 0, -2, l, 6, 2), NULL, 0, 0, 0, false, 0.8f);
+
             plan->has_bridge = true;
             if (plan->stage < FORERUNNER_STAGE_TRANSIT) plan->stage = FORERUNNER_STAGE_TRANSIT;
             return true;
         }
 
         case FORERUNNER_RULE_ADD_INTERSECTION_NEXUS: {
+            // Central support pedestal under core
+            forerunner_add_node(plan, FORERUNNER_PRIM_PYLON, FORERUNNER_MAT_PEWTER,
+                                make_forerunner_box(-2, 6, -2, 2, 9, 2), NULL, 0, 0, 0, false, 0.8f);
             forerunner_add_node(plan, FORERUNNER_PRIM_GRAVITY_CORE, FORERUNNER_MAT_HARDLIGHT_CYAN,
                                 make_forerunner_box(-2, 9, -2, 2, 13, 2), NULL, 0, 0, 0, false, 0.5f);
             forerunner_add_node(plan, FORERUNNER_PRIM_LINTEL, FORERUNNER_MAT_PEWTER,
@@ -531,6 +555,10 @@ bool forerunner_algebra_apply(ForerunnerPlan *plan, const ForerunnerOpportunity 
             forerunner_add_node(plan, FORERUNNER_PRIM_HARDLIGHT_BRIDGE, FORERUNNER_MAT_HARDLIGHT_CYAN,
                                 make_forerunner_box(3, 3, -2, r, 4, 2), NULL, 0, 0, 0, false, 0.3f);
 
+            // Central support pillar grounding catwalk hub to bedrock
+            forerunner_add_node(plan, FORERUNNER_PRIM_PYLON, FORERUNNER_MAT_PEWTER,
+                                make_forerunner_box(-2, 0, -2, 2, 3, 2), NULL, 0, 0, 0, false, 0.8f);
+
             forerunner_add_node(plan, FORERUNNER_PRIM_BRIDGE_SPAN, FORERUNNER_MAT_PEWTER,
                                 make_forerunner_box(-3, 3, -3, 3, 4, 3), NULL, 0, 0, 0, false, 0.6f);
 
@@ -540,6 +568,9 @@ bool forerunner_algebra_apply(ForerunnerPlan *plan, const ForerunnerOpportunity 
         }
 
         case FORERUNNER_RULE_SUSPEND_CENTRIFUGE_CORE: {
+            // Support pedestal resting on catwalk hub
+            forerunner_add_node(plan, FORERUNNER_PRIM_PYLON, FORERUNNER_MAT_PEWTER,
+                                make_forerunner_box(-2, 4, -2, 2, 7, 2), NULL, 0, 0, 0, false, 0.8f);
             forerunner_add_node(plan, FORERUNNER_PRIM_GRAVITY_CORE, FORERUNNER_MAT_HARDLIGHT_CYAN,
                                 make_forerunner_box(-2, 7, -2, 2, 11, 2), NULL, 0, 0, 0, false, 0.4f);
             forerunner_add_node(plan, FORERUNNER_PRIM_LINTEL, FORERUNNER_MAT_PEWTER,

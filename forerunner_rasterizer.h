@@ -48,6 +48,7 @@ static inline void rasterize_forerunner_plan(const ForerunnerPlan *plan,
             found_non_void = true;
         }
     }
+    if (min_non_void_y < 0) min_non_void_y = 0;
     int offset_y = base_gy - min_non_void_y * mv;
 
     for (int i = 0; i < plan->node_count; ++i) {
@@ -60,6 +61,8 @@ static inline void rasterize_forerunner_plan(const ForerunnerPlan *plan,
         int gz1 = center_gz + n->box.max_z * mv;
         int gy0 = offset_y  + n->box.min_y * mv;
         int gy1 = offset_y  + n->box.max_y * mv;
+        if (gy0 < base_gy) gy0 = base_gy;
+        if (gy1 < gy0) continue;
 
         int mid_x = (gx0 + gx1) / 2;
         int mid_z = (gz0 + gz1) / 2;
@@ -83,19 +86,21 @@ static inline void rasterize_forerunner_plan(const ForerunnerPlan *plan,
                 int px1 = gx1;
                 if (n->cant_angle_deg > 0.0f) {
                     px0 = gx0 + shift_x;
+                    px1 = gx1 + shift_x;
                 } else if (n->cant_angle_deg < 0.0f) {
+                    px0 = gx0 - shift_x;
                     px1 = gx1 - shift_x;
                 }
-                if (px0 >= px1) continue;
 
                 int pz0 = gz0;
                 int pz1 = gz1;
                 if (n->cant_angle_z > 0.0f) {
                     pz0 = gz0 + shift_z;
+                    pz1 = gz1 + shift_z;
                 } else if (n->cant_angle_z < 0.0f) {
+                    pz0 = gz0 - shift_z;
                     pz1 = gz1 - shift_z;
                 }
-                if (pz0 >= pz1) continue;
 
                 for (int z = pz0; z < pz1; ++z) {
                     for (int x = px0; x < px1; ++x) {

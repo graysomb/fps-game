@@ -423,7 +423,12 @@ bool greek_algebra_apply(TemplePlan *plan, const GrowthOpportunity *opp) {
 
         case RULE_RAISE_PEDIMENT: {
             ModBox3D roof_box = plan->sites[4].boundary;
-            int y_base = plan->column_height_m + 1;
+            int y_base = plan->cella_height_m;
+            for (int i = 0; i < plan->node_count; ++i) {
+                if (plan->nodes[i].type == ARCH_PRIMITIVE_LINTEL && plan->nodes[i].box.max_y > y_base) {
+                    y_base = plan->nodes[i].box.max_y;
+                }
+            }
             int pediment_height = (roof_box.max_x - roof_box.min_x) / 4;
             if (pediment_height < 2) pediment_height = 2;
 

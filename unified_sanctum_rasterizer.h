@@ -39,6 +39,7 @@ static inline void rasterize_sanctum_plan(const SanctumCitadelPlan *plan,
             found_non_void = true;
         }
     }
+    if (min_non_void_y < 0) min_non_void_y = 0;
     int offset_y = base_gy - min_non_void_y;
 
     // PASS 1: Negative Mass Void Excavation (Chasms, Pits, Crypt Voids)
@@ -73,6 +74,8 @@ static inline void rasterize_sanctum_plan(const SanctumCitadelPlan *plan,
         int gx1 = center_gx + node->x + (node->w - 1) / 2;
         int gy0 = offset_y + node->y;
         int gy1 = offset_y + node->y + node->h - 1;
+        if (gy0 < base_gy) gy0 = base_gy;
+        if (gy1 < gy0) continue;
         int gz0 = center_gz + node->z - node->d / 2;
         int gz1 = center_gz + node->z + (node->d - 1) / 2;
 

@@ -72,9 +72,9 @@ static inline void rasterize_hyperborean_plan(const HyperPlan *plan,
                         bool is_corner = is_edge_x && is_edge_z;
 
                         // Weathered chipping and skyward tapering
-                        if (y_ratio > 0.75f && is_corner) continue;
-                        if (y_ratio > 0.85f && (is_edge_x || is_edge_z) && (h % 3 == 0)) continue;
-                        if (is_corner && (h % 2 == 0)) continue;
+                        if (y > base_gy && y_ratio > 0.75f && is_corner) continue;
+                        if (y > base_gy && y_ratio > 0.85f && (is_edge_x || is_edge_z) && (h % 3 == 0)) continue;
+                        if (y > base_gy && (gx1 - gx0 > 1 && gz1 - gz0 > 1) && is_corner && (h % 2 == 0)) continue;
 
                         Color c = col_sarsen_light;
                         int v = h % 10;

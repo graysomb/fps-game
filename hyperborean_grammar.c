@@ -299,7 +299,7 @@ bool hyperborean_algebra_apply(HyperPlan *plan, const HyperOpportunity *opp) {
 
             // 2. Central Raised Tiered Marble Tholos Altar Podium (R = 2)
             hyper_add_node(plan, HYPER_PRIM_THOLOS_PODIUM, HYPER_MAT_PENTELIC_MARBLE,
-                           make_hyper_box(-2, 1, -2, 2, 2, 2), NULL, 0, 0.3f);
+                           make_hyper_box(-2, 0, -2, 2, 2, 2), NULL, 0, 0.3f);
 
             // 3. Central Sacrificial Bronze Tripod with Eternal Sacred Fire Embers
             hyper_add_node(plan, HYPER_PRIM_BRAZIER, HYPER_MAT_EMBER,

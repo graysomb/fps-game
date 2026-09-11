@@ -56,6 +56,27 @@ static inline void rasterize_temple_plan(const TemplePlan *plan,
         }
     }
 
+    // Foundation plinth for primitive temples lacking stepped stereobate (e.g. Stage 0)
+    if (!plan->has_stylobate && base_gy > 0) {
+        for (int i = 0; i < plan->node_count; ++i) {
+            const ArchNode *n = &plan->nodes[i];
+            if (n->type != ARCH_PRIMITIVE_CELL && n->type != ARCH_PRIMITIVE_WALL) continue;
+
+            int gx0 = center_gx + n->box.min_x * mv;
+            int gx1 = center_gx + n->box.max_x * mv;
+            int gz0 = center_gz + n->box.min_z * mv;
+            int gz1 = center_gz + n->box.max_z * mv;
+
+            for (int y = 0; y < base_gy; ++y) {
+                for (int z = gz0; z < gz1; ++z) {
+                    for (int x = gx0; x < gx1; ++x) {
+                        plot(x, y, z, col_step_dark);
+                    }
+                }
+            }
+        }
+    }
+
     // 2. Rasterize Cella Floor & Interior
     for (int i = 0; i < plan->node_count; ++i) {
         const ArchNode *n = &plan->nodes[i];

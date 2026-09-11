@@ -4113,6 +4113,12 @@ static bool occupied(int x, int y, int z) {
 
 static int add_static_voxel_at_grid(int gx, int gy, int gz, Color color, int type)
 {
+    int existing = table_get_static_only(gx, gy, gz);
+    if (existing >= 0 && existing < voxel_count) {
+        voxels[existing].color = color;
+        voxels[existing].type = type;
+        return existing;
+    }
     float px = ((float)gx + 0.5f) * VOXEL_SIZE;
     float py = ((float)gy + 0.5f) * VOXEL_SIZE;
     float pz = ((float)gz + 0.5f) * VOXEL_SIZE;
@@ -7540,15 +7546,23 @@ static void add_dynamic_unit_block(int minx, int miny, int minz,
     add_dynamic_unit_block_tag(minx, miny, minz, sx, sy, sz, color, 0);
 }
 
+static inline int grid_to_world_g(int g) {
+    return g - (int)floorf(FLOOR_SIZE / VOXEL_SIZE);
+}
+
 static inline void addVoxelAt(int gx, int gy, int gz, Color c) {
+    int tgx = grid_to_world_g(gx);
+    int tgy = gy;
+    int tgz = grid_to_world_g(gz);
+    int existing = table_get_static_only(tgx, tgy, tgz);
+    if (existing >= 0 && existing < voxel_count) {
+        voxels[existing].color = c;
+        return;
+    }
     float px = (gx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
     float py = (gy + 0.5f) * VOXEL_SIZE;
     float pz = (gz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
     addVoxel(px, py, pz, true, false, c, 0);
-}
-
-static inline int grid_to_world_g(int g) {
-    return g - (int)floorf(FLOOR_SIZE / VOXEL_SIZE);
 }
 
 static void add_static_box_at_grid(int minx, int maxx,
@@ -8554,6 +8568,7 @@ static void update_current_sanctum_offset(void) {
             found = true;
         }
     }
+    if (min_non_void_y < 0) min_non_void_y = 0;
     current_sanctum_offset_y = -min_non_void_y;
 }
 
@@ -8565,6 +8580,39 @@ static void buildUnifiedSanctumWorld(uint32_t seed, int growth_steps) {
     update_current_sanctum_offset();
     // Base at gy = 0 so foundations rest flush on the ground arena at y = 0.0f
     rasterize_sanctum_plan(&current_sanctum_plan, center, center, 0, plot_sanctum_voxel, void_sanctum_voxel);
+}
+
+// Scan static voxels that lack support directly below but have diagonal contact below,
+// and insert an interstitial support voxel to heal the seam into a solid 6-connected load path.
+static void heal_structural_seams(void) {
+    for (int pass = 0; pass < 2; ++pass) {
+        int initial_count = voxel_count;
+        for (int i = 0; i < initial_count; ++i) {
+            if (voxels[i].simulate) continue;
+            int gx = voxels[i].gx;
+            int gy = voxels[i].gy;
+            int gz = voxels[i].gz;
+            if (gy <= 0) continue; // Bedrock level or below
+
+            // Check if directly supported from below (6-connectivity)
+            if (table_get_static_only(gx, gy - 1, gz) >= 0) continue;
+
+            // Check 8 horizontal and diagonal neighbors on the layer below
+            bool has_support_below =
+                (table_get_static_only(gx + 1, gy - 1, gz) >= 0) ||
+                (table_get_static_only(gx - 1, gy - 1, gz) >= 0) ||
+                (table_get_static_only(gx, gy - 1, gz + 1) >= 0) ||
+                (table_get_static_only(gx, gy - 1, gz - 1) >= 0) ||
+                (table_get_static_only(gx + 1, gy - 1, gz + 1) >= 0) ||
+                (table_get_static_only(gx - 1, gy - 1, gz + 1) >= 0) ||
+                (table_get_static_only(gx + 1, gy - 1, gz - 1) >= 0) ||
+                (table_get_static_only(gx - 1, gy - 1, gz - 1) >= 0);
+
+            if (has_support_below) {
+                add_static_voxel_at_grid(gx, gy - 1, gz, voxels[i].color, voxels[i].type);
+            }
+        }
+    }
 }
 
 // Build static demo cube of voxels
@@ -8586,6 +8634,7 @@ static void buildDemo(void) {
     } else {
         buildTestWorld();
     }
+    heal_structural_seams();
     rebuild_glue_constraints();
 }
 
@@ -9133,6 +9182,9 @@ static void ResetGame(void) {
     memset(staticBeliefQueued, 0, sizeof(staticBeliefQueued));
     // clear hash
     memset(table, 0, sizeof(table));
+    memset(static_table, 0, sizeof(static_table));
+    memset(dynamic_table, 0, sizeof(dynamic_table));
+    table_cache_invalidate();
     // build static blocks
     buildDemo();
     rebuild_all_voxel_surfaces();

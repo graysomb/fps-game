@@ -115,10 +115,10 @@ static inline void rasterize_megalith_plan(const MegalithPlan *plan,
 
                     if (n->type == MEGALITH_PRIMITIVE_ORTHOSTAT || n->type == MEGALITH_PRIMITIVE_WALL_SLAB) {
                         // Tapering toward the sky (broader base, pointed apex)
-                        if (y_ratio > 0.7f && is_corner) continue; // Taper top corners
-                        if (y_ratio > 0.85f && (is_edge_x || is_edge_z) && (h % 3 == 0)) continue;
-                        // Surface erosion
-                        if (is_corner && (h % 2 == 0)) continue;
+                        if (y > base_gy && y_ratio > 0.7f && is_corner) continue; // Taper top corners
+                        if (y > base_gy && y_ratio > 0.85f && (is_edge_x || is_edge_z) && (h % 3 == 0)) continue;
+                        // Surface erosion: only above foundation level and for stones wide enough not to be severed
+                        if (y > base_gy && (gx1 - gx0 > 1 && gz1 - gz0 > 1) && is_corner && (h % 2 == 0)) continue;
                     } else if (n->type == MEGALITH_PRIMITIVE_CAPSTONE) {
                         // Bulging heavy convex table profile: rounded top corners
                         if (y == gy1 - 1 && is_corner) continue;

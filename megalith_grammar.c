@@ -311,22 +311,22 @@ bool megalith_algebra_apply(MegalithPlan *plan, const MegalithOpportunity *opp) 
         case MEGALITH_RULE_RAISE_TRILITHON: {
             // Inner monumental horseshoe of 3 great trilithons (like Stonehenge)
             // Trilithon 1: Center rear (Winter Solstice Sunset axis)
-            int left1  = add_stone(plan, MEGALITH_PRIMITIVE_ORTHOSTAT, make_box3d(-2, 0, -5, -1, 6, -4), NULL, 0, 0.4f);
-            int right1 = add_stone(plan, MEGALITH_PRIMITIVE_ORTHOSTAT, make_box3d(1, 0, -5, 2, 6, -4), NULL, 0, 0.4f);
+            int left1  = add_stone(plan, MEGALITH_PRIMITIVE_ORTHOSTAT, make_box3d(-3, 0, -5, -1, 6, -3), NULL, 0, 0.4f);
+            int right1 = add_stone(plan, MEGALITH_PRIMITIVE_ORTHOSTAT, make_box3d(1, 0, -5, 3, 6, -3), NULL, 0, 0.4f);
             int p1[2] = { left1, right1 };
-            add_stone(plan, MEGALITH_PRIMITIVE_CAPSTONE, make_box3d(-3, 6, -5, 3, 7, -4), p1, 2, 0.5f);
+            add_stone(plan, MEGALITH_PRIMITIVE_CAPSTONE, make_box3d(-4, 6, -5, 4, 7, -3), p1, 2, 0.5f);
 
             // Trilithon 2: Left flank
-            int left2  = add_stone(plan, MEGALITH_PRIMITIVE_ORTHOSTAT, make_box3d(-5, 0, -1, -4, 6, 0), NULL, 0, 0.4f);
-            int right2 = add_stone(plan, MEGALITH_PRIMITIVE_ORTHOSTAT, make_box3d(-5, 0, 2, -4, 6, 3), NULL, 0, 0.4f);
+            int left2  = add_stone(plan, MEGALITH_PRIMITIVE_ORTHOSTAT, make_box3d(-5, 0, -2, -3, 6, 0), NULL, 0, 0.4f);
+            int right2 = add_stone(plan, MEGALITH_PRIMITIVE_ORTHOSTAT, make_box3d(-5, 0, 2, -3, 6, 4), NULL, 0, 0.4f);
             int p2[2] = { left2, right2 };
-            add_stone(plan, MEGALITH_PRIMITIVE_CAPSTONE, make_box3d(-5, 6, -1, -4, 7, 3), p2, 2, 0.5f);
+            add_stone(plan, MEGALITH_PRIMITIVE_CAPSTONE, make_box3d(-5, 6, -3, -3, 7, 5), p2, 2, 0.5f);
 
             // Trilithon 3: Right flank
-            int left3  = add_stone(plan, MEGALITH_PRIMITIVE_ORTHOSTAT, make_box3d(4, 0, -1, 5, 6, 0), NULL, 0, 0.4f);
-            int right3 = add_stone(plan, MEGALITH_PRIMITIVE_ORTHOSTAT, make_box3d(4, 0, 2, 5, 6, 3), NULL, 0, 0.4f);
+            int left3  = add_stone(plan, MEGALITH_PRIMITIVE_ORTHOSTAT, make_box3d(3, 0, -2, 5, 6, 0), NULL, 0, 0.4f);
+            int right3 = add_stone(plan, MEGALITH_PRIMITIVE_ORTHOSTAT, make_box3d(3, 0, 2, 5, 6, 4), NULL, 0, 0.4f);
             int p3[2] = { left3, right3 };
-            add_stone(plan, MEGALITH_PRIMITIVE_CAPSTONE, make_box3d(4, 6, -1, 5, 7, 3), p3, 2, 0.5f);
+            add_stone(plan, MEGALITH_PRIMITIVE_CAPSTONE, make_box3d(3, 6, -3, 5, 7, 5), p3, 2, 0.5f);
 
             // Central Altar Stone / Offering slab
             add_stone(plan, MEGALITH_PRIMITIVE_HEARTH, make_box3d(-1, 0, -1, 1, 1, 1), NULL, 0, 0.2f);
