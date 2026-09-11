@@ -291,11 +291,11 @@ bool hyperborean_algebra_apply(HyperPlan *plan, const HyperOpportunity *opp) {
 
         case HYPER_RULE_EXCAVATE_THOLOS_BASIN: {
             // Epicenter: Sunken Circular Marble Tholos Podium surrounded by Sacred PBF Moat
-            int r_moat = plan->r_tholos_core; // 3
-            // 1. Concentric Sacred PBF Reflection Fluid Moat
-            hyper_add_node(plan, HYPER_PRIM_FLUID_BASIN, HYPER_MAT_PBF_WATER,
-                           make_hyper_box(-r_moat, 0, -r_moat, r_moat + 1, 1, r_moat + 1),
-                           NULL, 0, 0.1f);
+            // int r_moat = plan->r_tholos_core; // 3
+            // 1. Concentric Sacred PBF Reflection Fluid Moat (disabled for now)
+            // hyper_add_node(plan, HYPER_PRIM_FLUID_BASIN, HYPER_MAT_PBF_WATER,
+            //                make_hyper_box(-r_moat, 0, -r_moat, r_moat + 1, 1, r_moat + 1),
+            //                NULL, 0, 0.1f);
 
             // 2. Central Raised Tiered Marble Tholos Altar Podium (R = 2)
             hyper_add_node(plan, HYPER_PRIM_THOLOS_PODIUM, HYPER_MAT_PENTELIC_MARBLE,

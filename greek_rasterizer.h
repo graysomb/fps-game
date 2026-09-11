@@ -251,8 +251,8 @@ static inline void rasterize_temple_plan(const TemplePlan *plan,
                 } else {
                     // Sunken bed at ground
                     plot(x, ground_gy, z, col_floor);
-                    // Liquid water surface
-                    plot(x, ground_gy, z, col_water);
+                    // Liquid water surface (disabled for now)
+                    // plot(x, ground_gy, z, col_water);
                 }
             }
         }
@@ -501,7 +501,7 @@ static inline void rasterize_temple_plan(const TemplePlan *plan,
                     plot(x, ground_gy + 1, z, col_pool_rim);
                 } else {
                     plot(x, ground_gy, z, col_court_paving);
-                    plot(x, ground_gy, z, col_water); // live fluid
+                    // plot(x, ground_gy, z, col_water); // live fluid (disabled for now)
                 }
             }
         }

@@ -147,6 +147,8 @@ static inline void rasterize_hyperborean_plan(const HyperPlan *plan,
         // 4. Sacred Sunken PBF Fluid Moat & Tholos Podium
         // -------------------------------------------------------------------
         else if (n->type == HYPER_PRIM_FLUID_BASIN) {
+            // Fluids disabled for now
+            /*
             int rx = (gx1 - gx0) / 2;
             int rz = (gz1 - gz0) / 2;
             for (int z = gz0; z < gz1; ++z) {
@@ -162,6 +164,7 @@ static inline void rasterize_hyperborean_plan(const HyperPlan *plan,
                     }
                 }
             }
+            */
         }
         else if (n->type == HYPER_PRIM_THOLOS_PODIUM) {
             int rx = (gx1 - gx0) / 2;

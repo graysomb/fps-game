@@ -8437,13 +8437,16 @@ static const char *get_sanctum_topology_name(int mode, uint32_t seed) {
 }
 
 static void plot_temple_voxel(int gx, int gy, int gz, Color c) {
-    // If it's the water color from the pool, spawn physical PBF fluid voxels!
+    // Fluids disabled for now
+    /*
     if (c.r == 50 && c.g == 160 && c.b == 220) {
         float px = (gx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
         float py = (gy + 0.5f) * VOXEL_SIZE;
         float pz = (gz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
         add_fluid_cell(px, py, pz, c);
-    } else {
+    } else
+    */
+    {
         addVoxelAt(gx, gy, gz, c);
     }
 }
@@ -8453,13 +8456,16 @@ static void plot_megalith_voxel(int gx, int gy, int gz, Color c) {
 }
 
 static void plot_hyper_voxel(int gx, int gy, int gz, Color c) {
-    // Sacred PBF fluid moat spawns dynamic physical fluid particles!
+    // Fluids disabled for now
+    /*
     if (c.r == 50 && c.g == 160 && c.b == 220) {
         float px = (gx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
         float py = (gy + 0.5f) * VOXEL_SIZE;
         float pz = (gz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
         add_fluid_cell(px, py, pz, c);
-    } else {
+    } else
+    */
+    {
         addVoxelAt(gx, gy, gz, c);
     }
 }
@@ -8469,12 +8475,16 @@ static void plot_forerunner_voxel(int gx, int gy, int gz, Color c) {
 }
 
 static void plot_sanctum_voxel(int gx, int gy, int gz, Color c) {
+    // Fluids disabled for now
+    /*
     if (c.r == 50 && c.g == 160 && c.b == 220) {
         float px = (gx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
         float py = (gy + 0.5f) * VOXEL_SIZE;
         float pz = (gz + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
         add_fluid_cell(px, py, pz, c);
-    } else {
+    } else
+    */
+    {
         addVoxelAt(gx, gy, gz, c);
     }
 }

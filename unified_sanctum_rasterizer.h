@@ -33,7 +33,7 @@ static inline void rasterize_sanctum_plan(const SanctumCitadelPlan *plan,
     int min_non_void_y = 0;
     bool found_non_void = false;
     for (int i = 0; i < plan->node_count; ++i) {
-        if (plan->nodes[i].is_void) continue;
+        if (plan->nodes[i].is_void || plan->nodes[i].is_fluid || plan->nodes[i].prim_type == SANCTUM_PRIM_PBF_WATER) continue;
         if (!found_non_void || plan->nodes[i].y < min_non_void_y) {
             min_non_void_y = plan->nodes[i].y;
             found_non_void = true;
@@ -67,7 +67,7 @@ static inline void rasterize_sanctum_plan(const SanctumCitadelPlan *plan,
     // PASS 2: Positive Mass Deposition (Megaliths, Marble, Titanium, Hard-Light, Fluids)
     for (int i = 0; i < plan->node_count; ++i) {
         const SanctumNode *node = &plan->nodes[i];
-        if (node->is_void) continue;
+        if (node->is_void || node->is_fluid || node->prim_type == SANCTUM_PRIM_PBF_WATER) continue; // Fluids disabled for now
 
         int gx0 = center_gx + node->x - node->w / 2;
         int gx1 = center_gx + node->x + (node->w - 1) / 2;

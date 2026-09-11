@@ -105,7 +105,7 @@ static void sanctum_init_stronghold(SanctumCitadelPlan *plan) {
     Color c_marble   = (Color){ 232, 230, 222, 255 }; // Marble
     Color c_titanium = (Color){ 62, 68, 76, 255 };    // Titanium
     Color c_cyan     = (Color){ 45, 225, 255, 255 };  // Cyan
-    Color c_water    = (Color){ 50, 160, 220, 255 };  // PBF Water
+    // Color c_water    = (Color){ 50, 160, 220, 255 };  // PBF Water (disabled for now)
     Color c_gold     = (Color){ 255, 185, 45, 255 };  // Gold
 
     // Tier 0 Foundation Podium: 52 x 4 x 52
@@ -162,8 +162,8 @@ static void sanctum_init_stronghold(SanctumCitadelPlan *plan) {
         sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_COLUMN, SANCTUM_MOTIF_FIREFIGHT_HOLDOUT, -5, 8, k * 4 - 2, 2, 10, 2, 0.0f, 0.0f, c_marble, false, false, false);
         sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_COLUMN, SANCTUM_MOTIF_FIREFIGHT_HOLDOUT,  5, 8, k * 4 - 2, 2, 10, 2, 0.0f, 0.0f, c_marble, false, false, false);
     }
-    // Sacred Healing Well inside Holdout
-    sanctum_add_node(plan, SANCTUM_PRIM_PBF_WATER, SANCTUM_MOTIF_RECHARGER_WELL, 0, 8, 2, 6, 1, 8, 0.0f, 0.0f, c_water, false, false, true);
+    // Sacred Healing Well inside Holdout (disabled for now)
+    // sanctum_add_node(plan, SANCTUM_PRIM_PBF_WATER, SANCTUM_MOTIF_RECHARGER_WELL, 0, 8, 2, 6, 1, 8, 0.0f, 0.0f, c_water, false, false, true);
 
     // Coffered Ceiling & Roof Gallery
     sanctum_add_node(plan, SANCTUM_PRIM_COFFERED_CEILING, SANCTUM_MOTIF_FIREFIGHT_HOLDOUT, 0, 20, 0, 26, 2, 26, 0.0f, 0.0f, c_titanium, false, false, false);
@@ -227,7 +227,7 @@ static void sanctum_init_abyssal_rift(SanctumCitadelPlan *plan) {
     Color c_marble   = (Color){ 232, 230, 222, 255 }; // Marble
     Color c_titanium = (Color){ 62, 68, 76, 255 };    // Titanium
     Color c_cyan     = (Color){ 45, 225, 255, 255 };  // Cyan
-    Color c_water    = (Color){ 50, 160, 220, 255 };  // PBF Water
+    // Color c_water    = (Color){ 50, 160, 220, 255 };  // PBF Water (disabled for now)
     Color c_gold     = (Color){ 255, 185, 45, 255 };  // Gold
 
     // Central Abyssal Void Canyon bisecting the arena along X
@@ -260,9 +260,9 @@ static void sanctum_init_abyssal_rift(SanctumCitadelPlan *plan) {
     sanctum_add_node(plan, SANCTUM_PRIM_GRAVITY_CORE, SANCTUM_MOTIF_APEX_SPIRE_MATRIX,
                      0, 32, -20, 3, 3, 3, 0.0f, 0.0f, c_gold, true, false, false);
 
-    // South Sacred Healing Well
-    sanctum_add_node(plan, SANCTUM_PRIM_PBF_WATER, SANCTUM_MOTIF_RECHARGER_WELL,
-                     0, 8, -22, 6, 1, 6, 0.0f, 0.0f, c_water, false, false, true);
+    // South Sacred Healing Well (disabled for now)
+    // sanctum_add_node(plan, SANCTUM_PRIM_PBF_WATER, SANCTUM_MOTIF_RECHARGER_WELL,
+    //                  0, 8, -22, 6, 1, 6, 0.0f, 0.0f, c_water, false, false, true);
 
     // ================= THREE CHASM BRIDGES =================
     // Central Luminescent Hard-Light Bridge
@@ -334,7 +334,7 @@ static void sanctum_init_sunken_crucible(SanctumCitadelPlan *plan) {
     Color c_marble   = (Color){ 232, 230, 222, 255 }; // Marble
     Color c_titanium = (Color){ 62, 68, 76, 255 };    // Titanium
     Color c_cyan     = (Color){ 45, 225, 255, 255 };  // Cyan
-    Color c_water    = (Color){ 50, 160, 220, 255 };  // PBF Water
+    // Color c_water    = (Color){ 50, 160, 220, 255 };  // PBF Water (disabled for now)
 
     // Outer Colosseum Ring: 52 x 8 x 52 retaining wall at Y=4
     int base_colosseum = sanctum_add_node(plan, SANCTUM_PRIM_STONE_ORTHOSTAT, SANCTUM_MOTIF_ACROPOLIS_PODIUM,
@@ -366,8 +366,8 @@ static void sanctum_init_sunken_crucible(SanctumCitadelPlan *plan) {
     sanctum_add_node(plan, SANCTUM_PRIM_TITANIUM_PYLON, SANCTUM_MOTIF_SPAWN_CRYPT,  23, 10,   0, 4, 6, 8, 0.0f, 0.0f, c_titanium, false, false, false);
     sanctum_add_node(plan, SANCTUM_PRIM_TITANIUM_PYLON, SANCTUM_MOTIF_SPAWN_CRYPT, -23, 10,   0, 4, 6, 8, 0.0f, 0.0f, c_titanium, false, false, false);
 
-    // Sunken Arena Floor at Y=2
-    sanctum_add_node(plan, SANCTUM_PRIM_PBF_WATER, SANCTUM_MOTIF_THOLOS_GRAVITY_PIT, 0, 2, 0, 30, 1, 30, 0.0f, 0.0f, c_water, false, false, true);
+    // Sunken Arena Floor at Y=2 (disabled for now)
+    // sanctum_add_node(plan, SANCTUM_PRIM_PBF_WATER, SANCTUM_MOTIF_THOLOS_GRAVITY_PIT, 0, 2, 0, 30, 1, 30, 0.0f, 0.0f, c_water, false, false, true);
 
     // Central Holdout Sanctuary Island: 14 x 2 x 14 at Y=2
     sanctum_add_node(plan, SANCTUM_PRIM_STONE_ORTHOSTAT, SANCTUM_MOTIF_FIREFIGHT_HOLDOUT, 0, 2, 0, 14, 2, 14, 0.0f, 0.0f, c_stone, false, false, false);
@@ -421,7 +421,7 @@ static void sanctum_init_asymmetric_outpost(SanctumCitadelPlan *plan) {
     Color c_marble   = (Color){ 232, 230, 222, 255 }; // Marble
     Color c_titanium = (Color){ 62, 68, 76, 255 };    // Titanium
     Color c_cyan     = (Color){ 45, 225, 255, 255 };  // Cyan
-    Color c_water    = (Color){ 50, 160, 220, 255 };  // PBF Water
+    // Color c_water    = (Color){ 50, 160, 220, 255 };  // PBF Water (disabled for now)
     Color c_gold     = (Color){ 255, 185, 45, 255 };  // Gold
 
     // ================= SOUTH-WEST SECTOR (Player Holdout Bunker) =================
@@ -448,9 +448,9 @@ static void sanctum_init_asymmetric_outpost(SanctumCitadelPlan *plan) {
     sanctum_add_node(plan, SANCTUM_PRIM_BALUSTRADE, SANCTUM_MOTIF_FIREFIGHT_HOLDOUT,
                      -2, 5, -6, 2, 2, 8, 0.0f, 0.0f, c_marble, false, false, false);
 
-    // Bunker Healing Well
-    sanctum_add_node(plan, SANCTUM_PRIM_PBF_WATER, SANCTUM_MOTIF_RECHARGER_WELL,
-                     -14, 5, -14, 6, 1, 6, 0.0f, 0.0f, c_water, false, false, true);
+    // Bunker Healing Well (disabled for now)
+    // sanctum_add_node(plan, SANCTUM_PRIM_PBF_WATER, SANCTUM_MOTIF_RECHARGER_WELL,
+    //                  -14, 5, -14, 6, 1, 6, 0.0f, 0.0f, c_water, false, false, true);
 
     // ================= CENTRAL ZIGZAGGING PERIBOLOS CURTAIN WALL =================
     // Wall segment 1
@@ -883,7 +883,7 @@ bool sanctum_algebra_expand(SanctumCitadelPlan *plan, const SanctumOpportunity *
     Color c_titanium = (Color){ 58, 64, 72, 255 };    // Pewter titanium
     Color c_cyan     = (Color){ 45, 225, 255, 255 };  // Emissive cyan
     Color c_gold     = (Color){ 255, 185, 45, 255 };  // Amber/Gold
-    Color c_water    = (Color){ 50, 160, 220, 255 };  // PBF Fluid
+    // Color c_water    = (Color){ 50, 160, 220, 255 };  // PBF Fluid (disabled for now)
 
     switch (opp->motif) {
         case SANCTUM_MOTIF_MEGALITHIC_TRILITHON: {
@@ -1083,9 +1083,9 @@ bool sanctum_algebra_expand(SanctumCitadelPlan *plan, const SanctumOpportunity *
             sanctum_add_node(plan, SANCTUM_PRIM_CHASM_VOID, opp->motif,
                              center_x, py - pit_depth, center_z, 10, pit_depth, 10, 0.0f, 0.0f, BLACK, false, true, false);
 
-            // 2. Annular PBF Reflection Fluid Moat around rim
-            sanctum_add_node(plan, SANCTUM_PRIM_PBF_WATER, opp->motif,
-                             center_x, py, center_z, 14, 1, 14, 0.0f, 0.0f, c_water, false, false, true);
+            // 2. Annular PBF Reflection Fluid Moat around rim (disabled for now)
+            // sanctum_add_node(plan, SANCTUM_PRIM_PBF_WATER, opp->motif,
+            //                  center_x, py, center_z, 14, 1, 14, 0.0f, 0.0f, c_water, false, false, true);
 
             // 3. Concentric Fluted Doric Columns & Megalith Uprights in circle
             for (int a = 0; a < 8; ++a) {
@@ -1194,11 +1194,11 @@ bool sanctum_algebra_expand(SanctumCitadelPlan *plan, const SanctumOpportunity *
             sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_STYLOBATE, opp->motif,
                              center_x, py, center_z, mw, 1, md, 0.0f, 0.0f, c_marble, false, false, false);
 
-            // Dynamic PBF Water Flume
-            int ww = along_z ? 2 : length;
-            int wd = along_z ? length : 2;
-            sanctum_add_node(plan, SANCTUM_PRIM_PBF_WATER, opp->motif,
-                             center_x, py + 1, center_z, ww, 1, wd, 0.0f, 0.0f, c_water, false, false, true);
+            // Dynamic PBF Water Flume (disabled for now)
+            // int ww = along_z ? 2 : length;
+            // int wd = along_z ? length : 2;
+            // sanctum_add_node(plan, SANCTUM_PRIM_PBF_WATER, opp->motif,
+            //                  center_x, py + 1, center_z, ww, 1, wd, 0.0f, 0.0f, c_water, false, false, true);
 
             // Flanking Sarsen Boundary Stele
             int sx1 = along_z ? center_x - 2 : center_x;
@@ -1291,9 +1291,9 @@ bool sanctum_algebra_expand(SanctumCitadelPlan *plan, const SanctumOpportunity *
             sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_STYLOBATE, opp->motif,
                              center_x, py, center_z, size, 1, size, 0.0f, 0.0f, c_marble, false, false, false);
 
-            // 2. Central Sunken Reflecting Pool with PBF Water
-            sanctum_add_node(plan, SANCTUM_PRIM_PBF_WATER, opp->motif,
-                             center_x, py + 1, center_z, 6, 1, 6, 0.0f, 0.0f, c_water, false, false, true);
+            // 2. Central Sunken Reflecting Pool with PBF Water (disabled for now)
+            // sanctum_add_node(plan, SANCTUM_PRIM_PBF_WATER, opp->motif,
+            //                  center_x, py + 1, center_z, 6, 1, 6, 0.0f, 0.0f, c_water, false, false, true);
 
             // 3. Four Corner Sarsen Stelae with Titanium Collars
             sanctum_add_node(plan, SANCTUM_PRIM_STONE_ORTHOSTAT, opp->motif,
@@ -1448,9 +1448,9 @@ bool sanctum_algebra_expand(SanctumCitadelPlan *plan, const SanctumOpportunity *
             sanctum_add_node(plan, SANCTUM_PRIM_MARBLE_STYLOBATE, opp->motif,
                              center_x, py, center_z, p_size, 1, p_size, 0.0f, 0.0f, c_marble, false, false, false);
 
-            // 2. Central Sunken Pool with PBF water
-            sanctum_add_node(plan, SANCTUM_PRIM_PBF_WATER, opp->motif,
-                             center_x, py + 1, center_z, 6, 1, 6, 0.0f, 0.0f, c_water, false, false, true);
+            // 2. Central Sunken Pool with PBF water (disabled for now)
+            // sanctum_add_node(plan, SANCTUM_PRIM_PBF_WATER, opp->motif,
+            //                  center_x, py + 1, center_z, 6, 1, 6, 0.0f, 0.0f, c_water, false, false, true);
 
             // 3. Central Monolithic Tapered Obelisk
             sanctum_add_node(plan, SANCTUM_PRIM_OBELISK, opp->motif,
@@ -1641,9 +1641,9 @@ bool sanctum_algebra_expand(SanctumCitadelPlan *plan, const SanctumOpportunity *
             sanctum_add_node(plan, SANCTUM_PRIM_BALUSTRADE, opp->motif,
                              center_x, py + 1, center_z - 2, 6, 1, 1, 0.0f, 0.0f, c_marble, false, false, false);
 
-            // Sacred PBF restorative pool
-            sanctum_add_node(plan, SANCTUM_PRIM_PBF_WATER, opp->motif,
-                             center_x, py + 1, center_z, 4, 1, 4, 0.0f, 0.0f, c_water, false, false, true);
+            // Sacred PBF restorative pool (disabled for now)
+            // sanctum_add_node(plan, SANCTUM_PRIM_PBF_WATER, opp->motif,
+            //                  center_x, py + 1, center_z, 4, 1, 4, 0.0f, 0.0f, c_water, false, false, true);
 
             // Register Health Supply Point
             sanctum_add_supply(plan, (Vector3){ (float)center_x, (float)(py + 2), (float)center_z }, SANCTUM_SUPPLY_HEALTH);
