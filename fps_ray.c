@@ -11360,6 +11360,12 @@ static Material instancedMaterial = { 0 };
 static Shader instancedShader = { 0 };
 static Shader orbShader = { 0 };
 static Mesh sphereMesh = { 0 };
+static Mesh particleSphereMesh = { 0 };
+static Material particleMatteMaterial = { 0 };
+static Shader particleMatteShader = { 0 };
+static Matrix *particleTransforms = NULL;
+static int particleTransformsCount = 0;
+static int particleTransformsCapacity = 0;
 static Matrix *instanceTransforms = NULL;
 static int instanceTransformsCount = 0;
 static int instanceTransformsCapacity = 0;
@@ -11372,6 +11378,20 @@ static void InitInstancing(void) {
     
     orbShader = LoadShader("shaders/orb.vert", "shaders/orb.frag");
     sphereMesh = GenMeshSphere(VOXEL_SIZE * 0.25f, 16, 16);
+
+    particleSphereMesh = GenMeshSphere(1.0f, 6, 8);
+    particleMatteShader = LoadShader("shaders/particle_matte.vert", "shaders/particle_matte.frag");
+    if (particleMatteShader.id != 0) {
+        particleMatteShader.locs[SHADER_LOC_MATRIX_MVP] = GetShaderLocation(particleMatteShader, "mvp");
+        particleMatteShader.locs[SHADER_LOC_MATRIX_MODEL] = GetShaderLocationAttrib(particleMatteShader, "instanceTransform");
+        particleMatteShader.locs[SHADER_LOC_MATRIX_VIEW] = GetShaderLocation(particleMatteShader, "matView");
+        particleMatteShader.locs[SHADER_LOC_MATRIX_PROJECTION] = GetShaderLocation(particleMatteShader, "matProjection");
+
+        particleMatteMaterial = LoadMaterialDefault();
+        particleMatteMaterial.shader = particleMatteShader;
+    }
+    particleTransformsCapacity = MAX_PARTICLES;
+    particleTransforms = (Matrix*)RL_MALLOC(particleTransformsCapacity * sizeof(Matrix));
 
     // Get shader locations
     instancedShader.locs[SHADER_LOC_MATRIX_MVP] = GetShaderLocation(instancedShader, "mvp");
@@ -11536,19 +11556,39 @@ static void DrawVoxels(Camera3D cam) {
         DrawSphere(center, core_radius, (Color){ 120, 200, 255, 220 });
     }
 
-    // Render unglued particles ("no glue") as triangles
+    // Render unglued particles ("no glue") as 3D matte spheres
+    particleTransformsCount = 0;
+    Color particleColor = (Color){ 255, 160, 40, 255 };
+    float pr = (float)particleColor.r / 255.0f;
+    float pg = (float)particleColor.g / 255.0f;
+    float pb = (float)particleColor.b / 255.0f;
+
     for (int i = 0; i < active_particle_count; ++i) {
         Particle *p = active_particles[i];
         if (!p || !p->active || p->glue_count > 0) {
             continue;
         }
-        float sz = (p->radius > 0.0f) ? p->radius : (VOXEL_SIZE * 0.35f);
-        Vector3 top   = { p->pos.x,          p->pos.y + sz,         p->pos.z };
-        Vector3 left  = { p->pos.x - sz,     p->pos.y - sz * 0.5f,  p->pos.z };
-        Vector3 right = { p->pos.x + sz,     p->pos.y - sz * 0.5f,  p->pos.z };
-        Color triColor = (Color){ 255, 160, 40, 255 };
-        DrawTriangle3D(top, left, right, triColor);
-        DrawTriangle3D(top, right, left, triColor);
+        float radius = (p->radius > 0.0f) ? p->radius : (VOXEL_SIZE * 0.25f);
+        if (particleTransforms && particleTransformsCount < particleTransformsCapacity) {
+            Matrix m = MatrixIdentity();
+            m.m0 = radius;
+            m.m5 = radius;
+            m.m10 = radius;
+            m.m3 = pr;
+            m.m7 = pg;
+            m.m11 = pb;
+            m.m12 = p->pos.x;
+            m.m13 = p->pos.y;
+            m.m14 = p->pos.z;
+            m.m15 = 1.0f;
+            particleTransforms[particleTransformsCount++] = m;
+        } else {
+            DrawSphere(p->pos, radius, particleColor);
+        }
+    }
+
+    if (particleTransformsCount > 0 && particleSphereMesh.vertexCount > 0) {
+        DrawMeshInstanced(particleSphereMesh, particleMatteMaterial, particleTransforms, particleTransformsCount);
     }
 
     rlEnableBackfaceCulling();
