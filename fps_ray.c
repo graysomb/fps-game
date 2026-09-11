@@ -469,18 +469,11 @@ static InputType playerInput[MAX_PLAYERS] = {
 #define RECYCLE_STATIC_RESTORE_DELAY (60 * 30)
 #define RECYCLE_OWNED_STATIC_MAX_FRAMES (60 * 60)
 #define STATIC_DEBRIS_OWNER (-2)
-#define VOXEL_SPLIT_STRAIN_THRESHOLD 2.1f
-#define VOXEL_SPLIT_SHEAR_THRESHOLD 2.1f
-#define VOXEL_DUST_STRAIN_THRESHOLD 4.0f
-#define VOXEL_DUST_SHEAR_THRESHOLD 2.0f
 #define VOXEL_HASH_REBUILD_INTERVAL 2
 #define TABLE_CACHE_SIZE 4
-#define FACE_BLOCK_MIN_OVERLAP (VOXEL_SIZE * 0.25f)
 
 #define MAX_NEIGHBOR_VOXELS 128
 #define MAX_FACE_NEIGHBORS   64
-#define GLUE_NEIGHBOR_HASH_SIZE 128
-#define MAX_SPLIT_CHILDREN    8
 static const float GRID_EPSILON = 1e-4f;
 static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define VOXEL_ACTIVATION_RADIUS 2*1
@@ -780,7 +773,6 @@ static const Vector3 playerSpawnPositions[MAX_PLAYERS] = {
     { -12.0f, BASE_EYE_HEIGHT, -12.0f },
     {  12.0f, BASE_EYE_HEIGHT,  12.0f }
 };
-static const float playerSpawnYaw[MAX_PLAYERS] = { 0.0f, 180.0f, 45.0f, -135.0f };
 
 typedef struct {
     Vector3 pos;
@@ -960,7 +952,6 @@ static unsigned char voxelCalmFlags[MAX_VOXELS];
 static _Atomic unsigned char activationClaims[MAX_VOXELS];
 static bool dynamicGlueClustersInitialized = false;
 #define DEBUG_CLUSTER_TAG_MAX 64
-static int debugTagOffset[DEBUG_CLUSTER_TAG_MAX][3];
 static float freezeBeliefScratch[MAX_VOXELS];
 static int freezeDistance[MAX_VOXELS];
 static int overhangDistance[MAX_VOXELS];
@@ -969,7 +960,6 @@ static uint8_t staticBeliefDirty[MAX_VOXELS];
 static int staticBeliefDirtyList[MAX_VOXELS];
 static int staticBeliefDirtyCount = 0;
 static uint8_t staticBeliefQueued[MAX_VOXELS];
-static int staticBeliefQueue[MAX_VOXELS];
 static bool staticBeliefsInitialized = false;
 static bool staticBeliefsForceFullRefresh = false;
 static int debugSmushLogBudget = 0;
@@ -998,9 +988,7 @@ static bool build_recycle_physical_island_graph(void);
 static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count);
 static bool cluster_is_near_original_grid_pose(const int *cluster, int cluster_count);
 static void solve_static_collisions(float dt);
-static void solve_dynamic_collisions(float dt);
 static void log_dynamic_glue_cluster_breaks(void);
-static void compute_voxel_center_and_mass(const Voxel *voxel, Vector3 *center, float *inv_mass_sum);
 typedef struct {
     int gx, gy, gz;
     Color color;
@@ -1019,7 +1007,6 @@ typedef struct {
 } UnitVoxelBuffer;
 
 static void refresh_static_voxel_beliefs(void);
-static void update_static_voxel_belief(int idx);
 static void mark_static_beliefs_dirty_for_voxel(const Voxel *voxel);
 static void mark_static_beliefs_dirty_column_above(int gx, int gz, int gy);
 static void update_dynamic_activation_beliefs(void);
@@ -1367,11 +1354,7 @@ static bool debugDrawParticles = false;
 static bool debugColorParticlesByVelocity = false;
 static const float PARTICLE_DEBUG_MARKER_RADIUS = 0.6f;
 static const float PARTICLE_DEBUG_MAX_SPEED = 20.0f;
-static int debugSpanCollisionLogBudget = 0;
-static bool debugLogGlue = false;
 static bool debugLogGlueClusters = false;
-static bool skipGlueClusterCollisions = true;
-static bool renderAllDynamicFaces = false;
 static bool sfxEnabled = true;
 
 typedef enum {
@@ -1417,28 +1400,13 @@ static const float sfxChances[SFX_COUNT] = {
     1.00f,  // tether
     1.00f   // win
 };
-static const float sfxVolumes[SFX_COUNT] = {
-    0.35f,  // fire
-    0.45f,  // impact
-    0.55f,  // melee
-    0.35f,  // glue break
-    0.50f,  // kill
-    0.55f,  // death
-    0.35f,  // shield
-    1.00f,  // smush
-    0.70f,  // explosion
-    0.55f,  // tether
-    0.70f   // win
-};
 static bool sfxReady = false;
 static float smushBannerTimer = 0.0f;
-static bool debugLogDynamicVoxels = false;
 static bool debugLogVoxelRecycle = false;
 static bool debugLogActivationFailures = false;
 static bool debugLogRestoreFailures = false;
 static bool debugLogVoxelBlowup = false;
 static bool debugLogSmush = false;
-static bool debugLogSmushSpawns = false;
 static bool debugLogSmushHits = false;
 static bool debugLogSmushDeaths = false;
 static bool debugLogRestoreClusters = false;
@@ -1456,14 +1424,7 @@ static int creativeMapSlot = 0;
 static bool useCustomMap = false;
 static int creativeBlockColorIndex[MAX_PLAYERS] = { 0, 0, 0, 0 };
 static bool creativeHelpVisible[MAX_PLAYERS] = { true, true, true, true };
-static int debugGlueBuildLogBudget = 0;
-static int debugGlueSolveLogBudget = 0;
-static int debugGlueBreakLogBudget = 0;
-static const int DEBUG_GLUE_BUILD_LOG_INIT = 64;
-static const int DEBUG_GLUE_SOLVE_LOG_INIT = 64;
-static const int DEBUG_GLUE_BREAK_LOG_INIT = 16;
 static bool debugLogActivation = false;
-static const int DEBUG_ACTIVATION_LOG_INIT = 64;
 static bool debugLogVoxelDeactivation = false;
 static FILE *debugLogFile = NULL;
 static bool logsEnabled = true;
@@ -1487,36 +1448,6 @@ static const char *trace_level_label(int level) {
     }
 }
 
-static const char *debug_cluster_tag_label(int tag) {
-    switch (tag) {
-        case 1: return "corner-chunk";
-        case 2: return "stacked-pillar";
-        case 3: return "three-span-bar";
-        case 4: return "plate-cap";
-        case 5: return "step-chain";
-        case 6: return "solid-cube";
-        case 7: return "long-beam";
-        case 8: return "brace-frame";
-        case 9: return "staggered-stack";
-        case 10: return "unit-cube-control";
-        case 11: return "single-span-control";
-        case 12: return "thin-slab";
-        case 13: return "flat-cross";
-        case 14: return "vertical-column";
-        default: return "unlabeled";
-    }
-}
-
-static bool debug_should_log_tag_break(int tag)
-{
-    if (tag <= 0 || tag >= DEBUG_CLUSTER_TAG_MAX) {
-        return false;
-    }
-    if (debugTagBreakLogged[tag]) {
-        return false;
-    }
-    return true;
-}
 
 static bool debug_should_log_message(const char *text) {
     if (!debugLogClusterBreaksOnly) {
@@ -1697,77 +1628,6 @@ static void voxel_particle_world_bounds(const Voxel *v, VoxelWorldBounds *out)
     out->maxz = maxz;
 }
 
-static void voxel_predicted_bounds(const Voxel *v, VoxelWorldBounds *out)
-{
-    if (!out || !v) {
-        return;
-    }
-    Vector3 p = v->particles[0]->predicted_pos;
-    float minx = p.x, maxx = p.x;
-    float miny = p.y, maxy = p.y;
-    float minz = p.z, maxz = p.z;
-    for (int i = 1; i < 8; ++i) {
-        p = v->particles[i]->predicted_pos;
-        if (p.x < minx) minx = p.x;
-        if (p.x > maxx) maxx = p.x;
-        if (p.y < miny) miny = p.y;
-        if (p.y > maxy) maxy = p.y;
-        if (p.z < minz) minz = p.z;
-        if (p.z > maxz) maxz = p.z;
-    }
-    out->minx = minx;
-    out->maxx = maxx;
-    out->miny = miny;
-    out->maxy = maxy;
-    out->minz = minz;
-    out->maxz = maxz;
-}
-
-static void voxel_visibility_bounds(const Voxel *v, VoxelWorldBounds *out)
-{
-    if (!v || !out) {
-        return;
-    }
-    if (v->simulate) {
-        voxel_particle_world_bounds(v, out);
-    } else {
-        voxel_world_bounds(v, out);
-    }
-}
-
-static bool axis_contact_state(float minA, float maxA,
-                               float minB, float maxB,
-                               float eps, bool *touch, bool *overlap)
-{
-    if (maxA < minB - eps || maxB < minA - eps) {
-        if (touch) *touch = false;
-        if (overlap) *overlap = false;
-        return false;
-    }
-
-    float overlapMin = fmaxf(minA, minB);
-    float overlapMax = fminf(maxA, maxB);
-    bool touching = (overlapMax - overlapMin) <= eps;
-
-    if (touch) *touch = touching;
-    if (overlap) *overlap = !touching;
-    return true;
-}
-
-static bool bounds_overlap(float minA, float maxA,
-                           float minB, float maxB, float eps)
-{
-    return !(maxA < minB - eps || maxB < minA - eps);
-}
-
-static float bounds_overlap_length(float minA, float maxA,
-                                   float minB, float maxB)
-{
-    float lo = fmaxf(minA, minB);
-    float hi = fminf(maxA, maxB);
-    float len = hi - lo;
-    return (len > 0.0f) ? len : 0.0f;
-}
 
 static float randf_range(float min_val, float max_val)
 {
@@ -2012,221 +1872,10 @@ static bool segment_intersects_aabb(Vector3 start, Vector3 end,
     return true;
 }
 
-static bool face_blocked_by_voxel(const Voxel *self, const Voxel *neighbor, int face)
-{
-    if (!self || !neighbor) {
-        return false;
-    }
-    VoxelWorldBounds a, b;
-    voxel_visibility_bounds(self, &a);
-    voxel_visibility_bounds(neighbor, &b);
-    const float eps = VOXEL_SIZE * 0.05f;
-
-    switch (face) {
-        case 0: // +X
-            if (b.minx > a.maxx + eps || b.maxx < a.maxx - eps) return false;
-            return bounds_overlap(a.miny, a.maxy, b.miny, b.maxy, eps) &&
-                   bounds_overlap(a.minz, a.maxz, b.minz, b.maxz, eps) &&
-                   bounds_overlap_length(a.miny, a.maxy, b.miny, b.maxy) >= FACE_BLOCK_MIN_OVERLAP &&
-                   bounds_overlap_length(a.minz, a.maxz, b.minz, b.maxz) >= FACE_BLOCK_MIN_OVERLAP;
-        case 1: // -X
-            if (b.maxx < a.minx - eps || b.minx > a.minx + eps) return false;
-            return bounds_overlap(a.miny, a.maxy, b.miny, b.maxy, eps) &&
-                   bounds_overlap(a.minz, a.maxz, b.minz, b.maxz, eps) &&
-                   bounds_overlap_length(a.miny, a.maxy, b.miny, b.maxy) >= FACE_BLOCK_MIN_OVERLAP &&
-                   bounds_overlap_length(a.minz, a.maxz, b.minz, b.maxz) >= FACE_BLOCK_MIN_OVERLAP;
-        case 2: // +Y
-            if (b.miny > a.maxy + eps || b.maxy < a.maxy - eps) return false;
-            return bounds_overlap(a.minx, a.maxx, b.minx, b.maxx, eps) &&
-                   bounds_overlap(a.minz, a.maxz, b.minz, b.maxz, eps) &&
-                   bounds_overlap_length(a.minx, a.maxx, b.minx, b.maxx) >= FACE_BLOCK_MIN_OVERLAP &&
-                   bounds_overlap_length(a.minz, a.maxz, b.minz, b.maxz) >= FACE_BLOCK_MIN_OVERLAP;
-        case 3: // -Y
-            if (b.maxy < a.miny - eps || b.miny > a.miny + eps) return false;
-            return bounds_overlap(a.minx, a.maxx, b.minx, b.maxx, eps) &&
-                   bounds_overlap(a.minz, a.maxz, b.minz, b.maxz, eps) &&
-                   bounds_overlap_length(a.minx, a.maxx, b.minx, b.maxx) >= FACE_BLOCK_MIN_OVERLAP &&
-                   bounds_overlap_length(a.minz, a.maxz, b.minz, b.maxz) >= FACE_BLOCK_MIN_OVERLAP;
-        case 4: // +Z
-            if (b.minz > a.maxz + eps || b.maxz < a.maxz - eps) return false;
-            return bounds_overlap(a.minx, a.maxx, b.minx, b.maxx, eps) &&
-                   bounds_overlap(a.miny, a.maxy, b.miny, b.maxy, eps) &&
-                   bounds_overlap_length(a.minx, a.maxx, b.minx, b.maxx) >= FACE_BLOCK_MIN_OVERLAP &&
-                   bounds_overlap_length(a.miny, a.maxy, b.miny, b.maxy) >= FACE_BLOCK_MIN_OVERLAP;
-        case 5: // -Z
-            if (b.maxz < a.minz - eps || b.minz > a.minz + eps) return false;
-            return bounds_overlap(a.minx, a.maxx, b.minx, b.maxx, eps) &&
-                   bounds_overlap(a.miny, a.maxy, b.miny, b.maxy, eps) &&
-                   bounds_overlap_length(a.minx, a.maxx, b.minx, b.maxx) >= FACE_BLOCK_MIN_OVERLAP &&
-                   bounds_overlap_length(a.miny, a.maxy, b.miny, b.maxy) >= FACE_BLOCK_MIN_OVERLAP;
-        default:
-            return false;
-    }
-}
-
-static int voxel_touching_axes(const Voxel *a, const Voxel *b,
-                               int *overlap_axes, float eps)
-{
-    if (!a || !b) {
-        if (overlap_axes) *overlap_axes = 0;
-        return 0;
-    }
-
-    VoxelWorldBounds boundsA, boundsB;
-    voxel_world_bounds(a, &boundsA);
-    voxel_world_bounds(b, &boundsB);
-
-    bool touchX = false, overlapX = false;
-    bool touchY = false, overlapY = false;
-    bool touchZ = false, overlapZ = false;
-
-    if (!axis_contact_state(boundsA.minx, boundsA.maxx,
-                            boundsB.minx, boundsB.maxx, eps,
-                            &touchX, &overlapX)) {
-        if (overlap_axes) *overlap_axes = 0;
-        return 0;
-    }
-
-    if (!axis_contact_state(boundsA.miny, boundsA.maxy,
-                            boundsB.miny, boundsB.maxy, eps,
-                            &touchY, &overlapY)) {
-        if (overlap_axes) *overlap_axes = 0;
-        return 0;
-    }
-
-    if (!axis_contact_state(boundsA.minz, boundsA.maxz,
-                            boundsB.minz, boundsB.maxz, eps,
-                            &touchZ, &overlapZ)) {
-        if (overlap_axes) *overlap_axes = 0;
-        return 0;
-    }
-
-    if (overlap_axes) {
-        *overlap_axes = (overlapX ? 1 : 0) +
-                        (overlapY ? 1 : 0) +
-                        (overlapZ ? 1 : 0);
-    }
-
-    return (touchX ? 1 : 0) +
-           (touchY ? 1 : 0) +
-           (touchZ ? 1 : 0);
-}
-
-static bool ranges_touch_int(int minA, int maxA, int minB, int maxB) {
-    return (maxA + 1 == minB) || (maxB + 1 == minA);
-}
-
-static bool ranges_overlap_int(int minA, int maxA, int minB, int maxB) {
-    return !(maxA < minB || maxB < minA);
-}
-
-static bool voxels_share_edge_or_corner_rest(const Voxel *voxel_a, const Voxel *voxel_b) {
-    int aMinX = voxel_a->rest_min_gx, aMaxX = voxel_a->rest_max_gx;
-    int aMinY = voxel_a->rest_min_gy, aMaxY = voxel_a->rest_max_gy;
-    int aMinZ = voxel_a->rest_min_gz, aMaxZ = voxel_a->rest_max_gz;
-    int bMinX = voxel_b->rest_min_gx, bMaxX = voxel_b->rest_max_gx;
-    int bMinY = voxel_b->rest_min_gy, bMaxY = voxel_b->rest_max_gy;
-    int bMinZ = voxel_b->rest_min_gz, bMaxZ = voxel_b->rest_max_gz;
-
-    bool touchX = ranges_touch_int(aMinX, aMaxX, bMinX, bMaxX);
-    bool touchY = ranges_touch_int(aMinY, aMaxY, bMinY, bMaxY);
-    bool touchZ = ranges_touch_int(aMinZ, aMaxZ, bMinZ, bMaxZ);
-
-    bool overlapX = ranges_overlap_int(aMinX, aMaxX, bMinX, bMaxX);
-    bool overlapY = ranges_overlap_int(aMinY, aMaxY, bMinY, bMaxY);
-    bool overlapZ = ranges_overlap_int(aMinZ, aMaxZ, bMinZ, bMaxZ);
-
-    if ((!touchX && !overlapX) ||
-        (!touchY && !overlapY) ||
-        (!touchZ && !overlapZ)) {
-        return false;
-    }
-
-    int touching_axes = (touchX ? 1 : 0) + (touchY ? 1 : 0) + (touchZ ? 1 : 0);
-    return touching_axes >= 2;
-}
-
-static bool voxels_share_face_rest(const Voxel *voxel_a, const Voxel *voxel_b) {
-    int aMinX = voxel_a->rest_min_gx, aMaxX = voxel_a->rest_max_gx;
-    int aMinY = voxel_a->rest_min_gy, aMaxY = voxel_a->rest_max_gy;
-    int aMinZ = voxel_a->rest_min_gz, aMaxZ = voxel_a->rest_max_gz;
-    int bMinX = voxel_b->rest_min_gx, bMaxX = voxel_b->rest_max_gx;
-    int bMinY = voxel_b->rest_min_gy, bMaxY = voxel_b->rest_max_gy;
-    int bMinZ = voxel_b->rest_min_gz, bMaxZ = voxel_b->rest_max_gz;
-
-    bool overlapX = ranges_overlap_int(aMinX, aMaxX, bMinX, bMaxX);
-    bool overlapY = ranges_overlap_int(aMinY, aMaxY, bMinY, bMaxY);
-    bool overlapZ = ranges_overlap_int(aMinZ, aMaxZ, bMinZ, bMaxZ);
-
-    bool faceX = overlapY && overlapZ &&
-                 ((aMaxX + 1 == bMinX) || (bMaxX + 1 == aMinX));
-    bool faceY = overlapX && overlapZ &&
-                 ((aMaxY + 1 == bMinY) || (bMaxY + 1 == aMinY));
-    bool faceZ = overlapX && overlapY &&
-                 ((aMaxZ + 1 == bMinZ) || (bMaxZ + 1 == aMinZ));
-    return faceX || faceY || faceZ;
-}
-
-static float voxel_rest_axis_min(const Voxel *v, int axis) {
-    switch (axis) {
-        case 0: return (float)v->rest_min_gx * VOXEL_SIZE;
-        case 1: return (float)v->rest_min_gy * VOXEL_SIZE;
-        default: return (float)v->rest_min_gz * VOXEL_SIZE;
-    }
-}
-
-static float voxel_rest_axis_max(const Voxel *v, int axis) {
-    switch (axis) {
-        case 0: return (float)(v->rest_max_gx + 1) * VOXEL_SIZE;
-        case 1: return (float)(v->rest_max_gy + 1) * VOXEL_SIZE;
-        default: return (float)(v->rest_max_gz + 1) * VOXEL_SIZE;
-    }
-}
-
-static float voxel_rest_corner_axis_coord(const Voxel *v, int axis, int corner_idx) {
-    float min = voxel_rest_axis_min(v, axis);
-    float max = voxel_rest_axis_max(v, axis);
-    int sign = corner_signs[corner_idx][axis];
-    return (sign >= 0) ? max : min;
-}
-
-static Vector3 voxel_rest_corner_world(const Voxel *v, int corner_idx) {
-    return (Vector3){
-        voxel_rest_corner_axis_coord(v, 0, corner_idx),
-        voxel_rest_corner_axis_coord(v, 1, corner_idx),
-        voxel_rest_corner_axis_coord(v, 2, corner_idx)
-    };
-}
 
 static int table_get(int x, int y, int z);
 static int table_get_static_only(int x, int y, int z);
 static void rebuild_glue_constraints(void);
-static bool voxels_share_edge_or_corner(const Voxel *voxel_a, const Voxel *voxel_b);
-static bool voxels_share_face(const Voxel *voxel_a, const Voxel *voxel_b);
-
-typedef struct {
-    int dx, dy, dz;
-    int faceA[4];
-    int faceB[4];
-} GlueDirection;
-
-static const GlueDirection glueDirections[3] = {
-    { 1, 0, 0, { 1, 3, 5, 7 }, { 0, 2, 4, 6 } },
-    { 0, 1, 0, { 2, 3, 6, 7 }, { 0, 1, 4, 5 } },
-    { 0, 0, 1, { 4, 5, 6, 7 }, { 0, 1, 2, 3 } },
-};
-
-static const char *glue_direction_label_from_delta(int dx, int dy, int dz)
-{
-    if (dx > 0) return "+X";
-    if (dx < 0) return "-X";
-    if (dy > 0) return "+Y";
-    if (dy < 0) return "-Y";
-    if (dz > 0) return "+Z";
-    if (dz < 0) return "-Z";
-    return "unknown";
-}
-
 static void voxel_compute_bounds(const Voxel *v,
                                  int *minx, int *maxx,
                                  int *miny, int *maxy,
@@ -2544,13 +2193,6 @@ typedef struct {
     int count;
 } ParticleHashBuildJob;
 
-static void particle_hash_clear_range(int start, int end, int worker_id, void *user) {
-    (void)worker_id;
-    (void)user;
-    for (int i = start; i < end; ++i) {
-        atomic_store_explicit(&particle_hash_head[i], -1, memory_order_relaxed);
-    }
-}
 
 static void particle_hash_build_range(int start, int end, int worker_id, void *user) {
     (void)worker_id;
@@ -2651,32 +2293,6 @@ static void apply_particle_accumulators(void) {
     pbd_parallel_for(0, sim_particle_count, apply_particle_accumulators_range, NULL);
 }
 
-static bool face_local_coords(const Vector3 origin,
-                              const Vector3 U,
-                              const Vector3 V,
-                              const Vector3 normal,
-                              float UU,
-                              float VV,
-                              float UV,
-                              float invDet,
-                              Vector3 point,
-                              float *outU,
-                              float *outV)
-{
-    Vector3 d = v_sub(point, origin);
-    float signedDistance = v_dot(normal, d);
-    Vector3 projected = v_sub(point, v_mul(normal, signedDistance));
-    Vector3 p = v_sub(projected, origin);
-
-    float du = v_dot(p, U);
-    float dv = v_dot(p, V);
-
-    float u = (du * VV - dv * UV) * invDet;
-    float v = (dv * UU - du * UV) * invDet;
-    if (outU) *outU = u;
-    if (outV) *outV = v;
-    return true;
-}
 
 // Patch for a merged quad in one of the principal planes
 typedef struct {
@@ -2812,316 +2428,8 @@ typedef struct {
 } GlueConstraint;
 
 static GlueConstraint glueConstraints[MAX_VOXELS * 48];
-static float glueConstraintPeakViolation[MAX_VOXELS * 48];
 static int glueConstraintCount = 0;
-static uint8_t gluedNeighborCounts[MAX_VOXELS];
-static int gluedNeighborList[MAX_VOXELS][MAX_FACE_NEIGHBORS];
-static uint16_t gluedNeighborRefCounts[MAX_VOXELS][MAX_FACE_NEIGHBORS];
-static int gluedNeighborHashKeys[MAX_VOXELS][GLUE_NEIGHBOR_HASH_SIZE];
-static uint8_t gluedNeighborHashIndex[MAX_VOXELS][GLUE_NEIGHBOR_HASH_SIZE];
-static uint32_t gluedNeighborHashStamp[MAX_VOXELS][GLUE_NEIGHBOR_HASH_SIZE];
-static uint32_t gluedNeighborEpoch[MAX_VOXELS];
-static uint8_t glueAdjacencyDirtyFlags[MAX_VOXELS];
-static int glueAdjacencyDirtyList[MAX_VOXELS];
 static int freezeQueue[MAX_VOXELS];
-static unsigned char glueClusterVisitedTemp[MAX_VOXELS];
-static int glueAdjacencyDirtyCount = 0;
-static bool glueAdjacencyDirtyAll = true;
-
-static void reset_glue_constraint_peaks(void) {
-    memset(glueConstraintPeakViolation, 0, sizeof(glueConstraintPeakViolation));
-}
-
-static void mark_glue_adjacency_dirty_for_voxel(int voxel_idx) {
-    collisionTopologyDirty = true;
-    if (glueAdjacencyDirtyAll) {
-        return;
-    }
-    if (voxel_idx < 0 || voxel_idx >= MAX_VOXELS) {
-        return;
-    }
-    if (glueAdjacencyDirtyFlags[voxel_idx]) {
-        return;
-    }
-    glueAdjacencyDirtyFlags[voxel_idx] = 1;
-    if (glueAdjacencyDirtyCount < MAX_VOXELS) {
-        glueAdjacencyDirtyList[glueAdjacencyDirtyCount++] = voxel_idx;
-    } else {
-        glueAdjacencyDirtyAll = true;
-        glueAdjacencyDirtyCount = 0;
-    }
-}
-
-static void glue_neighbor_hash_reset(int voxel_idx) {
-    uint32_t epoch = ++gluedNeighborEpoch[voxel_idx];
-    if (epoch == 0) {
-        memset(gluedNeighborHashStamp[voxel_idx], 0, sizeof(gluedNeighborHashStamp[voxel_idx]));
-        gluedNeighborEpoch[voxel_idx] = 1;
-    }
-}
-
-static unsigned glue_neighbor_hash_seed(int neighbor_idx) {
-    return (unsigned)neighbor_idx * 2654435761u;
-}
-
-static bool glue_neighbor_hash_find(int voxel_idx, int neighbor_idx,
-                                    int *slot_out, int *list_index_out) {
-    uint32_t epoch = gluedNeighborEpoch[voxel_idx];
-    if (epoch == 0) {
-        glue_neighbor_hash_reset(voxel_idx);
-        epoch = gluedNeighborEpoch[voxel_idx];
-    }
-    unsigned mask = GLUE_NEIGHBOR_HASH_SIZE - 1;
-    unsigned h = glue_neighbor_hash_seed(neighbor_idx);
-    for (unsigned probe = 0; probe < GLUE_NEIGHBOR_HASH_SIZE; ++probe) {
-        unsigned slot = (h + probe) & mask;
-        if (gluedNeighborHashStamp[voxel_idx][slot] != epoch) {
-            if (slot_out) {
-                *slot_out = (int)slot;
-            }
-            if (list_index_out) {
-                *list_index_out = -1;
-            }
-            return false;
-        }
-        if (gluedNeighborHashKeys[voxel_idx][slot] == neighbor_idx) {
-            if (slot_out) {
-                *slot_out = (int)slot;
-            }
-            if (list_index_out) {
-                *list_index_out = (int)gluedNeighborHashIndex[voxel_idx][slot];
-            }
-            return true;
-        }
-    }
-    if (slot_out) {
-        *slot_out = -1;
-    }
-    if (list_index_out) {
-        *list_index_out = -1;
-    }
-    return false;
-}
-
-static bool glue_neighbor_hash_insert(int voxel_idx, int neighbor_idx, int list_index) {
-    int slot = -1;
-    int ignored = -1;
-    if (glue_neighbor_hash_find(voxel_idx, neighbor_idx, &slot, &ignored)) {
-        return true;
-    }
-    if (slot < 0) {
-        return false;
-    }
-    gluedNeighborHashStamp[voxel_idx][slot] = gluedNeighborEpoch[voxel_idx];
-    gluedNeighborHashKeys[voxel_idx][slot] = neighbor_idx;
-    gluedNeighborHashIndex[voxel_idx][slot] = (uint8_t)list_index;
-    return true;
-}
-
-static void glue_neighbor_hash_rebuild(int voxel_idx) {
-    glue_neighbor_hash_reset(voxel_idx);
-    int count = gluedNeighborCounts[voxel_idx];
-    for (int i = 0; i < count; ++i) {
-        int neighbor_idx = gluedNeighborList[voxel_idx][i];
-        glue_neighbor_hash_insert(voxel_idx, neighbor_idx, i);
-    }
-}
-
-static void glue_adjacency_reset_voxel(int voxel_idx) {
-    gluedNeighborCounts[voxel_idx] = 0;
-    for (int i = 0; i < MAX_FACE_NEIGHBORS; ++i) {
-        gluedNeighborList[voxel_idx][i] = -1;
-        gluedNeighborRefCounts[voxel_idx][i] = 0;
-    }
-    glue_neighbor_hash_reset(voxel_idx);
-}
-
-static void glue_adjacency_clear_all(void) {
-    for (int i = 0; i < voxel_count; ++i) {
-        glue_adjacency_reset_voxel(i);
-    }
-    memset(glueAdjacencyDirtyFlags, 0, sizeof(glueAdjacencyDirtyFlags));
-    glueAdjacencyDirtyCount = 0;
-    glueAdjacencyDirtyAll = false;
-}
-
-static void glue_adjacency_add_ref_oneway(int voxel_idx, int neighbor_idx, int ref_count) {
-    if (voxel_idx < 0 || voxel_idx >= MAX_VOXELS ||
-        neighbor_idx < 0 || neighbor_idx >= MAX_VOXELS) {
-        return;
-    }
-    if (ref_count <= 0) {
-        return;
-    }
-    int slot = -1;
-    int list_index = -1;
-    if (glue_neighbor_hash_find(voxel_idx, neighbor_idx, &slot, &list_index)) {
-        if (list_index >= 0 && list_index < MAX_FACE_NEIGHBORS) {
-            uint32_t sum = (uint32_t)gluedNeighborRefCounts[voxel_idx][list_index] +
-                           (uint32_t)ref_count;
-            if (sum > UINT16_MAX) {
-                sum = UINT16_MAX;
-            }
-            gluedNeighborRefCounts[voxel_idx][list_index] = (uint16_t)sum;
-        }
-        return;
-    }
-    int count = gluedNeighborCounts[voxel_idx];
-    if (count >= MAX_FACE_NEIGHBORS) {
-        mark_glue_adjacency_dirty_for_voxel(voxel_idx);
-        return;
-    }
-    gluedNeighborList[voxel_idx][count] = neighbor_idx;
-    gluedNeighborRefCounts[voxel_idx][count] = (uint16_t)ref_count;
-    gluedNeighborCounts[voxel_idx] = (uint8_t)(count + 1);
-    if (!glue_neighbor_hash_insert(voxel_idx, neighbor_idx, count)) {
-        mark_glue_adjacency_dirty_for_voxel(voxel_idx);
-    }
-}
-
-static void glue_adjacency_add_ref_pair(int voxel_a, int voxel_b, int ref_count) {
-    glue_adjacency_add_ref_oneway(voxel_a, voxel_b, ref_count);
-    glue_adjacency_add_ref_oneway(voxel_b, voxel_a, ref_count);
-}
-
-static void glue_adjacency_remove_ref_oneway(int voxel_idx, int neighbor_idx, int ref_count) {
-    if (voxel_idx < 0 || voxel_idx >= MAX_VOXELS ||
-        neighbor_idx < 0 || neighbor_idx >= MAX_VOXELS) {
-        return;
-    }
-    if (ref_count <= 0) {
-        return;
-    }
-    int slot = -1;
-    int list_index = -1;
-    if (!glue_neighbor_hash_find(voxel_idx, neighbor_idx, &slot, &list_index)) {
-        mark_glue_adjacency_dirty_for_voxel(voxel_idx);
-        return;
-    }
-    if (list_index < 0 || list_index >= MAX_FACE_NEIGHBORS) {
-        mark_glue_adjacency_dirty_for_voxel(voxel_idx);
-        return;
-    }
-    uint16_t current = gluedNeighborRefCounts[voxel_idx][list_index];
-    if (ref_count >= current) {
-        int last = gluedNeighborCounts[voxel_idx] - 1;
-        if (last < 0) {
-            gluedNeighborCounts[voxel_idx] = 0;
-        } else if (list_index != last) {
-            gluedNeighborList[voxel_idx][list_index] = gluedNeighborList[voxel_idx][last];
-            gluedNeighborRefCounts[voxel_idx][list_index] = gluedNeighborRefCounts[voxel_idx][last];
-        }
-        if (last >= 0) {
-            gluedNeighborList[voxel_idx][last] = -1;
-            gluedNeighborRefCounts[voxel_idx][last] = 0;
-        }
-        if (gluedNeighborCounts[voxel_idx] > 0) {
-            gluedNeighborCounts[voxel_idx] = (uint8_t)last;
-        }
-        glue_neighbor_hash_rebuild(voxel_idx);
-    } else {
-        gluedNeighborRefCounts[voxel_idx][list_index] = (uint16_t)(current - ref_count);
-    }
-}
-
-static void glue_adjacency_remove_ref_pair(int voxel_a, int voxel_b, int ref_count) {
-    glue_adjacency_remove_ref_oneway(voxel_a, voxel_b, ref_count);
-    glue_adjacency_remove_ref_oneway(voxel_b, voxel_a, ref_count);
-}
-
-static void rebuild_glue_adjacency_if_dirty(void) {
-    if (!glueAdjacencyDirtyAll && glueAdjacencyDirtyCount == 0) {
-        return;
-    }
-    bool rebuild_all = glueAdjacencyDirtyAll;
-    if (rebuild_all) {
-        glue_adjacency_clear_all();
-    } else {
-        for (int i = 0; i < glueAdjacencyDirtyCount; ++i) {
-            int voxel_idx = glueAdjacencyDirtyList[i];
-            glue_adjacency_reset_voxel(voxel_idx);
-        }
-        glueAdjacencyDirtyCount = 0;
-    }
-    for (int g = 0; g < glueConstraintCount; ++g) {
-        const GlueConstraint *gc = &glueConstraints[g];
-        if (!gc->active) {
-            continue;
-        }
-        if (rebuild_all) {
-            glue_adjacency_add_ref_pair(gc->coarseVoxel, gc->fineVoxel, 1);
-        } else {
-            if (gc->coarseVoxel >= 0 && gc->coarseVoxel < MAX_VOXELS &&
-                glueAdjacencyDirtyFlags[gc->coarseVoxel]) {
-                glue_adjacency_add_ref_oneway(gc->coarseVoxel, gc->fineVoxel, 1);
-            }
-            if (gc->fineVoxel >= 0 && gc->fineVoxel < MAX_VOXELS &&
-                glueAdjacencyDirtyFlags[gc->fineVoxel]) {
-                glue_adjacency_add_ref_oneway(gc->fineVoxel, gc->coarseVoxel, 1);
-            }
-        }
-    }
-    if (!rebuild_all) {
-        memset(glueAdjacencyDirtyFlags, 0, sizeof(glueAdjacencyDirtyFlags));
-    }
-    glueAdjacencyDirtyAll = false;
-}
-
-static bool face_normal_predicted(const Voxel *voxel, const int corners[4],
-                                  Vector3 *out_normal) {
-    Vector3 p0 = voxel->particles[corners[0]]->predicted_pos;
-    Vector3 p1 = voxel->particles[corners[1]]->predicted_pos;
-    Vector3 p2 = voxel->particles[corners[2]]->predicted_pos;
-    if (!v_isfinite(p0) || !v_isfinite(p1) || !v_isfinite(p2)) {
-        return false;
-    }
-    Vector3 u = v_sub(p1, p0);
-    Vector3 v = v_sub(p2, p0);
-    Vector3 n = v_cross(u, v);
-    float len = v_length(n);
-    if (len < 1e-6f) {
-        return false;
-    }
-    *out_normal = v_mul(n, 1.0f / len);
-    return true;
-}
-
-static bool face_normal_rest(const Voxel *voxel, const int corners[4],
-                             Vector3 *out_normal) {
-    Vector3 p0 = voxel_rest_corner_world(voxel, corners[0]);
-    Vector3 p1 = voxel_rest_corner_world(voxel, corners[1]);
-    Vector3 p2 = voxel_rest_corner_world(voxel, corners[2]);
-    Vector3 u = v_sub(p1, p0);
-    Vector3 v = v_sub(p2, p0);
-    Vector3 n = v_cross(u, v);
-    float len = v_length(n);
-    if (len < 1e-6f) {
-        return false;
-    }
-    *out_normal = v_mul(n, 1.0f / len);
-    return true;
-}
-
-static void get_face_corners_for_direction(const GlueDirection *dir,
-                                           bool positive_side,
-                                           int outCorners[4])
-{
-    const int *src = positive_side ? dir->faceA : dir->faceB;
-    for (int i = 0; i < 4; ++i) {
-        outCorners[i] = src[i];
-    }
-}
-
-static void order_coarse_fine_pair(int negativeIdx, int positiveIdx,
-                                   int *coarseIdx, bool *coarseIsPositive,
-                                   int *fineIdx, bool *fineIsPositive)
-{
-    *coarseIdx = negativeIdx;
-    *fineIdx = positiveIdx;
-    *coarseIsPositive = false;
-    *fineIsPositive = true;
-}
-
 
 
 // Spatial hash table for voxels
@@ -3183,7 +2491,6 @@ typedef struct {
     int      idx;   // index in `voxels[]`
 } Bucket;
 
-static Bucket table[HASH_SIZE]; // Deprecated, will be replaced by dynamic_table
 static Bucket static_table[HASH_SIZE];
 static Bucket dynamic_table[HASH_SIZE];
 static bool staticHashDirty = false;
@@ -3286,16 +2593,6 @@ static void dynamic_table_insert(int x, int y, int z, int idx)
     dynamic_table[h].idx = idx;
 }
 
-static int hashVoxel(int x, int y, int z)
-/*  **Only** used by table_set and table_get; keep it for API parity. */
-{
-    return (int)hashVoxelKey(mortonKey(x, y, z));
-}
-
-static void table_set(int x, int y, int z, int idx)
-{
-    dynamic_table_insert(x, y, z, idx);
-}
 
 static int table_get(int x, int y, int z)
 /*  Returns voxel index or –1 if empty */
@@ -3399,14 +2696,6 @@ static void dynamic_table_remove(int x, int y, int z) {
     }
 }
 
-// Remove voxel entry from spatial hash and rehash subsequent cluster entries
-static void table_remove(int x, int y, int z) {
-    // Try remove from both to be safe, as we don't know which one it's in purely from coords
-    // unless we look it up first. Since lookups are cheap, we could check. 
-    // But blindly removing from both is also fine if they don't overlap keys (which they shouldn't).
-    static_table_remove(x, y, z);
-    dynamic_table_remove(x, y, z);
-}
 
 static void voxel_table_register(Voxel *v, int idx)
 {
@@ -4275,12 +3564,6 @@ static void break_face_link(Voxel *voxel, int face_index) {
     // neighbor->glued_faces[opposite] = false;
 }
 
-static inline size_t unit_voxel_grid_index(int x, int y, int z,
-                                           int dimx, int dimy, int dimz)
-{
-    (void)dimz;
-    return ((size_t)z * (size_t)dimy + (size_t)y) * (size_t)dimx + (size_t)x;
-}
 
 static int emit_unit_voxels_from_units(const UnitVoxelBuffer *buffer,
                                        bool fixed, bool simulate,
@@ -4318,19 +3601,6 @@ static int emit_unit_voxels_from_units(const UnitVoxelBuffer *buffer,
     return spawned;
 }
 
-static void emit_static_voxels_from_units(const UnitVoxelBuffer *buffer)
-{
-    if (!buffer) {
-        return;
-    }
-    for (int i = 0; i < buffer->count; ++i) {
-        const UnitVoxelSeed *seed = &buffer->voxels[i];
-        int idx = add_static_voxel_at_grid(seed->gx, seed->gy, seed->gz, seed->color, seed->type);
-        if (idx >= 0) {
-            voxels[idx].debugClusterTag = seed->debugTag;
-        }
-    }
-}
 
 static void remove_buffered_static_voxels(UnitVoxelBuffer *buffer)
 {
@@ -5763,48 +5033,6 @@ static void mark_static_beliefs_dirty_for_voxel(const Voxel *voxel)
     mark_static_beliefs_dirty_column_above(voxel->gx, voxel->gz, voxel->gy);
 }
 
-static void update_static_voxel_belief(int idx)
-{
-    if (idx < 0 || idx >= voxel_count) {
-        return;
-    }
-    Voxel *voxel = &voxels[idx];
-    if (voxel->simulate) {
-        voxel->supportMask = 0;
-        voxel->neighborSupport = 0;
-        voxel->groundSupport = 0.0f;
-        freezeBoundaryFlags[idx] = 0;
-        voxel->freezeBelief = 0.0f;
-        freezeBeliefScratch[idx] = 0.0f;
-        return;
-    }
-
-    uint8_t supportMask = compute_static_support_mask(voxel);
-    voxel->supportMask = supportMask;
-    voxel->neighborSupport = (uint8_t)bitcount_u8(supportMask);
-
-    VoxelWorldBounds bounds;
-    voxel_world_bounds(voxel, &bounds);
-    bool touchesGround = (bounds.miny <= GRID_EPSILON);
-    //bool zeroBoundary = (!touchesGround) && (voxel->gy >=3.0f) && (voxel->surface[0] || voxel->surface[1] || voxel->surface[2] || voxel->surface[3] || voxel->surface[4] || voxel->surface[5]);
-    bool zeroBoundary = (!touchesGround) && ( voxel->surface[2] || voxel->surface[3]);
-
-    voxel->groundSupport = touchesGround ? 1.0f : 0.0f;
-
-    uint8_t flags = 0;
-    if (touchesGround) flags |= 1u;
-    if (zeroBoundary)  flags |= 2u;
-    freezeBoundaryFlags[idx] = flags;
-
-    if (touchesGround) {
-        voxel->freezeBelief = 1.0f;
-    } else if (zeroBoundary) {
-        voxel->freezeBelief = 0.0f;
-    } else {
-        voxel->freezeBelief = 0.5f;
-    }
-    freezeBeliefScratch[idx] = voxel->freezeBelief;
-}
 
 static void recompute_static_freeze_beliefs_path_length(void)
 {
@@ -6526,123 +5754,6 @@ static bool deactivate_sleeping_voxels(void)
     return changed;
 }
 
-static unsigned char mix_color_channel(float a, float b, float t) {
-    return (unsigned char)clampf(mixf(a, b, t), 0.0f, 255.0f);
-}
-
-static void build_oblique_voxel_pyramid(UnitVoxelBuffer *buffer) {
-    if (!buffer) {
-        return;
-    }
-
-    const int pyramid_height = 6;
-    const int base_length = 6;
-    const int base_width = 6;
-    const int origin_x = -8;
-    const int origin_y = 1;
-    const int origin_z = -4;
-
-    for (int level = 0; level < pyramid_height; ++level) {
-        int layer_y = origin_y + level;
-        int shrink_forward = level;
-        int shrink_z = (level + 1) / 2;
-        int min_x = origin_x;
-        int max_x = origin_x + base_length - 1 - shrink_forward;
-        int min_z = origin_z + shrink_z;
-        int max_z = origin_z + base_width - 1 - shrink_z;
-        if (max_x < min_x || max_z < min_z) {
-            continue;
-        }
-
-        float t = (pyramid_height > 1)
-            ? ((float)level / (float)(pyramid_height - 1))
-            : 0.0f;
-        Color col = {
-            mix_color_channel(170.0f, 230.0f, t),
-            mix_color_channel(100.0f, 160.0f, t),
-            mix_color_channel(140.0f, 210.0f, t),
-            255
-        };
-
-        for (int gx = min_x; gx <= max_x; ++gx) {
-            for (int gz = min_z; gz <= max_z; ++gz) {
-                if (!unit_voxel_buffer_push(buffer, gx, layer_y, gz, col, 0, true, -1, 0, -1)) {
-                    TraceLog(LOG_WARNING, "[Pyramid] Unit voxel buffer full");
-                    return;
-                }
-            }
-        }
-    }
-}
-
-static void apply_debug_tag_offset(int tag, int *x, int *y, int *z)
-{
-    if (tag <= 0 || tag >= DEBUG_CLUSTER_TAG_MAX) {
-        return;
-    }
-    if (x) *x += debugTagOffset[tag][0];
-    if (y) *y += debugTagOffset[tag][1];
-    if (z) *z += debugTagOffset[tag][2];
-}
-
-static void init_debug_tag_offsets(void)
-{
-    memset(debugTagOffset, 0, sizeof(debugTagOffset));
-    const int spacing = 16;
-    const int cols = 5;
-    const int max_tag = 19;
-    for (int tag = 1; tag <= max_tag; ++tag) {
-        int idx = tag - 1;
-        int col = idx % cols;
-        int row = idx / cols;
-        debugTagOffset[tag][0] = col * spacing;
-        debugTagOffset[tag][1] = 0;
-        debugTagOffset[tag][2] = row * spacing;
-    }
-}
-
-static int add_dynamic_span_voxel_at_grid_tag(int minx, int miny, int minz,
-                                              int span, Color color, int debugTag)
-{
-    (void)span;
-    apply_debug_tag_offset(debugTag, &minx, &miny, &minz);
-    float px = ((float)minx + 0.5f) * VOXEL_SIZE;
-    float py = ((float)miny + 0.5f) * VOXEL_SIZE;
-    float pz = ((float)minz + 0.5f) * VOXEL_SIZE;
-    int idx = addVoxel(px, py, pz, false, true, color, 0);
-    if (idx >= 0) {
-        voxels[idx].debugClusterTag = debugTag;
-        glue_neighbor_faces_for_voxel(idx);
-    }
-    return idx;
-}
-
-static void add_dynamic_span_voxel_at_grid(int minx, int miny, int minz,
-                                           int span, Color color)
-{
-    add_dynamic_span_voxel_at_grid_tag(minx, miny, minz, span, color, 0);
-}
-
-static void add_dynamic_unit_block_tag(int minx, int miny, int minz,
-                                       int sx, int sy, int sz, Color color,
-                                       int debugTag)
-{
-    apply_debug_tag_offset(debugTag, &minx, &miny, &minz);
-    for (int x = 0; x < sx; ++x) {
-        for (int y = 0; y < sy; ++y) {
-            for (int z = 0; z < sz; ++z) {
-                add_dynamic_span_voxel_at_grid_tag(minx + x, miny + y, minz + z,
-                                                   1, color, debugTag);
-            }
-        }
-    }
-}
-
-static void add_dynamic_unit_block(int minx, int miny, int minz,
-                                   int sx, int sy, int sz, Color color)
-{
-    add_dynamic_unit_block_tag(minx, miny, minz, sx, sy, sz, color, 0);
-}
 
 static inline void addVoxelAt(int gx, int gy, int gz, Color c) {
     float px = (gx + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
@@ -6651,236 +5762,6 @@ static inline void addVoxelAt(int gx, int gy, int gz, Color c) {
     addVoxel(px, py, pz, true, false, c, 0);
 }
 
-static inline int grid_to_world_g(int g) {
-    return g - (int)floorf(FLOOR_SIZE / VOXEL_SIZE);
-}
-
-static void add_static_box_at_grid(int minx, int maxx,
-                                   int miny, int maxy,
-                                   int minz, int maxz,
-                                   Color color)
-{
-    for (int y = miny; y <= maxy; ++y) {
-        for (int x = minx; x <= maxx; ++x) {
-            for (int z = minz; z <= maxz; ++z) {
-                add_static_voxel_at_grid(x, y, z, color, 0);
-            }
-        }
-    }
-}
-
-static void add_static_disc_at_grid(int cx, int cz, int radius, int y, Color color)
-{
-    int r2 = radius * radius;
-    for (int dx = -radius; dx <= radius; ++dx) {
-        for (int dz = -radius; dz <= radius; ++dz) {
-            if (dx * dx + dz * dz > r2) {
-                continue;
-            }
-            add_static_voxel_at_grid(cx + dx, y, cz + dz, color, 0);
-        }
-    }
-}
-
-static void add_static_cylinder_at_grid(int cx, int cz, int radius,
-                                        int miny, int maxy,
-                                        Color color)
-{
-    for (int y = miny; y <= maxy; ++y) {
-        add_static_disc_at_grid(cx, cz, radius, y, color);
-    }
-}
-
-static void add_static_ring_at_grid(int cx, int cz,
-                                    int radius_outer, int radius_inner,
-                                    int miny, int maxy,
-                                    Color color)
-{
-    int outer2 = radius_outer * radius_outer;
-    int inner2 = radius_inner * radius_inner;
-    for (int y = miny; y <= maxy; ++y) {
-        for (int dx = -radius_outer; dx <= radius_outer; ++dx) {
-            for (int dz = -radius_outer; dz <= radius_outer; ++dz) {
-                int dist2 = dx * dx + dz * dz;
-                if (dist2 > outer2 || dist2 < inner2) {
-                    continue;
-                }
-                add_static_voxel_at_grid(cx + dx, y, cz + dz, color, 0);
-            }
-        }
-    }
-}
-
-static void add_static_boulder_at_grid(int cx, int cz, int base_y,
-                                       int radius, Color color)
-{
-    static const int offsets[5][2] = {
-        { 0, 0 }, { 1, 0 }, { 0, 1 }, { -1, 0 }, { 0, -1 }
-    };
-    int layers = radius;
-    for (int y = 0; y <= layers; ++y) {
-        int layer_radius = radius - (y / 2);
-        if (layer_radius < 1) {
-            layer_radius = 1;
-        }
-        int oi = y % 5;
-        add_static_disc_at_grid(cx + offsets[oi][0],
-                                cz + offsets[oi][1],
-                                layer_radius, base_y + y, color);
-    }
-}
-
-static void add_static_ring_with_door_at_grid(int cx, int cz,
-                                              int radius_outer, int radius_inner,
-                                              int miny, int maxy,
-                                              Color color,
-                                              int door_dir_x,
-                                              int door_width, int door_height)
-{
-    int outer2 = radius_outer * radius_outer;
-    int inner2 = radius_inner * radius_inner;
-    for (int y = miny; y <= maxy; ++y) {
-        bool door_row = (y <= door_height);
-        for (int dx = -radius_outer; dx <= radius_outer; ++dx) {
-            for (int dz = -radius_outer; dz <= radius_outer; ++dz) {
-                int dist2 = dx * dx + dz * dz;
-                if (dist2 > outer2 || dist2 < inner2) {
-                    continue;
-                }
-                if (door_row && abs(dz) <= door_width) {
-                    if ((door_dir_x > 0 && dx >= radius_inner) ||
-                        (door_dir_x < 0 && dx <= -radius_inner)) {
-                        continue;
-                    }
-                }
-                add_static_voxel_at_grid(cx + dx, y, cz + dz, color, 0);
-            }
-        }
-    }
-}
-
-static void add_static_hollow_cylinder_at_grid(int cx, int cz,
-                                               int radius_outer, int radius_inner,
-                                               int miny, int maxy,
-                                               Color color)
-{
-    if (radius_inner < 0) {
-        radius_inner = 0;
-    }
-    if (radius_inner >= radius_outer) {
-        radius_inner = radius_outer - 1;
-    }
-    add_static_ring_at_grid(cx, cz, radius_outer, radius_inner, miny, maxy, color);
-}
-
-static void add_static_arch_at_grid(int cx, int cz, int base_y,
-                                    int span, int height, int thickness,
-                                    Color color)
-{
-    int radius = span / 2;
-    if (radius < 2) {
-        return;
-    }
-    float radius_f = (float)radius;
-    int half = span / 2;
-    for (int dx = -half; dx <= half; ++dx) {
-        float xf = (float)dx;
-        float y_arc = 0.0f;
-        float inside = radius_f * radius_f - xf * xf;
-        if (inside > 0.0f) {
-            y_arc = radius_f - sqrtf(inside);
-        }
-        int y = base_y + height - (int)roundf(y_arc);
-        for (int t = 0; t < thickness; ++t) {
-            add_static_box_at_grid(cx + dx, cx + dx,
-                                   y + t, y + t,
-                                   cz - thickness, cz + thickness,
-                                   color);
-        }
-    }
-}
-
-static void buildStackedPillar(int cx, int cz, int r,
-                               int segH, int segCount, int gapH,
-                               int faultY, Color c) {
-    int yBase = 0;
-    for (int s = 0; s < segCount; ++s) {
-        for (int y = 0; y < segH; ++y) {
-            for (int dx = -r; dx <= r; ++dx) {
-                for (int dz = -r; dz <= r; ++dz) {
-                    if (abs(dx) > r || abs(dz) > r) continue;
-                    if (abs(dx) == r && abs(dz) == r) continue;
-                    int worldY = yBase + y;
-                    if (faultY >= 0 && worldY == faultY) {
-                        if (abs(dx) <= r - 1 && abs(dz) <= r - 1) {
-                            continue;
-                        }
-                    }
-                    addVoxelAt(cx + dx, worldY, cz + dz, c);
-                }
-            }
-        }
-        yBase += segH + gapH;
-    }
-}
-
-static void buildSplitPlatform(int centerX, int centerZ,
-                               int baseY, int size, int seamHalf,
-                               Color deckC, Color ribC) {
-    int half = size / 2;
-    int x0 = centerX - half;
-    int z0 = centerZ - half;
-    int x1 = x0 + size;
-    int z1 = z0 + size;
-
-    int midX = centerX;
-    int midZ = centerZ;
-
-    for (int x = x0; x < x1; ++x) {
-        for (int z = z0; z < z1; ++z) {
-            if (seamHalf > 0 &&
-                (abs(x - midX) <= seamHalf || abs(z - midZ) <= seamHalf)) {
-                continue;
-            }
-            addVoxelAt(x, baseY, z, deckC);
-        }
-    }
-
-    int ribY = baseY - 1;
-    if (ribY >= 0) {
-        for (int x = x0; x < x1; ++x) {
-            if (x == midX) continue;
-            addVoxelAt(x, ribY, centerZ - 2, ribC);
-            addVoxelAt(x, ribY, centerZ + 0, ribC);
-            addVoxelAt(x, ribY, centerZ + 2, ribC);
-        }
-    }
-
-    if (seamHalf > 0) {
-        int capY = baseY + 2;
-        for (int dz = -2; dz <= 2; ++dz) {
-            if (dz == 0) {
-                addVoxelAt(centerX, capY, centerZ + dz, deckC);
-            }
-        }
-        for (int dx = -2; dx <= 2; ++dx) {
-            if (dx == 0) {
-                addVoxelAt(centerX + dx, capY, centerZ, deckC);
-            }
-        }
-    }
-}
-
-static void buildLeg2x2Notched(int gx, int gz, int y0, int y1, int topY, Color c) {
-    for (int y = y0; y <= y1; ++y) {
-        for (int dx = 0; dx < 2; ++dx) {
-            for (int dz = 0; dz < 2; ++dz) {
-                if (y == topY && dx == 1 && dz == 1) continue;
-                addVoxelAt(gx + dx, y, gz + dz, c);
-            }
-        }
-    }
-}
 
 static void buildBox(int cx, int cy, int cz, int sx, int sy, int sz, Color c) {
     int x0 = cx - sx / 2, x1 = x0 + sx;
@@ -6895,90 +5776,6 @@ static void buildBox(int cx, int cy, int cz, int sx, int sy, int sz, Color c) {
     }
 }
 
-static void buildFortWalls(int cx, int cz, int w, int d, int h, Color c) {
-    int x0 = cx - w/2, x1 = x0 + w;
-    int z0 = cz - d/2, z1 = z0 + d;
-    for (int y = 0; y < h; ++y) {
-        for (int x = x0; x < x1; ++x) {
-            addVoxelAt(x, y, z0, c);
-            addVoxelAt(x, y, z1 - 1, c);
-        }
-        for (int z = z0; z < z1; ++z) {
-            addVoxelAt(x0, y, z, c);
-            addVoxelAt(x1 - 1, y, z, c);
-        }
-    }
-}
-
-static void carveFortGateOnX(int cx, int cz, int w, int d,
-                             int gate_w, int gate_h, int side) {
-    int x0 = cx - w/2, x1 = x0 + w;
-    int z0 = cz - d/2, z1 = z0 + d;
-    int midZ = cz;
-    int xWall = (side < 0) ? x0 : (x1 - 1);
-    int halfGate = gate_w / 2;
-    for (int y = 0; y <= gate_h; ++y) {
-        for (int z = midZ - halfGate; z <= midZ + halfGate; ++z) {
-            int gx = grid_to_world_g(xWall);
-            int gz = grid_to_world_g(z);
-            int idx = table_get(gx, y, gz);
-            if (idx >= 0 && idx < voxel_count) {
-                remove_voxel_index(idx);
-            }
-        }
-    }
-}
-
-static void carveFortWindows(int cx, int cz, int w, int d,
-                             int y0, int y1, int window_w) {
-    int x0 = cx - w/2, x1 = x0 + w;
-    int z0 = cz - d/2, z1 = z0 + d;
-    int midX = cx;
-    int midZ = cz;
-    int halfWin = window_w / 2;
-    for (int y = y0; y <= y1; ++y) {
-        for (int x = midX - halfWin; x <= midX + halfWin; ++x) {
-            int idx = table_get(grid_to_world_g(x), y, grid_to_world_g(z0));
-            if (idx >= 0 && idx < voxel_count) remove_voxel_index(idx);
-            idx = table_get(grid_to_world_g(x), y, grid_to_world_g(z1 - 1));
-            if (idx >= 0 && idx < voxel_count) remove_voxel_index(idx);
-        }
-        for (int z = midZ - halfWin; z <= midZ + halfWin; ++z) {
-            int idx = table_get(grid_to_world_g(x0), y, grid_to_world_g(z));
-            if (idx >= 0 && idx < voxel_count) remove_voxel_index(idx);
-            idx = table_get(grid_to_world_g(x1 - 1), y, grid_to_world_g(z));
-            if (idx >= 0 && idx < voxel_count) remove_voxel_index(idx);
-        }
-    }
-}
-
-static void buildFortRoof(int cx, int cz, int w, int d, int y, Color c) {
-    int x0 = cx - w/2, x1 = x0 + w;
-    int z0 = cz - d/2, z1 = z0 + d;
-    for (int x = x0; x < x1; ++x) {
-        for (int z = z0; z < z1; ++z) {
-            addVoxelAt(x, y, z, c);
-        }
-    }
-}
-
-static void buildGateFrame(int cx, int cz, int w, int h, int depth, Color c) {
-    int x0 = cx - w / 2;
-    int x1 = x0 + w;
-    int z0 = cz - depth / 2;
-    int z1 = z0 + depth;
-    for (int y = 0; y < h; ++y) {
-        addVoxelAt(x0, y, z0, c);
-        addVoxelAt(x1 - 1, y, z0, c);
-        addVoxelAt(x0, y, z1 - 1, c);
-        addVoxelAt(x1 - 1, y, z1 - 1, c);
-    }
-    for (int x = x0; x < x1; ++x) {
-        for (int z = z0; z < z1; ++z) {
-            addVoxelAt(x, h, z, c);
-        }
-    }
-}
 
 static void buildTestWorld(void) {
     // Floor
@@ -7062,380 +5859,6 @@ static void buildTestWorld(void) {
     buildBox(center + 6, 0, center + 20, 3, 6, 10, DARKGRAY);
 }
 
-static void buildProceduralWorld(void) {
-    int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
-    int numStructures = 20;
-    
-    for (int i = 0; i < numStructures; ++i) {
-        int cx = GetRandomValue(5, M - 5);
-        int cz = GetRandomValue(5, M - 5);
-        int cy;
-        int size;
-        
-        // At least half grounded
-        if (i < numStructures / 2) {
-            cy = 0; // Grounded at floor level
-            size = GetRandomValue(10, 40); // Larger grounded structures
-        } else {
-            cy = GetRandomValue(6, 20); // Floating
-            size = GetRandomValue(1, 16); // Normal floating debris
-        }
-        
-        Color c = (Color){ GetRandomValue(50, 200), GetRandomValue(50, 200), GetRandomValue(50, 200), 255 };
-        
-        for (int j = 0; j < size; ++j) {
-            if (cy >= 0) {
-                addVoxelAt(cx, cy, cz, c);
-            }
-            
-            // Random walk
-            int axis = GetRandomValue(0, 2);
-            int dir = GetRandomValue(0, 1) ? 1 : -1;
-            
-            if (axis == 0) cx += dir;
-            else if (axis == 1) cy += dir;
-            else cz += dir;
-            
-            // Clamp bounds
-            if (cx < 0) cx = 0; if (cx >= M) cx = M - 1;
-            if (cz < 0) cz = 0; if (cz >= M) cz = M - 1;
-            if (cy < 0) cy = 0; if (cy > 40) cy = 40; // Allow cy=0
-        }
-    }
-}
-
-static void buildBloodWorld(void) {
-    int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
-    int center = M / 2;
-    int map_radius_cells = center - 2;
-
-    int pillar_radius = 3;
-    int pillar_seg_height = 6;
-    int pillar_seg_count = 3;
-    int pillar_gap = 0;
-
-    int platform_size = (int)roundf(0.25f * (float)map_radius_cells);
-    int platform_base_height = (int)roundf(0.10f * (float)map_radius_cells);
-    if (platform_size < 12) platform_size = 12;
-    if (platform_base_height < 5) platform_base_height = 5;
-
-    int pillar_offset = (int)roundf(0.50f * (float)map_radius_cells);
-    if (pillar_offset < 26) pillar_offset = 26;
-
-    int base_offset = (int)roundf(0.62f * (float)map_radius_cells);
-    if (base_offset < 30) base_offset = 30;
-
-    Color pillar_color = (Color){ 230, 160, 70, 255 };
-    Color deck_color = (Color){ 90, 220, 150, 255 };
-    Color rib_color = (Color){ 70, 190, 230, 255 };
-    Color leg_color = (Color){ 200, 210, 70, 255 };
-    Color cover_color = (Color){ 170, 110, 220, 255 };
-    Color wall_color = (Color){ 220, 120, 120, 255 };
-
-    int pillar_fault = pillar_seg_height;
-    buildStackedPillar(center - pillar_offset, center - pillar_offset,
-                       pillar_radius, pillar_seg_height, pillar_seg_count, pillar_gap,
-                       pillar_fault, pillar_color);
-    buildStackedPillar(center - pillar_offset, center + pillar_offset,
-                       pillar_radius, pillar_seg_height, pillar_seg_count, pillar_gap,
-                       pillar_fault, pillar_color);
-    buildStackedPillar(center + pillar_offset, center - pillar_offset,
-                       pillar_radius, pillar_seg_height, pillar_seg_count, pillar_gap,
-                       pillar_fault, pillar_color);
-    buildStackedPillar(center + pillar_offset, center + pillar_offset,
-                       pillar_radius, pillar_seg_height, pillar_seg_count, pillar_gap,
-                       pillar_fault, pillar_color);
-
-    buildSplitPlatform(center, center, platform_base_height,
-                       platform_size, 0, deck_color, rib_color);
-
-    int half = platform_size / 2;
-    int leg_min_y = 0;
-    int leg_max_y = platform_base_height - 1;
-    int topY = leg_max_y;
-    buildLeg2x2Notched(center - half, center - half, leg_min_y, leg_max_y, topY, leg_color);
-    buildLeg2x2Notched(center - half, center + half - 1, leg_min_y, leg_max_y, topY, leg_color);
-    buildLeg2x2Notched(center + half - 1, center - half, leg_min_y, leg_max_y, topY, leg_color);
-    buildLeg2x2Notched(center + half - 1, center + half - 1, leg_min_y, leg_max_y, topY, leg_color);
-
-    int base_height = 9;
-    int base_w = 16;
-    int base_d = 12;
-    int gate_w = 5;
-    int gate_h = 6;
-    int window_w = 3;
-    int window_y0 = 3;
-    int window_y1 = 5;
-    buildFortWalls(center - base_offset, center, base_w, base_d, base_height, wall_color);
-    buildFortWalls(center + base_offset, center, base_w, base_d, base_height, wall_color);
-    buildFortRoof(center - base_offset, center, base_w, base_d, base_height, wall_color);
-    buildFortRoof(center + base_offset, center, base_w, base_d, base_height, wall_color);
-    carveFortGateOnX(center - base_offset, center, base_w, base_d, gate_w, gate_h, 1);
-    carveFortGateOnX(center + base_offset, center, base_w, base_d, gate_w, gate_h, -1);
-    carveFortWindows(center - base_offset, center, base_w, base_d, window_y0, window_y1, window_w);
-    carveFortWindows(center + base_offset, center, base_w, base_d, window_y0, window_y1, window_w);
-
-    buildBox(center - pillar_offset + 4, 0, center + 14, 4, 4, 4, cover_color);
-    buildBox(center + pillar_offset - 4, 0, center - 14, 4, 4, 4, cover_color);
-    buildBox(center - pillar_offset + 4, 0, center - 14, 4, 4, 4, cover_color);
-    buildBox(center + pillar_offset - 4, 0, center + 14, 4, 4, 4, cover_color);
-
-    int lane_len = 34;
-    int lane_height = 5;
-    for (int y = 0; y < lane_height; ++y) {
-        for (int x = center - lane_len; x <= center + lane_len; ++x) {
-            addVoxelAt(x, y, center + 18, wall_color);
-            addVoxelAt(x, y, center - 18, wall_color);
-        }
-    }
-
-    // Extra low cover to break up long sight lines near the center.
-    buildBox(center - 10, 0, center + 6, 8, 3, 2, cover_color);
-    buildBox(center + 10, 0, center - 6, 8, 3, 2, cover_color);
-    buildBox(center - 6, 0, center - 10, 2, 3, 8, cover_color);
-    buildBox(center + 6, 0, center + 10, 2, 3, 8, cover_color);
-
-    buildGateFrame(center - pillar_offset - 8, center + 18, 5, 6, 3, wall_color);
-    buildGateFrame(center + pillar_offset + 8, center + 18, 5, 6, 3, wall_color);
-    buildGateFrame(center - pillar_offset - 8, center - 18, 5, 6, 3, wall_color);
-    buildGateFrame(center + pillar_offset + 8, center - 18, 5, 6, 3, wall_color);
-
-    buildBox(center - pillar_offset - 10, 0, center + 18, 4, 4, 4, cover_color);
-    buildBox(center + pillar_offset + 10, 0, center + 18, 4, 4, 4, cover_color);
-    buildBox(center - pillar_offset - 10, 0, center - 18, 4, 4, 4, cover_color);
-    buildBox(center + pillar_offset + 10, 0, center - 18, 4, 4, 4, cover_color);
-}
-
-static void buildDebugWorld(void) {
-    //init_debug_tag_offsets();
-    // Floating dynamic test clusters (mixed span sizes, zero initial glue stress).
-    // Debug tags: 1=corner chunk, 2=stacked pillar, 3=three-span bar, 4=plate+cap,
-    // 5=step chain, 6=solid cube, 7=long beam, 8=brace frame, 9=staggered stack,
-    // 10=unit cube control, 11=single span control, 12=thin slab, 13=flat cross, 14=vertical column,
-    // 15=slab as units, 16=slab as span-4, 17=beam as units, 18=beam as span-4, 19=checker slab,
-    // 20=vertical beam (Y), 21=depth beam (Z), 22=YZ wall, 23=XZ slab, 24=stacked span-2 (Y).
-    // {
-    //     int bx = -16, by = 10, bz = -12;
-    //     int tag = 1;
-    //     add_dynamic_unit_block_tag(bx, by, bz, 2, 2, 2, (Color){ 210, 120, 90, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by, bz, 2, (Color){ 240, 160, 100, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx, by + 2, bz, 2, (Color){ 200, 90, 140, 255 }, tag);
-    // }
-    // {
-    //     int bx = 6, by = 12, bz = -10;
-    //     int tag = 2;
-    //     add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 4, (Color){ 180, 150, 80, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 4, by, bz, 2, (Color){ 220, 180, 90, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 4, bz + 1, 2, (Color){ 250, 210, 130, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 6, bz + 1, 1, (Color){ 240, 200, 120, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 6, bz + 2, 1, (Color){ 240, 200, 120, 255 }, tag);
-    // }
-    // {
-    //     int bx = -8, by = 16, bz = 6;
-    //     int tag = 3;
-    //     add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 2, (Color){ 90, 170, 230, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by, bz, 2, (Color){ 70, 140, 210, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 4, by, bz, 2, (Color){ 60, 120, 190, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 2, bz, 1, (Color){ 120, 200, 250, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 2, bz + 1, 1, (Color){ 120, 200, 250, 255 }, tag);
-    // }
-    // {
-    //     int bx = 10, by = 8, bz = 8;
-    //     int tag = 4;
-    //     add_dynamic_unit_block_tag(bx, by, bz, 3, 1, 3, (Color){ 140, 200, 140, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 1, bz + 1, 2, (Color){ 90, 170, 120, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 3, bz + 1, 1, (Color){ 60, 140, 90, 255 }, tag);
-    // }
-    // {
-    //     int bx = -2, by = 20, bz = -2;
-    //     int tag = 5;
-    //     add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 2, (Color){ 200, 120, 210, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by, bz, 2, (Color){ 170, 90, 180, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx, by + 2, bz, 1, (Color){ 210, 140, 230, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 2, bz, 1, (Color){ 210, 140, 230, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 2, bz, 1, (Color){ 210, 140, 230, 255 }, tag);
-    // }
-    // {
-    //     int bx = -14, by = 24, bz = 6;
-    //     int tag = 6;
-    //     add_dynamic_unit_block_tag(bx, by, bz, 3, 3, 3, (Color){ 200, 170, 110, 255 }, tag);
-    // }
-    // {
-    //     int bx = 2, by = 22, bz = 12;
-    //     int tag = 7;
-    //     add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 1, (Color){ 160, 210, 120, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 1, by, bz, 1, (Color){ 160, 210, 120, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by, bz, 1, (Color){ 160, 210, 120, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 3, by, bz, 1, (Color){ 160, 210, 120, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 4, by, bz, 1, (Color){ 160, 210, 120, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 1, bz, 1, (Color){ 120, 170, 90, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by - 1, bz, 1, (Color){ 120, 170, 90, 255 }, tag);
-    // }
-    // {
-    //     int bx = 12, by = 18, bz = -6;
-    //     int tag = 8;
-    //     add_dynamic_unit_block_tag(bx, by, bz, 3, 1, 3, (Color){ 120, 150, 220, 255 }, tag);
-    //     add_dynamic_unit_block_tag(bx, by + 2, bz, 3, 1, 3, (Color){ 120, 150, 220, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx, by + 1, bz, 1, (Color){ 80, 110, 200, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 1, bz, 1, (Color){ 80, 110, 200, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx, by + 1, bz + 2, 1, (Color){ 80, 110, 200, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 1, bz + 2, 1, (Color){ 80, 110, 200, 255 }, tag);
-    // }
-    // {
-    //     int bx = -6, by = 26, bz = -14;
-    //     int tag = 9;
-    //     add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 2, (Color){ 210, 140, 120, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 2, by + 1, bz, 2, (Color){ 190, 120, 100, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 3, bz + 1, 1, (Color){ 230, 160, 130, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 3, by + 3, bz + 1, 1, (Color){ 230, 160, 130, 255 }, tag);
-    // }
-    // {
-    //     int bx = -20, by = 30, bz = 12;
-    //     int tag = 10;
-    //     add_dynamic_unit_block_tag(bx, by, bz, 2, 2, 2, (Color){ 200, 200, 200, 255 }, tag);
-    // }
-    // {
-    //     int bx = -10, by = 30, bz = 12;
-    //     int tag = 11;
-    //     add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 2, (Color){ 180, 180, 200, 255 }, tag);
-    // }
-    // {
-    //     int bx = 0, by = 30, bz = 12;
-    //     int tag = 12;
-    //     add_dynamic_unit_block_tag(bx, by, bz, 4, 1, 4, (Color){ 160, 180, 220, 255 }, tag);
-    // }
-    // {
-    //     int bx = 8, by = 30, bz = 14;
-    //     int tag = 13;
-    //     add_dynamic_unit_block_tag(bx, by, bz, 3, 1, 3, (Color){ 150, 160, 230, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 1, by + 1, bz + 1, 1, (Color){ 110, 130, 210, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 1, by - 1, bz + 1, 1, (Color){ 110, 130, 210, 255 }, tag);
-    // }
-    // {
-    //     int bx = 18, by = 30, bz = 12;
-    //     int tag = 14;
-    //     add_dynamic_unit_block_tag(bx, by, bz, 1, 5, 1, (Color){ 200, 150, 130, 255 }, tag);
-    // }
-    // {
-    //     int bx = -22, by = 34, bz = -2;
-    //     int tag = 15;
-    //     add_dynamic_unit_block_tag(bx, by, bz, 4, 1, 4, (Color){ 130, 170, 210, 255 }, tag);
-    // }
-    // {
-    //     int bx = -14, by = 34, bz = -2;
-    //     int tag = 16;
-    //     add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 4, (Color){ 110, 150, 190, 255 }, tag);
-    // }
-    // {
-    //     int bx = -6, by = 34, bz = -2;
-    //     int tag = 17;
-    //     add_dynamic_unit_block_tag(bx, by, bz, 6, 1, 1, (Color){ 140, 200, 160, 255 }, tag);
-    // }
-    // {
-    //     int bx = 2, by = 34, bz = -2;
-    //     int tag = 18;
-    //     add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 4, (Color){ 120, 180, 140, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx + 4, by, bz, 2, (Color){ 120, 180, 140, 255 }, tag);
-    // }
-    // {
-    //     int bx = 10, by = 34, bz = -4;
-    //     int tag = 19;
-    //     for (int x = 0; x < 4; ++x) {
-    //         for (int z = 0; z < 4; ++z) {
-    //             if (((x + z) & 1) == 0) {
-    //                 add_dynamic_span_voxel_at_grid_tag(bx + x, by, bz + z, 1,
-    //                                                    (Color){ 180, 140, 160, 255 }, tag);
-    //             }
-    //         }
-    //     }
-    // }
-    // {
-    //     int bx = -22, by = 34, bz = -12;
-    //     int tag = 20;
-    //     add_dynamic_unit_block_tag(bx, by, bz, 1, 6, 1, (Color){ 160, 190, 230, 255 }, tag);
-    // }
-    // {
-    //     int bx = -14, by = 34, bz = -12;
-    //     int tag = 21;
-    //     add_dynamic_unit_block_tag(bx, by, bz, 1, 1, 6, (Color){ 180, 210, 170, 255 }, tag);
-    // }
-    // {
-    //     int bx = -6, by = 34, bz = -12;
-    //     int tag = 22;
-    //     add_dynamic_unit_block_tag(bx, by, bz, 1, 4, 4, (Color){ 140, 170, 200, 255 }, tag);
-    // }
-    // {
-    //     int bx = 2, by = 34, bz = -12;
-    //     int tag = 23;
-    //     add_dynamic_unit_block_tag(bx, by, bz, 4, 1, 4, (Color){ 200, 170, 140, 255 }, tag);
-    // }
-    // {
-    //     int bx = 12, by = 34, bz = -12;
-    //     int tag = 24;
-    //     add_dynamic_span_voxel_at_grid_tag(bx, by, bz, 2, (Color){ 170, 140, 200, 255 }, tag);
-    //     add_dynamic_span_voxel_at_grid_tag(bx, by + 2, bz, 2, (Color){ 170, 140, 200, 255 }, tag);
-    // }
-    // for (int x = 0; x <= M; x++) {
-    //     for (int z = 0; z <= M; z++) {
-    //         float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //         float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
-    //         addVoxel(px, 0, pz, true, false, (Color){ 150, 150, 150, 255 }, 0);
-    //     }
-    // }
-    // UnitVoxelBuffer pyramid_units;
-    // unit_voxel_buffer_clear(&pyramid_units);
-    // build_oblique_voxel_pyramid(&pyramid_units);
-    // emit_static_voxels_from_units(&pyramid_units);
-    //Span-2 dynamic voxel near origin for floor collision testing
-    {
-        int span1 = 3;
-        int span2 = 30;
-        float px = -2.0f * VOXEL_SIZE;
-        float pz = 2.0f * VOXEL_SIZE;
-        float py = 0.0f;
-        for ( int x = 0; x < span1; x++){
-            for ( int z = 0; z < span1; z++){
-                for ( int y = 0; y < span2; y++){
-            addVoxel(px + x * VOXEL_SIZE, py + y * VOXEL_SIZE, pz + z * VOXEL_SIZE,
-                     true, false, (Color){ 240, 160, 60, 255 }, 0);
-                     //false, true, (Color){ 240, 160, 60, 255 }, 0);
-                }
-            }
-
-        }
-    }
-    // {
-    //     int span = 7;
-    //     float px = -2.0f * VOXEL_SIZE;
-    //     float pz = 2.0f * VOXEL_SIZE;
-    //     float py = 2.0f+0.5f * (float)span * VOXEL_SIZE;
-    //     addVoxelSized(px, py*2.0f, pz, false, true, (Color){ 240, 160, 60, 255 }, 0, span);
-    // }
-    // // Static 1x4x4 pad with a span-2 block hovering above for collision testing
-    // {
-    //     const int layer_size = 4;
-    //     const int layer_origin_x = 4;
-    //     const int layer_origin_z = -6;
-    //     const int layer_y = 1;
-    //     Color pad_color = (Color){ 80, 140, 210, 255 };
-    //     for (int lx = 0; lx < layer_size; ++lx) {
-    //         for (int lz = 0; lz < layer_size; ++lz) {
-    //             int gx = layer_origin_x + lx;
-    //             int gz = layer_origin_z + lz;
-    //             add_static_voxel_at_grid(gx, layer_y, gz, pad_color, 0);
-    //         }
-    //     }
-    //     float center_x = (layer_origin_x + 0.5f * (float)layer_size) * VOXEL_SIZE;
-    //     float center_z = (layer_origin_z + 0.5f * (float)layer_size) * VOXEL_SIZE;
-    //     float center_y = ((float)layer_y + 0.5f) * VOXEL_SIZE;
-    //     int span = 2;
-    //     float static_half = 0.5f * VOXEL_SIZE;
-    //     float vertical_gap = 2.0f * VOXEL_SIZE;
-    //     float dynamic_half = 0.5f * VOXEL_SIZE * (float)span;
-    //     float py = center_y + static_half + vertical_gap + dynamic_half;
-    //     addVoxelSized(center_x, py, center_z, false, true, (Color){ 230, 80, 120, 255 }, 0, span);
-    // }
-}
 
 // Build static demo cube of voxels
 static void buildDemo(void) {
@@ -7445,7 +5868,6 @@ static void buildDemo(void) {
     //buildDebugWorld();
     rebuild_glue_constraints();
 }
-
 
 
 static int first_voxel_hit(Ray ray, float t_max, int ignore_id);
@@ -7543,7 +5965,6 @@ static void clear_world_voxels(void) {
     memset(debugTagBreakLogged, 0, sizeof(debugTagBreakLogged));
     memset(staticBeliefDirty, 0, sizeof(staticBeliefDirty));
     memset(staticBeliefQueued, 0, sizeof(staticBeliefQueued));
-    memset(table, 0, sizeof(table));
     memset(static_table, 0, sizeof(static_table));
     memset(dynamic_table, 0, sizeof(dynamic_table));
     // Clearing the world changes authoritative static occupancy just as much as
@@ -7965,7 +6386,6 @@ static void ResetGame(void) {
     memset(staticBeliefDirty, 0, sizeof(staticBeliefDirty));
     memset(staticBeliefQueued, 0, sizeof(staticBeliefQueued));
     // clear hash
-    memset(table, 0, sizeof(table));
     // build static blocks
     buildDemo();
     rebuild_all_voxel_surfaces();
@@ -8696,77 +7116,6 @@ static void apply_matter_damage(int player_index, int attacker_index, float dama
     }
 }
 
-static bool activate_static_neighbors_of_region(int minx, int maxx,
-                                                int miny, int maxy,
-                                                int minz, int maxz,
-                                                int activator,
-                                                float activationBelief)
-{
-    static UnitVoxelBuffer buffer;
-    unit_voxel_buffer_clear(&buffer);
-    refresh_static_voxel_beliefs();
-
-    int ex_minx = minx - 1;
-    int ex_maxx = maxx + 1;
-    int ex_miny = miny - 1;
-    int ex_maxy = maxy + 1;
-    int ex_minz = minz - 1;
-    int ex_maxz = maxz + 1;
-
-    if (ex_miny < 0) {
-        ex_miny = 0;
-    }
-
-    for (int z = ex_minz; z <= ex_maxz && buffer.count < VOXEL_ACTIVATION_UNIT_BUDGET; ++z) {
-        for (int y = ex_miny; y <= ex_maxy && buffer.count < VOXEL_ACTIVATION_UNIT_BUDGET; ++y) {
-            for (int x = ex_minx; x <= ex_maxx && buffer.count < VOXEL_ACTIVATION_UNIT_BUDGET; ++x) {
-                if (x >= minx && x <= maxx &&
-                    y >= miny && y <= maxy &&
-                    z >= minz && z <= maxz) {
-                    continue;
-                }
-                int idx = table_get(x, y, z);
-                if (idx < 0 || idx >= voxel_count) {
-                    continue;
-                }
-                Voxel *candidate = &voxels[idx];
-                if (candidate->simulate || candidate->pendingActivation) {
-                    continue;
-                }
-                if (!dynamic_belief_overcomes_static(activationBelief, candidate->freezeBelief)) {
-                    continue;
-                }
-                candidate->pendingActivation = true;
-                if (!unit_voxel_buffer_push(&buffer,
-                                            candidate->gx, candidate->gy, candidate->gz,
-                                            candidate->color, candidate->type,
-                                            candidate->fixed, idx,
-                                            candidate->debugClusterTag, activator))
-                {
-                    candidate->pendingActivation = false;
-                    break;
-                }
-            }
-        }
-    }
-
-    if (buffer.count <= 0) {
-        return false;
-    }
-
-    remove_buffered_static_voxels(&buffer);
-    if (debugLogSmush) {
-        debugSmushLogBudget = 32;
-    }
-    emit_unit_voxels_from_units(&buffer, false, true, -1);
-    if (debugLogSmush && debugSmushLogBudget > 0) {
-        TraceLog(LOG_INFO,
-                 "[Smush] activated units=%d activator=%d region=(%d..%d,%d..%d,%d..%d)",
-                 buffer.count, activator, minx, maxx, miny, maxy, minz, maxz);
-        --debugSmushLogBudget;
-    }
-    return true;
-}
 
 static void rebuild_voxel_hash(void) {
     table_cache_invalidate();
@@ -8784,135 +7133,6 @@ static void rebuild_voxel_hash(void) {
     voxelHashFramesSinceRebuild = 0;
 }
 
-// Physics step for voxels
-static void physics_step(float dt) {    // Rebuild spatial hash
-    (void)dt;
-    rebuild_voxel_hash();
-    // // Simulate dynamic voxels
-    // for (int i = 0; i < voxel_count; i++) {
-    //     Voxel *v = &voxels[i];
-    //     if (!v->simulate) continue;
-
-    //     // Apply gravity
-    //     v->vel.y -= GRAVITY * dt;
-
-    //     // Continuous collision detection
-    //     Vector3 displacement = v_mul(v->vel, dt);
-    //     float distance = v_length(displacement);
-    //     bool hit_voxel = false;
-
-    //     if (distance > 0.0001f) { // only cast if moving
-    //         Ray ray = { v->pos, v_norm(v->vel) };
-    //         int hit_id = first_voxel_hit(ray, distance, i);
-
-    //         if (hit_id >= 0) {
-    //             hit_voxel = true;
-
-    //             // Stop the bullet
-    //             v->simulate = false;
-    //             v->fixed = true;
-    //             v->pos = (Vector3){-999.0f, -999.0f, -999.0f};
-    //             deactivate_constraints_for_voxel(i);
-
-    //             int brushExtent = (voxelBrushSpan < 1) ? 1 : voxelBrushSpan;
-
-    //             if (v->type == 1) { // DESTRUCTION
-    //                 Voxel *u = &voxels[hit_id];
-    //                 int anchorX = u->gx;
-    //                 int anchorY = u->gy;
-    //                 int anchorZ = u->gz;
-
-    //                 for (int dx = 0; dx < brushExtent; dx++) {
-    //                     for (int dy = 0; dy < brushExtent; dy++) {
-    //                         for (int dz = 0; dz < brushExtent; dz++) {
-    //                             int victim_idx = table_get(anchorX + dx, anchorY + dy, anchorZ + dz);
-    //                             if (victim_idx >= 0) {
-    //                                 Voxel *victim = &voxels[victim_idx];
-    //                                 voxel_table_unregister(victim);
-    //                                 mark_surface_neighbors(victim->pos);
-    //                                 victim->simulate = false;
-    //                                 victim->fixed = true;
-    //                                 victim->pos = (Vector3){-999.0f, -999.0f, -999.0f};
-    //                                 deactivate_constraints_for_voxel(victim_idx);
-    //                             }
-    //                         }
-    //                     }
-    //                 }
-    //             } else { // CONSTRUCTION
-    //                 int anchorX = v->gx;
-    //                 int anchorY = v->gy;
-    //                 int anchorZ = v->gz;
-
-    //                 for (int dx = 0; dx < brushExtent; dx++) {
-    //                     for (int dy = 0; dy < brushExtent; dy++) {
-    //                         for (int dz = 0; dz < brushExtent; dz++) {
-    //                             int targetX = anchorX + dx;
-    //                             int targetY = anchorY + dy;
-    //                             int targetZ = anchorZ + dz;
-    //                             if (!occupied(targetX, targetY, targetZ)) {
-    //                                 float px = (targetX + 0.5f) * VOXEL_SIZE;
-    //                                 float py = (targetY + 0.5f) * VOXEL_SIZE;
-    //                                 float pz = (targetZ + 0.5f) * VOXEL_SIZE;
-    //                                 int new_idx = addVoxel(px, py, pz, true, false, v->color, 0);
-    //                                 if (new_idx >= 0) {
-    //                                     mark_surface(new_idx);
-    //                                     mark_surface_neighbors(voxels[new_idx].pos);
-    //                                 }
-    //                             }
-    //                         }
-    //                     }
-    //                 }
-    //             }
-    //             //reset mesh
-    //             meshDirty = true;
-    //         }
-    //     }
-
-    //     if (!hit_voxel) {
-    //         // Move
-    //         v->pos = v_add(v->pos, displacement);
-    //         for (int j = 0; j < 2; j++) {
-    //             float dx = v->pos.x - players[j].pos.x;
-    //             float dy = v->pos.y - players[j].pos.y;
-    //             float dz = v->pos.z - players[j].pos.z;
-    //             if (fabsf(dx) < PLAYER_SIZE && fabsf(dy) < PLAYER_SIZE && fabsf(dz) < PLAYER_SIZE) {
-    //                 players[j].last_damage_time = (float)GetTime();
-    //                 if (players[j].shield > 0) {
-    //                     players[j].shield -= VOXEL_DAMAGE;
-    //                     if (players[j].shield < 0) {
-    //                         players[j].health += players[j].shield;
-    //                         players[j].shield = 0;
-    //                     }
-    //                 } else {
-    //                     players[j].health -= VOXEL_DAMAGE;
-    //                 }
-
-    //                 v->simulate = false;
-    //                 v->fixed    = true;
-    //                 v->pos      = (Vector3){ -999.0f, -999.0f, -999.0f };
-    //                 deactivate_constraints_for_voxel(i);
-
-    //                 if (players[j].health <= 0) {
-    //                     if (v->owner >= 0 && v->owner != j) {
-    //                         players[v->owner].kills++;
-    //                         players[j].deaths++;
-    //                         UpdateKdRatio(v->owner);
-    //                         UpdateKdRatio(j);
-    //                     }
-    //                     players[j].pos     = (Vector3){ randomInRange(-9,9), BASE_EYE_HEIGHT, randomInRange(-9,9) };
-    //                     players[j].vel     = (Vector3){0,0,0};
-    //                     players[j].onGround= true;
-    //                     players[j].yaw     = (j == 0 ? 0 : 180);
-    //                     players[j].pitch   = 0;
-    //                     players[j].health = BASE_HEALTH / players[j].kd_ratio;
-    //                     players[j].shield = BASE_SHIELD;
-    //                 }
-    //                 break;
-    //             }
-    //         }
-    //     }
-    // }
-}
 
 static void update_projectiles(float dt)
 {
@@ -9088,12 +7308,6 @@ static void update_projectiles(float dt)
             int anchorX = hit_gx - halfBrush;
             int anchorY = 0;
             int anchorZ = hit_gz - halfBrush;
-            int minx = anchorX;
-            int maxx = anchorX + brushExtent - 1;
-            int miny = anchorY;
-            int maxy = anchorY + brushExtent - 1;
-            int minz = anchorZ;
-            int maxz = anchorZ + brushExtent - 1;
             int min_g = (int)ceilf((-FLOOR_SIZE / VOXEL_SIZE) - 0.5f);
             int max_g = (int)floorf((FLOOR_SIZE / VOXEL_SIZE) - 0.5f);
 
@@ -9258,87 +7472,6 @@ static void handle_pbd_projectile_hits(void)
     }
 }
 
-static void update_voxel_coarsening_state(void) {
-    // 1. Determine initial active state (Shell vs Interior)
-    for (int i = 0; i < voxel_count; ++i) {
-        Voxel *v = &voxels[i];
-        if (!v->simulate || v->isBullet) {
-            v->full_neighbors = false;
-            v->simulate_dofs = false;
-            v->wake_source = false;
-            v->break_mask = 0;
-            continue;
-        }
-
-        bool full = true;
-        for (int face = 0; face < 6; ++face) {
-            int nx = v->gx + face_offsets[face][0];
-            int ny = v->gy + face_offsets[face][1];
-            int nz = v->gz + face_offsets[face][2];
-            if (table_get(nx, ny, nz) < 0) {
-                full = false;
-                break;
-            }
-        }
-
-        v->full_neighbors = full;
-        // Active if surface (not full) OR recently woken
-        v->simulate_dofs = (!full) || (v->wake_timer > 0);
-        v->wake_source = false;
-    }
-
-    // 2. Identify supported particles (those part of at least one active voxel)
-    // We assume 'touched_by_simulated' was cleared by reset_particle_mass_and_flags in the previous frame
-    // or we can clear it here to be safe.
-    for (int i = 0; i < sim_particle_count; ++i) {
-        sim_particles[i]->touched_by_simulated = false;
-    }
-
-    for (int i = 0; i < voxel_count; ++i) {
-        Voxel *v = &voxels[i];
-        if (v->simulate && !v->isBullet && v->simulate_dofs) {
-            for (int c = 0; c < 8; ++c) {
-                v->particles[c]->touched_by_simulated = true;
-            }
-        }
-    }
-
-    // 3. Rescue orphan particles (Deep Interior)
-    // If a voxel is inactive but contains an unsupported particle, wake it up to provide support.
-    for (int i = 0; i < voxel_count; ++i) {
-        Voxel *v = &voxels[i];
-        if (v->simulate && !v->isBullet && !v->simulate_dofs) {
-            bool has_orphan = false;
-            for (int c = 0; c < 8; ++c) {
-                if (!v->particles[c]->touched_by_simulated) {
-                    has_orphan = true;
-                    break;
-                }
-            }
-            if (has_orphan) {
-                v->simulate_dofs = true;
-                // Mark particles as supported now so we don't wake up neighbors unnecessarily?
-                // Actually, redundancy is fine, we just need connectivity.
-                for (int c = 0; c < 8; ++c) {
-                    v->particles[c]->touched_by_simulated = true;
-                }
-            }
-        }
-    }
-}
-
-static void reset_particle_mass_and_flags(void) {
-    for (int i = 0; i < sim_particle_count; ++i) {
-        Particle *p = sim_particles[i];
-        p->inv_mass = p->base_inv_mass;
-        p->extra_mass = 0;
-        p->touched_by_simulated = false;
-        atomic_store_explicit(&p->corr_sum_x, float_to_bits(0.0f), memory_order_relaxed);
-        atomic_store_explicit(&p->corr_sum_y, float_to_bits(0.0f), memory_order_relaxed);
-        atomic_store_explicit(&p->corr_sum_z, float_to_bits(0.0f), memory_order_relaxed);
-        atomic_store_explicit(&p->corr_weight_bits, float_to_bits(0.0f), memory_order_relaxed);
-    }
-}
 
 static int table_get_static_only(int x, int y, int z)
 /* Returns static voxel index or -1 if empty. Does not consult dynamic table. */
@@ -9357,29 +7490,6 @@ static int table_get_static_only(int x, int y, int z)
     }
 }
 
-static void apply_shell_effective_mass(void) {
-    for (int i = 0; i < voxel_count; ++i) {
-        Voxel *v = &voxels[i];
-        if (!v->simulate || v->isBullet || v->simulate_dofs) {
-            continue;
-        }
-
-        for (int c = 0; c < 8; ++c) {
-            Particle *p = v->particles[c];
-            p->extra_mass += 1;
-        }
-    }
-
-    for (int i = 0; i < sim_particle_count; ++i) {
-        Particle *p = sim_particles[i];
-        if (p->base_inv_mass <= 0.0f || p->extra_mass <= 0) {
-            p->inv_mass = p->base_inv_mass;
-            continue;
-        }
-        float scale = 1.0f + (COARSENING_MASS_SCALE * (float)p->extra_mass);
-        p->inv_mass = p->base_inv_mass / scale;
-    }
-}
 
 static int table_get_uncached_for_physics(int x, int y, int z) {
     uint64_t key = mortonKey(x, y, z);
@@ -9446,64 +7556,6 @@ static void process_break_masks(void) {
     }
 }
 
-static void accumulate_simulated_corner_deltas(Vector3 sum_delta[8], int counts[8]) {
-    for (int i = 0; i < 8; ++i) {
-        sum_delta[i] = (Vector3){ 0.0f, 0.0f, 0.0f };
-        counts[i] = 0;
-    }
-
-    for (int i = 0; i < voxel_count; ++i) {
-        Voxel *v = &voxels[i];
-        if (!v->simulate || v->isBullet || !v->simulate_dofs) {
-            continue;
-        }
-
-        for (int c = 0; c < 8; ++c) {
-            Particle *p = v->particles[c];
-            Vector3 delta = v_sub(p->predicted_pos, p->prev_pos);
-            sum_delta[c] = v_add(sum_delta[c], delta);
-            counts[c] += 1;
-        }
-    }
-}
-
-static void mark_simulated_particles(void) {
-    for (int i = 0; i < voxel_count; ++i) {
-        Voxel *v = &voxels[i];
-        if (!v->simulate || v->isBullet || !v->simulate_dofs) {
-            continue;
-        }
-        for (int c = 0; c < 8; ++c) {
-            v->particles[c]->touched_by_simulated = true;
-        }
-    }
-}
-
-static void apply_interior_sync(const Vector3 avg_delta[8], const int counts[8]) {
-    particle_sync_stamp++;
-    if (particle_sync_stamp == 0) {
-        particle_sync_stamp = 1;
-    }
-
-    for (int i = 0; i < voxel_count; ++i) {
-        Voxel *v = &voxels[i];
-        if (!v->simulate || v->isBullet || v->simulate_dofs) {
-            continue;
-        }
-
-        for (int c = 0; c < 8; ++c) {
-            if (counts[c] == 0) {
-                continue;
-            }
-            Particle *p = v->particles[c];
-            if (p->touched_by_simulated || p->sync_stamp == particle_sync_stamp) {
-                continue;
-            }
-            p->predicted_pos = v_add(p->predicted_pos, avg_delta[c]);
-            p->sync_stamp = particle_sync_stamp;
-        }
-    }
-}
 
 static void decrement_particle_timers_range(int start, int end, int worker_id, void *user) {
     (void)worker_id;
@@ -9759,197 +7811,6 @@ static inline float fast_cbrtf(float x) {
     return y;
 }
 
-static void reset_voxel_shape_to_rest(const Voxel *voxel, Vector3 *p, const float *w,
-                                      Vector3 centroid) {
-    float edge = voxel->rest_edge;
-    if (edge <= 0.0f) {
-        edge = VOXEL_SIZE;
-    }
-    if (!v_isfinite(centroid)) {
-        centroid = voxel->pos;
-    }
-    float half = 0.5f * edge;
-    for (int i = 0; i < 8; ++i) {
-        if (w[i] == 0.0f) {
-            continue;
-        }
-        p[i] = (Vector3){
-            centroid.x + corner_signs[i][0] * half,
-            centroid.y + corner_signs[i][1] * half,
-            centroid.z + corner_signs[i][2] * half
-        };
-    }
-}
-
-// Voxel Gram-Schmidt shape matching (Algorithm 1 in the paper) keeps each cell near-rest.
-static void solve_voxel_shape(Voxel *voxel) {
-    bool has_dynamic = false;
-    bool needs_reset = false;
-    Vector3 p[8];
-    float w[8];
-
-    for (int i = 0; i < 8; ++i) {
-        Particle *part = voxel->particles[i];
-        if (!v_isfinite(part->predicted_pos)) {
-            part->predicted_pos = part->pos;
-            needs_reset = true;
-        }
-        p[i] = part->predicted_pos;
-        
-        if (part->inv_mass <= 0.0f) {
-            w[i] = 1.0f; // Anchor
-        } else {
-            w[i] = part->inv_mass;
-            has_dynamic = true;
-        }
-    }
-
-    if (!has_dynamic) {
-        return;
-    }
-
-    const float rest_volume = voxel->rest_volume;
-    const float rest_edge = voxel->rest_edge;
-    Vector3 centroid = { 0.0f, 0.0f, 0.0f };
-
-    if (needs_reset) {
-        for (int i = 0; i < 8; ++i) {
-            centroid = v_add(centroid, p[i]);
-        }
-        centroid = v_mul(centroid, 1.0f / 8.0f);
-        reset_voxel_shape_to_rest(voxel, p, w, centroid);
-        voxel->pos = centroid;
-        for (int i = 0; i < 8; ++i) {
-            voxel->particles[i]->predicted_pos = p[i];
-        }
-        return;
-    }
-
-    for (int iter = 0; iter < VGS_ITERS; ++iter) {
-        centroid = (Vector3){ 0.0f, 0.0f, 0.0f };
-        for (int i = 0; i < 8; ++i) {
-            centroid = v_add(centroid, p[i]);
-        }
-        centroid = v_mul(centroid, 1.0f / 8.0f);
-
-        // Compute principal axes (v0..v2) and damp them toward orthogonality via Gram-Schmidt.
-        Vector3 v0 = v_add(v_add(v_sub(p[1], p[0]), v_sub(p[3], p[2])),
-                           v_add(v_sub(p[5], p[4]), v_sub(p[7], p[6])));
-        v0 = v_mul(v0, 0.25f);
-
-        Vector3 v1 = v_add(v_add(v_sub(p[2], p[0]), v_sub(p[3], p[1])),
-                           v_add(v_sub(p[6], p[4]), v_sub(p[7], p[5])));
-        v1 = v_mul(v1, 0.25f);
-
-        Vector3 v2 = v_add(v_add(v_sub(p[4], p[0]), v_sub(p[5], p[1])),
-                           v_add(v_sub(p[6], p[2]), v_sub(p[7], p[3])));
-        v2 = v_mul(v2, 0.25f);
-
-        Vector3 u0 = v_sub(v0, v_mul(v_add(vgs_project(v1, v0), vgs_project(v2, v0)), VGS_ALPHA));
-        Vector3 u1 = v_sub(v1, v_mul(v_add(vgs_project(v2, v1), vgs_project(v0, v1)), VGS_ALPHA));
-        Vector3 u2 = v_sub(v2, v_mul(v_add(vgs_project(v0, v2), vgs_project(v1, v2)), VGS_ALPHA));
-
-        float len0 = v_length(u0);
-        float len1 = v_length(u1);
-        float len2 = v_length(u2);
-        if (!isfinite(len0) || !isfinite(len1) || !isfinite(len2) ||
-            len0 < VGS_EPS || len1 < VGS_EPS || len2 < VGS_EPS) {
-            needs_reset = true;
-            break;
-        }
-
-        float lenp0 = 4.0f * v_length(v0);
-        float lenp1 = 4.0f * v_length(v1);
-        float lenp2 = 4.0f * v_length(v2);
-        float r_v = 1.0f;
-        float denom = lenp0 * lenp1 * lenp2;
-        float rest_demom = rest_edge * rest_edge * rest_edge;
-        if (fabsf(denom) < VGS_EPS || !isfinite(denom)) {
-            needs_reset = true;
-            break;
-        }
-        if (fabs(denom-rest_demom) > VGS_EPS) {
-            float ratio = (rest_edge * rest_edge * rest_edge) / denom;
-            float root = fast_cbrtf(fabsf(ratio));
-            r_v = (ratio < 0.0f) ? -root : root;
-        }
-
-        float target0 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * (lenp0 * r_v));
-        float target1 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * (lenp1 * r_v));
-        float target2 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * (lenp2 * r_v));
-
-        float edge_eps = VGS_EARLY_OUT_EPS * rest_edge;
-        float volume_eps = VGS_EARLY_OUT_EPS * rest_volume;
-        float d0 = fabsf(len0 - target0);
-        float d1 = fabsf(len1 - target1);
-        float d2 = fabsf(len2 - target2);
-        float raw_volume = v_dot(v_cross(u0, u1), u2);
-        if (!isfinite(raw_volume) || fabsf(raw_volume) < VGS_EPS) {
-            needs_reset = true;
-            break;
-        }
-        if (d0 <= edge_eps && d1 <= edge_eps && d2 <= edge_eps &&
-            fabsf(raw_volume - rest_volume) <= volume_eps) {
-            break;
-        }
-
-        if (fabs(len0-target0) > VGS_EPS) u0 = v_mul(u0, target0 / len0);
-        if (fabs(len1-target1) > VGS_EPS) u1 = v_mul(u1, target1 / len1);
-        if (fabs(len2-target2) > VGS_EPS) u2 = v_mul(u2, target2 / len2);
-
-        // Volume correction mirrors the GPU "ResizeVoxelBasis" stage.
-        float volume = v_dot(v_cross(u0, u1), u2);
-        if (!isfinite(volume) || fabsf(volume) < VGS_EPS) {
-            needs_reset = true;
-            break;
-        }
-        if (fabsf(volume) > VGS_EPS && fabsf(volume-rest_volume) > VGS_EPS) {
-            float scale = rest_volume / volume;
-            float root = fast_cbrtf(fabsf(scale));
-            if (scale < 0.0f) {
-                root = -root;
-            }
-            u0 = v_mul(u0, root);
-            u1 = v_mul(u1, root);
-            u2 = v_mul(u2, root);
-        }
-
-        // Rebuild the voxel corners from the orthogonal frame and push dynamic particles only.
-        u0 = v_mul(u0, 0.5f);
-        u1 = v_mul(u1, 0.5f);
-        u2 = v_mul(u2, 0.5f);
-        Vector3 new_p[8];
-        new_p[0] = v_sub(v_sub(v_sub(centroid, u0), u1), u2);
-        new_p[1] = v_sub(v_sub(v_add(centroid, u0), u1), u2);
-        new_p[2] = v_sub(v_add(v_sub(centroid, u0), u1), u2);
-        new_p[3] = v_sub(v_add(v_add(centroid, u0), u1), u2);
-        new_p[4] = v_add(v_sub(v_sub(centroid, u0), u1), u2);
-        new_p[5] = v_add(v_sub(v_add(centroid, u0), u1), u2);
-        new_p[6] = v_add(v_add(v_sub(centroid, u0), u1), u2);
-        new_p[7] = v_add(v_add(v_add(centroid, u0), u1), u2);
-
-        for (int i = 0; i < 8; ++i) {
-            if (w[i] == 0.0f)
-                continue;
-            p[i] = new_p[i];
-        }
-
-    }
-
-    if (needs_reset) {
-        centroid = (Vector3){ 0.0f, 0.0f, 0.0f };
-        for (int i = 0; i < 8; ++i) {
-            centroid = v_add(centroid, p[i]);
-        }
-        centroid = v_mul(centroid, 1.0f / 8.0f);
-        reset_voxel_shape_to_rest(voxel, p, w, centroid);
-    }
-
-    voxel->pos = centroid;
-    for (int i = 0; i < 8; ++i) {
-        voxel->particles[i]->predicted_pos = p[i];
-    }
-}
 
 // Voxel Gram-Schmidt shape matching (Algorithm 1 in the paper) gathers corrections for Jacobi updates.
 static void gather_voxel_shape_constraints(Voxel *voxel) {
@@ -10330,7 +8191,6 @@ static void gather_voxel_shape_constraints_range(int start, int end, int worker_
 static void rebuild_glue_constraints(void) {
     collisionTopologyDirty = true;
     glueConstraintCount = 0;
-    glue_adjacency_clear_all();
     for (int i = 0; i < voxel_count; ++i) {
         memset(voxels[i].glued_faces, 0, sizeof(voxels[i].glued_faces));
     }
@@ -10395,36 +8255,6 @@ static int gather_glued_neighbors_symmetric(int voxel_idx, int *out, int max_out
     return count;
 }
 
-static void deactivate_glue_constraints_between(int a, int b) {
-    if (a < 0 || b < 0 || a >= voxel_count || b >= voxel_count) {
-        return;
-    }
-    bool removed_any = false;
-    for (int g = 0; g < glueConstraintCount; ++g) {
-        GlueConstraint *gc = &glueConstraints[g];
-        if (!gc->active) {
-            continue;
-        }
-        if ((gc->coarseVoxel == a && gc->fineVoxel == b) ||
-            (gc->coarseVoxel == b && gc->fineVoxel == a)) {
-            gc->active = false;
-            removed_any = true;
-        }
-    }
-
-    if (removed_any) {
-        for (int face = 0; face < 6; ++face) {
-            int nx = voxels[a].gx + face_offsets[face][0];
-            int ny = voxels[a].gy + face_offsets[face][1];
-            int nz = voxels[a].gz + face_offsets[face][2];
-            int neighbor_idx = table_get(nx, ny, nz);
-            if (neighbor_idx == b) {
-                break_face_link(&voxels[a], face);
-                break;
-            }
-        }
-    }
-}
 
 static int build_glue_cluster_indices(int start_idx, int *out_indices)
 {
@@ -11098,185 +8928,6 @@ static void set_voxel_velocity(Voxel *voxel, Vector3 vel)
     }
 }
 
-static bool voxel_center_near_grid(const Voxel *voxel, float epsilon)
-{
-    if (!voxel) {
-        return false;
-    }
-    int minx, maxx, miny, maxy, minz, maxz;
-    voxel_grid_bounds(voxel, &minx, &maxx, &miny, &maxy, &minz, &maxz);
-    float target_x = 0.5f * ((float)minx + (float)maxx + 1.0f) * VOXEL_SIZE;
-    float target_y = 0.5f * ((float)miny + (float)maxy + 1.0f) * VOXEL_SIZE;
-    float target_z = 0.5f * ((float)minz + (float)maxz + 1.0f) * VOXEL_SIZE;
-    return (fabsf(voxel->pos.x - target_x) <= epsilon) &&
-           (fabsf(voxel->pos.y - target_y) <= epsilon) &&
-           (fabsf(voxel->pos.z - target_z) <= epsilon);
-}
-
-static bool batch_glued_dynamic_voxels(void)
-{
-    if (voxel_count <= 0) {
-        return false;
-    }
-
-    memset(glueClusterVisitedTemp, 0, (size_t)voxel_count * sizeof(unsigned char));
-    for (int i = 0; i < voxel_count; ++i) {
-        Voxel *seed = &voxels[i];
-        if (!seed->simulate || glueClusterVisitedTemp[i]) {
-            continue;
-        }
-
-        int cluster_count = build_glue_cluster_indices(i, glueClusterIndices);
-        if (cluster_count <= 1) {
-            glueClusterVisitedTemp[i] = 1;
-            continue;
-        }
-
-        for (int c = 0; c < cluster_count; ++c) {
-            int idx = glueClusterIndices[c];
-            if (idx >= 0 && idx < voxel_count) {
-                glueClusterVisitedTemp[idx] = 1;
-            }
-        }
-
-        static UnitVoxelBuffer buffer;
-        unit_voxel_buffer_clear(&buffer);
-        Vector3 sum_vel = { 0.0f, 0.0f, 0.0f };
-        float vel_weight = 0.0f;
-        int min_sleep = INT_MAX;
-        bool eligible = true;
-        float align_epsilon = VOXEL_SIZE * 0.1f;
-        int cluster_activator = -1;
-
-        for (int c = 0; c < cluster_count; ++c) {
-            int idx = glueClusterIndices[c];
-            if (idx < 0 || idx >= voxel_count) {
-                eligible = false;
-                break;
-            }
-            Voxel *voxel = &voxels[idx];
-            if (!voxel->simulate) {
-                eligible = false;
-                break;
-            }
-            if (cluster_activator < 0 && voxel->activator >= 0) {
-                cluster_activator = voxel->activator;
-            }
-            if (!voxel_center_near_grid(voxel, align_epsilon)) {
-                eligible = false;
-                break;
-            }
-
-            int minx, maxx, miny, maxy, minz, maxz;
-            voxel_grid_bounds(voxel, &minx, &maxx, &miny, &maxy, &minz, &maxz);
-            int span_count_x = maxx - minx + 1;
-            int span_count_y = maxy - miny + 1;
-            int span_count_z = maxz - minz + 1;
-            int cell_count = span_count_x * span_count_y * span_count_z;
-            if (cell_count <= 0) {
-                eligible = false;
-                break;
-            }
-
-            for (int gx = minx; gx <= maxx; ++gx) {
-                for (int gy = miny; gy <= maxy; ++gy) {
-                    for (int gz = minz; gz <= maxz; ++gz) {
-                        if (!unit_voxel_buffer_push(&buffer, gx, gy, gz,
-                                                    voxel->color, voxel->type, voxel->fixed, -1,
-                                                    voxel->debugClusterTag, -1)) {
-                            eligible = false;
-                            break;
-                        }
-                    }
-                    if (!eligible) {
-                        break;
-                    }
-                }
-                if (!eligible) {
-                    break;
-                }
-            }
-            if (!eligible) {
-                break;
-            }
-
-            sum_vel = v_add(sum_vel, v_mul(voxel->vel, (float)cell_count));
-            vel_weight += (float)cell_count;
-            if (voxel->sleepFrames < min_sleep) {
-                min_sleep = voxel->sleepFrames;
-            }
-        }
-
-        if (!eligible || buffer.count <= 1) {
-            continue;
-        }
-        if (cluster_activator >= 0) {
-            for (int b = 0; b < buffer.count; ++b) {
-                buffer.voxels[b].activator = cluster_activator;
-            }
-        }
-
-        if (vel_weight <= 0.0f) {
-            vel_weight = 1.0f;
-        }
-        Vector3 avg_vel = v_mul(sum_vel, 1.0f / vel_weight);
-        if (min_sleep == INT_MAX) {
-            min_sleep = 0;
-        }
-
-        Voxel *snapshots = (Voxel *)malloc(sizeof(Voxel) * (size_t)cluster_count);
-        int *sorted = (int *)malloc(sizeof(int) * (size_t)cluster_count);
-        if (!snapshots || !sorted) {
-            free(snapshots);
-            free(sorted);
-            ++i;
-            continue;
-        }
-        for (int c = 0; c < cluster_count; ++c) {
-            int idx = glueClusterIndices[c];
-            snapshots[c] = voxels[idx];
-            sorted[c] = idx;
-        }
-        for (int a = 0; a < cluster_count - 1; ++a) {
-            for (int b = a + 1; b < cluster_count; ++b) {
-                if (sorted[a] < sorted[b]) {
-                    int tmp = sorted[a];
-                    sorted[a] = sorted[b];
-                    sorted[b] = tmp;
-                }
-            }
-        }
-        for (int c = 0; c < cluster_count; ++c) {
-            remove_voxel_index(sorted[c]);
-        }
-
-        int before = voxel_count;
-        int spawned = emit_unit_voxels_from_units(&buffer, false, true, -1);
-        if (spawned <= 0) {
-            for (int c = 0; c < cluster_count; ++c) {
-                restore_dynamic_snapshot(&snapshots[c]);
-            }
-            free(sorted);
-            free(snapshots);
-            continue;
-        }
-
-        for (int v = before; v < voxel_count; ++v) {
-            set_voxel_velocity(&voxels[v], avg_vel);
-            voxels[v].sleepFrames = min_sleep;
-        }
-
-        free(sorted);
-        free(snapshots);
-        rebuild_voxel_hash();
-        rebuild_all_voxel_surfaces();
-        rebuild_glue_constraints();
-        meshDirty = true;
-        return true;
-    }
-
-    return false;
-}
 
 static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count)
 {
@@ -11464,66 +9115,6 @@ static bool ranges_overlap(int minA, int maxA, int minB, int maxB) {
     return true;
 }
 
-static bool voxels_face_direction(int idxA, int idxB,
-                                  const GlueDirection **out_dir,
-                                  bool *a_is_negative)
-{
-    const Voxel *a = &voxels[idxA];
-    const Voxel *b = &voxels[idxB];
-    int a_minx, a_maxx, a_miny, a_maxy, a_minz, a_maxz;
-    int b_minx, b_maxx, b_miny, b_maxy, b_minz, b_maxz;
-    voxel_grid_bounds(a, &a_minx, &a_maxx, &a_miny, &a_maxy, &a_minz, &a_maxz);
-    voxel_grid_bounds(b, &b_minx, &b_maxx, &b_miny, &b_maxy, &b_minz, &b_maxz);
-
-    if (ranges_overlap(a_miny, a_maxy, b_miny, b_maxy) &&
-        ranges_overlap(a_minz, a_maxz, b_minz, b_maxz))
-    {
-        if (a_maxx + 1 == b_minx) {
-            if (out_dir) *out_dir = &glueDirections[0];
-            if (a_is_negative) *a_is_negative = true;
-            return true;
-        }
-        if (b_maxx + 1 == a_minx) {
-            if (out_dir) *out_dir = &glueDirections[0];
-            if (a_is_negative) *a_is_negative = false;
-            return true;
-        }
-    }
-
-    if (ranges_overlap(a_minx, a_maxx, b_minx, b_maxx) &&
-        ranges_overlap(a_minz, a_maxz, b_minz, b_maxz))
-    {
-        if (a_maxy + 1 == b_miny) {
-            if (out_dir) *out_dir = &glueDirections[1];
-            if (a_is_negative) *a_is_negative = true;
-            return true;
-        }
-        if (b_maxy + 1 == a_miny) {
-            if (out_dir) *out_dir = &glueDirections[1];
-            if (a_is_negative) *a_is_negative = false;
-            return true;
-        }
-    }
-
-    if (ranges_overlap(a_minx, a_maxx, b_minx, b_maxx) &&
-        ranges_overlap(a_miny, a_maxy, b_miny, b_maxy))
-    {
-        if (a_maxz + 1 == b_minz) {
-            if (out_dir) *out_dir = &glueDirections[2];
-            if (a_is_negative) *a_is_negative = true;
-            return true;
-        }
-        if (b_maxz + 1 == a_minz) {
-            if (out_dir) *out_dir = &glueDirections[2];
-            if (a_is_negative) *a_is_negative = false;
-            return true;
-        }
-    }
-
-    return false;
-}
-
-
 
 static void compact_glue_constraints(void) {
     int write = 0;
@@ -11539,66 +9130,6 @@ static void compact_glue_constraints(void) {
     glueConstraintCount = write;
 }
 
-// Returns true when the provided voxel/corner pair is part of an active glue constraint.
-static bool particles_are_glued_pair(int voxel_idx_a, int corner_idx_a,
-                                     int voxel_idx_b, int corner_idx_b) {
-    uint8_t bitA = (uint8_t)(1u << corner_idx_a);
-    uint8_t bitB = (uint8_t)(1u << corner_idx_b);
-
-    for (int g = 0; g < glueConstraintCount; ++g) {
-        const GlueConstraint *gc = &glueConstraints[g];
-        if (!gc->active) {
-            continue;
-        }
-
-        if (gc->coarseVoxel == voxel_idx_a && gc->fineVoxel == voxel_idx_b) {
-            if ((gc->coarseMask & bitA) && (gc->fineMask & bitB)) {
-                return true;
-            }
-        } else if (gc->coarseVoxel == voxel_idx_b && gc->fineVoxel == voxel_idx_a) {
-            if ((gc->coarseMask & bitB) && (gc->fineMask & bitA)) {
-                return true;
-            }
-        }
-    }
-
-    return false;
-}
-
-static int gather_neighbor_voxels(const Voxel *voxel, int voxel_idx, int *out, int max_out)
-{
-    if (max_out <= 0) {
-        return 0;
-    }
-
-    int count = 0;
-    out[count++] = voxel_idx;
-
-    int minx, maxx, miny, maxy, minz, maxz;
-    voxel_grid_bounds(voxel, &minx, &maxx, &miny, &maxy, &minz, &maxz);
-
-    int gx = minx;
-    int gy = miny;
-    int gz = minz;
-    for (int dx = -1; dx <= 1; ++dx) {
-        for (int dy = -1; dy <= 1; ++dy) {
-            for (int dz = -1; dz <= 1; ++dz) {
-                if (dx == 0 && dy == 0 && dz == 0) {
-                    continue;
-                }
-                int idx = table_get(gx + dx, gy + dy, gz + dz);
-                if (idx < 0) {
-                    continue;
-                }
-                if (!list_contains_index(out, count, idx) && count < max_out) {
-                    out[count++] = idx;
-                }
-            }
-        }
-    }
-
-    return count;
-}
 
 static bool list_contains_index(const int *list, int count, int value)
 {
@@ -11906,67 +9437,6 @@ static void glue_dynamic_voxel_to_static_neighbors(void)
     }
 }
 
-// True when two voxels share any active glue constraint (face coupling).
-static bool voxels_are_glued(int voxel_idx_a, int voxel_idx_b) {
-    if (voxel_idx_a == voxel_idx_b) {
-        return false;
-    }
-    if (voxel_idx_a < 0 || voxel_idx_a >= voxel_count ||
-        voxel_idx_b < 0 || voxel_idx_b >= voxel_count) {
-        return false;
-    }
-    Voxel *a = &voxels[voxel_idx_a];
-    if (!a->simulate) {
-        return false;
-    }
-    for (int face = 0; face < 6; ++face) {
-        if (!a->glued_faces[face]) {
-            continue;
-        }
-        int nx = a->gx + face_offsets[face][0];
-        int ny = a->gy + face_offsets[face][1];
-        int nz = a->gz + face_offsets[face][2];
-        int nidx = table_get(nx, ny, nz);
-        if (nidx == voxel_idx_b) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// Edge/corner adjacency causes constraints to overlap; skip collisions for those pairs as well.
-// Returns false when intervals are separated by more than eps.
-// Sets *touch when they meet (within eps) but do not overlap.
-static bool voxels_share_edge_or_corner(const Voxel *voxel_a, const Voxel *voxel_b) {
-    const float eps = VOXEL_SIZE * 0.05f;
-    int overlap_axes = 0;
-    int touching_axes = voxel_touching_axes(voxel_a, voxel_b, &overlap_axes, eps);
-    bool share_edge = (touching_axes >= 2);
-    bool rest_share = voxels_share_edge_or_corner_rest(voxel_a, voxel_b);
-    bool rest_face = voxels_share_face_rest(voxel_a, voxel_b);
-    
-
-    return share_edge || rest_share || rest_face;
-}
-
-
-static void compute_voxel_center_and_mass(const Voxel *voxel, Vector3 *center, float *inv_mass_sum) {
-    Vector3 c = { 0.0f, 0.0f, 0.0f };
-    float sum = 0.0f;
-
-    for (int i = 0; i < 8; ++i) {
-        const Particle *p = voxel->particles[i];
-        c = v_add(c, p->predicted_pos);
-        sum += p->inv_mass;
-    }
-
-    if (center) {
-        *center = v_mul(c, 1.0f / 8.0f);
-    }
-    if (inv_mass_sum) {
-        *inv_mass_sum = sum;
-    }
-}
 
 typedef struct {
     float half_player;
@@ -12058,11 +9528,6 @@ static void solve_static_collisions(float dt) {
     pbd_parallel_for(0, collision_particle_count, solve_static_collisions_range, &job);
 }
 
-// Unified solver for dynamic-dynamic collisions
-static void solve_dynamic_collisions(float dt) {
-    // Redundant: gather_particle_collisions handles this via spatial hashing.
-    (void)dt;
-}
 
 typedef struct { float inv_dt; } VelocityUpdateJob;
 
@@ -12177,72 +9642,6 @@ static void voxel_measure_strain(const Voxel *voxel,
     }
 }
 
-static void apply_uniform_velocity(Voxel *v, Vector3 vel, float dt) {
-    v->vel = vel;
-    for (int i = 0; i < 8; ++i) {
-        v->particles[i]->vel = vel;
-        if (dt > 0.0f) {
-            Vector3 offset = v_mul(vel, dt);
-            v->particles[i]->prev_pos = v_sub(v->particles[i]->pos, offset);
-        }
-        v->particles[i]->predicted_pos = v->particles[i]->pos;
-    }
-}
-
-static int split_voxel_at(int idx, float dt, int *out_children, int max_children) {
-    (void)idx;
-    (void)dt;
-    (void)out_children;
-    (void)max_children;
-    return 0;
-}
-
-static bool split_strained_voxels(float dt) {
-    (void)dt;
-    return false;
-}
-
-static bool cull_dust_voxels(void) {
-    bool removed_any = false;
-    int i = 0;
-    while (i < voxel_count) {
-        Voxel *voxel = &voxels[i];
-        if (!voxel_is_awake_dynamic(voxel) || voxel->type != 0 || voxel->isBullet) {
-            ++i;
-            continue;
-        }
-
-        float strain = 0.0f;
-        float shear = 0.0f;
-        voxel_measure_strain(voxel, &strain, &shear);
-        if (strain <= VOXEL_DUST_STRAIN_THRESHOLD &&
-            shear <= VOXEL_DUST_SHEAR_THRESHOLD) {
-            ++i;
-            continue;
-        }
-
-        int glued_neighbors[MAX_FACE_NEIGHBORS];
-        int glued_neighbor_count = gather_glued_neighbors(i, glued_neighbors, MAX_FACE_NEIGHBORS);
-        for (int n = 0; n < glued_neighbor_count; ++n) {
-            deactivate_glue_constraints_between(i, glued_neighbors[n]);
-        }
-        bool queued_snapshot = voxel->restorationQueued || voxel->owner != -1;
-        if (!queued_snapshot) {
-            queued_snapshot = recycle_queue_push(voxel);
-        }
-        if (queued_snapshot && debugLogVoxelRecycle) {
-            TraceLog(LOG_INFO,
-                     "[Dust] remove-voxel idx=%d strain=%.3f shear=%.3f original_queued=%d queue=%d",
-                     i, strain, shear, voxel->restorationQueued ? 1 : 0, recycleQueueCount);
-        }
-        remove_voxel_index(i);
-        removed_any = true;
-    }
-    if (removed_any) {
-        compact_glue_constraints();
-    }
-    return removed_any;
-}
 
 #include "physics_gpu_common.inc"
 
@@ -12390,11 +9789,6 @@ static void physics_mark_gpu_recovered(void) {
     physicsBackend.fallback_reason[0] = '\0';
 }
 
-static void copy_particle_snapshot_range(int start, int end, int worker_id, void *user) {
-    (void)worker_id;
-    (void)user;
-    for (int i = start; i < end; ++i) particle_snapshot[i] = sim_particles[i];
-}
 
 static int find_voxel_by_identity(uint64_t identity)
 {
@@ -13877,217 +11271,7 @@ static void draw_player_radar(int player_index, int viewport_w, int viewport_h) 
         DrawCircle(blip_x, blip_y, 3, (Color){ 120, 200, 255, 230 });
     }
 }
-// Append the 12 edges (24 vertices) of a cube to the current RL_LINES batch
-static void drawCubeEdges(const Voxel *voxel)
-{
-    Vector3 v[8];
-    for (int i = 0; i < 8; ++i) v[i] = voxel->particles[i]->pos;
 
-    static const int edge_indices[12][2] = {
-        {0,1},{1,3},{3,2},{2,0},
-        {4,5},{5,7},{7,6},{6,4},
-        {0,4},{1,5},{3,7},{2,6}
-    };
-
-    for (int e = 0; e < 12; ++e) {
-        const Vector3 a = v[edge_indices[e][0]];
-        const Vector3 b = v[edge_indices[e][1]];
-        rlVertex3f(a.x, a.y, a.z);
-        rlVertex3f(b.x, b.y, b.z);
-    }
-}
-
-static void compute_dynamic_face_visibility(int idx, bool faces[6])
-{
-    if (!faces || idx < 0 || idx >= voxel_count) {
-        return;
-    }
-    Voxel *v = &voxels[idx];
-    VoxelWorldBounds bounds;
-    voxel_particle_world_bounds(v, &bounds);
-    int minx = (int)floorf((bounds.minx + GRID_EPSILON) / VOXEL_SIZE);
-    int maxx = (int)floorf((bounds.maxx - GRID_EPSILON) / VOXEL_SIZE);
-    int miny = (int)floorf((bounds.miny + GRID_EPSILON) / VOXEL_SIZE);
-    int maxy = (int)floorf((bounds.maxy - GRID_EPSILON) / VOXEL_SIZE);
-    int minz = (int)floorf((bounds.minz + GRID_EPSILON) / VOXEL_SIZE);
-    int maxz = (int)floorf((bounds.maxz - GRID_EPSILON) / VOXEL_SIZE);
-
-    for (int f = 0; f < 6; ++f) {
-        faces[f] = true;
-    }
-
-    for (int y = miny; y <= maxy && faces[0]; ++y) {
-        for (int z = minz; z <= maxz; ++z) {
-            int nidx = table_get(maxx + 1, y, z);
-            if (nidx < 0 || nidx >= voxel_count || nidx == idx) {
-                continue;
-            }
-            Voxel *neighbor = &voxels[nidx];
-            if (face_blocked_by_voxel(v, neighbor, 0)) {
-                faces[0] = false;
-                break;
-            }
-        }
-    }
-
-    for (int y = miny; y <= maxy && faces[1]; ++y) {
-        for (int z = minz; z <= maxz; ++z) {
-            int nidx = table_get(minx - 1, y, z);
-            if (nidx < 0 || nidx >= voxel_count || nidx == idx) {
-                continue;
-            }
-            Voxel *neighbor = &voxels[nidx];
-            if (face_blocked_by_voxel(v, neighbor, 1)) {
-                faces[1] = false;
-                break;
-            }
-        }
-    }
-
-    for (int x = minx; x <= maxx && faces[2]; ++x) {
-        for (int z = minz; z <= maxz; ++z) {
-            int nidx = table_get(x, maxy + 1, z);
-            if (nidx < 0 || nidx >= voxel_count || nidx == idx) {
-                continue;
-            }
-            Voxel *neighbor = &voxels[nidx];
-            if (face_blocked_by_voxel(v, neighbor, 2)) {
-                faces[2] = false;
-                break;
-            }
-        }
-    }
-
-    for (int x = minx; x <= maxx && faces[3]; ++x) {
-        for (int z = minz; z <= maxz; ++z) {
-            int nidx = table_get(x, miny - 1, z);
-            if (nidx < 0 || nidx >= voxel_count || nidx == idx) {
-                continue;
-            }
-            Voxel *neighbor = &voxels[nidx];
-            if (face_blocked_by_voxel(v, neighbor, 3)) {
-                faces[3] = false;
-                break;
-            }
-        }
-    }
-
-    for (int x = minx; x <= maxx && faces[4]; ++x) {
-        for (int y = miny; y <= maxy; ++y) {
-            int nidx = table_get(x, y, maxz + 1);
-            if (nidx < 0 || nidx >= voxel_count || nidx == idx) {
-                continue;
-            }
-            Voxel *neighbor = &voxels[nidx];
-            if (face_blocked_by_voxel(v, neighbor, 4)) {
-                faces[4] = false;
-                break;
-            }
-        }
-    }
-
-    for (int x = minx; x <= maxx && faces[5]; ++x) {
-        for (int y = miny; y <= maxy; ++y) {
-            int nidx = table_get(x, y, minz - 1);
-            if (nidx < 0 || nidx >= voxel_count || nidx == idx) {
-                continue;
-            }
-            Voxel *neighbor = &voxels[nidx];
-            if (face_blocked_by_voxel(v, neighbor, 5)) {
-                faces[5] = false;
-                break;
-            }
-        }
-    }
-}
-
-static void compute_voxel_face_visibility(int idx, bool faces[6])
-{
-    if (!faces || idx < 0 || idx >= voxel_count) {
-        return;
-    }
-    if (voxels[idx].simulate) {
-        if (renderAllDynamicFaces) {
-            for (int f = 0; f < 6; ++f) {
-                faces[f] = true;
-            }
-            return;
-        }
-        compute_dynamic_face_visibility(idx, faces);
-        return;
-    }
-    mark_surface(idx);
-    memcpy(faces, voxels[idx].surface, sizeof(voxels[idx].surface));
-}
-
-static void drawCubeMan(const Voxel *voxel, const bool faces[6])
-{
-    Vector3 v[8];
-    for (int i = 0; i < 8; ++i) v[i] = voxel->particles[i]->pos;
-
-    Color displayColor = voxel_display_color(voxel);
-    rlColor4ub(displayColor.r, displayColor.g, displayColor.b, displayColor.a);
-
-    if (!faces || faces[4]) {
-        rlNormal3f(0.0f, 0.0f, 1.0f);
-        rlVertex3f(v[4].x, v[4].y, v[4].z);
-        rlVertex3f(v[5].x, v[5].y, v[5].z);
-        rlVertex3f(v[7].x, v[7].y, v[7].z);
-        rlVertex3f(v[4].x, v[4].y, v[4].z);
-        rlVertex3f(v[7].x, v[7].y, v[7].z);
-        rlVertex3f(v[6].x, v[6].y, v[6].z);
-    }
-
-    if (!faces || faces[5]) {
-        rlNormal3f(0.0f, 0.0f, -1.0f);
-        rlVertex3f(v[1].x, v[1].y, v[1].z);
-        rlVertex3f(v[0].x, v[0].y, v[0].z);
-        rlVertex3f(v[2].x, v[2].y, v[2].z);
-        rlVertex3f(v[1].x, v[1].y, v[1].z);
-        rlVertex3f(v[2].x, v[2].y, v[2].z);
-        rlVertex3f(v[3].x, v[3].y, v[3].z);
-    }
-
-    if (!faces || faces[2]) {
-        rlNormal3f(0.0f, 1.0f, 0.0f);
-        rlVertex3f(v[6].x, v[6].y, v[6].z);
-        rlVertex3f(v[7].x, v[7].y, v[7].z);
-        rlVertex3f(v[3].x, v[3].y, v[3].z);
-        rlVertex3f(v[6].x, v[6].y, v[6].z);
-        rlVertex3f(v[3].x, v[3].y, v[3].z);
-        rlVertex3f(v[2].x, v[2].y, v[2].z);
-    }
-
-    if (!faces || faces[3]) {
-        rlNormal3f(0.0f, -1.0f, 0.0f);
-        rlVertex3f(v[0].x, v[0].y, v[0].z);
-        rlVertex3f(v[1].x, v[1].y, v[1].z);
-        rlVertex3f(v[5].x, v[5].y, v[5].z);
-        rlVertex3f(v[0].x, v[0].y, v[0].z);
-        rlVertex3f(v[5].x, v[5].y, v[5].z);
-        rlVertex3f(v[4].x, v[4].y, v[4].z);
-    }
-
-    if (!faces || faces[0]) {
-        rlNormal3f(1.0f, 0.0f, 0.0f);
-        rlVertex3f(v[5].x, v[5].y, v[5].z);
-        rlVertex3f(v[1].x, v[1].y, v[1].z);
-        rlVertex3f(v[3].x, v[3].y, v[3].z);
-        rlVertex3f(v[5].x, v[5].y, v[5].z);
-        rlVertex3f(v[3].x, v[3].y, v[3].z);
-        rlVertex3f(v[7].x, v[7].y, v[7].z);
-    }
-
-    if (!faces || faces[1]) {
-        rlNormal3f(-1.0f, 0.0f, 0.0f);
-        rlVertex3f(v[0].x, v[0].y, v[0].z);
-        rlVertex3f(v[4].x, v[4].y, v[4].z);
-        rlVertex3f(v[6].x, v[6].y, v[6].z);
-        rlVertex3f(v[0].x, v[0].y, v[0].z);
-        rlVertex3f(v[6].x, v[6].y, v[6].z);
-        rlVertex3f(v[2].x, v[2].y, v[2].z);
-    }
-}
 
 static Color particle_velocity_color(float speed)
 {
@@ -14207,184 +11391,9 @@ static int first_voxel_hit(Ray ray, float t_max, int ignore_id)
 }
 
 
-
 // Generate a greedy mesh of all visible voxels ( i think the bug where single voxels are not drawn right is somewhere in here)
 // Only one layer is drawn per voxel, this makes layers disappear on the individual voxel level
 
-static void merge_rects_on_plane(int count, int *list, int plane, bool positive) {
-    if (!list || count <= 0) return;
-    if (count > voxel_count) {
-        count = voxel_count;
-    }
-
-    // Group voxels by layer
-    int *layers = (int *)malloc((size_t)count * sizeof(int));
-    if (!layers) return;
-    int layerCount = 0;
-    for (int i = 0; i < count; i++) {
-        int idx = list[i];
-        if (idx < 0 || idx >= voxel_count) {
-            continue;
-        }
-        int layer = 0;
-        switch (plane) {
-            case 0: layer = voxels[idx].gz; break; // XY-plane, group by z
-            case 1: layer = voxels[idx].gy; break; // XZ-plane, group by y
-            case 2: layer = voxels[idx].gx; break; // YZ-plane, group by x
-        }
-        bool seen = false;
-        for (int j = 0; j < layerCount; j++) {
-            if (layers[j] == layer) {
-                seen = true;
-                break;
-            }
-        }
-        if (!seen) layers[layerCount++] = layer;
-    }
-    if (layerCount <= 0) {
-        free(layers);
-        return;
-    }
-
-    // For each layer, find and merge rectangles
-    for (int l = 0; l < layerCount; l++) {
-        int layer = layers[l];
-
-        // Find the bounds of the current layer
-        int minI = INT_MAX, maxI = INT_MIN, minJ = INT_MAX, maxJ = INT_MIN;
-        bool anyInLayer = false;
-        for (int i = 0; i < count; i++) {
-            int idx = list[i];
-            if (idx < 0 || idx >= voxel_count) {
-                continue;
-            }
-            Voxel *v = &voxels[idx];
-            int vLayer = 0, vI = 0, vJ = 0;
-            switch (plane) {
-                case 0: vLayer = v->gz; vI = v->gx; vJ = v->gy; break;
-                case 1: vLayer = v->gy; vI = v->gx; vJ = v->gz; break;
-                case 2: vLayer = v->gx; vI = v->gy; vJ = v->gz; break;
-            }
-
-            if (vLayer != layer) continue;
-            anyInLayer = true;
-            if (vI < minI) minI = vI;
-            if (vI > maxI) maxI = vI;
-            if (vJ < minJ) minJ = vJ;
-            if (vJ > maxJ) maxJ = vJ;
-        }
-        if (!anyInLayer) {
-            continue;
-        }
-
-        int w = maxI - minI + 1;
-        int h = maxJ - minJ + 1;
-        if (w <= 0 || h <= 0) {
-            continue;
-        }
-
-        if ((size_t)w > SIZE_MAX / (size_t)h) {
-            continue;
-        }
-        size_t area = (size_t)w * (size_t)h;
-
-        size_t max_area = (size_t)count * 64u;
-        if (area > max_area) {
-            for (int i = 0; i < count; i++) {
-                int idx = list[i];
-                if (idx < 0 || idx >= voxel_count) {
-                    continue;
-                }
-                Voxel *v = &voxels[idx];
-                int vLayer = 0, vI = 0, vJ = 0;
-                switch (plane) {
-                    case 0: vLayer = v->gz; vI = v->gx; vJ = v->gy; break;
-                    case 1: vLayer = v->gy; vI = v->gx; vJ = v->gz; break;
-                    case 2: vLayer = v->gx; vI = v->gy; vJ = v->gz; break;
-                }
-                if (vLayer != layer) continue;
-                if (!emit_patch(plane, layer, vI, vJ, 1, 1, positive)) {
-                    free(layers);
-                    return;
-                }
-            }
-            continue;
-        }
-
-        bool *mask = (bool *)calloc(area, sizeof(bool));
-        if (!mask) {
-            continue;
-        }
-
-        for (int i = 0; i < count; i++) {
-            int idx = list[i];
-            if (idx < 0 || idx >= voxel_count) {
-                continue;
-            }
-            Voxel *v = &voxels[idx];
-            int vLayer = 0, vI = 0, vJ = 0;
-            switch (plane) {
-                case 0: vLayer = v->gz; vI = v->gx; vJ = v->gy; break;
-                case 1: vLayer = v->gy; vI = v->gx; vJ = v->gz; break;
-                case 2: vLayer = v->gx; vI = v->gy; vJ = v->gz; break;
-            }
-            if (vLayer != layer) continue;
-            size_t mi = (size_t)(vI - minI);
-            size_t mj = (size_t)(vJ - minJ);
-            if (mi < (size_t)w && mj < (size_t)h) {
-                mask[mi * (size_t)h + mj] = true;
-            }
-        }
-
-        for (int j = 0; j < h; j++) {
-            for (int i = 0; i < w; i++) {
-                if (!mask[(size_t)i * (size_t)h + (size_t)j]) continue;
-
-                int si = i, sj = j;
-                int ww = 1;
-                while (si + ww < w &&
-                       mask[(size_t)(si + ww) * (size_t)h + (size_t)sj]) {
-                    ww++;
-                }
-
-                int hh = 1;
-                for (;;) {
-                    bool block = false;
-                    for (int k = 0; k < ww; k++) {
-                        if (sj + hh >= h ||
-                            !mask[(size_t)(si + k) * (size_t)h + (size_t)(sj + hh)]) {
-                            block = true;
-                            break;
-                        }
-                    }
-                    if (block) break;
-                    hh++;
-                }
-                
-                for (int dj = 0; dj < hh; dj++) {
-                    for (int di = 0; di < ww; di++) {
-                        mask[(size_t)(si + di) * (size_t)h + (size_t)(sj + dj)] = false;
-                    }
-                }
-
-                i = si + ww - 1;
-                
-                if (!emit_patch(plane, layer, minI + si, minJ + sj, ww, hh, positive)) {
-                    free(mask);
-                    free(layers);
-                    return;
-                }
-            }
-        }
-        free(mask);
-    }
-    free(layers);
-}
-
-
-static int yzPosList[MAX_VOXELS], yzNegList[MAX_VOXELS];
-static int xzPosList[MAX_VOXELS], xzNegList[MAX_VOXELS];
-static int xyPosList[MAX_VOXELS], xyNegList[MAX_VOXELS];
 
 static Mesh gen_greedy_mesh(void) {
     Mesh mesh = { 0 };
@@ -14595,9 +11604,6 @@ static void DrawVoxels(Camera3D cam) {
             DrawMesh(sphereMesh, mat, matModel);
             continue;
         }
-        
-        // Calculate Scale
-        float scale = VOXEL_SIZE;
         
         // Use the correct display color (handles beliefs/debug colors)
         Color displayColor = voxel_display_color(v);
@@ -16489,7 +13495,6 @@ static bool run_physics_smoke_test(int steps) {
 int main(int argc, char **argv) {
     if (!parse_physics_arguments(argc, argv)) return 2;
     bool automatedRun = physicsSmokeSteps > 0 || debug_run_requested();
-    int countFrame = 0;
     SetLoggingEnabled(getenv("FPS_SHADER_LOG") != NULL);
     SetTraceLogLevel(physicsReportRequested ? LOG_ALL : LOG_NONE);
     if (debug_run_requested() && !debug_show_window_requested()) {
