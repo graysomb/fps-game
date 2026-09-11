@@ -4425,12 +4425,23 @@ static bool spawn_static_covering_voxel(const Voxel *voxel)
         return false;
     }
     int base_minx, base_maxx, base_miny, base_maxy, base_minz, base_maxz;
+    bool has_orig_bounds =
+        (voxel->orig_min_gx <= voxel->orig_max_gx) &&
+        (voxel->orig_min_gy <= voxel->orig_max_gy) &&
+        (voxel->orig_min_gz <= voxel->orig_max_gz);
     bool has_rest_bounds =
         (voxel->rest_min_gx <= voxel->rest_max_gx) &&
         (voxel->rest_min_gy <= voxel->rest_max_gy) &&
         (voxel->rest_min_gz <= voxel->rest_max_gz);
 
-    if (has_rest_bounds) {
+    if (has_orig_bounds) {
+        base_minx = voxel->orig_min_gx;
+        base_maxx = voxel->orig_max_gx;
+        base_miny = voxel->orig_min_gy;
+        base_maxy = voxel->orig_max_gy;
+        base_minz = voxel->orig_min_gz;
+        base_maxz = voxel->orig_max_gz;
+    } else if (has_rest_bounds) {
         float rest_center_x = 0.5f * ((float)voxel->rest_min_gx + (float)voxel->rest_max_gx + 1.0f);
         float rest_center_y = 0.5f * ((float)voxel->rest_min_gy + (float)voxel->rest_max_gy + 1.0f);
         float rest_center_z = 0.5f * ((float)voxel->rest_min_gz + (float)voxel->rest_max_gz + 1.0f);
@@ -4473,7 +4484,7 @@ static bool spawn_static_covering_voxel(const Voxel *voxel)
                                                   &minx, &maxx,
                                                   &miny, &maxy,
                                                   &minz, &maxz);
-    if (!placed && has_rest_bounds) {
+    if (!placed && (has_orig_bounds || has_rest_bounds)) {
         int curr_minx, curr_maxx, curr_miny, curr_maxy, curr_minz, curr_maxz;
         voxel_grid_bounds(voxel, &curr_minx, &curr_maxx, &curr_miny, &curr_maxy, &curr_minz, &curr_maxz);
         placed = find_nearest_free_static_region(curr_minx, curr_maxx,
@@ -6877,23 +6888,26 @@ static bool cluster_is_near_original_grid_pose(const int *cluster, int cluster_c
 
     memset(sleepClusterVisited, 0, sizeof(unsigned char) * (size_t)voxel_count);
     int64_t required_static_cells = 0;
+    int cluster_min_orig_gy = INT_MAX;
     for (int i = 0; i < cluster_count; ++i) {
         int idx = cluster[i];
         if (idx < 0 || idx >= voxel_count || !voxel_is_awake_dynamic(&voxels[idx])) {
             return false;
         }
         sleepClusterVisited[idx] = 1;
-    }
-
-    const float tolerance_sq = VOXEL_SLEEP_SNAP_POSITION_TOLERANCE *
-                               VOXEL_SLEEP_SNAP_POSITION_TOLERANCE;
-    for (int i = 0; i < cluster_count; ++i) {
-        Voxel *voxel = &voxels[cluster[i]];
-        if (voxel->orig_min_gx > voxel->orig_max_gx ||
-            voxel->orig_min_gy > voxel->orig_max_gy ||
-            voxel->orig_min_gz > voxel->orig_max_gz) {
+        Voxel *v = &voxels[idx];
+        if (v->orig_min_gx > v->orig_max_gx ||
+            v->orig_min_gy > v->orig_max_gy ||
+            v->orig_min_gz > v->orig_max_gz) {
             return false;
         }
+        if (v->orig_min_gy < cluster_min_orig_gy) {
+            cluster_min_orig_gy = v->orig_min_gy;
+        }
+    }
+
+    for (int i = 0; i < cluster_count; ++i) {
+        Voxel *voxel = &voxels[cluster[i]];
 
         int span_x = voxel->orig_max_gx - voxel->orig_min_gx + 1;
         int span_y = voxel->orig_max_gy - voxel->orig_min_gy + 1;
@@ -6905,7 +6919,11 @@ static bool cluster_is_near_original_grid_pose(const int *cluster, int cluster_c
         // layer.  Requiring every corner to return to its exact pre-activation
         // coordinate therefore rejects an otherwise grid-aligned, calm island.
         // Shape strain and shear were already checked by the equilibrium gate;
-        // here we only decide whether each voxel remained in its original cell.
+        // here we only decide whether each voxel remained near its original cell.
+        // For tall structures (e.g. pillars), slight sway and elastic compression
+        // produce horizontal tilt and downward sag proportional to height above
+        // the cluster's base, while the base layer itself must remain firmly
+        // anchored near its original footprint.
         Vector3 original_center = {
             ((float)voxel->orig_min_gx + (float)voxel->orig_max_gx + 1.0f) *
                 (VOXEL_SIZE * 0.5f),
@@ -6916,12 +6934,28 @@ static bool cluster_is_near_original_grid_pose(const int *cluster, int cluster_c
         };
         if (!v_isfinite(voxel->pos)) return false;
         Vector3 center_delta = v_sub(voxel->pos, original_center);
-        if (v_dot(center_delta, center_delta) > tolerance_sq) {
+
+        float height_above_base = (float)(voxel->orig_min_gy - cluster_min_orig_gy) * VOXEL_SIZE;
+        if (height_above_base < 0.0f) height_above_base = 0.0f;
+
+        float horiz_tol = VOXEL_SLEEP_SNAP_POSITION_TOLERANCE + height_above_base * 0.18f;
+        float horiz_dist_sq = center_delta.x * center_delta.x + center_delta.z * center_delta.z;
+        if (horiz_dist_sq > horiz_tol * horiz_tol) {
             if (debugLogVoxelDeactivation) {
                 TraceLog(LOG_INFO,
-                         "[Deactivate] near-origin=false voxel=%d center-error=%.4f tolerance=%.4f",
-                         cluster[i], v_length(center_delta),
-                         (double)VOXEL_SLEEP_SNAP_POSITION_TOLERANCE);
+                         "[Deactivate] near-origin=false voxel=%d horiz-error=%.4f tolerance=%.4f (h=%.2f)",
+                         cluster[i], sqrtf(horiz_dist_sq), horiz_tol, height_above_base);
+            }
+            return false;
+        }
+
+        float vert_up_tol = VOXEL_SLEEP_SNAP_POSITION_TOLERANCE;
+        float vert_down_tol = VOXEL_SIZE * 0.60f + height_above_base * 0.05f;
+        if (center_delta.y > vert_up_tol || center_delta.y < -vert_down_tol) {
+            if (debugLogVoxelDeactivation) {
+                TraceLog(LOG_INFO,
+                         "[Deactivate] near-origin=false voxel=%d vert-delta=%.4f range=[-%.4f, %.4f] (h=%.2f)",
+                         cluster[i], center_delta.y, vert_down_tol, vert_up_tol, height_above_base);
             }
             return false;
         }

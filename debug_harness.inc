@@ -224,6 +224,7 @@ static bool debug_setup_single_corner_hinge(DebugRunState *state);
 static bool debug_setup_tether_active_then_static(DebugRunState *state);
 static bool debug_setup_tether_thin_wall_ccd(DebugRunState *state);
 static bool debug_setup_pbf_container(DebugRunState *state);
+static bool debug_setup_tall_pillar_snap(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall, 60, 60 },
@@ -231,6 +232,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "activation-floating", "Static cluster activated while unsupported", debug_setup_activation_floating, 60, 60 },
     { "sleep-wake-floating", "Supported cluster sleeps, loses support, then activates", debug_setup_sleep_wake_floating, 60, 60 },
     { "sleep-snap-original", "A calm 4x4x6 pillar near its original pose snaps back to static", debug_setup_sleep_snap_original, 60, 60 },
+    { "tall-pillar-snap", "Top half of a tall pillar settles and restores to static", debug_setup_tall_pillar_snap, 120, 60 },
     { "sleep-snap-no-rebuild", "A restored pillar remains static after its queued rebuild deadline", debug_setup_sleep_snap_no_rebuild, 60, 60 },
     { "sleep-recycle", "Sleeping dynamic island enters delayed restoration atomically", debug_setup_sleep_recycle, 60, 60 },
     { "falling-pillar-sleep", "Rotated pillar falls, settles, and sleeps without changing pose", debug_setup_falling_pillar_sleep, 60, 60 },
@@ -1614,6 +1616,58 @@ static bool debug_setup_sleep_snap_original(DebugRunState *state)
     return true;
 }
 
+static bool debug_setup_tall_pillar_snap(DebugRunState *state)
+{
+    debug_reset_world();
+    state->sleep_snap_original_test = true;
+    debugLogVoxelDeactivation = true;
+    state->sleep_snap_static_step = -1;
+    const int height = 14;
+    const int split_y = 7;
+    int expected_test = 2 * 2 * (height - split_y);
+    state->expected_voxels = expected_test;
+    Color static_color = (Color){ 80, 175, 245, 255 };
+    Color dynamic_color = (Color){ 245, 145, 45, 255 };
+
+    // Bottom half static
+    for (int y = 0; y < split_y; ++y) {
+        for (int z = 0; z < 2; ++z) {
+            for (int x = 0; x < 2; ++x) {
+                debug_add_cell(x, y, z, true, false, static_color, DEBUG_SUPPORT_TAG);
+            }
+        }
+    }
+    // Top half dynamic (activated)
+    for (int y = split_y; y < height; ++y) {
+        for (int z = 0; z < 2; ++z) {
+            for (int x = 0; x < 2; ++x) {
+                int idx = debug_add_cell(x, y, z, false, true, dynamic_color, DEBUG_TEST_TAG);
+                if (idx >= 0) {
+                    voxels[idx].vel = (Vector3){ 0.8f, 0.0f, 0.0f };
+                }
+            }
+        }
+    }
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_rebuild_world_state();
+    for (int i = 0; i < voxel_count; ++i) {
+        if (voxels[i].debugClusterTag == DEBUG_TEST_TAG && voxels[i].gy == split_y) {
+            break_face_link(&voxels[i], 3);
+        }
+    }
+    for (int i = 0; i < voxel_count; ++i) {
+        if (voxels[i].debugClusterTag == DEBUG_TEST_TAG && voxels[i].simulate) {
+            set_voxel_velocity(&voxels[i], (Vector3){ 1.5f, 0.0f, 0.0f });
+        }
+    }
+    state->camera.position = (Vector3){ 6.5f, 5.5f, 8.0f };
+    state->camera.target = (Vector3){ 0.5f, 3.5f, 0.5f };
+    debug_set_initial_centroid(state);
+    state->activation_succeeded = true;
+    state->sleep_snap_active_observed = true;
+    return true;
+}
+
 static bool debug_setup_sleep_snap_no_rebuild(DebugRunState *state)
 {
     if (!debug_setup_sleep_snap_original(state)) return false;
@@ -2546,8 +2600,9 @@ static void debug_validate_step(DebugRunState *state, int step)
                 ((float)voxel->orig_min_gz + (float)voxel->orig_max_gz + 1.0f) *
                     (VOXEL_SIZE * 0.5f)
             };
-            max_error = fmaxf(max_error,
-                              v_length(v_sub(voxel->pos, original_center)));
+            Vector3 d = v_sub(voxel->pos, original_center);
+            float err = v_length(d);
+            max_error = fmaxf(max_error, err);
         }
         state->sleep_snap_max_original_error = max_error;
         state->sleep_snap_last_speed = max_speed;
