@@ -581,8 +581,8 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 //#define VOXEL_ACTIVATION_UNIT_BUDGET 128
 #define VOXEL_ACTIVATION_UNIT_BUDGET 128*5
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 1.5f
-#define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.15f
-#define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.15f
+#define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.4f
+#define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.4f
 #define VOXEL_DEACTIVATION_FRAMES 5
 #define VOXEL_SLEEP_SNAP_POSITION_TOLERANCE (VOXEL_SIZE * 0.25f)
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
@@ -1127,6 +1127,10 @@ static int recycleLifetimeParent[MAX_VOXELS];
 static int recycleLifetimeHead[MAX_VOXELS];
 static int recycleLifetimeNext[MAX_VOXELS];
 static int recycleLifetimeParticleVoxel[MAX_PARTICLES];
+static int deactIslandParent[MAX_VOXELS];
+static int deactIslandHead[MAX_VOXELS];
+static int deactIslandNext[MAX_VOXELS];
+static int deactParticleVoxel[MAX_PARTICLES];
 static unsigned char recycleLifetimeExpired[MAX_VOXELS];
 static unsigned char recycleLifetimeOutside[MAX_VOXELS];
 static unsigned char recycleRestorationDue[MAX_VOXELS];
@@ -7079,7 +7083,7 @@ static bool wake_sleeping_voxels_near_awake(void)
 {
     bool changed = false;
     const float contact_margin = VOXEL_SIZE * 0.15f;
-    const float wake_speed = VOXEL_DEACTIVATION_VELOCITY_THRESHOLD * 0.25f;
+    const float wake_speed = VOXEL_DEACTIVATION_VELOCITY_THRESHOLD;
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *sleeper = &voxels[i];
         if (!sleeper->simulate || !sleeper->sleeping) continue;
@@ -7193,6 +7197,87 @@ static void evaluate_voxel_calm_range(int start, int end, int worker_id, void *u
     }
 }
 
+static int deact_island_find_root(int voxel_idx)
+{
+    int root = voxel_idx;
+    while (root >= 0 && root < voxel_count &&
+           deactIslandParent[root] >= 0 &&
+           deactIslandParent[root] != root) {
+        root = deactIslandParent[root];
+    }
+    while (voxel_idx >= 0 && voxel_idx < voxel_count &&
+           deactIslandParent[voxel_idx] >= 0 &&
+           deactIslandParent[voxel_idx] != root) {
+        int next = deactIslandParent[voxel_idx];
+        deactIslandParent[voxel_idx] = root;
+        voxel_idx = next;
+    }
+    return root;
+}
+
+static void deact_island_union(int a, int b)
+{
+    int root_a = deact_island_find_root(a);
+    int root_b = deact_island_find_root(b);
+    if (root_a < 0 || root_b < 0 || root_a == root_b) return;
+    if (root_a < root_b) deactIslandParent[root_b] = root_a;
+    else deactIslandParent[root_a] = root_b;
+}
+
+static bool build_awake_physical_island_graph(void)
+{
+    if (voxel_count <= 0) return false;
+
+    size_t voxel_count_size = (size_t)voxel_count;
+    memset(deactIslandHead, 0xff, voxel_count_size * sizeof(int));
+    memset(deactIslandNext, 0xff, voxel_count_size * sizeof(int));
+
+    bool has_islands = false;
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        bool eligible = voxel_is_awake_dynamic(voxel) && voxel->type == 0 && !voxel->isBullet;
+        deactIslandParent[i] = eligible ? i : -1;
+        has_islands = has_islands || eligible;
+    }
+    if (!has_islands) return false;
+
+    size_t particle_count = particle_pool_count > 0 ? (size_t)particle_pool_count : 0;
+    if (particle_count > MAX_PARTICLES) particle_count = MAX_PARTICLES;
+    memset(deactParticleVoxel, 0xff, particle_count * sizeof(int));
+
+    for (int i = 0; i < voxel_count; ++i) {
+        if (deactIslandParent[i] < 0) continue;
+        for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+            Particle *particle = voxels[i].particles[corner];
+            ptrdiff_t pool_id = particle ? particle - particles_pool : -1;
+            if (pool_id < 0 || (size_t)pool_id >= particle_count) continue;
+            int previous = deactParticleVoxel[pool_id];
+            if (previous >= 0) deact_island_union(i, previous);
+            else deactParticleVoxel[pool_id] = i;
+        }
+    }
+
+    for (int g = 0; g < glueConstraintCount; ++g) {
+        GlueConstraint *constraint = &glueConstraints[g];
+        int a = constraint->coarseVoxel;
+        int b = constraint->fineVoxel;
+        if (!constraint->active || a < 0 || b < 0 ||
+            a >= voxel_count || b >= voxel_count ||
+            deactIslandParent[a] < 0 || deactIslandParent[b] < 0) {
+            continue;
+        }
+        deact_island_union(a, b);
+    }
+
+    for (int i = 0; i < voxel_count; ++i) {
+        if (deactIslandParent[i] < 0) continue;
+        int root = deact_island_find_root(i);
+        deactIslandNext[i] = deactIslandHead[root];
+        deactIslandHead[root] = i;
+    }
+    return true;
+}
+
 static bool deactivate_sleeping_voxels(void)
 {
     bool changed = false;
@@ -7201,164 +7286,95 @@ static bool deactivate_sleeping_voxels(void)
 
     pbd_parallel_for(0, voxel_count, evaluate_voxel_calm_range, NULL);
 
-    memset(sleepClusterVisited, 0, sizeof(sleepClusterVisited));
-    for (int i = 0; i < voxel_count; ++i) {
-        Voxel *voxel = &voxels[i];
-        if (!voxel_is_awake_dynamic(voxel) || voxel->type != 0 || voxel->isBullet) {
-            continue;
-        }
-        if (sleepClusterVisited[i]) {
-            continue;
-        }
+    if (build_awake_physical_island_graph()) {
+        for (int root = 0; root < voxel_count && remaining_budget > 0; ++root) {
+            if (deactIslandParent[root] != root) continue;
 
-        int head = 0;
-        int tail = 0;
-        glueClusterIndices[tail++] = i;
-        sleepClusterVisited[i] = 1;
-
-        bool cluster_calm = (voxelCalmFlags[i] != 0);
-        int min_sleep = voxel->sleepFrames;
-
-        while (head < tail) {
-            int idx = glueClusterIndices[head++];
-            Voxel *member = &voxels[idx];
-            if (!voxelCalmFlags[idx]) {
-                cluster_calm = false;
-            }
-            if (member->sleepFrames < min_sleep) {
-                min_sleep = member->sleepFrames;
-            }
-            int neighbors[MAX_FACE_NEIGHBORS];
-            int neighbor_count = gather_glued_neighbors_symmetric(idx, neighbors, MAX_FACE_NEIGHBORS);
-            for (int n = 0; n < neighbor_count; ++n) {
-                int neighbor = neighbors[n];
-                if (neighbor < 0 || neighbor >= voxel_count) {
-                    continue;
-                }
-                if (sleepClusterVisited[neighbor]) {
-                    continue;
-                }
-                sleepClusterVisited[neighbor] = 1;
-                if (tail < MAX_VOXELS) {
-                    glueClusterIndices[tail++] = neighbor;
+            int cluster_count = 0;
+            for (int idx = deactIslandHead[root]; idx >= 0; idx = deactIslandNext[idx]) {
+                if (cluster_count < MAX_VOXELS) {
+                    glueClusterIndices[cluster_count++] = idx;
                 }
             }
-        }
+            if (cluster_count <= 0) continue;
 
-        int next_sleep = cluster_calm ? min_sleep + 1 : 0;
-        if (cluster_calm && min_sleep >= INT_MAX) {
-            next_sleep = INT_MAX;
-        } else if (cluster_calm && next_sleep < min_sleep) {
-            next_sleep = INT_MAX;
-        }
-
-        for (int c = 0; c < tail; ++c) {
-            int member_idx = glueClusterIndices[c];
-            Voxel *member = &voxels[member_idx];
-            member->sleepFrames = next_sleep;
-        }
-    }
-
-    int idx = 0;
-    while (idx < voxel_count && remaining_budget > 0) {
-        Voxel *voxel = &voxels[idx];
-        if (!voxel_is_awake_dynamic(voxel) || voxel->type != 0 || voxel->isBullet) {
-            ++idx;
-            continue;
-        }
-        if (voxel->sleepFrames < VOXEL_DEACTIVATION_FRAMES) {
-            if (debugLogVoxelDeactivation && voxel->sleepFrames > 0) {
-                TraceLog(LOG_INFO,
-                         "[Deactivate] voxel=%d sleep=%d/%d waiting",
-                         idx, voxel->sleepFrames, VOXEL_DEACTIVATION_FRAMES);
-            }
-            ++idx;
-            continue;
-        }
-
-        memset(sleepClusterVisited, 0, sizeof(unsigned char) * (size_t)voxel_count);
-        int head = 0;
-        int tail = 0;
-        glueClusterIndices[tail++] = idx;
-        sleepClusterVisited[idx] = 1;
-
-        while (head < tail) {
-            int current = glueClusterIndices[head++];
-            int neighbors[MAX_FACE_NEIGHBORS];
-            int neighbor_count = gather_glued_neighbors_symmetric(current, neighbors, MAX_FACE_NEIGHBORS);
-            for (int n = 0; n < neighbor_count; ++n) {
-                int neighbor = neighbors[n];
-                if (neighbor < 0 || neighbor >= voxel_count) {
-                    continue;
+            int uncalm_count = 0;
+            int min_sleep = voxels[glueClusterIndices[0]].sleepFrames;
+            float max_speed = 0.0f;
+            float speed_sum = 0.0f;
+            for (int c = 0; c < cluster_count; ++c) {
+                int idx = glueClusterIndices[c];
+                Voxel *member = &voxels[idx];
+                float sp = v_length(member->vel);
+                speed_sum += sp;
+                if (sp > max_speed) max_speed = sp;
+                if (!voxelCalmFlags[idx]) {
+                    uncalm_count++;
                 }
-                if (sleepClusterVisited[neighbor]) {
-                    continue;
-                }
-                sleepClusterVisited[neighbor] = 1;
-                if (tail < MAX_VOXELS) {
-                    glueClusterIndices[tail++] = neighbor;
+                if (member->sleepFrames < min_sleep) {
+                    min_sleep = member->sleepFrames;
                 }
             }
-        }
+            float avg_speed = speed_sum / (float)cluster_count;
 
-        int cluster_count = tail;
-        if (cluster_count <= 0) {
-            ++idx;
-            continue;
-        }
+            bool cluster_calm = (uncalm_count == 0) ||
+                (avg_speed < VOXEL_DEACTIVATION_VELOCITY_THRESHOLD * 0.75f &&
+                 (float)uncalm_count / (float)cluster_count <= 0.15f &&
+                 max_speed < VOXEL_DEACTIVATION_VELOCITY_THRESHOLD * 2.0f);
 
-        bool cluster_ready = true;
-        for (int c = 0; c < cluster_count; ++c) {
-            int cidx = glueClusterIndices[c];
-            if (cidx < 0 || cidx >= voxel_count) {
-                cluster_ready = false;
-                break;
+            int next_sleep = cluster_calm ? min_sleep + 1 : 0;
+            if (cluster_calm && min_sleep >= INT_MAX) {
+                next_sleep = INT_MAX;
+            } else if (cluster_calm && next_sleep < min_sleep) {
+                next_sleep = INT_MAX;
             }
-            Voxel *member = &voxels[cidx];
-            if (!voxel_is_awake_dynamic(member) || member->type != 0 || member->isBullet ||
-                member->sleepFrames < VOXEL_DEACTIVATION_FRAMES) {
-                cluster_ready = false;
-                break;
+
+            for (int c = 0; c < cluster_count; ++c) {
+                voxels[glueClusterIndices[c]].sleepFrames = next_sleep;
             }
-        }
 
-        if (!cluster_ready) {
-            keep_cluster_awake(glueClusterIndices, cluster_count);
-            ++idx;
-            continue;
-        }
+            bool supported = glue_cluster_has_static_support(glueClusterIndices, cluster_count);
 
-        if (!glue_cluster_has_static_support(glueClusterIndices, cluster_count)) {
-            keep_cluster_awake(glueClusterIndices, cluster_count);
-            ++idx;
-            continue;
-        }
-
-        bool near_original = cluster_is_near_original_grid_pose(glueClusterIndices,
-                                                                 cluster_count);
-        if (near_original) {
-            if (!restore_glue_cluster_to_static(glueClusterIndices, cluster_count)) {
-                ++idx;
+            if (next_sleep < VOXEL_DEACTIVATION_FRAMES) {
                 continue;
             }
-            restored_static = true;
-        } else if (!freeze_dynamic_cluster_in_place(glueClusterIndices, cluster_count)) {
-            ++idx;
-            continue;
-        }
 
-        if (debugLogVoxelDeactivation) {
-            TraceLog(LOG_INFO,
-                     "[Deactivate] %s cluster starting=%d count=%d remaining_budget_before=%d",
-                     near_original ? "restored near-origin" : "froze in place",
-                     idx, cluster_count, remaining_budget);
+            if (!supported) {
+                keep_cluster_awake(glueClusterIndices, cluster_count);
+                continue;
+            }
+
+            bool near_original = cluster_is_near_original_grid_pose(glueClusterIndices,
+                                                                    cluster_count);
+            if (near_original) {
+                if (!restore_glue_cluster_to_static(glueClusterIndices, cluster_count)) {
+                    continue;
+                }
+                restored_static = true;
+                if (debugLogVoxelDeactivation) {
+                    TraceLog(LOG_INFO,
+                             "[Deactivate] restored near-origin cluster starting=%d count=%d remaining_budget_before=%d",
+                             root, cluster_count, remaining_budget);
+                }
+                remaining_budget -= cluster_count;
+                if (remaining_budget < 0) remaining_budget = 0;
+                changed = true;
+                // Static restoration compacts the voxel array, invalidating graph indices.
+                break;
+            } else {
+                if (!freeze_dynamic_cluster_in_place(glueClusterIndices, cluster_count)) {
+                    continue;
+                }
+                if (debugLogVoxelDeactivation) {
+                    TraceLog(LOG_INFO,
+                             "[Deactivate] froze in place cluster starting=%d count=%d remaining_budget_before=%d",
+                             root, cluster_count, remaining_budget);
+                }
+                remaining_budget -= cluster_count;
+                if (remaining_budget < 0) remaining_budget = 0;
+                changed = true;
+            }
         }
-        remaining_budget -= cluster_count;
-        if (remaining_budget < 0) {
-            remaining_budget = 0;
-        }
-        changed = true;
-        continue;
     }
 
     bool fluid_deactivated = false;
