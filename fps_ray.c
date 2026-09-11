@@ -358,7 +358,7 @@ typedef enum {
     GAME_MODE_DEATHMATCH = 0,
     GAME_MODE_FIREFIGHT
 } GameMode;
-static GameMode gameMode = GAME_MODE_FIREFIGHT;
+static GameMode gameMode = GAME_MODE_DEATHMATCH;
 
 typedef enum {
     ENEMY_TYPE_STANDARD = 0,
@@ -447,6 +447,12 @@ typedef enum {
     INPUT_TYPE_BOT_HARD
 } InputType;
 static InputType playerInput[MAX_PLAYERS] = {
+    INPUT_TYPE_KEYBOARD,
+    INPUT_TYPE_KEYBOARD,
+    INPUT_TYPE_GAMEPAD,
+    INPUT_TYPE_GAMEPAD
+};
+static InputType multiplayerPlayerInput[MAX_PLAYERS] = {
     INPUT_TYPE_KEYBOARD,
     INPUT_TYPE_KEYBOARD,
     INPUT_TYPE_GAMEPAD,
@@ -752,6 +758,7 @@ static uint8_t netPeerPlayerMask[MAX_PLAYERS] = { 1u, 0u, 0u, 0u };
 static int netLocalPlayerSlots[MAX_PLAYERS] = { 0, -1, -1, -1 };
 static int netLocalPlayerCount = 1;
 static int activePlayers = 2;
+static int multiplayerActivePlayers = 2;
 static uint32_t netServerTick = 0;
 static uint32_t netInputSequence[MAX_PLAYERS] = { 0 };
 static uint32_t netPredictedMeleeSequence[MAX_PLAYERS] = { 0 };
@@ -8362,6 +8369,7 @@ static bool menuEditingSeed = false;
 static char menuSeedBuffer[16] = "1337";
 static bool menuSetupSubmenuOpen = false;
 
+static int clamp_active_players(int count);
 static void ResetGame(void);
 static void reset_firefight_match(void);
 static void start_firefight_wave(int wave_number);
@@ -9155,6 +9163,14 @@ static void ResetGame(void) {
             activePlayers = 4;
         }
         reset_firefight_match();
+    } else {
+        if (netTransport.role == NET_ROLE_OFFLINE) {
+            activePlayers = clamp_active_players(multiplayerActivePlayers);
+            for (int p = 0; p < MAX_PLAYERS; ++p) {
+                playerInput[p] = multiplayerPlayerInput[p];
+            }
+        }
+        firefightWaveBannerTimer = 0.0f;
     }
 }
 
@@ -14354,30 +14370,38 @@ static bool spawn_position_clear(Vector3 pos, float min_dist) {
 
 static Vector3 pick_player_spawn(int player_index) {
     if (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM && current_sanctum_plan_valid && current_sanctum_plan.spawn_point_count > 0) {
-        if (player_index == 0) {
-            for (int s = 0; s < current_sanctum_plan.spawn_point_count; ++s) {
-                if (current_sanctum_plan.spawn_points[s].is_player) {
-                    float wx = (current_sanctum_plan.spawn_points[s].pos.x + 0.5f) * VOXEL_SIZE;
-                    float wy = (current_sanctum_offset_y + current_sanctum_plan.spawn_points[s].pos.y + 0.5f) * VOXEL_SIZE + BASE_EYE_HEIGHT;
-                    float wz = (current_sanctum_plan.spawn_points[s].pos.z + 0.5f) * VOXEL_SIZE;
+        if (gameMode == GAME_MODE_FIREFIGHT) {
+            if (player_index == 0) {
+                for (int s = 0; s < current_sanctum_plan.spawn_point_count; ++s) {
+                    if (current_sanctum_plan.spawn_points[s].is_player) {
+                        float wx = (current_sanctum_plan.spawn_points[s].pos.x + 0.5f) * VOXEL_SIZE;
+                        float wy = (current_sanctum_offset_y + current_sanctum_plan.spawn_points[s].pos.y + 0.5f) * VOXEL_SIZE + BASE_EYE_HEIGHT;
+                        float wz = (current_sanctum_plan.spawn_points[s].pos.z + 0.5f) * VOXEL_SIZE;
+                        return (Vector3){ wx, wy, wz };
+                    }
+                }
+            } else {
+                int enemy_spawns[MAX_SANCTUM_SPAWNS];
+                int enemy_count = 0;
+                for (int s = 0; s < current_sanctum_plan.spawn_point_count; ++s) {
+                    if (!current_sanctum_plan.spawn_points[s].is_player) {
+                        enemy_spawns[enemy_count++] = s;
+                    }
+                }
+                if (enemy_count > 0) {
+                    int s_idx = enemy_spawns[(player_index - 1) % enemy_count];
+                    float wx = (current_sanctum_plan.spawn_points[s_idx].pos.x + 0.5f) * VOXEL_SIZE;
+                    float wy = (current_sanctum_offset_y + current_sanctum_plan.spawn_points[s_idx].pos.y + 0.5f) * VOXEL_SIZE + BASE_EYE_HEIGHT;
+                    float wz = (current_sanctum_plan.spawn_points[s_idx].pos.z + 0.5f) * VOXEL_SIZE;
                     return (Vector3){ wx, wy, wz };
                 }
             }
         } else {
-            int enemy_spawns[MAX_SANCTUM_SPAWNS];
-            int enemy_count = 0;
-            for (int s = 0; s < current_sanctum_plan.spawn_point_count; ++s) {
-                if (!current_sanctum_plan.spawn_points[s].is_player) {
-                    enemy_spawns[enemy_count++] = s;
-                }
-            }
-            if (enemy_count > 0) {
-                int s_idx = enemy_spawns[(player_index - 1) % enemy_count];
-                float wx = (current_sanctum_plan.spawn_points[s_idx].pos.x + 0.5f) * VOXEL_SIZE;
-                float wy = (current_sanctum_offset_y + current_sanctum_plan.spawn_points[s_idx].pos.y + 0.5f) * VOXEL_SIZE + BASE_EYE_HEIGHT;
-                float wz = (current_sanctum_plan.spawn_points[s_idx].pos.z + 0.5f) * VOXEL_SIZE;
-                return (Vector3){ wx, wy, wz };
-            }
+            int s_idx = (player_index >= 0) ? (player_index % current_sanctum_plan.spawn_point_count) : 0;
+            float wx = (current_sanctum_plan.spawn_points[s_idx].pos.x + 0.5f) * VOXEL_SIZE;
+            float wy = (current_sanctum_offset_y + current_sanctum_plan.spawn_points[s_idx].pos.y + 0.5f) * VOXEL_SIZE + BASE_EYE_HEIGHT;
+            float wz = (current_sanctum_plan.spawn_points[s_idx].pos.z + 0.5f) * VOXEL_SIZE;
+            return (Vector3){ wx, wy, wz };
         }
     }
 
@@ -18723,8 +18747,8 @@ int main(int argc, char **argv) {
         }
         switch (gameState) {
             case GAME_STATE_MENU: {
-                int boxW = menuSetupSubmenuOpen ? 1040 : 560;
-                int boxH = menuSetupSubmenuOpen ? 710 : 430;
+                int boxW = menuSetupSubmenuOpen ? 1040 : 580;
+                int boxH = menuSetupSubmenuOpen ? 710 : 440;
                 int boxX = (SCREEN_WIDTH - boxW) / 2;
                 int boxY = (SCREEN_HEIGHT - boxH) / 2;
                 Rectangle sBox = { (float)(boxX + 220), (float)(boxY + 314), 300.0f, 38.0f };
@@ -18758,21 +18782,22 @@ int main(int argc, char **argv) {
 
                     if (!menuSetupSubmenuOpen) {
                         // ==========================================
-                        // CLASSIC CLEAN MAIN MENU (560 x 430)
+                        // CLASSIC CLEAN MAIN MENU (580 x 440)
                         // ==========================================
                         DrawRectangle(boxX, boxY, boxW, boxH, Fade(RAYWHITE, 0.70f));
                         DrawRectangleLines(boxX, boxY, boxW, boxH, DARKGRAY);
 
-                        DrawText("FPS Game", SCREEN_WIDTH / 2 - MeasureText("FPS Game", 50) / 2, boxY + 30, 50, BLACK);
+                        DrawText("FPS Game", SCREEN_WIDTH / 2 - MeasureText("FPS Game", 50) / 2, boxY + 25, 50, BLACK);
 
-                        // Enter Start line (clickable or ENTER)
-                        Rectangle enterRec = { (float)(boxX + 40), (float)(boxY + 105), (float)(boxW - 80), 30.0f };
+                        // Option 1: Start Multiplayer (PvP) [ENTER]
+                        Rectangle enterRec = { (float)(boxX + 30), (float)(boxY + 95), (float)(boxW - 60), 34.0f };
                         bool enterHover = CheckCollisionPointRec(GetMousePosition(), enterRec);
-                        if (enterHover) DrawRectangleRec(enterRec, Fade(SKYBLUE, 0.25f));
-                        const char *enterPrompt = (gameMode == GAME_MODE_FIREFIGHT) ? "Press ENTER to Start [Firefight]" : "Press ENTER to Start";
-                        DrawText(enterPrompt, SCREEN_WIDTH / 2 - MeasureText(enterPrompt, 20) / 2, boxY + 110, 20, enterHover ? BLACK : DARKGRAY);
+                        if (enterHover) DrawRectangleRec(enterRec, Fade(GREEN, 0.22f));
+                        const char *enterPrompt = "Press ENTER to Start Multiplayer (PvP)";
+                        DrawText(enterPrompt, SCREEN_WIDTH / 2 - MeasureText(enterPrompt, 20) / 2, boxY + 102, 20, enterHover ? DARKGREEN : (Color){ 25, 75, 30, 255 });
                         if (enterHover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                             if (netTransport.role == NET_ROLE_OFFLINE) {
+                                gameMode = GAME_MODE_DEATHMATCH;
                                 ResetGame();
                                 if (droneIntroEnabled) {
                                     gameState = GAME_STATE_DRONE_INTRO;
@@ -18783,31 +18808,31 @@ int main(int argc, char **argv) {
                             }
                         }
 
-                        // F: Firefight & World Setup sub-menu
-                        Rectangle fRec = { (float)(boxX + 30), (float)(boxY + 142), (float)(boxW - 60), 32.0f };
+                        // Option 2: Firefight Mode [F / Shift+ENTER]
+                        Rectangle fRec = { (float)(boxX + 30), (float)(boxY + 137), (float)(boxW - 60), 34.0f };
                         bool fHover = CheckCollisionPointRec(GetMousePosition(), fRec);
-                        if (fHover) DrawRectangleRec(fRec, Fade(GOLD, 0.35f));
-                        const char *fPrompt = (gameMode == GAME_MODE_FIREFIGHT) ? ">>> Press F for Firefight & World Setup [ACTIVE] <<<" : "Press F for Firefight & World Setup";
-                        Color fColor = (gameMode == GAME_MODE_FIREFIGHT) ? (Color){ 195, 45, 35, 255 } : DARKBLUE;
-                        DrawText(fPrompt, SCREEN_WIDTH / 2 - MeasureText(fPrompt, 20) / 2, boxY + 148, 20, fHover ? RED : fColor);
+                        if (fHover) DrawRectangleRec(fRec, Fade(RED, 0.18f));
+                        const char *fPrompt = "Press F for Firefight Mode (Waves & Worlds)";
+                        DrawText(fPrompt, SCREEN_WIDTH / 2 - MeasureText(fPrompt, 20) / 2, boxY + 144, 20, fHover ? RED : (Color){ 160, 35, 25, 255 });
                         if (fHover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                            gameMode = GAME_MODE_FIREFIGHT;
                             menuSetupSubmenuOpen = true;
                         }
 
-                        // S: Settings
-                        Rectangle sRec = { (float)(boxX + 40), (float)(boxY + 180), (float)(boxW - 80), 26.0f };
+                        // Option 3: Settings [S]
+                        Rectangle sRec = { (float)(boxX + 40), (float)(boxY + 178), (float)(boxW - 80), 26.0f };
                         bool sHover = CheckCollisionPointRec(GetMousePosition(), sRec);
                         if (sHover) DrawRectangleRec(sRec, Fade(SKYBLUE, 0.25f));
-                        DrawText("Press S for Settings", SCREEN_WIDTH / 2 - MeasureText("Press S for Settings", 20) / 2, boxY + 183, 20, sHover ? BLACK : DARKGRAY);
+                        DrawText("Press S for Settings", SCREEN_WIDTH / 2 - MeasureText("Press S for Settings", 20) / 2, boxY + 181, 20, sHover ? BLACK : DARKGRAY);
                         if (sHover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                             if (netTransport.role == NET_ROLE_OFFLINE) gameState = GAME_STATE_SETTINGS;
                         }
 
-                        // C: Creative Mode
-                        Rectangle cRec = { (float)(boxX + 40), (float)(boxY + 210), (float)(boxW - 80), 26.0f };
+                        // Option 4: Creative Mode [C]
+                        Rectangle cRec = { (float)(boxX + 40), (float)(boxY + 208), (float)(boxW - 80), 26.0f };
                         bool cHover = CheckCollisionPointRec(GetMousePosition(), cRec);
                         if (cHover) DrawRectangleRec(cRec, Fade(SKYBLUE, 0.25f));
-                        DrawText("Press C for Creative Mode", SCREEN_WIDTH / 2 - MeasureText("Press C for Creative Mode", 20) / 2, boxY + 213, 20, cHover ? BLACK : DARKGRAY);
+                        DrawText("Press C for Creative Mode", SCREEN_WIDTH / 2 - MeasureText("Press C for Creative Mode", 20) / 2, boxY + 211, 20, cHover ? BLACK : DARKGRAY);
                         if (cHover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                             if (netTransport.role == NET_ROLE_OFFLINE) {
                                 ResetCreative();
@@ -18849,10 +18874,10 @@ int main(int argc, char **argv) {
                             TextFormat("World: Precursor Citadel [Growth: %d steps, #%u] (W Cycle, G Grow, T Seed)",
                                        sanctumGrowthSteps, sanctumSeed) :
                             TextFormat("World: %s (Press W to Cycle)", world_names[currentWorldType]);
-                        DrawText(world_info, SCREEN_WIDTH / 2 - MeasureText(world_info, 18) / 2, boxY + 310, 18, DARKBLUE);
+                        DrawText(world_info, SCREEN_WIDTH / 2 - MeasureText(world_info, 18) / 2, boxY + 306, 18, DARKBLUE);
 
-                        const char *mode_info = (gameMode == GAME_MODE_FIREFIGHT) ? "Mode: FIREFIGHT [Waves of AI bots]" : "Mode: DEATHMATCH [Classic PvP]";
-                        DrawText(mode_info, SCREEN_WIDTH / 2 - MeasureText(mode_info, 18) / 2, boxY + 340, 18, (gameMode == GAME_MODE_FIREFIGHT) ? (Color){ 195, 45, 35, 255 } : (Color){ 30, 80, 40, 255 });
+                        const char *mode_info = "ENTER = Classic Multiplayer PvP | F = Firefight Waves";
+                        DrawText(mode_info, SCREEN_WIDTH / 2 - MeasureText(mode_info, 16) / 2, boxY + 342, 16, (Color){ 60, 60, 80, 255 });
 
                         if (netTransport.role == NET_ROLE_CLIENT) {
                             DrawText(netWorldReady ? "Connected" : "Connecting...", boxX + 20, boxY + 380, 18, DARKBLUE);
@@ -19226,11 +19251,24 @@ int main(int argc, char **argv) {
                 EndDrawing();
 
                 if (!menuSetupSubmenuOpen) {
-                    // Inputs for Old Main Menu
+                    // Inputs for Classic Main Menu
                     if (IsKeyPressed(KEY_F)) {
+                        gameMode = GAME_MODE_FIREFIGHT;
                         menuSetupSubmenuOpen = true;
                     }
-                    if (netTransport.role == NET_ROLE_OFFLINE && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))) {
+                    if (netTransport.role == NET_ROLE_OFFLINE &&
+                        (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) &&
+                        (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))) {
+                        gameMode = GAME_MODE_FIREFIGHT;
+                        ResetGame();
+                        if (droneIntroEnabled) {
+                            gameState = GAME_STATE_DRONE_INTRO;
+                            droneTimer = 3.0f;
+                        } else {
+                            gameState = GAME_STATE_PLAYING;
+                        }
+                    } else if (netTransport.role == NET_ROLE_OFFLINE && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))) {
+                        gameMode = GAME_MODE_DEATHMATCH;
                         ResetGame();
                         if (droneIntroEnabled) {
                             gameState = GAME_STATE_DRONE_INTRO;
@@ -19303,6 +19341,7 @@ int main(int argc, char **argv) {
                         }
                     }
                     if (netTransport.role == NET_ROLE_OFFLINE && IsKeyPressed(KEY_H)) {
+                        gameMode = GAME_MODE_DEATHMATCH;
                         netRequestedRole = NET_ROLE_HOST;
                         netRequestedCreative = false;
                         if (net_transport_host(&netTransport, netRequestedPort)) {
@@ -19312,6 +19351,7 @@ int main(int argc, char **argv) {
                         }
                     }
                     if (netTransport.role == NET_ROLE_OFFLINE && IsKeyPressed(KEY_J)) {
+                        gameMode = GAME_MODE_DEATHMATCH;
                         netRequestedRole = NET_ROLE_CLIENT;
                         netRequestedCreative = false;
                         net_prepare_client_local_players(netRequestedLocalPlayers);
@@ -20110,14 +20150,29 @@ int main(int argc, char **argv) {
                 // Existing Inputs
                 if (IsKeyPressed(KEY_EQUAL) || IsKeyPressed(KEY_KP_ADD)) {
                     activePlayers = clamp_active_players(activePlayers + 1);
+                    multiplayerActivePlayers = activePlayers;
                 }
                 if (IsKeyPressed(KEY_MINUS) || IsKeyPressed(KEY_KP_SUBTRACT)) {
                     activePlayers = clamp_active_players(activePlayers - 1);
+                    multiplayerActivePlayers = activePlayers;
                 }
-                        if (IsKeyPressed(KEY_ONE)) playerInput[0] = (InputType)((playerInput[0] + 1) % 5);
-                        if (IsKeyPressed(KEY_TWO)) playerInput[1] = (InputType)((playerInput[1] + 1) % 5);
-                        if (IsKeyPressed(KEY_THREE)) playerInput[2] = (InputType)((playerInput[2] + 1) % 5);
-                        if (IsKeyPressed(KEY_FOUR)) playerInput[3] = (InputType)((playerInput[3] + 1) % 5);                if (IsKeyPressed(KEY_R)) randomSpawnEnabled = !randomSpawnEnabled;
+                if (IsKeyPressed(KEY_ONE)) {
+                    playerInput[0] = (InputType)((playerInput[0] + 1) % 5);
+                    multiplayerPlayerInput[0] = playerInput[0];
+                }
+                if (IsKeyPressed(KEY_TWO)) {
+                    playerInput[1] = (InputType)((playerInput[1] + 1) % 5);
+                    multiplayerPlayerInput[1] = playerInput[1];
+                }
+                if (IsKeyPressed(KEY_THREE)) {
+                    playerInput[2] = (InputType)((playerInput[2] + 1) % 5);
+                    multiplayerPlayerInput[2] = playerInput[2];
+                }
+                if (IsKeyPressed(KEY_FOUR)) {
+                    playerInput[3] = (InputType)((playerInput[3] + 1) % 5);
+                    multiplayerPlayerInput[3] = playerInput[3];
+                }
+                if (IsKeyPressed(KEY_R)) randomSpawnEnabled = !randomSpawnEnabled;
                 
                 // New Inputs
                 if (IsKeyPressed(KEY_LEFT_BRACKET)) {
