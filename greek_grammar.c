@@ -40,6 +40,65 @@ static ModBox3D compute_total_footprint(const TemplePlan *plan) {
     return res;
 }
 
+static void add_node(TemplePlan *plan, ArchPrimitiveType type, ModBox3D box, int col_count, int col_spacing, bool exterior);
+
+// Reconstruct 3-tiered stepped stylobate (Crepidoma) so it always fully encloses all temple columns and walls
+static void rebuild_stylobate_steps(TemplePlan *plan) {
+    if (!plan) return;
+
+    // Remove existing STEP nodes
+    int w = 0;
+    for (int i = 0; i < plan->node_count; ++i) {
+        if (plan->nodes[i].type != ARCH_PRIMITIVE_STEP) {
+            plan->nodes[w++] = plan->nodes[i];
+        }
+    }
+    plan->node_count = w;
+
+    // Find court_min_z if courtyard is present
+    int court_min_z = 999999;
+    for (int i = 0; i < plan->node_count; ++i) {
+        if (plan->nodes[i].type == ARCH_PRIMITIVE_COURTYARD) {
+            court_min_z = plan->nodes[i].box.min_z;
+            break;
+        }
+    }
+
+    // Compute bounding footprint of temple core (columns, cella, walls, lintels)
+    ModBox3D foot = make_box(0, 0, 0, 0, 0, 0);
+    bool found_first = false;
+    for (int i = 0; i < plan->node_count; ++i) {
+        const ArchNode *n = &plan->nodes[i];
+        // Only include temple building elements (not courtyard, garden paths, groves, tholos)
+        if (n->type == ARCH_PRIMITIVE_CELL || n->type == ARCH_PRIMITIVE_WALL ||
+            n->type == ARCH_PRIMITIVE_COLUMN || n->type == ARCH_PRIMITIVE_LINTEL) {
+            if (n->box.min_z >= court_min_z) continue; // In courtyard forecourt
+            if (!found_first) {
+                foot = n->box;
+                found_first = true;
+            } else {
+                if (n->box.min_x < foot.min_x) foot.min_x = n->box.min_x;
+                if (n->box.max_x > foot.max_x) foot.max_x = n->box.max_x;
+                if (n->box.min_z < foot.min_z) foot.min_z = n->box.min_z;
+                if (n->box.max_z > foot.max_z) foot.max_z = n->box.max_z;
+            }
+        }
+    }
+
+    if (!found_first) return;
+
+    // Add 3 stepped tiers (Crepidoma)
+    for (int tier = 0; tier < 3; ++tier) {
+        int expand = (3 - tier);
+        int y_level = -tier - 1;
+        add_node(plan, ARCH_PRIMITIVE_STEP,
+                 make_box(foot.min_x - expand, y_level, foot.min_z - expand,
+                          foot.max_x + expand, y_level + 1, foot.max_z + expand),
+                 0, 0, true);
+    }
+    plan->has_stylobate = true;
+}
+
 static void add_node(TemplePlan *plan, ArchPrimitiveType type, ModBox3D box, int col_count, int col_spacing, bool exterior) {
     if (plan->node_count >= MAX_ARCH_NODES) return;
     ArchNode *n = &plan->nodes[plan->node_count++];
@@ -324,6 +383,9 @@ bool greek_algebra_apply(TemplePlan *plan, const GrowthOpportunity *opp) {
 
             plan->stage = TEMPLE_STAGE_PROSTYLE;
             plan->complexity++;
+            if (plan->has_stylobate) {
+                rebuild_stylobate_steps(plan);
+            }
             return true;
         }
 
@@ -351,6 +413,9 @@ bool greek_algebra_apply(TemplePlan *plan, const GrowthOpportunity *opp) {
 
             plan->stage = TEMPLE_STAGE_AMPHIPROSTYLE;
             plan->complexity++;
+            if (plan->has_stylobate) {
+                rebuild_stylobate_steps(plan);
+            }
             return true;
         }
 
@@ -402,21 +467,14 @@ bool greek_algebra_apply(TemplePlan *plan, const GrowthOpportunity *opp) {
             plan->sites[4].boundary = make_box(lintel_left, h, peri_min_z, lintel_right, h, peri_max_z);
             plan->stage = TEMPLE_STAGE_PERIPTERAL;
             plan->complexity += 2;
+            if (plan->has_stylobate) {
+                rebuild_stylobate_steps(plan);
+            }
             return true;
         }
 
         case RULE_EXPAND_STYLOBATE: {
-            ModBox3D foot = compute_total_footprint(plan);
-            // Add 3 stepped tiers (Crepidoma)
-            for (int tier = 0; tier < 3; ++tier) {
-                int expand = (3 - tier);
-                int y_level = -tier - 1;
-                add_node(plan, ARCH_PRIMITIVE_STEP,
-                         make_box(foot.min_x - expand, y_level, foot.min_z - expand,
-                                  foot.max_x + expand, y_level + 1, foot.max_z + expand),
-                         0, 0, true);
-            }
-            plan->has_stylobate = true;
+            rebuild_stylobate_steps(plan);
             plan->complexity++;
             return true;
         }
@@ -781,6 +839,11 @@ TemplePlan generate_greek_temple(uint32_t seed, TempleStage target_stage, int mo
             GrowthOpportunity opp = { -1, -1, RULE_POPULATE_GARDEN_FLORA, 1.0f };
             greek_algebra_apply(&plan, &opp);
         }
+    }
+
+    // Final synchronization: ensure stylobate steps encompass the entire completed temple peristyle
+    if (plan.has_stylobate) {
+        rebuild_stylobate_steps(&plan);
     }
 
     return plan;

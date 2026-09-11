@@ -39,7 +39,6 @@ static inline void rasterize_sanctum_plan(const SanctumCitadelPlan *plan,
             found_non_void = true;
         }
     }
-    if (min_non_void_y < 0) min_non_void_y = 0;
     int offset_y = base_gy - min_non_void_y;
 
     // PASS 1: Negative Mass Void Excavation (Chasms, Pits, Crypt Voids)
@@ -78,6 +77,22 @@ static inline void rasterize_sanctum_plan(const SanctumCitadelPlan *plan,
         if (gy1 < gy0) continue;
         int gz0 = center_gz + node->z - node->d / 2;
         int gz1 = center_gz + node->z + (node->d - 1) / 2;
+
+        // Downward vertical foundation extrusion:
+        // Ensure upright load-bearing members reach solid bedrock at base_gy
+        if (node->prim_type == SANCTUM_PRIM_MARBLE_COLUMN ||
+            node->prim_type == SANCTUM_PRIM_STONE_ORTHOSTAT ||
+            node->prim_type == SANCTUM_PRIM_TITANIUM_PYLON ||
+            node->prim_type == SANCTUM_PRIM_TITANIUM_BUTTRESS ||
+            node->prim_type == SANCTUM_PRIM_OBELISK) {
+            for (int z = gz0; z <= gz1; ++z) {
+                for (int x = gx0; x <= gx1; ++x) {
+                    for (int y = gy0 - 1; y >= base_gy; --y) {
+                        plot_fn(x, y, z, node->color);
+                    }
+                }
+            }
+        }
 
         float slope_x = tanf(node->cant_angle_x * DEG2RAD);
         float slope_z = tanf(node->cant_angle_z * DEG2RAD);

@@ -101,6 +101,18 @@ static inline void rasterize_megalith_plan(const MegalithPlan *plan,
         int mid_z = (gz0 + gz1) / 2;
         int h_span = gy1 - gy0;
 
+        // Downward vertical foundation extrusion:
+        // Ensure every standing stone or wall slab firmly reaches bedrock at base_gy!
+        if (n->type == MEGALITH_PRIMITIVE_ORTHOSTAT || n->type == MEGALITH_PRIMITIVE_WALL_SLAB) {
+            for (int z = gz0; z < gz1; ++z) {
+                for (int x = gx0; x < gx1; ++x) {
+                    for (int y = gy0 - 1; y >= base_gy; --y) {
+                        plot(x, y, z, col_granite_dark);
+                    }
+                }
+            }
+        }
+
         for (int y = gy0; y < gy1; ++y) {
             float y_ratio = (h_span > 0) ? (float)(y - gy0) / (float)h_span : 0.0f;
 
@@ -115,10 +127,9 @@ static inline void rasterize_megalith_plan(const MegalithPlan *plan,
 
                     if (n->type == MEGALITH_PRIMITIVE_ORTHOSTAT || n->type == MEGALITH_PRIMITIVE_WALL_SLAB) {
                         // Tapering toward the sky (broader base, pointed apex)
+                        // Top-down only: never undercut lower foundation or shaft voxels
                         if (y > base_gy && y_ratio > 0.7f && is_corner) continue; // Taper top corners
                         if (y > base_gy && y_ratio > 0.85f && (is_edge_x || is_edge_z) && (h % 3 == 0)) continue;
-                        // Surface erosion: only above foundation level and for stones wide enough not to be severed
-                        if (y > base_gy && (gx1 - gx0 > 1 && gz1 - gz0 > 1) && is_corner && (h % 2 == 0)) continue;
                     } else if (n->type == MEGALITH_PRIMITIVE_CAPSTONE) {
                         // Bulging heavy convex table profile: rounded top corners
                         if (y == gy1 - 1 && is_corner) continue;

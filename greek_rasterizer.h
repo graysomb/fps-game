@@ -118,6 +118,19 @@ static inline void rasterize_temple_plan(const TemplePlan *plan,
         int gy0 = base_gy   + n->box.min_y * mv;
         int gy1 = base_gy   + n->box.max_y * mv;
 
+        if (plan->has_courtyard) {
+            for (int j = 0; j < plan->node_count; ++j) {
+                if (plan->nodes[j].type == ARCH_PRIMITIVE_COURTYARD) {
+                    if (n->box.min_z >= plan->nodes[j].box.min_z) {
+                        int h_vox = gy1 - gy0;
+                        gy0 = (base_gy >= 3) ? (base_gy - 3) : 0;
+                        gy1 = gy0 + h_vox;
+                    }
+                    break;
+                }
+            }
+        }
+
         for (int y = gy0; y < gy1; ++y) {
             for (int z = gz0; z < gz1; ++z) {
                 for (int x = gx0; x < gx1; ++x) {
@@ -138,6 +151,35 @@ static inline void rasterize_temple_plan(const TemplePlan *plan,
         int gz1 = center_gz + n->box.max_z * mv;
         int gy0 = base_gy   + n->box.min_y * mv;
         int gy1 = base_gy   + n->box.max_y * mv;
+
+        if (plan->has_courtyard) {
+            for (int j = 0; j < plan->node_count; ++j) {
+                if (plan->nodes[j].type == ARCH_PRIMITIVE_COURTYARD) {
+                    if (n->box.min_z >= plan->nodes[j].box.min_z) {
+                        int h_vox = gy1 - gy0;
+                        gy0 = (base_gy >= 3) ? (base_gy - 3) : 0;
+                        gy1 = gy0 + h_vox;
+                    }
+                    break;
+                }
+            }
+        }
+
+        // Downward vertical foundation extrusion pass:
+        // Ensure every column drum firmly reaches solid ground or stylobate beneath it!
+        for (int z = gz0; z < gz1; ++z) {
+            for (int x = gx0; x < gx1; ++x) {
+                if ((gx1 - gx0 >= 3) && (gz1 - gz0 >= 3)) {
+                    if ((x == gx0 || x == gx1 - 1) && (z == gz0 || z == gz1 - 1)) {
+                        continue; // cut 4 softened corners
+                    }
+                }
+                for (int y = gy0 - 1; y >= 0; --y) {
+                    bool is_seam = (y % 3 == 0);
+                    plot(x, y, z, is_seam ? col_drum_seam : col_column);
+                }
+            }
+        }
 
         for (int y = gy0; y < gy1; ++y) {
             // Drum seam every 3 voxels
@@ -177,6 +219,19 @@ static inline void rasterize_temple_plan(const TemplePlan *plan,
         int gz1 = center_gz + n->box.max_z * mv;
         int gy0 = base_gy   + n->box.min_y * mv;
         int gy1 = base_gy   + n->box.max_y * mv;
+
+        if (plan->has_courtyard) {
+            for (int j = 0; j < plan->node_count; ++j) {
+                if (plan->nodes[j].type == ARCH_PRIMITIVE_COURTYARD) {
+                    if (n->box.min_z >= plan->nodes[j].box.min_z) {
+                        int h_vox = gy1 - gy0;
+                        gy0 = (base_gy >= 3 ? base_gy - 3 : 0) + (n->box.min_y * mv);
+                        gy1 = gy0 + h_vox;
+                    }
+                    break;
+                }
+            }
+        }
 
         for (int y = gy0; y < gy1; ++y) {
             for (int z = gz0; z < gz1; ++z) {

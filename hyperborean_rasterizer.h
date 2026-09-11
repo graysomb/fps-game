@@ -62,6 +62,17 @@ static inline void rasterize_hyperborean_plan(const HyperPlan *plan,
         // -------------------------------------------------------------------
         if (n->type == HYPER_PRIM_MENHIR || n->type == HYPER_PRIM_HEEL_STONE ||
             n->type == HYPER_PRIM_ROUGH_LINTEL) {
+            // Extrude standing stones down to base_gy
+            if (n->type != HYPER_PRIM_ROUGH_LINTEL) {
+                for (int z = gz0; z < gz1; ++z) {
+                    for (int x = gx0; x < gx1; ++x) {
+                        for (int y = gy0 - 1; y >= base_gy; --y) {
+                            plot(x, y, z, col_sarsen_dark);
+                        }
+                    }
+                }
+            }
+
             for (int y = gy0; y < gy1; ++y) {
                 float y_ratio = span_y > 0 ? (float)(y - gy0) / (float)span_y : 0.0f;
                 for (int z = gz0; z < gz1; ++z) {
@@ -71,10 +82,9 @@ static inline void rasterize_hyperborean_plan(const HyperPlan *plan,
                         bool is_edge_z = (z == gz0 || z == gz1 - 1);
                         bool is_corner = is_edge_x && is_edge_z;
 
-                        // Weathered chipping and skyward tapering
+                        // Weathered chipping and skyward tapering (monotonic top-down only)
                         if (y > base_gy && y_ratio > 0.75f && is_corner) continue;
                         if (y > base_gy && y_ratio > 0.85f && (is_edge_x || is_edge_z) && (h % 3 == 0)) continue;
-                        if (y > base_gy && (gx1 - gx0 > 1 && gz1 - gz0 > 1) && is_corner && (h % 2 == 0)) continue;
 
                         Color c = col_sarsen_light;
                         int v = h % 10;
@@ -92,6 +102,15 @@ static inline void rasterize_hyperborean_plan(const HyperPlan *plan,
         // 2. Classical Fluted Marble Columns & Architraves
         // -------------------------------------------------------------------
         else if (n->type == HYPER_PRIM_FLUTED_COLUMN) {
+            // Extrude fluted column drums down to base_gy
+            for (int z = gz0; z < gz1; ++z) {
+                for (int x = gx0; x < gx1; ++x) {
+                    for (int y = gy0 - 1; y >= base_gy; --y) {
+                        plot(x, y, z, col_marble_shadow);
+                    }
+                }
+            }
+
             for (int y = gy0; y < gy1; ++y) {
                 bool is_capital = (y == gy1 - 1);
                 for (int z = gz0; z < gz1; ++z) {

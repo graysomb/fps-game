@@ -8568,8 +8568,7 @@ static void update_current_sanctum_offset(void) {
             found = true;
         }
     }
-    if (min_non_void_y < 0) min_non_void_y = 0;
-    current_sanctum_offset_y = -min_non_void_y;
+    current_sanctum_offset_y = (min_non_void_y < 0) ? -min_non_void_y : 0;
 }
 
 static void buildUnifiedSanctumWorld(uint32_t seed, int growth_steps) {
@@ -8580,6 +8579,51 @@ static void buildUnifiedSanctumWorld(uint32_t seed, int growth_steps) {
     update_current_sanctum_offset();
     // Base at gy = 0 so foundations rest flush on the ground arena at y = 0.0f
     rasterize_sanctum_plan(&current_sanctum_plan, center, center, 0, plot_sanctum_voxel, void_sanctum_voxel);
+}
+
+// Fail-safe engine-level grounding pass:
+// Scan static voxels that form the base of an upright column/pillar/monolith shaft
+// (having vertical continuity above, e.g. gy+1 and gy+2 solid) that hover over a small
+// air gap (gap <= 3) and extrude them downward to the underlying solid floor or bedrock (gy = 0).
+static void ground_structural_pillars(void) {
+    int initial_count = voxel_count;
+    for (int i = 0; i < initial_count; ++i) {
+        if (voxels[i].simulate) continue;
+        int gx = voxels[i].gx;
+        int gy = voxels[i].gy;
+        int gz = voxels[i].gz;
+        if (gy <= 0) continue; // Bedrock level or below
+
+        // Check if directly supported from below (6-connectivity)
+        if (table_get_static_only(gx, gy - 1, gz) >= 0) continue;
+
+        // Check if this is the bottom of an upright column/pillar shaft:
+        // Must have solid static voxels immediately above it
+        if (table_get_static_only(gx, gy + 1, gz) < 0 ||
+            table_get_static_only(gx, gy + 2, gz) < 0) {
+            continue;
+        }
+
+        // Find distance down to solid support or bedrock (gy = 0)
+        int support_y = -1;
+        for (int test_y = gy - 1; test_y >= 0; --test_y) {
+            if (table_get_static_only(gx, test_y, gz) >= 0) {
+                support_y = test_y;
+                break;
+            }
+        }
+
+        int target_bottom_y = (support_y >= 0) ? (support_y + 1) : 0;
+        int gap = gy - target_bottom_y;
+
+        // Only bridge realistic foundation gaps (1 to 3 voxels: e.g. missed stylobate tiers,
+        // courtyard depressions, or foundation steps). Do not fill tall rooms or corridors.
+        if (gap >= 1 && gap <= 3) {
+            for (int fill_y = gy - 1; fill_y >= target_bottom_y; --fill_y) {
+                add_static_voxel_at_grid(gx, fill_y, gz, voxels[i].color, voxels[i].type);
+            }
+        }
+    }
 }
 
 // Scan static voxels that lack support directly below but have diagonal contact below,
@@ -8634,6 +8678,7 @@ static void buildDemo(void) {
     } else {
         buildTestWorld();
     }
+    ground_structural_pillars();
     heal_structural_seams();
     rebuild_glue_constraints();
 }

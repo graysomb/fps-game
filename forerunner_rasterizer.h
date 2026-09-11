@@ -48,7 +48,6 @@ static inline void rasterize_forerunner_plan(const ForerunnerPlan *plan,
             found_non_void = true;
         }
     }
-    if (min_non_void_y < 0) min_non_void_y = 0;
     int offset_y = base_gy - min_non_void_y * mv;
 
     for (int i = 0; i < plan->node_count; ++i) {
@@ -71,7 +70,19 @@ static inline void rasterize_forerunner_plan(const ForerunnerPlan *plan,
         // -------------------------------------------------------------------
         // 1. Canted Angular Pylons (15-25 degree rake)
         // -------------------------------------------------------------------
+        // -------------------------------------------------------------------
+        // 1. Canted Angular Pylons (15-25 degree rake)
+        // -------------------------------------------------------------------
         if (n->type == FORERUNNER_PRIM_PYLON) {
+            // Extrude pylon base downward to base_gy bedrock
+            for (int z = gz0; z < gz1; ++z) {
+                for (int x = gx0; x < gx1; ++x) {
+                    for (int y = gy0 - 1; y >= base_gy; --y) {
+                        plot(x, y, z, col_pewter_dark);
+                    }
+                }
+            }
+
             float cant_x = n->cant_angle_deg * (3.14159265f / 180.0f);
             float cant_z = n->cant_angle_z * (3.14159265f / 180.0f);
             float slope_x = tanf(fabsf(cant_x));
@@ -100,6 +111,15 @@ static inline void rasterize_forerunner_plan(const ForerunnerPlan *plan,
                 } else if (n->cant_angle_z < 0.0f) {
                     pz0 = gz0 - shift_z;
                     pz1 = gz1 - shift_z;
+                }
+
+                // Seal stair-step overhang into layer y - 1 to maintain vertical 6-connectivity
+                if (dy > 0) {
+                    for (int z = pz0; z < pz1; ++z) {
+                        for (int x = px0; x < px1; ++x) {
+                            plot(x, y - 1, z, col_pewter_dark);
+                        }
+                    }
                 }
 
                 for (int z = pz0; z < pz1; ++z) {
@@ -155,6 +175,15 @@ static inline void rasterize_forerunner_plan(const ForerunnerPlan *plan,
         // 4. Vertical Telemetry Conduit Spires
         // -------------------------------------------------------------------
         else if (n->type == FORERUNNER_PRIM_SPIRE) {
+            // Extrude spire base downward to base_gy bedrock
+            for (int z = gz0; z < gz1; ++z) {
+                for (int x = gx0; x < gx1; ++x) {
+                    for (int y = gy0 - 1; y >= base_gy; --y) {
+                        plot(x, y, z, col_pewter_dark);
+                    }
+                }
+            }
+
             for (int y = gy0; y < gy1; ++y) {
                 float y_ratio = span_y > 0 ? (float)(y - gy0) / (float)span_y : 0.0f;
                 int inset = (int)(y_ratio * 1.5f); // Taper upward
