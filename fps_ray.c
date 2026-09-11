@@ -144,6 +144,7 @@ static int physicsSmokeSteps = 0;
 static int physicsSmokeVoxels = 2;
 static int physicsSmokeBatchSize = 1;
 static bool tetherThrowCcdEnabled = true;
+static bool aiSmokeTestRequested = false;
 
 static NetTransport netTransport;
 static NetRole netRequestedRole = NET_ROLE_OFFLINE;
@@ -290,6 +291,10 @@ static bool parse_physics_arguments(int argc, char **argv) {
             physicsSmokeBatchSize = atoi(arg + 22);
             if (physicsSmokeBatchSize < 1) physicsSmokeBatchSize = 1;
             if (physicsSmokeBatchSize > 8) physicsSmokeBatchSize = 8;
+            continue;
+        }
+        if (strcmp(arg, "--ai-smoke") == 0) {
+            aiSmokeTestRequested = true;
             continue;
         }
         const char *fluid_render_value = NULL;
@@ -933,6 +938,8 @@ typedef struct {
     Vector3 moveTarget;
     bool hasTarget;
     bool justBuilt;
+    Vector3 lastKnownTargetPos;
+    float lostTrackTimer;
 } BotState;
 static BotState botStates[MAX_PLAYERS];
 static bool randomSpawnEnabled = true;
@@ -9130,7 +9137,7 @@ static void reset_players_for_creative(void) {
         UpdateKdRatio(i);
         players[i].matter = players[i].matterMax;
         players[i].isExposed = false;
-        players[i].last_damage_time = 0.0f;
+        players[i].last_damage_time = -1000.0f;
         players[i].last_shot_time = -1000.0f;
         players[i].last_melee_time = -1000.0f;
         players[i].last_build_time = -1000.0f;
@@ -9194,7 +9201,7 @@ static void ResetGame(void) {
         players[i].matterMax = MATTER_MAX_DEFAULT;
         players[i].matter = players[i].matterMax;
         players[i].isExposed = false;
-        players[i].last_damage_time = 0.0f;
+        players[i].last_damage_time = -1000.0f;
         players[i].last_shot_time = -1000.0f;
         players[i].last_melee_time = -1000.0f;
         players[i].last_build_time = -1000.0f;
@@ -17431,6 +17438,191 @@ typedef enum {
     BOT_INTENT_FLEE
 } BotIntent;
 
+#define AI_MAX_AWARENESS_DIST 32.0f
+#define AI_FOV_DOT_THRESHOLD  0.50f  // cos(60 deg) -> 120 degree frontal vision cone
+
+// Traverse voxel grid with DDA, ignoring transparent non-occluders like bullets
+static bool ray_hit_solid_voxel(Ray ray, float t_max) {
+    float direction_length = v_length(ray.direction);
+    if (direction_length <= 1e-8f || t_max <= 0.0f) return false;
+    Vector3 dir = v_mul(ray.direction, 1.0f / direction_length);
+
+    int x = (int)floorf(ray.position.x / VOXEL_SIZE);
+    int y = (int)floorf(ray.position.y / VOXEL_SIZE);
+    int z = (int)floorf(ray.position.z / VOXEL_SIZE);
+    int step_x = (dir.x > 0.0f) ? 1 : (dir.x < 0.0f ? -1 : 0);
+    int step_y = (dir.y > 0.0f) ? 1 : (dir.y < 0.0f ? -1 : 0);
+    int step_z = (dir.z > 0.0f) ? 1 : (dir.z < 0.0f ? -1 : 0);
+    float delta_x = (step_x == 0) ? INFINITY : fabsf(VOXEL_SIZE / dir.x);
+    float delta_y = (step_y == 0) ? INFINITY : fabsf(VOXEL_SIZE / dir.y);
+    float delta_z = (step_z == 0) ? INFINITY : fabsf(VOXEL_SIZE / dir.z);
+    float next_x = ray_t_to_next_plane(ray.position.x, dir.x, x, VOXEL_SIZE);
+    float next_y = ray_t_to_next_plane(ray.position.y, dir.y, y, VOXEL_SIZE);
+    float next_z = ray_t_to_next_plane(ray.position.z, dir.z, z, VOXEL_SIZE);
+    float entry_t = 0.0f;
+
+    while (entry_t <= t_max + 1e-6f) {
+        int id = table_get(x, y, z);
+        if (id >= 0 && id < voxel_count && !voxels[id].isBullet) {
+            return true;
+        }
+
+        if (next_x <= next_y && next_x <= next_z) {
+            if (next_x > t_max) break;
+            x += step_x;
+            entry_t = next_x;
+            next_x += delta_x;
+        } else if (next_y <= next_z) {
+            if (next_y > t_max) break;
+            y += step_y;
+            entry_t = next_y;
+            next_y += delta_y;
+        } else {
+            if (next_z > t_max) break;
+            z += step_z;
+            entry_t = next_z;
+            next_z += delta_z;
+        }
+    }
+    return false;
+}
+
+// Ray trace to measure if the line of sight between two positions is occluded by solid voxels
+static bool is_view_occluded_by_voxels(Vector3 eye_pos, Vector3 target_pos) {
+    Vector3 diff = v_sub(target_pos, eye_pos);
+    float dist = v_length(diff);
+    if (dist <= 0.3f) {
+        return false; // Point-blank proximity, cannot be occluded
+    }
+    Vector3 dir = v_mul(diff, 1.0f / dist);
+
+    // Primary ray: eye to eye (nudged by 0.2f away from eye and ending 0.2f before target to prevent self-intersection)
+    Ray ray;
+    ray.position = v_add(eye_pos, v_mul(dir, 0.2f));
+    ray.direction = dir;
+    float max_t = dist - 0.4f;
+    if (max_t <= 0.0f) {
+        return false;
+    }
+
+    if (ray_hit_solid_voxel(ray, max_t)) {
+        // Primary ray occluded. Check secondary ray towards chest (target_pos.y - 0.4f)
+        // in case the head is behind a low doorway lintel or beam
+        Vector3 chest_pos = (Vector3){ target_pos.x, target_pos.y - 0.4f, target_pos.z };
+        Vector3 chest_diff = v_sub(chest_pos, eye_pos);
+        float chest_dist = v_length(chest_diff);
+        if (chest_dist > 0.4f) {
+            Vector3 chest_dir = v_mul(chest_diff, 1.0f / chest_dist);
+            Ray chest_ray;
+            chest_ray.position = v_add(eye_pos, v_mul(chest_dir, 0.2f));
+            chest_ray.direction = chest_dir;
+            float chest_max_t = chest_dist - 0.4f;
+            if (ray_hit_solid_voxel(chest_ray, chest_max_t)) {
+                return true; // Both eye and chest are occluded by solid voxels
+            }
+        } else {
+            return true;
+        }
+    }
+    return false; // Direct line of sight is clear
+}
+
+// AI Awareness Check:
+// 1. Check distance to player
+// 2. Check dot product of AI view to direction to player (view cone)
+// 3. Ray trace to measure if view is occluded
+static bool check_ai_awareness_of_player(int botIdx, int targetIdx, float *out_dist) {
+    if (botIdx < 0 || botIdx >= activePlayers || targetIdx < 0 || targetIdx >= activePlayers) {
+        return false;
+    }
+    if (botIdx == targetIdx) {
+        return false;
+    }
+    if (players[targetIdx].respawn_timer > 0.0f) {
+        return false;
+    }
+    if (gameMode == GAME_MODE_FIREFIGHT && is_player_bot(targetIdx) == is_player_bot(botIdx)) {
+        return false;
+    }
+
+    Player *bot = &players[botIdx];
+    Player *target = &players[targetIdx];
+
+    Vector3 to_target = v_sub(target->pos, bot->pos);
+    float dist = v_length(to_target);
+    if (out_dist) {
+        *out_dist = dist;
+    }
+
+    // 1. FIRST CHECK: Distance to player
+    float maxDist = AI_MAX_AWARENESS_DIST;
+    if (bot->enemyType == ENEMY_TYPE_SWARMER) {
+        maxDist = 22.0f;
+    } else if (bot->enemyType == ENEMY_TYPE_GOLIATH) {
+        maxDist = 28.0f;
+    } else if (playerInput[botIdx] == INPUT_TYPE_BOT_EASY) {
+        maxDist = 24.0f;
+    } else if (playerInput[botIdx] == INPUT_TYPE_BOT_HARD) {
+        maxDist = 42.0f;
+    }
+
+    if (dist > maxDist) {
+        return false; // Beyond awareness distance
+    }
+
+    if (dist < 1e-4f) {
+        return true; // Co-located
+    }
+
+    Vector3 dir_to_target = v_mul(to_target, 1.0f / dist);
+
+    // 2. SECOND CHECK: Dot product of AI view to dir to player (view cone)
+    float yr = DEG2RAD * bot->yaw;
+    float pr = DEG2RAD * bot->pitch;
+    Vector3 ai_view = (Vector3){
+        sinf(-yr) * cosf(pr),
+        sinf(pr),
+        -cosf(yr) * cosf(pr)
+    };
+
+    float dot = v_dot(ai_view, dir_to_target);
+
+    // If bot took damage very recently (< 1.2s ago), it is alerted towards its attacker
+    float damageDelta = (float)GetTime() - bot->last_damage_time;
+    bool recentlyDamaged = (damageDelta >= 0.0f && damageDelta < 1.2f);
+    bool inViewCone = (dot >= AI_FOV_DOT_THRESHOLD);
+
+    if (!inViewCone && !recentlyDamaged) {
+        return false; // Outside view direction
+    }
+
+    // 3. THIRD CHECK: Ray trace to measure if view is occluded by voxels
+    if (is_view_occluded_by_voxels(bot->pos, target->pos)) {
+        return false; // Occluded by terrain or wall
+    }
+
+    return true; // All 3 checks passed! AI is aware of player
+}
+
+static int find_nearest_aware_enemy(int playerIdx, float *out_dist_sq) {
+    int bestEnemy = -1;
+    float minDistSq = FLT_MAX;
+    for (int i = 0; i < activePlayers; i++) {
+        float dist = 0.0f;
+        if (check_ai_awareness_of_player(playerIdx, i, &dist)) {
+            float d2 = dist * dist;
+            if (d2 < minDistSq) {
+                minDistSq = d2;
+                bestEnemy = i;
+            }
+        }
+    }
+    if (out_dist_sq) {
+        *out_dist_sq = minDistSq;
+    }
+    return bestEnemy;
+}
+
 static int find_nearest_enemy(int playerIdx, float *out_dist_sq) {
     int bestEnemy = -1;
     float minDistSq = FLT_MAX;
@@ -17562,9 +17754,29 @@ static void UpdateBot(int playerIdx, float dt) {
     bs->stateTimer -= dt;
 
     float enemyDistSq = FLT_MAX;
-    int enemyIdx = find_nearest_enemy(playerIdx, &enemyDistSq);
-    bool hasEnemy = (enemyIdx >= 0);
-    float enemyDist = hasEnemy ? sqrtf(enemyDistSq) : FLT_MAX;
+    int enemyIdx = find_nearest_aware_enemy(playerIdx, &enemyDistSq);
+    bool isDirectlyVisible = (enemyIdx >= 0);
+    bool hasEnemy = isDirectlyVisible;
+    float enemyDist = isDirectlyVisible ? sqrtf(enemyDistSq) : FLT_MAX;
+
+    if (isDirectlyVisible) {
+        bs->targetIndex = enemyIdx;
+        bs->hasTarget = true;
+        bs->lastKnownTargetPos = players[enemyIdx].pos;
+        bs->lostTrackTimer = 1.5f;
+    } else if (bs->lostTrackTimer > 0.0f && bs->targetIndex >= 0 &&
+               bs->targetIndex < activePlayers && players[bs->targetIndex].respawn_timer <= 0.0f) {
+        // Target just broke line of sight: investigate last known position for 1.5s
+        bs->lostTrackTimer -= dt;
+        enemyIdx = bs->targetIndex;
+        hasEnemy = true;
+        enemyDist = v_length(v_sub(bs->lastKnownTargetPos, bot->pos));
+        enemyDistSq = enemyDist * enemyDist;
+    } else {
+        bs->targetIndex = -1;
+        bs->hasTarget = false;
+        bs->lostTrackTimer = 0.0f;
+    }
 
     float harvestDistSq = FLT_MAX;
     int harvestVoxelIdx = find_nearest_static_voxel(&bot->pos, &harvestDistSq);
@@ -17572,7 +17784,8 @@ static void UpdateBot(int playerIdx, float dt) {
 
     if (bot->enemyType == ENEMY_TYPE_SWARMER) {
         if (hasEnemy) {
-            Vector3 toEnemy = v_sub(players[enemyIdx].pos, bot->pos);
+            Vector3 targetDest = isDirectlyVisible ? players[enemyIdx].pos : bs->lastKnownTargetPos;
+            Vector3 toEnemy = v_sub(targetDest, bot->pos);
             toEnemy.y = 0.0f;
             float len = v_length(toEnemy);
             if (len > 0.05f) {
@@ -17590,6 +17803,9 @@ static void UpdateBot(int playerIdx, float dt) {
                 bot->vel.y = JUMP_SPEED * 0.9f;
                 bot->onGround = false;
             }
+        } else {
+            bot->vel.x *= 0.85f;
+            bot->vel.z *= 0.85f;
         }
         return;
     }
@@ -17604,13 +17820,15 @@ static void UpdateBot(int playerIdx, float dt) {
             gs->harvestCooldown = 1.2f;
         }
 
-        if (hasEnemy && gs->count > 0 && enemyDist < 25.0f && gs->launchTimer <= 0.0f) {
+        // Only launch voxels when target is directly visible (not through walls)
+        if (isDirectlyVisible && gs->count > 0 && enemyDist < 25.0f && gs->launchTimer <= 0.0f) {
             goliath_launch_voxel(playerIdx, enemyIdx);
             gs->launchTimer = (enemyDist < 10.0f) ? 1.5f : 2.5f;
         }
 
         if (hasEnemy) {
-            Vector3 toEnemy = v_sub(players[enemyIdx].pos, bot->pos);
+            Vector3 targetDest = isDirectlyVisible ? players[enemyIdx].pos : bs->lastKnownTargetPos;
+            Vector3 toEnemy = v_sub(targetDest, bot->pos);
             toEnemy.y = 0.0f;
             float len = v_length(toEnemy);
             if (len > 0.8f) {
@@ -17629,8 +17847,8 @@ static void UpdateBot(int playerIdx, float dt) {
                 bot->onGround = false;
             }
         } else {
-            bot->vel.x = 0.0f;
-            bot->vel.z = 0.0f;
+            bot->vel.x *= 0.85f;
+            bot->vel.z *= 0.85f;
         }
         return;
     }
@@ -17711,14 +17929,15 @@ static void UpdateBot(int playerIdx, float dt) {
     } else if (intent == BOT_INTENT_COMBAT && hasEnemy) {
         Player *target = &players[enemyIdx];
         aimingAtEnemy = true;
-        lookTarget = target->pos;
+        Vector3 targetDest = isDirectlyVisible ? target->pos : bs->lastKnownTargetPos;
+        lookTarget = targetDest;
 
         if (target->isExposed) {
-            moveDir = v_sub(target->pos, bot->pos);
+            moveDir = v_sub(targetDest, bot->pos);
             moveDir.y = 0.0f;
             moving = (enemyDist > MELEE_RANGE * 0.85f);
 
-            if (aggressive && !bot->tetherHolding && enemyDist > MELEE_RANGE * 1.25f) {
+            if (aggressive && !bot->tetherHolding && enemyDist > MELEE_RANGE * 1.25f && isDirectlyVisible) {
                 float debrisDistSq = FLT_MAX;
                 int debrisIdx = find_nearest_dynamic_voxel(&bot->pos,
                                                           TETHER_RANGE * TETHER_RANGE,
@@ -17728,7 +17947,7 @@ static void UpdateBot(int playerIdx, float dt) {
                     aimingAtEnemy = false;
                     doStartTether = true;
                 }
-            } else if (bot->tetherHolding && bs->reactionTimer <= 0.0f && enemyDist < TETHER_RANGE) {
+            } else if (bot->tetherHolding && bs->reactionTimer <= 0.0f && enemyDist < TETHER_RANGE && isDirectlyVisible) {
                 doReleaseTether = true;
             }
 
@@ -17739,11 +17958,11 @@ static void UpdateBot(int playerIdx, float dt) {
             const float desiredMin = 5.0f;
             const float desiredMax = 9.0f;
             if (enemyDist < desiredMin) {
-                moveDir = v_sub(bot->pos, target->pos);
+                moveDir = v_sub(bot->pos, targetDest);
                 moveDir.y = 0.0f;
                 moving = true;
             } else if (enemyDist > desiredMax) {
-                moveDir = v_sub(target->pos, bot->pos);
+                moveDir = v_sub(targetDest, bot->pos);
                 moveDir.y = 0.0f;
                 moving = true;
             } else {
@@ -17752,7 +17971,8 @@ static void UpdateBot(int playerIdx, float dt) {
 
             float reserve = fmaxf(MATTER_SHOT_COST * 3.0f, bot->matterMax * 0.2f);
             bool criticalMatter = bot->matter < reserve;
-            if (!criticalMatter && bs->reactionTimer <= 0.0f) {
+            // Only shoot if target is directly visible (not through walls)
+            if (!criticalMatter && isDirectlyVisible && bs->reactionTimer <= 0.0f) {
                 doShoot = true;
             }
         }
@@ -18716,16 +18936,144 @@ static bool DrawMenuButton(Rectangle rec, const char *text, int fontSize, bool i
 
 #include "debug_harness.inc"
 
+static bool run_ai_awareness_smoke_test(void) {
+    fprintf(stderr, "=== AI Awareness Smoke Test ===\n");
+    clear_world_voxels();
+    clear_pickups();
+    staticHashDirty = false;
+    init_static_hash();
+
+    activePlayers = 2;
+    gameMode = GAME_MODE_DEATHMATCH;
+
+    // Set up Bot (player 0) at (0, 1.0, 0) facing -Z (yaw=0, pitch=0)
+    memset(&players[0], 0, sizeof(Player));
+    players[0].pos = (Vector3){ 0.0f, 1.0f, 0.0f };
+    players[0].yaw = 0.0f;
+    players[0].pitch = 0.0f;
+    players[0].respawn_timer = 0.0f;
+    players[0].last_damage_time = -1000.0f;
+    players[0].enemyType = ENEMY_TYPE_STANDARD;
+    playerInput[0] = INPUT_TYPE_BOT_MEDIUM;
+
+    // Set up Target (player 1) at (0, 1.0, -10.0) (10m in front)
+    memset(&players[1], 0, sizeof(Player));
+    players[1].pos = (Vector3){ 0.0f, 1.0f, -10.0f };
+    players[1].yaw = 180.0f;
+    players[1].pitch = 0.0f;
+    players[1].respawn_timer = 0.0f;
+    playerInput[1] = INPUT_TYPE_KEYBOARD;
+
+    // 1. Base awareness test (clear LOS, 10m ahead)
+    float dist = 0.0f;
+    if (!check_ai_awareness_of_player(0, 1, &dist)) {
+        fprintf(stderr, "ai-smoke FAIL: Bot should be aware of target 10m directly ahead in open air!\n");
+        return false;
+    }
+    fprintf(stderr, "ai-smoke PASS: Bot aware of target in front at 10m (dist=%.2f)\n", dist);
+
+    // 2. Test Check 1: Distance check
+    // Standard bot maxDist is AI_MAX_AWARENESS_DIST = 32.0f
+    players[1].pos = (Vector3){ 0.0f, 1.0f, -40.0f };
+    if (check_ai_awareness_of_player(0, 1, &dist)) {
+        fprintf(stderr, "ai-smoke FAIL: Bot should NOT be aware of target at 40m (> 32m limit)!\n");
+        return false;
+    }
+    fprintf(stderr, "ai-smoke PASS: Bot ignores target beyond max distance (dist=%.2f > 32m)\n", dist);
+
+    // Difficulty scaling check:
+    playerInput[0] = INPUT_TYPE_BOT_EASY; // maxDist = 24.0m
+    players[1].pos = (Vector3){ 0.0f, 1.0f, -28.0f };
+    if (check_ai_awareness_of_player(0, 1, &dist)) {
+        fprintf(stderr, "ai-smoke FAIL: Easy bot should NOT detect target at 28m (> 24m)!\n");
+        return false;
+    }
+    playerInput[0] = INPUT_TYPE_BOT_HARD; // maxDist = 42.0m
+    if (!check_ai_awareness_of_player(0, 1, &dist)) {
+        fprintf(stderr, "ai-smoke FAIL: Hard bot SHOULD detect target at 28m (< 42m)!\n");
+        return false;
+    }
+    fprintf(stderr, "ai-smoke PASS: Awareness distance scales with difficulty\n");
+
+    // Reset bot difficulty & position
+    playerInput[0] = INPUT_TYPE_BOT_MEDIUM;
+    players[1].pos = (Vector3){ 0.0f, 1.0f, -10.0f };
+
+    // 3. Test Check 2: Dot product (view direction FOV cone)
+    // Lateral 90 degrees (10, 1.0, 0) -> dot = 0.0 < 0.50
+    players[1].pos = (Vector3){ 10.0f, 1.0f, 0.0f };
+    if (check_ai_awareness_of_player(0, 1, &dist)) {
+        fprintf(stderr, "ai-smoke FAIL: Bot should NOT detect target 90 deg outside view cone!\n");
+        return false;
+    }
+    fprintf(stderr, "ai-smoke PASS: Lateral target (90 deg) is outside view cone\n");
+
+    // Directly behind (0, 1.0, 10.0) -> dot = -1.0
+    players[1].pos = (Vector3){ 0.0f, 1.0f, 10.0f };
+    if (check_ai_awareness_of_player(0, 1, &dist)) {
+        fprintf(stderr, "ai-smoke FAIL: Bot should NOT detect target directly behind!\n");
+        return false;
+    }
+    fprintf(stderr, "ai-smoke PASS: Target behind is undetected\n");
+
+    // Alerted state: Bot damaged recently (< 1.2s ago)
+    players[0].last_damage_time = (float)GetTime();
+    if (!check_ai_awareness_of_player(0, 1, &dist)) {
+        fprintf(stderr, "ai-smoke FAIL: Bot should be alerted to target behind after recent damage!\n");
+        return false;
+    }
+    fprintf(stderr, "ai-smoke PASS: Bot alerted to attacker behind within 1.2s of taking damage\n");
+    players[0].last_damage_time = -1000.0f;
+
+    // 4. Test Check 3: Ray trace occlusion
+    // Target 10m in front
+    players[1].pos = (Vector3){ 0.0f, 1.0f, -10.0f };
+    int wall_v1 = addVoxel(0.0f, 1.0f, -5.0f, false, true, RED, 0); // Head height
+    int wall_v2 = addVoxel(0.0f, 0.5f, -5.0f, false, true, RED, 0); // Chest height
+    rebuild_voxel_hash();
+    rebuild_static_hash_if_dirty();
+    if (wall_v1 >= 0 && wall_v2 >= 0) {
+        if (check_ai_awareness_of_player(0, 1, &dist)) {
+            fprintf(stderr, "ai-smoke FAIL: Bot should NOT detect player through solid voxel wall!\n");
+            return false;
+        }
+        fprintf(stderr, "ai-smoke PASS: Solid voxel wall occludes bot vision\n");
+
+        // Bullet voxel transparency
+        voxels[wall_v1].isBullet = true;
+        voxels[wall_v2].isBullet = true;
+        if (!check_ai_awareness_of_player(0, 1, &dist)) {
+            fprintf(stderr, "ai-smoke FAIL: Bullet voxels should NOT block bot vision!\n");
+            return false;
+        }
+        fprintf(stderr, "ai-smoke PASS: Bullet voxels are transparent to bot vision\n");
+
+        clear_world_voxels();
+        init_static_hash();
+    }
+
+    // 5. Test find_nearest_aware_enemy
+    int awareEnemy = find_nearest_aware_enemy(0, NULL);
+    if (awareEnemy != 1) {
+        fprintf(stderr, "ai-smoke FAIL: find_nearest_aware_enemy should return 1, got %d!\n", awareEnemy);
+        return false;
+    }
+    fprintf(stderr, "ai-smoke PASS: find_nearest_aware_enemy correctly finds visible player\n");
+
+    fprintf(stderr, "=== ALL AI AWARENESS SMOKE TESTS PASSED! ===\n");
+    return true;
+}
+
 #define FPS_EXIT_GPU_CONTEXT_UNAVAILABLE 78
 #define FPS_EXIT_GPU_INITIALIZATION_FAILED 79
 
 int main(int argc, char **argv) {
     if (!parse_physics_arguments(argc, argv)) return 2;
-    bool automatedRun = physicsSmokeSteps > 0 || debug_run_requested();
+    bool automatedRun = physicsSmokeSteps > 0 || debug_run_requested() || aiSmokeTestRequested;
     int countFrame = 0;
     SetLoggingEnabled(getenv("FPS_SHADER_LOG") != NULL);
     SetTraceLogLevel(physicsReportRequested ? LOG_ALL : LOG_NONE);
-    if (debug_run_requested() && !debug_show_window_requested()) {
+    if ((debug_run_requested() && !debug_show_window_requested()) || aiSmokeTestRequested || physicsSmokeSteps > 0) {
         SetConfigFlags(FLAG_WINDOW_HIDDEN);
     }
     // init window and render textures
@@ -18795,6 +19143,14 @@ int main(int argc, char **argv) {
         shutdown_sfx();
         CloseWindow();
         return ok ? 0 : 3;
+    }
+    if (aiSmokeTestRequested) {
+        bool ok = run_ai_awareness_smoke_test();
+        shutdown_pbd_thread_pool();
+        gpu_physics_shutdown();
+        shutdown_sfx();
+        CloseWindow();
+        return ok ? 0 : 4;
     }
     if (debug_run_requested()) {
         int status = run_debug_harness();
