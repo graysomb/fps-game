@@ -445,9 +445,8 @@ static bool gpu_pack_world(void) {
         g->pos_rest_edge[0] = v->pos.x; g->pos_rest_edge[1] = v->pos.y; g->pos_rest_edge[2] = v->pos.z; g->pos_rest_edge[3] = v->rest_edge;
         g->velocity_rest_volume[0] = v->vel.x; g->velocity_rest_volume[1] = v->vel.y;
         g->velocity_rest_volume[2] = v->vel.z; g->velocity_rest_volume[3] = v->rest_volume;
-        // flags.x means awake dynamic. Sleeping dynamics remain packed as
-        // zero-mass collision anchors but skip voxel-level simulation kernels.
-        g->flags[0] = v->sleeping ? 0 : 1; g->flags[1] = v->isBullet ? 1 : 0;
+        // flags.x means awake dynamic with active VGS constraint.
+        g->flags[0] = (v->sleeping || !v->vgs_active) ? 0 : 1; g->flags[1] = v->isBullet ? 1 : 0;
         g->flags[2] = v->type; g->flags[3] = v->simulate_dofs ? 1 : 0;
         VoxelWorldBounds bounds;
         voxel_world_bounds(v, &bounds);
@@ -897,23 +896,9 @@ static bool gpu_validate_and_commit(void) {
             return false;
         }
     }
-    for (int i = gpuPhysics.uploaded_particle_count; i < used_particles; ++i) {
-        int parent_id = gpuPhysics.clone_parent_stage[i] & INT_MAX;
-        if (parent_id < 0 || parent_id >= i || !gpuPhysics.compact_to_particle[parent_id]) {
-            if (collision_diagnostics) fprintf(stderr, "collision-validation: clone %d has parent %d raw=0x%x\n",
-                                               i, parent_id, (unsigned)gpuPhysics.clone_parent_stage[i]);
-            return false;
-        }
-        Particle *clone = particle_clone(gpuPhysics.compact_to_particle[parent_id]);
-        if (!clone) {
-            if (collision_diagnostics) fprintf(stderr, "collision-validation: CPU clone allocation failed for %d\n", i);
-            return false;
-        }
-        gpuPhysics.compact_to_particle[i] = clone;
-        ptrdiff_t pool_id = clone - particles_pool;
-        if (pool_id >= 0 && pool_id < MAX_PARTICLES) gpuPhysics.pool_to_compact[pool_id] = i;
-    }
-    for (int i = 0; i < used_particles; ++i) {
+    int safe_particles = (used_particles > gpuPhysics.uploaded_particle_count) ?
+                         gpuPhysics.uploaded_particle_count : used_particles;
+    for (int i = 0; i < safe_particles; ++i) {
         Particle *p = gpuPhysics.compact_to_particle[i];
         if (!p) return false;
         GpuParticleState *g = &gpuPhysics.particle_stage[i];
@@ -927,15 +912,24 @@ static bool gpu_validate_and_commit(void) {
         p->cell_x = gpuPhysics.cell_stage[i].value[0]; p->cell_y = gpuPhysics.cell_stage[i].value[1];
         p->cell_z = gpuPhysics.cell_stage[i].value[2]; p->break_timer = gpuPhysics.cell_stage[i].value[3];
     }
-    bool topology_changed = used_particles != gpuPhysics.uploaded_particle_count;
-    gpuPhysics.clones_created += (uint64_t)(used_particles - gpuPhysics.uploaded_particle_count);
+    bool topology_changed = false;
     for (int i = 0; i < gpuPhysics.dynamic_voxel_count; ++i) {
         int voxel_id = gpuPhysics.compact_to_voxel[i];
         if (voxel_id < 0 || voxel_id >= voxel_count) return false;
         Voxel *v = &voxels[voxel_id]; GpuVoxelState *g = &gpuPhysics.voxel_stage[i];
+        if (v->vgs_active && g->flags[0] == 0) {
+            v->vgs_active = false;
+            v->simulate = false;
+            for (int corner = 0; corner < 8; ++corner) {
+                Particle *part = v->particles[corner];
+                if (part && part->glue_count > 0) {
+                    part->glue_count--;
+                }
+            }
+        }
         for (int corner = 0; corner < 8; ++corner) {
             uint32_t particle_id = g->particle[corner];
-            if (particle_id >= (uint32_t)used_particles || !gpuPhysics.compact_to_particle[particle_id]) return false;
+            if (particle_id >= (uint32_t)safe_particles || !gpuPhysics.compact_to_particle[particle_id]) return false;
             Particle *desired = gpuPhysics.compact_to_particle[particle_id];
             Particle *old = v->particles[corner];
             if (old != desired) {
@@ -958,10 +952,6 @@ static bool gpu_validate_and_commit(void) {
             if (v->glued_faces[face] != glued) topology_changed = true;
             v->glued_faces[face] = glued;
         }
-    }
-    for (int i = gpuPhysics.uploaded_particle_count; i < used_particles; ++i) {
-        Particle *clone = gpuPhysics.compact_to_particle[i];
-        if (clone) particle_release(clone);
     }
     if (topology_changed) collisionTopologyDirty = true;
     gpuPhysics.compact_count = used_particles;
@@ -1057,7 +1047,6 @@ static bool gpu_dispatch_substep(float sub_dt) {
     }
     ok = ok && gpu_dispatch_indirect_offset(GPU_MODE_STATIC_COLLISIONS, 16) &&
          gpu_dispatch(GPU_MODE_BREAK_MASK, gpuPhysics.dynamic_voxel_count) &&
-         gpu_dispatch(GPU_MODE_SPLIT_BREAKS, gpuPhysics.dynamic_voxel_count) &&
          gpu_dispatch(GPU_MODE_WAKE_GATHER, gpuPhysics.dynamic_voxel_count) &&
          gpu_dispatch(GPU_MODE_WAKE_APPLY, gpuPhysics.dynamic_voxel_count) &&
          gpu_dispatch(GPU_MODE_PREPARE_INDIRECT, 1) &&

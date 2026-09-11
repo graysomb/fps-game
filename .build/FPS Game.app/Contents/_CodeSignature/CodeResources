@@ -4,10 +4,6 @@
 <dict>
 	<key>files</key>
 	<dict>
-		<key>Resources/shaders/.DS_Store</key>
-		<data>
-		sveUwjcNfvGbIuda3Kmw+Eca2fU=
-		</data>
 		<key>Resources/shaders/debug_AABB.frag</key>
 		<data>
 		4dO9AMhUioLDJRAmMb7WuZKOr8Q=
@@ -15,6 +11,14 @@
 		<key>Resources/shaders/debug_AABB.vert</key>
 		<data>
 		AbAe6648hQPbGShjp8l2ZIbC9xo=
+		</data>
+		<key>Resources/shaders/fluid_instanced.frag</key>
+		<data>
+		3Z7+dTjEv+JHoYZUOVmsCjxrVMI=
+		</data>
+		<key>Resources/shaders/fluid_instanced.vert</key>
+		<data>
+		zjZiI4Ozn5kQcNlQkUlbJLeQsIw=
 		</data>
 		<key>Resources/shaders/instanced_voxel_hack.frag</key>
 		<data>
@@ -74,11 +78,11 @@
 		</data>
 		<key>Resources/shaders/pbd/pbd_pipeline.comp</key>
 		<data>
-		2OL9uMcFIdNQWlu0AXGuEKFQslY=
+		NPIKpsw3G0brsmGe/RJOwoteYSE=
 		</data>
 		<key>Resources/shaders/pbd/pbd_pipeline.metal</key>
 		<data>
-		VvP0/bNqXZWd7AGSRaKSXJze0KE=
+		/hNVRxYhKxa2iYBFMYJ5pYLjeTE=
 		</data>
 		<key>Resources/shaders/pbd/pbd_pipeline.metallib</key>
 		<data>
@@ -123,19 +127,19 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			8y29x1wWu1HFiuPktn0NAGk06Ik=
+			+mU2PGzFWLClcWzbxj4c66Ewbx0=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"f32dbdc75c16bb51c58ae3e4b67d0d006934e889" or cdhash H"6e53de628f8cfcc5dfd8cc1f8d59b6b33facd985"</string>
+			<string>cdhash H"fa65363c6cc558b0a5716cdbc63e1ceba1306f1d"</string>
 		</dict>
 		<key>MacOS/fps_ray_gpu</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			vy9of3GDQ9rYu6Vdp7PwZF7wVfc=
+			QFxL6R78TRvf6XSC01ZlEXydl9s=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"bf2f687f718343dad8bba55da7b3f0645ef055f7" or cdhash H"8def0ad7f458c1e864edf2d367126d636eaa3f4d"</string>
+			<string>cdhash H"405c4be91efc4d1bdfe97482d35665117c9d97db"</string>
 		</dict>
 		<key>Resources/shaders/debug_AABB.frag</key>
 		<dict>
@@ -149,6 +153,20 @@
 			<key>hash2</key>
 			<data>
 			SLmyHf1lf4AMnwuTWgR8skdH2Xmd7yzICcKDyGzdPQs=
+			</data>
+		</dict>
+		<key>Resources/shaders/fluid_instanced.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			48b4u04HHwXeaywaaPYRCzKF53VZo8LqmYx/2WY0O6A=
+			</data>
+		</dict>
+		<key>Resources/shaders/fluid_instanced.vert</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			+6XI20b9T7i1xklgraqpYaT+xYe2HeYY5YISEoRuN6U=
 			</data>
 		</dict>
 		<key>Resources/shaders/instanced_voxel_hack.frag</key>
@@ -253,14 +271,14 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			k4TlS4tYB2EImMFk5OKqEnGhUV0O3fXpj1jlImvLwng=
+			Jlylu3yeWzoFBJqUnDYSahf17WF77RpSGxZ28HIiSNM=
 			</data>
 		</dict>
 		<key>Resources/shaders/pbd/pbd_pipeline.metal</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			cOVxXIsgguyN1FQLWBYcukENnGyubtoPya+fsmvU+Rs=
+			pJtMN1kPr0sBy2V9S9KgDqowIHo3wy4aRLpgykUxZIM=
 			</data>
 		</dict>
 		<key>Resources/shaders/pbd/pbd_pipeline.metallib</key>

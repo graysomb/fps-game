@@ -390,27 +390,21 @@ inline void gatherBreakMask(uint gid, device ParticleState *particle,
             mask |= 1u << face;
         }
     }
-    v.lifecycle.w = mask;
-    if (exceeded) v.lifecycle.y = 1u;
+    if (exceeded) {
+        v.flags.x = 0; // Deactivate VGS constraint
+        v.lifecycle.y = 1u; // wake_source = true
+        v.lifecycle.z = 0u; // Clear glued faces
+    }
+    v.lifecycle.w = 0u;
     voxel[gid] = v;
 }
 
-inline uint allocateClone(uint parent,device ParticleState *particle,device atomic_uint *correction,device int4 *cell,device uint *simId,device int *tetherOwner,device int *collisionMeta,device atomic_int *refcount,device atomic_int *control,device int *cloneParent,constant GpuUniforms &u){
-    int slot=-1;for(;;){int current=controlLoad(control,0);if(current>=controlLoad(control,2)){atomic_store_explicit(&control[3],CONTROL_FLAG_OVERFLOW,memory_order_relaxed);return uint(-1);}int expected=current;if(atomic_compare_exchange_weak_explicit(&control[0],&expected,current+1,memory_order_relaxed,memory_order_relaxed)){slot=current;break;}}uint id=uint(slot);particle[id]=particle[parent];cell[id]=cell[parent];cell[id].w=u.break_damp_frames;for(int c=0;c<4;++c)collisionMeta[id*4u+uint(c)]=collisionMeta[parent*4u+uint(c)];tetherOwner[id]=tetherOwner[parent];for(int c=0;c<4;++c)atomic_store_explicit(&correction[id*4u+uint(c)],0u,memory_order_relaxed);atomic_store_explicit(&refcount[id],1,memory_order_relaxed);cloneParent[id]=int(parent);if(particle[id].predicted_base_inv_mass.w>0.0f){int simSlot=atomic_fetch_add_explicit(&control[1],1,memory_order_relaxed);if(simSlot<controlLoad(control,2))simId[simSlot]=id;else atomic_store_explicit(&control[3],CONTROL_FLAG_OVERFLOW,memory_order_relaxed);}return id;
-}
-
-inline void includeCollisionParticle(uint id,device uint *collisionId,device atomic_int *collisionMember,device atomic_uint *collisionControl,device atomic_int *control){
-    if(id>=uint(controlLoad(control,2)))return;int previous=atomic_fetch_or_explicit(&collisionMember[id],int(0x80000000u),memory_order_relaxed);if((uint(previous)&0x80000000u)!=0u)return;uint slot=atomic_fetch_add_explicit(collisionControl,1u,memory_order_relaxed);uint capacity=atomic_load_explicit(collisionControl+1,memory_order_relaxed);if(slot<capacity)collisionId[slot]=id;else{atomic_store_explicit(collisionControl+2,1u,memory_order_relaxed);atomic_fetch_or_explicit(&control[3],CONTROL_FLAG_OVERFLOW,memory_order_relaxed);}
-}
-
-inline void setVoxelParticle(thread VoxelState &v,int corner,uint id){if(corner<4)v.particle_0_3[corner]=id;else v.particle_4_7[corner-4]=id;}
-
-inline void detachCorner(thread VoxelState &v,int corner,device ParticleState *particle,device atomic_uint *correction,device int4 *cell,device uint *simId,device uint *collisionId,device atomic_int *collisionMember,device atomic_uint *collisionControl,device int *tetherOwner,device int *collisionMeta,device atomic_int *refcount,device atomic_int *control,device int *cloneParent,constant GpuUniforms &u){
-    uint oldId=voxelParticle(v,corner);if(oldId>=uint(controlLoad(control,0)))return;includeCollisionParticle(oldId,collisionId,collisionMember,collisionControl,control);for(;;){int refs=atomic_load_explicit(&refcount[oldId],memory_order_relaxed);if(refs<=1)return;int expected=refs;if(!atomic_compare_exchange_weak_explicit(&refcount[oldId],&expected,refs-1,memory_order_relaxed,memory_order_relaxed))continue;uint newId=allocateClone(oldId,particle,correction,cell,simId,tetherOwner,collisionMeta,refcount,control,cloneParent,u);if(newId==uint(-1)){atomic_fetch_add_explicit(&refcount[oldId],1,memory_order_relaxed);return;}cell[oldId].w=u.break_damp_frames;includeCollisionParticle(newId,collisionId,collisionMember,collisionControl,control);setVoxelParticle(v,corner,newId);return;}
-}
-
 inline void splitBrokenFaces(uint gid,device ParticleState *particle,device atomic_uint *correction,device int4 *cell,device uint *simId,device uint *collisionId,device atomic_int *collisionMember,device atomic_uint *collisionControl,device VoxelState *voxel,device int *tetherOwner,device int *collisionMeta,device atomic_int *refcount,device atomic_int *control,device int *cloneParent,constant GpuUniforms &u){
-    if(gid>=uint(u.voxel_count))return;VoxelState v=voxel[gid];uint mask=v.lifecycle.w&63u;if(mask==0u)return;atomic_fetch_or_explicit(&control[3],CONTROL_FLAG_TOPOLOGY_DIRTY,memory_order_relaxed);for(int face=0;face<6;++face){if((mask&(1u<<face))==0u)continue;for(int c=0;c<4;++c)detachCorner(v,FACE_CORNERS[face*4+c],particle,correction,cell,simId,collisionId,collisionMember,collisionControl,tetherOwner,collisionMeta,refcount,control,cloneParent,u);}v.lifecycle.z&=~mask;v.lifecycle.w=0u;voxel[gid]=v;
+    // No-op in VGS-as-glue model: fracture never splits or clones particles.
+    (void)gid; (void)particle; (void)correction; (void)cell; (void)simId;
+    (void)collisionId; (void)collisionMember; (void)collisionControl;
+    (void)voxel; (void)tetherOwner; (void)collisionMeta; (void)refcount;
+    (void)control; (void)cloneParent; (void)u;
 }
 
 inline int topologyNeighbor(device int4 *topology,int voxelId,int face){return face<4?topology[voxelId*2][face]:topology[voxelId*2+1][face-4];}

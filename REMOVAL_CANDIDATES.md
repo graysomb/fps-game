@@ -283,3 +283,16 @@ All other 18 shader files in `shaders/` are unused leftovers:
 
 ### D. Orphaned Prototype Header (1,361 lines)
 - [x] [`DestructiveCSSceneObject.h`](DestructiveCSSceneObject.h) (1,361 lines) - Old C++ header that referenced the legacy shaders above. Never included or compiled anywhere in the project.
+
+---
+
+## ⚡ 7. Solver Architecture Rework & VGS Glue Simplification (~384 MB Memory)
+
+As part of the solver overhaul (inverting particle/voxel coupling so **Particle = Persistent Node** and **Voxel = Breakable VGS Glue** without runtime particle cloning):
+- [x] `glueConstraints[MAX_VOXELS * 48]` (~384 MB BSS memory) and `GlueConstraint` struct.
+- [x] `compact_glue_constraints()`, `deactivate_glue_constraints_for_voxel()`, and `rebuild_glue_constraints()` unneeded resets.
+- [x] `detach_face_particles()`, `break_face_link()`, and `detach_all_glue_faces()` (runtime particle-duplication splitting routines).
+- [x] `process_break_masks()` and `gather_voxel_break_masks()` replaced with parallel `evaluate_voxel_fracture()`.
+- [x] Atomic float accumulator contention in Jacobi shape matching eliminated via non-atomic 8-octant `jacobi_slots[8]` scatter-gather.
+- [x] Unglued free particles (`glue_count <= 0`) rendered as 3D triangles (`DrawTriangle3D`).
+

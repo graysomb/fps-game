@@ -512,92 +512,17 @@ void gatherBreakMask(uint gid) {
             exceeded=true; mask |= 1u<<face;
         }
     }
-    v.lifecycle.w=mask; if (exceeded) v.lifecycle.y=1u; voxel[gid]=v;
-}
-
-uint allocateParticleClone(uint parent) {
-    int slot = -1;
-    for (;;) {
-        int current = gpuControl.x;
-        if (current >= gpuControl.z) {
-            atomicExchange(gpuControl.w, CONTROL_FLAG_OVERFLOW);
-            return uint(-1);
-        }
-        if (atomicCompSwap(gpuControl.x, current, current + 1) == current) {
-            slot = current;
-            break;
-        }
+    if (exceeded) {
+        v.flags.x = 0; // Deactivate VGS constraint
+        v.lifecycle.y = 1u; // wake_source = true
+        v.lifecycle.z = 0u; // Clear glued faces
     }
-    uint id = uint(slot);
-    particle[id] = particle[parent];
-    cell[id] = cell[parent];
-    cell[id].w = uBreakDampFrames;
-    collisionMeta[id] = collisionMeta[parent];
-    tetherOwner[id] = tetherOwner[parent];
-    correction[id] = uvec4(0u);
-    particleRefcount[id] = 1;
-    cloneParent[id] = int(parent);
-    if (particle[id].predicted_base_inv_mass.w > 0.0) {
-        int simSlot = atomicAdd(gpuControl.y, 1);
-        if (simSlot < gpuControl.z) simId[simSlot] = id;
-        else atomicExchange(gpuControl.w, CONTROL_FLAG_OVERFLOW);
-    }
-    return id;
-}
-
-void includeCollisionParticle(uint id) {
-    if (id >= uint(gpuControl.z)) return;
-    int previous = atomicOr(cloneParent[id], int(0x80000000u));
-    if ((uint(previous) & 0x80000000u) != 0u) return;
-    uint slot = atomicAdd(dispatchArgs[8], 1u);
-    if (slot < dispatchArgs[9]) simId[uint(gpuControl.z) + slot] = id;
-    else {
-        atomicExchange(dispatchArgs[10], 1u);
-        atomicOr(gpuControl.w, CONTROL_FLAG_OVERFLOW);
-    }
-}
-
-void setVoxelParticle(inout VoxelState v, int corner, uint id) {
-    if (corner < 4) v.particle_0_3[corner] = id;
-    else v.particle_4_7[corner - 4] = id;
-}
-
-void detachVoxelCorner(inout VoxelState v, int corner) {
-    uint oldId = voxelParticle(v, corner);
-    if (oldId >= uint(gpuControl.x)) return;
-    includeCollisionParticle(oldId);
-    for (;;) {
-        int refs = particleRefcount[oldId];
-        if (refs <= 1) return;
-        if (atomicCompSwap(particleRefcount[oldId], refs, refs - 1) != refs) continue;
-        uint newId = allocateParticleClone(oldId);
-        if (newId == uint(-1)) {
-            atomicAdd(particleRefcount[oldId], 1);
-            return;
-        }
-        cell[oldId].w = uBreakDampFrames;
-        includeCollisionParticle(newId);
-        setVoxelParticle(v, corner, newId);
-        return;
-    }
+    v.lifecycle.w = 0u;
+    voxel[gid] = v;
 }
 
 void splitBrokenFaces(uint gid) {
-    if (gid >= uint(uVoxelCount)) return;
-    VoxelState v = voxel[gid];
-    uint mask = v.lifecycle.w & 0x3fu;
-    if (mask == 0u) return;
-    atomicOr(gpuControl.w, CONTROL_FLAG_TOPOLOGY_DIRTY);
-    const int faceCorners[24] = int[24](
-        1,3,5,7, 0,2,4,6, 2,3,6,7,
-        0,1,4,5, 4,5,6,7, 0,1,2,3);
-    for (int face = 0; face < 6; ++face) {
-        if ((mask & (1u << face)) == 0u) continue;
-        for (int c = 0; c < 4; ++c) detachVoxelCorner(v, faceCorners[face * 4 + c]);
-    }
-    v.lifecycle.z &= ~mask;
-    v.lifecycle.w = 0u;
-    voxel[gid] = v;
+    // No-op in VGS-as-glue model: fracture never splits or clones particles.
 }
 
 int topologyNeighbor(int voxelId, int face) {

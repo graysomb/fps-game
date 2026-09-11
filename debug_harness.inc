@@ -620,7 +620,6 @@ static void debug_reset_world(void)
 {
     clear_world_voxels();
     clear_pickups();
-    glueConstraintCount = 0;
     voxelHashFramesSinceRebuild = 0;
     pbdTimeAccumulator = 0.0f;
     staticHashDirty = false;
@@ -1920,8 +1919,6 @@ static bool debug_setup_tether_throw_floating(DebugRunState *state)
     }
     debug_rebuild_world_state();
     Voxel *thrown = &voxels[thrown_idx];
-    detach_all_glue_faces(thrown_idx);
-    deactivate_glue_constraints_for_voxel(thrown_idx);
     thrown->owner = 0;
     thrown->activator = 0;
     thrown->wasTethered = true;

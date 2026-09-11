@@ -53,7 +53,21 @@ bool fps_metal_initialize(const char *library_path, long long *max_buffer_size,
 
         NSString *path = [NSString stringWithUTF8String:library_path ? library_path : ""];
         NSError *library_error = nil;
-        metal_state.library = [metal_state.device newLibraryWithFile:path error:&library_error];
+        NSString *source_path = [path stringByReplacingOccurrencesOfString:@".metallib" withString:@".metal"];
+        if (![[NSFileManager defaultManager] fileExistsAtPath:source_path]) {
+            source_path = @"shaders/pbd/pbd_pipeline.metal";
+        }
+        if ([[NSFileManager defaultManager] fileExistsAtPath:source_path]) {
+            NSString *source = [NSString stringWithContentsOfFile:source_path encoding:NSUTF8StringEncoding error:nil];
+            if (source) {
+                MTLCompileOptions *opts = [[MTLCompileOptions alloc] init];
+                metal_state.library = [metal_state.device newLibraryWithSource:source options:opts error:&library_error];
+                [opts release];
+            }
+        }
+        if (!metal_state.library) {
+            metal_state.library = [metal_state.device newLibraryWithFile:path error:&library_error];
+        }
         if (!metal_state.library) {
             fps_metal_error(error, error_capacity, [library_error localizedDescription]);
             fps_metal_shutdown();
