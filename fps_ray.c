@@ -844,7 +844,7 @@ typedef struct {
     int  orig_min_gx, orig_max_gx;
     int  orig_min_gy, orig_max_gy;
     int  orig_min_gz, orig_max_gz;
-    Particle *particles[8];
+    Particle *particles[8]; //pointer
     float rest_volume;
     float rest_edge;
     float particle_radius;
@@ -880,12 +880,12 @@ static Voxel voxels[MAX_VOXELS];
 static uint64_t nextVoxelIdentity = 1;
 static int voxel_count = 0;
 static Particle particles_pool[MAX_PARTICLES];
-static Particle *active_particles[MAX_PARTICLES];
-static Particle *sim_particles[MAX_PARTICLES];
+static Particle *active_particles[MAX_PARTICLES]; //pointer
+static Particle *sim_particles[MAX_PARTICLES]; //pointer
 // Collision traversal is intentionally independent from the full simulation
 // list.  Interior structural particles still integrate and participate in VGS,
 // but do not need to be hashed or projected against scene geometry.
-static Particle *collision_particles[MAX_PARTICLES];
+static Particle *collision_particles[MAX_PARTICLES]; //pointer
 static int particle_pool_count = 0;
 static int active_particle_count = 0;
 static int sim_particle_count = 0;
@@ -923,7 +923,7 @@ typedef struct {
     Vector3 particle_start[VOXEL_CORNER_COUNT];
 } TetherThrowCcdSnapshot;
 
-static inline bool voxel_is_awake_dynamic(const Voxel *voxel)
+static inline bool voxel_is_awake_dynamic(const Voxel *voxel) 
 {
     return voxel && voxel->simulate && !voxel->sleeping;
 }
@@ -937,9 +937,9 @@ static int particleHashActiveSize = 1024;
 static int tether_apply_stamp = 1;
 static _Atomic int particle_hash_head[PARTICLE_HASH_SIZE];
 static int particle_hash_next[MAX_PARTICLES];
-static Particle *particle_snapshot[MAX_PARTICLES];
+static Particle *particle_snapshot[MAX_PARTICLES]; //pointer
 typedef struct { float x, y, z, weight; } PairCorrection;
-static PairCorrection *pairCorrectionScratch = NULL;
+static PairCorrection *pairCorrectionScratch = NULL; 
 static size_t pairCorrectionScratchCapacity = 0;
 static int pairCorrectionScratchSlots = 0;
 static int glueClusterIndices[MAX_VOXELS];
@@ -1271,7 +1271,7 @@ static uint8_t compute_static_support_mask(const Voxel *voxel);
 static bool list_contains_index(const int *list, int count, int value);
 static int gather_static_face_neighbors(const Voxel *voxel, int *out, int max_out);
 static int gather_static_voxels_near_point(Vector3 point, float radius, int *out, int max_out);
-static bool push_particle_out_of_static(const Voxel *static_voxel, Particle *particle, float radius);
+static bool push_particle_out_of_static(const Voxel *static_voxel, Particle *particle, float radius); //pointer
 static void glue_dynamic_voxel_to_static_neighbors(void);
 static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx);
 static bool recycle_queue_push(const Voxel *voxel);
@@ -2330,7 +2330,7 @@ static bool v_isfinite(Vector3 v) {
     return isfinite(v.x) && isfinite(v.y) && isfinite(v.z);
 }
 
-static Particle *voxel_particle_at(Voxel *voxel, int idx) {
+static Particle *voxel_particle_at(Voxel *voxel, int idx) { //this is the pointer lookup code
     if (idx < 0 || idx >= VOXEL_CORNER_COUNT) {
         return voxel->particles[0];
     }
@@ -2391,7 +2391,7 @@ static void sim_particles_remove(Particle *p) {
     collisionTopologyDirty = true;
 }
 
-static Particle *particle_create(Vector3 pos, float inv_mass) {
+static Particle *particle_create(Vector3 pos, float inv_mass) { //pointer
     Particle *p = NULL;
     if (free_particle_count > 0) {
         int idx = free_particle_indices[--free_particle_count];
@@ -2440,7 +2440,7 @@ static Particle *particle_create(Vector3 pos, float inv_mass) {
     return p;
 }
 
-static Particle *particle_clone(const Particle *src) {
+static Particle *particle_clone(const Particle *src) { //pointer
     if (!src) {
         return NULL;
     }
@@ -4105,7 +4105,7 @@ static bool init_voxel_struct(Voxel *v,
             pz + corner_signs[i][2] * half
         };
         float inv_mass = (fixed || !simulate) ? 0.0f : 1.0f;
-        Particle *p = particle_create(p_pos, inv_mass);
+        Particle *p = particle_create(p_pos, inv_mass); //pointer
         if (!p) {
             for (int j = 0; j < i; ++j) {
                 particle_release(v->particles[j]);
@@ -4239,7 +4239,7 @@ static void detach_face_particles(Voxel *voxel, int face_index) {
             continue;
         }
 
-        Particle *p_new = particle_clone(p_old);
+        Particle *p_new = particle_clone(p_old); //pointer
         if (!p_new) {
             continue;
         }
@@ -4766,7 +4766,7 @@ static bool apply_tether_impact_to_dynamic_island(int target_index,
         target->wake_timer = COARSENING_WAKE_FRAMES;
         target->activationBelief = fmaxf(target->activationBelief, 1.0f);
         for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
-            Particle *particle = voxel_particle_at(target, corner);
+            Particle *particle = voxel_particle_at(target, corner); //pointer
             if (!particle || particle->inv_mass <= 0.0f ||
                 particle->sync_stamp == impact_stamp) continue;
             particle->vel = v_add(particle->vel, delta_velocity);
@@ -5337,7 +5337,7 @@ static bool build_recycle_physical_island_graph(void)
     for (int i = 0; i < voxel_count; ++i) {
         if (recycleLifetimeParent[i] < 0) continue;
         for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
-            Particle *particle = voxels[i].particles[corner];
+            Particle *particle = voxels[i].particles[corner]; //pointer
             ptrdiff_t pool_id = particle ? particle - particles_pool : -1;
             if (pool_id < 0 || (size_t)pool_id >= particle_count) continue;
             int previous = recycleLifetimeParticleVoxel[pool_id];
@@ -6162,7 +6162,7 @@ static bool freeze_dynamic_cluster_in_place(const int *cluster, int cluster_coun
         }
         sleepClusterVisited[idx] = 1;
         for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
-            Particle *particle = voxels[idx].particles[corner];
+            Particle *particle = voxels[idx].particles[corner]; //pointer
             if (particle) particle->sync_stamp = membership_stamp;
         }
     }
@@ -6172,7 +6172,7 @@ static bool freeze_dynamic_cluster_in_place(const int *cluster, int cluster_coun
     for (int i = 0; i < voxel_count; ++i) {
         if (sleepClusterVisited[i] || !voxel_is_awake_dynamic(&voxels[i])) continue;
         for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
-            Particle *particle = voxels[i].particles[corner];
+            Particle *particle = voxels[i].particles[corner]; //pointer
             if (particle && particle->sync_stamp == membership_stamp) {
                 return false;
             }
@@ -6194,7 +6194,7 @@ static bool freeze_dynamic_cluster_in_place(const int *cluster, int cluster_coun
         voxel->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
         voxel->lifeFrames = 0;
         for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
-            Particle *particle = voxel->particles[corner];
+            Particle *particle = voxel->particles[corner]; //pointer
             if (!particle || particle->sync_stamp == frozen_stamp) continue;
             particle->sync_stamp = frozen_stamp;
             particle->prev_pos = particle->pos;
@@ -6239,7 +6239,7 @@ static bool wake_sleeping_cluster_in_place(int start_idx)
         voxel->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
         voxel->lifeFrames = 0;
         for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
-            Particle *particle = voxel->particles[corner];
+            Particle *particle = voxel->particles[corner]; //pointer
             if (!particle || particle->sync_stamp == wake_stamp) continue;
             particle->sync_stamp = wake_stamp;
             particle->prev_pos = particle->pos;
@@ -9516,7 +9516,7 @@ static void decrement_particle_timers_range(int start, int end, int worker_id, v
     }
 }
 
-static void gather_voxel_break_masks(Voxel *voxel) {
+static void gather_voxel_break_masks(Voxel *voxel) { //this is the break up code with pointers
     if (!voxel->simulate || voxel->isBullet || voxel->type != 0) {
         return;
     }
@@ -9526,7 +9526,7 @@ static void gather_voxel_break_masks(Voxel *voxel) {
 
     Vector3 p[8];
     for (int i = 0; i < 8; ++i) {
-        Particle *part = voxel->particles[i];
+        Particle *part = voxel->particles[i]; //pointer
         p[i] = part->predicted_pos;
     }
 
@@ -9608,7 +9608,7 @@ static void gather_voxel_break_masks(Voxel *voxel) {
         if (!voxel->glued_faces[face]) continue;
         int shared_corner_count = 0;
         for (int face_corner = 0; face_corner < 4; ++face_corner) {
-            Particle *particle = voxel->particles[face_corner_indices[face][face_corner]];
+            Particle *particle = voxel->particles[face_corner_indices[face][face_corner]]; //pointer
             if (particle && particle->refcount > 1) ++shared_corner_count;
         }
         if (shared_corner_count > 1) continue;
@@ -9789,7 +9789,7 @@ static void solve_voxel_shape(Voxel *voxel) {
     float w[8];
 
     for (int i = 0; i < 8; ++i) {
-        Particle *part = voxel->particles[i];
+        Particle *part = voxel->particles[i]; //pointer
         if (!v_isfinite(part->predicted_pos)) {
             part->predicted_pos = part->pos;
             needs_reset = true;
@@ -9960,7 +9960,7 @@ static void gather_voxel_shape_constraints(Voxel *voxel) {
     float apply_w[8];
 
     for (int i = 0; i < 8; ++i) {
-        Particle *part = voxel->particles[i];
+        Particle *part = voxel->particles[i]; //pointer
         p[i] = part->predicted_pos;
         orig[i] = part->predicted_pos;
         
@@ -10095,7 +10095,7 @@ static bool reserve_pair_correction_scratch(int count) {
 
 static inline void accumulate_pair_correction(ParticleCollisionJob *job, int worker_id,
                                               int particle_index, Particle *particle,
-                                              Vector3 delta, float weight) {
+                                              Vector3 delta, float weight) { //pointer
     if (weight <= 0.0f) return;
     if (!job->local_corrections) {
         accumulate_particle_correction(particle, delta, weight);
@@ -10276,7 +10276,7 @@ static void apply_pair_corrections_range(int start, int end, int worker_id, void
             total.x += value.x; total.y += value.y; total.z += value.z;
             total.weight += value.weight;
         }
-        Particle *particle = job->list[i];
+        Particle *particle = job->list[i]; //pointer
         if (!particle || total.weight <= 0.0f) continue;
         float scale = PBD_SOR_FACTOR / total.weight;
         particle->predicted_pos = v_add(particle->predicted_pos,
@@ -10863,7 +10863,7 @@ static void rebuild_dynamic_collision_particles(void)
         if (!voxel->simulate || voxel->isBullet || voxel->type != 0) continue;
         bool shell = dynamic_voxel_is_collision_shell(voxel_index);
         for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
-            Particle *particle = voxel->particles[corner];
+            Particle *particle = voxel->particles[corner]; //pointer
             if (!particle) continue;
             ptrdiff_t pool_index = particle - particles_pool;
             if (pool_index < 0 || pool_index >= particle_pool_count) continue;
@@ -10878,7 +10878,7 @@ static void rebuild_dynamic_collision_particles(void)
 
     collision_particle_count = 0;
     for (int i = 0; i < sim_particle_count; ++i) {
-        Particle *particle = sim_particles[i];
+        Particle *particle = sim_particles[i]; //pointer
         if (!particle) continue;
         ptrdiff_t pool_index = particle - particles_pool;
         bool include = getenv("FPS_COLLISION_DYNAMIC_LEGACY") != NULL ||
@@ -10905,7 +10905,7 @@ static void rebuild_particle_collision_metadata(void)
         int group = collisionVoxelClusterIds[voxel_index];
         if (group < 0) group = voxel_index;
         for (int corner = 0; corner < 8; ++corner) {
-            Particle *particle = voxel->particles[corner];
+            Particle *particle = voxel->particles[corner]; //pointer
             if (!particle || particle->sim_index < 0) continue;
             if (particle->collision_group == -1) particle->collision_group = group;
             else if (particle->collision_group != group) particle->collision_group = -2;
@@ -11649,7 +11649,7 @@ static int gather_static_voxels_near_point(Vector3 point, float radius, int *out
     return count;
 }
 
-static bool push_particle_out_of_static(const Voxel *static_voxel, Particle *particle, float radius)
+static bool push_particle_out_of_static(const Voxel *static_voxel, Particle *particle, float radius) //pointer
 {
     if (!static_voxel || !particle || radius <= 0.0f) {
         return false;
@@ -11745,7 +11745,7 @@ static bool push_particle_out_of_static(const Voxel *static_voxel, Particle *par
     }
 }
 
-static bool push_particle_out_of_static_patch(const Patch *patch, Particle *particle, float radius)
+static bool push_particle_out_of_static_patch(const Patch *patch, Particle *particle, float radius) //pointer
 {
     if (!patch || !particle || radius <= 0.0f) return false;
     Vector3 position = particle->predicted_pos;
@@ -11798,7 +11798,7 @@ static bool push_particle_out_of_static_patch(const Patch *patch, Particle *part
     return true;
 }
 
-static void collide_particle_with_static_surface(Particle *particle, float radius)
+static void collide_particle_with_static_surface(Particle *particle, float radius) //pointer
 {
     enum { MAX_PATCH_CANDIDATES = 256 };
     int candidates[MAX_PATCH_CANDIDATES];
@@ -12436,7 +12436,7 @@ static int capture_tether_throw_ccd_snapshots(TetherThrowCcdSnapshot *snapshots,
         snapshot->identity = identity;
         bool valid = true;
         for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
-            Particle *particle = voxel_particle_at(voxel, corner);
+            Particle *particle = voxel_particle_at(voxel, corner); //pointer
             if (!particle || !v_isfinite(particle->pos)) {
                 valid = false;
                 break;
@@ -12465,7 +12465,7 @@ static bool resolve_tether_throw_ccd_snapshot(const TetherThrowCcdSnapshot *snap
     VoxelHit collision_hit = { .id = -1 };
     bool collided = false;
     for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
-        Particle *particle = voxel_particle_at(voxel, corner);
+        Particle *particle = voxel_particle_at(voxel, corner); //pointer
         if (!particle || !v_isfinite(particle->pos)) continue;
         Vector3 path = v_sub(particle->pos, snapshot->particle_start[corner]);
         float path_length = v_length(path);
@@ -12494,7 +12494,7 @@ static bool resolve_tether_throw_ccd_snapshot(const TetherThrowCcdSnapshot *snap
     if (v_length(collision_normal) <= 1e-6f) {
         Vector3 centroid_path = { 0.0f, 0.0f, 0.0f };
         for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
-            Particle *particle = voxel_particle_at(voxel, corner);
+            Particle *particle = voxel_particle_at(voxel, corner); //pointer
             if (!particle) continue;
             centroid_path = v_add(centroid_path,
                 v_sub(particle->pos, snapshot->particle_start[corner]));
@@ -12507,7 +12507,7 @@ static bool resolve_tether_throw_ccd_snapshot(const TetherThrowCcdSnapshot *snap
     Vector3 incoming_velocity = { 0.0f, 0.0f, 0.0f };
     int valid_corners = 0;
     for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
-        Particle *particle = voxel_particle_at(voxel, corner);
+        Particle *particle = voxel_particle_at(voxel, corner); //pointer
         if (!particle) continue;
         incoming_velocity = v_add(incoming_velocity, particle->vel);
         Vector3 end = particle->pos;
