@@ -38,6 +38,18 @@ static inline void rasterize_forerunner_plan(const ForerunnerPlan *plan,
     Color col_solar_amber      = (Color){ 255, 165, 35, 255 };  // Telemetry beam emitter
     Color col_bronze_trim      = (Color){ 145, 115, 75, 255 };  // Warm metallic accent
 
+    // Compute minimum non-void modular Y level to anchor foundation at base_gy
+    int min_non_void_y = 0;
+    bool found_non_void = false;
+    for (int i = 0; i < plan->node_count; ++i) {
+        if (plan->nodes[i].is_void) continue;
+        if (!found_non_void || plan->nodes[i].box.min_y < min_non_void_y) {
+            min_non_void_y = plan->nodes[i].box.min_y;
+            found_non_void = true;
+        }
+    }
+    int offset_y = base_gy - min_non_void_y * mv;
+
     for (int i = 0; i < plan->node_count; ++i) {
         const ForerunnerNode *n = &plan->nodes[i];
         if (n->is_void) continue; // Voids define empty space in the chasm
@@ -46,8 +58,8 @@ static inline void rasterize_forerunner_plan(const ForerunnerPlan *plan,
         int gx1 = center_gx + n->box.max_x * mv;
         int gz0 = center_gz + n->box.min_z * mv;
         int gz1 = center_gz + n->box.max_z * mv;
-        int gy0 = base_gy   + n->box.min_y * mv;
-        int gy1 = base_gy   + n->box.max_y * mv;
+        int gy0 = offset_y  + n->box.min_y * mv;
+        int gy1 = offset_y  + n->box.max_y * mv;
 
         int mid_x = (gx0 + gx1) / 2;
         int mid_z = (gz0 + gz1) / 2;

@@ -8498,36 +8498,55 @@ static void buildMegalithWorld(uint32_t seed, MegalithArchetype archetype, Megal
     int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
     int center = M / 2;
     MegalithPlan plan = generate_megalith_structure(seed, archetype, stage);
-    // Base at gy = 2 so stones rest firmly on the ground arena
-    rasterize_megalith_plan(&plan, center, center, 2, plot_megalith_voxel);
+    // Base at gy = 0 so foundation stones rest firmly on the ground arena at y = 0.0f
+    rasterize_megalith_plan(&plan, center, center, 0, plot_megalith_voxel);
 }
 
 static void buildHyperboreanWorld(uint32_t seed, HyperStage stage) {
     int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
     int center = M / 2;
     HyperPlan plan = generate_hyperborean_structure(seed, stage);
-    // Base at gy = 2 for ground-level alignment
-    rasterize_hyperborean_plan(&plan, center, center, 2, plot_hyper_voxel);
+    // Base at gy = 0 so columns and menhirs rest flush on the floor at y = 0.0f
+    rasterize_hyperborean_plan(&plan, center, center, 0, plot_hyper_voxel);
 }
 
 static void buildForerunnerWorld(uint32_t seed, ForerunnerArchetype archetype, ForerunnerStage stage) {
     int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
     int center = M / 2;
     ForerunnerPlan plan = generate_forerunner_structure(seed, archetype, stage);
-    // Base at gy = 10 so chasm drops toward bedrock gy=2 while bridges/pylons rise above
-    rasterize_forerunner_plan(&plan, center, center, 10, plot_forerunner_voxel);
+    // Base at gy = 0 so bedrock slab and pylons are grounded at y = 0.0f
+    rasterize_forerunner_plan(&plan, center, center, 0, plot_forerunner_voxel);
 }
 
 static SanctumCitadelPlan current_sanctum_plan;
 static bool current_sanctum_plan_valid = false;
+static int current_sanctum_offset_y = 0;
+
+static void update_current_sanctum_offset(void) {
+    if (!current_sanctum_plan_valid) {
+        current_sanctum_offset_y = 0;
+        return;
+    }
+    int min_non_void_y = 0;
+    bool found = false;
+    for (int i = 0; i < current_sanctum_plan.node_count; ++i) {
+        if (current_sanctum_plan.nodes[i].is_void) continue;
+        if (!found || current_sanctum_plan.nodes[i].y < min_non_void_y) {
+            min_non_void_y = current_sanctum_plan.nodes[i].y;
+            found = true;
+        }
+    }
+    current_sanctum_offset_y = -min_non_void_y;
+}
 
 static void buildUnifiedSanctumWorld(uint32_t seed, int growth_steps) {
     int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
     int center = M / 2;
     current_sanctum_plan = generate_unified_sanctum_ex(seed, growth_steps, sanctumTopologyMode);
     current_sanctum_plan_valid = true;
-    // Base at gy = 10 so subterranean crypts & chasm voids excavate down towards bedrock
-    rasterize_sanctum_plan(&current_sanctum_plan, center, center, 10, plot_sanctum_voxel, void_sanctum_voxel);
+    update_current_sanctum_offset();
+    // Base at gy = 0 so foundations rest flush on the ground arena at y = 0.0f
+    rasterize_sanctum_plan(&current_sanctum_plan, center, center, 0, plot_sanctum_voxel, void_sanctum_voxel);
 }
 
 // Build static demo cube of voxels
@@ -8784,11 +8803,12 @@ static void init_pickups(void) {
         if (!current_sanctum_plan_valid) {
             current_sanctum_plan = generate_unified_sanctum_ex(sanctumSeed, sanctumGrowthSteps, sanctumTopologyMode);
             current_sanctum_plan_valid = true;
+            update_current_sanctum_offset();
         }
         clear_pickups();
         for (int i = 0; i < current_sanctum_plan.supply_count && i < MAX_PICKUPS; ++i) {
             float wx = (current_sanctum_plan.supply_points[i].pos.x + 0.5f) * VOXEL_SIZE;
-            float wy = (10 + current_sanctum_plan.supply_points[i].pos.y + 0.5f) * VOXEL_SIZE + 0.6f;
+            float wy = (current_sanctum_offset_y + current_sanctum_plan.supply_points[i].pos.y + 0.5f) * VOXEL_SIZE + 0.6f;
             float wz = (current_sanctum_plan.supply_points[i].pos.z + 0.5f) * VOXEL_SIZE;
             pickups[i].pos = (Vector3){ wx, wy, wz };
             pickups[i].active = true;
@@ -14328,7 +14348,7 @@ static Vector3 pick_player_spawn(int player_index) {
             for (int s = 0; s < current_sanctum_plan.spawn_point_count; ++s) {
                 if (current_sanctum_plan.spawn_points[s].is_player) {
                     float wx = (current_sanctum_plan.spawn_points[s].pos.x + 0.5f) * VOXEL_SIZE;
-                    float wy = (10 + current_sanctum_plan.spawn_points[s].pos.y + 0.5f) * VOXEL_SIZE + BASE_EYE_HEIGHT;
+                    float wy = (current_sanctum_offset_y + current_sanctum_plan.spawn_points[s].pos.y + 0.5f) * VOXEL_SIZE + BASE_EYE_HEIGHT;
                     float wz = (current_sanctum_plan.spawn_points[s].pos.z + 0.5f) * VOXEL_SIZE;
                     return (Vector3){ wx, wy, wz };
                 }
@@ -14344,7 +14364,7 @@ static Vector3 pick_player_spawn(int player_index) {
             if (enemy_count > 0) {
                 int s_idx = enemy_spawns[(player_index - 1) % enemy_count];
                 float wx = (current_sanctum_plan.spawn_points[s_idx].pos.x + 0.5f) * VOXEL_SIZE;
-                float wy = (10 + current_sanctum_plan.spawn_points[s_idx].pos.y + 0.5f) * VOXEL_SIZE + BASE_EYE_HEIGHT;
+                float wy = (current_sanctum_offset_y + current_sanctum_plan.spawn_points[s_idx].pos.y + 0.5f) * VOXEL_SIZE + BASE_EYE_HEIGHT;
                 float wz = (current_sanctum_plan.spawn_points[s_idx].pos.z + 0.5f) * VOXEL_SIZE;
                 return (Vector3){ wx, wy, wz };
             }
@@ -14386,7 +14406,7 @@ static Vector3 pick_enemy_wave_spawn(int bot_idx) {
         if (enemy_count > 0) {
             int s_idx = enemy_spawns[(bot_idx + GetRandomValue(0, 15)) % enemy_count];
             float wx = (current_sanctum_plan.spawn_points[s_idx].pos.x + 0.5f) * VOXEL_SIZE;
-            float wy = (10 + current_sanctum_plan.spawn_points[s_idx].pos.y + 0.5f) * VOXEL_SIZE + BASE_EYE_HEIGHT;
+            float wy = (current_sanctum_offset_y + current_sanctum_plan.spawn_points[s_idx].pos.y + 0.5f) * VOXEL_SIZE + BASE_EYE_HEIGHT;
             float wz = (current_sanctum_plan.spawn_points[s_idx].pos.z + 0.5f) * VOXEL_SIZE;
             return (Vector3){ wx, wy, wz };
         }
@@ -19818,7 +19838,7 @@ int main(int argc, char **argv) {
             if (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM && current_sanctum_plan_valid) {
                 for (int j = 0; j < current_sanctum_plan.jump_pad_count; ++j) {
                     float jx = (current_sanctum_plan.jump_pads[j].pos.x + 0.5f) * VOXEL_SIZE;
-                    float jy = (10 + current_sanctum_plan.jump_pads[j].pos.y + 0.5f) * VOXEL_SIZE;
+                    float jy = (current_sanctum_offset_y + current_sanctum_plan.jump_pads[j].pos.y + 0.5f) * VOXEL_SIZE;
                     float jz = (current_sanctum_plan.jump_pads[j].pos.z + 0.5f) * VOXEL_SIZE;
                     float dist_sq = (p->pos.x - jx)*(p->pos.x - jx) + (p->pos.z - jz)*(p->pos.z - jz);
                     if (dist_sq < 2.5f * 2.5f && fabsf(p->pos.y - jy) < 2.5f) {

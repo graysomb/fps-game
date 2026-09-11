@@ -43,8 +43,8 @@ static inline void rasterize_temple_plan(const TemplePlan *plan,
         int gx1 = center_gx + n->box.max_x * mv;
         int gz0 = center_gz + n->box.min_z * mv;
         int gz1 = center_gz + n->box.max_z * mv;
-        int gy0 = base_gy   + n->box.min_y * mv;
-        int gy1 = base_gy   + n->box.max_y * mv;
+        int gy0 = base_gy   + n->box.min_y; // 1 voxel per tier: base_gy=3 drops tiers -3,-2,-1 to gy=0,1,2
+        int gy1 = base_gy   + n->box.max_y;
 
         Color c = (n->box.min_y >= -1) ? col_step_light : col_step_dark;
         for (int y = gy0; y < gy1; ++y) {
@@ -214,6 +214,7 @@ static inline void rasterize_temple_plan(const TemplePlan *plan,
     Color col_water        = (Color){ 50, 160, 220, 220 };   // Sparkling azure liquid
     Color col_trunk        = (Color){ 105, 75, 45, 255 };    // Olive timber trunk
     Color col_foliage      = (Color){ 75, 115, 60, 255 };    // Mediterranean olive leaves
+    int ground_gy          = (base_gy >= 3) ? (base_gy - 3) : 0; // Ground level for Temenos courtyard & gardens
 
     // 7. Rasterize Courtyard Pavement
     for (int i = 0; i < plan->node_count; ++i) {
@@ -227,7 +228,7 @@ static inline void rasterize_temple_plan(const TemplePlan *plan,
 
         for (int z = gz0; z < gz1; ++z) {
             for (int x = gx0; x < gx1; ++x) {
-                plot(x, base_gy, z, col_court_paving);
+                plot(x, ground_gy, z, col_court_paving);
             }
         }
     }
@@ -246,12 +247,12 @@ static inline void rasterize_temple_plan(const TemplePlan *plan,
             for (int x = gx0; x < gx1; ++x) {
                 bool is_rim = (x == gx0 || x == gx1 - 1 || z == gz0 || z == gz1 - 1);
                 if (is_rim) {
-                    plot(x, base_gy, z, col_pool_rim);
+                    plot(x, ground_gy + 1, z, col_pool_rim);
                 } else {
-                    // Sunken bed
-                    plot(x, base_gy - 1, z, col_floor);
+                    // Sunken bed at ground
+                    plot(x, ground_gy, z, col_floor);
                     // Liquid water surface
-                    plot(x, base_gy, z, col_water);
+                    plot(x, ground_gy, z, col_water);
                 }
             }
         }
@@ -266,8 +267,8 @@ static inline void rasterize_temple_plan(const TemplePlan *plan,
         int gx1 = center_gx + n->box.max_x * mv;
         int gz0 = center_gz + n->box.min_z * mv;
         int gz1 = center_gz + n->box.max_z * mv;
-        int gy0 = base_gy;
-        int gy1 = base_gy + (n->box.max_y - n->box.min_y) * mv;
+        int gy0 = ground_gy;
+        int gy1 = ground_gy + (n->box.max_y - n->box.min_y) * mv;
 
         int mid_x = (gx0 + gx1) / 2;
         int mid_z = (gz0 + gz1) / 2;
@@ -335,7 +336,7 @@ static inline void rasterize_temple_plan(const TemplePlan *plan,
         for (int z = gz0; z < gz1; ++z) {
             for (int x = gx0; x < gx1; ++x) {
                 Color c = ((x + z) % 3 == 0) ? col_path_b : col_path_a;
-                plot(x, base_gy, z, c);
+                plot(x, ground_gy, z, c);
             }
         }
     }
@@ -357,7 +358,7 @@ static inline void rasterize_temple_plan(const TemplePlan *plan,
         for (int dz = -r_tholos; dz <= r_tholos; ++dz) {
             for (int dx = -r_tholos; dx <= r_tholos; ++dx) {
                 if (dx * dx + dz * dz <= r_tholos * r_tholos) {
-                    plot(mid_x + dx, base_gy, mid_z + dz, col_step_light);
+                    plot(mid_x + dx, ground_gy, mid_z + dz, col_step_light);
                 }
             }
         }
@@ -368,13 +369,13 @@ static inline void rasterize_temple_plan(const TemplePlan *plan,
             float angle = col_i * (3.14159265f / 3.0f);
             int cx = mid_x + (int)((r_tholos - 1) * cosf(angle));
             int cz = mid_z + (int)((r_tholos - 1) * sinf(angle));
-            for (int y = base_gy + 1; y <= base_gy + col_h; ++y) {
+            for (int y = ground_gy + 1; y <= ground_gy + col_h; ++y) {
                 plot(cx, y, cz, col_column);
             }
         }
 
         // Circular Architrave ring
-        int arch_y = base_gy + col_h + 1;
+        int arch_y = ground_gy + col_h + 1;
         for (int dz = -r_tholos; dz <= r_tholos; ++dz) {
             for (int dx = -r_tholos; dx <= r_tholos; ++dx) {
                 int d2 = dx * dx + dz * dz;
@@ -401,7 +402,7 @@ static inline void rasterize_temple_plan(const TemplePlan *plan,
         plot(mid_x, arch_y + 5, mid_z, col_altar);
 
         // Center sacred bronze tripod
-        for (int y = base_gy + 1; y <= base_gy + 2; ++y) {
+        for (int y = ground_gy + 1; y <= ground_gy + 2; ++y) {
             plot(mid_x, y, mid_z, col_altar);
         }
     }
@@ -419,20 +420,20 @@ static inline void rasterize_temple_plan(const TemplePlan *plan,
         // Base plinth
         for (int z = gz0; z < gz1; ++z) {
             for (int x = gx0; x < gx1; ++x) {
-                plot(x, base_gy, z, col_step_light);
-                plot(x, base_gy + 1, z, col_column); // seat
+                plot(x, ground_gy, z, col_step_light);
+                plot(x, ground_gy + 1, z, col_column); // seat
             }
         }
         // High curved backrest along outer edge
         bool on_left = (gx0 < center_gx);
         int back_x = on_left ? gx0 : gx1 - 1;
         for (int z = gz0; z < gz1; ++z) {
-            plot(back_x, base_gy + 2, z, col_wall);
-            plot(back_x, base_gy + 3, z, col_wall);
+            plot(back_x, ground_gy + 2, z, col_wall);
+            plot(back_x, ground_gy + 3, z, col_wall);
         }
         // Armrest piers at the ends
-        plot(on_left ? gx1 - 1 : gx0, base_gy + 2, gz0, col_step_dark);
-        plot(on_left ? gx1 - 1 : gx0, base_gy + 2, gz1 - 1, col_step_dark);
+        plot(on_left ? gx1 - 1 : gx0, ground_gy + 2, gz0, col_step_dark);
+        plot(on_left ? gx1 - 1 : gx0, ground_gy + 2, gz1 - 1, col_step_dark);
     }
 
     // 13. Rasterize Naiskoi (Miniature Temple Votive Shrines)
@@ -444,8 +445,8 @@ static inline void rasterize_temple_plan(const TemplePlan *plan,
         int gx1 = center_gx + n->box.max_x * mv;
         int gz0 = center_gz + n->box.min_z * mv;
         int gz1 = center_gz + n->box.max_z * mv;
-        int gy0 = base_gy;
-        int gy1 = base_gy + (n->box.max_y - n->box.min_y) * mv;
+        int gy0 = ground_gy;
+        int gy1 = ground_gy + (n->box.max_y - n->box.min_y) * mv;
 
         // Stepped base
         for (int z = gz0; z < gz1; ++z) {
@@ -496,17 +497,17 @@ static inline void rasterize_temple_plan(const TemplePlan *plan,
             for (int x = gx0; x < gx1; ++x) {
                 bool is_rim = (x == gx0 || x == gx1 - 1 || z == gz0 || z == gz1 - 1);
                 if (is_rim) {
-                    plot(x, base_gy, z, col_pool_rim);
-                    plot(x, base_gy + 1, z, col_pool_rim);
+                    plot(x, ground_gy, z, col_pool_rim);
+                    plot(x, ground_gy + 1, z, col_pool_rim);
                 } else {
-                    plot(x, base_gy - 1, z, col_court_paving);
-                    plot(x, base_gy, z, col_water); // live fluid
+                    plot(x, ground_gy, z, col_court_paving);
+                    plot(x, ground_gy, z, col_water); // live fluid
                 }
             }
         }
         // Center spout column
-        plot(mid_x, base_gy + 1, mid_z, col_column);
-        plot(mid_x, base_gy + 2, mid_z, col_column);
+        plot(mid_x, ground_gy + 1, mid_z, col_column);
+        plot(mid_x, ground_gy + 2, mid_z, col_column);
     }
 
     // 15. Rasterize Pergolas (Timber Post-and-Beam Arbor with Vines)
@@ -520,8 +521,8 @@ static inline void rasterize_temple_plan(const TemplePlan *plan,
         int gx1 = center_gx + n->box.max_x * mv;
         int gz0 = center_gz + n->box.min_z * mv;
         int gz1 = center_gz + n->box.max_z * mv;
-        int gy0 = base_gy;
-        int gy1 = base_gy + (n->box.max_y - n->box.min_y) * mv;
+        int gy0 = ground_gy;
+        int gy1 = ground_gy + (n->box.max_y - n->box.min_y) * mv;
 
         // Timber uprights at 4 corners and intervals
         for (int z = gz0; z < gz1; z += 4) {
@@ -569,20 +570,20 @@ static inline void rasterize_temple_plan(const TemplePlan *plan,
         // Base pedestal
         for (int z = gz0; z < gz1; ++z) {
             for (int x = gx0; x < gx1; ++x) {
-                plot(x, base_gy, z, col_step_dark);
-                plot(x, base_gy + 1, z, col_wall);
+                plot(x, ground_gy, z, col_step_dark);
+                plot(x, ground_gy + 1, z, col_wall);
             }
         }
         // Bronze brazier bowl
-        plot(mid_x, base_gy + 2, mid_z, col_altar);
-        plot(mid_x + 1, base_gy + 2, mid_z, col_altar);
-        plot(mid_x, base_gy + 2, mid_z + 1, col_altar);
-        plot(mid_x + 1, base_gy + 2, mid_z + 1, col_altar);
+        plot(mid_x, ground_gy + 2, mid_z, col_altar);
+        plot(mid_x + 1, ground_gy + 2, mid_z, col_altar);
+        plot(mid_x, ground_gy + 2, mid_z + 1, col_altar);
+        plot(mid_x + 1, ground_gy + 2, mid_z + 1, col_altar);
         // Flaming embers
-        plot(mid_x, base_gy + 3, mid_z, col_fire1);
-        plot(mid_x + 1, base_gy + 3, mid_z, col_fire2);
-        plot(mid_x, base_gy + 3, mid_z + 1, col_fire2);
-        plot(mid_x + 1, base_gy + 3, mid_z + 1, col_fire1);
+        plot(mid_x, ground_gy + 3, mid_z, col_fire1);
+        plot(mid_x + 1, ground_gy + 3, mid_z, col_fire2);
+        plot(mid_x, ground_gy + 3, mid_z + 1, col_fire2);
+        plot(mid_x + 1, ground_gy + 3, mid_z + 1, col_fire1);
     }
 
     // 17. Rasterize Flowering Shrubs & Boxwood Borders
@@ -602,12 +603,12 @@ static inline void rasterize_temple_plan(const TemplePlan *plan,
         for (int z = gz0; z < gz1; ++z) {
             for (int x = gx0; x < gx1; ++x) {
                 // Low boxwood hedge
-                plot(x, base_gy, z, col_boxwood);
+                plot(x, ground_gy, z, col_boxwood);
 
                 // Varied blooms on top
                 Color bloom = ((x + z) % 3 == 0) ? col_flower_lavender :
                               ((x + z) % 3 == 1) ? col_flower_poppy : col_flower_gold;
-                plot(x, base_gy + 1, z, bloom);
+                plot(x, ground_gy + 1, z, bloom);
             }
         }
     }

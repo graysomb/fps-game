@@ -29,6 +29,18 @@ static inline void rasterize_sanctum_plan(const SanctumCitadelPlan *plan,
                                           SanctumVoidFn void_fn) {
     if (!plan || !plot_fn) return;
 
+    // Compute minimum non-void modular Y level to anchor foundation at base_gy
+    int min_non_void_y = 0;
+    bool found_non_void = false;
+    for (int i = 0; i < plan->node_count; ++i) {
+        if (plan->nodes[i].is_void) continue;
+        if (!found_non_void || plan->nodes[i].y < min_non_void_y) {
+            min_non_void_y = plan->nodes[i].y;
+            found_non_void = true;
+        }
+    }
+    int offset_y = base_gy - min_non_void_y;
+
     // PASS 1: Negative Mass Void Excavation (Chasms, Pits, Crypt Voids)
     for (int i = 0; i < plan->node_count; ++i) {
         const SanctumNode *node = &plan->nodes[i];
@@ -36,8 +48,8 @@ static inline void rasterize_sanctum_plan(const SanctumCitadelPlan *plan,
 
         int gx0 = center_gx + node->x - node->w / 2;
         int gx1 = center_gx + node->x + (node->w - 1) / 2;
-        int gy0 = base_gy + node->y;
-        int gy1 = base_gy + node->y + node->h - 1;
+        int gy0 = offset_y + node->y;
+        int gy1 = offset_y + node->y + node->h - 1;
         int gz0 = center_gz + node->z - node->d / 2;
         int gz1 = center_gz + node->z + (node->d - 1) / 2;
 
@@ -59,8 +71,8 @@ static inline void rasterize_sanctum_plan(const SanctumCitadelPlan *plan,
 
         int gx0 = center_gx + node->x - node->w / 2;
         int gx1 = center_gx + node->x + (node->w - 1) / 2;
-        int gy0 = base_gy + node->y;
-        int gy1 = base_gy + node->y + node->h - 1;
+        int gy0 = offset_y + node->y;
+        int gy1 = offset_y + node->y + node->h - 1;
         int gz0 = center_gz + node->z - node->d / 2;
         int gz1 = center_gz + node->z + (node->d - 1) / 2;
 
