@@ -3122,6 +3122,7 @@ static int run_debug_harness(void)
     if (!debug_prepare_capture_steps()) return 2;
 
     DebugRunState state = { 0 };
+    activePlayers = 1;
     state.expected_voxels = DEBUG_EXPECTED_VOXELS;
     state.camera.position = (Vector3){ 9.0f, 8.5f, 12.0f };
     state.camera.target = (Vector3){ 0.0f, 4.0f, 0.0f };

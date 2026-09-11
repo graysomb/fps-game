@@ -7509,6 +7509,10 @@ static void evaluate_voxel_fracture(Voxel *voxel) {
     if (!voxel->simulate || !voxel->vgs_active || voxel->isBullet || voxel->type != 0) {
         return;
     }
+    int voxel_idx = (int)(voxel - voxels);
+    if (voxel_idx >= 0 && voxel_idx < voxel_count && tetherTag[voxel_idx] > 0) {
+        return;
+    }
     if (voxel->rest_edge <= 0.0f) {
         return;
     }
@@ -7574,6 +7578,7 @@ static void evaluate_voxel_fracture_range(int start, int end, int worker_id, voi
     for (int i = start; i < end; ++i) {
         Voxel *voxel = &voxels[i];
         if (!voxel_is_awake_dynamic(voxel)) continue;
+        if (tetherTag[i] > 0) continue;
         evaluate_voxel_fracture(voxel);
     }
 }
@@ -7634,6 +7639,16 @@ static void integrate_particles(float dt) {
         int tether_player = tetherTag[i] - 1;
         Vector3 tether_target = tetherTargetByPlayer[tether_player];
 
+        Vector3 centroid = { 0.0f, 0.0f, 0.0f };
+        for (int j = 0; j < 8; ++j) {
+            centroid = v_add(centroid, voxel->particles[j]->predicted_pos);
+        }
+        centroid = v_mul(centroid, 0.125f);
+
+        Vector3 tether_delta = v_sub(tether_target, centroid);
+        Vector3 tether_accel = v_mul(tether_delta, TETHER_SPRING);
+        float tether_damp = clampf(TETHER_DAMPING * dt, 0.0f, 0.9f);
+
         for (int j = 0; j < 8; ++j) {
             Particle *p = voxel->particles[j];
             if (p->tether_stamp == stamp) {
@@ -7641,11 +7656,8 @@ static void integrate_particles(float dt) {
             }
             p->tether_stamp = stamp;
 
-            Vector3 tether_delta = v_sub(tether_target, p->predicted_pos);
-            Vector3 tether_accel = v_mul(tether_delta, TETHER_SPRING);
             p->predicted_pos = v_add(p->predicted_pos, v_mul(tether_accel, dt_sq));
             p->vel = v_add(p->vel, v_mul(tether_accel, dt));
-            float tether_damp = clampf(TETHER_DAMPING * dt, 0.0f, 0.9f);
             p->vel = v_mul(p->vel, 1.0f - tether_damp);
         }
     }
@@ -10894,7 +10906,8 @@ static void start_tether(int idx) {
 
 static void prepare_tether_forces(void) {
     memset(tetherTag, 0, sizeof(tetherTag));
-    for (int i = 0; i < activePlayers; ++i) {
+    int count = (activePlayers > 0) ? activePlayers : MAX_PLAYERS;
+    for (int i = 0; i < count; ++i) {
         Player *p = &players[i];
         if (!p->tetherHolding) {
             continue;
