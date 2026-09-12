@@ -11787,7 +11787,7 @@ static int particlePosRadiusCapacity = 0;
 static unsigned int particleInstanceVboId = 0;
 static int particlePosRadiusLoc = -1;
 static int particleColorLoc = -1;
-static Matrix *instanceTransforms = NULL;
+static float16 *instanceTransforms = NULL;
 static int instanceTransformsCount = 0;
 static int instanceTransformsCapacity = 0;
 static bool instancingInitialized = false;
@@ -11867,12 +11867,12 @@ static void InitInstancing(void) {
     instancedMaterial.shader = instancedShader;
     
     instanceTransformsCapacity = MAX_VOXELS;
-    instanceTransforms = (Matrix*)RL_MALLOC(instanceTransformsCapacity * sizeof(Matrix));
-    voxelInstanceVboId = rlLoadVertexBuffer(NULL, instanceTransformsCapacity * (int)sizeof(Matrix), true);
+    instanceTransforms = (float16*)RL_MALLOC(instanceTransformsCapacity * sizeof(float16));
+    voxelInstanceVboId = rlLoadVertexBuffer(NULL, instanceTransformsCapacity * (int)sizeof(float16), true);
     instancingInitialized = true;
 }
 
-static void DrawVoxelsInstancedFast(Mesh mesh, Material material, const Matrix *transforms, int count) {
+static void DrawVoxelsInstancedFast(Mesh mesh, Material material, const float16 *transforms, int count) {
     if (count <= 0 || mesh.vaoId == 0 || voxelInstanceVboId == 0) return;
 
     rlEnableShader(material.shader.id);
@@ -11885,7 +11885,7 @@ static void DrawVoxelsInstancedFast(Mesh mesh, Material material, const Matrix *
         rlSetUniformMatrix(material.shader.locs[SHADER_LOC_MATRIX_PROJECTION], matProjection);
 
     if (voxel_transforms_vbo_cached_frame != voxel_render_frame) {
-        rlUpdateVertexBuffer(voxelInstanceVboId, transforms, count * (int)sizeof(Matrix), 0);
+        rlUpdateVertexBuffer(voxelInstanceVboId, transforms, count * (int)sizeof(float16), 0);
         voxel_transforms_vbo_cached_frame = voxel_render_frame;
     }
 
@@ -11896,7 +11896,7 @@ static void DrawVoxelsInstancedFast(Mesh mesh, Material material, const Matrix *
     if (loc != -1) {
         for (unsigned int i = 0; i < 4; ++i) {
             rlEnableVertexAttribute(loc + i);
-            rlSetVertexAttribute(loc + i, 4, RL_FLOAT, 0, (int)sizeof(Matrix), (int)(i * sizeof(Vector4)));
+            rlSetVertexAttribute(loc + i, 4, RL_FLOAT, 0, (int)sizeof(float16), (int)(i * sizeof(Vector4)));
             rlSetVertexAttributeDivisor(loc + i, 1);
         }
     }
@@ -11968,44 +11968,57 @@ static void prepare_dynamic_voxel_transforms(void) {
         for(int k=0; k<8; ++k) center = v_add(center, v->particles[k]->pos);
         center = v_mul(center, 0.125f);
 
-        Matrix m = MatrixIdentity();
-        m.m0 = xAxis.x;
-        m.m1 = xAxis.y;
-        m.m2 = xAxis.z;
-        m.m3 = r; // Store Red in 4th row
-
-        m.m4 = yAxis.x;
-        m.m5 = yAxis.y;
-        m.m6 = yAxis.z;
-        m.m7 = g; // Store Green in 4th row
-
-        m.m8 = zAxis.x;
-        m.m9 = zAxis.y;
-        m.m10 = zAxis.z;
-        m.m11 = b; // Store Blue in 4th row
-
-        m.m12 = center.x;
-        m.m13 = center.y;
-        m.m14 = center.z;
-        m.m15 = 1.0f;
-
         if (instanceTransformsCount < instanceTransformsCapacity) {
-             instanceTransforms[instanceTransformsCount++] = m;
+            float16 *t = &instanceTransforms[instanceTransformsCount++];
+            // Column 0: X axis (x, y, z) + Red color
+            t->v[0] = xAxis.x;
+            t->v[1] = xAxis.y;
+            t->v[2] = xAxis.z;
+            t->v[3] = r;
+
+            // Column 1: Y axis (x, y, z) + Green color
+            t->v[4] = yAxis.x;
+            t->v[5] = yAxis.y;
+            t->v[6] = yAxis.z;
+            t->v[7] = g;
+
+            // Column 2: Z axis (x, y, z) + Blue color
+            t->v[8] = zAxis.x;
+            t->v[9] = zAxis.y;
+            t->v[10] = zAxis.z;
+            t->v[11] = b;
+
+            // Column 3: Center position (x, y, z) + 1.0
+            t->v[12] = center.x;
+            t->v[13] = center.y;
+            t->v[14] = center.z;
+            t->v[15] = 1.0f;
         }
     }
 
     if (netTransport.role == NET_ROLE_CLIENT && netVoxelProxies) {
         for (int i = 0; i < netVoxelProxyCount && instanceTransformsCount < instanceTransformsCapacity; ++i) {
             NetVoxelProxy *proxy = &netVoxelProxies[i];
-            Matrix m = MatrixIdentity();
-            m.m0 = proxy->x_axis.x; m.m1 = proxy->x_axis.y; m.m2 = proxy->x_axis.z;
-            m.m4 = proxy->y_axis.x; m.m5 = proxy->y_axis.y; m.m6 = proxy->y_axis.z;
-            m.m8 = proxy->z_axis.x; m.m9 = proxy->z_axis.y; m.m10 = proxy->z_axis.z;
-            m.m3 = (float)proxy->color.r / 255.0f;
-            m.m7 = (float)proxy->color.g / 255.0f;
-            m.m11 = (float)proxy->color.b / 255.0f;
-            m.m12 = proxy->center.x; m.m13 = proxy->center.y; m.m14 = proxy->center.z; m.m15 = 1.0f;
-            instanceTransforms[instanceTransformsCount++] = m;
+            float16 *t = &instanceTransforms[instanceTransformsCount++];
+            t->v[0] = proxy->x_axis.x;
+            t->v[1] = proxy->x_axis.y;
+            t->v[2] = proxy->x_axis.z;
+            t->v[3] = (float)proxy->color.r / 255.0f;
+
+            t->v[4] = proxy->y_axis.x;
+            t->v[5] = proxy->y_axis.y;
+            t->v[6] = proxy->y_axis.z;
+            t->v[7] = (float)proxy->color.g / 255.0f;
+
+            t->v[8] = proxy->z_axis.x;
+            t->v[9] = proxy->z_axis.y;
+            t->v[10] = proxy->z_axis.z;
+            t->v[11] = (float)proxy->color.b / 255.0f;
+
+            t->v[12] = proxy->center.x;
+            t->v[13] = proxy->center.y;
+            t->v[14] = proxy->center.z;
+            t->v[15] = 1.0f;
         }
     }
 }
@@ -12061,11 +12074,7 @@ static void DrawVoxels(Camera3D cam) {
     }
     
     if (instanceTransformsCount > 0) {
-        if (voxelInstanceVboId != 0) {
-            DrawVoxelsInstancedFast(voxelMesh, instancedMaterial, instanceTransforms, instanceTransformsCount);
-        } else {
-            DrawMeshInstanced(voxelMesh, instancedMaterial, instanceTransforms, instanceTransformsCount);
-        }
+        DrawVoxelsInstancedFast(voxelMesh, instancedMaterial, instanceTransforms, instanceTransformsCount);
     }
 
     // Add glow shells for type-0 bullets so they read as blue orbs.

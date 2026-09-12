@@ -831,6 +831,7 @@ static void debug_draw_overlay(const DebugRunState *state, const DebugSample *sa
 
 static void debug_render_scene(DebugRunState *state, const DebugSample *sample)
 {
+    voxel_render_frame++;
     BeginTextureMode(state->target);
         ClearBackground((Color){ 32, 42, 58, 255 });
         BeginMode3D(state->camera);
