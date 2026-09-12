@@ -4227,9 +4227,29 @@ static bool restore_dynamic_voxel_to_static(int idx)
     if (idx < 0 || idx >= voxel_count) {
         return false;
     }
-    Voxel voxel = voxels[idx];
-    remove_voxel_index(idx);
-    return spawn_static_covering_voxel(&voxel);
+    Voxel *voxel = &voxels[idx];
+    voxel_table_unregister(voxel);
+    bool spawned = spawn_static_covering_voxel(voxel);
+    if (spawned) {
+        voxel_table_register(voxel, idx);
+        remove_voxel_index(idx);
+        return true;
+    }
+    voxel_table_register(voxel, idx);
+    if (voxel->pos.y < 0.5f * VOXEL_SIZE) {
+        float dy = (0.5f * VOXEL_SIZE) - voxel->pos.y;
+        voxel->pos.y = 0.5f * VOXEL_SIZE;
+        voxel->vel.y = 0.0f;
+        for (int c = 0; c < VOXEL_CORNER_COUNT; ++c) {
+            if (voxel->particles[c]) {
+                voxel->particles[c]->pos.y += dy;
+                voxel->particles[c]->prev_pos.y = voxel->particles[c]->pos.y;
+                voxel->particles[c]->predicted_pos.y = voxel->particles[c]->pos.y;
+                voxel->particles[c]->vel.y = 0.0f;
+            }
+        }
+    }
+    return false;
 }
 
 static bool restore_dynamic_snapshot(const Voxel *snapshot)
@@ -7632,15 +7652,7 @@ static void evaluate_voxel_fracture(Voxel *voxel) {
                          shear_yz > SHEAR_BREAK_THRESHOLD);
 
     if (should_break) {
-        voxel->vgs_active = false;
-        voxel->simulate = false;
         voxel->wake_source = true;
-        for (int i = 0; i < 8; ++i) {
-            Particle *part = voxel->particles[i];
-            if (part && part->glue_count > 0) {
-                part->glue_count--;
-            }
-        }
     }
 }
 
@@ -9452,6 +9464,7 @@ static void solve_static_collisions_range(int start, int end, int worker_id, voi
             Vector3 travel = v_sub(pos, p->prev_pos);
             p->prev_pos.x = pos.x - travel.x * FLOOR_TANGENTIAL_VELOCITY_RETENTION;
             p->prev_pos.z = pos.z - travel.z * FLOOR_TANGENTIAL_VELOCITY_RETENTION;
+            p->prev_pos.y = pos.y;
         }
         pos.x = clampf(pos.x, -terrain_limit, terrain_limit);
         pos.z = clampf(pos.z, -terrain_limit, terrain_limit);

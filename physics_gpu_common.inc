@@ -931,14 +931,7 @@ static bool gpu_validate_and_commit(void) {
         if (voxel_id < 0 || voxel_id >= voxel_count) return false;
         Voxel *v = &voxels[voxel_id]; GpuVoxelState *g = &gpuPhysics.voxel_stage[i];
         if (v->vgs_active && g->flags[0] == 0) {
-            v->vgs_active = false;
-            v->simulate = false;
-            for (int corner = 0; corner < 8; ++corner) {
-                Particle *part = v->particles[corner];
-                if (part && part->glue_count > 0) {
-                    part->glue_count--;
-                }
-            }
+            v->wake_source = true;
         }
         for (int corner = 0; corner < 8; ++corner) {
             uint32_t particle_id = g->particle[corner];
