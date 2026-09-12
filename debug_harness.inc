@@ -200,6 +200,7 @@ static bool debug_setup_pillar_impact_drift(DebugRunState *state);
 static bool debug_setup_single_corner_hinge(DebugRunState *state);
 static bool debug_setup_tether_active_then_static(DebugRunState *state);
 static bool debug_setup_tether_thin_wall_ccd(DebugRunState *state);
+static bool debug_setup_cube_stress(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall },
@@ -216,7 +217,8 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "pillar-impact-drift", "Large undercut pillar impact exposes post-contact sliding and wiggle", debug_setup_pillar_impact_drift },
     { "single-corner-hinge", "A one-corner glue remnant must break beyond the hinge-angle limit", debug_setup_single_corner_hinge },
     { "tether-active-then-static", "Tethering an active voxel then a static voxel preserves and pulls both", debug_setup_tether_active_then_static },
-    { "tether-thin-wall-ccd", "High-speed tether throw uses swept particle rays against a one-voxel wall", debug_setup_tether_thin_wall_ccd }
+    { "tether-thin-wall-ccd", "High-speed tether throw uses swept particle rays against a one-voxel wall", debug_setup_tether_thin_wall_ccd },
+    { "cube-stress", "Stress test with scalable dynamic cube (size set by FPS_CUBE_SIZE)", debug_setup_cube_stress }
 };
 
 static const int debugScenarioCount = (int)(sizeof(debugScenarios) / sizeof(debugScenarios[0]));
@@ -1452,6 +1454,38 @@ static bool debug_setup_dynamic_freefall(DebugRunState *state)
                           created, state->expected_voxels);
         return false;
     }
+    return true;
+}
+
+static bool debug_setup_cube_stress(DebugRunState *state)
+{
+    debug_reset_world();
+    int size = 8;
+    const char *size_env = getenv("FPS_CUBE_SIZE");
+    if (size_env) {
+        int parsed = atoi(size_env);
+        if (parsed >= 2 && parsed <= 50) size = parsed;
+    }
+    int half = size / 2;
+    int created = 0;
+    Color color = (Color){ 245, 145, 45, 255 };
+    for (int y = 20; y < 20 + size; ++y) {
+        for (int z = -half; z < -half + size; ++z) {
+            for (int x = -half; x < -half + size; ++x) {
+                if (debug_add_cell(x, y, z, false, true, color, DEBUG_TEST_TAG) >= 0) {
+                    ++created;
+                }
+            }
+        }
+    }
+    state->expected_voxels = created;
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_rebuild_world_state();
+    state->activation_succeeded = true;
+    debug_set_initial_centroid(state);
+    float dist = (float)size * 2.5f + 10.0f;
+    state->camera.position = (Vector3){ dist, (float)(20 + size/2) + dist * 0.4f, dist };
+    state->camera.target = (Vector3){ 0.0f, (float)(20 + size/2), 0.0f };
     return true;
 }
 

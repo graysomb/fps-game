@@ -1,0 +1,90 @@
+[
+  {
+    "size": 4,
+    "voxels": 64,
+    "particles": 260,
+    "cpu_step_ms": 0.257791667,
+    "gpu_exec_step_ms": 0.9024,
+    "gpu_step_ms": 1.10879167,
+    "speedup": 0.2856733898492908,
+    "gpu_wall_ms": 1074.0531670162454,
+    "gpu_wait_ms": 1.5550333333333335
+  },
+  {
+    "size": 8,
+    "voxels": 512,
+    "particles": 2052,
+    "cpu_step_ms": 1.99954167,
+    "gpu_exec_step_ms": 1.0794833333333334,
+    "gpu_step_ms": 1.46745833,
+    "speedup": 1.8523136099059734,
+    "gpu_wall_ms": 602.2977919783443,
+    "gpu_wait_ms": 1.43685
+  },
+  {
+    "size": 12,
+    "voxels": 1728,
+    "particles": 6916,
+    "cpu_step_ms": 3.898625,
+    "gpu_exec_step_ms": 1.4021333333333332,
+    "gpu_step_ms": 1.99229167,
+    "speedup": 2.7804951977938384,
+    "gpu_wall_ms": 667.501165997237,
+    "gpu_wait_ms": 1.7622833333333332
+  },
+  {
+    "size": 16,
+    "voxels": 4096,
+    "particles": 16388,
+    "cpu_step_ms": 7.539125,
+    "gpu_exec_step_ms": 2.5073833333333337,
+    "gpu_step_ms": 3.695625,
+    "speedup": 3.0067700059158615,
+    "gpu_wall_ms": 911.2259999965318,
+    "gpu_wait_ms": 3.07715
+  },
+  {
+    "size": 20,
+    "voxels": 8000,
+    "particles": 32004,
+    "cpu_step_ms": 14.25575,
+    "gpu_exec_step_ms": 3.7682166666666665,
+    "gpu_step_ms": 6.13320833,
+    "speedup": 3.7831556041098136,
+    "gpu_wall_ms": 1442.357334017288,
+    "gpu_wait_ms": 4.456
+  },
+  {
+    "size": 24,
+    "voxels": 13824,
+    "particles": 55300,
+    "cpu_step_ms": 23.0129167,
+    "gpu_exec_step_ms": 5.70415,
+    "gpu_step_ms": 9.70491667,
+    "speedup": 4.034416468711377,
+    "gpu_wall_ms": 2632.9223749926314,
+    "gpu_wait_ms": 6.365716666666667
+  },
+  {
+    "size": 28,
+    "voxels": 21952,
+    "particles": 87812,
+    "cpu_step_ms": 38.4039583,
+    "gpu_exec_step_ms": 8.4857,
+    "gpu_step_ms": 15.0044583,
+    "speedup": 4.52572661065086,
+    "gpu_wall_ms": 4746.43758405,
+    "gpu_wait_ms": 9.2569
+  },
+  {
+    "size": 32,
+    "voxels": 32768,
+    "particles": 131076,
+    "cpu_step_ms": 59.2037083,
+    "gpu_exec_step_ms": 11.65445,
+    "gpu_step_ms": 19.1545417,
+    "speedup": 5.079922973628099,
+    "gpu_wall_ms": 8552.149583993014,
+    "gpu_wait_ms": 12.44195
+  }
+]

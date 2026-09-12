@@ -62,6 +62,8 @@ bool fps_metal_begin_batch(void);
 bool fps_metal_dispatch(int mode, int count);
 bool fps_metal_dispatch_indirect(int mode, void *buffer, size_t offset);
 bool fps_metal_end_batch(void);
+bool fps_metal_commit_batch(bool wait);
+bool fps_metal_wait_batch(void);
 void fps_metal_get_profile_info(FpsMetalProfileInfo *out);
 #endif
 

@@ -43,7 +43,8 @@ enum GpuPipelineMode {
 
 enum FpsGpuControlFlag {
     FPS_GPU_CONTROL_OVERFLOW = 1,
-    FPS_GPU_CONTROL_TOPOLOGY_DIRTY = 2
+    FPS_GPU_CONTROL_TOPOLOGY_DIRTY = 2,
+    FPS_GPU_CONTROL_BREAK_OCCURRED = 4
 };
 
 #endif

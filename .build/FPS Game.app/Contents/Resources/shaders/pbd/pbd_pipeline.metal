@@ -58,6 +58,7 @@ constant int MODE_WAKE_APPLY = 15;
 constant int MODE_TOPOLOGY_REBUILD_SERIAL = 16;
 constant int CONTROL_FLAG_OVERFLOW = 1;
 constant int CONTROL_FLAG_TOPOLOGY_DIRTY = 2;
+constant int CONTROL_FLAG_BREAK_OCCURRED = 4;
 
 constant int FACE_CORNERS[24] = {
     1,3,5,7, 0,2,4,6, 2,3,6,7,

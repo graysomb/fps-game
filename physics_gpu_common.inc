@@ -870,7 +870,7 @@ static bool gpu_validate_and_commit(void) {
     size_t cell_bytes = (size_t)used_particles * sizeof(GpuCellState);
     size_t voxel_bytes = (size_t)gpuPhysics.dynamic_voxel_count * sizeof(GpuVoxelState);
     if (particle_bytes) gpu_buffer_read(&gpuPhysics.particle_buffer, gpuPhysics.particle_stage, particle_bytes, 0);
-    if (cell_bytes) gpu_buffer_read(&gpuPhysics.cell_buffer, gpuPhysics.cell_stage, cell_bytes, 0);
+    if (cell_bytes && BREAK_DAMP_FRAMES > 0) gpu_buffer_read(&gpuPhysics.cell_buffer, gpuPhysics.cell_stage, cell_bytes, 0);
     if (voxel_bytes) gpu_buffer_read(&gpuPhysics.voxel_buffer, gpuPhysics.voxel_stage, voxel_bytes, 0);
     if (used_particles > gpuPhysics.uploaded_particle_count) {
         size_t offset = (size_t)gpuPhysics.uploaded_particle_count * sizeof(int32_t);
@@ -880,30 +880,37 @@ static bool gpu_validate_and_commit(void) {
                         bytes, offset);
     }
     gpuPhysics.sync_count++;
-    gpuPhysics.readback_bytes += (uint64_t)(sizeof(GpuControlState) + particle_bytes + cell_bytes + voxel_bytes +
+    gpuPhysics.readback_bytes += (uint64_t)(sizeof(GpuControlState) + particle_bytes +
+        (BREAK_DAMP_FRAMES > 0 ? cell_bytes : 0) + voxel_bytes +
         (size_t)(used_particles - gpuPhysics.uploaded_particle_count) * sizeof(int32_t));
     gpuPhysics.readback_ms += (GetTime() - read_started) * 1000.0;
     double commit_started = GetTime();
-    for (int i = 0; i < used_particles; ++i) {
-        GpuParticleState *g = &gpuPhysics.particle_stage[i];
-        for (int c = 0; c < 3; ++c) {
-            if (!isfinite(g->pos_radius[c]) || !isfinite(g->predicted_base_inv_mass[c]) ||
-                !isfinite(g->velocity[c]) || fabsf(g->pos_radius[c]) > 100000.0f) {
-                if (collision_diagnostics) fprintf(stderr, "collision-validation: invalid particle %d component %d\n", i, c);
-                return false;
+    if (collision_diagnostics) {
+        for (int i = 0; i < used_particles; ++i) {
+            GpuParticleState *g = &gpuPhysics.particle_stage[i];
+            for (int c = 0; c < 3; ++c) {
+                if (!isfinite(g->pos_radius[c]) || !isfinite(g->predicted_base_inv_mass[c]) ||
+                    !isfinite(g->velocity[c]) || fabsf(g->pos_radius[c]) > 100000.0f) {
+                    fprintf(stderr, "collision-validation: invalid particle %d component %d\n", i, c);
+                    return false;
+                }
             }
         }
-    }
-    for (int i = 0; i < gpuPhysics.dynamic_voxel_count; ++i) {
-        GpuVoxelState *g = &gpuPhysics.voxel_stage[i];
-        if (!isfinite(g->pos_rest_edge[0]) || !isfinite(g->pos_rest_edge[1]) || !isfinite(g->pos_rest_edge[2])) {
-            if (collision_diagnostics) fprintf(stderr, "collision-validation: invalid voxel %d\n", i);
-            return false;
+        for (int i = 0; i < gpuPhysics.dynamic_voxel_count; ++i) {
+            GpuVoxelState *g = &gpuPhysics.voxel_stage[i];
+            if (!isfinite(g->pos_rest_edge[0]) || !isfinite(g->pos_rest_edge[1]) || !isfinite(g->pos_rest_edge[2])) {
+                fprintf(stderr, "collision-validation: invalid voxel %d\n", i);
+                return false;
+            }
         }
     }
     int safe_particles = (used_particles > gpuPhysics.uploaded_particle_count) ?
                          gpuPhysics.uploaded_particle_count : used_particles;
     for (int i = 0; i < safe_particles; ++i) {
+        if (i + 8 < safe_particles) {
+            __builtin_prefetch(gpuPhysics.compact_to_particle[i + 8], 1, 1);
+            __builtin_prefetch(&gpuPhysics.particle_stage[i + 8], 0, 1);
+        }
         Particle *p = gpuPhysics.compact_to_particle[i];
         if (!p) return false;
         GpuParticleState *g = &gpuPhysics.particle_stage[i];
@@ -914,8 +921,9 @@ static bool gpu_validate_and_commit(void) {
         p->predicted_pos = (Vector3){g->predicted_base_inv_mass[0], g->predicted_base_inv_mass[1], g->predicted_base_inv_mass[2]};
         p->base_inv_mass = g->predicted_base_inv_mass[3];
         p->vel = (Vector3){g->velocity[0], g->velocity[1], g->velocity[2]};
-        p->cell_x = gpuPhysics.cell_stage[i].value[0]; p->cell_y = gpuPhysics.cell_stage[i].value[1];
-        p->cell_z = gpuPhysics.cell_stage[i].value[2]; p->break_timer = gpuPhysics.cell_stage[i].value[3];
+        if (BREAK_DAMP_FRAMES > 0) {
+            p->break_timer = gpuPhysics.cell_stage[i].value[3];
+        }
     }
     bool topology_changed = false;
     for (int i = 0; i < gpuPhysics.dynamic_voxel_count; ++i) {

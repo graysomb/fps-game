@@ -91,6 +91,7 @@ const int MODE_WAKE_APPLY = 15;
 const int MODE_TOPOLOGY_REBUILD_SERIAL = 16;
 const int CONTROL_FLAG_OVERFLOW = 1;
 const int CONTROL_FLAG_TOPOLOGY_DIRTY = 2;
+const int CONTROL_FLAG_BREAK_OCCURRED = 4;
 
 uint voxelParticle(VoxelState v, int corner) {
     return (corner < 4) ? v.particle_0_3[corner] : v.particle_4_7[corner - 4];
@@ -580,21 +581,7 @@ void topologyAssignParticles(uint gid) {
 }
 
 void topologyRebuildSerial(uint gid) {
-    if (gid != 0u || (gpuControl.w & CONTROL_FLAG_TOPOLOGY_DIRTY) == 0) return;
-    for (int i = 0; i < uVoxelCount; ++i) topology[i * 2 + 1].z = i;
-    for (int i = 0; i < uVoxelCount; ++i) topologyUnion(uint(i));
-    for (int pass = 0; pass < 18; ++pass)
-        for (int i = 0; i < uVoxelCount; ++i) topology[i * 2 + 1].z = topologyRoot(i);
-    for (int i = 0; i < gpuControl.y; ++i) {
-        uint id = simId[i];
-        if (particleRefcount[id] > 0) collisionMeta[id].w = -1;
-    }
-    for (int i = 0; i < uVoxelCount; ++i) topologyAssignParticles(uint(i));
-    for (int i = 0; i < gpuControl.y; ++i) {
-        uint id = simId[i];
-        if (particleRefcount[id] > 0 && collisionMeta[id].w == -2) collisionMeta[id].w = -1;
-    }
-    gpuControl.w &= ~CONTROL_FLAG_TOPOLOGY_DIRTY;
+    // No-op matching Metal pipeline: topology rebuild is handled via resident graph updates.
 }
 
 void wakeGather(uint gid) {
