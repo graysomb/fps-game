@@ -11363,13 +11363,54 @@ static Mesh sphereMesh = { 0 };
 static Mesh particleSphereMesh = { 0 };
 static Material particleMatteMaterial = { 0 };
 static Shader particleMatteShader = { 0 };
-static Matrix *particleTransforms = NULL;
-static int particleTransformsCount = 0;
-static int particleTransformsCapacity = 0;
+static Vector4 *particlePosRadius = NULL;
+static int particlePosRadiusCount = 0;
+static int particlePosRadiusCapacity = 0;
+static unsigned int particleInstanceVboId = 0;
+static int particlePosRadiusLoc = -1;
+static int particleColorLoc = -1;
 static Matrix *instanceTransforms = NULL;
 static int instanceTransformsCount = 0;
 static int instanceTransformsCapacity = 0;
 static bool instancingInitialized = false;
+
+static void DrawParticlesInstancedFast(Mesh mesh, Material material, const Vector4 *posRadius, int count, Color color) {
+    if (count <= 0 || mesh.vaoId == 0 || particleInstanceVboId == 0) return;
+
+    rlEnableShader(material.shader.id);
+
+    Matrix matView = rlGetMatrixModelview();
+    Matrix matProjection = rlGetMatrixProjection();
+    if (material.shader.locs[SHADER_LOC_MATRIX_VIEW] != -1)
+        rlSetUniformMatrix(material.shader.locs[SHADER_LOC_MATRIX_VIEW], matView);
+    if (material.shader.locs[SHADER_LOC_MATRIX_PROJECTION] != -1)
+        rlSetUniformMatrix(material.shader.locs[SHADER_LOC_MATRIX_PROJECTION], matProjection);
+    if (particleColorLoc != -1) {
+        float c[4] = { (float)color.r / 255.0f, (float)color.g / 255.0f, (float)color.b / 255.0f, (float)color.a / 255.0f };
+        rlSetUniform(particleColorLoc, c, SHADER_UNIFORM_VEC4, 1);
+    }
+
+    rlUpdateVertexBuffer(particleInstanceVboId, posRadius, count * (int)sizeof(Vector4), 0);
+
+    rlEnableVertexArray(mesh.vaoId);
+    rlEnableVertexBuffer(particleInstanceVboId);
+    if (particlePosRadiusLoc != -1) {
+        rlEnableVertexAttribute(particlePosRadiusLoc);
+        rlSetVertexAttribute(particlePosRadiusLoc, 4, RL_FLOAT, 0, (int)sizeof(Vector4), 0);
+        rlSetVertexAttributeDivisor(particlePosRadiusLoc, 1);
+    }
+
+    if (mesh.indices != NULL) rlEnableVertexBufferElement(mesh.vboId[RL_DEFAULT_SHADER_ATTRIB_LOCATION_INDICES]);
+
+    rlDrawVertexArrayElementsInstanced(0, mesh.triangleCount * 3, 0, count);
+
+    if (particlePosRadiusLoc != -1) {
+        rlDisableVertexAttribute(particlePosRadiusLoc);
+    }
+    rlDisableVertexBuffer();
+    rlDisableVertexArray();
+    rlDisableShader();
+}
 
 static void InitInstancing(void) {
     if (instancingInitialized) return;
@@ -11382,16 +11423,17 @@ static void InitInstancing(void) {
     particleSphereMesh = GenMeshSphere(1.0f, 6, 8);
     particleMatteShader = LoadShader("shaders/particle_matte.vert", "shaders/particle_matte.frag");
     if (particleMatteShader.id != 0) {
-        particleMatteShader.locs[SHADER_LOC_MATRIX_MVP] = GetShaderLocation(particleMatteShader, "mvp");
-        particleMatteShader.locs[SHADER_LOC_MATRIX_MODEL] = GetShaderLocationAttrib(particleMatteShader, "instanceTransform");
         particleMatteShader.locs[SHADER_LOC_MATRIX_VIEW] = GetShaderLocation(particleMatteShader, "matView");
         particleMatteShader.locs[SHADER_LOC_MATRIX_PROJECTION] = GetShaderLocation(particleMatteShader, "matProjection");
+        particlePosRadiusLoc = GetShaderLocationAttrib(particleMatteShader, "instancePosRadius");
+        particleColorLoc = GetShaderLocation(particleMatteShader, "particleColor");
 
         particleMatteMaterial = LoadMaterialDefault();
         particleMatteMaterial.shader = particleMatteShader;
     }
-    particleTransformsCapacity = MAX_PARTICLES;
-    particleTransforms = (Matrix*)RL_MALLOC(particleTransformsCapacity * sizeof(Matrix));
+    particlePosRadiusCapacity = MAX_PARTICLES;
+    particlePosRadius = (Vector4*)RL_MALLOC(particlePosRadiusCapacity * sizeof(Vector4));
+    particleInstanceVboId = rlLoadVertexBuffer(NULL, particlePosRadiusCapacity * sizeof(Vector4), true);
 
     // Get shader locations
     instancedShader.locs[SHADER_LOC_MATRIX_MVP] = GetShaderLocation(instancedShader, "mvp");
@@ -11557,11 +11599,8 @@ static void DrawVoxels(Camera3D cam) {
     }
 
     // Render unglued particles ("no glue") as 3D matte spheres
-    particleTransformsCount = 0;
+    particlePosRadiusCount = 0;
     Color particleColor = (Color){ 255, 160, 40, 255 };
-    float pr = (float)particleColor.r / 255.0f;
-    float pg = (float)particleColor.g / 255.0f;
-    float pb = (float)particleColor.b / 255.0f;
 
     for (int i = 0; i < active_particle_count; ++i) {
         Particle *p = active_particles[i];
@@ -11569,26 +11608,15 @@ static void DrawVoxels(Camera3D cam) {
             continue;
         }
         float radius = (p->radius > 0.0f) ? p->radius : (VOXEL_SIZE * 0.25f);
-        if (particleTransforms && particleTransformsCount < particleTransformsCapacity) {
-            Matrix m = MatrixIdentity();
-            m.m0 = radius;
-            m.m5 = radius;
-            m.m10 = radius;
-            m.m3 = pr;
-            m.m7 = pg;
-            m.m11 = pb;
-            m.m12 = p->pos.x;
-            m.m13 = p->pos.y;
-            m.m14 = p->pos.z;
-            m.m15 = 1.0f;
-            particleTransforms[particleTransformsCount++] = m;
+        if (particlePosRadius && particlePosRadiusCount < particlePosRadiusCapacity) {
+            particlePosRadius[particlePosRadiusCount++] = (Vector4){ p->pos.x, p->pos.y, p->pos.z, radius };
         } else {
             DrawSphere(p->pos, radius, particleColor);
         }
     }
 
-    if (particleTransformsCount > 0 && particleSphereMesh.vertexCount > 0) {
-        DrawMeshInstanced(particleSphereMesh, particleMatteMaterial, particleTransforms, particleTransformsCount);
+    if (particlePosRadiusCount > 0 && particleSphereMesh.vertexCount > 0) {
+        DrawParticlesInstancedFast(particleSphereMesh, particleMatteMaterial, particlePosRadius, particlePosRadiusCount, particleColor);
     }
 
     rlEnableBackfaceCulling();

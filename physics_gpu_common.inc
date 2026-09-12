@@ -457,7 +457,9 @@ static bool gpu_pack_world(void) {
         g->lifecycle[0] = (uint32_t)((v->skipCollisionVelocityFrames > 0) ? v->skipCollisionVelocityFrames : 0);
         g->lifecycle[1] = v->wake_source ? 1u : 0u;
         g->lifecycle[2] = gpu_glued_face_mask(v) | (v->glueEligible ? 0x80000000u : 0u);
-        g->lifecycle[3] = v->break_mask;
+        g->lifecycle[3] = ((uint32_t)v->orig_min_gx & 1u) |
+                         (((uint32_t)v->orig_min_gy & 1u) << 1) |
+                         (((uint32_t)v->orig_min_gz & 1u) << 2);
     }
 
     for (int dynamic_id = 0; dynamic_id < gpuPhysics.dynamic_voxel_count; ++dynamic_id) {
@@ -735,11 +737,13 @@ static bool gpu_upload_world(void) {
 
 #if defined(__APPLE__) && defined(FPS_GPU_METAL)
 static bool gpu_dispatch(int mode, int count) { return fps_metal_dispatch(mode, count); }
+static void gpu_set_vgs_color(int color) { fps_metal_set_vgs_color(color); }
 static bool gpu_dispatch_indirect_offset(int mode, size_t offset) {
     return fps_metal_dispatch_indirect(mode, (void *)gpuPhysics.dispatch_buffer.id, offset);
 }
 static bool gpu_dispatch_indirect(int mode) { return gpu_dispatch_indirect_offset(mode, 0); }
 #elif defined(GRAPHICS_API_OPENGL_43)
+static void gpu_set_vgs_color(int color) { (void)color; }
 static bool gpu_dispatch(int mode, int count) {
     if (count <= 0) return true;
     while (glGetError() != GL_NO_ERROR) { }
@@ -762,6 +766,7 @@ static bool gpu_dispatch_indirect_offset(int mode, size_t offset) {
 static bool gpu_dispatch_indirect(int mode) { return gpu_dispatch_indirect_offset(mode, 0); }
 #else
 static bool gpu_dispatch(int mode, int count) { (void)mode; (void)count; return false; }
+static void gpu_set_vgs_color(int color) { (void)color; }
 static bool gpu_dispatch_indirect(int mode) { (void)mode; return false; }
 static bool gpu_dispatch_indirect_offset(int mode, size_t offset) { (void)mode; (void)offset; return false; }
 #endif
@@ -1041,22 +1046,19 @@ static bool gpu_dispatch_substep(float sub_dt) {
               gpu_dispatch_indirect_offset(GPU_MODE_PAIR_COLLISIONS, 16) &&
               gpu_dispatch_indirect(GPU_MODE_APPLY);
     for (int it = 0; ok && it < PBD_CONSTRAINT_ITERS; ++it) {
-        ok = gpu_dispatch_indirect(GPU_MODE_RESET) &&
-             gpu_dispatch(GPU_MODE_VGS, gpuPhysics.dynamic_voxel_count) &&
+        ok = gpu_dispatch(GPU_MODE_VGS, gpuPhysics.dynamic_voxel_count) &&
              gpu_dispatch_indirect(GPU_MODE_APPLY);
     }
     ok = ok && gpu_dispatch_indirect_offset(GPU_MODE_STATIC_COLLISIONS, 16) &&
          gpu_dispatch(GPU_MODE_BREAK_MASK, gpuPhysics.dynamic_voxel_count) &&
          gpu_dispatch(GPU_MODE_WAKE_GATHER, gpuPhysics.dynamic_voxel_count) &&
-         gpu_dispatch(GPU_MODE_WAKE_APPLY, gpuPhysics.dynamic_voxel_count) &&
-         gpu_dispatch(GPU_MODE_PREPARE_INDIRECT, 1) &&
          gpu_dispatch_indirect(GPU_MODE_FINALIZE_PARTICLES) &&
          gpu_dispatch(GPU_MODE_FINALIZE_VOXELS, gpuPhysics.dynamic_voxel_count);
     return ok;
 }
 
 static bool gpu_rebuild_topology_if_needed(void) {
-    return gpu_dispatch(GPU_MODE_TOPOLOGY_REBUILD_SERIAL, 1);
+    return true;
 }
 
 static bool gpu_forced_step_failure_consumed = false;

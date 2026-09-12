@@ -173,6 +173,10 @@ void fps_metal_set_uniforms(const FpsGpuUniforms *uniforms) {
     if (uniforms) metal_state.uniforms = *uniforms;
 }
 
+void fps_metal_set_vgs_color(int color) {
+    metal_state.uniforms.vgs_color = color;
+}
+
 static FpsMetalProfileInfo metal_profile = { 0 };
 
 static inline double metal_time_now_ms(void) {

@@ -39,8 +39,8 @@ layout(std430, binding = 7) readonly buffer StaticCellBuffer { ivec4 staticCell[
 layout(std430, binding = 8) buffer TetherBuffer { int tetherOwner[]; };
 layout(std430, binding = 9) buffer CollisionMetaBuffer { ivec4 collisionMeta[]; };
 layout(std430, binding = 10) readonly buffer StaticColliderBuffer { StaticCollider staticCollider[]; };
-layout(std430, binding = 11) buffer RefcountBuffer { int particleRefcount[]; };
-layout(std430, binding = 12) buffer ControlBuffer { ivec4 gpuControl; };
+layout(std430, binding = 11) readonly buffer RefcountBuffer { int particleRefcount[]; };
+layout(std430, binding = 12) readonly buffer ControlBuffer { ivec4 gpuControl; };
 layout(std430, binding = 13) buffer CloneParentBuffer { int cloneParent[]; };
 layout(std430, binding = 14) buffer DispatchBuffer { uint dispatchArgs[]; };
 layout(std430, binding = 15) buffer TopologyBuffer { ivec4 topology[]; };
@@ -459,7 +459,6 @@ int topologyNeighbor(int voxelId, int face);
 void gatherBreakMask(uint gid) {
     if (gid >= uint(uVoxelCount)) return;
     VoxelState v = voxel[gid];
-    v.lifecycle.w = 0u;
     if (v.flags.x == 0 || v.flags.y != 0 || v.flags.z != 0 || v.pos_rest_edge.w <= 0.0) {
         voxel[gid] = v; return;
     }
@@ -517,7 +516,6 @@ void gatherBreakMask(uint gid) {
         v.lifecycle.y = 1u; // wake_source = true
         v.lifecycle.z = 0u; // Clear glued faces
     }
-    v.lifecycle.w = 0u;
     voxel[gid] = v;
 }
 
@@ -613,15 +611,12 @@ void wakeGather(uint gid) {
     }
     int timer = max(int(v.bounds_min.w) - 1, 0);
     if (wake) timer = 30;
-    v.bounds_max.w = float(timer);
+    v.bounds_min.w = float(timer);
     voxel[gid] = v;
 }
 
 void wakeApply(uint gid) {
-    if (gid >= uint(uVoxelCount)) return;
-    VoxelState v = voxel[gid];
-    v.bounds_min.w = v.bounds_max.w;
-    voxel[gid] = v;
+    // No-op: wakeGather writes directly to bounds_min.w
 }
 
 void prepareIndirect(uint gid) {

@@ -16,7 +16,8 @@ typedef struct FpsGpuUniforms {
     int32_t active_players;
     int32_t break_damp_frames;
     int32_t mode;
-    int32_t integer_padding[3];
+    int32_t vgs_color;
+    int32_t integer_padding[2];
     float dt;
     float voxel_size;
     float floor_size;
@@ -56,6 +57,7 @@ bool fps_metal_buffer_update(void *buffer, const void *data, size_t size, size_t
 bool fps_metal_buffer_read(void *buffer, void *data, size_t size, size_t offset);
 void fps_metal_bind_buffer(int slot, void *buffer);
 void fps_metal_set_uniforms(const FpsGpuUniforms *uniforms);
+void fps_metal_set_vgs_color(int color);
 bool fps_metal_begin_batch(void);
 bool fps_metal_dispatch(int mode, int count);
 bool fps_metal_dispatch_indirect(int mode, void *buffer, size_t offset);
