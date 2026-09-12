@@ -932,6 +932,7 @@ static bool gpu_validate_and_commit(void) {
         Voxel *v = &voxels[voxel_id]; GpuVoxelState *g = &gpuPhysics.voxel_stage[i];
         if (v->vgs_active && g->flags[0] == 0) {
             v->vgs_active = false;
+            v->simulate = false;
             v->wake_source = true;
             for (int corner = 0; corner < 8; ++corner) {
                 Particle *part = v->particles[corner];
@@ -1067,13 +1068,13 @@ static bool gpu_dispatch_substep(float sub_dt) {
               gpu_dispatch(GPU_MODE_HASH_CLEAR, hash_size) &&
               gpu_dispatch_indirect_offset(GPU_MODE_HASH_BUILD, 16) &&
               gpu_dispatch_indirect_offset(GPU_MODE_PAIR_COLLISIONS, 16) &&
-              gpu_dispatch_indirect(GPU_MODE_APPLY) &&
-              gpu_dispatch(GPU_MODE_BREAK_MASK, gpuPhysics.dynamic_voxel_count);
+              gpu_dispatch_indirect(GPU_MODE_APPLY);
     for (int it = 0; ok && it < PBD_CONSTRAINT_ITERS; ++it) {
         ok = gpu_dispatch(GPU_MODE_VGS, gpuPhysics.dynamic_voxel_count) &&
              gpu_dispatch_indirect(GPU_MODE_APPLY);
     }
     ok = ok && gpu_dispatch_indirect_offset(GPU_MODE_STATIC_COLLISIONS, 16) &&
+         gpu_dispatch(GPU_MODE_BREAK_MASK, gpuPhysics.dynamic_voxel_count) &&
          gpu_dispatch(GPU_MODE_WAKE_GATHER, gpuPhysics.dynamic_voxel_count) &&
          gpu_dispatch_indirect(GPU_MODE_FINALIZE_PARTICLES) &&
          gpu_dispatch(GPU_MODE_FINALIZE_VOXELS, gpuPhysics.dynamic_voxel_count);

@@ -7698,6 +7698,7 @@ static void evaluate_voxel_fracture(Voxel *voxel) {
 
     if (should_break) {
         voxel->vgs_active = false;
+        voxel->simulate = false;
         voxel->wake_source = true;
         for (int i = 0; i < 8; ++i) {
             Particle *part = voxel->particles[i];
@@ -10054,10 +10055,6 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
             if (pbdProfileEnabled) pbdCpuProfile.t_pair_collisions_ms += pbd_time_now_ms() - tc;
         }
 
-        double tb = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
-        pbd_parallel_for(0, active_voxel_count, evaluate_voxel_fracture_range, NULL);
-        if (pbdProfileEnabled) pbdCpuProfile.t_break_masks_ms += pbd_time_now_ms() - tb;
-
         double tv = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
         reset_particle_accumulators();
         for (int it = 0; it < constraint_iterations; ++it) {
@@ -10069,6 +10066,10 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
         double ts = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
         solve_static_collisions(sub_dt);
         if (pbdProfileEnabled) pbdCpuProfile.t_static_collisions_ms += pbd_time_now_ms() - ts;
+
+        double tb = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
+        pbd_parallel_for(0, active_voxel_count, evaluate_voxel_fracture_range, NULL);
+        if (pbdProfileEnabled) pbdCpuProfile.t_break_masks_ms += pbd_time_now_ms() - tb;
 
         double tw = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
         update_wake_timers();

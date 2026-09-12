@@ -143,11 +143,11 @@ inline void clearHash(uint gid, device atomic_int *hashHead, constant GpuUniform
 }
 
 inline void buildHash(uint gid, device ParticleState *particle, device int4 *cell,
-                      device uint *collisionId, device const uint *collisionControl,
+                      device uint *collisionId, device atomic_uint *collisionControl,
                       device atomic_int *hashHead,
                       device int *hashNext, device const int *refcount,
                       device const int *control, constant GpuUniforms &u) {
-    if (gid >= collisionControl[0]) return;
+    if (gid >= atomic_load_explicit(&collisionControl[0], memory_order_relaxed)) return;
     uint id = collisionId[gid];
     if (refcount[id] <= 0) return;
     int3 c = int3(floor(particle[id].predicted_base_inv_mass.xyz / u.voxel_size));
@@ -158,12 +158,12 @@ inline void buildHash(uint gid, device ParticleState *particle, device int4 *cel
 
 inline void pairCollisions(uint gid, device ParticleState *particle,
                            device atomic_uint *correction, device int4 *cell,
-                           device uint *collisionId, device const uint *collisionControl,
+                           device uint *collisionId, device atomic_uint *collisionControl,
                            device atomic_int *hashHead,
                            device int *hashNext, device int *collisionMeta,
                            device const int *refcount, device const int *control,
                            constant GpuUniforms &u) {
-    int collisionCount = int(collisionControl[0]);
+    int collisionCount = int(atomic_load_explicit(&collisionControl[0], memory_order_relaxed));
     if (gid >= uint(collisionCount)) return;
     uint aid = collisionId[gid];
     if (refcount[aid] <= 0) return;
@@ -193,7 +193,7 @@ inline void pairCollisions(uint gid, device ParticleState *particle,
     for (int dz = -1; dz <= 1; ++dz) for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
         if (dz < 0 || (dz == 0 && dy < 0) || (dz == 0 && dy == 0 && dx < 0)) continue;
         int3 nc = ac + int3(dx, dy, dz);
-        int item = hashHead[hashCoord(nc, u.hash_size)];
+        int item = atomic_load_explicit(&hashHead[hashCoord(nc, u.hash_size)], memory_order_relaxed);
         int traversed = 0;
         while (item >= 0 && item < collisionCount && traversed < collisionCount) {
             ++traversed;
@@ -323,10 +323,10 @@ inline float3 pushOutOfBox(float3 pos,float radius,StaticCollider box,constant G
 
 inline float3 pushOutOfPatch(float3 pos,float radius,StaticCollider patch){float3 closest=clamp(pos,patch.bounds_min.xyz,patch.bounds_max.xyz),normal=patch.center.xyz,delta=pos-closest;float signedDistance=dot(delta,normal);bool projectedInside;if(normal.x!=0.0f)projectedInside=pos.y>=patch.bounds_min.y&&pos.y<=patch.bounds_max.y&&pos.z>=patch.bounds_min.z&&pos.z<=patch.bounds_max.z;else if(normal.y!=0.0f)projectedInside=pos.x>=patch.bounds_min.x&&pos.x<=patch.bounds_max.x&&pos.z>=patch.bounds_min.z&&pos.z<=patch.bounds_max.z;else projectedInside=pos.x>=patch.bounds_min.x&&pos.x<=patch.bounds_max.x&&pos.y>=patch.bounds_min.y&&pos.y<=patch.bounds_max.y;if(projectedInside&&signedDistance<0.0f&&signedDistance>=-radius)return pos+normal*(radius-signedDistance);if(signedDistance<0.0f)return pos;float distanceSq=dot(delta,delta);if(distanceSq>=radius*radius)return pos;float distance=sqrt(max(distanceSq,1e-6f));float3 direction=distance>1e-6f?delta/distance:normal;return pos+direction*(radius-distance);}
 
-inline void staticCollisions(uint gid,device ParticleState *particle,device uint *collisionId,device const uint *collisionControl,device int4 *staticCell,device StaticCollider *staticCollider,device const int *refcount,device const int *control,constant GpuUniforms &u){
-    if(gid>=collisionControl[0])return;uint id=collisionId[gid];if(refcount[id]<=0)return;ParticleState p=particle[id];if(p.prev_inv_mass.w<=0.0f)return;float radius=p.pos_radius.w;float3 pos=p.predicted_base_inv_mass.xyz;float terrainLimit=u.floor_size-radius,floorLimit=max(0.0f,0.5f*u.voxel_size-radius);bool floorContact=pos.y<floorLimit;pos.y=max(pos.y,floorLimit);if(floorContact){p.prev_inv_mass.xz=pos.xz-(pos.xz-p.prev_inv_mass.xz)*0.05f;p.prev_inv_mass.y=pos.y;}pos.xz=clamp(pos.xz,float2(-terrainLimit),float2(terrainLimit));constexpr float eps=1e-6f;
+inline void staticCollisions(uint gid,device ParticleState *particle,device uint *collisionId,device atomic_uint *collisionControl,device int4 *staticCell,device StaticCollider *staticCollider,device const int *refcount,device const int *control,constant GpuUniforms &u){
+    if(gid>=atomic_load_explicit(&collisionControl[0], memory_order_relaxed))return;uint id=collisionId[gid];if(refcount[id]<=0)return;ParticleState p=particle[id];if(p.prev_inv_mass.w<=0.0f)return;float radius=p.pos_radius.w;float3 pos=p.predicted_base_inv_mass.xyz;float terrainLimit=u.floor_size-radius,floorLimit=max(0.0f,0.5f*u.voxel_size-radius);bool floorContact=pos.y<floorLimit;pos.y=max(pos.y,floorLimit);if(floorContact){p.prev_inv_mass.xz=pos.xz-(pos.xz-p.prev_inv_mass.xz)*0.05f;p.prev_inv_mass.y=pos.y;}pos.xz=clamp(pos.xz,float2(-terrainLimit),float2(terrainLimit));constexpr float eps=1e-6f;
     for(int i=0;i<u.active_players&&i<4;++i){if(u.players[i].w<0.0f)continue;float halfSize=u.players[i].w;float3 nearest=clamp(pos,u.players[i].xyz-float3(halfSize),u.players[i].xyz+float3(halfSize));float3 delta=pos-nearest;float distSq=dot(delta,delta);if(distSq<radius*radius){float dist=sqrt(max(distSq,eps));float3 normal=dist>eps?delta/dist:float3(0,1,0);pos+=normal*(radius-dist);}}
-    bool surfaceMode=collisionControl[4]!=0u;int3 center=int3(floor(pos/u.voxel_size));int seen[128];int seenCount=0;for(int z=-1;z<=1;++z)for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x){int item=findStaticCell(center+int3(x,y,z),staticCell,u);if(!surfaceMode&&item<=-2){int colliderId=-item-2;if(colliderId>=0&&colliderId<u.static_collider_count)pos=pushOutOfBox(pos,0.25f*u.voxel_size,staticCollider[colliderId],u);continue;}while(item>=0&&item<u.static_collider_count){StaticCollider patch=staticCollider[item];int patchId=as_type<int>(patch.bounds_min.w);bool duplicate=false;for(int s=0;s<seenCount;++s)duplicate=duplicate||seen[s]==patchId;if(!duplicate&&seenCount<128){seen[seenCount++]=patchId;pos=pushOutOfPatch(pos,0.25f*u.voxel_size,patch);}item=as_type<int>(patch.center.w);}}center=int3(floor(pos/u.voxel_size));int recovery=findStaticCell(center,staticCell,u);if(recovery<=-2){int colliderId=-recovery-2;if(colliderId>=0&&colliderId<u.static_collider_count)pos=pushOutOfBox(pos,0.25f*u.voxel_size,staticCollider[colliderId],u);}p.predicted_base_inv_mass.xyz=pos;particle[id]=p;
+    bool surfaceMode=atomic_load_explicit(&collisionControl[4], memory_order_relaxed)!=0u;int3 center=int3(floor(pos/u.voxel_size));int seen[128];int seenCount=0;for(int z=-1;z<=1;++z)for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x){int item=findStaticCell(center+int3(x,y,z),staticCell,u);if(!surfaceMode&&item<=-2){int colliderId=-item-2;if(colliderId>=0&&colliderId<u.static_collider_count)pos=pushOutOfBox(pos,0.25f*u.voxel_size,staticCollider[colliderId],u);continue;}while(item>=0&&item<u.static_collider_count){StaticCollider patch=staticCollider[item];int patchId=as_type<int>(patch.bounds_min.w);bool duplicate=false;for(int s=0;s<seenCount;++s)duplicate=duplicate||seen[s]==patchId;if(!duplicate&&seenCount<128){seen[seenCount++]=patchId;pos=pushOutOfPatch(pos,0.25f*u.voxel_size,patch);}item=as_type<int>(patch.center.w);}}center=int3(floor(pos/u.voxel_size));int recovery=findStaticCell(center,staticCell,u);if(recovery<=-2){int colliderId=-recovery-2;if(colliderId>=0&&colliderId<u.static_collider_count)pos=pushOutOfBox(pos,0.25f*u.voxel_size,staticCollider[colliderId],u);}p.predicted_base_inv_mass.xyz=pos;particle[id]=p;
 }
 
 inline int topologyNeighbor(device int4 *topology,int voxelId,int face);
@@ -400,7 +400,7 @@ inline void gatherBreakMask(uint gid, device ParticleState *particle,
     voxel[gid] = v;
 }
 
-inline void splitBrokenFaces(uint gid,device ParticleState *particle,device atomic_uint *correction,device int4 *cell,device uint *simId,device uint *collisionId,device atomic_int *collisionMember,device atomic_uint *collisionControl,device VoxelState *voxel,device int *tetherOwner,device int *collisionMeta,device atomic_int *refcount,device const int *control,device int *cloneParent,constant GpuUniforms &u){
+inline void splitBrokenFaces(uint gid,device ParticleState *particle,device atomic_uint *correction,device int4 *cell,device uint *simId,device uint *collisionId,device atomic_int *collisionMember,device atomic_uint *collisionControl,device VoxelState *voxel,device int *tetherOwner,device int *collisionMeta,device const int *refcount,device const int *control,device int *cloneParent,constant GpuUniforms &u){
     // No-op in VGS-as-glue model: fracture never splits or clones particles.
     (void)gid; (void)particle; (void)correction; (void)cell; (void)simId;
     (void)collisionId; (void)collisionMember; (void)collisionControl;
@@ -412,13 +412,13 @@ inline int topologyNeighbor(device int4 *topology,int voxelId,int face){return f
 inline int topologyRoot(device int4 *topology,int voxelId,constant GpuUniforms &u){int root=voxelId;for(int i=0;i<32;++i){int parent=topology[root*2+1].z;if(parent==root||parent<0||parent>=u.voxel_count)break;root=parent;}return root;}
 inline void topologyUnion(device VoxelState *voxel,device int4 *topology,int gid,constant GpuUniforms &u){VoxelState v=voxel[gid];if((v.lifecycle.z&0x80000000u)==0u)return;for(int face=0;face<6;++face){if((v.lifecycle.z&(1u<<face))==0u)continue;int neighbor=topologyNeighbor(topology,gid,face);if(neighbor<0||neighbor>=u.voxel_count||(voxel[neighbor].lifecycle.z&0x80000000u)==0u)continue;int a=topologyRoot(topology,gid,u),b=topologyRoot(topology,neighbor,u);if(a!=b)topology[max(a,b)*2+1].z=min(a,b);}}
 inline void assignGroup(device int *collisionMeta,uint id,int group){uint offset=id*4u+3u;int old=collisionMeta[offset];if(old==group||old==-2)return;collisionMeta[offset]=old==-1?group:-2;}
-inline void topologyRebuild(uint gid,device ParticleState *particle,device uint *simId,device VoxelState *voxel,device int *collisionMeta,device atomic_int *refcount,device const int *control,device int4 *topology,constant GpuUniforms &u){
+inline void topologyRebuild(uint gid,device ParticleState *particle,device uint *simId,device VoxelState *voxel,device int *collisionMeta,device const int *refcount,device const int *control,device int4 *topology,constant GpuUniforms &u){
     (void)gid; (void)particle; (void)simId; (void)voxel; (void)collisionMeta; (void)refcount; (void)control; (void)topology; (void)u;
 }
 
 inline void wakeGather(uint gid,device VoxelState *voxel,device int4 *topology,constant GpuUniforms &u){if(gid>=uint(u.voxel_count))return;VoxelState v=voxel[gid];if(v.flags.x==0||v.flags.y!=0)return;bool wake=v.lifecycle.y!=0u;if(!wake)for(int face=0;face<6;++face){int neighbor=topologyNeighbor(topology,int(gid),face);if(neighbor>=0&&neighbor<u.voxel_count&&voxel[neighbor].flags.y==0&&voxel[neighbor].lifecycle.y!=0u){wake=true;break;}}int timer=max(int(v.bounds_min.w)-1,0);if(wake)timer=30;v.bounds_min.w=float(timer);voxel[gid]=v;}
 inline void wakeApply(uint gid,device VoxelState *voxel,constant GpuUniforms &u){(void)gid; (void)voxel; (void)u;}
-inline void prepareIndirect(uint gid,device const int *control,device const uint *collisionControl,device uint *dispatchArgs){if(gid!=0u)return;dispatchArgs[0]=(uint(max(controlLoad(control,1),0))+127u)/128u;dispatchArgs[1]=1u;dispatchArgs[2]=1u;dispatchArgs[3]=0u;dispatchArgs[4]=(collisionControl[0]+127u)/128u;dispatchArgs[5]=1u;dispatchArgs[6]=1u;dispatchArgs[7]=0u;}
+inline void prepareIndirect(uint gid,device const int *control,device atomic_uint *collisionControl,device uint *dispatchArgs){if(gid!=0u)return;dispatchArgs[0]=(uint(max(controlLoad(control,1),0))+127u)/128u;dispatchArgs[1]=1u;dispatchArgs[2]=1u;dispatchArgs[3]=0u;dispatchArgs[4]=(atomic_load_explicit(&collisionControl[0], memory_order_relaxed)+127u)/128u;dispatchArgs[5]=1u;dispatchArgs[6]=1u;dispatchArgs[7]=0u;}
 inline void finalizeParticle(uint gid,device ParticleState *particle,device int4 *cell,device uint *simId,device const int *refcount,device const int *control,constant GpuUniforms &u){if(gid>=uint(controlLoad(control,1)))return;uint id=simId[gid];if(refcount[id]<=0)return;ParticleState p=particle[id];float3 delta=p.predicted_base_inv_mass.xyz-p.prev_inv_mass.xyz;p.velocity.xyz=p.prev_inv_mass.w>0.0f&&u.dt>0.0f?delta/u.dt:float3(0);p.pos_radius.xyz=p.predicted_base_inv_mass.xyz;if(cell[id].w>0)cell[id].w--;particle[id]=p;}
 inline void finalizeVoxel(uint gid,device ParticleState *particle,device VoxelState *voxel,device const int *control,constant GpuUniforms &u){if(gid>=uint(u.voxel_count))return;VoxelState v=voxel[gid];if(v.flags.x==0||v.flags.y!=0||v.flags.z!=0)return;float3 center(0),previous(0);for(int i=0;i<8;++i){uint id=voxelParticle(v,i);if(id>=uint(controlLoad(control,0)))return;center+=particle[id].predicted_base_inv_mass.xyz;previous+=particle[id].prev_inv_mass.xyz;}center*=0.125f;previous*=0.125f;if(v.lifecycle.x==0u&&u.dt>0.0f)v.velocity_rest_volume.xyz=(center-previous)/u.dt;else if(v.lifecycle.x>0u)v.lifecycle.x--;v.pos_rest_edge.xyz=center;voxel[gid]=v;}
 
@@ -443,7 +443,7 @@ kernel void pbd_pipeline(
     uint gid [[thread_position_in_grid]]) {
     device uint *collisionId=simId+uint(controlLoad(control,2));
     device atomic_int *collisionMember=reinterpret_cast<device atomic_int *>(cloneParent);
-    device const uint *collisionControl=reinterpret_cast<device const uint *>(dispatchArgs+8);
+    device atomic_uint *collisionControl=reinterpret_cast<device atomic_uint *>(dispatchArgs+8);
     switch(u.mode){
         case MODE_RESET:resetCorrections(gid,correction,simId,refcount,control);break;
         case MODE_INTEGRATE:integrateParticle(gid,particle,tetherOwner,simId,refcount,control,u);break;
