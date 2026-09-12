@@ -7651,8 +7651,70 @@ static void evaluate_voxel_fracture(Voxel *voxel) {
                          shear_xz > SHEAR_BREAK_THRESHOLD ||
                          shear_yz > SHEAR_BREAK_THRESHOLD);
 
+    if (!should_break) {
+        Vector3 axes[3] = { v_mul(v0, inv_len0), v_mul(v1, inv_len1), v_mul(v2, inv_len2) };
+        const float hinge_cos_limit = cosf(GLUE_BREAK_HINGE_ANGLE_DEG * DEG2RAD);
+        for (int face = 0; face < 6; ++face) {
+            if (!voxel->glued_faces[face]) continue;
+            int shared_corner_count = 0;
+            for (int face_corner = 0; face_corner < 4; ++face_corner) {
+                Particle *particle = voxel->particles[face_corner_indices[face][face_corner]];
+                if (particle && particle->refcount > 1) ++shared_corner_count;
+            }
+            if (shared_corner_count > 1) continue;
+            int neighbor_idx = voxel->glued_neighbors[face];
+            if (neighbor_idx < 0 || neighbor_idx >= voxel_count) continue;
+            Voxel *neighbor = &voxels[neighbor_idx];
+            if (!neighbor->simulate || neighbor->isBullet || neighbor->type != 0) continue;
+            Vector3 q[8];
+            for (int corner = 0; corner < 8; ++corner) {
+                Particle *np = neighbor->particles[corner];
+                if (!np) { q[0] = (Vector3){0}; break; }
+                q[corner] = np->predicted_pos;
+            }
+            Vector3 m0 = v_mul(v_add(v_add(v_sub(q[1], q[0]), v_sub(q[3], q[2])),
+                                     v_add(v_sub(q[5], q[4]), v_sub(q[7], q[6]))), 0.25f);
+            Vector3 m1 = v_mul(v_add(v_add(v_sub(q[2], q[0]), v_sub(q[3], q[1])),
+                                     v_add(v_sub(q[6], q[4]), v_sub(q[7], q[5]))), 0.25f);
+            Vector3 m2 = v_mul(v_add(v_add(v_sub(q[4], q[0]), v_sub(q[5], q[1])),
+                                     v_add(v_sub(q[6], q[2]), v_sub(q[7], q[3]))), 0.25f);
+            float len_m0 = v_length(m0);
+            float len_m1 = v_length(m1);
+            float len_m2 = v_length(m2);
+            if (len_m0 > VGS_EPS && len_v0 > VGS_EPS && v_dot(axes[0], v_mul(m0, 1.0f / len_m0)) < hinge_cos_limit) {
+                should_break = true;
+                break;
+            }
+            if (len_m1 > VGS_EPS && len_v1 > VGS_EPS && v_dot(axes[1], v_mul(m1, 1.0f / len_m1)) < hinge_cos_limit) {
+                should_break = true;
+                break;
+            }
+            if (len_m2 > VGS_EPS && len_v2 > VGS_EPS && v_dot(axes[2], v_mul(m2, 1.0f / len_m2)) < hinge_cos_limit) {
+                should_break = true;
+                break;
+            }
+        }
+    }
+
     if (should_break) {
+        voxel->vgs_active = false;
         voxel->wake_source = true;
+        for (int i = 0; i < 8; ++i) {
+            Particle *part = voxel->particles[i];
+            if (part && part->glue_count > 0) {
+                part->glue_count--;
+            }
+        }
+        for (int f = 0; f < 6; ++f) {
+            int nidx = voxel->glued_neighbors[f];
+            if (nidx >= 0 && nidx < voxel_count) {
+                voxels[nidx].glued_faces[opposite_face[f]] = false;
+                voxels[nidx].glued_neighbors[opposite_face[f]] = -1;
+            }
+            voxel->glued_neighbors[f] = -1;
+        }
+        memset(voxel->glued_faces, 0, sizeof(voxel->glued_faces));
+        collisionTopologyDirty = true;
     }
 }
 
@@ -9992,6 +10054,10 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
             if (pbdProfileEnabled) pbdCpuProfile.t_pair_collisions_ms += pbd_time_now_ms() - tc;
         }
 
+        double tb = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
+        pbd_parallel_for(0, active_voxel_count, evaluate_voxel_fracture_range, NULL);
+        if (pbdProfileEnabled) pbdCpuProfile.t_break_masks_ms += pbd_time_now_ms() - tb;
+
         double tv = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
         reset_particle_accumulators();
         for (int it = 0; it < constraint_iterations; ++it) {
@@ -10003,10 +10069,6 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
         double ts = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
         solve_static_collisions(sub_dt);
         if (pbdProfileEnabled) pbdCpuProfile.t_static_collisions_ms += pbd_time_now_ms() - ts;
-
-        double tb = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
-        pbd_parallel_for(0, active_voxel_count, evaluate_voxel_fracture_range, NULL);
-        if (pbdProfileEnabled) pbdCpuProfile.t_break_masks_ms += pbd_time_now_ms() - tb;
 
         double tw = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
         update_wake_timers();

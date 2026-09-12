@@ -931,7 +931,29 @@ static bool gpu_validate_and_commit(void) {
         if (voxel_id < 0 || voxel_id >= voxel_count) return false;
         Voxel *v = &voxels[voxel_id]; GpuVoxelState *g = &gpuPhysics.voxel_stage[i];
         if (v->vgs_active && g->flags[0] == 0) {
+            v->vgs_active = false;
             v->wake_source = true;
+            for (int corner = 0; corner < 8; ++corner) {
+                Particle *part = v->particles[corner];
+                if (part && part->glue_count > 0) {
+                    part->glue_count--;
+                }
+            }
+            memset(v->glued_faces, 0, sizeof(v->glued_faces));
+            for (int f = 0; f < 6; ++f) {
+                int nidx = v->glued_neighbors[f];
+                if (nidx >= 0 && nidx < voxel_count) {
+                    voxels[nidx].glued_faces[opposite_face[f]] = false;
+                    voxels[nidx].glued_neighbors[opposite_face[f]] = -1;
+                    int n_dyn = gpuPhysics.world_to_dynamic[nidx];
+                    if (n_dyn >= 0 && n_dyn < gpuPhysics.dynamic_voxel_count) {
+                        gpuPhysics.voxel_stage[n_dyn].lifecycle[2] &= ~(1u << opposite_face[f]);
+                    }
+                }
+                v->glued_neighbors[f] = -1;
+            }
+            g->lifecycle[2] = 0;
+            topology_changed = true;
         }
         for (int corner = 0; corner < 8; ++corner) {
             uint32_t particle_id = g->particle[corner];
@@ -987,7 +1009,7 @@ static bool gpu_resident_matches_cpu(void) {
         if (world_id < 0 || world_id >= voxel_count || !voxels[world_id].simulate) return false;
         Voxel *v = &voxels[world_id];
         GpuVoxelState *g = &gpuPhysics.voxel_stage[i];
-        if ((v->sleeping ? 0 : 1) != g->flags[0] ||
+        if (((v->sleeping || !v->vgs_active) ? 0 : 1) != g->flags[0] ||
             v->type != g->flags[2] || (v->isBullet ? 1 : 0) != g->flags[1] ||
             (v->simulate_dofs ? 1 : 0) != g->flags[3]) return false;
         uint32_t glue_mask = gpu_glued_face_mask(v);
@@ -1045,13 +1067,13 @@ static bool gpu_dispatch_substep(float sub_dt) {
               gpu_dispatch(GPU_MODE_HASH_CLEAR, hash_size) &&
               gpu_dispatch_indirect_offset(GPU_MODE_HASH_BUILD, 16) &&
               gpu_dispatch_indirect_offset(GPU_MODE_PAIR_COLLISIONS, 16) &&
-              gpu_dispatch_indirect(GPU_MODE_APPLY);
+              gpu_dispatch_indirect(GPU_MODE_APPLY) &&
+              gpu_dispatch(GPU_MODE_BREAK_MASK, gpuPhysics.dynamic_voxel_count);
     for (int it = 0; ok && it < PBD_CONSTRAINT_ITERS; ++it) {
         ok = gpu_dispatch(GPU_MODE_VGS, gpuPhysics.dynamic_voxel_count) &&
              gpu_dispatch_indirect(GPU_MODE_APPLY);
     }
     ok = ok && gpu_dispatch_indirect_offset(GPU_MODE_STATIC_COLLISIONS, 16) &&
-         gpu_dispatch(GPU_MODE_BREAK_MASK, gpuPhysics.dynamic_voxel_count) &&
          gpu_dispatch(GPU_MODE_WAKE_GATHER, gpuPhysics.dynamic_voxel_count) &&
          gpu_dispatch_indirect(GPU_MODE_FINALIZE_PARTICLES) &&
          gpu_dispatch(GPU_MODE_FINALIZE_VOXELS, gpuPhysics.dynamic_voxel_count);

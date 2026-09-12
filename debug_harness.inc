@@ -135,6 +135,10 @@ typedef struct DebugRunState {
     float tether_static_pull_distance;
     uint64_t tether_thin_wall_identity;
     uint64_t tether_thin_wall_hits_before;
+    bool voxel_fracture_test;
+    int fracture_strain_voxel;
+    int fracture_shear_voxel;
+    int fracture_control_voxel;
     float tether_thin_wall_initial_x;
     float tether_thin_wall_final_x;
     float tether_thin_wall_final_min_x;
@@ -201,6 +205,7 @@ static bool debug_setup_single_corner_hinge(DebugRunState *state);
 static bool debug_setup_tether_active_then_static(DebugRunState *state);
 static bool debug_setup_tether_thin_wall_ccd(DebugRunState *state);
 static bool debug_setup_cube_stress(DebugRunState *state);
+static bool debug_setup_voxel_strain_shear_fracture(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall },
@@ -218,7 +223,8 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "single-corner-hinge", "A one-corner glue remnant must break beyond the hinge-angle limit", debug_setup_single_corner_hinge },
     { "tether-active-then-static", "Tethering an active voxel then a static voxel preserves and pulls both", debug_setup_tether_active_then_static },
     { "tether-thin-wall-ccd", "High-speed tether throw uses swept particle rays against a one-voxel wall", debug_setup_tether_thin_wall_ccd },
-    { "cube-stress", "Stress test with scalable dynamic cube (size set by FPS_CUBE_SIZE)", debug_setup_cube_stress }
+    { "cube-stress", "Stress test with scalable dynamic cube (size set by FPS_CUBE_SIZE)", debug_setup_cube_stress },
+    { "voxel-strain-shear-fracture", "Dynamic voxels deactivate VGS shape constraints when strain or shear exceeds threshold", debug_setup_voxel_strain_shear_fracture }
 };
 
 static const int debugScenarioCount = (int)(sizeof(debugScenarios) / sizeof(debugScenarios[0]));
@@ -1487,6 +1493,61 @@ static bool debug_setup_cube_stress(DebugRunState *state)
     float dist = (float)size * 2.5f + 10.0f;
     state->camera.position = (Vector3){ dist, (float)(20 + size/2) + dist * 0.4f, dist };
     state->camera.target = (Vector3){ 0.0f, (float)(20 + size/2), 0.0f };
+    return true;
+}
+
+static bool debug_setup_voxel_strain_shear_fracture(DebugRunState *state)
+{
+    debug_reset_world();
+    state->voxel_fracture_test = true;
+    Color strain_color = (Color){ 245, 120, 60, 255 };
+    Color shear_color = (Color){ 220, 70, 180, 255 };
+    Color control_color = (Color){ 80, 200, 120, 255 };
+
+    int idx_strain = debug_add_cell(-3, 8, 0, false, true, strain_color, DEBUG_TEST_TAG);
+    int idx_shear = debug_add_cell(0, 8, 0, false, true, shear_color, DEBUG_TEST_TAG);
+    int idx_ctrl = debug_add_cell(3, 8, 0, false, true, control_color, DEBUG_TEST_TAG);
+
+    if (idx_strain < 0 || idx_shear < 0 || idx_ctrl < 0) {
+        debug_add_failure(state, "fracture setup could not create test voxels");
+        return false;
+    }
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_rebuild_world_state();
+
+    // 1. High Tensile Strain: stretch X coordinates by 35% (limit is 20%)
+    Voxel *v_strain = &voxels[idx_strain];
+    float stretch_x = VOXEL_SIZE * 0.35f * 0.5f;
+    for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+        Particle *p = v_strain->particles[corner];
+        if (corner_signs[corner][0] > 0) p->pos.x += stretch_x;
+        else p->pos.x -= stretch_x;
+        p->prev_pos = p->pos;
+        p->predicted_pos = p->pos;
+    }
+
+    // 2. High Shear: skew X based on Y sign by 35% (limit is 20%)
+    Voxel *v_shear = &voxels[idx_shear];
+    float skew = VOXEL_SIZE * 0.35f * 0.5f;
+    for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+        Particle *p = v_shear->particles[corner];
+        if (corner_signs[corner][1] > 0) p->pos.x += skew;
+        else p->pos.x -= skew;
+        p->prev_pos = p->pos;
+        p->predicted_pos = p->pos;
+    }
+
+    state->fracture_strain_voxel = idx_strain;
+    state->fracture_shear_voxel = idx_shear;
+    state->fracture_control_voxel = idx_ctrl;
+    state->expected_voxels = 3;
+    state->activation_succeeded = true;
+    collisionTopologyDirty = true;
+    rebuild_voxel_hash();
+    debug_set_initial_centroid(state);
+    state->camera.position = (Vector3){ 0.0f, 9.0f, 7.0f };
+    state->camera.target = (Vector3){ 0.0f, 8.0f, 0.0f };
+    debug_capture(state, "phase-01-fracture-setup.png", "fracture-setup", 0);
     return true;
 }
 
@@ -2868,6 +2929,21 @@ static void debug_finalize_validation(DebugRunState *state)
             debug_add_failure(state,
                               "single-corner glue survived %.1f degrees (limit %.1f)",
                               state->max_hinge_angle_deg, (double)GLUE_BREAK_HINGE_ANGLE_DEG);
+        }
+        return;
+    }
+    if (state->voxel_fracture_test) {
+        int idx_strain = state->fracture_strain_voxel;
+        int idx_shear = state->fracture_shear_voxel;
+        int idx_ctrl = state->fracture_control_voxel;
+        if (idx_strain >= 0 && idx_strain < voxel_count && voxels[idx_strain].vgs_active) {
+            debug_add_failure(state, "high-strain voxel (strain > 0.20) did not break (vgs_active remains true)");
+        }
+        if (idx_shear >= 0 && idx_shear < voxel_count && voxels[idx_shear].vgs_active) {
+            debug_add_failure(state, "high-shear voxel (shear > 0.20) did not break (vgs_active remains true)");
+        }
+        if (idx_ctrl >= 0 && idx_ctrl < voxel_count && !voxels[idx_ctrl].vgs_active) {
+            debug_add_failure(state, "control voxel broke unexpectedly (vgs_active became false)");
         }
         return;
     }
