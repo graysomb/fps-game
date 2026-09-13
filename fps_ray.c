@@ -40,6 +40,9 @@
 #endif
 
 #include "raylib.h"
+#if defined(__APPLE__)
+#include "macos/macos_gamepad.h"
+#endif
 #include "rlgl.h" // for rlBegin/rlEnd
 #include "raymath.h" // for MatrixIdentity()
 #include "physics_backend.h"
@@ -19132,6 +19135,9 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Unable to create the requested graphics context\n");
         return FPS_EXIT_GPU_CONTEXT_UNAVAILABLE;
     }
+#if defined(__APPLE__)
+    macos_gamepad_init();
+#endif
     SetWindowState(FLAG_WINDOW_RESIZABLE);
     if (!automatedRun) init_sfx();
     SetTargetFPS(TARGET_FRAME_RATE);
@@ -19222,6 +19228,9 @@ int main(int argc, char **argv) {
 
     // main loop
     while (!WindowShouldClose()) {
+#if defined(__APPLE__)
+        macos_gamepad_poll();
+#endif
         if (netTransport.role != NET_ROLE_OFFLINE) {
             net_transport_pump(&netTransport, net_on_receive, net_on_connect, NULL);
             if (netTransport.role == NET_ROLE_HOST) {

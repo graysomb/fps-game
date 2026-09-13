@@ -50,15 +50,20 @@ else
     opt_flags="-O2 -DNDEBUG"
 fi
 
-frameworks="-framework Foundation -framework AppKit -framework IOKit -framework CoreVideo -framework CoreGraphics -framework QuartzCore -framework OpenGL"
+frameworks="-framework Foundation -framework AppKit -framework IOKit -framework CoreVideo -framework CoreGraphics -framework QuartzCore -framework OpenGL -framework GameController"
 common_flags="-std=c11 $opt_flags $arch_flags -mmacosx-version-min=$deployment_target -I$project_root -I$raylib_build/src -L$raylib_build/src -lraylib -pthread -lm $frameworks"
 enet_sources="$project_root/net_protocol.c $project_root/net_transport.c $project_root/third_party/enet/callbacks.c $project_root/third_party/enet/compress.c $project_root/third_party/enet/host.c $project_root/third_party/enet/list.c $project_root/third_party/enet/packet.c $project_root/third_party/enet/peer.c $project_root/third_party/enet/protocol.c $project_root/third_party/enet/unix.c"
+macos_gamepad_o="$raylib_build/macos_gamepad.o"
 common_flags="$common_flags -I$project_root/third_party/enet/include"
 
 # shellcheck disable=SC2086
-clang "$project_root/fps_ray.c" "$project_root/physics_gpu_metal.m" $enet_sources -DFPS_GPU_METAL -o "$bin_dir/fps_ray_gpu" $common_flags -framework Metal
+clang -c -fobjc-arc $opt_flags $arch_flags -mmacosx-version-min="$deployment_target" \
+    -I"$project_root" -I"$raylib_build/src" "$project_root/macos/macos_gamepad.m" -o "$macos_gamepad_o"
+
 # shellcheck disable=SC2086
-clang "$project_root/fps_ray.c" $enet_sources -o "$bin_dir/fps_ray_cpu" $common_flags
+clang "$project_root/fps_ray.c" "$project_root/physics_gpu_metal.m" "$macos_gamepad_o" $enet_sources -DFPS_GPU_METAL -o "$bin_dir/fps_ray_gpu" $common_flags -framework Metal
+# shellcheck disable=SC2086
+clang "$project_root/fps_ray.c" "$macos_gamepad_o" $enet_sources -o "$bin_dir/fps_ray_cpu" $common_flags
 # shellcheck disable=SC2086
 clang "$project_root/fps_launcher.c" -std=c11 $opt_flags $arch_flags \
     -mmacosx-version-min="$deployment_target" -o "$bin_dir/fps_ray"
