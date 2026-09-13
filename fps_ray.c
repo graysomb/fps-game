@@ -537,6 +537,7 @@ static inline bool is_player_bot(int player_index) {
 #define VOXEL_CENTER_INDEX 8
 #define VOXEL_PARTICLE_COUNT 9
 #define TARGET_FRAME_RATE 60
+#define BULLET_MAX_FRAMES (TARGET_FRAME_RATE * 3)
 #define PBD_MAX_STEP_DT 1.0f/TARGET_FRAME_RATE
 #define PBD_SUBSTEPS 2
 #define PBD_CONSTRAINT_ITERS 3
@@ -6276,6 +6277,14 @@ static void recycle_dead_voxels(void) {
             recycleFrameCounter >= voxel->restorationDeadlineFrame) {
             has_due_restoration = true;
         }
+        if (voxel->isBullet) {
+            if (voxel->lifeFrames > BULLET_MAX_FRAMES || voxel_outside_world_bounds(voxel)) {
+                remove_voxel_index(i);
+                changed = true;
+                --i;
+            }
+            continue;
+        }
         if (voxel->sleeping) {
             has_sleeping_voxels = true;
             continue;
@@ -10433,6 +10442,12 @@ static void update_projectiles(float dt)
             continue;
         }
 
+        if (v->isBullet &&
+            (v->lifeFrames > BULLET_MAX_FRAMES || voxel_outside_world_bounds(v))) {
+            remove_voxel_index(i);
+            continue;
+        }
+
         Vector3 gravity = { 0.0f, -GRAVITY, 0.0f };
         if (v->isBullet) {
             gravity = (Vector3){ 0.0f, 0.0f, 0.0f };
@@ -10442,6 +10457,10 @@ static void update_projectiles(float dt)
         v->vel = v_add(v->vel, v_mul(gravity, dt));
         float distance = v_length(displacement);
         if (distance <= 1e-6f) {
+            if (v->isBullet) {
+                remove_voxel_index(i);
+                continue;
+            }
             ++i;
             continue;
         }
