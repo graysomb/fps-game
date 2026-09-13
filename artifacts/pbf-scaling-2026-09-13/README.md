@@ -3,9 +3,13 @@
 Measured on 2026-09-13 with the `pbf-scaling` debug scenario at 1280x720.
 Every timed frame includes a fixed PBF physics step and an offscreen convex-hull
 rebuild/draw pass. Each run uses 120 steps, discards 30 warm-up steps, and averages
-the remaining 90. The published values are the median of three runs. Fluid is
+the remaining 90. These post-optimization values are one complete sweep. Fluid is
 initialized as an `N x N x N` cube; each fluid cell has eight independent particles.
 VSync and presentation are not included.
+
+The GPU rows use the compute surface-net hull. The GPU report for each run also
+separates timer-query compute/hull time from CPU packing, upload, and compact
+readback time. The sweep now extends past 16K particles.
 
 Backends:
 

@@ -108,6 +108,18 @@ typedef struct DebugRunState {
     double benchmark_physics_total_ms;
     double benchmark_render_total_ms;
     double benchmark_frame_total_ms;
+    double benchmark_gpu_compute_total_ms;
+    double benchmark_gpu_hull_total_ms;
+    double benchmark_gpu_pack_total_ms;
+    double benchmark_gpu_upload_total_ms;
+    double benchmark_gpu_readback_total_ms;
+    uint64_t benchmark_gpu_upload_bytes;
+    uint64_t benchmark_gpu_readback_bytes;
+    int benchmark_gpu_dispatches;
+    int benchmark_gpu_hash_capacity;
+    uint32_t benchmark_gpu_neighbor_overflow;
+    bool benchmark_gpu_hull;
+    bool expect_gpu_neighbor_overflow;
     DebugTrackedCell tracked_cells[DEBUG_MAX_TRACKED_CELLS];
     int tracked_cell_count;
     DebugSample samples[DEBUG_MAX_SAMPLES];
@@ -143,6 +155,7 @@ static bool debug_setup_overhang_impact(DebugRunState *state);
 static bool debug_setup_pbf_container(DebugRunState *state);
 static bool debug_setup_pbf_dynamic_container(DebugRunState *state);
 static bool debug_setup_pbf_scaling(DebugRunState *state);
+static bool debug_setup_pbf_dense_neighbors(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall, 60, 60 },
@@ -152,7 +165,8 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "overhang-impact", "Falling dynamic voxel activates and bends a supported static overhang", debug_setup_overhang_impact, 60, 60 },
     { "pbf-container", "High-viscosity PBF falls into an immutable container", debug_setup_pbf_container, 240, 120 },
     { "pbf-dynamic-container", "PBF falls onto an elevated active PBD floor", debug_setup_pbf_dynamic_container, 240, 120 },
-    { "pbf-scaling", "Timed PBF physics plus convex-hull rendering", debug_setup_pbf_scaling, 120, 60 }
+    { "pbf-scaling", "Timed PBF physics plus convex-hull rendering", debug_setup_pbf_scaling, 120, 60 },
+    { "pbf-dense-neighbors", "Dense PBF neighborhood overflow fallback", debug_setup_pbf_dense_neighbors, 60, 60 }
 };
 
 static const int debugScenarioCount = (int)(sizeof(debugScenarios) / sizeof(debugScenarios[0]));
@@ -1473,6 +1487,38 @@ static bool debug_setup_pbf_scaling(DebugRunState *state)
     return state->failure_count == 0;
 }
 
+static bool debug_setup_pbf_dense_neighbors(DebugRunState *state)
+{
+    int requested_side = debugRunConfig.pbf_side;
+    debugRunConfig.pbf_side = 4;
+    bool ok = debug_setup_pbf_scaling(state);
+    debugRunConfig.pbf_side = requested_side;
+    if (!ok) return false;
+
+    const int row = 8;
+    const float spacing = PBF_SMOOTHING_RADIUS / 20.0f;
+    const Vector3 center = { 0.0f, 100.0f, 0.0f };
+    for (int i = 0; i < fluid_particle_count; ++i) {
+        int x = i % row;
+        int y = (i / row) % row;
+        int z = i / (row * row);
+        Vector3 position = {
+            center.x + ((float)x - 3.5f) * spacing,
+            center.y + ((float)y - 3.5f) * spacing,
+            center.z + ((float)z - 3.5f) * spacing
+        };
+        Particle *particle = fluid_particles[i];
+        particle->pos = position;
+        particle->prev_pos = position;
+        particle->predicted_pos = position;
+        particle->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+    }
+    state->expect_gpu_neighbor_overflow = true;
+    state->camera.position = (Vector3){ 2.5f, 102.0f, 3.0f };
+    state->camera.target = center;
+    return true;
+}
+
 static void debug_render_benchmark_frame(DebugRunState *state)
 {
     BeginTextureMode(state->target);
@@ -1605,6 +1651,11 @@ static void debug_finalize_validation(DebugRunState *state)
             !isfinite(state->benchmark_frame_total_ms) ||
             state->benchmark_frame_total_ms <= 0.0) {
             debug_add_failure(state, "benchmark did not record valid timed frames");
+        }
+        if (state->expect_gpu_neighbor_overflow &&
+            physicsBackend.active == PHYSICS_BACKEND_GPU_GL43 &&
+            state->benchmark_gpu_neighbor_overflow == 0) {
+            debug_add_failure(state, "dense PBF case did not exercise the GPU neighbor overflow fallback");
         }
         return;
     }
@@ -1825,15 +1876,34 @@ static bool debug_write_report(DebugRunState *state)
     double benchmark_frame_ms = state->benchmark_measured_steps > 0
         ? state->benchmark_frame_total_ms / (double)state->benchmark_measured_steps : 0.0;
     double benchmark_fps = benchmark_frame_ms > 0.0 ? 1000.0 / benchmark_frame_ms : 0.0;
+    double benchmark_gpu_compute_ms = state->benchmark_measured_steps > 0
+        ? state->benchmark_gpu_compute_total_ms / (double)state->benchmark_measured_steps : 0.0;
+    double benchmark_gpu_hull_ms = state->benchmark_measured_steps > 0
+        ? state->benchmark_gpu_hull_total_ms / (double)state->benchmark_measured_steps : 0.0;
     fprintf(file,
             "  \"benchmark\": {\"enabled\": %s, \"fluidParticles\": %d,"
-            " \"hullRender\": true, \"warmupSteps\": %d, \"measuredSteps\": %d,"
+            " \"hullRender\": true, \"hullBackend\": \"%s\", \"warmupSteps\": %d, \"measuredSteps\": %d,"
             " \"averagePhysicsMs\": %.9g, \"averageRenderMs\": %.9g,"
-            " \"averageFrameMs\": %.9g, \"framesPerSecond\": %.9g},\n",
+            " \"averageFrameMs\": %.9g, \"framesPerSecond\": %.9g,"
+            " \"gpuComputeMs\": %.9g, \"gpuHullMs\": %.9g,"
+            " \"gpuPackMs\": %.9g, \"gpuUploadMs\": %.9g, \"gpuReadbackMs\": %.9g,"
+            " \"gpuUploadBytesPerFrame\": %.9g, \"gpuReadbackBytesPerFrame\": %.9g,"
+            " \"gpuDispatchesPerFrame\": %.9g, \"gpuHashCapacity\": %d,"
+            " \"gpuNeighborOverflowMax\": %u},\n",
             state->pbf_scaling_benchmark ? "true" : "false",
             state->expected_fluid_particles,
+            state->benchmark_gpu_hull ? "gpu-compute" : "cpu",
             state->benchmark_warmup_steps, state->benchmark_measured_steps,
-            benchmark_physics_ms, benchmark_render_ms, benchmark_frame_ms, benchmark_fps);
+            benchmark_physics_ms, benchmark_render_ms, benchmark_frame_ms, benchmark_fps,
+            benchmark_gpu_compute_ms, benchmark_gpu_hull_ms,
+            state->benchmark_measured_steps > 0 ? state->benchmark_gpu_pack_total_ms / state->benchmark_measured_steps : 0.0,
+            state->benchmark_measured_steps > 0 ? state->benchmark_gpu_upload_total_ms / state->benchmark_measured_steps : 0.0,
+            state->benchmark_measured_steps > 0 ? state->benchmark_gpu_readback_total_ms / state->benchmark_measured_steps : 0.0,
+            state->benchmark_measured_steps > 0 ? (double)state->benchmark_gpu_upload_bytes / state->benchmark_measured_steps : 0.0,
+            state->benchmark_measured_steps > 0 ? (double)state->benchmark_gpu_readback_bytes / state->benchmark_measured_steps : 0.0,
+            state->benchmark_measured_steps > 0 ? (double)state->benchmark_gpu_dispatches / state->benchmark_measured_steps : 0.0,
+            state->benchmark_gpu_hash_capacity,
+            state->benchmark_gpu_neighbor_overflow);
 
     fputs("  \"failures\": [", file);
     for (int i = 0; i < state->failure_count; ++i) {
@@ -1968,6 +2038,10 @@ static int run_debug_harness(void)
             double frame_started = GetTime();
             debug_physics_step();
             double physics_finished = GetTime();
+            if (physicsBackend.active == PHYSICS_BACKEND_GPU_GL43 &&
+                gpuPhysics.last_neighbor_overflow > state.benchmark_gpu_neighbor_overflow) {
+                state.benchmark_gpu_neighbor_overflow = gpuPhysics.last_neighbor_overflow;
+            }
             if (state.pbf_scaling_benchmark) {
                 debug_render_benchmark_frame(&state);
             }
@@ -1976,6 +2050,18 @@ static int run_debug_harness(void)
                 state.benchmark_physics_total_ms += (physics_finished - frame_started) * 1000.0;
                 state.benchmark_render_total_ms += (frame_finished - physics_finished) * 1000.0;
                 state.benchmark_frame_total_ms += (frame_finished - frame_started) * 1000.0;
+                if (physicsBackend.active == PHYSICS_BACKEND_GPU_GL43) {
+                    state.benchmark_gpu_compute_total_ms += gpuPhysics.last_gpu_compute_ms;
+                    state.benchmark_gpu_hull_total_ms += gpuPhysics.last_hull_gpu_ms;
+                    state.benchmark_gpu_pack_total_ms += gpuPhysics.last_pack_ms;
+                    state.benchmark_gpu_upload_total_ms += gpuPhysics.last_upload_ms;
+                    state.benchmark_gpu_readback_total_ms += gpuPhysics.last_readback_ms;
+                    state.benchmark_gpu_upload_bytes += gpuPhysics.last_upload_bytes;
+                    state.benchmark_gpu_readback_bytes += gpuPhysics.last_readback_bytes;
+                    state.benchmark_gpu_dispatches += gpuPhysics.last_dispatches;
+                    state.benchmark_gpu_hash_capacity = gpuPhysics.hash_capacity;
+                    state.benchmark_gpu_hull = state.benchmark_gpu_hull || gpuPhysics.last_hull_used_gpu;
+                }
                 state.benchmark_measured_steps++;
             }
             debug_validate_step(&state, step);

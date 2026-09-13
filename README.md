@@ -34,11 +34,16 @@ the frame.
 
 The GPU path packs only particles referenced by active voxels into SSBOs. Stable
 particle-pool IDs are mapped to compact indices, preserving shared corners created
-by glue. Static voxels are uploaded only when the static-grid generation changes.
-Each substep dispatches prediction, dynamic hash construction, scene and particle
-collisions, Jacobi apply passes, VGS iterations, static collisions, glue-break
-evaluation, and velocity finalization. Topology mutations such as actually breaking
-glue or converting a sleeping cluster back to static remain ordered CPU commits.
+by glue. Particle and fluid state stays resident across both substeps and unchanged
+frames; static voxels are uploaded only when the static-grid generation changes.
+The dynamic hash is sized to the active population instead of clearing the maximum
+262,144 buckets. PBF builds one 64-entry neighbor cache per particle and reuses it
+for density, position correction, and viscosity, with a full hash scan only for
+dense particles that overflow the cache. Fluid-only scenes omit the solid pair,
+VGS, and glue-break passes. A compact 48-byte result record carries positions,
+velocities, and density diagnostics back to the CPU. Topology mutations such as
+actually breaking glue or converting a sleeping cluster back to static remain
+ordered CPU commits.
 
 The CPU PBD loop uses a lightweight, persistent thread pool to avoid per-frame
 thread creation.
@@ -46,7 +51,7 @@ Key ideas:
 *   **Parallel-for dispatcher:** A small worker pool runs chunked ranges over arrays (particles/voxels).
 *   **Jacobi-style accumulators:** Constraints write into per-particle correction accumulators (`corr_sum`, `corr_weight`) using atomic float adds. A later “apply” pass updates positions, preserving determinism within a single iteration.
 *   **Stable particle snapshots:** Each constraint iteration snapshots `active_particles` into a local array before building the spatial hash and gathering collisions, avoiding concurrent mutation while workers read.
-*   **Thread-safe spatial hash:** Particle hash buckets are cleared and built in parallel; inserts use atomic exchange for lock-free binning.
+*   **Thread-safe spatial hash:** Only buckets touched by the previous CPU step are cleared; inserts use atomic exchange for lock-free binning.
 *   **Execution order:** Integrate → Hash Clear/Build → Collisions → Apply → VGS/Apply iterations → Static collisions → Glue/lifecycle commit → Velocity update.
 
 This layout mirrors a GPU compute pipeline and keeps contention low while remaining safe on CPU.
@@ -275,9 +280,10 @@ run through the normal GPU -> CPU MT -> CPU ST fallback chain.
 Press `F5` to switch between low-poly particle spheres and a faceted approximate
 hull. Surface mode bins particles into 0.25 m cells, builds a coarse scalar density
 field, averages its edge crossings into one surface-net vertex per boundary cell,
-and connects those vertices with flat-shaded triangles. The hull is cached while
-quantized occupancy is unchanged and reused by every split-screen view. The startup
-mode can also be selected with:
+and connects those vertices with flat-shaded triangles. With GPU physics the four
+surface-net passes consume the resident particle SSBO and write renderable vertex
+buffers directly; CPU backends retain the cached CPU mesh builder. The startup mode
+can also be selected with:
 
 ```bash
 fps_ray --fluid-render=particles
@@ -327,6 +333,10 @@ Available scenarios are:
 * `pbf-scaling`: benchmarks a configurable cubic PBF volume with convex-hull rendering on every
   step. Use `--debug-pbf-side=N`; the particle count is `8 * N^3`. Reports include average
   physics, hull-render, and total frame times plus derived unthrottled FPS after warm-up.
+  GPU reports also include timer-query compute/hull time, packing/upload/readback wall time,
+  bytes transferred per frame, dispatch count, hull backend, and maximum neighbor overflow.
+* `pbf-dense-neighbors`: compresses 512 particles into one smoothing neighborhood and verifies
+  that GPU cache overflow is detected and routed through the complete hash-scan fallback.
 
 For example, benchmark 4,096 particles across all three backends with:
 

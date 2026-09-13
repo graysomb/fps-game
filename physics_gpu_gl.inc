@@ -6,6 +6,7 @@ typedef struct { int32_t value[4]; } GpuCellState;
 typedef struct { float value[4]; } GpuTetherState;
 typedef struct { int32_t value[4]; } GpuStaticCell;
 typedef struct { float density_lambda[4], delta[4]; } GpuFluidState;
+typedef struct { float pos_density[4], prev_lambda[4], velocity[4]; } GpuReadbackState;
 typedef struct {
     uint32_t particle[8];
     float pos_rest_edge[4];
@@ -22,6 +23,7 @@ _Static_assert(sizeof(GpuCellState) == 16, "GpuCellState/std430 mismatch");
 _Static_assert(sizeof(GpuVoxelState) == 128, "GpuVoxelState/std430 mismatch");
 _Static_assert(sizeof(GpuStaticCell) == 16, "GpuStaticCell/std430 mismatch");
 _Static_assert(sizeof(GpuFluidState) == 32, "GpuFluidState/std430 mismatch");
+_Static_assert(sizeof(GpuReadbackState) == 48, "GpuReadbackState/std430 mismatch");
 
 typedef struct {
     unsigned int id;
@@ -48,7 +50,9 @@ enum {
     GPU_MODE_PBF_VISCOSITY,
     GPU_MODE_PBF_APPLY_VISCOSITY,
     GPU_MODE_PBF_DYNAMIC_SOLID_COLLISIONS,
-    GPU_MODE_PBF_DYNAMIC_SOLID_FINAL
+    GPU_MODE_PBF_DYNAMIC_SOLID_FINAL,
+    GPU_MODE_PBF_BUILD_NEIGHBORS,
+    GPU_MODE_PACK_READBACK
 };
 
 enum {
@@ -104,6 +108,23 @@ typedef struct {
     GpuBuffer tether_buffer;
     GpuBuffer fluid_buffer;
     GpuBuffer dynamic_voxel_id_buffer;
+    GpuBuffer neighbor_count_buffer;
+    GpuBuffer neighbor_id_buffer;
+    GpuBuffer diagnostic_buffer;
+    GpuBuffer readback_buffer;
+    GpuBuffer hull_occupancy_buffer;
+    GpuBuffer hull_net_vertex_buffer;
+    GpuBuffer hull_net_active_buffer;
+    GpuBuffer hull_position_buffer;
+    GpuBuffer hull_normal_buffer;
+    GpuBuffer hull_counter_buffer;
+    unsigned int hull_program;
+    int hull_loc[9];
+    Mesh hull_mesh;
+    unsigned int hull_position_id;
+    unsigned int hull_normal_id;
+    unsigned int step_time_query;
+    unsigned int hull_time_query;
     GpuParticleState *particle_stage;
     GpuCellState *cell_stage;
     GpuTetherState *tether_stage;
@@ -112,6 +133,7 @@ typedef struct {
     GpuVoxelState *voxel_stage;
     GpuStaticCell *static_stage;
     GpuFluidState *fluid_stage;
+    GpuReadbackState *readback_stage;
     uint32_t *dynamic_voxel_ids;
     int *pool_to_compact;
     size_t particle_capacity;
@@ -120,7 +142,25 @@ typedef struct {
     uint64_t static_uploaded_generation;
     int compact_count;
     int dynamic_voxel_count;
+    int hash_capacity;
     int committed_substeps;
+    int current_dispatches;
+    int last_dispatches;
+    uint32_t last_neighbor_overflow;
+    size_t last_upload_bytes;
+    size_t last_readback_bytes;
+    double last_pack_ms;
+    double last_upload_ms;
+    double last_readback_ms;
+    double last_gpu_compute_ms;
+    double last_hull_gpu_ms;
+    bool last_hull_used_gpu;
+    bool resident_valid;
+    bool particle_upload_required;
+    bool fluid_upload_required;
+    int resident_compact_count;
+    int resident_sim_count;
+    int resident_fluid_count;
 } GpuPhysicsState;
 
 static GpuPhysicsState gpuPhysics = { 0 };
@@ -160,6 +200,23 @@ static bool gpu_buffer_ensure(GpuBuffer *buffer, size_t size) {
 }
 
 static void gpu_physics_release_resources(void) {
+#if defined(GRAPHICS_API_OPENGL_43)
+    if (gpuPhysics.step_time_query != 0) glDeleteQueries(1, &gpuPhysics.step_time_query);
+    if (gpuPhysics.hull_time_query != 0) glDeleteQueries(1, &gpuPhysics.hull_time_query);
+#endif
+    gpuPhysics.step_time_query = 0;
+    gpuPhysics.hull_time_query = 0;
+    if (gpuPhysics.hull_mesh.vaoId != 0) rlUnloadVertexArray(gpuPhysics.hull_mesh.vaoId);
+    RL_FREE(gpuPhysics.hull_mesh.vboId);
+    gpuPhysics.hull_mesh = (Mesh){ 0 };
+    gpu_buffer_destroy(&gpuPhysics.hull_occupancy_buffer);
+    gpu_buffer_destroy(&gpuPhysics.hull_net_vertex_buffer);
+    gpu_buffer_destroy(&gpuPhysics.hull_net_active_buffer);
+    gpu_buffer_destroy(&gpuPhysics.hull_position_buffer);
+    gpu_buffer_destroy(&gpuPhysics.hull_normal_buffer);
+    gpu_buffer_destroy(&gpuPhysics.hull_counter_buffer);
+    if (gpuPhysics.hull_program != 0) rlUnloadShaderProgram(gpuPhysics.hull_program);
+    gpuPhysics.hull_program = 0;
     gpu_buffer_destroy(&gpuPhysics.particle_buffer);
     gpu_buffer_destroy(&gpuPhysics.correction_buffer);
     gpu_buffer_destroy(&gpuPhysics.cell_buffer);
@@ -171,6 +228,10 @@ static void gpu_physics_release_resources(void) {
     gpu_buffer_destroy(&gpuPhysics.tether_buffer);
     gpu_buffer_destroy(&gpuPhysics.fluid_buffer);
     gpu_buffer_destroy(&gpuPhysics.dynamic_voxel_id_buffer);
+    gpu_buffer_destroy(&gpuPhysics.neighbor_count_buffer);
+    gpu_buffer_destroy(&gpuPhysics.neighbor_id_buffer);
+    gpu_buffer_destroy(&gpuPhysics.diagnostic_buffer);
+    gpu_buffer_destroy(&gpuPhysics.readback_buffer);
     if (gpuPhysics.program != 0) rlUnloadShaderProgram(gpuPhysics.program);
     gpuPhysics.program = 0;
     gpuPhysics.ready = false;
@@ -186,6 +247,7 @@ static void gpu_physics_shutdown(void) {
     free(gpuPhysics.voxel_stage);
     free(gpuPhysics.static_stage);
     free(gpuPhysics.fluid_stage);
+    free(gpuPhysics.readback_stage);
     free(gpuPhysics.dynamic_voxel_ids);
     free(gpuPhysics.pool_to_compact);
     memset(&gpuPhysics, 0, sizeof(gpuPhysics));
@@ -206,6 +268,7 @@ static bool gpu_stage_reserve(size_t particles, size_t sims, size_t voxels_count
             !gpu_resize_array((void **)&gpuPhysics.cell_stage, cap, sizeof(*gpuPhysics.cell_stage)) ||
             !gpu_resize_array((void **)&gpuPhysics.tether_stage, cap, sizeof(*gpuPhysics.tether_stage)) ||
             !gpu_resize_array((void **)&gpuPhysics.fluid_stage, cap, sizeof(*gpuPhysics.fluid_stage)) ||
+            !gpu_resize_array((void **)&gpuPhysics.readback_stage, cap, sizeof(*gpuPhysics.readback_stage)) ||
             !gpu_resize_array((void **)&gpuPhysics.compact_to_particle, cap, sizeof(*gpuPhysics.compact_to_particle))) return false;
         gpuPhysics.particle_capacity = cap;
     }
@@ -234,15 +297,32 @@ static int gpu_add_particle(Particle *p) {
     if (mapped >= 0) return mapped;
     int id = gpuPhysics.compact_count++;
     gpuPhysics.pool_to_compact[pool_id] = id;
+    if (gpuPhysics.resident_valid && !gpuPhysics.particle_upload_required &&
+        gpuPhysics.compact_to_particle[id] != p) {
+        gpuPhysics.particle_upload_required = true;
+        gpuPhysics.fluid_upload_required = true;
+    }
     gpuPhysics.compact_to_particle[id] = p;
-    GpuParticleState *g = &gpuPhysics.particle_stage[id];
-    g->pos_radius[0] = p->pos.x; g->pos_radius[1] = p->pos.y; g->pos_radius[2] = p->pos.z; g->pos_radius[3] = p->radius;
-    g->prev_inv_mass[0] = p->prev_pos.x; g->prev_inv_mass[1] = p->prev_pos.y; g->prev_inv_mass[2] = p->prev_pos.z; g->prev_inv_mass[3] = p->inv_mass;
-    g->predicted_base_inv_mass[0] = p->predicted_pos.x; g->predicted_base_inv_mass[1] = p->predicted_pos.y;
-    g->predicted_base_inv_mass[2] = p->predicted_pos.z; g->predicted_base_inv_mass[3] = p->base_inv_mass;
-    g->velocity[0] = p->vel.x; g->velocity[1] = p->vel.y; g->velocity[2] = p->vel.z;
-    g->velocity[3] = (float)p->material;
-    memset(&gpuPhysics.fluid_stage[id], 0, sizeof(gpuPhysics.fluid_stage[id]));
+    GpuParticleState next = { 0 };
+    next.pos_radius[0] = p->pos.x; next.pos_radius[1] = p->pos.y; next.pos_radius[2] = p->pos.z; next.pos_radius[3] = p->radius;
+    next.prev_inv_mass[0] = p->prev_pos.x; next.prev_inv_mass[1] = p->prev_pos.y; next.prev_inv_mass[2] = p->prev_pos.z; next.prev_inv_mass[3] = p->inv_mass;
+    next.predicted_base_inv_mass[0] = p->predicted_pos.x; next.predicted_base_inv_mass[1] = p->predicted_pos.y;
+    next.predicted_base_inv_mass[2] = p->predicted_pos.z; next.predicted_base_inv_mass[3] = p->base_inv_mass;
+    next.velocity[0] = p->vel.x; next.velocity[1] = p->vel.y; next.velocity[2] = p->vel.z;
+    next.velocity[3] = (float)p->material;
+    if (gpuPhysics.resident_valid && !gpuPhysics.particle_upload_required &&
+        memcmp(&gpuPhysics.particle_stage[id], &next, sizeof(next)) != 0)
+        gpuPhysics.particle_upload_required = true;
+    gpuPhysics.particle_stage[id] = next;
+    GpuFluidState next_fluid = { 0 };
+    if (p->material == PARTICLE_MATERIAL_FLUID) {
+        next_fluid.density_lambda[0] = p->pbf_density;
+        next_fluid.density_lambda[1] = p->pbf_lambda;
+    }
+    if (gpuPhysics.resident_valid && !gpuPhysics.fluid_upload_required &&
+        memcmp(&gpuPhysics.fluid_stage[id], &next_fluid, sizeof(next_fluid)) != 0)
+        gpuPhysics.fluid_upload_required = true;
+    gpuPhysics.fluid_stage[id] = next_fluid;
     gpuPhysics.cell_stage[id].value[0] = p->cell_x;
     gpuPhysics.cell_stage[id].value[1] = p->cell_y;
     gpuPhysics.cell_stage[id].value[2] = p->cell_z;
@@ -268,6 +348,11 @@ static bool gpu_pack_world(void) {
         if (!gpuPhysics.pool_to_compact) return false;
     }
     if (particle_pool_count > 0) memset(gpuPhysics.pool_to_compact, 0xff, (size_t)particle_pool_count * sizeof(*gpuPhysics.pool_to_compact));
+    bool reusable = gpuPhysics.resident_valid &&
+        gpuPhysics.resident_sim_count == sim_particle_count &&
+        gpuPhysics.resident_fluid_count == active_fluid_particle_count;
+    gpuPhysics.particle_upload_required = !reusable;
+    gpuPhysics.fluid_upload_required = !reusable;
     gpuPhysics.compact_count = 0;
     gpuPhysics.dynamic_voxel_count = 0;
 
@@ -287,6 +372,10 @@ static bool gpu_pack_world(void) {
         Voxel *v = &voxels[i];
         if (!v->simulate) continue;
         for (int c = 0; c < 8; ++c) if (gpu_add_particle(v->particles[c]) < 0) return false;
+    }
+    if (gpuPhysics.resident_valid && gpuPhysics.resident_compact_count != gpuPhysics.compact_count) {
+        gpuPhysics.particle_upload_required = true;
+        gpuPhysics.fluid_upload_required = true;
     }
 
     for (int i = 0; i < voxel_count; ++i) {
@@ -391,33 +480,58 @@ static bool gpu_upload_world(void) {
     size_t next_bytes = ((size_t)sim_particle_count + (size_t)active_fluid_particle_count) * sizeof(int32_t);
     size_t static_bytes = (size_t)HASH_SIZE * sizeof(GpuStaticCell);
     size_t dynamic_voxel_id_bytes = (size_t)gpuPhysics.dynamic_voxel_count * sizeof(uint32_t);
+    size_t neighbor_count_bytes = (size_t)active_fluid_particle_count * sizeof(uint32_t);
+    size_t neighbor_id_bytes = (size_t)active_fluid_particle_count * PBF_MAX_NEIGHBORS * sizeof(uint32_t);
+    size_t diagnostic_bytes = 4u * sizeof(uint32_t);
+    size_t readback_bytes = (size_t)gpuPhysics.compact_count * sizeof(GpuReadbackState);
+    int needed_hash = 256;
+    int dynamic_count = sim_particle_count + active_fluid_particle_count;
+    while (needed_hash < dynamic_count * 2 && needed_hash < PARTICLE_HASH_SIZE) needed_hash *= 2;
+    if (needed_hash > PARTICLE_HASH_SIZE) needed_hash = PARTICLE_HASH_SIZE;
+    gpuPhysics.hash_capacity = needed_hash;
+    gpuPhysics.last_upload_bytes = (gpuPhysics.particle_upload_required ? particle_bytes : 0) +
+        cell_bytes + sim_bytes + voxel_bytes +
+        (size_t)gpuPhysics.compact_count * sizeof(GpuTetherState) +
+        (gpuPhysics.fluid_upload_required ? fluid_bytes : 0) +
+        dynamic_voxel_id_bytes + diagnostic_bytes;
     if (!gpu_buffer_ensure(&gpuPhysics.particle_buffer, particle_bytes) ||
         !gpu_buffer_ensure(&gpuPhysics.correction_buffer, correction_bytes) ||
         !gpu_buffer_ensure(&gpuPhysics.cell_buffer, cell_bytes) ||
         !gpu_buffer_ensure(&gpuPhysics.sim_id_buffer, sim_bytes) ||
         !gpu_buffer_ensure(&gpuPhysics.voxel_buffer, voxel_bytes) ||
-        !gpu_buffer_ensure(&gpuPhysics.hash_head_buffer, (size_t)PARTICLE_HASH_SIZE * sizeof(int32_t)) ||
+        !gpu_buffer_ensure(&gpuPhysics.hash_head_buffer, (size_t)gpuPhysics.hash_capacity * sizeof(int32_t)) ||
         !gpu_buffer_ensure(&gpuPhysics.hash_next_buffer, next_bytes) ||
         !gpu_buffer_ensure(&gpuPhysics.static_cell_buffer, static_bytes) ||
         !gpu_buffer_ensure(&gpuPhysics.tether_buffer, (size_t)gpuPhysics.compact_count * sizeof(GpuTetherState)) ||
         !gpu_buffer_ensure(&gpuPhysics.fluid_buffer, fluid_bytes) ||
-        !gpu_buffer_ensure(&gpuPhysics.dynamic_voxel_id_buffer, dynamic_voxel_id_bytes)) return false;
-    if (particle_bytes) rlUpdateShaderBuffer(gpuPhysics.particle_buffer.id, gpuPhysics.particle_stage, (unsigned int)particle_bytes, 0);
+        !gpu_buffer_ensure(&gpuPhysics.dynamic_voxel_id_buffer, dynamic_voxel_id_bytes) ||
+        !gpu_buffer_ensure(&gpuPhysics.neighbor_count_buffer, neighbor_count_bytes) ||
+        !gpu_buffer_ensure(&gpuPhysics.neighbor_id_buffer, neighbor_id_bytes) ||
+        !gpu_buffer_ensure(&gpuPhysics.diagnostic_buffer, diagnostic_bytes) ||
+        !gpu_buffer_ensure(&gpuPhysics.readback_buffer, readback_bytes)) return false;
+    if (particle_bytes && gpuPhysics.particle_upload_required)
+        rlUpdateShaderBuffer(gpuPhysics.particle_buffer.id, gpuPhysics.particle_stage, (unsigned int)particle_bytes, 0);
     if (cell_bytes) rlUpdateShaderBuffer(gpuPhysics.cell_buffer.id, gpuPhysics.cell_stage, (unsigned int)cell_bytes, 0);
     if (sim_bytes) rlUpdateShaderBuffer(gpuPhysics.sim_id_buffer.id, gpuPhysics.sim_ids, (unsigned int)sim_bytes, 0);
     if (voxel_bytes) rlUpdateShaderBuffer(gpuPhysics.voxel_buffer.id, gpuPhysics.voxel_stage, (unsigned int)voxel_bytes, 0);
     if (gpuPhysics.compact_count) rlUpdateShaderBuffer(gpuPhysics.tether_buffer.id, gpuPhysics.tether_stage,
                                                        (unsigned int)((size_t)gpuPhysics.compact_count * sizeof(GpuTetherState)), 0);
-    if (fluid_bytes) rlUpdateShaderBuffer(gpuPhysics.fluid_buffer.id, gpuPhysics.fluid_stage,
+    if (fluid_bytes && gpuPhysics.fluid_upload_required) rlUpdateShaderBuffer(gpuPhysics.fluid_buffer.id, gpuPhysics.fluid_stage,
                                           (unsigned int)fluid_bytes, 0);
     if (dynamic_voxel_id_bytes) {
         rlUpdateShaderBuffer(gpuPhysics.dynamic_voxel_id_buffer.id, gpuPhysics.dynamic_voxel_ids,
                              (unsigned int)dynamic_voxel_id_bytes, 0);
     }
+    {
+        const uint32_t zero_diagnostics[4] = { 0, 0, 0, 0 };
+        rlUpdateShaderBuffer(gpuPhysics.diagnostic_buffer.id, zero_diagnostics,
+                             (unsigned int)sizeof(zero_diagnostics), 0);
+    }
     if (gpuPhysics.static_uploaded_generation != staticHashGeneration) {
         if (!gpu_rebuild_static_cells()) return false;
         rlUpdateShaderBuffer(gpuPhysics.static_cell_buffer.id, gpuPhysics.static_stage, (unsigned int)static_bytes, 0);
         gpuPhysics.static_uploaded_generation = staticHashGeneration;
+        gpuPhysics.last_upload_bytes += static_bytes;
     }
     rlBindShaderBuffer(gpuPhysics.particle_buffer.id, 0);
     rlBindShaderBuffer(gpuPhysics.correction_buffer.id, 1);
@@ -430,12 +544,17 @@ static bool gpu_upload_world(void) {
     rlBindShaderBuffer(gpuPhysics.tether_buffer.id, 8);
     rlBindShaderBuffer(gpuPhysics.fluid_buffer.id, 9);
     rlBindShaderBuffer(gpuPhysics.dynamic_voxel_id_buffer.id, 10);
+    rlBindShaderBuffer(gpuPhysics.neighbor_count_buffer.id, 11);
+    rlBindShaderBuffer(gpuPhysics.neighbor_id_buffer.id, 12);
+    rlBindShaderBuffer(gpuPhysics.diagnostic_buffer.id, 13);
+    rlBindShaderBuffer(gpuPhysics.readback_buffer.id, 14);
     return true;
 }
 
 #if defined(GRAPHICS_API_OPENGL_43)
 static bool gpu_dispatch(int mode, int count) {
     if (count <= 0) return true;
+    gpuPhysics.current_dispatches++;
 #ifndef NDEBUG
     while (glGetError() != GL_NO_ERROR) { }
 #endif
@@ -456,7 +575,7 @@ static bool gpu_dispatch(int mode, int count) { (void)mode; (void)count; return 
 static void gpu_set_uniforms(float dt) {
     int particle_count = gpuPhysics.compact_count;
     int fluid_count = active_fluid_particle_count;
-    int hash_size = PARTICLE_HASH_SIZE;
+    int hash_size = gpuPhysics.hash_capacity;
     int static_hash_size = HASH_SIZE;
     rlSetUniform(gpuPhysics.loc[GPU_LOC_PARTICLE_COUNT], &particle_count, SHADER_UNIFORM_INT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_SIM_COUNT], &sim_particle_count, SHADER_UNIFORM_INT, 1);
@@ -515,15 +634,26 @@ static void gpu_set_uniforms(float dt) {
 }
 
 static bool gpu_validate_and_commit(void) {
-    size_t particle_bytes = (size_t)gpuPhysics.compact_count * sizeof(GpuParticleState);
     size_t cell_bytes = (size_t)gpuPhysics.compact_count * sizeof(GpuCellState);
     size_t voxel_bytes = (size_t)voxel_count * sizeof(GpuVoxelState);
-    size_t fluid_bytes = (size_t)gpuPhysics.compact_count * sizeof(GpuFluidState);
-    if (particle_bytes) rlReadShaderBuffer(gpuPhysics.particle_buffer.id, gpuPhysics.particle_stage, (unsigned int)particle_bytes, 0);
-    if (cell_bytes) rlReadShaderBuffer(gpuPhysics.cell_buffer.id, gpuPhysics.cell_stage, (unsigned int)cell_bytes, 0);
+    size_t readback_bytes = (size_t)gpuPhysics.compact_count * sizeof(GpuReadbackState);
+    bool need_cells = sim_particle_count > 0;
+    gpuPhysics.last_readback_bytes = readback_bytes + (need_cells ? cell_bytes : 0) +
+        voxel_bytes + 4u * sizeof(uint32_t);
+    if (readback_bytes) rlReadShaderBuffer(gpuPhysics.readback_buffer.id, gpuPhysics.readback_stage, (unsigned int)readback_bytes, 0);
+    if (need_cells && cell_bytes) rlReadShaderBuffer(gpuPhysics.cell_buffer.id, gpuPhysics.cell_stage, (unsigned int)cell_bytes, 0);
     if (voxel_bytes) rlReadShaderBuffer(gpuPhysics.voxel_buffer.id, gpuPhysics.voxel_stage, (unsigned int)voxel_bytes, 0);
-    if (active_fluid_particle_count > 0 && fluid_bytes) {
-        rlReadShaderBuffer(gpuPhysics.fluid_buffer.id, gpuPhysics.fluid_stage, (unsigned int)fluid_bytes, 0);
+    for (int i = 0; i < gpuPhysics.compact_count; ++i) {
+        GpuReadbackState *r = &gpuPhysics.readback_stage[i];
+        GpuParticleState *g = &gpuPhysics.particle_stage[i];
+        g->pos_radius[0] = r->pos_density[0]; g->pos_radius[1] = r->pos_density[1]; g->pos_radius[2] = r->pos_density[2];
+        g->prev_inv_mass[0] = r->prev_lambda[0]; g->prev_inv_mass[1] = r->prev_lambda[1]; g->prev_inv_mass[2] = r->prev_lambda[2];
+        g->predicted_base_inv_mass[0] = r->pos_density[0]; g->predicted_base_inv_mass[1] = r->pos_density[1];
+        g->predicted_base_inv_mass[2] = r->pos_density[2];
+        g->velocity[0] = r->velocity[0]; g->velocity[1] = r->velocity[1]; g->velocity[2] = r->velocity[2];
+        gpuPhysics.fluid_stage[i].density_lambda[0] = r->pos_density[3];
+        gpuPhysics.fluid_stage[i].density_lambda[1] = r->prev_lambda[3];
+        memset(gpuPhysics.fluid_stage[i].delta, 0, sizeof(gpuPhysics.fluid_stage[i].delta));
     }
     for (int i = 0; i < gpuPhysics.compact_count; ++i) {
         GpuParticleState *g = &gpuPhysics.particle_stage[i];
@@ -569,39 +699,45 @@ static bool gpu_validate_and_commit(void) {
     return true;
 }
 
-static bool gpu_run_substep(float sub_dt) {
-    if (!gpu_pack_world() || !gpu_upload_world()) return false;
-    rlEnableShader(gpuPhysics.program);
+static bool gpu_run_resident_substep(float sub_dt) {
     gpu_set_uniforms(sub_dt);
     int dynamic_count = sim_particle_count + active_fluid_particle_count;
     bool ok = gpu_dispatch(GPU_MODE_INTEGRATE, dynamic_count) &&
-              gpu_dispatch(GPU_MODE_RESET, dynamic_count) &&
-              gpu_dispatch(GPU_MODE_HASH_CLEAR, PARTICLE_HASH_SIZE) &&
-              gpu_dispatch(GPU_MODE_HASH_BUILD, dynamic_count) &&
-              gpu_dispatch(GPU_MODE_SCENE_COLLISIONS, dynamic_count);
+              gpu_dispatch(GPU_MODE_HASH_CLEAR, gpuPhysics.hash_capacity) &&
+              gpu_dispatch(GPU_MODE_HASH_BUILD, dynamic_count);
+    bool has_particle_collisions = activePlayers > 0 || sim_particle_count > 0;
+    if (ok && has_particle_collisions) ok = gpu_dispatch(GPU_MODE_RESET, dynamic_count);
+    if (ok && activePlayers > 0) ok = gpu_dispatch(GPU_MODE_SCENE_COLLISIONS, dynamic_count);
     // PBF already provides fluid/fluid separation. When there are no solid
     // simulation particles this pass only walks hash chains to reject every pair.
     if (ok && sim_particle_count > 0) {
         ok = gpu_dispatch(GPU_MODE_PAIR_COLLISIONS, dynamic_count);
     }
-    if (ok) ok = gpu_dispatch(GPU_MODE_APPLY, dynamic_count);
+    if (ok && has_particle_collisions) ok = gpu_dispatch(GPU_MODE_APPLY, dynamic_count);
     if (active_fluid_particle_count > 0) {
+        ok = ok && gpu_dispatch(GPU_MODE_PBF_BUILD_NEIGHBORS, active_fluid_particle_count);
         for (int it = 0; ok && it < PBF_DENSITY_ITERS; ++it) {
             ok = gpu_dispatch(GPU_MODE_PBF_LAMBDA, active_fluid_particle_count) &&
                  gpu_dispatch(GPU_MODE_PBF_DELTA, active_fluid_particle_count) &&
-                 gpu_dispatch(GPU_MODE_PBF_APPLY, active_fluid_particle_count) &&
-                 gpu_dispatch(GPU_MODE_PBF_STATIC_COLLISIONS, active_fluid_particle_count);
+                 gpu_dispatch(GPU_MODE_PBF_APPLY, active_fluid_particle_count);
         }
+    }
+    {
+        uint32_t diagnostics[4] = { 0, 0, 0, 0 };
+        rlReadShaderBuffer(gpuPhysics.diagnostic_buffer.id, diagnostics, sizeof(diagnostics), 0);
+        gpuPhysics.last_neighbor_overflow = diagnostics[0];
     }
     if (ok && active_fluid_particle_count > 0 && gpuPhysics.dynamic_voxel_count > 0) {
         ok = gpu_dispatch(GPU_MODE_RESET, dynamic_count) &&
              gpu_dispatch(GPU_MODE_PBF_DYNAMIC_SOLID_COLLISIONS, active_fluid_particle_count) &&
              gpu_dispatch(GPU_MODE_APPLY, dynamic_count);
     }
-    for (int it = 0; ok && it < PBD_CONSTRAINT_ITERS; ++it) {
-        ok = gpu_dispatch(GPU_MODE_RESET, dynamic_count) &&
-             gpu_dispatch(GPU_MODE_VGS, voxel_count) &&
-             gpu_dispatch(GPU_MODE_APPLY, dynamic_count);
+    if (sim_particle_count > 0) {
+        for (int it = 0; ok && it < PBD_CONSTRAINT_ITERS; ++it) {
+            ok = gpu_dispatch(GPU_MODE_RESET, dynamic_count) &&
+                 gpu_dispatch(GPU_MODE_VGS, voxel_count) &&
+                 gpu_dispatch(GPU_MODE_APPLY, dynamic_count);
+        }
     }
     // Each PBF iteration ends with a boundary projection, so only solid
     // particles require the pipeline's final static-collision pass.
@@ -613,26 +749,72 @@ static bool gpu_run_substep(float sub_dt) {
             ok = gpu_dispatch(GPU_MODE_PBF_DYNAMIC_SOLID_FINAL, active_fluid_particle_count);
         }
     }
-    ok = ok && gpu_dispatch(GPU_MODE_BREAK_MASK, voxel_count) &&
-         gpu_dispatch(GPU_MODE_FINALIZE_PARTICLES, dynamic_count) &&
+    if (ok && sim_particle_count > 0) ok = gpu_dispatch(GPU_MODE_BREAK_MASK, voxel_count);
+    ok = ok && gpu_dispatch(GPU_MODE_FINALIZE_PARTICLES, dynamic_count) &&
          gpu_dispatch(GPU_MODE_PBF_VISCOSITY, active_fluid_particle_count) &&
-         gpu_dispatch(GPU_MODE_PBF_APPLY_VISCOSITY, active_fluid_particle_count) &&
-         gpu_dispatch(GPU_MODE_FINALIZE_VOXELS, voxel_count);
-    rlDisableShader();
-    if (!ok || !gpu_validate_and_commit()) return false;
-    process_break_masks();
-    update_wake_timers();
-    return true;
+         gpu_dispatch(GPU_MODE_PBF_APPLY_VISCOSITY, active_fluid_particle_count);
+    if (ok) ok = gpu_dispatch(GPU_MODE_FINALIZE_VOXELS, voxel_count);
+    return ok;
 }
 
 static int gpu_physics_step(float dt) {
     gpuPhysics.committed_substeps = 0;
     if (getenv("FPS_FORCE_GPU_STEP_FAILURE") != NULL) return 0;
+    gpuPhysics.current_dispatches = 0;
+    double stage_started = GetTime();
+    if (!gpu_pack_world()) return 0;
+    gpuPhysics.last_pack_ms = (GetTime() - stage_started) * 1000.0;
+    stage_started = GetTime();
+    if (!gpu_upload_world()) return 0;
+    gpuPhysics.last_upload_ms = (GetTime() - stage_started) * 1000.0;
+#if defined(GRAPHICS_API_OPENGL_43)
+    if (gpuPhysics.step_time_query != 0) glBeginQuery(GL_TIME_ELAPSED, gpuPhysics.step_time_query);
+#endif
+    rlEnableShader(gpuPhysics.program);
     float sub_dt = dt / (float)PBD_SUBSTEPS;
     for (int step = 0; step < PBD_SUBSTEPS; ++step) {
-        if (!gpu_run_substep(sub_dt)) return gpuPhysics.committed_substeps;
-        gpuPhysics.committed_substeps++;
+        if (!gpu_run_resident_substep(sub_dt)) {
+            rlDisableShader();
+#if defined(GRAPHICS_API_OPENGL_43)
+            if (gpuPhysics.step_time_query != 0) glEndQuery(GL_TIME_ELAPSED);
+#endif
+            gpuPhysics.resident_valid = false;
+            return 0;
+        }
     }
+    if (!gpu_dispatch(GPU_MODE_PACK_READBACK, gpuPhysics.compact_count)) {
+        rlDisableShader();
+#if defined(GRAPHICS_API_OPENGL_43)
+        if (gpuPhysics.step_time_query != 0) glEndQuery(GL_TIME_ELAPSED);
+#endif
+        gpuPhysics.resident_valid = false;
+        return 0;
+    }
+    rlDisableShader();
+#if defined(GRAPHICS_API_OPENGL_43)
+    if (gpuPhysics.step_time_query != 0) glEndQuery(GL_TIME_ELAPSED);
+#endif
+    stage_started = GetTime();
+    if (!gpu_validate_and_commit()) {
+        gpuPhysics.resident_valid = false;
+        return 0;
+    }
+    gpuPhysics.last_readback_ms = (GetTime() - stage_started) * 1000.0;
+#if defined(GRAPHICS_API_OPENGL_43)
+    if (gpuPhysics.step_time_query != 0) {
+        GLuint64 nanoseconds = 0;
+        glGetQueryObjectui64v(gpuPhysics.step_time_query, GL_QUERY_RESULT, &nanoseconds);
+        gpuPhysics.last_gpu_compute_ms = (double)nanoseconds / 1000000.0;
+    }
+#endif
+    gpuPhysics.last_dispatches = gpuPhysics.current_dispatches;
+    gpuPhysics.resident_valid = true;
+    gpuPhysics.resident_compact_count = gpuPhysics.compact_count;
+    gpuPhysics.resident_sim_count = sim_particle_count;
+    gpuPhysics.resident_fluid_count = active_fluid_particle_count;
+    gpuPhysics.committed_substeps = PBD_SUBSTEPS;
+    process_break_masks();
+    update_wake_timers();
     return gpuPhysics.committed_substeps;
 }
 
@@ -656,7 +838,7 @@ static bool gpu_physics_init(void) {
     glGetIntegerv(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS, &max_bindings);
     glGetIntegerv(GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS, &max_invocations);
     glGetInteger64v(GL_MAX_SHADER_STORAGE_BLOCK_SIZE, &max_block);
-    if (max_bindings < 11 || max_invocations < 128 || max_block < 1024 * 1024) {
+    if (max_bindings < 15 || max_invocations < 128 || max_block < 1024 * 1024) {
         snprintf(physicsBackend.fallback_reason, sizeof(physicsBackend.fallback_reason),
                  "insufficient compute limits (bindings=%d invocations=%d block=%lld)",
                  max_bindings, max_invocations, (long long)max_block);
@@ -708,6 +890,160 @@ static bool gpu_physics_init(void) {
     gpuPhysics.ready = true;
     gpuPhysics.static_uploaded_generation = 0;
     physicsBackend.gpu_available = true;
+    glGenQueries(1, &gpuPhysics.step_time_query);
+    glGenQueries(1, &gpuPhysics.hull_time_query);
     return true;
 #endif
 }
+
+#if defined(GRAPHICS_API_OPENGL_43)
+static bool gpu_fluid_hull_init(void) {
+    if (gpuPhysics.hull_program != 0) return true;
+    char *source = LoadFileText("shaders/pbd/fluid_hull.comp");
+    if (!source) return false;
+    unsigned int shader = rlCompileShader(source, RL_COMPUTE_SHADER);
+    UnloadFileText(source);
+    if (shader == 0) return false;
+    gpuPhysics.hull_program = rlLoadComputeShaderProgram(shader);
+    glDeleteShader(shader);
+    if (gpuPhysics.hull_program == 0) return false;
+    static const char *names[9] = {
+        "uMode", "uSimCount", "uFluidCount", "uOccupancyOrigin", "uOccupancyDims",
+        "uCubeOrigin", "uCubeDims", "uCellSize", "uMaxVertices"
+    };
+    for (int i = 0; i < 9; ++i) {
+        gpuPhysics.hull_loc[i] = rlGetLocationUniform(gpuPhysics.hull_program, names[i]);
+        if (gpuPhysics.hull_loc[i] < 0) {
+            rlUnloadShaderProgram(gpuPhysics.hull_program);
+            gpuPhysics.hull_program = 0;
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool gpu_fluid_hull_configure_mesh(void) {
+    if (gpuPhysics.hull_mesh.vaoId != 0 &&
+        gpuPhysics.hull_position_id == gpuPhysics.hull_position_buffer.id &&
+        gpuPhysics.hull_normal_id == gpuPhysics.hull_normal_buffer.id) return true;
+    if (gpuPhysics.hull_mesh.vaoId != 0) rlUnloadVertexArray(gpuPhysics.hull_mesh.vaoId);
+    if (!gpuPhysics.hull_mesh.vboId) {
+        gpuPhysics.hull_mesh.vboId = RL_CALLOC(9, sizeof(unsigned int));
+        if (!gpuPhysics.hull_mesh.vboId) return false;
+    }
+    gpuPhysics.hull_mesh.vaoId = rlLoadVertexArray();
+    if (gpuPhysics.hull_mesh.vaoId == 0) return false;
+    rlEnableVertexArray(gpuPhysics.hull_mesh.vaoId);
+    rlEnableVertexBuffer(gpuPhysics.hull_position_buffer.id);
+    rlSetVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_POSITION, 3, RL_FLOAT, 0, 0, 0);
+    rlEnableVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_POSITION);
+    rlEnableVertexBuffer(gpuPhysics.hull_normal_buffer.id);
+    rlSetVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_NORMAL, 3, RL_FLOAT, 0, 0, 0);
+    rlEnableVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_NORMAL);
+    rlDisableVertexBuffer();
+    rlDisableVertexArray();
+    gpuPhysics.hull_mesh.vboId[RL_DEFAULT_SHADER_ATTRIB_LOCATION_POSITION] = gpuPhysics.hull_position_buffer.id;
+    gpuPhysics.hull_mesh.vboId[RL_DEFAULT_SHADER_ATTRIB_LOCATION_NORMAL] = gpuPhysics.hull_normal_buffer.id;
+    gpuPhysics.hull_position_id = gpuPhysics.hull_position_buffer.id;
+    gpuPhysics.hull_normal_id = gpuPhysics.hull_normal_buffer.id;
+    return true;
+}
+
+static bool gpu_fluid_hull_draw(Material material) {
+    gpuPhysics.last_hull_used_gpu = false;
+    if (!gpuPhysics.ready || active_fluid_particle_count <= 0 || !gpu_fluid_hull_init()) return false;
+    int min_cell[3] = { INT_MAX, INT_MAX, INT_MAX };
+    int max_cell[3] = { INT_MIN, INT_MIN, INT_MIN };
+    int renderable = 0;
+    for (int i = 0; i < active_fluid_particle_count; ++i) {
+        Particle *p = fluid_particles[i];
+        if (!p || !p->active || !v_isfinite(p->pos)) continue;
+        int c[3] = { (int)floorf(p->pos.x / PBF_HULL_CELL_SIZE),
+                     (int)floorf(p->pos.y / PBF_HULL_CELL_SIZE),
+                     (int)floorf(p->pos.z / PBF_HULL_CELL_SIZE) };
+        for (int axis = 0; axis < 3; ++axis) {
+            if (c[axis] < min_cell[axis]) min_cell[axis] = c[axis];
+            if (c[axis] > max_cell[axis]) max_cell[axis] = c[axis];
+        }
+        renderable++;
+    }
+    if (renderable == 0) return false;
+    int occupancy_origin[3], occupancy_dims[3], cube_origin[3], cube_dims[3];
+    size_t occupancy_count = 1, cube_count = 1;
+    for (int axis = 0; axis < 3; ++axis) {
+        occupancy_origin[axis] = min_cell[axis] - 2;
+        occupancy_dims[axis] = max_cell[axis] - min_cell[axis] + 5;
+        cube_origin[axis] = min_cell[axis] - 1;
+        cube_dims[axis] = max_cell[axis] - min_cell[axis] + 3;
+        if (occupancy_dims[axis] <= 0 || cube_dims[axis] <= 0 ||
+            occupancy_count > SIZE_MAX / (size_t)occupancy_dims[axis] ||
+            cube_count > SIZE_MAX / (size_t)cube_dims[axis]) return false;
+        occupancy_count *= (size_t)occupancy_dims[axis];
+        cube_count *= (size_t)cube_dims[axis];
+    }
+    if (cube_count > SIZE_MAX / 18u) return false;
+    size_t max_vertices = cube_count * 18u;
+    if (max_vertices > UINT_MAX || max_vertices > SIZE_MAX / (3u * sizeof(float))) return false;
+    if (!gpu_buffer_ensure(&gpuPhysics.hull_occupancy_buffer, occupancy_count * sizeof(uint32_t)) ||
+        !gpu_buffer_ensure(&gpuPhysics.hull_net_vertex_buffer, cube_count * 4u * sizeof(float)) ||
+        !gpu_buffer_ensure(&gpuPhysics.hull_net_active_buffer, cube_count * sizeof(uint32_t)) ||
+        !gpu_buffer_ensure(&gpuPhysics.hull_position_buffer, max_vertices * 3u * sizeof(float)) ||
+        !gpu_buffer_ensure(&gpuPhysics.hull_normal_buffer, max_vertices * 3u * sizeof(float)) ||
+        !gpu_buffer_ensure(&gpuPhysics.hull_counter_buffer, 4u * sizeof(uint32_t)) ||
+        !gpu_fluid_hull_configure_mesh()) return false;
+    rlBindShaderBuffer(gpuPhysics.particle_buffer.id, 0);
+    rlBindShaderBuffer(gpuPhysics.sim_id_buffer.id, 1);
+    rlBindShaderBuffer(gpuPhysics.hull_occupancy_buffer.id, 2);
+    rlBindShaderBuffer(gpuPhysics.hull_net_vertex_buffer.id, 3);
+    rlBindShaderBuffer(gpuPhysics.hull_net_active_buffer.id, 4);
+    rlBindShaderBuffer(gpuPhysics.hull_position_buffer.id, 5);
+    rlBindShaderBuffer(gpuPhysics.hull_normal_buffer.id, 6);
+    rlBindShaderBuffer(gpuPhysics.hull_counter_buffer.id, 7);
+    rlEnableShader(gpuPhysics.hull_program);
+#if defined(GRAPHICS_API_OPENGL_43)
+    if (gpuPhysics.hull_time_query != 0) glBeginQuery(GL_TIME_ELAPSED, gpuPhysics.hull_time_query);
+#endif
+    rlSetUniform(gpuPhysics.hull_loc[1], &sim_particle_count, SHADER_UNIFORM_INT, 1);
+    rlSetUniform(gpuPhysics.hull_loc[2], &active_fluid_particle_count, SHADER_UNIFORM_INT, 1);
+    rlSetUniform(gpuPhysics.hull_loc[3], occupancy_origin, SHADER_UNIFORM_IVEC3, 1);
+    rlSetUniform(gpuPhysics.hull_loc[4], occupancy_dims, SHADER_UNIFORM_IVEC3, 1);
+    rlSetUniform(gpuPhysics.hull_loc[5], cube_origin, SHADER_UNIFORM_IVEC3, 1);
+    rlSetUniform(gpuPhysics.hull_loc[6], cube_dims, SHADER_UNIFORM_IVEC3, 1);
+    float cell_size = PBF_HULL_CELL_SIZE;
+    unsigned int max_vertices_uniform = (unsigned int)max_vertices;
+    rlSetUniform(gpuPhysics.hull_loc[7], &cell_size, SHADER_UNIFORM_FLOAT, 1);
+    rlSetUniform(gpuPhysics.hull_loc[8], &max_vertices_uniform, SHADER_UNIFORM_UINT, 1);
+    int modes[4] = { 0, 1, 2, 3 };
+    size_t clear_count = occupancy_count > cube_count ? occupancy_count : cube_count;
+    const size_t counts[4] = { clear_count, (size_t)active_fluid_particle_count, cube_count, occupancy_count };
+    for (int pass = 0; pass < 4; ++pass) {
+        rlSetUniform(gpuPhysics.hull_loc[0], &modes[pass], SHADER_UNIFORM_INT, 1);
+        rlComputeShaderDispatch((unsigned int)((counts[pass] + 127u) / 128u), 1, 1);
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT |
+                        GL_BUFFER_UPDATE_BARRIER_BIT);
+    }
+    rlDisableShader();
+#if defined(GRAPHICS_API_OPENGL_43)
+    if (gpuPhysics.hull_time_query != 0) glEndQuery(GL_TIME_ELAPSED);
+#endif
+    uint32_t counters[4] = { 0, 0, 0, 0 };
+    rlReadShaderBuffer(gpuPhysics.hull_counter_buffer.id, counters, sizeof(counters), 0);
+#if defined(GRAPHICS_API_OPENGL_43)
+    if (gpuPhysics.hull_time_query != 0) {
+        GLuint64 nanoseconds = 0;
+        glGetQueryObjectui64v(gpuPhysics.hull_time_query, GL_QUERY_RESULT, &nanoseconds);
+        gpuPhysics.last_hull_gpu_ms = (double)nanoseconds / 1000000.0;
+    }
+#endif
+    if (counters[1] != 0 || counters[0] == 0) return false;
+    gpuPhysics.hull_mesh.vertexCount = (int)counters[0];
+    gpuPhysics.hull_mesh.triangleCount = (int)counters[0] / 3;
+    rlDisableBackfaceCulling();
+    DrawMesh(gpuPhysics.hull_mesh, material, MatrixIdentity());
+    rlEnableBackfaceCulling();
+    gpuPhysics.last_hull_used_gpu = true;
+    return true;
+}
+#else
+static bool gpu_fluid_hull_draw(Material material) { (void)material; return false; }
+#endif

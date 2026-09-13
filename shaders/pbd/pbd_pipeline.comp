@@ -27,6 +27,12 @@ struct FluidState {
     vec4 delta;
 };
 
+struct ReadbackState {
+    vec4 pos_density;
+    vec4 prev_lambda;
+    vec4 velocity;
+};
+
 layout(std430, binding = 0) buffer ParticleBuffer { ParticleState particle[]; };
 layout(std430, binding = 1) buffer CorrectionBuffer { uvec4 correction[]; };
 layout(std430, binding = 2) buffer CellBuffer { ivec4 cell[]; };
@@ -38,6 +44,10 @@ layout(std430, binding = 7) readonly buffer StaticCellBuffer { ivec4 staticCell[
 layout(std430, binding = 8) readonly buffer TetherBuffer { vec4 tetherTarget[]; };
 layout(std430, binding = 9) buffer FluidBuffer { FluidState fluid[]; };
 layout(std430, binding = 10) readonly buffer DynamicVoxelIdBuffer { uint dynamicVoxelId[]; };
+layout(std430, binding = 11) buffer NeighborCountBuffer { uint neighborCount[]; };
+layout(std430, binding = 12) buffer NeighborIdBuffer { uint neighborId[]; };
+layout(std430, binding = 13) buffer DiagnosticBuffer { uint diagnostic[]; };
+layout(std430, binding = 14) buffer ReadbackBuffer { ReadbackState readbackState[]; };
 
 uniform int uMode;
 uniform int uParticleCount;
@@ -93,6 +103,9 @@ const int MODE_PBF_VISCOSITY = 16;
 const int MODE_PBF_APPLY_VISCOSITY = 17;
 const int MODE_PBF_DYNAMIC_SOLID_COLLISIONS = 18;
 const int MODE_PBF_DYNAMIC_SOLID_FINAL = 19;
+const int MODE_PBF_BUILD_NEIGHBORS = 20;
+const int MODE_PACK_READBACK = 21;
+const uint PBF_MAX_NEIGHBORS = 64u;
 
 const float PI_VALUE = 3.14159265358979323846;
 const float PARTICLE_MATERIAL_FLUID = 1.0;
@@ -183,6 +196,33 @@ void buildHash(uint gid) {
     cell[id].xyz = c;
     uint h = hashCoord(c, uHashSize);
     hashNext[gid] = atomicExchange(hashHead[h], int(gid));
+}
+
+void pbfBuildNeighbors(uint gid) {
+    if (gid >= uint(uFluidCount)) return;
+    uint id = fluidId(gid);
+    ivec3 currentCell = cell[id].xyz;
+    uint count = 0u;
+    bool overflow = false;
+    for (int z=-1; z<=1; ++z) for (int y=-1; y<=1; ++y) for (int x=-1; x<=1; ++x) {
+        ivec3 neighborCell = currentCell + ivec3(x,y,z);
+        int item = hashHead[hashCoord(neighborCell, uHashSize)];
+        while (item >= 0 && item < int(dynamicCount())) {
+            uint candidate = simId[item];
+            if (isFluid(candidate) && all(equal(cell[candidate].xyz, neighborCell))) {
+                vec3 separation = particle[id].predicted_base_inv_mass.xyz -
+                                  particle[candidate].predicted_base_inv_mass.xyz;
+                if (dot(separation, separation) < uPbfH * uPbfH) {
+                    if (count < PBF_MAX_NEIGHBORS) neighborId[gid * PBF_MAX_NEIGHBORS + count] = candidate;
+                    count++;
+                    if (count > PBF_MAX_NEIGHBORS) overflow = true;
+                }
+            }
+            item = hashNext[item];
+        }
+    }
+    neighborCount[gid] = count;
+    if (overflow) atomicAdd(diagnostic[0], 1u);
 }
 
 void sceneCollisions(uint gid) {
@@ -287,27 +327,43 @@ void pbfLambda(uint gid) {
     if (gid >= uint(uFluidCount)) return;
     uint id = fluidId(gid);
     ParticleState current = particle[id];
-    ivec3 currentCell = cell[id].xyz;
     float density = 0.0;
     float volume = uPbfParticleMass / uPbfRestDensity;
     vec3 gradientI = vec3(0.0);
     float gradientSumSq = 0.0;
-    for (int z=-1; z<=1; ++z) for (int y=-1; y<=1; ++y) for (int x=-1; x<=1; ++x) {
-        ivec3 neighborCell = currentCell + ivec3(x,y,z);
-        int item = hashHead[hashCoord(neighborCell, uHashSize)];
-        while (item >= 0 && item < int(dynamicCount())) {
-            uint neighborId = simId[item];
-            if (isFluid(neighborId) && all(equal(cell[neighborId].xyz, neighborCell))) {
-                vec3 separation = current.predicted_base_inv_mass.xyz -
-                                  particle[neighborId].predicted_base_inv_mass.xyz;
-                density += uPbfParticleMass * pbfPoly6(dot(separation, separation));
-                if (neighborId != id) {
-                    vec3 gradientJ = -volume * pbfSpikyGradient(separation);
-                    gradientSumSq += dot(gradientJ, gradientJ);
-                    gradientI -= gradientJ;
-                }
+    uint cachedCount = neighborCount[gid];
+    if (cachedCount <= PBF_MAX_NEIGHBORS) {
+        for (uint k = 0u; k < cachedCount; ++k) {
+            uint neighbor = neighborId[gid * PBF_MAX_NEIGHBORS + k];
+            vec3 separation = current.predicted_base_inv_mass.xyz - particle[neighbor].predicted_base_inv_mass.xyz;
+            density += uPbfParticleMass * pbfPoly6(dot(separation, separation));
+            if (neighbor != id) {
+                vec3 gradientJ = -volume * pbfSpikyGradient(separation);
+                gradientSumSq += dot(gradientJ, gradientJ);
+                gradientI -= gradientJ;
             }
-            item = hashNext[item];
+        }
+    } else {
+        ivec3 currentCell = cell[id].xyz;
+        for (int z=-1; z<=1; ++z) for (int y=-1; y<=1; ++y) for (int x=-1; x<=1; ++x) {
+            ivec3 neighborCell = currentCell + ivec3(x,y,z);
+            int item = hashHead[hashCoord(neighborCell, uHashSize)];
+            while (item >= 0 && item < int(dynamicCount())) {
+                uint neighbor = simId[item];
+                if (isFluid(neighbor) && all(equal(cell[neighbor].xyz, neighborCell))) {
+                    vec3 separation = current.predicted_base_inv_mass.xyz - particle[neighbor].predicted_base_inv_mass.xyz;
+                    float distanceSq = dot(separation, separation);
+                    if (distanceSq < uPbfH * uPbfH) {
+                        density += uPbfParticleMass * pbfPoly6(distanceSq);
+                        if (neighbor != id) {
+                            vec3 gradientJ = -volume * pbfSpikyGradient(separation);
+                            gradientSumSq += dot(gradientJ, gradientJ);
+                            gradientI -= gradientJ;
+                        }
+                    }
+                }
+                item = hashNext[item];
+            }
         }
     }
     gradientSumSq += dot(gradientI, gradientI);
@@ -316,38 +372,45 @@ void pbfLambda(uint gid) {
     fluid[id].density_lambda.y = -constraint / (gradientSumSq + uPbfLambdaEpsilon);
 }
 
+vec3 pbfDeltaContribution(uint id, uint neighbor, ParticleState current,
+                          float volume, float referenceKernel) {
+    if (neighbor == id) return vec3(0.0);
+    vec3 separation = current.predicted_base_inv_mass.xyz - particle[neighbor].predicted_base_inv_mass.xyz;
+    float kernel = pbfPoly6(dot(separation, separation));
+    if (kernel <= 0.0) return vec3(0.0);
+    float ratio = (referenceKernel > 0.0) ? kernel / referenceKernel : 0.0;
+    float ratioSquared = ratio * ratio;
+    float ratioFourth = ratioSquared * ratioSquared;
+    float scorr = -uPbfScorrK * (0.25 * uVoxelSize * uVoxelSize) * ratioFourth;
+    float scale = volume * (fluid[id].density_lambda.y + fluid[neighbor].density_lambda.y + scorr);
+    return scale * pbfSpikyGradient(separation);
+}
+
 void pbfDelta(uint gid) {
     if (gid >= uint(uFluidCount)) return;
     uint id = fluidId(gid);
     ParticleState current = particle[id];
-    ivec3 currentCell = cell[id].xyz;
     float volume = uPbfParticleMass / uPbfRestDensity;
     float referenceKernel = uPbfScorrReferenceKernel;
     vec3 delta = vec3(0.0);
-    for (int z=-1; z<=1; ++z) for (int y=-1; y<=1; ++y) for (int x=-1; x<=1; ++x) {
-        ivec3 neighborCell = currentCell + ivec3(x,y,z);
-        int item = hashHead[hashCoord(neighborCell, uHashSize)];
-        while (item >= 0 && item < int(dynamicCount())) {
-            uint neighborId = simId[item];
-            if (neighborId != id && isFluid(neighborId) &&
-                all(equal(cell[neighborId].xyz, neighborCell))) {
-                vec3 separation = current.predicted_base_inv_mass.xyz -
-                                  particle[neighborId].predicted_base_inv_mass.xyz;
-                float kernel = pbfPoly6(dot(separation, separation));
-                if (kernel > 0.0) {
-                    float ratio = (referenceKernel > 0.0) ? kernel / referenceKernel : 0.0;
-                    // Convert normalized artificial pressure to world-space lambda units.
-                    float ratioSquared = ratio * ratio;
-                    float ratioFourth = ratioSquared * ratioSquared;
-                    float scorr = -uPbfScorrK *
-                                  (0.25 * uVoxelSize * uVoxelSize) *
-                                  ratioFourth;
-                    float scale = volume * (fluid[id].density_lambda.y +
-                                            fluid[neighborId].density_lambda.y + scorr);
-                    delta += scale * pbfSpikyGradient(separation);
+    uint cachedCount = neighborCount[gid];
+    if (cachedCount <= PBF_MAX_NEIGHBORS) {
+        for (uint k = 0u; k < cachedCount; ++k) {
+            uint neighbor = neighborId[gid * PBF_MAX_NEIGHBORS + k];
+            delta += pbfDeltaContribution(id, neighbor, current, volume, referenceKernel);
+        }
+    } else {
+        ivec3 currentCell = cell[id].xyz;
+        for (int z=-1; z<=1; ++z) for (int y=-1; y<=1; ++y) for (int x=-1; x<=1; ++x) {
+            ivec3 neighborCell = currentCell + ivec3(x,y,z);
+            int item = hashHead[hashCoord(neighborCell, uHashSize)];
+            while (item >= 0 && item < int(dynamicCount())) {
+                uint neighbor = simId[item];
+                if (isFluid(neighbor) && all(equal(cell[neighbor].xyz, neighborCell))) {
+                    delta += pbfDeltaContribution(id, neighbor, current, volume, referenceKernel);
                 }
+                item = hashNext[item];
             }
-            item = hashNext[item];
         }
     }
     float deltaLength = length(delta);
@@ -364,26 +427,37 @@ void pbfApply(uint gid) {
     fluid[id].delta = vec4(0.0);
 }
 
+vec3 pbfViscosityContribution(uint id, uint neighbor, ParticleState current) {
+    if (neighbor == id) return vec3(0.0);
+    vec3 separation = current.pos_radius.xyz - particle[neighbor].pos_radius.xyz;
+    float kernel = pbfPoly6(dot(separation, separation));
+    float density = max(fluid[neighbor].density_lambda.x, uPbfRestDensity * 0.1);
+    float scale = uPbfViscosity * uPbfParticleMass * kernel / density;
+    return (particle[neighbor].velocity.xyz - current.velocity.xyz) * scale;
+}
+
 void pbfViscosity(uint gid) {
     if (gid >= uint(uFluidCount)) return;
     uint id = fluidId(gid);
     ParticleState current = particle[id];
-    ivec3 currentCell = cell[id].xyz;
     vec3 velocityDelta = vec3(0.0);
-    for (int z=-1; z<=1; ++z) for (int y=-1; y<=1; ++y) for (int x=-1; x<=1; ++x) {
-        ivec3 neighborCell = currentCell + ivec3(x,y,z);
-        int item = hashHead[hashCoord(neighborCell, uHashSize)];
-        while (item >= 0 && item < int(dynamicCount())) {
-            uint neighborId = simId[item];
-            if (neighborId != id && isFluid(neighborId) &&
-                all(equal(cell[neighborId].xyz, neighborCell))) {
-                vec3 separation = current.pos_radius.xyz - particle[neighborId].pos_radius.xyz;
-                float kernel = pbfPoly6(dot(separation, separation));
-                float density = max(fluid[neighborId].density_lambda.x, uPbfRestDensity * 0.1);
-                float scale = uPbfViscosity * uPbfParticleMass * kernel / density;
-                velocityDelta += (particle[neighborId].velocity.xyz - current.velocity.xyz) * scale;
+    uint cachedCount = neighborCount[gid];
+    if (cachedCount <= PBF_MAX_NEIGHBORS) {
+        for (uint k = 0u; k < cachedCount; ++k) {
+            velocityDelta += pbfViscosityContribution(id,
+                neighborId[gid * PBF_MAX_NEIGHBORS + k], current);
+        }
+    } else {
+        ivec3 currentCell = cell[id].xyz;
+        for (int z=-1; z<=1; ++z) for (int y=-1; y<=1; ++y) for (int x=-1; x<=1; ++x) {
+            ivec3 neighborCell = currentCell + ivec3(x,y,z);
+            int item = hashHead[hashCoord(neighborCell, uHashSize)];
+            while (item >= 0 && item < int(dynamicCount())) {
+                uint neighbor = simId[item];
+                if (isFluid(neighbor) && all(equal(cell[neighbor].xyz, neighborCell)))
+                    velocityDelta += pbfViscosityContribution(id, neighbor, current);
+                item = hashNext[item];
             }
-            item = hashNext[item];
         }
     }
     fluid[id].delta = vec4(velocityDelta, 0.0);
@@ -684,6 +758,11 @@ void pbfStaticCollisions(uint gid) {
     staticCollisionParticle(fluidId(gid));
 }
 
+void pbfApplyAndStaticCollisions(uint gid) {
+    pbfApply(gid);
+    pbfStaticCollisions(gid);
+}
+
 void gatherBreakMask(uint gid) {
     if (gid >= uint(uVoxelCount)) return;
     VoxelState v = voxel[gid];
@@ -740,6 +819,16 @@ void finalizeVoxel(uint gid) {
     v.pos_rest_edge.xyz=centerPos; voxel[gid]=v;
 }
 
+void packReadback(uint gid) {
+    if (gid >= uint(uParticleCount)) return;
+    ParticleState p = particle[gid];
+    float density = isFluid(gid) ? fluid[gid].density_lambda.x : 0.0;
+    float lambda = isFluid(gid) ? fluid[gid].density_lambda.y : 0.0;
+    readbackState[gid].pos_density = vec4(p.pos_radius.xyz, density);
+    readbackState[gid].prev_lambda = vec4(p.prev_inv_mass.xyz, lambda);
+    readbackState[gid].velocity = vec4(p.velocity.xyz, 0.0);
+}
+
 void main() {
     uint gid=gl_GlobalInvocationID.x;
     if (uMode==MODE_RESET) resetCorrections(gid);
@@ -756,10 +845,12 @@ void main() {
     else if (uMode==MODE_FINALIZE_VOXELS) finalizeVoxel(gid);
     else if (uMode==MODE_PBF_LAMBDA) pbfLambda(gid);
     else if (uMode==MODE_PBF_DELTA) pbfDelta(gid);
-    else if (uMode==MODE_PBF_APPLY) pbfApply(gid);
+    else if (uMode==MODE_PBF_APPLY) pbfApplyAndStaticCollisions(gid);
     else if (uMode==MODE_PBF_STATIC_COLLISIONS) pbfStaticCollisions(gid);
     else if (uMode==MODE_PBF_VISCOSITY) pbfViscosity(gid);
     else if (uMode==MODE_PBF_APPLY_VISCOSITY) pbfApplyViscosity(gid);
     else if (uMode==MODE_PBF_DYNAMIC_SOLID_COLLISIONS) pbfDynamicSolidCollisions(gid, true);
     else if (uMode==MODE_PBF_DYNAMIC_SOLID_FINAL) pbfDynamicSolidCollisions(gid, false);
+    else if (uMode==MODE_PBF_BUILD_NEIGHBORS) pbfBuildNeighbors(gid);
+    else if (uMode==MODE_PACK_READBACK) packReadback(gid);
 }

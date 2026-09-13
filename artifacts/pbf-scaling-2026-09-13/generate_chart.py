@@ -23,8 +23,8 @@ except OSError:
     title_font = body_font = small_font = ImageFont.load_default()
 
 x_min = math.log10(64)
-x_max = math.log10(8000)
-y_max = 700.0
+x_max = math.log10(17576)
+y_max = 1000.0
 
 
 def x_pos(particles: float) -> float:
@@ -36,7 +36,7 @@ def y_pos(fps: float) -> float:
 
 
 draw.text((left, 20), "PBF frame-rate scaling with convex-hull rendering", fill="#172033", font=title_font)
-for fps in range(0, 701, 100):
+for fps in range(0, 1001, 100):
     y = y_pos(fps)
     draw.line((left, y, width - right, y), fill="#dbe2ec", width=1)
     label = str(fps)
@@ -47,7 +47,7 @@ particles = [int(row["particles"]) for row in rows]
 for value in particles:
     x = x_pos(value)
     draw.line((x, top, x, top + plot_h), fill="#e8edf4", width=1)
-    label = f"{value:,}"
+    label = f"{value/1000:.1f}k" if value >= 10000 else f"{value:,}"
     box = draw.textbbox((0, 0), label, font=small_font)
     draw.text((x - (box[2] - box[0]) / 2, top + plot_h + 14), label, fill="#596579", font=small_font)
 

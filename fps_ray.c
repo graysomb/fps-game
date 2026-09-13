@@ -634,6 +634,9 @@ static int particle_sync_stamp = 1;
 static int tether_apply_stamp = 1;
 static _Atomic int particle_hash_head[PARTICLE_HASH_SIZE];
 static int particle_hash_next[MAX_PARTICLES];
+static int particle_hash_touched[PARTICLE_HASH_SIZE];
+static _Atomic int particle_hash_touched_count = 0;
+static bool particle_hash_initialized = false;
 static Particle *particle_snapshot[MAX_PARTICLES];
 static int glueClusterIndices[MAX_VOXELS];
 static unsigned char glueClusterVisited[MAX_VOXELS];
@@ -2440,6 +2443,16 @@ static void particle_hash_clear_range(int start, int end, int worker_id, void *u
     }
 }
 
+static void particle_hash_clear_touched_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    (void)user;
+    for (int i = start; i < end; ++i) {
+        int bucket = particle_hash_touched[i];
+        if (bucket >= 0 && bucket < PARTICLE_HASH_SIZE)
+            atomic_store_explicit(&particle_hash_head[bucket], -1, memory_order_relaxed);
+    }
+}
+
 static void particle_hash_build_range(int start, int end, int worker_id, void *user) {
     (void)worker_id;
     ParticleHashBuildJob *job = (ParticleHashBuildJob *)user;
@@ -2457,13 +2470,24 @@ static void particle_hash_build_range(int start, int end, int worker_id, void *u
         p->cell_z = gz;
         int h = particle_hash(gx, gy, gz);
         int prev = atomic_exchange_explicit(&particle_hash_head[h], i, memory_order_relaxed);
+        if (prev == -1) {
+            int touched = atomic_fetch_add_explicit(&particle_hash_touched_count, 1, memory_order_relaxed);
+            if (touched >= 0 && touched < PARTICLE_HASH_SIZE) particle_hash_touched[touched] = h;
+        }
         particle_hash_next[i] = prev;
     }
 }
 
 static void build_particle_hash(Particle **list, int count) {
     ParticleHashBuildJob job = { .list = list, .count = count };
-    pbd_parallel_for(0, PARTICLE_HASH_SIZE, particle_hash_clear_range, NULL);
+    if (!particle_hash_initialized) {
+        pbd_parallel_for(0, PARTICLE_HASH_SIZE, particle_hash_clear_range, NULL);
+        particle_hash_initialized = true;
+    } else {
+        int touched = atomic_load_explicit(&particle_hash_touched_count, memory_order_relaxed);
+        pbd_parallel_for(0, touched, particle_hash_clear_touched_range, NULL);
+    }
+    atomic_store_explicit(&particle_hash_touched_count, 0, memory_order_relaxed);
     pbd_parallel_for(0, count, particle_hash_build_range, &job);
 }
 
@@ -13955,6 +13979,7 @@ static void rebuild_fluid_hull(void) {
 static void draw_fluid_particles(Camera3D camera) {
     if (fluid_particle_count <= 0) return;
     if (fluidRenderMode == FLUID_RENDER_SURFACE) {
+        if (physicsBackend.active == PHYSICS_BACKEND_GPU_GL43 && gpu_fluid_hull_draw(fluidHullMaterial)) return;
         rebuild_fluid_hull();
         if (fluidHullMesh.vertices) {
             rlDisableBackfaceCulling();
