@@ -191,6 +191,17 @@ typedef struct DebugRunState {
     int lifecycle_sleep_step;
     int lifecycle_recycle_step;
     int restoration_deadline_frame;
+    bool swarmer_wall_test;
+    bool goliath_flight_test;
+    int enemy_bot_index;
+    int enemy_human_index;
+    int swarmer_inside_wall_frames;
+    float swarmer_min_z;
+    float goliath_start_y;
+    float goliath_max_y;
+    float goliath_y_after_landing;
+    int goliath_hover_frames;
+    int goliath_forced_jumps;
 } DebugRunState;
 
 typedef bool (*DebugScenarioSetupFn)(DebugRunState *state);
@@ -225,6 +236,8 @@ static bool debug_setup_tether_active_then_static(DebugRunState *state);
 static bool debug_setup_tether_thin_wall_ccd(DebugRunState *state);
 static bool debug_setup_pbf_container(DebugRunState *state);
 static bool debug_setup_tall_pillar_snap(DebugRunState *state);
+static bool debug_setup_swarmer_wall(DebugRunState *state);
+static bool debug_setup_goliath_flight(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall, 60, 60 },
@@ -243,7 +256,9 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "single-corner-hinge", "A one-corner glue remnant must break beyond the hinge-angle limit", debug_setup_single_corner_hinge, 60, 60 },
     { "tether-active-then-static", "Tethering an active voxel then a static voxel preserves and pulls both", debug_setup_tether_active_then_static, 60, 60 },
     { "tether-thin-wall-ccd", "High-speed tether throw uses swept particle rays against a one-voxel wall", debug_setup_tether_thin_wall_ccd, 60, 60 },
-    { "pbf-container", "High-viscosity PBF falls into an immutable container", debug_setup_pbf_container, 240, 120 }
+    { "pbf-container", "High-viscosity PBF falls into an immutable container", debug_setup_pbf_container, 240, 120 },
+    { "swarmer-wall", "Swarmer charges a visible target through a blocking wall", debug_setup_swarmer_wall, 90, 60 },
+    { "goliath-flight", "Goliath jumps with attached armor and must land", debug_setup_goliath_flight, 120, 90 }
 };
 
 static const int debugScenarioCount = (int)(sizeof(debugScenarios) / sizeof(debugScenarios[0]));
@@ -906,6 +921,9 @@ static void debug_render_scene(DebugRunState *state, const DebugSample *sample)
                       (Color){ 68, 75, 82, 255 });
             DrawGrid(48, VOXEL_SIZE);
             DrawVoxels(state->camera);
+            if (state->swarmer_wall_test || state->goliath_flight_test) {
+                draw_players();
+            }
             if (state->sleep_snap_original_test) {
                 for (int i = 0; i < voxel_count; ++i) {
                     Voxel *voxel = &voxels[i];
@@ -2530,8 +2548,142 @@ static bool debug_setup_pbf_container(DebugRunState *state)
     return state->failure_count == 0;
 }
 
-static void debug_physics_step(void)
+static void debug_init_enemy_player(int index, Vector3 pos, EnemyType type, InputType input)
 {
+    memset(&players[index], 0, sizeof(players[index]));
+    memset(&botStates[index], 0, sizeof(botStates[index]));
+    memset(&goliathStates[index], 0, sizeof(goliathStates[index]));
+    players[index].pos = pos;
+    players[index].death_pos = pos;
+    players[index].yaw = 0.0f;
+    players[index].pitch = 0.0f;
+    players[index].onGround = true;
+    players[index].respawn_timer = 0.0f;
+    players[index].enemyType = type;
+    players[index].matterMax = (type == ENEMY_TYPE_SWARMER) ? (MATTER_MAX_DEFAULT * 0.25f) : MATTER_MAX_DEFAULT;
+    players[index].matter = players[index].matterMax;
+    players[index].last_damage_time = -1000.0f;
+    playerInput[index] = input;
+    botStates[index].targetIndex = -1;
+}
+
+static bool debug_setup_swarmer_wall(DebugRunState *state)
+{
+    debug_reset_world();
+    state->swarmer_wall_test = true;
+    state->enemy_bot_index = 0;
+    state->enemy_human_index = 1;
+    state->swarmer_inside_wall_frames = 0;
+    state->swarmer_min_z = 1000.0f;
+    state->activation_succeeded = true;
+    state->drop_sampled = true;
+    state->expected_voxels = 0;
+    gameMode = GAME_MODE_FIREFIGHT;
+    activePlayers = 2;
+
+    Color wall_color = (Color){ 110, 120, 140, 255 };
+    int wall_created = 0;
+    for (int y = 0; y <= 4; ++y) {
+        for (int x = -2; x <= 2; ++x) {
+            if (debug_add_cell(x, y, 0, true, false, wall_color, DEBUG_SUPPORT_TAG) >= 0) {
+                ++wall_created;
+            }
+        }
+    }
+    debug_rebuild_world_state();
+    debug_init_enemy_player(0, (Vector3){ 0.0f, BASE_EYE_HEIGHT, 3.0f },
+                            ENEMY_TYPE_SWARMER, INPUT_TYPE_BOT_MEDIUM);
+    debug_init_enemy_player(1, (Vector3){ 0.0f, BASE_EYE_HEIGHT, -3.0f },
+                            ENEMY_TYPE_STANDARD, INPUT_TYPE_KEYBOARD);
+    players[0].yaw = 0.0f;
+    players[1].yaw = 180.0f;
+    state->camera.position = (Vector3){ 6.0f, 4.5f, 6.0f };
+    state->camera.target = (Vector3){ 0.0f, 1.2f, 0.0f };
+    if (wall_created < 20) {
+        debug_add_failure(state, "swarmer-wall created only %d wall voxels", wall_created);
+        return false;
+    }
+    return true;
+}
+
+static bool debug_setup_goliath_flight(DebugRunState *state)
+{
+    debug_reset_world();
+    state->goliath_flight_test = true;
+    state->enemy_bot_index = 0;
+    state->enemy_human_index = 1;
+    state->activation_succeeded = true;
+    state->drop_sampled = true;
+    state->expected_voxels = 0;
+    gameMode = GAME_MODE_FIREFIGHT;
+    activePlayers = 2;
+    debug_init_enemy_player(0, (Vector3){ 0.0f, BASE_EYE_HEIGHT, 2.0f },
+                            ENEMY_TYPE_GOLIATH, INPUT_TYPE_BOT_MEDIUM);
+    debug_init_enemy_player(1, (Vector3){ 0.0f, BASE_EYE_HEIGHT, -4.0f },
+                            ENEMY_TYPE_STANDARD, INPUT_TYPE_KEYBOARD);
+    spawn_goliath_armor(0);
+    debug_rebuild_world_state();
+    state->goliath_start_y = players[0].pos.y;
+    state->goliath_max_y = players[0].pos.y;
+    state->goliath_y_after_landing = players[0].pos.y;
+    state->goliath_hover_frames = 0;
+    players[0].yaw = 0.0f;
+    state->camera.position = (Vector3){ 5.5f, 4.0f, 6.0f };
+    state->camera.target = (Vector3){ 0.0f, 1.5f, 0.0f };
+    if (goliathStates[0].count <= 0) {
+        debug_add_failure(state, "goliath-flight spawned no armor voxels");
+        return false;
+    }
+    return true;
+}
+
+static void debug_physics_step(DebugRunState *state)
+{
+    float dt = PBD_MAX_STEP_DT;
+    if (state && (state->swarmer_wall_test || state->goliath_flight_test)) {
+        int bot = state->enemy_bot_index;
+        int human = state->enemy_human_index;
+        if (state->goliath_flight_test && state->goliath_forced_jumps < 1 &&
+            players[bot].onGround) {
+            players[bot].vel.y = JUMP_SPEED;
+            players[bot].onGround = false;
+            state->goliath_forced_jumps++;
+        }
+        if (state->swarmer_wall_test) {
+            /* Same straight-line charge UpdateBot uses once a swarmer has a target. */
+            Vector3 to_target = v_sub(players[human].pos, players[bot].pos);
+            to_target.y = 0.0f;
+            float len = v_length(to_target);
+            if (len > 0.05f) {
+                Vector3 moveDir = v_mul(to_target, 1.0f / len);
+                float swarmerSpeed = MOVE_SPEED * 1.35f;
+                players[bot].vel.x = moveDir.x * swarmerSpeed;
+                players[bot].vel.z = moveDir.z * swarmerSpeed;
+            }
+        } else if (state->goliath_flight_test) {
+            /* Walk toward the target like UpdateBot, but only the scripted jump. */
+            Vector3 to_target = v_sub(players[human].pos, players[bot].pos);
+            to_target.y = 0.0f;
+            float len = v_length(to_target);
+            if (len > 0.8f) {
+                Vector3 moveDir = v_mul(to_target, 1.0f / len);
+                float goliathSpeed = MOVE_SPEED * 0.85f;
+                players[bot].vel.x = moveDir.x * goliathSpeed;
+                players[bot].vel.z = moveDir.z * goliathSpeed;
+            } else {
+                players[bot].vel.x = 0.0f;
+                players[bot].vel.z = 0.0f;
+            }
+        } else {
+            UpdateBot(bot, dt);
+        }
+        net_integrate_player(&players[bot], dt, true);
+        net_integrate_player(&players[human], dt, true);
+        if (players[bot].enemyType == ENEMY_TYPE_GOLIATH) {
+            update_goliath_armor_positions(bot);
+            rebuild_voxel_hash();
+        }
+    }
     activate_static_voxels_near_dynamic();
     prepare_tether_forces();
     wake_sleeping_voxels_near_awake();
@@ -2564,6 +2716,22 @@ static uint64_t debug_tagged_static_identity_signature(int tag)
 static void debug_validate_step(DebugRunState *state, int step)
 {
     debug_validate_all_sim_particles(state, step);
+    if (state->swarmer_wall_test) {
+        Player *bot = &players[state->enemy_bot_index];
+        if (bot->pos.z < state->swarmer_min_z) state->swarmer_min_z = bot->pos.z;
+        float half = player_collision_half(bot);
+        if (player_aabb_hits_world(state->enemy_bot_index, bot->pos, half)) {
+            state->swarmer_inside_wall_frames++;
+        }
+    }
+    if (state->goliath_flight_test) {
+        Player *bot = &players[state->enemy_bot_index];
+        if (bot->pos.y > state->goliath_max_y) state->goliath_max_y = bot->pos.y;
+        if (step == debugRunConfig.steps) state->goliath_y_after_landing = bot->pos.y;
+        if (bot->onGround && bot->pos.y > state->goliath_start_y + 0.45f) {
+            state->goliath_hover_frames++;
+        }
+    }
     // Isolate the post-impact lifecycle under test: wait for the real swept
     // tether collision, then wake the struck pillar through the normal static
     // activation path.  Ground support otherwise makes this compact fixture's
@@ -3035,6 +3203,41 @@ static void debug_finalize_validation(DebugRunState *state)
         }
         return;
     }
+    if (state->swarmer_wall_test) {
+        if (state->swarmer_inside_wall_frames > 3) {
+            debug_add_failure(state, "swarmer spent %d frames inside the wall",
+                              state->swarmer_inside_wall_frames);
+        }
+        if (state->swarmer_min_z < 0.20f) {
+            debug_add_failure(state, "swarmer walked through the wall to z=%.3f",
+                              state->swarmer_min_z);
+        }
+        return;
+    }
+    if (state->goliath_flight_test) {
+        if (state->goliath_forced_jumps < 1) {
+            debug_add_failure(state, "goliath never jumped");
+        }
+        if (state->goliath_hover_frames > 8) {
+            debug_add_failure(state,
+                              "goliath hovered on its armor for %d frames (max_y=%.3f final_y=%.3f)",
+                              state->goliath_hover_frames, state->goliath_max_y,
+                              state->goliath_y_after_landing);
+        }
+        if (state->goliath_y_after_landing > state->goliath_start_y + 0.55f) {
+            Player *bot = &players[state->enemy_bot_index];
+            float half = player_collision_half(bot);
+            bool hits = player_aabb_hits_world(state->enemy_bot_index, bot->pos, half);
+            Vector3 probe = { bot->pos.x, bot->pos.y - 0.02f, bot->pos.z };
+            bool grounded = player_aabb_hits_world(state->enemy_bot_index, probe, half);
+            debug_add_failure(state,
+                              "goliath finished airborne at y=%.3f (start %.3f) onGround=%d vel.y=%.3f aabb=%d probe=%d armor=%d",
+                              state->goliath_y_after_landing, state->goliath_start_y,
+                              bot->onGround ? 1 : 0, bot->vel.y, hits ? 1 : 0, grounded ? 1 : 0,
+                              goliathStates[state->enemy_bot_index].count);
+        }
+        return;
+    }
     if (state->pillar_impact_drift_test) {
         if (!isfinite(state->drift_window_distance) || state->drift_window_distance > 1.00f) {
             debug_add_failure(state,
@@ -3503,7 +3706,7 @@ static int run_debug_harness(void)
             }
         }
         for (int step = 1; step <= debugRunConfig.steps; ++step) {
-            debug_physics_step();
+            debug_physics_step(&state);
             debug_validate_step(&state, step);
             debug_gif_capture(&state, step);
             if (debug_should_capture_step(step)) {

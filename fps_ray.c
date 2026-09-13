@@ -17380,24 +17380,79 @@ static void net_apply_movement_command(Player *p, const NetInputCommand *command
     }
 }
 
+static float player_collision_half(const Player *p) {
+    if (!p) return PLAYER_SIZE * 0.5f;
+    if (p->enemyType == ENEMY_TYPE_SWARMER) return PLAYER_SIZE * 0.25f;
+    if (p->enemyType == ENEMY_TYPE_GOLIATH) return PLAYER_SIZE * 0.75f;
+    return PLAYER_SIZE * 0.5f;
+}
+
+static bool voxel_blocks_player(int player_idx, int voxel_idx) {
+    if (voxel_idx < 0 || voxel_idx >= voxel_count) return false;
+    if (player_idx >= 0 && player_idx < MAX_PLAYERS &&
+        voxels[voxel_idx].owner == player_idx) {
+        return false;
+    }
+    return true;
+}
+
+static bool player_aabb_hits_world(int player_idx, Vector3 pos, float half) {
+    const float eps = 1e-4f;
+    int minx = (int)floorf((pos.x - half) / VOXEL_SIZE);
+    int maxx = (int)floorf((pos.x + half - eps) / VOXEL_SIZE);
+    int miny = (int)floorf((pos.y - half) / VOXEL_SIZE);
+    int maxy = (int)floorf((pos.y + half - eps) / VOXEL_SIZE);
+    int minz = (int)floorf((pos.z - half) / VOXEL_SIZE);
+    int maxz = (int)floorf((pos.z + half - eps) / VOXEL_SIZE);
+    for (int x = minx; x <= maxx; ++x) {
+        for (int y = miny; y <= maxy; ++y) {
+            for (int z = minz; z <= maxz; ++z) {
+                if (voxel_blocks_player(player_idx, table_get(x, y, z))) return true;
+            }
+        }
+    }
+    return false;
+}
+
 static void net_integrate_player(Player *p, float dt, bool query_world) {
+    int player_idx = (int)(p - players);
+    if (player_idx < 0 || player_idx >= MAX_PLAYERS || &players[player_idx] != p) {
+        player_idx = -1;
+    }
+    float half = player_collision_half(p);
+    float max_speed = MOVE_SPEED;
+    if (p->enemyType == ENEMY_TYPE_SWARMER) max_speed = MOVE_SPEED * 1.35f;
+    else if (p->enemyType == ENEMY_TYPE_GOLIATH) max_speed = MOVE_SPEED * 0.85f;
     float speed = sqrtf(p->vel.x * p->vel.x + p->vel.z * p->vel.z);
-    if (!p->meleeKnockbackActive && speed > MOVE_SPEED) {
-        p->vel.x *= MOVE_SPEED / speed;
-        p->vel.z *= MOVE_SPEED / speed;
+    if (!p->meleeKnockbackActive && speed > max_speed) {
+        p->vel.x *= max_speed / speed;
+        p->vel.z *= max_speed / speed;
     }
     bool collided = false;
-    bool neighbor[6] = { false };
-    if (query_world) get_adjacent_voxel_directions(v_add(p->pos, v_mul(p->vel, dt)), neighbor);
-    if ((p->vel.x > 0 && neighbor[0]) || (p->vel.x < 0 && neighbor[1])) p->vel.x = 0;
-    if ((p->vel.y > 0 && neighbor[2]) || (p->vel.y < 0 && neighbor[3])) p->vel.y = 0;
-    if ((p->vel.z > 0 && neighbor[4]) || (p->vel.z < 0 && neighbor[5])) p->vel.z = 0;
-    collided = neighbor[0] || neighbor[1] || neighbor[2] || neighbor[3] || neighbor[4] || neighbor[5];
-    if (!neighbor[3]) {
-        p->vel.y -= GRAVITY * dt;
-        p->onGround = false;
-    } else {
-        p->onGround = true;
+    if (query_world && player_idx >= 0) {
+        Vector3 try_x = { p->pos.x + p->vel.x * dt, p->pos.y, p->pos.z };
+        if (p->vel.x != 0.0f && player_aabb_hits_world(player_idx, try_x, half)) {
+            p->vel.x = 0.0f;
+            collided = true;
+        }
+        Vector3 try_y = { p->pos.x, p->pos.y + p->vel.y * dt, p->pos.z };
+        if (p->vel.y != 0.0f && player_aabb_hits_world(player_idx, try_y, half)) {
+            p->vel.y = 0.0f;
+            collided = true;
+        }
+        Vector3 try_z = { p->pos.x, p->pos.y, p->pos.z + p->vel.z * dt };
+        if (p->vel.z != 0.0f && player_aabb_hits_world(player_idx, try_z, half)) {
+            p->vel.z = 0.0f;
+            collided = true;
+        }
+        Vector3 ground_probe = { p->pos.x, p->pos.y - 0.02f, p->pos.z };
+        bool grounded = player_aabb_hits_world(player_idx, ground_probe, half);
+        if (!grounded) {
+            p->vel.y -= GRAVITY * dt;
+            p->onGround = false;
+        } else {
+            p->onGround = true;
+        }
     }
     p->pos = v_add(p->pos, v_mul(p->vel, dt));
     if (p->pos.y <= BASE_EYE_HEIGHT) {
@@ -20379,45 +20434,7 @@ int main(int argc, char **argv) {
             if (p->dynamicShotActive && p->matter <= 0.0f) {
                 p->dynamicShotActive = false;
             }
-            
-            bool collided = false;
-
-            // clamp horizontal speed
-            {
-                float speed = sqrtf(p->vel.x*p->vel.x + p->vel.z*p->vel.z);
-                if (!p->meleeKnockbackActive && speed > MOVE_SPEED) {
-                    p->vel.x *= MOVE_SPEED / speed;
-                    p->vel.z *= MOVE_SPEED / speed;
-                }
-            }
-
-            // Block velocity where a neighbor voxel exists in movement direction
-            {
-                bool neigh[6];
-                get_adjacent_voxel_directions(v_add(p->pos,v_mul(p->vel,dt)), neigh);
-                // X-axis (+X/neigh[0], -X/neigh[1])
-                if ((p->vel.x > 0 && neigh[0]) || (p->vel.x < 0 && neigh[1])) p->vel.x = 0;
-                // Y-axis (+Y/neigh[2], -Y/neigh[3])
-                if ((p->vel.y > 0 && neigh[2]) || (p->vel.y < 0 && neigh[3])) p->vel.y = 0;
-                // Z-axis (+Z/neigh[4], -Z/neigh[5])
-                if ((p->vel.z > 0 && neigh[4]) || (p->vel.z < 0 && neigh[5])) p->vel.z = 0;
-                if (neigh[0] || neigh[1] || neigh[2] || neigh[3] || neigh[4] || neigh[5]) {
-                    collided = true;
-                }
-                if (!neigh[3]){
-                    // apply gravity
-                    p->vel.y -= GRAVITY*dt;
-                    p->onGround = false;
-                }else{
-                    p->onGround = true;
-                }
-            }
-            
-
-            // apply movement
-            p->pos.x += p->vel.x*dt;
-            p->pos.y += p->vel.y*dt;
-            p->pos.z += p->vel.z*dt;
+            net_integrate_player(p, dt, true);
 
             // Firefight Gravity Jump Lift pads
             if (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM && current_sanctum_plan_valid) {
@@ -20431,25 +20448,6 @@ int main(int argc, char **argv) {
                         p->onGround = false;
                     }
                 }
-            }
-
-            // ground clamp
-            if (p->pos.y <= BASE_EYE_HEIGHT) {
-                collided = true;
-                p->pos.y = BASE_EYE_HEIGHT;
-                p->vel.y = 0;
-                p->onGround = true;
-            }
-            // world bounds clamp for X,Z
-            float clamped_x = clampf(p->pos.x, -FLOOR_SIZE+PLAYER_RADIUS, FLOOR_SIZE-PLAYER_RADIUS);
-            float clamped_z = clampf(p->pos.z, -FLOOR_SIZE+PLAYER_RADIUS, FLOOR_SIZE-PLAYER_RADIUS);
-            if (clamped_x != p->pos.x || clamped_z != p->pos.z) {
-                collided = true;
-            }
-            p->pos.x = clamped_x;
-            p->pos.z = clamped_z;
-            if (p->meleeKnockbackActive && collided) {
-                p->meleeKnockbackActive = false;
             }
         }
 
