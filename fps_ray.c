@@ -9313,7 +9313,11 @@ static void ResetGame(void) {
 
     if (gameMode == GAME_MODE_FIREFIGHT) {
         if (netTransport.role == NET_ROLE_OFFLINE) {
-            playerInput[0] = INPUT_TYPE_KEYBOARD;
+            InputType human_input = multiplayerPlayerInput[0];
+            if (human_input != INPUT_TYPE_KEYBOARD && human_input != INPUT_TYPE_GAMEPAD) {
+                human_input = INPUT_TYPE_KEYBOARD;
+            }
+            playerInput[0] = human_input;
             playerInput[1] = INPUT_TYPE_BOT_EASY;
             playerInput[2] = INPUT_TYPE_BOT_EASY;
             playerInput[3] = INPUT_TYPE_BOT_EASY;
