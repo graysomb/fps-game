@@ -24,5 +24,9 @@
     <string>12.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Bluetooth is used to connect wireless game controllers.</string>
+    <key>GCSupportsControllerUserInteraction</key>
+    <true/>
 </dict>
 </plist>

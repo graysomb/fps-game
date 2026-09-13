@@ -129,11 +129,11 @@ The engine implements three primary types of constraints:
 ### Gamepad
 *   **Move:** Left Stick
 *   **Look:** Right Stick
-*   **Jump:** A / Down Face Button
+*   **Jump:** B / Right Face Button
 *   **Shoot:** Right Trigger
-*   **Melee:** B / Right Face Button
-*   **Build:** X / Left Face Button
-*   **Gravity Tether:** Y / Top Face Button
+*   **Melee:** LB / Left Bumper
+*   **Build:** RB / Right Bumper
+*   **Gravity Tether:** LT / Left Trigger
 
 ### Global
 *   **Reset Game:** R (Main Menu / Game Over)

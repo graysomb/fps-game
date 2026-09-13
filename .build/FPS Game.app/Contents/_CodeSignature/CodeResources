@@ -4,6 +4,10 @@
 <dict>
 	<key>files</key>
 	<dict>
+		<key>Resources/shaders/.DS_Store</key>
+		<data>
+		sveUwjcNfvGbIuda3Kmw+Eca2fU=
+		</data>
 		<key>Resources/shaders/debug_AABB.frag</key>
 		<data>
 		4dO9AMhUioLDJRAmMb7WuZKOr8Q=
@@ -76,6 +80,22 @@
 		<data>
 		eypQE1Zmmju/TNY+En8cbpvXfVI=
 		</data>
+		<key>Resources/shaders/pbd/adaptive_kernel.inc</key>
+		<data>
+		giVJGMyodp9mZ/19C9HMvEfIAdI=
+		</data>
+		<key>Resources/shaders/pbd/adaptive_pipeline.comp</key>
+		<data>
+		QKyXm3WHIh516temSKXoMjwDqMk=
+		</data>
+		<key>Resources/shaders/pbd/adaptive_pipeline.metal</key>
+		<data>
+		H6rakCLtWPQFVA8EJnmi4yyz144=
+		</data>
+		<key>Resources/shaders/pbd/adaptive_types.inc</key>
+		<data>
+		ftxo26vniNtMkH4ilIfgwn16Ta4=
+		</data>
 		<key>Resources/shaders/pbd/pbd_pipeline.comp</key>
 		<data>
 		2OL9uMcFIdNQWlu0AXGuEKFQslY=
@@ -127,19 +147,19 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			weL52GQlbf6a3Ty71qc8YnDDmoE=
+			RM2Ci9+prGJRdYV9oL5Sop2K5SU=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"c1e2f9d864256dfe9add3cbbd6a73c6270c39a81"</string>
+			<string>cdhash H"44cd828bdfa9ac625175857da0be52a29d8ae525"</string>
 		</dict>
 		<key>MacOS/fps_ray_gpu</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			oqBI4OFk1On0E9wwa3vsZDnbHno=
+			oF0kTMncxfgywDxEazTnigOq/Kc=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"a2a048e0e164d4e9f413dc306b7bec6439db1e7a"</string>
+			<string>cdhash H"a05d244cc9dcc5f832c03c446b34e78a03aafca7"</string>
 		</dict>
 		<key>Resources/shaders/debug_AABB.frag</key>
 		<dict>
@@ -265,6 +285,34 @@
 			<key>hash2</key>
 			<data>
 			tho8sD2ME0iJVBuCVvfdB0uPAlEPLg/5omObfADBkpQ=
+			</data>
+		</dict>
+		<key>Resources/shaders/pbd/adaptive_kernel.inc</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			pVndropl16oStiEJ7ZSs/hPlfh3IKUrlFheiVWIsU8A=
+			</data>
+		</dict>
+		<key>Resources/shaders/pbd/adaptive_pipeline.comp</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			/+uIcQJZjS0lgDTvBLmqTlD1BQHzNf9ZNN+Qg74SiQU=
+			</data>
+		</dict>
+		<key>Resources/shaders/pbd/adaptive_pipeline.metal</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			KoIviLc73k5G9O0GAgAOxdbfhmQdDFN0MCFONJNnRok=
+			</data>
+		</dict>
+		<key>Resources/shaders/pbd/adaptive_types.inc</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			9k01cXtyqix28iegrZuyGCW5Bn3AMY6OWjiZCCOqMzY=
 			</data>
 		</dict>
 		<key>Resources/shaders/pbd/pbd_pipeline.comp</key>

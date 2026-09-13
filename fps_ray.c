@@ -18,7 +18,7 @@
  * ## Controls:
  * P1 (Keyboard): WASD (Move), F/H/T/G (Look), Space (Jump), LCtrl (Shoot), Z (Melee), E (Build), R (Tether)
  * P2 (Keyboard): IJKL (Move), Arrows (Look), RShift (Jump), RCtrl (Shoot), M (Melee), O (Build), P (Tether)
- * Gamepad: LS (Move), RS (Look), A (Jump), RT (Shoot), B (Melee), X (Build), Y (Tether)
+ * Gamepad: LS (Move), RS (Look), B (Jump), RT (Shoot), LB (Melee), RB (Build), LT (Tether)
  * gcc fps_ray.c -o fps_ray.exe   -I /c/raylib/src -L /c/raylib/src   -lraylib -lopengl32 -lgdi32 -lwinmm -lpthread   -static -static-libgcc
  */
 #ifdef _WIN32
@@ -17408,10 +17408,10 @@ static NetInputCommand net_sample_local_input(int local_index, int player_slot) 
         lx = GetGamepadAxisMovement(local_index, GAMEPAD_AXIS_RIGHT_X);
         ly = GetGamepadAxisMovement(local_index, GAMEPAD_AXIS_RIGHT_Y);
         if (IsGamepadButtonDown(local_index, GAMEPAD_BUTTON_LEFT_TRIGGER_2)) command.held |= NET_INPUT_TETHER;
-        if (IsGamepadButtonPressed(local_index, GAMEPAD_BUTTON_RIGHT_FACE_DOWN)) command.pressed |= NET_INPUT_JUMP;
+        if (IsGamepadButtonPressed(local_index, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT)) command.pressed |= NET_INPUT_JUMP;
         if (IsGamepadButtonPressed(local_index, GAMEPAD_BUTTON_RIGHT_TRIGGER_2)) command.pressed |= NET_INPUT_FIRE;
-        if (IsGamepadButtonPressed(local_index, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT)) command.pressed |= NET_INPUT_MELEE;
-        if (IsGamepadButtonPressed(local_index, GAMEPAD_BUTTON_RIGHT_FACE_LEFT)) command.pressed |= NET_INPUT_BUILD;
+        if (IsGamepadButtonPressed(local_index, GAMEPAD_BUTTON_LEFT_TRIGGER_1)) command.pressed |= NET_INPUT_MELEE;
+        if (IsGamepadButtonPressed(local_index, GAMEPAD_BUTTON_RIGHT_TRIGGER_1)) command.pressed |= NET_INPUT_BUILD;
     } else if (local_index == 0) {
         mx = (IsKeyDown(KEY_D) ? 1.0f : 0.0f) - (IsKeyDown(KEY_A) ? 1.0f : 0.0f);
         my = (IsKeyDown(KEY_W) ? 1.0f : 0.0f) - (IsKeyDown(KEY_S) ? 1.0f : 0.0f);
@@ -20265,10 +20265,10 @@ int main(int argc, char **argv) {
                 if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_RIGHT_TRIGGER_2)) {
                     FireVoxel(i);
                 }
-                if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT)) {
+                if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_LEFT_TRIGGER_1)) {
                     perform_melee(i);
                 }
-                if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_RIGHT_FACE_LEFT)) {
+                if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_RIGHT_TRIGGER_1)) {
                     perform_build(i);
                 }
                 if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_LEFT_TRIGGER_2)) {
@@ -20277,7 +20277,7 @@ int main(int argc, char **argv) {
                 if (IsGamepadButtonReleased(i, GAMEPAD_BUTTON_LEFT_TRIGGER_2)) {
                     release_tether(i);
                 }
-                if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_RIGHT_FACE_DOWN) && players[i].onGround) {
+                if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT) && players[i].onGround) {
                     players[i].vel.y = JUMP_SPEED;
                     players[i].onGround = false;
                 }
@@ -20648,7 +20648,7 @@ int main(int argc, char **argv) {
                              100, controlsY + controlsSpacing * 1, controlsSize, DARKGRAY);
                     DrawText("Keyboard P2: Move IJKL | Look Arrows | Jump RSHIFT | Shoot RCTRL | Melee M | Build O | Tether P",
                              100, controlsY + controlsSpacing * 2, controlsSize, DARKGRAY);
-                    DrawText("Gamepad: Move LS | Look RS | Jump A/Down Face | Shoot RT | Melee B | Build X | Tether LT",
+                    DrawText("Gamepad: Move LS | Look RS | Jump B | Shoot RT | Melee LB | Build RB | Tether LT",
                              100, controlsY + controlsSpacing * 3, controlsSize, DARKGRAY);
 
                     DrawText("Press M to return to Main Menu", 100, SCREEN_HEIGHT - 60, 20, DARKGRAY);
