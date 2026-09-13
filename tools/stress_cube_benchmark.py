@@ -16,7 +16,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 GPU_BIN = ROOT / ".build" / "bin" / "fps_ray_gpu"
 CPU_BIN = ROOT / ".build" / "bin" / "fps_ray_cpu"
 
-SIZES = [4, 8, 12, 16, 20, 24, 28, 32]
+SIZES = [4, 8, 16, 24, 32, 40, 48, 50]
 STEPS = 60
 
 def run_test(binary, size, steps=STEPS, extra_env=None):
