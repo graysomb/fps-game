@@ -324,6 +324,16 @@ Available scenarios are:
   fluid never activates the container.
 * `pbf-dynamic-container`: drops the same fluid volume onto an elevated active PBD floor and
   checks that the deforming solid supports it on GPU, multi-threaded CPU, and single-threaded CPU.
+* `pbf-scaling`: benchmarks a configurable cubic PBF volume with convex-hull rendering on every
+  step. Use `--debug-pbf-side=N`; the particle count is `8 * N^3`. Reports include average
+  physics, hull-render, and total frame times plus derived unthrottled FPS after warm-up.
+
+For example, benchmark 4,096 particles across all three backends with:
+
+```bash
+fps_ray --debug-matrix --debug-scenario=pbf-scaling --debug-pbf-side=8 \
+  --debug-steps=120 --debug-capture-steps=0
+```
 
 Without `--debug-output`, artifacts are written beneath
 `.build/bin/debug-artifacts/<scenario>/<active-backend>`. Each backend directory contains
