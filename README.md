@@ -131,7 +131,7 @@ The engine implements three primary types of constraints:
 *   **Look:** Right Stick
 *   **Jump:** B / Right Face Button
 *   **Shoot:** Right Trigger
-*   **Melee:** LB / Left Bumper
+*   **Melee:** A / Down Face Button
 *   **Build:** RB / Right Bumper
 *   **Gravity Tether:** LT / Left Trigger
 

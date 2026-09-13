@@ -18,7 +18,7 @@
  * ## Controls:
  * P1 (Keyboard): WASD (Move), F/H/T/G (Look), Space (Jump), LCtrl (Shoot), Z (Melee), E (Build), R (Tether)
  * P2 (Keyboard): IJKL (Move), Arrows (Look), RShift (Jump), RCtrl (Shoot), M (Melee), O (Build), P (Tether)
- * Gamepad: LS (Move), RS (Look), B (Jump), RT (Shoot), LB (Melee), RB (Build), Y (Tether)
+ * Gamepad: LS (Move), RS (Look), B (Jump), RT (Shoot), A (Melee), RB (Build), Y (Tether)
  */
 #include "raylib.h"
 #include "rlgl.h" // for rlBegin/rlEnd
@@ -11821,7 +11821,7 @@ int main(void) {
                 if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_RIGHT_TRIGGER_2)) {
                     FireVoxel(i);
                 }
-                if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_LEFT_TRIGGER_1)) {
+                if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_RIGHT_FACE_DOWN)) {
                     perform_melee(i);
                 }
                 if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_RIGHT_TRIGGER_1)) {
@@ -12213,7 +12213,7 @@ int main(void) {
                              100, controlsY + controlsSpacing * 1, controlsSize, DARKGRAY);
                     DrawText("Keyboard P2: Move IJKL | Look Arrows | Jump RSHIFT | Shoot RCTRL | Melee M | Build O | Tether P",
                              100, controlsY + controlsSpacing * 2, controlsSize, DARKGRAY);
-                    DrawText("Gamepad: Move LS | Look RS | Jump B | Shoot RT | Melee LB | Build RB | Tether Y",
+                    DrawText("Gamepad: Move LS | Look RS | Jump B | Shoot RT | Melee A | Build RB | Tether Y",
                              100, controlsY + controlsSpacing * 3, controlsSize, DARKGRAY);
 
                     DrawText("Press M to return to Main Menu", 100, SCREEN_HEIGHT - 60, 20, DARKGRAY);
