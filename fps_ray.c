@@ -106,9 +106,21 @@ typedef struct PbdCpuProfile {
 static PbdCpuProfile pbdCpuProfile = { 0 };
 
 static inline double pbd_time_now_ms(void) {
+#ifdef _WIN32
+    LARGE_INTEGER counter;
+    LARGE_INTEGER frequency;
+    QueryPerformanceCounter(&counter);
+    QueryPerformanceFrequency(&frequency);
+    return (double)counter.QuadPart * 1000.0 / (double)frequency.QuadPart;
+#else
     struct timespec ts;
+#ifdef CLOCK_MONOTONIC_RAW
     clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+#else
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
     return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+#endif
 }
 
 typedef enum { GPU_TRANSFER_RESIDENT = 0, GPU_TRANSFER_LEGACY = 1 } GpuTransferMode;
