@@ -1272,6 +1272,11 @@ static void mark_static_beliefs_dirty_column_above(int gx, int gz, int gy);
 static void update_dynamic_activation_beliefs(void);
 static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float activationBelief);
 static int rip_single_static_voxel(int voxel_idx, int activator);
+static bool activate_static_voxels_near_region(int minx, int maxx,
+                                                int miny, int maxy,
+                                                int minz, int maxz,
+                                                int activator);
+static bool wake_sleeping_cluster_in_place(int start_idx);
 
 #define PBD_MAX_THREADS 8
 #define PBD_PARALLEL_MIN_WORK 512
@@ -5212,6 +5217,121 @@ static bool activate_all_static_voxels(int activator)
     return activated;
 }
 
+static bool activate_static_voxels_near_region(int minx, int maxx,
+                                                int miny, int maxy,
+                                                int minz, int maxz,
+                                                int activator)
+{
+    if (minx > maxx || miny > maxy || minz > maxz) {
+        return false;
+    }
+
+    static UnitVoxelBuffer buffer;
+    unit_voxel_buffer_clear(&buffer);
+
+    for (int i = 0; i < voxel_count; ++i) {
+        atomic_store_explicit(&activationClaims[i], 0, memory_order_relaxed);
+    }
+
+    staticBeliefsForceFullRefresh = true;
+    refresh_static_voxel_beliefs();
+
+    int r_minx = minx - 1;
+    int r_maxx = maxx + 1;
+    int r_miny = miny - 1;
+    int r_maxy = maxy + 1;
+    int r_minz = minz - 1;
+    int r_maxz = maxz + 1;
+
+    for (int gz = r_minz; gz <= r_maxz && buffer.count < VOXEL_ACTIVATION_UNIT_BUDGET; ++gz) {
+        for (int gy = r_miny; gy <= r_maxy && buffer.count < VOXEL_ACTIVATION_UNIT_BUDGET; ++gy) {
+            for (int gx = r_minx; gx <= r_maxx && buffer.count < VOXEL_ACTIVATION_UNIT_BUDGET; ++gx) {
+                // Wake sleeping dynamic voxels near the excavated cavity
+                int dyn_idx = table_get(gx, gy, gz);
+                if (dyn_idx >= 0 && dyn_idx < voxel_count &&
+                    voxels[dyn_idx].simulate && voxels[dyn_idx].sleeping) {
+                    wake_sleeping_cluster_in_place(dyn_idx);
+                }
+
+                if (gx >= minx && gx <= maxx &&
+                    gy >= miny && gy <= maxy &&
+                    gz >= minz && gz <= maxz) {
+                    continue; // Skip interior cavity that was just removed
+                }
+
+                int idx = table_get_static_only(gx, gy, gz);
+                if (idx < 0 || idx >= voxel_count) {
+                    continue;
+                }
+                Voxel *candidate = &voxels[idx];
+                if (candidate->simulate || candidate->pendingActivation || candidate->activationCooldownFrames > 0) {
+                    continue;
+                }
+                if (voxel_is_fluid(candidate)) {
+                    activate_fluid_cluster(idx);
+                    continue;
+                }
+
+                int previousCount = buffer.count;
+                int added = collect_static_activation_cluster(idx, activator,
+                                                              candidate->gx, candidate->gy, candidate->gz,
+                                                              (float)(VOXEL_ACTIVATION_RADIUS * VOXEL_ACTIVATION_RADIUS),
+                                                              &buffer);
+                if (added <= 0) {
+                    rollback_activation_buffer(&buffer, previousCount);
+                    continue;
+                }
+                float clusterBelief = compute_cluster_freeze_belief(&buffer, previousCount);
+                if (dynamic_belief_overcomes_static(1.0f, clusterBelief)) {
+                    expand_activation_cluster_unbounded(&buffer, previousCount, 1.0f, activator);
+                } else {
+                    rollback_activation_buffer(&buffer, previousCount);
+                    activation_try_enqueue(idx, activator, candidate->gx, candidate->gy, candidate->gz,
+                                           -1.0f, &buffer, NULL, NULL);
+                }
+            }
+        }
+    }
+
+    if (buffer.count <= 0) {
+        return false;
+    }
+
+    qsort(buffer.voxels, (size_t)buffer.count, sizeof(UnitVoxelSeed), compare_unit_voxel_seed);
+
+    remove_buffered_static_voxels(&buffer);
+    int activation_base = voxel_count;
+    int spawned = emit_unit_voxels_from_units(&buffer, false, true, -1);
+    if (debugLogActivation) {
+        TraceLog(LOG_INFO,
+                 "[Activation] static->dynamic (mine/delete) units=%d spawned=%d base=%d after=%d",
+                 buffer.count, spawned, activation_base, voxel_count);
+    }
+
+    if (spawned > 0) {
+        for (int i = activation_base; i < voxel_count; ++i) {
+            if (voxels[i].simulate) {
+                voxels[i].activationBelief = 1.0f;
+                voxels[i].activator = activator;
+                voxels[i].wake_timer = COARSENING_WAKE_FRAMES;
+                voxels[i].wake_source = true;
+                voxels[i].sleeping = false;
+                voxels[i].sleepFrames = 0;
+            }
+        }
+        init_static_hash();
+        rebuild_voxel_hash();
+        rebuild_all_voxel_surfaces();
+        rebuild_glue_constraints();
+        glue_dynamic_voxel_to_static_neighbors();
+        refresh_static_voxel_beliefs();
+        meshDirty = true;
+        return true;
+    }
+
+    return false;
+}
+
 static bool restore_dynamic_voxel_to_static(int idx)
 {
     if (idx < 0 || idx >= voxel_count) {
@@ -8792,6 +8912,7 @@ static void creative_remove_voxels(int player_idx) {
     bool removed_dynamic = remove_dynamic_voxels_in_region(minx, maxx, miny, maxy, minz, maxz);
     remove_static_voxels_in_region(minx, maxx, miny, maxy, minz, maxz);
     recycle_queue_remove_region(minx, maxx, miny, maxy, minz, maxz);
+    activate_static_voxels_near_region(minx, maxx, miny, maxy, minz, maxz, player_idx);
     if (removed_dynamic) {
         rebuild_voxel_hash();
     }
@@ -9610,6 +9731,7 @@ static void update_projectiles(float dt)
 
                 if (v->type == 1) {
                     remove_static_voxels_in_region_recycle(minx, maxx, miny, maxy, minz, maxz);
+                    activate_static_voxels_near_region(minx, maxx, miny, maxy, minz, maxz, v->owner);
                     static_changed = true;
                 } else if (v->type == 2) {
                     int min_g = (int)ceilf((-FLOOR_SIZE / VOXEL_SIZE) - 0.5f);
@@ -13230,6 +13352,10 @@ static void goliath_consume_terrain(int bot_idx, int static_voxel_idx) {
     GoliathState *gs = &goliathStates[bot_idx];
     if (gs->count >= GOLIATH_MAX_ATTACHED) return;
 
+    int gx = voxels[static_voxel_idx].gx;
+    int gy = voxels[static_voxel_idx].gy;
+    int gz = voxels[static_voxel_idx].gz;
+
     int new_idx = rip_single_static_voxel(static_voxel_idx, bot_idx);
     if (new_idx >= 0 && new_idx < voxel_count) {
         voxels[new_idx].owner = bot_idx;
@@ -13239,6 +13365,7 @@ static void goliath_consume_terrain(int bot_idx, int static_voxel_idx) {
         gs->voxels[gs->count].localOffset = goliathArmorOffsets[gs->count];
         gs->count++;
         play_sfx(SFX_GLUE_BREAK);
+        activate_static_voxels_near_region(gx, gx, gy, gy, gz, gz, bot_idx);
     }
 }
 
@@ -13846,6 +13973,8 @@ static bool melee_hit_voxels(Player *p, Vector3 start, Vector3 dir, float reach)
     int maxz = minz + brushExtent - 1;
     bool removed_dynamic = remove_dynamic_voxels_in_region(minx, maxx, miny, maxy, minz, maxz);
     remove_static_voxels_in_region_recycle(minx, maxx, miny, maxy, minz, maxz);
+    int activator = (p >= players && p < players + activePlayers) ? (int)(p - players) : -1;
+    activate_static_voxels_near_region(minx, maxx, miny, maxy, minz, maxz, activator);
     if (!removed_dynamic) {
         rebuild_all_voxel_surfaces();
         meshDirty = true;
@@ -18049,6 +18178,42 @@ static bool run_ai_awareness_smoke_test(void) {
             return false;
         }
         fprintf(stderr, "ai-smoke PASS: Bullet voxels are transparent to aim assist line of sight\n");
+
+        clear_world_voxels();
+        init_static_hash();
+    }
+
+    // 7. Test Mining / Deleting Static Voxels Activates Nearby Voxels
+    {
+        clear_world_voxels();
+        init_static_hash();
+
+        // Place two static voxels: one at (0, 1, 0) and one at (1, 1, 0)
+        int v0 = add_static_voxel_at_grid(0, 1, 0, BLUE, 0);
+        int v1 = add_static_voxel_at_grid(1, 1, 0, BLUE, 0);
+        init_static_hash();
+        refresh_static_voxel_beliefs();
+
+        if (v0 < 0 || v1 < 0) {
+            fprintf(stderr, "ai-smoke FAIL: Failed to spawn static test voxels!\n");
+            return false;
+        }
+        int v1_static_idx = table_get_static_only(1, 1, 0);
+        if (v1_static_idx < 0 || voxels[v1_static_idx].simulate) {
+            fprintf(stderr, "ai-smoke FAIL: Voxel (1, 1, 0) should initially be static!\n");
+            return false;
+        }
+
+        // Simulate mining/deleting block (0, 1, 0)
+        remove_static_voxels_in_region_recycle(0, 0, 1, 1, 0, 0);
+        activate_static_voxels_near_region(0, 0, 1, 1, 0, 0, 0);
+
+        int remaining_idx = table_get(1, 1, 0);
+        if (remaining_idx < 0 || !voxels[remaining_idx].simulate) {
+            fprintf(stderr, "ai-smoke FAIL: Remaining nearby voxel (1, 1, 0) was NOT activated into dynamic simulation!\n");
+            return false;
+        }
+        fprintf(stderr, "ai-smoke PASS: Mining/deleting static voxel successfully activates remaining nearby voxels\n");
 
         clear_world_voxels();
         init_static_hash();
