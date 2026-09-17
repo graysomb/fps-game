@@ -1,5 +1,12 @@
 /* Included by fps_ray.c after the voxel/PBD helpers are defined. */
 #include "physics_gpu_metal.h"
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+#include "adaptive_physics.h"
+static AdaptivePhysics *gpuAdaptive;
+static AdaptiveParticleInput *gpuAdaptiveInput;
+static bool gpuAdaptiveNeedsBuild;
+static uint64_t gpuAdaptiveDispatchesObserved;
+#endif
 
 typedef struct { float pos_radius[4], prev_inv_mass[4], predicted_base_inv_mass[4], velocity[4]; } GpuParticleState;
 typedef struct { uint32_t bits[4]; } GpuCorrectionState;
@@ -240,6 +247,10 @@ static void gpu_buffer_read(GpuBuffer *buffer, void *data, size_t size, size_t o
 }
 
 static void gpu_physics_release_resources(void) {
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+    adaptive_physics_destroy(gpuAdaptive); gpuAdaptive = NULL;
+    free(gpuAdaptiveInput); gpuAdaptiveInput = NULL;
+#endif
     gpu_buffer_destroy(&gpuPhysics.particle_buffer);
     gpu_buffer_destroy(&gpuPhysics.correction_buffer);
     gpu_buffer_destroy(&gpuPhysics.cell_buffer);
@@ -884,6 +895,12 @@ static void gpu_set_uniforms(float dt) {
 }
 
 static bool gpu_validate_and_commit(void) {
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+    if(gpuAdaptive) {
+        uint32_t error=0;adaptive_physics_diagnostics(gpuAdaptive,NULL,NULL,&error);
+        if(error)return false; /* Preserve the canonical CPU state for fallback. */
+    }
+#endif
     double read_started = GetTime();
     bool collision_diagnostics = getenv("FPS_COLLISION_DIAGNOSTICS") != NULL;
     gpu_buffer_read(&gpuPhysics.control_buffer, &gpuPhysics.control_stage,
@@ -962,6 +979,9 @@ static bool gpu_validate_and_commit(void) {
         p->inv_mass = g->prev_inv_mass[3];
         p->predicted_pos = (Vector3){g->predicted_base_inv_mass[0], g->predicted_base_inv_mass[1], g->predicted_base_inv_mass[2]};
         p->base_inv_mass = g->predicted_base_inv_mass[3];
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+        if(gpuAdaptive){p->inv_mass=gpuAdaptiveInput[i].inverse_mass;p->base_inv_mass=gpuAdaptiveInput[i].base_inverse_mass;}
+#endif
         p->vel = (Vector3){g->velocity[0], g->velocity[1], g->velocity[2]};
         if (BREAK_DAMP_FRAMES > 0) {
             p->break_timer = gpuPhysics.cell_stage[i].value[3];
@@ -1041,9 +1061,13 @@ static bool gpu_resident_matches_cpu(void) {
         Particle *p = gpuPhysics.compact_to_particle[i];
         if (!p || !p->active) continue;
         GpuParticleState *g = &gpuPhysics.particle_stage[i];
+        float expected_inv=g->prev_inv_mass[3],expected_base=g->predicted_base_inv_mass[3];
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+        if(gpuAdaptive){expected_inv=gpuAdaptiveInput[i].inverse_mass;expected_base=gpuAdaptiveInput[i].base_inverse_mass;}
+#endif
         if (p->pos.x != g->pos_radius[0] || p->pos.y != g->pos_radius[1] || p->pos.z != g->pos_radius[2] ||
             p->vel.x != g->velocity[0] || p->vel.y != g->velocity[1] || p->vel.z != g->velocity[2] ||
-            p->inv_mass != g->prev_inv_mass[3] || p->base_inv_mass != g->predicted_base_inv_mass[3] ||
+            p->inv_mass != expected_inv || p->base_inv_mass != expected_base ||
             p->break_timer != gpuPhysics.cell_stage[i].value[3]) return false;
     }
     for (int i = 0; i < gpuPhysics.dynamic_voxel_count; ++i) {
@@ -1100,25 +1124,114 @@ static bool gpu_refresh_tethers(void) {
     return true;
 }
 
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+static bool gpu_adaptive_prepare(void) {
+    adaptive_physics_destroy(gpuAdaptive); gpuAdaptive = NULL;
+    free(gpuAdaptiveInput); gpuAdaptiveInput = NULL;
+    gpuAdaptiveNeedsBuild = false;
+    gpuAdaptiveDispatchesObserved=0;
+    if (!adaptivePhysicsEnabled || gpuPhysics.dynamic_voxel_count < 32) return true;
+    int n=gpuPhysics.dynamic_voxel_count, p=gpuPhysics.compact_count;
+    AdaptiveInput *in=calloc((size_t)n,sizeof(*in));
+    gpuAdaptiveInput=calloc((size_t)p,sizeof(*gpuAdaptiveInput));
+    if(!in||!gpuAdaptiveInput){free(in);return false;}
+    for(int i=0;i<p;i++) {
+        gpuAdaptiveInput[i].inverse_mass=gpuPhysics.particle_stage[i].prev_inv_mass[3];
+        gpuAdaptiveInput[i].base_inverse_mass=gpuPhysics.particle_stage[i].predicted_base_inv_mass[3];
+    }
+    for(int i=0;i<sim_particle_count;i++)if(gpuPhysics.sim_ids[i]<(uint32_t)p)
+        gpuAdaptiveInput[gpuPhysics.sim_ids[i]].simulated=1;
+    bool valid=true;
+    for(int i=0;i<n;i++) {
+        Voxel *v=&voxels[gpuPhysics.compact_to_voxel[i]];
+        in[i].xyz[0]=v->rest_min_gx;in[i].xyz[1]=v->rest_min_gy;in[i].xyz[2]=v->rest_min_gz;
+        int group=v->particles[0]?v->particles[0]->collision_group:-1;
+        in[i].arena=group>=0?(uint32_t)group:((uint32_t)i|0x80000000u);
+        in[i].material=(uint32_t)v->type;
+        in[i].flags=(gpu_glued_face_mask(v)!=63u||!v->vgs_active||v->sleeping||v->fixed||v->isBullet||v->type!=0||tetherTag[gpuPhysics.compact_to_voxel[i]]>0)?ADAPTIVE_PROTECTED:0;
+        float strain=0,shear=0;voxel_measure_strain(v,&strain,&shear);
+        if(strain>0.05f||shear>0.05f)in[i].flags|=ADAPTIVE_PROTECTED;
+        for(int k=0;k<8;k++) {
+            uint32_t id=gpuPhysics.voxel_stage[i].particle[k];if(id>=(uint32_t)p){valid=false;continue;}
+            AdaptiveParticleInput *pi=&gpuAdaptiveInput[id];
+            /* Preserve every existing contact sample, including interior
+             * samples retained by the current collision-shell classifier. */
+            if(gpuPhysics.clone_parent_stage[id]<0||pi->inverse_mass<=0)in[i].flags|=ADAPTIVE_PROTECTED;
+            int xyz[3]={in[i].xyz[0]+(k&1),in[i].xyz[1]+((k>>1)&1),in[i].xyz[2]+((k>>2)&1)};
+            if(pi->count){for(int d=0;d<3;d++)if(pi->xyz[d]!=xyz[d])valid=false;}
+            else {for(int d=0;d<3;d++)pi->xyz[d]=xyz[d];pi->arena=in[i].arena;}
+            if(pi->count==8){valid=false;continue;}pi->incident[pi->count++]=(uint32_t)(8*i+k);
+        }
+    }
+    unsigned eligible=0;for(int i=0;i<n;i++)if(!(in[i].flags&ADAPTIVE_PROTECTED))eligible++;
+    if(eligible<8){free(in);free(gpuAdaptiveInput);gpuAdaptiveInput=NULL;return true;}
+    char error[1024]={0};
+    if(valid)gpuAdaptive=adaptive_physics_create(fps_metal_device(),in,(uint32_t)n,gpuAdaptiveInput,(uint32_t)p,error,sizeof(error));
+    free(in);
+    if(!gpuAdaptive){fprintf(stderr,"adaptive physics unavailable: %s\n",valid?error:"non-lattice or oversized corner incidence");return false;}
+    gpuAdaptiveNeedsBuild=true;return true;
+}
+static bool gpu_adaptive_stage(unsigned mode) {
+    if(!gpuAdaptive)return true;
+    /* Uniforms are already staged by gpu_set_uniforms; recreate the exact
+     * scalar block through the shared helper's Metal state. */
+    FpsGpuUniforms uniforms; fps_metal_get_uniforms(&uniforms);
+    unsigned profile_stage=mode==ADAPTIVE_STAGE_SHAPE?FPS_METAL_SHAPE:mode==ADAPTIVE_STAGE_ATTACH?FPS_METAL_INTERFACE:FPS_METAL_FRACTURE;
+    bool measured=mode!=ADAPTIVE_STAGE_REFRESH;
+    if(measured)fps_metal_profile_mark(profile_stage,false);
+    bool ok=adaptive_physics_stage(gpuAdaptive,fps_metal_encoder(),
+        (void *)gpuPhysics.particle_buffer.id,(void *)gpuPhysics.voxel_buffer.id,
+        (void *)gpuPhysics.sim_id_buffer.id,(void *)gpuPhysics.control_buffer.id,&uniforms,mode);
+    if(measured)fps_metal_profile_mark(profile_stage,true);
+    fps_metal_restore_bindings();return ok;
+}
+#endif
+
 static bool gpu_dispatch_substep(float sub_dt) {
     gpu_set_uniforms(sub_dt);
     int hash_size = particle_hash_size_for_count(gpuPhysics.collision_count);
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+    if(gpuAdaptiveNeedsBuild) {
+        FpsGpuUniforms uniforms; fps_metal_get_uniforms(&uniforms);
+        fps_metal_profile_mark(FPS_METAL_BUILD,false);
+        bool built=adaptive_physics_build(gpuAdaptive,fps_metal_encoder(),
+            (void *)gpuPhysics.particle_buffer.id,(void *)gpuPhysics.voxel_buffer.id,
+            (void *)gpuPhysics.sim_id_buffer.id,(void *)gpuPhysics.control_buffer.id,&uniforms);
+        fps_metal_profile_mark(FPS_METAL_BUILD,true);
+        fps_metal_restore_bindings();if(!built)return false;gpuAdaptiveNeedsBuild=false;
+    }
+#endif
     bool ok = gpu_dispatch(GPU_MODE_PREPARE_INDIRECT, 1) &&
               gpu_dispatch_indirect(GPU_MODE_INTEGRATE) &&
               gpu_dispatch_indirect(GPU_MODE_RESET) &&
               gpu_dispatch(GPU_MODE_HASH_CLEAR, hash_size) &&
               gpu_dispatch_indirect_offset(GPU_MODE_HASH_BUILD, 16) &&
               gpu_dispatch_indirect_offset(GPU_MODE_PAIR_COLLISIONS, 16) &&
-              gpu_dispatch_indirect(GPU_MODE_APPLY) &&
-              gpu_dispatch(GPU_MODE_BREAK_MASK, gpuPhysics.dynamic_voxel_count);
+              gpu_dispatch_indirect(GPU_MODE_APPLY);
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+    if(ok&&gpuAdaptive)ok=gpu_adaptive_stage(ADAPTIVE_STAGE_REFRESH);
+#endif
+    ok=ok&&gpu_dispatch(GPU_MODE_BREAK_MASK, gpuPhysics.dynamic_voxel_count);
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+    if(ok&&gpuAdaptive)ok=gpu_adaptive_stage(ADAPTIVE_STAGE_FRACTURE)&&gpu_dispatch(GPU_MODE_PREPARE_INDIRECT,1);
+#endif
     for (int it = 0; ok && it < PBD_CONSTRAINT_ITERS; ++it) {
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+        if(gpuAdaptive) {
+            ok=gpu_adaptive_stage(ADAPTIVE_STAGE_SHAPE);
+            for(int attach=0;ok&&attach<2;attach++)ok=gpu_adaptive_stage(ADAPTIVE_STAGE_ATTACH);
+        } else
+#endif
         ok = gpu_dispatch(GPU_MODE_VGS, gpuPhysics.dynamic_voxel_count) &&
              gpu_dispatch_indirect(GPU_MODE_APPLY);
     }
     ok = ok && gpu_dispatch_indirect_offset(GPU_MODE_STATIC_COLLISIONS, 16) &&
          gpu_dispatch(GPU_MODE_WAKE_GATHER, gpuPhysics.dynamic_voxel_count) &&
-         gpu_dispatch_indirect(GPU_MODE_FINALIZE_PARTICLES) &&
-         gpu_dispatch(GPU_MODE_FINALIZE_VOXELS, gpuPhysics.dynamic_voxel_count);
+         gpu_dispatch_indirect(GPU_MODE_FINALIZE_PARTICLES);
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+    if(ok&&gpuAdaptive)ok=gpu_adaptive_stage(ADAPTIVE_STAGE_REFRESH);
+#endif
+    ok=ok&&gpu_dispatch(GPU_MODE_FINALIZE_VOXELS, gpuPhysics.dynamic_voxel_count);
     return ok;
 }
 
@@ -1158,6 +1271,11 @@ static int gpu_physics_steps(float dt, int fixed_steps) {
             gpu_set_step_failure(PHYSICS_GPU_FAILURE_TRANSIENT, "GPU buffer allocation or world upload failed");
             return 0;
         }
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+        if(!gpu_adaptive_prepare()) {
+            gpu_set_step_failure(PHYSICS_GPU_FAILURE_VALIDATION,"adaptive physics initialization failed");return 0;
+        }
+#endif
     }
     float sub_dt = dt / (float)PBD_SUBSTEPS;
 #if defined(__APPLE__) && defined(FPS_GPU_METAL)
@@ -1184,6 +1302,10 @@ static int gpu_physics_steps(float dt, int fixed_steps) {
     gpuPhysics.encode_ms += minfo.last_encode_ms;
     gpuPhysics.gpu_exec_ms += minfo.last_gpu_exec_ms;
     gpuPhysics.gpu_wait_ms += minfo.last_wait_ms;
+    gpuPhysics.last_gpu_compute_ms=minfo.last_gpu_exec_ms;
+    uint64_t adaptive_dispatches=adaptive_physics_dispatches(gpuAdaptive,true);
+    gpuPhysics.last_dispatches=minfo.last_dispatch_count+(int)(adaptive_dispatches-gpuAdaptiveDispatchesObserved);
+    gpuAdaptiveDispatchesObserved=adaptive_dispatches;
 #else
     rlDisableShader();
     bool batch_finished = true;

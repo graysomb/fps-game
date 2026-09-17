@@ -5,6 +5,7 @@
 #include "physics_gpu_metal.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 typedef struct FpsMetalState {
     id<MTLDevice> device;
@@ -18,6 +19,12 @@ typedef struct FpsMetalState {
     MTLResourceOptions resource_options;
     double wait_start;
     bool managed;
+    bool stage_encoder_mode;
+    id<MTLCounterSampleBuffer> stage_samples;
+    id<MTLBuffer> stage_resolved;
+    unsigned stage_pairs, stage_open[FPS_METAL_STAGES];
+    unsigned stage_kind[1024];
+    bool stage_complete[1024];
 } FpsMetalState;
 
 static FpsMetalState metal_state;
@@ -101,6 +108,18 @@ bool fps_metal_initialize(const char *library_path, long long *max_buffer_size,
             else
                 *max_buffer_size = 256ll * 1024ll * 1024ll;
         }
+        if(getenv("FPS_ADAPTIVE_PROFILE") &&
+           ([metal_state.device supportsCounterSampling:MTLCounterSamplingPointAtDispatchBoundary] ||
+            [metal_state.device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary])) {
+            metal_state.stage_encoder_mode=![metal_state.device supportsCounterSampling:MTLCounterSamplingPointAtDispatchBoundary];
+            for(id<MTLCounterSet> set in metal_state.device.counterSets)if([set.name isEqualToString:MTLCommonCounterSetTimestamp]) {
+                MTLCounterSampleBufferDescriptor *descriptor=[[MTLCounterSampleBufferDescriptor alloc] init];
+                descriptor.counterSet=set;descriptor.storageMode=MTLStorageModeShared;descriptor.sampleCount=2048;
+                metal_state.stage_samples=[metal_state.device newCounterSampleBufferWithDescriptor:descriptor error:nil];[descriptor release];
+                metal_state.stage_resolved=[metal_state.device newBufferWithLength:2048*sizeof(MTLCounterResultTimestamp) options:MTLResourceStorageModeShared];
+                break;
+            }
+        }
         return true;
     }
 }
@@ -117,6 +136,7 @@ void fps_metal_shutdown(void) {
             [metal_state.command_buffer release];
             metal_state.command_buffer = nil;
         }
+        [metal_state.stage_samples release];[metal_state.stage_resolved release];
         [metal_state.pipeline release];
         [metal_state.library release];
         [metal_state.queue release];
@@ -170,6 +190,8 @@ void fps_metal_bind_buffer(int slot, void *handle) {
     }
 }
 
+void fps_metal_get_uniforms(FpsGpuUniforms *uniforms) { if(uniforms)*uniforms=metal_state.uniforms; }
+
 void fps_metal_set_uniforms(const FpsGpuUniforms *uniforms) {
     if (uniforms) metal_state.uniforms = *uniforms;
 }
@@ -195,6 +217,10 @@ bool fps_metal_begin_batch(void) {
         if (!metal_state.queue || metal_state.command_buffer || metal_state.encoder) return false;
         metal_profile.last_encode_ms = 0.0;
         metal_profile.last_dispatch_count = 0;
+        metal_profile.stage_counters_available=metal_state.stage_samples&&metal_state.stage_resolved;
+        memset(metal_profile.stage_ticks,0,sizeof(metal_profile.stage_ticks));
+        metal_state.stage_pairs=0;memset(metal_state.stage_complete,0,sizeof(metal_state.stage_complete));
+        for(unsigned i=0;i<FPS_METAL_STAGES;i++)metal_state.stage_open[i]=UINT32_MAX;
         metal_state.command_buffer = [[metal_state.queue commandBuffer] retain];
         if (!metal_state.command_buffer) return false;
         metal_state.encoder = [[metal_state.command_buffer computeCommandEncoder] retain];
@@ -219,10 +245,47 @@ bool fps_metal_begin_batch(void) {
     }
 }
 
+void fps_metal_profile_mark(unsigned stage,bool end) {
+    if(!metal_state.stage_samples||!metal_state.stage_resolved||!metal_state.encoder||stage>=FPS_METAL_STAGES)return;
+    if(!end){
+        if(metal_state.stage_pairs>=1024)return;
+        unsigned pair=metal_state.stage_pairs++;metal_state.stage_open[stage]=pair;metal_state.stage_kind[pair]=stage;
+        if(metal_state.stage_encoder_mode) {
+            [metal_state.encoder endEncoding];[metal_state.encoder release];
+            MTLComputePassDescriptor *descriptor=[MTLComputePassDescriptor computePassDescriptor];
+            descriptor.sampleBufferAttachments[0].sampleBuffer=metal_state.stage_samples;
+            descriptor.sampleBufferAttachments[0].startOfEncoderSampleIndex=2*pair;
+            descriptor.sampleBufferAttachments[0].endOfEncoderSampleIndex=2*pair+1;
+            metal_state.encoder=[[metal_state.command_buffer computeCommandEncoderWithDescriptor:descriptor] retain];
+            fps_metal_restore_bindings();
+        } else [metal_state.encoder sampleCountersInBuffer:metal_state.stage_samples atSampleIndex:2*pair withBarrier:YES];
+    } else {
+        unsigned pair=metal_state.stage_open[stage];if(pair==UINT32_MAX)return;
+        if(metal_state.stage_encoder_mode) {
+            [metal_state.encoder endEncoding];[metal_state.encoder release];
+            metal_state.encoder=[[metal_state.command_buffer computeCommandEncoder] retain];fps_metal_restore_bindings();
+        } else [metal_state.encoder sampleCountersInBuffer:metal_state.stage_samples atSampleIndex:2*pair+1 withBarrier:YES];
+        metal_state.stage_complete[pair]=true;metal_state.stage_open[stage]=UINT32_MAX;
+    }
+}
+
+void *fps_metal_device(void) { return (void *)metal_state.device; }
+void *fps_metal_encoder(void) { return (void *)metal_state.encoder; }
+void fps_metal_restore_bindings(void) {
+    if (!metal_state.encoder) return;
+    [metal_state.encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
+    [metal_state.encoder setComputePipelineState:metal_state.pipeline];
+    for (int i=0;i<FPS_GPU_BUFFER_COUNT;i++)
+        [metal_state.encoder setBuffer:metal_state.bound[i] offset:0 atIndex:(NSUInteger)i];
+}
+
 static bool fps_metal_encode(int mode, int count, id<MTLBuffer> indirect, size_t offset) {
     @autoreleasepool {
         if (!metal_state.command_buffer || !metal_state.encoder || !metal_state.pipeline || count < 0) return false;
         double t0 = metal_time_now_ms();
+        int profile_stage=mode==GPU_MODE_VGS?FPS_METAL_SHAPE:
+            (mode==GPU_MODE_HASH_CLEAR||mode==GPU_MODE_HASH_BUILD||mode==GPU_MODE_PAIR_COLLISIONS||mode==GPU_MODE_STATIC_COLLISIONS)?FPS_METAL_CONTACT:-1;
+        if(profile_stage>=0)fps_metal_profile_mark((unsigned)profile_stage,false);
         if (metal_profile.last_dispatch_count > 0) {
             [metal_state.encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
         }
@@ -237,6 +300,7 @@ static bool fps_metal_encode(int mode, int count, id<MTLBuffer> indirect, size_t
             MTLSize groups = MTLSizeMake(((NSUInteger)count + 127u) / 128u, 1, 1);
             [metal_state.encoder dispatchThreadgroups:groups threadsPerThreadgroup:threads];
         }
+        if(profile_stage>=0)fps_metal_profile_mark((unsigned)profile_stage,true);
         metal_profile.last_encode_ms += (metal_time_now_ms() - t0);
         metal_profile.last_dispatch_count++;
         return true;
@@ -258,6 +322,11 @@ bool fps_metal_commit_batch(bool wait) {
             [metal_state.encoder endEncoding];
             [metal_state.encoder release];
             metal_state.encoder = nil;
+        }
+        if(metal_state.stage_samples&&metal_state.stage_resolved&&metal_state.stage_pairs) {
+            id<MTLBlitCommandEncoder> counter_blit=[metal_state.command_buffer blitCommandEncoder];
+            [counter_blit resolveCounters:metal_state.stage_samples inRange:NSMakeRange(0,2*metal_state.stage_pairs) destinationBuffer:metal_state.stage_resolved destinationOffset:0];
+            [counter_blit endEncoding];
         }
         if (metal_state.managed) {
             static const int readback_slots[] = {
@@ -295,6 +364,13 @@ bool fps_metal_wait_batch(void) {
         CFTimeInterval gpu_end = metal_state.command_buffer.GPUEndTime;
         metal_profile.last_gpu_exec_ms = (gpu_end > gpu_start) ? (gpu_end - gpu_start) * 1000.0 : 0.0;
         bool ok = metal_state.command_buffer.status == MTLCommandBufferStatusCompleted;
+        if(ok&&metal_state.stage_resolved) {
+            const MTLCounterResultTimestamp *samples=metal_state.stage_resolved.contents;
+            for(unsigned i=0;i<metal_state.stage_pairs;i++)if(metal_state.stage_complete[i]) {
+                uint64_t begin=samples[2*i].timestamp,end=samples[2*i+1].timestamp;
+                if(begin!=MTLCounterErrorValue&&end!=MTLCounterErrorValue&&end>=begin)metal_profile.stage_ticks[metal_state.stage_kind[i]]+=end-begin;
+            }
+        }
         [metal_state.command_buffer release];
         metal_state.command_buffer = nil;
         return ok;

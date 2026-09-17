@@ -65,7 +65,7 @@ clang -c -fobjc-arc $opt_flags $arch_flags -mmacosx-version-min="$deployment_tar
     -I"$project_root" -I"$raylib_build/src" "$project_root/macos/macos_gamepad.m" -o "$macos_gamepad_o"
 
 # shellcheck disable=SC2086
-clang "$project_root/fps_ray.c" "$project_root/physics_gpu_metal.m" "$macos_gamepad_o" $enet_sources -DFPS_GPU_METAL -o "$bin_dir/fps_ray_gpu" $common_flags -framework Metal
+clang "$project_root/fps_ray.c" "$project_root/physics_gpu_metal.m" "$project_root/adaptive_mesh.c" "$project_root/adaptive_metal.m" "$project_root/adaptive_physics.m" "$macos_gamepad_o" $enet_sources -DFPS_GPU_METAL -o "$bin_dir/fps_ray_gpu" $common_flags -framework Metal
 # shellcheck disable=SC2086
 clang "$project_root/fps_ray.c" "$macos_gamepad_o" $enet_sources -o "$bin_dir/fps_ray_cpu" $common_flags
 # shellcheck disable=SC2086

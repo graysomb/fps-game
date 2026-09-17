@@ -208,6 +208,8 @@ bool physics_backend_parse(const char *value, PhysicsBackendKind *out) {
     return true;
 }
 
+static bool adaptivePhysicsEnabled = false;
+
 static bool parse_physics_arguments(int argc, char **argv) {
     physicsBackend.requested = PHYSICS_BACKEND_AUTO;
     for (int i = 1; i < argc; ++i) {
@@ -337,6 +339,12 @@ static bool parse_physics_arguments(int argc, char **argv) {
             continue;
         }
         const char *value = NULL;
+        if (strncmp(arg, "--adaptive-physics=", 19) == 0) {
+            const char *mode = arg + 19;
+            if (strcmp(mode, "on") == 0) adaptivePhysicsEnabled = true;
+            else if (strcmp(mode, "off") == 0) adaptivePhysicsEnabled = false;
+            else { fprintf(stderr, "--adaptive-physics expects on or off\n"); return false; }
+        }
         if (strncmp(arg, "--physics=", 10) == 0) value = arg + 10;
         else if (strcmp(arg, "--physics") == 0 && i + 1 < argc) value = argv[++i];
         if (value && !physics_backend_parse(value, &physicsBackend.requested)) {

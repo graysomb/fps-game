@@ -266,6 +266,7 @@ static bool debug_setup_pbf_dynamic_container(DebugRunState *state);
 static bool debug_setup_pbf_scaling(DebugRunState *state);
 static bool debug_setup_pbf_dense_neighbors(DebugRunState *state);
 static bool debug_setup_cube_stress(DebugRunState *state);
+static bool debug_setup_adaptive_fixture(DebugRunState *state);
 static bool debug_setup_voxel_strain_shear_fracture(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
@@ -291,6 +292,12 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "pbf-dense-neighbors", "Dense PBF neighborhood overflow fallback", debug_setup_pbf_dense_neighbors, 60, 60 },
     { "swarmer-wall", "Swarmer charges a visible target through a blocking wall", debug_setup_swarmer_wall, 90, 60 },
     { "goliath-flight", "Goliath jumps with attached armor and must land", debug_setup_goliath_flight, 120, 90 },
+    { "adaptive-solid", "Adaptive solid block construction and steady-state workload", debug_setup_adaptive_fixture, 120, 60 },
+    { "adaptive-hollow", "Protected hollow shell must remain fine", debug_setup_adaptive_fixture, 120, 60 },
+    { "adaptive-thin", "Thin wall must retain fine contact samples", debug_setup_adaptive_fixture, 120, 60 },
+    { "adaptive-irregular", "Irregular connected block with cavities and steps", debug_setup_adaptive_fixture, 120, 60 },
+    { "adaptive-coarse-irregular", "Historical coarse-branch tunnel and thin-tail occupancy", debug_setup_adaptive_fixture, 120, 60 },
+    { "adaptive-fracture", "Repeated strain events in a solid block", debug_setup_adaptive_fixture, 120, 60 },
     { "cube-stress", "Stress test with scalable dynamic cube (size set by FPS_CUBE_SIZE)", debug_setup_cube_stress, 60, 60 },
     { "voxel-strain-shear-fracture", "Dynamic voxels deactivate VGS shape constraints when strain or shear exceeds threshold", debug_setup_voxel_strain_shear_fracture, 60, 60 }
 };
@@ -1433,9 +1440,17 @@ static void debug_readback_gpu_buffers(DebugRunState *state, int step)
         }
     }
 
-    for (int i = 0; i < sim_particle_count; ++i) {
+    int diagnostic_sim_count=sim_particle_count;
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+    if(gpuAdaptive)diagnostic_sim_count=gpuPhysics.control_stage.sim_count;
+#endif
+    for (int i = 0; i < diagnostic_sim_count; ++i) {
         uint32_t actual = sim_id_readback[i];
-        if (actual != gpuPhysics.sim_ids[i] || actual >= (uint32_t)gpuPhysics.compact_count) {
+        bool correct_order=actual==gpuPhysics.sim_ids[i];
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+        if(gpuAdaptive)correct_order=adaptive_physics_independent(gpuAdaptive,actual)&&(i==0||actual>sim_id_readback[i-1]);
+#endif
+        if (!correct_order || actual >= (uint32_t)gpuPhysics.compact_count) {
             ++state->gpu_sim_id_mismatches;
         }
     }
@@ -1458,6 +1473,9 @@ static void debug_readback_gpu_buffers(DebugRunState *state, int step)
                 ++state->gpu_tagged_corners_missing_from_sim_ids;
                 continue;
             }
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+            if(gpuAdaptive&&!adaptive_physics_independent(gpuAdaptive,(uint32_t)compact_id))continue;
+#endif
             bool zero_mass =
                 particle_readback[compact_id].predicted_base_inv_mass[3] <= 0.0f;
             if (zero_mass) {
@@ -1465,7 +1483,7 @@ static void debug_readback_gpu_buffers(DebugRunState *state, int step)
                 if (state->overhang_impact) continue;
             }
             bool found = false;
-            for (int sim = 0; sim < sim_particle_count; ++sim) {
+            for (int sim = 0; sim < diagnostic_sim_count; ++sim) {
                 if (sim_id_readback[sim] == (uint32_t)compact_id) {
                     found = true;
                     break;
@@ -1478,6 +1496,16 @@ static void debug_readback_gpu_buffers(DebugRunState *state, int step)
     free(static_readback);
     free(sim_id_readback);
     free(particle_readback);
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+    if(gpuAdaptive) {
+        for(int i=0;i<gpuPhysics.collision_count;i++)if(!adaptive_physics_independent(gpuAdaptive,gpuPhysics.collision_ids[i]))
+            debug_add_failure(state,"adaptive mode removed an existing contact sample %u",gpuPhysics.collision_ids[i]);
+        double error=adaptive_physics_mass_error(gpuAdaptive,(void *)gpuPhysics.particle_buffer.id);
+        if(error>1e-5)debug_add_failure(state,"adaptive relative mass error %.9g exceeds 1e-5",error);
+        double gap=adaptive_physics_interface_error(gpuAdaptive,(void *)gpuPhysics.particle_buffer.id);
+        if(gap>0.05*VOXEL_SIZE)debug_add_failure(state,"adaptive interface error %.9g exceeds 0.05 fine cells",gap/VOXEL_SIZE);
+    }
+#endif
 
     if (state->gpu_static_ssbo_diff_entries > 0) {
         debug_add_failure(state, "step %d: %d GPU static SSBO entries differ from the CPU staging table",
@@ -1622,6 +1650,40 @@ static bool debug_setup_cube_stress(DebugRunState *state)
     state->camera.position = (Vector3){ dist, (float)(20 + size/2) + dist * 0.4f, dist };
     state->camera.target = (Vector3){ 0.0f, (float)(20 + size/2), 0.0f };
     return true;
+}
+
+static bool debug_setup_adaptive_fixture(DebugRunState *state)
+{
+    debug_reset_world();
+    const int side=12;
+    int created=0;
+    bool hollow=strcmp(debugRunConfig.scenario,"adaptive-hollow")==0;
+    bool thin=strcmp(debugRunConfig.scenario,"adaptive-thin")==0;
+    bool irregular=strcmp(debugRunConfig.scenario,"adaptive-irregular")==0;
+    bool historical=strcmp(debugRunConfig.scenario,"adaptive-coarse-irregular")==0;
+    if(historical) {
+        /* Reuse coarse:debug_greedy.inc's occupancy, without its pointer
+         * topology, delayed CPU activation, or special solver dispatch. */
+        for(int z=-6;z<6;z++)for(int y=8;y<20;y++)for(int x=-6;x<6;x++) {
+            if(x>=-2&&x<2&&y>=12&&y<16)continue;
+            if(debug_add_cell(x,y,z,false,true,(Color){115,125,138,255},DEBUG_TEST_TAG)>=0)created++;
+        }
+        for(int z=-2;z<=2;z++)for(int y=8;y<13;y++)for(int x=6;x<11;x++)
+            if(debug_add_cell(x,y,z,false,true,(Color){115,125,138,255},DEBUG_TEST_TAG)>=0)created++;
+        for(int z=-1;z<=1;z++)for(int y=8;y<11;y++)for(int x=11;x<14;x++)
+            if(debug_add_cell(x,y,z,false,true,(Color){115,125,138,255},DEBUG_TEST_TAG)>=0)created++;
+        for(int x=14;x<18;x++)
+            if(debug_add_cell(x,8,0,false,true,(Color){115,125,138,255},DEBUG_TEST_TAG)>=0)created++;
+    } else for(int z=0;z<side;z++)for(int y=0;y<side;y++)for(int x=0;x<side;x++) {
+        if(hollow&&x>0&&y>0&&z>0&&x<side-1&&y<side-1&&z<side-1)continue;
+        if(thin&&z!=0)continue;
+        if(irregular&&((x>=8&&y>=5)||(x>=3&&x<6&&y>=3&&y<7&&z>=3&&z<7)))continue;
+        if(debug_add_cell(x-6,y+20,z-6,false,true,(Color){245,145,45,255},DEBUG_TEST_TAG)>=0)created++;
+    }
+    state->expected_voxels=created;debug_track_tagged_cells(state,DEBUG_TEST_TAG);
+    debug_rebuild_world_state();state->activation_succeeded=true;debug_set_initial_centroid(state);
+    state->camera.position=(Vector3){20,25,25};state->camera.target=(Vector3){0,13,0};
+    return created>0;
 }
 
 static bool debug_setup_voxel_strain_shear_fracture(DebugRunState *state)
@@ -3000,6 +3062,23 @@ static uint64_t debug_tagged_static_identity_signature(int tag)
 static void debug_validate_step(DebugRunState *state, int step)
 {
     debug_validate_all_sim_particles(state, step);
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+    if(step>0&&gpuAdaptive&&physicsBackend.active==PHYSICS_BACKEND_GPU_METAL) {
+        double mass_error=adaptive_physics_mass_error(gpuAdaptive,(void *)gpuPhysics.particle_buffer.id);
+        double gap=adaptive_physics_interface_error(gpuAdaptive,(void *)gpuPhysics.particle_buffer.id);
+        if(!isfinite(mass_error)||mass_error>1e-5)debug_add_failure(state,"step %d: adaptive mass error %.9g",step,mass_error);
+        if(!isfinite(gap)||gap>0.05*VOXEL_SIZE)debug_add_failure(state,"step %d: adaptive interface gap %.9g cells",step,gap/VOXEL_SIZE);
+    }
+#endif
+    if(strcmp(debugRunConfig.scenario,"adaptive-fracture")==0&&(step==20||step==40||step==60)) {
+        int target_x=-2+(step/20-1)*2;
+        for(int i=0;i<voxel_count;i++) {
+            Voxel *v=&voxels[i];
+            if(v->debugClusterTag!=DEBUG_TEST_TAG||v->rest_min_gx!=target_x||v->rest_min_gy!=25||v->rest_min_gz!=-1)continue;
+            for(int k=0;k<8;k++){Particle *p=v->particles[k];float offset=(k&1)?0.3f*VOXEL_SIZE:-0.3f*VOXEL_SIZE;p->pos.x+=offset;p->prev_pos=p->predicted_pos=p->pos;}
+            break;
+        }
+    }
     if (state->swarmer_wall_test) {
         Player *bot = &players[state->enemy_bot_index];
         if (bot->pos.z < state->swarmer_min_z) state->swarmer_min_z = bot->pos.z;
@@ -4079,6 +4158,12 @@ static int run_debug_harness(void)
         debug_add_failure(&state, "scenario setup failed without a diagnostic");
     }
 
+    FILE *adaptive_timing=NULL;
+    if(getenv("FPS_ADAPTIVE_BENCHMARK")) {
+        char timing_path[DEBUG_PATH_CAPACITY];snprintf(timing_path,sizeof(timing_path),"%s.timings.jsonl",state.report_path);
+        adaptive_timing=fopen(timing_path,"w");
+        if(!adaptive_timing)debug_add_failure(&state,"cannot open benchmark timing output");
+    }
     if (setup_ok) {
         debug_gif_begin(&state);
         debug_validate_step(&state, 0);
@@ -4095,6 +4180,10 @@ static int run_debug_harness(void)
             }
         }
         for (int step = 1; step <= debugRunConfig.steps; ++step) {
+            double before_gpu=gpuPhysics.gpu_exec_ms,before_wait=gpuPhysics.gpu_wait_ms;
+            double before_pack=gpuPhysics.pack_ms,before_upload=gpuPhysics.upload_ms,before_read=gpuPhysics.readback_ms;
+            uint64_t before_sync=gpuPhysics.sync_count,before_in=gpuPhysics.upload_bytes,before_out=gpuPhysics.readback_bytes;
+            uint64_t before_full=gpuPhysics.full_uploads;
             double frame_started = GetTime();
             debug_physics_step(&state);
             double physics_finished = GetTime();
@@ -4102,10 +4191,30 @@ static int run_debug_harness(void)
                 gpuPhysics.last_neighbor_overflow > state.benchmark_gpu_neighbor_overflow) {
                 state.benchmark_gpu_neighbor_overflow = gpuPhysics.last_neighbor_overflow;
             }
-            if (state.pbf_scaling_benchmark) {
+            if (state.pbf_scaling_benchmark || adaptive_timing) {
                 debug_render_benchmark_frame(&state);
             }
             double frame_finished = GetTime();
+            if(adaptive_timing) {
+                uint32_t leaves=(uint32_t)gpuPhysics.dynamic_voxel_count,generation=0,error=0;
+                size_t scratch=0;
+                FpsMetalProfileInfo stage_profile={0};
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+                fps_metal_get_profile_info(&stage_profile);
+                if(gpuAdaptive){adaptive_physics_diagnostics(gpuAdaptive,&leaves,&generation,&error);scratch=adaptive_physics_bytes(gpuAdaptive);}
+#endif
+                fprintf(adaptive_timing,"{\"step\":%d,\"physicsMs\":%.9g,\"frameMs\":%.9g,\"gpuMs\":%.9g,\"waitMs\":%.9g,\"packMs\":%.9g,\"uploadMs\":%.9g,\"readbackMs\":%.9g,\"syncs\":%llu,\"uploadBytes\":%llu,\"readbackBytes\":%llu,\"repacked\":%s,\"leaves\":%u,\"generation\":%u,\"error\":%u,\"scratchBytes\":%zu,\"controls\":%d,\"dispatches\":%d,\"fineCells\":%d,\"stageCountersAvailable\":%s,\"stageGpuTicks\":[%llu,%llu,%llu,%llu,%llu]}\n",
+                    step,(physics_finished-frame_started)*1000,(frame_finished-frame_started)*1000,
+                    gpuPhysics.gpu_exec_ms-before_gpu,gpuPhysics.gpu_wait_ms-before_wait,
+                    gpuPhysics.pack_ms-before_pack,gpuPhysics.upload_ms-before_upload,gpuPhysics.readback_ms-before_read,
+                    (unsigned long long)(gpuPhysics.sync_count-before_sync),(unsigned long long)(gpuPhysics.upload_bytes-before_in),
+                    (unsigned long long)(gpuPhysics.readback_bytes-before_out),gpuPhysics.full_uploads!=before_full?"true":"false",
+                    leaves,generation,error,scratch,gpuPhysics.control_stage.sim_count,gpuPhysics.last_dispatches,gpuPhysics.dynamic_voxel_count,
+                    stage_profile.stage_counters_available?"true":"false",
+                    (unsigned long long)stage_profile.stage_ticks[0],(unsigned long long)stage_profile.stage_ticks[1],
+                    (unsigned long long)stage_profile.stage_ticks[2],(unsigned long long)stage_profile.stage_ticks[3],(unsigned long long)stage_profile.stage_ticks[4]);
+                if(error)debug_add_failure(&state,"adaptive GPU error %u",error);
+            }
             if (state.pbf_scaling_benchmark && step > state.benchmark_warmup_steps) {
                 state.benchmark_physics_total_ms += (physics_finished - frame_started) * 1000.0;
                 state.benchmark_render_total_ms += (frame_finished - physics_finished) * 1000.0;
@@ -4135,6 +4244,7 @@ static int run_debug_harness(void)
         debug_finalize_validation(&state);
     }
 
+    if(adaptive_timing)fclose(adaptive_timing);
     debug_gif_end(&state);
     bool report_ok = debug_write_report(&state);
     bool passed = setup_ok && report_ok && state.failure_count == 0;

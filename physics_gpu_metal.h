@@ -40,11 +40,14 @@ typedef struct FpsGpuUniforms {
 
 _Static_assert(sizeof(FpsGpuUniforms) == 240, "Metal uniform layout mismatch");
 
+enum { FPS_METAL_BUILD, FPS_METAL_SHAPE, FPS_METAL_INTERFACE, FPS_METAL_CONTACT, FPS_METAL_FRACTURE, FPS_METAL_STAGES };
 typedef struct FpsMetalProfileInfo {
     double last_gpu_exec_ms;
     double last_wait_ms;
     double last_encode_ms;
     int last_dispatch_count;
+    bool stage_counters_available;
+    uint64_t stage_ticks[FPS_METAL_STAGES];
 } FpsMetalProfileInfo;
 
 #if defined(FPS_GPU_METAL)
@@ -56,8 +59,13 @@ void fps_metal_buffer_destroy(void *buffer);
 bool fps_metal_buffer_update(void *buffer, const void *data, size_t size, size_t offset);
 bool fps_metal_buffer_read(void *buffer, void *data, size_t size, size_t offset);
 void fps_metal_bind_buffer(int slot, void *buffer);
+void fps_metal_get_uniforms(FpsGpuUniforms *uniforms);
 void fps_metal_set_uniforms(const FpsGpuUniforms *uniforms);
 void fps_metal_set_vgs_color(int color);
+void fps_metal_profile_mark(unsigned stage,bool end);
+void *fps_metal_device(void);
+void *fps_metal_encoder(void);
+void fps_metal_restore_bindings(void);
 bool fps_metal_begin_batch(void);
 bool fps_metal_dispatch(int mode, int count);
 bool fps_metal_dispatch_indirect(int mode, void *buffer, size_t offset);
