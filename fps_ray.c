@@ -13474,6 +13474,8 @@ static void dir_to_yaw_pitch(Vector3 dir, float *out_yaw, float *out_pitch) {
     }
 }
 
+static bool is_view_occluded_by_voxels(Vector3 eye_pos, Vector3 target_pos);
+
 static bool find_aim_assist_target(int idx, Vector3 *out_dir, float *out_angle) {
     Player *p = &players[idx];
     Vector3 forward = player_forward(p);
@@ -13494,6 +13496,9 @@ static bool find_aim_assist_target(int idx, Vector3 *out_dir, float *out_angle) 
         if (target->respawn_timer > 0.0f) {
             continue;
         }
+        if (gameMode == GAME_MODE_FIREFIGHT && is_player_bot(j) == is_player_bot(idx)) {
+            continue;
+        }
         float aim_height = 0.35f - (PLAYER_SIZE * 0.5f);
         Vector3 target_pos = v_add(target->pos, (Vector3){ 0.0f, aim_height, 0.0f });
         Vector3 to_target = v_sub(target_pos, p->pos);
@@ -13504,6 +13509,9 @@ static bool find_aim_assist_target(int idx, Vector3 *out_dir, float *out_angle) 
         Vector3 dir = v_mul(to_target, 1.0f / dist);
         float dot = v_dot(forward, dir);
         if (dot < cos_max) {
+            continue;
+        }
+        if (is_view_occluded_by_voxels(p->pos, target->pos)) {
             continue;
         }
         float angle = acosf(clampf(dot, -1.0f, 1.0f));
@@ -18004,6 +18012,47 @@ static bool run_ai_awareness_smoke_test(void) {
         return false;
     }
     fprintf(stderr, "ai-smoke PASS: find_nearest_aware_enemy correctly finds visible player\n");
+
+    // 6. Test Aim Assist Line-of-Sight Check
+    Vector3 aimDir = { 0 };
+    float aimAngle = 0.0f;
+    players[0].pos = (Vector3){ 0.0f, 1.0f, 0.0f };
+    players[0].yaw = 0.0f;
+    players[0].pitch = 0.0f;
+    players[1].pos = (Vector3){ 0.0f, 1.0f, -10.0f };
+    players[1].respawn_timer = 0.0f;
+
+    // Clear LOS in open air -> should find target
+    if (!find_aim_assist_target(0, &aimDir, &aimAngle)) {
+        fprintf(stderr, "ai-smoke FAIL: Aim assist should find target with clear LOS in open air!\n");
+        return false;
+    }
+    fprintf(stderr, "ai-smoke PASS: Aim assist finds target with clear line of sight\n");
+
+    // Occluded by solid voxel wall -> should NOT find target
+    wall_v1 = addVoxel(0.0f, 1.0f, -5.0f, false, true, RED, 0);
+    wall_v2 = addVoxel(0.0f, 0.5f, -5.0f, false, true, RED, 0);
+    rebuild_voxel_hash();
+    rebuild_static_hash_if_dirty();
+    if (wall_v1 >= 0 && wall_v2 >= 0) {
+        if (find_aim_assist_target(0, &aimDir, &aimAngle)) {
+            fprintf(stderr, "ai-smoke FAIL: Aim assist should NOT find target behind solid voxel wall!\n");
+            return false;
+        }
+        fprintf(stderr, "ai-smoke PASS: Aim assist blocked by solid voxel wall\n");
+
+        // Bullet voxels are transparent to line of sight
+        voxels[wall_v1].isBullet = true;
+        voxels[wall_v2].isBullet = true;
+        if (!find_aim_assist_target(0, &aimDir, &aimAngle)) {
+            fprintf(stderr, "ai-smoke FAIL: Bullet voxels should NOT block aim assist line of sight!\n");
+            return false;
+        }
+        fprintf(stderr, "ai-smoke PASS: Bullet voxels are transparent to aim assist line of sight\n");
+
+        clear_world_voxels();
+        init_static_hash();
+    }
 
     fprintf(stderr, "=== ALL AI AWARENESS SMOKE TESTS PASSED! ===\n");
     return true;
