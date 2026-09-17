@@ -31,6 +31,7 @@ typedef struct DebugRunConfig {
     int gif_fps;
     int capture_steps[DEBUG_MAX_CAPTURE_STEPS];
     int capture_step_count;
+    int pbf_side;
     char scenario[64];
     char output_dir[DEBUG_PATH_CAPACITY];
 } DebugRunConfig;
@@ -161,6 +162,7 @@ typedef struct DebugRunState {
     int gpu_tagged_corners_missing_from_sim_ids;
     int gpu_zero_mass_corners;
     bool pbf_container;
+    bool pbf_dynamic_container;
     int expected_fluid_particles;
     int expected_container_voxels;
     float initial_fluid_centroid_y;
@@ -172,6 +174,24 @@ typedef struct DebugRunState {
     float container_floor_top;
     int escaped_fluid_particles;
     int below_container_particles;
+    bool pbf_scaling_benchmark;
+    int benchmark_warmup_steps;
+    int benchmark_measured_steps;
+    double benchmark_physics_total_ms;
+    double benchmark_render_total_ms;
+    double benchmark_frame_total_ms;
+    double benchmark_gpu_compute_total_ms;
+    double benchmark_gpu_hull_total_ms;
+    double benchmark_gpu_pack_total_ms;
+    double benchmark_gpu_upload_total_ms;
+    double benchmark_gpu_readback_total_ms;
+    uint64_t benchmark_gpu_upload_bytes;
+    uint64_t benchmark_gpu_readback_bytes;
+    int benchmark_gpu_dispatches;
+    int benchmark_gpu_hash_capacity;
+    uint32_t benchmark_gpu_neighbor_overflow;
+    bool benchmark_gpu_hull;
+    bool expect_gpu_neighbor_overflow;
     DebugTrackedCell tracked_cells[DEBUG_MAX_TRACKED_CELLS];
     int tracked_cell_count;
     DebugSample samples[DEBUG_MAX_SAMPLES];
@@ -216,7 +236,8 @@ typedef struct DebugScenarioDefinition {
 
 static DebugRunConfig debugRunConfig = {
     .steps = DEBUG_DEFAULT_STEPS,
-    .gif_fps = 20
+    .gif_fps = 20,
+    .pbf_side = 4
 };
 
 static bool debug_setup_dynamic_freefall(DebugRunState *state);
@@ -238,6 +259,9 @@ static bool debug_setup_pbf_container(DebugRunState *state);
 static bool debug_setup_tall_pillar_snap(DebugRunState *state);
 static bool debug_setup_swarmer_wall(DebugRunState *state);
 static bool debug_setup_goliath_flight(DebugRunState *state);
+static bool debug_setup_pbf_dynamic_container(DebugRunState *state);
+static bool debug_setup_pbf_scaling(DebugRunState *state);
+static bool debug_setup_pbf_dense_neighbors(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall, 60, 60 },
@@ -257,6 +281,9 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "tether-active-then-static", "Tethering an active voxel then a static voxel preserves and pulls both", debug_setup_tether_active_then_static, 60, 60 },
     { "tether-thin-wall-ccd", "High-speed tether throw uses swept particle rays against a one-voxel wall", debug_setup_tether_thin_wall_ccd, 60, 60 },
     { "pbf-container", "High-viscosity PBF falls into an immutable container", debug_setup_pbf_container, 240, 120 },
+    { "pbf-dynamic-container", "PBF falls onto an elevated active PBD floor", debug_setup_pbf_dynamic_container, 240, 120 },
+    { "pbf-scaling", "Timed PBF physics plus convex-hull rendering", debug_setup_pbf_scaling, 120, 60 },
+    { "pbf-dense-neighbors", "Dense PBF neighborhood overflow fallback", debug_setup_pbf_dense_neighbors, 60, 60 },
     { "swarmer-wall", "Swarmer charges a visible target through a blocking wall", debug_setup_swarmer_wall, 90, 60 },
     { "goliath-flight", "Goliath jumps with attached armor and must land", debug_setup_goliath_flight, 120, 90 }
 };
@@ -412,6 +439,13 @@ static int debug_parse_argument(int argc, char **argv, int *index)
                                  &debugRunConfig.gif_fps, "--debug-gif-fps")) return -1;
         debugRunConfig.record_gif = true;
         return 1;
+    }
+
+    value = debug_option_value(argc, argv, index, argument,
+                               "--debug-pbf-side=", "--debug-pbf-side");
+    if (value != (const char *)(uintptr_t)1) {
+        return debug_parse_integer(value, 1, 25,
+                                   &debugRunConfig.pbf_side, "--debug-pbf-side") ? 1 : -1;
     }
 
     value = debug_option_value(argc, argv, index, argument,
@@ -909,6 +943,16 @@ static void debug_draw_overlay(const DebugRunState *state, const DebugSample *sa
                             sample->mean_density_ratio, sample->max_density_ratio,
                             fluidRenderMode == FLUID_RENDER_SURFACE ? "surface" : "particles"),
                  34, y + 26, 17, result_color);
+        if (fluidRenderMode == FLUID_RENDER_SURFACE) {
+            DrawText(TextFormat("HULL cells=%d triangles=%d grid=%.3fm",
+                                fluidHullCellCount, fluidHullMesh.triangleCount,
+                                PBF_HULL_CELL_SIZE),
+                     34, y + 52, 17, result_color);
+        }
+        DrawText(TextFormat("DYNAMIC FLUID CONTACTS %d",
+                            atomic_load_explicit(&fluidDynamicCollisionCount,
+                                                 memory_order_relaxed)),
+                 34, y + 78, 17, result_color);
     }
 }
 
@@ -2548,6 +2592,178 @@ static bool debug_setup_pbf_container(DebugRunState *state)
     return state->failure_count == 0;
 }
 
+static bool debug_setup_pbf_dynamic_container(DebugRunState *state)
+{
+    debug_reset_world();
+    activePlayers = 0;
+    const Color floor_color = { 225, 145, 55, 255 };
+    const Color wall_color = { 125, 135, 150, 255 };
+    const Color fluid_color = { 45, 145, 235, 210 };
+    int container_created = 0;
+    int fluid_cells_created = 0;
+
+    // A 7x7 active floor is glued around its complete perimeter to an immutable rim.
+    for (int z = -3; z <= 3; ++z) {
+        for (int x = -3; x <= 3; ++x) {
+            if (debug_add_cell(x, 4, z, false, true,
+                               floor_color, DEBUG_CONTAINER_TAG) >= 0) {
+                ++container_created;
+            }
+        }
+    }
+    for (int y = 4; y <= 16; ++y) {
+        for (int z = -4; z <= 4; ++z) {
+            if (debug_add_cell(-4, y, z, true, false,
+                               wall_color, DEBUG_CONTAINER_TAG) >= 0) ++container_created;
+            if (debug_add_cell(4, y, z, true, false,
+                               wall_color, DEBUG_CONTAINER_TAG) >= 0) ++container_created;
+        }
+        for (int x = -3; x <= 3; ++x) {
+            if (debug_add_cell(x, y, -4, true, false,
+                               wall_color, DEBUG_CONTAINER_TAG) >= 0) ++container_created;
+            if (debug_add_cell(x, y, 4, true, false,
+                               wall_color, DEBUG_CONTAINER_TAG) >= 0) ++container_created;
+        }
+    }
+
+    for (int y = 10; y <= 13; ++y) {
+        for (int z = -2; z <= 1; ++z) {
+            for (int x = -2; x <= 1; ++x) {
+                float px = ((float)x + 0.5f) * VOXEL_SIZE;
+                float py = ((float)y + 0.5f) * VOXEL_SIZE;
+                float pz = ((float)z + 0.5f) * VOXEL_SIZE;
+                int index = add_fluid_cell(px, py, pz, fluid_color);
+                if (index >= 0) {
+                    voxels[index].debugClusterTag = DEBUG_FLUID_TAG;
+                    ++fluid_cells_created;
+                }
+            }
+        }
+    }
+
+    debug_rebuild_world_state();
+    state->pbf_container = true;
+    state->pbf_dynamic_container = true;
+    state->activation_succeeded = true;
+    state->expected_container_voxels = 49 + 13 * 32;
+    state->expected_fluid_particles = 4 * 4 * 4 * VOXEL_CORNER_COUNT;
+    state->container_min_x = -3.0f * VOXEL_SIZE + PBF_PARTICLE_RADIUS;
+    state->container_max_x = 4.0f * VOXEL_SIZE - PBF_PARTICLE_RADIUS;
+    state->container_min_z = -3.0f * VOXEL_SIZE + PBF_PARTICLE_RADIUS;
+    state->container_max_z = 4.0f * VOXEL_SIZE - PBF_PARTICLE_RADIUS;
+    state->container_floor_top = 5.0f * VOXEL_SIZE;
+    state->camera.position = (Vector3){ 3.0f, 6.0f, 3.0f };
+    state->camera.target = (Vector3){ 0.0f, 2.0f, 0.0f };
+
+    DebugSample initial = debug_collect_sample("initial-fluid-dynamic-floor", 0, 0.0f);
+    state->initial_fluid_centroid_y = initial.fluid_centroid_y;
+    if (container_created != state->expected_container_voxels) {
+        debug_add_failure(state, "pbf-dynamic-container created %d/%d container voxels",
+                          container_created, state->expected_container_voxels);
+    }
+    if (fluid_cells_created != 64 ||
+        fluid_particle_count != state->expected_fluid_particles) {
+        debug_add_failure(state,
+                          "pbf-dynamic-container created cells=%d/64 particles=%d/%d",
+                          fluid_cells_created, fluid_particle_count,
+                          state->expected_fluid_particles);
+    }
+    return state->failure_count == 0;
+}
+
+static bool debug_setup_pbf_scaling(DebugRunState *state)
+{
+    debug_reset_world();
+    activePlayers = 0;
+    fluidRenderMode = FLUID_RENDER_SURFACE;
+
+    const Color fluid_color = { 45, 145, 235, 210 };
+    const int side = debugRunConfig.pbf_side;
+    const float spacing = VOXEL_SIZE;
+    const float origin = -0.5f * (float)(side - 1) * spacing;
+    int fluid_cells_created = 0;
+
+    for (int y = 0; y < side; ++y) {
+        for (int z = 0; z < side; ++z) {
+            for (int x = 0; x < side; ++x) {
+                int index = add_fluid_cell(origin + (float)x * spacing,
+                                           100.0f + (float)y * spacing,
+                                           origin + (float)z * spacing,
+                                           fluid_color);
+                if (index >= 0) {
+                    voxels[index].debugClusterTag = DEBUG_FLUID_TAG;
+                    ++fluid_cells_created;
+                }
+            }
+        }
+    }
+
+    debug_rebuild_world_state();
+    state->pbf_scaling_benchmark = true;
+    state->activation_succeeded = true;
+    state->expected_fluid_particles = side * side * side * VOXEL_CORNER_COUNT;
+    state->benchmark_warmup_steps = debugRunConfig.steps / 4;
+    if (state->benchmark_warmup_steps < 10) state->benchmark_warmup_steps = 10;
+    if (state->benchmark_warmup_steps >= debugRunConfig.steps) {
+        state->benchmark_warmup_steps = debugRunConfig.steps - 1;
+    }
+    state->camera.position = (Vector3){ (float)side * 0.8f, 102.0f + (float)side * 0.5f,
+                                       (float)side * 1.2f };
+    state->camera.target = (Vector3){ 0.0f, 100.0f + (float)side * 0.25f, 0.0f };
+
+    if (fluid_cells_created != side * side * side ||
+        fluid_particle_count != state->expected_fluid_particles) {
+        debug_add_failure(state,
+                          "pbf-scaling created cells=%d/%d particles=%d/%d",
+                          fluid_cells_created, side * side * side,
+                          fluid_particle_count, state->expected_fluid_particles);
+    }
+    return state->failure_count == 0;
+}
+
+static bool debug_setup_pbf_dense_neighbors(DebugRunState *state)
+{
+    int requested_side = debugRunConfig.pbf_side;
+    debugRunConfig.pbf_side = 4;
+    bool ok = debug_setup_pbf_scaling(state);
+    debugRunConfig.pbf_side = requested_side;
+    if (!ok) return false;
+
+    const int row = 8;
+    const float spacing = PBF_SMOOTHING_RADIUS / 20.0f;
+    const Vector3 center = { 0.0f, 100.0f, 0.0f };
+    for (int i = 0; i < fluid_particle_count; ++i) {
+        int x = i % row;
+        int y = (i / row) % row;
+        int z = i / (row * row);
+        Vector3 position = {
+            center.x + ((float)x - 3.5f) * spacing,
+            center.y + ((float)y - 3.5f) * spacing,
+            center.z + ((float)z - 3.5f) * spacing
+        };
+        Particle *particle = fluid_particles[i];
+        particle->pos = position;
+        particle->prev_pos = position;
+        particle->predicted_pos = position;
+        particle->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+    }
+    state->expect_gpu_neighbor_overflow = true;
+    state->camera.position = (Vector3){ 2.5f, 102.0f, 3.0f };
+    state->camera.target = center;
+    return true;
+}
+
+static void debug_render_benchmark_frame(DebugRunState *state)
+{
+    BeginTextureMode(state->target);
+        ClearBackground((Color){ 32, 42, 58, 255 });
+        BeginMode3D(state->camera);
+            DrawVoxels(state->camera);
+        EndMode3D();
+    EndTextureMode();
+    rlDrawRenderBatchActive();
+}
+
 static void debug_init_enemy_player(int index, Vector3 pos, EnemyType type, InputType input)
 {
     memset(&players[index], 0, sizeof(players[index]));
@@ -3060,8 +3276,19 @@ static void debug_validate_step(DebugRunState *state, int step)
         debug_readback_gpu_buffers(state, step);
         return;
     }
+    if (state->pbf_scaling_benchmark) {
+        if (sample.fluid_particles != state->expected_fluid_particles) {
+            debug_add_failure(state, "step %d: benchmark fluid count changed to %d (expected %d)",
+                              step, sample.fluid_particles, state->expected_fluid_particles);
+        }
+        if (sample.invalid_fluid_particles > 0) {
+            debug_add_failure(state, "step %d: %d benchmark fluid particles are invalid",
+                              step, sample.invalid_fluid_particles);
+        }
+        return;
+    }
     if (state->pbf_container) {
-        if (sample.sim_particles != 0) {
+        if (!state->pbf_dynamic_container && sample.sim_particles != 0) {
             debug_add_failure(state,
                               "step %d: %d fluid particles leaked into the solid sim list",
                               step, sample.sim_particles);
@@ -3075,11 +3302,13 @@ static void debug_validate_step(DebugRunState *state, int step)
                               step, sample.invalid_fluid_particles);
         }
         int container_count = 0;
+        int dynamic_container_count = 0;
         for (int i = 0; i < voxel_count; ++i) {
             const Voxel *voxel = &voxels[i];
             if (voxel->debugClusterTag != DEBUG_CONTAINER_TAG) continue;
             ++container_count;
-            if (voxel->simulate || voxel->pendingActivation) {
+            if (voxel->simulate) ++dynamic_container_count;
+            if ((!state->pbf_dynamic_container && voxel->simulate) || voxel->pendingActivation) {
                 debug_add_failure(state,
                                   "step %d: fluid activated an immutable container voxel",
                                   step);
@@ -3089,6 +3318,11 @@ static void debug_validate_step(DebugRunState *state, int step)
         if (container_count != state->expected_container_voxels) {
             debug_add_failure(state, "step %d: container voxel count changed to %d (expected %d)",
                               step, container_count, state->expected_container_voxels);
+        }
+        if (state->pbf_dynamic_container && step <= 60 && dynamic_container_count < 49) {
+            debug_add_failure(state,
+                              "step %d: active floor lost dynamic voxels (%d/49 remain)",
+                              step, dynamic_container_count);
         }
         if (step == 120) {
             state->fluid_drop_at_step_120 =
@@ -3316,6 +3550,19 @@ static void debug_finalize_validation(DebugRunState *state)
         }
         return;
     }
+    if (state->pbf_scaling_benchmark) {
+        if (state->benchmark_measured_steps <= 0 ||
+            !isfinite(state->benchmark_frame_total_ms) ||
+            state->benchmark_frame_total_ms <= 0.0) {
+            debug_add_failure(state, "benchmark did not record valid timed frames");
+        }
+        if (state->expect_gpu_neighbor_overflow &&
+            physicsBackend.active == PHYSICS_BACKEND_GPU_GL43 &&
+            state->benchmark_gpu_neighbor_overflow == 0) {
+            debug_add_failure(state, "dense PBF case did not exercise the GPU neighbor overflow fallback");
+        }
+        return;
+    }
     if (state->pbf_container) {
         DebugSample final_sample = debug_collect_sample("final", debugRunConfig.steps, 0.0f);
         state->escaped_fluid_particles = 0;
@@ -3329,15 +3576,53 @@ static void debug_finalize_validation(DebugRunState *state)
                 particle->pos.z > state->container_max_z) {
                 ++state->escaped_fluid_particles;
             }
-            if (particle->pos.y < state->container_floor_top - 0.01f) {
+            if (state->pbf_dynamic_container) {
+                bool beneath_deformed_floor = false;
+                bool inside_container_xz =
+                    particle->pos.x >= state->container_min_x &&
+                    particle->pos.x <= state->container_max_x &&
+                    particle->pos.z >= state->container_min_z &&
+                    particle->pos.z <= state->container_max_z;
+                for (int voxel_index = 0; voxel_index < voxel_count; ++voxel_index) {
+                    const Voxel *floor_voxel = &voxels[voxel_index];
+                    if (floor_voxel->debugClusterTag != DEBUG_CONTAINER_TAG ||
+                        floor_voxel->orig_min_gy != 4 ||
+                        floor_voxel->orig_min_gx < -3 || floor_voxel->orig_max_gx > 3 ||
+                        floor_voxel->orig_min_gz < -3 || floor_voxel->orig_max_gz > 3) continue;
+                    Vector3 floor_min = { FLT_MAX, FLT_MAX, FLT_MAX };
+                    Vector3 floor_max = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+                    for (int corner = 0; corner < 8; ++corner) {
+                        Vector3 p = floor_voxel->particles[corner]->pos;
+                        if (p.x < floor_min.x) floor_min.x = p.x;
+                        if (p.y < floor_min.y) floor_min.y = p.y;
+                        if (p.z < floor_min.z) floor_min.z = p.z;
+                        if (p.x > floor_max.x) floor_max.x = p.x;
+                        if (p.y > floor_max.y) floor_max.y = p.y;
+                        if (p.z > floor_max.z) floor_max.z = p.z;
+                    }
+                    if (inside_container_xz &&
+                        particle->pos.x >= floor_min.x &&
+                        particle->pos.x <= floor_max.x &&
+                        particle->pos.z >= floor_min.z &&
+                        particle->pos.z <= floor_max.z &&
+                        particle->pos.y < floor_min.y - particle->radius - 0.01f) {
+                        beneath_deformed_floor = true;
+                        break;
+                    }
+                }
+                if (beneath_deformed_floor) ++state->below_container_particles;
+            } else if (particle->pos.y < state->container_floor_top - 0.01f) {
                 ++state->below_container_particles;
             }
         }
-        int maximum_escaped = (state->expected_fluid_particles + 19) / 20;
-        if (!isfinite(state->fluid_drop_at_step_120) || state->fluid_drop_at_step_120 < 2.0f) {
+        int maximum_escaped = state->pbf_dynamic_container
+            ? (state->expected_fluid_particles + 9) / 10
+            : (state->expected_fluid_particles + 19) / 20;
+        float minimum_drop = state->pbf_dynamic_container ? 1.0f : 2.0f;
+        if (!isfinite(state->fluid_drop_at_step_120) || state->fluid_drop_at_step_120 < minimum_drop) {
             debug_add_failure(state,
-                              "fluid dropped only %.3f metres after 120 steps (minimum 2.000)",
-                              state->fluid_drop_at_step_120);
+                              "fluid dropped only %.3f metres after 120 steps (minimum %.3f)",
+                              state->fluid_drop_at_step_120, minimum_drop);
         }
         if (state->escaped_fluid_particles > maximum_escaped) {
             debug_add_failure(state, "%d fluid particles escaped the container (maximum %d)",
@@ -3360,10 +3645,12 @@ static void debug_finalize_validation(DebugRunState *state)
                               "final maximum density/rest ratio %.3f exceeds 1.35",
                               final_sample.max_density_ratio);
         }
-        if (!isfinite(final_sample.mean_fluid_speed) || final_sample.mean_fluid_speed > 0.75f) {
+        float maximum_mean_speed = state->pbf_dynamic_container ? 1.25f : 0.75f;
+        if (!isfinite(final_sample.mean_fluid_speed) ||
+            final_sample.mean_fluid_speed > maximum_mean_speed) {
             debug_add_failure(state,
-                              "final mean fluid speed %.3f m/s exceeds 0.75",
-                              final_sample.mean_fluid_speed);
+                              "final mean fluid speed %.3f m/s exceeds %.2f",
+                              final_sample.mean_fluid_speed, maximum_mean_speed);
         }
         return;
     }
@@ -3566,7 +3853,43 @@ static bool debug_write_report(DebugRunState *state)
             state->expected_fluid_particles,
             (double)state->fluid_drop_at_step_120,
             state->escaped_fluid_particles,
-            state->below_container_particles);
+             state->below_container_particles);
+
+    double benchmark_physics_ms = state->benchmark_measured_steps > 0
+        ? state->benchmark_physics_total_ms / (double)state->benchmark_measured_steps : 0.0;
+    double benchmark_render_ms = state->benchmark_measured_steps > 0
+        ? state->benchmark_render_total_ms / (double)state->benchmark_measured_steps : 0.0;
+    double benchmark_frame_ms = state->benchmark_measured_steps > 0
+        ? state->benchmark_frame_total_ms / (double)state->benchmark_measured_steps : 0.0;
+    double benchmark_fps = benchmark_frame_ms > 0.0 ? 1000.0 / benchmark_frame_ms : 0.0;
+    double benchmark_gpu_compute_ms = state->benchmark_measured_steps > 0
+        ? state->benchmark_gpu_compute_total_ms / (double)state->benchmark_measured_steps : 0.0;
+    double benchmark_gpu_hull_ms = state->benchmark_measured_steps > 0
+        ? state->benchmark_gpu_hull_total_ms / (double)state->benchmark_measured_steps : 0.0;
+    fprintf(file,
+            "  \"benchmark\": {\"enabled\": %s, \"fluidParticles\": %d,"
+            " \"hullRender\": true, \"hullBackend\": \"%s\", \"warmupSteps\": %d, \"measuredSteps\": %d,"
+            " \"averagePhysicsMs\": %.9g, \"averageRenderMs\": %.9g,"
+            " \"averageFrameMs\": %.9g, \"framesPerSecond\": %.9g,"
+            " \"gpuComputeMs\": %.9g, \"gpuHullMs\": %.9g,"
+            " \"gpuPackMs\": %.9g, \"gpuUploadMs\": %.9g, \"gpuReadbackMs\": %.9g,"
+            " \"gpuUploadBytesPerFrame\": %.9g, \"gpuReadbackBytesPerFrame\": %.9g,"
+            " \"gpuDispatchesPerFrame\": %.9g, \"gpuHashCapacity\": %d,"
+            " \"gpuNeighborOverflowMax\": %u},\n",
+            state->pbf_scaling_benchmark ? "true" : "false",
+            state->expected_fluid_particles,
+            state->benchmark_gpu_hull ? "gpu-compute" : "cpu",
+            state->benchmark_warmup_steps, state->benchmark_measured_steps,
+            benchmark_physics_ms, benchmark_render_ms, benchmark_frame_ms, benchmark_fps,
+            benchmark_gpu_compute_ms, benchmark_gpu_hull_ms,
+            state->benchmark_measured_steps > 0 ? state->benchmark_gpu_pack_total_ms / state->benchmark_measured_steps : 0.0,
+            state->benchmark_measured_steps > 0 ? state->benchmark_gpu_upload_total_ms / state->benchmark_measured_steps : 0.0,
+            state->benchmark_measured_steps > 0 ? state->benchmark_gpu_readback_total_ms / state->benchmark_measured_steps : 0.0,
+            state->benchmark_measured_steps > 0 ? (double)state->benchmark_gpu_upload_bytes / state->benchmark_measured_steps : 0.0,
+            state->benchmark_measured_steps > 0 ? (double)state->benchmark_gpu_readback_bytes / state->benchmark_measured_steps : 0.0,
+            state->benchmark_measured_steps > 0 ? (double)state->benchmark_gpu_dispatches / state->benchmark_measured_steps : 0.0,
+            state->benchmark_gpu_hash_capacity,
+            state->benchmark_gpu_neighbor_overflow);
 
     fputs("  \"failures\": [", file);
     for (int i = 0; i < state->failure_count; ++i) {
@@ -3706,7 +4029,35 @@ static int run_debug_harness(void)
             }
         }
         for (int step = 1; step <= debugRunConfig.steps; ++step) {
+            double frame_started = GetTime();
             debug_physics_step(&state);
+            double physics_finished = GetTime();
+            if (physicsBackend.active == PHYSICS_BACKEND_GPU_GL43 &&
+                gpuPhysics.last_neighbor_overflow > state.benchmark_gpu_neighbor_overflow) {
+                state.benchmark_gpu_neighbor_overflow = gpuPhysics.last_neighbor_overflow;
+            }
+            if (state.pbf_scaling_benchmark) {
+                debug_render_benchmark_frame(&state);
+            }
+            double frame_finished = GetTime();
+            if (state.pbf_scaling_benchmark && step > state.benchmark_warmup_steps) {
+                state.benchmark_physics_total_ms += (physics_finished - frame_started) * 1000.0;
+                state.benchmark_render_total_ms += (frame_finished - physics_finished) * 1000.0;
+                state.benchmark_frame_total_ms += (frame_finished - frame_started) * 1000.0;
+                if (physicsBackend.active == PHYSICS_BACKEND_GPU_GL43) {
+                    state.benchmark_gpu_compute_total_ms += gpuPhysics.last_gpu_compute_ms;
+                    state.benchmark_gpu_hull_total_ms += gpuPhysics.last_hull_gpu_ms;
+                    state.benchmark_gpu_pack_total_ms += gpuPhysics.last_pack_ms;
+                    state.benchmark_gpu_upload_total_ms += gpuPhysics.last_upload_ms;
+                    state.benchmark_gpu_readback_total_ms += gpuPhysics.last_readback_ms;
+                    state.benchmark_gpu_upload_bytes += gpuPhysics.last_upload_bytes;
+                    state.benchmark_gpu_readback_bytes += gpuPhysics.last_readback_bytes;
+                    state.benchmark_gpu_dispatches += gpuPhysics.last_dispatches;
+                    state.benchmark_gpu_hash_capacity = gpuPhysics.hash_capacity;
+                    state.benchmark_gpu_hull = state.benchmark_gpu_hull || gpuPhysics.last_hull_used_gpu;
+                }
+                state.benchmark_measured_steps++;
+            }
             debug_validate_step(&state, step);
             debug_gif_capture(&state, step);
             if (debug_should_capture_step(step)) {
@@ -3735,6 +4086,16 @@ static int run_debug_harness(void)
             state.capture_count,
             debugRunConfig.record_gif ? state.gif_path : "disabled",
             state.gif_frame_count, state.report_path);
+    if (state.pbf_scaling_benchmark && state.benchmark_measured_steps > 0) {
+        double frame_ms = state.benchmark_frame_total_ms / (double)state.benchmark_measured_steps;
+        fprintf(stderr,
+                "debug-benchmark particles=%d backend=%s hull=surface physicsMs=%.6f renderMs=%.6f frameMs=%.6f fps=%.3f measured=%d warmup=%d\n",
+                state.expected_fluid_particles, physics_backend_name(physicsBackend.active),
+                state.benchmark_physics_total_ms / (double)state.benchmark_measured_steps,
+                state.benchmark_render_total_ms / (double)state.benchmark_measured_steps,
+                frame_ms, frame_ms > 0.0 ? 1000.0 / frame_ms : 0.0,
+                state.benchmark_measured_steps, state.benchmark_warmup_steps);
+    }
     for (int i = 0; i < state.failure_count; ++i) {
         fprintf(stderr, "debug-failure: %s\n", state.failures[i]);
     }

@@ -35,12 +35,18 @@ the frame.
 
 The GPU path packs only particles referenced by active voxels into SSBOs. Stable
 particle-pool IDs are mapped to compact indices, preserving shared corners created
-by glue. Static voxels are uploaded only when the static-grid generation changes.
-Each substep dispatches prediction, dynamic hash construction, scene and particle
-collisions, Jacobi apply passes, VGS iterations, static collisions, glue-break
-evaluation, GPU particle splitting, topology rebuilding, wake propagation, and
-velocity finalization. The compact result is committed back to the canonical CPU
-arrays once per rendered-frame batch.
+by glue. Particle and fluid state stays resident across both substeps and unchanged
+frames; static voxels are uploaded only when the static-grid generation changes.
+The dynamic hash is sized to the active population instead of clearing the maximum
+262,144 buckets. Each substep dispatches prediction, dynamic hash construction,
+scene and particle collisions, Jacobi apply passes, VGS iterations, static collisions,
+glue-break evaluation, GPU particle splitting, topology rebuilding, wake propagation,
+and velocity finalization. PBF builds one 64-entry neighbor cache per particle and
+reuses it for density, position correction, and viscosity, with a full hash scan only
+for dense particles that overflow the cache. Fluid-only scenes omit the solid pair,
+VGS, and glue-break passes. The compact result is committed back to the canonical CPU
+arrays once per rendered-frame batch. Topology mutations such as actually breaking
+glue or converting a sleeping cluster back to static remain ordered CPU commits.
 
 The CPU PBD loop uses a lightweight, persistent thread pool to avoid per-frame
 thread creation.
@@ -48,7 +54,7 @@ Key ideas:
 *   **Parallel-for dispatcher:** A small worker pool runs chunked ranges over arrays (particles/voxels).
 *   **Jacobi-style accumulators:** Constraints write into per-particle correction accumulators (`corr_sum`, `corr_weight`) using atomic float adds. A later “apply” pass updates positions, preserving determinism within a single iteration.
 *   **Stable particle snapshots:** Each constraint iteration snapshots `active_particles` into a local array before building the spatial hash and gathering collisions, avoiding concurrent mutation while workers read.
-*   **Thread-safe spatial hash:** Particle hash buckets are cleared and built in parallel; inserts use atomic exchange for lock-free binning.
+*   **Thread-safe spatial hash:** Only buckets touched by the previous CPU step are cleared; inserts use atomic exchange for lock-free binning.
 *   **Execution order:** Integrate → Hash Clear/Build → Collisions → Apply → VGS/Apply iterations → Static collisions → Glue/lifecycle commit → Velocity update.
 
 This layout mirrors a GPU compute pipeline and keeps contention low while remaining safe on CPU.
@@ -325,20 +331,27 @@ fps_ray --physics=gpu --gpu-transfer-mode=resident --gpu-transfer-stats
 Creative mode can place runtime PBF cells that reuse the voxel corner-particle
 storage. Press `C` for player one, keypad `3` for player two, or the left stick
 button on a controller to switch the creative brush between `SOLID` and `FLUID`.
-Fluid cells are intentionally excluded from saved map occupancy, glue, sleep,
-activation, projectile, and recycle paths. They collide with immutable static
+Fluid cells are intentionally excluded from saved map occupancy, glue, solid-voxel
+sleep, activation, projectile, and recycle paths. They collide with immutable static
 geometry without waking it and exchange collision corrections with solids that
-are already active.
+are already active. A settled fluid-only scene runs at one quarter rate after a
+conservative stability window and immediately returns to full rate when a player
+approaches or any solid physics particle becomes active.
 
 The implementation follows the density constraint, artificial-pressure surface
 correction, and XSPH viscosity stages from Macklin and Mueller's *Position Based
 Fluids*. A 0.5 m fluid cell contains eight independent particles on a 0.25 m
-lattice. Each physics substep runs four PBF Jacobi iterations with rest density
+lattice. Each physics substep runs two PBF Jacobi iterations with rest density
 1000 kg/m3, `k=0.2`, `n=4`, `dq=0.2h`, and XSPH viscosity 0.15. The same stages
 run through the normal GPU -> CPU MT -> CPU ST fallback chain.
 
-Press `F5` to switch between exact particle spheres and a fast overlapping-sphere
-surface preview. The startup mode can also be selected with:
+Press `F5` to switch between low-poly particle spheres and a faceted approximate
+hull. Surface mode bins particles into 0.25 m cells, builds a coarse scalar density
+field, averages its edge crossings into one surface-net vertex per boundary cell,
+and connects those vertices with flat-shaded triangles. With GPU physics the four
+surface-net passes consume the resident particle SSBO and write renderable vertex
+buffers directly; CPU backends retain the cached CPU mesh builder. The startup mode
+can also be selected with:
 
 ```bash
 fps_ray --fluid-render=particles
@@ -439,6 +452,22 @@ Available scenarios are:
 * `pbf-container`: drops 512 fluid particles into a tall immutable voxel container, captures
   both render modes, and checks particle membership, density, settling, containment, and that
   fluid never activates the container.
+* `pbf-dynamic-container`: drops the same fluid volume onto an elevated active PBD floor and
+  checks that the deforming solid supports it on GPU, multi-threaded CPU, and single-threaded CPU.
+* `pbf-scaling`: benchmarks a configurable cubic PBF volume with convex-hull rendering on every
+  step. Use `--debug-pbf-side=N`; the particle count is `8 * N^3`. Reports include average
+  physics, hull-render, and total frame times plus derived unthrottled FPS after warm-up.
+  GPU reports also include timer-query compute/hull time, packing/upload/readback wall time,
+  bytes transferred per frame, dispatch count, hull backend, and maximum neighbor overflow.
+* `pbf-dense-neighbors`: compresses 512 particles into one smoothing neighborhood and verifies
+  that GPU cache overflow is detected and routed through the complete hash-scan fallback.
+
+For example, benchmark 4,096 particles across all three backends with:
+
+```bash
+fps_ray --debug-matrix --debug-scenario=pbf-scaling --debug-pbf-side=8 \
+  --debug-steps=120 --debug-capture-steps=0
+```
 
 Without `--debug-output`, artifacts are written beneath
 `.build/bin/debug-artifacts/<scenario>/<active-backend>`. Each backend directory contains

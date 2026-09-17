@@ -12,7 +12,8 @@ void main()
 {
     vec3 normal = normalize(fragNormal);
     vec3 viewDirection = normalize(viewPos - fragPosition);
-    float fresnel = pow(clamp(1.0 - dot(normal, viewDirection), 0.0, 1.0), 2.2);
+    float fresnelBase = clamp(1.0 - dot(normal, viewDirection), 0.0, 1.0);
+    float fresnel = fresnelBase * fresnelBase;
     float light = 0.35 + 0.65 * max(dot(normal, normalize(vec3(-0.35, 0.85, 0.4))), 0.0);
     vec3 deepColor = vec3(0.035, 0.24, 0.52);
     vec3 rimColor = vec3(0.42, 0.82, 1.0);
