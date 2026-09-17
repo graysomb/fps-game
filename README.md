@@ -357,7 +357,6 @@ can also be selected with:
 fps_ray --fluid-render=particles
 fps_ray --fluid-render=surface
 ```
-
 Smoke runs still create a short-lived window because the GPU backend needs a
 graphics context:
 
@@ -449,6 +448,7 @@ Available scenarios are:
 * `tether-thin-wall-ccd`: throws a tether voxel fast enough to cross a one-voxel-thick
   wall between endpoint samples and verifies that swept particle rays stop it, rebound
   it, transfer forward momentum to the wall, and do not join their constraint graphs.
+* `cube-stress`: stress test with scalable dynamic cube (size set by `FPS_CUBE_SIZE`).
 * `pbf-container`: drops 512 fluid particles into a tall immutable voxel container, captures
   both render modes, and checks particle membership, density, settling, containment, and that
   fluid never activates the container.
@@ -472,10 +472,8 @@ fps_ray --debug-matrix --debug-scenario=pbf-scaling --debug-pbf-side=8 \
 Without `--debug-output`, artifacts are written beneath
 `.build/bin/debug-artifacts/<scenario>/<active-backend>`. Each backend directory contains
 `report.json`, named setup-phase images when applicable, and images for simulation steps
-`0,1,5,15,30,60` by default. The PBF scenario defaults to 240 steps and additionally
-captures steps 120 and 240. Its paired images are named `step-NNNN-particles.png` and
-`step-NNNN-surface.png`. Other runs require at least 60 steps; `pbf-container` requires
-at least 120.
+`0,1,5,15,30,60` by default. Debug runs require at least 60 steps so the report can make
+a meaningful fall assertion.
 
 Pass `--debug-gif` to additionally stream a 640x360 looping `simulation.gif` into the
 backend output directory. `--debug-gif-fps=N` selects 1-60 playback frames per second
@@ -499,5 +497,3 @@ the first-step SSBOs and record static-hash differences or stale cluster cells, 
 `simId` mismatches or missing corners, and zero-mass tagged corners. The same counters
 appear in the capture overlay. Overhang reports additionally compare root and tip motion
 at step 30, require a retained static root anchor, and assert measurable relative bending.
-PBF reports add rest-density ratios, mean fluid speed, centroid fall, escaped/penetrating
-particle counts, and compact fluid-list integrity.

@@ -1,0 +1,179 @@
+#version 430
+
+layout(local_size_x = 128) in;
+
+struct ParticleState {
+    vec4 pos_radius;
+    vec4 prev_inv_mass;
+    vec4 predicted_base_inv_mass;
+    vec4 velocity;
+};
+
+layout(std430, binding = 0) readonly buffer ParticleBuffer { ParticleState particle[]; };
+layout(std430, binding = 1) readonly buffer SimIdBuffer { uint simId[]; };
+layout(std430, binding = 2) buffer OccupancyBuffer { uint occupancy[]; };
+layout(std430, binding = 3) buffer NetVertexBuffer { vec4 netVertex[]; };
+layout(std430, binding = 4) buffer NetActiveBuffer { uint netActive[]; };
+layout(std430, binding = 5) buffer OutputPositionBuffer { float outputPosition[]; };
+layout(std430, binding = 6) buffer OutputNormalBuffer { float outputNormal[]; };
+layout(std430, binding = 7) buffer CounterBuffer { uint outputVertexCount; uint overflowCount; };
+
+uniform int uMode;
+uniform int uSimCount;
+uniform int uFluidCount;
+uniform ivec3 uOccupancyOrigin;
+uniform ivec3 uOccupancyDims;
+uniform ivec3 uCubeOrigin;
+uniform ivec3 uCubeDims;
+uniform float uCellSize;
+uniform uint uMaxVertices;
+
+const int MODE_CLEAR = 0;
+const int MODE_MARK = 1;
+const int MODE_NET = 2;
+const int MODE_EMIT = 3;
+const float ISO_LEVEL = 0.5;
+
+uint flatIndex(ivec3 p, ivec3 dims) {
+    return uint((p.z * dims.y + p.y) * dims.x + p.x);
+}
+
+bool inBounds(ivec3 p, ivec3 dims) {
+    return all(greaterThanEqual(p, ivec3(0))) && all(lessThan(p, dims));
+}
+
+float cellValue(ivec3 worldCell) {
+    ivec3 local = worldCell - uOccupancyOrigin;
+    return inBounds(local, uOccupancyDims) ? float(occupancy[flatIndex(local, uOccupancyDims)]) : 0.0;
+}
+
+float scalarValue(ivec3 gridPoint) {
+    float result = 0.0;
+    for (int z = -1; z <= 0; ++z)
+        for (int y = -1; y <= 0; ++y)
+            for (int x = -1; x <= 0; ++x)
+                result += cellValue(gridPoint + ivec3(x, y, z));
+    return result;
+}
+
+bool netLookup(ivec3 worldCube, out vec3 value) {
+    ivec3 local = worldCube - uCubeOrigin;
+    if (!inBounds(local, uCubeDims)) return false;
+    uint index = flatIndex(local, uCubeDims);
+    if (netActive[index] == 0u) return false;
+    value = netVertex[index].xyz;
+    return true;
+}
+
+void clearBuffers(uint gid) {
+    uint occupancyCount = uint(uOccupancyDims.x * uOccupancyDims.y * uOccupancyDims.z);
+    uint cubeCount = uint(uCubeDims.x * uCubeDims.y * uCubeDims.z);
+    if (gid < occupancyCount) occupancy[gid] = 0u;
+    if (gid < cubeCount) netActive[gid] = 0u;
+    if (gid == 0u) { outputVertexCount = 0u; overflowCount = 0u; }
+}
+
+void markParticle(uint gid) {
+    if (gid >= uint(uFluidCount)) return;
+    uint id = simId[uint(uSimCount) + gid];
+    ivec3 worldCell = ivec3(floor(particle[id].pos_radius.xyz / uCellSize));
+    ivec3 local = worldCell - uOccupancyOrigin;
+    if (inBounds(local, uOccupancyDims)) atomicExchange(occupancy[flatIndex(local, uOccupancyDims)], 1u);
+}
+
+void buildNetVertex(uint gid) {
+    uint cubeCount = uint(uCubeDims.x * uCubeDims.y * uCubeDims.z);
+    if (gid >= cubeCount) return;
+    int plane = uCubeDims.x * uCubeDims.y;
+    ivec3 local = ivec3(int(gid) % uCubeDims.x,
+                        (int(gid) / uCubeDims.x) % uCubeDims.y,
+                        int(gid) / plane);
+    ivec3 cube = uCubeOrigin + local;
+    const ivec3 corner[8] = ivec3[8](
+        ivec3(0,0,0), ivec3(1,0,0), ivec3(0,1,0), ivec3(1,1,0),
+        ivec3(0,0,1), ivec3(1,0,1), ivec3(0,1,1), ivec3(1,1,1));
+    const ivec2 edge[12] = ivec2[12](
+        ivec2(0,1), ivec2(2,3), ivec2(4,5), ivec2(6,7),
+        ivec2(0,2), ivec2(1,3), ivec2(4,6), ivec2(5,7),
+        ivec2(0,4), ivec2(1,5), ivec2(2,6), ivec2(3,7));
+    float values[8];
+    float minimum = 1e20, maximum = -1e20;
+    for (int i = 0; i < 8; ++i) {
+        values[i] = scalarValue(cube + corner[i]);
+        minimum = min(minimum, values[i]);
+        maximum = max(maximum, values[i]);
+    }
+    if (minimum >= ISO_LEVEL || maximum < ISO_LEVEL) return;
+    vec3 average = vec3(0.0);
+    int intersections = 0;
+    for (int i = 0; i < 12; ++i) {
+        int a = edge[i].x, b = edge[i].y;
+        if ((values[a] >= ISO_LEVEL) == (values[b] >= ISO_LEVEL)) continue;
+        float denominator = values[b] - values[a];
+        float t = abs(denominator) > 1e-6 ? clamp((ISO_LEVEL - values[a]) / denominator, 0.0, 1.0) : 0.5;
+        vec3 pa = vec3(cube + corner[a]) * uCellSize;
+        vec3 pb = vec3(cube + corner[b]) * uCellSize;
+        average += mix(pa, pb, t);
+        intersections++;
+    }
+    if (intersections > 0) {
+        netVertex[gid] = vec4(average / float(intersections), 1.0);
+        netActive[gid] = 1u;
+    }
+}
+
+void storeVertex(uint index, vec3 position, vec3 normal) {
+    outputPosition[index * 3u + 0u] = position.x;
+    outputPosition[index * 3u + 1u] = position.y;
+    outputPosition[index * 3u + 2u] = position.z;
+    outputNormal[index * 3u + 0u] = normal.x;
+    outputNormal[index * 3u + 1u] = normal.y;
+    outputNormal[index * 3u + 2u] = normal.z;
+}
+
+void emitQuad(vec3 a, vec3 b, vec3 c, vec3 d, vec3 outward) {
+    vec3 normal = cross(b - a, c - a);
+    float normalLength = length(normal);
+    if (normalLength <= 1e-7) return;
+    if (dot(normal, outward) < 0.0) { vec3 swapValue = b; b = d; d = swapValue; normal = -normal; }
+    normal /= normalLength;
+    uint base = atomicAdd(outputVertexCount, 6u);
+    if (base + 6u > uMaxVertices) { atomicAdd(overflowCount, 1u); return; }
+    storeVertex(base + 0u, a, normal); storeVertex(base + 1u, b, normal); storeVertex(base + 2u, c, normal);
+    storeVertex(base + 3u, a, normal); storeVertex(base + 4u, c, normal); storeVertex(base + 5u, d, normal);
+}
+
+void emitSurface(uint gid) {
+    uint occupancyCount = uint(uOccupancyDims.x * uOccupancyDims.y * uOccupancyDims.z);
+    if (gid >= occupancyCount) return;
+    int plane = uOccupancyDims.x * uOccupancyDims.y;
+    ivec3 local = ivec3(int(gid) % uOccupancyDims.x,
+                        (int(gid) / uOccupancyDims.x) % uOccupancyDims.y,
+                        int(gid) / plane);
+    ivec3 p = uOccupancyOrigin + local;
+    float a = scalarValue(p);
+    float b = scalarValue(p + ivec3(1,0,0));
+    vec3 q0, q1, q2, q3;
+    if ((a >= ISO_LEVEL) != (b >= ISO_LEVEL) &&
+        netLookup(p + ivec3(0,-1,-1), q0) && netLookup(p + ivec3(0,0,-1), q1) &&
+        netLookup(p, q2) && netLookup(p + ivec3(0,-1,0), q3))
+        emitQuad(q0, q1, q2, q3, vec3(a >= ISO_LEVEL ? 1.0 : -1.0, 0, 0));
+    b = scalarValue(p + ivec3(0,1,0));
+    if ((a >= ISO_LEVEL) != (b >= ISO_LEVEL) &&
+        netLookup(p + ivec3(-1,0,-1), q0) && netLookup(p + ivec3(0,0,-1), q1) &&
+        netLookup(p, q2) && netLookup(p + ivec3(-1,0,0), q3))
+        emitQuad(q0, q1, q2, q3, vec3(0, a >= ISO_LEVEL ? 1.0 : -1.0, 0));
+    b = scalarValue(p + ivec3(0,0,1));
+    if ((a >= ISO_LEVEL) != (b >= ISO_LEVEL) &&
+        netLookup(p + ivec3(-1,-1,0), q0) && netLookup(p + ivec3(0,-1,0), q1) &&
+        netLookup(p, q2) && netLookup(p + ivec3(-1,0,0), q3))
+        emitQuad(q0, q1, q2, q3, vec3(0, 0, a >= ISO_LEVEL ? 1.0 : -1.0));
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (uMode == MODE_CLEAR) clearBuffers(gid);
+    else if (uMode == MODE_MARK) markParticle(gid);
+    else if (uMode == MODE_NET) buildNetVertex(gid);
+    else if (uMode == MODE_EMIT) emitSurface(gid);
+}

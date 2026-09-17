@@ -4,10 +4,6 @@
 <dict>
 	<key>files</key>
 	<dict>
-		<key>Resources/shaders/.DS_Store</key>
-		<data>
-		sveUwjcNfvGbIuda3Kmw+Eca2fU=
-		</data>
 		<key>Resources/shaders/debug_AABB.frag</key>
 		<data>
 		4dO9AMhUioLDJRAmMb7WuZKOr8Q=
@@ -16,9 +12,17 @@
 		<data>
 		AbAe6648hQPbGShjp8l2ZIbC9xo=
 		</data>
+		<key>Resources/shaders/fluid_hull.frag</key>
+		<data>
+		KBApvLD/fWQzUMCEMyl1AOMmV9E=
+		</data>
+		<key>Resources/shaders/fluid_hull.vert</key>
+		<data>
+		/4SxQILEJxnFDA4IHVb577vNZK8=
+		</data>
 		<key>Resources/shaders/fluid_instanced.frag</key>
 		<data>
-		3Z7+dTjEv+JHoYZUOVmsCjxrVMI=
+		yfhEN1L4ueIYEAO53DAQzEF05K4=
 		</data>
 		<key>Resources/shaders/fluid_instanced.vert</key>
 		<data>
@@ -64,6 +68,14 @@
 		<data>
 		UNMQPZIGLIvaz6Rr9oYcpR6nYjY=
 		</data>
+		<key>Resources/shaders/particle_matte.frag</key>
+		<data>
+		/YM6+peIfak4ln5af68/XPK/WVA=
+		</data>
+		<key>Resources/shaders/particle_matte.vert</key>
+		<data>
+		FQXFl4qc/rPKAUVodDOl+puYoNM=
+		</data>
 		<key>Resources/shaders/particle_prefix_sum.comp</key>
 		<data>
 		1kYYL/hkuspJ+Unz1kd+BQ/0Vf4=
@@ -96,13 +108,17 @@
 		<data>
 		ftxo26vniNtMkH4ilIfgwn16Ta4=
 		</data>
+		<key>Resources/shaders/pbd/fluid_hull.comp</key>
+		<data>
+		a32fLEJoT9V1g//pL+QvAA6Ogdk=
+		</data>
 		<key>Resources/shaders/pbd/pbd_pipeline.comp</key>
 		<data>
-		2OL9uMcFIdNQWlu0AXGuEKFQslY=
+		U7ZGBGL1UqNnJAeeFH3dYcIljMI=
 		</data>
 		<key>Resources/shaders/pbd/pbd_pipeline.metal</key>
 		<data>
-		VvP0/bNqXZWd7AGSRaKSXJze0KE=
+		FxvJg8d3AeVJBvZkT6LzRHaQ30Q=
 		</data>
 		<key>Resources/shaders/pbd/pbd_pipeline.metallib</key>
 		<data>
@@ -147,19 +163,19 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			jIsdI/n1lRiaKlhBtqLJD5ZvJ38=
+			JhiPPXqdNS5JwXqemA7jNGkR2Ec=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"8c8b1d23f9f595189a2a5841b6a2c90f966f277f"</string>
+			<string>cdhash H"26188f3d7a9d352e49c17a9e980ee3346911d847"</string>
 		</dict>
 		<key>MacOS/fps_ray_gpu</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			VKHtJdwFVUFpwhnX0bIcPE6oV/o=
+			jyFXp2uQVdBZ1vmGqU2FJ0xfB7c=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"54a1ed25dc05554169c219d7d1b21c3c4ea857fa"</string>
+			<string>cdhash H"8f2157a76b9055d059d6f986a94d85274c5f07b7"</string>
 		</dict>
 		<key>Resources/shaders/debug_AABB.frag</key>
 		<dict>
@@ -175,11 +191,25 @@
 			SLmyHf1lf4AMnwuTWgR8skdH2Xmd7yzICcKDyGzdPQs=
 			</data>
 		</dict>
+		<key>Resources/shaders/fluid_hull.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			iiZRQLik2/8c/LXf3B0e7sQJ6KxDJHq6AmbdDo1khek=
+			</data>
+		</dict>
+		<key>Resources/shaders/fluid_hull.vert</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			mrKdlK961/XDkRYE2SYh6f/9ldZVxReQIH8cu7y5UpA=
+			</data>
+		</dict>
 		<key>Resources/shaders/fluid_instanced.frag</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			48b4u04HHwXeaywaaPYRCzKF53VZo8LqmYx/2WY0O6A=
+			5pDthhcnLUAGLCR9vXDySgLNlv2Nqa5aB4U3yFoW7Wc=
 			</data>
 		</dict>
 		<key>Resources/shaders/fluid_instanced.vert</key>
@@ -259,6 +289,20 @@
 			91EoRmo9HU05Ov61rGmVA2aI/rgHG6uKDRHL08cfoRI=
 			</data>
 		</dict>
+		<key>Resources/shaders/particle_matte.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			RiMqjjGfMybQ/r6N9pPxKZtHoUWs6yDW0Zag1jeu5Q8=
+			</data>
+		</dict>
+		<key>Resources/shaders/particle_matte.vert</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			v1T4EDFM3jkgC9gvhOywY/beq3uUfnfMrVltqFBcylM=
+			</data>
+		</dict>
 		<key>Resources/shaders/particle_prefix_sum.comp</key>
 		<dict>
 			<key>hash2</key>
@@ -315,18 +359,25 @@
 			9k01cXtyqix28iegrZuyGCW5Bn3AMY6OWjiZCCOqMzY=
 			</data>
 		</dict>
+		<key>Resources/shaders/pbd/fluid_hull.comp</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			viY9Dfnv4XjBdDd70KkwrQKx5x55RLl2OP5CKqBTgMY=
+			</data>
+		</dict>
 		<key>Resources/shaders/pbd/pbd_pipeline.comp</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			k4TlS4tYB2EImMFk5OKqEnGhUV0O3fXpj1jlImvLwng=
+			YIv7/V/s/3iL6SkbO3rluKDy1lb/XTPi8kt8YZ/9AaI=
 			</data>
 		</dict>
 		<key>Resources/shaders/pbd/pbd_pipeline.metal</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			cOVxXIsgguyN1FQLWBYcukENnGyubtoPya+fsmvU+Rs=
+			A6qtZwJAJ/bIrrjvyVFCW1m6xChCWl2ETkEgByfYcF4=
 			</data>
 		</dict>
 		<key>Resources/shaders/pbd/pbd_pipeline.metallib</key>

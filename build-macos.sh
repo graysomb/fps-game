@@ -8,8 +8,12 @@ architecture=${2:-native}
 deployment_target=${MACOSX_DEPLOYMENT_TARGET:-12.0}
 
 if [ -z "$raylib_source" ] || [ ! -d "$raylib_source/src" ]; then
-    echo "Set RAYLIB_SOURCE_DIR to a raylib source tree" >&2
-    exit 2
+    if [ -d "$project_root/.build/raylib-macos/src" ]; then
+        raylib_source="$project_root/.build/raylib-macos"
+    else
+        echo "Set RAYLIB_SOURCE_DIR to a raylib source tree" >&2
+        exit 2
+    fi
 fi
 if [ "$configuration" != release ] && [ "$configuration" != debug ]; then
     echo "Usage: ./build-macos.sh [release|debug] [native|universal]" >&2
@@ -74,6 +78,9 @@ if xcrun -sdk macosx metal -v >/dev/null 2>&1; then
         -o "$build_root/pbd_pipeline.air" -mmacosx-version-min="$deployment_target"
     xcrun -sdk macosx metallib "$build_root/pbd_pipeline.air" \
         -o "$bin_dir/shaders/pbd/pbd_pipeline.metallib"
+elif [ -f "$project_root/shaders/pbd/pbd_pipeline.metallib" ]; then
+    echo "Metal toolchain not installed; using precompiled shaders/pbd/pbd_pipeline.metallib"
+    cp "$project_root/shaders/pbd/pbd_pipeline.metallib" "$bin_dir/shaders/pbd/pbd_pipeline.metallib"
 fi
 cp -R "$project_root/shaders/." "$bin_dir/shaders/"
 

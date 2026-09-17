@@ -1,0 +1,350 @@
+{
+  "dynamic-freefall": {
+    "passed": true,
+    "runs": 2,
+    "mean_step_ms": 2.1162666656,
+    "median_step_ms": 1.06877083,
+    "mean_wall_ms": 811.338020459516,
+    "runs_data": [
+      {
+        "scenario": "dynamic-freefall",
+        "passed": true,
+        "returncode": 0,
+        "wall_ms": 811.3977079628967,
+        "samples_count": 5,
+        "step_mean_ms": 2.1354666646,
+        "step_median_ms": 1.09745833,
+        "step_min_ms": 0.996333333,
+        "step_max_ms": 6.394,
+        "all_step_times": [
+          6.394,
+          0.996333333,
+          1.13245833,
+          1.09745833,
+          1.05708333
+        ]
+      },
+      {
+        "scenario": "dynamic-freefall",
+        "passed": true,
+        "returncode": 0,
+        "wall_ms": 811.2783329561353,
+        "samples_count": 5,
+        "step_mean_ms": 2.0970666666,
+        "step_median_ms": 1.04008333,
+        "step_min_ms": 0.972208333,
+        "step_max_ms": 6.37579167,
+        "all_step_times": [
+          6.37579167,
+          0.972208333,
+          1.03070833,
+          1.06654167,
+          1.04008333
+        ]
+      }
+    ]
+  },
+  "falling-pillar-sleep": {
+    "passed": true,
+    "runs": 2,
+    "mean_step_ms": 2.482020834,
+    "median_step_ms": 1.4238125,
+    "mean_wall_ms": 883.6388749768957,
+    "runs_data": [
+      {
+        "scenario": "falling-pillar-sleep",
+        "passed": true,
+        "returncode": 0,
+        "wall_ms": 886.6002499707974,
+        "samples_count": 5,
+        "step_mean_ms": 2.498250002,
+        "step_median_ms": 1.412375,
+        "step_min_ms": 1.29741667,
+        "step_max_ms": 6.61016667,
+        "all_step_times": [
+          6.61016667,
+          1.29741667,
+          1.77841667,
+          1.392875,
+          1.412375
+        ]
+      },
+      {
+        "scenario": "falling-pillar-sleep",
+        "passed": true,
+        "returncode": 0,
+        "wall_ms": 880.677499982994,
+        "samples_count": 5,
+        "step_mean_ms": 2.465791666,
+        "step_median_ms": 1.43525,
+        "step_min_ms": 1.319375,
+        "step_max_ms": 6.77583333,
+        "all_step_times": [
+          6.77583333,
+          1.319375,
+          1.45025,
+          1.34825,
+          1.43525
+        ]
+      }
+    ]
+  },
+  "overhang-impact": {
+    "passed": true,
+    "runs": 2,
+    "mean_step_ms": 1.9556250011,
+    "median_step_ms": 1.0063541685,
+    "mean_wall_ms": 922.5878330180421,
+    "runs_data": [
+      {
+        "scenario": "overhang-impact",
+        "passed": true,
+        "returncode": 0,
+        "wall_ms": 926.1472080252133,
+        "samples_count": 5,
+        "step_mean_ms": 1.953083334,
+        "step_median_ms": 1.01904167,
+        "step_min_ms": 0.789333333,
+        "step_max_ms": 5.99383333,
+        "all_step_times": [
+          5.99383333,
+          0.921541667,
+          0.789333333,
+          1.04166667,
+          1.01904167
+        ]
+      },
+      {
+        "scenario": "overhang-impact",
+        "passed": true,
+        "returncode": 0,
+        "wall_ms": 919.028458010871,
+        "samples_count": 5,
+        "step_mean_ms": 1.9581666682,
+        "step_median_ms": 0.993666667,
+        "step_min_ms": 0.715041667,
+        "step_max_ms": 6.26229167,
+        "all_step_times": [
+          6.26229167,
+          0.715041667,
+          0.818041667,
+          0.993666667,
+          1.00179167
+        ]
+      }
+    ]
+  },
+  "pillar-impact-drift": {
+    "passed": true,
+    "runs": 2,
+    "mean_step_ms": 2.3519249999999996,
+    "median_step_ms": 1.1998125,
+    "mean_wall_ms": 894.110063003609,
+    "runs_data": [
+      {
+        "scenario": "pillar-impact-drift",
+        "passed": true,
+        "returncode": 0,
+        "wall_ms": 889.6665840293281,
+        "samples_count": 5,
+        "step_mean_ms": 2.362458334,
+        "step_median_ms": 1.163125,
+        "step_min_ms": 1.04416667,
+        "step_max_ms": 6.68479167,
+        "all_step_times": [
+          6.68479167,
+          1.04416667,
+          1.141125,
+          1.163125,
+          1.77908333
+        ]
+      },
+      {
+        "scenario": "pillar-impact-drift",
+        "passed": true,
+        "returncode": 0,
+        "wall_ms": 898.5535419778898,
+        "samples_count": 5,
+        "step_mean_ms": 2.341391666,
+        "step_median_ms": 1.2365,
+        "step_min_ms": 1.06404167,
+        "step_max_ms": 6.93270833,
+        "all_step_times": [
+          6.93270833,
+          1.06404167,
+          1.2365,
+          1.28045833,
+          1.19325
+        ]
+      }
+    ]
+  },
+  "tether-thin-wall-ccd": {
+    "passed": true,
+    "runs": 2,
+    "mean_step_ms": 2.109879167,
+    "median_step_ms": 1.095875,
+    "mean_wall_ms": 872.292791493237,
+    "runs_data": [
+      {
+        "scenario": "tether-thin-wall-ccd",
+        "passed": true,
+        "returncode": 0,
+        "wall_ms": 872.6969580166042,
+        "samples_count": 5,
+        "step_mean_ms": 2.1452166679999998,
+        "step_median_ms": 1.09704167,
+        "step_min_ms": 1.00679167,
+        "step_max_ms": 6.00475,
+        "all_step_times": [
+          6.00475,
+          1.00679167,
+          1.062125,
+          1.09704167,
+          1.555375
+        ]
+      },
+      {
+        "scenario": "tether-thin-wall-ccd",
+        "passed": true,
+        "returncode": 0,
+        "wall_ms": 871.8886249698699,
+        "samples_count": 5,
+        "step_mean_ms": 2.074541666,
+        "step_median_ms": 1.09470833,
+        "step_min_ms": 1.02695833,
+        "step_max_ms": 6.05933333,
+        "all_step_times": [
+          6.05933333,
+          1.09966667,
+          1.02695833,
+          1.09470833,
+          1.09204167
+        ]
+      }
+    ]
+  },
+  "sleep-wake-floating": {
+    "passed": true,
+    "runs": 2,
+    "mean_step_ms": 2.258829166,
+    "median_step_ms": 1.1056875,
+    "mean_wall_ms": 977.7683755091857,
+    "runs_data": [
+      {
+        "scenario": "sleep-wake-floating",
+        "passed": true,
+        "returncode": 0,
+        "wall_ms": 970.667792018503,
+        "samples_count": 5,
+        "step_mean_ms": 2.256758334,
+        "step_median_ms": 1.08241667,
+        "step_min_ms": 1.02695833,
+        "step_max_ms": 6.99091667,
+        "all_step_times": [
+          6.99091667,
+          1.08241667,
+          1.11091667,
+          1.07258333,
+          1.02695833
+        ]
+      },
+      {
+        "scenario": "sleep-wake-floating",
+        "passed": true,
+        "returncode": 0,
+        "wall_ms": 984.8689589998685,
+        "samples_count": 5,
+        "step_mean_ms": 2.260899998,
+        "step_median_ms": 1.12895833,
+        "step_min_ms": 1.02133333,
+        "step_max_ms": 6.41445833,
+        "all_step_times": [
+          6.41445833,
+          1.02133333,
+          1.12895833,
+          1.110625,
+          1.629125
+        ]
+      }
+    ]
+  },
+  "sleep-recycle": {
+    "passed": true,
+    "runs": 2,
+    "mean_step_ms": 0.0,
+    "median_step_ms": 0.0,
+    "mean_wall_ms": 842.3025835072622,
+    "runs_data": [
+      {
+        "scenario": "sleep-recycle",
+        "passed": true,
+        "returncode": 0,
+        "wall_ms": 840.2294170227833,
+        "samples_count": 0,
+        "step_mean_ms": 0.0,
+        "step_median_ms": 0.0,
+        "step_min_ms": 0.0,
+        "step_max_ms": 0.0,
+        "all_step_times": []
+      },
+      {
+        "scenario": "sleep-recycle",
+        "passed": true,
+        "returncode": 0,
+        "wall_ms": 844.375749991741,
+        "samples_count": 0,
+        "step_mean_ms": 0.0,
+        "step_median_ms": 0.0,
+        "step_min_ms": 0.0,
+        "step_max_ms": 0.0,
+        "all_step_times": []
+      }
+    ]
+  },
+  "creative-reset-cache": {
+    "passed": true,
+    "runs": 2,
+    "mean_step_ms": 2.2143541667,
+    "median_step_ms": 1.0803125,
+    "mean_wall_ms": 813.8084369711578,
+    "runs_data": [
+      {
+        "scenario": "creative-reset-cache",
+        "passed": true,
+        "returncode": 0,
+        "wall_ms": 807.4525409610942,
+        "samples_count": 5,
+        "step_mean_ms": 2.171341668,
+        "step_median_ms": 1.04304167,
+        "step_min_ms": 1.006875,
+        "step_max_ms": 6.17970833,
+        "all_step_times": [
+          6.17970833,
+          1.02179167,
+          1.04304167,
+          1.006875,
+          1.60529167
+        ]
+      },
+      {
+        "scenario": "creative-reset-cache",
+        "passed": true,
+        "returncode": 0,
+        "wall_ms": 820.1643329812214,
+        "samples_count": 5,
+        "step_mean_ms": 2.2573666654,
+        "step_median_ms": 1.11758333,
+        "step_min_ms": 0.947541667,
+        "step_max_ms": 6.93595833,
+        "all_step_times": [
+          6.93595833,
+          0.947541667,
+          1.20741667,
+          1.07833333,
+          1.11758333
+        ]
+      }
+    ]
+  }
+}

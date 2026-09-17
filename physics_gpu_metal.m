@@ -16,6 +16,7 @@ typedef struct FpsMetalState {
     id<MTLBuffer> bound[FPS_GPU_BUFFER_COUNT];
     FpsGpuUniforms uniforms;
     MTLResourceOptions resource_options;
+    double wait_start;
     bool managed;
 } FpsMetalState;
 
@@ -53,7 +54,21 @@ bool fps_metal_initialize(const char *library_path, long long *max_buffer_size,
 
         NSString *path = [NSString stringWithUTF8String:library_path ? library_path : ""];
         NSError *library_error = nil;
-        metal_state.library = [metal_state.device newLibraryWithFile:path error:&library_error];
+        NSString *source_path = [path stringByReplacingOccurrencesOfString:@".metallib" withString:@".metal"];
+        if (![[NSFileManager defaultManager] fileExistsAtPath:source_path]) {
+            source_path = @"shaders/pbd/pbd_pipeline.metal";
+        }
+        if ([[NSFileManager defaultManager] fileExistsAtPath:source_path]) {
+            NSString *source = [NSString stringWithContentsOfFile:source_path encoding:NSUTF8StringEncoding error:nil];
+            if (source) {
+                MTLCompileOptions *opts = [[MTLCompileOptions alloc] init];
+                metal_state.library = [metal_state.device newLibraryWithSource:source options:opts error:&library_error];
+                [opts release];
+            }
+        }
+        if (!metal_state.library) {
+            metal_state.library = [metal_state.device newLibraryWithFile:path error:&library_error];
+        }
         if (!metal_state.library) {
             fps_metal_error(error, error_capacity, [library_error localizedDescription]);
             fps_metal_shutdown();
@@ -159,6 +174,10 @@ void fps_metal_set_uniforms(const FpsGpuUniforms *uniforms) {
     if (uniforms) metal_state.uniforms = *uniforms;
 }
 
+void fps_metal_set_vgs_color(int color) {
+    metal_state.uniforms.vgs_color = color;
+}
+
 static FpsMetalProfileInfo metal_profile = { 0 };
 
 static inline double metal_time_now_ms(void) {
@@ -232,7 +251,7 @@ bool fps_metal_dispatch_indirect(int mode, void *buffer, size_t offset) {
     return fps_metal_encode(mode, 1, (id<MTLBuffer>)buffer, offset);
 }
 
-bool fps_metal_end_batch(void) {
+bool fps_metal_commit_batch(bool wait) {
     @autoreleasepool {
         if (!metal_state.command_buffer) return false;
         if (metal_state.encoder) {
@@ -257,11 +276,21 @@ bool fps_metal_end_batch(void) {
             }
             [blit endEncoding];
         }
-        double t_wait_start = metal_time_now_ms();
+        metal_state.wait_start = metal_time_now_ms();
         [metal_state.command_buffer commit];
+        if (wait) {
+            return fps_metal_wait_batch();
+        }
+        return true;
+    }
+}
+
+bool fps_metal_wait_batch(void) {
+    @autoreleasepool {
+        if (!metal_state.command_buffer) return true;
         [metal_state.command_buffer waitUntilCompleted];
         double t_wait_end = metal_time_now_ms();
-        metal_profile.last_wait_ms = t_wait_end - t_wait_start;
+        metal_profile.last_wait_ms = t_wait_end - metal_state.wait_start;
         CFTimeInterval gpu_start = metal_state.command_buffer.GPUStartTime;
         CFTimeInterval gpu_end = metal_state.command_buffer.GPUEndTime;
         metal_profile.last_gpu_exec_ms = (gpu_end > gpu_start) ? (gpu_end - gpu_start) * 1000.0 : 0.0;
@@ -270,6 +299,10 @@ bool fps_metal_end_batch(void) {
         metal_state.command_buffer = nil;
         return ok;
     }
+}
+
+bool fps_metal_end_batch(void) {
+    return fps_metal_commit_batch(true);
 }
 
 #else

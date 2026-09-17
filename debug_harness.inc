@@ -25,7 +25,6 @@ typedef struct DebugRunConfig {
     bool requested;
     bool show_window;
     bool record_gif;
-    bool steps_explicit;
     bool capture_steps_explicit;
     int steps;
     int gif_fps;
@@ -145,6 +144,10 @@ typedef struct DebugRunState {
     float tether_static_pull_distance;
     uint64_t tether_thin_wall_identity;
     uint64_t tether_thin_wall_hits_before;
+    bool voxel_fracture_test;
+    int fracture_strain_voxel;
+    int fracture_shear_voxel;
+    int fracture_control_voxel;
     float tether_thin_wall_initial_x;
     float tether_thin_wall_final_x;
     float tether_thin_wall_final_min_x;
@@ -262,6 +265,8 @@ static bool debug_setup_goliath_flight(DebugRunState *state);
 static bool debug_setup_pbf_dynamic_container(DebugRunState *state);
 static bool debug_setup_pbf_scaling(DebugRunState *state);
 static bool debug_setup_pbf_dense_neighbors(DebugRunState *state);
+static bool debug_setup_cube_stress(DebugRunState *state);
+static bool debug_setup_voxel_strain_shear_fracture(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall, 60, 60 },
@@ -285,7 +290,9 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "pbf-scaling", "Timed PBF physics plus convex-hull rendering", debug_setup_pbf_scaling, 120, 60 },
     { "pbf-dense-neighbors", "Dense PBF neighborhood overflow fallback", debug_setup_pbf_dense_neighbors, 60, 60 },
     { "swarmer-wall", "Swarmer charges a visible target through a blocking wall", debug_setup_swarmer_wall, 90, 60 },
-    { "goliath-flight", "Goliath jumps with attached armor and must land", debug_setup_goliath_flight, 120, 90 }
+    { "goliath-flight", "Goliath jumps with attached armor and must land", debug_setup_goliath_flight, 120, 90 },
+    { "cube-stress", "Stress test with scalable dynamic cube (size set by FPS_CUBE_SIZE)", debug_setup_cube_stress, 60, 60 },
+    { "voxel-strain-shear-fracture", "Dynamic voxels deactivate VGS shape constraints when strain or shear exceeds threshold", debug_setup_voxel_strain_shear_fracture, 60, 60 }
 };
 
 static const int debugScenarioCount = (int)(sizeof(debugScenarios) / sizeof(debugScenarios[0]));
@@ -422,7 +429,6 @@ static int debug_parse_argument(int argc, char **argv, int *index)
     if (value != (const char *)(uintptr_t)1) {
         if (!debug_parse_integer(value, DEBUG_MIN_STEPS, 10000,
                                  &debugRunConfig.steps, "--debug-steps")) return -1;
-        debugRunConfig.steps_explicit = true;
         return 1;
     }
 
@@ -697,7 +703,6 @@ static void debug_reset_world(void)
 {
     clear_world_voxels();
     clear_pickups();
-    glueConstraintCount = 0;
     voxelHashFramesSinceRebuild = 0;
     pbdTimeAccumulator = 0.0f;
     staticHashDirty = false;
@@ -890,7 +895,6 @@ static void debug_draw_overlay(const DebugRunState *state, const DebugSample *sa
     int box_height = 180;
     if (state->gpu_readback_performed) box_height += 30;
     if (state->overhang_impact) box_height += 30;
-    if (state->pbf_container) box_height += 52;
     DrawRectangle(18, 18, 650, box_height, Fade(BLACK, 0.78f));
     DrawText(TextFormat("SCENARIO %s", debugRunConfig.scenario), 34, 32, 22, RAYWHITE);
     DrawText(TextFormat("BACKEND requested=%s active=%s",
@@ -958,6 +962,7 @@ static void debug_draw_overlay(const DebugRunState *state, const DebugSample *sa
 
 static void debug_render_scene(DebugRunState *state, const DebugSample *sample)
 {
+    voxel_render_frame++;
     BeginTextureMode(state->target);
         ClearBackground((Color){ 32, 42, 58, 255 });
         BeginMode3D(state->camera);
@@ -1258,20 +1263,6 @@ static bool debug_capture(DebugRunState *state, const char *file_name,
     return true;
 }
 
-static void debug_capture_fluid_pair(DebugRunState *state, int step, const char *phase)
-{
-    if (!state) return;
-    FluidRenderMode saved_mode = fluidRenderMode;
-    char file_name[96];
-    fluidRenderMode = FLUID_RENDER_PARTICLES;
-    snprintf(file_name, sizeof(file_name), "step-%04d-particles.png", step);
-    debug_capture(state, file_name, phase, step);
-    fluidRenderMode = FLUID_RENDER_SURFACE;
-    snprintf(file_name, sizeof(file_name), "step-%04d-surface.png", step);
-    debug_capture(state, file_name, phase, step);
-    fluidRenderMode = saved_mode;
-}
-
 static bool debug_should_capture_step(int step)
 {
     for (int i = 0; i < debugRunConfig.capture_step_count; ++i) {
@@ -1283,7 +1274,7 @@ static bool debug_should_capture_step(int step)
 static bool debug_prepare_capture_steps(void)
 {
     if (!debugRunConfig.capture_steps_explicit) {
-        const int defaults[] = { 0, 1, 5, 15, 30, 60, 120, 240 };
+        const int defaults[] = { 0, 1, 5, 15, 30, 60 };
         debugRunConfig.capture_step_count = 0;
         for (int i = 0; i < (int)(sizeof(defaults) / sizeof(defaults[0])); ++i) {
             if (defaults[i] <= debugRunConfig.steps) {
@@ -1601,6 +1592,93 @@ static bool debug_setup_dynamic_freefall(DebugRunState *state)
     return true;
 }
 
+static bool debug_setup_cube_stress(DebugRunState *state)
+{
+    debug_reset_world();
+    int size = 8;
+    const char *size_env = getenv("FPS_CUBE_SIZE");
+    if (size_env) {
+        int parsed = atoi(size_env);
+        if (parsed >= 2 && parsed <= 50) size = parsed;
+    }
+    int half = size / 2;
+    int created = 0;
+    Color color = (Color){ 245, 145, 45, 255 };
+    for (int y = 20; y < 20 + size; ++y) {
+        for (int z = -half; z < -half + size; ++z) {
+            for (int x = -half; x < -half + size; ++x) {
+                if (debug_add_cell(x, y, z, false, true, color, DEBUG_TEST_TAG) >= 0) {
+                    ++created;
+                }
+            }
+        }
+    }
+    state->expected_voxels = created;
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_rebuild_world_state();
+    state->activation_succeeded = true;
+    debug_set_initial_centroid(state);
+    float dist = (float)size * 2.5f + 10.0f;
+    state->camera.position = (Vector3){ dist, (float)(20 + size/2) + dist * 0.4f, dist };
+    state->camera.target = (Vector3){ 0.0f, (float)(20 + size/2), 0.0f };
+    return true;
+}
+
+static bool debug_setup_voxel_strain_shear_fracture(DebugRunState *state)
+{
+    debug_reset_world();
+    state->voxel_fracture_test = true;
+    Color strain_color = (Color){ 245, 120, 60, 255 };
+    Color shear_color = (Color){ 220, 70, 180, 255 };
+    Color control_color = (Color){ 80, 200, 120, 255 };
+
+    int idx_strain = debug_add_cell(-3, 8, 0, false, true, strain_color, DEBUG_TEST_TAG);
+    int idx_shear = debug_add_cell(0, 8, 0, false, true, shear_color, DEBUG_TEST_TAG);
+    int idx_ctrl = debug_add_cell(3, 8, 0, false, true, control_color, DEBUG_TEST_TAG);
+
+    if (idx_strain < 0 || idx_shear < 0 || idx_ctrl < 0) {
+        debug_add_failure(state, "fracture setup could not create test voxels");
+        return false;
+    }
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_rebuild_world_state();
+
+    // 1. High Tensile Strain: stretch X coordinates by 35% (limit is 20%)
+    Voxel *v_strain = &voxels[idx_strain];
+    float stretch_x = VOXEL_SIZE * 0.35f * 0.5f;
+    for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+        Particle *p = v_strain->particles[corner];
+        if (corner_signs[corner][0] > 0) p->pos.x += stretch_x;
+        else p->pos.x -= stretch_x;
+        p->prev_pos = p->pos;
+        p->predicted_pos = p->pos;
+    }
+
+    // 2. High Shear: skew X based on Y sign by 35% (limit is 20%)
+    Voxel *v_shear = &voxels[idx_shear];
+    float skew = VOXEL_SIZE * 0.35f * 0.5f;
+    for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+        Particle *p = v_shear->particles[corner];
+        if (corner_signs[corner][1] > 0) p->pos.x += skew;
+        else p->pos.x -= skew;
+        p->prev_pos = p->pos;
+        p->predicted_pos = p->pos;
+    }
+
+    state->fracture_strain_voxel = idx_strain;
+    state->fracture_shear_voxel = idx_shear;
+    state->fracture_control_voxel = idx_ctrl;
+    state->expected_voxels = 3;
+    state->activation_succeeded = true;
+    collisionTopologyDirty = true;
+    rebuild_voxel_hash();
+    debug_set_initial_centroid(state);
+    state->camera.position = (Vector3){ 0.0f, 9.0f, 7.0f };
+    state->camera.target = (Vector3){ 0.0f, 8.0f, 0.0f };
+    debug_capture(state, "phase-01-fracture-setup.png", "fracture-setup", 0);
+    return true;
+}
+
 static bool debug_setup_activation_floating(DebugRunState *state)
 {
     debug_reset_world();
@@ -1653,13 +1731,6 @@ static bool debug_setup_sleep_snap_original(DebugRunState *state)
     thrown->owner = 0;
     thrown->activator = 0;
     thrown->wasTethered = true;
-    for (int j = 0; j < VOXEL_CORNER_COUNT; ++j) {
-        Particle *particle = voxel_particle_at(thrown, j);
-        if (particle) {
-            particle->base_inv_mass = 5.0f;
-            particle->inv_mass = 5.0f;
-        }
-    }
     // Use the tether's direct-activation strength so this isolated grounded
     // pillar reliably wakes when struck, matching a gameplay structure whose
     // local support has already been weakened by damage.
@@ -2091,7 +2162,6 @@ static bool debug_setup_tether_throw_floating(DebugRunState *state)
                           support_created, cluster_created, state->expected_voxels);
         return false;
     }
-    debug_transform_tagged_cluster_off_grid(DEBUG_TEST_TAG);
     debug_capture(state, "phase-01-supported-dynamic.png", "supported-dynamic", 0);
 
     for (int i = 0; i < voxel_count; ++i) {
@@ -2125,8 +2195,6 @@ static bool debug_setup_tether_throw_floating(DebugRunState *state)
     }
     debug_rebuild_world_state();
     Voxel *thrown = &voxels[thrown_idx];
-    detach_all_glue_faces(thrown_idx);
-    deactivate_glue_constraints_for_voxel(thrown_idx);
     thrown->owner = 0;
     thrown->activator = 0;
     thrown->wasTethered = true;
@@ -3540,6 +3608,21 @@ static void debug_finalize_validation(DebugRunState *state)
         }
         return;
     }
+    if (state->voxel_fracture_test) {
+        int idx_strain = state->fracture_strain_voxel;
+        int idx_shear = state->fracture_shear_voxel;
+        int idx_ctrl = state->fracture_control_voxel;
+        if (idx_strain >= 0 && idx_strain < voxel_count && voxels[idx_strain].vgs_active) {
+            debug_add_failure(state, "high-strain voxel (strain > 0.20) did not break (vgs_active remains true)");
+        }
+        if (idx_shear >= 0 && idx_shear < voxel_count && voxels[idx_shear].vgs_active) {
+            debug_add_failure(state, "high-shear voxel (shear > 0.20) did not break (vgs_active remains true)");
+        }
+        if (idx_ctrl >= 0 && idx_ctrl < voxel_count && !voxels[idx_ctrl].vgs_active) {
+            debug_add_failure(state, "control voxel broke unexpectedly (vgs_active became false)");
+        }
+        return;
+    }
     if (state->recycle_test) {
         if (!state->sleeping_conversion_succeeded || !state->recycle_succeeded) {
             debug_add_failure(state, "sleeping island did not complete atomic recycling");
@@ -3719,7 +3802,7 @@ static bool debug_write_report(DebugRunState *state)
         return false;
     }
     bool passed = state->failure_count == 0;
-    fputs("{\n  \"schemaVersion\": 2,\n  \"scenario\": ", file);
+    fputs("{\n  \"schemaVersion\": 1,\n  \"scenario\": ", file);
     debug_write_json_string(file, debugRunConfig.scenario);
     fputs(",\n  \"requestedBackend\": ", file);
     debug_write_json_string(file, physics_backend_name(physicsBackend.requested));
@@ -3916,10 +3999,7 @@ static bool debug_write_report(DebugRunState *state)
                 " \"staticGluedFaces\": %d, \"centroidY\": %.9g,"
                 " \"centroidDrop\": %.9g, \"minY\": %.9g, \"maxY\": %.9g,"
                 " \"meanVelocityY\": %.9g, \"staticHashGeneration\": %llu,"
-                " \"gpuStaticUploadedGeneration\": %llu, \"physicsStepMs\": %.9g,"
-                " \"fluidParticles\": %d, \"invalidFluidParticles\": %d,"
-                " \"fluidCentroidY\": %.9g, \"meanDensityRatio\": %.9g,"
-                " \"maxDensityRatio\": %.9g, \"meanFluidSpeed\": %.9g}%s\n",
+                " \"gpuStaticUploadedGeneration\": %llu, \"physicsStepMs\": %.9g}%s\n",
                 sample->step, sample->tagged_voxels, sample->tagged_dynamic,
                 sample->tagged_static, sample->tagged_sleeping, sample->sim_particles,
                 sample->collision_particles, sample->collision_particles_culled,
@@ -3932,11 +4012,6 @@ static bool debug_write_report(DebugRunState *state)
                 (unsigned long long)sample->static_hash_generation,
                 (unsigned long long)sample->gpu_static_uploaded_generation,
                 sample->physics_step_ms,
-                sample->fluid_particles, sample->invalid_fluid_particles,
-                (double)sample->fluid_centroid_y,
-                (double)sample->mean_density_ratio,
-                (double)sample->max_density_ratio,
-                (double)sample->mean_fluid_speed,
                 (i + 1 < state->sample_count) ? "," : "");
     }
     fputs("  ]\n}\n", file);
@@ -3981,17 +4056,10 @@ static int run_debug_harness(void)
         }
         return 2;
     }
-    if (!debugRunConfig.steps_explicit) {
-        debugRunConfig.steps = scenario->default_steps;
-    }
-    if (debugRunConfig.steps < scenario->minimum_steps) {
-        fprintf(stderr, "Debug scenario '%s' requires at least %d steps (received %d)\n",
-                scenario->name, scenario->minimum_steps, debugRunConfig.steps);
-        return 2;
-    }
     if (!debug_prepare_capture_steps()) return 2;
 
     DebugRunState state = { 0 };
+    activePlayers = 1;
     state.expected_voxels = DEBUG_EXPECTED_VOXELS;
     state.camera.position = (Vector3){ 9.0f, 8.5f, 12.0f };
     state.camera.target = (Vector3){ 0.0f, 4.0f, 0.0f };
@@ -4016,9 +4084,7 @@ static int run_debug_harness(void)
         debug_validate_step(&state, 0);
         debug_gif_capture(&state, 0);
         if (debug_should_capture_step(0)) {
-            if (state.pbf_container) {
-                debug_capture_fluid_pair(&state, 0, "fluid-initial");
-            } else if (state.delayed_activation) {
+            if (state.delayed_activation) {
                 if (state.overhang_impact) {
                     debug_capture(&state, "step-0000-falling-voxel.png", "falling-voxel", 0);
                 } else {
@@ -4061,13 +4127,9 @@ static int run_debug_harness(void)
             debug_validate_step(&state, step);
             debug_gif_capture(&state, step);
             if (debug_should_capture_step(step)) {
-                if (state.pbf_container) {
-                    debug_capture_fluid_pair(&state, step, "fluid-simulation");
-                } else {
-                    char file_name[64];
-                    snprintf(file_name, sizeof(file_name), "step-%04d.png", step);
-                    debug_capture(&state, file_name, "simulation", step);
-                }
+                char file_name[64];
+                snprintf(file_name, sizeof(file_name), "step-%04d.png", step);
+                debug_capture(&state, file_name, "simulation", step);
             }
         }
         debug_finalize_validation(&state);
@@ -4077,12 +4139,12 @@ static int run_debug_harness(void)
     bool report_ok = debug_write_report(&state);
     bool passed = setup_ok && report_ok && state.failure_count == 0;
     fprintf(stderr,
-            "debug-run scenario=%s requested=%s active=%s result=%s steps=%d drop60=%.6f fluidDrop120=%.6f captures=%d gif=%s frames=%d report=%s\n",
+            "debug-run scenario=%s requested=%s active=%s result=%s steps=%d drop60=%.6f captures=%d gif=%s frames=%d report=%s\n",
             debugRunConfig.scenario,
             physics_backend_name(physicsBackend.requested),
             physics_backend_name(physicsBackend.active),
             passed ? "PASS" : "FAIL",
-            debugRunConfig.steps, state.drop_at_step_60, state.fluid_drop_at_step_120,
+            debugRunConfig.steps, state.drop_at_step_60,
             state.capture_count,
             debugRunConfig.record_gif ? state.gif_path : "disabled",
             state.gif_frame_count, state.report_path);

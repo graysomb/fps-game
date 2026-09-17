@@ -487,9 +487,8 @@ static bool gpu_pack_world(void) {
         g->pos_rest_edge[0] = v->pos.x; g->pos_rest_edge[1] = v->pos.y; g->pos_rest_edge[2] = v->pos.z; g->pos_rest_edge[3] = v->rest_edge;
         g->velocity_rest_volume[0] = v->vel.x; g->velocity_rest_volume[1] = v->vel.y;
         g->velocity_rest_volume[2] = v->vel.z; g->velocity_rest_volume[3] = v->rest_volume;
-        // flags.x means awake dynamic. Sleeping dynamics remain packed as
-        // zero-mass collision anchors but skip voxel-level simulation kernels.
-        g->flags[0] = v->sleeping ? 0 : 1; g->flags[1] = v->isBullet ? 1 : 0;
+        // flags.x means awake dynamic with active VGS constraint.
+        g->flags[0] = (v->sleeping || !v->vgs_active) ? 0 : 1; g->flags[1] = v->isBullet ? 1 : 0;
         g->flags[2] = v->type; g->flags[3] = v->simulate_dofs ? 1 : 0;
         VoxelWorldBounds bounds;
         voxel_world_bounds(v, &bounds);
@@ -500,7 +499,9 @@ static bool gpu_pack_world(void) {
         g->lifecycle[0] = (uint32_t)((v->skipCollisionVelocityFrames > 0) ? v->skipCollisionVelocityFrames : 0);
         g->lifecycle[1] = v->wake_source ? 1u : 0u;
         g->lifecycle[2] = gpu_glued_face_mask(v) | (v->glueEligible ? 0x80000000u : 0u);
-        g->lifecycle[3] = v->break_mask;
+        g->lifecycle[3] = ((uint32_t)v->orig_min_gx & 1u) |
+                         (((uint32_t)v->orig_min_gy & 1u) << 1) |
+                         (((uint32_t)v->orig_min_gz & 1u) << 2);
     }
 
     for (int dynamic_id = 0; dynamic_id < gpuPhysics.dynamic_voxel_count; ++dynamic_id) {
@@ -778,11 +779,13 @@ static bool gpu_upload_world(void) {
 
 #if defined(__APPLE__) && defined(FPS_GPU_METAL)
 static bool gpu_dispatch(int mode, int count) { return fps_metal_dispatch(mode, count); }
+static void gpu_set_vgs_color(int color) { fps_metal_set_vgs_color(color); }
 static bool gpu_dispatch_indirect_offset(int mode, size_t offset) {
     return fps_metal_dispatch_indirect(mode, (void *)gpuPhysics.dispatch_buffer.id, offset);
 }
 static bool gpu_dispatch_indirect(int mode) { return gpu_dispatch_indirect_offset(mode, 0); }
 #elif defined(GRAPHICS_API_OPENGL_43)
+static void gpu_set_vgs_color(int color) { (void)color; }
 static bool gpu_dispatch(int mode, int count) {
     if (count <= 0) return true;
     while (glGetError() != GL_NO_ERROR) { }
@@ -805,6 +808,7 @@ static bool gpu_dispatch_indirect_offset(int mode, size_t offset) {
 static bool gpu_dispatch_indirect(int mode) { return gpu_dispatch_indirect_offset(mode, 0); }
 #else
 static bool gpu_dispatch(int mode, int count) { (void)mode; (void)count; return false; }
+static void gpu_set_vgs_color(int color) { (void)color; }
 static bool gpu_dispatch_indirect(int mode) { (void)mode; return false; }
 static bool gpu_dispatch_indirect_offset(int mode, size_t offset) { (void)mode; (void)offset; return false; }
 #endif
@@ -908,7 +912,7 @@ static bool gpu_validate_and_commit(void) {
     size_t cell_bytes = (size_t)used_particles * sizeof(GpuCellState);
     size_t voxel_bytes = (size_t)gpuPhysics.dynamic_voxel_count * sizeof(GpuVoxelState);
     if (particle_bytes) gpu_buffer_read(&gpuPhysics.particle_buffer, gpuPhysics.particle_stage, particle_bytes, 0);
-    if (cell_bytes) gpu_buffer_read(&gpuPhysics.cell_buffer, gpuPhysics.cell_stage, cell_bytes, 0);
+    if (cell_bytes && BREAK_DAMP_FRAMES > 0) gpu_buffer_read(&gpuPhysics.cell_buffer, gpuPhysics.cell_stage, cell_bytes, 0);
     if (voxel_bytes) gpu_buffer_read(&gpuPhysics.voxel_buffer, gpuPhysics.voxel_stage, voxel_bytes, 0);
     if (used_particles > gpuPhysics.uploaded_particle_count) {
         size_t offset = (size_t)gpuPhysics.uploaded_particle_count * sizeof(int32_t);
@@ -918,44 +922,37 @@ static bool gpu_validate_and_commit(void) {
                         bytes, offset);
     }
     gpuPhysics.sync_count++;
-    gpuPhysics.readback_bytes += (uint64_t)(sizeof(GpuControlState) + particle_bytes + cell_bytes + voxel_bytes +
+    gpuPhysics.readback_bytes += (uint64_t)(sizeof(GpuControlState) + particle_bytes +
+        (BREAK_DAMP_FRAMES > 0 ? cell_bytes : 0) + voxel_bytes +
         (size_t)(used_particles - gpuPhysics.uploaded_particle_count) * sizeof(int32_t));
     gpuPhysics.readback_ms += (GetTime() - read_started) * 1000.0;
     double commit_started = GetTime();
-    for (int i = 0; i < used_particles; ++i) {
-        GpuParticleState *g = &gpuPhysics.particle_stage[i];
-        for (int c = 0; c < 3; ++c) {
-            if (!isfinite(g->pos_radius[c]) || !isfinite(g->predicted_base_inv_mass[c]) ||
-                !isfinite(g->velocity[c]) || fabsf(g->pos_radius[c]) > 100000.0f) {
-                if (collision_diagnostics) fprintf(stderr, "collision-validation: invalid particle %d component %d\n", i, c);
+    if (collision_diagnostics) {
+        for (int i = 0; i < used_particles; ++i) {
+            GpuParticleState *g = &gpuPhysics.particle_stage[i];
+            for (int c = 0; c < 3; ++c) {
+                if (!isfinite(g->pos_radius[c]) || !isfinite(g->predicted_base_inv_mass[c]) ||
+                    !isfinite(g->velocity[c]) || fabsf(g->pos_radius[c]) > 100000.0f) {
+                    fprintf(stderr, "collision-validation: invalid particle %d component %d\n", i, c);
+                    return false;
+                }
+            }
+        }
+        for (int i = 0; i < gpuPhysics.dynamic_voxel_count; ++i) {
+            GpuVoxelState *g = &gpuPhysics.voxel_stage[i];
+            if (!isfinite(g->pos_rest_edge[0]) || !isfinite(g->pos_rest_edge[1]) || !isfinite(g->pos_rest_edge[2])) {
+                fprintf(stderr, "collision-validation: invalid voxel %d\n", i);
                 return false;
             }
         }
     }
-    for (int i = 0; i < gpuPhysics.dynamic_voxel_count; ++i) {
-        GpuVoxelState *g = &gpuPhysics.voxel_stage[i];
-        if (!isfinite(g->pos_rest_edge[0]) || !isfinite(g->pos_rest_edge[1]) || !isfinite(g->pos_rest_edge[2])) {
-            if (collision_diagnostics) fprintf(stderr, "collision-validation: invalid voxel %d\n", i);
-            return false;
+    int safe_particles = (used_particles > gpuPhysics.uploaded_particle_count) ?
+                         gpuPhysics.uploaded_particle_count : used_particles;
+    for (int i = 0; i < safe_particles; ++i) {
+        if (i + 8 < safe_particles) {
+            __builtin_prefetch(gpuPhysics.compact_to_particle[i + 8], 1, 1);
+            __builtin_prefetch(&gpuPhysics.particle_stage[i + 8], 0, 1);
         }
-    }
-    for (int i = gpuPhysics.uploaded_particle_count; i < used_particles; ++i) {
-        int parent_id = gpuPhysics.clone_parent_stage[i] & INT_MAX;
-        if (parent_id < 0 || parent_id >= i || !gpuPhysics.compact_to_particle[parent_id]) {
-            if (collision_diagnostics) fprintf(stderr, "collision-validation: clone %d has parent %d raw=0x%x\n",
-                                               i, parent_id, (unsigned)gpuPhysics.clone_parent_stage[i]);
-            return false;
-        }
-        Particle *clone = particle_clone(gpuPhysics.compact_to_particle[parent_id]);
-        if (!clone) {
-            if (collision_diagnostics) fprintf(stderr, "collision-validation: CPU clone allocation failed for %d\n", i);
-            return false;
-        }
-        gpuPhysics.compact_to_particle[i] = clone;
-        ptrdiff_t pool_id = clone - particles_pool;
-        if (pool_id >= 0 && pool_id < MAX_PARTICLES) gpuPhysics.pool_to_compact[pool_id] = i;
-    }
-    for (int i = 0; i < used_particles; ++i) {
         Particle *p = gpuPhysics.compact_to_particle[i];
         if (!p) return false;
         GpuParticleState *g = &gpuPhysics.particle_stage[i];
@@ -966,18 +963,43 @@ static bool gpu_validate_and_commit(void) {
         p->predicted_pos = (Vector3){g->predicted_base_inv_mass[0], g->predicted_base_inv_mass[1], g->predicted_base_inv_mass[2]};
         p->base_inv_mass = g->predicted_base_inv_mass[3];
         p->vel = (Vector3){g->velocity[0], g->velocity[1], g->velocity[2]};
-        p->cell_x = gpuPhysics.cell_stage[i].value[0]; p->cell_y = gpuPhysics.cell_stage[i].value[1];
-        p->cell_z = gpuPhysics.cell_stage[i].value[2]; p->break_timer = gpuPhysics.cell_stage[i].value[3];
+        if (BREAK_DAMP_FRAMES > 0) {
+            p->break_timer = gpuPhysics.cell_stage[i].value[3];
+        }
     }
-    bool topology_changed = used_particles != gpuPhysics.uploaded_particle_count;
-    gpuPhysics.clones_created += (uint64_t)(used_particles - gpuPhysics.uploaded_particle_count);
+    bool topology_changed = false;
     for (int i = 0; i < gpuPhysics.dynamic_voxel_count; ++i) {
         int voxel_id = gpuPhysics.compact_to_voxel[i];
         if (voxel_id < 0 || voxel_id >= voxel_count) return false;
         Voxel *v = &voxels[voxel_id]; GpuVoxelState *g = &gpuPhysics.voxel_stage[i];
+        if (v->vgs_active && g->flags[0] == 0) {
+            v->vgs_active = false;
+            v->wake_source = true;
+            for (int corner = 0; corner < 8; ++corner) {
+                Particle *part = v->particles[corner];
+                if (part && part->glue_count > 0) {
+                    part->glue_count--;
+                }
+            }
+            memset(v->glued_faces, 0, sizeof(v->glued_faces));
+            for (int f = 0; f < 6; ++f) {
+                int nidx = v->glued_neighbors[f];
+                if (nidx >= 0 && nidx < voxel_count) {
+                    voxels[nidx].glued_faces[opposite_face[f]] = false;
+                    voxels[nidx].glued_neighbors[opposite_face[f]] = -1;
+                    int n_dyn = gpuPhysics.world_to_dynamic[nidx];
+                    if (n_dyn >= 0 && n_dyn < gpuPhysics.dynamic_voxel_count) {
+                        gpuPhysics.voxel_stage[n_dyn].lifecycle[2] &= ~(1u << opposite_face[f]);
+                    }
+                }
+                v->glued_neighbors[f] = -1;
+            }
+            g->lifecycle[2] = 0;
+            topology_changed = true;
+        }
         for (int corner = 0; corner < 8; ++corner) {
             uint32_t particle_id = g->particle[corner];
-            if (particle_id >= (uint32_t)used_particles || !gpuPhysics.compact_to_particle[particle_id]) return false;
+            if (particle_id >= (uint32_t)safe_particles || !gpuPhysics.compact_to_particle[particle_id]) return false;
             Particle *desired = gpuPhysics.compact_to_particle[particle_id];
             Particle *old = v->particles[corner];
             if (old != desired) {
@@ -1000,10 +1022,6 @@ static bool gpu_validate_and_commit(void) {
             if (v->glued_faces[face] != glued) topology_changed = true;
             v->glued_faces[face] = glued;
         }
-    }
-    for (int i = gpuPhysics.uploaded_particle_count; i < used_particles; ++i) {
-        Particle *clone = gpuPhysics.compact_to_particle[i];
-        if (clone) particle_release(clone);
     }
     if (topology_changed) collisionTopologyDirty = true;
     gpuPhysics.compact_count = used_particles;
@@ -1033,7 +1051,7 @@ static bool gpu_resident_matches_cpu(void) {
         if (world_id < 0 || world_id >= voxel_count || !voxels[world_id].simulate) return false;
         Voxel *v = &voxels[world_id];
         GpuVoxelState *g = &gpuPhysics.voxel_stage[i];
-        if ((v->sleeping ? 0 : 1) != g->flags[0] ||
+        if (((v->sleeping || !v->vgs_active) ? 0 : 1) != g->flags[0] ||
             v->type != g->flags[2] || (v->isBullet ? 1 : 0) != g->flags[1] ||
             (v->simulate_dofs ? 1 : 0) != g->flags[3]) return false;
         uint32_t glue_mask = gpu_glued_face_mask(v);
@@ -1091,25 +1109,21 @@ static bool gpu_dispatch_substep(float sub_dt) {
               gpu_dispatch(GPU_MODE_HASH_CLEAR, hash_size) &&
               gpu_dispatch_indirect_offset(GPU_MODE_HASH_BUILD, 16) &&
               gpu_dispatch_indirect_offset(GPU_MODE_PAIR_COLLISIONS, 16) &&
-              gpu_dispatch_indirect(GPU_MODE_APPLY);
+              gpu_dispatch_indirect(GPU_MODE_APPLY) &&
+              gpu_dispatch(GPU_MODE_BREAK_MASK, gpuPhysics.dynamic_voxel_count);
     for (int it = 0; ok && it < PBD_CONSTRAINT_ITERS; ++it) {
-        ok = gpu_dispatch_indirect(GPU_MODE_RESET) &&
-             gpu_dispatch(GPU_MODE_VGS, gpuPhysics.dynamic_voxel_count) &&
+        ok = gpu_dispatch(GPU_MODE_VGS, gpuPhysics.dynamic_voxel_count) &&
              gpu_dispatch_indirect(GPU_MODE_APPLY);
     }
     ok = ok && gpu_dispatch_indirect_offset(GPU_MODE_STATIC_COLLISIONS, 16) &&
-         gpu_dispatch(GPU_MODE_BREAK_MASK, gpuPhysics.dynamic_voxel_count) &&
-         gpu_dispatch(GPU_MODE_SPLIT_BREAKS, gpuPhysics.dynamic_voxel_count) &&
          gpu_dispatch(GPU_MODE_WAKE_GATHER, gpuPhysics.dynamic_voxel_count) &&
-         gpu_dispatch(GPU_MODE_WAKE_APPLY, gpuPhysics.dynamic_voxel_count) &&
-         gpu_dispatch(GPU_MODE_PREPARE_INDIRECT, 1) &&
          gpu_dispatch_indirect(GPU_MODE_FINALIZE_PARTICLES) &&
          gpu_dispatch(GPU_MODE_FINALIZE_VOXELS, gpuPhysics.dynamic_voxel_count);
     return ok;
 }
 
 static bool gpu_rebuild_topology_if_needed(void) {
-    return gpu_dispatch(GPU_MODE_TOPOLOGY_REBUILD_SERIAL, 1);
+    return true;
 }
 
 static bool gpu_forced_step_failure_consumed = false;
