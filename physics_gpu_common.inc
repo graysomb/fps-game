@@ -1165,19 +1165,25 @@ static bool gpu_dispatch_substep(float sub_dt) {
     gpu_set_uniforms(sub_dt);
     int hash_size = particle_hash_size_for_count(gpuPhysics.collision_count);
     bool ok = gpu_dispatch(GPU_MODE_PREPARE_INDIRECT, 1) &&
-              gpu_dispatch_indirect(GPU_MODE_INTEGRATE) &&
-              gpu_dispatch_indirect(GPU_MODE_RESET) &&
-              gpu_dispatch(GPU_MODE_HASH_CLEAR, hash_size) &&
-              gpu_dispatch_indirect_offset(GPU_MODE_HASH_BUILD, 16) &&
-              gpu_dispatch_indirect_offset(GPU_MODE_PAIR_COLLISIONS, 16) &&
-              gpu_dispatch_indirect(GPU_MODE_APPLY);
+              gpu_dispatch_indirect(GPU_MODE_INTEGRATE);
+
+    if (sim_particle_count > 0) {
+        ok = ok && gpu_dispatch_indirect(GPU_MODE_RESET);
+    }
+
+    ok = ok && gpu_dispatch(GPU_MODE_HASH_CLEAR, hash_size) &&
+               gpu_dispatch_indirect_offset(GPU_MODE_HASH_BUILD, 16);
+
+    if (sim_particle_count > 0) {
+        ok = ok && gpu_dispatch_indirect_offset(GPU_MODE_PAIR_COLLISIONS, 16) &&
+                   gpu_dispatch_indirect(GPU_MODE_APPLY);
+    }
 
     if (active_fluid_particle_count > 0) {
         ok = ok && gpu_dispatch(GPU_MODE_PBF_BUILD_NEIGHBORS, active_fluid_particle_count);
         for (int it = 0; ok && it < PBF_DENSITY_ITERS; ++it) {
             ok = gpu_dispatch(GPU_MODE_PBF_LAMBDA, active_fluid_particle_count) &&
-                 gpu_dispatch(GPU_MODE_PBF_DELTA, active_fluid_particle_count) &&
-                 gpu_dispatch(GPU_MODE_PBF_APPLY, active_fluid_particle_count);
+                 gpu_dispatch(GPU_MODE_PBF_DELTA, active_fluid_particle_count);
         }
         if (ok && gpuPhysics.dynamic_voxel_count > 0) {
             ok = gpu_dispatch_indirect(GPU_MODE_RESET) &&
@@ -1186,12 +1192,17 @@ static bool gpu_dispatch_substep(float sub_dt) {
         }
     }
 
-    ok = ok && gpu_dispatch(GPU_MODE_BREAK_MASK, gpuPhysics.dynamic_voxel_count);
-    for (int it = 0; ok && it < PBD_CONSTRAINT_ITERS; ++it) {
-        ok = gpu_dispatch(GPU_MODE_VGS, gpuPhysics.dynamic_voxel_count) &&
-             gpu_dispatch_indirect(GPU_MODE_APPLY);
+    if (gpuPhysics.dynamic_voxel_count > 0) {
+        ok = ok && gpu_dispatch(GPU_MODE_BREAK_MASK, gpuPhysics.dynamic_voxel_count);
+        for (int it = 0; ok && it < PBD_CONSTRAINT_ITERS; ++it) {
+            ok = gpu_dispatch(GPU_MODE_VGS, gpuPhysics.dynamic_voxel_count) &&
+                 gpu_dispatch_indirect(GPU_MODE_APPLY);
+        }
     }
-    ok = ok && gpu_dispatch_indirect_offset(GPU_MODE_STATIC_COLLISIONS, 16);
+
+    if (sim_particle_count > 0) {
+        ok = ok && gpu_dispatch_indirect_offset(GPU_MODE_STATIC_COLLISIONS, 16);
+    }
 
     if (ok && active_fluid_particle_count > 0 && gpuPhysics.dynamic_voxel_count > 0) {
         for (int collision_iteration = 0; ok && collision_iteration < 3; ++collision_iteration) {

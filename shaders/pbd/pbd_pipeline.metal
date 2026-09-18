@@ -640,6 +640,8 @@ inline void pbfDelta(uint gid, device ParticleState *particle, device int4 *cell
                      device uint *simId, device uint *collisionId,
                      device atomic_int *hashHead, device int *hashNext,
                      device FluidState *fluid, device FluidNeighborData *fluidNeighbors,
+                     device int4 *staticCell, device StaticCollider *staticCollider,
+                     device atomic_uint *collisionControl,
                      device const int *control, constant GpuUniforms &u) {
     if (gid >= uint(u.fluid_count)) return;
     uint id = fluidId(gid, simId, u);
@@ -698,7 +700,9 @@ inline void pbfDelta(uint gid, device ParticleState *particle, device int4 *cell
     float deltaLength = length(delta);
     float deltaLimit = 0.0125f * u.voxel_size;
     if (deltaLength > deltaLimit) delta *= deltaLimit / deltaLength;
-    fluid[id].delta = float4(delta, 0.0f);
+    fluid[id].delta = float4(0.0f);
+    particle[id].predicted_base_inv_mass.xyz += delta;
+    staticCollisionParticleDirect(id, particle, staticCell, staticCollider, collisionControl, u);
 }
 
 inline void pbfApply(uint gid, device ParticleState *particle,
@@ -753,6 +757,15 @@ inline void pbfDynamicSolidCollisions(uint gid, bool react,
     for (int voxelId = 0; voxelId < u.voxel_count; ++voxelId) {
         VoxelState solid = voxel[voxelId];
         if (solid.flags.y != 0 || solid.flags.z != 0) continue;
+
+        float maxReach = u.voxel_size * 1.5f + radius;
+        float3 toPos = fabs(position - solid.pos_rest_edge.xyz);
+        float3 toPrev = fabs(previous - solid.pos_rest_edge.xyz);
+        if ((toPos.x > maxReach && toPrev.x > maxReach) ||
+            (toPos.z > maxReach && toPrev.z > maxReach) ||
+            (toPos.y > maxReach + u.voxel_size && toPrev.y > maxReach + u.voxel_size)) {
+            continue;
+        }
 
         float3 corner[8];
         float3 boundsMin(1e30f);
@@ -983,7 +996,7 @@ kernel void pbd_pipeline(
         case MODE_TOPOLOGY_REBUILD_SERIAL:break;
         case MODE_PBF_BUILD_NEIGHBORS:pbfBuildNeighbors(gid,particle,cell,simId,collisionId,hashHead,hashNext,fluidNeighbors,control,u);break;
         case MODE_PBF_LAMBDA:pbfLambda(gid,particle,cell,simId,collisionId,hashHead,hashNext,fluid,fluidNeighbors,control,u);break;
-        case MODE_PBF_DELTA:pbfDelta(gid,particle,cell,simId,collisionId,hashHead,hashNext,fluid,fluidNeighbors,control,u);break;
+        case MODE_PBF_DELTA:pbfDelta(gid,particle,cell,simId,collisionId,hashHead,hashNext,fluid,fluidNeighbors,staticCell,staticCollider,collisionControl,control,u);break;
         case MODE_PBF_APPLY:pbfApplyAndStaticCollisions(gid,particle,fluid,staticCell,staticCollider,collisionControl,simId,control,u);break;
         case MODE_PBF_STATIC_COLLISIONS:pbfStaticCollisions(gid,particle,staticCell,staticCollider,collisionControl,simId,control,u);break;
         case MODE_PBF_DYNAMIC_SOLID_COLLISIONS:pbfDynamicSolidCollisions(gid,true,particle,correction,voxel,simId,control,u);break;

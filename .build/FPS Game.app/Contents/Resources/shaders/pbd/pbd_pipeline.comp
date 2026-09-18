@@ -847,7 +847,9 @@ void pbfDelta(uint gid) {
     float deltaLength = length(delta);
     float deltaLimit = 0.0125 * uVoxelSize;
     if (deltaLength > deltaLimit) delta *= deltaLimit / deltaLength;
-    fluid[id].delta = vec4(delta, 0.0);
+    fluid[id].delta = vec4(0.0);
+    particle[id].predicted_base_inv_mass.xyz += delta;
+    staticCollisionParticleDirect(id);
 }
 
 void pbfApply(uint gid) {
@@ -883,6 +885,15 @@ void pbfDynamicSolidCollisions(uint gid, bool react) {
     for (int voxelId = 0; voxelId < uVoxelCount; ++voxelId) {
         VoxelState solid = voxel[voxelId];
         if (solid.flags.y != 0 || solid.flags.z != 0) continue;
+
+        float maxReach = uVoxelSize * 1.5 + radius;
+        vec3 toPos = abs(position - solid.pos_rest_edge.xyz);
+        vec3 toPrev = abs(previous - solid.pos_rest_edge.xyz);
+        if ((toPos.x > maxReach && toPrev.x > maxReach) ||
+            (toPos.z > maxReach && toPrev.z > maxReach) ||
+            (toPos.y > maxReach + uVoxelSize && toPrev.y > maxReach + uVoxelSize)) {
+            continue;
+        }
 
         vec3 corner[8];
         vec3 boundsMin = vec3(1e30);
