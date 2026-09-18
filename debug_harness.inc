@@ -301,7 +301,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "goliath-flight", "Goliath jumps with attached armor and must land", debug_setup_goliath_flight, 120, 90 },
     { "goliath-behavior", "Goliath maintains armor, detects enemy, and launches voxels", debug_setup_goliath_behavior, 180, 60 },
     { "cube-stress", "Stress test with scalable dynamic cube (size set by FPS_CUBE_SIZE)", debug_setup_cube_stress, 60, 60 },
-    { "voxel-strain-shear-fracture", "Dynamic voxels deactivate VGS shape constraints when strain or shear exceeds threshold", debug_setup_voxel_strain_shear_fracture, 60, 60 },
+    { "voxel-strain-shear-fracture", "Dynamic voxels deactivate VGS shape constraints when strain or shear exceeds threshold", debug_setup_voxel_strain_shear_fracture, 80, 60 },
     { "arena-platform-fluid", "Test arena central platform activated with sleeping fluid on top", debug_setup_arena_platform_fluid, 60, 60 }
 };
 
@@ -1656,9 +1656,9 @@ static bool debug_setup_voxel_strain_shear_fracture(DebugRunState *state)
     Color shear_color = (Color){ 220, 70, 180, 255 };
     Color control_color = (Color){ 80, 200, 120, 255 };
 
-    int idx_strain = debug_add_cell(-3, 8, 0, false, true, strain_color, DEBUG_TEST_TAG);
-    int idx_shear = debug_add_cell(0, 8, 0, false, true, shear_color, DEBUG_TEST_TAG);
-    int idx_ctrl = debug_add_cell(3, 8, 0, false, true, control_color, DEBUG_TEST_TAG);
+    int idx_strain = debug_add_cell(-3, 6, 0, false, true, strain_color, DEBUG_TEST_TAG);
+    int idx_shear = debug_add_cell(0, 6, 0, false, true, shear_color, DEBUG_TEST_TAG);
+    int idx_ctrl = debug_add_cell(3, 6, 0, false, true, control_color, DEBUG_TEST_TAG);
 
     if (idx_strain < 0 || idx_shear < 0 || idx_ctrl < 0) {
         debug_add_failure(state, "fracture setup could not create test voxels");
@@ -1697,8 +1697,8 @@ static bool debug_setup_voxel_strain_shear_fracture(DebugRunState *state)
     collisionTopologyDirty = true;
     rebuild_voxel_hash();
     debug_set_initial_centroid(state);
-    state->camera.position = (Vector3){ 0.0f, 9.0f, 7.0f };
-    state->camera.target = (Vector3){ 0.0f, 8.0f, 0.0f };
+    state->camera.position = (Vector3){ -1.2f, 2.5f, 5.5f };
+    state->camera.target = (Vector3){ -1.2f, 1.5f, 0.0f };
     debug_capture(state, "phase-01-fracture-setup.png", "fracture-setup", 0);
     return true;
 }
