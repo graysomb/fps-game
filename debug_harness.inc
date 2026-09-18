@@ -3004,7 +3004,7 @@ static void debug_validate_step(DebugRunState *state, int step)
         Player *bot = &players[state->enemy_bot_index];
         if (bot->pos.z < state->swarmer_min_z) state->swarmer_min_z = bot->pos.z;
         float half = player_collision_half(bot);
-        if (player_aabb_hits_world(state->enemy_bot_index, bot->pos, half)) {
+        if (player_aabb_hits_world(bot->pos, half)) {
             state->swarmer_inside_wall_frames++;
         }
     }
@@ -3529,9 +3529,9 @@ static void debug_finalize_validation(DebugRunState *state)
         if (state->goliath_y_after_landing > state->goliath_start_y + 0.55f) {
             Player *bot = &players[state->enemy_bot_index];
             float half = player_collision_half(bot);
-            bool hits = player_aabb_hits_world(state->enemy_bot_index, bot->pos, half);
+            bool hits = player_aabb_hits_world(bot->pos, half);
             Vector3 probe = { bot->pos.x, bot->pos.y - 0.02f, bot->pos.z };
-            bool grounded = player_aabb_hits_world(state->enemy_bot_index, probe, half);
+            bool grounded = player_aabb_hits_world(probe, half);
             debug_add_failure(state,
                               "goliath finished airborne at y=%.3f (start %.3f) onGround=%d vel.y=%.3f aabb=%d probe=%d armor=%d",
                               state->goliath_y_after_landing, state->goliath_start_y,

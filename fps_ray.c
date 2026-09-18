@@ -16503,16 +16503,7 @@ static float player_collision_half(const Player *p) {
     return PLAYER_SIZE * 0.5f;
 }
 
-static bool voxel_blocks_player(int player_idx, int voxel_idx) {
-    if (voxel_idx < 0 || voxel_idx >= voxel_count) return false;
-    if (player_idx >= 0 && player_idx < MAX_PLAYERS &&
-        voxels[voxel_idx].owner == player_idx) {
-        return false;
-    }
-    return true;
-}
-
-static bool player_aabb_hits_world(int player_idx, Vector3 pos, float half) {
+static bool player_aabb_hits_world(Vector3 pos, float half) {
     const float eps = 1e-4f;
     int minx = (int)floorf((pos.x - half) / VOXEL_SIZE);
     int maxx = (int)floorf((pos.x + half - eps) / VOXEL_SIZE);
@@ -16523,7 +16514,8 @@ static bool player_aabb_hits_world(int player_idx, Vector3 pos, float half) {
     for (int x = minx; x <= maxx; ++x) {
         for (int y = miny; y <= maxy; ++y) {
             for (int z = minz; z <= maxz; ++z) {
-                if (voxel_blocks_player(player_idx, table_get(x, y, z))) return true;
+                int voxel_idx = table_get(x, y, z);
+                if (voxel_idx >= 0 && voxel_idx < voxel_count) return true;
             }
         }
     }
@@ -16547,22 +16539,22 @@ static void net_integrate_player(Player *p, float dt, bool query_world) {
     bool collided = false;
     if (query_world && player_idx >= 0) {
         Vector3 try_x = { p->pos.x + p->vel.x * dt, p->pos.y, p->pos.z };
-        if (p->vel.x != 0.0f && player_aabb_hits_world(player_idx, try_x, half)) {
+        if (p->vel.x != 0.0f && player_aabb_hits_world(try_x, half)) {
             p->vel.x = 0.0f;
             collided = true;
         }
         Vector3 try_y = { p->pos.x, p->pos.y + p->vel.y * dt, p->pos.z };
-        if (p->vel.y != 0.0f && player_aabb_hits_world(player_idx, try_y, half)) {
+        if (p->vel.y != 0.0f && player_aabb_hits_world(try_y, half)) {
             p->vel.y = 0.0f;
             collided = true;
         }
         Vector3 try_z = { p->pos.x, p->pos.y, p->pos.z + p->vel.z * dt };
-        if (p->vel.z != 0.0f && player_aabb_hits_world(player_idx, try_z, half)) {
+        if (p->vel.z != 0.0f && player_aabb_hits_world(try_z, half)) {
             p->vel.z = 0.0f;
             collided = true;
         }
         Vector3 ground_probe = { p->pos.x, p->pos.y - 0.02f, p->pos.z };
-        bool grounded = player_aabb_hits_world(player_idx, ground_probe, half);
+        bool grounded = player_aabb_hits_world(ground_probe, half);
         if (!grounded) {
             p->vel.y -= GRAVITY * dt;
             p->onGround = false;
