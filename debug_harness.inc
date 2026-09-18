@@ -217,6 +217,7 @@ typedef struct DebugRunState {
     int restoration_deadline_frame;
     bool swarmer_wall_test;
     bool goliath_flight_test;
+    bool goliath_behavior_test;
     int enemy_bot_index;
     int enemy_human_index;
     int swarmer_inside_wall_frames;
@@ -226,6 +227,10 @@ typedef struct DebugRunState {
     float goliath_y_after_landing;
     int goliath_hover_frames;
     int goliath_forced_jumps;
+    int goliath_visible_frames;
+    int goliath_voxels_launched;
+    int goliath_min_armor_count;
+    int goliath_final_armor_count;
 } DebugRunState;
 
 typedef bool (*DebugScenarioSetupFn)(DebugRunState *state);
@@ -263,6 +268,7 @@ static bool debug_setup_pbf_container(DebugRunState *state);
 static bool debug_setup_tall_pillar_snap(DebugRunState *state);
 static bool debug_setup_swarmer_wall(DebugRunState *state);
 static bool debug_setup_goliath_flight(DebugRunState *state);
+static bool debug_setup_goliath_behavior(DebugRunState *state);
 static bool debug_setup_pbf_dynamic_container(DebugRunState *state);
 static bool debug_setup_pbf_scaling(DebugRunState *state);
 static bool debug_setup_pbf_dense_neighbors(DebugRunState *state);
@@ -293,6 +299,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "pbf-dense-neighbors", "Dense PBF neighborhood overflow fallback", debug_setup_pbf_dense_neighbors, 60, 60 },
     { "swarmer-wall", "Swarmer charges a visible target through a blocking wall", debug_setup_swarmer_wall, 90, 60 },
     { "goliath-flight", "Goliath jumps with attached armor and must land", debug_setup_goliath_flight, 120, 90 },
+    { "goliath-behavior", "Goliath maintains armor, detects enemy, and launches voxels", debug_setup_goliath_behavior, 180, 60 },
     { "cube-stress", "Stress test with scalable dynamic cube (size set by FPS_CUBE_SIZE)", debug_setup_cube_stress, 60, 60 },
     { "voxel-strain-shear-fracture", "Dynamic voxels deactivate VGS shape constraints when strain or shear exceeds threshold", debug_setup_voxel_strain_shear_fracture, 60, 60 },
     { "arena-platform-fluid", "Test arena central platform activated with sleeping fluid on top", debug_setup_arena_platform_fluid, 60, 60 }
@@ -3026,10 +3033,43 @@ static bool debug_setup_goliath_flight(DebugRunState *state)
     return true;
 }
 
+static bool debug_setup_goliath_behavior(DebugRunState *state)
+{
+    debug_reset_world();
+    state->goliath_behavior_test = true;
+    state->enemy_bot_index = 0;
+    state->enemy_human_index = 1;
+    state->activation_succeeded = true;
+    state->drop_sampled = true;
+    state->expected_voxels = 0;
+    gameMode = GAME_MODE_FIREFIGHT;
+    activePlayers = 2;
+    debug_init_enemy_player(0, (Vector3){ 0.0f, BASE_EYE_HEIGHT, 5.0f },
+                            ENEMY_TYPE_GOLIATH, INPUT_TYPE_BOT_MEDIUM);
+    debug_init_enemy_player(1, (Vector3){ 0.0f, BASE_EYE_HEIGHT, -5.0f },
+                            ENEMY_TYPE_STANDARD, INPUT_TYPE_KEYBOARD);
+    spawn_goliath_armor(0);
+    goliathStates[0].launchTimer = 0.5f;
+    players[0].yaw = 0.0f;
+    players[1].yaw = 180.0f;
+    debug_rebuild_world_state();
+    state->camera.position = (Vector3){ 13.0f, 7.0f, 4.0f };
+    state->camera.target = (Vector3){ 0.0f, 1.0f, -1.0f };
+    if (goliathStates[0].count <= 0) {
+        debug_add_failure(state, "goliath-behavior spawned no armor voxels");
+        return false;
+    }
+    state->goliath_min_armor_count = goliathStates[0].count;
+    state->goliath_final_armor_count = goliathStates[0].count;
+    state->goliath_visible_frames = 0;
+    state->goliath_voxels_launched = 0;
+    return true;
+}
+
 static void debug_physics_step(DebugRunState *state)
 {
     float dt = PBD_MAX_STEP_DT;
-    if (state && (state->swarmer_wall_test || state->goliath_flight_test)) {
+    if (state && (state->swarmer_wall_test || state->goliath_flight_test || state->goliath_behavior_test)) {
         int bot = state->enemy_bot_index;
         int human = state->enemy_human_index;
         if (state->goliath_flight_test && state->goliath_forced_jumps < 1 &&
@@ -3063,6 +3103,20 @@ static void debug_physics_step(DebugRunState *state)
                 players[bot].vel.x = 0.0f;
                 players[bot].vel.z = 0.0f;
             }
+        } else if (state->goliath_behavior_test) {
+            int count_before = goliathStates[bot].count;
+            UpdateBot(bot, dt);
+            if (goliathStates[bot].count < count_before) {
+                state->goliath_voxels_launched += (count_before - goliathStates[bot].count);
+            }
+            float dist = 0.0f;
+            if (check_ai_awareness_of_player(bot, human, &dist)) {
+                state->goliath_visible_frames++;
+            }
+            if (goliathStates[bot].count < state->goliath_min_armor_count) {
+                state->goliath_min_armor_count = goliathStates[bot].count;
+            }
+            state->goliath_final_armor_count = goliathStates[bot].count;
         } else {
             UpdateBot(bot, dt);
         }
@@ -3642,6 +3696,28 @@ static void debug_finalize_validation(DebugRunState *state)
                               state->goliath_y_after_landing, state->goliath_start_y,
                               bot->onGround ? 1 : 0, bot->vel.y, hits ? 1 : 0, grounded ? 1 : 0,
                               goliathStates[state->enemy_bot_index].count);
+        }
+        return;
+    }
+    if (state->goliath_behavior_test) {
+        fprintf(stderr,
+                "[GoliathBehavior] visible_frames=%d launched=%d final_armor=%d min_armor=%d\n",
+                state->goliath_visible_frames, state->goliath_voxels_launched,
+                state->goliath_final_armor_count, state->goliath_min_armor_count);
+        if (state->goliath_visible_frames < 20) {
+            debug_add_failure(state,
+                              "goliath was directly aware of visible player for only %d frames",
+                              state->goliath_visible_frames);
+        }
+        if (state->goliath_voxels_launched < 1) {
+            debug_add_failure(state,
+                              "goliath never launched any voxels (launched=%d visible_frames=%d)",
+                              state->goliath_voxels_launched, state->goliath_visible_frames);
+        }
+        if (state->goliath_final_armor_count <= 0) {
+            debug_add_failure(state,
+                              "goliath lost all armor voxels (final_armor=%d min_armor=%d)",
+                              state->goliath_final_armor_count, state->goliath_min_armor_count);
         }
         return;
     }

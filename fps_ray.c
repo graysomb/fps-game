@@ -1253,6 +1253,7 @@ static void activate_fluid_cell(int voxel_idx);
 static void activate_fluid_cluster(int seed_idx);
 static void deactivate_fluid_cell(int voxel_idx);
 static void log_dynamic_glue_cluster_breaks(void);
+static int get_goliath_owner_of_voxel(int voxel_idx);
 typedef struct {
     int gx, gy, gz;
     Color color;
@@ -5795,7 +5796,8 @@ static bool build_recycle_physical_island_graph(void)
     bool has_islands = false;
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
-        bool eligible = voxel->simulate && voxel->type == 0 && !voxel->isBullet;
+        bool is_attached_armor = (get_goliath_owner_of_voxel(i) >= 0);
+        bool eligible = voxel->simulate && voxel->type == 0 && !voxel->isBullet && !is_attached_armor;
         recycleLifetimeParent[i] = eligible ? i : -1;
         has_islands = has_islands || eligible;
     }
@@ -5901,6 +5903,10 @@ static void recycle_dead_voxels(void) {
             continue;
         }
         if (voxel_is_fluid(voxel)) {
+            continue;
+        }
+        if (get_goliath_owner_of_voxel(i) >= 0) {
+            voxel->lifeFrames = 0;
             continue;
         }
         voxel->lifeFrames++;
@@ -6849,7 +6855,8 @@ static bool deactivate_sleeping_voxels(void)
     memset(sleepClusterVisited, 0, sizeof(sleepClusterVisited));
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
-        if (!voxel_is_awake_dynamic(voxel) || voxel->type != 0 || voxel->isBullet) {
+        if (!voxel_is_awake_dynamic(voxel) || voxel->type != 0 || voxel->isBullet ||
+            get_goliath_owner_of_voxel(i) >= 0) {
             continue;
         }
         if (sleepClusterVisited[i]) {
@@ -9939,6 +9946,10 @@ static void handle_pbd_projectile_hits(void)
             continue;
         }
         if (v->type == 0 && v->isBullet) {
+            ++i;
+            continue;
+        }
+        if (get_goliath_owner_of_voxel(i) >= 0) {
             ++i;
             continue;
         }
@@ -13442,9 +13453,13 @@ static void update_goliath_armor_positions(int player_idx) {
             vox->vel = p->vel;
             vox->sleeping = false;
             vox->sleepFrames = 0;
+            vox->lifeFrames = 0;
             vox->glueEligible = false;
             vox->owner = player_idx;
             vox->activator = player_idx;
+            vox->gx = (int)floorf(target_pos.x / VOXEL_SIZE);
+            vox->gy = (int)floorf(target_pos.y / VOXEL_SIZE);
+            vox->gz = (int)floorf(target_pos.z / VOXEL_SIZE);
             for (int c = 0; c < VOXEL_CORNER_COUNT; ++c) {
                 if (vox->particles[c]) {
                     vox->particles[c]->pos = (Vector3){
@@ -13549,6 +13564,8 @@ static void goliath_launch_voxel(int bot_idx, int target_idx) {
             vox->glueEligible = false;
             vox->sleeping = false;
             vox->sleepFrames = 0;
+            vox->lifeFrames = 0;
+            vox->tetherThrowCcdFrames = TETHER_THROW_CCD_FRAMES;
             for (int c = 0; c < VOXEL_CORNER_COUNT; ++c) {
                 if (vox->particles[c]) {
                     vox->particles[c]->vel = vox->vel;
@@ -16864,7 +16881,9 @@ static bool ray_hit_solid_voxel(Ray ray, float t_max) {
     while (entry_t <= t_max + 1e-6f) {
         int id = table_get(x, y, z);
         if (id >= 0 && id < voxel_count && !voxels[id].isBullet) {
-            return true;
+            if (get_goliath_owner_of_voxel(id) < 0 && tetherTag[id] <= 0) {
+                return true;
+            }
         }
 
         if (next_x <= next_y && next_x <= next_z) {
