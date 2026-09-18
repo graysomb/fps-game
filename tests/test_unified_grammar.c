@@ -75,7 +75,7 @@ int main(void) {
 
     for (int t = 0; t < SANCTUM_TOPO_COUNT; ++t) {
         SanctumCitadelPlan plan_t;
-        sanctum_plan_init(&plan_t, (uint32_t)t);
+        sanctum_plan_init_ex(&plan_t, 1000u + (uint32_t)t, t);
         assert(plan_t.topology == (SanctumTopology)t);
         assert(plan_t.node_count > 0);
         assert(plan_t.count_stone > 0);
@@ -132,7 +132,7 @@ int main(void) {
         assert(test_plan.spawn_point_count >= 3);
         assert(test_plan.supply_count >= 2);
     }
-    printf("-> 50/50 randomized seeds across dynamic growth steps passed all invariants with 100%% stability!\n\n");
+    printf("-> 50/50 randomized seeds across dynamic growth steps passed all plan invariants.\n\n");
 
     printf("ALL UNIFIED SYNCRETIC CITADEL FIREFIGHT TESTS PASSED SUCCESSFULLY.\n");
     return 0;

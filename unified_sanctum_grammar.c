@@ -514,12 +514,14 @@ void sanctum_plan_init_ex(SanctumCitadelPlan *plan, uint32_t seed, int forced_to
     if (!plan) return;
     memset(plan, 0, sizeof(SanctumCitadelPlan));
     plan->seed = seed;
+    plan->layout_family = building_seed_stream(seed, BUILDING_STYLE_CITADEL, 0, 0) % 4u;
 
     // Seed-Driven Macro-Topology: forced override or seed % SANCTUM_TOPO_COUNT
     if (forced_topology >= 0 && forced_topology < SANCTUM_TOPO_COUNT) {
         plan->topology = (SanctumTopology)forced_topology;
+        plan->layout_family = (uint32_t)forced_topology;
     } else {
-        plan->topology = (SanctumTopology)(seed % SANCTUM_TOPO_COUNT);
+        plan->topology = (SanctumTopology)plan->layout_family;
     }
 
     switch (plan->topology) {
@@ -1687,18 +1689,26 @@ SanctumCitadelPlan generate_unified_sanctum_ex(uint32_t seed, int growth_steps, 
         int opp_count = sanctum_coalgebra_frontier(&plan, opps, MAX_SANCTUM_OPPS);
         if (opp_count <= 0) break;
 
-        // Choose opportunity with highest score (or weighted pseudo-random selection)
-        int best_idx = 0;
-        float best_score = -1.0f;
+        /* A dedicated growth stream plus repetition penalty gives the same
+         * seed reproducibility without repeatedly taking the local maximum. */
+        uint32_t rng = building_seed_stream(seed, BUILDING_STYLE_CITADEL,
+                                            plan.layout_family, 16u + (uint32_t)step);
+        float total = 0.0f;
         for (int i = 0; i < opp_count; ++i) {
-            if (opps[i].score > best_score) {
-                best_score = opps[i].score;
-                best_idx = i;
-            }
+            float penalty = 1.0f / (1.0f + 0.45f * plan.motif_counts[opps[i].motif]);
+            total += opps[i].score * penalty;
+        }
+        float pick = (building_rng_next(&rng) / (float)UINT32_MAX) * total;
+        int best_idx = opp_count - 1;
+        for (int i = 0; i < opp_count; ++i) {
+            float penalty = 1.0f / (1.0f + 0.45f * plan.motif_counts[opps[i].motif]);
+            pick -= opps[i].score * penalty;
+            if (pick <= 0.0f) { best_idx = i; break; }
         }
 
         // Apply selected continuation
-        sanctum_algebra_expand(&plan, &opps[best_idx]);
+        SanctumMotif chosen = opps[best_idx].motif;
+        if (sanctum_algebra_expand(&plan, &opps[best_idx])) plan.motif_counts[chosen]++;
     }
 
     return plan;

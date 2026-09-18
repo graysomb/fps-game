@@ -345,16 +345,20 @@ HyperPlan generate_hyperborean_structure(uint32_t seed, HyperStage target_stage)
     HyperPlan plan;
     memset(&plan, 0, sizeof(plan));
     plan.seed = seed;
+    plan.layout_family = building_seed_stream(seed, BUILDING_STYLE_HYPERBOREAN, 0, 0) % 4u;
     plan.stage = HYPER_STAGE_AVENUE;
 
     // Astronomical axis: Midsummer sunrise ~ +Z
     plan.axis_dx = 0.0f;
     plan.axis_dz = 1.0f;
 
-    plan.r_outer_henge     = 17;
-    plan.r_mid_peristyle   = 11;
-    plan.r_inner_trilithon = 6;
-    plan.r_tholos_core     = 3;
+    uint32_t dimensions = building_seed_stream(seed, BUILDING_STYLE_HYPERBOREAN, plan.layout_family, 1);
+    plan.r_outer_henge     = 12 + (int)(dimensions % 16u);
+    plan.r_mid_peristyle   = 7 + (int)((dimensions >> 5) % 10u);
+    plan.r_inner_trilithon = 4 + (int)((dimensions >> 10) % 7u);
+    plan.r_tholos_core     = 2 + (int)((dimensions >> 15) % 4u);
+    if (plan.r_mid_peristyle >= plan.r_outer_henge - 2) plan.r_mid_peristyle = plan.r_outer_henge - 3;
+    if (plan.r_inner_trilithon >= plan.r_mid_peristyle - 2) plan.r_inner_trilithon = plan.r_mid_peristyle - 3;
 
     uint32_t prng = seed;
     int max_steps = 25;

@@ -36,16 +36,22 @@ static bool verify_capstone_supports(const MegalithPlan *plan) {
 // Helper to verify solstice axis alignment of the passage
 static bool verify_passage_alignment(const MegalithPlan *plan) {
     if (!plan->has_passage) return true;
+    int aligned_walls = 0;
     for (int i = 0; i < plan->node_count; ++i) {
         const MegalithNode *n = &plan->nodes[i];
         if (n->box.min_z > plan->chamber_cz + 3 && n->type == MEGALITH_PRIMITIVE_WALL_SLAB) {
-            // Passage walls should be centered near X=0 along the sunrise axis
-            if (abs(n->box.min_x) > 5 || abs(n->box.max_x) > 5) {
-                printf("Error: Passage slab %d deviated from solstice axis! [%d..%d]\n",
-                       i, n->box.min_x, n->box.max_x);
-                return false;
-            }
+            // Chamber-ring slabs can also lie beyond this Z plane. Count only
+            // the paired, narrow walls that bound the seeded passage axis.
+            bool left = n->box.min_x == plan->chamber_cx - 2 &&
+                        n->box.max_x == plan->chamber_cx - 1;
+            bool right = n->box.min_x == plan->chamber_cx + 1 &&
+                         n->box.max_x == plan->chamber_cx + 2;
+            if (left || right) aligned_walls++;
         }
+    }
+    if (aligned_walls < 2) {
+        printf("Error: passage has only %d axis-aligned wall slabs\n", aligned_walls);
+        return false;
     }
     return true;
 }
@@ -55,11 +61,15 @@ static bool verify_circle_radius(const MegalithPlan *plan) {
     if (plan->circle_stones_placed < 4) return true;
     int r = plan->circle_radius;
     int tolerance = 3;
-    for (int i = 0; i < plan->node_count; ++i) {
+    // Node zero is the seed menhir; the next circle_stones_placed nodes are
+    // the perimeter. Later orthostats form the inner horseshoe or avenue.
+    int perimeter_end = 1 + plan->circle_stones_placed;
+    if (perimeter_end > plan->node_count) perimeter_end = plan->node_count;
+    for (int i = 1; i < perimeter_end; ++i) {
         const MegalithNode *n = &plan->nodes[i];
         if (n->type == MEGALITH_PRIMITIVE_ORTHOSTAT && n->box.min_y == 0 && n->box.min_z < plan->circle_radius + 1) {
-            int mx = (n->box.min_x + n->box.max_x) / 2;
-            int mz = (n->box.min_z + n->box.max_z) / 2;
+            int mx = (n->box.min_x + n->box.max_x) / 2 - plan->chamber_cx;
+            int mz = (n->box.min_z + n->box.max_z) / 2 - plan->chamber_cz;
             float dist = sqrtf((float)(mx * mx + mz * mz));
             // Either inner trilithon (dist < 8) or perimeter circle (dist ~ r)
             if (dist > 7.0f && fabsf(dist - (float)r) > (float)tolerance) {

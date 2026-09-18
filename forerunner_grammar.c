@@ -657,6 +657,7 @@ ForerunnerPlan generate_forerunner_structure(uint32_t seed, ForerunnerArchetype 
     ForerunnerPlan plan;
     memset(&plan, 0, sizeof(plan));
     plan.seed = seed;
+    plan.layout_family = building_seed_stream(seed, BUILDING_STYLE_FORERUNNER, (uint32_t)archetype, 0) % 4u;
     plan.archetype = archetype;
     plan.stage = FORERUNNER_STAGE_FOUNDATION;
 
@@ -664,9 +665,12 @@ ForerunnerPlan generate_forerunner_structure(uint32_t seed, ForerunnerArchetype 
     uint32_t h = (seed * 2654435761u) ^ (seed >> 16);
     h ^= (h << 13); h ^= (h >> 17); h ^= (h << 5);
 
-    int half_w = 5 + (h % 3);                // Half-width: 5, 6, or 7 modules
-    int depth  = 6 + ((h >> 3) % 3) * 2;     // Depth: 6, 8, or 10 modules
-    int half_l = 14 + ((h >> 6) % 3) * 2;    // Half-length: 14, 16, or 18 modules
+    int half_w = 4 + (h % 5);                // Half-width: 4..8 modules
+    int depth  = 5 + ((h >> 3) % 5) * 2;     // Depth: 5..13 modules
+    int half_l = 11 + ((h >> 6) % 6) * 2;    // Half-length: 11..21 modules
+    if (plan.layout_family == 1) half_w += 2;       /* branching */
+    else if (plan.layout_family == 2) depth += 4;   /* stacked */
+    else if (plan.layout_family == 3) half_l += 4;  /* split-level */
 
     plan.chasm_width  = half_w * 2;
     plan.chasm_depth  = depth;

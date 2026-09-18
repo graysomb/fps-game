@@ -2,6 +2,7 @@
 #define HYPERBOREAN_GRAMMAR_H
 
 #include <stdint.h>
+#include "building_generation.h"
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -86,6 +87,7 @@ typedef struct {
 // Complete blueprint plan for the Hyperborean Sun-Henge
 typedef struct {
     uint32_t seed;
+    uint32_t layout_family;
     HyperStage stage;
     HyperNode nodes[MAX_HYPER_NODES];
     int node_count;

@@ -145,6 +145,10 @@ typedef struct DebugRunState {
     uint64_t tether_thin_wall_identity;
     uint64_t tether_thin_wall_hits_before;
     bool voxel_fracture_test;
+    bool building_stability_test;
+    uint32_t building_structural_group;
+    double building_energy_at_settle_window;
+    int building_broken_previous;
     int fracture_strain_voxel;
     int fracture_shear_voxel;
     int fracture_control_voxel;
@@ -267,6 +271,7 @@ static bool debug_setup_pbf_scaling(DebugRunState *state);
 static bool debug_setup_pbf_dense_neighbors(DebugRunState *state);
 static bool debug_setup_cube_stress(DebugRunState *state);
 static bool debug_setup_voxel_strain_shear_fracture(DebugRunState *state);
+static bool debug_setup_building_stability(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall, 60, 60 },
@@ -293,6 +298,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "goliath-flight", "Goliath jumps with attached armor and must land", debug_setup_goliath_flight, 120, 90 },
     { "cube-stress", "Stress test with scalable dynamic cube (size set by FPS_CUBE_SIZE)", debug_setup_cube_stress, 60, 60 },
     { "voxel-strain-shear-fracture", "Dynamic voxels deactivate VGS shape constraints when strain or shear exceeds threshold", debug_setup_voxel_strain_shear_fracture, 60, 60 }
+    ,{ "building-stability", "Generate and fully activate a grammar building while retaining explicit anchors", debug_setup_building_stability, 600, 600 }
 };
 
 static const int debugScenarioCount = (int)(sizeof(debugScenarios) / sizeof(debugScenarios[0]));
@@ -1621,6 +1627,33 @@ static bool debug_setup_cube_stress(DebugRunState *state)
     float dist = (float)size * 2.5f + 10.0f;
     state->camera.position = (Vector3){ dist, (float)(20 + size/2) + dist * 0.4f, dist };
     state->camera.target = (Vector3){ 0.0f, (float)(20 + size/2), 0.0f };
+    return true;
+}
+
+static bool debug_setup_building_stability(DebugRunState *state)
+{
+    suppressBuildingStaticRecycle=true;
+    debug_reset_world();
+    const char *style = getenv("FPS_BUILDING_STYLE");
+    uint32_t seed = 1337;
+    const char *seed_text = getenv("FPS_BUILDING_SEED");
+    if (seed_text && seed_text[0]) seed = (uint32_t)strtoul(seed_text, NULL, 10);
+    if (style && strcmp(style,"megalith")==0) { currentWorldType=WORLD_TYPE_MEGALITH;megalithSeed=seed;megalithTargetStage=MEGALITH_STAGE_HENGE; }
+    else if (style && strcmp(style,"hyperborean")==0) { currentWorldType=WORLD_TYPE_HYPERBOREAN;hyperSeed=seed;hyperTargetStage=HYPER_STAGE_FULL_SANCTUM; }
+    else if (style && strcmp(style,"forerunner")==0) { currentWorldType=WORLD_TYPE_FORERUNNER;forerunnerSeed=seed;forerunnerTargetStage=FORERUNNER_STAGE_APEX; }
+    else if (style && strcmp(style,"citadel")==0) { currentWorldType=WORLD_TYPE_UNIFIED_SANCTUM;sanctumSeed=seed;sanctumGrowthSteps=20; }
+    else { currentWorldType=WORLD_TYPE_GREEK_TEMPLE;templeSeed=seed;templeTargetStage=TEMPLE_STAGE_SANCTUARY; }
+    buildDemo();
+    if (voxel_count <= 0) { debug_add_failure(state,"building generation produced no voxels"); return false; }
+    state->building_stability_test=true;
+    state->building_structural_group=0;
+    for(int i=0;i<voxel_count;i++)if(voxels[i].buildingStructuralGroup){state->building_structural_group=voxels[i].buildingStructuralGroup;break;}
+    if(!state->building_structural_group){debug_add_failure(state,"building generation published no structural group");return false;}
+    state->expected_voxels=0;
+    for(int i=0;i<voxel_count;i++)if(voxels[i].buildingStructuralGroup==state->building_structural_group){voxels[i].debugClusterTag=DEBUG_TEST_TAG;state->expected_voxels++;}
+    if(!activate_static_building_group(state->building_structural_group,-1)){debug_add_failure(state,"full building activation failed");return false;}
+    debug_rebuild_world_state();state->activation_succeeded=true;debug_set_initial_centroid(state);
+    state->camera.position=(Vector3){35,30,35};state->camera.target=(Vector3){0,8,0};
     return true;
 }
 
@@ -3030,6 +3063,32 @@ static void debug_validate_step(DebugRunState *state, int step)
         }
     }
     DebugSample sample = debug_collect_sample("validation", step, state->initial_centroid_y);
+    if (state->building_stability_test) {
+        double energy=0.0;double cx=0,cy=0,cz=0,rx=0,ry=0,rz=0;int count=0,broken=0,anchors=0;float maximum=0;
+        for(int i=0;i<voxel_count;i++){
+            Voxel *voxel=&voxels[i];if(voxel->buildingStructuralGroup!=state->building_structural_group)continue;
+            Vector3 center={0};for(int k=0;k<8;k++)center=v_add(center,voxel->particles[k]->pos);center=v_mul(center,0.125f);
+            Vector3 rest={(voxel->orig_min_gx+0.5f)*VOXEL_SIZE,(voxel->orig_min_gy+0.5f)*VOXEL_SIZE,(voxel->orig_min_gz+0.5f)*VOXEL_SIZE};
+            maximum=fmaxf(maximum,v_length(v_sub(center,rest)));cx+=center.x;cy+=center.y;cz+=center.z;rx+=rest.x;ry+=rest.y;rz+=rest.z;count++;
+            energy+=(double)v_dot(voxel->vel,voxel->vel);if(!voxel->vgs_active)broken++;
+            if(voxel->buildingStructuralFlags&BUILDING_VOXEL_ANCHOR){anchors++;for(int k=0;k<8;k++)if(voxel->particles[k]->inv_mass>0)debug_add_failure(state,"step %d: structural anchor became dynamic",step);}
+        }
+        if(!count||!anchors){debug_add_failure(state,"step %d: building lost its structure or anchors",step);return;}
+        energy/=count;if(step==debugRunConfig.steps-120)state->building_energy_at_settle_window=energy;
+        if(broken>state->building_broken_previous){
+            int source=-1,role=-1;
+            for(int i=0;i<voxel_count;i++){Voxel *v=&voxels[i];if(v->buildingStructuralGroup==state->building_structural_group&&!v->vgs_active){source=v->buildingSourceNode;role=v->buildingStructuralRole;break;}}
+            debug_add_failure(state,"step %d: building fractures increased %d -> %d (first source node %d, role %d)",step,state->building_broken_previous,broken,source,role);
+            state->building_broken_previous=broken;
+        }
+        if(step==debugRunConfig.steps){double drift=sqrt((cx/count-rx/count)*(cx/count-rx/count)+(cy/count-ry/count)*(cy/count-ry/count)+(cz/count-rz/count)*(cz/count-rz/count));
+            if(maximum>0.10f*VOXEL_SIZE)debug_add_failure(state,"building displacement %.6g exceeds 0.10 voxel",maximum/VOXEL_SIZE);
+            if(drift>0.05f*VOXEL_SIZE)debug_add_failure(state,"building center drift %.6g exceeds 0.05 voxel",drift/VOXEL_SIZE);
+            if(energy>0.0009)debug_add_failure(state,"building did not settle: mean squared speed %.6g",energy);
+            if(energy>state->building_energy_at_settle_window+1e-8)debug_add_failure(state,"building kinetic energy rose during final 120 steps");
+        }
+        return;
+    }
     if (state->sleep_snap_original_test) {
         float max_error = 0.0f;
         float max_speed = 0.0f;

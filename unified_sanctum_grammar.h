@@ -4,6 +4,7 @@
 #include "raylib.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include "building_generation.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -167,6 +168,8 @@ typedef struct {
 // ---------------------------------------------------------------------------
 typedef struct {
     uint32_t seed;
+    uint32_t layout_family;
+    uint32_t motif_counts[SANCTUM_MOTIF_COUNT];
     int growth_steps;
     SanctumTopology topology;
     int node_count;

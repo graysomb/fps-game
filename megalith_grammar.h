@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "building_generation.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -95,6 +96,7 @@ typedef struct {
     MegalithStage stage;
     int target_mass_nodes;    // Stopping condition: accumulated stone mass
     uint32_t seed;
+    uint32_t layout_family;
 
     // Astronomical alignment vector (e.g. Winter Solstice sunrise azimuth)
     float axis_dx;

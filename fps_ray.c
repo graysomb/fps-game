@@ -47,6 +47,7 @@
 #include "raymath.h" // for MatrixIdentity()
 #include "physics_backend.h"
 #include "net_transport.h"
+#include "building_generation.h"
 #if defined(GRAPHICS_API_OPENGL_43)
 #include "external/glad.h"
 #endif
@@ -102,6 +103,10 @@
 #include "unified_sanctum_grammar.h"
 #include "unified_sanctum_rasterizer.h"
 #include "unified_sanctum_grammar.c"
+
+/* The game is intentionally a single translation unit; keep the shared
+ * grammar/blueprint implementation available to both the game and unit tests. */
+#include "building_generation.c"
 
 typedef enum {
     FLUID_RENDER_PARTICLES = 0,
@@ -1064,6 +1069,10 @@ typedef struct {
     uint8_t tetherThrowCcdFrames;
     int lifeFrames;
     int debugClusterTag;
+    uint32_t buildingStructuralFlags;
+    uint32_t buildingStructuralGroup;
+    int buildingSourceNode;
+    uint16_t buildingStructuralRole;
     // The original static voxel was already captured by activation.  Dynamic
     // descendants carrying this flag must not enqueue a second restoration
     // snapshot when their sleeping island is recycled.
@@ -1079,6 +1088,7 @@ typedef struct {
 static Voxel voxels[MAX_VOXELS];
 static uint64_t nextVoxelIdentity = 1;
 static int voxel_count = 0;
+static bool suppressBuildingStaticRecycle = false;
 static Particle particles_pool[MAX_PARTICLES];
 static Particle *active_particles[MAX_PARTICLES]; //pointer
 static Particle *sim_particles[MAX_PARTICLES]; //pointer
@@ -1257,6 +1267,10 @@ typedef struct {
     int voxelIndex;
     int debugTag;
     int activator;
+    uint32_t buildingStructuralFlags;
+    uint32_t buildingStructuralGroup;
+    int buildingSourceNode;
+    uint16_t buildingStructuralRole;
     bool restorationQueued;
     int restorationDeadlineFrame;
 } UnitVoxelSeed;
@@ -1616,6 +1630,10 @@ static bool unit_voxel_buffer_push(UnitVoxelBuffer *buffer,
         .voxelIndex = voxelIndex,
         .debugTag = debugTag,
         .activator = activator,
+        .buildingStructuralFlags = (voxelIndex >= 0 && voxelIndex < voxel_count) ? voxels[voxelIndex].buildingStructuralFlags : 0,
+        .buildingStructuralGroup = (voxelIndex >= 0 && voxelIndex < voxel_count) ? voxels[voxelIndex].buildingStructuralGroup : 0,
+        .buildingSourceNode = (voxelIndex >= 0 && voxelIndex < voxel_count) ? voxels[voxelIndex].buildingSourceNode : -1,
+        .buildingStructuralRole = (voxelIndex >= 0 && voxelIndex < voxel_count) ? voxels[voxelIndex].buildingStructuralRole : BUILDING_ROLE_DECORATION,
         .restorationQueued = false,
         .restorationDeadlineFrame = 0
     };
@@ -4248,6 +4266,10 @@ static bool init_voxel_struct(Voxel *v,
     v->tetherThrowCcdFrames = 0;
     v->lifeFrames = 0;
     v->debugClusterTag = 0;
+    v->buildingStructuralFlags = 0;
+    v->buildingStructuralGroup = 0;
+    v->buildingSourceNode = -1;
+    v->buildingStructuralRole = BUILDING_ROLE_DECORATION;
     v->prevGlueClusterId = -1;
     v->prevGlueClusterSize = 0;
     v->prevGlueClusterTag = 0;
@@ -4356,10 +4378,23 @@ static void glue_neighbor_faces_for_voxel(int voxel_idx) {
         }
 
         // Dynamic-Dynamic Glue
-        // 'a' adopts 'b's particles to merge into existing cluster
+        // Merge coincident corners.  A fixed voxel owns the shared particle so
+        // activation order cannot turn an explicit foundation anchor dynamic.
         for (int c = 0; c < 4; ++c) {
             int ia = face_corner_indices[faceA][c];
             int ib = face_corner_indices[faceB][c];
+
+            if (a->fixed && !b->fixed) {
+                Particle *shared = a->particles[ia];
+                Particle *old = b->particles[ib];
+                if (shared == old) continue;
+                if (old && old->glue_count > 0) old->glue_count--;
+                particle_release(old);
+                particle_retain(shared);
+                if (shared) shared->glue_count++;
+                b->particles[ib] = shared;
+                continue;
+            }
 
             Particle *shared = b->particles[ib]; // Existing neighbor particle
             Particle *old = a->particles[ia];    // My new particle
@@ -4452,10 +4487,15 @@ static int emit_unit_voxels_from_units(const UnitVoxelBuffer *buffer,
         float px = ((float)gx + 0.5f) * VOXEL_SIZE;
         float py = ((float)gy + 0.5f) * VOXEL_SIZE;
         float pz = ((float)gz + 0.5f) * VOXEL_SIZE;
-        int new_idx = addVoxel(px, py, pz, fixed, simulate, color, spawn_type);
+        bool structural_anchor = (seed->buildingStructuralFlags & BUILDING_VOXEL_ANCHOR) != 0;
+        int new_idx = addVoxel(px, py, pz, fixed || structural_anchor, simulate, color, spawn_type);
         if (new_idx >= 0) {
             voxels[new_idx].debugClusterTag = seed->debugTag;
             voxels[new_idx].activator = seed->activator;;
+            voxels[new_idx].buildingStructuralFlags = seed->buildingStructuralFlags;
+            voxels[new_idx].buildingStructuralGroup = seed->buildingStructuralGroup;
+            voxels[new_idx].buildingSourceNode = seed->buildingSourceNode;
+            voxels[new_idx].buildingStructuralRole = seed->buildingStructuralRole;
             voxels[new_idx].restorationQueued = seed->restorationQueued;
             voxels[new_idx].restorationDeadlineFrame = seed->restorationDeadlineFrame;
 
@@ -5168,7 +5208,7 @@ static bool activate_static_voxels_near_dynamic(void)
     return false;
 }
 
-static bool activate_all_static_voxels(int activator)
+static bool activate_static_building_group(int structural_group, int activator)
 {
     bool activated = false;
     for (;;) {
@@ -5178,6 +5218,10 @@ static bool activate_all_static_voxels(int activator)
         for (int i = 0; i < voxel_count && buffer.count < VOXEL_ACTIVATION_UNIT_BUDGET; ++i) {
             Voxel *candidate = &voxels[i];
             if (candidate->simulate || candidate->pendingActivation) {
+                continue;
+            }
+            if (structural_group != 0 &&
+                candidate->buildingStructuralGroup != structural_group) {
                 continue;
             }
             candidate->pendingActivation = true;
@@ -5210,6 +5254,11 @@ static bool activate_all_static_voxels(int activator)
         meshDirty = true;
     }
     return activated;
+}
+
+static bool activate_all_static_voxels(int activator)
+{
+    return activate_static_building_group(0, activator);
 }
 
 static bool restore_dynamic_voxel_to_static(int idx)
@@ -5476,6 +5525,10 @@ static bool spawn_static_at_rest(const Voxel *snapshot) {
         voxels[idx].activationCooldownFrames = STATIC_REBUILD_ACTIVATION_COOLDOWN_FRAMES;
     }
     voxels[idx].owner = snapshot->owner;
+    voxels[idx].buildingStructuralFlags = snapshot->buildingStructuralFlags;
+    voxels[idx].buildingStructuralGroup = snapshot->buildingStructuralGroup;
+    voxels[idx].buildingSourceNode = snapshot->buildingSourceNode;
+    voxels[idx].buildingStructuralRole = snapshot->buildingStructuralRole;
     if (snapshot->orig_min_gx <= snapshot->orig_max_gx &&
         snapshot->orig_min_gy <= snapshot->orig_max_gy &&
         snapshot->orig_min_gz <= snapshot->orig_max_gz) {
@@ -5496,6 +5549,7 @@ static bool spawn_static_at_rest(const Voxel *snapshot) {
 // complete island unconditionally before its static source begins rebuilding.
 static bool recycle_sleeping_voxel_islands(void)
 {
+    if (suppressBuildingStaticRecycle) return false;
     if (voxel_count <= 0) return false;
     size_t voxel_count_size = (size_t)voxel_count;
     memset(recycleSleepReady, 0, voxel_count_size);
@@ -7850,7 +7904,8 @@ static void switch_world_type(WorldType next) {
 }
 
 static const char *get_sanctum_topology_name(int mode, uint32_t seed) {
-    int topo = (mode >= 0 && mode < 4) ? mode : (int)(seed % 4);
+    int topo = (mode >= 0 && mode < 4) ? mode :
+        (int)(building_seed_stream(seed, BUILDING_STYLE_CITADEL, 0, 0) % 4u);
     switch (topo) {
         case 0: return (mode >= 0) ? "Stronghold [Forced]" : "Stronghold [Auto]";
         case 1: return (mode >= 0) ? "Abyssal Rift [Forced]" : "Abyssal Rift [Auto]";
@@ -7858,6 +7913,37 @@ static const char *get_sanctum_topology_name(int mode, uint32_t seed) {
         case 3: return (mode >= 0) ? "Asymmetric Outpost [Forced]" : "Asymmetric Outpost [Auto]";
         default: return "Unknown";
     }
+}
+
+static BuildingBlueprint current_building_blueprint;
+static BuildingBlueprint current_building_voids;
+static BuildingValidationReport current_building_report;
+static bool collecting_building_blueprint;
+static bool building_blueprint_failed;
+static uint32_t next_building_structural_group = 1;
+
+static uint32_t color_rgba(Color c) {
+    return (uint32_t)c.r | ((uint32_t)c.g << 8) | ((uint32_t)c.b << 16) | ((uint32_t)c.a << 24);
+}
+
+static void collect_building_voxel(int gx, int gy, int gz, Color c) {
+    if (!collecting_building_blueprint) {
+        if (!building_blueprint_failed) addVoxelAt(gx, gy, gz, c);
+        return;
+    }
+    if (building_blueprint_find(&current_building_voids, gx, gy, gz)) return;
+    bool fantasy = c.b > 200 && c.g > 150 && c.r < 220;
+    bool foliage = c.g > c.r + 15 && c.g > c.b + 15;
+    BuildingVoxelSpec voxel = {
+        .x = gx, .y = gy, .z = gz, .rgba = color_rgba(c), .material = 0,
+        .role = fantasy ? BUILDING_ROLE_SEMANTIC_ANCHOR :
+                foliage ? BUILDING_ROLE_DECORATION : BUILDING_ROLE_WALL,
+        .source_node = -1,
+        .flags = BUILDING_VOXEL_DAMAGEABLE |
+                 (fantasy ? BUILDING_VOXEL_ANCHOR | BUILDING_VOXEL_SEMANTIC : 0)
+    };
+    if (!building_blueprint_put(&current_building_blueprint, voxel, &current_building_report))
+        building_blueprint_failed = true;
 }
 
 static void plot_temple_voxel(int gx, int gy, int gz, Color c) {
@@ -7871,12 +7957,12 @@ static void plot_temple_voxel(int gx, int gy, int gz, Color c) {
     } else
     */
     {
-        addVoxelAt(gx, gy, gz, c);
+        collect_building_voxel(gx, gy, gz, c);
     }
 }
 
 static void plot_megalith_voxel(int gx, int gy, int gz, Color c) {
-    addVoxelAt(gx, gy, gz, c);
+    collect_building_voxel(gx, gy, gz, c);
 }
 
 static void plot_hyper_voxel(int gx, int gy, int gz, Color c) {
@@ -7890,12 +7976,12 @@ static void plot_hyper_voxel(int gx, int gy, int gz, Color c) {
     } else
     */
     {
-        addVoxelAt(gx, gy, gz, c);
+        collect_building_voxel(gx, gy, gz, c);
     }
 }
 
 static void plot_forerunner_voxel(int gx, int gy, int gz, Color c) {
-    addVoxelAt(gx, gy, gz, c);
+    collect_building_voxel(gx, gy, gz, c);
 }
 
 static void plot_sanctum_voxel(int gx, int gy, int gz, Color c) {
@@ -7909,47 +7995,147 @@ static void plot_sanctum_voxel(int gx, int gy, int gz, Color c) {
     } else
     */
     {
-        addVoxelAt(gx, gy, gz, c);
+        collect_building_voxel(gx, gy, gz, c);
     }
 }
 
 static void void_sanctum_voxel(int gx, int gy, int gz) {
+    if (collecting_building_blueprint) {
+        BuildingVoxelSpec voxel = {.x=gx,.y=gy,.z=gz,.role=BUILDING_ROLE_VOID,.source_node=-1};
+        if (!building_blueprint_put(&current_building_voids, voxel, NULL) ||
+            !building_blueprint_remove(&current_building_blueprint, gx, gy, gz)) building_blueprint_failed = true;
+        return;
+    }
     int idx = table_get(gx, gy, gz);
     if (idx >= 0 && idx < voxel_count) {
         remove_voxel_index(idx);
     }
 }
 
+static uint16_t greek_role(ArchPrimitiveType type) {
+    switch (type) {
+        case ARCH_PRIMITIVE_STEP: return BUILDING_ROLE_FOUNDATION;
+        case ARCH_PRIMITIVE_COLUMN: return BUILDING_ROLE_COLUMN;
+        case ARCH_PRIMITIVE_LINTEL: case ARCH_PRIMITIVE_PEDIMENT: return BUILDING_ROLE_BEAM;
+        case ARCH_PRIMITIVE_CELL: case ARCH_PRIMITIVE_COURTYARD: case ARCH_PRIMITIVE_PATH: return BUILDING_ROLE_SLAB;
+        case ARCH_PRIMITIVE_WALL: return BUILDING_ROLE_WALL;
+        default: return BUILDING_ROLE_DECORATION;
+    }
+}
+
+static void annotate_greek_blueprint(const TemplePlan *plan, int cx, int cz, int base) {
+    int mv = plan->module_voxels > 0 ? plan->module_voxels : 2;
+    for (size_t v = 0; v < current_building_blueprint.count; ++v) {
+        BuildingVoxelSpec *voxel = &current_building_blueprint.voxels[v];
+        for (int i = plan->node_count - 1; i >= 0; --i) {
+            const ArchNode *n = &plan->nodes[i];
+            int x0=cx+n->box.min_x*mv,x1=cx+n->box.max_x*mv;
+            int y0=base+n->box.min_y*mv,y1=base+n->box.max_y*mv;
+            int z0=cz+n->box.min_z*mv,z1=cz+n->box.max_z*mv;
+            if(voxel->x>=x0&&voxel->x<x1&&voxel->y>=y0&&voxel->y<y1&&voxel->z>=z0&&voxel->z<z1){
+                voxel->source_node=i;voxel->role=greek_role(n->type);break;
+            }
+        }
+    }
+}
+
+static uint16_t megalith_role(MegalithPrimitiveType type) {
+    switch(type){
+        case MEGALITH_PRIMITIVE_ORTHOSTAT:return BUILDING_ROLE_COLUMN;
+        case MEGALITH_PRIMITIVE_CAPSTONE:case MEGALITH_PRIMITIVE_CORBEL:return BUILDING_ROLE_BEAM;
+        case MEGALITH_PRIMITIVE_WALL_SLAB:return BUILDING_ROLE_WALL;
+        case MEGALITH_PRIMITIVE_FLOOR_SLAB:case MEGALITH_PRIMITIVE_MOUND:return BUILDING_ROLE_SLAB;
+        default:return BUILDING_ROLE_DECORATION;
+    }
+}
+
+static void annotate_megalith_blueprint(const MegalithPlan *plan,int cx,int cz,int base){
+    for(size_t v=0;v<current_building_blueprint.count;v++){BuildingVoxelSpec *voxel=&current_building_blueprint.voxels[v];
+        for(int i=plan->node_count-1;i>=0;i--){const MegalithNode *n=&plan->nodes[i];
+            if(voxel->x>=cx+n->box.min_x*2&&voxel->x<cx+n->box.max_x*2&&voxel->y>=base+n->box.min_y*2&&voxel->y<base+n->box.max_y*2&&voxel->z>=cz+n->box.min_z*2&&voxel->z<cz+n->box.max_z*2){voxel->source_node=i;voxel->role=megalith_role(n->type);break;}}}
+}
+
+static uint16_t hyper_role(HyperPrimitiveType type){
+    switch(type){case HYPER_PRIM_MENHIR:case HYPER_PRIM_FLUTED_COLUMN:case HYPER_PRIM_HYBRID_TRILITHON:return BUILDING_ROLE_COLUMN;
+        case HYPER_PRIM_ROUGH_LINTEL:case HYPER_PRIM_ARCHITRAVE:case HYPER_PRIM_CYCLOPEAN_ARCHITRAVE:case HYPER_PRIM_PEDIMENT:return BUILDING_ROLE_BEAM;
+        case HYPER_PRIM_THOLOS_PODIUM:return BUILDING_ROLE_FOUNDATION;default:return BUILDING_ROLE_DECORATION;}
+}
+
+static void annotate_hyper_blueprint(const HyperPlan *plan,int cx,int cz,int base){
+    for(size_t v=0;v<current_building_blueprint.count;v++){BuildingVoxelSpec *voxel=&current_building_blueprint.voxels[v];
+        for(int i=plan->node_count-1;i>=0;i--){const HyperNode *n=&plan->nodes[i];
+            if(voxel->x>=cx+n->box.min_x*2&&voxel->x<cx+n->box.max_x*2&&voxel->y>=base+n->box.min_y*2&&voxel->y<base+n->box.max_y*2&&voxel->z>=cz+n->box.min_z*2&&voxel->z<cz+n->box.max_z*2){voxel->source_node=i;voxel->role=hyper_role(n->type);break;}}}
+}
+
+static uint16_t forerunner_role(ForerunnerPrimitiveType type){
+    switch(type){case FORERUNNER_PRIM_PYLON:case FORERUNNER_PRIM_SPIRE:return BUILDING_ROLE_COLUMN;
+        case FORERUNNER_PRIM_LINTEL:case FORERUNNER_PRIM_BRIDGE_SPAN:return BUILDING_ROLE_BEAM;
+        case FORERUNNER_PRIM_TERRACE:return BUILDING_ROLE_SLAB;
+        case FORERUNNER_PRIM_HARDLIGHT_BRIDGE:case FORERUNNER_PRIM_GRAVITY_CORE:return BUILDING_ROLE_SEMANTIC_ANCHOR;
+        default:return BUILDING_ROLE_DECORATION;}
+}
+
+static void annotate_forerunner_blueprint(const ForerunnerPlan *plan,int cx,int cz,int base){
+    int miny=0;bool found=false;for(int i=0;i<plan->node_count;i++)if(!plan->nodes[i].is_void&&(!found||plan->nodes[i].box.min_y<miny)){miny=plan->nodes[i].box.min_y;found=true;}int off=base-miny*2;
+    for(size_t v=0;v<current_building_blueprint.count;v++){BuildingVoxelSpec *voxel=&current_building_blueprint.voxels[v];
+        for(int i=plan->node_count-1;i>=0;i--){const ForerunnerNode *n=&plan->nodes[i];if(n->is_void)continue;
+            if(voxel->x>=cx+n->box.min_x*2&&voxel->x<cx+n->box.max_x*2&&voxel->y>=off+n->box.min_y*2&&voxel->y<off+n->box.max_y*2&&voxel->z>=cz+n->box.min_z*2&&voxel->z<cz+n->box.max_z*2){voxel->source_node=i;voxel->role=forerunner_role(n->type);if(voxel->role==BUILDING_ROLE_SEMANTIC_ANCHOR)voxel->flags|=BUILDING_VOXEL_ANCHOR|BUILDING_VOXEL_SEMANTIC;break;}}}
+}
+
+static uint16_t sanctum_role(SanctumPrimitiveType type){
+    switch(type){case SANCTUM_PRIM_MARBLE_STYLOBATE:return BUILDING_ROLE_FOUNDATION;
+        case SANCTUM_PRIM_STONE_ORTHOSTAT:case SANCTUM_PRIM_MARBLE_COLUMN:case SANCTUM_PRIM_TITANIUM_PYLON:return BUILDING_ROLE_COLUMN;
+        case SANCTUM_PRIM_STONE_LINTEL:case SANCTUM_PRIM_MARBLE_ARCHITRAVE:case SANCTUM_PRIM_MARBLE_PEDIMENT:case SANCTUM_PRIM_COFFERED_CEILING:return BUILDING_ROLE_BEAM;
+        case SANCTUM_PRIM_TITANIUM_BUTTRESS:return BUILDING_ROLE_BUTTRESS;
+        case SANCTUM_PRIM_HARDLIGHT_BRIDGE:case SANCTUM_PRIM_GRAVITY_CORE:return BUILDING_ROLE_SEMANTIC_ANCHOR;
+        default:return BUILDING_ROLE_DECORATION;}
+}
+
+static void annotate_sanctum_blueprint(const SanctumCitadelPlan *plan,int cx,int cz,int base){
+    int miny=0;bool found=false;for(int i=0;i<plan->node_count;i++)if(!plan->nodes[i].is_void&&!plan->nodes[i].is_fluid&&(!found||plan->nodes[i].y<miny)){miny=plan->nodes[i].y;found=true;}int off=base-miny;
+    for(size_t v=0;v<current_building_blueprint.count;v++){BuildingVoxelSpec *voxel=&current_building_blueprint.voxels[v];
+        for(int i=plan->node_count-1;i>=0;i--){const SanctumNode *n=&plan->nodes[i];if(n->is_void||n->is_fluid)continue;int x0=cx+n->x-n->w/2,x1=cx+n->x+(n->w-1)/2;int z0=cz+n->z-n->d/2,z1=cz+n->z+(n->d-1)/2;
+            if(voxel->x>=x0&&voxel->x<=x1&&voxel->y>=off+n->y&&voxel->y<off+n->y+n->h&&voxel->z>=z0&&voxel->z<=z1){voxel->source_node=i;voxel->role=sanctum_role(n->prim_type);if(voxel->role==BUILDING_ROLE_SEMANTIC_ANCHOR)voxel->flags|=BUILDING_VOXEL_ANCHOR|BUILDING_VOXEL_SEMANTIC;break;}}}
+}
+
 static void buildGreekTempleWorld(uint32_t seed, TempleStage stage) {
     int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
     int center = M / 2;
     TemplePlan plan = generate_greek_temple(seed, stage, 2);
+    current_building_blueprint.family = plan.layout_family;
     // Base at gy = 3 so stylobate steps connect seamlessly to the floor
     rasterize_temple_plan(&plan, center, center, 3, plot_temple_voxel);
+    annotate_greek_blueprint(&plan,center,center,3);
 }
 
 static void buildMegalithWorld(uint32_t seed, MegalithArchetype archetype, MegalithStage stage) {
     int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
     int center = M / 2;
     MegalithPlan plan = generate_megalith_structure(seed, archetype, stage);
+    current_building_blueprint.family = plan.layout_family;
     // Base at gy = 0 so foundation stones rest firmly on the ground arena at y = 0.0f
     rasterize_megalith_plan(&plan, center, center, 0, plot_megalith_voxel);
+    annotate_megalith_blueprint(&plan,center,center,0);
 }
 
 static void buildHyperboreanWorld(uint32_t seed, HyperStage stage) {
     int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
     int center = M / 2;
     HyperPlan plan = generate_hyperborean_structure(seed, stage);
+    current_building_blueprint.family = plan.layout_family;
     // Base at gy = 0 so columns and menhirs rest flush on the floor at y = 0.0f
     rasterize_hyperborean_plan(&plan, center, center, 0, plot_hyper_voxel);
+    annotate_hyper_blueprint(&plan,center,center,0);
 }
 
 static void buildForerunnerWorld(uint32_t seed, ForerunnerArchetype archetype, ForerunnerStage stage) {
     int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
     int center = M / 2;
     ForerunnerPlan plan = generate_forerunner_structure(seed, archetype, stage);
+    current_building_blueprint.family = plan.layout_family;
     // Base at gy = 0 so bedrock slab and pylons are grounded at y = 0.0f
     rasterize_forerunner_plan(&plan, center, center, 0, plot_forerunner_voxel);
+    annotate_forerunner_blueprint(&plan,center,center,0);
 }
 
 static SanctumCitadelPlan current_sanctum_plan;
@@ -7977,10 +8163,12 @@ static void buildUnifiedSanctumWorld(uint32_t seed, int growth_steps) {
     int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
     int center = M / 2;
     current_sanctum_plan = generate_unified_sanctum_ex(seed, growth_steps, sanctumTopologyMode);
+    current_building_blueprint.family = current_sanctum_plan.layout_family;
     current_sanctum_plan_valid = true;
     update_current_sanctum_offset();
     // Base at gy = 0 so foundations rest flush on the ground arena at y = 0.0f
     rasterize_sanctum_plan(&current_sanctum_plan, center, center, 0, plot_sanctum_voxel, void_sanctum_voxel);
+    annotate_sanctum_blueprint(&current_sanctum_plan,center,center,0);
 }
 
 // Fail-safe engine-level grounding pass:
@@ -8063,6 +8251,23 @@ static void heal_structural_seams(void) {
 
 // Build static demo cube of voxels
 static void buildDemo(void) {
+    bool grammar_world = currentWorldType >= WORLD_TYPE_GREEK_TEMPLE &&
+                         currentWorldType <= WORLD_TYPE_UNIFIED_SANCTUM;
+    uint32_t seed = get_current_world_seed();
+    collecting_building_blueprint = false;
+    if (grammar_world) {
+        bool mass_ok = building_blueprint_init(&current_building_blueprint, MAX_VOXELS,
+            (BuildingStyle)currentWorldType, seed, 0, next_building_structural_group++);
+        bool void_ok = mass_ok && building_blueprint_init(&current_building_voids, MAX_VOXELS,
+            (BuildingStyle)currentWorldType, seed, 0, current_building_blueprint.structural_group);
+        collecting_building_blueprint = mass_ok && void_ok;
+        if (!collecting_building_blueprint) {
+            building_blueprint_release(&current_building_blueprint);
+            building_blueprint_release(&current_building_voids);
+        }
+    }
+    building_blueprint_failed = grammar_world && !collecting_building_blueprint;
+    memset(&current_building_report, 0, sizeof(current_building_report));
     if (currentWorldType == WORLD_TYPE_GREEK_TEMPLE) {
         buildGreekTempleWorld(templeSeed, templeTargetStage);
     } else if (currentWorldType == WORLD_TYPE_MEGALITH) {
@@ -8080,8 +8285,36 @@ static void buildDemo(void) {
     } else {
         buildTestWorld();
     }
-    ground_structural_pillars();
-    heal_structural_seams();
+    if (collecting_building_blueprint) {
+        collecting_building_blueprint = false;
+        bool valid = !building_blueprint_failed &&
+            building_blueprint_validate_and_repair(&current_building_blueprint, &current_building_report);
+        if (valid && current_building_blueprint.count <= (size_t)(MAX_VOXELS - voxel_count)) {
+            for (size_t i = 0; i < current_building_voids.count; ++i) {
+                BuildingVoxelSpec *spec = &current_building_voids.voxels[i];
+                int idx = table_get(grid_to_world_g(spec->x), spec->y, grid_to_world_g(spec->z));
+                if (idx >= 0 && idx < voxel_count && !voxels[idx].simulate) remove_voxel_index(idx);
+            }
+            for (size_t i = 0; i < current_building_blueprint.count; ++i) {
+                BuildingVoxelSpec *spec = &current_building_blueprint.voxels[i];
+                Color c = {(unsigned char)spec->rgba, (unsigned char)(spec->rgba >> 8),
+                           (unsigned char)(spec->rgba >> 16), (unsigned char)(spec->rgba >> 24)};
+                addVoxelAt(spec->x, spec->y, spec->z, c);
+                int idx = table_get_static_only(grid_to_world_g(spec->x), spec->y, grid_to_world_g(spec->z));
+                if (idx >= 0 && idx < voxel_count) {
+                    voxels[idx].buildingStructuralFlags = spec->flags;
+                    voxels[idx].buildingStructuralGroup = current_building_blueprint.structural_group;
+                    voxels[idx].buildingSourceNode = spec->source_node;
+                    voxels[idx].buildingStructuralRole = spec->role;
+                }
+            }
+        } else {
+            TraceLog(LOG_ERROR, "building blueprint rejected: %s",
+                     current_building_report.reason[0] ? current_building_report.reason : "capacity or rasterization failure");
+        }
+        building_blueprint_release(&current_building_blueprint);
+        building_blueprint_release(&current_building_voids);
+    }
     rebuild_glue_constraints();
 }
 

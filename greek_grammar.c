@@ -702,15 +702,22 @@ TemplePlan generate_greek_temple(uint32_t seed, TempleStage target_stage, int mo
     TemplePlan plan;
     memset(&plan, 0, sizeof(plan));
     plan.seed = seed;
+    plan.layout_family = building_seed_stream(seed, BUILDING_STYLE_GREEK, 0, 0) % 4u;
+    uint32_t dimensions = building_seed_stream(seed, BUILDING_STYLE_GREEK, plan.layout_family, 1);
+    uint32_t features = building_seed_stream(seed, BUILDING_STYLE_GREEK, plan.layout_family, 2);
+    plan.optional_feature_mask = features;
     plan.module_voxels = (module_voxels > 0) ? module_voxels : 2;
 
     // Proportions adhering to classical ratios:
     // Cella width: 6M, length: 12M (2:1 ratio)
-    plan.column_spacing_m = 2;
-    plan.column_height_m = 6;
-    plan.cella_width_m = 6;
-    plan.cella_length_m = 12;
-    plan.cella_height_m = 6;
+    plan.column_spacing_m = 2 + (int)((dimensions >> 1) & 1u);
+    plan.column_height_m = 5 + (int)((dimensions >> 3) % 4u);
+    plan.cella_width_m = 5 + (int)((dimensions >> 6) % 4u);
+    plan.cella_length_m = 9 + (int)((dimensions >> 10) % 7u);
+    plan.cella_height_m = 5 + (int)((dimensions >> 14) % 3u);
+    if (plan.layout_family == 1) plan.cella_length_m += 3;       /* courtyard axis */
+    else if (plan.layout_family == 2) plan.cella_height_m += 2; /* terraced */
+    else if (plan.layout_family == 3) plan.cella_width_m += 3;  /* shrine cluster */
 
     uint32_t prng = seed;
 
@@ -799,11 +806,11 @@ TemplePlan generate_greek_temple(uint32_t seed, TempleStage target_stage, int mo
             GrowthOpportunity opp = { 0, -1, RULE_ATTACH_COURTYARD, 1.0f };
             greek_algebra_apply(&plan, &opp);
         }
-        if (!plan.has_pool) {
+        if (!plan.has_pool && (plan.optional_feature_mask & (1u << 0))) {
             GrowthOpportunity opp = { -1, -1, RULE_EXCAVATE_POOL, 1.0f };
             greek_algebra_apply(&plan, &opp);
         }
-        if (!plan.has_trees) {
+        if (!plan.has_trees && (plan.optional_feature_mask & (1u << 1))) {
             GrowthOpportunity opp = { -1, -1, RULE_PLANT_GROVE, 1.0f };
             greek_algebra_apply(&plan, &opp);
         }
@@ -811,31 +818,31 @@ TemplePlan generate_greek_temple(uint32_t seed, TempleStage target_stage, int mo
             GrowthOpportunity opp = { -1, -1, RULE_LAYOUT_GARDEN_PATHS, 1.0f };
             greek_algebra_apply(&plan, &opp);
         }
-        if (!plan.has_tholos) {
+        if (!plan.has_tholos && (plan.optional_feature_mask & (1u << 2))) {
             GrowthOpportunity opp = { -1, -1, RULE_ERECT_THOLOS, 1.0f };
             greek_algebra_apply(&plan, &opp);
         }
-        if (!plan.has_exedrae) {
+        if (!plan.has_exedrae && (plan.optional_feature_mask & (1u << 3))) {
             GrowthOpportunity opp = { -1, -1, RULE_INSTALL_EXEDRAE, 1.0f };
             greek_algebra_apply(&plan, &opp);
         }
-        if (!plan.has_naiskoi) {
+        if (!plan.has_naiskoi && (plan.optional_feature_mask & (1u << 4))) {
             GrowthOpportunity opp = { -1, -1, RULE_BUILD_NAISKOI, 1.0f };
             greek_algebra_apply(&plan, &opp);
         }
-        if (!plan.has_fountains) {
+        if (!plan.has_fountains && (plan.optional_feature_mask & (1u << 5))) {
             GrowthOpportunity opp = { -1, -1, RULE_CONSTRUCT_FOUNTAINS, 1.0f };
             greek_algebra_apply(&plan, &opp);
         }
-        if (!plan.has_pergolas) {
+        if (!plan.has_pergolas && (plan.optional_feature_mask & (1u << 6))) {
             GrowthOpportunity opp = { -1, -1, RULE_BUILD_PERGOLAS, 1.0f };
             greek_algebra_apply(&plan, &opp);
         }
-        if (!plan.has_braziers) {
+        if (!plan.has_braziers && (plan.optional_feature_mask & (1u << 7))) {
             GrowthOpportunity opp = { -1, -1, RULE_ERECT_BRAZIERS, 1.0f };
             greek_algebra_apply(&plan, &opp);
         }
-        if (!plan.has_garden_flora) {
+        if (!plan.has_garden_flora && (plan.optional_feature_mask & (1u << 8))) {
             GrowthOpportunity opp = { -1, -1, RULE_POPULATE_GARDEN_FLORA, 1.0f };
             greek_algebra_apply(&plan, &opp);
         }

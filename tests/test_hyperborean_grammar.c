@@ -141,7 +141,7 @@ int main(void) {
     print_hyperborean_blueprint(&p4);
     printf("-> Stage 4 Full Sanctum passed all syncretic bi-algebra invariants!\n\n");
 
-    // Monte-Carlo 50-Seed Invariant Sweep
+    // Monte-Carlo 50-Seed plan-invariant sweep (physics is tested separately)
     printf("Running Monte-Carlo sweep over 50 random Hyperborean seeds...\n");
     for (uint32_t seed = 1; seed <= 50; ++seed) {
         HyperStage stage = (HyperStage)(seed % 5);
@@ -150,7 +150,7 @@ int main(void) {
         assert(verify_solstice_alignment(&plan));
         assert(verify_concentric_rings(&plan));
     }
-    printf("-> 50/50 randomized Hyperborean seeds passed all invariants with 100%% stability!\n\n");
+    printf("-> 50/50 randomized Hyperborean seeds passed all plan invariants.\n\n");
 
     printf("ALL HYPERBOREAN SUN-HENGE TESTS PASSED SUCCESSFULLY.\n");
     return 0;

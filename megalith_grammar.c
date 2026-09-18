@@ -255,21 +255,25 @@ bool megalith_algebra_apply(MegalithPlan *plan, const MegalithOpportunity *opp) 
             int h = 4;
             // Left orthostat wall slab
             int left_id = add_stone(plan, MEGALITH_PRIMITIVE_WALL_SLAB,
-                                    make_box3d(-w, 0, p_z, -w + 1, h, p_z + 3),
+                                    make_box3d(plan->chamber_cx - w, 0, p_z,
+                                               plan->chamber_cx - w + 1, h, p_z + 3),
                                     NULL, 0, 0.3f);
             // Right orthostat wall slab
             int right_id = add_stone(plan, MEGALITH_PRIMITIVE_WALL_SLAB,
-                                     make_box3d(w - 1, 0, p_z, w, h, p_z + 3),
+                                     make_box3d(plan->chamber_cx + w - 1, 0, p_z,
+                                                plan->chamber_cx + w, h, p_z + 3),
                                      NULL, 0, 0.3f);
             // Paved flagstone passage floor
             add_stone(plan, MEGALITH_PRIMITIVE_FLOOR_SLAB,
-                      make_box3d(-w + 1, 0, p_z, w - 1, 1, p_z + 3),
+                      make_box3d(plan->chamber_cx - w + 1, 0, p_z,
+                                 plan->chamber_cx + w - 1, 1, p_z + 3),
                       NULL, 0, 0.1f);
 
             // Transverse lintel / roof slab bridging the passage
             int parents[2] = { left_id, right_id };
             add_stone(plan, MEGALITH_PRIMITIVE_CAPSTONE,
-                      make_box3d(-w, h, p_z, w, h + 1, p_z + 3),
+                      make_box3d(plan->chamber_cx - w, h, p_z,
+                                 plan->chamber_cx + w, h + 1, p_z + 3),
                       parents, 2, 0.4f);
 
             plan->passage_length += 3;
@@ -290,7 +294,8 @@ bool megalith_algebra_apply(MegalithPlan *plan, const MegalithOpportunity *opp) 
                 // Skip passage entrance gap at +Z
                 int kz = (int)roundf(r_kerb * sinf(angle));
                 if (kz > r_kerb - 3) continue; // Entrance portal threshold
-                int kx = (int)roundf(r_kerb * cosf(angle));
+                int kx = plan->chamber_cx + (int)roundf(r_kerb * cosf(angle));
+                kz += plan->chamber_cz;
                 add_stone(plan, MEGALITH_PRIMITIVE_ORTHOSTAT,
                           make_box3d(kx - 1, 0, kz - 1, kx + 1, 2, kz + 1),
                           NULL, 0, 0.5f);
@@ -366,6 +371,7 @@ MegalithPlan generate_megalith_structure(uint32_t seed, MegalithArchetype archet
     MegalithPlan plan;
     memset(&plan, 0, sizeof(plan));
     plan.seed = seed;
+    plan.layout_family = building_seed_stream(seed, BUILDING_STYLE_MEGALITH, (uint32_t)archetype, 0) % 4u;
     plan.archetype = archetype;
     plan.stage = MEGALITH_STAGE_MENHIR;
 
@@ -373,14 +379,15 @@ MegalithPlan generate_megalith_structure(uint32_t seed, MegalithArchetype archet
     plan.axis_dx = 0.0f;
     plan.axis_dz = 1.0f;
 
-    plan.chamber_cx = 0;
-    plan.chamber_cz = 0;
-    plan.chamber_radius = 4;
+    uint32_t dimensions = building_seed_stream(seed, BUILDING_STYLE_MEGALITH, plan.layout_family, 1);
+    plan.chamber_cx = (int)((dimensions >> 1) % 9u) - 4;
+    plan.chamber_cz = (int)((dimensions >> 5) % 9u) - 4;
+    plan.chamber_radius = 3 + (int)((dimensions >> 9) % 7u);
     plan.passage_length = 0;
 
-    plan.circle_radius = 12;
+    plan.circle_radius = 8 + (int)((dimensions >> 12) % 13u);
     plan.circle_stones_placed = 0;
-    plan.circle_stones_total = 16;
+    plan.circle_stones_total = 10 + 2 * (int)((dimensions >> 17) % 11u);
 
     uint32_t prng = seed;
 

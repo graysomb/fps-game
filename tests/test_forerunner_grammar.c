@@ -122,7 +122,7 @@ int main(void) {
             assert(verify_skybridge_alignment(&plan));
         }
     }
-    printf("-> 50/50 randomized seeds across 4 archetypes passed all invariants with 100%% stability!\n\n");
+    printf("-> 50/50 randomized seeds across 4 archetypes passed all plan invariants.\n\n");
 
     printf("ALL FORERUNNER TRI-GRAMMAR TESTS PASSED SUCCESSFULLY.\n");
     return 0;

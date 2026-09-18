@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "building_generation.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -126,6 +127,8 @@ typedef struct {
     TempleStage stage;
     int complexity;
     uint32_t seed;
+    uint32_t layout_family;
+    uint32_t optional_feature_mask;
     bool has_pediment;
     bool has_stylobate;
     bool has_courtyard;

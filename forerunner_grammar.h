@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include "building_generation.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -113,6 +114,7 @@ typedef struct {
 // Complete generative plan
 typedef struct {
     uint32_t seed;
+    uint32_t layout_family;
     ForerunnerArchetype archetype;
     ForerunnerStage stage;
     ForerunnerNode nodes[MAX_FORERUNNER_NODES];
