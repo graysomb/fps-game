@@ -7468,9 +7468,11 @@ static void buildTestWorld(void) {
         }
     }
 
-    // One-voxel retaining lip and a shallow pool on the central platform.
     int platform_min = M/2 - platform_size/2;
     int platform_max = M/2 + platform_size/2;
+    // Fluids disabled for now
+    /*
+    // One-voxel retaining lip and a shallow pool on the central platform.
     int platform_lip_y = platform_base_height + platform_height + 1;
     Color platform_lip_color = (Color){ 70, 165, 105, 255 };
     Color platform_fluid_color = (Color){ 45, 145, 235, 220 };
@@ -7494,6 +7496,7 @@ static void buildTestWorld(void) {
             add_fluid_cell(px, py, pz, platform_fluid_color);
         }
     }
+    */
 
     // Platform legs: 2x2 columns at each corner down to the floor.
     int leg_min_y = 0;

@@ -2760,8 +2760,38 @@ static bool debug_setup_arena_platform_fluid(DebugRunState *state)
 {
     debug_reset_world();
     activePlayers = 1;
-    players[0].pos = (Vector3){ 0.0f, 10.0f, 0.0f };
     buildTestWorld();
+
+    int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
+    int platform_size = 10;
+    int platform_base_height = 5;
+    int platform_height = 1;
+    int platform_min = M/2 - platform_size/2;
+    int platform_max = M/2 + platform_size/2;
+    int platform_lip_y = platform_base_height + platform_height + 1;
+    Color platform_lip_color = (Color){ 70, 165, 105, 255 };
+    Color platform_fluid_color = (Color){ 45, 145, 235, 220 };
+    for (int x = platform_min; x <= platform_max; ++x) {
+        for (int z = platform_min; z <= platform_max; ++z) {
+            if (x != platform_min && x != platform_max &&
+                z != platform_min && z != platform_max) {
+                continue;
+            }
+            float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+            float py = (platform_lip_y + 0.5f) * VOXEL_SIZE;
+            float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+            addVoxel(px, py, pz, true, false, platform_lip_color, VOXEL_TYPE_SOLID);
+        }
+    }
+    for (int x = platform_min + 2; x <= platform_max - 2; ++x) {
+        for (int z = platform_min + 2; z <= platform_max - 2; ++z) {
+            float px = (x + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+            float py = (platform_lip_y + 0.5f) * VOXEL_SIZE;
+            float pz = (z + 0.5f) * VOXEL_SIZE - FLOOR_SIZE;
+            add_fluid_cell(px, py, pz, platform_fluid_color);
+        }
+    }
+
     ground_structural_pillars();
     heal_structural_seams();
     rebuild_glue_constraints();
@@ -2781,10 +2811,6 @@ static bool debug_setup_arena_platform_fluid(DebugRunState *state)
     fprintf(stderr, "DEBUG REPRO: before platform activation: fluid_cells=%d active_fluid_particles=%d total_fluid_particles=%d\n",
             fluid_cells, active_fluid_particle_count, fluid_particle_count);
 
-    int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
-    int platform_base_height = 5;
-    int platform_height = 1;
-    int platform_lip_y = platform_base_height + platform_height + 1;
     int plat_gx = 0;
     int plat_gy = platform_lip_y - 1;
     int plat_gz = 0;
