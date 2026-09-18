@@ -12121,34 +12121,128 @@ static const int fluid_collision_face_corners[6][4] = {
     { 0, 1, 3, 2 }, { 4, 6, 7, 5 }
 };
 
+typedef struct {
+    int voxel_index;
+    Vector3 bounds_min;
+    Vector3 bounds_max;
+} FluidDynamicVoxelBounds;
+
+static FluidDynamicVoxelBounds fluidDynamicVoxelBounds[MAX_VOXELS];
+
+#define DYN_VOXEL_HASH_SIZE 4096
+#define MAX_DYN_VOXEL_HASH_ENTRIES 32768
+#define DYN_VOXEL_CELL_SIZE 1.0f
+
+static int dyn_voxel_hash_head[DYN_VOXEL_HASH_SIZE];
+static int dyn_voxel_hash_next[MAX_DYN_VOXEL_HASH_ENTRIES];
+static int dyn_voxel_hash_list_idx[MAX_DYN_VOXEL_HASH_ENTRIES];
+static int dyn_voxel_hash_entry_count = 0;
+
+static inline int dyn_voxel_hash(int x, int y, int z) {
+    uint32_t h = (uint32_t)(x * 73856093) ^ (uint32_t)(y * 19349663) ^ (uint32_t)(z * 83492791);
+    return (int)(h & (DYN_VOXEL_HASH_SIZE - 1));
+}
+
+static void build_fluid_dynamic_voxel_hash(void) {
+    dyn_voxel_hash_entry_count = 0;
+    memset(dyn_voxel_hash_head, -1, sizeof(dyn_voxel_hash_head));
+    const float cell_size = DYN_VOXEL_CELL_SIZE;
+    const float inv_cell_size = 1.0f / cell_size;
+    const float fluid_radius = PBF_PARTICLE_RADIUS;
+
+    for (int i = 0; i < fluidDynamicVoxelCount; ++i) {
+        int voxel_idx = fluidDynamicVoxelIndices[i];
+        Voxel *solid = &voxels[voxel_idx];
+        Vector3 bmin = { FLT_MAX, FLT_MAX, FLT_MAX };
+        Vector3 bmax = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+        bool valid = true;
+        for (int corner = 0; corner < 8; ++corner) {
+            Particle *cp = solid->particles[corner];
+            if (!cp || !v_isfinite(cp->predicted_pos)) {
+                valid = false;
+                break;
+            }
+            Vector3 p = cp->predicted_pos;
+            if (p.x < bmin.x) bmin.x = p.x;
+            if (p.y < bmin.y) bmin.y = p.y;
+            if (p.z < bmin.z) bmin.z = p.z;
+            if (p.x > bmax.x) bmax.x = p.x;
+            if (p.y > bmax.y) bmax.y = p.y;
+            if (p.z > bmax.z) bmax.z = p.z;
+        }
+        if (!valid) {
+            fluidDynamicVoxelBounds[i].voxel_index = -1;
+            continue;
+        }
+        fluidDynamicVoxelBounds[i].voxel_index = voxel_idx;
+        fluidDynamicVoxelBounds[i].bounds_min = bmin;
+        fluidDynamicVoxelBounds[i].bounds_max = bmax;
+
+        int min_gx = (int)floorf((bmin.x - fluid_radius) * inv_cell_size);
+        int max_gx = (int)floorf((bmax.x + fluid_radius) * inv_cell_size);
+        int min_gy = (int)floorf((bmin.y - fluid_radius - VOXEL_SIZE) * inv_cell_size);
+        int max_gy = (int)floorf((bmax.y + fluid_radius) * inv_cell_size);
+        int min_gz = (int)floorf((bmin.z - fluid_radius) * inv_cell_size);
+        int max_gz = (int)floorf((bmax.z + fluid_radius) * inv_cell_size);
+
+        if (max_gx - min_gx > 4 || max_gy - min_gy > 4 || max_gz - min_gz > 4) {
+            continue;
+        }
+
+        for (int gz = min_gz; gz <= max_gz; ++gz) {
+            for (int gy = min_gy; gy <= max_gy; ++gy) {
+                for (int gx = min_gx; gx <= max_gx; ++gx) {
+                    if (dyn_voxel_hash_entry_count >= MAX_DYN_VOXEL_HASH_ENTRIES) break;
+                    int h = dyn_voxel_hash(gx, gy, gz);
+                    int entry = dyn_voxel_hash_entry_count++;
+                    dyn_voxel_hash_list_idx[entry] = i;
+                    dyn_voxel_hash_next[entry] = dyn_voxel_hash_head[h];
+                    dyn_voxel_hash_head[h] = entry;
+                }
+            }
+        }
+    }
+}
+
 static bool project_fluid_out_of_dynamic_voxel(Particle *fluid, Voxel *solid,
+                                                const Vector3 *cached_bmin,
+                                                const Vector3 *cached_bmax,
                                                 bool accumulate_reaction) {
     if (!fluid || !solid || !solid->simulate || solid->isBullet ||
         solid->type != VOXEL_TYPE_SOLID) return false;
 
-    Vector3 bounds_min = { FLT_MAX, FLT_MAX, FLT_MAX };
-    Vector3 bounds_max = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
-    for (int corner = 0; corner < 8; ++corner) {
-        Particle *particle = solid->particles[corner];
-        if (!particle || !v_isfinite(particle->predicted_pos)) return false;
-        Vector3 p = particle->predicted_pos;
-        if (p.x < bounds_min.x) bounds_min.x = p.x;
-        if (p.y < bounds_min.y) bounds_min.y = p.y;
-        if (p.z < bounds_min.z) bounds_min.z = p.z;
-        if (p.x > bounds_max.x) bounds_max.x = p.x;
-        if (p.y > bounds_max.y) bounds_max.y = p.y;
-        if (p.z > bounds_max.z) bounds_max.z = p.z;
+    Vector3 bounds_min, bounds_max;
+    if (cached_bmin && cached_bmax) {
+        bounds_min = *cached_bmin;
+        bounds_max = *cached_bmax;
+    } else {
+        bounds_min = (Vector3){ FLT_MAX, FLT_MAX, FLT_MAX };
+        bounds_max = (Vector3){ -FLT_MAX, -FLT_MAX, -FLT_MAX };
+        for (int corner = 0; corner < 8; ++corner) {
+            Particle *particle = solid->particles[corner];
+            if (!particle || !v_isfinite(particle->predicted_pos)) return false;
+            Vector3 p = particle->predicted_pos;
+            if (p.x < bounds_min.x) bounds_min.x = p.x;
+            if (p.y < bounds_min.y) bounds_min.y = p.y;
+            if (p.z < bounds_min.z) bounds_min.z = p.z;
+            if (p.x > bounds_max.x) bounds_max.x = p.x;
+            if (p.y > bounds_max.y) bounds_max.y = p.y;
+            if (p.z > bounds_max.z) bounds_max.z = p.z;
+        }
     }
     float radius = fluid->radius;
     Vector3 position = fluid->predicted_pos;
     Vector3 previous = fluid->prev_pos;
     Vector3 expanded_min = v_sub(bounds_min, (Vector3){ radius, radius, radius });
     Vector3 expanded_max = v_add(bounds_max, (Vector3){ radius, radius, radius });
+
     bool recover_below =
+        !solid->glued_faces[2] &&
         position.x >= expanded_min.x && position.x <= expanded_max.x &&
         position.z >= expanded_min.z && position.z <= expanded_max.z &&
         position.y < expanded_min.y &&
-        position.y >= expanded_min.y - fmaxf(2.0f * radius, 2.0f * VOXEL_SIZE);
+        position.y >= expanded_min.y - fmaxf(2.0f * radius, VOXEL_SIZE);
+
     if (!recover_below &&
         ((position.x < bounds_min.x - radius && previous.x < bounds_min.x - radius) ||
         (position.x > bounds_max.x + radius && previous.x > bounds_max.x + radius) ||
@@ -12210,11 +12304,6 @@ static bool project_fluid_out_of_dynamic_voxel(Particle *fluid, Voxel *solid,
     if (recover_below) {
         nearest_face = 3;
     } else if (nearest_face < 0 || previous_inside) {
-        // A resting particle normally begins exactly on an expanded face.  If
-        // the voxel bends far enough during this substep, choosing from the
-        // current point can suddenly select the opposite face and pull the
-        // particle through the solid.  Keep the side represented by the last
-        // committed position instead.
         Vector3 side_sample = previous_inside ? previous : position;
         float distances[6] = {
             fabsf(side_sample.x - expanded_min.x), fabsf(expanded_max.x - side_sample.x),
@@ -12223,10 +12312,25 @@ static bool project_fluid_out_of_dynamic_voxel(Particle *fluid, Voxel *solid,
         };
         float nearest = FLT_MAX;
         for (int face = 0; face < 6; ++face) {
+            // Never depenetrate through a face glued to another solid voxel
+            if (solid->glued_faces[face]) {
+                continue;
+            }
+            // Depenetration must oppose penetration: do not eject out of the bottom face
+            // if the particle entered from the top half or moved downwards.
+            if (face == 2 && (previous.y >= (expanded_min.y + expanded_max.y) * 0.5f || movement.y <= 0.0f)) {
+                continue;
+            }
+            if (face == 3 && (previous.y < (expanded_min.y + expanded_max.y) * 0.5f && movement.y > 0.0f)) {
+                continue;
+            }
             if (distances[face] < nearest) {
                 nearest = distances[face];
                 nearest_face = face;
             }
+        }
+        if (nearest_face < 0) {
+            nearest_face = (movement.y <= 0.0f && !solid->glued_faces[3]) ? 3 : 2;
         }
     }
     if (nearest_face < 0) return false;
@@ -12237,6 +12341,7 @@ static bool project_fluid_out_of_dynamic_voxel(Particle *fluid, Voxel *solid,
     else if (nearest_face == 3) correction.y = expanded_max.y - position.y + 1e-4f;
     else if (nearest_face == 4) correction.z = expanded_min.z - position.z - 1e-4f;
     else correction.z = expanded_max.z - position.z + 1e-4f;
+
     fluid->predicted_pos = v_add(fluid->predicted_pos, correction);
     // Do not turn depenetration into artificial rebound velocity.  Preserve
     // tangential motion while cancelling displacement along the contact axis.
@@ -12246,6 +12351,14 @@ static bool project_fluid_out_of_dynamic_voxel(Particle *fluid, Voxel *solid,
     atomic_fetch_add_explicit(&fluidDynamicCollisionCount, 1, memory_order_relaxed);
     if (accumulate_reaction) {
         Vector3 corner_reaction = v_mul(correction, -PBF_DYNAMIC_SOLID_REACTION * 0.25f);
+        float max_reaction = 0.05f * VOXEL_SIZE;
+        if (corner_reaction.x > max_reaction) corner_reaction.x = max_reaction;
+        if (corner_reaction.x < -max_reaction) corner_reaction.x = -max_reaction;
+        if (corner_reaction.y > max_reaction) corner_reaction.y = max_reaction;
+        if (corner_reaction.y < -max_reaction) corner_reaction.y = -max_reaction;
+        if (corner_reaction.z > max_reaction) corner_reaction.z = max_reaction;
+        if (corner_reaction.z < -max_reaction) corner_reaction.z = -max_reaction;
+
         for (int i = 0; i < 4; ++i) {
             Particle *corner = solid->particles[fluid_collision_face_corners[nearest_face][i]];
             if (corner && corner->inv_mass > 0.0f) {
@@ -12270,12 +12383,59 @@ static void rebuild_fluid_dynamic_voxel_list(void) {
 static void solve_fluid_dynamic_collisions_range(int start, int end, int worker_id, void *user) {
     (void)worker_id;
     FluidDynamicCollisionJob *job = (FluidDynamicCollisionJob *)user;
+    const float inv_cell_size = 1.0f / DYN_VOXEL_CELL_SIZE;
+
     for (int fluid_index = start; fluid_index < end; ++fluid_index) {
         Particle *fluid = fluid_particles[fluid_index];
         if (!fluid || fluid->inv_mass <= 0.0f) continue;
-        for (int list_index = 0; list_index < fluidDynamicVoxelCount; ++list_index) {
-            Voxel *solid = &voxels[fluidDynamicVoxelIndices[list_index]];
-            project_fluid_out_of_dynamic_voxel(fluid, solid, job->react);
+
+        Vector3 cur = fluid->predicted_pos;
+        Vector3 prev = fluid->prev_pos;
+        float r = fluid->radius;
+
+        if (!v_isfinite(cur) || !v_isfinite(prev)) continue;
+
+        int min_gx = (int)floorf((fminf(cur.x, prev.x) - r) * inv_cell_size);
+        int max_gx = (int)floorf((fmaxf(cur.x, prev.x) + r) * inv_cell_size);
+        int min_gy = (int)floorf((fminf(cur.y, prev.y) - r) * inv_cell_size);
+        int max_gy = (int)floorf((fmaxf(cur.y, prev.y) + r) * inv_cell_size);
+        int min_gz = (int)floorf((fminf(cur.z, prev.z) - r) * inv_cell_size);
+        int max_gz = (int)floorf((fmaxf(cur.z, prev.z) + r) * inv_cell_size);
+
+        if (max_gx - min_gx > 3 || max_gy - min_gy > 3 || max_gz - min_gz > 3) {
+            continue;
+        }
+
+        int candidates[32];
+        int candidate_count = 0;
+
+        for (int gz = min_gz; gz <= max_gz; ++gz) {
+            for (int gy = min_gy; gy <= max_gy; ++gy) {
+                for (int gx = min_gx; gx <= max_gx; ++gx) {
+                    int h = dyn_voxel_hash(gx, gy, gz);
+                    for (int entry = dyn_voxel_hash_head[h]; entry != -1; entry = dyn_voxel_hash_next[entry]) {
+                        int list_idx = dyn_voxel_hash_list_idx[entry];
+                        bool duplicate = false;
+                        for (int c = 0; c < candidate_count; ++c) {
+                            if (candidates[c] == list_idx) {
+                                duplicate = true;
+                                break;
+                            }
+                        }
+                        if (!duplicate && candidate_count < 32) {
+                            candidates[candidate_count++] = list_idx;
+                        }
+                    }
+                }
+            }
+        }
+
+        for (int c = 0; c < candidate_count; ++c) {
+            int list_idx = candidates[c];
+            const FluidDynamicVoxelBounds *b = &fluidDynamicVoxelBounds[list_idx];
+            if (b->voxel_index < 0) continue;
+            Voxel *solid = &voxels[b->voxel_index];
+            project_fluid_out_of_dynamic_voxel(fluid, solid, &b->bounds_min, &b->bounds_max, job->react);
         }
     }
 }
@@ -12283,6 +12443,7 @@ static void solve_fluid_dynamic_collisions_range(int start, int end, int worker_
 static void solve_fluid_dynamic_collisions(bool react) {
     if (active_fluid_particle_count <= 0 || fluidDynamicVoxelCount <= 0) return;
     atomic_store_explicit(&fluidDynamicCollisionCount, 0, memory_order_relaxed);
+    build_fluid_dynamic_voxel_hash();
     FluidDynamicCollisionJob job = { .react = react };
     if (react) reset_particle_accumulators();
     pbd_parallel_for(0, active_fluid_particle_count, solve_fluid_dynamic_collisions_range, &job);
