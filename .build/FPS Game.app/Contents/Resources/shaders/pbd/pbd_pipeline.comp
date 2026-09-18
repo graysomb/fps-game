@@ -154,6 +154,8 @@ void integrateParticle(uint gid) {
             p.predicted_base_inv_mass.xyz += accel * uDt * uDt;
             p.velocity.xyz += accel * uDt;
             float damp = clamp(uTetherDamping * scale * uDt, 0.0, 0.9);
+            vec3 disp = p.predicted_base_inv_mass.xyz - p.prev_inv_mass.xyz;
+            p.predicted_base_inv_mass.xyz = p.prev_inv_mass.xyz + disp * (1.0 - damp);
             p.velocity.xyz *= 1.0 - damp;
         }
     }

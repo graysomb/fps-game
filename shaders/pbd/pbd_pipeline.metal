@@ -133,7 +133,10 @@ inline void integrateParticle(uint gid, device ParticleState *particle,
             float3 accel = u.tether_targets[player].xyz * u.tether_spring * scale;
             p.predicted_base_inv_mass.xyz += accel * u.dt * u.dt;
             p.velocity.xyz += accel * u.dt;
-            p.velocity.xyz *= 1.0f - clamp(u.tether_damping * scale * u.dt, 0.0f, 0.9f);
+            float damp = clamp(u.tether_damping * scale * u.dt, 0.0f, 0.9f);
+            float3 disp = p.predicted_base_inv_mass.xyz - p.prev_inv_mass.xyz;
+            p.predicted_base_inv_mass.xyz = p.prev_inv_mass.xyz + disp * (1.0f - damp);
+            p.velocity.xyz *= 1.0f - damp;
         }
     }
     particle[id] = p;

@@ -619,7 +619,7 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define BUILD_COOLDOWN_SECONDS 0.5f
 #define TETHER_RANGE 8.0f
 #define TETHER_SPRING 200.0f
-#define TETHER_DAMPING 30.0f
+#define TETHER_DAMPING 10.0f
 #define TETHER_REFERENCE_MASS 8.0f /* one isolated voxel: 8 unit-mass corners */
 #define TETHER_THROW_IMPULSE 50.0f
 #define TETHER_THROW_CCD_MIN_SPEED 30.0f
@@ -10293,6 +10293,11 @@ static void integrate_particles(float dt) {
 
             p->predicted_pos = v_add(p->predicted_pos, v_mul(tether_accel, dt_sq));
             p->vel = v_add(p->vel, v_mul(tether_accel, dt));
+            // PBD rebuilds vel from predicted_pos - prev_pos at step end, so
+            // damping has to shrink that displacement or it is discarded.
+            Vector3 disp = v_sub(p->predicted_pos, p->prev_pos);
+            disp = v_mul(disp, 1.0f - tether_damp);
+            p->predicted_pos = v_add(p->prev_pos, disp);
             p->vel = v_mul(p->vel, 1.0f - tether_damp);
         }
     }
