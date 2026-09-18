@@ -556,6 +556,7 @@ void gatherBreakMask(uint gid) {
         v.flags.x = 0; // Deactivate VGS constraint
         v.lifecycle.y = 1u; // wake_source = true
         v.lifecycle.z = 0u; // Clear glued faces
+        v.lifecycle.w &= ~0x8u; // No longer a fluid/solid collision volume
     }
     voxel[gid] = v;
 }
@@ -884,7 +885,8 @@ void pbfDynamicSolidCollisions(uint gid, bool react) {
 
     for (int voxelId = 0; voxelId < uVoxelCount; ++voxelId) {
         VoxelState solid = voxel[voxelId];
-        if (solid.flags.y != 0 || solid.flags.z != 0) continue;
+        if (solid.flags.y != 0 || solid.flags.z != 0 ||
+            (solid.lifecycle.w & 0x8u) == 0u) continue;
 
         float maxReach = uVoxelSize * 1.5 + radius;
         vec3 toPos = abs(position - solid.pos_rest_edge.xyz);

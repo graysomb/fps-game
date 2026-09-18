@@ -1021,6 +1021,9 @@ typedef struct {
     Vector3 vel;
     bool simulate;
     bool vgs_active;
+    // Fracture detection may run in parallel, but releasing shared VGS
+    // ownership and changing particle lists must happen on the main thread.
+    bool fracture_pending;
     // Dynamic voxels have a separate sleep state.  Sleeping voxels retain their
     // exact particle-space transform instead of being rebuilt on the world grid.
     bool sleeping;
@@ -4236,6 +4239,7 @@ static bool init_voxel_struct(Voxel *v,
     v->rest_volume = edge * edge * edge;
     v->particle_radius = 0.5f * edge;
     v->vgs_active = true;
+    v->fracture_pending = false;
     memset(v->glued_faces, 0, sizeof(v->glued_faces));
     for (int f = 0; f < 6; ++f) v->glued_neighbors[f] = -1;
     v->full_neighbors = false;
@@ -6672,7 +6676,11 @@ static bool freeze_dynamic_cluster_in_place(const int *cluster, int cluster_coun
             particle->prev_pos = particle->pos;
             particle->predicted_pos = particle->pos;
             particle->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
-            particle->inv_mass = 0.0f;
+            if (particle->material == PARTICLE_MATERIAL_FLUID) {
+                fluid_particle_deactivate(particle);
+            } else {
+                particle->inv_mass = 0.0f;
+            }
         }
     }
     collisionTopologyDirty = true;
@@ -6717,7 +6725,11 @@ static bool wake_sleeping_cluster_in_place(int start_idx)
             particle->prev_pos = particle->pos;
             particle->predicted_pos = particle->pos;
             particle->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
-            particle->inv_mass = particle->base_inv_mass;
+            if (particle->material == PARTICLE_MATERIAL_FLUID) {
+                fluid_particle_activate(particle);
+            } else {
+                particle->inv_mass = particle->base_inv_mass;
+            }
         }
         woke = true;
     }
@@ -10132,6 +10144,60 @@ static void decrement_particle_timers_range(int start, int end, int worker_id, v
     }
 }
 
+static void convert_unconstrained_particle_to_fluid(Particle *particle) {
+    if (!particle || !particle->active || particle->glue_count != 0 ||
+        particle->material == PARTICLE_MATERIAL_FLUID) {
+        return;
+    }
+
+    // Preserve the fracture velocity and position, but adopt the physical
+    // properties expected by the PBF solver.
+    particle->radius = PBF_PARTICLE_RADIUS;
+    particle->base_inv_mass = 1.0f / PBF_PARTICLE_MASS;
+    particle->inv_mass = particle->base_inv_mass;
+    particle->pbf_density = 0.0f;
+    particle->pbf_lambda = 0.0f;
+    particle->pbf_delta = (Vector3){ 0.0f, 0.0f, 0.0f };
+    particle_set_material(particle, PARTICLE_MATERIAL_FLUID);
+}
+
+static bool finalize_pending_voxel_fracture(Voxel *voxel) {
+    if (!voxel || !voxel->fracture_pending) return false;
+    voxel->fracture_pending = false;
+
+    // glue_count is one ownership unit per VGS voxel corner. Decrement every
+    // corner before converting so a particle shared by multiple voxels cannot
+    // transition until the last referencing constraint has broken.
+    for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+        Particle *particle = voxel->particles[corner];
+        if (particle && particle->glue_count > 0) particle->glue_count--;
+    }
+
+    for (int face = 0; face < 6; ++face) {
+        int neighbor_index = voxel->glued_neighbors[face];
+        if (neighbor_index >= 0 && neighbor_index < voxel_count) {
+            voxels[neighbor_index].glued_faces[opposite_face[face]] = false;
+            voxels[neighbor_index].glued_neighbors[opposite_face[face]] = -1;
+        }
+        voxel->glued_neighbors[face] = -1;
+    }
+    memset(voxel->glued_faces, 0, sizeof(voxel->glued_faces));
+
+    for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+        convert_unconstrained_particle_to_fluid(voxel->particles[corner]);
+    }
+    collisionTopologyDirty = true;
+    return true;
+}
+
+static bool finalize_pending_voxel_fractures(void) {
+    bool changed = false;
+    for (int i = 0; i < voxel_count; ++i) {
+        changed = finalize_pending_voxel_fracture(&voxels[i]) || changed;
+    }
+    return changed;
+}
+
 static void evaluate_voxel_fracture(Voxel *voxel) {
     if (!voxel->simulate || !voxel->vgs_active || voxel->isBullet || voxel->type != 0 || voxel->debugClusterTag == DEBUG_CONTAINER_TAG) {
         return;
@@ -10233,23 +10299,8 @@ static void evaluate_voxel_fracture(Voxel *voxel) {
 
     if (should_break) {
         voxel->vgs_active = false;
+        voxel->fracture_pending = true;
         voxel->wake_source = true;
-        for (int i = 0; i < 8; ++i) {
-            Particle *part = voxel->particles[i];
-            if (part && part->glue_count > 0) {
-                part->glue_count--;
-            }
-        }
-        for (int f = 0; f < 6; ++f) {
-            int nidx = voxel->glued_neighbors[f];
-            if (nidx >= 0 && nidx < voxel_count) {
-                voxels[nidx].glued_faces[opposite_face[f]] = false;
-                voxels[nidx].glued_neighbors[opposite_face[f]] = -1;
-            }
-            voxel->glued_neighbors[f] = -1;
-        }
-        memset(voxel->glued_faces, 0, sizeof(voxel->glued_faces));
-        collisionTopologyDirty = true;
     }
 }
 
@@ -12004,6 +12055,12 @@ static void glue_dynamic_face_to_static(Voxel *dynamic, Voxel *stat,
         }
         particle_retain(shared);
         dynamic->particles[dyn_corner] = shared;
+        if (shared) {
+            // The static voxel owns one structural reference already. Account
+            // for the dynamic VGS constraint separately so breaking it cannot
+            // turn a still-static corner into fluid.
+            shared->glue_count++;
+        }
     }
     dynamic->glued_faces[face_dynamic] = true;
     stat->glued_faces[face_static] = true;
@@ -12307,7 +12364,7 @@ static bool project_fluid_out_of_dynamic_voxel(Particle *fluid, Voxel *solid,
                                                 const Vector3 *cached_bmin,
                                                 const Vector3 *cached_bmax,
                                                 bool accumulate_reaction) {
-    if (!fluid || !solid || !solid->simulate || solid->isBullet ||
+    if (!fluid || !solid || !solid->simulate || !solid->vgs_active || solid->isBullet ||
         solid->type != VOXEL_TYPE_SOLID) return false;
 
     Vector3 bounds_min, bounds_max;
@@ -12474,7 +12531,8 @@ static void rebuild_fluid_dynamic_voxel_list(void) {
     fluidDynamicVoxelCount = 0;
     for (int voxel_index = 0; voxel_index < voxel_count; ++voxel_index) {
         const Voxel *solid = &voxels[voxel_index];
-        if (!solid->simulate || solid->isBullet || solid->type != VOXEL_TYPE_SOLID) continue;
+        if (!solid->simulate || !solid->vgs_active || solid->isBullet ||
+            solid->type != VOXEL_TYPE_SOLID) continue;
         fluidDynamicVoxelIndices[fluidDynamicVoxelCount++] = voxel_index;
     }
 }
@@ -13038,6 +13096,9 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
         if (active_voxel_count > 0) {
             double tb = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
             pbd_parallel_for(0, active_voxel_count, evaluate_voxel_fracture_range, NULL);
+            if (finalize_pending_voxel_fractures()) {
+                rebuild_particle_collision_metadata();
+            }
             if (pbdProfileEnabled) pbdCpuProfile.t_break_masks_ms += pbd_time_now_ms() - tb;
 
             double tv = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
@@ -16150,7 +16211,8 @@ static void DrawVoxels(Camera3D cam) {
 
     for (int i = 0; i < active_particle_count; ++i) {
         Particle *p = active_particles[i];
-        if (!p || !p->active || p->glue_count > 0) {
+        if (!p || !p->active || p->material != PARTICLE_MATERIAL_SOLID ||
+            p->glue_count > 0) {
             continue;
         }
         float radius = (p->radius > 0.0f) ? p->radius : (VOXEL_SIZE * 0.25f);

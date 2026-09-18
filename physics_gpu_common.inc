@@ -541,7 +541,8 @@ static bool gpu_pack_world(void) {
         g->lifecycle[2] = gpu_glued_face_mask(v) | (v->glueEligible ? 0x80000000u : 0u);
         g->lifecycle[3] = ((uint32_t)v->orig_min_gx & 1u) |
                          (((uint32_t)v->orig_min_gy & 1u) << 1) |
-                         (((uint32_t)v->orig_min_gz & 1u) << 2);
+                         (((uint32_t)v->orig_min_gz & 1u) << 2) |
+                         (v->vgs_active ? 0x8u : 0u);
     }
 
     for (int dynamic_id = 0; dynamic_id < gpuPhysics.dynamic_voxel_count; ++dynamic_id) {
@@ -1027,34 +1028,29 @@ static bool gpu_validate_and_commit(void) {
         }
     }
     bool topology_changed = false;
+    bool particle_layout_changed = false;
     for (int i = 0; i < gpuPhysics.dynamic_voxel_count; ++i) {
         int voxel_id = gpuPhysics.compact_to_voxel[i];
         if (voxel_id < 0 || voxel_id >= voxel_count) return false;
         Voxel *v = &voxels[voxel_id]; GpuVoxelState *g = &gpuPhysics.voxel_stage[i];
-        if (v->vgs_active && g->flags[0] == 0) {
+        if (v->vgs_active && (g->lifecycle[3] & 0x8u) == 0u) {
             v->vgs_active = false;
+            v->fracture_pending = true;
             v->wake_source = true;
-            for (int corner = 0; corner < 8; ++corner) {
-                Particle *part = v->particles[corner];
-                if (part && part->glue_count > 0) {
-                    part->glue_count--;
-                }
-            }
-            memset(v->glued_faces, 0, sizeof(v->glued_faces));
             for (int f = 0; f < 6; ++f) {
                 int nidx = v->glued_neighbors[f];
                 if (nidx >= 0 && nidx < voxel_count) {
-                    voxels[nidx].glued_faces[opposite_face[f]] = false;
-                    voxels[nidx].glued_neighbors[opposite_face[f]] = -1;
                     int n_dyn = gpuPhysics.world_to_dynamic[nidx];
                     if (n_dyn >= 0 && n_dyn < gpuPhysics.dynamic_voxel_count) {
                         gpuPhysics.voxel_stage[n_dyn].lifecycle[2] &= ~(1u << opposite_face[f]);
                     }
                 }
-                v->glued_neighbors[f] = -1;
             }
             g->lifecycle[2] = 0;
+            g->lifecycle[3] &= ~0x8u;
+            finalize_pending_voxel_fracture(v);
             topology_changed = true;
+            particle_layout_changed = true;
         }
         for (int corner = 0; corner < 8; ++corner) {
             uint32_t particle_id = g->particle[corner];
@@ -1069,8 +1065,21 @@ static bool gpu_validate_and_commit(void) {
             }
         }
         if (v->type == 0 && !v->isBullet) {
-            v->pos = (Vector3){g->pos_rest_edge[0], g->pos_rest_edge[1], g->pos_rest_edge[2]};
-            v->vel = (Vector3){g->velocity_rest_volume[0], g->velocity_rest_volume[1], g->velocity_rest_volume[2]};
+            if (v->vgs_active) {
+                v->pos = (Vector3){g->pos_rest_edge[0], g->pos_rest_edge[1], g->pos_rest_edge[2]};
+                v->vel = (Vector3){g->velocity_rest_volume[0], g->velocity_rest_volume[1], g->velocity_rest_volume[2]};
+            } else {
+                Vector3 center = { 0.0f, 0.0f, 0.0f };
+                Vector3 velocity = { 0.0f, 0.0f, 0.0f };
+                for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+                    Particle *particle = v->particles[corner];
+                    if (!particle) continue;
+                    center = v_add(center, particle->pos);
+                    velocity = v_add(velocity, particle->vel);
+                }
+                v->pos = v_mul(center, 1.0f / (float)VOXEL_CORNER_COUNT);
+                v->vel = v_mul(velocity, 1.0f / (float)VOXEL_CORNER_COUNT);
+            }
             v->skipCollisionVelocityFrames = (int)g->lifecycle[0];
         }
         v->wake_source = g->lifecycle[1] != 0;
@@ -1085,7 +1094,7 @@ static bool gpu_validate_and_commit(void) {
     if (topology_changed) collisionTopologyDirty = true;
     gpuPhysics.compact_count = used_particles;
     gpuPhysics.uploaded_particle_count = used_particles;
-    gpuPhysics.resident_valid = true;
+    gpuPhysics.resident_valid = !particle_layout_changed;
     gpuPhysics.commit_ms += (GetTime() - commit_started) * 1000.0;
     return true;
 }
@@ -1117,6 +1126,7 @@ static bool gpu_resident_matches_cpu(void) {
             (v->simulate_dofs ? 1 : 0) != g->flags[3]) return false;
         uint32_t glue_mask = gpu_glued_face_mask(v);
         if ((g->lifecycle[2] & 0x3fu) != glue_mask) return false;
+        if (((g->lifecycle[3] & 0x8u) != 0u) != v->vgs_active) return false;
         for (int corner = 0; corner < 8; ++corner) {
             Particle *p = v->particles[corner];
             if (!p) return false;
