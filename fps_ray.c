@@ -672,6 +672,7 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define PBF_RENDER_SPHERE_SLICES 8
 #define PBF_HULL_CELL_SIZE VOXEL_SIZE
 #define PBF_HULL_ISO_LEVEL 0.5f
+#define PBF_HULL_MAX_NET_CELLS 2000000u
 #define PBF_DYNAMIC_SOLID_REACTION 0.02f
 #define PBF_SETTLE_REQUIRED_STEPS 90
 #define PBF_SETTLE_MEAN_SPEED 0.65f
@@ -1729,6 +1730,7 @@ static bool aimAssistDebugDraw = false;
 static Vector3 aimAssistDebugTarget[MAX_PLAYERS];
 static bool aimAssistDebugHasTarget[MAX_PLAYERS];
 static bool creativeModeActive = false;
+static CreativeMaterial creativeMaterial[MAX_PLAYERS] = { 0 };
 static int creativeBrushSpan[MAX_PLAYERS] = { 3, 3, 3, 3 };
 static int creativePickupType[MAX_PLAYERS] = { 0, 0, 0, 0 };
 static int creativeMapSlot = 0;
@@ -2931,6 +2933,13 @@ static void solve_pbf_density_constraints(Particle **hash_list, int hash_count) 
         if (new_cache) {
             pbf_neighbor_cache = new_cache;
             pbf_neighbor_cache_capacity = new_cap;
+        } else {
+            // A smaller stale cache is unsafe: the parallel PBF passes index it
+            // with the current fluid count. Running without a cache is slower,
+            // but the kernels already support rebuilding neighbors on demand.
+            free(pbf_neighbor_cache);
+            pbf_neighbor_cache = NULL;
+            pbf_neighbor_cache_capacity = 0;
         }
     }
     PbfJob job = { .hash_list = hash_list, .hash_count = hash_count, .populate_cache = true };
@@ -8729,6 +8738,7 @@ static void ResetCreative(void) {
     creativeModeActive = true;
     for (int i = 0; i < MAX_PLAYERS; ++i) {
         creativeBrushSpan[i] = 3;
+        creativeMaterial[i] = CREATIVE_MATERIAL_SOLID;
         creativePickupType[i] = PICKUP_DYNAMIC_SHOT;
         creativeBlockColorIndex[i] = 0;
         creativeHelpVisible[i] = true;
@@ -8918,6 +8928,7 @@ static void creative_place_voxels(int player_idx) {
     if (maxy > max_y) maxy = max_y;
 
     int placed = 0;
+    bool fluid = creativeMaterial[player_idx] == CREATIVE_MATERIAL_FLUID;
     Color c = creative_block_palette(creativeBlockColorIndex[player_idx]);
     for (int x = minx; x <= maxx; ++x) {
         for (int y = miny; y <= maxy; ++y) {
@@ -8925,16 +8936,22 @@ static void creative_place_voxels(int player_idx) {
                 if (occupied(x, y, z)) {
                     continue;
                 }
-                int idx_added = add_static_voxel_at_grid(x, y, z, c, 0);
+                int idx_added = fluid
+                    ? add_fluid_cell((x + 0.5f) * VOXEL_SIZE,
+                                     (y + 0.5f) * VOXEL_SIZE,
+                                     (z + 0.5f) * VOXEL_SIZE, c)
+                    : add_static_voxel_at_grid(x, y, z, c, 0);
                 if (idx_added >= 0) {
-                    mark_surface(idx_added);
-                    mark_surface_neighbors(voxels[idx_added].pos);
+                    if (!fluid) {
+                        mark_surface(idx_added);
+                        mark_surface_neighbors(voxels[idx_added].pos);
+                    }
                     placed++;
                 }
             }
         }
     }
-    if (placed > 0) {
+    if (placed > 0 && !fluid) {
         rebuild_all_voxel_surfaces();
         init_static_hash();
         meshDirty = true;
@@ -9076,6 +9093,10 @@ static void update_creative_player_keyboard(int player_idx, float dt) {
         if (IsKeyPressed(KEY_TAB)) {
             creativePickupType[player_idx] = (creativePickupType[player_idx] + 1) % 4;
         }
+        if (IsKeyPressed(KEY_C)) {
+            creativeMaterial[player_idx] = creativeMaterial[player_idx] == CREATIVE_MATERIAL_SOLID
+                ? CREATIVE_MATERIAL_FLUID : CREATIVE_MATERIAL_SOLID;
+        }
         if (IsKeyPressed(KEY_V)) {
             creativeBlockColorIndex[player_idx]++;
         }
@@ -9120,6 +9141,10 @@ static void update_creative_player_keyboard(int player_idx, float dt) {
         }
         if (IsKeyPressed(KEY_KP_MULTIPLY)) {
             creativePickupType[player_idx] = (creativePickupType[player_idx] + 1) % 4;
+        }
+        if (IsKeyPressed(KEY_KP_3)) {
+            creativeMaterial[player_idx] = creativeMaterial[player_idx] == CREATIVE_MATERIAL_SOLID
+                ? CREATIVE_MATERIAL_FLUID : CREATIVE_MATERIAL_SOLID;
         }
         if (IsKeyPressed(KEY_KP_1)) {
             creativeBlockColorIndex[player_idx]--;
@@ -9258,6 +9283,10 @@ static void update_creative_player_gamepad(int player_idx, float dt) {
     if (IsGamepadButtonPressed(player_idx, GAMEPAD_BUTTON_LEFT_FACE_RIGHT)) {
         creativeBrushSpan[player_idx] = clampi(creativeBrushSpan[player_idx] + 1, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
     }
+    if (IsGamepadButtonPressed(player_idx, GAMEPAD_BUTTON_LEFT_THUMB)) {
+        creativeMaterial[player_idx] = creativeMaterial[player_idx] == CREATIVE_MATERIAL_SOLID
+            ? CREATIVE_MATERIAL_FLUID : CREATIVE_MATERIAL_SOLID;
+    }
     if (IsGamepadButtonPressed(player_idx, GAMEPAD_BUTTON_LEFT_FACE_UP)) {
         creativeBlockColorIndex[player_idx]--;
     }
@@ -9339,6 +9368,7 @@ static void draw_creative_help_overlay(int player_idx, int view_w, int view_h) {
         lines[count++] = "Fast Fly: Hold RT";
         lines[count++] = "Brush: D-pad Left/Right";
         lines[count++] = "Color: D-pad Up/Down";
+        lines[count++] = "Solid/Fluid: L3";
         lines[count++] = "Pickup Type: A";
         lines[count++] = "Place Voxels: RT";
         lines[count++] = "Remove Voxels: LT";
@@ -9354,6 +9384,7 @@ static void draw_creative_help_overlay(int player_idx, int view_w, int view_h) {
         lines[count++] = "Fast Fly: Left Shift";
         lines[count++] = "Brush: [ ]";
         lines[count++] = "Color: V/B";
+        lines[count++] = "Solid/Fluid: C";
         lines[count++] = "Pickup Type: Tab";
         lines[count++] = "Place Voxels: Left Ctrl";
         lines[count++] = "Remove Voxels: Left Alt";
@@ -9369,6 +9400,7 @@ static void draw_creative_help_overlay(int player_idx, int view_w, int view_h) {
         lines[count++] = "Fast Fly: Left Shift";
         lines[count++] = "Brush: KP -/+";
         lines[count++] = "Color: KP 1/2";
+        lines[count++] = "Solid/Fluid: KP 3";
         lines[count++] = "Pickup Type: KP *";
         lines[count++] = "Place Voxels: Right Ctrl";
         lines[count++] = "Remove Voxels: Right Shift";
@@ -13076,7 +13108,10 @@ static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
     const float sub_dt = dt / (float)PBD_SUBSTEPS;
     if (!physics_backend_is_gpu(physicsBackend.active)) physics_try_gpu_recovery();
     static bool hybrid_prefers_gpu = false;
-    bool run_gpu = physics_backend_is_gpu(physicsBackend.active) && gpuPhysics.ready;
+    // The GPU simulation upload currently contains solid particles only.
+    // Keep fluid and solid collision response together in the CPU solver.
+    bool run_gpu = physics_backend_is_gpu(physicsBackend.active) && gpuPhysics.ready &&
+                   fluid_particle_count == 0;
     if (physicsBackend.requested == PHYSICS_BACKEND_AUTO && !debug_run_requested() && run_gpu) {
         if (!hybrid_prefers_gpu && sim_particle_count >= 1800) {
             hybrid_prefers_gpu = true;
@@ -15370,9 +15405,8 @@ static Mesh sphereMesh = { 0 };
 static Mesh fluidHullMesh = { 0 };
 static Material fluidMaterial = { 0 };
 static Material fluidHullMaterial = { 0 };
-static Matrix *fluidInstanceTransforms = NULL;
-static int fluidInstanceCapacity = 0;
 static int fluidSurfaceModeLocation = -1;
+static int fluidPosRadiusLocation = -1;
 static uint64_t fluidHullSignature = 0;
 static bool fluidHullSignatureValid = false;
 static uint64_t fluidHullParticleSignature = 0;
@@ -15392,7 +15426,9 @@ static int instanceTransformsCount = 0;
 static int instanceTransformsCapacity = 0;
 static bool instancingInitialized = false;
 
-static void DrawParticlesInstancedFast(Mesh mesh, Material material, const Vector4 *posRadius, int count, Color color) {
+static void DrawParticlesInstancedFast(Mesh mesh, Material material, const Vector4 *posRadius,
+                                       int count, int position_location,
+                                       int color_location, Color color) {
     if (count <= 0 || mesh.vaoId == 0 || particleInstanceVboId == 0) return;
 
     rlEnableShader(material.shader.id);
@@ -15403,27 +15439,27 @@ static void DrawParticlesInstancedFast(Mesh mesh, Material material, const Vecto
         rlSetUniformMatrix(material.shader.locs[SHADER_LOC_MATRIX_VIEW], matView);
     if (material.shader.locs[SHADER_LOC_MATRIX_PROJECTION] != -1)
         rlSetUniformMatrix(material.shader.locs[SHADER_LOC_MATRIX_PROJECTION], matProjection);
-    if (particleColorLoc != -1) {
+    if (color_location != -1) {
         float c[4] = { (float)color.r / 255.0f, (float)color.g / 255.0f, (float)color.b / 255.0f, (float)color.a / 255.0f };
-        rlSetUniform(particleColorLoc, c, SHADER_UNIFORM_VEC4, 1);
+        rlSetUniform(color_location, c, SHADER_UNIFORM_VEC4, 1);
     }
 
     rlUpdateVertexBuffer(particleInstanceVboId, posRadius, count * (int)sizeof(Vector4), 0);
 
     rlEnableVertexArray(mesh.vaoId);
     rlEnableVertexBuffer(particleInstanceVboId);
-    if (particlePosRadiusLoc != -1) {
-        rlEnableVertexAttribute(particlePosRadiusLoc);
-        rlSetVertexAttribute(particlePosRadiusLoc, 4, RL_FLOAT, 0, (int)sizeof(Vector4), 0);
-        rlSetVertexAttributeDivisor(particlePosRadiusLoc, 1);
+    if (position_location != -1) {
+        rlEnableVertexAttribute(position_location);
+        rlSetVertexAttribute(position_location, 4, RL_FLOAT, 0, (int)sizeof(Vector4), 0);
+        rlSetVertexAttributeDivisor(position_location, 1);
     }
 
     if (mesh.indices != NULL) rlEnableVertexBufferElement(mesh.vboId[RL_DEFAULT_SHADER_ATTRIB_LOCATION_INDICES]);
 
     rlDrawVertexArrayElementsInstanced(0, mesh.triangleCount * 3, 0, count);
 
-    if (particlePosRadiusLoc != -1) {
-        rlDisableVertexAttribute(particlePosRadiusLoc);
+    if (position_location != -1) {
+        rlDisableVertexAttribute(position_location);
     }
     rlDisableVertexBuffer();
     rlDisableVertexArray();
@@ -15478,6 +15514,7 @@ static void InitInstancing(void) {
     fluidShader.locs[SHADER_LOC_VECTOR_VIEW] = GetShaderLocation(fluidShader, "viewPos");
     fluidShader.locs[SHADER_LOC_MATRIX_VIEW] = GetShaderLocation(fluidShader, "matView");
     fluidShader.locs[SHADER_LOC_MATRIX_PROJECTION] = GetShaderLocation(fluidShader, "matProjection");
+    fluidPosRadiusLocation = GetShaderLocationAttrib(fluidShader, "instancePosRadius");
     fluidSurfaceModeLocation = GetShaderLocation(fluidShader, "uSurfaceMode");
     
     instanceTransformsCapacity = MAX_VOXELS;
@@ -15527,24 +15564,6 @@ static void DrawVoxelsInstancedFast(Mesh mesh, Material material, const float16 
     rlDisableVertexBuffer();
     rlDisableVertexArray();
     rlDisableShader();
-}
-
-static bool ensure_fluid_instance_capacity(int needed) {
-    if (needed <= fluidInstanceCapacity) return true;
-    int capacity = fluidInstanceCapacity > 0 ? fluidInstanceCapacity : 256;
-    while (capacity < needed) {
-        if (capacity > MAX_PARTICLES / 2) {
-            capacity = MAX_PARTICLES;
-            break;
-        }
-        capacity *= 2;
-    }
-    Matrix *next = (Matrix *)RL_REALLOC(fluidInstanceTransforms,
-                                        (size_t)capacity * sizeof(Matrix));
-    if (!next) return false;
-    fluidInstanceTransforms = next;
-    fluidInstanceCapacity = capacity;
-    return true;
 }
 
 typedef struct {
@@ -15758,10 +15777,24 @@ static void rebuild_fluid_hull(void) {
         int cube_min_x = min_x - 1, cube_max_x = max_x + 1;
         int cube_min_y = min_y - 1, cube_max_y = max_y + 1;
         int cube_min_z = min_z - 1, cube_max_z = max_z + 1;
-        int net_x = cube_max_x - cube_min_x + 1;
-        int net_y = cube_max_y - cube_min_y + 1;
-        int net_z = cube_max_z - cube_min_z + 1;
-        size_t net_count = (size_t)net_x * (size_t)net_y * (size_t)net_z;
+        int64_t net_x64 = (int64_t)cube_max_x - cube_min_x + 1;
+        int64_t net_y64 = (int64_t)cube_max_y - cube_min_y + 1;
+        int64_t net_z64 = (int64_t)cube_max_z - cube_min_z + 1;
+        uint64_t net_count64 = 0;
+        if (net_x64 > 0 && net_y64 > 0 && net_z64 > 0 &&
+            (uint64_t)net_x64 <= PBF_HULL_MAX_NET_CELLS / (uint64_t)net_y64) {
+            uint64_t net_xy = (uint64_t)net_x64 * (uint64_t)net_y64;
+            if (net_xy <= PBF_HULL_MAX_NET_CELLS / (uint64_t)net_z64) {
+                net_count64 = net_xy * (uint64_t)net_z64;
+            }
+        }
+        if (net_count64 == 0 || net_count64 > PBF_HULL_MAX_NET_CELLS) {
+            builder.failed = true;
+        }
+        int net_x = builder.failed ? 0 : (int)net_x64;
+        int net_y = builder.failed ? 0 : (int)net_y64;
+        int net_z = builder.failed ? 0 : (int)net_z64;
+        size_t net_count = (size_t)net_count64;
         Vector3 *net_vertex = (Vector3 *)RL_CALLOC(net_count, sizeof(Vector3));
         unsigned char *net_active = (unsigned char *)RL_CALLOC(net_count, 1);
         if (!net_vertex || !net_active) builder.failed = true;
@@ -15878,6 +15911,10 @@ static void rebuild_fluid_hull(void) {
     if (builder.failed) {
         RL_FREE(builder.vertices);
         RL_FREE(builder.normals);
+        if (fluidHullMesh.vertices) {
+            UnloadMesh(fluidHullMesh);
+            fluidHullMesh = (Mesh){ 0 };
+        }
         return;
     }
     if (fluidHullMesh.vertices) {
@@ -15908,7 +15945,7 @@ static void draw_fluid_particles(Camera3D camera) {
             return;
         }
     }
-    if (!ensure_fluid_instance_capacity(fluid_particle_count)) return;
+    if (!particlePosRadius || particlePosRadiusCapacity <= 0) return;
     float desired_radius = PBF_PARTICLE_RADIUS;
     float mesh_radius = VOXEL_SIZE * 0.25f;
     float scale = desired_radius / mesh_radius;
@@ -15916,21 +15953,18 @@ static void draw_fluid_particles(Camera3D camera) {
     for (int i = 0; i < fluid_particle_count; ++i) {
         const Particle *particle = fluid_particles[i];
         if (!particle || !particle->active || !v_isfinite(particle->pos)) continue;
-        Matrix transform = MatrixIdentity();
-        transform.m0 = scale;
-        transform.m5 = scale;
-        transform.m10 = scale;
-        transform.m12 = particle->pos.x;
-        transform.m13 = particle->pos.y;
-        transform.m14 = particle->pos.z;
-        fluidInstanceTransforms[count++] = transform;
+        if (count >= particlePosRadiusCapacity) break;
+        particlePosRadius[count++] = (Vector4){
+            particle->pos.x, particle->pos.y, particle->pos.z, scale
+        };
     }
     if (count <= 0) return;
     int surface_mode = 0;
     SetShaderValue(fluidShader, fluidSurfaceModeLocation, &surface_mode, SHADER_UNIFORM_INT);
     SetShaderValue(fluidShader, fluidShader.locs[SHADER_LOC_VECTOR_VIEW],
                    &camera.position, SHADER_UNIFORM_VEC3);
-    DrawMeshInstanced(sphereMesh, fluidMaterial, fluidInstanceTransforms, count);
+    DrawParticlesInstancedFast(sphereMesh, fluidMaterial, particlePosRadius, count,
+                               fluidPosRadiusLocation, -1, WHITE);
 }
 
 static void prepare_dynamic_voxel_transforms(void) {
@@ -16126,7 +16160,9 @@ static void DrawVoxels(Camera3D cam) {
     }
 
     if (particlePosRadiusCount > 0 && particleSphereMesh.vertexCount > 0) {
-        DrawParticlesInstancedFast(particleSphereMesh, particleMatteMaterial, particlePosRadius, particlePosRadiusCount, particleColor);
+        DrawParticlesInstancedFast(particleSphereMesh, particleMatteMaterial, particlePosRadius,
+                                   particlePosRadiusCount, particlePosRadiusLoc,
+                                   particleColorLoc, particleColor);
     }
 
     draw_fluid_particles(cam);
@@ -16821,6 +16857,9 @@ static NetInputCommand net_sample_local_input(int local_index, int player_slot) 
         if (IsKeyPressed(KEY_V)) ++creativeBlockColorIndex[slot];
         if (IsKeyPressed(KEY_B)) --creativeBlockColorIndex[slot];
         if (IsKeyPressed(KEY_TAB)) creativePickupType[slot] = (creativePickupType[slot] + 1) % 4;
+        if (IsKeyPressed(KEY_C)) creativeMaterial[slot] = creativeMaterial[slot] == CREATIVE_MATERIAL_SOLID
+            ? CREATIVE_MATERIAL_FLUID : CREATIVE_MATERIAL_SOLID;
+        if (creativeMaterial[slot] == CREATIVE_MATERIAL_FLUID) command.held |= NET_INPUT_CREATIVE_FLUID;
         command.creative_brush = (uint8_t)creativeBrushSpan[slot];
         command.creative_color = (uint8_t)creativeBlockColorIndex[slot];
         command.creative_pickup = (uint8_t)creativePickupType[slot];
@@ -17911,6 +17950,8 @@ static void net_host_tick(void) {
         netHasPendingInput[slot] = false;
         if (netRequestedCreative) {
             creativeBrushSpan[slot] = clampi(command.creative_brush, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
+            creativeMaterial[slot] = (command.held & NET_INPUT_CREATIVE_FLUID)
+                ? CREATIVE_MATERIAL_FLUID : CREATIVE_MATERIAL_SOLID;
             creativeBlockColorIndex[slot] = command.creative_color;
             creativePickupType[slot] = command.creative_pickup % 4;
             net_apply_creative_command(&players[slot], &command, 1.0f / FPS_NET_TICK_RATE);
@@ -18063,8 +18104,9 @@ static void render_gameplay_view(RenderTexture2D *screens,
             DrawRectangle(0, 0, view_w, HUD_BAR_HEIGHT, Fade(BLACK, 0.5f));
             if (creative_mode) {
                 Color c = creative_block_palette(creativeBlockColorIndex[i]);
-                const char *label = TextFormat("P%d CREATIVE | Brush %d | Pickup %s | Color %d",
+                const char *label = TextFormat("P%d CREATIVE | %s | Brush %d | Pickup %s | Color %d",
                                                i + 1,
+                                               creativeMaterial[i] == CREATIVE_MATERIAL_FLUID ? "FLUID" : "SOLID",
                                                creativeBrushSpan[i],
                                                pickup_type_label((PickupType)creativePickupType[i]),
                                                (creativeBlockColorIndex[i] % 6 + 6) % 6 + 1);

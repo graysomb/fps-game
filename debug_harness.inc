@@ -1938,6 +1938,37 @@ static bool debug_setup_creative_reset_cache(DebugRunState *state)
         return false;
     }
 
+    // Exercise the actual creative brush against the empty world's floor.
+    players[0].pos = (Vector3){ 0.25f, 4.0f, 0.25f };
+    players[0].pitch = -89.0f;
+    players[0].yaw = 0.0f;
+    creativeMaterial[0] = CREATIVE_MATERIAL_FLUID;
+    creative_place_voxels(0);
+    if (voxel_count != 27 || fluid_particle_count != 27 * VOXEL_CORNER_COUNT) {
+        debug_add_failure(state, "creative fluid brush created cells=%d/27 particles=%d/216",
+                          voxel_count, fluid_particle_count);
+        return false;
+    }
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (!voxel_is_fluid(v) || !v->simulate || v->glueEligible ||
+            occupied(v->gx, v->gy, v->gz)) {
+            debug_add_failure(state, "creative fluid cell entered solid occupancy or glue paths");
+            return false;
+        }
+    }
+    creativeMaterial[0] = CREATIVE_MATERIAL_SOLID;
+    creative_place_voxels(0);
+    if (voxel_count != 54 || fluid_particle_count != 216) {
+        debug_add_failure(state, "creative solid brush failed after fluid placement");
+        return false;
+    }
+    ResetCreative();
+    if (fluid_particle_count != 0 || creativeMaterial[0] != CREATIVE_MATERIAL_SOLID) {
+        debug_add_failure(state, "creative reset retained fluid particles or material selection");
+        return false;
+    }
+
     // Finish as a normal deterministic simulation so the scenario also checks
     // that rebuilding the world after the empty creative reset remains valid.
     return debug_setup_dynamic_freefall(state);
@@ -2855,7 +2886,6 @@ static bool debug_setup_pbf_scaling(DebugRunState *state)
 {
     debug_reset_world();
     activePlayers = 0;
-    fluidRenderMode = FLUID_RENDER_SURFACE;
 
     const Color fluid_color = { 45, 145, 235, 210 };
     const int side = debugRunConfig.pbf_side;
@@ -4145,7 +4175,7 @@ static bool debug_write_report(DebugRunState *state)
         ? state->benchmark_gpu_hull_total_ms / (double)state->benchmark_measured_steps : 0.0;
     fprintf(file,
             "  \"benchmark\": {\"enabled\": %s, \"fluidParticles\": %d,"
-            " \"hullRender\": true, \"hullBackend\": \"%s\", \"warmupSteps\": %d, \"measuredSteps\": %d,"
+            " \"hullRender\": %s, \"hullBackend\": \"%s\", \"warmupSteps\": %d, \"measuredSteps\": %d,"
             " \"averagePhysicsMs\": %.9g, \"averageRenderMs\": %.9g,"
             " \"averageFrameMs\": %.9g, \"framesPerSecond\": %.9g,"
             " \"gpuComputeMs\": %.9g, \"gpuHullMs\": %.9g,"
@@ -4155,7 +4185,9 @@ static bool debug_write_report(DebugRunState *state)
             " \"gpuNeighborOverflowMax\": %u},\n",
             state->pbf_scaling_benchmark ? "true" : "false",
             state->expected_fluid_particles,
-            state->benchmark_gpu_hull ? "gpu-compute" : "cpu",
+            fluidRenderMode == FLUID_RENDER_SURFACE ? "true" : "false",
+            fluidRenderMode == FLUID_RENDER_PARTICLES ? "particles" :
+                (state->benchmark_gpu_hull ? "gpu-compute" : "cpu"),
             state->benchmark_warmup_steps, state->benchmark_measured_steps,
             benchmark_physics_ms, benchmark_render_ms, benchmark_frame_ms, benchmark_fps,
             benchmark_gpu_compute_ms, benchmark_gpu_hull_ms,
@@ -4345,8 +4377,9 @@ static int run_debug_harness(void)
     if (state.pbf_scaling_benchmark && state.benchmark_measured_steps > 0) {
         double frame_ms = state.benchmark_frame_total_ms / (double)state.benchmark_measured_steps;
         fprintf(stderr,
-                "debug-benchmark particles=%d backend=%s hull=surface physicsMs=%.6f renderMs=%.6f frameMs=%.6f fps=%.3f measured=%d warmup=%d\n",
+                "debug-benchmark particles=%d backend=%s render=%s physicsMs=%.6f renderMs=%.6f frameMs=%.6f fps=%.3f measured=%d warmup=%d\n",
                 state.expected_fluid_particles, physics_backend_name(physicsBackend.active),
+                fluidRenderMode == FLUID_RENDER_SURFACE ? "surface" : "particles",
                 state.benchmark_physics_total_ms / (double)state.benchmark_measured_steps,
                 state.benchmark_render_total_ms / (double)state.benchmark_measured_steps,
                 frame_ms, frame_ms > 0.0 ? 1000.0 / frame_ms : 0.0,

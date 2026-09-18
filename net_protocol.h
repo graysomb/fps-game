@@ -48,7 +48,8 @@ typedef enum NetInputButtons {
     NET_INPUT_CREATIVE_REMOVE_PICKUP = 1u << 8,
     NET_INPUT_CREATIVE_ACTIVATE = 1u << 9,
     NET_INPUT_CREATIVE_UP = 1u << 10,
-    NET_INPUT_CREATIVE_DOWN = 1u << 11
+    NET_INPUT_CREATIVE_DOWN = 1u << 11,
+    NET_INPUT_CREATIVE_FLUID = 1u << 12
 } NetInputButtons;
 
 typedef struct NetPacketHeader {

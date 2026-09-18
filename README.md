@@ -331,6 +331,9 @@ fps_ray --physics=gpu --gpu-transfer-mode=resident --gpu-transfer-stats
 Creative mode can place runtime PBF cells that reuse the voxel corner-particle
 storage. Press `C` for player one, keypad `3` for player two, or the left stick
 button on a controller to switch the creative brush between `SOLID` and `FLUID`.
+Use the normal place control (`Left Ctrl`, player two `Right Ctrl`, or controller
+`RT`) to generate a brush-sized volume, and adjust its size with `[` / `]`
+(or D-pad Left/Right). The HUD shows the selected material.
 Fluid cells are intentionally excluded from saved map occupancy, glue, solid-voxel
 sleep, activation, projectile, and recycle paths. They collide with immutable static
 geometry without waking it and exchange collision corrections with solids that
@@ -343,7 +346,8 @@ correction, and XSPH viscosity stages from Macklin and Mueller's *Position Based
 Fluids*. A 0.5 m fluid cell contains eight independent particles on a 0.25 m
 lattice. Each physics substep runs two PBF Jacobi iterations with rest density
 1000 kg/m3, `k=0.2`, `n=4`, `dq=0.2h`, and XSPH viscosity 0.15. The same stages
-run through the normal GPU -> CPU MT -> CPU ST fallback chain.
+run on the CPU while fluid is present, including when GPU physics is selected,
+because the GPU simulation upload currently contains only solid particles.
 
 Press `F5` to switch between low-poly particle spheres and a faceted approximate
 hull. Surface mode bins particles into 0.25 m cells, builds a coarse scalar density

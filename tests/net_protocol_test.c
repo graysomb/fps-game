@@ -11,7 +11,7 @@ int main(void) {
         .move_y = 32767,
         .look_x = 222,
         .look_y = -333,
-        .held = NET_INPUT_TETHER,
+        .held = NET_INPUT_TETHER | NET_INPUT_CREATIVE_FLUID,
         .pressed = NET_INPUT_FIRE | NET_INPUT_JUMP,
         .creative_brush = 7,
         .creative_color = 4,
