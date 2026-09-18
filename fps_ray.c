@@ -594,8 +594,8 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define VOXEL_DEACTIVATION_FRAMES 5
 #define VOXEL_SLEEP_SNAP_POSITION_TOLERANCE (VOXEL_SIZE * 0.25f)
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
-#define FLUID_DEACTIVATION_VELOCITY_THRESHOLD 0.40f
-#define FLUID_DEACTIVATION_FRAMES 8
+#define FLUID_DEACTIVATION_VELOCITY_THRESHOLD 0.75f
+#define FLUID_DEACTIVATION_FRAMES 5
 #define STATIC_RESTORE_SEARCH_RADIUS 2*1
 #define DEBRIS_ACTIVATION_COOLDOWN_FRAMES (60 * 10)
 #define STATIC_REBUILD_ACTIVATION_COOLDOWN_FRAMES (60 * 10)
@@ -4844,64 +4844,17 @@ static void deactivate_fluid_cell(int voxel_idx) {
     if (!voxel->simulate || !voxel_is_fluid(voxel)) return;
 
     voxel->simulate = false;
-    int tgx = (int)floorf(voxel->pos.x / VOXEL_SIZE);
-    int tgy = (int)floorf(voxel->pos.y / VOXEL_SIZE);
-    int tgz = (int)floorf(voxel->pos.z / VOXEL_SIZE);
-    int existing = table_get_static_only(tgx, tgy, tgz);
-    if (existing >= 0 && existing != voxel_idx) {
-        int best_x = tgx, best_y = tgy, best_z = tgz;
-        float best_dist_sq = FLT_MAX;
-        for (int dy = -1; dy <= 1; ++dy) {
-            for (int dz = -1; dz <= 1; ++dz) {
-                for (int dx = -1; dx <= 1; ++dx) {
-                    if (dx == 0 && dy == 0 && dz == 0) continue;
-                    if (table_get_static_only(tgx + dx, tgy + dy, tgz + dz) < 0) {
-                        float cx = (tgx + dx + 0.5f) * VOXEL_SIZE;
-                        float cy = (tgy + dy + 0.5f) * VOXEL_SIZE;
-                        float cz = (tgz + dz + 0.5f) * VOXEL_SIZE;
-                        float dsq = (cx - voxel->pos.x) * (cx - voxel->pos.x) +
-                                    (cy - voxel->pos.y) * (cy - voxel->pos.y) +
-                                    (cz - voxel->pos.z) * (cz - voxel->pos.z);
-                        if (dsq < best_dist_sq) {
-                            best_dist_sq = dsq;
-                            best_x = tgx + dx;
-                            best_y = tgy + dy;
-                            best_z = tgz + dz;
-                        }
-                    }
-                }
-            }
-        }
-        tgx = best_x;
-        tgy = best_y;
-        tgz = best_z;
-    }
-    voxel->gx = tgx;
-    voxel->gy = tgy;
-    voxel->gz = tgz;
+    voxel->gx = (int)floorf(voxel->pos.x / VOXEL_SIZE);
+    voxel->gy = (int)floorf(voxel->pos.y / VOXEL_SIZE);
+    voxel->gz = (int)floorf(voxel->pos.z / VOXEL_SIZE);
     voxel->min_gx = voxel->max_gx = voxel->gx;
     voxel->min_gy = voxel->max_gy = voxel->gy;
     voxel->min_gz = voxel->max_gz = voxel->gz;
-    voxel->pos = (Vector3){
-        ((float)tgx + 0.5f) * VOXEL_SIZE,
-        ((float)tgy + 0.5f) * VOXEL_SIZE,
-        ((float)tgz + 0.5f) * VOXEL_SIZE
-    };
-    voxel->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
 
     voxel_table_register(voxel, voxel_idx);
 
-    float offset = 0.5f * PBF_PARTICLE_SPACING;
     for (int c = 0; c < VOXEL_CORNER_COUNT; ++c) {
         if (voxel->particles[c]) {
-            voxel->particles[c]->pos = (Vector3){
-                voxel->pos.x + (float)corner_signs[c][0] * offset,
-                voxel->pos.y + (float)corner_signs[c][1] * offset,
-                voxel->pos.z + (float)corner_signs[c][2] * offset
-            };
-            voxel->particles[c]->predicted_pos = voxel->particles[c]->pos;
-            voxel->particles[c]->prev_pos = voxel->particles[c]->pos;
-            voxel->particles[c]->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
             fluid_particle_deactivate(voxel->particles[c]);
         }
     }
@@ -6871,7 +6824,7 @@ static void evaluate_voxel_calm_range(int start, int end, int worker_id, void *u
                     }
                     if (p->pbf_density > 0.0f) {
                         float density_ratio = p->pbf_density / PBF_REST_DENSITY;
-                        if (density_ratio < 0.35f || density_ratio > 1.35f) {
+                        if (fabsf(density_ratio - 1.0f) > 0.25f) {
                             calm = false;
                             break;
                         }
@@ -6900,22 +6853,11 @@ static void evaluate_voxel_calm_range(int start, int end, int worker_id, void *u
     }
 }
 
-static int compare_fluid_candidate_height(const void *a, const void *b) {
-    int idx_a = *(const int *)a;
-    int idx_b = *(const int *)b;
-    float ya = voxels[idx_a].pos.y;
-    float yb = voxels[idx_b].pos.y;
-    if (ya < yb) return -1;
-    if (ya > yb) return 1;
-    return 0;
-}
-
 static bool deactivate_sleeping_voxels(void)
 {
     bool changed = false;
     bool restored_static = false;
-    int remaining_solid_budget = VOXEL_MAX_DEACTIVATIONS_PER_FRAME;
-    int remaining_fluid_budget = VOXEL_MAX_DEACTIVATIONS_PER_FRAME;
+    int remaining_budget = VOXEL_MAX_DEACTIVATIONS_PER_FRAME;
 
     pbd_parallel_for(0, voxel_count, evaluate_voxel_calm_range, NULL);
 
@@ -6979,7 +6921,7 @@ static bool deactivate_sleeping_voxels(void)
     }
 
     int idx = 0;
-    while (idx < voxel_count && remaining_solid_budget > 0) {
+    while (idx < voxel_count && remaining_budget > 0) {
         Voxel *voxel = &voxels[idx];
         if (!voxel_is_awake_dynamic(voxel) || voxel->type != 0 || voxel->isBullet) {
             ++idx;
@@ -7068,74 +7010,76 @@ static bool deactivate_sleeping_voxels(void)
 
         if (debugLogVoxelDeactivation) {
             TraceLog(LOG_INFO,
-                     "[Deactivate] %s cluster starting=%d count=%d remaining_solid_budget_before=%d",
+                     "[Deactivate] %s cluster starting=%d count=%d remaining_budget_before=%d",
                      near_original ? "restored near-origin" : "froze in place",
-                     idx, cluster_count, remaining_solid_budget);
+                     idx, cluster_count, remaining_budget);
         }
-        remaining_solid_budget -= cluster_count;
-        if (remaining_solid_budget < 0) {
-            remaining_solid_budget = 0;
+        remaining_budget -= cluster_count;
+        if (remaining_budget < 0) {
+            remaining_budget = 0;
         }
         changed = true;
         continue;
     }
 
     bool fluid_deactivated = false;
-    // Advance sleepFrames independently per dynamic fluid voxel
+    // Cluster evaluation and deactivation for fluid voxels
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
         if (!voxel->simulate || !voxel_is_fluid(voxel)) {
             continue;
         }
-        if (voxelCalmFlags[i]) {
-            if (voxel->sleepFrames < INT_MAX) {
-                voxel->sleepFrames++;
-            }
-        } else {
-            voxel->sleepFrames = 0;
-        }
-    }
-
-    // Collect all fluid voxels eligible to deactivate
-    int fluid_candidate_count = 0;
-    for (int i = 0; i < voxel_count; ++i) {
-        Voxel *voxel = &voxels[i];
-        if (!voxel->simulate || !voxel_is_fluid(voxel)) {
+        if (sleepClusterVisited[i]) {
             continue;
         }
-        if (voxel->sleepFrames >= FLUID_DEACTIVATION_FRAMES) {
-            glueClusterIndices[fluid_candidate_count++] = i;
-        }
-    }
 
-    // Sort candidates bottom-up (lowest y first) so bottom fluid settles first,
-    // providing static support for the layers above it.
-    if (fluid_candidate_count > 1) {
-        qsort(glueClusterIndices, fluid_candidate_count, sizeof(int), compare_fluid_candidate_height);
-    }
+        int head = 0;
+        int tail = 0;
+        glueClusterIndices[tail++] = i;
+        sleepClusterVisited[i] = 1;
 
-    // Greedily deactivate supported candidates up to the fluid deactivation budget
-    for (int c = 0; c < fluid_candidate_count && remaining_fluid_budget > 0; ++c) {
-        int candidate_idx = glueClusterIndices[c];
-        Voxel *member = &voxels[candidate_idx];
-        if (!member->simulate || !voxel_is_fluid(member)) {
-            continue;
-        }
-        // If there is an awake fluid voxel directly above, ensure it is calm too
-        // so we don't freeze the bottom while a waterfall is crashing down into it.
-        int gx = (int)floorf(member->pos.x / VOXEL_SIZE);
-        int gy = (int)floorf(member->pos.y / VOXEL_SIZE);
-        int gz = (int)floorf(member->pos.z / VOXEL_SIZE);
-        int above_idx = table_get(gx, gy + 1, gz);
-        if (above_idx >= 0 && above_idx < voxel_count) {
-            Voxel *above = &voxels[above_idx];
-            if (above->simulate && voxel_is_fluid(above) && !voxelCalmFlags[above_idx]) {
-                continue;
+        bool cluster_calm = (voxelCalmFlags[i] != 0);
+        int min_sleep = voxel->sleepFrames;
+
+        while (head < tail) {
+            int idx = glueClusterIndices[head++];
+            Voxel *member = &voxels[idx];
+            if (!voxelCalmFlags[idx]) {
+                cluster_calm = false;
+            }
+            if (member->sleepFrames < min_sleep) {
+                min_sleep = member->sleepFrames;
+            }
+            int neighbors[32];
+            int neighbor_count = gather_adjacent_fluid_voxels(idx, neighbors, 32);
+            for (int n = 0; n < neighbor_count; ++n) {
+                int neighbor = neighbors[n];
+                if (neighbor < 0 || neighbor >= voxel_count) continue;
+                if (sleepClusterVisited[neighbor]) continue;
+                sleepClusterVisited[neighbor] = 1;
+                if (tail < MAX_VOXELS) {
+                    glueClusterIndices[tail++] = neighbor;
+                }
             }
         }
-        if (fluid_voxel_has_support(member)) {
-            deactivate_fluid_cell(candidate_idx);
-            remaining_fluid_budget--;
+
+        int next_sleep = cluster_calm ? min_sleep + 1 : 0;
+        bool cluster_has_support = false;
+        for (int c = 0; c < tail; ++c) {
+            int member_idx = glueClusterIndices[c];
+            Voxel *member = &voxels[member_idx];
+            member->sleepFrames = next_sleep;
+            if (fluid_voxel_has_support(member)) {
+                cluster_has_support = true;
+            }
+        }
+
+        if (next_sleep >= FLUID_DEACTIVATION_FRAMES && cluster_has_support && remaining_budget >= tail) {
+            for (int c = 0; c < tail; ++c) {
+                int member_idx = glueClusterIndices[c];
+                deactivate_fluid_cell(member_idx);
+            }
+            remaining_budget -= tail;
             changed = true;
             fluid_deactivated = true;
         }
@@ -12164,12 +12108,7 @@ static void solve_static_collision_particle(Particle *p, float half_player) {
         Voxel *static_voxel = &voxels[static_idx];
         if (static_voxel->simulate) continue;
         if (voxel_is_fluid(static_voxel)) {
-            bool energetic = (p->material == PARTICLE_MATERIAL_FLUID)
-                ? (v_length(p->vel) >= FLUID_DEACTIVATION_VELOCITY_THRESHOLD * 1.5f)
-                : (v_length(p->vel) >= VOXEL_DEACTIVATION_VELOCITY_THRESHOLD);
-            if (energetic) {
-                static_voxel->wake_source = true;
-            }
+            static_voxel->wake_source = true;
         }
         push_particle_out_of_static(static_voxel, p, particle_radius);
     }
