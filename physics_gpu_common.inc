@@ -1072,6 +1072,17 @@ static bool gpu_validate_and_commit(void) {
             v->pos = (Vector3){g->pos_rest_edge[0], g->pos_rest_edge[1], g->pos_rest_edge[2]};
             v->vel = (Vector3){g->velocity_rest_volume[0], g->velocity_rest_volume[1], g->velocity_rest_volume[2]};
             v->skipCollisionVelocityFrames = (int)g->lifecycle[0];
+        } else if (voxel_is_fluid(v)) {
+            Vector3 centroid = { 0.0f, 0.0f, 0.0f };
+            Vector3 vel = { 0.0f, 0.0f, 0.0f };
+            for (int corner = 0; corner < 8; ++corner) {
+                if (v->particles[corner]) {
+                    centroid = v_add(centroid, v->particles[corner]->pos);
+                    vel = v_add(vel, v->particles[corner]->vel);
+                }
+            }
+            v->pos = v_mul(centroid, 0.125f);
+            v->vel = v_mul(vel, 0.125f);
         }
         v->wake_source = g->lifecycle[1] != 0;
         v->wake_timer = (int)g->bounds_min[3];
