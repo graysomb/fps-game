@@ -66,6 +66,9 @@ typedef struct DebugSample {
     float mean_density_ratio;
     float max_density_ratio;
     float mean_fluid_speed;
+    int constrained_solid_particles;
+    int illegal_free_solid_particles;
+    int fracture_derived_fluid_particles;
 } DebugSample;
 
 typedef struct DebugTrackedCell {
@@ -148,6 +151,14 @@ typedef struct DebugRunState {
     int fracture_strain_voxel;
     int fracture_shear_voxel;
     int fracture_control_voxel;
+    bool pbd_pbf_fracture_test;
+    int fracture_voxel_1;
+    int fracture_voxel_2;
+    int fracture_creative_fluid_voxel;
+    bool fracture_partial_observed;
+    bool fracture_complete_observed;
+    bool fracture_restoration_observed;
+    bool fracture_creative_survived;
     float tether_thin_wall_initial_x;
     float tether_thin_wall_final_x;
     float tether_thin_wall_final_min_x;
@@ -275,6 +286,7 @@ static bool debug_setup_pbf_dense_neighbors(DebugRunState *state);
 static bool debug_setup_cube_stress(DebugRunState *state);
 static bool debug_setup_voxel_strain_shear_fracture(DebugRunState *state);
 static bool debug_setup_arena_platform_fluid(DebugRunState *state);
+static bool debug_setup_pbd_pbf_fracture(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall, 60, 60 },
@@ -302,7 +314,8 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "goliath-behavior", "Goliath maintains armor, detects enemy, and launches voxels", debug_setup_goliath_behavior, 180, 60 },
     { "cube-stress", "Stress test with scalable dynamic cube (size set by FPS_CUBE_SIZE)", debug_setup_cube_stress, 60, 60 },
     { "voxel-strain-shear-fracture", "Dynamic voxels deactivate VGS shape constraints when strain or shear exceeds threshold", debug_setup_voxel_strain_shear_fracture, 80, 60 },
-    { "arena-platform-fluid", "Test arena central platform activated with sleeping fluid on top", debug_setup_arena_platform_fluid, 60, 60 }
+    { "arena-platform-fluid", "Test arena central platform activated with sleeping fluid on top", debug_setup_arena_platform_fluid, 60, 60 },
+    { "pbd-pbf-fracture", "Fracture converts unconstrained solid particles to PBF fluid with lifecycle restoration", debug_setup_pbd_pbf_fracture, 60, 60 }
 };
 
 static const int debugScenarioCount = (int)(sizeof(debugScenarios) / sizeof(debugScenarios[0]));
@@ -842,10 +855,16 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
             if (voxel->simulate && particle->base_inv_mass <= 0.0f) {
                 ++sample.zero_mass_corners;
             }
-            if (voxel->simulate &&
-                (particle->sim_index < 0 || particle->sim_index >= sim_particle_count ||
-                 sim_particles[particle->sim_index] != particle)) {
-                ++sample.invalid_particle_refs;
+            if (voxel->simulate) {
+                if (particle->material == PARTICLE_MATERIAL_FLUID) {
+                    if (particle->fluid_index < 0 || particle->fluid_index >= fluid_particle_count ||
+                        fluid_particles[particle->fluid_index] != particle) {
+                        ++sample.invalid_particle_refs;
+                    }
+                } else if (particle->sim_index < 0 || particle->sim_index >= sim_particle_count ||
+                           sim_particles[particle->sim_index] != particle) {
+                    ++sample.invalid_particle_refs;
+                }
             }
         }
         if (valid_corners > 0) center = v_mul(center, 1.0f / (float)valid_corners);
@@ -902,6 +921,25 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
         sample.mean_fluid_speed = speed_sum * inverse_count;
     }
     sample.physics_step_ms = physicsBackend.last_step_ms;
+
+    for (int i = 0; i < active_particle_count; ++i) {
+        const Particle *particle = active_particles[i];
+        if (!particle || !particle->active) continue;
+        if (particle->material == PARTICLE_MATERIAL_SOLID) {
+            if (particle->base_inv_mass > 0.0f) {
+                if (particle->glue_count > 0) {
+                    ++sample.constrained_solid_particles;
+                } else {
+                    ++sample.illegal_free_solid_particles;
+                }
+            }
+        } else if (particle->material == PARTICLE_MATERIAL_FLUID) {
+            if (particle->fracture_derived) {
+                ++sample.fracture_derived_fluid_particles;
+            }
+        }
+    }
+
     return sample;
 }
 
@@ -981,6 +1019,20 @@ static void debug_draw_overlay(const DebugRunState *state, const DebugSample *sa
                             atomic_load_explicit(&fluidDynamicCollisionCount,
                                                  memory_order_relaxed)),
                  34, y + 78, 17, result_color);
+    }
+    if (state->pbd_pbf_fracture_test) {
+        int y = 192;
+        DrawText(TextFormat("FRACTURE constrained=%d illegal_free=%d frac_fluid=%d",
+                            sample->constrained_solid_particles,
+                            sample->illegal_free_solid_particles,
+                            sample->fracture_derived_fluid_particles),
+                 34, y, 17, result_color);
+        DrawText(TextFormat("PHASES partial=%s complete=%s restore=%s creative=%s",
+                            state->fracture_partial_observed ? "yes" : "no",
+                            state->fracture_complete_observed ? "yes" : "no",
+                            state->fracture_restoration_observed ? "yes" : "no",
+                            state->fracture_creative_survived ? "yes" : "no"),
+                 34, y + 26, 17, result_color);
     }
 }
 
@@ -1421,7 +1473,9 @@ static void debug_readback_gpu_buffers(DebugRunState *state, int step)
 
     size_t static_bytes = (size_t)HASH_SIZE * sizeof(GpuStaticCell);
     GpuStaticCell *static_readback = malloc(static_bytes);
-    size_t sim_bytes = (size_t)sim_particle_count * sizeof(uint32_t);
+    int uploaded_sim_count = gpuPhysics.control_stage.sim_count > 0
+        ? gpuPhysics.control_stage.sim_count : sim_particle_count;
+    size_t sim_bytes = (size_t)uploaded_sim_count * sizeof(uint32_t);
     uint32_t *sim_id_readback = sim_bytes ? malloc(sim_bytes) : NULL;
     size_t particle_bytes = (size_t)gpuPhysics.compact_count * sizeof(GpuParticleState);
     GpuParticleState *particle_readback = particle_bytes ? malloc(particle_bytes) : NULL;
@@ -1457,7 +1511,7 @@ static void debug_readback_gpu_buffers(DebugRunState *state, int step)
         }
     }
 
-    for (int i = 0; i < sim_particle_count; ++i) {
+    for (int i = 0; i < uploaded_sim_count; ++i) {
         uint32_t actual = sim_id_readback[i];
         if (actual != gpuPhysics.sim_ids[i] || actual >= (uint32_t)gpuPhysics.compact_count) {
             ++state->gpu_sim_id_mismatches;
@@ -1470,6 +1524,9 @@ static void debug_readback_gpu_buffers(DebugRunState *state, int step)
             const Particle *particle = voxel->particles[corner];
             if (!particle) {
                 ++state->gpu_tagged_corners_missing_from_sim_ids;
+                continue;
+            }
+            if (particle->material == PARTICLE_MATERIAL_FLUID) {
                 continue;
             }
             ptrdiff_t pool_id = particle - particles_pool;
@@ -1489,7 +1546,7 @@ static void debug_readback_gpu_buffers(DebugRunState *state, int step)
                 if (state->overhang_impact) continue;
             }
             bool found = false;
-            for (int sim = 0; sim < sim_particle_count; ++sim) {
+            for (int sim = 0; sim < uploaded_sim_count; ++sim) {
                 if (sim_id_readback[sim] == (uint32_t)compact_id) {
                     found = true;
                     break;
@@ -1699,6 +1756,93 @@ static bool debug_setup_voxel_strain_shear_fracture(DebugRunState *state)
     debug_set_initial_centroid(state);
     state->camera.position = (Vector3){ -1.2f, 2.5f, 5.5f };
     state->camera.target = (Vector3){ -1.2f, 1.5f, 0.0f };
+    debug_capture(state, "phase-01-fracture-setup.png", "fracture-setup", 0);
+    return true;
+}
+
+static bool debug_setup_pbd_pbf_fracture(DebugRunState *state)
+{
+    debug_reset_world();
+    activePlayers = 0;
+    state->pbd_pbf_fracture_test = true;
+    state->fracture_partial_observed = false;
+    state->fracture_complete_observed = false;
+    state->fracture_restoration_observed = false;
+    state->fracture_creative_survived = false;
+    state->expected_voxels = 2;
+
+    Color floor_color = (Color){ 75, 85, 95, 255 };
+    Color solid_color = (Color){ 225, 110, 50, 255 };
+    Color creative_color = (Color){ 65, 215, 160, 210 };
+
+    for (int z = -3; z <= 3; ++z) {
+        for (int x = -3; x <= 6; ++x) {
+            debug_add_cell(x, 0, z, true, false, floor_color, DEBUG_SUPPORT_TAG);
+        }
+    }
+
+    int c1 = debug_add_cell(0, 6, 0, true, false, solid_color, DEBUG_TEST_TAG);
+    int c2 = debug_add_cell(1, 6, 0, true, false, solid_color, DEBUG_TEST_TAG);
+    if (c1 < 0 || c2 < 0) {
+        debug_add_failure(state, "pbd-pbf-fracture could not create static test cells");
+        return false;
+    }
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+
+    float fx = 4.0f * VOXEL_SIZE + 0.5f * VOXEL_SIZE;
+    float fy = 1.0f * VOXEL_SIZE + 0.5f * VOXEL_SIZE;
+    float fz = 0.0f * VOXEL_SIZE + 0.5f * VOXEL_SIZE;
+    int creative_cell = add_fluid_cell(fx, fy, fz, creative_color);
+    if (creative_cell < 0) {
+        debug_add_failure(state, "pbd-pbf-fracture could not create creative fluid cell");
+        return false;
+    }
+    voxels[creative_cell].debugClusterTag = DEBUG_FLUID_TAG;
+    state->fracture_creative_fluid_voxel = creative_cell;
+
+    debug_rebuild_world_state();
+
+    if (!debug_activate_test_cluster(state)) {
+        debug_add_failure(state, "pbd-pbf-fracture could not activate test cluster");
+        return false;
+    }
+
+    int dyn_v1 = -1, dyn_v2 = -1;
+    for (int i = 0; i < voxel_count; ++i) {
+        if (voxels[i].debugClusterTag == DEBUG_TEST_TAG && voxels[i].simulate) {
+            if (dyn_v1 < 0) dyn_v1 = i;
+            else if (dyn_v2 < 0) dyn_v2 = i;
+        }
+    }
+    if (dyn_v1 < 0 || dyn_v2 < 0) {
+        debug_add_failure(state, "pbd-pbf-fracture could not find activated dynamic voxels");
+        return false;
+    }
+    if (voxels[dyn_v1].pos.x > voxels[dyn_v2].pos.x) {
+        int tmp = dyn_v1; dyn_v1 = dyn_v2; dyn_v2 = tmp;
+    }
+    state->fracture_voxel_1 = dyn_v1;
+    state->fracture_voxel_2 = dyn_v2;
+
+    debug_set_initial_centroid(state);
+    state->camera.position = (Vector3){ 2.5f, 6.0f, 7.5f };
+    state->camera.target = (Vector3){ 1.5f, 3.0f, 0.0f };
+
+    Voxel *v1 = &voxels[dyn_v1];
+    float stretch_x = VOXEL_SIZE * 0.40f;
+    for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+        Particle *p = v1->particles[corner];
+        if (p && corner_signs[corner][0] < 0) {
+            p->pos.x -= stretch_x;
+            p->prev_pos = p->pos;
+            p->predicted_pos = p->pos;
+        }
+    }
+    collisionTopologyDirty = true;
+#if defined(GRAPHICS_API_OPENGL_43) || (defined(__APPLE__) && defined(FPS_GPU_METAL))
+    gpuPhysics.resident_valid = false;
+#endif
+
     debug_capture(state, "phase-01-fracture-setup.png", "fracture-setup", 0);
     return true;
 }
@@ -3587,6 +3731,210 @@ static void debug_validate_step(DebugRunState *state, int step)
         }
         return;
     }
+    if (state->pbd_pbf_fracture_test) {
+        int v1_idx = state->fracture_voxel_1;
+        int v2_idx = state->fracture_voxel_2;
+
+        if (step == 0) {
+            if (sample.tagged_dynamic != 2 || sample.tagged_static != 0) {
+                debug_add_failure(state, "step 0: expected 2 dynamic solid voxels, found dyn=%d stat=%d",
+                                  sample.tagged_dynamic, sample.tagged_static);
+            }
+            if (sample.constrained_solid_particles != 12) {
+                debug_add_failure(state, "step 0: expected 12 constrained solid particles, found %d",
+                                  sample.constrained_solid_particles);
+            }
+            if (sample.illegal_free_solid_particles != 0) {
+                debug_add_failure(state, "step 0: found %d illegal free solid particles",
+                                  sample.illegal_free_solid_particles);
+            }
+            if (sample.fracture_derived_fluid_particles != 0) {
+                debug_add_failure(state, "step 0: expected 0 fracture fluid particles, found %d",
+                                  sample.fracture_derived_fluid_particles);
+            }
+            if (sample.fluid_particles != 8) {
+                debug_add_failure(state, "step 0: expected 8 creative fluid particles, found %d",
+                                  sample.fluid_particles);
+            }
+        }
+
+        if (step == 1) {
+            if (v1_idx >= 0 && v1_idx < voxel_count && voxels[v1_idx].vgs_active) {
+                debug_add_failure(state, "step 1: voxel 1 did not break (vgs_active remains true)");
+            }
+            if (v2_idx >= 0 && v2_idx < voxel_count && !voxels[v2_idx].vgs_active) {
+                debug_add_failure(state, "step 1: voxel 2 broke prematurely (vgs_active became false)");
+            }
+            if (sample.constrained_solid_particles != 8) {
+                debug_add_failure(state, "step 1: expected 8 constrained solid particles, got %d",
+                                  sample.constrained_solid_particles);
+            }
+            if (sample.illegal_free_solid_particles != 0) {
+                debug_add_failure(state, "step 1: found %d illegal free solid particles",
+                                  sample.illegal_free_solid_particles);
+            }
+            if (sample.fracture_derived_fluid_particles != 4) {
+                debug_add_failure(state, "step 1: expected 4 fracture-derived fluid particles, got %d",
+                                  sample.fracture_derived_fluid_particles);
+            }
+            if (sample.fluid_particles != 12) {
+                debug_add_failure(state, "step 1: expected 12 total fluid particles (8 creative + 4 fracture), got %d",
+                                  sample.fluid_particles);
+            }
+            if (v1_idx >= 0 && v1_idx < voxel_count) {
+                Voxel *v1 = &voxels[v1_idx];
+                for (int c = 0; c < VOXEL_CORNER_COUNT; ++c) {
+                    Particle *p = v1->particles[c];
+                    if (!p) {
+                        debug_add_failure(state, "step 1: voxel 1 particle %d is null", c);
+                        continue;
+                    }
+                    if (corner_signs[c][0] < 0) {
+                        if (p->material != PARTICLE_MATERIAL_FLUID || p->glue_count != 0 ||
+                            p->fluid_index < 0 || p->sim_index != -1 ||
+                            fabsf(p->radius - PBF_PARTICLE_RADIUS) > 1e-4f ||
+                            fabsf(p->base_inv_mass - 1.0f / PBF_PARTICLE_MASS) > 1e-4f) {
+                            debug_add_failure(state, "step 1: free corner %d failed fluid conversion validation", c);
+                        }
+                    } else {
+                        if (p->material != PARTICLE_MATERIAL_SOLID || p->glue_count != 1 ||
+                            p->fluid_index != -1 || p->sim_index < 0) {
+                            debug_add_failure(state, "step 1: shared corner %d failed constrained solid validation", c);
+                        }
+                    }
+                }
+            }
+            state->fracture_partial_observed = true;
+            debug_capture(state, "phase-02-partial-fracture.png", "partial-fracture", step);
+        }
+
+        if (step == 4) {
+            if (v2_idx >= 0 && v2_idx < voxel_count) {
+                Voxel *v2 = &voxels[v2_idx];
+                float stretch_x = VOXEL_SIZE * 0.40f;
+                for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+                    Particle *p = v2->particles[corner];
+                    if (p && corner_signs[corner][0] > 0) {
+                        p->pos.x += stretch_x;
+                        p->prev_pos = p->pos;
+                        p->predicted_pos = p->pos;
+                    }
+                }
+                collisionTopologyDirty = true;
+#if defined(GRAPHICS_API_OPENGL_43) || (defined(__APPLE__) && defined(FPS_GPU_METAL))
+                gpuPhysics.resident_valid = false;
+#endif
+            }
+        }
+
+        if (step == 5) {
+            if (v2_idx >= 0 && v2_idx < voxel_count && voxels[v2_idx].vgs_active) {
+                debug_add_failure(state, "step 5: voxel 2 did not break (vgs_active remains true)");
+            }
+            if (sample.constrained_solid_particles != 0) {
+                debug_add_failure(state, "step 5: expected 0 constrained solid particles, got %d",
+                                  sample.constrained_solid_particles);
+            }
+            if (sample.illegal_free_solid_particles != 0) {
+                debug_add_failure(state, "step 5: found %d illegal free solid particles",
+                                  sample.illegal_free_solid_particles);
+            }
+            if (sample.fracture_derived_fluid_particles != 12) {
+                debug_add_failure(state, "step 5: expected 12 fracture-derived fluid particles, got %d",
+                                  sample.fracture_derived_fluid_particles);
+            }
+            if (sample.fluid_particles != 20) {
+                debug_add_failure(state, "step 5: expected 20 total fluid particles (8 creative + 12 fracture), got %d",
+                                  sample.fluid_particles);
+            }
+            if (sample.sim_particles != 0) {
+                debug_add_failure(state, "step 5: expected 0 sim_particles, got %d",
+                                  sample.sim_particles);
+            }
+            for (int i = 0; i < active_particle_count; ++i) {
+                Particle *p = active_particles[i];
+                if (!p || !p->active || !p->fracture_derived) continue;
+                if (p->material != PARTICLE_MATERIAL_FLUID || p->glue_count != 0 ||
+                    p->fluid_index < 0 || p->sim_index != -1 ||
+                    fabsf(p->radius - PBF_PARTICLE_RADIUS) > 1e-4f ||
+                    fabsf(p->base_inv_mass - 1.0f / PBF_PARTICLE_MASS) > 1e-4f) {
+                    debug_add_failure(state, "step 5: converted particle %d failed fluid validation", i);
+                }
+            }
+            state->fracture_complete_observed = true;
+            debug_capture(state, "phase-03-complete-conversion.png", "complete-conversion", step);
+        }
+
+        if (step >= 6 && step <= 20) {
+            if (sample.fluid_particles != 20 || sample.invalid_fluid_particles > 0) {
+                debug_add_failure(state, "step %d: invalid fluid particle state (count=%d invalid=%d)",
+                                  step, sample.fluid_particles, sample.invalid_fluid_particles);
+            }
+            if (sample.mean_fluid_speed > 25.0f) {
+                debug_add_failure(state, "step %d: excessive fluid velocity (%.2f m/s, self-ejection)",
+                                  step, sample.mean_fluid_speed);
+            }
+            if (step == 20 && sample.fluid_centroid_y >= state->initial_centroid_y) {
+                debug_add_failure(state, "step 20: fluid particles did not fall (centroid_y=%.3f initial=%.3f)",
+                                  sample.fluid_centroid_y, state->initial_centroid_y);
+            }
+        }
+
+        if (step == 20) {
+            for (int i = 0; i < voxel_count; ++i) {
+                if (voxels[i].debugClusterTag == DEBUG_TEST_TAG && voxels[i].simulate) {
+                    voxels[i].restorationDeadlineFrame = recycleFrameCounter + 1;
+                }
+            }
+        }
+
+        if (step == 21) {
+            if (sample.tagged_dynamic != 0) {
+                debug_add_failure(state, "step 21: expected 0 dynamic source voxels after deadline, found %d",
+                                  sample.tagged_dynamic);
+            }
+            if (sample.tagged_static != 0) {
+                debug_add_failure(state, "step 21: static cells regenerated too early (expected 0, found %d)",
+                                  sample.tagged_static);
+            }
+            if (sample.fracture_derived_fluid_particles != 0) {
+                debug_add_failure(state, "step 21: %d fracture fluid particles survived island removal",
+                                  sample.fracture_derived_fluid_particles);
+            }
+            if (sample.fluid_particles != 8) {
+                debug_add_failure(state, "step 21: expected 8 creative fluid particles, found %d",
+                                  sample.fluid_particles);
+            }
+            state->fracture_restoration_observed = true;
+            debug_capture(state, "phase-04-particles-disappeared.png", "particles-disappeared", step);
+
+            for (int q = 0; q < recycleQueueCount; ++q) {
+                int idx = (recycleQueueHead + q) % MAX_VOXELS;
+                recycleQueue[idx].lifeFrames = recycleFrameCounter - RECYCLE_STATIC_RESTORE_DELAY;
+            }
+        }
+
+        if (step == 24) {
+            if (sample.tagged_static != 2) {
+                debug_add_failure(state, "step 24: expected 2 regenerated static cells, found %d",
+                                  sample.tagged_static);
+            }
+            if (sample.fracture_derived_fluid_particles != 0) {
+                debug_add_failure(state, "step 24: unexpected fracture fluid particles (%d)",
+                                  sample.fracture_derived_fluid_particles);
+            }
+            if (sample.fluid_particles != 8) {
+                debug_add_failure(state, "step 24: creative fluid was corrupted (found %d, expected 8)",
+                                  sample.fluid_particles);
+            }
+            state->fracture_creative_survived = true;
+            debug_capture(state, "phase-05-post-restoration.png", "post-restoration", step);
+        }
+
+        debug_validate_gpu_static_state(state, step);
+        debug_readback_gpu_buffers(state, step);
+        return;
+    }
     if (state->delayed_activation) {
         if (!state->activation_succeeded &&
             sample.tagged_dynamic == state->expected_voxels && sample.tagged_static == 0 &&
@@ -3835,6 +4183,21 @@ static void debug_finalize_validation(DebugRunState *state)
         }
         return;
     }
+    if (state->pbd_pbf_fracture_test) {
+        if (!state->fracture_partial_observed) {
+            debug_add_failure(state, "partial fracture transition was not observed");
+        }
+        if (!state->fracture_complete_observed) {
+            debug_add_failure(state, "complete fracture conversion to fluid was not observed");
+        }
+        if (!state->fracture_restoration_observed) {
+            debug_add_failure(state, "fracture-derived fluid disappearance on restoration deadline was not observed");
+        }
+        if (!state->fracture_creative_survived) {
+            debug_add_failure(state, "static cell restoration or creative fluid survival was not observed");
+        }
+        return;
+    }
     if (state->recycle_test) {
         if (!state->sleeping_conversion_succeeded || !state->recycle_succeeded) {
             debug_add_failure(state, "sleeping island did not complete atomic recycling");
@@ -3957,8 +4320,13 @@ static void debug_finalize_validation(DebugRunState *state)
         if (fluid_cells_final != 49) {
             debug_add_failure(state, "Fluid voxels lost during simulation: expected 49, found %d", fluid_cells_final);
         }
-        if (fluid_particle_count != 392) {
-            debug_add_failure(state, "Fluid particles lost during simulation: expected 392, found %d", fluid_particle_count);
+        int creative_fluid_particles = 0;
+        for (int i = 0; i < fluid_particle_count; ++i) {
+            Particle *p = fluid_particles[i];
+            if (p && !p->fracture_derived) creative_fluid_particles++;
+        }
+        if (creative_fluid_particles != 392) {
+            debug_add_failure(state, "Fluid particles lost during simulation: expected 392, found %d", creative_fluid_particles);
         }
         return;
     }
@@ -4163,6 +4531,16 @@ static bool debug_write_report(DebugRunState *state)
             state->escaped_fluid_particles,
              state->below_container_particles);
 
+    fprintf(file,
+            "  \"pbdPbfFractureDiagnostics\": {\"enabled\": %s,"
+            " \"partialFractureObserved\": %s, \"completeConversionObserved\": %s,"
+            " \"restorationObserved\": %s, \"creativeFluidSurvived\": %s},\n",
+            state->pbd_pbf_fracture_test ? "true" : "false",
+            state->fracture_partial_observed ? "true" : "false",
+            state->fracture_complete_observed ? "true" : "false",
+            state->fracture_restoration_observed ? "true" : "false",
+            state->fracture_creative_survived ? "true" : "false");
+
     double benchmark_physics_ms = state->benchmark_measured_steps > 0
         ? state->benchmark_physics_total_ms / (double)state->benchmark_measured_steps : 0.0;
     double benchmark_render_ms = state->benchmark_measured_steps > 0
@@ -4226,7 +4604,12 @@ static bool debug_write_report(DebugRunState *state)
                 " \"staticGluedFaces\": %d, \"centroidY\": %.9g,"
                 " \"centroidDrop\": %.9g, \"minY\": %.9g, \"maxY\": %.9g,"
                 " \"meanVelocityY\": %.9g, \"staticHashGeneration\": %llu,"
-                " \"gpuStaticUploadedGeneration\": %llu, \"physicsStepMs\": %.9g}%s\n",
+                " \"gpuStaticUploadedGeneration\": %llu, \"physicsStepMs\": %.9g,"
+                " \"fluidParticles\": %d, \"invalidFluidParticles\": %d,"
+                " \"fluidCentroidY\": %.9g, \"meanDensityRatio\": %.9g,"
+                " \"maxDensityRatio\": %.9g, \"meanFluidSpeed\": %.9g,"
+                " \"constrainedSolidParticles\": %d, \"illegalFreeSolidParticles\": %d,"
+                " \"fractureDerivedFluidParticles\": %d}%s\n",
                 sample->step, sample->tagged_voxels, sample->tagged_dynamic,
                 sample->tagged_static, sample->tagged_sleeping, sample->sim_particles,
                 sample->collision_particles, sample->collision_particles_culled,
@@ -4239,6 +4622,11 @@ static bool debug_write_report(DebugRunState *state)
                 (unsigned long long)sample->static_hash_generation,
                 (unsigned long long)sample->gpu_static_uploaded_generation,
                 sample->physics_step_ms,
+                sample->fluid_particles, sample->invalid_fluid_particles,
+                (double)sample->fluid_centroid_y, (double)sample->mean_density_ratio,
+                (double)sample->max_density_ratio, (double)sample->mean_fluid_speed,
+                sample->constrained_solid_particles, sample->illegal_free_solid_particles,
+                sample->fracture_derived_fluid_particles,
                 (i + 1 < state->sample_count) ? "," : "");
     }
     fputs("  ]\n}\n", file);

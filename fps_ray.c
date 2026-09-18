@@ -1013,6 +1013,7 @@ typedef struct {
     float pbf_density;
     float pbf_lambda;
     Vector3 pbf_delta;
+    bool fracture_derived;
 } Particle;
 
 // Voxel structure
@@ -2468,6 +2469,14 @@ static void fluid_note_completed_step(float dt) {
     }
 }
 
+typedef struct {
+    int count;
+    int neighbors[PBF_MAX_NEIGHBORS];
+} PbfNeighborCache;
+
+static PbfNeighborCache *pbf_neighbor_cache = NULL;
+static int pbf_neighbor_cache_capacity = 0;
+
 static void fluid_particles_add(Particle *p) {
     if (!p || p->fluid_index >= 0 || fluid_particle_count >= MAX_PARTICLES) {
         return;
@@ -2483,6 +2492,9 @@ static void fluid_particles_add(Particle *p) {
         fluid_particle_count++;
         p->fluid_index = active_fluid_particle_count;
         fluid_particles[active_fluid_particle_count++] = p;
+    }
+    if (pbf_neighbor_cache && p->fluid_index < pbf_neighbor_cache_capacity) {
+        pbf_neighbor_cache[p->fluid_index].count = 0;
     }
     fluid_reset_reduced_rate_state();
 }
@@ -2500,6 +2512,12 @@ static void fluid_particles_remove(Particle *p) {
         Particle *swap = fluid_particles[last];
         fluid_particles[idx] = swap;
         swap->fluid_index = idx;
+        if (pbf_neighbor_cache && idx < pbf_neighbor_cache_capacity && last < pbf_neighbor_cache_capacity) {
+            pbf_neighbor_cache[idx] = pbf_neighbor_cache[last];
+        }
+    }
+    if (pbf_neighbor_cache && last < pbf_neighbor_cache_capacity) {
+        pbf_neighbor_cache[last].count = 0;
     }
     fluid_particles[last] = NULL;
     fluid_particle_count--;
@@ -2522,7 +2540,10 @@ static void particle_set_material(Particle *p, ParticleMaterial material) {
         sim_particles_remove(p);
         fluid_particles_add(p);
     } else if (p->base_inv_mass > 0.0f) {
+        p->fracture_derived = false;
         sim_particles_add(p);
+    } else {
+        p->fracture_derived = false;
     }
 }
 
@@ -2605,6 +2626,7 @@ static Particle *particle_create(Vector3 pos, float inv_mass) { //pointer
     p->pbf_density = 0.0f;
     p->pbf_lambda = 0.0f;
     p->pbf_delta = (Vector3){ 0.0f, 0.0f, 0.0f };
+    p->fracture_derived = false;
     return p;
 }
 
@@ -2631,6 +2653,7 @@ static Particle *particle_clone(const Particle *src) { //pointer
     p->active_index = active_particle_count;
     p->sim_index = -1;
     p->fluid_index = -1;
+    p->fracture_derived = src->fracture_derived;
     active_particles[active_particle_count++] = p;
     if (p->base_inv_mass > 0.0f && p->material != PARTICLE_MATERIAL_FLUID) {
         sim_particles_add(p);
@@ -2748,13 +2771,6 @@ static void build_particle_hash(Particle **list, int count) {
     pbd_parallel_for(0, count, particle_hash_build_range, &job);
 }
 
-typedef struct {
-    int count;
-    int neighbors[PBF_MAX_NEIGHBORS];
-} PbfNeighborCache;
-
-static PbfNeighborCache *pbf_neighbor_cache = NULL;
-static int pbf_neighbor_cache_capacity = 0;
 
 typedef struct {
     Particle **hash_list;
@@ -2809,7 +2825,7 @@ static void pbf_compute_lambda_range(int start, int end, int worker_id, void *us
                             Vector3 separation = v_sub(particle->predicted_pos, neighbor->predicted_pos);
                             float distance_sq = v_dot(separation, separation);
                             if (distance_sq < PBF_H2) {
-                                if (pbf_neighbor_cache && nb_count < PBF_MAX_NEIGHBORS) {
+                                if (pbf_neighbor_cache && fluid_index < pbf_neighbor_cache_capacity && nb_count < PBF_MAX_NEIGHBORS) {
                                     pbf_neighbor_cache[fluid_index].neighbors[nb_count++] = item;
                                 }
                                 density += PBF_PARTICLE_MASS * pbf_poly6(distance_sq);
@@ -2823,9 +2839,10 @@ static void pbf_compute_lambda_range(int start, int end, int worker_id, void *us
                     }
                 }
             }
-            if (pbf_neighbor_cache) pbf_neighbor_cache[fluid_index].count = nb_count;
+            if (pbf_neighbor_cache && fluid_index < pbf_neighbor_cache_capacity) pbf_neighbor_cache[fluid_index].count = nb_count;
         } else {
-            int nb_count = pbf_neighbor_cache[fluid_index].count;
+            int nb_count = (pbf_neighbor_cache && fluid_index < pbf_neighbor_cache_capacity) ? pbf_neighbor_cache[fluid_index].count : 0;
+            if (nb_count > PBF_MAX_NEIGHBORS) nb_count = PBF_MAX_NEIGHBORS;
             for (int k = 0; k < nb_count; ++k) {
                 int item = pbf_neighbor_cache[fluid_index].neighbors[k];
                 if (item < 0 || item >= job->hash_count) continue;
@@ -2858,8 +2875,9 @@ static void pbf_compute_delta_range(int start, int end, int worker_id, void *use
         Particle *particle = fluid_particles[fluid_index];
         if (!particle) continue;
         Vector3 delta_sum = { 0.0f, 0.0f, 0.0f };
-        if (pbf_neighbor_cache) {
+        if (pbf_neighbor_cache && fluid_index < pbf_neighbor_cache_capacity) {
             int nb_count = pbf_neighbor_cache[fluid_index].count;
+            if (nb_count > PBF_MAX_NEIGHBORS) nb_count = PBF_MAX_NEIGHBORS;
             for (int k = 0; k < nb_count; ++k) {
                 int item = pbf_neighbor_cache[fluid_index].neighbors[k];
                 if (item < 0 || item >= job->hash_count) continue;
@@ -2934,6 +2952,8 @@ static void solve_pbf_density_constraints(Particle **hash_list, int hash_count) 
         int new_cap = active_fluid_particle_count + 256;
         PbfNeighborCache *new_cache = (PbfNeighborCache *)realloc(pbf_neighbor_cache, (size_t)new_cap * sizeof(PbfNeighborCache));
         if (new_cache) {
+            memset((char *)new_cache + (size_t)pbf_neighbor_cache_capacity * sizeof(PbfNeighborCache), 0,
+                   (size_t)(new_cap - pbf_neighbor_cache_capacity) * sizeof(PbfNeighborCache));
             pbf_neighbor_cache = new_cache;
             pbf_neighbor_cache_capacity = new_cap;
         } else {
@@ -2966,8 +2986,9 @@ static void pbf_compute_viscosity_range(int start, int end, int worker_id, void 
         Particle *particle = fluid_particles[fluid_index];
         if (!particle) continue;
         Vector3 velocity_delta = { 0.0f, 0.0f, 0.0f };
-        if (pbf_neighbor_cache) {
+        if (pbf_neighbor_cache && fluid_index < pbf_neighbor_cache_capacity) {
             int nb_count = pbf_neighbor_cache[fluid_index].count;
+            if (nb_count > PBF_MAX_NEIGHBORS) nb_count = PBF_MAX_NEIGHBORS;
             for (int k = 0; k < nb_count; ++k) {
                 int item = pbf_neighbor_cache[fluid_index].neighbors[k];
                 if (item < 0 || item >= job->hash_count) continue;
@@ -5649,6 +5670,7 @@ static bool spawn_static_at_rest(const Voxel *snapshot) {
         voxels[idx].activationCooldownFrames = STATIC_REBUILD_ACTIVATION_COOLDOWN_FRAMES;
     }
     voxels[idx].owner = snapshot->owner;
+    voxels[idx].debugClusterTag = snapshot->debugClusterTag;
     if (snapshot->orig_min_gx <= snapshot->orig_max_gx &&
         snapshot->orig_min_gy <= snapshot->orig_max_gy &&
         snapshot->orig_min_gz <= snapshot->orig_max_gz) {
@@ -10158,6 +10180,7 @@ static void convert_unconstrained_particle_to_fluid(Particle *particle) {
     particle->pbf_density = 0.0f;
     particle->pbf_lambda = 0.0f;
     particle->pbf_delta = (Vector3){ 0.0f, 0.0f, 0.0f };
+    particle->fracture_derived = true;
     particle_set_material(particle, PARTICLE_MATERIAL_FLUID);
 }
 

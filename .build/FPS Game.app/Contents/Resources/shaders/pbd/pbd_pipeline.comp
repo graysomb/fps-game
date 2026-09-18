@@ -500,7 +500,7 @@ int topologyNeighbor(int voxelId, int face);
 void gatherBreakMask(uint gid) {
     if (gid >= uint(uVoxelCount)) return;
     VoxelState v = voxel[gid];
-    if (v.flags.x == 0 || v.flags.y != 0 || v.flags.z != 0 || v.pos_rest_edge.w <= 0.0) {
+    if (v.flags.x == 0 || v.flags.y != 0 || v.flags.z != 0 || v.pos_rest_edge.w <= 0.0 || (v.lifecycle.w & 0x10u) == 0u) {
         voxel[gid] = v; return;
     }
     vec3 p[8];

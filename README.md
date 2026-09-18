@@ -465,6 +465,9 @@ Available scenarios are:
   bytes transferred per frame, dispatch count, hull backend, and maximum neighbor overflow.
 * `pbf-dense-neighbors`: compresses 512 particles into one smoothing neighborhood and verifies
   that GPU cache overflow is detected and routed through the complete hash-scan fallback.
+* `voxel-strain-shear-fracture`: verifies dynamic voxels deactivate VGS shape constraints when strain or shear exceeds threshold.
+* `arena-platform-fluid`: activates test arena central platform with sleeping fluid on top to verify wake/reactivation behavior.
+* `pbd-pbf-fracture`: fractures 2 face-connected activated solid voxels in stages, converting unconstrained corner particles to PBF fluid when `glue_count == 0` while keeping shared corners solid (`glue_count > 0`). Validates that converted particles interact via PBF without self-collision ejection from invisible lifecycle shells, cleans up fracture fluid atomically when the static source regenerates, and leaves unrelated creative fluid untouched throughout.
 
 For example, benchmark 4,096 particles across all three backends with:
 
