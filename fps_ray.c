@@ -9941,7 +9941,7 @@ static void handle_pbd_projectile_hits(void)
         }
         bool removed = false;
         for (int j = 0; j < activePlayers; ++j) {
-            if (players[j].tetherHolding && players[j].tetherVoxel == i) {
+            if (tetherTag[i] == j + 1) {
                 continue;
             }
             int goliath_owner = get_goliath_owner_of_voxel(i);
@@ -14459,15 +14459,32 @@ static void start_tether(int idx) {
         return;
     }
     
-    // For dynamic voxels, mark ownership and tether state
+    // For dynamic voxels, mark ownership and tether state on the whole glue
+    // cluster so sibling voxels are treated as held too.
     if (voxels[tether_idx].simulate) {
         detach_goliath_armor_voxel(tether_idx);
-        voxels[tether_idx].owner = idx;
-        voxels[tether_idx].activator = idx;
-        voxels[tether_idx].wasTethered = true;
-        // Keep the isolated tether target out of any structure that activates
-        // beside it while it is still being held.
-        voxels[tether_idx].glueEligible = false;
+        int cluster_count = build_glue_cluster_indices(tether_idx, glueClusterIndices);
+        if (cluster_count > 0) {
+            for (int c = 0; c < cluster_count; ++c) {
+                int v_idx = glueClusterIndices[c];
+                if (v_idx < 0 || v_idx >= voxel_count) {
+                    continue;
+                }
+                voxels[v_idx].owner = idx;
+                voxels[v_idx].activator = idx;
+                voxels[v_idx].wasTethered = true;
+            }
+        } else {
+            voxels[tether_idx].owner = idx;
+            voxels[tether_idx].activator = idx;
+            voxels[tether_idx].wasTethered = true;
+            cluster_count = 1;
+        }
+        // Keep a lone grab from gluing to newly activated walls. Leave a
+        // multi-voxel chunk glue-eligible so it stays one group.
+        if (cluster_count <= 1) {
+            voxels[tether_idx].glueEligible = false;
+        }
     }
 
     p->tetherHolding = true;
@@ -14505,9 +14522,22 @@ static void prepare_tether_forces(void) {
             v = &voxels[new_idx];
         }
         tetherTargetByPlayer[i] = player_hand_position(p);
-        tetherTag[p->tetherVoxel] = i + 1;
-        voxels[p->tetherVoxel].activationBelief = 1.0f;
-        voxels[p->tetherVoxel].activationCooldownFrames = 0;
+        int cluster_count = build_glue_cluster_indices(p->tetherVoxel, glueClusterIndices);
+        if (cluster_count > 0) {
+            for (int c = 0; c < cluster_count; ++c) {
+                int v_idx = glueClusterIndices[c];
+                if (v_idx < 0 || v_idx >= voxel_count) {
+                    continue;
+                }
+                tetherTag[v_idx] = i + 1;
+                voxels[v_idx].activationBelief = 1.0f;
+                voxels[v_idx].activationCooldownFrames = 0;
+            }
+        } else {
+            tetherTag[p->tetherVoxel] = i + 1;
+            voxels[p->tetherVoxel].activationBelief = 1.0f;
+            voxels[p->tetherVoxel].activationCooldownFrames = 0;
+        }
     }
 }
 
