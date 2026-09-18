@@ -604,6 +604,7 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define VOXEL_DAMAGE 20
 #define MATTER_MAX_DEFAULT 100.0f
 #define MATTER_MELEE_HARVEST 10.0f
+#define MATTER_MELEE_DAMAGE (MATTER_MELEE_HARVEST + 1.0f)
 #define MATTER_SHOT_COST 2.0f
 #define MATTER_BUILD_COST 10.0f
 #define MELEE_RANGE 2.0f
@@ -14147,6 +14148,7 @@ static bool melee_hit_players(int attacker_idx, Vector3 start, Vector3 end, Vect
         players[j].vel = v_add(players[j].vel, v_mul(knock_dir, MELEE_KNOCKBACK_SPEED));
         players[j].vel.y += MELEE_UPWARD_BOOST;
         players[j].meleeKnockbackActive = true;
+        apply_matter_damage(j, attacker_idx, MATTER_MELEE_DAMAGE);
         if (players[j].isExposed) {
             kill_player(j, attacker_idx, true, false);
         }
