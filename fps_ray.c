@@ -3691,6 +3691,10 @@ static void remove_static_voxels_in_region(int minx, int maxx,
                     if (candidate->simulate) {
                         break;
                     }
+                    if (voxel_is_fluid(candidate)) {
+                        activate_fluid_cluster(idx);
+                        break;
+                    }
                     remove_voxel_index(idx);
                 }
             }
@@ -3715,6 +3719,10 @@ static void remove_static_voxels_in_region_recycle(int minx, int maxx,
                     }
                     Voxel *candidate = &voxels[idx];
                     if (candidate->simulate) {
+                        break;
+                    }
+                    if (voxel_is_fluid(candidate)) {
+                        activate_fluid_cluster(idx);
                         break;
                     }
                     if (candidate->owner == -1) {
@@ -3776,7 +3784,7 @@ static void remove_unowned_static_voxels_in_region(int minx, int maxx,
                         break;
                     }
                     Voxel *candidate = &voxels[idx];
-                    if (candidate->simulate) {
+                    if (candidate->simulate || voxel_is_fluid(candidate)) {
                         break;
                     }
                     if (candidate->owner >= 0) {
@@ -4555,7 +4563,7 @@ static bool activation_try_enqueue(int voxel_idx,
     }
 
     Voxel *candidate = &voxels[voxel_idx];
-    if (candidate->simulate) {
+    if (candidate->simulate || voxel_is_fluid(candidate)) {
         return false;
     }
     unsigned char expected_claim = 0;
@@ -4563,7 +4571,7 @@ static bool activation_try_enqueue(int voxel_idx,
                                                   &expected_claim, 1,
                                                   memory_order_acq_rel,
                                                   memory_order_acquire)) return false;
-    if (candidate->simulate || candidate->pendingActivation) {
+    if (candidate->simulate || candidate->pendingActivation || voxel_is_fluid(candidate)) {
         atomic_store_explicit(&activationClaims[voxel_idx], 0, memory_order_release);
         return false;
     }
@@ -4642,6 +4650,9 @@ static int collect_static_activation_cluster(int seed_idx,
             if (neighbor_idx < 0) {
                 continue;
             }
+            if (neighbor_idx >= 0 && neighbor_idx < voxel_count && voxel_is_fluid(&voxels[neighbor_idx])) {
+                continue;
+            }
             if (activation_try_enqueue(neighbor_idx, activator, center_gx, center_gy, center_gz,
                                        seed_radius_sq, buffer, queue, &tail))
             {
@@ -4706,6 +4717,9 @@ static int expand_activation_cluster_unbounded(UnitVoxelBuffer *buffer, int star
             }
             if (neighbor_idx >= 0 && neighbor_idx < voxel_count) {
                 Voxel *neighbor = &voxels[neighbor_idx];
+                if (voxel_is_fluid(neighbor)) {
+                    continue;
+                }
                 if (!dynamic_belief_overcomes_static(dynamicBelief, neighbor->freezeBelief)) {
                     continue;
                 }
@@ -4886,6 +4900,25 @@ static void activate_fluid_cluster(int seed_idx) {
     }
 }
 
+static void wake_fluid_near_unit_buffer(const UnitVoxelBuffer *buffer) {
+    if (!buffer || buffer->count <= 0) return;
+    for (int i = 0; i < buffer->count; ++i) {
+        int gx = buffer->voxels[i].gx;
+        int gy = buffer->voxels[i].gy;
+        int gz = buffer->voxels[i].gz;
+        for (int dz = -2; dz <= 2; ++dz) {
+            for (int dy = -2; dy <= 2; ++dy) {
+                for (int dx = -2; dx <= 2; ++dx) {
+                    int sidx = table_get_static_only(gx + dx, gy + dy, gz + dz);
+                    if (sidx >= 0 && sidx < voxel_count && voxel_is_fluid(&voxels[sidx])) {
+                        activate_fluid_cluster(sidx);
+                    }
+                }
+            }
+        }
+    }
+}
+
 static UnitVoxelBuffer activate_thread_buffers[PBD_MAX_THREADS + 1];
 
 typedef struct {
@@ -4947,7 +4980,7 @@ static void activate_static_worker(int start, int end, int worker_id, void *user
                         continue;
                     }
                     Voxel *candidate = &voxels[idx];
-                    if (candidate->simulate || candidate->activationCooldownFrames > 0) {
+                    if (candidate->simulate || candidate->activationCooldownFrames > 0 || voxel_is_fluid(candidate)) {
                         continue;
                     }
 
@@ -5160,6 +5193,7 @@ static bool activate_static_voxels_near_dynamic(void)
     }
 
     if (spawned > 0) {
+        wake_fluid_near_unit_buffer(&buffer);
         rebuild_voxel_hash();
         rebuild_all_voxel_surfaces();
         //rebuild_glue_constraints();
@@ -5319,6 +5353,7 @@ static bool activate_static_voxels_near_region(int minx, int maxx,
                 voxels[i].sleepFrames = 0;
             }
         }
+        wake_fluid_near_unit_buffer(&buffer);
         init_static_hash();
         rebuild_voxel_hash();
         rebuild_all_voxel_surfaces();
@@ -9389,6 +9424,10 @@ static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float
     if (seed->simulate || seed->pendingActivation) {
         return false;
     }
+    if (voxel_is_fluid(seed)) {
+        activate_fluid_cluster(voxel_idx);
+        return true;
+    }
 
     int previousCount = buffer.count;
     int added = collect_static_activation_cluster(voxel_idx, activator,
@@ -9407,6 +9446,7 @@ static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float
 
     remove_buffered_static_voxels(&buffer);
     emit_unit_voxels_from_units(&buffer, false, true, -1);
+    wake_fluid_near_unit_buffer(&buffer);
     rebuild_voxel_hash();
     rebuild_all_voxel_surfaces();
     rebuild_glue_constraints();
@@ -14340,6 +14380,10 @@ static void perform_build(int idx) {
 
 static int rip_single_static_voxel(int voxel_idx, int activator) {
     if (voxel_idx < 0 || voxel_idx >= voxel_count) return -1;
+    if (voxel_is_fluid(&voxels[voxel_idx])) {
+        activate_fluid_cluster(voxel_idx);
+        return voxel_idx;
+    }
     // Restored static spans deliberately reject activation for a short time.
     // Honor that protection before removing anything: removing a regenerated
     // span here and then failing the tether would make the whole span vanish.

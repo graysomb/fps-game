@@ -195,6 +195,7 @@ typedef struct DebugRunState {
     uint32_t benchmark_gpu_neighbor_overflow;
     bool benchmark_gpu_hull;
     bool expect_gpu_neighbor_overflow;
+    bool arena_platform_fluid_test;
     DebugTrackedCell tracked_cells[DEBUG_MAX_TRACKED_CELLS];
     int tracked_cell_count;
     DebugSample samples[DEBUG_MAX_SAMPLES];
@@ -267,6 +268,7 @@ static bool debug_setup_pbf_scaling(DebugRunState *state);
 static bool debug_setup_pbf_dense_neighbors(DebugRunState *state);
 static bool debug_setup_cube_stress(DebugRunState *state);
 static bool debug_setup_voxel_strain_shear_fracture(DebugRunState *state);
+static bool debug_setup_arena_platform_fluid(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall, 60, 60 },
@@ -292,7 +294,8 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "swarmer-wall", "Swarmer charges a visible target through a blocking wall", debug_setup_swarmer_wall, 90, 60 },
     { "goliath-flight", "Goliath jumps with attached armor and must land", debug_setup_goliath_flight, 120, 90 },
     { "cube-stress", "Stress test with scalable dynamic cube (size set by FPS_CUBE_SIZE)", debug_setup_cube_stress, 60, 60 },
-    { "voxel-strain-shear-fracture", "Dynamic voxels deactivate VGS shape constraints when strain or shear exceeds threshold", debug_setup_voxel_strain_shear_fracture, 60, 60 }
+    { "voxel-strain-shear-fracture", "Dynamic voxels deactivate VGS shape constraints when strain or shear exceeds threshold", debug_setup_voxel_strain_shear_fracture, 60, 60 },
+    { "arena-platform-fluid", "Test arena central platform activated with sleeping fluid on top", debug_setup_arena_platform_fluid, 60, 60 }
 };
 
 static const int debugScenarioCount = (int)(sizeof(debugScenarios) / sizeof(debugScenarios[0]));
@@ -2739,6 +2742,68 @@ static bool debug_setup_pbf_dynamic_container(DebugRunState *state)
     return state->failure_count == 0;
 }
 
+static bool debug_setup_arena_platform_fluid(DebugRunState *state)
+{
+    debug_reset_world();
+    activePlayers = 1;
+    players[0].pos = (Vector3){ 0.0f, 10.0f, 0.0f };
+    buildTestWorld();
+    ground_structural_pillars();
+    heal_structural_seams();
+    rebuild_glue_constraints();
+
+    state->arena_platform_fluid_test = true;
+    state->activation_succeeded = true;
+    state->camera.position = (Vector3){ 0.0f, 15.0f, 15.0f };
+    state->camera.target = (Vector3){ 0.0f, 6.0f, 0.0f };
+
+    int fluid_cells = 0;
+    for (int i = 0; i < voxel_count; ++i) {
+        if (voxel_is_fluid(&voxels[i])) {
+            fluid_cells++;
+            deactivate_fluid_cell(i);
+        }
+    }
+    fprintf(stderr, "DEBUG REPRO: before platform activation: fluid_cells=%d active_fluid_particles=%d total_fluid_particles=%d\n",
+            fluid_cells, active_fluid_particle_count, fluid_particle_count);
+
+    int M = (int)(2.0f * FLOOR_SIZE / VOXEL_SIZE);
+    int platform_base_height = 5;
+    int platform_height = 1;
+    int platform_lip_y = platform_base_height + platform_height + 1;
+    int plat_gx = 0;
+    int plat_gy = platform_lip_y - 1;
+    int plat_gz = 0;
+    int plat_idx = table_get_static_only(plat_gx, plat_gy, plat_gz);
+    fprintf(stderr, "DEBUG REPRO: plat_idx at (%d,%d,%d) = %d\n", plat_gx, plat_gy, plat_gz, plat_idx);
+
+    bool activated = activate_static_voxel_for_tether(plat_idx, 0, 1.0f);
+    if (!activated) {
+        debug_add_failure(state, "Failed to activate platform voxel at (%d,%d,%d)", plat_gx, plat_gy, plat_gz);
+    }
+
+    int fluid_cells_after = 0;
+    for (int i = 0; i < voxel_count; ++i) {
+        if (voxel_is_fluid(&voxels[i])) {
+            fluid_cells_after++;
+        }
+    }
+
+    fprintf(stderr, "DEBUG REPRO: after platform activation: fluid_cells=%d active_fluid_particles=%d total_fluid_particles=%d\n",
+            fluid_cells_after, active_fluid_particle_count, fluid_particle_count);
+
+    if (fluid_cells_after != 49) {
+        debug_add_failure(state, "Fluid voxels disappeared upon platform activation: expected 49, found %d", fluid_cells_after);
+    }
+    if (active_fluid_particle_count != 392) {
+        debug_add_failure(state, "Active fluid particles disappeared upon platform activation: expected 392, found %d", active_fluid_particle_count);
+    }
+    if (fluid_particle_count != 392) {
+        debug_add_failure(state, "Total fluid particles disappeared upon platform activation: expected 392, found %d", fluid_particle_count);
+    }
+    return state->failure_count == 0;
+}
+
 static bool debug_setup_pbf_scaling(DebugRunState *state)
 {
     debug_reset_world();
@@ -3413,7 +3478,7 @@ static void debug_validate_step(DebugRunState *state, int step)
             }
         }
     } else if (step <= 1 && !state->tether_active_then_static_test &&
-               !state->sleep_snap_original_test) {
+               !state->sleep_snap_original_test && !state->arena_platform_fluid_test) {
         debug_validate_tagged_dynamic(state, &sample, step == 0 ? "after activation" : "first physics step");
     }
     // The snap scenario intentionally has no dynamic particles after setup, so
@@ -3734,6 +3799,19 @@ static void debug_finalize_validation(DebugRunState *state)
             debug_add_failure(state,
                               "final mean fluid speed %.3f m/s exceeds %.2f",
                               final_sample.mean_fluid_speed, maximum_mean_speed);
+        }
+        return;
+    }
+    if (state->arena_platform_fluid_test) {
+        int fluid_cells_final = 0;
+        for (int i = 0; i < voxel_count; ++i) {
+            if (voxel_is_fluid(&voxels[i])) fluid_cells_final++;
+        }
+        if (fluid_cells_final != 49) {
+            debug_add_failure(state, "Fluid voxels lost during simulation: expected 49, found %d", fluid_cells_final);
+        }
+        if (fluid_particle_count != 392) {
+            debug_add_failure(state, "Fluid particles lost during simulation: expected 392, found %d", fluid_particle_count);
         }
         return;
     }
