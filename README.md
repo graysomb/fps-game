@@ -486,6 +486,9 @@ Run all backends sequentially through the launcher with:
 fps_ray --debug-matrix --debug-scenario=sleep-wake-floating
 ```
 
+Building grammar generation, validation, diversity checks, and full-activation
+qualification are documented in [docs/building-generation.md](docs/building-generation.md).
+
 Matrix mode creates `gpu-gl43` (Windows/Linux) or `gpu-metal` (macOS), `cpu-mt`, and `cpu-st` subdirectories plus a combined
 `matrix.json`. An unavailable GPU is reported as `UNAVAILABLE`; assertion, capture, or
 execution failures from an available backend fail the matrix. The per-backend reports

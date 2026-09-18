@@ -165,6 +165,48 @@ static bool add_pier(BuildingBlueprint *b, const BuildingVoxelSpec *from,
     return true;
 }
 
+static bool role_needs_vertical_bearing(uint16_t role) {
+    return role == BUILDING_ROLE_COLUMN || role == BUILDING_ROLE_WALL ||
+           role == BUILDING_ROLE_BUTTRESS;
+}
+
+static bool role_allows_spanning(uint16_t role) {
+    return role == BUILDING_ROLE_BEAM || role == BUILDING_ROLE_SLAB;
+}
+
+static bool has_nearby_bearing(const BuildingBlueprint *b,
+                               const BuildingVoxelSpec *v, int radius) {
+    if (building_blueprint_find(b, v->x, v->y - 1, v->z)) return true;
+    for (int d = 1; d <= radius; ++d) {
+        if (building_blueprint_find(b, v->x + d, v->y - 1, v->z) ||
+            building_blueprint_find(b, v->x - d, v->y - 1, v->z) ||
+            building_blueprint_find(b, v->x, v->y - 1, v->z + d) ||
+            building_blueprint_find(b, v->x, v->y - 1, v->z - d)) return true;
+    }
+    return false;
+}
+
+static bool repair_unsupported_members(BuildingBlueprint *b,
+                                       BuildingValidationReport *report,
+                                       bool *changed) {
+    size_t initial_count = b->count;
+    for (size_t i = 0; i < initial_count; ++i) {
+        BuildingVoxelSpec v = b->voxels[i];
+        if (v.y <= b->min_y || (v.flags & BUILDING_VOXEL_SEMANTIC) ||
+            v.role == BUILDING_ROLE_DECORATION || v.role == BUILDING_ROLE_VOID)
+            continue;
+        bool unsupported = role_needs_vertical_bearing(v.role) ?
+            !building_blueprint_find(b, v.x, v.y - 1, v.z) :
+            role_allows_spanning(v.role) && !has_nearby_bearing(b, &v, 3);
+        if (!unsupported) continue;
+        report->unsupported_members++;
+        if (!add_pier(b, &v, report)) return false;
+        report->bearing_repairs++;
+        *changed = true;
+    }
+    return true;
+}
+
 bool building_blueprint_validate_and_repair(BuildingBlueprint *b,
                                              BuildingValidationReport *report) {
     if (!b || !b->count) return false;
@@ -176,13 +218,18 @@ bool building_blueprint_validate_and_repair(BuildingBlueprint *b,
         b->voxels[i].flags |= BUILDING_VOXEL_ANCHOR;
     }
     for (unsigned pass = 0; pass < 8; ++pass) {
+        bool bearing_changed = false;
+        if (!repair_unsupported_members(b, report, &bearing_changed)) {
+            snprintf(report->reason, sizeof(report->reason), "capacity exhausted during bearing repair");
+            return false;
+        }
         size_t count = b->count;
         unsigned char *grounded = calloc(count, 1);
         if (!grounded || !mark_grounded(b, grounded)) { free(grounded); snprintf(report->reason, sizeof(report->reason), "allocation failure"); return false; }
         size_t first = count;
         for (size_t i = 0; i < count; ++i) if (!grounded[i] && !(b->voxels[i].flags & BUILDING_VOXEL_SEMANTIC)) { first = i; break; }
         free(grounded);
-        if (first == count) {
+        if (first == count && !bearing_changed) {
             qsort(b->voxels, b->count, sizeof(*b->voxels), voxel_compare);
             for (size_t i = 0; i < b->slot_capacity; ++i) b->slots[i] = -1;
             for (size_t i = 0; i < b->count; ++i) if (!index_voxel(b, i)) {

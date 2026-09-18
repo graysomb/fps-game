@@ -7932,15 +7932,12 @@ static void collect_building_voxel(int gx, int gy, int gz, Color c) {
         return;
     }
     if (building_blueprint_find(&current_building_voids, gx, gy, gz)) return;
-    bool fantasy = c.b > 200 && c.g > 150 && c.r < 220;
     bool foliage = c.g > c.r + 15 && c.g > c.b + 15;
     BuildingVoxelSpec voxel = {
         .x = gx, .y = gy, .z = gz, .rgba = color_rgba(c), .material = 0,
-        .role = fantasy ? BUILDING_ROLE_SEMANTIC_ANCHOR :
-                foliage ? BUILDING_ROLE_DECORATION : BUILDING_ROLE_WALL,
+        .role = foliage ? BUILDING_ROLE_DECORATION : BUILDING_ROLE_WALL,
         .source_node = -1,
-        .flags = BUILDING_VOXEL_DAMAGEABLE |
-                 (fantasy ? BUILDING_VOXEL_ANCHOR | BUILDING_VOXEL_SEMANTIC : 0)
+        .flags = BUILDING_VOXEL_DAMAGEABLE
     };
     if (!building_blueprint_put(&current_building_blueprint, voxel, &current_building_report))
         building_blueprint_failed = true;
@@ -8032,6 +8029,9 @@ static void annotate_greek_blueprint(const TemplePlan *plan, int cx, int cz, int
             int x0=cx+n->box.min_x*mv,x1=cx+n->box.max_x*mv;
             int y0=base+n->box.min_y*mv,y1=base+n->box.max_y*mv;
             int z0=cz+n->box.min_z*mv,z1=cz+n->box.max_z*mv;
+            if(n->type==ARCH_PRIMITIVE_STEP){y0=base+n->box.min_y;y1=base+n->box.max_y;}
+            else if(n->type==ARCH_PRIMITIVE_COURTYARD||n->type==ARCH_PRIMITIVE_PATH){y0=(base>=3)?base-3:0;y1=y0+1;}
+            else if(n->type==ARCH_PRIMITIVE_CELL){y0=base;y1=base+3;}
             if(voxel->x>=x0&&voxel->x<x1&&voxel->y>=y0&&voxel->y<y1&&voxel->z>=z0&&voxel->z<z1){
                 voxel->source_node=i;voxel->role=greek_role(n->type);break;
             }

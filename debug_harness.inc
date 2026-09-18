@@ -3076,16 +3076,16 @@ static void debug_validate_step(DebugRunState *state, int step)
         if(!count||!anchors){debug_add_failure(state,"step %d: building lost its structure or anchors",step);return;}
         energy/=count;if(step==debugRunConfig.steps-120)state->building_energy_at_settle_window=energy;
         if(broken>state->building_broken_previous){
-            int source=-1,role=-1;
-            for(int i=0;i<voxel_count;i++){Voxel *v=&voxels[i];if(v->buildingStructuralGroup==state->building_structural_group&&!v->vgs_active){source=v->buildingSourceNode;role=v->buildingStructuralRole;break;}}
-            debug_add_failure(state,"step %d: building fractures increased %d -> %d (first source node %d, role %d)",step,state->building_broken_previous,broken,source,role);
+            int source=-1,role=-1,bx=0,by=0,bz=0;
+            for(int i=0;i<voxel_count;i++){Voxel *v=&voxels[i];if(v->buildingStructuralGroup==state->building_structural_group&&!v->vgs_active){source=v->buildingSourceNode;role=v->buildingStructuralRole;bx=v->gx;by=v->gy;bz=v->gz;break;}}
+            debug_add_failure(state,"step %d: building fractures increased %d -> %d (first source node %d, role %d, cell %d,%d,%d)",step,state->building_broken_previous,broken,source,role,bx,by,bz);
             state->building_broken_previous=broken;
         }
         if(step==debugRunConfig.steps){double drift=sqrt((cx/count-rx/count)*(cx/count-rx/count)+(cy/count-ry/count)*(cy/count-ry/count)+(cz/count-rz/count)*(cz/count-rz/count));
             if(maximum>0.10f*VOXEL_SIZE)debug_add_failure(state,"building displacement %.6g exceeds 0.10 voxel",maximum/VOXEL_SIZE);
             if(drift>0.05f*VOXEL_SIZE)debug_add_failure(state,"building center drift %.6g exceeds 0.05 voxel",drift/VOXEL_SIZE);
             if(energy>0.0009)debug_add_failure(state,"building did not settle: mean squared speed %.6g",energy);
-            if(energy>state->building_energy_at_settle_window+1e-8)debug_add_failure(state,"building kinetic energy rose during final 120 steps");
+            if(debugRunConfig.steps>=120&&energy>state->building_energy_at_settle_window+1e-8)debug_add_failure(state,"building kinetic energy rose during final 120 steps");
         }
         return;
     }
@@ -3799,12 +3799,14 @@ static void debug_finalize_validation(DebugRunState *state)
     if (!state->activation_succeeded) {
         debug_add_failure(state, "scenario did not complete its activation stage");
     }
-    if (!state->drop_sampled) {
-        debug_add_failure(state, "scenario did not reach the required 60-step drop sample");
-    } else if (!state->overhang_impact && !state->platform_lifecycle_test &&
-               (!isfinite(state->drop_at_step_60) || state->drop_at_step_60 < 0.5f)) {
-        debug_add_failure(state, "cluster dropped only %.3f metres after 60 steps (minimum 0.500)",
-                          state->drop_at_step_60);
+    if (!state->building_stability_test) {
+        if (!state->drop_sampled) {
+            debug_add_failure(state, "scenario did not reach the required 60-step drop sample");
+        } else if (!state->overhang_impact && !state->platform_lifecycle_test &&
+                   (!isfinite(state->drop_at_step_60) || state->drop_at_step_60 < 0.5f)) {
+            debug_add_failure(state, "cluster dropped only %.3f metres after 60 steps (minimum 0.500)",
+                              state->drop_at_step_60);
+        }
     }
     if (state->overhang_impact) {
         if (!state->overhang_anchor_observed) {

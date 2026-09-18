@@ -56,6 +56,8 @@ typedef struct {
     bool valid;
     uint32_t repair_passes;
     uint32_t piers_added;
+    uint32_t bearing_repairs;
+    uint32_t unsupported_members;
     uint32_t disconnected_components;
     uint32_t duplicate_writes;
     uint32_t conflict_writes;
