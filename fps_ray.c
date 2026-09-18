@@ -9997,7 +9997,11 @@ static void handle_pbd_projectile_hits(void)
                 }
                 play_sfx(SFX_SMUSH);
                 float speed = v_length(v->vel);
-                float damage = (float)VOXEL_DAMAGE;
+                int cluster_count = build_glue_cluster_indices(i, glueClusterIndices);
+                if (cluster_count < 1) {
+                    cluster_count = 1;
+                }
+                float damage = (float)VOXEL_DAMAGE * (float)cluster_count;
                 if (speed >= SMUSH_EXPOSED_SPEED && players[j].isExposed) {
                     kill_player(j, attacker, award_kill, award_debris);
                     smushBannerTimer = 1.0f;
