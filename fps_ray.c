@@ -15763,12 +15763,12 @@ static void draw_fluid_particles(Camera3D camera) {
     if (fluidRenderMode == FLUID_RENDER_SURFACE) {
         if (physicsBackend.active == PHYSICS_BACKEND_GPU_GL43 && gpu_fluid_hull_draw(fluidHullMaterial)) return;
         rebuild_fluid_hull();
-        if (fluidHullMesh.vertices) {
+        if (fluidHullMesh.vertices && fluidHullMesh.vertexCount > 0) {
             rlDisableBackfaceCulling();
             DrawMesh(fluidHullMesh, fluidHullMaterial, MatrixIdentity());
             rlEnableBackfaceCulling();
+            return;
         }
-        return;
     }
     if (!ensure_fluid_instance_capacity(fluid_particle_count)) return;
     float desired_radius = PBF_PARTICLE_RADIUS;
@@ -15905,8 +15905,6 @@ static void prepare_dynamic_voxel_transforms(void) {
 
 // Draw all voxels via greedy mesh instead of per-voxel raycasting
 static void DrawVoxels(Camera3D cam) {
-    (void)cam;
-
     if (!instancingInitialized) {
         InitInstancing();
     }
@@ -15992,6 +15990,8 @@ static void DrawVoxels(Camera3D cam) {
     if (particlePosRadiusCount > 0 && particleSphereMesh.vertexCount > 0) {
         DrawParticlesInstancedFast(particleSphereMesh, particleMatteMaterial, particlePosRadius, particlePosRadiusCount, particleColor);
     }
+
+    draw_fluid_particles(cam);
 
     rlEnableBackfaceCulling();
 

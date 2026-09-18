@@ -464,6 +464,20 @@ static int debug_parse_argument(int argc, char **argv, int *index)
                                  value, "--debug-output") ? 1 : -1;
     }
 
+    value = debug_option_value(argc, argv, index, argument,
+                               "--debug-fluid-render=", "--debug-fluid-render");
+    if (value != (const char *)(uintptr_t)1) {
+        if (strcmp(value, "surface") == 0) {
+            fluidRenderMode = FLUID_RENDER_SURFACE;
+        } else if (strcmp(value, "particles") == 0) {
+            fluidRenderMode = FLUID_RENDER_PARTICLES;
+        } else {
+            fprintf(stderr, "Invalid --debug-fluid-render value '%s' (expected 'surface' or 'particles')\n", value);
+            return -1;
+        }
+        return 1;
+    }
+
     if (strncmp(argument, "--debug-", 8) == 0) {
         fprintf(stderr, "Unknown debug option '%s'\n", argument);
         return -1;
