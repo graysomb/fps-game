@@ -15414,9 +15414,12 @@ static void DrawParticlesInstancedFast(Mesh mesh, Material material, const Vecto
         rlSetVertexAttributeDivisor(particlePosRadiusLoc, 1);
     }
 
-    if (mesh.indices != NULL) rlEnableVertexBufferElement(mesh.vboId[RL_DEFAULT_SHADER_ATTRIB_LOCATION_INDICES]);
-
-    rlDrawVertexArrayElementsInstanced(0, mesh.triangleCount * 3, 0, count);
+    if (mesh.indices != NULL) {
+        rlEnableVertexBufferElement(mesh.vboId[RL_DEFAULT_SHADER_ATTRIB_LOCATION_INDICES]);
+        rlDrawVertexArrayElementsInstanced(0, mesh.triangleCount * 3, 0, count);
+    } else {
+        rlDrawVertexArrayInstanced(0, mesh.vertexCount, count);
+    }
 
     if (particlePosRadiusLoc != -1) {
         rlDisableVertexAttribute(particlePosRadiusLoc);
