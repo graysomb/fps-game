@@ -21,11 +21,21 @@ struct VoxelState {
 
 struct StaticCollider { float4 center, bounds_min, bounds_max; };
 
+struct FluidState {
+    float4 density_lambda;
+    float4 delta;
+};
+
+struct FluidNeighborData {
+    uint count;
+    uint neighbors[64];
+};
+
 struct GpuUniforms {
     int particle_count, sim_count, voxel_count, static_collider_count;
     int hash_size, static_hash_size, active_players, break_damp_frames;
     int mode;
-    int vgs_color, integer_padding_1, integer_padding_2;
+    int vgs_color, fluid_count, integer_padding_2;
     float dt, voxel_size, floor_size, gravity;
     float velocity_damping, sor, collision_relaxation, vgs_alpha;
     float vgs_beta, vgs_epsilon, strain_threshold, shear_threshold;
@@ -56,9 +66,28 @@ constant int MODE_PREPARE_INDIRECT = 13;
 constant int MODE_WAKE_GATHER = 14;
 constant int MODE_WAKE_APPLY = 15;
 constant int MODE_TOPOLOGY_REBUILD_SERIAL = 16;
+constant int MODE_PBF_BUILD_NEIGHBORS = 17;
+constant int MODE_PBF_LAMBDA = 18;
+constant int MODE_PBF_DELTA = 19;
+constant int MODE_PBF_APPLY = 20;
+constant int MODE_PBF_STATIC_COLLISIONS = 21;
+constant int MODE_PBF_DYNAMIC_SOLID_COLLISIONS = 22;
+constant int MODE_PBF_DYNAMIC_SOLID_FINAL = 23;
+constant int MODE_PBF_VISCOSITY = 24;
+constant int MODE_PBF_APPLY_VISCOSITY = 25;
 constant int CONTROL_FLAG_OVERFLOW = 1;
 constant int CONTROL_FLAG_TOPOLOGY_DIRTY = 2;
 constant int CONTROL_FLAG_BREAK_OCCURRED = 4;
+constant uint PBF_MAX_NEIGHBORS = 64u;
+constant float PARTICLE_MATERIAL_FLUID = 1.0f;
+
+inline bool isFluid(ParticleState p) {
+    return abs(p.velocity.w - PARTICLE_MATERIAL_FLUID) < 0.25f;
+}
+
+inline uint fluidId(uint gid, device uint *simId, constant GpuUniforms &u) {
+    return simId[uint(u.sim_count) + gid];
+}
 
 constant int FACE_CORNERS[24] = {
     1,3,5,7, 0,2,4,6, 2,3,6,7,
@@ -172,6 +201,7 @@ inline void pairCollisions(uint gid, device ParticleState *particle,
     uint aid = collisionId[gid];
     if (refcount[aid] <= 0) return;
     ParticleState a = particle[aid];
+    if (isFluid(a)) return;
     float wa = a.prev_inv_mass.w;
     if (wa <= 0.0f) return;
     constexpr float eps = 1e-6f;
@@ -204,7 +234,7 @@ inline void pairCollisions(uint gid, device ParticleState *particle,
             bool sameCell = dx == 0 && dy == 0 && dz == 0;
             if (!sameCell || uint(item) > gid) {
                 uint bid = collisionId[item];
-                if (refcount[bid] <= 0) {
+                if (refcount[bid] <= 0 || isFluid(particle[bid])) {
                     item = hashNext[item]; continue;
                 }
                 if (all(cell[bid].xyz == nc)) {
@@ -327,10 +357,78 @@ inline float3 pushOutOfBox(float3 pos,float radius,StaticCollider box,constant G
 
 inline float3 pushOutOfPatch(float3 pos,float radius,StaticCollider patch){float3 closest=clamp(pos,patch.bounds_min.xyz,patch.bounds_max.xyz),normal=patch.center.xyz,delta=pos-closest;float signedDistance=dot(delta,normal);bool projectedInside;if(normal.x!=0.0f)projectedInside=pos.y>=patch.bounds_min.y&&pos.y<=patch.bounds_max.y&&pos.z>=patch.bounds_min.z&&pos.z<=patch.bounds_max.z;else if(normal.y!=0.0f)projectedInside=pos.x>=patch.bounds_min.x&&pos.x<=patch.bounds_max.x&&pos.z>=patch.bounds_min.z&&pos.z<=patch.bounds_max.z;else projectedInside=pos.x>=patch.bounds_min.x&&pos.x<=patch.bounds_max.x&&pos.y>=patch.bounds_min.y&&pos.y<=patch.bounds_max.y;if(projectedInside&&signedDistance<0.0f&&signedDistance>=-radius)return pos+normal*(radius-signedDistance);if(signedDistance<0.0f)return pos;float distanceSq=dot(delta,delta);if(distanceSq>=radius*radius)return pos;float distance=sqrt(max(distanceSq,1e-6f));float3 direction=distance>1e-6f?delta/distance:normal;return pos+direction*(radius-distance);}
 
-inline void staticCollisions(uint gid,device ParticleState *particle,device uint *collisionId,device atomic_uint *collisionControl,device int4 *staticCell,device StaticCollider *staticCollider,device const int *refcount,device const int *control,constant GpuUniforms &u){
-    if(gid>=atomic_load_explicit(&collisionControl[0], memory_order_relaxed))return;uint id=collisionId[gid];if(refcount[id]<=0)return;ParticleState p=particle[id];if(p.prev_inv_mass.w<=0.0f)return;float radius=p.pos_radius.w;float3 pos=p.predicted_base_inv_mass.xyz;float terrainLimit=u.floor_size-radius,floorLimit=max(0.0f,0.5f*u.voxel_size-radius);bool floorContact=pos.y<floorLimit;pos.y=max(pos.y,floorLimit);if(floorContact){p.prev_inv_mass.xz=pos.xz-(pos.xz-p.prev_inv_mass.xz)*0.05f;p.prev_inv_mass.y=pos.y;}pos.xz=clamp(pos.xz,float2(-terrainLimit),float2(terrainLimit));constexpr float eps=1e-6f;
-    for(int i=0;i<u.active_players&&i<4;++i){if(u.players[i].w<0.0f)continue;float halfSize=u.players[i].w;float3 nearest=clamp(pos,u.players[i].xyz-float3(halfSize),u.players[i].xyz+float3(halfSize));float3 delta=pos-nearest;float distSq=dot(delta,delta);if(distSq<radius*radius){float dist=sqrt(max(distSq,eps));float3 normal=dist>eps?delta/dist:float3(0,1,0);pos+=normal*(radius-dist);}}
-    bool surfaceMode=atomic_load_explicit(&collisionControl[4], memory_order_relaxed)!=0u;int3 center=int3(floor(pos/u.voxel_size));int seen[128];int seenCount=0;for(int z=-1;z<=1;++z)for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x){int item=findStaticCell(center+int3(x,y,z),staticCell,u);if(!surfaceMode&&item<=-2){int colliderId=-item-2;if(colliderId>=0&&colliderId<u.static_collider_count)pos=pushOutOfBox(pos,0.25f*u.voxel_size,staticCollider[colliderId],u);continue;}while(item>=0&&item<u.static_collider_count){StaticCollider patch=staticCollider[item];int patchId=as_type<int>(patch.bounds_min.w);bool duplicate=false;for(int s=0;s<seenCount;++s)duplicate=duplicate||seen[s]==patchId;if(!duplicate&&seenCount<128){seen[seenCount++]=patchId;pos=pushOutOfPatch(pos,0.25f*u.voxel_size,patch);}item=as_type<int>(patch.center.w);}}center=int3(floor(pos/u.voxel_size));int recovery=findStaticCell(center,staticCell,u);if(recovery<=-2){int colliderId=-recovery-2;if(colliderId>=0&&colliderId<u.static_collider_count)pos=pushOutOfBox(pos,0.25f*u.voxel_size,staticCollider[colliderId],u);}p.predicted_base_inv_mass.xyz=pos;particle[id]=p;
+inline void staticCollisionParticleDirect(uint id, device ParticleState *particle,
+                                         device int4 *staticCell,
+                                         device StaticCollider *staticCollider,
+                                         device atomic_uint *collisionControl,
+                                         constant GpuUniforms &u) {
+    ParticleState p = particle[id];
+    if (p.prev_inv_mass.w <= 0.0f) return;
+    float radius = p.pos_radius.w;
+    float3 pos = p.predicted_base_inv_mass.xyz;
+    float terrainLimit = u.floor_size - radius, floorLimit = max(0.0f, 0.5f * u.voxel_size - radius);
+    bool floorContact = pos.y < floorLimit;
+    pos.y = max(pos.y, floorLimit);
+    if (floorContact) {
+        p.prev_inv_mass.xz = pos.xz - (pos.xz - p.prev_inv_mass.xz) * 0.05f;
+        p.prev_inv_mass.y = pos.y;
+    }
+    pos.xz = clamp(pos.xz, float2(-terrainLimit), float2(terrainLimit));
+    constexpr float eps = 1e-6f;
+    for (int i = 0; i < u.active_players && i < 4; ++i) {
+        if (u.players[i].w < 0.0f) continue;
+        float halfSize = u.players[i].w;
+        float3 nearest = clamp(pos, u.players[i].xyz - float3(halfSize), u.players[i].xyz + float3(halfSize));
+        float3 delta = pos - nearest;
+        float distSq = dot(delta, delta);
+        if (distSq < radius * radius) {
+            float dist = sqrt(max(distSq, eps));
+            float3 normal = dist > eps ? delta / dist : float3(0, 1, 0);
+            pos += normal * (radius - dist);
+        }
+    }
+    bool surfaceMode = atomic_load_explicit(&collisionControl[4], memory_order_relaxed) != 0u;
+    int3 center = int3(floor(pos / u.voxel_size));
+    int seen[128]; int seenCount = 0;
+    for (int dz = -1; dz <= 1; ++dz) for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
+        int item = findStaticCell(center + int3(dx, dy, dz), staticCell, u);
+        if (!surfaceMode && item <= -2) {
+            int colliderId = -item - 2;
+            if (colliderId >= 0 && colliderId < u.static_collider_count)
+                pos = pushOutOfBox(pos, 0.25f * u.voxel_size, staticCollider[colliderId], u);
+            continue;
+        }
+        while (item >= 0 && item < u.static_collider_count) {
+            StaticCollider patch = staticCollider[item];
+            int patchId = as_type<int>(patch.bounds_min.w);
+            bool duplicate = false;
+            for (int s = 0; s < seenCount; ++s) duplicate = duplicate || seen[s] == patchId;
+            if (!duplicate && seenCount < 128) {
+                seen[seenCount++] = patchId;
+                pos = pushOutOfPatch(pos, 0.25f * u.voxel_size, patch);
+            }
+            item = as_type<int>(patch.center.w);
+        }
+    }
+    center = int3(floor(pos / u.voxel_size));
+    int recovery = findStaticCell(center, staticCell, u);
+    if (recovery <= -2) {
+        int colliderId = -recovery - 2;
+        if (colliderId >= 0 && colliderId < u.static_collider_count)
+            pos = pushOutOfBox(pos, 0.25f * u.voxel_size, staticCollider[colliderId], u);
+    }
+    p.predicted_base_inv_mass.xyz = pos;
+    particle[id] = p;
+}
+
+inline void staticCollisions(uint gid, device ParticleState *particle, device uint *collisionId,
+                            device atomic_uint *collisionControl, device int4 *staticCell,
+                            device StaticCollider *staticCollider, device const int *refcount,
+                            device const int *control, constant GpuUniforms &u) {
+    if (gid >= atomic_load_explicit(&collisionControl[0], memory_order_relaxed)) return;
+    uint id = collisionId[gid];
+    if (refcount[id] <= 0 || isFluid(particle[id])) return;
+    staticCollisionParticleDirect(id, particle, staticCell, staticCollider, collisionControl, u);
 }
 
 inline int topologyNeighbor(device int4 *topology,int voxelId,int face);
@@ -426,6 +524,422 @@ inline void prepareIndirect(uint gid,device const int *control,device atomic_uin
 inline void finalizeParticle(uint gid,device ParticleState *particle,device int4 *cell,device uint *simId,device const int *refcount,device const int *control,constant GpuUniforms &u){if(gid>=uint(controlLoad(control,1)))return;uint id=simId[gid];if(refcount[id]<=0)return;ParticleState p=particle[id];float3 delta=p.predicted_base_inv_mass.xyz-p.prev_inv_mass.xyz;p.velocity.xyz=p.prev_inv_mass.w>0.0f&&u.dt>0.0f?delta/u.dt:float3(0);p.pos_radius.xyz=p.predicted_base_inv_mass.xyz;if(cell[id].w>0)cell[id].w--;particle[id]=p;}
 inline void finalizeVoxel(uint gid,device ParticleState *particle,device VoxelState *voxel,device const int *control,constant GpuUniforms &u){if(gid>=uint(u.voxel_count))return;VoxelState v=voxel[gid];if(v.flags.x==0||v.flags.y!=0||v.flags.z!=0)return;float3 center(0),previous(0);for(int i=0;i<8;++i){uint id=voxelParticle(v,i);if(id>=uint(controlLoad(control,0)))return;center+=particle[id].predicted_base_inv_mass.xyz;previous+=particle[id].prev_inv_mass.xyz;}center*=0.125f;previous*=0.125f;if(v.lifecycle.x==0u&&u.dt>0.0f)v.velocity_rest_volume.xyz=(center-previous)/u.dt;else if(v.lifecycle.x>0u)v.lifecycle.x--;v.pos_rest_edge.xyz=center;voxel[gid]=v;}
 
+inline float pbfPoly6(float distanceSq, float h, float poly6Coeff) {
+    float hSq = h * h;
+    if (distanceSq < 0.0f || distanceSq >= hSq) return 0.0f;
+    float term = hSq - distanceSq;
+    return poly6Coeff * term * term * term;
+}
+
+inline float3 pbfSpikyGradient(float3 separation, float h, float spikyCoeff) {
+    float distanceSq = dot(separation, separation);
+    if (distanceSq <= 1e-12f || distanceSq >= h * h) return float3(0.0f);
+    float distance = sqrt(distanceSq);
+    float term = h - distance;
+    return separation * (spikyCoeff * term * term / distance);
+}
+
+inline void pbfBuildNeighbors(uint gid, device ParticleState *particle, device int4 *cell,
+                              device uint *simId, device uint *collisionId,
+                              device atomic_int *hashHead, device int *hashNext,
+                              device FluidNeighborData *fluidNeighbors,
+                              device const int *control, constant GpuUniforms &u) {
+    if (gid >= uint(u.fluid_count)) return;
+    uint id = fluidId(gid, simId, u);
+    int3 currentCell = cell[id].xyz;
+    uint count = 0u;
+    float h = u.voxel_size;
+    float hSq = h * h;
+    for (int dz = -1; dz <= 1; ++dz) for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
+        int3 neighborCell = currentCell + int3(dx, dy, dz);
+        int item = atomic_load_explicit(&hashHead[hashCoord(neighborCell, u.hash_size)], memory_order_relaxed);
+        int traversed = 0;
+        while (item >= 0 && traversed < u.particle_count) {
+            ++traversed;
+            uint candidate = collisionId[item];
+            if (isFluid(particle[candidate]) && all(cell[candidate].xyz == neighborCell)) {
+                float3 sep = particle[id].predicted_base_inv_mass.xyz - particle[candidate].predicted_base_inv_mass.xyz;
+                if (dot(sep, sep) < hSq) {
+                    if (count < PBF_MAX_NEIGHBORS) {
+                        fluidNeighbors[gid].neighbors[count] = candidate;
+                    }
+                    count++;
+                }
+            }
+            item = hashNext[item];
+        }
+    }
+    fluidNeighbors[gid].count = count;
+}
+
+inline void pbfLambda(uint gid, device ParticleState *particle, device int4 *cell,
+                      device uint *simId, device uint *collisionId,
+                      device atomic_int *hashHead, device int *hashNext,
+                      device FluidState *fluid, device FluidNeighborData *fluidNeighbors,
+                      device const int *control, constant GpuUniforms &u) {
+    if (gid >= uint(u.fluid_count)) return;
+    uint id = fluidId(gid, simId, u);
+    ParticleState current = particle[id];
+    float h = u.voxel_size;
+    float spacing = u.voxel_size * 0.5f;
+    float restDensity = 1000.0f;
+    float particleMass = restDensity * spacing * spacing * spacing;
+    float h2 = h * h, h6 = h2 * h2 * h2, h9 = h6 * h2 * h;
+    float poly6Coeff = 315.0f / (64.0f * 3.14159265358979323846f * h9);
+    float spikyCoeff = -45.0f / (3.14159265358979323846f * h6);
+    float volume = particleMass / restDensity;
+    float lambdaEpsilon = 1e-6f;
+
+    float density = 0.0f;
+    float3 gradientI = float3(0.0f);
+    float gradientSumSq = 0.0f;
+    uint cachedCount = fluidNeighbors[gid].count;
+    if (cachedCount <= PBF_MAX_NEIGHBORS) {
+        for (uint k = 0; k < cachedCount; ++k) {
+            uint neighbor = fluidNeighbors[gid].neighbors[k];
+            float3 sep = current.predicted_base_inv_mass.xyz - particle[neighbor].predicted_base_inv_mass.xyz;
+            density += particleMass * pbfPoly6(dot(sep, sep), h, poly6Coeff);
+            if (neighbor != id) {
+                float3 gradientJ = -volume * pbfSpikyGradient(sep, h, spikyCoeff);
+                gradientSumSq += dot(gradientJ, gradientJ);
+                gradientI -= gradientJ;
+            }
+        }
+    } else {
+        int3 currentCell = cell[id].xyz;
+        for (int dz = -1; dz <= 1; ++dz) for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
+            int3 neighborCell = currentCell + int3(dx, dy, dz);
+            int item = atomic_load_explicit(&hashHead[hashCoord(neighborCell, u.hash_size)], memory_order_relaxed);
+            int traversed = 0;
+            while (item >= 0 && traversed < u.particle_count) {
+                ++traversed;
+                uint neighbor = collisionId[item];
+                if (isFluid(particle[neighbor]) && all(cell[neighbor].xyz == neighborCell)) {
+                    float3 sep = current.predicted_base_inv_mass.xyz - particle[neighbor].predicted_base_inv_mass.xyz;
+                    float distSq = dot(sep, sep);
+                    if (distSq < h * h) {
+                        density += particleMass * pbfPoly6(distSq, h, poly6Coeff);
+                        if (neighbor != id) {
+                            float3 gradientJ = -volume * pbfSpikyGradient(sep, h, spikyCoeff);
+                            gradientSumSq += dot(gradientJ, gradientJ);
+                            gradientI -= gradientJ;
+                        }
+                    }
+                }
+                item = hashNext[item];
+            }
+        }
+    }
+    gradientSumSq += dot(gradientI, gradientI);
+    float constraint = density / restDensity - 1.0f;
+    fluid[id].density_lambda.x = density;
+    fluid[id].density_lambda.y = -constraint / (gradientSumSq + lambdaEpsilon);
+}
+
+inline void pbfDelta(uint gid, device ParticleState *particle, device int4 *cell,
+                     device uint *simId, device uint *collisionId,
+                     device atomic_int *hashHead, device int *hashNext,
+                     device FluidState *fluid, device FluidNeighborData *fluidNeighbors,
+                     device const int *control, constant GpuUniforms &u) {
+    if (gid >= uint(u.fluid_count)) return;
+    uint id = fluidId(gid, simId, u);
+    ParticleState current = particle[id];
+    float h = u.voxel_size;
+    float spacing = u.voxel_size * 0.5f;
+    float restDensity = 1000.0f;
+    float particleMass = restDensity * spacing * spacing * spacing;
+    float h2 = h * h, h6 = h2 * h2 * h2, h9 = h6 * h2 * h;
+    float poly6Coeff = 315.0f / (64.0f * 3.14159265358979323846f * h9);
+    float spikyCoeff = -45.0f / (3.14159265358979323846f * h6);
+    float volume = particleMass / restDensity;
+    float scorrK = 0.2f;
+    float scorrDeltaQ = h * 0.2f;
+    float referenceKernel = pbfPoly6(scorrDeltaQ * scorrDeltaQ, h, poly6Coeff);
+
+    float3 delta = float3(0.0f);
+    uint cachedCount = fluidNeighbors[gid].count;
+    if (cachedCount <= PBF_MAX_NEIGHBORS) {
+        for (uint k = 0; k < cachedCount; ++k) {
+            uint neighbor = fluidNeighbors[gid].neighbors[k];
+            if (neighbor == id) continue;
+            float3 sep = current.predicted_base_inv_mass.xyz - particle[neighbor].predicted_base_inv_mass.xyz;
+            float wVal = pbfPoly6(dot(sep, sep), h, poly6Coeff);
+            if (wVal <= 0.0f) continue;
+            float ratio = (referenceKernel > 0.0f) ? wVal / referenceKernel : 0.0f;
+            float ratioSq = ratio * ratio;
+            float scorr = -scorrK * (0.25f * u.voxel_size * u.voxel_size) * (ratioSq * ratioSq);
+            float scale = volume * (fluid[id].density_lambda.y + fluid[neighbor].density_lambda.y + scorr);
+            delta += scale * pbfSpikyGradient(sep, h, spikyCoeff);
+        }
+    } else {
+        int3 currentCell = cell[id].xyz;
+        for (int dz = -1; dz <= 1; ++dz) for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
+            int3 neighborCell = currentCell + int3(dx, dy, dz);
+            int item = atomic_load_explicit(&hashHead[hashCoord(neighborCell, u.hash_size)], memory_order_relaxed);
+            int traversed = 0;
+            while (item >= 0 && traversed < u.particle_count) {
+                ++traversed;
+                uint neighbor = collisionId[item];
+                if (neighbor != id && isFluid(particle[neighbor]) && all(cell[neighbor].xyz == neighborCell)) {
+                    float3 sep = current.predicted_base_inv_mass.xyz - particle[neighbor].predicted_base_inv_mass.xyz;
+                    float wVal = pbfPoly6(dot(sep, sep), h, poly6Coeff);
+                    if (wVal > 0.0f) {
+                        float ratio = (referenceKernel > 0.0f) ? wVal / referenceKernel : 0.0f;
+                        float ratioSq = ratio * ratio;
+                        float scorr = -scorrK * (0.25f * u.voxel_size * u.voxel_size) * (ratioSq * ratioSq);
+                        float scale = volume * (fluid[id].density_lambda.y + fluid[neighbor].density_lambda.y + scorr);
+                        delta += scale * pbfSpikyGradient(sep, h, spikyCoeff);
+                    }
+                }
+                item = hashNext[item];
+            }
+        }
+    }
+    float deltaLength = length(delta);
+    float deltaLimit = 0.0125f * u.voxel_size;
+    if (deltaLength > deltaLimit) delta *= deltaLimit / deltaLength;
+    fluid[id].delta = float4(delta, 0.0f);
+}
+
+inline void pbfApply(uint gid, device ParticleState *particle,
+                     device FluidState *fluid, device uint *simId,
+                     constant GpuUniforms &u) {
+    if (gid >= uint(u.fluid_count)) return;
+    uint id = fluidId(gid, simId, u);
+    particle[id].predicted_base_inv_mass.xyz += fluid[id].delta.xyz;
+    fluid[id].delta = float4(0.0f);
+}
+
+inline void pbfStaticCollisions(uint gid, device ParticleState *particle,
+                                device int4 *staticCell,
+                                device StaticCollider *staticCollider,
+                                device atomic_uint *collisionControl,
+                                device uint *simId, device const int *control,
+                                constant GpuUniforms &u) {
+    if (gid >= uint(u.fluid_count)) return;
+    uint id = fluidId(gid, simId, u);
+    staticCollisionParticleDirect(id, particle, staticCell, staticCollider, collisionControl, u);
+}
+
+inline void pbfApplyAndStaticCollisions(uint gid, device ParticleState *particle,
+                                       device FluidState *fluid,
+                                       device int4 *staticCell,
+                                       device StaticCollider *staticCollider,
+                                       device atomic_uint *collisionControl,
+                                       device uint *simId, device const int *control,
+                                       constant GpuUniforms &u) {
+    pbfApply(gid, particle, fluid, simId, u);
+    pbfStaticCollisions(gid, particle, staticCell, staticCollider, collisionControl, simId, control, u);
+}
+
+inline void pbfDynamicSolidCollisions(uint gid, bool react,
+                                      device ParticleState *particle,
+                                      device atomic_uint *correction,
+                                      device VoxelState *voxel,
+                                      device uint *simId,
+                                      device const int *control,
+                                      constant GpuUniforms &u) {
+    if (gid >= uint(u.fluid_count)) return;
+    uint id = fluidId(gid, simId, u);
+    float radius = particle[id].pos_radius.w;
+    float3 position = particle[id].predicted_base_inv_mass.xyz;
+    float3 previous = particle[id].prev_inv_mass.xyz;
+    const int4 faceCorner[6] = {
+        int4(0, 2, 6, 4), int4(1, 5, 7, 3),
+        int4(0, 4, 5, 1), int4(2, 3, 7, 6),
+        int4(0, 1, 3, 2), int4(4, 6, 7, 5)
+    };
+
+    for (int voxelId = 0; voxelId < u.voxel_count; ++voxelId) {
+        VoxelState solid = voxel[voxelId];
+        if (solid.flags.y != 0 || solid.flags.z != 0) continue;
+
+        float3 corner[8];
+        float3 boundsMin(1e30f);
+        float3 boundsMax(-1e30f);
+        bool valid = true;
+        for (int i = 0; i < 8; ++i) {
+            uint cornerId = voxelParticle(solid, i);
+            if (cornerId >= uint(controlLoad(control, 0))) { valid = false; break; }
+            corner[i] = particle[cornerId].predicted_base_inv_mass.xyz;
+            boundsMin = min(boundsMin, corner[i]);
+            boundsMax = max(boundsMax, corner[i]);
+        }
+        if (!valid) continue;
+        float3 expandedMin = boundsMin - float3(radius);
+        float3 expandedMax = boundsMax + float3(radius);
+        uint glueMask = solid.lifecycle.z;
+        bool recoverBelow = !(glueMask & (1u << 2)) &&
+                            position.x >= expandedMin.x && position.x <= expandedMax.x &&
+                            position.z >= expandedMin.z && position.z <= expandedMax.z &&
+                            position.y < expandedMin.y &&
+                            position.y >= expandedMin.y - max(2.0f * radius, u.voxel_size);
+        if (!recoverBelow && (
+            (position.x < boundsMin.x - radius && previous.x < boundsMin.x - radius) ||
+            (position.y < boundsMin.y - radius && previous.y < boundsMin.y - radius) ||
+            (position.z < boundsMin.z - radius && previous.z < boundsMin.z - radius) ||
+            (position.x > boundsMax.x + radius && previous.x > boundsMax.x + radius) ||
+            (position.y > boundsMax.y + radius && previous.y > boundsMax.y + radius) ||
+            (position.z > boundsMax.z + radius && previous.z > boundsMax.z + radius))) continue;
+
+        bool currentInside = all(position >= expandedMin) && all(position <= expandedMax);
+        bool previousInside = all(previous >= expandedMin) && all(previous <= expandedMax);
+        int nearestFace = -1;
+        float entryT = 0.0f;
+        float exitT = 1.0f;
+        float3 movement = position - previous;
+        bool segmentHits = true;
+        for (int axis = 0; axis < 3; ++axis) {
+            float origin = previous[axis];
+            float direction = movement[axis];
+            if (fabs(direction) <= 1e-8f) {
+                if (origin < expandedMin[axis] || origin > expandedMax[axis]) {
+                    segmentHits = false;
+                    break;
+                }
+                continue;
+            }
+            float tMin = (expandedMin[axis] - origin) / direction;
+            float tMax = (expandedMax[axis] - origin) / direction;
+            int minFace = axis * 2;
+            int maxFace = minFace + 1;
+            if (tMin > tMax) {
+                float swapT = tMin; tMin = tMax; tMax = swapT;
+                int swapFace = minFace; minFace = maxFace; maxFace = swapFace;
+            }
+            if (tMin > entryT) {
+                entryT = tMin;
+                nearestFace = minFace;
+            }
+            exitT = min(exitT, tMax);
+            if (entryT > exitT) {
+                segmentHits = false;
+                break;
+            }
+        }
+        if (!recoverBelow && !currentInside &&
+            (!segmentHits || previousInside || entryT < 0.0f || entryT > 1.0f)) {
+            continue;
+        }
+        if (recoverBelow) {
+            nearestFace = 3;
+        } else if (nearestFace < 0 || previousInside) {
+            float3 sideSample = previousInside ? previous : position;
+            float distances[6] = {
+                fabs(sideSample.x - expandedMin.x), fabs(expandedMax.x - sideSample.x),
+                fabs(sideSample.y - expandedMin.y), fabs(expandedMax.y - sideSample.y),
+                fabs(sideSample.z - expandedMin.z), fabs(expandedMax.z - sideSample.z)
+            };
+            float nearest = 1e30f;
+            for (int face = 0; face < 6; ++face) {
+                if ((glueMask & (1u << uint(face))) != 0) continue;
+                if (face == 2 && (previous.y >= (expandedMin.y + expandedMax.y) * 0.5f || movement.y <= 0.0f)) {
+                    continue;
+                }
+                if (face == 3 && (previous.y < (expandedMin.y + expandedMax.y) * 0.5f && movement.y > 0.0f)) {
+                    continue;
+                }
+                if (distances[face] < nearest) {
+                    nearest = distances[face];
+                    nearestFace = face;
+                }
+            }
+            if (nearestFace < 0) {
+                nearestFace = (movement.y <= 0.0f && !(glueMask & (1u << 3))) ? 3 : 2;
+            }
+        }
+        if (nearestFace < 0) continue;
+
+        float3 correctionDelta(0.0f);
+        if (nearestFace == 0) correctionDelta.x = expandedMin.x - position.x - 1e-4f;
+        else if (nearestFace == 1) correctionDelta.x = expandedMax.x - position.x + 1e-4f;
+        else if (nearestFace == 2) correctionDelta.y = expandedMin.y - position.y - 1e-4f;
+        else if (nearestFace == 3) correctionDelta.y = expandedMax.y - position.y + 1e-4f;
+        else if (nearestFace == 4) correctionDelta.z = expandedMin.z - position.z - 1e-4f;
+        else correctionDelta.z = expandedMax.z - position.z + 1e-4f;
+
+        position += correctionDelta;
+        if (nearestFace <= 1) previous.x = position.x;
+        else if (nearestFace <= 3) previous.y = position.y;
+        else previous.z = position.z;
+
+        if (react) {
+            int4 fc = faceCorner[nearestFace];
+            float3 cornerReaction = -correctionDelta * (0.02f * 0.25f);
+            float maxReaction = 0.05f * u.voxel_size;
+            cornerReaction = clamp(cornerReaction, float3(-maxReaction), float3(maxReaction));
+            for (int i = 0; i < 4; ++i) {
+                uint cornerId = voxelParticle(solid, fc[i]);
+                if (cornerId < uint(controlLoad(control, 0)) && particle[cornerId].prev_inv_mass.w > 0.0f) {
+                    accumulate(correction, control, cornerId, cornerReaction, 1.0f);
+                }
+            }
+        }
+    }
+    particle[id].predicted_base_inv_mass.xyz = position;
+    particle[id].prev_inv_mass.xyz = previous;
+}
+
+inline void pbfViscosity(uint gid, device ParticleState *particle, device int4 *cell,
+                         device uint *simId, device uint *collisionId,
+                         device atomic_int *hashHead, device int *hashNext,
+                         device FluidState *fluid, device FluidNeighborData *fluidNeighbors,
+                         device const int *control, constant GpuUniforms &u) {
+    if (gid >= uint(u.fluid_count)) return;
+    uint id = fluidId(gid, simId, u);
+    ParticleState current = particle[id];
+    float h = u.voxel_size;
+    float spacing = u.voxel_size * 0.5f;
+    float restDensity = 1000.0f;
+    float particleMass = restDensity * spacing * spacing * spacing;
+    float h2 = h * h, h6 = h2 * h2 * h2, h9 = h6 * h2 * h;
+    float poly6Coeff = 315.0f / (64.0f * 3.14159265358979323846f * h9);
+    float viscosity = 0.15f;
+
+    float3 velocityDelta = float3(0.0f);
+    uint cachedCount = fluidNeighbors[gid].count;
+    if (cachedCount <= PBF_MAX_NEIGHBORS) {
+        for (uint k = 0; k < cachedCount; ++k) {
+            uint neighbor = fluidNeighbors[gid].neighbors[k];
+            if (neighbor == id) continue;
+            float3 sep = current.pos_radius.xyz - particle[neighbor].pos_radius.xyz;
+            float wVal = pbfPoly6(dot(sep, sep), h, poly6Coeff);
+            float neighborDensity = max(fluid[neighbor].density_lambda.x, restDensity * 0.1f);
+            float scale = viscosity * particleMass * wVal / neighborDensity;
+            velocityDelta += (particle[neighbor].velocity.xyz - current.velocity.xyz) * scale;
+        }
+    } else {
+        int3 currentCell = cell[id].xyz;
+        for (int dz = -1; dz <= 1; ++dz) for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
+            int3 neighborCell = currentCell + int3(dx, dy, dz);
+            int item = atomic_load_explicit(&hashHead[hashCoord(neighborCell, u.hash_size)], memory_order_relaxed);
+            int traversed = 0;
+            while (item >= 0 && traversed < u.particle_count) {
+                ++traversed;
+                uint neighbor = collisionId[item];
+                if (neighbor != id && isFluid(particle[neighbor]) && all(cell[neighbor].xyz == neighborCell)) {
+                    float3 sep = current.pos_radius.xyz - particle[neighbor].pos_radius.xyz;
+                    float wVal = pbfPoly6(dot(sep, sep), h, poly6Coeff);
+                    float neighborDensity = max(fluid[neighbor].density_lambda.x, restDensity * 0.1f);
+                    float scale = viscosity * particleMass * wVal / neighborDensity;
+                    velocityDelta += (particle[neighbor].velocity.xyz - current.velocity.xyz) * scale;
+                }
+                item = hashNext[item];
+            }
+        }
+    }
+    fluid[id].delta = float4(velocityDelta, 0.0f);
+}
+
+inline void pbfApplyViscosity(uint gid, device ParticleState *particle,
+                              device FluidState *fluid, device uint *simId,
+                              device const int *control, constant GpuUniforms &u) {
+    if (gid >= uint(u.fluid_count)) return;
+    uint id = fluidId(gid, simId, u);
+    particle[id].velocity.xyz += fluid[id].delta.xyz;
+    fluid[id].delta = float4(0.0f);
+}
+
 kernel void pbd_pipeline(
     device ParticleState *particle [[buffer(0)]],
     device atomic_uint *correction [[buffer(1)]],
@@ -443,7 +957,9 @@ kernel void pbd_pipeline(
     device int *cloneParent [[buffer(13)]],
     device uint *dispatchArgs [[buffer(14)]],
     device int4 *topology [[buffer(15)]],
-    constant GpuUniforms &u [[buffer(16)]],
+    device FluidState *fluid [[buffer(16)]],
+    device FluidNeighborData *fluidNeighbors [[buffer(17)]],
+    constant GpuUniforms &u [[buffer(18)]],
     uint gid [[thread_position_in_grid]]) {
     device uint *collisionId=simId+uint(controlLoad(control,2));
     device atomic_int *collisionMember=reinterpret_cast<device atomic_int *>(cloneParent);
@@ -465,5 +981,14 @@ kernel void pbd_pipeline(
         case MODE_WAKE_GATHER:wakeGather(gid,voxel,topology,u);break;
         case MODE_WAKE_APPLY:wakeApply(gid,voxel,u);break;
         case MODE_TOPOLOGY_REBUILD_SERIAL:break;
+        case MODE_PBF_BUILD_NEIGHBORS:pbfBuildNeighbors(gid,particle,cell,simId,collisionId,hashHead,hashNext,fluidNeighbors,control,u);break;
+        case MODE_PBF_LAMBDA:pbfLambda(gid,particle,cell,simId,collisionId,hashHead,hashNext,fluid,fluidNeighbors,control,u);break;
+        case MODE_PBF_DELTA:pbfDelta(gid,particle,cell,simId,collisionId,hashHead,hashNext,fluid,fluidNeighbors,control,u);break;
+        case MODE_PBF_APPLY:pbfApplyAndStaticCollisions(gid,particle,fluid,staticCell,staticCollider,collisionControl,simId,control,u);break;
+        case MODE_PBF_STATIC_COLLISIONS:pbfStaticCollisions(gid,particle,staticCell,staticCollider,collisionControl,simId,control,u);break;
+        case MODE_PBF_DYNAMIC_SOLID_COLLISIONS:pbfDynamicSolidCollisions(gid,true,particle,correction,voxel,simId,control,u);break;
+        case MODE_PBF_DYNAMIC_SOLID_FINAL:pbfDynamicSolidCollisions(gid,false,particle,correction,voxel,simId,control,u);break;
+        case MODE_PBF_VISCOSITY:pbfViscosity(gid,particle,cell,simId,collisionId,hashHead,hashNext,fluid,fluidNeighbors,control,u);break;
+        case MODE_PBF_APPLY_VISCOSITY:pbfApplyViscosity(gid,particle,fluid,simId,control,u);break;
     }
 }

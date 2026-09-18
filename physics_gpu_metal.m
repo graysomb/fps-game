@@ -64,9 +64,15 @@ bool fps_metal_initialize(const char *library_path, long long *max_buffer_size,
                 MTLCompileOptions *opts = [[MTLCompileOptions alloc] init];
                 metal_state.library = [metal_state.device newLibraryWithSource:source options:opts error:&library_error];
                 [opts release];
+                if (!metal_state.library && library_error) {
+                    fprintf(stderr, "[Metal] newLibraryWithSource failed: %s\n", [[library_error localizedDescription] UTF8String]);
+                } else if (metal_state.library) {
+                    fprintf(stderr, "[Metal] Compiled pipeline from source: %s\n", [source_path UTF8String]);
+                }
             }
         }
         if (!metal_state.library) {
+            fprintf(stderr, "[Metal] Falling back to metallib file: %s\n", [path UTF8String]);
             metal_state.library = [metal_state.device newLibraryWithFile:path error:&library_error];
         }
         if (!metal_state.library) {

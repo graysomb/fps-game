@@ -38,7 +38,7 @@ glsl_text = (ROOT / "shaders/pbd/pbd_pipeline.comp").read_text(encoding="utf-8")
 metal_text = (ROOT / "shaders/pbd/pbd_pipeline.metal").read_text(encoding="utf-8")
 glsl_slots = {int(value) for value in re.findall(r"binding\s*=\s*(\d+)", glsl_text)}
 metal_slots = {int(value) for value in re.findall(r"\[\[buffer\((\d+)\)\]\]", metal_text)}
-expected_slots = set(range(16))
+expected_slots = set(range(18))
 if glsl_slots != expected_slots:
     errors.append(f"GLSL buffer slots differ: {sorted(glsl_slots)}")
 if not expected_slots.issubset(metal_slots):

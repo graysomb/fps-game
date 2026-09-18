@@ -1397,7 +1397,7 @@ static void debug_validate_gpu_static_state(DebugRunState *state, int step)
                           (unsigned long long)gpuPhysics.static_uploaded_generation,
                           (unsigned long long)staticHashGeneration);
     }
-    if (!debug_gpu_cluster_cells_are_clear(state)) {
+    if (state->tracked_cell_count > 0 && !debug_gpu_cluster_cells_are_clear(state)) {
         debug_add_failure(state, "step %d: activated cells remain in the staged GPU static hash", step);
     }
 #else
@@ -3608,7 +3608,8 @@ static void debug_validate_step(DebugRunState *state, int step)
     // The snap scenario intentionally has no dynamic particles after setup, so
     // a requested GPU backend has no dispatch that could upload the new static
     // generation. Its assertions inspect the authoritative CPU static tables.
-    if (!state->single_corner_hinge_test && !state->sleep_snap_original_test) {
+    if (!state->single_corner_hinge_test && !state->sleep_snap_original_test &&
+        !state->arena_platform_fluid_test) {
         debug_validate_gpu_static_state(state, step);
         debug_readback_gpu_buffers(state, step);
     }

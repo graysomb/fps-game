@@ -13108,14 +13108,13 @@ static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
     const float sub_dt = dt / (float)PBD_SUBSTEPS;
     if (!physics_backend_is_gpu(physicsBackend.active)) physics_try_gpu_recovery();
     static bool hybrid_prefers_gpu = false;
-    // The GPU simulation upload currently contains solid particles only.
-    // Keep fluid and solid collision response together in the CPU solver.
-    bool run_gpu = physics_backend_is_gpu(physicsBackend.active) && gpuPhysics.ready &&
-                   fluid_particle_count == 0;
+    // The GPU simulation upload supports both solid and fluid particles.
+    bool run_gpu = physics_backend_is_gpu(physicsBackend.active) && gpuPhysics.ready;
     if (physicsBackend.requested == PHYSICS_BACKEND_AUTO && !debug_run_requested() && run_gpu) {
-        if (!hybrid_prefers_gpu && sim_particle_count >= 1800) {
+        int total_particles = sim_particle_count + active_fluid_particle_count;
+        if (!hybrid_prefers_gpu && total_particles >= 1800) {
             hybrid_prefers_gpu = true;
-        } else if (hybrid_prefers_gpu && sim_particle_count < 1200) {
+        } else if (hybrid_prefers_gpu && total_particles < 1200) {
             hybrid_prefers_gpu = false;
         }
         if (!hybrid_prefers_gpu) {

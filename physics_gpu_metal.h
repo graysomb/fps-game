@@ -17,7 +17,8 @@ typedef struct FpsGpuUniforms {
     int32_t break_damp_frames;
     int32_t mode;
     int32_t vgs_color;
-    int32_t integer_padding[2];
+    int32_t fluid_count;
+    int32_t integer_padding;
     float dt;
     float voxel_size;
     float floor_size;
