@@ -834,10 +834,11 @@ static void gpu_set_uniforms(float dt) {
     for (int i = 0; i < MAX_PLAYERS; ++i) {
         player_data[i][0] = players[i].pos.x; player_data[i][1] = players[i].pos.y; player_data[i][2] = players[i].pos.z;
         player_data[i][3] = (i < activePlayers && players[i].respawn_timer <= 0.0f) ? PLAYER_SIZE * 0.5f : -1.0f;
-        tether_data[i][0] = tetherTargetByPlayer[i].x;
-        tether_data[i][1] = tetherTargetByPlayer[i].y;
-        tether_data[i][2] = tetherTargetByPlayer[i].z;
-        tether_data[i][3] = 1.0f;
+        Vector3 pull = v_sub(tetherTargetByPlayer[i], tetherComByPlayer[i]);
+        tether_data[i][0] = pull.x;
+        tether_data[i][1] = pull.y;
+        tether_data[i][2] = pull.z;
+        tether_data[i][3] = tetherScaleByPlayer[i];
     }
 #if defined(__APPLE__) && defined(FPS_GPU_METAL)
     FpsGpuUniforms uniforms = { 0 };

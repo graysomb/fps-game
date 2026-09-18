@@ -149,10 +149,11 @@ void integrateParticle(uint gid) {
         p.predicted_base_inv_mass.y -= uGravity * uDt * uDt;
         int tetherPlayer = tetherOwner[id];
         if (tetherPlayer >= 0 && tetherPlayer < 4) {
-            vec3 accel = (uTetherTarget[tetherPlayer].xyz - p.predicted_base_inv_mass.xyz) * uTetherSpring;
+            float scale = uTetherTarget[tetherPlayer].w;
+            vec3 accel = uTetherTarget[tetherPlayer].xyz * uTetherSpring * scale;
             p.predicted_base_inv_mass.xyz += accel * uDt * uDt;
             p.velocity.xyz += accel * uDt;
-            float damp = clamp(uTetherDamping * uDt, 0.0, 0.9);
+            float damp = clamp(uTetherDamping * scale * uDt, 0.0, 0.9);
             p.velocity.xyz *= 1.0 - damp;
         }
     }

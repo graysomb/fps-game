@@ -619,7 +619,8 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define BUILD_COOLDOWN_SECONDS 0.5f
 #define TETHER_RANGE 8.0f
 #define TETHER_SPRING 200.0f
-#define TETHER_DAMPING 0.2f
+#define TETHER_DAMPING 30.0f
+#define TETHER_REFERENCE_MASS 8.0f /* one isolated voxel: 8 unit-mass corners */
 #define TETHER_THROW_IMPULSE 50.0f
 #define TETHER_THROW_CCD_MIN_SPEED 30.0f
 #define TETHER_THROW_CCD_FRAMES 30
@@ -948,6 +949,8 @@ static void net_proxy_expire(uint32_t tick) {
 }
 static int tetherTag[MAX_VOXELS];
 static Vector3 tetherTargetByPlayer[MAX_PLAYERS];
+static Vector3 tetherComByPlayer[MAX_PLAYERS];
+static float tetherScaleByPlayer[MAX_PLAYERS];
 
 typedef struct {
     float reactionTimer;
@@ -10269,17 +10272,17 @@ static void integrate_particles(float dt) {
         }
 
         int tether_player = tetherTag[i] - 1;
-        Vector3 tether_target = tetherTargetByPlayer[tether_player];
-
-        Vector3 centroid = { 0.0f, 0.0f, 0.0f };
-        for (int j = 0; j < 8; ++j) {
-            centroid = v_add(centroid, voxel->particles[j]->predicted_pos);
+        if (tether_player < 0 || tether_player >= MAX_PLAYERS) {
+            continue;
         }
-        centroid = v_mul(centroid, 0.125f);
-
-        Vector3 tether_delta = v_sub(tether_target, centroid);
-        Vector3 tether_accel = v_mul(tether_delta, TETHER_SPRING);
-        float tether_damp = clampf(TETHER_DAMPING * dt, 0.0f, 0.9f);
+        Vector3 tether_delta = v_sub(tetherTargetByPlayer[tether_player],
+                                     tetherComByPlayer[tether_player]);
+        float tether_scale = tetherScaleByPlayer[tether_player];
+        if (tether_scale <= 0.0f) {
+            continue;
+        }
+        Vector3 tether_accel = v_mul(tether_delta, TETHER_SPRING * tether_scale);
+        float tether_damp = clampf(TETHER_DAMPING * tether_scale * dt, 0.0f, 0.9f);
 
         for (int j = 0; j < 8; ++j) {
             Particle *p = voxel->particles[j];
@@ -14493,8 +14496,59 @@ static void start_tether(int idx) {
     play_sfx(SFX_TETHER);
 }
 
+static void measure_tether_cluster(int player_idx, const int *cluster, int cluster_count)
+{
+    tetherScaleByPlayer[player_idx] = 1.0f;
+    tetherComByPlayer[player_idx] = tetherTargetByPlayer[player_idx];
+    if (!cluster || cluster_count <= 0) {
+        return;
+    }
+
+    int stamp = ++particle_sync_stamp;
+    if (stamp == 0) {
+        stamp = 1;
+        particle_sync_stamp = 1;
+    }
+
+    float mass = 0.0f;
+    Vector3 com = { 0.0f, 0.0f, 0.0f };
+    for (int c = 0; c < cluster_count; ++c) {
+        int idx = cluster[c];
+        if (idx < 0 || idx >= voxel_count) {
+            continue;
+        }
+        Voxel *voxel = &voxels[idx];
+        for (int k = 0; k < VOXEL_CORNER_COUNT; ++k) {
+            Particle *p = voxel->particles[k];
+            if (!p || p->inv_mass <= 0.0f) {
+                continue;
+            }
+            if (p->sync_stamp == stamp) {
+                continue;
+            }
+            p->sync_stamp = stamp;
+            float m = 1.0f / p->inv_mass;
+            mass += m;
+            com = v_add(com, v_mul(p->pos, m));
+        }
+    }
+    if (mass <= 1e-6f) {
+        return;
+    }
+    tetherComByPlayer[player_idx] = v_mul(com, 1.0f / mass);
+    float scale = TETHER_REFERENCE_MASS / mass;
+    if (scale > 1.0f) {
+        scale = 1.0f;
+    }
+    tetherScaleByPlayer[player_idx] = scale;
+}
+
 static void prepare_tether_forces(void) {
     memset(tetherTag, 0, sizeof(tetherTag));
+    for (int i = 0; i < MAX_PLAYERS; ++i) {
+        tetherScaleByPlayer[i] = 1.0f;
+        tetherComByPlayer[i] = tetherTargetByPlayer[i];
+    }
     int count = (activePlayers > 0) ? activePlayers : MAX_PLAYERS;
     for (int i = 0; i < count; ++i) {
         Player *p = &players[i];
@@ -14523,21 +14577,20 @@ static void prepare_tether_forces(void) {
         }
         tetherTargetByPlayer[i] = player_hand_position(p);
         int cluster_count = build_glue_cluster_indices(p->tetherVoxel, glueClusterIndices);
-        if (cluster_count > 0) {
-            for (int c = 0; c < cluster_count; ++c) {
-                int v_idx = glueClusterIndices[c];
-                if (v_idx < 0 || v_idx >= voxel_count) {
-                    continue;
-                }
-                tetherTag[v_idx] = i + 1;
-                voxels[v_idx].activationBelief = 1.0f;
-                voxels[v_idx].activationCooldownFrames = 0;
-            }
-        } else {
-            tetherTag[p->tetherVoxel] = i + 1;
-            voxels[p->tetherVoxel].activationBelief = 1.0f;
-            voxels[p->tetherVoxel].activationCooldownFrames = 0;
+        if (cluster_count <= 0) {
+            glueClusterIndices[0] = p->tetherVoxel;
+            cluster_count = 1;
         }
+        for (int c = 0; c < cluster_count; ++c) {
+            int v_idx = glueClusterIndices[c];
+            if (v_idx < 0 || v_idx >= voxel_count) {
+                continue;
+            }
+            tetherTag[v_idx] = i + 1;
+            voxels[v_idx].activationBelief = 1.0f;
+            voxels[v_idx].activationCooldownFrames = 0;
+        }
+        measure_tether_cluster(i, glueClusterIndices, cluster_count);
     }
 }
 
@@ -14555,14 +14608,38 @@ static void release_tether(int idx) {
         }
         if (v->simulate) {
             Vector3 dir = player_forward(p);
-            Vector3 impulse = v_mul(dir, TETHER_THROW_IMPULSE);
-            v->vel = v_add(v->vel, impulse);
-            for (int j = 0; j < VOXEL_CORNER_COUNT; ++j) {
-                Particle *particle = voxel_particle_at(v, j);
-                if (particle->inv_mass == 0.0f) {
+            int cluster_count = build_glue_cluster_indices(p->tetherVoxel, glueClusterIndices);
+            if (cluster_count <= 0) {
+                glueClusterIndices[0] = p->tetherVoxel;
+                cluster_count = 1;
+            }
+            Vector3 impulse = v_mul(dir, TETHER_THROW_IMPULSE / (float)cluster_count);
+            int stamp = ++particle_sync_stamp;
+            if (stamp == 0) {
+                stamp = 1;
+                particle_sync_stamp = 1;
+            }
+            for (int c = 0; c < cluster_count; ++c) {
+                int v_idx = glueClusterIndices[c];
+                if (v_idx < 0 || v_idx >= voxel_count) {
                     continue;
                 }
-                particle->vel = v_add(particle->vel, impulse);
+                Voxel *member = &voxels[v_idx];
+                if (!member->simulate) {
+                    continue;
+                }
+                member->vel = v_add(member->vel, impulse);
+                for (int j = 0; j < VOXEL_CORNER_COUNT; ++j) {
+                    Particle *particle = voxel_particle_at(member, j);
+                    if (!particle || particle->inv_mass == 0.0f) {
+                        continue;
+                    }
+                    if (particle->sync_stamp == stamp) {
+                        continue;
+                    }
+                    particle->sync_stamp = stamp;
+                    particle->vel = v_add(particle->vel, impulse);
+                }
             }
             v->tetherThrowCcdFrames =
                 tetherThrowCcdEnabled && v_length(v->vel) >= TETHER_THROW_CCD_MIN_SPEED

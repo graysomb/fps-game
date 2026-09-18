@@ -129,10 +129,11 @@ inline void integrateParticle(uint gid, device ParticleState *particle,
         p.predicted_base_inv_mass.y -= u.gravity * u.dt * u.dt;
         int player = tetherOwner[id];
         if (player >= 0 && player < 4) {
-            float3 accel = (u.tether_targets[player].xyz - p.predicted_base_inv_mass.xyz) * u.tether_spring;
+            float scale = u.tether_targets[player].w;
+            float3 accel = u.tether_targets[player].xyz * u.tether_spring * scale;
             p.predicted_base_inv_mass.xyz += accel * u.dt * u.dt;
             p.velocity.xyz += accel * u.dt;
-            p.velocity.xyz *= 1.0f - clamp(u.tether_damping * u.dt, 0.0f, 0.9f);
+            p.velocity.xyz *= 1.0f - clamp(u.tether_damping * scale * u.dt, 0.0f, 0.9f);
         }
     }
     particle[id] = p;
