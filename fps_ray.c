@@ -731,6 +731,7 @@ typedef struct {
     bool tetherHolding;
     int tetherVoxel;
     uint64_t tetherVoxelIdentity;
+    int tetherFace;
     bool netTetherVisualActive;
     Vector3 netTetherVisualTarget;
     bool meleeKnockbackActive;
@@ -4417,13 +4418,25 @@ static void detach_face_particles(Voxel *voxel, int face_index) {
     for (int c = 0; c < 4; ++c) {
         int corner = face_corner_indices[face_index][c];
         Particle *p_old = voxel->particles[corner];
-        if (!p_old || p_old->refcount <= 1) {
+        if (!p_old) {
+            continue;
+        }
+        if (p_old->refcount <= 1 && p_old->inv_mass > 0.0f) {
             continue;
         }
 
         Particle *p_new = particle_clone(p_old);
         if (!p_new) {
             continue;
+        }
+
+        if (voxel->simulate) {
+            p_new->inv_mass = 1.0f;
+            p_new->base_inv_mass = 1.0f;
+            p_new->vel = voxel->vel;
+            if (p_new->sim_index < 0) {
+                sim_particles_add(p_new);
+            }
         }
 
         p_new->break_timer = BREAK_DAMP_FRAMES;
@@ -8256,6 +8269,8 @@ static void buildDemo(void) {
 
 
 static int first_voxel_hit(Ray ray, float t_max, int ignore_id);
+static bool first_voxel_hit_detailed(Ray ray, float t_max, int ignore_id,
+                                     bool static_only, VoxelHit *out_hit);
 static bool first_swept_voxel_hit(Ray ray, float t_max, int ignore_id,
                                   VoxelHit *out_hit);
 static void UpdateKdRatio(int player_index);
@@ -9446,7 +9461,7 @@ static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float
     int previousCount = buffer.count;
     int added = collect_static_activation_cluster(voxel_idx, activator,
                                                   seed->gx, seed->gy, seed->gz,
-                                                  -1.0f,
+                                                  (float)(VOXEL_ACTIVATION_RADIUS * VOXEL_ACTIVATION_RADIUS),
                                                   &buffer);
     if (added <= 0) {
         rollback_activation_buffer(&buffer, previousCount);
@@ -9459,7 +9474,21 @@ static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float
     }
 
     remove_buffered_static_voxels(&buffer);
-    emit_unit_voxels_from_units(&buffer, false, true, -1);
+    int activation_base = voxel_count;
+    int spawned = emit_unit_voxels_from_units(&buffer, false, true, -1);
+    if (spawned > 0) {
+        for (int i = activation_base; i < voxel_count; ++i) {
+            if (voxels[i].simulate) {
+                voxels[i].activationBelief = 1.0f;
+                voxels[i].activator = activator;
+                voxels[i].owner = activator;
+                voxels[i].wake_timer = COARSENING_WAKE_FRAMES;
+                voxels[i].wake_source = true;
+                voxels[i].sleeping = false;
+                voxels[i].sleepFrames = 0;
+            }
+        }
+    }
     wake_fluid_near_unit_buffer(&buffer);
     rebuild_voxel_hash();
     rebuild_all_voxel_surfaces();
@@ -10104,10 +10133,6 @@ static void evaluate_voxel_fracture(Voxel *voxel) {
     if (!voxel->simulate || !voxel->vgs_active || voxel->isBullet || voxel->type != 0 || voxel->debugClusterTag == DEBUG_CONTAINER_TAG) {
         return;
     }
-    int voxel_idx = (int)(voxel - voxels);
-    if (voxel_idx >= 0 && voxel_idx < voxel_count && tetherTag[voxel_idx] > 0) {
-        return;
-    }
     if (voxel->rest_edge <= 0.0f) {
         return;
     }
@@ -10200,24 +10225,35 @@ static void evaluate_voxel_fracture(Voxel *voxel) {
     }
 
     if (should_break) {
-        voxel->vgs_active = false;
+        static pthread_mutex_t fracture_mutex = PTHREAD_MUTEX_INITIALIZER;
+        pthread_mutex_lock(&fracture_mutex);
+        if (!voxel->simulate || !voxel->vgs_active) {
+            pthread_mutex_unlock(&fracture_mutex);
+            return;
+        }
+
+        int voxel_idx = (int)(voxel - voxels);
+        bool is_tethered = (voxel_idx >= 0 && voxel_idx < voxel_count && tetherTag[voxel_idx] > 0);
+
+        if (is_tethered) {
+            // The voxel the tether targets is indestructible while tethered:
+            // keeps vgs_active = true, but its VGS connections to neighbors naturally disable.
+            voxel->vgs_active = true;
+            voxel->glueEligible = false;
+        } else {
+            voxel->vgs_active = false;
+        }
+
         voxel->wake_source = true;
-        for (int i = 0; i < 8; ++i) {
-            Particle *part = voxel->particles[i];
-            if (part && part->glue_count > 0) {
-                part->glue_count--;
-            }
-        }
+
         for (int f = 0; f < 6; ++f) {
-            int nidx = voxel->glued_neighbors[f];
-            if (nidx >= 0 && nidx < voxel_count) {
-                voxels[nidx].glued_faces[opposite_face[f]] = false;
-                voxels[nidx].glued_neighbors[opposite_face[f]] = -1;
-            }
-            voxel->glued_neighbors[f] = -1;
+            if (!voxel->glued_faces[f]) continue;
+            break_face_link(voxel, f);
         }
-        memset(voxel->glued_faces, 0, sizeof(voxel->glued_faces));
+
         collisionTopologyDirty = true;
+        play_sfx(SFX_GLUE_BREAK);
+        pthread_mutex_unlock(&fracture_mutex);
     }
 }
 
@@ -10227,7 +10263,6 @@ static void evaluate_voxel_fracture_range(int start, int end, int worker_id, voi
     for (int i = start; i < end; ++i) {
         int v_idx = active_voxels[i];
         Voxel *voxel = &voxels[v_idx];
-        if (tetherTag[v_idx] > 0) continue;
         evaluate_voxel_fracture(voxel);
     }
 }
@@ -10299,8 +10334,26 @@ static void integrate_particles(float dt) {
         Vector3 tether_accel = v_mul(tether_delta, TETHER_SPRING * tether_scale);
         float tether_damp = clampf(TETHER_DAMPING * tether_scale * dt, 0.0f, 0.9f);
 
-        for (int j = 0; j < 8; ++j) {
-            Particle *p = voxel->particles[j];
+        int tether_face = players[tether_player].tetherFace;
+        if (tether_face < 0 || tether_face >= 6) {
+            Vector3 delta = v_sub(tetherTargetByPlayer[tether_player], voxel->pos);
+            float best_dot = -1e9f;
+            for (int f = 0; f < 6; ++f) {
+                Vector3 fn = { (float)face_offsets[f][0], (float)face_offsets[f][1], (float)face_offsets[f][2] };
+                float d = v_dot(delta, fn);
+                if (d > best_dot) {
+                    best_dot = d;
+                    tether_face = f;
+                }
+            }
+        }
+
+        for (int c = 0; c < 4; ++c) {
+            int corner_idx = face_corner_indices[tether_face][c];
+            Particle *p = voxel->particles[corner_idx];
+            if (!p || p->inv_mass <= 0.0f) {
+                continue;
+            }
             if (p->tether_stamp == stamp) {
                 continue;
             }
@@ -14412,6 +14465,30 @@ static void perform_build(int idx) {
     }
 }
 
+static int activate_static_voxel_to_dynamic(int voxel_idx, int activator) {
+    if (voxel_idx < 0 || voxel_idx >= voxel_count) return -1;
+    if (voxel_is_fluid(&voxels[voxel_idx])) {
+        activate_fluid_cluster(voxel_idx);
+        return voxel_idx;
+    }
+    if (!voxels[voxel_idx].simulate &&
+        voxels[voxel_idx].activationCooldownFrames > 0) return -1;
+    Voxel v = voxels[voxel_idx]; // Copy data
+    
+    remove_voxel_index(voxel_idx);
+    mark_surface_neighbors(v.pos);
+    meshDirty = true;
+    
+    int new_idx = addVoxel(v.pos.x, v.pos.y, v.pos.z, false, true, v.color, v.type);
+    if (new_idx >= 0) {
+        voxels[new_idx].owner = activator;
+        voxels[new_idx].activator = activator;
+        voxels[new_idx].glueEligible = true;
+        glue_neighbor_faces_for_voxel(new_idx);
+    }
+    return new_idx;
+}
+
 static int rip_single_static_voxel(int voxel_idx, int activator) {
     if (voxel_idx < 0 || voxel_idx >= voxel_count) return -1;
     if (voxel_is_fluid(&voxels[voxel_idx])) {
@@ -14465,7 +14542,11 @@ static void start_tether(int idx) {
     }
     Vector3 dir = player_forward(p);
     Ray ray = { p->pos, dir };
-    int hit_id = first_voxel_hit(ray, TETHER_RANGE, -1);
+    VoxelHit hit_info;
+    if (!first_voxel_hit_detailed(ray, TETHER_RANGE, -1, false, &hit_info)) {
+        return;
+    }
+    int hit_id = hit_info.id;
     if (hit_id < 0 || hit_id >= voxel_count) {
         return;
     }
@@ -14474,51 +14555,45 @@ static void start_tether(int idx) {
         wake_sleeping_cluster_in_place(hit_id);
         hit = &voxels[hit_id];
     }
-    
+
+    int hit_face = 0;
+    if (hit_info.normal.x > 0.5f) hit_face = 0;
+    else if (hit_info.normal.x < -0.5f) hit_face = 1;
+    else if (hit_info.normal.y > 0.5f) hit_face = 2;
+    else if (hit_info.normal.y < -0.5f) hit_face = 3;
+    else if (hit_info.normal.z > 0.5f) hit_face = 4;
+    else if (hit_info.normal.z < -0.5f) hit_face = 5;
+
     int tether_idx = -1;
     if (!hit->simulate) {
-        // Rip single voxel
-        tether_idx = rip_single_static_voxel(hit_id, idx);
+        // Tether activates voxels just like mining or moving active voxels
+        int h_gx = hit->gx, h_gy = hit->gy, h_gz = hit->gz;
+        activate_static_voxel_for_tether(hit_id, idx, ACTIVATION_TETHER_BELIEF);
+        int new_idx = table_get(h_gx, h_gy, h_gz);
+        if (new_idx >= 0 && new_idx < voxel_count && voxels[new_idx].simulate) {
+            tether_idx = new_idx;
+        } else {
+            tether_idx = find_closest_dynamic_voxel(hit->pos, 2.5f);
+        }
     } else {
-        Vector3 hit_pos = hit->pos;
-        tether_idx = hit->simulate ? hit_id : find_closest_dynamic_voxel(hit_pos, 2.5f);
+        tether_idx = hit_id;
     }
 
     if (tether_idx < 0 || tether_idx >= voxel_count) {
         return;
     }
-    
-    // For dynamic voxels, mark ownership and tether state on the whole glue
-    // cluster so sibling voxels are treated as held too.
+
     if (voxels[tether_idx].simulate) {
         detach_goliath_armor_voxel(tether_idx);
-        int cluster_count = build_glue_cluster_indices(tether_idx, glueClusterIndices);
-        if (cluster_count > 0) {
-            for (int c = 0; c < cluster_count; ++c) {
-                int v_idx = glueClusterIndices[c];
-                if (v_idx < 0 || v_idx >= voxel_count) {
-                    continue;
-                }
-                voxels[v_idx].owner = idx;
-                voxels[v_idx].activator = idx;
-                voxels[v_idx].wasTethered = true;
-            }
-        } else {
-            voxels[tether_idx].owner = idx;
-            voxels[tether_idx].activator = idx;
-            voxels[tether_idx].wasTethered = true;
-            cluster_count = 1;
-        }
-        // Keep a lone grab from gluing to newly activated walls. Leave a
-        // multi-voxel chunk glue-eligible so it stays one group.
-        if (cluster_count <= 1) {
-            voxels[tether_idx].glueEligible = false;
-        }
+        voxels[tether_idx].owner = idx;
+        voxels[tether_idx].activator = idx;
+        voxels[tether_idx].wasTethered = true;
     }
 
     p->tetherHolding = true;
     p->tetherVoxel = tether_idx;
     p->tetherVoxelIdentity = voxels[tether_idx].identity;
+    p->tetherFace = hit_face;
     play_sfx(SFX_TETHER);
 }
 
@@ -14529,15 +14604,13 @@ static void measure_tether_cluster(int player_idx, const int *cluster, int clust
     if (!cluster || cluster_count <= 0) {
         return;
     }
-
     int stamp = ++particle_sync_stamp;
     if (stamp == 0) {
         stamp = 1;
         particle_sync_stamp = 1;
     }
-
-    float mass = 0.0f;
     Vector3 com = { 0.0f, 0.0f, 0.0f };
+    float mass = 0.0f;
     for (int c = 0; c < cluster_count; ++c) {
         int idx = cluster[c];
         if (idx < 0 || idx >= voxel_count) {
@@ -14556,6 +14629,17 @@ static void measure_tether_cluster(int player_idx, const int *cluster, int clust
             float m = 1.0f / p->inv_mass;
             mass += m;
             com = v_add(com, v_mul(p->pos, m));
+        }
+    }
+    if (mass <= 1e-6f) {
+        for (int c = 0; c < cluster_count; ++c) {
+            int idx = cluster[c];
+            if (idx < 0 || idx >= voxel_count) {
+                continue;
+            }
+            Voxel *voxel = &voxels[idx];
+            mass += 8.0f;
+            com = v_add(com, v_mul(voxel->pos, 8.0f));
         }
     }
     if (mass <= 1e-6f) {
@@ -14590,33 +14674,26 @@ static void prepare_tether_forces(void) {
             v = &voxels[p->tetherVoxel];
         }
         if (!v->simulate) {
-            int new_idx = rip_single_static_voxel(p->tetherVoxel, i);
-            if (new_idx < 0 || new_idx >= voxel_count) {
+            int h_gx = v->gx, h_gy = v->gy, h_gz = v->gz;
+            activate_static_voxel_for_tether(p->tetherVoxel, i, ACTIVATION_TETHER_BELIEF);
+            int new_idx = table_get(h_gx, h_gy, h_gz);
+            if (new_idx >= 0 && new_idx < voxel_count && voxels[new_idx].simulate) {
+                p->tetherVoxel = new_idx;
+                p->tetherVoxelIdentity = voxels[new_idx].identity;
+                v = &voxels[new_idx];
+            } else {
                 p->tetherHolding = false;
                 p->tetherVoxel = -1;
                 p->tetherVoxelIdentity = 0;
                 continue;
             }
-            p->tetherVoxel = new_idx;
-            p->tetherVoxelIdentity = voxels[new_idx].identity;
-            v = &voxels[new_idx];
         }
         tetherTargetByPlayer[i] = player_hand_position(p);
-        int cluster_count = build_glue_cluster_indices(p->tetherVoxel, glueClusterIndices);
-        if (cluster_count <= 0) {
-            glueClusterIndices[0] = p->tetherVoxel;
-            cluster_count = 1;
-        }
-        for (int c = 0; c < cluster_count; ++c) {
-            int v_idx = glueClusterIndices[c];
-            if (v_idx < 0 || v_idx >= voxel_count) {
-                continue;
-            }
-            tetherTag[v_idx] = i + 1;
-            voxels[v_idx].activationBelief = 1.0f;
-            voxels[v_idx].activationCooldownFrames = 0;
-        }
-        measure_tether_cluster(i, glueClusterIndices, cluster_count);
+        tetherComByPlayer[i] = v->pos;
+        tetherScaleByPlayer[i] = 1.0f;
+        tetherTag[p->tetherVoxel] = i + 1;
+        v->activationBelief = 1.0f;
+        v->activationCooldownFrames = 0;
     }
 }
 

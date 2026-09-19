@@ -530,8 +530,22 @@ static bool gpu_pack_world(void) {
         if (!v->simulate || v->type != 0 || v->isBullet || tetherTag[i] <= 0) continue;
         int player = tetherTag[i] - 1;
         if (player < 0 || player >= MAX_PLAYERS) continue;
-        for (int c = 0; c < 8; ++c) {
-            ptrdiff_t pool_id = v->particles[c] - particles_pool;
+        int tether_face = players[player].tetherFace;
+        if (tether_face < 0 || tether_face >= 6) {
+            Vector3 delta = v_sub(tetherTargetByPlayer[player], v->pos);
+            float best_dot = -1e9f;
+            for (int f = 0; f < 6; ++f) {
+                Vector3 fn = { (float)face_offsets[f][0], (float)face_offsets[f][1], (float)face_offsets[f][2] };
+                float d = v_dot(delta, fn);
+                if (d > best_dot) {
+                    best_dot = d;
+                    tether_face = f;
+                }
+            }
+        }
+        for (int c = 0; c < 4; ++c) {
+            int corner = face_corner_indices[tether_face][c];
+            ptrdiff_t pool_id = v->particles[corner] - particles_pool;
             if (pool_id < 0 || pool_id >= particle_pool_count) continue;
             int id = gpuPhysics.pool_to_compact[pool_id];
             if (id < 0 || gpuPhysics.tether_stage[id] >= 0) continue;
@@ -974,7 +988,13 @@ static bool gpu_validate_and_commit(void) {
         if (voxel_id < 0 || voxel_id >= voxel_count) return false;
         Voxel *v = &voxels[voxel_id]; GpuVoxelState *g = &gpuPhysics.voxel_stage[i];
         if (v->vgs_active && g->flags[0] == 0) {
-            v->vgs_active = false;
+            bool is_tethered = (voxel_id >= 0 && voxel_id < voxel_count && tetherTag[voxel_id] > 0);
+            if (is_tethered) {
+                v->vgs_active = true;
+                v->glueEligible = false;
+            } else {
+                v->vgs_active = false;
+            }
             v->wake_source = true;
             for (int corner = 0; corner < 8; ++corner) {
                 Particle *part = v->particles[corner];
@@ -982,8 +1002,8 @@ static bool gpu_validate_and_commit(void) {
                     part->glue_count--;
                 }
             }
-            memset(v->glued_faces, 0, sizeof(v->glued_faces));
             for (int f = 0; f < 6; ++f) {
+                if (!v->glued_faces[f]) continue;
                 int nidx = v->glued_neighbors[f];
                 if (nidx >= 0 && nidx < voxel_count) {
                     voxels[nidx].glued_faces[opposite_face[f]] = false;
@@ -993,7 +1013,27 @@ static bool gpu_validate_and_commit(void) {
                         gpuPhysics.voxel_stage[n_dyn].lifecycle[2] &= ~(1u << opposite_face[f]);
                     }
                 }
+                v->glued_faces[f] = false;
                 v->glued_neighbors[f] = -1;
+            }
+            for (int corner = 0; corner < 8; ++corner) {
+                Particle *part = v->particles[corner];
+                if (!part) continue;
+                if (part->inv_mass <= 0.0f || (is_tethered && part->refcount > 1)) {
+                    Particle *clone = particle_clone(part);
+                    if (clone) {
+                        clone->inv_mass = 1.0f;
+                        clone->base_inv_mass = 1.0f;
+                        clone->vel = v->vel;
+                        clone->break_timer = BREAK_DAMP_FRAMES;
+                        part->break_timer = BREAK_DAMP_FRAMES;
+                        if (clone->sim_index < 0) {
+                            sim_particles_add(clone);
+                        }
+                        v->particles[corner] = clone;
+                        particle_release(part);
+                    }
+                }
             }
             g->lifecycle[2] = 0;
             topology_changed = true;
@@ -1011,7 +1051,11 @@ static bool gpu_validate_and_commit(void) {
             }
         }
         if (v->type == 0 && !v->isBullet) {
-            v->pos = (Vector3){g->pos_rest_edge[0], g->pos_rest_edge[1], g->pos_rest_edge[2]};
+            Vector3 centroid = { 0.0f, 0.0f, 0.0f };
+            for (int c = 0; c < 8; ++c) {
+                if (v->particles[c]) centroid = v_add(centroid, v->particles[c]->pos);
+            }
+            v->pos = v_mul(centroid, 0.125f);
             v->vel = (Vector3){g->velocity_rest_volume[0], g->velocity_rest_volume[1], g->velocity_rest_volume[2]};
             v->skipCollisionVelocityFrames = (int)g->lifecycle[0];
         }
@@ -1081,7 +1125,21 @@ static bool gpu_refresh_tethers(void) {
         if (v->type != 0 || v->isBullet || tetherTag[world_id] <= 0) continue;
         int player = tetherTag[world_id] - 1;
         if (player < 0 || player >= MAX_PLAYERS) continue;
-        for (int corner = 0; corner < 8; ++corner) {
+        int tether_face = players[player].tetherFace;
+        if (tether_face < 0 || tether_face >= 6) {
+            Vector3 delta = v_sub(tetherTargetByPlayer[player], v->pos);
+            float best_dot = -1e9f;
+            for (int f = 0; f < 6; ++f) {
+                Vector3 fn = { (float)face_offsets[f][0], (float)face_offsets[f][1], (float)face_offsets[f][2] };
+                float d = v_dot(delta, fn);
+                if (d > best_dot) {
+                    best_dot = d;
+                    tether_face = f;
+                }
+            }
+        }
+        for (int c = 0; c < 4; ++c) {
+            int corner = face_corner_indices[tether_face][c];
             ptrdiff_t pool_id = v->particles[corner] - particles_pool;
             if (pool_id < 0 || pool_id >= particle_pool_count) continue;
             int id = gpuPhysics.pool_to_compact[pool_id];

@@ -445,6 +445,8 @@ Available scenarios are:
   hinge-angle limit.
 * `tether-active-then-static`: tethers an active voxel and then a static cluster voxel,
   verifying that activation/array compaction does not lose or redirect the tether target.
+* `tether-active-glued-static`: tethers an active voxel glued to a static anchor and verifies
+  whether stress/strain fracture checks trigger under tension to break the static glue bond.
 * `tether-thin-wall-ccd`: throws a tether voxel fast enough to cross a one-voxel-thick
   wall between endpoint samples and verifies that swept particle rays stop it, rebound
   it, transfer forward momentum to the wall, and do not join their constraint graphs.

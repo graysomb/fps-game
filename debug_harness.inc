@@ -103,6 +103,10 @@ typedef struct DebugRunState {
     bool tether_thin_wall_received_impulse;
     bool tether_second_started;
     bool tether_second_survived;
+    bool tether_active_glued_static_test;
+    bool tether_active_glued_static_glue_broken;
+    float tether_active_glued_static_max_strain;
+    float tether_active_glued_static_pull_distance;
     bool recycle_test;
     bool recycle_succeeded;
     bool falling_pillar_test;
@@ -275,6 +279,7 @@ static bool debug_setup_pbf_dense_neighbors(DebugRunState *state);
 static bool debug_setup_cube_stress(DebugRunState *state);
 static bool debug_setup_voxel_strain_shear_fracture(DebugRunState *state);
 static bool debug_setup_arena_platform_fluid(DebugRunState *state);
+static bool debug_setup_tether_active_glued_static(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall, 60, 60 },
@@ -302,7 +307,8 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "goliath-behavior", "Goliath maintains armor, detects enemy, and launches voxels", debug_setup_goliath_behavior, 180, 60 },
     { "cube-stress", "Stress test with scalable dynamic cube (size set by FPS_CUBE_SIZE)", debug_setup_cube_stress, 60, 60 },
     { "voxel-strain-shear-fracture", "Dynamic voxels deactivate VGS shape constraints when strain or shear exceeds threshold", debug_setup_voxel_strain_shear_fracture, 60, 60 },
-    { "arena-platform-fluid", "Test arena central platform activated with sleeping fluid on top", debug_setup_arena_platform_fluid, 60, 60 }
+    { "arena-platform-fluid", "Test arena central platform activated with sleeping fluid on top", debug_setup_arena_platform_fluid, 60, 60 },
+    { "tether-active-glued-static", "Tethering an active voxel glued to static breaks VGS constraints and extracts intact voxel under stress/strain", debug_setup_tether_active_glued_static, 60, 60 }
 };
 
 static const int debugScenarioCount = (int)(sizeof(debugScenarios) / sizeof(debugScenarios[0]));
@@ -2537,6 +2543,54 @@ static bool debug_setup_tether_active_then_static(DebugRunState *state)
     return true;
 }
 
+static bool debug_setup_tether_active_glued_static(DebugRunState *state)
+{
+    debug_reset_world();
+    state->tether_active_glued_static_test = true;
+    Color static_color = (Color){ 75, 175, 245, 255 };
+    Color active_color = (Color){ 245, 145, 45, 255 };
+    int static_idx = debug_add_cell(0, 8, 0, true, false, static_color, DEBUG_SUPPORT_TAG);
+    int active_idx = debug_add_cell(0, 9, 0, false, true, active_color, DEBUG_TEST_TAG);
+    if (static_idx < 0 || active_idx < 0) {
+        debug_add_failure(state, "tether active glued static could not create test voxels");
+        return false;
+    }
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_rebuild_world_state();
+
+    if (!voxels[active_idx].glued_faces[3] || !voxels[static_idx].glued_faces[2]) {
+        debug_add_failure(state, "setup failed: active voxel was not glued to static base");
+        return false;
+    }
+
+    memset(tetherTag, 0, sizeof(tetherTag));
+    for (int i = 0; i < MAX_PLAYERS; ++i) {
+        players[i].tetherHolding = false;
+        players[i].tetherVoxel = -1;
+        players[i].tetherVoxelIdentity = 0;
+        players[i].respawn_timer = (i == 0) ? 0.0f : 1000.0f;
+    }
+    players[0].pos = (Vector3){ 0.25f, 9.0f, 4.0f };
+    Vector3 aim = v_norm(v_sub(voxels[active_idx].pos, players[0].pos));
+    dir_to_yaw_pitch(aim, &players[0].yaw, &players[0].pitch);
+    start_tether(0);
+    if (!players[0].tetherHolding || players[0].tetherVoxel != active_idx) {
+        debug_add_failure(state, "tether failed to acquire active voxel (holding=%d voxel=%d expected=%d)",
+                          players[0].tetherHolding ? 1 : 0, players[0].tetherVoxel, active_idx);
+        return false;
+    }
+    players[0].pos = (Vector3){ 0.25f, 12.0f, 6.0f };
+    prepare_tether_forces();
+    state->tether_static_start = voxels[active_idx].pos;
+    state->expected_voxels = 1;
+    state->activation_succeeded = true;
+    debug_set_initial_centroid(state);
+    state->camera.position = (Vector3){ 4.0f, 7.0f, 5.0f };
+    state->camera.target = (Vector3){ 0.0f, 5.0f, 0.5f };
+    debug_capture(state, "phase-01-active-glued-tethered.png", "active-glued-tethered", 0);
+    return true;
+}
+
 static bool debug_setup_tether_thin_wall_ccd(DebugRunState *state)
 {
     debug_reset_world();
@@ -3572,13 +3626,15 @@ static void debug_validate_step(DebugRunState *state, int step)
             }
         }
     } else if (step <= 1 && !state->tether_active_then_static_test &&
-               !state->sleep_snap_original_test && !state->arena_platform_fluid_test) {
+               !state->sleep_snap_original_test && !state->arena_platform_fluid_test &&
+               !state->tether_active_glued_static_test) {
         debug_validate_tagged_dynamic(state, &sample, step == 0 ? "after activation" : "first physics step");
     }
     // The snap scenario intentionally has no dynamic particles after setup, so
     // a requested GPU backend has no dispatch that could upload the new static
     // generation. Its assertions inspect the authoritative CPU static tables.
-    if (!state->single_corner_hinge_test && !state->sleep_snap_original_test) {
+    if (!state->single_corner_hinge_test && !state->sleep_snap_original_test &&
+        !state->tether_active_glued_static_test) {
         debug_validate_gpu_static_state(state, step);
         debug_readback_gpu_buffers(state, step);
     }
@@ -3620,6 +3676,20 @@ static void debug_validate_step(DebugRunState *state, int step)
             if (angle > state->max_hinge_angle_deg) state->max_hinge_angle_deg = angle;
             state->hinge_broken = !voxels[lower_idx].glued_faces[2] ||
                                   !voxels[upper_idx].glued_faces[3];
+        }
+    }
+    if (state->tether_active_glued_static_test) {
+        int active_idx = debug_find_tagged_voxel(DEBUG_TEST_TAG, false);
+        if (active_idx >= 0 && active_idx < voxel_count) {
+            float strain = 0.0f, shear = 0.0f;
+            voxel_measure_strain(&voxels[active_idx], &strain, &shear);
+            if (strain > state->tether_active_glued_static_max_strain)
+                state->tether_active_glued_static_max_strain = strain;
+            float distance = v_length(v_sub(voxels[active_idx].pos, state->tether_static_start));
+            if (distance > state->tether_active_glued_static_pull_distance)
+                state->tether_active_glued_static_pull_distance = distance;
+            if (!voxels[active_idx].glued_faces[3])
+                state->tether_active_glued_static_glue_broken = true;
         }
     }
 }
@@ -3774,6 +3844,20 @@ static void debug_finalize_validation(DebugRunState *state)
             state->tether_static_pull_distance < 0.25f) {
             debug_add_failure(state, "second tether pulled its target only %.3f metres",
                               state->tether_static_pull_distance);
+        }
+        return;
+    }
+    if (state->tether_active_glued_static_test) {
+        if (!state->tether_active_glued_static_glue_broken) {
+            debug_add_failure(state,
+                              "reproduced bug: tethered active voxel glued to static bypassed stress/strain fracture check (max strain %.3f > %.3f threshold); glue remained intact and voxel was not extracted (distance %.3fm)",
+                              (double)state->tether_active_glued_static_max_strain,
+                              (double)STRAIN_BREAK_THRESHOLD,
+                              (double)state->tether_active_glued_static_pull_distance);
+        } else if (state->tether_active_glued_static_pull_distance < 0.25f) {
+            debug_add_failure(state,
+                              "active voxel broke glue but pulled only %.3f metres",
+                              (double)state->tether_active_glued_static_pull_distance);
         }
         return;
     }
@@ -4089,6 +4173,14 @@ static bool debug_write_report(DebugRunState *state)
             (double)state->tether_static_pull_distance,
             state->tether_index_mismatch_step, state->tether_expected_index,
             state->tether_selected_index);
+
+    fprintf(file,
+            "  \"tetherActiveGluedStaticDiagnostics\": {\"enabled\": %s,"
+            " \"glueBroken\": %s, \"maxStrain\": %.9g, \"pullDistance\": %.9g},\n",
+            state->tether_active_glued_static_test ? "true" : "false",
+            state->tether_active_glued_static_glue_broken ? "true" : "false",
+            (double)state->tether_active_glued_static_max_strain,
+            (double)state->tether_active_glued_static_pull_distance);
 
     fprintf(file,
             "  \"tetherThinWallDiagnostics\": {\"enabled\": %s,"
