@@ -539,12 +539,10 @@ static bool gpu_pack_world(void) {
         g->lifecycle[0] = (uint32_t)((v->skipCollisionVelocityFrames > 0) ? v->skipCollisionVelocityFrames : 0);
         g->lifecycle[1] = v->wake_source ? 1u : 0u;
         g->lifecycle[2] = gpu_glued_face_mask(v) | (v->glueEligible ? 0x80000000u : 0u);
-        bool can_fracture = (v->vgs_active && v->debugClusterTag != DEBUG_CONTAINER_TAG && (i < 0 || i >= voxel_count || tetherTag[i] <= 0));
         g->lifecycle[3] = ((uint32_t)v->orig_min_gx & 1u) |
                          (((uint32_t)v->orig_min_gy & 1u) << 1) |
                          (((uint32_t)v->orig_min_gz & 1u) << 2) |
-                         (v->vgs_active ? 0x8u : 0u) |
-                         (can_fracture ? 0x10u : 0u);
+                         (v->vgs_active ? 0x8u : 0u);
     }
 
     for (int dynamic_id = 0; dynamic_id < gpuPhysics.dynamic_voxel_count; ++dynamic_id) {
@@ -1049,7 +1047,7 @@ static bool gpu_validate_and_commit(void) {
                 }
             }
             g->lifecycle[2] = 0;
-            g->lifecycle[3] &= ~(0x8u | 0x10u);
+            g->lifecycle[3] &= ~0x8u;
             finalize_pending_voxel_fracture(v);
             topology_changed = true;
             particle_layout_changed = true;
@@ -1129,8 +1127,6 @@ static bool gpu_resident_matches_cpu(void) {
         uint32_t glue_mask = gpu_glued_face_mask(v);
         if ((g->lifecycle[2] & 0x3fu) != glue_mask) return false;
         if (((g->lifecycle[3] & 0x8u) != 0u) != v->vgs_active) return false;
-        bool can_fracture = (v->vgs_active && v->debugClusterTag != DEBUG_CONTAINER_TAG && (world_id < 0 || world_id >= voxel_count || tetherTag[world_id] <= 0));
-        if (((g->lifecycle[3] & 0x10u) != 0u) != can_fracture) return false;
         for (int corner = 0; corner < 8; ++corner) {
             Particle *p = v->particles[corner];
             if (!p) return false;
