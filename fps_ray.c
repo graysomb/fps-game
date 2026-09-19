@@ -16228,6 +16228,30 @@ static void DrawVoxels(Camera3D cam) {
         DrawSphere(center, core_radius, (Color){ 120, 200, 255, 220 });
     }
 
+    // Render unglued particles ("no glue") as 3D matte spheres
+    particlePosRadiusCount = 0;
+    Color particleColor = (Color){ 255, 160, 40, 255 };
+
+    for (int i = 0; i < active_particle_count; ++i) {
+        Particle *p = active_particles[i];
+        if (!p || !p->active || p->material != PARTICLE_MATERIAL_SOLID ||
+            p->glue_count > 0) {
+            continue;
+        }
+        float radius = (p->radius > 0.0f) ? p->radius : (VOXEL_SIZE * 0.25f);
+        if (particlePosRadius && particlePosRadiusCount < particlePosRadiusCapacity) {
+            particlePosRadius[particlePosRadiusCount++] = (Vector4){ p->pos.x, p->pos.y, p->pos.z, radius };
+        } else {
+            DrawSphere(p->pos, radius, particleColor);
+        }
+    }
+
+    if (particlePosRadiusCount > 0 && particleSphereMesh.vertexCount > 0) {
+        DrawParticlesInstancedFast(particleSphereMesh, particleMatteMaterial, particlePosRadius,
+                                   particlePosRadiusCount, particlePosRadiusLoc,
+                                   particleColorLoc, particleColor);
+    }
+
     draw_fluid_particles(cam);
 
     rlEnableBackfaceCulling();
