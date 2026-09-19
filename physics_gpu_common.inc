@@ -49,6 +49,7 @@ enum {
     GPU_LOC_ACTIVE_PLAYERS,
     GPU_LOC_DT,
     GPU_LOC_VOXEL_SIZE,
+    GPU_LOC_PARTICLE_HASH_STEP,
     GPU_LOC_FLOOR_SIZE,
     GPU_LOC_GRAVITY,
     GPU_LOC_VELOCITY_DAMPING,
@@ -828,7 +829,8 @@ static void gpu_set_uniforms(float dt) {
     float strain = STRAIN_BREAK_THRESHOLD, shear = SHEAR_BREAK_THRESHOLD;
     float tether_spring = TETHER_SPRING, tether_damping = TETHER_DAMPING;
     int break_damp_frames = BREAK_DAMP_FRAMES;
-    float rest_grid_step = VOXEL_SIZE * 0.5f;
+    float rest_grid_step = pbdSolidVoxelSize * 0.5f;
+    float particle_hash_step = pbdSolidVoxelSize;
     float player_data[MAX_PLAYERS][4];
     float tether_data[MAX_PLAYERS][4];
     for (int i = 0; i < MAX_PLAYERS; ++i) {
@@ -852,6 +854,7 @@ static void gpu_set_uniforms(float dt) {
     uniforms.vgs_epsilon = eps; uniforms.strain_threshold = strain; uniforms.shear_threshold = shear;
     uniforms.tether_spring = tether_spring; uniforms.tether_damping = tether_damping;
     uniforms.rest_grid_step = rest_grid_step;
+    uniforms.particle_hash_step = particle_hash_step;
     memcpy(uniforms.players, player_data, sizeof(player_data));
     memcpy(uniforms.tether_targets, tether_data, sizeof(tether_data));
     fps_metal_set_uniforms(&uniforms);
@@ -865,6 +868,7 @@ static void gpu_set_uniforms(float dt) {
     rlSetUniform(gpuPhysics.loc[GPU_LOC_ACTIVE_PLAYERS], &activePlayers, SHADER_UNIFORM_INT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_DT], &dt, SHADER_UNIFORM_FLOAT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_VOXEL_SIZE], &voxel_size, SHADER_UNIFORM_FLOAT, 1);
+    rlSetUniform(gpuPhysics.loc[GPU_LOC_PARTICLE_HASH_STEP], &particle_hash_step, SHADER_UNIFORM_FLOAT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_FLOOR_SIZE], &floor_size, SHADER_UNIFORM_FLOAT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_GRAVITY], &gravity, SHADER_UNIFORM_FLOAT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_VELOCITY_DAMPING], &damping, SHADER_UNIFORM_FLOAT, 1);
@@ -1319,7 +1323,7 @@ static bool gpu_physics_init(void) {
     }
     static const char *names[GPU_LOC_COUNT] = {
         "uMode", "uParticleCount", "uSimCount", "uVoxelCount", "uStaticColliderCount", "uHashSize", "uStaticHashSize",
-        "uActivePlayers", "uDt", "uVoxelSize", "uFloorSize", "uGravity", "uVelocityDamping",
+        "uActivePlayers", "uDt", "uVoxelSize", "uParticleHashStep", "uFloorSize", "uGravity", "uVelocityDamping",
         "uSor", "uCollisionRelaxation", "uVgsAlpha", "uVgsBeta", "uVgsEpsilon",
         "uStrainBreakThreshold", "uShearBreakThreshold", "uTetherSpring", "uTetherDamping",
         "uBreakDampFrames", "uRestGridStep", "uPlayerPosHalf", "uTetherTarget"

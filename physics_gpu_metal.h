@@ -33,7 +33,7 @@ typedef struct FpsGpuUniforms {
     float tether_spring;
     float tether_damping;
     float rest_grid_step;
-    float padding;
+    float particle_hash_step;
     float players[4][4];
     float tether_targets[4][4];
 } FpsGpuUniforms;

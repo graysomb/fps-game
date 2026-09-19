@@ -586,8 +586,7 @@ static inline bool is_player_bot(int player_index) {
 static const float GRID_EPSILON = 1e-4f;
 static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define VOXEL_ACTIVATION_RADIUS 2*1
-//#define VOXEL_ACTIVATION_UNIT_BUDGET 128
-#define VOXEL_ACTIVATION_UNIT_BUDGET 128*5
+#define VOXEL_ACTIVATION_UNIT_BUDGET 1000
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 1.5f
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.4f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.4f
@@ -649,6 +648,12 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define MAX_VOXELS    131072
 #define HASH_SIZE     524288    // must be power of two
 #define VOXEL_SIZE     0.5f    // size of each voxel cube
+#ifndef DEBUG_PBD_VOXEL_SIZE
+#define DEBUG_PBD_VOXEL_SIZE VOXEL_SIZE
+#endif
+// The cube-drop debug fixture can use a different solid lattice. Gameplay resets
+// this to the static cell size before constructing any other scene.
+static float pbdSolidVoxelSize = VOXEL_SIZE;
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
 #define MAX_PARTICLES (MAX_VOXELS * 8)
 #define PARTICLE_HASH_SIZE 262144
@@ -2588,7 +2593,7 @@ static Particle *particle_create(Vector3 pos, float inv_mass) { //pointer
     p->cell_x = 0;
     p->cell_y = 0;
     p->cell_z = 0;
-    const float rest_grid_step = VOXEL_SIZE * 0.5f;
+    const float rest_grid_step = pbdSolidVoxelSize * 0.5f;
     p->rest_cell_x = (int)lroundf(pos.x / rest_grid_step);
     p->rest_cell_y = (int)lroundf(pos.y / rest_grid_step);
     p->rest_cell_z = (int)lroundf(pos.z / rest_grid_step);
@@ -2724,9 +2729,9 @@ static void particle_hash_build_range(int start, int end, int worker_id, void *u
         if (!p) {
             continue;
         }
-        int gx = (int)floorf(p->predicted_pos.x / VOXEL_SIZE);
-        int gy = (int)floorf(p->predicted_pos.y / VOXEL_SIZE);
-        int gz = (int)floorf(p->predicted_pos.z / VOXEL_SIZE);
+        int gx = (int)floorf(p->predicted_pos.x / pbdSolidVoxelSize);
+        int gy = (int)floorf(p->predicted_pos.y / pbdSolidVoxelSize);
+        int gz = (int)floorf(p->predicted_pos.z / pbdSolidVoxelSize);
         p->cell_x = gx;
         p->cell_y = gy;
         p->cell_z = gz;
@@ -4191,7 +4196,7 @@ static bool init_voxel_struct(Voxel *v,
     if (!v) {
         return false;
     }
-    float edge = VOXEL_SIZE;
+    float edge = simulate ? pbdSolidVoxelSize : VOXEL_SIZE;
     float half = 0.5f * edge;
 
     v->pos = (Vector3){ px, py, pz };
@@ -10528,7 +10533,7 @@ static bool particles_are_local_structural_neighbors(const Particle *a, const Pa
     if (!a || !b || a->collision_group < 0 || a->collision_group != b->collision_group) {
         return false;
     }
-    const float step = VOXEL_SIZE * 0.5f;
+    const float step = pbdSolidVoxelSize * 0.5f;
     float dx = (float)(a->rest_cell_x - b->rest_cell_x) * step;
     float dy = (float)(a->rest_cell_y - b->rest_cell_y) * step;
     float dz = (float)(a->rest_cell_z - b->rest_cell_z) * step;
@@ -11916,9 +11921,10 @@ static void collide_particle_with_static_surface(Particle *particle, float radiu
     int gy = (int)floorf(position.y / VOXEL_SIZE);
     int gz = (int)floorf(position.z / VOXEL_SIZE);
 
-    for (int dz = -1; dz <= 1; ++dz) {
-        for (int dy = -1; dy <= 1; ++dy) {
-            for (int dx = -1; dx <= 1; ++dx) {
+    int reach = radius > VOXEL_SIZE ? (int)ceilf(radius / VOXEL_SIZE) + 1 : 1;
+    for (int dz = -reach; dz <= reach; ++dz) {
+        for (int dy = -reach; dy <= reach; ++dy) {
+            for (int dx = -reach; dx <= reach; ++dx) {
                 const StaticSurfaceCell *cell = find_static_surface_cell(gx + dx, gy + dy, gz + dz);
                 if (!cell) continue;
                 for (int item = 0; item < cell->count; ++item) {
@@ -12087,7 +12093,6 @@ static void solve_static_collisions_range(int start, int end, int worker_id, voi
     StaticCollisionJob *job = (StaticCollisionJob *)user;
     float half_player = job->half_player;
     const float eps = 1e-6f;
-    const float static_collision_radius = 0.25f * VOXEL_SIZE;
 
     for (int i = start; i < end; ++i) {
         Particle *p = collision_particles[i];
@@ -12095,6 +12100,7 @@ static void solve_static_collisions_range(int start, int end, int worker_id, voi
 
         // p->radius holds the voxel radius (0.25)
         float voxel_radius = p->radius;
+        const float static_collision_radius = 0.5f * voxel_radius;
         float terrain_limit = FLOOR_SIZE - voxel_radius;
         
         // Floor collision

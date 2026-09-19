@@ -449,6 +449,13 @@ Available scenarios are:
   wall between endpoint samples and verifies that swept particle rays stop it, rebound
   it, transfer forward momentum to the wall, and do not join their constraint graphs.
 * `cube-stress`: stress test with scalable dynamic cube (size set by `FPS_CUBE_SIZE`).
+* `active-cube-drop`: creates a static 10×10×10 cube above the floor, converts
+  the entire cube to PBD cells, and drops it for 120 steps by default. Compile
+  with `-DDEBUG_PBD_VOXEL_SIZE=0.25f` to change only this scenario's target PBD
+  size; the default is 0.5. A uniform lattice always fits the original 5 m cube.
+  When the requested size does not divide 5 m, the effective cell size is
+  `5 / ceil(5 / requested size)` (for example, 2 m requests use 27 cells of
+  about 1.667 m). The JSON report includes both sizes and the dynamic count.
 * `pbf-container`: drops 512 fluid particles into a tall immutable voxel container, captures
   both render modes, and checks particle membership, density, settling, containment, and that
   fluid never activates the container.
@@ -461,6 +468,8 @@ Available scenarios are:
   bytes transferred per frame, dispatch count, hull backend, and maximum neighbor overflow.
 * `pbf-dense-neighbors`: compresses 512 particles into one smoothing neighborhood and verifies
   that GPU cache overflow is detected and routed through the complete hash-scan fallback.
+
+Run the cube drop with `fps_ray --physics=cpu-mt --debug-scenario=active-cube-drop`.
 
 For example, benchmark 4,096 particles across all three backends with:
 

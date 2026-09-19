@@ -29,7 +29,7 @@ struct GpuUniforms {
     float dt, voxel_size, floor_size, gravity;
     float velocity_damping, sor, collision_relaxation, vgs_alpha;
     float vgs_beta, vgs_epsilon, strain_threshold, shear_threshold;
-    float tether_spring, tether_damping, rest_grid_step, padding;
+    float tether_spring, tether_damping, rest_grid_step, particle_hash_step;
     float4 players[4];
     float4 tether_targets[4];
 };
@@ -154,7 +154,7 @@ inline void buildHash(uint gid, device ParticleState *particle, device int4 *cel
     if (gid >= atomic_load_explicit(&collisionControl[0], memory_order_relaxed)) return;
     uint id = collisionId[gid];
     if (refcount[id] <= 0) return;
-    int3 c = int3(floor(particle[id].predicted_base_inv_mass.xyz / u.voxel_size));
+    int3 c = int3(floor(particle[id].predicted_base_inv_mass.xyz / u.particle_hash_step));
     cell[id].xyz = c;
     uint h = hashCoord(c, u.hash_size);
     hashNext[gid] = atomic_exchange_explicit(&hashHead[h], int(gid), memory_order_relaxed);
@@ -330,7 +330,7 @@ inline float3 pushOutOfPatch(float3 pos,float radius,StaticCollider patch){float
 inline void staticCollisions(uint gid,device ParticleState *particle,device uint *collisionId,device atomic_uint *collisionControl,device int4 *staticCell,device StaticCollider *staticCollider,device const int *refcount,device const int *control,constant GpuUniforms &u){
     if(gid>=atomic_load_explicit(&collisionControl[0], memory_order_relaxed))return;uint id=collisionId[gid];if(refcount[id]<=0)return;ParticleState p=particle[id];if(p.prev_inv_mass.w<=0.0f)return;float radius=p.pos_radius.w;float3 pos=p.predicted_base_inv_mass.xyz;float terrainLimit=u.floor_size-radius,floorLimit=max(0.0f,0.5f*u.voxel_size-radius);bool floorContact=pos.y<floorLimit;pos.y=max(pos.y,floorLimit);if(floorContact){p.prev_inv_mass.xz=pos.xz-(pos.xz-p.prev_inv_mass.xz)*0.05f;p.prev_inv_mass.y=pos.y;}pos.xz=clamp(pos.xz,float2(-terrainLimit),float2(terrainLimit));constexpr float eps=1e-6f;
     for(int i=0;i<u.active_players&&i<4;++i){if(u.players[i].w<0.0f)continue;float halfSize=u.players[i].w;float3 nearest=clamp(pos,u.players[i].xyz-float3(halfSize),u.players[i].xyz+float3(halfSize));float3 delta=pos-nearest;float distSq=dot(delta,delta);if(distSq<radius*radius){float dist=sqrt(max(distSq,eps));float3 normal=dist>eps?delta/dist:float3(0,1,0);pos+=normal*(radius-dist);}}
-    bool surfaceMode=atomic_load_explicit(&collisionControl[4], memory_order_relaxed)!=0u;int3 center=int3(floor(pos/u.voxel_size));int seen[128];int seenCount=0;for(int z=-1;z<=1;++z)for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x){int item=findStaticCell(center+int3(x,y,z),staticCell,u);if(!surfaceMode&&item<=-2){int colliderId=-item-2;if(colliderId>=0&&colliderId<u.static_collider_count)pos=pushOutOfBox(pos,0.25f*u.voxel_size,staticCollider[colliderId],u);continue;}while(item>=0&&item<u.static_collider_count){StaticCollider patch=staticCollider[item];int patchId=as_type<int>(patch.bounds_min.w);bool duplicate=false;for(int s=0;s<seenCount;++s)duplicate=duplicate||seen[s]==patchId;if(!duplicate&&seenCount<128){seen[seenCount++]=patchId;pos=pushOutOfPatch(pos,0.25f*u.voxel_size,patch);}item=as_type<int>(patch.center.w);}}center=int3(floor(pos/u.voxel_size));int recovery=findStaticCell(center,staticCell,u);if(recovery<=-2){int colliderId=-recovery-2;if(colliderId>=0&&colliderId<u.static_collider_count)pos=pushOutOfBox(pos,0.25f*u.voxel_size,staticCollider[colliderId],u);}p.predicted_base_inv_mass.xyz=pos;particle[id]=p;
+    bool surfaceMode=atomic_load_explicit(&collisionControl[4], memory_order_relaxed)!=0u;int3 center=int3(floor(pos/u.voxel_size));int seen[128];int seenCount=0;int reach=0.5f*radius>u.voxel_size?int(ceil(0.5f*radius/u.voxel_size))+1:1;for(int z=-reach;z<=reach;++z)for(int y=-reach;y<=reach;++y)for(int x=-reach;x<=reach;++x){int item=findStaticCell(center+int3(x,y,z),staticCell,u);if(!surfaceMode&&item<=-2){int colliderId=-item-2;if(colliderId>=0&&colliderId<u.static_collider_count)pos=pushOutOfBox(pos,0.5f*radius,staticCollider[colliderId],u);continue;}while(item>=0&&item<u.static_collider_count){StaticCollider patch=staticCollider[item];int patchId=as_type<int>(patch.bounds_min.w);bool duplicate=false;for(int s=0;s<seenCount;++s)duplicate=duplicate||seen[s]==patchId;if(!duplicate&&seenCount<128){seen[seenCount++]=patchId;pos=pushOutOfPatch(pos,0.5f*radius,patch);}item=as_type<int>(patch.center.w);}}center=int3(floor(pos/u.voxel_size));int recovery=findStaticCell(center,staticCell,u);if(recovery<=-2){int colliderId=-recovery-2;if(colliderId>=0&&colliderId<u.static_collider_count)pos=pushOutOfBox(pos,0.5f*radius,staticCollider[colliderId],u);}p.predicted_base_inv_mass.xyz=pos;particle[id]=p;
 }
 
 inline int topologyNeighbor(device int4 *topology,int voxelId,int face);

@@ -1,4 +1,9 @@
 #include <errno.h>
+#ifdef _WIN32
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#endif
 
 #define DEBUG_PATH_CAPACITY 2048
 #define DEBUG_MAX_CAPTURE_STEPS 64
@@ -40,6 +45,7 @@ typedef struct DebugSample {
     int step;
     int tagged_voxels;
     int tagged_dynamic;
+    int tagged_rendered;
     int tagged_static;
     int tagged_sleeping;
     int sim_particles;
@@ -78,6 +84,9 @@ typedef struct DebugRunState {
     RenderTexture2D target;
     Camera3D camera;
     int expected_voxels;
+    int expected_static_leftovers;
+    float effective_pbd_size;
+    bool active_cube_drop;
     bool activation_succeeded;
     bool sleeping_conversion_succeeded;
     bool sleep_snap_original_test;
@@ -273,6 +282,7 @@ static bool debug_setup_pbf_dynamic_container(DebugRunState *state);
 static bool debug_setup_pbf_scaling(DebugRunState *state);
 static bool debug_setup_pbf_dense_neighbors(DebugRunState *state);
 static bool debug_setup_cube_stress(DebugRunState *state);
+static bool debug_setup_active_cube_drop(DebugRunState *state);
 static bool debug_setup_voxel_strain_shear_fracture(DebugRunState *state);
 static bool debug_setup_arena_platform_fluid(DebugRunState *state);
 
@@ -301,6 +311,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "goliath-flight", "Goliath jumps with attached armor and must land", debug_setup_goliath_flight, 120, 90 },
     { "goliath-behavior", "Goliath maintains armor, detects enemy, and launches voxels", debug_setup_goliath_behavior, 180, 60 },
     { "cube-stress", "Stress test with scalable dynamic cube (size set by FPS_CUBE_SIZE)", debug_setup_cube_stress, 60, 60 },
+    { "active-cube-drop", "Activate a static 10x10x10 cube and drop it", debug_setup_active_cube_drop, 120, 60 },
     { "voxel-strain-shear-fracture", "Dynamic voxels deactivate VGS shape constraints when strain or shear exceeds threshold", debug_setup_voxel_strain_shear_fracture, 60, 60 },
     { "arena-platform-fluid", "Test arena central platform activated with sleeping fluid on top", debug_setup_arena_platform_fluid, 60, 60 }
 };
@@ -521,6 +532,33 @@ static bool debug_join_path(char *out, size_t capacity, const char *left, const 
     return written >= 0 && (size_t)written < capacity;
 }
 
+static bool debug_make_directory_recursive(const char *path)
+{
+    if (!path || !path[0] || strlen(path) >= DEBUG_PATH_CAPACITY) return false;
+    char copy[DEBUG_PATH_CAPACITY];
+    strcpy(copy, path);
+    for (char *cursor = copy + 1; *cursor; ++cursor) {
+        if (*cursor != '/' && *cursor != '\\') continue;
+#ifdef _WIN32
+        if (cursor == copy + 2 && copy[1] == ':') continue;
+#endif
+        char separator = *cursor;
+        *cursor = '\0';
+#ifdef _WIN32
+        bool created = _mkdir(copy) == 0 || errno == EEXIST;
+#else
+        bool created = mkdir(copy, 0755) == 0 || errno == EEXIST;
+#endif
+        *cursor = separator;
+        if (!created) return false;
+    }
+#ifdef _WIN32
+    return (_mkdir(copy) == 0 || errno == EEXIST) && DirectoryExists(path);
+#else
+    return (mkdir(copy, 0755) == 0 || errno == EEXIST) && DirectoryExists(path);
+#endif
+}
+
 static void debug_add_failure(DebugRunState *state, const char *format, ...)
 {
     if (!state || !format || state->failure_count >= DEBUG_MAX_FAILURES) return;
@@ -725,6 +763,7 @@ static void debug_rebuild_world_state(void)
 
 static void debug_reset_world(void)
 {
+    pbdSolidVoxelSize = VOXEL_SIZE;
     clear_world_voxels();
     clear_pickups();
     voxelHashFramesSinceRebuild = 0;
@@ -732,6 +771,151 @@ static void debug_reset_world(void)
     staticHashDirty = false;
     init_static_hash();
     table_cache_invalidate();
+}
+
+static void debug_glue_pbd_faces(int new_index, int neighbor_index, int face)
+{
+    Voxel *a = &voxels[new_index];
+    Voxel *b = &voxels[neighbor_index];
+    int opposite = opposite_face[face];
+    for (int corner = 0; corner < 4; ++corner) {
+        int ai = face_corner_indices[face][corner];
+        int bi = face_corner_indices[opposite][corner];
+        Particle *old = a->particles[ai];
+        Particle *shared = b->particles[bi];
+        if (old == shared) continue;
+        if (old->glue_count > 0) --old->glue_count;
+        particle_release(old);
+        particle_retain(shared);
+        ++shared->glue_count;
+        a->particles[ai] = shared;
+    }
+    a->glued_faces[face] = b->glued_faces[opposite] = true;
+    a->glued_neighbors[face] = neighbor_index;
+    b->glued_neighbors[opposite] = new_index;
+    collisionTopologyDirty = true;
+}
+
+static bool debug_remove_tagged_voxels(int tag);
+
+static bool debug_convert_cube_to_pbd(DebugRunState *state)
+{
+    state->expected_voxels = 0;
+    state->expected_static_leftovers = 1000;
+    const double size = (double)DEBUG_PBD_VOXEL_SIZE;
+    const double cube_edge = 10.0 * (double)VOXEL_SIZE;
+    if (!isfinite(size) || size <= 0.0 || size > cube_edge) {
+        debug_add_failure(state, "PBD size %.9g must be positive and no larger than the %.9g m cube",
+                          size, cube_edge);
+        return false;
+    }
+    // Keep the original cube bounds and use a uniform lattice. The requested
+    // size is an upper bound when it does not divide the 5 m cube exactly.
+    double side_d = ceil(cube_edge / size - 1e-6);
+    if (side_d > 50.0) {
+        double required = side_d * side_d * side_d;
+        debug_add_failure(state, "PBD size %.9g requires %.0f voxels and %.0f particles (caps %d/%d)",
+                          size, required, required * 8.0, MAX_VOXELS, MAX_PARTICLES);
+        return false;
+    }
+    int side = (int)side_d;
+    float effective_size = (float)(cube_edge / side_d);
+    int64_t dynamic_count = (int64_t)side * side * side;
+    int64_t needed_particles = 8 * dynamic_count;
+    if (dynamic_count > MAX_VOXELS || needed_particles > MAX_PARTICLES ||
+        dynamic_count > INT_MAX) {
+        debug_add_failure(state, "PBD size %.9g requires %lld voxels and %lld particles (caps %d/%d)",
+                          size, (long long)dynamic_count,
+                          (long long)needed_particles, MAX_VOXELS, MAX_PARTICLES);
+        return false;
+    }
+
+    int *lattice = malloc((size_t)dynamic_count * sizeof(*lattice));
+    float *particle_mass = calloc((size_t)MAX_PARTICLES, sizeof(*particle_mass));
+    if (!lattice || !particle_mass) {
+        free(lattice); free(particle_mass);
+        debug_add_failure(state, "PBD size %.9g: unable to allocate conversion workspace", size);
+        return false;
+    }
+    debug_remove_tagged_voxels(DEBUG_TEST_TAG);
+    const Color color = { 245, 145, 45, 255 };
+    pbdSolidVoxelSize = effective_size;
+    for (int y = 0; y < side; ++y) for (int z = 0; z < side; ++z) for (int x = 0; x < side; ++x) {
+        int flat = (y * side + z) * side + x;
+        float px = -5.0f * VOXEL_SIZE + ((float)x + 0.5f) * pbdSolidVoxelSize;
+        float py = 18.0f * VOXEL_SIZE + ((float)y + 0.5f) * pbdSolidVoxelSize;
+        float pz = -5.0f * VOXEL_SIZE + ((float)z + 0.5f) * pbdSolidVoxelSize;
+        int idx = addVoxel(px, py, pz, false, true, color, 0);
+        if (idx < 0) goto conversion_failed;
+        voxels[idx].debugClusterTag = DEBUG_TEST_TAG;
+        lattice[flat] = idx;
+        if (x > 0) debug_glue_pbd_faces(idx, lattice[flat - 1], 1);
+        if (z > 0) debug_glue_pbd_faces(idx, lattice[flat - side], 5);
+        if (y > 0) debug_glue_pbd_faces(idx, lattice[flat - side * side], 3);
+    }
+    // Each voxel contributes eight corner masses. Shared particles receive the
+    // sum of contributions, preserving mass per physical volume after gluing.
+    float contribution = (pbdSolidVoxelSize / VOXEL_SIZE);
+    contribution = contribution * contribution * contribution;
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (!v->simulate || v->debugClusterTag != DEBUG_TEST_TAG) continue;
+        for (int c = 0; c < 8; ++c) {
+            ptrdiff_t pool = v->particles[c] - particles_pool;
+            particle_mass[pool] += contribution;
+        }
+    }
+    for (int i = 0; i < particle_pool_count; ++i) {
+        if (particle_mass[i] <= 0.0f) continue;
+        particles_pool[i].inv_mass = particles_pool[i].base_inv_mass = 1.0f / particle_mass[i];
+    }
+    double total_mass = 0.0;
+    for (int i = 0; i < particle_pool_count; ++i) {
+        if (particle_mass[i] > 0.0f) total_mass += 1.0 / particles_pool[i].base_inv_mass;
+    }
+    double expected_mass = 8.0 * 10.0 * 10.0 * 10.0;
+    if (fabs(total_mass - expected_mass) > expected_mass * 1e-4) {
+        debug_add_failure(state, "PBD size %.9g mass %.6g differs from expected %.6g",
+                          size, total_mass, expected_mass);
+    }
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *v = &voxels[i];
+        if (!v->simulate || v->debugClusterTag != DEBUG_TEST_TAG) continue;
+        if (fabsf(v->rest_edge - pbdSolidVoxelSize) > 1e-5f) {
+            debug_add_failure(state, "PBD voxel %d has the wrong rest edge", i);
+            break;
+        }
+        for (int c = 0; c < 8; ++c) {
+            Particle *p = v->particles[c];
+            Vector3 target = {
+                v->pos.x + corner_signs[c][0] * 0.5f * pbdSolidVoxelSize,
+                v->pos.y + corner_signs[c][1] * 0.5f * pbdSolidVoxelSize,
+                v->pos.z + corner_signs[c][2] * 0.5f * pbdSolidVoxelSize
+            };
+            if (!p || v_length(v_sub(p->pos, target)) > 1e-4f) {
+                debug_add_failure(state, "PBD voxel %d corner %d does not match its lattice position", i, c);
+                break;
+            }
+        }
+    }
+    state->expected_voxels = (int)dynamic_count;
+    state->expected_static_leftovers = 0;
+    state->effective_pbd_size = effective_size;
+    state->activation_succeeded = true;
+    // The gameplay glue rebuild uses static-grid coordinates. Preserve the
+    // explicit PBD-lattice links created above when refreshing debug caches.
+    rebuild_voxel_hash();
+    rebuild_static_hash_if_dirty();
+    rebuild_all_voxel_surfaces();
+    refresh_static_voxel_beliefs();
+    meshDirty = true;
+    free(lattice); free(particle_mass);
+    return true;
+
+conversion_failed:
+    debug_add_failure(state, "PBD size %.9g: cube conversion failed after preflight", size);
+    free(lattice); free(particle_mass);
+    return false;
 }
 
 static bool debug_remove_tagged_voxels(int tag)
@@ -820,11 +1004,15 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
 
     float centroid_sum = 0.0f;
     float velocity_sum = 0.0f;
+    bool cube_dynamic_only = strcmp(debugRunConfig.scenario, "active-cube-drop") == 0;
     for (int i = 0; i < voxel_count; ++i) {
         const Voxel *voxel = &voxels[i];
         if (voxel->debugClusterTag != DEBUG_TEST_TAG) continue;
         ++sample.tagged_voxels;
-        if (voxel->simulate) ++sample.tagged_dynamic;
+        if (voxel->simulate) {
+            ++sample.tagged_dynamic;
+            if (voxel->vgs_active) ++sample.tagged_rendered;
+        }
         else ++sample.tagged_static;
         if (voxel->simulate && voxel->sleeping) ++sample.tagged_sleeping;
 
@@ -849,8 +1037,10 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
             }
         }
         if (valid_corners > 0) center = v_mul(center, 1.0f / (float)valid_corners);
-        centroid_sum += center.y;
-        velocity_sum += voxel->vel.y;
+        if (!cube_dynamic_only || voxel->simulate) {
+            centroid_sum += center.y;
+            velocity_sum += voxel->vel.y;
+        }
         if (center.y < sample.min_y) sample.min_y = center.y;
         if (center.y > sample.max_y) sample.max_y = center.y;
 
@@ -864,9 +1054,10 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
             }
         }
     }
-    if (sample.tagged_voxels > 0) {
-        sample.centroid_y = centroid_sum / (float)sample.tagged_voxels;
-        sample.mean_velocity_y = velocity_sum / (float)sample.tagged_voxels;
+    int centroid_count = cube_dynamic_only ? sample.tagged_dynamic : sample.tagged_voxels;
+    if (centroid_count > 0) {
+        sample.centroid_y = centroid_sum / (float)centroid_count;
+        sample.mean_velocity_y = velocity_sum / (float)centroid_count;
     } else {
         sample.min_y = 0.0f;
         sample.max_y = 0.0f;
@@ -1323,13 +1514,16 @@ static void debug_validate_tagged_dynamic(DebugRunState *state, const DebugSampl
                                           const char *context)
 {
     if (!state || !sample) return;
-    if (sample->tagged_voxels != state->expected_voxels) {
+    int expected_total = state->expected_voxels + state->expected_static_leftovers;
+    if (sample->tagged_voxels != expected_total) {
         debug_add_failure(state, "%s: expected %d tagged voxels, found %d",
-                          context, state->expected_voxels, sample->tagged_voxels);
+                          context, expected_total, sample->tagged_voxels);
     }
-    if (sample->tagged_dynamic != state->expected_voxels || sample->tagged_static != 0) {
-        debug_add_failure(state, "%s: tagged cluster is not fully dynamic (dynamic=%d static=%d)",
-                          context, sample->tagged_dynamic, sample->tagged_static);
+    if (sample->tagged_dynamic != state->expected_voxels ||
+        sample->tagged_static != state->expected_static_leftovers) {
+        debug_add_failure(state, "%s: tagged counts dynamic=%d/%d static=%d/%d",
+                          context, sample->tagged_dynamic, state->expected_voxels,
+                          sample->tagged_static, state->expected_static_leftovers);
     }
     if (sample->tagged_sleeping != 0) {
         debug_add_failure(state, "%s: %d tagged voxels remain sleeping", context,
@@ -1645,6 +1839,37 @@ static bool debug_setup_cube_stress(DebugRunState *state)
     float dist = (float)size * 2.5f + 10.0f;
     state->camera.position = (Vector3){ dist, (float)(20 + size/2) + dist * 0.4f, dist };
     state->camera.target = (Vector3){ 0.0f, (float)(20 + size/2), 0.0f };
+    return true;
+}
+
+static bool debug_setup_active_cube_drop(DebugRunState *state)
+{
+    debug_reset_world();
+    state->active_cube_drop = true;
+    state->expected_voxels = 10 * 10 * 10;
+    int created = 0;
+    const Color color = { 245, 145, 45, 255 };
+    for (int y = 18; y < 28; ++y) {
+        for (int z = -5; z < 5; ++z) {
+            for (int x = -5; x < 5; ++x) {
+                if (debug_add_cell(x, y, z, true, false, color, DEBUG_TEST_TAG) >= 0) {
+                    ++created;
+                }
+            }
+        }
+    }
+    if (created != state->expected_voxels) {
+        debug_add_failure(state, "active-cube-drop created %d/%d voxels",
+                          created, state->expected_voxels);
+        return false;
+    }
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_rebuild_world_state();
+    state->camera.position = (Vector3){ 18.0f, 16.0f, 20.0f };
+    state->camera.target = (Vector3){ 0.0f, 7.0f, 0.0f };
+    debug_capture(state, "phase-01-static-cube.png", "static-cube", 0);
+    if (!debug_convert_cube_to_pbd(state)) return false;
+    debug_set_initial_centroid(state);
     return true;
 }
 
@@ -3127,14 +3352,16 @@ static void debug_physics_step(DebugRunState *state)
             rebuild_voxel_hash();
         }
     }
-    activate_static_voxels_near_dynamic();
-    prepare_tether_forces();
-    wake_sleeping_voxels_near_awake();
+    if (!state || !state->active_cube_drop) {
+        activate_static_voxels_near_dynamic();
+        prepare_tether_forces();
+        wake_sleeping_voxels_near_awake();
+    }
     rebuild_static_hash_if_dirty();
     simulate_voxel_pbd(PBD_MAX_STEP_DT);
-    recycle_dead_voxels();
+    if (!state || !state->active_cube_drop) recycle_dead_voxels();
     rebuild_voxel_hash();
-    deactivate_sleeping_voxels();
+    if (!state || !state->active_cube_drop) deactivate_sleeping_voxels();
     rebuild_static_hash_if_dirty();
 }
 
@@ -3189,6 +3416,13 @@ static void debug_validate_step(DebugRunState *state, int step)
         }
     }
     DebugSample sample = debug_collect_sample("validation", step, state->initial_centroid_y);
+    if (state->active_cube_drop && (step == 60 || step == debugRunConfig.steps)) {
+        debug_validate_tagged_dynamic(state, &sample, "cube drop");
+        if (step == 60 && sample.tagged_rendered != state->expected_voxels) {
+            debug_add_failure(state, "cube drop lost rendered PBD cells before impact (%d/%d)",
+                              sample.tagged_rendered, state->expected_voxels);
+        }
+    }
     if (state->sleep_snap_original_test) {
         float max_error = 0.0f;
         float max_speed = 0.0f;
@@ -3937,6 +4171,7 @@ static void debug_finalize_validation(DebugRunState *state)
     if (!state->drop_sampled) {
         debug_add_failure(state, "scenario did not reach the required 60-step drop sample");
     } else if (!state->overhang_impact && !state->platform_lifecycle_test &&
+               state->expected_static_leftovers == 0 &&
                (!isfinite(state->drop_at_step_60) || state->drop_at_step_60 < 0.5f)) {
         debug_add_failure(state, "cluster dropped only %.3f metres after 60 steps (minimum 0.500)",
                           state->drop_at_step_60);
@@ -4004,6 +4239,12 @@ static bool debug_write_report(DebugRunState *state)
     debug_write_json_string(file, physics_backend_name(physicsBackend.active));
     fprintf(file, ",\n  \"passed\": %s,\n  \"steps\": %d,\n  \"fixedDt\": %.9g,\n",
             passed ? "true" : "false", debugRunConfig.steps, (double)PBD_MAX_STEP_DT);
+    if (state->active_cube_drop) {
+        fprintf(file, "  \"pbdVoxelSize\": %.9g,\n  \"effectivePbdVoxelSize\": %.9g,\n  \"dynamicVoxels\": %d,\n  \"staticLeftovers\": %d,\n",
+                (double)DEBUG_PBD_VOXEL_SIZE, (double)state->effective_pbd_size,
+                state->expected_voxels,
+                state->expected_static_leftovers);
+    }
     fprintf(file,
             "  \"animation\": {\"requested\": %s, \"format\": \"gif\","
             " \"frames\": %d, \"fpsRequested\": %d, \"stepStride\": %d, \"path\": ",
@@ -4185,6 +4426,7 @@ static bool debug_write_report(DebugRunState *state)
         debug_write_json_string(file, sample->phase);
         fprintf(file,
                 ", \"step\": %d, \"taggedVoxels\": %d, \"taggedDynamic\": %d,"
+                " \"taggedRendered\": %d,"
                 " \"taggedStatic\": %d, \"taggedSleeping\": %d, \"simParticles\": %d,"
                 " \"collisionParticles\": %d, \"collisionParticlesCulled\": %d,"
                 " \"staticOccupiedCells\": %d, \"staticSurfacePatches\": %d,"
@@ -4195,6 +4437,7 @@ static bool debug_write_report(DebugRunState *state)
                 " \"meanVelocityY\": %.9g, \"staticHashGeneration\": %llu,"
                 " \"gpuStaticUploadedGeneration\": %llu, \"physicsStepMs\": %.9g}%s\n",
                 sample->step, sample->tagged_voxels, sample->tagged_dynamic,
+                sample->tagged_rendered,
                 sample->tagged_static, sample->tagged_sleeping, sample->sim_particles,
                 sample->collision_particles, sample->collision_particles_culled,
                 sample->static_occupied_cells, sample->static_surface_patches,
@@ -4232,7 +4475,7 @@ static bool debug_prepare_output_directory(DebugRunState *state)
             return false;
         }
     }
-    if (!DirectoryExists(state->output_dir) && MakeDirectory(state->output_dir) != 0) {
+    if (!debug_make_directory_recursive(state->output_dir)) {
         fprintf(stderr, "Unable to create debug output directory '%s'\n", state->output_dir);
         return false;
     }
