@@ -3392,7 +3392,12 @@ static int table_get(int x, int y, int z)
     uint64_t k = mortonKey(x, y, z);
     for (int i = 0; i < TABLE_CACHE_SIZE; ++i) {
         if (tableCache[i].gen == tableCacheGeneration && tableCache[i].key == k) {
-            return tableCache[i].idx;
+            int c_idx = tableCache[i].idx;
+            if (c_idx >= 0 && c_idx < voxel_count && voxels[c_idx].simulate && !voxels[c_idx].vgs_active) {
+                tableCache[i].gen = 0;
+                break;
+            }
+            return c_idx;
         }
     }
     
@@ -3403,6 +3408,9 @@ static int table_get(int x, int y, int z)
         if (bk == 0) break; // Miss
         if (bk == k) {
             int idx = dynamic_table[h].idx;
+            if (idx >= 0 && idx < voxel_count && voxels[idx].simulate && !voxels[idx].vgs_active) {
+                break;
+            }
             // Update Cache
             tableCache[tableCacheCursor].key = k;
             tableCache[tableCacheCursor].idx = idx;
@@ -9676,6 +9684,7 @@ static void rebuild_voxel_hash(void) {
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
         if (!v->simulate) continue; // Skip static voxels
+        if (!v->vgs_active || v->isBullet || v->type != 0 || voxel_is_fluid(v)) continue;
         
         v->gx = (int)floorf(v->pos.x / VOXEL_SIZE);
         v->gy = (int)floorf(v->pos.y / VOXEL_SIZE);
@@ -10242,6 +10251,8 @@ static void evaluate_voxel_fracture(Voxel *voxel) {
             voxel->glueEligible = false;
         } else {
             voxel->vgs_active = false;
+            voxel_table_unregister(voxel);
+            table_cache_invalidate();
         }
 
         voxel->wake_source = true;
@@ -10314,7 +10325,7 @@ static void integrate_particles(float dt) {
 
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
-        if (!voxel_is_awake_dynamic(voxel) || voxel->type != 0 || voxel->isBullet) {
+        if (!voxel_is_awake_dynamic(voxel) || voxel->type != 0 || voxel->isBullet || !voxel->vgs_active) {
             continue;
         }
         if (tetherTag[i] <= 0) {
@@ -14000,7 +14011,7 @@ static int find_closest_dynamic_voxel(Vector3 pos, float radius) {
     int best_idx = -1;
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *v = &voxels[i];
-        if (!v->simulate || v->type != 0 || v->isBullet) {
+        if (!v->simulate || !v->vgs_active || v->type != 0 || v->isBullet || voxel_is_fluid(v)) {
             continue;
         }
         Vector3 delta = v_sub(v->pos, pos);
@@ -14521,10 +14532,21 @@ static bool resolve_tether_voxel(Player *player)
     }
     if (player->tetherVoxel >= 0 && player->tetherVoxel < voxel_count &&
         voxels[player->tetherVoxel].identity == player->tetherVoxelIdentity) {
+        Voxel *v = &voxels[player->tetherVoxel];
+        if (v->simulate && !v->vgs_active) {
+            player->tetherHolding = false;
+            player->tetherVoxel = -1;
+            player->tetherVoxelIdentity = 0;
+            return false;
+        }
         return true;
     }
     for (int i = 0; i < voxel_count; ++i) {
         if (voxels[i].identity == player->tetherVoxelIdentity) {
+            Voxel *v = &voxels[i];
+            if (v->simulate && !v->vgs_active) {
+                break;
+            }
             player->tetherVoxel = i;
             return true;
         }
@@ -14551,6 +14573,9 @@ static void start_tether(int idx) {
         return;
     }
     Voxel *hit = &voxels[hit_id];
+    if (hit->simulate && (!hit->vgs_active || hit->isBullet || hit->type != 0 || voxel_is_fluid(hit))) {
+        return;
+    }
     if (hit->simulate && hit->sleeping) {
         wake_sleeping_cluster_in_place(hit_id);
         hit = &voxels[hit_id];
@@ -14570,7 +14595,8 @@ static void start_tether(int idx) {
         int h_gx = hit->gx, h_gy = hit->gy, h_gz = hit->gz;
         activate_static_voxel_for_tether(hit_id, idx, ACTIVATION_TETHER_BELIEF);
         int new_idx = table_get(h_gx, h_gy, h_gz);
-        if (new_idx >= 0 && new_idx < voxel_count && voxels[new_idx].simulate) {
+        if (new_idx >= 0 && new_idx < voxel_count && voxels[new_idx].simulate &&
+            voxels[new_idx].vgs_active && !voxels[new_idx].isBullet && voxels[new_idx].type == 0) {
             tether_idx = new_idx;
         } else {
             tether_idx = find_closest_dynamic_voxel(hit->pos, 2.5f);
@@ -14580,6 +14606,10 @@ static void start_tether(int idx) {
     }
 
     if (tether_idx < 0 || tether_idx >= voxel_count) {
+        return;
+    }
+    if (voxels[tether_idx].simulate &&
+        (!voxels[tether_idx].vgs_active || voxels[tether_idx].isBullet || voxels[tether_idx].type != 0 || voxel_is_fluid(&voxels[tether_idx]))) {
         return;
     }
 
@@ -14669,6 +14699,12 @@ static void prepare_tether_forces(void) {
             continue;
         }
         Voxel *v = &voxels[p->tetherVoxel];
+        if (v->simulate && (!v->vgs_active || v->isBullet || v->type != 0 || voxel_is_fluid(v))) {
+            p->tetherHolding = false;
+            p->tetherVoxel = -1;
+            p->tetherVoxelIdentity = 0;
+            continue;
+        }
         if (v->simulate && v->sleeping) {
             wake_sleeping_cluster_in_place(p->tetherVoxel);
             v = &voxels[p->tetherVoxel];
@@ -14677,7 +14713,8 @@ static void prepare_tether_forces(void) {
             int h_gx = v->gx, h_gy = v->gy, h_gz = v->gz;
             activate_static_voxel_for_tether(p->tetherVoxel, i, ACTIVATION_TETHER_BELIEF);
             int new_idx = table_get(h_gx, h_gy, h_gz);
-            if (new_idx >= 0 && new_idx < voxel_count && voxels[new_idx].simulate) {
+            if (new_idx >= 0 && new_idx < voxel_count && voxels[new_idx].simulate &&
+                voxels[new_idx].vgs_active && !voxels[new_idx].isBullet && voxels[new_idx].type == 0) {
                 p->tetherVoxel = new_idx;
                 p->tetherVoxelIdentity = voxels[new_idx].identity;
                 v = &voxels[new_idx];
@@ -14965,12 +15002,22 @@ static bool first_voxel_hit_detailed(Ray ray, float t_max, int ignore_id,
 
     while (entry_t <= t_max + 1e-6f) {
         int id = static_only ? table_get_static_only(x, y, z) : table_get(x, y, z);
-        if (id >= 0 && id != ignore_id && id < voxel_count &&
-            (!static_only || !voxels[id].simulate)) {
-            if (out_hit) {
-                *out_hit = (VoxelHit){ id, x, y, z, entry_t, entry_normal };
+        if (id >= 0 && id != ignore_id && id < voxel_count) {
+            Voxel *v = &voxels[id];
+            bool valid = false;
+            if (static_only) {
+                valid = !v->simulate;
+            } else if (!v->simulate) {
+                valid = true;
+            } else {
+                valid = (v->vgs_active && !v->isBullet && v->type == 0 && !voxel_is_fluid(v));
             }
-            return true;
+            if (valid) {
+                if (out_hit) {
+                    *out_hit = (VoxelHit){ id, x, y, z, entry_t, entry_normal };
+                }
+                return true;
+            }
         }
 
         if (next_x <= next_y && next_x <= next_z) {
@@ -16980,8 +17027,10 @@ static bool ray_hit_solid_voxel(Ray ray, float t_max) {
 
     while (entry_t <= t_max + 1e-6f) {
         int id = table_get(x, y, z);
-        if (id >= 0 && id < voxel_count && !voxels[id].isBullet) {
-            if (get_goliath_owner_of_voxel(id) < 0 && tetherTag[id] <= 0) {
+        if (id >= 0 && id < voxel_count) {
+            Voxel *v = &voxels[id];
+            bool solid = (!v->simulate || (v->vgs_active && !v->isBullet && v->type == 0 && !voxel_is_fluid(v)));
+            if (solid && get_goliath_owner_of_voxel(id) < 0 && tetherTag[id] <= 0) {
                 return true;
             }
         }
@@ -17682,7 +17731,8 @@ static void net_write_player_state(NetWriter *writer, int slot) {
         visual.melee_progress = (uint8_t)lrintf(saturatef(melee_progress) * 255.0f);
     }
     if (p->tetherHolding && p->tetherVoxel >= 0 && p->tetherVoxel < voxel_count &&
-        voxels[p->tetherVoxel].identity == p->tetherVoxelIdentity) {
+        voxels[p->tetherVoxel].identity == p->tetherVoxelIdentity &&
+        (!voxels[p->tetherVoxel].simulate || voxels[p->tetherVoxel].vgs_active)) {
         visual.flags |= NET_PLAYER_VISUAL_TETHER;
         Vector3 target;
         if (player_tether_visual_target(slot, &target)) {

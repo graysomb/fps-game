@@ -527,7 +527,7 @@ static bool gpu_pack_world(void) {
 
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *v = &voxels[i];
-        if (!v->simulate || v->type != 0 || v->isBullet || tetherTag[i] <= 0) continue;
+        if (!v->simulate || v->type != 0 || v->isBullet || !v->vgs_active || tetherTag[i] <= 0) continue;
         int player = tetherTag[i] - 1;
         if (player < 0 || player >= MAX_PLAYERS) continue;
         int tether_face = players[player].tetherFace;
@@ -994,6 +994,8 @@ static bool gpu_validate_and_commit(void) {
                 v->glueEligible = false;
             } else {
                 v->vgs_active = false;
+                voxel_table_unregister(v);
+                table_cache_invalidate();
             }
             v->wake_source = true;
             for (int corner = 0; corner < 8; ++corner) {
@@ -1122,7 +1124,7 @@ static bool gpu_refresh_tethers(void) {
         int world_id = gpuPhysics.compact_to_voxel[i];
         if (world_id < 0 || world_id >= voxel_count) return false;
         Voxel *v = &voxels[world_id];
-        if (v->type != 0 || v->isBullet || tetherTag[world_id] <= 0) continue;
+        if (v->type != 0 || v->isBullet || !v->vgs_active || tetherTag[world_id] <= 0) continue;
         int player = tetherTag[world_id] - 1;
         if (player < 0 || player >= MAX_PLAYERS) continue;
         int tether_face = players[player].tetherFace;
