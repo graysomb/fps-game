@@ -16466,8 +16466,27 @@ static bool player_tether_visual_target(int player_index, Vector3 *out_target) {
         *out_target = p->netTetherVisualTarget;
         return true;
     }
-    if (!p->tetherHolding || p->tetherVoxel < 0) return false;
-    return tether_cluster_center(p->tetherVoxel, out_target);
+    if (!p->tetherHolding || !resolve_tether_voxel(p)) return false;
+    if (p->tetherVoxel < 0 || p->tetherVoxel >= voxel_count) return false;
+    Voxel *v = &voxels[p->tetherVoxel];
+    int face = p->tetherFace;
+    if (face >= 0 && face < 6) {
+        Vector3 face_center = { 0.0f, 0.0f, 0.0f };
+        int count = 0;
+        for (int c = 0; c < 4; ++c) {
+            int corner = face_corner_indices[face][c];
+            if (v->particles[corner]) {
+                face_center = v_add(face_center, v->particles[corner]->pos);
+                count++;
+            }
+        }
+        if (count == 4) {
+            *out_target = v_mul(face_center, 0.25f);
+            return true;
+        }
+    }
+    *out_target = v->pos;
+    return true;
 }
 
 static void draw_player_tether_world(int player_index) {
@@ -17665,9 +17684,16 @@ static void net_write_player_state(NetWriter *writer, int slot) {
     if (p->tetherHolding && p->tetherVoxel >= 0 && p->tetherVoxel < voxel_count &&
         voxels[p->tetherVoxel].identity == p->tetherVoxelIdentity) {
         visual.flags |= NET_PLAYER_VISUAL_TETHER;
-        visual.tether_x = voxels[p->tetherVoxel].pos.x;
-        visual.tether_y = voxels[p->tetherVoxel].pos.y;
-        visual.tether_z = voxels[p->tetherVoxel].pos.z;
+        Vector3 target;
+        if (player_tether_visual_target(slot, &target)) {
+            visual.tether_x = target.x;
+            visual.tether_y = target.y;
+            visual.tether_z = target.z;
+        } else {
+            visual.tether_x = voxels[p->tetherVoxel].pos.x;
+            visual.tether_y = voxels[p->tetherVoxel].pos.y;
+            visual.tether_z = voxels[p->tetherVoxel].pos.z;
+        }
     }
     net_write_u8(writer, (uint8_t)slot);
     net_write_u32(writer, netLastProcessedInput[slot]);
