@@ -1014,7 +1014,6 @@ typedef struct {
     float pbf_lambda;
     Vector3 pbf_delta;
     bool fracture_derived;
-    Color color;
 } Particle;
 
 // Voxel structure
@@ -2628,7 +2627,6 @@ static Particle *particle_create(Vector3 pos, float inv_mass) { //pointer
     p->pbf_lambda = 0.0f;
     p->pbf_delta = (Vector3){ 0.0f, 0.0f, 0.0f };
     p->fracture_derived = false;
-    p->color = WHITE;
     return p;
 }
 
@@ -4290,7 +4288,6 @@ static bool init_voxel_struct(Voxel *v,
         }
         p->radius = voxel_particle_radius(v);
         p->glue_count++;
-        p->color = color;
         v->particles[i] = p;
     }
     v->sleepFrames = 0;
@@ -4364,7 +4361,6 @@ static int add_fluid_cell(float px, float py, float pz, Color color) {
         particle->radius = PBF_PARTICLE_RADIUS;
         particle->inv_mass = inv_mass;
         particle->base_inv_mass = inv_mass;
-        particle->color = color;
         particle_set_material(particle, PARTICLE_MATERIAL_FLUID);
     }
     return index;
@@ -4466,7 +4462,6 @@ static void detach_face_particles(Voxel *voxel, int face_index) {
 
         p_new->break_timer = BREAK_DAMP_FRAMES;
         p_old->break_timer = BREAK_DAMP_FRAMES;
-        p_new->color = voxel->color;
 
         voxel->particles[corner] = p_new;
         particle_release(p_old);
@@ -10171,7 +10166,7 @@ static void decrement_particle_timers_range(int start, int end, int worker_id, v
     }
 }
 
-static void convert_unconstrained_particle_to_fluid(Particle *particle, Color source_color) {
+static void convert_unconstrained_particle_to_fluid(Particle *particle) {
     if (!particle || !particle->active || particle->glue_count != 0 ||
         particle->material == PARTICLE_MATERIAL_FLUID) {
         return;
@@ -10186,7 +10181,6 @@ static void convert_unconstrained_particle_to_fluid(Particle *particle, Color so
     particle->pbf_lambda = 0.0f;
     particle->pbf_delta = (Vector3){ 0.0f, 0.0f, 0.0f };
     particle->fracture_derived = true;
-    particle->color = source_color;
     particle_set_material(particle, PARTICLE_MATERIAL_FLUID);
 }
 
@@ -10213,7 +10207,7 @@ static bool finalize_pending_voxel_fracture(Voxel *voxel) {
     memset(voxel->glued_faces, 0, sizeof(voxel->glued_faces));
 
     for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
-        convert_unconstrained_particle_to_fluid(voxel->particles[corner], voxel->color);
+        convert_unconstrained_particle_to_fluid(voxel->particles[corner]);
     }
     collisionTopologyDirty = true;
     return true;
@@ -15505,25 +15499,19 @@ static Mesh particleSphereMesh = { 0 };
 static Material particleMatteMaterial = { 0 };
 static Shader particleMatteShader = { 0 };
 static Vector4 *particlePosRadius = NULL;
-static Vector4 *particleColors = NULL;
 static int particlePosRadiusCount = 0;
 static int particlePosRadiusCapacity = 0;
 static unsigned int particleInstanceVboId = 0;
-static unsigned int particleColorVboId = 0;
 static int particlePosRadiusLoc = -1;
 static int particleColorLoc = -1;
-static int fluidColorLocation = -1;
 static float16 *instanceTransforms = NULL;
 static int instanceTransformsCount = 0;
 static int instanceTransformsCapacity = 0;
 static bool instancingInitialized = false;
 
-static void DrawParticlesInstancedFast(Mesh mesh, Material material,
-                                       const Vector4 *posRadius,
-                                       const Vector4 *colors,
-                                       int count,
-                                       int position_location,
-                                       int color_attrib_location) {
+static void DrawParticlesInstancedFast(Mesh mesh, Material material, const Vector4 *posRadius,
+                                       int count, int position_location,
+                                       int color_location, Color color) {
     if (count <= 0 || mesh.vaoId == 0 || particleInstanceVboId == 0) return;
 
     rlEnableShader(material.shader.id);
@@ -15534,11 +15522,12 @@ static void DrawParticlesInstancedFast(Mesh mesh, Material material,
         rlSetUniformMatrix(material.shader.locs[SHADER_LOC_MATRIX_VIEW], matView);
     if (material.shader.locs[SHADER_LOC_MATRIX_PROJECTION] != -1)
         rlSetUniformMatrix(material.shader.locs[SHADER_LOC_MATRIX_PROJECTION], matProjection);
+    if (color_location != -1) {
+        float c[4] = { (float)color.r / 255.0f, (float)color.g / 255.0f, (float)color.b / 255.0f, (float)color.a / 255.0f };
+        rlSetUniform(color_location, c, SHADER_UNIFORM_VEC4, 1);
+    }
 
     rlUpdateVertexBuffer(particleInstanceVboId, posRadius, count * (int)sizeof(Vector4), 0);
-    if (particleColorVboId != 0 && colors != NULL && color_attrib_location != -1) {
-        rlUpdateVertexBuffer(particleColorVboId, colors, count * (int)sizeof(Vector4), 0);
-    }
 
     rlEnableVertexArray(mesh.vaoId);
     rlEnableVertexBuffer(particleInstanceVboId);
@@ -15546,13 +15535,6 @@ static void DrawParticlesInstancedFast(Mesh mesh, Material material,
         rlEnableVertexAttribute(position_location);
         rlSetVertexAttribute(position_location, 4, RL_FLOAT, 0, (int)sizeof(Vector4), 0);
         rlSetVertexAttributeDivisor(position_location, 1);
-    }
-
-    if (particleColorVboId != 0 && colors != NULL && color_attrib_location != -1) {
-        rlEnableVertexBuffer(particleColorVboId);
-        rlEnableVertexAttribute(color_attrib_location);
-        rlSetVertexAttribute(color_attrib_location, 4, RL_FLOAT, 0, (int)sizeof(Vector4), 0);
-        rlSetVertexAttributeDivisor(color_attrib_location, 1);
     }
 
     if (mesh.indices != NULL) {
@@ -15564,9 +15546,6 @@ static void DrawParticlesInstancedFast(Mesh mesh, Material material,
 
     if (position_location != -1) {
         rlDisableVertexAttribute(position_location);
-    }
-    if (particleColorVboId != 0 && colors != NULL && color_attrib_location != -1) {
-        rlDisableVertexAttribute(color_attrib_location);
     }
     rlDisableVertexBuffer();
     rlDisableVertexArray();
@@ -15604,8 +15583,6 @@ static void InitInstancing(void) {
     particlePosRadiusCapacity = MAX_PARTICLES;
     particlePosRadius = (Vector4*)RL_MALLOC(particlePosRadiusCapacity * sizeof(Vector4));
     particleInstanceVboId = rlLoadVertexBuffer(NULL, particlePosRadiusCapacity * sizeof(Vector4), true);
-    particleColors = (Vector4*)RL_MALLOC(particlePosRadiusCapacity * sizeof(Vector4));
-    particleColorVboId = rlLoadVertexBuffer(NULL, particlePosRadiusCapacity * sizeof(Vector4), true);
 
     // Get shader locations
     instancedShader.locs[SHADER_LOC_MATRIX_MVP] = GetShaderLocation(instancedShader, "mvp");
@@ -15624,7 +15601,6 @@ static void InitInstancing(void) {
     fluidShader.locs[SHADER_LOC_MATRIX_VIEW] = GetShaderLocation(fluidShader, "matView");
     fluidShader.locs[SHADER_LOC_MATRIX_PROJECTION] = GetShaderLocation(fluidShader, "matProjection");
     fluidPosRadiusLocation = GetShaderLocationAttrib(fluidShader, "instancePosRadius");
-    fluidColorLocation = GetShaderLocationAttrib(fluidShader, "instanceColor");
     fluidSurfaceModeLocation = GetShaderLocation(fluidShader, "uSurfaceMode");
     
     instanceTransformsCapacity = MAX_VOXELS;
@@ -15679,7 +15655,6 @@ static void DrawVoxelsInstancedFast(Mesh mesh, Material material, const float16 
 typedef struct {
     int x, y, z;
     unsigned char occupied;
-    unsigned char r, g, b, a;
 } FluidHullCell;
 
 static FluidHullCell *fluidHullCells = NULL;
@@ -15719,7 +15694,6 @@ static FluidHullCell *fluid_hull_find_cell(int x, int y, int z, bool insert) {
             cell->y = y;
             cell->z = z;
             cell->occupied = 1;
-            cell->r = 45; cell->g = 145; cell->b = 235; cell->a = 220;
             fluidHullCellCount++;
             return cell;
         }
@@ -15733,28 +15707,9 @@ static bool fluid_hull_has_cell(int x, int y, int z) {
     return fluid_hull_find_cell(x, y, z, false) != NULL;
 }
 
-static Color fluid_hull_cell_color_near(int gx, int gy, int gz) {
-    FluidHullCell *cell = fluid_hull_find_cell(gx, gy, gz, false);
-    if (cell && cell->occupied && cell->a > 0) {
-        return (Color){ cell->r, cell->g, cell->b, cell->a };
-    }
-    for (int dz = -1; dz <= 1; ++dz) {
-        for (int dy = -1; dy <= 1; ++dy) {
-            for (int dx = -1; dx <= 1; ++dx) {
-                cell = fluid_hull_find_cell(gx + dx, gy + dy, gz + dz, false);
-                if (cell && cell->occupied && cell->a > 0) {
-                    return (Color){ cell->r, cell->g, cell->b, cell->a };
-                }
-            }
-        }
-    }
-    return (Color){ 45, 145, 235, 220 };
-}
-
 typedef struct {
     float *vertices;
     float *normals;
-    unsigned char *colors;
     int vertex_count;
     int vertex_capacity;
     bool failed;
@@ -15786,21 +15741,13 @@ static bool fluid_hull_builder_reserve(FluidHullBuilder *builder, int additional
         return false;
     }
     builder->normals = normals;
-    unsigned char *colors = (unsigned char *)RL_REALLOC(
-        builder->colors, (size_t)capacity * 4 * sizeof(unsigned char));
-    if (!colors) {
-        builder->failed = true;
-        return false;
-    }
-    builder->colors = colors;
     builder->vertex_capacity = capacity;
     return true;
 }
 
 static void fluid_hull_emit_triangle(FluidHullBuilder *builder,
                                      Vector3 a, Vector3 b, Vector3 c,
-                                     Vector3 outward_hint,
-                                     Color color) {
+                                     Vector3 outward_hint) {
     Vector3 normal = v_cross(v_sub(b, a), v_sub(c, a));
     float normal_length = v_length(normal);
     if (normal_length <= 1e-7f || !fluid_hull_builder_reserve(builder, 3)) return;
@@ -15820,12 +15767,6 @@ static void fluid_hull_emit_triangle(FluidHullBuilder *builder,
         builder->normals[vertex * 3 + 0] = normal.x;
         builder->normals[vertex * 3 + 1] = normal.y;
         builder->normals[vertex * 3 + 2] = normal.z;
-        if (builder->colors) {
-            builder->colors[vertex * 4 + 0] = color.r;
-            builder->colors[vertex * 4 + 1] = color.g;
-            builder->colors[vertex * 4 + 2] = color.b;
-            builder->colors[vertex * 4 + 3] = color.a;
-        }
     }
 }
 
@@ -15839,10 +15780,9 @@ static Vector3 fluid_hull_edge_intersection(Vector3 a, Vector3 b,
 
 static void fluid_hull_emit_quad(FluidHullBuilder *builder,
                                  Vector3 a, Vector3 b, Vector3 c, Vector3 d,
-                                 Vector3 outward_hint,
-                                 Color color) {
-    fluid_hull_emit_triangle(builder, a, b, c, outward_hint, color);
-    fluid_hull_emit_triangle(builder, a, c, d, outward_hint, color);
+                                 Vector3 outward_hint) {
+    fluid_hull_emit_triangle(builder, a, b, c, outward_hint);
+    fluid_hull_emit_triangle(builder, a, c, d, outward_hint);
 }
 
 static float fluid_hull_scalar(int grid_x, int grid_y, int grid_z) {
@@ -15869,11 +15809,6 @@ static void rebuild_fluid_hull(void) {
         int y = (int)floorf(particle->pos.y / PBF_HULL_CELL_SIZE);
         int z = (int)floorf(particle->pos.z / PBF_HULL_CELL_SIZE);
         uint64_t cell_hash = fluid_hull_cell_hash(x, y, z);
-        uint32_t color_bits = (uint32_t)particle->color.r |
-                              ((uint32_t)particle->color.g << 8) |
-                              ((uint32_t)particle->color.b << 16) |
-                              ((uint32_t)particle->color.a << 24);
-        cell_hash ^= (uint64_t)color_bits * UINT64_C(0x9e3779b185ebca87);
         particle_signature += cell_hash;
         particle_signature ^= (cell_hash << (i & 15)) | (cell_hash >> ((64 - (i & 15)) & 63));
         renderable_particles++;
@@ -15893,15 +15828,7 @@ static void rebuild_fluid_hull(void) {
         int x = (int)floorf(particle->pos.x / PBF_HULL_CELL_SIZE);
         int y = (int)floorf(particle->pos.y / PBF_HULL_CELL_SIZE);
         int z = (int)floorf(particle->pos.z / PBF_HULL_CELL_SIZE);
-        FluidHullCell *cell = fluid_hull_find_cell(x, y, z, true);
-        if (cell) {
-            Color c = particle->color;
-            if (c.a == 0) c = (Color){ 45, 145, 235, 220 };
-            cell->r = c.r;
-            cell->g = c.g;
-            cell->b = c.b;
-            cell->a = c.a;
-        }
+        fluid_hull_find_cell(x, y, z, true);
     }
 
     uint64_t signature = (uint64_t)fluidHullCellCount * UINT64_C(0x9e3779b185ebca87);
@@ -15911,7 +15838,6 @@ static void rebuild_fluid_hull(void) {
         FluidHullCell *cell = &fluidHullCells[i];
         if (!cell->occupied) continue;
         signature ^= fluid_hull_cell_hash(cell->x, cell->y, cell->z);
-        signature ^= ((uint64_t)cell->r << 32) ^ ((uint64_t)cell->g << 40) ^ ((uint64_t)cell->b << 48);
         if (cell->x < min_x) min_x = cell->x;
         if (cell->y < min_y) min_y = cell->y;
         if (cell->z < min_z) min_z = cell->z;
@@ -16020,15 +15946,14 @@ static void rebuild_fluid_hull(void) {
                     size_t id = FLUID_NET_INDEX(x, y - 1, z);
                     if (net_active[ia] && net_active[ib] && net_active[ic] && net_active[id]) {
                         Vector3 outward = { a >= PBF_HULL_ISO_LEVEL ? 1.0f : -1.0f, 0, 0 };
-                        Color color = fluid_hull_cell_color_near(a >= PBF_HULL_ISO_LEVEL ? x : x + 1, y, z);
                         fluid_hull_emit_quad(&builder, net_vertex[ia], net_vertex[ib],
-                                             net_vertex[ic], net_vertex[id], outward, color);
+                                             net_vertex[ic], net_vertex[id], outward);
                     }
                 }
             }
         }
         for (int z = cube_min_z + 1; z <= cube_max_z; ++z) {
-            for (int y = cube_min_y + 1; y <= cube_max_y; ++y) {
+            for (int y = cube_min_y; y <= cube_max_y; ++y) {
                 for (int x = cube_min_x + 1; x <= cube_max_x; ++x) {
                     float a = fluid_hull_scalar(x, y, z);
                     float b = fluid_hull_scalar(x, y + 1, z);
@@ -16039,14 +15964,13 @@ static void rebuild_fluid_hull(void) {
                     size_t id = FLUID_NET_INDEX(x - 1, y, z);
                     if (net_active[ia] && net_active[ib] && net_active[ic] && net_active[id]) {
                         Vector3 outward = { 0, a >= PBF_HULL_ISO_LEVEL ? 1.0f : -1.0f, 0 };
-                        Color color = fluid_hull_cell_color_near(x, a >= PBF_HULL_ISO_LEVEL ? y : y + 1, z);
                         fluid_hull_emit_quad(&builder, net_vertex[ia], net_vertex[ib],
-                                             net_vertex[ic], net_vertex[id], outward, color);
+                                             net_vertex[ic], net_vertex[id], outward);
                     }
                 }
             }
         }
-        for (int z = cube_min_z + 1; z <= cube_max_z; ++z) {
+        for (int z = cube_min_z; z <= cube_max_z; ++z) {
             for (int y = cube_min_y + 1; y <= cube_max_y; ++y) {
                 for (int x = cube_min_x + 1; x <= cube_max_x; ++x) {
                     float a = fluid_hull_scalar(x, y, z);
@@ -16058,9 +15982,8 @@ static void rebuild_fluid_hull(void) {
                     size_t id = FLUID_NET_INDEX(x - 1, y, z);
                     if (net_active[ia] && net_active[ib] && net_active[ic] && net_active[id]) {
                         Vector3 outward = { 0, 0, a >= PBF_HULL_ISO_LEVEL ? 1.0f : -1.0f };
-                        Color color = fluid_hull_cell_color_near(x, y, a >= PBF_HULL_ISO_LEVEL ? z : z + 1);
                         fluid_hull_emit_quad(&builder, net_vertex[ia], net_vertex[ib],
-                                             net_vertex[ic], net_vertex[id], outward, color);
+                                             net_vertex[ic], net_vertex[id], outward);
                     }
                 }
             }
@@ -16074,7 +15997,6 @@ static void rebuild_fluid_hull(void) {
     if (builder.failed) {
         RL_FREE(builder.vertices);
         RL_FREE(builder.normals);
-        RL_FREE(builder.colors);
         if (fluidHullMesh.vertices) {
             UnloadMesh(fluidHullMesh);
             fluidHullMesh = (Mesh){ 0 };
@@ -16088,14 +16010,12 @@ static void rebuild_fluid_hull(void) {
     if (builder.vertex_count <= 0) {
         RL_FREE(builder.vertices);
         RL_FREE(builder.normals);
-        RL_FREE(builder.colors);
         return;
     }
     fluidHullMesh.vertexCount = builder.vertex_count;
     fluidHullMesh.triangleCount = builder.vertex_count / 3;
     fluidHullMesh.vertices = builder.vertices;
     fluidHullMesh.normals = builder.normals;
-    fluidHullMesh.colors = builder.colors;
     UploadMesh(&fluidHullMesh, false);
 }
 
@@ -16120,28 +16040,17 @@ static void draw_fluid_particles(Camera3D camera) {
         const Particle *particle = fluid_particles[i];
         if (!particle || !particle->active || !v_isfinite(particle->pos)) continue;
         if (count >= particlePosRadiusCapacity) break;
-        particlePosRadius[count] = (Vector4){
+        particlePosRadius[count++] = (Vector4){
             particle->pos.x, particle->pos.y, particle->pos.z, scale
         };
-        Color c = particle->color;
-        if (c.a == 0) c = (Color){ 45, 145, 235, 220 };
-        if (particleColors) {
-            particleColors[count] = (Vector4){
-                (float)c.r / 255.0f,
-                (float)c.g / 255.0f,
-                (float)c.b / 255.0f,
-                (float)c.a / 255.0f
-            };
-        }
-        count++;
     }
     if (count <= 0) return;
     int surface_mode = 0;
     SetShaderValue(fluidShader, fluidSurfaceModeLocation, &surface_mode, SHADER_UNIFORM_INT);
     SetShaderValue(fluidShader, fluidShader.locs[SHADER_LOC_VECTOR_VIEW],
                    &camera.position, SHADER_UNIFORM_VEC3);
-    DrawParticlesInstancedFast(sphereMesh, fluidMaterial, particlePosRadius, particleColors, count,
-                               fluidPosRadiusLocation, fluidColorLocation);
+    DrawParticlesInstancedFast(sphereMesh, fluidMaterial, particlePosRadius, count,
+                               fluidPosRadiusLocation, -1, WHITE);
 }
 
 static void prepare_dynamic_voxel_transforms(void) {

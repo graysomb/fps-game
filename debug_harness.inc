@@ -1813,9 +1813,6 @@ static bool debug_setup_pbd_pbf_fracture(DebugRunState *state)
             if (dyn_v1 < 0) dyn_v1 = i;
             else if (dyn_v2 < 0) dyn_v2 = i;
         }
-        if (voxels[i].debugClusterTag == DEBUG_FLUID_TAG) {
-            state->fracture_creative_fluid_voxel = i;
-        }
     }
     if (dyn_v1 < 0 || dyn_v2 < 0) {
         debug_add_failure(state, "pbd-pbf-fracture could not find activated dynamic voxels");
@@ -3799,26 +3796,11 @@ static void debug_validate_step(DebugRunState *state, int step)
                             fabsf(p->base_inv_mass - 1.0f / PBF_PARTICLE_MASS) > 1e-4f) {
                             debug_add_failure(state, "step 1: free corner %d failed fluid conversion validation", c);
                         }
-                        if (p->color.r != 225 || p->color.g != 110 || p->color.b != 50) {
-                            debug_add_failure(state, "step 1: free corner %d color (%u,%u,%u) did not match source voxel (225,110,50)",
-                                              c, p->color.r, p->color.g, p->color.b);
-                        }
                     } else {
                         if (p->material != PARTICLE_MATERIAL_SOLID || p->glue_count != 1 ||
                             p->fluid_index != -1 || p->sim_index < 0) {
                             debug_add_failure(state, "step 1: shared corner %d failed constrained solid validation", c);
                         }
-                    }
-                }
-            }
-            int creative_idx = state->fracture_creative_fluid_voxel;
-            if (creative_idx >= 0 && creative_idx < voxel_count) {
-                Voxel *cv = &voxels[creative_idx];
-                for (int c = 0; c < VOXEL_CORNER_COUNT; ++c) {
-                    Particle *p = cv->particles[c];
-                    if (p && (p->color.r != 65 || p->color.g != 215 || p->color.b != 160)) {
-                        debug_add_failure(state, "step 1: creative fluid corner %d color (%u,%u,%u) did not match creative color (65,215,160)",
-                                          c, p->color.r, p->color.g, p->color.b);
                     }
                 }
             }
@@ -3851,7 +3833,7 @@ static void debug_validate_step(DebugRunState *state, int step)
             }
             if (sample.constrained_solid_particles != 0) {
                 debug_add_failure(state, "step 5: expected 0 constrained solid particles, got %d",
-                                   sample.constrained_solid_particles);
+                                  sample.constrained_solid_particles);
             }
             if (sample.illegal_free_solid_particles != 0) {
                 debug_add_failure(state, "step 5: found %d illegal free solid particles",
@@ -3877,10 +3859,6 @@ static void debug_validate_step(DebugRunState *state, int step)
                     fabsf(p->radius - PBF_PARTICLE_RADIUS) > 1e-4f ||
                     fabsf(p->base_inv_mass - 1.0f / PBF_PARTICLE_MASS) > 1e-4f) {
                     debug_add_failure(state, "step 5: converted particle %d failed fluid validation", i);
-                }
-                if (p->color.r != 225 || p->color.g != 110 || p->color.b != 50) {
-                    debug_add_failure(state, "step 5: converted particle %d color (%u,%u,%u) did not match source voxel (225,110,50)",
-                                      i, p->color.r, p->color.g, p->color.b);
                 }
             }
             state->fracture_complete_observed = true;

@@ -2,7 +2,6 @@
 
 in vec3 fragPosition;
 in vec3 fragNormal;
-in vec4 fragColor;
 
 uniform vec3 viewPos;
 uniform int uSurfaceMode;
@@ -16,9 +15,8 @@ void main()
     float fresnelBase = clamp(1.0 - dot(normal, viewDirection), 0.0, 1.0);
     float fresnel = fresnelBase * fresnelBase;
     float light = 0.35 + 0.65 * max(dot(normal, normalize(vec3(-0.35, 0.85, 0.4))), 0.0);
-    vec3 baseCol = (fragColor.a > 0.0) ? fragColor.rgb : vec3(0.035, 0.24, 0.52);
-    vec3 deepColor = baseCol * 0.75;
-    vec3 rimColor = mix(baseCol, vec3(1.0), 0.45);
+    vec3 deepColor = vec3(0.035, 0.24, 0.52);
+    vec3 rimColor = vec3(0.42, 0.82, 1.0);
     vec3 color = mix(deepColor * light, rimColor, fresnel * 0.75);
     float alpha = (uSurfaceMode != 0) ? (0.82 + 0.16 * fresnel) : 1.0;
     finalColor = vec4(color, alpha);
