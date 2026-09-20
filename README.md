@@ -441,8 +441,8 @@ Available scenarios are:
   cantilever and checks that the overhang activates and deflects while its root stays supported.
 * `pillar-impact-drift`: drops a 500-voxel undercut pillar and bounds its late sliding speed
   and displacement.
-* `single-corner-hinge`: checks one-corner glue beyond the configured hinge-angle
-  limit; with the temporary VGS deactivation switch enabled, the glue stays intact.
+* `single-corner-hinge`: checks that one-corner glue breaks beyond the configured
+  hinge-angle limit.
 * `tether-active-then-static`: tethers an active voxel and then a static cluster voxel,
   verifying that activation/array compaction does not lose or redirect the tether target.
 * `tether-thin-wall-ccd`: throws a tether voxel fast enough to cross a one-voxel-thick
@@ -463,21 +463,25 @@ Available scenarios are:
   `R = (A^T A)^-1 A^T`. These are positional constraints; they do not transfer
   velocities or change the octree topology. Dormant child cells skip welding.
   Collisions still use leaf particles only.
-  VGS deactivation is temporarily disabled across the PBD solver, so solid
-  cells remain visible after impact. The normal VGS parameters are unchanged.
+  VGS constraints deactivate when their own strain or shear exceeds 0.20;
+  broken cells stop rendering. Hierarchy nodes and their children break
+  independently. A broken terminal child also loses its incoming trilinear
+  weld, and cannot be coarsened back into its parent. The normal VGS
+  parameters are unchanged.
   Active cells are colored by the largest absolute second time derivative of
   their three signed VGS strains and three signed shears. Each component uses
   three consecutive fixed physics steps; the color scale is green at 0,
   yellow at 50 s^-2, and red at 100 s^-2 or higher.
-  Build with `-DPBD_DISABLE_VGS_DEACTIVATION=0` to restore fracture-driven
-  deactivation.
+  Build with `-DPBD_DISABLE_VGS_DEACTIVATION=1` to disable fracture for debugging.
   Resolutions that round beyond the voxel or particle caps fail before activation.
   The JSON report includes both sizes, voxel count, and octree diagnostics.
-* `adaptive-cube-drop`: runs the same drop with the complete octree stored but
-  only the root VGS active initially. After each PBD substep, an active terminal
-  node whose six-component strain/shear time curvature exceeds 50 s^-2 enables all
-  eight children. A parent coarsens when its curvature and the mean child
-  curvature are below 50 s^-2 and no grandchildren remain active. Refinement
+* `adaptive-cube-drop`: rotates the activated cube 45 degrees about X and Z so
+  its lowest corner lands first, with the complete octree stored but only the
+  root VGS active initially. Set `FPS_AMR_FLAT_DROP=1` to compare the original
+  flat orientation at the same resolution and threshold. After each PBD
+  substep, an active terminal node whose strain/shear time curvature exceeds
+  10 s^-2 enables all eight children. A parent coarsens when its curvature and
+  mean child curvature are below 10 s^-2 and no grandchildren remain active. Refinement
   initializes child positions and velocities with trilinear interpolation;
   coarsening fits parent positions and velocities with the precomputed left
   pseudoinverse. The GPU receives a compact, flat list of active VGS constraints
@@ -486,12 +490,16 @@ Available scenarios are:
   `curvature-by-level.csv` file records per-scale curvature distributions.
   Adaptive refinement accepts whole eight-child splits in descending curvature
   order, with an active VGS cap of half the hierarchy's fine leaf count. The
-  cube drop's 32,768 leaves therefore allow at most 16,384 active VGS
-  constraints. Weld constraints are counted separately; the report records
-  the active and peak VGS count, cap, and rejected refinements.
-  At the 0.25 m requested resolution, the impact activates several octree
-  levels before the tree coarsens again. There is no hysteresis, so cells can
-  change level on consecutive substeps. Dormant descendants follow trilinear
+  cube drop's 32,768 leaves therefore allow at most 16,384 active tree
+  cells. The cap counts active cells even after their constraints break. Weld
+  constraints are counted separately; the report records tree counts,
+  enabled VGS and weld counts, the cap, and rejected refinements.
+  `FPS_AMR_TEST_BREAK_CHILD=1` seeds a refined, overstretched child and checks
+  that it breaks independently, loses its weld, and prevents root coarsening.
+  At the 0.25 m requested resolution, the corner impact activates several
+  octree levels and can reach the active-cell cap. Broken children block
+  coarsening. There is no hysteresis, so unbroken cells can change level on
+  consecutive substeps. Dormant descendants follow trilinear
   parent motion and do not provide an independent fine-scale curvature signal
   until they become active.
 * `vgs-refinement`: drops a 5 m cube with one root VGS constraint and eight

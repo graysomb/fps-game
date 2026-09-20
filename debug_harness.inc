@@ -716,6 +716,59 @@ static void debug_transform_tagged_cluster_off_grid(int tag)
     rebuild_voxel_hash();
 }
 
+static bool debug_tilt_tagged_cube_for_corner_drop(int tag)
+{
+    Vector3 pivot = {0};
+    int count = 0;
+    int stamp = ++particle_sync_stamp;
+    if (stamp == 0) stamp = particle_sync_stamp = 1;
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (!voxel->simulate || voxel->debugClusterTag != tag) continue;
+        for (int c = 0; c < 8; ++c) {
+            Particle *particle = voxel->particles[c];
+            if (!particle || particle->sync_stamp == stamp) continue;
+            particle->sync_stamp = stamp;
+            pivot = v_add(pivot, particle->pos);
+            ++count;
+        }
+    }
+    if (!count) return false;
+    pivot = v_mul(pivot, 1.0f / (float)count);
+
+    const float angle = 45.0f * DEG2RAD;
+    const float cs = cosf(angle), sn = sinf(angle);
+    stamp = ++particle_sync_stamp;
+    if (stamp == 0) stamp = particle_sync_stamp = 1;
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (!voxel->simulate || voxel->debugClusterTag != tag) continue;
+        Vector3 center = {0};
+        for (int c = 0; c < 8; ++c) {
+            Particle *particle = voxel->particles[c];
+            if (particle->sync_stamp != stamp) {
+                particle->sync_stamp = stamp;
+                Vector3 local = v_sub(particle->pos, pivot);
+                // Apply 45 degrees about X, then 45 degrees about Z.
+                float y = cs * local.y - sn * local.z;
+                Vector3 rotated = {cs * local.x - sn * y,
+                                   sn * local.x + cs * y,
+                                   sn * local.y + cs * local.z};
+                particle->pos = v_add(pivot, rotated);
+                particle->prev_pos = particle->predicted_pos = particle->pos;
+                particle->vel = (Vector3){0};
+            }
+            center = v_add(center, particle->pos);
+        }
+        voxel->pos = v_mul(center, 0.125f);
+        voxel->vel = (Vector3){0};
+    }
+    rebuild_voxel_hash();
+    collisionTopologyDirty = true;
+    meshDirty = true;
+    return true;
+}
+
 static void debug_place_tagged_cluster_near_original(int tag, Vector3 offset)
 {
     for (int i = 0; i < voxel_count; ++i) {
@@ -864,6 +917,7 @@ static bool debug_build_cube_vgs_hierarchy(const int *lattice, int side, float l
             node->rest_edge = span * leaf_edge;
             node->rest_volume = node->rest_edge * node->rest_edge * node->rest_edge;
             node->active = true;
+            node->vgs_enabled = true;
             for (int c = 0; c < 8; ++c) {
                 int cx = x * span + (corner_signs[c][0] > 0 ? span - 1 : 0);
                 int cy = y * span + (corner_signs[c][1] > 0 ? span - 1 : 0);
@@ -908,15 +962,14 @@ static bool debug_validate_cube_vgs_hierarchy(int side)
             }
         }
     }
-    // Exercise the fracture rule without changing the scenario's initial state.
+    // A broken child must not disable its parent VGS constraint.
     if (vgsHierarchy.node_count) {
         Voxel *leaf = &voxels[-vgsHierarchy.nodes[vgsHierarchy.node_count - 1].children[0] - 1];
         leaf->vgs_active = false;
-        if (!vgsHierarchy.adaptive) update_vgs_hierarchy_activity();
-        bool disabled = !vgsHierarchy.nodes[0].active;
+        bool independent = vgsHierarchy.nodes[0].active &&
+                           vgsHierarchy.nodes[0].vgs_enabled;
         leaf->vgs_active = true;
-        for (int i = 0; i < vgsHierarchy.node_count; ++i) vgsHierarchy.nodes[i].active = true;
-        if (!disabled) return false;
+        if (!independent) return false;
     }
     return true;
 }
@@ -1224,7 +1277,7 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
     }
     if (vgsHierarchy.adaptive)
         for (int i = 0; i < vgsHierarchy.node_count; ++i)
-            if (vgsHierarchy.nodes[i].active &&
+            if (vgsHierarchy.nodes[i].active && vgsHierarchy.nodes[i].vgs_enabled &&
                 !vgs_node_has_active_children(&vgsHierarchy.nodes[i])) ++sample.tagged_rendered;
     int centroid_count = cube_dynamic_only ? sample.tagged_dynamic : sample.tagged_voxels;
     if (centroid_count > 0) {
@@ -1387,17 +1440,25 @@ static void debug_render_scene(DebugRunState *state, const DebugSample *sample)
                         (1.0f - (float)level / (float)vgsHierarchy.levels), 0.8f, 0.9f);
                     for (int i = first; i < end; ++i) {
                         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
-                        if (!node->active || vgs_node_has_active_children(node)) continue;
+                        if (!node->active || !node->vgs_enabled ||
+                            vgs_node_has_active_children(node)) continue;
                         Vector3 center = {0};
                         for (int c = 0; c < 8; ++c) center = v_add(center, node->particles[c]->pos);
                         center = v_mul(center, 0.125f);
-                        Vector3 size = {
-                            v_length(v_sub(node->particles[1]->pos, node->particles[0]->pos)),
-                            v_length(v_sub(node->particles[2]->pos, node->particles[0]->pos)),
-                            v_length(v_sub(node->particles[4]->pos, node->particles[0]->pos))
-                        };
-                        DrawCubeV(center, size, color);
-                        if (level < 3) DrawCubeWiresV(center, size, DARKGRAY);
+                        Vector3 x = v_sub(node->particles[1]->pos, node->particles[0]->pos);
+                        Vector3 y = v_sub(node->particles[2]->pos, node->particles[0]->pos);
+                        Vector3 z = v_sub(node->particles[4]->pos, node->particles[0]->pos);
+                        Matrix transform = MatrixIdentity();
+                        transform.m0 = x.x; transform.m1 = x.y; transform.m2 = x.z;
+                        transform.m4 = y.x; transform.m5 = y.y; transform.m6 = y.z;
+                        transform.m8 = z.x; transform.m9 = z.y; transform.m10 = z.z;
+                        transform.m12 = center.x; transform.m13 = center.y; transform.m14 = center.z;
+                        rlPushMatrix();
+                        rlMultMatrixf(MatrixToFloat(transform));
+                        DrawCubeV((Vector3){0}, (Vector3){1, 1, 1}, color);
+                        if (level < 3)
+                            DrawCubeWiresV((Vector3){0}, (Vector3){1, 1, 1}, DARKGRAY);
+                        rlPopMatrix();
                     }
                 }
             }
@@ -2197,15 +2258,27 @@ static bool debug_setup_adaptive_cube_drop(DebugRunState *state)
 {
     state->adaptive_cube_drop = true;
     if (!debug_setup_active_cube_drop(state)) return false;
+    if (!getenv("FPS_AMR_FLAT_DROP") &&
+        !debug_tilt_tagged_cube_for_corner_drop(DEBUG_TEST_TAG)) {
+        debug_add_failure(state, "unable to tilt adaptive cube");
+        return false;
+    }
     if (!vgs_hierarchy_initialize_adaptive()) {
         debug_add_failure(state, "unable to initialize adaptive octree");
         return false;
     }
     // A diagnostic seed exercises a refined GPU constraint list even when the
     // normal curvature trigger has not fired yet.
-    if (getenv("FPS_AMR_TEST_REFINE_ROOT")) {
+    if (getenv("FPS_AMR_TEST_REFINE_ROOT") || getenv("FPS_AMR_TEST_BREAK_CHILD")) {
         vgs_hierarchy_transfer_refine(&vgsHierarchy.nodes[0], true);
         if (!vgs_hierarchy_rebuild_active_masses()) return false;
+    }
+    if (getenv("FPS_AMR_TEST_BREAK_CHILD")) {
+        Particle *grid[27];
+        if (!vgs_hierarchy_grid_points(&vgsHierarchy.nodes[0], grid)) return false;
+        Particle *center = grid[13];
+        center->pos.y += 3.5f;
+        center->prev_pos = center->predicted_pos = center->pos;
     }
     debugAdaptiveOctree = true;
     debugColorVoxelsByVgsTemporalCurvature = false;
@@ -4103,6 +4176,19 @@ static void debug_validate_step(DebugRunState *state, int step)
         }
     }
     if (state->adaptive_cube_drop) {
+        if (getenv("FPS_AMR_TEST_BREAK_CHILD") && step == 1) {
+            int broken = 0;
+            for (int c = 0; c < 8; ++c)
+                if (!vgs_child_enabled(vgsHierarchy.nodes[0].children[c])) ++broken;
+            if (broken == 0 || !vgsHierarchy.nodes[0].vgs_enabled ||
+                vgs_enabled_child_mask(&vgsHierarchy.nodes[0]) == 0xffu)
+                debug_add_failure(state, "child fracture parent=%d broken=%d weldMask=0x%x",
+                                  vgsHierarchy.nodes[0].vgs_enabled, broken,
+                                  vgs_enabled_child_mask(&vgsHierarchy.nodes[0]));
+        }
+        if (getenv("FPS_AMR_TEST_BREAK_CHILD") && step > 0 &&
+            !vgs_node_has_active_children(&vgsHierarchy.nodes[0]))
+            debug_add_failure(state, "root coarsened across a broken child");
         int active_nodes = 0, terminal_nodes = 0, active_leaves = 0;
         double total_mass = 0.0;
         double terminal_volume = 0.0;
@@ -4129,13 +4215,13 @@ static void debug_validate_step(DebugRunState *state, int step)
             if (children != 0 && children != 8)
                 debug_add_failure(state, "step %d: partial adaptive octet at node %d", step, i);
             if (children == 0) {
-                ++terminal_nodes;
+                if (node->vgs_enabled) ++terminal_nodes;
                 terminal_volume += node->rest_volume;
             }
         }
         for (int i = 0; i < voxel_count; ++i)
             if (voxels[i].simulate && voxels[i].simulate_dofs) {
-                ++active_leaves;
+                if (voxels[i].vgs_active) ++active_leaves;
                 terminal_volume += voxels[i].rest_volume;
             }
         if (!vgsHierarchy.nodes[0].active || active_nodes == 0 ||
@@ -4983,25 +5069,37 @@ static bool debug_write_report(DebugRunState *state)
     fprintf(file, ",\n  \"passed\": %s,\n  \"steps\": %d,\n  \"fixedDt\": %.9g,\n",
             passed ? "true" : "false", debugRunConfig.steps, (double)PBD_MAX_STEP_DT);
     if (state->active_cube_drop) {
-        if (!vgsHierarchy.adaptive) update_vgs_hierarchy_activity();
         int active_nodes = 0;
+        int enabled_nodes = 0;
         for (int i = 0; i < vgsHierarchy.node_count; ++i)
-            if (vgsHierarchy.nodes[i].active) ++active_nodes;
+            if (vgsHierarchy.nodes[i].active) {
+                ++active_nodes;
+                if (vgsHierarchy.nodes[i].vgs_enabled) ++enabled_nodes;
+            }
         fprintf(file, "  \"pbdVoxelSize\": %.9g,\n  \"effectivePbdVoxelSize\": %.9g,\n  \"dynamicVoxels\": %d,\n  \"staticLeftovers\": %d,\n",
                 (double)DEBUG_PBD_VOXEL_SIZE, (double)state->effective_pbd_size,
                 state->expected_voxels,
                 state->expected_static_leftovers);
-        fprintf(file, "  \"vgsHierarchy\": {\"levels\": %d, \"internalNodes\": %d, \"activeInternalNodes\": %d, \"deactivationDisabled\": %s},\n",
+        fprintf(file, "  \"vgsHierarchy\": {\"levels\": %d, \"internalNodes\": %d, \"activeInternalNodes\": %d, \"enabledInternalNodes\": %d, \"deactivationDisabled\": %s},\n",
                 vgsHierarchy.levels + (vgsHierarchy.leaf_count ? 1 : 0),
-                vgsHierarchy.node_count, active_nodes,
+                vgsHierarchy.node_count, active_nodes, enabled_nodes,
                 PBD_DISABLE_VGS_DEACTIVATION ? "true" : "false");
-        if (state->adaptive_cube_drop)
-            fprintf(file, "  \"adaptiveHierarchy\": {\"thresholdPerSecondSquared\": %.9g, \"refinements\": %u, \"coarsenings\": %u, \"activeVgsConstraints\": %d, \"peakActiveVgsConstraints\": %d, \"vgsConstraintCap\": %d, \"refinementsBlockedByCap\": %u, \"gpuConstraints\": %d, \"simulatedParticles\": %d},\n",
+        if (state->adaptive_cube_drop) {
+            int enabled_vgs = enabled_nodes, enabled_welds = 0;
+            for (int i = 0; i < voxel_count; ++i)
+                if (voxels[i].simulate && voxels[i].simulate_dofs && voxels[i].vgs_active)
+                    ++enabled_vgs;
+            for (int i = 0; i < vgsHierarchy.node_count; ++i)
+                if (vgsHierarchy.nodes[i].active &&
+                    vgs_terminal_child_mask(&vgsHierarchy.nodes[i])) ++enabled_welds;
+            fprintf(file, "  \"adaptiveHierarchy\": {\"thresholdPerSecondSquared\": %.9g, \"refinements\": %u, \"coarsenings\": %u, \"activeVgsConstraints\": %d, \"peakActiveVgsConstraints\": %d, \"vgsConstraintCap\": %d, \"enabledVgsConstraints\": %d, \"enabledWeldConstraints\": %d, \"refinementsBlockedByCap\": %u, \"gpuConstraints\": %d, \"simulatedParticles\": %d},\n",
                     (double)VGS_ADAPTIVE_CURVATURE_THRESHOLD,
                     vgsHierarchy.refine_count, vgsHierarchy.coarsen_count,
                     vgsHierarchy.active_vgs_count, vgsHierarchy.peak_active_vgs_count,
-                    vgsHierarchy.vgs_constraint_cap, vgsHierarchy.refinements_blocked_by_cap,
+                    vgsHierarchy.vgs_constraint_cap, enabled_vgs, enabled_welds,
+                    vgsHierarchy.refinements_blocked_by_cap,
                     gpuPhysics.constraint_count, sim_particle_count);
+        }
         fprintf(file, "  \"vgsTemporalCurvature\": {\"samples\": %d, \"redAtPerSecondSquared\": %.9g, \"lastStepMax\": %.9g, \"lastStepMean\": %.9g},\n",
                 debugVgsTemporalSampleCount, (double)VGS_TEMPORAL_CURVATURE_RED_AT,
                 (double)debugVgsTemporalLastMax, (double)debugVgsTemporalLastMean);
