@@ -9537,13 +9537,18 @@ static void UpdateKdRatio(int player_index) {
     if (player_index < 0 || player_index >= activePlayers) return;
     Player *p = &players[player_index];
     p->kd_ratio = (float)(p->kills + 1) / (p->deaths + 1);
-    
-    // Scale matter max based on K/D: Lower K/D -> More Matter
-    // Base 100 at K/D 1.0. Max ~200 at K/D 0. Min ~20 at K/D 9.
-    p->matterMax = 200.0f / (1.0f + p->kd_ratio);
-    
-    // Ensure valid range
-    if (p->matterMax < 10.0f) p->matterMax = 10.0f;
+
+    if (gameMode == GAME_MODE_FIREFIGHT) {
+        // Firefight Matter is fixed by enemy type, regardless of K/D.
+        p->matterMax = (is_player_bot(player_index) && p->enemyType == ENEMY_TYPE_SWARMER)
+                           ? MATTER_MAX_DEFAULT * 0.25f
+                           : MATTER_MAX_DEFAULT;
+    } else {
+        // Scale matter max based on K/D: Lower K/D -> More Matter.
+        // Base 100 at K/D 1.0. Max ~200 at K/D 0. Min ~20 at K/D 9.
+        p->matterMax = 200.0f / (1.0f + p->kd_ratio);
+        if (p->matterMax < 10.0f) p->matterMax = 10.0f;
+    }
     
     // Clamp current matter to new max
     if (p->matter > p->matterMax) {
