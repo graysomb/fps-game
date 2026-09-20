@@ -25,6 +25,7 @@
 #define DEBUG_GIF_WIDTH 640
 #define DEBUG_GIF_HEIGHT 360
 #define DEBUG_GIF_HASH_SIZE 8191
+#define DEBUG_REFINE_AT_STEP 120
 
 typedef struct DebugRunConfig {
     bool requested;
@@ -87,6 +88,13 @@ typedef struct DebugRunState {
     int expected_static_leftovers;
     float effective_pbd_size;
     bool active_cube_drop;
+    bool refinement_demo;
+    bool refinement_complete;
+    int refinement_step;
+    int refinement_elapsed;
+    Particle *refine_grid[27];
+    float refine_inv_mass[27];
+    int refine_children[8];
     bool activation_succeeded;
     bool sleeping_conversion_succeeded;
     bool sleep_snap_original_test;
@@ -283,6 +291,7 @@ static bool debug_setup_pbf_scaling(DebugRunState *state);
 static bool debug_setup_pbf_dense_neighbors(DebugRunState *state);
 static bool debug_setup_cube_stress(DebugRunState *state);
 static bool debug_setup_active_cube_drop(DebugRunState *state);
+static bool debug_setup_vgs_refinement(DebugRunState *state);
 static bool debug_setup_voxel_strain_shear_fracture(DebugRunState *state);
 static bool debug_setup_arena_platform_fluid(DebugRunState *state);
 
@@ -312,6 +321,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "goliath-behavior", "Goliath maintains armor, detects enemy, and launches voxels", debug_setup_goliath_behavior, 180, 60 },
     { "cube-stress", "Stress test with scalable dynamic cube (size set by FPS_CUBE_SIZE)", debug_setup_cube_stress, 60, 60 },
     { "active-cube-drop", "Activate a static 10x10x10 cube and drop it", debug_setup_active_cube_drop, 120, 60 },
+    { "vgs-refinement", "Drop a root VGS cube, then refine into eight shared-particle children", debug_setup_vgs_refinement, 300, 180 },
     { "voxel-strain-shear-fracture", "Check VGS deactivation behavior under high strain and shear", debug_setup_voxel_strain_shear_fracture, 60, 60 },
     { "arena-platform-fluid", "Test arena central platform activated with sleeping fluid on top", debug_setup_arena_platform_fluid, 60, 60 }
 };
@@ -764,6 +774,7 @@ static void debug_rebuild_world_state(void)
 static void debug_reset_world(void)
 {
     debugColorVoxelsByVgsTemporalCurvature = false;
+    debugRefinementCoarse = false;
     debug_reset_vgs_temporal_curvature();
     pbdSolidVoxelSize = VOXEL_SIZE;
     clear_world_voxels();
@@ -889,11 +900,11 @@ static bool debug_validate_cube_vgs_hierarchy(int side)
     return true;
 }
 
-static bool debug_convert_cube_to_pbd(DebugRunState *state)
+static bool debug_convert_cube_to_pbd(DebugRunState *state, float requested_size)
 {
     state->expected_voxels = 0;
     state->expected_static_leftovers = 1000;
-    const double size = (double)DEBUG_PBD_VOXEL_SIZE;
+    const double size = (double)requested_size;
     const double cube_edge = 10.0 * (double)VOXEL_SIZE;
     if (!isfinite(size) || size <= 0.0 || size > cube_edge) {
         debug_add_failure(state, "PBD size %.9g must be positive and no larger than the %.9g m cube",
@@ -936,7 +947,8 @@ static bool debug_convert_cube_to_pbd(DebugRunState *state)
     for (int y = 0; y < side; ++y) for (int z = 0; z < side; ++z) for (int x = 0; x < side; ++x) {
         int flat = (y * side + z) * side + x;
         float px = -5.0f * VOXEL_SIZE + ((float)x + 0.5f) * pbdSolidVoxelSize;
-        float py = 18.0f * VOXEL_SIZE + ((float)y + 0.5f) * pbdSolidVoxelSize;
+        float py = 18.0f * VOXEL_SIZE + ((float)y + 0.5f) * pbdSolidVoxelSize +
+                   (state->refinement_demo ? 15.0f : 0.0f);
         float pz = -5.0f * VOXEL_SIZE + ((float)z + 0.5f) * pbdSolidVoxelSize;
         int idx = addVoxel(px, py, pz, false, true, color, 0);
         if (idx < 0) goto conversion_failed;
@@ -969,6 +981,36 @@ static bool debug_convert_cube_to_pbd(DebugRunState *state)
     if (!debug_validate_cube_vgs_hierarchy(side)) {
         debug_add_failure(state, "PBD size %.9g: invalid VGS octree", size);
         goto conversion_failed;
+    }
+    if (state->refinement_demo) {
+        if (side != 2 || vgsHierarchy.node_count != 1) {
+            debug_add_failure(state, "refinement demo requires a 2x2x2 child lattice");
+            goto conversion_failed;
+        }
+        for (int c = 0; c < 8; ++c) {
+            int cx = c & 1, cy = (c >> 1) & 1, cz = (c >> 2) & 1;
+            int idx = lattice[(cy * 2 + cz) * 2 + cx];
+            state->refine_children[c] = idx;
+            for (int k = 0; k < 8; ++k) {
+                int gx = cx + (k & 1);
+                int gy = cy + ((k >> 1) & 1);
+                int gz = cz + ((k >> 2) & 1);
+                int r = gx + 3 * gy + 9 * gz;
+                Particle *particle = voxels[idx].particles[k];
+                if (state->refine_grid[r] && state->refine_grid[r] != particle) {
+                    debug_add_failure(state, "refinement grid point %d is not shared", r);
+                    goto conversion_failed;
+                }
+                state->refine_grid[r] = particle;
+                state->refine_inv_mass[r] = particle->base_inv_mass;
+            }
+        }
+        for (int r = 0; r < 27; ++r) {
+            if (!state->refine_grid[r]) {
+                debug_add_failure(state, "refinement grid point %d is missing", r);
+                goto conversion_failed;
+            }
+        }
     }
     double total_mass = 0.0;
     for (int i = 0; i < particle_pool_count; ++i) {
@@ -1213,6 +1255,7 @@ static void debug_draw_overlay(const DebugRunState *state, const DebugSample *sa
     if (state->gpu_readback_performed) box_height += 30;
     if (state->overhang_impact) box_height += 30;
     if (state->active_cube_drop && debugColorVoxelsByVgsTemporalCurvature) box_height += 30;
+    if (state->refinement_demo) box_height += 30;
     DrawRectangle(18, 18, 650, box_height, Fade(BLACK, 0.78f));
     DrawText(TextFormat("SCENARIO %s", debugRunConfig.scenario), 34, 32, 22, RAYWHITE);
     DrawText(TextFormat("BACKEND requested=%s active=%s",
@@ -1256,6 +1299,12 @@ static void debug_draw_overlay(const DebugRunState *state, const DebugSample *sa
         DrawRectangle(421, y + 2, 24, 16, ColorFromHSV(0.0f, 0.85f, 0.9f));
         DrawText("100+", 449, y, 17, LIGHTGRAY);
     }
+    if (state->refinement_demo) {
+        int y = state->gpu_readback_performed ? 222 : 192;
+        DrawText(TextFormat("VGS %s | refine at step %d",
+                            state->refinement_complete ? "ROOT + 8 CHILDREN" : "ROOT ONLY",
+                            state->refinement_step), 34, y, 17, RAYWHITE);
+    }
     if (state->overhang_impact) {
         int y = state->gpu_readback_performed ? 222 : 192;
         DrawText(TextFormat("OVERHANG rootDrop30=%.3f tipDrop30=%.3f relative=%.3f anchor=%s",
@@ -1298,6 +1347,21 @@ static void debug_render_scene(DebugRunState *state, const DebugSample *sample)
                       (Color){ 68, 75, 82, 255 });
             DrawGrid(48, VOXEL_SIZE);
             DrawVoxels(state->camera);
+            if (state->refinement_demo && !state->refinement_complete &&
+                vgsHierarchy.node_count == 1) {
+                const VgsHierarchyNode *root = &vgsHierarchy.nodes[0];
+                Vector3 center = { 0 };
+                for (int c = 0; c < 8; ++c)
+                    center = v_add(center, root->particles[c]->pos);
+                center = v_mul(center, 0.125f);
+                Vector3 size = {
+                    v_length(v_sub(root->particles[1]->pos, root->particles[0]->pos)),
+                    v_length(v_sub(root->particles[2]->pos, root->particles[0]->pos)),
+                    v_length(v_sub(root->particles[4]->pos, root->particles[0]->pos))
+                };
+                DrawCubeV(center, size, (Color){ 40, 185, 220, 255 });
+                DrawCubeWiresV(center, size, (Color){ 15, 75, 100, 255 });
+            }
             if (state->swarmer_wall_test || state->goliath_flight_test) {
                 draw_players();
             }
@@ -1646,7 +1710,8 @@ static void debug_validate_tagged_dynamic(DebugRunState *state, const DebugSampl
         debug_add_failure(state, "%s: %d invalid particle or sim-index references",
                           context, sample->invalid_particle_refs);
     }
-    if (sample->zero_mass_corners > 0) {
+    if (sample->zero_mass_corners > 0 &&
+        !(state->refinement_demo && !state->refinement_complete)) {
         debug_add_failure(state, "%s: %d activated corners have zero base inverse mass",
                           context, sample->zero_mass_corners);
     }
@@ -1826,7 +1891,9 @@ static void debug_readback_gpu_buffers(DebugRunState *state, int step)
         debug_add_failure(state, "step %d: %d tagged dynamic corners are missing from the uploaded simId list",
                           step, state->gpu_tagged_corners_missing_from_sim_ids);
     }
-    if (!state->overhang_impact && state->gpu_zero_mass_corners > 0) {
+    if (!state->overhang_impact &&
+        !(state->refinement_demo && !state->refinement_complete) &&
+        state->gpu_zero_mass_corners > 0) {
         debug_add_failure(state, "step %d: %d tagged dynamic corners have zero mass in the GPU particle SSBO",
                           step, state->gpu_zero_mass_corners);
     } else if (state->overhang_impact && state->gpu_zero_mass_corners <= 0) {
@@ -1981,13 +2048,101 @@ static bool debug_setup_active_cube_drop(DebugRunState *state)
     state->camera.position = (Vector3){ 18.0f, 16.0f, 20.0f };
     state->camera.target = (Vector3){ 0.0f, 7.0f, 0.0f };
     debug_capture(state, "phase-01-static-cube.png", "static-cube", 0);
-    if (!debug_convert_cube_to_pbd(state)) return false;
+    if (!debug_convert_cube_to_pbd(state, DEBUG_PBD_VOXEL_SIZE)) return false;
     if (!debug_init_vgs_temporal_curvature()) {
         debug_add_failure(state, "unable to allocate VGS temporal history");
         return false;
     }
     debugColorVoxelsByVgsTemporalCurvature = true;
     debug_sample_vgs_temporal_curvature(PBD_MAX_STEP_DT);
+    debug_set_initial_centroid(state);
+    return true;
+}
+
+static float debugRefineWeights[27][8];
+
+static void debug_build_refinement_weights(void)
+{
+    static const float t[3] = { 0.0f, 0.5f, 1.0f };
+    for (int gz = 0; gz < 3; ++gz) for (int gy = 0; gy < 3; ++gy) for (int gx = 0; gx < 3; ++gx) {
+        int r = gx + 3 * gy + 9 * gz;
+        for (int c = 0; c < 8; ++c) {
+            float wx = (c & 1) ? t[gx] : 1.0f - t[gx];
+            float wy = (c & 2) ? t[gy] : 1.0f - t[gy];
+            float wz = (c & 4) ? t[gz] : 1.0f - t[gz];
+            debugRefineWeights[r][c] = wx * wy * wz;
+        }
+    }
+}
+
+static bool debug_sync_refinement_grid(DebugRunState *state, bool refine)
+{
+    if (!state || !state->refinement_demo || vgsHierarchy.node_count != 1) return false;
+    VgsHierarchyNode *root = &vgsHierarchy.nodes[0];
+    Vector3 parent_pos[8], parent_vel[8];
+    for (int c = 0; c < 8; ++c) {
+        Particle *particle = root->particles[c];
+        int r = 2 * (c & 1) + 6 * ((c >> 1) & 1) + 18 * ((c >> 2) & 1);
+        if (!particle || state->refine_grid[r] != particle) return false;
+        parent_pos[c] = particle->pos;
+        parent_vel[c] = particle->vel;
+    }
+    for (int r = 0; r < 27; ++r) {
+        Particle *particle = state->refine_grid[r];
+        if (!particle) return false;
+        int gx = r % 3, gy = (r / 3) % 3, gz = r / 9;
+        bool parent_corner = gx != 1 && gy != 1 && gz != 1;
+        if (!parent_corner) {
+            Vector3 pos = { 0 }, vel = { 0 };
+            for (int c = 0; c < 8; ++c) {
+                float w = debugRefineWeights[r][c];
+                pos = v_add(pos, v_mul(parent_pos[c], w));
+                vel = v_add(vel, v_mul(parent_vel[c], w));
+            }
+            particle->pos = particle->prev_pos = particle->predicted_pos = pos;
+            particle->vel = vel;
+        }
+        particle->inv_mass = particle->base_inv_mass = refine ?
+            state->refine_inv_mass[r] : (parent_corner ? 0.001f : 0.0f);
+    }
+    for (int c = 0; c < 8; ++c) {
+        Voxel *child = &voxels[state->refine_children[c]];
+        child->simulate_dofs = refine;
+        Vector3 center = { 0 }, velocity = { 0 };
+        for (int k = 0; k < 8; ++k) {
+            center = v_add(center, child->particles[k]->pos);
+            velocity = v_add(velocity, child->particles[k]->vel);
+        }
+        child->pos = v_mul(center, 0.125f);
+        child->vel = v_mul(velocity, 0.125f);
+    }
+    return true;
+}
+
+static bool debug_setup_vgs_refinement(DebugRunState *state)
+{
+    debug_reset_world();
+    state->refinement_demo = true;
+    state->refinement_step = DEBUG_REFINE_AT_STEP;
+    const Color color = { 245, 145, 45, 255 };
+    int created = 0;
+    for (int y = 18; y < 28; ++y) for (int z = -5; z < 5; ++z) for (int x = -5; x < 5; ++x)
+        if (debug_add_cell(x, y, z, true, false, color, DEBUG_TEST_TAG) >= 0) ++created;
+    if (created != 1000) {
+        debug_add_failure(state, "refinement demo created %d/1000 static cells", created);
+        return false;
+    }
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_rebuild_world_state();
+    if (!debug_convert_cube_to_pbd(state, 2.5f)) return false;
+    debug_build_refinement_weights();
+    if (!debug_sync_refinement_grid(state, false)) {
+        debug_add_failure(state, "refinement demo could not initialize the shared grid");
+        return false;
+    }
+    debugRefinementCoarse = true;
+    state->camera.position = (Vector3){ 34.0f, 31.0f, 35.0f };
+    state->camera.target = (Vector3){ 0.0f, 15.0f, 0.0f };
     debug_set_initial_centroid(state);
     return true;
 }
@@ -3413,6 +3568,19 @@ static bool debug_setup_goliath_behavior(DebugRunState *state)
 static void debug_physics_step(DebugRunState *state)
 {
     float dt = PBD_MAX_STEP_DT;
+    if (state && state->refinement_demo) {
+        ++state->refinement_elapsed;
+        if (state->refinement_elapsed == state->refinement_step) {
+            if (!debug_sync_refinement_grid(state, true))
+                debug_add_failure(state, "refinement transfer failed at step %d",
+                                  state->refinement_elapsed);
+            else {
+                state->refinement_complete = true;
+                debugRefinementCoarse = false;
+                collisionTopologyDirty = true;
+            }
+        }
+    }
     if (state && (state->swarmer_wall_test || state->goliath_flight_test || state->goliath_behavior_test)) {
         int bot = state->enemy_bot_index;
         int human = state->enemy_human_index;
@@ -3471,18 +3639,22 @@ static void debug_physics_step(DebugRunState *state)
             rebuild_voxel_hash();
         }
     }
-    if (!state || !state->active_cube_drop) {
+    if (!state || (!state->active_cube_drop && !state->refinement_demo)) {
         activate_static_voxels_near_dynamic();
         prepare_tether_forces();
         wake_sleeping_voxels_near_awake();
     }
     rebuild_static_hash_if_dirty();
     simulate_voxel_pbd(PBD_MAX_STEP_DT);
+    if (state && state->refinement_demo && !state->refinement_complete &&
+        !debug_sync_refinement_grid(state, false))
+        debug_add_failure(state, "coarse grid synchronization failed at step %d",
+                          state->refinement_elapsed);
     if (state && state->active_cube_drop)
         debug_sample_vgs_temporal_curvature(PBD_MAX_STEP_DT);
-    if (!state || !state->active_cube_drop) recycle_dead_voxels();
+    if (!state || (!state->active_cube_drop && !state->refinement_demo)) recycle_dead_voxels();
     rebuild_voxel_hash();
-    if (!state || !state->active_cube_drop) deactivate_sleeping_voxels();
+    if (!state || (!state->active_cube_drop && !state->refinement_demo)) deactivate_sleeping_voxels();
     rebuild_static_hash_if_dirty();
 }
 
@@ -3537,6 +3709,43 @@ static void debug_validate_step(DebugRunState *state, int step)
         }
     }
     DebugSample sample = debug_collect_sample("validation", step, state->initial_centroid_y);
+    if (state->refinement_demo &&
+        (step == 0 || step == state->refinement_step - 1 ||
+         step == state->refinement_step || step == debugRunConfig.steps)) {
+        bool expect_refined = step >= state->refinement_step;
+        if (step == state->refinement_step && state->gpu_readback_performed) {
+            // Recheck the uploaded particle masses after enabling the children.
+            state->gpu_readback_performed = false;
+            state->gpu_zero_mass_corners = 0;
+        }
+        int mobile_points = 0, enabled_children = 0;
+        double total_mass = 0.0;
+        for (int r = 0; r < 27; ++r) {
+            Particle *particle = state->refine_grid[r];
+            if (!particle || !particle->active) {
+                debug_add_failure(state, "step %d: refinement grid point %d is invalid", step, r);
+                continue;
+            }
+            if (particle->inv_mass > 0.0f) {
+                ++mobile_points;
+                total_mass += 1.0 / particle->inv_mass;
+            }
+        }
+        for (int c = 0; c < 8; ++c)
+            if (voxels[state->refine_children[c]].simulate_dofs) ++enabled_children;
+        if (state->refinement_complete != expect_refined ||
+            mobile_points != (expect_refined ? 27 : 8) ||
+            enabled_children != (expect_refined ? 8 : 0) ||
+            fabs(total_mass - 8000.0) > 0.1) {
+            debug_add_failure(state,
+                "step %d: refinement state mismatch (done=%d mobile=%d children=%d mass=%.1f)",
+                step, state->refinement_complete, mobile_points, enabled_children, total_mass);
+        }
+        if (sample.invalid_particle_refs > 0)
+            debug_add_failure(state, "step %d: %d invalid refinement particle references",
+                              step, sample.invalid_particle_refs);
+        if (expect_refined) debug_validate_tagged_dynamic(state, &sample, "after refinement");
+    }
     if (state->active_cube_drop && (step == 60 || step == debugRunConfig.steps)) {
         debug_validate_tagged_dynamic(state, &sample, "cube drop");
         if (step == 60 && sample.tagged_rendered != state->expected_voxels) {
@@ -4307,6 +4516,9 @@ static void debug_finalize_validation(DebugRunState *state)
     if (!state->activation_succeeded) {
         debug_add_failure(state, "scenario did not complete its activation stage");
     }
+    if (state->refinement_demo && !state->refinement_complete) {
+        debug_add_failure(state, "refinement demo never enabled its eight children");
+    }
     if (!state->drop_sampled) {
         debug_add_failure(state, "scenario did not reach the required 60-step drop sample");
     } else if (!state->overhang_impact && !state->platform_lifecycle_test &&
@@ -4394,6 +4606,10 @@ static bool debug_write_report(DebugRunState *state)
         fprintf(file, "  \"vgsTemporalCurvature\": {\"samples\": %d, \"redAtPerSecondSquared\": %.9g, \"lastStepMax\": %.9g, \"lastStepMean\": %.9g},\n",
                 debugVgsTemporalSampleCount, (double)VGS_TEMPORAL_CURVATURE_RED_AT,
                 (double)debugVgsTemporalLastMax, (double)debugVgsTemporalLastMean);
+    }
+    if (state->refinement_demo) {
+        fprintf(file, "  \"refinement\": {\"step\": %d, \"completed\": %s, \"sharedGridPoints\": 27, \"children\": 8},\n",
+                state->refinement_step, state->refinement_complete ? "true" : "false");
     }
     fprintf(file,
             "  \"animation\": {\"requested\": %s, \"format\": \"gif\","

@@ -467,6 +467,16 @@ Available scenarios are:
   deactivation.
   Resolutions that round beyond the voxel or particle caps fail before activation.
   The JSON report includes both sizes, voxel count, and octree diagnostics.
+* `vgs-refinement`: drops a 5 m cube with one root VGS constraint and eight
+  dormant 2.5 m child cells. At fixed step 120 (2 seconds), it enables the
+  eight child constraints while keeping the root constraint active. The children
+  share a 3×3×3 grid of 27 particles. Before refinement, only the root's eight
+  corners have mass and the fine grid follows their positions and velocities by
+  trilinear interpolation; only the root cube is drawn. Refinement restores the
+  saved particle masses and draws the eight child cells. The scenario checks the
+  shared grid, mobile particle count, child constraints, and total mass at the
+  transition. Run `fps_ray --physics=cpu-mt --debug-scenario=vgs-refinement
+  --debug-gif` (or choose `--physics=gpu` for Metal).
 * `pbf-container`: drops 512 fluid particles into a tall immutable voxel container, captures
   both render modes, and checks particle membership, density, settling, containment, and that
   fluid never activates the container.

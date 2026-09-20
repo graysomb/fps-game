@@ -1776,6 +1776,7 @@ static const int DEBUG_FALL_LOG_BUDGET = 32;
 static bool debugLogFall = false;
 static bool debugShowBeliefColors = false;
 static bool debugColorVoxelsByVgsTemporalCurvature = false;
+static bool debugRefinementCoarse = false;
 typedef struct {
     float latest[6];
     float previous[6];
@@ -16134,6 +16135,7 @@ static void prepare_dynamic_voxel_transforms(void) {
         if (!v->simulate || voxel_is_fluid(v)) {
             continue;
         }
+        if (debugRefinementCoarse) continue;
 
         // Collect Bullet with Orb Shader
         if (v->isBullet && v->type == 0) {
