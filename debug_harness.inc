@@ -90,6 +90,9 @@ typedef struct DebugRunState {
     bool active_cube_drop;
     bool refinement_demo;
     bool refinement_complete;
+    bool coarsening_demo;
+    bool coarsening_complete;
+    float coarsening_projection_rms;
     int refinement_step;
     int refinement_elapsed;
     Particle *refine_grid[27];
@@ -292,6 +295,7 @@ static bool debug_setup_pbf_dense_neighbors(DebugRunState *state);
 static bool debug_setup_cube_stress(DebugRunState *state);
 static bool debug_setup_active_cube_drop(DebugRunState *state);
 static bool debug_setup_vgs_refinement(DebugRunState *state);
+static bool debug_setup_vgs_coarsening(DebugRunState *state);
 static bool debug_setup_voxel_strain_shear_fracture(DebugRunState *state);
 static bool debug_setup_arena_platform_fluid(DebugRunState *state);
 
@@ -322,6 +326,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "cube-stress", "Stress test with scalable dynamic cube (size set by FPS_CUBE_SIZE)", debug_setup_cube_stress, 60, 60 },
     { "active-cube-drop", "Activate a static 10x10x10 cube and drop it", debug_setup_active_cube_drop, 120, 60 },
     { "vgs-refinement", "Drop a root VGS cube, then refine into eight shared-particle children", debug_setup_vgs_refinement, 300, 180 },
+    { "vgs-coarsening", "Drop eight child VGS cubes, then project them onto one root", debug_setup_vgs_coarsening, 300, 180 },
     { "voxel-strain-shear-fracture", "Check VGS deactivation behavior under high strain and shear", debug_setup_voxel_strain_shear_fracture, 60, 60 },
     { "arena-platform-fluid", "Test arena central platform activated with sleeping fluid on top", debug_setup_arena_platform_fluid, 60, 60 }
 };
@@ -982,9 +987,9 @@ static bool debug_convert_cube_to_pbd(DebugRunState *state, float requested_size
         debug_add_failure(state, "PBD size %.9g: invalid VGS octree", size);
         goto conversion_failed;
     }
-    if (state->refinement_demo) {
+    if (state->refinement_demo || state->coarsening_demo) {
         if (side != 2 || vgsHierarchy.node_count != 1) {
-            debug_add_failure(state, "refinement demo requires a 2x2x2 child lattice");
+            debug_add_failure(state, "scale transition demo requires a 2x2x2 child lattice");
             goto conversion_failed;
         }
         for (int c = 0; c < 8; ++c) {
@@ -1255,7 +1260,7 @@ static void debug_draw_overlay(const DebugRunState *state, const DebugSample *sa
     if (state->gpu_readback_performed) box_height += 30;
     if (state->overhang_impact) box_height += 30;
     if (state->active_cube_drop && debugColorVoxelsByVgsTemporalCurvature) box_height += 30;
-    if (state->refinement_demo) box_height += 30;
+    if (state->refinement_demo || state->coarsening_demo) box_height += 30;
     DrawRectangle(18, 18, 650, box_height, Fade(BLACK, 0.78f));
     DrawText(TextFormat("SCENARIO %s", debugRunConfig.scenario), 34, 32, 22, RAYWHITE);
     DrawText(TextFormat("BACKEND requested=%s active=%s",
@@ -1299,10 +1304,14 @@ static void debug_draw_overlay(const DebugRunState *state, const DebugSample *sa
         DrawRectangle(421, y + 2, 24, 16, ColorFromHSV(0.0f, 0.85f, 0.9f));
         DrawText("100+", 449, y, 17, LIGHTGRAY);
     }
-    if (state->refinement_demo) {
+    if (state->refinement_demo || state->coarsening_demo) {
         int y = state->gpu_readback_performed ? 222 : 192;
-        DrawText(TextFormat("VGS %s | refine at step %d",
-                            state->refinement_complete ? "ROOT + 8 CHILDREN" : "ROOT ONLY",
+        bool coarse = state->refinement_demo ? !state->refinement_complete :
+                      state->coarsening_complete;
+        DrawText(TextFormat("VGS %s | %s at step %d",
+                            coarse ? "ROOT ONLY" :
+                            (state->coarsening_demo ? "8 CHILDREN" : "ROOT + 8 CHILDREN"),
+                            state->coarsening_demo ? "coarsen" : "refine",
                             state->refinement_step), 34, y, 17, RAYWHITE);
     }
     if (state->overhang_impact) {
@@ -1347,7 +1356,8 @@ static void debug_render_scene(DebugRunState *state, const DebugSample *sample)
                       (Color){ 68, 75, 82, 255 });
             DrawGrid(48, VOXEL_SIZE);
             DrawVoxels(state->camera);
-            if (state->refinement_demo && !state->refinement_complete &&
+            if ((state->refinement_demo || state->coarsening_demo) &&
+                debugRefinementCoarse &&
                 vgsHierarchy.node_count == 1) {
                 const VgsHierarchyNode *root = &vgsHierarchy.nodes[0];
                 Vector3 center = { 0 };
@@ -1711,7 +1721,8 @@ static void debug_validate_tagged_dynamic(DebugRunState *state, const DebugSampl
                           context, sample->invalid_particle_refs);
     }
     if (sample->zero_mass_corners > 0 &&
-        !(state->refinement_demo && !state->refinement_complete)) {
+        !(state->refinement_demo && !state->refinement_complete) &&
+        !(state->coarsening_demo && state->coarsening_complete)) {
         debug_add_failure(state, "%s: %d activated corners have zero base inverse mass",
                           context, sample->zero_mass_corners);
     }
@@ -1893,6 +1904,7 @@ static void debug_readback_gpu_buffers(DebugRunState *state, int step)
     }
     if (!state->overhang_impact &&
         !(state->refinement_demo && !state->refinement_complete) &&
+        !(state->coarsening_demo && state->coarsening_complete) &&
         state->gpu_zero_mass_corners > 0) {
         debug_add_failure(state, "step %d: %d tagged dynamic corners have zero mass in the GPU particle SSBO",
                           step, state->gpu_zero_mass_corners);
@@ -2060,6 +2072,7 @@ static bool debug_setup_active_cube_drop(DebugRunState *state)
 }
 
 static float debugRefineWeights[27][8];
+static float debugCoarsenWeights[8][27];
 
 static void debug_build_refinement_weights(void)
 {
@@ -2075,9 +2088,57 @@ static void debug_build_refinement_weights(void)
     }
 }
 
+// For this fixed 3x3x3 lattice, A is the trilinear 27x8 refinement matrix.
+// Build its left pseudoinverse once, then reuse it for positions and velocities.
+static bool debug_build_coarsening_weights(void)
+{
+    double augmented[8][16] = { 0 };
+    for (int i = 0; i < 8; ++i) {
+        for (int j = 0; j < 8; ++j)
+            for (int r = 0; r < 27; ++r)
+                augmented[i][j] += (double)debugRefineWeights[r][i] *
+                                   (double)debugRefineWeights[r][j];
+        augmented[i][8 + i] = 1.0;
+    }
+    for (int i = 0; i < 8; ++i) {
+        int pivot = i;
+        for (int row = i + 1; row < 8; ++row)
+            if (fabs(augmented[row][i]) > fabs(augmented[pivot][i])) pivot = row;
+        if (fabs(augmented[pivot][i]) < 1e-12) return false;
+        if (pivot != i) for (int j = 0; j < 16; ++j) {
+            double tmp = augmented[i][j];
+            augmented[i][j] = augmented[pivot][j];
+            augmented[pivot][j] = tmp;
+        }
+        double inverse_pivot = 1.0 / augmented[i][i];
+        for (int j = 0; j < 16; ++j) augmented[i][j] *= inverse_pivot;
+        for (int row = 0; row < 8; ++row) {
+            if (row == i) continue;
+            double factor = augmented[row][i];
+            for (int j = 0; j < 16; ++j)
+                augmented[row][j] -= factor * augmented[i][j];
+        }
+    }
+    for (int i = 0; i < 8; ++i) for (int r = 0; r < 27; ++r) {
+        double weight = 0.0;
+        for (int j = 0; j < 8; ++j)
+            weight += augmented[i][8 + j] * (double)debugRefineWeights[r][j];
+        debugCoarsenWeights[i][r] = (float)weight;
+    }
+    // R*A must reproduce every possible root-corner state.
+    for (int i = 0; i < 8; ++i) for (int j = 0; j < 8; ++j) {
+        double value = 0.0;
+        for (int r = 0; r < 27; ++r)
+            value += (double)debugCoarsenWeights[i][r] * debugRefineWeights[r][j];
+        if (fabs(value - (i == j ? 1.0 : 0.0)) > 1e-5) return false;
+    }
+    return true;
+}
+
 static bool debug_sync_refinement_grid(DebugRunState *state, bool refine)
 {
-    if (!state || !state->refinement_demo || vgsHierarchy.node_count != 1) return false;
+    if (!state || (!state->refinement_demo && !state->coarsening_demo) ||
+        vgsHierarchy.node_count != 1) return false;
     VgsHierarchyNode *root = &vgsHierarchy.nodes[0];
     Vector3 parent_pos[8], parent_vel[8];
     for (int c = 0; c < 8; ++c) {
@@ -2119,6 +2180,45 @@ static bool debug_sync_refinement_grid(DebugRunState *state, bool refine)
     return true;
 }
 
+static bool debug_coarsen_grid(DebugRunState *state)
+{
+    if (!state || !state->coarsening_demo || vgsHierarchy.node_count != 1) return false;
+    Vector3 fine_pos[27], fine_vel[27], coarse_pos[8], coarse_vel[8];
+    for (int r = 0; r < 27; ++r) {
+        Particle *particle = state->refine_grid[r];
+        if (!particle) return false;
+        fine_pos[r] = particle->pos;
+        fine_vel[r] = particle->vel;
+    }
+    for (int c = 0; c < 8; ++c) {
+        coarse_pos[c] = coarse_vel[c] = (Vector3){ 0 };
+        for (int r = 0; r < 27; ++r) {
+            float weight = debugCoarsenWeights[c][r];
+            coarse_pos[c] = v_add(coarse_pos[c], v_mul(fine_pos[r], weight));
+            coarse_vel[c] = v_add(coarse_vel[c], v_mul(fine_vel[r], weight));
+        }
+    }
+    double error_squared = 0.0;
+    for (int r = 0; r < 27; ++r) {
+        Vector3 fitted = { 0 };
+        for (int c = 0; c < 8; ++c)
+            fitted = v_add(fitted, v_mul(coarse_pos[c], debugRefineWeights[r][c]));
+        Vector3 error = v_sub(fitted, fine_pos[r]);
+        error_squared += (double)v_dot(error, error);
+    }
+    state->coarsening_projection_rms = (float)sqrt(error_squared / 27.0);
+    if (!isfinite(state->coarsening_projection_rms)) return false;
+    for (int c = 0; c < 8; ++c) {
+        Particle *particle = vgsHierarchy.nodes[0].particles[c];
+        int r = 2 * (c & 1) + 6 * ((c >> 1) & 1) + 18 * ((c >> 2) & 1);
+        if (!particle || particle != state->refine_grid[r]) return false;
+        particle->pos = particle->prev_pos = particle->predicted_pos = coarse_pos[c];
+        particle->vel = coarse_vel[c];
+    }
+    vgsHierarchy.nodes[0].active = true;
+    return debug_sync_refinement_grid(state, false);
+}
+
 static bool debug_setup_vgs_refinement(DebugRunState *state)
 {
     debug_reset_world();
@@ -2143,6 +2243,34 @@ static bool debug_setup_vgs_refinement(DebugRunState *state)
     debugRefinementCoarse = true;
     state->camera.position = (Vector3){ 34.0f, 31.0f, 35.0f };
     state->camera.target = (Vector3){ 0.0f, 15.0f, 0.0f };
+    debug_set_initial_centroid(state);
+    return true;
+}
+
+static bool debug_setup_vgs_coarsening(DebugRunState *state)
+{
+    debug_reset_world();
+    state->coarsening_demo = true;
+    state->refinement_step = DEBUG_REFINE_AT_STEP;
+    const Color color = { 245, 145, 45, 255 };
+    int created = 0;
+    for (int y = 18; y < 28; ++y) for (int z = -5; z < 5; ++z) for (int x = -5; x < 5; ++x)
+        if (debug_add_cell(x, y, z, true, false, color, DEBUG_TEST_TAG) >= 0) ++created;
+    if (created != 1000) {
+        debug_add_failure(state, "coarsening demo created %d/1000 static cells", created);
+        return false;
+    }
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_rebuild_world_state();
+    if (!debug_convert_cube_to_pbd(state, 2.5f)) return false;
+    debug_build_refinement_weights();
+    if (!debug_build_coarsening_weights()) {
+        debug_add_failure(state, "coarsening pseudoinverse is singular or inaccurate");
+        return false;
+    }
+    vgsHierarchy.nodes[0].active = false;
+    state->camera.position = (Vector3){ 20.0f, 18.0f, 22.0f };
+    state->camera.target = (Vector3){ 0.0f, 6.0f, 0.0f };
     debug_set_initial_centroid(state);
     return true;
 }
@@ -3568,6 +3696,19 @@ static bool debug_setup_goliath_behavior(DebugRunState *state)
 static void debug_physics_step(DebugRunState *state)
 {
     float dt = PBD_MAX_STEP_DT;
+    if (state && state->coarsening_demo) {
+        ++state->refinement_elapsed;
+        if (state->refinement_elapsed == state->refinement_step) {
+            if (!debug_coarsen_grid(state))
+                debug_add_failure(state, "coarsening transfer failed at step %d",
+                                  state->refinement_elapsed);
+            else {
+                state->coarsening_complete = true;
+                debugRefinementCoarse = true;
+                collisionTopologyDirty = true;
+            }
+        }
+    }
     if (state && state->refinement_demo) {
         ++state->refinement_elapsed;
         if (state->refinement_elapsed == state->refinement_step) {
@@ -3639,22 +3780,23 @@ static void debug_physics_step(DebugRunState *state)
             rebuild_voxel_hash();
         }
     }
-    if (!state || (!state->active_cube_drop && !state->refinement_demo)) {
+    if (!state || (!state->active_cube_drop && !state->refinement_demo && !state->coarsening_demo)) {
         activate_static_voxels_near_dynamic();
         prepare_tether_forces();
         wake_sleeping_voxels_near_awake();
     }
     rebuild_static_hash_if_dirty();
     simulate_voxel_pbd(PBD_MAX_STEP_DT);
-    if (state && state->refinement_demo && !state->refinement_complete &&
+    if (state && ((state->refinement_demo && !state->refinement_complete) ||
+                  (state->coarsening_demo && state->coarsening_complete)) &&
         !debug_sync_refinement_grid(state, false))
         debug_add_failure(state, "coarse grid synchronization failed at step %d",
                           state->refinement_elapsed);
     if (state && state->active_cube_drop)
         debug_sample_vgs_temporal_curvature(PBD_MAX_STEP_DT);
-    if (!state || (!state->active_cube_drop && !state->refinement_demo)) recycle_dead_voxels();
+    if (!state || (!state->active_cube_drop && !state->refinement_demo && !state->coarsening_demo)) recycle_dead_voxels();
     rebuild_voxel_hash();
-    if (!state || (!state->active_cube_drop && !state->refinement_demo)) deactivate_sleeping_voxels();
+    if (!state || (!state->active_cube_drop && !state->refinement_demo && !state->coarsening_demo)) deactivate_sleeping_voxels();
     rebuild_static_hash_if_dirty();
 }
 
@@ -3745,6 +3887,47 @@ static void debug_validate_step(DebugRunState *state, int step)
             debug_add_failure(state, "step %d: %d invalid refinement particle references",
                               step, sample.invalid_particle_refs);
         if (expect_refined) debug_validate_tagged_dynamic(state, &sample, "after refinement");
+    }
+    if (state->coarsening_demo &&
+        (step == 0 || step == state->refinement_step - 1 ||
+         step == state->refinement_step || step == debugRunConfig.steps)) {
+        bool expect_coarse = step >= state->refinement_step;
+        if (step == state->refinement_step && state->gpu_readback_performed) {
+            state->gpu_readback_performed = false;
+            state->gpu_zero_mass_corners = 0;
+        }
+        int mobile_points = 0, enabled_children = 0;
+        double total_mass = 0.0;
+        for (int r = 0; r < 27; ++r) {
+            Particle *particle = state->refine_grid[r];
+            if (!particle || !particle->active) {
+                debug_add_failure(state, "step %d: coarsening grid point %d is invalid", step, r);
+                continue;
+            }
+            if (particle->inv_mass > 0.0f) {
+                ++mobile_points;
+                total_mass += 1.0 / particle->inv_mass;
+            }
+        }
+        for (int c = 0; c < 8; ++c)
+            if (voxels[state->refine_children[c]].simulate_dofs) ++enabled_children;
+        if (state->coarsening_complete != expect_coarse ||
+            vgsHierarchy.node_count != 1 ||
+            vgsHierarchy.nodes[0].active != expect_coarse ||
+            mobile_points != (expect_coarse ? 8 : 27) ||
+            enabled_children != (expect_coarse ? 0 : 8) ||
+            fabs(total_mass - 8000.0) > 0.1 ||
+            !isfinite(state->coarsening_projection_rms)) {
+            debug_add_failure(state,
+                "step %d: coarsening state mismatch (done=%d mobile=%d children=%d mass=%.1f rms=%.4f)",
+                step, state->coarsening_complete, mobile_points, enabled_children,
+                total_mass, state->coarsening_projection_rms);
+        }
+        if (sample.invalid_particle_refs > 0)
+            debug_add_failure(state, "step %d: %d invalid coarsening particle references",
+                              step, sample.invalid_particle_refs);
+        debug_validate_tagged_dynamic(state, &sample,
+                                      expect_coarse ? "after coarsening" : "before coarsening");
     }
     if (state->active_cube_drop && (step == 60 || step == debugRunConfig.steps)) {
         debug_validate_tagged_dynamic(state, &sample, "cube drop");
@@ -4519,6 +4702,9 @@ static void debug_finalize_validation(DebugRunState *state)
     if (state->refinement_demo && !state->refinement_complete) {
         debug_add_failure(state, "refinement demo never enabled its eight children");
     }
+    if (state->coarsening_demo && !state->coarsening_complete) {
+        debug_add_failure(state, "coarsening demo never projected its fine grid");
+    }
     if (!state->drop_sampled) {
         debug_add_failure(state, "scenario did not reach the required 60-step drop sample");
     } else if (!state->overhang_impact && !state->platform_lifecycle_test &&
@@ -4610,6 +4796,11 @@ static bool debug_write_report(DebugRunState *state)
     if (state->refinement_demo) {
         fprintf(file, "  \"refinement\": {\"step\": %d, \"completed\": %s, \"sharedGridPoints\": 27, \"children\": 8},\n",
                 state->refinement_step, state->refinement_complete ? "true" : "false");
+    }
+    if (state->coarsening_demo) {
+        fprintf(file, "  \"coarsening\": {\"step\": %d, \"completed\": %s, \"fineGridPoints\": 27, \"rootCorners\": 8, \"projectionRms\": %.9g},\n",
+                state->refinement_step, state->coarsening_complete ? "true" : "false",
+                (double)state->coarsening_projection_rms);
     }
     fprintf(file,
             "  \"animation\": {\"requested\": %s, \"format\": \"gif\","

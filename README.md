@@ -477,6 +477,14 @@ Available scenarios are:
   shared grid, mobile particle count, child constraints, and total mass at the
   transition. Run `fps_ray --physics=cpu-mt --debug-scenario=vgs-refinement
   --debug-gif` (or choose `--physics=gpu` for Metal).
+* `vgs-coarsening`: starts with the eight 2.5 m child VGS constraints and
+  their shared 27-particle grid. At fixed step 120 (2 seconds), it fits one
+  5 m root cube to all fine positions and velocities using the precomputed
+  left pseudoinverse `R = (A^T A)^-1 A^T` of the 27×8 trilinear refinement
+  matrix. The children stop solving and rendering; the root starts solving and
+  renders as one cube. The demo verifies `R A` reproduces root corners and
+  checks the transition's mobile particle count and total mass. Run it with
+  `fps_ray --physics=cpu-mt --debug-scenario=vgs-coarsening --debug-gif`.
 * `pbf-container`: drops 512 fluid particles into a tall immutable voxel container, captures
   both render modes, and checks particle membership, density, settling, containment, and that
   fluid never activates the container.
