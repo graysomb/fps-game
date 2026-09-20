@@ -49,6 +49,8 @@ uniform int uMode;
 uniform int uParticleCount;
 uniform int uSimCount;
 uniform int uVoxelCount;
+uniform int uVgsBegin;
+uniform int uVgsCount;
 uniform int uStaticColliderCount;
 uniform int uHashSize;
 uniform int uStaticHashSize;
@@ -90,6 +92,7 @@ const int MODE_PREPARE_INDIRECT = 13;
 const int MODE_WAKE_GATHER = 14;
 const int MODE_WAKE_APPLY = 15;
 const int MODE_TOPOLOGY_REBUILD_SERIAL = 16;
+const int MODE_HIERARCHY_MASK = 17;
 const int CONTROL_FLAG_OVERFLOW = 1;
 const int CONTROL_FLAG_TOPOLOGY_DIRTY = 2;
 const int CONTROL_FLAG_BREAK_OCCURRED = 4;
@@ -274,8 +277,8 @@ void applyCorrections(uint gid) {
 }
 
 void solveVgs(uint gid) {
-    if (gid >= uint(uVoxelCount)) return;
-    VoxelState v = voxel[gid];
+    if (gid >= uint(uVgsCount)) return;
+    VoxelState v = voxel[uint(uVgsBegin) + gid];
     if (v.flags.x == 0 || v.flags.y != 0 || v.flags.z != 0 || v.flags.w == 0) return;
     vec3 p[8];
     vec3 original[8];
@@ -325,6 +328,20 @@ void solveVgs(uint gid) {
     }
     for (int i = 0; i < 8; ++i) {
         if (applyWeight[i] > 0.0) accumulate(voxelParticle(v, i), p[i] - original[i], applyWeight[i]);
+    }
+}
+
+void propagateHierarchyMask(uint gid) {
+    if (gid >= uint(uVgsCount)) return;
+    uint id = uint(uVgsBegin) + gid;
+    if (voxel[id].flags.x == 0) return;
+    VoxelState parent = voxel[id];
+    for (int c = 0; c < 8; ++c) {
+        uint child = floatBitsToUint(c < 4 ? parent.bounds_min[c] : parent.bounds_max[c - 4]);
+        if (voxel[child].flags.x == 0) {
+            voxel[id].flags.x = 0;
+            return;
+        }
     }
 }
 
@@ -669,4 +686,5 @@ void main() {
     else if (uMode==MODE_WAKE_GATHER) wakeGather(gid);
     else if (uMode==MODE_WAKE_APPLY) wakeApply(gid);
     else if (uMode==MODE_TOPOLOGY_REBUILD_SERIAL) topologyRebuildSerial(gid);
+    else if (uMode==MODE_HIERARCHY_MASK) propagateHierarchyMask(gid);
 }

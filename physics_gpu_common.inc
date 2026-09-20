@@ -43,6 +43,8 @@ enum {
     GPU_LOC_PARTICLE_COUNT,
     GPU_LOC_SIM_COUNT,
     GPU_LOC_VOXEL_COUNT,
+    GPU_LOC_VGS_BEGIN,
+    GPU_LOC_VGS_COUNT,
     GPU_LOC_STATIC_COLLIDER_COUNT,
     GPU_LOC_HASH_SIZE,
     GPU_LOC_STATIC_HASH_SIZE,
@@ -144,6 +146,7 @@ typedef struct {
     int particle_slot_capacity;
     int sim_slot_capacity;
     int dynamic_voxel_count;
+    int hierarchy_node_count;
     int collision_count;
     int static_collider_count;
     uint64_t upload_bytes;
@@ -404,7 +407,8 @@ static bool gpu_pack_world(void) {
     if (possible_clones > cpu_free_slots) possible_clones = cpu_free_slots;
     size_t slot_capacity = maximum_references + possible_clones;
     if (slot_capacity > (size_t)MAX_PARTICLES) slot_capacity = MAX_PARTICLES;
-    if (!gpu_stage_reserve(slot_capacity, slot_capacity, (size_t)dynamic_count)) return false;
+    if (!gpu_stage_reserve(slot_capacity, slot_capacity,
+                           (size_t)dynamic_count + (size_t)vgsHierarchy.node_count)) return false;
     if (!gpuPhysics.world_to_dynamic) {
         gpuPhysics.world_to_dynamic = malloc((size_t)MAX_VOXELS * sizeof(*gpuPhysics.world_to_dynamic));
         if (!gpuPhysics.world_to_dynamic) return false;
@@ -503,6 +507,28 @@ static bool gpu_pack_world(void) {
         g->lifecycle[3] = ((uint32_t)v->orig_min_gx & 1u) |
                          (((uint32_t)v->orig_min_gy & 1u) << 1) |
                          (((uint32_t)v->orig_min_gz & 1u) << 2);
+    }
+
+    gpuPhysics.hierarchy_node_count = vgsHierarchy.node_count;
+    for (int i = 0; i < vgsHierarchy.node_count; ++i) {
+        VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+        GpuVoxelState *g = &gpuPhysics.voxel_stage[gpuPhysics.dynamic_voxel_count + i];
+        memset(g, 0, sizeof(*g));
+        g->flags[0] = node->active ? 1 : 0;
+        g->flags[3] = 1;
+        g->pos_rest_edge[3] = node->rest_edge;
+        g->velocity_rest_volume[3] = node->rest_volume;
+        for (int c = 0; c < 8; ++c) {
+            Particle *p = node->particles[c];
+            int mapped = p ? gpuPhysics.pool_to_compact[p - particles_pool] : -1;
+            g->particle[c] = mapped >= 0 ? (uint32_t)mapped : UINT32_MAX;
+            int child = node->children[c];
+            uint32_t child_stage = child >= 0
+                ? (uint32_t)(gpuPhysics.dynamic_voxel_count + child)
+                : (uint32_t)gpuPhysics.world_to_dynamic[-child - 1];
+            memcpy(c < 4 ? &g->bounds_min[c] : &g->bounds_max[c - 4],
+                   &child_stage, sizeof(child_stage));
+        }
     }
 
     for (int dynamic_id = 0; dynamic_id < gpuPhysics.dynamic_voxel_count; ++dynamic_id) {
@@ -702,7 +728,7 @@ static bool gpu_upload_world(void) {
     size_t particle_bytes = (size_t)gpuPhysics.compact_count * sizeof(GpuParticleState);
     size_t cell_bytes = (size_t)gpuPhysics.compact_count * sizeof(GpuCellState);
     size_t sim_bytes = (size_t)sim_particle_count * sizeof(uint32_t);
-    size_t voxel_bytes = (size_t)gpuPhysics.dynamic_voxel_count * sizeof(GpuVoxelState);
+    size_t voxel_bytes = (size_t)(gpuPhysics.dynamic_voxel_count + gpuPhysics.hierarchy_node_count) * sizeof(GpuVoxelState);
     size_t static_bytes = (size_t)HASH_SIZE * sizeof(GpuStaticCell);
     size_t static_collider_bytes = (size_t)gpuPhysics.static_collider_count * sizeof(GpuStaticCollider);
     size_t collision_meta_bytes = (size_t)gpuPhysics.compact_count * sizeof(GpuCollisionMeta);
@@ -781,12 +807,17 @@ static bool gpu_upload_world(void) {
 #if defined(__APPLE__) && defined(FPS_GPU_METAL)
 static bool gpu_dispatch(int mode, int count) { return fps_metal_dispatch(mode, count); }
 static void gpu_set_vgs_color(int color) { fps_metal_set_vgs_color(color); }
+static void gpu_set_vgs_layer(int begin, int count) { fps_metal_set_vgs_layer(begin, count); }
 static bool gpu_dispatch_indirect_offset(int mode, size_t offset) {
     return fps_metal_dispatch_indirect(mode, (void *)gpuPhysics.dispatch_buffer.id, offset);
 }
 static bool gpu_dispatch_indirect(int mode) { return gpu_dispatch_indirect_offset(mode, 0); }
 #elif defined(GRAPHICS_API_OPENGL_43)
 static void gpu_set_vgs_color(int color) { (void)color; }
+static void gpu_set_vgs_layer(int begin, int count) {
+    rlSetUniform(gpuPhysics.loc[GPU_LOC_VGS_BEGIN], &begin, SHADER_UNIFORM_INT, 1);
+    rlSetUniform(gpuPhysics.loc[GPU_LOC_VGS_COUNT], &count, SHADER_UNIFORM_INT, 1);
+}
 static bool gpu_dispatch(int mode, int count) {
     if (count <= 0) return true;
     while (glGetError() != GL_NO_ERROR) { }
@@ -810,6 +841,7 @@ static bool gpu_dispatch_indirect(int mode) { return gpu_dispatch_indirect_offse
 #else
 static bool gpu_dispatch(int mode, int count) { (void)mode; (void)count; return false; }
 static void gpu_set_vgs_color(int color) { (void)color; }
+static void gpu_set_vgs_layer(int begin, int count) { (void)begin; (void)count; }
 static bool gpu_dispatch_indirect(int mode) { (void)mode; return false; }
 static bool gpu_dispatch_indirect_offset(int mode, size_t offset) { (void)mode; (void)offset; return false; }
 #endif
@@ -862,6 +894,7 @@ static void gpu_set_uniforms(float dt) {
     rlSetUniform(gpuPhysics.loc[GPU_LOC_PARTICLE_COUNT], &particle_count, SHADER_UNIFORM_INT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_SIM_COUNT], &sim_particle_count, SHADER_UNIFORM_INT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_VOXEL_COUNT], &dynamic_voxel_count, SHADER_UNIFORM_INT, 1);
+    gpu_set_vgs_layer(0, dynamic_voxel_count);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_STATIC_COLLIDER_COUNT], &static_collider_count, SHADER_UNIFORM_INT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_HASH_SIZE], &hash_size, SHADER_UNIFORM_INT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_STATIC_HASH_SIZE], &static_hash_size, SHADER_UNIFORM_INT, 1);
@@ -1041,7 +1074,8 @@ static bool gpu_resident_matches_cpu(void) {
         gpuPhysics.collision_uploaded_generation != collisionMetadataGeneration) return false;
     int dynamic_count = 0;
     for (int i = 0; i < voxel_count; ++i) if (voxels[i].simulate) dynamic_count++;
-    if (dynamic_count != gpuPhysics.dynamic_voxel_count) return false;
+    if (dynamic_count != gpuPhysics.dynamic_voxel_count ||
+        vgsHierarchy.node_count != gpuPhysics.hierarchy_node_count) return false;
     for (int i = 0; i < gpuPhysics.compact_count; ++i) {
         Particle *p = gpuPhysics.compact_to_particle[i];
         if (!p || !p->active) continue;
@@ -1114,9 +1148,21 @@ static bool gpu_dispatch_substep(float sub_dt) {
               gpu_dispatch(GPU_MODE_HASH_CLEAR, hash_size) &&
               gpu_dispatch_indirect_offset(GPU_MODE_HASH_BUILD, 16) &&
               gpu_dispatch_indirect_offset(GPU_MODE_PAIR_COLLISIONS, 16) &&
-              gpu_dispatch_indirect(GPU_MODE_APPLY) &&
-              gpu_dispatch(GPU_MODE_BREAK_MASK, gpuPhysics.dynamic_voxel_count);
+              gpu_dispatch_indirect(GPU_MODE_APPLY);
+    if (ok && !PBD_DISABLE_VGS_DEACTIVATION)
+        ok = gpu_dispatch(GPU_MODE_BREAK_MASK, gpuPhysics.dynamic_voxel_count);
+    for (int level = vgsHierarchy.levels - 1; ok && level >= 0; --level) {
+        int count = vgsHierarchy.level_count[level];
+        gpu_set_vgs_layer(gpuPhysics.dynamic_voxel_count + vgsHierarchy.level_start[level], count);
+        ok = gpu_dispatch(GPU_MODE_HIERARCHY_MASK, count);
+    }
     for (int it = 0; ok && it < PBD_CONSTRAINT_ITERS; ++it) {
+        for (int level = 0; ok && level < vgsHierarchy.levels; ++level) {
+            int count = vgsHierarchy.level_count[level];
+            gpu_set_vgs_layer(gpuPhysics.dynamic_voxel_count + vgsHierarchy.level_start[level], count);
+            ok = gpu_dispatch(GPU_MODE_VGS, count) && gpu_dispatch_indirect(GPU_MODE_APPLY);
+        }
+        gpu_set_vgs_layer(0, gpuPhysics.dynamic_voxel_count);
         ok = gpu_dispatch(GPU_MODE_VGS, gpuPhysics.dynamic_voxel_count) &&
              gpu_dispatch_indirect(GPU_MODE_APPLY);
     }
@@ -1137,6 +1183,13 @@ static bool gpu_forced_validation_failure_consumed = false;
 static int gpu_physics_steps(float dt, int fixed_steps) {
     gpu_clear_step_failure();
     if (fixed_steps <= 0) return 0;
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+    if (vgsHierarchy.node_count && !fps_metal_supports_vgs_hierarchy()) {
+        gpu_set_step_failure(PHYSICS_GPU_FAILURE_PERMANENT,
+                             "Metal library lacks hierarchical VGS support");
+        return 0;
+    }
+#endif
     if (getenv("FPS_FORCE_GPU_STEP_FAILURE") != NULL) {
         gpu_set_step_failure(PHYSICS_GPU_FAILURE_TRANSIENT, "forced GPU step failure");
         return 0;
@@ -1322,7 +1375,8 @@ static bool gpu_physics_init(void) {
         return false;
     }
     static const char *names[GPU_LOC_COUNT] = {
-        "uMode", "uParticleCount", "uSimCount", "uVoxelCount", "uStaticColliderCount", "uHashSize", "uStaticHashSize",
+        "uMode", "uParticleCount", "uSimCount", "uVoxelCount", "uVgsBegin", "uVgsCount",
+        "uStaticColliderCount", "uHashSize", "uStaticHashSize",
         "uActivePlayers", "uDt", "uVoxelSize", "uParticleHashStep", "uFloorSize", "uGravity", "uVelocityDamping",
         "uSor", "uCollisionRelaxation", "uVgsAlpha", "uVgsBeta", "uVgsEpsilon",
         "uStrainBreakThreshold", "uShearBreakThreshold", "uTetherSpring", "uTetherDamping",

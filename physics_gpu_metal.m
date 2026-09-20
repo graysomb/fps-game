@@ -18,6 +18,7 @@ typedef struct FpsMetalState {
     MTLResourceOptions resource_options;
     double wait_start;
     bool managed;
+    bool hierarchy_supported;
 } FpsMetalState;
 
 static FpsMetalState metal_state;
@@ -74,6 +75,9 @@ bool fps_metal_initialize(const char *library_path, long long *max_buffer_size,
             fps_metal_shutdown();
             return false;
         }
+        id<MTLFunction> hierarchy_marker = [metal_state.library newFunctionWithName:@"pbd_hierarchy_marker"];
+        metal_state.hierarchy_supported = hierarchy_marker != nil;
+        [hierarchy_marker release];
         id<MTLFunction> function = [metal_state.library newFunctionWithName:@"pbd_pipeline"];
         if (!function) {
             fps_metal_error(error, error_capacity, @"pbd_pipeline is missing from the Metal library");
@@ -176,6 +180,15 @@ void fps_metal_set_uniforms(const FpsGpuUniforms *uniforms) {
 
 void fps_metal_set_vgs_color(int color) {
     metal_state.uniforms.vgs_color = color;
+}
+
+void fps_metal_set_vgs_layer(int begin, int count) {
+    metal_state.uniforms.integer_padding[0] = begin;
+    metal_state.uniforms.integer_padding[1] = count;
+}
+
+bool fps_metal_supports_vgs_hierarchy(void) {
+    return metal_state.hierarchy_supported;
 }
 
 static FpsMetalProfileInfo metal_profile = { 0 };

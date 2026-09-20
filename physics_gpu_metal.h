@@ -58,6 +58,8 @@ bool fps_metal_buffer_read(void *buffer, void *data, size_t size, size_t offset)
 void fps_metal_bind_buffer(int slot, void *buffer);
 void fps_metal_set_uniforms(const FpsGpuUniforms *uniforms);
 void fps_metal_set_vgs_color(int color);
+void fps_metal_set_vgs_layer(int begin, int count);
+bool fps_metal_supports_vgs_hierarchy(void);
 bool fps_metal_begin_batch(void);
 bool fps_metal_dispatch(int mode, int count);
 bool fps_metal_dispatch_indirect(int mode, void *buffer, size_t offset);

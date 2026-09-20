@@ -558,6 +558,10 @@ static inline bool is_player_bot(int player_index) {
 #define COARSENING_MASS_SCALE 0.1f
 #define STRAIN_BREAK_THRESHOLD 0.2f
 #define SHEAR_BREAK_THRESHOLD 0.2f
+// Temporary global switch while hierarchical VGS is being evaluated.
+#ifndef PBD_DISABLE_VGS_DEACTIVATION
+#define PBD_DISABLE_VGS_DEACTIVATION 1
+#endif
 #define PBD_MAX_ACCUM_STEPS 8
 #define COLLISION_RELAXATION 0.99f
 #define COLLISION_CENTROID_ONLY_DT 10.2f
@@ -1086,6 +1090,27 @@ typedef struct {
     uint8_t prevGlueClusterValid;
 } Voxel;
 static Voxel voxels[MAX_VOXELS];
+typedef struct {
+    Particle *particles[8];
+    int children[8]; // Internal node index, or -(world voxel index + 1) at the leaf level.
+    int parent;
+    float rest_edge;
+    float rest_volume;
+    bool active;
+} VgsHierarchyNode;
+typedef struct {
+    VgsHierarchyNode *nodes;
+    int level_start[8];
+    int level_count[8];
+    int levels;
+    int node_count;
+    int leaf_count;
+} VgsHierarchy;
+static VgsHierarchy vgsHierarchy;
+static void clear_vgs_hierarchy(void) {
+    free(vgsHierarchy.nodes);
+    memset(&vgsHierarchy, 0, sizeof(vgsHierarchy));
+}
 static uint64_t nextVoxelIdentity = 1;
 static int voxel_count = 0;
 static Particle particles_pool[MAX_PARTICLES];
@@ -1750,6 +1775,19 @@ static const float DEBUG_FALL_LOG_THRESHOLD = -5.0f;
 static const int DEBUG_FALL_LOG_BUDGET = 32;
 static bool debugLogFall = false;
 static bool debugShowBeliefColors = false;
+static bool debugColorVoxelsByVgsTemporalCurvature = false;
+typedef struct {
+    float latest[6];
+    float previous[6];
+    float curvature;
+} VgsTemporalVoxel;
+static VgsTemporalVoxel *debugVgsTemporalVoxels = NULL;
+static int debugVgsTemporalVoxelCount = 0;
+static int debugVgsTemporalSampleCount = 0;
+static float debugVgsTemporalLastMax = 0.0f;
+static float debugVgsTemporalLastMean = 0.0f;
+// VGS strain/shear are dimensionless; temporal curvature has units of 1/s^2.
+#define VGS_TEMPORAL_CURVATURE_RED_AT 100.0f
 static unsigned char debugTagBreakLogged[DEBUG_CLUSTER_TAG_MAX];
 
 static const char *trace_level_label(int level) {
@@ -3172,6 +3210,121 @@ static Color voxel_belief_debug_color(const Voxel *voxel)
     return col;
 }
 
+typedef struct {
+    Vector3 axis[3];
+    float length[3];
+    float strain[3];
+    float shear[3];
+    float max_abs_strain;
+    float max_abs_shear;
+} VgsDeformation;
+
+// These are the same three fitted axes and normalized shear terms used by
+// fracture. Rendering measures committed positions; fracture uses predictions.
+static VgsDeformation measure_vgs_deformation(const Vector3 p[8], float rest_edge)
+{
+    VgsDeformation d = { 0 };
+    d.axis[0] = v_mul(v_add(v_add(v_sub(p[1], p[0]), v_sub(p[3], p[2])),
+                            v_add(v_sub(p[5], p[4]), v_sub(p[7], p[6]))), 0.25f);
+    d.axis[1] = v_mul(v_add(v_add(v_sub(p[2], p[0]), v_sub(p[3], p[1])),
+                            v_add(v_sub(p[6], p[4]), v_sub(p[7], p[5]))), 0.25f);
+    d.axis[2] = v_mul(v_add(v_add(v_sub(p[4], p[0]), v_sub(p[5], p[1])),
+                            v_add(v_sub(p[6], p[2]), v_sub(p[7], p[3]))), 0.25f);
+    for (int i = 0; i < 3; ++i) {
+        d.length[i] = v_length(d.axis[i]);
+        if (rest_edge > 0.0f) {
+            d.strain[i] = (d.length[i] - rest_edge) / rest_edge;
+            d.max_abs_strain = fmaxf(d.max_abs_strain, fabsf(d.strain[i]));
+        }
+    }
+    int shear_index = 0;
+    for (int i = 0; i < 3; ++i) for (int j = i + 1; j < 3; ++j) {
+        if (d.length[i] > VGS_EPS && d.length[j] > VGS_EPS)
+            d.shear[shear_index] = v_dot(d.axis[i], d.axis[j]) /
+                                   (d.length[i] * d.length[j]);
+        d.max_abs_shear = fmaxf(d.max_abs_shear, fabsf(d.shear[shear_index]));
+        ++shear_index;
+    }
+    return d;
+}
+
+static bool voxel_vgs_deformation(const Voxel *voxel, VgsDeformation *result)
+{
+    Vector3 corners[8];
+    for (int i = 0; i < 8; ++i) {
+        if (!voxel->particles[i]) return false;
+        corners[i] = voxel->particles[i]->pos;
+    }
+    *result = measure_vgs_deformation(corners, voxel->rest_edge);
+    return true;
+}
+
+static void debug_reset_vgs_temporal_curvature(void)
+{
+    free(debugVgsTemporalVoxels);
+    debugVgsTemporalVoxels = NULL;
+    debugVgsTemporalVoxelCount = 0;
+    debugVgsTemporalSampleCount = 0;
+    debugVgsTemporalLastMax = 0.0f;
+    debugVgsTemporalLastMean = 0.0f;
+}
+
+static bool debug_init_vgs_temporal_curvature(void)
+{
+    debug_reset_vgs_temporal_curvature();
+    debugVgsTemporalVoxels = calloc((size_t)voxel_count, sizeof(*debugVgsTemporalVoxels));
+    if (!debugVgsTemporalVoxels) return false;
+    debugVgsTemporalVoxelCount = voxel_count;
+    return true;
+}
+
+static void debug_sample_vgs_temporal_curvature(float dt)
+{
+    if (!debugVgsTemporalVoxels || dt <= 0.0f) return;
+    float inv_dt_squared = 1.0f / (dt * dt);
+    double sum = 0.0;
+    int count = 0;
+    float maximum = 0.0f;
+    for (int i = 0; i < debugVgsTemporalVoxelCount; ++i) {
+        const Voxel *voxel = &voxels[i];
+        if (!voxel->simulate || voxel->type != 0 || voxel->isBullet) continue;
+        VgsDeformation d;
+        if (!voxel_vgs_deformation(voxel, &d)) continue;
+        float current[6] = {
+            d.strain[0], d.strain[1], d.strain[2],
+            d.shear[0], d.shear[1], d.shear[2]
+        };
+        VgsTemporalVoxel *history = &debugVgsTemporalVoxels[i];
+        float curvature = 0.0f;
+        if (debugVgsTemporalSampleCount >= 2) {
+            for (int axis = 0; axis < 6; ++axis) {
+                float second_difference = current[axis] - 2.0f * history->latest[axis] +
+                                          history->previous[axis];
+                curvature = fmaxf(curvature, fabsf(second_difference) * inv_dt_squared);
+            }
+        }
+        memcpy(history->previous, history->latest, sizeof(history->previous));
+        memcpy(history->latest, current, sizeof(history->latest));
+        history->curvature = isfinite(curvature) ? curvature : VGS_TEMPORAL_CURVATURE_RED_AT;
+        maximum = fmaxf(maximum, history->curvature);
+        sum += history->curvature;
+        ++count;
+    }
+    ++debugVgsTemporalSampleCount;
+    debugVgsTemporalLastMax = maximum;
+    debugVgsTemporalLastMean = count ? (float)(sum / count) : 0.0f;
+}
+
+static Color voxel_vgs_temporal_curvature_color(const Voxel *voxel)
+{
+    int index = (int)(voxel - voxels);
+    if (!debugVgsTemporalVoxels || index < 0 || index >= debugVgsTemporalVoxelCount)
+        return (Color){ 255, 0, 255, 255 };
+    float t = clampf(debugVgsTemporalVoxels[index].curvature /
+                     VGS_TEMPORAL_CURVATURE_RED_AT, 0.0f, 1.0f);
+    return ColorFromHSV(120.0f * (1.0f - t), 0.85f, 0.9f);
+}
+
 static Color voxel_display_color(const Voxel *voxel)
 {
     if (!voxel) {
@@ -3179,6 +3332,10 @@ static Color voxel_display_color(const Voxel *voxel)
     }
     if (debugShowBeliefColors) {
         return voxel_belief_debug_color(voxel);
+    }
+    if (debugColorVoxelsByVgsTemporalCurvature && voxel->simulate &&
+        voxel->type == 0 && !voxel->isBullet) {
+        return voxel_vgs_temporal_curvature_color(voxel);
     }
     Color base = voxel->color;
     if (!voxel->simulate && voxel->activationCooldownFrames > 0) {
@@ -8344,6 +8501,7 @@ static void clear_pickups(void) {
 }
 
 static void clear_world_voxels(void) {
+    clear_vgs_hierarchy();
     voxel_count = 0;
     tetherThrowCcdActiveCount = 0;
     pendingTetherImpactCount = 0;
@@ -10106,7 +10264,8 @@ static void decrement_particle_timers_range(int start, int end, int worker_id, v
 }
 
 static void evaluate_voxel_fracture(Voxel *voxel) {
-    if (!voxel->simulate || !voxel->vgs_active || voxel->isBullet || voxel->type != 0 || voxel->debugClusterTag == DEBUG_CONTAINER_TAG) {
+    if (PBD_DISABLE_VGS_DEACTIVATION || !voxel->simulate || !voxel->vgs_active ||
+        voxel->isBullet || voxel->type != 0 || voxel->debugClusterTag == DEBUG_CONTAINER_TAG) {
         return;
     }
     int voxel_idx = (int)(voxel - voxels);
@@ -10124,40 +10283,18 @@ static void evaluate_voxel_fracture(Voxel *voxel) {
         p[i] = part->predicted_pos;
     }
 
-    Vector3 v0 = v_add(v_add(v_sub(p[1], p[0]), v_sub(p[3], p[2])),
-                       v_add(v_sub(p[5], p[4]), v_sub(p[7], p[6])));
-    v0 = v_mul(v0, 0.25f);
-
-    Vector3 v1 = v_add(v_add(v_sub(p[2], p[0]), v_sub(p[3], p[1])),
-                       v_add(v_sub(p[6], p[4]), v_sub(p[7], p[5])));
-    v1 = v_mul(v1, 0.25f);
-
-    Vector3 v2 = v_add(v_add(v_sub(p[4], p[0]), v_sub(p[5], p[1])),
-                       v_add(v_sub(p[6], p[2]), v_sub(p[7], p[3])));
-    v2 = v_mul(v2, 0.25f);
-
-    float len_v0 = v_length(v0);
-    float len_v1 = v_length(v1);
-    float len_v2 = v_length(v2);
-
-    float strain_x = fabsf(len_v0 - voxel->rest_edge) / voxel->rest_edge;
-    float strain_y = fabsf(len_v1 - voxel->rest_edge) / voxel->rest_edge;
-    float strain_z = fabsf(len_v2 - voxel->rest_edge) / voxel->rest_edge;
+    VgsDeformation deformation = measure_vgs_deformation(p, voxel->rest_edge);
+    Vector3 v0 = deformation.axis[0], v1 = deformation.axis[1], v2 = deformation.axis[2];
+    float len_v0 = deformation.length[0];
+    float len_v1 = deformation.length[1];
+    float len_v2 = deformation.length[2];
 
     float inv_len0 = (len_v0 > VGS_EPS) ? 1.0f / len_v0 : 0.0f;
     float inv_len1 = (len_v1 > VGS_EPS) ? 1.0f / len_v1 : 0.0f;
     float inv_len2 = (len_v2 > VGS_EPS) ? 1.0f / len_v2 : 0.0f;
 
-    float shear_xy = (inv_len0 > 0.0f && inv_len1 > 0.0f) ? fabsf(v_dot(v0, v1)) * inv_len0 * inv_len1 : 0.0f;
-    float shear_xz = (inv_len0 > 0.0f && inv_len2 > 0.0f) ? fabsf(v_dot(v0, v2)) * inv_len0 * inv_len2 : 0.0f;
-    float shear_yz = (inv_len1 > 0.0f && inv_len2 > 0.0f) ? fabsf(v_dot(v1, v2)) * inv_len1 * inv_len2 : 0.0f;
-
-    bool should_break = (strain_x > STRAIN_BREAK_THRESHOLD ||
-                         strain_y > STRAIN_BREAK_THRESHOLD ||
-                         strain_z > STRAIN_BREAK_THRESHOLD ||
-                         shear_xy > SHEAR_BREAK_THRESHOLD ||
-                         shear_xz > SHEAR_BREAK_THRESHOLD ||
-                         shear_yz > SHEAR_BREAK_THRESHOLD);
+    bool should_break = deformation.max_abs_strain > STRAIN_BREAK_THRESHOLD ||
+                        deformation.max_abs_shear > SHEAR_BREAK_THRESHOLD;
 
     if (!should_break) {
         Vector3 axes[3] = { v_mul(v0, inv_len0), v_mul(v1, inv_len1), v_mul(v2, inv_len2) };
@@ -10350,10 +10487,8 @@ static inline float fast_cbrtf(float x) {
 
 
 // Voxel Gram-Schmidt shape matching (Algorithm 1 in the paper) gathers corrections for Jacobi updates.
-static void gather_voxel_shape_constraints(Voxel *voxel) {
-    if (!voxel->simulate || !voxel->vgs_active) {
-        return;
-    }
+static void gather_shape_constraints(Particle *const corners[8], float rest_edge,
+                                     float rest_volume, bool simulate_dofs) {
     bool has_dynamic = false;
     Vector3 p[8];
     Vector3 orig[8];
@@ -10361,7 +10496,7 @@ static void gather_voxel_shape_constraints(Voxel *voxel) {
     float apply_w[8];
 
     for (int i = 0; i < 8; ++i) {
-        Particle *part = voxel->particles[i]; //pointer
+        Particle *part = corners[i];
         p[i] = part->predicted_pos;
         orig[i] = part->predicted_pos;
         
@@ -10381,8 +10516,6 @@ static void gather_voxel_shape_constraints(Voxel *voxel) {
         return;
     }
 
-    const float rest_volume = voxel->rest_volume;
-    const float rest_edge = voxel->rest_edge;
     Vector3 centroid = { 0.0f, 0.0f, 0.0f };
 
     for (int iter = 0; iter < VGS_ITERS; ++iter) {
@@ -10421,7 +10554,7 @@ static void gather_voxel_shape_constraints(Voxel *voxel) {
             }
         }
 
-        if (!voxel->simulate_dofs) {
+        if (!simulate_dofs) {
             return;
         }
 
@@ -10477,11 +10610,44 @@ static void gather_voxel_shape_constraints(Voxel *voxel) {
             continue;
         }
         Vector3 delta = v_sub(p[i], orig[i]);
-        Particle *part = voxel->particles[i];
+        Particle *part = corners[i];
         if (part && part->inv_mass > 0.0f) {
             part->jacobi_slots[i].dx = v_mul(delta, apply_w[i]);
             part->jacobi_slots[i].weight = apply_w[i];
         }
+    }
+}
+
+static void gather_voxel_shape_constraints(Voxel *voxel) {
+    if (voxel->simulate && voxel->vgs_active)
+        gather_shape_constraints(voxel->particles, voxel->rest_edge, voxel->rest_volume,
+                                 voxel->simulate_dofs);
+}
+
+static void update_vgs_hierarchy_activity(void) {
+    for (int level = vgsHierarchy.levels - 1; level >= 0; --level) {
+        int begin = vgsHierarchy.level_start[level];
+        int end = begin + vgsHierarchy.level_count[level];
+        for (int i = begin; i < end; ++i) {
+            VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+            if (!node->active) continue;
+            for (int c = 0; c < 8; ++c) {
+                int child = node->children[c];
+                bool active = child >= 0 ? vgsHierarchy.nodes[child].active :
+                    voxels[-child - 1].vgs_active;
+                if (!active) { node->active = false; break; }
+            }
+        }
+    }
+}
+
+static void gather_vgs_hierarchy_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    int base = *(int *)user;
+    for (int i = start; i < end; ++i) {
+        VgsHierarchyNode *node = &vgsHierarchy.nodes[base + i];
+        if (node->active)
+            gather_shape_constraints(node->particles, node->rest_edge, node->rest_volume, true);
     }
 }
 
@@ -13011,12 +13177,20 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
 
         if (active_voxel_count > 0) {
             double tb = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
-            pbd_parallel_for(0, active_voxel_count, evaluate_voxel_fracture_range, NULL);
+            if (!PBD_DISABLE_VGS_DEACTIVATION)
+                pbd_parallel_for(0, active_voxel_count, evaluate_voxel_fracture_range, NULL);
+            if (vgsHierarchy.node_count) update_vgs_hierarchy_activity();
             if (pbdProfileEnabled) pbdCpuProfile.t_break_masks_ms += pbd_time_now_ms() - tb;
 
             double tv = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
             reset_particle_accumulators();
             for (int it = 0; it < constraint_iterations; ++it) {
+                for (int level = 0; level < vgsHierarchy.levels; ++level) {
+                    int base = vgsHierarchy.level_start[level];
+                    pbd_parallel_for(0, vgsHierarchy.level_count[level],
+                                     gather_vgs_hierarchy_range, &base);
+                    apply_particle_accumulators();
+                }
                 pbd_parallel_for(0, active_voxel_count, gather_voxel_shape_constraints_range, NULL);
                 apply_particle_accumulators();
             }

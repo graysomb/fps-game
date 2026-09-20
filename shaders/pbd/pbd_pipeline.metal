@@ -56,9 +56,13 @@ constant int MODE_PREPARE_INDIRECT = 13;
 constant int MODE_WAKE_GATHER = 14;
 constant int MODE_WAKE_APPLY = 15;
 constant int MODE_TOPOLOGY_REBUILD_SERIAL = 16;
+constant int MODE_HIERARCHY_MASK = 17;
 constant int CONTROL_FLAG_OVERFLOW = 1;
 constant int CONTROL_FLAG_TOPOLOGY_DIRTY = 2;
 constant int CONTROL_FLAG_BREAK_OCCURRED = 4;
+
+// Presence of this entry point identifies libraries with hierarchical VGS support.
+kernel void pbd_hierarchy_marker() {}
 
 constant int FACE_CORNERS[24] = {
     1,3,5,7, 0,2,4,6, 2,3,6,7,
@@ -267,8 +271,8 @@ inline void applyCorrections(uint gid, device ParticleState *particle,
 inline void solveVgs(uint gid, device ParticleState *particle,
                      device atomic_uint *correction, device VoxelState *voxel,
                      device const int *control, constant GpuUniforms &u) {
-    if (gid >= uint(u.voxel_count)) return;
-    VoxelState v = voxel[gid];
+    if (gid >= uint(u.integer_padding_2)) return;
+    VoxelState v = voxel[uint(u.integer_padding_1) + gid];
     if (v.flags.x == 0 || v.flags.y != 0 || v.flags.z != 0 || v.flags.w == 0) return;
     float3 p[8], original[8];
     float applyWeight[8];
@@ -308,6 +312,21 @@ inline void solveVgs(uint gid, device ParticleState *particle,
     for (int i = 0; i < 8; ++i) {
         if (applyWeight[i] > 0.0f) {
             accumulate(correction, control, voxelParticle(v, i), p[i] - original[i], applyWeight[i]);
+        }
+    }
+}
+
+inline void propagateHierarchyMask(uint gid, device VoxelState *voxel,
+                                   constant GpuUniforms &u) {
+    if (gid >= uint(u.integer_padding_2)) return;
+    uint id = uint(u.integer_padding_1) + gid;
+    if (voxel[id].flags.x == 0) return;
+    VoxelState parent = voxel[id];
+    for (int c = 0; c < 8; ++c) {
+        uint child = as_type<uint>(c < 4 ? parent.bounds_min[c] : parent.bounds_max[c - 4]);
+        if (voxel[child].flags.x == 0) {
+            voxel[id].flags.x = 0;
+            return;
         }
     }
 }
@@ -465,5 +484,6 @@ kernel void pbd_pipeline(
         case MODE_WAKE_GATHER:wakeGather(gid,voxel,topology,u);break;
         case MODE_WAKE_APPLY:wakeApply(gid,voxel,u);break;
         case MODE_TOPOLOGY_REBUILD_SERIAL:break;
+        case MODE_HIERARCHY_MASK:propagateHierarchyMask(gid,voxel,u);break;
     }
 }

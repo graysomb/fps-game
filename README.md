@@ -441,8 +441,8 @@ Available scenarios are:
   cantilever and checks that the overhang activates and deflects while its root stays supported.
 * `pillar-impact-drift`: drops a 500-voxel undercut pillar and bounds its late sliding speed
   and displacement.
-* `single-corner-hinge`: verifies that a one-corner glue remnant breaks at the configured
-  hinge-angle limit.
+* `single-corner-hinge`: checks one-corner glue beyond the configured hinge-angle
+  limit; with the temporary VGS deactivation switch enabled, the glue stays intact.
 * `tether-active-then-static`: tethers an active voxel and then a static cluster voxel,
   verifying that activation/array compaction does not lose or redirect the tether target.
 * `tether-thin-wall-ccd`: throws a tether voxel fast enough to cross a one-voxel-thick
@@ -452,10 +452,21 @@ Available scenarios are:
 * `active-cube-drop`: creates a static 10×10×10 cube above the floor, converts
   the entire cube to PBD cells, and drops it for 120 steps by default. Compile
   with `-DDEBUG_PBD_VOXEL_SIZE=0.25f` to change only this scenario's target PBD
-  size; the default is 0.5. A uniform lattice always fits the original 5 m cube.
-  When the requested size does not divide 5 m, the effective cell size is
-  `5 / ceil(5 / requested size)` (for example, 2 m requests use 27 cells of
-  about 1.667 m). The JSON report includes both sizes and the dynamic count.
+  size; the default is 0.5. The cells per axis round up to the next power of two
+  so they form a complete VGS octree. The effective cell size is
+  `5 / next_power_of_two(ceil(5 / requested size))`; for example, a 2 m request
+  uses a 4×4×4 grid with 1.25 m cells. Internal VGS constraints run from the
+  root down to the leaf voxels, while collisions still use leaf particles only.
+  VGS deactivation is temporarily disabled across the PBD solver, so solid
+  cells remain visible after impact. The normal VGS parameters are unchanged.
+  Active cells are colored by the largest absolute second time derivative of
+  their three signed VGS strains and three signed shears. Each component uses
+  three consecutive fixed physics steps; the color scale is green at 0,
+  yellow at 50 s^-2, and red at 100 s^-2 or higher.
+  Build with `-DPBD_DISABLE_VGS_DEACTIVATION=0` to restore fracture-driven
+  deactivation.
+  Resolutions that round beyond the voxel or particle caps fail before activation.
+  The JSON report includes both sizes, voxel count, and octree diagnostics.
 * `pbf-container`: drops 512 fluid particles into a tall immutable voxel container, captures
   both render modes, and checks particle membership, density, settling, containment, and that
   fluid never activates the container.

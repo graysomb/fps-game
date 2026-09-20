@@ -300,7 +300,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "tether-throw-floating", "Released tether voxel wakes an unsupported sleeping cluster", debug_setup_tether_throw_floating, 60, 60 },
     { "overhang-impact", "Falling dynamic voxel activates and bends a supported static overhang", debug_setup_overhang_impact, 60, 60 },
     { "pillar-impact-drift", "Large undercut pillar impact exposes post-contact sliding and wiggle", debug_setup_pillar_impact_drift, 60, 60 },
-    { "single-corner-hinge", "A one-corner glue remnant must break beyond the hinge-angle limit", debug_setup_single_corner_hinge, 60, 60 },
+    { "single-corner-hinge", "Check one-corner glue behavior beyond the hinge-angle limit", debug_setup_single_corner_hinge, 60, 60 },
     { "tether-active-then-static", "Tethering an active voxel then a static voxel preserves and pulls both", debug_setup_tether_active_then_static, 60, 60 },
     { "tether-thin-wall-ccd", "High-speed tether throw uses swept particle rays against a one-voxel wall", debug_setup_tether_thin_wall_ccd, 60, 60 },
     { "pbf-container", "High-viscosity PBF falls into an immutable container", debug_setup_pbf_container, 240, 120 },
@@ -312,7 +312,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "goliath-behavior", "Goliath maintains armor, detects enemy, and launches voxels", debug_setup_goliath_behavior, 180, 60 },
     { "cube-stress", "Stress test with scalable dynamic cube (size set by FPS_CUBE_SIZE)", debug_setup_cube_stress, 60, 60 },
     { "active-cube-drop", "Activate a static 10x10x10 cube and drop it", debug_setup_active_cube_drop, 120, 60 },
-    { "voxel-strain-shear-fracture", "Dynamic voxels deactivate VGS shape constraints when strain or shear exceeds threshold", debug_setup_voxel_strain_shear_fracture, 60, 60 },
+    { "voxel-strain-shear-fracture", "Check VGS deactivation behavior under high strain and shear", debug_setup_voxel_strain_shear_fracture, 60, 60 },
     { "arena-platform-fluid", "Test arena central platform activated with sleeping fluid on top", debug_setup_arena_platform_fluid, 60, 60 }
 };
 
@@ -763,6 +763,8 @@ static void debug_rebuild_world_state(void)
 
 static void debug_reset_world(void)
 {
+    debugColorVoxelsByVgsTemporalCurvature = false;
+    debug_reset_vgs_temporal_curvature();
     pbdSolidVoxelSize = VOXEL_SIZE;
     clear_world_voxels();
     clear_pickups();
@@ -798,6 +800,95 @@ static void debug_glue_pbd_faces(int new_index, int neighbor_index, int face)
 
 static bool debug_remove_tagged_voxels(int tag);
 
+static bool debug_build_cube_vgs_hierarchy(const int *lattice, int side, float leaf_edge)
+{
+    clear_vgs_hierarchy();
+    if (side == 1) { vgsHierarchy.leaf_count = 1; return true; }
+    int levels = 0, node_count = 0;
+    for (int width = 1; width < side; width *= 2) {
+        node_count += width * width * width;
+        ++levels;
+    }
+    VgsHierarchyNode *nodes = calloc((size_t)node_count, sizeof(*nodes));
+    if (!nodes) return false;
+    vgsHierarchy.nodes = nodes;
+    vgsHierarchy.levels = levels;
+    vgsHierarchy.node_count = node_count;
+    vgsHierarchy.leaf_count = side * side * side;
+    int offset = 0;
+    for (int level = 0, grid = 1; level < levels; ++level, grid *= 2) {
+        vgsHierarchy.level_start[level] = offset;
+        vgsHierarchy.level_count[level] = grid * grid * grid;
+        offset += grid * grid * grid;
+    }
+    for (int level = 0, grid = 1; level < levels; ++level, grid *= 2) {
+        int span = side / grid;
+        int child_grid = grid * 2;
+        for (int y = 0; y < grid; ++y) for (int z = 0; z < grid; ++z) for (int x = 0; x < grid; ++x) {
+            int id = vgsHierarchy.level_start[level] + (y * grid + z) * grid + x;
+            VgsHierarchyNode *node = &nodes[id];
+            node->parent = level ? vgsHierarchy.level_start[level - 1] +
+                (((y / 2) * (grid / 2) + z / 2) * (grid / 2) + x / 2) : -1;
+            node->rest_edge = span * leaf_edge;
+            node->rest_volume = node->rest_edge * node->rest_edge * node->rest_edge;
+            node->active = true;
+            for (int c = 0; c < 8; ++c) {
+                int cx = x * span + (corner_signs[c][0] > 0 ? span - 1 : 0);
+                int cy = y * span + (corner_signs[c][1] > 0 ? span - 1 : 0);
+                int cz = z * span + (corner_signs[c][2] > 0 ? span - 1 : 0);
+                node->particles[c] = voxels[lattice[(cy * side + cz) * side + cx]].particles[c];
+                int child_x = x * 2 + (c & 1);
+                int child_y = y * 2 + ((c >> 1) & 1);
+                int child_z = z * 2 + ((c >> 2) & 1);
+                int child_flat = (child_y * child_grid + child_z) * child_grid + child_x;
+                node->children[c] = level + 1 < levels
+                    ? vgsHierarchy.level_start[level + 1] + child_flat
+                    : -(lattice[child_flat] + 1);
+            }
+        }
+    }
+    return true;
+}
+
+static bool debug_validate_cube_vgs_hierarchy(int side)
+{
+    int expected = (side * side * side - 1) / 7;
+    if (vgsHierarchy.node_count != expected || vgsHierarchy.leaf_count != side * side * side)
+        return false;
+    if (side > 1 && fabsf(vgsHierarchy.nodes[0].rest_edge - 5.0f) > 1e-5f)
+        return false;
+    for (int i = 0; i < vgsHierarchy.node_count; ++i) {
+        VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+        if (!node->active || node->rest_edge <= 0.0f ||
+            fabsf(node->rest_volume - node->rest_edge * node->rest_edge * node->rest_edge) > 1e-4f)
+            return false;
+        for (int c = 0; c < 8; ++c) {
+            Particle *p = node->particles[c];
+            if (!p || (uintptr_t)p < (uintptr_t)particles_pool ||
+                (uintptr_t)p >= (uintptr_t)(particles_pool + particle_pool_count) || !p->active)
+                return false;
+            int child = node->children[c];
+            if (child >= 0) {
+                if (child >= vgsHierarchy.node_count || vgsHierarchy.nodes[child].parent != i)
+                    return false;
+            } else if (-child - 1 >= voxel_count || !voxels[-child - 1].simulate) {
+                return false;
+            }
+        }
+    }
+    // Exercise the fracture rule without changing the scenario's initial state.
+    if (vgsHierarchy.node_count) {
+        Voxel *leaf = &voxels[-vgsHierarchy.nodes[vgsHierarchy.node_count - 1].children[0] - 1];
+        leaf->vgs_active = false;
+        update_vgs_hierarchy_activity();
+        bool disabled = !vgsHierarchy.nodes[0].active;
+        leaf->vgs_active = true;
+        for (int i = 0; i < vgsHierarchy.node_count; ++i) vgsHierarchy.nodes[i].active = true;
+        if (!disabled) return false;
+    }
+    return true;
+}
+
 static bool debug_convert_cube_to_pbd(DebugRunState *state)
 {
     state->expected_voxels = 0;
@@ -811,15 +902,17 @@ static bool debug_convert_cube_to_pbd(DebugRunState *state)
     }
     // Keep the original cube bounds and use a uniform lattice. The requested
     // size is an upper bound when it does not divide the 5 m cube exactly.
-    double side_d = ceil(cube_edge / size - 1e-6);
-    if (side_d > 50.0) {
-        double required = side_d * side_d * side_d;
-        debug_add_failure(state, "PBD size %.9g requires %.0f voxels and %.0f particles (caps %d/%d)",
+    double minimum_side = ceil(cube_edge / size - 1e-6);
+    int side = 1;
+    while ((double)side < minimum_side && side < 64) side *= 2;
+    if ((double)side < minimum_side || side > 32) {
+        double lower_side = fmax((double)side, minimum_side);
+        double required = lower_side * lower_side * lower_side;
+        debug_add_failure(state, "PBD size %.9g requires at least %.0f voxels and %.0f particles (caps %d/%d)",
                           size, required, required * 8.0, MAX_VOXELS, MAX_PARTICLES);
         return false;
     }
-    int side = (int)side_d;
-    float effective_size = (float)(cube_edge / side_d);
+    float effective_size = (float)(cube_edge / (double)side);
     int64_t dynamic_count = (int64_t)side * side * side;
     int64_t needed_particles = 8 * dynamic_count;
     if (dynamic_count > MAX_VOXELS || needed_particles > MAX_PARTICLES ||
@@ -869,6 +962,14 @@ static bool debug_convert_cube_to_pbd(DebugRunState *state)
         if (particle_mass[i] <= 0.0f) continue;
         particles_pool[i].inv_mass = particles_pool[i].base_inv_mass = 1.0f / particle_mass[i];
     }
+    if (!debug_build_cube_vgs_hierarchy(lattice, side, effective_size)) {
+        debug_add_failure(state, "PBD size %.9g: unable to allocate VGS hierarchy", size);
+        goto conversion_failed;
+    }
+    if (!debug_validate_cube_vgs_hierarchy(side)) {
+        debug_add_failure(state, "PBD size %.9g: invalid VGS octree", size);
+        goto conversion_failed;
+    }
     double total_mass = 0.0;
     for (int i = 0; i < particle_pool_count; ++i) {
         if (particle_mass[i] > 0.0f) total_mass += 1.0 / particles_pool[i].base_inv_mass;
@@ -913,6 +1014,7 @@ static bool debug_convert_cube_to_pbd(DebugRunState *state)
     return true;
 
 conversion_failed:
+    clear_vgs_hierarchy();
     debug_add_failure(state, "PBD size %.9g: cube conversion failed after preflight", size);
     free(lattice); free(particle_mass);
     return false;
@@ -1110,6 +1212,7 @@ static void debug_draw_overlay(const DebugRunState *state, const DebugSample *sa
     int box_height = 180;
     if (state->gpu_readback_performed) box_height += 30;
     if (state->overhang_impact) box_height += 30;
+    if (state->active_cube_drop && debugColorVoxelsByVgsTemporalCurvature) box_height += 30;
     DrawRectangle(18, 18, 650, box_height, Fade(BLACK, 0.78f));
     DrawText(TextFormat("SCENARIO %s", debugRunConfig.scenario), 34, 32, 22, RAYWHITE);
     DrawText(TextFormat("BACKEND requested=%s active=%s",
@@ -1142,6 +1245,16 @@ static void debug_draw_overlay(const DebugRunState *state, const DebugSample *sa
                             state->gpu_tagged_corners_missing_from_sim_ids,
                             state->gpu_zero_mass_corners),
                  34, 192, 17, result_color);
+    }
+    if (state->active_cube_drop && debugColorVoxelsByVgsTemporalCurvature) {
+        int y = state->gpu_readback_performed ? 222 : 192;
+        DrawText("VGS curvature (s^-2)", 34, y, 17, RAYWHITE);
+        DrawRectangle(270, y + 2, 24, 16, ColorFromHSV(120.0f, 0.85f, 0.9f));
+        DrawText("0", 298, y, 17, LIGHTGRAY);
+        DrawRectangle(328, y + 2, 24, 16, ColorFromHSV(60.0f, 0.85f, 0.9f));
+        DrawText("50", 356, y, 17, LIGHTGRAY);
+        DrawRectangle(421, y + 2, 24, 16, ColorFromHSV(0.0f, 0.85f, 0.9f));
+        DrawText("100+", 449, y, 17, LIGHTGRAY);
     }
     if (state->overhang_impact) {
         int y = state->gpu_readback_performed ? 222 : 192;
@@ -1869,6 +1982,12 @@ static bool debug_setup_active_cube_drop(DebugRunState *state)
     state->camera.target = (Vector3){ 0.0f, 7.0f, 0.0f };
     debug_capture(state, "phase-01-static-cube.png", "static-cube", 0);
     if (!debug_convert_cube_to_pbd(state)) return false;
+    if (!debug_init_vgs_temporal_curvature()) {
+        debug_add_failure(state, "unable to allocate VGS temporal history");
+        return false;
+    }
+    debugColorVoxelsByVgsTemporalCurvature = true;
+    debug_sample_vgs_temporal_curvature(PBD_MAX_STEP_DT);
     debug_set_initial_centroid(state);
     return true;
 }
@@ -3359,6 +3478,8 @@ static void debug_physics_step(DebugRunState *state)
     }
     rebuild_static_hash_if_dirty();
     simulate_voxel_pbd(PBD_MAX_STEP_DT);
+    if (state && state->active_cube_drop)
+        debug_sample_vgs_temporal_curvature(PBD_MAX_STEP_DT);
     if (!state || !state->active_cube_drop) recycle_dead_voxels();
     rebuild_voxel_hash();
     if (!state || !state->active_cube_drop) deactivate_sleeping_voxels();
@@ -3420,6 +3541,11 @@ static void debug_validate_step(DebugRunState *state, int step)
         debug_validate_tagged_dynamic(state, &sample, "cube drop");
         if (step == 60 && sample.tagged_rendered != state->expected_voxels) {
             debug_add_failure(state, "cube drop lost rendered PBD cells before impact (%d/%d)",
+                              sample.tagged_rendered, state->expected_voxels);
+        }
+        if (PBD_DISABLE_VGS_DEACTIVATION && step == debugRunConfig.steps && step >= 120 &&
+            sample.tagged_rendered != state->expected_voxels) {
+            debug_add_failure(state, "cube drop retained only %d/%d rendered cells after impact",
                               sample.tagged_rendered, state->expected_voxels);
         }
     }
@@ -4016,6 +4142,11 @@ static void debug_finalize_validation(DebugRunState *state)
             debug_add_failure(state, "hinge reached only %.1f degrees; reproduction was not exercised",
                               state->max_hinge_angle_deg);
         }
+        if (PBD_DISABLE_VGS_DEACTIVATION) {
+            if (state->hinge_broken)
+                debug_add_failure(state, "single-corner glue broke while VGS deactivation is disabled");
+            return;
+        }
         if (!state->hinge_broken) {
             debug_add_failure(state,
                               "single-corner glue survived %.1f degrees (limit %.1f)",
@@ -4027,6 +4158,14 @@ static void debug_finalize_validation(DebugRunState *state)
         int idx_strain = state->fracture_strain_voxel;
         int idx_shear = state->fracture_shear_voxel;
         int idx_ctrl = state->fracture_control_voxel;
+        if (PBD_DISABLE_VGS_DEACTIVATION) {
+            if ((idx_strain >= 0 && idx_strain < voxel_count && !voxels[idx_strain].vgs_active) ||
+                (idx_shear >= 0 && idx_shear < voxel_count && !voxels[idx_shear].vgs_active) ||
+                (idx_ctrl >= 0 && idx_ctrl < voxel_count && !voxels[idx_ctrl].vgs_active)) {
+                debug_add_failure(state, "VGS deactivated while the temporary global switch is enabled");
+            }
+            return;
+        }
         if (idx_strain >= 0 && idx_strain < voxel_count && voxels[idx_strain].vgs_active) {
             debug_add_failure(state, "high-strain voxel (strain > 0.20) did not break (vgs_active remains true)");
         }
@@ -4240,10 +4379,21 @@ static bool debug_write_report(DebugRunState *state)
     fprintf(file, ",\n  \"passed\": %s,\n  \"steps\": %d,\n  \"fixedDt\": %.9g,\n",
             passed ? "true" : "false", debugRunConfig.steps, (double)PBD_MAX_STEP_DT);
     if (state->active_cube_drop) {
+        update_vgs_hierarchy_activity();
+        int active_nodes = 0;
+        for (int i = 0; i < vgsHierarchy.node_count; ++i)
+            if (vgsHierarchy.nodes[i].active) ++active_nodes;
         fprintf(file, "  \"pbdVoxelSize\": %.9g,\n  \"effectivePbdVoxelSize\": %.9g,\n  \"dynamicVoxels\": %d,\n  \"staticLeftovers\": %d,\n",
                 (double)DEBUG_PBD_VOXEL_SIZE, (double)state->effective_pbd_size,
                 state->expected_voxels,
                 state->expected_static_leftovers);
+        fprintf(file, "  \"vgsHierarchy\": {\"levels\": %d, \"internalNodes\": %d, \"activeInternalNodes\": %d, \"deactivationDisabled\": %s},\n",
+                vgsHierarchy.levels + (vgsHierarchy.leaf_count ? 1 : 0),
+                vgsHierarchy.node_count, active_nodes,
+                PBD_DISABLE_VGS_DEACTIVATION ? "true" : "false");
+        fprintf(file, "  \"vgsTemporalCurvature\": {\"samples\": %d, \"redAtPerSecondSquared\": %.9g, \"lastStepMax\": %.9g, \"lastStepMean\": %.9g},\n",
+                debugVgsTemporalSampleCount, (double)VGS_TEMPORAL_CURVATURE_RED_AT,
+                (double)debugVgsTemporalLastMax, (double)debugVgsTemporalLastMean);
     }
     fprintf(file,
             "  \"animation\": {\"requested\": %s, \"format\": \"gif\","
