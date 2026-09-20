@@ -36,6 +36,14 @@
 		<data>
 		zjZiI4Ozn5kQcNlQkUlbJLeQsIw=
 		</data>
+		<key>Resources/shaders/gold_pickup.frag</key>
+		<data>
+		31wNuDrvt7DRroc5i4Faldp1eTA=
+		</data>
+		<key>Resources/shaders/gold_pickup.vert</key>
+		<data>
+		T6BL4+sY/VMBNGkZS3ug+ywiVN4=
+		</data>
 		<key>Resources/shaders/instanced_voxel_hack.frag</key>
 		<data>
 		69ae14Bw2sfMw8l3cgUsyNm4G0k=
@@ -122,15 +130,15 @@
 		</data>
 		<key>Resources/shaders/pbd/pbd_pipeline.comp</key>
 		<data>
-		rHtj/SdRuHsUjqLQNATaZVwrxSs=
+		EsX8elbMg2BE/+tHxAqBFLIqcyE=
 		</data>
 		<key>Resources/shaders/pbd/pbd_pipeline.metal</key>
 		<data>
-		s01REc1R9JYQBGAZr1MFh8N2wm0=
+		UhsalzcIwSX4HLfvn8akW+AIq+Y=
 		</data>
 		<key>Resources/shaders/pbd/pbd_pipeline.metallib</key>
 		<data>
-		JLocVDugD4LoRa3b8gNYI7/BMSw=
+		1pm688uQ2MTZn/7TXDqut+njqNA=
 		</data>
 		<key>Resources/shaders/shard_instanced.frag</key>
 		<data>
@@ -179,19 +187,19 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			3p4agXMGRfz8XBC12gnoW4jiunE=
+			El5MaWcu2Qw5+fchgY9WbwqgGPU=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"de9e1a81730645fcfc5c10b5da09e85b88e2ba71"</string>
+			<string>cdhash H"125e4c69672ed90c39f9f721818f566f0aa018f5"</string>
 		</dict>
 		<key>MacOS/fps_ray_gpu</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			Eku53xHRiieJMOJefkEtQ45ptC8=
+			ZK0rgvEWmCJBjkyGk/o5evBdklk=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"124bb9df11d18a278930e25e7e412d438e69b42f"</string>
+			<string>cdhash H"64ad2b82f1169822418e4c8693fa397af05d9259"</string>
 		</dict>
 		<key>MacOS/game_song.mp3</key>
 		<dict>
@@ -249,6 +257,20 @@
 			<key>hash2</key>
 			<data>
 			+6XI20b9T7i1xklgraqpYaT+xYe2HeYY5YISEoRuN6U=
+			</data>
+		</dict>
+		<key>Resources/shaders/gold_pickup.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			7/JaxQYYR1gh4VddUj6rlpARevTvj/nnwNAQFX8reb8=
+			</data>
+		</dict>
+		<key>Resources/shaders/gold_pickup.vert</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			F01CIrEV6ZT09Xy2S1z7A335dOzqvtR0BOJVAw6db/0=
 			</data>
 		</dict>
 		<key>Resources/shaders/instanced_voxel_hack.frag</key>
@@ -402,21 +424,21 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			jaHem8TfhRZhdjQ32U54dI8IAFEf91FqP2r1rsztLKs=
+			BP7Kx0obAw3lTl0oP7vrLlPYrFrlCg+chs/5FwvcovA=
 			</data>
 		</dict>
 		<key>Resources/shaders/pbd/pbd_pipeline.metal</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			+xrORLsskKHEUf8FVJrPlB//it7rOEMQoym/9AWvXfU=
+			+ThdSONJFGjaStc9CehTWNy1zhP/kpmNjuHTAbDV/Fk=
 			</data>
 		</dict>
 		<key>Resources/shaders/pbd/pbd_pipeline.metallib</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			gM+BTNeLUZmLv4vm9lxHi8xAAdug4/V5uoXWMuYrwjY=
+			PwktAIHKlB3ge1/7e/1lY8l4fnwRPj9Zeota19tfW4E=
 			</data>
 		</dict>
 		<key>Resources/shaders/shard_instanced.frag</key>

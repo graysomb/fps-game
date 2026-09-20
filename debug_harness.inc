@@ -313,6 +313,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "arena-platform-fluid", "Test arena central platform activated with sleeping fluid on top", debug_setup_arena_platform_fluid, 60, 60 },
     { "tether-active-glued-static", "Tethering an active voxel glued to static breaks VGS constraints and extracts intact voxel under stress/strain", debug_setup_tether_active_glued_static, 60, 60 },
     { "gold-tether-group", "Gold tether holds and throws a glued group without breaking its static boundary", debug_setup_gold_tether_group, 60, 60 },
+    { "gold-tether-strained-release", "Gold tether release keeps a strained held group intact", debug_setup_gold_tether_group, 60, 60 },
     { "gold-tether-static", "Gold tether activates a distant static target", debug_setup_gold_tether_static, 60, 60 }
 };
 
@@ -2602,9 +2603,9 @@ static bool debug_setup_gold_tether_group(DebugRunState *state)
 {
     debug_reset_world();
     state->gold_tether_group_test = true;
-    int anchor = debug_add_cell(0, 7, 0, true, false, (Color){ 80, 120, 180, 255 }, DEBUG_SUPPORT_TAG);
     int first = debug_add_cell(0, 8, 0, false, true, (Color){ 240, 180, 50, 255 }, DEBUG_TEST_TAG);
     int second = debug_add_cell(1, 8, 0, false, true, (Color){ 240, 180, 50, 255 }, DEBUG_TEST_TAG);
+    int anchor = debug_add_cell(0, 7, 0, true, false, (Color){ 80, 120, 180, 255 }, DEBUG_SUPPORT_TAG);
     if (anchor < 0 || first < 0 || second < 0) return false;
     debug_rebuild_world_state();
     if (!voxels[first].glued_faces[0] || !voxels[first].glued_faces[3]) {
@@ -2620,7 +2621,7 @@ static bool debug_setup_gold_tether_group(DebugRunState *state)
     }
     Player *player = &players[0];
     player->goldTetherCharged = true;
-    player->pos = (Vector3){ 0.25f, 8.5f, 20.0f };
+    player->pos = (Vector3){ 0.25f, 4.25f, 20.0f };
     Vector3 aim = v_norm(v_sub(voxels[first].pos, player->pos));
     dir_to_yaw_pitch(aim, &player->yaw, &player->pitch);
     if (first_voxel_hit((Ray){ player->pos, player_forward(player) }, TETHER_RANGE, -1) >= 0)
@@ -2650,6 +2651,15 @@ static bool debug_setup_gold_tether_group(DebugRunState *state)
         v_length(v_sub(voxels[first].pos, held_a)) < 0.05f ||
         v_length(v_sub(voxels[second].pos, held_b)) < 0.05f)
         debug_add_failure(state, "gold hold did not move and protect the whole group");
+    const int outer_corners[4] = { 0, 2, 4, 6 };
+    if (strcmp(debugRunConfig.scenario, "gold-tether-strained-release") == 0) {
+        for (int c = 0; c < 4; ++c) {
+            Particle *particle = voxels[first].particles[outer_corners[c]];
+            particle->pos.x -= 0.3f;
+            particle->predicted_pos.x -= 0.3f;
+            particle->prev_pos.x -= 0.3f;
+        }
+    }
     Vector3 first_before = voxels[first].vel;
     Vector3 second_before = voxels[second].vel;
     release_tether(0);
@@ -2659,6 +2669,31 @@ static bool debug_setup_gold_tether_group(DebugRunState *state)
         fabsf(v_length(delta_a) - TETHER_THROW_IMPULSE) > 0.01f ||
         fabsf(v_length(delta_b) - TETHER_THROW_IMPULSE) > 0.01f)
         debug_add_failure(state, "gold throw did not consume charge and apply full impulse to both voxels");
+    for (int step = 0; step < 5; ++step) {
+        prepare_tether_forces();
+        simulate_voxel_pbd_steps(1.0f / 60.0f, 1);
+    }
+    if (!voxels[first].vgs_active || !voxels[second].vgs_active ||
+        !voxels[first].glued_faces[0] || !voxels[second].glued_faces[1])
+        debug_add_failure(state, "gold group fractured immediately after an unobstructed release");
+    if (strcmp(debugRunConfig.scenario, "gold-tether-strained-release") == 0) {
+        for (int step = 0; step < GOLD_TETHER_RELEASE_GRACE_STEPS - 5; ++step) {
+            prepare_tether_forces();
+            simulate_voxel_pbd_steps(1.0f / 60.0f, 1);
+        }
+        if (goldReleaseGraceActiveCount != 0)
+            debug_add_failure(state, "gold release settling window did not expire");
+        for (int c = 0; c < 4; ++c) {
+            Particle *particle = voxels[first].particles[outer_corners[c]];
+            particle->pos.x -= 0.3f;
+            particle->predicted_pos.x -= 0.3f;
+            particle->prev_pos.x -= 0.3f;
+        }
+        prepare_tether_forces();
+        simulate_voxel_pbd_steps(1.0f / 60.0f, 1);
+        if (voxels[first].vgs_active)
+            debug_add_failure(state, "VGS fracture remained suppressed after gold release settled");
+    }
     player->goldTetherCharged = true;
     player->pos = (Vector3){ 0.0f, 8.5f, 50.0f };
     start_tether(0);

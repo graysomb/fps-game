@@ -82,7 +82,13 @@ inline uint hashCoord(int3 c, int size) {
 
 inline void atomicAddFloat(device atomic_uint *value, float addend) {
     if (addend == 0.0f) return;
-    atomic_fetch_add_explicit(reinterpret_cast<device atomic<float> *>(value), addend, memory_order_relaxed);
+    uint expected = atomic_load_explicit(value, memory_order_relaxed);
+    uint desired;
+    do {
+        desired = as_type<uint>(as_type<float>(expected) + addend);
+    } while (!atomic_compare_exchange_weak_explicit(value, &expected, desired,
+                                                    memory_order_relaxed,
+                                                    memory_order_relaxed));
 }
 
 inline void accumulate(device atomic_uint *correction, device const int *control,
@@ -127,7 +133,8 @@ inline void integrateParticle(uint gid, device ParticleState *particle,
         p.velocity.xyz *= u.velocity_damping;
         p.predicted_base_inv_mass.xyz += p.velocity.xyz * u.dt;
         p.predicted_base_inv_mass.y -= u.gravity * u.dt * u.dt;
-        int player = tetherOwner[id];
+        int owner = tetherOwner[id];
+        int player = owner >= 4 ? owner - 4 : owner;
         if (player >= 0 && player < 4) {
             float scale = u.tether_targets[player].w;
             float3 accel = u.tether_targets[player].xyz * u.tether_spring * scale;
@@ -336,7 +343,8 @@ inline void staticCollisions(uint gid,device ParticleState *particle,device uint
 inline int topologyNeighbor(device int4 *topology,int voxelId,int face);
 
 inline void gatherBreakMask(uint gid, device ParticleState *particle,
-                            device VoxelState *voxel, device int4 *topology,
+                            device VoxelState *voxel, device const int *tetherOwner,
+                            device int4 *topology,
                             device const int *refcount,
                             device const int *control, constant GpuUniforms &u) {
     if (gid >= uint(u.voxel_count)) return;
@@ -344,6 +352,12 @@ inline void gatherBreakMask(uint gid, device ParticleState *particle,
     if (v.flags.x == 0 || v.flags.y != 0 || v.flags.z != 0 || v.pos_rest_edge.w <= 0.0f) {
         voxel[gid] = v;
         return;
+    }
+    for (int i = 0; i < 8; ++i) {
+        uint id = voxelParticle(v, i);
+        // Owners 4..7 are held gold groups; 8 is the short release settling window.
+        if (id < uint(controlLoad(control, 0)) && tetherOwner[id] >= 4 && tetherOwner[id] <= 8)
+            return;
     }
     float3 p[8];
     for (int i = 0; i < 8; ++i) {
@@ -457,7 +471,7 @@ kernel void pbd_pipeline(
         case MODE_APPLY:applyCorrections(gid,particle,correction,simId,refcount,control,u);break;
         case MODE_VGS:solveVgs(gid,particle,correction,voxel,control,u);break;
         case MODE_STATIC_COLLISIONS:staticCollisions(gid,particle,collisionId,collisionControl,staticCell,staticCollider,refcount,control,u);break;
-        case MODE_BREAK_MASK:gatherBreakMask(gid,particle,voxel,topology,refcount,control,u);break;
+        case MODE_BREAK_MASK:gatherBreakMask(gid,particle,voxel,tetherOwner,topology,refcount,control,u);break;
         case MODE_FINALIZE_PARTICLES:finalizeParticle(gid,particle,cell,simId,refcount,control,u);break;
         case MODE_FINALIZE_VOXELS:finalizeVoxel(gid,particle,voxel,control,u);break;
         case MODE_SPLIT_BREAKS:splitBrokenFaces(gid,particle,correction,cell,simId,collisionId,collisionMember,collisionControl,voxel,tetherOwner,collisionMeta,refcount,control,cloneParent,u);break;

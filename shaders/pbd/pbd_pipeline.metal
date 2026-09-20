@@ -355,7 +355,8 @@ inline void gatherBreakMask(uint gid, device ParticleState *particle,
     }
     for (int i = 0; i < 8; ++i) {
         uint id = voxelParticle(v, i);
-        if (id < uint(controlLoad(control, 0)) && tetherOwner[id] >= 4 && tetherOwner[id] < 8)
+        // Owners 4..7 are held gold groups; 8 is the short release settling window.
+        if (id < uint(controlLoad(control, 0)) && tetherOwner[id] >= 4 && tetherOwner[id] <= 8)
             return;
     }
     float3 p[8];

@@ -553,6 +553,20 @@ static bool gpu_pack_world(void) {
             gpuPhysics.tether_stage[id] = gold ? player + MAX_PLAYERS : player;
         }
     }
+    // Tether owner 8 protects a released voxel group without applying tether force.
+    if (goldReleaseGraceActiveCount > 0) {
+        for (int i = 0; i < voxel_count; ++i) {
+            Voxel *v = &voxels[i];
+            if (goldReleaseGraceFrames[i] == 0 || !v->simulate || !v->vgs_active) continue;
+            for (int c = 0; c < VOXEL_CORNER_COUNT; ++c) {
+                if (!v->particles[c]) continue;
+                ptrdiff_t pool_id = v->particles[c] - particles_pool;
+                if (pool_id < 0 || pool_id >= particle_pool_count) continue;
+                int id = gpuPhysics.pool_to_compact[pool_id];
+                if (id >= 0 && gpuPhysics.tether_stage[id] < 0) gpuPhysics.tether_stage[id] = 8;
+            }
+        }
+    }
     return true;
 }
 
@@ -991,7 +1005,8 @@ static bool gpu_validate_and_commit(void) {
         if (v->vgs_active && g->flags[0] == 0) {
             bool is_tethered = (voxel_id >= 0 && voxel_id < voxel_count && tetherTag[voxel_id] > 0);
             int holder = is_tethered ? tetherTag[voxel_id] - 1 : -1;
-            if (holder >= 0 && holder < MAX_PLAYERS && players[holder].goldTetherHolding) {
+            if ((holder >= 0 && holder < MAX_PLAYERS && players[holder].goldTetherHolding) ||
+                goldReleaseGraceFrames[voxel_id] > 0) {
                 g->flags[0] = 1;
                 continue;
             }
@@ -1154,6 +1169,22 @@ static bool gpu_refresh_tethers(void) {
             int id = gpuPhysics.pool_to_compact[pool_id];
             if (id < 0 || id >= gpuPhysics.compact_count || gpuPhysics.tether_stage[id] >= 0) continue;
             gpuPhysics.tether_stage[id] = gold ? player + MAX_PLAYERS : player;
+        }
+    }
+    if (goldReleaseGraceActiveCount > 0) {
+        for (int i = 0; i < gpuPhysics.dynamic_voxel_count; ++i) {
+            int world_id = gpuPhysics.compact_to_voxel[i];
+            if (world_id < 0 || world_id >= voxel_count || goldReleaseGraceFrames[world_id] == 0) continue;
+            Voxel *v = &voxels[world_id];
+            if (!v->vgs_active) continue;
+            for (int c = 0; c < VOXEL_CORNER_COUNT; ++c) {
+                if (!v->particles[c]) continue;
+                ptrdiff_t pool_id = v->particles[c] - particles_pool;
+                if (pool_id < 0 || pool_id >= particle_pool_count) continue;
+                int id = gpuPhysics.pool_to_compact[pool_id];
+                if (id >= 0 && id < gpuPhysics.compact_count && gpuPhysics.tether_stage[id] < 0)
+                    gpuPhysics.tether_stage[id] = 8;
+            }
         }
     }
     bool changed = memcmp(gpuPhysics.tether_compare_stage, gpuPhysics.tether_stage,

@@ -622,6 +622,7 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define GOLD_TETHER_RANGE (TETHER_RANGE * 3.0f)
 #define TETHER_HOLD_FORWARD 1.5f
 #define GOLD_TETHER_HOLD_FORWARD (TETHER_HOLD_FORWARD * 3.0f)
+#define GOLD_TETHER_RELEASE_GRACE_STEPS 12
 #define TETHER_HOLD_RIGHT 0.55f
 #define TETHER_HOLD_UP 0.2f
 #define TETHER_SPRING 200.0f
@@ -960,6 +961,8 @@ static void net_proxy_expire(uint32_t tick) {
     }
 }
 static int tetherTag[MAX_VOXELS];
+static uint8_t goldReleaseGraceFrames[MAX_VOXELS];
+static int goldReleaseGraceActiveCount = 0;
 static Vector3 tetherTargetByPlayer[MAX_PLAYERS];
 static Vector3 tetherComByPlayer[MAX_PLAYERS];
 static float tetherScaleByPlayer[MAX_PLAYERS];
@@ -3668,6 +3671,7 @@ static void remove_voxel_index(int idx)
     table_cache_invalidate();
     int voxel_count_before = voxel_count;
     Voxel *victim = &voxels[idx];
+    if (goldReleaseGraceFrames[idx] > 0) goldReleaseGraceActiveCount--;
     if (!victim->simulate) {
         mark_static_beliefs_dirty_for_voxel(victim);
         mark_static_hash_dirty();
@@ -3715,10 +3719,13 @@ static void remove_voxel_index(int idx)
     }
     if (idx != last) {
         tetherTag[idx] = tetherTag[last];
+        goldReleaseGraceFrames[idx] = goldReleaseGraceFrames[last];
     } else {
         tetherTag[idx] = 0;
+        goldReleaseGraceFrames[idx] = 0;
     }
     tetherTag[last] = 0;
+    goldReleaseGraceFrames[last] = 0;
     if (idx != last) {
         Voxel *moved = &voxels[last];
         voxel_table_unregister(moved);
@@ -8495,6 +8502,8 @@ static void clear_pickups(void) {
 
 static void clear_world_voxels(void) {
     voxel_count = 0;
+    memset(goldReleaseGraceFrames, 0, sizeof(goldReleaseGraceFrames));
+    goldReleaseGraceActiveCount = 0;
     tetherThrowCcdActiveCount = 0;
     pendingTetherImpactCount = 0;
     reset_particle_pool();
@@ -8980,6 +8989,8 @@ static void ResetGame(void) {
     }
     // clear voxels
     voxel_count = 0;
+    memset(goldReleaseGraceFrames, 0, sizeof(goldReleaseGraceFrames));
+    goldReleaseGraceActiveCount = 0;
     reset_particle_pool();
     staticBeliefsInitialized = false;
     staticBeliefsForceFullRefresh = false;
@@ -10341,7 +10352,8 @@ static void evaluate_voxel_fracture(Voxel *voxel) {
     }
     int voxel_idx = (int)(voxel - voxels);
     int holder = (voxel_idx >= 0 && voxel_idx < voxel_count) ? tetherTag[voxel_idx] - 1 : -1;
-    if (holder >= 0 && holder < MAX_PLAYERS && players[holder].goldTetherHolding) return;
+    if ((holder >= 0 && holder < MAX_PLAYERS && players[holder].goldTetherHolding) ||
+        goldReleaseGraceFrames[voxel_idx] > 0) return;
     if (voxel->rest_edge <= 0.0f) {
         return;
     }
@@ -13327,6 +13339,17 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
     //log_dynamic_voxel_positions();
 }
 
+static void advance_gold_release_grace(int fixed_steps) {
+    if (goldReleaseGraceActiveCount <= 0) return;
+    for (int i = 0; i < voxel_count; ++i) {
+        if (goldReleaseGraceFrames[i] == 0) continue;
+        int remaining = (int)goldReleaseGraceFrames[i] - fixed_steps;
+        if (remaining < 0) remaining = 0;
+        if (remaining == 0) goldReleaseGraceActiveCount--;
+        goldReleaseGraceFrames[i] = (uint8_t)remaining;
+    }
+}
+
 static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
     if (dynamic_particle_count() <= 0 || fixed_steps <= 0) return;
     if (sim_particle_count == 0 && fluid_should_skip_reduced_rate_step()) {
@@ -13361,6 +13384,7 @@ static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
             resolve_tether_throw_ccd_snapshots(tether_ccd_snapshots,
                                                tether_ccd_snapshot_count, fixed_steps);
             fluid_note_completed_step(dt);
+            advance_gold_release_grace(fixed_steps);
             physicsBackend.last_step_ms = pbdProfileEnabled ? (pbd_time_now_ms() - started) : (GetTime() - started) * 1000.0;
             return;
         }
@@ -13374,6 +13398,7 @@ static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
         resolve_tether_throw_ccd_snapshots(tether_ccd_snapshots,
                                            tether_ccd_snapshot_count, fixed_steps);
         fluid_note_completed_step(dt);
+        advance_gold_release_grace(fixed_steps);
         double step_ms = pbdProfileEnabled ? (pbd_time_now_ms() - started) : (GetTime() - started) * 1000.0;
         physicsBackend.last_step_ms = step_ms;
         if (pbdProfileEnabled) { pbdCpuProfile.step_count += fixed_steps; pbdCpuProfile.t_total_ms += step_ms; }
@@ -13390,6 +13415,7 @@ static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
     resolve_tether_throw_ccd_snapshots(tether_ccd_snapshots,
                                        tether_ccd_snapshot_count, fixed_steps);
     fluid_note_completed_step(dt);
+    advance_gold_release_grace(fixed_steps);
     double step_ms = pbdProfileEnabled ? (pbd_time_now_ms() - started) : (GetTime() - started) * 1000.0;
     physicsBackend.last_step_ms = step_ms;
     if (pbdProfileEnabled) { pbdCpuProfile.step_count += fixed_steps; pbdCpuProfile.t_total_ms += step_ms; }
@@ -15213,6 +15239,10 @@ static void release_tether(int idx) {
                     continue;
                 }
                 member->vel = v_add(member->vel, impulse);
+                if (p->goldTetherHolding) {
+                    if (goldReleaseGraceFrames[v_idx] == 0) goldReleaseGraceActiveCount++;
+                    goldReleaseGraceFrames[v_idx] = GOLD_TETHER_RELEASE_GRACE_STEPS;
+                }
                 for (int j = 0; j < VOXEL_CORNER_COUNT; ++j) {
                     Particle *particle = voxel_particle_at(member, j);
                     if (!particle || particle->inv_mass == 0.0f) {
