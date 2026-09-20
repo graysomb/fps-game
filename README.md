@@ -455,9 +455,13 @@ Available scenarios are:
   size; the default is 0.5. The cells per axis round up to the next power of two
   so they form a complete VGS octree. The effective cell size is
   `5 / next_power_of_two(ceil(5 / requested size))`; for example, a 2 m request
-  uses a 4×4×4 grid with 1.25 m cells. On CPU, internal VGS constraints run
-  from the root down to the leaf voxels. On GPU, every active scale scatters
-  corrections in one VGS dispatch and one apply pass per solver iteration.
+  uses a 4×4×4 grid with 1.25 m cells. On CPU and GPU, all active VGS scales
+  and parent-child weld constraints scatter corrections from the same position
+  snapshot, followed by one apply pass per solver iteration. Each active
+  parent welds its 19 noncorner fine-grid points to trilinear parent positions
+  and fits its eight corners to all 27 fine points with the left pseudoinverse
+  `R = (A^T A)^-1 A^T`. These are positional constraints; they do not transfer
+  velocities or change the octree topology. Dormant child cells skip welding.
   Collisions still use leaf particles only.
   VGS deactivation is temporarily disabled across the PBD solver, so solid
   cells remain visible after impact. The normal VGS parameters are unchanged.

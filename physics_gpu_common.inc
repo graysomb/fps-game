@@ -1157,8 +1157,8 @@ static bool gpu_dispatch_substep(float sub_dt) {
         ok = gpu_dispatch(GPU_MODE_HIERARCHY_MASK, count);
     }
     // Leaves and hierarchy nodes share the same particle correction buffer.
-    // Scatter all VGS constraints from one position snapshot, then apply their
-    // accumulated corrections together once per solver iteration.
+    // Internal nodes scatter VGS plus trilinear/pseudoinverse weld corrections
+    // from one position snapshot; apply all scales together once per iteration.
     int vgs_count = gpuPhysics.dynamic_voxel_count + gpuPhysics.hierarchy_node_count;
     for (int it = 0; ok && it < PBD_CONSTRAINT_ITERS; ++it) {
         gpu_set_vgs_layer(0, vgs_count);

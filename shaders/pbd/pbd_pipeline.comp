@@ -276,10 +276,67 @@ void applyCorrections(uint gid) {
     correction[id] = uvec4(0u);
 }
 
+// Separable, precomputed factors of A and R=(A^T A)^-1 A^T.
+const float WELD_A[6] = float[6](1.0, 0.0, 0.5, 0.5, 0.0, 1.0);
+const float WELD_R[6] = float[6](5.0/6.0, 1.0/3.0, -1.0/6.0,
+                                  -1.0/6.0, 1.0/3.0, 5.0/6.0);
+
+void scatterHierarchyWeld(uint voxelId) {
+    VoxelState parent = voxel[voxelId];
+    uint fineId[27];
+    vec3 finePos[27], coarsePos[8];
+    for (int c = 0; c < 8; ++c) {
+        uint id = voxelParticle(parent, c);
+        if (id >= uint(gpuControl.x)) return;
+        uint child = floatBitsToUint(c < 4 ? parent.bounds_min[c] : parent.bounds_max[c - 4]);
+        if (voxel[child].flags.w == 0) return;
+        coarsePos[c] = particle[id].predicted_base_inv_mass.xyz;
+    }
+    for (int r = 0; r < 27; ++r) {
+        int gx = r % 3, gy = (r / 3) % 3, gz = r / 9;
+        int childCorner = int(gx == 2) | (int(gy == 2) << 1) | (int(gz == 2) << 2);
+        int localCorner = int(gx != 0) | (int(gy != 0) << 1) | (int(gz != 0) << 2);
+        uint child = floatBitsToUint(childCorner < 4 ? parent.bounds_min[childCorner]
+                                                     : parent.bounds_max[childCorner - 4]);
+        uint id = voxelParticle(voxel[child], localCorner);
+        if (id >= uint(gpuControl.x)) return;
+        fineId[r] = id;
+        finePos[r] = particle[id].predicted_base_inv_mass.xyz;
+    }
+    for (int r = 0; r < 27; ++r) {
+        int gx = r % 3, gy = (r / 3) % 3, gz = r / 9;
+        if (gx != 1 && gy != 1 && gz != 1) continue;
+        float weight = particle[fineId[r]].prev_inv_mass.w;
+        if (weight <= 0.0) continue;
+        vec3 target = vec3(0.0);
+        for (int c = 0; c < 8; ++c) {
+            float w = WELD_A[2*gx+(c&1)] * WELD_A[2*gy+((c>>1)&1)] *
+                      WELD_A[2*gz+((c>>2)&1)];
+            target += coarsePos[c] * w;
+        }
+        accumulate(fineId[r], target - finePos[r], weight);
+    }
+    for (int c = 0; c < 8; ++c) {
+        uint id = voxelParticle(parent, c);
+        float weight = particle[id].prev_inv_mass.w;
+        if (weight <= 0.0) continue;
+        vec3 target = vec3(0.0);
+        for (int r = 0; r < 27; ++r) {
+            int gx = r % 3, gy = (r / 3) % 3, gz = r / 9;
+            float w = WELD_R[3*(c&1)+gx] * WELD_R[3*((c>>1)&1)+gy] *
+                      WELD_R[3*((c>>2)&1)+gz];
+            target += finePos[r] * w;
+        }
+        accumulate(id, target - coarsePos[c], weight);
+    }
+}
+
 void solveVgs(uint gid) {
     if (gid >= uint(uVgsCount)) return;
     VoxelState v = voxel[uint(uVgsBegin) + gid];
     if (v.flags.x == 0 || v.flags.y != 0 || v.flags.z != 0 || v.flags.w == 0) return;
+    if (uint(uVgsBegin) + gid >= uint(uVoxelCount))
+        scatterHierarchyWeld(uint(uVgsBegin) + gid);
     vec3 p[8];
     vec3 original[8];
     float applyWeight[8];

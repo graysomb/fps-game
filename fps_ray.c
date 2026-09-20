@@ -10613,8 +10613,7 @@ static void gather_shape_constraints(Particle *const corners[8], float rest_edge
         Vector3 delta = v_sub(p[i], orig[i]);
         Particle *part = corners[i];
         if (part && part->inv_mass > 0.0f) {
-            part->jacobi_slots[i].dx = v_mul(delta, apply_w[i]);
-            part->jacobi_slots[i].weight = apply_w[i];
+            accumulate_particle_correction(part, delta, apply_w[i]);
         }
     }
 }
@@ -10623,6 +10622,70 @@ static void gather_voxel_shape_constraints(Voxel *voxel) {
     if (voxel->simulate && voxel->vgs_active)
         gather_shape_constraints(voxel->particles, voxel->rest_edge, voxel->rest_volume,
                                  voxel->simulate_dofs);
+}
+
+// The one-dimensional left pseudoinverse of [1 0; 1/2 1/2; 0 1].
+// Tensor products give the 3D R=(A^T A)^-1 A^T without storing 216 weights.
+static const float weld_refine_axis[3][2] = {
+    {1.0f, 0.0f}, {0.5f, 0.5f}, {0.0f, 1.0f}
+};
+static const float weld_coarsen_axis[2][3] = {
+    {5.0f / 6.0f, 1.0f / 3.0f, -1.0f / 6.0f},
+    {-1.0f / 6.0f, 1.0f / 3.0f, 5.0f / 6.0f}
+};
+
+static void gather_hierarchy_weld_constraints(VgsHierarchyNode *node) {
+    Particle *fine[27];
+    Vector3 fine_pos[27], coarse_pos[8];
+    for (int c = 0; c < 8; ++c) {
+        if (!node->particles[c]) return;
+        int child = node->children[c];
+        if (child < 0 && !voxels[-child - 1].simulate_dofs) return;
+        coarse_pos[c] = node->particles[c]->predicted_pos;
+    }
+    for (int gz = 0; gz < 3; ++gz) for (int gy = 0; gy < 3; ++gy)
+        for (int gx = 0; gx < 3; ++gx) {
+            int r = gx + 3 * gy + 9 * gz;
+            int child_corner = (gx == 2) | ((gy == 2) << 1) | ((gz == 2) << 2);
+            int local_corner = (gx != 0) | ((gy != 0) << 1) | ((gz != 0) << 2);
+            int child_id = node->children[child_corner];
+            Particle *p = child_id >= 0
+                ? vgsHierarchy.nodes[child_id].particles[local_corner]
+                : voxels[-child_id - 1].particles[local_corner];
+            if (!p) return;
+            fine[r] = p;
+            fine_pos[r] = p->predicted_pos;
+        }
+    // Scatter the trilinear fine-grid target to the 19 noncorner grid points.
+    // The eight outer corners are the same particles as the parent corners.
+    for (int r = 0; r < 27; ++r) {
+        int gx = r % 3, gy = (r / 3) % 3, gz = r / 9;
+        if (gx != 1 && gy != 1 && gz != 1) continue;
+        if (fine[r]->inv_mass <= 0.0f) continue;
+        Vector3 target = {0};
+        for (int c = 0; c < 8; ++c) {
+            float w = weld_refine_axis[gx][c & 1] *
+                      weld_refine_axis[gy][(c >> 1) & 1] *
+                      weld_refine_axis[gz][(c >> 2) & 1];
+            target = v_add(target, v_mul(coarse_pos[c], w));
+        }
+        accumulate_particle_correction(fine[r], v_sub(target, fine_pos[r]), fine[r]->inv_mass);
+    }
+    // Independently fit the parent to all 27 fine points with the exact
+    // pseudoinverse. Both constraint families use this iteration's snapshot.
+    for (int c = 0; c < 8; ++c) {
+        Particle *p = node->particles[c];
+        if (p->inv_mass <= 0.0f) continue;
+        Vector3 target = {0};
+        for (int r = 0; r < 27; ++r) {
+            int gx = r % 3, gy = (r / 3) % 3, gz = r / 9;
+            float w = weld_coarsen_axis[c & 1][gx] *
+                      weld_coarsen_axis[(c >> 1) & 1][gy] *
+                      weld_coarsen_axis[(c >> 2) & 1][gz];
+            target = v_add(target, v_mul(fine_pos[r], w));
+        }
+        accumulate_particle_correction(p, v_sub(target, coarse_pos[c]), p->inv_mass);
+    }
 }
 
 static void update_vgs_hierarchy_activity(void) {
@@ -10647,8 +10710,10 @@ static void gather_vgs_hierarchy_range(int start, int end, int worker_id, void *
     int base = *(int *)user;
     for (int i = start; i < end; ++i) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[base + i];
-        if (node->active)
+        if (node->active) {
             gather_shape_constraints(node->particles, node->rest_edge, node->rest_volume, true);
+            gather_hierarchy_weld_constraints(node);
+        }
     }
 }
 
@@ -13186,12 +13251,9 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
             double tv = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
             reset_particle_accumulators();
             for (int it = 0; it < constraint_iterations; ++it) {
-                for (int level = 0; level < vgsHierarchy.levels; ++level) {
-                    int base = vgsHierarchy.level_start[level];
-                    pbd_parallel_for(0, vgsHierarchy.level_count[level],
-                                     gather_vgs_hierarchy_range, &base);
-                    apply_particle_accumulators();
-                }
+                int base = 0;
+                pbd_parallel_for(0, vgsHierarchy.node_count,
+                                 gather_vgs_hierarchy_range, &base);
                 pbd_parallel_for(0, active_voxel_count, gather_voxel_shape_constraints_range, NULL);
                 apply_particle_accumulators();
             }

@@ -268,12 +268,71 @@ inline void applyCorrections(uint gid, device ParticleState *particle,
     base[3] = 0.0f;
 }
 
+// Separable, precomputed factors of A and R=(A^T A)^-1 A^T.
+constant float WELD_A[6] = {1.0f, 0.0f, 0.5f, 0.5f, 0.0f, 1.0f};
+constant float WELD_R[6] = {5.0f/6.0f, 1.0f/3.0f, -1.0f/6.0f,
+                            -1.0f/6.0f, 1.0f/3.0f, 5.0f/6.0f};
+
+inline void scatterHierarchyWeld(uint voxelId, device ParticleState *particle,
+                                 device atomic_uint *correction, device VoxelState *voxel,
+                                 device const int *control) {
+    VoxelState parent = voxel[voxelId];
+    uint fineId[27];
+    float3 finePos[27], coarsePos[8];
+    for (int c = 0; c < 8; ++c) {
+        uint id = voxelParticle(parent, c);
+        if (id >= uint(controlLoad(control, 0))) return;
+        uint child = as_type<uint>(c < 4 ? parent.bounds_min[c] : parent.bounds_max[c - 4]);
+        if (voxel[child].flags.w == 0) return;
+        coarsePos[c] = particle[id].predicted_base_inv_mass.xyz;
+    }
+    for (int r = 0; r < 27; ++r) {
+        int gx = r % 3, gy = (r / 3) % 3, gz = r / 9;
+        int childCorner = (gx == 2) | ((gy == 2) << 1) | ((gz == 2) << 2);
+        int localCorner = (gx != 0) | ((gy != 0) << 1) | ((gz != 0) << 2);
+        uint child = as_type<uint>(childCorner < 4 ? parent.bounds_min[childCorner]
+                                                 : parent.bounds_max[childCorner - 4]);
+        uint id = voxelParticle(voxel[child], localCorner);
+        if (id >= uint(controlLoad(control, 0))) return;
+        fineId[r] = id;
+        finePos[r] = particle[id].predicted_base_inv_mass.xyz;
+    }
+    for (int r = 0; r < 27; ++r) {
+        int gx = r % 3, gy = (r / 3) % 3, gz = r / 9;
+        if (gx != 1 && gy != 1 && gz != 1) continue;
+        float weight = particle[fineId[r]].prev_inv_mass.w;
+        if (weight <= 0.0f) continue;
+        float3 target(0.0f);
+        for (int c = 0; c < 8; ++c) {
+            float w = WELD_A[2*gx+(c&1)] * WELD_A[2*gy+((c>>1)&1)] *
+                      WELD_A[2*gz+((c>>2)&1)];
+            target += coarsePos[c] * w;
+        }
+        accumulate(correction, control, fineId[r], target - finePos[r], weight);
+    }
+    for (int c = 0; c < 8; ++c) {
+        uint id = voxelParticle(parent, c);
+        float weight = particle[id].prev_inv_mass.w;
+        if (weight <= 0.0f) continue;
+        float3 target(0.0f);
+        for (int r = 0; r < 27; ++r) {
+            int gx = r % 3, gy = (r / 3) % 3, gz = r / 9;
+            float w = WELD_R[3*(c&1)+gx] * WELD_R[3*((c>>1)&1)+gy] *
+                      WELD_R[3*((c>>2)&1)+gz];
+            target += finePos[r] * w;
+        }
+        accumulate(correction, control, id, target - coarsePos[c], weight);
+    }
+}
+
 inline void solveVgs(uint gid, device ParticleState *particle,
                      device atomic_uint *correction, device VoxelState *voxel,
                      device const int *control, constant GpuUniforms &u) {
     if (gid >= uint(u.integer_padding_2)) return;
     VoxelState v = voxel[uint(u.integer_padding_1) + gid];
     if (v.flags.x == 0 || v.flags.y != 0 || v.flags.z != 0 || v.flags.w == 0) return;
+    if (uint(u.integer_padding_1) + gid >= uint(u.voxel_count))
+        scatterHierarchyWeld(uint(u.integer_padding_1) + gid, particle, correction, voxel, control);
     float3 p[8], original[8];
     float applyWeight[8];
     bool dynamicParticle = false;
