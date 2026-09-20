@@ -487,9 +487,11 @@ Available scenarios are:
   and parent-to-terminal-child trilinear welds for each substep. Only active
   terminal voxels render. The report records transition counts and the
   `curvature-by-level.csv` file records per-scale curvature distributions.
-  At the 0.25 m requested resolution, the impact activates several octree
-  levels before the tree coarsens again. There is no hysteresis, so cells can
-  change level on consecutive substeps. Dormant descendants follow trilinear
+  With size-squared VGS strength scaling, a [threshold sweep](docs/vgs-amr-h2-threshold/README.md)
+  found a phase-change-like jump in tree activity between 34 and 33 s^-2:
+  the former returns to one terminal cell, while the latter retains most fine
+  cells at frame 240. The default remains 50 s^-2. There is no hysteresis, so
+  cells can change level on consecutive substeps. Dormant descendants follow trilinear
   parent motion and do not provide an independent fine-scale curvature signal
   until they become active.
 * `vgs-refinement`: drops a 5 m cube with one root VGS constraint and eight
