@@ -10589,6 +10589,12 @@ static inline float fast_cbrtf(float x) {
 // Voxel Gram-Schmidt shape matching (Algorithm 1 in the paper) gathers corrections for Jacobi updates.
 static void gather_shape_constraints(Particle *const corners[8], float rest_edge,
                                      float rest_volume, bool simulate_dofs) {
+    // Anchor the original strengths at the finest PBD cell and soften coarse nodes.
+    float size_ratio = fminf(1.0f, pbdSolidVoxelSize / fmaxf(rest_edge, VGS_EPS));
+    float strength_scale = size_ratio * size_ratio;
+    float vgs_alpha = VGS_ALPHA * strength_scale;
+    float vgs_beta = 1.0f - (1.0f - VGS_BETA) * strength_scale;
+    float vgs_volume = VGS_VOLUME * strength_scale;
     bool has_dynamic = false;
     Vector3 p[8];
     Vector3 orig[8];
@@ -10658,17 +10664,17 @@ static void gather_shape_constraints(Particle *const corners[8], float rest_edge
             return;
         }
 
-        Vector3 u0 = v_sub(v0, v_mul(v_add(vgs_project(v1, v0), vgs_project(v2, v0)), VGS_ALPHA));
-        Vector3 u1 = v_sub(v1, v_mul(v_add(vgs_project(v2, v1), vgs_project(v0, v1)), VGS_ALPHA));
-        Vector3 u2 = v_sub(v2, v_mul(v_add(vgs_project(v0, v2), vgs_project(v1, v2)), VGS_ALPHA));
+        Vector3 u0 = v_sub(v0, v_mul(v_add(vgs_project(v1, v0), vgs_project(v2, v0)), vgs_alpha));
+        Vector3 u1 = v_sub(v1, v_mul(v_add(vgs_project(v2, v1), vgs_project(v0, v1)), vgs_alpha));
+        Vector3 u2 = v_sub(v2, v_mul(v_add(vgs_project(v0, v2), vgs_project(v1, v2)), vgs_alpha));
 
         float len0 = v_length(u0);
         float len1 = v_length(u1);
         float len2 = v_length(u2);
 
-        float target0 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * len_v0);
-        float target1 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * len_v1);
-        float target2 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * len_v2);
+        float target0 = ((1.0f - vgs_beta) * rest_edge) + (vgs_beta * len_v0);
+        float target1 = ((1.0f - vgs_beta) * rest_edge) + (vgs_beta * len_v1);
+        float target2 = ((1.0f - vgs_beta) * rest_edge) + (vgs_beta * len_v2);
 
         if (len0 > VGS_EPS) u0 = v_mul(u0, target0 / len0);
         if (len1 > VGS_EPS) u1 = v_mul(u1, target1 / len1);
@@ -10676,8 +10682,8 @@ static void gather_shape_constraints(Particle *const corners[8], float rest_edge
 
         float volume = v_dot(v_cross(u0, u1), u2);
         float root = 1.0f;
-        if (VGS_VOLUME > 0.0f && fabsf(volume) > VGS_EPS) {
-            float target_volume = volume + VGS_VOLUME * (rest_volume - volume);
+        if (vgs_volume > 0.0f && fabsf(volume) > VGS_EPS) {
+            float target_volume = volume + vgs_volume * (rest_volume - volume);
             float scale = target_volume / volume;
             root = fast_cbrtf(fabsf(scale));
             if (scale < 0.0f) {

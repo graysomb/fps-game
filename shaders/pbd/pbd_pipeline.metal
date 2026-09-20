@@ -355,6 +355,11 @@ inline void solveVgs(uint gid, device ParticleState *particle,
     }
     if (!dynamicParticle) return;
     float restEdge = v.pos_rest_edge.w, restVolume = v.velocity_rest_volume.w;
+    float sizeRatio = clamp(u.particle_hash_step / restEdge, 0.0f, 1.0f);
+    float strengthScale = sizeRatio * sizeRatio;
+    float vgsAlpha = u.vgs_alpha * strengthScale;
+    float vgsBeta = 1.0f - (1.0f - u.vgs_beta) * strengthScale;
+    float vgsVolume = u.vgs_volume * strengthScale;
     for (int iteration = 0; iteration < 3; ++iteration) {
         float3 centerPos(0.0f);
         for (int i = 0; i < 8; ++i) centerPos += p[i];
@@ -362,18 +367,18 @@ inline void solveVgs(uint gid, device ParticleState *particle,
         float3 v0=((p[1]-p[0])+(p[3]-p[2])+(p[5]-p[4])+(p[7]-p[6]))*0.25f;
         float3 v1=((p[2]-p[0])+(p[3]-p[1])+(p[6]-p[4])+(p[7]-p[5]))*0.25f;
         float3 v2=((p[4]-p[0])+(p[5]-p[1])+(p[6]-p[2])+(p[7]-p[3]))*0.25f;
-        float3 u0=v0-u.vgs_alpha*(projectOnto(v1,v0,u)+projectOnto(v2,v0,u));
-        float3 u1=v1-u.vgs_alpha*(projectOnto(v2,v1,u)+projectOnto(v0,v1,u));
-        float3 u2=v2-u.vgs_alpha*(projectOnto(v0,v2,u)+projectOnto(v1,v2,u));
-        float target0=mix(restEdge,length(v0),u.vgs_beta);
-        float target1=mix(restEdge,length(v1),u.vgs_beta);
-        float target2=mix(restEdge,length(v2),u.vgs_beta);
+        float3 u0=v0-vgsAlpha*(projectOnto(v1,v0,u)+projectOnto(v2,v0,u));
+        float3 u1=v1-vgsAlpha*(projectOnto(v2,v1,u)+projectOnto(v0,v1,u));
+        float3 u2=v2-vgsAlpha*(projectOnto(v0,v2,u)+projectOnto(v1,v2,u));
+        float target0=mix(restEdge,length(v0),vgsBeta);
+        float target1=mix(restEdge,length(v1),vgsBeta);
+        float target2=mix(restEdge,length(v2),vgsBeta);
         if(length(u0)>u.vgs_epsilon)u0*=target0/length(u0);
         if(length(u1)>u.vgs_epsilon)u1*=target1/length(u1);
         if(length(u2)>u.vgs_epsilon)u2*=target2/length(u2);
         float volume=dot(cross(u0,u1),u2);
         float root=1.0f;
-        if(u.vgs_volume>0.0f && fabs(volume)>u.vgs_epsilon){float targetVolume=mix(volume,restVolume,u.vgs_volume);float scale=targetVolume/volume;root=pow(fabs(scale),1.0f/3.0f)*(scale<0.0f?-1.0f:1.0f);}
+        if(vgsVolume>0.0f && fabs(volume)>u.vgs_epsilon){float targetVolume=mix(volume,restVolume,vgsVolume);float scale=targetVolume/volume;root=pow(fabs(scale),1.0f/3.0f)*(scale<0.0f?-1.0f:1.0f);}
         u0*=0.5f*root;u1*=0.5f*root;u2*=0.5f*root;
         p[0]=centerPos-u0-u1-u2;p[1]=centerPos+u0-u1-u2;p[2]=centerPos-u0+u1-u2;p[3]=centerPos+u0+u1-u2;
         p[4]=centerPos-u0-u1+u2;p[5]=centerPos+u0-u1+u2;p[6]=centerPos-u0+u1+u2;p[7]=centerPos+u0+u1+u2;
