@@ -132,6 +132,14 @@
 		<data>
 		JLocVDugD4LoRa3b8gNYI7/BMSw=
 		</data>
+		<key>Resources/shaders/shard_instanced.frag</key>
+		<data>
+		n8Rm8/Z2LigAJVIR+rDdeqwhlUU=
+		</data>
+		<key>Resources/shaders/shard_instanced.vert</key>
+		<data>
+		TME8P40Bu2gJBK/wM8osre9F3JI=
+		</data>
 		<key>Resources/shaders/skybox_shader.frag</key>
 		<data>
 		YDnTi9wuFSezI2UQdHi69uGMClI=
@@ -171,19 +179,19 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			C1Hg5guYAP+ey8cEM0jJaZFk4aU=
+			pUCHZsWv7XQWJFkMEJHa9LYJ7pY=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"0b51e0e60b9800ff9ecbc7043348c9699164e1a5"</string>
+			<string>cdhash H"a5408766c5afed741624590c1091daf4b609ee96"</string>
 		</dict>
 		<key>MacOS/fps_ray_gpu</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			O9SRK9hPqoylSGK76ziAF9i9gNg=
+			9ONxb0O1GYkUkP/atGWtlRANd78=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"3bd4912bd84faa8ca54862bbeb388017d8bd80d8"</string>
+			<string>cdhash H"f4e3716f43b519891490ffdab465ad95100d77bf"</string>
 		</dict>
 		<key>MacOS/game_song.mp3</key>
 		<dict>
@@ -409,6 +417,20 @@
 			<key>hash2</key>
 			<data>
 			gM+BTNeLUZmLv4vm9lxHi8xAAdug4/V5uoXWMuYrwjY=
+			</data>
+		</dict>
+		<key>Resources/shaders/shard_instanced.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			8i4GS0sFwpbbvsKLbAkAEBccvMd4YPdKcZpsltLHT7M=
+			</data>
+		</dict>
+		<key>Resources/shaders/shard_instanced.vert</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			7y0XplqfCmvQd39F0cm5YnSpLOEkiNDaCUqvshHcTS8=
 			</data>
 		</dict>
 		<key>Resources/shaders/skybox_shader.frag</key>

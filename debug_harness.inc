@@ -1703,8 +1703,8 @@ static bool debug_setup_voxel_strain_shear_fracture(DebugRunState *state)
     collisionTopologyDirty = true;
     rebuild_voxel_hash();
     debug_set_initial_centroid(state);
-    state->camera.position = (Vector3){ 0.0f, 9.0f, 7.0f };
-    state->camera.target = (Vector3){ 0.0f, 8.0f, 0.0f };
+    state->camera.position = (Vector3){ 0.0f, state->initial_centroid_y + 2.0f, 7.0f };
+    state->camera.target = (Vector3){ 0.0f, state->initial_centroid_y, 0.0f };
     debug_capture(state, "phase-01-fracture-setup.png", "fracture-setup", 0);
     return true;
 }
@@ -3885,6 +3885,40 @@ static void debug_finalize_validation(DebugRunState *state)
         }
         if (idx_ctrl >= 0 && idx_ctrl < voxel_count && !voxels[idx_ctrl].vgs_active) {
             debug_add_failure(state, "control voxel broke unexpectedly (vgs_active became false)");
+        }
+        // Fractured solids must produce eight visible instances per voxel,
+        // independent of whether their corner particles still have glue_count.
+        if (!instancingInitialized) InitInstancing();
+        voxel_render_frame++;
+        prepare_shard_transforms();
+        if (shardShader.id == 0 || shardInstanceVboId == 0 ||
+            shardStateCount != 2 || shardTransformCount != 16) {
+            debug_add_failure(state, "fracture shards expected 2 voxel states and 16 instances (got %d and %d)",
+                              shardStateCount, shardTransformCount);
+        }
+        if (idx_strain >= 0 && idx_strain < voxel_count &&
+            idx_ctrl >= 0 && idx_ctrl < voxel_count &&
+            !voxels[idx_strain].vgs_active && voxels[idx_ctrl].vgs_active) {
+            Particle *saved = voxels[idx_strain].particles[0];
+            Particle *constrained = voxels[idx_ctrl].particles[0];
+            if (saved && constrained) {
+                particle_retain(constrained);
+                voxels[idx_strain].particles[0] = constrained;
+                voxel_render_frame++;
+                prepare_shard_transforms();
+                if (shardTransformCount != 15) {
+                    debug_add_failure(state, "corner shared with active VGS rendered a shard (%d instances)",
+                                      shardTransformCount);
+                }
+                voxels[idx_strain].particles[0] = saved;
+                particle_release(constrained);
+                voxel_render_frame++;
+                prepare_shard_transforms();
+                if (shardTransformCount != 16) {
+                    debug_add_failure(state, "freed corner failed to regain its shard (%d instances)",
+                                      shardTransformCount);
+                }
+            }
         }
         return;
     }

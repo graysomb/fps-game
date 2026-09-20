@@ -57,6 +57,7 @@
 #include <time.h>
 #include <string.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <limits.h>
 #include <float.h>
 #include <stdarg.h>
@@ -15652,6 +15653,23 @@ static int particlePosRadiusCapacity = 0;
 static unsigned int particleInstanceVboId = 0;
 static int particlePosRadiusLoc = -1;
 static int particleColorLoc = -1;
+typedef struct {
+    uint64_t identity;
+    Quaternion rotation[8];
+    Vector3 angular_velocity[8];
+    Vector3 size[8];
+} ShardVoxelState;
+static ShardVoxelState *shardStates = NULL;
+static ShardVoxelState *shardNextStates = NULL;
+static int shardStateCount = 0;
+static int shardStateCapacity = 0;
+static float16 *shardTransforms = NULL;
+static int shardTransformCount = 0;
+static uint32_t *shardParticleStamp = NULL;
+static uint32_t *vgsParticleStamp = NULL;
+static uint64_t shardCachedFrame = 0;
+static unsigned int shardInstanceVboId = 0;
+static Shader shardShader = { 0 };
 static float16 *instanceTransforms = NULL;
 static int instanceTransformsCount = 0;
 static int instanceTransformsCapacity = 0;
@@ -15702,6 +15720,7 @@ static void InitInstancing(void) {
     if (instancingInitialized) return;
     voxelMesh = GenMeshCube(1.0f, 1.0f, 1.0f);
     instancedShader = LoadShader("shaders/instanced_voxel_hack.vert", "shaders/instanced_voxel_hack.frag");
+    shardShader = LoadShader("shaders/shard_instanced.vert", "shaders/shard_instanced.frag");
     
     orbShader = LoadShader("shaders/orb.vert", "shaders/orb.frag");
     fluidShader = LoadShader("shaders/fluid_instanced.vert", "shaders/fluid_instanced.frag");
@@ -15736,6 +15755,11 @@ static void InitInstancing(void) {
 
     instancedMaterial = LoadMaterialDefault();
     instancedMaterial.shader = instancedShader;
+    shardShader.locs[SHADER_LOC_MATRIX_MODEL] = GetShaderLocationAttrib(shardShader, "instanceTransform");
+    shardShader.locs[SHADER_LOC_MATRIX_VIEW] = GetShaderLocation(shardShader, "matView");
+    shardShader.locs[SHADER_LOC_MATRIX_PROJECTION] = GetShaderLocation(shardShader, "matProjection");
+    shardParticleStamp = (uint32_t *)RL_CALLOC(MAX_PARTICLES, sizeof(uint32_t));
+    vgsParticleStamp = (uint32_t *)RL_CALLOC(MAX_PARTICLES, sizeof(uint32_t));
     fluidMaterial = LoadMaterialDefault();
     fluidMaterial.shader = fluidShader;
     fluidHullMaterial = LoadMaterialDefault();
@@ -15792,6 +15816,52 @@ static void DrawVoxelsInstancedFast(Mesh mesh, Material material, const float16 
     rlDisableVertexBuffer();
     rlDisableVertexArray();
     rlDisableShader();
+}
+
+static void DrawShardsInstanced(void) {
+    if (shardTransformCount <= 0 || voxelMesh.vaoId == 0 || shardInstanceVboId == 0 || shardShader.id == 0) return;
+    rlEnableShader(shardShader.id);
+    rlSetUniformMatrix(shardShader.locs[SHADER_LOC_MATRIX_VIEW], rlGetMatrixModelview());
+    rlSetUniformMatrix(shardShader.locs[SHADER_LOC_MATRIX_PROJECTION], rlGetMatrixProjection());
+    rlEnableVertexArray(voxelMesh.vaoId);
+    rlEnableVertexBuffer(shardInstanceVboId);
+    int loc = shardShader.locs[SHADER_LOC_MATRIX_MODEL];
+    if (loc != -1) {
+        for (int i = 0; i < 4; ++i) {
+            rlEnableVertexAttribute(loc + i);
+            rlSetVertexAttribute(loc + i, 4, RL_FLOAT, 0, (int)sizeof(float16), i * (int)sizeof(Vector4));
+            rlSetVertexAttributeDivisor(loc + i, 1);
+        }
+    }
+    if (voxelMesh.indices) rlEnableVertexBufferElement(voxelMesh.vboId[RL_DEFAULT_SHADER_ATTRIB_LOCATION_INDICES]);
+    rlDrawVertexArrayElementsInstanced(0, voxelMesh.triangleCount * 3, 0, shardTransformCount);
+    if (loc != -1) {
+        for (int i = 0; i < 4; ++i) rlDisableVertexAttribute(loc + i);
+    }
+    rlDisableVertexBuffer();
+    rlDisableVertexArray();
+    rlDisableShader();
+}
+
+static void shutdown_shard_rendering(void) {
+    if (shardInstanceVboId) rlUnloadVertexBuffer(shardInstanceVboId);
+    if (shardShader.id) UnloadShader(shardShader);
+    RL_FREE(shardStates);
+    RL_FREE(shardNextStates);
+    RL_FREE(shardTransforms);
+    RL_FREE(shardParticleStamp);
+    RL_FREE(vgsParticleStamp);
+    shardInstanceVboId = 0;
+    shardShader = (Shader){ 0 };
+    shardStates = NULL;
+    shardNextStates = NULL;
+    shardTransforms = NULL;
+    shardParticleStamp = NULL;
+    vgsParticleStamp = NULL;
+    shardStateCount = 0;
+    shardStateCapacity = 0;
+    shardTransformCount = 0;
+    shardCachedFrame = 0;
 }
 
 static bool ensure_fluid_instance_capacity(int needed) {
@@ -16198,6 +16268,173 @@ static void draw_fluid_particles(Camera3D camera) {
     DrawMeshInstanced(sphereMesh, fluidMaterial, fluidInstanceTransforms, count);
 }
 
+static int shard_state_compare(const void *left, const void *right) {
+    uint64_t a = ((const ShardVoxelState *)left)->identity;
+    uint64_t b = ((const ShardVoxelState *)right)->identity;
+    return (a > b) - (a < b);
+}
+
+static uint32_t shard_hash(uint64_t identity, int corner) {
+    uint64_t x = identity ^ ((uint64_t)(corner + 1) * UINT64_C(0x9e3779b97f4a7c15));
+    x ^= x >> 30;
+    x *= UINT64_C(0xbf58476d1ce4e5b9);
+    x ^= x >> 27;
+    return (uint32_t)(x ^ (x >> 31));
+}
+
+static Quaternion shard_voxel_rotation(const Voxel *voxel) {
+    Vector3 x = v_sub(voxel->particles[1]->pos, voxel->particles[0]->pos);
+    Vector3 y = v_sub(voxel->particles[2]->pos, voxel->particles[0]->pos);
+    if (v_length(x) < VGS_EPS || v_length(y) < VGS_EPS) return (Quaternion){ 0, 0, 0, 1 };
+    x = v_norm(x);
+    y = v_sub(y, v_mul(x, v_dot(x, y)));
+    if (v_length(y) < VGS_EPS) return (Quaternion){ 0, 0, 0, 1 };
+    y = v_norm(y);
+    Vector3 z = Vector3CrossProduct(x, y);
+    Matrix rotation = MatrixIdentity();
+    rotation.m0 = x.x; rotation.m1 = x.y; rotation.m2 = x.z;
+    rotation.m4 = y.x; rotation.m5 = y.y; rotation.m6 = y.z;
+    rotation.m8 = z.x; rotation.m9 = z.y; rotation.m10 = z.z;
+    return QuaternionNormalize(QuaternionFromMatrix(rotation));
+}
+
+static Vector3 shard_voxel_angular_velocity(const Voxel *voxel) {
+    Vector3 center = { 0 }, mean_velocity = { 0 };
+    for (int i = 0; i < 8; ++i) {
+        center = v_add(center, voxel->particles[i]->pos);
+        mean_velocity = v_add(mean_velocity, voxel->particles[i]->vel);
+    }
+    center = v_mul(center, 0.125f);
+    mean_velocity = v_mul(mean_velocity, 0.125f);
+    Vector3 momentum = { 0 };
+    float isotropic_inertia = 0.0f;
+    for (int i = 0; i < 8; ++i) {
+        Vector3 r = v_sub(voxel->particles[i]->pos, center);
+        Vector3 relative_velocity = v_sub(voxel->particles[i]->vel, mean_velocity);
+        momentum = v_add(momentum, Vector3CrossProduct(r, relative_velocity));
+        isotropic_inertia += (2.0f / 3.0f) * v_dot(r, r);
+    }
+    return (isotropic_inertia > VGS_EPS) ? v_mul(momentum, 1.0f / isotropic_inertia) : (Vector3){ 0 };
+}
+
+static bool ensure_shard_capacity(int voxel_capacity) {
+    if (voxel_capacity <= shardStateCapacity) return true;
+    int capacity = shardStateCapacity ? shardStateCapacity : 64;
+    while (capacity < voxel_capacity) capacity *= 2;
+    ShardVoxelState *states = (ShardVoxelState *)RL_REALLOC(shardStates, (size_t)capacity * sizeof(*states));
+    if (!states) return false;
+    shardStates = states;
+    ShardVoxelState *next = (ShardVoxelState *)RL_REALLOC(shardNextStates, (size_t)capacity * sizeof(*next));
+    if (!next) return false;
+    shardNextStates = next;
+    float16 *transforms = (float16 *)RL_REALLOC(shardTransforms, (size_t)capacity * 8 * sizeof(*transforms));
+    if (!transforms) return false;
+    shardTransforms = transforms;
+    if (shardInstanceVboId) rlUnloadVertexBuffer(shardInstanceVboId);
+    shardInstanceVboId = rlLoadVertexBuffer(NULL, capacity * 8 * (int)sizeof(float16), true);
+    shardStateCapacity = capacity;
+    return shardInstanceVboId != 0;
+}
+
+static void prepare_shard_transforms(void) {
+    if (shardCachedFrame == voxel_render_frame) return;
+    shardCachedFrame = voxel_render_frame;
+    shardTransformCount = 0;
+    ensure_dynamic_voxels();
+    if (!vgsParticleStamp) return;
+    // A broken voxel can still share corner particles with another voxel whose
+    // VGS constraint is active. Those corners remain part of the intact shape.
+    for (int i = 0; i < dynamic_voxel_count; ++i) {
+        const Voxel *v = &voxels[dynamic_voxels[i]];
+        if (!v->simulate || !v->vgs_active) continue;
+        for (int corner = 0; corner < 8; ++corner) {
+            const Particle *particle = v->particles[corner];
+            if (!particle || !particle->active) continue;
+            ptrdiff_t pool_index = particle - particles_pool;
+            if (pool_index >= 0 && pool_index < MAX_PARTICLES)
+                vgsParticleStamp[pool_index] = (uint32_t)voxel_render_frame;
+        }
+    }
+    int broken_count = 0;
+    for (int i = 0; i < dynamic_voxel_count; ++i) {
+        const Voxel *v = &voxels[dynamic_voxels[i]];
+        if (v->simulate && !v->vgs_active && !v->isBullet && v->type == 0 && !voxel_is_fluid(v)) ++broken_count;
+    }
+    if (!ensure_shard_capacity(broken_count)) return;
+    int next_count = 0;
+    float dt = clampf(GetFrameTime(), 0.0f, 0.05f);
+    float spin_decay = powf(0.985f, dt * 60.0f);
+    for (int i = 0; i < dynamic_voxel_count; ++i) {
+        const Voxel *v = &voxels[dynamic_voxels[i]];
+        if (!v->simulate || v->vgs_active || v->isBullet || v->type != 0 || voxel_is_fluid(v)) continue;
+        bool valid = true;
+        for (int corner = 0; corner < 8; ++corner) valid &= v->particles[corner] && v->particles[corner]->active;
+        if (!valid) continue;
+        ShardVoxelState key = { .identity = v->identity };
+        const ShardVoxelState *previous = shardStateCount > 0
+            ? (const ShardVoxelState *)bsearch(&key, shardStates, (size_t)shardStateCount,
+                                                sizeof(*shardStates), shard_state_compare) : NULL;
+        ShardVoxelState *state = &shardNextStates[next_count++];
+        if (previous) {
+            *state = *previous;
+        } else {
+            state->identity = v->identity;
+            Quaternion parent_rotation = shard_voxel_rotation(v);
+            Vector3 parent_spin = shard_voxel_angular_velocity(v);
+            for (int corner = 0; corner < 8; ++corner) {
+                uint32_t h = shard_hash(v->identity, corner);
+                float size_variation = 0.88f + (float)(h & 255u) * (0.14f / 255.0f);
+                float edge = v->rest_edge * 0.48f * size_variation;
+                state->size[corner] = (Vector3){ edge, edge * (0.94f + (float)((h >> 8) & 15u) * 0.008f), edge };
+                state->rotation[corner] = parent_rotation;
+                Vector3 fan = { (float)corner_signs[corner][0], (float)corner_signs[corner][1],
+                                (float)corner_signs[corner][2] };
+                fan = v_norm(v_add(fan, (Vector3){ (float)((h >> 16) & 7u) * 0.06f,
+                                                    (float)((h >> 20) & 7u) * 0.06f,
+                                                    (float)((h >> 24) & 7u) * 0.06f }));
+                state->angular_velocity[corner] = v_add(parent_spin, v_mul(fan, 2.0f + (float)((h >> 12) & 15u) * 0.35f));
+            }
+        }
+        Color color = voxel_display_color(v);
+        for (int corner = 0; corner < 8; ++corner) {
+            Particle *particle = v->particles[corner];
+            ptrdiff_t pool_index = particle - particles_pool;
+            if (pool_index >= 0 && pool_index < MAX_PARTICLES &&
+                vgsParticleStamp[pool_index] == (uint32_t)voxel_render_frame) continue;
+            Vector3 omega = state->angular_velocity[corner];
+            float speed = v_length(omega);
+            if (speed > VGS_EPS && dt > 0.0f) {
+                Quaternion delta = QuaternionFromAxisAngle(v_mul(omega, 1.0f / speed), speed * dt);
+                state->rotation[corner] = QuaternionNormalize(QuaternionMultiply(delta, state->rotation[corner]));
+            }
+            state->angular_velocity[corner] = v_mul(omega, spin_decay);
+            Quaternion q = state->rotation[corner];
+            Vector3 offset = { -corner_signs[corner][0] * v->rest_edge * 0.25f,
+                               -corner_signs[corner][1] * v->rest_edge * 0.25f,
+                               -corner_signs[corner][2] * v->rest_edge * 0.25f };
+            Vector3 position = v_add(particle->pos, Vector3RotateByQuaternion(offset, q));
+            Matrix rotation = QuaternionToMatrix(q);
+            Vector3 size = state->size[corner];
+            float16 *t = &shardTransforms[shardTransformCount++];
+            t->v[0] = rotation.m0 * size.x; t->v[1] = rotation.m1 * size.x; t->v[2] = rotation.m2 * size.x; t->v[3] = color.r / 255.0f;
+            t->v[4] = rotation.m4 * size.y; t->v[5] = rotation.m5 * size.y; t->v[6] = rotation.m6 * size.y; t->v[7] = color.g / 255.0f;
+            t->v[8] = rotation.m8 * size.z; t->v[9] = rotation.m9 * size.z; t->v[10] = rotation.m10 * size.z; t->v[11] = color.b / 255.0f;
+            t->v[12] = position.x; t->v[13] = position.y; t->v[14] = position.z; t->v[15] = 1.0f;
+            if (shardParticleStamp) {
+                if (pool_index >= 0 && pool_index < MAX_PARTICLES) shardParticleStamp[pool_index] = (uint32_t)voxel_render_frame;
+            }
+        }
+    }
+    if (next_count > 1) qsort(shardNextStates, (size_t)next_count, sizeof(*shardNextStates), shard_state_compare);
+    ShardVoxelState *swap = shardStates;
+    shardStates = shardNextStates;
+    shardNextStates = swap;
+    shardStateCount = next_count;
+    if (shardTransformCount > 0 && shardInstanceVboId) {
+        rlUpdateVertexBuffer(shardInstanceVboId, shardTransforms, shardTransformCount * (int)sizeof(float16), 0);
+    }
+}
+
 static void prepare_dynamic_voxel_transforms(void) {
     if (dynamic_transforms_cached_frame == voxel_render_frame && voxel_render_frame > 0) {
         return;
@@ -16357,6 +16594,8 @@ static void DrawVoxels(Camera3D cam) {
     if (instanceTransformsCount > 0) {
         DrawVoxelsInstancedFast(voxelMesh, instancedMaterial, instanceTransforms, instanceTransformsCount);
     }
+    prepare_shard_transforms();
+    DrawShardsInstanced();
 
     // Add glow shells for type-0 bullets so they read as blue orbs.
     for (int b = 0; b < bullet_voxel_count; ++b) {
@@ -16379,7 +16618,8 @@ static void DrawVoxels(Camera3D cam) {
 
     for (int i = 0; i < active_particle_count; ++i) {
         Particle *p = active_particles[i];
-        if (!p || !p->active || p->glue_count > 0) {
+        if (!p || !p->active || p->glue_count > 0 ||
+            (shardParticleStamp && shardParticleStamp[p - particles_pool] == (uint32_t)voxel_render_frame)) {
             continue;
         }
         float radius = (p->radius > 0.0f) ? p->radius : (VOXEL_SIZE * 0.25f);
@@ -18967,6 +19207,7 @@ int main(int argc, char **argv) {
             UnloadMaterial(greedyMaterial);
             greedyMaterialInit = false;
         }
+        shutdown_shard_rendering();
         shutdown_world_visuals();
         shutdown_sfx();
         CloseWindow();
@@ -20414,6 +20655,7 @@ int main(int argc, char **argv) {
         UnloadMaterial(greedyMaterial);
         greedyMaterialInit = false;
     }
+    shutdown_shard_rendering();
     shutdown_world_visuals();
     free(netVoxelProxies);
     free(netVoxelProxyMap);
