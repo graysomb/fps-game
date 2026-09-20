@@ -13464,28 +13464,47 @@ static void ensure_render_targets(RenderTexture2D *screens,
     *current_h = view_h;
 }
 
-static bool spawn_position_clear(Vector3 pos, float min_dist) {
-    float half = PLAYER_SIZE * 0.5f;
-    int minx = (int)floorf((pos.x - half) / VOXEL_SIZE);
-    int maxx = (int)floorf((pos.x + half) / VOXEL_SIZE);
-    int miny = (int)floorf((pos.y - half) / VOXEL_SIZE);
-    int maxy = (int)floorf((pos.y + half) / VOXEL_SIZE);
-    int minz = (int)floorf((pos.z - half) / VOXEL_SIZE);
-    int maxz = (int)floorf((pos.z + half) / VOXEL_SIZE);
+static float spawn_clear_half(int player_index) {
+    if (player_index >= 0 && player_index < MAX_PLAYERS) {
+        if (players[player_index].enemyType == ENEMY_TYPE_GOLIATH) return PLAYER_SIZE * 0.75f;
+        if (players[player_index].enemyType == ENEMY_TYPE_SWARMER) return PLAYER_SIZE * 0.25f;
+    }
+    return PLAYER_SIZE * 0.5f;
+}
 
+static bool spawn_aabb_blocked(Vector3 pos, float half) {
+    const float eps = 1e-4f;
+    int minx = (int)floorf((pos.x - half) / VOXEL_SIZE);
+    int maxx = (int)floorf((pos.x + half - eps) / VOXEL_SIZE);
+    int miny = (int)floorf((pos.y - half) / VOXEL_SIZE);
+    int maxy = (int)floorf((pos.y + half - eps) / VOXEL_SIZE);
+    int minz = (int)floorf((pos.z - half) / VOXEL_SIZE);
+    int maxz = (int)floorf((pos.z + half - eps) / VOXEL_SIZE);
     for (int x = minx; x <= maxx; ++x) {
         for (int y = miny; y <= maxy; ++y) {
             for (int z = minz; z <= maxz; ++z) {
                 if (occupied(x, y, z)) {
-                    return false;
+                    return true;
                 }
             }
         }
     }
+    return false;
+}
 
+static bool spawn_position_clear_ex(Vector3 pos, float half, float min_dist, int ignore_player) {
+    if (spawn_aabb_blocked(pos, half)) {
+        return false;
+    }
     if (min_dist > 0.0f) {
         float min_dist_sq = min_dist * min_dist;
         for (int i = 0; i < activePlayers; ++i) {
+            if (i == ignore_player) {
+                continue;
+            }
+            if (players[i].respawn_timer > 0.0f) {
+                continue;
+            }
             Vector3 delta = v_sub(pos, players[i].pos);
             if (v_dot(delta, delta) < min_dist_sq) {
                 return false;
@@ -13495,16 +13514,80 @@ static bool spawn_position_clear(Vector3 pos, float min_dist) {
     return true;
 }
 
+static bool spawn_position_clear(Vector3 pos, float min_dist) {
+    return spawn_position_clear_ex(pos, PLAYER_SIZE * 0.5f, min_dist, -1);
+}
+
+static Vector3 nudge_spawn_clear(Vector3 pos, float half, float min_dist, int ignore_player) {
+    if (spawn_position_clear_ex(pos, half, min_dist, ignore_player)) {
+        return pos;
+    }
+    for (int up = 1; up <= 16; ++up) {
+        Vector3 lifted = pos;
+        lifted.y += (float)up * VOXEL_SIZE;
+        if (spawn_position_clear_ex(lifted, half, min_dist, ignore_player)) {
+            return lifted;
+        }
+    }
+    const int dirs[8][2] = {
+        { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 },
+        { 1, 1 }, { 1, -1 }, { -1, 1 }, { -1, -1 }
+    };
+    for (int r = 1; r <= 8; ++r) {
+        for (int d = 0; d < 8; ++d) {
+            for (int up = 0; up <= 10; ++up) {
+                Vector3 p = {
+                    pos.x + (float)dirs[d][0] * (float)r * VOXEL_SIZE,
+                    pos.y + (float)up * VOXEL_SIZE,
+                    pos.z + (float)dirs[d][1] * (float)r * VOXEL_SIZE
+                };
+                if (spawn_position_clear_ex(p, half, min_dist, ignore_player)) {
+                    return p;
+                }
+            }
+        }
+    }
+    return pos;
+}
+
+static Vector3 random_clear_spawn(float half, float min_dist, int ignore_player) {
+    float min_pos = -FLOOR_SIZE + PLAYER_RADIUS * 2.5f;
+    float max_pos = FLOOR_SIZE - PLAYER_RADIUS * 2.5f;
+    for (int attempt = 0; attempt < 96; ++attempt) {
+        Vector3 pos = {
+            randomInRange(min_pos, max_pos),
+            BASE_EYE_HEIGHT,
+            randomInRange(min_pos, max_pos)
+        };
+        pos = nudge_spawn_clear(pos, half, min_dist, ignore_player);
+        if (spawn_position_clear_ex(pos, half, min_dist, ignore_player)) {
+            return pos;
+        }
+    }
+    return (Vector3){ 0.0f, BASE_EYE_HEIGHT, 0.0f };
+}
+
+static Vector3 sanctum_spawn_world(int spawn_index) {
+    float wx = (current_sanctum_plan.spawn_points[spawn_index].pos.x + 0.5f) * VOXEL_SIZE;
+    float wy = (current_sanctum_offset_y + current_sanctum_plan.spawn_points[spawn_index].pos.y + 0.5f) * VOXEL_SIZE + BASE_EYE_HEIGHT;
+    float wz = (current_sanctum_plan.spawn_points[spawn_index].pos.z + 0.5f) * VOXEL_SIZE;
+    return (Vector3){ wx, wy, wz };
+}
+
 static Vector3 pick_player_spawn(int player_index) {
+    float half = spawn_clear_half(player_index);
+    float min_distance = randomSpawnEnabled ? (FLOOR_SIZE * 0.5f) : 0.0f;
+
     if (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM && current_sanctum_plan_valid && current_sanctum_plan.spawn_point_count > 0) {
         if (gameMode == GAME_MODE_FIREFIGHT) {
             if (player_index == 0) {
                 for (int s = 0; s < current_sanctum_plan.spawn_point_count; ++s) {
-                    if (current_sanctum_plan.spawn_points[s].is_player) {
-                        float wx = (current_sanctum_plan.spawn_points[s].pos.x + 0.5f) * VOXEL_SIZE;
-                        float wy = (current_sanctum_offset_y + current_sanctum_plan.spawn_points[s].pos.y + 0.5f) * VOXEL_SIZE + BASE_EYE_HEIGHT;
-                        float wz = (current_sanctum_plan.spawn_points[s].pos.z + 0.5f) * VOXEL_SIZE;
-                        return (Vector3){ wx, wy, wz };
+                    if (!current_sanctum_plan.spawn_points[s].is_player) {
+                        continue;
+                    }
+                    Vector3 pos = nudge_spawn_clear(sanctum_spawn_world(s), half, 0.0f, player_index);
+                    if (spawn_position_clear_ex(pos, half, 0.0f, player_index)) {
+                        return pos;
                     }
                 }
             } else {
@@ -13515,47 +13598,48 @@ static Vector3 pick_player_spawn(int player_index) {
                         enemy_spawns[enemy_count++] = s;
                     }
                 }
-                if (enemy_count > 0) {
-                    int s_idx = enemy_spawns[(player_index - 1) % enemy_count];
-                    float wx = (current_sanctum_plan.spawn_points[s_idx].pos.x + 0.5f) * VOXEL_SIZE;
-                    float wy = (current_sanctum_offset_y + current_sanctum_plan.spawn_points[s_idx].pos.y + 0.5f) * VOXEL_SIZE + BASE_EYE_HEIGHT;
-                    float wz = (current_sanctum_plan.spawn_points[s_idx].pos.z + 0.5f) * VOXEL_SIZE;
-                    return (Vector3){ wx, wy, wz };
+                for (int n = 0; n < enemy_count; ++n) {
+                    int s_idx = enemy_spawns[(player_index - 1 + n) % enemy_count];
+                    Vector3 pos = nudge_spawn_clear(sanctum_spawn_world(s_idx), half, 0.0f, player_index);
+                    if (spawn_position_clear_ex(pos, half, 0.0f, player_index)) {
+                        return pos;
+                    }
                 }
             }
         } else {
-            int s_idx = (player_index >= 0) ? (player_index % current_sanctum_plan.spawn_point_count) : 0;
-            float wx = (current_sanctum_plan.spawn_points[s_idx].pos.x + 0.5f) * VOXEL_SIZE;
-            float wy = (current_sanctum_offset_y + current_sanctum_plan.spawn_points[s_idx].pos.y + 0.5f) * VOXEL_SIZE + BASE_EYE_HEIGHT;
-            float wz = (current_sanctum_plan.spawn_points[s_idx].pos.z + 0.5f) * VOXEL_SIZE;
-            return (Vector3){ wx, wy, wz };
+            for (int n = 0; n < current_sanctum_plan.spawn_point_count; ++n) {
+                int s_idx = ((player_index >= 0 ? player_index : 0) + n) % current_sanctum_plan.spawn_point_count;
+                Vector3 pos = nudge_spawn_clear(sanctum_spawn_world(s_idx), half, 0.0f, player_index);
+                if (spawn_position_clear_ex(pos, half, 0.0f, player_index)) {
+                    return pos;
+                }
+            }
         }
     }
 
-    if (!randomSpawnEnabled) {
-        return playerSpawnPositions[0];
+    Vector3 random_pos = random_clear_spawn(half, min_distance, player_index);
+    if (spawn_position_clear_ex(random_pos, half, min_distance, player_index)) {
+        return random_pos;
     }
-
-    float min_distance = FLOOR_SIZE*0.5f;
-    float min_pos = -FLOOR_SIZE + PLAYER_RADIUS;
-    float max_pos = FLOOR_SIZE - PLAYER_RADIUS;
-    for (int attempt = 0; attempt < 64; ++attempt) {
-        Vector3 pos = {
-            randomInRange(min_pos, max_pos),
-            BASE_EYE_HEIGHT,
-            randomInRange(min_pos, max_pos)
-        };
-        if (spawn_position_clear(pos, min_distance)) {
-            return pos;
+    if (!randomSpawnEnabled) {
+        Vector3 fallback = nudge_spawn_clear(playerSpawnPositions[0], half, 0.0f, player_index);
+        if (spawn_position_clear_ex(fallback, half, 0.0f, player_index)) {
+            return fallback;
         }
     }
     if (player_index >= 0 && player_index < MAX_PLAYERS) {
-        return playerSpawnPositions[player_index];
+        Vector3 fallback = nudge_spawn_clear(playerSpawnPositions[player_index], half, 0.0f, player_index);
+        if (spawn_position_clear_ex(fallback, half, 0.0f, player_index)) {
+            return fallback;
+        }
     }
-    return (Vector3){ 0.0f, BASE_EYE_HEIGHT, 0.0f };
+    return random_pos;
 }
 
 static Vector3 pick_enemy_wave_spawn(int bot_idx) {
+    float half = spawn_clear_half(bot_idx);
+    const float human_clearance = 14.0f;
+
     if (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM && current_sanctum_plan_valid && current_sanctum_plan.spawn_point_count > 0) {
         int enemy_spawns[MAX_SANCTUM_SPAWNS];
         int enemy_count = 0;
@@ -13565,38 +13649,28 @@ static Vector3 pick_enemy_wave_spawn(int bot_idx) {
             }
         }
         if (enemy_count > 0) {
-            int s_idx = enemy_spawns[(bot_idx + GetRandomValue(0, 15)) % enemy_count];
-            float wx = (current_sanctum_plan.spawn_points[s_idx].pos.x + 0.5f) * VOXEL_SIZE;
-            float wy = (current_sanctum_offset_y + current_sanctum_plan.spawn_points[s_idx].pos.y + 0.5f) * VOXEL_SIZE + BASE_EYE_HEIGHT;
-            float wz = (current_sanctum_plan.spawn_points[s_idx].pos.z + 0.5f) * VOXEL_SIZE;
-            return (Vector3){ wx, wy, wz };
-        }
-    }
-
-    float min_pos = -FLOOR_SIZE + PLAYER_RADIUS * 2.5f;
-    float max_pos = FLOOR_SIZE - PLAYER_RADIUS * 2.5f;
-    for (int attempt = 0; attempt < 40; ++attempt) {
-        Vector3 pos = {
-            randomInRange(min_pos, max_pos),
-            BASE_EYE_HEIGHT,
-            randomInRange(min_pos, max_pos)
-        };
-        bool clear = true;
-        for (int p = 0; p < activePlayers; ++p) {
-            if (!is_player_bot(p)) {
-                Vector3 diff = v_sub(pos, players[p].pos);
-                if (v_dot(diff, diff) < 14.0f * 14.0f) {
-                    clear = false;
-                    break;
+            int start = (bot_idx + GetRandomValue(0, 15)) % enemy_count;
+            for (int n = 0; n < enemy_count; ++n) {
+                int s_idx = enemy_spawns[(start + n) % enemy_count];
+                Vector3 pos = nudge_spawn_clear(sanctum_spawn_world(s_idx), half, human_clearance, bot_idx);
+                if (spawn_position_clear_ex(pos, half, human_clearance, bot_idx)) {
+                    return pos;
                 }
             }
         }
-        if (clear) return pos;
+    }
+
+    Vector3 random_pos = random_clear_spawn(half, human_clearance, bot_idx);
+    if (spawn_position_clear_ex(random_pos, half, human_clearance, bot_idx)) {
+        return random_pos;
     }
     if (bot_idx >= 0 && bot_idx < MAX_PLAYERS) {
-        return playerSpawnPositions[bot_idx];
+        Vector3 fallback = nudge_spawn_clear(playerSpawnPositions[bot_idx], half, 0.0f, bot_idx);
+        if (spawn_position_clear_ex(fallback, half, 0.0f, bot_idx)) {
+            return fallback;
+        }
     }
-    return (Vector3){ 0.0f, BASE_EYE_HEIGHT, 0.0f };
+    return random_pos;
 }
 
 static void spawn_goliath_armor(int player_idx) {
@@ -13609,6 +13683,12 @@ static void spawn_goliath_armor(int player_idx) {
     Color armorCol = (Color){ 70, 80, 95, 255 };
     for (int i = 0; i < GOLIATH_MAX_ATTACHED; ++i) {
         Vector3 spawn_pos = v_add(p->pos, goliathArmorOffsets[i]);
+        int gx = (int)floorf(spawn_pos.x / VOXEL_SIZE);
+        int gy = (int)floorf(spawn_pos.y / VOXEL_SIZE);
+        int gz = (int)floorf(spawn_pos.z / VOXEL_SIZE);
+        if (occupied(gx, gy, gz)) {
+            continue;
+        }
         int idx = addVoxel(spawn_pos.x, spawn_pos.y, spawn_pos.z, false, true, armorCol, 0);
         if (idx >= 0) {
             voxels[idx].owner = player_idx;
