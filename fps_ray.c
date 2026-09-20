@@ -9728,7 +9728,7 @@ static void kill_player(int player_index, int attacker_index,
             }
             if (firefightWaveEnemiesRemaining <= 0) {
                 firefightWaveState = FIREFIGHT_STATE_INTERMISSION;
-                firefightIntermissionTimer = 4.0f;
+                firefightIntermissionTimer = 15.0f;
                 firefightScore += 500 * firefightWave;
                 play_sfx(SFX_WIN);
             }
