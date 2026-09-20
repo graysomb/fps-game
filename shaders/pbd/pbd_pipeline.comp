@@ -147,7 +147,8 @@ void integrateParticle(uint gid) {
         p.velocity.xyz *= uVelocityDamping;
         p.predicted_base_inv_mass.xyz += p.velocity.xyz * uDt;
         p.predicted_base_inv_mass.y -= uGravity * uDt * uDt;
-        int tetherPlayer = tetherOwner[id];
+        int owner = tetherOwner[id];
+        int tetherPlayer = owner >= 4 ? owner - 4 : owner;
         if (tetherPlayer >= 0 && tetherPlayer < 4) {
             float scale = uTetherTarget[tetherPlayer].w;
             vec3 accel = uTetherTarget[tetherPlayer].xyz * uTetherSpring * scale;
@@ -465,6 +466,10 @@ void gatherBreakMask(uint gid) {
     VoxelState v = voxel[gid];
     if (v.flags.x == 0 || v.flags.y != 0 || v.flags.z != 0 || v.pos_rest_edge.w <= 0.0) {
         voxel[gid] = v; return;
+    }
+    for (int i=0; i<8; ++i) {
+        uint id=voxelParticle(v,i);
+        if (id<uint(gpuControl.x) && tetherOwner[id]>=4 && tetherOwner[id]<8) return;
     }
     vec3 p[8];
     for (int i=0; i<8; ++i) {

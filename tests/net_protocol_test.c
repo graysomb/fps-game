@@ -42,7 +42,8 @@ int main(void) {
     assert(decoded.creative_pickup == input.creative_pickup);
 
     NetPlayerVisualState visual = {
-        .flags = NET_PLAYER_VISUAL_MELEE | NET_PLAYER_VISUAL_TETHER,
+        .flags = NET_PLAYER_VISUAL_MELEE | NET_PLAYER_VISUAL_TETHER |
+                 NET_PLAYER_VISUAL_GOLD_TETHER,
         .melee_progress = 173,
         .tether_x = 1.25f,
         .tether_y = -2.5f,

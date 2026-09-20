@@ -104,6 +104,7 @@ typedef struct DebugRunState {
     bool tether_second_started;
     bool tether_second_survived;
     bool tether_active_glued_static_test;
+    bool gold_tether_group_test;
     bool tether_active_glued_static_glue_broken;
     float tether_active_glued_static_max_strain;
     float tether_active_glued_static_pull_distance;
@@ -280,6 +281,8 @@ static bool debug_setup_cube_stress(DebugRunState *state);
 static bool debug_setup_voxel_strain_shear_fracture(DebugRunState *state);
 static bool debug_setup_arena_platform_fluid(DebugRunState *state);
 static bool debug_setup_tether_active_glued_static(DebugRunState *state);
+static bool debug_setup_gold_tether_group(DebugRunState *state);
+static bool debug_setup_gold_tether_static(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall, 60, 60 },
@@ -308,7 +311,9 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "cube-stress", "Stress test with scalable dynamic cube (size set by FPS_CUBE_SIZE)", debug_setup_cube_stress, 60, 60 },
     { "voxel-strain-shear-fracture", "Dynamic voxels deactivate VGS shape constraints when strain or shear exceeds threshold", debug_setup_voxel_strain_shear_fracture, 60, 60 },
     { "arena-platform-fluid", "Test arena central platform activated with sleeping fluid on top", debug_setup_arena_platform_fluid, 60, 60 },
-    { "tether-active-glued-static", "Tethering an active voxel glued to static breaks VGS constraints and extracts intact voxel under stress/strain", debug_setup_tether_active_glued_static, 60, 60 }
+    { "tether-active-glued-static", "Tethering an active voxel glued to static breaks VGS constraints and extracts intact voxel under stress/strain", debug_setup_tether_active_glued_static, 60, 60 },
+    { "gold-tether-group", "Gold tether holds and throws a glued group without breaking its static boundary", debug_setup_gold_tether_group, 60, 60 },
+    { "gold-tether-static", "Gold tether activates a distant static target", debug_setup_gold_tether_static, 60, 60 }
 };
 
 static const int debugScenarioCount = (int)(sizeof(debugScenarios) / sizeof(debugScenarios[0]));
@@ -1000,6 +1005,8 @@ static void debug_render_scene(DebugRunState *state, const DebugSample *sample)
                       (Color){ 68, 75, 82, 255 });
             DrawGrid(48, VOXEL_SIZE);
             DrawVoxels(state->camera);
+            if (strcmp(debugRunConfig.scenario, "gold-tether-static") == 0)
+                draw_pickups(state->camera);
             if (state->swarmer_wall_test || state->goliath_flight_test) {
                 draw_players();
             }
@@ -2591,6 +2598,130 @@ static bool debug_setup_tether_active_glued_static(DebugRunState *state)
     return true;
 }
 
+static bool debug_setup_gold_tether_group(DebugRunState *state)
+{
+    debug_reset_world();
+    state->gold_tether_group_test = true;
+    int anchor = debug_add_cell(0, 7, 0, true, false, (Color){ 80, 120, 180, 255 }, DEBUG_SUPPORT_TAG);
+    int first = debug_add_cell(0, 8, 0, false, true, (Color){ 240, 180, 50, 255 }, DEBUG_TEST_TAG);
+    int second = debug_add_cell(1, 8, 0, false, true, (Color){ 240, 180, 50, 255 }, DEBUG_TEST_TAG);
+    if (anchor < 0 || first < 0 || second < 0) return false;
+    debug_rebuild_world_state();
+    if (!voxels[first].glued_faces[0] || !voxels[first].glued_faces[3]) {
+        debug_add_failure(state, "gold tether setup lacks group or static anchor glue");
+        return false;
+    }
+    memset(tetherTag, 0, sizeof(tetherTag));
+    for (int i = 0; i < MAX_PLAYERS; ++i) {
+        players[i].tetherHolding = false;
+        players[i].goldTetherHolding = false;
+        players[i].goldTetherCharged = false;
+        players[i].respawn_timer = i == 0 ? 0.0f : 1000.0f;
+    }
+    Player *player = &players[0];
+    player->goldTetherCharged = true;
+    player->pos = (Vector3){ 0.25f, 8.5f, 20.0f };
+    Vector3 aim = v_norm(v_sub(voxels[first].pos, player->pos));
+    dir_to_yaw_pitch(aim, &player->yaw, &player->pitch);
+    if (first_voxel_hit((Ray){ player->pos, player_forward(player) }, TETHER_RANGE, -1) >= 0)
+        debug_add_failure(state, "gold target is inside normal tether range");
+    start_tether(0);
+    if (!player->tetherHolding || !player->goldTetherHolding || player->tetherVoxel != first) {
+        debug_add_failure(state, "gold tether failed to grab the 24-unit target");
+        return false;
+    }
+    prepare_tether_forces();
+    if (tetherTag[first] != 1 || tetherTag[second] != 1 ||
+        voxels[first].glued_faces[3] || voxels[anchor].glued_faces[2] ||
+        !voxels[first].glued_faces[0] || !voxels[second].glued_faces[1])
+        debug_add_failure(state, "gold tether did not retain internal glue and detach the anchor");
+    for (int c = 0; c < VOXEL_CORNER_COUNT; ++c) {
+        if (!voxels[first].particles[c] || voxels[first].particles[c]->inv_mass <= 0.0f)
+            debug_add_failure(state, "gold tether retained an immovable group corner");
+    }
+    Vector3 held_a = voxels[first].pos;
+    Vector3 held_b = voxels[second].pos;
+    for (int step = 0; step < 10; ++step) {
+        prepare_tether_forces();
+        simulate_voxel_pbd_steps(1.0f / 60.0f, 1);
+    }
+    if (!voxels[first].vgs_active || !voxels[second].vgs_active ||
+        !voxels[first].glued_faces[0] || !voxels[second].glued_faces[1] ||
+        v_length(v_sub(voxels[first].pos, held_a)) < 0.05f ||
+        v_length(v_sub(voxels[second].pos, held_b)) < 0.05f)
+        debug_add_failure(state, "gold hold did not move and protect the whole group");
+    Vector3 first_before = voxels[first].vel;
+    Vector3 second_before = voxels[second].vel;
+    release_tether(0);
+    Vector3 delta_a = v_sub(voxels[first].vel, first_before);
+    Vector3 delta_b = v_sub(voxels[second].vel, second_before);
+    if (player->goldTetherCharged || player->goldTetherHolding ||
+        fabsf(v_length(delta_a) - TETHER_THROW_IMPULSE) > 0.01f ||
+        fabsf(v_length(delta_b) - TETHER_THROW_IMPULSE) > 0.01f)
+        debug_add_failure(state, "gold throw did not consume charge and apply full impulse to both voxels");
+    player->goldTetherCharged = true;
+    player->pos = (Vector3){ 0.0f, 8.5f, 50.0f };
+    start_tether(0);
+    if (!player->goldTetherCharged || player->tetherHolding)
+        debug_add_failure(state, "missed gold grab spent the charge");
+    player->goldTetherCharged = false;
+    state->expected_voxels = 2;
+    state->activation_succeeded = true;
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_set_initial_centroid(state);
+    state->camera.position = (Vector3){ 5.0f, 10.0f, 7.0f };
+    state->camera.target = (Vector3){ 0.5f, 8.0f, 0.5f };
+    return true;
+}
+
+static bool debug_setup_gold_tether_static(DebugRunState *state)
+{
+    debug_reset_world();
+    int target = debug_add_cell(0, 8, 0, true, false,
+                                (Color){ 255, 180, 50, 255 }, DEBUG_TEST_TAG);
+    if (target < 0) return false;
+    debug_rebuild_world_state();
+    memset(tetherTag, 0, sizeof(tetherTag));
+    for (int i = 0; i < MAX_PLAYERS; ++i) {
+        players[i].tetherHolding = false;
+        players[i].goldTetherHolding = false;
+        players[i].goldTetherCharged = false;
+        players[i].respawn_timer = i == 0 ? 0.0f : 1000.0f;
+    }
+    Player *player = &players[0];
+    player->goldTetherCharged = true;
+    player->pos = (Vector3){ 0.25f, 8.5f, 20.0f };
+    Vector3 aim = v_norm(v_sub(voxels[target].pos, player->pos));
+    dir_to_yaw_pitch(aim, &player->yaw, &player->pitch);
+    voxels[target].pendingActivation = true;
+    start_tether(0);
+    if (!player->goldTetherCharged || player->tetherHolding)
+        debug_add_failure(state, "failed static activation spent the gold charge");
+    voxels[target].pendingActivation = false;
+    start_tether(0);
+    if (!player->goldTetherHolding || !player->tetherHolding ||
+        player->tetherVoxel < 0 || !voxels[player->tetherVoxel].simulate)
+        debug_add_failure(state, "gold tether failed to activate a distant static target");
+    else {
+        prepare_tether_forces();
+        if (tetherTag[player->tetherVoxel] != 1)
+            debug_add_failure(state, "activated static target is outside gold hold group");
+        release_tether(0);
+        if (player->goldTetherCharged)
+            debug_add_failure(state, "throwing an activated static target did not spend the charge");
+    }
+    state->activation_succeeded = true;
+    state->expected_voxels = 1;
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_set_initial_centroid(state);
+    state->camera.position = (Vector3){ 4.0f, 10.0f, 6.0f };
+    state->camera.target = (Vector3){ 0.0f, 8.0f, 0.0f };
+    pickups[0].type = PICKUP_GOLD_TETHER;
+    pickups[0].active = true;
+    pickups[0].pos = (Vector3){ 1.25f, 8.0f, 0.75f };
+    return true;
+}
+
 static bool debug_setup_tether_thin_wall_ccd(DebugRunState *state)
 {
     debug_reset_world();
@@ -4077,6 +4208,7 @@ static void debug_finalize_validation(DebugRunState *state)
     if (!state->drop_sampled) {
         debug_add_failure(state, "scenario did not reach the required 60-step drop sample");
     } else if (!state->overhang_impact && !state->platform_lifecycle_test &&
+               !state->gold_tether_group_test &&
                (!isfinite(state->drop_at_step_60) || state->drop_at_step_60 < 0.5f)) {
         debug_add_failure(state, "cluster dropped only %.3f metres after 60 steps (minimum 0.500)",
                           state->drop_at_step_60);

@@ -194,7 +194,8 @@ bool net_read_player_visual(NetReader *reader, NetPlayerVisualState *state) {
     if (!reader || !state) return false;
     memset(state, 0, sizeof(*state));
     state->flags = net_read_u8(reader);
-    if (state->flags & ~(NET_PLAYER_VISUAL_MELEE | NET_PLAYER_VISUAL_TETHER)) {
+    if (state->flags & ~(NET_PLAYER_VISUAL_MELEE | NET_PLAYER_VISUAL_TETHER |
+                         NET_PLAYER_VISUAL_GOLD_TETHER)) {
         reader->failed = true;
         return false;
     }

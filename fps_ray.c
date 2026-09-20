@@ -619,7 +619,9 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define MELEE_BASE_REACH_FRAC 0.18f
 #define BUILD_COOLDOWN_SECONDS 0.5f
 #define TETHER_RANGE 8.0f
+#define GOLD_TETHER_RANGE (TETHER_RANGE * 3.0f)
 #define TETHER_HOLD_FORWARD 1.5f
+#define GOLD_TETHER_HOLD_FORWARD (TETHER_HOLD_FORWARD * 3.0f)
 #define TETHER_HOLD_RIGHT 0.55f
 #define TETHER_HOLD_UP 0.2f
 #define TETHER_SPRING 200.0f
@@ -733,6 +735,9 @@ typedef struct {
     float matter_flash_timer;
     float exposed_flash_timer;
     bool tetherHolding;
+    bool goldTetherCharged;
+    bool goldTetherHolding;
+    bool netGoldTetherVisualActive;
     int tetherVoxel;
     uint64_t tetherVoxelIdentity;
     int tetherFace;
@@ -1248,6 +1253,7 @@ static int gather_glued_neighbors(int voxel_idx, int *out, int max_out);
 static int gather_glued_neighbors_symmetric(int voxel_idx, int *out, int max_out);
 static bool voxel_connected_to_static_world(const Voxel *voxel);
 static bool glue_cluster_has_static_support(const int *cluster, int cluster_count);
+static void measure_tether_cluster(int player_idx, const int *cluster, int cluster_count);
 static bool freeze_dynamic_cluster_in_place(const int *cluster, int cluster_count);
 static int recycle_lifetime_find_root(int voxel_idx);
 static void recycle_lifetime_union(int a, int b);
@@ -3700,6 +3706,7 @@ static void remove_voxel_index(int idx)
         if (!player->tetherHolding) continue;
         if (player->tetherVoxel == idx) {
             player->tetherHolding = false;
+            player->goldTetherHolding = false;
             player->tetherVoxel = -1;
             player->tetherVoxelIdentity = 0;
         } else if (idx != last && player->tetherVoxel == last) {
@@ -4490,6 +4497,9 @@ static void glue_neighbor_faces_for_voxel(int voxel_idx) {
         int faceB = opposite_face[f];
 
         if (!b->simulate) {
+            int holder = tetherTag[voxel_idx] - 1;
+            if (holder >= 0 && holder < MAX_PLAYERS && players[holder].goldTetherHolding)
+                continue;
             glue_dynamic_face_to_static(a, b, faceA, faceB);
             continue;
         }
@@ -8426,7 +8436,9 @@ typedef enum {
     PICKUP_AMMO,
     PICKUP_HEALTH,
     PICKUP_VOID,
-    PICKUP_DYNAMIC_SHOT
+    PICKUP_DYNAMIC_SHOT,
+    PICKUP_GOLD_TETHER,
+    PICKUP_TYPE_COUNT
 } PickupType;
 
 typedef struct {
@@ -8438,6 +8450,9 @@ typedef struct {
 } Pickup;
 
 static Pickup pickups[MAX_PICKUPS];
+static Shader goldPickupShader = { 0 };
+static int goldPickupTimeLocation = -1;
+static bool goldPickupShaderAttempted = false;
 
 static const char *pickup_type_label(PickupType type) {
     switch (type) {
@@ -8445,6 +8460,7 @@ static const char *pickup_type_label(PickupType type) {
         case PICKUP_HEALTH: return "Health";
         case PICKUP_VOID: return "Void";
         case PICKUP_DYNAMIC_SHOT: return "Dynamic";
+        case PICKUP_GOLD_TETHER: return "Gold Tether";
         default: return "Unknown";
     }
 }
@@ -8607,7 +8623,8 @@ static bool load_map_slot(int slot) {
             }
             if (slot_idx >= 0) {
                 pickups[slot_idx].pos = (Vector3){ px, py, pz };
-                pickups[slot_idx].type = (PickupType)type;
+                pickups[slot_idx].type = (type >= 0 && type < PICKUP_TYPE_COUNT)
+                    ? (PickupType)type : PICKUP_AMMO;
                 pickups[slot_idx].active = active != 0;
                 pickups[slot_idx].respawnTimer = respawn;
                 pickups[slot_idx].bobTimer = (float)GetRandomValue(0, 100) / 10.0f;
@@ -8658,6 +8675,13 @@ static void init_pickups(void) {
     pickups[0].respawnTimer = 0.0f;
     pickups[0].bobTimer = (float)GetRandomValue(0, 100) / 10.0f;
     pickups[0].type = PICKUP_DYNAMIC_SHOT;
+    if (currentWorldType == WORLD_TYPE_BLOOD) {
+        pickups[1].pos = (Vector3){ 0.0f, 1.0f, 5.0f };
+        pickups[1].active = true;
+        pickups[1].respawnTimer = 0.0f;
+        pickups[1].bobTimer = 0.0f;
+        pickups[1].type = PICKUP_GOLD_TETHER;
+    }
 }
 
 static void update_pickups(float dt) {
@@ -8665,6 +8689,7 @@ static void update_pickups(float dt) {
         Pickup *p = &pickups[i];
         
         if (!p->active) {
+            if (p->respawnTimer <= 0.0f) continue;
             p->respawnTimer -= dt;
             if (p->respawnTimer <= 0.0f) {
                 p->active = true;
@@ -8686,6 +8711,7 @@ static void update_pickups(float dt) {
             if (p->type == PICKUP_VOID) hitRad += 1.0f; // Larger hitbox for void
 
             if (distSq < hitRad*hitRad) {
+                if (p->type == PICKUP_GOLD_TETHER && pl->goldTetherCharged) continue;
                 // Collect
                 if (p->type == PICKUP_AMMO) {
                     add_player_matter(pl, 25.0f);
@@ -8700,10 +8726,14 @@ static void update_pickups(float dt) {
                 } else if (p->type == PICKUP_DYNAMIC_SHOT) {
                     pl->dynamicShotActive = true;
                     play_sfx(SFX_SHIELD);
+                } else if (p->type == PICKUP_GOLD_TETHER) {
+                    pl->goldTetherCharged = true;
+                    play_sfx(SFX_SHIELD);
                 }
                 
                 p->active = false;
                 p->respawnTimer = (p->type == PICKUP_VOID) ? PICKUP_VOID_RESPAWN_TIME : PICKUP_RESPAWN_TIME;
+                break;
             }
         }
     }
@@ -8716,6 +8746,12 @@ static void draw_pickups(Camera cam) {
     Color voidRing = (Color){ 255, 165, 0, 255 }; // Orange
     Color dynamicGold = (Color){ 255, 210, 90, 230 };
     Color dynamicBlue = (Color){ 80, 160, 255, 200 };
+    if (!goldPickupShaderAttempted) {
+        goldPickupShaderAttempted = true;
+        goldPickupShader = LoadShader("shaders/gold_pickup.vert", "shaders/gold_pickup.frag");
+        if (goldPickupShader.id != 0)
+            goldPickupTimeLocation = GetShaderLocation(goldPickupShader, "uTime");
+    }
     
     for (int i = 0; i < MAX_PICKUPS; i++) {
         if (!pickups[i].active) continue;
@@ -8793,6 +8829,15 @@ static void draw_pickups(Camera cam) {
                 }
                 rlEnd();
             rlPopMatrix();
+        } else if (p->type == PICKUP_GOLD_TETHER) {
+            rlRotatef(p->bobTimer * 65.0f, 0.0f, 1.0f, 0.0f);
+            if (goldPickupShader.id != 0) {
+                SetShaderValue(goldPickupShader, goldPickupTimeLocation, &p->bobTimer, SHADER_UNIFORM_FLOAT);
+                BeginShaderMode(goldPickupShader);
+            }
+            DrawSphere((Vector3){ 0 }, PICKUP_SIZE * 1.15f, WHITE);
+            if (goldPickupShader.id != 0) EndShaderMode();
+            DrawSphereWires((Vector3){ 0 }, PICKUP_SIZE * 1.28f, 12, 16, GOLD);
         } else if (p->type == PICKUP_DYNAMIC_SHOT) {
             // Dynamic shot: Gold core + blue orbit ring
             DrawSphere((Vector3){0,0,0}, PICKUP_SIZE * 0.9f, dynamicGold);
@@ -8854,6 +8899,9 @@ static void reset_players_for_creative(void) {
         players[i].matter_flash_timer = 0.0f;
         players[i].exposed_flash_timer = 0.0f;
         players[i].tetherHolding = false;
+        players[i].goldTetherCharged = false;
+        players[i].goldTetherHolding = false;
+        players[i].netGoldTetherVisualActive = false;
         players[i].tetherVoxel = -1;
         players[i].tetherVoxelIdentity = 0;
         players[i].meleeKnockbackActive = false;
@@ -8918,6 +8966,9 @@ static void ResetGame(void) {
         players[i].matter_flash_timer = 0.0f;
         players[i].exposed_flash_timer = 0.0f;
         players[i].tetherHolding = false;
+        players[i].goldTetherCharged = false;
+        players[i].goldTetherHolding = false;
+        players[i].netGoldTetherVisualActive = false;
         players[i].tetherVoxel = -1;
         players[i].tetherVoxelIdentity = 0;
         players[i].meleeKnockbackActive = false;
@@ -9213,7 +9264,7 @@ static void update_creative_player_keyboard(int player_idx, float dt) {
             creativeBrushSpan[player_idx] = clampi(creativeBrushSpan[player_idx] + 1, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
         }
         if (IsKeyPressed(KEY_TAB)) {
-            creativePickupType[player_idx] = (creativePickupType[player_idx] + 1) % 4;
+            creativePickupType[player_idx] = (creativePickupType[player_idx] + 1) % PICKUP_TYPE_COUNT;
         }
         if (IsKeyPressed(KEY_V)) {
             creativeBlockColorIndex[player_idx]++;
@@ -9258,7 +9309,7 @@ static void update_creative_player_keyboard(int player_idx, float dt) {
             creativeBrushSpan[player_idx] = clampi(creativeBrushSpan[player_idx] + 1, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
         }
         if (IsKeyPressed(KEY_KP_MULTIPLY)) {
-            creativePickupType[player_idx] = (creativePickupType[player_idx] + 1) % 4;
+            creativePickupType[player_idx] = (creativePickupType[player_idx] + 1) % PICKUP_TYPE_COUNT;
         }
         if (IsKeyPressed(KEY_KP_1)) {
             creativeBlockColorIndex[player_idx]--;
@@ -9404,7 +9455,7 @@ static void update_creative_player_gamepad(int player_idx, float dt) {
         creativeBlockColorIndex[player_idx]++;
     }
     if (IsGamepadButtonPressed(player_idx, GAMEPAD_BUTTON_RIGHT_FACE_DOWN)) {
-        creativePickupType[player_idx] = (creativePickupType[player_idx] + 1) % 4;
+        creativePickupType[player_idx] = (creativePickupType[player_idx] + 1) % PICKUP_TYPE_COUNT;
     }
     if (IsGamepadButtonPressed(player_idx, GAMEPAD_BUTTON_RIGHT_TRIGGER_2)) {
         creative_place_voxels(player_idx);
@@ -9701,6 +9752,8 @@ static void kill_player(int player_index, int attacker_index,
     player->exposed_flash_timer = 0.35f;
     player->invuln_timer = 0.0f;
     player->tetherHolding = false;
+    player->goldTetherCharged = false;
+    player->goldTetherHolding = false;
     player->tetherVoxel = -1;
     player->tetherVoxelIdentity = 0;
     player->dynamicShotActive = false;
@@ -9877,7 +9930,7 @@ static void update_projectiles(float dt)
                     player_t = 0.0f;
                 }
                 if (first_voxel_hit_detailed(block_ray, distance, i, false, &blocker) &&
-                    blocker.entry_t < player_t) {
+                    blocker.t < player_t) {
                     break;
                 }
                 int damage = player_bullet_damage(v->owner);
@@ -10286,6 +10339,9 @@ static void evaluate_voxel_fracture(Voxel *voxel) {
     if (!voxel->simulate || !voxel->vgs_active || voxel->isBullet || voxel->type != 0 || voxel->debugClusterTag == DEBUG_CONTAINER_TAG) {
         return;
     }
+    int voxel_idx = (int)(voxel - voxels);
+    int holder = (voxel_idx >= 0 && voxel_idx < voxel_count) ? tetherTag[voxel_idx] - 1 : -1;
+    if (holder >= 0 && holder < MAX_PLAYERS && players[holder].goldTetherHolding) return;
     if (voxel->rest_edge <= 0.0f) {
         return;
     }
@@ -10385,7 +10441,6 @@ static void evaluate_voxel_fracture(Voxel *voxel) {
             return;
         }
 
-        int voxel_idx = (int)(voxel - voxels);
         bool is_tethered = (voxel_idx >= 0 && voxel_idx < voxel_count && tetherTag[voxel_idx] > 0);
 
         if (is_tethered) {
@@ -10503,8 +10558,9 @@ static void integrate_particles(float dt) {
             }
         }
 
-        for (int c = 0; c < 4; ++c) {
-            int corner_idx = face_corner_indices[tether_face][c];
+        bool gold = players[tether_player].goldTetherHolding;
+        for (int c = 0; c < (gold ? VOXEL_CORNER_COUNT : 4); ++c) {
+            int corner_idx = gold ? c : face_corner_indices[tether_face][c];
             Particle *p = voxel->particles[corner_idx];
             if (!p || p->inv_mass <= 0.0f) {
                 continue;
@@ -12201,6 +12257,9 @@ static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx)
     if (!dynamic->simulate || !dynamic->glueEligible) {
         return;
     }
+    int holder = tetherTag[voxel_idx] - 1;
+    if (holder >= 0 && holder < MAX_PLAYERS && players[holder].goldTetherHolding)
+        return;
 
     for (int face = 0; face < 6; ++face) {
         int nx = dynamic->gx + face_offsets[face][0];
@@ -13971,6 +14030,8 @@ static void init_firefight_bot_entity(int i, EnemyType etype, InputType botDiff)
     b->exposed_flash_timer = 0.0f;
     b->invuln_timer = 1.0f;
     b->tetherHolding = false;
+    b->goldTetherCharged = false;
+    b->goldTetherHolding = false;
     b->tetherVoxel = -1;
     b->tetherVoxelIdentity = 0;
     b->dynamicShotActive = false;
@@ -14257,7 +14318,9 @@ static Vector3 player_tether_hold_position(const Player *p) {
     } else {
         right = v_mul(right, 1.0f / right_len);
     }
-    Vector3 pos = v_add(p->pos, v_mul(forward, TETHER_HOLD_FORWARD));
+    float forward_distance = (p->goldTetherHolding || p->netGoldTetherVisualActive)
+        ? GOLD_TETHER_HOLD_FORWARD : TETHER_HOLD_FORWARD;
+    Vector3 pos = v_add(p->pos, v_mul(forward, forward_distance));
     pos = v_add(pos, v_mul(right, TETHER_HOLD_RIGHT));
     pos.y += TETHER_HOLD_UP;
     return pos;
@@ -14782,6 +14845,82 @@ static int rip_single_static_voxel(int voxel_idx, int activator) {
     return new_idx;
 }
 
+// Separate a selected dynamic island from static anchors without splitting
+// particles shared by its own voxels. All clones are allocated before rewiring.
+static bool detach_gold_tether_static_boundary(const int *group, int count)
+{
+    if (!group || count <= 0) return false;
+    int original_pool_count = particle_pool_count;
+    Particle **replacement = (Particle **)calloc((size_t)original_pool_count, sizeof(*replacement));
+    if (!replacement) return false;
+    int static_stamp = ++particle_sync_stamp;
+    if (static_stamp == 0) static_stamp = particle_sync_stamp = 1;
+    for (int i = 0; i < voxel_count; ++i) {
+        if (voxels[i].simulate) continue;
+        for (int c = 0; c < VOXEL_CORNER_COUNT; ++c) {
+            Particle *p = voxels[i].particles[c];
+            if (p) p->sync_stamp = static_stamp;
+        }
+    }
+
+    bool ready = true;
+    for (int i = 0; i < count && ready; ++i) {
+        Voxel *v = &voxels[group[i]];
+        for (int c = 0; c < VOXEL_CORNER_COUNT; ++c) {
+            Particle *p = v->particles[c];
+            if (!p || p->sync_stamp != static_stamp) continue;
+            ptrdiff_t pool_id = p - particles_pool;
+            if (pool_id < 0 || pool_id >= original_pool_count) { ready = false; break; }
+            if (replacement[pool_id]) continue;
+            Particle *clone = particle_clone(p);
+            if (!clone) { ready = false; break; }
+            clone->inv_mass = clone->base_inv_mass = 1.0f;
+            clone->vel = v->vel;
+            clone->prev_pos = clone->predicted_pos = clone->pos;
+            if (clone->sim_index < 0) sim_particles_add(clone);
+            replacement[pool_id] = clone;
+        }
+    }
+    if (!ready) {
+        for (int i = 0; i < original_pool_count; ++i)
+            if (replacement[i]) particle_release(replacement[i]);
+        free(replacement);
+        return false;
+    }
+
+    for (int i = 0; i < count; ++i) {
+        Voxel *v = &voxels[group[i]];
+        for (int c = 0; c < VOXEL_CORNER_COUNT; ++c) {
+            Particle *old = v->particles[c];
+            if (!old || old->sync_stamp != static_stamp) continue;
+            ptrdiff_t pool_id = old - particles_pool;
+            Particle *clone = replacement[pool_id];
+            if (!clone) continue;
+            if (clone->glue_count > 0) particle_retain(clone);
+            clone->glue_count++;
+            if (old->glue_count > 0) old->glue_count--;
+            v->particles[c] = clone;
+            particle_release(old);
+        }
+        for (int face = 0; face < 6; ++face) {
+            if (!v->glued_faces[face]) continue;
+            int neighbor = v->glued_neighbors[face];
+            if (neighbor < 0 || neighbor >= voxel_count || voxels[neighbor].simulate) continue;
+            int opposite = opposite_face[face];
+            voxels[neighbor].glued_faces[opposite] = false;
+            voxels[neighbor].glued_neighbors[opposite] = -1;
+            v->glued_faces[face] = false;
+            v->glued_neighbors[face] = -1;
+        }
+        v->sleeping = false;
+        v->sleepFrames = 0;
+    }
+    free(replacement);
+    collisionTopologyDirty = true;
+    dynamic_voxels_dirty = true;
+    return true;
+}
+
 static bool resolve_tether_voxel(Player *player)
 {
     if (!player || !player->tetherHolding || player->tetherVoxelIdentity == 0) {
@@ -14792,6 +14931,7 @@ static bool resolve_tether_voxel(Player *player)
         Voxel *v = &voxels[player->tetherVoxel];
         if (v->simulate && !v->vgs_active) {
             player->tetherHolding = false;
+            player->goldTetherHolding = false;
             player->tetherVoxel = -1;
             player->tetherVoxelIdentity = 0;
             return false;
@@ -14809,6 +14949,7 @@ static bool resolve_tether_voxel(Player *player)
         }
     }
     player->tetherHolding = false;
+    player->goldTetherHolding = false;
     player->tetherVoxel = -1;
     player->tetherVoxelIdentity = 0;
     return false;
@@ -14822,7 +14963,8 @@ static void start_tether(int idx) {
     Vector3 dir = player_forward(p);
     Ray ray = { p->pos, dir };
     VoxelHit hit_info;
-    if (!first_voxel_hit_detailed(ray, TETHER_RANGE, -1, false, &hit_info)) {
+    float reach = p->goldTetherCharged ? GOLD_TETHER_RANGE : TETHER_RANGE;
+    if (!first_voxel_hit_detailed(ray, reach, -1, false, &hit_info)) {
         return;
     }
     int hit_id = hit_info.id;
@@ -14849,14 +14991,16 @@ static void start_tether(int idx) {
     int tether_idx = -1;
     if (!hit->simulate) {
         // Tether activates voxels just like mining or moving active voxels
+        Vector3 hit_pos = hit->pos;
         int h_gx = hit->gx, h_gy = hit->gy, h_gz = hit->gz;
-        activate_static_voxel_for_tether(hit_id, idx, ACTIVATION_TETHER_BELIEF);
+        if (!activate_static_voxel_for_tether(hit_id, idx, ACTIVATION_TETHER_BELIEF))
+            return;
         int new_idx = table_get(h_gx, h_gy, h_gz);
         if (new_idx >= 0 && new_idx < voxel_count && voxels[new_idx].simulate &&
             voxels[new_idx].vgs_active && !voxels[new_idx].isBullet && voxels[new_idx].type == 0) {
             tether_idx = new_idx;
         } else {
-            tether_idx = find_closest_dynamic_voxel(hit->pos, 2.5f);
+            tether_idx = find_closest_dynamic_voxel(hit_pos, 2.5f);
         }
     } else {
         tether_idx = hit_id;
@@ -14870,6 +15014,17 @@ static void start_tether(int idx) {
         return;
     }
 
+    int gold_count = 0;
+    if (p->goldTetherCharged) {
+        gold_count = build_glue_cluster_indices(tether_idx, glueClusterIndices);
+        if (gold_count <= 0) return;
+        for (int c = 0; c < gold_count; ++c) {
+            int holder = tetherTag[glueClusterIndices[c]];
+            if (holder > 0 && holder != idx + 1) return;
+        }
+        if (!detach_gold_tether_static_boundary(glueClusterIndices, gold_count)) return;
+    }
+
     if (voxels[tether_idx].simulate) {
         detach_goliath_armor_voxel(tether_idx);
         voxels[tether_idx].owner = idx;
@@ -14878,9 +15033,16 @@ static void start_tether(int idx) {
     }
 
     p->tetherHolding = true;
+    p->goldTetherHolding = p->goldTetherCharged;
     p->tetherVoxel = tether_idx;
     p->tetherVoxelIdentity = voxels[tether_idx].identity;
     p->tetherFace = hit_face;
+    if (p->goldTetherHolding) {
+        for (int c = 0; c < gold_count; ++c) tetherTag[glueClusterIndices[c]] = idx + 1;
+        tetherTargetByPlayer[idx] = player_tether_hold_position(p);
+        measure_tether_cluster(idx, glueClusterIndices, gold_count);
+        tetherScaleByPlayer[idx] = 1.0f;
+    }
     play_sfx(SFX_TETHER);
 }
 
@@ -14958,6 +15120,7 @@ static void prepare_tether_forces(void) {
         Voxel *v = &voxels[p->tetherVoxel];
         if (v->simulate && (!v->vgs_active || v->isBullet || v->type != 0 || voxel_is_fluid(v))) {
             p->tetherHolding = false;
+            p->goldTetherHolding = false;
             p->tetherVoxel = -1;
             p->tetherVoxelIdentity = 0;
             continue;
@@ -14977,17 +15140,40 @@ static void prepare_tether_forces(void) {
                 v = &voxels[new_idx];
             } else {
                 p->tetherHolding = false;
+                p->goldTetherHolding = false;
                 p->tetherVoxel = -1;
                 p->tetherVoxelIdentity = 0;
                 continue;
             }
         }
         tetherTargetByPlayer[i] = player_tether_hold_position(p);
-        tetherComByPlayer[i] = v->pos;
-        tetherScaleByPlayer[i] = 1.0f;
-        tetherTag[p->tetherVoxel] = i + 1;
-        v->activationBelief = 1.0f;
-        v->activationCooldownFrames = 0;
+        if (p->goldTetherHolding) {
+            int group_count = build_glue_cluster_indices(p->tetherVoxel, glueClusterIndices);
+            if (group_count <= 0) {
+                p->tetherHolding = false;
+                p->goldTetherHolding = false;
+                p->tetherVoxel = -1;
+                p->tetherVoxelIdentity = 0;
+                continue;
+            }
+            measure_tether_cluster(i, glueClusterIndices, group_count);
+            tetherScaleByPlayer[i] = 1.0f;
+            for (int c = 0; c < group_count; ++c) {
+                int member_idx = glueClusterIndices[c];
+                Voxel *member = &voxels[member_idx];
+                member->sleeping = false;
+                member->sleepFrames = 0;
+                member->activationBelief = 1.0f;
+                member->activationCooldownFrames = 0;
+                tetherTag[member_idx] = i + 1;
+            }
+        } else {
+            tetherComByPlayer[i] = v->pos;
+            tetherScaleByPlayer[i] = 1.0f;
+            tetherTag[p->tetherVoxel] = i + 1;
+            v->activationBelief = 1.0f;
+            v->activationCooldownFrames = 0;
+        }
     }
 }
 
@@ -15010,7 +15196,8 @@ static void release_tether(int idx) {
                 glueClusterIndices[0] = p->tetherVoxel;
                 cluster_count = 1;
             }
-            Vector3 impulse = v_mul(dir, TETHER_THROW_IMPULSE / (float)cluster_count);
+            Vector3 impulse = v_mul(dir, p->goldTetherHolding
+                ? TETHER_THROW_IMPULSE : TETHER_THROW_IMPULSE / (float)cluster_count);
             int stamp = ++particle_sync_stamp;
             if (stamp == 0) {
                 stamp = 1;
@@ -15046,10 +15233,14 @@ static void release_tether(int idx) {
             // dynamic wall voxels must not adopt its corner particles.
             if (v->tetherThrowCcdFrames > 0) v->glueEligible = false;
             track_tether_throw_ccd(v);
+            if (p->goldTetherHolding) p->goldTetherCharged = false;
         }
     }
+    for (int i = 0; i < voxel_count; ++i)
+        if (tetherTag[i] == idx + 1) tetherTag[i] = 0;
     play_sfx(SFX_TETHER);
     p->tetherHolding = false;
+    p->goldTetherHolding = false;
     p->tetherVoxel = -1;
     p->tetherVoxelIdentity = 0;
 }
@@ -17012,6 +17203,10 @@ static bool player_tether_visual_target(int player_index, Vector3 *out_target) {
     }
     if (!p->tetherHolding || !resolve_tether_voxel(p)) return false;
     if (p->tetherVoxel < 0 || p->tetherVoxel >= voxel_count) return false;
+    if (p->goldTetherHolding) {
+        *out_target = tetherComByPlayer[player_index];
+        return true;
+    }
     Voxel *v = &voxels[p->tetherVoxel];
     int face = p->tetherFace;
     if (face >= 0 && face < 6) {
@@ -17038,11 +17233,14 @@ static void draw_player_tether_world(int player_index) {
     if (!player_tether_visual_target(player_index, &center)) return;
     Vector3 hand = player_tether_hold_position(&players[player_index]);
     float tether_radius = 0.05f;
+    bool gold = players[player_index].goldTetherHolding ||
+                players[player_index].netGoldTetherVisualActive;
     DrawCylinderEx(hand, center, tether_radius * 1.6f, tether_radius * 1.6f, 6,
-                   (Color){ 80, 170, 255, 80 });
+                   gold ? (Color){ 255, 185, 35, 100 } : (Color){ 80, 170, 255, 80 });
     DrawCylinderEx(hand, center, tether_radius, tether_radius, 6,
-                   (Color){ 120, 200, 255, 220 });
-    DrawSphere(center, 0.08f, (Color){ 80, 170, 255, 180 });
+                   gold ? (Color){ 255, 220, 85, 240 } : (Color){ 120, 200, 255, 220 });
+    DrawSphere(center, 0.08f,
+               gold ? (Color){ 255, 205, 55, 210 } : (Color){ 80, 170, 255, 180 });
 }
 
 static void draw_players(void) {
@@ -17460,7 +17658,7 @@ static NetInputCommand net_sample_local_input(int local_index, int player_slot) 
         if (IsKeyPressed(KEY_RIGHT_BRACKET)) creativeBrushSpan[slot] = clampi(creativeBrushSpan[slot] + 1, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
         if (IsKeyPressed(KEY_V)) ++creativeBlockColorIndex[slot];
         if (IsKeyPressed(KEY_B)) --creativeBlockColorIndex[slot];
-        if (IsKeyPressed(KEY_TAB)) creativePickupType[slot] = (creativePickupType[slot] + 1) % 4;
+        if (IsKeyPressed(KEY_TAB)) creativePickupType[slot] = (creativePickupType[slot] + 1) % PICKUP_TYPE_COUNT;
         command.creative_brush = (uint8_t)creativeBrushSpan[slot];
         command.creative_color = (uint8_t)creativeBlockColorIndex[slot];
         command.creative_pickup = (uint8_t)creativePickupType[slot];
@@ -18254,6 +18452,7 @@ static void net_write_player_state(NetWriter *writer, int slot) {
         voxels[p->tetherVoxel].identity == p->tetherVoxelIdentity &&
         (!voxels[p->tetherVoxel].simulate || voxels[p->tetherVoxel].vgs_active)) {
         visual.flags |= NET_PLAYER_VISUAL_TETHER;
+        if (p->goldTetherHolding) visual.flags |= NET_PLAYER_VISUAL_GOLD_TETHER;
         Vector3 target;
         if (player_tether_visual_target(slot, &target)) {
             visual.tether_x = target.x;
@@ -18470,7 +18669,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
         for (uint8_t i = 0; i < count && i < MAX_PICKUPS && !reader.failed; ++i) {
             pickups[i].pos = (Vector3){ net_read_f32(&reader), net_read_f32(&reader), net_read_f32(&reader) };
             pickups[i].respawnTimer = net_read_f32(&reader);
-            pickups[i].type = (PickupType)(net_read_u8(&reader) % 4);
+            pickups[i].type = (PickupType)(net_read_u8(&reader) % PICKUP_TYPE_COUNT);
             pickups[i].active = net_read_u8(&reader) != 0;
         }
     } else if (header.type == NET_MSG_PLAYER_STATE) {
@@ -18511,6 +18710,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
                 }
             }
             p->netTetherVisualActive = (state.visual.flags & NET_PLAYER_VISUAL_TETHER) != 0;
+            p->netGoldTetherVisualActive = (state.visual.flags & NET_PLAYER_VISUAL_GOLD_TETHER) != 0;
             if (p->netTetherVisualActive) {
                 p->netTetherVisualTarget = (Vector3){ state.visual.tether_x,
                                                       state.visual.tether_y,
@@ -18585,7 +18785,7 @@ static void net_host_tick(void) {
         if (netRequestedCreative) {
             creativeBrushSpan[slot] = clampi(command.creative_brush, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
             creativeBlockColorIndex[slot] = command.creative_color;
-            creativePickupType[slot] = command.creative_pickup % 4;
+            creativePickupType[slot] = command.creative_pickup % PICKUP_TYPE_COUNT;
             net_apply_creative_command(&players[slot], &command, 1.0f / FPS_NET_TICK_RATE);
             if (command.pressed & NET_INPUT_CREATIVE_PLACE) creative_place_voxels(slot);
             if (command.pressed & NET_INPUT_CREATIVE_REMOVE) creative_remove_voxels(slot);
@@ -20357,6 +20557,8 @@ int main(int argc, char **argv) {
                     players[i].matter_flash_timer = 0.0f;
                     players[i].exposed_flash_timer = 0.0f;
                     players[i].tetherHolding = false;
+                    players[i].goldTetherCharged = false;
+                    players[i].goldTetherHolding = false;
                     players[i].tetherVoxel = -1;
                     players[i].tetherVoxelIdentity = 0;
                     players[i].meleeKnockbackActive = false;
@@ -20790,6 +20992,7 @@ int main(int argc, char **argv) {
         greedyMaterialInit = false;
     }
     shutdown_shard_rendering();
+    if (goldPickupShader.id != 0) UnloadShader(goldPickupShader);
     shutdown_world_visuals();
     free(netVoxelProxies);
     free(netVoxelProxyMap);

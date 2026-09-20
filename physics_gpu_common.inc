@@ -530,6 +530,7 @@ static bool gpu_pack_world(void) {
         if (!v->simulate || v->type != 0 || v->isBullet || !v->vgs_active || tetherTag[i] <= 0) continue;
         int player = tetherTag[i] - 1;
         if (player < 0 || player >= MAX_PLAYERS) continue;
+        bool gold = players[player].goldTetherHolding;
         int tether_face = players[player].tetherFace;
         if (tether_face < 0 || tether_face >= 6) {
             Vector3 delta = v_sub(tetherTargetByPlayer[player], v->pos);
@@ -543,13 +544,13 @@ static bool gpu_pack_world(void) {
                 }
             }
         }
-        for (int c = 0; c < 4; ++c) {
-            int corner = face_corner_indices[tether_face][c];
+        for (int c = 0; c < (gold ? VOXEL_CORNER_COUNT : 4); ++c) {
+            int corner = gold ? c : face_corner_indices[tether_face][c];
             ptrdiff_t pool_id = v->particles[corner] - particles_pool;
             if (pool_id < 0 || pool_id >= particle_pool_count) continue;
             int id = gpuPhysics.pool_to_compact[pool_id];
             if (id < 0 || gpuPhysics.tether_stage[id] >= 0) continue;
-            gpuPhysics.tether_stage[id] = player;
+            gpuPhysics.tether_stage[id] = gold ? player + MAX_PLAYERS : player;
         }
     }
     return true;
@@ -989,6 +990,11 @@ static bool gpu_validate_and_commit(void) {
         Voxel *v = &voxels[voxel_id]; GpuVoxelState *g = &gpuPhysics.voxel_stage[i];
         if (v->vgs_active && g->flags[0] == 0) {
             bool is_tethered = (voxel_id >= 0 && voxel_id < voxel_count && tetherTag[voxel_id] > 0);
+            int holder = is_tethered ? tetherTag[voxel_id] - 1 : -1;
+            if (holder >= 0 && holder < MAX_PLAYERS && players[holder].goldTetherHolding) {
+                g->flags[0] = 1;
+                continue;
+            }
             if (is_tethered) {
                 v->vgs_active = true;
                 v->glueEligible = false;
@@ -1127,6 +1133,7 @@ static bool gpu_refresh_tethers(void) {
         if (v->type != 0 || v->isBullet || !v->vgs_active || tetherTag[world_id] <= 0) continue;
         int player = tetherTag[world_id] - 1;
         if (player < 0 || player >= MAX_PLAYERS) continue;
+        bool gold = players[player].goldTetherHolding;
         int tether_face = players[player].tetherFace;
         if (tether_face < 0 || tether_face >= 6) {
             Vector3 delta = v_sub(tetherTargetByPlayer[player], v->pos);
@@ -1140,13 +1147,13 @@ static bool gpu_refresh_tethers(void) {
                 }
             }
         }
-        for (int c = 0; c < 4; ++c) {
-            int corner = face_corner_indices[tether_face][c];
+        for (int c = 0; c < (gold ? VOXEL_CORNER_COUNT : 4); ++c) {
+            int corner = gold ? c : face_corner_indices[tether_face][c];
             ptrdiff_t pool_id = v->particles[corner] - particles_pool;
             if (pool_id < 0 || pool_id >= particle_pool_count) continue;
             int id = gpuPhysics.pool_to_compact[pool_id];
             if (id < 0 || id >= gpuPhysics.compact_count || gpuPhysics.tether_stage[id] >= 0) continue;
-            gpuPhysics.tether_stage[id] = player;
+            gpuPhysics.tether_stage[id] = gold ? player + MAX_PLAYERS : player;
         }
     }
     bool changed = memcmp(gpuPhysics.tether_compare_stage, gpuPhysics.tether_stage,
