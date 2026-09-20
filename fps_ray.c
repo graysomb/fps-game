@@ -1091,6 +1091,11 @@ typedef struct {
 } Voxel;
 static Voxel voxels[MAX_VOXELS];
 typedef struct {
+    float latest[6];
+    float previous[6];
+    float curvature;
+} VgsCurvatureHistory;
+typedef struct {
     Particle *particles[8];
     int children[8]; // Internal node index, or -(world voxel index + 1) at the leaf level.
     int parent;
@@ -1105,10 +1110,51 @@ typedef struct {
     int levels;
     int node_count;
     int leaf_count;
+    VgsCurvatureHistory *node_history;
+    VgsCurvatureHistory *leaf_history; // Indexed by world voxel ID.
+    int sample_count;
+    bool adaptive;
+    unsigned refine_count;
+    unsigned coarsen_count;
+    float mass_density;
+    uint64_t topology_generation;
 } VgsHierarchy;
 static VgsHierarchy vgsHierarchy;
+static uint8_t vgs_terminal_child_mask(const VgsHierarchyNode *node)
+{
+    uint8_t mask = 0;
+    for (int c = 0; c < 8; ++c) {
+        int child = node->children[c];
+        if (child < 0) {
+            if (voxels[-child - 1].simulate_dofs) mask |= (uint8_t)(1u << c);
+        } else if (vgsHierarchy.nodes[child].active) {
+            bool has_active_children = false;
+            for (int k = 0; k < 8; ++k) {
+                int grandchild = vgsHierarchy.nodes[child].children[k];
+                if (grandchild >= 0 ? vgsHierarchy.nodes[grandchild].active :
+                    voxels[-grandchild - 1].simulate_dofs) {
+                    has_active_children = true;
+                    break;
+                }
+            }
+            if (!has_active_children) mask |= (uint8_t)(1u << c);
+        }
+    }
+    return mask;
+}
+static bool vgs_node_has_active_children(const VgsHierarchyNode *node)
+{
+    for (int c = 0; c < 8; ++c) {
+        int child = node->children[c];
+        if (child >= 0 ? vgsHierarchy.nodes[child].active :
+            voxels[-child - 1].simulate_dofs) return true;
+    }
+    return false;
+}
 static void clear_vgs_hierarchy(void) {
     free(vgsHierarchy.nodes);
+    free(vgsHierarchy.node_history);
+    free(vgsHierarchy.leaf_history);
     memset(&vgsHierarchy, 0, sizeof(vgsHierarchy));
 }
 static uint64_t nextVoxelIdentity = 1;
@@ -1777,6 +1823,7 @@ static bool debugLogFall = false;
 static bool debugShowBeliefColors = false;
 static bool debugColorVoxelsByVgsTemporalCurvature = false;
 static bool debugRefinementCoarse = false;
+static bool debugAdaptiveOctree = false;
 typedef struct {
     float latest[6];
     float previous[6];
@@ -1789,6 +1836,7 @@ static float debugVgsTemporalLastMax = 0.0f;
 static float debugVgsTemporalLastMean = 0.0f;
 // VGS strain/shear are dimensionless; temporal curvature has units of 1/s^2.
 #define VGS_TEMPORAL_CURVATURE_RED_AT 100.0f
+#define VGS_ADAPTIVE_CURVATURE_THRESHOLD 50.0f
 static unsigned char debugTagBreakLogged[DEBUG_CLUSTER_TAG_MAX];
 
 static const char *trace_level_label(int level) {
@@ -3260,6 +3308,50 @@ static bool voxel_vgs_deformation(const Voxel *voxel, VgsDeformation *result)
     return true;
 }
 
+static void vgs_sample_curvature_history(VgsCurvatureHistory *history,
+                                         const VgsDeformation *deformation,
+                                         int samples, float inv_dt_squared)
+{
+    float current[6] = {
+        deformation->strain[0], deformation->strain[1], deformation->strain[2],
+        deformation->shear[0], deformation->shear[1], deformation->shear[2]
+    };
+    float curvature = 0.0f;
+    if (samples >= 2) for (int i = 0; i < 6; ++i)
+        curvature = fmaxf(curvature, fabsf(current[i] - 2.0f * history->latest[i] +
+                                          history->previous[i]) * inv_dt_squared);
+    memcpy(history->previous, history->latest, sizeof(history->previous));
+    memcpy(history->latest, current, sizeof(history->latest));
+    history->curvature = isfinite(curvature) ? curvature : VGS_TEMPORAL_CURVATURE_RED_AT;
+}
+
+static void vgs_hierarchy_sample_curvature(float dt)
+{
+    if (!vgsHierarchy.leaf_history || dt <= 0.0f) return;
+    float inv_dt_squared = 1.0f / (dt * dt);
+    for (int i = 0; i < vgsHierarchy.node_count; ++i) {
+        VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+        Vector3 corners[8];
+        bool valid = true;
+        for (int c = 0; c < 8; ++c) {
+            if (!node->particles[c]) { valid = false; break; }
+            corners[c] = node->particles[c]->pos;
+        }
+        if (!valid) continue;
+        VgsDeformation deformation = measure_vgs_deformation(corners, node->rest_edge);
+        vgs_sample_curvature_history(&vgsHierarchy.node_history[i], &deformation,
+                                     vgsHierarchy.sample_count, inv_dt_squared);
+    }
+    for (int i = 0; i < voxel_count; ++i) {
+        if (!voxels[i].simulate || voxels[i].type != 0 || voxels[i].isBullet) continue;
+        VgsDeformation deformation;
+        if (!voxel_vgs_deformation(&voxels[i], &deformation)) continue;
+        vgs_sample_curvature_history(&vgsHierarchy.leaf_history[i], &deformation,
+                                     vgsHierarchy.sample_count, inv_dt_squared);
+    }
+    ++vgsHierarchy.sample_count;
+}
+
 static void debug_reset_vgs_temporal_curvature(void)
 {
     free(debugVgsTemporalVoxels);
@@ -3282,6 +3374,7 @@ static bool debug_init_vgs_temporal_curvature(void)
 static void debug_sample_vgs_temporal_curvature(float dt)
 {
     if (!debugVgsTemporalVoxels || dt <= 0.0f) return;
+    if (!vgsHierarchy.adaptive) vgs_hierarchy_sample_curvature(dt);
     float inv_dt_squared = 1.0f / (dt * dt);
     double sum = 0.0;
     int count = 0;
@@ -3334,6 +3427,10 @@ static Color voxel_display_color(const Voxel *voxel)
     if (debugShowBeliefColors) {
         return voxel_belief_debug_color(voxel);
     }
+    if (debugAdaptiveOctree && voxel->simulate && voxel->type == 0)
+        return ColorFromHSV(235.0f - 235.0f *
+                            ((float)vgsHierarchy.levels / fmaxf(1.0f, (float)vgsHierarchy.levels)),
+                            0.8f, 0.9f);
     if (debugColorVoxelsByVgsTemporalCurvature && voxel->simulate &&
         voxel->type == 0 && !voxel->isBullet) {
         return voxel_vgs_temporal_curvature_color(voxel);
@@ -10634,13 +10731,15 @@ static const float weld_coarsen_axis[2][3] = {
     {-1.0f / 6.0f, 1.0f / 3.0f, 5.0f / 6.0f}
 };
 
-static void gather_hierarchy_weld_constraints(VgsHierarchyNode *node) {
+static void gather_hierarchy_weld_constraints(VgsHierarchyNode *node,
+                                              uint8_t terminal_mask, bool include_coarsening) {
     Particle *fine[27];
     Vector3 fine_pos[27], coarse_pos[8];
     for (int c = 0; c < 8; ++c) {
         if (!node->particles[c]) return;
         int child = node->children[c];
-        if (child < 0 && !voxels[-child - 1].simulate_dofs) return;
+        if ((terminal_mask & (1u << c)) && child < 0 &&
+            !voxels[-child - 1].simulate_dofs) return;
         coarse_pos[c] = node->particles[c]->predicted_pos;
     }
     for (int gz = 0; gz < 3; ++gz) for (int gy = 0; gy < 3; ++gy)
@@ -10661,6 +10760,14 @@ static void gather_hierarchy_weld_constraints(VgsHierarchyNode *node) {
     for (int r = 0; r < 27; ++r) {
         int gx = r % 3, gy = (r / 3) % 3, gz = r / 9;
         if (gx != 1 && gy != 1 && gz != 1) continue;
+        bool covered = false;
+        for (int c = 0; c < 8; ++c) {
+            if (!(terminal_mask & (1u << c))) continue;
+            int cx = c & 1, cy = (c >> 1) & 1, cz = (c >> 2) & 1;
+            if (gx >= cx && gx <= cx + 1 && gy >= cy && gy <= cy + 1 &&
+                gz >= cz && gz <= cz + 1) { covered = true; break; }
+        }
+        if (!covered) continue;
         if (fine[r]->inv_mass <= 0.0f) continue;
         Vector3 target = {0};
         for (int c = 0; c < 8; ++c) {
@@ -10673,6 +10780,7 @@ static void gather_hierarchy_weld_constraints(VgsHierarchyNode *node) {
     }
     // Independently fit the parent to all 27 fine points with the exact
     // pseudoinverse. Both constraint families use this iteration's snapshot.
+    if (!include_coarsening) return;
     for (int c = 0; c < 8; ++c) {
         Particle *p = node->particles[c];
         if (p->inv_mass <= 0.0f) continue;
@@ -10686,6 +10794,203 @@ static void gather_hierarchy_weld_constraints(VgsHierarchyNode *node) {
         }
         accumulate_particle_correction(p, v_sub(target, coarse_pos[c]), p->inv_mass);
     }
+}
+
+static bool vgs_hierarchy_grid_points(const VgsHierarchyNode *node, Particle *grid[27])
+{
+    for (int r = 0; r < 27; ++r) {
+        int gx = r % 3, gy = (r / 3) % 3, gz = r / 9;
+        int child_corner = (gx == 2) | ((gy == 2) << 1) | ((gz == 2) << 2);
+        int local_corner = (gx != 0) | ((gy != 0) << 1) | ((gz != 0) << 2);
+        int child = node->children[child_corner];
+        grid[r] = child >= 0 ? vgsHierarchy.nodes[child].particles[local_corner] :
+            voxels[-child - 1].particles[local_corner];
+        if (!grid[r]) return false;
+    }
+    return true;
+}
+
+static void vgs_hierarchy_transfer_refine(VgsHierarchyNode *node, bool activate)
+{
+    Particle *grid[27];
+    if (!vgs_hierarchy_grid_points(node, grid)) return;
+    Vector3 pos[8], vel[8];
+    for (int c = 0; c < 8; ++c) {
+        pos[c] = node->particles[c]->pos;
+        vel[c] = node->particles[c]->vel;
+    }
+    for (int r = 0; r < 27; ++r) {
+        int gx = r % 3, gy = (r / 3) % 3, gz = r / 9;
+        if (gx != 1 && gy != 1 && gz != 1) continue;
+        if (grid[r]->base_inv_mass > 0.0f) continue;
+        Vector3 target_pos = {0}, target_vel = {0};
+        for (int c = 0; c < 8; ++c) {
+            float w = weld_refine_axis[gx][c & 1] *
+                      weld_refine_axis[gy][(c >> 1) & 1] *
+                      weld_refine_axis[gz][(c >> 2) & 1];
+            target_pos = v_add(target_pos, v_mul(pos[c], w));
+            target_vel = v_add(target_vel, v_mul(vel[c], w));
+        }
+        grid[r]->pos = grid[r]->prev_pos = grid[r]->predicted_pos = target_pos;
+        grid[r]->vel = target_vel;
+    }
+    if (!activate) return;
+    ptrdiff_t node_id = node - vgsHierarchy.nodes;
+    VgsCurvatureHistory parent_history = vgsHierarchy.node_history[node_id];
+    for (int c = 0; c < 8; ++c) {
+        int child = node->children[c];
+        if (child >= 0) {
+            vgsHierarchy.nodes[child].active = true;
+            vgsHierarchy.node_history[child] = parent_history;
+        } else {
+            int world_id = -child - 1;
+            voxels[world_id].simulate_dofs = true;
+            vgsHierarchy.leaf_history[world_id] = parent_history;
+        }
+    }
+    ++vgsHierarchy.refine_count;
+}
+
+static void vgs_hierarchy_transfer_coarsen(VgsHierarchyNode *node)
+{
+    Particle *grid[27];
+    if (!vgs_hierarchy_grid_points(node, grid)) return;
+    Vector3 fine_pos[27], fine_vel[27];
+    for (int r = 0; r < 27; ++r) {
+        fine_pos[r] = grid[r]->pos;
+        fine_vel[r] = grid[r]->vel;
+    }
+    for (int c = 0; c < 8; ++c) {
+        Vector3 target_pos = {0}, target_vel = {0};
+        for (int r = 0; r < 27; ++r) {
+            int gx = r % 3, gy = (r / 3) % 3, gz = r / 9;
+            float w = weld_coarsen_axis[c & 1][gx] *
+                      weld_coarsen_axis[(c >> 1) & 1][gy] *
+                      weld_coarsen_axis[(c >> 2) & 1][gz];
+            target_pos = v_add(target_pos, v_mul(fine_pos[r], w));
+            target_vel = v_add(target_vel, v_mul(fine_vel[r], w));
+        }
+        Particle *p = node->particles[c];
+        p->pos = p->prev_pos = p->predicted_pos = target_pos;
+        p->vel = target_vel;
+    }
+    for (int c = 0; c < 8; ++c) {
+        int child = node->children[c];
+        if (child >= 0) vgsHierarchy.nodes[child].active = false;
+        else voxels[-child - 1].simulate_dofs = false;
+    }
+    Vector3 corners[8];
+    for (int c = 0; c < 8; ++c) corners[c] = node->particles[c]->pos;
+    VgsDeformation d = measure_vgs_deformation(corners, node->rest_edge);
+    VgsCurvatureHistory *history = &vgsHierarchy.node_history[node - vgsHierarchy.nodes];
+    float values[6] = {d.strain[0], d.strain[1], d.strain[2],
+                       d.shear[0], d.shear[1], d.shear[2]};
+    memcpy(history->latest, values, sizeof(values));
+    memcpy(history->previous, values, sizeof(values));
+    history->curvature = 0.0f;
+    ++vgsHierarchy.coarsen_count;
+}
+
+static void vgs_hierarchy_sync_dormant_descendants(VgsHierarchyNode *node)
+{
+    vgs_hierarchy_transfer_refine(node, false);
+    for (int c = 0; c < 8; ++c) {
+        int child = node->children[c];
+        if (child >= 0) vgs_hierarchy_sync_dormant_descendants(&vgsHierarchy.nodes[child]);
+    }
+}
+
+static bool vgs_hierarchy_rebuild_active_masses(void)
+{
+    float *mass = calloc((size_t)particle_pool_count, sizeof(*mass));
+    if (!mass) return false;
+    for (int i = 0; i < vgsHierarchy.node_count; ++i) {
+        VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+        if (!node->active || vgs_node_has_active_children(node)) continue;
+        float contribution = vgsHierarchy.mass_density * node->rest_volume * 0.125f;
+        for (int c = 0; c < 8; ++c) mass[node->particles[c] - particles_pool] += contribution;
+    }
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (!voxel->simulate || !voxel->simulate_dofs) continue;
+        float contribution = vgsHierarchy.mass_density * voxel->rest_volume * 0.125f;
+        for (int c = 0; c < 8; ++c) mass[voxel->particles[c] - particles_pool] += contribution;
+    }
+    while (sim_particle_count > 0) sim_particles_remove(sim_particles[sim_particle_count - 1]);
+    for (int i = 0; i < particle_pool_count; ++i) {
+        Particle *p = &particles_pool[i];
+        p->inv_mass = p->base_inv_mass = mass[i] > 0.0f ? 1.0f / mass[i] : 0.0f;
+        if (mass[i] > 0.0f) sim_particles_add(p);
+    }
+    free(mass);
+    collisionTopologyDirty = true;
+    ++vgsHierarchy.topology_generation;
+    return true;
+}
+
+static bool vgs_hierarchy_initialize_adaptive(void)
+{
+    if (!vgsHierarchy.node_count || !vgsHierarchy.leaf_history) return false;
+    double total_mass = 0.0;
+    for (int i = 0; i < sim_particle_count; ++i)
+        if (sim_particles[i]->base_inv_mass > 0.0f)
+            total_mass += 1.0 / sim_particles[i]->base_inv_mass;
+    vgsHierarchy.mass_density = (float)(total_mass / vgsHierarchy.nodes[0].rest_volume);
+    if (!isfinite(vgsHierarchy.mass_density) || vgsHierarchy.mass_density <= 0.0f) return false;
+    vgsHierarchy.adaptive = true;
+    for (int i = 0; i < vgsHierarchy.node_count; ++i)
+        vgsHierarchy.nodes[i].active = i == 0;
+    for (int i = 0; i < voxel_count; ++i)
+        if (voxels[i].simulate) voxels[i].simulate_dofs = false;
+    if (!vgs_hierarchy_rebuild_active_masses()) return false;
+    vgs_hierarchy_sync_dormant_descendants(&vgsHierarchy.nodes[0]);
+    return true;
+}
+
+static bool vgs_hierarchy_adapt(void)
+{
+    if (!vgsHierarchy.adaptive) return true;
+    uint8_t *refine = calloc((size_t)vgsHierarchy.node_count, 1);
+    uint8_t *coarsen = calloc((size_t)vgsHierarchy.node_count, 1);
+    if (!refine || !coarsen) { free(refine); free(coarsen); return false; }
+    for (int i = 0; i < vgsHierarchy.node_count; ++i) {
+        VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+        if (!node->active) continue;
+        float own = vgsHierarchy.node_history[i].curvature;
+        if (!vgs_node_has_active_children(node)) {
+            refine[i] = own > VGS_ADAPTIVE_CURVATURE_THRESHOLD;
+            continue;
+        }
+        float child_mean = 0.0f;
+        bool active_grandchildren = false;
+        for (int c = 0; c < 8; ++c) {
+            int child = node->children[c];
+            child_mean += child >= 0 ? vgsHierarchy.node_history[child].curvature :
+                vgsHierarchy.leaf_history[-child - 1].curvature;
+            if (child >= 0 && vgs_node_has_active_children(&vgsHierarchy.nodes[child]))
+                active_grandchildren = true;
+        }
+        child_mean *= 0.125f;
+        coarsen[i] = own < VGS_ADAPTIVE_CURVATURE_THRESHOLD &&
+                     child_mean < VGS_ADAPTIVE_CURVATURE_THRESHOLD && !active_grandchildren;
+    }
+    // A child selected from the old snapshot cannot refine under a parent
+    // that is being coarsened in this same topology update.
+    for (int i = 0; i < vgsHierarchy.node_count; ++i) {
+        int parent = vgsHierarchy.nodes[i].parent;
+        if (parent >= 0 && coarsen[parent]) refine[i] = 0;
+    }
+    bool changed = false;
+    for (int i = vgsHierarchy.node_count - 1; i >= 0; --i)
+        if (coarsen[i]) { vgs_hierarchy_transfer_coarsen(&vgsHierarchy.nodes[i]); changed = true; }
+    for (int i = 0; i < vgsHierarchy.node_count; ++i)
+        if (refine[i]) { vgs_hierarchy_transfer_refine(&vgsHierarchy.nodes[i], true); changed = true; }
+    free(refine); free(coarsen);
+    if (changed && !vgs_hierarchy_rebuild_active_masses()) return false;
+    for (int i = 0; i < vgsHierarchy.node_count; ++i)
+        if (vgsHierarchy.nodes[i].active && !vgs_node_has_active_children(&vgsHierarchy.nodes[i]))
+            vgs_hierarchy_sync_dormant_descendants(&vgsHierarchy.nodes[i]);
+    return true;
 }
 
 static void update_vgs_hierarchy_activity(void) {
@@ -10712,7 +11017,8 @@ static void gather_vgs_hierarchy_range(int start, int end, int worker_id, void *
         VgsHierarchyNode *node = &vgsHierarchy.nodes[base + i];
         if (node->active) {
             gather_shape_constraints(node->particles, node->rest_edge, node->rest_volume, true);
-            gather_hierarchy_weld_constraints(node);
+            uint8_t mask = vgsHierarchy.adaptive ? vgs_terminal_child_mask(node) : 0xffu;
+            if (mask) gather_hierarchy_weld_constraints(node, mask, !vgsHierarchy.adaptive);
         }
     }
 }
@@ -13245,7 +13551,7 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
             double tb = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
             if (!PBD_DISABLE_VGS_DEACTIVATION)
                 pbd_parallel_for(0, active_voxel_count, evaluate_voxel_fracture_range, NULL);
-            if (vgsHierarchy.node_count) update_vgs_hierarchy_activity();
+            if (vgsHierarchy.node_count && !vgsHierarchy.adaptive) update_vgs_hierarchy_activity();
             if (pbdProfileEnabled) pbdCpuProfile.t_break_masks_ms += pbd_time_now_ms() - tb;
 
             double tv = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
@@ -13303,8 +13609,8 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
     //log_dynamic_voxel_positions();
 }
 
-static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
-    if (dynamic_particle_count() <= 0 || fixed_steps <= 0) return;
+static void simulate_voxel_pbd_steps_counted(float dt, int fixed_steps, int substeps) {
+    if (dynamic_particle_count() <= 0 || fixed_steps <= 0 || substeps <= 0) return;
     if (sim_particle_count == 0 && fluid_should_skip_reduced_rate_step()) {
         return;
     }
@@ -13316,7 +13622,7 @@ static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
     if (pbdProfileEnabled) pbdCpuProfile.t_metadata_ms += pbd_time_now_ms() - t_meta;
 
     double started = pbdProfileEnabled ? pbd_time_now_ms() : GetTime();
-    const float sub_dt = dt / (float)PBD_SUBSTEPS;
+    const float sub_dt = dt / (float)substeps;
     if (!physics_backend_is_gpu(physicsBackend.active)) physics_try_gpu_recovery();
     static bool hybrid_prefers_gpu = false;
     bool run_gpu = physics_backend_is_gpu(physicsBackend.active) && gpuPhysics.ready;
@@ -13331,7 +13637,7 @@ static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
         }
     }
     if (run_gpu) {
-        int completed_steps = gpu_physics_steps(dt, fixed_steps);
+        int completed_steps = gpu_physics_steps(dt, fixed_steps, substeps);
         if (completed_steps >= fixed_steps) {
             physics_mark_gpu_recovered();
             resolve_tether_throw_ccd_snapshots(tether_ccd_snapshots,
@@ -13345,7 +13651,7 @@ static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
             double tm2 = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
             rebuild_particle_collision_metadata();
             if (pbdProfileEnabled) pbdCpuProfile.t_metadata_ms += pbd_time_now_ms() - tm2;
-            simulate_voxel_pbd_cpu_steps(sub_dt, PBD_SUBSTEPS);
+            simulate_voxel_pbd_cpu_steps(sub_dt, substeps);
         }
         resolve_tether_throw_ccd_snapshots(tether_ccd_snapshots,
                                            tether_ccd_snapshot_count, fixed_steps);
@@ -13361,7 +13667,7 @@ static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
         double tm3 = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
         rebuild_particle_collision_metadata();
         if (pbdProfileEnabled) pbdCpuProfile.t_metadata_ms += pbd_time_now_ms() - tm3;
-        simulate_voxel_pbd_cpu_steps(sub_dt, PBD_SUBSTEPS);
+        simulate_voxel_pbd_cpu_steps(sub_dt, substeps);
     }
     resolve_tether_throw_ccd_snapshots(tether_ccd_snapshots,
                                        tether_ccd_snapshot_count, fixed_steps);
@@ -13369,6 +13675,10 @@ static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
     double step_ms = pbdProfileEnabled ? (pbd_time_now_ms() - started) : (GetTime() - started) * 1000.0;
     physicsBackend.last_step_ms = step_ms;
     if (pbdProfileEnabled) { pbdCpuProfile.step_count += fixed_steps; pbdCpuProfile.t_total_ms += step_ms; }
+}
+
+static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
+    simulate_voxel_pbd_steps_counted(dt, fixed_steps, PBD_SUBSTEPS);
 }
 
 void simulate_voxel_pbd(float dt) { simulate_voxel_pbd_steps(dt, 1); }
@@ -16197,7 +16507,7 @@ static void prepare_dynamic_voxel_transforms(void) {
         if (!v->simulate || voxel_is_fluid(v)) {
             continue;
         }
-        if (debugRefinementCoarse) continue;
+        if (debugRefinementCoarse || (debugAdaptiveOctree && !v->simulate_dofs)) continue;
 
         // Collect Bullet with Orb Shader
         if (v->isBullet && v->type == 0) {

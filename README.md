@@ -473,6 +473,22 @@ Available scenarios are:
   deactivation.
   Resolutions that round beyond the voxel or particle caps fail before activation.
   The JSON report includes both sizes, voxel count, and octree diagnostics.
+* `adaptive-cube-drop`: runs the same drop with the complete octree stored but
+  only the root VGS active initially. After each PBD substep, an active terminal
+  node whose six-component strain/shear time curvature exceeds 50 s^-2 enables all
+  eight children. A parent coarsens when its curvature and the mean child
+  curvature are below 50 s^-2 and no grandchildren remain active. Refinement
+  initializes child positions and velocities with trilinear interpolation;
+  coarsening fits parent positions and velocities with the precomputed left
+  pseudoinverse. The GPU receives a compact, flat list of active VGS constraints
+  and parent-to-terminal-child trilinear welds for each substep. Only active
+  terminal voxels render. The report records transition counts and the
+  `curvature-by-level.csv` file records per-scale curvature distributions.
+  At the 0.25 m requested resolution, the impact activates several octree
+  levels before the tree coarsens again. There is no hysteresis, so cells can
+  change level on consecutive substeps. Dormant descendants follow trilinear
+  parent motion and do not provide an independent fine-scale curvature signal
+  until they become active.
 * `vgs-refinement`: drops a 5 m cube with one root VGS constraint and eight
   dormant 2.5 m child cells. At fixed step 120 (2 seconds), it enables the
   eight child constraints while keeping the root constraint active. The children

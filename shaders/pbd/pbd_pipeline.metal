@@ -275,7 +275,8 @@ constant float WELD_R[6] = {5.0f/6.0f, 1.0f/3.0f, -1.0f/6.0f,
 
 inline void scatterHierarchyWeld(uint voxelId, device ParticleState *particle,
                                  device atomic_uint *correction, device VoxelState *voxel,
-                                 device const int *control) {
+                                 device const int *control, uint terminalMask,
+                                 bool includeCoarsening) {
     VoxelState parent = voxel[voxelId];
     uint fineId[27];
     float3 finePos[27], coarsePos[8];
@@ -283,7 +284,7 @@ inline void scatterHierarchyWeld(uint voxelId, device ParticleState *particle,
         uint id = voxelParticle(parent, c);
         if (id >= uint(controlLoad(control, 0))) return;
         uint child = as_type<uint>(c < 4 ? parent.bounds_min[c] : parent.bounds_max[c - 4]);
-        if (voxel[child].flags.w == 0) return;
+        if ((terminalMask & (1u << c)) != 0u && voxel[child].flags.w == 0) return;
         coarsePos[c] = particle[id].predicted_base_inv_mass.xyz;
     }
     for (int r = 0; r < 27; ++r) {
@@ -300,6 +301,14 @@ inline void scatterHierarchyWeld(uint voxelId, device ParticleState *particle,
     for (int r = 0; r < 27; ++r) {
         int gx = r % 3, gy = (r / 3) % 3, gz = r / 9;
         if (gx != 1 && gy != 1 && gz != 1) continue;
+        bool covered = false;
+        for (int c = 0; c < 8; ++c) {
+            if ((terminalMask & (1u << c)) == 0u) continue;
+            int cx = c & 1, cy = (c >> 1) & 1, cz = (c >> 2) & 1;
+            covered = covered || (gx >= cx && gx <= cx + 1 &&
+                                  gy >= cy && gy <= cy + 1 && gz >= cz && gz <= cz + 1);
+        }
+        if (!covered) continue;
         float weight = particle[fineId[r]].prev_inv_mass.w;
         if (weight <= 0.0f) continue;
         float3 target(0.0f);
@@ -310,6 +319,7 @@ inline void scatterHierarchyWeld(uint voxelId, device ParticleState *particle,
         }
         accumulate(correction, control, fineId[r], target - finePos[r], weight);
     }
+    if (!includeCoarsening) return;
     for (int c = 0; c < 8; ++c) {
         uint id = voxelParticle(parent, c);
         float weight = particle[id].prev_inv_mass.w;
@@ -328,11 +338,8 @@ inline void scatterHierarchyWeld(uint voxelId, device ParticleState *particle,
 inline void solveVgs(uint gid, device ParticleState *particle,
                      device atomic_uint *correction, device VoxelState *voxel,
                      device const int *control, constant GpuUniforms &u) {
-    if (gid >= uint(u.integer_padding_2)) return;
     VoxelState v = voxel[uint(u.integer_padding_1) + gid];
     if (v.flags.x == 0 || v.flags.y != 0 || v.flags.z != 0 || v.flags.w == 0) return;
-    if (uint(u.integer_padding_1) + gid >= uint(u.voxel_count))
-        scatterHierarchyWeld(uint(u.integer_padding_1) + gid, particle, correction, voxel, control);
     float3 p[8], original[8];
     float applyWeight[8];
     bool dynamicParticle = false;
@@ -533,7 +540,15 @@ kernel void pbd_pipeline(
         case MODE_HASH_BUILD:buildHash(gid,particle,cell,collisionId,collisionControl,hashHead,hashNext,refcount,control,u);break;
         case MODE_PAIR_COLLISIONS:pairCollisions(gid,particle,correction,cell,collisionId,collisionControl,hashHead,hashNext,collisionMeta,refcount,control,u);break;
         case MODE_APPLY:applyCorrections(gid,particle,correction,simId,refcount,control,u);break;
-        case MODE_VGS:solveVgs(gid,particle,correction,voxel,control,u);break;
+        case MODE_VGS:
+            if (gid < uint(u.integer_padding_2)) {
+                uint base = 16u + gid * 4u;
+                uint kind = dispatchArgs[base], voxelId = dispatchArgs[base + 1u];
+                if (kind == 0u) solveVgs(voxelId,particle,correction,voxel,control,u);
+                else scatterHierarchyWeld(voxelId,particle,correction,voxel,control,
+                                          dispatchArgs[base + 2u],kind == 2u);
+            }
+            break;
         case MODE_STATIC_COLLISIONS:staticCollisions(gid,particle,collisionId,collisionControl,staticCell,staticCollider,refcount,control,u);break;
         case MODE_BREAK_MASK:gatherBreakMask(gid,particle,voxel,topology,refcount,control,u);break;
         case MODE_FINALIZE_PARTICLES:finalizeParticle(gid,particle,cell,simId,refcount,control,u);break;

@@ -24,11 +24,19 @@ typedef struct {
     uint32_t lifecycle[4];
 } GpuVoxelState;
 
+typedef struct {
+    uint32_t kind;       // 0 VGS, 1 parent-to-terminal weld, 2 legacy two-way weld.
+    uint32_t voxel_id;   // Packed voxel/node stage index.
+    uint32_t child_mask; // Terminal children of this parent.
+    uint32_t reserved;
+} GpuConstraintState;
+
 _Static_assert(sizeof(GpuParticleState) == 64, "GpuParticleState/std430 mismatch");
 _Static_assert(sizeof(GpuCorrectionState) == 16, "GpuCorrectionState/std430 mismatch");
 _Static_assert(sizeof(GpuCellState) == 16, "GpuCellState/std430 mismatch");
 _Static_assert(sizeof(GpuCollisionMeta) == 16, "GpuCollisionMeta/std430 mismatch");
 _Static_assert(sizeof(GpuVoxelState) == 128, "GpuVoxelState/std430 mismatch");
+_Static_assert(sizeof(GpuConstraintState) == 16, "GpuConstraintState/std430 mismatch");
 _Static_assert(sizeof(GpuStaticCell) == 16, "GpuStaticCell/std430 mismatch");
 _Static_assert(sizeof(GpuStaticCollider) == 48, "GpuStaticCollider/std430 mismatch");
 _Static_assert(sizeof(GpuControlState) == 16, "GpuControlState/std430 mismatch");
@@ -126,6 +134,7 @@ typedef struct {
     uint32_t *sim_ids;
     uint32_t *collision_ids;
     GpuVoxelState *voxel_stage;
+    GpuConstraintState *constraint_stage;
     GpuStaticCell *static_stage;
     GpuStaticCollider *static_collider_stage;
     int *compact_to_voxel;
@@ -147,6 +156,8 @@ typedef struct {
     int sim_slot_capacity;
     int dynamic_voxel_count;
     int hierarchy_node_count;
+    int constraint_count;
+    uint64_t hierarchy_generation;
     int collision_count;
     int static_collider_count;
     uint64_t upload_bytes;
@@ -314,6 +325,7 @@ static void gpu_physics_shutdown(void) {
     free(gpuPhysics.sim_ids);
     free(gpuPhysics.collision_ids);
     free(gpuPhysics.voxel_stage);
+    free(gpuPhysics.constraint_stage);
     free(gpuPhysics.static_stage);
     free(gpuPhysics.static_collider_stage);
     free(gpuPhysics.compact_to_voxel);
@@ -357,6 +369,7 @@ static bool gpu_stage_reserve(size_t particles, size_t sims, size_t voxels_count
         size_t cap = gpuPhysics.voxel_capacity ? gpuPhysics.voxel_capacity : 256;
         while (cap < voxels_count) cap *= 2;
         if (!gpu_resize_array((void **)&gpuPhysics.voxel_stage, cap, sizeof(*gpuPhysics.voxel_stage)) ||
+            !gpu_resize_array((void **)&gpuPhysics.constraint_stage, cap * 2u, sizeof(*gpuPhysics.constraint_stage)) ||
             !gpu_resize_array((void **)&gpuPhysics.compact_to_voxel, cap, sizeof(*gpuPhysics.compact_to_voxel)) ||
             !gpu_resize_array((void **)&gpuPhysics.topology_stage, cap * 2u, sizeof(*gpuPhysics.topology_stage))) return false;
         gpuPhysics.voxel_capacity = cap;
@@ -531,6 +544,29 @@ static bool gpu_pack_world(void) {
         }
     }
 
+    // The dispatch list is compact even though the voxel array remains stable
+    // for collision, rendering, and parent/child index references.
+    gpuPhysics.constraint_count = 0;
+    for (int i = 0; i < gpuPhysics.dynamic_voxel_count; ++i) {
+        Voxel *v = &voxels[gpuPhysics.compact_to_voxel[i]];
+        if (v->sleeping || !v->vgs_active || !v->simulate_dofs || v->isBullet || v->type != 0) continue;
+        gpuPhysics.constraint_stage[gpuPhysics.constraint_count++] =
+            (GpuConstraintState){0u, (uint32_t)i, 0u, 0u};
+    }
+    for (int i = 0; i < vgsHierarchy.node_count; ++i) {
+        if (!vgsHierarchy.nodes[i].active) continue;
+        gpuPhysics.constraint_stage[gpuPhysics.constraint_count++] =
+            (GpuConstraintState){0u, (uint32_t)(gpuPhysics.dynamic_voxel_count + i), 0u, 0u};
+    }
+    for (int i = 0; i < vgsHierarchy.node_count; ++i) {
+        if (!vgsHierarchy.nodes[i].active) continue;
+        uint32_t mask = vgsHierarchy.adaptive ? vgs_terminal_child_mask(&vgsHierarchy.nodes[i]) : 0xffu;
+        if (!mask) continue;
+        gpuPhysics.constraint_stage[gpuPhysics.constraint_count++] =
+            (GpuConstraintState){vgsHierarchy.adaptive ? 1u : 2u,
+                                 (uint32_t)(gpuPhysics.dynamic_voxel_count + i), mask, 0u};
+    }
+
     for (int dynamic_id = 0; dynamic_id < gpuPhysics.dynamic_voxel_count; ++dynamic_id) {
         int world_id = gpuPhysics.compact_to_voxel[dynamic_id];
         Voxel *v = &voxels[world_id];
@@ -565,6 +601,7 @@ static bool gpu_pack_world(void) {
             gpuPhysics.tether_stage[id] = player;
         }
     }
+    gpuPhysics.hierarchy_generation = vgsHierarchy.topology_generation;
     return true;
 }
 
@@ -752,7 +789,8 @@ static bool gpu_upload_world(void) {
         !gpu_buffer_ensure(&gpuPhysics.refcount_buffer, (size_t)gpuPhysics.particle_slot_capacity * sizeof(int32_t)) ||
         !gpu_buffer_ensure(&gpuPhysics.control_buffer, sizeof(GpuControlState)) ||
         !gpu_buffer_ensure(&gpuPhysics.clone_parent_buffer, (size_t)gpuPhysics.particle_slot_capacity * sizeof(int32_t)) ||
-        !gpu_buffer_ensure(&gpuPhysics.dispatch_buffer, 64) ||
+        !gpu_buffer_ensure(&gpuPhysics.dispatch_buffer,
+                           64u + (size_t)gpuPhysics.constraint_count * sizeof(GpuConstraintState)) ||
         !gpu_buffer_ensure(&gpuPhysics.topology_buffer,
                            (size_t)gpuPhysics.dynamic_voxel_count * 2u * sizeof(GpuTopologyState))) return false;
     if (particle_bytes) gpu_buffer_update(&gpuPhysics.particle_buffer, gpuPhysics.particle_stage, particle_bytes, 0);
@@ -766,6 +804,9 @@ static bool gpu_upload_world(void) {
     dispatch_stage[9] = (uint32_t)gpuPhysics.sim_slot_capacity;
     dispatch_stage[12] = getenv("FPS_COLLISION_STATIC_LEGACY") ? 0u : 1u;
     gpu_buffer_update(&gpuPhysics.dispatch_buffer, dispatch_stage, sizeof(dispatch_stage), 0);
+    if (gpuPhysics.constraint_count)
+        gpu_buffer_update(&gpuPhysics.dispatch_buffer, gpuPhysics.constraint_stage,
+                          (size_t)gpuPhysics.constraint_count * sizeof(GpuConstraintState), 64);
     if (voxel_bytes) gpu_buffer_update(&gpuPhysics.voxel_buffer, gpuPhysics.voxel_stage, voxel_bytes, 0);
     if (gpuPhysics.compact_count) gpu_buffer_update(&gpuPhysics.tether_buffer, gpuPhysics.tether_stage,
                                                     (size_t)gpuPhysics.compact_count * sizeof(GpuTetherState), 0);
@@ -1070,7 +1111,8 @@ static bool gpu_validate_and_commit(void) {
 }
 
 static bool gpu_resident_matches_cpu(void) {
-    if (!gpuPhysics.resident_valid || gpuPhysics.static_uploaded_generation != staticHashGeneration ||
+    if (!gpuPhysics.resident_valid || gpuPhysics.hierarchy_generation != vgsHierarchy.topology_generation ||
+        gpuPhysics.static_uploaded_generation != staticHashGeneration ||
         gpuPhysics.collision_uploaded_generation != collisionMetadataGeneration) return false;
     int dynamic_count = 0;
     for (int i = 0; i < voxel_count; ++i) if (voxels[i].simulate) dynamic_count++;
@@ -1151,7 +1193,8 @@ static bool gpu_dispatch_substep(float sub_dt) {
               gpu_dispatch_indirect(GPU_MODE_APPLY);
     if (ok && !PBD_DISABLE_VGS_DEACTIVATION)
         ok = gpu_dispatch(GPU_MODE_BREAK_MASK, gpuPhysics.dynamic_voxel_count);
-    for (int level = vgsHierarchy.levels - 1; ok && level >= 0; --level) {
+    for (int level = vgsHierarchy.adaptive ? -1 : vgsHierarchy.levels - 1;
+         ok && level >= 0; --level) {
         int count = vgsHierarchy.level_count[level];
         gpu_set_vgs_layer(gpuPhysics.dynamic_voxel_count + vgsHierarchy.level_start[level], count);
         ok = gpu_dispatch(GPU_MODE_HIERARCHY_MASK, count);
@@ -1159,7 +1202,7 @@ static bool gpu_dispatch_substep(float sub_dt) {
     // Leaves and hierarchy nodes share the same particle correction buffer.
     // Internal nodes scatter VGS plus trilinear/pseudoinverse weld corrections
     // from one position snapshot; apply all scales together once per iteration.
-    int vgs_count = gpuPhysics.dynamic_voxel_count + gpuPhysics.hierarchy_node_count;
+    int vgs_count = gpuPhysics.constraint_count;
     for (int it = 0; ok && it < PBD_CONSTRAINT_ITERS; ++it) {
         gpu_set_vgs_layer(0, vgs_count);
         ok = gpu_dispatch(GPU_MODE_VGS, vgs_count) &&
@@ -1179,9 +1222,9 @@ static bool gpu_rebuild_topology_if_needed(void) {
 static bool gpu_forced_step_failure_consumed = false;
 static bool gpu_forced_validation_failure_consumed = false;
 
-static int gpu_physics_steps(float dt, int fixed_steps) {
+static int gpu_physics_steps(float dt, int fixed_steps, int substeps) {
     gpu_clear_step_failure();
-    if (fixed_steps <= 0) return 0;
+    if (fixed_steps <= 0 || substeps <= 0) return 0;
 #if defined(__APPLE__) && defined(FPS_GPU_METAL)
     if (vgsHierarchy.node_count && !fps_metal_supports_vgs_hierarchy()) {
         gpu_set_step_failure(PHYSICS_GPU_FAILURE_PERMANENT,
@@ -1216,7 +1259,7 @@ static int gpu_physics_steps(float dt, int fixed_steps) {
             return 0;
         }
     }
-    float sub_dt = dt / (float)PBD_SUBSTEPS;
+    float sub_dt = dt / (float)substeps;
 #if defined(__APPLE__) && defined(FPS_GPU_METAL)
     if (!fps_metal_begin_batch()) {
         gpu_set_step_failure(PHYSICS_GPU_FAILURE_TRANSIENT, "Metal failed to begin a compute batch");
@@ -1228,7 +1271,7 @@ static int gpu_physics_steps(float dt, int fixed_steps) {
     double dispatch_started = GetTime();
     bool ok = true;
     for (int fixed = 0; ok && fixed < fixed_steps; ++fixed) {
-        for (int step = 0; step < PBD_SUBSTEPS; ++step) {
+        for (int step = 0; step < substeps; ++step) {
             if (!gpu_dispatch_substep(sub_dt)) { ok = false; break; }
         }
         if (ok) ok = gpu_rebuild_topology_if_needed();

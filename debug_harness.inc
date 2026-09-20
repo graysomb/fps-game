@@ -88,6 +88,9 @@ typedef struct DebugRunState {
     int expected_static_leftovers;
     float effective_pbd_size;
     bool active_cube_drop;
+    bool adaptive_cube_drop;
+    FILE *curvature_levels_file;
+    char curvature_levels_path[DEBUG_PATH_CAPACITY];
     bool refinement_demo;
     bool refinement_complete;
     bool coarsening_demo;
@@ -294,6 +297,7 @@ static bool debug_setup_pbf_scaling(DebugRunState *state);
 static bool debug_setup_pbf_dense_neighbors(DebugRunState *state);
 static bool debug_setup_cube_stress(DebugRunState *state);
 static bool debug_setup_active_cube_drop(DebugRunState *state);
+static bool debug_setup_adaptive_cube_drop(DebugRunState *state);
 static bool debug_setup_vgs_refinement(DebugRunState *state);
 static bool debug_setup_vgs_coarsening(DebugRunState *state);
 static bool debug_setup_voxel_strain_shear_fracture(DebugRunState *state);
@@ -325,6 +329,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "goliath-behavior", "Goliath maintains armor, detects enemy, and launches voxels", debug_setup_goliath_behavior, 180, 60 },
     { "cube-stress", "Stress test with scalable dynamic cube (size set by FPS_CUBE_SIZE)", debug_setup_cube_stress, 60, 60 },
     { "active-cube-drop", "Activate a static 10x10x10 cube and drop it", debug_setup_active_cube_drop, 120, 60 },
+    { "adaptive-cube-drop", "Curvature-driven octree cube drop", debug_setup_adaptive_cube_drop, 240, 60 },
     { "vgs-refinement", "Drop a root VGS cube, then refine into eight shared-particle children", debug_setup_vgs_refinement, 300, 180 },
     { "vgs-coarsening", "Drop eight child VGS cubes, then project them onto one root", debug_setup_vgs_coarsening, 300, 180 },
     { "voxel-strain-shear-fracture", "Check VGS deactivation behavior under high strain and shear", debug_setup_voxel_strain_shear_fracture, 60, 60 },
@@ -780,6 +785,7 @@ static void debug_reset_world(void)
 {
     debugColorVoxelsByVgsTemporalCurvature = false;
     debugRefinementCoarse = false;
+    debugAdaptiveOctree = false;
     debug_reset_vgs_temporal_curvature();
     pbdSolidVoxelSize = VOXEL_SIZE;
     clear_world_voxels();
@@ -819,7 +825,11 @@ static bool debug_remove_tagged_voxels(int tag);
 static bool debug_build_cube_vgs_hierarchy(const int *lattice, int side, float leaf_edge)
 {
     clear_vgs_hierarchy();
-    if (side == 1) { vgsHierarchy.leaf_count = 1; return true; }
+    if (side == 1) {
+        vgsHierarchy.leaf_count = 1;
+        vgsHierarchy.leaf_history = calloc((size_t)voxel_count, sizeof(VgsCurvatureHistory));
+        return vgsHierarchy.leaf_history != NULL;
+    }
     int levels = 0, node_count = 0;
     for (int width = 1; width < side; width *= 2) {
         node_count += width * width * width;
@@ -831,6 +841,12 @@ static bool debug_build_cube_vgs_hierarchy(const int *lattice, int side, float l
     vgsHierarchy.levels = levels;
     vgsHierarchy.node_count = node_count;
     vgsHierarchy.leaf_count = side * side * side;
+    vgsHierarchy.node_history = calloc((size_t)node_count, sizeof(VgsCurvatureHistory));
+    vgsHierarchy.leaf_history = calloc((size_t)voxel_count, sizeof(VgsCurvatureHistory));
+    if (!vgsHierarchy.node_history || !vgsHierarchy.leaf_history) {
+        clear_vgs_hierarchy();
+        return false;
+    }
     int offset = 0;
     for (int level = 0, grid = 1; level < levels; ++level, grid *= 2) {
         vgsHierarchy.level_start[level] = offset;
@@ -896,7 +912,7 @@ static bool debug_validate_cube_vgs_hierarchy(int side)
     if (vgsHierarchy.node_count) {
         Voxel *leaf = &voxels[-vgsHierarchy.nodes[vgsHierarchy.node_count - 1].children[0] - 1];
         leaf->vgs_active = false;
-        update_vgs_hierarchy_activity();
+        if (!vgsHierarchy.adaptive) update_vgs_hierarchy_activity();
         bool disabled = !vgsHierarchy.nodes[0].active;
         leaf->vgs_active = true;
         for (int i = 0; i < vgsHierarchy.node_count; ++i) vgsHierarchy.nodes[i].active = true;
@@ -1153,14 +1169,16 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
 
     float centroid_sum = 0.0f;
     float velocity_sum = 0.0f;
-    bool cube_dynamic_only = strcmp(debugRunConfig.scenario, "active-cube-drop") == 0;
+    bool cube_dynamic_only = strcmp(debugRunConfig.scenario, "active-cube-drop") == 0 ||
+                             strcmp(debugRunConfig.scenario, "adaptive-cube-drop") == 0;
     for (int i = 0; i < voxel_count; ++i) {
         const Voxel *voxel = &voxels[i];
         if (voxel->debugClusterTag != DEBUG_TEST_TAG) continue;
         ++sample.tagged_voxels;
         if (voxel->simulate) {
             ++sample.tagged_dynamic;
-            if (voxel->vgs_active) ++sample.tagged_rendered;
+            if (voxel->vgs_active && (!vgsHierarchy.adaptive || voxel->simulate_dofs))
+                ++sample.tagged_rendered;
         }
         else ++sample.tagged_static;
         if (voxel->simulate && voxel->sleeping) ++sample.tagged_sleeping;
@@ -1176,10 +1194,11 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
             }
             center = v_add(center, particle->pos);
             ++valid_corners;
-            if (voxel->simulate && particle->base_inv_mass <= 0.0f) {
+            if (voxel->simulate && particle->base_inv_mass <= 0.0f &&
+                !vgsHierarchy.adaptive) {
                 ++sample.zero_mass_corners;
             }
-            if (voxel->simulate &&
+            if (voxel->simulate && (!vgsHierarchy.adaptive || particle->base_inv_mass > 0.0f) &&
                 (particle->sim_index < 0 || particle->sim_index >= sim_particle_count ||
                  sim_particles[particle->sim_index] != particle)) {
                 ++sample.invalid_particle_refs;
@@ -1203,6 +1222,10 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
             }
         }
     }
+    if (vgsHierarchy.adaptive)
+        for (int i = 0; i < vgsHierarchy.node_count; ++i)
+            if (vgsHierarchy.nodes[i].active &&
+                !vgs_node_has_active_children(&vgsHierarchy.nodes[i])) ++sample.tagged_rendered;
     int centroid_count = cube_dynamic_only ? sample.tagged_dynamic : sample.tagged_voxels;
     if (centroid_count > 0) {
         sample.centroid_y = centroid_sum / (float)centroid_count;
@@ -1356,6 +1379,28 @@ static void debug_render_scene(DebugRunState *state, const DebugSample *sample)
                       (Color){ 68, 75, 82, 255 });
             DrawGrid(48, VOXEL_SIZE);
             DrawVoxels(state->camera);
+            if (state->adaptive_cube_drop) {
+                for (int level = 0; level < vgsHierarchy.levels; ++level) {
+                    int first = vgsHierarchy.level_start[level];
+                    int end = first + vgsHierarchy.level_count[level];
+                    Color color = ColorFromHSV(235.0f *
+                        (1.0f - (float)level / (float)vgsHierarchy.levels), 0.8f, 0.9f);
+                    for (int i = first; i < end; ++i) {
+                        VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+                        if (!node->active || vgs_node_has_active_children(node)) continue;
+                        Vector3 center = {0};
+                        for (int c = 0; c < 8; ++c) center = v_add(center, node->particles[c]->pos);
+                        center = v_mul(center, 0.125f);
+                        Vector3 size = {
+                            v_length(v_sub(node->particles[1]->pos, node->particles[0]->pos)),
+                            v_length(v_sub(node->particles[2]->pos, node->particles[0]->pos)),
+                            v_length(v_sub(node->particles[4]->pos, node->particles[0]->pos))
+                        };
+                        DrawCubeV(center, size, color);
+                        if (level < 3) DrawCubeWiresV(center, size, DARKGRAY);
+                    }
+                }
+            }
             if ((state->refinement_demo || state->coarsening_demo) &&
                 debugRefinementCoarse &&
                 vgsHierarchy.node_count == 1) {
@@ -1793,6 +1838,10 @@ static void debug_readback_gpu_buffers(DebugRunState *state, int step)
     if (!state || !physics_backend_is_gpu(physicsBackend.active) || step < 1 ||
         !state->activation_succeeded || state->gpu_readback_performed) return;
 #if defined(GRAPHICS_API_OPENGL_43) || (defined(__APPLE__) && defined(FPS_GPU_METAL))
+    // Adaptation follows the physics dispatch. Its new sim list is staged for
+    // the next frame, so compare the lists only after that upload has happened.
+    if (state->adaptive_cube_drop &&
+        gpuPhysics.hierarchy_generation != vgsHierarchy.topology_generation) return;
     state->gpu_readback_performed = true;
     if (gpuPhysics.static_cell_buffer.id == 0 || gpuPhysics.sim_id_buffer.id == 0 ||
         gpuPhysics.particle_buffer.id == 0 ||
@@ -1865,6 +1914,7 @@ static void debug_readback_gpu_buffers(DebugRunState *state, int step)
                 ++state->gpu_tagged_corners_missing_from_sim_ids;
                 continue;
             }
+            if (state->adaptive_cube_drop && particle->base_inv_mass <= 0.0f) continue;
             bool zero_mass =
                 particle_readback[compact_id].predicted_base_inv_mass[3] <= 0.0f;
             if (zero_mass) {
@@ -2034,6 +2084,71 @@ static bool debug_setup_cube_stress(DebugRunState *state)
     return true;
 }
 
+static int debug_compare_curvature(const void *a, const void *b)
+{
+    float x = *(const float *)a, y = *(const float *)b;
+    return (x > y) - (x < y);
+}
+
+static void debug_write_curvature_levels(DebugRunState *state, int step)
+{
+    if (!state->curvature_levels_file || !vgsHierarchy.leaf_history) return;
+    int capacity = vgsHierarchy.leaf_count > vgsHierarchy.node_count
+        ? vgsHierarchy.leaf_count : vgsHierarchy.node_count;
+    float *values = malloc((size_t)capacity * sizeof(*values));
+    if (!values) {
+        debug_add_failure(state, "unable to allocate curvature distribution scratch");
+        return;
+    }
+    for (int level = 0; level <= vgsHierarchy.levels; ++level) {
+        int count = 0, above = 0, child_above = 0;
+        int above_adaptive = 0, child_above_adaptive = 0;
+        double child_sum = 0.0;
+        if (level < vgsHierarchy.levels) {
+            int first = vgsHierarchy.level_start[level];
+            int end = first + vgsHierarchy.level_count[level];
+            for (int i = first; i < end; ++i) {
+                float value = vgsHierarchy.node_history[i].curvature;
+                values[count++] = value;
+                above += value > VGS_TEMPORAL_CURVATURE_RED_AT;
+                above_adaptive += value > VGS_ADAPTIVE_CURVATURE_THRESHOLD;
+                VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+                float mean = 0.0f;
+                for (int c = 0; c < 8; ++c) {
+                    int child = node->children[c];
+                    mean += child >= 0 ? vgsHierarchy.node_history[child].curvature :
+                        vgsHierarchy.leaf_history[-child - 1].curvature;
+                }
+                mean *= 0.125f;
+                child_sum += mean;
+                child_above += mean > VGS_TEMPORAL_CURVATURE_RED_AT;
+                child_above_adaptive += mean > VGS_ADAPTIVE_CURVATURE_THRESHOLD;
+            }
+        } else {
+            for (int i = 0; i < voxel_count; ++i) {
+                if (!voxels[i].simulate || voxels[i].debugClusterTag != DEBUG_TEST_TAG) continue;
+                float value = vgsHierarchy.leaf_history[i].curvature;
+                values[count++] = value;
+                above += value > VGS_TEMPORAL_CURVATURE_RED_AT;
+                above_adaptive += value > VGS_ADAPTIVE_CURVATURE_THRESHOLD;
+            }
+        }
+        if (count > capacity) { debug_add_failure(state, "curvature level overflow"); break; }
+        if (!count) continue;
+        qsort(values, (size_t)count, sizeof(*values), debug_compare_curvature);
+        fprintf(state->curvature_levels_file,
+                "%d,%d,%d,%.9g,%.9g,%.9g,%.9g,%d,%.9g,%d,%d,%d\n",
+                step, level, count,
+                (double)values[(count - 1) / 2],
+                (double)values[(int)((count - 1) * 0.90)],
+                (double)values[(int)((count - 1) * 0.99)],
+                (double)values[count - 1], above,
+                count ? child_sum / count : 0.0, child_above,
+                above_adaptive, child_above_adaptive);
+    }
+    free(values);
+}
+
 static bool debug_setup_active_cube_drop(DebugRunState *state)
 {
     debug_reset_world();
@@ -2067,7 +2182,33 @@ static bool debug_setup_active_cube_drop(DebugRunState *state)
     }
     debugColorVoxelsByVgsTemporalCurvature = true;
     debug_sample_vgs_temporal_curvature(PBD_MAX_STEP_DT);
+    if (!debug_join_path(state->curvature_levels_path, sizeof(state->curvature_levels_path),
+                         state->output_dir, "curvature-by-level.csv")) return false;
+    state->curvature_levels_file = fopen(state->curvature_levels_path, "w");
+    if (!state->curvature_levels_file) return false;
+    fputs("step,level,count,p50,p90,p99,max,above100,meanChildCurvature,childMeansAbove100,aboveAdaptiveThreshold,childMeansAboveAdaptiveThreshold\n",
+          state->curvature_levels_file);
+    debug_write_curvature_levels(state, 0);
     debug_set_initial_centroid(state);
+    return true;
+}
+
+static bool debug_setup_adaptive_cube_drop(DebugRunState *state)
+{
+    state->adaptive_cube_drop = true;
+    if (!debug_setup_active_cube_drop(state)) return false;
+    if (!vgs_hierarchy_initialize_adaptive()) {
+        debug_add_failure(state, "unable to initialize adaptive octree");
+        return false;
+    }
+    // A diagnostic seed exercises a refined GPU constraint list even when the
+    // normal curvature trigger has not fired yet.
+    if (getenv("FPS_AMR_TEST_REFINE_ROOT")) {
+        vgs_hierarchy_transfer_refine(&vgsHierarchy.nodes[0], true);
+        if (!vgs_hierarchy_rebuild_active_masses()) return false;
+    }
+    debugAdaptiveOctree = true;
+    debugColorVoxelsByVgsTemporalCurvature = false;
     return true;
 }
 
@@ -3786,14 +3927,33 @@ static void debug_physics_step(DebugRunState *state)
         wake_sleeping_voxels_near_awake();
     }
     rebuild_static_hash_if_dirty();
-    simulate_voxel_pbd(PBD_MAX_STEP_DT);
+    if (state && state->adaptive_cube_drop) {
+        // Commit each GPU substep before sampling curvature. A topology change
+        // invalidates the resident constraint list for the next substep.
+        const float sub_dt = PBD_MAX_STEP_DT / (float)PBD_SUBSTEPS;
+        for (int substep = 0; substep < PBD_SUBSTEPS; ++substep) {
+            simulate_voxel_pbd_steps_counted(sub_dt, 1, 1);
+            vgs_hierarchy_sample_curvature(sub_dt);
+            if (!vgs_hierarchy_adapt()) {
+                debug_add_failure(state, "adaptive octree transition failed");
+                break;
+            }
+        }
+    } else {
+        simulate_voxel_pbd(PBD_MAX_STEP_DT);
+    }
     if (state && ((state->refinement_demo && !state->refinement_complete) ||
                   (state->coarsening_demo && state->coarsening_complete)) &&
         !debug_sync_refinement_grid(state, false))
         debug_add_failure(state, "coarse grid synchronization failed at step %d",
                           state->refinement_elapsed);
-    if (state && state->active_cube_drop)
+    if (state && state->active_cube_drop) {
         debug_sample_vgs_temporal_curvature(PBD_MAX_STEP_DT);
+        int curvature_frame = state->adaptive_cube_drop
+            ? (vgsHierarchy.sample_count - 1) / PBD_SUBSTEPS
+            : vgsHierarchy.sample_count - 1;
+        debug_write_curvature_levels(state, curvature_frame);
+    }
     if (!state || (!state->active_cube_drop && !state->refinement_demo && !state->coarsening_demo)) recycle_dead_voxels();
     rebuild_voxel_hash();
     if (!state || (!state->active_cube_drop && !state->refinement_demo && !state->coarsening_demo)) deactivate_sleeping_voxels();
@@ -3929,7 +4089,8 @@ static void debug_validate_step(DebugRunState *state, int step)
         debug_validate_tagged_dynamic(state, &sample,
                                       expect_coarse ? "after coarsening" : "before coarsening");
     }
-    if (state->active_cube_drop && (step == 60 || step == debugRunConfig.steps)) {
+    if (state->active_cube_drop && !state->adaptive_cube_drop &&
+        (step == 60 || step == debugRunConfig.steps)) {
         debug_validate_tagged_dynamic(state, &sample, "cube drop");
         if (step == 60 && sample.tagged_rendered != state->expected_voxels) {
             debug_add_failure(state, "cube drop lost rendered PBD cells before impact (%d/%d)",
@@ -3940,6 +4101,51 @@ static void debug_validate_step(DebugRunState *state, int step)
             debug_add_failure(state, "cube drop retained only %d/%d rendered cells after impact",
                               sample.tagged_rendered, state->expected_voxels);
         }
+    }
+    if (state->adaptive_cube_drop) {
+        int active_nodes = 0, terminal_nodes = 0, active_leaves = 0;
+        double total_mass = 0.0;
+        double terminal_volume = 0.0;
+        for (int i = 0; i < sim_particle_count; ++i)
+            if (sim_particles[i]->base_inv_mass > 0.0f)
+                total_mass += 1.0 / sim_particles[i]->base_inv_mass;
+        for (int i = 0; i < vgsHierarchy.node_count; ++i) {
+            VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+            for (int c = 0; c < 8; ++c) {
+                int child = node->children[c];
+                bool child_active = child >= 0 ? vgsHierarchy.nodes[child].active :
+                    voxels[-child - 1].simulate_dofs;
+                if (child_active && !node->active)
+                    debug_add_failure(state, "step %d: active child beneath inactive node %d", step, i);
+            }
+            if (!node->active) continue;
+            ++active_nodes;
+            int children = 0;
+            for (int c = 0; c < 8; ++c) {
+                int child = node->children[c];
+                children += child >= 0 ? vgsHierarchy.nodes[child].active :
+                    voxels[-child - 1].simulate_dofs;
+            }
+            if (children != 0 && children != 8)
+                debug_add_failure(state, "step %d: partial adaptive octet at node %d", step, i);
+            if (children == 0) {
+                ++terminal_nodes;
+                terminal_volume += node->rest_volume;
+            }
+        }
+        for (int i = 0; i < voxel_count; ++i)
+            if (voxels[i].simulate && voxels[i].simulate_dofs) {
+                ++active_leaves;
+                terminal_volume += voxels[i].rest_volume;
+            }
+        if (!vgsHierarchy.nodes[0].active || active_nodes == 0 ||
+            terminal_nodes + active_leaves != sample.tagged_rendered ||
+            fabs(total_mass - 8000.0) > 0.1 ||
+            fabs(terminal_volume - 125.0) > 0.01 || sample.invalid_particle_refs > 0)
+            debug_add_failure(state,
+                "step %d: adaptive state nodes=%d terminals=%d leaves=%d rendered=%d mass=%.3f volume=%.3f invalid=%d",
+                step, active_nodes, terminal_nodes, active_leaves,
+                sample.tagged_rendered, total_mass, terminal_volume, sample.invalid_particle_refs);
     }
     if (state->sleep_snap_original_test) {
         float max_error = 0.0f;
@@ -4777,7 +4983,7 @@ static bool debug_write_report(DebugRunState *state)
     fprintf(file, ",\n  \"passed\": %s,\n  \"steps\": %d,\n  \"fixedDt\": %.9g,\n",
             passed ? "true" : "false", debugRunConfig.steps, (double)PBD_MAX_STEP_DT);
     if (state->active_cube_drop) {
-        update_vgs_hierarchy_activity();
+        if (!vgsHierarchy.adaptive) update_vgs_hierarchy_activity();
         int active_nodes = 0;
         for (int i = 0; i < vgsHierarchy.node_count; ++i)
             if (vgsHierarchy.nodes[i].active) ++active_nodes;
@@ -4789,9 +4995,15 @@ static bool debug_write_report(DebugRunState *state)
                 vgsHierarchy.levels + (vgsHierarchy.leaf_count ? 1 : 0),
                 vgsHierarchy.node_count, active_nodes,
                 PBD_DISABLE_VGS_DEACTIVATION ? "true" : "false");
+        if (state->adaptive_cube_drop)
+            fprintf(file, "  \"adaptiveHierarchy\": {\"thresholdPerSecondSquared\": %.9g, \"refinements\": %u, \"coarsenings\": %u, \"gpuConstraints\": %d, \"simulatedParticles\": %d},\n",
+                    (double)VGS_ADAPTIVE_CURVATURE_THRESHOLD,
+                    vgsHierarchy.refine_count, vgsHierarchy.coarsen_count,
+                    gpuPhysics.constraint_count, sim_particle_count);
         fprintf(file, "  \"vgsTemporalCurvature\": {\"samples\": %d, \"redAtPerSecondSquared\": %.9g, \"lastStepMax\": %.9g, \"lastStepMean\": %.9g},\n",
                 debugVgsTemporalSampleCount, (double)VGS_TEMPORAL_CURVATURE_RED_AT,
                 (double)debugVgsTemporalLastMax, (double)debugVgsTemporalLastMean);
+        fprintf(file, "  \"curvatureByLevelCsv\": \"%s\",\n", state->curvature_levels_path);
     }
     if (state->refinement_demo) {
         fprintf(file, "  \"refinement\": {\"step\": %d, \"completed\": %s, \"sharedGridPoints\": 27, \"children\": 8},\n",
@@ -5130,6 +5342,11 @@ static int run_debug_harness(void)
     }
 
     debug_gif_end(&state);
+    if (state.curvature_levels_file) {
+        if (fclose(state.curvature_levels_file) != 0)
+            debug_add_failure(&state, "failed to close curvature distribution CSV");
+        state.curvature_levels_file = NULL;
+    }
     bool report_ok = debug_write_report(&state);
     bool passed = setup_ok && report_ok && state.failure_count == 0;
     fprintf(stderr,

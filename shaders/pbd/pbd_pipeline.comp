@@ -281,7 +281,7 @@ const float WELD_A[6] = float[6](1.0, 0.0, 0.5, 0.5, 0.0, 1.0);
 const float WELD_R[6] = float[6](5.0/6.0, 1.0/3.0, -1.0/6.0,
                                   -1.0/6.0, 1.0/3.0, 5.0/6.0);
 
-void scatterHierarchyWeld(uint voxelId) {
+void scatterHierarchyWeld(uint voxelId, uint terminalMask, bool includeCoarsening) {
     VoxelState parent = voxel[voxelId];
     uint fineId[27];
     vec3 finePos[27], coarsePos[8];
@@ -289,7 +289,7 @@ void scatterHierarchyWeld(uint voxelId) {
         uint id = voxelParticle(parent, c);
         if (id >= uint(gpuControl.x)) return;
         uint child = floatBitsToUint(c < 4 ? parent.bounds_min[c] : parent.bounds_max[c - 4]);
-        if (voxel[child].flags.w == 0) return;
+        if ((terminalMask & (1u << c)) != 0u && voxel[child].flags.w == 0) return;
         coarsePos[c] = particle[id].predicted_base_inv_mass.xyz;
     }
     for (int r = 0; r < 27; ++r) {
@@ -306,6 +306,14 @@ void scatterHierarchyWeld(uint voxelId) {
     for (int r = 0; r < 27; ++r) {
         int gx = r % 3, gy = (r / 3) % 3, gz = r / 9;
         if (gx != 1 && gy != 1 && gz != 1) continue;
+        bool covered = false;
+        for (int c = 0; c < 8; ++c) {
+            if ((terminalMask & (1u << c)) == 0u) continue;
+            int cx = c & 1, cy = (c >> 1) & 1, cz = (c >> 2) & 1;
+            covered = covered || (gx >= cx && gx <= cx + 1 &&
+                                  gy >= cy && gy <= cy + 1 && gz >= cz && gz <= cz + 1);
+        }
+        if (!covered) continue;
         float weight = particle[fineId[r]].prev_inv_mass.w;
         if (weight <= 0.0) continue;
         vec3 target = vec3(0.0);
@@ -316,6 +324,7 @@ void scatterHierarchyWeld(uint voxelId) {
         }
         accumulate(fineId[r], target - finePos[r], weight);
     }
+    if (!includeCoarsening) return;
     for (int c = 0; c < 8; ++c) {
         uint id = voxelParticle(parent, c);
         float weight = particle[id].prev_inv_mass.w;
@@ -332,11 +341,8 @@ void scatterHierarchyWeld(uint voxelId) {
 }
 
 void solveVgs(uint gid) {
-    if (gid >= uint(uVgsCount)) return;
     VoxelState v = voxel[uint(uVgsBegin) + gid];
     if (v.flags.x == 0 || v.flags.y != 0 || v.flags.z != 0 || v.flags.w == 0) return;
-    if (uint(uVgsBegin) + gid >= uint(uVoxelCount))
-        scatterHierarchyWeld(uint(uVgsBegin) + gid);
     vec3 p[8];
     vec3 original[8];
     float applyWeight[8];
@@ -733,7 +739,14 @@ void main() {
     else if (uMode==MODE_HASH_BUILD) buildHash(gid);
     else if (uMode==MODE_PAIR_COLLISIONS) pairCollisions(gid);
     else if (uMode==MODE_APPLY) applyCorrections(gid);
-    else if (uMode==MODE_VGS) solveVgs(gid);
+    else if (uMode==MODE_VGS) {
+        if (gid < uint(uVgsCount)) {
+            uint base = 16u + gid * 4u;
+            uint kind = dispatchArgs[base], voxelId = dispatchArgs[base + 1u];
+            if (kind == 0u) solveVgs(voxelId);
+            else scatterHierarchyWeld(voxelId, dispatchArgs[base + 2u], kind == 2u);
+        }
+    }
     else if (uMode==MODE_STATIC_COLLISIONS) staticCollisions(gid);
     else if (uMode==MODE_BREAK_MASK) gatherBreakMask(gid);
     else if (uMode==MODE_FINALIZE_PARTICLES) finalizeParticle(gid);
