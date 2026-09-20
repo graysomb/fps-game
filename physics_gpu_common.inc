@@ -1156,14 +1156,13 @@ static bool gpu_dispatch_substep(float sub_dt) {
         gpu_set_vgs_layer(gpuPhysics.dynamic_voxel_count + vgsHierarchy.level_start[level], count);
         ok = gpu_dispatch(GPU_MODE_HIERARCHY_MASK, count);
     }
+    // Leaves and hierarchy nodes share the same particle correction buffer.
+    // Scatter all VGS constraints from one position snapshot, then apply their
+    // accumulated corrections together once per solver iteration.
+    int vgs_count = gpuPhysics.dynamic_voxel_count + gpuPhysics.hierarchy_node_count;
     for (int it = 0; ok && it < PBD_CONSTRAINT_ITERS; ++it) {
-        for (int level = 0; ok && level < vgsHierarchy.levels; ++level) {
-            int count = vgsHierarchy.level_count[level];
-            gpu_set_vgs_layer(gpuPhysics.dynamic_voxel_count + vgsHierarchy.level_start[level], count);
-            ok = gpu_dispatch(GPU_MODE_VGS, count) && gpu_dispatch_indirect(GPU_MODE_APPLY);
-        }
-        gpu_set_vgs_layer(0, gpuPhysics.dynamic_voxel_count);
-        ok = gpu_dispatch(GPU_MODE_VGS, gpuPhysics.dynamic_voxel_count) &&
+        gpu_set_vgs_layer(0, vgs_count);
+        ok = gpu_dispatch(GPU_MODE_VGS, vgs_count) &&
              gpu_dispatch_indirect(GPU_MODE_APPLY);
     }
     ok = ok && gpu_dispatch_indirect_offset(GPU_MODE_STATIC_COLLISIONS, 16) &&
