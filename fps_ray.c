@@ -618,6 +618,9 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define MELEE_BASE_REACH_FRAC 0.18f
 #define BUILD_COOLDOWN_SECONDS 0.5f
 #define TETHER_RANGE 8.0f
+#define TETHER_HOLD_FORWARD 1.5f
+#define TETHER_HOLD_RIGHT 0.55f
+#define TETHER_HOLD_UP 0.2f
 #define TETHER_SPRING 200.0f
 #define TETHER_DAMPING 10.0f
 #define TETHER_REFERENCE_MASS 8.0f /* one isolated voxel: 8 unit-mass corners */
@@ -14123,6 +14126,22 @@ static Vector3 player_hand_position(const Player *p) {
     return v_add(p->pos, v_add(v_mul(dir, 1.0f), (Vector3){ 0.0f, 0.35f, 0.0f }));
 }
 
+static Vector3 player_tether_hold_position(const Player *p) {
+    Vector3 forward = player_forward(p);
+    Vector3 world_up = { 0.0f, 1.0f, 0.0f };
+    Vector3 right = v_cross(forward, world_up);
+    float right_len = v_length(right);
+    if (right_len < 1e-4f) {
+        right = (Vector3){ 1.0f, 0.0f, 0.0f };
+    } else {
+        right = v_mul(right, 1.0f / right_len);
+    }
+    Vector3 pos = v_add(p->pos, v_mul(forward, TETHER_HOLD_FORWARD));
+    pos = v_add(pos, v_mul(right, TETHER_HOLD_RIGHT));
+    pos.y += TETHER_HOLD_UP;
+    return pos;
+}
+
 static int find_closest_dynamic_voxel(Vector3 pos, float radius) {
     float best = radius * radius;
     int best_idx = -1;
@@ -14842,7 +14861,7 @@ static void prepare_tether_forces(void) {
                 continue;
             }
         }
-        tetherTargetByPlayer[i] = player_hand_position(p);
+        tetherTargetByPlayer[i] = player_tether_hold_position(p);
         tetherComByPlayer[i] = v->pos;
         tetherScaleByPlayer[i] = 1.0f;
         tetherTag[p->tetherVoxel] = i + 1;
@@ -16656,7 +16675,7 @@ static bool player_tether_visual_target(int player_index, Vector3 *out_target) {
 static void draw_player_tether_world(int player_index) {
     Vector3 center;
     if (!player_tether_visual_target(player_index, &center)) return;
-    Vector3 hand = player_hand_position(&players[player_index]);
+    Vector3 hand = player_tether_hold_position(&players[player_index]);
     float tether_radius = 0.05f;
     DrawCylinderEx(hand, center, tether_radius * 1.6f, tether_radius * 1.6f, 6,
                    (Color){ 80, 170, 255, 80 });
