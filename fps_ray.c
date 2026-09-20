@@ -557,8 +557,8 @@ static inline bool is_player_bot(int player_index) {
 #define BREAK_DAMP_FRAMES 0
 #define COARSENING_WAKE_FRAMES 30
 #define COARSENING_MASS_SCALE 0.1f
-#define STRAIN_BREAK_THRESHOLD 0.2f
-#define SHEAR_BREAK_THRESHOLD 0.2f
+#define STRAIN_BREAK_THRESHOLD 0.4f
+#define SHEAR_BREAK_THRESHOLD 0.4f
 #define PBD_MAX_ACCUM_STEPS 8
 #define COLLISION_RELAXATION 0.99f
 #define COLLISION_CENTROID_ONLY_DT 10.2f
@@ -589,10 +589,10 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define VOXEL_ACTIVATION_RADIUS 2*1
 //#define VOXEL_ACTIVATION_UNIT_BUDGET 128
 #define VOXEL_ACTIVATION_UNIT_BUDGET 128*5
-#define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 1.5f
-#define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.4f
-#define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.4f
-#define VOXEL_DEACTIVATION_FRAMES 5
+#define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 0.75f
+#define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.2f
+#define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.2f
+#define VOXEL_DEACTIVATION_FRAMES 10
 #define VOXEL_SLEEP_SNAP_POSITION_TOLERANCE (VOXEL_SIZE * 0.25f)
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
 #define FLUID_DEACTIVATION_VELOCITY_THRESHOLD 0.75f
@@ -16398,6 +16398,7 @@ static void prepare_shard_transforms(void) {
         Color color = voxel_display_color(v);
         for (int corner = 0; corner < 8; ++corner) {
             Particle *particle = v->particles[corner];
+            if (particle->inv_mass <= 0.0f) continue;
             ptrdiff_t pool_index = particle - particles_pool;
             if (pool_index >= 0 && pool_index < MAX_PARTICLES &&
                 vgsParticleStamp[pool_index] == (uint32_t)voxel_render_frame) continue;
@@ -16618,7 +16619,7 @@ static void DrawVoxels(Camera3D cam) {
 
     for (int i = 0; i < active_particle_count; ++i) {
         Particle *p = active_particles[i];
-        if (!p || !p->active || p->glue_count > 0 ||
+        if (!p || !p->active || p->inv_mass <= 0.0f || p->glue_count > 0 ||
             (shardParticleStamp && shardParticleStamp[p - particles_pool] == (uint32_t)voxel_render_frame)) {
             continue;
         }

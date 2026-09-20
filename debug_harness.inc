@@ -3920,6 +3920,28 @@ static void debug_finalize_validation(DebugRunState *state)
                 }
             }
         }
+        if (idx_strain >= 0 && idx_strain < voxel_count && !voxels[idx_strain].vgs_active) {
+            Particle *frozen = voxels[idx_strain].particles[0];
+            if (frozen) {
+                float saved_inv_mass = frozen->inv_mass;
+                frozen->inv_mass = 0.0f;
+                voxel_render_frame++;
+                prepare_shard_transforms();
+                if (shardTransformCount != 15 ||
+                    (shardParticleStamp &&
+                     shardParticleStamp[frozen - particles_pool] == (uint32_t)voxel_render_frame)) {
+                    debug_add_failure(state, "immovable corner rendered a shard (%d instances)",
+                                      shardTransformCount);
+                }
+                frozen->inv_mass = saved_inv_mass;
+                voxel_render_frame++;
+                prepare_shard_transforms();
+                if (shardTransformCount != 16) {
+                    debug_add_failure(state, "mobile corner failed to regain its shard (%d instances)",
+                                      shardTransformCount);
+                }
+            }
+        }
         return;
     }
     if (state->recycle_test) {
