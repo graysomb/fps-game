@@ -361,11 +361,6 @@ void solveVgs(uint gid) {
 
     float restEdge = v.pos_rest_edge.w;
     float restVolume = v.velocity_rest_volume.w;
-    float sizeRatio = clamp(uParticleHashStep / restEdge, 0.0, 1.0);
-    float strengthScale = sizeRatio * sizeRatio;
-    float vgsAlpha = uVgsAlpha * strengthScale;
-    float vgsBeta = 1.0 - (1.0 - uVgsBeta) * strengthScale;
-    float vgsVolume = uVgsVolume * strengthScale;
     for (int iteration = 0; iteration < 3; ++iteration) {
         vec3 centerPos = vec3(0.0);
         for (int i = 0; i < 8; ++i) centerPos += p[i];
@@ -373,19 +368,19 @@ void solveVgs(uint gid) {
         vec3 v0 = ((p[1]-p[0]) + (p[3]-p[2]) + (p[5]-p[4]) + (p[7]-p[6])) * 0.25;
         vec3 v1 = ((p[2]-p[0]) + (p[3]-p[1]) + (p[6]-p[4]) + (p[7]-p[5])) * 0.25;
         vec3 v2 = ((p[4]-p[0]) + (p[5]-p[1]) + (p[6]-p[2]) + (p[7]-p[3])) * 0.25;
-        vec3 u0 = v0 - vgsAlpha * (projectOnto(v1, v0) + projectOnto(v2, v0));
-        vec3 u1 = v1 - vgsAlpha * (projectOnto(v2, v1) + projectOnto(v0, v1));
-        vec3 u2 = v2 - vgsAlpha * (projectOnto(v0, v2) + projectOnto(v1, v2));
-        float target0 = mix(restEdge, length(v0), vgsBeta);
-        float target1 = mix(restEdge, length(v1), vgsBeta);
-        float target2 = mix(restEdge, length(v2), vgsBeta);
+        vec3 u0 = v0 - uVgsAlpha * (projectOnto(v1, v0) + projectOnto(v2, v0));
+        vec3 u1 = v1 - uVgsAlpha * (projectOnto(v2, v1) + projectOnto(v0, v1));
+        vec3 u2 = v2 - uVgsAlpha * (projectOnto(v0, v2) + projectOnto(v1, v2));
+        float target0 = mix(restEdge, length(v0), uVgsBeta);
+        float target1 = mix(restEdge, length(v1), uVgsBeta);
+        float target2 = mix(restEdge, length(v2), uVgsBeta);
         if (length(u0) > uVgsEpsilon) u0 *= target0 / length(u0);
         if (length(u1) > uVgsEpsilon) u1 *= target1 / length(u1);
         if (length(u2) > uVgsEpsilon) u2 *= target2 / length(u2);
         float volume = dot(cross(u0, u1), u2);
         float root = 1.0;
-        if (vgsVolume > 0.0 && abs(volume) > uVgsEpsilon) {
-            float targetVolume = mix(volume, restVolume, vgsVolume);
+        if (uVgsVolume > 0.0 && abs(volume) > uVgsEpsilon) {
+            float targetVolume = mix(volume, restVolume, uVgsVolume);
             float scale = targetVolume / volume;
             root = pow(abs(scale), 1.0/3.0) * ((scale < 0.0) ? -1.0 : 1.0);
         }

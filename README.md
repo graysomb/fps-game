@@ -464,10 +464,7 @@ Available scenarios are:
   velocities or change the octree topology. Dormant child cells skip welding.
   Collisions still use leaf particles only.
   VGS deactivation is temporarily disabled across the PBD solver, so solid
-  cells remain visible after impact. VGS shear strength `alpha`, stretch
-  strength `1-beta`, and volume restoration strength are each multiplied by
-  `(finest PBD cell size / constraint edge size)^2`. Their original values
-  (`0.9`, `0.1`, and `1.0`) apply at the finest level.
+  cells remain visible after impact. The normal VGS parameters are unchanged.
   Active cells are colored by the largest absolute second time derivative of
   their three signed VGS strains and three signed shears. Each component uses
   three consecutive fixed physics steps; the color scale is green at 0,
@@ -479,20 +476,17 @@ Available scenarios are:
 * `adaptive-cube-drop`: runs the same drop with the complete octree stored but
   only the root VGS active initially. After each PBD substep, an active terminal
   node whose six-component strain/shear time curvature exceeds 50 s^-2 enables all
-  eight children. A parent coarsens when its own curvature is below 50 s^-2
-  and no grandchildren remain active. Refinement
+  eight children. A parent coarsens when its curvature and the mean child
+  curvature are below 50 s^-2 and no grandchildren remain active. Refinement
   initializes child positions and velocities with trilinear interpolation;
   coarsening fits parent positions and velocities with the precomputed left
   pseudoinverse. The GPU receives a compact, flat list of active VGS constraints
   and parent-to-terminal-child trilinear welds for each substep. Only active
   terminal voxels render. The report records transition counts and the
   `curvature-by-level.csv` file records per-scale curvature distributions.
-  A [threshold sweep with the previous child-mean coarsening rule](docs/vgs-amr-h2-threshold/README.md)
-  found a phase-change-like jump in tree activity between 34 and 33 s^-2.
-  Parent-only coarsening removes that persistent fine state in the cube drop,
-  but the tested thresholds from 10 to 34 s^-2 reached only eight terminal
-  cells near impact. The default remains 50 s^-2. There is no hysteresis, so
-  cells can change level on consecutive substeps. Dormant descendants follow trilinear
+  At the 0.25 m requested resolution, the impact activates several octree
+  levels before the tree coarsens again. There is no hysteresis, so cells can
+  change level on consecutive substeps. Dormant descendants follow trilinear
   parent motion and do not provide an independent fine-scale curvature signal
   until they become active.
 * `vgs-refinement`: drops a 5 m cube with one root VGS constraint and eight
