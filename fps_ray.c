@@ -1118,6 +1118,10 @@ typedef struct {
     bool adaptive;
     unsigned refine_count;
     unsigned coarsen_count;
+    int active_vgs_count;
+    int peak_active_vgs_count;
+    int vgs_constraint_cap;
+    unsigned refinements_blocked_by_cap;
     float mass_density;
     uint64_t topology_generation;
 } VgsHierarchy;
@@ -10817,6 +10821,11 @@ static bool vgs_hierarchy_grid_points(const VgsHierarchyNode *node, Particle *gr
 
 static void vgs_hierarchy_transfer_refine(VgsHierarchyNode *node, bool activate)
 {
+    if (activate && vgsHierarchy.adaptive &&
+        vgsHierarchy.active_vgs_count + 8 > vgsHierarchy.vgs_constraint_cap) {
+        ++vgsHierarchy.refinements_blocked_by_cap;
+        return;
+    }
     Particle *grid[27];
     if (!vgs_hierarchy_grid_points(node, grid)) return;
     Vector3 pos[8], vel[8];
@@ -10853,6 +10862,11 @@ static void vgs_hierarchy_transfer_refine(VgsHierarchyNode *node, bool activate)
             vgsHierarchy.leaf_history[world_id] = parent_history;
         }
     }
+    if (vgsHierarchy.adaptive) {
+        vgsHierarchy.active_vgs_count += 8;
+        if (vgsHierarchy.active_vgs_count > vgsHierarchy.peak_active_vgs_count)
+            vgsHierarchy.peak_active_vgs_count = vgsHierarchy.active_vgs_count;
+    }
     ++vgsHierarchy.refine_count;
 }
 
@@ -10884,6 +10898,7 @@ static void vgs_hierarchy_transfer_coarsen(VgsHierarchyNode *node)
         if (child >= 0) vgsHierarchy.nodes[child].active = false;
         else voxels[-child - 1].simulate_dofs = false;
     }
+    if (vgsHierarchy.adaptive) vgsHierarchy.active_vgs_count -= 8;
     Vector3 corners[8];
     for (int c = 0; c < 8; ++c) corners[c] = node->particles[c]->pos;
     VgsDeformation d = measure_vgs_deformation(corners, node->rest_edge);
@@ -10943,6 +10958,11 @@ static bool vgs_hierarchy_initialize_adaptive(void)
     vgsHierarchy.mass_density = (float)(total_mass / vgsHierarchy.nodes[0].rest_volume);
     if (!isfinite(vgsHierarchy.mass_density) || vgsHierarchy.mass_density <= 0.0f) return false;
     vgsHierarchy.adaptive = true;
+    // A complete split adds eight VGS constraints; the parent stays active.
+    vgsHierarchy.vgs_constraint_cap = vgsHierarchy.leaf_count / 2;
+    if (vgsHierarchy.vgs_constraint_cap < 1) vgsHierarchy.vgs_constraint_cap = 1;
+    vgsHierarchy.active_vgs_count = 1;
+    vgsHierarchy.peak_active_vgs_count = 1;
     for (int i = 0; i < vgsHierarchy.node_count; ++i)
         vgsHierarchy.nodes[i].active = i == 0;
     for (int i = 0; i < voxel_count; ++i)
@@ -10952,12 +10972,28 @@ static bool vgs_hierarchy_initialize_adaptive(void)
     return true;
 }
 
+typedef struct {
+    int node_id;
+    float curvature;
+} VgsRefineCandidate;
+
+static int vgs_refine_candidate_compare(const void *left, const void *right)
+{
+    const VgsRefineCandidate *a = left, *b = right;
+    if (a->curvature > b->curvature) return -1;
+    if (a->curvature < b->curvature) return 1;
+    return (a->node_id > b->node_id) - (a->node_id < b->node_id);
+}
+
 static bool vgs_hierarchy_adapt(void)
 {
     if (!vgsHierarchy.adaptive) return true;
     uint8_t *refine = calloc((size_t)vgsHierarchy.node_count, 1);
     uint8_t *coarsen = calloc((size_t)vgsHierarchy.node_count, 1);
-    if (!refine || !coarsen) { free(refine); free(coarsen); return false; }
+    VgsRefineCandidate *candidates = malloc((size_t)vgsHierarchy.node_count * sizeof(*candidates));
+    if (!refine || !coarsen || !candidates) {
+        free(refine); free(coarsen); free(candidates); return false;
+    }
     for (int i = 0; i < vgsHierarchy.node_count; ++i) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
         if (!node->active) continue;
@@ -10985,12 +11021,30 @@ static bool vgs_hierarchy_adapt(void)
         int parent = vgsHierarchy.nodes[i].parent;
         if (parent >= 0 && coarsen[parent]) refine[i] = 0;
     }
+    int projected_vgs_count = vgsHierarchy.active_vgs_count;
+    int candidate_count = 0;
+    for (int i = 0; i < vgsHierarchy.node_count; ++i) {
+        if (coarsen[i]) projected_vgs_count -= 8;
+        if (refine[i]) candidates[candidate_count++] =
+            (VgsRefineCandidate){i, vgsHierarchy.node_history[i].curvature};
+    }
+    if (projected_vgs_count < 1) {
+        free(refine); free(coarsen); free(candidates); return false;
+    }
+    int slots = (vgsHierarchy.vgs_constraint_cap - projected_vgs_count) / 8;
+    if (slots < 0) slots = 0;
+    qsort(candidates, (size_t)candidate_count, sizeof(*candidates),
+          vgs_refine_candidate_compare);
+    memset(refine, 0, (size_t)vgsHierarchy.node_count);
+    int accepted = candidate_count < slots ? candidate_count : slots;
+    for (int i = 0; i < accepted; ++i) refine[candidates[i].node_id] = 1;
+    vgsHierarchy.refinements_blocked_by_cap += (unsigned)(candidate_count - accepted);
     bool changed = false;
     for (int i = vgsHierarchy.node_count - 1; i >= 0; --i)
         if (coarsen[i]) { vgs_hierarchy_transfer_coarsen(&vgsHierarchy.nodes[i]); changed = true; }
     for (int i = 0; i < vgsHierarchy.node_count; ++i)
         if (refine[i]) { vgs_hierarchy_transfer_refine(&vgsHierarchy.nodes[i], true); changed = true; }
-    free(refine); free(coarsen);
+    free(refine); free(coarsen); free(candidates);
     if (changed && !vgs_hierarchy_rebuild_active_masses()) return false;
     for (int i = 0; i < vgsHierarchy.node_count; ++i)
         if (vgsHierarchy.nodes[i].active && !vgs_node_has_active_children(&vgsHierarchy.nodes[i]))

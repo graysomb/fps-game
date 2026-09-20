@@ -4996,9 +4996,11 @@ static bool debug_write_report(DebugRunState *state)
                 vgsHierarchy.node_count, active_nodes,
                 PBD_DISABLE_VGS_DEACTIVATION ? "true" : "false");
         if (state->adaptive_cube_drop)
-            fprintf(file, "  \"adaptiveHierarchy\": {\"thresholdPerSecondSquared\": %.9g, \"refinements\": %u, \"coarsenings\": %u, \"gpuConstraints\": %d, \"simulatedParticles\": %d},\n",
+            fprintf(file, "  \"adaptiveHierarchy\": {\"thresholdPerSecondSquared\": %.9g, \"refinements\": %u, \"coarsenings\": %u, \"activeVgsConstraints\": %d, \"peakActiveVgsConstraints\": %d, \"vgsConstraintCap\": %d, \"refinementsBlockedByCap\": %u, \"gpuConstraints\": %d, \"simulatedParticles\": %d},\n",
                     (double)VGS_ADAPTIVE_CURVATURE_THRESHOLD,
                     vgsHierarchy.refine_count, vgsHierarchy.coarsen_count,
+                    vgsHierarchy.active_vgs_count, vgsHierarchy.peak_active_vgs_count,
+                    vgsHierarchy.vgs_constraint_cap, vgsHierarchy.refinements_blocked_by_cap,
                     gpuPhysics.constraint_count, sim_particle_count);
         fprintf(file, "  \"vgsTemporalCurvature\": {\"samples\": %d, \"redAtPerSecondSquared\": %.9g, \"lastStepMax\": %.9g, \"lastStepMean\": %.9g},\n",
                 debugVgsTemporalSampleCount, (double)VGS_TEMPORAL_CURVATURE_RED_AT,

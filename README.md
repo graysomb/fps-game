@@ -484,6 +484,11 @@ Available scenarios are:
   and parent-to-terminal-child trilinear welds for each substep. Only active
   terminal voxels render. The report records transition counts and the
   `curvature-by-level.csv` file records per-scale curvature distributions.
+  Adaptive refinement accepts whole eight-child splits in descending curvature
+  order, with an active VGS cap of half the hierarchy's fine leaf count. The
+  cube drop's 32,768 leaves therefore allow at most 16,384 active VGS
+  constraints. Weld constraints are counted separately; the report records
+  the active and peak VGS count, cap, and rejected refinements.
   At the 0.25 m requested resolution, the impact activates several octree
   levels before the tree coarsens again. There is no hysteresis, so cells can
   change level on consecutive substeps. Dormant descendants follow trilinear
