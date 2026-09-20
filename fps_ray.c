@@ -749,6 +749,8 @@ typedef struct {
 static Player players[MAX_PLAYERS];
 
 #define GOLIATH_MAX_ATTACHED 18
+#define GOLIATH_ARMOR_REGEN_SECONDS 5.0f
+#define GOLIATH_ARMOR_REGEN_COST MATTER_BUILD_COST
 typedef struct {
     uint64_t voxelIdentity;
     Vector3 localOffset;
@@ -758,7 +760,7 @@ typedef struct {
     GoliathVoxelArmor voxels[GOLIATH_MAX_ATTACHED];
     int count;
     float launchTimer;
-    float harvestCooldown;
+    float regenTimer;
 } GoliathState;
 static GoliathState goliathStates[MAX_PLAYERS];
 
@@ -8101,7 +8103,7 @@ static void detach_one_goliath_armor_voxel(int player_idx);
 static int get_goliath_owner_of_voxel(int voxel_idx);
 static bool goliath_has_armor(int player_idx);
 static void goliath_launch_voxel(int bot_idx, int target_idx);
-static void goliath_consume_terrain(int bot_idx, int static_voxel_idx);
+static bool goliath_try_regen_armor(int player_idx);
 static void explode_goliath_armor(int player_idx);
 static int find_nearest_static_voxel(const Vector3 *pos, float *out_dist_sq);
 static EnemyType pick_firefight_enemy_type(int wave, int spawn_index);
@@ -13673,32 +13675,69 @@ static Vector3 pick_enemy_wave_spawn(int bot_idx) {
     return random_pos;
 }
 
+static bool goliath_offset_in_use(const GoliathState *gs, Vector3 offset) {
+    for (int i = 0; i < gs->count; ++i) {
+        Vector3 d = v_sub(gs->voxels[i].localOffset, offset);
+        if (v_dot(d, d) < 1e-6f) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool try_add_goliath_armor_plate(int player_idx, int offset_index) {
+    if (player_idx < 0 || player_idx >= activePlayers) return false;
+    if (offset_index < 0 || offset_index >= GOLIATH_MAX_ATTACHED) return false;
+    GoliathState *gs = &goliathStates[player_idx];
+    if (gs->count >= GOLIATH_MAX_ATTACHED) return false;
+    Player *p = &players[player_idx];
+    Vector3 offset = goliathArmorOffsets[offset_index];
+    if (goliath_offset_in_use(gs, offset)) return false;
+    Vector3 spawn_pos = v_add(p->pos, offset);
+    int gx = (int)floorf(spawn_pos.x / VOXEL_SIZE);
+    int gy = (int)floorf(spawn_pos.y / VOXEL_SIZE);
+    int gz = (int)floorf(spawn_pos.z / VOXEL_SIZE);
+    if (occupied(gx, gy, gz)) {
+        return false;
+    }
+    Color armorCol = (Color){ 70, 80, 95, 255 };
+    int idx = addVoxel(spawn_pos.x, spawn_pos.y, spawn_pos.z, false, true, armorCol, 0);
+    if (idx < 0) {
+        return false;
+    }
+    voxels[idx].owner = player_idx;
+    voxels[idx].activator = player_idx;
+    voxels[idx].glueEligible = false;
+    gs->voxels[gs->count].voxelIdentity = voxels[idx].identity;
+    gs->voxels[gs->count].localOffset = offset;
+    gs->count++;
+    return true;
+}
+
 static void spawn_goliath_armor(int player_idx) {
     if (player_idx < 0 || player_idx >= activePlayers) return;
     GoliathState *gs = &goliathStates[player_idx];
     gs->count = 0;
     gs->launchTimer = 2.0f;
-    gs->harvestCooldown = 1.0f;
-    Player *p = &players[player_idx];
-    Color armorCol = (Color){ 70, 80, 95, 255 };
+    gs->regenTimer = GOLIATH_ARMOR_REGEN_SECONDS;
     for (int i = 0; i < GOLIATH_MAX_ATTACHED; ++i) {
-        Vector3 spawn_pos = v_add(p->pos, goliathArmorOffsets[i]);
-        int gx = (int)floorf(spawn_pos.x / VOXEL_SIZE);
-        int gy = (int)floorf(spawn_pos.y / VOXEL_SIZE);
-        int gz = (int)floorf(spawn_pos.z / VOXEL_SIZE);
-        if (occupied(gx, gy, gz)) {
-            continue;
-        }
-        int idx = addVoxel(spawn_pos.x, spawn_pos.y, spawn_pos.z, false, true, armorCol, 0);
-        if (idx >= 0) {
-            voxels[idx].owner = player_idx;
-            voxels[idx].activator = player_idx;
-            voxels[idx].glueEligible = false;
-            gs->voxels[gs->count].voxelIdentity = voxels[idx].identity;
-            gs->voxels[gs->count].localOffset = goliathArmorOffsets[i];
-            gs->count++;
+        try_add_goliath_armor_plate(player_idx, i);
+    }
+}
+
+static bool goliath_try_regen_armor(int player_idx) {
+    if (player_idx < 0 || player_idx >= activePlayers) return false;
+    Player *p = &players[player_idx];
+    GoliathState *gs = &goliathStates[player_idx];
+    if (gs->count >= GOLIATH_MAX_ATTACHED) return false;
+    if (p->matter < GOLIATH_ARMOR_REGEN_COST) return false;
+    for (int i = 0; i < GOLIATH_MAX_ATTACHED; ++i) {
+        if (try_add_goliath_armor_plate(player_idx, i)) {
+            p->matter = fmaxf(0.0f, p->matter - GOLIATH_ARMOR_REGEN_COST);
+            return true;
         }
     }
+    return false;
 }
 
 static void update_goliath_armor_positions(int player_idx) {
@@ -13851,27 +13890,7 @@ static void goliath_launch_voxel(int bot_idx, int target_idx) {
     }
 }
 
-static void goliath_consume_terrain(int bot_idx, int static_voxel_idx) {
-    if (bot_idx < 0 || bot_idx >= activePlayers || static_voxel_idx < 0 || static_voxel_idx >= voxel_count) return;
-    GoliathState *gs = &goliathStates[bot_idx];
-    if (gs->count >= GOLIATH_MAX_ATTACHED) return;
 
-    int gx = voxels[static_voxel_idx].gx;
-    int gy = voxels[static_voxel_idx].gy;
-    int gz = voxels[static_voxel_idx].gz;
-
-    int new_idx = rip_single_static_voxel(static_voxel_idx, bot_idx);
-    if (new_idx >= 0 && new_idx < voxel_count) {
-        voxels[new_idx].owner = bot_idx;
-        voxels[new_idx].activator = bot_idx;
-        voxels[new_idx].glueEligible = false;
-        gs->voxels[gs->count].voxelIdentity = voxels[new_idx].identity;
-        gs->voxels[gs->count].localOffset = goliathArmorOffsets[gs->count];
-        gs->count++;
-        play_sfx(SFX_GLUE_BREAK);
-        activate_static_voxels_near_region(gx, gx, gy, gy, gz, gz, bot_idx);
-    }
-}
 
 static void explode_goliath_armor(int player_idx) {
     if (player_idx < 0 || player_idx >= activePlayers) return;
@@ -17848,20 +17867,34 @@ static void UpdateBot(int playerIdx, float dt) {
     if (bot->enemyType == ENEMY_TYPE_GOLIATH) {
         GoliathState *gs = &goliathStates[playerIdx];
         if (gs->launchTimer > 0.0f) gs->launchTimer -= dt;
-        if (gs->harvestCooldown > 0.0f) gs->harvestCooldown -= dt;
+        if (gs->regenTimer > 0.0f) gs->regenTimer -= dt;
 
-        if (gs->count < GOLIATH_MAX_ATTACHED && gs->harvestCooldown <= 0.0f && harvestVoxelIdx >= 0 && harvestDist <= 3.5f) {
-            goliath_consume_terrain(playerIdx, harvestVoxelIdx);
-            gs->harvestCooldown = 1.2f;
+        bool needArmor = (gs->count < GOLIATH_MAX_ATTACHED);
+        bool needMatter = needArmor && (bot->matter < GOLIATH_ARMOR_REGEN_COST);
+        if (needArmor && gs->regenTimer <= 0.0f && goliath_try_regen_armor(playerIdx)) {
+            gs->regenTimer = GOLIATH_ARMOR_REGEN_SECONDS;
         }
 
-        // Only launch voxels when target is directly visible (not through walls)
-        if (isDirectlyVisible && gs->count > 0 && enemyDist < 25.0f && gs->launchTimer <= 0.0f) {
-            goliath_launch_voxel(playerIdx, enemyIdx);
-            gs->launchTimer = (enemyDist < 10.0f) ? 1.5f : 2.5f;
-        }
-
-        if (hasEnemy) {
+        if (needMatter && harvestVoxelIdx >= 0) {
+            Vector3 toVoxel = v_sub(voxels[harvestVoxelIdx].pos, bot->pos);
+            toVoxel.y = 0.0f;
+            float len = v_length(toVoxel);
+            if (len > MELEE_RANGE * 0.85f && len > 1e-3f) {
+                Vector3 moveDir = v_mul(toVoxel, 1.0f / len);
+                float goliathSpeed = MOVE_SPEED * 0.85f;
+                bot->vel.x = moveDir.x * goliathSpeed;
+                bot->vel.z = moveDir.z * goliathSpeed;
+            } else {
+                bot->vel.x = 0.0f;
+                bot->vel.z = 0.0f;
+            }
+            Vector3 lookDir = v_sub(voxels[harvestVoxelIdx].pos, bot->pos);
+            float targetYaw = atan2f(lookDir.x, lookDir.z) * RAD2DEG + 180.0f;
+            bot->yaw += (targetYaw - bot->yaw) * 6.0f * dt;
+            if (harvestDist <= MELEE_RANGE * 0.95f) {
+                perform_melee(playerIdx);
+            }
+        } else if (hasEnemy) {
             Vector3 targetDest = isDirectlyVisible ? players[enemyIdx].pos : bs->lastKnownTargetPos;
             Vector3 toEnemy = v_sub(targetDest, bot->pos);
             toEnemy.y = 0.0f;
@@ -17880,6 +17913,10 @@ static void UpdateBot(int playerIdx, float dt) {
             if (bot->onGround && GetRandomValue(0, 100) < 3) {
                 bot->vel.y = JUMP_SPEED;
                 bot->onGround = false;
+            }
+            if (isDirectlyVisible && gs->count > 0 && enemyDist < 25.0f && gs->launchTimer <= 0.0f) {
+                goliath_launch_voxel(playerIdx, enemyIdx);
+                gs->launchTimer = (enemyDist < 10.0f) ? 1.5f : 2.5f;
             }
         } else {
             bot->vel.x *= 0.85f;
