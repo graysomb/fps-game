@@ -632,7 +632,7 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define TETHER_THROW_CCD_SKIN (VOXEL_SIZE * 0.01f)
 #define TETHER_THROW_CCD_RESTITUTION 0.15f
 #define TETHER_THROW_IMPACT_LIFETIME_FRAMES 8
-#define SMUSH_EXPOSED_SPEED 8.0f
+#define SMUSH_EXPOSED_SPEED 2.0f
 #define SMUSH_POINT_MULT 4
 #define POINTS_UPDATE_DURATION 0.6f
 #define BULLET_MAX_SPAN 4
@@ -9775,15 +9775,6 @@ static void apply_matter_damage(int player_index, int attacker_index, float dama
     if (player->invuln_timer > 0.0f || player->isExposed) {
         return;
     }
-    if (player->enemyType == ENEMY_TYPE_GOLIATH && goliath_has_armor(player_index)) {
-        detach_one_goliath_armor_voxel(player_index);
-        player->matter_flash_timer = 0.2f;
-        play_sfx(SFX_IMPACT);
-        if (attacker_index >= 0 && attacker_index < activePlayers && attacker_index != player_index) {
-            players[attacker_index].last_damage_time = (float)GetTime();
-        }
-        return;
-    }
     player->matter = fmaxf(0.0f, player->matter - damage);
     player->matter_flash_timer = 0.2f;
     play_sfx(SFX_IMPACT);
@@ -9866,7 +9857,7 @@ static void update_projectiles(float dt)
             }
             Player *pl = &players[j];
             float bullet_radius = VOXEL_SIZE * 0.5f;
-            float body_size = (pl->enemyType == ENEMY_TYPE_SWARMER) ? (PLAYER_SIZE * 0.5f) : ((pl->enemyType == ENEMY_TYPE_GOLIATH) ? (PLAYER_SIZE * 1.5f) : PLAYER_SIZE);
+            float body_size = (pl->enemyType == ENEMY_TYPE_SWARMER) ? (PLAYER_SIZE * 0.5f) : PLAYER_SIZE;
             float hit_extent = body_size * 0.5f + bullet_radius;
             Vector3 box_min = {
                 pl->pos.x - hit_extent,
@@ -9879,6 +9870,16 @@ static void update_projectiles(float dt)
                 pl->pos.z + hit_extent
             };
             if (segment_intersects_aabb(start, end, box_min, box_max)) {
+                Ray block_ray = { start, v_norm(v->vel) };
+                VoxelHit blocker;
+                float player_t = v_length(v_sub(pl->pos, start)) - hit_extent;
+                if (player_t < 0.0f) {
+                    player_t = 0.0f;
+                }
+                if (first_voxel_hit_detailed(block_ray, distance, i, false, &blocker) &&
+                    blocker.entry_t < player_t) {
+                    break;
+                }
                 int damage = player_bullet_damage(v->owner);
                 apply_matter_damage(j, v->owner, (float)damage);
                 remove_voxel_index(i);
@@ -9896,6 +9897,18 @@ static void update_projectiles(float dt)
             play_sfx(SFX_IMPACT);
             if (voxels[hit_id].simulate && voxels[hit_id].sleeping) {
                 wake_sleeping_cluster_in_place(hit_id);
+            }
+            int armor_owner = get_goliath_owner_of_voxel(hit_id);
+            if (armor_owner >= 0) {
+                detach_goliath_armor_voxel(hit_id);
+                voxels[hit_id].glueEligible = true;
+                Vector3 knock = v_mul(v_norm(v->vel), 8.0f);
+                voxels[hit_id].vel = knock;
+                for (int c = 0; c < VOXEL_CORNER_COUNT; ++c) {
+                    if (voxels[hit_id].particles[c]) {
+                        voxels[hit_id].particles[c]->vel = knock;
+                    }
+                }
             }
             
             // Bullet vs Static Voxel
@@ -10161,7 +10174,10 @@ static void handle_pbd_projectile_hits(void)
                     cluster_count = 1;
                 }
                 float damage = (float)VOXEL_DAMAGE * (float)cluster_count;
-                if (speed >= SMUSH_EXPOSED_SPEED && players[j].isExposed) {
+                bool would_empty = players[j].isExposed ||
+                    (players[j].invuln_timer <= 0.0f &&
+                     players[j].matter <= damage);
+                if (speed >= SMUSH_EXPOSED_SPEED && would_empty) {
                     kill_player(j, attacker, award_kill, award_debris);
                     smushBannerTimer = 1.0f;
                 } else {
