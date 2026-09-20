@@ -1668,6 +1668,9 @@ static const float PARTICLE_DEBUG_MARKER_RADIUS = 0.6f;
 static const float PARTICLE_DEBUG_MAX_SPEED = 20.0f;
 static bool debugLogGlueClusters = false;
 static bool sfxEnabled = true;
+static Music gameMusic;
+static bool gameMusicReady = false;
+static bool gameMusicPlaying = false;
 
 typedef enum {
     SFX_FIRE = 0,
@@ -2027,6 +2030,90 @@ static Wave make_win_song_wave(void) {
     return wave;
 }
 
+static bool load_game_music_from(const char *path)
+{
+    if (!path || !path[0] || !FileExists(path)) {
+        return false;
+    }
+    gameMusic = LoadMusicStream(path);
+    if (gameMusic.ctxData == NULL || gameMusic.frameCount == 0) {
+        if (gameMusic.ctxData != NULL) {
+            UnloadMusicStream(gameMusic);
+        }
+        gameMusic = (Music){ 0 };
+        return false;
+    }
+    gameMusic.looping = true;
+    SetMusicVolume(gameMusic, 0.45f);
+    gameMusicReady = true;
+    return true;
+}
+
+static void init_game_music(void)
+{
+    if (gameMusicReady) {
+        return;
+    }
+    const char *name = "game_song.mp3";
+    if (load_game_music_from(name)) {
+        return;
+    }
+    const char *app_dir = GetApplicationDirectory();
+    if (app_dir && app_dir[0]) {
+        char path[1024];
+        if (snprintf(path, sizeof(path), "%s%s", app_dir, name) < (int)sizeof(path) &&
+            load_game_music_from(path)) {
+            return;
+        }
+        if (snprintf(path, sizeof(path), "%s../Resources/%s", app_dir, name) < (int)sizeof(path) &&
+            load_game_music_from(path)) {
+            return;
+        }
+    }
+}
+
+static void shutdown_game_music(void)
+{
+    if (gameMusicPlaying) {
+        StopMusicStream(gameMusic);
+        gameMusicPlaying = false;
+    }
+    if (gameMusicReady) {
+        UnloadMusicStream(gameMusic);
+        gameMusic = (Music){ 0 };
+        gameMusicReady = false;
+    }
+}
+
+static bool gameplay_music_wanted(void)
+{
+    if (gameState != GAME_STATE_PLAYING &&
+        gameState != GAME_STATE_PAUSED &&
+        gameState != GAME_STATE_DRONE_INTRO) {
+        return false;
+    }
+    return gameMode == GAME_MODE_DEATHMATCH || gameMode == GAME_MODE_FIREFIGHT;
+}
+
+static void update_game_music(void)
+{
+    if (!gameMusicReady) {
+        return;
+    }
+    bool want = gameplay_music_wanted();
+    if (want && !gameMusicPlaying) {
+        PlayMusicStream(gameMusic);
+        gameMusicPlaying = true;
+    } else if (!want && gameMusicPlaying) {
+        StopMusicStream(gameMusic);
+        SeekMusicStream(gameMusic, 0.0f);
+        gameMusicPlaying = false;
+    }
+    if (gameMusicPlaying) {
+        UpdateMusicStream(gameMusic);
+    }
+}
+
 static void init_sfx(void)
 {
     if (sfxReady) {
@@ -2083,6 +2170,7 @@ static void init_sfx(void)
     UnloadWave(wave);
 
     sfxReady = true;
+    init_game_music();
 }
 
 static void shutdown_sfx(void)
@@ -2090,6 +2178,7 @@ static void shutdown_sfx(void)
     if (!sfxReady) {
         return;
     }
+    shutdown_game_music();
     for (int i = 0; i < SFX_COUNT; ++i) {
         UnloadSound(sfxSounds[i]);
     }
@@ -18832,6 +18921,7 @@ int main(int argc, char **argv) {
 #if defined(__APPLE__)
         macos_gamepad_poll();
 #endif
+        update_game_music();
         voxel_render_frame++;
         if (netTransport.role != NET_ROLE_OFFLINE) {
             net_transport_pump(&netTransport, net_on_receive, net_on_connect, NULL);

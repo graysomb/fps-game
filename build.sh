@@ -45,4 +45,7 @@ cc "$project_root/fps_ray.c" $enet_sources -I"$raylib33/src" -L"$raylib33/src" -
 cc "$project_root/fps_ray.c" $enet_sources -DGRAPHICS_API_OPENGL_43 -I"$raylib43/src" -L"$raylib43/src" -o "$bin_dir/fps_ray_gpu" -lraylib $common_flags
 cc "$project_root/fps_launcher.c" -std=c11 -O2 -o "$bin_dir/fps_ray"
 cp -a "$project_root/shaders" "$bin_dir/"
+if [ -f "$project_root/game_song.mp3" ]; then
+    cp "$project_root/game_song.mp3" "$bin_dir/game_song.mp3"
+fi
 echo "Built launcher and both physics backends in $bin_dir"

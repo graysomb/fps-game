@@ -62,4 +62,8 @@ try {
 }
 
 Copy-Item -LiteralPath (Join-Path $ProjectRoot "shaders") -Destination $BinDir -Recurse -Force
+$Song = Join-Path $ProjectRoot "game_song.mp3"
+if (Test-Path -LiteralPath $Song) {
+    Copy-Item -LiteralPath $Song -Destination (Join-Path $BinDir "game_song.mp3") -Force
+}
 Write-Host "Built launcher and both physics backends in $BinDir"
