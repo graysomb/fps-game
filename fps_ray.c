@@ -20136,8 +20136,8 @@ int main(int argc, char **argv) {
             if (bot->contactDamageTimer > 0.0f) continue;
 
             float contactRadius = (bot->enemyType == ENEMY_TYPE_SWARMER) ? 0.75f : 1.6f;
-            float contactDamage = (bot->enemyType == ENEMY_TYPE_SWARMER) ? 15.0f : 30.0f;
-            float knockbackImpulse = (bot->enemyType == ENEMY_TYPE_SWARMER) ? 9.0f : 16.0f;
+            float contactDamage = (bot->enemyType == ENEMY_TYPE_SWARMER) ? 10.0f : 30.0f;
+            float knockbackImpulse = (bot->enemyType == ENEMY_TYPE_SWARMER) ? 2.5f : 16.0f;
 
             for (int j = 0; j < activePlayers; ++j) {
                 if (i == j) continue;
@@ -20158,6 +20158,9 @@ int main(int argc, char **argv) {
                     apply_matter_damage(j, i, contactDamage);
                     bot->contactDamageTimer = (bot->enemyType == ENEMY_TYPE_SWARMER) ? 0.5f : 0.8f;
                     play_sfx(SFX_IMPACT);
+                    if (bot->enemyType == ENEMY_TYPE_SWARMER) {
+                        kill_player(i, -1, false, false);
+                    }
                     break;
                 }
             }
