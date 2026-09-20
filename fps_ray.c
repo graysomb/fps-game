@@ -10235,6 +10235,13 @@ static void update_wake_timers_range(int start, int end, int worker_id, void *us
 
 static void update_wake_timers(void) {
     pbd_parallel_for(0, active_voxel_count, update_wake_timers_range, NULL);
+    // wake_source is a one-frame pulse used above to refresh neighbors.
+    // Clear it after the pass so the timer can actually run down.
+    for (int i = 0; i < voxel_count; ++i) {
+        if (voxels[i].simulate) {
+            voxels[i].wake_source = false;
+        }
+    }
 }
 
 static void decrement_particle_timers_range(int start, int end, int worker_id, void *user) {
