@@ -2770,6 +2770,21 @@ static void particle_release(Particle *p) {
     }
 }
 
+static void particle_promote_static_leftover(Particle *p)
+{
+    if (!p || !p->active || p->refcount <= 0) {
+        return;
+    }
+    if (p->base_inv_mass > 0.0f || p->material == PARTICLE_MATERIAL_FLUID) {
+        return;
+    }
+    p->inv_mass = 1.0f;
+    p->base_inv_mass = 1.0f;
+    if (p->sim_index < 0) {
+        sim_particles_add(p);
+    }
+}
+
 static inline int particle_hash(int x, int y, int z) {
     uint32_t h = (uint32_t)(x * 73856093) ^ (uint32_t)(y * 19349663) ^ (uint32_t)(z * 83492791);
     return (int)(h & (uint32_t)(particleHashActiveSize - 1));
@@ -3647,13 +3662,19 @@ static void remove_voxel_index(int idx)
         mark_chunk_dirty_for_grid(victim->gx, victim->gy, victim->gz);
     }
     voxel_table_unregister(victim);
+    bool was_static = !victim->simulate;
     for (int j = 0; j < 8; ++j) {
-        if (victim->particles[j]) {
-            if (victim->particles[j]->glue_count > 0) {
-                victim->particles[j]->glue_count--;
-            }
-            particle_release(victim->particles[j]);
-            victim->particles[j] = NULL;
+        Particle *p = victim->particles[j];
+        if (!p) {
+            continue;
+        }
+        if (p->glue_count > 0) {
+            p->glue_count--;
+        }
+        particle_release(p);
+        victim->particles[j] = NULL;
+        if (was_static) {
+            particle_promote_static_leftover(p);
         }
     }
 

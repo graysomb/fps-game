@@ -4,6 +4,10 @@
 <dict>
 	<key>files</key>
 	<dict>
+		<key>Resources/game_song.mp3</key>
+		<data>
+		aMlqL9l+Xdgs72wqhoGkaj9RvBg=
+		</data>
 		<key>Resources/shaders/.DS_Store</key>
 		<data>
 		sveUwjcNfvGbIuda3Kmw+Eca2fU=
@@ -167,19 +171,35 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			HBMcdtYNLTmr8A/9YDHgXd/JmVg=
+			hjK8NcH2drggMFn/OZGUacYt1Fw=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"1c131c76d60d2d39abf00ffd6031e05ddfc99958"</string>
+			<string>cdhash H"8632bc35c1f676b8203059ff39919469c62dd45c"</string>
 		</dict>
 		<key>MacOS/fps_ray_gpu</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			qskKC8nbbzngZG7W5oZe9JhXP5c=
+			L6lslQgKZ0I4cObd33R3JyxaEsQ=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"aac90a0bc9db6f39e0646ed6e6865ef498573f97"</string>
+			<string>cdhash H"2fa96c95080a67423870e6dddf7477272c5a12c4"</string>
+		</dict>
+		<key>MacOS/game_song.mp3</key>
+		<dict>
+			<key>cdhash</key>
+			<data>
+			PrR98c0gBCIv3gemh/vu1ssaElk=
+			</data>
+			<key>requirement</key>
+			<string>cdhash H"3eb47df1cd2004222fde07a687fbeed6cb1a1259"</string>
+		</dict>
+		<key>Resources/game_song.mp3</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			6183jrPWjMQ8zLW2w2iNm3PhwclbpUzdMjPoDdKhQrc=
+			</data>
 		</dict>
 		<key>Resources/shaders/debug_AABB.frag</key>
 		<dict>
