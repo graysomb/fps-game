@@ -30,6 +30,7 @@ struct GpuUniforms {
     float velocity_damping, sor, collision_relaxation, vgs_alpha;
     float vgs_beta, vgs_epsilon, strain_threshold, shear_threshold;
     float tether_spring, tether_damping, rest_grid_step, particle_hash_step;
+    float vgs_volume, float_padding_1, float_padding_2, float_padding_3;
     float4 players[4];
     float4 tether_targets[4];
 };
@@ -37,7 +38,7 @@ struct GpuUniforms {
 static_assert(sizeof(ParticleState) == 64, "ParticleState layout mismatch");
 static_assert(sizeof(VoxelState) == 128, "VoxelState layout mismatch");
 static_assert(sizeof(StaticCollider) == 48, "StaticCollider layout mismatch");
-static_assert(sizeof(GpuUniforms) == 240, "GpuUniforms layout mismatch");
+static_assert(sizeof(GpuUniforms) == 256, "GpuUniforms layout mismatch");
 
 constant int MODE_RESET = 0;
 constant int MODE_INTEGRATE = 1;
@@ -371,7 +372,9 @@ inline void solveVgs(uint gid, device ParticleState *particle,
         if(length(u1)>u.vgs_epsilon)u1*=target1/length(u1);
         if(length(u2)>u.vgs_epsilon)u2*=target2/length(u2);
         float volume=dot(cross(u0,u1),u2);
-        if(fabs(volume)>u.vgs_epsilon){float scale=restVolume/volume;float root=pow(fabs(scale),1.0f/3.0f)*(scale<0.0f?-1.0f:1.0f);u0*=0.5f*root;u1*=0.5f*root;u2*=0.5f*root;}
+        float root=1.0f;
+        if(u.vgs_volume>0.0f && fabs(volume)>u.vgs_epsilon){float targetVolume=mix(volume,restVolume,u.vgs_volume);float scale=targetVolume/volume;root=pow(fabs(scale),1.0f/3.0f)*(scale<0.0f?-1.0f:1.0f);}
+        u0*=0.5f*root;u1*=0.5f*root;u2*=0.5f*root;
         p[0]=centerPos-u0-u1-u2;p[1]=centerPos+u0-u1-u2;p[2]=centerPos-u0+u1-u2;p[3]=centerPos+u0+u1-u2;
         p[4]=centerPos-u0-u1+u2;p[5]=centerPos+u0-u1+u2;p[6]=centerPos-u0+u1+u2;p[7]=centerPos+u0+u1+u2;
     }

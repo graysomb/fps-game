@@ -541,6 +541,8 @@ static inline bool is_player_bot(int player_index) {
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
 #define VGS_ALPHA 0.9f
 #define VGS_BETA 0.9f
+// Fraction of the volume error restored by each VGS projection (0 = off, 1 = full).
+#define VGS_VOLUME 1.0f
 #define VGS_ITERS 3
 #define VGS_EPS 1e-6f
 #define VGS_EARLY_OUT_EPS 0.0002f
@@ -10673,17 +10675,20 @@ static void gather_shape_constraints(Particle *const corners[8], float rest_edge
         if (len2 > VGS_EPS) u2 = v_mul(u2, target2 / len2);
 
         float volume = v_dot(v_cross(u0, u1), u2);
-        if (fabsf(volume) > VGS_EPS) {
-            float scale = rest_volume / volume;
-            float root = fast_cbrtf(fabsf(scale));
+        float root = 1.0f;
+        if (VGS_VOLUME > 0.0f && fabsf(volume) > VGS_EPS) {
+            float target_volume = volume + VGS_VOLUME * (rest_volume - volume);
+            float scale = target_volume / volume;
+            root = fast_cbrtf(fabsf(scale));
             if (scale < 0.0f) {
                 root = -root;
             }
-            float factor = 0.5f * root;
-            u0 = v_mul(u0, factor);
-            u1 = v_mul(u1, factor);
-            u2 = v_mul(u2, factor);
         }
+        // u0/u1/u2 are full edge vectors; corners use half edges even with volume off.
+        float factor = 0.5f * root;
+        u0 = v_mul(u0, factor);
+        u1 = v_mul(u1, factor);
+        u2 = v_mul(u2, factor);
 
         Vector3 new_p[8];
         new_p[0] = v_sub(v_sub(v_sub(centroid, u0), u1), u2);

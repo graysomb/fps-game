@@ -65,6 +65,7 @@ uniform float uSor;
 uniform float uCollisionRelaxation;
 uniform float uVgsAlpha;
 uniform float uVgsBeta;
+uniform float uVgsVolume;
 uniform float uVgsEpsilon;
 uniform float uStrainBreakThreshold;
 uniform float uShearBreakThreshold;
@@ -377,11 +378,13 @@ void solveVgs(uint gid) {
         if (length(u1) > uVgsEpsilon) u1 *= target1 / length(u1);
         if (length(u2) > uVgsEpsilon) u2 *= target2 / length(u2);
         float volume = dot(cross(u0, u1), u2);
-        if (abs(volume) > uVgsEpsilon) {
-            float scale = restVolume / volume;
-            float root = pow(abs(scale), 1.0/3.0) * ((scale < 0.0) ? -1.0 : 1.0);
-            u0 *= 0.5 * root; u1 *= 0.5 * root; u2 *= 0.5 * root;
+        float root = 1.0;
+        if (uVgsVolume > 0.0 && abs(volume) > uVgsEpsilon) {
+            float targetVolume = mix(volume, restVolume, uVgsVolume);
+            float scale = targetVolume / volume;
+            root = pow(abs(scale), 1.0/3.0) * ((scale < 0.0) ? -1.0 : 1.0);
         }
+        u0 *= 0.5 * root; u1 *= 0.5 * root; u2 *= 0.5 * root;
         vec3 nextP[8];
         nextP[0]=centerPos-u0-u1-u2; nextP[1]=centerPos+u0-u1-u2;
         nextP[2]=centerPos-u0+u1-u2; nextP[3]=centerPos+u0+u1-u2;

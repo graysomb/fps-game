@@ -67,6 +67,7 @@ enum {
     GPU_LOC_COLLISION_RELAXATION,
     GPU_LOC_VGS_ALPHA,
     GPU_LOC_VGS_BETA,
+    GPU_LOC_VGS_VOLUME,
     GPU_LOC_VGS_EPSILON,
     GPU_LOC_STRAIN_THRESHOLD,
     GPU_LOC_SHEAR_THRESHOLD,
@@ -898,7 +899,7 @@ static void gpu_set_uniforms(float dt) {
     int static_hash_size = HASH_SIZE;
     float voxel_size = VOXEL_SIZE, floor_size = FLOOR_SIZE, gravity = GRAVITY;
     float damping = VELOCITY_DAMPING, sor = PBD_SOR_FACTOR, collision = COLLISION_RELAXATION;
-    float alpha = VGS_ALPHA, beta = VGS_BETA, eps = VGS_EPS;
+    float alpha = VGS_ALPHA, beta = VGS_BETA, volume = VGS_VOLUME, eps = VGS_EPS;
     float strain = STRAIN_BREAK_THRESHOLD, shear = SHEAR_BREAK_THRESHOLD;
     float tether_spring = TETHER_SPRING, tether_damping = TETHER_DAMPING;
     int break_damp_frames = BREAK_DAMP_FRAMES;
@@ -928,6 +929,7 @@ static void gpu_set_uniforms(float dt) {
     uniforms.tether_spring = tether_spring; uniforms.tether_damping = tether_damping;
     uniforms.rest_grid_step = rest_grid_step;
     uniforms.particle_hash_step = particle_hash_step;
+    uniforms.vgs_volume = volume;
     memcpy(uniforms.players, player_data, sizeof(player_data));
     memcpy(uniforms.tether_targets, tether_data, sizeof(tether_data));
     fps_metal_set_uniforms(&uniforms);
@@ -950,6 +952,7 @@ static void gpu_set_uniforms(float dt) {
     rlSetUniform(gpuPhysics.loc[GPU_LOC_COLLISION_RELAXATION], &collision, SHADER_UNIFORM_FLOAT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_VGS_ALPHA], &alpha, SHADER_UNIFORM_FLOAT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_VGS_BETA], &beta, SHADER_UNIFORM_FLOAT, 1);
+    rlSetUniform(gpuPhysics.loc[GPU_LOC_VGS_VOLUME], &volume, SHADER_UNIFORM_FLOAT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_VGS_EPSILON], &eps, SHADER_UNIFORM_FLOAT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_STRAIN_THRESHOLD], &strain, SHADER_UNIFORM_FLOAT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_SHEAR_THRESHOLD], &shear, SHADER_UNIFORM_FLOAT, 1);
@@ -1420,7 +1423,7 @@ static bool gpu_physics_init(void) {
         "uMode", "uParticleCount", "uSimCount", "uVoxelCount", "uVgsBegin", "uVgsCount",
         "uStaticColliderCount", "uHashSize", "uStaticHashSize",
         "uActivePlayers", "uDt", "uVoxelSize", "uParticleHashStep", "uFloorSize", "uGravity", "uVelocityDamping",
-        "uSor", "uCollisionRelaxation", "uVgsAlpha", "uVgsBeta", "uVgsEpsilon",
+        "uSor", "uCollisionRelaxation", "uVgsAlpha", "uVgsBeta", "uVgsVolume", "uVgsEpsilon",
         "uStrainBreakThreshold", "uShearBreakThreshold", "uTetherSpring", "uTetherDamping",
         "uBreakDampFrames", "uRestGridStep", "uPlayerPosHalf", "uTetherTarget"
     };
