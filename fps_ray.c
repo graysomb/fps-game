@@ -10972,18 +10972,16 @@ static bool vgs_hierarchy_adapt(void)
             refine[i] = own > VGS_ADAPTIVE_CURVATURE_THRESHOLD;
             continue;
         }
-        float child_mean = 0.0f;
         bool active_grandchildren = false;
         for (int c = 0; c < 8; ++c) {
             int child = node->children[c];
-            child_mean += child >= 0 ? vgsHierarchy.node_history[child].curvature :
-                vgsHierarchy.leaf_history[-child - 1].curvature;
             if (child >= 0 && vgs_node_has_active_children(&vgsHierarchy.nodes[child]))
                 active_grandchildren = true;
         }
-        child_mean *= 0.125f;
+        // The parent owns this split: child curvature can prompt deeper refinement,
+        // but does not prevent the parent from coarsening its own children.
         coarsen[i] = own < VGS_ADAPTIVE_CURVATURE_THRESHOLD &&
-                     child_mean < VGS_ADAPTIVE_CURVATURE_THRESHOLD && !active_grandchildren;
+                     !active_grandchildren;
     }
     // A child selected from the old snapshot cannot refine under a parent
     // that is being coarsened in this same topology update.

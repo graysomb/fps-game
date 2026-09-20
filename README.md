@@ -479,18 +479,19 @@ Available scenarios are:
 * `adaptive-cube-drop`: runs the same drop with the complete octree stored but
   only the root VGS active initially. After each PBD substep, an active terminal
   node whose six-component strain/shear time curvature exceeds 50 s^-2 enables all
-  eight children. A parent coarsens when its curvature and the mean child
-  curvature are below 50 s^-2 and no grandchildren remain active. Refinement
+  eight children. A parent coarsens when its own curvature is below 50 s^-2
+  and no grandchildren remain active. Refinement
   initializes child positions and velocities with trilinear interpolation;
   coarsening fits parent positions and velocities with the precomputed left
   pseudoinverse. The GPU receives a compact, flat list of active VGS constraints
   and parent-to-terminal-child trilinear welds for each substep. Only active
   terminal voxels render. The report records transition counts and the
   `curvature-by-level.csv` file records per-scale curvature distributions.
-  With size-squared VGS strength scaling, a [threshold sweep](docs/vgs-amr-h2-threshold/README.md)
-  found a phase-change-like jump in tree activity between 34 and 33 s^-2:
-  the former returns to one terminal cell, while the latter retains most fine
-  cells at frame 240. The default remains 50 s^-2. There is no hysteresis, so
+  A [threshold sweep with the previous child-mean coarsening rule](docs/vgs-amr-h2-threshold/README.md)
+  found a phase-change-like jump in tree activity between 34 and 33 s^-2.
+  Parent-only coarsening removes that persistent fine state in the cube drop,
+  but the tested thresholds from 10 to 34 s^-2 reached only eight terminal
+  cells near impact. The default remains 50 s^-2. There is no hysteresis, so
   cells can change level on consecutive substeps. Dormant descendants follow trilinear
   parent motion and do not provide an independent fine-scale curvature signal
   until they become active.
