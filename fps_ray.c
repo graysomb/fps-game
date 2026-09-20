@@ -17145,6 +17145,7 @@ typedef enum {
 
 #define AI_MAX_AWARENESS_DIST 32.0f
 #define AI_FOV_DOT_THRESHOLD  0.50f  // cos(60 deg) -> 120 degree frontal vision cone
+#define SWARMER_HOP_INTERVAL 5.0f
 
 // Traverse voxel grid with DDA, ignoring transparent non-occluders like bullets
 static bool ray_hit_solid_voxel(Ray ray, float t_max) {
@@ -17508,9 +17509,13 @@ static void UpdateBot(int playerIdx, float dt) {
                 bot->vel.x = 0.0f;
                 bot->vel.z = 0.0f;
             }
-            if (bot->onGround && (GetRandomValue(0, 100) < 6 || (len < 3.0f && GetRandomValue(0, 100) < 14))) {
-                bot->vel.y = JUMP_SPEED * 0.9f;
-                bot->onGround = false;
+            if (bot->onGround) {
+                float hop_chance = dt / SWARMER_HOP_INTERVAL;
+                if (hop_chance > 1.0f) hop_chance = 1.0f;
+                if ((float)GetRandomValue(0, 9999) < hop_chance * 10000.0f) {
+                    bot->vel.y = JUMP_SPEED * 0.9f;
+                    bot->onGround = false;
+                }
             }
         } else {
             bot->vel.x *= 0.85f;
