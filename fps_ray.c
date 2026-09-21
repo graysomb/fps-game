@@ -56,6 +56,7 @@
 #include <stdbool.h>
 #include <time.h>
 #include <string.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <limits.h>
@@ -1686,6 +1687,7 @@ static inline float voxel_particle_radius(const Voxel *v) {
 
 static bool debugDrawParticles = false;
 static bool debugColorParticlesByVelocity = false;
+static bool debugConsoleOpen = false;
 static const float PARTICLE_DEBUG_MARKER_RADIUS = 0.6f;
 static const float PARTICLE_DEBUG_MAX_SPEED = 20.0f;
 static bool debugLogGlueClusters = false;
@@ -19268,6 +19270,351 @@ static void net_client_update(float dt) {
     }
 }
 
+#define DEBUG_CONSOLE_INPUT_MAX 256
+#define DEBUG_CONSOLE_LINE_MAX 72
+#define DEBUG_CONSOLE_LINE_LEN 256
+#define DEBUG_CONSOLE_HISTORY_MAX 24
+
+static char debugConsoleInput[DEBUG_CONSOLE_INPUT_MAX];
+static char debugConsoleLines[DEBUG_CONSOLE_LINE_MAX][DEBUG_CONSOLE_LINE_LEN];
+static int debugConsoleLineCount = 0;
+static char debugConsoleHistory[DEBUG_CONSOLE_HISTORY_MAX][DEBUG_CONSOLE_INPUT_MAX];
+static int debugConsoleHistoryCount = 0;
+static int debugConsoleHistoryIndex = -1;
+
+static void debug_console_print(const char *text)
+{
+    if (!text) {
+        return;
+    }
+    if (debugConsoleLineCount < DEBUG_CONSOLE_LINE_MAX) {
+        snprintf(debugConsoleLines[debugConsoleLineCount++], DEBUG_CONSOLE_LINE_LEN, "%s", text);
+        return;
+    }
+    memmove(debugConsoleLines[0], debugConsoleLines[1],
+            (DEBUG_CONSOLE_LINE_MAX - 1) * DEBUG_CONSOLE_LINE_LEN);
+    snprintf(debugConsoleLines[DEBUG_CONSOLE_LINE_MAX - 1], DEBUG_CONSOLE_LINE_LEN, "%s", text);
+}
+
+static void debug_console_printf(const char *fmt, ...)
+{
+    char buf[DEBUG_CONSOLE_LINE_LEN];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    debug_console_print(buf);
+}
+
+static int debug_console_local_player(void)
+{
+    if (netTransport.role != NET_ROLE_OFFLINE) {
+        for (int i = 0; i < netLocalPlayerCount; ++i) {
+            int slot = netLocalPlayerSlots[i];
+            if (slot >= 0 && slot < activePlayers) {
+                return slot;
+            }
+        }
+    }
+    for (int i = 0; i < activePlayers; ++i) {
+        if (!is_player_bot(i)) {
+            return i;
+        }
+    }
+    return 0;
+}
+
+static void debug_console_exec(const char *line)
+{
+    char buf[DEBUG_CONSOLE_INPUT_MAX];
+    snprintf(buf, sizeof(buf), "%s", line ? line : "");
+    char *cmd = strtok(buf, " \t");
+    if (!cmd || !cmd[0]) {
+        return;
+    }
+    int local = debug_console_local_player();
+    if (strcmp(cmd, "help") == 0) {
+        debug_console_print("help | clear | god [on|off] | matter [n] | exposed");
+        debug_console_print("kill | pos | tp x y z | players | particles | belief | smush");
+        debug_console_print("wave n | nextwave | lives n | armor | spawn swarmer|goliath|standard");
+        return;
+    }
+    if (strcmp(cmd, "clear") == 0) {
+        debugConsoleLineCount = 0;
+        return;
+    }
+    if (strcmp(cmd, "god") == 0) {
+        const char *arg = strtok(NULL, " \t");
+        bool on = (arg == NULL) ? (players[local].invuln_timer <= 0.0f)
+                                : (strcmp(arg, "on") == 0 || strcmp(arg, "1") == 0);
+        players[local].invuln_timer = on ? 1.0e6f : 0.0f;
+        debug_console_printf("god %s (p%d)", on ? "on" : "off", local);
+        return;
+    }
+    if (strcmp(cmd, "matter") == 0) {
+        const char *arg = strtok(NULL, " \t");
+        float value = arg ? (float)atof(arg) : players[local].matterMax;
+        players[local].matter = clampf(value, 0.0f, players[local].matterMax);
+        players[local].isExposed = (players[local].matter <= 0.0f);
+        debug_console_printf("p%d matter=%.1f", local, players[local].matter);
+        return;
+    }
+    if (strcmp(cmd, "exposed") == 0) {
+        players[local].matter = 0.0f;
+        players[local].isExposed = true;
+        debug_console_printf("p%d exposed", local);
+        return;
+    }
+    if (strcmp(cmd, "kill") == 0) {
+        const char *arg = strtok(NULL, " \t");
+        int idx = arg ? atoi(arg) : local;
+        if (idx >= 0 && idx < activePlayers) {
+            kill_player(idx, -1, false, false);
+            debug_console_printf("killed p%d", idx);
+        } else {
+            debug_console_print("kill: bad player index");
+        }
+        return;
+    }
+    if (strcmp(cmd, "pos") == 0) {
+        Player *p = &players[local];
+        debug_console_printf("p%d pos=(%.2f, %.2f, %.2f) yaw=%.1f",
+                             local, p->pos.x, p->pos.y, p->pos.z, p->yaw);
+        return;
+    }
+    if (strcmp(cmd, "tp") == 0) {
+        const char *xs = strtok(NULL, " \t");
+        const char *ys = strtok(NULL, " \t");
+        const char *zs = strtok(NULL, " \t");
+        if (!xs || !ys || !zs) {
+            debug_console_print("usage: tp x y z");
+            return;
+        }
+        players[local].pos = (Vector3){ (float)atof(xs), (float)atof(ys), (float)atof(zs) };
+        players[local].vel = (Vector3){ 0, 0, 0 };
+        debug_console_printf("teleported p%d", local);
+        return;
+    }
+    if (strcmp(cmd, "players") == 0) {
+        for (int i = 0; i < activePlayers; ++i) {
+            debug_console_printf("p%d %s type=%d matter=%.0f pos=(%.1f,%.1f,%.1f)",
+                                 i, is_player_bot(i) ? "bot" : "human",
+                                 players[i].enemyType, players[i].matter,
+                                 players[i].pos.x, players[i].pos.y, players[i].pos.z);
+        }
+        return;
+    }
+    if (strcmp(cmd, "particles") == 0) {
+        debugDrawParticles = !debugDrawParticles;
+        debug_console_printf("particles %s", debugDrawParticles ? "on" : "off");
+        return;
+    }
+    if (strcmp(cmd, "belief") == 0) {
+        debugShowBeliefColors = !debugShowBeliefColors;
+        debug_console_printf("belief colors %s", debugShowBeliefColors ? "on" : "off");
+        return;
+    }
+    if (strcmp(cmd, "smush") == 0) {
+        debugLogSmush = !debugLogSmush;
+        debugLogSmushHits = debugLogSmush;
+        debug_console_printf("smush log %s", debugLogSmush ? "on" : "off");
+        return;
+    }
+    if (strcmp(cmd, "wave") == 0) {
+        const char *arg = strtok(NULL, " \t");
+        if (!arg || gameMode != GAME_MODE_FIREFIGHT) {
+            debug_console_print("usage: wave n  (firefight only)");
+            return;
+        }
+        start_firefight_wave(atoi(arg));
+        debug_console_printf("started wave %d", firefightWave);
+        return;
+    }
+    if (strcmp(cmd, "nextwave") == 0) {
+        if (gameMode != GAME_MODE_FIREFIGHT) {
+            debug_console_print("nextwave: firefight only");
+            return;
+        }
+        start_firefight_wave(firefightWave + 1);
+        debug_console_printf("started wave %d", firefightWave);
+        return;
+    }
+    if (strcmp(cmd, "lives") == 0) {
+        const char *arg = strtok(NULL, " \t");
+        if (!arg) {
+            debug_console_printf("lives=%d", firefightTeamLives);
+            return;
+        }
+        firefightTeamLives = atoi(arg);
+        if (firefightTeamLives < 0) {
+            firefightTeamLives = 0;
+        }
+        debug_console_printf("lives=%d", firefightTeamLives);
+        return;
+    }
+    if (strcmp(cmd, "armor") == 0) {
+        if (players[local].enemyType != ENEMY_TYPE_GOLIATH) {
+            debug_console_print("armor: local player is not a goliath");
+            return;
+        }
+        spawn_goliath_armor(local);
+        debug_console_printf("goliath armor count=%d", goliathStates[local].count);
+        return;
+    }
+    if (strcmp(cmd, "spawn") == 0) {
+        const char *arg = strtok(NULL, " \t");
+        EnemyType etype = ENEMY_TYPE_STANDARD;
+        if (arg && strcmp(arg, "swarmer") == 0) {
+            etype = ENEMY_TYPE_SWARMER;
+        } else if (arg && strcmp(arg, "goliath") == 0) {
+            etype = ENEMY_TYPE_GOLIATH;
+        } else if (arg && strcmp(arg, "standard") != 0 && arg[0]) {
+            debug_console_print("usage: spawn swarmer|goliath|standard");
+            return;
+        }
+        int slot = -1;
+        for (int i = 0; i < MAX_PLAYERS; ++i) {
+            if (i >= activePlayers || (is_player_bot(i) && players[i].respawn_timer > 9000.0f)) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0) {
+            debug_console_print("spawn: no free player slot");
+            return;
+        }
+        if (slot >= activePlayers) {
+            activePlayers = slot + 1;
+        }
+        init_firefight_bot_entity(slot, etype, INPUT_TYPE_BOT_MEDIUM);
+        debug_console_printf("spawned %s as p%d",
+                             etype == ENEMY_TYPE_SWARMER ? "swarmer" :
+                             (etype == ENEMY_TYPE_GOLIATH ? "goliath" : "standard"), slot);
+        return;
+    }
+    debug_console_printf("unknown command: %s  (try help)", cmd);
+}
+
+static void debug_console_submit(void)
+{
+    if (!debugConsoleInput[0]) {
+        return;
+    }
+    debug_console_printf("> %s", debugConsoleInput);
+    if (debugConsoleHistoryCount == 0 ||
+        strcmp(debugConsoleHistory[debugConsoleHistoryCount - 1], debugConsoleInput) != 0) {
+        if (debugConsoleHistoryCount < DEBUG_CONSOLE_HISTORY_MAX) {
+            snprintf(debugConsoleHistory[debugConsoleHistoryCount++],
+                     DEBUG_CONSOLE_INPUT_MAX, "%s", debugConsoleInput);
+        } else {
+            memmove(debugConsoleHistory[0], debugConsoleHistory[1],
+                    (DEBUG_CONSOLE_HISTORY_MAX - 1) * DEBUG_CONSOLE_INPUT_MAX);
+            snprintf(debugConsoleHistory[DEBUG_CONSOLE_HISTORY_MAX - 1],
+                     DEBUG_CONSOLE_INPUT_MAX, "%s", debugConsoleInput);
+        }
+    }
+    debugConsoleHistoryIndex = -1;
+    debug_console_exec(debugConsoleInput);
+    debugConsoleInput[0] = '\0';
+}
+
+static void debug_console_handle_input(void)
+{
+    int key = GetCharPressed();
+    while (key > 0) {
+        if (key >= 32 && key < 127 && key != '`' && key != '~') {
+            size_t len = strlen(debugConsoleInput);
+            if (len + 1 < DEBUG_CONSOLE_INPUT_MAX) {
+                debugConsoleInput[len] = (char)key;
+                debugConsoleInput[len + 1] = '\0';
+            }
+        }
+        key = GetCharPressed();
+    }
+    if (IsKeyPressed(KEY_BACKSPACE)) {
+        size_t len = strlen(debugConsoleInput);
+        if (len > 0) {
+            debugConsoleInput[len - 1] = '\0';
+        }
+    }
+    if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
+        debug_console_submit();
+    }
+    if (IsKeyPressed(KEY_UP) && debugConsoleHistoryCount > 0) {
+        if (debugConsoleHistoryIndex < 0) {
+            debugConsoleHistoryIndex = debugConsoleHistoryCount - 1;
+        } else if (debugConsoleHistoryIndex > 0) {
+            debugConsoleHistoryIndex--;
+        }
+        snprintf(debugConsoleInput, DEBUG_CONSOLE_INPUT_MAX, "%s",
+                 debugConsoleHistory[debugConsoleHistoryIndex]);
+    }
+    if (IsKeyPressed(KEY_DOWN) && debugConsoleHistoryCount > 0) {
+        if (debugConsoleHistoryIndex < 0) {
+            /* keep empty */
+        } else if (debugConsoleHistoryIndex + 1 >= debugConsoleHistoryCount) {
+            debugConsoleHistoryIndex = -1;
+            debugConsoleInput[0] = '\0';
+        } else {
+            debugConsoleHistoryIndex++;
+            snprintf(debugConsoleInput, DEBUG_CONSOLE_INPUT_MAX, "%s",
+                     debugConsoleHistory[debugConsoleHistoryIndex]);
+        }
+    }
+}
+
+static void debug_console_update(void)
+{
+    if (IsKeyPressed(KEY_GRAVE)) {
+        debugConsoleOpen = !debugConsoleOpen;
+        debugConsoleHistoryIndex = -1;
+        while (GetCharPressed() != 0) {
+        }
+        if (debugConsoleOpen && debugConsoleLineCount == 0) {
+            debug_console_print("debug console  (~ to close, help for commands)");
+        }
+        return;
+    }
+    if (debugConsoleOpen && IsKeyPressed(KEY_ESCAPE)) {
+        debugConsoleOpen = false;
+        return;
+    }
+    if (debugConsoleOpen) {
+        debug_console_handle_input();
+    }
+}
+
+static void debug_console_draw(void)
+{
+    if (!debugConsoleOpen) {
+        return;
+    }
+    int w = GetScreenWidth();
+    int h = GetScreenHeight();
+    int panel_h = h / 3;
+    if (panel_h < 180) {
+        panel_h = 180;
+    }
+    DrawRectangle(0, 0, w, panel_h, Fade(BLACK, 0.78f));
+    DrawRectangleLines(0, 0, w, panel_h, (Color){ 80, 170, 255, 180 });
+    int font = 16;
+    int y = panel_h - 28 - font - 6;
+    int shown = 0;
+    int max_lines = (panel_h - 40) / (font + 2);
+    for (int i = debugConsoleLineCount - 1; i >= 0 && shown < max_lines; --i) {
+        DrawText(debugConsoleLines[i], 10, y, font, RAYWHITE);
+        y -= font + 2;
+        shown++;
+    }
+    DrawRectangle(0, panel_h - 28, w, 28, Fade((Color){ 20, 30, 50, 255 }, 0.95f));
+    const char *prompt = TextFormat("> %s", debugConsoleInput);
+    DrawText(prompt, 10, panel_h - 22, font, (Color){ 180, 230, 255, 255 });
+    if (((int)(GetTime() * 2.0) & 1) == 0) {
+        int pw = MeasureText(prompt, font);
+        DrawText("_", 10 + pw, panel_h - 22, font, (Color){ 180, 230, 255, 255 });
+    }
+}
+
 static void render_gameplay_view(RenderTexture2D *screens,
                                  int *renderPlayers,
                                  int *renderW,
@@ -19498,6 +19845,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 DrawText(net_text, 12, GetScreenHeight() - 28, 18, RAYWHITE);
             }
         }
+        debug_console_draw();
     EndDrawing();
 }
 
@@ -20899,6 +21247,7 @@ int main(int argc, char **argv) {
                 break;
             case GAME_STATE_PLAYING: {
         float dt = GetFrameTime();
+        debug_console_update();
         if (netTransport.role == NET_ROLE_CLIENT) {
             net_client_update(dt);
             render_gameplay_view(screens, &renderPlayers, &renderW, &renderH, false);
@@ -21012,7 +21361,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        if (playerInput[0] == INPUT_TYPE_KEYBOARD && players[0].respawn_timer <= 0.0f) {
+        if (!debugConsoleOpen && playerInput[0] == INPUT_TYPE_KEYBOARD && players[0].respawn_timer <= 0.0f) {
             if (IsKeyPressed(KEY_LEFT_CONTROL))  FireVoxel(0);
             if (IsKeyPressed(KEY_Z)) perform_melee(0);
             if (IsKeyPressed(KEY_E)) perform_build(0);
@@ -21023,7 +21372,7 @@ int main(int argc, char **argv) {
                 players[0].onGround = false;
             }
         }
-        if (net_player_is_local(1) && playerInput[1] == INPUT_TYPE_KEYBOARD && players[1].respawn_timer <= 0.0f) {
+        if (!debugConsoleOpen && net_player_is_local(1) && playerInput[1] == INPUT_TYPE_KEYBOARD && players[1].respawn_timer <= 0.0f) {
             if (IsKeyPressed(KEY_RIGHT_CONTROL)) FireVoxel(1);
             if (IsKeyPressed(KEY_M)) perform_melee(1);
             if (IsKeyPressed(KEY_O)) perform_build(1);
@@ -21074,7 +21423,9 @@ int main(int argc, char **argv) {
                 /* Remote movement and integration run at the authoritative 60 Hz tick. */
                 continue;
             } else if (playerInput[i] == INPUT_TYPE_KEYBOARD) {
-                HandleKeyboardInput(i, dt);
+                if (!debugConsoleOpen) {
+                    HandleKeyboardInput(i, dt);
+                }
             } else if (playerInput[i] == INPUT_TYPE_GAMEPAD) {
                 HandleGamepadInput(i, dt);
             } else {
@@ -21237,6 +21588,7 @@ int main(int argc, char **argv) {
             }
             case GAME_STATE_CREATIVE: {
                 float dt = GetFrameTime();
+                debug_console_update();
                 if (netTransport.role == NET_ROLE_CLIENT) {
                     net_client_update(dt);
                     render_gameplay_view(screens, &renderPlayers, &renderW, &renderH, true);
