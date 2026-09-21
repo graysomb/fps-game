@@ -9041,15 +9041,24 @@ static void ResetGame(void) {
 
     if (gameMode == GAME_MODE_FIREFIGHT) {
         if (netTransport.role == NET_ROLE_OFFLINE) {
-            InputType human_input = multiplayerPlayerInput[0];
-            if (human_input != INPUT_TYPE_KEYBOARD && human_input != INPUT_TYPE_GAMEPAD) {
-                human_input = INPUT_TYPE_KEYBOARD;
+            int humans = clamp_active_players(multiplayerActivePlayers);
+            if (humans < 1) {
+                humans = 1;
             }
-            playerInput[0] = human_input;
-            playerInput[1] = INPUT_TYPE_BOT_EASY;
-            playerInput[2] = INPUT_TYPE_BOT_EASY;
-            playerInput[3] = INPUT_TYPE_BOT_EASY;
             activePlayers = 4;
+            if (humans > activePlayers) {
+                humans = activePlayers;
+            }
+            for (int p = 0; p < humans; ++p) {
+                InputType human_input = multiplayerPlayerInput[p];
+                if (human_input != INPUT_TYPE_KEYBOARD && human_input != INPUT_TYPE_GAMEPAD) {
+                    human_input = (p == 0) ? INPUT_TYPE_KEYBOARD : INPUT_TYPE_GAMEPAD;
+                }
+                playerInput[p] = human_input;
+            }
+            for (int p = humans; p < activePlayers; ++p) {
+                playerInput[p] = INPUT_TYPE_BOT_EASY;
+            }
         }
         reset_firefight_match();
     } else {
@@ -13701,7 +13710,7 @@ static Vector3 pick_player_spawn(int player_index) {
 
     if (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM && current_sanctum_plan_valid && current_sanctum_plan.spawn_point_count > 0) {
         if (gameMode == GAME_MODE_FIREFIGHT) {
-            if (player_index == 0) {
+            if (!is_player_bot(player_index)) {
                 for (int s = 0; s < current_sanctum_plan.spawn_point_count; ++s) {
                     if (!current_sanctum_plan.spawn_points[s].is_player) {
                         continue;
@@ -13720,7 +13729,7 @@ static Vector3 pick_player_spawn(int player_index) {
                     }
                 }
                 for (int n = 0; n < enemy_count; ++n) {
-                    int s_idx = enemy_spawns[(player_index - 1 + n) % enemy_count];
+                    int s_idx = enemy_spawns[(player_index + n) % enemy_count];
                     Vector3 pos = nudge_spawn_clear(sanctum_spawn_world(s_idx), half, 0.0f, player_index);
                     if (spawn_position_clear_ex(pos, half, 0.0f, player_index)) {
                         return pos;
@@ -13850,7 +13859,7 @@ static void spawn_goliath_armor(int player_idx) {
     if (player_idx < 0 || player_idx >= activePlayers) return;
     GoliathState *gs = &goliathStates[player_idx];
     gs->count = 0;
-    gs->launchTimer = 2.0f;
+    gs->launchTimer = 0.35f;
     gs->regenTimer = GOLIATH_ARMOR_REGEN_SECONDS;
     for (int i = 0; i < GOLIATH_MAX_ATTACHED; ++i) {
         try_add_goliath_armor_plate(player_idx, i);
@@ -13995,6 +14004,19 @@ static void goliath_launch_voxel(int bot_idx, int target_idx) {
     GoliathState *gs = &goliathStates[bot_idx];
     if (gs->count <= 0) return;
 
+    Vector3 to_target = v_sub(players[target_idx].pos, players[bot_idx].pos);
+    int pick = gs->count - 1;
+    float best_dot = 1e9f;
+    for (int i = 0; i < gs->count; ++i) {
+        float d = v_dot(gs->voxels[i].localOffset, to_target);
+        if (d < best_dot) {
+            best_dot = d;
+            pick = i;
+        }
+    }
+    GoliathVoxelArmor chosen = gs->voxels[pick];
+    gs->voxels[pick] = gs->voxels[gs->count - 1];
+    gs->voxels[gs->count - 1] = chosen;
     int last = gs->count - 1;
     uint64_t ident = gs->voxels[last].voxelIdentity;
     gs->count--;
@@ -14058,7 +14080,7 @@ static void explode_goliath_armor(int player_idx) {
 
 static EnemyType pick_firefight_enemy_type(int wave, int spawn_index) {
     if (wave <= 1) {
-        return (spawn_index % 2 == 1) ? ENEMY_TYPE_SWARMER : ENEMY_TYPE_STANDARD;
+        return (spawn_index == 0) ? ENEMY_TYPE_SWARMER : ENEMY_TYPE_STANDARD;
     } else if (wave == 2) {
         if (spawn_index % 3 == 2) return ENEMY_TYPE_GOLIATH;
         return (spawn_index % 2 == 1) ? ENEMY_TYPE_SWARMER : ENEMY_TYPE_STANDARD;
@@ -14111,6 +14133,49 @@ static void init_firefight_bot_entity(int i, EnemyType etype, InputType botDiff)
     play_sfx(SFX_SHIELD);
 }
 
+static void spawn_firefight_enemy_group(EnemyType etype, InputType botDiff, int prefer_slot)
+{
+    int remaining = firefightWaveEnemiesTotal - firefightEnemiesSpawned;
+    if (remaining <= 0) {
+        return;
+    }
+    int pack = 1;
+    if (etype == ENEMY_TYPE_SWARMER) {
+        pack = (remaining >= 3) ? 3 : remaining;
+    }
+    Vector3 origin = { 0 };
+    for (int n = 0; n < pack; ++n) {
+        int slot = -1;
+        if (n == 0 && prefer_slot >= 0 && prefer_slot < activePlayers &&
+            is_player_bot(prefer_slot)) {
+            slot = prefer_slot;
+        } else {
+            for (int i = 0; i < activePlayers; ++i) {
+                if (!is_player_bot(i)) {
+                    continue;
+                }
+                if (players[i].respawn_timer > 0.0f && players[i].respawn_timer < 9000.0f) {
+                    slot = i;
+                    break;
+                }
+            }
+        }
+        if (slot < 0) {
+            break;
+        }
+        init_firefight_bot_entity(slot, etype, botDiff);
+        if (n == 0) {
+            origin = players[slot].pos;
+        } else {
+            float side = (n % 2 == 1) ? 1.0f : -1.0f;
+            float dist = 0.7f * (float)((n + 1) / 2);
+            players[slot].pos = (Vector3){ origin.x + side * dist, origin.y, origin.z };
+            players[slot].death_pos = players[slot].pos;
+        }
+        firefightEnemiesSpawned++;
+    }
+}
+
 static void start_firefight_wave(int wave_number) {
     firefightWave = wave_number;
     firefightWaveEnemiesTotal = 3 + (firefightWave - 1) * 2;
@@ -14128,9 +14193,15 @@ static void start_firefight_wave(int wave_number) {
 
     for (int i = 0; i < activePlayers; ++i) {
         if (is_player_bot(i)) {
-            EnemyType etype = pick_firefight_enemy_type(firefightWave, firefightEnemiesSpawned);
-            init_firefight_bot_entity(i, etype, botDiff);
-            firefightEnemiesSpawned++;
+            players[i].respawn_timer = 1.0f;
+        }
+    }
+    while (firefightEnemiesSpawned < firefightWaveEnemiesTotal) {
+        int before = firefightEnemiesSpawned;
+        EnemyType etype = pick_firefight_enemy_type(firefightWave, firefightEnemiesSpawned);
+        spawn_firefight_enemy_group(etype, botDiff, -1);
+        if (firefightEnemiesSpawned == before) {
+            break;
         }
     }
 }
@@ -14171,8 +14242,7 @@ static void update_firefight_logic(float dt) {
                     if (b->respawn_timer <= 0.0f) {
                         if (firefightEnemiesSpawned < firefightWaveEnemiesTotal) {
                             EnemyType etype = pick_firefight_enemy_type(firefightWave, firefightEnemiesSpawned);
-                            init_firefight_bot_entity(i, etype, playerInput[i]);
-                            firefightEnemiesSpawned++;
+                            spawn_firefight_enemy_group(etype, playerInput[i], i);
                         } else {
                             b->respawn_timer = 9999.0f;
                         }
@@ -17417,6 +17487,53 @@ static void draw_player_tether_world(int player_index) {
                gold ? (Color){ 255, 205, 55, 210 } : (Color){ 80, 170, 255, 180 });
 }
 
+static Color player_face_contrast_color(Color base)
+{
+    float lum = 0.299f * (float)base.r + 0.587f * (float)base.g + 0.114f * (float)base.b;
+    return (lum > 110.0f) ? (Color){ 20, 16, 14, 255 } : (Color){ 245, 236, 210, 255 };
+}
+
+static void draw_player_face(const Player *p, Vector3 render_pos, float body_size, Color base)
+{
+    Vector3 forward = player_forward(p);
+    forward.y = 0.0f;
+    if (v_length(forward) < 1e-3f) {
+        forward = (Vector3){ 0.0f, 0.0f, -1.0f };
+    } else {
+        forward = v_norm(forward);
+    }
+    Vector3 right = v_cross(forward, (Vector3){ 0.0f, 1.0f, 0.0f });
+    if (v_length(right) < 1e-3f) {
+        right = (Vector3){ 1.0f, 0.0f, 0.0f };
+    } else {
+        right = v_norm(right);
+    }
+    float s = body_size;
+    float half = s * 0.5f;
+    Color fc = player_face_contrast_color(base);
+    Vector3 face = v_add(render_pos, v_mul(forward, half + 0.012f * s));
+    Vector3 eye_l = v_add(face, v_add(v_mul(right, -0.16f * s), (Vector3){ 0.0f, 0.12f * s, 0.0f }));
+    Vector3 eye_r = v_add(face, v_add(v_mul(right, 0.16f * s), (Vector3){ 0.0f, 0.12f * s, 0.0f }));
+    rlPushMatrix();
+    rlTranslatef(eye_l.x, eye_l.y, eye_l.z);
+    rlRotatef(p->yaw, 0.0f, 1.0f, 0.0f);
+    DrawCube((Vector3){ 0 }, 0.16f * s, 0.035f * s, 0.03f * s, fc);
+    rlPopMatrix();
+    rlPushMatrix();
+    rlTranslatef(eye_r.x, eye_r.y, eye_r.z);
+    rlRotatef(p->yaw, 0.0f, 1.0f, 0.0f);
+    DrawCube((Vector3){ 0 }, 0.16f * s, 0.035f * s, 0.03f * s, fc);
+    rlPopMatrix();
+    Vector3 mouth = v_add(face, (Vector3){ 0.0f, -0.12f * s, 0.0f });
+    rlPushMatrix();
+    rlTranslatef(mouth.x, mouth.y, mouth.z);
+    rlRotatef(p->yaw, 0.0f, 1.0f, 0.0f);
+    DrawCube((Vector3){ -0.08f * s, 0.0f, 0.0f }, 0.035f * s, 0.16f * s, 0.03f * s, fc);
+    DrawCube((Vector3){ 0.02f * s, 0.07f * s, 0.0f }, 0.14f * s, 0.035f * s, 0.03f * s, fc);
+    DrawCube((Vector3){ 0.02f * s, -0.07f * s, 0.0f }, 0.14f * s, 0.035f * s, 0.03f * s, fc);
+    rlPopMatrix();
+}
+
 static void draw_players(void) {
     for (int i = 0; i < activePlayers; i++) {
         Player *p = &players[i];
@@ -17437,6 +17554,7 @@ static void draw_players(void) {
         }
         DrawCube(render_pos, body_size, body_size, body_size, base);
         DrawCubeWires(render_pos, body_size, body_size, body_size, base_dark);
+        draw_player_face(p, render_pos, body_size, base);
         if (p->enemyType == ENEMY_TYPE_GOLIATH) {
             float pulse = 0.5f + 0.5f * sinf((float)GetTime() * 5.0f);
             Color coreEnergy = (Color){ 255, 90, 30, (unsigned char)(140 + 80 * pulse) };
@@ -18411,7 +18529,7 @@ static void UpdateBot(int playerIdx, float dt) {
             }
             if (isDirectlyVisible && gs->count > 0 && enemyDist < 25.0f && gs->launchTimer <= 0.0f) {
                 goliath_launch_voxel(playerIdx, enemyIdx);
-                gs->launchTimer = (enemyDist < 10.0f) ? 1.5f : 2.5f;
+                gs->launchTimer = (enemyDist < 10.0f) ? 0.55f : 0.9f;
             }
         } else {
             bot->vel.x *= 0.85f;

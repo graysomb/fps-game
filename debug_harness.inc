@@ -282,6 +282,11 @@ typedef struct DebugRunState {
     bool melee_unstuck_cleared;
     int melee_unstuck_overlap_before;
     int melee_unstuck_overlap_after;
+    bool swarmer_pack_test;
+    int swarmer_pack_count;
+    bool goliath_throw_cover_test;
+    float goliath_throw_cover_best_front_dot;
+    float goliath_throw_cover_launched_dot;
 } DebugRunState;
 
 typedef bool (*DebugScenarioSetupFn)(DebugRunState *state);
@@ -335,6 +340,8 @@ static bool debug_setup_gold_tether_static(DebugRunState *state);
 static bool debug_setup_melee_close_player(DebugRunState *state);
 static bool debug_setup_tether_group_smush(DebugRunState *state);
 static bool debug_setup_melee_unstuck(DebugRunState *state);
+static bool debug_setup_swarmer_pack(DebugRunState *state);
+static bool debug_setup_goliath_throw_cover(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall, 60, 60 },
@@ -374,7 +381,9 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "gold-tether-static", "Gold tether activates a distant static target", debug_setup_gold_tether_static, 60, 60 },
     { "melee-close-player", "Melee hits a player standing closer than the hand origin", debug_setup_melee_close_player, 8, 4 },
     { "tether-group-smush", "Held glue-cluster siblings must not smush the tetherer", debug_setup_tether_group_smush, 30, 10 },
-    { "melee-unstuck", "Melee clears overlapping voxels around the attacker", debug_setup_melee_unstuck, 8, 4 }
+    { "melee-unstuck", "Melee clears overlapping voxels around the attacker", debug_setup_melee_unstuck, 8, 4 },
+    { "swarmer-pack", "Firefight wave 1 fills bot slots with a swarmer pack of 3", debug_setup_swarmer_pack, 8, 4 },
+    { "goliath-throw-cover", "Goliath throws a rear armor plate rather than a frontal one", debug_setup_goliath_throw_cover, 90, 30 }
 };
 
 static const int debugScenarioCount = (int)(sizeof(debugScenarios) / sizeof(debugScenarios[0]));
@@ -3592,6 +3601,54 @@ static bool debug_setup_melee_unstuck(DebugRunState *state)
     return true;
 }
 
+static bool debug_setup_swarmer_pack(DebugRunState *state)
+{
+    debug_reset_world();
+    state->swarmer_pack_test = true;
+    state->activation_succeeded = true;
+    state->drop_sampled = true;
+    state->expected_voxels = 0;
+    gameMode = GAME_MODE_FIREFIGHT;
+    activePlayers = 4;
+    playerInput[0] = INPUT_TYPE_KEYBOARD;
+    playerInput[1] = INPUT_TYPE_BOT_EASY;
+    playerInput[2] = INPUT_TYPE_BOT_EASY;
+    playerInput[3] = INPUT_TYPE_BOT_EASY;
+    debug_init_enemy_player(0, (Vector3){ 0.0f, BASE_EYE_HEIGHT, 8.0f },
+                            ENEMY_TYPE_STANDARD, INPUT_TYPE_KEYBOARD);
+    for (int i = 1; i < 4; ++i) {
+        debug_init_enemy_player(i, (Vector3){ 0.0f, BASE_EYE_HEIGHT, -4.0f },
+                                ENEMY_TYPE_STANDARD, INPUT_TYPE_BOT_EASY);
+        players[i].respawn_timer = 1.0f;
+    }
+    firefightWaveEnemiesTotal = 3;
+    firefightEnemiesSpawned = 0;
+    start_firefight_wave(1);
+    state->swarmer_pack_count = 0;
+    for (int i = 0; i < activePlayers; ++i) {
+        if (is_player_bot(i) && players[i].respawn_timer <= 0.0f &&
+            players[i].enemyType == ENEMY_TYPE_SWARMER) {
+            state->swarmer_pack_count++;
+        }
+    }
+    state->camera.position = (Vector3){ 8.0f, 6.0f, 2.0f };
+    state->camera.target = (Vector3){ 0.0f, 1.0f, -4.0f };
+    return true;
+}
+
+static bool debug_setup_goliath_throw_cover(DebugRunState *state)
+{
+    if (!debug_setup_goliath_behavior(state)) {
+        return false;
+    }
+    state->goliath_behavior_test = false;
+    state->goliath_throw_cover_test = true;
+    state->goliath_throw_cover_launched_dot = 1e9f;
+    state->goliath_throw_cover_best_front_dot = -1e9f;
+    goliathStates[0].launchTimer = 0.0f;
+    return true;
+}
+
 static void debug_physics_step(DebugRunState *state)
 {
     float dt = PBD_MAX_STEP_DT;
@@ -3615,7 +3672,7 @@ static void debug_physics_step(DebugRunState *state)
         state->melee_unstuck_overlap_after = debug_count_player_overlapping_voxels(0);
         state->melee_unstuck_cleared = (state->melee_unstuck_overlap_after == 0);
     }
-    if (state && (state->swarmer_wall_test || state->swarmer_wander_test || state->goliath_flight_test || state->goliath_behavior_test || state->goliath_mining_test)) {
+    if (state && (state->swarmer_wall_test || state->swarmer_wander_test || state->goliath_flight_test || state->goliath_behavior_test || state->goliath_mining_test || state->goliath_throw_cover_test)) {
         int bot = state->enemy_bot_index;
         int human = state->enemy_human_index;
         if (state->goliath_flight_test && state->goliath_forced_jumps < 1 &&
@@ -3662,12 +3719,43 @@ static void debug_physics_step(DebugRunState *state)
                 players[bot].vel.x = 0.0f;
                 players[bot].vel.z = 0.0f;
             }
-        } else if (state->goliath_behavior_test || state->goliath_mining_test) {
+        } else if (state->goliath_behavior_test || state->goliath_mining_test ||
+                   state->goliath_throw_cover_test) {
             int count_before = goliathStates[bot].count;
+            uint64_t before_ids[GOLIATH_MAX_ATTACHED];
+            Vector3 before_off[GOLIATH_MAX_ATTACHED];
+            Vector3 to_human = v_sub(players[human].pos, players[bot].pos);
+            for (int a = 0; a < count_before && a < GOLIATH_MAX_ATTACHED; ++a) {
+                before_ids[a] = goliathStates[bot].voxels[a].voxelIdentity;
+                before_off[a] = goliathStates[bot].voxels[a].localOffset;
+                if (state->goliath_throw_cover_test) {
+                    float d = v_dot(before_off[a], to_human);
+                    if (d > state->goliath_throw_cover_best_front_dot) {
+                        state->goliath_throw_cover_best_front_dot = d;
+                    }
+                }
+            }
             uint64_t launch_identity = count_before > 0 ?
                 goliathStates[bot].voxels[count_before - 1].voxelIdentity : 0;
             UpdateBot(bot, dt);
             if (goliathStates[bot].count < count_before) {
+                if (state->goliath_throw_cover_test) {
+                    for (int a = 0; a < count_before; ++a) {
+                        bool still = false;
+                        for (int b = 0; b < goliathStates[bot].count; ++b) {
+                            if (goliathStates[bot].voxels[b].voxelIdentity == before_ids[a]) {
+                                still = true;
+                                break;
+                            }
+                        }
+                        if (!still) {
+                            state->goliath_throw_cover_launched_dot =
+                                v_dot(before_off[a], to_human);
+                            launch_identity = before_ids[a];
+                            break;
+                        }
+                    }
+                }
                 state->goliath_voxels_launched += (count_before - goliathStates[bot].count);
                 int launched_voxel = -1;
                 for (int v = 0; v < voxel_count; ++v) {
@@ -4508,6 +4596,32 @@ static void debug_finalize_validation(DebugRunState *state)
         if (!state->melee_unstuck_cleared) {
             debug_add_failure(state, "melee did not clear overlapping voxels around the player (%d remain)",
                               state->melee_unstuck_overlap_after);
+        }
+        return;
+    }
+    if (state->swarmer_pack_test) {
+        fprintf(stderr, "[SwarmerPack] swarmers=%d spawned=%d total=%d\n",
+                state->swarmer_pack_count, firefightEnemiesSpawned, firefightWaveEnemiesTotal);
+        if (state->swarmer_pack_count != 3) {
+            debug_add_failure(state, "wave 1 swarmer pack size was %d, expected 3",
+                              state->swarmer_pack_count);
+        }
+        return;
+    }
+    if (state->goliath_throw_cover_test) {
+        fprintf(stderr, "[GoliathThrowCover] launched=%d launched_dot=%.3f front_dot=%.3f\n",
+                state->goliath_voxels_launched,
+                (double)state->goliath_throw_cover_launched_dot,
+                (double)state->goliath_throw_cover_best_front_dot);
+        if (state->goliath_voxels_launched < 1) {
+            debug_add_failure(state, "goliath never threw an armor plate");
+        }
+        if (state->goliath_throw_cover_launched_dot >
+            state->goliath_throw_cover_best_front_dot - 0.01f &&
+            state->goliath_throw_cover_best_front_dot > 0.0f) {
+            debug_add_failure(state, "goliath threw a frontal plate (dot %.3f, front %.3f)",
+                              state->goliath_throw_cover_launched_dot,
+                              state->goliath_throw_cover_best_front_dot);
         }
         return;
     }
