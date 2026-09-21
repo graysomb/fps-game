@@ -2104,6 +2104,7 @@ static void debug_write_curvature_levels(DebugRunState *state, int step)
         int count = 0, above = 0, child_above = 0;
         int above_adaptive = 0, child_above_adaptive = 0;
         double child_sum = 0.0;
+        float level_threshold = ldexpf(VGS_ADAPTIVE_CURVATURE_THRESHOLD, level);
         if (level < vgsHierarchy.levels) {
             int first = vgsHierarchy.level_start[level];
             int end = first + vgsHierarchy.level_count[level];
@@ -2111,7 +2112,7 @@ static void debug_write_curvature_levels(DebugRunState *state, int step)
                 float value = vgsHierarchy.node_history[i].curvature;
                 values[count++] = value;
                 above += value > VGS_TEMPORAL_CURVATURE_RED_AT;
-                above_adaptive += value > VGS_ADAPTIVE_CURVATURE_THRESHOLD;
+                above_adaptive += value > level_threshold;
                 VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
                 float mean = 0.0f;
                 for (int c = 0; c < 8; ++c) {
@@ -2122,7 +2123,7 @@ static void debug_write_curvature_levels(DebugRunState *state, int step)
                 mean *= 0.125f;
                 child_sum += mean;
                 child_above += mean > VGS_TEMPORAL_CURVATURE_RED_AT;
-                child_above_adaptive += mean > VGS_ADAPTIVE_CURVATURE_THRESHOLD;
+                child_above_adaptive += mean > 2.0f * level_threshold;
             }
         } else {
             for (int i = 0; i < voxel_count; ++i) {
@@ -2130,7 +2131,7 @@ static void debug_write_curvature_levels(DebugRunState *state, int step)
                 float value = vgsHierarchy.leaf_history[i].curvature;
                 values[count++] = value;
                 above += value > VGS_TEMPORAL_CURVATURE_RED_AT;
-                above_adaptive += value > VGS_ADAPTIVE_CURVATURE_THRESHOLD;
+                above_adaptive += value > level_threshold;
             }
         }
         if (count > capacity) { debug_add_failure(state, "curvature level overflow"); break; }

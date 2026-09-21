@@ -1838,7 +1838,9 @@ static float debugVgsTemporalLastMax = 0.0f;
 static float debugVgsTemporalLastMean = 0.0f;
 // VGS strain/shear are dimensionless; temporal curvature has units of 1/s^2.
 #define VGS_TEMPORAL_CURVATURE_RED_AT 100.0f
+#ifndef VGS_ADAPTIVE_CURVATURE_THRESHOLD
 #define VGS_ADAPTIVE_CURVATURE_THRESHOLD 50.0f
+#endif
 static unsigned char debugTagBreakLogged[DEBUG_CLUSTER_TAG_MAX];
 
 static const char *trace_level_label(int level) {
@@ -10958,6 +10960,16 @@ static bool vgs_hierarchy_initialize_adaptive(void)
     return true;
 }
 
+static float vgs_adaptive_threshold_for_edge(float rest_edge)
+{
+    // The plotted threshold is for the root. Each halving of edge length
+    // doubles the curvature needed to refine or retain that level.
+    if (vgsHierarchy.node_count <= 0 || rest_edge <= 0.0f)
+        return VGS_ADAPTIVE_CURVATURE_THRESHOLD;
+    return VGS_ADAPTIVE_CURVATURE_THRESHOLD *
+           (vgsHierarchy.nodes[0].rest_edge / rest_edge);
+}
+
 static bool vgs_hierarchy_adapt(void)
 {
     if (!vgsHierarchy.adaptive) return true;
@@ -10968,8 +10980,9 @@ static bool vgs_hierarchy_adapt(void)
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
         if (!node->active) continue;
         float own = vgsHierarchy.node_history[i].curvature;
+        float threshold = vgs_adaptive_threshold_for_edge(node->rest_edge);
         if (!vgs_node_has_active_children(node)) {
-            refine[i] = own > VGS_ADAPTIVE_CURVATURE_THRESHOLD;
+            refine[i] = own > threshold;
             continue;
         }
         float child_mean = 0.0f;
@@ -10982,8 +10995,8 @@ static bool vgs_hierarchy_adapt(void)
                 active_grandchildren = true;
         }
         child_mean *= 0.125f;
-        coarsen[i] = own < VGS_ADAPTIVE_CURVATURE_THRESHOLD &&
-                     child_mean < VGS_ADAPTIVE_CURVATURE_THRESHOLD && !active_grandchildren;
+        coarsen[i] = own < threshold && child_mean < 2.0f * threshold &&
+                     !active_grandchildren;
     }
     // A child selected from the old snapshot cannot refine under a parent
     // that is being coarsened in this same topology update.
