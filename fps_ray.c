@@ -17487,6 +17487,8 @@ static void draw_player_tether_world(int player_index) {
                gold ? (Color){ 255, 205, 55, 210 } : (Color){ 80, 170, 255, 180 });
 }
 
+static int drawViewPlayerIndex = -1;
+
 static Color player_face_contrast_color(Color base)
 {
     float lum = 0.299f * (float)base.r + 0.587f * (float)base.g + 0.114f * (float)base.b;
@@ -17511,7 +17513,8 @@ static void draw_player_face(const Player *p, Vector3 render_pos, float body_siz
     float s = body_size;
     float half = s * 0.5f;
     Color fc = player_face_contrast_color(base);
-    Vector3 face = v_add(render_pos, v_mul(forward, half + 0.012f * s));
+    float face_out = half * 1.42f + 0.05f * s;
+    Vector3 face = v_add(render_pos, v_mul(forward, face_out));
     Vector3 eye_l = v_add(face, v_add(v_mul(right, -0.16f * s), (Vector3){ 0.0f, 0.12f * s, 0.0f }));
     Vector3 eye_r = v_add(face, v_add(v_mul(right, 0.16f * s), (Vector3){ 0.0f, 0.12f * s, 0.0f }));
     rlPushMatrix();
@@ -17524,13 +17527,13 @@ static void draw_player_face(const Player *p, Vector3 render_pos, float body_siz
     rlRotatef(p->yaw, 0.0f, 1.0f, 0.0f);
     DrawCube((Vector3){ 0 }, 0.16f * s, 0.035f * s, 0.03f * s, fc);
     rlPopMatrix();
-    Vector3 mouth = v_add(face, (Vector3){ 0.0f, -0.12f * s, 0.0f });
+    Vector3 mouth = v_add(face, (Vector3){ 0.0f, -0.10f * s, 0.0f });
     rlPushMatrix();
     rlTranslatef(mouth.x, mouth.y, mouth.z);
     rlRotatef(p->yaw, 0.0f, 1.0f, 0.0f);
-    DrawCube((Vector3){ -0.08f * s, 0.0f, 0.0f }, 0.035f * s, 0.16f * s, 0.03f * s, fc);
-    DrawCube((Vector3){ 0.02f * s, 0.07f * s, 0.0f }, 0.14f * s, 0.035f * s, 0.03f * s, fc);
-    DrawCube((Vector3){ 0.02f * s, -0.07f * s, 0.0f }, 0.14f * s, 0.035f * s, 0.03f * s, fc);
+    DrawCube((Vector3){ 0.0f, 0.06f * s, 0.0f }, 0.18f * s, 0.035f * s, 0.03f * s, fc);
+    DrawCube((Vector3){ -0.072f * s, -0.02f * s, 0.0f }, 0.035f * s, 0.12f * s, 0.03f * s, fc);
+    DrawCube((Vector3){ 0.072f * s, -0.02f * s, 0.0f }, 0.035f * s, 0.12f * s, 0.03f * s, fc);
     rlPopMatrix();
 }
 
@@ -17554,7 +17557,9 @@ static void draw_players(void) {
         }
         DrawCube(render_pos, body_size, body_size, body_size, base);
         DrawCubeWires(render_pos, body_size, body_size, body_size, base_dark);
-        draw_player_face(p, render_pos, body_size, base);
+        if (i != drawViewPlayerIndex) {
+            draw_player_face(p, render_pos, body_size, base);
+        }
         if (p->enemyType == ENEMY_TYPE_GOLIATH) {
             float pulse = 0.5f + 0.5f * sinf((float)GetTime() * 5.0f);
             Color coreEnergy = (Color){ 255, 90, 30, (unsigned char)(140 + 80 * pulse) };
@@ -19325,10 +19330,12 @@ static void render_gameplay_view(RenderTexture2D *screens,
         BeginTextureMode(screens[view]);
             ClearBackground(SKYBLUE);
             BeginMode3D(cams[i]);
+                drawViewPlayerIndex = i;
                 draw_world_surfaces();
                 DrawVoxels(cams[i]);
                 draw_pickups(cams[i]);
                 draw_players();
+                drawViewPlayerIndex = -1;
             EndMode3D();
             int view_x = 0, view_y = 0, view_w = 0, view_h = 0;
             get_viewport(view, viewCount, &view_x, &view_y, &view_w, &view_h);
