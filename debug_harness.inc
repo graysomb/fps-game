@@ -2104,7 +2104,8 @@ static void debug_write_curvature_levels(DebugRunState *state, int step)
         int count = 0, above = 0, child_above = 0;
         int above_adaptive = 0, child_above_adaptive = 0;
         double child_sum = 0.0;
-        float level_threshold = ldexpf(VGS_ADAPTIVE_CURVATURE_THRESHOLD, level);
+        float level_threshold = ldexpf(VGS_ADAPTIVE_CURVATURE_THRESHOLD,
+                                      (VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR == 4 ? 2 : 1) * level);
         if (level < vgsHierarchy.levels) {
             int first = vgsHierarchy.level_start[level];
             int end = first + vgsHierarchy.level_count[level];
@@ -2123,7 +2124,8 @@ static void debug_write_curvature_levels(DebugRunState *state, int step)
                 mean *= 0.125f;
                 child_sum += mean;
                 child_above += mean > VGS_TEMPORAL_CURVATURE_RED_AT;
-                child_above_adaptive += mean > 2.0f * level_threshold;
+                child_above_adaptive += mean >
+                    VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR * level_threshold;
             }
         } else {
             for (int i = 0; i < voxel_count; ++i) {
@@ -4997,8 +4999,9 @@ static bool debug_write_report(DebugRunState *state)
                 vgsHierarchy.node_count, active_nodes,
                 PBD_DISABLE_VGS_DEACTIVATION ? "true" : "false");
         if (state->adaptive_cube_drop)
-            fprintf(file, "  \"adaptiveHierarchy\": {\"thresholdPerSecondSquared\": %.9g, \"refinements\": %u, \"coarsenings\": %u, \"gpuConstraints\": %d, \"simulatedParticles\": %d},\n",
+            fprintf(file, "  \"adaptiveHierarchy\": {\"thresholdPerSecondSquared\": %.9g, \"thresholdLevelFactor\": %d, \"refinements\": %u, \"coarsenings\": %u, \"gpuConstraints\": %d, \"simulatedParticles\": %d},\n",
                     (double)VGS_ADAPTIVE_CURVATURE_THRESHOLD,
+                    VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR,
                     vgsHierarchy.refine_count, vgsHierarchy.coarsen_count,
                     gpuPhysics.constraint_count, sim_particle_count);
         fprintf(file, "  \"vgsTemporalCurvature\": {\"samples\": %d, \"redAtPerSecondSquared\": %.9g, \"lastStepMax\": %.9g, \"lastStepMean\": %.9g},\n",

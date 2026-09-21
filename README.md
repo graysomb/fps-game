@@ -480,7 +480,7 @@ Available scenarios are:
   only the root VGS active initially. After each PBD substep, an active terminal
   node whose six-component strain/shear time curvature exceeds its level's
   threshold enables all eight children. The root threshold defaults to 50 s^-2
-  and doubles at every finer level. A parent coarsens when its curvature is
+  and quadruples at every finer level. A parent coarsens when its curvature is
   below its own threshold, the mean child curvature is below the child level's
   threshold, and no grandchildren remain active. Refinement
   initializes child positions and velocities with trilinear interpolation;
@@ -493,7 +493,9 @@ Available scenarios are:
   [uniform-threshold sweep](docs/vgs-amr-h2-threshold/README.md) found a
   phase-change-like jump between root thresholds 34 and 33 s^-2. The
   [level-scaled sweep](docs/vgs-amr-h2-level-threshold/README.md) records the
-  new response, including the dense range from 10 to 30 s^-2. There is no hysteresis, so
+  earlier 2x response, including the dense range from 10 to 30 s^-2. The
+  [4x active-resolution sweep](docs/vgs-amr-h2-quad-threshold/README.md)
+  records the current rule. There is no hysteresis, so
   cells can change level on consecutive substeps. Dormant descendants follow trilinear
   parent motion and do not provide an independent fine-scale curvature signal
   until they become active.

@@ -1841,6 +1841,12 @@ static float debugVgsTemporalLastMean = 0.0f;
 #ifndef VGS_ADAPTIVE_CURVATURE_THRESHOLD
 #define VGS_ADAPTIVE_CURVATURE_THRESHOLD 50.0f
 #endif
+#ifndef VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR
+#define VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR 4
+#endif
+#if VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR != 2 && VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR != 4
+#error VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR must be 2 or 4
+#endif
 static unsigned char debugTagBreakLogged[DEBUG_CLUSTER_TAG_MAX];
 
 static const char *trace_level_label(int level) {
@@ -10963,11 +10969,14 @@ static bool vgs_hierarchy_initialize_adaptive(void)
 static float vgs_adaptive_threshold_for_edge(float rest_edge)
 {
     // The plotted threshold is for the root. Each halving of edge length
-    // doubles the curvature needed to refine or retain that level.
+    // multiplies the curvature threshold by the configured level factor.
     if (vgsHierarchy.node_count <= 0 || rest_edge <= 0.0f)
         return VGS_ADAPTIVE_CURVATURE_THRESHOLD;
-    return VGS_ADAPTIVE_CURVATURE_THRESHOLD *
-           (vgsHierarchy.nodes[0].rest_edge / rest_edge);
+    float edge_ratio = vgsHierarchy.nodes[0].rest_edge / rest_edge;
+#if VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR == 4
+    edge_ratio *= edge_ratio;
+#endif
+    return VGS_ADAPTIVE_CURVATURE_THRESHOLD * edge_ratio;
 }
 
 static bool vgs_hierarchy_adapt(void)
@@ -10995,7 +11004,8 @@ static bool vgs_hierarchy_adapt(void)
                 active_grandchildren = true;
         }
         child_mean *= 0.125f;
-        coarsen[i] = own < threshold && child_mean < 2.0f * threshold &&
+        coarsen[i] = own < threshold &&
+                     child_mean < VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR * threshold &&
                      !active_grandchildren;
     }
     // A child selected from the old snapshot cannot refine under a parent
