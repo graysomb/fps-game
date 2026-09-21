@@ -610,7 +610,7 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define MATTER_BUILD_COST 10.0f
 #define MELEE_RANGE 2.0f
 #define MELEE_KNOCKBACK_SPEED 14.0f
-#define MELEE_UPWARD_BOOST 6.0f
+#define MELEE_UPWARD_BOOST 2.0f
 #define MELEE_COOLDOWN_SECONDS 0.0f
 #define MELEE_ANIM_DURATION_SECONDS 0.32f
 #define MELEE_ACTIVE_START_NORM 0.28f
@@ -960,6 +960,7 @@ static void net_proxy_expire(uint32_t tick) {
     }
 }
 static int tetherTag[MAX_VOXELS];
+static int tetherHoldClusterTag[MAX_VOXELS];
 static uint8_t goldReleaseGraceFrames[MAX_VOXELS];
 static int goldReleaseGraceActiveCount = 0;
 static Vector3 tetherTargetByPlayer[MAX_PLAYERS];
@@ -10205,7 +10206,7 @@ static void handle_pbd_projectile_hits(void)
         }
         bool removed = false;
         for (int j = 0; j < activePlayers; ++j) {
-            if (tetherTag[i] == j + 1) {
+            if (tetherTag[i] == j + 1 || tetherHoldClusterTag[i] == j + 1) {
                 continue;
             }
             if (v->goliathProjectile && v->owner == j) continue;
@@ -14589,6 +14590,10 @@ static Vector3 melee_swing_direction(const Player *p, float reach_frac) {
 }
 
 static bool melee_hit_players(int attacker_idx, Vector3 start, Vector3 end, Vector3 dir) {
+    (void)dir;
+    Vector3 attacker_pos = players[attacker_idx].pos;
+    Vector3 forward = player_forward(&players[attacker_idx]);
+    Vector3 body_end = v_add(attacker_pos, v_mul(forward, MELEE_RANGE));
     for (int j = 0; j < activePlayers; ++j) {
         if (j == attacker_idx || players[j].respawn_timer > 0.0f) {
             continue;
@@ -14611,16 +14616,26 @@ static bool melee_hit_players(int attacker_idx, Vector3 start, Vector3 end, Vect
         };
         float hit_radius = PLAYER_RADIUS * 1.05f;
         float dist_sq = point_segment_distance_sq(players[j].pos, start, end);
+        float body_dist_sq = point_segment_distance_sq(players[j].pos, attacker_pos, body_end);
         if (dist_sq > hit_radius * hit_radius &&
-            !segment_intersects_aabb(start, end, box_min, box_max)) {
+            body_dist_sq > hit_radius * hit_radius &&
+            !segment_intersects_aabb(start, end, box_min, box_max) &&
+            !segment_intersects_aabb(attacker_pos, body_end, box_min, box_max)) {
             continue;
         }
-        Vector3 knock_dir = { dir.x, 0.0f, dir.z };
+        Vector3 knock_dir = v_sub(players[j].pos, attacker_pos);
+        knock_dir.y = 0.0f;
         float knock_len = v_length(knock_dir);
         if (knock_len > 1e-3f) {
             knock_dir = v_mul(knock_dir, 1.0f / knock_len);
         } else {
-            knock_dir = (Vector3){ 0.0f, 0.0f, -1.0f };
+            knock_dir = (Vector3){ forward.x, 0.0f, forward.z };
+            knock_len = v_length(knock_dir);
+            if (knock_len > 1e-3f) {
+                knock_dir = v_mul(knock_dir, 1.0f / knock_len);
+            } else {
+                knock_dir = (Vector3){ 0.0f, 0.0f, -1.0f };
+            }
         }
         players[j].vel = v_add(players[j].vel, v_mul(knock_dir, MELEE_KNOCKBACK_SPEED));
         players[j].vel.y += MELEE_UPWARD_BOOST;
@@ -14633,6 +14648,49 @@ static bool melee_hit_players(int attacker_idx, Vector3 start, Vector3 end, Vect
         return true;
     }
     return false;
+}
+
+static bool melee_clear_overlapping_voxels(Player *p)
+{
+    if (!p) {
+        return false;
+    }
+    float half = PLAYER_SIZE * 0.5f;
+    if (p->enemyType == ENEMY_TYPE_GOLIATH) {
+        half = PLAYER_SIZE * 0.75f;
+    } else if (p->enemyType == ENEMY_TYPE_SWARMER) {
+        half = PLAYER_SIZE * 0.25f;
+    }
+    half += VOXEL_SIZE * 0.25f;
+    const float eps = 1e-4f;
+    int minx = (int)floorf((p->pos.x - half) / VOXEL_SIZE);
+    int maxx = (int)floorf((p->pos.x + half - eps) / VOXEL_SIZE);
+    int miny = (int)floorf((p->pos.y - half) / VOXEL_SIZE);
+    int maxy = (int)floorf((p->pos.y + half - eps) / VOXEL_SIZE);
+    int minz = (int)floorf((p->pos.z - half) / VOXEL_SIZE);
+    int maxz = (int)floorf((p->pos.z + half - eps) / VOXEL_SIZE);
+    bool removed_dynamic = remove_dynamic_voxels_in_region(minx, maxx, miny, maxy, minz, maxz);
+    int removed_static = 0;
+    for (int x = minx; x <= maxx; ++x) {
+        for (int y = miny; y <= maxy; ++y) {
+            for (int z = minz; z <= maxz; ++z) {
+                if (table_get_static_only(x, y, z) >= 0) {
+                    removed_static++;
+                }
+            }
+        }
+    }
+    remove_static_voxels_in_region_recycle(minx, maxx, miny, maxy, minz, maxz);
+    if (!removed_dynamic && removed_static <= 0) {
+        return false;
+    }
+    int activator = (p >= players && p < players + activePlayers) ? (int)(p - players) : -1;
+    activate_static_voxels_near_region(minx, maxx, miny, maxy, minz, maxz, activator);
+    rebuild_all_voxel_surfaces();
+    meshDirty = true;
+    add_player_matter(p, MATTER_MELEE_HARVEST);
+    play_sfx(SFX_MELEE);
+    return true;
 }
 
 static bool melee_hit_voxels(Player *p, Vector3 start, Vector3 dir, float reach) {
@@ -14767,6 +14825,10 @@ static void update_melee_swings(void) {
         Vector3 dir = melee_swing_direction(p, reach_frac);
         Vector3 start = melee_swing_origin(p, reach_frac);
         Vector3 end = v_add(start, v_mul(dir, reach));
+        if (melee_clear_overlapping_voxels(p)) {
+            p->meleeSwingHitApplied = true;
+            continue;
+        }
         if (melee_hit_players(i, start, end, dir)) {
             p->meleeSwingHitApplied = true;
             continue;
@@ -15189,6 +15251,7 @@ static void measure_tether_cluster(int player_idx, const int *cluster, int clust
 
 static void prepare_tether_forces(void) {
     memset(tetherTag, 0, sizeof(tetherTag));
+    memset(tetherHoldClusterTag, 0, sizeof(tetherHoldClusterTag));
     for (int i = 0; i < MAX_PLAYERS; ++i) {
         tetherScaleByPlayer[i] = 1.0f;
         tetherComByPlayer[i] = tetherTargetByPlayer[i];
@@ -15251,6 +15314,7 @@ static void prepare_tether_forces(void) {
                 member->activationBelief = 1.0f;
                 member->activationCooldownFrames = 0;
                 tetherTag[member_idx] = i + 1;
+                tetherHoldClusterTag[member_idx] = i + 1;
             }
         } else {
             tetherComByPlayer[i] = v->pos;
@@ -15258,6 +15322,17 @@ static void prepare_tether_forces(void) {
             tetherTag[p->tetherVoxel] = i + 1;
             v->activationBelief = 1.0f;
             v->activationCooldownFrames = 0;
+            int group_count = build_glue_cluster_indices(p->tetherVoxel, glueClusterIndices);
+            if (group_count <= 0) {
+                tetherHoldClusterTag[p->tetherVoxel] = i + 1;
+            } else {
+                for (int c = 0; c < group_count; ++c) {
+                    int member_idx = glueClusterIndices[c];
+                    if (member_idx >= 0 && member_idx < voxel_count) {
+                        tetherHoldClusterTag[member_idx] = i + 1;
+                    }
+                }
+            }
         }
     }
 }

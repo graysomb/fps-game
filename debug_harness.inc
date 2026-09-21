@@ -270,6 +270,18 @@ typedef struct DebugRunState {
     int goliath_mining_swings;
     int goliath_mining_hits;
     float goliath_mining_start_matter;
+    bool melee_close_test;
+    bool melee_close_swung;
+    bool melee_close_hit;
+    float melee_close_knock_h;
+    float melee_close_knock_y;
+    bool tether_group_smush_test;
+    bool tether_group_smush_damaged;
+    float tether_group_smush_start_matter;
+    bool melee_unstuck_test;
+    bool melee_unstuck_cleared;
+    int melee_unstuck_overlap_before;
+    int melee_unstuck_overlap_after;
 } DebugRunState;
 
 typedef bool (*DebugScenarioSetupFn)(DebugRunState *state);
@@ -320,6 +332,9 @@ static bool debug_setup_arena_platform_fluid(DebugRunState *state);
 static bool debug_setup_tether_active_glued_static(DebugRunState *state);
 static bool debug_setup_gold_tether_group(DebugRunState *state);
 static bool debug_setup_gold_tether_static(DebugRunState *state);
+static bool debug_setup_melee_close_player(DebugRunState *state);
+static bool debug_setup_tether_group_smush(DebugRunState *state);
+static bool debug_setup_melee_unstuck(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall, 60, 60 },
@@ -356,7 +371,10 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "tether-active-glued-static", "Tethering an active voxel glued to static breaks VGS constraints and extracts intact voxel under stress/strain", debug_setup_tether_active_glued_static, 60, 60 },
     { "gold-tether-group", "Gold tether holds and throws a glued group without breaking its static boundary", debug_setup_gold_tether_group, 60, 60 },
     { "gold-tether-strained-release", "Gold tether release keeps a strained held group intact", debug_setup_gold_tether_group, 60, 60 },
-    { "gold-tether-static", "Gold tether activates a distant static target", debug_setup_gold_tether_static, 60, 60 }
+    { "gold-tether-static", "Gold tether activates a distant static target", debug_setup_gold_tether_static, 60, 60 },
+    { "melee-close-player", "Melee hits a player standing closer than the hand origin", debug_setup_melee_close_player, 8, 4 },
+    { "tether-group-smush", "Held glue-cluster siblings must not smush the tetherer", debug_setup_tether_group_smush, 30, 10 },
+    { "melee-unstuck", "Melee clears overlapping voxels around the attacker", debug_setup_melee_unstuck, 8, 4 }
 };
 
 static const int debugScenarioCount = (int)(sizeof(debugScenarios) / sizeof(debugScenarios[0]));
@@ -3461,9 +3479,142 @@ static bool debug_setup_goliath_mining(DebugRunState *state)
     return true;
 }
 
+static int debug_count_player_overlapping_voxels(int player_idx)
+{
+    float half = player_collision_half(&players[player_idx]);
+    Vector3 pos = players[player_idx].pos;
+    const float eps = 1e-4f;
+    int minx = (int)floorf((pos.x - half) / VOXEL_SIZE);
+    int maxx = (int)floorf((pos.x + half - eps) / VOXEL_SIZE);
+    int miny = (int)floorf((pos.y - half) / VOXEL_SIZE);
+    int maxy = (int)floorf((pos.y + half - eps) / VOXEL_SIZE);
+    int minz = (int)floorf((pos.z - half) / VOXEL_SIZE);
+    int maxz = (int)floorf((pos.z + half - eps) / VOXEL_SIZE);
+    int count = 0;
+    for (int x = minx; x <= maxx; ++x) {
+        for (int y = miny; y <= maxy; ++y) {
+            for (int z = minz; z <= maxz; ++z) {
+                if (table_get(x, y, z) >= 0) count++;
+            }
+        }
+    }
+    return count;
+}
+
+static bool debug_setup_melee_close_player(DebugRunState *state)
+{
+    debug_reset_world();
+    state->melee_close_test = true;
+    state->activation_succeeded = true;
+    state->drop_sampled = true;
+    state->expected_voxels = 0;
+    gameMode = GAME_MODE_DEATHMATCH;
+    activePlayers = 2;
+    debug_init_enemy_player(0, (Vector3){ 0.0f, BASE_EYE_HEIGHT, 0.0f },
+                            ENEMY_TYPE_STANDARD, INPUT_TYPE_KEYBOARD);
+    debug_init_enemy_player(1, (Vector3){ 0.0f, BASE_EYE_HEIGHT, -0.6f },
+                            ENEMY_TYPE_STANDARD, INPUT_TYPE_KEYBOARD);
+    players[0].yaw = 0.0f;
+    players[0].pitch = 0.0f;
+    players[0].last_melee_time = -1000.0f;
+    players[1].invuln_timer = 0.0f;
+    state->camera.position = (Vector3){ 4.0f, 3.0f, 2.0f };
+    state->camera.target = (Vector3){ 0.0f, BASE_EYE_HEIGHT, -0.3f };
+    return true;
+}
+
+static bool debug_setup_tether_group_smush(DebugRunState *state)
+{
+    debug_reset_world();
+    state->tether_group_smush_test = true;
+    state->activation_succeeded = true;
+    state->drop_sampled = true;
+    gameMode = GAME_MODE_DEATHMATCH;
+    activePlayers = 1;
+    debug_init_enemy_player(0, (Vector3){ 0.25f, BASE_EYE_HEIGHT, 0.25f },
+                            ENEMY_TYPE_STANDARD, INPUT_TYPE_KEYBOARD);
+    Color color = (Color){ 180, 80, 60, 255 };
+    int gy = (int)floorf(BASE_EYE_HEIGHT / VOXEL_SIZE);
+    int a = debug_add_cell(0, gy, 0, false, true, color, DEBUG_THROW_TAG);
+    int b = debug_add_cell(1, gy, 0, false, true, color, DEBUG_THROW_TAG);
+    if (a < 0 || b < 0) {
+        debug_add_failure(state, "tether-group-smush could not create glued pair");
+        return false;
+    }
+    glue_neighbor_faces_for_voxel(a);
+    glue_neighbor_faces_for_voxel(b);
+    players[0].tetherHolding = true;
+    players[0].tetherVoxel = a;
+    players[0].tetherVoxelIdentity = voxels[a].identity;
+    players[0].tetherFace = 2;
+    voxels[a].owner = 0;
+    voxels[b].owner = 0;
+    state->tether_group_smush_start_matter = players[0].matter;
+    state->expected_voxels = 0;
+    debug_rebuild_world_state();
+    state->camera.position = (Vector3){ 4.0f, 4.0f, 2.0f };
+    state->camera.target = (Vector3){ 0.5f, 1.5f, -1.0f };
+    return true;
+}
+
+static bool debug_setup_melee_unstuck(DebugRunState *state)
+{
+    debug_reset_world();
+    state->melee_unstuck_test = true;
+    state->activation_succeeded = true;
+    state->drop_sampled = true;
+    gameMode = GAME_MODE_DEATHMATCH;
+    activePlayers = 1;
+    debug_init_enemy_player(0, (Vector3){ 0.25f, BASE_EYE_HEIGHT, 0.25f },
+                            ENEMY_TYPE_STANDARD, INPUT_TYPE_KEYBOARD);
+    Color color = (Color){ 90, 100, 110, 255 };
+    int gx = (int)floorf(players[0].pos.x / VOXEL_SIZE);
+    int gy = (int)floorf(players[0].pos.y / VOXEL_SIZE);
+    int gz = (int)floorf(players[0].pos.z / VOXEL_SIZE);
+    for (int dx = -1; dx <= 1; ++dx) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dz = -1; dz <= 1; ++dz) {
+                debug_add_cell(gx + dx, gy + dy, gz + dz, true, false, color, DEBUG_SUPPORT_TAG);
+            }
+        }
+    }
+    debug_rebuild_world_state();
+    state->melee_unstuck_overlap_before = debug_count_player_overlapping_voxels(0);
+    state->expected_voxels = 0;
+    players[0].last_melee_time = -1000.0f;
+    players[0].yaw = 0.0f;
+    state->camera.position = (Vector3){ 4.0f, 3.5f, 4.0f };
+    state->camera.target = players[0].pos;
+    if (state->melee_unstuck_overlap_before <= 0) {
+        debug_add_failure(state, "melee-unstuck player was not overlapping voxels");
+        return false;
+    }
+    return true;
+}
+
 static void debug_physics_step(DebugRunState *state)
 {
     float dt = PBD_MAX_STEP_DT;
+    if (state && state->melee_close_test && !state->melee_close_swung) {
+        perform_melee(0);
+        players[0].meleeSwingStartTime = (float)GetTime() -
+            MELEE_ANIM_DURATION_SECONDS * MELEE_REACH_PEAK_NORM;
+        update_melee_swings();
+        state->melee_close_swung = true;
+        state->melee_close_hit = players[0].meleeSwingHitApplied;
+        state->melee_close_knock_h = sqrtf(players[1].vel.x * players[1].vel.x +
+                                           players[1].vel.z * players[1].vel.z);
+        state->melee_close_knock_y = players[1].vel.y;
+    }
+    if (state && state->melee_unstuck_test && !state->melee_unstuck_cleared) {
+        perform_melee(0);
+        players[0].meleeSwingStartTime = (float)GetTime() -
+            MELEE_ANIM_DURATION_SECONDS * MELEE_REACH_PEAK_NORM;
+        update_melee_swings();
+        debug_rebuild_world_state();
+        state->melee_unstuck_overlap_after = debug_count_player_overlapping_voxels(0);
+        state->melee_unstuck_cleared = (state->melee_unstuck_overlap_after == 0);
+    }
     if (state && (state->swarmer_wall_test || state->swarmer_wander_test || state->goliath_flight_test || state->goliath_behavior_test || state->goliath_mining_test)) {
         int bot = state->enemy_bot_index;
         int human = state->enemy_human_index;
@@ -4316,6 +4467,47 @@ static void debug_finalize_validation(DebugRunState *state)
             debug_add_failure(state,
                               "goliath lost all armor voxels (final_armor=%d min_armor=%d)",
                               state->goliath_final_armor_count, state->goliath_min_armor_count);
+        }
+        return;
+    }
+    if (state->melee_close_test) {
+        fprintf(stderr, "[MeleeClose] hit=%d knock_h=%.3f knock_y=%.3f matter=%.1f\n",
+                state->melee_close_hit ? 1 : 0,
+                (double)state->melee_close_knock_h,
+                (double)state->melee_close_knock_y,
+                (double)players[1].matter);
+        if (!state->melee_close_hit) {
+            debug_add_failure(state, "melee did not hit a player standing closer than the hand origin");
+        }
+        if (state->melee_close_knock_h < 4.0f) {
+            debug_add_failure(state, "melee knockback was not mostly horizontal (h=%.3f y=%.3f)",
+                              state->melee_close_knock_h, state->melee_close_knock_y);
+        }
+        if (state->melee_close_knock_y > state->melee_close_knock_h) {
+            debug_add_failure(state, "melee knockback was mostly upward (h=%.3f y=%.3f)",
+                              state->melee_close_knock_h, state->melee_close_knock_y);
+        }
+        return;
+    }
+    if (state->tether_group_smush_test) {
+        fprintf(stderr, "[TetherGroupSmush] start_matter=%.1f matter=%.1f damaged=%d\n",
+                (double)state->tether_group_smush_start_matter,
+                (double)players[0].matter,
+                state->tether_group_smush_damaged ? 1 : 0);
+        if (players[0].matter < state->tether_group_smush_start_matter - 0.5f ||
+            players[0].respawn_timer > 0.0f) {
+            debug_add_failure(state, "tethered glue-cluster sibling smushed the holder (matter %.1f -> %.1f)",
+                              state->tether_group_smush_start_matter, players[0].matter);
+        }
+        return;
+    }
+    if (state->melee_unstuck_test) {
+        fprintf(stderr, "[MeleeUnstuck] overlap_before=%d overlap_after=%d cleared=%d\n",
+                state->melee_unstuck_overlap_before, state->melee_unstuck_overlap_after,
+                state->melee_unstuck_cleared ? 1 : 0);
+        if (!state->melee_unstuck_cleared) {
+            debug_add_failure(state, "melee did not clear overlapping voxels around the player (%d remain)",
+                              state->melee_unstuck_overlap_after);
         }
         return;
     }
