@@ -502,6 +502,7 @@ static bool gpu_pack_world(void) {
         g->lifecycle[3] = ((uint32_t)v->orig_min_gx & 1u) |
                          (((uint32_t)v->orig_min_gy & 1u) << 1) |
                          (((uint32_t)v->orig_min_gz & 1u) << 2);
+        if (v->goliathProjectile) g->lifecycle[3] |= 0x80000000u;
     }
 
     for (int dynamic_id = 0; dynamic_id < gpuPhysics.dynamic_voxel_count; ++dynamic_id) {

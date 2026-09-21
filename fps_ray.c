@@ -1042,6 +1042,7 @@ typedef struct {
     bool glueEligible;
     bool pendingActivation;
     bool isBullet;
+    bool goliathProjectile;
     bool wasTethered;
     int activationCooldownFrames;
     Color color;
@@ -4341,6 +4342,7 @@ static bool init_voxel_struct(Voxel *v,
     v->glueEligible = simulate;
     v->pendingActivation = false;
     v->isBullet = false;
+    v->goliathProjectile = false;
     v->wasTethered = false;
     v->activationCooldownFrames = 0;
     v->color = color;
@@ -5102,6 +5104,9 @@ static void activate_static_worker(int start, int end, int worker_id, void *user
             continue;
         }
         if (dynamic->isBullet) {
+            continue;
+        }
+        if (get_goliath_owner_of_voxel(i) >= 0) {
             continue;
         }
         if (dynamic->activationCooldownFrames > 0) {
@@ -8412,6 +8417,10 @@ static void buildDemo(void) {
 static int first_voxel_hit(Ray ray, float t_max, int ignore_id);
 static bool first_voxel_hit_detailed(Ray ray, float t_max, int ignore_id,
                                      bool static_only, VoxelHit *out_hit);
+static bool first_voxel_hit_detailed_ex(Ray ray, float t_max, int ignore_id,
+                                        bool static_only, int ignore_goliath_owner,
+                                        VoxelHit *out_hit);
+static int find_goliath_harvest_voxel(const Player *bot, float *out_dist_sq);
 static bool first_swept_voxel_hit(Ray ray, float t_max, int ignore_id,
                                   VoxelHit *out_hit);
 static void UpdateKdRatio(int player_index);
@@ -10194,6 +10203,7 @@ static void handle_pbd_projectile_hits(void)
             if (tetherTag[i] == j + 1) {
                 continue;
             }
+            if (v->goliathProjectile && v->owner == j) continue;
             int goliath_owner = get_goliath_owner_of_voxel(i);
             if (goliath_owner >= 0 && goliath_owner == j) {
                 continue;
@@ -10347,10 +10357,14 @@ static void decrement_particle_timers_range(int start, int end, int worker_id, v
 }
 
 static void evaluate_voxel_fracture(Voxel *voxel) {
-    if (!voxel->simulate || !voxel->vgs_active || voxel->isBullet || voxel->type != 0 || voxel->debugClusterTag == DEBUG_CONTAINER_TAG) {
+    if (!voxel->simulate || !voxel->vgs_active || voxel->isBullet ||
+        voxel->goliathProjectile || voxel->type != 0 ||
+        voxel->debugClusterTag == DEBUG_CONTAINER_TAG) {
         return;
     }
     int voxel_idx = (int)(voxel - voxels);
+    if (voxel_idx >= 0 && voxel_idx < voxel_count &&
+        get_goliath_owner_of_voxel(voxel_idx) >= 0) return;
     int holder = (voxel_idx >= 0 && voxel_idx < voxel_count) ? tetherTag[voxel_idx] - 1 : -1;
     if ((holder >= 0 && holder < MAX_PLAYERS && players[holder].goldTetherHolding) ||
         goldReleaseGraceFrames[voxel_idx] > 0) return;
@@ -13786,6 +13800,18 @@ static bool goliath_offset_in_use(const GoliathState *gs, Vector3 offset) {
     return false;
 }
 
+static void goliath_set_armor_attached(Voxel *voxel, bool attached) {
+    if (!voxel) return;
+    for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
+        Particle *particle = voxel->particles[corner];
+        if (!particle) continue;
+        particle->inv_mass = attached ? 0.0f : particle->base_inv_mass;
+        particle->predicted_pos = particle->pos;
+        particle->prev_pos = particle->pos;
+    }
+    collisionTopologyDirty = true;
+}
+
 static bool try_add_goliath_armor_plate(int player_idx, int offset_index) {
     if (player_idx < 0 || player_idx >= activePlayers) return false;
     if (offset_index < 0 || offset_index >= GOLIATH_MAX_ATTACHED) return false;
@@ -13809,6 +13835,7 @@ static bool try_add_goliath_armor_plate(int player_idx, int offset_index) {
     voxels[idx].owner = player_idx;
     voxels[idx].activator = player_idx;
     voxels[idx].glueEligible = false;
+    goliath_set_armor_attached(&voxels[idx], true);
     gs->voxels[gs->count].voxelIdentity = voxels[idx].identity;
     gs->voxels[gs->count].localOffset = offset;
     gs->count++;
@@ -13882,6 +13909,7 @@ static void update_goliath_armor_positions(int player_idx) {
                         target_pos.z + corner_signs[c][2] * half
                     };
                     vox->particles[c]->prev_pos = vox->particles[c]->pos;
+                    vox->particles[c]->predicted_pos = vox->particles[c]->pos;
                     vox->particles[c]->vel = p->vel;
                 }
             }
@@ -13919,6 +13947,7 @@ static void detach_goliath_armor_voxel(int voxel_idx) {
                 }
                 gs->count--;
                 voxels[voxel_idx].glueEligible = false;
+                goliath_set_armor_attached(&voxels[voxel_idx], false);
                 return;
             }
         }
@@ -13934,6 +13963,7 @@ static void detach_one_goliath_armor_voxel(int player_idx) {
     gs->count--;
     for (int v = 0; v < voxel_count; ++v) {
         if (voxels[v].identity == ident) {
+            goliath_set_armor_attached(&voxels[v], false);
             voxels[v].glueEligible = true;
             Vector3 pop = {
                 (float)GetRandomValue(-40, 40) * 0.1f,
@@ -13968,6 +13998,7 @@ static void goliath_launch_voxel(int bot_idx, int target_idx) {
     for (int v = 0; v < voxel_count; ++v) {
         if (voxels[v].identity == ident) {
             Voxel *vox = &voxels[v];
+            goliath_set_armor_attached(vox, false);
             Vector3 toTarget = v_sub(players[target_idx].pos, vox->pos);
             toTarget.y += 0.2f;
             Vector3 dir = v_norm(toTarget);
@@ -13975,6 +14006,7 @@ static void goliath_launch_voxel(int bot_idx, int target_idx) {
             vox->vel = v_mul(dir, launchSpeed);
             vox->owner = bot_idx;
             vox->activator = bot_idx;
+            vox->goliathProjectile = true;
             vox->glueEligible = false;
             vox->sleeping = false;
             vox->sleepFrames = 0;
@@ -14000,6 +14032,7 @@ static void explode_goliath_armor(int player_idx) {
         uint64_t ident = gs->voxels[i].voxelIdentity;
         for (int v = 0; v < voxel_count; ++v) {
             if (voxels[v].identity == ident && voxels[v].simulate) {
+                goliath_set_armor_attached(&voxels[v], false);
                 voxels[v].glueEligible = true;
                 Vector3 blast = {
                     (float)GetRandomValue(-100, 100) * 0.1f,
@@ -14599,7 +14632,28 @@ static bool melee_hit_players(int attacker_idx, Vector3 start, Vector3 end, Vect
 
 static bool melee_hit_voxels(Player *p, Vector3 start, Vector3 dir, float reach) {
     Ray ray = { start, dir };
-    int hit_id = first_voxel_hit(ray, reach, -1);
+    int player_idx = (p >= players && p < players + activePlayers) ? (int)(p - players) : -1;
+    VoxelHit melee_hit;
+    int hit_id = -1;
+    bool harvesting = p->enemyType == ENEMY_TYPE_GOLIATH && player_idx >= 0 &&
+        goliathStates[player_idx].count < GOLIATH_MAX_ATTACHED &&
+        p->matter < GOLIATH_ARMOR_REGEN_COST;
+    if (harvesting) {
+        float target_dist_sq = FLT_MAX;
+        int target = find_goliath_harvest_voxel(p, &target_dist_sq);
+        if (target >= 0 && target_dist_sq <= reach * reach) {
+            Vector3 to_target = v_sub(voxels[target].pos, p->pos);
+            ray = (Ray){ p->pos, v_norm(to_target) };
+            if (first_voxel_hit_detailed_ex(ray, reach, -1, false,
+                                            player_idx, &melee_hit) &&
+                !voxels[melee_hit.id].simulate)
+                hit_id = melee_hit.id;
+        }
+    } else if (first_voxel_hit_detailed_ex(ray, reach, -1, false,
+               (p->enemyType == ENEMY_TYPE_GOLIATH) ? player_idx : -1,
+               &melee_hit)) {
+        hit_id = melee_hit.id;
+    }
     if (hit_id < 0 || hit_id >= voxel_count) {
         return false;
     }
@@ -15456,8 +15510,9 @@ static inline float ray_t_to_next_plane(float p,      // ray.position.x  (or y /
     return (nextPlane - p) / d;              // d has sign, so t is positive
 }
 
-static bool first_voxel_hit_detailed(Ray ray, float t_max, int ignore_id,
-                                     bool static_only, VoxelHit *out_hit)
+static bool first_voxel_hit_detailed_ex(Ray ray, float t_max, int ignore_id,
+                                        bool static_only, int ignore_goliath_owner,
+                                        VoxelHit *out_hit)
 {
     float direction_length = v_length(ray.direction);
     if (direction_length <= 1e-8f || t_max < 0.0f) return false;
@@ -15480,6 +15535,9 @@ static bool first_voxel_hit_detailed(Ray ray, float t_max, int ignore_id,
 
     while (entry_t <= t_max + 1e-6f) {
         int id = static_only ? table_get_static_only(x, y, z) : table_get(x, y, z);
+        if (id >= 0 && ignore_goliath_owner >= 0 &&
+            get_goliath_owner_of_voxel(id) == ignore_goliath_owner)
+            id = table_get_static_only(x, y, z);
         if (id >= 0 && id != ignore_id && id < voxel_count) {
             Voxel *v = &voxels[id];
             bool valid = false;
@@ -15519,6 +15577,12 @@ static bool first_voxel_hit_detailed(Ray ray, float t_max, int ignore_id,
         }
     }
     return false;
+}
+
+static bool first_voxel_hit_detailed(Ray ray, float t_max, int ignore_id,
+                                     bool static_only, VoxelHit *out_hit)
+{
+    return first_voxel_hit_detailed_ex(ray, t_max, ignore_id, static_only, -1, out_hit);
 }
 
 static bool first_swept_voxel_hit(Ray ray, float t_max, int ignore_id,
@@ -17553,7 +17617,7 @@ static float player_collision_half(const Player *p) {
     return PLAYER_SIZE * 0.5f;
 }
 
-static bool player_aabb_hits_world(Vector3 pos, float half) {
+static bool player_aabb_hits_world_ex(Vector3 pos, float half, int player_idx) {
     const float eps = 1e-4f;
     int minx = (int)floorf((pos.x - half) / VOXEL_SIZE);
     int maxx = (int)floorf((pos.x + half - eps) / VOXEL_SIZE);
@@ -17565,11 +17629,19 @@ static bool player_aabb_hits_world(Vector3 pos, float half) {
         for (int y = miny; y <= maxy; ++y) {
             for (int z = minz; z <= maxz; ++z) {
                 int voxel_idx = table_get(x, y, z);
-                if (voxel_idx >= 0 && voxel_idx < voxel_count) return true;
+                if (voxel_idx >= 0 && voxel_idx < voxel_count) {
+                    if (player_idx < 0 || get_goliath_owner_of_voxel(voxel_idx) != player_idx)
+                        return true;
+                    if (table_get_static_only(x, y, z) >= 0) return true;
+                }
             }
         }
     }
     return false;
+}
+
+static bool player_aabb_hits_world(Vector3 pos, float half) {
+    return player_aabb_hits_world_ex(pos, half, -1);
 }
 
 static void net_integrate_player(Player *p, float dt, bool query_world) {
@@ -17589,22 +17661,22 @@ static void net_integrate_player(Player *p, float dt, bool query_world) {
     bool collided = false;
     if (query_world && player_idx >= 0) {
         Vector3 try_x = { p->pos.x + p->vel.x * dt, p->pos.y, p->pos.z };
-        if (p->vel.x != 0.0f && player_aabb_hits_world(try_x, half)) {
+        if (p->vel.x != 0.0f && player_aabb_hits_world_ex(try_x, half, player_idx)) {
             p->vel.x = 0.0f;
             collided = true;
         }
         Vector3 try_y = { p->pos.x, p->pos.y + p->vel.y * dt, p->pos.z };
-        if (p->vel.y != 0.0f && player_aabb_hits_world(try_y, half)) {
+        if (p->vel.y != 0.0f && player_aabb_hits_world_ex(try_y, half, player_idx)) {
             p->vel.y = 0.0f;
             collided = true;
         }
         Vector3 try_z = { p->pos.x, p->pos.y, p->pos.z + p->vel.z * dt };
-        if (p->vel.z != 0.0f && player_aabb_hits_world(try_z, half)) {
+        if (p->vel.z != 0.0f && player_aabb_hits_world_ex(try_z, half, player_idx)) {
             p->vel.z = 0.0f;
             collided = true;
         }
         Vector3 ground_probe = { p->pos.x, p->pos.y - 0.02f, p->pos.z };
-        bool grounded = player_aabb_hits_world(ground_probe, half);
+        bool grounded = player_aabb_hits_world_ex(ground_probe, half, player_idx);
         if (!grounded) {
             p->vel.y -= GRAVITY * dt;
             p->onGround = false;
@@ -17971,6 +18043,27 @@ static int find_nearest_static_voxel(const Vector3 *pos, float *out_dist_sq) {
     return best;
 }
 
+static int find_goliath_harvest_voxel(const Player *bot, float *out_dist_sq) {
+    int best = -1;
+    float best_dist_sq = FLT_MAX;
+    for (int i = 0; i < voxel_count; ++i) {
+        const Voxel *voxel = &voxels[i];
+        if (voxel->simulate || voxel->isBullet || voxel->type != 0 ||
+            voxel->pendingActivation) continue;
+        /* Underfoot floor cells are close to the eye but outside the melee arc. */
+        if (voxel->pos.y + VOXEL_SIZE * 0.5f < bot->pos.y - 0.25f)
+            continue;
+        Vector3 delta = v_sub(voxel->pos, bot->pos);
+        float distance_sq = v_dot(delta, delta);
+        if (distance_sq < best_dist_sq) {
+            best = i;
+            best_dist_sq = distance_sq;
+        }
+    }
+    if (out_dist_sq) *out_dist_sq = best_dist_sq;
+    return best;
+}
+
 static int find_nearest_dynamic_voxel(const Vector3 *pos, float max_dist_sq, float *out_dist_sq) {
     int best = -1;
     float minDistSq = max_dist_sq;
@@ -18115,6 +18208,10 @@ static void UpdateBot(int playerIdx, float dt) {
 
         bool needArmor = (gs->count < GOLIATH_MAX_ATTACHED);
         bool needMatter = needArmor && (bot->matter < GOLIATH_ARMOR_REGEN_COST);
+        if (needMatter) {
+            harvestVoxelIdx = find_goliath_harvest_voxel(bot, &harvestDistSq);
+            harvestDist = harvestVoxelIdx >= 0 ? sqrtf(harvestDistSq) : FLT_MAX;
+        }
         if (needArmor && gs->regenTimer <= 0.0f && goliath_try_regen_armor(playerIdx)) {
             gs->regenTimer = GOLIATH_ARMOR_REGEN_SECONDS;
         }
@@ -18133,8 +18230,10 @@ static void UpdateBot(int playerIdx, float dt) {
                 bot->vel.z = 0.0f;
             }
             Vector3 lookDir = v_sub(voxels[harvestVoxelIdx].pos, bot->pos);
-            float targetYaw = atan2f(lookDir.x, lookDir.z) * RAD2DEG + 180.0f;
+            float targetYaw, targetPitch;
+            dir_to_yaw_pitch(lookDir, &targetYaw, &targetPitch);
             bot->yaw += (targetYaw - bot->yaw) * 6.0f * dt;
+            bot->pitch += (targetPitch - bot->pitch) * 6.0f * dt;
             if (harvestDist <= MELEE_RANGE * 0.95f) {
                 perform_melee(playerIdx);
             }

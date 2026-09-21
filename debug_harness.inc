@@ -223,6 +223,7 @@ typedef struct DebugRunState {
     bool swarmer_wall_test;
     bool goliath_flight_test;
     bool goliath_behavior_test;
+    bool goliath_mining_test;
     int enemy_bot_index;
     int enemy_human_index;
     int swarmer_inside_wall_frames;
@@ -236,6 +237,21 @@ typedef struct DebugRunState {
     int goliath_voxels_launched;
     int goliath_min_armor_count;
     int goliath_final_armor_count;
+    int goliath_broken_armor_count;
+    int goliath_first_broken_step;
+    int goliath_launches_with_intact_voxel;
+    int goliath_launches_with_broken_voxel;
+    int goliath_launches_without_voxel;
+    uint64_t goliath_launched_identities[GOLIATH_MAX_ATTACHED];
+    bool goliath_launched_broken_seen[GOLIATH_MAX_ATTACHED];
+    int goliath_launched_identity_count;
+    int goliath_broken_launched_in_flight;
+    float goliath_min_projectile_distance;
+    float goliath_initial_human_matter;
+    uint64_t goliath_mining_target_identity;
+    int goliath_mining_swings;
+    int goliath_mining_hits;
+    float goliath_mining_start_matter;
 } DebugRunState;
 
 typedef bool (*DebugScenarioSetupFn)(DebugRunState *state);
@@ -274,6 +290,7 @@ static bool debug_setup_tall_pillar_snap(DebugRunState *state);
 static bool debug_setup_swarmer_wall(DebugRunState *state);
 static bool debug_setup_goliath_flight(DebugRunState *state);
 static bool debug_setup_goliath_behavior(DebugRunState *state);
+static bool debug_setup_goliath_mining(DebugRunState *state);
 static bool debug_setup_pbf_dynamic_container(DebugRunState *state);
 static bool debug_setup_pbf_scaling(DebugRunState *state);
 static bool debug_setup_pbf_dense_neighbors(DebugRunState *state);
@@ -308,6 +325,9 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "swarmer-wall", "Swarmer charges a visible target through a blocking wall", debug_setup_swarmer_wall, 90, 60 },
     { "goliath-flight", "Goliath jumps with attached armor and must land", debug_setup_goliath_flight, 120, 90 },
     { "goliath-behavior", "Goliath maintains armor, detects enemy, and launches voxels", debug_setup_goliath_behavior, 180, 60 },
+    { "goliath-mining", "Goliath mines a nearby static voxel when armor needs matter", debug_setup_goliath_mining, 90, 60 },
+    { "goliath-mining-high", "Goliath aims at a reachable elevated static material voxel", debug_setup_goliath_mining, 90, 60 },
+    { "goliath-mining-floor", "Goliath chooses material with floor underfoot and a wall ahead", debug_setup_goliath_mining, 90, 60 },
     { "cube-stress", "Stress test with scalable dynamic cube (size set by FPS_CUBE_SIZE)", debug_setup_cube_stress, 60, 60 },
     { "voxel-strain-shear-fracture", "Dynamic voxels deactivate VGS shape constraints when strain or shear exceeds threshold", debug_setup_voxel_strain_shear_fracture, 60, 60 },
     { "arena-platform-fluid", "Test arena central platform activated with sleeping fluid on top", debug_setup_arena_platform_fluid, 60, 60 },
@@ -793,7 +813,8 @@ static bool debug_gpu_static_cell_absent_in(const GpuStaticCell *cells, int x, i
 
 static bool debug_gpu_cluster_cells_are_clear(const DebugRunState *state)
 {
-    if (!state || state->tracked_cell_count <= 0) return false;
+    if (!state) return false;
+    if (state->tracked_cell_count <= 0) return true;
     for (int i = 0; i < state->tracked_cell_count; ++i) {
         const DebugTrackedCell *cell = &state->tracked_cells[i];
         // Some activation scenarios deliberately retain a static anchor.  Only
@@ -1008,7 +1029,8 @@ static void debug_render_scene(DebugRunState *state, const DebugSample *sample)
             DrawVoxels(state->camera);
             if (strcmp(debugRunConfig.scenario, "gold-tether-static") == 0)
                 draw_pickups(state->camera);
-            if (state->swarmer_wall_test || state->goliath_flight_test) {
+            if (state->swarmer_wall_test || state->goliath_flight_test ||
+                state->goliath_behavior_test || state->goliath_mining_test) {
                 draw_players();
             }
             if (state->sleep_snap_original_test) {
@@ -3283,13 +3305,72 @@ static bool debug_setup_goliath_behavior(DebugRunState *state)
     state->goliath_final_armor_count = goliathStates[0].count;
     state->goliath_visible_frames = 0;
     state->goliath_voxels_launched = 0;
+    state->goliath_first_broken_step = -1;
+    state->goliath_min_projectile_distance = FLT_MAX;
+    state->goliath_initial_human_matter = players[1].matter;
+    return true;
+}
+
+static bool debug_setup_goliath_mining(DebugRunState *state)
+{
+    debug_reset_world();
+    state->goliath_mining_test = true;
+    state->enemy_bot_index = 0;
+    state->enemy_human_index = 1;
+    state->activation_succeeded = true;
+    state->drop_sampled = true;
+    state->expected_voxels = 0;
+    gameMode = GAME_MODE_FIREFIGHT;
+    activePlayers = 2;
+    debug_init_enemy_player(0, (Vector3){ 0.0f, BASE_EYE_HEIGHT, 5.0f },
+                            ENEMY_TYPE_GOLIATH, INPUT_TYPE_BOT_MEDIUM);
+    debug_init_enemy_player(1, (Vector3){ 0.0f, BASE_EYE_HEIGHT, -30.0f },
+                            ENEMY_TYPE_STANDARD, INPUT_TYPE_KEYBOARD);
+    spawn_goliath_armor(0);
+    /* A missing plate and insufficient matter force the normal mining branch. */
+    GoliathState *armor = &goliathStates[0];
+    uint64_t removed_identity = armor->voxels[--armor->count].voxelIdentity;
+    for (int v = 0; v < voxel_count; ++v) {
+        if (voxels[v].identity == removed_identity) {
+            remove_voxel_index(v);
+            break;
+        }
+    }
+    players[0].matter = 0.0f;
+    players[0].last_melee_time = -1000.0f;
+    state->goliath_mining_start_matter = players[0].matter;
+    bool high_target = strcmp(debugRunConfig.scenario, "goliath-mining-high") == 0;
+    bool floor_target = strcmp(debugRunConfig.scenario, "goliath-mining-floor") == 0;
+    int gy = (int)floorf(BASE_EYE_HEIGHT / VOXEL_SIZE) + (high_target ? 2 : 0);
+    int gz = (int)floorf((high_target ? 4.0f : 3.5f) / VOXEL_SIZE);
+    int gx = floor_target ? (int)floorf(2.0f / VOXEL_SIZE) : 0;
+    if (floor_target) gz = (int)floorf(5.0f / VOXEL_SIZE);
+    int target = debug_add_cell(gx, gy, gz, true, false,
+                                (Color){ 130, 160, 180, 255 }, DEBUG_SUPPORT_TAG);
+    if (target < 0) {
+        debug_add_failure(state, "goliath-mining could not create target voxel");
+        return false;
+    }
+    state->goliath_mining_target_identity = voxels[target].identity;
+    if (floor_target) {
+        int floor_z = (int)floorf(5.0f / VOXEL_SIZE);
+        if (debug_add_cell(0, 0, floor_z, true, false,
+                           (Color){ 90, 90, 100, 255 }, DEBUG_SUPPORT_TAG) < 0) {
+            debug_add_failure(state, "goliath-mining-floor could not create floor voxel");
+            return false;
+        }
+    }
+    players[0].yaw = 0.0f;
+    debug_rebuild_world_state();
+    state->camera.position = (Vector3){ 5.0f, 4.0f, 6.0f };
+    state->camera.target = (Vector3){ 0.0f, 1.5f, 4.0f };
     return true;
 }
 
 static void debug_physics_step(DebugRunState *state)
 {
     float dt = PBD_MAX_STEP_DT;
-    if (state && (state->swarmer_wall_test || state->goliath_flight_test || state->goliath_behavior_test)) {
+    if (state && (state->swarmer_wall_test || state->goliath_flight_test || state->goliath_behavior_test || state->goliath_mining_test)) {
         int bot = state->enemy_bot_index;
         int human = state->enemy_human_index;
         if (state->goliath_flight_test && state->goliath_forced_jumps < 1 &&
@@ -3323,11 +3404,37 @@ static void debug_physics_step(DebugRunState *state)
                 players[bot].vel.x = 0.0f;
                 players[bot].vel.z = 0.0f;
             }
-        } else if (state->goliath_behavior_test) {
+        } else if (state->goliath_behavior_test || state->goliath_mining_test) {
             int count_before = goliathStates[bot].count;
+            uint64_t launch_identity = count_before > 0 ?
+                goliathStates[bot].voxels[count_before - 1].voxelIdentity : 0;
             UpdateBot(bot, dt);
             if (goliathStates[bot].count < count_before) {
                 state->goliath_voxels_launched += (count_before - goliathStates[bot].count);
+                int launched_voxel = -1;
+                for (int v = 0; v < voxel_count; ++v) {
+                    if (voxels[v].identity == launch_identity) {
+                        launched_voxel = v;
+                        break;
+                    }
+                }
+                if (launched_voxel < 0) {
+                    state->goliath_launches_without_voxel++;
+                } else {
+                    if (voxels[launched_voxel].vgs_active) state->goliath_launches_with_intact_voxel++;
+                    else state->goliath_launches_with_broken_voxel++;
+                    if (state->goliath_launched_identity_count < GOLIATH_MAX_ATTACHED)
+                        state->goliath_launched_identities[state->goliath_launched_identity_count++] = launch_identity;
+                }
+            }
+            if (state->goliath_mining_test && players[bot].meleeSwingActive &&
+                !players[bot].meleeSwingHitApplied) {
+                /* The harness runs faster than wall time. Sample the active swing. */
+                players[bot].meleeSwingStartTime = (float)GetTime() -
+                    MELEE_ANIM_DURATION_SECONDS * MELEE_REACH_PEAK_NORM;
+                state->goliath_mining_swings++;
+                update_melee_swings();
+                if (players[bot].meleeSwingHitApplied) state->goliath_mining_hits++;
             }
             float dist = 0.0f;
             if (check_ai_awareness_of_player(bot, human, &dist)) {
@@ -3353,6 +3460,7 @@ static void debug_physics_step(DebugRunState *state)
     rebuild_static_hash_if_dirty();
     simulate_voxel_pbd(PBD_MAX_STEP_DT);
     recycle_dead_voxels();
+    if (state && state->goliath_behavior_test) handle_pbd_projectile_hits();
     rebuild_voxel_hash();
     deactivate_sleeping_voxels();
     rebuild_static_hash_if_dirty();
@@ -3393,6 +3501,37 @@ static void debug_validate_step(DebugRunState *state, int step)
         if (step == debugRunConfig.steps) state->goliath_y_after_landing = bot->pos.y;
         if (bot->onGround && bot->pos.y > state->goliath_start_y + 0.45f) {
             state->goliath_hover_frames++;
+        }
+    }
+    if (state->goliath_behavior_test || state->goliath_mining_test) {
+        int bot = state->enemy_bot_index;
+        int broken = 0;
+        for (int i = 0; i < goliathStates[bot].count; ++i) {
+            uint64_t identity = goliathStates[bot].voxels[i].voxelIdentity;
+            for (int v = 0; v < voxel_count; ++v) {
+                if (voxels[v].identity == identity) {
+                    if (!voxels[v].vgs_active) broken++;
+                    break;
+                }
+            }
+        }
+        if (broken > state->goliath_broken_armor_count)
+            state->goliath_broken_armor_count = broken;
+        if (broken > 0 && state->goliath_first_broken_step < 0)
+            state->goliath_first_broken_step = step;
+        for (int i = 0; i < state->goliath_launched_identity_count; ++i) {
+            uint64_t identity = state->goliath_launched_identities[i];
+            for (int v = 0; v < voxel_count; ++v) {
+                if (voxels[v].identity != identity) continue;
+                if (!voxels[v].vgs_active && !state->goliath_launched_broken_seen[i]) {
+                    state->goliath_launched_broken_seen[i] = true;
+                    state->goliath_broken_launched_in_flight++;
+                }
+                float distance = v_length(v_sub(voxels[v].pos, players[state->enemy_human_index].pos));
+                if (distance < state->goliath_min_projectile_distance)
+                    state->goliath_min_projectile_distance = distance;
+                break;
+            }
         }
     }
     // Isolate the post-impact lifecycle under test: wait for the real swept
@@ -3937,9 +4076,16 @@ static void debug_finalize_validation(DebugRunState *state)
     }
     if (state->goliath_behavior_test) {
         fprintf(stderr,
-                "[GoliathBehavior] visible_frames=%d launched=%d final_armor=%d min_armor=%d\n",
+                "[GoliathBehavior] visible_frames=%d launched=%d intact_launches=%d broken_launches=%d missing_launches=%d broken_in_flight=%d final_armor=%d min_armor=%d broken_attached_max=%d first_broken_step=%d min_projectile_distance=%.3f human_matter=%.1f\n",
                 state->goliath_visible_frames, state->goliath_voxels_launched,
-                state->goliath_final_armor_count, state->goliath_min_armor_count);
+                state->goliath_launches_with_intact_voxel,
+                state->goliath_launches_with_broken_voxel,
+                state->goliath_launches_without_voxel,
+                state->goliath_broken_launched_in_flight,
+                state->goliath_final_armor_count, state->goliath_min_armor_count,
+                state->goliath_broken_armor_count, state->goliath_first_broken_step,
+                (double)state->goliath_min_projectile_distance,
+                (double)players[state->enemy_human_index].matter);
         if (state->goliath_visible_frames < 20) {
             debug_add_failure(state,
                               "goliath was directly aware of visible player for only %d frames",
@@ -3950,11 +4096,59 @@ static void debug_finalize_validation(DebugRunState *state)
                               "goliath never launched any voxels (launched=%d visible_frames=%d)",
                               state->goliath_voxels_launched, state->goliath_visible_frames);
         }
+        if (state->goliath_broken_armor_count > 0) {
+            debug_add_failure(state,
+                              "%d attached armor voxels lost VGS by step %d",
+                              state->goliath_broken_armor_count,
+                              state->goliath_first_broken_step);
+        }
+        if (state->goliath_launches_with_broken_voxel > 0 ||
+            state->goliath_launches_without_voxel > 0) {
+            debug_add_failure(state,
+                              "goliath launched %d broken voxels and %d missing voxels",
+                              state->goliath_launches_with_broken_voxel,
+                              state->goliath_launches_without_voxel);
+        }
+        if (state->goliath_broken_launched_in_flight > 0)
+            debug_add_failure(state, "%d launched voxels fractured in flight",
+                              state->goliath_broken_launched_in_flight);
+        if (players[state->enemy_human_index].matter >= state->goliath_initial_human_matter)
+            debug_add_failure(state, "goliath launches did not damage the player");
         if (state->goliath_final_armor_count <= 0) {
             debug_add_failure(state,
                               "goliath lost all armor voxels (final_armor=%d min_armor=%d)",
                               state->goliath_final_armor_count, state->goliath_min_armor_count);
         }
+        return;
+    }
+    if (state->goliath_mining_test) {
+        bool target_present = false;
+        for (int v = 0; v < voxel_count; ++v) {
+            if (voxels[v].identity == state->goliath_mining_target_identity) {
+                target_present = true;
+                break;
+            }
+        }
+        float selected_dist_sq = FLT_MAX;
+        int selected_idx = find_goliath_harvest_voxel(
+            &players[state->enemy_bot_index], &selected_dist_sq);
+        fprintf(stderr,
+                "[GoliathMining] swings=%d hits=%d target_present=%d matter=%.3f start_matter=%.3f broken_attached_max=%d bot=(%.3f,%.3f,%.3f) selected=(%.3f,%.3f,%.3f) dist=%.3f\n",
+                state->goliath_mining_swings, state->goliath_mining_hits,
+                target_present ? 1 : 0, (double)players[state->enemy_bot_index].matter,
+                (double)state->goliath_mining_start_matter,
+                state->goliath_broken_armor_count,
+                (double)players[state->enemy_bot_index].pos.x,
+                (double)players[state->enemy_bot_index].pos.y,
+                (double)players[state->enemy_bot_index].pos.z,
+                selected_idx >= 0 ? (double)voxels[selected_idx].pos.x : -1.0,
+                selected_idx >= 0 ? (double)voxels[selected_idx].pos.y : -1.0,
+                selected_idx >= 0 ? (double)voxels[selected_idx].pos.z : -1.0,
+                selected_idx >= 0 ? sqrt((double)selected_dist_sq) : -1.0);
+        if (state->goliath_mining_swings == 0)
+            debug_add_failure(state, "goliath never attempted a melee mining swing");
+        if (target_present || players[state->enemy_bot_index].matter <= state->goliath_mining_start_matter)
+            debug_add_failure(state, "goliath failed to mine the nearby static target");
         return;
     }
     if (state->pillar_impact_drift_test) {
@@ -4360,6 +4554,29 @@ static bool debug_write_report(DebugRunState *state)
             state->gpu_sim_id_mismatches,
             state->gpu_tagged_corners_missing_from_sim_ids,
             state->gpu_zero_mass_corners);
+
+    fprintf(file,
+            "  \"goliathDiagnostics\": {\"behavior\": %s, \"mining\": %s,"
+            " \"visibleFrames\": %d, \"armorSlotsLaunched\": %d,"
+            " \"intactLaunches\": %d, \"brokenLaunches\": %d,"
+            " \"missingLaunches\": %d, \"brokenInFlight\": %d,"
+            " \"maxBrokenAttachedArmor\": %d,"
+            " \"firstBrokenStep\": %d, \"minProjectileDistance\": %.9g,"
+            " \"humanMatterLost\": %.9g,"
+            " \"miningSwings\": %d, \"miningHits\": %d,"
+            " \"miningMatter\": %.9g},\n",
+            state->goliath_behavior_test ? "true" : "false",
+            state->goliath_mining_test ? "true" : "false",
+            state->goliath_visible_frames, state->goliath_voxels_launched,
+            state->goliath_launches_with_intact_voxel,
+            state->goliath_launches_with_broken_voxel,
+            state->goliath_launches_without_voxel,
+            state->goliath_broken_launched_in_flight,
+            state->goliath_broken_armor_count, state->goliath_first_broken_step,
+            (double)(state->goliath_min_projectile_distance == FLT_MAX ? -1.0f : state->goliath_min_projectile_distance),
+            (double)fmaxf(0.0f, state->goliath_initial_human_matter - players[state->enemy_human_index].matter),
+            state->goliath_mining_swings, state->goliath_mining_hits,
+            (double)players[state->enemy_bot_index].matter);
 
     fprintf(file,
             "  \"overhangDiagnostics\": {\"enabled\": %s, \"anchorObserved\": %s,"

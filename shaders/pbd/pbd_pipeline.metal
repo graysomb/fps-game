@@ -349,7 +349,8 @@ inline void gatherBreakMask(uint gid, device ParticleState *particle,
                             device const int *control, constant GpuUniforms &u) {
     if (gid >= uint(u.voxel_count)) return;
     VoxelState v = voxel[gid];
-    if (v.flags.x == 0 || v.flags.y != 0 || v.flags.z != 0 || v.pos_rest_edge.w <= 0.0f) {
+    if (v.flags.x == 0 || v.flags.y != 0 || v.flags.z != 0 ||
+        (v.lifecycle.w & 0x80000000u) != 0u || v.pos_rest_edge.w <= 0.0f) {
         voxel[gid] = v;
         return;
     }
