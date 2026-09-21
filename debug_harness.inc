@@ -111,6 +111,16 @@ typedef struct DebugRunState {
     bool recycle_test;
     bool recycle_succeeded;
     bool falling_pillar_test;
+    bool falling_cube_player_test;
+    bool falling_cube_player_died;
+    int falling_cube_death_step;
+    float falling_cube_initial_matter;
+    float falling_cube_min_matter;
+    float falling_cube_max_speed;
+    float falling_cube_max_contact_speed;
+    float falling_cube_max_actionable_contact_speed;
+    int falling_cube_contact_count;
+    int falling_cube_supported_contacts;
     bool platform_lifecycle_test;
     bool restoration_deadline_test;
     bool restoration_deadline_hold_applied;
@@ -286,6 +296,7 @@ static bool debug_setup_sleep_snap_original(DebugRunState *state);
 static bool debug_setup_sleep_snap_no_rebuild(DebugRunState *state);
 static bool debug_setup_sleep_recycle(DebugRunState *state);
 static bool debug_setup_falling_pillar_sleep(DebugRunState *state);
+static bool debug_setup_falling_cube_player(DebugRunState *state);
 static bool debug_setup_three_leg_cut_platform(DebugRunState *state);
 static bool debug_setup_tether_throw_floating(DebugRunState *state);
 static bool debug_setup_overhang_impact(DebugRunState *state);
@@ -320,6 +331,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "sleep-snap-no-rebuild", "A restored pillar remains static after its queued rebuild deadline", debug_setup_sleep_snap_no_rebuild, 60, 60 },
     { "sleep-recycle", "Sleeping dynamic island enters delayed restoration atomically", debug_setup_sleep_recycle, 60, 60 },
     { "falling-pillar-sleep", "Rotated pillar falls, settles, and sleeps without changing pose", debug_setup_falling_pillar_sleep, 60, 60 },
+    { "falling-cube-player", "A 5x5x5 active voxel cube falls onto a stationary player", debug_setup_falling_cube_player, 180, 90 },
     { "three-leg-cut-platform", "Four-legged platform with three legs removed completes sleep and recycling", debug_setup_three_leg_cut_platform, 60, 60 },
     { "tether-throw-floating", "Released tether voxel wakes an unsupported sleeping cluster", debug_setup_tether_throw_floating, 60, 60 },
     { "overhang-impact", "Falling dynamic voxel activates and bends a supported static overhang", debug_setup_overhang_impact, 60, 60 },
@@ -1039,7 +1051,8 @@ static void debug_render_scene(DebugRunState *state, const DebugSample *sample)
             DrawVoxels(state->camera);
             if (strcmp(debugRunConfig.scenario, "gold-tether-static") == 0)
                 draw_pickups(state->camera);
-            if (state->swarmer_wall_test || state->swarmer_wander_test || state->goliath_flight_test ||
+            if (state->falling_cube_player_test || state->swarmer_wall_test ||
+                state->swarmer_wander_test || state->goliath_flight_test ||
                 state->goliath_behavior_test || state->goliath_mining_test) {
                 draw_players();
             }
@@ -3217,6 +3230,53 @@ static void debug_init_enemy_player(int index, Vector3 pos, EnemyType type, Inpu
     botStates[index].targetIndex = -1;
 }
 
+static bool debug_setup_falling_cube_player(DebugRunState *state)
+{
+    debug_reset_world();
+    state->falling_cube_player_test = true;
+    state->falling_cube_death_step = -1;
+    state->activation_succeeded = true;
+    activePlayers = 1;
+    gameMode = GAME_MODE_FIREFIGHT;
+    debug_init_enemy_player(0, (Vector3){ 0.0f, BASE_EYE_HEIGHT, 0.0f },
+                            ENEMY_TYPE_STANDARD, INPUT_TYPE_KEYBOARD);
+    players[0].invuln_timer = 0.0f;
+    players[0].isExposed = false;
+    state->falling_cube_initial_matter = players[0].matter;
+    state->falling_cube_min_matter = players[0].matter;
+
+    int created = 0;
+    Color color = (Color){ 195, 75, 55, 255 };
+    for (int y = 8; y < 13; ++y) {
+        for (int z = -2; z <= 2; ++z) {
+            for (int x = -2; x <= 2; ++x) {
+                int voxel_index = debug_add_cell(x, y, z, false, true,
+                                                 color, DEBUG_TEST_TAG);
+                if (voxel_index < 0) continue;
+                Voxel *voxel = &voxels[voxel_index];
+                voxel->owner = -1;
+                voxel->activator = -1;
+                voxel->activationBelief = 1.0f;
+                voxel->wake_timer = COARSENING_WAKE_FRAMES;
+                voxel->sleeping = false;
+                ++created;
+            }
+        }
+    }
+    state->expected_voxels = 125;
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_rebuild_world_state();
+    debug_set_initial_centroid(state);
+    state->camera.position = (Vector3){ 7.0f, 7.0f, 9.0f };
+    state->camera.target = (Vector3){ 0.0f, 3.5f, 0.0f };
+    if (created != state->expected_voxels) {
+        debug_add_failure(state, "falling-cube setup created %d/%d voxels",
+                          created, state->expected_voxels);
+        return false;
+    }
+    return true;
+}
+
 static bool debug_setup_swarmer_wall(DebugRunState *state)
 {
     debug_reset_world();
@@ -3507,7 +3567,30 @@ static void debug_physics_step(DebugRunState *state)
     rebuild_static_hash_if_dirty();
     simulate_voxel_pbd(PBD_MAX_STEP_DT);
     recycle_dead_voxels();
-    if (state && state->goliath_behavior_test) handle_pbd_projectile_hits();
+    if (state && state->falling_cube_player_test) {
+        float voxel_radius = VOXEL_SIZE * 0.5f;
+        float threshold = (PLAYER_SIZE * 0.5f) + voxel_radius + 0.1f;
+        for (int i = 0; i < voxel_count; ++i) {
+            Voxel *voxel = &voxels[i];
+            if (!voxel->simulate || voxel->sleeping ||
+                voxel->debugClusterTag != DEBUG_TEST_TAG) continue;
+            Vector3 delta = v_sub(voxel->pos, players[0].pos);
+            if (fabsf(delta.x) >= threshold || fabsf(delta.y) >= threshold ||
+                fabsf(delta.z) >= threshold) continue;
+            float speed = v_length(voxel->vel);
+            state->falling_cube_contact_count++;
+            state->falling_cube_max_contact_speed =
+                fmaxf(state->falling_cube_max_contact_speed, speed);
+            if (dynamic_voxel_glued_to_static(i)) {
+                state->falling_cube_supported_contacts++;
+            } else {
+                state->falling_cube_max_actionable_contact_speed =
+                    fmaxf(state->falling_cube_max_actionable_contact_speed, speed);
+            }
+        }
+    }
+    if (state && (state->goliath_behavior_test || state->falling_cube_player_test))
+        handle_pbd_projectile_hits();
     rebuild_voxel_hash();
     deactivate_sleeping_voxels();
     rebuild_static_hash_if_dirty();
@@ -3534,6 +3617,19 @@ static uint64_t debug_tagged_static_identity_signature(int tag)
 static void debug_validate_step(DebugRunState *state, int step)
 {
     debug_validate_all_sim_particles(state, step);
+    if (state->falling_cube_player_test) {
+        state->falling_cube_min_matter = fminf(state->falling_cube_min_matter,
+                                               players[0].matter);
+        for (int i = 0; i < voxel_count; ++i) {
+            if (voxels[i].debugClusterTag != DEBUG_TEST_TAG || !voxels[i].simulate) continue;
+            state->falling_cube_max_speed = fmaxf(state->falling_cube_max_speed,
+                                                  v_length(voxels[i].vel));
+        }
+        if (!state->falling_cube_player_died && players[0].deaths > 0) {
+            state->falling_cube_player_died = true;
+            state->falling_cube_death_step = step;
+        }
+    }
     if (state->swarmer_wall_test) {
         Player *bot = &players[state->enemy_bot_index];
         if (bot->pos.z < state->swarmer_min_z) state->swarmer_min_z = bot->pos.z;
@@ -4067,6 +4163,31 @@ static void debug_finalize_validation(DebugRunState *state)
         debug_add_failure(state, "forced GPU run fell back to %s: %s",
                           physics_backend_name(physicsBackend.active),
                           physicsBackend.fallback_reason);
+    }
+    if (state->falling_cube_player_test) {
+        fprintf(stderr,
+                "[FallingCubePlayer] died=%d death_step=%d initial_matter=%.1f min_matter=%.1f max_cube_speed=%.3f contacts=%d max_contact_speed=%.3f max_actionable_contact_speed=%.3f supported_contacts=%d remaining_voxels=%d\n",
+                state->falling_cube_player_died ? 1 : 0,
+                state->falling_cube_death_step,
+                (double)state->falling_cube_initial_matter,
+                (double)state->falling_cube_min_matter,
+                (double)state->falling_cube_max_speed,
+                state->falling_cube_contact_count,
+                (double)state->falling_cube_max_contact_speed,
+                (double)state->falling_cube_max_actionable_contact_speed,
+                state->falling_cube_supported_contacts,
+                debug_count_tagged(DEBUG_TEST_TAG, -1));
+        if (!state->falling_cube_player_died) {
+            debug_add_failure(state,
+                              "5x5x5 falling active cube did not kill the player "
+                              "(matter %.1f -> %.1f, max cube speed %.3f, "
+                              "max contact speed %.3f)",
+                              state->falling_cube_initial_matter,
+                              state->falling_cube_min_matter,
+                              state->falling_cube_max_speed,
+                              state->falling_cube_max_contact_speed);
+        }
+        return;
     }
     if (state->sleep_snap_original_test) {
         if (!state->sleep_snap_active_observed) {
@@ -4631,6 +4752,24 @@ static bool debug_write_report(DebugRunState *state)
             state->gpu_sim_id_mismatches,
             state->gpu_tagged_corners_missing_from_sim_ids,
             state->gpu_zero_mass_corners);
+
+    fprintf(file,
+            "  \"fallingCubePlayerDiagnostics\": {\"enabled\": %s,"
+            " \"playerDied\": %s, \"deathStep\": %d,"
+            " \"initialMatter\": %.9g, \"minimumMatter\": %.9g,"
+            " \"maximumCubeSpeed\": %.9g, \"contactCount\": %d,"
+            " \"maximumContactSpeed\": %.9g, \"maximumActionableContactSpeed\": %.9g,"
+            " \"supportedContacts\": %d},\n",
+            state->falling_cube_player_test ? "true" : "false",
+            state->falling_cube_player_died ? "true" : "false",
+            state->falling_cube_death_step,
+            (double)state->falling_cube_initial_matter,
+            (double)state->falling_cube_min_matter,
+            (double)state->falling_cube_max_speed,
+            state->falling_cube_contact_count,
+            (double)state->falling_cube_max_contact_speed,
+            (double)state->falling_cube_max_actionable_contact_speed,
+            state->falling_cube_supported_contacts);
 
     fprintf(file,
             "  \"goliathDiagnostics\": {\"behavior\": %s, \"mining\": %s,"

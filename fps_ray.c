@@ -635,7 +635,6 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define TETHER_THROW_CCD_SKIN (VOXEL_SIZE * 0.01f)
 #define TETHER_THROW_CCD_RESTITUTION 0.15f
 #define TETHER_THROW_IMPACT_LIFETIME_FRAMES 8
-#define SMUSH_EXPOSED_SPEED 2.0f
 #define SMUSH_POINT_MULT 4
 #define POINTS_UPDATE_DURATION 0.6f
 #define BULLET_MAX_SPAN 4
@@ -10248,16 +10247,14 @@ static void handle_pbd_projectile_hits(void)
                     --debugSmushLogBudget;
                 }
                 play_sfx(SFX_SMUSH);
-                float speed = v_length(v->vel);
                 int cluster_count = build_glue_cluster_indices(i, glueClusterIndices);
                 if (cluster_count < 1) {
                     cluster_count = 1;
                 }
                 float damage = (float)VOXEL_DAMAGE * (float)cluster_count;
-                bool would_empty = players[j].isExposed ||
-                    (players[j].invuln_timer <= 0.0f &&
-                     players[j].matter <= damage);
-                if (speed >= SMUSH_EXPOSED_SPEED && would_empty) {
+                bool lethal_hit = players[j].isExposed ||
+                    (players[j].invuln_timer <= 0.0f && players[j].matter <= damage);
+                if (lethal_hit) {
                     kill_player(j, attacker, award_kill, award_debris);
                     smushBannerTimer = 1.0f;
                 } else {
