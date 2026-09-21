@@ -221,6 +221,14 @@ typedef struct DebugRunState {
     int lifecycle_recycle_step;
     int restoration_deadline_frame;
     bool swarmer_wall_test;
+    bool swarmer_wander_test;
+    int swarmer_wander_frame;
+    int swarmer_wander_pause_frames;
+    int swarmer_wander_turn_frames;
+    int swarmer_wander_move_frames;
+    bool swarmer_wander_reacquired;
+    Vector3 swarmer_wander_origin;
+    float swarmer_wander_max_displacement;
     bool goliath_flight_test;
     bool goliath_behavior_test;
     bool goliath_mining_test;
@@ -288,6 +296,7 @@ static bool debug_setup_tether_thin_wall_ccd(DebugRunState *state);
 static bool debug_setup_pbf_container(DebugRunState *state);
 static bool debug_setup_tall_pillar_snap(DebugRunState *state);
 static bool debug_setup_swarmer_wall(DebugRunState *state);
+static bool debug_setup_swarmer_wander(DebugRunState *state);
 static bool debug_setup_goliath_flight(DebugRunState *state);
 static bool debug_setup_goliath_behavior(DebugRunState *state);
 static bool debug_setup_goliath_mining(DebugRunState *state);
@@ -323,6 +332,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "pbf-scaling", "Timed PBF physics plus convex-hull rendering", debug_setup_pbf_scaling, 120, 60 },
     { "pbf-dense-neighbors", "Dense PBF neighborhood overflow fallback", debug_setup_pbf_dense_neighbors, 60, 60 },
     { "swarmer-wall", "Swarmer charges a visible target through a blocking wall", debug_setup_swarmer_wall, 90, 60 },
+    { "swarmer-wander", "Swarmer pauses, turns, and takes bounded Levy steps until it sees a player", debug_setup_swarmer_wander, 600, 240 },
     { "goliath-flight", "Goliath jumps with attached armor and must land", debug_setup_goliath_flight, 120, 90 },
     { "goliath-behavior", "Goliath maintains armor, detects enemy, and launches voxels", debug_setup_goliath_behavior, 180, 60 },
     { "goliath-mining", "Goliath mines a nearby static voxel when armor needs matter", debug_setup_goliath_mining, 90, 60 },
@@ -1029,7 +1039,7 @@ static void debug_render_scene(DebugRunState *state, const DebugSample *sample)
             DrawVoxels(state->camera);
             if (strcmp(debugRunConfig.scenario, "gold-tether-static") == 0)
                 draw_pickups(state->camera);
-            if (state->swarmer_wall_test || state->goliath_flight_test ||
+            if (state->swarmer_wall_test || state->swarmer_wander_test || state->goliath_flight_test ||
                 state->goliath_behavior_test || state->goliath_mining_test) {
                 draw_players();
             }
@@ -1424,7 +1434,8 @@ static void debug_validate_all_sim_particles(DebugRunState *state, int step)
 static void debug_validate_gpu_static_state(DebugRunState *state, int step)
 {
     if (!physics_backend_is_gpu(physicsBackend.active) || step < 1 ||
-        !state || !state->activation_succeeded || state->gpu_readback_performed) return;
+        !state || !state->activation_succeeded || state->gpu_readback_performed ||
+        dynamic_particle_count() <= 0) return;
 #if defined(GRAPHICS_API_OPENGL_43) || (defined(__APPLE__) && defined(FPS_GPU_METAL))
     if (gpuPhysics.static_uploaded_generation != staticHashGeneration) {
         debug_add_failure(state,
@@ -1444,7 +1455,8 @@ static void debug_validate_gpu_static_state(DebugRunState *state, int step)
 static void debug_readback_gpu_buffers(DebugRunState *state, int step)
 {
     if (!state || !physics_backend_is_gpu(physicsBackend.active) || step < 1 ||
-        !state->activation_succeeded || state->gpu_readback_performed) return;
+        !state->activation_succeeded || state->gpu_readback_performed ||
+        dynamic_particle_count() <= 0) return;
 #if defined(GRAPHICS_API_OPENGL_43) || (defined(__APPLE__) && defined(FPS_GPU_METAL))
     state->gpu_readback_performed = true;
     if (gpuPhysics.static_cell_buffer.id == 0 || gpuPhysics.sim_id_buffer.id == 0 ||
@@ -3244,6 +3256,28 @@ static bool debug_setup_swarmer_wall(DebugRunState *state)
     return true;
 }
 
+static bool debug_setup_swarmer_wander(DebugRunState *state)
+{
+    debug_reset_world();
+    state->swarmer_wander_test = true;
+    state->enemy_bot_index = 0;
+    state->enemy_human_index = 1;
+    state->activation_succeeded = true;
+    state->drop_sampled = true;
+    state->expected_voxels = 0;
+    gameMode = GAME_MODE_FIREFIGHT;
+    activePlayers = 2;
+    debug_init_enemy_player(0, (Vector3){ 0.0f, BASE_EYE_HEIGHT, 0.0f },
+                            ENEMY_TYPE_SWARMER, INPUT_TYPE_BOT_MEDIUM);
+    debug_init_enemy_player(1, (Vector3){ 0.0f, BASE_EYE_HEIGHT, -6.0f },
+                            ENEMY_TYPE_STANDARD, INPUT_TYPE_KEYBOARD);
+    players[1].respawn_timer = 9999.0f;
+    state->swarmer_wander_origin = players[0].pos;
+    state->camera.position = (Vector3){ 7.0f, 7.0f, 7.0f };
+    state->camera.target = players[0].pos;
+    return true;
+}
+
 static bool debug_setup_goliath_flight(DebugRunState *state)
 {
     debug_reset_world();
@@ -3370,7 +3404,7 @@ static bool debug_setup_goliath_mining(DebugRunState *state)
 static void debug_physics_step(DebugRunState *state)
 {
     float dt = PBD_MAX_STEP_DT;
-    if (state && (state->swarmer_wall_test || state->goliath_flight_test || state->goliath_behavior_test || state->goliath_mining_test)) {
+    if (state && (state->swarmer_wall_test || state->swarmer_wander_test || state->goliath_flight_test || state->goliath_behavior_test || state->goliath_mining_test)) {
         int bot = state->enemy_bot_index;
         int human = state->enemy_human_index;
         if (state->goliath_flight_test && state->goliath_forced_jumps < 1 &&
@@ -3390,6 +3424,19 @@ static void debug_physics_step(DebugRunState *state)
                 players[bot].vel.x = moveDir.x * swarmerSpeed;
                 players[bot].vel.z = moveDir.z * swarmerSpeed;
             }
+        } else if (state->swarmer_wander_test) {
+            state->swarmer_wander_frame++;
+            if (state->swarmer_wander_frame == 480) {
+                Vector3 forward = player_forward(&players[bot]);
+                players[human].pos = v_add(players[bot].pos, v_mul(forward, 6.0f));
+                players[human].pos.y = players[bot].pos.y;
+                players[human].respawn_timer = 0.0f;
+            }
+            UpdateBot(bot, dt);
+            if (state->swarmer_wander_frame >= 480 &&
+                botStates[bot].swarmerWanderPhase == SWARMER_WANDER_NEW &&
+                check_ai_awareness_of_player(bot, human, NULL))
+                state->swarmer_wander_reacquired = true;
         } else if (state->goliath_flight_test) {
             /* Walk toward the target like UpdateBot, but only the scripted jump. */
             Vector3 to_target = v_sub(players[human].pos, players[bot].pos);
@@ -3494,6 +3541,20 @@ static void debug_validate_step(DebugRunState *state, int step)
         if (player_aabb_hits_world(bot->pos, half)) {
             state->swarmer_inside_wall_frames++;
         }
+    }
+    if (state->swarmer_wander_test && step < 480) {
+        BotState *bot_state = &botStates[state->enemy_bot_index];
+        if (bot_state->swarmerWanderPhase == SWARMER_WANDER_PAUSE)
+            state->swarmer_wander_pause_frames++;
+        else if (bot_state->swarmerWanderPhase == SWARMER_WANDER_TURN)
+            state->swarmer_wander_turn_frames++;
+        else if (bot_state->swarmerWanderPhase == SWARMER_WANDER_MOVE)
+            state->swarmer_wander_move_frames++;
+        Vector3 displacement = v_sub(players[state->enemy_bot_index].pos,
+                                     state->swarmer_wander_origin);
+        displacement.y = 0.0f;
+        state->swarmer_wander_max_displacement = fmaxf(
+            state->swarmer_wander_max_displacement, v_length(displacement));
     }
     if (state->goliath_flight_test) {
         Player *bot = &players[state->enemy_bot_index];
@@ -4048,6 +4109,22 @@ static void debug_finalize_validation(DebugRunState *state)
             debug_add_failure(state, "swarmer walked through the wall to z=%.3f",
                               state->swarmer_min_z);
         }
+        return;
+    }
+    if (state->swarmer_wander_test) {
+        fprintf(stderr, "[SwarmerWander] pause=%d turn=%d move=%d max_displacement=%.3f reacquired=%d\n",
+                state->swarmer_wander_pause_frames,
+                state->swarmer_wander_turn_frames,
+                state->swarmer_wander_move_frames,
+                (double)state->swarmer_wander_max_displacement,
+                state->swarmer_wander_reacquired ? 1 : 0);
+        if (state->swarmer_wander_pause_frames == 0 ||
+            state->swarmer_wander_turn_frames == 0 ||
+            state->swarmer_wander_move_frames == 0 ||
+            state->swarmer_wander_max_displacement < 0.2f)
+            debug_add_failure(state, "swarmer did not complete pause, turn, and movement while unseen");
+        if (!state->swarmer_wander_reacquired)
+            debug_add_failure(state, "swarmer did not resume pursuit when the player appeared");
         return;
     }
     if (state->goliath_flight_test) {

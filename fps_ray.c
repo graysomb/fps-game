@@ -977,6 +977,12 @@ typedef struct {
     bool justBuilt;
     Vector3 lastKnownTargetPos;
     float lostTrackTimer;
+    uint8_t swarmerWanderPhase;
+    float swarmerWanderTimer;
+    float swarmerWanderYaw;
+    float swarmerWanderRemaining;
+    float swarmerWanderStuckTime;
+    Vector3 swarmerWanderLastPos;
 } BotState;
 static BotState botStates[MAX_PLAYERS];
 static bool randomSpawnEnabled = true;
@@ -14068,6 +14074,8 @@ static EnemyType pick_firefight_enemy_type(int wave, int spawn_index) {
 
 static void init_firefight_bot_entity(int i, EnemyType etype, InputType botDiff) {
     playerInput[i] = botDiff;
+    memset(&botStates[i], 0, sizeof(botStates[i]));
+    botStates[i].targetIndex = -1;
     Player *b = &players[i];
     b->enemyType = etype;
     b->contactDamageTimer = 0.0f;
@@ -17802,6 +17810,30 @@ typedef enum {
 #define AI_MAX_AWARENESS_DIST 32.0f
 #define AI_FOV_DOT_THRESHOLD  0.50f  // cos(60 deg) -> 120 degree frontal vision cone
 #define SWARMER_HOP_INTERVAL 5.0f
+#define SWARMER_WANDER_MAX_STEP 5.0f
+#define SWARMER_WANDER_MAX_PAUSE 3.0f
+#define SWARMER_WANDER_TURN_SPEED 270.0f
+#define SWARMER_WANDER_STUCK_SECONDS 0.5f
+
+enum {
+    SWARMER_WANDER_NEW = 0,
+    SWARMER_WANDER_PAUSE,
+    SWARMER_WANDER_TURN,
+    SWARMER_WANDER_MOVE
+};
+
+static float swarmer_levy_step_length(void) {
+    float u = clampf(randomInRange(0.0f, 1.0f), 0.0f, 0.9999f);
+    float distance = 0.8f * (powf(1.0f - u, -2.0f / 3.0f) - 1.0f);
+    return clampf(distance, 0.0f, SWARMER_WANDER_MAX_STEP);
+}
+
+static void swarmer_begin_wander_pause(BotState *state) {
+    state->swarmerWanderPhase = SWARMER_WANDER_PAUSE;
+    state->swarmerWanderTimer = randomInRange(0.0f, SWARMER_WANDER_MAX_PAUSE);
+    state->swarmerWanderRemaining = 0.0f;
+    state->swarmerWanderStuckTime = 0.0f;
+}
 
 // Traverse voxel grid with DDA, ignoring transparent non-occluders like bullets
 static bool ray_hit_solid_voxel(Ray ray, float t_max) {
@@ -18170,8 +18202,9 @@ static void UpdateBot(int playerIdx, float dt) {
     float harvestDist = (harvestVoxelIdx >= 0) ? sqrtf(harvestDistSq) : FLT_MAX;
 
     if (bot->enemyType == ENEMY_TYPE_SWARMER) {
-        if (hasEnemy) {
-            Vector3 targetDest = isDirectlyVisible ? players[enemyIdx].pos : bs->lastKnownTargetPos;
+        if (isDirectlyVisible) {
+            bs->swarmerWanderPhase = SWARMER_WANDER_NEW;
+            Vector3 targetDest = players[enemyIdx].pos;
             Vector3 toEnemy = v_sub(targetDest, bot->pos);
             toEnemy.y = 0.0f;
             float len = v_length(toEnemy);
@@ -18195,8 +18228,55 @@ static void UpdateBot(int playerIdx, float dt) {
                 }
             }
         } else {
-            bot->vel.x *= 0.85f;
-            bot->vel.z *= 0.85f;
+            bs->targetIndex = -1;
+            bs->hasTarget = false;
+            bs->lostTrackTimer = 0.0f;
+            if (bs->swarmerWanderPhase == SWARMER_WANDER_NEW)
+                swarmer_begin_wander_pause(bs);
+            if (bs->swarmerWanderPhase == SWARMER_WANDER_PAUSE) {
+                bot->vel.x = 0.0f;
+                bot->vel.z = 0.0f;
+                bs->swarmerWanderTimer -= dt;
+                if (bs->swarmerWanderTimer <= 0.0f) {
+                    float angle = randomInRange(0.0f, 180.0f);
+                    if (GetRandomValue(0, 1) == 0) angle = -angle;
+                    bs->swarmerWanderYaw = bot->yaw + angle;
+                    bs->swarmerWanderRemaining = swarmer_levy_step_length();
+                    bs->swarmerWanderPhase = SWARMER_WANDER_TURN;
+                }
+            } else if (bs->swarmerWanderPhase == SWARMER_WANDER_TURN) {
+                bot->vel.x = 0.0f;
+                bot->vel.z = 0.0f;
+                float delta = angle_diff_deg(bot->yaw, bs->swarmerWanderYaw);
+                float turn = SWARMER_WANDER_TURN_SPEED * dt;
+                bot->yaw += clampf(delta, -turn, turn);
+                if (fabsf(angle_diff_deg(bot->yaw, bs->swarmerWanderYaw)) <= 0.1f) {
+                    bot->yaw = bs->swarmerWanderYaw;
+                    bs->swarmerWanderLastPos = bot->pos;
+                    bs->swarmerWanderStuckTime = 0.0f;
+                    bs->swarmerWanderPhase = SWARMER_WANDER_MOVE;
+                }
+            } else if (bs->swarmerWanderPhase == SWARMER_WANDER_MOVE) {
+                Vector3 traveled = v_sub(bot->pos, bs->swarmerWanderLastPos);
+                traveled.y = 0.0f;
+                float progress = v_length(traveled);
+                bs->swarmerWanderRemaining -= progress;
+                bs->swarmerWanderLastPos = bot->pos;
+                bs->swarmerWanderStuckTime = progress < 0.005f
+                    ? bs->swarmerWanderStuckTime + dt : 0.0f;
+                if (bs->swarmerWanderRemaining <= 0.0f ||
+                    bs->swarmerWanderStuckTime >= SWARMER_WANDER_STUCK_SECONDS) {
+                    bot->vel.x = 0.0f;
+                    bot->vel.z = 0.0f;
+                    swarmer_begin_wander_pause(bs);
+                } else {
+                    float heading = bs->swarmerWanderYaw * DEG2RAD;
+                    float speed = fminf(MOVE_SPEED * 1.35f,
+                                        bs->swarmerWanderRemaining / fmaxf(dt, 1e-4f));
+                    bot->vel.x = -sinf(heading) * speed;
+                    bot->vel.z = -cosf(heading) * speed;
+                }
+            }
         }
         return;
     }
