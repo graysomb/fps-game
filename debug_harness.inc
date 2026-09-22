@@ -287,6 +287,10 @@ typedef struct DebugRunState {
     bool goliath_throw_cover_test;
     float goliath_throw_cover_best_front_dot;
     float goliath_throw_cover_launched_dot;
+    bool goliath_wall_stuck_test;
+    bool goliath_idle_test;
+    Vector3 goliath_start_pos;
+    float goliath_max_xz_travel;
 } DebugRunState;
 
 typedef bool (*DebugScenarioSetupFn)(DebugRunState *state);
@@ -342,6 +346,8 @@ static bool debug_setup_tether_group_smush(DebugRunState *state);
 static bool debug_setup_melee_unstuck(DebugRunState *state);
 static bool debug_setup_swarmer_pack(DebugRunState *state);
 static bool debug_setup_goliath_throw_cover(DebugRunState *state);
+static bool debug_setup_goliath_wall_stuck(DebugRunState *state);
+static bool debug_setup_goliath_idle(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall, 60, 60 },
@@ -383,7 +389,9 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "tether-group-smush", "Held glue-cluster siblings must not smush the tetherer", debug_setup_tether_group_smush, 30, 10 },
     { "melee-unstuck", "Melee clears overlapping voxels around the attacker", debug_setup_melee_unstuck, 8, 4 },
     { "swarmer-pack", "Firefight wave 1 fills bot slots with a swarmer pack of 3", debug_setup_swarmer_pack, 8, 4 },
-    { "goliath-throw-cover", "Goliath throws a rear armor plate rather than a frontal one", debug_setup_goliath_throw_cover, 90, 30 }
+    { "goliath-throw-cover", "Goliath throws a rear armor plate rather than a frontal one", debug_setup_goliath_throw_cover, 90, 30 },
+    { "goliath-wall-stuck", "Goliath must strafe or jump instead of freezing on a blocking wall", debug_setup_goliath_wall_stuck, 90, 60 },
+    { "goliath-idle", "Goliath with no matter must keep moving instead of standing still", debug_setup_goliath_idle, 90, 60 }
 };
 
 static const int debugScenarioCount = (int)(sizeof(debugScenarios) / sizeof(debugScenarios[0]));
@@ -3649,6 +3657,83 @@ static bool debug_setup_goliath_throw_cover(DebugRunState *state)
     return true;
 }
 
+static bool debug_setup_goliath_wall_stuck(DebugRunState *state)
+{
+    debug_reset_world();
+    state->goliath_wall_stuck_test = true;
+    state->enemy_bot_index = 0;
+    state->enemy_human_index = 1;
+    state->activation_succeeded = true;
+    state->drop_sampled = true;
+    state->expected_voxels = 0;
+    gameMode = GAME_MODE_FIREFIGHT;
+    activePlayers = 2;
+    debug_init_enemy_player(0, (Vector3){ 0.0f, BASE_EYE_HEIGHT, 6.0f },
+                            ENEMY_TYPE_GOLIATH, INPUT_TYPE_BOT_MEDIUM);
+    debug_init_enemy_player(1, (Vector3){ 0.0f, BASE_EYE_HEIGHT, -6.0f },
+                            ENEMY_TYPE_STANDARD, INPUT_TYPE_KEYBOARD);
+    spawn_goliath_armor(0);
+    Color wall = (Color){ 110, 120, 140, 255 };
+    int gz = (int)floorf(3.0f / VOXEL_SIZE);
+    for (int y = 0; y <= 6; ++y) {
+        for (int x = -3; x <= 3; ++x) {
+            debug_add_cell(x, y, gz, true, false, wall, DEBUG_SUPPORT_TAG);
+        }
+    }
+    debug_rebuild_world_state();
+    players[0].yaw = 0.0f;
+    players[1].yaw = 180.0f;
+    botStates[0].targetIndex = 1;
+    botStates[0].hasTarget = true;
+    botStates[0].lastKnownTargetPos = players[1].pos;
+    botStates[0].lostTrackTimer = 30.0f;
+    state->goliath_start_pos = players[0].pos;
+    state->goliath_max_xz_travel = 0.0f;
+    state->camera.position = (Vector3){ 12.0f, 7.0f, 4.0f };
+    state->camera.target = (Vector3){ 0.0f, 1.5f, 0.0f };
+    return true;
+}
+
+static bool debug_setup_goliath_idle(DebugRunState *state)
+{
+    debug_reset_world();
+    state->goliath_idle_test = true;
+    state->enemy_bot_index = 0;
+    state->enemy_human_index = 1;
+    state->activation_succeeded = true;
+    state->drop_sampled = true;
+    state->expected_voxels = 0;
+    gameMode = GAME_MODE_FIREFIGHT;
+    activePlayers = 2;
+    debug_init_enemy_player(0, (Vector3){ 0.0f, BASE_EYE_HEIGHT, 5.0f },
+                            ENEMY_TYPE_GOLIATH, INPUT_TYPE_BOT_MEDIUM);
+    debug_init_enemy_player(1, (Vector3){ 0.0f, BASE_EYE_HEIGHT, -8.0f },
+                            ENEMY_TYPE_STANDARD, INPUT_TYPE_KEYBOARD);
+    spawn_goliath_armor(0);
+    GoliathState *armor = &goliathStates[0];
+    while (armor->count > 0) {
+        uint64_t ident = armor->voxels[armor->count - 1].voxelIdentity;
+        armor->count--;
+        for (int v = 0; v < voxel_count; ++v) {
+            if (voxels[v].identity == ident) {
+                remove_voxel_index(v);
+                break;
+            }
+        }
+    }
+    players[0].matter = 0.0f;
+    int gy = (int)floorf(BASE_EYE_HEIGHT / VOXEL_SIZE) + 5;
+    int gz = (int)floorf(5.0f / VOXEL_SIZE);
+    debug_add_cell(0, gy, gz, true, false, (Color){ 130, 160, 180, 255 }, DEBUG_SUPPORT_TAG);
+    debug_rebuild_world_state();
+    players[0].yaw = 0.0f;
+    state->goliath_start_pos = players[0].pos;
+    state->goliath_max_xz_travel = 0.0f;
+    state->camera.position = (Vector3){ 10.0f, 6.0f, 4.0f };
+    state->camera.target = (Vector3){ 0.0f, 1.5f, 0.0f };
+    return true;
+}
+
 static void debug_physics_step(DebugRunState *state)
 {
     float dt = PBD_MAX_STEP_DT;
@@ -3672,7 +3757,7 @@ static void debug_physics_step(DebugRunState *state)
         state->melee_unstuck_overlap_after = debug_count_player_overlapping_voxels(0);
         state->melee_unstuck_cleared = (state->melee_unstuck_overlap_after == 0);
     }
-    if (state && (state->swarmer_wall_test || state->swarmer_wander_test || state->goliath_flight_test || state->goliath_behavior_test || state->goliath_mining_test || state->goliath_throw_cover_test)) {
+    if (state && (state->swarmer_wall_test || state->swarmer_wander_test || state->goliath_flight_test || state->goliath_behavior_test || state->goliath_mining_test || state->goliath_throw_cover_test || state->goliath_wall_stuck_test || state->goliath_idle_test)) {
         int bot = state->enemy_bot_index;
         int human = state->enemy_human_index;
         if (state->goliath_flight_test && state->goliath_forced_jumps < 1 &&
@@ -3718,6 +3803,14 @@ static void debug_physics_step(DebugRunState *state)
             } else {
                 players[bot].vel.x = 0.0f;
                 players[bot].vel.z = 0.0f;
+            }
+        } else if (state->goliath_wall_stuck_test || state->goliath_idle_test) {
+            UpdateBot(bot, dt);
+            float dx = players[bot].pos.x - state->goliath_start_pos.x;
+            float dz = players[bot].pos.z - state->goliath_start_pos.z;
+            float travel = sqrtf(dx * dx + dz * dz);
+            if (travel > state->goliath_max_xz_travel) {
+                state->goliath_max_xz_travel = travel;
             }
         } else if (state->goliath_behavior_test || state->goliath_mining_test ||
                    state->goliath_throw_cover_test) {
@@ -4605,6 +4698,29 @@ static void debug_finalize_validation(DebugRunState *state)
         if (state->swarmer_pack_count != 3) {
             debug_add_failure(state, "wave 1 swarmer pack size was %d, expected 3",
                               state->swarmer_pack_count);
+        }
+        return;
+    }
+    if (state->goliath_wall_stuck_test) {
+        Player *bot = &players[state->enemy_bot_index];
+        fprintf(stderr, "[GoliathWall] travel=%.3f pos=(%.2f,%.2f,%.2f) start_z=%.2f\n",
+                (double)state->goliath_max_xz_travel,
+                (double)bot->pos.x, (double)bot->pos.y, (double)bot->pos.z,
+                (double)state->goliath_start_pos.z);
+        if (state->goliath_max_xz_travel < 0.8f && bot->pos.z > 3.0f) {
+            debug_add_failure(state, "goliath stayed stuck on the wall (travel %.3f, z %.3f)",
+                              state->goliath_max_xz_travel, bot->pos.z);
+        }
+        return;
+    }
+    if (state->goliath_idle_test) {
+        Player *bot = &players[state->enemy_bot_index];
+        fprintf(stderr, "[GoliathIdle] travel=%.3f matter=%.1f pos=(%.2f,%.2f,%.2f)\n",
+                (double)state->goliath_max_xz_travel, (double)bot->matter,
+                (double)bot->pos.x, (double)bot->pos.y, (double)bot->pos.z);
+        if (state->goliath_max_xz_travel < 0.8f) {
+            debug_add_failure(state, "goliath with no matter stood still (travel %.3f)",
+                              state->goliath_max_xz_travel);
         }
         return;
     }

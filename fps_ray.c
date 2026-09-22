@@ -984,6 +984,8 @@ typedef struct {
     float swarmerWanderRemaining;
     float swarmerWanderStuckTime;
     Vector3 swarmerWanderLastPos;
+    float goliathStuckTime;
+    float goliathStrafeSign;
 } BotState;
 static BotState botStates[MAX_PLAYERS];
 static bool randomSpawnEnabled = true;
@@ -18283,7 +18285,11 @@ static int find_goliath_harvest_voxel(const Player *bot, float *out_dist_sq) {
         if (voxel->pos.y + VOXEL_SIZE * 0.5f < bot->pos.y - 0.25f)
             continue;
         Vector3 delta = v_sub(voxel->pos, bot->pos);
+        float xz_sq = delta.x * delta.x + delta.z * delta.z;
         float distance_sq = v_dot(delta, delta);
+        if (xz_sq < 0.2f * 0.2f && distance_sq > (MELEE_RANGE * 0.9f) * (MELEE_RANGE * 0.9f)) {
+            continue;
+        }
         if (distance_sq < best_dist_sq) {
             best = i;
             best_dist_sq = distance_sq;
@@ -18336,6 +18342,67 @@ static float CalculateUtility_Flee(const Player *bot, int enemyIdx) {
         return 0.0f;
     }
     return bot->isExposed ? 1.0f : 0.35f;
+}
+
+static void goliath_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float speed, float dt)
+{
+    desired_dir.y = 0.0f;
+    float len = v_length(desired_dir);
+    float half = player_collision_half(bot);
+    int player_idx = (int)(bot - players);
+    if (player_idx < 0 || player_idx >= MAX_PLAYERS || &players[player_idx] != bot) {
+        player_idx = -1;
+    }
+    float probe = speed * fmaxf(dt, 1.0f / 60.0f) + 0.2f;
+    if (len < 1e-3f) {
+        bot->vel.x = 0.0f;
+        bot->vel.z = 0.0f;
+        return;
+    }
+    desired_dir = v_mul(desired_dir, 1.0f / len);
+    Vector3 ahead = bot->pos;
+    ahead.x += desired_dir.x * probe;
+    ahead.z += desired_dir.z * probe;
+    if (!player_aabb_hits_world_ex(ahead, half, player_idx)) {
+        bot->vel.x = desired_dir.x * speed;
+        bot->vel.z = desired_dir.z * speed;
+        bs->goliathStuckTime = 0.0f;
+        return;
+    }
+    if (bs->goliathStrafeSign == 0.0f) {
+        bs->goliathStrafeSign = (GetRandomValue(0, 1) == 0) ? 1.0f : -1.0f;
+    }
+    Vector3 right = { desired_dir.z, 0.0f, -desired_dir.x };
+    Vector3 first = v_mul(right, bs->goliathStrafeSign);
+    Vector3 second = v_mul(right, -bs->goliathStrafeSign);
+    Vector3 try1 = bot->pos;
+    try1.x += first.x * probe;
+    try1.z += first.z * probe;
+    if (!player_aabb_hits_world_ex(try1, half, player_idx)) {
+        bot->vel.x = first.x * speed;
+        bot->vel.z = first.z * speed;
+        bs->goliathStuckTime += dt;
+        return;
+    }
+    Vector3 try2 = bot->pos;
+    try2.x += second.x * probe;
+    try2.z += second.z * probe;
+    if (!player_aabb_hits_world_ex(try2, half, player_idx)) {
+        bs->goliathStrafeSign = -bs->goliathStrafeSign;
+        bot->vel.x = second.x * speed;
+        bot->vel.z = second.z * speed;
+        bs->goliathStuckTime += dt;
+        return;
+    }
+    bot->vel.x = 0.0f;
+    bot->vel.z = 0.0f;
+    bs->goliathStuckTime += dt;
+    if (bot->onGround && bs->goliathStuckTime > 0.2f) {
+        bot->vel.y = JUMP_SPEED;
+        bot->onGround = false;
+        bs->goliathStrafeSign = -bs->goliathStrafeSign;
+        bs->goliathStuckTime = 0.0f;
+    }
 }
 
 static void UpdateBot(int playerIdx, float dt) {
@@ -18493,19 +18560,10 @@ static void UpdateBot(int playerIdx, float dt) {
             gs->regenTimer = GOLIATH_ARMOR_REGEN_SECONDS;
         }
 
-        if (needMatter && harvestVoxelIdx >= 0) {
-            Vector3 toVoxel = v_sub(voxels[harvestVoxelIdx].pos, bot->pos);
-            toVoxel.y = 0.0f;
-            float len = v_length(toVoxel);
-            if (len > MELEE_RANGE * 0.85f && len > 1e-3f) {
-                Vector3 moveDir = v_mul(toVoxel, 1.0f / len);
-                float goliathSpeed = MOVE_SPEED * 0.85f;
-                bot->vel.x = moveDir.x * goliathSpeed;
-                bot->vel.z = moveDir.z * goliathSpeed;
-            } else {
-                bot->vel.x = 0.0f;
-                bot->vel.z = 0.0f;
-            }
+        bool mineNow = needMatter && harvestVoxelIdx >= 0 &&
+            (gs->count <= 0 || !hasEnemy || bs->goliathStuckTime > 1.2f);
+        float goliathSpeed = MOVE_SPEED * 0.85f;
+        if (mineNow) {
             Vector3 lookDir = v_sub(voxels[harvestVoxelIdx].pos, bot->pos);
             float targetYaw, targetPitch;
             dir_to_yaw_pitch(lookDir, &targetYaw, &targetPitch);
@@ -18513,6 +18571,12 @@ static void UpdateBot(int playerIdx, float dt) {
             bot->pitch += (targetPitch - bot->pitch) * 6.0f * dt;
             if (harvestDist <= MELEE_RANGE * 0.95f) {
                 perform_melee(playerIdx);
+                if (bs->goliathStuckTime > 0.4f) {
+                    Vector3 slide = { lookDir.z, 0.0f, -lookDir.x };
+                    goliath_apply_move(bot, bs, slide, goliathSpeed, dt);
+                }
+            } else {
+                goliath_apply_move(bot, bs, lookDir, goliathSpeed, dt);
             }
         } else if (hasEnemy) {
             Vector3 targetDest = isDirectlyVisible ? players[enemyIdx].pos : bs->lastKnownTargetPos;
@@ -18520,10 +18584,7 @@ static void UpdateBot(int playerIdx, float dt) {
             toEnemy.y = 0.0f;
             float len = v_length(toEnemy);
             if (len > 0.8f) {
-                Vector3 moveDir = v_mul(toEnemy, 1.0f / len);
-                float goliathSpeed = MOVE_SPEED * 0.85f;
-                bot->vel.x = moveDir.x * goliathSpeed;
-                bot->vel.z = moveDir.z * goliathSpeed;
+                goliath_apply_move(bot, bs, toEnemy, goliathSpeed, dt);
             } else {
                 bot->vel.x = 0.0f;
                 bot->vel.z = 0.0f;
@@ -18538,6 +18599,9 @@ static void UpdateBot(int playerIdx, float dt) {
                 goliath_launch_voxel(playerIdx, enemyIdx);
                 gs->launchTimer = (enemyDist < 10.0f) ? 0.55f : 0.9f;
             }
+        } else if (needMatter && harvestVoxelIdx >= 0) {
+            goliath_apply_move(bot, bs, v_sub(voxels[harvestVoxelIdx].pos, bot->pos),
+                               goliathSpeed, dt);
         } else {
             bot->vel.x *= 0.85f;
             bot->vel.z *= 0.85f;
