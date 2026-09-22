@@ -279,6 +279,12 @@ inline void scatterHierarchyWeld(uint voxelId, device ParticleState *particle,
                                  device const int *control, uint terminalMask,
                                  bool includeCoarsening) {
     VoxelState parent = voxel[voxelId];
+    for (int c = 0; c < 8; ++c) {
+        uint child = as_type<uint>(c < 4 ? parent.bounds_min[c] : parent.bounds_max[c - 4]);
+        if (voxel[child].flags.x == 0) terminalMask &= ~(1u << c);
+    }
+    if (terminalMask == 0u) return;
+    includeCoarsening = includeCoarsening && terminalMask == 0xffu;
     uint fineId[27];
     float3 finePos[27], coarsePos[8];
     for (int c = 0; c < 8; ++c) {
@@ -432,10 +438,11 @@ inline void gatherBreakMask(uint gid, device ParticleState *particle,
                             device VoxelState *voxel, device int4 *topology,
                             device const int *refcount,
                             device const int *control, constant GpuUniforms &u) {
-    if (gid >= uint(u.voxel_count)) return;
-    VoxelState v = voxel[gid];
+    if (gid >= uint(u.integer_padding_2)) return;
+    uint id = uint(u.integer_padding_1) + gid;
+    VoxelState v = voxel[id];
     if (v.flags.x == 0 || v.flags.y != 0 || v.flags.z != 0 || v.pos_rest_edge.w <= 0.0f) {
-        voxel[gid] = v;
+        voxel[id] = v;
         return;
     }
     float3 p[8];
@@ -471,7 +478,7 @@ inline void gatherBreakMask(uint gid, device ParticleState *particle,
                 ++sharedCornerCount;
         }
         if (sharedCornerCount > 1) continue;
-        int neighborId = topologyNeighbor(topology, int(gid), face);
+        int neighborId = topologyNeighbor(topology, int(id), face);
         if (neighborId < 0 || neighborId >= u.voxel_count) continue;
         VoxelState neighbor = voxel[neighborId];
         if (neighbor.flags.x == 0 || neighbor.flags.y != 0 || neighbor.flags.z != 0) continue;
@@ -494,7 +501,7 @@ inline void gatherBreakMask(uint gid, device ParticleState *particle,
         v.lifecycle.y = 1u; // wake_source = true
         v.lifecycle.z = 0u; // Clear glued faces
     }
-    voxel[gid] = v;
+    voxel[id] = v;
 }
 
 inline void splitBrokenFaces(uint gid,device ParticleState *particle,device atomic_uint *correction,device int4 *cell,device uint *simId,device uint *collisionId,device atomic_int *collisionMember,device atomic_uint *collisionControl,device VoxelState *voxel,device int *tetherOwner,device int *collisionMeta,device const int *refcount,device const int *control,device int *cloneParent,constant GpuUniforms &u){

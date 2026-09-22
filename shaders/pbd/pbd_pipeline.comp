@@ -284,6 +284,12 @@ const float WELD_R[6] = float[6](5.0/6.0, 1.0/3.0, -1.0/6.0,
 
 void scatterHierarchyWeld(uint voxelId, uint terminalMask, bool includeCoarsening) {
     VoxelState parent = voxel[voxelId];
+    for (int c = 0; c < 8; ++c) {
+        uint child = floatBitsToUint(c < 4 ? parent.bounds_min[c] : parent.bounds_max[c - 4]);
+        if (voxel[child].flags.x == 0) terminalMask &= ~(1u << c);
+    }
+    if (terminalMask == 0u) return;
+    includeCoarsening = includeCoarsening && terminalMask == 0xffu;
     uint fineId[27];
     vec3 finePos[27], coarsePos[8];
     for (int c = 0; c < 8; ++c) {
@@ -551,10 +557,11 @@ void staticCollisions(uint gid) {
 int topologyNeighbor(int voxelId, int face);
 
 void gatherBreakMask(uint gid) {
-    if (gid >= uint(uVoxelCount)) return;
-    VoxelState v = voxel[gid];
+    if (gid >= uint(uVgsCount)) return;
+    uint voxelId = uint(uVgsBegin) + gid;
+    VoxelState v = voxel[voxelId];
     if (v.flags.x == 0 || v.flags.y != 0 || v.flags.z != 0 || v.pos_rest_edge.w <= 0.0) {
-        voxel[gid] = v; return;
+        voxel[voxelId] = v; return;
     }
     vec3 p[8];
     for (int i=0; i<8; ++i) {
@@ -589,7 +596,7 @@ void gatherBreakMask(uint gid) {
                 ++sharedCornerCount;
         }
         if (sharedCornerCount > 1) continue;
-        int neighborId = topologyNeighbor(int(gid), face);
+        int neighborId = topologyNeighbor(int(voxelId), face);
         if (neighborId < 0 || neighborId >= uVoxelCount) continue;
         VoxelState neighbor = voxel[neighborId];
         if (neighbor.flags.x == 0 || neighbor.flags.y != 0 || neighbor.flags.z != 0) continue;
@@ -610,7 +617,7 @@ void gatherBreakMask(uint gid) {
         v.lifecycle.y = 1u; // wake_source = true
         v.lifecycle.z = 0u; // Clear glued faces
     }
-    voxel[gid] = v;
+    voxel[voxelId] = v;
 }
 
 void splitBrokenFaces(uint gid) {

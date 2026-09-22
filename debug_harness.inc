@@ -917,6 +917,7 @@ static bool debug_build_cube_vgs_hierarchy(const int *lattice, int side, float l
             node->rest_edge = span * leaf_edge;
             node->rest_volume = node->rest_edge * node->rest_edge * node->rest_edge;
             node->active = true;
+            node->vgs_enabled = true;
             for (int c = 0; c < 8; ++c) {
                 int cx = x * span + (corner_signs[c][0] > 0 ? span - 1 : 0);
                 int cy = y * span + (corner_signs[c][1] > 0 ? span - 1 : 0);
@@ -961,15 +962,14 @@ static bool debug_validate_cube_vgs_hierarchy(int side)
             }
         }
     }
-    // Exercise the fracture rule without changing the scenario's initial state.
+    // A broken child leaves the parent's VGS state independent.
     if (vgsHierarchy.node_count) {
         Voxel *leaf = &voxels[-vgsHierarchy.nodes[vgsHierarchy.node_count - 1].children[0] - 1];
         leaf->vgs_active = false;
-        if (!vgsHierarchy.adaptive) update_vgs_hierarchy_activity();
-        bool disabled = !vgsHierarchy.nodes[0].active;
+        bool independent = vgsHierarchy.nodes[0].active &&
+                           vgsHierarchy.nodes[0].vgs_enabled;
         leaf->vgs_active = true;
-        for (int i = 0; i < vgsHierarchy.node_count; ++i) vgsHierarchy.nodes[i].active = true;
-        if (!disabled) return false;
+        if (!independent) return false;
     }
     return true;
 }
@@ -1277,7 +1277,7 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
     }
     if (vgsHierarchy.adaptive)
         for (int i = 0; i < vgsHierarchy.node_count; ++i)
-            if (vgsHierarchy.nodes[i].active &&
+            if (vgsHierarchy.nodes[i].active && vgsHierarchy.nodes[i].vgs_enabled &&
                 !vgs_node_has_active_children(&vgsHierarchy.nodes[i])) ++sample.tagged_rendered;
     int centroid_count = cube_dynamic_only ? sample.tagged_dynamic : sample.tagged_voxels;
     if (centroid_count > 0) {
@@ -1440,7 +1440,8 @@ static void debug_render_scene(DebugRunState *state, const DebugSample *sample)
                         (1.0f - (float)level / (float)vgsHierarchy.levels), 0.8f, 0.9f);
                     for (int i = first; i < end; ++i) {
                         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
-                        if (!node->active || vgs_node_has_active_children(node)) continue;
+                        if (!node->active || !node->vgs_enabled ||
+                            vgs_node_has_active_children(node)) continue;
                         Vector3 center = {0};
                         for (int c = 0; c < 8; ++c) center = v_add(center, node->particles[c]->pos);
                         center = v_mul(center, 0.125f);
@@ -2271,9 +2272,16 @@ static bool debug_setup_adaptive_cube_drop(DebugRunState *state)
     }
     // A diagnostic seed exercises a refined GPU constraint list even when the
     // normal curvature trigger has not fired yet.
-    if (getenv("FPS_AMR_TEST_REFINE_ROOT")) {
+    if (getenv("FPS_AMR_TEST_REFINE_ROOT") || getenv("FPS_AMR_TEST_BREAK_CHILD")) {
         vgs_hierarchy_transfer_refine(&vgsHierarchy.nodes[0], true);
         if (!vgs_hierarchy_rebuild_active_masses()) return false;
+    }
+    if (getenv("FPS_AMR_TEST_BREAK_CHILD")) {
+        Particle *grid[27];
+        if (!vgs_hierarchy_grid_points(&vgsHierarchy.nodes[0], grid)) return false;
+        Particle *center = grid[13];
+        center->pos.y += 3.5f;
+        center->prev_pos = center->predicted_pos = center->pos;
     }
     debugAdaptiveOctree = true;
     debugColorVoxelsByVgsTemporalCurvature = false;
@@ -4171,6 +4179,19 @@ static void debug_validate_step(DebugRunState *state, int step)
         }
     }
     if (state->adaptive_cube_drop) {
+        if (getenv("FPS_AMR_TEST_BREAK_CHILD") && step == 1) {
+            int broken = 0;
+            for (int c = 0; c < 8; ++c)
+                if (!vgs_child_enabled(vgsHierarchy.nodes[0].children[c])) ++broken;
+            if (broken == 0 || !vgsHierarchy.nodes[0].vgs_enabled ||
+                vgs_enabled_child_mask(&vgsHierarchy.nodes[0]) == 0xffu)
+                debug_add_failure(state, "child fracture parent=%d broken=%d weldMask=0x%x",
+                                  vgsHierarchy.nodes[0].vgs_enabled, broken,
+                                  vgs_enabled_child_mask(&vgsHierarchy.nodes[0]));
+        }
+        if (getenv("FPS_AMR_TEST_BREAK_CHILD") && step > 0 &&
+            !vgs_node_has_active_children(&vgsHierarchy.nodes[0]))
+            debug_add_failure(state, "root coarsened across a broken child");
         int active_nodes = 0, terminal_nodes = 0, active_leaves = 0;
         double total_mass = 0.0;
         double terminal_volume = 0.0;
@@ -4197,13 +4218,13 @@ static void debug_validate_step(DebugRunState *state, int step)
             if (children != 0 && children != 8)
                 debug_add_failure(state, "step %d: partial adaptive octet at node %d", step, i);
             if (children == 0) {
-                ++terminal_nodes;
+                if (node->vgs_enabled) ++terminal_nodes;
                 terminal_volume += node->rest_volume;
             }
         }
         for (int i = 0; i < voxel_count; ++i)
             if (voxels[i].simulate && voxels[i].simulate_dofs) {
-                ++active_leaves;
+                if (voxels[i].vgs_active) ++active_leaves;
                 terminal_volume += voxels[i].rest_volume;
             }
         if (!vgsHierarchy.nodes[0].active || active_nodes == 0 ||
@@ -5051,25 +5072,37 @@ static bool debug_write_report(DebugRunState *state)
     fprintf(file, ",\n  \"passed\": %s,\n  \"steps\": %d,\n  \"fixedDt\": %.9g,\n",
             passed ? "true" : "false", debugRunConfig.steps, (double)PBD_MAX_STEP_DT);
     if (state->active_cube_drop) {
-        if (!vgsHierarchy.adaptive) update_vgs_hierarchy_activity();
         int active_nodes = 0;
+        int enabled_nodes = 0;
         for (int i = 0; i < vgsHierarchy.node_count; ++i)
-            if (vgsHierarchy.nodes[i].active) ++active_nodes;
+            if (vgsHierarchy.nodes[i].active) {
+                ++active_nodes;
+                if (vgsHierarchy.nodes[i].vgs_enabled) ++enabled_nodes;
+            }
         fprintf(file, "  \"pbdVoxelSize\": %.9g,\n  \"effectivePbdVoxelSize\": %.9g,\n  \"dynamicVoxels\": %d,\n  \"staticLeftovers\": %d,\n",
                 (double)DEBUG_PBD_VOXEL_SIZE, (double)state->effective_pbd_size,
                 state->expected_voxels,
                 state->expected_static_leftovers);
-        fprintf(file, "  \"vgsHierarchy\": {\"levels\": %d, \"internalNodes\": %d, \"activeInternalNodes\": %d, \"deactivationDisabled\": %s},\n",
+        fprintf(file, "  \"vgsHierarchy\": {\"levels\": %d, \"internalNodes\": %d, \"activeInternalNodes\": %d, \"enabledInternalNodes\": %d, \"deactivationDisabled\": %s},\n",
                 vgsHierarchy.levels + (vgsHierarchy.leaf_count ? 1 : 0),
-                vgsHierarchy.node_count, active_nodes,
+                vgsHierarchy.node_count, active_nodes, enabled_nodes,
                 PBD_DISABLE_VGS_DEACTIVATION ? "true" : "false");
-        if (state->adaptive_cube_drop)
-            fprintf(file, "  \"adaptiveHierarchy\": {\"thresholdPerSecondSquared\": %.9g, \"thresholdLevelFactor\": %d, \"cornerDrop\": %s, \"refinements\": %u, \"coarsenings\": %u, \"gpuConstraints\": %d, \"simulatedParticles\": %d},\n",
+        if (state->adaptive_cube_drop) {
+            int enabled_vgs = enabled_nodes, enabled_welds = 0;
+            for (int i = 0; i < voxel_count; ++i)
+                if (voxels[i].simulate && voxels[i].simulate_dofs && voxels[i].vgs_active)
+                    ++enabled_vgs;
+            for (int i = 0; i < vgsHierarchy.node_count; ++i)
+                if (vgsHierarchy.nodes[i].active &&
+                    vgs_terminal_child_mask(&vgsHierarchy.nodes[i])) ++enabled_welds;
+            fprintf(file, "  \"adaptiveHierarchy\": {\"thresholdPerSecondSquared\": %.9g, \"thresholdLevelFactor\": %d, \"cornerDrop\": %s, \"refinements\": %u, \"coarsenings\": %u, \"enabledVgsConstraints\": %d, \"enabledWeldConstraints\": %d, \"gpuConstraints\": %d, \"simulatedParticles\": %d},\n",
                     (double)VGS_ADAPTIVE_CURVATURE_THRESHOLD,
                     VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR,
                     getenv("FPS_AMR_CORNER_DROP") ? "true" : "false",
                     vgsHierarchy.refine_count, vgsHierarchy.coarsen_count,
+                    enabled_vgs, enabled_welds,
                     gpuPhysics.constraint_count, sim_particle_count);
+        }
         fprintf(file, "  \"vgsTemporalCurvature\": {\"samples\": %d, \"redAtPerSecondSquared\": %.9g, \"lastStepMax\": %.9g, \"lastStepMean\": %.9g},\n",
                 debugVgsTemporalSampleCount, (double)VGS_TEMPORAL_CURVATURE_RED_AT,
                 (double)debugVgsTemporalLastMax, (double)debugVgsTemporalLastMean);

@@ -507,7 +507,9 @@ static bool gpu_pack_world(void) {
         g->velocity_rest_volume[0] = v->vel.x; g->velocity_rest_volume[1] = v->vel.y;
         g->velocity_rest_volume[2] = v->vel.z; g->velocity_rest_volume[3] = v->rest_volume;
         // flags.x means awake dynamic with active VGS constraint.
-        g->flags[0] = (v->sleeping || !v->vgs_active) ? 0 : 1; g->flags[1] = v->isBullet ? 1 : 0;
+        g->flags[0] = (v->sleeping || !v->vgs_active ||
+                       (vgsHierarchy.adaptive && !v->simulate_dofs)) ? 0 : 1;
+        g->flags[1] = v->isBullet ? 1 : 0;
         g->flags[2] = v->type; g->flags[3] = v->simulate_dofs ? 1 : 0;
         VoxelWorldBounds bounds;
         voxel_world_bounds(v, &bounds);
@@ -528,7 +530,7 @@ static bool gpu_pack_world(void) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
         GpuVoxelState *g = &gpuPhysics.voxel_stage[gpuPhysics.dynamic_voxel_count + i];
         memset(g, 0, sizeof(*g));
-        g->flags[0] = node->active ? 1 : 0;
+        g->flags[0] = (node->active && node->vgs_enabled) ? 1 : 0;
         g->flags[3] = 1;
         g->pos_rest_edge[3] = node->rest_edge;
         g->velocity_rest_volume[3] = node->rest_volume;
@@ -555,16 +557,17 @@ static bool gpu_pack_world(void) {
             (GpuConstraintState){0u, (uint32_t)i, 0u, 0u};
     }
     for (int i = 0; i < vgsHierarchy.node_count; ++i) {
-        if (!vgsHierarchy.nodes[i].active) continue;
+        if (!vgsHierarchy.nodes[i].active || !vgsHierarchy.nodes[i].vgs_enabled) continue;
         gpuPhysics.constraint_stage[gpuPhysics.constraint_count++] =
             (GpuConstraintState){0u, (uint32_t)(gpuPhysics.dynamic_voxel_count + i), 0u, 0u};
     }
     for (int i = 0; i < vgsHierarchy.node_count; ++i) {
         if (!vgsHierarchy.nodes[i].active) continue;
-        uint32_t mask = vgsHierarchy.adaptive ? vgs_terminal_child_mask(&vgsHierarchy.nodes[i]) : 0xffu;
+        uint32_t mask = vgsHierarchy.adaptive ? vgs_terminal_child_mask(&vgsHierarchy.nodes[i]) :
+            vgs_enabled_child_mask(&vgsHierarchy.nodes[i]);
         if (!mask) continue;
         gpuPhysics.constraint_stage[gpuPhysics.constraint_count++] =
-            (GpuConstraintState){vgsHierarchy.adaptive ? 1u : 2u,
+            (GpuConstraintState){!vgsHierarchy.adaptive && mask == 0xffu ? 2u : 1u,
                                  (uint32_t)(gpuPhysics.dynamic_voxel_count + i), mask, 0u};
     }
 
@@ -992,7 +995,8 @@ static bool gpu_validate_and_commit(void) {
     }
     size_t particle_bytes = (size_t)used_particles * sizeof(GpuParticleState);
     size_t cell_bytes = (size_t)used_particles * sizeof(GpuCellState);
-    size_t voxel_bytes = (size_t)gpuPhysics.dynamic_voxel_count * sizeof(GpuVoxelState);
+    size_t voxel_bytes = (size_t)(gpuPhysics.dynamic_voxel_count +
+                                  gpuPhysics.hierarchy_node_count) * sizeof(GpuVoxelState);
     if (particle_bytes) gpu_buffer_read(&gpuPhysics.particle_buffer, gpuPhysics.particle_stage, particle_bytes, 0);
     if (cell_bytes && BREAK_DAMP_FRAMES > 0) gpu_buffer_read(&gpuPhysics.cell_buffer, gpuPhysics.cell_stage, cell_bytes, 0);
     if (voxel_bytes) gpu_buffer_read(&gpuPhysics.voxel_buffer, gpuPhysics.voxel_stage, voxel_bytes, 0);
@@ -1054,7 +1058,8 @@ static bool gpu_validate_and_commit(void) {
         int voxel_id = gpuPhysics.compact_to_voxel[i];
         if (voxel_id < 0 || voxel_id >= voxel_count) return false;
         Voxel *v = &voxels[voxel_id]; GpuVoxelState *g = &gpuPhysics.voxel_stage[i];
-        if (v->vgs_active && g->flags[0] == 0) {
+        if (v->vgs_active && g->flags[0] == 0 &&
+            (!vgsHierarchy.adaptive || v->simulate_dofs)) {
             v->vgs_active = false;
             v->wake_source = true;
             for (int corner = 0; corner < 8; ++corner) {
@@ -1105,10 +1110,19 @@ static bool gpu_validate_and_commit(void) {
             v->glued_faces[face] = glued;
         }
     }
+    bool hierarchy_broken = false;
+    for (int i = 0; i < vgsHierarchy.node_count; ++i) {
+        VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+        GpuVoxelState *g = &gpuPhysics.voxel_stage[gpuPhysics.dynamic_voxel_count + i];
+        if (node->active && node->vgs_enabled && g->flags[0] == 0) {
+            node->vgs_enabled = false;
+            hierarchy_broken = true;
+        }
+    }
     if (topology_changed) collisionTopologyDirty = true;
     gpuPhysics.compact_count = used_particles;
     gpuPhysics.uploaded_particle_count = used_particles;
-    gpuPhysics.resident_valid = true;
+    gpuPhysics.resident_valid = !topology_changed && !hierarchy_broken;
     gpuPhysics.commit_ms += (GetTime() - commit_started) * 1000.0;
     return true;
 }
@@ -1135,7 +1149,8 @@ static bool gpu_resident_matches_cpu(void) {
         if (world_id < 0 || world_id >= voxel_count || !voxels[world_id].simulate) return false;
         Voxel *v = &voxels[world_id];
         GpuVoxelState *g = &gpuPhysics.voxel_stage[i];
-        if (((v->sleeping || !v->vgs_active) ? 0 : 1) != g->flags[0] ||
+        if (((v->sleeping || !v->vgs_active ||
+              (vgsHierarchy.adaptive && !v->simulate_dofs)) ? 0 : 1) != g->flags[0] ||
             v->type != g->flags[2] || (v->isBullet ? 1 : 0) != g->flags[1] ||
             (v->simulate_dofs ? 1 : 0) != g->flags[3]) return false;
         uint32_t glue_mask = gpu_glued_face_mask(v);
@@ -1148,6 +1163,11 @@ static bool gpu_resident_matches_cpu(void) {
             int compact_id = gpuPhysics.pool_to_compact[pool_id];
             if (compact_id < 0 || g->particle[corner] != (uint32_t)compact_id) return false;
         }
+    }
+    for (int i = 0; i < vgsHierarchy.node_count; ++i) {
+        VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+        GpuVoxelState *g = &gpuPhysics.voxel_stage[gpuPhysics.dynamic_voxel_count + i];
+        if ((node->active && node->vgs_enabled ? 1 : 0) != g->flags[0]) return false;
     }
     return true;
 }
@@ -1194,13 +1214,13 @@ static bool gpu_dispatch_substep(float sub_dt) {
               gpu_dispatch_indirect_offset(GPU_MODE_HASH_BUILD, 16) &&
               gpu_dispatch_indirect_offset(GPU_MODE_PAIR_COLLISIONS, 16) &&
               gpu_dispatch_indirect(GPU_MODE_APPLY);
-    if (ok && !PBD_DISABLE_VGS_DEACTIVATION)
+    if (ok && !PBD_DISABLE_VGS_DEACTIVATION) {
+        gpu_set_vgs_layer(0, gpuPhysics.dynamic_voxel_count);
         ok = gpu_dispatch(GPU_MODE_BREAK_MASK, gpuPhysics.dynamic_voxel_count);
-    for (int level = vgsHierarchy.adaptive ? -1 : vgsHierarchy.levels - 1;
-         ok && level >= 0; --level) {
-        int count = vgsHierarchy.level_count[level];
-        gpu_set_vgs_layer(gpuPhysics.dynamic_voxel_count + vgsHierarchy.level_start[level], count);
-        ok = gpu_dispatch(GPU_MODE_HIERARCHY_MASK, count);
+        if (ok && vgsHierarchy.node_count) {
+            gpu_set_vgs_layer(gpuPhysics.dynamic_voxel_count, vgsHierarchy.node_count);
+            ok = gpu_dispatch(GPU_MODE_BREAK_MASK, vgsHierarchy.node_count);
+        }
     }
     // Leaves and hierarchy nodes share the same particle correction buffer.
     // Internal nodes scatter VGS plus trilinear/pseudoinverse weld corrections

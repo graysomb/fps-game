@@ -463,8 +463,10 @@ Available scenarios are:
   `R = (A^T A)^-1 A^T`. These are positional constraints; they do not transfer
   velocities or change the octree topology. Dormant child cells skip welding.
   Collisions still use leaf particles only.
-  VGS deactivation is temporarily disabled across the PBD solver, so solid
-  cells remain visible after impact. VGS shear strength `alpha`, stretch
+  VGS fracture is enabled by default. Each leaf and hierarchy node breaks
+  independently when its strain or shear exceeds 0.2; a broken child also
+  loses its parent weld and prevents coarsening across that child. VGS shear
+  strength `alpha`, stretch
   strength `1-beta`, and volume restoration strength are each multiplied by
   `(finest PBD cell size / constraint edge size)^2`. Their original values
   (`0.9`, `0.1`, and `1.0`) apply at the finest level.
@@ -472,8 +474,8 @@ Available scenarios are:
   their three signed VGS strains and three signed shears. Each component uses
   three consecutive fixed physics steps; the color scale is green at 0,
   yellow at 50 s^-2, and red at 100 s^-2 or higher.
-  Build with `-DPBD_DISABLE_VGS_DEACTIVATION=0` to restore fracture-driven
-  deactivation.
+  Build with `-DPBD_DISABLE_VGS_DEACTIVATION=1` to disable fracture for
+  diagnostic comparisons.
   Resolutions that round beyond the voxel or particle caps fail before activation.
   The JSON report includes both sizes, voxel count, and octree diagnostics.
 * `adaptive-cube-drop`: runs the same drop with the complete octree stored but
@@ -484,13 +486,16 @@ Available scenarios are:
   The root threshold defaults to 50 s^-2
   and quadruples at every finer level. A parent coarsens when its curvature is
   below its own threshold, the mean child curvature is below the child level's
-  threshold, and no grandchildren remain active. Refinement
+  threshold, no grandchildren remain active, and none of its children has
+  broken. Refinement
   initializes child positions and velocities with trilinear interpolation;
   coarsening fits parent positions and velocities with the precomputed left
   pseudoinverse. The GPU receives a compact, flat list of active VGS constraints
   and parent-to-terminal-child trilinear welds for each substep. Only active
-  terminal voxels render. The report records transition counts and the
-  `curvature-by-level.csv` file records per-scale curvature distributions.
+  terminal voxels with enabled VGS render. The report records transition and
+  enabled constraint counts; `curvature-by-level.csv` records per-scale curvature
+  distributions. `FPS_AMR_TEST_BREAK_CHILD=1` seeds an overstretched child to
+  check that it breaks without disabling its parent and blocks coarsening.
   With size-squared VGS strength scaling, the earlier
   [uniform-threshold sweep](docs/vgs-amr-h2-threshold/README.md) found a
   phase-change-like jump between root thresholds 34 and 33 s^-2. The

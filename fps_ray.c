@@ -560,9 +560,8 @@ static inline bool is_player_bot(int player_index) {
 #define COARSENING_MASS_SCALE 0.1f
 #define STRAIN_BREAK_THRESHOLD 0.2f
 #define SHEAR_BREAK_THRESHOLD 0.2f
-// Temporary global switch while hierarchical VGS is being evaluated.
 #ifndef PBD_DISABLE_VGS_DEACTIVATION
-#define PBD_DISABLE_VGS_DEACTIVATION 1
+#define PBD_DISABLE_VGS_DEACTIVATION 0
 #endif
 #define PBD_MAX_ACCUM_STEPS 8
 #define COLLISION_RELAXATION 0.99f
@@ -1103,7 +1102,8 @@ typedef struct {
     int parent;
     float rest_edge;
     float rest_volume;
-    bool active;
+    bool active; // Present in the current refinement tree.
+    bool vgs_enabled; // Fracture state, independent of tree activity.
 } VgsHierarchyNode;
 typedef struct {
     VgsHierarchyNode *nodes;
@@ -1122,6 +1122,18 @@ typedef struct {
     uint64_t topology_generation;
 } VgsHierarchy;
 static VgsHierarchy vgsHierarchy;
+static bool vgs_child_enabled(int child)
+{
+    return child >= 0 ? vgsHierarchy.nodes[child].vgs_enabled :
+        voxels[-child - 1].vgs_active;
+}
+static uint8_t vgs_enabled_child_mask(const VgsHierarchyNode *node)
+{
+    uint8_t mask = 0;
+    for (int c = 0; c < 8; ++c)
+        if (vgs_child_enabled(node->children[c])) mask |= (uint8_t)(1u << c);
+    return mask;
+}
 static uint8_t vgs_terminal_child_mask(const VgsHierarchyNode *node)
 {
     uint8_t mask = 0;
@@ -1142,7 +1154,7 @@ static uint8_t vgs_terminal_child_mask(const VgsHierarchyNode *node)
             if (!has_active_children) mask |= (uint8_t)(1u << c);
         }
     }
-    return mask;
+    return mask & vgs_enabled_child_mask(node);
 }
 static bool vgs_node_has_active_children(const VgsHierarchyNode *node)
 {
@@ -10477,8 +10489,29 @@ static void evaluate_voxel_fracture_range(int start, int end, int worker_id, voi
     for (int i = start; i < end; ++i) {
         int v_idx = active_voxels[i];
         Voxel *voxel = &voxels[v_idx];
+        if (vgsHierarchy.adaptive && !voxel->simulate_dofs) continue;
         if (tetherTag[v_idx] > 0) continue;
         evaluate_voxel_fracture(voxel);
+    }
+}
+
+static void evaluate_hierarchy_fracture_range(int start, int end, int worker_id, void *user) {
+    (void)worker_id;
+    (void)user;
+    for (int i = start; i < end; ++i) {
+        VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+        if (!node->active || !node->vgs_enabled || node->rest_edge <= 0.0f) continue;
+        Vector3 corners[8];
+        bool valid = true;
+        for (int c = 0; c < 8; ++c) {
+            if (!node->particles[c]) { valid = false; break; }
+            corners[c] = node->particles[c]->predicted_pos;
+        }
+        if (!valid) continue;
+        VgsDeformation deformation = measure_vgs_deformation(corners, node->rest_edge);
+        if (deformation.max_abs_strain > STRAIN_BREAK_THRESHOLD ||
+            deformation.max_abs_shear > SHEAR_BREAK_THRESHOLD)
+            node->vgs_enabled = false;
     }
 }
 
@@ -10996,8 +11029,10 @@ static bool vgs_hierarchy_adapt(void)
         }
         float child_mean = 0.0f;
         bool active_grandchildren = false;
+        bool broken_child = false;
         for (int c = 0; c < 8; ++c) {
             int child = node->children[c];
+            if (!vgs_child_enabled(child)) broken_child = true;
             child_mean += child >= 0 ? vgsHierarchy.node_history[child].curvature :
                 vgsHierarchy.leaf_history[-child - 1].curvature;
             if (child >= 0 && vgs_node_has_active_children(&vgsHierarchy.nodes[child]))
@@ -11006,7 +11041,7 @@ static bool vgs_hierarchy_adapt(void)
         child_mean *= 0.125f;
         coarsen[i] = own < threshold &&
                      child_mean < VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR * threshold &&
-                     !active_grandchildren;
+                     !active_grandchildren && !broken_child;
     }
     // A child selected from the old snapshot cannot refine under a parent
     // that is being coarsened in this same topology update.
@@ -11027,32 +11062,18 @@ static bool vgs_hierarchy_adapt(void)
     return true;
 }
 
-static void update_vgs_hierarchy_activity(void) {
-    for (int level = vgsHierarchy.levels - 1; level >= 0; --level) {
-        int begin = vgsHierarchy.level_start[level];
-        int end = begin + vgsHierarchy.level_count[level];
-        for (int i = begin; i < end; ++i) {
-            VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
-            if (!node->active) continue;
-            for (int c = 0; c < 8; ++c) {
-                int child = node->children[c];
-                bool active = child >= 0 ? vgsHierarchy.nodes[child].active :
-                    voxels[-child - 1].vgs_active;
-                if (!active) { node->active = false; break; }
-            }
-        }
-    }
-}
-
 static void gather_vgs_hierarchy_range(int start, int end, int worker_id, void *user) {
     (void)worker_id;
     int base = *(int *)user;
     for (int i = start; i < end; ++i) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[base + i];
         if (node->active) {
-            gather_shape_constraints(node->particles, node->rest_edge, node->rest_volume, true);
-            uint8_t mask = vgsHierarchy.adaptive ? vgs_terminal_child_mask(node) : 0xffu;
-            if (mask) gather_hierarchy_weld_constraints(node, mask, !vgsHierarchy.adaptive);
+            if (node->vgs_enabled)
+                gather_shape_constraints(node->particles, node->rest_edge, node->rest_volume, true);
+            uint8_t mask = vgsHierarchy.adaptive ? vgs_terminal_child_mask(node) :
+                vgs_enabled_child_mask(node);
+            if (mask) gather_hierarchy_weld_constraints(node, mask,
+                                                        !vgsHierarchy.adaptive && mask == 0xffu);
         }
     }
 }
@@ -13585,7 +13606,9 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
             double tb = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
             if (!PBD_DISABLE_VGS_DEACTIVATION)
                 pbd_parallel_for(0, active_voxel_count, evaluate_voxel_fracture_range, NULL);
-            if (vgsHierarchy.node_count && !vgsHierarchy.adaptive) update_vgs_hierarchy_activity();
+            if (!PBD_DISABLE_VGS_DEACTIVATION && vgsHierarchy.node_count)
+                pbd_parallel_for(0, vgsHierarchy.node_count,
+                                 evaluate_hierarchy_fracture_range, NULL);
             if (pbdProfileEnabled) pbdCpuProfile.t_break_masks_ms += pbd_time_now_ms() - tb;
 
             double tv = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
