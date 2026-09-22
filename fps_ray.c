@@ -755,7 +755,8 @@ typedef struct {
 static Player players[MAX_PLAYERS];
 
 #define GOLIATH_MAX_ATTACHED 18
-#define GOLIATH_ARMOR_REGEN_SECONDS 5.0f
+#define GOLIATH_ARMOR_REGEN_SECONDS 2.0f
+#define GOLIATH_MIN_ARMOR_TO_THROW 6
 #define GOLIATH_ARMOR_REGEN_COST MATTER_BUILD_COST
 typedef struct {
     uint64_t voxelIdentity;
@@ -14006,7 +14007,7 @@ static bool goliath_has_armor(int player_idx) {
 static void goliath_launch_voxel(int bot_idx, int target_idx) {
     if (bot_idx < 0 || bot_idx >= activePlayers || target_idx < 0 || target_idx >= activePlayers) return;
     GoliathState *gs = &goliathStates[bot_idx];
-    if (gs->count <= 0) return;
+    if (gs->count <= GOLIATH_MIN_ARMOR_TO_THROW) return;
 
     Vector3 to_target = v_sub(players[target_idx].pos, players[bot_idx].pos);
     int pick = gs->count - 1;
@@ -18625,7 +18626,8 @@ static void UpdateBot(int playerIdx, float dt) {
                 bot->vel.y = JUMP_SPEED;
                 bot->onGround = false;
             }
-            if (isDirectlyVisible && gs->count > 0 && enemyDist < 25.0f && gs->launchTimer <= 0.0f) {
+            if (isDirectlyVisible && gs->count > GOLIATH_MIN_ARMOR_TO_THROW &&
+                enemyDist < 25.0f && gs->launchTimer <= 0.0f) {
                 goliath_launch_voxel(playerIdx, enemyIdx);
                 gs->launchTimer = (enemyDist < 10.0f) ? 0.55f : 0.9f;
             }
