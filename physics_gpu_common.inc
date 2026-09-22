@@ -900,7 +900,8 @@ static void gpu_set_uniforms(float dt) {
     // in the upper buckets and can create self-referential chains.
     int hash_size = particle_hash_size_for_count(gpuPhysics.collision_count);
     int static_hash_size = HASH_SIZE;
-    float voxel_size = VOXEL_SIZE, floor_size = FLOOR_SIZE, gravity = GRAVITY;
+    float voxel_size = VOXEL_SIZE, floor_size = FLOOR_SIZE;
+    float gravity = debugRipTest ? 0.0f : GRAVITY;
     float damping = VELOCITY_DAMPING, sor = PBD_SOR_FACTOR, collision = COLLISION_RELAXATION;
     float alpha = VGS_ALPHA, beta = VGS_BETA, volume = VGS_VOLUME, eps = VGS_EPS;
     float strain = STRAIN_BREAK_THRESHOLD, shear = SHEAR_BREAK_THRESHOLD;

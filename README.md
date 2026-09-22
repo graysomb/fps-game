@@ -502,10 +502,24 @@ Available scenarios are:
   [level-scaled sweep](docs/vgs-amr-h2-level-threshold/README.md) records the
   earlier 2x response, including the dense range from 10 to 30 s^-2. The
   [4x active-resolution sweep](docs/vgs-amr-h2-quad-threshold/README.md)
-  records the current rule. There is no hysteresis, so
+  records the curvature rule. Current AMR also refines when VGS strain or shear
+  exceeds 75% of its fracture threshold. Set `FPS_AMR_DEFORMATION_FRACTION`
+  to change that fraction for an adaptive run (0 refines on any nonzero
+  measured deformation). It coarsens only when parent
+  curvature and mean child curvature are low and deformation is below the
+  refinement threshold for the parent and every child. There is no hysteresis, so
   cells can change level on consecutive substeps. Dormant descendants follow trilinear
   parent motion and do not provide an independent fine-scale curvature signal
   until they become active.
+* `rip-test`: activates the same 5 m cube, starts with its eight root children,
+  and translates every particle in the outer 1.25 m on each X side symmetrically,
+  including dormant particles that may become simulated after refinement. AMR
+  remains free to refine and coarsen, and gravity is disabled. Over the default
+  480 steps, prescribed whole-cube strain
+  grows linearly from 0 to 0.4, reaching the 0.2 VGS break threshold by face
+  displacement at step 240. Normal adaptive refinement and fracture remain
+  active. `rip-history.csv` records grip positions, measured VGS strain,
+  refinement, and broken constraints; the JSON report records the first break.
 * `vgs-refinement`: drops a 5 m cube with one root VGS constraint and eight
   dormant 2.5 m child cells. At fixed step 120 (2 seconds), it enables the
   eight child constraints while keeping the root constraint active. The children

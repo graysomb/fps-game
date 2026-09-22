@@ -89,6 +89,19 @@ typedef struct DebugRunState {
     float effective_pbd_size;
     bool active_cube_drop;
     bool adaptive_cube_drop;
+    bool rip_test;
+    FILE *rip_history_file;
+    char rip_history_path[DEBUG_PATH_CAPACITY];
+    FILE *rip_strain_levels_file;
+    char rip_strain_levels_path[DEBUG_PATH_CAPACITY];
+    int rip_substeps;
+    int rip_first_break_step;
+    float rip_left_x;
+    float rip_right_x;
+    float rip_grip_depth;
+    float rip_commanded_strain;
+    int rip_broken_nodes;
+    int rip_broken_leaves;
     FILE *curvature_levels_file;
     char curvature_levels_path[DEBUG_PATH_CAPACITY];
     bool refinement_demo;
@@ -298,6 +311,7 @@ static bool debug_setup_pbf_dense_neighbors(DebugRunState *state);
 static bool debug_setup_cube_stress(DebugRunState *state);
 static bool debug_setup_active_cube_drop(DebugRunState *state);
 static bool debug_setup_adaptive_cube_drop(DebugRunState *state);
+static bool debug_setup_rip_test(DebugRunState *state);
 static bool debug_setup_vgs_refinement(DebugRunState *state);
 static bool debug_setup_vgs_coarsening(DebugRunState *state);
 static bool debug_setup_voxel_strain_shear_fracture(DebugRunState *state);
@@ -330,6 +344,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "cube-stress", "Stress test with scalable dynamic cube (size set by FPS_CUBE_SIZE)", debug_setup_cube_stress, 60, 60 },
     { "active-cube-drop", "Activate a static 10x10x10 cube and drop it", debug_setup_active_cube_drop, 120, 60 },
     { "adaptive-cube-drop", "Curvature-driven octree cube drop", debug_setup_adaptive_cube_drop, 240, 60 },
+    { "rip-test", "Pull both faces of an adaptive cube to test fracture", debug_setup_rip_test, 480, 60 },
     { "vgs-refinement", "Drop a root VGS cube, then refine into eight shared-particle children", debug_setup_vgs_refinement, 300, 180 },
     { "vgs-coarsening", "Drop eight child VGS cubes, then project them onto one root", debug_setup_vgs_coarsening, 300, 180 },
     { "voxel-strain-shear-fracture", "Check VGS deactivation behavior under high strain and shear", debug_setup_voxel_strain_shear_fracture, 60, 60 },
@@ -839,6 +854,7 @@ static void debug_reset_world(void)
     debugColorVoxelsByVgsTemporalCurvature = false;
     debugRefinementCoarse = false;
     debugAdaptiveOctree = false;
+    debugRipTest = false;
     debug_reset_vgs_temporal_curvature();
     pbdSolidVoxelSize = VOXEL_SIZE;
     clear_world_voxels();
@@ -2285,6 +2301,79 @@ static bool debug_setup_adaptive_cube_drop(DebugRunState *state)
     }
     debugAdaptiveOctree = true;
     debugColorVoxelsByVgsTemporalCurvature = false;
+    return true;
+}
+
+static void debug_apply_rip_grips(DebugRunState *state)
+{
+    const float rest_edge = state->rip_right_x - state->rip_left_x;
+    const int total_substeps = debugRunConfig.steps * PBD_SUBSTEPS;
+    state->rip_commanded_strain = 2.0f * STRAIN_BREAK_THRESHOLD *
+        (float)state->rip_substeps / (float)total_substeps;
+    const float half_extension = 0.5f * rest_edge * state->rip_commanded_strain;
+    const float rest_step = 0.5f * pbdSolidVoxelSize;
+    for (int i = 0; i < particle_pool_count; ++i) {
+        Particle *particle = &particles_pool[i];
+        if (!particle->active) continue;
+        float rest_x = (float)particle->rest_cell_x * rest_step;
+        bool left = rest_x <= state->rip_left_x + state->rip_grip_depth + 1e-5f;
+        bool right = rest_x >= state->rip_right_x - state->rip_grip_depth - 1e-5f;
+        if (!left && !right) continue;
+        Vector3 target = {
+            rest_x + (left ? -half_extension : half_extension),
+            (float)particle->rest_cell_y * rest_step,
+            (float)particle->rest_cell_z * rest_step
+        };
+        particle->pos = particle->prev_pos = particle->predicted_pos = target;
+        particle->vel = (Vector3){0};
+        // Preserve base mass for AMR transfer and diagnostics. Pin only the
+        // current substep; AMR may rebuild inverse masses after it completes.
+        particle->inv_mass = 0.0f;
+    }
+    collisionTopologyDirty = true;
+}
+
+static bool debug_setup_rip_test(DebugRunState *state)
+{
+    state->adaptive_cube_drop = true;
+    state->rip_test = true;
+    state->rip_first_break_step = -1;
+    if (!debug_setup_active_cube_drop(state)) return false;
+    if (!vgs_hierarchy_initialize_adaptive()) return false;
+    vgs_hierarchy_transfer_refine(&vgsHierarchy.nodes[0], true);
+    if (!vgs_hierarchy_rebuild_active_masses()) return false;
+    debugAdaptiveOctree = true;
+    debugColorVoxelsByVgsTemporalCurvature = false;
+    debugRipTest = true;
+    state->rip_left_x = FLT_MAX;
+    state->rip_right_x = -FLT_MAX;
+    for (int c = 0; c < 8; ++c) {
+        Particle *particle = vgsHierarchy.nodes[0].particles[c];
+        if (particle->pos.x < state->rip_left_x) state->rip_left_x = particle->pos.x;
+        if (particle->pos.x > state->rip_right_x) state->rip_right_x = particle->pos.x;
+    }
+    if (state->rip_right_x - state->rip_left_x < 4.9f) return false;
+    state->rip_grip_depth = 0.25f * (state->rip_right_x - state->rip_left_x);
+    state->camera.position = (Vector3){ 0.0f, 15.0f, 24.0f };
+    state->camera.target = (Vector3){ 0.0f, 11.5f, 0.0f };
+    if (!debug_join_path(state->rip_history_path, sizeof(state->rip_history_path),
+                         state->output_dir, "rip-history.csv")) return false;
+    state->rip_history_file = fopen(state->rip_history_path, "w");
+    if (!state->rip_history_file) return false;
+    fputs("step,commandedStrain,leftTargetX,rightTargetX,leftGripParticles,rightGripParticles,"
+          "leftSimulatedGripParticles,rightSimulatedGripParticles,maxGripError,"
+          "maxActiveVgsStrain,brokenNodes,brokenLeaves,enabledVgs,enabledWelds,"
+          "refinements,coarsenings\n", state->rip_history_file);
+    if (!debug_join_path(state->rip_strain_levels_path,
+                         sizeof(state->rip_strain_levels_path),
+                         state->output_dir, "rip-parent-child-strain.csv")) return false;
+    state->rip_strain_levels_file = fopen(state->rip_strain_levels_path, "w");
+    if (!state->rip_strain_levels_file) return false;
+    fputs("step,parentLevel,relationships,parentMeanStrain,childMeanStrain,"
+          "ratioOfMeans,meanNodeRatio,intactRelationships,intactParentMeanStrain,"
+          "intactChildMeanStrain,intactRatioOfMeans\n",
+          state->rip_strain_levels_file);
+    debug_apply_rip_grips(state);
     return true;
 }
 
@@ -4008,12 +4097,17 @@ static void debug_physics_step(DebugRunState *state)
         // invalidates the resident constraint list for the next substep.
         const float sub_dt = PBD_MAX_STEP_DT / (float)PBD_SUBSTEPS;
         for (int substep = 0; substep < PBD_SUBSTEPS; ++substep) {
+            if (state->rip_test) {
+                ++state->rip_substeps;
+                debug_apply_rip_grips(state);
+            }
             simulate_voxel_pbd_steps_counted(sub_dt, 1, 1);
             vgs_hierarchy_sample_curvature(sub_dt);
             if (!vgs_hierarchy_adapt()) {
                 debug_add_failure(state, "adaptive octree transition failed");
                 break;
             }
+            if (state->rip_test) debug_apply_rip_grips(state);
         }
     } else {
         simulate_voxel_pbd(PBD_MAX_STEP_DT);
@@ -4034,6 +4128,151 @@ static void debug_physics_step(DebugRunState *state)
     rebuild_voxel_hash();
     if (!state || (!state->active_cube_drop && !state->refinement_demo && !state->coarsening_demo)) deactivate_sleeping_voxels();
     rebuild_static_hash_if_dirty();
+}
+
+static void debug_record_rip_step(DebugRunState *state, int step)
+{
+    if (!state->rip_test || !state->rip_history_file) return;
+    float half_extension = 0.5f * (state->rip_right_x - state->rip_left_x) *
+                           state->rip_commanded_strain;
+    float left_target = state->rip_left_x - half_extension;
+    float right_target = state->rip_right_x + half_extension;
+    float rest_step = 0.5f * pbdSolidVoxelSize;
+    int left_count = 0, right_count = 0;
+    int left_simulated = 0, right_simulated = 0;
+    float max_error = 0.0f;
+    for (int i = 0; i < particle_pool_count; ++i) {
+        Particle *particle = &particles_pool[i];
+        if (!particle->active) continue;
+        float rest_x = (float)particle->rest_cell_x * rest_step;
+        bool left = rest_x <= state->rip_left_x + state->rip_grip_depth + 1e-5f;
+        bool right = rest_x >= state->rip_right_x - state->rip_grip_depth - 1e-5f;
+        if (!left && !right) continue;
+        if (left) ++left_count;
+        if (right) ++right_count;
+        if (particle->base_inv_mass > 0.0f) {
+            if (left) ++left_simulated;
+            if (right) ++right_simulated;
+            Vector3 target = {
+                rest_x + (left ? -half_extension : half_extension),
+                (float)particle->rest_cell_y * rest_step,
+                (float)particle->rest_cell_z * rest_step
+            };
+            float error = v_length(v_sub(particle->pos, target));
+            if (error > max_error) max_error = error;
+        }
+    }
+    int broken_nodes = 0, broken_leaves = 0, enabled_vgs = 0, enabled_welds = 0;
+    float max_strain = 0.0f;
+    for (int i = 0; i < vgsHierarchy.node_count; ++i) {
+        VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+        if (!node->vgs_enabled) ++broken_nodes;
+        if (!node->active) continue;
+        if (node->vgs_enabled) ++enabled_vgs;
+        if (vgs_terminal_child_mask(node)) ++enabled_welds;
+        Vector3 corners[8];
+        for (int c = 0; c < 8; ++c) corners[c] = node->particles[c]->pos;
+        VgsDeformation d = measure_vgs_deformation(corners, node->rest_edge);
+        if (d.max_abs_strain > max_strain) max_strain = d.max_abs_strain;
+    }
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (!voxel->simulate || voxel->debugClusterTag != DEBUG_TEST_TAG) continue;
+        if (!voxel->vgs_active) ++broken_leaves;
+        if (!voxel->simulate_dofs) continue;
+        if (voxel->vgs_active) ++enabled_vgs;
+        Vector3 corners[8];
+        for (int c = 0; c < 8; ++c) corners[c] = voxel->particles[c]->pos;
+        VgsDeformation d = measure_vgs_deformation(corners, voxel->rest_edge);
+        if (d.max_abs_strain > max_strain) max_strain = d.max_abs_strain;
+    }
+    state->rip_broken_nodes = broken_nodes;
+    state->rip_broken_leaves = broken_leaves;
+    if (step > 0 && state->rip_first_break_step < 0 && broken_nodes + broken_leaves > 0)
+        state->rip_first_break_step = step;
+    fprintf(state->rip_history_file,
+            "%d,%.9g,%.9g,%.9g,%d,%d,%d,%d,%.9g,%.9g,%d,%d,%d,%d,%u,%u\n",
+            step, (double)state->rip_commanded_strain,
+            (double)left_target, (double)right_target, left_count, right_count,
+            left_simulated, right_simulated,
+            (double)max_error, (double)max_strain, broken_nodes, broken_leaves,
+            enabled_vgs, enabled_welds,
+            vgsHierarchy.refine_count, vgsHierarchy.coarsen_count);
+    if (left_simulated < 4 || right_simulated < 4 || !isfinite(max_error) ||
+        max_error > 1e-4f)
+        debug_add_failure(state, "rip step %d simulated grip count/error %d/%d %.6g",
+                          step, left_simulated, right_simulated, (double)max_error);
+    if (step == debugRunConfig.steps / 2 &&
+        fabsf(state->rip_commanded_strain - STRAIN_BREAK_THRESHOLD) > 1e-5f)
+        debug_add_failure(state, "rip midpoint strain %.6g differs from threshold %.6g",
+                          (double)state->rip_commanded_strain,
+                          (double)STRAIN_BREAK_THRESHOLD);
+}
+
+static float debug_vgs_max_abs_strain(Particle *const particles[8], float rest_edge)
+{
+    Vector3 corners[8];
+    for (int c = 0; c < 8; ++c) corners[c] = particles[c]->pos;
+    return measure_vgs_deformation(corners, rest_edge).max_abs_strain;
+}
+
+static void debug_record_rip_parent_child_strain(DebugRunState *state, int step)
+{
+    if (!state->rip_test || !state->rip_strain_levels_file) return;
+    for (int level = 0; level < vgsHierarchy.levels; ++level) {
+        int count = 0, ratio_count = 0, intact_count = 0;
+        double parent_sum = 0.0, child_sum = 0.0, ratio_sum = 0.0;
+        double intact_parent_sum = 0.0, intact_child_sum = 0.0;
+        int first = vgsHierarchy.level_start[level];
+        int end = first + vgsHierarchy.level_count[level];
+        for (int i = first; i < end; ++i) {
+            VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+            if (!node->active || !vgs_node_has_active_children(node)) continue;
+            float parent_strain = debug_vgs_max_abs_strain(node->particles,
+                                                            node->rest_edge);
+            float child_mean = 0.0f;
+            bool intact = node->vgs_enabled;
+            for (int c = 0; c < 8; ++c) {
+                int child = node->children[c];
+                if (child >= 0) {
+                    VgsHierarchyNode *child_node = &vgsHierarchy.nodes[child];
+                    child_mean += debug_vgs_max_abs_strain(child_node->particles,
+                                                            child_node->rest_edge);
+                    intact = intact && child_node->vgs_enabled;
+                } else {
+                    Voxel *child_voxel = &voxels[-child - 1];
+                    child_mean += debug_vgs_max_abs_strain(child_voxel->particles,
+                                                            child_voxel->rest_edge);
+                    intact = intact && child_voxel->vgs_active;
+                }
+            }
+            child_mean *= 0.125f;
+            ++count;
+            parent_sum += parent_strain;
+            child_sum += child_mean;
+            if (child_mean > 1e-8f) {
+                ratio_sum += parent_strain / child_mean;
+                ++ratio_count;
+            }
+            if (intact) {
+                ++intact_count;
+                intact_parent_sum += parent_strain;
+                intact_child_sum += child_mean;
+            }
+        }
+        if (!count) continue;
+        double parent_mean = parent_sum / count;
+        double child_mean = child_sum / count;
+        double intact_parent_mean = intact_count ? intact_parent_sum / intact_count : 0.0;
+        double intact_child_mean = intact_count ? intact_child_sum / intact_count : 0.0;
+        fprintf(state->rip_strain_levels_file,
+                "%d,%d,%d,%.9g,%.9g,%.9g,%.9g,%d,%.9g,%.9g,%.9g\n",
+                step, level, count, parent_mean, child_mean,
+                child_mean > 1e-12 ? parent_mean / child_mean : 0.0,
+                ratio_count ? ratio_sum / ratio_count : 0.0,
+                intact_count, intact_parent_mean, intact_child_mean,
+                intact_child_mean > 1e-12 ? intact_parent_mean / intact_child_mean : 0.0);
+    }
 }
 
 static uint64_t debug_tagged_static_identity_signature(int tag)
@@ -5002,7 +5241,7 @@ static void debug_finalize_validation(DebugRunState *state)
     }
     if (!state->drop_sampled) {
         debug_add_failure(state, "scenario did not reach the required 60-step drop sample");
-    } else if (!state->overhang_impact && !state->platform_lifecycle_test &&
+    } else if (!state->rip_test && !state->overhang_impact && !state->platform_lifecycle_test &&
                state->expected_static_leftovers == 0 &&
                (!isfinite(state->drop_at_step_60) || state->drop_at_step_60 < 0.5f)) {
         debug_add_failure(state, "cluster dropped only %.3f metres after 60 steps (minimum 0.500)",
@@ -5019,6 +5258,13 @@ static void debug_finalize_validation(DebugRunState *state)
                               "overhang relative tip deflection at step 30 was only %.3f metres (minimum 0.050)",
                               state->overhang_relative_deflection_at_step_30);
         }
+    }
+    if (state->rip_test) {
+        if (fabsf(state->rip_commanded_strain - 2.0f * STRAIN_BREAK_THRESHOLD) > 1e-5f)
+            debug_add_failure(state, "rip final strain %.6g is not twice break threshold",
+                              (double)state->rip_commanded_strain);
+        if (state->rip_first_break_step < 0)
+            debug_add_failure(state, "rip test did not fracture any VGS constraint");
     }
     if (strcmp(debugRunConfig.scenario, "sleep-wake-floating") == 0 ||
         (state->delayed_activation && !state->overhang_impact)) {
@@ -5089,17 +5335,31 @@ static bool debug_write_report(DebugRunState *state)
                 PBD_DISABLE_VGS_DEACTIVATION ? "true" : "false");
         if (state->adaptive_cube_drop) {
             int enabled_vgs = enabled_nodes, enabled_welds = 0;
+            int terminal_nodes = 0, terminal_leaves = 0, visible_terminal_cells = 0;
             for (int i = 0; i < voxel_count; ++i)
-                if (voxels[i].simulate && voxels[i].simulate_dofs && voxels[i].vgs_active)
-                    ++enabled_vgs;
-            for (int i = 0; i < vgsHierarchy.node_count; ++i)
-                if (vgsHierarchy.nodes[i].active &&
-                    vgs_terminal_child_mask(&vgsHierarchy.nodes[i])) ++enabled_welds;
-            fprintf(file, "  \"adaptiveHierarchy\": {\"thresholdPerSecondSquared\": %.9g, \"thresholdLevelFactor\": %d, \"cornerDrop\": %s, \"refinements\": %u, \"coarsenings\": %u, \"enabledVgsConstraints\": %d, \"enabledWeldConstraints\": %d, \"gpuConstraints\": %d, \"simulatedParticles\": %d},\n",
+                if (voxels[i].simulate && voxels[i].simulate_dofs) {
+                    ++terminal_leaves;
+                    if (voxels[i].vgs_active) {
+                        ++enabled_vgs;
+                        ++visible_terminal_cells;
+                    }
+                }
+            for (int i = 0; i < vgsHierarchy.node_count; ++i) {
+                VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+                if (!node->active) continue;
+                if (vgs_terminal_child_mask(node)) ++enabled_welds;
+                if (vgs_node_has_active_children(node)) continue;
+                ++terminal_nodes;
+                if (node->vgs_enabled) ++visible_terminal_cells;
+            }
+            fprintf(file, "  \"adaptiveHierarchy\": {\"thresholdPerSecondSquared\": %.9g, \"thresholdLevelFactor\": %d, \"deformationFraction\": %.9g, \"cornerDrop\": %s, \"refinements\": %u, \"coarsenings\": %u, \"terminalCells\": %d, \"visibleTerminalCells\": %d, \"terminalNodes\": %d, \"terminalLeaves\": %d, \"enabledVgsConstraints\": %d, \"enabledWeldConstraints\": %d, \"gpuConstraints\": %d, \"simulatedParticles\": %d},\n",
                     (double)VGS_ADAPTIVE_CURVATURE_THRESHOLD,
                     VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR,
+                    (double)vgsAdaptiveDeformationFraction,
                     getenv("FPS_AMR_CORNER_DROP") ? "true" : "false",
                     vgsHierarchy.refine_count, vgsHierarchy.coarsen_count,
+                    terminal_nodes + terminal_leaves, visible_terminal_cells,
+                    terminal_nodes, terminal_leaves,
                     enabled_vgs, enabled_welds,
                     gpuPhysics.constraint_count, sim_particle_count);
         }
@@ -5107,6 +5367,15 @@ static bool debug_write_report(DebugRunState *state)
                 debugVgsTemporalSampleCount, (double)VGS_TEMPORAL_CURVATURE_RED_AT,
                 (double)debugVgsTemporalLastMax, (double)debugVgsTemporalLastMean);
         fprintf(file, "  \"curvatureByLevelCsv\": \"%s\",\n", state->curvature_levels_path);
+        if (state->rip_test)
+            fprintf(file, "  \"ripTest\": {\"restEdge\": %.9g, \"gripDepth\": %.9g, \"breakStrain\": %.9g, \"commandedStrain\": %.9g, \"firstBreakStep\": %d, \"brokenNodes\": %d, \"brokenLeaves\": %d, \"historyCsv\": \"%s\"},\n",
+                    (double)(state->rip_right_x - state->rip_left_x),
+                    (double)state->rip_grip_depth,
+                    (double)STRAIN_BREAK_THRESHOLD,
+                    (double)state->rip_commanded_strain,
+                    state->rip_first_break_step,
+                    state->rip_broken_nodes, state->rip_broken_leaves,
+                    state->rip_history_path);
     }
     if (state->refinement_demo) {
         fprintf(file, "  \"refinement\": {\"step\": %d, \"completed\": %s, \"sharedGridPoints\": 27, \"children\": 8},\n",
@@ -5402,6 +5671,8 @@ static int run_debug_harness(void)
     if (setup_ok) {
         debug_gif_begin(&state);
         debug_validate_step(&state, 0);
+        debug_record_rip_step(&state, 0);
+        debug_record_rip_parent_child_strain(&state, 0);
         debug_gif_capture(&state, 0);
         if (debug_should_capture_step(0)) {
             if (state.delayed_activation) {
@@ -5445,6 +5716,8 @@ static int run_debug_harness(void)
                 state.benchmark_measured_steps++;
             }
             debug_validate_step(&state, step);
+            debug_record_rip_step(&state, step);
+            debug_record_rip_parent_child_strain(&state, step);
             debug_gif_capture(&state, step);
             if (debug_should_capture_step(step)) {
                 char file_name[64];
@@ -5462,6 +5735,16 @@ static int run_debug_harness(void)
     if (timing_file && fclose(timing_file) != 0)
         debug_add_failure(&state, "failed to close frame timing CSV");
     debug_gif_end(&state);
+    if (state.rip_history_file) {
+        if (fclose(state.rip_history_file) != 0)
+            debug_add_failure(&state, "failed to close rip history CSV");
+        state.rip_history_file = NULL;
+    }
+    if (state.rip_strain_levels_file) {
+        if (fclose(state.rip_strain_levels_file) != 0)
+            debug_add_failure(&state, "failed to close rip parent/child strain CSV");
+        state.rip_strain_levels_file = NULL;
+    }
     if (state.curvature_levels_file) {
         if (fclose(state.curvature_levels_file) != 0)
             debug_add_failure(&state, "failed to close curvature distribution CSV");

@@ -1838,6 +1838,7 @@ static bool debugShowBeliefColors = false;
 static bool debugColorVoxelsByVgsTemporalCurvature = false;
 static bool debugRefinementCoarse = false;
 static bool debugAdaptiveOctree = false;
+static bool debugRipTest = false;
 typedef struct {
     float latest[6];
     float previous[6];
@@ -1859,6 +1860,7 @@ static float debugVgsTemporalLastMean = 0.0f;
 #if VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR != 2 && VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR != 4
 #error VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR must be 2 or 4
 #endif
+static float vgsAdaptiveDeformationFraction = 0.75f;
 static unsigned char debugTagBreakLogged[DEBUG_CLUSTER_TAG_MAX];
 
 static const char *trace_level_label(int level) {
@@ -10548,7 +10550,7 @@ static void integrate_particles_range(int start, int end, int worker_id, void *u
 
 // Predict positions for the next step (equivalent to the GPU PredictPositions kernel).
 static void integrate_particles(float dt) {
-    const Vector3 gravity = { 0.0f, -GRAVITY*1.0f, 0.0f };
+    const Vector3 gravity = { 0.0f, debugRipTest ? 0.0f : -GRAVITY, 0.0f };
     const float dt_sq = dt * dt;
 
     IntegrateParticlesJob job = { .gravity = gravity, .dt = dt, .dt_sq = dt_sq };
@@ -10983,6 +10985,15 @@ static bool vgs_hierarchy_rebuild_active_masses(void)
 static bool vgs_hierarchy_initialize_adaptive(void)
 {
     if (!vgsHierarchy.node_count || !vgsHierarchy.leaf_history) return false;
+    vgsAdaptiveDeformationFraction = 0.75f;
+    const char *fraction_text = getenv("FPS_AMR_DEFORMATION_FRACTION");
+    if (fraction_text) {
+        char *end = NULL;
+        float fraction = strtof(fraction_text, &end);
+        if (end == fraction_text || *end != '\0' || !isfinite(fraction) ||
+            fraction < 0.0f || fraction > 1.0f) return false;
+        vgsAdaptiveDeformationFraction = fraction;
+    }
     double total_mass = 0.0;
     for (int i = 0; i < sim_particle_count; ++i)
         if (sim_particles[i]->base_inv_mass > 0.0f)
@@ -11012,6 +11023,18 @@ static float vgs_adaptive_threshold_for_edge(float rest_edge)
     return VGS_ADAPTIVE_CURVATURE_THRESHOLD * edge_ratio;
 }
 
+static bool vgs_adaptive_exceeds_refine_deformation(Particle *const particles[8],
+                                                    float rest_edge)
+{
+    Vector3 corners[8];
+    for (int c = 0; c < 8; ++c) corners[c] = particles[c]->pos;
+    VgsDeformation deformation = measure_vgs_deformation(corners, rest_edge);
+    return deformation.max_abs_strain >
+               vgsAdaptiveDeformationFraction * STRAIN_BREAK_THRESHOLD ||
+           deformation.max_abs_shear >
+               vgsAdaptiveDeformationFraction * SHEAR_BREAK_THRESHOLD;
+}
+
 static bool vgs_hierarchy_adapt(void)
 {
     if (!vgsHierarchy.adaptive) return true;
@@ -11023,23 +11046,37 @@ static bool vgs_hierarchy_adapt(void)
         if (!node->active) continue;
         float own = vgsHierarchy.node_history[i].curvature;
         float threshold = vgs_adaptive_threshold_for_edge(node->rest_edge);
+        bool own_deformed = vgs_adaptive_exceeds_refine_deformation(
+            node->particles, node->rest_edge);
         if (!vgs_node_has_active_children(node)) {
-            refine[i] = own > threshold;
+            refine[i] = own > threshold || own_deformed;
             continue;
         }
         float child_mean = 0.0f;
         bool active_grandchildren = false;
         bool broken_child = false;
+        bool deformed_child = false;
         for (int c = 0; c < 8; ++c) {
             int child = node->children[c];
             if (!vgs_child_enabled(child)) broken_child = true;
             child_mean += child >= 0 ? vgsHierarchy.node_history[child].curvature :
                 vgsHierarchy.leaf_history[-child - 1].curvature;
+            if (child >= 0) {
+                VgsHierarchyNode *child_node = &vgsHierarchy.nodes[child];
+                if (vgs_adaptive_exceeds_refine_deformation(child_node->particles,
+                                                             child_node->rest_edge))
+                    deformed_child = true;
+            } else {
+                Voxel *child_voxel = &voxels[-child - 1];
+                if (vgs_adaptive_exceeds_refine_deformation(child_voxel->particles,
+                                                             child_voxel->rest_edge))
+                    deformed_child = true;
+            }
             if (child >= 0 && vgs_node_has_active_children(&vgsHierarchy.nodes[child]))
                 active_grandchildren = true;
         }
         child_mean *= 0.125f;
-        coarsen[i] = own < threshold &&
+        coarsen[i] = !own_deformed && !deformed_child && own < threshold &&
                      child_mean < VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR * threshold &&
                      !active_grandchildren && !broken_child;
     }
