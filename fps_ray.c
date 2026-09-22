@@ -14871,11 +14871,12 @@ static void draw_melee_arm_world(int playerIdx) {
 
 static void perform_melee(int idx) {
     Player *p = &players[idx];
-    if (p->respawn_timer > 0.0f) {
+    if (p->respawn_timer > 0.0f || p->meleeSwingActive) {
         return;
     }
     float now = (float)GetTime();
-    if (now - p->last_melee_time < MELEE_COOLDOWN_SECONDS) {
+    float min_cooldown = fmaxf(MELEE_COOLDOWN_SECONDS, MELEE_ANIM_DURATION_SECONDS);
+    if (now - p->last_melee_time < min_cooldown) {
         return;
     }
     p->last_melee_time = now;
@@ -18585,8 +18586,8 @@ static void UpdateBot(int playerIdx, float dt) {
             Vector3 lookDir = v_sub(voxels[harvestVoxelIdx].pos, bot->pos);
             float targetYaw, targetPitch;
             dir_to_yaw_pitch(lookDir, &targetYaw, &targetPitch);
-            bot->yaw += (targetYaw - bot->yaw) * 6.0f * dt;
-            bot->pitch += (targetPitch - bot->pitch) * 6.0f * dt;
+            bot->yaw += angle_diff_deg(bot->yaw, targetYaw) * fminf(1.0f, 12.0f * dt);
+            bot->pitch += (targetPitch - bot->pitch) * fminf(1.0f, 12.0f * dt);
 
             bool canMine = (harvestDist <= MELEE_RANGE * 0.95f);
             if (!canMine) {
@@ -18605,10 +18606,17 @@ static void UpdateBot(int playerIdx, float dt) {
                     }
                 }
             }
-            if (canMine || bs->botStuckTime > 0.3f) {
+            if (canMine) {
                 perform_melee(playerIdx);
+                bot->vel.x = 0.0f;
+                bot->vel.z = 0.0f;
+                bs->botStuckTime = 0.0f;
+            } else {
+                if (bs->botStuckTime > 0.3f) {
+                    perform_melee(playerIdx);
+                }
+                bot_apply_move(bot, bs, lookDir, goliathSpeed, dt);
             }
-            bot_apply_move(bot, bs, lookDir, goliathSpeed, dt);
         } else if (hasEnemy) {
             Vector3 targetDest = isDirectlyVisible ? players[enemyIdx].pos : bs->lastKnownTargetPos;
             Vector3 toEnemy = v_sub(targetDest, bot->pos);
