@@ -246,6 +246,7 @@ typedef struct DebugRunState {
     int enemy_human_index;
     int swarmer_inside_wall_frames;
     float swarmer_min_z;
+    float swarmer_max_abs_x;
     float goliath_start_y;
     float goliath_max_y;
     float goliath_y_after_landing;
@@ -289,6 +290,8 @@ typedef struct DebugRunState {
     float goliath_throw_cover_launched_dot;
     bool goliath_wall_stuck_test;
     bool goliath_idle_test;
+    bool standard_look_test;
+    float standard_look_align;
     Vector3 goliath_start_pos;
     float goliath_max_xz_travel;
 } DebugRunState;
@@ -348,6 +351,7 @@ static bool debug_setup_swarmer_pack(DebugRunState *state);
 static bool debug_setup_goliath_throw_cover(DebugRunState *state);
 static bool debug_setup_goliath_wall_stuck(DebugRunState *state);
 static bool debug_setup_goliath_idle(DebugRunState *state);
+static bool debug_setup_standard_look(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall, 60, 60 },
@@ -391,7 +395,8 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "swarmer-pack", "Firefight wave 1 fills bot slots with a swarmer pack of 3", debug_setup_swarmer_pack, 8, 4 },
     { "goliath-throw-cover", "Goliath throws a rear armor plate rather than a frontal one", debug_setup_goliath_throw_cover, 90, 30 },
     { "goliath-wall-stuck", "Goliath must strafe or jump instead of freezing on a blocking wall", debug_setup_goliath_wall_stuck, 90, 60 },
-    { "goliath-idle", "Goliath with no matter must keep moving instead of standing still", debug_setup_goliath_idle, 90, 60 }
+    { "goliath-idle", "Goliath with no matter must keep moving instead of standing still", debug_setup_goliath_idle, 90, 60 },
+    { "standard-look", "Standard bot faces the direction it is walking", debug_setup_standard_look, 60, 30 }
 };
 
 static const int debugScenarioCount = (int)(sizeof(debugScenarios) / sizeof(debugScenarios[0]));
@@ -3320,6 +3325,7 @@ static bool debug_setup_swarmer_wall(DebugRunState *state)
     state->enemy_human_index = 1;
     state->swarmer_inside_wall_frames = 0;
     state->swarmer_min_z = 1000.0f;
+    state->swarmer_max_abs_x = 0.0f;
     state->activation_succeeded = true;
     state->drop_sampled = true;
     state->expected_voxels = 0;
@@ -3342,6 +3348,10 @@ static bool debug_setup_swarmer_wall(DebugRunState *state)
                             ENEMY_TYPE_STANDARD, INPUT_TYPE_KEYBOARD);
     players[0].yaw = 0.0f;
     players[1].yaw = 180.0f;
+    botStates[0].targetIndex = 1;
+    botStates[0].hasTarget = true;
+    botStates[0].lastKnownTargetPos = players[1].pos;
+    botStates[0].lostTrackTimer = 30.0f;
     state->camera.position = (Vector3){ 6.0f, 4.5f, 6.0f };
     state->camera.target = (Vector3){ 0.0f, 1.2f, 0.0f };
     if (wall_created < 20) {
@@ -3734,6 +3744,27 @@ static bool debug_setup_goliath_idle(DebugRunState *state)
     return true;
 }
 
+static bool debug_setup_standard_look(DebugRunState *state)
+{
+    debug_reset_world();
+    state->standard_look_test = true;
+    state->enemy_bot_index = 0;
+    state->activation_succeeded = true;
+    state->drop_sampled = true;
+    state->expected_voxels = 0;
+    gameMode = GAME_MODE_FIREFIGHT;
+    activePlayers = 1;
+    debug_init_enemy_player(0, (Vector3){ 0.0f, BASE_EYE_HEIGHT, 0.0f },
+                            ENEMY_TYPE_STANDARD, INPUT_TYPE_BOT_MEDIUM);
+    players[0].yaw = 90.0f;
+    botStates[0].moveTarget = (Vector3){ 0.0f, BASE_EYE_HEIGHT, -8.0f };
+    botStates[0].pathTimer = 30.0f;
+    state->standard_look_align = -1.0f;
+    state->camera.position = (Vector3){ 6.0f, 4.0f, 4.0f };
+    state->camera.target = (Vector3){ 0.0f, 1.0f, -2.0f };
+    return true;
+}
+
 static void debug_physics_step(DebugRunState *state)
 {
     float dt = PBD_MAX_STEP_DT;
@@ -3757,7 +3788,7 @@ static void debug_physics_step(DebugRunState *state)
         state->melee_unstuck_overlap_after = debug_count_player_overlapping_voxels(0);
         state->melee_unstuck_cleared = (state->melee_unstuck_overlap_after == 0);
     }
-    if (state && (state->swarmer_wall_test || state->swarmer_wander_test || state->goliath_flight_test || state->goliath_behavior_test || state->goliath_mining_test || state->goliath_throw_cover_test || state->goliath_wall_stuck_test || state->goliath_idle_test)) {
+    if (state && (state->swarmer_wall_test || state->swarmer_wander_test || state->goliath_flight_test || state->goliath_behavior_test || state->goliath_mining_test || state->goliath_throw_cover_test || state->goliath_wall_stuck_test || state->goliath_idle_test || state->standard_look_test)) {
         int bot = state->enemy_bot_index;
         int human = state->enemy_human_index;
         if (state->goliath_flight_test && state->goliath_forced_jumps < 1 &&
@@ -3767,16 +3798,7 @@ static void debug_physics_step(DebugRunState *state)
             state->goliath_forced_jumps++;
         }
         if (state->swarmer_wall_test) {
-            /* Same straight-line charge UpdateBot uses once a swarmer has a target. */
-            Vector3 to_target = v_sub(players[human].pos, players[bot].pos);
-            to_target.y = 0.0f;
-            float len = v_length(to_target);
-            if (len > 0.05f) {
-                Vector3 moveDir = v_mul(to_target, 1.0f / len);
-                float swarmerSpeed = MOVE_SPEED * 1.35f;
-                players[bot].vel.x = moveDir.x * swarmerSpeed;
-                players[bot].vel.z = moveDir.z * swarmerSpeed;
-            }
+            UpdateBot(bot, dt);
         } else if (state->swarmer_wander_test) {
             state->swarmer_wander_frame++;
             if (state->swarmer_wander_frame == 480) {
@@ -3803,6 +3825,17 @@ static void debug_physics_step(DebugRunState *state)
             } else {
                 players[bot].vel.x = 0.0f;
                 players[bot].vel.z = 0.0f;
+            }
+        } else if (state->standard_look_test) {
+            UpdateBot(bot, dt);
+            Vector3 fwd = player_forward(&players[bot]);
+            Vector3 vel = { players[bot].vel.x, 0.0f, players[bot].vel.z };
+            float speed = v_length(vel);
+            if (speed > 0.4f) {
+                vel = v_mul(vel, 1.0f / speed);
+                fwd.y = 0.0f;
+                if (v_length(fwd) > 1e-3f) fwd = v_norm(fwd);
+                state->standard_look_align = v_dot(fwd, vel);
             }
         } else if (state->goliath_wall_stuck_test || state->goliath_idle_test) {
             UpdateBot(bot, dt);
@@ -3965,6 +3998,8 @@ static void debug_validate_step(DebugRunState *state, int step)
     if (state->swarmer_wall_test) {
         Player *bot = &players[state->enemy_bot_index];
         if (bot->pos.z < state->swarmer_min_z) state->swarmer_min_z = bot->pos.z;
+        float abs_x = fabsf(bot->pos.x);
+        if (abs_x > state->swarmer_max_abs_x) state->swarmer_max_abs_x = abs_x;
         float half = player_collision_half(bot);
         if (player_aabb_hits_world(bot->pos, half)) {
             state->swarmer_inside_wall_frames++;
@@ -4553,14 +4588,35 @@ static void debug_finalize_validation(DebugRunState *state)
         }
         return;
     }
+    if (state->standard_look_test) {
+        Player *bot = &players[state->enemy_bot_index];
+        fprintf(stderr, "[StandardLook] align=%.3f yaw=%.1f vel=(%.2f,%.2f) pos=(%.2f,%.2f,%.2f)\n",
+                (double)state->standard_look_align, (double)bot->yaw,
+                (double)bot->vel.x, (double)bot->vel.z,
+                (double)bot->pos.x, (double)bot->pos.y, (double)bot->pos.z);
+        if (state->standard_look_align < 0.7f) {
+            debug_add_failure(state, "standard bot was not facing its motion (dot %.3f)",
+                              state->standard_look_align);
+        }
+        return;
+    }
     if (state->swarmer_wall_test) {
+        Player *bot = &players[state->enemy_bot_index];
+        fprintf(stderr, "[SwarmerWall] min_z=%.3f max_abs_x=%.3f inside=%d pos=(%.2f,%.2f,%.2f)\n",
+                (double)state->swarmer_min_z, (double)state->swarmer_max_abs_x,
+                state->swarmer_inside_wall_frames,
+                (double)bot->pos.x, (double)bot->pos.y, (double)bot->pos.z);
         if (state->swarmer_inside_wall_frames > 3) {
             debug_add_failure(state, "swarmer spent %d frames inside the wall",
                               state->swarmer_inside_wall_frames);
         }
-        if (state->swarmer_min_z < 0.20f) {
+        if (state->swarmer_min_z < 0.20f && state->swarmer_max_abs_x < 1.0f) {
             debug_add_failure(state, "swarmer walked through the wall to z=%.3f",
                               state->swarmer_min_z);
+        }
+        if (state->swarmer_max_abs_x < 0.8f && state->swarmer_min_z > 0.4f) {
+            debug_add_failure(state, "swarmer stayed stuck on the wall (x=%.3f z=%.3f)",
+                              bot->pos.x, bot->pos.z);
         }
         return;
     }

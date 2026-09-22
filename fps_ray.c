@@ -984,8 +984,8 @@ typedef struct {
     float swarmerWanderRemaining;
     float swarmerWanderStuckTime;
     Vector3 swarmerWanderLastPos;
-    float goliathStuckTime;
-    float goliathStrafeSign;
+    float botStuckTime;
+    float botStrafeSign;
 } BotState;
 static BotState botStates[MAX_PLAYERS];
 static bool randomSpawnEnabled = true;
@@ -18344,7 +18344,7 @@ static float CalculateUtility_Flee(const Player *bot, int enemyIdx) {
     return bot->isExposed ? 1.0f : 0.35f;
 }
 
-static void goliath_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float speed, float dt)
+static void bot_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float speed, float dt)
 {
     desired_dir.y = 0.0f;
     float len = v_length(desired_dir);
@@ -18366,42 +18366,42 @@ static void goliath_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, f
     if (!player_aabb_hits_world_ex(ahead, half, player_idx)) {
         bot->vel.x = desired_dir.x * speed;
         bot->vel.z = desired_dir.z * speed;
-        bs->goliathStuckTime = 0.0f;
+        bs->botStuckTime = 0.0f;
         return;
     }
-    if (bs->goliathStrafeSign == 0.0f) {
-        bs->goliathStrafeSign = (GetRandomValue(0, 1) == 0) ? 1.0f : -1.0f;
+    if (bs->botStrafeSign == 0.0f) {
+        bs->botStrafeSign = (GetRandomValue(0, 1) == 0) ? 1.0f : -1.0f;
     }
     Vector3 right = { desired_dir.z, 0.0f, -desired_dir.x };
-    Vector3 first = v_mul(right, bs->goliathStrafeSign);
-    Vector3 second = v_mul(right, -bs->goliathStrafeSign);
+    Vector3 first = v_mul(right, bs->botStrafeSign);
+    Vector3 second = v_mul(right, -bs->botStrafeSign);
     Vector3 try1 = bot->pos;
     try1.x += first.x * probe;
     try1.z += first.z * probe;
     if (!player_aabb_hits_world_ex(try1, half, player_idx)) {
         bot->vel.x = first.x * speed;
         bot->vel.z = first.z * speed;
-        bs->goliathStuckTime += dt;
+        bs->botStuckTime += dt;
         return;
     }
     Vector3 try2 = bot->pos;
     try2.x += second.x * probe;
     try2.z += second.z * probe;
     if (!player_aabb_hits_world_ex(try2, half, player_idx)) {
-        bs->goliathStrafeSign = -bs->goliathStrafeSign;
+        bs->botStrafeSign = -bs->botStrafeSign;
         bot->vel.x = second.x * speed;
         bot->vel.z = second.z * speed;
-        bs->goliathStuckTime += dt;
+        bs->botStuckTime += dt;
         return;
     }
     bot->vel.x = 0.0f;
     bot->vel.z = 0.0f;
-    bs->goliathStuckTime += dt;
-    if (bot->onGround && bs->goliathStuckTime > 0.2f) {
+    bs->botStuckTime += dt;
+    if (bot->onGround && bs->botStuckTime > 0.2f) {
         bot->vel.y = JUMP_SPEED;
         bot->onGround = false;
-        bs->goliathStrafeSign = -bs->goliathStrafeSign;
-        bs->goliathStuckTime = 0.0f;
+        bs->botStrafeSign = -bs->botStrafeSign;
+        bs->botStuckTime = 0.0f;
     }
 }
 
@@ -18466,19 +18466,18 @@ static void UpdateBot(int playerIdx, float dt) {
     float harvestDist = (harvestVoxelIdx >= 0) ? sqrtf(harvestDistSq) : FLT_MAX;
 
     if (bot->enemyType == ENEMY_TYPE_SWARMER) {
-        if (isDirectlyVisible) {
+        if (isDirectlyVisible || hasEnemy) {
             bs->swarmerWanderPhase = SWARMER_WANDER_NEW;
-            Vector3 targetDest = players[enemyIdx].pos;
+            Vector3 targetDest = isDirectlyVisible ? players[enemyIdx].pos : bs->lastKnownTargetPos;
             Vector3 toEnemy = v_sub(targetDest, bot->pos);
             toEnemy.y = 0.0f;
             float len = v_length(toEnemy);
             if (len > 0.05f) {
-                Vector3 moveDir = v_mul(toEnemy, 1.0f / len);
                 float swarmerSpeed = MOVE_SPEED * 1.35f;
-                bot->vel.x = moveDir.x * swarmerSpeed;
-                bot->vel.z = moveDir.z * swarmerSpeed;
-                float targetYaw = atan2f(toEnemy.x, toEnemy.z) * RAD2DEG + 180.0f;
-                bot->yaw += (targetYaw - bot->yaw) * 12.0f * dt;
+                bot_apply_move(bot, bs, toEnemy, swarmerSpeed, dt);
+                float targetYaw, targetPitch;
+                dir_to_yaw_pitch(toEnemy, &targetYaw, &targetPitch);
+                bot->yaw += angle_diff_deg(bot->yaw, targetYaw) * fminf(1.0f, 12.0f * dt);
             } else {
                 bot->vel.x = 0.0f;
                 bot->vel.z = 0.0f;
@@ -18537,8 +18536,8 @@ static void UpdateBot(int playerIdx, float dt) {
                     float heading = bs->swarmerWanderYaw * DEG2RAD;
                     float speed = fminf(MOVE_SPEED * 1.35f,
                                         bs->swarmerWanderRemaining / fmaxf(dt, 1e-4f));
-                    bot->vel.x = -sinf(heading) * speed;
-                    bot->vel.z = -cosf(heading) * speed;
+                    Vector3 wanderDir = { -sinf(heading), 0.0f, -cosf(heading) };
+                    bot_apply_move(bot, bs, wanderDir, speed, dt);
                 }
             }
         }
@@ -18561,7 +18560,7 @@ static void UpdateBot(int playerIdx, float dt) {
         }
 
         bool mineNow = needMatter && harvestVoxelIdx >= 0 &&
-            (gs->count <= 0 || !hasEnemy || bs->goliathStuckTime > 1.2f);
+            (gs->count <= 0 || !hasEnemy || bs->botStuckTime > 1.2f);
         float goliathSpeed = MOVE_SPEED * 0.85f;
         if (mineNow) {
             Vector3 lookDir = v_sub(voxels[harvestVoxelIdx].pos, bot->pos);
@@ -18571,12 +18570,12 @@ static void UpdateBot(int playerIdx, float dt) {
             bot->pitch += (targetPitch - bot->pitch) * 6.0f * dt;
             if (harvestDist <= MELEE_RANGE * 0.95f) {
                 perform_melee(playerIdx);
-                if (bs->goliathStuckTime > 0.4f) {
+                if (bs->botStuckTime > 0.4f) {
                     Vector3 slide = { lookDir.z, 0.0f, -lookDir.x };
-                    goliath_apply_move(bot, bs, slide, goliathSpeed, dt);
+                    bot_apply_move(bot, bs, slide, goliathSpeed, dt);
                 }
             } else {
-                goliath_apply_move(bot, bs, lookDir, goliathSpeed, dt);
+                bot_apply_move(bot, bs, lookDir, goliathSpeed, dt);
             }
         } else if (hasEnemy) {
             Vector3 targetDest = isDirectlyVisible ? players[enemyIdx].pos : bs->lastKnownTargetPos;
@@ -18584,7 +18583,7 @@ static void UpdateBot(int playerIdx, float dt) {
             toEnemy.y = 0.0f;
             float len = v_length(toEnemy);
             if (len > 0.8f) {
-                goliath_apply_move(bot, bs, toEnemy, goliathSpeed, dt);
+                bot_apply_move(bot, bs, toEnemy, goliathSpeed, dt);
             } else {
                 bot->vel.x = 0.0f;
                 bot->vel.z = 0.0f;
@@ -18600,7 +18599,7 @@ static void UpdateBot(int playerIdx, float dt) {
                 gs->launchTimer = (enemyDist < 10.0f) ? 0.55f : 0.9f;
             }
         } else if (needMatter && harvestVoxelIdx >= 0) {
-            goliath_apply_move(bot, bs, v_sub(voxels[harvestVoxelIdx].pos, bot->pos),
+            bot_apply_move(bot, bs, v_sub(voxels[harvestVoxelIdx].pos, bot->pos),
                                goliathSpeed, dt);
         } else {
             bot->vel.x *= 0.85f;
@@ -18753,16 +18752,24 @@ static void UpdateBot(int playerIdx, float dt) {
         bot->vel.z = 0.0f;
     }
 
-    if (intent != BOT_INTENT_WANDER || aimingAtEnemy) {
-        Vector3 lookDir = v_sub(lookTarget, bot->pos);
-        float yaw = atan2f(lookDir.x, lookDir.z) * RAD2DEG + 180.0f;
-        float dist = v_length(lookDir);
-        float pitch = asinf(lookDir.y / (dist + 0.001f)) * RAD2DEG;
-        bot->yaw += (yaw - bot->yaw) * 10.0f * dt;
-        bot->pitch += (pitch - bot->pitch) * 10.0f * dt;
+    {
+        Vector3 faceDir = { 0.0f, 0.0f, 0.0f };
         if (aimingAtEnemy) {
-            bot->yaw += (float)GetRandomValue(-100, 100) * (1.0f - accuracy) * 0.05f;
-            bot->pitch += (float)GetRandomValue(-100, 100) * (1.0f - accuracy) * 0.05f;
+            faceDir = v_sub(lookTarget, bot->pos);
+        } else if (moving && v_length(moveDir) > 0.01f) {
+            faceDir = moveDir;
+        } else {
+            faceDir = v_sub(lookTarget, bot->pos);
+        }
+        if (v_length(faceDir) > 0.01f) {
+            float yaw, pitch;
+            dir_to_yaw_pitch(faceDir, &yaw, &pitch);
+            bot->yaw += angle_diff_deg(bot->yaw, yaw) * fminf(1.0f, 10.0f * dt);
+            bot->pitch += (pitch - bot->pitch) * fminf(1.0f, 10.0f * dt);
+            if (aimingAtEnemy) {
+                bot->yaw += (float)GetRandomValue(-100, 100) * (1.0f - accuracy) * 0.05f;
+                bot->pitch += (float)GetRandomValue(-100, 100) * (1.0f - accuracy) * 0.05f;
+            }
         }
     }
 
