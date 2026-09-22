@@ -3905,7 +3905,7 @@ static bool remove_dynamic_voxels_in_region(int minx, int maxx,
     int i = 0;
     while (i < voxel_count) {
         Voxel *v = &voxels[i];
-        if (!v->simulate || voxel_is_fluid(v)) {
+        if (!v->simulate || voxel_is_fluid(v) || get_goliath_owner_of_voxel(i) >= 0) {
             ++i;
             continue;
         }
@@ -14778,13 +14778,27 @@ static bool melee_hit_voxels(Player *p, Vector3 start, Vector3 dir, float reach)
     if (harvesting) {
         float target_dist_sq = FLT_MAX;
         int target = find_goliath_harvest_voxel(p, &target_dist_sq);
-        if (target >= 0 && target_dist_sq <= reach * reach) {
+        if (target >= 0) {
             Vector3 to_target = v_sub(voxels[target].pos, p->pos);
-            ray = (Ray){ p->pos, v_norm(to_target) };
-            if (first_voxel_hit_detailed_ex(ray, reach, -1, false,
-                                            player_idx, &melee_hit) &&
-                !voxels[melee_hit.id].simulate)
+            float dist = v_length(to_target);
+            if (dist > 1e-4f) {
+                ray = (Ray){ p->pos, v_mul(to_target, 1.0f / dist) };
+                if (first_voxel_hit_detailed_ex(ray, MELEE_RANGE, -1, true,
+                                                player_idx, &melee_hit))
+                    hit_id = melee_hit.id;
+            }
+        }
+        if (hit_id < 0) {
+            if (first_voxel_hit_detailed_ex((Ray){ start, dir }, MELEE_RANGE, -1, true,
+                                            player_idx, &melee_hit)) {
                 hit_id = melee_hit.id;
+            } else {
+                Vector3 forward = player_forward(p);
+                if (first_voxel_hit_detailed_ex((Ray){ p->pos, forward }, MELEE_RANGE, -1, true,
+                                                player_idx, &melee_hit)) {
+                    hit_id = melee_hit.id;
+                }
+            }
         }
     } else if (first_voxel_hit_detailed_ex(ray, reach, -1, false,
                (p->enemyType == ENEMY_TYPE_GOLIATH) ? player_idx : -1,
@@ -18284,6 +18298,10 @@ static int find_goliath_harvest_voxel(const Player *bot, float *out_dist_sq) {
         /* Underfoot floor cells are close to the eye but outside the melee arc. */
         if (voxel->pos.y + VOXEL_SIZE * 0.5f < bot->pos.y - 0.25f)
             continue;
+        /* Cells too high to reach with melee */
+        float ground_y = bot->onGround ? bot->pos.y : BASE_EYE_HEIGHT;
+        if (voxel->pos.y - ground_y > MELEE_RANGE * 0.95f)
+            continue;
         Vector3 delta = v_sub(voxel->pos, bot->pos);
         float xz_sq = delta.x * delta.x + delta.z * delta.z;
         float distance_sq = v_dot(delta, delta);
@@ -18560,7 +18578,7 @@ static void UpdateBot(int playerIdx, float dt) {
         }
 
         bool mineNow = needMatter && harvestVoxelIdx >= 0 &&
-            (gs->count <= 0 || !hasEnemy || bs->botStuckTime > 1.2f);
+            (gs->count <= 0 || !hasEnemy || harvestDist <= MELEE_RANGE * 1.5f || bs->botStuckTime > 0.4f);
         float goliathSpeed = MOVE_SPEED * 0.85f;
         if (mineNow) {
             Vector3 lookDir = v_sub(voxels[harvestVoxelIdx].pos, bot->pos);
@@ -18568,15 +18586,28 @@ static void UpdateBot(int playerIdx, float dt) {
             dir_to_yaw_pitch(lookDir, &targetYaw, &targetPitch);
             bot->yaw += (targetYaw - bot->yaw) * 6.0f * dt;
             bot->pitch += (targetPitch - bot->pitch) * 6.0f * dt;
-            if (harvestDist <= MELEE_RANGE * 0.95f) {
-                perform_melee(playerIdx);
-                if (bs->botStuckTime > 0.4f) {
-                    Vector3 slide = { lookDir.z, 0.0f, -lookDir.x };
-                    bot_apply_move(bot, bs, slide, goliathSpeed, dt);
+
+            bool canMine = (harvestDist <= MELEE_RANGE * 0.95f);
+            if (!canMine) {
+                VoxelHit probe_hit;
+                float dir_len = v_length(lookDir);
+                if (dir_len > 1e-4f) {
+                    Vector3 dir_norm = v_mul(lookDir, 1.0f / dir_len);
+                    if (first_voxel_hit_detailed_ex((Ray){ bot->pos, dir_norm }, MELEE_RANGE * 0.95f, -1, true, playerIdx, &probe_hit)) {
+                        canMine = true;
+                    }
                 }
-            } else {
-                bot_apply_move(bot, bs, lookDir, goliathSpeed, dt);
+                if (!canMine) {
+                    Vector3 forward = player_forward(bot);
+                    if (first_voxel_hit_detailed_ex((Ray){ bot->pos, forward }, MELEE_RANGE * 0.95f, -1, true, playerIdx, &probe_hit)) {
+                        canMine = true;
+                    }
+                }
             }
+            if (canMine || bs->botStuckTime > 0.3f) {
+                perform_melee(playerIdx);
+            }
+            bot_apply_move(bot, bs, lookDir, goliathSpeed, dt);
         } else if (hasEnemy) {
             Vector3 targetDest = isDirectlyVisible ? players[enemyIdx].pos : bs->lastKnownTargetPos;
             Vector3 toEnemy = v_sub(targetDest, bot->pos);
