@@ -479,7 +479,9 @@ Available scenarios are:
 * `adaptive-cube-drop`: runs the same drop with the complete octree stored but
   only the root VGS active initially. After each PBD substep, an active terminal
   node whose six-component strain/shear time curvature exceeds its level's
-  threshold enables all eight children. The root threshold defaults to 50 s^-2
+  threshold enables all eight children. Set `FPS_AMR_CORNER_DROP=1` to rotate
+  the initial cube 45 degrees about X and Z for a corner-first landing.
+  The root threshold defaults to 50 s^-2
   and quadruples at every finer level. A parent coarsens when its curvature is
   below its own threshold, the mean child curvature is below the child level's
   threshold, and no grandchildren remain active. Refinement

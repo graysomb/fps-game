@@ -716,6 +716,59 @@ static void debug_transform_tagged_cluster_off_grid(int tag)
     rebuild_voxel_hash();
 }
 
+static bool debug_tilt_tagged_cube_for_corner_drop(int tag)
+{
+    Vector3 pivot = {0};
+    int count = 0;
+    int stamp = ++particle_sync_stamp;
+    if (stamp == 0) stamp = particle_sync_stamp = 1;
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (!voxel->simulate || voxel->debugClusterTag != tag) continue;
+        for (int c = 0; c < 8; ++c) {
+            Particle *particle = voxel->particles[c];
+            if (!particle || particle->sync_stamp == stamp) continue;
+            particle->sync_stamp = stamp;
+            pivot = v_add(pivot, particle->pos);
+            ++count;
+        }
+    }
+    if (!count) return false;
+    pivot = v_mul(pivot, 1.0f / (float)count);
+
+    const float angle = 45.0f * DEG2RAD;
+    const float cs = cosf(angle), sn = sinf(angle);
+    stamp = ++particle_sync_stamp;
+    if (stamp == 0) stamp = particle_sync_stamp = 1;
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (!voxel->simulate || voxel->debugClusterTag != tag) continue;
+        Vector3 center = {0};
+        for (int c = 0; c < 8; ++c) {
+            Particle *particle = voxel->particles[c];
+            if (particle->sync_stamp != stamp) {
+                particle->sync_stamp = stamp;
+                Vector3 local = v_sub(particle->pos, pivot);
+                // Apply 45 degrees about X, then 45 degrees about Z.
+                float y = cs * local.y - sn * local.z;
+                Vector3 rotated = {cs * local.x - sn * y,
+                                   sn * local.x + cs * y,
+                                   sn * local.y + cs * local.z};
+                particle->pos = v_add(pivot, rotated);
+                particle->prev_pos = particle->predicted_pos = particle->pos;
+                particle->vel = (Vector3){0};
+            }
+            center = v_add(center, particle->pos);
+        }
+        voxel->pos = v_mul(center, 0.125f);
+        voxel->vel = (Vector3){0};
+    }
+    rebuild_voxel_hash();
+    collisionTopologyDirty = true;
+    meshDirty = true;
+    return true;
+}
+
 static void debug_place_tagged_cluster_near_original(int tag, Vector3 offset)
 {
     for (int i = 0; i < voxel_count; ++i) {
@@ -1391,13 +1444,20 @@ static void debug_render_scene(DebugRunState *state, const DebugSample *sample)
                         Vector3 center = {0};
                         for (int c = 0; c < 8; ++c) center = v_add(center, node->particles[c]->pos);
                         center = v_mul(center, 0.125f);
-                        Vector3 size = {
-                            v_length(v_sub(node->particles[1]->pos, node->particles[0]->pos)),
-                            v_length(v_sub(node->particles[2]->pos, node->particles[0]->pos)),
-                            v_length(v_sub(node->particles[4]->pos, node->particles[0]->pos))
-                        };
-                        DrawCubeV(center, size, color);
-                        if (level < 3) DrawCubeWiresV(center, size, DARKGRAY);
+                        Vector3 x = v_sub(node->particles[1]->pos, node->particles[0]->pos);
+                        Vector3 y = v_sub(node->particles[2]->pos, node->particles[0]->pos);
+                        Vector3 z = v_sub(node->particles[4]->pos, node->particles[0]->pos);
+                        Matrix transform = MatrixIdentity();
+                        transform.m0 = x.x; transform.m1 = x.y; transform.m2 = x.z;
+                        transform.m4 = y.x; transform.m5 = y.y; transform.m6 = y.z;
+                        transform.m8 = z.x; transform.m9 = z.y; transform.m10 = z.z;
+                        transform.m12 = center.x; transform.m13 = center.y; transform.m14 = center.z;
+                        rlPushMatrix();
+                        rlMultMatrixf(MatrixToFloat(transform));
+                        DrawCubeV((Vector3){0}, (Vector3){1, 1, 1}, color);
+                        if (level < 3)
+                            DrawCubeWiresV((Vector3){0}, (Vector3){1, 1, 1}, DARKGRAY);
+                        rlPopMatrix();
                     }
                 }
             }
@@ -2200,6 +2260,11 @@ static bool debug_setup_adaptive_cube_drop(DebugRunState *state)
 {
     state->adaptive_cube_drop = true;
     if (!debug_setup_active_cube_drop(state)) return false;
+    if (getenv("FPS_AMR_CORNER_DROP") &&
+        !debug_tilt_tagged_cube_for_corner_drop(DEBUG_TEST_TAG)) {
+        debug_add_failure(state, "unable to tilt adaptive cube");
+        return false;
+    }
     if (!vgs_hierarchy_initialize_adaptive()) {
         debug_add_failure(state, "unable to initialize adaptive octree");
         return false;
@@ -4999,9 +5064,10 @@ static bool debug_write_report(DebugRunState *state)
                 vgsHierarchy.node_count, active_nodes,
                 PBD_DISABLE_VGS_DEACTIVATION ? "true" : "false");
         if (state->adaptive_cube_drop)
-            fprintf(file, "  \"adaptiveHierarchy\": {\"thresholdPerSecondSquared\": %.9g, \"thresholdLevelFactor\": %d, \"refinements\": %u, \"coarsenings\": %u, \"gpuConstraints\": %d, \"simulatedParticles\": %d},\n",
+            fprintf(file, "  \"adaptiveHierarchy\": {\"thresholdPerSecondSquared\": %.9g, \"thresholdLevelFactor\": %d, \"cornerDrop\": %s, \"refinements\": %u, \"coarsenings\": %u, \"gpuConstraints\": %d, \"simulatedParticles\": %d},\n",
                     (double)VGS_ADAPTIVE_CURVATURE_THRESHOLD,
                     VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR,
+                    getenv("FPS_AMR_CORNER_DROP") ? "true" : "false",
                     vgsHierarchy.refine_count, vgsHierarchy.coarsen_count,
                     gpuPhysics.constraint_count, sim_particle_count);
         fprintf(file, "  \"vgsTemporalCurvature\": {\"samples\": %d, \"redAtPerSecondSquared\": %.9g, \"lastStepMax\": %.9g, \"lastStepMean\": %.9g},\n",
@@ -5278,6 +5344,17 @@ static int run_debug_harness(void)
     state.camera.projection = CAMERA_PERSPECTIVE;
 
     if (!debug_prepare_output_directory(&state)) return 4;
+    FILE *timing_file = NULL;
+    if (getenv("FPS_AMR_RECORD_TIMINGS")) {
+        char timing_path[DEBUG_PATH_CAPACITY];
+        if (!debug_join_path(timing_path, sizeof(timing_path),
+                             state.output_dir, "frame-timings.csv") ||
+            !(timing_file = fopen(timing_path, "w"))) {
+            fprintf(stderr, "Unable to create frame timing CSV\n");
+            return 4;
+        }
+        fputs("step,physicsMs,debugFrameMs\n", timing_file);
+    }
     state.target = LoadRenderTexture(DEBUG_RENDER_WIDTH, DEBUG_RENDER_HEIGHT);
     if (!IsRenderTextureValid(state.target)) {
         fprintf(stderr, "Unable to create debug render target\n");
@@ -5341,10 +5418,16 @@ static int run_debug_harness(void)
                 snprintf(file_name, sizeof(file_name), "step-%04d.png", step);
                 debug_capture(&state, file_name, "simulation", step);
             }
+            if (timing_file)
+                fprintf(timing_file, "%d,%.9g,%.9g\n", step,
+                        (physics_finished - frame_started) * 1000.0,
+                        (GetTime() - frame_started) * 1000.0);
         }
         debug_finalize_validation(&state);
     }
 
+    if (timing_file && fclose(timing_file) != 0)
+        debug_add_failure(&state, "failed to close frame timing CSV");
     debug_gif_end(&state);
     if (state.curvature_levels_file) {
         if (fclose(state.curvature_levels_file) != 0)
