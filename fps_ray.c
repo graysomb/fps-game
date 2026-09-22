@@ -13699,7 +13699,20 @@ static Vector3 random_clear_spawn(float half, float min_dist, int ignore_player)
             return pos;
         }
     }
-    return (Vector3){ 0.0f, BASE_EYE_HEIGHT, 0.0f };
+    if (min_dist > 0.0f) {
+        for (int attempt = 0; attempt < 48; ++attempt) {
+            Vector3 pos = {
+                randomInRange(min_pos, max_pos),
+                BASE_EYE_HEIGHT,
+                randomInRange(min_pos, max_pos)
+            };
+            pos = nudge_spawn_clear(pos, half, 0.0f, ignore_player);
+            if (spawn_position_clear_ex(pos, half, 0.0f, ignore_player)) {
+                return pos;
+            }
+        }
+    }
+    return nudge_spawn_clear((Vector3){ 0.0f, BASE_EYE_HEIGHT, 0.0f }, half, 0.0f, ignore_player);
 }
 
 static Vector3 sanctum_spawn_world(int spawn_index) {
@@ -13711,18 +13724,32 @@ static Vector3 sanctum_spawn_world(int spawn_index) {
 
 static Vector3 pick_player_spawn(int player_index) {
     float half = spawn_clear_half(player_index);
-    float min_distance = randomSpawnEnabled ? (FLOOR_SIZE * 0.5f) : 0.0f;
+    bool is_bot = is_player_bot(player_index);
+    float desired_clearance = 0.0f;
+    if (gameMode == GAME_MODE_FIREFIGHT && is_bot) {
+        desired_clearance = 14.0f;
+    } else if (randomSpawnEnabled) {
+        desired_clearance = FLOOR_SIZE * 0.5f;
+    }
 
     if (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM && current_sanctum_plan_valid && current_sanctum_plan.spawn_point_count > 0) {
         if (gameMode == GAME_MODE_FIREFIGHT) {
-            if (!is_player_bot(player_index)) {
+            if (!is_bot) {
+                int player_spawns[MAX_SANCTUM_SPAWNS];
+                int player_count = 0;
                 for (int s = 0; s < current_sanctum_plan.spawn_point_count; ++s) {
-                    if (!current_sanctum_plan.spawn_points[s].is_player) {
-                        continue;
+                    if (current_sanctum_plan.spawn_points[s].is_player) {
+                        player_spawns[player_count++] = s;
                     }
-                    Vector3 pos = nudge_spawn_clear(sanctum_spawn_world(s), half, 0.0f, player_index);
-                    if (spawn_position_clear_ex(pos, half, 0.0f, player_index)) {
-                        return pos;
+                }
+                if (player_count > 0) {
+                    int start = (player_index >= 0 ? player_index : 0) % player_count;
+                    for (int n = 0; n < player_count; ++n) {
+                        int s_idx = player_spawns[(start + n) % player_count];
+                        Vector3 pos = nudge_spawn_clear(sanctum_spawn_world(s_idx), half, 0.0f, player_index);
+                        if (spawn_position_clear_ex(pos, half, 0.0f, player_index)) {
+                            return pos;
+                        }
                     }
                 }
             } else {
@@ -13733,79 +13760,57 @@ static Vector3 pick_player_spawn(int player_index) {
                         enemy_spawns[enemy_count++] = s;
                     }
                 }
-                for (int n = 0; n < enemy_count; ++n) {
-                    int s_idx = enemy_spawns[(player_index + n) % enemy_count];
-                    Vector3 pos = nudge_spawn_clear(sanctum_spawn_world(s_idx), half, 0.0f, player_index);
-                    if (spawn_position_clear_ex(pos, half, 0.0f, player_index)) {
-                        return pos;
+                if (enemy_count > 0) {
+                    const float clearances[] = { 14.0f, 10.0f, 6.0f, 0.0f };
+                    int start = (player_index + GetRandomValue(0, 15)) % enemy_count;
+                    for (int c = 0; c < 4; ++c) {
+                        float clearance = clearances[c];
+                        for (int n = 0; n < enemy_count; ++n) {
+                            int s_idx = enemy_spawns[(start + n) % enemy_count];
+                            Vector3 pos = nudge_spawn_clear(sanctum_spawn_world(s_idx), half, clearance, player_index);
+                            if (spawn_position_clear_ex(pos, half, clearance, player_index)) {
+                                return pos;
+                            }
+                        }
                     }
                 }
             }
         } else {
-            for (int n = 0; n < current_sanctum_plan.spawn_point_count; ++n) {
-                int s_idx = ((player_index >= 0 ? player_index : 0) + n) % current_sanctum_plan.spawn_point_count;
-                Vector3 pos = nudge_spawn_clear(sanctum_spawn_world(s_idx), half, 0.0f, player_index);
-                if (spawn_position_clear_ex(pos, half, 0.0f, player_index)) {
-                    return pos;
+            const float clearances[] = { desired_clearance, 10.0f, 5.0f, 0.0f };
+            int start = (player_index >= 0 ? player_index : 0) % current_sanctum_plan.spawn_point_count;
+            for (int c = 0; c < 4; ++c) {
+                float clearance = clearances[c];
+                for (int n = 0; n < current_sanctum_plan.spawn_point_count; ++n) {
+                    int s_idx = (start + n) % current_sanctum_plan.spawn_point_count;
+                    Vector3 pos = nudge_spawn_clear(sanctum_spawn_world(s_idx), half, clearance, player_index);
+                    if (spawn_position_clear_ex(pos, half, clearance, player_index)) {
+                        return pos;
+                    }
                 }
             }
         }
     }
 
-    Vector3 random_pos = random_clear_spawn(half, min_distance, player_index);
-    if (spawn_position_clear_ex(random_pos, half, min_distance, player_index)) {
-        return random_pos;
-    }
-    if (!randomSpawnEnabled) {
-        Vector3 fallback = nudge_spawn_clear(playerSpawnPositions[0], half, 0.0f, player_index);
-        if (spawn_position_clear_ex(fallback, half, 0.0f, player_index)) {
-            return fallback;
+    const float clearances[] = { desired_clearance, 10.0f, 5.0f, 0.0f };
+    for (int c = 0; c < 4; ++c) {
+        float clearance = clearances[c];
+        Vector3 random_pos = random_clear_spawn(half, clearance, player_index);
+        if (spawn_position_clear_ex(random_pos, half, clearance, player_index)) {
+            return random_pos;
         }
     }
+
     if (player_index >= 0 && player_index < MAX_PLAYERS) {
         Vector3 fallback = nudge_spawn_clear(playerSpawnPositions[player_index], half, 0.0f, player_index);
         if (spawn_position_clear_ex(fallback, half, 0.0f, player_index)) {
             return fallback;
         }
     }
-    return random_pos;
-}
-
-static Vector3 pick_enemy_wave_spawn(int bot_idx) {
-    float half = spawn_clear_half(bot_idx);
-    const float human_clearance = 14.0f;
-
-    if (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM && current_sanctum_plan_valid && current_sanctum_plan.spawn_point_count > 0) {
-        int enemy_spawns[MAX_SANCTUM_SPAWNS];
-        int enemy_count = 0;
-        for (int s = 0; s < current_sanctum_plan.spawn_point_count; ++s) {
-            if (!current_sanctum_plan.spawn_points[s].is_player) {
-                enemy_spawns[enemy_count++] = s;
-            }
-        }
-        if (enemy_count > 0) {
-            int start = (bot_idx + GetRandomValue(0, 15)) % enemy_count;
-            for (int n = 0; n < enemy_count; ++n) {
-                int s_idx = enemy_spawns[(start + n) % enemy_count];
-                Vector3 pos = nudge_spawn_clear(sanctum_spawn_world(s_idx), half, human_clearance, bot_idx);
-                if (spawn_position_clear_ex(pos, half, human_clearance, bot_idx)) {
-                    return pos;
-                }
-            }
-        }
+    Vector3 fb0 = nudge_spawn_clear(playerSpawnPositions[0], half, 0.0f, player_index);
+    if (spawn_position_clear_ex(fb0, half, 0.0f, player_index)) {
+        return fb0;
     }
-
-    Vector3 random_pos = random_clear_spawn(half, human_clearance, bot_idx);
-    if (spawn_position_clear_ex(random_pos, half, human_clearance, bot_idx)) {
-        return random_pos;
-    }
-    if (bot_idx >= 0 && bot_idx < MAX_PLAYERS) {
-        Vector3 fallback = nudge_spawn_clear(playerSpawnPositions[bot_idx], half, 0.0f, bot_idx);
-        if (spawn_position_clear_ex(fallback, half, 0.0f, bot_idx)) {
-            return fallback;
-        }
-    }
-    return random_pos;
+    return random_clear_spawn(half, 0.0f, player_index);
 }
 
 static bool goliath_offset_in_use(const GoliathState *gs, Vector3 offset) {
@@ -14105,7 +14110,7 @@ static void init_firefight_bot_entity(int i, EnemyType etype, InputType botDiff)
     b->enemyType = etype;
     b->contactDamageTimer = 0.0f;
     b->respawn_timer = 0.0f;
-    b->pos = pick_enemy_wave_spawn(i);
+    b->pos = pick_player_spawn(i);
     b->death_pos = b->pos;
     b->vel = (Vector3){ 0, 0, 0 };
     b->yaw = randomInRange(-180.0f, 180.0f);
@@ -14174,7 +14179,18 @@ static void spawn_firefight_enemy_group(EnemyType etype, InputType botDiff, int 
         } else {
             float side = (n % 2 == 1) ? 1.0f : -1.0f;
             float dist = 0.7f * (float)((n + 1) / 2);
-            players[slot].pos = (Vector3){ origin.x + side * dist, origin.y, origin.z };
+            float half = spawn_clear_half(slot);
+            Vector3 candidate = (Vector3){ origin.x + side * dist, origin.y, origin.z };
+            candidate = nudge_spawn_clear(candidate, half, 0.0f, slot);
+            if (spawn_position_clear_ex(candidate, half, 0.0f, slot)) {
+                players[slot].pos = candidate;
+            } else {
+                candidate = (Vector3){ origin.x, origin.y, origin.z + side * dist };
+                candidate = nudge_spawn_clear(candidate, half, 0.0f, slot);
+                if (spawn_position_clear_ex(candidate, half, 0.0f, slot)) {
+                    players[slot].pos = candidate;
+                }
+            }
             players[slot].death_pos = players[slot].pos;
         }
         firefightEnemiesSpawned++;
@@ -18026,7 +18042,7 @@ typedef enum {
 #define AI_FOV_DOT_THRESHOLD  0.50f  // cos(60 deg) -> 120 degree frontal vision cone
 #define SWARMER_HOP_INTERVAL 5.0f
 #define SWARMER_WANDER_MAX_STEP 5.0f
-#define SWARMER_WANDER_MAX_PAUSE 3.0f
+#define SWARMER_WANDER_MAX_PAUSE 0.8f
 #define SWARMER_WANDER_TURN_SPEED 270.0f
 #define SWARMER_WANDER_STUCK_SECONDS 0.5f
 
@@ -18039,13 +18055,13 @@ enum {
 
 static float swarmer_levy_step_length(void) {
     float u = clampf(randomInRange(0.0f, 1.0f), 0.0f, 0.9999f);
-    float distance = 0.8f * (powf(1.0f - u, -2.0f / 3.0f) - 1.0f);
-    return clampf(distance, 0.0f, SWARMER_WANDER_MAX_STEP);
+    float distance = 1.8f + 1.2f * (powf(1.0f - u, -2.0f / 3.0f) - 1.0f);
+    return clampf(distance, 1.5f, SWARMER_WANDER_MAX_STEP);
 }
 
 static void swarmer_begin_wander_pause(BotState *state) {
     state->swarmerWanderPhase = SWARMER_WANDER_PAUSE;
-    state->swarmerWanderTimer = randomInRange(0.0f, SWARMER_WANDER_MAX_PAUSE);
+    state->swarmerWanderTimer = randomInRange(0.2f, SWARMER_WANDER_MAX_PAUSE);
     state->swarmerWanderRemaining = 0.0f;
     state->swarmerWanderStuckTime = 0.0f;
 }
@@ -18558,6 +18574,8 @@ static void UpdateBot(int playerIdx, float dt) {
                                         bs->swarmerWanderRemaining / fmaxf(dt, 1e-4f));
                     Vector3 wanderDir = { -sinf(heading), 0.0f, -cosf(heading) };
                     bot_apply_move(bot, bs, wanderDir, speed, dt);
+                    bot->yaw = bs->swarmerWanderYaw;
+                    bot->pitch = 0.0f;
                 }
             }
         }
@@ -18643,8 +18661,20 @@ static void UpdateBot(int playerIdx, float dt) {
             bot_apply_move(bot, bs, v_sub(voxels[harvestVoxelIdx].pos, bot->pos),
                                goliathSpeed, dt);
         } else {
-            bot->vel.x *= 0.85f;
-            bot->vel.z *= 0.85f;
+            if (bs->pathTimer <= 0.0f || v_length(v_sub(bs->moveTarget, bot->pos)) < 1.0f || bs->botStuckTime > 1.0f) {
+                bs->moveTarget = (Vector3){
+                    (float)GetRandomValue((int)(-FLOOR_SIZE * 0.7f), (int)(FLOOR_SIZE * 0.7f)),
+                    bot->pos.y,
+                    (float)GetRandomValue((int)(-FLOOR_SIZE * 0.7f), (int)(FLOOR_SIZE * 0.7f))
+                };
+                bs->pathTimer = randomInRange(3.0f, 6.0f);
+            }
+            Vector3 wanderDir = v_sub(bs->moveTarget, bot->pos);
+            wanderDir.y = 0.0f;
+            bot_apply_move(bot, bs, wanderDir, goliathSpeed * 0.75f, dt);
+            float targetYaw, targetPitch;
+            dir_to_yaw_pitch(wanderDir, &targetYaw, &targetPitch);
+            bot->yaw += angle_diff_deg(bot->yaw, targetYaw) * fminf(1.0f, 5.0f * dt);
         }
         return;
     }

@@ -26,6 +26,7 @@ typedef struct DebugRunConfig {
     bool show_window;
     bool record_gif;
     bool capture_steps_explicit;
+    bool steps_explicit;
     int steps;
     int gif_fps;
     int capture_steps[DEBUG_MAX_CAPTURE_STEPS];
@@ -533,6 +534,7 @@ static int debug_parse_argument(int argc, char **argv, int *index)
     if (value != (const char *)(uintptr_t)1) {
         if (!debug_parse_integer(value, DEBUG_MIN_STEPS, 10000,
                                  &debugRunConfig.steps, "--debug-steps")) return -1;
+        debugRunConfig.steps_explicit = true;
         return 1;
     }
 
@@ -5475,6 +5477,12 @@ static int run_debug_harness(void)
             fprintf(stderr, "  %s - %s\n", debugScenarios[i].name, debugScenarios[i].description);
         }
         return 2;
+    }
+    if (!debugRunConfig.steps_explicit && scenario->default_steps > 0) {
+        debugRunConfig.steps = scenario->default_steps;
+    }
+    if (scenario->minimum_steps > 0 && debugRunConfig.steps < scenario->minimum_steps) {
+        debugRunConfig.steps = scenario->minimum_steps;
     }
     if (!debug_prepare_capture_steps()) return 2;
 
