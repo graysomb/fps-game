@@ -13601,6 +13601,17 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
         if (debugLogVoxelBlowup) {
             debugBlowupLogBudget = 32;
         }
+        // Fracture the state committed by the previous substep. In adaptive
+        // runs this occurs after the intervening AMR pass, so a newly refined
+        // child is tested before integration and constraint projection.
+        if (active_voxel_count > 0 && !PBD_DISABLE_VGS_DEACTIVATION) {
+            double tb = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
+            pbd_parallel_for(0, active_voxel_count, evaluate_voxel_fracture_range, NULL);
+            if (vgsHierarchy.node_count)
+                pbd_parallel_for(0, vgsHierarchy.node_count,
+                                 evaluate_hierarchy_fracture_range, NULL);
+            if (pbdProfileEnabled) pbdCpuProfile.t_break_masks_ms += pbd_time_now_ms() - tb;
+        }
         double t0 = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
         integrate_particles(sub_dt);
         if (pbdProfileEnabled) pbdCpuProfile.t_integrate_ms += pbd_time_now_ms() - t0;
@@ -13640,14 +13651,6 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
         }
 
         if (active_voxel_count > 0) {
-            double tb = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
-            if (!PBD_DISABLE_VGS_DEACTIVATION)
-                pbd_parallel_for(0, active_voxel_count, evaluate_voxel_fracture_range, NULL);
-            if (!PBD_DISABLE_VGS_DEACTIVATION && vgsHierarchy.node_count)
-                pbd_parallel_for(0, vgsHierarchy.node_count,
-                                 evaluate_hierarchy_fracture_range, NULL);
-            if (pbdProfileEnabled) pbdCpuProfile.t_break_masks_ms += pbd_time_now_ms() - tb;
-
             double tv = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
             reset_particle_accumulators();
             for (int it = 0; it < constraint_iterations; ++it) {

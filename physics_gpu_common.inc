@@ -1208,14 +1208,11 @@ static bool gpu_refresh_tethers(void) {
 static bool gpu_dispatch_substep(float sub_dt) {
     gpu_set_uniforms(sub_dt);
     int hash_size = particle_hash_size_for_count(gpuPhysics.collision_count);
-    bool ok = gpu_dispatch(GPU_MODE_PREPARE_INDIRECT, 1) &&
-              gpu_dispatch_indirect(GPU_MODE_INTEGRATE) &&
-              gpu_dispatch_indirect(GPU_MODE_RESET) &&
-              gpu_dispatch(GPU_MODE_HASH_CLEAR, hash_size) &&
-              gpu_dispatch_indirect_offset(GPU_MODE_HASH_BUILD, 16) &&
-              gpu_dispatch_indirect_offset(GPU_MODE_PAIR_COLLISIONS, 16) &&
-              gpu_dispatch_indirect(GPU_MODE_APPLY);
-    if (ok && !PBD_DISABLE_VGS_DEACTIVATION) {
+    bool ok = true;
+    // Test the positions committed by the preceding substep. Adaptive runs
+    // rebuild the tree between calls, so newly refined children reach this
+    // check before integration or any constraint projection can move them.
+    if (!PBD_DISABLE_VGS_DEACTIVATION) {
         gpu_set_vgs_layer(0, gpuPhysics.dynamic_voxel_count);
         ok = gpu_dispatch(GPU_MODE_BREAK_MASK, gpuPhysics.dynamic_voxel_count);
         if (ok && vgsHierarchy.node_count) {
@@ -1223,6 +1220,13 @@ static bool gpu_dispatch_substep(float sub_dt) {
             ok = gpu_dispatch(GPU_MODE_BREAK_MASK, vgsHierarchy.node_count);
         }
     }
+    ok = ok && gpu_dispatch(GPU_MODE_PREPARE_INDIRECT, 1) &&
+              gpu_dispatch_indirect(GPU_MODE_INTEGRATE) &&
+              gpu_dispatch_indirect(GPU_MODE_RESET) &&
+              gpu_dispatch(GPU_MODE_HASH_CLEAR, hash_size) &&
+              gpu_dispatch_indirect_offset(GPU_MODE_HASH_BUILD, 16) &&
+              gpu_dispatch_indirect_offset(GPU_MODE_PAIR_COLLISIONS, 16) &&
+              gpu_dispatch_indirect(GPU_MODE_APPLY);
     // Leaves and hierarchy nodes share the same particle correction buffer.
     // Internal nodes scatter VGS plus trilinear/pseudoinverse weld corrections
     // from one position snapshot; apply all scales together once per iteration.
