@@ -503,18 +503,25 @@ Available scenarios are:
   earlier 2x response, including the dense range from 10 to 30 s^-2. The
   [4x active-resolution sweep](docs/vgs-amr-h2-quad-threshold/README.md)
   records the curvature rule. Current AMR also refines when VGS strain or shear
-  exceeds 75% of its fracture threshold. Set `FPS_AMR_DEFORMATION_FRACTION`
-  to change that fraction for an adaptive run (0 refines on any nonzero
-  measured deformation). It coarsens only when parent
-  curvature and mean child curvature are low and deformation is below the
-  refinement threshold for the parent and every child. There is no hysteresis, so
+  exceeds a level-scaled fraction of its fracture threshold. The fraction rises
+  linearly by octree depth from 25% at the root to 75% at the finest cells.
+  Curvature participates after every PBD
+  substep, while current strain/shear participates only in the final AMR decision
+  of each fixed physics frame; no deformation state is cached between decisions.
+  Set `FPS_AMR_DEFORMATION_FRACTION` to override both endpoints with one uniform
+  fraction for comparison runs (0 refines on any nonzero measured deformation).
+  On that once-per-frame deformation decision, it
+  coarsens only when parent curvature and mean child curvature are low and
+  deformation is below the refinement threshold for the parent and every child.
+  There is no hysteresis, so
   cells can change level on consecutive substeps. Dormant descendants follow trilinear
   parent motion and do not provide an independent fine-scale curvature signal
   until they become active.
 * `rip-test`: activates the same 5 m cube, starts with its eight root children,
   and translates every particle in the outer 1.25 m on each X side symmetrically,
   including dormant particles that may become simulated after refinement. AMR
-  remains free to refine and coarsen, and gravity is disabled. Over the default
+  remains free to refine and coarsen. The grip prescribes only X position and
+  X velocity; Y/Z motion and particle mass remain dynamic. Gravity is disabled. Over the default
   480 steps, prescribed whole-cube strain
   grows linearly from 0 to 0.4, reaching the 0.2 VGS break threshold by face
   displacement at step 240. Normal adaptive refinement and fracture remain

@@ -2319,16 +2319,11 @@ static void debug_apply_rip_grips(DebugRunState *state)
         bool left = rest_x <= state->rip_left_x + state->rip_grip_depth + 1e-5f;
         bool right = rest_x >= state->rip_right_x - state->rip_grip_depth - 1e-5f;
         if (!left && !right) continue;
-        Vector3 target = {
-            rest_x + (left ? -half_extension : half_extension),
-            (float)particle->rest_cell_y * rest_step,
-            (float)particle->rest_cell_z * rest_step
-        };
-        particle->pos = particle->prev_pos = particle->predicted_pos = target;
-        particle->vel = (Vector3){0};
-        // Preserve base mass for AMR transfer and diagnostics. Pin only the
-        // current substep; AMR may rebuild inverse masses after it completes.
-        particle->inv_mass = 0.0f;
+        float target_x = rest_x + (left ? -half_extension : half_extension);
+        particle->pos.x = target_x;
+        particle->prev_pos.x = target_x;
+        particle->predicted_pos.x = target_x;
+        particle->vel.x = 0.0f;
     }
     collisionTopologyDirty = true;
 }
@@ -4103,7 +4098,9 @@ static void debug_physics_step(DebugRunState *state)
             }
             simulate_voxel_pbd_steps_counted(sub_dt, 1, 1);
             vgs_hierarchy_sample_curvature(sub_dt);
-            if (!vgs_hierarchy_adapt()) {
+            // Curvature adapts after every substep. Strain/shear participates
+            // only in the final AMR decision of each fixed physics frame.
+            if (!vgs_hierarchy_adapt(substep == PBD_SUBSTEPS - 1)) {
                 debug_add_failure(state, "adaptive octree transition failed");
                 break;
             }
@@ -4153,12 +4150,8 @@ static void debug_record_rip_step(DebugRunState *state, int step)
         if (particle->base_inv_mass > 0.0f) {
             if (left) ++left_simulated;
             if (right) ++right_simulated;
-            Vector3 target = {
-                rest_x + (left ? -half_extension : half_extension),
-                (float)particle->rest_cell_y * rest_step,
-                (float)particle->rest_cell_z * rest_step
-            };
-            float error = v_length(v_sub(particle->pos, target));
+            float target_x = rest_x + (left ? -half_extension : half_extension);
+            float error = fabsf(particle->pos.x - target_x);
             if (error > max_error) max_error = error;
         }
     }
@@ -5352,10 +5345,11 @@ static bool debug_write_report(DebugRunState *state)
                 ++terminal_nodes;
                 if (node->vgs_enabled) ++visible_terminal_cells;
             }
-            fprintf(file, "  \"adaptiveHierarchy\": {\"thresholdPerSecondSquared\": %.9g, \"thresholdLevelFactor\": %d, \"deformationFraction\": %.9g, \"cornerDrop\": %s, \"refinements\": %u, \"coarsenings\": %u, \"terminalCells\": %d, \"visibleTerminalCells\": %d, \"terminalNodes\": %d, \"terminalLeaves\": %d, \"enabledVgsConstraints\": %d, \"enabledWeldConstraints\": %d, \"gpuConstraints\": %d, \"simulatedParticles\": %d},\n",
+            fprintf(file, "  \"adaptiveHierarchy\": {\"thresholdPerSecondSquared\": %.9g, \"thresholdLevelFactor\": %d, \"deformationFractionCoarsest\": %.9g, \"deformationFractionFinest\": %.9g, \"cornerDrop\": %s, \"refinements\": %u, \"coarsenings\": %u, \"terminalCells\": %d, \"visibleTerminalCells\": %d, \"terminalNodes\": %d, \"terminalLeaves\": %d, \"enabledVgsConstraints\": %d, \"enabledWeldConstraints\": %d, \"gpuConstraints\": %d, \"simulatedParticles\": %d},\n",
                     (double)VGS_ADAPTIVE_CURVATURE_THRESHOLD,
                     VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR,
-                    (double)vgsAdaptiveDeformationFraction,
+                    (double)vgsAdaptiveDeformationCoarseFraction,
+                    (double)vgsAdaptiveDeformationFineFraction,
                     getenv("FPS_AMR_CORNER_DROP") ? "true" : "false",
                     vgsHierarchy.refine_count, vgsHierarchy.coarsen_count,
                     terminal_nodes + terminal_leaves, visible_terminal_cells,

@@ -1860,7 +1860,8 @@ static float debugVgsTemporalLastMean = 0.0f;
 #if VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR != 2 && VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR != 4
 #error VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR must be 2 or 4
 #endif
-static float vgsAdaptiveDeformationFraction = 0.75f;
+static float vgsAdaptiveDeformationCoarseFraction = 0.25f;
+static float vgsAdaptiveDeformationFineFraction = 0.75f;
 static unsigned char debugTagBreakLogged[DEBUG_CLUSTER_TAG_MAX];
 
 static const char *trace_level_label(int level) {
@@ -10985,14 +10986,17 @@ static bool vgs_hierarchy_rebuild_active_masses(void)
 static bool vgs_hierarchy_initialize_adaptive(void)
 {
     if (!vgsHierarchy.node_count || !vgsHierarchy.leaf_history) return false;
-    vgsAdaptiveDeformationFraction = 0.75f;
+    vgsAdaptiveDeformationCoarseFraction = 0.25f;
+    vgsAdaptiveDeformationFineFraction = 0.75f;
     const char *fraction_text = getenv("FPS_AMR_DEFORMATION_FRACTION");
     if (fraction_text) {
         char *end = NULL;
         float fraction = strtof(fraction_text, &end);
         if (end == fraction_text || *end != '\0' || !isfinite(fraction) ||
             fraction < 0.0f || fraction > 1.0f) return false;
-        vgsAdaptiveDeformationFraction = fraction;
+        // Preserve the old uniform-threshold override for comparison runs.
+        vgsAdaptiveDeformationCoarseFraction = fraction;
+        vgsAdaptiveDeformationFineFraction = fraction;
     }
     double total_mass = 0.0;
     for (int i = 0; i < sim_particle_count; ++i)
@@ -11026,16 +11030,26 @@ static float vgs_adaptive_threshold_for_edge(float rest_edge)
 static bool vgs_adaptive_exceeds_refine_deformation(Particle *const particles[8],
                                                     float rest_edge)
 {
+    float level_fraction = 0.0f;
+    if (vgsHierarchy.node_count > 0 && vgsHierarchy.levels > 0 && rest_edge > 0.0f) {
+        float edge_ratio = vgsHierarchy.nodes[0].rest_edge / rest_edge;
+        level_fraction = log2f(fmaxf(1.0f, edge_ratio)) /
+                         (float)vgsHierarchy.levels;
+        level_fraction = fminf(1.0f, fmaxf(0.0f, level_fraction));
+    }
+    float deformation_fraction = vgsAdaptiveDeformationCoarseFraction +
+        level_fraction * (vgsAdaptiveDeformationFineFraction -
+                          vgsAdaptiveDeformationCoarseFraction);
     Vector3 corners[8];
     for (int c = 0; c < 8; ++c) corners[c] = particles[c]->pos;
     VgsDeformation deformation = measure_vgs_deformation(corners, rest_edge);
     return deformation.max_abs_strain >
-               vgsAdaptiveDeformationFraction * STRAIN_BREAK_THRESHOLD ||
+               deformation_fraction * STRAIN_BREAK_THRESHOLD ||
            deformation.max_abs_shear >
-               vgsAdaptiveDeformationFraction * SHEAR_BREAK_THRESHOLD;
+               deformation_fraction * SHEAR_BREAK_THRESHOLD;
 }
 
-static bool vgs_hierarchy_adapt(void)
+static bool vgs_hierarchy_adapt(bool use_deformation)
 {
     if (!vgsHierarchy.adaptive) return true;
     uint8_t *refine = calloc((size_t)vgsHierarchy.node_count, 1);
@@ -11046,8 +11060,9 @@ static bool vgs_hierarchy_adapt(void)
         if (!node->active) continue;
         float own = vgsHierarchy.node_history[i].curvature;
         float threshold = vgs_adaptive_threshold_for_edge(node->rest_edge);
-        bool own_deformed = vgs_adaptive_exceeds_refine_deformation(
-            node->particles, node->rest_edge);
+        bool own_deformed = use_deformation &&
+            vgs_adaptive_exceeds_refine_deformation(node->particles,
+                                                     node->rest_edge);
         if (!vgs_node_has_active_children(node)) {
             refine[i] = own > threshold || own_deformed;
             continue;
@@ -11061,12 +11076,12 @@ static bool vgs_hierarchy_adapt(void)
             if (!vgs_child_enabled(child)) broken_child = true;
             child_mean += child >= 0 ? vgsHierarchy.node_history[child].curvature :
                 vgsHierarchy.leaf_history[-child - 1].curvature;
-            if (child >= 0) {
+            if (use_deformation && child >= 0) {
                 VgsHierarchyNode *child_node = &vgsHierarchy.nodes[child];
                 if (vgs_adaptive_exceeds_refine_deformation(child_node->particles,
                                                              child_node->rest_edge))
                     deformed_child = true;
-            } else {
+            } else if (use_deformation) {
                 Voxel *child_voxel = &voxels[-child - 1];
                 if (vgs_adaptive_exceeds_refine_deformation(child_voxel->particles,
                                                              child_voxel->rest_edge))
