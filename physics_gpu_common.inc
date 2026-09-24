@@ -31,6 +31,8 @@ typedef struct {
     uint32_t reserved;
 } GpuConstraintState;
 
+#define GPU_VGS_INTACT_BIT 0x80000000u
+
 _Static_assert(sizeof(GpuParticleState) == 64, "GpuParticleState/std430 mismatch");
 _Static_assert(sizeof(GpuCorrectionState) == 16, "GpuCorrectionState/std430 mismatch");
 _Static_assert(sizeof(GpuCellState) == 16, "GpuCellState/std430 mismatch");
@@ -522,7 +524,8 @@ static bool gpu_pack_world(void) {
         g->lifecycle[2] = gpu_glued_face_mask(v) | (v->glueEligible ? 0x80000000u : 0u);
         g->lifecycle[3] = ((uint32_t)v->orig_min_gx & 1u) |
                          (((uint32_t)v->orig_min_gy & 1u) << 1) |
-                         (((uint32_t)v->orig_min_gz & 1u) << 2);
+                         (((uint32_t)v->orig_min_gz & 1u) << 2) |
+                         (v->vgs_active ? GPU_VGS_INTACT_BIT : 0u);
     }
 
     gpuPhysics.hierarchy_node_count = vgsHierarchy.node_count;
@@ -532,6 +535,7 @@ static bool gpu_pack_world(void) {
         memset(g, 0, sizeof(*g));
         g->flags[0] = (node->active && node->vgs_enabled) ? 1 : 0;
         g->flags[3] = 1;
+        g->lifecycle[3] = node->vgs_enabled ? GPU_VGS_INTACT_BIT : 0u;
         g->pos_rest_edge[3] = node->rest_edge;
         g->velocity_rest_volume[3] = node->rest_volume;
         for (int c = 0; c < 8; ++c) {
@@ -1056,8 +1060,7 @@ static bool gpu_validate_and_commit(void) {
         int voxel_id = gpuPhysics.compact_to_voxel[i];
         if (voxel_id < 0 || voxel_id >= voxel_count) return false;
         Voxel *v = &voxels[voxel_id]; GpuVoxelState *g = &gpuPhysics.voxel_stage[i];
-        if (v->vgs_active && g->flags[0] == 0 &&
-            (!vgsHierarchy.adaptive || v->simulate_dofs)) {
+        if (v->vgs_active && (g->lifecycle[3] & GPU_VGS_INTACT_BIT) == 0u) {
             v->vgs_active = false;
             v->wake_source = true;
             for (int corner = 0; corner < 8; ++corner) {
@@ -1112,7 +1115,7 @@ static bool gpu_validate_and_commit(void) {
     for (int i = 0; i < vgsHierarchy.node_count; ++i) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
         GpuVoxelState *g = &gpuPhysics.voxel_stage[gpuPhysics.dynamic_voxel_count + i];
-        if (node->active && node->vgs_enabled && g->flags[0] == 0) {
+        if (node->vgs_enabled && (g->lifecycle[3] & GPU_VGS_INTACT_BIT) == 0u) {
             node->vgs_enabled = false;
             hierarchy_broken = true;
         }
@@ -1153,6 +1156,7 @@ static bool gpu_resident_matches_cpu(void) {
             (v->simulate_dofs ? 1 : 0) != g->flags[3]) return false;
         uint32_t glue_mask = gpu_glued_face_mask(v);
         if ((g->lifecycle[2] & 0x3fu) != glue_mask) return false;
+        if (((g->lifecycle[3] & GPU_VGS_INTACT_BIT) != 0u) != v->vgs_active) return false;
         for (int corner = 0; corner < 8; ++corner) {
             Particle *p = v->particles[corner];
             if (!p) return false;
@@ -1165,7 +1169,8 @@ static bool gpu_resident_matches_cpu(void) {
     for (int i = 0; i < vgsHierarchy.node_count; ++i) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
         GpuVoxelState *g = &gpuPhysics.voxel_stage[gpuPhysics.dynamic_voxel_count + i];
-        if ((node->active && node->vgs_enabled ? 1 : 0) != g->flags[0]) return false;
+        if ((node->active && node->vgs_enabled ? 1 : 0) != g->flags[0] ||
+            (((g->lifecycle[3] & GPU_VGS_INTACT_BIT) != 0u) != node->vgs_enabled)) return false;
     }
     return true;
 }
@@ -1215,6 +1220,12 @@ static bool gpu_dispatch_substep(float sub_dt) {
         if (ok && vgsHierarchy.node_count) {
             gpu_set_vgs_layer(gpuPhysics.dynamic_voxel_count, vgsHierarchy.node_count);
             ok = gpu_dispatch(GPU_MODE_BREAK_MASK, vgsHierarchy.node_count);
+        }
+        for (int level = vgsHierarchy.levels - 1; ok && level >= 0; --level) {
+            int first = gpuPhysics.dynamic_voxel_count + vgsHierarchy.level_start[level];
+            int count = vgsHierarchy.level_count[level];
+            gpu_set_vgs_layer(first, count);
+            ok = gpu_dispatch(GPU_MODE_HIERARCHY_MASK, count);
         }
     }
     ok = ok && gpu_dispatch(GPU_MODE_PREPARE_INDIRECT, 1) &&

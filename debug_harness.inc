@@ -1834,9 +1834,10 @@ static void debug_validate_tagged_dynamic(DebugRunState *state, const DebugSampl
                           context, sample->tagged_dynamic, state->expected_voxels,
                           sample->tagged_static, state->expected_static_leftovers);
     }
-    if (sample->tagged_sleeping != 0) {
-        debug_add_failure(state, "%s: %d tagged voxels remain sleeping", context,
-                          sample->tagged_sleeping);
+    int expected_sleeping = getenv("FPS_AMR_TEST_PROPAGATE_FRACTURE") ? 1 : 0;
+    if (sample->tagged_sleeping != expected_sleeping) {
+        debug_add_failure(state, "%s: tagged sleeping=%d/%d", context,
+                          sample->tagged_sleeping, expected_sleeping);
     }
     if (sample->invalid_particle_refs > 0) {
         debug_add_failure(state, "%s: %d invalid particle or sim-index references",
@@ -2273,6 +2274,32 @@ static bool debug_setup_active_cube_drop(DebugRunState *state)
     return true;
 }
 
+static int debug_refine_hierarchy_branch_to_leaf(int node_id, int child_corner)
+{
+    while (node_id >= 0) {
+        VgsHierarchyNode *node = &vgsHierarchy.nodes[node_id];
+        vgs_hierarchy_transfer_refine(node, true);
+        int child = node->children[child_corner];
+        if (child < 0) return -child - 1;
+        node_id = child;
+    }
+    return -1;
+}
+
+static bool debug_seed_upward_fracture_propagation(void)
+{
+    if (vgsHierarchy.levels < 2) return false;
+    int broken_branch = vgsHierarchy.nodes[0].children[0];
+    int sleeping_branch = vgsHierarchy.nodes[0].children[7];
+    if (broken_branch < 0 || sleeping_branch < 0) return false;
+    int broken_leaf = debug_refine_hierarchy_branch_to_leaf(broken_branch, 0);
+    int sleeping_leaf = debug_refine_hierarchy_branch_to_leaf(sleeping_branch, 7);
+    if (broken_leaf < 0 || sleeping_leaf < 0) return false;
+    voxels[broken_leaf].vgs_active = false;
+    voxels[sleeping_leaf].sleeping = true;
+    return vgs_hierarchy_rebuild_active_masses();
+}
+
 static bool debug_setup_adaptive_cube_drop(DebugRunState *state)
 {
     state->adaptive_cube_drop = true;
@@ -2289,7 +2316,8 @@ static bool debug_setup_adaptive_cube_drop(DebugRunState *state)
     // A diagnostic seed exercises a refined GPU constraint list even when the
     // normal curvature trigger has not fired yet.
     if (getenv("FPS_AMR_TEST_REFINE_ROOT") || getenv("FPS_AMR_TEST_BREAK_CHILD") ||
-        getenv("FPS_AMR_TEST_BREAK_PARENT")) {
+        getenv("FPS_AMR_TEST_BREAK_PARENT") ||
+        getenv("FPS_AMR_TEST_PROPAGATE_FRACTURE")) {
         vgs_hierarchy_transfer_refine(&vgsHierarchy.nodes[0], true);
         if (!vgs_hierarchy_rebuild_active_masses()) return false;
     }
@@ -2302,6 +2330,11 @@ static bool debug_setup_adaptive_cube_drop(DebugRunState *state)
     }
     if (getenv("FPS_AMR_TEST_BREAK_PARENT"))
         vgsHierarchy.nodes[0].vgs_enabled = false;
+    if (getenv("FPS_AMR_TEST_PROPAGATE_FRACTURE") &&
+        !debug_seed_upward_fracture_propagation()) {
+        debug_add_failure(state, "unable to seed multilevel fracture propagation");
+        return false;
+    }
     debugAdaptiveOctree = true;
     debugColorVoxelsByVgsTemporalCurvature = false;
     return true;
@@ -4414,6 +4447,56 @@ static void debug_validate_step(DebugRunState *state, int step)
         }
     }
     if (state->adaptive_cube_drop) {
+        if (getenv("FPS_AMR_TEST_PROPAGATE_FRACTURE") && step >= 1) {
+            bool expect_propagated = !PBD_DISABLE_VGS_DEACTIVATION;
+            int broken_node = 0;
+            int sleeping_node = 0;
+            while (broken_node >= 0) {
+                VgsHierarchyNode *node = &vgsHierarchy.nodes[broken_node];
+                if (node->vgs_enabled == expect_propagated)
+                    debug_add_failure(state,
+                        "step %d: fracture path node %d enabled=%d expected=%d",
+                        step, broken_node, node->vgs_enabled, !expect_propagated);
+                int sibling = node->children[1];
+                if (sibling >= 0 && !vgsHierarchy.nodes[sibling].vgs_enabled)
+                    debug_add_failure(state,
+                        "step %d: fracture propagated downward to sibling node %d",
+                        step, sibling);
+                int child = node->children[0];
+                if (child < 0) break;
+                broken_node = child;
+            }
+            sleeping_node = vgsHierarchy.nodes[0].children[7];
+            while (sleeping_node >= 0) {
+                VgsHierarchyNode *node = &vgsHierarchy.nodes[sleeping_node];
+                if (!node->vgs_enabled)
+                    debug_add_failure(state,
+                        "step %d: sleeping branch falsely fractured node %d",
+                        step, sleeping_node);
+                int child = node->children[7];
+                if (child < 0) {
+                    int leaf = -child - 1;
+                    if (!voxels[leaf].vgs_active)
+                        debug_add_failure(state,
+                            "step %d: sleeping leaf %d falsely fractured", step, leaf);
+                    break;
+                }
+                sleeping_node = child;
+            }
+            if (step >= 2 && expect_propagated &&
+                physics_backend_is_gpu(physicsBackend.active)) {
+                for (int i = 0; i < gpuPhysics.constraint_count; ++i) {
+                    GpuConstraintState *constraint = &gpuPhysics.constraint_stage[i];
+                    if (constraint->voxel_id < (uint32_t)gpuPhysics.dynamic_voxel_count) continue;
+                    int node_id = (int)constraint->voxel_id - gpuPhysics.dynamic_voxel_count;
+                    if (node_id >= 0 && node_id < vgsHierarchy.node_count &&
+                        !vgsHierarchy.nodes[node_id].vgs_enabled)
+                        debug_add_failure(state,
+                            "step %d: propagated node %d retained GPU constraint kind=%u",
+                            step, node_id, constraint->kind);
+                }
+            }
+        }
         if (getenv("FPS_AMR_TEST_BREAK_PARENT") && step == 1) {
             VgsHierarchyNode *root = &vgsHierarchy.nodes[0];
             int enabled_children = 0;
@@ -4439,8 +4522,8 @@ static void debug_validate_step(DebugRunState *state, int step)
             int broken = 0;
             for (int c = 0; c < 8; ++c)
                 if (!vgs_child_enabled(vgsHierarchy.nodes[0].children[c])) ++broken;
-            if (broken == 0 || !vgsHierarchy.nodes[0].vgs_enabled ||
-                vgs_enabled_child_mask(&vgsHierarchy.nodes[0]) == 0xffu)
+            if (broken == 0 || vgsHierarchy.nodes[0].vgs_enabled ||
+                vgs_enabled_child_mask(&vgsHierarchy.nodes[0]) != 0u)
                 debug_add_failure(state, "child fracture parent=%d broken=%d weldMask=0x%x",
                                   vgsHierarchy.nodes[0].vgs_enabled, broken,
                                   vgs_enabled_child_mask(&vgsHierarchy.nodes[0]));

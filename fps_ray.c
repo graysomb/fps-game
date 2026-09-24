@@ -10524,6 +10524,22 @@ static void evaluate_hierarchy_fracture_range(int start, int end, int worker_id,
     }
 }
 
+static void propagate_hierarchy_fracture_upward(void) {
+    for (int level = vgsHierarchy.levels - 1; level >= 0; --level) {
+        int first = vgsHierarchy.level_start[level];
+        int end = first + vgsHierarchy.level_count[level];
+        for (int i = first; i < end; ++i) {
+            VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+            if (!node->vgs_enabled) continue;
+            for (int c = 0; c < 8; ++c) {
+                if (vgs_child_enabled(node->children[c])) continue;
+                node->vgs_enabled = false;
+                break;
+            }
+        }
+    }
+}
+
 typedef struct {
     Vector3 gravity;
     float dt;
@@ -13629,6 +13645,8 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
             if (vgsHierarchy.node_count)
                 pbd_parallel_for(0, vgsHierarchy.node_count,
                                  evaluate_hierarchy_fracture_range, NULL);
+            if (vgsHierarchy.node_count)
+                propagate_hierarchy_fracture_upward();
             if (pbdProfileEnabled) pbdCpuProfile.t_break_masks_ms += pbd_time_now_ms() - tb;
         }
         double t0 = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;

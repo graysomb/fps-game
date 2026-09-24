@@ -97,6 +97,7 @@ const int MODE_HIERARCHY_MASK = 17;
 const int CONTROL_FLAG_OVERFLOW = 1;
 const int CONTROL_FLAG_TOPOLOGY_DIRTY = 2;
 const int CONTROL_FLAG_BREAK_OCCURRED = 4;
+const uint VGS_INTACT_BIT = 0x80000000u;
 
 uint voxelParticle(VoxelState v, int corner) {
     return (corner < 4) ? v.particle_0_3[corner] : v.particle_4_7[corner - 4];
@@ -414,12 +415,14 @@ void solveVgs(uint gid) {
 void propagateHierarchyMask(uint gid) {
     if (gid >= uint(uVgsCount)) return;
     uint id = uint(uVgsBegin) + gid;
-    if (voxel[id].flags.x == 0) return;
+    if ((voxel[id].lifecycle.w & VGS_INTACT_BIT) == 0u) return;
     VoxelState parent = voxel[id];
     for (int c = 0; c < 8; ++c) {
         uint child = floatBitsToUint(c < 4 ? parent.bounds_min[c] : parent.bounds_max[c - 4]);
-        if (voxel[child].flags.x == 0) {
-            voxel[id].flags.x = 0;
+        if ((voxel[child].lifecycle.w & VGS_INTACT_BIT) == 0u) {
+            parent.flags.x = 0;
+            parent.lifecycle.w &= ~VGS_INTACT_BIT;
+            voxel[id] = parent;
             return;
         }
     }
@@ -617,6 +620,7 @@ void gatherBreakMask(uint gid) {
     }
     if (exceeded) {
         v.flags.x = 0; // Deactivate VGS constraint
+        v.lifecycle.w &= ~VGS_INTACT_BIT;
         v.lifecycle.y = 1u; // wake_source = true
         v.lifecycle.z = 0u; // Clear glued faces
     }
