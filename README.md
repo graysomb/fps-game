@@ -496,6 +496,9 @@ Available scenarios are:
   enabled constraint counts; `curvature-by-level.csv` records per-scale curvature
   distributions. `FPS_AMR_TEST_BREAK_CHILD=1` seeds an overstretched child to
   check that it breaks without disabling its parent and blocks coarsening.
+  `FPS_AMR_TEST_BREAK_PARENT=1` refines and disables the root to check that a
+  broken parent emits neither VGS nor weld constraints while its children stay
+  independently enabled.
   With size-squared VGS strength scaling, the earlier
   [uniform-threshold sweep](docs/vgs-amr-h2-threshold/README.md) found a
   phase-change-like jump between root thresholds 34 and 33 s^-2. The

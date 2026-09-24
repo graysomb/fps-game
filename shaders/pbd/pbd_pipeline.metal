@@ -279,6 +279,9 @@ inline void scatterHierarchyWeld(uint voxelId, device ParticleState *particle,
                                  device const int *control, uint terminalMask,
                                  bool includeCoarsening) {
     VoxelState parent = voxel[voxelId];
+    // The break pass runs before projection and may disable this parent after
+    // the flat constraint list was built. Suppress its stale weld immediately.
+    if (parent.flags.x == 0) return;
     for (int c = 0; c < 8; ++c) {
         uint child = as_type<uint>(c < 4 ? parent.bounds_min[c] : parent.bounds_max[c - 4]);
         if (voxel[child].flags.x == 0) terminalMask &= ~(1u << c);

@@ -557,12 +557,9 @@ static bool gpu_pack_world(void) {
             (GpuConstraintState){0u, (uint32_t)i, 0u, 0u};
     }
     for (int i = 0; i < vgsHierarchy.node_count; ++i) {
-        if (!vgsHierarchy.nodes[i].active || !vgsHierarchy.nodes[i].vgs_enabled) continue;
+        if (!vgs_node_constraints_enabled(&vgsHierarchy.nodes[i])) continue;
         gpuPhysics.constraint_stage[gpuPhysics.constraint_count++] =
             (GpuConstraintState){0u, (uint32_t)(gpuPhysics.dynamic_voxel_count + i), 0u, 0u};
-    }
-    for (int i = 0; i < vgsHierarchy.node_count; ++i) {
-        if (!vgsHierarchy.nodes[i].active) continue;
         uint32_t mask = vgsHierarchy.adaptive ? vgs_terminal_child_mask(&vgsHierarchy.nodes[i]) :
             vgs_enabled_child_mask(&vgsHierarchy.nodes[i]);
         if (!mask) continue;

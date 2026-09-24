@@ -1122,6 +1122,10 @@ typedef struct {
     uint64_t topology_generation;
 } VgsHierarchy;
 static VgsHierarchy vgsHierarchy;
+static bool vgs_node_constraints_enabled(const VgsHierarchyNode *node)
+{
+    return node->active && node->vgs_enabled;
+}
 static bool vgs_child_enabled(int child)
 {
     return child >= 0 ? vgsHierarchy.nodes[child].vgs_enabled :
@@ -1129,6 +1133,7 @@ static bool vgs_child_enabled(int child)
 }
 static uint8_t vgs_enabled_child_mask(const VgsHierarchyNode *node)
 {
+    if (!vgs_node_constraints_enabled(node)) return 0;
     uint8_t mask = 0;
     for (int c = 0; c < 8; ++c)
         if (vgs_child_enabled(node->children[c])) mask |= (uint8_t)(1u << c);
@@ -1136,6 +1141,7 @@ static uint8_t vgs_enabled_child_mask(const VgsHierarchyNode *node)
 }
 static uint8_t vgs_terminal_child_mask(const VgsHierarchyNode *node)
 {
+    if (!vgs_node_constraints_enabled(node)) return 0;
     uint8_t mask = 0;
     for (int c = 0; c < 8; ++c) {
         int child = node->children[c];
@@ -11119,14 +11125,12 @@ static void gather_vgs_hierarchy_range(int start, int end, int worker_id, void *
     int base = *(int *)user;
     for (int i = start; i < end; ++i) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[base + i];
-        if (node->active) {
-            if (node->vgs_enabled)
-                gather_shape_constraints(node->particles, node->rest_edge, node->rest_volume, true);
-            uint8_t mask = vgsHierarchy.adaptive ? vgs_terminal_child_mask(node) :
-                vgs_enabled_child_mask(node);
-            if (mask) gather_hierarchy_weld_constraints(node, mask,
-                                                        !vgsHierarchy.adaptive && mask == 0xffu);
-        }
+        if (!vgs_node_constraints_enabled(node)) continue;
+        gather_shape_constraints(node->particles, node->rest_edge, node->rest_volume, true);
+        uint8_t mask = vgsHierarchy.adaptive ? vgs_terminal_child_mask(node) :
+            vgs_enabled_child_mask(node);
+        if (mask) gather_hierarchy_weld_constraints(node, mask,
+                                                    !vgsHierarchy.adaptive && mask == 0xffu);
     }
 }
 

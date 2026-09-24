@@ -2288,7 +2288,8 @@ static bool debug_setup_adaptive_cube_drop(DebugRunState *state)
     }
     // A diagnostic seed exercises a refined GPU constraint list even when the
     // normal curvature trigger has not fired yet.
-    if (getenv("FPS_AMR_TEST_REFINE_ROOT") || getenv("FPS_AMR_TEST_BREAK_CHILD")) {
+    if (getenv("FPS_AMR_TEST_REFINE_ROOT") || getenv("FPS_AMR_TEST_BREAK_CHILD") ||
+        getenv("FPS_AMR_TEST_BREAK_PARENT")) {
         vgs_hierarchy_transfer_refine(&vgsHierarchy.nodes[0], true);
         if (!vgs_hierarchy_rebuild_active_masses()) return false;
     }
@@ -2299,6 +2300,8 @@ static bool debug_setup_adaptive_cube_drop(DebugRunState *state)
         center->pos.y += 3.5f;
         center->prev_pos = center->predicted_pos = center->pos;
     }
+    if (getenv("FPS_AMR_TEST_BREAK_PARENT"))
+        vgsHierarchy.nodes[0].vgs_enabled = false;
     debugAdaptiveOctree = true;
     debugColorVoxelsByVgsTemporalCurvature = false;
     return true;
@@ -4411,6 +4414,27 @@ static void debug_validate_step(DebugRunState *state, int step)
         }
     }
     if (state->adaptive_cube_drop) {
+        if (getenv("FPS_AMR_TEST_BREAK_PARENT") && step == 1) {
+            VgsHierarchyNode *root = &vgsHierarchy.nodes[0];
+            int enabled_children = 0;
+            for (int c = 0; c < 8; ++c)
+                if (vgs_child_enabled(root->children[c])) ++enabled_children;
+            if (root->vgs_enabled || enabled_children != 8 ||
+                vgs_enabled_child_mask(root) != 0 ||
+                vgs_terminal_child_mask(root) != 0)
+                debug_add_failure(state,
+                    "parent fracture enabled=%d children=%d childMask=0x%x terminalMask=0x%x",
+                    root->vgs_enabled, enabled_children,
+                    vgs_enabled_child_mask(root), vgs_terminal_child_mask(root));
+            if (physics_backend_is_gpu(physicsBackend.active)) {
+                uint32_t root_voxel_id = (uint32_t)gpuPhysics.dynamic_voxel_count;
+                for (int i = 0; i < gpuPhysics.constraint_count; ++i)
+                    if (gpuPhysics.constraint_stage[i].voxel_id == root_voxel_id)
+                        debug_add_failure(state,
+                            "disabled parent retained GPU constraint kind=%u",
+                            gpuPhysics.constraint_stage[i].kind);
+            }
+        }
         if (getenv("FPS_AMR_TEST_BREAK_CHILD") && step == 1) {
             int broken = 0;
             for (int c = 0; c < 8; ++c)
@@ -5329,23 +5353,28 @@ static bool debug_write_report(DebugRunState *state)
         if (state->adaptive_cube_drop) {
             int enabled_vgs = enabled_nodes, enabled_welds = 0;
             int terminal_nodes = 0, terminal_leaves = 0, visible_terminal_cells = 0;
+            int broken_nodes = 0, broken_leaves = 0;
             for (int i = 0; i < voxel_count; ++i)
-                if (voxels[i].simulate && voxels[i].simulate_dofs) {
-                    ++terminal_leaves;
-                    if (voxels[i].vgs_active) {
-                        ++enabled_vgs;
-                        ++visible_terminal_cells;
+                if (voxels[i].simulate) {
+                    if (!voxels[i].vgs_active) ++broken_leaves;
+                    if (voxels[i].simulate_dofs) {
+                        ++terminal_leaves;
+                        if (voxels[i].vgs_active) {
+                            ++enabled_vgs;
+                            ++visible_terminal_cells;
+                        }
                     }
                 }
             for (int i = 0; i < vgsHierarchy.node_count; ++i) {
                 VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+                if (!node->vgs_enabled) ++broken_nodes;
                 if (!node->active) continue;
                 if (vgs_terminal_child_mask(node)) ++enabled_welds;
                 if (vgs_node_has_active_children(node)) continue;
                 ++terminal_nodes;
                 if (node->vgs_enabled) ++visible_terminal_cells;
             }
-            fprintf(file, "  \"adaptiveHierarchy\": {\"thresholdPerSecondSquared\": %.9g, \"thresholdLevelFactor\": %d, \"deformationFractionCoarsest\": %.9g, \"deformationFractionFinest\": %.9g, \"cornerDrop\": %s, \"refinements\": %u, \"coarsenings\": %u, \"terminalCells\": %d, \"visibleTerminalCells\": %d, \"terminalNodes\": %d, \"terminalLeaves\": %d, \"enabledVgsConstraints\": %d, \"enabledWeldConstraints\": %d, \"gpuConstraints\": %d, \"simulatedParticles\": %d},\n",
+            fprintf(file, "  \"adaptiveHierarchy\": {\"thresholdPerSecondSquared\": %.9g, \"thresholdLevelFactor\": %d, \"deformationFractionCoarsest\": %.9g, \"deformationFractionFinest\": %.9g, \"cornerDrop\": %s, \"refinements\": %u, \"coarsenings\": %u, \"terminalCells\": %d, \"visibleTerminalCells\": %d, \"terminalNodes\": %d, \"terminalLeaves\": %d, \"brokenInternalNodes\": %d, \"brokenLeaves\": %d, \"enabledVgsConstraints\": %d, \"enabledWeldConstraints\": %d, \"gpuConstraints\": %d, \"simulatedParticles\": %d},\n",
                     (double)VGS_ADAPTIVE_CURVATURE_THRESHOLD,
                     VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR,
                     (double)vgsAdaptiveDeformationCoarseFraction,
@@ -5354,6 +5383,7 @@ static bool debug_write_report(DebugRunState *state)
                     vgsHierarchy.refine_count, vgsHierarchy.coarsen_count,
                     terminal_nodes + terminal_leaves, visible_terminal_cells,
                     terminal_nodes, terminal_leaves,
+                    broken_nodes, broken_leaves,
                     enabled_vgs, enabled_welds,
                     gpuPhysics.constraint_count, sim_particle_count);
         }
