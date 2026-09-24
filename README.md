@@ -495,13 +495,10 @@ Available scenarios are:
   terminal voxels with enabled VGS render. The report records transition and
   enabled constraint counts; `curvature-by-level.csv` records per-scale curvature
   distributions. `FPS_AMR_TEST_BREAK_CHILD=1` seeds an overstretched child to
-  check that its fracture propagates upward and blocks coarsening.
+  check that it breaks without disabling its parent and blocks coarsening.
   `FPS_AMR_TEST_BREAK_PARENT=1` refines and disables the root to check that a
   broken parent emits neither VGS nor weld constraints while its children stay
   independently enabled.
-  `FPS_AMR_TEST_PROPAGATE_FRACTURE=1` seeds one broken deepest leaf and a
-  separate sleeping leaf to verify bottom-up fracture propagation without
-  downward inheritance or false fracture from inactive solver state.
   With size-squared VGS strength scaling, the earlier
   [uniform-threshold sweep](docs/vgs-amr-h2-threshold/README.md) found a
   phase-change-like jump between root thresholds 34 and 33 s^-2. The

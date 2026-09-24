@@ -61,7 +61,6 @@ constant int MODE_HIERARCHY_MASK = 17;
 constant int CONTROL_FLAG_OVERFLOW = 1;
 constant int CONTROL_FLAG_TOPOLOGY_DIRTY = 2;
 constant int CONTROL_FLAG_BREAK_OCCURRED = 4;
-constant uint VGS_INTACT_BIT = 0x80000000u;
 
 // Presence of this entry point identifies libraries with hierarchical VGS support.
 kernel void pbd_hierarchy_marker() {}
@@ -404,14 +403,12 @@ inline void propagateHierarchyMask(uint gid, device VoxelState *voxel,
                                    constant GpuUniforms &u) {
     if (gid >= uint(u.integer_padding_2)) return;
     uint id = uint(u.integer_padding_1) + gid;
-    if ((voxel[id].lifecycle.w & VGS_INTACT_BIT) == 0u) return;
+    if (voxel[id].flags.x == 0) return;
     VoxelState parent = voxel[id];
     for (int c = 0; c < 8; ++c) {
         uint child = as_type<uint>(c < 4 ? parent.bounds_min[c] : parent.bounds_max[c - 4]);
-        if ((voxel[child].lifecycle.w & VGS_INTACT_BIT) == 0u) {
-            parent.flags.x = 0;
-            parent.lifecycle.w &= ~VGS_INTACT_BIT;
-            voxel[id] = parent;
+        if (voxel[child].flags.x == 0) {
+            voxel[id].flags.x = 0;
             return;
         }
     }
@@ -504,7 +501,6 @@ inline void gatherBreakMask(uint gid, device ParticleState *particle,
     }
     if (exceeded) {
         v.flags.x = 0; // Deactivate VGS constraint
-        v.lifecycle.w &= ~VGS_INTACT_BIT;
         v.lifecycle.y = 1u; // wake_source = true
         v.lifecycle.z = 0u; // Clear glued faces
     }
