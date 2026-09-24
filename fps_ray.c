@@ -1854,7 +1854,9 @@ static float debugVgsTemporalLastMax = 0.0f;
 static float debugVgsTemporalLastMean = 0.0f;
 // VGS strain/shear are dimensionless; temporal curvature has units of 1/s^2.
 #define VGS_TEMPORAL_CURVATURE_RED_AT 100.0f
+#ifndef VGS_ADAPTIVE_CURVATURE_THRESHOLD
 #define VGS_ADAPTIVE_CURVATURE_THRESHOLD 10.0f
+#endif
 static unsigned char debugTagBreakLogged[DEBUG_CLUSTER_TAG_MAX];
 
 static const char *trace_level_label(int level) {
