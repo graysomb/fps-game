@@ -685,7 +685,7 @@ static float debug_water_centroid_y(void)
     long double weighted_y = 0.0;
     uint64_t total = 0;
     for (int i = 0; i < WATER_CELL_COUNT; ++i) {
-        uint32_t mass = waterSystem.mass[i];
+        uint32_t mass = water_mass_index(i);
         if (!mass || water_cell_blocked_index(i)) continue;
         int gx, gy, gz;
         water_coords_from_index(i, &gx, &gy, &gz);
@@ -864,9 +864,9 @@ static void debug_draw_overlay(const DebugRunState *state, const DebugSample *sa
              34, 166, 19, result_color);
     if (state->water_fall_test) {
         const WaterDiagnostics *water = water_diagnostics();
-        DrawText(TextFormat("WATER mass=%llu wet=%u active=%u trapped=%llu",
+        DrawText(TextFormat("WATER mass=%llu wet=%u active=%u chunks=%u trapped=%llu",
                             (unsigned long long)water_test_total_mass(),
-                            water->wet_cells, water->active_cells,
+                            water->wet_cells, water->active_cells, water->resident_chunks,
                             (unsigned long long)water->trapped_mass),
                  34, 192, 17, (Color){ 90, 190, 255, 255 });
     }
@@ -2702,7 +2702,7 @@ static void debug_validate_step(DebugRunState *state, int step)
             }
         }
         for (int i = 0; i < WATER_CELL_COUNT; ++i) {
-            uint32_t mass = waterSystem.mass[i];
+            uint32_t mass = water_mass_index(i);
             if (mass > WATER_MAX_MASS) {
                 debug_add_failure(state, "step %d: water cell %d exceeded maximum mass", step, i);
             }
@@ -2718,7 +2718,7 @@ static void debug_validate_step(DebugRunState *state, int step)
                     for (int d = 0; d < 6; ++d) {
                         int nx = gx + dx[d], ny = gy + dy[d], nz = gz + dz[d];
                         if (water_in_domain(nx, ny, nz) &&
-                            waterSystem.dynamic_solid[water_index_unchecked(nx, ny, nz)]) {
+                            water_dynamic_index(water_index_unchecked(nx, ny, nz))) {
                             state->water_dynamic_contact = true;
                         }
                     }
@@ -3373,7 +3373,8 @@ static bool debug_write_report(DebugRunState *state)
             " \"obstacleAverageMs\": %.9g, \"solverAverageMs\": %.9g,"
             " \"maintenanceAverageMs\": %.9g, \"gpuUploadAverageMs\": %.9g,"
             " \"gpuDispatchAverageMs\": %.9g, \"gpuReadbackAverageMs\": %.9g,"
-            " \"renderCacheLastMs\": %.9g, \"activeTiles\": %u, \"processedCells\": %u},\n",
+            " \"renderCacheLastMs\": %.9g, \"activeTiles\": %u, \"processedCells\": %u,"
+            " \"residentChunks\": %u, \"residentBytes\": %llu},\n",
             state->water_step_samples, state->water_step_total_ms,
             water_average_ms, water_median_ms, state->water_step_min_ms, state->water_step_max_ms,
             state->water_step_samples ? state->water_obstacle_total_ms / state->water_step_samples : 0.0,
@@ -3383,7 +3384,8 @@ static bool debug_write_report(DebugRunState *state)
             state->water_step_samples ? state->water_gpu_dispatch_total_ms / state->water_step_samples : 0.0,
             state->water_step_samples ? state->water_gpu_readback_total_ms / state->water_step_samples : 0.0,
             water_diagnostics()->last_render_build_ms, water_diagnostics()->active_tiles,
-            water_diagnostics()->processed_cells);
+            water_diagnostics()->processed_cells, water_diagnostics()->resident_chunks,
+            (unsigned long long)water_diagnostics()->resident_bytes);
     fprintf(file, "  \"fallback\": %s,\n  \"fallbackReason\": ",
             physicsBackend.sticky_fallback ? "true" : "false");
     debug_write_json_string(file, physicsBackend.fallback_reason);

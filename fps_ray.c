@@ -14748,7 +14748,7 @@ static bool water_cell_is_enclosed_rendered(int gx, int gy, int gz) {
         if (!water_in_domain(nx, ny, nz)) return false;
         int neighbor = water_index_unchecked(nx, ny, nz);
         if (water_cell_blocked_index(neighbor) ||
-            waterSystem.mass[neighbor] < WATER_RENDER_MIN_MASS) return false;
+            water_mass_index(neighbor) < WATER_RENDER_MIN_MASS) return false;
     }
     return true;
 }
@@ -14756,6 +14756,11 @@ static bool water_cell_is_enclosed_rendered(int gx, int gy, int gz) {
 static bool rebuild_water_render_tile(int tile) {
     WaterRenderTileCache *cache = &waterRenderTiles[tile];
     cache->count = 0;
+    WaterChunk *chunk = waterSystem.chunks[tile];
+    if (!chunk) {
+        waterSystem.tile_render_dirty[tile] = 0;
+        return true;
+    }
     int tx, ty, tz;
     water_tile_coords(tile, &tx, &ty, &tz);
     int gx0 = WATER_MIN_X + tx * WATER_TILE_SIZE;
@@ -14768,7 +14773,7 @@ static bool rebuild_water_render_tile(int tile) {
             for (int lx = 0; lx < WATER_TILE_SIZE; ++lx) {
                 int gx = gx0 + lx;
                 int index = water_index_unchecked(gx, gy, gz);
-                uint32_t mass = waterSystem.mass[index];
+                uint32_t mass = chunk->mass[lx + 8 * (lz + 8 * ly)];
                 if (mass < WATER_RENDER_MIN_MASS || water_cell_blocked_index(index) ||
                     water_cell_is_enclosed_rendered(gx, gy, gz)) continue;
                 if (cache->count >= cache->capacity) {
@@ -14804,7 +14809,8 @@ static void rebuild_water_instances(void) {
         return;
     }
     int total = 0;
-    for (int tile = 0; tile < WATER_TILE_COUNT; ++tile) {
+    for (int r = 0; r < waterSystem.resident_tile_count; ++r) {
+        int tile = waterSystem.resident_tile_ids[r];
         if (waterSystem.tile_render_dirty[tile] && !rebuild_water_render_tile(tile)) return;
         total += waterRenderTiles[tile].count;
     }
@@ -14818,7 +14824,8 @@ static void rebuild_water_instances(void) {
         waterInstanceTransforms = next;
         waterInstanceCapacity = next_capacity;
     }
-    for (int tile = 0; tile < WATER_TILE_COUNT; ++tile) {
+    for (int r = 0; r < waterSystem.resident_tile_count; ++r) {
+        int tile = waterSystem.resident_tile_ids[r];
         WaterRenderTileCache *cache = &waterRenderTiles[tile];
         if (cache->count) {
             memcpy(&waterInstanceTransforms[waterInstanceCount], cache->transforms,
@@ -16649,12 +16656,12 @@ static void render_gameplay_view(RenderTexture2D *screens,
                                        physicsBackend.sticky_fallback ? " (fallback)" : "";
             const WaterDiagnostics *water_diag = water_diagnostics();
             const char *fps_text = netTransport.role == NET_ROLE_OFFLINE
-                ? TextFormat("FPS %d | PHYS %s %.2fms%s | WATER %s %.2fms %u active/%u wet/%u tiles T%llu D%llu",
+                ? TextFormat("FPS %d | PHYS %s %.2fms%s | WATER %s %.2fms %u active/%u wet/%u tiles/%u chunks T%llu D%llu",
                              GetFPS(), physics_backend_name(physicsBackend.active),
                              physicsBackend.last_step_ms, physics_note,
                              water_diag->backend, water_diag->last_step_ms,
                              water_diag->active_cells, water_diag->wet_cells,
-                             water_diag->active_tiles,
+                             water_diag->active_tiles, water_diag->resident_chunks,
                              (unsigned long long)water_diag->trapped_mass,
                              (unsigned long long)water_diag->displaced_mass)
                 : TextFormat("FPS %d | PHYS %s %.2fms%s | WATER disabled (LAN)",
@@ -16796,18 +16803,19 @@ static bool run_physics_smoke_test(int steps) {
 
 static uint64_t water_test_total_mass(void) {
     uint64_t total = 0;
-    for (int i = 0; i < WATER_CELL_COUNT; ++i) total += waterSystem.mass[i];
+    for (int r = 0; r < waterSystem.resident_tile_count; ++r) {
+        WaterChunk *chunk = waterSystem.chunks[waterSystem.resident_tile_ids[r]];
+        for (int i = 0; i < 512; ++i) total += chunk->mass[i];
+    }
     return total;
 }
 
+static void water_test_snapshot_dense(uint16_t *out) {
+    memset(out, 0, (size_t)WATER_CELL_COUNT * sizeof(uint16_t));
+    for (int i = 0; i < WATER_CELL_COUNT; ++i) out[i] = water_mass_index(i);
+}
+
 static bool water_test_invariants(const char *name, uint64_t expected_mass) {
-    for (int i = 0; i < WATER_CELL_COUNT; ++i) {
-        if (waterSystem.mass[i] > WATER_MAX_MASS) {
-            fprintf(stderr, "water-self-test %s FAIL mass[%d]=%u\n",
-                    name, i, waterSystem.mass[i]);
-            return false;
-        }
-    }
     uint64_t total = water_test_total_mass();
     if (total != expected_mass) {
         fprintf(stderr, "water-self-test %s FAIL mass=%llu expected=%llu\n", name,
@@ -16824,7 +16832,7 @@ static bool water_test_render_cache_matches_reference(void) {
         for (int z = WATER_MIN_Z; z <= WATER_MAX_Z; ++z)
             for (int x = WATER_MIN_X; x <= WATER_MAX_X; ++x) {
                 int i = water_index_unchecked(x, y, z);
-                if (waterSystem.mass[i] >= WATER_RENDER_MIN_MASS &&
+                if (water_mass_index(i) >= WATER_RENDER_MIN_MASS &&
                     !water_cell_blocked_index(i) && !water_cell_is_enclosed_rendered(x, y, z)) expected++;
             }
     if (expected != waterInstanceCount) return false;
@@ -16834,7 +16842,7 @@ static bool water_test_render_cache_matches_reference(void) {
         int gy = (int)floorf(m.m13 / VOXEL_SIZE);
         int gz = (int)floorf(m.m14 / VOXEL_SIZE);
         if (!water_in_domain(gx, gy, gz) ||
-            waterSystem.mass[water_index_unchecked(gx, gy, gz)] < WATER_RENDER_MIN_MASS ||
+            water_mass_index(water_index_unchecked(gx, gy, gz)) < WATER_RENDER_MIN_MASS ||
             water_cell_is_enclosed_rendered(gx, gy, gz) ||
             m.m0 != VOXEL_SIZE || m.m5 != VOXEL_SIZE || m.m10 != VOXEL_SIZE) return false;
     }
@@ -16843,9 +16851,6 @@ static bool water_test_render_cache_matches_reference(void) {
 
 static void water_test_empty_world(void) {
     water_reset();
-    memset(waterSystem.static_solid, 0, sizeof(waterSystem.static_solid));
-    memset(waterSystem.dynamic_solid, 0, sizeof(waterSystem.dynamic_solid));
-    memset(waterSystem.previous_solid, 0, sizeof(waterSystem.previous_solid));
     waterSystem.static_generation = staticHashGeneration;
 }
 
@@ -16858,14 +16863,16 @@ static uint64_t water_test_setup_basin(void) {
                 water_index_unchecked(p, y, -2), water_index_unchecked(p, y, 2)
             };
             for (int k = 0; k < 4; ++k) {
-                waterSystem.static_solid[indices[k]] = 1;
-                waterSystem.previous_solid[indices[k]] = 1;
+                int local; WaterChunk *chunk = water_chunk_for_index(indices[k], true, &local);
+                chunk->static_solid[local] = 1;
+                chunk->previous_solid[local] = 1;
             }
         }
     }
     int obstacle = water_index_unchecked(0, 0, 0);
-    waterSystem.static_solid[obstacle] = 1;
-    waterSystem.previous_solid[obstacle] = 1;
+    int obstacle_local; WaterChunk *obstacle_chunk = water_chunk_for_index(obstacle, true, &obstacle_local);
+    obstacle_chunk->static_solid[obstacle_local] = 1;
+    obstacle_chunk->previous_solid[obstacle_local] = 1;
     (void)water_set_mass(0, 6, 0, WATER_MAX_MASS);
     (void)water_set_mass(0, 7, 0, WATER_MAX_MASS);
     (void)water_set_mass(1, 6, 0, WATER_MAX_MASS);
@@ -16882,11 +16889,13 @@ static bool water_test_run_steps(PhysicsBackendKind backend, int steps) {
 static bool run_water_self_tests(void) {
     PhysicsBackendKind saved_backend = physicsBackend.active;
     bool passed = true;
-    uint16_t *reference = (uint16_t *)malloc(sizeof(waterSystem.mass));
-    uint16_t *roundtrip = (uint16_t *)malloc(sizeof(waterSystem.mass));
-    if (!reference || !roundtrip) {
+    size_t snapshot_bytes = (size_t)WATER_CELL_COUNT * sizeof(uint16_t);
+    uint16_t *reference = (uint16_t *)malloc(snapshot_bytes);
+    uint16_t *roundtrip = (uint16_t *)malloc(snapshot_bytes);
+    uint16_t *comparison = (uint16_t *)malloc(snapshot_bytes);
+    if (!reference || !roundtrip || !comparison) {
         fprintf(stderr, "water-self-test FAIL allocation\n");
-        free(reference); free(roundtrip);
+        free(reference); free(roundtrip); free(comparison);
         return false;
     }
 
@@ -16927,24 +16936,25 @@ static bool run_water_self_tests(void) {
     fprintf(stderr, "water-self-test obstacle-flow-leveling-sleep %s (neighborSpread=%u range=%u floor=%d active=%u)\n",
             settled ? "PASS" : "FAIL", neighbor_spread, basin_max - basin_min,
             all_on_floor ? 1 : 0, waterSystem.diagnostics.active_tiles);
-    memcpy(reference, waterSystem.mass, sizeof(waterSystem.mass));
+    water_test_snapshot_dense(reference);
     fprintf(stderr, "water-self-test vertical-column-and-basin %s\n", passed ? "PASS" : "FAIL");
 
     uint64_t mt_mass = water_test_setup_basin();
     water_test_run_steps(PHYSICS_BACKEND_CPU_MT, 180);
     bool mt_equal = mt_mass == initial_mass &&
-                    memcmp(reference, waterSystem.mass, sizeof(waterSystem.mass)) == 0;
+                    (water_test_snapshot_dense(roundtrip), memcmp(reference, roundtrip, snapshot_bytes) == 0);
     passed &= mt_equal && water_test_invariants("cpu-mt-parity", initial_mass);
     fprintf(stderr, "water-self-test cpu-st/cpu-mt-parity %s\n", mt_equal ? "PASS" : "FAIL");
 
     uint64_t batch_mass = water_test_setup_basin();
     physicsBackend.active = PHYSICS_BACKEND_CPU_ST;
     water_step_batch(PBD_MAX_STEP_DT, PBD_MAX_ACCUM_STEPS);
-    memcpy(roundtrip, waterSystem.mass, sizeof(waterSystem.mass));
+    water_test_snapshot_dense(roundtrip);
     water_test_setup_basin();
     physicsBackend.active = PHYSICS_BACKEND_CPU_MT;
     water_step_batch(PBD_MAX_STEP_DT, PBD_MAX_ACCUM_STEPS);
-    bool batch_equal = memcmp(roundtrip, waterSystem.mass, sizeof(waterSystem.mass)) == 0 &&
+    water_test_snapshot_dense(comparison);
+    bool batch_equal = memcmp(roundtrip, comparison, snapshot_bytes) == 0 &&
                        water_test_invariants("cpu-batch-parity", batch_mass);
     passed &= batch_equal;
     fprintf(stderr, "water-self-test cpu-st/cpu-mt-8-step-batch %s\n",
@@ -16955,7 +16965,7 @@ static bool run_water_self_tests(void) {
         physicsBackend.active = saved_backend;
         water_step_batch(PBD_MAX_STEP_DT, PBD_MAX_ACCUM_STEPS);
         bool gpu_batch_equal = strncmp(waterSystem.diagnostics.backend, "gpu-", 4) == 0 &&
-                               memcmp(roundtrip, waterSystem.mass, sizeof(waterSystem.mass)) == 0;
+                               (water_test_snapshot_dense(comparison), memcmp(roundtrip, comparison, snapshot_bytes) == 0);
         passed &= gpu_batch_equal && water_test_invariants("native-gpu-batch-parity", batch_mass);
         fprintf(stderr, "water-self-test native-gpu-8-step-batch %s\n",
                 gpu_batch_equal ? "PASS" : "FAIL");
@@ -16963,12 +16973,12 @@ static bool run_water_self_tests(void) {
         water_test_run_steps(saved_backend, 180);
         bool used_gpu = strncmp(waterSystem.diagnostics.backend, "gpu-", 4) == 0;
         bool gpu_equal = used_gpu &&
-                         memcmp(reference, waterSystem.mass, sizeof(waterSystem.mass)) == 0;
+                         (water_test_snapshot_dense(roundtrip), memcmp(reference, roundtrip, snapshot_bytes) == 0);
         if (used_gpu && !gpu_equal) {
             for (int i = 0; i < WATER_CELL_COUNT; ++i) {
-                if (reference[i] != waterSystem.mass[i]) {
+                if (reference[i] != roundtrip[i]) {
                     fprintf(stderr, "water-self-test GPU first diff cell=%d cpu=%u gpu=%u\n",
-                            i, reference[i], waterSystem.mass[i]);
+                            i, reference[i], roundtrip[i]);
                     break;
                 }
             }
@@ -16979,11 +16989,12 @@ static bool run_water_self_tests(void) {
 
         water_test_setup_basin();
         water_test_run_steps(PHYSICS_BACKEND_CPU_ST, 2);
-        memcpy(roundtrip, waterSystem.mass, sizeof(waterSystem.mass));
+        water_test_snapshot_dense(roundtrip);
         water_test_setup_basin();
         water_test_run_steps(saved_backend, 1);
         water_test_run_steps(PHYSICS_BACKEND_CPU_ST, 1);
-        bool switch_equal = memcmp(roundtrip, waterSystem.mass, sizeof(waterSystem.mass)) == 0;
+        water_test_snapshot_dense(comparison);
+        bool switch_equal = memcmp(roundtrip, comparison, snapshot_bytes) == 0;
         passed &= switch_equal;
         fprintf(stderr, "water-self-test gpu-to-cpu-switch %s\n",
                 switch_equal ? "PASS" : "FAIL");
@@ -16993,13 +17004,14 @@ static bool run_water_self_tests(void) {
 
     water_test_empty_world();
     int source = water_index_unchecked(0, 1, 0);
-    waterSystem.mass[source] = WATER_MAX_MASS;
-    waterSystem.scratch[source] = WATER_MAX_MASS;
+    int source_local; WaterChunk *source_chunk = water_chunk_for_index(source, true, &source_local);
+    source_chunk->mass[source_local] = WATER_MAX_MASS;
+    source_chunk->scratch[source_local] = WATER_MAX_MASS;
     int dynamic_test_voxel = addVoxel(0.25f, 0.75f, 0.25f, false, true, BLUE, 0);
     water_rebuild_obstacles_and_displace();
-    bool displaced = dynamic_test_voxel >= 0 && waterSystem.dynamic_solid[source] != 0 &&
+    bool displaced = dynamic_test_voxel >= 0 && water_dynamic_index(source) &&
                      water_test_total_mass() == WATER_MAX_MASS &&
-                     waterSystem.mass[source] < WATER_MAX_MASS;
+                     water_mass_index(source) < WATER_MAX_MASS;
     passed &= displaced && water_test_invariants("solid-displacement", WATER_MAX_MASS);
     fprintf(stderr, "water-self-test moving-solid-displacement %s\n", displaced ? "PASS" : "FAIL");
 
@@ -17016,7 +17028,7 @@ static bool run_water_self_tests(void) {
         projectile_ok = bullet < voxel_count && voxels[bullet].vel.x > 0.0f &&
                         voxels[bullet].vel.x < 10.0f * VELOCITY_DAMPING;
         water_rebuild_obstacles_and_displace();
-        projectile_ok = projectile_ok && waterSystem.dynamic_solid[water_index_unchecked(0, 10, 0)] != 0;
+        projectile_ok = projectile_ok && water_dynamic_index(water_index_unchecked(0, 10, 0));
     }
     passed &= projectile_ok;
     fprintf(stderr, "water-self-test projectile-drag-displacement %s\n",
@@ -17058,9 +17070,9 @@ static bool run_water_self_tests(void) {
         rewind(map);
         int count = -1;
         map_ok = fscanf(map, "WATER %d\n", &count) == 1;
-        memcpy(roundtrip, waterSystem.mass, sizeof(waterSystem.mass));
+        water_test_snapshot_dense(roundtrip);
         if (map_ok) map_ok = water_read_map_entries(map, count);
-        if (map_ok) map_ok = memcmp(roundtrip, waterSystem.mass, sizeof(waterSystem.mass)) == 0;
+        if (map_ok) { water_test_snapshot_dense(reference); map_ok = memcmp(roundtrip, reference, snapshot_bytes) == 0; }
         fclose(map);
     }
     passed &= map_ok;
@@ -17078,8 +17090,21 @@ static bool run_water_self_tests(void) {
     fprintf(stderr, "water-self-test tile-sleep-neighbor-wake %s\n",
             (slept && woke) ? "PASS" : "FAIL");
 
+    water_test_empty_world();
+    bool sparse_chunks = waterSystem.resident_tile_count == 0;
+    (void)water_set_mass(0, 4, 0, WATER_MAX_MASS);
+    sparse_chunks = sparse_chunks && waterSystem.resident_tile_count > 0 &&
+                    waterSystem.resident_tile_count <= 7;
+    water_remove_region(0, 0, 4, 4, 0, 0);
+    water_test_run_steps(PHYSICS_BACKEND_CPU_ST, WATER_SLEEP_STEPS + 2);
+    sparse_chunks = sparse_chunks && waterSystem.resident_tile_count == 0;
+    passed &= sparse_chunks;
+    fprintf(stderr, "water-self-test sparse-chunk-allocation-reclaim %s\n",
+            sparse_chunks ? "PASS" : "FAIL");
+
     free(reference);
     free(roundtrip);
+    free(comparison);
     physicsBackend.active = saved_backend;
     water_reset();
     fprintf(stderr, "water-self-test result=%s\n", passed ? "PASS" : "FAIL");

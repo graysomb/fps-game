@@ -1,15 +1,17 @@
-/*
- * Dense, finite-mass cellular-automata water.  This deliberately lives beside
- * the voxel/PBD storage: voxels are only consulted to build read-only masks.
- */
+/* Sparse 8^3 water chunks. Voxels remain a read-only obstacle source. */
+typedef struct WaterChunk {
+    uint16_t mass[WATER_CHUNK_CELLS];
+    uint16_t scratch[WATER_CHUNK_CELLS];
+    uint16_t batch_snapshot[WATER_CHUNK_CELLS];
+    uint8_t static_solid[WATER_CHUNK_CELLS];
+    uint8_t dynamic_solid[WATER_CHUNK_CELLS];
+    uint8_t previous_solid[WATER_CHUNK_CELLS];
+} WaterChunk;
+
 typedef struct WaterSystem {
-    uint16_t mass[WATER_CELL_COUNT];
-    uint16_t scratch[WATER_CELL_COUNT];
-    uint16_t batch_snapshot[WATER_CELL_COUNT];
-    uint16_t gpu_readback[WATER_CELL_COUNT];
-    uint8_t static_solid[WATER_CELL_COUNT];
-    uint8_t dynamic_solid[WATER_CELL_COUNT];
-    uint8_t previous_solid[WATER_CELL_COUNT];
+    WaterChunk *chunks[WATER_TILE_COUNT];
+    uint16_t resident_tile_ids[WATER_TILE_COUNT];
+    uint16_t resident_tile_count;
     uint8_t tile_active[WATER_TILE_COUNT];
     uint8_t batch_tile_active[WATER_TILE_COUNT];
     uint8_t tile_still_steps[WATER_TILE_COUNT];
@@ -21,19 +23,11 @@ typedef struct WaterSystem {
     uint16_t tile_wet_cells[WATER_TILE_COUNT];
     uint64_t tile_visible_mass[WATER_TILE_COUNT];
     uint64_t tile_trapped_mass[WATER_TILE_COUNT];
-    uint32_t dynamic_cells[WATER_CELL_COUNT];
-    uint32_t dynamic_cell_count;
-    uint32_t obstacle_candidates[WATER_CELL_COUNT];
-    uint32_t obstacle_candidate_count;
-    uint32_t obstacle_seen[WATER_CELL_COUNT];
-    uint32_t obstacle_stamp;
-    uint32_t bfs_queue[WATER_CELL_COUNT];
-    uint8_t bfs_depth[WATER_CELL_COUNT];
-    uint32_t bfs_seen[WATER_CELL_COUNT];
-    uint32_t bfs_stamp;
     uint64_t static_generation;
     uint64_t mass_generation;
     uint64_t dynamic_generation;
+    uint64_t dynamic_mask_hash;
+    uint64_t resident_generation;
     bool initialized;
     bool render_dirty;
     bool cpu_scratch_valid;
@@ -42,6 +36,78 @@ typedef struct WaterSystem {
 
 static WaterSystem waterSystem;
 static inline void water_tile_coords(int tile, int *tx, int *ty, int *tz);
+
+static WaterChunk *water_chunk_get(int tile, bool create) {
+    if (tile < 0 || tile >= WATER_TILE_COUNT) return NULL;
+    WaterChunk *chunk = waterSystem.chunks[tile];
+    if (chunk || !create) return chunk;
+    chunk = (WaterChunk *)calloc(1, sizeof(*chunk));
+    if (!chunk) return NULL;
+    int tx, ty, tz;
+    water_tile_coords(tile, &tx, &ty, &tz);
+    for (int local = 0; local < WATER_CHUNK_CELLS; ++local) {
+        int lx = local & 7, lz = (local >> 3) & 7, ly = local >> 6;
+        int gx = WATER_MIN_X + tx * 8 + lx;
+        int gy = WATER_MIN_Y + ty * 8 + ly;
+        int gz = WATER_MIN_Z + tz * 8 + lz;
+        int voxel = table_get_static_only(gx, gy, gz);
+        chunk->static_solid[local] = (uint8_t)(voxel >= 0 && voxel < voxel_count &&
+                                               !voxels[voxel].simulate);
+        chunk->previous_solid[local] = chunk->static_solid[local];
+    }
+    waterSystem.chunks[tile] = chunk;
+    waterSystem.resident_tile_ids[waterSystem.resident_tile_count++] = (uint16_t)tile;
+    if (++waterSystem.resident_generation == 0) waterSystem.resident_generation = 1;
+    waterSystem.tile_stats_dirty[tile] = 1;
+    waterSystem.tile_render_dirty[tile] = 1;
+    return chunk;
+}
+
+static inline int water_chunk_local_for_index(int index, int *tile_out) {
+    int y = index / (WATER_SIZE_X * WATER_SIZE_Z);
+    int rem = index - y * WATER_SIZE_X * WATER_SIZE_Z;
+    int z = rem / WATER_SIZE_X;
+    int x = rem - z * WATER_SIZE_X;
+    int tx = x / WATER_TILE_SIZE, ty = y / WATER_TILE_SIZE, tz = z / WATER_TILE_SIZE;
+    *tile_out = tx + WATER_TILE_COUNT_X * (tz + WATER_TILE_COUNT_Z * ty);
+    return (x & 7) + WATER_TILE_SIZE * ((z & 7) + WATER_TILE_SIZE * (y & 7));
+}
+
+static inline WaterChunk *water_chunk_for_index(int index, bool create, int *local_out) {
+    int tile;
+    int local = water_chunk_local_for_index(index, &tile);
+    if (local_out) *local_out = local;
+    return water_chunk_get(tile, create);
+}
+
+static inline uint16_t water_mass_index(int index) {
+    int local; WaterChunk *chunk = water_chunk_for_index(index, false, &local);
+    return chunk ? chunk->mass[local] : 0;
+}
+
+static inline uint16_t water_scratch_index(int index) {
+    int local; WaterChunk *chunk = water_chunk_for_index(index, false, &local);
+    return chunk ? chunk->scratch[local] : 0;
+}
+
+static inline bool water_static_index(int index) {
+    int local; WaterChunk *chunk = water_chunk_for_index(index, false, &local);
+    return chunk && chunk->static_solid[local];
+}
+
+static inline bool water_dynamic_index(int index) {
+    int local; WaterChunk *chunk = water_chunk_for_index(index, false, &local);
+    return chunk && chunk->dynamic_solid[local];
+}
+
+static void water_free_chunks(void) {
+    for (int i = 0; i < waterSystem.resident_tile_count; ++i) {
+        int tile = waterSystem.resident_tile_ids[i];
+        free(waterSystem.chunks[tile]);
+        waterSystem.chunks[tile] = NULL;
+    }
+    waterSystem.resident_tile_count = 0;
+}
 
 static void water_mark_tile_dirty(int tile) {
     if (tile < 0 || tile >= WATER_TILE_COUNT) return;
@@ -114,6 +180,7 @@ static void water_wake_tile_xyz(int tx, int ty, int tz) {
         ty < 0 || ty >= WATER_TILE_COUNT_Y ||
         tz < 0 || tz >= WATER_TILE_COUNT_Z) return;
     int tile = tx + WATER_TILE_COUNT_X * (tz + WATER_TILE_COUNT_Z * ty);
+    if (!water_chunk_get(tile, true)) return;
     waterSystem.tile_active[tile] = 1;
     waterSystem.tile_still_steps[tile] = 0;
     water_mark_tile_dirty(tile);
@@ -134,14 +201,7 @@ static void water_wake_cell_and_neighbors(int gx, int gy, int gz) {
 }
 
 static inline bool water_cell_blocked_index(int index) {
-    return waterSystem.static_solid[index] || waterSystem.dynamic_solid[index];
-}
-
-static void water_add_obstacle_candidate(int index) {
-    if (index < 0 || index >= WATER_CELL_COUNT) return;
-    if (waterSystem.obstacle_seen[index] == waterSystem.obstacle_stamp) return;
-    waterSystem.obstacle_seen[index] = waterSystem.obstacle_stamp;
-    waterSystem.obstacle_candidates[waterSystem.obstacle_candidate_count++] = (uint32_t)index;
+    return water_static_index(index) || water_dynamic_index(index);
 }
 
 static void water_init(void) {
@@ -158,6 +218,7 @@ static void water_init(void) {
 
 static void water_reset(void) {
     water_gpu_shutdown_backend();
+    water_free_chunks();
     memset(&waterSystem, 0, sizeof(waterSystem));
     waterSystem.initialized = true;
     waterSystem.static_generation = UINT64_MAX;
@@ -168,13 +229,14 @@ static void water_reset(void) {
 }
 
 static void water_shutdown(void) {
+    water_free_chunks();
     memset(&waterSystem, 0, sizeof(waterSystem));
 }
 
 static uint32_t water_get_mass(int gx, int gy, int gz) {
     if (!waterSystem.initialized || !water_runtime_enabled() ||
         !water_in_domain(gx, gy, gz)) return 0;
-    return waterSystem.mass[water_index_unchecked(gx, gy, gz)];
+    return water_mass_index(water_index_unchecked(gx, gy, gz));
 }
 
 static bool water_set_mass(int gx, int gy, int gz, uint32_t mass) {
@@ -183,9 +245,11 @@ static bool water_set_mass(int gx, int gy, int gz, uint32_t mass) {
     int index = water_index_unchecked(gx, gy, gz);
     if (water_cell_blocked_index(index) || table_get(gx, gy, gz) >= 0) return false;
     if (mass > WATER_MAX_MASS) mass = WATER_MAX_MASS;
-    if (waterSystem.mass[index] == mass && waterSystem.scratch[index] == mass) return true;
-    waterSystem.mass[index] = mass;
-    waterSystem.scratch[index] = mass;
+    int local; WaterChunk *chunk = water_chunk_for_index(index, mass != 0, &local);
+    if (!chunk) return mass == 0;
+    if (chunk->mass[local] == mass && chunk->scratch[local] == mass) return true;
+    chunk->mass[local] = (uint16_t)mass;
+    chunk->scratch[local] = (uint16_t)mass;
     water_note_cpu_mass_edit();
     water_wake_cell_and_neighbors(gx, gy, gz);
     water_mark_tile_and_neighbors_dirty(water_tile_index_for_cell(gx, gy, gz));
@@ -227,8 +291,10 @@ static void water_remove_region(int minx, int maxx, int miny, int maxy,
         for (int z = minz; z <= maxz; ++z) {
             for (int x = minx; x <= maxx; ++x) {
                 int index = water_index_unchecked(x, y, z);
-                waterSystem.mass[index] = 0;
-                waterSystem.scratch[index] = 0;
+                int local; WaterChunk *chunk = water_chunk_for_index(index, false, &local);
+                if (!chunk) continue;
+                chunk->mass[local] = 0;
+                chunk->scratch[local] = 0;
                 water_note_cpu_mass_edit();
                 water_wake_cell_and_neighbors(x, y, z);
                 water_mark_tile_and_neighbors_dirty(water_tile_index_for_cell(x, y, z));
@@ -255,31 +321,30 @@ static WorldCell world_cell_get(int gx, int gy, int gz) {
 
 static void water_rebuild_static_mask(void) {
     if (waterSystem.static_generation == staticHashGeneration) return;
-    for (int gy = WATER_MIN_Y; gy <= WATER_MAX_Y; ++gy) {
-        for (int gz = WATER_MIN_Z; gz <= WATER_MAX_Z; ++gz) {
-            for (int gx = WATER_MIN_X; gx <= WATER_MAX_X; ++gx) {
-                int index = water_index_unchecked(gx, gy, gz);
+    for (int r = 0; r < waterSystem.resident_tile_count; ++r) {
+        int tile = waterSystem.resident_tile_ids[r];
+        WaterChunk *chunk = waterSystem.chunks[tile];
+        int tx, ty, tz; water_tile_coords(tile, &tx, &ty, &tz);
+        for (int ly = 0; ly < WATER_TILE_SIZE; ++ly)
+            for (int lz = 0; lz < WATER_TILE_SIZE; ++lz)
+                for (int lx = 0; lx < WATER_TILE_SIZE; ++lx) {
+                int gx = WATER_MIN_X + tx * 8 + lx;
+                int gy = WATER_MIN_Y + ty * 8 + ly;
+                int gz = WATER_MIN_Z + tz * 8 + lz;
+                int local = lx + 8 * (lz + 8 * ly);
                 int voxel = table_get_static_only(gx, gy, gz);
                 uint8_t blocked = (uint8_t)(voxel >= 0 && voxel < voxel_count && !voxels[voxel].simulate);
-                if (waterSystem.static_solid[index] != blocked) {
-                    waterSystem.static_solid[index] = blocked;
-                    water_add_obstacle_candidate(index);
-                }
+                chunk->static_solid[local] = blocked;
             }
-        }
     }
     waterSystem.static_generation = staticHashGeneration;
 }
 
 static void water_rebuild_dynamic_mask(void) {
-    uint32_t old_count = waterSystem.dynamic_cell_count;
-    if (old_count) memcpy(waterSystem.bfs_queue, waterSystem.dynamic_cells,
-                          (size_t)old_count * sizeof(uint32_t));
-    for (uint32_t i = 0; i < old_count; ++i) {
-        int index = (int)waterSystem.dynamic_cells[i];
-        waterSystem.dynamic_solid[index] = 0;
+    for (int r = 0; r < waterSystem.resident_tile_count; ++r) {
+        WaterChunk *chunk = waterSystem.chunks[waterSystem.resident_tile_ids[r]];
+        memset(chunk->dynamic_solid, 0, sizeof(chunk->dynamic_solid));
     }
-    waterSystem.dynamic_cell_count = 0;
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *v = &voxels[i];
         if (!v->simulate) continue;
@@ -316,100 +381,110 @@ static void water_rebuild_dynamic_mask(void) {
             for (int gz = gz0; gz <= gz1; ++gz)
                 for (int gx = gx0; gx <= gx1; ++gx)
                 {
-                    int index = water_index_unchecked(gx, gy, gz);
-                    if (!waterSystem.dynamic_solid[index]) {
-                        waterSystem.dynamic_solid[index] = 1;
-                        waterSystem.dynamic_cells[waterSystem.dynamic_cell_count++] = (uint32_t)index;
-                    }
+                    int index = water_index_unchecked(gx, gy, gz), local;
+                    WaterChunk *chunk = water_chunk_for_index(index, false, &local);
+                    if (chunk) chunk->dynamic_solid[local] = 1;
                 }
     }
-    bool changed = old_count != waterSystem.dynamic_cell_count ||
-                   (old_count && memcmp(waterSystem.bfs_queue, waterSystem.dynamic_cells,
-                                        (size_t)old_count * sizeof(uint32_t)) != 0);
-    if (changed) {
-        for (uint32_t i = 0; i < old_count; ++i)
-            water_add_obstacle_candidate((int)waterSystem.bfs_queue[i]);
-        for (uint32_t i = 0; i < waterSystem.dynamic_cell_count; ++i)
-            water_add_obstacle_candidate((int)waterSystem.dynamic_cells[i]);
+    uint64_t hash = UINT64_C(1469598103934665603);
+    for (int r = 0; r < waterSystem.resident_tile_count; ++r) {
+        int tile = waterSystem.resident_tile_ids[r];
+        WaterChunk *chunk = waterSystem.chunks[tile];
+        for (int i = 0; i < 512; ++i) if (chunk->dynamic_solid[i]) {
+            hash ^= ((uint64_t)(uint32_t)tile << 9) | (uint32_t)i;
+            hash *= UINT64_C(1099511628211);
+        }
+    }
+    if (hash != waterSystem.dynamic_mask_hash) {
+        waterSystem.dynamic_mask_hash = hash;
         if (++waterSystem.dynamic_generation == 0) waterSystem.dynamic_generation = 1;
     }
 }
 
 static uint32_t water_displace_from_cell(int source_index) {
-    uint32_t remaining = waterSystem.mass[source_index];
+    uint32_t remaining = water_mass_index(source_index);
     if (remaining == 0) return 0;
-    if (++waterSystem.bfs_stamp == 0) {
-        memset(waterSystem.bfs_seen, 0, sizeof(waterSystem.bfs_seen));
-        waterSystem.bfs_stamp = 1;
-    }
+    enum { BFS_SIDE = 17, BFS_CAPACITY = 17 * 17 * 17 };
+    int queue[BFS_CAPACITY];
+    uint8_t depth[BFS_CAPACITY], seen[BFS_CAPACITY];
+    memset(seen, 0, sizeof(seen));
     uint32_t head = 0, tail = 0;
-    waterSystem.bfs_queue[tail] = (uint32_t)source_index;
-    waterSystem.bfs_depth[tail++] = 0;
-    waterSystem.bfs_seen[source_index] = waterSystem.bfs_stamp;
+    queue[tail] = source_index;
+    depth[tail++] = 0;
+    int sgx, sgy, sgz; water_coords_from_index(source_index, &sgx, &sgy, &sgz);
+    seen[8 + BFS_SIDE * (8 + BFS_SIDE * 8)] = 1;
     uint32_t moved = 0;
     static const int dx[6] = { 0, 1, -1, 0, 0, 0 };
     static const int dy[6] = { 1, 0, 0, 0, 0, -1 };
     static const int dz[6] = { 0, 0, 0, 1, -1, 0 };
     while (head < tail && remaining > 0) {
-        int index = (int)waterSystem.bfs_queue[head];
-        int depth = waterSystem.bfs_depth[head++];
+        int index = queue[head];
+        int cell_depth = depth[head++];
         int gx, gy, gz;
         water_coords_from_index(index, &gx, &gy, &gz);
         if (index != source_index && !water_cell_blocked_index(index)) {
-            uint32_t current = waterSystem.mass[index];
+            uint32_t current = water_mass_index(index);
             uint32_t capacity = WATER_MAX_MASS - current;
             uint32_t amount = remaining < capacity ? remaining : capacity;
             if (amount > 0) {
-                waterSystem.mass[index] = current + amount;
-                waterSystem.scratch[index] = current + amount;
+                int local; WaterChunk *chunk = water_chunk_for_index(index, true, &local);
+                if (!chunk) break;
+                chunk->mass[local] = (uint16_t)(current + amount);
+                chunk->scratch[local] = chunk->mass[local];
                 water_note_cpu_mass_edit();
                 remaining -= amount;
                 moved += amount;
                 water_wake_cell_and_neighbors(gx, gy, gz);
             }
         }
-        if (depth >= 8) continue;
+        if (cell_depth >= 8) continue;
         for (int d = 0; d < 6; ++d) {
             int nx = gx + dx[d], ny = gy + dy[d], nz = gz + dz[d];
             if (!water_in_domain(nx, ny, nz)) continue;
-            int next = water_index_unchecked(nx, ny, nz);
-            if (waterSystem.bfs_seen[next] == waterSystem.bfs_stamp) continue;
-            waterSystem.bfs_seen[next] = waterSystem.bfs_stamp;
-            waterSystem.bfs_queue[tail] = (uint32_t)next;
-            waterSystem.bfs_depth[tail++] = (uint8_t)(depth + 1);
+            int rx = nx - sgx + 8, ry = ny - sgy + 8, rz = nz - sgz + 8;
+            int seen_index = rx + BFS_SIDE * (rz + BFS_SIDE * ry);
+            if (seen[seen_index]) continue;
+            seen[seen_index] = 1;
+            if (tail >= BFS_CAPACITY) continue;
+            queue[tail] = water_index_unchecked(nx, ny, nz);
+            depth[tail++] = (uint8_t)(cell_depth + 1);
         }
     }
-    waterSystem.mass[source_index] = remaining;
-    waterSystem.scratch[source_index] = remaining;
+    int source_local; WaterChunk *source_chunk = water_chunk_for_index(source_index, true, &source_local);
+    source_chunk->mass[source_local] = (uint16_t)remaining;
+    source_chunk->scratch[source_local] = (uint16_t)remaining;
     water_note_cpu_mass_edit();
     return moved;
 }
 
 static void water_rebuild_obstacles_and_displace(void) {
     if (!waterSystem.initialized || !water_runtime_enabled()) return;
-    waterSystem.obstacle_candidate_count = 0;
-    if (++waterSystem.obstacle_stamp == 0) {
-        memset(waterSystem.obstacle_seen, 0, sizeof(waterSystem.obstacle_seen));
-        waterSystem.obstacle_stamp = 1;
-    }
     water_rebuild_static_mask();
     water_rebuild_dynamic_mask();
-    for (uint32_t c = 0; c < waterSystem.obstacle_candidate_count; ++c) {
-        int i = (int)waterSystem.obstacle_candidates[c];
-        uint8_t blocked = (uint8_t)water_cell_blocked_index(i);
-        if (blocked && !waterSystem.previous_solid[i] && waterSystem.mass[i] > 0) {
+    int resident_count = waterSystem.resident_tile_count;
+    for (int r = 0; r < resident_count; ++r) {
+        int tile = waterSystem.resident_tile_ids[r];
+        WaterChunk *chunk = waterSystem.chunks[tile];
+        int tx, ty, tz; water_tile_coords(tile, &tx, &ty, &tz);
+        for (int local = 0; local < 512; ++local) {
+        int lx = local & 7, lz = (local >> 3) & 7, ly = local >> 6;
+        int gx = WATER_MIN_X + tx * 8 + lx;
+        int gy = WATER_MIN_Y + ty * 8 + ly;
+        int gz = WATER_MIN_Z + tz * 8 + lz;
+        int i = water_index_unchecked(gx, gy, gz);
+        uint8_t blocked = chunk->static_solid[local] || chunk->dynamic_solid[local];
+        if (blocked && !chunk->previous_solid[local] && chunk->mass[local] > 0) {
             waterSystem.diagnostics.displaced_mass += water_displace_from_cell(i);
-        } else if (!blocked && waterSystem.previous_solid[i]) {
+        } else if (!blocked && chunk->previous_solid[local]) {
             int gx, gy, gz;
             water_coords_from_index(i, &gx, &gy, &gz);
             water_wake_cell_and_neighbors(gx, gy, gz);
         }
-        if (blocked != waterSystem.previous_solid[i]) {
-            int gx, gy, gz;
-            water_coords_from_index(i, &gx, &gy, &gz);
+        if (blocked != chunk->previous_solid[local]) {
             water_mark_tile_and_neighbors_dirty(water_tile_index_for_cell(gx, gy, gz));
         }
-        waterSystem.previous_solid[i] = blocked;
+        chunk->previous_solid[local] = blocked;
+        }
     }
 }
 
@@ -430,43 +505,61 @@ static inline bool water_neighbor_tile_active(int tx, int ty, int tz) {
            (tz + WATER_TILE_COUNT_Z * ty)] != 0;
 }
 
-static inline uint32_t water_flow_pair(const uint16_t *source, int from, int to,
-                                       bool edge_active) {
-    if (!edge_active || water_cell_blocked_index(from) || water_cell_blocked_index(to)) return 0;
-    uint32_t a = source[from], b = source[to];
+static inline uint32_t water_flow_chunks(const WaterChunk *from_chunk, int from,
+                                         const WaterChunk *to_chunk, int to,
+                                         bool edge_active) {
+    if (!edge_active || !from_chunk || !to_chunk ||
+        from_chunk->static_solid[from] || from_chunk->dynamic_solid[from] ||
+        to_chunk->static_solid[to] || to_chunk->dynamic_solid[to]) return 0;
+    uint32_t a = from_chunk->scratch[from], b = to_chunk->scratch[to];
     return a > b ? (a - b) >> 3 : 0;
+}
+
+static inline WaterChunk *water_neighbor_chunk(int tx, int ty, int tz) {
+    if (tx < 0 || tx >= WATER_TILE_COUNT_X || ty < 0 || ty >= WATER_TILE_COUNT_Y ||
+        tz < 0 || tz >= WATER_TILE_COUNT_Z) return NULL;
+    return waterSystem.chunks[tx + WATER_TILE_COUNT_X * (tz + WATER_TILE_COUNT_Z * ty)];
 }
 
 static void water_gravity_tiles(int start, int end, int worker_id, void *user) {
     (void)worker_id; (void)user;
-    const uint16_t *source = waterSystem.mass;
-    uint16_t *dest = waterSystem.scratch;
-    const int layer = WATER_SIZE_X * WATER_SIZE_Z;
     for (int job = start; job < end; ++job) {
         int tile = waterSystem.active_tile_ids[job];
         int tx, ty, tz;
         water_tile_coords(tile, &tx, &ty, &tz);
+        WaterChunk *chunk = waterSystem.chunks[tile];
+        WaterChunk *below_chunk = water_neighbor_chunk(tx, ty - 1, tz);
+        WaterChunk *above_chunk = water_neighbor_chunk(tx, ty + 1, tz);
         int x0 = tx * WATER_TILE_SIZE, y0 = ty * WATER_TILE_SIZE, z0 = tz * WATER_TILE_SIZE;
         for (int ly = 0; ly < WATER_TILE_SIZE; ++ly) {
             int y = y0 + ly;
             bool below_active = ly > 0 || water_neighbor_tile_active(tx, ty - 1, tz);
             bool above_active = ly + 1 < WATER_TILE_SIZE || water_neighbor_tile_active(tx, ty + 1, tz);
             for (int lz = 0; lz < WATER_TILE_SIZE; ++lz) {
-                int row = x0 + WATER_SIZE_X * ((z0 + lz) + WATER_SIZE_Z * y);
                 for (int lx = 0; lx < WATER_TILE_SIZE; ++lx) {
-                    int index = row + lx;
-                    if (water_cell_blocked_index(index)) { dest[index] = source[index]; continue; }
+                    int local = lx + 8 * (lz + 8 * ly);
+                    uint32_t source_mass = chunk->mass[local];
+                    if (chunk->static_solid[local] || chunk->dynamic_solid[local]) {
+                        chunk->scratch[local] = (uint16_t)source_mass;
+                        continue;
+                    }
                     uint32_t down = 0, incoming = 0;
-                    if (y > 0 && below_active && !water_cell_blocked_index(index - layer)) {
-                        uint32_t capacity = WATER_MAX_MASS - source[index - layer];
-                        down = source[index] < capacity ? source[index] : capacity;
+                    WaterChunk *down_owner = ly > 0 ? chunk : below_chunk;
+                    int down_local = ly > 0 ? local - 64 : lx + 8 * (lz + 8 * 7);
+                    if (y > 0 && below_active && down_owner &&
+                        !down_owner->static_solid[down_local] && !down_owner->dynamic_solid[down_local]) {
+                        uint32_t capacity = WATER_MAX_MASS - down_owner->mass[down_local];
+                        down = source_mass < capacity ? source_mass : capacity;
                     }
-                    if (y + 1 < WATER_SIZE_Y && above_active &&
-                        !water_cell_blocked_index(index + layer)) {
-                        uint32_t capacity = WATER_MAX_MASS - source[index];
-                        incoming = source[index + layer] < capacity ? source[index + layer] : capacity;
+                    WaterChunk *up_owner = ly < 7 ? chunk : above_chunk;
+                    int up_local = ly < 7 ? local + 64 : lx + 8 * lz;
+                    if (y + 1 < WATER_SIZE_Y && above_active && up_owner &&
+                        !up_owner->static_solid[up_local] && !up_owner->dynamic_solid[up_local]) {
+                        uint32_t capacity = WATER_MAX_MASS - source_mass;
+                        uint32_t above = up_owner->mass[up_local];
+                        incoming = above < capacity ? above : capacity;
                     }
-                    dest[index] = source[index] - down + incoming;
+                    chunk->scratch[local] = (uint16_t)(source_mass - down + incoming);
                 }
             }
         }
@@ -475,25 +568,35 @@ static void water_gravity_tiles(int start, int end, int worker_id, void *user) {
 
 static void water_horizontal_tiles(int start, int end, int worker_id, void *user) {
     (void)worker_id; (void)user;
-    const uint16_t *source = waterSystem.scratch;
-    uint16_t *dest = waterSystem.mass;
     for (int job = start; job < end; ++job) {
         int tile = waterSystem.active_tile_ids[job];
         int tx, ty, tz;
         water_tile_coords(tile, &tx, &ty, &tz);
+        WaterChunk *chunk = waterSystem.chunks[tile];
+        WaterChunk *xp = water_neighbor_chunk(tx + 1, ty, tz);
+        WaterChunk *xm = water_neighbor_chunk(tx - 1, ty, tz);
+        WaterChunk *zp = water_neighbor_chunk(tx, ty, tz + 1);
+        WaterChunk *zm = water_neighbor_chunk(tx, ty, tz - 1);
         int x0 = tx * WATER_TILE_SIZE, y0 = ty * WATER_TILE_SIZE, z0 = tz * WATER_TILE_SIZE;
         bool tile_changed = false;
         for (int ly = 0; ly < WATER_TILE_SIZE; ++ly) {
             int y = y0 + ly;
             for (int lz = 0; lz < WATER_TILE_SIZE; ++lz) {
                 int z = z0 + lz;
-                int row = x0 + WATER_SIZE_X * (z + WATER_SIZE_Z * y);
                 for (int lx = 0; lx < WATER_TILE_SIZE; ++lx) {
-                    int index = row + lx;
-                    uint32_t next = source[index];
-                    if (!water_cell_blocked_index(index)) {
-                        int neighbors[4] = { index + 1, index - 1,
-                                             index + WATER_SIZE_X, index - WATER_SIZE_X };
+                    int local = lx + 8 * (lz + 8 * ly);
+                    uint32_t next = chunk->scratch[local];
+                    if (!chunk->static_solid[local] && !chunk->dynamic_solid[local]) {
+                        WaterChunk *owners[4] = {
+                            lx < 7 ? chunk : xp, lx > 0 ? chunk : xm,
+                            lz < 7 ? chunk : zp, lz > 0 ? chunk : zm
+                        };
+                        int neighbors[4] = {
+                            lx < 7 ? local + 1 : 8 * (lz + 8 * ly),
+                            lx > 0 ? local - 1 : 7 + 8 * (lz + 8 * ly),
+                            lz < 7 ? local + 8 : lx + 8 * (8 * ly),
+                            lz > 0 ? local - 8 : lx + 8 * (7 + 8 * ly)
+                        };
                         bool enabled[4] = {
                             lx + 1 < WATER_TILE_SIZE || water_neighbor_tile_active(tx + 1, ty, tz),
                             lx > 0 || water_neighbor_tile_active(tx - 1, ty, tz),
@@ -507,13 +610,13 @@ static void water_horizontal_tiles(int start, int end, int worker_id, void *user
                         uint32_t outgoing = 0, incoming = 0;
                         for (int n = 0; n < 4; ++n) {
                             if (!enabled[n]) continue;
-                            outgoing += water_flow_pair(source, index, neighbors[n], true);
-                            incoming += water_flow_pair(source, neighbors[n], index, true);
+                            outgoing += water_flow_chunks(chunk, local, owners[n], neighbors[n], true);
+                            incoming += water_flow_chunks(owners[n], neighbors[n], chunk, local, true);
                         }
-                        next = source[index] - outgoing + incoming;
+                        next = chunk->scratch[local] - outgoing + incoming;
                     }
-                    if (dest[index] != next) tile_changed = true;
-                    dest[index] = next;
+                    if (chunk->mass[local] != next) tile_changed = true;
+                    chunk->mass[local] = (uint16_t)next;
                 }
             }
         }
@@ -524,15 +627,8 @@ static void water_horizontal_tiles(int start, int end, int worker_id, void *user
 }
 
 static void water_sync_tile_buffers(int tile) {
-    int tx, ty, tz;
-    water_tile_coords(tile, &tx, &ty, &tz);
-    int x0 = tx * WATER_TILE_SIZE, y0 = ty * WATER_TILE_SIZE, z0 = tz * WATER_TILE_SIZE;
-    for (int ly = 0; ly < WATER_TILE_SIZE; ++ly)
-        for (int lz = 0; lz < WATER_TILE_SIZE; ++lz) {
-            int row = x0 + WATER_SIZE_X * ((z0 + lz) + WATER_SIZE_Z * (y0 + ly));
-            memcpy(&waterSystem.scratch[row], &waterSystem.mass[row],
-                   WATER_TILE_SIZE * sizeof(uint16_t));
-        }
+    WaterChunk *chunk = waterSystem.chunks[tile];
+    if (chunk) memcpy(chunk->scratch, chunk->mass, sizeof(chunk->mass));
 }
 
 static void water_update_tile_sleep(int still_increment) {
@@ -560,7 +656,39 @@ static void water_update_tile_sleep(int still_increment) {
     }
 }
 
+static void water_reclaim_empty_chunks(void) {
+    for (int r = waterSystem.resident_tile_count - 1; r >= 0; --r) {
+        int tile = waterSystem.resident_tile_ids[r];
+        WaterChunk *chunk = waterSystem.chunks[tile];
+        if (!chunk || waterSystem.tile_active[tile]) continue;
+        bool wet = false;
+        for (int i = 0; i < WATER_CHUNK_CELLS; ++i) wet |= chunk->mass[i] != 0;
+        if (wet) continue;
+        free(chunk);
+        waterSystem.chunks[tile] = NULL;
+        waterSystem.resident_tile_ids[r] =
+            waterSystem.resident_tile_ids[--waterSystem.resident_tile_count];
+        waterSystem.tile_still_steps[tile] = 0;
+        waterSystem.tile_changed[tile] = 0;
+        waterSystem.tile_wet_cells[tile] = 0;
+        waterSystem.tile_visible_mass[tile] = 0;
+        waterSystem.tile_trapped_mass[tile] = 0;
+        waterSystem.tile_stats_dirty[tile] = 0;
+        waterSystem.tile_render_dirty[tile] = 1;
+        waterSystem.render_dirty = true;
+        if (++waterSystem.resident_generation == 0) waterSystem.resident_generation = 1;
+    }
+}
+
 static void water_recompute_tile_stats(int tile) {
+    WaterChunk *chunk = waterSystem.chunks[tile];
+    if (!chunk) {
+        waterSystem.tile_wet_cells[tile] = 0;
+        waterSystem.tile_visible_mass[tile] = 0;
+        waterSystem.tile_trapped_mass[tile] = 0;
+        waterSystem.tile_stats_dirty[tile] = 0;
+        return;
+    }
     int tx, ty, tz;
     water_tile_coords(tile, &tx, &ty, &tz);
     int x0 = tx * WATER_TILE_SIZE, y0 = ty * WATER_TILE_SIZE, z0 = tz * WATER_TILE_SIZE;
@@ -571,7 +699,8 @@ static void water_recompute_tile_stats(int tile) {
             int row = x0 + WATER_SIZE_X * ((z0 + lz) + WATER_SIZE_Z * (y0 + ly));
             for (int lx = 0; lx < WATER_TILE_SIZE; ++lx) {
                 int i = row + lx;
-                uint32_t mass = waterSystem.mass[i];
+                int local = lx + 8 * (lz + 8 * ly);
+                uint32_t mass = chunk->mass[local];
                 if (!mass) continue;
                 if (water_cell_blocked_index(i)) trapped += mass;
                 else { wet++; visible += mass; }
@@ -586,7 +715,8 @@ static void water_recompute_tile_stats(int tile) {
 static void water_refresh_diagnostics(void) {
     uint32_t wet = 0, active = 0;
     uint64_t visible = 0, trapped = 0;
-    for (int tile = 0; tile < WATER_TILE_COUNT; ++tile) {
+    for (int r = 0; r < waterSystem.resident_tile_count; ++r) {
+        int tile = waterSystem.resident_tile_ids[r];
         if (waterSystem.tile_stats_dirty[tile]) water_recompute_tile_stats(tile);
         active += waterSystem.tile_active[tile] != 0;
         wet += waterSystem.tile_wet_cells[tile];
@@ -598,6 +728,9 @@ static void water_refresh_diagnostics(void) {
     waterSystem.diagnostics.wet_cells = wet;
     waterSystem.diagnostics.visible_mass = visible;
     waterSystem.diagnostics.trapped_mass = trapped;
+    waterSystem.diagnostics.resident_chunks = waterSystem.resident_tile_count;
+    waterSystem.diagnostics.resident_bytes =
+        (uint64_t)waterSystem.resident_tile_count * (uint64_t)sizeof(WaterChunk);
 }
 
 static void water_step_batch(float fixed_dt, int fixed_steps) {
@@ -612,6 +745,7 @@ static void water_step_batch(float fixed_dt, int fixed_steps) {
     double after_obstacles = pbd_time_now_ms();
     water_build_active_tile_list();
     if (waterSystem.active_tile_count == 0) {
+        water_reclaim_empty_chunks();
         water_refresh_diagnostics();
         double finished = pbd_time_now_ms();
         waterSystem.diagnostics.processed_cells = 0;
@@ -622,19 +756,23 @@ static void water_step_batch(float fixed_dt, int fixed_steps) {
         return;
     }
     bool gpu_requested = physics_backend_is_gpu(physicsBackend.active);
-    if (gpu_requested) memcpy(waterSystem.batch_snapshot, waterSystem.mass, sizeof(waterSystem.mass));
+    if (gpu_requested) for (int r = 0; r < waterSystem.resident_tile_count; ++r) {
+        WaterChunk *chunk = waterSystem.chunks[waterSystem.resident_tile_ids[r]];
+        memcpy(chunk->batch_snapshot, chunk->mass, sizeof(chunk->mass));
+    }
     if (gpu_requested && water_gpu_run_batch(fixed_steps)) {
         for (int job = 0; job < waterSystem.active_tile_count; ++job) {
             int tile = waterSystem.active_tile_ids[job];
             int tx, ty, tz;
             water_tile_coords(tile, &tx, &ty, &tz);
+            WaterChunk *chunk = waterSystem.chunks[tile];
             int x0 = tx * WATER_TILE_SIZE, y0 = ty * WATER_TILE_SIZE, z0 = tz * WATER_TILE_SIZE;
             for (int ly = 0; ly < WATER_TILE_SIZE && !waterSystem.tile_changed[tile]; ++ly)
                 for (int lz = 0; lz < WATER_TILE_SIZE && !waterSystem.tile_changed[tile]; ++lz) {
                     int row = x0 + WATER_SIZE_X * ((z0 + lz) + WATER_SIZE_Z * (y0 + ly));
                     for (int lx = 0; lx < WATER_TILE_SIZE; ++lx) {
-                        int i = row + lx;
-                        if (waterSystem.mass[i] != waterSystem.batch_snapshot[i]) {
+                        int local = lx + 8 * (lz + 8 * ly);
+                        if (chunk->mass[local] != chunk->batch_snapshot[local]) {
                             waterSystem.tile_changed[tile] = 1;
                             break;
                         }
@@ -644,6 +782,7 @@ static void water_step_batch(float fixed_dt, int fixed_steps) {
         }
         double after_solver = pbd_time_now_ms();
         water_update_tile_sleep(fixed_steps);
+        water_reclaim_empty_chunks();
         water_refresh_diagnostics();
         double finished = pbd_time_now_ms();
         waterSystem.diagnostics.processed_cells =
@@ -655,8 +794,11 @@ static void water_step_batch(float fixed_dt, int fixed_steps) {
         return;
     }
     if (gpu_requested) {
-        memcpy(waterSystem.mass, waterSystem.batch_snapshot, sizeof(waterSystem.mass));
-        memcpy(waterSystem.scratch, waterSystem.batch_snapshot, sizeof(waterSystem.mass));
+        for (int r = 0; r < waterSystem.resident_tile_count; ++r) {
+            WaterChunk *chunk = waterSystem.chunks[waterSystem.resident_tile_ids[r]];
+            memcpy(chunk->mass, chunk->batch_snapshot, sizeof(chunk->mass));
+            memcpy(chunk->scratch, chunk->batch_snapshot, sizeof(chunk->mass));
+        }
         waterSystem.cpu_scratch_valid = true;
     }
     bool old_force_st = physics_force_single_cpu;
@@ -682,6 +824,7 @@ static void water_step_batch(float fixed_dt, int fixed_steps) {
     if (any_mass_changed) water_note_cpu_mass_edit();
     water_update_tile_sleep(fixed_steps);
     physics_force_single_cpu = old_force_st;
+    water_reclaim_empty_chunks();
     water_refresh_diagnostics();
     double finished = pbd_time_now_ms();
     waterSystem.diagnostics.processed_cells =
@@ -700,7 +843,7 @@ static void water_disturb(Vector3 world_position, Vector3 direction, uint32_t li
     if (!water_in_domain(gx, gy, gz)) return;
     int source = water_index_unchecked(gx, gy, gz);
     if (water_cell_blocked_index(source)) return;
-    uint32_t amount = waterSystem.mass[source];
+    uint32_t amount = water_mass_index(source);
     if (amount > limit) amount = limit;
     if (!amount) return;
     int tx = gx, ty = gy + 1, tz = gz;
@@ -709,12 +852,16 @@ static void water_disturb(Vector3 world_position, Vector3 direction, uint32_t li
     if (!water_in_domain(tx, ty, tz)) return;
     int target = water_index_unchecked(tx, ty, tz);
     if (water_cell_blocked_index(target)) return;
-    uint32_t capacity = WATER_MAX_MASS - waterSystem.mass[target];
+    uint32_t capacity = WATER_MAX_MASS - water_mass_index(target);
     if (amount > capacity) amount = capacity;
-    waterSystem.mass[source] -= amount;
-    waterSystem.scratch[source] = waterSystem.mass[source];
-    waterSystem.mass[target] += amount;
-    waterSystem.scratch[target] = waterSystem.mass[target];
+    int source_local, target_local;
+    WaterChunk *source_chunk = water_chunk_for_index(source, false, &source_local);
+    WaterChunk *target_chunk = water_chunk_for_index(target, true, &target_local);
+    if (!source_chunk || !target_chunk) return;
+    source_chunk->mass[source_local] -= (uint16_t)amount;
+    source_chunk->scratch[source_local] = source_chunk->mass[source_local];
+    target_chunk->mass[target_local] += (uint16_t)amount;
+    target_chunk->scratch[target_local] = target_chunk->mass[target_local];
     water_note_cpu_mass_edit();
     water_wake_cell_and_neighbors(gx, gy, gz);
     water_wake_cell_and_neighbors(tx, ty, tz);
@@ -728,13 +875,23 @@ static int water_write_map(FILE *fp) {
         return 0;
     }
     int count = 0;
-    for (int i = 0; i < WATER_CELL_COUNT; ++i) if (waterSystem.mass[i] > 0) count++;
+    for (int r = 0; r < waterSystem.resident_tile_count; ++r) {
+        WaterChunk *chunk = waterSystem.chunks[waterSystem.resident_tile_ids[r]];
+        for (int local = 0; local < 512; ++local) count += chunk->mass[local] > 0;
+    }
     fprintf(fp, "WATER %d\n", count);
-    for (int i = 0; i < WATER_CELL_COUNT; ++i) {
-        if (waterSystem.mass[i] == 0) continue;
-        int gx, gy, gz;
-        water_coords_from_index(i, &gx, &gy, &gz);
-        fprintf(fp, "%d %d %d %u\n", gx, gy, gz, waterSystem.mass[i]);
+    for (int r = 0; r < waterSystem.resident_tile_count; ++r) {
+        int tile = waterSystem.resident_tile_ids[r], tx, ty, tz;
+        WaterChunk *chunk = waterSystem.chunks[tile];
+        water_tile_coords(tile, &tx, &ty, &tz);
+        for (int local = 0; local < 512; ++local) {
+            if (!chunk->mass[local]) continue;
+            int lx = local & 7, lz = (local >> 3) & 7, ly = local >> 6;
+            int gx = WATER_MIN_X + tx * 8 + lx;
+            int gy = WATER_MIN_Y + ty * 8 + ly;
+            int gz = WATER_MIN_Z + tz * 8 + lz;
+            fprintf(fp, "%d %d %d %u\n", gx, gy, gz, (unsigned)chunk->mass[local]);
+        }
     }
     return count;
 }
@@ -749,11 +906,7 @@ static bool water_read_map_entries(FILE *fp, int count) {
         if (fscanf(fp, "%d %d %d %u\n", &gx, &gy, &gz, &mass) != 4) return false;
         if (!water_in_domain(gx, gy, gz) || mass > WATER_MAX_MASS) return false;
         if (enabled) {
-            int index = water_index_unchecked(gx, gy, gz);
-            waterSystem.mass[index] = (uint32_t)mass;
-            waterSystem.scratch[index] = (uint32_t)mass;
-            water_note_cpu_mass_edit();
-            water_wake_cell_and_neighbors(gx, gy, gz);
+            (void)water_set_mass(gx, gy, gz, mass);
         }
     }
     waterSystem.render_dirty = true;

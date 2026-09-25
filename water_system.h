@@ -18,6 +18,7 @@
 #define WATER_MAX_MASS UINT32_C(65535)
 #define WATER_RENDER_MIN_MASS UINT32_C(256)
 #define WATER_TILE_SIZE 8
+#define WATER_CHUNK_CELLS (WATER_TILE_SIZE * WATER_TILE_SIZE * WATER_TILE_SIZE)
 #define WATER_TILE_COUNT_X (WATER_SIZE_X / WATER_TILE_SIZE)
 #define WATER_TILE_COUNT_Y (WATER_SIZE_Y / WATER_TILE_SIZE)
 #define WATER_TILE_COUNT_Z (WATER_SIZE_Z / WATER_TILE_SIZE)
@@ -45,6 +46,8 @@ typedef struct WaterDiagnostics {
     uint64_t trapped_mass;
     uint64_t displaced_mass;
     uint32_t processed_cells;
+    uint32_t resident_chunks;
+    uint64_t resident_bytes;
     double last_obstacle_ms;
     double last_solver_ms;
     double last_maintenance_ms;
