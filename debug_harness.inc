@@ -99,6 +99,9 @@ typedef struct DebugRunState {
     bool falling_pillar_test;
     bool platform_lifecycle_test;
     bool water_fall_test;
+    bool water_active_structure_test;
+    bool water_submersion_test;
+    bool water_dynamic_contact;
     bool water_ground_contact;
     bool restoration_deadline_test;
     bool restoration_deadline_hold_applied;
@@ -217,6 +220,8 @@ static bool debug_setup_tether_active_then_static(DebugRunState *state);
 static bool debug_setup_tether_thin_wall_ccd(DebugRunState *state);
 static bool debug_setup_water_fall(DebugRunState *state);
 static bool debug_setup_water_cube_impact(DebugRunState *state);
+static bool debug_setup_water_active_cube_impact(DebugRunState *state);
+static bool debug_setup_water_container_drop(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall },
@@ -235,7 +240,9 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "tether-active-then-static", "Tethering an active voxel then a static voxel preserves and pulls both", debug_setup_tether_active_then_static },
     { "tether-thin-wall-ccd", "High-speed tether throw uses swept particle rays against a one-voxel wall", debug_setup_tether_thin_wall_ccd },
     { "water-fall", "Finite CA water falls onto a static voxel floor and spreads", debug_setup_water_fall },
-    { "water-cube-impact", "A 10x10x10 water cube falls onto a 10x10x10 static cube", debug_setup_water_cube_impact }
+    { "water-cube-impact", "A 10x10x10 water cube falls onto a 10x10x10 static cube", debug_setup_water_cube_impact },
+    { "water-active-cube-impact", "A 4x4x4 water cube falls onto a glued 4x4x4 active voxel group", debug_setup_water_active_cube_impact },
+    { "water-container-drop", "A glued 3x3x3 active voxel group falls into CA water held by a static basin", debug_setup_water_container_drop }
 };
 
 static const int debugScenarioCount = (int)(sizeof(debugScenarios) / sizeof(debugScenarios[0]));
@@ -803,7 +810,8 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
         sample.min_y = 0.0f;
         sample.max_y = 0.0f;
     }
-    if (strcmp(debugRunConfig.scenario, "water-fall") == 0) {
+    if (strncmp(debugRunConfig.scenario, "water-", 6) == 0 &&
+        strcmp(debugRunConfig.scenario, "water-container-drop") != 0) {
         sample.centroid_y = debug_water_centroid_y();
         sample.centroid_drop = initial_centroid_y - sample.centroid_y;
         sample.min_y = 0.0f;
@@ -1538,7 +1546,7 @@ static bool debug_setup_water_fall(DebugRunState *state)
     water_rebuild_obstacles_and_displace();
     water_refresh_diagnostics();
     state->water_initial_mass = water_test_total_mass();
-    state->initial_centroid_y = debug_water_centroid_y();
+    debug_set_initial_centroid(state);
     state->activation_succeeded = true;
 
     state->camera.position = (Vector3){ 11.5f, 9.0f, 15.5f };
@@ -1588,7 +1596,7 @@ static bool debug_setup_water_cube_impact(DebugRunState *state)
     water_rebuild_obstacles_and_displace();
     water_refresh_diagnostics();
     state->water_initial_mass = water_test_total_mass();
-    state->initial_centroid_y = debug_water_centroid_y();
+    debug_set_initial_centroid(state);
     state->activation_succeeded = true;
 
     state->camera.position = (Vector3){ 24.0f, 17.0f, 30.0f };
@@ -1604,6 +1612,152 @@ static bool debug_setup_water_cube_impact(DebugRunState *state)
         state->water_initial_mass != UINT64_C(1000) * WATER_MAX_MASS) {
         debug_add_failure(state,
                           "water-cube-impact created %d/1000 water cells (mass=%llu)",
+                          water_cells, (unsigned long long)state->water_initial_mass);
+        return false;
+    }
+    return true;
+}
+
+static bool debug_setup_water_active_cube_impact(DebugRunState *state)
+{
+    debug_reset_world();
+    state->water_fall_test = true;
+    state->water_active_structure_test = true;
+    state->expected_voxels = 64;
+
+    Color structure_color = (Color){ 232, 142, 48, 255 };
+    int active_cells = 0;
+    for (int y = 3; y < 7; ++y) {
+        for (int z = -2; z < 2; ++z) {
+            for (int x = -2; x < 2; ++x) {
+                if (debug_add_cell(x, y, z, false, true, structure_color,
+                                   DEBUG_TEST_TAG) >= 0) {
+                    ++active_cells;
+                }
+            }
+        }
+    }
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_rebuild_world_state();
+
+    int glued_faces = 0;
+    for (int i = 0; i < voxel_count; ++i) {
+        if (voxels[i].debugClusterTag != DEBUG_TEST_TAG) continue;
+        for (int face = 0; face < 6; ++face) glued_faces += voxels[i].glued_faces[face] ? 1 : 0;
+    }
+
+    int water_cells = 0;
+    for (int y = 14; y < 18; ++y) {
+        for (int z = -2; z < 2; ++z) {
+            for (int x = -2; x < 2; ++x) {
+                if (water_set_mass(x, y, z, WATER_MAX_MASS)) ++water_cells;
+            }
+        }
+    }
+    water_rebuild_obstacles_and_displace();
+    water_refresh_diagnostics();
+    state->water_initial_mass = water_test_total_mass();
+    state->initial_centroid_y = debug_water_centroid_y();
+    state->activation_succeeded = true;
+
+    state->camera.position = (Vector3){ 13.0f, 10.0f, 17.0f };
+    state->camera.target = (Vector3){ 0.0f, 5.0f, 0.0f };
+    state->camera.fovy = 48.0f;
+
+    if (active_cells != 64 || glued_faces == 0) {
+        debug_add_failure(state,
+                          "water-active-cube-impact created %d/64 active voxels with %d glued faces",
+                          active_cells, glued_faces);
+        return false;
+    }
+    if (water_cells != 64 || state->water_initial_mass != UINT64_C(64) * WATER_MAX_MASS) {
+        debug_add_failure(state,
+                          "water-active-cube-impact created %d/64 water cells (mass=%llu)",
+                          water_cells, (unsigned long long)state->water_initial_mass);
+        return false;
+    }
+    return true;
+}
+
+static bool debug_setup_water_container_drop(DebugRunState *state)
+{
+    debug_reset_world();
+    state->water_fall_test = true;
+    state->water_active_structure_test = true;
+    state->water_submersion_test = true;
+    state->expected_voxels = 27;
+
+    Color container_color = (Color){ 88, 100, 116, 255 };
+    int container_cells = 0;
+    for (int z = -8; z <= 8; ++z) {
+        for (int x = -8; x <= 8; ++x) {
+            if (debug_add_cell(x, 0, z, true, false, container_color,
+                               DEBUG_SUPPORT_TAG) >= 0) ++container_cells;
+        }
+    }
+    for (int y = 1; y <= 8; ++y) {
+        for (int z = -8; z <= 8; ++z) {
+            for (int x = -8; x <= 8; ++x) {
+                if (x != -8 && x != 8 && z != -8 && z != 8) continue;
+                if (debug_add_cell(x, y, z, true, false, container_color,
+                                   DEBUG_SUPPORT_TAG) >= 0) ++container_cells;
+            }
+        }
+    }
+
+    Color structure_color = (Color){ 232, 142, 48, 255 };
+    int active_cells = 0;
+    for (int y = 8; y <= 10; ++y) {
+        for (int z = -1; z <= 1; ++z) {
+            for (int x = -1; x <= 1; ++x) {
+                if (debug_add_cell(x, y, z, false, true, structure_color,
+                                   DEBUG_TEST_TAG) >= 0) ++active_cells;
+            }
+        }
+    }
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_rebuild_world_state();
+
+    int glued_faces = 0;
+    for (int i = 0; i < voxel_count; ++i) {
+        if (voxels[i].debugClusterTag != DEBUG_TEST_TAG) continue;
+        for (int face = 0; face < 6; ++face) glued_faces += voxels[i].glued_faces[face] ? 1 : 0;
+    }
+
+    int water_cells = 0;
+    for (int y = 1; y <= 5; ++y) {
+        for (int z = -7; z <= 7; ++z) {
+            for (int x = -7; x <= 7; ++x) {
+                if (water_set_mass(x, y, z, WATER_MAX_MASS)) ++water_cells;
+            }
+        }
+    }
+    water_rebuild_obstacles_and_displace();
+    water_refresh_diagnostics();
+    state->water_initial_mass = water_test_total_mass();
+    debug_set_initial_centroid(state);
+    state->activation_succeeded = true;
+
+    state->camera.position = (Vector3){ 18.0f, 13.0f, 22.0f };
+    state->camera.target = (Vector3){ 0.0f, 4.0f, 0.0f };
+    state->camera.fovy = 48.0f;
+
+    const int expected_container_cells = 17 * 17 + 8 * (17 * 4 - 4);
+    if (container_cells != expected_container_cells) {
+        debug_add_failure(state, "water-container-drop created %d/%d container voxels",
+                          container_cells, expected_container_cells);
+        return false;
+    }
+    if (active_cells != 27 || glued_faces == 0) {
+        debug_add_failure(state,
+                          "water-container-drop created %d/27 active voxels with %d glued faces",
+                          active_cells, glued_faces);
+        return false;
+    }
+    if (water_cells != 1125 ||
+        state->water_initial_mass != UINT64_C(1125) * WATER_MAX_MASS) {
+        debug_add_failure(state,
+                          "water-container-drop created %d/1125 water cells (mass=%llu)",
                           water_cells, (unsigned long long)state->water_initial_mass);
         return false;
     }
@@ -2457,13 +2611,10 @@ static bool debug_setup_tether_thin_wall_ccd(DebugRunState *state)
     return true;
 }
 
-static void debug_physics_step(DebugRunState *state)
+static void debug_record_water_timing(DebugRunState *state)
 {
-    if (state && state->water_fall_test) {
-        rebuild_static_hash_if_dirty();
-        water_step_batch(PBD_MAX_STEP_DT, 1);
-        double elapsed_ms = water_diagnostics()->last_step_ms;
         const WaterDiagnostics *wd = water_diagnostics();
+        double elapsed_ms = wd->last_step_ms;
         state->water_step_total_ms += elapsed_ms;
         if (state->water_step_samples == 0 || elapsed_ms < state->water_step_min_ms) {
             state->water_step_min_ms = elapsed_ms;
@@ -2478,6 +2629,14 @@ static void debug_physics_step(DebugRunState *state)
         state->water_gpu_dispatch_total_ms += wd->last_gpu_dispatch_ms;
         state->water_gpu_readback_total_ms += wd->last_gpu_readback_ms;
         state->water_step_samples++;
+}
+
+static void debug_physics_step(DebugRunState *state)
+{
+    if (state && state->water_fall_test && !state->water_active_structure_test) {
+        rebuild_static_hash_if_dirty();
+        water_step_batch(PBD_MAX_STEP_DT, 1);
+        debug_record_water_timing(state);
         return;
     }
     activate_static_voxels_near_dynamic();
@@ -2485,6 +2644,10 @@ static void debug_physics_step(DebugRunState *state)
     wake_sleeping_voxels_near_awake();
     rebuild_static_hash_if_dirty();
     simulate_voxel_pbd(PBD_MAX_STEP_DT);
+    if (state && state->water_active_structure_test) {
+        water_step_batch(PBD_MAX_STEP_DT, 1);
+        debug_record_water_timing(state);
+    }
     recycle_dead_voxels();
     rebuild_voxel_hash();
     deactivate_sleeping_voxels();
@@ -2529,6 +2692,15 @@ static void debug_validate_step(DebugRunState *state, int step)
     if (state->water_fall_test) {
         uint64_t total = 0;
         uint64_t trapped = 0;
+        int structure_voxels = 0;
+        if (state->water_active_structure_test) {
+            for (int i = 0; i < voxel_count; ++i)
+                structure_voxels += voxels[i].debugClusterTag == DEBUG_TEST_TAG;
+            if (structure_voxels != state->expected_voxels) {
+                debug_add_failure(state, "step %d: active water target has %d/%d voxels",
+                                  step, structure_voxels, state->expected_voxels);
+            }
+        }
         for (int i = 0; i < WATER_CELL_COUNT; ++i) {
             uint32_t mass = waterSystem.mass[i];
             if (mass > WATER_MAX_MASS) {
@@ -2539,6 +2711,18 @@ static void debug_validate_step(DebugRunState *state, int step)
             if (mass >= WATER_RENDER_MIN_MASS) {
                 int gx, gy, gz;
                 water_coords_from_index(i, &gx, &gy, &gz);
+                if (state->water_submersion_test) {
+                    static const int dx[6] = { 1, -1, 0, 0, 0, 0 };
+                    static const int dy[6] = { 0, 0, 1, -1, 0, 0 };
+                    static const int dz[6] = { 0, 0, 0, 0, 1, -1 };
+                    for (int d = 0; d < 6; ++d) {
+                        int nx = gx + dx[d], ny = gy + dy[d], nz = gz + dz[d];
+                        if (water_in_domain(nx, ny, nz) &&
+                            waterSystem.dynamic_solid[water_index_unchecked(nx, ny, nz)]) {
+                            state->water_dynamic_contact = true;
+                        }
+                    }
+                }
                 if (gy > WATER_MIN_Y) {
                     int below = water_index_unchecked(gx, gy - 1, gz);
                     if (water_cell_blocked_index(below)) state->water_ground_contact = true;
@@ -2949,15 +3133,21 @@ static void debug_finalize_validation(DebugRunState *state)
                           physicsBackend.fallback_reason);
     }
     if (state->water_fall_test) {
-        if (!state->water_ground_contact) {
-            debug_add_failure(state, "falling water never reached the floor");
+        if (state->water_submersion_test && !state->water_dynamic_contact) {
+            debug_add_failure(state, "active voxel structure never contacted the CA liquid");
         }
+        if (!state->water_ground_contact) {
+            debug_add_failure(state, state->water_active_structure_test
+                ? "falling water never reached the active voxel structure"
+                : "falling water never reached the floor");
+        }
+        float minimum_drop = state->water_submersion_test ? 2.0f : 5.0f;
         if (!state->drop_sampled || !isfinite(state->drop_at_step_60) ||
-            state->drop_at_step_60 < 5.0f) {
+            state->drop_at_step_60 < minimum_drop) {
             debug_add_failure(state,
-                              "water centroid dropped only %.3f metres "
-                              "(minimum 5.000)",
-                              state->drop_at_step_60);
+                              "tracked centroid dropped only %.3f metres "
+                              "(minimum %.3f)",
+                              state->drop_at_step_60, minimum_drop);
         }
         uint64_t final_mass = water_test_total_mass();
         if (final_mass != state->water_initial_mass) {
