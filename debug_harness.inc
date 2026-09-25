@@ -98,6 +98,8 @@ typedef struct DebugRunState {
     bool recycle_succeeded;
     bool falling_pillar_test;
     bool platform_lifecycle_test;
+    bool water_fall_test;
+    bool water_ground_contact;
     bool restoration_deadline_test;
     bool restoration_deadline_hold_applied;
     bool overhang_anchor_observed;
@@ -107,6 +109,19 @@ typedef struct DebugRunState {
     int sleep_snap_static_step;
     int sleep_snap_queue_at_static;
     uint64_t sleep_snap_static_identity_signature;
+    uint64_t water_initial_mass;
+    double water_step_total_ms;
+    double water_step_min_ms;
+    double water_step_max_ms;
+    double water_obstacle_total_ms;
+    double water_solver_total_ms;
+    double water_maintenance_total_ms;
+    double water_gpu_upload_total_ms;
+    double water_gpu_dispatch_total_ms;
+    double water_gpu_readback_total_ms;
+    double *water_step_times;
+    int water_step_time_capacity;
+    int water_step_samples;
     bool sleep_snap_rebuilt_after_static;
     float sleep_snap_max_original_error;
     float sleep_snap_last_speed;
@@ -200,6 +215,8 @@ static bool debug_setup_pillar_impact_drift(DebugRunState *state);
 static bool debug_setup_single_corner_hinge(DebugRunState *state);
 static bool debug_setup_tether_active_then_static(DebugRunState *state);
 static bool debug_setup_tether_thin_wall_ccd(DebugRunState *state);
+static bool debug_setup_water_fall(DebugRunState *state);
+static bool debug_setup_water_cube_impact(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall },
@@ -216,7 +233,9 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "pillar-impact-drift", "Large undercut pillar impact exposes post-contact sliding and wiggle", debug_setup_pillar_impact_drift },
     { "single-corner-hinge", "A one-corner glue remnant must break beyond the hinge-angle limit", debug_setup_single_corner_hinge },
     { "tether-active-then-static", "Tethering an active voxel then a static voxel preserves and pulls both", debug_setup_tether_active_then_static },
-    { "tether-thin-wall-ccd", "High-speed tether throw uses swept particle rays against a one-voxel wall", debug_setup_tether_thin_wall_ccd }
+    { "tether-thin-wall-ccd", "High-speed tether throw uses swept particle rays against a one-voxel wall", debug_setup_tether_thin_wall_ccd },
+    { "water-fall", "Finite CA water falls onto a static voxel floor and spreads", debug_setup_water_fall },
+    { "water-cube-impact", "A 10x10x10 water cube falls onto a 10x10x10 static cube", debug_setup_water_cube_impact }
 };
 
 static const int debugScenarioCount = (int)(sizeof(debugScenarios) / sizeof(debugScenarios[0]));
@@ -654,6 +673,25 @@ static bool debug_original_cluster_cells_are_clear(const DebugRunState *state)
     return true;
 }
 
+static float debug_water_centroid_y(void)
+{
+    long double weighted_y = 0.0;
+    uint64_t total = 0;
+    for (int i = 0; i < WATER_CELL_COUNT; ++i) {
+        uint32_t mass = waterSystem.mass[i];
+        if (!mass || water_cell_blocked_index(i)) continue;
+        int gx, gy, gz;
+        water_coords_from_index(i, &gx, &gy, &gz);
+        (void)gx;
+        (void)gz;
+        float height = VOXEL_SIZE * ((float)mass / (float)WATER_MAX_MASS);
+        float center_y = (float)gy * VOXEL_SIZE + height * 0.5f;
+        weighted_y += (long double)center_y * (long double)mass;
+        total += mass;
+    }
+    return total > 0 ? (float)(weighted_y / (long double)total) : 0.0f;
+}
+
 #if defined(GRAPHICS_API_OPENGL_43) || (defined(__APPLE__) && defined(FPS_GPU_METAL))
 static bool debug_gpu_static_cell_absent_in(const GpuStaticCell *cells, int x, int y, int z)
 {
@@ -765,6 +803,12 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
         sample.min_y = 0.0f;
         sample.max_y = 0.0f;
     }
+    if (strcmp(debugRunConfig.scenario, "water-fall") == 0) {
+        sample.centroid_y = debug_water_centroid_y();
+        sample.centroid_drop = initial_centroid_y - sample.centroid_y;
+        sample.min_y = 0.0f;
+        sample.max_y = initial_centroid_y;
+    }
     sample.centroid_drop = initial_centroid_y - sample.centroid_y;
     sample.physics_step_ms = physicsBackend.last_step_ms;
     return sample;
@@ -782,9 +826,11 @@ static void debug_draw_overlay(const DebugRunState *state, const DebugSample *sa
 {
     if (!state || !sample) return;
     int box_height = 180;
+    if (state->water_fall_test) box_height += 30;
     if (state->gpu_readback_performed) box_height += 30;
     if (state->overhang_impact) box_height += 30;
-    DrawRectangle(18, 18, 650, box_height, Fade(BLACK, 0.78f));
+    int box_width = state->water_fall_test ? 530 : 650;
+    DrawRectangle(18, 18, box_width, box_height, Fade(BLACK, 0.78f));
     DrawText(TextFormat("SCENARIO %s", debugRunConfig.scenario), 34, 32, 22, RAYWHITE);
     DrawText(TextFormat("BACKEND requested=%s active=%s",
                         physics_backend_name(physicsBackend.requested),
@@ -808,6 +854,14 @@ static void debug_draw_overlay(const DebugRunState *state, const DebugSample *sa
                         sample->invalid_particle_refs, sample->zero_mass_corners,
                         sample->static_glued_faces),
              34, 166, 19, result_color);
+    if (state->water_fall_test) {
+        const WaterDiagnostics *water = water_diagnostics();
+        DrawText(TextFormat("WATER mass=%llu wet=%u active=%u trapped=%llu",
+                            (unsigned long long)water_test_total_mass(),
+                            water->wet_cells, water->active_cells,
+                            (unsigned long long)water->trapped_mass),
+                 34, 192, 17, (Color){ 90, 190, 255, 255 });
+    }
     if (state->gpu_readback_performed) {
         DrawText(TextFormat("GPU SSBO staticStale=%d staticDiff=%d simMismatch=%d missing=%d gpuZeroMass=%d",
                             state->gpu_static_ssbo_stale_cells,
@@ -837,6 +891,7 @@ static void debug_render_scene(DebugRunState *state, const DebugSample *sample)
                       (Color){ 68, 75, 82, 255 });
             DrawGrid(48, VOXEL_SIZE);
             DrawVoxels(state->camera);
+            DrawWater();
             if (state->sleep_snap_original_test) {
                 for (int i = 0; i < voxel_count; ++i) {
                     Voxel *voxel = &voxels[i];
@@ -1451,6 +1506,105 @@ static bool debug_setup_dynamic_freefall(DebugRunState *state)
     if (created != state->expected_voxels) {
         debug_add_failure(state, "dynamic-freefall created %d/%d voxels",
                           created, state->expected_voxels);
+        return false;
+    }
+    return true;
+}
+
+static bool debug_setup_water_fall(DebugRunState *state)
+{
+    debug_reset_world();
+    state->water_fall_test = true;
+
+    Color floor_color = (Color){ 92, 104, 118, 255 };
+    int floor_created = 0;
+    for (int z = -8; z <= 8; ++z) {
+        for (int x = -8; x <= 8; ++x) {
+            if (debug_add_cell(x, 0, z, true, false, floor_color, DEBUG_SUPPORT_TAG) >= 0) {
+                ++floor_created;
+            }
+        }
+    }
+    debug_rebuild_world_state();
+
+    int water_cells = 0;
+    for (int y = 22; y <= 24; ++y) {
+        for (int z = -1; z <= 1; ++z) {
+            for (int x = -1; x <= 1; ++x) {
+                if (water_set_mass(x, y, z, WATER_MAX_MASS)) ++water_cells;
+            }
+        }
+    }
+    water_rebuild_obstacles_and_displace();
+    water_refresh_diagnostics();
+    state->water_initial_mass = water_test_total_mass();
+    state->initial_centroid_y = debug_water_centroid_y();
+    state->activation_succeeded = true;
+
+    state->camera.position = (Vector3){ 11.5f, 9.0f, 15.5f };
+    state->camera.target = (Vector3){ 0.0f, 5.2f, 0.0f };
+    state->camera.fovy = 48.0f;
+
+    if (floor_created != 17 * 17) {
+        debug_add_failure(state, "water-fall created %d/%d floor voxels",
+                          floor_created, 17 * 17);
+        return false;
+    }
+    if (water_cells != 27 || state->water_initial_mass != UINT64_C(27) * WATER_MAX_MASS) {
+        debug_add_failure(state, "water-fall created %d/27 water cells (mass=%llu)",
+                          water_cells, (unsigned long long)state->water_initial_mass);
+        return false;
+    }
+    return true;
+}
+
+static bool debug_setup_water_cube_impact(DebugRunState *state)
+{
+    debug_reset_world();
+    state->water_fall_test = true;
+
+    Color solid_color = (Color){ 92, 104, 118, 255 };
+    int solid_cells = 0;
+    for (int y = 0; y < 10; ++y) {
+        for (int z = -5; z < 5; ++z) {
+            for (int x = -5; x < 5; ++x) {
+                if (debug_add_cell(x, y, z, true, false, solid_color,
+                                   DEBUG_SUPPORT_TAG) >= 0) {
+                    ++solid_cells;
+                }
+            }
+        }
+    }
+    debug_rebuild_world_state();
+
+    int water_cells = 0;
+    for (int y = 24; y < 34; ++y) {
+        for (int z = -5; z < 5; ++z) {
+            for (int x = -5; x < 5; ++x) {
+                if (water_set_mass(x, y, z, WATER_MAX_MASS)) ++water_cells;
+            }
+        }
+    }
+    water_rebuild_obstacles_and_displace();
+    water_refresh_diagnostics();
+    state->water_initial_mass = water_test_total_mass();
+    state->initial_centroid_y = debug_water_centroid_y();
+    state->activation_succeeded = true;
+
+    state->camera.position = (Vector3){ 24.0f, 17.0f, 30.0f };
+    state->camera.target = (Vector3){ 0.0f, 7.8f, 0.0f };
+    state->camera.fovy = 48.0f;
+
+    if (solid_cells != 1000) {
+        debug_add_failure(state, "water-cube-impact created %d/1000 static voxels",
+                          solid_cells);
+        return false;
+    }
+    if (water_cells != 1000 ||
+        state->water_initial_mass != UINT64_C(1000) * WATER_MAX_MASS) {
+        debug_add_failure(state,
+                          "water-cube-impact created %d/1000 water cells (mass=%llu)",
+                          water_cells, (unsigned long long)state->water_initial_mass);
         return false;
     }
     return true;
@@ -2303,8 +2457,29 @@ static bool debug_setup_tether_thin_wall_ccd(DebugRunState *state)
     return true;
 }
 
-static void debug_physics_step(void)
+static void debug_physics_step(DebugRunState *state)
 {
+    if (state && state->water_fall_test) {
+        rebuild_static_hash_if_dirty();
+        water_step_batch(PBD_MAX_STEP_DT, 1);
+        double elapsed_ms = water_diagnostics()->last_step_ms;
+        const WaterDiagnostics *wd = water_diagnostics();
+        state->water_step_total_ms += elapsed_ms;
+        if (state->water_step_samples == 0 || elapsed_ms < state->water_step_min_ms) {
+            state->water_step_min_ms = elapsed_ms;
+        }
+        if (elapsed_ms > state->water_step_max_ms) state->water_step_max_ms = elapsed_ms;
+        if (state->water_step_times && state->water_step_samples < state->water_step_time_capacity)
+            state->water_step_times[state->water_step_samples] = elapsed_ms;
+        state->water_obstacle_total_ms += wd->last_obstacle_ms;
+        state->water_solver_total_ms += wd->last_solver_ms;
+        state->water_maintenance_total_ms += wd->last_maintenance_ms;
+        state->water_gpu_upload_total_ms += wd->last_gpu_upload_ms;
+        state->water_gpu_dispatch_total_ms += wd->last_gpu_dispatch_ms;
+        state->water_gpu_readback_total_ms += wd->last_gpu_readback_ms;
+        state->water_step_samples++;
+        return;
+    }
     activate_static_voxels_near_dynamic();
     prepare_tether_forces();
     wake_sleeping_voxels_near_awake();
@@ -2351,6 +2526,40 @@ static void debug_validate_step(DebugRunState *state, int step)
         }
     }
     DebugSample sample = debug_collect_sample("validation", step, state->initial_centroid_y);
+    if (state->water_fall_test) {
+        uint64_t total = 0;
+        uint64_t trapped = 0;
+        for (int i = 0; i < WATER_CELL_COUNT; ++i) {
+            uint32_t mass = waterSystem.mass[i];
+            if (mass > WATER_MAX_MASS) {
+                debug_add_failure(state, "step %d: water cell %d exceeded maximum mass", step, i);
+            }
+            total += mass;
+            if (mass && water_cell_blocked_index(i)) trapped += mass;
+            if (mass >= WATER_RENDER_MIN_MASS) {
+                int gx, gy, gz;
+                water_coords_from_index(i, &gx, &gy, &gz);
+                if (gy > WATER_MIN_Y) {
+                    int below = water_index_unchecked(gx, gy - 1, gz);
+                    if (water_cell_blocked_index(below)) state->water_ground_contact = true;
+                }
+            }
+        }
+        if (total != state->water_initial_mass) {
+            debug_add_failure(state, "step %d: water mass changed from %llu to %llu",
+                              step, (unsigned long long)state->water_initial_mass,
+                              (unsigned long long)total);
+        }
+        if (trapped != 0) {
+            debug_add_failure(state, "step %d: water left %llu mass trapped in the floor",
+                              step, (unsigned long long)trapped);
+        }
+        if (step == debugRunConfig.steps) {
+            state->drop_sampled = true;
+            state->drop_at_step_60 = sample.centroid_drop;
+        }
+        return;
+    }
     if (state->sleep_snap_original_test) {
         float max_error = 0.0f;
         float max_speed = 0.0f;
@@ -2739,6 +2948,26 @@ static void debug_finalize_validation(DebugRunState *state)
                           physics_backend_name(physicsBackend.active),
                           physicsBackend.fallback_reason);
     }
+    if (state->water_fall_test) {
+        if (!state->water_ground_contact) {
+            debug_add_failure(state, "falling water never reached the floor");
+        }
+        if (!state->drop_sampled || !isfinite(state->drop_at_step_60) ||
+            state->drop_at_step_60 < 5.0f) {
+            debug_add_failure(state,
+                              "water centroid dropped only %.3f metres "
+                              "(minimum 5.000)",
+                              state->drop_at_step_60);
+        }
+        uint64_t final_mass = water_test_total_mass();
+        if (final_mass != state->water_initial_mass) {
+            debug_add_failure(state,
+                              "water mass changed during run (%llu/%llu)",
+                              (unsigned long long)final_mass,
+                              (unsigned long long)state->water_initial_mass);
+        }
+        return;
+    }
     if (state->sleep_snap_original_test) {
         if (!state->sleep_snap_active_observed) {
             debug_add_failure(state, "near-origin test never visibly entered the dynamic state");
@@ -2929,6 +3158,42 @@ static bool debug_write_report(DebugRunState *state)
             state->gif_frame_count, debugRunConfig.gif_fps, state->gif_step_stride);
     debug_write_json_string(file, state->gif_path);
     fputs("},\n", file);
+    double water_average_ms = state->water_step_samples > 0
+        ? state->water_step_total_ms / (double)state->water_step_samples : 0.0;
+    double water_median_ms = 0.0;
+    int timing_count = state->water_step_samples < state->water_step_time_capacity
+        ? state->water_step_samples : state->water_step_time_capacity;
+    if (timing_count > 0 && state->water_step_times) {
+        for (int i = 1; i < timing_count; ++i) {
+            double value = state->water_step_times[i];
+            int j = i;
+            while (j > 0 && state->water_step_times[j - 1] > value) {
+                state->water_step_times[j] = state->water_step_times[j - 1];
+                --j;
+            }
+            state->water_step_times[j] = value;
+        }
+        water_median_ms = timing_count & 1 ? state->water_step_times[timing_count / 2]
+            : 0.5 * (state->water_step_times[timing_count / 2 - 1] +
+                     state->water_step_times[timing_count / 2]);
+    }
+    fprintf(file,
+            "  \"waterTiming\": {\"samples\": %d, \"totalMs\": %.9g,"
+            " \"averageMs\": %.9g, \"medianMs\": %.9g, \"minMs\": %.9g, \"maxMs\": %.9g,"
+            " \"obstacleAverageMs\": %.9g, \"solverAverageMs\": %.9g,"
+            " \"maintenanceAverageMs\": %.9g, \"gpuUploadAverageMs\": %.9g,"
+            " \"gpuDispatchAverageMs\": %.9g, \"gpuReadbackAverageMs\": %.9g,"
+            " \"renderCacheLastMs\": %.9g, \"activeTiles\": %u, \"processedCells\": %u},\n",
+            state->water_step_samples, state->water_step_total_ms,
+            water_average_ms, water_median_ms, state->water_step_min_ms, state->water_step_max_ms,
+            state->water_step_samples ? state->water_obstacle_total_ms / state->water_step_samples : 0.0,
+            state->water_step_samples ? state->water_solver_total_ms / state->water_step_samples : 0.0,
+            state->water_step_samples ? state->water_maintenance_total_ms / state->water_step_samples : 0.0,
+            state->water_step_samples ? state->water_gpu_upload_total_ms / state->water_step_samples : 0.0,
+            state->water_step_samples ? state->water_gpu_dispatch_total_ms / state->water_step_samples : 0.0,
+            state->water_step_samples ? state->water_gpu_readback_total_ms / state->water_step_samples : 0.0,
+            water_diagnostics()->last_render_build_ms, water_diagnostics()->active_tiles,
+            water_diagnostics()->processed_cells);
     fprintf(file, "  \"fallback\": %s,\n  \"fallbackReason\": ",
             physicsBackend.sticky_fallback ? "true" : "false");
     debug_write_json_string(file, physicsBackend.fallback_reason);
@@ -3125,6 +3390,8 @@ static int run_debug_harness(void)
     if (!debug_prepare_capture_steps()) return 2;
 
     DebugRunState state = { 0 };
+    state.water_step_time_capacity = debugRunConfig.steps;
+    state.water_step_times = (double *)calloc((size_t)debugRunConfig.steps, sizeof(double));
     state.expected_voxels = DEBUG_EXPECTED_VOXELS;
     state.camera.position = (Vector3){ 9.0f, 8.5f, 12.0f };
     state.camera.target = (Vector3){ 0.0f, 4.0f, 0.0f };
@@ -3160,7 +3427,7 @@ static int run_debug_harness(void)
             }
         }
         for (int step = 1; step <= debugRunConfig.steps; ++step) {
-            debug_physics_step();
+            debug_physics_step(&state);
             debug_validate_step(&state, step);
             debug_gif_capture(&state, step);
             if (debug_should_capture_step(step)) {
@@ -3176,12 +3443,15 @@ static int run_debug_harness(void)
     bool report_ok = debug_write_report(&state);
     bool passed = setup_ok && report_ok && state.failure_count == 0;
     fprintf(stderr,
-            "debug-run scenario=%s requested=%s active=%s result=%s steps=%d drop60=%.6f captures=%d gif=%s frames=%d report=%s\n",
+            "debug-run scenario=%s requested=%s active=%s result=%s steps=%d drop60=%.6f waterAvgMs=%.6f waterMinMs=%.6f waterMaxMs=%.6f captures=%d gif=%s frames=%d report=%s\n",
             debugRunConfig.scenario,
             physics_backend_name(physicsBackend.requested),
             physics_backend_name(physicsBackend.active),
             passed ? "PASS" : "FAIL",
             debugRunConfig.steps, state.drop_at_step_60,
+            state.water_step_samples > 0
+                ? state.water_step_total_ms / (double)state.water_step_samples : 0.0,
+            state.water_step_min_ms, state.water_step_max_ms,
             state.capture_count,
             debugRunConfig.record_gif ? state.gif_path : "disabled",
             state.gif_frame_count, state.report_path);
@@ -3189,5 +3459,6 @@ static int run_debug_harness(void)
         fprintf(stderr, "debug-failure: %s\n", state.failures[i]);
     }
     UnloadRenderTexture(state.target);
+    free(state.water_step_times);
     return passed ? 0 : 4;
 }

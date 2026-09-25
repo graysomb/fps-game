@@ -14693,6 +14693,14 @@ static int waterInstanceCount = 0;
 static int waterInstanceCapacity = 0;
 static bool waterRenderingInitialized = false;
 
+typedef struct WaterRenderTileCache {
+    Matrix *transforms;
+    uint16_t count;
+    uint16_t capacity;
+} WaterRenderTileCache;
+
+static WaterRenderTileCache waterRenderTiles[WATER_TILE_COUNT];
+
 static void InitInstancing(void) {
     if (instancingInitialized) return;
     voxelMesh = GenMeshCube(1.0f, 1.0f, 1.0f);
@@ -14730,8 +14738,8 @@ static void InitWaterRendering(void) {
     waterRenderingInitialized = true;
 }
 
-static bool water_cell_is_enclosed_full(int gx, int gy, int gz) {
-    if (water_get_mass(gx, gy, gz) != WATER_MAX_MASS) return false;
+static bool water_cell_is_enclosed_rendered(int gx, int gy, int gz) {
+    if (water_get_mass(gx, gy, gz) < WATER_RENDER_MIN_MASS) return false;
     static const int dx[6] = { 1, -1, 0, 0, 0, 0 };
     static const int dy[6] = { 0, 0, 1, -1, 0, 0 };
     static const int dz[6] = { 0, 0, 0, 0, 1, -1 };
@@ -14739,49 +14747,87 @@ static bool water_cell_is_enclosed_full(int gx, int gy, int gz) {
         int nx = gx + dx[d], ny = gy + dy[d], nz = gz + dz[d];
         if (!water_in_domain(nx, ny, nz)) return false;
         int neighbor = water_index_unchecked(nx, ny, nz);
-        if (water_cell_blocked_index(neighbor) || waterSystem.mass[neighbor] != WATER_MAX_MASS) return false;
+        if (water_cell_blocked_index(neighbor) ||
+            waterSystem.mass[neighbor] < WATER_RENDER_MIN_MASS) return false;
     }
     return true;
 }
 
+static bool rebuild_water_render_tile(int tile) {
+    WaterRenderTileCache *cache = &waterRenderTiles[tile];
+    cache->count = 0;
+    int tx, ty, tz;
+    water_tile_coords(tile, &tx, &ty, &tz);
+    int gx0 = WATER_MIN_X + tx * WATER_TILE_SIZE;
+    int gy0 = WATER_MIN_Y + ty * WATER_TILE_SIZE;
+    int gz0 = WATER_MIN_Z + tz * WATER_TILE_SIZE;
+    for (int ly = 0; ly < WATER_TILE_SIZE; ++ly) {
+        int gy = gy0 + ly;
+        for (int lz = 0; lz < WATER_TILE_SIZE; ++lz) {
+            int gz = gz0 + lz;
+            for (int lx = 0; lx < WATER_TILE_SIZE; ++lx) {
+                int gx = gx0 + lx;
+                int index = water_index_unchecked(gx, gy, gz);
+                uint32_t mass = waterSystem.mass[index];
+                if (mass < WATER_RENDER_MIN_MASS || water_cell_blocked_index(index) ||
+                    water_cell_is_enclosed_rendered(gx, gy, gz)) continue;
+                if (cache->count >= cache->capacity) {
+                    int capacity = cache->capacity ? cache->capacity * 2 : 32;
+                    if (capacity > WATER_TILE_SIZE * WATER_TILE_SIZE * WATER_TILE_SIZE)
+                        capacity = WATER_TILE_SIZE * WATER_TILE_SIZE * WATER_TILE_SIZE;
+                    Matrix *next = (Matrix *)RL_REALLOC(cache->transforms,
+                                                        (size_t)capacity * sizeof(Matrix));
+                    if (!next) return false;
+                    cache->transforms = next;
+                    cache->capacity = (uint16_t)capacity;
+                }
+                Matrix transform = MatrixIdentity();
+                transform.m0 = VOXEL_SIZE;
+                transform.m5 = VOXEL_SIZE;
+                transform.m10 = VOXEL_SIZE;
+                transform.m12 = ((float)gx + 0.5f) * VOXEL_SIZE;
+                transform.m13 = ((float)gy + 0.5f) * VOXEL_SIZE;
+                transform.m14 = ((float)gz + 0.5f) * VOXEL_SIZE;
+                cache->transforms[cache->count++] = transform;
+            }
+        }
+    }
+    waterSystem.tile_render_dirty[tile] = 0;
+    return true;
+}
+
 static void rebuild_water_instances(void) {
+    double started = pbd_time_now_ms();
     waterInstanceCount = 0;
     if (!water_runtime_enabled()) {
         waterSystem.render_dirty = false;
         return;
     }
-    for (int gy = WATER_MIN_Y; gy <= WATER_MAX_Y; ++gy) {
-        for (int gz = WATER_MIN_Z; gz <= WATER_MAX_Z; ++gz) {
-            for (int gx = WATER_MIN_X; gx <= WATER_MAX_X; ++gx) {
-                int index = water_index_unchecked(gx, gy, gz);
-                uint32_t mass = waterSystem.mass[index];
-                if (mass < WATER_RENDER_MIN_MASS || water_cell_blocked_index(index) ||
-                    water_cell_is_enclosed_full(gx, gy, gz)) continue;
-                if (waterInstanceCount >= waterInstanceCapacity) {
-                    int next_capacity = waterInstanceCapacity * 2;
-                    if (next_capacity > WATER_CELL_COUNT) next_capacity = WATER_CELL_COUNT;
-                    Matrix *next = (Matrix *)RL_REALLOC(waterInstanceTransforms,
-                                                        (size_t)next_capacity * sizeof(Matrix));
-                    if (!next) {
-                        waterSystem.render_dirty = false;
-                        return;
-                    }
-                    waterInstanceTransforms = next;
-                    waterInstanceCapacity = next_capacity;
-                }
-                float height = VOXEL_SIZE * ((float)mass / (float)WATER_MAX_MASS);
-                Matrix transform = MatrixIdentity();
-                transform.m0 = VOXEL_SIZE;
-                transform.m5 = height;
-                transform.m10 = VOXEL_SIZE;
-                transform.m12 = ((float)gx + 0.5f) * VOXEL_SIZE;
-                transform.m13 = (float)gy * VOXEL_SIZE + height * 0.5f;
-                transform.m14 = ((float)gz + 0.5f) * VOXEL_SIZE;
-                waterInstanceTransforms[waterInstanceCount++] = transform;
-            }
+    int total = 0;
+    for (int tile = 0; tile < WATER_TILE_COUNT; ++tile) {
+        if (waterSystem.tile_render_dirty[tile] && !rebuild_water_render_tile(tile)) return;
+        total += waterRenderTiles[tile].count;
+    }
+    if (total > waterInstanceCapacity) {
+        int next_capacity = waterInstanceCapacity > 0 ? waterInstanceCapacity : 4096;
+        while (next_capacity < total && next_capacity < WATER_CELL_COUNT) next_capacity *= 2;
+        if (next_capacity > WATER_CELL_COUNT) next_capacity = WATER_CELL_COUNT;
+        Matrix *next = (Matrix *)RL_REALLOC(waterInstanceTransforms,
+                                            (size_t)next_capacity * sizeof(Matrix));
+        if (!next) return;
+        waterInstanceTransforms = next;
+        waterInstanceCapacity = next_capacity;
+    }
+    for (int tile = 0; tile < WATER_TILE_COUNT; ++tile) {
+        WaterRenderTileCache *cache = &waterRenderTiles[tile];
+        if (cache->count) {
+            memcpy(&waterInstanceTransforms[waterInstanceCount], cache->transforms,
+                   (size_t)cache->count * sizeof(Matrix));
+            waterInstanceCount += cache->count;
         }
     }
     waterSystem.render_dirty = false;
+    waterSystem.diagnostics.last_render_build_ms = pbd_time_now_ms() - started;
 }
 
 static void DrawWater(void) {
@@ -16771,6 +16817,30 @@ static bool water_test_invariants(const char *name, uint64_t expected_mass) {
     return true;
 }
 
+static bool water_test_render_cache_matches_reference(void) {
+    rebuild_water_instances();
+    int expected = 0;
+    for (int y = WATER_MIN_Y; y <= WATER_MAX_Y; ++y)
+        for (int z = WATER_MIN_Z; z <= WATER_MAX_Z; ++z)
+            for (int x = WATER_MIN_X; x <= WATER_MAX_X; ++x) {
+                int i = water_index_unchecked(x, y, z);
+                if (waterSystem.mass[i] >= WATER_RENDER_MIN_MASS &&
+                    !water_cell_blocked_index(i) && !water_cell_is_enclosed_rendered(x, y, z)) expected++;
+            }
+    if (expected != waterInstanceCount) return false;
+    for (int n = 0; n < waterInstanceCount; ++n) {
+        Matrix m = waterInstanceTransforms[n];
+        int gx = (int)floorf(m.m12 / VOXEL_SIZE);
+        int gy = (int)floorf(m.m13 / VOXEL_SIZE);
+        int gz = (int)floorf(m.m14 / VOXEL_SIZE);
+        if (!water_in_domain(gx, gy, gz) ||
+            waterSystem.mass[water_index_unchecked(gx, gy, gz)] < WATER_RENDER_MIN_MASS ||
+            water_cell_is_enclosed_rendered(gx, gy, gz) ||
+            m.m0 != VOXEL_SIZE || m.m5 != VOXEL_SIZE || m.m10 != VOXEL_SIZE) return false;
+    }
+    return true;
+}
+
 static void water_test_empty_world(void) {
     water_reset();
     memset(waterSystem.static_solid, 0, sizeof(waterSystem.static_solid));
@@ -16812,8 +16882,8 @@ static bool water_test_run_steps(PhysicsBackendKind backend, int steps) {
 static bool run_water_self_tests(void) {
     PhysicsBackendKind saved_backend = physicsBackend.active;
     bool passed = true;
-    uint32_t *reference = (uint32_t *)malloc(sizeof(waterSystem.mass));
-    uint32_t *roundtrip = (uint32_t *)malloc(sizeof(waterSystem.mass));
+    uint16_t *reference = (uint16_t *)malloc(sizeof(waterSystem.mass));
+    uint16_t *roundtrip = (uint16_t *)malloc(sizeof(waterSystem.mass));
     if (!reference || !roundtrip) {
         fprintf(stderr, "water-self-test FAIL allocation\n");
         free(reference); free(roundtrip);
@@ -16867,15 +16937,56 @@ static bool run_water_self_tests(void) {
     passed &= mt_equal && water_test_invariants("cpu-mt-parity", initial_mass);
     fprintf(stderr, "water-self-test cpu-st/cpu-mt-parity %s\n", mt_equal ? "PASS" : "FAIL");
 
+    uint64_t batch_mass = water_test_setup_basin();
+    physicsBackend.active = PHYSICS_BACKEND_CPU_ST;
+    water_step_batch(PBD_MAX_STEP_DT, PBD_MAX_ACCUM_STEPS);
+    memcpy(roundtrip, waterSystem.mass, sizeof(waterSystem.mass));
+    water_test_setup_basin();
+    physicsBackend.active = PHYSICS_BACKEND_CPU_MT;
+    water_step_batch(PBD_MAX_STEP_DT, PBD_MAX_ACCUM_STEPS);
+    bool batch_equal = memcmp(roundtrip, waterSystem.mass, sizeof(waterSystem.mass)) == 0 &&
+                       water_test_invariants("cpu-batch-parity", batch_mass);
+    passed &= batch_equal;
+    fprintf(stderr, "water-self-test cpu-st/cpu-mt-8-step-batch %s\n",
+            batch_equal ? "PASS" : "FAIL");
+
     if (physics_backend_is_gpu(saved_backend) && gpuPhysics.ready) {
+        water_test_setup_basin();
+        physicsBackend.active = saved_backend;
+        water_step_batch(PBD_MAX_STEP_DT, PBD_MAX_ACCUM_STEPS);
+        bool gpu_batch_equal = strncmp(waterSystem.diagnostics.backend, "gpu-", 4) == 0 &&
+                               memcmp(roundtrip, waterSystem.mass, sizeof(waterSystem.mass)) == 0;
+        passed &= gpu_batch_equal && water_test_invariants("native-gpu-batch-parity", batch_mass);
+        fprintf(stderr, "water-self-test native-gpu-8-step-batch %s\n",
+                gpu_batch_equal ? "PASS" : "FAIL");
         water_test_setup_basin();
         water_test_run_steps(saved_backend, 180);
         bool used_gpu = strncmp(waterSystem.diagnostics.backend, "gpu-", 4) == 0;
         bool gpu_equal = used_gpu &&
                          memcmp(reference, waterSystem.mass, sizeof(waterSystem.mass)) == 0;
+        if (used_gpu && !gpu_equal) {
+            for (int i = 0; i < WATER_CELL_COUNT; ++i) {
+                if (reference[i] != waterSystem.mass[i]) {
+                    fprintf(stderr, "water-self-test GPU first diff cell=%d cpu=%u gpu=%u\n",
+                            i, reference[i], waterSystem.mass[i]);
+                    break;
+                }
+            }
+        }
         passed &= gpu_equal && water_test_invariants("native-gpu-parity", initial_mass);
         fprintf(stderr, "water-self-test native-gpu-parity %s (%s)\n",
                 gpu_equal ? "PASS" : "FAIL", waterSystem.diagnostics.backend);
+
+        water_test_setup_basin();
+        water_test_run_steps(PHYSICS_BACKEND_CPU_ST, 2);
+        memcpy(roundtrip, waterSystem.mass, sizeof(waterSystem.mass));
+        water_test_setup_basin();
+        water_test_run_steps(saved_backend, 1);
+        water_test_run_steps(PHYSICS_BACKEND_CPU_ST, 1);
+        bool switch_equal = memcmp(roundtrip, waterSystem.mass, sizeof(waterSystem.mass)) == 0;
+        passed &= switch_equal;
+        fprintf(stderr, "water-self-test gpu-to-cpu-switch %s\n",
+                switch_equal ? "PASS" : "FAIL");
     } else {
         fprintf(stderr, "water-self-test native-gpu-parity SKIP (GPU backend not active)\n");
     }
@@ -16935,6 +17046,10 @@ static bool run_water_self_tests(void) {
                   water_test_total_mass() == UINT64_C(16) * WATER_MAX_MASS;
     passed &= edited;
     fprintf(stderr, "water-self-test creative-place-remove %s\n", edited ? "PASS" : "FAIL");
+    bool render_cache_ok = water_test_render_cache_matches_reference();
+    passed &= render_cache_ok;
+    fprintf(stderr, "water-self-test incremental-render-cache %s\n",
+            render_cache_ok ? "PASS" : "FAIL");
 
     FILE *map = tmpfile();
     bool map_ok = map != NULL;
@@ -17790,6 +17905,10 @@ int main(int argc, char **argv) {
         waterInstanceTransforms = NULL;
         waterInstanceCapacity = 0;
         waterInstanceCount = 0;
+        for (int tile = 0; tile < WATER_TILE_COUNT; ++tile) {
+            RL_FREE(waterRenderTiles[tile].transforms);
+            waterRenderTiles[tile] = (WaterRenderTileCache){ 0 };
+        }
         waterRenderingInitialized = false;
     }
     water_shutdown();

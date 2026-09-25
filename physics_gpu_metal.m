@@ -290,22 +290,22 @@ bool fps_metal_water_available(void) {
 
 bool fps_metal_water_dispatch(void *mass_handle, void *scratch_handle,
                               void *static_handle, void *dynamic_handle,
-                              void *active_handle, int fixed_steps,
+                              void *active_handle, void *active_ids_handle, int fixed_steps,
                               int cell_count) {
     @autoreleasepool {
         if (!fps_metal_water_available() || fixed_steps <= 0 || cell_count <= 0) return false;
-        id<MTLBuffer> buffers[5] = {
+        id<MTLBuffer> buffers[6] = {
             (id<MTLBuffer>)mass_handle, (id<MTLBuffer>)scratch_handle,
             (id<MTLBuffer>)static_handle, (id<MTLBuffer>)dynamic_handle,
-            (id<MTLBuffer>)active_handle
+            (id<MTLBuffer>)active_handle, (id<MTLBuffer>)active_ids_handle
         };
-        for (int i = 0; i < 5; ++i) if (!buffers[i]) return false;
+        for (int i = 0; i < 6; ++i) if (!buffers[i]) return false;
         id<MTLCommandBuffer> command = [metal_state.queue commandBuffer];
         if (!command) return false;
         id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
         if (!encoder) return false;
         [encoder setComputePipelineState:metal_state.water_pipeline];
-        for (int i = 0; i < 5; ++i) [encoder setBuffer:buffers[i] offset:0 atIndex:(NSUInteger)i];
+        for (int i = 0; i < 6; ++i) [encoder setBuffer:buffers[i] offset:0 atIndex:(NSUInteger)i];
         struct { int mode, cell_count, padding0, padding1; } uniforms = { 0, cell_count, 0, 0 };
         MTLSize threads = MTLSizeMake(128, 1, 1);
         MTLSize groups = MTLSizeMake(((NSUInteger)cell_count + 127u) / 128u, 1, 1);
@@ -313,7 +313,7 @@ bool fps_metal_water_dispatch(void *mass_handle, void *scratch_handle,
             for (int mode = 0; mode < 2; ++mode) {
                 if (step != 0 || mode != 0) [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
                 uniforms.mode = mode;
-                [encoder setBytes:&uniforms length:sizeof(uniforms) atIndex:5];
+                [encoder setBytes:&uniforms length:sizeof(uniforms) atIndex:6];
                 [encoder dispatchThreadgroups:groups threadsPerThreadgroup:threads];
             }
         }
@@ -326,6 +326,10 @@ bool fps_metal_water_dispatch(void *mass_handle, void *scratch_handle,
         }
         [command commit];
         [command waitUntilCompleted];
+        if (command.status != MTLCommandBufferStatusCompleted) {
+            fprintf(stderr, "Metal water dispatch failed: %s\n",
+                    command.error ? [[command.error localizedDescription] UTF8String] : "unknown error");
+        }
         return command.status == MTLCommandBufferStatusCompleted;
     }
 }

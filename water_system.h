@@ -44,6 +44,14 @@ typedef struct WaterDiagnostics {
     uint64_t visible_mass;
     uint64_t trapped_mass;
     uint64_t displaced_mass;
+    uint32_t processed_cells;
+    double last_obstacle_ms;
+    double last_solver_ms;
+    double last_maintenance_ms;
+    double last_gpu_upload_ms;
+    double last_gpu_dispatch_ms;
+    double last_gpu_readback_ms;
+    double last_render_build_ms;
     double last_step_ms;
 } WaterDiagnostics;
 

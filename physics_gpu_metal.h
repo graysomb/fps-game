@@ -64,7 +64,7 @@ void fps_metal_get_profile_info(FpsMetalProfileInfo *out);
 bool fps_metal_water_available(void);
 bool fps_metal_water_dispatch(void *mass, void *scratch,
                               void *static_mask, void *dynamic_mask,
-                              void *active_tiles, int fixed_steps,
+                              void *active_tiles, void *active_tile_ids, int fixed_steps,
                               int cell_count);
 #endif
 
