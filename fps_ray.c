@@ -44,6 +44,7 @@
 #include "raymath.h" // for MatrixIdentity()
 #include "physics_backend.h"
 #include "net_transport.h"
+#include "water_system.h"
 #if defined(GRAPHICS_API_OPENGL_43)
 #include "external/glad.h"
 #endif
@@ -116,6 +117,7 @@ static GpuTransferMode gpuTransferMode = GPU_TRANSFER_RESIDENT;
 static int physicsSmokeSteps = 0;
 static int physicsSmokeVoxels = 2;
 static int physicsSmokeBatchSize = 1;
+static bool waterSelfTestRequested = false;
 static bool tetherThrowCcdEnabled = true;
 
 static NetTransport netTransport;
@@ -263,6 +265,10 @@ static bool parse_physics_arguments(int argc, char **argv) {
             physicsSmokeBatchSize = atoi(arg + 22);
             if (physicsSmokeBatchSize < 1) physicsSmokeBatchSize = 1;
             if (physicsSmokeBatchSize > 8) physicsSmokeBatchSize = 8;
+            continue;
+        }
+        if (strcmp(arg, "--water-self-test") == 0) {
+            waterSelfTestRequested = true;
             continue;
         }
         int debug_parse_result = debug_parse_argument(argc, argv, &i);
@@ -1451,6 +1457,7 @@ static Vector3 aimAssistDebugTarget[MAX_PLAYERS];
 static bool aimAssistDebugHasTarget[MAX_PLAYERS];
 static bool creativeModeActive = false;
 static int creativeBrushSpan[MAX_PLAYERS] = { 3, 3, 3, 3 };
+static bool creativeWaterBrush[MAX_PLAYERS] = { false, false, false, false };
 static int creativePickupType[MAX_PLAYERS] = { 0, 0, 0, 0 };
 static int creativeMapSlot = 0;
 static bool useCustomMap = false;
@@ -7553,6 +7560,7 @@ static void clear_world_voxels(void) {
     table_cache_invalidate();
     mark_static_hash_dirty();
     meshDirty = true;
+    water_reset();
 }
 
 static const char *map_slot_path(int slot) {
@@ -7568,7 +7576,7 @@ static bool save_map_slot(int slot) {
     if (!fp) {
         return false;
     }
-    fprintf(fp, "FPSMAP1\n");
+    fprintf(fp, "FPSMAP2\n");
     int static_count = 0;
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *v = &voxels[i];
@@ -7586,6 +7594,7 @@ static bool save_map_slot(int slot) {
                     v->type);
         }
     }
+    water_write_map(fp);
     int pickup_count = 0;
     for (int i = 0; i < MAX_PICKUPS; ++i) {
         if (pickups[i].active || pickups[i].respawnTimer > 0.0f) {
@@ -7616,7 +7625,9 @@ static bool load_map_slot(int slot) {
         fclose(fp);
         return false;
     }
-    if (strncmp(header, "FPSMAP1", 7) != 0) {
+    bool is_v2 = strncmp(header, "FPSMAP2", 7) == 0;
+    bool is_v1 = strncmp(header, "FPSMAP1", 7) == 0;
+    if (!is_v1 && !is_v2) {
         fclose(fp);
         return false;
     }
@@ -7638,6 +7649,18 @@ static bool load_map_slot(int slot) {
             break;
         }
         add_static_voxel_at_grid(gx, gy, gz, (Color){ (unsigned char)r, (unsigned char)g, (unsigned char)b, (unsigned char)a }, type);
+    }
+
+    if (is_v2) {
+        int water_count = 0;
+        if (fscanf(fp, "WATER %d\n", &water_count) != 1 ||
+            !water_read_map_entries(fp, water_count)) {
+            fclose(fp);
+            water_reset();
+            return false;
+        }
+    } else {
+        water_reset();
     }
 
     int pickup_count = 0;
@@ -7669,6 +7692,7 @@ static bool load_map_slot(int slot) {
 
     rebuild_all_voxel_surfaces();
     init_static_hash();
+    water_rebuild_obstacles_and_displace();
     meshDirty = true;
     return true;
 }
@@ -7899,6 +7923,7 @@ static void ResetCreative(void) {
     creativeModeActive = true;
     for (int i = 0; i < MAX_PLAYERS; ++i) {
         creativeBrushSpan[i] = 3;
+        creativeWaterBrush[i] = false;
         creativePickupType[i] = PICKUP_DYNAMIC_SHOT;
         creativeBlockColorIndex[i] = 0;
         creativeHelpVisible[i] = true;
@@ -7913,6 +7938,7 @@ static void ResetCreative(void) {
 
 static void ResetGame(void) {
     creativeModeActive = false;
+    water_reset();
     winnerId = -1;
     pbdTimeAccumulator = 0.0f;
     init_confetti();
@@ -7979,7 +8005,74 @@ static void ResetGame(void) {
 
 }
 
+static bool creative_find_water_cell(Ray ray, float range, bool removal,
+                                     int *out_gx, int *out_gy, int *out_gz) {
+    Vector3 dir = v_norm(ray.direction);
+    int previous_x = (int)floorf(ray.position.x / VOXEL_SIZE);
+    int previous_y = (int)floorf(ray.position.y / VOXEL_SIZE);
+    int previous_z = (int)floorf(ray.position.z / VOXEL_SIZE);
+    const float stride = VOXEL_SIZE * 0.2f;
+    for (float t = 0.0f; t <= range; t += stride) {
+        Vector3 point = v_add(ray.position, v_mul(dir, t));
+        int gx = (int)floorf(point.x / VOXEL_SIZE);
+        int gy = (int)floorf(point.y / VOXEL_SIZE);
+        int gz = (int)floorf(point.z / VOXEL_SIZE);
+        WorldCell cell = world_cell_get(gx, gy, gz);
+        if (removal && cell.kind == WORLD_CELL_WATER) {
+            *out_gx = gx; *out_gy = gy; *out_gz = gz;
+            return true;
+        }
+        if (!removal && cell.kind == WORLD_CELL_WATER) {
+            *out_gx = gx; *out_gy = gy; *out_gz = gz;
+            return true;
+        }
+        if (!removal && cell.kind == WORLD_CELL_SOLID) {
+            if (water_in_domain(previous_x, previous_y, previous_z) &&
+                table_get(previous_x, previous_y, previous_z) < 0) {
+                *out_gx = previous_x; *out_gy = previous_y; *out_gz = previous_z;
+                return true;
+            }
+            return false;
+        }
+        previous_x = gx; previous_y = gy; previous_z = gz;
+    }
+    if (!removal && water_in_domain(previous_x, previous_y, previous_z)) {
+        *out_gx = previous_x; *out_gy = previous_y; *out_gz = previous_z;
+        return true;
+    }
+    return false;
+}
+
+static void creative_place_water(int player_idx) {
+    Player *p = &players[player_idx];
+    Ray ray = { p->pos, player_forward(p) };
+    int gx, gy, gz;
+    if (!creative_find_water_cell(ray, CREATIVE_RAY_RANGE, false, &gx, &gy, &gz)) return;
+    int span = clampi(creativeBrushSpan[player_idx], CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
+    int half = span / 2;
+    for (int y = gy - half; y < gy - half + span; ++y)
+        for (int z = gz - half; z < gz - half + span; ++z)
+            for (int x = gx - half; x < gx - half + span; ++x)
+                (void)water_set_mass(x, y, z, WATER_MAX_MASS);
+}
+
+static void creative_remove_water(int player_idx) {
+    Player *p = &players[player_idx];
+    Ray ray = { p->pos, player_forward(p) };
+    int gx, gy, gz;
+    if (!creative_find_water_cell(ray, CREATIVE_RAY_RANGE, true, &gx, &gy, &gz)) return;
+    int span = clampi(creativeBrushSpan[player_idx], CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
+    int half = span / 2;
+    water_remove_region(gx - half, gx - half + span - 1,
+                        gy - half, gy - half + span - 1,
+                        gz - half, gz - half + span - 1);
+}
+
 static void creative_place_voxels(int player_idx) {
+    if (creativeWaterBrush[player_idx] && netTransport.role == NET_ROLE_OFFLINE) {
+        creative_place_water(player_idx);
+        return;
+    }
     Player *p = &players[player_idx];
     Vector3 dir = player_forward(p);
     Ray ray = { p->pos, dir };
@@ -8074,6 +8167,10 @@ static void creative_place_voxels(int player_idx) {
 }
 
 static void creative_remove_voxels(int player_idx) {
+    if (creativeWaterBrush[player_idx] && netTransport.role == NET_ROLE_OFFLINE) {
+        creative_remove_water(player_idx);
+        return;
+    }
     Player *p = &players[player_idx];
     Vector3 dir = player_forward(p);
     Ray ray = { p->pos, dir };
@@ -8213,6 +8310,9 @@ static void update_creative_player_keyboard(int player_idx, float dt) {
         if (IsKeyPressed(KEY_B)) {
             creativeBlockColorIndex[player_idx]--;
         }
+        if (IsKeyPressed(KEY_C) && netTransport.role == NET_ROLE_OFFLINE) {
+            creativeWaterBrush[player_idx] = !creativeWaterBrush[player_idx];
+        }
         if (IsKeyPressed(KEY_LEFT_CONTROL)) {
             creative_place_voxels(player_idx);
         }
@@ -8257,6 +8357,9 @@ static void update_creative_player_keyboard(int player_idx, float dt) {
         }
         if (IsKeyPressed(KEY_KP_2)) {
             creativeBlockColorIndex[player_idx]++;
+        }
+        if (IsKeyPressed(KEY_KP_3) && netTransport.role == NET_ROLE_OFFLINE) {
+            creativeWaterBrush[player_idx] = !creativeWaterBrush[player_idx];
         }
         if (IsKeyPressed(KEY_RIGHT_CONTROL)) {
             creative_place_voxels(player_idx);
@@ -8398,6 +8501,10 @@ static void update_creative_player_gamepad(int player_idx, float dt) {
     if (IsGamepadButtonPressed(player_idx, GAMEPAD_BUTTON_RIGHT_FACE_DOWN)) {
         creativePickupType[player_idx] = (creativePickupType[player_idx] + 1) % 4;
     }
+    if (IsGamepadButtonPressed(player_idx, GAMEPAD_BUTTON_LEFT_THUMB) &&
+        netTransport.role == NET_ROLE_OFFLINE) {
+        creativeWaterBrush[player_idx] = !creativeWaterBrush[player_idx];
+    }
     if (IsGamepadButtonPressed(player_idx, GAMEPAD_BUTTON_RIGHT_TRIGGER_2)) {
         creative_place_voxels(player_idx);
     }
@@ -8456,10 +8563,13 @@ static void draw_creative_help_overlay(int player_idx, int view_w, int view_h) {
     const int font = 18;
     const int pad = 12;
     const int line_gap = 6;
-    const int max_lines = 16;
+    const int max_lines = 18;
     const char *lines[max_lines];
     int count = 0;
     char title[64];
+    char brush_mode[64];
+    snprintf(brush_mode, sizeof(brush_mode), "Brush Material: %s",
+             creativeWaterBrush[player_idx] ? "Water" : "Solid");
 
     if (playerInput[player_idx] == INPUT_TYPE_GAMEPAD) {
         snprintf(title, sizeof(title), "Creative Help (toggle: R3)");
@@ -8469,6 +8579,8 @@ static void draw_creative_help_overlay(int player_idx, int view_w, int view_h) {
         lines[count++] = "Up/Down: RB/LB";
         lines[count++] = "Fast Fly: Hold RT";
         lines[count++] = "Brush: D-pad Left/Right";
+        lines[count++] = brush_mode;
+        lines[count++] = "Toggle Solid/Water: L3";
         lines[count++] = "Color: D-pad Up/Down";
         lines[count++] = "Pickup Type: A";
         lines[count++] = "Place Voxels: RT";
@@ -8484,6 +8596,8 @@ static void draw_creative_help_overlay(int player_idx, int view_w, int view_h) {
         lines[count++] = "Up/Down: Q/E";
         lines[count++] = "Fast Fly: Left Shift";
         lines[count++] = "Brush: [ ]";
+        lines[count++] = brush_mode;
+        lines[count++] = "Toggle Solid/Water: C";
         lines[count++] = "Color: V/B";
         lines[count++] = "Pickup Type: Tab";
         lines[count++] = "Place Voxels: Left Ctrl";
@@ -8499,6 +8613,8 @@ static void draw_creative_help_overlay(int player_idx, int view_w, int view_h) {
         lines[count++] = "Up/Down: U/O";
         lines[count++] = "Fast Fly: Left Shift";
         lines[count++] = "Brush: KP -/+";
+        lines[count++] = brush_mode;
+        lines[count++] = "Toggle Solid/Water: KP 3";
         lines[count++] = "Color: KP 1/2";
         lines[count++] = "Pickup Type: KP *";
         lines[count++] = "Place Voxels: Right Ctrl";
@@ -8932,6 +9048,10 @@ static void update_projectiles(float dt)
         if (v->isBullet) {
             gravity = (Vector3){ 0.0f, 0.0f, 0.0f };
         }
+        float water_fill = water_sample_fill(v->pos);
+        if (water_fill > 0.0f) {
+            v->vel = v_mul(v->vel, expf(-10.0f * water_fill * dt));
+        }
         v->vel = v_mul(v->vel, VELOCITY_DAMPING);
         Vector3 displacement = v_add(v_mul(v->vel, dt), v_mul(gravity, dt * dt));
         v->vel = v_add(v->vel, v_mul(gravity, dt));
@@ -9354,6 +9474,52 @@ static int table_get_static_only(int x, int y, int z)
             return static_table[h].idx;
         }
         h = (h + 1) & (HASH_SIZE - 1);
+    }
+}
+
+#include "water_system.inc"
+
+static float water_player_submersion(const Player *player) {
+    if (!player || !water_runtime_enabled()) return 0.0f;
+    Vector3 feet = player->pos;
+    feet.y -= BASE_EYE_HEIGHT - 0.1f;
+    Vector3 torso = player->pos;
+    torso.y -= BASE_EYE_HEIGHT * 0.5f;
+    float fill = water_sample_fill(feet) +
+                 water_sample_fill(torso) +
+                 water_sample_fill(player->pos);
+    return fill / 3.0f;
+}
+
+static bool water_swim_input_held(int player_index) {
+    if (player_index < 0 || player_index >= activePlayers) return false;
+    if (playerInput[player_index] == INPUT_TYPE_GAMEPAD) {
+        return IsGamepadButtonDown(player_index, GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
+    }
+    if (playerInput[player_index] == INPUT_TYPE_KEYBOARD) {
+        return player_index == 0 ? IsKeyDown(KEY_SPACE) : IsKeyDown(KEY_RIGHT_SHIFT);
+    }
+    return false;
+}
+
+static void water_apply_player_forces(int player_index, float dt) {
+    Player *player = &players[player_index];
+    float submersion = water_player_submersion(player);
+    if (submersion <= 0.0f) return;
+    float drag = expf(-4.0f * submersion * dt);
+    player->vel = v_mul(player->vel, drag);
+    player->vel.y += 12.0f * submersion * dt;
+    bool swimming = water_swim_input_held(player_index);
+    if (swimming) {
+        player->vel.y += 10.0f * dt;
+        if (player->vel.y > 4.0f) player->vel.y = 4.0f;
+    }
+    float horizontal_speed = sqrtf(player->vel.x * player->vel.x + player->vel.z * player->vel.z);
+    if (swimming || horizontal_speed > 0.25f) {
+        uint32_t limit = (uint32_t)((float)(WATER_MAX_MASS / 4u) * clampf(dt * 10.0f, 0.0f, 1.0f));
+        Vector3 disturbance_point = player->pos;
+        disturbance_point.y -= BASE_EYE_HEIGHT * 0.5f;
+        water_disturb(disturbance_point, player->vel, limit);
     }
 }
 
@@ -12245,6 +12411,7 @@ static bool cull_dust_voxels(void) {
 }
 
 #include "physics_gpu_common.inc"
+#include "water_gpu_backend.inc"
 
 static void select_cpu_physics_backend(void) {
     if (physicsBackend.requested == PHYSICS_BACKEND_CPU_ST ||
@@ -14519,6 +14686,12 @@ static Matrix *instanceTransforms = NULL;
 static int instanceTransformsCount = 0;
 static int instanceTransformsCapacity = 0;
 static bool instancingInitialized = false;
+static Material waterMaterial = { 0 };
+static Shader waterShader = { 0 };
+static Matrix *waterInstanceTransforms = NULL;
+static int waterInstanceCount = 0;
+static int waterInstanceCapacity = 0;
+static bool waterRenderingInitialized = false;
 
 static void InitInstancing(void) {
     if (instancingInitialized) return;
@@ -14541,6 +14714,87 @@ static void InitInstancing(void) {
     instanceTransformsCapacity = MAX_VOXELS;
     instanceTransforms = (Matrix*)RL_MALLOC(instanceTransformsCapacity * sizeof(Matrix));
     instancingInitialized = true;
+}
+
+static void InitWaterRendering(void) {
+    if (waterRenderingInitialized) return;
+    if (!instancingInitialized) InitInstancing();
+    waterShader = LoadShader("shaders/water_instanced.vert", "shaders/water_instanced.frag");
+    waterShader.locs[SHADER_LOC_MATRIX_MODEL] = GetShaderLocationAttrib(waterShader, "instanceTransform");
+    waterShader.locs[SHADER_LOC_MATRIX_VIEW] = GetShaderLocation(waterShader, "matView");
+    waterShader.locs[SHADER_LOC_MATRIX_PROJECTION] = GetShaderLocation(waterShader, "matProjection");
+    waterMaterial = LoadMaterialDefault();
+    waterMaterial.shader = waterShader;
+    waterInstanceCapacity = 4096;
+    waterInstanceTransforms = (Matrix *)RL_MALLOC((size_t)waterInstanceCapacity * sizeof(Matrix));
+    waterRenderingInitialized = true;
+}
+
+static bool water_cell_is_enclosed_full(int gx, int gy, int gz) {
+    if (water_get_mass(gx, gy, gz) != WATER_MAX_MASS) return false;
+    static const int dx[6] = { 1, -1, 0, 0, 0, 0 };
+    static const int dy[6] = { 0, 0, 1, -1, 0, 0 };
+    static const int dz[6] = { 0, 0, 0, 0, 1, -1 };
+    for (int d = 0; d < 6; ++d) {
+        int nx = gx + dx[d], ny = gy + dy[d], nz = gz + dz[d];
+        if (!water_in_domain(nx, ny, nz)) return false;
+        int neighbor = water_index_unchecked(nx, ny, nz);
+        if (water_cell_blocked_index(neighbor) || waterSystem.mass[neighbor] != WATER_MAX_MASS) return false;
+    }
+    return true;
+}
+
+static void rebuild_water_instances(void) {
+    waterInstanceCount = 0;
+    if (!water_runtime_enabled()) {
+        waterSystem.render_dirty = false;
+        return;
+    }
+    for (int gy = WATER_MIN_Y; gy <= WATER_MAX_Y; ++gy) {
+        for (int gz = WATER_MIN_Z; gz <= WATER_MAX_Z; ++gz) {
+            for (int gx = WATER_MIN_X; gx <= WATER_MAX_X; ++gx) {
+                int index = water_index_unchecked(gx, gy, gz);
+                uint32_t mass = waterSystem.mass[index];
+                if (mass < WATER_RENDER_MIN_MASS || water_cell_blocked_index(index) ||
+                    water_cell_is_enclosed_full(gx, gy, gz)) continue;
+                if (waterInstanceCount >= waterInstanceCapacity) {
+                    int next_capacity = waterInstanceCapacity * 2;
+                    if (next_capacity > WATER_CELL_COUNT) next_capacity = WATER_CELL_COUNT;
+                    Matrix *next = (Matrix *)RL_REALLOC(waterInstanceTransforms,
+                                                        (size_t)next_capacity * sizeof(Matrix));
+                    if (!next) {
+                        waterSystem.render_dirty = false;
+                        return;
+                    }
+                    waterInstanceTransforms = next;
+                    waterInstanceCapacity = next_capacity;
+                }
+                float height = VOXEL_SIZE * ((float)mass / (float)WATER_MAX_MASS);
+                Matrix transform = MatrixIdentity();
+                transform.m0 = VOXEL_SIZE;
+                transform.m5 = height;
+                transform.m10 = VOXEL_SIZE;
+                transform.m12 = ((float)gx + 0.5f) * VOXEL_SIZE;
+                transform.m13 = (float)gy * VOXEL_SIZE + height * 0.5f;
+                transform.m14 = ((float)gz + 0.5f) * VOXEL_SIZE;
+                waterInstanceTransforms[waterInstanceCount++] = transform;
+            }
+        }
+    }
+    waterSystem.render_dirty = false;
+}
+
+static void DrawWater(void) {
+    if (!water_runtime_enabled()) return;
+    if (!waterRenderingInitialized) InitWaterRendering();
+    if (waterSystem.render_dirty) rebuild_water_instances();
+    if (waterInstanceCount <= 0) return;
+    BeginBlendMode(BLEND_ALPHA);
+    rlEnableDepthTest();
+    rlEnableBackfaceCulling();
+    DrawMeshInstanced(voxelMesh, waterMaterial, waterInstanceTransforms, waterInstanceCount);
+    EndBlendMode();
+    rlDisableBackfaceCulling();
 }
 
 // Draw all voxels via greedy mesh instead of per-voxel raycasting
@@ -16244,6 +16498,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
             BeginMode3D(cams[i]);
                 draw_world_surfaces();
                 DrawVoxels(cams[i]);
+                DrawWater();
                 draw_pickups(cams[i]);
                 draw_players();
             EndMode3D();
@@ -16251,10 +16506,13 @@ static void render_gameplay_view(RenderTexture2D *screens,
             get_viewport(view, viewCount, &view_x, &view_y, &view_w, &view_h);
             DrawRectangle(0, 0, view_w, HUD_BAR_HEIGHT, Fade(BLACK, 0.5f));
             if (creative_mode) {
-                Color c = creative_block_palette(creativeBlockColorIndex[i]);
-                const char *label = TextFormat("P%d CREATIVE | Brush %d | Pickup %s | Color %d",
+                Color c = creativeWaterBrush[i]
+                    ? (Color){ 25, 125, 230, 166 }
+                    : creative_block_palette(creativeBlockColorIndex[i]);
+                const char *label = TextFormat("P%d CREATIVE | Brush %d %s | Pickup %s | Color %d",
                                                i + 1,
                                                creativeBrushSpan[i],
+                                               creativeWaterBrush[i] ? "WATER" : "SOLID",
                                                pickup_type_label((PickupType)creativePickupType[i]),
                                                (creativeBlockColorIndex[i] % 6 + 6) % 6 + 1);
                 DrawText(label, HUD_PADDING_X, HUD_PADDING_Y, HUD_FONT_SIZE, WHITE);
@@ -16343,10 +16601,19 @@ static void render_gameplay_view(RenderTexture2D *screens,
             const char *physics_note = physicsBackend.gpu_recovery_probe ? " (GPU validating)" :
                                        physicsBackend.gpu_recovery_pending ? " (GPU retry pending)" :
                                        physicsBackend.sticky_fallback ? " (fallback)" : "";
-            const char *fps_text = TextFormat("FPS %d | PHYS %s %.2fms%s",
-                                              GetFPS(),
-                                              physics_backend_name(physicsBackend.active),
-                                              physicsBackend.last_step_ms, physics_note);
+            const WaterDiagnostics *water_diag = water_diagnostics();
+            const char *fps_text = netTransport.role == NET_ROLE_OFFLINE
+                ? TextFormat("FPS %d | PHYS %s %.2fms%s | WATER %s %.2fms %u active/%u wet/%u tiles T%llu D%llu",
+                             GetFPS(), physics_backend_name(physicsBackend.active),
+                             physicsBackend.last_step_ms, physics_note,
+                             water_diag->backend, water_diag->last_step_ms,
+                             water_diag->active_cells, water_diag->wet_cells,
+                             water_diag->active_tiles,
+                             (unsigned long long)water_diag->trapped_mass,
+                             (unsigned long long)water_diag->displaced_mass)
+                : TextFormat("FPS %d | PHYS %s %.2fms%s | WATER disabled (LAN)",
+                             GetFPS(), physics_backend_name(physicsBackend.active),
+                             physicsBackend.last_step_ms, physics_note);
             int text_w = MeasureText(fps_text, fps_font);
             int box_w = text_w + fps_pad * 2;
             int box_h = fps_font + fps_pad * 2 - 2;
@@ -16481,6 +16748,229 @@ static bool run_physics_smoke_test(int steps) {
     return true;
 }
 
+static uint64_t water_test_total_mass(void) {
+    uint64_t total = 0;
+    for (int i = 0; i < WATER_CELL_COUNT; ++i) total += waterSystem.mass[i];
+    return total;
+}
+
+static bool water_test_invariants(const char *name, uint64_t expected_mass) {
+    for (int i = 0; i < WATER_CELL_COUNT; ++i) {
+        if (waterSystem.mass[i] > WATER_MAX_MASS) {
+            fprintf(stderr, "water-self-test %s FAIL mass[%d]=%u\n",
+                    name, i, waterSystem.mass[i]);
+            return false;
+        }
+    }
+    uint64_t total = water_test_total_mass();
+    if (total != expected_mass) {
+        fprintf(stderr, "water-self-test %s FAIL mass=%llu expected=%llu\n", name,
+                (unsigned long long)total, (unsigned long long)expected_mass);
+        return false;
+    }
+    return true;
+}
+
+static void water_test_empty_world(void) {
+    water_reset();
+    memset(waterSystem.static_solid, 0, sizeof(waterSystem.static_solid));
+    memset(waterSystem.dynamic_solid, 0, sizeof(waterSystem.dynamic_solid));
+    memset(waterSystem.previous_solid, 0, sizeof(waterSystem.previous_solid));
+    waterSystem.static_generation = staticHashGeneration;
+}
+
+static uint64_t water_test_setup_basin(void) {
+    water_test_empty_world();
+    for (int y = 0; y <= 7; ++y) {
+        for (int p = -2; p <= 2; ++p) {
+            int indices[4] = {
+                water_index_unchecked(-2, y, p), water_index_unchecked(2, y, p),
+                water_index_unchecked(p, y, -2), water_index_unchecked(p, y, 2)
+            };
+            for (int k = 0; k < 4; ++k) {
+                waterSystem.static_solid[indices[k]] = 1;
+                waterSystem.previous_solid[indices[k]] = 1;
+            }
+        }
+    }
+    int obstacle = water_index_unchecked(0, 0, 0);
+    waterSystem.static_solid[obstacle] = 1;
+    waterSystem.previous_solid[obstacle] = 1;
+    (void)water_set_mass(0, 6, 0, WATER_MAX_MASS);
+    (void)water_set_mass(0, 7, 0, WATER_MAX_MASS);
+    (void)water_set_mass(1, 6, 0, WATER_MAX_MASS);
+    (void)water_set_mass(-1, 5, 1, WATER_MAX_MASS / 2u);
+    return water_test_total_mass();
+}
+
+static bool water_test_run_steps(PhysicsBackendKind backend, int steps) {
+    physicsBackend.active = backend;
+    for (int i = 0; i < steps; ++i) water_step_batch(PBD_MAX_STEP_DT, 1);
+    return true;
+}
+
+static bool run_water_self_tests(void) {
+    PhysicsBackendKind saved_backend = physicsBackend.active;
+    bool passed = true;
+    uint32_t *reference = (uint32_t *)malloc(sizeof(waterSystem.mass));
+    uint32_t *roundtrip = (uint32_t *)malloc(sizeof(waterSystem.mass));
+    if (!reference || !roundtrip) {
+        fprintf(stderr, "water-self-test FAIL allocation\n");
+        free(reference); free(roundtrip);
+        return false;
+    }
+
+    uint64_t initial_mass = water_test_setup_basin();
+    water_test_run_steps(PHYSICS_BACKEND_CPU_ST, 180);
+    passed &= water_test_invariants("vertical-column-and-basin", initial_mass);
+    uint32_t basin_min = WATER_MAX_MASS, basin_max = 0;
+    uint32_t neighbor_spread = 0;
+    bool all_on_floor = true;
+    for (int z = -1; z <= 1; ++z) {
+        for (int x = -1; x <= 1; ++x) {
+            if (x == 0 && z == 0) continue;
+            uint32_t mass = water_get_mass(x, 0, z);
+            if (mass < basin_min) basin_min = mass;
+            if (mass > basin_max) basin_max = mass;
+            static const int ndx[4] = { 1, -1, 0, 0 };
+            static const int ndz[4] = { 0, 0, 1, -1 };
+            for (int n = 0; n < 4; ++n) {
+                int nx = x + ndx[n], nz = z + ndz[n];
+                if (nx < -1 || nx > 1 || nz < -1 || nz > 1 || (nx == 0 && nz == 0)) continue;
+                uint32_t neighbor = water_get_mass(nx, 0, nz);
+                uint32_t delta = mass > neighbor ? mass - neighbor : neighbor - mass;
+                if (delta > neighbor_spread) neighbor_spread = delta;
+            }
+        }
+    }
+    for (int y = 1; y <= WATER_MAX_Y && all_on_floor; ++y)
+        for (int z = -1; z <= 1 && all_on_floor; ++z)
+            for (int x = -1; x <= 1; ++x)
+                if (water_get_mass(x, y, z) >= 8u) {
+                    all_on_floor = false;
+                    break;
+                }
+    water_refresh_diagnostics();
+    bool settled = all_on_floor && neighbor_spread < 8u &&
+                   waterSystem.diagnostics.active_tiles == 0;
+    passed &= settled;
+    fprintf(stderr, "water-self-test obstacle-flow-leveling-sleep %s (neighborSpread=%u range=%u floor=%d active=%u)\n",
+            settled ? "PASS" : "FAIL", neighbor_spread, basin_max - basin_min,
+            all_on_floor ? 1 : 0, waterSystem.diagnostics.active_tiles);
+    memcpy(reference, waterSystem.mass, sizeof(waterSystem.mass));
+    fprintf(stderr, "water-self-test vertical-column-and-basin %s\n", passed ? "PASS" : "FAIL");
+
+    uint64_t mt_mass = water_test_setup_basin();
+    water_test_run_steps(PHYSICS_BACKEND_CPU_MT, 180);
+    bool mt_equal = mt_mass == initial_mass &&
+                    memcmp(reference, waterSystem.mass, sizeof(waterSystem.mass)) == 0;
+    passed &= mt_equal && water_test_invariants("cpu-mt-parity", initial_mass);
+    fprintf(stderr, "water-self-test cpu-st/cpu-mt-parity %s\n", mt_equal ? "PASS" : "FAIL");
+
+    if (physics_backend_is_gpu(saved_backend) && gpuPhysics.ready) {
+        water_test_setup_basin();
+        water_test_run_steps(saved_backend, 180);
+        bool used_gpu = strncmp(waterSystem.diagnostics.backend, "gpu-", 4) == 0;
+        bool gpu_equal = used_gpu &&
+                         memcmp(reference, waterSystem.mass, sizeof(waterSystem.mass)) == 0;
+        passed &= gpu_equal && water_test_invariants("native-gpu-parity", initial_mass);
+        fprintf(stderr, "water-self-test native-gpu-parity %s (%s)\n",
+                gpu_equal ? "PASS" : "FAIL", waterSystem.diagnostics.backend);
+    } else {
+        fprintf(stderr, "water-self-test native-gpu-parity SKIP (GPU backend not active)\n");
+    }
+
+    water_test_empty_world();
+    int source = water_index_unchecked(0, 1, 0);
+    waterSystem.mass[source] = WATER_MAX_MASS;
+    waterSystem.scratch[source] = WATER_MAX_MASS;
+    int dynamic_test_voxel = addVoxel(0.25f, 0.75f, 0.25f, false, true, BLUE, 0);
+    water_rebuild_obstacles_and_displace();
+    bool displaced = dynamic_test_voxel >= 0 && waterSystem.dynamic_solid[source] != 0 &&
+                     water_test_total_mass() == WATER_MAX_MASS &&
+                     waterSystem.mass[source] < WATER_MAX_MASS;
+    passed &= displaced && water_test_invariants("solid-displacement", WATER_MAX_MASS);
+    fprintf(stderr, "water-self-test moving-solid-displacement %s\n", displaced ? "PASS" : "FAIL");
+
+    clear_world_voxels();
+    init_static_hash();
+    water_test_empty_world();
+    (void)water_set_mass(0, 10, 0, WATER_MAX_MASS);
+    int bullet = addVoxel(0.25f, 5.25f, 0.25f, false, true, BLUE, 0);
+    bool projectile_ok = bullet >= 0;
+    if (projectile_ok) {
+        voxels[bullet].isBullet = true;
+        set_voxel_velocity(&voxels[bullet], (Vector3){ 10.0f, 0.0f, 0.0f });
+        update_projectiles(PBD_MAX_STEP_DT);
+        projectile_ok = bullet < voxel_count && voxels[bullet].vel.x > 0.0f &&
+                        voxels[bullet].vel.x < 10.0f * VELOCITY_DAMPING;
+        water_rebuild_obstacles_and_displace();
+        projectile_ok = projectile_ok && waterSystem.dynamic_solid[water_index_unchecked(0, 10, 0)] != 0;
+    }
+    passed &= projectile_ok;
+    fprintf(stderr, "water-self-test projectile-drag-displacement %s\n",
+            projectile_ok ? "PASS" : "FAIL");
+
+    clear_world_voxels();
+    init_static_hash();
+    water_test_empty_world();
+    int saved_active_players = activePlayers;
+    activePlayers = 1;
+    players[0].pos = (Vector3){ 0.25f, 2.0f, 0.25f };
+    players[0].vel = (Vector3){ 4.0f, 0.0f, 0.0f };
+    (void)water_set_mass(0, 1, 0, WATER_MAX_MASS);
+    (void)water_set_mass(0, 2, 0, WATER_MAX_MASS);
+    (void)water_set_mass(0, 4, 0, WATER_MAX_MASS);
+    water_apply_player_forces(0, PBD_MAX_STEP_DT);
+    bool player_ok = players[0].vel.x < 4.0f && players[0].vel.y > 0.0f;
+    activePlayers = saved_active_players;
+    passed &= player_ok;
+    fprintf(stderr, "water-self-test player-buoyancy-drag %s\n", player_ok ? "PASS" : "FAIL");
+
+    water_test_empty_world();
+    water_add_region(-1, 1, 1, 2, -1, 1, WATER_MAX_MASS);
+    uint64_t placed_mass = water_test_total_mass();
+    water_remove_region(0, 0, 1, 2, 0, 0);
+    bool edited = placed_mass == UINT64_C(18) * WATER_MAX_MASS &&
+                  water_test_total_mass() == UINT64_C(16) * WATER_MAX_MASS;
+    passed &= edited;
+    fprintf(stderr, "water-self-test creative-place-remove %s\n", edited ? "PASS" : "FAIL");
+
+    FILE *map = tmpfile();
+    bool map_ok = map != NULL;
+    if (map_ok) {
+        water_write_map(map);
+        rewind(map);
+        int count = -1;
+        map_ok = fscanf(map, "WATER %d\n", &count) == 1;
+        memcpy(roundtrip, waterSystem.mass, sizeof(waterSystem.mass));
+        if (map_ok) map_ok = water_read_map_entries(map, count);
+        if (map_ok) map_ok = memcmp(roundtrip, waterSystem.mass, sizeof(waterSystem.mass)) == 0;
+        fclose(map);
+    }
+    passed &= map_ok;
+    fprintf(stderr, "water-self-test FPSMAP2-water-roundtrip %s\n", map_ok ? "PASS" : "FAIL");
+
+    water_test_empty_world();
+    water_wake_cell_and_neighbors(0, 0, 0);
+    water_test_run_steps(PHYSICS_BACKEND_CPU_ST, WATER_SLEEP_STEPS + 2);
+    water_refresh_diagnostics();
+    bool slept = waterSystem.diagnostics.active_tiles == 0;
+    (void)water_set_mass(0, 0, 0, WATER_MAX_MASS);
+    water_refresh_diagnostics();
+    bool woke = waterSystem.diagnostics.active_tiles > 1;
+    passed &= slept && woke;
+    fprintf(stderr, "water-self-test tile-sleep-neighbor-wake %s\n",
+            (slept && woke) ? "PASS" : "FAIL");
+
+    free(reference);
+    free(roundtrip);
+    physicsBackend.active = saved_backend;
+    water_reset();
+    fprintf(stderr, "water-self-test result=%s\n", passed ? "PASS" : "FAIL");
+    return passed;
+}
+
 #include "debug_harness.inc"
 
 #define FPS_EXIT_GPU_CONTEXT_UNAVAILABLE 78
@@ -16488,7 +16978,7 @@ static bool run_physics_smoke_test(int steps) {
 
 int main(int argc, char **argv) {
     if (!parse_physics_arguments(argc, argv)) return 2;
-    bool automatedRun = physicsSmokeSteps > 0 || debug_run_requested();
+    bool automatedRun = physicsSmokeSteps > 0 || waterSelfTestRequested || debug_run_requested();
     int countFrame = 0;
     SetLoggingEnabled(getenv("FPS_SHADER_LOG") != NULL);
     SetTraceLogLevel(physicsReportRequested ? LOG_ALL : LOG_NONE);
@@ -16562,6 +17052,15 @@ int main(int argc, char **argv) {
         shutdown_sfx();
         CloseWindow();
         return ok ? 0 : 3;
+    }
+    if (waterSelfTestRequested) {
+        bool ok = run_water_self_tests();
+        water_gpu_shutdown_backend();
+        shutdown_pbd_thread_pool();
+        gpu_physics_shutdown();
+        shutdown_sfx();
+        CloseWindow();
+        return ok ? 0 : 5;
     }
     if (debug_run_requested()) {
         int status = run_debug_harness();
@@ -17007,6 +17506,7 @@ int main(int argc, char **argv) {
             if (p->dynamicShotActive && p->matter <= 0.0f) {
                 p->dynamicShotActive = false;
             }
+            water_apply_player_forces(i, dt);
             
             bool collided = false;
 
@@ -17089,6 +17589,7 @@ int main(int argc, char **argv) {
         if (pbd_steps_due > PBD_MAX_ACCUM_STEPS) pbd_steps_due = PBD_MAX_ACCUM_STEPS;
         if (pbd_steps_due > 0) {
             simulate_voxel_pbd_steps(pbd_fixed_dt, pbd_steps_due);
+            water_step_batch(pbd_fixed_dt, pbd_steps_due);
             pbdTimeAccumulator -= pbd_fixed_dt * (float)pbd_steps_due;
         }
         recycle_dead_voxels();
@@ -17177,6 +17678,7 @@ int main(int argc, char **argv) {
                 if (pbd_steps_due > PBD_MAX_ACCUM_STEPS) pbd_steps_due = PBD_MAX_ACCUM_STEPS;
                 if (pbd_steps_due > 0) {
                     simulate_voxel_pbd_steps(pbd_fixed_dt, pbd_steps_due);
+                    water_step_batch(pbd_fixed_dt, pbd_steps_due);
                     pbdTimeAccumulator -= pbd_fixed_dt * (float)pbd_steps_due;
                 }
                 recycle_dead_voxels();
@@ -17280,7 +17782,17 @@ int main(int argc, char **argv) {
     }
     shutdown_pbd_thread_pool();
     net_transport_shutdown(&netTransport);
+    water_gpu_shutdown_backend();
     gpu_physics_shutdown();
+    if (waterRenderingInitialized) {
+        UnloadMaterial(waterMaterial);
+        RL_FREE(waterInstanceTransforms);
+        waterInstanceTransforms = NULL;
+        waterInstanceCapacity = 0;
+        waterInstanceCount = 0;
+        waterRenderingInitialized = false;
+    }
+    water_shutdown();
     // cleanup
     for (int i = 0; i < renderPlayers; ++i) {
         if (screens[i].id != 0) {

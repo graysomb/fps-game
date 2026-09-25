@@ -150,6 +150,7 @@ Creative mode lets you fly around an empty world and build voxel maps that can b
 *   **Up/Down:** E / Q
 *   **Faster Fly:** Left Shift
 *   **Brush Size:** [ / ] (1–20)
+*   **Toggle Solid/Water Brush:** C
 *   **Place Voxels:** Left Ctrl (grid-aligned)
 *   **Remove Voxels:** Left Alt
 *   **Cycle Block Color:** V (next) / B (prev)
@@ -166,6 +167,7 @@ Creative mode lets you fly around an empty world and build voxel maps that can b
 *   **Look:** Arrow Keys
 *   **Up/Down:** O / U
 *   **Brush Size:** Numpad - / +
+*   **Toggle Solid/Water Brush:** Numpad 3
 *   **Cycle Block Color:** Numpad 1/2
 *   **Cycle Pickup Type:** Numpad *
 *   **Place Voxels:** Right Ctrl
@@ -180,6 +182,7 @@ Creative mode lets you fly around an empty world and build voxel maps that can b
 *   **Up/Down:** RB / LB
 *   **Faster Fly:** RT (hold)
 *   **Brush Size:** D-pad Left/Right
+*   **Toggle Solid/Water Brush:** Left Stick Press (L3)
 *   **Cycle Block Color:** D-pad Up/Down
 *   **Cycle Pickup Type:** A
 *   **Place Voxels:** RT (press)
@@ -187,6 +190,16 @@ Creative mode lets you fly around an empty world and build voxel maps that can b
 *   **Place Pickup:** X
 *   **Remove Nearest Pickup:** B
 *   **Activate Structure:** Y
+
+### Cellular-Automata Water
+
+Water is a separate finite-mass 80×80×80 grid over the build bounds. It uses
+16-bit integer fill values, falls before leveling horizontally, sleeps in 8³
+tiles, and treats the voxel hashes as read-only solid obstacles. Dynamic voxels
+and projectiles displace it; players receive drag, buoyancy, and held-jump swim
+acceleration. Creative maps save this state as `FPSMAP2`; `FPSMAP1` maps still
+load with an empty water grid. Water remains disabled in LAN sessions until it
+has protocol replication.
 
 ### Custom Map in Multiplayer
 *   **Toggle Custom Map:** U (Main Menu)
@@ -328,7 +341,13 @@ fps_ray --physics=gpu --physics-smoke=60 --physics-smoke-voxels=256
 fps_ray --physics=cpu-mt --physics-smoke=60 --physics-smoke-voxels=256
 fps_ray --physics=gpu --physics-smoke=80 --physics-smoke-voxels=4096 \
   --physics-smoke-batch=8 --gpu-transfer-stats
+fps_ray --physics=cpu-st --water-self-test
+fps_ray --physics=gpu --water-self-test
 ```
+
+The water self-test checks conservation and bounds, vertical fall and basin
+leveling, CPU ST/MT byte parity, native GPU byte parity when active, solid
+displacement, creative edits, map round-tripping, and tile sleep/wake behavior.
 
 Runtime GPU failures immediately continue on CPU, then retry the GPU after 5,
 15, and 60 seconds. A successful retry repacks state from the CPU and must pass

@@ -64,11 +64,13 @@ clang "$project_root/fps_launcher.c" -std=c11 $opt_flags $arch_flags \
     -mmacosx-version-min="$deployment_target" -o "$bin_dir/fps_ray"
 
 mkdir -p "$bin_dir/shaders/pbd"
+cp -R "$project_root/shaders/." "$bin_dir/shaders/"
 xcrun -sdk macosx metal -c "$project_root/shaders/pbd/pbd_pipeline.metal" \
     -o "$build_root/pbd_pipeline.air" -mmacosx-version-min="$deployment_target"
-xcrun -sdk macosx metallib "$build_root/pbd_pipeline.air" \
-    -o "$bin_dir/shaders/pbd/pbd_pipeline.metallib"
-cp -R "$project_root/shaders/." "$bin_dir/shaders/"
+xcrun -sdk macosx metal -c "$project_root/shaders/water/water_ca.metal" \
+    -o "$build_root/water_ca.air" -mmacosx-version-min="$deployment_target"
+xcrun -sdk macosx metallib -o "$bin_dir/shaders/pbd/pbd_pipeline.metallib" \
+    "$build_root/pbd_pipeline.air" "$build_root/water_ca.air"
 
 cp "$bin_dir/fps_ray" "$bin_dir/fps_ray_gpu" "$bin_dir/fps_ray_cpu" "$app_dir/Contents/MacOS/"
 cp "$project_root/macos/Info.plist" "$app_dir/Contents/Info.plist"

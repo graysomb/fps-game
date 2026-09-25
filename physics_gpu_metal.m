@@ -11,6 +11,7 @@ typedef struct FpsMetalState {
     id<MTLCommandQueue> queue;
     id<MTLLibrary> library;
     id<MTLComputePipelineState> pipeline;
+    id<MTLComputePipelineState> water_pipeline;
     id<MTLCommandBuffer> command_buffer;
     id<MTLComputeCommandEncoder> encoder;
     id<MTLBuffer> bound[FPS_GPU_BUFFER_COUNT];
@@ -80,6 +81,16 @@ bool fps_metal_initialize(const char *library_path, long long *max_buffer_size,
             fps_metal_shutdown();
             return false;
         }
+        id<MTLFunction> water_function = [metal_state.library newFunctionWithName:@"water_ca"];
+        if (water_function) {
+            NSError *water_error = nil;
+            metal_state.water_pipeline = [metal_state.device newComputePipelineStateWithFunction:water_function
+                                                                                             error:&water_error];
+            [water_function release];
+            if (!metal_state.water_pipeline && error && error_capacity > 0) {
+                fps_metal_error(error, error_capacity, [water_error localizedDescription]);
+            }
+        }
         if (max_buffer_size) {
             if ([metal_state.device respondsToSelector:@selector(maxBufferLength)])
                 *max_buffer_size = (long long)metal_state.device.maxBufferLength;
@@ -103,6 +114,7 @@ void fps_metal_shutdown(void) {
             metal_state.command_buffer = nil;
         }
         [metal_state.pipeline release];
+        [metal_state.water_pipeline release];
         [metal_state.library release];
         [metal_state.queue release];
         [metal_state.device release];
@@ -269,6 +281,52 @@ bool fps_metal_end_batch(void) {
         [metal_state.command_buffer release];
         metal_state.command_buffer = nil;
         return ok;
+    }
+}
+
+bool fps_metal_water_available(void) {
+    return metal_state.water_pipeline != nil && metal_state.queue != nil;
+}
+
+bool fps_metal_water_dispatch(void *mass_handle, void *scratch_handle,
+                              void *static_handle, void *dynamic_handle,
+                              void *active_handle, int fixed_steps,
+                              int cell_count) {
+    @autoreleasepool {
+        if (!fps_metal_water_available() || fixed_steps <= 0 || cell_count <= 0) return false;
+        id<MTLBuffer> buffers[5] = {
+            (id<MTLBuffer>)mass_handle, (id<MTLBuffer>)scratch_handle,
+            (id<MTLBuffer>)static_handle, (id<MTLBuffer>)dynamic_handle,
+            (id<MTLBuffer>)active_handle
+        };
+        for (int i = 0; i < 5; ++i) if (!buffers[i]) return false;
+        id<MTLCommandBuffer> command = [metal_state.queue commandBuffer];
+        if (!command) return false;
+        id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+        if (!encoder) return false;
+        [encoder setComputePipelineState:metal_state.water_pipeline];
+        for (int i = 0; i < 5; ++i) [encoder setBuffer:buffers[i] offset:0 atIndex:(NSUInteger)i];
+        struct { int mode, cell_count, padding0, padding1; } uniforms = { 0, cell_count, 0, 0 };
+        MTLSize threads = MTLSizeMake(128, 1, 1);
+        MTLSize groups = MTLSizeMake(((NSUInteger)cell_count + 127u) / 128u, 1, 1);
+        for (int step = 0; step < fixed_steps; ++step) {
+            for (int mode = 0; mode < 2; ++mode) {
+                if (step != 0 || mode != 0) [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
+                uniforms.mode = mode;
+                [encoder setBytes:&uniforms length:sizeof(uniforms) atIndex:5];
+                [encoder dispatchThreadgroups:groups threadsPerThreadgroup:threads];
+            }
+        }
+        [encoder endEncoding];
+        if (metal_state.managed) {
+            id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+            if (!blit) return false;
+            [blit synchronizeResource:buffers[0]];
+            [blit endEncoding];
+        }
+        [command commit];
+        [command waitUntilCompleted];
+        return command.status == MTLCommandBufferStatusCompleted;
     }
 }
 

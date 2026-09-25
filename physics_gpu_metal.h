@@ -61,6 +61,11 @@ bool fps_metal_dispatch(int mode, int count);
 bool fps_metal_dispatch_indirect(int mode, void *buffer, size_t offset);
 bool fps_metal_end_batch(void);
 void fps_metal_get_profile_info(FpsMetalProfileInfo *out);
+bool fps_metal_water_available(void);
+bool fps_metal_water_dispatch(void *mass, void *scratch,
+                              void *static_mask, void *dynamic_mask,
+                              void *active_tiles, int fixed_steps,
+                              int cell_count);
 #endif
 
 #endif
