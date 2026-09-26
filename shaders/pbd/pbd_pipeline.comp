@@ -69,6 +69,8 @@ uniform float uVgsVolume;
 uniform float uVgsEpsilon;
 uniform float uStrainBreakThreshold;
 uniform float uShearBreakThreshold;
+uniform float uFractureProbability;
+uniform int uFractureEvaluationSerial;
 uniform float uTetherSpring;
 uniform float uTetherDamping;
 uniform int uBreakDampFrames;
@@ -562,6 +564,22 @@ void staticCollisions(uint gid) {
 
 int topologyNeighbor(int voxelId, int face);
 
+uint fractureHash(uint value) {
+    value ^= value >> 16;
+    value *= 0x7feb352du;
+    value ^= value >> 15;
+    value *= 0x846ca68bu;
+    value ^= value >> 16;
+    return value;
+}
+
+bool fractureProbabilityAccepts(uint identity) {
+    uint sampleBits = fractureHash(
+        identity ^ uint(uFractureEvaluationSerial) * 0x9e3779b9u);
+    float sample = float(sampleBits) * (1.0 / 4294967296.0);
+    return sample < uFractureProbability;
+}
+
 void gatherBreakMask(uint gid) {
     if (gid >= uint(uVgsCount)) return;
     uint voxelId = uint(uVgsBegin) + gid;
@@ -618,7 +636,7 @@ void gatherBreakMask(uint gid) {
             exceeded=true; mask |= 1u<<face;
         }
     }
-    if (exceeded) {
+    if (exceeded && fractureProbabilityAccepts(voxelId)) {
         v.flags.x = 0; // Deactivate VGS constraint
         v.lifecycle.y = 1u; // wake_source = true
         v.lifecycle.z = 0u; // Clear glued faces

@@ -5374,9 +5374,10 @@ static bool debug_write_report(DebugRunState *state)
                 ++terminal_nodes;
                 if (node->vgs_enabled) ++visible_terminal_cells;
             }
-            fprintf(file, "  \"adaptiveHierarchy\": {\"thresholdPerSecondSquared\": %.9g, \"thresholdLevelFactor\": %d, \"deformationFractionCoarsest\": %.9g, \"deformationFractionFinest\": %.9g, \"cornerDrop\": %s, \"refinements\": %u, \"coarsenings\": %u, \"terminalCells\": %d, \"visibleTerminalCells\": %d, \"terminalNodes\": %d, \"terminalLeaves\": %d, \"brokenInternalNodes\": %d, \"brokenLeaves\": %d, \"enabledVgsConstraints\": %d, \"enabledWeldConstraints\": %d, \"gpuConstraints\": %d, \"simulatedParticles\": %d},\n",
+            fprintf(file, "  \"adaptiveHierarchy\": {\"thresholdPerSecondSquared\": %.9g, \"thresholdLevelFactor\": %d, \"fractureProbability\": %.9g, \"deformationFractionCoarsest\": %.9g, \"deformationFractionFinest\": %.9g, \"cornerDrop\": %s, \"refinements\": %u, \"coarsenings\": %u, \"terminalCells\": %d, \"visibleTerminalCells\": %d, \"terminalNodes\": %d, \"terminalLeaves\": %d, \"brokenInternalNodes\": %d, \"brokenLeaves\": %d, \"enabledVgsConstraints\": %d, \"enabledWeldConstraints\": %d, \"gpuConstraints\": %d, \"simulatedParticles\": %d},\n",
                     (double)VGS_ADAPTIVE_CURVATURE_THRESHOLD,
                     VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR,
+                    (double)VGS_FRACTURE_PROBABILITY,
                     (double)vgsAdaptiveDeformationCoarseFraction,
                     (double)vgsAdaptiveDeformationFineFraction,
                     getenv("FPS_AMR_CORNER_DROP") ? "true" : "false",

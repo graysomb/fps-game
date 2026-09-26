@@ -71,6 +71,8 @@ enum {
     GPU_LOC_VGS_EPSILON,
     GPU_LOC_STRAIN_THRESHOLD,
     GPU_LOC_SHEAR_THRESHOLD,
+    GPU_LOC_FRACTURE_PROBABILITY,
+    GPU_LOC_FRACTURE_EVALUATION_SERIAL,
     GPU_LOC_TETHER_SPRING,
     GPU_LOC_TETHER_DAMPING,
     GPU_LOC_BREAK_DAMP_FRAMES,
@@ -931,6 +933,8 @@ static void gpu_set_uniforms(float dt) {
     uniforms.rest_grid_step = rest_grid_step;
     uniforms.particle_hash_step = particle_hash_step;
     uniforms.vgs_volume = volume;
+    uniforms.fracture_probability = VGS_FRACTURE_PROBABILITY;
+    uniforms.fracture_evaluation_serial = vgsFractureEvaluationSerial;
     memcpy(uniforms.players, player_data, sizeof(player_data));
     memcpy(uniforms.tether_targets, tether_data, sizeof(tether_data));
     fps_metal_set_uniforms(&uniforms);
@@ -957,6 +961,12 @@ static void gpu_set_uniforms(float dt) {
     rlSetUniform(gpuPhysics.loc[GPU_LOC_VGS_EPSILON], &eps, SHADER_UNIFORM_FLOAT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_STRAIN_THRESHOLD], &strain, SHADER_UNIFORM_FLOAT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_SHEAR_THRESHOLD], &shear, SHADER_UNIFORM_FLOAT, 1);
+    float fracture_probability = VGS_FRACTURE_PROBABILITY;
+    int fracture_evaluation_serial = (int)vgsFractureEvaluationSerial;
+    rlSetUniform(gpuPhysics.loc[GPU_LOC_FRACTURE_PROBABILITY], &fracture_probability,
+                 SHADER_UNIFORM_FLOAT, 1);
+    rlSetUniform(gpuPhysics.loc[GPU_LOC_FRACTURE_EVALUATION_SERIAL],
+                 &fracture_evaluation_serial, SHADER_UNIFORM_INT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_TETHER_SPRING], &tether_spring, SHADER_UNIFORM_FLOAT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_TETHER_DAMPING], &tether_damping, SHADER_UNIFORM_FLOAT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_BREAK_DAMP_FRAMES], &break_damp_frames, SHADER_UNIFORM_INT, 1);
@@ -1203,6 +1213,7 @@ static bool gpu_refresh_tethers(void) {
 }
 
 static bool gpu_dispatch_substep(float sub_dt) {
+    ++vgsFractureEvaluationSerial;
     gpu_set_uniforms(sub_dt);
     int hash_size = particle_hash_size_for_count(gpuPhysics.collision_count);
     bool ok = true;
@@ -1446,7 +1457,8 @@ static bool gpu_physics_init(void) {
         "uStaticColliderCount", "uHashSize", "uStaticHashSize",
         "uActivePlayers", "uDt", "uVoxelSize", "uParticleHashStep", "uFloorSize", "uGravity", "uVelocityDamping",
         "uSor", "uCollisionRelaxation", "uVgsAlpha", "uVgsBeta", "uVgsVolume", "uVgsEpsilon",
-        "uStrainBreakThreshold", "uShearBreakThreshold", "uTetherSpring", "uTetherDamping",
+        "uStrainBreakThreshold", "uShearBreakThreshold", "uFractureProbability",
+        "uFractureEvaluationSerial", "uTetherSpring", "uTetherDamping",
         "uBreakDampFrames", "uRestGridStep", "uPlayerPosHalf", "uTetherTarget"
     };
     for (int i = 0; i < GPU_LOC_COUNT; ++i) {

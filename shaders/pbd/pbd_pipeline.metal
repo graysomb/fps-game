@@ -30,7 +30,9 @@ struct GpuUniforms {
     float velocity_damping, sor, collision_relaxation, vgs_alpha;
     float vgs_beta, vgs_epsilon, strain_threshold, shear_threshold;
     float tether_spring, tether_damping, rest_grid_step, particle_hash_step;
-    float vgs_volume, float_padding_1, float_padding_2, float_padding_3;
+    float vgs_volume, fracture_probability;
+    uint fracture_evaluation_serial;
+    float float_padding;
     float4 players[4];
     float4 tether_targets[4];
 };
@@ -440,6 +442,22 @@ inline void staticCollisions(uint gid,device ParticleState *particle,device uint
 
 inline int topologyNeighbor(device int4 *topology,int voxelId,int face);
 
+inline uint fractureHash(uint value) {
+    value ^= value >> 16;
+    value *= 0x7feb352du;
+    value ^= value >> 15;
+    value *= 0x846ca68bu;
+    value ^= value >> 16;
+    return value;
+}
+
+inline bool fractureProbabilityAccepts(uint identity, constant GpuUniforms &u) {
+    uint sampleBits = fractureHash(
+        identity ^ u.fracture_evaluation_serial * 0x9e3779b9u);
+    float sample = float(sampleBits) * (1.0f / 4294967296.0f);
+    return sample < u.fracture_probability;
+}
+
 inline void gatherBreakMask(uint gid, device ParticleState *particle,
                             device VoxelState *voxel, device int4 *topology,
                             device const int *refcount,
@@ -502,7 +520,7 @@ inline void gatherBreakMask(uint gid, device ParticleState *particle,
             mask |= 1u << face;
         }
     }
-    if (exceeded) {
+    if (exceeded && fractureProbabilityAccepts(id, u)) {
         v.flags.x = 0; // Deactivate VGS constraint
         v.lifecycle.y = 1u; // wake_source = true
         v.lifecycle.z = 0u; // Clear glued faces

@@ -560,6 +560,9 @@ static inline bool is_player_bot(int player_index) {
 #define COARSENING_MASS_SCALE 0.1f
 #define STRAIN_BREAK_THRESHOLD 0.2f
 #define SHEAR_BREAK_THRESHOLD 0.2f
+#ifndef VGS_FRACTURE_PROBABILITY
+#define VGS_FRACTURE_PROBABILITY 0.05f
+#endif
 #ifndef PBD_DISABLE_VGS_DEACTIVATION
 #define PBD_DISABLE_VGS_DEACTIVATION 0
 #endif
@@ -1869,6 +1872,7 @@ static float debugVgsTemporalLastMean = 0.0f;
 static float vgsAdaptiveDeformationCoarseFraction = 0.25f;
 static float vgsAdaptiveDeformationFineFraction = 0.75f;
 static unsigned char debugTagBreakLogged[DEBUG_CLUSTER_TAG_MAX];
+static uint32_t vgsFractureEvaluationSerial = 0;
 
 static const char *trace_level_label(int level) {
     switch (level) {
@@ -10392,6 +10396,25 @@ static void decrement_particle_timers_range(int start, int end, int worker_id, v
     }
 }
 
+static inline uint32_t vgs_fracture_hash(uint32_t value) {
+    value ^= value >> 16;
+    value *= 0x7feb352du;
+    value ^= value >> 15;
+    value *= 0x846ca68bu;
+    value ^= value >> 16;
+    return value;
+}
+
+static inline bool vgs_fracture_probability_accepts(uint32_t identity,
+                                                    uint32_t evaluation_serial) {
+    if (VGS_FRACTURE_PROBABILITY <= 0.0f) return false;
+    if (VGS_FRACTURE_PROBABILITY >= 1.0f) return true;
+    uint32_t sample_bits = vgs_fracture_hash(
+        identity ^ evaluation_serial * 0x9e3779b9u);
+    double sample = (double)sample_bits / 4294967296.0;
+    return sample < (double)VGS_FRACTURE_PROBABILITY;
+}
+
 static void evaluate_voxel_fracture(Voxel *voxel) {
     if (PBD_DISABLE_VGS_DEACTIVATION || !voxel->simulate || !voxel->vgs_active ||
         voxel->isBullet || voxel->type != 0 || voxel->debugClusterTag == DEBUG_CONTAINER_TAG) {
@@ -10470,7 +10493,9 @@ static void evaluate_voxel_fracture(Voxel *voxel) {
         }
     }
 
-    if (should_break) {
+    if (should_break &&
+        vgs_fracture_probability_accepts(0x4c454146u ^ (uint32_t)voxel_idx,
+                                         vgsFractureEvaluationSerial)) {
         voxel->vgs_active = false;
         voxel->wake_source = true;
         for (int i = 0; i < 8; ++i) {
@@ -10518,8 +10543,10 @@ static void evaluate_hierarchy_fracture_range(int start, int end, int worker_id,
         }
         if (!valid) continue;
         VgsDeformation deformation = measure_vgs_deformation(corners, node->rest_edge);
-        if (deformation.max_abs_strain > STRAIN_BREAK_THRESHOLD ||
-            deformation.max_abs_shear > SHEAR_BREAK_THRESHOLD)
+        if ((deformation.max_abs_strain > STRAIN_BREAK_THRESHOLD ||
+            deformation.max_abs_shear > SHEAR_BREAK_THRESHOLD) &&
+            vgs_fracture_probability_accepts(0x4e4f4445u ^ (uint32_t)i,
+                                             vgsFractureEvaluationSerial))
             node->vgs_enabled = false;
     }
 }
@@ -13646,6 +13673,7 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
         // child is tested before integration and constraint projection.
         if (active_voxel_count > 0 && !PBD_DISABLE_VGS_DEACTIVATION) {
             double tb = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
+            ++vgsFractureEvaluationSerial;
             pbd_parallel_for(0, active_voxel_count, evaluate_voxel_fracture_range, NULL);
             if (vgsHierarchy.node_count)
                 pbd_parallel_for(0, vgsHierarchy.node_count,

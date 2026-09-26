@@ -35,7 +35,9 @@ typedef struct FpsGpuUniforms {
     float rest_grid_step;
     float particle_hash_step;
     float vgs_volume;
-    float float_padding[3];
+    float fracture_probability;
+    uint32_t fracture_evaluation_serial;
+    float float_padding;
     float players[4][4];
     float tether_targets[4][4];
 } FpsGpuUniforms;
