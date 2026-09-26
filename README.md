@@ -466,10 +466,12 @@ Available scenarios are:
   VGS fracture is enabled by default. Each leaf and hierarchy node breaks
   independently when its strain or shear exceeds 0.2; a broken child also
   loses its parent weld and prevents coarsening across that child. VGS shear
-  strength `alpha`, stretch
-  strength `1-beta`, and volume restoration strength are each multiplied by
-  `(finest PBD cell size / constraint edge size)^2`. Their original values
-  (`0.9`, `0.1`, and `1.0`) apply at the finest level.
+  strength `alpha`, stretch strength `1-beta`, and volume restoration strength
+  are each multiplied by `(finest PBD cell size / constraint edge size)^2`.
+  A level-indexed modulus fit additionally scales `alpha` separately from
+  `1-beta` and volume restoration to match the measured finest-level shear and
+  compression moduli. Their original values (`0.9`, `0.1`, and `1.0`) apply at
+  the finest level.
   Active cells are colored by the largest absolute second time derivative of
   their three signed VGS strains and three signed shears. Each component uses
   three consecutive fixed physics steps; the color scale is green at 0,
@@ -483,7 +485,7 @@ Available scenarios are:
   node whose six-component strain/shear time curvature exceeds its level's
   threshold enables all eight children. Set `FPS_AMR_CORNER_DROP=1` to rotate
   the initial cube 45 degrees about X and Z for a corner-first landing.
-  The root threshold defaults to 50 s^-2
+  The root threshold defaults to 1 s^-2
   and quadruples at every finer level. A parent coarsens when its curvature is
   below its own threshold, the mean child curvature is below the child level's
   threshold, no grandchildren remain active, and none of its children has

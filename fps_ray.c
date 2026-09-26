@@ -1858,7 +1858,7 @@ static float debugVgsTemporalLastMean = 0.0f;
 // VGS strain/shear are dimensionless; temporal curvature has units of 1/s^2.
 #define VGS_TEMPORAL_CURVATURE_RED_AT 100.0f
 #ifndef VGS_ADAPTIVE_CURVATURE_THRESHOLD
-#define VGS_ADAPTIVE_CURVATURE_THRESHOLD 50.0f
+#define VGS_ADAPTIVE_CURVATURE_THRESHOLD 1.0f
 #endif
 #ifndef VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR
 #define VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR 4
@@ -10635,6 +10635,25 @@ static inline float fast_cbrtf(float x) {
     return y;
 }
 
+// Empirical correction for the nonlinear VGS response after h^2 scaling.
+// Entries are ordered from the finest level upward and preserve the measured
+// 0.5 m response while bringing coarser levels down to the same modulus.
+static inline void vgs_modulus_fit(float rest_edge, float *shear, float *compression) {
+    static const float shear_fit[6] = {
+        1.0f, 0.753081149f, 0.697625275f,
+        0.684079152f, 0.677501467f, 0.699009452f
+    };
+    static const float compression_fit[6] = {
+        1.0f, 0.854608088f, 0.818620020f,
+        0.808366762f, 0.800347253f, 0.800347253f
+    };
+    float finest_edge = fmaxf(pbdSolidVoxelSize, VGS_EPS);
+    float level_value = log2f(fmaxf(rest_edge / finest_edge, 1.0f));
+    int level = clampi((int)floorf(level_value + 0.5f), 0, 5);
+    *shear = shear_fit[level];
+    *compression = compression_fit[level];
+}
+
 
 // Voxel Gram-Schmidt shape matching (Algorithm 1 in the paper) gathers corrections for Jacobi updates.
 static void gather_shape_constraints(Particle *const corners[8], float rest_edge,
@@ -10642,9 +10661,11 @@ static void gather_shape_constraints(Particle *const corners[8], float rest_edge
     // Anchor the original strengths at the finest PBD cell and soften coarse nodes.
     float size_ratio = fminf(1.0f, pbdSolidVoxelSize / fmaxf(rest_edge, VGS_EPS));
     float strength_scale = size_ratio * size_ratio;
-    float vgs_alpha = VGS_ALPHA * strength_scale;
-    float vgs_beta = 1.0f - (1.0f - VGS_BETA) * strength_scale;
-    float vgs_volume = VGS_VOLUME * strength_scale;
+    float shear_fit, compression_fit;
+    vgs_modulus_fit(rest_edge, &shear_fit, &compression_fit);
+    float vgs_alpha = VGS_ALPHA * strength_scale * shear_fit;
+    float vgs_beta = 1.0f - (1.0f - VGS_BETA) * strength_scale * compression_fit;
+    float vgs_volume = VGS_VOLUME * strength_scale * compression_fit;
     bool has_dynamic = false;
     Vector3 p[8];
     Vector3 orig[8];

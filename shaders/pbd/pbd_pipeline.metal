@@ -366,9 +366,12 @@ inline void solveVgs(uint gid, device ParticleState *particle,
     float restEdge = v.pos_rest_edge.w, restVolume = v.velocity_rest_volume.w;
     float sizeRatio = clamp(u.particle_hash_step / restEdge, 0.0f, 1.0f);
     float strengthScale = sizeRatio * sizeRatio;
-    float vgsAlpha = u.vgs_alpha * strengthScale;
-    float vgsBeta = 1.0f - (1.0f - u.vgs_beta) * strengthScale;
-    float vgsVolume = u.vgs_volume * strengthScale;
+    int level = clamp(int(round(log2(max(restEdge / max(u.particle_hash_step, u.vgs_epsilon), 1.0f)))), 0, 5);
+    constexpr float shearFit[6] = {1.0f, 0.753081149f, 0.697625275f, 0.684079152f, 0.677501467f, 0.699009452f};
+    constexpr float compressionFit[6] = {1.0f, 0.854608088f, 0.818620020f, 0.808366762f, 0.800347253f, 0.800347253f};
+    float vgsAlpha = u.vgs_alpha * strengthScale * shearFit[level];
+    float vgsBeta = 1.0f - (1.0f - u.vgs_beta) * strengthScale * compressionFit[level];
+    float vgsVolume = u.vgs_volume * strengthScale * compressionFit[level];
     for (int iteration = 0; iteration < 3; ++iteration) {
         float3 centerPos(0.0f);
         for (int i = 0; i < 8; ++i) centerPos += p[i];

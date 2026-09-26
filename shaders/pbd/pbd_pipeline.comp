@@ -372,9 +372,12 @@ void solveVgs(uint gid) {
     float restVolume = v.velocity_rest_volume.w;
     float sizeRatio = clamp(uParticleHashStep / restEdge, 0.0, 1.0);
     float strengthScale = sizeRatio * sizeRatio;
-    float vgsAlpha = uVgsAlpha * strengthScale;
-    float vgsBeta = 1.0 - (1.0 - uVgsBeta) * strengthScale;
-    float vgsVolume = uVgsVolume * strengthScale;
+    int level = clamp(int(round(log2(max(restEdge / max(uParticleHashStep, uVgsEpsilon), 1.0)))), 0, 5);
+    const float shearFit[6] = float[6](1.0, 0.753081149, 0.697625275, 0.684079152, 0.677501467, 0.699009452);
+    const float compressionFit[6] = float[6](1.0, 0.854608088, 0.818620020, 0.808366762, 0.800347253, 0.800347253);
+    float vgsAlpha = uVgsAlpha * strengthScale * shearFit[level];
+    float vgsBeta = 1.0 - (1.0 - uVgsBeta) * strengthScale * compressionFit[level];
+    float vgsVolume = uVgsVolume * strengthScale * compressionFit[level];
     for (int iteration = 0; iteration < 3; ++iteration) {
         vec3 centerPos = vec3(0.0);
         for (int i = 0; i < 8; ++i) centerPos += p[i];
