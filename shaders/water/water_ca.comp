@@ -9,6 +9,7 @@ layout(std430, binding = 5) readonly buffer ActiveTileIdBuffer { uint activeTile
 uniform int uMode;
 uniform int uCellCount;
 const uint WATER_MAX = 65535u;
+const uint LATERAL_SUPPORT_MASS = 60000u;
 const int SIZE_X = 80, SIZE_Y = 80, SIZE_Z = 80;
 const int LAYER = SIZE_X * SIZE_Z, TILE_PAIRS = 256;
 uint loadMass(int i) { return (mass[i >> 1] >> ((i & 1) * 16)) & WATER_MAX; }
@@ -24,6 +25,8 @@ uint downFlow(int i, int y) { if (blocked(i)||y==0) return 0u; int b=i-LAYER;
     return min(loadMass(i), WATER_MAX-loadMass(b)); }
 uint horizontalFlow(int f, int t) { if (t<0||t>=SIZE_X*SIZE_Y*SIZE_Z||blocked(f)||blocked(t)||
     !tileActive(tileForIndex(f))||!tileActive(tileForIndex(t))) return 0u;
+    int fy=f/LAYER; if(fy>0){int below=f-LAYER;
+    if(!blocked(below)&&loadScratch(below)<LATERAL_SUPPORT_MASS)return 0u;}
     uint a=loadScratch(f), b=loadScratch(t); return a>b ? (a-b)>>3 : 0u; }
 uint gravityValue(int i,int y) { if(blocked(i)) return loadMass(i); uint o=downFlow(i,y);
     uint n=y+1<SIZE_Y?downFlow(i+LAYER,y+1):0u; return loadMass(i)-o+n; }

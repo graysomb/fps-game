@@ -507,12 +507,22 @@ static inline bool water_neighbor_tile_active(int tx, int ty, int tz) {
 
 static inline uint32_t water_flow_chunks(const WaterChunk *from_chunk, int from,
                                          const WaterChunk *to_chunk, int to,
-                                         bool edge_active) {
+                                         bool edge_active, bool from_supported) {
     if (!edge_active || !from_chunk || !to_chunk ||
+        !from_supported ||
         from_chunk->static_solid[from] || from_chunk->dynamic_solid[from] ||
         to_chunk->static_solid[to] || to_chunk->dynamic_solid[to]) return 0;
     uint32_t a = from_chunk->scratch[from], b = to_chunk->scratch[to];
     return a > b ? (a - b) >> 3 : 0;
+}
+
+static inline bool water_laterally_supported(const WaterChunk *below_chunk,
+                                              int below_local, int y) {
+    if (y == 0) return true;
+    if (!below_chunk) return false;
+    if (below_chunk->static_solid[below_local] || below_chunk->dynamic_solid[below_local])
+        return true;
+    return below_chunk->scratch[below_local] >= WATER_LATERAL_SUPPORT_MASS;
 }
 
 static inline WaterChunk *water_neighbor_chunk(int tx, int ty, int tz) {
@@ -577,6 +587,11 @@ static void water_horizontal_tiles(int start, int end, int worker_id, void *user
         WaterChunk *xm = water_neighbor_chunk(tx - 1, ty, tz);
         WaterChunk *zp = water_neighbor_chunk(tx, ty, tz + 1);
         WaterChunk *zm = water_neighbor_chunk(tx, ty, tz - 1);
+        WaterChunk *below = water_neighbor_chunk(tx, ty - 1, tz);
+        WaterChunk *xp_below = water_neighbor_chunk(tx + 1, ty - 1, tz);
+        WaterChunk *xm_below = water_neighbor_chunk(tx - 1, ty - 1, tz);
+        WaterChunk *zp_below = water_neighbor_chunk(tx, ty - 1, tz + 1);
+        WaterChunk *zm_below = water_neighbor_chunk(tx, ty - 1, tz - 1);
         int x0 = tx * WATER_TILE_SIZE, y0 = ty * WATER_TILE_SIZE, z0 = tz * WATER_TILE_SIZE;
         bool tile_changed = false;
         for (int ly = 0; ly < WATER_TILE_SIZE; ++ly) {
@@ -603,6 +618,22 @@ static void water_horizontal_tiles(int start, int end, int worker_id, void *user
                             lz + 1 < WATER_TILE_SIZE || water_neighbor_tile_active(tx, ty, tz + 1),
                             lz > 0 || water_neighbor_tile_active(tx, ty, tz - 1)
                         };
+                        WaterChunk *below_owners[4] = {
+                            ly > 0 ? owners[0] : (lx < 7 ? below : xp_below),
+                            ly > 0 ? owners[1] : (lx > 0 ? below : xm_below),
+                            ly > 0 ? owners[2] : (lz < 7 ? below : zp_below),
+                            ly > 0 ? owners[3] : (lz > 0 ? below : zm_below)
+                        };
+                        int below_local = ly > 0 ? local - 64 : local + 448;
+                        int neighbor_below[4] = {
+                            ly > 0 ? neighbors[0] - 64 : neighbors[0] + 448,
+                            ly > 0 ? neighbors[1] - 64 : neighbors[1] + 448,
+                            ly > 0 ? neighbors[2] - 64 : neighbors[2] + 448,
+                            ly > 0 ? neighbors[3] - 64 : neighbors[3] + 448
+                        };
+                        WaterChunk *source_below = ly > 0 ? chunk : below;
+                        bool source_supported = water_laterally_supported(source_below,
+                                                                          below_local, y);
                         if (x0 + lx + 1 >= WATER_SIZE_X) enabled[0] = false;
                         if (x0 + lx <= 0) enabled[1] = false;
                         if (z + 1 >= WATER_SIZE_Z) enabled[2] = false;
@@ -610,8 +641,12 @@ static void water_horizontal_tiles(int start, int end, int worker_id, void *user
                         uint32_t outgoing = 0, incoming = 0;
                         for (int n = 0; n < 4; ++n) {
                             if (!enabled[n]) continue;
-                            outgoing += water_flow_chunks(chunk, local, owners[n], neighbors[n], true);
-                            incoming += water_flow_chunks(owners[n], neighbors[n], chunk, local, true);
+                            bool neighbor_supported = water_laterally_supported(
+                                below_owners[n], neighbor_below[n], y);
+                            outgoing += water_flow_chunks(chunk, local, owners[n], neighbors[n],
+                                                          true, source_supported);
+                            incoming += water_flow_chunks(owners[n], neighbors[n], chunk, local,
+                                                          true, neighbor_supported);
                         }
                         next = chunk->scratch[local] - outgoing + incoming;
                     }

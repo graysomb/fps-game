@@ -16899,6 +16899,19 @@ static bool run_water_self_tests(void) {
         return false;
     }
 
+    water_test_empty_world();
+    (void)water_set_mass(0, 10, 0, WATER_MAX_MASS);
+    water_test_run_steps(PHYSICS_BACKEND_CPU_ST, 1);
+    bool airborne_column = water_get_mass(0, 9, 0) == WATER_MAX_MASS &&
+                           water_get_mass(1, 9, 0) == 0 &&
+                           water_get_mass(-1, 9, 0) == 0 &&
+                           water_get_mass(0, 9, 1) == 0 &&
+                           water_get_mass(0, 9, -1) == 0;
+    passed &= airborne_column &&
+              water_test_invariants("unsupported-horizontal-gate", WATER_MAX_MASS);
+    fprintf(stderr, "water-self-test unsupported-horizontal-gate %s\n",
+            airborne_column ? "PASS" : "FAIL");
+
     uint64_t initial_mass = water_test_setup_basin();
     water_test_run_steps(PHYSICS_BACKEND_CPU_ST, 180);
     passed &= water_test_invariants("vertical-column-and-basin", initial_mass);

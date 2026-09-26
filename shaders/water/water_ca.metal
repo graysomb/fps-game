@@ -3,6 +3,7 @@ using namespace metal;
 
 struct WaterUniforms { int mode; int cell_count; int padding0; int padding1; };
 constant uint WATER_MAX = 65535u;
+constant uint LATERAL_SUPPORT_MASS = 60000u;
 constant int SIZE_X = 80, SIZE_Y = 80, SIZE_Z = 80;
 constant int LAYER = SIZE_X * SIZE_Z;
 constant int TILE_PAIRS = 256;
@@ -39,6 +40,12 @@ inline uint horizontal_flow(int from, int to, device const uint *scratch,
     if (to < 0 || to >= SIZE_X * SIZE_Y * SIZE_Z || water_blocked(from, sm, dm) ||
         water_blocked(to, sm, dm) || !tile_active(active, water_tile_for_index(from)) ||
         !tile_active(active, water_tile_for_index(to))) return 0u;
+    int from_y = from / LAYER;
+    if (from_y > 0) {
+        int below = from - LAYER;
+        if (!water_blocked(below, sm, dm) && load_mass(scratch, below) < LATERAL_SUPPORT_MASS)
+            return 0u;
+    }
     uint a = load_mass(scratch, from), b = load_mass(scratch, to);
     return a > b ? (a - b) >> 3 : 0u;
 }
