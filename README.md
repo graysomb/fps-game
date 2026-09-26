@@ -528,7 +528,12 @@ Available scenarios are:
   compilation remain GPU resident between PBD substeps. Both substeps are encoded
   in one command buffer and CPU state is mirrored once at the end of the frame.
   The CPU implementation remains the reference and runtime fallback; OpenGL uses
-  the existing CPU AMR path.
+  the existing CPU AMR path. Collision projection still uses the original finest-
+  voxel shell classification, intersected with the particles that currently have
+  active AMR mass. Coarse terminal cells consequently have sparse surface collision
+  samples. In addition, Metal resident AMR does not currently rebuild that shell
+  classification when GPU fracture exposes a formerly interior surface; the stale
+  culling remains until another event causes a complete resident-world repack.
 * `rip-test`: activates the same 5 m cube, starts with its eight root children,
   and translates every particle in the outer 1.25 m on each X side symmetrically,
   including dormant particles that may become simulated after refinement. AMR
