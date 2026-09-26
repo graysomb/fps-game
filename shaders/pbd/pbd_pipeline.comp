@@ -373,8 +373,8 @@ void solveVgs(uint gid) {
     float sizeRatio = clamp(uParticleHashStep / restEdge, 0.0, 1.0);
     float strengthScale = sizeRatio * sizeRatio;
     int level = clamp(int(round(log2(max(restEdge / max(uParticleHashStep, uVgsEpsilon), 1.0)))), 0, 5);
-    const float shearFit[6] = float[6](1.0, 0.753081149, 0.697625275, 0.684079152, 0.677501467, 0.699009452);
-    const float compressionFit[6] = float[6](1.0, 0.854608088, 0.818620020, 0.808366762, 0.800347253, 0.800347253);
+    const float shearFit[6] = float[6](1.0, 0.167465888, 0.147586011, 0.143609412, 0.142652311, 0.142450549);
+    const float compressionFit[6] = float[6](1.0, 0.332471773, 0.285779610, 0.276316121, 0.274034485, 0.274624392);
     float vgsAlpha = uVgsAlpha * strengthScale * shearFit[level];
     float vgsBeta = 1.0 - (1.0 - uVgsBeta) * strengthScale * compressionFit[level];
     float vgsVolume = uVgsVolume * strengthScale * compressionFit[level];

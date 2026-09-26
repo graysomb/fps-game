@@ -10640,12 +10640,12 @@ static inline float fast_cbrtf(float x) {
 // 0.5 m response while bringing coarser levels down to the same modulus.
 static inline void vgs_modulus_fit(float rest_edge, float *shear, float *compression) {
     static const float shear_fit[6] = {
-        1.0f, 0.753081149f, 0.697625275f,
-        0.684079152f, 0.677501467f, 0.699009452f
+        1.0f, 0.167465888f, 0.147586011f,
+        0.143609412f, 0.142652311f, 0.142450549f
     };
     static const float compression_fit[6] = {
-        1.0f, 0.854608088f, 0.818620020f,
-        0.808366762f, 0.800347253f, 0.800347253f
+        1.0f, 0.332471773f, 0.285779610f,
+        0.276316121f, 0.274034485f, 0.274624392f
     };
     float finest_edge = fmaxf(pbdSolidVoxelSize, VGS_EPS);
     float level_value = log2f(fmaxf(rest_edge / finest_edge, 1.0f));

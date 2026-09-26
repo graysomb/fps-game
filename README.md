@@ -468,10 +468,11 @@ Available scenarios are:
   loses its parent weld and prevents coarsening across that child. VGS shear
   strength `alpha`, stretch strength `1-beta`, and volume restoration strength
   are each multiplied by `(finest PBD cell size / constraint edge size)^2`.
-  A level-indexed modulus fit additionally scales `alpha` separately from
-  `1-beta` and volume restoration to match the measured finest-level shear and
-  compression moduli. Their original values (`0.9`, `0.1`, and `1.0`) apply at
-  the finest level.
+  A level-indexed modulus fit, calibrated at 15% strain, additionally scales
+  `alpha` separately from `1-beta` and volume restoration to match the measured
+  finest-level shear and compression moduli. The runtime finest cell is the
+  material reference, and its original values (`0.9`, `0.1`, and `1.0`) remain
+  unchanged.
   Active cells are colored by the largest absolute second time derivative of
   their three signed VGS strains and three signed shears. Each component uses
   three consecutive fixed physics steps; the color scale is green at 0,
