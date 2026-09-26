@@ -532,7 +532,7 @@ static bool gpu_pack_world(void) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
         GpuVoxelState *g = &gpuPhysics.voxel_stage[gpuPhysics.dynamic_voxel_count + i];
         memset(g, 0, sizeof(*g));
-        g->flags[0] = (node->active && node->vgs_enabled) ? 1 : 0;
+        g->flags[0] = vgs_node_constraints_enabled(node) ? 1 : 0;
         g->flags[3] = 1;
         g->pos_rest_edge[3] = node->rest_edge;
         g->velocity_rest_volume[3] = node->rest_volume;
@@ -541,7 +541,7 @@ static bool gpu_pack_world(void) {
             int mapped = p ? gpuPhysics.pool_to_compact[p - particles_pool] : -1;
             g->particle[c] = mapped >= 0 ? (uint32_t)mapped : UINT32_MAX;
             int child = node->children[c];
-            uint32_t child_stage = child >= 0
+            uint32_t child_stage = child == VGS_CHILD_EMPTY ? UINT32_MAX : child >= 0
                 ? (uint32_t)(gpuPhysics.dynamic_voxel_count + child)
                 : (uint32_t)gpuPhysics.world_to_dynamic[-child - 1];
             memcpy(c < 4 ? &g->bounds_min[c] : &g->bounds_max[c - 4],
@@ -1122,7 +1122,7 @@ static bool gpu_validate_and_commit(void) {
     for (int i = 0; i < vgsHierarchy.node_count; ++i) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
         GpuVoxelState *g = &gpuPhysics.voxel_stage[gpuPhysics.dynamic_voxel_count + i];
-        if (node->active && node->vgs_enabled && g->flags[0] == 0) {
+        if (vgs_node_constraints_enabled(node) && g->flags[0] == 0) {
             node->vgs_enabled = false;
             hierarchy_broken = true;
         }
@@ -1175,7 +1175,7 @@ static bool gpu_resident_matches_cpu(void) {
     for (int i = 0; i < vgsHierarchy.node_count; ++i) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
         GpuVoxelState *g = &gpuPhysics.voxel_stage[gpuPhysics.dynamic_voxel_count + i];
-        if ((node->active && node->vgs_enabled ? 1 : 0) != g->flags[0]) return false;
+        if ((vgs_node_constraints_enabled(node) ? 1 : 0) != g->flags[0]) return false;
     }
     return true;
 }

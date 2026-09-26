@@ -1099,12 +1099,28 @@ typedef struct {
     float previous[6];
     float curvature;
 } VgsCurvatureHistory;
+
+typedef enum {
+    VGS_OCCUPANCY_EMPTY = 0,
+    VGS_OCCUPANCY_PARTIAL = 1,
+    VGS_OCCUPANCY_FULL = 2
+} VgsOccupancy;
+
+#define VGS_CHILD_EMPTY INT_MIN
+
 typedef struct {
     Particle *particles[8];
-    int children[8]; // Internal node index, or -(world voxel index + 1) at the leaf level.
+    int children[8]; // Internal node, -(world voxel + 1) leaf, or VGS_CHILD_EMPTY.
     int parent;
+    int grid_x;
+    int grid_y;
+    int grid_z;
+    int grid_span;
     float rest_edge;
     float rest_volume;
+    uint8_t occupancy;
+    uint8_t real_corner_mask;
+    bool force_refined;
     bool active; // Present in the current refinement tree.
     bool vgs_enabled; // Fracture state, independent of tree activity.
 } VgsHierarchyNode;
@@ -1115,6 +1131,14 @@ typedef struct {
     int levels;
     int node_count;
     int leaf_count;
+    int leaf_capacity;
+    int grid_side;
+    int full_node_count;
+    int partial_node_count;
+    int empty_node_count;
+    int forced_refined_node_count;
+    int real_corner_refs;
+    int virtual_corner_refs;
     VgsCurvatureHistory *node_history;
     VgsCurvatureHistory *leaf_history; // Indexed by world voxel ID.
     int sample_count;
@@ -1127,12 +1151,16 @@ typedef struct {
 static VgsHierarchy vgsHierarchy;
 static bool vgs_node_constraints_enabled(const VgsHierarchyNode *node)
 {
-    return node->active && node->vgs_enabled;
+    return node->active && node->occupancy == VGS_OCCUPANCY_FULL &&
+           node->vgs_enabled && node->real_corner_mask == 0xffu;
 }
 static bool vgs_child_enabled(int child)
 {
-    return child >= 0 ? vgsHierarchy.nodes[child].vgs_enabled :
-        voxels[-child - 1].vgs_active;
+    if (child == VGS_CHILD_EMPTY) return false;
+    return child >= 0
+        ? vgsHierarchy.nodes[child].occupancy != VGS_OCCUPANCY_EMPTY &&
+          vgsHierarchy.nodes[child].vgs_enabled
+        : voxels[-child - 1].vgs_active;
 }
 static uint8_t vgs_enabled_child_mask(const VgsHierarchyNode *node)
 {
@@ -1148,12 +1176,15 @@ static uint8_t vgs_terminal_child_mask(const VgsHierarchyNode *node)
     uint8_t mask = 0;
     for (int c = 0; c < 8; ++c) {
         int child = node->children[c];
-        if (child < 0) {
+        if (child == VGS_CHILD_EMPTY) {
+            continue;
+        } else if (child < 0) {
             if (voxels[-child - 1].simulate_dofs) mask |= (uint8_t)(1u << c);
         } else if (vgsHierarchy.nodes[child].active) {
             bool has_active_children = false;
             for (int k = 0; k < 8; ++k) {
                 int grandchild = vgsHierarchy.nodes[child].children[k];
+                if (grandchild == VGS_CHILD_EMPTY) continue;
                 if (grandchild >= 0 ? vgsHierarchy.nodes[grandchild].active :
                     voxels[-grandchild - 1].simulate_dofs) {
                     has_active_children = true;
@@ -1169,6 +1200,7 @@ static bool vgs_node_has_active_children(const VgsHierarchyNode *node)
 {
     for (int c = 0; c < 8; ++c) {
         int child = node->children[c];
+        if (child == VGS_CHILD_EMPTY) continue;
         if (child >= 0 ? vgsHierarchy.nodes[child].active :
             voxels[-child - 1].simulate_dofs) return true;
     }
@@ -3366,6 +3398,8 @@ static void vgs_hierarchy_sample_curvature(float dt)
     float inv_dt_squared = 1.0f / (dt * dt);
     for (int i = 0; i < vgsHierarchy.node_count; ++i) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+        if (node->occupancy != VGS_OCCUPANCY_FULL || node->real_corner_mask != 0xffu)
+            continue;
         Vector3 corners[8];
         bool valid = true;
         for (int c = 0; c < 8; ++c) {
@@ -10534,7 +10568,7 @@ static void evaluate_hierarchy_fracture_range(int start, int end, int worker_id,
     (void)user;
     for (int i = start; i < end; ++i) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
-        if (!node->active || !node->vgs_enabled || node->rest_edge <= 0.0f) continue;
+        if (!vgs_node_constraints_enabled(node) || node->rest_edge <= 0.0f) continue;
         Vector3 corners[8];
         bool valid = true;
         for (int c = 0; c < 8; ++c) {
@@ -10830,6 +10864,199 @@ static void gather_voxel_shape_constraints(Voxel *voxel) {
                                  voxel->simulate_dofs);
 }
 
+static VgsOccupancy vgs_child_occupancy(int child)
+{
+    if (child == VGS_CHILD_EMPTY) return VGS_OCCUPANCY_EMPTY;
+    return child >= 0 ? (VgsOccupancy)vgsHierarchy.nodes[child].occupancy
+                      : VGS_OCCUPANCY_FULL;
+}
+
+static int vgs_real_corner_count(uint8_t mask)
+{
+    int count = 0;
+    for (; mask; mask &= (uint8_t)(mask - 1u)) ++count;
+    return count;
+}
+
+static void vgs_mark_subtree_face_refined(int child, int axis, int face_bit)
+{
+    if (child == VGS_CHILD_EMPTY || child < 0) return;
+    VgsHierarchyNode *node = &vgsHierarchy.nodes[child];
+    if (node->occupancy == VGS_OCCUPANCY_EMPTY) return;
+    if (node->occupancy == VGS_OCCUPANCY_FULL && !node->force_refined) {
+        node->force_refined = true;
+        ++vgsHierarchy.forced_refined_node_count;
+    }
+    for (int c = 0; c < 8; ++c)
+        if (((c >> axis) & 1) == face_bit)
+            vgs_mark_subtree_face_refined(node->children[c], axis, face_bit);
+}
+
+// Builds a complete logical octree over a sparse finest-level lattice. Missing
+// cells are algebraic/virtual: they have no Voxel or Particle allocation.
+// Full nodes retain the existing VGS and weld behavior; partial nodes only
+// carry topology and are kept refined.
+static bool vgs_build_hierarchy_from_occupancy(const int *leaf_voxel_ids,
+                                               int side, float leaf_edge)
+{
+    clear_vgs_hierarchy();
+    if (!leaf_voxel_ids || side < 1 || side > 32 ||
+        (side & (side - 1)) != 0 || !isfinite(leaf_edge) || leaf_edge <= 0.0f)
+        return false;
+
+    int leaf_capacity = side * side * side;
+    int occupied_leaves = 0;
+    for (int i = 0; i < leaf_capacity; ++i) {
+        int world_id = leaf_voxel_ids[i];
+        if (world_id < 0) continue;
+        if (world_id >= voxel_count || !voxels[world_id].simulate) return false;
+        ++occupied_leaves;
+    }
+    if (!occupied_leaves) return false;
+
+    vgsHierarchy.leaf_count = occupied_leaves;
+    vgsHierarchy.leaf_capacity = leaf_capacity;
+    vgsHierarchy.grid_side = side;
+    vgsHierarchy.leaf_history = calloc((size_t)voxel_count, sizeof(VgsCurvatureHistory));
+    if (!vgsHierarchy.leaf_history) goto fail;
+    if (side == 1) return true;
+
+    int levels = 0, node_count = 0;
+    for (int width = 1; width < side; width *= 2) {
+        node_count += width * width * width;
+        ++levels;
+    }
+    vgsHierarchy.nodes = calloc((size_t)node_count, sizeof(*vgsHierarchy.nodes));
+    vgsHierarchy.node_history = calloc((size_t)node_count, sizeof(*vgsHierarchy.node_history));
+    if (!vgsHierarchy.nodes || !vgsHierarchy.node_history) goto fail;
+    vgsHierarchy.levels = levels;
+    vgsHierarchy.node_count = node_count;
+
+    int offset = 0;
+    for (int level = 0, grid = 1; level < levels; ++level, grid *= 2) {
+        vgsHierarchy.level_start[level] = offset;
+        vgsHierarchy.level_count[level] = grid * grid * grid;
+        offset += grid * grid * grid;
+    }
+
+    size_t vertex_side = (size_t)side + 1u;
+    size_t vertex_count = vertex_side * vertex_side * vertex_side;
+    Particle **vertices = calloc(vertex_count, sizeof(*vertices));
+    if (!vertices) goto fail;
+    for (int y = 0; y < side; ++y) for (int z = 0; z < side; ++z)
+        for (int x = 0; x < side; ++x) {
+            int flat = (y * side + z) * side + x;
+            int world_id = leaf_voxel_ids[flat];
+            if (world_id < 0) continue;
+            for (int c = 0; c < 8; ++c) {
+                int vx = x + (c & 1);
+                int vy = y + ((c >> 1) & 1);
+                int vz = z + ((c >> 2) & 1);
+                size_t vertex = ((size_t)vy * vertex_side + (size_t)vz) * vertex_side + (size_t)vx;
+                Particle *p = voxels[world_id].particles[c];
+                if (!p || (vertices[vertex] && vertices[vertex] != p)) {
+                    free(vertices);
+                    goto fail;
+                }
+                vertices[vertex] = p;
+            }
+        }
+
+    for (int level = 0, grid = 1; level < levels; ++level, grid *= 2) {
+        int span = side / grid;
+        int child_grid = grid * 2;
+        for (int y = 0; y < grid; ++y) for (int z = 0; z < grid; ++z)
+            for (int x = 0; x < grid; ++x) {
+                int id = vgsHierarchy.level_start[level] + (y * grid + z) * grid + x;
+                VgsHierarchyNode *node = &vgsHierarchy.nodes[id];
+                node->parent = level ? vgsHierarchy.level_start[level - 1] +
+                    (((y / 2) * (grid / 2) + z / 2) * (grid / 2) + x / 2) : -1;
+                node->grid_x = x * span;
+                node->grid_y = y * span;
+                node->grid_z = z * span;
+                node->grid_span = span;
+                node->rest_edge = span * leaf_edge;
+                node->rest_volume = node->rest_edge * node->rest_edge * node->rest_edge;
+                node->active = true;
+                node->vgs_enabled = true;
+                for (int c = 0; c < 8; ++c) {
+                    int vx = node->grid_x + ((c & 1) ? span : 0);
+                    int vy = node->grid_y + ((c >> 1 & 1) ? span : 0);
+                    int vz = node->grid_z + ((c >> 2 & 1) ? span : 0);
+                    size_t vertex = ((size_t)vy * vertex_side + (size_t)vz) * vertex_side + (size_t)vx;
+                    node->particles[c] = vertices[vertex];
+                    if (node->particles[c]) node->real_corner_mask |= (uint8_t)(1u << c);
+                    int child_x = x * 2 + (c & 1);
+                    int child_y = y * 2 + ((c >> 1) & 1);
+                    int child_z = z * 2 + ((c >> 2) & 1);
+                    int child_flat = (child_y * child_grid + child_z) * child_grid + child_x;
+                    if (level + 1 < levels) {
+                        node->children[c] = vgsHierarchy.level_start[level + 1] + child_flat;
+                    } else {
+                        int world_id = leaf_voxel_ids[child_flat];
+                        node->children[c] = world_id >= 0 ? -(world_id + 1) : VGS_CHILD_EMPTY;
+                    }
+                }
+            }
+    }
+    free(vertices);
+
+    for (int i = node_count - 1; i >= 0; --i) {
+        VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+        int full = 0, empty = 0;
+        for (int c = 0; c < 8; ++c) {
+            VgsOccupancy occupancy = vgs_child_occupancy(node->children[c]);
+            full += occupancy == VGS_OCCUPANCY_FULL;
+            empty += occupancy == VGS_OCCUPANCY_EMPTY;
+        }
+        node->occupancy = full == 8 ? VGS_OCCUPANCY_FULL :
+                          empty == 8 ? VGS_OCCUPANCY_EMPTY : VGS_OCCUPANCY_PARTIAL;
+        if (node->occupancy == VGS_OCCUPANCY_FULL) {
+            if (node->real_corner_mask != 0xffu) goto fail;
+            ++vgsHierarchy.full_node_count;
+        } else if (node->occupancy == VGS_OCCUPANCY_PARTIAL) {
+            ++vgsHierarchy.partial_node_count;
+        } else {
+            node->vgs_enabled = false;
+            ++vgsHierarchy.empty_node_count;
+        }
+        int real_corners = vgs_real_corner_count(node->real_corner_mask);
+        vgsHierarchy.real_corner_refs += real_corners;
+        vgsHierarchy.virtual_corner_refs += 8 - real_corners;
+    }
+
+    // A full subtree bordering a deeper partial subtree would otherwise leave
+    // hanging interface particles. Pin both occupied sides of such seams to
+    // the finest lattice while leaving full interiors free to coarsen.
+    for (int i = 0; i < node_count; ++i) {
+        VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+        if (node->occupancy != VGS_OCCUPANCY_PARTIAL) continue;
+        for (int axis = 0; axis < 3; ++axis) {
+            for (int a = 0; a < 2; ++a) for (int b = 0; b < 2; ++b) {
+                int other0 = (axis + 1) % 3;
+                int other1 = (axis + 2) % 3;
+                int low = (a << other0) | (b << other1);
+                int high = low | (1 << axis);
+                int low_child = node->children[low];
+                int high_child = node->children[high];
+                VgsOccupancy low_occupancy = vgs_child_occupancy(low_child);
+                VgsOccupancy high_occupancy = vgs_child_occupancy(high_child);
+                if (low_occupancy == VGS_OCCUPANCY_EMPTY ||
+                    high_occupancy == VGS_OCCUPANCY_EMPTY ||
+                    (low_occupancy != VGS_OCCUPANCY_PARTIAL &&
+                     high_occupancy != VGS_OCCUPANCY_PARTIAL)) continue;
+                vgs_mark_subtree_face_refined(low_child, axis, 1);
+                vgs_mark_subtree_face_refined(high_child, axis, 0);
+            }
+        }
+    }
+    return true;
+
+fail:
+    clear_vgs_hierarchy();
+    return false;
+}
+
 // The one-dimensional left pseudoinverse of [1 0; 1/2 1/2; 0 1].
 // Tensor products give the 3D R=(A^T A)^-1 A^T without storing 216 weights.
 static const float weld_refine_axis[3][2] = {
@@ -10842,6 +11069,7 @@ static const float weld_coarsen_axis[2][3] = {
 
 static void gather_hierarchy_weld_constraints(VgsHierarchyNode *node,
                                               uint8_t terminal_mask, bool include_coarsening) {
+    if (node->occupancy != VGS_OCCUPANCY_FULL) return;
     Particle *fine[27];
     Vector3 fine_pos[27], coarse_pos[8];
     for (int c = 0; c < 8; ++c) {
@@ -10857,6 +11085,7 @@ static void gather_hierarchy_weld_constraints(VgsHierarchyNode *node,
             int child_corner = (gx == 2) | ((gy == 2) << 1) | ((gz == 2) << 2);
             int local_corner = (gx != 0) | ((gy != 0) << 1) | ((gz != 0) << 2);
             int child_id = node->children[child_corner];
+            if (child_id == VGS_CHILD_EMPTY) return;
             Particle *p = child_id >= 0
                 ? vgsHierarchy.nodes[child_id].particles[local_corner]
                 : voxels[-child_id - 1].particles[local_corner];
@@ -10907,11 +11136,14 @@ static void gather_hierarchy_weld_constraints(VgsHierarchyNode *node,
 
 static bool vgs_hierarchy_grid_points(const VgsHierarchyNode *node, Particle *grid[27])
 {
+    if (!node || node->occupancy != VGS_OCCUPANCY_FULL ||
+        node->real_corner_mask != 0xffu) return false;
     for (int r = 0; r < 27; ++r) {
         int gx = r % 3, gy = (r / 3) % 3, gz = r / 9;
         int child_corner = (gx == 2) | ((gy == 2) << 1) | ((gz == 2) << 2);
         int local_corner = (gx != 0) | ((gy != 0) << 1) | ((gz != 0) << 2);
         int child = node->children[child_corner];
+        if (child == VGS_CHILD_EMPTY) return false;
         grid[r] = child >= 0 ? vgsHierarchy.nodes[child].particles[local_corner] :
             voxels[-child - 1].particles[local_corner];
         if (!grid[r]) return false;
@@ -10921,6 +11153,7 @@ static bool vgs_hierarchy_grid_points(const VgsHierarchyNode *node, Particle *gr
 
 static void vgs_hierarchy_transfer_refine(VgsHierarchyNode *node, bool activate)
 {
+    if (!node || node->occupancy != VGS_OCCUPANCY_FULL) return;
     Particle *grid[27];
     if (!vgs_hierarchy_grid_points(node, grid)) return;
     Vector3 pos[8], vel[8];
@@ -10948,6 +11181,7 @@ static void vgs_hierarchy_transfer_refine(VgsHierarchyNode *node, bool activate)
     VgsCurvatureHistory parent_history = vgsHierarchy.node_history[node_id];
     for (int c = 0; c < 8; ++c) {
         int child = node->children[c];
+        if (child == VGS_CHILD_EMPTY) continue;
         if (child >= 0) {
             vgsHierarchy.nodes[child].active = true;
             vgsHierarchy.node_history[child] = parent_history;
@@ -10962,6 +11196,7 @@ static void vgs_hierarchy_transfer_refine(VgsHierarchyNode *node, bool activate)
 
 static void vgs_hierarchy_transfer_coarsen(VgsHierarchyNode *node)
 {
+    if (!node || node->occupancy != VGS_OCCUPANCY_FULL || node->force_refined) return;
     Particle *grid[27];
     if (!vgs_hierarchy_grid_points(node, grid)) return;
     Vector3 fine_pos[27], fine_vel[27];
@@ -10985,6 +11220,7 @@ static void vgs_hierarchy_transfer_coarsen(VgsHierarchyNode *node)
     }
     for (int c = 0; c < 8; ++c) {
         int child = node->children[c];
+        if (child == VGS_CHILD_EMPTY) continue;
         if (child >= 0) vgsHierarchy.nodes[child].active = false;
         else voxels[-child - 1].simulate_dofs = false;
     }
@@ -11002,6 +11238,7 @@ static void vgs_hierarchy_transfer_coarsen(VgsHierarchyNode *node)
 
 static void vgs_hierarchy_sync_dormant_descendants(VgsHierarchyNode *node)
 {
+    if (!node || node->occupancy != VGS_OCCUPANCY_FULL) return;
     vgs_hierarchy_transfer_refine(node, false);
     for (int c = 0; c < 8; ++c) {
         int child = node->children[c];
@@ -11015,9 +11252,17 @@ static bool vgs_hierarchy_rebuild_active_masses(void)
     if (!mass) return false;
     for (int i = 0; i < vgsHierarchy.node_count; ++i) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
-        if (!node->active || vgs_node_has_active_children(node)) continue;
+        if (!node->active || node->occupancy != VGS_OCCUPANCY_FULL ||
+            node->real_corner_mask != 0xffu || vgs_node_has_active_children(node)) continue;
         float contribution = vgsHierarchy.mass_density * node->rest_volume * 0.125f;
-        for (int c = 0; c < 8; ++c) mass[node->particles[c] - particles_pool] += contribution;
+        for (int c = 0; c < 8; ++c) {
+            ptrdiff_t particle_id = node->particles[c] - particles_pool;
+            if (particle_id < 0 || particle_id >= particle_pool_count) {
+                free(mass);
+                return false;
+            }
+            mass[particle_id] += contribution;
+        }
     }
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
@@ -11035,6 +11280,21 @@ static bool vgs_hierarchy_rebuild_active_masses(void)
     collisionTopologyDirty = true;
     ++vgsHierarchy.topology_generation;
     return true;
+}
+
+static void vgs_hierarchy_activate_initial_subtree(int child)
+{
+    if (child == VGS_CHILD_EMPTY) return;
+    if (child < 0) {
+        voxels[-child - 1].simulate_dofs = true;
+        return;
+    }
+    VgsHierarchyNode *node = &vgsHierarchy.nodes[child];
+    if (node->occupancy == VGS_OCCUPANCY_EMPTY) return;
+    node->active = true;
+    if (node->occupancy == VGS_OCCUPANCY_PARTIAL || node->force_refined)
+        for (int c = 0; c < 8; ++c)
+            vgs_hierarchy_activate_initial_subtree(node->children[c]);
 }
 
 static bool vgs_hierarchy_initialize_adaptive(void)
@@ -11056,15 +11316,24 @@ static bool vgs_hierarchy_initialize_adaptive(void)
     for (int i = 0; i < sim_particle_count; ++i)
         if (sim_particles[i]->base_inv_mass > 0.0f)
             total_mass += 1.0 / sim_particles[i]->base_inv_mass;
-    vgsHierarchy.mass_density = (float)(total_mass / vgsHierarchy.nodes[0].rest_volume);
+    double occupied_volume = (double)vgsHierarchy.leaf_count *
+        (double)pbdSolidVoxelSize * (double)pbdSolidVoxelSize * (double)pbdSolidVoxelSize;
+    vgsHierarchy.mass_density = occupied_volume > 0.0
+        ? (float)(total_mass / occupied_volume) : 0.0f;
     if (!isfinite(vgsHierarchy.mass_density) || vgsHierarchy.mass_density <= 0.0f) return false;
     vgsHierarchy.adaptive = true;
     for (int i = 0; i < vgsHierarchy.node_count; ++i)
-        vgsHierarchy.nodes[i].active = i == 0;
+        vgsHierarchy.nodes[i].active = false;
     for (int i = 0; i < voxel_count; ++i)
         if (voxels[i].simulate) voxels[i].simulate_dofs = false;
+    vgs_hierarchy_activate_initial_subtree(0);
     if (!vgs_hierarchy_rebuild_active_masses()) return false;
-    vgs_hierarchy_sync_dormant_descendants(&vgsHierarchy.nodes[0]);
+    for (int i = 0; i < vgsHierarchy.node_count; ++i) {
+        VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+        if (node->active && node->occupancy == VGS_OCCUPANCY_FULL &&
+            !vgs_node_has_active_children(node))
+            vgs_hierarchy_sync_dormant_descendants(node);
+    }
     return true;
 }
 
@@ -11111,14 +11380,15 @@ static bool vgs_hierarchy_adapt(bool use_deformation)
     if (!refine || !coarsen) { free(refine); free(coarsen); return false; }
     for (int i = 0; i < vgsHierarchy.node_count; ++i) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
-        if (!node->active) continue;
+        if (!node->active || node->occupancy != VGS_OCCUPANCY_FULL ||
+            node->real_corner_mask != 0xffu) continue;
         float own = vgsHierarchy.node_history[i].curvature;
         float threshold = vgs_adaptive_threshold_for_edge(node->rest_edge);
         bool own_deformed = use_deformation &&
             vgs_adaptive_exceeds_refine_deformation(node->particles,
                                                      node->rest_edge);
         if (!vgs_node_has_active_children(node)) {
-            refine[i] = own > threshold || own_deformed;
+            refine[i] = node->force_refined || own > threshold || own_deformed;
             continue;
         }
         float child_mean = 0.0f;
@@ -11145,7 +11415,7 @@ static bool vgs_hierarchy_adapt(bool use_deformation)
                 active_grandchildren = true;
         }
         child_mean *= 0.125f;
-        coarsen[i] = !own_deformed && !deformed_child && own < threshold &&
+        coarsen[i] = !node->force_refined && !own_deformed && !deformed_child && own < threshold &&
                      child_mean < VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR * threshold &&
                      !active_grandchildren && !broken_child;
     }
@@ -11163,7 +11433,9 @@ static bool vgs_hierarchy_adapt(bool use_deformation)
     free(refine); free(coarsen);
     if (changed && !vgs_hierarchy_rebuild_active_masses()) return false;
     for (int i = 0; i < vgsHierarchy.node_count; ++i)
-        if (vgsHierarchy.nodes[i].active && !vgs_node_has_active_children(&vgsHierarchy.nodes[i]))
+        if (vgsHierarchy.nodes[i].active &&
+            vgsHierarchy.nodes[i].occupancy == VGS_OCCUPANCY_FULL &&
+            !vgs_node_has_active_children(&vgsHierarchy.nodes[i]))
             vgs_hierarchy_sync_dormant_descendants(&vgsHierarchy.nodes[i]);
     return true;
 }
