@@ -96,6 +96,22 @@ const int MODE_WAKE_GATHER = 14;
 const int MODE_WAKE_APPLY = 15;
 const int MODE_TOPOLOGY_REBUILD_SERIAL = 16;
 const int MODE_HIERARCHY_MASK = 17;
+// Resident AMR is currently dispatched by the Metal backend. Keep mode values
+// shared so C/Metal/GL validation cannot silently diverge.
+const int MODE_AMR_CLEAR = 18;
+const int MODE_AMR_SAMPLE = 19;
+const int MODE_AMR_SAMPLE_COMPLETE = 20;
+const int MODE_AMR_SELECT = 21;
+const int MODE_AMR_RESOLVE = 22;
+const int MODE_AMR_TRANSITION_CLEAR = 23;
+const int MODE_AMR_TRANSITION_SCATTER = 24;
+const int MODE_AMR_TRANSITION_APPLY = 25;
+const int MODE_AMR_TOPOLOGY_APPLY = 26;
+const int MODE_AMR_MASS_SCATTER = 27;
+const int MODE_AMR_COMPACT = 28;
+const int MODE_AMR_COMPILE = 29;
+const int MODE_AMR_PREPARE_INDIRECT = 30;
+const int MODE_AMR_DORMANT_SCATTER = 31;
 const int CONTROL_FLAG_OVERFLOW = 1;
 const int CONTROL_FLAG_TOPOLOGY_DIRTY = 2;
 const int CONTROL_FLAG_BREAK_OCCURRED = 4;

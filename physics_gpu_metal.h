@@ -64,6 +64,7 @@ void fps_metal_set_uniforms(const FpsGpuUniforms *uniforms);
 void fps_metal_set_vgs_color(int color);
 void fps_metal_set_vgs_layer(int begin, int count);
 bool fps_metal_supports_vgs_hierarchy(void);
+bool fps_metal_supports_resident_amr(void);
 bool fps_metal_begin_batch(void);
 bool fps_metal_dispatch(int mode, int count);
 bool fps_metal_dispatch_indirect(int mode, void *buffer, size_t offset);

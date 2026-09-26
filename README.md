@@ -523,6 +523,12 @@ Available scenarios are:
   cells can change level on consecutive substeps. Dormant descendants follow trilinear
   parent motion and do not provide an independent fine-scale curvature signal
   until they become active.
+  On Metal, curvature sampling, AMR decisions, refinement/coarsening transfers,
+  mass reconstruction, active particle compaction, and flat VGS/weld constraint
+  compilation remain GPU resident between PBD substeps. Both substeps are encoded
+  in one command buffer and CPU state is mirrored once at the end of the frame.
+  The CPU implementation remains the reference and runtime fallback; OpenGL uses
+  the existing CPU AMR path.
 * `rip-test`: activates the same 5 m cube, starts with its eight root children,
   and translates every particle in the outer 1.25 m on each X side symmetrically,
   including dormant particles that may become simulated after refinement. AMR

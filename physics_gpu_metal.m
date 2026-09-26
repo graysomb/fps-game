@@ -19,6 +19,7 @@ typedef struct FpsMetalState {
     double wait_start;
     bool managed;
     bool hierarchy_supported;
+    bool resident_amr_supported;
 } FpsMetalState;
 
 static FpsMetalState metal_state;
@@ -78,6 +79,9 @@ bool fps_metal_initialize(const char *library_path, long long *max_buffer_size,
         id<MTLFunction> hierarchy_marker = [metal_state.library newFunctionWithName:@"pbd_hierarchy_marker"];
         metal_state.hierarchy_supported = hierarchy_marker != nil;
         [hierarchy_marker release];
+        id<MTLFunction> amr_marker = [metal_state.library newFunctionWithName:@"pbd_resident_amr_marker"];
+        metal_state.resident_amr_supported = amr_marker != nil;
+        [amr_marker release];
         id<MTLFunction> function = [metal_state.library newFunctionWithName:@"pbd_pipeline"];
         if (!function) {
             fps_metal_error(error, error_capacity, @"pbd_pipeline is missing from the Metal library");
@@ -191,6 +195,10 @@ bool fps_metal_supports_vgs_hierarchy(void) {
     return metal_state.hierarchy_supported;
 }
 
+bool fps_metal_supports_resident_amr(void) {
+    return metal_state.resident_amr_supported;
+}
+
 static FpsMetalProfileInfo metal_profile = { 0 };
 
 static inline double metal_time_now_ms(void) {
@@ -275,7 +283,8 @@ bool fps_metal_commit_batch(bool wait) {
         if (metal_state.managed) {
             static const int readback_slots[] = {
                 FPS_GPU_BUFFER_PARTICLE, FPS_GPU_BUFFER_CELL, FPS_GPU_BUFFER_SIM_ID, FPS_GPU_BUFFER_VOXEL,
-                FPS_GPU_BUFFER_CONTROL, FPS_GPU_BUFFER_CLONE_PARENT
+                FPS_GPU_BUFFER_CONTROL, FPS_GPU_BUFFER_CLONE_PARENT,
+                FPS_GPU_BUFFER_AMR_STATE, FPS_GPU_BUFFER_AMR_CONTROL
             };
             id<MTLBlitCommandEncoder> blit = [metal_state.command_buffer blitCommandEncoder];
             if (!blit) {

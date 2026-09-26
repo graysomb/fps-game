@@ -4143,23 +4143,41 @@ static void debug_physics_step(DebugRunState *state)
     }
     rebuild_static_hash_if_dirty();
     if (state && state->adaptive_cube_drop) {
-        // Commit each GPU substep before sampling curvature. A topology change
-        // invalidates the resident constraint list for the next substep.
         const float sub_dt = PBD_MAX_STEP_DT / (float)PBD_SUBSTEPS;
-        for (int substep = 0; substep < PBD_SUBSTEPS; ++substep) {
+        if (physics_backend_is_gpu(physicsBackend.active) && gpuPhysics.ready &&
+            gpu_resident_amr_enabled()) {
+            // Metal owns curvature, transitions, mass/list rebuilds, and flat
+            // constraint compilation between substeps in one command buffer.
             if (state->rip_test) {
-                ++state->rip_substeps;
+                state->rip_substeps += PBD_SUBSTEPS;
                 debug_apply_rip_grips(state);
             }
-            simulate_voxel_pbd_steps_counted(sub_dt, 1, 1);
-            vgs_hierarchy_sample_curvature(sub_dt);
-            // Curvature adapts after every substep. Strain/shear participates
-            // only in the final AMR decision of each fixed physics frame.
-            if (!vgs_hierarchy_adapt(substep == PBD_SUBSTEPS - 1)) {
-                debug_add_failure(state, "adaptive octree transition failed");
-                break;
+            int sample_count_before = vgsHierarchy.sample_count;
+            simulate_voxel_pbd_steps_counted(PBD_MAX_STEP_DT, 1, PBD_SUBSTEPS);
+            if (vgsHierarchy.sample_count == sample_count_before) {
+                // A runtime GPU failure may have completed the frame through
+                // the CPU fallback. Keep the tree valid until the next frame.
+                vgs_hierarchy_sample_curvature(sub_dt);
+                if (!vgs_hierarchy_adapt(true))
+                    debug_add_failure(state, "adaptive octree fallback transition failed");
             }
             if (state->rip_test) debug_apply_rip_grips(state);
+        } else {
+            for (int substep = 0; substep < PBD_SUBSTEPS; ++substep) {
+                if (state->rip_test) {
+                    ++state->rip_substeps;
+                    debug_apply_rip_grips(state);
+                }
+                simulate_voxel_pbd_steps_counted(sub_dt, 1, 1);
+                vgs_hierarchy_sample_curvature(sub_dt);
+                // Curvature adapts after every substep. Strain/shear participates
+                // only in the final AMR decision of each fixed physics frame.
+                if (!vgs_hierarchy_adapt(substep == PBD_SUBSTEPS - 1)) {
+                    debug_add_failure(state, "adaptive octree transition failed");
+                    break;
+                }
+                if (state->rip_test) debug_apply_rip_grips(state);
+            }
         }
     } else {
         simulate_voxel_pbd(PBD_MAX_STEP_DT);
