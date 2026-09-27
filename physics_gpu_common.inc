@@ -51,6 +51,12 @@ typedef struct {
     uint32_t padding[4];
 } GpuAmrControl;
 
+enum {
+    GPU_AMR_CONTROL_MAX_COLLISION_DIAMETER = 0,
+    GPU_AMR_CONTROL_SCALE_COLLISION_RADIUS = 1,
+    GPU_AMR_CONTROL_FIXED_LEVEL = 2
+};
+
 _Static_assert(sizeof(GpuParticleState) == 64, "GpuParticleState/std430 mismatch");
 _Static_assert(sizeof(GpuCorrectionState) == 16, "GpuCorrectionState/std430 mismatch");
 _Static_assert(sizeof(GpuCellState) == 16, "GpuCellState/std430 mismatch");
@@ -705,7 +711,13 @@ static bool gpu_pack_world(void) {
         .deformation_fine_fraction = vgsAdaptiveDeformationFineFraction,
         .mass_density = vgsHierarchy.mass_density,
         .total_refine_count = vgsHierarchy.refine_count,
-        .total_coarsen_count = vgsHierarchy.coarsen_count
+        .total_coarsen_count = vgsHierarchy.coarsen_count,
+        .padding = {
+            float_to_bits(2.0f * vgsHierarchy.max_collision_radius),
+            vgs_amr_collision_radius_scaling_enabled() ? 1u : 0u,
+            debugAmrFixedLevel >= 0 ? 1u : 0u,
+            0u
+        }
     };
     gpuPhysics.hierarchy_generation = vgsHierarchy.topology_generation;
     return true;
@@ -1048,7 +1060,7 @@ static void gpu_set_uniforms(float dt) {
     float tether_spring = TETHER_SPRING, tether_damping = TETHER_DAMPING;
     int break_damp_frames = BREAK_DAMP_FRAMES;
     float rest_grid_step = pbdSolidVoxelSize * 0.5f;
-    float particle_hash_step = pbdSolidVoxelSize;
+    float particle_hash_step = solid_collision_hash_step();
     float player_data[MAX_PLAYERS][4];
     float tether_data[MAX_PLAYERS][4];
     for (int i = 0; i < MAX_PLAYERS; ++i) {
@@ -1339,6 +1351,11 @@ static bool gpu_validate_and_commit(void) {
         vgsHierarchy.sample_count = (int)gpuPhysics.amr_control_stage.sample_count;
         vgsHierarchy.refine_count = gpuPhysics.amr_control_stage.total_refine_count;
         vgsHierarchy.coarsen_count = gpuPhysics.amr_control_stage.total_coarsen_count;
+        float max_collision_diameter = bits_to_float(
+            gpuPhysics.amr_control_stage.padding[GPU_AMR_CONTROL_MAX_COLLISION_DIAMETER]);
+        vgsHierarchy.max_collision_radius =
+            isfinite(max_collision_diameter) && max_collision_diameter > 0.0f
+                ? 0.5f * max_collision_diameter : 0.5f * pbdSolidVoxelSize;
         vgsHierarchy.topology_generation = gpuPhysics.amr_control_stage.topology_generation;
         gpuPhysics.hierarchy_generation = vgsHierarchy.topology_generation;
     }
@@ -1366,6 +1383,7 @@ static bool gpu_resident_matches_cpu(void) {
         if (!p || !p->active) continue;
         GpuParticleState *g = &gpuPhysics.particle_stage[i];
         if (p->pos.x != g->pos_radius[0] || p->pos.y != g->pos_radius[1] || p->pos.z != g->pos_radius[2] ||
+            p->radius != g->pos_radius[3] ||
             p->vel.x != g->velocity[0] || p->vel.y != g->velocity[1] || p->vel.z != g->velocity[2] ||
             p->inv_mass != g->prev_inv_mass[3] || p->base_inv_mass != g->predicted_base_inv_mass[3] ||
             p->break_timer != gpuPhysics.cell_stage[i].value[3]) return false;
@@ -1501,7 +1519,8 @@ static bool gpu_dispatch_amr(float sub_dt, bool use_deformation) {
              gpu_dispatch(GPU_MODE_AMR_TRANSITION_APPLY, particles);
     }
     gpu_set_vgs_layer(0, total_stage);
-    return ok && gpu_dispatch(GPU_MODE_FINALIZE_VOXELS, gpuPhysics.dynamic_voxel_count) &&
+    return ok && gpu_dispatch(GPU_MODE_AMR_TRANSITION_CLEAR, particles) &&
+           gpu_dispatch(GPU_MODE_FINALIZE_VOXELS, gpuPhysics.dynamic_voxel_count) &&
            gpu_dispatch(GPU_MODE_AMR_MASS_SCATTER, total_stage) &&
            gpu_dispatch(GPU_MODE_AMR_COMPACT, particles) &&
            gpu_dispatch(GPU_MODE_AMR_COMPILE, total_stage) &&
