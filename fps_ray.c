@@ -1238,6 +1238,7 @@ static int fluidDynamicVoxelCount = 0;
 static int active_fluid_particle_count = 0;
 static uint16_t collision_particle_structural_refs[MAX_PARTICLES];
 static uint16_t collision_particle_shell_refs[MAX_PARTICLES];
+static uint8_t cpu_aabb_covered[MAX_PARTICLES];
 static int free_particle_indices[MAX_PARTICLES];
 static int free_particle_count = 0;
 static int particle_sync_stamp = 1;
@@ -11454,6 +11455,297 @@ static void gather_vgs_hierarchy_range(int start, int end, int worker_id, void *
     }
 }
 
+typedef struct CpuAabbProxy {
+    Particle *particle[8];
+    float previous_min[3], previous_max[3];
+    float predicted_min[3], predicted_max[3];
+    float rest_edge;
+    int body;
+} CpuAabbProxy;
+
+static CpuAabbProxy *cpuAabbProxies;
+static int cpuAabbProxyCount;
+static int cpuAabbProxyCapacity;
+static uint64_t cpuAabbCandidates;
+static uint64_t cpuAabbContacts;
+
+static bool cpu_aabb_collisions_enabled(void) {
+    return vgsHierarchy.adaptive && vgsHierarchy.node_count > 0 &&
+           getenv("FPS_AMR_COLLISION_PARTICLES") == NULL;
+}
+
+static bool cpu_particle_is_aabb_covered(const Particle *particle) {
+    ptrdiff_t id = particle ? particle - particles_pool : -1;
+    return id >= 0 && id < particle_pool_count && cpu_aabb_covered[id] != 0;
+}
+
+static bool cpu_aabb_reserve(int count) {
+    if (count <= cpuAabbProxyCapacity) return true;
+    int capacity = cpuAabbProxyCapacity ? cpuAabbProxyCapacity : 256;
+    while (capacity < count) capacity *= 2;
+    CpuAabbProxy *next = realloc(cpuAabbProxies, (size_t)capacity * sizeof(*next));
+    if (!next) return false;
+    cpuAabbProxies = next;
+    cpuAabbProxyCapacity = capacity;
+    return true;
+}
+
+static bool cpu_aabb_append(Particle *const particles[8], float rest_edge,
+                            int fallback_body) {
+    if (!cpu_aabb_reserve(cpuAabbProxyCount + 1)) return false;
+    CpuAabbProxy *proxy = &cpuAabbProxies[cpuAabbProxyCount++];
+    memset(proxy, 0, sizeof(*proxy));
+    proxy->rest_edge = rest_edge;
+    proxy->body = fallback_body;
+    for (int axis = 0; axis < 3; ++axis) {
+        proxy->previous_min[axis] = proxy->predicted_min[axis] = FLT_MAX;
+        proxy->previous_max[axis] = proxy->predicted_max[axis] = -FLT_MAX;
+    }
+    for (int corner = 0; corner < 8; ++corner) {
+        Particle *particle = particles[corner];
+        if (!particle) { --cpuAabbProxyCount; return true; }
+        proxy->particle[corner] = particle;
+        if (corner == 0 && particle->collision_group >= 0)
+            proxy->body = particle->collision_group;
+        ptrdiff_t id = particle - particles_pool;
+        if (id >= 0 && id < particle_pool_count) cpu_aabb_covered[id] = 1;
+        const float previous[3] = { particle->prev_pos.x, particle->prev_pos.y,
+                                    particle->prev_pos.z };
+        const float predicted[3] = { particle->predicted_pos.x, particle->predicted_pos.y,
+                                     particle->predicted_pos.z };
+        for (int axis = 0; axis < 3; ++axis) {
+            proxy->previous_min[axis] = fminf(proxy->previous_min[axis], previous[axis]);
+            proxy->previous_max[axis] = fmaxf(proxy->previous_max[axis], previous[axis]);
+            proxy->predicted_min[axis] = fminf(proxy->predicted_min[axis], predicted[axis]);
+            proxy->predicted_max[axis] = fmaxf(proxy->predicted_max[axis], predicted[axis]);
+        }
+    }
+    return true;
+}
+
+static bool cpu_rebuild_aabb_proxies(void) {
+    cpuAabbProxyCount = 0;
+    if (particle_pool_count > 0)
+        memset(cpu_aabb_covered, 0, (size_t)particle_pool_count);
+    if (!cpu_aabb_collisions_enabled()) return true;
+    if (!cpu_aabb_reserve(vgsHierarchy.node_count + active_voxel_count + 1)) return false;
+    for (int i = 0; i < vgsHierarchy.node_count; ++i) {
+        VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+        if (!node->active || !node->vgs_enabled ||
+            node->occupancy != VGS_OCCUPANCY_FULL || node->real_corner_mask != 0xffu ||
+            vgs_node_has_active_children(node)) continue;
+        if (!cpu_aabb_append(node->particles, node->rest_edge, 0)) return false;
+    }
+    for (int slot = 0; slot < active_voxel_count; ++slot) {
+        int id = active_voxels[slot];
+        Voxel *voxel = &voxels[id];
+        if (!voxel->simulate_dofs || !voxel->vgs_active || voxel->isBullet || voxel->type != 0)
+            continue;
+        if (!cpu_aabb_append(voxel->particles, voxel->rest_edge, id + 1)) return false;
+    }
+    return true;
+}
+
+static float cpu_aabb_weight(int corner, const float uvw[3]) {
+    return ((corner & 1) ? uvw[0] : 1.0f - uvw[0]) *
+           ((corner & 2) ? uvw[1] : 1.0f - uvw[1]) *
+           ((corner & 4) ? uvw[2] : 1.0f - uvw[2]);
+}
+
+static bool cpu_aabb_contact(const CpuAabbProxy *a, const CpuAabbProxy *b,
+                             float normal[3], float *depth, float *toi,
+                             float amin[3], float amax[3],
+                             float bmin[3], float bmax[3]) {
+    const float skin = fmaxf(1e-4f, 0.002f * VOXEL_SIZE);
+    float overlap[3], ac[3], bc[3];
+    bool current = true;
+    for (int axis = 0; axis < 3; ++axis) {
+        overlap[axis] = fminf(a->predicted_max[axis], b->predicted_max[axis]) -
+                        fmaxf(a->predicted_min[axis], b->predicted_min[axis]);
+        ac[axis] = 0.5f * (a->predicted_min[axis] + a->predicted_max[axis]);
+        bc[axis] = 0.5f * (b->predicted_min[axis] + b->predicted_max[axis]);
+        if (overlap[axis] < -skin) current = false;
+    }
+    memset(normal, 0, 3 * sizeof(*normal));
+    if (current) {
+        int axis = overlap[1] < overlap[0] ? 1 : 0;
+        if (overlap[2] < overlap[axis]) axis = 2;
+        normal[axis] = ac[axis] < bc[axis] ? -1.0f : 1.0f;
+        *depth = fmaxf(overlap[axis] + skin, skin);
+        *toi = 1.0f;
+        memcpy(amin, a->predicted_min, 3 * sizeof(float));
+        memcpy(amax, a->predicted_max, 3 * sizeof(float));
+        memcpy(bmin, b->predicted_min, 3 * sizeof(float));
+        memcpy(bmax, b->predicted_max, 3 * sizeof(float));
+        return true;
+    }
+    float start[3], travel[3], extent[3];
+    float entry = 0.0f, exit = 1.0f;
+    int hit_axis = -1;
+    for (int axis = 0; axis < 3; ++axis) {
+        float a0 = 0.5f * (a->previous_min[axis] + a->previous_max[axis]);
+        float b0 = 0.5f * (b->previous_min[axis] + b->previous_max[axis]);
+        start[axis] = a0 - b0;
+        travel[axis] = (ac[axis] - a0) - (bc[axis] - b0);
+        extent[axis] = fmaxf(0.5f * (a->previous_max[axis] - a->previous_min[axis]),
+                             0.5f * (a->predicted_max[axis] - a->predicted_min[axis])) +
+                       fmaxf(0.5f * (b->previous_max[axis] - b->previous_min[axis]),
+                             0.5f * (b->predicted_max[axis] - b->predicted_min[axis])) + skin;
+        if (fabsf(travel[axis]) < 1e-8f) {
+            if (fabsf(start[axis]) > extent[axis]) return false;
+            continue;
+        }
+        float t0 = (-extent[axis] - start[axis]) / travel[axis];
+        float t1 = ( extent[axis] - start[axis]) / travel[axis];
+        if (t0 > t1) { float swap = t0; t0 = t1; t1 = swap; }
+        if (t0 > entry) { entry = t0; hit_axis = axis; }
+        exit = fminf(exit, t1);
+        if (entry > exit) return false;
+    }
+    if (hit_axis < 0 || entry < 0.0f || entry > 1.0f) return false;
+    normal[hit_axis] = travel[hit_axis] > 0.0f ? -1.0f : 1.0f;
+    *depth = fmaxf(skin, fabsf(travel[hit_axis]) * (1.0f - entry) + skin);
+    *toi = entry;
+    for (int axis = 0; axis < 3; ++axis) {
+        amin[axis] = mixf(a->previous_min[axis], a->predicted_min[axis], entry);
+        amax[axis] = mixf(a->previous_max[axis], a->predicted_max[axis], entry);
+        bmin[axis] = mixf(b->previous_min[axis], b->predicted_min[axis], entry);
+        bmax[axis] = mixf(b->previous_max[axis], b->predicted_max[axis], entry);
+    }
+    return true;
+}
+
+static void cpu_scatter_aabb_point(CpuAabbProxy *a, CpuAabbProxy *b, bool dynamic_b,
+                                   const float point[3], const float normal[3], float depth) {
+    float auvw[3], buvw[3], aw[8], bw[8];
+    float denominator = 0.0f;
+    for (int axis = 0; axis < 3; ++axis) {
+        float span = fmaxf(a->predicted_max[axis] - a->predicted_min[axis], VGS_EPS);
+        auvw[axis] = clampf((point[axis] - a->predicted_min[axis]) / span, 0.0f, 1.0f);
+        if (dynamic_b) {
+            span = fmaxf(b->predicted_max[axis] - b->predicted_min[axis], VGS_EPS);
+            buvw[axis] = clampf((point[axis] - b->predicted_min[axis]) / span, 0.0f, 1.0f);
+        }
+    }
+    for (int c = 0; c < 8; ++c) {
+        aw[c] = cpu_aabb_weight(c, auvw);
+        denominator += a->particle[c]->inv_mass * aw[c] * aw[c];
+        if (dynamic_b) {
+            bw[c] = cpu_aabb_weight(c, buvw);
+            denominator += b->particle[c]->inv_mass * bw[c] * bw[c];
+        }
+    }
+    if (denominator <= VGS_EPS) return;
+    float lambda = COLLISION_RELAXATION * depth / denominator;
+    Vector3 n = { normal[0], normal[1], normal[2] };
+    for (int c = 0; c < 8; ++c) {
+        float inv_mass = a->particle[c]->inv_mass;
+        if (inv_mass > 0.0f && aw[c] > 0.0f)
+            accumulate_particle_correction(a->particle[c],
+                v_mul(n, lambda * inv_mass * aw[c]), 1.0f);
+        if (dynamic_b) {
+            inv_mass = b->particle[c]->inv_mass;
+            if (inv_mass > 0.0f && bw[c] > 0.0f)
+                accumulate_particle_correction(b->particle[c],
+                    v_mul(n, -lambda * inv_mass * bw[c]), 1.0f);
+        }
+    }
+}
+
+static void cpu_scatter_aabb_manifold(CpuAabbProxy *a, CpuAabbProxy *b, bool dynamic_b,
+                                      const float normal[3], float depth,
+                                      const float amin[3], const float amax[3],
+                                      const float bmin[3], const float bmax[3]) {
+    int axis = fabsf(normal[0]) > 0.5f ? 0 : (fabsf(normal[1]) > 0.5f ? 1 : 2);
+    int t0 = axis == 0 ? 1 : 0;
+    int t1 = axis == 2 ? 1 : 2;
+    float low[3], high[3], point[3];
+    for (int d = 0; d < 3; ++d) {
+        low[d] = fmaxf(amin[d], bmin[d]);
+        high[d] = fminf(amax[d], bmax[d]);
+        if (low[d] > high[d]) low[d] = high[d] = 0.5f * (low[d] + high[d]);
+        point[d] = 0.5f * (low[d] + high[d]);
+    }
+    point[axis] = normal[axis] < 0.0f ? 0.5f * (amax[axis] + bmin[axis])
+                                             : 0.5f * (amin[axis] + bmax[axis]);
+    for (int corner = 0; corner < 4; ++corner) {
+        float q[3] = { point[0], point[1], point[2] };
+        q[t0] = (corner & 1) ? high[t0] : low[t0];
+        q[t1] = (corner & 2) ? high[t1] : low[t1];
+        cpu_scatter_aabb_point(a, b, dynamic_b, q, normal, depth);
+    }
+}
+
+static void cpu_solve_dynamic_aabb_collisions(void) {
+    if (cpuAabbProxyCount <= 1) return;
+    reset_particle_accumulators();
+    for (int i = 0; i < cpuAabbProxyCount; ++i) {
+        for (int j = i + 1; j < cpuAabbProxyCount; ++j) {
+            CpuAabbProxy *a = &cpuAabbProxies[i], *b = &cpuAabbProxies[j];
+            if (a->body == b->body) continue;
+            ++cpuAabbCandidates;
+            float normal[3], depth, toi, amin[3], amax[3], bmin[3], bmax[3];
+            if (!cpu_aabb_contact(a, b, normal, &depth, &toi,
+                                  amin, amax, bmin, bmax)) continue;
+            cpu_scatter_aabb_manifold(a, b, true, normal, depth,
+                                      amin, amax, bmin, bmax);
+            ++cpuAabbContacts;
+        }
+    }
+    apply_particle_accumulators();
+}
+
+static void cpu_solve_static_aabb_collisions(void) {
+    if (cpuAabbProxyCount <= 0) return;
+    reset_particle_accumulators();
+    for (int i = 0; i < cpuAabbProxyCount; ++i) {
+        CpuAabbProxy *a = &cpuAabbProxies[i];
+        float normal[3] = {0.0f, 1.0f, 0.0f};
+        float depth = fmaxf(1e-4f, 0.002f * VOXEL_SIZE) - a->predicted_min[1];
+        if (depth > 0.0f) {
+            float amin[3], amax[3], bmin[3], bmax[3];
+            memcpy(amin, a->predicted_min, sizeof(amin));
+            memcpy(amax, a->predicted_max, sizeof(amax));
+            memcpy(bmin, amin, sizeof(bmin)); memcpy(bmax, amax, sizeof(bmax));
+            bmin[1] = -FLOOR_SIZE; bmax[1] = 0.0f;
+            cpu_scatter_aabb_manifold(a, NULL, false, normal, depth,
+                                      amin, amax, bmin, bmax);
+            ++cpuAabbContacts;
+        }
+        Vector3 center = {
+            0.5f * (a->predicted_min[0] + a->predicted_max[0]),
+            0.5f * (a->predicted_min[1] + a->predicted_max[1]),
+            0.5f * (a->predicted_min[2] + a->predicted_max[2])
+        };
+        float radius = 0.5f * sqrtf(
+            (a->predicted_max[0]-a->predicted_min[0])*(a->predicted_max[0]-a->predicted_min[0])+
+            (a->predicted_max[1]-a->predicted_min[1])*(a->predicted_max[1]-a->predicted_min[1])+
+            (a->predicted_max[2]-a->predicted_min[2])*(a->predicted_max[2]-a->predicted_min[2]));
+        int nearby[MAX_STATIC_COLLISION_NEIGHBORS];
+        int count = gather_static_voxels_near_point(center, radius, nearby,
+                                                     MAX_STATIC_COLLISION_NEIGHBORS);
+        for (int n = 0; n < count; ++n) {
+            int voxel_id = nearby[n];
+            if (voxel_id < 0 || voxel_id >= voxel_count || voxels[voxel_id].simulate) continue;
+            VoxelWorldBounds bounds; voxel_world_bounds(&voxels[voxel_id], &bounds);
+            CpuAabbProxy b = {0};
+            b.previous_min[0]=b.predicted_min[0]=bounds.minx;
+            b.previous_min[1]=b.predicted_min[1]=bounds.miny;
+            b.previous_min[2]=b.predicted_min[2]=bounds.minz;
+            b.previous_max[0]=b.predicted_max[0]=bounds.maxx;
+            b.previous_max[1]=b.predicted_max[1]=bounds.maxy;
+            b.previous_max[2]=b.predicted_max[2]=bounds.maxz;
+            float contact_normal[3], toi, amin[3], amax[3], bmin[3], bmax[3];
+            if (!cpu_aabb_contact(a, &b, contact_normal, &depth, &toi,
+                                  amin, amax, bmin, bmax)) continue;
+            cpu_scatter_aabb_manifold(a, NULL, false, contact_normal, depth,
+                                      amin, amax, bmin, bmax);
+            ++cpuAabbContacts;
+        }
+    }
+    apply_particle_accumulators();
+}
+
 typedef struct {
     Particle **list;
     int count;
@@ -11525,6 +11817,7 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
         if (!pa) {
             continue;
         }
+        if (cpu_particle_is_aabb_covered(pa)) continue;
         float wa = pa->inv_mass;
         if (wa <= 0.0f) {
             continue;
@@ -11584,6 +11877,7 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
                         if (!pb) {
                             continue;
                         }
+                        if (cpu_particle_is_aabb_covered(pb)) continue;
                         if (pb == pa) {
                             continue;
                         }
@@ -13065,7 +13359,7 @@ static void solve_static_collisions_range(int start, int end, int worker_id, voi
 
     for (int i = start; i < end; ++i) {
         Particle *p = collision_particles[i];
-        if (!p || p->inv_mass == 0.0f) continue;
+        if (!p || p->inv_mass == 0.0f || cpu_particle_is_aabb_covered(p)) continue;
 
         // p->radius holds the voxel radius (0.25)
         float voxel_radius = p->radius;
@@ -13935,6 +14229,8 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
         return;
     }
     const int constraint_iterations = PBD_CONSTRAINT_ITERS;
+    cpuAabbCandidates = 0;
+    cpuAabbContacts = 0;
 
     for (int step = 0; step < substeps; ++step) {
         if (debugLogVoxelBlowup) {
@@ -13956,6 +14252,10 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
         integrate_particles(sub_dt);
         if (pbdProfileEnabled) pbdCpuProfile.t_integrate_ms += pbd_time_now_ms() - t0;
         rebuild_fluid_dynamic_voxel_list();
+        if (!cpu_rebuild_aabb_proxies()) {
+            cpuAabbProxyCount = 0;
+            memset(cpu_aabb_covered, 0, (size_t)particle_pool_count);
+        }
 
         for (int it = 0; it < 1; ++it) {
             if (collisionTopologyDirty) {
@@ -13989,6 +14289,7 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
             solve_pbf_density_constraints(particle_snapshot, snapshot_count);
             solve_fluid_dynamic_collisions(true);
         }
+        cpu_solve_dynamic_aabb_collisions();
 
         if (active_voxel_count > 0) {
             double tv = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
@@ -14003,8 +14304,13 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
             if (pbdProfileEnabled) pbdCpuProfile.t_vgs_shape_ms += pbd_time_now_ms() - tv;
         }
 
+        if (!cpu_rebuild_aabb_proxies()) {
+            cpuAabbProxyCount = 0;
+            memset(cpu_aabb_covered, 0, (size_t)particle_pool_count);
+        }
         double ts = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
         solve_static_collisions(sub_dt);
+        cpu_solve_static_aabb_collisions();
         if (pbdProfileEnabled) pbdCpuProfile.t_static_collisions_ms += pbd_time_now_ms() - ts;
 
         // Shape matching and the world/static collision pass can both move a
@@ -21103,6 +21409,9 @@ int main(int argc, char **argv) {
         greedyMaterialInit = false;
     }
     shutdown_world_visuals();
+    free(cpuAabbProxies);
+    cpuAabbProxies = NULL;
+    cpuAabbProxyCount = cpuAabbProxyCapacity = 0;
     free(netVoxelProxies);
     free(netVoxelProxyMap);
     netVoxelProxies = NULL;

@@ -462,7 +462,6 @@ Available scenarios are:
   and fits its eight corners to all 27 fine points with the left pseudoinverse
   `R = (A^T A)^-1 A^T`. These are positional constraints; they do not transfer
   velocities or change the octree topology. Dormant child cells skip welding.
-  Collisions still use leaf particles only.
   VGS fracture is enabled by default. Each leaf and hierarchy node breaks
   independently when its strain or shear exceeds 0.2; a broken child also
   loses its parent weld and prevents coarsening across that child. VGS shear
@@ -528,12 +527,20 @@ Available scenarios are:
   compilation remain GPU resident between PBD substeps. Both substeps are encoded
   in one command buffer and CPU state is mirrored once at the end of the frame.
   The CPU implementation remains the reference and runtime fallback; OpenGL uses
-  the existing CPU AMR path. Collision projection still uses the original finest-
-  voxel shell classification, intersected with the particles that currently have
-  active AMR mass. Coarse terminal cells consequently have sparse surface collision
-  samples. In addition, Metal resident AMR does not currently rebuild that shell
-  classification when GPU fracture exposes a formerly interior surface; the stale
-  culling remains until another event causes a complete resident-world repack.
+  the existing CPU AMR path. Each full, intact terminal cell now contributes one
+  conservative world-space AABB collision proxy at its current AMR level. A
+  multilevel GPU hash compares dynamic proxies across scale, swept AABB tests catch
+  fast crossings, and four face points scatter each contact correction to the
+  cell's eight VGS corners with trilinear weights. Static voxels, the floor, and the
+  terrain side walls use the same scatter. Particles owned by an AABB proxy skip the
+  old sphere collision path, while fluid, bullets, broken cells, and unrelated PBD
+  particles keep that path. Set `FPS_AMR_COLLISION_PARTICLES=1` to restore the old
+  particle-only AMR collision behavior for comparisons. Since the proxy is an AABB,
+  rotation is conservative and can produce earlier corner contact than an oriented
+  box would.
+* `amr-projectile-impact`: fires one finest-scale voxel at 40 m/s into an initially
+  coarse adaptive cube. The check requires a swept impact, projectile slowdown,
+  target momentum transfer, no far-face tunneling, and no AABB buffer overflow.
 * `rip-test`: activates the same 5 m cube, starts with its eight root children,
   and translates every particle in the outer 1.25 m on each X side symmetrically,
   including dormant particles that may become simulated after refinement. AMR

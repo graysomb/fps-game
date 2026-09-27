@@ -31,6 +31,25 @@ struct AmrScratch {
     atomic_uint velocity_sum_mass[4];
 };
 
+struct AabbState {
+    float4 previous_min;
+    float4 previous_max;
+    float4 predicted_min;
+    float4 predicted_max;
+    int4 cell_level;
+    uint4 meta;
+};
+
+struct AabbControl {
+    atomic_uint proxy_count;
+    atomic_uint candidate_count;
+    atomic_uint contact_count;
+    atomic_uint overflow;
+    uint total_stage_count;
+    uint enabled;
+    uint2 padding;
+};
+
 struct AmrControl {
     uint constraint_count, frame_refine_count, frame_coarsen_count, topology_generation;
     uint overflow, hierarchy_count, total_stage_count, levels;
@@ -64,6 +83,8 @@ static_assert(sizeof(GpuUniforms) == 256, "GpuUniforms layout mismatch");
 static_assert(sizeof(AmrState) == 64, "AmrState layout mismatch");
 static_assert(sizeof(AmrScratch) == 32, "AmrScratch layout mismatch");
 static_assert(sizeof(AmrControl) == 96, "AmrControl layout mismatch");
+static_assert(sizeof(AabbState) == 96, "AabbState layout mismatch");
+static_assert(sizeof(AabbControl) == 32, "AabbControl layout mismatch");
 
 constant int MODE_RESET = 0;
 constant int MODE_INTEGRATE = 1;
@@ -97,6 +118,11 @@ constant int MODE_AMR_COMPACT = 28;
 constant int MODE_AMR_COMPILE = 29;
 constant int MODE_AMR_PREPARE_INDIRECT = 30;
 constant int MODE_AMR_DORMANT_SCATTER = 31;
+constant int MODE_AABB_CLEAR = 32;
+constant int MODE_AABB_BOUNDS = 33;
+constant int MODE_AABB_HASH_BUILD = 34;
+constant int MODE_AABB_COLLISIONS = 35;
+constant int MODE_AABB_STATIC_COLLISIONS = 36;
 constant int CONTROL_FLAG_OVERFLOW = 1;
 constant int CONTROL_FLAG_TOPOLOGY_DIRTY = 2;
 constant int CONTROL_FLAG_BREAK_OCCURRED = 4;
@@ -129,6 +155,13 @@ inline uint hashCoord(int3 c, int size) {
     uint h = uint(c.x) * 73856093u;
     h ^= uint(c.y) * 19349663u;
     h ^= uint(c.z) * 83492791u;
+    return h & uint(size - 1);
+}
+
+inline uint aabbHashCoord(int3 c, int level, int size) {
+    uint h = hashCoord(c, size);
+    h ^= uint(level + 1) * 2654435761u;
+    h ^= h >> 16u;
     return h & uint(size - 1);
 }
 
@@ -208,10 +241,14 @@ inline void buildHash(uint gid, device ParticleState *particle, device int4 *cel
                       device uint *collisionId, device atomic_uint *collisionControl,
                       device atomic_int *hashHead,
                       device int *hashNext, device const int *refcount,
+                      device const atomic_uint *aabbOwner,
+                      device const AabbControl *aabb,
                       device const int *control, constant GpuUniforms &u) {
     if (gid >= atomic_load_explicit(&collisionControl[0], memory_order_relaxed)) return;
     uint id = collisionId[gid];
     if (refcount[id] <= 0) return;
+    if (aabb->enabled != 0u &&
+        atomic_load_explicit(aabbOwner + id, memory_order_relaxed) != 0u) return;
     int3 c = int3(floor(particle[id].predicted_base_inv_mass.xyz / u.particle_hash_step));
     cell[id].xyz = c;
     uint h = hashCoord(c, u.hash_size);
@@ -223,6 +260,8 @@ inline void pairCollisions(uint gid, device ParticleState *particle,
                            device uint *collisionId, device atomic_uint *collisionControl,
                            device atomic_int *hashHead,
                            device int *hashNext, device int *collisionMeta,
+                           device const atomic_uint *aabbOwner,
+                           device const AabbControl *aabb,
                            device const int *refcount, device const int *control,
                            constant GpuUniforms &u) {
     int collisionCount = int(atomic_load_explicit(&collisionControl[0], memory_order_relaxed));
@@ -250,6 +289,8 @@ inline void pairCollisions(uint gid, device ParticleState *particle,
         }
     }
     accumulate(correction, control, aid, scenePos - a.predicted_base_inv_mass.xyz, 1.0f);
+    if (aabb->enabled != 0u &&
+        atomic_load_explicit(aabbOwner + aid, memory_order_relaxed) != 0u) return;
 
     int3 ac = cell[aid].xyz;
     for (int dz = -1; dz <= 1; ++dz) for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
@@ -490,6 +531,334 @@ inline bool amrHasActiveChildren(VoxelState parent, device const VoxelState *vox
         if (child < amr->total_stage_count && voxel[child].flags.w != 0) return true;
     }
     return false;
+}
+
+inline bool aabbEligible(uint gid, VoxelState v, device const VoxelState *voxel,
+                         device const AmrControl *amr, constant GpuUniforms &u) {
+    if (v.flags.x == 0 || v.flags.w == 0 || v.flags.y != 0 || v.flags.z != 0 ||
+        amrOccupancy(v) != 2u || amrRealMask(v) != 0xffu) return false;
+    return gid < uint(u.voxel_count) || !amrHasActiveChildren(v, voxel, amr);
+}
+
+inline void aabbClear(uint gid, device atomic_uint *owner, device AabbState *state,
+                      device AabbControl *aabb, device const AmrControl *amr) {
+    if (gid < amr->particle_capacity)
+        atomic_store_explicit(owner + gid, 0u, memory_order_relaxed);
+    if (gid < aabb->total_stage_count) state[gid].meta.x = 0u;
+    if (gid == 0u) {
+        atomic_store_explicit(&aabb->proxy_count, 0u, memory_order_relaxed);
+        atomic_store_explicit(&aabb->candidate_count, 0u, memory_order_relaxed);
+        atomic_store_explicit(&aabb->contact_count, 0u, memory_order_relaxed);
+        atomic_store_explicit(&aabb->overflow, 0u, memory_order_relaxed);
+    }
+}
+
+inline void aabbBounds(uint gid, device const ParticleState *particle,
+                       device const VoxelState *voxel, device const int *collisionMeta,
+                       device atomic_uint *owner, device AabbState *state,
+                       device AabbControl *aabb, device const AmrControl *amr,
+                       device const int *control, constant GpuUniforms &u) {
+    if (gid >= aabb->total_stage_count || aabb->enabled == 0u) return;
+    VoxelState v = voxel[gid];
+    if (!aabbEligible(gid, v, voxel, amr, u)) return;
+    bool firstBuildThisSubstep = state[gid].meta.x == 0u;
+    float3 previousMin(INFINITY), previousMax(-INFINITY);
+    float3 predictedMin(INFINITY), predictedMax(-INFINITY);
+    uint first = uint(controlLoad(control, 0));
+    for (int c = 0; c < 8; ++c) {
+        uint id = voxelParticle(v, c);
+        if (id >= uint(controlLoad(control, 0))) return;
+        first = min(first, id);
+        float3 previous = particle[id].prev_inv_mass.xyz;
+        float3 predicted = particle[id].predicted_base_inv_mass.xyz;
+        previousMin = min(previousMin, previous); previousMax = max(previousMax, previous);
+        predictedMin = min(predictedMin, predicted); predictedMax = max(predictedMax, predicted);
+    }
+    float rootEdge = voxel[uint(u.voxel_count)].pos_rest_edge.w;
+    int level = int(round(log2(max(rootEdge / max(v.pos_rest_edge.w, u.vgs_epsilon), 1.0f))));
+    level = clamp(level, 0, int(amr->levels));
+    float cellSize = rootEdge / float(1 << level);
+    float3 center = 0.25f * (previousMin + previousMax + predictedMin + predictedMax);
+    int body = first < uint(controlLoad(control, 0)) ? collisionMeta[first * 4u + 3u] : -1;
+    if (body < 0) body = gid >= uint(u.voxel_count) ? 0 : int(gid) + 1;
+    AabbState out;
+    out.previous_min = float4(previousMin, 0.0f);
+    out.previous_max = float4(previousMax, 0.0f);
+    out.predicted_min = float4(predictedMin, 0.0f);
+    out.predicted_max = float4(predictedMax, v.pos_rest_edge.w);
+    out.cell_level = int4(int3(floor(center / cellSize)), level);
+    out.meta = uint4(1u, uint(body + 1), gid, 0u);
+    state[gid] = out;
+    for (int c = 0; c < 8; ++c) {
+        uint id = voxelParticle(v, c);
+        atomic_store_explicit(owner + id, 1u, memory_order_relaxed);
+    }
+    if (firstBuildThisSubstep)
+        atomic_fetch_add_explicit(&aabb->proxy_count, 1u, memory_order_relaxed);
+}
+
+inline void aabbHashBuild(uint gid, device const AabbState *state,
+                          device atomic_int *hashHead, device int *hashNext,
+                          device const AabbControl *aabb, constant GpuUniforms &u) {
+    if (gid >= aabb->total_stage_count || state[gid].meta.x == 0u) return;
+    int4 key = state[gid].cell_level;
+    uint hash = aabbHashCoord(key.xyz, key.w, u.hash_size);
+    hashNext[gid] = atomic_exchange_explicit(hashHead + hash, int(gid), memory_order_relaxed);
+}
+
+inline float aabbWeight(int corner, float3 uvw) {
+    return ((corner & 1) ? uvw.x : 1.0f - uvw.x) *
+           ((corner & 2) ? uvw.y : 1.0f - uvw.y) *
+           ((corner & 4) ? uvw.z : 1.0f - uvw.z);
+}
+
+inline bool aabbContact(AabbState a, AabbState b, float skin,
+                        thread float3 &normal, thread float &depth, thread float &toi,
+                        thread float3 &amin, thread float3 &amax,
+                        thread float3 &bmin, thread float3 &bmax) {
+    float3 overlap = min(a.predicted_max.xyz, b.predicted_max.xyz) -
+                     max(a.predicted_min.xyz, b.predicted_min.xyz);
+    float3 ac = 0.5f * (a.predicted_min.xyz + a.predicted_max.xyz);
+    float3 bc = 0.5f * (b.predicted_min.xyz + b.predicted_max.xyz);
+    if (all(overlap >= float3(-skin))) {
+        int axis = overlap.y < overlap.x ? 1 : 0;
+        if (overlap.z < overlap[axis]) axis = 2;
+        normal = float3(0.0f); normal[axis] = ac[axis] < bc[axis] ? -1.0f : 1.0f;
+        depth = max(overlap[axis] + skin, skin);
+        toi = 1.0f;
+        amin = a.predicted_min.xyz; amax = a.predicted_max.xyz;
+        bmin = b.predicted_min.xyz; bmax = b.predicted_max.xyz;
+        return true;
+    }
+    float3 a0 = 0.5f * (a.previous_min.xyz + a.previous_max.xyz);
+    float3 a1 = ac;
+    float3 b0 = 0.5f * (b.previous_min.xyz + b.previous_max.xyz);
+    float3 b1 = bc;
+    float3 ea = max(0.5f * (a.previous_max.xyz - a.previous_min.xyz),
+                    0.5f * (a.predicted_max.xyz - a.predicted_min.xyz));
+    float3 eb = max(0.5f * (b.previous_max.xyz - b.previous_min.xyz),
+                    0.5f * (b.predicted_max.xyz - b.predicted_min.xyz));
+    float3 start = a0 - b0;
+    float3 travel = (a1 - a0) - (b1 - b0);
+    float entry = 0.0f, exit = 1.0f;
+    int hitAxis = -1;
+    for (int axis = 0; axis < 3; ++axis) {
+        float extent = ea[axis] + eb[axis] + skin;
+        if (fabs(travel[axis]) < 1e-8f) {
+            if (fabs(start[axis]) > extent) return false;
+            continue;
+        }
+        float t0 = (-extent - start[axis]) / travel[axis];
+        float t1 = ( extent - start[axis]) / travel[axis];
+        if (t0 > t1) { float swap = t0; t0 = t1; t1 = swap; }
+        if (t0 > entry) { entry = t0; hitAxis = axis; }
+        exit = min(exit, t1);
+        if (entry > exit) return false;
+    }
+    if (hitAxis < 0 || entry < 0.0f || entry > 1.0f) return false;
+    toi = entry;
+    normal = float3(0.0f);
+    normal[hitAxis] = travel[hitAxis] > 0.0f ? -1.0f : 1.0f;
+    depth = max(skin, fabs(travel[hitAxis]) * (1.0f - entry) + skin);
+    amin = mix(a.previous_min.xyz, a.predicted_min.xyz, entry);
+    amax = mix(a.previous_max.xyz, a.predicted_max.xyz, entry);
+    bmin = mix(b.previous_min.xyz, b.predicted_min.xyz, entry);
+    bmax = mix(b.previous_max.xyz, b.predicted_max.xyz, entry);
+    return true;
+}
+
+inline void scatterAabbPoint(float3 point, float3 normal, float depth,
+                             uint aId, uint bId, bool dynamicB,
+                             device const AabbState *state, device const VoxelState *voxel,
+                             device const ParticleState *particle, device atomic_uint *correction,
+                             device const int *control, constant GpuUniforms &u) {
+    AabbState a = state[aId]; VoxelState av = voxel[aId];
+    float3 aspan = max(a.predicted_max.xyz - a.predicted_min.xyz, float3(u.vgs_epsilon));
+    float3 auvw = clamp((point - a.predicted_min.xyz) / aspan, 0.0f, 1.0f);
+    float aw[8], bw[8];
+    float denominator = 0.0f;
+    for (int c = 0; c < 8; ++c) {
+        aw[c] = aabbWeight(c, auvw);
+        uint id = voxelParticle(av, c);
+        if (id < uint(controlLoad(control, 0)))
+            denominator += particle[id].prev_inv_mass.w * aw[c] * aw[c];
+    }
+    VoxelState bv;
+    if (dynamicB) {
+        AabbState b = state[bId]; bv = voxel[bId];
+        float3 bspan = max(b.predicted_max.xyz - b.predicted_min.xyz, float3(u.vgs_epsilon));
+        float3 buvw = clamp((point - b.predicted_min.xyz) / bspan, 0.0f, 1.0f);
+        for (int c = 0; c < 8; ++c) {
+            bw[c] = aabbWeight(c, buvw);
+            uint id = voxelParticle(bv, c);
+            if (id < uint(controlLoad(control, 0)))
+                denominator += particle[id].prev_inv_mass.w * bw[c] * bw[c];
+        }
+    }
+    if (denominator <= u.vgs_epsilon) return;
+    float lambda = u.collision_relaxation * depth / denominator;
+    for (int c = 0; c < 8; ++c) {
+        uint id = voxelParticle(av, c); if (id >= uint(controlLoad(control, 0))) continue;
+        float invMass = particle[id].prev_inv_mass.w;
+        if (invMass > 0.0f && aw[c] > 0.0f)
+            accumulate(correction, control, id, normal * (lambda * invMass * aw[c]), 1.0f);
+    }
+    if (dynamicB) for (int c = 0; c < 8; ++c) {
+        uint id = voxelParticle(bv, c); if (id >= uint(controlLoad(control, 0))) continue;
+        float invMass = particle[id].prev_inv_mass.w;
+        if (invMass > 0.0f && bw[c] > 0.0f)
+            accumulate(correction, control, id, -normal * (lambda * invMass * bw[c]), 1.0f);
+    }
+}
+
+inline void scatterAabbManifold(uint aId, uint bId, bool dynamicB,
+                                float3 normal, float depth,
+                                float3 amin, float3 amax, float3 bmin, float3 bmax,
+                                device const AabbState *state, device const VoxelState *voxel,
+                                device const ParticleState *particle, device atomic_uint *correction,
+                                device const int *control, constant GpuUniforms &u) {
+    int axis = fabs(normal.x) > 0.5f ? 0 : (fabs(normal.y) > 0.5f ? 1 : 2);
+    int t0 = axis == 0 ? 1 : 0;
+    int t1 = axis == 2 ? 1 : 2;
+    float3 low = max(amin, bmin), high = min(amax, bmax);
+    float3 point = 0.5f * (max(amin, bmin) + min(amax, bmax));
+    point[axis] = normal[axis] < 0.0f ? 0.5f * (amax[axis] + bmin[axis])
+                                            : 0.5f * (amin[axis] + bmax[axis]);
+    low[t0] = min(low[t0], high[t0]); low[t1] = min(low[t1], high[t1]);
+    for (int corner = 0; corner < 4; ++corner) {
+        float3 q = point;
+        q[t0] = (corner & 1) ? high[t0] : low[t0];
+        q[t1] = (corner & 2) ? high[t1] : low[t1];
+        scatterAabbPoint(q, normal, depth, aId, bId, dynamicB,
+                         state, voxel, particle, correction, control, u);
+    }
+}
+
+inline void aabbCollisions(uint gid, device const ParticleState *particle,
+                           device atomic_uint *correction, device const VoxelState *voxel,
+                           device atomic_int *hashHead, device const int *hashNext,
+                           device const AabbState *state, device AabbControl *aabb,
+                           device const AmrControl *amr, device const int *control,
+                           constant GpuUniforms &u) {
+    if (gid >= aabb->total_stage_count || state[gid].meta.x == 0u) return;
+    AabbState a = state[gid];
+    float rootEdge = voxel[uint(u.voxel_count)].pos_rest_edge.w;
+    float3 sweptMin = min(a.previous_min.xyz, a.predicted_min.xyz);
+    float3 sweptMax = max(a.previous_max.xyz, a.predicted_max.xyz);
+    float skin = max(1e-4f, 0.002f * u.voxel_size);
+    for (int level = a.cell_level.w; level >= 0; --level) {
+        float cellSize = rootEdge / float(1 << level);
+        int3 lo = int3(floor((sweptMin - float3(cellSize)) / cellSize));
+        int3 hi = int3(floor((sweptMax + float3(cellSize)) / cellSize));
+        int3 span = hi - lo + 1;
+        if (any(span <= int3(0)) || any(span > int3(64))) {
+            atomic_store_explicit(&aabb->overflow, 1u, memory_order_relaxed);
+            return;
+        }
+        for (int z = lo.z; z <= hi.z; ++z) for (int y = lo.y; y <= hi.y; ++y)
+        for (int x = lo.x; x <= hi.x; ++x) {
+            int3 key(x,y,z);
+            int item = atomic_load_explicit(hashHead + aabbHashCoord(key, level, u.hash_size),
+                                            memory_order_relaxed);
+            int traversed = 0;
+            while (item >= 0 && uint(item) < aabb->total_stage_count &&
+                   traversed++ < int(aabb->total_stage_count)) {
+                uint bid = uint(item); AabbState b = state[bid];
+                if (b.meta.x != 0u && b.cell_level.w == level && all(b.cell_level.xyz == key) &&
+                    b.meta.y != a.meta.y && (level < a.cell_level.w || bid > gid)) {
+                    atomic_fetch_add_explicit(&aabb->candidate_count, 1u, memory_order_relaxed);
+                    float3 normal, amin, amax, bmin, bmax; float depth, toi;
+                    if (aabbContact(a, b, skin, normal, depth, toi, amin, amax, bmin, bmax)) {
+                        scatterAabbManifold(gid, bid, true, normal, depth,
+                                            amin, amax, bmin, bmax,
+                                            state, voxel, particle, correction, control, u);
+                        atomic_fetch_add_explicit(&aabb->contact_count, 1u, memory_order_relaxed);
+                    }
+                }
+                item = hashNext[item];
+            }
+            if (item >= 0 && uint(item) < aabb->total_stage_count)
+                atomic_store_explicit(&aabb->overflow, 1u, memory_order_relaxed);
+        }
+    }
+}
+
+inline int findStaticCell(int3 coord, device int4 *staticCell,
+                          constant GpuUniforms &u);
+
+inline void aabbStaticCollisions(uint gid, device const ParticleState *particle,
+                                 device atomic_uint *correction, device const VoxelState *voxel,
+                                 device int4 *staticCell,
+                                 device const StaticCollider *staticCollider,
+                                 device const AabbState *state, device AabbControl *aabb,
+                                 device const atomic_uint *collisionControl,
+                                 device const int *control, constant GpuUniforms &u) {
+    if (gid >= aabb->total_stage_count || state[gid].meta.x == 0u) return;
+    AabbState a = state[gid];
+    float skin = max(1e-4f, 0.002f * u.voxel_size);
+    // Analytic floor and terrain side walls use the same trilinear scatter.
+    float3 normal, amin, amax, bmin, bmax; float depth, toi;
+    if (a.predicted_min.y < skin) {
+        normal=float3(0,1,0);depth=skin-a.predicted_min.y;
+        amin=a.predicted_min.xyz;amax=a.predicted_max.xyz;
+        bmin=float3(amin.x,-u.floor_size,amin.z);bmax=float3(amax.x,0.0f,amax.z);
+        scatterAabbManifold(gid,0u,false,normal,depth,amin,amax,bmin,bmax,
+                            state,voxel,particle,correction,control,u);
+        atomic_fetch_add_explicit(&aabb->contact_count,1u,memory_order_relaxed);
+    }
+    for (int side=0;side<2;++side) for (int axis=0;axis<2;++axis) {
+        int d=axis==0?0:2;float limit=side==0?-u.floor_size:u.floor_size;
+        float face=side==0?a.predicted_min[d]:a.predicted_max[d];
+        float penetration=side==0?(limit+skin-face):(face-(limit-skin));
+        if(penetration<=0.0f)continue;normal=float3(0);normal[d]=side==0?1.0f:-1.0f;
+        amin=a.predicted_min.xyz;amax=a.predicted_max.xyz;bmin=amin;bmax=amax;
+        bmin[d]=bmax[d]=limit;
+        scatterAabbManifold(gid,0u,false,normal,penetration,amin,amax,bmin,bmax,
+                            state,voxel,particle,correction,control,u);
+        atomic_fetch_add_explicit(&aabb->contact_count,1u,memory_order_relaxed);
+    }
+    // Query only static cells touched by the swept proxy. Surface patches can
+    // span several cells, so keep the same compact per-thread de-duplication
+    // used by the particle collision path.
+    float3 sweptMin=min(a.previous_min.xyz,a.predicted_min.xyz)-float3(skin);
+    float3 sweptMax=max(a.previous_max.xyz,a.predicted_max.xyz)+float3(skin);
+    int3 cellMin=int3(floor(sweptMin/u.voxel_size));
+    int3 cellMax=int3(floor(sweptMax/u.voxel_size));
+    int3 cellSpan=cellMax-cellMin+1;
+    if(any(cellSpan<=int3(0))||any(cellSpan>int3(64))){
+        atomic_store_explicit(&aabb->overflow,1u,memory_order_relaxed);return;
+    }
+    bool surfaceMode=atomic_load_explicit(&collisionControl[4],memory_order_relaxed)!=0u;
+    int seen[128];int seenCount=0;
+    for(int z=cellMin.z;z<=cellMax.z;++z)for(int y=cellMin.y;y<=cellMax.y;++y)
+    for(int x=cellMin.x;x<=cellMax.x;++x){
+        int item=findStaticCell(int3(x,y,z),staticCell,u);
+        int guard=0;
+        while(item!=-1&&guard++<u.static_collider_count+1){
+            int sid=item;
+            if(!surfaceMode&&item<=-2)sid=-item-2;
+            if(sid<0||sid>=u.static_collider_count)break;
+            StaticCollider box=staticCollider[sid];
+            int patchId=surfaceMode?as_type<int>(box.bounds_min.w):sid;
+            bool duplicate=false;for(int s=0;s<seenCount;++s)duplicate=duplicate||seen[s]==patchId;
+            if(!duplicate){
+                if(seenCount<128)seen[seenCount++]=patchId;
+                AabbState b;float3 smin=box.bounds_min.xyz,smax=box.bounds_max.xyz;
+                for(int d=0;d<3;++d)if(smax[d]-smin[d]<2.0f*skin){float mid=0.5f*(smin[d]+smax[d]);smin[d]=mid-skin;smax[d]=mid+skin;}
+                b.previous_min=b.predicted_min=float4(smin,0);b.previous_max=b.predicted_max=float4(smax,0);
+                atomic_fetch_add_explicit(&aabb->candidate_count,1u,memory_order_relaxed);
+                if(aabbContact(a,b,skin,normal,depth,toi,amin,amax,bmin,bmax)){
+                    scatterAabbManifold(gid,0u,false,normal,depth,amin,amax,bmin,bmax,
+                                        state,voxel,particle,correction,control,u);
+                    atomic_fetch_add_explicit(&aabb->contact_count,1u,memory_order_relaxed);
+                }
+            }
+            if(!surfaceMode||item<=-2)break;
+            item=as_type<int>(box.center.w);
+        }
+        if(guard>=u.static_collider_count+1&&item!=-1)
+            atomic_store_explicit(&aabb->overflow,1u,memory_order_relaxed);
+    }
 }
 
 inline bool amrMeasure(device const ParticleState *particle, VoxelState v,
@@ -772,8 +1141,8 @@ inline float3 pushOutOfBox(float3 pos,float radius,StaticCollider box,constant G
 
 inline float3 pushOutOfPatch(float3 pos,float radius,StaticCollider patch){float3 closest=clamp(pos,patch.bounds_min.xyz,patch.bounds_max.xyz),normal=patch.center.xyz,delta=pos-closest;float signedDistance=dot(delta,normal);bool projectedInside;if(normal.x!=0.0f)projectedInside=pos.y>=patch.bounds_min.y&&pos.y<=patch.bounds_max.y&&pos.z>=patch.bounds_min.z&&pos.z<=patch.bounds_max.z;else if(normal.y!=0.0f)projectedInside=pos.x>=patch.bounds_min.x&&pos.x<=patch.bounds_max.x&&pos.z>=patch.bounds_min.z&&pos.z<=patch.bounds_max.z;else projectedInside=pos.x>=patch.bounds_min.x&&pos.x<=patch.bounds_max.x&&pos.y>=patch.bounds_min.y&&pos.y<=patch.bounds_max.y;if(projectedInside&&signedDistance<0.0f&&signedDistance>=-radius)return pos+normal*(radius-signedDistance);if(signedDistance<0.0f)return pos;float distanceSq=dot(delta,delta);if(distanceSq>=radius*radius)return pos;float distance=sqrt(max(distanceSq,1e-6f));float3 direction=distance>1e-6f?delta/distance:normal;return pos+direction*(radius-distance);}
 
-inline void staticCollisions(uint gid,device ParticleState *particle,device uint *collisionId,device atomic_uint *collisionControl,device int4 *staticCell,device StaticCollider *staticCollider,device const int *refcount,device const int *control,constant GpuUniforms &u){
-    if(gid>=atomic_load_explicit(&collisionControl[0], memory_order_relaxed))return;uint id=collisionId[gid];if(refcount[id]<=0)return;ParticleState p=particle[id];if(p.prev_inv_mass.w<=0.0f)return;float radius=p.pos_radius.w;float3 pos=p.predicted_base_inv_mass.xyz;float terrainLimit=u.floor_size-radius,floorLimit=max(0.0f,0.5f*u.voxel_size-radius);bool floorContact=pos.y<floorLimit;pos.y=max(pos.y,floorLimit);if(floorContact){p.prev_inv_mass.xz=pos.xz-(pos.xz-p.prev_inv_mass.xz)*0.05f;p.prev_inv_mass.y=pos.y;}pos.xz=clamp(pos.xz,float2(-terrainLimit),float2(terrainLimit));constexpr float eps=1e-6f;
+inline void staticCollisions(uint gid,device ParticleState *particle,device uint *collisionId,device atomic_uint *collisionControl,device int4 *staticCell,device StaticCollider *staticCollider,device const atomic_uint *aabbOwner,device const AabbControl *aabb,device const int *refcount,device const int *control,constant GpuUniforms &u){
+    if(gid>=atomic_load_explicit(&collisionControl[0], memory_order_relaxed))return;uint id=collisionId[gid];if(refcount[id]<=0||(aabb->enabled!=0u&&atomic_load_explicit(aabbOwner+id,memory_order_relaxed)!=0u))return;ParticleState p=particle[id];if(p.prev_inv_mass.w<=0.0f)return;float radius=p.pos_radius.w;float3 pos=p.predicted_base_inv_mass.xyz;float terrainLimit=u.floor_size-radius,floorLimit=max(0.0f,0.5f*u.voxel_size-radius);bool floorContact=pos.y<floorLimit;pos.y=max(pos.y,floorLimit);if(floorContact){p.prev_inv_mass.xz=pos.xz-(pos.xz-p.prev_inv_mass.xz)*0.05f;p.prev_inv_mass.y=pos.y;}pos.xz=clamp(pos.xz,float2(-terrainLimit),float2(terrainLimit));constexpr float eps=1e-6f;
     for(int i=0;i<u.active_players&&i<4;++i){if(u.players[i].w<0.0f)continue;float halfSize=u.players[i].w;float3 nearest=clamp(pos,u.players[i].xyz-float3(halfSize),u.players[i].xyz+float3(halfSize));float3 delta=pos-nearest;float distSq=dot(delta,delta);if(distSq<radius*radius){float dist=sqrt(max(distSq,eps));float3 normal=dist>eps?delta/dist:float3(0,1,0);pos+=normal*(radius-dist);}}
     bool surfaceMode=atomic_load_explicit(&collisionControl[4], memory_order_relaxed)!=0u;int3 center=int3(floor(pos/u.voxel_size));int seen[128];int seenCount=0;int reach=0.5f*radius>u.voxel_size?int(ceil(0.5f*radius/u.voxel_size))+1:1;for(int z=-reach;z<=reach;++z)for(int y=-reach;y<=reach;++y)for(int x=-reach;x<=reach;++x){int item=findStaticCell(center+int3(x,y,z),staticCell,u);if(!surfaceMode&&item<=-2){int colliderId=-item-2;if(colliderId>=0&&colliderId<u.static_collider_count)pos=pushOutOfBox(pos,0.5f*radius,staticCollider[colliderId],u);continue;}while(item>=0&&item<u.static_collider_count){StaticCollider patch=staticCollider[item];int patchId=as_type<int>(patch.bounds_min.w);bool duplicate=false;for(int s=0;s<seenCount;++s)duplicate=duplicate||seen[s]==patchId;if(!duplicate&&seenCount<128){seen[seenCount++]=patchId;pos=pushOutOfPatch(pos,0.5f*radius,patch);}item=as_type<int>(patch.center.w);}}center=int3(floor(pos/u.voxel_size));int recovery=findStaticCell(center,staticCell,u);if(recovery<=-2){int colliderId=-recovery-2;if(colliderId>=0&&colliderId<u.static_collider_count)pos=pushOutOfBox(pos,0.5f*radius,staticCollider[colliderId],u);}p.predicted_base_inv_mass.xyz=pos;particle[id]=p;
 }
@@ -909,7 +1278,10 @@ kernel void pbd_pipeline(
     device AmrState *amrState [[buffer(16)]],
     device AmrScratch *amrScratch [[buffer(17)]],
     device AmrControl *amrControl [[buffer(18)]],
-    constant GpuUniforms &u [[buffer(19)]],
+    device AabbState *aabbState [[buffer(19)]],
+    device atomic_uint *aabbOwner [[buffer(20)]],
+    device AabbControl *aabbControl [[buffer(21)]],
+    constant GpuUniforms &u [[buffer(22)]],
     uint gid [[thread_position_in_grid]]) {
     device uint *collisionId=simId+uint(controlLoad(control,2));
     device atomic_int *collisionMember=reinterpret_cast<device atomic_int *>(cloneParent);
@@ -918,8 +1290,8 @@ kernel void pbd_pipeline(
         case MODE_RESET:resetCorrections(gid,correction,simId,refcount,control);break;
         case MODE_INTEGRATE:integrateParticle(gid,particle,tetherOwner,simId,refcount,control,u);break;
         case MODE_HASH_CLEAR:clearHash(gid,hashHead,u);break;
-        case MODE_HASH_BUILD:buildHash(gid,particle,cell,collisionId,collisionControl,hashHead,hashNext,refcount,control,u);break;
-        case MODE_PAIR_COLLISIONS:pairCollisions(gid,particle,correction,cell,collisionId,collisionControl,hashHead,hashNext,collisionMeta,refcount,control,u);break;
+        case MODE_HASH_BUILD:buildHash(gid,particle,cell,collisionId,collisionControl,hashHead,hashNext,refcount,aabbOwner,aabbControl,control,u);break;
+        case MODE_PAIR_COLLISIONS:pairCollisions(gid,particle,correction,cell,collisionId,collisionControl,hashHead,hashNext,collisionMeta,aabbOwner,aabbControl,refcount,control,u);break;
         case MODE_APPLY:applyCorrections(gid,particle,correction,simId,refcount,control,u);break;
         case MODE_VGS:
             if (gid < uint(u.integer_padding_2) && gid < amrControl->constraint_count) {
@@ -930,7 +1302,7 @@ kernel void pbd_pipeline(
                                           dispatchArgs[base + 2u],kind == 2u);
             }
             break;
-        case MODE_STATIC_COLLISIONS:staticCollisions(gid,particle,collisionId,collisionControl,staticCell,staticCollider,refcount,control,u);break;
+        case MODE_STATIC_COLLISIONS:staticCollisions(gid,particle,collisionId,collisionControl,staticCell,staticCollider,aabbOwner,aabbControl,refcount,control,u);break;
         case MODE_BREAK_MASK:gatherBreakMask(gid,particle,voxel,topology,refcount,control,u);break;
         case MODE_FINALIZE_PARTICLES:finalizeParticle(gid,particle,cell,simId,refcount,control,u);break;
         case MODE_FINALIZE_VOXELS:finalizeVoxel(gid,particle,voxel,control,u);break;
@@ -954,5 +1326,10 @@ kernel void pbd_pipeline(
         case MODE_AMR_COMPILE:amrCompile(gid,voxel,dispatchArgs,amrControl,u);break;
         case MODE_AMR_PREPARE_INDIRECT:amrPrepareIndirect(gid,control,dispatchArgs,amrControl);break;
         case MODE_AMR_DORMANT_SCATTER:amrDormantScatter(gid,particle,voxel,amrScratch,amrControl,control,u);break;
+        case MODE_AABB_CLEAR:aabbClear(gid,aabbOwner,aabbState,aabbControl,amrControl);break;
+        case MODE_AABB_BOUNDS:aabbBounds(gid,particle,voxel,collisionMeta,aabbOwner,aabbState,aabbControl,amrControl,control,u);break;
+        case MODE_AABB_HASH_BUILD:aabbHashBuild(gid,aabbState,hashHead,hashNext,aabbControl,u);break;
+        case MODE_AABB_COLLISIONS:aabbCollisions(gid,particle,correction,voxel,hashHead,hashNext,aabbState,aabbControl,amrControl,control,u);break;
+        case MODE_AABB_STATIC_COLLISIONS:aabbStaticCollisions(gid,particle,correction,voxel,staticCell,staticCollider,aabbState,aabbControl,collisionControl,control,u);break;
     }
 }

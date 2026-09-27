@@ -90,6 +90,14 @@ typedef struct DebugRunState {
     bool active_cube_drop;
     bool adaptive_cube_drop;
     bool arbitrary_shape_drop;
+    bool amr_projectile_test;
+    uint64_t amr_projectile_identity;
+    float amr_projectile_initial_speed;
+    float amr_projectile_min_velocity_x;
+    float amr_projectile_target_max_velocity_x;
+    float amr_projectile_target_far_x;
+    int amr_projectile_impact_step;
+    bool amr_projectile_tunneled;
     bool rip_test;
     FILE *rip_history_file;
     char rip_history_path[DEBUG_PATH_CAPACITY];
@@ -314,6 +322,7 @@ static bool debug_setup_cube_stress(DebugRunState *state);
 static bool debug_setup_active_cube_drop(DebugRunState *state);
 static bool debug_setup_adaptive_cube_drop(DebugRunState *state);
 static bool debug_setup_adaptive_l_drop(DebugRunState *state);
+static bool debug_setup_amr_projectile_impact(DebugRunState *state);
 static bool debug_setup_rip_test(DebugRunState *state);
 static bool debug_setup_vgs_refinement(DebugRunState *state);
 static bool debug_setup_vgs_coarsening(DebugRunState *state);
@@ -348,6 +357,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "active-cube-drop", "Activate a static 10x10x10 cube and drop it", debug_setup_active_cube_drop, 120, 60 },
     { "adaptive-cube-drop", "Curvature-driven octree cube drop", debug_setup_adaptive_cube_drop, 240, 60 },
     { "adaptive-l-drop", "Occupancy-masked adaptive L-shaped drop", debug_setup_adaptive_l_drop, 480, 120 },
+    { "amr-projectile-impact", "Fire one finest-scale voxel into an adaptive cube AABB", debug_setup_amr_projectile_impact, 240, 120 },
     { "rip-test", "Pull both faces of an adaptive cube to test fracture", debug_setup_rip_test, 480, 60 },
     { "vgs-refinement", "Drop a root VGS cube, then refine into eight shared-particle children", debug_setup_vgs_refinement, 300, 180 },
     { "vgs-coarsening", "Drop eight child VGS cubes, then project them onto one root", debug_setup_vgs_coarsening, 300, 180 },
@@ -1006,6 +1016,18 @@ static bool debug_convert_shape_to_pbd(DebugRunState *state, float requested_siz
             debug_glue_pbd_faces(idx, lattice[flat - side], 5);
         if (y > 0 && lattice[flat - side * side] >= 0)
             debug_glue_pbd_faces(idx, lattice[flat - side * side], 3);
+    }
+    if (state->amr_projectile_test) {
+        float cube_center_y = 23.0f * VOXEL_SIZE;
+        int projectile = addVoxel(-7.5f, cube_center_y, 0.0f, true, true,
+                                  (Color){ 65, 220, 255, 255 }, 0);
+        if (projectile < 0) {
+            debug_add_failure(state, "unable to create the AMR impact projectile");
+            goto conversion_failed;
+        }
+        voxels[projectile].debugClusterTag = DEBUG_THROW_TAG;
+        voxels[projectile].glueEligible = false;
+        state->amr_projectile_identity = voxels[projectile].identity;
     }
     // Each voxel contributes eight corner masses. Shared particles receive the
     // sum of contributions, preserving mass per physical volume after gluing.
@@ -2356,6 +2378,38 @@ static bool debug_setup_adaptive_l_drop(DebugRunState *state)
     debugColorVoxelsByVgsTemporalCurvature = false;
     state->camera.position = (Vector3){ 18.0f, 17.0f, 22.0f };
     state->camera.target = (Vector3){ 0.0f, 8.0f, 0.0f };
+    return true;
+}
+
+static bool debug_setup_amr_projectile_impact(DebugRunState *state)
+{
+    state->amr_projectile_test = true;
+    state->amr_projectile_initial_speed = 40.0f;
+    state->amr_projectile_min_velocity_x = state->amr_projectile_initial_speed;
+    state->amr_projectile_impact_step = -1;
+    state->amr_projectile_target_far_x = 5.0f * VOXEL_SIZE;
+    if (!debug_setup_adaptive_cube_drop(state)) return false;
+
+    int projectile_index = find_voxel_by_identity(state->amr_projectile_identity);
+    if (projectile_index < 0) {
+        debug_add_failure(state, "AMR impact projectile disappeared during hierarchy setup");
+        return false;
+    }
+    Voxel *projectile = &voxels[projectile_index];
+    projectile->fixed = false;
+    projectile->simulate_dofs = true;
+    projectile->vgs_active = true;
+    projectile->activationBelief = 1.0f;
+    if (!vgs_hierarchy_rebuild_active_masses()) {
+        debug_add_failure(state, "unable to add projectile mass to the AMR simulation");
+        return false;
+    }
+    set_voxel_velocity(projectile,
+                       (Vector3){ state->amr_projectile_initial_speed, 0.0f, 0.0f });
+    collisionTopologyDirty = true;
+    state->camera.position = (Vector3){ -15.0f, 15.5f, 18.0f };
+    state->camera.target = (Vector3){ -0.5f, 11.5f, 0.0f };
+    debug_capture(state, "phase-02-projectile-launched.png", "projectile-launched", 0);
     return true;
 }
 
@@ -4484,6 +4538,36 @@ static void debug_validate_step(DebugRunState *state, int step)
         }
     }
     if (state->adaptive_cube_drop) {
+        if (state->amr_projectile_test) {
+            int projectile_index = find_voxel_by_identity(state->amr_projectile_identity);
+            if (projectile_index < 0) {
+                debug_add_failure(state, "step %d: AMR impact projectile disappeared", step);
+            } else {
+                Voxel *projectile = &voxels[projectile_index];
+                float velocity_x = projectile->vel.x;
+                state->amr_projectile_min_velocity_x =
+                    fminf(state->amr_projectile_min_velocity_x, velocity_x);
+                for (int i = 0; i < voxel_count; ++i) {
+                    Voxel *target = &voxels[i];
+                    if (!target->simulate || target->debugClusterTag != DEBUG_TEST_TAG) continue;
+                    for (int corner = 0; corner < 8; ++corner) {
+                        Particle *particle = target->particles[corner];
+                        if (!particle) continue;
+                        state->amr_projectile_target_max_velocity_x =
+                            fmaxf(state->amr_projectile_target_max_velocity_x,
+                                  particle->vel.x);
+                    }
+                }
+                if (state->amr_projectile_impact_step < 0 &&
+                    (velocity_x < 0.9f * state->amr_projectile_initial_speed ||
+                     state->amr_projectile_target_max_velocity_x > 0.05f))
+                    state->amr_projectile_impact_step = step;
+                if (projectile->pos.x > state->amr_projectile_target_far_x +
+                                        projectile->rest_edge &&
+                    state->amr_projectile_impact_step < 0)
+                    state->amr_projectile_tunneled = true;
+            }
+        }
 #if defined(GRAPHICS_API_OPENGL_43) || (defined(__APPLE__) && defined(FPS_GPU_METAL))
         if (state->arbitrary_shape_drop && step == 1 &&
             physics_backend_is_gpu(physicsBackend.active)) {
@@ -4538,6 +4622,7 @@ static void debug_validate_step(DebugRunState *state, int step)
         int active_nodes = 0, terminal_nodes = 0, active_leaves = 0;
         double total_mass = 0.0;
         double terminal_volume = 0.0;
+        double external_volume = 0.0;
         for (int i = 0; i < sim_particle_count; ++i)
             if (sim_particles[i]->base_inv_mass > 0.0f)
                 total_mass += 1.0 / sim_particles[i]->base_inv_mass;
@@ -4569,11 +4654,17 @@ static void debug_validate_step(DebugRunState *state, int step)
         }
         for (int i = 0; i < voxel_count; ++i)
             if (voxels[i].simulate && voxels[i].simulate_dofs) {
+                if (state->amr_projectile_test &&
+                    voxels[i].identity == state->amr_projectile_identity) {
+                    external_volume += voxels[i].rest_volume;
+                    continue;
+                }
                 if (voxels[i].vgs_active) ++active_leaves;
                 terminal_volume += voxels[i].rest_volume;
             }
         double expected_mass = 8.0 * (double)vgsHierarchy.leaf_count *
-            pow((double)pbdSolidVoxelSize / (double)VOXEL_SIZE, 3.0);
+            pow((double)pbdSolidVoxelSize / (double)VOXEL_SIZE, 3.0) +
+            (double)vgsHierarchy.mass_density * external_volume;
         double expected_volume = (double)vgsHierarchy.leaf_count *
             pow((double)pbdSolidVoxelSize, 3.0);
         if (!vgsHierarchy.nodes[0].active || active_nodes == 0 ||
@@ -5343,6 +5434,24 @@ static void debug_finalize_validation(DebugRunState *state)
     if (!state->activation_succeeded) {
         debug_add_failure(state, "scenario did not complete its activation stage");
     }
+    if (state->amr_projectile_test) {
+        if (state->amr_projectile_tunneled)
+            debug_add_failure(state, "high-speed projectile crossed the far face before contact");
+        if (state->amr_projectile_impact_step < 0)
+            debug_add_failure(state, "high-speed projectile never transferred momentum to the AMR cube");
+        // The projectile is one finest cell while the unrefined target carries
+        // the mass of the complete cube.  A small target velocity is therefore
+        // the expected momentum-conserving response; the projectile slowdown
+        // above is the stronger contact signal.
+        if (state->amr_projectile_target_max_velocity_x <= 1e-4f)
+            debug_add_failure(state, "AMR target maximum X velocity was only %.6g m/s",
+                              (double)state->amr_projectile_target_max_velocity_x);
+        if (state->amr_projectile_min_velocity_x >=
+            0.9f * state->amr_projectile_initial_speed)
+            debug_add_failure(state, "projectile retained %.6g/%.6g m/s after impact",
+                              (double)state->amr_projectile_min_velocity_x,
+                              (double)state->amr_projectile_initial_speed);
+    }
     if (state->refinement_demo && !state->refinement_complete) {
         debug_add_failure(state, "refinement demo never enabled its eight children");
     }
@@ -5453,6 +5562,8 @@ static bool debug_write_report(DebugRunState *state)
             int broken_nodes = 0, broken_leaves = 0;
             for (int i = 0; i < voxel_count; ++i)
                 if (voxels[i].simulate) {
+                    if (state->amr_projectile_test &&
+                        voxels[i].identity == state->amr_projectile_identity) continue;
                     if (!voxels[i].vgs_active) ++broken_leaves;
                     if (voxels[i].simulate_dofs) {
                         ++terminal_leaves;
@@ -5487,6 +5598,17 @@ static bool debug_write_report(DebugRunState *state)
                     broken_nodes, broken_leaves,
                     enabled_vgs, enabled_welds,
                     gpuPhysics.constraint_count, sim_particle_count);
+            bool gpu_aabb = physics_backend_is_gpu(physicsBackend.active);
+            fprintf(file, "  \"amrAabbCollision\": {\"enabled\": %s, \"proxies\": %llu, \"candidatePairs\": %llu, \"contacts\": %llu, \"overflow\": %u},\n",
+                    (gpu_aabb ? gpuPhysics.aabb_control_stage.enabled != 0
+                              : cpu_aabb_collisions_enabled()) ? "true" : "false",
+                    (unsigned long long)(gpu_aabb ? gpuPhysics.aabb_control_stage.proxy_count
+                                                  : (uint64_t)cpuAabbProxyCount),
+                    (unsigned long long)(gpu_aabb ? gpuPhysics.aabb_control_stage.candidate_count
+                                                  : cpuAabbCandidates),
+                    (unsigned long long)(gpu_aabb ? gpuPhysics.aabb_control_stage.contact_count
+                                                  : cpuAabbContacts),
+                    gpu_aabb ? gpuPhysics.aabb_control_stage.overflow : 0u);
         }
         fprintf(file, "  \"vgsTemporalCurvature\": {\"samples\": %d, \"redAtPerSecondSquared\": %.9g, \"lastStepMax\": %.9g, \"lastStepMean\": %.9g},\n",
                 debugVgsTemporalSampleCount, (double)VGS_TEMPORAL_CURVATURE_RED_AT,
@@ -5503,6 +5625,13 @@ static bool debug_write_report(DebugRunState *state)
                     state->rip_first_break_step,
                     state->rip_broken_nodes, state->rip_broken_leaves,
                     state->rip_history_path);
+        if (state->amr_projectile_test)
+            fprintf(file, "  \"amrProjectile\": {\"initialVelocityX\": %.9g, \"minimumVelocityX\": %.9g, \"targetMaximumVelocityX\": %.9g, \"impactStep\": %d, \"tunneled\": %s},\n",
+                    (double)state->amr_projectile_initial_speed,
+                    (double)state->amr_projectile_min_velocity_x,
+                    (double)state->amr_projectile_target_max_velocity_x,
+                    state->amr_projectile_impact_step,
+                    state->amr_projectile_tunneled ? "true" : "false");
     }
     if (state->refinement_demo) {
         fprintf(file, "  \"refinement\": {\"step\": %d, \"completed\": %s, \"sharedGridPoints\": 27, \"children\": 8},\n",
