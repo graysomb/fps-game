@@ -107,9 +107,6 @@ constant uint AMR_DECISION_REFINE = 1u;
 constant uint AMR_DECISION_COARSEN = 2u;
 constant uint AMR_OVERFLOW_CONSTRAINT = 1u;
 constant uint AMR_OVERFLOW_PARTICLE = 2u;
-constant uint AMR_MAX_COLLISION_DIAMETER = 0u;
-constant uint AMR_SCALE_COLLISION_RADIUS = 1u;
-constant uint AMR_FIXED_LEVEL = 2u;
 
 // Presence of this entry point identifies libraries with hierarchical VGS support.
 kernel void pbd_hierarchy_marker() {}
@@ -211,14 +208,11 @@ inline void buildHash(uint gid, device ParticleState *particle, device int4 *cel
                       device uint *collisionId, device atomic_uint *collisionControl,
                       device atomic_int *hashHead,
                       device int *hashNext, device const int *refcount,
-                      device const int *control, device const AmrControl *amr,
-                      constant GpuUniforms &u) {
+                      device const int *control, constant GpuUniforms &u) {
     if (gid >= atomic_load_explicit(&collisionControl[0], memory_order_relaxed)) return;
     uint id = collisionId[gid];
     if (refcount[id] <= 0) return;
-    float hashStep = as_type<float>(amr->padding[AMR_MAX_COLLISION_DIAMETER]);
-    if (!(hashStep > 0.0f) || !isfinite(hashStep)) hashStep = u.particle_hash_step;
-    int3 c = int3(floor(particle[id].predicted_base_inv_mass.xyz / hashStep));
+    int3 c = int3(floor(particle[id].predicted_base_inv_mass.xyz / u.particle_hash_step));
     cell[id].xyz = c;
     uint h = hashCoord(c, u.hash_size);
     hashNext[gid] = atomic_exchange_explicit(&hashHead[h], int(gid), memory_order_relaxed);
@@ -546,7 +540,6 @@ inline void amrClear(uint gid, device AmrState *state, device AmrControl *amr,
     amr->frame_refine_count = 0u;
     amr->frame_coarsen_count = 0u;
     amr->changed = 0u;
-    amr->padding[AMR_MAX_COLLISION_DIAMETER] = 0u;
     control[1] = 0;
     dispatchArgs[8] = 0u;
 }
@@ -582,7 +575,7 @@ inline void amrSelect(uint gid, device const ParticleState *particle,
                       device VoxelState *voxel, device AmrState *state,
                       device const int *control, device AmrControl *amr,
                       constant GpuUniforms &u) {
-    if (gid >= amr->hierarchy_count || amr->padding[AMR_FIXED_LEVEL] != 0u) return;
+    if (gid >= amr->hierarchy_count) return;
     uint stage = uint(u.voxel_count) + gid;
     VoxelState node = voxel[stage];
     if (node.flags.w == 0 || amrOccupancy(node) != 2u || amrRealMask(node) != 0xffu) return;
@@ -736,16 +729,16 @@ inline void amrTopologyApply(uint gid, device const ParticleState *particle,
 }
 
 inline void amrMassScatter(uint gid, device const VoxelState *voxel,
-                           device AmrScratch *scratch, device AmrControl *amr,
+                           device AmrScratch *scratch, device const AmrControl *amr,
                            constant GpuUniforms &u) {
-    if(gid>=amr->total_stage_count)return;VoxelState v=voxel[gid];if(v.flags.w==0||amrOccupancy(v)!=2u||amrRealMask(v)!=0xffu)return;if(gid>=uint(u.voxel_count)&&amrHasActiveChildren(v,voxel,amr))return;float contribution=amr->mass_density*v.velocity_rest_volume.w*0.125f;float radius=amr->padding[AMR_SCALE_COLLISION_RADIUS]!=0u?0.5f*v.pos_rest_edge.w:0.5f*u.particle_hash_step;uint radiusBits=as_type<uint>(radius);atomic_fetch_max_explicit(reinterpret_cast<device atomic_uint *>(&amr->padding[AMR_MAX_COLLISION_DIAMETER]),as_type<uint>(2.0f*radius),memory_order_relaxed);for(int c=0;c<8;++c){uint id=voxelParticle(v,c);if(id<amr->particle_capacity){atomicAddFloat(&scratch[id].velocity_sum_mass[3],contribution);atomic_fetch_max_explicit(&scratch[id].position_sum[3],radiusBits,memory_order_relaxed);}}
+    if(gid>=amr->total_stage_count)return;VoxelState v=voxel[gid];if(v.flags.w==0||amrOccupancy(v)!=2u||amrRealMask(v)!=0xffu)return;if(gid>=uint(u.voxel_count)&&amrHasActiveChildren(v,voxel,amr))return;float contribution=amr->mass_density*v.velocity_rest_volume.w*0.125f;for(int c=0;c<8;++c){uint id=voxelParticle(v,c);if(id<amr->particle_capacity)atomicAddFloat(&scratch[id].velocity_sum_mass[3],contribution);}
 }
 
 inline void amrCompact(uint gid, device ParticleState *particle, device uint *simId,
                        device AmrScratch *scratch, device int *cloneParent,
                        device int *control, device uint *dispatchArgs,
                        device AmrControl *amr) {
-    if(gid>=uint(controlLoad(control,0)))return;float mass=amrLoadFloat(&scratch[gid].velocity_sum_mass[3]);float radius=amrLoadFloat(&scratch[gid].position_sum[3]);ParticleState p=particle[gid];p.prev_inv_mass.w=mass>0.0f?1.0f/mass:0.0f;p.predicted_base_inv_mass.w=p.prev_inv_mass.w;if(mass>0.0f&&radius>0.0f)p.pos_radius.w=radius;particle[gid]=p;if(mass<=0.0f)return;uint slot=atomic_fetch_add_explicit(reinterpret_cast<device atomic_uint *>(&control[1]),1u,memory_order_relaxed);if(slot<amr->particle_capacity)simId[slot]=gid;else atomic_fetch_or_explicit(reinterpret_cast<device atomic_uint *>(&amr->overflow),AMR_OVERFLOW_PARTICLE,memory_order_relaxed);if(cloneParent[gid]<0){uint collision=atomic_fetch_add_explicit(reinterpret_cast<device atomic_uint *>(&dispatchArgs[8]),1u,memory_order_relaxed);if(collision<amr->particle_capacity)simId[amr->particle_capacity+collision]=gid;else atomic_fetch_or_explicit(reinterpret_cast<device atomic_uint *>(&amr->overflow),AMR_OVERFLOW_PARTICLE,memory_order_relaxed);}
+    if(gid>=uint(controlLoad(control,0)))return;float mass=amrLoadFloat(&scratch[gid].velocity_sum_mass[3]);ParticleState p=particle[gid];p.prev_inv_mass.w=mass>0.0f?1.0f/mass:0.0f;p.predicted_base_inv_mass.w=p.prev_inv_mass.w;particle[gid]=p;if(mass<=0.0f)return;uint slot=atomic_fetch_add_explicit(reinterpret_cast<device atomic_uint *>(&control[1]),1u,memory_order_relaxed);if(slot<amr->particle_capacity)simId[slot]=gid;else atomic_fetch_or_explicit(reinterpret_cast<device atomic_uint *>(&amr->overflow),AMR_OVERFLOW_PARTICLE,memory_order_relaxed);if(cloneParent[gid]<0){uint collision=atomic_fetch_add_explicit(reinterpret_cast<device atomic_uint *>(&dispatchArgs[8]),1u,memory_order_relaxed);if(collision<amr->particle_capacity)simId[amr->particle_capacity+collision]=gid;else atomic_fetch_or_explicit(reinterpret_cast<device atomic_uint *>(&amr->overflow),AMR_OVERFLOW_PARTICLE,memory_order_relaxed);}
 }
 
 inline uint amrTerminalMask(VoxelState parent, device const VoxelState *voxel,
@@ -925,7 +918,7 @@ kernel void pbd_pipeline(
         case MODE_RESET:resetCorrections(gid,correction,simId,refcount,control);break;
         case MODE_INTEGRATE:integrateParticle(gid,particle,tetherOwner,simId,refcount,control,u);break;
         case MODE_HASH_CLEAR:clearHash(gid,hashHead,u);break;
-        case MODE_HASH_BUILD:buildHash(gid,particle,cell,collisionId,collisionControl,hashHead,hashNext,refcount,control,amrControl,u);break;
+        case MODE_HASH_BUILD:buildHash(gid,particle,cell,collisionId,collisionControl,hashHead,hashNext,refcount,control,u);break;
         case MODE_PAIR_COLLISIONS:pairCollisions(gid,particle,correction,cell,collisionId,collisionControl,hashHead,hashNext,collisionMeta,refcount,control,u);break;
         case MODE_APPLY:applyCorrections(gid,particle,correction,simId,refcount,control,u);break;
         case MODE_VGS:

@@ -52,9 +52,6 @@ typedef struct DebugSample {
     int sim_particles;
     int collision_particles;
     int collision_particles_culled;
-    float min_collision_radius;
-    float max_collision_radius;
-    float collision_hash_step;
     int static_occupied_cells;
     int static_surface_patches;
     int static_surface_cells;
@@ -84,20 +81,6 @@ typedef struct DebugTrackedCell {
     int z;
 } DebugTrackedCell;
 
-#define DEBUG_MAX_COLLISION_RADIUS_PAIRS 32
-
-typedef struct DebugCollisionRadiusPair {
-    Particle *a;
-    Particle *b;
-    int level_a;
-    int level_b;
-    float radius_a;
-    float radius_b;
-    float initial_distance;
-    float initial_a_x;
-    float initial_b_x;
-} DebugCollisionRadiusPair;
-
 typedef struct DebugRunState {
     RenderTexture2D target;
     Camera3D camera;
@@ -107,16 +90,6 @@ typedef struct DebugRunState {
     bool active_cube_drop;
     bool adaptive_cube_drop;
     bool arbitrary_shape_drop;
-    bool amr_projectile_test;
-    uint64_t amr_projectile_identity;
-    float amr_projectile_initial_speed;
-    float amr_projectile_min_velocity_x;
-    float amr_projectile_target_max_velocity_x;
-    int amr_projectile_impact_step;
-    bool collision_radius_test;
-    DebugCollisionRadiusPair collision_radius_pairs[DEBUG_MAX_COLLISION_RADIUS_PAIRS];
-    int collision_radius_pair_count;
-    char collision_radius_matrix_path[DEBUG_PATH_CAPACITY];
     bool rip_test;
     FILE *rip_history_file;
     char rip_history_path[DEBUG_PATH_CAPACITY];
@@ -341,8 +314,6 @@ static bool debug_setup_cube_stress(DebugRunState *state);
 static bool debug_setup_active_cube_drop(DebugRunState *state);
 static bool debug_setup_adaptive_cube_drop(DebugRunState *state);
 static bool debug_setup_adaptive_l_drop(DebugRunState *state);
-static bool debug_setup_amr_projectile_impact(DebugRunState *state);
-static bool debug_setup_amr_collision_pairs(DebugRunState *state);
 static bool debug_setup_rip_test(DebugRunState *state);
 static bool debug_setup_vgs_refinement(DebugRunState *state);
 static bool debug_setup_vgs_coarsening(DebugRunState *state);
@@ -377,8 +348,6 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "active-cube-drop", "Activate a static 10x10x10 cube and drop it", debug_setup_active_cube_drop, 120, 60 },
     { "adaptive-cube-drop", "Curvature-driven octree cube drop", debug_setup_adaptive_cube_drop, 240, 60 },
     { "adaptive-l-drop", "Occupancy-masked adaptive L-shaped drop", debug_setup_adaptive_l_drop, 480, 120 },
-    { "amr-projectile-impact", "Fire one finest-scale voxel into an adaptive cube", debug_setup_amr_projectile_impact, 240, 120 },
-    { "amr-collision-pairs", "Equal and mixed AMR-radius particle collisions", debug_setup_amr_collision_pairs, 60, 60 },
     { "rip-test", "Pull both faces of an adaptive cube to test fracture", debug_setup_rip_test, 480, 60 },
     { "vgs-refinement", "Drop a root VGS cube, then refine into eight shared-particle children", debug_setup_vgs_refinement, 300, 180 },
     { "vgs-coarsening", "Drop eight child VGS cubes, then project them onto one root", debug_setup_vgs_coarsening, 300, 180 },
@@ -890,7 +859,6 @@ static void debug_reset_world(void)
     debugRefinementCoarse = false;
     debugAdaptiveOctree = false;
     debugRipTest = false;
-    debugAmrFixedLevel = -1;
     debug_reset_vgs_temporal_curvature();
     pbdSolidVoxelSize = VOXEL_SIZE;
     clear_world_voxels();
@@ -1038,18 +1006,6 @@ static bool debug_convert_shape_to_pbd(DebugRunState *state, float requested_siz
             debug_glue_pbd_faces(idx, lattice[flat - side], 5);
         if (y > 0 && lattice[flat - side * side] >= 0)
             debug_glue_pbd_faces(idx, lattice[flat - side * side], 3);
-    }
-    if (state->amr_projectile_test) {
-        float cube_center_y = 18.0f * VOXEL_SIZE + 5.0f * VOXEL_SIZE;
-        int projectile = addVoxel(-7.5f, cube_center_y, 0.0f, true, true,
-                                  (Color){ 65, 220, 255, 255 }, 0);
-        if (projectile < 0) {
-            debug_add_failure(state, "unable to create the AMR impact projectile");
-            goto conversion_failed;
-        }
-        voxels[projectile].debugClusterTag = DEBUG_THROW_TAG;
-        voxels[projectile].glueEligible = false;
-        state->amr_projectile_identity = voxels[projectile].identity;
     }
     // Each voxel contributes eight corner masses. Shared particles receive the
     // sum of contributions, preserving mass per physical volume after gluing.
@@ -1233,16 +1189,6 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
     (void)ensure_static_surface_cache();
     sample.collision_particles = collision_particle_count;
     sample.collision_particles_culled = sim_particle_count - collision_particle_count;
-    sample.min_collision_radius = FLT_MAX;
-    sample.max_collision_radius = 0.0f;
-    sample.collision_hash_step = solid_collision_hash_step();
-    for (int i = 0; i < collision_particle_count; ++i) {
-        const Particle *particle = collision_particles[i];
-        if (!particle || particle->radius <= 0.0f) continue;
-        sample.min_collision_radius = fminf(sample.min_collision_radius, particle->radius);
-        sample.max_collision_radius = fmaxf(sample.max_collision_radius, particle->radius);
-    }
-    if (sample.min_collision_radius == FLT_MAX) sample.min_collision_radius = 0.0f;
     sample.static_occupied_cells = staticSurfaceOccupiedCellCount;
     sample.static_surface_patches = patchCount;
     sample.static_surface_cells = staticSurfaceCellCount;
@@ -1356,60 +1302,6 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
     }
     sample.physics_step_ms = physicsBackend.last_step_ms;
     return sample;
-}
-
-static void debug_validate_amr_collision_radii(DebugRunState *state, int step)
-{
-    if (!state || !vgsHierarchy.adaptive || particle_pool_count <= 0) return;
-    float *expected = calloc((size_t)particle_pool_count, sizeof(*expected));
-    if (!expected) {
-        debug_add_failure(state, "step %d: unable to allocate AMR radius validation", step);
-        return;
-    }
-    bool scaling = vgs_amr_collision_radius_scaling_enabled();
-    float finest_radius = 0.5f * pbdSolidVoxelSize;
-    for (int i = 0; i < vgsHierarchy.node_count; ++i) {
-        VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
-        if (!node->active || node->occupancy != VGS_OCCUPANCY_FULL ||
-            node->real_corner_mask != 0xffu || vgs_node_has_active_children(node)) continue;
-        float requested = scaling ? 0.5f * node->rest_edge : finest_radius;
-        for (int c = 0; c < 8; ++c) {
-            ptrdiff_t id = node->particles[c] - particles_pool;
-            if (id >= 0 && id < particle_pool_count)
-                expected[id] = fmaxf(expected[id], requested);
-        }
-    }
-    for (int i = 0; i < voxel_count; ++i) {
-        Voxel *voxel = &voxels[i];
-        if (!voxel->simulate || !voxel->simulate_dofs) continue;
-        float requested = scaling ? 0.5f * voxel->rest_edge : finest_radius;
-        for (int c = 0; c < 8; ++c) {
-            ptrdiff_t id = voxel->particles[c] - particles_pool;
-            if (id >= 0 && id < particle_pool_count)
-                expected[id] = fmaxf(expected[id], requested);
-        }
-    }
-    float max_radius = 0.0f;
-    int mismatches = 0;
-    for (int i = 0; i < sim_particle_count; ++i) {
-        Particle *particle = sim_particles[i];
-        ptrdiff_t id = particle ? particle - particles_pool : -1;
-        if (id < 0 || id >= particle_pool_count || expected[id] <= 0.0f ||
-            fabsf(particle->radius - expected[id]) > 1e-5f) {
-            ++mismatches;
-            continue;
-        }
-        max_radius = fmaxf(max_radius, expected[id]);
-    }
-    float expected_hash_step = max_radius > 0.0f ? 2.0f * max_radius : pbdSolidVoxelSize;
-    if (mismatches || fabsf(vgsHierarchy.max_collision_radius - max_radius) > 1e-5f ||
-        fabsf(solid_collision_hash_step() - expected_hash_step) > 1e-5f)
-        debug_add_failure(state,
-            "step %d: AMR collision radius mismatch particles=%d max=%.6g/%.6g hash=%.6g/%.6g",
-            step, mismatches, (double)vgsHierarchy.max_collision_radius,
-            (double)max_radius, (double)solid_collision_hash_step(),
-            (double)expected_hash_step);
-    free(expected);
 }
 
 static DebugSample *debug_record_sample(DebugRunState *state, const char *phase, int step)
@@ -2366,29 +2258,6 @@ static bool debug_setup_adaptive_cube_drop(DebugRunState *state)
         debug_add_failure(state, "unable to initialize adaptive octree");
         return false;
     }
-    const char *fixed_level_text = getenv("FPS_AMR_FIXED_LEVEL");
-    if (fixed_level_text) {
-        char *end = NULL;
-        long fixed_level = strtol(fixed_level_text, &end, 10);
-        if (end == fixed_level_text || *end != '\0' || fixed_level < 0 ||
-            fixed_level > vgsHierarchy.levels) {
-            debug_add_failure(state, "invalid FPS_AMR_FIXED_LEVEL=%s (expected 0..%d)",
-                              fixed_level_text, vgsHierarchy.levels);
-            return false;
-        }
-        debugAmrFixedLevel = (int)fixed_level;
-        for (int level = 0; level < debugAmrFixedLevel; ++level) {
-            int begin = vgsHierarchy.level_start[level];
-            int end_node = begin + vgsHierarchy.level_count[level];
-            for (int i = begin; i < end_node; ++i) {
-                VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
-                if (node->active && node->occupancy == VGS_OCCUPANCY_FULL &&
-                    !vgs_node_has_active_children(node))
-                    vgs_hierarchy_transfer_refine(node, true);
-            }
-        }
-        if (!vgs_hierarchy_rebuild_active_masses()) return false;
-    }
     // A diagnostic seed exercises a refined GPU constraint list even when the
     // normal curvature trigger has not fired yet.
     if (getenv("FPS_AMR_TEST_REFINE_ROOT") || getenv("FPS_AMR_TEST_BREAK_CHILD") ||
@@ -2490,102 +2359,6 @@ static bool debug_setup_adaptive_l_drop(DebugRunState *state)
     return true;
 }
 
-static bool debug_setup_amr_projectile_impact(DebugRunState *state)
-{
-    state->amr_projectile_test = true;
-    state->amr_projectile_initial_speed = 40.0f;
-    state->amr_projectile_min_velocity_x = state->amr_projectile_initial_speed;
-    state->amr_projectile_impact_step = -1;
-    if (!debug_setup_adaptive_cube_drop(state)) return false;
-
-    int projectile_index = find_voxel_by_identity(state->amr_projectile_identity);
-    if (projectile_index < 0) {
-        debug_add_failure(state, "AMR impact projectile disappeared during hierarchy setup");
-        return false;
-    }
-    Voxel *projectile = &voxels[projectile_index];
-    projectile->fixed = false;
-    projectile->simulate_dofs = true;
-    projectile->vgs_active = true;
-    projectile->activationBelief = 1.0f;
-    if (!vgs_hierarchy_rebuild_active_masses()) {
-        debug_add_failure(state, "unable to add projectile mass to the AMR simulation");
-        return false;
-    }
-    set_voxel_velocity(projectile,
-                       (Vector3){ state->amr_projectile_initial_speed, 0.0f, 0.0f });
-    collisionTopologyDirty = true;
-    state->camera.position = (Vector3){ -15.0f, 15.0f, 18.0f };
-    state->camera.target = (Vector3){ 0.0f, 11.0f, 0.0f };
-    debug_capture(state, "phase-02-projectile-launched.png", "projectile-launched", 0);
-    return true;
-}
-
-static bool debug_setup_amr_collision_pairs(DebugRunState *state)
-{
-    debug_reset_world();
-    state->collision_radius_test = true;
-    state->activation_succeeded = true;
-    state->drop_sampled = true;
-    activePlayers = 0;
-
-    const int level_count = 5;
-    float radii[level_count];
-    const float finest_edge = 10.0f * VOXEL_SIZE / 16.0f;
-    pbdSolidVoxelSize = finest_edge;
-    for (int level = 0; level < level_count; ++level) {
-        float edge = 10.0f * VOXEL_SIZE / (float)(1 << level);
-        radii[level] = vgs_amr_collision_radius_scaling_enabled()
-            ? 0.5f * edge : 0.5f * finest_edge;
-    }
-
-    int pair_index = 0;
-    for (int a_level = 0; a_level < level_count; ++a_level) {
-        for (int b_level = a_level; b_level < level_count; ++b_level) {
-            if (pair_index >= DEBUG_MAX_COLLISION_RADIUS_PAIRS) {
-                debug_add_failure(state, "AMR collision pair fixture capacity exceeded");
-                return false;
-            }
-            int lane_x = pair_index % 4;
-            int lane_z = pair_index / 4;
-            float radius_a = radii[a_level];
-            float radius_b = radii[b_level];
-            float initial_distance = 0.8f * (radius_a + radius_b);
-            Vector3 center = { -12.0f + 8.0f * (float)lane_x, 20.0f,
-                               -12.0f + 8.0f * (float)lane_z };
-            Vector3 a_pos = center;
-            Vector3 b_pos = center;
-            a_pos.x -= 0.5f * initial_distance;
-            b_pos.x += 0.5f * initial_distance;
-            Particle *a = particle_create(a_pos, 1.0f);
-            Particle *b = particle_create(b_pos, 1.0f);
-            if (!a || !b) {
-                debug_add_failure(state, "unable to allocate AMR collision pair %d", pair_index);
-                return false;
-            }
-            a->radius = radius_a;
-            b->radius = radius_b;
-            a->collision_group = b->collision_group = -1;
-            state->collision_radius_pairs[pair_index++] = (DebugCollisionRadiusPair){
-                .a = a, .b = b, .level_a = a_level, .level_b = b_level,
-                .radius_a = radius_a, .radius_b = radius_b,
-                .initial_distance = initial_distance,
-                .initial_a_x = a_pos.x, .initial_b_x = b_pos.x
-            };
-        }
-    }
-    state->collision_radius_pair_count = pair_index;
-    vgsHierarchy.adaptive = true;
-    vgsHierarchy.max_collision_radius = radii[0];
-    collisionTopologyDirty = true;
-    if (!debug_join_path(state->collision_radius_matrix_path,
-                         sizeof(state->collision_radius_matrix_path), state->output_dir,
-                         "collision-pair-matrix.csv")) return false;
-    state->camera.position = (Vector3){ 26.0f, 31.0f, 31.0f };
-    state->camera.target = (Vector3){ 0.0f, 20.0f, 0.0f };
-    return true;
-}
-
 static void debug_apply_rip_grips(DebugRunState *state)
 {
     const float rest_edge = state->rip_right_x - state->rip_left_x;
@@ -2608,17 +2381,6 @@ static void debug_apply_rip_grips(DebugRunState *state)
         particle->vel.x = 0.0f;
     }
     collisionTopologyDirty = true;
-}
-
-static void debug_sync_fixed_amr_descendants(void)
-{
-    if (debugAmrFixedLevel < 0) return;
-    for (int i = 0; i < vgsHierarchy.node_count; ++i) {
-        VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
-        if (node->active && node->occupancy == VGS_OCCUPANCY_FULL &&
-            !vgs_node_has_active_children(node))
-            vgs_hierarchy_sync_dormant_descendants(node);
-    }
 }
 
 static bool debug_setup_rip_test(DebugRunState *state)
@@ -4380,11 +4142,6 @@ static void debug_physics_step(DebugRunState *state)
         wake_sleeping_voxels_near_awake();
     }
     rebuild_static_hash_if_dirty();
-    if (state && state->collision_radius_test) {
-        simulate_voxel_pbd_steps_counted(PBD_MAX_STEP_DT / (float)PBD_SUBSTEPS, 1, 1);
-        rebuild_voxel_hash();
-        return;
-    }
     if (state && state->adaptive_cube_drop) {
         const float sub_dt = PBD_MAX_STEP_DT / (float)PBD_SUBSTEPS;
         if (physics_backend_is_gpu(physicsBackend.active) && gpuPhysics.ready &&
@@ -4401,9 +4158,8 @@ static void debug_physics_step(DebugRunState *state)
                 // A runtime GPU failure may have completed the frame through
                 // the CPU fallback. Keep the tree valid until the next frame.
                 vgs_hierarchy_sample_curvature(sub_dt);
-                if (debugAmrFixedLevel < 0 && !vgs_hierarchy_adapt(true))
+                if (!vgs_hierarchy_adapt(true))
                     debug_add_failure(state, "adaptive octree fallback transition failed");
-                debug_sync_fixed_amr_descendants();
             }
             if (state->rip_test) debug_apply_rip_grips(state);
         } else {
@@ -4416,12 +4172,10 @@ static void debug_physics_step(DebugRunState *state)
                 vgs_hierarchy_sample_curvature(sub_dt);
                 // Curvature adapts after every substep. Strain/shear participates
                 // only in the final AMR decision of each fixed physics frame.
-                if (debugAmrFixedLevel < 0 &&
-                    !vgs_hierarchy_adapt(substep == PBD_SUBSTEPS - 1)) {
+                if (!vgs_hierarchy_adapt(substep == PBD_SUBSTEPS - 1)) {
                     debug_add_failure(state, "adaptive octree transition failed");
                     break;
                 }
-                debug_sync_fixed_amr_descendants();
                 if (state->rip_test) debug_apply_rip_grips(state);
             }
         }
@@ -4608,55 +4362,6 @@ static uint64_t debug_tagged_static_identity_signature(int tag)
 static void debug_validate_step(DebugRunState *state, int step)
 {
     debug_validate_all_sim_particles(state, step);
-    if (state->collision_radius_test) {
-        if (step == 1) {
-            debug_readback_gpu_buffers(state, step);
-            FILE *matrix = fopen(state->collision_radius_matrix_path, "w");
-            if (!matrix) {
-                debug_add_failure(state, "unable to write collision-pair-matrix.csv");
-                return;
-            }
-            fputs("levelA,levelB,radiusA,radiusB,initialDistance,resolvedDistance,targetDistance,resolvedFraction,xCorrection\n",
-                  matrix);
-            int missed = 0;
-            for (int i = 0; i < state->collision_radius_pair_count; ++i) {
-                DebugCollisionRadiusPair *pair = &state->collision_radius_pairs[i];
-                float resolved = v_length(v_sub(pair->a->pos, pair->b->pos));
-                float target = pair->radius_a + pair->radius_b;
-                float resolved_fraction = target > pair->initial_distance
-                    ? (resolved - pair->initial_distance) /
-                      (target - pair->initial_distance) : 1.0f;
-                float x_correction = fabsf(pair->a->pos.x - pair->initial_a_x) +
-                                     fabsf(pair->b->pos.x - pair->initial_b_x);
-                fprintf(matrix, "%d,%d,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n",
-                        pair->level_a, pair->level_b, (double)pair->radius_a,
-                        (double)pair->radius_b, (double)pair->initial_distance,
-                        (double)resolved, (double)target, (double)resolved_fraction,
-                        (double)x_correction);
-                if (!isfinite(resolved) || !isfinite(x_correction) || x_correction <= 1e-5f ||
-                    fabsf(pair->a->radius - pair->radius_a) > 1e-5f ||
-                    fabsf(pair->b->radius - pair->radius_b) > 1e-5f) {
-                    ++missed;
-                }
-            }
-            if (fclose(matrix) != 0)
-                debug_add_failure(state, "failed to close collision-pair-matrix.csv");
-            if (missed)
-                debug_add_failure(state, "%d/%d AMR scale collision pairs were missed",
-                                  missed, state->collision_radius_pair_count);
-            if (collision_particle_count != state->collision_radius_pair_count * 2)
-                debug_add_failure(state, "collision fixture culled %d/%d particles",
-                                  state->collision_radius_pair_count * 2 -
-                                      collision_particle_count,
-                                  state->collision_radius_pair_count * 2);
-            float expected_hash = 2.0f * vgsHierarchy.max_collision_radius;
-            if (fabsf(solid_collision_hash_step() - expected_hash) > 1e-5f)
-                debug_add_failure(state, "collision fixture hash step %.6g != %.6g",
-                                  (double)solid_collision_hash_step(),
-                                  (double)expected_hash);
-        }
-        return;
-    }
     if (state->swarmer_wall_test) {
         Player *bot = &players[state->enemy_bot_index];
         if (bot->pos.z < state->swarmer_min_z) state->swarmer_min_z = bot->pos.z;
@@ -4779,27 +4484,6 @@ static void debug_validate_step(DebugRunState *state, int step)
         }
     }
     if (state->adaptive_cube_drop) {
-        debug_validate_amr_collision_radii(state, step);
-        if (state->amr_projectile_test) {
-            int projectile_index = find_voxel_by_identity(state->amr_projectile_identity);
-            if (projectile_index < 0) {
-                debug_add_failure(state, "step %d: AMR impact projectile disappeared", step);
-            } else {
-                float projectile_velocity_x = voxels[projectile_index].vel.x;
-                if (projectile_velocity_x < state->amr_projectile_min_velocity_x)
-                    state->amr_projectile_min_velocity_x = projectile_velocity_x;
-                for (int i = 0; i < voxel_count; ++i) {
-                    Voxel *target = &voxels[i];
-                    if (!target->simulate || target->debugClusterTag != DEBUG_TEST_TAG) continue;
-                    if (target->vel.x > state->amr_projectile_target_max_velocity_x)
-                        state->amr_projectile_target_max_velocity_x = target->vel.x;
-                }
-                if (state->amr_projectile_impact_step < 0 &&
-                    (projectile_velocity_x < 0.9f * state->amr_projectile_initial_speed ||
-                     state->amr_projectile_target_max_velocity_x > 0.05f))
-                    state->amr_projectile_impact_step = step;
-            }
-        }
 #if defined(GRAPHICS_API_OPENGL_43) || (defined(__APPLE__) && defined(FPS_GPU_METAL))
         if (state->arbitrary_shape_drop && step == 1 &&
             physics_backend_is_gpu(physicsBackend.active)) {
@@ -4854,7 +4538,6 @@ static void debug_validate_step(DebugRunState *state, int step)
         int active_nodes = 0, terminal_nodes = 0, active_leaves = 0;
         double total_mass = 0.0;
         double terminal_volume = 0.0;
-        double external_volume = 0.0;
         for (int i = 0; i < sim_particle_count; ++i)
             if (sim_particles[i]->base_inv_mass > 0.0f)
                 total_mass += 1.0 / sim_particles[i]->base_inv_mass;
@@ -4886,17 +4569,11 @@ static void debug_validate_step(DebugRunState *state, int step)
         }
         for (int i = 0; i < voxel_count; ++i)
             if (voxels[i].simulate && voxels[i].simulate_dofs) {
-                if (state->amr_projectile_test &&
-                    voxels[i].identity == state->amr_projectile_identity) {
-                    external_volume += voxels[i].rest_volume;
-                    continue;
-                }
                 if (voxels[i].vgs_active) ++active_leaves;
                 terminal_volume += voxels[i].rest_volume;
             }
         double expected_mass = 8.0 * (double)vgsHierarchy.leaf_count *
-            pow((double)pbdSolidVoxelSize / (double)VOXEL_SIZE, 3.0) +
-            (double)vgsHierarchy.mass_density * external_volume;
+            pow((double)pbdSolidVoxelSize / (double)VOXEL_SIZE, 3.0);
         double expected_volume = (double)vgsHierarchy.leaf_count *
             pow((double)pbdSolidVoxelSize, 3.0);
         if (!vgsHierarchy.nodes[0].active || active_nodes == 0 ||
@@ -5351,7 +5028,6 @@ static void debug_finalize_validation(DebugRunState *state)
                           physics_backend_name(physicsBackend.active),
                           physicsBackend.fallback_reason);
     }
-    if (state->collision_radius_test) return;
     if (state->sleep_snap_original_test) {
         if (!state->sleep_snap_active_observed) {
             debug_add_failure(state, "near-origin test never visibly entered the dynamic state");
@@ -5667,18 +5343,6 @@ static void debug_finalize_validation(DebugRunState *state)
     if (!state->activation_succeeded) {
         debug_add_failure(state, "scenario did not complete its activation stage");
     }
-    if (state->amr_projectile_test) {
-        if (state->amr_projectile_impact_step < 0)
-            debug_add_failure(state, "high-speed projectile never transferred momentum to the AMR cube");
-        if (state->amr_projectile_target_max_velocity_x <= 0.05f)
-            debug_add_failure(state, "AMR target maximum X velocity was only %.6g m/s",
-                              (double)state->amr_projectile_target_max_velocity_x);
-        if (state->amr_projectile_min_velocity_x >=
-            0.9f * state->amr_projectile_initial_speed)
-            debug_add_failure(state, "projectile retained %.6g/%.6g m/s after impact",
-                              (double)state->amr_projectile_min_velocity_x,
-                              (double)state->amr_projectile_initial_speed);
-    }
     if (state->refinement_demo && !state->refinement_complete) {
         debug_add_failure(state, "refinement demo never enabled its eight children");
     }
@@ -5809,7 +5473,7 @@ static bool debug_write_report(DebugRunState *state)
                 ++terminal_nodes;
                 if (node->vgs_enabled) ++visible_terminal_cells;
             }
-            fprintf(file, "  \"adaptiveHierarchy\": {\"thresholdPerSecondSquared\": %.9g, \"thresholdLevelFactor\": %d, \"fractureProbability\": %.9g, \"deformationFractionCoarsest\": %.9g, \"deformationFractionFinest\": %.9g, \"cornerDrop\": %s, \"fixedLevel\": %d, \"collisionRadiusScaling\": %s, \"maxCollisionRadius\": %.9g, \"collisionHashStep\": %.9g, \"refinements\": %u, \"coarsenings\": %u, \"terminalCells\": %d, \"visibleTerminalCells\": %d, \"terminalNodes\": %d, \"terminalLeaves\": %d, \"brokenInternalNodes\": %d, \"brokenLeaves\": %d, \"enabledVgsConstraints\": %d, \"enabledWeldConstraints\": %d, \"gpuConstraints\": %d, \"simulatedParticles\": %d},\n",
+            fprintf(file, "  \"adaptiveHierarchy\": {\"thresholdPerSecondSquared\": %.9g, \"thresholdLevelFactor\": %d, \"fractureProbability\": %.9g, \"deformationFractionCoarsest\": %.9g, \"deformationFractionFinest\": %.9g, \"cornerDrop\": %s, \"refinements\": %u, \"coarsenings\": %u, \"terminalCells\": %d, \"visibleTerminalCells\": %d, \"terminalNodes\": %d, \"terminalLeaves\": %d, \"brokenInternalNodes\": %d, \"brokenLeaves\": %d, \"enabledVgsConstraints\": %d, \"enabledWeldConstraints\": %d, \"gpuConstraints\": %d, \"simulatedParticles\": %d},\n",
                     (double)VGS_ADAPTIVE_CURVATURE_THRESHOLD,
                     VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR,
                     (double)VGS_FRACTURE_PROBABILITY,
@@ -5817,10 +5481,6 @@ static bool debug_write_report(DebugRunState *state)
                     (double)vgsAdaptiveDeformationFineFraction,
                     (getenv("FPS_AMR_CORNER_DROP") || state->arbitrary_shape_drop)
                         ? "true" : "false",
-                    debugAmrFixedLevel,
-                    vgs_amr_collision_radius_scaling_enabled() ? "true" : "false",
-                    (double)vgsHierarchy.max_collision_radius,
-                    (double)solid_collision_hash_step(),
                     vgsHierarchy.refine_count, vgsHierarchy.coarsen_count,
                     terminal_nodes + terminal_leaves, visible_terminal_cells,
                     terminal_nodes, terminal_leaves,
@@ -5843,12 +5503,6 @@ static bool debug_write_report(DebugRunState *state)
                     state->rip_first_break_step,
                     state->rip_broken_nodes, state->rip_broken_leaves,
                     state->rip_history_path);
-        if (state->amr_projectile_test)
-            fprintf(file, "  \"amrProjectile\": {\"initialVelocityX\": %.9g, \"minimumVelocityX\": %.9g, \"targetMaximumVelocityX\": %.9g, \"impactStep\": %d},\n",
-                    (double)state->amr_projectile_initial_speed,
-                    (double)state->amr_projectile_min_velocity_x,
-                    (double)state->amr_projectile_target_max_velocity_x,
-                    state->amr_projectile_impact_step);
     }
     if (state->refinement_demo) {
         fprintf(file, "  \"refinement\": {\"step\": %d, \"completed\": %s, \"sharedGridPoints\": 27, \"children\": 8},\n",
@@ -6043,8 +5697,6 @@ static bool debug_write_report(DebugRunState *state)
                 " \"taggedRendered\": %d,"
                 " \"taggedStatic\": %d, \"taggedSleeping\": %d, \"simParticles\": %d,"
                 " \"collisionParticles\": %d, \"collisionParticlesCulled\": %d,"
-                " \"minCollisionRadius\": %.9g, \"maxCollisionRadius\": %.9g,"
-                " \"collisionHashStep\": %.9g,"
                 " \"staticOccupiedCells\": %d, \"staticSurfacePatches\": %d,"
                 " \"staticSurfaceCells\": %d, \"staticSurfacePatchRefs\": %d,"
                 " \"zeroMassCorners\": %d, \"invalidParticleRefs\": %d,"
@@ -6056,9 +5708,6 @@ static bool debug_write_report(DebugRunState *state)
                 sample->tagged_rendered,
                 sample->tagged_static, sample->tagged_sleeping, sample->sim_particles,
                 sample->collision_particles, sample->collision_particles_culled,
-                (double)sample->min_collision_radius,
-                (double)sample->max_collision_radius,
-                (double)sample->collision_hash_step,
                 sample->static_occupied_cells, sample->static_surface_patches,
                 sample->static_surface_cells, sample->static_surface_patch_refs,
                 sample->zero_mass_corners, sample->invalid_particle_refs,

@@ -1146,21 +1146,9 @@ typedef struct {
     unsigned refine_count;
     unsigned coarsen_count;
     float mass_density;
-    float max_collision_radius;
     uint64_t topology_generation;
 } VgsHierarchy;
 static VgsHierarchy vgsHierarchy;
-static bool vgs_amr_collision_radius_scaling_enabled(void)
-{
-    const char *value = getenv("FPS_AMR_COLLISION_RADIUS_SCALING");
-    return !value || strcmp(value, "0") != 0;
-}
-static float solid_collision_hash_step(void)
-{
-    if (vgsHierarchy.adaptive && vgsHierarchy.max_collision_radius > 0.0f)
-        return 2.0f * vgsHierarchy.max_collision_radius;
-    return pbdSolidVoxelSize;
-}
 static bool vgs_node_constraints_enabled(const VgsHierarchyNode *node)
 {
     return node->active && node->occupancy == VGS_OCCUPANCY_FULL &&
@@ -1892,7 +1880,6 @@ static bool debugColorVoxelsByVgsTemporalCurvature = false;
 static bool debugRefinementCoarse = false;
 static bool debugAdaptiveOctree = false;
 static bool debugRipTest = false;
-static int debugAmrFixedLevel = -1;
 typedef struct {
     float latest[6];
     float previous[6];
@@ -2896,10 +2883,9 @@ static void particle_hash_build_range(int start, int end, int worker_id, void *u
         if (!p) {
             continue;
         }
-        float hash_step = solid_collision_hash_step();
-        int gx = (int)floorf(p->predicted_pos.x / hash_step);
-        int gy = (int)floorf(p->predicted_pos.y / hash_step);
-        int gz = (int)floorf(p->predicted_pos.z / hash_step);
+        int gx = (int)floorf(p->predicted_pos.x / pbdSolidVoxelSize);
+        int gy = (int)floorf(p->predicted_pos.y / pbdSolidVoxelSize);
+        int gz = (int)floorf(p->predicted_pos.z / pbdSolidVoxelSize);
         p->cell_x = gx;
         p->cell_y = gy;
         p->cell_z = gz;
@@ -11263,57 +11249,34 @@ static void vgs_hierarchy_sync_dormant_descendants(VgsHierarchyNode *node)
 static bool vgs_hierarchy_rebuild_active_masses(void)
 {
     float *mass = calloc((size_t)particle_pool_count, sizeof(*mass));
-    float *radius = calloc((size_t)particle_pool_count, sizeof(*radius));
-    if (!mass || !radius) { free(mass); free(radius); return false; }
-    bool scale_radius = vgs_amr_collision_radius_scaling_enabled();
-    float finest_radius = 0.5f * pbdSolidVoxelSize;
+    if (!mass) return false;
     for (int i = 0; i < vgsHierarchy.node_count; ++i) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
         if (!node->active || node->occupancy != VGS_OCCUPANCY_FULL ||
             node->real_corner_mask != 0xffu || vgs_node_has_active_children(node)) continue;
         float contribution = vgsHierarchy.mass_density * node->rest_volume * 0.125f;
-        float requested_radius = scale_radius ? 0.5f * node->rest_edge : finest_radius;
         for (int c = 0; c < 8; ++c) {
             ptrdiff_t particle_id = node->particles[c] - particles_pool;
             if (particle_id < 0 || particle_id >= particle_pool_count) {
                 free(mass);
-                free(radius);
                 return false;
             }
             mass[particle_id] += contribution;
-            radius[particle_id] = fmaxf(radius[particle_id], requested_radius);
         }
     }
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
         if (!voxel->simulate || !voxel->simulate_dofs) continue;
         float contribution = vgsHierarchy.mass_density * voxel->rest_volume * 0.125f;
-        float requested_radius = scale_radius ? 0.5f * voxel->rest_edge : finest_radius;
-        for (int c = 0; c < 8; ++c) {
-            ptrdiff_t particle_id = voxel->particles[c] - particles_pool;
-            if (particle_id < 0 || particle_id >= particle_pool_count) {
-                free(mass);
-                free(radius);
-                return false;
-            }
-            mass[particle_id] += contribution;
-            radius[particle_id] = fmaxf(radius[particle_id], requested_radius);
-        }
+        for (int c = 0; c < 8; ++c) mass[voxel->particles[c] - particles_pool] += contribution;
     }
     while (sim_particle_count > 0) sim_particles_remove(sim_particles[sim_particle_count - 1]);
-    vgsHierarchy.max_collision_radius = 0.0f;
     for (int i = 0; i < particle_pool_count; ++i) {
         Particle *p = &particles_pool[i];
         p->inv_mass = p->base_inv_mass = mass[i] > 0.0f ? 1.0f / mass[i] : 0.0f;
-        if (mass[i] > 0.0f) {
-            p->radius = radius[i] > 0.0f ? radius[i] : finest_radius;
-            vgsHierarchy.max_collision_radius =
-                fmaxf(vgsHierarchy.max_collision_radius, p->radius);
-            sim_particles_add(p);
-        }
+        if (mass[i] > 0.0f) sim_particles_add(p);
     }
     free(mass);
-    free(radius);
     collisionTopologyDirty = true;
     ++vgsHierarchy.topology_generation;
     return true;
