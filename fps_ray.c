@@ -16656,12 +16656,11 @@ static void render_gameplay_view(RenderTexture2D *screens,
                                        physicsBackend.sticky_fallback ? " (fallback)" : "";
             const WaterDiagnostics *water_diag = water_diagnostics();
             const char *fps_text = netTransport.role == NET_ROLE_OFFLINE
-                ? TextFormat("FPS %d | PHYS %s %.2fms%s | WATER %s %.2fms %u active/%u wet/%u moving v%u/%u tiles/%u chunks T%llu D%llu",
+                ? TextFormat("FPS %d | PHYS %s %.2fms%s | WATER %s %.2fms %u active/%u wet/%u tiles/%u chunks T%llu D%llu",
                              GetFPS(), physics_backend_name(physicsBackend.active),
                              physicsBackend.last_step_ms, physics_note,
                              water_diag->backend, water_diag->last_step_ms,
                              water_diag->active_cells, water_diag->wet_cells,
-                             water_diag->moving_cells, water_diag->max_component_speed,
                              water_diag->active_tiles, water_diag->resident_chunks,
                              (unsigned long long)water_diag->trapped_mass,
                              (unsigned long long)water_diag->displaced_mass)
@@ -16816,33 +16815,12 @@ static void water_test_snapshot_dense(uint16_t *out) {
     for (int i = 0; i < WATER_CELL_COUNT; ++i) out[i] = water_mass_index(i);
 }
 
-static void water_test_snapshot_velocity(uint32_t *out) {
-    memset(out, 0, (size_t)WATER_CELL_COUNT * sizeof(uint32_t));
-    for (int i = 0; i < WATER_CELL_COUNT; ++i) out[i] = water_velocity_index(i);
-}
-
-static bool water_test_velocity_is_zero(void) {
-    for (int i = 0; i < WATER_CELL_COUNT; ++i)
-        if (water_velocity_index(i) != 0) return false;
-    return true;
-}
-
 static bool water_test_invariants(const char *name, uint64_t expected_mass) {
     uint64_t total = water_test_total_mass();
     if (total != expected_mass) {
         fprintf(stderr, "water-self-test %s FAIL mass=%llu expected=%llu\n", name,
                 (unsigned long long)total, (unsigned long long)expected_mass);
         return false;
-    }
-    for (int i = 0; i < WATER_CELL_COUNT; ++i) {
-        uint32_t mass = water_mass_index(i);
-        uint32_t velocity = water_velocity_index(i);
-        if ((velocity & UINT32_C(0xff000000)) != 0 || (!mass && velocity) ||
-            (water_cell_blocked_index(i) && velocity)) {
-            fprintf(stderr, "water-self-test %s FAIL state cell=%d mass=%u velocity=%08x blocked=%d\n",
-                    name, i, mass, velocity, water_cell_blocked_index(i) ? 1 : 0);
-            return false;
-        }
     }
     return true;
 }
@@ -16915,15 +16893,9 @@ static bool run_water_self_tests(void) {
     uint16_t *reference = (uint16_t *)malloc(snapshot_bytes);
     uint16_t *roundtrip = (uint16_t *)malloc(snapshot_bytes);
     uint16_t *comparison = (uint16_t *)malloc(snapshot_bytes);
-    size_t velocity_snapshot_bytes = (size_t)WATER_CELL_COUNT * sizeof(uint32_t);
-    uint32_t *velocity_reference = (uint32_t *)malloc(velocity_snapshot_bytes);
-    uint32_t *velocity_roundtrip = (uint32_t *)malloc(velocity_snapshot_bytes);
-    uint32_t *velocity_comparison = (uint32_t *)malloc(velocity_snapshot_bytes);
-    if (!reference || !roundtrip || !comparison || !velocity_reference ||
-        !velocity_roundtrip || !velocity_comparison) {
+    if (!reference || !roundtrip || !comparison) {
         fprintf(stderr, "water-self-test FAIL allocation\n");
         free(reference); free(roundtrip); free(comparison);
-        free(velocity_reference); free(velocity_roundtrip); free(velocity_comparison);
         return false;
     }
 
@@ -16935,62 +16907,10 @@ static bool run_water_self_tests(void) {
                            water_get_mass(-1, 9, 0) == 0 &&
                            water_get_mass(0, 9, 1) == 0 &&
                            water_get_mass(0, 9, -1) == 0;
-    WaterVelocity falling_velocity = water_unpack_velocity(
-        water_velocity_index(water_index_unchecked(0, 9, 0)));
-    airborne_column = airborne_column && falling_velocity.y < 0;
     passed &= airborne_column &&
               water_test_invariants("unsupported-horizontal-gate", WATER_MAX_MASS);
     fprintf(stderr, "water-self-test unsupported-horizontal-gate %s\n",
             airborne_column ? "PASS" : "FAIL");
-
-    water_test_empty_world();
-    (void)water_set_mass(0, 12, 0, WATER_MAX_MASS);
-    (void)water_set_mass(0, 13, 0, WATER_MAX_MASS);
-    water_test_run_steps(PHYSICS_BACKEND_CPU_ST, 4);
-    bool falling_stack_rebounded = false;
-    for (int y = 7; y <= 13; ++y) {
-        WaterVelocity velocity = water_unpack_velocity(
-            water_velocity_index(water_index_unchecked(0, y, 0)));
-        if (velocity.y > 0) falling_stack_rebounded = true;
-    }
-    bool falling_stack_ok = !falling_stack_rebounded &&
-        water_test_invariants("falling-stack-no-false-impact", UINT64_C(2) * WATER_MAX_MASS);
-    passed &= falling_stack_ok;
-    fprintf(stderr, "water-self-test falling-stack-no-false-impact %s\n",
-            falling_stack_ok ? "PASS" : "FAIL");
-
-    water_test_empty_world();
-    int impact_floor = water_index_unchecked(0, 0, 0), impact_floor_local;
-    WaterChunk *impact_chunk = water_chunk_for_index(impact_floor, true, &impact_floor_local);
-    impact_chunk->static_solid[impact_floor_local] = 1;
-    impact_chunk->previous_solid[impact_floor_local] = 1;
-    (void)water_set_mass(0, 3, 0, WATER_MAX_MASS);
-    water_test_run_steps(PHYSICS_BACKEND_CPU_ST, 2);
-    int splash_index = water_index_unchecked(0, 2, 0);
-    WaterVelocity splash_velocity = water_unpack_velocity(water_velocity_index(splash_index));
-    bool upward_splash = water_mass_index(splash_index) >= WATER_RENDER_MIN_MASS &&
-                           splash_velocity.y > 0;
-    passed &= upward_splash && water_test_invariants("floor-impact-splash", WATER_MAX_MASS);
-    fprintf(stderr, "water-self-test floor-impact-upward-splash %s (mass=%u vy=%d)\n",
-            upward_splash ? "PASS" : "FAIL", water_mass_index(splash_index), splash_velocity.y);
-
-    water_test_empty_world();
-    for (int x = 0; x <= 2; ++x) {
-        int floor_index = water_index_unchecked(x, 0, 0), floor_local;
-        WaterChunk *floor_chunk = water_chunk_for_index(floor_index, true, &floor_local);
-        floor_chunk->static_solid[floor_local] = 1;
-        floor_chunk->previous_solid[floor_local] = 1;
-    }
-    (void)water_set_mass(0, 1, 0, WATER_MAX_MASS);
-    water_add_impulse_index(water_index_unchecked(0, 1, 0),
-                            (Vector3){ VOXEL_SIZE / PBD_MAX_STEP_DT, 0.0f, 0.0f }, 0);
-    water_test_run_steps(PHYSICS_BACKEND_CPU_ST, 1);
-    int wake_index = water_index_unchecked(1, 1, 0);
-    WaterVelocity wake_velocity = water_unpack_velocity(water_velocity_index(wake_index));
-    bool directional_wake = water_mass_index(wake_index) > 0 && wake_velocity.x > 0;
-    passed &= directional_wake && water_test_invariants("directional-wake", WATER_MAX_MASS);
-    fprintf(stderr, "water-self-test directional-wake %s (mass=%u vx=%d)\n",
-            directional_wake ? "PASS" : "FAIL", water_mass_index(wake_index), wake_velocity.x);
 
     uint64_t initial_mass = water_test_setup_basin();
     water_test_run_steps(PHYSICS_BACKEND_CPU_ST, 180);
@@ -17023,22 +16943,19 @@ static bool run_water_self_tests(void) {
                     break;
                 }
     water_refresh_diagnostics();
-    bool settled = all_on_floor && neighbor_spread < 8u && water_test_velocity_is_zero() &&
+    bool settled = all_on_floor && neighbor_spread < 8u &&
                    waterSystem.diagnostics.active_tiles == 0;
     passed &= settled;
     fprintf(stderr, "water-self-test obstacle-flow-leveling-sleep %s (neighborSpread=%u range=%u floor=%d active=%u)\n",
             settled ? "PASS" : "FAIL", neighbor_spread, basin_max - basin_min,
             all_on_floor ? 1 : 0, waterSystem.diagnostics.active_tiles);
     water_test_snapshot_dense(reference);
-    water_test_snapshot_velocity(velocity_reference);
     fprintf(stderr, "water-self-test vertical-column-and-basin %s\n", passed ? "PASS" : "FAIL");
 
     uint64_t mt_mass = water_test_setup_basin();
     water_test_run_steps(PHYSICS_BACKEND_CPU_MT, 180);
     bool mt_equal = mt_mass == initial_mass &&
-                    (water_test_snapshot_dense(roundtrip), memcmp(reference, roundtrip, snapshot_bytes) == 0) &&
-                    (water_test_snapshot_velocity(velocity_roundtrip),
-                     memcmp(velocity_reference, velocity_roundtrip, velocity_snapshot_bytes) == 0);
+                    (water_test_snapshot_dense(roundtrip), memcmp(reference, roundtrip, snapshot_bytes) == 0);
     passed &= mt_equal && water_test_invariants("cpu-mt-parity", initial_mass);
     fprintf(stderr, "water-self-test cpu-st/cpu-mt-parity %s\n", mt_equal ? "PASS" : "FAIL");
 
@@ -17046,15 +16963,11 @@ static bool run_water_self_tests(void) {
     physicsBackend.active = PHYSICS_BACKEND_CPU_ST;
     water_step_batch(PBD_MAX_STEP_DT, PBD_MAX_ACCUM_STEPS);
     water_test_snapshot_dense(roundtrip);
-    water_test_snapshot_velocity(velocity_roundtrip);
     water_test_setup_basin();
     physicsBackend.active = PHYSICS_BACKEND_CPU_MT;
     water_step_batch(PBD_MAX_STEP_DT, PBD_MAX_ACCUM_STEPS);
     water_test_snapshot_dense(comparison);
-    water_test_snapshot_velocity(velocity_comparison);
     bool batch_equal = memcmp(roundtrip, comparison, snapshot_bytes) == 0 &&
-                       memcmp(velocity_roundtrip, velocity_comparison,
-                              velocity_snapshot_bytes) == 0 &&
                        water_test_invariants("cpu-batch-parity", batch_mass);
     passed &= batch_equal;
     fprintf(stderr, "water-self-test cpu-st/cpu-mt-8-step-batch %s\n",
@@ -17065,10 +16978,7 @@ static bool run_water_self_tests(void) {
         physicsBackend.active = saved_backend;
         water_step_batch(PBD_MAX_STEP_DT, PBD_MAX_ACCUM_STEPS);
         bool gpu_batch_equal = strncmp(waterSystem.diagnostics.backend, "gpu-", 4) == 0 &&
-                               (water_test_snapshot_dense(comparison), memcmp(roundtrip, comparison, snapshot_bytes) == 0) &&
-                               (water_test_snapshot_velocity(velocity_comparison),
-                                memcmp(velocity_roundtrip, velocity_comparison,
-                                       velocity_snapshot_bytes) == 0);
+                               (water_test_snapshot_dense(comparison), memcmp(roundtrip, comparison, snapshot_bytes) == 0);
         passed &= gpu_batch_equal && water_test_invariants("native-gpu-batch-parity", batch_mass);
         fprintf(stderr, "water-self-test native-gpu-8-step-batch %s\n",
                 gpu_batch_equal ? "PASS" : "FAIL");
@@ -17076,10 +16986,7 @@ static bool run_water_self_tests(void) {
         water_test_run_steps(saved_backend, 180);
         bool used_gpu = strncmp(waterSystem.diagnostics.backend, "gpu-", 4) == 0;
         bool gpu_equal = used_gpu &&
-                         (water_test_snapshot_dense(roundtrip), memcmp(reference, roundtrip, snapshot_bytes) == 0) &&
-                         (water_test_snapshot_velocity(velocity_roundtrip),
-                          memcmp(velocity_reference, velocity_roundtrip,
-                                 velocity_snapshot_bytes) == 0);
+                         (water_test_snapshot_dense(roundtrip), memcmp(reference, roundtrip, snapshot_bytes) == 0);
         if (used_gpu && !gpu_equal) {
             for (int i = 0; i < WATER_CELL_COUNT; ++i) {
                 if (reference[i] != roundtrip[i]) {
@@ -17096,15 +17003,11 @@ static bool run_water_self_tests(void) {
         water_test_setup_basin();
         water_test_run_steps(PHYSICS_BACKEND_CPU_ST, 2);
         water_test_snapshot_dense(roundtrip);
-        water_test_snapshot_velocity(velocity_roundtrip);
         water_test_setup_basin();
         water_test_run_steps(saved_backend, 1);
         water_test_run_steps(PHYSICS_BACKEND_CPU_ST, 1);
         water_test_snapshot_dense(comparison);
-        water_test_snapshot_velocity(velocity_comparison);
-        bool switch_equal = memcmp(roundtrip, comparison, snapshot_bytes) == 0 &&
-                            memcmp(velocity_roundtrip, velocity_comparison,
-                                   velocity_snapshot_bytes) == 0;
+        bool switch_equal = memcmp(roundtrip, comparison, snapshot_bytes) == 0;
         passed &= switch_equal;
         fprintf(stderr, "water-self-test gpu-to-cpu-switch %s\n",
                 switch_equal ? "PASS" : "FAIL");
@@ -17118,13 +17021,10 @@ static bool run_water_self_tests(void) {
     source_chunk->mass[source_local] = WATER_MAX_MASS;
     source_chunk->scratch[source_local] = WATER_MAX_MASS;
     int dynamic_test_voxel = addVoxel(0.25f, 0.75f, 0.25f, false, true, BLUE, 0);
-    if (dynamic_test_voxel >= 0)
-        set_voxel_velocity(&voxels[dynamic_test_voxel], (Vector3){ 4.0f, 1.0f, 0.0f });
     water_rebuild_obstacles_and_displace();
     bool displaced = dynamic_test_voxel >= 0 && water_dynamic_index(source) &&
                      water_test_total_mass() == WATER_MAX_MASS &&
-                     water_mass_index(source) < WATER_MAX_MASS &&
-                     !water_test_velocity_is_zero();
+                     water_mass_index(source) < WATER_MAX_MASS;
     passed &= displaced && water_test_invariants("solid-displacement", WATER_MAX_MASS);
     fprintf(stderr, "water-self-test moving-solid-displacement %s\n", displaced ? "PASS" : "FAIL");
 
@@ -17141,8 +17041,7 @@ static bool run_water_self_tests(void) {
         projectile_ok = bullet < voxel_count && voxels[bullet].vel.x > 0.0f &&
                         voxels[bullet].vel.x < 10.0f * VELOCITY_DAMPING;
         water_rebuild_obstacles_and_displace();
-        projectile_ok = projectile_ok && water_dynamic_index(water_index_unchecked(0, 10, 0)) &&
-                        !water_test_velocity_is_zero();
+        projectile_ok = projectile_ok && water_dynamic_index(water_index_unchecked(0, 10, 0));
     }
     passed &= projectile_ok;
     fprintf(stderr, "water-self-test projectile-drag-displacement %s\n",
@@ -17157,11 +17056,9 @@ static bool run_water_self_tests(void) {
     players[0].vel = (Vector3){ 4.0f, 0.0f, 0.0f };
     (void)water_set_mass(0, 1, 0, WATER_MAX_MASS);
     (void)water_set_mass(0, 2, 0, WATER_MAX_MASS);
-    (void)water_set_mass(0, 3, 0, WATER_MAX_MASS);
     (void)water_set_mass(0, 4, 0, WATER_MAX_MASS);
     water_apply_player_forces(0, PBD_MAX_STEP_DT);
-    bool player_ok = players[0].vel.x < 4.0f && players[0].vel.y > 0.0f &&
-                     !water_test_velocity_is_zero();
+    bool player_ok = players[0].vel.x < 4.0f && players[0].vel.y > 0.0f;
     activePlayers = saved_active_players;
     passed &= player_ok;
     fprintf(stderr, "water-self-test player-buoyancy-drag %s\n", player_ok ? "PASS" : "FAIL");
@@ -17182,19 +17079,13 @@ static bool run_water_self_tests(void) {
     FILE *map = tmpfile();
     bool map_ok = map != NULL;
     if (map_ok) {
-        water_add_impulse_index(water_index_unchecked(-1, 1, -1),
-                                (Vector3){ 4.0f, 2.0f, -1.0f }, 0);
         water_write_map(map);
         rewind(map);
         int count = -1;
         map_ok = fscanf(map, "WATER %d\n", &count) == 1;
         water_test_snapshot_dense(roundtrip);
         if (map_ok) map_ok = water_read_map_entries(map, count);
-        if (map_ok) {
-            water_test_snapshot_dense(reference);
-            map_ok = memcmp(roundtrip, reference, snapshot_bytes) == 0 &&
-                     water_test_velocity_is_zero();
-        }
+        if (map_ok) { water_test_snapshot_dense(reference); map_ok = memcmp(roundtrip, reference, snapshot_bytes) == 0; }
         fclose(map);
     }
     passed &= map_ok;
@@ -17227,9 +17118,6 @@ static bool run_water_self_tests(void) {
     free(reference);
     free(roundtrip);
     free(comparison);
-    free(velocity_reference);
-    free(velocity_roundtrip);
-    free(velocity_comparison);
     physicsBackend.active = saved_backend;
     water_reset();
     fprintf(stderr, "water-self-test result=%s\n", passed ? "PASS" : "FAIL");

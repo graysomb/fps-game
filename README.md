@@ -194,13 +194,12 @@ Creative mode lets you fly around an empty world and build voxel maps that can b
 ### Cellular-Automata Water
 
 Water is a separate finite-mass 80×80×80 grid over the build bounds. It uses
-16-bit integer fill values plus packed signed 3D splash momentum, falls before
-directional leveling, sleeps in sparse 8³ tiles, and treats the voxel hashes as
-read-only solid obstacles. Dynamic voxels and projectiles displace it and inject
-momentum; players receive drag, buoyancy, held-jump swim acceleration, and leave
-wakes. Creative maps save mass as `FPSMAP2` and restart water at rest; `FPSMAP1`
-maps still load with an empty water grid. Water remains disabled in LAN sessions
-until it has protocol replication.
+16-bit integer fill values, falls before leveling horizontally, sleeps in 8³
+tiles, and treats the voxel hashes as read-only solid obstacles. Dynamic voxels
+and projectiles displace it; players receive drag, buoyancy, and held-jump swim
+acceleration. Creative maps save this state as `FPSMAP2`; `FPSMAP1` maps still
+load with an empty water grid. Water remains disabled in LAN sessions until it
+has protocol replication.
 
 ### Custom Map in Multiplayer
 *   **Toggle Custom Map:** U (Main Menu)
@@ -346,10 +345,9 @@ fps_ray --physics=cpu-st --water-self-test
 fps_ray --physics=gpu --water-self-test
 ```
 
-The water self-test checks conservation and bounds, vertical fall, impact splash,
-directional wakes, basin leveling, CPU ST/MT byte parity, native GPU mass/velocity
-parity when active, solid displacement, creative edits, transient-velocity map
-round-tripping, and tile sleep/wake behavior.
+The water self-test checks conservation and bounds, vertical fall and basin
+leveling, CPU ST/MT byte parity, native GPU byte parity when active, solid
+displacement, creative edits, map round-tripping, and tile sleep/wake behavior.
 
 Runtime GPU failures immediately continue on CPU, then retry the GPU after 5,
 15, and 60 seconds. A successful retry repacks state from the CPU and must pass

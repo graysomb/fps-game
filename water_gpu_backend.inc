@@ -11,17 +11,14 @@ typedef struct WaterGpuState {
     uint16_t *mass_stage;
     uint16_t *scratch_stage;
     uint16_t *readback_stage;
-    uint32_t *velocity_stage;
-    uint32_t *velocity_scratch_stage;
-    uint32_t *velocity_readback_stage;
     uint64_t synced_mass_generation;
     uint64_t synced_static_generation;
     uint64_t synced_dynamic_generation;
     uint64_t synced_resident_generation;
 #if defined(__APPLE__) && defined(FPS_GPU_METAL)
-    void *buffer[8];
+    void *buffer[6];
 #elif defined(GRAPHICS_API_OPENGL_43)
-    unsigned int buffer[8];
+    unsigned int buffer[6];
     unsigned int program;
     int mode_location;
     int count_location;
@@ -35,12 +32,12 @@ static WaterGpuState waterGpu;
 
 static void water_gpu_release(void) {
 #if defined(__APPLE__) && defined(FPS_GPU_METAL)
-    for (int i = 0; i < 8; ++i) {
+    for (int i = 0; i < 6; ++i) {
         if (waterGpu.buffer[i]) fps_metal_buffer_destroy(waterGpu.buffer[i]);
         waterGpu.buffer[i] = NULL;
     }
 #elif defined(GRAPHICS_API_OPENGL_43)
-    for (int i = 0; i < 8; ++i) {
+    for (int i = 0; i < 6; ++i) {
         if (waterGpu.buffer[i]) rlUnloadShaderBuffer(waterGpu.buffer[i]);
         waterGpu.buffer[i] = 0;
     }
@@ -80,16 +77,9 @@ static bool water_gpu_allocate_staging(void) {
         waterGpu.scratch_stage = (uint16_t *)calloc((size_t)WATER_CELL_COUNT, sizeof(uint16_t));
     if (!waterGpu.readback_stage)
         waterGpu.readback_stage = (uint16_t *)malloc((size_t)WATER_CELL_COUNT * sizeof(uint16_t));
-    if (!waterGpu.velocity_stage)
-        waterGpu.velocity_stage = (uint32_t *)calloc((size_t)WATER_CELL_COUNT, sizeof(uint32_t));
-    if (!waterGpu.velocity_scratch_stage)
-        waterGpu.velocity_scratch_stage = (uint32_t *)calloc((size_t)WATER_CELL_COUNT, sizeof(uint32_t));
-    if (!waterGpu.velocity_readback_stage)
-        waterGpu.velocity_readback_stage = (uint32_t *)malloc((size_t)WATER_CELL_COUNT * sizeof(uint32_t));
     return waterGpu.static_stage && waterGpu.dynamic_stage && waterGpu.dynamic_next_stage && waterGpu.active_stage &&
            waterGpu.active_id_stage && waterGpu.mass_stage && waterGpu.scratch_stage &&
-           waterGpu.readback_stage && waterGpu.velocity_stage &&
-           waterGpu.velocity_scratch_stage && waterGpu.velocity_readback_stage;
+           waterGpu.readback_stage;
 }
 
 static bool water_gpu_initialize_backend(void) {
@@ -106,7 +96,6 @@ static bool water_gpu_initialize_backend(void) {
         return false;
     }
     size_t mass_bytes = (size_t)WATER_CELL_COUNT * sizeof(uint16_t);
-    size_t velocity_bytes = (size_t)WATER_CELL_COUNT * sizeof(uint32_t);
     size_t mask_bytes = (size_t)WATER_MASK_WORD_COUNT * sizeof(uint32_t);
     waterGpu.buffer[0] = fps_metal_buffer_create(mass_bytes);
     waterGpu.buffer[1] = fps_metal_buffer_create(mass_bytes);
@@ -114,9 +103,7 @@ static bool water_gpu_initialize_backend(void) {
     waterGpu.buffer[3] = fps_metal_buffer_create(mask_bytes);
     waterGpu.buffer[4] = fps_metal_buffer_create((size_t)WATER_ACTIVE_WORD_COUNT * sizeof(uint32_t));
     waterGpu.buffer[5] = fps_metal_buffer_create((size_t)WATER_TILE_COUNT * sizeof(uint32_t));
-    waterGpu.buffer[6] = fps_metal_buffer_create(velocity_bytes);
-    waterGpu.buffer[7] = fps_metal_buffer_create(velocity_bytes);
-    for (int i = 0; i < 8; ++i) {
+    for (int i = 0; i < 6; ++i) {
         if (!waterGpu.buffer[i]) {
             water_gpu_fail("Metal water buffer allocation failed");
             return false;
@@ -165,12 +152,11 @@ static bool water_gpu_initialize_backend(void) {
         return false;
     }
     size_t mass_bytes = (size_t)WATER_CELL_COUNT * sizeof(uint16_t);
-    size_t velocity_bytes = (size_t)WATER_CELL_COUNT * sizeof(uint32_t);
     size_t mask_bytes = (size_t)WATER_MASK_WORD_COUNT * sizeof(uint32_t);
-    for (int i = 0; i < 8; ++i) {
+    for (int i = 0; i < 6; ++i) {
         size_t bytes = i < 2 ? mass_bytes : (i < 4 ? mask_bytes :
                        (i == 4 ? (size_t)WATER_ACTIVE_WORD_COUNT * sizeof(uint32_t) :
-                        (i == 5 ? (size_t)WATER_TILE_COUNT * sizeof(uint32_t) : velocity_bytes)));
+                                 (size_t)WATER_TILE_COUNT * sizeof(uint32_t)));
         waterGpu.buffer[i] = rlLoadShaderBuffer((unsigned int)bytes, NULL, RL_DYNAMIC_COPY);
         if (!waterGpu.buffer[i]) {
             water_gpu_fail("OpenGL water buffer allocation failed");
@@ -236,9 +222,6 @@ static bool water_gpu_run_batch(int fixed_steps) {
     if (upload_mass) {
         memset(waterGpu.mass_stage, 0, (size_t)WATER_CELL_COUNT * sizeof(uint16_t));
         memset(waterGpu.scratch_stage, 0, (size_t)WATER_CELL_COUNT * sizeof(uint16_t));
-        memset(waterGpu.velocity_stage, 0, (size_t)WATER_CELL_COUNT * sizeof(uint32_t));
-        memset(waterGpu.velocity_scratch_stage, 0,
-               (size_t)WATER_CELL_COUNT * sizeof(uint32_t));
         for (int r = 0; r < waterSystem.resident_tile_count; ++r) {
             int tile = waterSystem.resident_tile_ids[r], tx, ty, tz;
             WaterChunk *chunk = waterSystem.chunks[tile];
@@ -248,8 +231,6 @@ static bool water_gpu_run_batch(int fixed_steps) {
                 int i = (tx * 8 + lx) + WATER_SIZE_X * ((tz * 8 + lz) + WATER_SIZE_Z * (ty * 8 + ly));
                 waterGpu.mass_stage[i] = chunk->mass[local];
                 waterGpu.scratch_stage[i] = chunk->scratch[local];
-                waterGpu.velocity_stage[i] = chunk->velocity[local];
-                waterGpu.velocity_scratch_stage[i] = chunk->velocity_scratch[local];
             }
         }
     }
@@ -257,14 +238,9 @@ static bool water_gpu_run_batch(int fixed_steps) {
     double upload_started = pbd_time_now_ms();
 #if defined(__APPLE__) && defined(FPS_GPU_METAL)
     size_t mass_bytes = (size_t)WATER_CELL_COUNT * sizeof(uint16_t);
-    size_t velocity_bytes = (size_t)WATER_CELL_COUNT * sizeof(uint32_t);
     size_t mask_bytes = (size_t)WATER_MASK_WORD_COUNT * sizeof(uint32_t);
     if (upload_mass) ok = fps_metal_buffer_update(waterGpu.buffer[0], waterGpu.mass_stage, mass_bytes, 0) &&
-                          fps_metal_buffer_update(waterGpu.buffer[1], waterGpu.scratch_stage, mass_bytes, 0) &&
-                          fps_metal_buffer_update(waterGpu.buffer[6], waterGpu.velocity_stage,
-                                                  velocity_bytes, 0) &&
-                          fps_metal_buffer_update(waterGpu.buffer[7], waterGpu.velocity_scratch_stage,
-                                                  velocity_bytes, 0);
+                          fps_metal_buffer_update(waterGpu.buffer[1], waterGpu.scratch_stage, mass_bytes, 0);
     if (ok && upload_static) ok = fps_metal_buffer_update(waterGpu.buffer[2], waterGpu.static_stage, mask_bytes, 0);
     if (ok && upload_dynamic && dynamic_full_upload)
         ok = fps_metal_buffer_update(waterGpu.buffer[3], waterGpu.dynamic_next_stage, mask_bytes, 0);
@@ -289,27 +265,19 @@ static bool water_gpu_run_batch(int fixed_steps) {
     double dispatch_started = pbd_time_now_ms();
     if (ok) ok = fps_metal_water_dispatch(waterGpu.buffer[0], waterGpu.buffer[1],
                                           waterGpu.buffer[2], waterGpu.buffer[3],
-                                          waterGpu.buffer[4], waterGpu.buffer[5],
-                                          waterGpu.buffer[6], waterGpu.buffer[7], fixed_steps,
+                                          waterGpu.buffer[4], waterGpu.buffer[5], fixed_steps,
                                           waterSystem.active_tile_count * 256);
     waterSystem.diagnostics.last_gpu_dispatch_ms = pbd_time_now_ms() - dispatch_started;
     double readback_started = pbd_time_now_ms();
-    if (ok) ok = fps_metal_buffer_read(waterGpu.buffer[0], waterGpu.readback_stage, mass_bytes, 0) &&
-                 fps_metal_buffer_read(waterGpu.buffer[6], waterGpu.velocity_readback_stage,
-                                       velocity_bytes, 0);
+    if (ok) ok = fps_metal_buffer_read(waterGpu.buffer[0], waterGpu.readback_stage, mass_bytes, 0);
     waterSystem.diagnostics.last_gpu_readback_ms = pbd_time_now_ms() - readback_started;
     if (ok) waterSystem.diagnostics.backend = "gpu-metal";
 #elif defined(GRAPHICS_API_OPENGL_43)
     size_t mass_bytes = (size_t)WATER_CELL_COUNT * sizeof(uint16_t);
-    size_t velocity_bytes = (size_t)WATER_CELL_COUNT * sizeof(uint32_t);
     size_t mask_bytes = (size_t)WATER_MASK_WORD_COUNT * sizeof(uint32_t);
     if (upload_mass) {
         rlUpdateShaderBuffer(waterGpu.buffer[0], waterGpu.mass_stage, (unsigned int)mass_bytes, 0);
         rlUpdateShaderBuffer(waterGpu.buffer[1], waterGpu.scratch_stage, (unsigned int)mass_bytes, 0);
-        rlUpdateShaderBuffer(waterGpu.buffer[6], waterGpu.velocity_stage,
-                             (unsigned int)velocity_bytes, 0);
-        rlUpdateShaderBuffer(waterGpu.buffer[7], waterGpu.velocity_scratch_stage,
-                             (unsigned int)velocity_bytes, 0);
     }
     if (upload_static) rlUpdateShaderBuffer(waterGpu.buffer[2], waterGpu.static_stage, (unsigned int)mask_bytes, 0);
     if (upload_dynamic && dynamic_full_upload)
@@ -335,7 +303,7 @@ static bool water_gpu_run_batch(int fixed_steps) {
     while (glGetError() != GL_NO_ERROR) { }
     glUseProgram(waterGpu.program);
     glUniform1i(waterGpu.count_location, waterSystem.active_tile_count * 256);
-    for (int i = 0; i < 8; ++i) rlBindShaderBuffer(waterGpu.buffer[i], (unsigned int)i);
+    for (int i = 0; i < 6; ++i) rlBindShaderBuffer(waterGpu.buffer[i], (unsigned int)i);
     GLuint groups = (GLuint)(((int)waterSystem.active_tile_count * 256 + 127) / 128);
     double dispatch_started = pbd_time_now_ms();
     for (int step = 0; step < fixed_steps; ++step) {
@@ -350,11 +318,7 @@ static bool water_gpu_run_batch(int fixed_steps) {
     ok = glGetError() == GL_NO_ERROR;
     waterSystem.diagnostics.last_gpu_dispatch_ms = pbd_time_now_ms() - dispatch_started;
     double readback_started = pbd_time_now_ms();
-    if (ok) {
-        rlReadShaderBuffer(waterGpu.buffer[0], waterGpu.readback_stage, (unsigned int)mass_bytes, 0);
-        rlReadShaderBuffer(waterGpu.buffer[6], waterGpu.velocity_readback_stage,
-                           (unsigned int)velocity_bytes, 0);
-    }
+    if (ok) rlReadShaderBuffer(waterGpu.buffer[0], waterGpu.readback_stage, (unsigned int)mass_bytes, 0);
     waterSystem.diagnostics.last_gpu_readback_ms = pbd_time_now_ms() - readback_started;
     if (ok) waterSystem.diagnostics.backend = "gpu-gl43";
 #else
@@ -372,12 +336,6 @@ static bool water_gpu_run_batch(int fixed_steps) {
                 int i = (tx * 8 + lx) + WATER_SIZE_X * ((tz * 8 + lz) + WATER_SIZE_Z * (ty * 8 + ly));
                 before_mass += chunk->batch_snapshot[local];
                 after_mass += waterGpu.readback_stage[i];
-                uint32_t packed_velocity = waterGpu.velocity_readback_stage[i];
-                if ((packed_velocity & UINT32_C(0xff000000)) != 0 ||
-                    (waterGpu.readback_stage[i] == 0 && packed_velocity != 0)) {
-                    invalid_mass_index = i;
-                    ok = false;
-                }
             }
         }
         if (ok && before_mass != after_mass) ok = false;
@@ -385,9 +343,8 @@ static bool water_gpu_run_batch(int fixed_steps) {
     if (!ok) {
         char reason[160];
         if (invalid_mass_index >= 0) {
-            snprintf(reason, sizeof(reason), "water state validation failed at %d: mass=%u velocity=%08x",
-                     invalid_mass_index, (unsigned)waterGpu.readback_stage[invalid_mass_index],
-                     waterGpu.velocity_readback_stage[invalid_mass_index]);
+            snprintf(reason, sizeof(reason), "mass validation failed at %d: %u",
+                     invalid_mass_index, (unsigned)waterGpu.readback_stage[invalid_mass_index]);
             water_gpu_fail(reason);
         } else water_gpu_fail("dispatch or readback failed");
         return false;
@@ -402,7 +359,6 @@ static bool water_gpu_run_batch(int fixed_steps) {
             int lx = local & 7, lz = (local >> 3) & 7, ly = local >> 6;
             int i = (tx * 8 + lx) + WATER_SIZE_X * ((tz * 8 + lz) + WATER_SIZE_Z * (ty * 8 + ly));
             chunk->mass[local] = waterGpu.readback_stage[i];
-            chunk->velocity[local] = waterGpu.velocity_readback_stage[i];
         }
     }
     if (++waterSystem.mass_generation == 0) waterSystem.mass_generation = 1;
@@ -426,8 +382,5 @@ static void water_gpu_shutdown_backend(void) {
     free(waterGpu.mass_stage);
     free(waterGpu.scratch_stage);
     free(waterGpu.readback_stage);
-    free(waterGpu.velocity_stage);
-    free(waterGpu.velocity_scratch_stage);
-    free(waterGpu.velocity_readback_stage);
     memset(&waterGpu, 0, sizeof(waterGpu));
 }

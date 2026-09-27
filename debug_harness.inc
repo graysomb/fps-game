@@ -864,10 +864,9 @@ static void debug_draw_overlay(const DebugRunState *state, const DebugSample *sa
              34, 166, 19, result_color);
     if (state->water_fall_test) {
         const WaterDiagnostics *water = water_diagnostics();
-        DrawText(TextFormat("WATER mass=%llu wet=%u moving=%u vmax=%u active=%u chunks=%u trapped=%llu",
+        DrawText(TextFormat("WATER mass=%llu wet=%u active=%u chunks=%u trapped=%llu",
                             (unsigned long long)water_test_total_mass(),
-                            water->wet_cells, water->moving_cells, water->max_component_speed,
-                            water->active_cells, water->resident_chunks,
+                            water->wet_cells, water->active_cells, water->resident_chunks,
                             (unsigned long long)water->trapped_mass),
                  34, 192, 17, (Color){ 90, 190, 255, 255 });
     }
@@ -3375,8 +3374,7 @@ static bool debug_write_report(DebugRunState *state)
             " \"maintenanceAverageMs\": %.9g, \"gpuUploadAverageMs\": %.9g,"
             " \"gpuDispatchAverageMs\": %.9g, \"gpuReadbackAverageMs\": %.9g,"
             " \"renderCacheLastMs\": %.9g, \"activeTiles\": %u, \"processedCells\": %u,"
-            " \"residentChunks\": %u, \"residentBytes\": %llu, \"velocityBytes\": %llu,"
-            " \"movingCells\": %u, \"maxComponentSpeed\": %u},\n",
+            " \"residentChunks\": %u, \"residentBytes\": %llu},\n",
             state->water_step_samples, state->water_step_total_ms,
             water_average_ms, water_median_ms, state->water_step_min_ms, state->water_step_max_ms,
             state->water_step_samples ? state->water_obstacle_total_ms / state->water_step_samples : 0.0,
@@ -3387,9 +3385,7 @@ static bool debug_write_report(DebugRunState *state)
             state->water_step_samples ? state->water_gpu_readback_total_ms / state->water_step_samples : 0.0,
             water_diagnostics()->last_render_build_ms, water_diagnostics()->active_tiles,
             water_diagnostics()->processed_cells, water_diagnostics()->resident_chunks,
-            (unsigned long long)water_diagnostics()->resident_bytes,
-            (unsigned long long)water_diagnostics()->velocity_bytes,
-            water_diagnostics()->moving_cells, water_diagnostics()->max_component_speed);
+            (unsigned long long)water_diagnostics()->resident_bytes);
     fprintf(file, "  \"fallback\": %s,\n  \"fallbackReason\": ",
             physicsBackend.sticky_fallback ? "true" : "false");
     debug_write_json_string(file, physicsBackend.fallback_reason);
