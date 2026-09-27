@@ -6,37 +6,105 @@ layout(std430, binding = 2) readonly buffer StaticMaskBuffer { uint staticMask[]
 layout(std430, binding = 3) readonly buffer DynamicMaskBuffer { uint dynamicMask[]; };
 layout(std430, binding = 4) readonly buffer ActiveTileBuffer { uint activeTiles[]; };
 layout(std430, binding = 5) readonly buffer ActiveTileIdBuffer { uint activeTileIds[]; };
+layout(std430, binding = 6) buffer VelocityBuffer { uint velocity[]; };
+layout(std430, binding = 7) buffer VelocityScratchBuffer { uint velocityScratch[]; };
 uniform int uMode;
 uniform int uCellCount;
-const uint WATER_MAX = 65535u;
-const uint LATERAL_SUPPORT_MASS = 60000u;
+const uint WATER_MAX = 65535u, LATERAL_SUPPORT_MASS = 60000u;
+const int VELOCITY_MAX = 127, VELOCITY_GRAVITY = 12;
+const int IMPACT_THRESHOLD = 16, HORIZONTAL_KICK = 8;
 const int SIZE_X = 80, SIZE_Y = 80, SIZE_Z = 80;
 const int LAYER = SIZE_X * SIZE_Z, TILE_PAIRS = 256;
+
 uint loadMass(int i) { return (mass[i >> 1] >> ((i & 1) * 16)) & WATER_MAX; }
 uint loadScratch(int i) { return (scratch[i >> 1] >> ((i & 1) * 16)) & WATER_MAX; }
 bool staticBit(int i) { return ((staticMask[i >> 5] >> (i & 31)) & 1u) != 0u; }
 bool dynamicBit(int i) { return ((dynamicMask[i >> 5] >> (i & 31)) & 1u) != 0u; }
 bool blocked(int i) { return staticBit(i) || dynamicBit(i); }
-int tileForIndex(int i) { int y=i/LAYER, r=i-y*LAYER, z=r/SIZE_X, x=r-z*SIZE_X;
+int tileForIndex(int i) { int y=i/LAYER,r=i-y*LAYER,z=r/SIZE_X,x=r-z*SIZE_X;
     return (x/8)+10*((z/8)+10*(y/8)); }
 bool tileActive(int t) { return ((activeTiles[t >> 5] >> (t & 31)) & 1u) != 0u; }
-uint downFlow(int i, int y) { if (blocked(i)||y==0) return 0u; int b=i-LAYER;
-    if (blocked(b)||!tileActive(tileForIndex(i))||!tileActive(tileForIndex(b))) return 0u;
-    return min(loadMass(i), WATER_MAX-loadMass(b)); }
-uint horizontalFlow(int f, int t) { if (t<0||t>=SIZE_X*SIZE_Y*SIZE_Z||blocked(f)||blocked(t)||
-    !tileActive(tileForIndex(f))||!tileActive(tileForIndex(t))) return 0u;
-    int fy=f/LAYER; if(fy>0){int below=f-LAYER;
-    if(!blocked(below)&&loadScratch(below)<LATERAL_SUPPORT_MASS)return 0u;}
-    uint a=loadScratch(f), b=loadScratch(t); return a>b ? (a-b)>>3 : 0u; }
-uint gravityValue(int i,int y) { if(blocked(i)) return loadMass(i); uint o=downFlow(i,y);
-    uint n=y+1<SIZE_Y?downFlow(i+LAYER,y+1):0u; return loadMass(i)-o+n; }
-uint horizontalValue(int i,int x,int z) { uint v=loadScratch(i); if(blocked(i)) return v;
-    int ns[4]=int[4](x+1<SIZE_X?i+1:-1,x>0?i-1:-1,z+1<SIZE_Z?i+SIZE_X:-1,z>0?i-SIZE_X:-1);
-    uint o=0u,n=0u; for(int k=0;k<4;++k){if(ns[k]<0)continue;o+=horizontalFlow(i,ns[k]);n+=horizontalFlow(ns[k],i);} return v-o+n; }
-void main() { int inv=int(gl_GlobalInvocationID.x); if(inv>=uCellCount)return;
+int unpackComponent(uint packed,int shift) { int v=int((packed>>shift)&255u); return v>127?v-256:v; }
+ivec3 unpackVelocity(uint packed) { return ivec3(unpackComponent(packed,0),
+    unpackComponent(packed,8),unpackComponent(packed,16)); }
+uint packVelocity(ivec3 v) { v=clamp(v,ivec3(-VELOCITY_MAX),ivec3(VELOCITY_MAX));
+    return uint(v.x&255)|(uint(v.y&255)<<8)|(uint(v.z&255)<<16); }
+ivec3 acceleratedVelocity(uint packed,uint m) { if(m==0u)return ivec3(0);
+    ivec3 v=unpackVelocity(packed);v.y=max(-VELOCITY_MAX,v.y-VELOCITY_GRAVITY);return v; }
+uint downFlow(int i,int y) { if(blocked(i)||y==0)return 0u;int b=i-LAYER;
+    if(acceleratedVelocity(velocity[i],loadMass(i)).y>0)return 0u;
+    if(blocked(b)||!tileActive(tileForIndex(i))||!tileActive(tileForIndex(b)))return 0u;
+    return min(loadMass(i),WATER_MAX-loadMass(b)); }
+uint gravityMass(int i,int y) { if(blocked(i))return loadMass(i);uint o=downFlow(i,y);
+    uint n=y+1<SIZE_Y?downFlow(i+LAYER,y+1):0u;return loadMass(i)-o+n; }
+uint gravityVelocity(int i,int y) { if(blocked(i))return 0u;uint m=loadMass(i),o=downFlow(i,y);
+    uint n=y+1<SIZE_Y?downFlow(i+LAYER,y+1):0u,r=m-o,total=r+n;if(total==0u)return 0u;
+    ivec3 a=acceleratedVelocity(velocity[i],m);ivec3 b=n>0u?
+    acceleratedVelocity(velocity[i+LAYER],loadMass(i+LAYER)):ivec3(0);
+    return packVelocity((int(r)*a+int(n)*b)/int(total)); }
+ivec3 effectiveVelocity(int i) { if(loadScratch(i)==0u||blocked(i))return ivec3(0);
+    ivec3 v=unpackVelocity(velocityScratch[i]);int y=i/LAYER;bool impact=y==0;
+    if(y>0){int b=i-LAYER;if(blocked(b))impact=true;else if(loadScratch(b)>=LATERAL_SUPPORT_MASS)
+    impact=unpackVelocity(velocityScratch[b]).y>=-IMPACT_THRESHOLD;}
+    if(impact&&v.y<0)v.y=v.y<-IMPACT_THRESHOLD?((-v.y)*3)/4:0;return v; }
+bool laterallySupported(int i) { int y=i/LAYER;if(y==0)return true;int b=i-LAYER;
+    return blocked(b)||loadScratch(b)>=LATERAL_SUPPORT_MASS; }
+int directionalSpeed(ivec3 v,int d) { if(d==0)return v.x;if(d==1)return-v.x;
+    if(d==2)return v.z;if(d==3)return-v.z;return v.y; }
+int surfaceSplashSpeed(int index) { int fallSpeed=0;bool impact=false;
+    for(int depth=0;depth<8;++depth){if(loadScratch(index)==0u||blocked(index))return 0;
+    ivec3 v=unpackVelocity(velocityScratch[index]);fallSpeed=max(fallSpeed,-v.y);int y=index/LAYER;
+    if(y==0){impact=true;break;}int below=index-LAYER;if(blocked(below)){impact=true;break;}
+    if(loadScratch(below)<LATERAL_SUPPORT_MASS)return 0;
+    if(unpackVelocity(velocityScratch[below]).y>=-IMPACT_THRESHOLD){impact=true;break;}index=below;}
+    if(!impact||fallSpeed<=IMPACT_THRESHOLD)return 0;uint hash=uint(index)*747796405u+2891336453u;
+    if((hash>>30)!=0u)return 0;return min(VELOCITY_MAX,fallSpeed*2); }
+uint directionalFlow(int f,int t,int d) { if(f<0||t<0||f>=SIZE_X*SIZE_Y*SIZE_Z||
+    t>=SIZE_X*SIZE_Y*SIZE_Z||blocked(f)||blocked(t)||!tileActive(tileForIndex(f))||
+    !tileActive(tileForIndex(t)))return 0u;uint a=loadScratch(f),b=loadScratch(t);
+    if(a==0u||b>=WATER_MAX)return 0u;int ty=t/LAYER;
+    if(d!=4&&ty>0){int belowTo=t-LAYER;
+        uint belowMass=loadScratch(belowTo);if(surfaceSplashSpeed(belowTo)>0||
+        (belowMass<LATERAL_SUPPORT_MASS&&effectiveVelocity(belowTo).y>0))return 0u;}
+    uint base=d!=4&&laterallySupported(f)&&a>b?(a-b)>>3:0u;
+    ivec3 effective=effectiveVelocity(f);int speed=directionalSpeed(effective,d);int splash=surfaceSplashSpeed(f);
+    bool rising=d==4&&splash==0&&a<LATERAL_SUPPORT_MASS&&effective.y>0;
+    if(d!=4&&(splash>0||(a<LATERAL_SUPPORT_MASS&&effective.y>0)))return 0u;
+    if(d==4&&splash==0&&effective.y>0&&!rising)return 0u;
+    if(d==4)speed=max(speed,splash);else speed+=max(effective.y,splash)/2;
+    speed=min(speed,VELOCITY_MAX);bool launch=d==4&&splash>0;uint momentum=rising?a:(speed>0?
+    (a*uint(speed))/(127u*4u):0u);uint sourceCap=rising?a:(launch?a/4u:a/5u);
+    uint destinationCap=(rising||launch)?WATER_MAX-b:(WATER_MAX-b)/5u;
+    return min(base+momentum,min(sourceCap,destinationCap)); }
+ivec3 carriedVelocity(int f,int d) { ivec3 v=effectiveVelocity(f);
+    if(d==4){int splash=surfaceSplashSpeed(f);if(splash>0){v.y=max(v.y,splash);
+        uint hash=uint(f)*747796405u+2891336453u;v.x+=(hash&1u)!=0u?64:-64;v.z+=(hash&2u)!=0u?64:-64;}}
+    if(d==0)v.x+=HORIZONTAL_KICK;else if(d==1)v.x-=HORIZONTAL_KICK;
+    else if(d==2)v.z+=HORIZONTAL_KICK;else if(d==3)v.z-=HORIZONTAL_KICK;
+    return clamp(v,ivec3(-VELOCITY_MAX),ivec3(VELOCITY_MAX)); }
+uint directionalMass(int i,int x,int y,int z) { uint value=loadScratch(i);if(blocked(i))return value;
+    int ns[5]=int[5](x+1<SIZE_X?i+1:-1,x>0?i-1:-1,z+1<SIZE_Z?i+SIZE_X:-1,
+    z>0?i-SIZE_X:-1,y+1<SIZE_Y?i+LAYER:-1);int rev[4]=int[4](1,0,3,2);
+    uint o=0u,n=0u;for(int k=0;k<5;++k)if(ns[k]>=0)o+=directionalFlow(i,ns[k],k);
+    for(int k=0;k<4;++k)if(ns[k]>=0)n+=directionalFlow(ns[k],i,rev[k]);
+    if(y>0)n+=directionalFlow(i-LAYER,i,4);return value-o+n; }
+uint directionalVelocity(int i,int x,int y,int z) { if(blocked(i))return 0u;uint value=loadScratch(i);
+    int ns[5]=int[5](x+1<SIZE_X?i+1:-1,x>0?i-1:-1,z+1<SIZE_Z?i+SIZE_X:-1,
+    z>0?i-SIZE_X:-1,y+1<SIZE_Y?i+LAYER:-1);int rev[4]=int[4](1,0,3,2);
+    uint o=0u,inc[5]=uint[5](0u,0u,0u,0u,0u),sum=0u;
+    for(int k=0;k<5;++k)if(ns[k]>=0)o+=directionalFlow(i,ns[k],k);
+    for(int k=0;k<4;++k)if(ns[k]>=0){inc[k]=directionalFlow(ns[k],i,rev[k]);sum+=inc[k];}
+    int below=y>0?i-LAYER:-1;if(below>=0){inc[4]=directionalFlow(below,i,4);sum+=inc[4];}
+    uint retained=value-o,total=retained+sum;if(total==0u)return 0u;
+    ivec3 p=int(retained)*effectiveVelocity(i);for(int k=0;k<4;++k)if(inc[k]>0u)
+    p+=int(inc[k])*carriedVelocity(ns[k],rev[k]);if(inc[4]>0u)p+=int(inc[4])*carriedVelocity(below,4);
+    return packVelocity((p/int(total))*7/8); }
+void main() { int inv=int(gl_GlobalInvocationID.x);if(inv>=uCellCount)return;
     int job=inv/TILE_PAIRS,pair=inv-job*TILE_PAIRS,tile=int(activeTileIds[job]);
     int ty=tile/100,r=tile-ty*100,tz=r/10,tx=r-tz*10;
     int x=tx*8+((pair&3)<<1),z=tz*8+((pair>>2)&7),y=ty*8+(pair>>5);
-    int i0=x+SIZE_X*(z+SIZE_Z*y),i1=i0+1; uint lo,hi;
-    if(uMode==0){lo=gravityValue(i0,y);hi=gravityValue(i1,y);scratch[i0>>1]=lo|(hi<<16);}
-    else{lo=horizontalValue(i0,x,z);hi=horizontalValue(i1,x+1,z);mass[i0>>1]=lo|(hi<<16);} }
+    int i0=x+SIZE_X*(z+SIZE_Z*y),i1=i0+1;uint lo,hi;
+    if(uMode==0){lo=gravityMass(i0,y);hi=gravityMass(i1,y);scratch[i0>>1]=lo|(hi<<16);
+    velocityScratch[i0]=gravityVelocity(i0,y);velocityScratch[i1]=gravityVelocity(i1,y);}
+    else{lo=directionalMass(i0,x,y,z);hi=directionalMass(i1,x+1,y,z);mass[i0>>1]=lo|(hi<<16);
+    velocity[i0]=directionalVelocity(i0,x,y,z);velocity[i1]=directionalVelocity(i1,x+1,y,z);} }

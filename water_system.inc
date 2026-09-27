@@ -3,6 +3,9 @@ typedef struct WaterChunk {
     uint16_t mass[WATER_CHUNK_CELLS];
     uint16_t scratch[WATER_CHUNK_CELLS];
     uint16_t batch_snapshot[WATER_CHUNK_CELLS];
+    uint32_t velocity[WATER_CHUNK_CELLS];
+    uint32_t velocity_scratch[WATER_CHUNK_CELLS];
+    uint32_t velocity_batch_snapshot[WATER_CHUNK_CELLS];
     uint8_t static_solid[WATER_CHUNK_CELLS];
     uint8_t dynamic_solid[WATER_CHUNK_CELLS];
     uint8_t previous_solid[WATER_CHUNK_CELLS];
@@ -21,6 +24,8 @@ typedef struct WaterSystem {
     uint16_t active_tile_ids[WATER_TILE_COUNT];
     uint16_t active_tile_count;
     uint16_t tile_wet_cells[WATER_TILE_COUNT];
+    uint16_t tile_moving_cells[WATER_TILE_COUNT];
+    uint8_t tile_max_component_speed[WATER_TILE_COUNT];
     uint64_t tile_visible_mass[WATER_TILE_COUNT];
     uint64_t tile_trapped_mass[WATER_TILE_COUNT];
     uint64_t static_generation;
@@ -36,6 +41,53 @@ typedef struct WaterSystem {
 
 static WaterSystem waterSystem;
 static inline void water_tile_coords(int tile, int *tx, int *ty, int *tz);
+static inline void water_coords_from_index(int index, int *gx, int *gy, int *gz);
+static void water_wake_cell_and_neighbors(int gx, int gy, int gz);
+
+typedef struct WaterVelocity {
+    int32_t x, y, z;
+} WaterVelocity;
+
+static inline int32_t water_clamp_velocity(int32_t value) {
+    if (value < -WATER_VELOCITY_MAX) return -WATER_VELOCITY_MAX;
+    if (value > WATER_VELOCITY_MAX) return WATER_VELOCITY_MAX;
+    return value;
+}
+
+static inline uint32_t water_pack_velocity(WaterVelocity velocity) {
+    return ((uint32_t)(uint8_t)water_clamp_velocity(velocity.x)) |
+           ((uint32_t)(uint8_t)water_clamp_velocity(velocity.y) << 8) |
+           ((uint32_t)(uint8_t)water_clamp_velocity(velocity.z) << 16);
+}
+
+static inline int32_t water_unpack_component(uint32_t packed, int shift) {
+    int32_t value = (int32_t)((packed >> shift) & 255u);
+    return value > 127 ? value - 256 : value;
+}
+
+static inline WaterVelocity water_unpack_velocity(uint32_t packed) {
+    return (WaterVelocity){ water_unpack_component(packed, 0),
+                            water_unpack_component(packed, 8),
+                            water_unpack_component(packed, 16) };
+}
+
+static inline WaterVelocity water_accelerated_velocity(uint32_t packed, uint32_t mass) {
+    if (!mass) return (WaterVelocity){ 0, 0, 0 };
+    WaterVelocity velocity = water_unpack_velocity(packed);
+    velocity.y = water_clamp_velocity(velocity.y - WATER_VELOCITY_GRAVITY);
+    return velocity;
+}
+
+static inline WaterVelocity water_mix_velocity(uint32_t mass_a, WaterVelocity a,
+                                                uint32_t mass_b, WaterVelocity b) {
+    uint32_t total = mass_a + mass_b;
+    if (!total) return (WaterVelocity){ 0, 0, 0 };
+    return (WaterVelocity){
+        ((int32_t)mass_a * a.x + (int32_t)mass_b * b.x) / (int32_t)total,
+        ((int32_t)mass_a * a.y + (int32_t)mass_b * b.y) / (int32_t)total,
+        ((int32_t)mass_a * a.z + (int32_t)mass_b * b.z) / (int32_t)total
+    };
+}
 
 static WaterChunk *water_chunk_get(int tile, bool create) {
     if (tile < 0 || tile >= WATER_TILE_COUNT) return NULL;
@@ -90,6 +142,16 @@ static inline uint16_t water_scratch_index(int index) {
     return chunk ? chunk->scratch[local] : 0;
 }
 
+static inline uint32_t water_velocity_index(int index) {
+    int local; WaterChunk *chunk = water_chunk_for_index(index, false, &local);
+    return chunk ? chunk->velocity[local] : 0;
+}
+
+static inline uint32_t water_velocity_scratch_index(int index) {
+    int local; WaterChunk *chunk = water_chunk_for_index(index, false, &local);
+    return chunk ? chunk->velocity_scratch[local] : 0;
+}
+
 static inline bool water_static_index(int index) {
     int local; WaterChunk *chunk = water_chunk_for_index(index, false, &local);
     return chunk && chunk->static_solid[local];
@@ -118,6 +180,34 @@ static void water_mark_tile_dirty(int tile) {
 
 static void water_note_cpu_mass_edit(void) {
     if (++waterSystem.mass_generation == 0) waterSystem.mass_generation = 1;
+}
+
+static WaterVelocity water_velocity_from_world(Vector3 world_velocity) {
+    float scale = 127.0f * PBD_MAX_STEP_DT / VOXEL_SIZE;
+    return (WaterVelocity){
+        water_clamp_velocity((int32_t)lroundf(world_velocity.x * scale)),
+        water_clamp_velocity((int32_t)lroundf(world_velocity.y * scale)),
+        water_clamp_velocity((int32_t)lroundf(world_velocity.z * scale))
+    };
+}
+
+static void water_add_impulse_index(int index, Vector3 world_velocity, int32_t upward_boost) {
+    int local;
+    WaterChunk *chunk = water_chunk_for_index(index, false, &local);
+    if (!chunk || !chunk->mass[local]) return;
+    WaterVelocity old = water_unpack_velocity(chunk->velocity[local]);
+    WaterVelocity impulse = water_velocity_from_world(world_velocity);
+    old.x = water_clamp_velocity(old.x + impulse.x);
+    old.y = water_clamp_velocity(old.y + impulse.y + upward_boost);
+    old.z = water_clamp_velocity(old.z + impulse.z);
+    uint32_t packed = water_pack_velocity(old);
+    if (packed == chunk->velocity[local]) return;
+    chunk->velocity[local] = packed;
+    chunk->velocity_scratch[local] = packed;
+    water_note_cpu_mass_edit();
+    int gx, gy, gz;
+    water_coords_from_index(index, &gx, &gy, &gz);
+    water_wake_cell_and_neighbors(gx, gy, gz);
 }
 
 static void water_mark_tile_and_neighbors_dirty(int tile) {
@@ -247,9 +337,12 @@ static bool water_set_mass(int gx, int gy, int gz, uint32_t mass) {
     if (mass > WATER_MAX_MASS) mass = WATER_MAX_MASS;
     int local; WaterChunk *chunk = water_chunk_for_index(index, mass != 0, &local);
     if (!chunk) return mass == 0;
-    if (chunk->mass[local] == mass && chunk->scratch[local] == mass) return true;
+    if (chunk->mass[local] == mass && chunk->scratch[local] == mass &&
+        chunk->velocity[local] == 0 && chunk->velocity_scratch[local] == 0) return true;
     chunk->mass[local] = (uint16_t)mass;
     chunk->scratch[local] = (uint16_t)mass;
+    chunk->velocity[local] = 0;
+    chunk->velocity_scratch[local] = 0;
     water_note_cpu_mass_edit();
     water_wake_cell_and_neighbors(gx, gy, gz);
     water_mark_tile_and_neighbors_dirty(water_tile_index_for_cell(gx, gy, gz));
@@ -295,6 +388,8 @@ static void water_remove_region(int minx, int maxx, int miny, int maxy,
                 if (!chunk) continue;
                 chunk->mass[local] = 0;
                 chunk->scratch[local] = 0;
+                chunk->velocity[local] = 0;
+                chunk->velocity_scratch[local] = 0;
                 water_note_cpu_mass_edit();
                 water_wake_cell_and_neighbors(x, y, z);
                 water_mark_tile_and_neighbors_dirty(water_tile_index_for_cell(x, y, z));
@@ -383,7 +478,11 @@ static void water_rebuild_dynamic_mask(void) {
                 {
                     int index = water_index_unchecked(gx, gy, gz), local;
                     WaterChunk *chunk = water_chunk_for_index(index, false, &local);
-                    if (chunk) chunk->dynamic_solid[local] = 1;
+                    if (chunk) {
+                        if (!chunk->previous_solid[local] && chunk->mass[local] > 0)
+                            water_add_impulse_index(index, v->vel, 0);
+                        chunk->dynamic_solid[local] = 1;
+                    }
                 }
     }
     uint64_t hash = UINT64_C(1469598103934665603);
@@ -404,6 +503,7 @@ static void water_rebuild_dynamic_mask(void) {
 static uint32_t water_displace_from_cell(int source_index) {
     uint32_t remaining = water_mass_index(source_index);
     if (remaining == 0) return 0;
+    WaterVelocity source_velocity = water_unpack_velocity(water_velocity_index(source_index));
     enum { BFS_SIDE = 17, BFS_CAPACITY = 17 * 17 * 17 };
     int queue[BFS_CAPACITY];
     uint8_t depth[BFS_CAPACITY], seen[BFS_CAPACITY];
@@ -429,8 +529,13 @@ static uint32_t water_displace_from_cell(int source_index) {
             if (amount > 0) {
                 int local; WaterChunk *chunk = water_chunk_for_index(index, true, &local);
                 if (!chunk) break;
+                WaterVelocity target_velocity = water_unpack_velocity(chunk->velocity[local]);
+                WaterVelocity mixed = water_mix_velocity(current, target_velocity,
+                                                          amount, source_velocity);
                 chunk->mass[local] = (uint16_t)(current + amount);
                 chunk->scratch[local] = chunk->mass[local];
+                chunk->velocity[local] = water_pack_velocity(mixed);
+                chunk->velocity_scratch[local] = chunk->velocity[local];
                 water_note_cpu_mass_edit();
                 remaining -= amount;
                 moved += amount;
@@ -453,6 +558,8 @@ static uint32_t water_displace_from_cell(int source_index) {
     int source_local; WaterChunk *source_chunk = water_chunk_for_index(source_index, true, &source_local);
     source_chunk->mass[source_local] = (uint16_t)remaining;
     source_chunk->scratch[source_local] = (uint16_t)remaining;
+    source_chunk->velocity[source_local] = 0;
+    source_chunk->velocity_scratch[source_local] = 0;
     water_note_cpu_mass_edit();
     return moved;
 }
@@ -505,24 +612,154 @@ static inline bool water_neighbor_tile_active(int tx, int ty, int tz) {
            (tz + WATER_TILE_COUNT_Z * ty)] != 0;
 }
 
-static inline uint32_t water_flow_chunks(const WaterChunk *from_chunk, int from,
-                                         const WaterChunk *to_chunk, int to,
-                                         bool edge_active, bool from_supported) {
-    if (!edge_active || !from_chunk || !to_chunk ||
-        !from_supported ||
-        from_chunk->static_solid[from] || from_chunk->dynamic_solid[from] ||
-        to_chunk->static_solid[to] || to_chunk->dynamic_solid[to]) return 0;
-    uint32_t a = from_chunk->scratch[from], b = to_chunk->scratch[to];
-    return a > b ? (a - b) >> 3 : 0;
+enum {
+    WATER_DIRECTION_XP = 0, WATER_DIRECTION_XM = 1,
+    WATER_DIRECTION_ZP = 2, WATER_DIRECTION_ZM = 3,
+    WATER_DIRECTION_UP = 4
+};
+
+static inline bool water_index_active(int index) {
+    int tile;
+    (void)water_chunk_local_for_index(index, &tile);
+    return waterSystem.batch_tile_active[tile] != 0;
 }
 
-static inline bool water_laterally_supported(const WaterChunk *below_chunk,
-                                              int below_local, int y) {
+static inline bool water_laterally_supported_index(int index) {
+    int y = index / (WATER_SIZE_X * WATER_SIZE_Z);
     if (y == 0) return true;
-    if (!below_chunk) return false;
-    if (below_chunk->static_solid[below_local] || below_chunk->dynamic_solid[below_local])
-        return true;
-    return below_chunk->scratch[below_local] >= WATER_LATERAL_SUPPORT_MASS;
+    int below = index - WATER_SIZE_X * WATER_SIZE_Z;
+    return water_cell_blocked_index(below) ||
+           water_scratch_index(below) >= WATER_LATERAL_SUPPORT_MASS;
+}
+
+static inline WaterVelocity water_effective_velocity_index(int index) {
+    uint32_t mass = water_scratch_index(index);
+    if (!mass || water_cell_blocked_index(index)) return (WaterVelocity){ 0, 0, 0 };
+    WaterVelocity velocity = water_unpack_velocity(water_velocity_scratch_index(index));
+    int y = index / (WATER_SIZE_X * WATER_SIZE_Z);
+    bool impact = y == 0;
+    if (y > 0) {
+        int below = index - WATER_SIZE_X * WATER_SIZE_Z;
+        if (water_cell_blocked_index(below)) {
+            impact = true;
+        } else if (water_scratch_index(below) >= WATER_LATERAL_SUPPORT_MASS) {
+            WaterVelocity below_velocity =
+                water_unpack_velocity(water_velocity_scratch_index(below));
+            impact = below_velocity.y >= -WATER_VELOCITY_IMPACT_THRESHOLD;
+        }
+    }
+    if (impact && velocity.y < 0) {
+        velocity.y = velocity.y < -WATER_VELOCITY_IMPACT_THRESHOLD
+            ? ((-velocity.y) * 3) / 4 : 0;
+    }
+    return velocity;
+}
+
+static inline int32_t water_velocity_for_direction(WaterVelocity velocity, int direction) {
+    if (direction == WATER_DIRECTION_XP) return velocity.x;
+    if (direction == WATER_DIRECTION_XM) return -velocity.x;
+    if (direction == WATER_DIRECTION_ZP) return velocity.z;
+    if (direction == WATER_DIRECTION_ZM) return -velocity.z;
+    return velocity.y;
+}
+
+static inline int32_t water_surface_splash_speed(int index) {
+    int32_t fall_speed = 0;
+    bool impact = false;
+    for (int depth = 0; depth < 8; ++depth) {
+        uint32_t mass = water_scratch_index(index);
+        if (!mass || water_cell_blocked_index(index)) return 0;
+        WaterVelocity velocity = water_unpack_velocity(water_velocity_scratch_index(index));
+        if (-velocity.y > fall_speed) fall_speed = -velocity.y;
+        int y = index / (WATER_SIZE_X * WATER_SIZE_Z);
+        if (y == 0) { impact = true; break; }
+        int below = index - WATER_SIZE_X * WATER_SIZE_Z;
+        if (water_cell_blocked_index(below)) { impact = true; break; }
+        if (water_scratch_index(below) < WATER_LATERAL_SUPPORT_MASS) return 0;
+        WaterVelocity below_velocity =
+            water_unpack_velocity(water_velocity_scratch_index(below));
+        if (below_velocity.y >= -WATER_VELOCITY_IMPACT_THRESHOLD) {
+            impact = true;
+            break;
+        }
+        index = below;
+    }
+    if (!impact || fall_speed <= WATER_VELOCITY_IMPACT_THRESHOLD) return 0;
+    uint32_t hash = (uint32_t)index * UINT32_C(747796405) + UINT32_C(2891336453);
+    if ((hash >> 30) != 0) return 0;
+    int32_t splash = fall_speed * 2;
+    return splash > WATER_VELOCITY_MAX ? WATER_VELOCITY_MAX : splash;
+}
+
+static inline uint32_t water_directional_flow(int from, int to, int direction) {
+    if (from < 0 || from >= WATER_CELL_COUNT || to < 0 || to >= WATER_CELL_COUNT ||
+        !water_index_active(from) || !water_index_active(to) ||
+        water_cell_blocked_index(from) || water_cell_blocked_index(to)) return 0;
+    uint32_t a = water_scratch_index(from), b = water_scratch_index(to);
+    if (!a || b >= WATER_MAX_MASS) return 0;
+    if (direction != WATER_DIRECTION_UP) {
+        int to_y = to / (WATER_SIZE_X * WATER_SIZE_Z);
+        if (to_y > 0) {
+            int below_to = to - WATER_SIZE_X * WATER_SIZE_Z;
+            uint32_t below_mass = water_scratch_index(below_to);
+            if (water_surface_splash_speed(below_to) > 0 ||
+                (below_mass < WATER_LATERAL_SUPPORT_MASS &&
+                 water_effective_velocity_index(below_to).y > 0)) return 0;
+        }
+    }
+    uint32_t base = 0;
+    if (direction != WATER_DIRECTION_UP && water_laterally_supported_index(from) && a > b)
+        base = (a - b) >> 3;
+    WaterVelocity effective_velocity = water_effective_velocity_index(from);
+    int32_t speed = water_velocity_for_direction(effective_velocity, direction);
+    int32_t surface_splash = water_surface_splash_speed(from);
+    bool rising_droplet = direction == WATER_DIRECTION_UP && surface_splash == 0 &&
+                          a < WATER_LATERAL_SUPPORT_MASS && effective_velocity.y > 0;
+    if (direction != WATER_DIRECTION_UP &&
+        (surface_splash > 0 ||
+         (a < WATER_LATERAL_SUPPORT_MASS && effective_velocity.y > 0))) return 0;
+    if (direction == WATER_DIRECTION_UP && surface_splash == 0 &&
+        effective_velocity.y > 0 && !rising_droplet) return 0;
+    if (direction == WATER_DIRECTION_UP) {
+        if (surface_splash > speed) speed = surface_splash;
+    } else {
+        int32_t outward_splash = effective_velocity.y > surface_splash
+            ? effective_velocity.y : surface_splash;
+        if (outward_splash > 0) speed += outward_splash / 2;
+    }
+    if (speed > WATER_VELOCITY_MAX) speed = WATER_VELOCITY_MAX;
+    bool splash_launch = direction == WATER_DIRECTION_UP && surface_splash > 0;
+    uint32_t momentum = rising_droplet ? a : (speed > 0
+        ? (uint32_t)(((uint64_t)a * (uint32_t)speed) / (127u * 4u)) : 0);
+    uint32_t flow = base + momentum;
+    uint32_t source_cap = rising_droplet ? a : (splash_launch ? a / 4u : a / 5u);
+    uint32_t destination_cap = (rising_droplet || splash_launch)
+        ? WATER_MAX_MASS - b : (WATER_MAX_MASS - b) / 5u;
+    if (flow > source_cap) flow = source_cap;
+    if (flow > destination_cap) flow = destination_cap;
+    return flow;
+}
+
+static inline WaterVelocity water_carried_velocity(int from, int direction) {
+    WaterVelocity velocity = water_effective_velocity_index(from);
+    if (direction == WATER_DIRECTION_UP) {
+        int32_t surface_splash = water_surface_splash_speed(from);
+        if (surface_splash > 0) {
+            if (surface_splash > velocity.y) velocity.y = surface_splash;
+            uint32_t hash = (uint32_t)from * UINT32_C(747796405) + UINT32_C(2891336453);
+            velocity.x = water_clamp_velocity(velocity.x + ((hash & 1u) ? 64 : -64));
+            velocity.z = water_clamp_velocity(velocity.z + ((hash & 2u) ? 64 : -64));
+        }
+    }
+    if (direction == WATER_DIRECTION_XP)
+        velocity.x = water_clamp_velocity(velocity.x + WATER_VELOCITY_HORIZONTAL_KICK);
+    else if (direction == WATER_DIRECTION_XM)
+        velocity.x = water_clamp_velocity(velocity.x - WATER_VELOCITY_HORIZONTAL_KICK);
+    else if (direction == WATER_DIRECTION_ZP)
+        velocity.z = water_clamp_velocity(velocity.z + WATER_VELOCITY_HORIZONTAL_KICK);
+    else if (direction == WATER_DIRECTION_ZM)
+        velocity.z = water_clamp_velocity(velocity.z - WATER_VELOCITY_HORIZONTAL_KICK);
+    return velocity;
 }
 
 static inline WaterChunk *water_neighbor_chunk(int tx, int ty, int tz) {
@@ -549,27 +786,40 @@ static void water_gravity_tiles(int start, int end, int worker_id, void *user) {
                 for (int lx = 0; lx < WATER_TILE_SIZE; ++lx) {
                     int local = lx + 8 * (lz + 8 * ly);
                     uint32_t source_mass = chunk->mass[local];
+                    WaterVelocity source_velocity =
+                        water_accelerated_velocity(chunk->velocity[local], source_mass);
                     if (chunk->static_solid[local] || chunk->dynamic_solid[local]) {
                         chunk->scratch[local] = (uint16_t)source_mass;
+                        chunk->velocity_scratch[local] = 0;
                         continue;
                     }
                     uint32_t down = 0, incoming = 0;
                     WaterChunk *down_owner = ly > 0 ? chunk : below_chunk;
                     int down_local = ly > 0 ? local - 64 : lx + 8 * (lz + 8 * 7);
-                    if (y > 0 && below_active && down_owner &&
+                    if (source_velocity.y <= 0 && y > 0 && below_active && down_owner &&
                         !down_owner->static_solid[down_local] && !down_owner->dynamic_solid[down_local]) {
                         uint32_t capacity = WATER_MAX_MASS - down_owner->mass[down_local];
                         down = source_mass < capacity ? source_mass : capacity;
                     }
                     WaterChunk *up_owner = ly < 7 ? chunk : above_chunk;
                     int up_local = ly < 7 ? local + 64 : lx + 8 * lz;
+                    WaterVelocity incoming_velocity = (WaterVelocity){ 0, 0, 0 };
                     if (y + 1 < WATER_SIZE_Y && above_active && up_owner &&
                         !up_owner->static_solid[up_local] && !up_owner->dynamic_solid[up_local]) {
                         uint32_t capacity = WATER_MAX_MASS - source_mass;
                         uint32_t above = up_owner->mass[up_local];
-                        incoming = above < capacity ? above : capacity;
+                        incoming_velocity = water_accelerated_velocity(
+                            up_owner->velocity[up_local], above);
+                        if (incoming_velocity.y <= 0)
+                            incoming = above < capacity ? above : capacity;
                     }
-                    chunk->scratch[local] = (uint16_t)(source_mass - down + incoming);
+                    uint32_t retained = source_mass - down;
+                    uint32_t next_mass = retained + incoming;
+                    WaterVelocity next_velocity = water_mix_velocity(
+                        retained, source_velocity, incoming, incoming_velocity);
+                    chunk->scratch[local] = (uint16_t)next_mass;
+                    chunk->velocity_scratch[local] = next_mass
+                        ? water_pack_velocity(next_velocity) : 0;
                 }
             }
         }
@@ -583,15 +833,6 @@ static void water_horizontal_tiles(int start, int end, int worker_id, void *user
         int tx, ty, tz;
         water_tile_coords(tile, &tx, &ty, &tz);
         WaterChunk *chunk = waterSystem.chunks[tile];
-        WaterChunk *xp = water_neighbor_chunk(tx + 1, ty, tz);
-        WaterChunk *xm = water_neighbor_chunk(tx - 1, ty, tz);
-        WaterChunk *zp = water_neighbor_chunk(tx, ty, tz + 1);
-        WaterChunk *zm = water_neighbor_chunk(tx, ty, tz - 1);
-        WaterChunk *below = water_neighbor_chunk(tx, ty - 1, tz);
-        WaterChunk *xp_below = water_neighbor_chunk(tx + 1, ty - 1, tz);
-        WaterChunk *xm_below = water_neighbor_chunk(tx - 1, ty - 1, tz);
-        WaterChunk *zp_below = water_neighbor_chunk(tx, ty - 1, tz + 1);
-        WaterChunk *zm_below = water_neighbor_chunk(tx, ty - 1, tz - 1);
         int x0 = tx * WATER_TILE_SIZE, y0 = ty * WATER_TILE_SIZE, z0 = tz * WATER_TILE_SIZE;
         bool tile_changed = false;
         for (int ly = 0; ly < WATER_TILE_SIZE; ++ly) {
@@ -600,58 +841,68 @@ static void water_horizontal_tiles(int start, int end, int worker_id, void *user
                 int z = z0 + lz;
                 for (int lx = 0; lx < WATER_TILE_SIZE; ++lx) {
                     int local = lx + 8 * (lz + 8 * ly);
+                    int x = x0 + lx;
+                    int index = x + WATER_SIZE_X * (z + WATER_SIZE_Z * y);
                     uint32_t next = chunk->scratch[local];
+                    uint32_t next_velocity = 0;
                     if (!chunk->static_solid[local] && !chunk->dynamic_solid[local]) {
-                        WaterChunk *owners[4] = {
-                            lx < 7 ? chunk : xp, lx > 0 ? chunk : xm,
-                            lz < 7 ? chunk : zp, lz > 0 ? chunk : zm
+                        int neighbors[5] = {
+                            x + 1 < WATER_SIZE_X ? index + 1 : -1,
+                            x > 0 ? index - 1 : -1,
+                            z + 1 < WATER_SIZE_Z ? index + WATER_SIZE_X : -1,
+                            z > 0 ? index - WATER_SIZE_X : -1,
+                            y + 1 < WATER_SIZE_Y ? index + WATER_SIZE_X * WATER_SIZE_Z : -1
                         };
-                        int neighbors[4] = {
-                            lx < 7 ? local + 1 : 8 * (lz + 8 * ly),
-                            lx > 0 ? local - 1 : 7 + 8 * (lz + 8 * ly),
-                            lz < 7 ? local + 8 : lx + 8 * (8 * ly),
-                            lz > 0 ? local - 8 : lx + 8 * (7 + 8 * ly)
-                        };
-                        bool enabled[4] = {
-                            lx + 1 < WATER_TILE_SIZE || water_neighbor_tile_active(tx + 1, ty, tz),
-                            lx > 0 || water_neighbor_tile_active(tx - 1, ty, tz),
-                            lz + 1 < WATER_TILE_SIZE || water_neighbor_tile_active(tx, ty, tz + 1),
-                            lz > 0 || water_neighbor_tile_active(tx, ty, tz - 1)
-                        };
-                        WaterChunk *below_owners[4] = {
-                            ly > 0 ? owners[0] : (lx < 7 ? below : xp_below),
-                            ly > 0 ? owners[1] : (lx > 0 ? below : xm_below),
-                            ly > 0 ? owners[2] : (lz < 7 ? below : zp_below),
-                            ly > 0 ? owners[3] : (lz > 0 ? below : zm_below)
-                        };
-                        int below_local = ly > 0 ? local - 64 : local + 448;
-                        int neighbor_below[4] = {
-                            ly > 0 ? neighbors[0] - 64 : neighbors[0] + 448,
-                            ly > 0 ? neighbors[1] - 64 : neighbors[1] + 448,
-                            ly > 0 ? neighbors[2] - 64 : neighbors[2] + 448,
-                            ly > 0 ? neighbors[3] - 64 : neighbors[3] + 448
-                        };
-                        WaterChunk *source_below = ly > 0 ? chunk : below;
-                        bool source_supported = water_laterally_supported(source_below,
-                                                                          below_local, y);
-                        if (x0 + lx + 1 >= WATER_SIZE_X) enabled[0] = false;
-                        if (x0 + lx <= 0) enabled[1] = false;
-                        if (z + 1 >= WATER_SIZE_Z) enabled[2] = false;
-                        if (z <= 0) enabled[3] = false;
-                        uint32_t outgoing = 0, incoming = 0;
-                        for (int n = 0; n < 4; ++n) {
-                            if (!enabled[n]) continue;
-                            bool neighbor_supported = water_laterally_supported(
-                                below_owners[n], neighbor_below[n], y);
-                            outgoing += water_flow_chunks(chunk, local, owners[n], neighbors[n],
-                                                          true, source_supported);
-                            incoming += water_flow_chunks(owners[n], neighbors[n], chunk, local,
-                                                          true, neighbor_supported);
+                        int below = y > 0 ? index - WATER_SIZE_X * WATER_SIZE_Z : -1;
+                        uint32_t outgoing[5] = { 0 }, incoming[5] = { 0 };
+                        uint32_t outgoing_sum = 0, incoming_sum = 0;
+                        for (int n = 0; n < 5; ++n) if (neighbors[n] >= 0) {
+                            outgoing[n] = water_directional_flow(index, neighbors[n], n);
+                            outgoing_sum += outgoing[n];
                         }
-                        next = chunk->scratch[local] - outgoing + incoming;
+                        static const int reverse[4] = {
+                            WATER_DIRECTION_XM, WATER_DIRECTION_XP,
+                            WATER_DIRECTION_ZM, WATER_DIRECTION_ZP
+                        };
+                        for (int n = 0; n < 4; ++n) if (neighbors[n] >= 0) {
+                            incoming[n] = water_directional_flow(neighbors[n], index, reverse[n]);
+                            incoming_sum += incoming[n];
+                        }
+                        if (below >= 0) {
+                            incoming[4] = water_directional_flow(below, index, WATER_DIRECTION_UP);
+                            incoming_sum += incoming[4];
+                        }
+                        uint32_t retained = chunk->scratch[local] - outgoing_sum;
+                        next = retained + incoming_sum;
+                        if (next) {
+                            WaterVelocity source_velocity = water_effective_velocity_index(index);
+                            int32_t momentum_x = (int32_t)retained * source_velocity.x;
+                            int32_t momentum_y = (int32_t)retained * source_velocity.y;
+                            int32_t momentum_z = (int32_t)retained * source_velocity.z;
+                            for (int n = 0; n < 4; ++n) if (incoming[n]) {
+                                WaterVelocity carried = water_carried_velocity(neighbors[n], reverse[n]);
+                                momentum_x += (int32_t)incoming[n] * carried.x;
+                                momentum_y += (int32_t)incoming[n] * carried.y;
+                                momentum_z += (int32_t)incoming[n] * carried.z;
+                            }
+                            if (incoming[4]) {
+                                WaterVelocity carried = water_carried_velocity(below, WATER_DIRECTION_UP);
+                                momentum_x += (int32_t)incoming[4] * carried.x;
+                                momentum_y += (int32_t)incoming[4] * carried.y;
+                                momentum_z += (int32_t)incoming[4] * carried.z;
+                            }
+                            WaterVelocity velocity = {
+                                (momentum_x / (int32_t)next) * 7 / 8,
+                                (momentum_y / (int32_t)next) * 7 / 8,
+                                (momentum_z / (int32_t)next) * 7 / 8
+                            };
+                            next_velocity = water_pack_velocity(velocity);
+                        }
                     }
-                    if (chunk->mass[local] != next) tile_changed = true;
+                    if (chunk->mass[local] != next ||
+                        chunk->velocity[local] != next_velocity) tile_changed = true;
                     chunk->mass[local] = (uint16_t)next;
+                    chunk->velocity[local] = next_velocity;
                 }
             }
         }
@@ -663,7 +914,10 @@ static void water_horizontal_tiles(int start, int end, int worker_id, void *user
 
 static void water_sync_tile_buffers(int tile) {
     WaterChunk *chunk = waterSystem.chunks[tile];
-    if (chunk) memcpy(chunk->scratch, chunk->mass, sizeof(chunk->mass));
+    if (chunk) {
+        memcpy(chunk->scratch, chunk->mass, sizeof(chunk->mass));
+        memcpy(chunk->velocity_scratch, chunk->velocity, sizeof(chunk->velocity));
+    }
 }
 
 static void water_update_tile_sleep(int still_increment) {
@@ -706,6 +960,8 @@ static void water_reclaim_empty_chunks(void) {
         waterSystem.tile_still_steps[tile] = 0;
         waterSystem.tile_changed[tile] = 0;
         waterSystem.tile_wet_cells[tile] = 0;
+        waterSystem.tile_moving_cells[tile] = 0;
+        waterSystem.tile_max_component_speed[tile] = 0;
         waterSystem.tile_visible_mass[tile] = 0;
         waterSystem.tile_trapped_mass[tile] = 0;
         waterSystem.tile_stats_dirty[tile] = 0;
@@ -719,6 +975,8 @@ static void water_recompute_tile_stats(int tile) {
     WaterChunk *chunk = waterSystem.chunks[tile];
     if (!chunk) {
         waterSystem.tile_wet_cells[tile] = 0;
+        waterSystem.tile_moving_cells[tile] = 0;
+        waterSystem.tile_max_component_speed[tile] = 0;
         waterSystem.tile_visible_mass[tile] = 0;
         waterSystem.tile_trapped_mass[tile] = 0;
         waterSystem.tile_stats_dirty[tile] = 0;
@@ -727,7 +985,8 @@ static void water_recompute_tile_stats(int tile) {
     int tx, ty, tz;
     water_tile_coords(tile, &tx, &ty, &tz);
     int x0 = tx * WATER_TILE_SIZE, y0 = ty * WATER_TILE_SIZE, z0 = tz * WATER_TILE_SIZE;
-    uint16_t wet = 0;
+    uint16_t wet = 0, moving = 0;
+    uint8_t max_speed = 0;
     uint64_t visible = 0, trapped = 0;
     for (int ly = 0; ly < WATER_TILE_SIZE; ++ly)
         for (int lz = 0; lz < WATER_TILE_SIZE; ++lz) {
@@ -737,35 +996,53 @@ static void water_recompute_tile_stats(int tile) {
                 int local = lx + 8 * (lz + 8 * ly);
                 uint32_t mass = chunk->mass[local];
                 if (!mass) continue;
+                WaterVelocity velocity = water_unpack_velocity(chunk->velocity[local]);
+                int speed_x = velocity.x < 0 ? -velocity.x : velocity.x;
+                int speed_y = velocity.y < 0 ? -velocity.y : velocity.y;
+                int speed_z = velocity.z < 0 ? -velocity.z : velocity.z;
+                int speed = speed_x > speed_y ? speed_x : speed_y;
+                if (speed_z > speed) speed = speed_z;
+                if (speed > 0) moving++;
+                if (speed > max_speed) max_speed = (uint8_t)speed;
                 if (water_cell_blocked_index(i)) trapped += mass;
                 else { wet++; visible += mass; }
             }
         }
     waterSystem.tile_wet_cells[tile] = wet;
+    waterSystem.tile_moving_cells[tile] = moving;
+    waterSystem.tile_max_component_speed[tile] = max_speed;
     waterSystem.tile_visible_mass[tile] = visible;
     waterSystem.tile_trapped_mass[tile] = trapped;
     waterSystem.tile_stats_dirty[tile] = 0;
 }
 
 static void water_refresh_diagnostics(void) {
-    uint32_t wet = 0, active = 0;
+    uint32_t wet = 0, active = 0, moving = 0, max_speed = 0;
     uint64_t visible = 0, trapped = 0;
     for (int r = 0; r < waterSystem.resident_tile_count; ++r) {
         int tile = waterSystem.resident_tile_ids[r];
         if (waterSystem.tile_stats_dirty[tile]) water_recompute_tile_stats(tile);
         active += waterSystem.tile_active[tile] != 0;
         wet += waterSystem.tile_wet_cells[tile];
+        moving += waterSystem.tile_moving_cells[tile];
+        if (waterSystem.tile_max_component_speed[tile] > max_speed)
+            max_speed = waterSystem.tile_max_component_speed[tile];
         visible += waterSystem.tile_visible_mass[tile];
         trapped += waterSystem.tile_trapped_mass[tile];
     }
     waterSystem.diagnostics.active_tiles = active;
     waterSystem.diagnostics.active_cells = active * (WATER_TILE_SIZE * WATER_TILE_SIZE * WATER_TILE_SIZE);
     waterSystem.diagnostics.wet_cells = wet;
+    waterSystem.diagnostics.moving_cells = moving;
+    waterSystem.diagnostics.max_component_speed = max_speed;
     waterSystem.diagnostics.visible_mass = visible;
     waterSystem.diagnostics.trapped_mass = trapped;
     waterSystem.diagnostics.resident_chunks = waterSystem.resident_tile_count;
     waterSystem.diagnostics.resident_bytes =
         (uint64_t)waterSystem.resident_tile_count * (uint64_t)sizeof(WaterChunk);
+    waterSystem.diagnostics.velocity_bytes =
+        (uint64_t)waterSystem.resident_tile_count * WATER_CHUNK_CELLS *
+        (sizeof(uint32_t) * 3u);
 }
 
 static void water_step_batch(float fixed_dt, int fixed_steps) {
@@ -794,6 +1071,7 @@ static void water_step_batch(float fixed_dt, int fixed_steps) {
     if (gpu_requested) for (int r = 0; r < waterSystem.resident_tile_count; ++r) {
         WaterChunk *chunk = waterSystem.chunks[waterSystem.resident_tile_ids[r]];
         memcpy(chunk->batch_snapshot, chunk->mass, sizeof(chunk->mass));
+        memcpy(chunk->velocity_batch_snapshot, chunk->velocity, sizeof(chunk->velocity));
     }
     if (gpu_requested && water_gpu_run_batch(fixed_steps)) {
         for (int job = 0; job < waterSystem.active_tile_count; ++job) {
@@ -807,7 +1085,8 @@ static void water_step_batch(float fixed_dt, int fixed_steps) {
                     int row = x0 + WATER_SIZE_X * ((z0 + lz) + WATER_SIZE_Z * (y0 + ly));
                     for (int lx = 0; lx < WATER_TILE_SIZE; ++lx) {
                         int local = lx + 8 * (lz + 8 * ly);
-                        if (chunk->mass[local] != chunk->batch_snapshot[local]) {
+                        if (chunk->mass[local] != chunk->batch_snapshot[local] ||
+                            chunk->velocity[local] != chunk->velocity_batch_snapshot[local]) {
                             waterSystem.tile_changed[tile] = 1;
                             break;
                         }
@@ -833,6 +1112,9 @@ static void water_step_batch(float fixed_dt, int fixed_steps) {
             WaterChunk *chunk = waterSystem.chunks[waterSystem.resident_tile_ids[r]];
             memcpy(chunk->mass, chunk->batch_snapshot, sizeof(chunk->mass));
             memcpy(chunk->scratch, chunk->batch_snapshot, sizeof(chunk->mass));
+            memcpy(chunk->velocity, chunk->velocity_batch_snapshot, sizeof(chunk->velocity));
+            memcpy(chunk->velocity_scratch, chunk->velocity_batch_snapshot,
+                   sizeof(chunk->velocity));
         }
         waterSystem.cpu_scratch_valid = true;
     }
@@ -893,10 +1175,21 @@ static void water_disturb(Vector3 world_position, Vector3 direction, uint32_t li
     WaterChunk *source_chunk = water_chunk_for_index(source, false, &source_local);
     WaterChunk *target_chunk = water_chunk_for_index(target, true, &target_local);
     if (!source_chunk || !target_chunk) return;
+    WaterVelocity source_velocity = water_unpack_velocity(source_chunk->velocity[source_local]);
+    WaterVelocity target_velocity = water_unpack_velocity(target_chunk->velocity[target_local]);
+    WaterVelocity mixed_velocity = water_mix_velocity(target_chunk->mass[target_local],
+                                                       target_velocity, amount,
+                                                       source_velocity);
     source_chunk->mass[source_local] -= (uint16_t)amount;
     source_chunk->scratch[source_local] = source_chunk->mass[source_local];
+    if (!source_chunk->mass[source_local]) source_chunk->velocity[source_local] = 0;
+    source_chunk->velocity_scratch[source_local] = source_chunk->velocity[source_local];
     target_chunk->mass[target_local] += (uint16_t)amount;
     target_chunk->scratch[target_local] = target_chunk->mass[target_local];
+    target_chunk->velocity[target_local] = water_pack_velocity(mixed_velocity);
+    target_chunk->velocity_scratch[target_local] = target_chunk->velocity[target_local];
+    water_add_impulse_index(source, direction, 0);
+    water_add_impulse_index(target, direction, 0);
     water_note_cpu_mass_edit();
     water_wake_cell_and_neighbors(gx, gy, gz);
     water_wake_cell_and_neighbors(tx, ty, tz);

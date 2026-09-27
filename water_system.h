@@ -17,7 +17,7 @@
 #define WATER_CELL_COUNT (WATER_SIZE_X * WATER_SIZE_Y * WATER_SIZE_Z)
 #define WATER_MAX_MASS UINT32_C(65535)
 #define WATER_LATERAL_SUPPORT_MASS UINT32_C(60000)
-#define WATER_RENDER_MIN_MASS UINT32_C(256)
+#define WATER_RENDER_MIN_MASS UINT32_C(128)
 #define WATER_TILE_SIZE 8
 #define WATER_CHUNK_CELLS (WATER_TILE_SIZE * WATER_TILE_SIZE * WATER_TILE_SIZE)
 #define WATER_TILE_COUNT_X (WATER_SIZE_X / WATER_TILE_SIZE)
@@ -25,6 +25,10 @@
 #define WATER_TILE_COUNT_Z (WATER_SIZE_Z / WATER_TILE_SIZE)
 #define WATER_TILE_COUNT (WATER_TILE_COUNT_X * WATER_TILE_COUNT_Y * WATER_TILE_COUNT_Z)
 #define WATER_SLEEP_STEPS 30
+#define WATER_VELOCITY_GRAVITY 12
+#define WATER_VELOCITY_IMPACT_THRESHOLD 16
+#define WATER_VELOCITY_HORIZONTAL_KICK 8
+#define WATER_VELOCITY_MAX 127
 
 typedef enum WaterCellKind {
     WORLD_CELL_EMPTY = 0,
@@ -49,6 +53,9 @@ typedef struct WaterDiagnostics {
     uint32_t processed_cells;
     uint32_t resident_chunks;
     uint64_t resident_bytes;
+    uint64_t velocity_bytes;
+    uint32_t moving_cells;
+    uint32_t max_component_speed;
     double last_obstacle_ms;
     double last_solver_ms;
     double last_maintenance_ms;
