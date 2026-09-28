@@ -1248,22 +1248,32 @@ inline void amrSphereTreeCollisions(uint gid, device const ParticleState *partic
                                     device const AmrControl *amr,
                                     device const int *control,
                                     constant GpuUniforms &u) {
-    if (aabb->mode != 3u || gid >= uint(u.voxel_count)) return;
+    if (aabb->mode != 3u || gid >= amr->total_stage_count) return;
     VoxelState queryVoxel = voxel[gid];
-    uint parent = as_type<uint>(amrState[gid].latest[7]);
-    if (parent < amr->total_stage_count || queryVoxel.flags.x == 0 || queryVoxel.flags.w == 0 ||
-        queryVoxel.flags.y != 0 || queryVoxel.flags.z != 0) return;
+    bool hierarchyQuery = gid >= uint(u.voxel_count);
+    uint parent = hierarchyQuery ? as_type<uint>(queryVoxel.pos_rest_edge.x)
+                                 : as_type<uint>(amrState[gid].latest[7]);
+    bool externalQuery = !hierarchyQuery && parent >= amr->total_stage_count &&
+        queryVoxel.flags.x != 0 && queryVoxel.flags.w != 0 &&
+        queryVoxel.flags.y == 0 && queryVoxel.flags.z == 0;
+    if (!externalQuery && !amrSphereTerminal(gid, queryVoxel, voxel, amrState, amr, u)) return;
     float3 queryPosition[9]; uint queryParticle[8];
     if (!loadSphereShape(gid, particle, voxel, control, queryPosition, queryParticle)) return;
     float queryProxyRadius[9];
     loadSphereRadii(queryVoxel.pos_rest_edge.w, queryParticle, particle, queryProxyRadius);
     int queryBody = sphereShapeBody(queryVoxel, collisionMeta, control);
     float queryRadius = 0.5f * queryVoxel.pos_rest_edge.w;
+    uint queryRoot = as_type<uint>(amrState[gid].previous[6]);
     uint root = uint(u.voxel_count);
-    if (root >= amr->total_stage_count) return;
-    uint stack[64]; uint stackSize = 1u; stack[0] = root;
-    atomicMaxUint(&aabb->max_stack_depth, stackSize);
-    while (stackSize > 0u) {
+    while (root < amr->total_stage_count) {
+      uint nextRoot = voxel[root].lifecycle.x;
+      // AMR pairs are evaluated once: the lower root owns the query side.
+      // External fixed-scale voxels have no root and visit every active body.
+      if (root != queryRoot && (queryRoot >= amr->total_stage_count || queryRoot < root) &&
+          voxel[root].flags.w != 0) {
+       uint stack[64]; uint stackSize = 1u; stack[0] = root;
+       atomicMaxUint(&aabb->max_stack_depth, stackSize);
+       while (stackSize > 0u) {
         uint nodeId = stack[--stackSize];
         if (nodeId >= amr->total_stage_count) {
             atomic_fetch_add_explicit(&aabb->empty_reject_count, 1u, memory_order_relaxed);
@@ -1322,6 +1332,9 @@ inline void amrSphereTreeCollisions(uint gid, device const ParticleState *partic
         if (contactCount > 0)
             atomic_fetch_add_explicit(&aabb->contact_count, uint(contactCount),
                                       memory_order_relaxed);
+       }
+      }
+      root = nextRoot;
     }
 }
 
@@ -1543,7 +1556,9 @@ inline void amrSelect(uint gid, device const ParticleState *particle,
     uint stage = uint(u.voxel_count) + gid;
     VoxelState node = voxel[stage];
     if (node.flags.w == 0 || amrOccupancy(node) != 2u || amrRealMask(node) != 0xffu) return;
-    float rootEdge = voxel[uint(u.voxel_count)].pos_rest_edge.w;
+    uint rootStage = as_type<uint>(state[stage].previous[6]);
+    if (rootStage >= amr->total_stage_count) return;
+    float rootEdge = voxel[rootStage].pos_rest_edge.w;
     float level = log2(max(rootEdge/max(node.pos_rest_edge.w,u.vgs_epsilon),1.0f));
     float threshold = amr->curvature_threshold * pow(amr->threshold_factor, level);
     bool deformed = u.integer_padding_1 != 0 &&

@@ -89,6 +89,7 @@ typedef struct DebugRunState {
     float effective_pbd_size;
     bool active_cube_drop;
     bool adaptive_cube_drop;
+    bool amr_multiple_groups_test;
     bool arbitrary_shape_drop;
     bool amr_projectile_test;
     uint64_t amr_projectile_identity;
@@ -326,6 +327,7 @@ static bool debug_setup_active_cube_drop(DebugRunState *state);
 static bool debug_setup_adaptive_cube_drop(DebugRunState *state);
 static bool debug_setup_adaptive_l_drop(DebugRunState *state);
 static bool debug_setup_amr_projectile_impact(DebugRunState *state);
+static bool debug_setup_amr_multiple_groups(DebugRunState *state);
 static bool debug_setup_rip_test(DebugRunState *state);
 static bool debug_setup_vgs_refinement(DebugRunState *state);
 static bool debug_setup_vgs_coarsening(DebugRunState *state);
@@ -361,6 +363,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "adaptive-cube-drop", "Curvature-driven octree cube drop", debug_setup_adaptive_cube_drop, 240, 60 },
     { "adaptive-l-drop", "Occupancy-masked adaptive L-shaped drop", debug_setup_adaptive_l_drop, 480, 120 },
     { "amr-projectile-impact", "Fire one finest-scale voxel into adaptive terminal spheres", debug_setup_amr_projectile_impact, 240, 120 },
+    { "amr-multiple-groups", "Two independent active groups compile as two AMR bodies", debug_setup_amr_multiple_groups, 120, 60 },
     { "rip-test", "Pull both faces of an adaptive cube to test fracture", debug_setup_rip_test, 480, 60 },
     { "vgs-refinement", "Drop a root VGS cube, then refine into eight shared-particle children", debug_setup_vgs_refinement, 300, 180 },
     { "vgs-coarsening", "Drop eight child VGS cubes, then project them onto one root", debug_setup_vgs_coarsening, 300, 180 },
@@ -2456,6 +2459,84 @@ static bool debug_setup_amr_projectile_impact(DebugRunState *state)
     state->camera.position = (Vector3){ -15.0f, 15.5f, 18.0f };
     state->camera.target = (Vector3){ -0.5f, 11.5f, 0.0f };
     debug_capture(state, "phase-02-projectile-launched.png", "projectile-launched", 0);
+    return true;
+}
+
+static bool debug_setup_amr_multiple_groups(DebugRunState *state)
+{
+    debug_reset_world();
+    pbdSolidVoxelSize = 0.5f;
+    const Color colors[2] = {{245,145,45,255}, {65,180,255,255}};
+    int groups[2][8];
+    for (int body = 0; body < 2; ++body) {
+        int *lattice = groups[body];
+        for (int i = 0; i < 8; ++i) lattice[i] = -1;
+        float origin_x = body ? 0.0f : -1.5f;
+        for (int y = 0; y < 2; ++y) for (int z = 0; z < 2; ++z)
+            for (int x = 0; x < 2; ++x) {
+                int flat = x + 2 * z + 4 * y;
+                int world = addVoxel(origin_x + ((float)x + 0.5f) * pbdSolidVoxelSize,
+                                     8.0f + ((float)y + 0.5f) * pbdSolidVoxelSize,
+                                     ((float)z + 0.5f) * pbdSolidVoxelSize,
+                                     false, true, colors[body], 0);
+                if (world < 0) {
+                    debug_add_failure(state, "unable to create AMR body %d", body);
+                    return false;
+                }
+                voxels[world].debugClusterTag = DEBUG_TEST_TAG;
+                lattice[flat] = world;
+                if (x) debug_glue_pbd_faces(world, lattice[flat - 1], 1);
+                if (z) debug_glue_pbd_faces(world, lattice[flat - 2], 5);
+                if (y) debug_glue_pbd_faces(world, lattice[flat - 4], 3);
+            }
+    }
+    rebuild_voxel_hash();
+    rebuild_static_hash_if_dirty();
+    rebuild_all_voxel_surfaces();
+    refresh_static_voxel_beliefs();
+    meshDirty = true;
+    rebuild_particle_collision_metadata();
+    bool built = amr_build_body_from_cluster(groups[0], 8) &&
+                 amr_build_body_from_cluster(groups[1], 8);
+    if (!built || amrBodyCount != 2 ||
+        amrBodies[0].lifecycle != AMR_BODY_ACTIVE ||
+        amrBodies[1].lifecycle != AMR_BODY_ACTIVE) {
+        debug_add_failure(state, "expected two active AMR bodies, got %d", amrBodyCount);
+        return false;
+    }
+    for (int slot = 0; slot < 8; ++slot) voxels[groups[0][slot]].sleeping = true;
+    if (!amr_reconcile_body_registry() ||
+        amrBodies[0].lifecycle != AMR_BODY_SLEEPING ||
+        vgs_node_constraints_enabled(&vgsHierarchy.nodes[amrBodies[0].root_node])) {
+        debug_add_failure(state, "AMR body did not enter the sleeping lifecycle cleanly");
+        return false;
+    }
+    for (int slot = 0; slot < 8; ++slot) voxels[groups[0][slot]].sleeping = false;
+    if (!amr_reconcile_body_registry() ||
+        amrBodies[0].lifecycle != AMR_BODY_ACTIVE ||
+        !vgs_node_constraints_enabled(&vgsHierarchy.nodes[amrBodies[0].root_node])) {
+        debug_add_failure(state, "AMR body did not wake with its constraints restored");
+        return false;
+    }
+    for (int body = 0; body < 2; ++body)
+        for (int slot = 0; slot < 8; ++slot) {
+            Voxel *voxel = &voxels[groups[body][slot]];
+            voxel->vel.x = body ? -2.0f : 2.0f;
+            for (int c = 0; c < 8; ++c)
+                voxel->particles[c]->vel.x = voxel->vel.x;
+        }
+    debugAdaptiveOctree = true;
+    state->active_cube_drop = true;
+    state->adaptive_cube_drop = true;
+    state->amr_multiple_groups_test = true;
+    state->expected_voxels = 16;
+    state->expected_static_leftovers = 0;
+    state->effective_pbd_size = pbdSolidVoxelSize;
+    state->activation_succeeded = true;
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_set_initial_centroid(state);
+    state->camera.position = (Vector3){10.0f, 8.0f, 14.0f};
+    state->camera.target = (Vector3){0.0f, 5.0f, 0.0f};
     return true;
 }
 
@@ -4601,7 +4682,7 @@ static void debug_validate_step(DebugRunState *state, int step)
                               sample.tagged_rendered, state->expected_voxels);
         }
     }
-    if (state->adaptive_cube_drop) {
+    if (state->adaptive_cube_drop && !state->amr_multiple_groups_test) {
         if (state->amr_projectile_test) {
             int projectile_index = find_voxel_by_identity(state->amr_projectile_identity);
             if (projectile_index < 0) {
@@ -4692,6 +4773,8 @@ static void debug_validate_step(DebugRunState *state, int step)
                 total_mass += 1.0 / sim_particles[i]->base_inv_mass;
         for (int i = 0; i < vgsHierarchy.node_count; ++i) {
             VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+            if (node->body_id >= 0 && node->body_id < amrBodyCount &&
+                amrBodies[node->body_id].lifecycle == AMR_BODY_RETIRED) continue;
             for (int c = 0; c < 8; ++c) {
                 int child = node->children[c];
                 if (child == VGS_CHILD_EMPTY) continue;
@@ -5498,6 +5581,17 @@ static void debug_finalize_validation(DebugRunState *state)
     if (!state->activation_succeeded) {
         debug_add_failure(state, "scenario did not complete its activation stage");
     }
+    if (state->amr_multiple_groups_test) {
+        int active_bodies = 0;
+        for (int body_id = 0; body_id < amrBodyCount; ++body_id)
+            active_bodies += amrBodies[body_id].valid &&
+                amrBodies[body_id].lifecycle == AMR_BODY_ACTIVE;
+        if (active_bodies != 2)
+            debug_add_failure(state, "expected two active AMR bodies at completion, got %d",
+                              active_bodies);
+        if (!state->amr_aabb_contact_observed)
+            debug_add_failure(state, "independent AMR bodies registered no collision contact");
+    }
     if (state->amr_projectile_test) {
         if (state->amr_projectile_tunneled)
             debug_add_failure(state, "high-speed projectile crossed the far face before contact");
@@ -5715,6 +5809,15 @@ static bool debug_write_report(DebugRunState *state)
         fprintf(file, "  \"vgsTemporalCurvature\": {\"samples\": %d, \"redAtPerSecondSquared\": %.9g, \"lastStepMax\": %.9g, \"lastStepMean\": %.9g},\n",
                 debugVgsTemporalSampleCount, (double)VGS_TEMPORAL_CURVATURE_RED_AT,
                 (double)debugVgsTemporalLastMax, (double)debugVgsTemporalLastMean);
+        int active_amr_bodies = 0, sleeping_amr_bodies = 0, retired_amr_bodies = 0;
+        for (int body_id = 0; body_id < amrBodyCount; ++body_id) {
+            if (!amrBodies[body_id].valid) continue;
+            active_amr_bodies += amrBodies[body_id].lifecycle == AMR_BODY_ACTIVE;
+            sleeping_amr_bodies += amrBodies[body_id].lifecycle == AMR_BODY_SLEEPING;
+            retired_amr_bodies += amrBodies[body_id].lifecycle == AMR_BODY_RETIRED;
+        }
+        fprintf(file, "  \"amrBodies\": {\"total\": %d, \"active\": %d, \"sleeping\": %d, \"retired\": %d},\n",
+                amrBodyCount, active_amr_bodies, sleeping_amr_bodies, retired_amr_bodies);
         fprintf(file, "  \"curvatureByLevelCsv\": \"%s\",\n", state->curvature_levels_path);
         if (state->arbitrary_shape_drop)
             fprintf(file, "  \"occupancyByLevelCsv\": \"%s\",\n", state->occupancy_levels_path);

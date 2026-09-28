@@ -606,8 +606,7 @@ static bool gpu_pack_world(void) {
         g->velocity_rest_volume[2] = v->vel.z; g->velocity_rest_volume[3] = v->rest_volume;
         // Adaptive Metal keeps fracture state and tree activity independent:
         // flags.x is intact VGS state and flags.w is active DOF state.
-        g->flags[0] = vgsHierarchy.adaptive ? (v->vgs_active ? 1 : 0) :
-            ((v->sleeping || !v->vgs_active) ? 0 : 1);
+        g->flags[0] = (v->sleeping || !v->vgs_active) ? 0 : 1;
         g->flags[1] = v->isBullet ? 1 : 0;
         g->flags[2] = v->type; g->flags[3] = v->simulate_dofs ? 1 : 0;
         VoxelWorldBounds bounds;
@@ -642,8 +641,12 @@ static bool gpu_pack_world(void) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
         GpuVoxelState *g = &gpuPhysics.voxel_stage[gpuPhysics.dynamic_voxel_count + i];
         memset(g, 0, sizeof(*g));
-        g->flags[0] = node->vgs_enabled ? 1 : 0;
-        g->flags[3] = node->active ? 1 : 0;
+        bool body_active = node->body_id < 0 ||
+            (node->body_id < amrBodyCount && amrBodies[node->body_id].valid &&
+             amrBodies[node->body_id].lifecycle == AMR_BODY_ACTIVE);
+        g->flags[0] = node->vgs_enabled && body_active ? 1 : 0;
+        g->flags[2] = body_active ? 0 : 1;
+        g->flags[3] = node->active && body_active ? 1 : 0;
         uint32_t parent_stage = node->parent >= 0
             ? (uint32_t)(gpuPhysics.dynamic_voxel_count + node->parent) : UINT32_MAX;
         memcpy(&g->pos_rest_edge[0], &parent_stage, sizeof(parent_stage));
@@ -674,6 +677,27 @@ static bool gpu_pack_world(void) {
             history->latest[6] = vgsHierarchy.node_history[i].curvature;
         }
         memcpy(&history->latest[7], &parent_stage, sizeof(parent_stage));
+        int root_node = amr_root_node_for_body(node->body_id);
+        uint32_t root_stage = root_node >= 0
+            ? (uint32_t)(gpuPhysics.dynamic_voxel_count + root_node) : UINT32_MAX;
+        memcpy(&history->previous[6], &root_stage, sizeof(root_stage));
+    }
+    // Root nodes form a compact linked list for GPU forest traversal.  This
+    // avoids a new buffer and lets every external or terminal shape cull once
+    // against each AMR body rather than assuming node zero is the only root.
+    for (int body_id = 0; body_id < amrBodyCount; ++body_id) {
+        AmrBody *body = &amrBodies[body_id];
+        if (!body->valid || body->root_node < 0) continue;
+        uint32_t next_root = UINT32_MAX;
+        for (int next = body_id + 1; next < amrBodyCount; ++next) {
+            if (amrBodies[next].valid && amrBodies[next].root_node >= 0) {
+                next_root = (uint32_t)(gpuPhysics.dynamic_voxel_count +
+                                       amrBodies[next].root_node);
+                break;
+            }
+        }
+        gpuPhysics.voxel_stage[gpuPhysics.dynamic_voxel_count + body->root_node]
+            .lifecycle[0] = next_root;
     }
     for (int i = 0; i < vgsHierarchy.node_count; ++i) {
         uint32_t parent_stage = (uint32_t)(gpuPhysics.dynamic_voxel_count + i);
@@ -685,6 +709,14 @@ static bool gpu_pack_world(void) {
                 memcpy(&gpuPhysics.amr_state_stage[dynamic_id].latest[7],
                        &parent_stage, sizeof(parent_stage));
         }
+    }
+    for (int dynamic_id = 0; dynamic_id < gpuPhysics.dynamic_voxel_count; ++dynamic_id) {
+        int world = gpuPhysics.compact_to_voxel[dynamic_id];
+        int root_node = amr_root_node_for_body(voxels[world].amr_body_id);
+        uint32_t root_stage = root_node >= 0
+            ? (uint32_t)(gpuPhysics.dynamic_voxel_count + root_node) : UINT32_MAX;
+        memcpy(&gpuPhysics.amr_state_stage[dynamic_id].previous[6],
+               &root_stage, sizeof(root_stage));
     }
 
     // The dispatch list is compact even though the voxel array remains stable
@@ -1557,12 +1589,14 @@ static bool gpu_dispatch_substep(float sub_dt) {
             ok = gpu_dispatch(GPU_MODE_AABB_BOUNDS, total_stage);
         }
         if (ok && aabb_mode == GPU_AABB_MODE_TREE) {
-            for (int level = vgsHierarchy.levels - 1; ok && level >= 0; --level) {
-                gpu_set_vgs_layer(gpuPhysics.dynamic_voxel_count +
-                                  vgsHierarchy.level_start[level],
-                                  vgsHierarchy.level_count[level]);
-                ok = gpu_dispatch(GPU_MODE_AABB_REDUCE,
-                                  vgsHierarchy.level_count[level]);
+            for (int body_id = 0; ok && body_id < amrBodyCount; ++body_id) {
+              AmrBody *body = &amrBodies[body_id];
+              if (!body->valid || body->lifecycle != AMR_BODY_ACTIVE) continue;
+              for (int level = body->levels - 1; ok && level >= 0; --level) {
+                gpu_set_vgs_layer(gpuPhysics.dynamic_voxel_count + body->level_start[level],
+                                  body->level_count[level]);
+                ok = gpu_dispatch(GPU_MODE_AABB_REDUCE, body->level_count[level]);
+              }
             }
             gpu_set_vgs_layer(0, total_stage);
         }
@@ -1579,8 +1613,7 @@ static bool gpu_dispatch_substep(float sub_dt) {
             ok = gpu_dispatch(GPU_MODE_AABB_TREE_COLLISIONS,
                               gpuPhysics.dynamic_voxel_count);
         else
-            ok = gpu_dispatch(GPU_MODE_AMR_SPHERE_TREE_COLLISIONS,
-                              gpuPhysics.dynamic_voxel_count);
+            ok = gpu_dispatch(GPU_MODE_AMR_SPHERE_TREE_COLLISIONS, total_stage);
     }
     ok = ok && gpu_dispatch_indirect(GPU_MODE_APPLY);
     // Leaves and hierarchy nodes share the same particle correction buffer.
@@ -1626,13 +1659,16 @@ static bool gpu_dispatch_amr(float sub_dt, bool use_deformation) {
            gpu_dispatch(GPU_MODE_AMR_TRANSITION_SCATTER, gpuPhysics.hierarchy_node_count) &&
            gpu_dispatch(GPU_MODE_AMR_TRANSITION_APPLY, particles) &&
            gpu_dispatch(GPU_MODE_AMR_TOPOLOGY_APPLY, gpuPhysics.hierarchy_node_count);
-    for (int level = 0; ok && level < vgsHierarchy.levels; ++level) {
-        gpu_set_vgs_layer(gpuPhysics.dynamic_voxel_count + vgsHierarchy.level_start[level],
-                          vgsHierarchy.level_count[level]);
+    for (int body_id = 0; ok && body_id < amrBodyCount; ++body_id) {
+      AmrBody *body = &amrBodies[body_id];
+      if (!body->valid || body->lifecycle != AMR_BODY_ACTIVE) continue;
+      for (int level = 0; ok && level < body->levels; ++level) {
+        gpu_set_vgs_layer(gpuPhysics.dynamic_voxel_count + body->level_start[level],
+                          body->level_count[level]);
         ok = gpu_dispatch(GPU_MODE_AMR_TRANSITION_CLEAR, particles) &&
-             gpu_dispatch(GPU_MODE_AMR_DORMANT_SCATTER,
-                          vgsHierarchy.level_count[level]) &&
+             gpu_dispatch(GPU_MODE_AMR_DORMANT_SCATTER, body->level_count[level]) &&
              gpu_dispatch(GPU_MODE_AMR_TRANSITION_APPLY, particles);
+      }
     }
     gpu_set_vgs_layer(0, total_stage);
     return ok && gpu_dispatch(GPU_MODE_FINALIZE_VOXELS, gpuPhysics.dynamic_voxel_count) &&
