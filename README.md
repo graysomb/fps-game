@@ -522,13 +522,17 @@ Available scenarios are:
   cells can change level on consecutive substeps. Dormant descendants follow trilinear
   parent motion and do not provide an independent fine-scale curvature signal
   until they become active.
-  On Metal, curvature sampling, AMR decisions, refinement/coarsening transfers,
+  On Metal and OpenGL 4.3, curvature sampling, AMR decisions, refinement/coarsening transfers,
   mass reconstruction, active particle compaction, and flat VGS/weld constraint
   compilation remain GPU resident between PBD substeps. Both substeps are encoded
-  in one command buffer and CPU state is mirrored once at the end of the frame.
-  The CPU implementation remains the reference and runtime fallback; OpenGL uses
-  the existing CPU AMR path. Dynamic voxels outside the AMR mesh traverse the octree
+  without an intervening CPU readback and CPU state is mirrored once at the end of the frame.
+  The CPU implementation remains the reference and runtime fallback. Dynamic voxels outside the AMR mesh traverse the octree
   directly. Each query uses its eight corner spheres plus an algebraic center sphere.
+  Active and sleeping groups keep stable 64-bit body identities. When a group is
+  retired or split, frame-boundary registry maintenance transactionally compacts
+  the live forest, remaps node and voxel ownership, and frees retired leaf maps.
+  The 1024-body limit therefore applies to simultaneously live bodies rather than
+  cumulative body churn.
   Full nodes reject queries with six sphere-versus-deformed-hexahedron projection
   tests, partial nodes descend through nonempty children, and refined full nodes
   descend through active children. Full terminal cells test all 81 pairs between
@@ -543,7 +547,9 @@ Available scenarios are:
   cells, and unrelated PBD particles retain the ordinary path. Set
   `FPS_AMR_COLLISION_AABB=1` for the previous AABB tree,
   `FPS_AMR_COLLISION_HASH=1` for the earlier multilevel AABB hash, or
-  `FPS_AMR_COLLISION_PARTICLES=1` for particle-only AMR collisions.
+  `FPS_AMR_COLLISION_PARTICLES=1` for particle-only AMR collisions. The two
+  legacy AABB comparison switches apply to CPU and Metal; resident OpenGL uses
+  the production nine-sphere hierarchy.
 * `amr-projectile-impact`: fires one finest-scale voxel at 40 m/s into an initially
   coarse adaptive cube. The check requires a nine-ray DDA impact, projectile slowdown,
   target momentum transfer, no far-face tunneling, and no traversal overflow.

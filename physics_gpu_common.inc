@@ -275,9 +275,16 @@ enum {
 
 static uint32_t gpu_aabb_collision_mode(void) {
     if (!gpu_aabb_collisions_enabled()) return GPU_AABB_MODE_DISABLED;
+#if defined(GRAPHICS_API_OPENGL_43) && !defined(FPS_GPU_METAL)
+    // The resident GLSL backend uses the conservative nine-sphere hierarchy
+    // for every AMR collision dispatch. The legacy AABB experiments remain
+    // available on CPU and Metal without changing the production GL path.
+    return GPU_AABB_MODE_SPHERE_TREE;
+#else
     if (getenv("FPS_AMR_COLLISION_HASH")) return GPU_AABB_MODE_HASH;
     if (getenv("FPS_AMR_COLLISION_AABB")) return GPU_AABB_MODE_TREE;
     return GPU_AABB_MODE_SPHERE_TREE;
+#endif
 }
 
 static bool gpu_resize_array(void **ptr, size_t count, size_t item_size) {
@@ -956,6 +963,12 @@ static void gpu_bind_world_buffers(void) {
     rlBindShaderBuffer((unsigned int)gpuPhysics.clone_parent_buffer.id, 13);
     rlBindShaderBuffer((unsigned int)gpuPhysics.dispatch_buffer.id, 14);
     rlBindShaderBuffer((unsigned int)gpuPhysics.topology_buffer.id, 15);
+    rlBindShaderBuffer((unsigned int)gpuPhysics.amr_state_buffer.id, 16);
+    rlBindShaderBuffer((unsigned int)gpuPhysics.amr_scratch_buffer.id, 17);
+    rlBindShaderBuffer((unsigned int)gpuPhysics.amr_control_buffer.id, 18);
+    rlBindShaderBuffer((unsigned int)gpuPhysics.aabb_state_buffer.id, 19);
+    rlBindShaderBuffer((unsigned int)gpuPhysics.aabb_owner_buffer.id, 20);
+    rlBindShaderBuffer((unsigned int)gpuPhysics.aabb_control_buffer.id, 21);
 #endif
 }
 
@@ -1000,7 +1013,6 @@ static bool gpu_upload_world(void) {
                            64u + constraint_capacity * sizeof(GpuConstraintState)) ||
         !gpu_buffer_ensure(&gpuPhysics.topology_buffer,
                            (size_t)gpuPhysics.dynamic_voxel_count * 2u * sizeof(GpuTopologyState))
-#if defined(__APPLE__) && defined(FPS_GPU_METAL)
         || !gpu_buffer_ensure(&gpuPhysics.amr_state_buffer,
                               total_stage_count * sizeof(GpuAmrState))
         || !gpu_buffer_ensure(&gpuPhysics.amr_scratch_buffer,
@@ -1011,7 +1023,6 @@ static bool gpu_upload_world(void) {
         || !gpu_buffer_ensure(&gpuPhysics.aabb_owner_buffer,
                               (size_t)gpuPhysics.particle_slot_capacity * sizeof(uint32_t))
         || !gpu_buffer_ensure(&gpuPhysics.aabb_control_buffer, sizeof(GpuAabbControl))
-#endif
         ) return false;
     if (particle_bytes) gpu_buffer_update(&gpuPhysics.particle_buffer, gpuPhysics.particle_stage, particle_bytes, 0);
     if (cell_bytes) gpu_buffer_update(&gpuPhysics.cell_buffer, gpuPhysics.cell_stage, cell_bytes, 0);
@@ -1047,7 +1058,6 @@ static bool gpu_upload_world(void) {
         gpu_buffer_update(&gpuPhysics.topology_buffer, gpuPhysics.topology_stage,
                           (size_t)gpuPhysics.dynamic_voxel_count * 2u * sizeof(GpuTopologyState), 0);
     }
-#if defined(__APPLE__) && defined(FPS_GPU_METAL)
     if (total_stage_count) {
         gpu_buffer_update(&gpuPhysics.amr_state_buffer, gpuPhysics.amr_state_stage,
                           total_stage_count * sizeof(GpuAmrState), 0);
@@ -1056,7 +1066,6 @@ static bool gpu_upload_world(void) {
                       sizeof(gpuPhysics.amr_control_stage), 0);
     gpu_buffer_update(&gpuPhysics.aabb_control_buffer, &gpuPhysics.aabb_control_stage,
                       sizeof(gpuPhysics.aabb_control_stage), 0);
-#endif
     if (static_changed) {
         gpu_buffer_update(&gpuPhysics.static_cell_buffer, gpuPhysics.static_stage, static_bytes, 0);
         if (static_collider_bytes) gpu_buffer_update(&gpuPhysics.static_collider_buffer,
@@ -1071,11 +1080,9 @@ static bool gpu_upload_world(void) {
         (size_t)gpuPhysics.compact_count * sizeof(GpuTetherState) + collision_meta_bytes +
         (size_t)gpuPhysics.compact_count * sizeof(int32_t) * 2u + sizeof(GpuControlState) +
         (size_t)gpuPhysics.dynamic_voxel_count * 2u * sizeof(GpuTopologyState) +
-        collision_id_bytes + sizeof(dispatch_stage)
-#if defined(__APPLE__) && defined(FPS_GPU_METAL)
-        + total_stage_count * sizeof(GpuAmrState) + sizeof(GpuAmrControl) +
+        collision_id_bytes + sizeof(dispatch_stage) +
+        total_stage_count * sizeof(GpuAmrState) + sizeof(GpuAmrControl) +
           sizeof(GpuAabbControl)
-#endif
         );
     if (static_changed) gpuPhysics.upload_bytes += (uint64_t)(static_bytes + static_collider_bytes);
     gpuPhysics.full_uploads++;
@@ -1129,6 +1136,8 @@ static bool gpu_resident_amr_enabled(void) {
 #if defined(__APPLE__) && defined(FPS_GPU_METAL)
     return vgsHierarchy.adaptive && vgsHierarchy.node_count > 0 &&
            fps_metal_supports_resident_amr();
+#elif defined(GRAPHICS_API_OPENGL_43)
+    return vgsHierarchy.adaptive && vgsHierarchy.node_count > 0 && gpuPhysics.ready;
 #else
     return false;
 #endif
@@ -1688,6 +1697,12 @@ static bool gpu_forced_validation_failure_consumed = false;
 static int gpu_physics_steps(float dt, int fixed_steps, int substeps) {
     gpu_clear_step_failure();
     if (fixed_steps <= 0 || substeps <= 0) return 0;
+    if (vgsHierarchy.adaptive && vgsHierarchy.node_count > 0 &&
+        !gpu_resident_amr_enabled()) {
+        gpu_set_step_failure(PHYSICS_GPU_FAILURE_PERMANENT,
+                             "GPU backend lacks resident AMR support; using CPU AMR");
+        return 0;
+    }
 #if defined(__APPLE__) && defined(FPS_GPU_METAL)
     if (vgsHierarchy.node_count && !fps_metal_supports_vgs_hierarchy()) {
         gpu_set_step_failure(PHYSICS_GPU_FAILURE_PERMANENT,

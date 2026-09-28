@@ -1178,6 +1178,7 @@ typedef struct {
     bool adaptive;
     unsigned refine_count;
     unsigned coarsen_count;
+    unsigned compaction_count;
     float mass_density;
     uint64_t topology_generation;
 } VgsHierarchy;
@@ -11900,6 +11901,193 @@ static bool amr_build_body_from_cluster(const int *cluster, int count)
     return true;
 }
 
+// Reclaim retired body slots and their node ranges at the frame boundary.
+// Build the complete replacement forest before touching any live ownership so
+// allocation or validation failure leaves the old forest usable.
+static bool amr_compact_retired_bodies(void)
+{
+    int retired_count = 0, live_body_count = 0, live_node_count = 0;
+    for (int body_id = 0; body_id < amrBodyCount; ++body_id) {
+        const AmrBody *body = &amrBodies[body_id];
+        if (!body->valid || body->lifecycle == AMR_BODY_RETIRED) {
+            ++retired_count;
+            continue;
+        }
+        if (body->node_start < 0 || body->node_count <= 0 ||
+            body->node_start > vgsHierarchy.node_count - body->node_count)
+            return false;
+        ++live_body_count;
+        live_node_count += body->node_count;
+    }
+    if (retired_count == 0) return true;
+
+    int *body_map = malloc((size_t)(amrBodyCount > 0 ? amrBodyCount : 1) *
+                           sizeof(*body_map));
+    int *node_map = malloc((size_t)(vgsHierarchy.node_count > 0 ?
+                           vgsHierarchy.node_count : 1) * sizeof(*node_map));
+    AmrBody *next_bodies = calloc((size_t)(live_body_count > 0 ? live_body_count : 1),
+                                  sizeof(*next_bodies));
+    VgsHierarchyNode *next_nodes = live_node_count > 0
+        ? calloc((size_t)live_node_count, sizeof(*next_nodes)) : NULL;
+    VgsCurvatureHistory *next_history = live_node_count > 0
+        ? calloc((size_t)live_node_count, sizeof(*next_history)) : NULL;
+    if (!body_map || !node_map || !next_bodies ||
+        (live_node_count > 0 && (!next_nodes || !next_history))) {
+        free(body_map); free(node_map); free(next_bodies);
+        free(next_nodes); free(next_history);
+        return false;
+    }
+    for (int i = 0; i < amrBodyCount; ++i) body_map[i] = -1;
+    for (int i = 0; i < vgsHierarchy.node_count; ++i) node_map[i] = -1;
+
+    bool valid = true;
+    int next_body_id = 0, next_node_id = 0;
+    for (int body_id = 0; body_id < amrBodyCount && valid; ++body_id) {
+        const AmrBody *old = &amrBodies[body_id];
+        if (!old->valid || old->lifecycle == AMR_BODY_RETIRED) continue;
+        int new_start = next_node_id;
+        body_map[body_id] = next_body_id;
+        next_bodies[next_body_id] = *old;
+        next_bodies[next_body_id].node_start = new_start;
+        next_bodies[next_body_id].root_node = new_start +
+            (old->root_node - old->node_start);
+        if (old->root_node < old->node_start ||
+            old->root_node >= old->node_start + old->node_count) {
+            valid = false;
+            break;
+        }
+        for (int level = 0; level < old->levels; ++level) {
+            int relative = old->level_start[level] - old->node_start;
+            if (relative < 0 || relative > old->node_count - old->level_count[level]) {
+                valid = false;
+                break;
+            }
+            next_bodies[next_body_id].level_start[level] = new_start + relative;
+        }
+        for (int offset = 0; valid && offset < old->node_count; ++offset) {
+            int old_node = old->node_start + offset;
+            int new_node = new_start + offset;
+            node_map[old_node] = new_node;
+            next_nodes[new_node] = vgsHierarchy.nodes[old_node];
+            next_history[new_node] = vgsHierarchy.node_history[old_node];
+        }
+        next_node_id += old->node_count;
+        ++next_body_id;
+    }
+
+    for (int old_node = 0; old_node < vgsHierarchy.node_count && valid; ++old_node) {
+        int new_node = node_map[old_node];
+        if (new_node < 0) continue;
+        VgsHierarchyNode *node = &next_nodes[new_node];
+        if (node->body_id < 0 || node->body_id >= amrBodyCount ||
+            body_map[node->body_id] < 0) {
+            valid = false;
+            break;
+        }
+        node->body_id = body_map[node->body_id];
+        if (node->parent >= 0) {
+            if (node->parent >= vgsHierarchy.node_count || node_map[node->parent] < 0) {
+                valid = false;
+                break;
+            }
+            node->parent = node_map[node->parent];
+        }
+        for (int c = 0; c < 8; ++c) {
+            int child = node->children[c];
+            if (child >= 0) {
+                if (child >= vgsHierarchy.node_count || node_map[child] < 0) {
+                    valid = false;
+                    break;
+                }
+                node->children[c] = node_map[child];
+            } else if (child != VGS_CHILD_EMPTY) {
+                int world = -child - 1;
+                if (world < 0 || world >= voxel_count) {
+                    valid = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    for (int new_body = 0; new_body < live_body_count && valid; ++new_body) {
+        const AmrBody *body = &next_bodies[new_body];
+        for (int slot = 0; slot < body->leaf_capacity; ++slot) {
+            int world = body->leaf_voxel_ids ? body->leaf_voxel_ids[slot] : -1;
+            if (world < 0) continue;
+            if (world >= voxel_count || voxels[world].amr_body_id < 0 ||
+                voxels[world].amr_body_id >= amrBodyCount ||
+                body_map[voxels[world].amr_body_id] != new_body ||
+                voxels[world].amr_leaf_slot != slot) {
+                valid = false;
+                break;
+            }
+        }
+    }
+    if (!valid) {
+        free(body_map); free(node_map); free(next_bodies);
+        free(next_nodes); free(next_history);
+        return false;
+    }
+
+    for (int world = 0; world < voxel_count; ++world) {
+        int old_body = voxels[world].amr_body_id;
+        if (old_body >= 0 && old_body < amrBodyCount && body_map[old_body] >= 0)
+            voxels[world].amr_body_id = body_map[old_body];
+    }
+    for (int body_id = 0; body_id < amrBodyCount; ++body_id)
+        if (!amrBodies[body_id].valid ||
+            amrBodies[body_id].lifecycle == AMR_BODY_RETIRED)
+            free(amrBodies[body_id].leaf_voxel_ids);
+
+    free(vgsHierarchy.nodes);
+    free(vgsHierarchy.node_history);
+    vgsHierarchy.nodes = next_nodes;
+    vgsHierarchy.node_history = next_history;
+    vgsHierarchy.node_count = live_node_count;
+    vgsHierarchy.leaf_count = 0;
+    vgsHierarchy.leaf_capacity = 0;
+    vgsHierarchy.full_node_count = 0;
+    vgsHierarchy.partial_node_count = 0;
+    vgsHierarchy.empty_node_count = 0;
+    vgsHierarchy.forced_refined_node_count = 0;
+    vgsHierarchy.real_corner_refs = 0;
+    vgsHierarchy.virtual_corner_refs = 0;
+    memset(vgsHierarchy.level_start, 0, sizeof(vgsHierarchy.level_start));
+    memset(vgsHierarchy.level_count, 0, sizeof(vgsHierarchy.level_count));
+    vgsHierarchy.levels = live_body_count > 0 ? next_bodies[0].levels : 0;
+    if (live_body_count > 0) {
+        memcpy(vgsHierarchy.level_start, next_bodies[0].level_start,
+               sizeof(vgsHierarchy.level_start));
+        memcpy(vgsHierarchy.level_count, next_bodies[0].level_count,
+               sizeof(vgsHierarchy.level_count));
+    }
+    for (int body_id = 0; body_id < live_body_count; ++body_id) {
+        vgsHierarchy.leaf_count += next_bodies[body_id].leaf_count;
+        vgsHierarchy.leaf_capacity += next_bodies[body_id].leaf_capacity;
+    }
+    for (int i = 0; i < live_node_count; ++i) {
+        VgsHierarchyNode *node = &next_nodes[i];
+        if (node->occupancy == VGS_OCCUPANCY_FULL) ++vgsHierarchy.full_node_count;
+        else if (node->occupancy == VGS_OCCUPANCY_PARTIAL) ++vgsHierarchy.partial_node_count;
+        else ++vgsHierarchy.empty_node_count;
+        vgsHierarchy.forced_refined_node_count += node->force_refined ? 1 : 0;
+        int real = vgs_real_corner_count(node->real_corner_mask);
+        vgsHierarchy.real_corner_refs += real;
+        vgsHierarchy.virtual_corner_refs += 8 - real;
+    }
+    memset(amrBodies, 0, sizeof(amrBodies));
+    if (live_body_count > 0)
+        memcpy(amrBodies, next_bodies, (size_t)live_body_count * sizeof(*next_bodies));
+    amrBodyCount = live_body_count;
+    ++vgsHierarchy.compaction_count;
+    ++vgsHierarchy.topology_generation;
+    collisionTopologyDirty = true;
+
+    free(body_map); free(node_map); free(next_bodies);
+    return true;
+}
+
 // Frame-boundary registry maintenance.  Glue connectivity is already rebuilt
 // here, so a body whose leaves now have different collision groups is split
 // without any extra GPU synchronization.
@@ -11965,6 +12153,8 @@ static bool amr_reconcile_body_registry(void)
             mass_changed = true;
         }
     }
+
+    if (!amr_compact_retired_bodies()) return false;
 
     uint8_t *visited = calloc((size_t)voxel_count, 1);
     int *cluster = malloc((size_t)voxel_count * sizeof(*cluster));
@@ -15589,6 +15779,17 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
     //log_dynamic_voxel_positions();
 }
 
+static bool simulate_voxel_pbd_cpu_adaptive_steps(float sub_dt, int substeps)
+{
+    for (int step = 0; step < substeps; ++step) {
+        simulate_voxel_pbd_cpu_steps(sub_dt, 1);
+        if (!vgsHierarchy.adaptive) continue;
+        vgs_hierarchy_sample_curvature(sub_dt);
+        if (!vgs_hierarchy_adapt(step == substeps - 1)) return false;
+    }
+    return true;
+}
+
 static void simulate_voxel_pbd_steps_counted(float dt, int fixed_steps, int substeps) {
     if (dynamic_particle_count() <= 0 || fixed_steps <= 0 || substeps <= 0) return;
     if (sim_particle_count == 0 && fluid_should_skip_reduced_rate_step()) {
@@ -15634,7 +15835,12 @@ static void simulate_voxel_pbd_steps_counted(float dt, int fixed_steps, int subs
             double tm2 = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
             rebuild_particle_collision_metadata();
             if (pbdProfileEnabled) pbdCpuProfile.t_metadata_ms += pbd_time_now_ms() - tm2;
-            simulate_voxel_pbd_cpu_steps(sub_dt, substeps);
+            if (vgsHierarchy.adaptive) {
+                if (!simulate_voxel_pbd_cpu_adaptive_steps(sub_dt, substeps))
+                    TraceLog(LOG_WARNING, "CPU AMR fallback transition failed");
+            } else {
+                simulate_voxel_pbd_cpu_steps(sub_dt, substeps);
+            }
         }
         resolve_tether_throw_ccd_snapshots(tether_ccd_snapshots,
                                            tether_ccd_snapshot_count, fixed_steps);
@@ -15650,7 +15856,12 @@ static void simulate_voxel_pbd_steps_counted(float dt, int fixed_steps, int subs
         double tm3 = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
         rebuild_particle_collision_metadata();
         if (pbdProfileEnabled) pbdCpuProfile.t_metadata_ms += pbd_time_now_ms() - tm3;
-        simulate_voxel_pbd_cpu_steps(sub_dt, substeps);
+        if (vgsHierarchy.adaptive && !debug_run_requested()) {
+            if (!simulate_voxel_pbd_cpu_adaptive_steps(sub_dt, substeps))
+                TraceLog(LOG_WARNING, "CPU AMR transition failed");
+        } else {
+            simulate_voxel_pbd_cpu_steps(sub_dt, substeps);
+        }
     }
     resolve_tether_throw_ccd_snapshots(tether_ccd_snapshots,
                                        tether_ccd_snapshot_count, fixed_steps);

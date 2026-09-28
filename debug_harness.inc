@@ -328,6 +328,7 @@ static bool debug_setup_adaptive_cube_drop(DebugRunState *state);
 static bool debug_setup_adaptive_l_drop(DebugRunState *state);
 static bool debug_setup_amr_projectile_impact(DebugRunState *state);
 static bool debug_setup_amr_multiple_groups(DebugRunState *state);
+static bool debug_setup_amr_body_churn(DebugRunState *state);
 static bool debug_setup_rip_test(DebugRunState *state);
 static bool debug_setup_vgs_refinement(DebugRunState *state);
 static bool debug_setup_vgs_coarsening(DebugRunState *state);
@@ -364,6 +365,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "adaptive-l-drop", "Occupancy-masked adaptive L-shaped drop", debug_setup_adaptive_l_drop, 480, 120 },
     { "amr-projectile-impact", "Fire one finest-scale voxel into adaptive terminal spheres", debug_setup_amr_projectile_impact, 240, 120 },
     { "amr-multiple-groups", "Two independent active groups compile as two AMR bodies", debug_setup_amr_multiple_groups, 120, 60 },
+    { "amr-body-churn", "Retire and rebuild one AMR body 2048 times without exhausting registry slots", debug_setup_amr_body_churn, 60, 60 },
     { "rip-test", "Pull both faces of an adaptive cube to test fracture", debug_setup_rip_test, 480, 60 },
     { "vgs-refinement", "Drop a root VGS cube, then refine into eight shared-particle children", debug_setup_vgs_refinement, 300, 180 },
     { "vgs-coarsening", "Drop eight child VGS cubes, then project them onto one root", debug_setup_vgs_coarsening, 300, 180 },
@@ -2537,6 +2539,98 @@ static bool debug_setup_amr_multiple_groups(DebugRunState *state)
     debug_set_initial_centroid(state);
     state->camera.position = (Vector3){10.0f, 8.0f, 14.0f};
     state->camera.target = (Vector3){0.0f, 5.0f, 0.0f};
+    return true;
+}
+
+static bool debug_setup_amr_body_churn(DebugRunState *state)
+{
+    if (!debug_setup_amr_multiple_groups(state)) return false;
+    if (amrBodyCount != 2 || amrBodies[1].leaf_count != 8) {
+        debug_add_failure(state, "AMR churn requires two eight-leaf bodies");
+        return false;
+    }
+    int cluster[8];
+    for (int slot = 0; slot < 8; ++slot) {
+        cluster[slot] = amrBodies[1].leaf_voxel_ids[slot];
+        if (cluster[slot] < 0 || cluster[slot] >= voxel_count) {
+            debug_add_failure(state, "AMR churn found invalid leaf slot %d", slot);
+            return false;
+        }
+    }
+    uint64_t survivor_identity = amrBodies[0].identity;
+    uint64_t previous_replacement_identity = amrBodies[1].identity;
+    const int churn_cycles = 2048;
+    for (int cycle = 0; cycle < churn_cycles; ++cycle) {
+        amr_retire_body(1);
+        if (!amr_compact_retired_bodies() || amrBodyCount != 1 ||
+            amrBodies[0].identity != survivor_identity ||
+            vgsHierarchy.node_count != amrBodies[0].node_count) {
+            debug_add_failure(state,
+                              "AMR churn compaction failed at cycle %d (bodies=%d nodes=%d)",
+                              cycle, amrBodyCount, vgsHierarchy.node_count);
+            return false;
+        }
+        if (!amr_build_body_from_cluster(cluster, 8) || amrBodyCount != 2 ||
+            amrBodies[1].identity == previous_replacement_identity ||
+            amrBodies[1].identity == survivor_identity ||
+            vgsHierarchy.node_count != amrBodies[0].node_count + amrBodies[1].node_count) {
+            debug_add_failure(state,
+                              "AMR churn rebuild failed at cycle %d (bodies=%d nodes=%d)",
+                              cycle, amrBodyCount, vgsHierarchy.node_count);
+            return false;
+        }
+        previous_replacement_identity = amrBodies[1].identity;
+        for (int slot = 0; slot < 8; ++slot) {
+            int world = cluster[slot];
+            if (voxels[world].amr_body_id != 1 || voxels[world].amr_leaf_slot != slot) {
+                debug_add_failure(state,
+                                  "AMR churn ownership mismatch at cycle %d slot %d",
+                                  cycle, slot);
+                return false;
+            }
+        }
+    }
+    if (vgsHierarchy.compaction_count < (unsigned)churn_cycles) {
+        debug_add_failure(state, "AMR churn recorded only %u/%d compactions",
+                          vgsHierarchy.compaction_count, churn_cycles);
+        return false;
+    }
+
+    // Exercise the real registry split path once: sever the four X interface
+    // links, let reconciliation replace the old body with two components, then
+    // restore the fixture for the ordinary two-body collision assertions.
+    for (int y = 0; y < 2; ++y) for (int z = 0; z < 2; ++z) {
+        int left = cluster[2 * z + 4 * y];
+        int right = cluster[1 + 2 * z + 4 * y];
+        voxels[right].glued_faces[1] = false;
+        voxels[right].glued_neighbors[1] = -1;
+        voxels[left].glued_faces[0] = false;
+        voxels[left].glued_neighbors[0] = -1;
+    }
+    bool saved_debug_adaptive = debugAdaptiveOctree;
+    debugAdaptiveOctree = false;
+    rebuild_particle_collision_metadata();
+    bool split_ok = amr_reconcile_body_registry();
+    debugAdaptiveOctree = saved_debug_adaptive;
+    if (!split_ok || amrBodyCount != 3) {
+        debug_add_failure(state, "AMR churn split produced %d bodies instead of 3",
+                          amrBodyCount);
+        return false;
+    }
+    amr_retire_body(1);
+    amr_retire_body(2);
+    if (!amr_compact_retired_bodies() || amrBodyCount != 1) {
+        debug_add_failure(state, "AMR churn could not reclaim split bodies");
+        return false;
+    }
+    for (int y = 0; y < 2; ++y) for (int z = 0; z < 2; ++z) {
+        int flat = 1 + 2 * z + 4 * y;
+        debug_glue_pbd_faces(cluster[flat], cluster[flat - 1], 1);
+    }
+    if (!amr_build_body_from_cluster(cluster, 8) || amrBodyCount != 2) {
+        debug_add_failure(state, "AMR churn could not restore split fixture");
+        return false;
+    }
     return true;
 }
 
@@ -4767,7 +4861,7 @@ static void debug_validate_step(DebugRunState *state, int step)
         int active_nodes = 0, terminal_nodes = 0, active_leaves = 0;
         double total_mass = 0.0;
         double terminal_volume = 0.0;
-        double external_volume = 0.0;
+        double external_mass = 0.0;
         for (int i = 0; i < sim_particle_count; ++i)
             if (sim_particles[i]->base_inv_mass > 0.0f)
                 total_mass += 1.0 / sim_particles[i]->base_inv_mass;
@@ -4803,17 +4897,23 @@ static void debug_validate_step(DebugRunState *state, int step)
             if (voxels[i].simulate && voxels[i].simulate_dofs) {
                 if (state->amr_projectile_test &&
                     voxels[i].identity == state->amr_projectile_identity) {
-                    external_volume += voxels[i].rest_volume;
+                    for (int corner = 0; corner < 8; ++corner) {
+                        Particle *particle = voxels[i].particles[corner];
+                        bool duplicate = false;
+                        for (int prior = 0; prior < corner; ++prior)
+                            duplicate |= voxels[i].particles[prior] == particle;
+                        if (!duplicate && particle && particle->base_inv_mass > 0.0f)
+                            external_mass += 1.0 / particle->base_inv_mass;
+                    }
                     continue;
                 }
                 if (voxels[i].vgs_active) ++active_leaves;
                 terminal_volume += voxels[i].rest_volume;
             }
-        double expected_mass = 8.0 * (double)vgsHierarchy.leaf_count *
-            pow((double)pbdSolidVoxelSize / (double)VOXEL_SIZE, 3.0) +
-            (double)vgsHierarchy.mass_density * external_volume;
         double expected_volume = (double)vgsHierarchy.leaf_count *
             pow((double)pbdSolidVoxelSize, 3.0);
+        double expected_mass = (double)vgsHierarchy.mass_density * expected_volume +
+            external_mass;
         if (!vgsHierarchy.nodes[0].active || active_nodes == 0 ||
             terminal_nodes + active_leaves != sample.tagged_rendered ||
             fabs(total_mass - expected_mass) > 0.1 ||
@@ -5816,8 +5916,9 @@ static bool debug_write_report(DebugRunState *state)
             sleeping_amr_bodies += amrBodies[body_id].lifecycle == AMR_BODY_SLEEPING;
             retired_amr_bodies += amrBodies[body_id].lifecycle == AMR_BODY_RETIRED;
         }
-        fprintf(file, "  \"amrBodies\": {\"total\": %d, \"active\": %d, \"sleeping\": %d, \"retired\": %d},\n",
-                amrBodyCount, active_amr_bodies, sleeping_amr_bodies, retired_amr_bodies);
+        fprintf(file, "  \"amrBodies\": {\"total\": %d, \"active\": %d, \"sleeping\": %d, \"retired\": %d, \"hierarchyNodes\": %d, \"compactions\": %u},\n",
+                amrBodyCount, active_amr_bodies, sleeping_amr_bodies, retired_amr_bodies,
+                vgsHierarchy.node_count, vgsHierarchy.compaction_count);
         fprintf(file, "  \"curvatureByLevelCsv\": \"%s\",\n", state->curvature_levels_path);
         if (state->arbitrary_shape_drop)
             fprintf(file, "  \"occupancyByLevelCsv\": \"%s\",\n", state->occupancy_levels_path);
@@ -5889,13 +5990,17 @@ static bool debug_write_report(DebugRunState *state)
             "  \"gpuDiagnostics\": {\"readbackPerformed\": %s,"
             " \"staticSsboDiffEntries\": %d, \"staticSsboStaleClusterCells\": %d,"
             " \"simIdMismatches\": %d, \"taggedCornersMissingFromSimIds\": %d,"
-            " \"zeroMassTaggedCorners\": %d},\n",
+            " \"zeroMassTaggedCorners\": %d, \"syncCount\": %llu,"
+            " \"fullUploads\": %llu, \"residentReuses\": %llu},\n",
             state->gpu_readback_performed ? "true" : "false",
             state->gpu_static_ssbo_diff_entries,
             state->gpu_static_ssbo_stale_cells,
             state->gpu_sim_id_mismatches,
             state->gpu_tagged_corners_missing_from_sim_ids,
-            state->gpu_zero_mass_corners);
+            state->gpu_zero_mass_corners,
+            (unsigned long long)gpuPhysics.sync_count,
+            (unsigned long long)gpuPhysics.full_uploads,
+            (unsigned long long)gpuPhysics.resident_reuses);
 
     fprintf(file,
             "  \"overhangDiagnostics\": {\"enabled\": %s, \"anchorObserved\": %s,"
