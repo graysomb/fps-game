@@ -1267,7 +1267,7 @@ typedef struct {
 
 typedef struct {
     uint64_t identity;
-    Vector3 particle_start[VOXEL_CORNER_COUNT];
+    Vector3 particle_start[VOXEL_CORNER_COUNT + 1];
 } TetherThrowCcdSnapshot;
 
 static inline bool voxel_is_awake_dynamic(const Voxel *voxel) 
@@ -11489,6 +11489,11 @@ static bool cpu_aabb_hash_enabled(void) {
     return cpu_aabb_collisions_enabled() && getenv("FPS_AMR_COLLISION_HASH") != NULL;
 }
 
+static bool cpu_sphere_tree_enabled(void) {
+    return cpu_aabb_collisions_enabled() && !cpu_aabb_hash_enabled() &&
+           getenv("FPS_AMR_COLLISION_AABB") == NULL;
+}
+
 static bool cpu_particle_is_aabb_covered(const Particle *particle) {
     ptrdiff_t id = particle ? particle - particles_pool : -1;
     return id >= 0 && id < particle_pool_count && cpu_aabb_covered[id] != 0;
@@ -11938,6 +11943,429 @@ static void cpu_solve_static_aabb_collisions(void) {
         }
     }
     apply_particle_accumulators();
+}
+
+typedef struct CpuSphereShape {
+    Particle *particle[8];
+    float edge;
+    int body;
+} CpuSphereShape;
+
+typedef struct CpuSphereContact {
+    uint8_t a_proxy;
+    uint8_t b_proxy;
+    Vector3 normal;
+    float depth;
+} CpuSphereContact;
+
+static Vector3 cpu_sphere_proxy_position(const CpuSphereShape *shape, int proxy)
+{
+    if (proxy < 8) return shape->particle[proxy]->predicted_pos;
+    Vector3 center = {0};
+    for (int c = 0; c < 8; ++c)
+        center = v_add(center, v_mul(shape->particle[c]->predicted_pos, 0.125f));
+    return center;
+}
+
+static bool cpu_sphere_shape_from_node(const VgsHierarchyNode *node,
+                                       CpuSphereShape *shape)
+{
+    if (!node || !shape || node->occupancy != VGS_OCCUPANCY_FULL ||
+        node->real_corner_mask != 0xffu) return false;
+    memset(shape, 0, sizeof(*shape));
+    shape->edge = node->rest_edge;
+    shape->body = 0;
+    for (int c = 0; c < 8; ++c) {
+        if (!node->particles[c]) return false;
+        shape->particle[c] = node->particles[c];
+    }
+    if (shape->particle[0]->collision_group >= 0)
+        shape->body = shape->particle[0]->collision_group;
+    return true;
+}
+
+static bool cpu_sphere_shape_from_voxel(int world, CpuSphereShape *shape)
+{
+    if (!shape || world < 0 || world >= voxel_count) return false;
+    Voxel *voxel = &voxels[world];
+    memset(shape, 0, sizeof(*shape));
+    shape->edge = voxel->rest_edge;
+    shape->body = world + 1;
+    for (int c = 0; c < 8; ++c) {
+        if (!voxel->particles[c]) return false;
+        shape->particle[c] = voxel->particles[c];
+    }
+    if (shape->particle[0]->collision_group >= 0)
+        shape->body = shape->particle[0]->collision_group;
+    return true;
+}
+
+static Vector3 cpu_hexa_face_normal(const CpuSphereShape *shape, int face)
+{
+    static const uint8_t corners[6][4] = {
+        {0,4,6,2}, {1,3,7,5}, {0,1,5,4},
+        {2,6,7,3}, {0,2,3,1}, {4,5,7,6}
+    };
+    Vector3 p0 = shape->particle[corners[face][0]]->predicted_pos;
+    Vector3 p1 = shape->particle[corners[face][1]]->predicted_pos;
+    Vector3 p2 = shape->particle[corners[face][2]]->predicted_pos;
+    Vector3 p3 = shape->particle[corners[face][3]]->predicted_pos;
+    Vector3 n = v_add(v_cross(v_sub(p1, p0), v_sub(p2, p0)),
+                      v_cross(v_sub(p2, p0), v_sub(p3, p0)));
+    float length = v_length(n);
+    return length > VGS_EPS ? v_mul(n, 1.0f / length) : (Vector3){0};
+}
+
+static bool cpu_sphere_intersects_hexahedron(const CpuSphereShape *query,
+                                             const CpuSphereShape *node)
+{
+    float query_radius = 0.5f * query->edge;
+    float node_margin = 0.5f * node->edge;
+    for (int q = 0; q < 9; ++q) {
+        Vector3 center = cpu_sphere_proxy_position(query, q);
+        bool separated = false;
+        for (int face = 0; face < 6; ++face) {
+            Vector3 axis = cpu_hexa_face_normal(node, face);
+            if (v_dot(axis, axis) <= VGS_EPS * VGS_EPS) continue;
+            float lo = FLT_MAX, hi = -FLT_MAX;
+            for (int c = 0; c < 8; ++c) {
+                float projection = v_dot(node->particle[c]->predicted_pos, axis);
+                lo = fminf(lo, projection);
+                hi = fmaxf(hi, projection);
+            }
+            float projection = v_dot(center, axis);
+            if (projection + query_radius < lo - node_margin ||
+                projection - query_radius > hi + node_margin) {
+                separated = true;
+                break;
+            }
+        }
+        if (!separated) return true;
+    }
+    return false;
+}
+
+static void cpu_insert_sphere_contact(CpuSphereContact contacts[4], int *count,
+                                      CpuSphereContact candidate)
+{
+    int slot;
+    if (*count < 4) slot = (*count)++;
+    else {
+        slot = 3;
+        if (candidate.depth <= contacts[slot].depth) return;
+    }
+    contacts[slot] = candidate;
+    while (slot > 0 && contacts[slot].depth > contacts[slot - 1].depth) {
+        CpuSphereContact swap = contacts[slot - 1];
+        contacts[slot - 1] = contacts[slot];
+        contacts[slot] = swap;
+        --slot;
+    }
+}
+
+static int cpu_sphere_contacts(const CpuSphereShape *a, const CpuSphereShape *b,
+                               CpuSphereContact contacts[4])
+{
+    int count = 0;
+    float ar = 0.5f * a->edge, br = 0.5f * b->edge;
+    float target = ar + br;
+    float target_sq = target * target;
+    Vector3 fallback = v_sub(cpu_sphere_proxy_position(a, 8),
+                             cpu_sphere_proxy_position(b, 8));
+    float fallback_length = v_length(fallback);
+    if (fallback_length <= VGS_EPS) fallback = (Vector3){1,0,0};
+    else fallback = v_mul(fallback, 1.0f / fallback_length);
+    for (int ap = 0; ap < 9; ++ap) {
+        Vector3 pa = cpu_sphere_proxy_position(a, ap);
+        for (int bp = 0; bp < 9; ++bp) {
+            Vector3 delta = v_sub(pa, cpu_sphere_proxy_position(b, bp));
+            float distance_sq = v_dot(delta, delta);
+            if (distance_sq >= target_sq) continue;
+            float distance = sqrtf(fmaxf(distance_sq, 0.0f));
+            CpuSphereContact contact = {
+                .a_proxy = (uint8_t)ap,
+                .b_proxy = (uint8_t)bp,
+                .normal = distance > VGS_EPS ? v_mul(delta, 1.0f / distance) : fallback,
+                .depth = target - distance
+            };
+            cpu_insert_sphere_contact(contacts, &count, contact);
+        }
+    }
+    return count;
+}
+
+static float cpu_sphere_proxy_weight(int proxy, int corner)
+{
+    return proxy == 8 ? 0.125f : (proxy == corner ? 1.0f : 0.0f);
+}
+
+static void cpu_scatter_sphere_contact(const CpuSphereShape *a,
+                                       const CpuSphereShape *b, bool dynamic_b,
+                                       const CpuSphereContact *contact)
+{
+    float denominator = 0.0f;
+    for (int c = 0; c < 8; ++c) {
+        float weight = cpu_sphere_proxy_weight(contact->a_proxy, c);
+        denominator += a->particle[c]->inv_mass * weight * weight;
+        if (dynamic_b) {
+            weight = cpu_sphere_proxy_weight(contact->b_proxy, c);
+            denominator += b->particle[c]->inv_mass * weight * weight;
+        }
+    }
+    if (denominator <= VGS_EPS) return;
+    float lambda = COLLISION_RELAXATION * contact->depth / denominator;
+    for (int c = 0; c < 8; ++c) {
+        float weight = cpu_sphere_proxy_weight(contact->a_proxy, c);
+        float inv_mass = a->particle[c]->inv_mass;
+        if (weight > 0.0f && inv_mass > 0.0f)
+            accumulate_particle_correction(a->particle[c],
+                v_mul(contact->normal, lambda * inv_mass * weight), 1.0f);
+        if (dynamic_b) {
+            weight = cpu_sphere_proxy_weight(contact->b_proxy, c);
+            inv_mass = b->particle[c]->inv_mass;
+            if (weight > 0.0f && inv_mass > 0.0f)
+                accumulate_particle_correction(b->particle[c],
+                    v_mul(contact->normal, -lambda * inv_mass * weight), 1.0f);
+        }
+    }
+}
+
+static bool cpu_rebuild_sphere_proxies(void)
+{
+    cpuAabbProxyCount = 0;
+    if (particle_pool_count > 0)
+        memset(cpu_aabb_covered, 0, (size_t)particle_pool_count);
+    if (!cpu_sphere_tree_enabled()) return true;
+    if (!cpu_aabb_reserve(active_voxel_count + 1)) return false;
+    for (int i = 0; i < voxel_count; ++i) cpuAabbLeafParent[i] = -1;
+    for (int i = 0; i < vgsHierarchy.node_count; ++i) {
+        VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+        for (int c = 0; c < 8; ++c) {
+            int child = node->children[c];
+            if (child < 0 && child != VGS_CHILD_EMPTY)
+                cpuAabbLeafParent[-child - 1] = i;
+        }
+        if (!node->active || !node->vgs_enabled ||
+            node->occupancy != VGS_OCCUPANCY_FULL || node->real_corner_mask != 0xffu ||
+            vgs_node_has_active_children(node)) continue;
+        for (int c = 0; c < 8; ++c) {
+            ptrdiff_t id = node->particles[c] - particles_pool;
+            if (id >= 0 && id < particle_pool_count) cpu_aabb_covered[id] = 1;
+        }
+    }
+    for (int slot = 0; slot < active_voxel_count; ++slot) {
+        int world = active_voxels[slot];
+        Voxel *voxel = &voxels[world];
+        if (!voxel->simulate_dofs || !voxel->vgs_active || voxel->isBullet || voxel->type != 0)
+            continue;
+        bool owned = cpuAabbLeafParent[world] >= 0;
+        if (owned) {
+            for (int c = 0; c < 8; ++c) {
+                ptrdiff_t id = voxel->particles[c] - particles_pool;
+                if (id >= 0 && id < particle_pool_count) cpu_aabb_covered[id] = 1;
+            }
+        } else if (!cpu_aabb_append(voxel->particles, voxel->rest_edge, world + 1,
+                                    false, true, false)) return false;
+    }
+    return true;
+}
+
+static bool cpu_rebuild_amr_collision_proxies(void)
+{
+    return cpu_sphere_tree_enabled() ? cpu_rebuild_sphere_proxies()
+                                     : cpu_rebuild_aabb_proxies();
+}
+
+static void cpu_solve_sphere_tree_query(const CpuSphereShape *query)
+{
+    int stack[64], stack_count = 1;
+    stack[0] = 0;
+    cpuAabbMaxStack = cpuAabbMaxStack < 1u ? 1u : cpuAabbMaxStack;
+    while (stack_count > 0) {
+        int entry = stack[--stack_count];
+        ++cpuAabbNodeVisits;
+        CpuSphereShape target;
+        bool descend = false, enabled = false;
+        VgsOccupancy occupancy;
+        if (entry >= 0) {
+            if (entry >= vgsHierarchy.node_count) { ++cpuAabbEmptyRejects; continue; }
+            VgsHierarchyNode *node = &vgsHierarchy.nodes[entry];
+            occupancy = (VgsOccupancy)node->occupancy;
+            if (occupancy == VGS_OCCUPANCY_EMPTY) { ++cpuAabbEmptyRejects; continue; }
+            descend = occupancy == VGS_OCCUPANCY_PARTIAL || vgs_node_has_active_children(node);
+            if (occupancy == VGS_OCCUPANCY_FULL) {
+                if (!cpu_sphere_shape_from_node(node, &target) ||
+                    !cpu_sphere_intersects_hexahedron(query, &target)) {
+                    ++cpuAabbBoundsRejects;
+                    continue;
+                }
+            }
+            if (descend) {
+                for (int c = 7; c >= 0; --c) {
+                    int child = node->children[c];
+                    if (child == VGS_CHILD_EMPTY) { ++cpuAabbEmptyRejects; continue; }
+                    if (occupancy != VGS_OCCUPANCY_PARTIAL) {
+                        bool active = child >= 0 ? vgsHierarchy.nodes[child].active
+                                                 : voxels[-child - 1].simulate_dofs;
+                        if (!active) continue;
+                    }
+                    if (stack_count >= 64) { cpuAabbOverflow = 1u; return; }
+                    stack[stack_count++] = child;
+                }
+                if (cpuAabbMaxStack < (uint32_t)stack_count)
+                    cpuAabbMaxStack = (uint32_t)stack_count;
+                continue;
+            }
+            enabled = node->active && node->vgs_enabled;
+        } else {
+            int world = -entry - 1;
+            if (!cpu_sphere_shape_from_voxel(world, &target)) {
+                ++cpuAabbEmptyRejects;
+                continue;
+            }
+            occupancy = VGS_OCCUPANCY_FULL;
+            enabled = voxels[world].simulate_dofs && voxels[world].vgs_active;
+            if (!cpu_sphere_intersects_hexahedron(query, &target)) {
+                ++cpuAabbBoundsRejects;
+                continue;
+            }
+        }
+        if (occupancy != VGS_OCCUPANCY_FULL || !enabled || target.body == query->body)
+            continue;
+        ++cpuAabbCandidates;
+        CpuSphereContact contacts[4];
+        int count = cpu_sphere_contacts(query, &target, contacts);
+        for (int c = 0; c < count; ++c)
+            cpu_scatter_sphere_contact(query, &target, true, &contacts[c]);
+        cpuAabbContacts += (uint64_t)count;
+    }
+}
+
+static void cpu_solve_dynamic_sphere_collisions(void)
+{
+    if (cpuAabbProxyCount <= 0) return;
+    reset_particle_accumulators();
+    for (int i = 0; i < cpuAabbProxyCount; ++i) {
+        CpuAabbProxy *proxy = &cpuAabbProxies[i];
+        if (!proxy->query) continue;
+        CpuSphereShape query = {.edge = proxy->rest_edge, .body = proxy->body};
+        memcpy(query.particle, proxy->particle, sizeof(query.particle));
+        cpu_solve_sphere_tree_query(&query);
+    }
+    apply_particle_accumulators();
+}
+
+static void cpu_collect_plane_contact(const CpuSphereShape *shape, int proxy,
+                                      Vector3 normal, float depth,
+                                      CpuSphereContact contacts[4], int *count)
+{
+    if (depth <= 0.0f) return;
+    cpu_insert_sphere_contact(contacts, count, (CpuSphereContact){
+        .a_proxy = (uint8_t)proxy, .b_proxy = 0,
+        .normal = normal, .depth = depth
+    });
+}
+
+static void cpu_solve_static_sphere_shape(const CpuSphereShape *shape)
+{
+    float radius = 0.5f * shape->edge;
+    CpuSphereContact contacts[4];
+    int count = 0;
+    for (int p = 0; p < 9; ++p) {
+        Vector3 center = cpu_sphere_proxy_position(shape, p);
+        cpu_collect_plane_contact(shape, p, (Vector3){0,1,0}, radius - center.y,
+                                  contacts, &count);
+        cpu_collect_plane_contact(shape, p, (Vector3){1,0,0},
+                                  -FLOOR_SIZE + radius - center.x, contacts, &count);
+        cpu_collect_plane_contact(shape, p, (Vector3){-1,0,0},
+                                  center.x + radius - FLOOR_SIZE, contacts, &count);
+        cpu_collect_plane_contact(shape, p, (Vector3){0,0,1},
+                                  -FLOOR_SIZE + radius - center.z, contacts, &count);
+        cpu_collect_plane_contact(shape, p, (Vector3){0,0,-1},
+                                  center.z + radius - FLOOR_SIZE, contacts, &count);
+    }
+    for (int c = 0; c < count; ++c)
+        cpu_scatter_sphere_contact(shape, NULL, false, &contacts[c]);
+    cpuAabbContacts += (uint64_t)count;
+
+    Vector3 center = cpu_sphere_proxy_position(shape, 8);
+    int nearby[MAX_STATIC_COLLISION_NEIGHBORS];
+    float search_radius = 1.5f * shape->edge;
+    int nearby_count = gather_static_voxels_near_point(center, search_radius, nearby,
+                                                        MAX_STATIC_COLLISION_NEIGHBORS);
+    for (int n = 0; n < nearby_count; ++n) {
+        int world = nearby[n];
+        if (world < 0 || world >= voxel_count || voxels[world].simulate) continue;
+        VoxelWorldBounds bounds;
+        voxel_world_bounds(&voxels[world], &bounds);
+        count = 0;
+        for (int p = 0; p < 9; ++p) {
+            Vector3 q = cpu_sphere_proxy_position(shape, p);
+            Vector3 nearest = { clampf(q.x, bounds.minx, bounds.maxx),
+                                clampf(q.y, bounds.miny, bounds.maxy),
+                                clampf(q.z, bounds.minz, bounds.maxz) };
+            Vector3 delta = v_sub(q, nearest);
+            float distance_sq = v_dot(delta, delta);
+            if (distance_sq >= radius * radius) continue;
+            float distance = sqrtf(fmaxf(distance_sq, 0.0f));
+            Vector3 normal;
+            float depth;
+            if (distance > VGS_EPS) {
+                normal = v_mul(delta, 1.0f / distance);
+                depth = radius - distance;
+            } else {
+                float d[6] = {q.x-bounds.minx, bounds.maxx-q.x,
+                              q.y-bounds.miny, bounds.maxy-q.y,
+                              q.z-bounds.minz, bounds.maxz-q.z};
+                int face = 0;
+                for (int f = 1; f < 6; ++f) if (d[f] < d[face]) face = f;
+                static const Vector3 normals[6] = {
+                    {-1,0,0},{1,0,0},{0,-1,0},{0,1,0},{0,0,-1},{0,0,1}
+                };
+                normal = normals[face];
+                depth = radius + d[face];
+            }
+            cpu_insert_sphere_contact(contacts, &count, (CpuSphereContact){
+                .a_proxy=(uint8_t)p, .normal=normal, .depth=depth
+            });
+        }
+        for (int c = 0; c < count; ++c)
+            cpu_scatter_sphere_contact(shape, NULL, false, &contacts[c]);
+        cpuAabbContacts += (uint64_t)count;
+    }
+}
+
+static void cpu_solve_static_sphere_collisions(void)
+{
+    reset_particle_accumulators();
+    for (int i = 0; i < vgsHierarchy.node_count; ++i) {
+        VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+        if (!node->active || !node->vgs_enabled ||
+            node->occupancy != VGS_OCCUPANCY_FULL || node->real_corner_mask != 0xffu ||
+            vgs_node_has_active_children(node)) continue;
+        CpuSphereShape shape;
+        if (cpu_sphere_shape_from_node(node, &shape)) cpu_solve_static_sphere_shape(&shape);
+    }
+    for (int i = 0; i < active_voxel_count; ++i) {
+        int world = active_voxels[i];
+        if (cpuAabbLeafParent[world] < 0 || !voxels[world].simulate_dofs ||
+            !voxels[world].vgs_active) continue;
+        CpuSphereShape shape;
+        if (cpu_sphere_shape_from_voxel(world, &shape)) cpu_solve_static_sphere_shape(&shape);
+    }
+    apply_particle_accumulators();
+}
+
+static void cpu_solve_dynamic_amr_collisions(void)
+{
+    if (cpu_sphere_tree_enabled()) cpu_solve_dynamic_sphere_collisions();
+    else cpu_solve_dynamic_aabb_collisions();
+}
+
+static void cpu_solve_static_amr_collisions(void)
+{
+    if (cpu_sphere_tree_enabled()) cpu_solve_static_sphere_collisions();
+    else cpu_solve_static_aabb_collisions();
 }
 
 typedef struct {
@@ -14291,6 +14719,7 @@ static int capture_tether_throw_ccd_snapshots(TetherThrowCcdSnapshot *snapshots,
         TetherThrowCcdSnapshot *snapshot = &snapshots[count];
         snapshot->identity = identity;
         bool valid = true;
+        Vector3 center = {0};
         for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
             Particle *particle = voxel_particle_at(voxel, corner); //pointer
             if (!particle || !v_isfinite(particle->pos)) {
@@ -14298,7 +14727,9 @@ static int capture_tether_throw_ccd_snapshots(TetherThrowCcdSnapshot *snapshots,
                 break;
             }
             snapshot->particle_start[corner] = particle->pos;
+            center = v_add(center, v_mul(particle->pos, 0.125f));
         }
+        snapshot->particle_start[VOXEL_CORNER_COUNT] = center;
         if (valid) ++count;
     }
     tetherThrowCcdActiveCount = retained;
@@ -14320,14 +14751,21 @@ static bool resolve_tether_throw_ccd_snapshot(const TetherThrowCcdSnapshot *snap
     Vector3 collision_normal = { 0.0f, 0.0f, 0.0f };
     VoxelHit collision_hit = { .id = -1 };
     bool collided = false;
+    Vector3 current[VOXEL_CORNER_COUNT + 1];
+    current[VOXEL_CORNER_COUNT] = (Vector3){0};
     for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
         Particle *particle = voxel_particle_at(voxel, corner); //pointer
-        if (!particle || !v_isfinite(particle->pos)) continue;
-        Vector3 path = v_sub(particle->pos, snapshot->particle_start[corner]);
+        if (!particle || !v_isfinite(particle->pos)) return false;
+        current[corner] = particle->pos;
+        current[VOXEL_CORNER_COUNT] = v_add(current[VOXEL_CORNER_COUNT],
+                                             v_mul(particle->pos, 0.125f));
+    }
+    for (int proxy = 0; proxy < VOXEL_CORNER_COUNT + 1; ++proxy) {
+        Vector3 path = v_sub(current[proxy], snapshot->particle_start[proxy]);
         float path_length = v_length(path);
         if (path_length <= 1e-6f) continue;
         VoxelHit hit;
-        Ray ray = { snapshot->particle_start[corner], v_mul(path, 1.0f / path_length) };
+        Ray ray = { snapshot->particle_start[proxy], v_mul(path, 1.0f / path_length) };
         if (!first_swept_voxel_hit(ray, path_length, voxel_index, &hit)) continue;
         float fraction = clampf(hit.t / path_length, 0.0f, 1.0f);
         if (fraction < earliest_fraction) {
@@ -14451,7 +14889,7 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
         integrate_particles(sub_dt);
         if (pbdProfileEnabled) pbdCpuProfile.t_integrate_ms += pbd_time_now_ms() - t0;
         rebuild_fluid_dynamic_voxel_list();
-        if (!cpu_rebuild_aabb_proxies()) {
+        if (!cpu_rebuild_amr_collision_proxies()) {
             cpuAabbProxyCount = 0;
             memset(cpu_aabb_covered, 0, (size_t)particle_pool_count);
         }
@@ -14488,7 +14926,7 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
             solve_pbf_density_constraints(particle_snapshot, snapshot_count);
             solve_fluid_dynamic_collisions(true);
         }
-        cpu_solve_dynamic_aabb_collisions();
+        cpu_solve_dynamic_amr_collisions();
 
         if (active_voxel_count > 0) {
             double tv = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
@@ -14503,13 +14941,13 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
             if (pbdProfileEnabled) pbdCpuProfile.t_vgs_shape_ms += pbd_time_now_ms() - tv;
         }
 
-        if (!cpu_rebuild_aabb_proxies()) {
+        if (!cpu_rebuild_amr_collision_proxies()) {
             cpuAabbProxyCount = 0;
             memset(cpu_aabb_covered, 0, (size_t)particle_pool_count);
         }
         double ts = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
         solve_static_collisions(sub_dt);
-        cpu_solve_static_aabb_collisions();
+        cpu_solve_static_amr_collisions();
         if (pbdProfileEnabled) pbdCpuProfile.t_static_collisions_ms += pbd_time_now_ms() - ts;
 
         // Shape matching and the world/static collision pass can both move a

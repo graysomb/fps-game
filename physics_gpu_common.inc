@@ -266,11 +266,18 @@ static bool gpu_aabb_collisions_enabled(void) {
            getenv("FPS_AMR_COLLISION_PARTICLES") == NULL;
 }
 
-enum { GPU_AABB_MODE_DISABLED = 0, GPU_AABB_MODE_HASH = 1, GPU_AABB_MODE_TREE = 2 };
+enum {
+    GPU_AABB_MODE_DISABLED = 0,
+    GPU_AABB_MODE_HASH = 1,
+    GPU_AABB_MODE_TREE = 2,
+    GPU_AABB_MODE_SPHERE_TREE = 3
+};
 
 static uint32_t gpu_aabb_collision_mode(void) {
     if (!gpu_aabb_collisions_enabled()) return GPU_AABB_MODE_DISABLED;
-    return getenv("FPS_AMR_COLLISION_HASH") ? GPU_AABB_MODE_HASH : GPU_AABB_MODE_TREE;
+    if (getenv("FPS_AMR_COLLISION_HASH")) return GPU_AABB_MODE_HASH;
+    if (getenv("FPS_AMR_COLLISION_AABB")) return GPU_AABB_MODE_TREE;
+    return GPU_AABB_MODE_SPHERE_TREE;
 }
 
 static bool gpu_resize_array(void **ptr, size_t count, size_t item_size) {
@@ -1543,8 +1550,12 @@ static bool gpu_dispatch_substep(float sub_dt) {
               gpu_dispatch_indirect(GPU_MODE_INTEGRATE) &&
               gpu_dispatch_indirect(GPU_MODE_RESET);
     if (ok && aabb_collisions) {
-        ok = gpu_dispatch(GPU_MODE_AABB_CLEAR, aabb_clear_count) &&
-             gpu_dispatch(GPU_MODE_AABB_BOUNDS, total_stage);
+        ok = gpu_dispatch(GPU_MODE_AABB_CLEAR, aabb_clear_count);
+        if (ok && aabb_mode == GPU_AABB_MODE_SPHERE_TREE) {
+            ok = gpu_dispatch(GPU_MODE_AMR_SPHERE_SETUP, total_stage);
+        } else {
+            ok = gpu_dispatch(GPU_MODE_AABB_BOUNDS, total_stage);
+        }
         if (ok && aabb_mode == GPU_AABB_MODE_TREE) {
             for (int level = vgsHierarchy.levels - 1; ok && level >= 0; --level) {
                 gpu_set_vgs_layer(gpuPhysics.dynamic_voxel_count +
@@ -1564,8 +1575,11 @@ static bool gpu_dispatch_substep(float sub_dt) {
             ok = gpu_dispatch(GPU_MODE_HASH_CLEAR, hash_size) &&
                  gpu_dispatch(GPU_MODE_AABB_HASH_BUILD, total_stage) &&
                  gpu_dispatch(GPU_MODE_AABB_COLLISIONS, total_stage);
-        else
+        else if (aabb_mode == GPU_AABB_MODE_TREE)
             ok = gpu_dispatch(GPU_MODE_AABB_TREE_COLLISIONS,
+                              gpuPhysics.dynamic_voxel_count);
+        else
+            ok = gpu_dispatch(GPU_MODE_AMR_SPHERE_TREE_COLLISIONS,
                               gpuPhysics.dynamic_voxel_count);
     }
     ok = ok && gpu_dispatch_indirect(GPU_MODE_APPLY);
@@ -1583,10 +1597,14 @@ static bool gpu_dispatch_substep(float sub_dt) {
              gpu_dispatch_indirect(GPU_MODE_APPLY);
     }
     ok = ok && gpu_dispatch_indirect_offset(GPU_MODE_STATIC_COLLISIONS, 16);
-    if (ok && aabb_collisions)
-        ok = gpu_dispatch(GPU_MODE_AABB_BOUNDS, total_stage) &&
-             gpu_dispatch(GPU_MODE_AABB_STATIC_COLLISIONS, total_stage) &&
-             gpu_dispatch_indirect(GPU_MODE_APPLY);
+    if (ok && aabb_collisions) {
+        if (aabb_mode == GPU_AABB_MODE_SPHERE_TREE)
+            ok = gpu_dispatch(GPU_MODE_AMR_SPHERE_STATIC_COLLISIONS, total_stage);
+        else
+            ok = gpu_dispatch(GPU_MODE_AABB_BOUNDS, total_stage) &&
+                 gpu_dispatch(GPU_MODE_AABB_STATIC_COLLISIONS, total_stage);
+        ok = ok && gpu_dispatch_indirect(GPU_MODE_APPLY);
+    }
     ok = ok && gpu_dispatch(GPU_MODE_WAKE_GATHER, gpuPhysics.dynamic_voxel_count) &&
          gpu_dispatch_indirect(GPU_MODE_FINALIZE_PARTICLES) &&
          gpu_dispatch(GPU_MODE_FINALIZE_VOXELS, gpuPhysics.dynamic_voxel_count);

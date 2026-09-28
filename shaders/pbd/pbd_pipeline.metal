@@ -130,6 +130,9 @@ constant int MODE_AABB_COLLISIONS = 35;
 constant int MODE_AABB_STATIC_COLLISIONS = 36;
 constant int MODE_AABB_REDUCE = 37;
 constant int MODE_AABB_TREE_COLLISIONS = 38;
+constant int MODE_AMR_SPHERE_SETUP = 39;
+constant int MODE_AMR_SPHERE_TREE_COLLISIONS = 40;
+constant int MODE_AMR_SPHERE_STATIC_COLLISIONS = 41;
 constant int CONTROL_FLAG_OVERFLOW = 1;
 constant int CONTROL_FLAG_TOPOLOGY_DIRTY = 2;
 constant int CONTROL_FLAG_BREAK_OCCURRED = 4;
@@ -1023,6 +1026,414 @@ inline void aabbStaticCollisions(uint gid, device const ParticleState *particle,
     }
 }
 
+constant ushort AMR_HEX_FACE_CORNERS[24] = {
+    0,4,6,2, 1,3,7,5, 0,1,5,4,
+    2,6,7,3, 0,2,3,1, 4,5,7,6
+};
+
+struct SphereContact {
+    ushort aProxy;
+    ushort bProxy;
+    float depth;
+    float3 normal;
+};
+
+inline bool loadSphereShape(uint voxelId, device const ParticleState *particle,
+                            device const VoxelState *voxel, device const int *control,
+                            thread float3 *position, thread uint *particleId) {
+    VoxelState v = voxel[voxelId];
+    float3 center(0.0f);
+    for (int c = 0; c < 8; ++c) {
+        uint id = voxelParticle(v, c);
+        if (id >= uint(controlLoad(control, 0))) return false;
+        particleId[c] = id;
+        position[c] = particle[id].predicted_base_inv_mass.xyz;
+        center += position[c] * 0.125f;
+    }
+    position[8] = center;
+    return true;
+}
+
+inline float3 hexaFaceNormal(thread const float3 *position, int face) {
+    int base = face * 4;
+    float3 p0 = position[AMR_HEX_FACE_CORNERS[base]];
+    float3 p1 = position[AMR_HEX_FACE_CORNERS[base + 1]];
+    float3 p2 = position[AMR_HEX_FACE_CORNERS[base + 2]];
+    float3 p3 = position[AMR_HEX_FACE_CORNERS[base + 3]];
+    float3 normal = cross(p1 - p0, p2 - p0) + cross(p2 - p0, p3 - p0);
+    float lengthSquared = dot(normal, normal);
+    return lengthSquared > 1e-12f ? normal * rsqrt(lengthSquared) : float3(0.0f);
+}
+
+inline bool sphereHexOverlap(thread const float3 *queryPosition, float queryRadius,
+                             thread const float3 *nodePosition, float nodeMargin) {
+    for (int query = 0; query < 9; ++query) {
+        bool separated = false;
+        for (int face = 0; face < 6; ++face) {
+            float3 axis = hexaFaceNormal(nodePosition, face);
+            if (dot(axis, axis) <= 1e-12f) continue;
+            float lo = INFINITY, hi = -INFINITY;
+            for (int c = 0; c < 8; ++c) {
+                float projection = dot(nodePosition[c], axis);
+                lo = min(lo, projection);
+                hi = max(hi, projection);
+            }
+            float projection = dot(queryPosition[query], axis);
+            if (projection + queryRadius < lo - nodeMargin ||
+                projection - queryRadius > hi + nodeMargin) {
+                separated = true;
+                break;
+            }
+        }
+        if (!separated) return true;
+    }
+    return false;
+}
+
+inline void insertSphereContact(thread SphereContact *contacts, thread int &count,
+                                SphereContact candidate) {
+    int slot;
+    if (count < 4) slot = count++;
+    else {
+        slot = 3;
+        if (candidate.depth <= contacts[slot].depth) return;
+    }
+    contacts[slot] = candidate;
+    while (slot > 0 && contacts[slot].depth > contacts[slot - 1].depth) {
+        SphereContact swap = contacts[slot - 1];
+        contacts[slot - 1] = contacts[slot];
+        contacts[slot] = swap;
+        --slot;
+    }
+}
+
+inline int gatherSphereContacts(thread const float3 *aPosition, float aRadius,
+                                thread const float3 *bPosition, float bRadius,
+                                thread SphereContact *contacts) {
+    int count = 0;
+    float target = aRadius + bRadius;
+    float targetSquared = target * target;
+    float3 fallback = aPosition[8] - bPosition[8];
+    float fallbackSquared = dot(fallback, fallback);
+    fallback = fallbackSquared > 1e-12f ? fallback * rsqrt(fallbackSquared)
+                                        : float3(1.0f, 0.0f, 0.0f);
+    for (int a = 0; a < 9; ++a) for (int b = 0; b < 9; ++b) {
+        float3 delta = aPosition[a] - bPosition[b];
+        float distanceSquared = dot(delta, delta);
+        if (distanceSquared >= targetSquared) continue;
+        float distance = sqrt(max(distanceSquared, 0.0f));
+        SphereContact contact;
+        contact.aProxy = ushort(a);
+        contact.bProxy = ushort(b);
+        contact.depth = target - distance;
+        contact.normal = distance > 1e-6f ? delta / distance : fallback;
+        insertSphereContact(contacts, count, contact);
+    }
+    return count;
+}
+
+inline float sphereProxyWeight(int proxy, int corner) {
+    return proxy == 8 ? 0.125f : (proxy == corner ? 1.0f : 0.0f);
+}
+
+inline void scatterSphereContact(uint aId, uint bId, bool dynamicB,
+                                 SphereContact contact,
+                                 device const ParticleState *particle,
+                                 device atomic_uint *correction,
+                                 device const VoxelState *voxel,
+                                 device const int *control,
+                                 constant GpuUniforms &u) {
+    VoxelState a = voxel[aId];
+    VoxelState b;
+    if (dynamicB) b = voxel[bId];
+    float denominator = 0.0f;
+    for (int c = 0; c < 8; ++c) {
+        float weight = sphereProxyWeight(contact.aProxy, c);
+        uint id = voxelParticle(a, c);
+        if (id < uint(controlLoad(control, 0)))
+            denominator += particle[id].prev_inv_mass.w * weight * weight;
+        if (dynamicB) {
+            weight = sphereProxyWeight(contact.bProxy, c);
+            id = voxelParticle(b, c);
+            if (id < uint(controlLoad(control, 0)))
+                denominator += particle[id].prev_inv_mass.w * weight * weight;
+        }
+    }
+    if (denominator <= u.vgs_epsilon) return;
+    float lambda = u.collision_relaxation * contact.depth / denominator;
+    for (int c = 0; c < 8; ++c) {
+        float weight = sphereProxyWeight(contact.aProxy, c);
+        uint id = voxelParticle(a, c);
+        if (id < uint(controlLoad(control, 0))) {
+            float invMass = particle[id].prev_inv_mass.w;
+            if (invMass > 0.0f && weight > 0.0f)
+                accumulate(correction, control, id,
+                           contact.normal * (lambda * invMass * weight), 1.0f);
+        }
+        if (dynamicB) {
+            weight = sphereProxyWeight(contact.bProxy, c);
+            id = voxelParticle(b, c);
+            if (id < uint(controlLoad(control, 0))) {
+                float invMass = particle[id].prev_inv_mass.w;
+                if (invMass > 0.0f && weight > 0.0f)
+                    accumulate(correction, control, id,
+                               -contact.normal * (lambda * invMass * weight), 1.0f);
+            }
+        }
+    }
+}
+
+inline bool amrSphereTerminal(uint gid, VoxelState v, device const VoxelState *voxel,
+                             device const AmrState *amrState,
+                             device const AmrControl *amr,
+                             constant GpuUniforms &u) {
+    bool hierarchyNode = gid >= uint(u.voxel_count);
+    uint parent = hierarchyNode ? as_type<uint>(v.pos_rest_edge.x)
+                                : as_type<uint>(amrState[gid].latest[7]);
+    bool owned = hierarchyNode || parent < amr->total_stage_count;
+    return owned && v.flags.x != 0 && v.flags.w != 0 && v.flags.y == 0 && v.flags.z == 0 &&
+           amrOccupancy(v) == 2u && amrRealMask(v) == 0xffu &&
+           (!hierarchyNode || !amrHasActiveChildren(v, voxel, amr));
+}
+
+inline int sphereShapeBody(VoxelState v, device const int *collisionMeta,
+                           device const int *control) {
+    uint id = voxelParticle(v, 0);
+    return id < uint(controlLoad(control, 0)) ? collisionMeta[id * 4u + 3u] : -1;
+}
+
+inline void amrSphereSetup(uint gid, device const VoxelState *voxel,
+                           device const AmrState *amrState,
+                           device atomic_uint *owner, device AabbControl *aabb,
+                           device const AmrControl *amr, constant GpuUniforms &u) {
+    if (aabb->mode != 3u || gid >= aabb->total_stage_count) return;
+    VoxelState v = voxel[gid];
+    if (amrSphereTerminal(gid, v, voxel, amrState, amr, u)) {
+        for (int c = 0; c < 8; ++c) {
+            uint id = voxelParticle(v, c);
+            if (id < amr->particle_capacity)
+                atomic_store_explicit(owner + id, 1u, memory_order_relaxed);
+        }
+    }
+    if (gid < uint(u.voxel_count)) {
+        uint parent = as_type<uint>(amrState[gid].latest[7]);
+        bool external = parent >= amr->total_stage_count && v.flags.x != 0 && v.flags.w != 0 &&
+                        v.flags.y == 0 && v.flags.z == 0;
+        if (external)
+            atomic_fetch_add_explicit(&aabb->proxy_count, 1u, memory_order_relaxed);
+    }
+}
+
+inline void amrSphereTreeCollisions(uint gid, device const ParticleState *particle,
+                                    device atomic_uint *correction,
+                                    device const VoxelState *voxel,
+                                    device const int *collisionMeta,
+                                    device const AmrState *amrState,
+                                    device AabbControl *aabb,
+                                    device const AmrControl *amr,
+                                    device const int *control,
+                                    constant GpuUniforms &u) {
+    if (aabb->mode != 3u || gid >= uint(u.voxel_count)) return;
+    VoxelState queryVoxel = voxel[gid];
+    uint parent = as_type<uint>(amrState[gid].latest[7]);
+    if (parent < amr->total_stage_count || queryVoxel.flags.x == 0 || queryVoxel.flags.w == 0 ||
+        queryVoxel.flags.y != 0 || queryVoxel.flags.z != 0) return;
+    float3 queryPosition[9]; uint queryParticle[8];
+    if (!loadSphereShape(gid, particle, voxel, control, queryPosition, queryParticle)) return;
+    int queryBody = sphereShapeBody(queryVoxel, collisionMeta, control);
+    float queryRadius = 0.5f * queryVoxel.pos_rest_edge.w;
+    uint root = uint(u.voxel_count);
+    if (root >= amr->total_stage_count) return;
+    uint stack[64]; uint stackSize = 1u; stack[0] = root;
+    atomicMaxUint(&aabb->max_stack_depth, stackSize);
+    while (stackSize > 0u) {
+        uint nodeId = stack[--stackSize];
+        if (nodeId >= amr->total_stage_count) {
+            atomic_fetch_add_explicit(&aabb->empty_reject_count, 1u, memory_order_relaxed);
+            continue;
+        }
+        atomic_fetch_add_explicit(&aabb->node_visit_count, 1u, memory_order_relaxed);
+        VoxelState node = voxel[nodeId];
+        uint occupancy = amrOccupancy(node);
+        if (occupancy == 0u) {
+            atomic_fetch_add_explicit(&aabb->empty_reject_count, 1u, memory_order_relaxed);
+            continue;
+        }
+        float3 nodePosition[9]; uint nodeParticle[8];
+        if (occupancy == 2u) {
+            if (amrRealMask(node) != 0xffu ||
+                !loadSphereShape(nodeId, particle, voxel, control, nodePosition, nodeParticle) ||
+                !sphereHexOverlap(queryPosition, queryRadius, nodePosition,
+                                  0.5f * node.pos_rest_edge.w)) {
+                atomic_fetch_add_explicit(&aabb->bounds_reject_count, 1u,
+                                          memory_order_relaxed);
+                continue;
+            }
+        }
+        bool hierarchyNode = nodeId >= uint(u.voxel_count);
+        bool descend = occupancy == 1u ||
+            (hierarchyNode && amrHasActiveChildren(node, voxel, amr));
+        if (descend && hierarchyNode) {
+            for (int c = 7; c >= 0; --c) {
+                uint child = amrChild(node, c);
+                if (child >= amr->total_stage_count) {
+                    atomic_fetch_add_explicit(&aabb->empty_reject_count, 1u,
+                                              memory_order_relaxed);
+                    continue;
+                }
+                if (occupancy != 1u && voxel[child].flags.w == 0) continue;
+                if (stackSize >= 64u) {
+                    atomic_store_explicit(&aabb->overflow, 1u, memory_order_relaxed);
+                    return;
+                }
+                stack[stackSize++] = child;
+            }
+            atomicMaxUint(&aabb->max_stack_depth, stackSize);
+            continue;
+        }
+        if (occupancy != 2u || node.flags.x == 0 || node.flags.w == 0 ||
+            sphereShapeBody(node, collisionMeta, control) == queryBody) continue;
+        atomic_fetch_add_explicit(&aabb->candidate_count, 1u, memory_order_relaxed);
+        SphereContact contacts[4];
+        int contactCount = gatherSphereContacts(queryPosition, queryRadius, nodePosition,
+                                                 0.5f * node.pos_rest_edge.w, contacts);
+        for (int c = 0; c < contactCount; ++c)
+            scatterSphereContact(gid, nodeId, true, contacts[c], particle, correction,
+                                 voxel, control, u);
+        if (contactCount > 0)
+            atomic_fetch_add_explicit(&aabb->contact_count, uint(contactCount),
+                                      memory_order_relaxed);
+    }
+}
+
+inline void gatherSpherePlaneContact(int proxy, float depth, float3 normal,
+                                     thread SphereContact *contacts, thread int &count) {
+    if (depth <= 0.0f) return;
+    SphereContact contact;
+    contact.aProxy = ushort(proxy); contact.bProxy = 0;
+    contact.depth = depth; contact.normal = normal;
+    insertSphereContact(contacts, count, contact);
+}
+
+inline void amrSphereStaticCollisions(uint gid, device const ParticleState *particle,
+                                      device atomic_uint *correction,
+                                      device const VoxelState *voxel,
+                                      device int4 *staticCell,
+                                      device const StaticCollider *staticCollider,
+                                      device const AmrState *amrState,
+                                      device AabbControl *aabb,
+                                      device const AmrControl *amr,
+                                      device const atomic_uint *collisionControl,
+                                      device const int *control,
+                                      constant GpuUniforms &u) {
+    if (aabb->mode != 3u || gid >= amr->total_stage_count) return;
+    VoxelState v = voxel[gid];
+    if (!amrSphereTerminal(gid, v, voxel, amrState, amr, u)) return;
+    float3 position[9]; uint particleId[8];
+    if (!loadSphereShape(gid, particle, voxel, control, position, particleId)) return;
+    float radius = 0.5f * v.pos_rest_edge.w;
+    SphereContact contacts[4]; int contactCount = 0;
+    for (int p = 0; p < 9; ++p) {
+        gatherSpherePlaneContact(p, radius - position[p].y, float3(0,1,0),
+                                 contacts, contactCount);
+        gatherSpherePlaneContact(p, -u.floor_size + radius - position[p].x,
+                                 float3(1,0,0), contacts, contactCount);
+        gatherSpherePlaneContact(p, position[p].x + radius - u.floor_size,
+                                 float3(-1,0,0), contacts, contactCount);
+        gatherSpherePlaneContact(p, -u.floor_size + radius - position[p].z,
+                                 float3(0,0,1), contacts, contactCount);
+        gatherSpherePlaneContact(p, position[p].z + radius - u.floor_size,
+                                 float3(0,0,-1), contacts, contactCount);
+    }
+    for (int c = 0; c < contactCount; ++c)
+        scatterSphereContact(gid, 0u, false, contacts[c], particle, correction,
+                             voxel, control, u);
+    if (contactCount > 0)
+        atomic_fetch_add_explicit(&aabb->contact_count, uint(contactCount),
+                                  memory_order_relaxed);
+
+    if (u.static_collider_count <= 0) return;
+
+    float3 boundsMin(INFINITY), boundsMax(-INFINITY);
+    for (int p = 0; p < 9; ++p) {
+        boundsMin = min(boundsMin, position[p] - float3(radius));
+        boundsMax = max(boundsMax, position[p] + float3(radius));
+    }
+    int3 cellMin = int3(floor(boundsMin / u.voxel_size));
+    int3 cellMax = int3(floor(boundsMax / u.voxel_size));
+    int3 cellSpan = cellMax - cellMin + 1;
+    if (any(cellSpan <= int3(0)) || any(cellSpan > int3(64))) {
+        atomic_store_explicit(&aabb->overflow, 1u, memory_order_relaxed);
+        return;
+    }
+    bool surfaceMode = atomic_load_explicit(&collisionControl[4], memory_order_relaxed) != 0u;
+    int seen[128]; int seenCount = 0;
+    for (int z = cellMin.z; z <= cellMax.z; ++z)
+    for (int y = cellMin.y; y <= cellMax.y; ++y)
+    for (int x = cellMin.x; x <= cellMax.x; ++x) {
+        int item = findStaticCell(int3(x,y,z), staticCell, u);
+        int guard = 0;
+        while (item != -1 && guard++ < u.static_collider_count + 1) {
+            int sid = item;
+            if (!surfaceMode && item <= -2) sid = -item - 2;
+            if (sid < 0 || sid >= u.static_collider_count) break;
+            StaticCollider box = staticCollider[sid];
+            int patchId = surfaceMode ? as_type<int>(box.bounds_min.w) : sid;
+            bool duplicate = false;
+            for (int s = 0; s < seenCount; ++s) duplicate = duplicate || seen[s] == patchId;
+            if (!duplicate) {
+                if (seenCount < 128) seen[seenCount++] = patchId;
+                float3 boxMin = box.bounds_min.xyz, boxMax = box.bounds_max.xyz;
+                float skin = max(1e-4f, 0.002f * u.voxel_size);
+                for (int d = 0; d < 3; ++d) if (boxMax[d] - boxMin[d] < 2.0f * skin) {
+                    float middle = 0.5f * (boxMin[d] + boxMax[d]);
+                    boxMin[d] = middle - skin; boxMax[d] = middle + skin;
+                }
+                contactCount = 0;
+                for (int p = 0; p < 9; ++p) {
+                    float3 nearest = clamp(position[p], boxMin, boxMax);
+                    float3 delta = position[p] - nearest;
+                    float distanceSquared = dot(delta, delta);
+                    if (distanceSquared >= radius * radius) continue;
+                    float distance = sqrt(max(distanceSquared, 0.0f));
+                    SphereContact contact;
+                    contact.aProxy = ushort(p); contact.bProxy = 0;
+                    if (distance > 1e-6f) {
+                        contact.normal = delta / distance;
+                        contact.depth = radius - distance;
+                    } else {
+                        float distanceToFace[6] = {
+                            position[p].x-boxMin.x, boxMax.x-position[p].x,
+                            position[p].y-boxMin.y, boxMax.y-position[p].y,
+                            position[p].z-boxMin.z, boxMax.z-position[p].z
+                        };
+                        int face = 0;
+                        for (int f = 1; f < 6; ++f)
+                            if (distanceToFace[f] < distanceToFace[face]) face = f;
+                        const float3 normal[6] = {
+                            float3(-1,0,0),float3(1,0,0),float3(0,-1,0),
+                            float3(0,1,0),float3(0,0,-1),float3(0,0,1)
+                        };
+                        contact.normal = normal[face];
+                        contact.depth = radius + distanceToFace[face];
+                    }
+                    insertSphereContact(contacts, contactCount, contact);
+                }
+                for (int c = 0; c < contactCount; ++c)
+                    scatterSphereContact(gid, 0u, false, contacts[c], particle, correction,
+                                         voxel, control, u);
+                if (contactCount > 0)
+                    atomic_fetch_add_explicit(&aabb->contact_count, uint(contactCount),
+                                              memory_order_relaxed);
+            }
+            if (!surfaceMode || item <= -2) break;
+            item = as_type<int>(box.center.w);
+        }
+        if (guard >= u.static_collider_count + 1 && item != -1)
+            atomic_store_explicit(&aabb->overflow, 1u, memory_order_relaxed);
+    }
+}
+
 inline bool amrMeasure(device const ParticleState *particle, VoxelState v,
                        device const int *control, thread float values[6]) {
     if (v.pos_rest_edge.w <= 0.0f) return false;
@@ -1495,5 +1906,8 @@ kernel void pbd_pipeline(
         case MODE_AABB_STATIC_COLLISIONS:aabbStaticCollisions(gid,particle,correction,voxel,staticCell,staticCollider,aabbState,aabbControl,amrState,amrControl,collisionControl,control,u);break;
         case MODE_AABB_REDUCE:aabbReduce(gid,voxel,aabbState,aabbControl,u);break;
         case MODE_AABB_TREE_COLLISIONS:aabbTreeCollisions(gid,particle,correction,voxel,aabbState,aabbControl,amrControl,control,u);break;
+        case MODE_AMR_SPHERE_SETUP:amrSphereSetup(gid,voxel,amrState,aabbOwner,aabbControl,amrControl,u);break;
+        case MODE_AMR_SPHERE_TREE_COLLISIONS:amrSphereTreeCollisions(gid,particle,correction,voxel,collisionMeta,amrState,aabbControl,amrControl,control,u);break;
+        case MODE_AMR_SPHERE_STATIC_COLLISIONS:amrSphereStaticCollisions(gid,particle,correction,voxel,staticCell,staticCollider,amrState,aabbControl,amrControl,collisionControl,control,u);break;
     }
 }

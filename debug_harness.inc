@@ -360,7 +360,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "active-cube-drop", "Activate a static 10x10x10 cube and drop it", debug_setup_active_cube_drop, 120, 60 },
     { "adaptive-cube-drop", "Curvature-driven octree cube drop", debug_setup_adaptive_cube_drop, 240, 60 },
     { "adaptive-l-drop", "Occupancy-masked adaptive L-shaped drop", debug_setup_adaptive_l_drop, 480, 120 },
-    { "amr-projectile-impact", "Fire one finest-scale voxel into an adaptive cube AABB", debug_setup_amr_projectile_impact, 240, 120 },
+    { "amr-projectile-impact", "Fire one finest-scale voxel into adaptive terminal spheres", debug_setup_amr_projectile_impact, 240, 120 },
     { "rip-test", "Pull both faces of an adaptive cube to test fracture", debug_setup_rip_test, 480, 60 },
     { "vgs-refinement", "Drop a root VGS cube, then refine into eight shared-particle children", debug_setup_vgs_refinement, 300, 180 },
     { "vgs-coarsening", "Drop eight child VGS cubes, then project them onto one root", debug_setup_vgs_coarsening, 300, 180 },
@@ -2448,6 +2448,10 @@ static bool debug_setup_amr_projectile_impact(DebugRunState *state)
     }
     set_voxel_velocity(projectile,
                        (Vector3){ state->amr_projectile_initial_speed, 0.0f, 0.0f });
+    projectile->tetherThrowCcdFrames =
+        tetherThrowCcdEnabled && state->amr_projectile_initial_speed >= TETHER_THROW_CCD_MIN_SPEED
+        ? TETHER_THROW_CCD_FRAMES : 0;
+    track_tether_throw_ccd(projectile);
     collisionTopologyDirty = true;
     state->camera.position = (Vector3){ -15.0f, 15.5f, 18.0f };
     state->camera.target = (Vector3){ -0.5f, 11.5f, 0.0f };
@@ -5670,23 +5674,29 @@ static bool debug_write_report(DebugRunState *state)
             uint32_t mode = gpu_aabb ? gpuPhysics.aabb_control_stage.mode
                 : (!cpu_aabb_collisions_enabled() ? GPU_AABB_MODE_DISABLED
                     : (cpu_aabb_hash_enabled() ? GPU_AABB_MODE_HASH
-                                               : GPU_AABB_MODE_TREE));
+                        : (cpu_sphere_tree_enabled() ? GPU_AABB_MODE_SPHERE_TREE
+                                                     : GPU_AABB_MODE_TREE)));
             uint64_t gpu_items = gpu_aabb
                 ? gpuPhysics.aabb_control_stage.proxy_count : 0u;
             uint64_t query_count = gpu_aabb
-                ? (mode == GPU_AABB_MODE_TREE ? gpu_items : 0u) : cpu_queries;
+                ? ((mode == GPU_AABB_MODE_TREE || mode == GPU_AABB_MODE_SPHERE_TREE)
+                    ? gpu_items : 0u) : cpu_queries;
             uint64_t proxy_count = gpu_aabb
                 ? (mode == GPU_AABB_MODE_HASH ? gpu_items : 0u)
                 : (mode == GPU_AABB_MODE_HASH ? (uint64_t)cpuAabbProxyCount : 0u);
-            fprintf(file, "  \"amrAabbCollision\": {\"enabled\": %s, \"mode\": \"%s\", \"queries\": %llu, \"proxies\": %llu, \"candidatePairs\": %llu, \"contacts\": %llu, \"nodeVisits\": %llu, \"boundsRejects\": %llu, \"emptyRejects\": %llu, \"maxStackDepth\": %u, \"maxNodeVisitsObserved\": %llu, \"maxStackDepthObserved\": %u, \"contactObserved\": %s, \"overflow\": %u},\n",
+            uint64_t candidate_pairs = gpu_aabb
+                ? gpuPhysics.aabb_control_stage.candidate_count : cpuAabbCandidates;
+            fprintf(file, "  \"amrAabbCollision\": {\"enabled\": %s, \"mode\": \"%s\", \"queries\": %llu, \"proxies\": %llu, \"candidatePairs\": %llu, \"spherePairTests\": %llu, \"contacts\": %llu, \"nodeVisits\": %llu, \"boundsRejects\": %llu, \"emptyRejects\": %llu, \"maxStackDepth\": %u, \"maxNodeVisitsObserved\": %llu, \"maxStackDepthObserved\": %u, \"contactObserved\": %s, \"overflow\": %u},\n",
                     (gpu_aabb ? gpuPhysics.aabb_control_stage.enabled != 0
                               : cpu_aabb_collisions_enabled()) ? "true" : "false",
                     mode == GPU_AABB_MODE_HASH ? "hash" :
-                    mode == GPU_AABB_MODE_TREE ? "tree" : "disabled",
+                    mode == GPU_AABB_MODE_TREE ? "aabb-tree" :
+                    mode == GPU_AABB_MODE_SPHERE_TREE ? "sphere-hexahedron" : "disabled",
                     (unsigned long long)query_count,
                     (unsigned long long)proxy_count,
-                    (unsigned long long)(gpu_aabb ? gpuPhysics.aabb_control_stage.candidate_count
-                                                  : cpuAabbCandidates),
+                    (unsigned long long)candidate_pairs,
+                    (unsigned long long)(mode == GPU_AABB_MODE_SPHERE_TREE
+                        ? candidate_pairs * 81u : 0u),
                     (unsigned long long)(gpu_aabb ? gpuPhysics.aabb_control_stage.contact_count
                                                   : cpuAabbContacts),
                     (unsigned long long)(gpu_aabb ? gpuPhysics.aabb_control_stage.node_visit_count

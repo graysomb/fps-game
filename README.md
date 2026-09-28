@@ -386,7 +386,7 @@ provides the pre-filter baseline. Debug JSON samples report simulated versus
 collision particles and static occupied-cell, surface-cell, patch, and patch-reference
 counts.
 
-High-speed voxels released by the tether use a short-lived swept-particle CCD
+High-speed voxels released by the tether use a short-lived nine-ray CCD
 pass against the static and active voxel grids. It is enabled by default and shared by the
 GPU, CPU MT, and CPU ST paths. Use `--no-tether-throw-ccd` for an endpoint-only
 A/B run, or `--tether-throw-ccd` to enable it explicitly. Tracked tether impactors
@@ -527,26 +527,21 @@ Available scenarios are:
   compilation remain GPU resident between PBD substeps. Both substeps are encoded
   in one command buffer and CPU state is mirrored once at the end of the frame.
   The CPU implementation remains the reference and runtime fallback; OpenGL uses
-  the existing CPU AMR path. Each full, intact terminal cell contributes one
-  conservative world-space AABB collision proxy at its current AMR level. For
-  dynamic objects outside the AMR mesh, the GPU reduces swept child bounds into the
-  hierarchy from finest level to root, then traverses that hierarchy directly. A
-  query rejected by the root exits immediately. Partial nodes descend through their
-  nonempty children, refined full nodes descend through their active children, and
-  intact full terminal nodes run the narrow phase. Empty nodes end that branch.
-  Traversal changes no AMR state. Swept AABB tests catch fast crossings, and four
-  face points scatter each contact correction to the cell's eight VGS corners with
-  trilinear weights. Static voxels, the floor, and the terrain side walls use the
-  same terminal-cell scatter. Particles owned by an AABB proxy skip the old sphere
-  collision path, while fluid, bullets, broken cells, and unrelated PBD particles
-  keep that path. The current traversal starts at the single AMR root; multiple
-  active AMR groups will require one root entry per group. Set
-  `FPS_AMR_COLLISION_HASH=1` to use the earlier multilevel hash, or
-  `FPS_AMR_COLLISION_PARTICLES=1` to restore particle-only AMR collisions. The
-  particle option takes precedence. Since the proxy is an AABB, rotation is
-  conservative and can produce earlier corner contact than an oriented box would.
+  the existing CPU AMR path. Dynamic voxels outside the AMR mesh traverse the octree
+  directly. Each query uses its eight corner spheres plus an algebraic center sphere.
+  Full nodes reject queries with six sphere-versus-deformed-hexahedron projection
+  tests, partial nodes descend through nonempty children, and refined full nodes
+  descend through active children. Full terminal cells test all 81 pairs between
+  their nine scale-radius spheres and keep the four deepest contacts. Center contacts
+  scatter equally to all eight VGS corners. Static voxels, the floor, and terrain side
+  walls use the same nine terminal proxies. Ordinary contacts are discrete; tracked
+  high-speed voxels use the existing DDA with an added center ray. Owned AMR corners
+  skip the ordinary sphere path, while fluid, bullets, broken cells, and unrelated PBD
+  particles retain it. Set `FPS_AMR_COLLISION_AABB=1` for the previous AABB tree,
+  `FPS_AMR_COLLISION_HASH=1` for the earlier multilevel AABB hash, or
+  `FPS_AMR_COLLISION_PARTICLES=1` for particle-only AMR collisions.
 * `amr-projectile-impact`: fires one finest-scale voxel at 40 m/s into an initially
-  coarse adaptive cube. The check requires a swept impact, projectile slowdown,
+  coarse adaptive cube. The check requires a nine-ray DDA impact, projectile slowdown,
   target momentum transfer, no far-face tunneling, and no traversal overflow.
   `FPS_AMR_PROJECTILE_SPEED`, `FPS_AMR_PROJECTILE_START_X`, and
   `FPS_AMR_PROJECTILE_OFFSET_Y/Z` provide deterministic traversal probes.
