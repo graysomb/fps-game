@@ -532,12 +532,16 @@ Available scenarios are:
   Full nodes reject queries with six sphere-versus-deformed-hexahedron projection
   tests, partial nodes descend through nonempty children, and refined full nodes
   descend through active children. Full terminal cells test all 81 pairs between
-  their nine scale-radius spheres and keep the four deepest contacts. Center contacts
-  scatter equally to all eight VGS corners. Static voxels, the floor, and terrain side
-  walls use the same nine terminal proxies. Ordinary contacts are discrete; tracked
-  high-speed voxels use the existing DDA with an added center ray. Owned AMR corners
-  skip the ordinary sphere path, while fluid, bullets, broken cells, and unrelated PBD
-  particles retain it. Set `FPS_AMR_COLLISION_AABB=1` for the previous AABB tree,
+  eight corner spheres using the particles' existing radii and one algebraic center
+  sphere with radius `h/2`, then keep the four deepest contacts. This keeps the center
+  sphere inscribed without expanding coarse corners beyond the cell by `h/2`. Center
+  contacts scatter equally to all eight VGS corners. Static voxels, the floor, and
+  terrain side walls use the same nine terminal proxies. Ordinary contacts are discrete; tracked
+  high-speed voxels use the existing DDA with an added center ray. Every particle owned
+  by the AMR hierarchy, including dormant and internal particles, skips the ordinary
+  sphere path; terminal cells are its only collision surface. Fluid, bullets, broken
+  cells, and unrelated PBD particles retain the ordinary path. Set
+  `FPS_AMR_COLLISION_AABB=1` for the previous AABB tree,
   `FPS_AMR_COLLISION_HASH=1` for the earlier multilevel AABB hash, or
   `FPS_AMR_COLLISION_PARTICLES=1` for particle-only AMR collisions.
 * `amr-projectile-impact`: fires one finest-scale voxel at 40 m/s into an initially

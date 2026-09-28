@@ -11967,6 +11967,11 @@ static Vector3 cpu_sphere_proxy_position(const CpuSphereShape *shape, int proxy)
     return center;
 }
 
+static float cpu_sphere_proxy_radius(const CpuSphereShape *shape, int proxy)
+{
+    return proxy < 8 ? shape->particle[proxy]->radius : 0.5f * shape->edge;
+}
+
 static bool cpu_sphere_shape_from_node(const VgsHierarchyNode *node,
                                        CpuSphereShape *shape)
 {
@@ -12067,9 +12072,6 @@ static int cpu_sphere_contacts(const CpuSphereShape *a, const CpuSphereShape *b,
                                CpuSphereContact contacts[4])
 {
     int count = 0;
-    float ar = 0.5f * a->edge, br = 0.5f * b->edge;
-    float target = ar + br;
-    float target_sq = target * target;
     Vector3 fallback = v_sub(cpu_sphere_proxy_position(a, 8),
                              cpu_sphere_proxy_position(b, 8));
     float fallback_length = v_length(fallback);
@@ -12078,6 +12080,9 @@ static int cpu_sphere_contacts(const CpuSphereShape *a, const CpuSphereShape *b,
     for (int ap = 0; ap < 9; ++ap) {
         Vector3 pa = cpu_sphere_proxy_position(a, ap);
         for (int bp = 0; bp < 9; ++bp) {
+            float target = cpu_sphere_proxy_radius(a, ap) +
+                           cpu_sphere_proxy_radius(b, bp);
+            float target_sq = target * target;
             Vector3 delta = v_sub(pa, cpu_sphere_proxy_position(b, bp));
             float distance_sq = v_dot(delta, delta);
             if (distance_sq >= target_sq) continue;
@@ -12144,27 +12149,28 @@ static bool cpu_rebuild_sphere_proxies(void)
             int child = node->children[c];
             if (child < 0 && child != VGS_CHILD_EMPTY)
                 cpuAabbLeafParent[-child - 1] = i;
-        }
-        if (!node->active || !node->vgs_enabled ||
-            node->occupancy != VGS_OCCUPANCY_FULL || node->real_corner_mask != 0xffu ||
-            vgs_node_has_active_children(node)) continue;
-        for (int c = 0; c < 8; ++c) {
-            ptrdiff_t id = node->particles[c] - particles_pool;
+            /* Every hierarchy particle belongs to the same AMR body.  Keep
+             * dormant and internal particles out of the ordinary particle
+             * collision hash; only terminal cells provide collision shapes. */
+            Particle *particle = node->particles[c];
+            if (!particle) continue;
+            ptrdiff_t id = particle - particles_pool;
             if (id >= 0 && id < particle_pool_count) cpu_aabb_covered[id] = 1;
         }
     }
     for (int slot = 0; slot < active_voxel_count; ++slot) {
         int world = active_voxels[slot];
         Voxel *voxel = &voxels[world];
-        if (!voxel->simulate_dofs || !voxel->vgs_active || voxel->isBullet || voxel->type != 0)
-            continue;
         bool owned = cpuAabbLeafParent[world] >= 0;
         if (owned) {
             for (int c = 0; c < 8; ++c) {
                 ptrdiff_t id = voxel->particles[c] - particles_pool;
                 if (id >= 0 && id < particle_pool_count) cpu_aabb_covered[id] = 1;
             }
-        } else if (!cpu_aabb_append(voxel->particles, voxel->rest_edge, world + 1,
+        }
+        if (!voxel->simulate_dofs || !voxel->vgs_active || voxel->isBullet || voxel->type != 0)
+            continue;
+        if (!owned && !cpu_aabb_append(voxel->particles, voxel->rest_edge, world + 1,
                                     false, true, false)) return false;
     }
     return true;
@@ -12268,10 +12274,10 @@ static void cpu_collect_plane_contact(const CpuSphereShape *shape, int proxy,
 
 static void cpu_solve_static_sphere_shape(const CpuSphereShape *shape)
 {
-    float radius = 0.5f * shape->edge;
     CpuSphereContact contacts[4];
     int count = 0;
     for (int p = 0; p < 9; ++p) {
+        float radius = cpu_sphere_proxy_radius(shape, p);
         Vector3 center = cpu_sphere_proxy_position(shape, p);
         cpu_collect_plane_contact(shape, p, (Vector3){0,1,0}, radius - center.y,
                                   contacts, &count);
@@ -12300,6 +12306,7 @@ static void cpu_solve_static_sphere_shape(const CpuSphereShape *shape)
         voxel_world_bounds(&voxels[world], &bounds);
         count = 0;
         for (int p = 0; p < 9; ++p) {
+            float radius = cpu_sphere_proxy_radius(shape, p);
             Vector3 q = cpu_sphere_proxy_position(shape, p);
             Vector3 nearest = { clampf(q.x, bounds.minx, bounds.maxx),
                                 clampf(q.y, bounds.miny, bounds.maxy),

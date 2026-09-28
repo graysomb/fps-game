@@ -1054,6 +1054,13 @@ inline bool loadSphereShape(uint voxelId, device const ParticleState *particle,
     return true;
 }
 
+inline void loadSphereRadii(float edge, thread const uint *particleId,
+                            device const ParticleState *particle,
+                            thread float *radius) {
+    for (int c = 0; c < 8; ++c) radius[c] = particle[particleId[c]].pos_radius.w;
+    radius[8] = 0.5f * edge;
+}
+
 inline float3 hexaFaceNormal(thread const float3 *position, int face) {
     int base = face * 4;
     float3 p0 = position[AMR_HEX_FACE_CORNERS[base]];
@@ -1107,17 +1114,19 @@ inline void insertSphereContact(thread SphereContact *contacts, thread int &coun
     }
 }
 
-inline int gatherSphereContacts(thread const float3 *aPosition, float aRadius,
-                                thread const float3 *bPosition, float bRadius,
+inline int gatherSphereContacts(thread const float3 *aPosition,
+                                thread const float *aRadius,
+                                thread const float3 *bPosition,
+                                thread const float *bRadius,
                                 thread SphereContact *contacts) {
     int count = 0;
-    float target = aRadius + bRadius;
-    float targetSquared = target * target;
     float3 fallback = aPosition[8] - bPosition[8];
     float fallbackSquared = dot(fallback, fallback);
     fallback = fallbackSquared > 1e-12f ? fallback * rsqrt(fallbackSquared)
                                         : float3(1.0f, 0.0f, 0.0f);
     for (int a = 0; a < 9; ++a) for (int b = 0; b < 9; ++b) {
+        float target = aRadius[a] + bRadius[b];
+        float targetSquared = target * target;
         float3 delta = aPosition[a] - bPosition[b];
         float distanceSquared = dot(delta, delta);
         if (distanceSquared >= targetSquared) continue;
@@ -1208,7 +1217,14 @@ inline void amrSphereSetup(uint gid, device const VoxelState *voxel,
                            device const AmrControl *amr, constant GpuUniforms &u) {
     if (aabb->mode != 3u || gid >= aabb->total_stage_count) return;
     VoxelState v = voxel[gid];
-    if (amrSphereTerminal(gid, v, voxel, amrState, amr, u)) {
+    bool hierarchyNode = gid >= uint(u.voxel_count);
+    uint parent = hierarchyNode ? as_type<uint>(v.pos_rest_edge.x)
+                                : as_type<uint>(amrState[gid].latest[7]);
+    bool amrOwned = hierarchyNode || parent < amr->total_stage_count;
+    // The hierarchy is one collision body.  Mask every particle it owns from
+    // the ordinary particle hash, including dormant and internal particles;
+    // terminal cells alone are dispatched as the body's collision surface.
+    if (amrOwned) {
         for (int c = 0; c < 8; ++c) {
             uint id = voxelParticle(v, c);
             if (id < amr->particle_capacity)
@@ -1216,7 +1232,6 @@ inline void amrSphereSetup(uint gid, device const VoxelState *voxel,
         }
     }
     if (gid < uint(u.voxel_count)) {
-        uint parent = as_type<uint>(amrState[gid].latest[7]);
         bool external = parent >= amr->total_stage_count && v.flags.x != 0 && v.flags.w != 0 &&
                         v.flags.y == 0 && v.flags.z == 0;
         if (external)
@@ -1240,6 +1255,8 @@ inline void amrSphereTreeCollisions(uint gid, device const ParticleState *partic
         queryVoxel.flags.y != 0 || queryVoxel.flags.z != 0) return;
     float3 queryPosition[9]; uint queryParticle[8];
     if (!loadSphereShape(gid, particle, voxel, control, queryPosition, queryParticle)) return;
+    float queryProxyRadius[9];
+    loadSphereRadii(queryVoxel.pos_rest_edge.w, queryParticle, particle, queryProxyRadius);
     int queryBody = sphereShapeBody(queryVoxel, collisionMeta, control);
     float queryRadius = 0.5f * queryVoxel.pos_rest_edge.w;
     uint root = uint(u.voxel_count);
@@ -1294,9 +1311,11 @@ inline void amrSphereTreeCollisions(uint gid, device const ParticleState *partic
         if (occupancy != 2u || node.flags.x == 0 || node.flags.w == 0 ||
             sphereShapeBody(node, collisionMeta, control) == queryBody) continue;
         atomic_fetch_add_explicit(&aabb->candidate_count, 1u, memory_order_relaxed);
+        float nodeProxyRadius[9];
+        loadSphereRadii(node.pos_rest_edge.w, nodeParticle, particle, nodeProxyRadius);
         SphereContact contacts[4];
-        int contactCount = gatherSphereContacts(queryPosition, queryRadius, nodePosition,
-                                                 0.5f * node.pos_rest_edge.w, contacts);
+        int contactCount = gatherSphereContacts(queryPosition, queryProxyRadius, nodePosition,
+                                                 nodeProxyRadius, contacts);
         for (int c = 0; c < contactCount; ++c)
             scatterSphereContact(gid, nodeId, true, contacts[c], particle, correction,
                                  voxel, control, u);
@@ -1331,9 +1350,11 @@ inline void amrSphereStaticCollisions(uint gid, device const ParticleState *part
     if (!amrSphereTerminal(gid, v, voxel, amrState, amr, u)) return;
     float3 position[9]; uint particleId[8];
     if (!loadSphereShape(gid, particle, voxel, control, position, particleId)) return;
-    float radius = 0.5f * v.pos_rest_edge.w;
+    float proxyRadius[9];
+    loadSphereRadii(v.pos_rest_edge.w, particleId, particle, proxyRadius);
     SphereContact contacts[4]; int contactCount = 0;
     for (int p = 0; p < 9; ++p) {
+        float radius = proxyRadius[p];
         gatherSpherePlaneContact(p, radius - position[p].y, float3(0,1,0),
                                  contacts, contactCount);
         gatherSpherePlaneContact(p, -u.floor_size + radius - position[p].x,
@@ -1356,8 +1377,8 @@ inline void amrSphereStaticCollisions(uint gid, device const ParticleState *part
 
     float3 boundsMin(INFINITY), boundsMax(-INFINITY);
     for (int p = 0; p < 9; ++p) {
-        boundsMin = min(boundsMin, position[p] - float3(radius));
-        boundsMax = max(boundsMax, position[p] + float3(radius));
+        boundsMin = min(boundsMin, position[p] - float3(proxyRadius[p]));
+        boundsMax = max(boundsMax, position[p] + float3(proxyRadius[p]));
     }
     int3 cellMin = int3(floor(boundsMin / u.voxel_size));
     int3 cellMax = int3(floor(boundsMax / u.voxel_size));
@@ -1391,6 +1412,7 @@ inline void amrSphereStaticCollisions(uint gid, device const ParticleState *part
                 }
                 contactCount = 0;
                 for (int p = 0; p < 9; ++p) {
+                    float radius = proxyRadius[p];
                     float3 nearest = clamp(position[p], boxMin, boxMax);
                     float3 delta = position[p] - nearest;
                     float distanceSquared = dot(delta, delta);
