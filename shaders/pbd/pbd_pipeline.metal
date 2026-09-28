@@ -47,7 +47,12 @@ struct AabbControl {
     atomic_uint overflow;
     uint total_stage_count;
     uint enabled;
-    uint2 padding;
+    uint mode;
+    atomic_uint node_visit_count;
+    atomic_uint bounds_reject_count;
+    atomic_uint empty_reject_count;
+    atomic_uint max_stack_depth;
+    uint padding;
 };
 
 struct AmrControl {
@@ -84,7 +89,7 @@ static_assert(sizeof(AmrState) == 64, "AmrState layout mismatch");
 static_assert(sizeof(AmrScratch) == 32, "AmrScratch layout mismatch");
 static_assert(sizeof(AmrControl) == 96, "AmrControl layout mismatch");
 static_assert(sizeof(AabbState) == 96, "AabbState layout mismatch");
-static_assert(sizeof(AabbControl) == 32, "AabbControl layout mismatch");
+static_assert(sizeof(AabbControl) == 48, "AabbControl layout mismatch");
 
 constant int MODE_RESET = 0;
 constant int MODE_INTEGRATE = 1;
@@ -123,6 +128,8 @@ constant int MODE_AABB_BOUNDS = 33;
 constant int MODE_AABB_HASH_BUILD = 34;
 constant int MODE_AABB_COLLISIONS = 35;
 constant int MODE_AABB_STATIC_COLLISIONS = 36;
+constant int MODE_AABB_REDUCE = 37;
+constant int MODE_AABB_TREE_COLLISIONS = 38;
 constant int CONTROL_FLAG_OVERFLOW = 1;
 constant int CONTROL_FLAG_TOPOLOGY_DIRTY = 2;
 constant int CONTROL_FLAG_BREAK_OCCURRED = 4;
@@ -550,17 +557,29 @@ inline void aabbClear(uint gid, device atomic_uint *owner, device AabbState *sta
         atomic_store_explicit(&aabb->candidate_count, 0u, memory_order_relaxed);
         atomic_store_explicit(&aabb->contact_count, 0u, memory_order_relaxed);
         atomic_store_explicit(&aabb->overflow, 0u, memory_order_relaxed);
+        atomic_store_explicit(&aabb->node_visit_count, 0u, memory_order_relaxed);
+        atomic_store_explicit(&aabb->bounds_reject_count, 0u, memory_order_relaxed);
+        atomic_store_explicit(&aabb->empty_reject_count, 0u, memory_order_relaxed);
+        atomic_store_explicit(&aabb->max_stack_depth, 0u, memory_order_relaxed);
     }
 }
 
 inline void aabbBounds(uint gid, device const ParticleState *particle,
                        device const VoxelState *voxel, device const int *collisionMeta,
+                       device const AmrState *amrState,
                        device atomic_uint *owner, device AabbState *state,
                        device AabbControl *aabb, device const AmrControl *amr,
                        device const int *control, constant GpuUniforms &u) {
     if (gid >= aabb->total_stage_count || aabb->enabled == 0u) return;
     VoxelState v = voxel[gid];
-    if (!aabbEligible(gid, v, voxel, amr, u)) return;
+    uint occupancy = amrOccupancy(v);
+    uint realMask = amrRealMask(v);
+    bool hashMode = aabb->mode == 1u;
+    if (hashMode) {
+        if (!aabbEligible(gid, v, voxel, amr, u)) return;
+    } else if (occupancy != 2u || realMask != 0xffu) {
+        return;
+    }
     bool firstBuildThisSubstep = state[gid].meta.x == 0u;
     float3 previousMin(INFINITY), previousMax(-INFINITY);
     float3 predictedMin(INFINITY), predictedMax(-INFINITY);
@@ -581,19 +600,30 @@ inline void aabbBounds(uint gid, device const ParticleState *particle,
     float3 center = 0.25f * (previousMin + previousMax + predictedMin + predictedMax);
     int body = first < uint(controlLoad(control, 0)) ? collisionMeta[first * 4u + 3u] : -1;
     if (body < 0) body = gid >= uint(u.voxel_count) ? 0 : int(gid) + 1;
+    uint parent = gid < uint(u.voxel_count) ? as_type<uint>(amrState[gid].latest[7])
+                                             : as_type<uint>(v.pos_rest_edge.x);
+    bool hasParent = parent < aabb->total_stage_count;
+    bool hierarchyNode = gid >= uint(u.voxel_count);
+    bool amrOwned = hierarchyNode || hasParent;
+    bool terminalAmr = amrOwned && v.flags.w != 0 &&
+        (!hierarchyNode || !amrHasActiveChildren(v, voxel, amr));
+    bool externalQuery = !hierarchyNode && !hasParent && v.flags.x != 0 &&
+                         v.flags.w != 0 && v.flags.y == 0 && v.flags.z == 0;
     AabbState out;
     out.previous_min = float4(previousMin, 0.0f);
     out.previous_max = float4(previousMax, 0.0f);
     out.predicted_min = float4(predictedMin, 0.0f);
     out.predicted_max = float4(predictedMax, v.pos_rest_edge.w);
     out.cell_level = int4(int3(floor(center / cellSize)), level);
-    out.meta = uint4(1u, uint(body + 1), gid, 0u);
+    out.meta = uint4(1u, uint(body + 1), gid,
+                     externalQuery ? 2u : (amrOwned ? 1u : 0u));
     state[gid] = out;
-    for (int c = 0; c < 8; ++c) {
+    bool cover = hashMode ? true : (terminalAmr && v.flags.x != 0);
+    if (cover) for (int c = 0; c < 8; ++c) {
         uint id = voxelParticle(v, c);
         atomic_store_explicit(owner + id, 1u, memory_order_relaxed);
     }
-    if (firstBuildThisSubstep)
+    if (firstBuildThisSubstep && (hashMode || externalQuery))
         atomic_fetch_add_explicit(&aabb->proxy_count, 1u, memory_order_relaxed);
 }
 
@@ -604,6 +634,55 @@ inline void aabbHashBuild(uint gid, device const AabbState *state,
     int4 key = state[gid].cell_level;
     uint hash = aabbHashCoord(key.xyz, key.w, u.hash_size);
     hashNext[gid] = atomic_exchange_explicit(hashHead + hash, int(gid), memory_order_relaxed);
+}
+
+inline void atomicMaxUint(device atomic_uint *value, uint candidate) {
+    uint expected = atomic_load_explicit(value, memory_order_relaxed);
+    while (expected < candidate &&
+           !atomic_compare_exchange_weak_explicit(value, &expected, candidate,
+                                                   memory_order_relaxed,
+                                                   memory_order_relaxed)) {}
+}
+
+inline void aabbReduce(uint gid, device const VoxelState *voxel,
+                       device AabbState *state, device const AabbControl *aabb,
+                       constant GpuUniforms &u) {
+    if (aabb->mode != 2u || gid >= uint(u.integer_padding_2)) return;
+    uint stage = uint(u.integer_padding_1) + gid;
+    if (stage >= aabb->total_stage_count) return;
+    VoxelState node = voxel[stage];
+    if (amrOccupancy(node) == 0u) { state[stage].meta.x = 0u; return; }
+    bool valid = state[stage].meta.x != 0u;
+    float3 previousMin = valid ? state[stage].previous_min.xyz : float3(INFINITY);
+    float3 previousMax = valid ? state[stage].previous_max.xyz : float3(-INFINITY);
+    float3 predictedMin = valid ? state[stage].predicted_min.xyz : float3(INFINITY);
+    float3 predictedMax = valid ? state[stage].predicted_max.xyz : float3(-INFINITY);
+    for (int c = 0; c < 8; ++c) {
+        uint child = amrChild(node, c);
+        if (child >= aabb->total_stage_count || state[child].meta.x == 0u) continue;
+        valid = true;
+        previousMin = min(previousMin, state[child].previous_min.xyz);
+        previousMax = max(previousMax, state[child].previous_max.xyz);
+        predictedMin = min(predictedMin, state[child].predicted_min.xyz);
+        predictedMax = max(predictedMax, state[child].predicted_max.xyz);
+    }
+    if (!valid) { state[stage].meta.x = 0u; return; }
+    AabbState out = state[stage];
+    out.previous_min = float4(previousMin, 0.0f);
+    out.previous_max = float4(previousMax, 0.0f);
+    out.predicted_min = float4(predictedMin, 0.0f);
+    out.predicted_max = float4(predictedMax, node.pos_rest_edge.w);
+    out.meta.x = 1u; out.meta.z = stage; out.meta.w = 1u;
+    if (out.meta.y == 0u) out.meta.y = 1u;
+    state[stage] = out;
+}
+
+inline bool aabbSweptOverlap(AabbState a, AabbState b, float skin) {
+    float3 amin = min(a.previous_min.xyz, a.predicted_min.xyz) - float3(skin);
+    float3 amax = max(a.previous_max.xyz, a.predicted_max.xyz) + float3(skin);
+    float3 bmin = min(b.previous_min.xyz, b.predicted_min.xyz);
+    float3 bmax = max(b.previous_max.xyz, b.predicted_max.xyz);
+    return all(amax >= bmin) && all(bmax >= amin);
 }
 
 inline float aabbWeight(int corner, float3 uvw) {
@@ -783,6 +862,76 @@ inline void aabbCollisions(uint gid, device const ParticleState *particle,
     }
 }
 
+inline void aabbTreeCollisions(uint gid, device const ParticleState *particle,
+                               device atomic_uint *correction,
+                               device const VoxelState *voxel,
+                               device const AabbState *state, device AabbControl *aabb,
+                               device const AmrControl *amr, device const int *control,
+                               constant GpuUniforms &u) {
+    if (aabb->mode != 2u || gid >= uint(u.voxel_count) ||
+        state[gid].meta.x == 0u || state[gid].meta.w != 2u) return;
+    uint root = uint(u.voxel_count);
+    if (root >= aabb->total_stage_count) return;
+    uint stack[64]; uint stackSize = 1u; stack[0] = root;
+    atomicMaxUint(&aabb->max_stack_depth, stackSize);
+    AabbState query = state[gid];
+    float skin = max(1e-4f, 0.002f * u.voxel_size);
+    while (stackSize > 0u) {
+        uint nodeId = stack[--stackSize];
+        if (nodeId >= aabb->total_stage_count) {
+            atomic_fetch_add_explicit(&aabb->empty_reject_count, 1u,
+                                      memory_order_relaxed);
+            continue;
+        }
+        atomic_fetch_add_explicit(&aabb->node_visit_count, 1u, memory_order_relaxed);
+        VoxelState node = voxel[nodeId];
+        uint occupancy = amrOccupancy(node);
+        if (occupancy == 0u) {
+            atomic_fetch_add_explicit(&aabb->empty_reject_count, 1u,
+                                      memory_order_relaxed);
+            continue;
+        }
+        if (state[nodeId].meta.x == 0u ||
+            !aabbSweptOverlap(query, state[nodeId], skin)) {
+            atomic_fetch_add_explicit(&aabb->bounds_reject_count, 1u,
+                                      memory_order_relaxed);
+            continue;
+        }
+        bool hierarchyNode = nodeId >= uint(u.voxel_count);
+        bool descend = occupancy == 1u ||
+            (hierarchyNode && amrHasActiveChildren(node, voxel, amr));
+        if (descend && hierarchyNode) {
+            for (int c = 7; c >= 0; --c) {
+                uint child = amrChild(node, c);
+                if (child >= aabb->total_stage_count) {
+                    atomic_fetch_add_explicit(&aabb->empty_reject_count, 1u,
+                                              memory_order_relaxed);
+                    continue;
+                }
+                if (occupancy != 1u && voxel[child].flags.w == 0) continue;
+                if (stackSize >= 64u) {
+                    atomic_store_explicit(&aabb->overflow, 1u, memory_order_relaxed);
+                    return;
+                }
+                stack[stackSize++] = child;
+            }
+            atomicMaxUint(&aabb->max_stack_depth, stackSize);
+            continue;
+        }
+        if (occupancy != 2u || amrRealMask(node) != 0xffu ||
+            node.flags.x == 0 || node.flags.w == 0 ||
+            state[nodeId].meta.y == query.meta.y) continue;
+        atomic_fetch_add_explicit(&aabb->candidate_count, 1u, memory_order_relaxed);
+        float3 normal, amin, amax, bmin, bmax; float depth, toi;
+        if (!aabbContact(query, state[nodeId], skin, normal, depth, toi,
+                         amin, amax, bmin, bmax)) continue;
+        scatterAabbManifold(gid, nodeId, true, normal, depth,
+                            amin, amax, bmin, bmax,
+                            state, voxel, particle, correction, control, u);
+        atomic_fetch_add_explicit(&aabb->contact_count, 1u, memory_order_relaxed);
+    }
+}
+
 inline int findStaticCell(int3 coord, device int4 *staticCell,
                           constant GpuUniforms &u);
 
@@ -791,9 +940,22 @@ inline void aabbStaticCollisions(uint gid, device const ParticleState *particle,
                                  device int4 *staticCell,
                                  device const StaticCollider *staticCollider,
                                  device const AabbState *state, device AabbControl *aabb,
+                                 device const AmrState *amrState,
+                                 device const AmrControl *amr,
                                  device const atomic_uint *collisionControl,
                                  device const int *control, constant GpuUniforms &u) {
     if (gid >= aabb->total_stage_count || state[gid].meta.x == 0u) return;
+    if (aabb->mode == 2u) {
+        VoxelState v = voxel[gid];
+        bool hierarchyNode = gid >= uint(u.voxel_count);
+        uint parent = hierarchyNode ? as_type<uint>(v.pos_rest_edge.x)
+                                    : as_type<uint>(amrState[gid].latest[7]);
+        bool amrOwned = hierarchyNode || parent < aabb->total_stage_count;
+        if (!amrOwned || v.flags.x == 0 || v.flags.w == 0 ||
+            v.flags.y != 0 || v.flags.z != 0 || amrOccupancy(v) != 2u ||
+            amrRealMask(v) != 0xffu ||
+            (hierarchyNode && amrHasActiveChildren(v, voxel, amr))) return;
+    }
     AabbState a = state[gid];
     float skin = max(1e-4f, 0.002f * u.voxel_size);
     // Analytic floor and terrain side walls use the same trilinear scatter.
@@ -1327,9 +1489,11 @@ kernel void pbd_pipeline(
         case MODE_AMR_PREPARE_INDIRECT:amrPrepareIndirect(gid,control,dispatchArgs,amrControl);break;
         case MODE_AMR_DORMANT_SCATTER:amrDormantScatter(gid,particle,voxel,amrScratch,amrControl,control,u);break;
         case MODE_AABB_CLEAR:aabbClear(gid,aabbOwner,aabbState,aabbControl,amrControl);break;
-        case MODE_AABB_BOUNDS:aabbBounds(gid,particle,voxel,collisionMeta,aabbOwner,aabbState,aabbControl,amrControl,control,u);break;
+        case MODE_AABB_BOUNDS:aabbBounds(gid,particle,voxel,collisionMeta,amrState,aabbOwner,aabbState,aabbControl,amrControl,control,u);break;
         case MODE_AABB_HASH_BUILD:aabbHashBuild(gid,aabbState,hashHead,hashNext,aabbControl,u);break;
         case MODE_AABB_COLLISIONS:aabbCollisions(gid,particle,correction,voxel,hashHead,hashNext,aabbState,aabbControl,amrControl,control,u);break;
-        case MODE_AABB_STATIC_COLLISIONS:aabbStaticCollisions(gid,particle,correction,voxel,staticCell,staticCollider,aabbState,aabbControl,collisionControl,control,u);break;
+        case MODE_AABB_STATIC_COLLISIONS:aabbStaticCollisions(gid,particle,correction,voxel,staticCell,staticCollider,aabbState,aabbControl,amrState,amrControl,collisionControl,control,u);break;
+        case MODE_AABB_REDUCE:aabbReduce(gid,voxel,aabbState,aabbControl,u);break;
+        case MODE_AABB_TREE_COLLISIONS:aabbTreeCollisions(gid,particle,correction,voxel,aabbState,aabbControl,amrControl,control,u);break;
     }
 }

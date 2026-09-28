@@ -57,7 +57,12 @@ typedef struct {
     uint32_t overflow;
     uint32_t total_stage_count;
     uint32_t enabled;
-    uint32_t padding[2];
+    uint32_t mode;
+    uint32_t node_visit_count;
+    uint32_t bounds_reject_count;
+    uint32_t empty_reject_count;
+    uint32_t max_stack_depth;
+    uint32_t padding;
 } GpuAabbControl;
 
 typedef struct {
@@ -83,7 +88,7 @@ _Static_assert(sizeof(GpuAmrState) == 64, "GpuAmrState/Metal mismatch");
 _Static_assert(sizeof(GpuAmrScratch) == 32, "GpuAmrScratch/Metal mismatch");
 _Static_assert(sizeof(GpuAmrControl) == 96, "GpuAmrControl/Metal mismatch");
 _Static_assert(sizeof(GpuAabbState) == 96, "GpuAabbState/Metal mismatch");
-_Static_assert(sizeof(GpuAabbControl) == 32, "GpuAabbControl/Metal mismatch");
+_Static_assert(sizeof(GpuAabbControl) == 48, "GpuAabbControl/Metal mismatch");
 
 enum {
     GPU_AMR_META_OCCUPANCY_SHIFT = 8,
@@ -259,6 +264,13 @@ static void gpu_clear_step_failure(void) {
 static bool gpu_aabb_collisions_enabled(void) {
     return vgsHierarchy.adaptive && vgsHierarchy.node_count > 0 &&
            getenv("FPS_AMR_COLLISION_PARTICLES") == NULL;
+}
+
+enum { GPU_AABB_MODE_DISABLED = 0, GPU_AABB_MODE_HASH = 1, GPU_AABB_MODE_TREE = 2 };
+
+static uint32_t gpu_aabb_collision_mode(void) {
+    if (!gpu_aabb_collisions_enabled()) return GPU_AABB_MODE_DISABLED;
+    return getenv("FPS_AMR_COLLISION_HASH") ? GPU_AABB_MODE_HASH : GPU_AABB_MODE_TREE;
 }
 
 static bool gpu_resize_array(void **ptr, size_t count, size_t item_size) {
@@ -607,6 +619,8 @@ static bool gpu_pack_world(void) {
                          (0xffu << GPU_AMR_META_REAL_MASK_SHIFT);
         GpuAmrState *history = &gpuPhysics.amr_state_stage[dynamic_id];
         memset(history, 0, sizeof(*history));
+        uint32_t no_parent = UINT32_MAX;
+        memcpy(&history->latest[7], &no_parent, sizeof(no_parent));
         if (vgsHierarchy.leaf_history) {
             memcpy(history->latest, vgsHierarchy.leaf_history[i].latest,
                    sizeof(vgsHierarchy.leaf_history[i].latest));
@@ -743,7 +757,8 @@ static bool gpu_pack_world(void) {
     gpuPhysics.aabb_control_stage = (GpuAabbControl){
         .total_stage_count = (uint32_t)(gpuPhysics.dynamic_voxel_count +
                                         gpuPhysics.hierarchy_node_count),
-        .enabled = gpu_aabb_collisions_enabled() ? 1u : 0u
+        .enabled = gpu_aabb_collisions_enabled() ? 1u : 0u,
+        .mode = gpu_aabb_collision_mode()
     };
     gpuPhysics.hierarchy_generation = vgsHierarchy.topology_generation;
     return true;
@@ -1194,11 +1209,16 @@ static bool gpu_validate_and_commit(void) {
                 gpuPhysics.control_stage.overflow, dispatch_stage[0], dispatch_stage[8],
                 dispatch_stage[9], dispatch_stage[10], dispatch_stage[11]);
         if (resident_amr)
-            fprintf(stderr, "aabb-readback enabled=%u proxies=%u candidates=%u contacts=%u overflow=%u\n",
+            fprintf(stderr, "aabb-readback enabled=%u mode=%u queries=%u candidates=%u contacts=%u nodes=%u boundsReject=%u emptyReject=%u maxStack=%u overflow=%u\n",
                     gpuPhysics.aabb_control_stage.enabled,
+                    gpuPhysics.aabb_control_stage.mode,
                     gpuPhysics.aabb_control_stage.proxy_count,
                     gpuPhysics.aabb_control_stage.candidate_count,
                     gpuPhysics.aabb_control_stage.contact_count,
+                    gpuPhysics.aabb_control_stage.node_visit_count,
+                    gpuPhysics.aabb_control_stage.bounds_reject_count,
+                    gpuPhysics.aabb_control_stage.empty_reject_count,
+                    gpuPhysics.aabb_control_stage.max_stack_depth,
                     gpuPhysics.aabb_control_stage.overflow);
     }
     if (used_particles < gpuPhysics.uploaded_particle_count ||
@@ -1500,6 +1520,7 @@ static bool gpu_dispatch_substep(float sub_dt) {
     gpu_set_uniforms(sub_dt);
     bool resident_amr = gpu_resident_amr_enabled();
     bool aabb_collisions = resident_amr && gpu_aabb_collisions_enabled();
+    uint32_t aabb_mode = gpu_aabb_collision_mode();
     int total_stage = gpuPhysics.dynamic_voxel_count + gpuPhysics.hierarchy_node_count;
     int hash_items = resident_amr ? gpuPhysics.sim_slot_capacity : gpuPhysics.collision_count;
     if (hash_items < total_stage) hash_items = total_stage;
@@ -1521,16 +1542,32 @@ static bool gpu_dispatch_substep(float sub_dt) {
     ok = ok && gpu_dispatch(GPU_MODE_PREPARE_INDIRECT, 1) &&
               gpu_dispatch_indirect(GPU_MODE_INTEGRATE) &&
               gpu_dispatch_indirect(GPU_MODE_RESET);
-    if (ok && aabb_collisions)
+    if (ok && aabb_collisions) {
         ok = gpu_dispatch(GPU_MODE_AABB_CLEAR, aabb_clear_count) &&
              gpu_dispatch(GPU_MODE_AABB_BOUNDS, total_stage);
+        if (ok && aabb_mode == GPU_AABB_MODE_TREE) {
+            for (int level = vgsHierarchy.levels - 1; ok && level >= 0; --level) {
+                gpu_set_vgs_layer(gpuPhysics.dynamic_voxel_count +
+                                  vgsHierarchy.level_start[level],
+                                  vgsHierarchy.level_count[level]);
+                ok = gpu_dispatch(GPU_MODE_AABB_REDUCE,
+                                  vgsHierarchy.level_count[level]);
+            }
+            gpu_set_vgs_layer(0, total_stage);
+        }
+    }
     ok = ok && gpu_dispatch(GPU_MODE_HASH_CLEAR, hash_size) &&
          gpu_dispatch_indirect_offset(GPU_MODE_HASH_BUILD, 16) &&
          gpu_dispatch_indirect_offset(GPU_MODE_PAIR_COLLISIONS, 16);
-    if (ok && aabb_collisions)
-        ok = gpu_dispatch(GPU_MODE_HASH_CLEAR, hash_size) &&
-             gpu_dispatch(GPU_MODE_AABB_HASH_BUILD, total_stage) &&
-             gpu_dispatch(GPU_MODE_AABB_COLLISIONS, total_stage);
+    if (ok && aabb_collisions) {
+        if (aabb_mode == GPU_AABB_MODE_HASH)
+            ok = gpu_dispatch(GPU_MODE_HASH_CLEAR, hash_size) &&
+                 gpu_dispatch(GPU_MODE_AABB_HASH_BUILD, total_stage) &&
+                 gpu_dispatch(GPU_MODE_AABB_COLLISIONS, total_stage);
+        else
+            ok = gpu_dispatch(GPU_MODE_AABB_TREE_COLLISIONS,
+                              gpuPhysics.dynamic_voxel_count);
+    }
     ok = ok && gpu_dispatch_indirect(GPU_MODE_APPLY);
     // Leaves and hierarchy nodes share the same particle correction buffer.
     // Internal nodes scatter VGS plus trilinear/pseudoinverse weld corrections

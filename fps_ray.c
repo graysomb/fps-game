@@ -11461,17 +11461,32 @@ typedef struct CpuAabbProxy {
     float predicted_min[3], predicted_max[3];
     float rest_edge;
     int body;
+    bool valid;
+    bool amr_owned;
+    bool query;
 } CpuAabbProxy;
 
 static CpuAabbProxy *cpuAabbProxies;
+static CpuAabbProxy *cpuAabbNodeBounds;
 static int cpuAabbProxyCount;
 static int cpuAabbProxyCapacity;
+static int cpuAabbNodeCapacity;
+static int cpuAabbLeafParent[MAX_VOXELS];
 static uint64_t cpuAabbCandidates;
 static uint64_t cpuAabbContacts;
+static uint64_t cpuAabbNodeVisits;
+static uint64_t cpuAabbBoundsRejects;
+static uint64_t cpuAabbEmptyRejects;
+static uint32_t cpuAabbMaxStack;
+static uint32_t cpuAabbOverflow;
 
 static bool cpu_aabb_collisions_enabled(void) {
     return vgsHierarchy.adaptive && vgsHierarchy.node_count > 0 &&
            getenv("FPS_AMR_COLLISION_PARTICLES") == NULL;
+}
+
+static bool cpu_aabb_hash_enabled(void) {
+    return cpu_aabb_collisions_enabled() && getenv("FPS_AMR_COLLISION_HASH") != NULL;
 }
 
 static bool cpu_particle_is_aabb_covered(const Particle *particle) {
@@ -11490,10 +11505,17 @@ static bool cpu_aabb_reserve(int count) {
     return true;
 }
 
-static bool cpu_aabb_append(Particle *const particles[8], float rest_edge,
-                            int fallback_body) {
-    if (!cpu_aabb_reserve(cpuAabbProxyCount + 1)) return false;
-    CpuAabbProxy *proxy = &cpuAabbProxies[cpuAabbProxyCount++];
+static bool cpu_aabb_reserve_nodes(int count) {
+    if (count <= cpuAabbNodeCapacity) return true;
+    CpuAabbProxy *next = realloc(cpuAabbNodeBounds, (size_t)count * sizeof(*next));
+    if (!next) return false;
+    cpuAabbNodeBounds = next;
+    cpuAabbNodeCapacity = count;
+    return true;
+}
+
+static bool cpu_aabb_fill(CpuAabbProxy *proxy, Particle *const particles[8],
+                          float rest_edge, int fallback_body, bool cover) {
     memset(proxy, 0, sizeof(*proxy));
     proxy->rest_edge = rest_edge;
     proxy->body = fallback_body;
@@ -11503,12 +11525,12 @@ static bool cpu_aabb_append(Particle *const particles[8], float rest_edge,
     }
     for (int corner = 0; corner < 8; ++corner) {
         Particle *particle = particles[corner];
-        if (!particle) { --cpuAabbProxyCount; return true; }
+        if (!particle) return false;
         proxy->particle[corner] = particle;
         if (corner == 0 && particle->collision_group >= 0)
             proxy->body = particle->collision_group;
         ptrdiff_t id = particle - particles_pool;
-        if (id >= 0 && id < particle_pool_count) cpu_aabb_covered[id] = 1;
+        if (cover && id >= 0 && id < particle_pool_count) cpu_aabb_covered[id] = 1;
         const float previous[3] = { particle->prev_pos.x, particle->prev_pos.y,
                                     particle->prev_pos.z };
         const float predicted[3] = { particle->predicted_pos.x, particle->predicted_pos.y,
@@ -11520,7 +11542,38 @@ static bool cpu_aabb_append(Particle *const particles[8], float rest_edge,
             proxy->predicted_max[axis] = fmaxf(proxy->predicted_max[axis], predicted[axis]);
         }
     }
+    proxy->valid = true;
     return true;
+}
+
+static bool cpu_aabb_append(Particle *const particles[8], float rest_edge,
+                            int fallback_body, bool amr_owned, bool query,
+                            bool cover) {
+    if (!cpu_aabb_reserve(cpuAabbProxyCount + 1)) return false;
+    CpuAabbProxy *proxy = &cpuAabbProxies[cpuAabbProxyCount];
+    if (!cpu_aabb_fill(proxy, particles, rest_edge, fallback_body, cover)) return true;
+    proxy->amr_owned = amr_owned;
+    proxy->query = query;
+    ++cpuAabbProxyCount;
+    return true;
+}
+
+static void cpu_aabb_union(CpuAabbProxy *dst, const CpuAabbProxy *src) {
+    if (!src || !src->valid) return;
+    if (!dst->valid) {
+        float edge = dst->rest_edge;
+        *dst = *src;
+        dst->rest_edge = edge;
+        dst->amr_owned = true;
+        dst->query = false;
+        return;
+    }
+    for (int axis = 0; axis < 3; ++axis) {
+        dst->previous_min[axis] = fminf(dst->previous_min[axis], src->previous_min[axis]);
+        dst->previous_max[axis] = fmaxf(dst->previous_max[axis], src->previous_max[axis]);
+        dst->predicted_min[axis] = fminf(dst->predicted_min[axis], src->predicted_min[axis]);
+        dst->predicted_max[axis] = fmaxf(dst->predicted_max[axis], src->predicted_max[axis]);
+    }
 }
 
 static bool cpu_rebuild_aabb_proxies(void) {
@@ -11528,20 +11581,70 @@ static bool cpu_rebuild_aabb_proxies(void) {
     if (particle_pool_count > 0)
         memset(cpu_aabb_covered, 0, (size_t)particle_pool_count);
     if (!cpu_aabb_collisions_enabled()) return true;
-    if (!cpu_aabb_reserve(vgsHierarchy.node_count + active_voxel_count + 1)) return false;
+    if (!cpu_aabb_reserve(vgsHierarchy.node_count + active_voxel_count + 1) ||
+        !cpu_aabb_reserve_nodes(vgsHierarchy.node_count)) return false;
+    for (int i = 0; i < voxel_count; ++i) cpuAabbLeafParent[i] = -1;
+    for (int i = 0; i < vgsHierarchy.node_count; ++i)
+        for (int c = 0; c < 8; ++c) {
+            int child = vgsHierarchy.nodes[i].children[c];
+            if (child < 0 && child != VGS_CHILD_EMPTY) {
+                int world = -child - 1;
+                if (world >= 0 && world < voxel_count) cpuAabbLeafParent[world] = i;
+            }
+        }
+    memset(cpuAabbNodeBounds, 0,
+           (size_t)vgsHierarchy.node_count * sizeof(*cpuAabbNodeBounds));
+    for (int i = vgsHierarchy.node_count - 1; i >= 0; --i) {
+        VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+        CpuAabbProxy *bounds = &cpuAabbNodeBounds[i];
+        bounds->rest_edge = node->rest_edge;
+        bounds->body = 0;
+        bounds->amr_owned = true;
+        if (node->occupancy == VGS_OCCUPANCY_EMPTY) continue;
+        if (node->occupancy == VGS_OCCUPANCY_FULL && node->real_corner_mask == 0xffu)
+            cpu_aabb_fill(bounds, node->particles, node->rest_edge, 0, false);
+        for (int c = 0; c < 8; ++c) {
+            int child = node->children[c];
+            if (child == VGS_CHILD_EMPTY) continue;
+            if (child >= 0) {
+                cpu_aabb_union(bounds, &cpuAabbNodeBounds[child]);
+            } else {
+                int world = -child - 1;
+                if (world < 0 || world >= voxel_count) continue;
+                CpuAabbProxy leaf = {0};
+                if (cpu_aabb_fill(&leaf, voxels[world].particles,
+                                  voxels[world].rest_edge, world + 1, false))
+                    cpu_aabb_union(bounds, &leaf);
+            }
+        }
+    }
+    bool hash_mode = cpu_aabb_hash_enabled();
     for (int i = 0; i < vgsHierarchy.node_count; ++i) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
         if (!node->active || !node->vgs_enabled ||
             node->occupancy != VGS_OCCUPANCY_FULL || node->real_corner_mask != 0xffu ||
             vgs_node_has_active_children(node)) continue;
-        if (!cpu_aabb_append(node->particles, node->rest_edge, 0)) return false;
+        int slot = cpuAabbProxyCount;
+        if (!cpu_aabb_append(node->particles, node->rest_edge, 0,
+                             true, false, true)) return false;
+        if (cpuAabbProxyCount > slot && cpuAabbNodeBounds[i].valid) {
+            CpuAabbProxy saved = cpuAabbProxies[slot];
+            cpuAabbProxies[slot] = cpuAabbNodeBounds[i];
+            memcpy(cpuAabbProxies[slot].particle, saved.particle,
+                   sizeof(saved.particle));
+            cpuAabbProxies[slot].body = saved.body;
+            cpuAabbProxies[slot].amr_owned = true;
+        }
     }
     for (int slot = 0; slot < active_voxel_count; ++slot) {
         int id = active_voxels[slot];
         Voxel *voxel = &voxels[id];
         if (!voxel->simulate_dofs || !voxel->vgs_active || voxel->isBullet || voxel->type != 0)
             continue;
-        if (!cpu_aabb_append(voxel->particles, voxel->rest_edge, id + 1)) return false;
+        bool amr_owned = cpuAabbLeafParent[id] >= 0;
+        if (!cpu_aabb_append(voxel->particles, voxel->rest_edge, id + 1,
+                             amr_owned, !amr_owned,
+                             amr_owned || hash_mode)) return false;
     }
     return true;
 }
@@ -11676,10 +11779,100 @@ static void cpu_scatter_aabb_manifold(CpuAabbProxy *a, CpuAabbProxy *b, bool dyn
     }
 }
 
+static bool cpu_aabb_swept_overlap(const CpuAabbProxy *a, const CpuAabbProxy *b) {
+    const float skin = fmaxf(1e-4f, 0.002f * VOXEL_SIZE);
+    if (!a || !b || !a->valid || !b->valid) return false;
+    for (int axis = 0; axis < 3; ++axis) {
+        float amin = fminf(a->previous_min[axis], a->predicted_min[axis]) - skin;
+        float amax = fmaxf(a->previous_max[axis], a->predicted_max[axis]) + skin;
+        float bmin = fminf(b->previous_min[axis], b->predicted_min[axis]);
+        float bmax = fmaxf(b->previous_max[axis], b->predicted_max[axis]);
+        if (amax < bmin || bmax < amin) return false;
+    }
+    return true;
+}
+
+static bool cpu_aabb_leaf_proxy(int world, CpuAabbProxy *out) {
+    if (world < 0 || world >= voxel_count || !out) return false;
+    Voxel *voxel = &voxels[world];
+    if (!cpu_aabb_fill(out, voxel->particles, voxel->rest_edge, world + 1, false))
+        return false;
+    out->amr_owned = true;
+    return true;
+}
+
+static void cpu_solve_tree_query(CpuAabbProxy *query) {
+    if (!query || !query->query || vgsHierarchy.node_count <= 0) return;
+    int stack[64]; int stack_count = 1; stack[0] = 0;
+    if (cpuAabbMaxStack < 1u) cpuAabbMaxStack = 1u;
+    while (stack_count > 0) {
+        int entry = stack[--stack_count];
+        ++cpuAabbNodeVisits;
+        CpuAabbProxy leaf = {0};
+        CpuAabbProxy *target = NULL;
+        VgsOccupancy occupancy = VGS_OCCUPANCY_EMPTY;
+        bool descend = false;
+        bool enabled = false;
+        if (entry >= 0) {
+            if (entry >= vgsHierarchy.node_count) { ++cpuAabbEmptyRejects; continue; }
+            VgsHierarchyNode *node = &vgsHierarchy.nodes[entry];
+            occupancy = (VgsOccupancy)node->occupancy;
+            if (occupancy == VGS_OCCUPANCY_EMPTY) {
+                ++cpuAabbEmptyRejects; continue;
+            }
+            target = &cpuAabbNodeBounds[entry];
+            descend = occupancy == VGS_OCCUPANCY_PARTIAL ||
+                      vgs_node_has_active_children(node);
+            enabled = node->active && node->vgs_enabled &&
+                      node->real_corner_mask == 0xffu;
+            if (!cpu_aabb_swept_overlap(query, target)) {
+                ++cpuAabbBoundsRejects; continue;
+            }
+            if (descend) {
+                for (int c = 7; c >= 0; --c) {
+                    int child = node->children[c];
+                    if (child == VGS_CHILD_EMPTY) { ++cpuAabbEmptyRejects; continue; }
+                    if (occupancy != VGS_OCCUPANCY_PARTIAL) {
+                        bool active = child >= 0 ? vgsHierarchy.nodes[child].active
+                                                 : voxels[-child - 1].simulate_dofs;
+                        if (!active) continue;
+                    }
+                    if (stack_count >= 64) { cpuAabbOverflow = 1u; return; }
+                    stack[stack_count++] = child;
+                }
+                if (cpuAabbMaxStack < (uint32_t)stack_count)
+                    cpuAabbMaxStack = (uint32_t)stack_count;
+                continue;
+            }
+        } else {
+            int world = -entry - 1;
+            if (!cpu_aabb_leaf_proxy(world, &leaf)) { ++cpuAabbEmptyRejects; continue; }
+            target = &leaf;
+            occupancy = VGS_OCCUPANCY_FULL;
+            enabled = voxels[world].simulate_dofs && voxels[world].vgs_active;
+            if (!cpu_aabb_swept_overlap(query, target)) {
+                ++cpuAabbBoundsRejects; continue;
+            }
+        }
+        if (occupancy != VGS_OCCUPANCY_FULL || !enabled || !target ||
+            target->body == query->body) continue;
+        ++cpuAabbCandidates;
+        float normal[3], depth, toi, amin[3], amax[3], bmin[3], bmax[3];
+        if (!cpu_aabb_contact(query, target, normal, &depth, &toi,
+                              amin, amax, bmin, bmax)) continue;
+        cpu_scatter_aabb_manifold(query, target, true, normal, depth,
+                                  amin, amax, bmin, bmax);
+        ++cpuAabbContacts;
+    }
+}
+
 static void cpu_solve_dynamic_aabb_collisions(void) {
-    if (cpuAabbProxyCount <= 1) return;
+    if (cpuAabbProxyCount <= 0) return;
     reset_particle_accumulators();
-    for (int i = 0; i < cpuAabbProxyCount; ++i) {
+    if (!cpu_aabb_hash_enabled()) {
+        for (int i = 0; i < cpuAabbProxyCount; ++i)
+            if (cpuAabbProxies[i].query) cpu_solve_tree_query(&cpuAabbProxies[i]);
+    } else for (int i = 0; i < cpuAabbProxyCount; ++i) {
         for (int j = i + 1; j < cpuAabbProxyCount; ++j) {
             CpuAabbProxy *a = &cpuAabbProxies[i], *b = &cpuAabbProxies[j];
             if (a->body == b->body) continue;
@@ -11700,6 +11893,7 @@ static void cpu_solve_static_aabb_collisions(void) {
     reset_particle_accumulators();
     for (int i = 0; i < cpuAabbProxyCount; ++i) {
         CpuAabbProxy *a = &cpuAabbProxies[i];
+        if (!cpu_aabb_hash_enabled() && !a->amr_owned) continue;
         float normal[3] = {0.0f, 1.0f, 0.0f};
         float depth = fmaxf(1e-4f, 0.002f * VOXEL_SIZE) - a->predicted_min[1];
         if (depth > 0.0f) {
@@ -14231,6 +14425,11 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
     const int constraint_iterations = PBD_CONSTRAINT_ITERS;
     cpuAabbCandidates = 0;
     cpuAabbContacts = 0;
+    cpuAabbNodeVisits = 0;
+    cpuAabbBoundsRejects = 0;
+    cpuAabbEmptyRejects = 0;
+    cpuAabbMaxStack = 0;
+    cpuAabbOverflow = 0;
 
     for (int step = 0; step < substeps; ++step) {
         if (debugLogVoxelBlowup) {
@@ -21410,8 +21609,11 @@ int main(int argc, char **argv) {
     }
     shutdown_world_visuals();
     free(cpuAabbProxies);
+    free(cpuAabbNodeBounds);
     cpuAabbProxies = NULL;
+    cpuAabbNodeBounds = NULL;
     cpuAabbProxyCount = cpuAabbProxyCapacity = 0;
+    cpuAabbNodeCapacity = 0;
     free(netVoxelProxies);
     free(netVoxelProxyMap);
     netVoxelProxies = NULL;

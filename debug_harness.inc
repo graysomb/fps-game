@@ -98,6 +98,9 @@ typedef struct DebugRunState {
     float amr_projectile_target_far_x;
     int amr_projectile_impact_step;
     bool amr_projectile_tunneled;
+    uint64_t amr_aabb_max_node_visits;
+    uint32_t amr_aabb_max_stack_depth;
+    bool amr_aabb_contact_observed;
     bool rip_test;
     FILE *rip_history_file;
     char rip_history_path[DEBUG_PATH_CAPACITY];
@@ -2385,10 +2388,21 @@ static bool debug_setup_amr_projectile_impact(DebugRunState *state)
 {
     state->amr_projectile_test = true;
     state->amr_projectile_initial_speed = 40.0f;
+    const char *speed_text = getenv("FPS_AMR_PROJECTILE_SPEED");
+    if (speed_text) {
+        char *end = NULL;
+        float speed = strtof(speed_text, &end);
+        if (end != speed_text && *end == '\0' && isfinite(speed) && speed > 0.0f)
+            state->amr_projectile_initial_speed = speed;
+    }
     state->amr_projectile_min_velocity_x = state->amr_projectile_initial_speed;
     state->amr_projectile_impact_step = -1;
     state->amr_projectile_target_far_x = 5.0f * VOXEL_SIZE;
-    if (!debug_setup_adaptive_cube_drop(state)) return false;
+    if (getenv("FPS_AMR_PROJECTILE_L_SHAPE")) {
+        if (!debug_setup_adaptive_l_drop(state)) return false;
+    } else if (!debug_setup_adaptive_cube_drop(state)) {
+        return false;
+    }
 
     int projectile_index = find_voxel_by_identity(state->amr_projectile_identity);
     if (projectile_index < 0) {
@@ -2396,6 +2410,34 @@ static bool debug_setup_amr_projectile_impact(DebugRunState *state)
         return false;
     }
     Voxel *projectile = &voxels[projectile_index];
+    const char *start_x_text = getenv("FPS_AMR_PROJECTILE_START_X");
+    const char *offset_y_text = getenv("FPS_AMR_PROJECTILE_OFFSET_Y");
+    const char *offset_z_text = getenv("FPS_AMR_PROJECTILE_OFFSET_Z");
+    float start_x = projectile->pos.x;
+    float offset_y = 0.0f, offset_z = 0.0f;
+    char *end = NULL;
+    if (start_x_text) {
+        float parsed = strtof(start_x_text, &end);
+        if (end != start_x_text && *end == '\0' && isfinite(parsed)) start_x = parsed;
+    }
+    if (offset_y_text) {
+        end = NULL;
+        float parsed = strtof(offset_y_text, &end);
+        if (end != offset_y_text && *end == '\0' && isfinite(parsed)) offset_y = parsed;
+    }
+    if (offset_z_text) {
+        end = NULL;
+        float parsed = strtof(offset_z_text, &end);
+        if (end != offset_z_text && *end == '\0' && isfinite(parsed)) offset_z = parsed;
+    }
+    Vector3 translation = { start_x - projectile->pos.x, offset_y, offset_z };
+    for (int corner = 0; corner < 8; ++corner) {
+        Particle *particle = projectile->particles[corner];
+        if (!particle) continue;
+        particle->pos = Vector3Add(particle->pos, translation);
+        particle->prev_pos = particle->predicted_pos = particle->pos;
+    }
+    projectile->pos = Vector3Add(projectile->pos, translation);
     projectile->fixed = false;
     projectile->simulate_dofs = true;
     projectile->vgs_active = true;
@@ -4446,6 +4488,24 @@ static void debug_validate_step(DebugRunState *state, int step)
         }
     }
     DebugSample sample = debug_collect_sample("validation", step, state->initial_centroid_y);
+    if (state->adaptive_cube_drop) {
+        bool gpu_aabb = physics_backend_is_gpu(physicsBackend.active);
+        uint64_t node_visits = gpu_aabb
+            ? gpuPhysics.aabb_control_stage.node_visit_count : cpuAabbNodeVisits;
+        uint64_t contacts = gpu_aabb
+            ? gpuPhysics.aabb_control_stage.contact_count : cpuAabbContacts;
+        uint32_t stack_depth = gpu_aabb
+            ? gpuPhysics.aabb_control_stage.max_stack_depth : cpuAabbMaxStack;
+        uint32_t overflow = gpu_aabb
+            ? gpuPhysics.aabb_control_stage.overflow : cpuAabbOverflow;
+        if (node_visits > state->amr_aabb_max_node_visits)
+            state->amr_aabb_max_node_visits = node_visits;
+        if (stack_depth > state->amr_aabb_max_stack_depth)
+            state->amr_aabb_max_stack_depth = stack_depth;
+        state->amr_aabb_contact_observed |= contacts > 0;
+        if (overflow)
+            debug_add_failure(state, "step %d: AMR AABB traversal overflow", step);
+    }
     if (state->refinement_demo &&
         (step == 0 || step == state->refinement_step - 1 ||
          step == state->refinement_step || step == debugRunConfig.steps)) {
@@ -5451,6 +5511,11 @@ static void debug_finalize_validation(DebugRunState *state)
             debug_add_failure(state, "projectile retained %.6g/%.6g m/s after impact",
                               (double)state->amr_projectile_min_velocity_x,
                               (double)state->amr_projectile_initial_speed);
+        if (!state->amr_aabb_contact_observed && cpu_aabb_collisions_enabled())
+            debug_add_failure(state, "AMR projectile registered no AABB contact");
+        if (getenv("FPS_AMR_PROJECTILE_L_SHAPE") &&
+            !cpu_aabb_hash_enabled() && state->amr_aabb_max_node_visits <= 1)
+            debug_add_failure(state, "L-shape projectile never descended below the AMR root");
     }
     if (state->refinement_demo && !state->refinement_complete) {
         debug_add_failure(state, "refinement demo never enabled its eight children");
@@ -5599,16 +5664,43 @@ static bool debug_write_report(DebugRunState *state)
                     enabled_vgs, enabled_welds,
                     gpuPhysics.constraint_count, sim_particle_count);
             bool gpu_aabb = physics_backend_is_gpu(physicsBackend.active);
-            fprintf(file, "  \"amrAabbCollision\": {\"enabled\": %s, \"proxies\": %llu, \"candidatePairs\": %llu, \"contacts\": %llu, \"overflow\": %u},\n",
+            uint64_t cpu_queries = 0;
+            for (int i = 0; !gpu_aabb && i < cpuAabbProxyCount; ++i)
+                cpu_queries += cpuAabbProxies[i].query ? 1u : 0u;
+            uint32_t mode = gpu_aabb ? gpuPhysics.aabb_control_stage.mode
+                : (!cpu_aabb_collisions_enabled() ? GPU_AABB_MODE_DISABLED
+                    : (cpu_aabb_hash_enabled() ? GPU_AABB_MODE_HASH
+                                               : GPU_AABB_MODE_TREE));
+            uint64_t gpu_items = gpu_aabb
+                ? gpuPhysics.aabb_control_stage.proxy_count : 0u;
+            uint64_t query_count = gpu_aabb
+                ? (mode == GPU_AABB_MODE_TREE ? gpu_items : 0u) : cpu_queries;
+            uint64_t proxy_count = gpu_aabb
+                ? (mode == GPU_AABB_MODE_HASH ? gpu_items : 0u)
+                : (mode == GPU_AABB_MODE_HASH ? (uint64_t)cpuAabbProxyCount : 0u);
+            fprintf(file, "  \"amrAabbCollision\": {\"enabled\": %s, \"mode\": \"%s\", \"queries\": %llu, \"proxies\": %llu, \"candidatePairs\": %llu, \"contacts\": %llu, \"nodeVisits\": %llu, \"boundsRejects\": %llu, \"emptyRejects\": %llu, \"maxStackDepth\": %u, \"maxNodeVisitsObserved\": %llu, \"maxStackDepthObserved\": %u, \"contactObserved\": %s, \"overflow\": %u},\n",
                     (gpu_aabb ? gpuPhysics.aabb_control_stage.enabled != 0
                               : cpu_aabb_collisions_enabled()) ? "true" : "false",
-                    (unsigned long long)(gpu_aabb ? gpuPhysics.aabb_control_stage.proxy_count
-                                                  : (uint64_t)cpuAabbProxyCount),
+                    mode == GPU_AABB_MODE_HASH ? "hash" :
+                    mode == GPU_AABB_MODE_TREE ? "tree" : "disabled",
+                    (unsigned long long)query_count,
+                    (unsigned long long)proxy_count,
                     (unsigned long long)(gpu_aabb ? gpuPhysics.aabb_control_stage.candidate_count
                                                   : cpuAabbCandidates),
                     (unsigned long long)(gpu_aabb ? gpuPhysics.aabb_control_stage.contact_count
                                                   : cpuAabbContacts),
-                    gpu_aabb ? gpuPhysics.aabb_control_stage.overflow : 0u);
+                    (unsigned long long)(gpu_aabb ? gpuPhysics.aabb_control_stage.node_visit_count
+                                                  : cpuAabbNodeVisits),
+                    (unsigned long long)(gpu_aabb ? gpuPhysics.aabb_control_stage.bounds_reject_count
+                                                  : cpuAabbBoundsRejects),
+                    (unsigned long long)(gpu_aabb ? gpuPhysics.aabb_control_stage.empty_reject_count
+                                                  : cpuAabbEmptyRejects),
+                    gpu_aabb ? gpuPhysics.aabb_control_stage.max_stack_depth
+                             : cpuAabbMaxStack,
+                    (unsigned long long)state->amr_aabb_max_node_visits,
+                    state->amr_aabb_max_stack_depth,
+                    state->amr_aabb_contact_observed ? "true" : "false",
+                    gpu_aabb ? gpuPhysics.aabb_control_stage.overflow : cpuAabbOverflow);
         }
         fprintf(file, "  \"vgsTemporalCurvature\": {\"samples\": %d, \"redAtPerSecondSquared\": %.9g, \"lastStepMax\": %.9g, \"lastStepMean\": %.9g},\n",
                 debugVgsTemporalSampleCount, (double)VGS_TEMPORAL_CURVATURE_RED_AT,

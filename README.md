@@ -527,20 +527,31 @@ Available scenarios are:
   compilation remain GPU resident between PBD substeps. Both substeps are encoded
   in one command buffer and CPU state is mirrored once at the end of the frame.
   The CPU implementation remains the reference and runtime fallback; OpenGL uses
-  the existing CPU AMR path. Each full, intact terminal cell now contributes one
-  conservative world-space AABB collision proxy at its current AMR level. A
-  multilevel GPU hash compares dynamic proxies across scale, swept AABB tests catch
-  fast crossings, and four face points scatter each contact correction to the
-  cell's eight VGS corners with trilinear weights. Static voxels, the floor, and the
-  terrain side walls use the same scatter. Particles owned by an AABB proxy skip the
-  old sphere collision path, while fluid, bullets, broken cells, and unrelated PBD
-  particles keep that path. Set `FPS_AMR_COLLISION_PARTICLES=1` to restore the old
-  particle-only AMR collision behavior for comparisons. Since the proxy is an AABB,
-  rotation is conservative and can produce earlier corner contact than an oriented
-  box would.
+  the existing CPU AMR path. Each full, intact terminal cell contributes one
+  conservative world-space AABB collision proxy at its current AMR level. For
+  dynamic objects outside the AMR mesh, the GPU reduces swept child bounds into the
+  hierarchy from finest level to root, then traverses that hierarchy directly. A
+  query rejected by the root exits immediately. Partial nodes descend through their
+  nonempty children, refined full nodes descend through their active children, and
+  intact full terminal nodes run the narrow phase. Empty nodes end that branch.
+  Traversal changes no AMR state. Swept AABB tests catch fast crossings, and four
+  face points scatter each contact correction to the cell's eight VGS corners with
+  trilinear weights. Static voxels, the floor, and the terrain side walls use the
+  same terminal-cell scatter. Particles owned by an AABB proxy skip the old sphere
+  collision path, while fluid, bullets, broken cells, and unrelated PBD particles
+  keep that path. The current traversal starts at the single AMR root; multiple
+  active AMR groups will require one root entry per group. Set
+  `FPS_AMR_COLLISION_HASH=1` to use the earlier multilevel hash, or
+  `FPS_AMR_COLLISION_PARTICLES=1` to restore particle-only AMR collisions. The
+  particle option takes precedence. Since the proxy is an AABB, rotation is
+  conservative and can produce earlier corner contact than an oriented box would.
 * `amr-projectile-impact`: fires one finest-scale voxel at 40 m/s into an initially
   coarse adaptive cube. The check requires a swept impact, projectile slowdown,
-  target momentum transfer, no far-face tunneling, and no AABB buffer overflow.
+  target momentum transfer, no far-face tunneling, and no traversal overflow.
+  `FPS_AMR_PROJECTILE_SPEED`, `FPS_AMR_PROJECTILE_START_X`, and
+  `FPS_AMR_PROJECTILE_OFFSET_Y/Z` provide deterministic traversal probes.
+  `FPS_AMR_PROJECTILE_L_SHAPE=1` uses the occupancy-masked L hierarchy so the probe
+  must descend partial nodes.
 * `rip-test`: activates the same 5 m cube, starts with its eight root children,
   and translates every particle in the outer 1.25 m on each X side symmetrically,
   including dormant particles that may become simulated after refinement. AMR
