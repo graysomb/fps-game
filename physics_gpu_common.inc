@@ -1370,6 +1370,7 @@ static bool gpu_validate_and_commit(void) {
         if (v->vgs_active && g->flags[0] == 0 &&
             (!vgsHierarchy.adaptive || v->simulate_dofs)) {
             v->vgs_active = false;
+            net_queue_dynamic_delete(v->identity);
             v->wake_source = true;
             for (int corner = 0; corner < 8; ++corner) {
                 Particle *part = v->particles[corner];

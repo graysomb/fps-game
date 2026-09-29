@@ -665,6 +665,7 @@ void gatherBreakMask(uint gid) {
     vec3 p[8];
     for (int i=0; i<8; ++i) {
         uint id=voxelParticle(v,i); if (id>=uint(gpuControl.x)) return;
+        if (tetherOwner[id] >= 0) return;
         p[i]=particle[id].predicted_base_inv_mass.xyz;
     }
     vec3 axis0=((p[1]-p[0])+(p[3]-p[2])+(p[5]-p[4])+(p[7]-p[6]))*0.25;

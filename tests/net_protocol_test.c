@@ -62,6 +62,20 @@ int main(void) {
     net_reader_init(&reader, packet, writer.length - 1);
     assert(!net_read_player_visual(&reader, &decoded_visual));
 
+    const uint64_t deleted[] = { UINT64_C(7), UINT64_C(0x123456789abcdef0) };
+    net_writer_init(&writer, packet, sizeof(packet));
+    assert(net_write_header(&writer, NET_MSG_DYNAMIC_DELETE, 0, 77, 99));
+    net_write_u16(&writer, 2);
+    net_write_u64(&writer, deleted[0]);
+    net_write_u64(&writer, deleted[1]);
+    net_reader_init(&reader, packet, writer.length);
+    assert(net_read_header(&reader, &header));
+    assert(header.type == NET_MSG_DYNAMIC_DELETE && header.server_tick == 99);
+    assert(net_read_u16(&reader) == 2);
+    assert(net_read_u64(&reader) == deleted[0]);
+    assert(net_read_u64(&reader) == deleted[1]);
+    assert(!reader.failed);
+
     net_writer_init(&writer, packet, sizeof(packet));
     assert(net_write_header(&writer, NET_MSG_INPUT, 2, 77, 88));
     net_write_u8(&writer, 3);

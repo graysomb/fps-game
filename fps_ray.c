@@ -900,6 +900,15 @@ static int netVoxelProxyCount = 0;
 static int *netVoxelProxyMap = NULL;
 static int netDynamicSendCursor = 0;
 static uint64_t netLastStaticGenerationSent = 0;
+static uint64_t netDynamicDeleteQueue[MAX_VOXELS];
+static int netDynamicDeleteCount = 0;
+static int net_proxy_find_slot(uint64_t identity, bool insert);
+
+static void net_queue_dynamic_delete(uint64_t identity) {
+    if (identity == 0 || netTransport.role != NET_ROLE_HOST ||
+        netDynamicDeleteCount >= MAX_VOXELS) return;
+    netDynamicDeleteQueue[netDynamicDeleteCount++] = identity;
+}
 
 static uint32_t net_identity_hash(uint64_t identity) {
     identity ^= identity >> 33; identity *= UINT64_C(0xff51afd7ed558ccd);
@@ -915,6 +924,22 @@ static void net_proxy_map_clear(void) {
     }
     if (netVoxelProxyMap) for (int i = 0; i < NET_PROXY_HASH_SIZE; ++i) netVoxelProxyMap[i] = -1;
     netVoxelProxyCount = 0;
+}
+
+static void net_proxy_remove(uint64_t identity) {
+    int slot = net_proxy_find_slot(identity, false);
+    if (slot < 0) return;
+    int index = netVoxelProxyMap[slot];
+    if (index < 0 || index >= netVoxelProxyCount) return;
+    int last = netVoxelProxyCount - 1;
+    int moved_slot = index != last
+        ? net_proxy_find_slot(netVoxelProxies[last].identity, false) : -1;
+    netVoxelProxyMap[slot] = -2;
+    --netVoxelProxyCount;
+    if (index != last) {
+        netVoxelProxies[index] = netVoxelProxies[last];
+        if (moved_slot >= 0) netVoxelProxyMap[moved_slot] = index;
+    }
 }
 
 static int net_proxy_find_slot(uint64_t identity, bool insert) {
@@ -951,11 +976,13 @@ static void net_proxy_expire(uint32_t tick) {
     for (int i = 0; i < netVoxelProxyCount; ) {
         if (tick - netVoxelProxies[i].last_tick <= FPS_NET_TICK_RATE * 5u) { ++i; continue; }
         int old_slot = net_proxy_find_slot(netVoxelProxies[i].identity, false);
+        int last = netVoxelProxyCount - 1;
+        int moved_slot = i != last
+            ? net_proxy_find_slot(netVoxelProxies[last].identity, false) : -1;
         if (old_slot >= 0) netVoxelProxyMap[old_slot] = -2;
-        int last = --netVoxelProxyCount;
+        --netVoxelProxyCount;
         if (i != last) {
             netVoxelProxies[i] = netVoxelProxies[last];
-            int moved_slot = net_proxy_find_slot(netVoxelProxies[i].identity, false);
             if (moved_slot >= 0) netVoxelProxyMap[moved_slot] = i;
         }
     }
@@ -1156,6 +1183,7 @@ typedef struct {
 static AmrBody amrBodies[MAX_AMR_BODIES];
 static int amrBodyCount;
 static uint64_t nextAmrBodyIdentity = 1;
+static bool amrBodyTethered[MAX_AMR_BODIES];
 typedef struct {
     VgsHierarchyNode *nodes;
     int level_start[8];
@@ -1307,6 +1335,7 @@ static void amr_prepare_voxel_removal(int removed, int moved_from)
 static void clear_vgs_hierarchy(void) {
     for (int i = 0; i < amrBodyCount; ++i) free(amrBodies[i].leaf_voxel_ids);
     memset(amrBodies, 0, sizeof(amrBodies));
+    memset(amrBodyTethered, 0, sizeof(amrBodyTethered));
     amrBodyCount = 0;
     free(vgsHierarchy.nodes);
     free(vgsHierarchy.node_history);
@@ -2561,6 +2590,13 @@ static void reset_particle_pool(void) {
 
 static inline bool voxel_is_fluid(const Voxel *voxel) {
     return voxel && voxel->type == VOXEL_TYPE_FLUID;
+}
+
+// Gameplay keeps authored finest voxels as its visible and interactive units.
+// AMR activity only chooses physics constraints; dormant descendants remain
+// synchronized by hierarchy transfer and stay addressable in the fine grid.
+static bool voxel_is_visible_gameplay_leaf(const Voxel *voxel) {
+    return voxel && voxel->simulate && !voxel_is_fluid(voxel) && voxel->vgs_active;
 }
 
 static inline int dynamic_particle_count(void) {
@@ -3974,6 +4010,7 @@ static void remove_voxel_index(int idx)
     table_cache_invalidate();
     int voxel_count_before = voxel_count;
     Voxel *victim = &voxels[idx];
+    if (victim->simulate) net_queue_dynamic_delete(victim->identity);
     if (!victim->simulate) {
         mark_static_beliefs_dirty_for_voxel(victim);
         mark_static_hash_dirty();
@@ -8774,6 +8811,8 @@ static void clear_pickups(void) {
 
 static void clear_world_voxels(void) {
     clear_vgs_hierarchy();
+    netDynamicDeleteCount = 0;
+    netDynamicSendCursor = 0;
     voxel_count = 0;
     tetherThrowCcdActiveCount = 0;
     pendingTetherImpactCount = 0;
@@ -9223,20 +9262,9 @@ static void ResetGame(void) {
         players[i].dynamicShotActive = false;
         goliathStates[i].count = 0;
     }
-    // clear voxels
-    voxel_count = 0;
-    reset_particle_pool();
-    staticBeliefsInitialized = false;
-    staticBeliefsForceFullRefresh = false;
-    staticBeliefDirtyCount = 0;
-    dynamicGlueClustersInitialized = false;
-    memset(debugTagBreakLogged, 0, sizeof(debugTagBreakLogged));
-    memset(staticBeliefDirty, 0, sizeof(staticBeliefDirty));
-    memset(staticBeliefQueued, 0, sizeof(staticBeliefQueued));
-    // clear hash
-    memset(static_table, 0, sizeof(static_table));
-    memset(dynamic_table, 0, sizeof(dynamic_table));
-    table_cache_invalidate();
+    // Use the shared reset so AMR bodies, histories, collision ownership, and
+    // particle state are retired together before the replacement world exists.
+    clear_world_voxels();
     // build static blocks
     buildDemo();
     rebuild_all_voxel_surfaces();
@@ -10636,6 +10664,7 @@ static void evaluate_voxel_fracture(Voxel *voxel) {
         vgs_fracture_probability_accepts(0x4c454146u ^ (uint32_t)voxel_idx,
                                          vgsFractureEvaluationSerial)) {
         voxel->vgs_active = false;
+        net_queue_dynamic_delete(voxel->identity);
         voxel->wake_source = true;
         for (int i = 0; i < 8; ++i) {
             Particle *part = voxel->particles[i];
@@ -10673,6 +10702,8 @@ static void evaluate_hierarchy_fracture_range(int start, int end, int worker_id,
     (void)user;
     for (int i = start; i < end; ++i) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+        if (node->body_id >= 0 && node->body_id < amrBodyCount &&
+            amrBodyTethered[node->body_id]) continue;
         if (!vgs_node_constraints_enabled(node) || node->rest_edge <= 0.0f) continue;
         Vector3 corners[8];
         bool valid = true;
@@ -10759,6 +10790,7 @@ static void integrate_particles(float dt) {
 
         for (int j = 0; j < 8; ++j) {
             Particle *p = voxel->particles[j];
+            if (!p || p->inv_mass <= 0.0f) continue;
             if (p->tether_stamp == stamp) {
                 continue;
             }
@@ -11794,9 +11826,13 @@ static bool amr_initialize_new_body(int body_id)
     }
     for (int i = body->node_start; i < body->node_start + body->node_count; ++i)
         vgsHierarchy.nodes[i].active = false;
+    amrBodyTethered[body_id] = false;
     for (int slot = 0; slot < body->leaf_capacity; ++slot) {
         int world = body->leaf_voxel_ids[slot];
-        if (world >= 0 && world < voxel_count) voxels[world].simulate_dofs = false;
+        if (world >= 0 && world < voxel_count) {
+            voxels[world].simulate_dofs = false;
+            amrBodyTethered[body_id] |= tetherTag[world] != 0;
+        }
     }
     body->lifecycle = AMR_BODY_ACTIVE;
     vgs_hierarchy_activate_initial_subtree(body->root_node);
@@ -11906,6 +11942,7 @@ static bool amr_build_body_from_cluster(const int *cluster, int count)
 // allocation or validation failure leaves the old forest usable.
 static bool amr_compact_retired_bodies(void)
 {
+    bool next_tethered[MAX_AMR_BODIES] = { false };
     int retired_count = 0, live_body_count = 0, live_node_count = 0;
     for (int body_id = 0; body_id < amrBodyCount; ++body_id) {
         const AmrBody *body = &amrBodies[body_id];
@@ -11947,6 +11984,7 @@ static bool amr_compact_retired_bodies(void)
         if (!old->valid || old->lifecycle == AMR_BODY_RETIRED) continue;
         int new_start = next_node_id;
         body_map[body_id] = next_body_id;
+        next_tethered[next_body_id] = amrBodyTethered[body_id];
         next_bodies[next_body_id] = *old;
         next_bodies[next_body_id].node_start = new_start;
         next_bodies[next_body_id].root_node = new_start +
@@ -12077,8 +12115,12 @@ static bool amr_compact_retired_bodies(void)
         vgsHierarchy.virtual_corner_refs += 8 - real;
     }
     memset(amrBodies, 0, sizeof(amrBodies));
+    memset(amrBodyTethered, 0, sizeof(amrBodyTethered));
     if (live_body_count > 0)
         memcpy(amrBodies, next_bodies, (size_t)live_body_count * sizeof(*next_bodies));
+    if (live_body_count > 0)
+        memcpy(amrBodyTethered, next_tethered,
+               (size_t)live_body_count * sizeof(*next_tethered));
     amrBodyCount = live_body_count;
     ++vgsHierarchy.compaction_count;
     ++vgsHierarchy.topology_generation;
@@ -17318,6 +17360,7 @@ static void measure_tether_cluster(int player_idx, const int *cluster, int clust
 
 static void prepare_tether_forces(void) {
     memset(tetherTag, 0, sizeof(tetherTag));
+    memset(amrBodyTethered, 0, sizeof(amrBodyTethered));
     for (int i = 0; i < MAX_PLAYERS; ++i) {
         tetherScaleByPlayer[i] = 1.0f;
         tetherComByPlayer[i] = tetherTargetByPlayer[i];
@@ -17360,6 +17403,9 @@ static void prepare_tether_forces(void) {
                 continue;
             }
             tetherTag[v_idx] = i + 1;
+            int body_id = voxels[v_idx].amr_body_id;
+            if (body_id >= 0 && body_id < amrBodyCount)
+                amrBodyTethered[body_id] = true;
             voxels[v_idx].activationBelief = 1.0f;
             voxels[v_idx].activationCooldownFrames = 0;
         }
@@ -17635,7 +17681,10 @@ static bool first_voxel_hit_detailed(Ray ray, float t_max, int ignore_id,
 
     while (entry_t <= t_max + 1e-6f) {
         int id = static_only ? table_get_static_only(x, y, z) : table_get(x, y, z);
-        if (id >= 0 && id != ignore_id && id < voxel_count &&
+        bool hittable = id >= 0 && id < voxel_count &&
+            (!voxels[id].simulate || voxel_is_fluid(&voxels[id]) ||
+             voxel_is_visible_gameplay_leaf(&voxels[id]));
+        if (hittable && id != ignore_id &&
             (!static_only || !voxels[id].simulate)) {
             if (out_hit) {
                 *out_hit = (VoxelHit){ id, x, y, z, entry_t, entry_normal };
@@ -18698,7 +18747,7 @@ static void prepare_dynamic_voxel_transforms(void) {
     for (int d = 0; d < dynamic_voxel_count; ++d) {
         int i = dynamic_voxels[d];
         Voxel *v = &voxels[i];
-        if (!v->simulate || voxel_is_fluid(v)) {
+        if (!voxel_is_visible_gameplay_leaf(v)) {
             continue;
         }
         if (debugRefinementCoarse || (debugAdaptiveOctree && !v->simulate_dofs)) continue;
@@ -18708,10 +18757,6 @@ static void prepare_dynamic_voxel_transforms(void) {
             if (bullet_voxel_count < MAX_VOXELS) {
                 bullet_voxel_indices[bullet_voxel_count++] = i;
             }
-            continue;
-        }
-
-        if (!v->vgs_active) {
             continue;
         }
 
@@ -19853,7 +19898,7 @@ static int find_nearest_dynamic_voxel(const Vector3 *pos, float max_dist_sq, flo
     float minDistSq = max_dist_sq;
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *v = &voxels[i];
-        if (!v->simulate || v->isBullet || voxel_is_fluid(v)) {
+        if (!voxel_is_visible_gameplay_leaf(v) || v->isBullet) {
             continue;
         }
         float dx = v->pos.x - pos->x;
@@ -20210,6 +20255,55 @@ static void UpdateBot(int playerIdx, float dt) {
     }
 }
 
+static bool net_voxel_has_dynamic_pose(const Voxel *voxel) {
+    if (!voxel || !voxel->simulate || !voxel->particles[0] ||
+        !voxel->particles[1] || !voxel->particles[2] || !voxel->particles[4])
+        return false;
+    return voxel_is_fluid(voxel) || voxel_is_visible_gameplay_leaf(voxel);
+}
+
+static bool net_write_dynamic_pose(NetWriter *writer, const Voxel *voxel) {
+    if (!writer || !net_voxel_has_dynamic_pose(voxel)) return false;
+    Vector3 center = { 0 };
+    for (int k = 0; k < 8; ++k) center = v_add(center, voxel->particles[k]->pos);
+    center = v_mul(center, 0.125f);
+    Vector3 x_axis = v_sub(voxel->particles[1]->pos, voxel->particles[0]->pos);
+    Vector3 y_axis = v_sub(voxel->particles[2]->pos, voxel->particles[0]->pos);
+    Vector3 z_axis = v_sub(voxel->particles[4]->pos, voxel->particles[0]->pos);
+    Color color = voxel_display_color(voxel);
+    net_write_u64(writer, voxel->identity);
+    net_write_f32(writer, center.x); net_write_f32(writer, center.y); net_write_f32(writer, center.z);
+    net_write_f32(writer, x_axis.x); net_write_f32(writer, x_axis.y); net_write_f32(writer, x_axis.z);
+    net_write_f32(writer, y_axis.x); net_write_f32(writer, y_axis.y); net_write_f32(writer, y_axis.z);
+    net_write_f32(writer, z_axis.x); net_write_f32(writer, z_axis.y); net_write_f32(writer, z_axis.z);
+    net_write_u8(writer, color.r); net_write_u8(writer, color.g); net_write_u8(writer, color.b);
+    net_write_u8(writer, voxel->isBullet ? 1 : 0);
+    return !writer->failed;
+}
+
+static void net_send_dynamic_bootstrap_to(int slot) {
+    uint8_t packet[FPS_NET_MAX_PACKET];
+    int cursor = 0;
+    while (cursor < voxel_count) {
+        NetWriter writer; net_writer_init(&writer, packet, sizeof(packet));
+        net_write_header(&writer, NET_MSG_DYNAMIC_POSES, 0,
+                         netTransport.session_id, netServerTick);
+        size_t count_offset = writer.length; net_write_u16(&writer, 0);
+        uint16_t count = 0;
+        while (cursor < voxel_count && writer.length + 60 <= writer.capacity) {
+            Voxel *voxel = &voxels[cursor++];
+            if (!net_voxel_has_dynamic_pose(voxel)) continue;
+            if (!net_write_dynamic_pose(&writer, voxel)) break;
+            ++count;
+        }
+        packet[count_offset] = (uint8_t)(count >> 8);
+        packet[count_offset + 1] = (uint8_t)count;
+        if (count)
+            net_transport_send(&netTransport, slot, FPS_NET_CHANNEL_WORLD,
+                               packet, writer.length, true);
+    }
+}
+
 static void net_send_world_to(int slot) {
     uint8_t packet[FPS_NET_MAX_PACKET];
     NetWriter writer;
@@ -20260,6 +20354,7 @@ static void net_send_world_to(int slot) {
     net_writer_init(&writer, packet, sizeof(packet));
     net_write_header(&writer, NET_MSG_WORLD_END, 0, netTransport.session_id, netServerTick);
     net_transport_send(&netTransport, slot, FPS_NET_CHANNEL_WORLD, packet, writer.length, true);
+    net_send_dynamic_bootstrap_to(slot);
 }
 
 static void net_send_hello(void) {
@@ -20607,7 +20702,33 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
             proxy.last_tick = header.server_tick;
             if (!reader.failed) net_proxy_upsert(proxy);
         }
+    } else if (header.type == NET_MSG_DYNAMIC_DELETE) {
+        uint16_t count = net_read_u16(&reader);
+        for (uint16_t i = 0; i < count && !reader.failed; ++i)
+            net_proxy_remove(net_read_u64(&reader));
     }
+}
+
+static void net_host_send_dynamic_deletes(void) {
+    if (netDynamicDeleteCount <= 0) return;
+    uint8_t packet[FPS_NET_MAX_PACKET];
+    int cursor = 0;
+    while (cursor < netDynamicDeleteCount) {
+        NetWriter writer; net_writer_init(&writer, packet, sizeof(packet));
+        net_write_header(&writer, NET_MSG_DYNAMIC_DELETE, 0,
+                         netTransport.session_id, netServerTick);
+        size_t count_offset = writer.length; net_write_u16(&writer, 0);
+        uint16_t count = 0;
+        while (cursor < netDynamicDeleteCount && writer.length + 8 <= writer.capacity) {
+            net_write_u64(&writer, netDynamicDeleteQueue[cursor++]);
+            ++count;
+        }
+        packet[count_offset] = (uint8_t)(count >> 8);
+        packet[count_offset + 1] = (uint8_t)count;
+        net_transport_broadcast(&netTransport, FPS_NET_CHANNEL_SNAPSHOT,
+                                packet, writer.length, true);
+    }
+    netDynamicDeleteCount = 0;
 }
 
 static void net_host_send_dynamic_poses(void) {
@@ -20624,21 +20745,8 @@ static void net_host_send_dynamic_poses(void) {
             if (netDynamicSendCursor >= voxel_count) netDynamicSendCursor = 0;
             Voxel *v = &voxels[netDynamicSendCursor++];
             ++visited;
-            if (!v->simulate || !v->particles[0] || !v->particles[1] || !v->particles[2] || !v->particles[4]) continue;
-            Vector3 center = { 0 };
-            for (int k = 0; k < 8; ++k) center = v_add(center, v->particles[k]->pos);
-            center = v_mul(center, 0.125f);
-            Vector3 x_axis = v_sub(v->particles[1]->pos, v->particles[0]->pos);
-            Vector3 y_axis = v_sub(v->particles[2]->pos, v->particles[0]->pos);
-            Vector3 z_axis = v_sub(v->particles[4]->pos, v->particles[0]->pos);
-            Color color = voxel_display_color(v);
-            net_write_u64(&writer, v->identity);
-            net_write_f32(&writer, center.x); net_write_f32(&writer, center.y); net_write_f32(&writer, center.z);
-            net_write_f32(&writer, x_axis.x); net_write_f32(&writer, x_axis.y); net_write_f32(&writer, x_axis.z);
-            net_write_f32(&writer, y_axis.x); net_write_f32(&writer, y_axis.y); net_write_f32(&writer, y_axis.z);
-            net_write_f32(&writer, z_axis.x); net_write_f32(&writer, z_axis.y); net_write_f32(&writer, z_axis.z);
-            net_write_u8(&writer, color.r); net_write_u8(&writer, color.g); net_write_u8(&writer, color.b);
-            net_write_u8(&writer, v->isBullet ? 1 : 0);
+            if (!net_voxel_has_dynamic_pose(v)) continue;
+            if (!net_write_dynamic_pose(&writer, v)) break;
             ++count; ++sent;
         }
         packet[count_offset] = (uint8_t)(count >> 8); packet[count_offset + 1] = (uint8_t)count;
@@ -20687,6 +20795,7 @@ static void net_host_tick(void) {
     net_write_u8(&writer, count);
     for (int i = 0; i < MAX_PLAYERS; ++i) if (netPlayerPresent[i]) net_write_player_state(&writer, i);
     net_transport_broadcast(&netTransport, FPS_NET_CHANNEL_SNAPSHOT, packet, writer.length, false);
+    net_host_send_dynamic_deletes();
     net_host_send_dynamic_poses();
     if ((netServerTick % 6u) == 0u) {
         net_writer_init(&writer, packet, sizeof(packet));

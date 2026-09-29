@@ -1777,6 +1777,7 @@ inline bool fractureProbabilityAccepts(uint identity, constant GpuUniforms &u) {
 
 inline void gatherBreakMask(uint gid, device ParticleState *particle,
                             device VoxelState *voxel, device int4 *topology,
+                            device const int *tetherOwner,
                             device const int *refcount,
                             device const int *control, constant GpuUniforms &u) {
     if (gid >= uint(u.integer_padding_2)) return;
@@ -1791,6 +1792,7 @@ inline void gatherBreakMask(uint gid, device ParticleState *particle,
     for (int i = 0; i < 8; ++i) {
         uint id = voxelParticle(v, i);
         if (id >= uint(controlLoad(control, 0))) return;
+        if (tetherOwner[id] >= 0) return;
         p[i] = particle[id].predicted_base_inv_mass.xyz;
     }
     float3 axis0 = ((p[1]-p[0])+(p[3]-p[2])+(p[5]-p[4])+(p[7]-p[6]))*0.25f;
@@ -1913,7 +1915,7 @@ kernel void pbd_pipeline(
             }
             break;
         case MODE_STATIC_COLLISIONS:staticCollisions(gid,particle,collisionId,collisionControl,staticCell,staticCollider,aabbOwner,aabbControl,refcount,control,u);break;
-        case MODE_BREAK_MASK:gatherBreakMask(gid,particle,voxel,topology,refcount,control,u);break;
+        case MODE_BREAK_MASK:gatherBreakMask(gid,particle,voxel,topology,tetherOwner,refcount,control,u);break;
         case MODE_FINALIZE_PARTICLES:finalizeParticle(gid,particle,cell,simId,refcount,control,u);break;
         case MODE_FINALIZE_VOXELS:finalizeVoxel(gid,particle,voxel,control,u);break;
         case MODE_SPLIT_BREAKS:splitBrokenFaces(gid,particle,correction,cell,simId,collisionId,collisionMember,collisionControl,voxel,tetherOwner,collisionMeta,refcount,control,cloneParent,u);break;

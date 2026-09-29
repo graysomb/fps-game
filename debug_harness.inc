@@ -90,6 +90,12 @@ typedef struct DebugRunState {
     bool active_cube_drop;
     bool adaptive_cube_drop;
     bool amr_multiple_groups_test;
+    bool amr_gameplay_lifecycle_test;
+    bool amr_gameplay_body_seen;
+    bool amr_gameplay_edit_done;
+    bool amr_gameplay_rebuilt;
+    bool amr_gameplay_reset_succeeded;
+    uint64_t amr_gameplay_original_body_identity;
     bool arbitrary_shape_drop;
     bool amr_projectile_test;
     uint64_t amr_projectile_identity;
@@ -302,6 +308,7 @@ static DebugRunConfig debugRunConfig = {
 static bool debug_setup_dynamic_freefall(DebugRunState *state);
 static bool debug_setup_creative_reset_cache(DebugRunState *state);
 static bool debug_setup_activation_floating(DebugRunState *state);
+static bool debug_setup_amr_gameplay_lifecycle(DebugRunState *state);
 static bool debug_setup_sleep_wake_floating(DebugRunState *state);
 static bool debug_setup_sleep_snap_original(DebugRunState *state);
 static bool debug_setup_sleep_snap_no_rebuild(DebugRunState *state);
@@ -339,6 +346,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall, 60, 60 },
     { "creative-reset-cache", "Creative reset invalidates cached static render and collision surfaces", debug_setup_creative_reset_cache, 60, 60 },
     { "activation-floating", "Static cluster activated while unsupported", debug_setup_activation_floating, 60, 60 },
+    { "amr-gameplay-lifecycle", "Gameplay activation, edit rebuild, and reset of one AMR body", debug_setup_amr_gameplay_lifecycle, 60, 60 },
     { "sleep-wake-floating", "Supported cluster sleeps, loses support, then activates", debug_setup_sleep_wake_floating, 60, 60 },
     { "sleep-snap-original", "A calm 4x4x6 pillar near its original pose snaps back to static", debug_setup_sleep_snap_original, 60, 60 },
     { "tall-pillar-snap", "Top half of a tall pillar settles and restores to static", debug_setup_tall_pillar_snap, 120, 60 },
@@ -2979,6 +2987,16 @@ static bool debug_setup_activation_floating(DebugRunState *state)
     return true;
 }
 
+static bool debug_setup_amr_gameplay_lifecycle(DebugRunState *state)
+{
+    if (!debug_setup_activation_floating(state)) return false;
+    // Keep debugAdaptiveOctree false: this scenario must discover and build
+    // the hierarchy through the ordinary frame-boundary gameplay registry.
+    state->amr_gameplay_lifecycle_test = true;
+    state->platform_lifecycle_test = true;
+    return true;
+}
+
 static bool debug_setup_sleep_snap_original(DebugRunState *state)
 {
     debug_reset_world();
@@ -5356,6 +5374,77 @@ static void debug_validate_step(DebugRunState *state, int step)
                                   !voxels[upper_idx].glued_faces[3];
         }
     }
+    if (state->amr_gameplay_lifecycle_test) {
+        if (step == 1) {
+            int active_bodies = 0;
+            int body_id = -1;
+            for (int i = 0; i < amrBodyCount; ++i) {
+                if (amrBodies[i].valid && amrBodies[i].lifecycle == AMR_BODY_ACTIVE) {
+                    ++active_bodies;
+                    body_id = i;
+                }
+            }
+            bool owned = active_bodies == 1 && body_id >= 0;
+            for (int i = 0; i < voxel_count && owned; ++i) {
+                if (voxels[i].debugClusterTag == DEBUG_TEST_TAG &&
+                    voxels[i].simulate && voxels[i].amr_body_id != body_id)
+                    owned = false;
+            }
+            if (!owned || amrBodies[body_id].leaf_count != state->expected_voxels) {
+                debug_add_failure(state,
+                    "gameplay activation did not produce one owned AMR body (bodies=%d leaves=%d/%d)",
+                    active_bodies, body_id >= 0 ? amrBodies[body_id].leaf_count : 0,
+                    state->expected_voxels);
+            } else {
+                state->amr_gameplay_body_seen = true;
+                state->amr_gameplay_original_body_identity = amrBodies[body_id].identity;
+                int victim = debug_find_tagged_voxel(DEBUG_TEST_TAG, false);
+                if (victim >= 0 && voxels[victim].simulate) {
+                    remove_voxel_index(victim);
+                    --state->expected_voxels;
+                    state->amr_gameplay_edit_done = true;
+                } else {
+                    debug_add_failure(state, "gameplay AMR edit found no dynamic leaf to remove");
+                }
+            }
+        } else if (step == 2 && state->amr_gameplay_edit_done) {
+            int active_bodies = 0;
+            int body_id = -1;
+            for (int i = 0; i < amrBodyCount; ++i) {
+                if (amrBodies[i].valid && amrBodies[i].lifecycle == AMR_BODY_ACTIVE) {
+                    ++active_bodies;
+                    body_id = i;
+                }
+            }
+            bool rebuilt = active_bodies == 1 && body_id >= 0 &&
+                amrBodies[body_id].identity != state->amr_gameplay_original_body_identity &&
+                amrBodies[body_id].leaf_count == state->expected_voxels;
+            for (int i = 0; i < voxel_count && rebuilt; ++i) {
+                if (voxels[i].debugClusterTag == DEBUG_TEST_TAG &&
+                    voxels[i].simulate && voxels[i].amr_body_id != body_id)
+                    rebuilt = false;
+            }
+            if (!rebuilt) {
+                debug_add_failure(state,
+                    "gameplay AMR edit did not retire and rebuild cleanly (bodies=%d leaves=%d/%d)",
+                    active_bodies, body_id >= 0 ? amrBodies[body_id].leaf_count : 0,
+                    state->expected_voxels);
+            }
+            state->amr_gameplay_rebuilt = rebuilt;
+        }
+        if (step == debugRunConfig.steps) {
+            clear_world_voxels();
+            state->amr_gameplay_reset_succeeded =
+                voxel_count == 0 && active_particle_count == 0 && sim_particle_count == 0 &&
+                amrBodyCount == 0 && vgsHierarchy.node_count == 0 &&
+                vgsHierarchy.leaf_history == NULL;
+            if (!state->amr_gameplay_reset_succeeded)
+                debug_add_failure(state,
+                    "world reset retained AMR state (voxels=%d particles=%d sim=%d bodies=%d nodes=%d)",
+                    voxel_count, active_particle_count, sim_particle_count,
+                    amrBodyCount, vgsHierarchy.node_count);
+        }
+    }
 }
 
 static void debug_finalize_validation(DebugRunState *state)
@@ -5680,6 +5769,14 @@ static void debug_finalize_validation(DebugRunState *state)
     }
     if (!state->activation_succeeded) {
         debug_add_failure(state, "scenario did not complete its activation stage");
+    }
+    if (state->amr_gameplay_lifecycle_test &&
+        (!state->amr_gameplay_body_seen || !state->amr_gameplay_edit_done ||
+         !state->amr_gameplay_rebuilt || !state->amr_gameplay_reset_succeeded)) {
+        debug_add_failure(state,
+            "gameplay AMR lifecycle incomplete (body=%d edit=%d rebuilt=%d reset=%d)",
+            state->amr_gameplay_body_seen, state->amr_gameplay_edit_done,
+            state->amr_gameplay_rebuilt, state->amr_gameplay_reset_succeeded);
     }
     if (state->amr_multiple_groups_test) {
         int active_bodies = 0;

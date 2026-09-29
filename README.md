@@ -273,6 +273,12 @@ static world and compact dynamic-voxel transforms. Player input and snapshots ru
 at 60 Hz. Clients predict only their own movement/look, then reconcile and replay
 unacknowledged inputs. Shooting, melee, building, tethering, creative edits,
 pickups, scores, and voxel physics remain authoritative on the host.
+Dynamic voxel poses use the same finest-leaf visibility rule as host rendering.
+A joining client receives a reliable complete dynamic-pose bootstrap after the
+static world, and reliable identity-based delete messages remove fractured or
+mined leaves from every client. The network protocol version is bumped whenever
+this stream changes, so older binaries fail the handshake instead of decoding a
+different voxel format.
 
 Choose the number of LAN-local players with `-`/`+` on the main menu, then press
 `H` to create a lobby on port 27015 or `J` to join a host on the same machine. Clients
@@ -423,6 +429,10 @@ Available scenarios are:
 * `creative-reset-cache`: populates the shared static surface cache, enters the empty
   creative world, and verifies that no render or collision patches survive the reset.
 * `activation-floating`: activates an unsupported static cluster through the tether path.
+* `amr-gameplay-lifecycle`: activates that cluster through the same static tether path,
+  verifies frame-boundary AMR discovery and finest-leaf ownership, removes one leaf
+  through the gameplay voxel removal path, verifies transactional body replacement,
+  then checks that a world reset releases all bodies, nodes, histories, and particles.
 * `sleep-wake-floating`: sleeps a supported dynamic cluster, removes its support, then
   activates it through the tether path.
 * `sleep-snap-original`: activates a grounded 4×4×6 static pillar, settles it within
@@ -493,8 +503,10 @@ Available scenarios are:
   initializes child positions and velocities with trilinear interpolation;
   coarsening fits parent positions and velocities with the precomputed left
   pseudoinverse. The GPU receives a compact, flat list of active VGS constraints
-  and parent-to-terminal-child trilinear welds for each substep. Only active
-  terminal voxels with enabled VGS render. The report records transition and
+  and parent-to-terminal-child trilinear welds for each substep. Gameplay rendering,
+  ray interaction, damage, mining, and network replication keep using every intact
+  finest voxel; AMR activity only selects physics constraints. The coarse terminal
+  view remains available to adaptive debug scenarios. The report records transition and
   enabled constraint counts; `curvature-by-level.csv` records per-scale curvature
   distributions. `FPS_AMR_TEST_BREAK_CHILD=1` seeds an overstretched child to
   check that it breaks without disabling its parent and blocks coarsening.
@@ -533,6 +545,11 @@ Available scenarios are:
   the live forest, remaps node and voxel ownership, and frees retired leaf maps.
   The 1024-body limit therefore applies to simultaneously live bodies rather than
   cumulative body churn.
+  Tethering marks the complete owning AMR body as held for the frame. CPU and GPU
+  fracture checks skip its leaf and hierarchy VGS constraints, and the tether force
+  is applied only to currently massive particles; dormant particles continue to
+  follow their algebraic hierarchy transfer. Releasing the tether restores ordinary
+  fracture evaluation on the next frame.
   Full nodes reject queries with six sphere-versus-deformed-hexahedron projection
   tests, partial nodes descend through nonempty children, and refined full nodes
   descend through active children. Full terminal cells test all 81 pairs between
