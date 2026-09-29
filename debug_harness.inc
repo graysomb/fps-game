@@ -335,12 +335,14 @@ static bool debug_setup_adaptive_cube_drop(DebugRunState *state);
 static bool debug_setup_adaptive_l_drop(DebugRunState *state);
 static bool debug_setup_amr_projectile_impact(DebugRunState *state);
 static bool debug_setup_amr_multiple_groups(DebugRunState *state);
+static bool debug_setup_amr_atomic_snap(DebugRunState *state);
 static bool debug_setup_amr_body_churn(DebugRunState *state);
 static bool debug_setup_rip_test(DebugRunState *state);
 static bool debug_setup_vgs_refinement(DebugRunState *state);
 static bool debug_setup_vgs_coarsening(DebugRunState *state);
 static bool debug_setup_voxel_strain_shear_fracture(DebugRunState *state);
 static bool debug_setup_arena_platform_fluid(DebugRunState *state);
+static uint64_t debug_tagged_static_identity_signature(int tag);
 
 static const DebugScenarioDefinition debugScenarios[] = {
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall, 60, 60 },
@@ -373,6 +375,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "adaptive-l-drop", "Occupancy-masked adaptive L-shaped drop", debug_setup_adaptive_l_drop, 480, 120 },
     { "amr-projectile-impact", "Fire one finest-scale voxel into adaptive terminal spheres", debug_setup_amr_projectile_impact, 240, 120 },
     { "amr-multiple-groups", "Two independent active groups compile as two AMR bodies", debug_setup_amr_multiple_groups, 120, 60 },
+    { "amr-atomic-snap", "A calm supported AMR body restores to static atomically", debug_setup_amr_atomic_snap, 60, 60 },
     { "amr-body-churn", "Retire and rebuild one AMR body 2048 times without exhausting registry slots", debug_setup_amr_body_churn, 60, 60 },
     { "rip-test", "Pull both faces of an adaptive cube to test fracture", debug_setup_rip_test, 480, 60 },
     { "vgs-refinement", "Drop a root VGS cube, then refine into eight shared-particle children", debug_setup_vgs_refinement, 300, 180 },
@@ -727,7 +730,9 @@ static void debug_transform_tagged_cluster_off_grid(int tag)
     const float angle = 3.0f * DEG2RAD;
     const float cs = cosf(angle);
     const float sn = sinf(angle);
-    const Vector3 offset = { VOXEL_SIZE * 0.18f, 0.0f, VOXEL_SIZE * 0.13f };
+    // Stay outside the AMR body's aggregate snap envelope (RMS <= 1 and
+    // maximum normalized error <= 2), while preserving a rigid calm pose.
+    const Vector3 offset = { VOXEL_SIZE * 0.40f, 0.0f, VOXEL_SIZE * 0.30f };
     stamp = ++particle_sync_stamp;
     if (stamp == 0) {
         stamp = 1;
@@ -2547,6 +2552,88 @@ static bool debug_setup_amr_multiple_groups(DebugRunState *state)
     debug_set_initial_centroid(state);
     state->camera.position = (Vector3){10.0f, 8.0f, 14.0f};
     state->camera.target = (Vector3){0.0f, 5.0f, 0.0f};
+    return true;
+}
+
+static bool debug_setup_amr_atomic_snap(DebugRunState *state)
+{
+    debug_reset_world();
+    pbdSolidVoxelSize = VOXEL_SIZE;
+    static UnitVoxelBuffer capacity_probe;
+    unit_voxel_buffer_clear(&capacity_probe);
+    Color probe_color = (Color){255, 255, 255, 255};
+    for (int z = 0; z < AMR_MAX_GRID_SIDE; ++z)
+        for (int y = 0; y < AMR_MAX_GRID_SIDE; ++y)
+            for (int x = 0; x < AMR_MAX_GRID_SIDE; ++x)
+                if (!unit_voxel_buffer_push(&capacity_probe, x, y, z, probe_color,
+                                            0, false, -1, 0, -1)) {
+                    debug_add_failure(state,
+                                      "activation capacity rejected (%d,%d,%d) before %d leaves",
+                                      x, y, z, AMR_MAX_BODY_LEAVES);
+                    return false;
+                }
+    if (capacity_probe.count != AMR_MAX_BODY_LEAVES ||
+        unit_voxel_buffer_push(&capacity_probe, AMR_MAX_GRID_SIDE, 0, 0,
+                               probe_color, 0, false, -1, 0, -1)) {
+        debug_add_failure(state,
+                          "activation capacity accepted invalid extent/count=%d",
+                          capacity_probe.count);
+        return false;
+    }
+    unit_voxel_buffer_clear(&capacity_probe);
+    int cluster[8];
+    int created = 0;
+    for (int y = 0; y < 2; ++y) for (int z = 0; z < 2; ++z)
+        for (int x = 0; x < 2; ++x) {
+            int flat = x + 2 * z + 4 * y;
+            int world = addVoxel(((float)x + 0.5f) * VOXEL_SIZE,
+                                 ((float)y + 0.5f) * VOXEL_SIZE,
+                                 ((float)z + 0.5f) * VOXEL_SIZE,
+                                 false, true, (Color){90, 185, 245, 255}, 0);
+            if (world < 0) continue;
+            cluster[flat] = world;
+            voxels[world].debugClusterTag = DEBUG_TEST_TAG;
+            ++created;
+            if (x) debug_glue_pbd_faces(world, cluster[flat - 1], 1);
+            if (z) debug_glue_pbd_faces(world, cluster[flat - 2], 5);
+            if (y) debug_glue_pbd_faces(world, cluster[flat - 4], 3);
+        }
+    if (created != 8) {
+        debug_add_failure(state, "AMR atomic snap created %d/8 leaves", created);
+        return false;
+    }
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    rebuild_voxel_hash();
+    rebuild_particle_collision_metadata();
+    if (!amr_build_body_from_cluster(cluster, 8) || amrBodyCount != 1) {
+        debug_add_failure(state, "AMR atomic snap could not build one body");
+        return false;
+    }
+    for (int i = 0; i < 8; ++i) {
+        voxels[cluster[i]].sleepFrames = VOXEL_DEACTIVATION_FRAMES - 1;
+        set_voxel_velocity(&voxels[cluster[i]], (Vector3){0});
+    }
+    bool converted = deactivate_sleeping_voxels();
+    if (!converted || debug_count_tagged(DEBUG_TEST_TAG, 0) != 8 ||
+        debug_count_tagged(DEBUG_TEST_TAG, 1) != 0 ||
+        !amr_reconcile_body_registry() || amrBodyCount != 0) {
+        debug_add_failure(state,
+                          "AMR atomic snap failed converted=%d static=%d dynamic=%d bodies=%d",
+                          converted, debug_count_tagged(DEBUG_TEST_TAG, 0),
+                          debug_count_tagged(DEBUG_TEST_TAG, 1), amrBodyCount);
+        return false;
+    }
+    state->expected_voxels = 8;
+    state->sleep_snap_original_test = true;
+    state->sleep_snap_active_observed = true;
+    state->sleep_snap_original_succeeded = true;
+    state->sleeping_conversion_succeeded = true;
+    state->sleep_snap_static_step = 0;
+    state->sleep_snap_queue_at_static = recycleQueueCount;
+    state->sleep_snap_static_identity_signature =
+        debug_tagged_static_identity_signature(DEBUG_TEST_TAG);
+    debug_set_initial_centroid(state);
+    debug_capture(state, "phase-01-amr-atomic-static.png", "amr-atomic-static", 0);
     return true;
 }
 

@@ -518,8 +518,8 @@ static inline bool is_player_bot(int player_index) {
 #define FREEZE_PROPAGATION_ITERATIONS 100
 #define FREEZE_PROPAGATION_ATTENUATION 1.0f
 #define FREEZE_PROPAGATION_EPSILON 1e-6f
-#define FREEZE_PATH_DECAY 0.85f
-#define FREEZE_OVERHANG_DECAY 0.7f
+#define FREEZE_SUPPORT_PATH_DECAY_METERS 32.0f
+#define FREEZE_OVERHANG_DECAY_METERS 2.0f
 #define ACTIVATION_VELOCITY_WEIGHT 0.6f
 #define ACTIVATION_VELOCITY_REF_SPEED 12.0f
 #define ACTIVATION_STRAIN_WEIGHT   0.1f
@@ -594,11 +594,15 @@ static inline bool is_player_bot(int player_index) {
 static const float GRID_EPSILON = 1e-4f;
 static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define VOXEL_ACTIVATION_RADIUS 2*1
-#define VOXEL_ACTIVATION_UNIT_BUDGET 1000
+#define AMR_MAX_GRID_SIDE 32
+#define AMR_MAX_BODY_LEAVES (AMR_MAX_GRID_SIDE * AMR_MAX_GRID_SIDE * AMR_MAX_GRID_SIDE)
+#define VOXEL_ACTIVATION_UNIT_BUDGET AMR_MAX_BODY_LEAVES
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 1.5f
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.4f
 #define VOXEL_DEACTIVATION_SHEAR_THRESHOLD 0.4f
 #define VOXEL_DEACTIVATION_FRAMES 5
+#define AMR_SLEEP_RMS_VELOCITY_THRESHOLD (VOXEL_DEACTIVATION_VELOCITY_THRESHOLD * 0.5f)
+#define AMR_SLEEP_RMS_DEFORMATION_THRESHOLD (VOXEL_DEACTIVATION_STRAIN_THRESHOLD * 0.5f)
 #define VOXEL_SLEEP_SNAP_POSITION_TOLERANCE (VOXEL_SIZE * 0.25f)
 #define VOXEL_MAX_DEACTIVATIONS_PER_FRAME 128*5
 #define FLUID_DEACTIVATION_VELOCITY_THRESHOLD 0.75f
@@ -1176,6 +1180,11 @@ typedef struct {
     int leaf_capacity;
     int leaf_count;
     float mass_density;
+    float sleep_rms_speed;
+    float sleep_max_speed;
+    float sleep_rms_strain;
+    float sleep_max_strain;
+    int calm_frames;
     AmrBodyLifecycle lifecycle;
     bool valid;
 } AmrBody;
@@ -1531,6 +1540,10 @@ typedef struct {
 typedef struct {
     UnitVoxelSeed voxels[MAX_VOXELS];
     int count;
+    int min_gx, min_gy, min_gz;
+    int max_gx, max_gy, max_gz;
+    int adjacent_leaf_count;
+    uint8_t included_amr_bodies[MAX_AMR_BODIES];
 } UnitVoxelBuffer;
 
 static void refresh_static_voxel_beliefs(void);
@@ -1782,9 +1795,9 @@ static void pbd_parallel_for(int start, int end, PbdParallelFn fn, void *user) {
         pbdCpuProfile.t_parallel_overhead_ms += (t_dispatch - t0) + (t_wait - t_job);
     }
 }
-static float compute_cluster_freeze_belief(const UnitVoxelBuffer *buffer, int startIndex);
 static void rollback_activation_buffer(UnitVoxelBuffer *buffer, int startIndex);
 static bool dynamic_belief_overcomes_static(float dynamicBelief, float frozenBelief);
+static int table_get(int x, int y, int z);
 static bool ranges_overlap(int minA, int maxA, int minB, int maxB);
 static uint8_t compute_static_support_mask(const Voxel *voxel);
 static bool list_contains_index(const int *list, int count, int value);
@@ -1851,6 +1864,16 @@ FORCE_INLINE bool v_isfinite(Vector3 v) {
 static void set_voxel_velocity(Voxel *voxel, Vector3 vel);
 static void draw_creative_help_overlay(int player_idx, int view_w, int view_h);
 
+static void unit_voxel_buffer_reset_metadata(UnitVoxelBuffer *buffer)
+{
+    if (!buffer) return;
+    buffer->count = 0;
+    buffer->min_gx = buffer->min_gy = buffer->min_gz = INT_MAX;
+    buffer->max_gx = buffer->max_gy = buffer->max_gz = INT_MIN;
+    buffer->adjacent_leaf_count = 0;
+    memset(buffer->included_amr_bodies, 0, sizeof(buffer->included_amr_bodies));
+}
+
 static void unit_voxel_buffer_clear(UnitVoxelBuffer *buffer) {
     if (!buffer) {
         return;
@@ -1866,7 +1889,77 @@ static void unit_voxel_buffer_clear(UnitVoxelBuffer *buffer) {
             atomic_store_explicit(&activationClaims[idx], 0, memory_order_release);
         }
     }
-    buffer->count = 0;
+    unit_voxel_buffer_reset_metadata(buffer);
+}
+
+static bool unit_voxel_buffer_fits_amr(const UnitVoxelBuffer *buffer,
+                                       int gx, int gy, int gz)
+{
+    if (!buffer || buffer->count + buffer->adjacent_leaf_count >= AMR_MAX_BODY_LEAVES)
+        return false;
+    bool has_region = buffer->count > 0 || buffer->adjacent_leaf_count > 0;
+    int minx = has_region ? (gx < buffer->min_gx ? gx : buffer->min_gx) : gx;
+    int miny = has_region ? (gy < buffer->min_gy ? gy : buffer->min_gy) : gy;
+    int minz = has_region ? (gz < buffer->min_gz ? gz : buffer->min_gz) : gz;
+    int maxx = has_region ? (gx > buffer->max_gx ? gx : buffer->max_gx) : gx;
+    int maxy = has_region ? (gy > buffer->max_gy ? gy : buffer->max_gy) : gy;
+    int maxz = has_region ? (gz > buffer->max_gz ? gz : buffer->max_gz) : gz;
+    return maxx - minx + 1 <= AMR_MAX_GRID_SIDE &&
+           maxy - miny + 1 <= AMR_MAX_GRID_SIDE &&
+           maxz - minz + 1 <= AMR_MAX_GRID_SIDE;
+}
+
+static bool unit_voxel_buffer_include_body(UnitVoxelBuffer *buffer, int body_id)
+{
+    if (!buffer || body_id < 0 || body_id >= amrBodyCount ||
+        body_id >= MAX_AMR_BODIES || buffer->included_amr_bodies[body_id]) return true;
+    AmrBody *body = &amrBodies[body_id];
+    if (!body->valid || body->lifecycle == AMR_BODY_RETIRED) return true;
+    if (buffer->count + buffer->adjacent_leaf_count + body->leaf_count >
+        AMR_MAX_BODY_LEAVES) return false;
+    bool has_region = buffer->count > 0 || buffer->adjacent_leaf_count > 0;
+    int minx = has_region ? buffer->min_gx : INT_MAX;
+    int miny = has_region ? buffer->min_gy : INT_MAX;
+    int minz = has_region ? buffer->min_gz : INT_MAX;
+    int maxx = has_region ? buffer->max_gx : INT_MIN;
+    int maxy = has_region ? buffer->max_gy : INT_MIN;
+    int maxz = has_region ? buffer->max_gz : INT_MIN;
+    for (int slot = 0; slot < body->leaf_capacity; ++slot) {
+        int world = body->leaf_voxel_ids ? body->leaf_voxel_ids[slot] : -1;
+        if (world < 0 || world >= voxel_count) continue;
+        Voxel *voxel = &voxels[world];
+        if (voxel->gx < minx) minx = voxel->gx;
+        if (voxel->gy < miny) miny = voxel->gy;
+        if (voxel->gz < minz) minz = voxel->gz;
+        if (voxel->gx > maxx) maxx = voxel->gx;
+        if (voxel->gy > maxy) maxy = voxel->gy;
+        if (voxel->gz > maxz) maxz = voxel->gz;
+    }
+    if (maxx - minx + 1 > AMR_MAX_GRID_SIDE ||
+        maxy - miny + 1 > AMR_MAX_GRID_SIDE ||
+        maxz - minz + 1 > AMR_MAX_GRID_SIDE) return false;
+    buffer->min_gx = minx; buffer->min_gy = miny; buffer->min_gz = minz;
+    buffer->max_gx = maxx; buffer->max_gy = maxy; buffer->max_gz = maxz;
+    buffer->adjacent_leaf_count += body->leaf_count;
+    buffer->included_amr_bodies[body_id] = 1;
+    return true;
+}
+
+static bool unit_voxel_buffer_include_adjacent_bodies(UnitVoxelBuffer *buffer,
+                                                       int gx, int gy, int gz)
+{
+    static const int directions[6][3] = {
+        {1, 0, 0}, {-1, 0, 0}, {0, 1, 0},
+        {0, -1, 0}, {0, 0, 1}, {0, 0, -1}
+    };
+    for (int face = 0; face < 6; ++face) {
+        int world = table_get(gx + directions[face][0],
+                              gy + directions[face][1],
+                              gz + directions[face][2]);
+        if (world < 0 || world >= voxel_count || !voxels[world].simulate) continue;
+        if (!unit_voxel_buffer_include_body(buffer, voxels[world].amr_body_id)) return false;
+    }
+    return unit_voxel_buffer_fits_amr(buffer, gx, gy, gz);
 }
 
 static bool unit_voxel_buffer_push(UnitVoxelBuffer *buffer,
@@ -1875,7 +1968,9 @@ static bool unit_voxel_buffer_push(UnitVoxelBuffer *buffer,
                                    bool fixed, int voxelIndex,
                                    int debugTag, int activator)
 {
-    if (!buffer || buffer->count >= MAX_VOXELS) {
+    if (!buffer || buffer->count >= MAX_VOXELS ||
+        !unit_voxel_buffer_fits_amr(buffer, gx, gy, gz) ||
+        !unit_voxel_buffer_include_adjacent_bodies(buffer, gx, gy, gz)) {
         return false;
     }
     buffer->voxels[buffer->count++] = (UnitVoxelSeed){
@@ -1891,6 +1986,29 @@ static bool unit_voxel_buffer_push(UnitVoxelBuffer *buffer,
         .restorationQueued = false,
         .restorationDeadlineFrame = 0
     };
+    if (gx < buffer->min_gx) buffer->min_gx = gx;
+    if (gy < buffer->min_gy) buffer->min_gy = gy;
+    if (gz < buffer->min_gz) buffer->min_gz = gz;
+    if (gx > buffer->max_gx) buffer->max_gx = gx;
+    if (gy > buffer->max_gy) buffer->max_gy = gy;
+    if (gz > buffer->max_gz) buffer->max_gz = gz;
+    return true;
+}
+
+static bool unit_voxel_buffer_append_seed(UnitVoxelBuffer *buffer,
+                                          const UnitVoxelSeed *seed)
+{
+    if (!buffer || !seed || buffer->count >= MAX_VOXELS ||
+        !unit_voxel_buffer_fits_amr(buffer, seed->gx, seed->gy, seed->gz) ||
+        !unit_voxel_buffer_include_adjacent_bodies(buffer,
+                                                   seed->gx, seed->gy, seed->gz)) return false;
+    buffer->voxels[buffer->count++] = *seed;
+    if (seed->gx < buffer->min_gx) buffer->min_gx = seed->gx;
+    if (seed->gy < buffer->min_gy) buffer->min_gy = seed->gy;
+    if (seed->gz < buffer->min_gz) buffer->min_gz = seed->gz;
+    if (seed->gx > buffer->max_gx) buffer->max_gx = seed->gx;
+    if (seed->gy > buffer->max_gy) buffer->max_gy = seed->gy;
+    if (seed->gz > buffer->max_gz) buffer->max_gz = seed->gz;
     return true;
 }
 
@@ -1912,7 +2030,22 @@ static void rollback_activation_buffer(UnitVoxelBuffer *buffer, int startIndex)
             atomic_store_explicit(&activationClaims[idx], 0, memory_order_release);
         }
     }
-    buffer->count = startIndex;
+    buffer->count = 0;
+    buffer->min_gx = buffer->min_gy = buffer->min_gz = INT_MAX;
+    buffer->max_gx = buffer->max_gy = buffer->max_gz = INT_MIN;
+    buffer->adjacent_leaf_count = 0;
+    memset(buffer->included_amr_bodies, 0, sizeof(buffer->included_amr_bodies));
+    for (int i = 0; i < startIndex; ++i) {
+        const UnitVoxelSeed *seed = &buffer->voxels[i];
+        unit_voxel_buffer_include_adjacent_bodies(buffer, seed->gx, seed->gy, seed->gz);
+        ++buffer->count;
+        if (seed->gx < buffer->min_gx) buffer->min_gx = seed->gx;
+        if (seed->gy < buffer->min_gy) buffer->min_gy = seed->gy;
+        if (seed->gz < buffer->min_gz) buffer->min_gz = seed->gz;
+        if (seed->gx > buffer->max_gx) buffer->max_gx = seed->gx;
+        if (seed->gy > buffer->max_gy) buffer->max_gy = seed->gy;
+        if (seed->gz > buffer->max_gz) buffer->max_gz = seed->gz;
+    }
 }
 
 static inline float voxel_particle_radius(const Voxel *v) {
@@ -5084,6 +5217,8 @@ static int collect_static_activation_cluster(int seed_idx,
                                              int activator,
                                              int center_gx, int center_gy, int center_gz,
                                              float seed_radius_sq,
+                                             float propagation_belief,
+                                             bool force_seed,
                                              UnitVoxelBuffer *buffer)
 {
     if (!buffer || buffer->count >= VOXEL_ACTIVATION_UNIT_BUDGET) {
@@ -5095,6 +5230,11 @@ static int collect_static_activation_cluster(int seed_idx,
     int tail = 0;
     int added = 0;
 
+    if (!force_seed && seed_idx >= 0 && seed_idx < voxel_count &&
+        !dynamic_belief_overcomes_static(propagation_belief,
+                                         voxels[seed_idx].freezeBelief)) {
+        return 0;
+    }
     if (!activation_try_enqueue(seed_idx, activator, center_gx, center_gy, center_gz,
                                 seed_radius_sq, buffer, queue, &tail))
     {
@@ -5127,6 +5267,11 @@ static int collect_static_activation_cluster(int seed_idx,
                 continue;
             }
             if (neighbor_idx >= 0 && neighbor_idx < voxel_count && voxel_is_fluid(&voxels[neighbor_idx])) {
+                continue;
+            }
+            if (neighbor_idx >= 0 && neighbor_idx < voxel_count &&
+                !dynamic_belief_overcomes_static(propagation_belief,
+                                                 voxels[neighbor_idx].freezeBelief)) {
                 continue;
             }
             if (activation_try_enqueue(neighbor_idx, activator, center_gx, center_gy, center_gz,
@@ -5214,39 +5359,6 @@ static int expand_activation_cluster_unbounded(UnitVoxelBuffer *buffer, int star
     return added;
 }
 
-static float compute_cluster_freeze_belief(const UnitVoxelBuffer *buffer, int startIndex)
-{
-    if (!buffer) {
-        return 0.0f;
-    }
-    if (startIndex < 0) {
-        startIndex = 0;
-    }
-    if (startIndex >= buffer->count) {
-        return 0.0f;
-    }
-    float accum = 0.0f;
-    float minBelief = 1.0f;
-    int count = 0;
-    for (int i = startIndex; i < buffer->count; ++i) {
-        int idx = buffer->voxels[i].voxelIndex;
-        if (idx < 0 || idx >= voxel_count) {
-            continue;
-        }
-        float belief = voxels[idx].freezeBelief;
-        accum += belief;
-        if (belief < minBelief) {
-            minBelief = belief;
-        }
-        ++count;
-    }
-    if (count <= 0) {
-        return 0.0f;
-    }
-    float average = accum / (float)count;
-    return 0.5f * (average + minBelief);
-}
-
 static bool dynamic_belief_overcomes_static(float dynamicBelief, float frozenBelief)
 {
     float weightedDynamic = dynamicBelief * ACTIVATION_DYNAMIC_WEIGHT;
@@ -5260,6 +5372,13 @@ static int compare_unit_voxel_seed(const void *a, const void *b) {
     if (ua->gz != ub->gz) return ua->gz - ub->gz;
     if (ua->gy != ub->gy) return ua->gy - ub->gy;
     return ua->gx - ub->gx;
+}
+
+static int compare_int_descending(const void *a, const void *b)
+{
+    int lhs = *(const int *)a;
+    int rhs = *(const int *)b;
+    return (lhs < rhs) - (lhs > rhs);
 }
 
 static bool fluid_voxel_has_support(const Voxel *voxel) {
@@ -5464,13 +5583,10 @@ static void activate_static_worker(int start, int end, int worker_id, void *user
                     int added = collect_static_activation_cluster(idx, activator,
                                                                   center_gx, center_gy, center_gz,
                                                                   radius_sq,
+                                                                  dynamic->activationBelief,
+                                                                  false,
                                                                   buffer);
                     if (added <= 0) {
-                        rollback_activation_buffer(buffer, previousCount);
-                        continue;
-                    }
-                    float clusterBelief = compute_cluster_freeze_belief(buffer, previousCount);
-                    if (!dynamic_belief_overcomes_static(dynamic->activationBelief, clusterBelief)) {
                         rollback_activation_buffer(buffer, previousCount);
                         continue;
                     }
@@ -5597,7 +5713,7 @@ static bool activate_static_voxels_near_dynamic(void)
     }
 
     for (int i = 0; i < PBD_MAX_THREADS + 1; ++i) {
-        activate_thread_buffers[i].count = 0;
+        unit_voxel_buffer_reset_metadata(&activate_thread_buffers[i]);
     }
 
     ActivateJob job = { .radius_sq = radius_sq, .radius = VOXEL_ACTIVATION_RADIUS };
@@ -5647,8 +5763,15 @@ static bool activate_static_voxels_near_dynamic(void)
     for (int i = 0; i < PBD_MAX_THREADS + 1; ++i) {
         UnitVoxelBuffer *tb = &activate_thread_buffers[i];
         for (int k = 0; k < tb->count; ++k) {
-            if (buffer.count >= MAX_VOXELS) break;
-            buffer.voxels[buffer.count++] = tb->voxels[k];
+            UnitVoxelSeed *seed = &tb->voxels[k];
+            if (!unit_voxel_buffer_append_seed(&buffer, seed)) {
+                int world = seed->voxelIndex;
+                if (world >= 0 && world < voxel_count) {
+                    voxels[world].pendingActivation = false;
+                    atomic_store_explicit(&activationClaims[world], 0,
+                                          memory_order_release);
+                }
+            }
         }
     }
 
@@ -5786,19 +5909,14 @@ static bool activate_static_voxels_near_region(int minx, int maxx,
                 int added = collect_static_activation_cluster(idx, activator,
                                                               candidate->gx, candidate->gy, candidate->gz,
                                                               (float)(VOXEL_ACTIVATION_RADIUS * VOXEL_ACTIVATION_RADIUS),
+                                                              1.0f,
+                                                              true,
                                                               &buffer);
                 if (added <= 0) {
                     rollback_activation_buffer(&buffer, previousCount);
                     continue;
                 }
-                float clusterBelief = compute_cluster_freeze_belief(&buffer, previousCount);
-                if (dynamic_belief_overcomes_static(1.0f, clusterBelief)) {
-                    expand_activation_cluster_unbounded(&buffer, previousCount, 1.0f, activator);
-                } else {
-                    rollback_activation_buffer(&buffer, previousCount);
-                    activation_try_enqueue(idx, activator, candidate->gx, candidate->gy, candidate->gz,
-                                           -1.0f, &buffer, NULL, NULL);
-                }
+                expand_activation_cluster_unbounded(&buffer, previousCount, 1.0f, activator);
             }
         }
     }
@@ -6796,11 +6914,10 @@ static void recompute_static_freeze_beliefs_path_length(void)
         bool touchesGround = (freezeBoundaryFlags[i] & 1u) != 0;
         bool hasBelow = (voxels[i].supportMask & (1u << 3)) != 0;
         if (touchesGround || hasBelow) {
-            continue;
-        }
-        overhangDistance[i] = 0;
-        if (tail < MAX_VOXELS) {
-            queue[tail++] = i;
+            overhangDistance[i] = 0;
+            if (tail < MAX_VOXELS) {
+                queue[tail++] = i;
+            }
         }
     }
 
@@ -6823,11 +6940,6 @@ static void recompute_static_freeze_beliefs_path_length(void)
             if (voxels[nidx].simulate) {
                 continue;
             }
-            bool touchesGround = (freezeBoundaryFlags[nidx] & 1u) != 0;
-            bool hasBelow = (voxels[nidx].supportMask & (1u << 3)) != 0;
-            if (touchesGround || hasBelow) {
-                continue;
-            }
             int nextDist = overhangDistance[idx] + 1;
             if (nextDist < overhangDistance[nidx]) {
                 overhangDistance[nidx] = nextDist;
@@ -6843,14 +6955,34 @@ static void recompute_static_freeze_beliefs_path_length(void)
         if (voxel->simulate) {
             continue;
         }
+        bool touchesGround = (freezeBoundaryFlags[i] & 1u) != 0;
         if (freezeDistance[i] == INT_MAX) {
             voxel->freezeBelief = 0.0f;
+        } else if (touchesGround) {
+            voxel->freezeBelief = 1.0f;
         } else {
-            voxel->freezeBelief = powf(FREEZE_PATH_DECAY, (float)freezeDistance[i]);
-        }
-        if (overhangDistance[i] != INT_MAX) {
-            voxel->freezeBelief *= powf(FREEZE_OVERHANG_DECAY,
-                                        (float)(overhangDistance[i] + 1));
+            float path_m = (float)freezeDistance[i] * VOXEL_SIZE;
+            float cantilever_m = overhangDistance[i] == INT_MAX
+                ? path_m : (float)overhangDistance[i] * VOXEL_SIZE;
+            int supported = 0;
+            int vminx, vmaxx, vminy, vmaxy, vminz, vmaxz;
+            voxel_grid_bounds(voxel, &vminx, &vmaxx, &vminy, &vmaxy, &vminz, &vmaxz);
+            int support_x = (vminx + vmaxx) / 2;
+            int support_y = vminy - 1;
+            int support_z = (vminz + vmaxz) / 2;
+            for (int dz = -1; dz <= 1; ++dz) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    supported += cell_contains_static_voxel(support_x + dx,
+                                                            support_y,
+                                                            support_z + dz) ? 1 : 0;
+                }
+            }
+            float support_fraction = (float)supported / 9.0f;
+            float area_factor = 0.5f + 0.5f * sqrtf(support_fraction);
+            float path_factor = expf(-path_m / FREEZE_SUPPORT_PATH_DECAY_METERS);
+            float overhang_factor = expf(-cantilever_m / FREEZE_OVERHANG_DECAY_METERS);
+            voxel->freezeBelief = clampf(path_factor * area_factor * overhang_factor,
+                                         0.0f, 1.0f);
         }
         freezeBeliefScratch[i] = voxel->freezeBelief;
     }
@@ -6973,6 +7105,9 @@ static bool cluster_is_near_original_grid_pose(const int *cluster, int cluster_c
     memset(sleepClusterVisited, 0, sizeof(unsigned char) * (size_t)voxel_count);
     int64_t required_static_cells = 0;
     int cluster_min_orig_gy = INT_MAX;
+    double normalized_error_sq = 0.0;
+    float max_normalized_error = 0.0f;
+    int pose_samples = 0;
     for (int i = 0; i < cluster_count; ++i) {
         int idx = cluster[i];
         if (idx < 0 || idx >= voxel_count || !voxel_is_awake_dynamic(&voxels[idx])) {
@@ -7024,25 +7159,15 @@ static bool cluster_is_near_original_grid_pose(const int *cluster, int cluster_c
 
         float horiz_tol = VOXEL_SLEEP_SNAP_POSITION_TOLERANCE + height_above_base * 0.18f;
         float horiz_dist_sq = center_delta.x * center_delta.x + center_delta.z * center_delta.z;
-        if (horiz_dist_sq > horiz_tol * horiz_tol) {
-            if (debugLogVoxelDeactivation) {
-                TraceLog(LOG_INFO,
-                         "[Deactivate] near-origin=false voxel=%d horiz-error=%.4f tolerance=%.4f (h=%.2f)",
-                         cluster[i], sqrtf(horiz_dist_sq), horiz_tol, height_above_base);
-            }
-            return false;
-        }
-
         float vert_up_tol = VOXEL_SLEEP_SNAP_POSITION_TOLERANCE;
         float vert_down_tol = VOXEL_SIZE * 0.60f + height_above_base * 0.05f;
-        if (center_delta.y > vert_up_tol || center_delta.y < -vert_down_tol) {
-            if (debugLogVoxelDeactivation) {
-                TraceLog(LOG_INFO,
-                         "[Deactivate] near-origin=false voxel=%d vert-delta=%.4f range=[-%.4f, %.4f] (h=%.2f)",
-                         cluster[i], center_delta.y, vert_down_tol, vert_up_tol, height_above_base);
-            }
-            return false;
-        }
+        float horiz_error = horiz_tol > 0.0f ? sqrtf(horiz_dist_sq) / horiz_tol : FLT_MAX;
+        float vert_tol = center_delta.y >= 0.0f ? vert_up_tol : vert_down_tol;
+        float vert_error = vert_tol > 0.0f ? fabsf(center_delta.y) / vert_tol : FLT_MAX;
+        float normalized_error = fmaxf(horiz_error, vert_error);
+        normalized_error_sq += (double)normalized_error * normalized_error;
+        if (normalized_error > max_normalized_error) max_normalized_error = normalized_error;
+        ++pose_samples;
 
         // Snapping must never replace an already-static occupant or a dynamic
         // voxel belonging to another island.
@@ -7070,6 +7195,17 @@ static bool cluster_is_near_original_grid_pose(const int *cluster, int cluster_c
                 }
             }
         }
+    }
+
+    float rms_normalized_error = pose_samples > 0
+        ? sqrtf((float)(normalized_error_sq / (double)pose_samples)) : FLT_MAX;
+    if (rms_normalized_error > 1.0f || max_normalized_error > 2.0f) {
+        if (debugLogVoxelDeactivation) {
+            TraceLog(LOG_INFO,
+                     "[Deactivate] near-origin=false rms-normalized=%.4f max-normalized=%.4f",
+                     rms_normalized_error, max_normalized_error);
+        }
+        return false;
     }
 
     return required_static_cells <=
@@ -7315,6 +7451,121 @@ static void evaluate_voxel_calm_range(int start, int end, int worker_id, void *u
     }
 }
 
+static bool deactivate_calm_amr_bodies(bool *restored_static)
+{
+    bool changed = false;
+    if (getenv("FPS_AMR_SLEEP_DIAGNOSTICS"))
+        fprintf(stderr, "amr-sleep registry bodies=%d voxels=%d\n", amrBodyCount, voxel_count);
+    for (int body_id = 0; body_id < amrBodyCount; ++body_id) {
+        AmrBody *body = &amrBodies[body_id];
+        if (!body->valid || body->lifecycle != AMR_BODY_ACTIVE) continue;
+
+        int particle_stamp = ++particle_sync_stamp;
+        if (particle_stamp == 0) particle_stamp = ++particle_sync_stamp;
+        double kinetic_weighted = 0.0, particle_mass = 0.0;
+        double deformation_weighted = 0.0, deformation_volume = 0.0;
+        float max_speed = 0.0f, max_deformation = 0.0f;
+        bool eligible = !amrBodyTethered[body_id];
+        int cluster_count = 0;
+        int min_leaf_sleep = INT_MAX;
+
+        for (int slot = 0; slot < body->leaf_capacity; ++slot) {
+            int world = body->leaf_voxel_ids ? body->leaf_voxel_ids[slot] : -1;
+            if (world < 0) continue;
+            if (world >= voxel_count || voxels[world].amr_body_id != body_id ||
+                cluster_count >= MAX_VOXELS) {
+                eligible = false;
+                break;
+            }
+            Voxel *voxel = &voxels[world];
+            glueClusterIndices[cluster_count++] = world;
+            if (voxel->sleepFrames < min_leaf_sleep) min_leaf_sleep = voxel->sleepFrames;
+            if (!voxel_is_awake_dynamic(voxel) || voxel->type != 0 || voxel->isBullet ||
+                voxel->wake_timer > 0 || tetherTag[world] > 0) eligible = false;
+
+            VgsDeformation d;
+            if (voxel_vgs_deformation(voxel, &d)) {
+                float deformation = fmaxf(d.max_abs_strain, d.max_abs_shear);
+                float volume = voxel->rest_volume > 0.0f ? voxel->rest_volume : 1.0f;
+                deformation_weighted += (double)volume * deformation * deformation;
+                deformation_volume += volume;
+                if (deformation > max_deformation) max_deformation = deformation;
+            }
+            for (int c = 0; c < VOXEL_CORNER_COUNT; ++c) {
+                Particle *particle = voxel->particles[c];
+                if (!particle || particle->sync_stamp == particle_stamp) continue;
+                particle->sync_stamp = particle_stamp;
+                float mass = particle->base_inv_mass > 0.0f
+                    ? 1.0f / particle->base_inv_mass : 0.0f;
+                if (mass <= 0.0f) continue;
+                float speed = v_length(particle->vel);
+                kinetic_weighted += (double)mass * speed * speed;
+                particle_mass += mass;
+                if (speed > max_speed) max_speed = speed;
+            }
+        }
+
+        body->sleep_rms_speed = particle_mass > 0.0
+            ? sqrtf((float)(kinetic_weighted / particle_mass)) : FLT_MAX;
+        body->sleep_max_speed = max_speed;
+        body->sleep_rms_strain = deformation_volume > 0.0
+            ? sqrtf((float)(deformation_weighted / deformation_volume)) : FLT_MAX;
+        body->sleep_max_strain = max_deformation;
+        bool complete = cluster_count == body->leaf_count && cluster_count > 0;
+        bool supported = glue_cluster_has_static_support(glueClusterIndices, cluster_count);
+        eligible &= complete;
+        eligible &= body->sleep_rms_speed < AMR_SLEEP_RMS_VELOCITY_THRESHOLD;
+        eligible &= body->sleep_max_speed < VOXEL_DEACTIVATION_VELOCITY_THRESHOLD;
+        eligible &= body->sleep_rms_strain < AMR_SLEEP_RMS_DEFORMATION_THRESHOLD;
+        eligible &= body->sleep_max_strain < VOXEL_DEACTIVATION_STRAIN_THRESHOLD;
+        eligible &= supported;
+        if (getenv("FPS_AMR_SLEEP_DIAGNOSTICS")) {
+            fprintf(stderr,
+                    "amr-sleep body=%d leaves=%d/%d eligible=%d supported=%d tethered=%d rmsV=%g maxV=%g rmsD=%g maxD=%g prior=%d\n",
+                    body_id, cluster_count, body->leaf_count, eligible, supported,
+                    amrBodyTethered[body_id], body->sleep_rms_speed,
+                    body->sleep_max_speed, body->sleep_rms_strain,
+                    body->sleep_max_strain, body->calm_frames);
+        }
+
+        if (eligible && body->calm_frames == 0 && min_leaf_sleep > 0 &&
+            min_leaf_sleep < INT_MAX) body->calm_frames = min_leaf_sleep;
+        body->calm_frames = eligible ? body->calm_frames + 1 : 0;
+        for (int i = 0; i < cluster_count; ++i) {
+            int world = glueClusterIndices[i];
+            if (world >= 0 && world < voxel_count)
+                voxels[world].sleepFrames = body->calm_frames;
+        }
+        if (body->calm_frames < VOXEL_DEACTIVATION_FRAMES) continue;
+
+        bool near_original = cluster_is_near_original_grid_pose(glueClusterIndices,
+                                                                 cluster_count);
+        bool transitioned = near_original
+            ? restore_glue_cluster_to_static(glueClusterIndices, cluster_count)
+            : freeze_dynamic_cluster_in_place(glueClusterIndices, cluster_count);
+        if (!transitioned) {
+            body->calm_frames = 0;
+            continue;
+        }
+        if (near_original) {
+            if (restored_static) *restored_static = true;
+        } else {
+            body->lifecycle = AMR_BODY_SLEEPING;
+            ++vgsHierarchy.topology_generation;
+        }
+        if (debugLogVoxelDeactivation) {
+            TraceLog(LOG_INFO,
+                     "[DeactivateAMR] body=%d leaves=%d action=%s rms-speed=%.4f max-speed=%.4f rms-deformation=%.4f max-deformation=%.4f",
+                     body_id, cluster_count, near_original ? "snap" : "sleep",
+                     body->sleep_rms_speed, body->sleep_max_speed,
+                     body->sleep_rms_strain, body->sleep_max_strain);
+        }
+        changed = true;
+        if (near_original) break; // Packed voxel indices changed transactionally.
+    }
+    return changed;
+}
+
 static bool deactivate_sleeping_voxels(void)
 {
     bool changed = false;
@@ -7322,11 +7573,17 @@ static bool deactivate_sleeping_voxels(void)
     int remaining_budget = VOXEL_MAX_DEACTIVATIONS_PER_FRAME;
 
     pbd_parallel_for(0, voxel_count, evaluate_voxel_calm_range, NULL);
+    changed |= deactivate_calm_amr_bodies(&restored_static);
 
     memset(sleepClusterVisited, 0, sizeof(sleepClusterVisited));
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
+        bool resident_amr = voxel->amr_body_id >= 0 &&
+            voxel->amr_body_id < amrBodyCount &&
+            amrBodies[voxel->amr_body_id].valid &&
+            amrBodies[voxel->amr_body_id].lifecycle != AMR_BODY_RETIRED;
         if (!voxel_is_awake_dynamic(voxel) || voxel->type != 0 || voxel->isBullet ||
+            resident_amr ||
             get_goliath_owner_of_voxel(i) >= 0) {
             continue;
         }
@@ -7385,7 +7642,12 @@ static bool deactivate_sleeping_voxels(void)
     int idx = 0;
     while (idx < voxel_count && remaining_budget > 0) {
         Voxel *voxel = &voxels[idx];
-        if (!voxel_is_awake_dynamic(voxel) || voxel->type != 0 || voxel->isBullet) {
+        bool resident_amr = voxel->amr_body_id >= 0 &&
+            voxel->amr_body_id < amrBodyCount &&
+            amrBodies[voxel->amr_body_id].valid &&
+            amrBodies[voxel->amr_body_id].lifecycle != AMR_BODY_RETIRED;
+        if (!voxel_is_awake_dynamic(voxel) || voxel->type != 0 || voxel->isBullet ||
+            resident_amr) {
             ++idx;
             continue;
         }
@@ -9907,19 +10169,21 @@ static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float
     }
 
     int previousCount = buffer.count;
+    // Tether activation is an explicit whole-body wake.  The AMR extent and
+    // leaf budget bound propagation, so its high belief cannot flood the map.
+    float propagation_belief = activationBelief;
     int added = collect_static_activation_cluster(voxel_idx, activator,
                                                   seed->gx, seed->gy, seed->gz,
                                                   -1.0f,
+                                                  propagation_belief,
+                                                  true,
                                                   &buffer);
     if (added <= 0) {
         rollback_activation_buffer(&buffer, previousCount);
         return false;
     }
-    float clusterBelief = compute_cluster_freeze_belief(&buffer, previousCount);
-    if (!dynamic_belief_overcomes_static(activationBelief, clusterBelief)) {
-        rollback_activation_buffer(&buffer, previousCount);
-        return false;
-    }
+    expand_activation_cluster_unbounded(&buffer, previousCount,
+                                        propagation_belief, activator);
 
     remove_buffered_static_voxels(&buffer);
     emit_unit_voxels_from_units(&buffer, false, true, -1);
@@ -11037,7 +11301,7 @@ static bool vgs_build_hierarchy_from_occupancy(const int *leaf_voxel_ids,
                                                int side, float leaf_edge)
 {
     clear_vgs_hierarchy();
-    if (!leaf_voxel_ids || side < 1 || side > 32 ||
+    if (!leaf_voxel_ids || side < 1 || side > AMR_MAX_GRID_SIDE ||
         (side & (side - 1)) != 0 || !isfinite(leaf_edge) || leaf_edge <= 0.0f)
         return false;
 
@@ -11890,8 +12154,8 @@ static bool amr_build_body_from_cluster(const int *cluster, int count)
         if (span > extent) extent = span;
     }
     int side = 1;
-    while (side < extent && side <= 32) side <<= 1;
-    if (side < 2 || side > 32) {
+    while (side < extent && side <= AMR_MAX_GRID_SIDE) side <<= 1;
+    if (side < 2 || side > AMR_MAX_GRID_SIDE || count > AMR_MAX_BODY_LEAVES) {
         if (diagnostics) fprintf(stderr, "amr-body fixed fallback extent=%d side=%d count=%d\n",
                                  extent, side, count);
         return false;
@@ -14260,25 +14524,16 @@ static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count
         sorted[i] = idx;
     }
 
-    for (int i = 0; i < cluster_count - 1; ++i) {
-        for (int j = i + 1; j < cluster_count; ++j) {
-            if (sorted[i] < sorted[j]) {
-                int tmp = sorted[i];
-                sorted[i] = sorted[j];
-                sorted[j] = tmp;
-            }
-        }
-    }
+    qsort(sorted, (size_t)cluster_count, sizeof(*sorted), compare_int_descending);
 
     for (int i = 0; i < cluster_count; ++i) {
         remove_voxel_index(sorted[i]);
     }
     int voxel_count_after_removal = voxel_count;
     int static_success = 0;
-    bool converted = false;
+    bool converted = true;
     for (int i = 0; i < cluster_count; ++i) {
         if (spawn_static_covering_voxel(&snapshots[i])) {
-            converted = true;
             ++static_success;
         } else {
             if (debugLogRestoreFailures) {
@@ -14289,8 +14544,19 @@ static bool restore_glue_cluster_to_static(const int *cluster, int cluster_count
                          snapshots[i].rest_min_gy, snapshots[i].rest_max_gy,
                          snapshots[i].rest_min_gz, snapshots[i].rest_max_gz);
             }
+            converted = false;
+            break;
+        }
+    }
+
+    if (!converted) {
+        while (voxel_count > voxel_count_after_removal) {
+            remove_voxel_index(voxel_count - 1);
+        }
+        for (int i = 0; i < cluster_count; ++i) {
             restore_dynamic_snapshot(&snapshots[i]);
         }
+        static_success = 0;
     }
 
     if (debugLogRestoreClusters) {

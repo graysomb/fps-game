@@ -408,11 +408,16 @@ simulation, capture diagnostic PNGs, write a JSON report, and exit without requi
 gameplay input. The window is hidden by default but a graphics context is still
 created for off-screen rendering.
 
-When a calm dynamic island reaches its sleep cutoff, each voxel center is compared
-with its original grid cell. Islands entirely within one quarter voxel and whose
-original cells remain available are restored to static voxels; displaced or blocked
-islands retain their exact particle pose and sleep in place. The normal equilibrium
-strain and shear limits still prevent significantly deformed islands from snapping.
+AMR activation is bounded by the hierarchy's representable region: at most 32 finest
+cells per axis and 32^3 real leaves. Activation is collected and checked before the
+static cells are removed, so the boundary stays attached when a connected structure
+would exceed one hierarchy.
+
+AMR bodies sleep from mass-weighted kinetic energy and volume-weighted deformation,
+with hard per-particle and per-cell ceilings. After five calm frames, a body whose
+original cells remain available and whose normalized pose error has RMS at most one
+and maximum at most two is restored atomically. Other supported bodies retain their
+exact particle pose and sleep in place.
 
 ```bash
 fps_ray --physics=gpu --debug-scenario=sleep-wake-floating
@@ -433,6 +438,8 @@ Available scenarios are:
   verifies frame-boundary AMR discovery and finest-leaf ownership, removes one leaf
   through the gameplay voxel removal path, verifies transactional body replacement,
   then checks that a world reset releases all bodies, nodes, histories, and particles.
+* `amr-atomic-snap`: checks the full 32³ activation admission limit, rejects a
+  33-cell extent, and restores a calm supported AMR body to static atomically.
 * `sleep-wake-floating`: sleeps a supported dynamic cluster, removes its support, then
   activates it through the tether path.
 * `sleep-snap-original`: activates a grounded 4×4×6 static pillar, settles it within
