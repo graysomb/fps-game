@@ -1256,7 +1256,9 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
         ++sample.tagged_voxels;
         if (voxel->simulate) {
             ++sample.tagged_dynamic;
-            if (voxel->vgs_active && (!vgsHierarchy.adaptive || voxel->simulate_dofs))
+            bool embedded = vgsHierarchy.adaptive && !voxel->simulate_dofs &&
+                cpu_partial_relation_for_particle(voxel->particles[0],NULL)!=NULL;
+            if (voxel->vgs_active && (!vgsHierarchy.adaptive || voxel->simulate_dofs || embedded))
                 ++sample.tagged_rendered;
         }
         else ++sample.tagged_static;
@@ -1304,7 +1306,8 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
     if (vgsHierarchy.adaptive)
         for (int i = 0; i < vgsHierarchy.node_count; ++i)
             if (vgs_node_constraints_enabled(&vgsHierarchy.nodes[i]) &&
-                !vgs_node_has_active_children(&vgsHierarchy.nodes[i])) ++sample.tagged_rendered;
+                !vgs_node_has_active_children(&vgsHierarchy.nodes[i]) &&
+                vgsHierarchy.nodes[i].occupancy != VGS_OCCUPANCY_PARTIAL) ++sample.tagged_rendered;
     int centroid_count = cube_dynamic_only ? sample.tagged_dynamic : sample.tagged_voxels;
     if (centroid_count > 0) {
         sample.centroid_y = centroid_sum / (float)centroid_count;
@@ -1467,7 +1470,8 @@ static void debug_render_scene(DebugRunState *state, const DebugSample *sample)
                     for (int i = first; i < end; ++i) {
                         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
                         if (!vgs_node_constraints_enabled(node) ||
-                            vgs_node_has_active_children(node)) continue;
+                            vgs_node_has_active_children(node) ||
+                            node->occupancy == VGS_OCCUPANCY_PARTIAL) continue;
                         Vector3 center = {0};
                         for (int c = 0; c < 8; ++c) center = v_add(center, node->particles[c]->pos);
                         center = v_mul(center, 0.125f);
@@ -2317,6 +2321,8 @@ static bool debug_setup_adaptive_cube_drop(DebugRunState *state)
     }
     if (getenv("FPS_AMR_TEST_BREAK_PARENT"))
         vgsHierarchy.nodes[0].vgs_enabled = false;
+    if (getenv("FPS_AMR_TEST_BREAK_TERMINAL"))
+        vgsHierarchy.nodes[0].vgs_enabled = false;
     debugAdaptiveOctree = true;
     debugColorVoxelsByVgsTemporalCurvature = false;
     return true;
@@ -2379,6 +2385,8 @@ static bool debug_setup_adaptive_l_drop(DebugRunState *state)
         debug_add_failure(state, "unable to initialize occupancy-masked octree");
         return false;
     }
+    if (getenv("FPS_AMR_TEST_BREAK_TERMINAL"))
+        vgsHierarchy.nodes[0].vgs_enabled = false;
     for (int i = 0; i < vgsHierarchy.node_count; ++i) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
         uint8_t pointer_mask = 0;
@@ -2388,7 +2396,8 @@ static bool debug_setup_adaptive_l_drop(DebugRunState *state)
             (node->occupancy == VGS_OCCUPANCY_EMPTY &&
              (node->active || node->vgs_enabled)) ||
             (node->occupancy == VGS_OCCUPANCY_PARTIAL &&
-             (!node->active || !vgs_node_has_active_children(node))) ||
+             (!node->active || (!node->partial_coarsenable &&
+                                !vgs_node_has_active_children(node)))) ||
             (node->occupancy == VGS_OCCUPANCY_FULL &&
              node->real_corner_mask != 0xffu)) {
             debug_add_failure(state, "invalid occupancy state at hierarchy node %d", i);
@@ -4920,7 +4929,8 @@ static void debug_validate_step(DebugRunState *state, int step)
                 if (stage_id < (uint32_t)gpuPhysics.dynamic_voxel_count) continue;
                 int node_id = (int)stage_id - gpuPhysics.dynamic_voxel_count;
                 if (node_id < 0 || node_id >= vgsHierarchy.node_count ||
-                    vgsHierarchy.nodes[node_id].occupancy != VGS_OCCUPANCY_FULL) {
+                    (vgsHierarchy.nodes[node_id].occupancy != VGS_OCCUPANCY_FULL &&
+                     !vgsHierarchy.nodes[node_id].partial_coarsenable)) {
                     debug_add_failure(state,
                         "GPU constraint %d references non-full hierarchy node %d",
                         constraint, node_id);
@@ -4947,6 +4957,31 @@ static void debug_validate_step(DebugRunState *state, int step)
                     if (gpuPhysics.constraint_stage[i].voxel_id == root_voxel_id)
                         debug_add_failure(state,
                             "disabled parent retained GPU constraint kind=%u",
+                            gpuPhysics.constraint_stage[i].kind);
+            }
+        }
+        if (getenv("FPS_AMR_TEST_BREAK_TERMINAL") && step == 1) {
+            VgsHierarchyNode *root = &vgsHierarchy.nodes[0];
+            int expected_children = 0;
+            int active_children = 0;
+            for (int c = 0; c < 8; ++c) {
+                int child = root->children[c];
+                if (child == VGS_CHILD_EMPTY) continue;
+                ++expected_children;
+                active_children += child >= 0 ? vgsHierarchy.nodes[child].active :
+                    voxels[-child - 1].simulate_dofs;
+            }
+            if (root->vgs_enabled || active_children != expected_children ||
+                !vgs_node_has_active_children(root))
+                debug_add_failure(state,
+                    "broken terminal refinement enabled=%d children=%d/%d",
+                    root->vgs_enabled, active_children, expected_children);
+            if (physics_backend_is_gpu(physicsBackend.active)) {
+                uint32_t root_voxel_id = (uint32_t)gpuPhysics.dynamic_voxel_count;
+                for (int i = 0; i < gpuPhysics.constraint_count; ++i)
+                    if (gpuPhysics.constraint_stage[i].voxel_id == root_voxel_id)
+                        debug_add_failure(state,
+                            "broken terminal retained GPU constraint kind=%u",
                             gpuPhysics.constraint_stage[i].kind);
             }
         }
@@ -4999,7 +5034,8 @@ static void debug_validate_step(DebugRunState *state, int step)
             }
         }
         for (int i = 0; i < voxel_count; ++i)
-            if (voxels[i].simulate && voxels[i].simulate_dofs) {
+            if (voxels[i].simulate && (voxels[i].simulate_dofs ||
+                cpu_partial_relation_for_particle(voxels[i].particles[0],NULL))) {
                 if (state->amr_projectile_test &&
                     voxels[i].identity == state->amr_projectile_identity) {
                     for (int corner = 0; corner < 8; ++corner) {
@@ -5019,10 +5055,17 @@ static void debug_validate_step(DebugRunState *state, int step)
             pow((double)pbdSolidVoxelSize, 3.0);
         double expected_mass = (double)vgsHierarchy.mass_density * expected_volume +
             external_mass;
+        bool pending_broken_terminal_refine =
+            getenv("FPS_AMR_TEST_BREAK_TERMINAL") && step == 0 &&
+            !vgsHierarchy.nodes[0].vgs_enabled &&
+            !vgs_node_has_active_children(&vgsHierarchy.nodes[0]);
         if (!vgsHierarchy.nodes[0].active || active_nodes == 0 ||
-            terminal_nodes + active_leaves != sample.tagged_rendered ||
+            (!pending_broken_terminal_refine &&
+             terminal_nodes + active_leaves != sample.tagged_rendered) ||
             fabs(total_mass - expected_mass) > 0.1 ||
-            fabs(terminal_volume - expected_volume) > 0.01 || sample.invalid_particle_refs > 0)
+            (!pending_broken_terminal_refine &&
+             fabs(terminal_volume - expected_volume) > 0.01) ||
+            sample.invalid_particle_refs > 0)
             debug_add_failure(state,
                 "step %d: adaptive state nodes=%d terminals=%d leaves=%d rendered=%d mass=%.3f volume=%.3f invalid=%d",
                 step, active_nodes, terminal_nodes, active_leaves,
@@ -5986,20 +6029,33 @@ static bool debug_write_report(DebugRunState *state)
     if (state->active_cube_drop) {
         int active_nodes = 0;
         int enabled_nodes = 0;
-        for (int i = 0; i < vgsHierarchy.node_count; ++i)
+        float embedding_rms_max=0,embedding_error_max=0;
+        for (int i = 0; i < vgsHierarchy.node_count; ++i) {
+            embedding_rms_max = fmaxf(embedding_rms_max,
+                                      vgsHierarchy.nodes[i].projection_rms);
+            embedding_error_max = fmaxf(embedding_error_max,
+                                        vgsHierarchy.nodes[i].projection_max);
             if (vgsHierarchy.nodes[i].active) {
                 ++active_nodes;
                 if (vgs_node_constraints_enabled(&vgsHierarchy.nodes[i])) ++enabled_nodes;
             }
+        }
         fprintf(file, "  \"pbdVoxelSize\": %.9g,\n  \"effectivePbdVoxelSize\": %.9g,\n  \"dynamicVoxels\": %d,\n  \"staticLeftovers\": %d,\n",
                 (double)DEBUG_PBD_VOXEL_SIZE, (double)state->effective_pbd_size,
                 state->expected_voxels,
                 state->expected_static_leftovers);
-        fprintf(file, "  \"vgsHierarchy\": {\"levels\": %d, \"internalNodes\": %d, \"activeInternalNodes\": %d, \"enabledInternalNodes\": %d, \"occupiedLeaves\": %d, \"leafCapacity\": %d, \"fullNodes\": %d, \"partialNodes\": %d, \"emptyNodes\": %d, \"forcedRefinedNodes\": %d, \"realCornerRefs\": %d, \"virtualCornerRefs\": %d, \"deactivationDisabled\": %s},\n",
+        fprintf(file, "  \"vgsHierarchy\": {\"levels\": %d, \"internalNodes\": %d, \"activeInternalNodes\": %d, \"enabledInternalNodes\": %d, \"occupiedLeaves\": %d, \"leafCapacity\": %d, \"fullNodes\": %d, \"partialNodes\": %d, \"partialTerminals\": %d, \"embeddingRelations\": %d, \"embeddingRankHistogram\": [%d,%d,%d,%d,%d,%d,%d,%d,%d], \"projectionRmsMax\": %.9g, \"projectionErrorMax\": %.9g, \"emptyNodes\": %d, \"forcedRefinedNodes\": %d, \"realCornerRefs\": %d, \"virtualCornerRefs\": %d, \"deactivationDisabled\": %s},\n",
                 vgsHierarchy.levels + (vgsHierarchy.leaf_count ? 1 : 0),
                 vgsHierarchy.node_count, active_nodes, enabled_nodes,
                 vgsHierarchy.leaf_count, vgsHierarchy.leaf_capacity,
                 vgsHierarchy.full_node_count, vgsHierarchy.partial_node_count,
+                vgsHierarchy.partial_terminal_count,vgsHierarchy.embedding_relation_count,
+                vgsHierarchy.embedding_rank_histogram[0],vgsHierarchy.embedding_rank_histogram[1],
+                vgsHierarchy.embedding_rank_histogram[2],vgsHierarchy.embedding_rank_histogram[3],
+                vgsHierarchy.embedding_rank_histogram[4],vgsHierarchy.embedding_rank_histogram[5],
+                vgsHierarchy.embedding_rank_histogram[6],vgsHierarchy.embedding_rank_histogram[7],
+                vgsHierarchy.embedding_rank_histogram[8],
+                (double)embedding_rms_max,(double)embedding_error_max,
                 vgsHierarchy.empty_node_count, vgsHierarchy.forced_refined_node_count,
                 vgsHierarchy.real_corner_refs, vgsHierarchy.virtual_corner_refs,
                 PBD_DISABLE_VGS_DEACTIVATION ? "true" : "false");
@@ -6012,7 +6068,8 @@ static bool debug_write_report(DebugRunState *state)
                     if (state->amr_projectile_test &&
                         voxels[i].identity == state->amr_projectile_identity) continue;
                     if (!voxels[i].vgs_active) ++broken_leaves;
-                    if (voxels[i].simulate_dofs) {
+                    bool embedded=cpu_partial_relation_for_particle(voxels[i].particles[0],NULL)!=NULL;
+                    if (voxels[i].simulate_dofs || embedded) {
                         ++terminal_leaves;
                         if (voxels[i].vgs_active) {
                             ++enabled_vgs;
@@ -6022,7 +6079,8 @@ static bool debug_write_report(DebugRunState *state)
                 }
             for (int i = 0; i < vgsHierarchy.node_count; ++i) {
                 VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
-                if (node->occupancy == VGS_OCCUPANCY_FULL && !node->vgs_enabled)
+                if ((node->occupancy == VGS_OCCUPANCY_FULL || node->partial_coarsenable) &&
+                    !node->vgs_enabled)
                     ++broken_nodes;
                 if (!node->active) continue;
                 if (vgs_terminal_child_mask(node)) ++enabled_welds;
@@ -6064,7 +6122,7 @@ static bool debug_write_report(DebugRunState *state)
                 : (mode == GPU_AABB_MODE_HASH ? (uint64_t)cpuAabbProxyCount : 0u);
             uint64_t candidate_pairs = gpu_aabb
                 ? gpuPhysics.aabb_control_stage.candidate_count : cpuAabbCandidates;
-            fprintf(file, "  \"amrAabbCollision\": {\"enabled\": %s, \"mode\": \"%s\", \"queries\": %llu, \"proxies\": %llu, \"candidatePairs\": %llu, \"spherePairTests\": %llu, \"contacts\": %llu, \"nodeVisits\": %llu, \"boundsRejects\": %llu, \"emptyRejects\": %llu, \"maxStackDepth\": %u, \"maxNodeVisitsObserved\": %llu, \"maxStackDepthObserved\": %u, \"contactObserved\": %s, \"overflow\": %u},\n",
+            fprintf(file, "  \"amrAabbCollision\": {\"enabled\": %s, \"mode\": \"%s\", \"queries\": %llu, \"proxies\": %llu, \"candidatePairs\": %llu, \"spherePairTests\": %llu, \"contacts\": %llu, \"partialCollisionRedirections\": %llu, \"nodeVisits\": %llu, \"boundsRejects\": %llu, \"emptyRejects\": %llu, \"maxStackDepth\": %u, \"maxNodeVisitsObserved\": %llu, \"maxStackDepthObserved\": %u, \"contactObserved\": %s, \"overflow\": %u},\n",
                     (gpu_aabb ? gpuPhysics.aabb_control_stage.enabled != 0
                               : cpu_aabb_collisions_enabled()) ? "true" : "false",
                     mode == GPU_AABB_MODE_HASH ? "hash" :
@@ -6077,6 +6135,7 @@ static bool debug_write_report(DebugRunState *state)
                         ? candidate_pairs * 81u : 0u),
                     (unsigned long long)(gpu_aabb ? gpuPhysics.aabb_control_stage.contact_count
                                                   : cpuAabbContacts),
+                    (unsigned long long)(gpu_aabb ? 0u : cpuPartialCollisionRedirections),
                     (unsigned long long)(gpu_aabb ? gpuPhysics.aabb_control_stage.node_visit_count
                                                   : cpuAabbNodeVisits),
                     (unsigned long long)(gpu_aabb ? gpuPhysics.aabb_control_stage.bounds_reject_count

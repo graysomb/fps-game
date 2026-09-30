@@ -1155,11 +1155,30 @@ typedef struct {
     float rest_volume;
     uint8_t occupancy;
     uint8_t real_corner_mask;
+    uint8_t embedding_rank;
+    bool partial_coarsenable;
+    float occupied_fraction;
+    float projection_rms;
+    float projection_max;
+    int embedding_begin;
+    int embedding_count;
+    // Partial terminals use real particles as generalized coordinates.  These
+    // two small matrices reconstruct the algebraic cube and project its
+    // correction back to the selected coordinates.
+    float cage_from_anchor[8][8];
+    float anchor_from_cage[8][8];
     int body_id;
     bool force_refined;
     bool active; // Present in the current refinement tree.
     bool vgs_enabled; // Fracture state, independent of tree activity.
 } VgsHierarchyNode;
+
+typedef struct {
+    Particle *particle;
+    float refine[8];
+    float coarsen[8];
+    float mass;
+} VgsEmbeddingRelation;
 
 #define MAX_AMR_BODIES 1024
 typedef enum {
@@ -1208,6 +1227,11 @@ typedef struct {
     int forced_refined_node_count;
     int real_corner_refs;
     int virtual_corner_refs;
+    int partial_terminal_count;
+    int embedding_relation_count;
+    int embedding_relation_capacity;
+    int embedding_rank_histogram[9];
+    VgsEmbeddingRelation *embedding_relations;
     VgsCurvatureHistory *node_history;
     VgsCurvatureHistory *leaf_history; // Indexed by world voxel ID.
     int leaf_history_capacity;
@@ -1220,15 +1244,24 @@ typedef struct {
     uint64_t topology_generation;
 } VgsHierarchy;
 static VgsHierarchy vgsHierarchy;
+static int *vgsEmbeddedNode;
+static int *vgsEmbeddedRelation;
+static int vgsEmbeddedCapacity;
 static int voxel_count;
-static bool vgs_node_constraints_enabled(const VgsHierarchyNode *node)
+static bool vgs_node_representation_active(const VgsHierarchyNode *node)
 {
     if (node->body_id >= 0) {
         if (node->body_id >= amrBodyCount || !amrBodies[node->body_id].valid ||
             amrBodies[node->body_id].lifecycle != AMR_BODY_ACTIVE) return false;
     }
-    return node->active && node->occupancy == VGS_OCCUPANCY_FULL &&
-           node->vgs_enabled && node->real_corner_mask == 0xffu;
+    bool represented = node->occupancy == VGS_OCCUPANCY_FULL ||
+                       (node->occupancy == VGS_OCCUPANCY_PARTIAL &&
+                        node->partial_coarsenable);
+    return node->active && represented && node->real_corner_mask == 0xffu;
+}
+static bool vgs_node_constraints_enabled(const VgsHierarchyNode *node)
+{
+    return vgs_node_representation_active(node) && node->vgs_enabled;
 }
 static bool vgs_child_enabled(int child)
 {
@@ -1349,6 +1382,9 @@ static void clear_vgs_hierarchy(void) {
     free(vgsHierarchy.nodes);
     free(vgsHierarchy.node_history);
     free(vgsHierarchy.leaf_history);
+    free(vgsHierarchy.embedding_relations);
+    free(vgsEmbeddedNode); free(vgsEmbeddedRelation);
+    vgsEmbeddedNode=NULL;vgsEmbeddedRelation=NULL;vgsEmbeddedCapacity=0;
     memset(&vgsHierarchy, 0, sizeof(vgsHierarchy));
 }
 static uint64_t nextVoxelIdentity = 1;
@@ -3646,6 +3682,21 @@ static bool voxel_vgs_deformation(const Voxel *voxel, VgsDeformation *result)
     return true;
 }
 
+static bool vgs_node_corners(const VgsHierarchyNode *node, bool predicted, Vector3 corners[8])
+{
+    if (!node || node->real_corner_mask != 0xffu) return false;
+    if (node->occupancy == VGS_OCCUPANCY_PARTIAL && node->partial_coarsenable) {
+        for(int c=0;c<8;++c){corners[c]=(Vector3){0};for(int a=0;a<node->embedding_rank;++a)
+            corners[c]=v_add(corners[c],v_mul(predicted?node->particles[a]->predicted_pos:
+                                              node->particles[a]->pos,
+                                              node->cage_from_anchor[c][a]));}
+        return true;
+    }
+    for(int c=0;c<8;++c){if(!node->particles[c])return false;corners[c]=predicted?
+        node->particles[c]->predicted_pos:node->particles[c]->pos;}
+    return true;
+}
+
 static void vgs_sample_curvature_history(VgsCurvatureHistory *history,
                                          const VgsDeformation *deformation,
                                          int samples, float inv_dt_squared)
@@ -3669,15 +3720,10 @@ static void vgs_hierarchy_sample_curvature(float dt)
     float inv_dt_squared = 1.0f / (dt * dt);
     for (int i = 0; i < vgsHierarchy.node_count; ++i) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
-        if (node->occupancy != VGS_OCCUPANCY_FULL || node->real_corner_mask != 0xffu)
-            continue;
+        if ((node->occupancy != VGS_OCCUPANCY_FULL && !node->partial_coarsenable) ||
+            node->real_corner_mask != 0xffu) continue;
         Vector3 corners[8];
-        bool valid = true;
-        for (int c = 0; c < 8; ++c) {
-            if (!node->particles[c]) { valid = false; break; }
-            corners[c] = node->particles[c]->pos;
-        }
-        if (!valid) continue;
+        if (!vgs_node_corners(node,false,corners)) continue;
         VgsDeformation deformation = measure_vgs_deformation(corners, node->rest_edge);
         vgs_sample_curvature_history(&vgsHierarchy.node_history[i], &deformation,
                                      vgsHierarchy.sample_count, inv_dt_squared);
@@ -10970,12 +11016,7 @@ static void evaluate_hierarchy_fracture_range(int start, int end, int worker_id,
             amrBodyTethered[node->body_id]) continue;
         if (!vgs_node_constraints_enabled(node) || node->rest_edge <= 0.0f) continue;
         Vector3 corners[8];
-        bool valid = true;
-        for (int c = 0; c < 8; ++c) {
-            if (!node->particles[c]) { valid = false; break; }
-            corners[c] = node->particles[c]->predicted_pos;
-        }
-        if (!valid) continue;
+        if (!vgs_node_corners(node,true,corners)) continue;
         VgsDeformation deformation = measure_vgs_deformation(corners, node->rest_edge);
         if ((deformation.max_abs_strain > STRAIN_BREAK_THRESHOLD ||
             deformation.max_abs_shear > SHEAR_BREAK_THRESHOLD) &&
@@ -11265,6 +11306,25 @@ static void gather_voxel_shape_constraints(Voxel *voxel) {
                                  voxel->simulate_dofs);
 }
 
+static void gather_partial_shape_constraints(VgsHierarchyNode *node)
+{
+    Particle temporary[8]; Particle *corner[8]; Vector3 cage_delta[8];
+    memset(temporary,0,sizeof(temporary));
+    for(int c=0;c<8;++c){Vector3 p={0};for(int a=0;a<node->embedding_rank;++a)
+            p=v_add(p,v_mul(node->particles[a]->predicted_pos,node->cage_from_anchor[c][a]));
+        temporary[c].predicted_pos=p;temporary[c].inv_mass=1.0f;temporary[c].base_inv_mass=1.0f;
+        atomic_init(&temporary[c].corr_sum_x,float_to_bits(0));atomic_init(&temporary[c].corr_sum_y,float_to_bits(0));
+        atomic_init(&temporary[c].corr_sum_z,float_to_bits(0));atomic_init(&temporary[c].corr_weight_bits,float_to_bits(0));corner[c]=&temporary[c];}
+    gather_shape_constraints(corner,node->rest_edge,node->rest_volume,true);
+    for(int c=0;c<8;++c)cage_delta[c]=(Vector3){
+        bits_to_float(atomic_load_explicit(&temporary[c].corr_sum_x,memory_order_relaxed)),
+        bits_to_float(atomic_load_explicit(&temporary[c].corr_sum_y,memory_order_relaxed)),
+        bits_to_float(atomic_load_explicit(&temporary[c].corr_sum_z,memory_order_relaxed))};
+    for(int a=0;a<node->embedding_rank;++a){Particle *p=node->particles[a];if(p->inv_mass<=0)continue;Vector3 delta={0};
+        for(int c=0;c<8;++c)delta=v_add(delta,v_mul(cage_delta[c],node->anchor_from_cage[a][c]));
+        accumulate_particle_correction(p,v_mul(delta,node->occupied_fraction),p->inv_mass);}
+}
+
 static VgsOccupancy vgs_child_occupancy(int child)
 {
     if (child == VGS_CHILD_EMPTY) return VGS_OCCUPANCY_EMPTY;
@@ -11291,6 +11351,194 @@ static void vgs_mark_subtree_face_refined(int child, int axis, int face_bit)
     for (int c = 0; c < 8; ++c)
         if (((c >> axis) & 1) == face_bit)
             vgs_mark_subtree_face_refined(node->children[c], axis, face_bit);
+}
+
+typedef struct {
+    Particle *particle;
+    float a[8];
+    float mass;
+} VgsEmbeddingCandidate;
+
+static void vgs_jacobi_eigen8(float input[8][8], float vector[8][8], float value[8])
+{
+    float a[8][8];
+    memcpy(a, input, sizeof(a));
+    memset(vector, 0, 64 * sizeof(float));
+    for (int i = 0; i < 8; ++i) vector[i][i] = 1.0f;
+    for (int sweep = 0; sweep < 96; ++sweep) {
+        int p = 0, q = 1;
+        float largest = fabsf(a[p][q]);
+        for (int i = 0; i < 8; ++i) for (int j = i + 1; j < 8; ++j)
+            if (fabsf(a[i][j]) > largest) { largest = fabsf(a[i][j]); p = i; q = j; }
+        if (largest < 1e-9f) break;
+        float angle = 0.5f * atan2f(2.0f * a[p][q], a[q][q] - a[p][p]);
+        float c = cosf(angle), s = sinf(angle);
+        for (int k = 0; k < 8; ++k) {
+            float apk = a[p][k], aqk = a[q][k];
+            a[p][k] = c * apk - s * aqk; a[q][k] = s * apk + c * aqk;
+        }
+        for (int k = 0; k < 8; ++k) {
+            float akp = a[k][p], akq = a[k][q];
+            a[k][p] = c * akp - s * akq; a[k][q] = s * akp + c * akq;
+            float vkp = vector[k][p], vkq = vector[k][q];
+            vector[k][p] = c * vkp - s * vkq; vector[k][q] = s * vkp + c * vkq;
+        }
+    }
+    for (int i = 0; i < 8; ++i) value[i] = a[i][i];
+}
+
+static int vgs_pseudoinverse8(float gram[8][8], float inverse[8][8])
+{
+    float eigenvector[8][8], eigenvalue[8], largest = 0.0f;
+    vgs_jacobi_eigen8(gram, eigenvector, eigenvalue);
+    for (int i = 0; i < 8; ++i) largest = fmaxf(largest, eigenvalue[i]);
+    float cutoff = fmaxf(largest * 1e-4f, 1e-10f);
+    int rank = 0;
+    memset(inverse, 0, 64 * sizeof(float));
+    for (int k = 0; k < 8; ++k) {
+        if (eigenvalue[k] <= cutoff) continue;
+        ++rank;
+        float inv = 1.0f / eigenvalue[k];
+        for (int i = 0; i < 8; ++i) for (int j = 0; j < 8; ++j)
+            inverse[i][j] += eigenvector[i][k] * eigenvector[j][k] * inv;
+    }
+    return rank;
+}
+
+static bool vgs_partial_connected(const int *leaves, int side,
+                                  const VgsHierarchyNode *node, int *occupied_out)
+{
+    int span = node->grid_span, volume = span * span * span, occupied = 0, first = -1;
+    uint8_t *seen = calloc((size_t)volume, 1);
+    int *queue = malloc((size_t)volume * sizeof(*queue));
+    if (!seen || !queue) { free(seen); free(queue); return false; }
+    for (int y = 0; y < span; ++y) for (int z = 0; z < span; ++z)
+        for (int x = 0; x < span; ++x) {
+            int local = (y * span + z) * span + x;
+            int flat = ((node->grid_y + y) * side + node->grid_z + z) * side + node->grid_x + x;
+            if (leaves[flat] >= 0) { if (first < 0) first = local; ++occupied; }
+        }
+    int head = 0, tail = 0, reached = 0;
+    if (first >= 0) { queue[tail++] = first; seen[first] = 1; }
+    static const int d[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+    while (head < tail) {
+        int v = queue[head++], x = v % span, z = (v / span) % span, y = v / (span * span);
+        ++reached;
+        for (int n = 0; n < 6; ++n) {
+            int nx=x+d[n][0], ny=y+d[n][1], nz=z+d[n][2];
+            if (nx<0||ny<0||nz<0||nx>=span||ny>=span||nz>=span) continue;
+            int q=(ny*span+nz)*span+nx;
+            int flat=((node->grid_y+ny)*side+node->grid_z+nz)*side+node->grid_x+nx;
+            if (!seen[q] && leaves[flat] >= 0) { seen[q]=1; queue[tail++]=q; }
+        }
+    }
+    free(seen); free(queue); if (occupied_out) *occupied_out = occupied;
+    return occupied > 0 && reached == occupied;
+}
+
+static bool vgs_embedding_reserve(int extra)
+{
+    int needed = vgsHierarchy.embedding_relation_count + extra;
+    if (needed <= vgsHierarchy.embedding_relation_capacity) return true;
+    int cap = vgsHierarchy.embedding_relation_capacity ? vgsHierarchy.embedding_relation_capacity : 256;
+    while (cap < needed) cap *= 2;
+    VgsEmbeddingRelation *next = realloc(vgsHierarchy.embedding_relations,
+        (size_t)cap * sizeof(*next));
+    if (!next) return false;
+    vgsHierarchy.embedding_relations = next;
+    vgsHierarchy.embedding_relation_capacity = cap;
+    return true;
+}
+
+static bool vgs_build_partial_embedding(VgsHierarchyNode *node,
+                                        const int *leaves, int side, float leaf_edge)
+{
+    int occupied = 0;
+    // The reduced embedding currently executes in the CPU gather path.  GPU
+    // backends retain the established sparse fully-refined representation
+    // until the relation table has a resident shader implementation.
+    if (getenv("FPS_AMR_DISABLE_PARTIAL_COARSENING") ||
+        physics_backend_is_gpu(physicsBackend.active) ||
+        !vgs_partial_connected(leaves, side, node, &occupied)) return true;
+    int max_candidates = occupied * 8;
+    VgsEmbeddingCandidate *candidate = calloc((size_t)max_candidates, sizeof(*candidate));
+    int hash_cap = 16; while (hash_cap < max_candidates * 2) hash_cap *= 2;
+    int *hash = malloc((size_t)hash_cap * sizeof(*hash));
+    if (!candidate || !hash) { free(candidate); free(hash); return false; }
+    for (int i = 0; i < hash_cap; ++i) hash[i] = -1;
+    int count = 0, span = node->grid_span;
+    for (int y=0;y<span;++y) for(int z=0;z<span;++z) for(int x=0;x<span;++x) {
+        int flat=((node->grid_y+y)*side+node->grid_z+z)*side+node->grid_x+x;
+        int world=leaves[flat]; if(world<0) continue;
+        for(int c=0;c<8;++c) {
+            Particle *p=voxels[world].particles[c]; uintptr_t key=(uintptr_t)(p-particles_pool);
+            int slot=(int)((key*2654435761u)&(uint32_t)(hash_cap-1));
+            while(hash[slot]>=0 && candidate[hash[slot]].particle!=p) slot=(slot+1)&(hash_cap-1);
+            int id=hash[slot];
+            if(id<0) {
+                id=count++; hash[slot]=id; candidate[id].particle=p;
+                float u=(float)(x+(c&1))/(float)span;
+                float v=(float)(y+((c>>1)&1))/(float)span;
+                float w=(float)(z+((c>>2)&1))/(float)span;
+                for(int k=0;k<8;++k) candidate[id].a[k]=
+                    ((k&1)?u:1-u)*((k&2)?v:1-v)*((k&4)?w:1-w);
+            }
+            candidate[id].mass += leaf_edge*leaf_edge*leaf_edge*0.125f;
+        }
+    }
+    free(hash);
+    if (count < 1) { free(candidate); return true; }
+    float gram[8][8]={{0}}, inv[8][8];
+    for(int n=0;n<count;++n) for(int i=0;i<8;++i) for(int j=0;j<8;++j)
+        gram[i][j]+=candidate[n].mass*candidate[n].a[i]*candidate[n].a[j];
+    int rank=vgs_pseudoinverse8(gram,inv);
+    if(rank<1) { free(candidate); return true; }
+    // Deterministic row pivoting selects real generalized coordinates.
+    int anchor[8]; bool *used=calloc((size_t)count,sizeof(bool)); float basis[8][8]={{0}};
+    if(!used){free(candidate);return false;}
+    int selected=0;
+    for(int r=0;r<rank;++r){int best=-1;float best_norm=-1;
+        for(int n=0;n<count;++n){if(used[n])continue;float q[8];memcpy(q,candidate[n].a,sizeof(q));
+            for(int b=0;b<selected;++b){float dot=0;for(int k=0;k<8;++k)dot+=q[k]*basis[b][k];for(int k=0;k<8;++k)q[k]-=dot*basis[b][k];}
+            float norm=0;for(int k=0;k<8;++k)norm+=q[k]*q[k];
+            ptrdiff_t pid=candidate[n].particle-particles_pool, bid=best<0?PTRDIFF_MAX:candidate[best].particle-particles_pool;
+            if(norm>best_norm+1e-10f||(fabsf(norm-best_norm)<=1e-10f&&pid<bid)){best=n;best_norm=norm;}
+        }
+        if(best<0||best_norm<1e-10f)break;anchor[selected]=best;used[best]=true;
+        memcpy(basis[selected],candidate[best].a,sizeof(basis[selected]));
+        for(int b=0;b<selected;++b){float dot=0;for(int k=0;k<8;++k)dot+=basis[selected][k]*basis[b][k];for(int k=0;k<8;++k)basis[selected][k]-=dot*basis[b][k];}
+        float norm=0;for(int k=0;k<8;++k)norm+=basis[selected][k]*basis[selected][k];norm=sqrtf(norm);
+        for(int k=0;k<8;++k)basis[selected][k]/=norm;++selected;
+    }
+    rank=selected; if(rank<1){free(used);free(candidate);return true;}
+    float ag[8][8]={{0}}, aginv[8][8];
+    for(int a=0;a<rank;++a)for(int i=0;i<8;++i)for(int j=0;j<8;++j)
+        ag[i][j]+=candidate[anchor[a]].a[i]*candidate[anchor[a]].a[j];
+    rank=vgs_pseudoinverse8(ag,aginv);
+    memset(node->cage_from_anchor,0,sizeof(node->cage_from_anchor));
+    memset(node->anchor_from_cage,0,sizeof(node->anchor_from_cage));
+    for(int a=0;a<rank;++a){node->particles[a]=candidate[anchor[a]].particle;
+        for(int i=0;i<8;++i){node->anchor_from_cage[a][i]=candidate[anchor[a]].a[i];
+            for(int j=0;j<8;++j)node->cage_from_anchor[i][a]+=aginv[i][j]*candidate[anchor[a]].a[j];}}
+    for(int a=rank;a<8;++a)node->particles[a]=node->particles[0];
+    if(!vgs_embedding_reserve(count)){free(used);free(candidate);return false;}
+    node->embedding_begin=vgsHierarchy.embedding_relation_count; node->embedding_count=count;
+    double sum_sq=0;float max_error=0;
+    for(int n=0;n<count;++n){VgsEmbeddingRelation *rel=&vgsHierarchy.embedding_relations[vgsHierarchy.embedding_relation_count++];
+        memset(rel,0,sizeof(*rel));rel->particle=candidate[n].particle;rel->mass=candidate[n].mass;
+        for(int a=0;a<rank;++a)for(int j=0;j<8;++j)
+            rel->refine[a]+=candidate[n].a[j]*node->cage_from_anchor[j][a];
+        for(int a=0;a<rank;++a)for(int j=0;j<8;++j)for(int k=0;k<8;++k)
+            rel->coarsen[a]+=node->anchor_from_cage[a][j]*inv[j][k]*candidate[n].mass*candidate[n].a[k];
+        Vector3 estimate={0};for(int a=0;a<rank;++a)estimate=v_add(estimate,v_mul(node->particles[a]->pos,rel->refine[a]));
+        float error=v_length(v_sub(estimate,rel->particle->pos))/fmaxf(node->rest_edge,VGS_EPS);
+        sum_sq+=(double)error*error;max_error=fmaxf(max_error,error);
+    }
+    node->projection_rms=(float)sqrt(sum_sq/(double)count);node->projection_max=max_error;
+    node->occupied_fraction=(float)occupied/(float)(span*span*span);node->embedding_rank=(uint8_t)rank;
+    node->partial_coarsenable=node->projection_rms<=0.05f&&node->projection_max<=0.15f;
+    if(node->partial_coarsenable){node->real_corner_mask=0xffu;++vgsHierarchy.partial_terminal_count;++vgsHierarchy.embedding_rank_histogram[rank];}
+    free(used);free(candidate);return true;
 }
 
 // Builds a complete logical octree over a sparse finest-level lattice. Missing
@@ -11401,8 +11649,6 @@ static bool vgs_build_hierarchy_from_occupancy(const int *leaf_voxel_ids,
                 }
             }
     }
-    free(vertices);
-
     for (int i = node_count - 1; i >= 0; --i) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
         int full = 0, empty = 0;
@@ -11418,6 +11664,10 @@ static bool vgs_build_hierarchy_from_occupancy(const int *leaf_voxel_ids,
             ++vgsHierarchy.full_node_count;
         } else if (node->occupancy == VGS_OCCUPANCY_PARTIAL) {
             ++vgsHierarchy.partial_node_count;
+            if (!vgs_build_partial_embedding(node, leaf_voxel_ids, side, leaf_edge)) {
+                free(vertices);
+                goto fail;
+            }
         } else {
             node->vgs_enabled = false;
             ++vgsHierarchy.empty_node_count;
@@ -11426,32 +11676,7 @@ static bool vgs_build_hierarchy_from_occupancy(const int *leaf_voxel_ids,
         vgsHierarchy.real_corner_refs += real_corners;
         vgsHierarchy.virtual_corner_refs += 8 - real_corners;
     }
-
-    // A full subtree bordering a deeper partial subtree would otherwise leave
-    // hanging interface particles. Pin both occupied sides of such seams to
-    // the finest lattice while leaving full interiors free to coarsen.
-    for (int i = 0; i < node_count; ++i) {
-        VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
-        if (node->occupancy != VGS_OCCUPANCY_PARTIAL) continue;
-        for (int axis = 0; axis < 3; ++axis) {
-            for (int a = 0; a < 2; ++a) for (int b = 0; b < 2; ++b) {
-                int other0 = (axis + 1) % 3;
-                int other1 = (axis + 2) % 3;
-                int low = (a << other0) | (b << other1);
-                int high = low | (1 << axis);
-                int low_child = node->children[low];
-                int high_child = node->children[high];
-                VgsOccupancy low_occupancy = vgs_child_occupancy(low_child);
-                VgsOccupancy high_occupancy = vgs_child_occupancy(high_child);
-                if (low_occupancy == VGS_OCCUPANCY_EMPTY ||
-                    high_occupancy == VGS_OCCUPANCY_EMPTY ||
-                    (low_occupancy != VGS_OCCUPANCY_PARTIAL &&
-                     high_occupancy != VGS_OCCUPANCY_PARTIAL)) continue;
-                vgs_mark_subtree_face_refined(low_child, axis, 1);
-                vgs_mark_subtree_face_refined(high_child, axis, 0);
-            }
-        }
-    }
+    free(vertices);
     if (amrBodyCount >= MAX_AMR_BODIES) goto fail;
     AmrBody *body = &amrBodies[amrBodyCount];
     memset(body, 0, sizeof(*body));
@@ -11530,6 +11755,24 @@ static bool vgs_append_hierarchy_from_occupancy(const int *leaf_voxel_ids,
     }
     saved.nodes = nodes;
     saved.node_history = history;
+    int relation_offset = saved.embedding_relation_count;
+    int total_relations = relation_offset + built.embedding_relation_count;
+    VgsEmbeddingRelation *relations = realloc(saved.embedding_relations,
+        (size_t)total_relations * sizeof(*relations));
+    if (total_relations && !relations) {
+        free(built.nodes); free(built.node_history); free(built.leaf_history);
+        free(built.embedding_relations); free(built_body.leaf_voxel_ids);
+        vgsHierarchy = saved;
+        memcpy(amrBodies, saved_bodies, sizeof(amrBodies));
+        amrBodyCount = saved_body_count;
+        return false;
+    }
+    saved.embedding_relations = relations;
+    if (built.embedding_relation_count)
+        memcpy(relations + relation_offset, built.embedding_relations,
+               (size_t)built.embedding_relation_count * sizeof(*relations));
+    saved.embedding_relation_count = total_relations;
+    saved.embedding_relation_capacity = total_relations;
     if (saved.leaf_history_capacity < voxel_count) {
         VgsCurvatureHistory *leaf_history = realloc(saved.leaf_history,
             (size_t)voxel_count * sizeof(*leaf_history));
@@ -11553,6 +11796,7 @@ static bool vgs_append_hierarchy_from_occupancy(const int *leaf_voxel_ids,
     for (int i = 0; i < built.node_count; ++i) {
         VgsHierarchyNode *node = &saved.nodes[node_offset + i];
         node->body_id = saved_body_count;
+        if (node->embedding_count) node->embedding_begin += relation_offset;
         if (node->parent >= 0) node->parent += node_offset;
         for (int c = 0; c < 8; ++c)
             if (node->children[c] >= 0) node->children[c] += node_offset;
@@ -11566,6 +11810,9 @@ static bool vgs_append_hierarchy_from_occupancy(const int *leaf_voxel_ids,
     saved.forced_refined_node_count += built.forced_refined_node_count;
     saved.real_corner_refs += built.real_corner_refs;
     saved.virtual_corner_refs += built.virtual_corner_refs;
+    saved.partial_terminal_count += built.partial_terminal_count;
+    for (int r = 0; r <= 8; ++r)
+        saved.embedding_rank_histogram[r] += built.embedding_rank_histogram[r];
     if (built.levels > saved.levels) saved.levels = built.levels;
     saved.topology_generation++;
 
@@ -11582,6 +11829,7 @@ static bool vgs_append_hierarchy_from_occupancy(const int *leaf_voxel_ids,
         voxels[world].amr_leaf_slot = slot;
     }
     free(built.nodes); free(built.node_history); free(built.leaf_history);
+    free(built.embedding_relations);
     vgsHierarchy = saved;
     memcpy(amrBodies, saved_bodies, sizeof(amrBodies));
     amrBodyCount = saved_body_count + 1;
@@ -11600,6 +11848,20 @@ static const float weld_coarsen_axis[2][3] = {
 
 static void gather_hierarchy_weld_constraints(VgsHierarchyNode *node,
                                               uint8_t terminal_mask, bool include_coarsening) {
+    if (node->occupancy == VGS_OCCUPANCY_PARTIAL && node->partial_coarsenable) {
+        Vector3 anchor[8];
+        for (int a=0;a<node->embedding_rank;++a) anchor[a]=node->particles[a]->predicted_pos;
+        for (int n=0;n<node->embedding_count;++n) {
+            VgsEmbeddingRelation *rel=&vgsHierarchy.embedding_relations[node->embedding_begin+n];
+            if (rel->particle->inv_mass<=0.0f) continue;
+            Vector3 target={0};for(int a=0;a<node->embedding_rank;++a)
+                target=v_add(target,v_mul(anchor[a],rel->refine[a]));
+            accumulate_particle_correction(rel->particle,
+                v_mul(v_sub(target,rel->particle->predicted_pos),node->occupied_fraction),
+                rel->particle->inv_mass);
+        }
+        return;
+    }
     if (node->occupancy != VGS_OCCUPANCY_FULL) return;
     Particle *fine[27];
     Vector3 fine_pos[27], coarse_pos[8];
@@ -11684,7 +11946,18 @@ static bool vgs_hierarchy_grid_points(const VgsHierarchyNode *node, Particle *gr
 
 static void vgs_hierarchy_transfer_refine(VgsHierarchyNode *node, bool activate)
 {
-    if (!node || node->occupancy != VGS_OCCUPANCY_FULL) return;
+    if (!node) return;
+    if (node->occupancy == VGS_OCCUPANCY_PARTIAL && node->partial_coarsenable) {
+        Vector3 pos[8],vel[8];for(int a=0;a<node->embedding_rank;++a){pos[a]=node->particles[a]->pos;vel[a]=node->particles[a]->vel;}
+        for(int n=0;n<node->embedding_count;++n){VgsEmbeddingRelation *rel=&vgsHierarchy.embedding_relations[node->embedding_begin+n];Vector3 p={0},v={0};
+            for(int a=0;a<node->embedding_rank;++a){p=v_add(p,v_mul(pos[a],rel->refine[a]));v=v_add(v,v_mul(vel[a],rel->refine[a]));}
+            rel->particle->pos=rel->particle->prev_pos=rel->particle->predicted_pos=p;rel->particle->vel=v;}
+        if(!activate)return;
+        VgsCurvatureHistory h=vgsHierarchy.node_history[node-vgsHierarchy.nodes];
+        for(int c=0;c<8;++c){int child=node->children[c];if(child==VGS_CHILD_EMPTY)continue;if(child>=0){vgsHierarchy.nodes[child].active=true;vgsHierarchy.node_history[child]=h;}else{int w=-child-1;voxels[w].simulate_dofs=true;vgsHierarchy.leaf_history[w]=h;}}
+        ++vgsHierarchy.refine_count;return;
+    }
+    if (node->occupancy != VGS_OCCUPANCY_FULL) return;
     Particle *grid[27];
     if (!vgs_hierarchy_grid_points(node, grid)) return;
     Vector3 pos[8], vel[8];
@@ -11727,7 +12000,13 @@ static void vgs_hierarchy_transfer_refine(VgsHierarchyNode *node, bool activate)
 
 static void vgs_hierarchy_transfer_coarsen(VgsHierarchyNode *node)
 {
-    if (!node || node->occupancy != VGS_OCCUPANCY_FULL || node->force_refined) return;
+    if (!node || node->force_refined) return;
+    if(node->occupancy==VGS_OCCUPANCY_PARTIAL&&node->partial_coarsenable){
+        for(int a=0;a<node->embedding_rank;++a){Vector3 p={0},v={0};for(int n=0;n<node->embedding_count;++n){VgsEmbeddingRelation *rel=&vgsHierarchy.embedding_relations[node->embedding_begin+n];p=v_add(p,v_mul(rel->particle->pos,rel->coarsen[a]));v=v_add(v,v_mul(rel->particle->vel,rel->coarsen[a]));}node->particles[a]->pos=node->particles[a]->prev_pos=node->particles[a]->predicted_pos=p;node->particles[a]->vel=v;}
+        for(int c=0;c<8;++c){int child=node->children[c];if(child==VGS_CHILD_EMPTY)continue;if(child>=0)vgsHierarchy.nodes[child].active=false;else voxels[-child-1].simulate_dofs=false;}
+        ++vgsHierarchy.coarsen_count;return;
+    }
+    if (node->occupancy != VGS_OCCUPANCY_FULL) return;
     Particle *grid[27];
     if (!vgs_hierarchy_grid_points(node, grid)) return;
     Vector3 fine_pos[27], fine_vel[27];
@@ -11769,7 +12048,7 @@ static void vgs_hierarchy_transfer_coarsen(VgsHierarchyNode *node)
 
 static void vgs_hierarchy_sync_dormant_descendants(VgsHierarchyNode *node)
 {
-    if (!node || node->occupancy != VGS_OCCUPANCY_FULL) return;
+    if (!node || (node->occupancy != VGS_OCCUPANCY_FULL && !node->partial_coarsenable)) return;
     vgs_hierarchy_transfer_refine(node, false);
     for (int c = 0; c < 8; ++c) {
         int child = node->children[c];
@@ -11779,6 +12058,8 @@ static void vgs_hierarchy_sync_dormant_descendants(VgsHierarchyNode *node)
 
 static bool vgs_hierarchy_rebuild_active_masses(void)
 {
+    if(particle_pool_count>vgsEmbeddedCapacity){int *nodes=realloc(vgsEmbeddedNode,(size_t)particle_pool_count*sizeof(*nodes));int *relations=realloc(vgsEmbeddedRelation,(size_t)particle_pool_count*sizeof(*relations));if(!nodes||!relations){if(nodes)vgsEmbeddedNode=nodes;if(relations)vgsEmbeddedRelation=relations;return false;}vgsEmbeddedNode=nodes;vgsEmbeddedRelation=relations;vgsEmbeddedCapacity=particle_pool_count;}
+    if(particle_pool_count>0){memset(vgsEmbeddedNode,0xff,(size_t)particle_pool_count*sizeof(*vgsEmbeddedNode));memset(vgsEmbeddedRelation,0xff,(size_t)particle_pool_count*sizeof(*vgsEmbeddedRelation));}
     float *mass = calloc((size_t)particle_pool_count, sizeof(*mass));
     uint8_t *managed = calloc((size_t)particle_pool_count, 1);
     uint8_t *sleeping_managed = calloc((size_t)particle_pool_count, 1);
@@ -11825,11 +12106,20 @@ static bool vgs_hierarchy_rebuild_active_masses(void)
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
         if (node->body_id < 0 || node->body_id >= amrBodyCount ||
             amrBodies[node->body_id].lifecycle != AMR_BODY_ACTIVE) continue;
-        if (!node->active || node->occupancy != VGS_OCCUPANCY_FULL ||
-            node->real_corner_mask != 0xffu || vgs_node_has_active_children(node)) continue;
+        if (!vgs_node_representation_active(node) ||
+            vgs_node_has_active_children(node)) continue;
         float density = node->body_id >= 0 && node->body_id < amrBodyCount &&
             amrBodies[node->body_id].mass_density > 0.0f
             ? amrBodies[node->body_id].mass_density : vgsHierarchy.mass_density;
+        if (node->occupancy == VGS_OCCUPANCY_PARTIAL) {
+            float diagonal[8]={0}, total_diagonal=0;
+            for(int n=0;n<node->embedding_count;++n){VgsEmbeddingRelation *rel=&vgsHierarchy.embedding_relations[node->embedding_begin+n];for(int a=0;a<node->embedding_rank;++a)diagonal[a]+=rel->mass*rel->refine[a]*rel->refine[a];}
+            for(int a=0;a<node->embedding_rank;++a)total_diagonal+=diagonal[a];
+            float total_mass=density*node->rest_volume*node->occupied_fraction;
+            if(total_diagonal>VGS_EPS)for(int a=0;a<node->embedding_rank;++a)mass[node->particles[a]-particles_pool]+=total_mass*diagonal[a]/total_diagonal;
+            for(int n=0;n<node->embedding_count;++n){int relation=node->embedding_begin+n;ptrdiff_t id=vgsHierarchy.embedding_relations[relation].particle-particles_pool;if(id>=0&&id<particle_pool_count){vgsEmbeddedNode[id]=i;vgsEmbeddedRelation[id]=relation;}}
+            continue;
+        }
         float contribution = density * node->rest_volume * 0.125f;
         for (int c = 0; c < 8; ++c) {
             ptrdiff_t particle_id = node->particles[c] - particles_pool;
@@ -11881,7 +12171,7 @@ static void vgs_hierarchy_activate_initial_subtree(int child)
     VgsHierarchyNode *node = &vgsHierarchy.nodes[child];
     if (node->occupancy == VGS_OCCUPANCY_EMPTY) return;
     node->active = true;
-    if (node->occupancy == VGS_OCCUPANCY_PARTIAL || node->force_refined)
+    if ((node->occupancy == VGS_OCCUPANCY_PARTIAL && !node->partial_coarsenable) || node->force_refined)
         for (int c = 0; c < 8; ++c)
             vgs_hierarchy_activate_initial_subtree(node->children[c]);
 }
@@ -11929,7 +12219,8 @@ static bool vgs_hierarchy_initialize_adaptive(void)
     if (!vgs_hierarchy_rebuild_active_masses()) return false;
     for (int i = 0; i < vgsHierarchy.node_count; ++i) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
-        if (node->active && node->occupancy == VGS_OCCUPANCY_FULL &&
+        if (node->active && (node->occupancy == VGS_OCCUPANCY_FULL ||
+                             node->partial_coarsenable) &&
             !vgs_node_has_active_children(node))
             vgs_hierarchy_sync_dormant_descendants(node);
     }
@@ -11976,6 +12267,17 @@ static bool vgs_adaptive_exceeds_refine_deformation(Particle *const particles[8]
                deformation_fraction * SHEAR_BREAK_THRESHOLD;
 }
 
+static bool vgs_adaptive_node_deformed(const VgsHierarchyNode *node)
+{
+    Vector3 corners[8]; if(!vgs_node_corners(node,false,corners))return false;
+    float level_fraction=0;int root=amr_root_node_for_body(node->body_id);
+    int levels=node->body_id>=0&&node->body_id<amrBodyCount?amrBodies[node->body_id].levels:vgsHierarchy.levels;
+    if(root>=0&&levels>0)level_fraction=clampf(log2f(fmaxf(1.0f,vgsHierarchy.nodes[root].rest_edge/node->rest_edge))/(float)levels,0,1);
+    float fraction=vgsAdaptiveDeformationCoarseFraction+level_fraction*(vgsAdaptiveDeformationFineFraction-vgsAdaptiveDeformationCoarseFraction);
+    VgsDeformation d=measure_vgs_deformation(corners,node->rest_edge);
+    return d.max_abs_strain>fraction*STRAIN_BREAK_THRESHOLD||d.max_abs_shear>fraction*SHEAR_BREAK_THRESHOLD;
+}
+
 static bool vgs_hierarchy_adapt(bool use_deformation)
 {
     if (!vgsHierarchy.adaptive) return true;
@@ -11986,31 +12288,36 @@ static bool vgs_hierarchy_adapt(bool use_deformation)
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
         if (node->body_id >= 0 &&
             amrBodies[node->body_id].lifecycle != AMR_BODY_ACTIVE) continue;
-        if (!node->active || node->occupancy != VGS_OCCUPANCY_FULL ||
-            node->real_corner_mask != 0xffu) continue;
+        if (!vgs_node_representation_active(node)) continue;
+        bool has_children = vgs_node_has_active_children(node);
+        // Fracture removes this node's constraints, not its material.  Expose
+        // one child level so descendants take over mass and can fracture
+        // independently.  The broken parent remains a topology ancestor.
+        if (!node->vgs_enabled) {
+            if (!has_children) refine[i] = 1;
+            continue;
+        }
         float own = vgsHierarchy.node_history[i].curvature;
         float threshold = vgs_adaptive_threshold_for_node(node);
-        bool own_deformed = use_deformation &&
-            vgs_adaptive_exceeds_refine_deformation(node->particles,
-                                                     node->rest_edge, node->body_id);
-        if (!vgs_node_has_active_children(node)) {
+        bool own_deformed = use_deformation && vgs_adaptive_node_deformed(node);
+        if (!has_children) {
             refine[i] = node->force_refined || own > threshold || own_deformed;
             continue;
         }
-        float child_mean = 0.0f;
+        float child_mean = 0.0f; int child_count = 0;
         bool active_grandchildren = false;
         bool broken_child = false;
         bool deformed_child = false;
         for (int c = 0; c < 8; ++c) {
             int child = node->children[c];
+            if (child == VGS_CHILD_EMPTY) continue;
+            ++child_count;
             if (!vgs_child_enabled(child)) broken_child = true;
             child_mean += child >= 0 ? vgsHierarchy.node_history[child].curvature :
                 vgsHierarchy.leaf_history[-child - 1].curvature;
             if (use_deformation && child >= 0) {
                 VgsHierarchyNode *child_node = &vgsHierarchy.nodes[child];
-                if (vgs_adaptive_exceeds_refine_deformation(child_node->particles,
-                                                             child_node->rest_edge,
-                                                             child_node->body_id))
+                if (vgs_adaptive_node_deformed(child_node))
                     deformed_child = true;
             } else if (use_deformation) {
                 Voxel *child_voxel = &voxels[-child - 1];
@@ -12022,7 +12329,7 @@ static bool vgs_hierarchy_adapt(bool use_deformation)
             if (child >= 0 && vgs_node_has_active_children(&vgsHierarchy.nodes[child]))
                 active_grandchildren = true;
         }
-        child_mean *= 0.125f;
+        if (child_count) child_mean /= (float)child_count;
         coarsen[i] = !node->force_refined && !own_deformed && !deformed_child && own < threshold &&
                      child_mean < VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR * threshold &&
                      !active_grandchildren && !broken_child;
@@ -12042,7 +12349,8 @@ static bool vgs_hierarchy_adapt(bool use_deformation)
     if (changed && !vgs_hierarchy_rebuild_active_masses()) return false;
     for (int i = 0; i < vgsHierarchy.node_count; ++i)
         if (vgsHierarchy.nodes[i].active &&
-            vgsHierarchy.nodes[i].occupancy == VGS_OCCUPANCY_FULL &&
+            (vgsHierarchy.nodes[i].occupancy == VGS_OCCUPANCY_FULL ||
+             vgsHierarchy.nodes[i].partial_coarsenable) &&
             !vgs_node_has_active_children(&vgsHierarchy.nodes[i]))
             vgs_hierarchy_sync_dormant_descendants(&vgsHierarchy.nodes[i]);
     return true;
@@ -12103,7 +12411,8 @@ static bool amr_initialize_new_body(int body_id)
     vgsHierarchy.adaptive = true;
     for (int i = body->node_start; i < body->node_start + body->node_count; ++i) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
-        if (node->active && node->occupancy == VGS_OCCUPANCY_FULL &&
+        if (node->active && (node->occupancy == VGS_OCCUPANCY_FULL ||
+                             node->partial_coarsenable) &&
             !vgs_node_has_active_children(node))
             vgs_hierarchy_sync_dormant_descendants(node);
     }
@@ -12355,6 +12664,8 @@ static bool amr_compact_retired_bodies(void)
     vgsHierarchy.forced_refined_node_count = 0;
     vgsHierarchy.real_corner_refs = 0;
     vgsHierarchy.virtual_corner_refs = 0;
+    vgsHierarchy.partial_terminal_count = 0;
+    memset(vgsHierarchy.embedding_rank_histogram,0,sizeof(vgsHierarchy.embedding_rank_histogram));
     memset(vgsHierarchy.level_start, 0, sizeof(vgsHierarchy.level_start));
     memset(vgsHierarchy.level_count, 0, sizeof(vgsHierarchy.level_count));
     vgsHierarchy.levels = live_body_count > 0 ? next_bodies[0].levels : 0;
@@ -12377,6 +12688,8 @@ static bool amr_compact_retired_bodies(void)
         int real = vgs_real_corner_count(node->real_corner_mask);
         vgsHierarchy.real_corner_refs += real;
         vgsHierarchy.virtual_corner_refs += 8 - real;
+        if(node->partial_coarsenable){++vgsHierarchy.partial_terminal_count;
+            if(node->embedding_rank<=8)++vgsHierarchy.embedding_rank_histogram[node->embedding_rank];}
     }
     memset(amrBodies, 0, sizeof(amrBodies));
     memset(amrBodyTethered, 0, sizeof(amrBodyTethered));
@@ -12507,10 +12820,15 @@ static void gather_vgs_hierarchy_range(int start, int end, int worker_id, void *
     for (int i = start; i < end; ++i) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[base + i];
         if (!vgs_node_constraints_enabled(node)) continue;
-        gather_shape_constraints(node->particles, node->rest_edge, node->rest_volume, true);
+        if(node->occupancy==VGS_OCCUPANCY_PARTIAL)
+            gather_partial_shape_constraints(node);
+        else gather_shape_constraints(node->particles, node->rest_edge, node->rest_volume, true);
         uint8_t mask = vgsHierarchy.adaptive ? vgs_terminal_child_mask(node) :
             vgs_enabled_child_mask(node);
-        if (mask) gather_hierarchy_weld_constraints(node, mask,
+        if (node->occupancy == VGS_OCCUPANCY_PARTIAL && node->partial_coarsenable &&
+            !vgs_node_has_active_children(node))
+            gather_hierarchy_weld_constraints(node, 0xffu, false);
+        else if (mask) gather_hierarchy_weld_constraints(node, mask,
                                                     !vgsHierarchy.adaptive && mask == 0xffu);
     }
 }
@@ -12525,6 +12843,8 @@ typedef struct CpuAabbProxy {
     bool amr_owned;
     bool query;
 } CpuAabbProxy;
+static const VgsEmbeddingRelation *cpu_partial_relation_for_particle(
+    const Particle *particle, const VgsHierarchyNode **owner);
 
 static CpuAabbProxy *cpuAabbProxies;
 static CpuAabbProxy *cpuAabbNodeBounds;
@@ -12539,6 +12859,7 @@ static uint64_t cpuAabbBoundsRejects;
 static uint64_t cpuAabbEmptyRejects;
 static uint32_t cpuAabbMaxStack;
 static uint32_t cpuAabbOverflow;
+static uint64_t cpuPartialCollisionRedirections;
 
 static bool cpu_aabb_collisions_enabled(void) {
     return vgsHierarchy.adaptive && vgsHierarchy.node_count > 0 &&
@@ -12704,7 +13025,8 @@ static bool cpu_rebuild_aabb_proxies(void) {
     for (int slot = 0; slot < active_voxel_count; ++slot) {
         int id = active_voxels[slot];
         Voxel *voxel = &voxels[id];
-        if (!voxel->simulate_dofs || !voxel->vgs_active || voxel->isBullet || voxel->type != 0)
+        bool embedded=cpu_partial_relation_for_particle(voxel->particles[0],NULL)!=NULL;
+        if ((!voxel->simulate_dofs&&!embedded) || !voxel->vgs_active || voxel->isBullet || voxel->type != 0)
             continue;
         bool amr_owned = cpuAabbLeafParent[id] >= 0;
         if (!cpu_aabb_append(voxel->particles, voxel->rest_edge, id + 1,
@@ -12914,7 +13236,9 @@ static void cpu_solve_tree_query(CpuAabbProxy *query) {
             if (!cpu_aabb_leaf_proxy(world, &leaf)) { ++cpuAabbEmptyRejects; continue; }
             target = &leaf;
             occupancy = VGS_OCCUPANCY_FULL;
-            enabled = voxels[world].simulate_dofs && voxels[world].vgs_active;
+            enabled = (voxels[world].simulate_dofs ||
+                       cpu_partial_relation_for_particle(voxels[world].particles[0],NULL)) &&
+                      voxels[world].vgs_active;
             if (!cpu_aabb_swept_overlap(query, target)) {
                 ++cpuAabbBoundsRejects; continue;
             }
@@ -13164,34 +13488,46 @@ static float cpu_sphere_proxy_weight(int proxy, int corner)
     return proxy == 8 ? 0.125f : (proxy == corner ? 1.0f : 0.0f);
 }
 
+static const VgsEmbeddingRelation *cpu_partial_relation_for_particle(
+    const Particle *particle, const VgsHierarchyNode **owner)
+{
+    ptrdiff_t id=particle?particle-particles_pool:-1;if(id<0||id>=particle_pool_count||
+        id>=vgsEmbeddedCapacity||vgsEmbeddedNode[id]<0||vgsEmbeddedRelation[id]<0)return NULL;
+    VgsHierarchyNode *node=&vgsHierarchy.nodes[vgsEmbeddedNode[id]];
+    if(!node->active||!node->partial_coarsenable||!node->vgs_enabled||vgs_node_has_active_children(node))return NULL;
+    if(owner)*owner=node;return &vgsHierarchy.embedding_relations[vgsEmbeddedRelation[id]];
+}
+
+static void cpu_sphere_add_dof(const CpuSphereShape *shape,int proxy,int corner,
+                               float sign,Vector3 normal,float lambda,bool scatter,
+                               float *denominator)
+{
+    float proxy_weight=cpu_sphere_proxy_weight(proxy,corner);if(proxy_weight<=0)return;
+    Particle *p=shape->particle[corner];
+    if(p->inv_mass>0){if(denominator)*denominator+=p->inv_mass*proxy_weight*proxy_weight;
+        if(scatter)accumulate_particle_correction(p,v_mul(normal,sign*lambda*p->inv_mass*proxy_weight),1);return;}
+    const VgsHierarchyNode *node=NULL;const VgsEmbeddingRelation *rel=cpu_partial_relation_for_particle(p,&node);
+    if(!rel||!node)return;
+    for(int a=0;a<node->embedding_rank;++a){float w=proxy_weight*rel->refine[a];float inv=node->particles[a]->inv_mass;
+        if(denominator)*denominator+=inv*w*w;
+        if(scatter&&inv>0&&fabsf(w)>VGS_EPS)accumulate_particle_correction(node->particles[a],v_mul(normal,sign*lambda*inv*w),1);}
+    if(scatter)++cpuPartialCollisionRedirections;
+}
+
 static void cpu_scatter_sphere_contact(const CpuSphereShape *a,
                                        const CpuSphereShape *b, bool dynamic_b,
                                        const CpuSphereContact *contact)
 {
     float denominator = 0.0f;
     for (int c = 0; c < 8; ++c) {
-        float weight = cpu_sphere_proxy_weight(contact->a_proxy, c);
-        denominator += a->particle[c]->inv_mass * weight * weight;
-        if (dynamic_b) {
-            weight = cpu_sphere_proxy_weight(contact->b_proxy, c);
-            denominator += b->particle[c]->inv_mass * weight * weight;
-        }
+        cpu_sphere_add_dof(a,contact->a_proxy,c,1,(Vector3){0},0,false,&denominator);
+        if(dynamic_b)cpu_sphere_add_dof(b,contact->b_proxy,c,-1,(Vector3){0},0,false,&denominator);
     }
     if (denominator <= VGS_EPS) return;
     float lambda = COLLISION_RELAXATION * contact->depth / denominator;
     for (int c = 0; c < 8; ++c) {
-        float weight = cpu_sphere_proxy_weight(contact->a_proxy, c);
-        float inv_mass = a->particle[c]->inv_mass;
-        if (weight > 0.0f && inv_mass > 0.0f)
-            accumulate_particle_correction(a->particle[c],
-                v_mul(contact->normal, lambda * inv_mass * weight), 1.0f);
-        if (dynamic_b) {
-            weight = cpu_sphere_proxy_weight(contact->b_proxy, c);
-            inv_mass = b->particle[c]->inv_mass;
-            if (weight > 0.0f && inv_mass > 0.0f)
-                accumulate_particle_correction(b->particle[c],
-                    v_mul(contact->normal, -lambda * inv_mass * weight), 1.0f);
-        }
+        cpu_sphere_add_dof(a,contact->a_proxy,c,1,contact->normal,lambda,true,NULL);
+        if(dynamic_b)cpu_sphere_add_dof(b,contact->b_proxy,c,-1,contact->normal,lambda,true,NULL);
     }
 }
 
@@ -13245,7 +13581,8 @@ static bool cpu_rebuild_sphere_proxies(void)
     for (int slot = 0; slot < active_voxel_count; ++slot) {
         int world = active_voxels[slot];
         Voxel *voxel = &voxels[world];
-        if (voxel->amr_body_id < 0 || !voxel->simulate_dofs || !voxel->vgs_active)
+        bool embedded=cpu_partial_relation_for_particle(voxel->particles[0],NULL)!=NULL;
+        if (voxel->amr_body_id < 0 || (!voxel->simulate_dofs&&!embedded) || !voxel->vgs_active)
             continue;
         int body = INT_MIN + voxel->amr_body_id;
         if (!cpu_aabb_append(voxel->particles, voxel->rest_edge, body,
@@ -13442,7 +13779,8 @@ static void cpu_solve_static_sphere_collisions(void)
     }
     for (int i = 0; i < active_voxel_count; ++i) {
         int world = active_voxels[i];
-        if (cpuAabbLeafParent[world] < 0 || !voxels[world].simulate_dofs ||
+        bool embedded=cpu_partial_relation_for_particle(voxels[world].particles[0],NULL)!=NULL;
+        if (cpuAabbLeafParent[world] < 0 || (!voxels[world].simulate_dofs&&!embedded) ||
             (voxels[world].amr_body_id >= 0 &&
              amrBodies[voxels[world].amr_body_id].lifecycle != AMR_BODY_ACTIVE) ||
             !voxels[world].vgs_active) continue;
@@ -15966,6 +16304,7 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
     cpuAabbEmptyRejects = 0;
     cpuAabbMaxStack = 0;
     cpuAabbOverflow = 0;
+    cpuPartialCollisionRedirections = 0;
 
     for (int step = 0; step < substeps; ++step) {
         if (debugLogVoxelBlowup) {
@@ -19016,7 +19355,10 @@ static void prepare_dynamic_voxel_transforms(void) {
         if (!voxel_is_visible_gameplay_leaf(v)) {
             continue;
         }
-        if (debugRefinementCoarse || (debugAdaptiveOctree && !v->simulate_dofs)) continue;
+        bool embedded_partial = debugAdaptiveOctree && !v->simulate_dofs &&
+            cpu_partial_relation_for_particle(v->particles[0], NULL) != NULL;
+        if (debugRefinementCoarse || (debugAdaptiveOctree && !v->simulate_dofs &&
+                                     !embedded_partial)) continue;
 
         // Collect Bullet with Orb Shader
         if (v->isBullet && v->type == 0) {

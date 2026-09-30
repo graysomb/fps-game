@@ -1556,6 +1556,14 @@ inline void amrSelect(uint gid, device const ParticleState *particle,
     uint stage = uint(u.voxel_count) + gid;
     VoxelState node = voxel[stage];
     if (node.flags.w == 0 || amrOccupancy(node) != 2u || amrRealMask(node) != 0xffu) return;
+    bool hasChildren = amrHasActiveChildren(node,voxel,amr);
+    // A broken internal terminal must hand its mass to one child level.  It
+    // remains disabled as a constraint and only acts as a topology ancestor.
+    if (node.flags.x == 0) {
+        if (!hasChildren)
+            state[stage].previous[7] = as_type<float>(AMR_DECISION_REFINE);
+        return;
+    }
     uint rootStage = as_type<uint>(state[stage].previous[6]);
     if (rootStage >= amr->total_stage_count) return;
     float rootEdge = voxel[rootStage].pos_rest_edge.w;
@@ -1563,7 +1571,6 @@ inline void amrSelect(uint gid, device const ParticleState *particle,
     float threshold = amr->curvature_threshold * pow(amr->threshold_factor, level);
     bool deformed = u.integer_padding_1 != 0 &&
         amrDeformed(particle,node,control,amr,rootEdge,u);
-    bool hasChildren = amrHasActiveChildren(node,voxel,amr);
     if (!hasChildren) {
         bool forced = (node.lifecycle.w & AMR_FORCE_REFINED) != 0u;
         if (forced || state[stage].latest[6] > threshold || deformed)
