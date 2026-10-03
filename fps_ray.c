@@ -2180,6 +2180,7 @@ static bool debugShowBeliefColors = false;
 static bool debugColorVoxelsByVgsTemporalCurvature = false;
 static bool debugRefinementCoarse = false;
 static bool debugAdaptiveOctree = false;
+static bool debugUseGameplayAmrRendering = false;
 static bool debugRipTest = false;
 typedef struct {
     float latest[6];
@@ -3814,7 +3815,8 @@ static Color voxel_display_color(const Voxel *voxel)
     if (debugShowBeliefColors) {
         return voxel_belief_debug_color(voxel);
     }
-    if (debugAdaptiveOctree && voxel->simulate && voxel->type == 0)
+    if (debugAdaptiveOctree && !debugUseGameplayAmrRendering &&
+        voxel->simulate && voxel->type == 0)
         return ColorFromHSV(235.0f - 235.0f *
                             ((float)vgsHierarchy.levels / fmaxf(1.0f, (float)vgsHierarchy.levels)),
                             0.8f, 0.9f);
@@ -19363,7 +19365,8 @@ static void prepare_dynamic_voxel_transforms(void) {
         }
         bool embedded_partial = debugAdaptiveOctree && !v->simulate_dofs &&
             cpu_partial_relation_for_particle(v->particles[0], NULL) != NULL;
-        if (debugRefinementCoarse || (debugAdaptiveOctree && !v->simulate_dofs &&
+        if (debugRefinementCoarse || (debugAdaptiveOctree &&
+                                     !debugUseGameplayAmrRendering && !v->simulate_dofs &&
                                      !embedded_partial)) continue;
 
         // Collect Bullet with Orb Shader

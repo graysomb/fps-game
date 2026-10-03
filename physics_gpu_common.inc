@@ -497,8 +497,12 @@ static bool gpu_stage_reserve(size_t particles, size_t sims, size_t voxels_count
             !gpu_resize_array((void **)&gpuPhysics.amr_state_stage, cap, sizeof(*gpuPhysics.amr_state_stage))) return false;
         gpuPhysics.voxel_capacity = cap;
     }
-    size_t constraints = voxels_count * 2u +
-        (size_t)vgsHierarchy.embedding_relation_count / GPU_PARTIAL_WELD_CHUNK +
+    size_t partial_chunks = 0;
+    for (int i = 0; i < vgsHierarchy.node_count; ++i)
+        if (vgsHierarchy.nodes[i].partial_coarsenable)
+            partial_chunks += ((size_t)vgsHierarchy.nodes[i].embedding_count +
+                               GPU_PARTIAL_WELD_CHUNK - 1u) / GPU_PARTIAL_WELD_CHUNK;
+    size_t constraints = voxels_count * 2u + partial_chunks +
         (size_t)vgsHierarchy.node_count;
     if (constraints > gpuPhysics.constraint_stage_capacity) {
         if (!gpu_resize_array((void **)&gpuPhysics.constraint_stage, constraints,
@@ -553,7 +557,7 @@ static bool gpu_pack_partial_embeddings(void) {
     }
     size_t particles = (size_t)gpuPhysics.compact_count;
     size_t words = nodes * GPU_PARTIAL_NODE_WORDS + relations * GPU_PARTIAL_REL_WORDS +
-                   particles + 1u + relations * 3u;
+                   particles + 1u + relations * 3u + chunks;
     if (words > UINT32_MAX || relations > UINT32_MAX || chunks > UINT32_MAX ||
         !gpu_resize_array((void **)&gpuPhysics.partial_stage, words ? words : 1u,
                           sizeof(uint32_t))) return false;
@@ -591,6 +595,20 @@ static bool gpu_pack_partial_embeddings(void) {
             dst[12 + c * 8 + a] = gpu_float_word(node->cage_from_anchor[c][a]);
             dst[76 + a * 8 + c] = gpu_float_word(node->anchor_from_cage[a][c]);
         }
+        // Counting sort keeps each region's rows together without duplicating
+        // particles that lie on an immediate-child boundary.
+        uint32_t region_count[256] = {0}, region_next[256];
+        for (int n = 0; n < node->embedding_count; ++n) {
+            uint8_t mask = vgsHierarchy.embedding_relations[
+                node->embedding_begin + n].immediate_child_mask;
+            if (!mask) return false;
+            ++region_count[mask];
+        }
+        uint32_t region_offset = 0;
+        for (int mask = 0; mask < 256; ++mask) {
+            region_next[mask] = region_offset;
+            region_offset += region_count[mask];
+        }
         for (int n = 0; n < node->embedding_count; ++n) {
             const VgsEmbeddingRelation *rel =
                 &vgsHierarchy.embedding_relations[node->embedding_begin + n];
@@ -599,7 +617,8 @@ static bool gpu_pack_partial_embeddings(void) {
             int compact = gpuPhysics.pool_to_compact[pool];
             if (compact < 0 || (size_t)compact >= particles) return false;
             uint32_t *record = gpuPhysics.partial_stage + relation_base +
-                               (size_t)relation_id * GPU_PARTIAL_REL_WORDS;
+                (size_t)(relation_id + region_next[rel->immediate_child_mask]++) *
+                GPU_PARTIAL_REL_WORDS;
             record[0] = (uint32_t)compact;
             record[1] = (uint32_t)i;
             record[2] = gpu_float_word(rel->mass);
@@ -609,8 +628,8 @@ static bool gpu_pack_partial_embeddings(void) {
                 record[12 + a] = gpu_float_word(rel->coarsen[a]);
             }
             offset[compact + 1]++;
-            relation_id++;
         }
+        relation_id += (uint32_t)node->embedding_count;
     }
     for (size_t p = 1; p <= particles; ++p) offset[p] += offset[p - 1];
     uint32_t *cursor = calloc(particles ? particles : 1u, sizeof(uint32_t));
@@ -672,8 +691,25 @@ static bool gpu_pack_partial_embeddings(void) {
     free(seen);
     gpuPhysics.partial_global_job_count = job_count - global_start;
     gpuPhysics.partial_global_job_start = global_start;
-    gpuPhysics.partial_words = jobs_base + job_count;
-    return relation_id == gpuPhysics.partial_relation_count;
+    size_t mask_base = jobs_base + job_count;
+    uint32_t chunk_id = 0;
+    for (size_t i = 0; i < nodes; ++i) {
+        uint32_t *meta = gpuPhysics.partial_stage + i * GPU_PARTIAL_NODE_WORDS;
+        meta[142] = chunk_id;
+        meta[143] = (meta[1] + GPU_PARTIAL_WELD_CHUNK - 1u) /
+                    GPU_PARTIAL_WELD_CHUNK;
+        for (uint32_t c = 0; c < meta[143]; ++c) {
+            uint32_t mask = 0;
+            for (uint32_t n = c * GPU_PARTIAL_WELD_CHUNK;
+                 n < meta[1] && n < (c + 1u) * GPU_PARTIAL_WELD_CHUNK; ++n)
+                mask |= gpuPhysics.partial_stage[relation_base +
+                    (size_t)(meta[0] + n) * GPU_PARTIAL_REL_WORDS + 3u];
+            gpuPhysics.partial_stage[mask_base + chunk_id++] = mask;
+        }
+    }
+    gpuPhysics.partial_words = mask_base + chunk_id;
+    return relation_id == gpuPhysics.partial_relation_count && chunk_id == chunks &&
+           gpuPhysics.partial_words <= words;
 }
 
 static bool gpu_pack_world(void) {
@@ -910,12 +946,19 @@ static bool gpu_pack_world(void) {
         if (vgsHierarchy.nodes[i].partial_coarsenable) {
             const VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
             if (mask) {
+                const uint32_t *meta = gpuPhysics.partial_stage +
+                                       (size_t)i * GPU_PARTIAL_NODE_WORDS;
+                const uint32_t *chunk_masks = gpuPhysics.partial_stage +
+                    gpuPhysics.partial_words - gpuPhysics.partial_constraint_capacity;
                 for (int begin = 0; begin < node->embedding_count;
-                     begin += GPU_PARTIAL_WELD_CHUNK)
+                     begin += GPU_PARTIAL_WELD_CHUNK) {
+                    if (!(chunk_masks[meta[142] + begin / GPU_PARTIAL_WELD_CHUNK] & mask))
+                        continue;
                     gpuPhysics.constraint_stage[gpuPhysics.constraint_count++] =
                         (GpuConstraintState){3u,
                             (uint32_t)(gpuPhysics.dynamic_voxel_count + i),
                             (uint32_t)begin, 0u};
+                }
             }
             continue;
         }

@@ -97,6 +97,19 @@ typedef struct DebugRunState {
     bool amr_gameplay_reset_succeeded;
     uint64_t amr_gameplay_original_body_identity;
     bool arbitrary_shape_drop;
+    bool crossed_tunnel_drop;
+    bool crossed_skeleton_drop;
+    bool edge_frame_drop;
+    bool gameplay_render_drop;
+    FILE *partial_weld_file;
+    char partial_weld_path[DEBUG_PATH_CAPACITY];
+    int partial_weld_samples;
+    uint64_t partial_weld_parent_sum;
+    uint64_t partial_weld_chunk_sum;
+    uint64_t partial_weld_row_sum;
+    int partial_weld_parent_peak;
+    int partial_weld_chunk_peak;
+    int partial_weld_row_peak;
     bool amr_projectile_test;
     uint64_t amr_projectile_identity;
     float amr_projectile_initial_speed;
@@ -333,6 +346,10 @@ static bool debug_setup_cube_stress(DebugRunState *state);
 static bool debug_setup_active_cube_drop(DebugRunState *state);
 static bool debug_setup_adaptive_cube_drop(DebugRunState *state);
 static bool debug_setup_adaptive_l_drop(DebugRunState *state);
+static bool debug_setup_adaptive_crossed_tunnel_drop(DebugRunState *state);
+static bool debug_setup_adaptive_crossed_skeleton_drop(DebugRunState *state);
+static bool debug_setup_adaptive_crossed_skeleton_gameplay_drop(DebugRunState *state);
+static bool debug_setup_adaptive_edge_frame_gameplay_drop(DebugRunState *state);
 static bool debug_setup_amr_projectile_impact(DebugRunState *state);
 static bool debug_setup_amr_multiple_groups(DebugRunState *state);
 static bool debug_setup_amr_atomic_snap(DebugRunState *state);
@@ -373,6 +390,10 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "active-cube-drop", "Activate a static 10x10x10 cube and drop it", debug_setup_active_cube_drop, 120, 60 },
     { "adaptive-cube-drop", "Curvature-driven octree cube drop", debug_setup_adaptive_cube_drop, 240, 60 },
     { "adaptive-l-drop", "Occupancy-masked adaptive L-shaped drop", debug_setup_adaptive_l_drop, 480, 120 },
+    { "adaptive-crossed-tunnel-drop", "Connected crossed-tunnel AMR drop with partial nodes at every level", debug_setup_adaptive_crossed_tunnel_drop, 480, 120 },
+    { "adaptive-crossed-skeleton-drop", "Fully perforated crossed-tunnel AMR drop", debug_setup_adaptive_crossed_skeleton_drop, 480, 120 },
+    { "adaptive-crossed-skeleton-gameplay-drop", "Crossed-tunnel AMR drop rendered as gameplay fine voxels", debug_setup_adaptive_crossed_skeleton_gameplay_drop, 480, 120 },
+    { "adaptive-edge-frame-gameplay-drop", "Hollow cube frame with twelve four-by-four-voxel edge beams", debug_setup_adaptive_edge_frame_gameplay_drop, 480, 120 },
     { "amr-projectile-impact", "Fire one finest-scale voxel into adaptive terminal spheres", debug_setup_amr_projectile_impact, 240, 120 },
     { "amr-multiple-groups", "Two independent active groups compile as two AMR bodies", debug_setup_amr_multiple_groups, 120, 60 },
     { "amr-atomic-snap", "A calm supported AMR body restores to static atomically", debug_setup_amr_atomic_snap, 60, 60 },
@@ -889,6 +910,7 @@ static void debug_reset_world(void)
     debugColorVoxelsByVgsTemporalCurvature = false;
     debugRefinementCoarse = false;
     debugAdaptiveOctree = false;
+    debugUseGameplayAmrRendering = false;
     debugRipTest = false;
     debug_reset_vgs_temporal_curvature();
     pbdSolidVoxelSize = VOXEL_SIZE;
@@ -970,8 +992,29 @@ static bool debug_validate_cube_vgs_hierarchy(int side)
     return true;
 }
 
+static bool debug_shape_occupied(int x, int y, int z, int side, int shape)
+{
+    if (shape == 1) return x < side / 2 || z < side / 2;
+    // Keep a solid L arm visible while crossed one-cell tunnels make its
+    // other arm partial at every octree level.
+    if (shape == 2) return (x < side / 2 || z < side / 2) &&
+                           (x >= side / 2 ||
+                            (!((x & 1) && (z & 1)) &&
+                             !((y & 1) && (z & 1))));
+    if (shape == 3) return !((x & 1) && (z & 1)) &&
+                           !((y & 1) && (z & 1));
+    if (shape == 4) {
+        int thickness = side / 4;
+        int boundary_axes = (x < thickness || x >= side - thickness) +
+                            (y < thickness || y >= side - thickness) +
+                            (z < thickness || z >= side - thickness);
+        return boundary_axes >= 2;
+    }
+    return true;
+}
+
 static bool debug_convert_shape_to_pbd(DebugRunState *state, float requested_size,
-                                       bool l_shape)
+                                       int shape)
 {
     state->expected_voxels = 0;
     state->expected_static_leftovers = 1000;
@@ -999,7 +1042,7 @@ static bool debug_convert_shape_to_pbd(DebugRunState *state, float requested_siz
     int64_t dynamic_count = 0;
     for (int y = 0; y < side; ++y) for (int z = 0; z < side; ++z)
         for (int x = 0; x < side; ++x)
-            if (!l_shape || x < side / 2 || z < side / 2) ++dynamic_count;
+            if (debug_shape_occupied(x, y, z, side, shape)) ++dynamic_count;
     int64_t needed_particles = 8 * dynamic_count;
     if (dynamic_count > MAX_VOXELS || needed_particles > MAX_PARTICLES ||
         dynamic_count > INT_MAX) {
@@ -1011,8 +1054,11 @@ static bool debug_convert_shape_to_pbd(DebugRunState *state, float requested_siz
 
     int *lattice = malloc((size_t)lattice_count * sizeof(*lattice));
     float *particle_mass = calloc((size_t)MAX_PARTICLES, sizeof(*particle_mass));
-    if (!lattice || !particle_mass) {
-        free(lattice); free(particle_mass);
+    size_t vertex_side = (size_t)side + 1u;
+    Particle **shape_vertices = shape >= 2 ?
+        calloc(vertex_side * vertex_side * vertex_side, sizeof(*shape_vertices)) : NULL;
+    if (!lattice || !particle_mass || (shape >= 2 && !shape_vertices)) {
+        free(lattice); free(particle_mass); free(shape_vertices);
         debug_add_failure(state, "PBD size %.9g: unable to allocate conversion workspace", size);
         return false;
     }
@@ -1022,7 +1068,7 @@ static bool debug_convert_shape_to_pbd(DebugRunState *state, float requested_siz
     for (int64_t i = 0; i < lattice_count; ++i) lattice[i] = -1;
     for (int y = 0; y < side; ++y) for (int z = 0; z < side; ++z) for (int x = 0; x < side; ++x) {
         int flat = (y * side + z) * side + x;
-        if (l_shape && x >= side / 2 && z >= side / 2) continue;
+        if (!debug_shape_occupied(x, y, z, side, shape)) continue;
         float px = -5.0f * VOXEL_SIZE + ((float)x + 0.5f) * pbdSolidVoxelSize;
         float py = 18.0f * VOXEL_SIZE + ((float)y + 0.5f) * pbdSolidVoxelSize +
                    (state->refinement_demo ? 15.0f : 0.0f);
@@ -1031,6 +1077,22 @@ static bool debug_convert_shape_to_pbd(DebugRunState *state, float requested_siz
         if (idx < 0) goto conversion_failed;
         voxels[idx].debugClusterTag = DEBUG_TEST_TAG;
         lattice[flat] = idx;
+        if (shape_vertices) for (int c = 0; c < 8; ++c) {
+            size_t vertex = (((size_t)y + ((c >> 1) & 1)) * vertex_side +
+                             (size_t)z + ((c >> 2) & 1)) * vertex_side +
+                             (size_t)x + (c & 1);
+            Particle *old = voxels[idx].particles[c];
+            Particle *shared = shape_vertices[vertex];
+            if (!shared) {
+                shape_vertices[vertex] = old;
+            } else if (shared != old) {
+                if (old->glue_count > 0) --old->glue_count;
+                particle_release(old);
+                particle_retain(shared);
+                ++shared->glue_count;
+                voxels[idx].particles[c] = shared;
+            }
+        }
         if (x > 0 && lattice[flat - 1] >= 0)
             debug_glue_pbd_faces(idx, lattice[flat - 1], 1);
         if (z > 0 && lattice[flat - side] >= 0)
@@ -1070,7 +1132,7 @@ static bool debug_convert_shape_to_pbd(DebugRunState *state, float requested_siz
         debug_add_failure(state, "PBD size %.9g: unable to allocate VGS hierarchy", size);
         goto conversion_failed;
     }
-    if (!l_shape && !debug_validate_cube_vgs_hierarchy(side)) {
+    if (shape == 0 && !debug_validate_cube_vgs_hierarchy(side)) {
         debug_add_failure(state, "PBD size %.9g: invalid VGS octree", size);
         goto conversion_failed;
     }
@@ -1146,19 +1208,19 @@ static bool debug_convert_shape_to_pbd(DebugRunState *state, float requested_siz
     rebuild_all_voxel_surfaces();
     refresh_static_voxel_beliefs();
     meshDirty = true;
-    free(lattice); free(particle_mass);
+    free(lattice); free(particle_mass); free(shape_vertices);
     return true;
 
 conversion_failed:
     clear_vgs_hierarchy();
     debug_add_failure(state, "PBD size %.9g: cube conversion failed after preflight", size);
-    free(lattice); free(particle_mass);
+    free(lattice); free(particle_mass); free(shape_vertices);
     return false;
 }
 
 static bool debug_convert_cube_to_pbd(DebugRunState *state, float requested_size)
 {
-    return debug_convert_shape_to_pbd(state, requested_size, false);
+    return debug_convert_shape_to_pbd(state, requested_size, 0);
 }
 
 static bool debug_remove_tagged_voxels(int tag)
@@ -1258,7 +1320,8 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
             ++sample.tagged_dynamic;
             bool embedded = vgsHierarchy.adaptive && !voxel->simulate_dofs &&
                 cpu_partial_relation_for_particle(voxel->particles[0],NULL)!=NULL;
-            if (voxel->vgs_active && (!vgsHierarchy.adaptive || voxel->simulate_dofs || embedded))
+            if (voxel->vgs_active && (debugUseGameplayAmrRendering ||
+                                      !vgsHierarchy.adaptive || voxel->simulate_dofs || embedded))
                 ++sample.tagged_rendered;
         }
         else ++sample.tagged_static;
@@ -1303,7 +1366,7 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
             }
         }
     }
-    if (vgsHierarchy.adaptive)
+    if (vgsHierarchy.adaptive && !debugUseGameplayAmrRendering)
         for (int i = 0; i < vgsHierarchy.node_count; ++i)
             if (vgs_node_constraints_enabled(&vgsHierarchy.nodes[i]) &&
                 !vgs_node_has_active_children(&vgsHierarchy.nodes[i]) &&
@@ -2276,7 +2339,10 @@ static bool debug_setup_active_cube_drop(DebugRunState *state)
     state->camera.target = (Vector3){ 0.0f, 7.0f, 0.0f };
     debug_capture(state, "phase-01-static-cube.png", "static-cube", 0);
     if (!debug_convert_shape_to_pbd(state, DEBUG_PBD_VOXEL_SIZE,
-                                    state->arbitrary_shape_drop)) return false;
+                                    state->edge_frame_drop ? 4 :
+                                    state->crossed_skeleton_drop ? 3 :
+                                    state->crossed_tunnel_drop ? 2 :
+                                    (state->arbitrary_shape_drop ? 1 : 0))) return false;
     if (!debug_init_vgs_temporal_curvature()) {
         debug_add_failure(state, "unable to allocate VGS temporal history");
         return false;
@@ -2359,20 +2425,42 @@ static bool debug_write_occupancy_levels(DebugRunState *state)
     return true;
 }
 
-static bool debug_setup_adaptive_l_drop(DebugRunState *state)
+static bool debug_setup_adaptive_partial_drop(DebugRunState *state, int shape)
 {
     state->active_cube_drop = true;
     state->adaptive_cube_drop = true;
     state->arbitrary_shape_drop = true;
+    state->crossed_tunnel_drop = shape == 2;
+    state->crossed_skeleton_drop = shape == 3;
+    state->edge_frame_drop = shape == 4;
     if (!debug_setup_active_cube_drop(state)) return false;
-    if (vgsHierarchy.grid_side != 16 || vgsHierarchy.leaf_count != 3072 ||
+    if (vgsHierarchy.grid_side != 16 ||
+        vgsHierarchy.leaf_count != (shape == 4 ? 2048 : shape == 3 ? 2560 :
+                                    shape == 2 ? 2304 : 3072) ||
         vgsHierarchy.leaf_capacity != 4096 || vgsHierarchy.partial_node_count <= 0 ||
-        vgsHierarchy.empty_node_count <= 0 || vgsHierarchy.virtual_corner_refs <= 0) {
+        (shape == 1 && vgsHierarchy.empty_node_count <= 0) ||
+        (shape == 1 && vgsHierarchy.virtual_corner_refs <= 0)) {
         debug_add_failure(state,
-            "L occupancy mismatch side=%d leaves=%d/%d partial=%d empty=%d virtual=%d",
+            "partial-shape occupancy mismatch side=%d leaves=%d/%d partial=%d empty=%d virtual=%d",
             vgsHierarchy.grid_side, vgsHierarchy.leaf_count, vgsHierarchy.leaf_capacity,
             vgsHierarchy.partial_node_count, vgsHierarchy.empty_node_count,
             vgsHierarchy.virtual_corner_refs);
+        return false;
+    }
+    if (shape == 2 && vgsHierarchy.partial_node_count < 290) {
+        debug_add_failure(state, "crossed tunnels expected many partial nodes; got %d",
+                          vgsHierarchy.partial_node_count);
+        return false;
+    }
+    if (shape == 3 && vgsHierarchy.partial_node_count != vgsHierarchy.node_count) {
+        debug_add_failure(state, "crossed skeleton expected all %d nodes partial; got %d",
+                          vgsHierarchy.node_count, vgsHierarchy.partial_node_count);
+        return false;
+    }
+    if (shape == 4 && (vgsHierarchy.partial_node_count != 9 ||
+                       vgsHierarchy.empty_node_count != 288)) {
+        debug_add_failure(state, "edge frame expected 9 partial and 288 empty nodes; got %d and %d",
+                          vgsHierarchy.partial_node_count, vgsHierarchy.empty_node_count);
         return false;
     }
     if (!debug_write_occupancy_levels(state)) {
@@ -2397,9 +2485,8 @@ static bool debug_setup_adaptive_l_drop(DebugRunState *state)
         if (pointer_mask != node->real_corner_mask ||
             (node->occupancy == VGS_OCCUPANCY_EMPTY &&
              (node->active || node->vgs_enabled)) ||
-            (node->occupancy == VGS_OCCUPANCY_PARTIAL &&
-             (!node->active || (!node->partial_coarsenable &&
-                                !vgs_node_has_active_children(node)))) ||
+            (node->occupancy == VGS_OCCUPANCY_PARTIAL && node->active &&
+             !node->partial_coarsenable && !vgs_node_has_active_children(node)) ||
             (node->occupancy == VGS_OCCUPANCY_FULL &&
              node->real_corner_mask != 0xffu)) {
             debug_add_failure(state, "invalid occupancy state at hierarchy node %d", i);
@@ -2411,6 +2498,79 @@ static bool debug_setup_adaptive_l_drop(DebugRunState *state)
     state->camera.position = (Vector3){ 18.0f, 17.0f, 22.0f };
     state->camera.target = (Vector3){ 0.0f, 8.0f, 0.0f };
     return true;
+}
+
+static bool debug_setup_adaptive_l_drop(DebugRunState *state)
+{
+    return debug_setup_adaptive_partial_drop(state, 1);
+}
+
+static bool debug_setup_adaptive_crossed_tunnel_drop(DebugRunState *state)
+{
+    return debug_setup_adaptive_partial_drop(state, 2);
+}
+
+static bool debug_setup_adaptive_crossed_skeleton_drop(DebugRunState *state)
+{
+    return debug_setup_adaptive_partial_drop(state, 3);
+}
+
+static bool debug_setup_adaptive_crossed_skeleton_gameplay_drop(DebugRunState *state)
+{
+    if (!debug_setup_adaptive_partial_drop(state, 3)) return false;
+    state->gameplay_render_drop = true;
+    debugUseGameplayAmrRendering = true;
+    return true;
+}
+
+static bool debug_setup_adaptive_edge_frame_gameplay_drop(DebugRunState *state)
+{
+    if (!debug_setup_adaptive_partial_drop(state, 4)) return false;
+    state->gameplay_render_drop = true;
+    debugUseGameplayAmrRendering = true;
+    state->camera.position.y += 2.0f;
+    state->camera.target.y += 2.0f;
+    return true;
+}
+
+static void debug_record_partial_weld_workload(DebugRunState *state, int step)
+{
+    if (!state->partial_weld_file) return;
+    int parents = 0, chunks = 0, rows = 0;
+    bool gpu = physics_backend_is_gpu(physicsBackend.active) &&
+               gpuPhysics.partial_stage &&
+               gpuPhysics.partial_words >= gpuPhysics.partial_constraint_capacity;
+    const uint32_t *chunk_masks = gpu ? gpuPhysics.partial_stage +
+        gpuPhysics.partial_words - gpuPhysics.partial_constraint_capacity : NULL;
+    for (int i = 0; i < vgsHierarchy.node_count; ++i) {
+        const VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+        if (!node->partial_coarsenable) continue;
+        uint8_t terminal = vgs_terminal_child_mask(node);
+        if (!terminal) continue;
+        ++parents;
+        int eligible = 0;
+        for (int r = 0; r < node->embedding_count; ++r)
+            eligible += (vgsHierarchy.embedding_relations[
+                node->embedding_begin + r].immediate_child_mask & terminal) != 0;
+        rows += eligible;
+        if (gpu) {
+            const uint32_t *meta = gpuPhysics.partial_stage +
+                (size_t)i * GPU_PARTIAL_NODE_WORDS;
+            for (uint32_t c = 0; c < meta[143]; ++c)
+                chunks += (chunk_masks[meta[142] + c] & terminal) != 0;
+        } else {
+            chunks += (eligible + GPU_PARTIAL_WELD_CHUNK - 1) /
+                      GPU_PARTIAL_WELD_CHUNK;
+        }
+    }
+    fprintf(state->partial_weld_file, "%d,%d,%d,%d\n", step, parents, chunks, rows);
+    ++state->partial_weld_samples;
+    state->partial_weld_parent_sum += (uint64_t)parents;
+    state->partial_weld_chunk_sum += (uint64_t)chunks;
+    state->partial_weld_row_sum += (uint64_t)rows;
+    if (parents > state->partial_weld_parent_peak) state->partial_weld_parent_peak = parents;
+    if (chunks > state->partial_weld_chunk_peak) state->partial_weld_chunk_peak = chunks;
+    if (rows > state->partial_weld_row_peak) state->partial_weld_row_peak = rows;
 }
 
 static bool debug_setup_amr_projectile_impact(DebugRunState *state)
@@ -4926,6 +5086,68 @@ static void debug_validate_step(DebugRunState *state, int step)
 #if defined(GRAPHICS_API_OPENGL_43) || (defined(__APPLE__) && defined(FPS_GPU_METAL))
         if (state->arbitrary_shape_drop && step == 1 &&
             physics_backend_is_gpu(physicsBackend.active)) {
+            size_t mask_base = gpuPhysics.partial_words -
+                               gpuPhysics.partial_constraint_capacity;
+            size_t expected_base =
+                (size_t)vgsHierarchy.node_count * GPU_PARTIAL_NODE_WORDS +
+                (size_t)gpuPhysics.partial_relation_count * GPU_PARTIAL_REL_WORDS +
+                (size_t)gpuPhysics.compact_count + 1u +
+                (size_t)gpuPhysics.partial_relation_count +
+                gpuPhysics.partial_global_job_start +
+                gpuPhysics.partial_global_job_count;
+            if (gpuPhysics.partial_words < gpuPhysics.partial_constraint_capacity ||
+                mask_base != expected_base) {
+                debug_add_failure(state, "partial weld chunk-mask layout mismatch");
+            } else {
+                bool culled_single_child = false;
+                for (int node_id = 0; node_id < vgsHierarchy.node_count; ++node_id) {
+                    const VgsHierarchyNode *node = &vgsHierarchy.nodes[node_id];
+                    if (!node->partial_coarsenable) continue;
+                    const uint32_t *meta = gpuPhysics.partial_stage +
+                        (size_t)node_id * GPU_PARTIAL_NODE_WORDS;
+                    if (meta[1] != (uint32_t)node->embedding_count ||
+                        meta[143] != (meta[1] + GPU_PARTIAL_WELD_CHUNK - 1u) /
+                                     GPU_PARTIAL_WELD_CHUNK ||
+                        (size_t)meta[142] + meta[143] >
+                            gpuPhysics.partial_constraint_capacity) {
+                        debug_add_failure(state, "partial weld chunk range invalid at node %d",
+                                          node_id);
+                        break;
+                    }
+                    uint32_t previous_mask = 0;
+                    for (uint32_t c = 0; c < meta[143]; ++c) {
+                        uint32_t expected_mask = 0;
+                        for (uint32_t n = c * GPU_PARTIAL_WELD_CHUNK;
+                             n < meta[1] && n < (c + 1u) * GPU_PARTIAL_WELD_CHUNK; ++n) {
+                            size_t row = (size_t)vgsHierarchy.node_count *
+                                GPU_PARTIAL_NODE_WORDS +
+                                (size_t)(meta[0] + n) * GPU_PARTIAL_REL_WORDS;
+                            uint32_t row_mask = gpuPhysics.partial_stage[row + 3u];
+                            if (!row_mask || row_mask < previous_mask) {
+                                debug_add_failure(state,
+                                    "partial weld rows are not grouped at node %d", node_id);
+                                break;
+                            }
+                            previous_mask = row_mask;
+                            expected_mask |= row_mask;
+                        }
+                        uint32_t packed_mask = gpuPhysics.partial_stage[
+                            mask_base + meta[142] + c];
+                        if (packed_mask != expected_mask) {
+                            debug_add_failure(state,
+                                "partial weld chunk mask mismatch at node %d chunk %u",
+                                node_id, c);
+                            break;
+                        }
+                        if (node_id == 0 && (packed_mask & 1u) == 0u)
+                            culled_single_child = true;
+                    }
+                }
+                if (strcmp(debugRunConfig.scenario, "adaptive-l-drop") == 0 &&
+                    !culled_single_child)
+                    debug_add_failure(state,
+                        "partial weld table cannot cull an L-root chunk for child zero");
+            }
             for (int constraint = 0; constraint < gpuPhysics.constraint_count; ++constraint) {
                 uint32_t stage_id = gpuPhysics.constraint_stage[constraint].voxel_id;
                 if (stage_id < (uint32_t)gpuPhysics.dynamic_voxel_count) continue;
@@ -5064,10 +5286,12 @@ static void debug_validate_step(DebugRunState *state, int step)
             !vgsHierarchy.nodes[0].vgs_enabled &&
             !vgs_node_has_active_children(&vgsHierarchy.nodes[0]);
         if (!vgsHierarchy.nodes[0].active || active_nodes == 0 ||
-            (!pending_broken_terminal_refine &&
+            (!state->gameplay_render_drop && !pending_broken_terminal_refine &&
              terminal_nodes + active_leaves != sample.tagged_rendered) ||
             fabs(total_mass - expected_mass) > 0.1 ||
-            (!pending_broken_terminal_refine &&
+            // Partial terminals are drawn through their embedded fine cells;
+            // this debug-only volume sum tracks full terminals only.
+            (!state->arbitrary_shape_drop && !pending_broken_terminal_refine &&
              fabs(terminal_volume - expected_volume) > 0.01) ||
             sample.invalid_particle_refs > 0)
             debug_add_failure(state,
@@ -6107,6 +6331,17 @@ static bool debug_write_report(DebugRunState *state)
                     broken_nodes, broken_leaves,
                     enabled_vgs, enabled_welds,
                     gpuPhysics.constraint_count, sim_particle_count);
+            if (state->partial_weld_samples) {
+                double divisor = (double)state->partial_weld_samples;
+                fprintf(file, "  \"partialWeldWorkload\": {\"samples\": %d, \"activeParentsPeak\": %d, \"activeParentsMean\": %.9g, \"scheduledChunksPeak\": %d, \"scheduledChunksMean\": %.9g, \"eligibleRowsPeak\": %d, \"eligibleRowsMean\": %.9g},\n",
+                        state->partial_weld_samples,
+                        state->partial_weld_parent_peak,
+                        state->partial_weld_parent_sum / divisor,
+                        state->partial_weld_chunk_peak,
+                        state->partial_weld_chunk_sum / divisor,
+                        state->partial_weld_row_peak,
+                        state->partial_weld_row_sum / divisor);
+            }
             bool gpu_aabb = physics_backend_is_gpu(physicsBackend.active);
             uint64_t cpu_queries = 0;
             for (int i = 0; !gpu_aabb && i < cpuAabbProxyCount; ++i)
@@ -6481,6 +6716,18 @@ static int run_debug_harness(void)
         debug_add_failure(&state, "scenario setup failed without a diagnostic");
     }
 
+    if (setup_ok && state.arbitrary_shape_drop) {
+        if (!debug_join_path(state.partial_weld_path, sizeof(state.partial_weld_path),
+                             state.output_dir, "partial-weld-workload.csv") ||
+            !(state.partial_weld_file = fopen(state.partial_weld_path, "w"))) {
+            debug_add_failure(&state, "unable to create partial weld workload CSV");
+            setup_ok = false;
+        } else {
+            fputs("step,activePartialParents,scheduledChunks,eligibleRows\n",
+                  state.partial_weld_file);
+        }
+    }
+
     if (setup_ok) {
         debug_gif_begin(&state);
         debug_validate_step(&state, 0);
@@ -6529,6 +6776,7 @@ static int run_debug_harness(void)
                 state.benchmark_measured_steps++;
             }
             debug_validate_step(&state, step);
+            debug_record_partial_weld_workload(&state, step);
             debug_record_rip_step(&state, step);
             debug_record_rip_parent_child_strain(&state, step);
             debug_gif_capture(&state, step);
@@ -6562,6 +6810,11 @@ static int run_debug_harness(void)
         if (fclose(state.curvature_levels_file) != 0)
             debug_add_failure(&state, "failed to close curvature distribution CSV");
         state.curvature_levels_file = NULL;
+    }
+    if (state.partial_weld_file) {
+        if (fclose(state.partial_weld_file) != 0)
+            debug_add_failure(&state, "failed to close partial weld workload CSV");
+        state.partial_weld_file = NULL;
     }
     bool report_ok = debug_write_report(&state);
     bool passed = setup_ok && report_ok && state.failure_count == 0;

@@ -878,6 +878,9 @@ bool amrRepresented(VoxelState v){return (amrOccupancy(v)==2u||amrPartial(v))&&
 uint partialNodeBase(uint stage){return (stage-uint(uVoxelCount))*PARTIAL_NODE_WORDS;}
 uint partialRelationBase(uint relation){return amrControl.hierarchy_count*PARTIAL_NODE_WORDS+
     relation*PARTIAL_REL_WORDS;}
+uint partialChunkMaskBase(){return amrControl.hierarchy_count*PARTIAL_NODE_WORDS+
+    amrControl.padding[0]*PARTIAL_REL_WORDS+amrControl.padding[1]+1u+
+    amrControl.padding[0]+amrControl.padding[2]+amrControl.padding[3];}
 float partialFloat(uint index){return uintBitsToFloat(partial[index]);}
 void amrLoadCorners(uint stage,VoxelState v,bool predicted,out vec3 corners[8]){
     vec3 anchor[8];for(int a=0;a<8;++a){uint id=voxelParticle(v,a);
@@ -909,6 +912,8 @@ void scatterPartialWeld(uint stage,uint chunk){
     uint terminalMask=amrTerminalMask(parent);
     if(terminalMask==0u)return;
     uint base=partialNodeBase(stage),begin=partial[base],count=partial[base+1u];
+    if(chunk>=count||(partial[partialChunkMaskBase()+partial[base+142u]+
+        chunk/PARTIAL_WELD_CHUNK]&terminalMask)==0u)return;
     uint rank=partial[base+2u];float fraction=partialFloat(base+3u);
     vec3 anchor[8];for(uint a=0u;a<rank;++a){uint id=voxelParticle(parent,int(a));
         if(id>=uint(gpuControl.x))return;anchor[a]=particle[id].predicted_base_inv_mass.xyz;}
@@ -1270,18 +1275,21 @@ void amrCompile(uint gid){
        v.flags.y!=0||v.flags.z!=0)return;
     bool embedded=amrPartial(v);
     uint mask=gid>=uint(uVoxelCount)?amrTerminalMask(v):0u;
-    uint chunks=0u;if(embedded&&mask!=0u){
+    uint chunks=0u,chunkBegin=0u,chunkCount=0u;if(embedded&&mask!=0u){
         uint base=partialNodeBase(gid);
-        chunks=(partial[base+1u]+PARTIAL_WELD_CHUNK-1u)/PARTIAL_WELD_CHUNK;}
+        chunkBegin=partial[base+142u];chunkCount=partial[base+143u];
+        uint maskBase=partialChunkMaskBase();
+        for(uint c=0u;c<chunkCount;++c)chunks+=uint((partial[maskBase+chunkBegin+c]&mask)!=0u);}
     uint emit=1u+(!embedded&&mask!=0u?1u:0u)+chunks;
     uint slot=atomicAdd(amrControl.constraint_count,emit);
     if(slot+emit>amrControl.constraint_capacity){atomicOr(amrControl.overflow,AMR_OVERFLOW_CONSTRAINT);return;}
     uint base=16u+slot*4u;dispatchArgs[base]=0u;dispatchArgs[base+1u]=gid;
     dispatchArgs[base+2u]=0u;dispatchArgs[base+3u]=0u;if(!embedded&&mask!=0u){base+=4u;
     dispatchArgs[base]=1u;dispatchArgs[base+1u]=gid;dispatchArgs[base+2u]=mask;dispatchArgs[base+3u]=0u;}
-    for(uint c=0u;c<chunks;++c){base+=4u;dispatchArgs[base]=3u;
-        dispatchArgs[base+1u]=gid;dispatchArgs[base+2u]=c*PARTIAL_WELD_CHUNK;
-        dispatchArgs[base+3u]=0u;}
+    if(chunks!=0u){uint maskBase=partialChunkMaskBase();
+        for(uint c=0u;c<chunkCount;++c){if((partial[maskBase+chunkBegin+c]&mask)==0u)continue;
+            base+=4u;dispatchArgs[base]=3u;dispatchArgs[base+1u]=gid;
+            dispatchArgs[base+2u]=c*PARTIAL_WELD_CHUNK;dispatchArgs[base+3u]=0u;}}
 }
 
 void amrPrepareIndirect(uint gid){

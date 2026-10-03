@@ -569,6 +569,11 @@ inline uint partialRelationBase(uint relation, device const uint *partial,
                                 device const AmrControl *amr) {
     return amr->hierarchy_count * PARTIAL_NODE_WORDS + relation * PARTIAL_REL_WORDS;
 }
+inline uint partialChunkMaskBase(device const AmrControl *amr) {
+    return amr->hierarchy_count * PARTIAL_NODE_WORDS +
+           amr->padding[0] * PARTIAL_REL_WORDS + amr->padding[1] + 1u +
+           amr->padding[0] + amr->padding[2] + amr->padding[3];
+}
 inline float partialFloat(device const uint *partial, uint index) {
     return as_type<float>(partial[index]);
 }
@@ -625,6 +630,9 @@ inline void scatterPartialWeld(uint stage, uint chunk,
     uint terminalMask=amrTerminalMask(parent,voxel,amr);
     if(terminalMask==0u)return;
     uint base=partialNodeBase(stage,u), begin=partial[base], count=partial[base+1u];
+    if(chunk>=count ||
+       (partial[partialChunkMaskBase(amr)+partial[base+142u]+chunk/PARTIAL_WELD_CHUNK]
+        & terminalMask)==0u)return;
     uint rank=partial[base+2u];
     float fraction=partialFloat(partial,base+3u);
     float3 anchor[8];
@@ -2022,10 +2030,13 @@ inline void amrCompile(uint gid, device const VoxelState *voxel,
     if(v.flags.x==0||v.flags.w==0||!amrRepresented(v)||v.flags.y!=0||v.flags.z!=0)return;
     bool embedded=amrPartial(v);
     uint mask=gid>=uint(u.voxel_count)?amrTerminalMask(v,voxel,amr):0u;
-    uint chunks=0u;
+    uint chunks=0u, chunkBegin=0u, chunkCount=0u;
     if(embedded&&mask!=0u) {
         uint nodeBase=partialNodeBase(gid,u);
-        chunks=(partial[nodeBase+1u]+PARTIAL_WELD_CHUNK-1u)/PARTIAL_WELD_CHUNK;
+        chunkBegin=partial[nodeBase+142u];chunkCount=partial[nodeBase+143u];
+        uint maskBase=partialChunkMaskBase(amr);
+        for(uint c=0u;c<chunkCount;++c)
+            chunks+=(partial[maskBase+chunkBegin+c]&mask)!=0u;
     }
     uint emit=1u+(!embedded&&mask!=0u?1u:0u)+chunks;
     uint slot=atomic_fetch_add_explicit(reinterpret_cast<device atomic_uint *>(&amr->constraint_count),emit,memory_order_relaxed);
@@ -2033,7 +2044,10 @@ inline void amrCompile(uint gid, device const VoxelState *voxel,
     uint base=16u+slot*4u;
     dispatchArgs[base]=0u;dispatchArgs[base+1u]=gid;dispatchArgs[base+2u]=0u;dispatchArgs[base+3u]=0u;
     if(!embedded&&mask!=0u){base+=4u;dispatchArgs[base]=1u;dispatchArgs[base+1u]=gid;dispatchArgs[base+2u]=mask;dispatchArgs[base+3u]=0u;}
-    for(uint c=0u;c<chunks;++c){base+=4u;dispatchArgs[base]=3u;dispatchArgs[base+1u]=gid;dispatchArgs[base+2u]=c*PARTIAL_WELD_CHUNK;dispatchArgs[base+3u]=0u;}
+    if(chunks!=0u){uint maskBase=partialChunkMaskBase(amr);
+        for(uint c=0u;c<chunkCount;++c){if((partial[maskBase+chunkBegin+c]&mask)==0u)continue;
+            base+=4u;dispatchArgs[base]=3u;dispatchArgs[base+1u]=gid;
+            dispatchArgs[base+2u]=c*PARTIAL_WELD_CHUNK;dispatchArgs[base+3u]=0u;}}
 }
 
 inline void amrPrepareIndirect(uint gid, device const int *control,
