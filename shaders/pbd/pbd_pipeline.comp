@@ -86,6 +86,7 @@ layout(std430, binding = 18) buffer AmrControlBuffer { AmrControl amrControl; };
 layout(std430, binding = 19) buffer AabbStateBuffer { AabbState aabbState[]; };
 layout(std430, binding = 20) buffer AabbOwnerBuffer { uint aabbOwner[]; };
 layout(std430, binding = 21) buffer AabbControlBuffer { AabbControl aabbControl; };
+layout(std430, binding = 22) readonly buffer PartialBuffer { uint partial[]; };
 
 uniform int uMode;
 uniform int uParticleCount;
@@ -169,11 +170,15 @@ const int CONTROL_FLAG_TOPOLOGY_DIRTY = 2;
 const int CONTROL_FLAG_BREAK_OCCURRED = 4;
 const uint AMR_OCCUPANCY_SHIFT = 8u;
 const uint AMR_FORCE_REFINED = 1u << 10u;
+const uint AMR_PARTIAL_EMBEDDED = 1u << 11u;
 const uint AMR_REAL_MASK_SHIFT = 16u;
 const uint AMR_DECISION_REFINE = 1u;
 const uint AMR_DECISION_COARSEN = 2u;
 const uint AMR_OVERFLOW_CONSTRAINT = 1u;
 const uint AMR_OVERFLOW_PARTICLE = 2u;
+const uint PARTIAL_NODE_WORDS = 144u;
+const uint PARTIAL_REL_WORDS = 20u;
+const uint PARTIAL_WELD_CHUNK = 32u;
 
 uint voxelParticle(VoxelState v, int corner) {
     return (corner < 4) ? v.particle_0_3[corner] : v.particle_4_7[corner - 4];
@@ -355,6 +360,10 @@ void applyCorrections(uint gid) {
 }
 
 // Separable, precomputed factors of A and R=(A^T A)^-1 A^T.
+bool amrPartial(VoxelState v);
+uint partialNodeBase(uint stage);
+float partialFloat(uint index);
+void amrLoadCorners(uint stage,VoxelState v,bool predicted,out vec3 corners[8]);
 const float WELD_A[6] = float[6](1.0, 0.0, 0.5, 0.5, 0.0, 1.0);
 const float WELD_R[6] = float[6](5.0/6.0, 1.0/3.0, -1.0/6.0,
                                   -1.0/6.0, 1.0/3.0, 5.0/6.0);
@@ -444,6 +453,10 @@ void solveVgs(uint gid) {
         dynamicParticle = dynamicParticle || (w > 0.0);
     }
     if (!dynamicParticle) return;
+    bool embedded=amrPartial(v);
+    uint nodeBase=embedded?partialNodeBase(uint(uVgsBegin)+gid):0u;
+    if(embedded){amrLoadCorners(uint(uVgsBegin)+gid,v,true,p);
+        for(int c=0;c<8;++c)original[c]=p[c];}
 
     float restEdge = v.pos_rest_edge.w;
     float restVolume = v.velocity_rest_volume.w;
@@ -486,7 +499,12 @@ void solveVgs(uint gid) {
         nextP[6]=centerPos-u0+u1+u2; nextP[7]=centerPos+u0+u1+u2;
         for (int i = 0; i < 8; ++i) p[i] = nextP[i];
     }
-    for (int i = 0; i < 8; ++i) {
+    if(embedded){uint rank=partial[nodeBase+2u];float fraction=partialFloat(nodeBase+3u);
+        for(uint a=0u;a<rank;++a){if(applyWeight[a]<=0.0)continue;vec3 delta=vec3(0.0);
+            for(uint c=0u;c<8u;++c)delta+=(p[c]-original[c])*
+                partialFloat(nodeBase+76u+a*8u+c);
+            accumulate(voxelParticle(v,int(a)),delta*fraction,applyWeight[a]);}}
+    else for (int i = 0; i < 8; ++i) {
         if (applyWeight[i] > 0.0) accumulate(voxelParticle(v, i), p[i] - original[i], applyWeight[i]);
     }
 }
@@ -659,7 +677,8 @@ void gatherBreakMask(uint gid) {
     if (gid >= uint(uVgsCount)) return;
     uint voxelId = uint(uVgsBegin) + gid;
     VoxelState v = voxel[voxelId];
-    if (v.flags.x == 0 || v.flags.y != 0 || v.flags.z != 0 || v.pos_rest_edge.w <= 0.0) {
+    if (v.flags.x == 0 || v.flags.w == 0 || v.flags.y != 0 ||
+        v.flags.z != 0 || v.pos_rest_edge.w <= 0.0) {
         voxel[voxelId] = v; return;
     }
     vec3 p[8];
@@ -668,6 +687,7 @@ void gatherBreakMask(uint gid) {
         if (tetherOwner[id] >= 0) return;
         p[i]=particle[id].predicted_base_inv_mass.xyz;
     }
+    if(amrPartial(v))amrLoadCorners(voxelId,v,true,p);
     vec3 axis0=((p[1]-p[0])+(p[3]-p[2])+(p[5]-p[4])+(p[7]-p[6]))*0.25;
     vec3 axis1=((p[2]-p[0])+(p[3]-p[1])+(p[6]-p[4])+(p[7]-p[5]))*0.25;
     vec3 axis2=((p[4]-p[0])+(p[5]-p[1])+(p[6]-p[2])+(p[7]-p[3]))*0.25;
@@ -852,6 +872,22 @@ uint amrOccupancy(VoxelState v) {
 uint amrRealMask(VoxelState v) {
     return (v.lifecycle.w >> AMR_REAL_MASK_SHIFT) & 0xffu;
 }
+bool amrPartial(VoxelState v){return (v.lifecycle.w&AMR_PARTIAL_EMBEDDED)!=0u;}
+bool amrRepresented(VoxelState v){return (amrOccupancy(v)==2u||amrPartial(v))&&
+    amrRealMask(v)==0xffu;}
+uint partialNodeBase(uint stage){return (stage-uint(uVoxelCount))*PARTIAL_NODE_WORDS;}
+uint partialRelationBase(uint relation){return amrControl.hierarchy_count*PARTIAL_NODE_WORDS+
+    relation*PARTIAL_REL_WORDS;}
+float partialFloat(uint index){return uintBitsToFloat(partial[index]);}
+void amrLoadCorners(uint stage,VoxelState v,bool predicted,out vec3 corners[8]){
+    vec3 anchor[8];for(int a=0;a<8;++a){uint id=voxelParticle(v,a);
+        anchor[a]=id<uint(gpuControl.x)?(predicted?
+            particle[id].predicted_base_inv_mass.xyz:particle[id].pos_radius.xyz):vec3(0.0);}
+    if(!amrPartial(v)){for(int c=0;c<8;++c)corners[c]=anchor[c];return;}
+    uint base=partialNodeBase(stage),rank=partial[base+2u];
+    for(int c=0;c<8;++c){vec3 p=vec3(0.0);for(uint a=0u;a<rank;++a)
+        p+=anchor[a]*partialFloat(base+12u+uint(c)*8u+a);corners[c]=p;}
+}
 
 uint amrChild(VoxelState parent, int corner) {
     return floatBitsToUint(corner < 4 ? parent.bounds_min[corner]
@@ -866,14 +902,34 @@ bool amrHasActiveChildren(VoxelState parent) {
     return false;
 }
 
-bool amrMeasure(VoxelState v, out float values[6]) {
+uint amrTerminalMask(VoxelState parent);
+
+void scatterPartialWeld(uint stage,uint chunk){
+    VoxelState parent=voxel[stage];
+    uint terminalMask=amrTerminalMask(parent);
+    if(terminalMask==0u)return;
+    uint base=partialNodeBase(stage),begin=partial[base],count=partial[base+1u];
+    uint rank=partial[base+2u];float fraction=partialFloat(base+3u);
+    vec3 anchor[8];for(uint a=0u;a<rank;++a){uint id=voxelParticle(parent,int(a));
+        if(id>=uint(gpuControl.x))return;anchor[a]=particle[id].predicted_base_inv_mass.xyz;}
+    for(uint n=chunk;n<min(chunk+PARTIAL_WELD_CHUNK,count);++n){
+        uint rel=partialRelationBase(begin+n),id=partial[rel];
+        if((partial[rel+3u]&terminalMask)==0u)continue;
+        if(id>=uint(gpuControl.x))continue;float weight=particle[id].prev_inv_mass.w;
+        if(weight<=0.0)continue;vec3 target=vec3(0.0);
+        for(uint a=0u;a<rank;++a)target+=anchor[a]*partialFloat(rel+4u+a);
+        accumulate(id,(target-particle[id].predicted_base_inv_mass.xyz)*fraction,weight);
+    }
+}
+
+bool amrMeasure(uint stage,VoxelState v, out float values[6]) {
     if (v.pos_rest_edge.w <= 0.0) return false;
     vec3 p[8];
     for (int i = 0; i < 8; ++i) {
         uint id = voxelParticle(v, i);
         if (id >= uint(gpuControl.x)) return false;
-        p[i] = particle[id].pos_radius.xyz;
     }
+    amrLoadCorners(stage,v,false,p);
     vec3 axis[3];
     axis[0]=((p[1]-p[0])+(p[3]-p[2])+(p[5]-p[4])+(p[7]-p[6]))*0.25;
     axis[1]=((p[2]-p[0])+(p[3]-p[1])+(p[6]-p[4])+(p[7]-p[5]))*0.25;
@@ -888,9 +944,9 @@ bool amrMeasure(VoxelState v, out float values[6]) {
     return true;
 }
 
-bool amrDeformed(VoxelState v, float rootEdge) {
+bool amrDeformed(uint stage,VoxelState v, float rootEdge) {
     float values[6];
-    if (!amrMeasure(v, values)) return false;
+    if (!amrMeasure(stage,v, values)) return false;
     float level=log2(max(rootEdge/max(v.pos_rest_edge.w,uVgsEpsilon),1.0));
     float levelFraction=clamp(level/max(float(amrControl.levels),1.0),0.0,1.0);
     float fraction=mix(amrControl.deformation_coarse_fraction,
@@ -916,9 +972,9 @@ void amrClear(uint gid) {
 void amrSample(uint gid) {
     if (gid >= amrControl.total_stage_count) return;
     VoxelState v=voxel[gid];
-    if (amrOccupancy(v)!=2u || amrRealMask(v)!=0xffu) return;
+    if (!amrRepresented(v)) return;
     float values[6];
-    if (!amrMeasure(v,values)) return;
+    if (!amrMeasure(gid,v,values)) return;
     float curvature=0.0;
     if (amrControl.sample_count>=2u && uDt>0.0) {
         float invDtSquared=1.0/(uDt*uDt);
@@ -937,7 +993,7 @@ void amrSelect(uint gid) {
     if(gid>=amrControl.hierarchy_count)return;
     uint stage=uint(uVoxelCount)+gid;
     VoxelState node=voxel[stage];
-    if(node.flags.w==0||amrOccupancy(node)!=2u||amrRealMask(node)!=0xffu)return;
+    if(node.flags.w==0||!amrRepresented(node))return;
     bool hasChildren=amrHasActiveChildren(node);
     // A broken internal terminal must hand its mass to one child level.  It
     // remains disabled as a constraint and only acts as a topology ancestor.
@@ -951,25 +1007,27 @@ void amrSelect(uint gid) {
     float rootEdge=voxel[rootStage].pos_rest_edge.w;
     float level=log2(max(rootEdge/max(node.pos_rest_edge.w,uVgsEpsilon),1.0));
     float threshold=amrControl.curvature_threshold*pow(amrControl.threshold_factor,level);
-    bool deformed=uVgsBegin!=0&&amrDeformed(node,rootEdge);
+    bool deformed=uVgsBegin!=0&&amrDeformed(stage,node,rootEdge);
     if(!hasChildren){
         bool forced=(node.lifecycle.w&AMR_FORCE_REFINED)!=0u;
         if(forced||amrState[stage].latest[6]>threshold||deformed)
             amrState[stage].previous[7]=uintBitsToFloat(AMR_DECISION_REFINE);
         return;
     }
-    float childMean=0.0;
+    float childMean=0.0;uint childCount=0u;
     bool grandchildren=false,broken=false,childDeformed=false;
     for(int c=0;c<8;++c){
         uint child=amrChild(node,c);
-        if(child>=amrControl.total_stage_count){broken=true;continue;}
+        if(child>=amrControl.total_stage_count)continue;
         VoxelState cv=voxel[child];
+        if(amrOccupancy(cv)==0u)continue;
+        childCount++;
         broken=broken||cv.flags.x==0;
         childMean+=amrState[child].latest[6];
-        if(uVgsBegin!=0)childDeformed=childDeformed||amrDeformed(cv,rootEdge);
+        if(uVgsBegin!=0)childDeformed=childDeformed||amrDeformed(child,cv,rootEdge);
         if(child>=uint(uVoxelCount))grandchildren=grandchildren||amrHasActiveChildren(cv);
     }
-    childMean*=0.125;
+    if(childCount>0u)childMean/=float(childCount);
     bool forced=(node.lifecycle.w&AMR_FORCE_REFINED)!=0u;
     if(!forced&&!deformed&&!childDeformed&&amrState[stage].latest[6]<threshold&&
        childMean<amrControl.threshold_factor*threshold&&!grandchildren&&!broken)
@@ -1026,7 +1084,7 @@ void amrAccumulateTarget(uint id,vec3 position,vec3 velocity,float weight){
     atomicAddAmrVelocityMass(id,2,velocity.z*weight);
 }
 
-void amrTransitionScatter(uint gid){
+void amrFullTransitionScatter(uint gid){
     if(gid>=amrControl.hierarchy_count)return;
     uint stage=uint(uVoxelCount)+gid;
     uint decision=floatBitsToUint(amrState[stage].previous[7]);
@@ -1053,12 +1111,12 @@ void amrTransitionScatter(uint gid){
     }
 }
 
-void amrDormantScatter(uint gid){
+void amrFullDormantScatter(uint gid){
     if(gid>=uint(uVgsCount))return;
     uint stage=uint(uVgsBegin)+gid;
     if(stage<uint(uVoxelCount)||stage>=amrControl.total_stage_count)return;
     VoxelState parent=voxel[stage];
-    if(amrOccupancy(parent)!=2u||amrRealMask(parent)!=0xffu)return;
+    if(!amrRepresented(parent))return;
     if(parent.flags.w!=0&&amrHasActiveChildren(parent))return;
     vec3 coarsePos[8],coarseVel[8];
     for(int c=0;c<8;++c){uint id=voxelParticle(parent,c);if(id>=uint(gpuControl.x))return;
@@ -1068,6 +1126,76 @@ void amrDormantScatter(uint gid){
         vec3 p=vec3(0.0),v=vec3(0.0);for(int c=0;c<8;++c){float w=WELD_A[2*gx+(c&1)]*
         WELD_A[2*gy+((c>>1)&1)]*WELD_A[2*gz+((c>>2)&1)];p+=coarsePos[c]*w;v+=coarseVel[c]*w;}
         amrAccumulateTarget(id,p,v,1.0);}
+}
+
+void amrTransitionScatter(uint gid){
+    if(gid<amrControl.hierarchy_count){uint stage=uint(uVoxelCount)+gid;
+        if(!amrPartial(voxel[stage]))amrFullTransitionScatter(gid);}
+    if(gid<amrControl.padding[3]){
+        uint offsets=amrControl.hierarchy_count*PARTIAL_NODE_WORDS+
+                     amrControl.padding[0]*PARTIAL_REL_WORDS;
+        uint incidences=offsets+amrControl.padding[1]+1u;
+        uint jobs=incidences+amrControl.padding[0];
+        uint id=partial[jobs+amrControl.padding[2]+gid];
+        if(particle[id].predicted_base_inv_mass.w<=0.0){
+        vec3 p=vec3(0.0),v=vec3(0.0);float count=0.0;
+        for(uint i=partial[offsets+id];i<partial[offsets+id+1u];++i){
+            uint rel=partialRelationBase(partial[incidences+i]);
+            uint stage=uint(uVoxelCount)+partial[rel+1u];
+            if(stage>=amrControl.total_stage_count||
+               (floatBitsToUint(amrState[stage].previous[7])&AMR_DECISION_REFINE)==0u)continue;
+            VoxelState parent=voxel[stage];uint base=partialNodeBase(stage);
+            uint rank=partial[base+2u];
+            for(uint a=0u;a<rank;++a){uint anchor=voxelParticle(parent,int(a));
+                if(anchor>=uint(gpuControl.x))continue;float w=partialFloat(rel+4u+a);
+                p+=particle[anchor].pos_radius.xyz*w;v+=particle[anchor].velocity.xyz*w;}
+            count+=1.0;
+        }
+        if(count>0.0)amrAccumulateTarget(id,p/count,v/count,1.0);
+        }
+    }
+    if(gid<amrControl.hierarchy_count*8u){
+        uint node=gid/8u,a=gid%8u,stage=uint(uVoxelCount)+node;
+        VoxelState parent=voxel[stage];
+        if(!amrPartial(parent)||
+           (floatBitsToUint(amrState[stage].previous[7])&AMR_DECISION_COARSEN)==0u)return;
+        uint base=partialNodeBase(stage),rank=partial[base+2u];if(a>=rank)return;
+        uint begin=partial[base],count=partial[base+1u];vec3 p=vec3(0.0),v=vec3(0.0);
+        for(uint n=0u;n<count;++n){uint rel=partialRelationBase(begin+n),id=partial[rel];
+            if(id>=uint(gpuControl.x))return;float w=partialFloat(rel+12u+a);
+            p+=particle[id].pos_radius.xyz*w;v+=particle[id].velocity.xyz*w;}
+        amrAccumulateTarget(voxelParticle(parent,int(a)),p,v,1.0);
+    }
+}
+
+void amrDormantScatter(uint gid){
+    if(gid<uint(uVgsCount)){uint stage=uint(uVgsBegin)+gid;
+        if(stage<amrControl.total_stage_count&&!amrPartial(voxel[stage]))
+            amrFullDormantScatter(gid);}
+    if(uVgsCount<=0)return;
+    uint firstNode=partialNodeBase(uint(uVgsBegin));
+    if(gid>=partial[firstNode+141u])return;
+    uint offsets=amrControl.hierarchy_count*PARTIAL_NODE_WORDS+
+                 amrControl.padding[0]*PARTIAL_REL_WORDS;
+    uint incidences=offsets+amrControl.padding[1]+1u;
+    uint jobs=incidences+amrControl.padding[0];
+    uint id=partial[jobs+partial[firstNode+140u]+gid];
+    if(particle[id].prev_inv_mass.w>0.0)return;
+    vec3 p=vec3(0.0),v=vec3(0.0);float count=0.0;
+    for(uint i=partial[offsets+id];i<partial[offsets+id+1u];++i){
+        uint rel=partialRelationBase(partial[incidences+i]);
+        uint stage=uint(uVoxelCount)+partial[rel+1u];
+        if(stage<uint(uVgsBegin)||stage>=uint(uVgsBegin+uVgsCount)||
+           stage>=amrControl.total_stage_count)continue;
+        VoxelState parent=voxel[stage];
+        if(parent.flags.w!=0&&amrHasActiveChildren(parent))continue;
+        uint base=partialNodeBase(stage),rank=partial[base+2u];
+        for(uint a=0u;a<rank;++a){uint anchor=voxelParticle(parent,int(a));
+            if(anchor>=uint(gpuControl.x))continue;float w=partialFloat(rel+4u+a);
+            p+=particle[anchor].pos_radius.xyz*w;v+=particle[anchor].velocity.xyz*w;}
+        count+=1.0;
+    }
+    if(count>0.0)amrAccumulateTarget(id,p/count,v/count,1.0);
 }
 
 void amrTransitionApply(uint gid){
@@ -1088,11 +1216,12 @@ void amrTopologyApply(uint gid){
     uint decision=floatBitsToUint(amrState[stage].previous[7]);if(decision==0u)return;
     bool refine=(decision&AMR_DECISION_REFINE)!=0u;VoxelState parent=voxel[stage];
     for(int c=0;c<8;++c){uint child=amrChild(parent,c);if(child>=amrControl.total_stage_count)continue;
-        VoxelState cv=voxel[child];cv.flags.w=refine?1:0;voxel[child]=cv;if(refine){
+        VoxelState cv=voxel[child];if(amrOccupancy(cv)==0u)continue;
+        cv.flags.w=refine?1:0;voxel[child]=cv;if(refine){
         float parentId=amrState[child].latest[7];amrState[child]=amrState[stage];
         amrState[child].latest[7]=parentId;amrState[child].previous[7]=uintBitsToFloat(0u);}}
     if(refine){atomicAdd(amrControl.frame_refine_count,1u);atomicAdd(amrControl.total_refine_count,1u);}
-    else{float values[6];if(amrMeasure(parent,values)){for(int i=0;i<6;++i){
+    else{float values[6];if(amrMeasure(stage,parent,values)){for(int i=0;i<6;++i){
         amrState[stage].latest[i]=values[i];amrState[stage].previous[i]=values[i];}
         amrState[stage].latest[6]=0.0;}atomicAdd(amrControl.frame_coarsen_count,1u);
         atomicAdd(amrControl.total_coarsen_count,1u);}
@@ -1101,8 +1230,16 @@ void amrTopologyApply(uint gid){
 
 void amrMassScatter(uint gid){
     if(gid>=amrControl.total_stage_count)return;VoxelState v=voxel[gid];
-    if(v.flags.w==0||amrOccupancy(v)!=2u||amrRealMask(v)!=0xffu)return;
+    if(v.flags.w==0||!amrRepresented(v))return;
     if(gid>=uint(uVoxelCount)&&amrHasActiveChildren(v))return;
+    if(amrPartial(v)){
+        uint base=partialNodeBase(gid),rank=partial[base+2u];
+        float total=amrControl.mass_density*v.velocity_rest_volume.w*partialFloat(base+3u);
+        for(uint a=0u;a<rank;++a){uint id=voxelParticle(v,int(a));
+            if(id<amrControl.particle_capacity)
+                atomicAddAmrVelocityMass(id,3,total*partialFloat(base+4u+a));}
+        return;
+    }
     float contribution=amrControl.mass_density*v.velocity_rest_volume.w*0.125;
     for(int c=0;c<8;++c){uint id=voxelParticle(v,c);if(id<amrControl.particle_capacity)
         atomicAddAmrVelocityMass(id,3,contribution);}
@@ -1129,14 +1266,22 @@ uint amrTerminalMask(VoxelState parent){
 
 void amrCompile(uint gid){
     if(gid>=amrControl.total_stage_count)return;VoxelState v=voxel[gid];
-    if(v.flags.x==0||v.flags.w==0||amrOccupancy(v)!=2u||amrRealMask(v)!=0xffu||
+    if(v.flags.x==0||v.flags.w==0||!amrRepresented(v)||
        v.flags.y!=0||v.flags.z!=0)return;
-    uint mask=gid>=uint(uVoxelCount)?amrTerminalMask(v):0u;uint emit=1u+(mask!=0u?1u:0u);
+    bool embedded=amrPartial(v);
+    uint mask=gid>=uint(uVoxelCount)?amrTerminalMask(v):0u;
+    uint chunks=0u;if(embedded&&mask!=0u){
+        uint base=partialNodeBase(gid);
+        chunks=(partial[base+1u]+PARTIAL_WELD_CHUNK-1u)/PARTIAL_WELD_CHUNK;}
+    uint emit=1u+(!embedded&&mask!=0u?1u:0u)+chunks;
     uint slot=atomicAdd(amrControl.constraint_count,emit);
     if(slot+emit>amrControl.constraint_capacity){atomicOr(amrControl.overflow,AMR_OVERFLOW_CONSTRAINT);return;}
     uint base=16u+slot*4u;dispatchArgs[base]=0u;dispatchArgs[base+1u]=gid;
-    dispatchArgs[base+2u]=0u;dispatchArgs[base+3u]=0u;if(mask!=0u){base+=4u;
+    dispatchArgs[base+2u]=0u;dispatchArgs[base+3u]=0u;if(!embedded&&mask!=0u){base+=4u;
     dispatchArgs[base]=1u;dispatchArgs[base+1u]=gid;dispatchArgs[base+2u]=mask;dispatchArgs[base+3u]=0u;}
+    for(uint c=0u;c<chunks;++c){base+=4u;dispatchArgs[base]=3u;
+        dispatchArgs[base+1u]=gid;dispatchArgs[base+2u]=c*PARTIAL_WELD_CHUNK;
+        dispatchArgs[base+3u]=0u;}
 }
 
 void amrPrepareIndirect(uint gid){
@@ -1210,27 +1355,62 @@ float sphereProxyWeight(uint proxy,int corner){
     return proxy==8u?0.125:(proxy==uint(corner)?1.0:0.0);
 }
 
+uint amrEmbeddedRelation(uint id){
+    if(id>=amrControl.padding[1])return 0xffffffffu;
+    uint offsets=amrControl.hierarchy_count*PARTIAL_NODE_WORDS+
+                 amrControl.padding[0]*PARTIAL_REL_WORDS;
+    uint incidences=offsets+amrControl.padding[1]+1u;
+    for(uint i=partial[offsets+id];i<partial[offsets+id+1u];++i){
+        uint rel=partial[incidences+i],record=partialRelationBase(rel);
+        uint stage=uint(uVoxelCount)+partial[record+1u];
+        if(stage>=amrControl.total_stage_count)continue;
+        VoxelState owner=voxel[stage];
+        if(owner.flags.w!=0&&owner.flags.x!=0&&amrPartial(owner)&&
+           !amrHasActiveChildren(owner))return rel;
+    }
+    return 0xffffffffu;
+}
+
+void sphereContactDof(uint id,float proxyWeight,float sign,vec3 normal,
+                      float lambda,bool scatter,inout float denominator){
+    if(id>=uint(gpuControl.x)||proxyWeight<=0.0)return;
+    float inv=particle[id].prev_inv_mass.w;
+    if(inv>0.0){if(scatter)accumulate(id,normal*(sign*lambda*inv*proxyWeight),1.0);
+        else denominator+=inv*proxyWeight*proxyWeight;return;}
+    uint rel=amrEmbeddedRelation(id);if(rel==0xffffffffu)return;
+    uint record=partialRelationBase(rel),stage=uint(uVoxelCount)+partial[record+1u];
+    uint base=partialNodeBase(stage),rank=partial[base+2u];
+    for(uint a=0u;a<rank;++a){uint anchor=voxelParticle(voxel[stage],int(a));
+        if(anchor>=uint(gpuControl.x))continue;
+        float w=proxyWeight*partialFloat(record+4u+a);
+        float mass=particle[anchor].prev_inv_mass.w;if(mass<=0.0)continue;
+        if(scatter)accumulate(anchor,normal*(sign*lambda*mass*w),1.0);
+        else denominator+=mass*w*w;
+    }
+}
+
 void scatterSphereContact(uint aId,uint bId,bool dynamicB,SphereContact contact){
     VoxelState a=voxel[aId];VoxelState b;if(dynamicB)b=voxel[bId];float denominator=0.0;
     for(int c=0;c<8;++c){float weight=sphereProxyWeight(contact.aProxy,c);
-        uint id=voxelParticle(a,c);if(id<uint(gpuControl.x))denominator+=particle[id].prev_inv_mass.w*weight*weight;
+        uint id=voxelParticle(a,c);sphereContactDof(id,weight,1.0,contact.normal,
+            0.0,false,denominator);
         if(dynamicB){weight=sphereProxyWeight(contact.bProxy,c);id=voxelParticle(b,c);
-            if(id<uint(gpuControl.x))denominator+=particle[id].prev_inv_mass.w*weight*weight;}}
+            sphereContactDof(id,weight,-1.0,contact.normal,0.0,false,denominator);}}
     if(denominator<=uVgsEpsilon)return;float lambda=uCollisionRelaxation*contact.depth/denominator;
     for(int c=0;c<8;++c){float weight=sphereProxyWeight(contact.aProxy,c);uint id=voxelParticle(a,c);
-        if(id<uint(gpuControl.x)){float invMass=particle[id].prev_inv_mass.w;
-            if(invMass>0.0&&weight>0.0)accumulate(id,contact.normal*(lambda*invMass*weight),1.0);}
+        sphereContactDof(id,weight,1.0,contact.normal,lambda,true,denominator);
         if(dynamicB){weight=sphereProxyWeight(contact.bProxy,c);id=voxelParticle(b,c);
-            if(id<uint(gpuControl.x)){float invMass=particle[id].prev_inv_mass.w;
-                if(invMass>0.0&&weight>0.0)accumulate(id,-contact.normal*(lambda*invMass*weight),1.0);}}}
+            sphereContactDof(id,weight,-1.0,contact.normal,lambda,true,denominator);}}
 }
 
 bool amrSphereTerminal(uint gid,VoxelState v){
     bool hierarchyNode=gid>=uint(uVoxelCount);uint parent=hierarchyNode?
         floatBitsToUint(v.pos_rest_edge.x):floatBitsToUint(amrState[gid].latest[7]);
     bool owned=hierarchyNode||parent<amrControl.total_stage_count;
-    return owned&&v.flags.x!=0&&v.flags.w!=0&&v.flags.y==0&&v.flags.z==0&&
-        amrOccupancy(v)==2u&&amrRealMask(v)==0xffu&&(!hierarchyNode||!amrHasActiveChildren(v));
+    if(!owned||v.flags.x==0||v.flags.y!=0||v.flags.z!=0||
+       amrOccupancy(v)!=2u||amrRealMask(v)!=0xffu)return false;
+    if(hierarchyNode)return v.flags.w!=0&&!amrHasActiveChildren(v);
+    return v.flags.w!=0||amrEmbeddedRelation(voxelParticle(v,0))!=0xffffffffu;
 }
 
 int sphereShapeBody(VoxelState v){uint id=voxelParticle(v,0);
@@ -1287,7 +1467,8 @@ void amrSphereTreeCollisions(uint gid){
               if(occupancy!=1u&&voxel[child].flags.w==0)continue;if(stackSize>=64u){
                   atomicExchange(aabbControl.overflow,1u);return;}stack[stackSize++]=child;}
               atomicMaxAabbStack(stackSize);continue;}
-          if(occupancy!=2u||node.flags.x==0||node.flags.w==0||sphereShapeBody(node)==queryBody)continue;
+          if(occupancy!=2u||!amrSphereTerminal(nodeId,node)||
+             sphereShapeBody(node)==queryBody)continue;
           atomicAdd(aabbControl.candidate_count,1u);float nodeProxyRadius[9];
           loadSphereRadii(node.pos_rest_edge.w,nodeParticle,nodeProxyRadius);SphereContact contacts[4];
           int contactCount=gatherSphereContacts(queryPosition,queryProxyRadius,nodePosition,nodeProxyRadius,contacts);
@@ -1362,6 +1543,7 @@ void main() {
             uint base = 16u + gid * 4u;
             uint kind = dispatchArgs[base], voxelId = dispatchArgs[base + 1u];
             if (kind == 0u) solveVgs(voxelId);
+            else if(kind==3u)scatterPartialWeld(voxelId,dispatchArgs[base+2u]);
             else scatterHierarchyWeld(voxelId, dispatchArgs[base + 2u], kind == 2u);
         }
     }

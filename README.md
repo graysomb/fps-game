@@ -541,7 +541,7 @@ Available scenarios are:
   cells can change level on consecutive substeps. Dormant descendants follow trilinear
   parent motion and do not provide an independent fine-scale curvature signal
   until they become active.
-  CPU AMR also permits a 6-connected partial node to become a terminal. It
+  AMR permits a 6-connected partial node to become a terminal. It
   selects real descendant particles as generalized coordinates, reconstructs
   an algebraic eight-corner cage with a mass-weighted pseudoinverse (relative
   eigenvalue cutoff `1e-4`), and accepts the representation only below 5% RMS
@@ -554,8 +554,9 @@ Available scenarios are:
   decision. The parent remains constraint-disabled while its descendants take
   over the same material mass, so mass ownership is independent of VGS and weld
   enablement.
-  Resident GPU runs currently retain that established refined sparse path for
-  partial nodes; solid nodes continue to use resident AMR.
+  Resident GPU runs upload the partial embedding once per hierarchy rebuild;
+  partial-node decisions, transfers, constraints, mass, and embedded-leaf
+  collision response then run alongside solid nodes without a substep readback.
   On Metal and OpenGL 4.3, curvature sampling, AMR decisions, refinement/coarsening transfers,
   mass reconstruction, active particle compaction, and flat VGS/weld constraint
   compilation remain GPU resident between PBD substeps. Both substeps are encoded

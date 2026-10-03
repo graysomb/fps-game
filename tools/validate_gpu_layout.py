@@ -38,11 +38,17 @@ glsl_text = (ROOT / "shaders/pbd/pbd_pipeline.comp").read_text(encoding="utf-8")
 metal_text = (ROOT / "shaders/pbd/pbd_pipeline.metal").read_text(encoding="utf-8")
 glsl_slots = {int(value) for value in re.findall(r"binding\s*=\s*(\d+)", glsl_text)}
 metal_slots = {int(value) for value in re.findall(r"\[\[buffer\((\d+)\)\]\]", metal_text)}
-expected_slots = set(range(22))
+buffer_count_match = re.search(r"FPS_GPU_BUFFER_COUNT\s*=\s*(\d+)",
+                               (ROOT / "physics_gpu_layout.h").read_text(encoding="utf-8"))
+if buffer_count_match is None:
+    errors.append("C GPU buffer count is missing")
+expected_slots = set(range(int(buffer_count_match.group(1)))) if buffer_count_match else set()
 if glsl_slots != expected_slots:
     errors.append(f"GLSL buffer slots differ: {sorted(glsl_slots)}")
 if not expected_slots.issubset(metal_slots):
     errors.append(f"Metal buffer slots differ: {sorted(metal_slots)}")
+if buffer_count_match and int(buffer_count_match.group(1)) not in metal_slots:
+    errors.append("Metal uniform slot does not follow GPU buffers")
 
 amr_c = constants(ROOT / "physics_gpu_common.inc", r"GPU_AMR_META_([A-Z_]+)\s*=\s*(\d+)")
 amr_glsl = constants(ROOT / "shaders/pbd/pbd_pipeline.comp", r"const uint AMR_([A-Z_]+)\s*=\s*(\d+)u")

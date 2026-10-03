@@ -2008,7 +2008,9 @@ static void debug_readback_gpu_buffers(DebugRunState *state, int step)
                 ++state->gpu_tagged_corners_missing_from_sim_ids;
                 continue;
             }
-            if (state->adaptive_cube_drop && particle->base_inv_mass <= 0.0f) continue;
+            // Coarsened AMR leaves keep render particles resident with zero
+            // mass; only their active anchors belong in the solver simId list.
+            if (voxel->amr_body_id >= 0 && particle->base_inv_mass <= 0.0f) continue;
             bool zero_mass =
                 particle_readback[compact_id].predicted_base_inv_mass[3] <= 0.0f;
             if (zero_mass) {
@@ -4966,7 +4968,9 @@ static void debug_validate_step(DebugRunState *state, int step)
             int active_children = 0;
             for (int c = 0; c < 8; ++c) {
                 int child = root->children[c];
-                if (child == VGS_CHILD_EMPTY) continue;
+                if (child == VGS_CHILD_EMPTY ||
+                    (child >= 0 &&
+                     vgsHierarchy.nodes[child].occupancy == VGS_OCCUPANCY_EMPTY)) continue;
                 ++expected_children;
                 active_children += child >= 0 ? vgsHierarchy.nodes[child].active :
                     voxels[-child - 1].simulate_dofs;

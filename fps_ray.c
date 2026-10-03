@@ -1178,6 +1178,7 @@ typedef struct {
     float refine[8];
     float coarsen[8];
     float mass;
+    uint8_t immediate_child_mask;
 } VgsEmbeddingRelation;
 
 #define MAX_AMR_BODIES 1024
@@ -11357,6 +11358,7 @@ typedef struct {
     Particle *particle;
     float a[8];
     float mass;
+    uint8_t immediate_child_mask;
 } VgsEmbeddingCandidate;
 
 static void vgs_jacobi_eigen8(float input[8][8], float vector[8][8], float value[8])
@@ -11454,11 +11456,7 @@ static bool vgs_build_partial_embedding(VgsHierarchyNode *node,
                                         const int *leaves, int side, float leaf_edge)
 {
     int occupied = 0;
-    // The reduced embedding currently executes in the CPU gather path.  GPU
-    // backends retain the established sparse fully-refined representation
-    // until the relation table has a resident shader implementation.
     if (getenv("FPS_AMR_DISABLE_PARTIAL_COARSENING") ||
-        physics_backend_is_gpu(physicsBackend.active) ||
         !vgs_partial_connected(leaves, side, node, &occupied)) return true;
     int max_candidates = occupied * 8;
     VgsEmbeddingCandidate *candidate = calloc((size_t)max_candidates, sizeof(*candidate));
@@ -11477,11 +11475,17 @@ static bool vgs_build_partial_embedding(VgsHierarchyNode *node,
             int id=hash[slot];
             if(id<0) {
                 id=count++; hash[slot]=id; candidate[id].particle=p;
-                float u=(float)(x+(c&1))/(float)span;
-                float v=(float)(y+((c>>1)&1))/(float)span;
-                float w=(float)(z+((c>>2)&1))/(float)span;
+                int gx=x+(c&1), gy=y+((c>>1)&1), gz=z+((c>>2)&1);
+                float u=(float)gx/(float)span;
+                float v=(float)gy/(float)span;
+                float w=(float)gz/(float)span;
                 for(int k=0;k<8;++k) candidate[id].a[k]=
                     ((k&1)?u:1-u)*((k&2)?v:1-v)*((k&4)?w:1-w);
+                for(int child=0;child<8;++child)
+                    if (((child&1)?2*gx>=span:2*gx<=span) &&
+                        ((child&2)?2*gy>=span:2*gy<=span) &&
+                        ((child&4)?2*gz>=span:2*gz<=span))
+                        candidate[id].immediate_child_mask|=(uint8_t)(1u<<child);
             }
             candidate[id].mass += leaf_edge*leaf_edge*leaf_edge*0.125f;
         }
@@ -11526,6 +11530,7 @@ static bool vgs_build_partial_embedding(VgsHierarchyNode *node,
     double sum_sq=0;float max_error=0;
     for(int n=0;n<count;++n){VgsEmbeddingRelation *rel=&vgsHierarchy.embedding_relations[vgsHierarchy.embedding_relation_count++];
         memset(rel,0,sizeof(*rel));rel->particle=candidate[n].particle;rel->mass=candidate[n].mass;
+        rel->immediate_child_mask=candidate[n].immediate_child_mask;
         for(int a=0;a<rank;++a)for(int j=0;j<8;++j)
             rel->refine[a]+=candidate[n].a[j]*node->cage_from_anchor[j][a];
         for(int a=0;a<rank;++a)for(int j=0;j<8;++j)for(int k=0;k<8;++k)
@@ -11853,6 +11858,7 @@ static void gather_hierarchy_weld_constraints(VgsHierarchyNode *node,
         for (int a=0;a<node->embedding_rank;++a) anchor[a]=node->particles[a]->predicted_pos;
         for (int n=0;n<node->embedding_count;++n) {
             VgsEmbeddingRelation *rel=&vgsHierarchy.embedding_relations[node->embedding_begin+n];
+            if (!(rel->immediate_child_mask & terminal_mask)) continue;
             if (rel->particle->inv_mass<=0.0f) continue;
             Vector3 target={0};for(int a=0;a<node->embedding_rank;++a)
                 target=v_add(target,v_mul(anchor[a],rel->refine[a]));

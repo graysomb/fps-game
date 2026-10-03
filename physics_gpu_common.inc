@@ -93,10 +93,20 @@ _Static_assert(sizeof(GpuAabbControl) == 48, "GpuAabbControl/Metal mismatch");
 enum {
     GPU_AMR_META_OCCUPANCY_SHIFT = 8,
     GPU_AMR_META_FORCE_REFINED = 1u << 10,
+    GPU_AMR_META_PARTIAL_EMBEDDED = 1u << 11,
     GPU_AMR_META_REAL_MASK_SHIFT = 16,
     GPU_AMR_DECISION_REFINE = 1u,
     GPU_AMR_DECISION_COARSEN = 2u
 };
+
+enum { GPU_PARTIAL_NODE_WORDS = 144, GPU_PARTIAL_REL_WORDS = 20,
+       GPU_PARTIAL_WELD_CHUNK = 32 };
+
+static uint32_t gpu_float_word(float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
 
 typedef struct {
     uintptr_t id;
@@ -165,6 +175,7 @@ typedef struct {
     GpuBuffer aabb_state_buffer;
     GpuBuffer aabb_owner_buffer;
     GpuBuffer aabb_control_buffer;
+    GpuBuffer partial_buffer;
     GpuBuffer tether_buffer;
     GpuBuffer collision_meta_buffer;
     GpuBuffer hull_occupancy_buffer;
@@ -210,12 +221,20 @@ typedef struct {
     GpuTopologyState *topology_stage;
     GpuAmrState *amr_state_stage;
     GpuAmrControl amr_control_stage;
+    uint32_t *partial_stage;
+    size_t partial_words;
+    uint32_t partial_relation_count;
+    uint32_t partial_constraint_capacity;
+    uint32_t partial_global_job_count;
+    uint32_t partial_global_job_start;
+    uint32_t partial_level_job_count[MAX_AMR_BODIES][8];
     GpuAabbControl aabb_control_stage;
     int *world_to_dynamic;
     int *pool_to_compact;
     size_t particle_capacity;
     size_t sim_capacity;
     size_t voxel_capacity;
+    size_t constraint_stage_capacity;
     size_t static_collider_capacity;
     uint64_t static_uploaded_generation;
     uint64_t collision_uploaded_generation;
@@ -370,6 +389,7 @@ static void gpu_physics_release_resources(void) {
     gpu_buffer_destroy(&gpuPhysics.aabb_state_buffer);
     gpu_buffer_destroy(&gpuPhysics.aabb_owner_buffer);
     gpu_buffer_destroy(&gpuPhysics.aabb_control_buffer);
+    gpu_buffer_destroy(&gpuPhysics.partial_buffer);
     gpu_buffer_destroy(&gpuPhysics.tether_buffer);
     gpu_buffer_destroy(&gpuPhysics.collision_meta_buffer);
 #if defined(GRAPHICS_API_OPENGL_43)
@@ -434,6 +454,7 @@ static void gpu_physics_shutdown(void) {
     free(gpuPhysics.clone_parent_stage);
     free(gpuPhysics.topology_stage);
     free(gpuPhysics.amr_state_stage);
+    free(gpuPhysics.partial_stage);
     free(gpuPhysics.world_to_dynamic);
     free(gpuPhysics.pool_to_compact);
     memset(&gpuPhysics, 0, sizeof(gpuPhysics));
@@ -471,11 +492,18 @@ static bool gpu_stage_reserve(size_t particles, size_t sims, size_t voxels_count
         size_t cap = gpuPhysics.voxel_capacity ? gpuPhysics.voxel_capacity : 256;
         while (cap < voxels_count) cap *= 2;
         if (!gpu_resize_array((void **)&gpuPhysics.voxel_stage, cap, sizeof(*gpuPhysics.voxel_stage)) ||
-            !gpu_resize_array((void **)&gpuPhysics.constraint_stage, cap * 2u, sizeof(*gpuPhysics.constraint_stage)) ||
             !gpu_resize_array((void **)&gpuPhysics.compact_to_voxel, cap, sizeof(*gpuPhysics.compact_to_voxel)) ||
             !gpu_resize_array((void **)&gpuPhysics.topology_stage, cap * 2u, sizeof(*gpuPhysics.topology_stage)) ||
             !gpu_resize_array((void **)&gpuPhysics.amr_state_stage, cap, sizeof(*gpuPhysics.amr_state_stage))) return false;
         gpuPhysics.voxel_capacity = cap;
+    }
+    size_t constraints = voxels_count * 2u +
+        (size_t)vgsHierarchy.embedding_relation_count / GPU_PARTIAL_WELD_CHUNK +
+        (size_t)vgsHierarchy.node_count;
+    if (constraints > gpuPhysics.constraint_stage_capacity) {
+        if (!gpu_resize_array((void **)&gpuPhysics.constraint_stage, constraints,
+                              sizeof(*gpuPhysics.constraint_stage))) return false;
+        gpuPhysics.constraint_stage_capacity = constraints;
     }
     return true;
 }
@@ -511,6 +539,141 @@ static uint32_t gpu_glued_face_mask(const Voxel *v) {
     uint32_t mask = 0;
     for (int face = 0; face < 6; ++face) if (v->glued_faces[face]) mask |= 1u << face;
     return mask;
+}
+
+static bool gpu_pack_partial_embeddings(void) {
+    size_t nodes = (size_t)vgsHierarchy.node_count;
+    size_t relations = 0, chunks = 0;
+    for (size_t i = 0; i < nodes; ++i) {
+        const VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+        if (!node->partial_coarsenable) continue;
+        relations += (size_t)node->embedding_count;
+        chunks += ((size_t)node->embedding_count + GPU_PARTIAL_WELD_CHUNK - 1u) /
+                  GPU_PARTIAL_WELD_CHUNK;
+    }
+    size_t particles = (size_t)gpuPhysics.compact_count;
+    size_t words = nodes * GPU_PARTIAL_NODE_WORDS + relations * GPU_PARTIAL_REL_WORDS +
+                   particles + 1u + relations * 3u;
+    if (words > UINT32_MAX || relations > UINT32_MAX || chunks > UINT32_MAX ||
+        !gpu_resize_array((void **)&gpuPhysics.partial_stage, words ? words : 1u,
+                          sizeof(uint32_t))) return false;
+    gpuPhysics.partial_words = words;
+    gpuPhysics.partial_relation_count = (uint32_t)relations;
+    gpuPhysics.partial_constraint_capacity = (uint32_t)chunks;
+    gpuPhysics.partial_global_job_count = 0;
+    memset(gpuPhysics.partial_level_job_count, 0,
+           sizeof(gpuPhysics.partial_level_job_count));
+    memset(gpuPhysics.partial_stage, 0, (words ? words : 1u) * sizeof(uint32_t));
+    size_t relation_base = nodes * GPU_PARTIAL_NODE_WORDS;
+    size_t offset_base = relation_base + relations * GPU_PARTIAL_REL_WORDS;
+    size_t incidence_base = offset_base + particles + 1u;
+    uint32_t *offset = gpuPhysics.partial_stage + offset_base;
+    uint32_t relation_id = 0;
+    for (size_t i = 0; i < nodes; ++i) {
+        const VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+        uint32_t *dst = gpuPhysics.partial_stage + i * GPU_PARTIAL_NODE_WORDS;
+        dst[0] = relation_id;
+        if (!node->partial_coarsenable) continue;
+        dst[1] = (uint32_t)node->embedding_count;
+        dst[2] = node->embedding_rank;
+        dst[3] = gpu_float_word(node->occupied_fraction);
+        float diagonal[8] = {0}, sum = 0.0f;
+        for (int n = 0; n < node->embedding_count; ++n) {
+            const VgsEmbeddingRelation *rel =
+                &vgsHierarchy.embedding_relations[node->embedding_begin + n];
+            for (int a = 0; a < node->embedding_rank; ++a)
+                diagonal[a] += rel->mass * rel->refine[a] * rel->refine[a];
+        }
+        for (int a = 0; a < node->embedding_rank; ++a) sum += diagonal[a];
+        for (int a = 0; a < node->embedding_rank; ++a)
+            dst[4 + a] = gpu_float_word(sum > VGS_EPS ? diagonal[a] / sum : 0.0f);
+        for (int c = 0; c < 8; ++c) for (int a = 0; a < 8; ++a) {
+            dst[12 + c * 8 + a] = gpu_float_word(node->cage_from_anchor[c][a]);
+            dst[76 + a * 8 + c] = gpu_float_word(node->anchor_from_cage[a][c]);
+        }
+        for (int n = 0; n < node->embedding_count; ++n) {
+            const VgsEmbeddingRelation *rel =
+                &vgsHierarchy.embedding_relations[node->embedding_begin + n];
+            ptrdiff_t pool = rel->particle - particles_pool;
+            if (pool < 0 || pool >= particle_pool_count) return false;
+            int compact = gpuPhysics.pool_to_compact[pool];
+            if (compact < 0 || (size_t)compact >= particles) return false;
+            uint32_t *record = gpuPhysics.partial_stage + relation_base +
+                               (size_t)relation_id * GPU_PARTIAL_REL_WORDS;
+            record[0] = (uint32_t)compact;
+            record[1] = (uint32_t)i;
+            record[2] = gpu_float_word(rel->mass);
+            record[3] = rel->immediate_child_mask;
+            for (int a = 0; a < 8; ++a) {
+                record[4 + a] = gpu_float_word(rel->refine[a]);
+                record[12 + a] = gpu_float_word(rel->coarsen[a]);
+            }
+            offset[compact + 1]++;
+            relation_id++;
+        }
+    }
+    for (size_t p = 1; p <= particles; ++p) offset[p] += offset[p - 1];
+    uint32_t *cursor = calloc(particles ? particles : 1u, sizeof(uint32_t));
+    if (!cursor) return false;
+    for (uint32_t r = 0; r < relation_id; ++r) {
+        uint32_t compact = gpuPhysics.partial_stage[relation_base +
+                            (size_t)r * GPU_PARTIAL_REL_WORDS];
+        gpuPhysics.partial_stage[incidence_base + offset[compact] + cursor[compact]++] = r;
+    }
+    free(cursor);
+    size_t jobs_base = incidence_base + relations;
+    uint32_t job_count = 0;
+    uint8_t *seen = calloc(particles ? particles : 1u, 1);
+    if (!seen) return false;
+    for (int body_id = 0; body_id < amrBodyCount; ++body_id) {
+        const AmrBody *body = &amrBodies[body_id];
+        if (!body->valid) continue;
+        for (int level = 0; level < body->levels && level < 8; ++level) {
+            uint32_t first = job_count;
+            memset(seen, 0, particles);
+            for (int node_id = body->level_start[level];
+                 node_id < body->level_start[level] + body->level_count[level];
+                 ++node_id) {
+                if (node_id < 0 || (size_t)node_id >= nodes) continue;
+                uint32_t *meta = gpuPhysics.partial_stage +
+                                 (size_t)node_id * GPU_PARTIAL_NODE_WORDS;
+                for (uint32_t n = 0; n < meta[1]; ++n) {
+                    uint32_t id = gpuPhysics.partial_stage[relation_base +
+                                  (size_t)(meta[0] + n) * GPU_PARTIAL_REL_WORDS];
+                    if (!seen[id]) {
+                        seen[id] = 1;
+                        gpuPhysics.partial_stage[jobs_base + job_count++] = id;
+                    }
+                }
+            }
+            uint32_t count = job_count - first;
+            gpuPhysics.partial_level_job_count[body_id][level] = count;
+            for (int node_id = body->level_start[level];
+                 node_id < body->level_start[level] + body->level_count[level];
+                 ++node_id) {
+                if (node_id < 0 || (size_t)node_id >= nodes) continue;
+                uint32_t *meta = gpuPhysics.partial_stage +
+                                 (size_t)node_id * GPU_PARTIAL_NODE_WORDS;
+                meta[140] = first;
+                meta[141] = count;
+            }
+        }
+    }
+    uint32_t global_start = job_count;
+    memset(seen, 0, particles);
+    for (uint32_t r = 0; r < relation_id; ++r) {
+        uint32_t id = gpuPhysics.partial_stage[relation_base +
+                      (size_t)r * GPU_PARTIAL_REL_WORDS];
+        if (!seen[id]) {
+            seen[id] = 1;
+            gpuPhysics.partial_stage[jobs_base + job_count++] = id;
+        }
+    }
+    free(seen);
+    gpuPhysics.partial_global_job_count = job_count - global_start;
+    gpuPhysics.partial_global_job_start = global_start;
+    gpuPhysics.partial_words = jobs_base + job_count;
+    return relation_id == gpuPhysics.partial_relation_count;
 }
 
 static bool gpu_pack_world(void) {
@@ -672,6 +835,7 @@ static bool gpu_pack_world(void) {
         }
         g->lifecycle[3] = ((uint32_t)node->occupancy << GPU_AMR_META_OCCUPANCY_SHIFT) |
                           (node->force_refined ? GPU_AMR_META_FORCE_REFINED : 0u) |
+                          (node->partial_coarsenable ? GPU_AMR_META_PARTIAL_EMBEDDED : 0u) |
                           ((uint32_t)node->real_corner_mask << GPU_AMR_META_REAL_MASK_SHIFT);
         GpuAmrState *history =
             &gpuPhysics.amr_state_stage[gpuPhysics.dynamic_voxel_count + i];
@@ -726,6 +890,8 @@ static bool gpu_pack_world(void) {
                &root_stage, sizeof(root_stage));
     }
 
+    if (!gpu_pack_partial_embeddings()) return false;
+
     // The dispatch list is compact even though the voxel array remains stable
     // for collision, rendering, and parent/child index references.
     gpuPhysics.constraint_count = 0;
@@ -741,6 +907,18 @@ static bool gpu_pack_world(void) {
             (GpuConstraintState){0u, (uint32_t)(gpuPhysics.dynamic_voxel_count + i), 0u, 0u};
         uint32_t mask = vgsHierarchy.adaptive ? vgs_terminal_child_mask(&vgsHierarchy.nodes[i]) :
             vgs_enabled_child_mask(&vgsHierarchy.nodes[i]);
+        if (vgsHierarchy.nodes[i].partial_coarsenable) {
+            const VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
+            if (mask) {
+                for (int begin = 0; begin < node->embedding_count;
+                     begin += GPU_PARTIAL_WELD_CHUNK)
+                    gpuPhysics.constraint_stage[gpuPhysics.constraint_count++] =
+                        (GpuConstraintState){3u,
+                            (uint32_t)(gpuPhysics.dynamic_voxel_count + i),
+                            (uint32_t)begin, 0u};
+            }
+            continue;
+        }
         if (!mask) continue;
         gpuPhysics.constraint_stage[gpuPhysics.constraint_count++] =
             (GpuConstraintState){!vgsHierarchy.adaptive && mask == 0xffu ? 2u : 1u,
@@ -791,7 +969,8 @@ static bool gpu_pack_world(void) {
         .sample_count = (uint32_t)vgsHierarchy.sample_count,
         .particle_capacity = (uint32_t)gpuPhysics.particle_slot_capacity,
         .constraint_capacity = (uint32_t)((gpuPhysics.dynamic_voxel_count +
-                                           gpuPhysics.hierarchy_node_count) * 2),
+                                           gpuPhysics.hierarchy_node_count) * 2u +
+                                          gpuPhysics.partial_constraint_capacity),
         .curvature_threshold = VGS_ADAPTIVE_CURVATURE_THRESHOLD,
         .threshold_factor = (float)VGS_ADAPTIVE_THRESHOLD_LEVEL_FACTOR,
         .deformation_coarse_fraction = vgsAdaptiveDeformationCoarseFraction,
@@ -800,6 +979,10 @@ static bool gpu_pack_world(void) {
         .total_refine_count = vgsHierarchy.refine_count,
         .total_coarsen_count = vgsHierarchy.coarsen_count
     };
+    gpuPhysics.amr_control_stage.padding[0] = gpuPhysics.partial_relation_count;
+    gpuPhysics.amr_control_stage.padding[1] = (uint32_t)gpuPhysics.compact_count;
+    gpuPhysics.amr_control_stage.padding[2] = gpuPhysics.partial_global_job_start;
+    gpuPhysics.amr_control_stage.padding[3] = gpuPhysics.partial_global_job_count;
     gpuPhysics.aabb_control_stage = (GpuAabbControl){
         .total_stage_count = (uint32_t)(gpuPhysics.dynamic_voxel_count +
                                         gpuPhysics.hierarchy_node_count),
@@ -942,7 +1125,8 @@ static void gpu_bind_world_buffers(void) {
         &gpuPhysics.dispatch_buffer, &gpuPhysics.topology_buffer,
         &gpuPhysics.amr_state_buffer, &gpuPhysics.amr_scratch_buffer,
         &gpuPhysics.amr_control_buffer, &gpuPhysics.aabb_state_buffer,
-        &gpuPhysics.aabb_owner_buffer, &gpuPhysics.aabb_control_buffer
+        &gpuPhysics.aabb_owner_buffer, &gpuPhysics.aabb_control_buffer,
+        &gpuPhysics.partial_buffer
     };
     for (int i = 0; i < FPS_GPU_BUFFER_COUNT; ++i)
         fps_metal_bind_buffer(i, (void *)buffers[i]->id);
@@ -969,6 +1153,7 @@ static void gpu_bind_world_buffers(void) {
     rlBindShaderBuffer((unsigned int)gpuPhysics.aabb_state_buffer.id, 19);
     rlBindShaderBuffer((unsigned int)gpuPhysics.aabb_owner_buffer.id, 20);
     rlBindShaderBuffer((unsigned int)gpuPhysics.aabb_control_buffer.id, 21);
+    rlBindShaderBuffer((unsigned int)gpuPhysics.partial_buffer.id, 22);
 #endif
 }
 
@@ -994,7 +1179,8 @@ static bool gpu_upload_world(void) {
     size_t hash_next_bytes = sim_capacity_bytes;
     if (hash_next_bytes < total_stage_count * sizeof(int32_t))
         hash_next_bytes = total_stage_count * sizeof(int32_t);
-    size_t constraint_capacity = total_stage_count * 2u;
+    size_t constraint_capacity = total_stage_count * 2u +
+                                 gpuPhysics.partial_constraint_capacity;
     if (!gpu_buffer_ensure(&gpuPhysics.particle_buffer, particle_capacity_bytes) ||
         !gpu_buffer_ensure(&gpuPhysics.correction_buffer, correction_capacity_bytes) ||
         !gpu_buffer_ensure(&gpuPhysics.cell_buffer, cell_capacity_bytes) ||
@@ -1023,6 +1209,9 @@ static bool gpu_upload_world(void) {
         || !gpu_buffer_ensure(&gpuPhysics.aabb_owner_buffer,
                               (size_t)gpuPhysics.particle_slot_capacity * sizeof(uint32_t))
         || !gpu_buffer_ensure(&gpuPhysics.aabb_control_buffer, sizeof(GpuAabbControl))
+        || !gpu_buffer_ensure(&gpuPhysics.partial_buffer,
+                              (gpuPhysics.partial_words ? gpuPhysics.partial_words : 1u) *
+                              sizeof(uint32_t))
         ) return false;
     if (particle_bytes) gpu_buffer_update(&gpuPhysics.particle_buffer, gpuPhysics.particle_stage, particle_bytes, 0);
     if (cell_bytes) gpu_buffer_update(&gpuPhysics.cell_buffer, gpuPhysics.cell_stage, cell_bytes, 0);
@@ -1064,6 +1253,9 @@ static bool gpu_upload_world(void) {
     }
     gpu_buffer_update(&gpuPhysics.amr_control_buffer, &gpuPhysics.amr_control_stage,
                       sizeof(gpuPhysics.amr_control_stage), 0);
+    if (gpuPhysics.partial_words)
+        gpu_buffer_update(&gpuPhysics.partial_buffer, gpuPhysics.partial_stage,
+                          gpuPhysics.partial_words * sizeof(uint32_t), 0);
     gpu_buffer_update(&gpuPhysics.aabb_control_buffer, &gpuPhysics.aabb_control_stage,
                       sizeof(gpuPhysics.aabb_control_stage), 0);
     if (static_changed) {
@@ -1082,7 +1274,7 @@ static bool gpu_upload_world(void) {
         (size_t)gpuPhysics.dynamic_voxel_count * 2u * sizeof(GpuTopologyState) +
         collision_id_bytes + sizeof(dispatch_stage) +
         total_stage_count * sizeof(GpuAmrState) + sizeof(GpuAmrControl) +
-          sizeof(GpuAabbControl)
+          sizeof(GpuAabbControl) + gpuPhysics.partial_words * sizeof(uint32_t)
         );
     if (static_changed) gpuPhysics.upload_bytes += (uint64_t)(static_bytes + static_collider_bytes);
     gpuPhysics.full_uploads++;
@@ -1666,7 +1858,13 @@ static bool gpu_dispatch_amr(float sub_dt, bool use_deformation) {
            gpu_dispatch(GPU_MODE_AMR_SELECT, gpuPhysics.hierarchy_node_count) &&
            gpu_dispatch(GPU_MODE_AMR_RESOLVE, gpuPhysics.hierarchy_node_count) &&
            gpu_dispatch(GPU_MODE_AMR_TRANSITION_CLEAR, particles) &&
-           gpu_dispatch(GPU_MODE_AMR_TRANSITION_SCATTER, gpuPhysics.hierarchy_node_count) &&
+           gpu_dispatch(GPU_MODE_AMR_TRANSITION_SCATTER,
+                        gpuPhysics.partial_relation_count
+                          ? ((int)gpuPhysics.partial_global_job_count >
+                             gpuPhysics.hierarchy_node_count * 8
+                             ? (int)gpuPhysics.partial_global_job_count
+                             : gpuPhysics.hierarchy_node_count * 8)
+                          : gpuPhysics.hierarchy_node_count) &&
            gpu_dispatch(GPU_MODE_AMR_TRANSITION_APPLY, particles) &&
            gpu_dispatch(GPU_MODE_AMR_TOPOLOGY_APPLY, gpuPhysics.hierarchy_node_count);
     for (int body_id = 0; ok && body_id < amrBodyCount; ++body_id) {
@@ -1676,7 +1874,11 @@ static bool gpu_dispatch_amr(float sub_dt, bool use_deformation) {
         gpu_set_vgs_layer(gpuPhysics.dynamic_voxel_count + body->level_start[level],
                           body->level_count[level]);
         ok = gpu_dispatch(GPU_MODE_AMR_TRANSITION_CLEAR, particles) &&
-             gpu_dispatch(GPU_MODE_AMR_DORMANT_SCATTER, body->level_count[level]) &&
+             gpu_dispatch(GPU_MODE_AMR_DORMANT_SCATTER,
+                          gpuPhysics.partial_level_job_count[body_id][level] >
+                          (uint32_t)body->level_count[level]
+                              ? (int)gpuPhysics.partial_level_job_count[body_id][level]
+                              : body->level_count[level]) &&
              gpu_dispatch(GPU_MODE_AMR_TRANSITION_APPLY, particles);
       }
     }
