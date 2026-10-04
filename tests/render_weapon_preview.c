@@ -55,17 +55,54 @@ static void test_visual_state(void) {
     weapon_visual_update(&v,false,.15f); assert(v.claw_open==0);
 }
 
+static void test_melee_pose(void) {
+    Vector3 forward={0,0,-1},right={1,0,0},up={0,1,0};
+    for (int view=0;view<2;++view) {
+        bool fp=view==0;
+        WeaponPose idle=weapon_pose((Vector3){0},forward,right,up,fp,16.0f/9,NULL,0);
+        for (int phase=0;phase<=100;++phase) {
+            WeaponMeleePose melee={phase/100.0f,{-.29f,-.26f,-2.90f}};
+            WeaponPose pose=weapon_pose((Vector3){0},forward,right,up,fp,16.0f/9,&melee,0);
+            Matrix m=pose.transform;
+            Vector3 x={m.m0,m.m1,m.m2},y={m.m4,m.m5,m.m6},z={m.m8,m.m9,m.m10};
+            float scale=fp ? .36f : .56f;
+            assert(fabsf(Vector3Length(x)-scale)<.00001f);
+            assert(fabsf(Vector3Length(y)-scale)<.00001f);
+            assert(fabsf(Vector3Length(z)-scale)<.00001f);
+            assert(fabsf(Vector3DotProduct(x,y))<.00001f);
+            assert(fabsf(Vector3DotProduct(y,z))<.00001f);
+            if (melee.progress>=WEAPON_MELEE_ACTIVE_START && melee.progress<=WEAPON_MELEE_ACTIVE_END) {
+                assert(Vector3Distance(pose.grip_heel,melee.strike_endpoint)<.00001f);
+                WeaponPose firing=weapon_pose((Vector3){0},forward,right,up,fp,16.0f/9,&melee,1);
+                assert(Vector3Distance(pose.muzzle,firing.muzzle)<.00001f);
+            }
+            if (phase==0 || phase==100) {
+                assert(Vector3Distance(idle.muzzle,pose.muzzle)<.00001f);
+                assert(Vector3Distance(idle.grip_heel,pose.grip_heel)<.00001f);
+            }
+        }
+        const float knots[]={WEAPON_MELEE_ACTIVE_START,WEAPON_MELEE_PEAK,WEAPON_MELEE_ACTIVE_END};
+        for (int i=0;i<3;++i) {
+            WeaponMeleePose before={knots[i]-.00001f,{-.29f,-.26f,-2.90f}},after=before;
+            after.progress+=.00002f;
+            WeaponPose a=weapon_pose((Vector3){0},forward,right,up,fp,16.0f/9,&before,0);
+            WeaponPose b=weapon_pose((Vector3){0},forward,right,up,fp,16.0f/9,&after,0);
+            assert(Vector3Distance(a.muzzle,b.muzzle)<.0001f);
+        }
+    }
+}
+
 int main(int argc,char **argv) {
     const char *out=argc>1 ? argv[1] : "artifacts/weapon";
     use_bloom=argc<3 || strcmp(argv[2],"--no-bloom")!=0;
-    test_visual_state();
+    test_visual_state(); test_melee_pose();
     SetConfigFlags(FLAG_WINDOW_HIDDEN); InitWindow(1280,720,"Weapon preview");
     assert(IsWindowReady()); assert(weapon_renderer_init());
     RenderTexture2D scene=LoadRenderTexture(1000,1000);
     WeaponVisual visual; weapon_visual_reset(&visual);
     Camera3D camera={.position={-2.0f,1.2f,-2.6f},.target={0,-.22f,-.10f},
                      .up={0,1,0},.fovy=42,.projection=CAMERA_PERSPECTIVE};
-    WeaponPose pose={MatrixIdentity(),{0,0,-.84f}};
+    WeaponPose pose={.transform=MatrixIdentity(),.muzzle={0,0,-.84f}};
     render(scene,camera,pose,&visual,false,false,false); save(scene,out,"reference-idle");
     Image visible=LoadImageFromTexture(scene.texture); Color *lit=LoadImageColors(visible);
     int cyan=0;
@@ -93,7 +130,7 @@ int main(int argc,char **argv) {
         Vector3 forward={0,sinf(pitch),-cosf(pitch)},right={1,0,0};
         Vector3 up=Vector3CrossProduct(right,forward);
         camera=(Camera3D){.position={0},.target=forward,.up={0,1,0},.fovy=60,.projection=CAMERA_PERSPECTIVE};
-        pose=weapon_pose((Vector3){0},forward,right,up,true,(float)width/height,0,0);
+        pose=weapon_pose((Vector3){0},forward,right,up,true,(float)width/height,NULL,0);
         render(scene,camera,pose,&visual,false,false,true);
         BeginTextureMode(scene);
         DrawLine(width/2-6,height/2,width/2+6,height/2,WHITE);

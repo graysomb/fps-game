@@ -620,9 +620,9 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define MELEE_UPWARD_BOOST 2.0f
 #define MELEE_COOLDOWN_SECONDS 0.0f
 #define MELEE_ANIM_DURATION_SECONDS 0.32f
-#define MELEE_ACTIVE_START_NORM 0.28f
-#define MELEE_ACTIVE_END_NORM 0.62f
-#define MELEE_REACH_PEAK_NORM 0.52f
+#define MELEE_ACTIVE_START_NORM WEAPON_MELEE_ACTIVE_START
+#define MELEE_ACTIVE_END_NORM WEAPON_MELEE_ACTIVE_END
+#define MELEE_REACH_PEAK_NORM WEAPON_MELEE_PEAK
 #define MELEE_BASE_REACH_FRAC 0.18f
 #define BUILD_COOLDOWN_SECONDS 0.5f
 #define TETHER_RANGE 8.0f
@@ -17525,16 +17525,31 @@ static bool player_tether_visual_target(int player_index, Vector3 *out_target) {
 static int drawViewPlayerIndex = -1;
 static float weaponViewAspect = 1.0f;
 static bool drawWeaponModels;
+static bool weaponFrameSampled;
+static float weaponFrameTime;
+static WeaponMeleePose weaponMeleeSamples[MAX_PLAYERS];
+
+static WeaponMeleePose player_weapon_melee_sample(const Player *p, float now) {
+    float progress = p->respawn_timer > 0 ? -1 : melee_anim_progress(p, now);
+    WeaponMeleePose sample = { .progress = progress };
+    if (progress >= 0 && progress <= 1) {
+        float fraction = melee_reach_fraction(progress);
+        sample.strike_endpoint = v_add(melee_swing_origin(p, fraction),
+            v_mul(melee_swing_direction(p, fraction), MELEE_RANGE * fraction));
+    }
+    return sample;
+}
 
 static WeaponPose player_weapon_pose(int player_index, bool first_person) {
     Player *p = &players[player_index];
     Vector3 forward = player_forward(p);
     Vector3 right = v_norm(v_cross(forward, (Vector3){0,1,0}));
     Vector3 up = v_norm(v_cross(right, forward));
-    float progress = melee_anim_progress(p, (float)GetTime());
-    float melee = progress >= 0 && progress < 1 ? sinf(progress * PI) : 0;
-    return weapon_pose(p->pos, forward, right, up, first_person, weaponViewAspect, melee,
-                       weapon_shot_amount(&weaponVisuals[player_index], (float)GetTime()));
+    float now = weaponFrameSampled ? weaponFrameTime : (float)GetTime();
+    WeaponMeleePose melee = weaponFrameSampled ? weaponMeleeSamples[player_index] :
+                                               player_weapon_melee_sample(p, now);
+    return weapon_pose(p->pos, forward, right, up, first_person, weaponViewAspect, &melee,
+                       weapon_shot_amount(&weaponVisuals[player_index], now));
 }
 
 static bool player_has_gun(int player_index) {
@@ -17546,7 +17561,8 @@ static void draw_player_weapon(int player_index, Vector3 eye, bool first_person,
     if (!player_has_gun(player_index)) return;
     Player *p = &players[player_index];
     weapon_draw(player_weapon_pose(player_index, first_person), &weaponVisuals[player_index],
-                eye, (float)GetTime(), p->goldTetherHolding || p->netGoldTetherVisualActive,
+                eye, weaponFrameSampled ? weaponFrameTime : (float)GetTime(),
+                p->goldTetherHolding || p->netGoldTetherVisualActive,
                 p->dynamicShotActive, emission);
 }
 
@@ -17649,7 +17665,7 @@ static void draw_players(void) {
             DrawCubeWires(render_pos, body_size * 0.8f, body_size * 0.8f, body_size * 0.8f, coreEnergy);
         }
         if (p->enemyType != ENEMY_TYPE_SWARMER) {
-            draw_melee_arm_world(i);
+            if (!drawWeaponModels || !player_has_gun(i)) draw_melee_arm_world(i);
             draw_player_tether_world(i);
         }
         if (p->matter_flash_timer > 0.0f && !p->isExposed && p->matter > 0.0f) {
@@ -19866,7 +19882,11 @@ static void render_gameplay_view(RenderTexture2D *screens,
     prepare_dynamic_voxel_transforms();
 
     drawWeaponModels = weaponRenderingReady && !creative_mode;
+    // All viewports, color/mask passes and tether origins use one animation sample.
+    weaponFrameTime = (float)GetTime();
+    weaponFrameSampled = true;
     for (int p = 0; p < activePlayers; ++p) {
+        weaponMeleeSamples[p] = player_weapon_melee_sample(&players[p], weaponFrameTime);
         Vector3 target;
         bool tether = drawWeaponModels && player_has_gun(p) && player_tether_visual_target(p, &target);
         weapon_visual_update(&weaponVisuals[p], tether, GetFrameTime());
@@ -20081,6 +20101,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
         }
         debug_console_draw();
     EndDrawing();
+    weaponFrameSampled = false;
 }
 
 static bool run_physics_smoke_test(int steps) {

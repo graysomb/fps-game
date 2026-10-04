@@ -274,8 +274,13 @@ feedback use amber energy. Projectile collision, damage, and tether forces retai
 their existing behavior.
 
 Weapon bloom is isolated per viewport and respects world occlusion. Pass
-`--no-weapon-bloom` to disable its extra render passes. The gun is lowered during
-melee and hidden in creative mode and respawn. LAN peers must all use protocol
+`--no-weapon-bloom` to disable its extra render passes. Melee rotates the gun around
+the grip and strikes with the silver grip heel. Attacks, mining and misses use the
+same 0.32-second swing; the heel follows the existing hit sweep during its active
+window. Rigid pose transforms preserve the flat colors, edge lines and glow, and
+the tether follows the animated muzzle. Hit detection, damage, mining and cooldown
+are unchanged. Goliaths retain their arm attack. The gun is hidden in creative mode
+and respawn. LAN peers must all use protocol
 version 5, which adds successful-shot sequence/age and powered-shot visual state.
 
 After building raylib with `build.ps1`, run the Windows visual checks from the
@@ -286,7 +291,8 @@ repository root:
 ```
 
 This compiles and runs OpenGL 3.3/4.3 previews, shot-state and network serialization
-tests, and the actual gameplay renderer with one through four viewports. PNGs are
+tests, melee pose/hit checks, and the actual gameplay renderer with one through four
+viewports, swing phases and remote-player swings. PNGs are
 saved beneath `artifacts/weapon`; logs and executables are in `.build/weapon`.
 The preview includes wall occlusion, extreme pitch, gold tether, firing, resize,
 and a rendering-only four-view bloom comparison. Timing excludes gameplay physics.

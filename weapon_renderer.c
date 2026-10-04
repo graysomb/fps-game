@@ -180,8 +180,24 @@ float weapon_shot_amount(const WeaponVisual *v,float now) {
     return t>=0 && t<WEAPON_SHOT_SECONDS ? 1-t/WEAPON_SHOT_SECONDS : 0;
 }
 
+static float wr_ease(float t) {
+    t=fmaxf(0,fminf(1,t));
+    return t*t*(3-2*t);
+}
+
 WeaponPose weapon_pose(Vector3 pos,Vector3 forward,Vector3 right,Vector3 up,
-                       bool first_person,float aspect,float melee,float recoil) {
+                       bool first_person,float aspect,const WeaponMeleePose *melee,float recoil) {
+    bool swinging=melee && melee->progress>=0 && melee->progress<=1;
+    float windup=0,extend=0,recover=0,anchor=0;
+    if (swinging) {
+        windup=wr_ease(melee->progress/WEAPON_MELEE_ACTIVE_START);
+        extend=wr_ease((melee->progress-WEAPON_MELEE_ACTIVE_START)/
+                       (WEAPON_MELEE_PEAK-WEAPON_MELEE_ACTIVE_START));
+        recover=wr_ease((melee->progress-WEAPON_MELEE_ACTIVE_END)/
+                        (1-WEAPON_MELEE_ACTIVE_END));
+        anchor=windup*(1-recover);
+        recoil*=1-anchor;
+    }
     float scale=first_person ? .36f*fminf(1.0f,aspect) : .56f;
     float distance=(first_person ? 1.0f : .62f)-.045f*recoil;
     float right_offset=.48f;
@@ -195,15 +211,37 @@ WeaponPose weapon_pose(Vector3 pos,Vector3 forward,Vector3 right,Vector3 up,
         right_offset=.97f*tanf(30*DEG2RAD)*aspect*(distance-corner_z)-corner_x;
     }
     Vector3 offset=Vector3Add(Vector3Scale(right,right_offset),
-                    Vector3Add(Vector3Scale(up,-.25f-.23f*melee),
+                    Vector3Add(Vector3Scale(up,-.25f),
                                Vector3Scale(forward,distance)));
     pos=Vector3Add(pos,offset);
     // Mesh forward is -Z. right/up/forward form an orthonormal camera basis.
     Matrix m={right.x*scale,up.x*scale,-forward.x*scale,pos.x,
               right.y*scale,up.y*scale,-forward.y*scale,pos.y,
               right.z*scale,up.z*scale,-forward.z*scale,pos.z,0,0,0,1};
-    if (first_person) m=MatrixMultiply(MatrixRotateY(22*DEG2RAD),m);
-    return (WeaponPose){m,Vector3Transform((Vector3){0,0,-.84f},m)};
+    if (first_person) m=MatrixMultiply(MatrixRotateY(22*(1-anchor)*DEG2RAD),m);
+    // Center of the underside of the silver grip cap (which is tilted -0.25 rad).
+    const Vector3 heel={0,-1.01f-.085f*cosf(.25f),.39f+.085f*sinf(.25f)};
+    if (swinging) {
+        // Rigid rotation around the grip; the heel turns forward for the strike.
+        const Vector3 pivot={0,-.55f,.28f};
+        // Tip past vertical in windup so the claws clear the top of the view.
+        float pitch=(130*windup-30*extend)*(1-recover)*DEG2RAD;
+        float roll=(-12*windup+6*extend)*(1-recover)*DEG2RAD;
+        Matrix swing=MatrixMultiply(MatrixTranslate(-pivot.x,-pivot.y,-pivot.z),
+                                     MatrixRotateX(pitch));
+        swing=MatrixMultiply(swing,MatrixRotateZ(roll));
+        swing=MatrixMultiply(swing,MatrixTranslate(pivot.x,pivot.y,pivot.z));
+        m=MatrixMultiply(swing,m);
+        Vector3 delta=Vector3Scale(Vector3Subtract(melee->strike_endpoint,
+                                    Vector3Transform(heel,m)),anchor);
+        m.m12+=delta.x; m.m13+=delta.y; m.m14+=delta.z;
+        // Dip during the flip, then meet the unmodified sweep at active-start.
+        if (windup<1) {
+            Vector3 dip=Vector3Scale(up,-.50f*sinf(windup*PI));
+            m.m12+=dip.x; m.m13+=dip.y; m.m14+=dip.z;
+        }
+    }
+    return (WeaponPose){m,Vector3Transform((Vector3){0,0,-.84f},m),Vector3Transform(heel,m)};
 }
 
 void weapon_draw(WeaponPose pose,const WeaponVisual *v,Vector3 eye,float now,

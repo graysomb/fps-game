@@ -5,6 +5,9 @@
 #include <stdint.h>
 
 #define WEAPON_SHOT_SECONDS 0.12f
+#define WEAPON_MELEE_ACTIVE_START 0.28f
+#define WEAPON_MELEE_ACTIVE_END 0.62f
+#define WEAPON_MELEE_PEAK 0.52f
 
 /* Presentation only: callers own gameplay, aim, and projectile spawning. */
 typedef struct WeaponVisual {
@@ -16,7 +19,15 @@ typedef struct WeaponVisual {
 typedef struct WeaponPose {
     Matrix transform;
     Vector3 muzzle;
+    Vector3 grip_heel;
 } WeaponPose;
+
+/* The caller supplies the existing hit sweep's endpoint, in world space.
+ * No target or hit-result state: mining, attacking and missing share a swing. */
+typedef struct WeaponMeleePose {
+    float progress;
+    Vector3 strike_endpoint;
+} WeaponMeleePose;
 
 typedef struct WeaponBloom {
     RenderTexture2D emission;
@@ -31,7 +42,8 @@ void weapon_visual_shot(WeaponVisual *visual, float now);
 void weapon_visual_receive(WeaponVisual *visual, uint32_t sequence, uint8_t age_ms, float now);
 void weapon_visual_update(WeaponVisual *visual, bool tether, float dt);
 WeaponPose weapon_pose(Vector3 position, Vector3 forward, Vector3 right,
-                       Vector3 up, bool first_person, float aspect, float melee, float recoil);
+                       Vector3 up, bool first_person, float aspect,
+                       const WeaponMeleePose *melee, float recoil);
 float weapon_shot_amount(const WeaponVisual *visual, float now);
 void weapon_draw(WeaponPose pose, const WeaponVisual *visual, Vector3 eye,
                  float now, bool gold, bool powered_shot, bool emission_only);
