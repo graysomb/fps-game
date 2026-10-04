@@ -22,10 +22,12 @@ void main() {
     if ((edgeMask & 2) != 0) interior = min(interior, coverage.y);
     if ((edgeMask & 4) != 0) interior = min(interior, coverage.z);
     base = mix(vec3(0.035, 0.045, 0.065), base, interior);
-    vec3 emissive = energyColor * color.r * energyStrength;
+    // Cubes keep subtle face tints and outlined edges while emitting energy.
+    float energyEdge = energy > 1.5 ? mix(0.45, 1.0, interior) : 1.0;
+    vec3 emissive = energyColor * color.r * energyStrength * energyEdge;
     if (emissionOnly != 0) {
         finalColor = vec4(energy > 0.5 ? emissive : vec3(0.0), 1.0);
     } else {
-        finalColor = vec4(energy > 0.5 ? emissive + vec3(0.16) : base, 1.0);
+        finalColor = vec4(energy > 0.5 ? emissive + vec3(0.16) : base, color.a);
     }
 }

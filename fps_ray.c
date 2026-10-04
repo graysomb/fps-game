@@ -17528,6 +17528,11 @@ static bool drawWeaponModels;
 static bool weaponFrameSampled;
 static float weaponFrameTime;
 static WeaponMeleePose weaponMeleeSamples[MAX_PLAYERS];
+static WeaponKind weaponKindSamples[MAX_PLAYERS];
+
+static WeaponKind player_weapon_kind(const Player *p) {
+    return p->dynamicShotActive ? WEAPON_DYNAMIC_LAUNCHER : WEAPON_STANDARD;
+}
 
 static WeaponMeleePose player_weapon_melee_sample(const Player *p, float now) {
     float progress = p->respawn_timer > 0 ? -1 : melee_anim_progress(p, now);
@@ -17548,7 +17553,8 @@ static WeaponPose player_weapon_pose(int player_index, bool first_person) {
     float now = weaponFrameSampled ? weaponFrameTime : (float)GetTime();
     WeaponMeleePose melee = weaponFrameSampled ? weaponMeleeSamples[player_index] :
                                                player_weapon_melee_sample(p, now);
-    return weapon_pose(p->pos, forward, right, up, first_person, weaponViewAspect, &melee,
+    WeaponKind kind = weaponFrameSampled ? weaponKindSamples[player_index] : player_weapon_kind(p);
+    return weapon_pose(kind, p->pos, forward, right, up, first_person, weaponViewAspect, &melee,
                        weapon_shot_amount(&weaponVisuals[player_index], now));
 }
 
@@ -17557,13 +17563,30 @@ static bool player_has_gun(int player_index) {
            players[player_index].enemyType == ENEMY_TYPE_STANDARD;
 }
 
-static void draw_player_weapon(int player_index, Vector3 eye, bool first_person, bool emission) {
+static void draw_player_weapon(int player_index, Vector3 eye, bool first_person, WeaponRenderPass pass) {
     if (!player_has_gun(player_index)) return;
     Player *p = &players[player_index];
     weapon_draw(player_weapon_pose(player_index, first_person), &weaponVisuals[player_index],
                 eye, weaponFrameSampled ? weaponFrameTime : (float)GetTime(),
-                p->goldTetherHolding || p->netGoldTetherVisualActive,
-                p->dynamicShotActive, emission);
+                p->goldTetherHolding || p->netGoldTetherVisualActive, pass);
+}
+
+static void draw_remote_weapon_glass(int view_player, Vector3 eye) {
+    int order[MAX_PLAYERS], count = 0;
+    float distances[MAX_PLAYERS];
+    for (int p = 0; p < activePlayers; ++p) {
+        if (p == view_player || !player_has_gun(p)) continue;
+        WeaponPose pose = player_weapon_pose(p, false);
+        if (pose.kind != WEAPON_DYNAMIC_LAUNCHER) continue;
+        Vector3 chamber = Vector3Transform((Vector3){0,.23f,.20f}, pose.transform);
+        float distance = v_dot(v_sub(chamber, eye), v_sub(chamber, eye));
+        int at = count++;
+        while (at > 0 && distances[at-1] < distance) {
+            order[at] = order[at-1]; distances[at] = distances[at-1]; --at;
+        }
+        order[at] = p; distances[at] = distance;
+    }
+    for (int at = 0; at < count; ++at) draw_player_weapon(order[at], eye, false, WEAPON_GLASS);
 }
 
 static void draw_player_tether_world(int player_index) {
@@ -17654,7 +17677,7 @@ static void draw_players(void) {
         DrawCubeWires(render_pos, body_size, body_size, body_size, base_dark);
         if (drawWeaponModels && i != drawViewPlayerIndex) {
             Vector3 eye = drawViewPlayerIndex >= 0 ? players[drawViewPlayerIndex].pos : p->pos;
-            draw_player_weapon(i, eye, false, false);
+            draw_player_weapon(i, eye, false, WEAPON_COLOR);
         }
         if (i != drawViewPlayerIndex) {
             draw_player_face(p, render_pos, body_size, base);
@@ -19887,6 +19910,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
     weaponFrameSampled = true;
     for (int p = 0; p < activePlayers; ++p) {
         weaponMeleeSamples[p] = player_weapon_melee_sample(&players[p], weaponFrameTime);
+        weaponKindSamples[p] = player_weapon_kind(&players[p]);
         Vector3 target;
         bool tether = drawWeaponModels && player_has_gun(p) && player_tether_visual_target(p, &target);
         weapon_visual_update(&weaponVisuals[p], tether, GetFrameTime());
@@ -19913,6 +19937,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 DrawVoxels(cams[i]);
                 draw_pickups(cams[i]);
                 draw_players();
+                if (drawWeaponModels) draw_remote_weapon_glass(i, cams[i].position);
                 drawViewPlayerIndex = -1;
             EndMode3D();
             // Preserve world depth for the remote-gun mask before drawing the viewmodel.
@@ -19921,13 +19946,13 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 weapon_bloom_begin(&weaponBlooms[view], screens[view]);
                 BeginMode3D(cams[i]);
                 for (int p = 0; p < activePlayers; ++p) {
-                    if (p != i) draw_player_weapon(p, cams[i].position, false, true);
+                    if (p != i) draw_player_weapon(p, cams[i].position, false, WEAPON_EMISSION);
                 }
                 EndMode3D();
                 if (players[i].respawn_timer <= 0) {
                     weapon_clear_depth();
                     BeginMode3D(cams[i]);
-                    draw_player_weapon(i, cams[i].position, true, true);
+                    draw_player_weapon(i, cams[i].position, true, WEAPON_EMISSION);
                     EndMode3D();
                 }
                 weapon_bloom_composite(&weaponBlooms[view], screens[view]);
@@ -19935,7 +19960,8 @@ static void render_gameplay_view(RenderTexture2D *screens,
             if (drawWeaponModels && players[i].respawn_timer <= 0) {
                 weapon_clear_depth();
                 BeginMode3D(cams[i]);
-                draw_player_weapon(i, cams[i].position, true, false);
+                draw_player_weapon(i, cams[i].position, true, WEAPON_COLOR);
+                draw_player_weapon(i, cams[i].position, true, WEAPON_GLASS);
                 EndMode3D();
             }
             int view_x = 0, view_y = 0, view_w = 0, view_h = 0;
