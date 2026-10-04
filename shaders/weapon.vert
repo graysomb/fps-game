@@ -2,6 +2,7 @@
 in vec3 vertexPosition;
 in vec3 vertexNormal;
 in vec2 vertexTexCoord;
+in vec2 vertexTexCoord2;
 in vec4 vertexColor;
 uniform mat4 mvp;
 uniform mat4 matModel;
@@ -11,11 +12,15 @@ out vec3 normal;
 out vec4 color;
 out float energy;
 out vec3 localPosition;
+out vec3 edgeDistance;
+flat out int edgeMask;
 void main() {
     localPosition = vertexPosition;
     position = vec3(matModel * vec4(vertexPosition, 1.0));
     normal = normalize(vec3(matNormal * vec4(vertexNormal, 0.0)));
     color = vertexColor;
     energy = vertexTexCoord.x;
+    edgeDistance = vec3(vertexTexCoord2, 1.0 - vertexTexCoord2.x - vertexTexCoord2.y);
+    edgeMask = int(vertexTexCoord.y + 0.5);
     gl_Position = mvp * vec4(vertexPosition, 1.0);
 }

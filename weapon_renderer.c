@@ -9,6 +9,7 @@ enum { WR_SILVER, WR_DARK, WR_ENERGY };
 static const Color wr_colors[] = { {184,190,201,255}, {37,43,58,255}, {255,255,255,255} };
 typedef struct WrBuilder {
     float vertices[4096 * 3], normals[4096 * 3], uv[4096 * 2];
+    float edge_uv[4096 * 2];
     unsigned char colors[4096 * 4];
     int count;
 } WrBuilder;
@@ -21,7 +22,7 @@ static Vector3 wr_rotate(Vector3 p, float angle) {
     return (Vector3){p.x, p.y*cosf(angle)-p.z*sinf(angle), p.y*sinf(angle)+p.z*cosf(angle)};
 }
 
-static void wr_triangle(WrBuilder *b, Vector3 a, Vector3 c, Vector3 d, int material, float tint) {
+static void wr_triangle(WrBuilder *b, Vector3 a, Vector3 c, Vector3 d, int material, float tint, int edge_mask) {
     if (b->count + 3 > 4096) return;
     Vector3 n = Vector3Normalize(Vector3CrossProduct(Vector3Subtract(c,a), Vector3Subtract(d,a)));
     Vector3 points[3] = {a,c,d};
@@ -31,6 +32,9 @@ static void wr_triangle(WrBuilder *b, Vector3 a, Vector3 c, Vector3 d, int mater
         memcpy(b->vertices+j*3, &points[i], sizeof(Vector3));
         memcpy(b->normals+j*3, &n, sizeof(Vector3));
         b->uv[j*2] = material == WR_ENERGY ? 1.0f : 0.0f;
+        b->uv[j*2+1] = (float)edge_mask;
+        b->edge_uv[j*2] = i==0 ? 1.0f : 0.0f;
+        b->edge_uv[j*2+1] = i==1 ? 1.0f : 0.0f;
         b->colors[j*4] = (unsigned char)(color.r*tint);
         b->colors[j*4+1] = (unsigned char)(color.g*tint);
         b->colors[j*4+2] = (unsigned char)(color.b*tint);
@@ -56,15 +60,17 @@ static void wr_prism(WrBuilder *b, Vector3 center, float w, float h, float lengt
     for (int r=0;r<3;++r) for (int i=0;i<8;++i) {
         int j=(i+1)%8;
         float tint=material==WR_ENERGY ? (0.84f+0.02f*i) : 1.0f;
-        wr_triangle(b,rings[r][i],rings[r][j],rings[r+1][j],material,tint);
-        wr_triangle(b,rings[r][i],rings[r+1][j],rings[r+1][i],material,tint);
+        // Mark actual face boundaries, excluding the quad's triangulation diagonal.
+        wr_triangle(b,rings[r][i],rings[r][j],rings[r+1][j],material,tint,5);
+        wr_triangle(b,rings[r][i],rings[r+1][j],rings[r+1][i],material,tint,3);
     }
     Vector3 front=Vector3Add(center,wr_rotate((Vector3){0,0,zs[0]},angle));
     Vector3 back=Vector3Add(center,wr_rotate((Vector3){0,0,zs[3]},angle));
     for (int i=0;i<8;++i) {
         int j=(i+1)%8;
-        wr_triangle(b,front,rings[0][j],rings[0][i],material,1);
-        wr_triangle(b,back,rings[3][i],rings[3][j],material,1);
+        // End caps have a perimeter only; hide the fan's internal spokes.
+        wr_triangle(b,front,rings[0][j],rings[0][i],material,1,1);
+        wr_triangle(b,back,rings[3][i],rings[3][j],material,1,1);
     }
 }
 
@@ -124,8 +130,9 @@ bool weapon_renderer_init(void) {
         mesh.vertices=MemAlloc(mesh.vertexCount*3*sizeof(float));
         mesh.normals=MemAlloc(mesh.vertexCount*3*sizeof(float));
         mesh.texcoords=MemAlloc(mesh.vertexCount*2*sizeof(float));
+        mesh.texcoords2=MemAlloc(mesh.vertexCount*2*sizeof(float));
         mesh.colors=MemAlloc(mesh.vertexCount*4);
-        if (!mesh.vertices || !mesh.normals || !mesh.texcoords || !mesh.colors) {
+        if (!mesh.vertices || !mesh.normals || !mesh.texcoords || !mesh.texcoords2 || !mesh.colors) {
             UnloadMesh(mesh); MemFree(builder);
             for (int i=0;i<p;++i) UnloadModel(wr_parts[i]);
             UnloadShader(wr_shader); UnloadShader(wr_blur); return false;
@@ -133,6 +140,7 @@ bool weapon_renderer_init(void) {
         memcpy(mesh.vertices,builder->vertices,mesh.vertexCount*3*sizeof(float));
         memcpy(mesh.normals,builder->normals,mesh.vertexCount*3*sizeof(float));
         memcpy(mesh.texcoords,builder->uv,mesh.vertexCount*2*sizeof(float));
+        memcpy(mesh.texcoords2,builder->edge_uv,mesh.vertexCount*2*sizeof(float));
         memcpy(mesh.colors,builder->colors,mesh.vertexCount*4);
         UploadMesh(&mesh,false);
         wr_parts[p]=LoadModelFromMesh(mesh);
@@ -175,9 +183,20 @@ float weapon_shot_amount(const WeaponVisual *v,float now) {
 WeaponPose weapon_pose(Vector3 pos,Vector3 forward,Vector3 right,Vector3 up,
                        bool first_person,float aspect,float melee,float recoil) {
     float scale=first_person ? .36f*fminf(1.0f,aspect) : .56f;
-    Vector3 offset=Vector3Add(Vector3Scale(right,first_person ? fminf(.36f,.24f*aspect) : .48f),
+    float distance=(first_person ? 1.0f : .62f)-.045f*recoil;
+    float right_offset=.48f;
+    if (first_person) {
+        // Anchor the rear cap at 97% of the viewport's right half-width.
+        // Its outer corner includes the existing 22-degree inward gun rotation.
+        float angle=22*DEG2RAD;
+        float rear_x=.58f*.5f-.065f*.45f, rear_z=.59f+.13f*.5f;
+        float corner_x=scale*(rear_x*cosf(angle)+rear_z*sinf(angle));
+        float corner_z=scale*(-rear_x*sinf(angle)+rear_z*cosf(angle));
+        right_offset=.97f*tanf(30*DEG2RAD)*aspect*(distance-corner_z)-corner_x;
+    }
+    Vector3 offset=Vector3Add(Vector3Scale(right,right_offset),
                     Vector3Add(Vector3Scale(up,-.25f-.23f*melee),
-                               Vector3Scale(forward,(first_person ? 1.0f : .62f)-.045f*recoil)));
+                               Vector3Scale(forward,distance)));
     pos=Vector3Add(pos,offset);
     // Mesh forward is -Z. right/up/forward form an orthonormal camera basis.
     Matrix m={right.x*scale,up.x*scale,-forward.x*scale,pos.x,
