@@ -1,0 +1,84 @@
+#version 430
+
+layout(local_size_x = 128) in;
+
+layout(std430, binding = 0) buffer MassBuffer { uint mass[]; };
+layout(std430, binding = 1) buffer ScratchBuffer { uint scratch[]; };
+layout(std430, binding = 2) readonly buffer StaticMaskBuffer { uint staticMask[]; };
+layout(std430, binding = 3) readonly buffer DynamicMaskBuffer { uint dynamicMask[]; };
+layout(std430, binding = 4) readonly buffer ActiveTileBuffer { uint activeTile[]; };
+
+uniform int uMode;
+uniform int uCellCount;
+
+const uint WATER_MAX = 65535u;
+const int SIZE_X = 80;
+const int SIZE_Y = 80;
+const int SIZE_Z = 80;
+const int LAYER = SIZE_X * SIZE_Z;
+
+bool blocked(int i) { return staticMask[i] != 0u || dynamicMask[i] != 0u; }
+
+void coords(int i, out int x, out int y, out int z)
+{
+    y = i / LAYER;
+    int rem = i - y * LAYER;
+    z = rem / SIZE_X;
+    x = rem - z * SIZE_X;
+}
+
+bool active_cell(int x, int y, int z)
+{
+    int tile = (x / 8) + 10 * ((z / 8) + 10 * (y / 8));
+    return activeTile[tile] != 0u;
+}
+
+uint down_flow(int i, int y)
+{
+    if (blocked(i) || y == 0) return 0u;
+    int below = i - LAYER;
+    if (blocked(below)) return 0u;
+    return min(mass[i], WATER_MAX - mass[below]);
+}
+
+uint horizontal_flow(int from, int to)
+{
+    if (to < 0 || to >= uCellCount || blocked(from) || blocked(to)) return 0u;
+    return scratch[from] > scratch[to] ? (scratch[from] - scratch[to]) >> 3 : 0u;
+}
+
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= uCellCount) return;
+    int x, y, z;
+    coords(i, x, y, z);
+    if (uMode == 0) {
+        if (!active_cell(x, y, z) || blocked(i)) {
+            scratch[i] = mass[i];
+            return;
+        }
+        uint outgoing = down_flow(i, y);
+        uint incoming = y + 1 < SIZE_Y ? down_flow(i + LAYER, y + 1) : 0u;
+        scratch[i] = mass[i] - outgoing + incoming;
+        return;
+    }
+    if (!active_cell(x, y, z) || blocked(i)) {
+        mass[i] = scratch[i];
+        return;
+    }
+    int neighbors[4] = int[4](
+        x + 1 < SIZE_X ? i + 1 : -1,
+        x > 0 ? i - 1 : -1,
+        z + 1 < SIZE_Z ? i + SIZE_X : -1,
+        z > 0 ? i - SIZE_X : -1
+    );
+    uint outgoing = 0u;
+    uint incoming = 0u;
+    for (int n = 0; n < 4; ++n) {
+        if (neighbors[n] < 0) continue;
+        outgoing += horizontal_flow(i, neighbors[n]);
+        incoming += horizontal_flow(neighbors[n], i);
+    }
+    mass[i] = scratch[i] - outgoing + incoming;
+}
