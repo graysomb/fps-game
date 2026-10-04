@@ -165,6 +165,10 @@ const int MODE_AABB_TREE_COLLISIONS = 38;
 const int MODE_AMR_SPHERE_SETUP = 39;
 const int MODE_AMR_SPHERE_TREE_COLLISIONS = 40;
 const int MODE_AMR_SPHERE_STATIC_COLLISIONS = 41;
+const int MODE_AMR_DORMANT_FULL_SNAPSHOT = 42;
+const int MODE_AMR_BREAK_MASK = 43;
+const int MODE_AMR_ACTIVE_CLEAR = 44;
+const int MODE_AMR_PREPARE_TRANSITION = 45;
 const int CONTROL_FLAG_OVERFLOW = 1;
 const int CONTROL_FLAG_TOPOLOGY_DIRTY = 2;
 const int CONTROL_FLAG_BREAK_OCCURRED = 4;
@@ -674,8 +678,15 @@ bool fractureProbabilityAccepts(uint identity) {
 }
 
 void gatherBreakMask(uint gid) {
-    if (gid >= uint(uVgsCount)) return;
-    uint voxelId = uint(uVgsBegin) + gid;
+    uint voxelId;
+    if(uMode==MODE_AMR_BREAK_MASK){
+        uint activeBase=16u+4u*amrControl.constraint_capacity;
+        if(gid>=dispatchArgs[activeBase])return;
+        voxelId=dispatchArgs[activeBase+4u+gid];
+    }else{
+        if(gid>=uint(uVgsCount))return;
+        voxelId=uint(uVgsBegin)+gid;
+    }
     VoxelState v = voxel[voxelId];
     if (v.flags.x == 0 || v.flags.w == 0 || v.flags.y != 0 ||
         v.flags.z != 0 || v.pos_rest_edge.w <= 0.0) {
@@ -963,8 +974,6 @@ bool amrDeformed(uint stage,VoxelState v, float rootEdge) {
 }
 
 void amrClear(uint gid) {
-    if (gid < amrControl.total_stage_count)
-        amrState[gid].previous[7] = uintBitsToFloat(0u);
     if (gid != 0u) return;
     amrControl.constraint_count=0u;
     amrControl.frame_refine_count=0u;
@@ -975,36 +984,45 @@ void amrClear(uint gid) {
 }
 
 void amrSample(uint gid) {
-    if (gid >= amrControl.total_stage_count) return;
-    VoxelState v=voxel[gid];
-    if (!amrRepresented(v)) return;
+    if (gid >= amrControl.constraint_count) return;
+    uint base=16u+gid*4u;
+    if(dispatchArgs[base]!=0u)return;
+    uint stage=dispatchArgs[base+1u];
+    if(stage>=amrControl.total_stage_count)return;
+    amrState[stage].previous[7]=uintBitsToFloat(0u);
+    VoxelState v=voxel[stage];
+    if (v.flags.w==0||!amrRepresented(v)) return;
     float values[6];
-    if (!amrMeasure(gid,v,values)) return;
+    if (!amrMeasure(stage,v,values)) return;
     float curvature=0.0;
     if (amrControl.sample_count>=2u && uDt>0.0) {
         float invDtSquared=1.0/(uDt*uDt);
         for(int i=0;i<6;++i)
-            curvature=max(curvature,abs(values[i]-2.0*amrState[gid].latest[i]+
-                                         amrState[gid].previous[i])*invDtSquared);
+            curvature=max(curvature,abs(values[i]-2.0*amrState[stage].latest[i]+
+                                         amrState[stage].previous[i])*invDtSquared);
     }
     for(int i=0;i<6;++i){
-        amrState[gid].previous[i]=amrState[gid].latest[i];
-        amrState[gid].latest[i]=values[i];
+        amrState[stage].previous[i]=amrState[stage].latest[i];
+        amrState[stage].latest[i]=values[i];
     }
-    amrState[gid].latest[6]=isnan(curvature)||isinf(curvature)?1000.0:curvature;
+    amrState[stage].latest[6]=isnan(curvature)||isinf(curvature)?1000.0:curvature;
 }
 
 void amrSelect(uint gid) {
-    if(gid>=amrControl.hierarchy_count)return;
-    uint stage=uint(uVoxelCount)+gid;
+    uint activeBase=16u+4u*amrControl.constraint_capacity;
+    if(gid>=dispatchArgs[activeBase])return;
+    uint stage=dispatchArgs[activeBase+4u+gid];
+    if(stage<uint(uVoxelCount))return;
     VoxelState node=voxel[stage];
     if(node.flags.w==0||!amrRepresented(node))return;
     bool hasChildren=amrHasActiveChildren(node);
     // A broken internal terminal must hand its mass to one child level.  It
     // remains disabled as a constraint and only acts as a topology ancestor.
     if(node.flags.x==0){
-        if(!hasChildren)
+        if(!hasChildren){
             amrState[stage].previous[7]=uintBitsToFloat(AMR_DECISION_REFINE);
+            atomicOr(amrControl.changed,1u);
+        }
         return;
     }
     uint rootStage=floatBitsToUint(amrState[stage].previous[6]);
@@ -1015,8 +1033,10 @@ void amrSelect(uint gid) {
     bool deformed=uVgsBegin!=0&&amrDeformed(stage,node,rootEdge);
     if(!hasChildren){
         bool forced=(node.lifecycle.w&AMR_FORCE_REFINED)!=0u;
-        if(forced||amrState[stage].latest[6]>threshold||deformed)
+        if(forced||amrState[stage].latest[6]>threshold||deformed){
             amrState[stage].previous[7]=uintBitsToFloat(AMR_DECISION_REFINE);
+            atomicOr(amrControl.changed,1u);
+        }
         return;
     }
     float childMean=0.0;uint childCount=0u;
@@ -1035,13 +1055,17 @@ void amrSelect(uint gid) {
     if(childCount>0u)childMean/=float(childCount);
     bool forced=(node.lifecycle.w&AMR_FORCE_REFINED)!=0u;
     if(!forced&&!deformed&&!childDeformed&&amrState[stage].latest[6]<threshold&&
-       childMean<amrControl.threshold_factor*threshold&&!grandchildren&&!broken)
+       childMean<amrControl.threshold_factor*threshold&&!grandchildren&&!broken){
         amrState[stage].previous[7]=uintBitsToFloat(AMR_DECISION_COARSEN);
+        atomicOr(amrControl.changed,1u);
+    }
 }
 
 void amrResolve(uint gid) {
-    if(gid>=amrControl.hierarchy_count)return;
-    uint stage=uint(uVoxelCount)+gid;
+    uint activeBase=16u+4u*amrControl.constraint_capacity;
+    if(gid>=dispatchArgs[activeBase])return;
+    uint stage=dispatchArgs[activeBase+4u+gid];
+    if(stage<uint(uVoxelCount))return;
     uint parent=floatBitsToUint(amrState[stage].latest[7]);
     if(parent<amrControl.total_stage_count&&
        (floatBitsToUint(amrState[parent].previous[7])&AMR_DECISION_COARSEN)!=0u)
@@ -1134,6 +1158,13 @@ void amrFullDormantScatter(uint gid){
 }
 
 void amrTransitionScatter(uint gid){
+    if(amrControl.padding[0]==0u){
+        uint activeBase=16u+4u*amrControl.constraint_capacity;
+        if(gid>=dispatchArgs[activeBase])return;
+        uint stage=dispatchArgs[activeBase+4u+gid];
+        if(stage>=uint(uVoxelCount))amrFullTransitionScatter(stage-uint(uVoxelCount));
+        return;
+    }
     if(gid<amrControl.hierarchy_count){uint stage=uint(uVoxelCount)+gid;
         if(!amrPartial(voxel[stage]))amrFullTransitionScatter(gid);}
     if(gid<amrControl.padding[3]){
@@ -1174,9 +1205,8 @@ void amrTransitionScatter(uint gid){
 }
 
 void amrDormantScatter(uint gid){
-    if(gid<uint(uVgsCount)){uint stage=uint(uVgsBegin)+gid;
-        if(stage<amrControl.total_stage_count&&!amrPartial(voxel[stage]))
-            amrFullDormantScatter(gid);}
+    // Full descendants are initialized by refinement. Embedded partial
+    // terminals still need fine coordinates between transitions.
     if(uVgsCount<=0)return;
     uint firstNode=partialNodeBase(uint(uVgsBegin));
     if(gid>=partial[firstNode+141u])return;
@@ -1217,7 +1247,10 @@ void amrTransitionApply(uint gid){
 }
 
 void amrTopologyApply(uint gid){
-    if(gid>=amrControl.hierarchy_count)return;uint stage=uint(uVoxelCount)+gid;
+    uint activeBase=16u+4u*amrControl.constraint_capacity;
+    if(gid>=dispatchArgs[activeBase])return;
+    uint stage=dispatchArgs[activeBase+4u+gid];
+    if(stage<uint(uVoxelCount))return;
     uint decision=floatBitsToUint(amrState[stage].previous[7]);if(decision==0u)return;
     bool refine=(decision&AMR_DECISION_REFINE)!=0u;VoxelState parent=voxel[stage];
     for(int c=0;c<8;++c){uint child=amrChild(parent,c);if(child>=amrControl.total_stage_count)continue;
@@ -1225,6 +1258,7 @@ void amrTopologyApply(uint gid){
         cv.flags.w=refine?1:0;voxel[child]=cv;if(refine){
         float parentId=amrState[child].latest[7];amrState[child]=amrState[stage];
         amrState[child].latest[7]=parentId;amrState[child].previous[7]=uintBitsToFloat(0u);}}
+    amrState[stage].previous[7]=uintBitsToFloat(0u);
     if(refine){atomicAdd(amrControl.frame_refine_count,1u);atomicAdd(amrControl.total_refine_count,1u);}
     else{float values[6];if(amrMeasure(stage,parent,values)){for(int i=0;i<6;++i){
         amrState[stage].latest[i]=values[i];amrState[stage].previous[i]=values[i];}
@@ -1234,7 +1268,9 @@ void amrTopologyApply(uint gid){
 }
 
 void amrMassScatter(uint gid){
-    if(gid>=amrControl.total_stage_count)return;VoxelState v=voxel[gid];
+    uint activeBase=16u+4u*amrControl.constraint_capacity;
+    if(gid>=dispatchArgs[activeBase])return;
+    gid=dispatchArgs[activeBase+4u+gid];VoxelState v=voxel[gid];
     if(v.flags.w==0||!amrRepresented(v))return;
     if(gid>=uint(uVoxelCount)&&amrHasActiveChildren(v))return;
     if(amrPartial(v)){
@@ -1269,10 +1305,20 @@ uint amrTerminalMask(VoxelState parent){
         mask|=1u<<c;}return mask;
 }
 
+uint amrEmbeddedRelation(uint id);
+
 void amrCompile(uint gid){
     if(gid>=amrControl.total_stage_count)return;VoxelState v=voxel[gid];
-    if(v.flags.x==0||v.flags.w==0||!amrRepresented(v)||
+    bool embeddedTerminal=gid<uint(uVoxelCount)&&v.flags.w==0&&
+        amrControl.padding[0]!=0u&&
+        amrEmbeddedRelation(voxelParticle(v,0))!=0xffffffffu;
+    if((v.flags.w==0&&!embeddedTerminal)||!amrRepresented(v)||
        v.flags.y!=0||v.flags.z!=0)return;
+    uint activeBase=16u+4u*amrControl.constraint_capacity;
+    uint activeSlot=atomicAdd(dispatchArgs[activeBase],1u);
+    if(activeSlot<amrControl.total_stage_count)dispatchArgs[activeBase+4u+activeSlot]=gid;
+    else atomicOr(amrControl.overflow,AMR_OVERFLOW_CONSTRAINT);
+    if(v.flags.x==0||v.flags.w==0)return;
     bool embedded=amrPartial(v);
     uint mask=gid>=uint(uVoxelCount)?amrTerminalMask(v):0u;
     uint chunks=0u,chunkBegin=0u,chunkCount=0u;if(embedded&&mask!=0u){
@@ -1297,6 +1343,9 @@ void amrPrepareIndirect(uint gid){
     dispatchArgs[1]=1u;dispatchArgs[2]=1u;dispatchArgs[4]=(dispatchArgs[8]+127u)/128u;
     dispatchArgs[5]=1u;dispatchArgs[6]=1u;dispatchArgs[13]=(amrControl.constraint_count+127u)/128u;
     dispatchArgs[14]=1u;dispatchArgs[15]=1u;
+    uint activeBase=16u+4u*amrControl.constraint_capacity;
+    dispatchArgs[activeBase+1u]=(dispatchArgs[activeBase]+127u)/128u;
+    dispatchArgs[activeBase+2u]=1u;dispatchArgs[activeBase+3u]=1u;
 }
 
 const int AMR_HEX_FACE_CORNERS[24]=int[24](
@@ -1425,8 +1474,14 @@ int sphereShapeBody(VoxelState v){uint id=voxelParticle(v,0);
     return id<uint(gpuControl.x)?collisionMeta[id].w:-1;}
 
 void aabbClear(uint gid){
-    if(gid<amrControl.particle_capacity)aabbOwner[gid]=0u;
-    if(gid<aabbControl.total_stage_count)aabbState[gid].meta.x=0u;
+    if(aabbControl.mode==3u){
+        if(gid<uint(max(gpuControl.y,0))){
+            uint id=simId[gid];if(id<amrControl.particle_capacity)aabbOwner[id]=0u;
+        }
+    }else{
+        if(gid<amrControl.particle_capacity)aabbOwner[gid]=0u;
+        if(gid<aabbControl.total_stage_count)aabbState[gid].meta.x=0u;
+    }
     if(gid==0u){aabbControl.proxy_count=0u;aabbControl.candidate_count=0u;
         aabbControl.contact_count=0u;aabbControl.overflow=0u;aabbControl.node_visit_count=0u;
         aabbControl.bounds_reject_count=0u;aabbControl.empty_reject_count=0u;
@@ -1436,7 +1491,9 @@ void aabbClear(uint gid){
 void atomicMaxAabbStack(uint candidate){atomicMax(aabbControl.max_stack_depth,candidate);}
 
 void amrSphereSetup(uint gid){
-    if(aabbControl.mode==0u||gid>=aabbControl.total_stage_count)return;VoxelState v=voxel[gid];
+    uint activeBase=16u+4u*amrControl.constraint_capacity;
+    if(aabbControl.mode==0u||gid>=dispatchArgs[activeBase])return;
+    gid=dispatchArgs[activeBase+4u+gid];VoxelState v=voxel[gid];
     bool hierarchyNode=gid>=uint(uVoxelCount);uint parent=hierarchyNode?
         floatBitsToUint(v.pos_rest_edge.x):floatBitsToUint(amrState[gid].latest[7]);
     bool owned=hierarchyNode||parent<amrControl.total_stage_count;if(owned)for(int c=0;c<8;++c){
@@ -1446,7 +1503,9 @@ void amrSphereSetup(uint gid){
 }
 
 void amrSphereTreeCollisions(uint gid){
-    if(aabbControl.mode==0u||gid>=amrControl.total_stage_count)return;
+    uint activeBase=16u+4u*amrControl.constraint_capacity;
+    if(aabbControl.mode==0u||gid>=dispatchArgs[activeBase])return;
+    gid=dispatchArgs[activeBase+4u+gid];
     VoxelState queryVoxel=voxel[gid];bool hierarchyQuery=gid>=uint(uVoxelCount);
     uint parent=hierarchyQuery?floatBitsToUint(queryVoxel.pos_rest_edge.x):
         floatBitsToUint(amrState[gid].latest[7]);
@@ -1493,7 +1552,9 @@ void gatherSpherePlaneContact(int proxy,float depth,vec3 normal,
 }
 
 void amrSphereStaticCollisions(uint gid){
-    if(aabbControl.mode==0u||gid>=amrControl.total_stage_count)return;VoxelState v=voxel[gid];
+    uint activeBase=16u+4u*amrControl.constraint_capacity;
+    if(aabbControl.mode==0u||gid>=dispatchArgs[activeBase])return;
+    gid=dispatchArgs[activeBase+4u+gid];VoxelState v=voxel[gid];
     if(!amrSphereTerminal(gid,v))return;vec3 position[9];uint particleId[8];
     if(!loadSphereShape(gid,position,particleId))return;float proxyRadius[9];
     loadSphereRadii(v.pos_rest_edge.w,particleId,proxyRadius);SphereContact contacts[4];int contactCount=0;
@@ -1556,7 +1617,7 @@ void main() {
         }
     }
     else if (uMode==MODE_STATIC_COLLISIONS) staticCollisions(gid);
-    else if (uMode==MODE_BREAK_MASK) gatherBreakMask(gid);
+    else if (uMode==MODE_BREAK_MASK || uMode==MODE_AMR_BREAK_MASK) gatherBreakMask(gid);
     else if (uMode==MODE_FINALIZE_PARTICLES) finalizeParticle(gid);
     else if (uMode==MODE_FINALIZE_VOXELS) finalizeVoxel(gid);
     else if (uMode==MODE_SPLIT_BREAKS) splitBrokenFaces(gid);
@@ -1567,18 +1628,32 @@ void main() {
     else if (uMode==MODE_HIERARCHY_MASK) propagateHierarchyMask(gid);
     else if (uMode==MODE_AMR_CLEAR) amrClear(gid);
     else if (uMode==MODE_AMR_SAMPLE) amrSample(gid);
-    else if (uMode==MODE_AMR_SAMPLE_COMPLETE) { if(gid==0u) amrControl.sample_count++; }
+    else if (uMode==MODE_AMR_SAMPLE_COMPLETE) { if(gid==0u){ amrControl.sample_count++; amrControl.changed=0u; } }
     else if (uMode==MODE_AMR_SELECT) amrSelect(gid);
     else if (uMode==MODE_AMR_RESOLVE) amrResolve(gid);
     else if (uMode==MODE_AMR_TRANSITION_CLEAR) amrScratchClear(gid);
     else if (uMode==MODE_AMR_TRANSITION_SCATTER) amrTransitionScatter(gid);
     else if (uMode==MODE_AMR_TRANSITION_APPLY) amrTransitionApply(gid);
     else if (uMode==MODE_AMR_TOPOLOGY_APPLY) amrTopologyApply(gid);
+    else if (uMode==MODE_AMR_ACTIVE_CLEAR && gid==0u)
+        dispatchArgs[16u+4u*amrControl.constraint_capacity]=0u;
+    else if (uMode==MODE_AMR_PREPARE_TRANSITION && gid==0u){
+        uint base=16u+4u*amrControl.constraint_capacity+4u+amrControl.total_stage_count;
+        dispatchArgs[base]=amrControl.changed!=0u?(amrControl.particle_capacity+127u)/128u:0u;
+        dispatchArgs[base+1u]=1u;dispatchArgs[base+2u]=1u;
+    }
     else if (uMode==MODE_AMR_MASS_SCATTER) amrMassScatter(gid);
     else if (uMode==MODE_AMR_COMPACT) amrCompact(gid);
     else if (uMode==MODE_AMR_COMPILE) amrCompile(gid);
     else if (uMode==MODE_AMR_PREPARE_INDIRECT) amrPrepareIndirect(gid);
     else if (uMode==MODE_AMR_DORMANT_SCATTER) amrDormantScatter(gid);
+    else if (uMode==MODE_AMR_DORMANT_FULL_SNAPSHOT) {
+        if (gid<uint(uVgsCount)) {
+            uint stage=uint(uVgsBegin)+gid;
+            if(stage<amrControl.total_stage_count&&!amrPartial(voxel[stage]))
+                amrFullDormantScatter(gid);
+        }
+    }
     else if (uMode==MODE_AABB_CLEAR) aabbClear(gid);
     else if (uMode==MODE_AABB_BOUNDS) amrSphereSetup(gid);
     else if (uMode==MODE_AABB_HASH_BUILD) { }

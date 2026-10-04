@@ -345,6 +345,9 @@ static bool debug_setup_pbf_dense_neighbors(DebugRunState *state);
 static bool debug_setup_cube_stress(DebugRunState *state);
 static bool debug_setup_active_cube_drop(DebugRunState *state);
 static bool debug_setup_adaptive_cube_drop(DebugRunState *state);
+static bool debug_setup_adaptive_cube_gameplay_drop(DebugRunState *state);
+static bool debug_setup_adaptive_32_corner_drop(DebugRunState *state);
+static bool debug_setup_adaptive_large_corner_drop(DebugRunState *state);
 static bool debug_setup_adaptive_l_drop(DebugRunState *state);
 static bool debug_setup_adaptive_crossed_tunnel_drop(DebugRunState *state);
 static bool debug_setup_adaptive_crossed_skeleton_drop(DebugRunState *state);
@@ -389,6 +392,9 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "cube-stress", "Stress test with scalable dynamic cube (size set by FPS_CUBE_SIZE)", debug_setup_cube_stress, 60, 60 },
     { "active-cube-drop", "Activate a static 10x10x10 cube and drop it", debug_setup_active_cube_drop, 120, 60 },
     { "adaptive-cube-drop", "Curvature-driven octree cube drop", debug_setup_adaptive_cube_drop, 240, 60 },
+    { "adaptive-cube-gameplay-drop", "Adaptive cube drop with gameplay terminal rendering", debug_setup_adaptive_cube_gameplay_drop, 240, 60 },
+    { "adaptive-32-corner-drop", "Full 32^3 adaptive cube corner drop", debug_setup_adaptive_32_corner_drop, 480, 60 },
+    { "adaptive-large-corner-drop", "Full 64^3 adaptive cube corner drop", debug_setup_adaptive_large_corner_drop, 480, 60 },
     { "adaptive-l-drop", "Occupancy-masked adaptive L-shaped drop", debug_setup_adaptive_l_drop, 480, 120 },
     { "adaptive-crossed-tunnel-drop", "Connected crossed-tunnel AMR drop with partial nodes at every level", debug_setup_adaptive_crossed_tunnel_drop, 480, 120 },
     { "adaptive-crossed-skeleton-drop", "Fully perforated crossed-tunnel AMR drop", debug_setup_adaptive_crossed_skeleton_drop, 480, 120 },
@@ -907,6 +913,7 @@ static void debug_rebuild_world_state(void)
 
 static void debug_reset_world(void)
 {
+    arenaHalfSize = 20.0f;
     debugColorVoxelsByVgsTemporalCurvature = false;
     debugRefinementCoarse = false;
     debugAdaptiveOctree = false;
@@ -953,12 +960,12 @@ static bool debug_build_cube_vgs_hierarchy(const int *lattice, int side, float l
     return vgs_build_hierarchy_from_occupancy(lattice, side, leaf_edge);
 }
 
-static bool debug_validate_cube_vgs_hierarchy(int side)
+static bool debug_validate_cube_vgs_hierarchy(int side, float cube_edge)
 {
     int expected = (side * side * side - 1) / 7;
     if (vgsHierarchy.node_count != expected || vgsHierarchy.leaf_count != side * side * side)
         return false;
-    if (side > 1 && fabsf(vgsHierarchy.nodes[0].rest_edge - 5.0f) > 1e-5f)
+    if (side > 1 && fabsf(vgsHierarchy.nodes[0].rest_edge - cube_edge) > 1e-5f)
         return false;
     for (int i = 0; i < vgsHierarchy.node_count; ++i) {
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
@@ -1029,8 +1036,8 @@ static bool debug_convert_shape_to_pbd(DebugRunState *state, float requested_siz
     // size is an upper bound when it does not divide the 5 m cube exactly.
     double minimum_side = ceil(cube_edge / size - 1e-6);
     int side = 1;
-    while ((double)side < minimum_side && side < 64) side *= 2;
-    if ((double)side < minimum_side || side > 32) {
+    while ((double)side < minimum_side && side < AMR_MAX_GRID_SIDE) side *= 2;
+    if ((double)side < minimum_side || side > AMR_MAX_GRID_SIDE) {
         double lower_side = fmax((double)side, minimum_side);
         double required = lower_side * lower_side * lower_side;
         debug_add_failure(state, "PBD size %.9g requires at least %.0f voxels and %.0f particles (caps %d/%d)",
@@ -1132,7 +1139,7 @@ static bool debug_convert_shape_to_pbd(DebugRunState *state, float requested_siz
         debug_add_failure(state, "PBD size %.9g: unable to allocate VGS hierarchy", size);
         goto conversion_failed;
     }
-    if (shape == 0 && !debug_validate_cube_vgs_hierarchy(side)) {
+    if (shape == 0 && !debug_validate_cube_vgs_hierarchy(side, (float)cube_edge)) {
         debug_add_failure(state, "PBD size %.9g: invalid VGS octree", size);
         goto conversion_failed;
     }
@@ -1320,8 +1327,8 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
             ++sample.tagged_dynamic;
             bool embedded = vgsHierarchy.adaptive && !voxel->simulate_dofs &&
                 cpu_partial_relation_for_particle(voxel->particles[0],NULL)!=NULL;
-            if (voxel->vgs_active && (debugUseGameplayAmrRendering ||
-                                      !vgsHierarchy.adaptive || voxel->simulate_dofs || embedded))
+            if (voxel->vgs_active && (!vgsHierarchy.adaptive ||
+                                      voxel->simulate_dofs || embedded))
                 ++sample.tagged_rendered;
         }
         else ++sample.tagged_static;
@@ -1366,9 +1373,12 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
             }
         }
     }
-    if (vgsHierarchy.adaptive && !debugUseGameplayAmrRendering)
+    if (vgsHierarchy.adaptive)
         for (int i = 0; i < vgsHierarchy.node_count; ++i)
-            if (vgs_node_constraints_enabled(&vgsHierarchy.nodes[i]) &&
+            if ((debugUseGameplayAmrRendering
+                    ? (vgsHierarchy.nodes[i].active &&
+                       vgsHierarchy.nodes[i].occupancy == VGS_OCCUPANCY_FULL)
+                    : vgs_node_constraints_enabled(&vgsHierarchy.nodes[i])) &&
                 !vgs_node_has_active_children(&vgsHierarchy.nodes[i]) &&
                 vgsHierarchy.nodes[i].occupancy != VGS_OCCUPANCY_PARTIAL) ++sample.tagged_rendered;
     int centroid_count = cube_dynamic_only ? sample.tagged_dynamic : sample.tagged_voxels;
@@ -1524,7 +1534,7 @@ static void debug_render_scene(DebugRunState *state, const DebugSample *sample)
                       (Color){ 68, 75, 82, 255 });
             DrawGrid(48, VOXEL_SIZE);
             DrawVoxels(state->camera);
-            if (state->adaptive_cube_drop) {
+            if (state->adaptive_cube_drop && !state->gameplay_render_drop) {
                 for (int level = 0; level < vgsHierarchy.levels; ++level) {
                     int first = vgsHierarchy.level_start[level];
                     int end = first + vgsHierarchy.level_count[level];
@@ -2394,6 +2404,122 @@ static bool debug_setup_adaptive_cube_drop(DebugRunState *state)
     debugAdaptiveOctree = true;
     debugColorVoxelsByVgsTemporalCurvature = false;
     return true;
+}
+
+static bool debug_setup_adaptive_cube_gameplay_drop(DebugRunState *state)
+{
+    if (!debug_setup_adaptive_cube_drop(state)) return false;
+    state->gameplay_render_drop = true;
+    debugUseGameplayAmrRendering = true;
+    return true;
+}
+
+static bool debug_setup_adaptive_power_of_two_corner_drop(DebugRunState *state, int side)
+{
+    int cells = side * side * side;
+    debug_reset_world();
+    arenaHalfSize = 64.0f;
+    state->active_cube_drop = true;
+    state->adaptive_cube_drop = true;
+    state->expected_voxels = cells;
+    state->expected_static_leftovers = 0;
+    state->effective_pbd_size = VOXEL_SIZE;
+    state->activation_succeeded = true;
+    pbdSolidVoxelSize = VOXEL_SIZE;
+
+    int *lattice = malloc((size_t)cells * sizeof(*lattice));
+    float *particle_mass = calloc((size_t)MAX_PARTICLES, sizeof(*particle_mass));
+    if (!lattice || !particle_mass) {
+        debug_add_failure(state, "unable to allocate %d^3 cube setup scratch", side);
+        free(lattice);
+        free(particle_mass);
+        return false;
+    }
+
+    const Color color = {245, 145, 45, 255};
+    const float center_y = side == 32 ? 24.0f : 40.0f;
+    bool okay = true;
+    for (int y = 0; y < side && okay; ++y) {
+        for (int z = 0; z < side && okay; ++z) {
+            for (int x = 0; x < side; ++x) {
+                int flat = (y * side + z) * side + x;
+                float px = ((float)x + 0.5f - side * 0.5f) * VOXEL_SIZE;
+                float py = center_y + ((float)y + 0.5f - side * 0.5f) * VOXEL_SIZE;
+                float pz = ((float)z + 0.5f - side * 0.5f) * VOXEL_SIZE;
+                int idx = addVoxel(px, py, pz, false, true, color, VOXEL_TYPE_SOLID);
+                if (idx < 0) { okay = false; break; }
+                voxels[idx].debugClusterTag = DEBUG_TEST_TAG;
+                lattice[flat] = idx;
+                if (x > 0) debug_glue_pbd_faces(idx, lattice[flat - 1], 1);
+                if (z > 0) debug_glue_pbd_faces(idx, lattice[flat - side], 5);
+                if (y > 0) debug_glue_pbd_faces(idx, lattice[flat - side * side], 3);
+            }
+        }
+    }
+    if (!okay) debug_add_failure(state, "%d^3 cube creation stopped at %d/%d cells",
+                                side, voxel_count, cells);
+
+    if (okay) {
+        for (int i = 0; i < cells; ++i)
+            for (int c = 0; c < 8; ++c) {
+                ptrdiff_t pool = voxels[lattice[i]].particles[c] - particles_pool;
+                if (pool < 0 || pool >= MAX_PARTICLES) { okay = false; break; }
+                particle_mass[pool] += 1.0f;
+            }
+    }
+    if (okay) {
+        for (int i = 0; i < particle_pool_count; ++i)
+            if (particle_mass[i] > 0.0f)
+                particles_pool[i].inv_mass = particles_pool[i].base_inv_mass =
+                    1.0f / particle_mass[i];
+        okay = debug_build_cube_vgs_hierarchy(lattice, side, VOXEL_SIZE) &&
+               debug_validate_cube_vgs_hierarchy(side, side * VOXEL_SIZE);
+        if (!okay) debug_add_failure(state, "%d^3 cube hierarchy validation failed", side);
+    }
+    free(lattice);
+    free(particle_mass);
+    if (!okay) return false;
+
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    rebuild_voxel_hash();
+    rebuild_static_hash_if_dirty();
+    rebuild_all_voxel_surfaces();
+    refresh_static_voxel_beliefs();
+    meshDirty = true;
+    state->camera.position = side == 32 ? (Vector3){38.0f, 37.0f, 38.0f}
+                                        : (Vector3){62.0f, 60.0f, 62.0f};
+    state->camera.target = side == 32 ? (Vector3){0.0f, 20.0f, 0.0f}
+                                      : (Vector3){0.0f, 36.0f, 0.0f};
+    state->camera.fovy = 65.0f;
+    debug_set_initial_centroid(state);
+    if (!debug_tilt_tagged_cube_for_corner_drop(DEBUG_TEST_TAG) ||
+        !debug_init_vgs_temporal_curvature() ||
+        !vgs_hierarchy_initialize_adaptive()) {
+        debug_add_failure(state, "unable to initialize %d^3 adaptive corner drop", side);
+        return false;
+    }
+    debugAdaptiveOctree = true;
+    debugColorVoxelsByVgsTemporalCurvature = false;
+    debug_sample_vgs_temporal_curvature(PBD_MAX_STEP_DT);
+    if (!debug_join_path(state->curvature_levels_path,
+                         sizeof(state->curvature_levels_path),
+                         state->output_dir, "curvature-by-level.csv")) return false;
+    state->curvature_levels_file = fopen(state->curvature_levels_path, "w");
+    if (!state->curvature_levels_file) return false;
+    fputs("step,level,count,p50,p90,p99,max,above100,meanChildCurvature,childMeansAbove100,aboveAdaptiveThreshold,childMeansAboveAdaptiveThreshold\n",
+          state->curvature_levels_file);
+    debug_write_curvature_levels(state, 0);
+    return true;
+}
+
+static bool debug_setup_adaptive_32_corner_drop(DebugRunState *state)
+{
+    return debug_setup_adaptive_power_of_two_corner_drop(state, 32);
+}
+
+static bool debug_setup_adaptive_large_corner_drop(DebugRunState *state)
+{
+    return debug_setup_adaptive_power_of_two_corner_drop(state, 64);
 }
 
 static bool debug_write_occupancy_levels(DebugRunState *state)
@@ -5295,9 +5421,10 @@ static void debug_validate_step(DebugRunState *state, int step)
              fabs(terminal_volume - expected_volume) > 0.01) ||
             sample.invalid_particle_refs > 0)
             debug_add_failure(state,
-                "step %d: adaptive state nodes=%d terminals=%d leaves=%d rendered=%d mass=%.3f volume=%.3f invalid=%d",
-                step, active_nodes, terminal_nodes, active_leaves,
-                sample.tagged_rendered, total_mass, terminal_volume, sample.invalid_particle_refs);
+                "step %d: adaptive state nodes=%d root=%d terminals=%d leaves=%d rendered=%d mass=%.6f/%.6f volume=%.6f/%.6f invalid=%d",
+                step, active_nodes, vgsHierarchy.nodes[0].active, terminal_nodes, active_leaves,
+                sample.tagged_rendered, total_mass, expected_mass,
+                terminal_volume, expected_volume, sample.invalid_particle_refs);
     }
     if (state->sleep_snap_original_test) {
         float max_error = 0.0f;

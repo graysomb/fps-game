@@ -133,6 +133,10 @@ constant int MODE_AABB_TREE_COLLISIONS = 38;
 constant int MODE_AMR_SPHERE_SETUP = 39;
 constant int MODE_AMR_SPHERE_TREE_COLLISIONS = 40;
 constant int MODE_AMR_SPHERE_STATIC_COLLISIONS = 41;
+constant int MODE_AMR_DORMANT_FULL_SNAPSHOT = 42;
+constant int MODE_AMR_BREAK_MASK = 43;
+constant int MODE_AMR_ACTIVE_CLEAR = 44;
+constant int MODE_AMR_PREPARE_TRANSITION = 45;
 constant int CONTROL_FLAG_OVERFLOW = 1;
 constant int CONTROL_FLAG_TOPOLOGY_DIRTY = 2;
 constant int CONTROL_FLAG_BREAK_OCCURRED = 4;
@@ -664,10 +668,19 @@ inline bool aabbEligible(uint gid, VoxelState v, device const VoxelState *voxel,
 }
 
 inline void aabbClear(uint gid, device atomic_uint *owner, device AabbState *state,
-                      device AabbControl *aabb, device const AmrControl *amr) {
-    if (gid < amr->particle_capacity)
-        atomic_store_explicit(owner + gid, 0u, memory_order_relaxed);
-    if (gid < aabb->total_stage_count) state[gid].meta.x = 0u;
+                      device AabbControl *aabb, device const AmrControl *amr,
+                      device const uint *simId, device const int *control) {
+    if(aabb->mode==3u){
+        if(gid<uint(max(controlLoad(control,1),0))){
+            uint id=simId[gid];
+            if(id<amr->particle_capacity)
+                atomic_store_explicit(owner+id,0u,memory_order_relaxed);
+        }
+    }else{
+        if(gid<amr->particle_capacity)
+            atomic_store_explicit(owner+gid,0u,memory_order_relaxed);
+        if(gid<aabb->total_stage_count)state[gid].meta.x=0u;
+    }
     if (gid == 0u) {
         atomic_store_explicit(&aabb->proxy_count, 0u, memory_order_relaxed);
         atomic_store_explicit(&aabb->candidate_count, 0u, memory_order_relaxed);
@@ -1377,16 +1390,19 @@ inline int sphereShapeBody(VoxelState v, device const int *collisionMeta,
 inline void amrSphereSetup(uint gid, device const VoxelState *voxel,
                            device const AmrState *amrState,
                            device atomic_uint *owner, device AabbControl *aabb,
-                           device const AmrControl *amr, constant GpuUniforms &u) {
-    if (aabb->mode != 3u || gid >= aabb->total_stage_count) return;
+                           device const AmrControl *amr, device const uint *dispatchArgs,
+                           constant GpuUniforms &u) {
+    uint activeBase = 16u + 4u * amr->constraint_capacity;
+    if (aabb->mode != 3u || gid >= dispatchArgs[activeBase]) return;
+    gid = dispatchArgs[activeBase + 4u + gid];
     VoxelState v = voxel[gid];
     bool hierarchyNode = gid >= uint(u.voxel_count);
     uint parent = hierarchyNode ? as_type<uint>(v.pos_rest_edge.x)
                                 : as_type<uint>(amrState[gid].latest[7]);
     bool amrOwned = hierarchyNode || parent < amr->total_stage_count;
-    // The hierarchy is one collision body.  Mask every particle it owns from
-    // the ordinary particle hash, including dormant and internal particles;
-    // terminal cells alone are dispatched as the body's collision surface.
+    // The hierarchy is one collision body. Active cell anchors are masked
+    // from the ordinary hash; dormant particles have zero mass and never enter
+    // that hash. Terminal cells alone provide the collision surface.
     if (amrOwned) {
         for (int c = 0; c < 8; ++c) {
             uint id = voxelParticle(v, c);
@@ -1410,9 +1426,11 @@ inline void amrSphereTreeCollisions(uint gid, device const ParticleState *partic
                                     device const uint *partial,
                                     device AabbControl *aabb,
                                     device const AmrControl *amr,
-                                    device const int *control,
+                                    device const int *control, device const uint *dispatchArgs,
                                     constant GpuUniforms &u) {
-    if (aabb->mode != 3u || gid >= amr->total_stage_count) return;
+    uint activeBase = 16u + 4u * amr->constraint_capacity;
+    if (aabb->mode != 3u || gid >= dispatchArgs[activeBase]) return;
+    gid = dispatchArgs[activeBase + 4u + gid];
     VoxelState queryVoxel = voxel[gid];
     bool hierarchyQuery = gid >= uint(u.voxel_count);
     uint parent = hierarchyQuery ? as_type<uint>(queryVoxel.pos_rest_edge.x)
@@ -1522,9 +1540,11 @@ inline void amrSphereStaticCollisions(uint gid, device const ParticleState *part
                                       device AabbControl *aabb,
                                       device const AmrControl *amr,
                                       device const atomic_uint *collisionControl,
-                                      device const int *control,
+                                      device const int *control, device const uint *dispatchArgs,
                                       constant GpuUniforms &u) {
-    if (aabb->mode != 3u || gid >= amr->total_stage_count) return;
+    uint activeBase = 16u + 4u * amr->constraint_capacity;
+    if (aabb->mode != 3u || gid >= dispatchArgs[activeBase]) return;
+    gid = dispatchArgs[activeBase + 4u + gid];
     VoxelState v = voxel[gid];
     if (!amrSphereTerminal(gid, v, voxel, amrState, partial, amr, u)) return;
     float3 position[9]; uint particleId[8];
@@ -1679,7 +1699,6 @@ inline bool amrDeformed(uint stage, device const ParticleState *particle, VoxelS
 
 inline void amrClear(uint gid, device AmrState *state, device AmrControl *amr,
                      device int *control, device uint *dispatchArgs) {
-    if (gid < amr->total_stage_count) state[gid].previous[7] = as_type<float>(0u);
     if (gid != 0u) return;
     amr->constraint_count = 0u;
     amr->frame_refine_count = 0u;
@@ -1692,46 +1711,57 @@ inline void amrClear(uint gid, device AmrState *state, device AmrControl *amr,
 inline void amrSample(uint gid, device const ParticleState *particle,
                       device const VoxelState *voxel, device AmrState *state,
                       device const uint *partial,
+                      device const uint *dispatchArgs,
                       device const int *control, device const AmrControl *amr,
                       constant GpuUniforms &u) {
-    if (gid >= amr->total_stage_count) return;
-    VoxelState v = voxel[gid];
-    if (!amrRepresented(v)) return;
+    if (gid >= amr->constraint_count) return;
+    uint base = 16u + gid * 4u;
+    if (dispatchArgs[base] != 0u) return;
+    uint stage = dispatchArgs[base + 1u];
+    if (stage >= amr->total_stage_count) return;
+    state[stage].previous[7] = as_type<float>(0u);
+    VoxelState v = voxel[stage];
+    if (v.flags.w == 0 || !amrRepresented(v)) return;
     float values[6];
-    if (!amrMeasure(gid,particle, v, partial, control,u, values)) return;
+    if (!amrMeasure(stage,particle, v, partial, control,u, values)) return;
     float curvature = 0.0f;
     if (amr->sample_count >= 2u && u.dt > 0.0f) {
         float invDtSquared = 1.0f/(u.dt*u.dt);
         for (int i = 0; i < 6; ++i)
-            curvature = max(curvature, fabs(values[i]-2.0f*state[gid].latest[i]+
-                                             state[gid].previous[i])*invDtSquared);
+            curvature = max(curvature, fabs(values[i]-2.0f*state[stage].latest[i]+
+                                             state[stage].previous[i])*invDtSquared);
     }
     for (int i = 0; i < 6; ++i) {
-        state[gid].previous[i] = state[gid].latest[i];
-        state[gid].latest[i] = values[i];
+        state[stage].previous[i] = state[stage].latest[i];
+        state[stage].latest[i] = values[i];
     }
-    state[gid].latest[6] = isfinite(curvature) ? curvature : 1000.0f;
+    state[stage].latest[6] = isfinite(curvature) ? curvature : 1000.0f;
 }
 
 inline void amrSampleComplete(uint gid, device AmrControl *amr) {
-    if (gid == 0u) amr->sample_count++;
+    if (gid == 0u) { amr->sample_count++; amr->changed=0u; }
 }
 
 inline void amrSelect(uint gid, device const ParticleState *particle,
                       device VoxelState *voxel, device AmrState *state,
                       device const uint *partial,
                       device const int *control, device AmrControl *amr,
+                      device const uint *dispatchArgs,
                       constant GpuUniforms &u) {
-    if (gid >= amr->hierarchy_count) return;
-    uint stage = uint(u.voxel_count) + gid;
+    uint activeBase=16u+4u*amr->constraint_capacity;
+    if(gid>=dispatchArgs[activeBase])return;
+    uint stage=dispatchArgs[activeBase+4u+gid];
+    if(stage<uint(u.voxel_count))return;
     VoxelState node = voxel[stage];
     if (node.flags.w == 0 || !amrRepresented(node)) return;
     bool hasChildren = amrHasActiveChildren(node,voxel,amr);
     // A broken internal terminal must hand its mass to one child level.  It
     // remains disabled as a constraint and only acts as a topology ancestor.
     if (node.flags.x == 0) {
-        if (!hasChildren)
+        if (!hasChildren) {
             state[stage].previous[7] = as_type<float>(AMR_DECISION_REFINE);
+            atomic_store_explicit(reinterpret_cast<device atomic_uint *>(&amr->changed),1u,memory_order_relaxed);
+        }
         return;
     }
     uint rootStage = as_type<uint>(state[stage].previous[6]);
@@ -1743,8 +1773,10 @@ inline void amrSelect(uint gid, device const ParticleState *particle,
         amrDeformed(stage,particle,node,partial,control,amr,rootEdge,u);
     if (!hasChildren) {
         bool forced = (node.lifecycle.w & AMR_FORCE_REFINED) != 0u;
-        if (forced || state[stage].latest[6] > threshold || deformed)
+        if (forced || state[stage].latest[6] > threshold || deformed) {
             state[stage].previous[7] = as_type<float>(AMR_DECISION_REFINE);
+            atomic_store_explicit(reinterpret_cast<device atomic_uint *>(&amr->changed),1u,memory_order_relaxed);
+        }
         return;
     }
     float childMean = 0.0f;
@@ -1766,15 +1798,28 @@ inline void amrSelect(uint gid, device const ParticleState *particle,
     if (childCount > 0u) childMean /= float(childCount);
     bool forced = (node.lifecycle.w & AMR_FORCE_REFINED) != 0u;
     if (!forced && !deformed && !childDeformed && state[stage].latest[6] < threshold &&
-        childMean < amr->threshold_factor*threshold && !grandchildren && !broken)
+        childMean < amr->threshold_factor*threshold && !grandchildren && !broken) {
         state[stage].previous[7] = as_type<float>(AMR_DECISION_COARSEN);
+        atomic_store_explicit(reinterpret_cast<device atomic_uint *>(&amr->changed),1u,memory_order_relaxed);
+    }
+}
+
+inline void amrPrepareTransition(uint gid, device uint *dispatchArgs,
+                                 device const AmrControl *amr) {
+    if(gid!=0u)return;
+    uint base=16u+4u*amr->constraint_capacity+4u+amr->total_stage_count;
+    dispatchArgs[base]=amr->changed!=0u?(amr->particle_capacity+127u)/128u:0u;
+    dispatchArgs[base+1u]=1u;dispatchArgs[base+2u]=1u;
 }
 
 inline void amrResolve(uint gid, device const VoxelState *voxel,
                        device AmrState *state, device const AmrControl *amr,
+                       device const uint *dispatchArgs,
                        constant GpuUniforms &u) {
-    if (gid >= amr->hierarchy_count) return;
-    uint stage = uint(u.voxel_count) + gid;
+    uint activeBase=16u+4u*amr->constraint_capacity;
+    if(gid>=dispatchArgs[activeBase])return;
+    uint stage=dispatchArgs[activeBase+4u+gid];
+    if(stage<uint(u.voxel_count))return;
     uint parent = as_type<uint>(state[stage].latest[7]);
     if (parent < amr->total_stage_count &&
         (as_type<uint>(state[parent].previous[7]) & AMR_DECISION_COARSEN) != 0u)
@@ -1870,7 +1915,16 @@ inline void amrTransitionScatter(uint gid, device const ParticleState *particle,
                                  device const VoxelState *voxel, device const AmrState *state,
                                  device AmrScratch *scratch, device const AmrControl *amr,
                                  device const uint *partial, device const int *control,
+                                 device const uint *dispatchArgs,
                                  constant GpuUniforms &u) {
+    if(amr->padding[0]==0u){
+        uint activeBase=16u+4u*amr->constraint_capacity;
+        if(gid>=dispatchArgs[activeBase])return;
+        uint stage=dispatchArgs[activeBase+4u+gid];
+        if(stage>=uint(u.voxel_count))
+            amrFullTransitionScatter(stage-uint(u.voxel_count),particle,voxel,state,scratch,amr,partial,control,u);
+        return;
+    }
     if(gid<amr->hierarchy_count) {
         uint stage=uint(u.voxel_count)+gid;
         if(!amrPartial(voxel[stage]))
@@ -1927,11 +1981,8 @@ inline void amrDormantScatter(uint gid, device const ParticleState *particle,
                               device const VoxelState *voxel, device AmrScratch *scratch,
                               device const AmrControl *amr, device const uint *partial,
                               device const int *control, constant GpuUniforms &u) {
-    if(gid<uint(u.integer_padding_2)) {
-        uint stage=uint(u.integer_padding_1)+gid;
-        if(stage<amr->total_stage_count&&!amrPartial(voxel[stage]))
-            amrFullDormantScatter(gid,particle,voxel,scratch,amr,partial,control,u);
-    }
+    // Full descendants are initialized by the refinement transition.  Only
+    // embedded partial terminals need fine coordinates between transitions.
     if(u.integer_padding_2<=0)return;
     uint firstNode=partialNodeBase(uint(u.integer_padding_1),u);
     if(gid>=partial[firstNode+141u])return;
@@ -1979,17 +2030,19 @@ inline void amrTransitionApply(uint gid, device ParticleState *particle,
 inline void amrTopologyApply(uint gid, device const ParticleState *particle,
                              device VoxelState *voxel, device AmrState *state,
                              device AmrControl *amr, device const uint *partial,
-                             device const int *control,
+                             device const int *control, device const uint *dispatchArgs,
                              constant GpuUniforms &u) {
-    if(gid>=amr->hierarchy_count)return;uint stage=uint(u.voxel_count)+gid;uint decision=as_type<uint>(state[stage].previous[7]);if(decision==0u)return;bool refine=(decision&AMR_DECISION_REFINE)!=0u;VoxelState parent=voxel[stage];for(int c=0;c<8;++c){uint child=amrChild(parent,c);if(child>=amr->total_stage_count)continue;VoxelState cv=voxel[child];if(amrOccupancy(cv)==0u)continue;cv.flags.w=refine?1:0;voxel[child]=cv;if(refine){float parentId=state[child].latest[7];state[child]=state[stage];state[child].latest[7]=parentId;state[child].previous[7]=as_type<float>(0u);}}
+    uint activeBase=16u+4u*amr->constraint_capacity;if(gid>=dispatchArgs[activeBase])return;uint stage=dispatchArgs[activeBase+4u+gid];if(stage<uint(u.voxel_count))return;uint decision=as_type<uint>(state[stage].previous[7]);if(decision==0u)return;bool refine=(decision&AMR_DECISION_REFINE)!=0u;VoxelState parent=voxel[stage];for(int c=0;c<8;++c){uint child=amrChild(parent,c);if(child>=amr->total_stage_count)continue;VoxelState cv=voxel[child];if(amrOccupancy(cv)==0u)continue;cv.flags.w=refine?1:0;voxel[child]=cv;if(refine){float parentId=state[child].latest[7];state[child]=state[stage];state[child].latest[7]=parentId;state[child].previous[7]=as_type<float>(0u);}}state[stage].previous[7]=as_type<float>(0u);
     if(refine){atomic_fetch_add_explicit(reinterpret_cast<device atomic_uint *>(&amr->frame_refine_count),1u,memory_order_relaxed);atomic_fetch_add_explicit(reinterpret_cast<device atomic_uint *>(&amr->total_refine_count),1u,memory_order_relaxed);}else{float values[6];if(amrMeasure(stage,particle,parent,partial,control,u,values)){for(int i=0;i<6;++i){state[stage].latest[i]=values[i];state[stage].previous[i]=values[i];}state[stage].latest[6]=0.0f;}atomic_fetch_add_explicit(reinterpret_cast<device atomic_uint *>(&amr->frame_coarsen_count),1u,memory_order_relaxed);atomic_fetch_add_explicit(reinterpret_cast<device atomic_uint *>(&amr->total_coarsen_count),1u,memory_order_relaxed);}atomic_store_explicit(reinterpret_cast<device atomic_uint *>(&amr->changed),1u,memory_order_relaxed);atomic_fetch_add_explicit(reinterpret_cast<device atomic_uint *>(&amr->topology_generation),1u,memory_order_relaxed);
 }
 
 inline void amrMassScatter(uint gid, device const VoxelState *voxel,
                            device AmrScratch *scratch, device const AmrControl *amr,
-                           device const uint *partial,
+                           device const uint *partial, device const uint *dispatchArgs,
                            constant GpuUniforms &u) {
-    if(gid>=amr->total_stage_count)return;
+    uint activeBase=16u+4u*amr->constraint_capacity;
+    if(gid>=dispatchArgs[activeBase])return;
+    gid=dispatchArgs[activeBase+4u+gid];
     VoxelState v=voxel[gid];
     if(v.flags.w==0||!amrRepresented(v))return;
     if(gid>=uint(u.voxel_count)&&amrHasActiveChildren(v,voxel,amr))return;
@@ -2027,7 +2080,16 @@ inline void amrCompile(uint gid, device const VoxelState *voxel,
                        constant GpuUniforms &u) {
     if(gid>=amr->total_stage_count)return;
     VoxelState v=voxel[gid];
-    if(v.flags.x==0||v.flags.w==0||!amrRepresented(v)||v.flags.y!=0||v.flags.z!=0)return;
+    bool embeddedTerminal=gid<uint(u.voxel_count)&&v.flags.w==0&&
+        amr->padding[0]!=0u&&
+        amrEmbeddedRelation(voxelParticle(v,0),voxel,partial,amr,u)!=0xffffffffu;
+    if((v.flags.w==0&&!embeddedTerminal)||!amrRepresented(v)||
+       v.flags.y!=0||v.flags.z!=0)return;
+    uint activeBase=16u+4u*amr->constraint_capacity;
+    uint activeSlot=atomic_fetch_add_explicit(reinterpret_cast<device atomic_uint *>(&dispatchArgs[activeBase]),1u,memory_order_relaxed);
+    if(activeSlot<amr->total_stage_count)dispatchArgs[activeBase+4u+activeSlot]=gid;
+    else atomic_fetch_or_explicit(reinterpret_cast<device atomic_uint *>(&amr->overflow),AMR_OVERFLOW_CONSTRAINT,memory_order_relaxed);
+    if(v.flags.x==0||v.flags.w==0)return;
     bool embedded=amrPartial(v);
     uint mask=gid>=uint(u.voxel_count)?amrTerminalMask(v,voxel,amr):0u;
     uint chunks=0u, chunkBegin=0u, chunkCount=0u;
@@ -2052,7 +2114,7 @@ inline void amrCompile(uint gid, device const VoxelState *voxel,
 
 inline void amrPrepareIndirect(uint gid, device const int *control,
                                device uint *dispatchArgs, device const AmrControl *amr) {
-    if(gid!=0u)return;dispatchArgs[0]=(uint(max(controlLoad(control,1),0))+127u)/128u;dispatchArgs[1]=1u;dispatchArgs[2]=1u;dispatchArgs[4]=(dispatchArgs[8]+127u)/128u;dispatchArgs[5]=1u;dispatchArgs[6]=1u;dispatchArgs[13]=(amr->constraint_count+127u)/128u;dispatchArgs[14]=1u;dispatchArgs[15]=1u;
+    if(gid!=0u)return;dispatchArgs[0]=(uint(max(controlLoad(control,1),0))+127u)/128u;dispatchArgs[1]=1u;dispatchArgs[2]=1u;dispatchArgs[4]=(dispatchArgs[8]+127u)/128u;dispatchArgs[5]=1u;dispatchArgs[6]=1u;dispatchArgs[13]=(amr->constraint_count+127u)/128u;dispatchArgs[14]=1u;dispatchArgs[15]=1u;uint activeBase=16u+4u*amr->constraint_capacity;dispatchArgs[activeBase+1u]=(dispatchArgs[activeBase]+127u)/128u;dispatchArgs[activeBase+2u]=1u;dispatchArgs[activeBase+3u]=1u;
 }
 
 inline int findStaticCell(int3 coord, device int4 *staticCell, constant GpuUniforms &u) {
@@ -2099,9 +2161,18 @@ inline void gatherBreakMask(uint gid, device ParticleState *particle,
                             device const uint *partial,
                             device const int *tetherOwner,
                             device const int *refcount,
-                            device const int *control, constant GpuUniforms &u) {
-    if (gid >= uint(u.integer_padding_2)) return;
-    uint id = uint(u.integer_padding_1) + gid;
+                            device const int *control, device const uint *dispatchArgs,
+                            device const AmrControl *amr, bool sparse,
+                            constant GpuUniforms &u) {
+    uint id;
+    if(sparse){
+        uint activeBase=16u+4u*amr->constraint_capacity;
+        if(gid>=dispatchArgs[activeBase])return;
+        id=dispatchArgs[activeBase+4u+gid];
+    }else{
+        if(gid>=uint(u.integer_padding_2))return;
+        id=uint(u.integer_padding_1)+gid;
+    }
     VoxelState v = voxel[id];
     if (v.flags.x == 0 || v.flags.w == 0 || v.flags.y != 0 || v.flags.z != 0 ||
         v.pos_rest_edge.w <= 0.0f) {
@@ -2239,7 +2310,8 @@ kernel void pbd_pipeline(
             }
             break;
         case MODE_STATIC_COLLISIONS:staticCollisions(gid,particle,collisionId,collisionControl,staticCell,staticCollider,aabbOwner,aabbControl,refcount,control,u);break;
-        case MODE_BREAK_MASK:gatherBreakMask(gid,particle,voxel,topology,partial,tetherOwner,refcount,control,u);break;
+        case MODE_BREAK_MASK:gatherBreakMask(gid,particle,voxel,topology,partial,tetherOwner,refcount,control,dispatchArgs,amrControl,false,u);break;
+        case MODE_AMR_BREAK_MASK:gatherBreakMask(gid,particle,voxel,topology,partial,tetherOwner,refcount,control,dispatchArgs,amrControl,true,u);break;
         case MODE_FINALIZE_PARTICLES:finalizeParticle(gid,particle,cell,simId,refcount,control,u);break;
         case MODE_FINALIZE_VOXELS:finalizeVoxel(gid,particle,voxel,control,u);break;
         case MODE_SPLIT_BREAKS:splitBrokenFaces(gid,particle,correction,cell,simId,collisionId,collisionMember,collisionControl,voxel,tetherOwner,collisionMeta,refcount,control,cloneParent,u);break;
@@ -2249,28 +2321,35 @@ kernel void pbd_pipeline(
         case MODE_TOPOLOGY_REBUILD_SERIAL:break;
         case MODE_HIERARCHY_MASK:propagateHierarchyMask(gid,voxel,u);break;
         case MODE_AMR_CLEAR:amrClear(gid,amrState,amrControl,control,dispatchArgs);break;
-        case MODE_AMR_SAMPLE:amrSample(gid,particle,voxel,amrState,partial,control,amrControl,u);break;
+        case MODE_AMR_SAMPLE:amrSample(gid,particle,voxel,amrState,partial,dispatchArgs,control,amrControl,u);break;
         case MODE_AMR_SAMPLE_COMPLETE:amrSampleComplete(gid,amrControl);break;
-        case MODE_AMR_SELECT:amrSelect(gid,particle,voxel,amrState,partial,control,amrControl,u);break;
-        case MODE_AMR_RESOLVE:amrResolve(gid,voxel,amrState,amrControl,u);break;
+        case MODE_AMR_SELECT:amrSelect(gid,particle,voxel,amrState,partial,control,amrControl,dispatchArgs,u);break;
+        case MODE_AMR_RESOLVE:amrResolve(gid,voxel,amrState,amrControl,dispatchArgs,u);break;
         case MODE_AMR_TRANSITION_CLEAR:amrScratchClear(gid,amrScratch,amrControl);break;
-        case MODE_AMR_TRANSITION_SCATTER:amrTransitionScatter(gid,particle,voxel,amrState,amrScratch,amrControl,partial,control,u);break;
+        case MODE_AMR_TRANSITION_SCATTER:amrTransitionScatter(gid,particle,voxel,amrState,amrScratch,amrControl,partial,control,dispatchArgs,u);break;
         case MODE_AMR_TRANSITION_APPLY:amrTransitionApply(gid,particle,amrScratch,amrControl,control);break;
-        case MODE_AMR_TOPOLOGY_APPLY:amrTopologyApply(gid,particle,voxel,amrState,amrControl,partial,control,u);break;
-        case MODE_AMR_MASS_SCATTER:amrMassScatter(gid,voxel,amrScratch,amrControl,partial,u);break;
+        case MODE_AMR_TOPOLOGY_APPLY:amrTopologyApply(gid,particle,voxel,amrState,amrControl,partial,control,dispatchArgs,u);break;
+        case MODE_AMR_ACTIVE_CLEAR:if(gid==0u)dispatchArgs[16u+4u*amrControl->constraint_capacity]=0u;break;
+        case MODE_AMR_PREPARE_TRANSITION:amrPrepareTransition(gid,dispatchArgs,amrControl);break;
+        case MODE_AMR_MASS_SCATTER:amrMassScatter(gid,voxel,amrScratch,amrControl,partial,dispatchArgs,u);break;
         case MODE_AMR_COMPACT:amrCompact(gid,particle,simId,amrScratch,cloneParent,control,dispatchArgs,amrControl);break;
         case MODE_AMR_COMPILE:amrCompile(gid,voxel,dispatchArgs,amrControl,partial,u);break;
         case MODE_AMR_PREPARE_INDIRECT:amrPrepareIndirect(gid,control,dispatchArgs,amrControl);break;
         case MODE_AMR_DORMANT_SCATTER:amrDormantScatter(gid,particle,voxel,amrScratch,amrControl,partial,control,u);break;
-        case MODE_AABB_CLEAR:aabbClear(gid,aabbOwner,aabbState,aabbControl,amrControl);break;
+        case MODE_AMR_DORMANT_FULL_SNAPSHOT:if (gid < uint(u.integer_padding_2)) {
+            uint stage = uint(u.integer_padding_1) + gid;
+            if (stage < amrControl->total_stage_count && !amrPartial(voxel[stage]))
+                amrFullDormantScatter(gid,particle,voxel,amrScratch,amrControl,partial,control,u);
+        } break;
+        case MODE_AABB_CLEAR:aabbClear(gid,aabbOwner,aabbState,aabbControl,amrControl,simId,control);break;
         case MODE_AABB_BOUNDS:aabbBounds(gid,particle,voxel,collisionMeta,amrState,aabbOwner,aabbState,aabbControl,amrControl,control,u);break;
         case MODE_AABB_HASH_BUILD:aabbHashBuild(gid,aabbState,hashHead,hashNext,aabbControl,u);break;
         case MODE_AABB_COLLISIONS:aabbCollisions(gid,particle,correction,voxel,hashHead,hashNext,aabbState,aabbControl,amrControl,control,u);break;
         case MODE_AABB_STATIC_COLLISIONS:aabbStaticCollisions(gid,particle,correction,voxel,staticCell,staticCollider,aabbState,aabbControl,amrState,amrControl,collisionControl,control,u);break;
         case MODE_AABB_REDUCE:aabbReduce(gid,voxel,aabbState,aabbControl,u);break;
         case MODE_AABB_TREE_COLLISIONS:aabbTreeCollisions(gid,particle,correction,voxel,aabbState,aabbControl,amrControl,control,u);break;
-        case MODE_AMR_SPHERE_SETUP:amrSphereSetup(gid,voxel,amrState,aabbOwner,aabbControl,amrControl,u);break;
-        case MODE_AMR_SPHERE_TREE_COLLISIONS:amrSphereTreeCollisions(gid,particle,correction,voxel,collisionMeta,amrState,partial,aabbControl,amrControl,control,u);break;
-        case MODE_AMR_SPHERE_STATIC_COLLISIONS:amrSphereStaticCollisions(gid,particle,correction,voxel,staticCell,staticCollider,amrState,partial,aabbControl,amrControl,collisionControl,control,u);break;
+        case MODE_AMR_SPHERE_SETUP:amrSphereSetup(gid,voxel,amrState,aabbOwner,aabbControl,amrControl,dispatchArgs,u);break;
+        case MODE_AMR_SPHERE_TREE_COLLISIONS:amrSphereTreeCollisions(gid,particle,correction,voxel,collisionMeta,amrState,partial,aabbControl,amrControl,control,dispatchArgs,u);break;
+        case MODE_AMR_SPHERE_STATIC_COLLISIONS:amrSphereStaticCollisions(gid,particle,correction,voxel,staticCell,staticCollider,amrState,partial,aabbControl,amrControl,collisionControl,control,dispatchArgs,u);break;
     }
 }

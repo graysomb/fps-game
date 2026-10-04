@@ -590,6 +590,21 @@ Available scenarios are:
   `FPS_AMR_COLLISION_PARTICLES=1` for particle-only AMR collisions. The two
   legacy AABB comparison switches apply to CPU and Metal; resident OpenGL uses
   the production nine-sphere hierarchy.
+* `adaptive-large-corner-drop`: builds a connected 64×64×64 AMR cube with 0.5 m
+  finest voxels, rotates it 45° about X and Z, and drops it in a debug-only
+  64 m half-width arena. The ordinary gameplay arena remains 20 m. Run with
+  `--physics=gpu --debug-scenario=adaptive-large-corner-drop --debug-steps=480
+  --debug-gif --debug-gif-fps=20`; set `FPS_DEBUG_GIF_ALL_FRAMES=1` to retain
+  all 481 simulation frames and `FPS_AMR_RECORD_TIMINGS=1` for a per-frame CSV.
+* `adaptive-32-corner-drop`: runs the same corner-drop setup with a 32×32×32
+  cube, 0.5 m finest voxels, and the same adaptive solver settings.
+* `adaptive-cube-gameplay-drop`: uses the ordinary adaptive cube drop with the
+  gameplay renderer, so a full terminal appears as one coarse cube while
+  occupied partial terminals remain fine voxels.
+  Resident Metal AMR reads back only active voxel state when the active list is
+  sparse and the topology did not change during the frame. Set
+  `FPS_AMR_FULL_STATE_READBACK=1` to force bulk state readback for comparison;
+  `FPS_AMR_ACTIVE_LIST_DIAGNOSTICS=1` prints the active stage count.
 * `amr-projectile-impact`: fires one finest-scale voxel at 40 m/s into an initially
   coarse adaptive cube. The check requires a nine-ray DDA impact, projectile slowdown,
   target momentum transfer, no far-face tunneling, and no traversal overflow.
