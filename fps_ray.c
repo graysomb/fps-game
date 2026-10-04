@@ -1213,6 +1213,7 @@ typedef struct {
 
 static AmrBody amrBodies[MAX_AMR_BODIES];
 static int amrBodyCount;
+static bool amrRegistryDirty = true;
 static uint64_t nextAmrBodyIdentity = 1;
 static bool amrBodyTethered[MAX_AMR_BODIES];
 typedef struct {
@@ -1346,6 +1347,7 @@ static void amr_retire_body(int body_id)
     }
     body->leaf_count = 0;
     ++vgsHierarchy.topology_generation;
+    amrRegistryDirty = true;
 }
 
 // Keep persistent leaf ownership valid when the packed world voxel array moves.
@@ -1439,7 +1441,6 @@ static int particle_sync_stamp = 1;
 static bool collisionTopologyDirty = true;
 // The body registry depends on material connectivity and lifecycle changes,
 // not on ordinary AMR refinement within an unchanged body.
-static bool amrRegistryDirty = true;
 static uint64_t collisionMetadataGeneration = 1;
 static uint64_t tetherThrowCcdHitCount = 0;
 static uint64_t tetherThrowCcdIdentities[TETHER_THROW_CCD_SNAPSHOT_CAPACITY];
