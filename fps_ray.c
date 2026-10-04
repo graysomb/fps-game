@@ -595,8 +595,9 @@ static float arenaHalfSize = 20.0f;
 static const float GRID_EPSILON = 1e-4f;
 static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define VOXEL_ACTIVATION_RADIUS 2*1
-#define AMR_MAX_GRID_SIDE 64
-#define AMR_MAX_BODY_LEAVES (AMR_MAX_GRID_SIDE * AMR_MAX_GRID_SIDE * AMR_MAX_GRID_SIDE)
+#define AMR_MAX_GRID_SIDE 64 // hierarchy storage also supports the 64^3 debug stress case
+#define AMR_GAMEPLAY_GRID_SIDE 32
+#define AMR_MAX_BODY_LEAVES (AMR_GAMEPLAY_GRID_SIDE * AMR_GAMEPLAY_GRID_SIDE * AMR_GAMEPLAY_GRID_SIDE)
 #define VOXEL_ACTIVATION_UNIT_BUDGET AMR_MAX_BODY_LEAVES
 #define VOXEL_DEACTIVATION_VELOCITY_THRESHOLD 1.5f
 #define VOXEL_DEACTIVATION_STRAIN_THRESHOLD 0.4f
@@ -1961,9 +1962,9 @@ static bool unit_voxel_buffer_fits_amr(const UnitVoxelBuffer *buffer,
     int maxx = has_region ? (gx > buffer->max_gx ? gx : buffer->max_gx) : gx;
     int maxy = has_region ? (gy > buffer->max_gy ? gy : buffer->max_gy) : gy;
     int maxz = has_region ? (gz > buffer->max_gz ? gz : buffer->max_gz) : gz;
-    return maxx - minx + 1 <= AMR_MAX_GRID_SIDE &&
-           maxy - miny + 1 <= AMR_MAX_GRID_SIDE &&
-           maxz - minz + 1 <= AMR_MAX_GRID_SIDE;
+    return maxx - minx + 1 <= AMR_GAMEPLAY_GRID_SIDE &&
+           maxy - miny + 1 <= AMR_GAMEPLAY_GRID_SIDE &&
+           maxz - minz + 1 <= AMR_GAMEPLAY_GRID_SIDE;
 }
 
 static bool unit_voxel_buffer_include_body(UnitVoxelBuffer *buffer, int body_id)
@@ -1992,9 +1993,9 @@ static bool unit_voxel_buffer_include_body(UnitVoxelBuffer *buffer, int body_id)
         if (voxel->gy > maxy) maxy = voxel->gy;
         if (voxel->gz > maxz) maxz = voxel->gz;
     }
-    if (maxx - minx + 1 > AMR_MAX_GRID_SIDE ||
-        maxy - miny + 1 > AMR_MAX_GRID_SIDE ||
-        maxz - minz + 1 > AMR_MAX_GRID_SIDE) return false;
+    if (maxx - minx + 1 > AMR_GAMEPLAY_GRID_SIDE ||
+        maxy - miny + 1 > AMR_GAMEPLAY_GRID_SIDE ||
+        maxz - minz + 1 > AMR_GAMEPLAY_GRID_SIDE) return false;
     buffer->min_gx = minx; buffer->min_gy = miny; buffer->min_gz = minz;
     buffer->max_gx = maxx; buffer->max_gy = maxy; buffer->max_gz = maxz;
     buffer->adjacent_leaf_count += body->leaf_count;
@@ -12518,8 +12519,8 @@ static bool amr_build_body_from_cluster(const int *cluster, int count)
         if (span > extent) extent = span;
     }
     int side = 1;
-    while (side < extent && side <= AMR_MAX_GRID_SIDE) side <<= 1;
-    if (side < 2 || side > AMR_MAX_GRID_SIDE || count > AMR_MAX_BODY_LEAVES) {
+    while (side < extent && side <= AMR_GAMEPLAY_GRID_SIDE) side <<= 1;
+    if (side < 2 || side > AMR_GAMEPLAY_GRID_SIDE || count > AMR_MAX_BODY_LEAVES) {
         if (diagnostics) fprintf(stderr, "amr-body fixed fallback extent=%d side=%d count=%d\n",
                                  extent, side, count);
         return false;

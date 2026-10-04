@@ -591,7 +591,8 @@ Available scenarios are:
   legacy AABB comparison switches apply to CPU and Metal; resident OpenGL uses
   the production nine-sphere hierarchy.
 * `adaptive-large-corner-drop`: builds a connected 64×64×64 AMR cube with 0.5 m
-  finest voxels, rotates it 45° about X and Z, and drops it in a debug-only
+  finest voxels as a debug-only stress case beyond the 32³ gameplay admission
+  limit, rotates it 45° about X and Z, and drops it in a debug-only
   64 m half-width arena. The ordinary gameplay arena remains 20 m. Run with
   `--physics=gpu --debug-scenario=adaptive-large-corner-drop --debug-steps=480
   --debug-gif --debug-gif-fps=20`; set `FPS_DEBUG_GIF_ALL_FRAMES=1` to retain

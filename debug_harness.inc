@@ -2859,9 +2859,9 @@ static bool debug_setup_amr_atomic_snap(DebugRunState *state)
     static UnitVoxelBuffer capacity_probe;
     unit_voxel_buffer_clear(&capacity_probe);
     Color probe_color = (Color){255, 255, 255, 255};
-    for (int z = 0; z < AMR_MAX_GRID_SIDE; ++z)
-        for (int y = 0; y < AMR_MAX_GRID_SIDE; ++y)
-            for (int x = 0; x < AMR_MAX_GRID_SIDE; ++x)
+    for (int z = 0; z < AMR_GAMEPLAY_GRID_SIDE; ++z)
+        for (int y = 0; y < AMR_GAMEPLAY_GRID_SIDE; ++y)
+            for (int x = 0; x < AMR_GAMEPLAY_GRID_SIDE; ++x)
                 if (!unit_voxel_buffer_push(&capacity_probe, x, y, z, probe_color,
                                             0, false, -1, 0, -1)) {
                     debug_add_failure(state,
@@ -2870,7 +2870,7 @@ static bool debug_setup_amr_atomic_snap(DebugRunState *state)
                     return false;
                 }
     if (capacity_probe.count != AMR_MAX_BODY_LEAVES ||
-        unit_voxel_buffer_push(&capacity_probe, AMR_MAX_GRID_SIDE, 0, 0,
+        unit_voxel_buffer_push(&capacity_probe, AMR_GAMEPLAY_GRID_SIDE, 0, 0,
                                probe_color, 0, false, -1, 0, -1)) {
         debug_add_failure(state,
                           "activation capacity accepted invalid extent/count=%d",
