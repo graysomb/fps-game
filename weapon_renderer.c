@@ -6,10 +6,10 @@
 
 enum { WR_BODY, WR_UPPER, WR_LOWER, WR_FLASH, WR_LAUNCH_BARREL, WR_LAUNCH_FRAME,
        WR_LAUNCH_GRIP, WR_LAUNCH_STOCK, WR_CUBE, WR_GLASS_LEFT, WR_GLASS_RIGHT,
-       WR_GLASS_FRONT, WR_GLASS_BACK, WR_PART_COUNT };
-enum { WR_SILVER, WR_DARK, WR_ENERGY, WR_CHARCOAL, WR_PARTICLE, WR_GLASS };
+       WR_GLASS_FRONT, WR_GLASS_BACK, WR_AURA, WR_PART_COUNT };
+enum { WR_SILVER, WR_DARK, WR_ENERGY, WR_CHARCOAL, WR_PARTICLE, WR_GLASS, WR_GOLD_AURA };
 static const Color wr_colors[] = { {184,190,201,255}, {37,43,58,255}, {255,255,255,255},
-                                 {47,49,56,255}, {255,255,255,255}, {255,235,170,24} };
+                                 {47,49,56,255}, {255,255,255,255}, {255,235,170,24}, {255,255,255,255} };
 typedef struct WrBuilder {
     float vertices[4096 * 3], normals[4096 * 3], uv[4096 * 2];
     float edge_uv[4096 * 2];
@@ -19,7 +19,7 @@ typedef struct WrBuilder {
 } WrBuilder;
 static Model wr_parts[WR_PART_COUNT];
 static Shader wr_shader, wr_blur;
-static int wr_eye, wr_energy, wr_strength, wr_mask, wr_direction;
+static int wr_eye, wr_energy, wr_strength, wr_mask, wr_direction, wr_time, wr_launcher;
 static bool wr_ready;
 
 static Vector3 wr_rotate(Vector3 p, float angle) {
@@ -35,7 +35,8 @@ static void wr_triangle(WrBuilder *b, Vector3 a, Vector3 c, Vector3 d, int mater
         int j = b->count++;
         memcpy(b->vertices+j*3, &points[i], sizeof(Vector3));
         memcpy(b->normals+j*3, &n, sizeof(Vector3));
-        b->uv[j*2] = material == WR_ENERGY ? 1.0f : material == WR_PARTICLE ? 2.0f : 0.0f;
+        b->uv[j*2] = material == WR_ENERGY ? 1.0f : material == WR_PARTICLE ? 2.0f :
+                         material == WR_GOLD_AURA ? 3.0f : 0.0f;
         b->uv[j*2+1] = (float)edge_mask;
         b->edge_uv[j*2] = i==0 ? 1.0f : 0.0f;
         b->edge_uv[j*2+1] = i==1 ? 1.0f : 0.0f;
@@ -176,6 +177,16 @@ static void wr_launcher_part(WrBuilder *b,int part) {
 
 static void wr_build_part(WrBuilder *b, int part) {
     memset(b,0,sizeof(*b));
+    if (part==WR_AURA) {
+        // Parameter-space ribbons: the vertex shader orbits and ripples them.
+        for (int strand=0;strand<2;++strand) for (int step=0;step<64;++step) {
+            float t=step/64.0f,next=(step+1)/64.0f;
+            float a=strand*PI+t*7.5f,c=strand*PI+next*7.5f;
+            wr_quad(b,(Vector3){a,-1,t},(Vector3){a,1,t},
+                      (Vector3){c,1,next},(Vector3){c,-1,next},WR_GOLD_AURA,1);
+        }
+        return;
+    }
     if (part>=WR_LAUNCH_BARREL) { wr_launcher_part(b,part); return; }
     if (part==WR_BODY) {
         wr_prism(b,(Vector3){0,0,0},.65f,.65f,.55f,.10f,WR_SILVER,0);
@@ -258,6 +269,8 @@ bool weapon_renderer_init(void) {
     wr_energy=GetShaderLocation(wr_shader,"energyColor");
     wr_strength=GetShaderLocation(wr_shader,"energyStrength");
     wr_mask=GetShaderLocation(wr_shader,"emissionOnly");
+    wr_time=GetShaderLocation(wr_shader,"effectTime");
+    wr_launcher=GetShaderLocation(wr_shader,"launcher");
     wr_direction=GetShaderLocation(wr_blur,"direction");
     wr_ready=true; return true;
 }
@@ -386,6 +399,9 @@ void weapon_draw(WeaponPose pose,const WeaponVisual *v,Vector3 eye,float now,
     SetShaderValue(wr_shader,wr_energy,&energy,SHADER_UNIFORM_VEC3);
     SetShaderValue(wr_shader,wr_strength,&strength,SHADER_UNIFORM_FLOAT);
     SetShaderValue(wr_shader,wr_mask,&mask,SHADER_UNIFORM_INT);
+    SetShaderValue(wr_shader,wr_time,&now,SHADER_UNIFORM_FLOAT);
+    int variant=launcher ? 1 : 0;
+    SetShaderValue(wr_shader,wr_launcher,&variant,SHADER_UNIFORM_INT);
     if (pass==WEAPON_GLASS) {
         const Vector3 centers[4]={{-.411f,.23f,.20f},{.411f,.23f,.20f},{0,.23f,-.16f},{0,.23f,.56f}};
         int order[4]; float distances[4];
@@ -426,6 +442,14 @@ void weapon_draw(WeaponPose pose,const WeaponVisual *v,Vector3 eye,float now,
                                   MatrixTranslate(0,0,launcher ? -1.49f : -.89f));
         tip=MatrixMultiply(tip,pose.transform);
         wr_draw_part(WR_FLASH,tip);
+    }
+    if (gold) {
+        // Keep world occlusion, but do not write translucent ribbons into depth.
+        rlDrawRenderBatchActive();
+        BeginBlendMode(BLEND_ADDITIVE); rlDisableDepthMask(); rlDisableBackfaceCulling();
+        wr_draw_part(WR_AURA,pose.transform);
+        rlDrawRenderBatchActive();
+        rlEnableBackfaceCulling(); rlEnableDepthMask(); EndBlendMode();
     }
 }
 

@@ -6,11 +6,13 @@
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static WeaponBloom bloom;
 static bool use_bloom = true;
 static bool draw_glass = true;
+static float render_time = 1;
 
 static void save(RenderTexture2D scene, const char *directory, const char *name) {
     char path[1024]; snprintf(path,sizeof(path),"%s/%s.png",directory,name);
@@ -25,20 +27,20 @@ static void render(RenderTexture2D scene, Camera3D camera, WeaponPose pose,
     BeginMode3D(camera);
     if (wall) DrawCube((Vector3){0,0,1},5,5,.3f,(Color){72,75,83,255});
     if (!first_person) {
-        weapon_draw(pose,visual,camera.position,1,gold,WEAPON_COLOR);
-        if (draw_glass) weapon_draw(pose,visual,camera.position,1,gold,WEAPON_GLASS);
+        weapon_draw(pose,visual,camera.position,render_time,gold,WEAPON_COLOR);
+        if (draw_glass) weapon_draw(pose,visual,camera.position,render_time,gold,WEAPON_GLASS);
     }
     EndMode3D(); EndTextureMode();
     if (glow) {
         weapon_bloom_begin(&bloom,scene);
         if (first_person) weapon_clear_depth();
-        BeginMode3D(camera); weapon_draw(pose,visual,camera.position,1,gold,WEAPON_EMISSION); EndMode3D();
+        BeginMode3D(camera); weapon_draw(pose,visual,camera.position,render_time,gold,WEAPON_EMISSION); EndMode3D();
         weapon_bloom_composite(&bloom,scene);
     } else BeginTextureMode(scene);
     if (first_person) {
         weapon_clear_depth(); BeginMode3D(camera);
-        weapon_draw(pose,visual,camera.position,1,gold,WEAPON_COLOR);
-        if (draw_glass) weapon_draw(pose,visual,camera.position,1,gold,WEAPON_GLASS);
+        weapon_draw(pose,visual,camera.position,render_time,gold,WEAPON_COLOR);
+        if (draw_glass) weapon_draw(pose,visual,camera.position,render_time,gold,WEAPON_GLASS);
         EndMode3D();
     }
     EndTextureMode();
@@ -132,6 +134,19 @@ int main(int argc,char **argv) {
     visual.claw_open=1;
     render(scene,camera,pose,&visual,false,false,false); save(scene,out,"reference-tether");
     render(scene,camera,pose,&visual,true,false,false); save(scene,out,"reference-gold");
+    visual.claw_open=0;
+    render(scene,camera,pose,&visual,true,false,false);
+    Image gold_a=LoadImageFromTexture(scene.texture);
+    render_time=1.4f;
+    render(scene,camera,pose,&visual,true,false,false); save(scene,out,"reference-gold-animated");
+    Image gold_b=LoadImageFromTexture(scene.texture);
+    Color *aura_a=LoadImageColors(gold_a),*aura_b=LoadImageColors(gold_b);
+    int animated=0;
+    for (int i=0;i<gold_a.width*gold_a.height;++i)
+        if (abs(aura_a[i].r-aura_b[i].r)>20 || abs(aura_a[i].g-aura_b[i].g)>20) ++animated;
+    assert(animated>100);
+    UnloadImageColors(aura_a); UnloadImageColors(aura_b); UnloadImage(gold_a); UnloadImage(gold_b);
+    render_time=1;
     visual.claw_open=0; weapon_visual_shot(&visual,1);
     render(scene,camera,pose,&visual,false,false,false); save(scene,out,"reference-firing");
     weapon_visual_reset(&visual);
@@ -157,8 +172,12 @@ int main(int argc,char **argv) {
     // Hidden gun must contribute no cyan pixels or bloom through an opaque wall.
     camera.position=(Vector3){0,0,3}; camera.target=(Vector3){0,0,0};
     render(scene,camera,pose,&visual,false,true,false); save(scene,out,"wall-occlusion");
+    render(scene,camera,pose,&visual,true,true,false); save(scene,out,"gold-wall-occlusion");
     Image hidden=LoadImageFromTexture(scene.texture); Color *pixels=LoadImageColors(hidden);
-    for (int i=0;i<hidden.width*hidden.height;++i) assert(!(pixels[i].g>150 && pixels[i].b>150 && pixels[i].r<80));
+    for (int i=0;i<hidden.width*hidden.height;++i) {
+        assert(!(pixels[i].g>150 && pixels[i].b>150 && pixels[i].r<80));
+        assert(!(pixels[i].r>170 && pixels[i].g>100 && pixels[i].b<90));
+    }
     UnloadImageColors(pixels); UnloadImage(hidden); UnloadRenderTexture(scene);
     scene=LoadRenderTexture(1000,1000); pose.kind=WEAPON_DYNAMIC_LAUNCHER;
     render(scene,camera,pose,&visual,false,true,false); save(scene,out,"launcher-wall-occlusion");

@@ -10,8 +10,18 @@ uniform vec3 eyePosition;
 uniform vec3 energyColor;
 uniform float energyStrength;
 uniform int emissionOnly;
+uniform float effectTime;
 out vec4 finalColor;
 void main() {
+    if (energy > 2.5) {
+        float t = localPosition.z;
+        float pulse = pow(0.5 + 0.5 * sin(t * 24.0 - effectTime * 9.0 + localPosition.x), 3.0);
+        float fade = smoothstep(0.0, 0.12, t) * (1.0 - smoothstep(0.86, 1.0, t));
+        float core = 1.0 - smoothstep(0.20, 1.0, abs(localPosition.y));
+        finalColor = vec4(mix(vec3(1.0, 0.55, 0.025), vec3(1.0, 0.94, 0.50), core * pulse),
+                          fade * core * (0.60 + 0.40 * pulse));
+        return;
+    }
     // Match the world's unlit colors: no directional shading, highlights, or spill.
     vec3 base = color.rgb;
     // A roughly one-pixel, antialiased line along real polygon edges only.

@@ -128,6 +128,13 @@ static void test_launcher_pickup(void) {
     assert(shot->activationBelief==1 && shot->vel.z==-60 && shot->vel.y==0);
     assert(v_length(v_sub(shot->pos,v_add(players[0].pos,(Vector3){0,0,-.8f})))<.0001f);
     assert(players[0].matter==100-MATTER_SHOT_COST);
+    pickups[0]=(Pickup){.pos=players[0].pos,.type=PICKUP_GOLD_TETHER,.active=true};
+    update_pickups(0);
+    assert(players[0].goldTetherCharged && !pickups[0].active);
+    players[0].tetherHolding=true; players[0].goldTetherHolding=true;
+    players[0].tetherVoxel=0; players[0].tetherVoxelIdentity=shot->identity;
+    release_tether(0);
+    assert(!players[0].goldTetherCharged && !players[0].goldTetherHolding);
     kill_player(0,-1,false,false);
     assert(!players[0].dynamicShotActive && !player_has_gun(0));
     clear_world_voxels(); clear_pickups();
@@ -137,21 +144,21 @@ static void test_launcher_pickup(void) {
 }
 
 static void render_action_gun(RenderTexture2D scene,WeaponBloom *bloom,Camera3D camera,
-                              WeaponPose pose,WeaponVisual *visual,float now,bool fp) {
+                              WeaponPose pose,WeaponVisual *visual,float now,bool fp,bool gold) {
     assert(weapon_bloom_resize(bloom,scene.texture.width,scene.texture.height));
     BeginTextureMode(scene); ClearBackground((Color){29,55,94,255}); BeginMode3D(camera);
     if (!fp) {
-        weapon_draw(pose,visual,camera.position,now,false,WEAPON_COLOR);
-        weapon_draw(pose,visual,camera.position,now,false,WEAPON_GLASS);
+        weapon_draw(pose,visual,camera.position,now,gold,WEAPON_COLOR);
+        weapon_draw(pose,visual,camera.position,now,gold,WEAPON_GLASS);
     }
     EndMode3D(); EndTextureMode(); weapon_bloom_begin(bloom,scene);
     if (fp) weapon_clear_depth();
-    BeginMode3D(camera); weapon_draw(pose,visual,camera.position,now,false,WEAPON_EMISSION); EndMode3D();
+    BeginMode3D(camera); weapon_draw(pose,visual,camera.position,now,gold,WEAPON_EMISSION); EndMode3D();
     weapon_bloom_composite(bloom,scene);
     if (fp) {
         weapon_clear_depth(); BeginMode3D(camera);
-        weapon_draw(pose,visual,camera.position,now,false,WEAPON_COLOR);
-        weapon_draw(pose,visual,camera.position,now,false,WEAPON_GLASS); EndMode3D();
+        weapon_draw(pose,visual,camera.position,now,gold,WEAPON_COLOR);
+        weapon_draw(pose,visual,camera.position,now,gold,WEAPON_GLASS); EndMode3D();
     }
     EndTextureMode();
 }
@@ -177,8 +184,8 @@ static void capture_launcher_animations(const char *out) {
             WeaponPose pose=action==3 && phase>=0 && phase<=1 ? pose_at(p,phase,true,16.0f/9) :
                 weapon_pose(WEAPON_DYNAMIC_LAUNCHER,p.pos,forward,right,up,true,16.0f/9,NULL,recoil);
             WeaponPose world=weapon_pose(WEAPON_DYNAMIC_LAUNCHER,p.pos,forward,right,up,false,1,NULL,recoil);
-            render_action_gun(scene,&view_bloom,camera,pose,&visual,now,true);
-            if (action!=3) render_action_gun(detail,&detail_bloom,side,world,&visual,now,false);
+            render_action_gun(scene,&view_bloom,camera,pose,&visual,now,true,false);
+            if (action!=3) render_action_gun(detail,&detail_bloom,side,world,&visual,now,false,false);
             BeginTextureMode(scene);
             if (action!=3) {
                 DrawTexturePro(detail.texture,(Rectangle){0,0,420,-420},(Rectangle){15,64,310,310},(Vector2){0},0,WHITE);
@@ -207,6 +214,25 @@ static void capture_launcher_animations(const char *out) {
     UnloadRenderTexture(scene); UnloadRenderTexture(detail);
 }
 
+static void capture_gold_aura(const char *out) {
+    RenderTexture2D scene=LoadRenderTexture(960,540); WeaponBloom bloom={0};
+    Camera3D camera={.target={0,0,-1},.up={0,1,0},.fovy=60,.projection=CAMERA_PERSPECTIVE};
+    WeaponVisual visual; weapon_visual_reset(&visual);
+    for (int kind=WEAPON_STANDARD;kind<=WEAPON_DYNAMIC_LAUNCHER;++kind) {
+        WeaponPose pose=weapon_pose(kind,(Vector3){0},(Vector3){0,0,-1},(Vector3){1,0,0},
+                                   (Vector3){0,1,0},true,16.0f/9,NULL,0);
+        for (int frame=0;frame<64;++frame) {
+            render_action_gun(scene,&bloom,camera,pose,&visual,1+frame*.04f,true,true);
+            BeginTextureMode(scene);
+            DrawText("GOLD TETHER: charged",18,14,24,GOLD); EndTextureMode();
+            char name[96]; snprintf(name,sizeof(name),"gold-%s-frame-%03d",
+                kind==WEAPON_STANDARD ? "gun" : "launcher",frame);
+            capture_view(scene,out,name);
+        }
+    }
+    weapon_bloom_unload(&bloom); UnloadRenderTexture(scene);
+}
+
 int main(int argc,char **argv) {
     const char *out=argc>1 ? argv[1] : "artifacts/weapon/gameplay";
     SetLoggingEnabled(false); SetTraceLogLevel(LOG_WARNING);
@@ -223,6 +249,7 @@ int main(int argc,char **argv) {
     test_melee_alignment(); test_melee_hits(); capture_melee_sequence(out);
     test_launcher_pickup();
     capture_launcher_animations(out);
+    capture_gold_aura(out);
     // Feedback occurs only after accepted shots, never on cooldown/resource failure.
     FireVoxel(0); assert(weaponVisuals[0].shot_sequence==1);
     int bullet_count=voxel_count; float matter=players[0].matter;
@@ -237,6 +264,7 @@ int main(int argc,char **argv) {
     // Round-trip the same player snapshot used by the game.
     players[0].meleeSwingActive=true; set_melee_phase(.45f);
     players[0].dynamicShotActive=true;
+    players[0].goldTetherCharged=true;
     uint8_t packet[1024]; NetWriter writer; NetReader reader; NetPlayerWireState state;
     net_writer_init(&writer,packet,sizeof(packet)); net_write_player_state(&writer,0);
     net_reader_init(&reader,packet,writer.length); int slot=-1;
@@ -244,6 +272,7 @@ int main(int argc,char **argv) {
     assert(state.visual.shot_sequence==1 && state.visual.shot_age_ms<120);
     assert(state.visual.flags & NET_PLAYER_VISUAL_MELEE);
     assert(state.visual.flags & NET_PLAYER_VISUAL_POWERED_SHOT);
+    assert(state.flags & NET_PLAYER_STATE_GOLD_TETHER_CHARGED);
     assert(fabsf(state.visual.melee_progress/255.0f-.45f)<.01f);
     // Feed an authoritative packet through the production client receive path.
     net_writer_init(&writer,packet,sizeof(packet));
@@ -252,21 +281,26 @@ int main(int argc,char **argv) {
     netTransport.role=NET_ROLE_CLIENT; netTransport.session_id=77;
     netLocalPlayerCount=0; weapon_visual_reset(&weaponVisuals[0]);
     players[0].dynamicShotActive=false;
+    players[0].goldTetherCharged=false;
     net_on_receive(&netTransport,0,FPS_NET_CHANNEL_SNAPSHOT,packet,writer.length,NULL);
     assert(weaponVisuals[0].shot_sequence==1);
     assert(players[0].meleeSwingActive);
     assert(player_weapon_pose(0,true).kind==WEAPON_DYNAMIC_LAUNCHER);
+    assert(players[0].goldTetherCharged && !players[0].netGoldTetherVisualActive);
     assert(fabsf(melee_anim_progress(&players[0],(float)GetTime())-.45f)<.02f);
     float received_time=weaponVisuals[0].shot_time;
     net_on_receive(&netTransport,0,FPS_NET_CHANNEL_SNAPSHOT,packet,writer.length,NULL);
     assert(weaponVisuals[0].shot_time==received_time); // duplicate never restarts recoil
     players[0].dynamicShotActive=false;
+    players[0].goldTetherCharged=false;
     net_writer_init(&writer,packet,sizeof(packet));
     net_write_header(&writer,NET_MSG_PLAYER_STATE,0,77,101);
     net_write_u8(&writer,1); net_write_player_state(&writer,0);
     players[0].dynamicShotActive=true;
+    players[0].goldTetherCharged=true;
     net_on_receive(&netTransport,0,FPS_NET_CHANNEL_SNAPSHOT,packet,writer.length,NULL);
     assert(player_weapon_pose(0,true).kind==WEAPON_STANDARD);
+    assert(!players[0].goldTetherCharged);
     netTransport.role=NET_ROLE_OFFLINE;
     players[0].meleeSwingActive=false;
     clear_world_voxels(); weaponVisuals[0].shot_time=-1000;

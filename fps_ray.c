@@ -17568,7 +17568,7 @@ static void draw_player_weapon(int player_index, Vector3 eye, bool first_person,
     Player *p = &players[player_index];
     weapon_draw(player_weapon_pose(player_index, first_person), &weaponVisuals[player_index],
                 eye, weaponFrameSampled ? weaponFrameTime : (float)GetTime(),
-                p->goldTetherHolding || p->netGoldTetherVisualActive, pass);
+                p->goldTetherCharged || p->goldTetherHolding || p->netGoldTetherVisualActive, pass);
 }
 
 static void draw_remote_weapon_glass(int view_player, Vector3 eye) {
@@ -19112,7 +19112,8 @@ static void net_write_player_state(NetWriter *writer, int slot) {
     net_write_f32(writer, p->matter); net_write_f32(writer, p->respawn_timer);
     net_write_i16(writer, (int16_t)p->kills); net_write_i16(writer, (int16_t)p->deaths);
     net_write_i16(writer, (int16_t)p->debrisKills);
-    net_write_u8(writer, (p->onGround ? 1u : 0u) | (p->isExposed ? 2u : 0u));
+    net_write_u8(writer, (p->onGround ? 1u : 0u) | (p->isExposed ? 2u : 0u) |
+                        (p->goldTetherCharged ? NET_PLAYER_STATE_GOLD_TETHER_CHARGED : 0u));
     net_write_player_visual(writer, &visual);
 }
 
@@ -19351,6 +19352,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
             }
             p->netTetherVisualActive = (state.visual.flags & NET_PLAYER_VISUAL_TETHER) != 0;
             p->dynamicShotActive = (state.visual.flags & NET_PLAYER_VISUAL_POWERED_SHOT) != 0;
+            p->goldTetherCharged = (state.flags & NET_PLAYER_STATE_GOLD_TETHER_CHARGED) != 0;
             weapon_visual_receive(&weaponVisuals[slot], state.visual.shot_sequence,
                                   state.visual.shot_age_ms, (float)GetTime());
             p->netGoldTetherVisualActive = (state.visual.flags & NET_PLAYER_VISUAL_GOLD_TETHER) != 0;

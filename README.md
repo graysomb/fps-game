@@ -270,6 +270,10 @@ The shared bullet/tether gun is generated from beveled low-poly meshes and uses
 the GLSL 330 shaders in `shaders/weapon*`. It appears in first-person views and on
 standard players/bots; claw opening and cyan energy intensify while tethering.
 Successful shots drive muzzle flash and recoil. Gold tether uses amber energy.
+While Gold Tether is charged or held, two pulsing gold ribbons orbit the gun through
+its vertex/fragment shaders. They follow recoil and melee on either gun, remain
+visible with bloom disabled, and disappear when the charge is spent. The charged
+state also travels in the existing LAN player-state flags byte.
 Dynamic Shot immediately equips a larger charcoal-and-silver launcher with a
 hollow octagonal barrel, transparent chamber and three glowing yellow cubes that
 drift and rotate inside it. These cubes are visual particles; the power-up still
