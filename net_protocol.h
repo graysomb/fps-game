@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define FPS_NET_MAGIC 0x4650534eu /* "FPSN" */
-#define FPS_NET_PROTOCOL_VERSION 4u
+#define FPS_NET_PROTOCOL_VERSION 5u
 #define FPS_NET_DEFAULT_PORT 27015u
 #define FPS_NET_DISCOVERY_PORT 27016u
 #define FPS_NET_MAX_PACKET 1100u
@@ -75,12 +75,15 @@ typedef struct NetInputCommand {
 typedef enum NetPlayerVisualFlags {
     NET_PLAYER_VISUAL_MELEE = 1u << 0,
     NET_PLAYER_VISUAL_TETHER = 1u << 1,
-    NET_PLAYER_VISUAL_GOLD_TETHER = 1u << 2
+    NET_PLAYER_VISUAL_GOLD_TETHER = 1u << 2,
+    NET_PLAYER_VISUAL_POWERED_SHOT = 1u << 3
 } NetPlayerVisualFlags;
 
 typedef struct NetPlayerVisualState {
     uint8_t flags;
     uint8_t melee_progress;
+    uint32_t shot_sequence;
+    uint8_t shot_age_ms; /* 255 = no recent successful shot */
     float tether_x;
     float tether_y;
     float tether_z;

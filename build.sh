@@ -40,9 +40,9 @@ common_flags="-std=c11 $opt_flags -I$project_root -lGL -lm -lpthread -ldl -lrt -
 enet_sources="$project_root/net_protocol.c $project_root/net_transport.c $project_root/third_party/enet/callbacks.c $project_root/third_party/enet/compress.c $project_root/third_party/enet/host.c $project_root/third_party/enet/list.c $project_root/third_party/enet/packet.c $project_root/third_party/enet/peer.c $project_root/third_party/enet/protocol.c $project_root/third_party/enet/unix.c"
 common_flags="$common_flags -I$project_root/third_party/enet/include"
 # shellcheck disable=SC2086
-cc "$project_root/fps_ray.c" $enet_sources -I"$raylib33/src" -L"$raylib33/src" -o "$bin_dir/fps_ray_cpu" -lraylib $common_flags
+cc "$project_root/fps_ray.c" "$project_root/weapon_renderer.c" $enet_sources -I"$raylib33/src" -L"$raylib33/src" -o "$bin_dir/fps_ray_cpu" -lraylib $common_flags
 # shellcheck disable=SC2086
-cc "$project_root/fps_ray.c" $enet_sources -DGRAPHICS_API_OPENGL_43 -I"$raylib43/src" -L"$raylib43/src" -o "$bin_dir/fps_ray_gpu" -lraylib $common_flags
+cc "$project_root/fps_ray.c" "$project_root/weapon_renderer.c" $enet_sources -DGRAPHICS_API_OPENGL_43 -I"$raylib43/src" -L"$raylib43/src" -o "$bin_dir/fps_ray_gpu" -lraylib $common_flags
 cc "$project_root/fps_launcher.c" -std=c11 -O2 -o "$bin_dir/fps_ray"
 cp -a "$project_root/shaders" "$bin_dir/"
 if [ -f "$project_root/game_song.mp3" ]; then

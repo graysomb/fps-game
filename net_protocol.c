@@ -179,6 +179,8 @@ bool net_read_input(NetReader *reader, NetInputCommand *command) {
 bool net_write_player_visual(NetWriter *writer, const NetPlayerVisualState *state) {
     if (!writer || !state) return false;
     net_write_u8(writer, state->flags);
+    net_write_u32(writer, state->shot_sequence);
+    net_write_u8(writer, state->shot_age_ms);
     if (state->flags & NET_PLAYER_VISUAL_MELEE) {
         net_write_u8(writer, state->melee_progress);
     }
@@ -194,8 +196,10 @@ bool net_read_player_visual(NetReader *reader, NetPlayerVisualState *state) {
     if (!reader || !state) return false;
     memset(state, 0, sizeof(*state));
     state->flags = net_read_u8(reader);
+    state->shot_sequence = net_read_u32(reader);
+    state->shot_age_ms = net_read_u8(reader);
     if (state->flags & ~(NET_PLAYER_VISUAL_MELEE | NET_PLAYER_VISUAL_TETHER |
-                         NET_PLAYER_VISUAL_GOLD_TETHER)) {
+                         NET_PLAYER_VISUAL_GOLD_TETHER | NET_PLAYER_VISUAL_POWERED_SHOT)) {
         reader->failed = true;
         return false;
     }

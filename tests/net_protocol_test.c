@@ -45,6 +45,8 @@ int main(void) {
         .flags = NET_PLAYER_VISUAL_MELEE | NET_PLAYER_VISUAL_TETHER |
                  NET_PLAYER_VISUAL_GOLD_TETHER,
         .melee_progress = 173,
+        .shot_sequence = 0xfedcba98u,
+        .shot_age_ms = 37,
         .tether_x = 1.25f,
         .tether_y = -2.5f,
         .tether_z = 9.75f
@@ -56,12 +58,38 @@ int main(void) {
     assert(net_read_player_visual(&reader, &decoded_visual));
     assert(decoded_visual.flags == visual.flags);
     assert(decoded_visual.melee_progress == visual.melee_progress);
+    assert(decoded_visual.shot_sequence == visual.shot_sequence);
+    assert(decoded_visual.shot_age_ms == visual.shot_age_ms);
     assert(decoded_visual.tether_x == visual.tether_x);
     assert(decoded_visual.tether_y == visual.tether_y);
     assert(decoded_visual.tether_z == visual.tether_z);
 
     net_reader_init(&reader, packet, writer.length - 1);
     assert(!net_read_player_visual(&reader, &decoded_visual));
+
+    // Every combination has a bounded, exact wire length and rejects truncation.
+    for (unsigned int flags = 0; flags < 16; ++flags) {
+        visual.flags = (uint8_t)flags;
+        visual.shot_age_ms = 255;
+        net_writer_init(&writer, packet, sizeof(packet));
+        assert(net_write_player_visual(&writer, &visual));
+        assert(writer.length == 6u + ((flags & NET_PLAYER_VISUAL_MELEE) ? 1u : 0u) +
+               ((flags & NET_PLAYER_VISUAL_TETHER) ? 12u : 0u));
+        net_reader_init(&reader, packet, writer.length);
+        assert(net_read_player_visual(&reader, &decoded_visual));
+        assert(reader.offset == writer.length);
+        assert(decoded_visual.shot_sequence == visual.shot_sequence);
+        assert(decoded_visual.shot_age_ms == 255);
+        for (size_t length = 0; length < writer.length; ++length) {
+            net_reader_init(&reader, packet, length);
+            assert(!net_read_player_visual(&reader, &decoded_visual));
+        }
+    }
+    packet[0] = 0x80;
+    net_reader_init(&reader, packet, writer.length);
+    assert(!net_read_player_visual(&reader, &decoded_visual));
+    net_writer_init(&writer, packet, 5);
+    assert(!net_write_player_visual(&writer, &visual));
 
     net_writer_init(&writer, packet, sizeof(packet));
     assert(net_write_header(&writer, NET_MSG_INPUT, 2, 77, 88));

@@ -264,6 +264,36 @@ The Mac GPU binary links Metal physics with the same CPU MT and CPU ST fallbacks
 The app bundle is ad-hoc signed for local play; distribution outside the local Mac
 still requires a Developer ID signature and notarization.
 
+## Bullet and tether gun
+
+The shared bullet/tether gun is generated from beveled low-poly meshes and uses
+the GLSL 330 shaders in `shaders/weapon*`. It appears in first-person views and on
+standard players/bots; claw opening and cyan energy intensify while tethering.
+Successful shots drive muzzle flash and recoil. Gold tether and powered-shot
+feedback use amber energy. Projectile collision, damage, and tether forces retain
+their existing behavior.
+
+Weapon bloom is isolated per viewport and respects world occlusion. Pass
+`--no-weapon-bloom` to disable its extra render passes. The gun is lowered during
+melee and hidden in creative mode and respawn. LAN peers must all use protocol
+version 5, which adds successful-shot sequence/age and powered-shot visual state.
+
+After building raylib with `build.ps1`, run the Windows visual checks from the
+repository root:
+
+```powershell
+.\tools\validate_weapon.ps1
+```
+
+This compiles and runs OpenGL 3.3/4.3 previews, shot-state and network serialization
+tests, and the actual gameplay renderer with one through four viewports. PNGs are
+saved beneath `artifacts/weapon`; logs and executables are in `.build/weapon`.
+The preview includes wall occlusion, extreme pitch, gold tether, firing, resize,
+and a rendering-only four-view bloom comparison. Timing excludes gameplay physics.
+On other platforms, compile `tests/render_weapon_preview.c` with
+`weapon_renderer.c` and raylib, then run it from the repository root with an
+existing output directory as its first argument (optional second: `--no-bloom`).
+
 ## LAN multiplayer
 
 LAN play uses a host-authoritative ENet session with up to four players total;

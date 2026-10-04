@@ -44,6 +44,7 @@ try {
     $Optimization = if ($Configuration -eq "debug") { "-O0", "-g" } else { "-O2", "-DNDEBUG" }
     $EnetRoot = Join-Path $ProjectRoot "third_party\enet"
     $NetworkSources = @(
+        (Join-Path $ProjectRoot "weapon_renderer.c"),
         (Join-Path $ProjectRoot "net_protocol.c"), (Join-Path $ProjectRoot "net_transport.c"),
         (Join-Path $EnetRoot "callbacks.c"), (Join-Path $EnetRoot "compress.c"),
         (Join-Path $EnetRoot "host.c"), (Join-Path $EnetRoot "list.c"),

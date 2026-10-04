@@ -47,6 +47,7 @@
 #include "raymath.h" // for MatrixIdentity()
 #include "physics_backend.h"
 #include "net_transport.h"
+#include "weapon_renderer.h"
 #if defined(GRAPHICS_API_OPENGL_43)
 #include "external/glad.h"
 #endif
@@ -160,6 +161,7 @@ static int physicsSmokeSteps = 0;
 static int physicsSmokeVoxels = 2;
 static int physicsSmokeBatchSize = 1;
 static bool tetherThrowCcdEnabled = true;
+static bool weaponBloomEnabled = true;
 static bool aiSmokeTestRequested = false;
 
 static NetTransport netTransport;
@@ -214,6 +216,10 @@ static bool parse_physics_arguments(int argc, char **argv) {
     physicsBackend.requested = PHYSICS_BACKEND_AUTO;
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
+        if (strcmp(arg, "--no-weapon-bloom") == 0) {
+            weaponBloomEnabled = false;
+            continue;
+        }
         if (strcmp(arg, "--lan-host") == 0) {
             netRequestedRole = NET_ROLE_HOST;
             continue;
@@ -753,6 +759,9 @@ typedef struct {
     float contactDamageTimer;
 } Player;
 static Player players[MAX_PLAYERS];
+static WeaponVisual weaponVisuals[MAX_PLAYERS];
+static WeaponBloom weaponBlooms[MAX_PLAYERS];
+static bool weaponRenderingReady;
 
 #define GOLIATH_MAX_ATTACHED 18
 #define GOLIATH_ARMOR_REGEN_SECONDS 2.0f
@@ -861,6 +870,7 @@ static void net_set_host_local_players(int count) {
     memset(netPredictionHead, 0, sizeof(netPredictionHead));
     memset(netPredictionCount, 0, sizeof(netPredictionCount));
     memset(netPredictedMeleeSequence, 0, sizeof(netPredictedMeleeSequence));
+    for (int i = 0; i < MAX_PLAYERS; ++i) weapon_visual_reset(&weaponVisuals[i]);
     netLocalPlayerCount = count;
     netPeerPlayerMask[0] = 0;
     for (int i = 0; i < MAX_PLAYERS; ++i) netLocalPlayerSlots[i] = -1;
@@ -882,6 +892,7 @@ static void net_prepare_client_local_players(int count) {
     memset(netPredictionHead, 0, sizeof(netPredictionHead));
     memset(netPredictionCount, 0, sizeof(netPredictionCount));
     memset(netPredictedMeleeSequence, 0, sizeof(netPredictedMeleeSequence));
+    for (int i = 0; i < MAX_PLAYERS; ++i) weapon_visual_reset(&weaponVisuals[i]);
     for (int i = 0; i < MAX_PLAYERS; ++i) netLocalPlayerSlots[i] = -1;
 }
 
@@ -8918,6 +8929,7 @@ static void reset_players_for_creative(void) {
         players[i].isExposed = false;
         players[i].last_damage_time = -1000.0f;
         players[i].last_shot_time = -1000.0f;
+        weapon_visual_reset(&weaponVisuals[i]);
         players[i].last_melee_time = -1000.0f;
         players[i].last_build_time = -1000.0f;
         players[i].invuln_timer = 0.0f;
@@ -8985,6 +8997,7 @@ static void ResetGame(void) {
         players[i].isExposed = false;
         players[i].last_damage_time = -1000.0f;
         players[i].last_shot_time = -1000.0f;
+        weapon_visual_reset(&weaponVisuals[i]);
         players[i].last_melee_time = -1000.0f;
         players[i].last_build_time = -1000.0f;
         players[i].invuln_timer = 0.0f;
@@ -13522,6 +13535,7 @@ static void FireVoxel(int idx) {
             // If simulate is true, particles should be active.
         }
         play_sfx(SFX_FIRE);
+        weapon_visual_shot(&weaponVisuals[idx], now);
     }
     p->last_shot_time = now;
 }
@@ -17508,10 +17522,41 @@ static bool player_tether_visual_target(int player_index, Vector3 *out_target) {
     return true;
 }
 
+static int drawViewPlayerIndex = -1;
+static float weaponViewAspect = 1.0f;
+static bool drawWeaponModels;
+
+static WeaponPose player_weapon_pose(int player_index, bool first_person) {
+    Player *p = &players[player_index];
+    Vector3 forward = player_forward(p);
+    Vector3 right = v_norm(v_cross(forward, (Vector3){0,1,0}));
+    Vector3 up = v_norm(v_cross(right, forward));
+    float progress = melee_anim_progress(p, (float)GetTime());
+    float melee = progress >= 0 && progress < 1 ? sinf(progress * PI) : 0;
+    return weapon_pose(p->pos, forward, right, up, first_person, weaponViewAspect, melee,
+                       weapon_shot_amount(&weaponVisuals[player_index], (float)GetTime()));
+}
+
+static bool player_has_gun(int player_index) {
+    return players[player_index].respawn_timer <= 0 &&
+           players[player_index].enemyType == ENEMY_TYPE_STANDARD;
+}
+
+static void draw_player_weapon(int player_index, Vector3 eye, bool first_person, bool emission) {
+    if (!player_has_gun(player_index)) return;
+    Player *p = &players[player_index];
+    weapon_draw(player_weapon_pose(player_index, first_person), &weaponVisuals[player_index],
+                eye, (float)GetTime(), p->goldTetherHolding || p->netGoldTetherVisualActive,
+                p->dynamicShotActive, emission);
+}
+
 static void draw_player_tether_world(int player_index) {
     Vector3 center;
     if (!player_tether_visual_target(player_index, &center)) return;
     Vector3 hand = player_tether_hold_position(&players[player_index]);
+    if (drawWeaponModels && player_has_gun(player_index)) {
+        hand = player_weapon_pose(player_index, player_index == drawViewPlayerIndex).muzzle;
+    }
     float tether_radius = 0.05f;
     bool gold = players[player_index].goldTetherHolding ||
                 players[player_index].netGoldTetherVisualActive;
@@ -17522,8 +17567,6 @@ static void draw_player_tether_world(int player_index) {
     DrawSphere(center, 0.08f,
                gold ? (Color){ 255, 205, 55, 210 } : (Color){ 80, 170, 255, 180 });
 }
-
-static int drawViewPlayerIndex = -1;
 
 static Color player_face_contrast_color(Color base)
 {
@@ -17593,6 +17636,10 @@ static void draw_players(void) {
         }
         DrawCube(render_pos, body_size, body_size, body_size, base);
         DrawCubeWires(render_pos, body_size, body_size, body_size, base_dark);
+        if (drawWeaponModels && i != drawViewPlayerIndex) {
+            Vector3 eye = drawViewPlayerIndex >= 0 ? players[drawViewPlayerIndex].pos : p->pos;
+            draw_player_weapon(i, eye, false, false);
+        }
         if (i != drawViewPlayerIndex) {
             draw_player_face(p, render_pos, body_size, base);
         }
@@ -18991,6 +19038,11 @@ static void net_host_start_match(void) {
 static void net_write_player_state(NetWriter *writer, int slot) {
     Player *p = &players[slot];
     NetPlayerVisualState visual = { 0 };
+    visual.shot_sequence = weaponVisuals[slot].shot_sequence;
+    if (p->dynamicShotActive) visual.flags |= NET_PLAYER_VISUAL_POWERED_SHOT;
+    float shot_age = (float)GetTime() - weaponVisuals[slot].shot_time;
+    visual.shot_age_ms = shot_age >= 0 && shot_age < WEAPON_SHOT_SECONDS
+        ? (uint8_t)fminf(119, floorf(shot_age * 1000)) : 255;
     float melee_progress = melee_anim_progress(p, (float)GetTime());
     if (melee_progress >= 0.0f && melee_progress < 1.0f) {
         visual.flags |= NET_PLAYER_VISUAL_MELEE;
@@ -19190,6 +19242,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
         }
         if (!netLobbyStarted) gameState = GAME_STATE_LOBBY;
     } else if (header.type == NET_MSG_START) {
+        for (int i = 0; i < MAX_PLAYERS; ++i) weapon_visual_reset(&weaponVisuals[i]);
         netLobbyStarted = true;
         netRequestedCreative = net_read_u8(&reader) != 0;
         netWorldReady = false;
@@ -19258,6 +19311,9 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
                 }
             }
             p->netTetherVisualActive = (state.visual.flags & NET_PLAYER_VISUAL_TETHER) != 0;
+            p->dynamicShotActive = (state.visual.flags & NET_PLAYER_VISUAL_POWERED_SHOT) != 0;
+            weapon_visual_receive(&weaponVisuals[slot], state.visual.shot_sequence,
+                                  state.visual.shot_age_ms, (float)GetTime());
             p->netGoldTetherVisualActive = (state.visual.flags & NET_PLAYER_VISUAL_GOLD_TETHER) != 0;
             if (p->netTetherVisualActive) {
                 p->netTetherVisualTarget = (Vector3){ state.visual.tether_x,
@@ -19809,6 +19865,15 @@ static void render_gameplay_view(RenderTexture2D *screens,
 
     prepare_dynamic_voxel_transforms();
 
+    drawWeaponModels = weaponRenderingReady && !creative_mode;
+    for (int p = 0; p < activePlayers; ++p) {
+        Vector3 target;
+        bool tether = drawWeaponModels && player_has_gun(p) && player_tether_visual_target(p, &target);
+        weapon_visual_update(&weaponVisuals[p], tether, GetFrameTime());
+        if (players[p].respawn_timer > 0) weaponVisuals[p].shot_time = -1000;
+    }
+    for (int view = viewCount; view < MAX_PLAYERS; ++view) weapon_bloom_unload(&weaponBlooms[view]);
+
     for (int view = 0; view < viewCount; ++view) {
         int i;
         if (netTransport.role == NET_ROLE_OFFLINE) {
@@ -19816,6 +19881,10 @@ static void render_gameplay_view(RenderTexture2D *screens,
         } else {
             i = netLocalPlayerSlots[view];
         }
+        weaponViewAspect = (float)(*renderW) / (float)(*renderH);
+        bool bloom = drawWeaponModels && weaponBloomEnabled &&
+                     weapon_bloom_resize(&weaponBlooms[view], *renderW, *renderH);
+        if (!drawWeaponModels || !weaponBloomEnabled) weapon_bloom_unload(&weaponBlooms[view]);
         BeginTextureMode(screens[view]);
             ClearBackground(SKYBLUE);
             BeginMode3D(cams[i]);
@@ -19826,6 +19895,29 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 draw_players();
                 drawViewPlayerIndex = -1;
             EndMode3D();
+            // Preserve world depth for the remote-gun mask before drawing the viewmodel.
+            if (bloom) {
+                EndTextureMode();
+                weapon_bloom_begin(&weaponBlooms[view], screens[view]);
+                BeginMode3D(cams[i]);
+                for (int p = 0; p < activePlayers; ++p) {
+                    if (p != i) draw_player_weapon(p, cams[i].position, false, true);
+                }
+                EndMode3D();
+                if (players[i].respawn_timer <= 0) {
+                    weapon_clear_depth();
+                    BeginMode3D(cams[i]);
+                    draw_player_weapon(i, cams[i].position, true, true);
+                    EndMode3D();
+                }
+                weapon_bloom_composite(&weaponBlooms[view], screens[view]);
+            }
+            if (drawWeaponModels && players[i].respawn_timer <= 0) {
+                weapon_clear_depth();
+                BeginMode3D(cams[i]);
+                draw_player_weapon(i, cams[i].position, true, false);
+                EndMode3D();
+            }
             int view_x = 0, view_y = 0, view_w = 0, view_h = 0;
             get_viewport(view, viewCount, &view_x, &view_y, &view_w, &view_h);
             DrawRectangle(0, 0, view_w, HUD_BAR_HEIGHT, Fade(BLACK, 0.5f));
@@ -20444,6 +20536,7 @@ int main(int argc, char **argv) {
         return status;
     }
 
+    weaponRenderingReady = weapon_renderer_init();
     // main loop
     while (!WindowShouldClose()) {
 #if defined(__APPLE__)
@@ -21892,6 +21985,8 @@ int main(int argc, char **argv) {
         greedyMaterialInit = false;
     }
     shutdown_shard_rendering();
+    for (int i = 0; i < MAX_PLAYERS; ++i) weapon_bloom_unload(&weaponBlooms[i]);
+    weapon_renderer_shutdown();
     if (goldPickupShader.id != 0) UnloadShader(goldPickupShader);
     shutdown_world_visuals();
     free(netVoxelProxies);
