@@ -309,14 +309,17 @@ WeaponPose weapon_pose(WeaponKind kind,Vector3 pos,Vector3 forward,Vector3 right
     float distance=(first_person ? 1.0f : .62f)-.045f*recoil;
     float right_offset=.48f;
     if (first_person) {
-        // Anchor the rear cap at 97% of the viewport's right half-width.
-        // Its outer corner includes the existing 22-degree inward gun rotation.
+        // Keep the standard rear cap near the right edge. For the launcher,
+        // place the stock's innermost corner beyond it, clipping the whole stock.
+        // Both include the existing 22-degree inward gun rotation.
         float angle=22*DEG2RAD;
-        float rear_x=kind==WEAPON_DYNAMIC_LAUNCHER ? .48f*.5f-.075f*.45f : .58f*.5f-.065f*.45f;
-        float rear_z=kind==WEAPON_DYNAMIC_LAUNCHER ? .82f+.16f*.5f : .59f+.13f*.5f;
+        bool launcher=kind==WEAPON_DYNAMIC_LAUNCHER;
+        float rear_x=launcher ? -.48f*.5f : .58f*.5f-.065f*.45f;
+        float rear_z=launcher ? .82f-.16f*.5f : .59f+.13f*.5f;
         float corner_x=scale*(rear_x*cosf(angle)+rear_z*sinf(angle));
         float corner_z=scale*(-rear_x*sinf(angle)+rear_z*cosf(angle));
-        right_offset=.97f*tanf(30*DEG2RAD)*aspect*(distance-corner_z)-corner_x;
+        float edge=launcher ? 1.02f : .97f;
+        right_offset=edge*tanf(30*DEG2RAD)*aspect*(distance-corner_z)-corner_x;
     }
     Vector3 offset=Vector3Add(Vector3Scale(right,right_offset),
                     Vector3Add(Vector3Scale(up,-.25f),
