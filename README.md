@@ -269,13 +269,28 @@ still requires a Developer ID signature and notarization.
 The shared bullet/tether gun is generated from beveled low-poly meshes and uses
 the GLSL 330 shaders in `shaders/weapon*`. It appears in first-person views and on
 standard players/bots; claw opening and cyan energy intensify while tethering.
-Successful shots drive muzzle flash and recoil. Gold tether and powered-shot
-feedback use amber energy. Projectile collision, damage, and tether forces retain
+Successful shots drive muzzle flash and recoil. Gold tether uses amber energy.
+While Gold Tether is charged or held, two pulsing gold ribbons orbit the gun through
+its vertex/fragment shaders. They follow recoil and melee on either gun, remain
+visible with bloom disabled, and disappear when the charge is spent. The charged
+state also travels in the existing LAN player-state flags byte.
+Dynamic Shot immediately equips a larger charcoal-and-silver launcher with a
+hollow octagonal barrel, transparent chamber and three glowing yellow cubes that
+drift and rotate inside it. These cubes are visual particles; the power-up still
+fires the existing gold physics voxels. The launcher also supports tethering and
+grip-butt melee, and returns to the standard gun when the power-up clears. Its
+appearance uses the existing LAN power-up flag without a protocol change.
+Projectile collision, damage, and tether forces retain
 their existing behavior.
 
 Weapon bloom is isolated per viewport and respects world occlusion. Pass
-`--no-weapon-bloom` to disable its extra render passes. The gun is lowered during
-melee and hidden in creative mode and respawn. LAN peers must all use protocol
+`--no-weapon-bloom` to disable its extra render passes. Melee rotates the gun around
+the grip and strikes with the grip heel. Attacks, mining and misses use the
+same 0.32-second swing; the heel follows the existing hit sweep during its active
+window. Rigid pose transforms preserve the flat colors, edge lines and glow, and
+the tether follows the animated muzzle. Hit detection, damage, mining and cooldown
+are unchanged. Goliaths retain their arm attack. The gun is hidden in creative mode
+and respawn. LAN peers must all use protocol
 version 5, which adds successful-shot sequence/age and powered-shot visual state.
 
 After building raylib with `build.ps1`, run the Windows visual checks from the
@@ -286,10 +301,14 @@ repository root:
 ```
 
 This compiles and runs OpenGL 3.3/4.3 previews, shot-state and network serialization
-tests, and the actual gameplay renderer with one through four viewports. PNGs are
+tests, melee pose/hit checks, and the actual gameplay renderer with one through four
+viewports, swing phases and remote-player swings. PNGs are
 saved beneath `artifacts/weapon`; logs and executables are in `.build/weapon`.
 The preview includes wall occlusion, extreme pitch, gold tether, firing, resize,
-and a rendering-only four-view bloom comparison. Timing excludes gameplay physics.
+and a rendering-only four-view bloom comparison. Launcher checks cover transparent
+glass, cube containment over two minutes, pickup/reversion and replicated state.
+Gameplay captures also include launcher floating, firing, tethering and melee
+animation frames. Timing excludes gameplay physics.
 On other platforms, compile `tests/render_weapon_preview.c` with
 `weapon_renderer.c` and raylib, then run it from the repository root with an
 existing output directory as its first argument (optional second: `--no-bloom`).

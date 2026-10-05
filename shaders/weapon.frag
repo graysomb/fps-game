@@ -4,28 +4,40 @@ in vec3 normal;
 in vec4 color;
 in float energy;
 in vec3 localPosition;
+in vec3 edgeDistance;
+flat in int edgeMask;
 uniform vec3 eyePosition;
 uniform vec3 energyColor;
 uniform float energyStrength;
 uniform int emissionOnly;
+uniform float effectTime;
 out vec4 finalColor;
 void main() {
-    vec3 N = normalize(normal);
-    vec3 V = normalize(eyePosition - position);
-    vec3 L = normalize(vec3(-0.4, 0.85, 0.55));
-    float diffuse = max(dot(N, L), 0.0);
-    float hemisphere = N.y * 0.5 + 0.5;
-    float specular = pow(max(dot(N, normalize(L + V)), 0.0), 24.0);
-    vec3 base = color.rgb * (mix(vec3(0.24, 0.28, 0.38), vec3(0.55, 0.59, 0.68), hemisphere)
-                             + vec3(0.63) * diffuse);
-    base += vec3(0.16) * specular;
-    // Local spill is restricted to the gun, independent of world lighting.
-    float spill = exp(-5.0 * length(localPosition - vec3(0.0, 0.0, -0.38)));
-    base += energyColor * spill * 0.13 * energyStrength;
-    vec3 emissive = energyColor * color.r * energyStrength;
+    if (energy > 2.5) {
+        float t = localPosition.z;
+        float pulse = pow(0.5 + 0.5 * sin(t * 24.0 - effectTime * 9.0 + localPosition.x), 3.0);
+        float fade = smoothstep(0.0, 0.12, t) * (1.0 - smoothstep(0.86, 1.0, t));
+        float core = 1.0 - smoothstep(0.20, 1.0, abs(localPosition.y));
+        finalColor = vec4(mix(vec3(1.0, 0.55, 0.025), vec3(1.0, 0.94, 0.50), core * pulse),
+                          fade * core * (0.60 + 0.40 * pulse));
+        return;
+    }
+    // Match the world's unlit colors: no directional shading, highlights, or spill.
+    vec3 base = color.rgb;
+    // A roughly one-pixel, antialiased line along real polygon edges only.
+    // Derivatives keep the width consistent in first-person and split-screen views.
+    vec3 coverage = smoothstep(vec3(0.0), max(fwidth(edgeDistance), vec3(0.000001)), edgeDistance);
+    float interior = 1.0;
+    if ((edgeMask & 1) != 0) interior = min(interior, coverage.x);
+    if ((edgeMask & 2) != 0) interior = min(interior, coverage.y);
+    if ((edgeMask & 4) != 0) interior = min(interior, coverage.z);
+    base = mix(vec3(0.035, 0.045, 0.065), base, interior);
+    // Cubes keep subtle face tints and outlined edges while emitting energy.
+    float energyEdge = energy > 1.5 ? mix(0.45, 1.0, interior) : 1.0;
+    vec3 emissive = energyColor * color.r * energyStrength * energyEdge;
     if (emissionOnly != 0) {
         finalColor = vec4(energy > 0.5 ? emissive : vec3(0.0), 1.0);
     } else {
-        finalColor = vec4(energy > 0.5 ? emissive + vec3(0.16) : base, 1.0);
+        finalColor = vec4(energy > 0.5 ? emissive + vec3(0.16) : base, color.a);
     }
 }

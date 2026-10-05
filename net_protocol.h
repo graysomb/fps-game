@@ -79,6 +79,9 @@ typedef enum NetPlayerVisualFlags {
     NET_PLAYER_VISUAL_POWERED_SHOT = 1u << 3
 } NetPlayerVisualFlags;
 
+/* Optional bit in the existing player-state flags byte; no payload change. */
+#define NET_PLAYER_STATE_GOLD_TETHER_CHARGED (1u << 2)
+
 typedef struct NetPlayerVisualState {
     uint8_t flags;
     uint8_t melee_progress;

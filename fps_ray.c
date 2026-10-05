@@ -620,9 +620,9 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define MELEE_UPWARD_BOOST 2.0f
 #define MELEE_COOLDOWN_SECONDS 0.0f
 #define MELEE_ANIM_DURATION_SECONDS 0.32f
-#define MELEE_ACTIVE_START_NORM 0.28f
-#define MELEE_ACTIVE_END_NORM 0.62f
-#define MELEE_REACH_PEAK_NORM 0.52f
+#define MELEE_ACTIVE_START_NORM WEAPON_MELEE_ACTIVE_START
+#define MELEE_ACTIVE_END_NORM WEAPON_MELEE_ACTIVE_END
+#define MELEE_REACH_PEAK_NORM WEAPON_MELEE_PEAK
 #define MELEE_BASE_REACH_FRAC 0.18f
 #define BUILD_COOLDOWN_SECONDS 0.5f
 #define TETHER_RANGE 8.0f
@@ -17525,16 +17525,37 @@ static bool player_tether_visual_target(int player_index, Vector3 *out_target) {
 static int drawViewPlayerIndex = -1;
 static float weaponViewAspect = 1.0f;
 static bool drawWeaponModels;
+static bool weaponFrameSampled;
+static float weaponFrameTime;
+static WeaponMeleePose weaponMeleeSamples[MAX_PLAYERS];
+static WeaponKind weaponKindSamples[MAX_PLAYERS];
+
+static WeaponKind player_weapon_kind(const Player *p) {
+    return p->dynamicShotActive ? WEAPON_DYNAMIC_LAUNCHER : WEAPON_STANDARD;
+}
+
+static WeaponMeleePose player_weapon_melee_sample(const Player *p, float now) {
+    float progress = p->respawn_timer > 0 ? -1 : melee_anim_progress(p, now);
+    WeaponMeleePose sample = { .progress = progress };
+    if (progress >= 0 && progress <= 1) {
+        float fraction = melee_reach_fraction(progress);
+        sample.strike_endpoint = v_add(melee_swing_origin(p, fraction),
+            v_mul(melee_swing_direction(p, fraction), MELEE_RANGE * fraction));
+    }
+    return sample;
+}
 
 static WeaponPose player_weapon_pose(int player_index, bool first_person) {
     Player *p = &players[player_index];
     Vector3 forward = player_forward(p);
     Vector3 right = v_norm(v_cross(forward, (Vector3){0,1,0}));
     Vector3 up = v_norm(v_cross(right, forward));
-    float progress = melee_anim_progress(p, (float)GetTime());
-    float melee = progress >= 0 && progress < 1 ? sinf(progress * PI) : 0;
-    return weapon_pose(p->pos, forward, right, up, first_person, weaponViewAspect, melee,
-                       weapon_shot_amount(&weaponVisuals[player_index], (float)GetTime()));
+    float now = weaponFrameSampled ? weaponFrameTime : (float)GetTime();
+    WeaponMeleePose melee = weaponFrameSampled ? weaponMeleeSamples[player_index] :
+                                               player_weapon_melee_sample(p, now);
+    WeaponKind kind = weaponFrameSampled ? weaponKindSamples[player_index] : player_weapon_kind(p);
+    return weapon_pose(kind, p->pos, forward, right, up, first_person, weaponViewAspect, &melee,
+                       weapon_shot_amount(&weaponVisuals[player_index], now));
 }
 
 static bool player_has_gun(int player_index) {
@@ -17542,12 +17563,30 @@ static bool player_has_gun(int player_index) {
            players[player_index].enemyType == ENEMY_TYPE_STANDARD;
 }
 
-static void draw_player_weapon(int player_index, Vector3 eye, bool first_person, bool emission) {
+static void draw_player_weapon(int player_index, Vector3 eye, bool first_person, WeaponRenderPass pass) {
     if (!player_has_gun(player_index)) return;
     Player *p = &players[player_index];
     weapon_draw(player_weapon_pose(player_index, first_person), &weaponVisuals[player_index],
-                eye, (float)GetTime(), p->goldTetherHolding || p->netGoldTetherVisualActive,
-                p->dynamicShotActive, emission);
+                eye, weaponFrameSampled ? weaponFrameTime : (float)GetTime(),
+                p->goldTetherCharged || p->goldTetherHolding || p->netGoldTetherVisualActive, pass);
+}
+
+static void draw_remote_weapon_glass(int view_player, Vector3 eye) {
+    int order[MAX_PLAYERS], count = 0;
+    float distances[MAX_PLAYERS];
+    for (int p = 0; p < activePlayers; ++p) {
+        if (p == view_player || !player_has_gun(p)) continue;
+        WeaponPose pose = player_weapon_pose(p, false);
+        if (pose.kind != WEAPON_DYNAMIC_LAUNCHER) continue;
+        Vector3 chamber = Vector3Transform((Vector3){0,.23f,.20f}, pose.transform);
+        float distance = v_dot(v_sub(chamber, eye), v_sub(chamber, eye));
+        int at = count++;
+        while (at > 0 && distances[at-1] < distance) {
+            order[at] = order[at-1]; distances[at] = distances[at-1]; --at;
+        }
+        order[at] = p; distances[at] = distance;
+    }
+    for (int at = 0; at < count; ++at) draw_player_weapon(order[at], eye, false, WEAPON_GLASS);
 }
 
 static void draw_player_tether_world(int player_index) {
@@ -17638,7 +17677,7 @@ static void draw_players(void) {
         DrawCubeWires(render_pos, body_size, body_size, body_size, base_dark);
         if (drawWeaponModels && i != drawViewPlayerIndex) {
             Vector3 eye = drawViewPlayerIndex >= 0 ? players[drawViewPlayerIndex].pos : p->pos;
-            draw_player_weapon(i, eye, false, false);
+            draw_player_weapon(i, eye, false, WEAPON_COLOR);
         }
         if (i != drawViewPlayerIndex) {
             draw_player_face(p, render_pos, body_size, base);
@@ -17649,7 +17688,7 @@ static void draw_players(void) {
             DrawCubeWires(render_pos, body_size * 0.8f, body_size * 0.8f, body_size * 0.8f, coreEnergy);
         }
         if (p->enemyType != ENEMY_TYPE_SWARMER) {
-            draw_melee_arm_world(i);
+            if (!drawWeaponModels || !player_has_gun(i)) draw_melee_arm_world(i);
             draw_player_tether_world(i);
         }
         if (p->matter_flash_timer > 0.0f && !p->isExposed && p->matter > 0.0f) {
@@ -19073,7 +19112,8 @@ static void net_write_player_state(NetWriter *writer, int slot) {
     net_write_f32(writer, p->matter); net_write_f32(writer, p->respawn_timer);
     net_write_i16(writer, (int16_t)p->kills); net_write_i16(writer, (int16_t)p->deaths);
     net_write_i16(writer, (int16_t)p->debrisKills);
-    net_write_u8(writer, (p->onGround ? 1u : 0u) | (p->isExposed ? 2u : 0u));
+    net_write_u8(writer, (p->onGround ? 1u : 0u) | (p->isExposed ? 2u : 0u) |
+                        (p->goldTetherCharged ? NET_PLAYER_STATE_GOLD_TETHER_CHARGED : 0u));
     net_write_player_visual(writer, &visual);
 }
 
@@ -19312,6 +19352,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
             }
             p->netTetherVisualActive = (state.visual.flags & NET_PLAYER_VISUAL_TETHER) != 0;
             p->dynamicShotActive = (state.visual.flags & NET_PLAYER_VISUAL_POWERED_SHOT) != 0;
+            p->goldTetherCharged = (state.flags & NET_PLAYER_STATE_GOLD_TETHER_CHARGED) != 0;
             weapon_visual_receive(&weaponVisuals[slot], state.visual.shot_sequence,
                                   state.visual.shot_age_ms, (float)GetTime());
             p->netGoldTetherVisualActive = (state.visual.flags & NET_PLAYER_VISUAL_GOLD_TETHER) != 0;
@@ -19866,7 +19907,12 @@ static void render_gameplay_view(RenderTexture2D *screens,
     prepare_dynamic_voxel_transforms();
 
     drawWeaponModels = weaponRenderingReady && !creative_mode;
+    // All viewports, color/mask passes and tether origins use one animation sample.
+    weaponFrameTime = (float)GetTime();
+    weaponFrameSampled = true;
     for (int p = 0; p < activePlayers; ++p) {
+        weaponMeleeSamples[p] = player_weapon_melee_sample(&players[p], weaponFrameTime);
+        weaponKindSamples[p] = player_weapon_kind(&players[p]);
         Vector3 target;
         bool tether = drawWeaponModels && player_has_gun(p) && player_tether_visual_target(p, &target);
         weapon_visual_update(&weaponVisuals[p], tether, GetFrameTime());
@@ -19893,6 +19939,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 DrawVoxels(cams[i]);
                 draw_pickups(cams[i]);
                 draw_players();
+                if (drawWeaponModels) draw_remote_weapon_glass(i, cams[i].position);
                 drawViewPlayerIndex = -1;
             EndMode3D();
             // Preserve world depth for the remote-gun mask before drawing the viewmodel.
@@ -19901,13 +19948,13 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 weapon_bloom_begin(&weaponBlooms[view], screens[view]);
                 BeginMode3D(cams[i]);
                 for (int p = 0; p < activePlayers; ++p) {
-                    if (p != i) draw_player_weapon(p, cams[i].position, false, true);
+                    if (p != i) draw_player_weapon(p, cams[i].position, false, WEAPON_EMISSION);
                 }
                 EndMode3D();
                 if (players[i].respawn_timer <= 0) {
                     weapon_clear_depth();
                     BeginMode3D(cams[i]);
-                    draw_player_weapon(i, cams[i].position, true, true);
+                    draw_player_weapon(i, cams[i].position, true, WEAPON_EMISSION);
                     EndMode3D();
                 }
                 weapon_bloom_composite(&weaponBlooms[view], screens[view]);
@@ -19915,7 +19962,8 @@ static void render_gameplay_view(RenderTexture2D *screens,
             if (drawWeaponModels && players[i].respawn_timer <= 0) {
                 weapon_clear_depth();
                 BeginMode3D(cams[i]);
-                draw_player_weapon(i, cams[i].position, true, false);
+                draw_player_weapon(i, cams[i].position, true, WEAPON_COLOR);
+                draw_player_weapon(i, cams[i].position, true, WEAPON_GLASS);
                 EndMode3D();
             }
             int view_x = 0, view_y = 0, view_w = 0, view_h = 0;
@@ -20081,6 +20129,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
         }
         debug_console_draw();
     EndDrawing();
+    weaponFrameSampled = false;
 }
 
 static bool run_physics_smoke_test(int steps) {
