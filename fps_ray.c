@@ -1251,6 +1251,11 @@ static VgsHierarchy vgsHierarchy;
 static int *vgsEmbeddedNode;
 static int *vgsEmbeddedRelation;
 static int vgsEmbeddedCapacity;
+static int *vgsDormantOwnerWorld;
+static uint8_t *vgsDormantOwnerCorner;
+static int vgsDormantOwnerCapacity;
+static int vgsDormantOwnerCount;
+static uint64_t vgsDormantOwnerGeneration = UINT64_MAX;
 static int voxel_count;
 static bool vgs_node_representation_active(const VgsHierarchyNode *node)
 {
@@ -1316,6 +1321,16 @@ static bool vgs_node_has_active_children(const VgsHierarchyNode *node)
         if (child == VGS_CHILD_EMPTY) continue;
         if (child >= 0 ? vgsHierarchy.nodes[child].active :
             voxels[-child - 1].simulate_dofs) return true;
+    }
+    return false;
+}
+static bool vgs_node_has_dormant_children(const VgsHierarchyNode *node)
+{
+    for (int c = 0; c < 8; ++c) {
+        int child = node->children[c];
+        if (child == VGS_CHILD_EMPTY) continue;
+        if (child >= 0 ? !vgsHierarchy.nodes[child].active :
+            !voxels[-child - 1].simulate_dofs) return true;
     }
     return false;
 }
@@ -1404,6 +1419,10 @@ static void clear_vgs_hierarchy(void) {
     free(vgsHierarchy.embedding_relations);
     free(vgsEmbeddedNode); free(vgsEmbeddedRelation);
     vgsEmbeddedNode=NULL;vgsEmbeddedRelation=NULL;vgsEmbeddedCapacity=0;
+    free(vgsDormantOwnerWorld); free(vgsDormantOwnerCorner);
+    vgsDormantOwnerWorld=NULL;vgsDormantOwnerCorner=NULL;
+    vgsDormantOwnerCapacity=0;vgsDormantOwnerCount=0;
+    vgsDormantOwnerGeneration=UINT64_MAX;
     memset(&vgsHierarchy, 0, sizeof(vgsHierarchy));
 }
 static uint64_t nextVoxelIdentity = 1;
@@ -2785,9 +2804,8 @@ static inline bool voxel_is_fluid(const Voxel *voxel) {
     return voxel && voxel->type == VOXEL_TYPE_FLUID;
 }
 
-// Fine voxels remain interactive identities. The renderer may replace the
-// dormant descendants of a full AMR terminal with one coarse instance; partial
-// terminals still draw their occupied fine voxels.
+// Fine voxels remain the visible and interactive identities of an AMR body.
+// A fractured VGS voxel is hidden regardless of the active AMR level.
 static bool voxel_is_visible_gameplay_leaf(const Voxel *voxel) {
     return voxel && voxel->simulate && !voxel_is_fluid(voxel) && voxel->vgs_active;
 }
@@ -12004,6 +12022,26 @@ static bool vgs_hierarchy_grid_points(const VgsHierarchyNode *node, Particle *gr
 static void vgs_hierarchy_transfer_refine(VgsHierarchyNode *node, bool activate)
 {
     if (!node) return;
+    if (node->occupancy == VGS_OCCUPANCY_PARTIAL &&
+        !node->partial_coarsenable) {
+        if (activate) {
+            VgsCurvatureHistory history =
+                vgsHierarchy.node_history[node - vgsHierarchy.nodes];
+            for (int c = 0; c < 8; ++c) {
+                int child = node->children[c];
+                if (child == VGS_CHILD_EMPTY) continue;
+                if (child >= 0) {
+                    vgsHierarchy.nodes[child].active = true;
+                    vgsHierarchy.node_history[child] = history;
+                } else {
+                    voxels[-child - 1].simulate_dofs = true;
+                    vgsHierarchy.leaf_history[-child - 1] = history;
+                }
+            }
+            ++vgsHierarchy.refine_count;
+        }
+        return;
+    }
     if (node->occupancy == VGS_OCCUPANCY_PARTIAL && node->partial_coarsenable) {
         Vector3 pos[8],vel[8];for(int a=0;a<node->embedding_rank;++a){pos[a]=node->particles[a]->pos;vel[a]=node->particles[a]->vel;}
         for(int n=0;n<node->embedding_count;++n){VgsEmbeddingRelation *rel=&vgsHierarchy.embedding_relations[node->embedding_begin+n];Vector3 p={0},v={0};
@@ -12103,14 +12141,126 @@ static void vgs_hierarchy_transfer_coarsen(VgsHierarchyNode *node)
     ++vgsHierarchy.coarsen_count;
 }
 
-static void vgs_hierarchy_sync_dormant_descendants(VgsHierarchyNode *node)
+static bool vgs_hierarchy_evaluate_dormant_particles(bool apply,
+                                                      float *max_error_out,
+                                                      int *unresolved_out)
 {
-    if (!node || (node->occupancy != VGS_OCCUPANCY_FULL && !node->partial_coarsenable)) return;
-    vgs_hierarchy_transfer_refine(node, false);
-    for (int c = 0; c < 8; ++c) {
-        int child = node->children[c];
-        if (child >= 0) vgs_hierarchy_sync_dormant_descendants(&vgsHierarchy.nodes[child]);
+    if (!vgsHierarchy.adaptive) return true;
+    float max_error = 0.0f;
+    int unresolved = 0;
+    if (vgsDormantOwnerCapacity < particle_pool_count) {
+        int *world = realloc(vgsDormantOwnerWorld,
+                             (size_t)particle_pool_count * sizeof(*world));
+        uint8_t *corner = realloc(vgsDormantOwnerCorner,
+                                  (size_t)particle_pool_count * sizeof(*corner));
+        if (!world || !corner) {
+            if (world) vgsDormantOwnerWorld = world;
+            if (corner) vgsDormantOwnerCorner = corner;
+            return false;
+        }
+        vgsDormantOwnerWorld = world;
+        vgsDormantOwnerCorner = corner;
+        vgsDormantOwnerCapacity = particle_pool_count;
     }
+    if (vgsDormantOwnerGeneration != vgsHierarchy.topology_generation ||
+        vgsDormantOwnerCount != particle_pool_count) {
+        memset(vgsDormantOwnerWorld, 0xff,
+               (size_t)particle_pool_count * sizeof(*vgsDormantOwnerWorld));
+        for (int body_id = 0; body_id < amrBodyCount; ++body_id) {
+            const AmrBody *body = &amrBodies[body_id];
+            if (!body->valid || body->lifecycle != AMR_BODY_ACTIVE) continue;
+            for (int slot = 0; slot < body->leaf_capacity; ++slot) {
+                int world = body->leaf_voxel_ids[slot];
+                if (world < 0 || world >= voxel_count) continue;
+                for (int c = 0; c < 8; ++c) {
+                    ptrdiff_t id = voxels[world].particles[c] - particles_pool;
+                    if (id < 0 || id >= particle_pool_count) return false;
+                    if (vgsDormantOwnerWorld[id] < 0) {
+                        vgsDormantOwnerWorld[id] = world;
+                        vgsDormantOwnerCorner[id] = (uint8_t)c;
+                    }
+                }
+            }
+        }
+        vgsDormantOwnerGeneration = vgsHierarchy.topology_generation;
+        vgsDormantOwnerCount = particle_pool_count;
+    }
+    for (int id = 0; id < particle_pool_count; ++id) {
+        int world = vgsDormantOwnerWorld[id];
+        Particle *p = &particles_pool[id];
+        if (world < 0 || p->base_inv_mass > 0.0f) continue;
+        const Voxel *leaf = &voxels[world];
+        const AmrBody *body = &amrBodies[leaf->amr_body_id];
+        int side = vgsHierarchy.nodes[body->root_node].grid_span;
+        int slot = leaf->amr_leaf_slot;
+        if (side <= 0 || slot < 0 || slot >= body->leaf_capacity) return false;
+        int gx = slot % side + (vgsDormantOwnerCorner[id] & 1);
+        int gz = (slot / side) % side + ((vgsDormantOwnerCorner[id] >> 2) & 1);
+        int gy = slot / (side * side) + ((vgsDormantOwnerCorner[id] >> 1) & 1);
+        int level = body->levels - 1;
+        int grid = side / 2;
+        if (level < 0 || grid <= 0) return false;
+        // A boundary vertex may choose either adjacent leaf. The chosen leaf's
+        // own parent must win; clamp the corner to its leaf's octant.
+        int lx = slot % side, lz = (slot / side) % side, ly = slot / (side * side);
+        int parent = body->level_start[level] +
+                 ((ly / 2 * grid + lz / 2) * grid + lx / 2);
+        while (parent >= 0) {
+            const VgsHierarchyNode *node = &vgsHierarchy.nodes[parent];
+            if (vgs_node_representation_active(node)) {
+                if (!node->vgs_enabled) break;
+                Vector3 pos = {0}, vel = {0};
+                if (node->occupancy == VGS_OCCUPANCY_PARTIAL) {
+                    int rel_id = vgsEmbeddedRelation && id < vgsEmbeddedCapacity
+                        ? vgsEmbeddedRelation[id] : -1;
+                    if (rel_id < node->embedding_begin ||
+                        rel_id >= node->embedding_begin + node->embedding_count) {
+                        rel_id = -1;
+                        for (int r = node->embedding_begin;
+                             r < node->embedding_begin + node->embedding_count; ++r)
+                            if (vgsHierarchy.embedding_relations[r].particle == p) {
+                                rel_id = r;
+                                break;
+                            }
+                        if (rel_id < 0) { ++unresolved; break; }
+                    }
+                    const VgsEmbeddingRelation *rel =
+                        &vgsHierarchy.embedding_relations[rel_id];
+                    for (int a = 0; a < node->embedding_rank; ++a) {
+                        pos = v_add(pos, v_mul(node->particles[a]->pos, rel->refine[a]));
+                        vel = v_add(vel, v_mul(node->particles[a]->vel, rel->refine[a]));
+                    }
+                } else {
+                    float u = (float)(gx - node->grid_x) / node->grid_span;
+                    float v = (float)(gy - node->grid_y) / node->grid_span;
+                    float w = (float)(gz - node->grid_z) / node->grid_span;
+                    for (int c = 0; c < 8; ++c) {
+                        float weight = ((c & 1) ? u : 1.0f - u) *
+                                       ((c & 2) ? v : 1.0f - v) *
+                                       ((c & 4) ? w : 1.0f - w);
+                        pos = v_add(pos, v_mul(node->particles[c]->pos, weight));
+                        vel = v_add(vel, v_mul(node->particles[c]->vel, weight));
+                    }
+                }
+                max_error = fmaxf(max_error, v_length(v_sub(p->pos, pos)));
+                if (apply) {
+                    p->pos = p->prev_pos = p->predicted_pos = pos;
+                    p->vel = vel;
+                }
+                break;
+            }
+            parent = node->parent;
+        }
+        if (parent < 0) ++unresolved;
+    }
+    if (max_error_out) *max_error_out = max_error;
+    if (unresolved_out) *unresolved_out = unresolved;
+    return true;
+}
+
+static bool vgs_hierarchy_sync_dormant_particles(void)
+{
+    return vgs_hierarchy_evaluate_dormant_particles(true, NULL, NULL);
 }
 
 static bool vgs_hierarchy_rebuild_active_masses(void)
@@ -12274,14 +12424,7 @@ static bool vgs_hierarchy_initialize_adaptive(void)
             vgs_hierarchy_activate_initial_subtree(body->root_node);
     }
     if (!vgs_hierarchy_rebuild_active_masses()) return false;
-    for (int i = 0; i < vgsHierarchy.node_count; ++i) {
-        VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
-        if (node->active && (node->occupancy == VGS_OCCUPANCY_FULL ||
-                             node->partial_coarsenable) &&
-            !vgs_node_has_active_children(node))
-            vgs_hierarchy_sync_dormant_descendants(node);
-    }
-    return true;
+    return vgs_hierarchy_sync_dormant_particles();
 }
 
 static float vgs_adaptive_threshold_for_node(const VgsHierarchyNode *node)
@@ -12345,13 +12488,17 @@ static bool vgs_hierarchy_adapt(bool use_deformation)
         VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
         if (node->body_id >= 0 &&
             amrBodies[node->body_id].lifecycle != AMR_BODY_ACTIVE) continue;
-        if (!vgs_node_representation_active(node)) continue;
+        if (!node->active || node->occupancy == VGS_OCCUPANCY_EMPTY) continue;
+        if (!vgs_node_representation_active(node)) {
+            refine[i] = vgs_node_has_dormant_children(node);
+            continue;
+        }
         bool has_children = vgs_node_has_active_children(node);
         // Fracture removes this node's constraints, not its material.  Expose
         // one child level so descendants take over mass and can fracture
         // independently.  The broken parent remains a topology ancestor.
         if (!node->vgs_enabled) {
-            if (!has_children) refine[i] = 1;
+            if (vgs_node_has_dormant_children(node)) refine[i] = 1;
             continue;
         }
         float own = vgsHierarchy.node_history[i].curvature;
@@ -12404,12 +12551,6 @@ static bool vgs_hierarchy_adapt(bool use_deformation)
         if (refine[i]) { vgs_hierarchy_transfer_refine(&vgsHierarchy.nodes[i], true); changed = true; }
     free(refine); free(coarsen);
     if (changed && !vgs_hierarchy_rebuild_active_masses()) return false;
-    for (int i = 0; i < vgsHierarchy.node_count; ++i)
-        if (vgsHierarchy.nodes[i].active &&
-            (vgsHierarchy.nodes[i].occupancy == VGS_OCCUPANCY_FULL ||
-             vgsHierarchy.nodes[i].partial_coarsenable) &&
-            !vgs_node_has_active_children(&vgsHierarchy.nodes[i]))
-            vgs_hierarchy_sync_dormant_descendants(&vgsHierarchy.nodes[i]);
     return true;
 }
 
@@ -12466,13 +12607,6 @@ static bool amr_initialize_new_body(int body_id)
     body->lifecycle = AMR_BODY_ACTIVE;
     vgs_hierarchy_activate_initial_subtree(body->root_node);
     vgsHierarchy.adaptive = true;
-    for (int i = body->node_start; i < body->node_start + body->node_count; ++i) {
-        VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
-        if (node->active && (node->occupancy == VGS_OCCUPANCY_FULL ||
-                             node->partial_coarsenable) &&
-            !vgs_node_has_active_children(node))
-            vgs_hierarchy_sync_dormant_descendants(node);
-    }
     return true;
 }
 
@@ -16490,6 +16624,7 @@ static bool simulate_voxel_pbd_cpu_adaptive_steps(float sub_dt, int substeps)
         if (!vgsHierarchy.adaptive) continue;
         vgs_hierarchy_sample_curvature(sub_dt);
         if (!vgs_hierarchy_adapt(step == substeps - 1)) return false;
+        if (!vgs_hierarchy_sync_dormant_particles()) return false;
     }
     return true;
 }
@@ -16565,7 +16700,8 @@ static void simulate_voxel_pbd_steps_counted(float dt, int fixed_steps, int subs
         double tm3 = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
         rebuild_particle_collision_metadata();
         if (pbdProfileEnabled) pbdCpuProfile.t_metadata_ms += pbd_time_now_ms() - tm3;
-        if (vgsHierarchy.adaptive && !debug_run_requested()) {
+        if (vgsHierarchy.adaptive &&
+            (!debug_run_requested() || getenv("FPS_DEBUG_CPU_AMR_ADAPT"))) {
             if (!simulate_voxel_pbd_cpu_adaptive_steps(sub_dt, substeps))
                 TraceLog(LOG_WARNING, "CPU AMR transition failed");
         } else {
@@ -19414,18 +19550,20 @@ static void prepare_dynamic_voxel_transforms(void) {
     for (int d = 0; d < dynamic_voxel_count; ++d) {
         int i = dynamic_voxels[d];
         Voxel *v = &voxels[i];
+        bool amr_leaf = vgsHierarchy.adaptive &&
+            (!debugAdaptiveOctree || debugUseGameplayAmrRendering) &&
+            v->simulate && !voxel_is_fluid(v);
         if (!voxel_is_visible_gameplay_leaf(v)) {
             continue;
         }
-        bool embedded_partial = vgsHierarchy.adaptive &&
-            vgsHierarchy.partial_node_count > 0 && !v->simulate_dofs &&
-            cpu_partial_relation_for_particle(v->particles[0], NULL) != NULL;
-        if (vgsHierarchy.adaptive && v->amr_body_id >= 0 &&
-            !v->simulate_dofs && !embedded_partial)
-            continue;
-        if (debugRefinementCoarse || (debugAdaptiveOctree &&
-                                     !debugUseGameplayAmrRendering && !v->simulate_dofs &&
-                                     !embedded_partial)) continue;
+        if (!amr_leaf) {
+            bool embedded_partial = vgsHierarchy.adaptive &&
+                vgsHierarchy.partial_node_count > 0 && !v->simulate_dofs &&
+                cpu_partial_relation_for_particle(v->particles[0], NULL) != NULL;
+            if (debugRefinementCoarse || (debugAdaptiveOctree &&
+                                         !debugUseGameplayAmrRendering && !v->simulate_dofs &&
+                                         !embedded_partial)) continue;
+        }
 
         // Collect Bullet with Orb Shader
         if (v->isBullet && v->type == 0) {
@@ -19480,42 +19618,6 @@ static void prepare_dynamic_voxel_transforms(void) {
             t->v[14] = center.z;
             t->v[15] = 1.0f;
         }
-    }
-
-    // A full terminal owns its whole occupied region. Draw its current cage
-    // once rather than drawing fine descendants whose solver DOFs are dormant.
-    if (vgsHierarchy.adaptive) for (int n = 0; n < vgsHierarchy.node_count; ++n) {
-        VgsHierarchyNode *node = &vgsHierarchy.nodes[n];
-        if (!node->active ||
-            node->occupancy != VGS_OCCUPANCY_FULL ||
-            vgs_node_has_active_children(node) ||
-            node->body_id < 0 || node->body_id >= amrBodyCount ||
-            amrBodies[node->body_id].lifecycle != AMR_BODY_ACTIVE)
-            continue;
-        AmrBody *body = &amrBodies[node->body_id];
-        int side = vgsHierarchy.nodes[body->root_node].grid_span;
-        int flat = (node->grid_y * side + node->grid_z) * side + node->grid_x;
-        if (flat < 0 || flat >= body->leaf_capacity) continue;
-        int world = body->leaf_voxel_ids[flat];
-        if (world < 0 || world >= voxel_count) continue;
-        Vector3 p[8];
-        if (!vgs_node_corners(node, false, p)) continue;
-        Color color = voxel_display_color(&voxels[world]);
-        Vector3 center = {0};
-        for (int c = 0; c < 8; ++c) center = v_add(center, p[c]);
-        center = v_mul(center, 0.125f);
-        Vector3 axis[3] = {v_sub(p[1], p[0]), v_sub(p[2], p[0]),
-                           v_sub(p[4], p[0])};
-        if (instanceTransformsCount >= instanceTransformsCapacity) break;
-        float16 *t = &instanceTransforms[instanceTransformsCount++];
-        t->v[0] = axis[0].x; t->v[1] = axis[0].y; t->v[2] = axis[0].z;
-        t->v[3] = (float)color.r / 255.0f;
-        t->v[4] = axis[1].x; t->v[5] = axis[1].y; t->v[6] = axis[1].z;
-        t->v[7] = (float)color.g / 255.0f;
-        t->v[8] = axis[2].x; t->v[9] = axis[2].y; t->v[10] = axis[2].z;
-        t->v[11] = (float)color.b / 255.0f;
-        t->v[12] = center.x; t->v[13] = center.y; t->v[14] = center.z;
-        t->v[15] = 1.0f;
     }
 
     if (netTransport.role == NET_ROLE_CLIENT && netVoxelProxies) {

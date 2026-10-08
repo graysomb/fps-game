@@ -891,7 +891,7 @@ uint partialRelationBase(uint relation){return amrControl.hierarchy_count*PARTIA
     relation*PARTIAL_REL_WORDS;}
 uint partialChunkMaskBase(){return amrControl.hierarchy_count*PARTIAL_NODE_WORDS+
     amrControl.padding[0]*PARTIAL_REL_WORDS+amrControl.padding[1]+1u+
-    amrControl.padding[0]+amrControl.padding[2]+amrControl.padding[3];}
+    amrControl.padding[0]+amrControl.padding[2]+amrControl.padding[3]+1u;}
 float partialFloat(uint index){return uintBitsToFloat(partial[index]);}
 void amrLoadCorners(uint stage,VoxelState v,bool predicted,out vec3 corners[8]){
     vec3 anchor[8];for(int a=0;a<8;++a){uint id=voxelParticle(v,a);
@@ -1014,12 +1014,19 @@ void amrSelect(uint gid) {
     uint stage=dispatchArgs[activeBase+4u+gid];
     if(stage<uint(uVoxelCount))return;
     VoxelState node=voxel[stage];
-    if(node.flags.w==0||!amrRepresented(node))return;
+    if(node.flags.w==0)return;
     bool hasChildren=amrHasActiveChildren(node);
+    bool missingChild=false;
+    for(int c=0;c<8;++c){uint child=amrChild(node,c);
+        if(child<amrControl.total_stage_count&&amrOccupancy(voxel[child])!=0u&&
+           voxel[child].flags.w==0)missingChild=true;}
+    if(!amrRepresented(node)){
+        if(missingChild){amrState[stage].previous[7]=uintBitsToFloat(AMR_DECISION_REFINE);
+            atomicOr(amrControl.changed,1u);}return;}
     // A broken internal terminal must hand its mass to one child level.  It
     // remains disabled as a constraint and only acts as a topology ancestor.
     if(node.flags.x==0){
-        if(!hasChildren){
+        if(missingChild){
             amrState[stage].previous[7]=uintBitsToFloat(AMR_DECISION_REFINE);
             atomicOr(amrControl.changed,1u);
         }
@@ -1205,32 +1212,45 @@ void amrTransitionScatter(uint gid){
 }
 
 void amrDormantScatter(uint gid){
-    // Full descendants are initialized by refinement. Embedded partial
-    // terminals still need fine coordinates between transitions.
-    if(uVgsCount<=0)return;
-    uint firstNode=partialNodeBase(uint(uVgsBegin));
-    if(gid>=partial[firstNode+141u])return;
-    uint offsets=amrControl.hierarchy_count*PARTIAL_NODE_WORDS+
-                 amrControl.padding[0]*PARTIAL_REL_WORDS;
-    uint incidences=offsets+amrControl.padding[1]+1u;
-    uint jobs=incidences+amrControl.padding[0];
-    uint id=partial[jobs+partial[firstNode+140u]+gid];
-    if(particle[id].prev_inv_mass.w>0.0)return;
-    vec3 p=vec3(0.0),v=vec3(0.0);float count=0.0;
-    for(uint i=partial[offsets+id];i<partial[offsets+id+1u];++i){
-        uint rel=partialRelationBase(partial[incidences+i]);
-        uint stage=uint(uVoxelCount)+partial[rel+1u];
-        if(stage<uint(uVgsBegin)||stage>=uint(uVgsBegin+uVgsCount)||
-           stage>=amrControl.total_stage_count)continue;
-        VoxelState parent=voxel[stage];
-        if(parent.flags.w!=0&&amrHasActiveChildren(parent))continue;
-        uint base=partialNodeBase(stage),rank=partial[base+2u];
-        for(uint a=0u;a<rank;++a){uint anchor=voxelParticle(parent,int(a));
-            if(anchor>=uint(gpuControl.x))continue;float w=partialFloat(rel+4u+a);
-            p+=particle[anchor].pos_radius.xyz*w;v+=particle[anchor].velocity.xyz*w;}
-        count+=1.0;
+    if(gid>=amrControl.padding[1]||amrControl.hierarchy_count==0u||
+       particle[gid].prev_inv_mass.w>0.0)return;
+    uint ownerBase=partial[partialChunkMaskBase()-1u],child=partial[ownerBase+2u*gid];
+    if(child>=uint(uVoxelCount)||child>=amrControl.total_stage_count)return;
+    uint corner=partial[ownerBase+2u*gid+1u];
+    vec3 uv=vec3(float(corner&1u),float((corner>>1u)&1u),float((corner>>2u)&1u));
+    uint parentStage=floatBitsToUint(amrState[child].latest[7]);
+    for(uint depth=0u;depth<8u&&parentStage<amrControl.total_stage_count;++depth){
+        VoxelState parent=voxel[parentStage];int octant=-1;
+        for(int c=0;c<8;++c)if(amrChild(parent,c)==child){octant=c;break;}
+        if(octant<0)return;
+        uv=(uv+vec3(float(octant&1),float((octant>>1)&1),float((octant>>2)&1)))*0.5;
+        if(parent.flags.w!=0&&amrRepresented(parent)){
+            if(parent.flags.x==0)return;
+            vec3 p=vec3(0.0),v=vec3(0.0);
+            if(amrPartial(parent)){
+                uint offsets=amrControl.hierarchy_count*PARTIAL_NODE_WORDS+
+                             amrControl.padding[0]*PARTIAL_REL_WORDS;
+                uint incidences=offsets+amrControl.padding[1]+1u;
+                uint relation=0xffffffffu;
+                for(uint i=partial[offsets+gid];i<partial[offsets+gid+1u];++i){
+                    uint rel=partialRelationBase(partial[incidences+i]);
+                    if(uint(uVoxelCount)+partial[rel+1u]==parentStage){relation=rel;break;}}
+                if(relation==0xffffffffu)return;
+                uint rank=partial[partialNodeBase(parentStage)+2u];
+                for(uint a=0u;a<rank;++a){uint anchor=voxelParticle(parent,int(a));
+                    if(anchor>=uint(gpuControl.x))return;
+                    float w=partialFloat(relation+4u+a);
+                    p+=particle[anchor].pos_radius.xyz*w;v+=particle[anchor].velocity.xyz*w;}
+            }else{
+                for(int c=0;c<8;++c){uint anchor=voxelParticle(parent,c);
+                    if(anchor>=uint(gpuControl.x))return;
+                    float w=((c&1)!=0?uv.x:1.0-uv.x)*((c&2)!=0?uv.y:1.0-uv.y)*
+                            ((c&4)!=0?uv.z:1.0-uv.z);
+                    p+=particle[anchor].pos_radius.xyz*w;v+=particle[anchor].velocity.xyz*w;}}
+            amrAccumulateTarget(gid,p,v,1.0);return;
+        }
+        child=parentStage;parentStage=floatBitsToUint(amrState[child].latest[7]);
     }
-    if(count>0.0)amrAccumulateTarget(id,p/count,v/count,1.0);
 }
 
 void amrTransitionApply(uint gid){
@@ -1300,7 +1320,7 @@ void amrCompact(uint gid){
 uint amrTerminalMask(VoxelState parent){
     if(parent.flags.x==0||parent.flags.w==0)return 0u;uint mask=0u;
     for(int c=0;c<8;++c){uint child=amrChild(parent,c);if(child>=amrControl.total_stage_count)continue;
-        VoxelState cv=voxel[child];if(cv.flags.x==0||cv.flags.w==0)continue;
+        VoxelState cv=voxel[child];if(cv.flags.x==0||cv.flags.w==0||!amrRepresented(cv))continue;
         if(child>=amrControl.total_stage_count-amrControl.hierarchy_count&&amrHasActiveChildren(cv))continue;
         mask|=1u<<c;}return mask;
 }
@@ -1312,13 +1332,14 @@ void amrCompile(uint gid){
     bool embeddedTerminal=gid<uint(uVoxelCount)&&v.flags.w==0&&
         amrControl.padding[0]!=0u&&
         amrEmbeddedRelation(voxelParticle(v,0))!=0xffffffffu;
-    if((v.flags.w==0&&!embeddedTerminal)||!amrRepresented(v)||
-       v.flags.y!=0||v.flags.z!=0)return;
+    if((v.flags.w==0&&!embeddedTerminal)||v.flags.y!=0||v.flags.z!=0)return;
+    bool represented=amrRepresented(v);
+    if(!represented&&(gid<uint(uVoxelCount)||amrOccupancy(v)==0u))return;
     uint activeBase=16u+4u*amrControl.constraint_capacity;
     uint activeSlot=atomicAdd(dispatchArgs[activeBase],1u);
     if(activeSlot<amrControl.total_stage_count)dispatchArgs[activeBase+4u+activeSlot]=gid;
     else atomicOr(amrControl.overflow,AMR_OVERFLOW_CONSTRAINT);
-    if(v.flags.x==0||v.flags.w==0)return;
+    if(!represented||v.flags.x==0||v.flags.w==0)return;
     bool embedded=amrPartial(v);
     uint mask=gid>=uint(uVoxelCount)?amrTerminalMask(v):0u;
     uint chunks=0u,chunkBegin=0u,chunkCount=0u;if(embedded&&mask!=0u){

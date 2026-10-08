@@ -226,6 +226,7 @@ typedef struct {
     GpuAmrControl amr_control_stage;
     uint32_t *partial_stage;
     size_t partial_words;
+    size_t partial_mask_base;
     uint32_t partial_relation_count;
     uint32_t partial_constraint_capacity;
     uint32_t partial_global_job_count;
@@ -562,7 +563,7 @@ static bool gpu_pack_partial_embeddings(void) {
     }
     size_t particles = (size_t)gpuPhysics.compact_count;
     size_t words = nodes * GPU_PARTIAL_NODE_WORDS + relations * GPU_PARTIAL_REL_WORDS +
-                   particles + 1u + relations * 3u + chunks;
+                   particles + 1u + relations * 3u + 1u + chunks + particles * 2u;
     if (words > UINT32_MAX || relations > UINT32_MAX || chunks > UINT32_MAX ||
         !gpu_resize_array((void **)&gpuPhysics.partial_stage, words ? words : 1u,
                           sizeof(uint32_t))) return false;
@@ -696,7 +697,8 @@ static bool gpu_pack_partial_embeddings(void) {
     free(seen);
     gpuPhysics.partial_global_job_count = job_count - global_start;
     gpuPhysics.partial_global_job_start = global_start;
-    size_t mask_base = jobs_base + job_count;
+    size_t mask_base = jobs_base + job_count + 1u;
+    gpuPhysics.partial_mask_base = mask_base;
     uint32_t chunk_id = 0;
     for (size_t i = 0; i < nodes; ++i) {
         uint32_t *meta = gpuPhysics.partial_stage + i * GPU_PARTIAL_NODE_WORDS;
@@ -712,7 +714,34 @@ static bool gpu_pack_partial_embeddings(void) {
             gpuPhysics.partial_stage[mask_base + chunk_id++] = mask;
         }
     }
-    gpuPhysics.partial_words = mask_base + chunk_id;
+    // One deterministic owner per unique fine particle.  The full-node 27-point
+    // grid has only one canonical particle per point and cannot cover duplicate
+    // corners from distinct fine voxels.
+    size_t owner_base = mask_base + chunk_id;
+    gpuPhysics.partial_stage[mask_base - 1u] = (uint32_t)owner_base;
+    uint32_t *owner = gpuPhysics.partial_stage + owner_base;
+    for (size_t p = 0; p < particles; ++p) owner[p * 2u] = UINT32_MAX;
+    for (int body_id = 0; body_id < amrBodyCount; ++body_id) {
+        const AmrBody *body = &amrBodies[body_id];
+        if (!body->valid || body->lifecycle != AMR_BODY_ACTIVE) continue;
+        for (int slot = 0; slot < body->leaf_capacity; ++slot) {
+            int world = body->leaf_voxel_ids[slot];
+            if (world < 0 || world >= voxel_count) continue;
+            int leaf_stage = gpuPhysics.world_to_dynamic[world];
+            if (leaf_stage < 0) return false;
+            for (int corner = 0; corner < 8; ++corner) {
+                ptrdiff_t pool = voxels[world].particles[corner] - particles_pool;
+                if (pool < 0 || pool >= particle_pool_count) return false;
+                int id = gpuPhysics.pool_to_compact[pool];
+                if (id < 0 || (size_t)id >= particles) return false;
+                if (owner[(size_t)id * 2u] == UINT32_MAX) {
+                    owner[(size_t)id * 2u] = (uint32_t)leaf_stage;
+                    owner[(size_t)id * 2u + 1u] = (uint32_t)corner;
+                }
+            }
+        }
+    }
+    gpuPhysics.partial_words = owner_base + particles * 2u;
     return relation_id == gpuPhysics.partial_relation_count && chunk_id == chunks &&
            gpuPhysics.partial_words <= words;
 }
@@ -954,7 +983,7 @@ static bool gpu_pack_world(void) {
                 const uint32_t *meta = gpuPhysics.partial_stage +
                                        (size_t)i * GPU_PARTIAL_NODE_WORDS;
                 const uint32_t *chunk_masks = gpuPhysics.partial_stage +
-                    gpuPhysics.partial_words - gpuPhysics.partial_constraint_capacity;
+                    gpuPhysics.partial_mask_base;
                 for (int begin = 0; begin < node->embedding_count;
                      begin += GPU_PARTIAL_WELD_CHUNK) {
                     if (!(chunk_masks[meta[142] + begin / GPU_PARTIAL_WELD_CHUNK] & mask))
@@ -2048,48 +2077,19 @@ static bool gpu_dispatch_amr(float sub_dt, bool use_deformation) {
            gpu_dispatch_indirect_offset(GPU_MODE_AMR_TOPOLOGY_APPLY,
                                         gpu_amr_active_indirect_offset()) &&
            gpu_dispatch(GPU_MODE_AMR_ACTIVE_CLEAR, 1);
-    for (int body_id = 0; ok && body_id < amrBodyCount; ++body_id) {
-      AmrBody *body = &amrBodies[body_id];
-      if (!body->valid || body->lifecycle != AMR_BODY_ACTIVE) continue;
-      for (int level = 0; ok && level < body->levels; ++level) {
-        int jobs = (int)gpuPhysics.partial_level_job_count[body_id][level];
-        if (jobs == 0) continue;
-        gpu_set_vgs_layer(gpuPhysics.dynamic_voxel_count + body->level_start[level],
-                          body->level_count[level]);
-        ok = gpu_dispatch(GPU_MODE_AMR_TRANSITION_CLEAR, particles) &&
-             gpu_dispatch(GPU_MODE_AMR_DORMANT_SCATTER, jobs) &&
-             gpu_dispatch(GPU_MODE_AMR_TRANSITION_APPLY, particles);
-      }
-    }
     gpu_set_vgs_layer(0, total_stage);
-    return ok && gpu_dispatch(GPU_MODE_FINALIZE_VOXELS, gpuPhysics.dynamic_voxel_count) &&
+    ok = ok && gpu_dispatch(GPU_MODE_FINALIZE_VOXELS, gpuPhysics.dynamic_voxel_count) &&
            gpu_dispatch(GPU_MODE_AMR_COMPILE, total_stage) &&
            gpu_dispatch(GPU_MODE_AMR_PREPARE_INDIRECT, 1) &&
            gpu_dispatch_indirect_offset(GPU_MODE_AMR_MASS_SCATTER,
                                         gpu_amr_active_indirect_offset()) &&
            gpu_dispatch(GPU_MODE_AMR_COMPACT, particles) &&
            gpu_dispatch(GPU_MODE_AMR_PREPARE_INDIRECT, 1);
-}
-
-// CPU rendering, gameplay queries, and sleep/snap still inspect fine leaf
-// poses. Materialize those derived poses once per frame while their consumers
-// move to terminal-cell data; physics substeps do not need them.
-static bool gpu_dispatch_amr_frame_snapshot(void) {
-    if (!gpu_resident_amr_enabled()) return true;
-    int particles = gpuPhysics.particle_slot_capacity;
-    for (int body_id = 0; body_id < amrBodyCount; ++body_id) {
-        AmrBody *body = &amrBodies[body_id];
-        if (!body->valid || body->lifecycle != AMR_BODY_ACTIVE) continue;
-        for (int level = 0; level < body->levels; ++level) {
-            gpu_set_vgs_layer(gpuPhysics.dynamic_voxel_count + body->level_start[level],
-                              body->level_count[level]);
-            if (!gpu_dispatch(GPU_MODE_AMR_TRANSITION_CLEAR, particles) ||
-                !gpu_dispatch(GPU_MODE_AMR_DORMANT_FULL_SNAPSHOT,
-                              body->level_count[level]) ||
-                !gpu_dispatch(GPU_MODE_AMR_TRANSITION_APPLY, particles)) return false;
-        }
-    }
-    return true;
+    // Remassing must finish before selecting dormant targets.  A single gather
+    // covers both full and partial ancestors and every unique fine corner.
+    return ok && gpu_dispatch(GPU_MODE_AMR_TRANSITION_CLEAR, particles) &&
+           gpu_dispatch(GPU_MODE_AMR_DORMANT_SCATTER, gpuPhysics.compact_count) &&
+           gpu_dispatch(GPU_MODE_AMR_TRANSITION_APPLY, particles);
 }
 
 static bool gpu_rebuild_topology_if_needed(void) {
@@ -2160,7 +2160,6 @@ static int gpu_physics_steps(float dt, int fixed_steps, int substeps) {
         }
         if (ok) ok = gpu_rebuild_topology_if_needed();
     }
-    if (ok) ok = gpu_dispatch_amr_frame_snapshot();
     gpuPhysics.dispatch_ms += (GetTime() - dispatch_started) * 1000.0;
 #if defined(__APPLE__) && defined(FPS_GPU_METAL)
     bool batch_finished = fps_metal_end_batch();

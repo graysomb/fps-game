@@ -91,6 +91,10 @@ typedef struct DebugRunState {
     bool adaptive_cube_drop;
     bool amr_multiple_groups_test;
     bool amr_gameplay_lifecycle_test;
+    bool forerunner_collapse_test;
+    float dormant_weld_max_error;
+    int dormant_weld_unresolved_peak;
+    int dormant_weld_samples;
     bool amr_gameplay_body_seen;
     bool amr_gameplay_edit_done;
     bool amr_gameplay_rebuilt;
@@ -322,6 +326,7 @@ static bool debug_setup_dynamic_freefall(DebugRunState *state);
 static bool debug_setup_creative_reset_cache(DebugRunState *state);
 static bool debug_setup_activation_floating(DebugRunState *state);
 static bool debug_setup_amr_gameplay_lifecycle(DebugRunState *state);
+static bool debug_setup_forerunner_collapse(DebugRunState *state);
 static bool debug_setup_sleep_wake_floating(DebugRunState *state);
 static bool debug_setup_sleep_snap_original(DebugRunState *state);
 static bool debug_setup_sleep_snap_no_rebuild(DebugRunState *state);
@@ -369,6 +374,7 @@ static const DebugScenarioDefinition debugScenarios[] = {
     { "creative-reset-cache", "Creative reset invalidates cached static render and collision surfaces", debug_setup_creative_reset_cache, 60, 60 },
     { "activation-floating", "Static cluster activated while unsupported", debug_setup_activation_floating, 60, 60 },
     { "amr-gameplay-lifecycle", "Gameplay activation, edit rebuild, and reset of one AMR body", debug_setup_amr_gameplay_lifecycle, 60, 60 },
+    { "forerunner-collapse", "Activate a generated Forerunner Crucible pedestal and lintel as AMR, then collapse it", debug_setup_forerunner_collapse, 360, 60 },
     { "sleep-wake-floating", "Supported cluster sleeps, loses support, then activates", debug_setup_sleep_wake_floating, 60, 60 },
     { "sleep-snap-original", "A calm 4x4x6 pillar near its original pose snaps back to static", debug_setup_sleep_snap_original, 60, 60 },
     { "tall-pillar-snap", "Top half of a tall pillar settles and restores to static", debug_setup_tall_pillar_snap, 120, 60 },
@@ -1327,8 +1333,10 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
             ++sample.tagged_dynamic;
             bool embedded = vgsHierarchy.adaptive && !voxel->simulate_dofs &&
                 cpu_partial_relation_for_particle(voxel->particles[0],NULL)!=NULL;
-            if (voxel->vgs_active && (!vgsHierarchy.adaptive ||
-                                      voxel->simulate_dofs || embedded))
+            bool amr_fine = vgsHierarchy.adaptive &&
+                (!debugAdaptiveOctree || debugUseGameplayAmrRendering);
+            if (voxel->vgs_active && (amr_fine ||
+                (!vgsHierarchy.adaptive || voxel->simulate_dofs || embedded)))
                 ++sample.tagged_rendered;
         }
         else ++sample.tagged_static;
@@ -1375,10 +1383,9 @@ static DebugSample debug_collect_sample(const char *phase, int step, float initi
     }
     if (vgsHierarchy.adaptive)
         for (int i = 0; i < vgsHierarchy.node_count; ++i)
-            if ((debugUseGameplayAmrRendering
-                    ? (vgsHierarchy.nodes[i].active &&
-                       vgsHierarchy.nodes[i].occupancy == VGS_OCCUPANCY_FULL)
-                    : vgs_node_constraints_enabled(&vgsHierarchy.nodes[i])) &&
+            if (vgsHierarchy.nodes[i].body_id < 0 &&
+                !debugUseGameplayAmrRendering &&
+                vgs_node_constraints_enabled(&vgsHierarchy.nodes[i]) &&
                 !vgs_node_has_active_children(&vgsHierarchy.nodes[i]) &&
                 vgsHierarchy.nodes[i].occupancy != VGS_OCCUPANCY_PARTIAL) ++sample.tagged_rendered;
     int centroid_count = cube_dynamic_only ? sample.tagged_dynamic : sample.tagged_voxels;
@@ -2665,9 +2672,10 @@ static void debug_record_partial_weld_workload(DebugRunState *state, int step)
     int parents = 0, chunks = 0, rows = 0;
     bool gpu = physics_backend_is_gpu(physicsBackend.active) &&
                gpuPhysics.partial_stage &&
-               gpuPhysics.partial_words >= gpuPhysics.partial_constraint_capacity;
+               vgsHierarchy.node_count > 0 &&
+               gpuPhysics.partial_mask_base <= gpuPhysics.partial_words;
     const uint32_t *chunk_masks = gpu ? gpuPhysics.partial_stage +
-        gpuPhysics.partial_words - gpuPhysics.partial_constraint_capacity : NULL;
+        gpuPhysics.partial_mask_base : NULL;
     for (int i = 0; i < vgsHierarchy.node_count; ++i) {
         const VgsHierarchyNode *node = &vgsHierarchy.nodes[i];
         if (!node->partial_coarsenable) continue;
@@ -3378,6 +3386,63 @@ static bool debug_setup_amr_gameplay_lifecycle(DebugRunState *state)
     // the hierarchy through the ordinary frame-boundary gameplay registry.
     state->amr_gameplay_lifecycle_test = true;
     state->platform_lifecycle_test = true;
+    return true;
+}
+
+static void debug_plot_forerunner_collapse_voxel(int gx, int gy, int gz, Color color)
+{
+    addVoxelAt(gx, gy, gz, color);
+    int world = table_get_static_only(grid_to_world_g(gx), gy, grid_to_world_g(gz));
+    if (world >= 0 && world < voxel_count)
+        voxels[world].debugClusterTag = DEBUG_TEST_TAG;
+}
+
+static bool debug_setup_forerunner_collapse(DebugRunState *state)
+{
+    debug_reset_world();
+    pbdSolidVoxelSize = VOXEL_SIZE;
+    state->forerunner_collapse_test = true;
+    state->effective_pbd_size = VOXEL_SIZE;
+    state->expected_static_leftovers = 0;
+
+    ForerunnerPlan plan = generate_forerunner_structure(
+        1337, FORERUNNER_ARCHETYPE_CRUCIBLE, FORERUNNER_STAGE_APEX);
+    int core = -1;
+    for (int i = 0; i < plan.node_count; ++i)
+        if (plan.nodes[i].type == FORERUNNER_PRIM_GRAVITY_CORE) core = i;
+    if (core < 1 || core + 1 >= plan.node_count ||
+        plan.nodes[core - 1].type != FORERUNNER_PRIM_PYLON ||
+        plan.nodes[core + 1].type != FORERUNNER_PRIM_LINTEL) {
+        debug_add_failure(state, "Forerunner Crucible has no pedestal/core/lintel group");
+        return false;
+    }
+    ForerunnerPlan structure = {0};
+    structure.node_count = 3;
+    for (int i = 0; i < 3; ++i) structure.nodes[i] = plan.nodes[core - 1 + i];
+    int center = (int)(FLOOR_SIZE / VOXEL_SIZE);
+    rasterize_forerunner_plan(&structure, center, center, 12,
+                              debug_plot_forerunner_collapse_voxel);
+    state->expected_voxels = debug_count_tagged(DEBUG_TEST_TAG, 0);
+    if (state->expected_voxels < 100 || state->expected_voxels > AMR_MAX_BODY_LEAVES) {
+        debug_add_failure(state, "Forerunner structure has %d static voxels",
+                          state->expected_voxels);
+        return false;
+    }
+    debug_track_tagged_cells(state, DEBUG_TEST_TAG);
+    debug_rebuild_world_state();
+    state->camera.position = (Vector3){18.0f, 18.0f, 20.0f};
+    state->camera.target = (Vector3){0.0f, 10.0f, 0.0f};
+    state->camera.fovy = 55.0f;
+    debug_capture(state, "phase-01-static-forerunner-core.png", "static-forerunner-core", 0);
+    int seed = debug_find_tagged_voxel(DEBUG_TEST_TAG, true);
+    state->activation_succeeded = seed >= 0 &&
+        activate_static_voxel_for_tether(seed, 0, 1.0f);
+    if (!state->activation_succeeded) {
+        debug_add_failure(state, "Forerunner core activation failed");
+        return false;
+    }
+    rebuild_static_hash_if_dirty();
+    debug_set_initial_centroid(state);
     return true;
 }
 
@@ -5038,6 +5103,45 @@ static uint64_t debug_tagged_static_identity_signature(int tag)
 
 static void debug_validate_step(DebugRunState *state, int step)
 {
+    if (state->forerunner_collapse_test && step > 0 && step % 60 == 0 &&
+        vgsHierarchy.adaptive) {
+        float error = 0.0f;
+        int unresolved = 0;
+        if (!vgs_hierarchy_evaluate_dormant_particles(false, &error, &unresolved))
+            debug_add_failure(state, "step %d: dormant weld coverage check failed", step);
+        state->dormant_weld_samples++;
+        state->dormant_weld_max_error = fmaxf(state->dormant_weld_max_error, error);
+        if (unresolved > state->dormant_weld_unresolved_peak)
+            state->dormant_weld_unresolved_peak = unresolved;
+        if (unresolved || error > 0.01f)
+            debug_add_failure(state,
+                "step %d: dormant weld unresolved=%d max error=%.6g m",
+                step, unresolved, (double)error);
+    }
+    if (state->forerunner_collapse_test && step > 0 && step % 60 == 0 &&
+        getenv("FPS_AMR_SHAPE_TRACE")) {
+        int count[3] = {0}, over[3] = {0};
+        float worst[3] = {0};
+        for (int i = 0; i < voxel_count; ++i) {
+            Voxel *v = &voxels[i];
+            if (!v->simulate || !v->vgs_active) continue;
+            bool owned = v->amr_body_id >= 0 && v->amr_body_id < amrBodyCount &&
+                         amrBodies[v->amr_body_id].valid &&
+                         amrBodies[v->amr_body_id].lifecycle == AMR_BODY_ACTIVE;
+            int category = !owned ? 2 : (v->simulate_dofs ? 1 : 0);
+            Vector3 corners[8];
+            for (int c = 0; c < 8; ++c) corners[c] = v->particles[c]->pos;
+            VgsDeformation d = measure_vgs_deformation(corners, v->rest_edge);
+            float measure = fmaxf(d.max_abs_strain, d.max_abs_shear);
+            ++count[category];
+            over[category] += measure > 0.2f;
+            worst[category] = fmaxf(worst[category], measure);
+        }
+        fprintf(stderr,"amr-shape step=%d bodies=%d dormant=%d/%d/%g active=%d/%d/%g other=%d/%d/%g\n",
+                step, amrBodyCount,
+                count[0],over[0],worst[0],count[1],over[1],worst[1],
+                count[2],over[2],worst[2]);
+    }
     debug_validate_all_sim_particles(state, step);
     if (state->swarmer_wall_test) {
         Player *bot = &players[state->enemy_bot_index];
@@ -5212,17 +5316,20 @@ static void debug_validate_step(DebugRunState *state, int step)
 #if defined(GRAPHICS_API_OPENGL_43) || (defined(__APPLE__) && defined(FPS_GPU_METAL))
         if (state->arbitrary_shape_drop && step == 1 &&
             physics_backend_is_gpu(physicsBackend.active)) {
-            size_t mask_base = gpuPhysics.partial_words -
-                               gpuPhysics.partial_constraint_capacity;
+            size_t mask_base = gpuPhysics.partial_mask_base;
             size_t expected_base =
                 (size_t)vgsHierarchy.node_count * GPU_PARTIAL_NODE_WORDS +
                 (size_t)gpuPhysics.partial_relation_count * GPU_PARTIAL_REL_WORDS +
                 (size_t)gpuPhysics.compact_count + 1u +
                 (size_t)gpuPhysics.partial_relation_count +
                 gpuPhysics.partial_global_job_start +
-                gpuPhysics.partial_global_job_count;
-            if (gpuPhysics.partial_words < gpuPhysics.partial_constraint_capacity ||
-                mask_base != expected_base) {
+                gpuPhysics.partial_global_job_count + 1u;
+            if (mask_base == 0 ||
+                mask_base != expected_base ||
+                gpuPhysics.partial_stage[mask_base - 1u] !=
+                    mask_base + gpuPhysics.partial_constraint_capacity ||
+                gpuPhysics.partial_words != gpuPhysics.partial_stage[mask_base - 1u] +
+                    (size_t)gpuPhysics.compact_count * 2u) {
                 debug_add_failure(state, "partial weld chunk-mask layout mismatch");
             } else {
                 bool culled_single_child = false;
@@ -5858,6 +5965,19 @@ static void debug_validate_step(DebugRunState *state, int step)
             state->hinge_broken = !voxels[lower_idx].glued_faces[2] ||
                                   !voxels[upper_idx].glued_faces[3];
         }
+    }
+    if (state->forerunner_collapse_test && step == 1) {
+        int active_bodies = 0, owned_leaves = 0;
+        for (int body_id = 0; body_id < amrBodyCount; ++body_id)
+            if (amrBodies[body_id].valid &&
+                amrBodies[body_id].lifecycle == AMR_BODY_ACTIVE) {
+                ++active_bodies;
+                owned_leaves += amrBodies[body_id].leaf_count;
+            }
+        if (active_bodies != 1 || owned_leaves != state->expected_voxels)
+            debug_add_failure(state,
+                "Forerunner activation produced %d AMR bodies and %d/%d leaves",
+                active_bodies, owned_leaves, state->expected_voxels);
     }
     if (state->amr_gameplay_lifecycle_test) {
         if (step == 1) {
@@ -6567,6 +6687,11 @@ static bool debug_write_report(DebugRunState *state)
     fprintf(file, "  \"fallback\": %s,\n  \"fallbackReason\": ",
             physicsBackend.sticky_fallback ? "true" : "false");
     debug_write_json_string(file, physicsBackend.fallback_reason);
+    if (state->forerunner_collapse_test)
+        fprintf(file,
+                ",\n  \"dormantWeld\": {\"samples\": %d, \"unresolvedPeak\": %d, \"maxPositionErrorM\": %.9g}",
+                state->dormant_weld_samples, state->dormant_weld_unresolved_peak,
+                (double)state->dormant_weld_max_error);
     fprintf(file,
             ",\n  \"activationSucceeded\": %s,\n  \"sleepingConversionSucceeded\": %s,\n"
             "  \"sleepSnapOriginalTest\": %s,\n  \"sleepSnapActiveObserved\": %s,\n"

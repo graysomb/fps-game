@@ -438,6 +438,11 @@ Available scenarios are:
   verifies frame-boundary AMR discovery and finest-leaf ownership, removes one leaf
   through the gameplay voxel removal path, verifies transactional body replacement,
   then checks that a world reset releases all bodies, nodes, histories, and particles.
+* `forerunner-collapse`: rasterizes the generated Crucible pedestal, gravity core, and
+  smaller lintel as one static structure, activates it through the gameplay tether
+  path, and drops the resulting AMR body until the lintel crumples on impact. Run
+  with `--physics=gpu --debug-scenario=forerunner-collapse --debug-steps=360
+  --debug-gif --debug-gif-fps=20`; set `FPS_DEBUG_GIF_ALL_FRAMES=1` to keep every frame.
 * `amr-atomic-snap`: checks the full 32³ activation admission limit, rejects a
   33-cell extent, and restores a calm supported AMR body to static atomically.
 * `sleep-wake-floating`: sleeps a supported dynamic cluster, removes its support, then
@@ -600,8 +605,8 @@ Available scenarios are:
 * `adaptive-32-corner-drop`: runs the same corner-drop setup with a 32×32×32
   cube, 0.5 m finest voxels, and the same adaptive solver settings.
 * `adaptive-cube-gameplay-drop`: uses the ordinary adaptive cube drop with the
-  gameplay renderer, so a full terminal appears as one coarse cube while
-  occupied partial terminals remain fine voxels.
+  gameplay renderer. AMR bodies draw their occupied, unbroken fine voxels at
+  every refinement level; dormant fine positions are reconstructed once per frame.
   Resident Metal AMR reads back only active voxel state when the active list is
   sparse and the topology did not change during the frame. Set
   `FPS_AMR_FULL_STATE_READBACK=1` to force bulk state readback for comparison;
