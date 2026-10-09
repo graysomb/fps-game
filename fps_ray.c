@@ -552,7 +552,8 @@ static inline bool is_player_bot(int player_index) {
 #define TURN_ACCELERATION 400.0f
 #define TURN_FRICTION 400.0f
 #define PLAYER_RADIUS   0.5f
-#define FLOOR_SIZE     20.0f*1.0f    // half-size of floor in world units
+static float worldFloorHalfSize=20.0f;
+#define FLOOR_SIZE worldFloorHalfSize // Runtime bounds, shared by movement and physics.
 #define MAX_STATIC_COLLISION_NEIGHBORS 64
 #define PLAYER_SIZE 0.5f
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
@@ -9028,6 +9029,7 @@ static void reset_players_for_creative(void) {
 }
 
 static void ResetCreative(void) {
+    worldFloorHalfSize=20.0f;
     creativeModeActive = true;
     for (int i = 0; i < MAX_PLAYERS; ++i) {
         creativeBrushSpan[i] = 3;
@@ -9044,6 +9046,8 @@ static void ResetCreative(void) {
 }
 
 static void ResetGame(void) {
+    worldFloorHalfSize=(!useCustomMap && (currentWorldType==WORLD_TYPE_CROSSCUT ||
+        (gameMode==GAME_MODE_FIREFIGHT && (firefightFoundry||firefightPractice))))?32.0f:20.0f;
     if(netTransport.role!=NET_ROLE_OFFLINE && gameMode==GAME_MODE_FIREFIGHT) gameMode=GAME_MODE_DEATHMATCH;
     if(netTransport.role==NET_ROLE_OFFLINE && gameMode!=GAME_MODE_FIREFIGHT) activePlayers=clamp_active_players(multiplayerActivePlayers);
     creativeModeActive = false;
@@ -13851,7 +13855,7 @@ static Vector3 pick_player_spawn(int player_index) {
         return random_clear_spawn(half,3,player_index);
     }
     if(gameMode==GAME_MODE_FIREFIGHT && (firefightFoundry||firefightPractice)) {
-        Vector3 pos=player_index<MAX_PLAYERS ? (Vector3){(float)(player_index%2)*3-1.5f,BASE_EYE_HEIGHT+2.0f,(float)(player_index/2)*3} : (Vector3){-18,BASE_EYE_HEIGHT,(float)(player_index%5-2)*2};
+        Vector3 pos=player_index<MAX_PLAYERS ? (Vector3){(float)(player_index%2)*3-1.5f,BASE_EYE_HEIGHT+2.0f,(float)(player_index/2)*3} : (Vector3){-28,BASE_EYE_HEIGHT,(float)(player_index%5-2)*2};
         return nudge_spawn_clear(pos,spawn_clear_half(player_index),0,player_index);
     }
 
@@ -17382,10 +17386,12 @@ static void scale_mesh_texcoords(Mesh *mesh, float scale_u, float scale_v) {
     }
 }
 
+static float worldVisualsHalfSize=20.0f;
 static void init_world_visuals(void) {
     if (worldVisualsReady) {
         return;
     }
+    worldVisualsHalfSize=FLOOR_SIZE;
     float floor_span = FLOOR_SIZE * 2.0f;
     float floor_repeat = 12.0f;
     float world_units_per_texture = floor_span / floor_repeat;
@@ -17430,22 +17436,23 @@ static void init_world_visuals(void) {
 
 static void draw_world_surfaces(void) {
     init_world_visuals();
-    DrawModel(worldFloorModel, (Vector3){ 0.0f, 0.0f, 0.0f }, 1.0f, WHITE);
+    float scale=FLOOR_SIZE/worldVisualsHalfSize;
+    DrawModel(worldFloorModel, (Vector3){ 0.0f, 0.0f, 0.0f }, scale, WHITE);
 
     float wall_height = FLOOR_SIZE * 2.0f;
     float wall_y = wall_height * 0.5f;
     float wall_offset = FLOOR_SIZE;
     DrawModelEx(worldWallModel, (Vector3){ 0.0f, wall_y, wall_offset },
-                (Vector3){ 1.0f, 0.0f, 0.0f }, -90.0f, (Vector3){ 1.0f, 1.0f, 1.0f }, WHITE);
+                (Vector3){ 1.0f, 0.0f, 0.0f }, -90.0f, (Vector3){ scale, scale, scale }, WHITE);
     DrawModelEx(worldWallModel, (Vector3){ 0.0f, wall_y, -wall_offset },
-                (Vector3){ 1.0f, 0.0f, 0.0f }, 90.0f, (Vector3){ 1.0f, 1.0f, 1.0f }, WHITE);
+                (Vector3){ 1.0f, 0.0f, 0.0f }, 90.0f, (Vector3){ scale, scale, scale }, WHITE);
     DrawModelEx(worldWallModel, (Vector3){ wall_offset, wall_y, 0.0f },
-                (Vector3){ 0.0f, 0.0f, 1.0f }, 90.0f, (Vector3){ 1.0f, 1.0f, 1.0f }, WHITE);
+                (Vector3){ 0.0f, 0.0f, 1.0f }, 90.0f, (Vector3){ scale, scale, scale }, WHITE);
     DrawModelEx(worldWallModel, (Vector3){ -wall_offset, wall_y, 0.0f },
-                (Vector3){ 0.0f, 0.0f, 1.0f }, -90.0f, (Vector3){ 1.0f, 1.0f, 1.0f }, WHITE);
+                (Vector3){ 0.0f, 0.0f, 1.0f }, -90.0f, (Vector3){ scale, scale, scale }, WHITE);
 
     DrawModelEx(worldCeilingModel, (Vector3){ 0.0f, wall_height, 0.0f },
-                (Vector3){ 1.0f, 0.0f, 0.0f }, 180.0f, (Vector3){ 1.0f, 1.0f, 1.0f }, WHITE);
+                (Vector3){ 1.0f, 0.0f, 0.0f }, 180.0f, (Vector3){ scale, scale, scale }, WHITE);
 }
 
 static void shutdown_world_visuals(void) {
@@ -18968,6 +18975,7 @@ static void net_send_world_to(int slot) {
     net_write_header(&writer, NET_MSG_WORLD_BEGIN, 0, netTransport.session_id, netServerTick);
     net_write_u32(&writer, (uint32_t)static_count);
     net_write_u8(&writer, netRequestedCreative ? 1 : 0);
+    net_write_f32(&writer, worldFloorHalfSize);
     net_transport_send(&netTransport, slot, FPS_NET_CHANNEL_WORLD, packet, writer.length, true);
 
     int cursor = 0;
@@ -19287,6 +19295,9 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
         netWorldReady = false;
     } else if (header.type == NET_MSG_WORLD_BEGIN) {
         (void)net_read_u32(&reader); netRequestedCreative = net_read_u8(&reader) != 0;
+        float extent=net_read_f32(&reader);
+        if(reader.failed || !isfinite(extent) || extent<20 || extent>32) return;
+        worldFloorHalfSize=extent;
         clear_world_voxels(); clear_pickups(); net_proxy_map_clear(); netWorldReady = false;
     } else if (header.type == NET_MSG_WORLD_STATIC) {
         uint16_t count = net_read_u16(&reader);

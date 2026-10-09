@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define FPS_NET_MAGIC 0x4650534eu /* "FPSN" */
-#define FPS_NET_PROTOCOL_VERSION 5u
+#define FPS_NET_PROTOCOL_VERSION 6u /* WORLD_BEGIN includes the arena half-size. */
 #define FPS_NET_DEFAULT_PORT 27015u
 #define FPS_NET_DISCOVERY_PORT 27016u
 #define FPS_NET_MAX_PACKET 1100u

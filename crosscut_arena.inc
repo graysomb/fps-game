@@ -4,16 +4,17 @@ static Vector3 crosscut_rotate(Vector3 p,int quarter) {
     return p;
 }
 static void crosscut_box(int q,float x0,float x1,float y0,float y1,float z0,float z1,Color c) {
+    x0*=1.5f;x1*=1.5f;z0*=1.5f;z1*=1.5f;
     Vector3 a=crosscut_rotate((Vector3){x0,y0,z0},q),b=crosscut_rotate((Vector3){x1,y1,z1},q);
     add_static_box_at_grid((int)roundf(fminf(a.x,b.x)/VOXEL_SIZE),(int)roundf(fmaxf(a.x,b.x)/VOXEL_SIZE)-1,
         (int)roundf(y0/VOXEL_SIZE),(int)roundf(y1/VOXEL_SIZE)-1,
         (int)roundf(fminf(a.z,b.z)/VOXEL_SIZE),(int)roundf(fmaxf(a.z,b.z)/VOXEL_SIZE)-1,c);
 }
 static Vector3 crosscut_spawn_point(int index) {
-    return crosscut_rotate((Vector3){index%2?-4.5f:4.5f,BASE_EYE_HEIGHT,15.5f},index/2);
+    return crosscut_rotate((Vector3){index%2?-6.75f:6.75f,BASE_EYE_HEIGHT,23.25f},index/2);
 }
 static Vector3 crosscut_supply_point(int index) {
-    return crosscut_rotate((Vector3){9,1,11},index);
+    return crosscut_rotate((Vector3){13.5f,1,16.5f},index);
 }
 static void buildCrosscut(void) {
     Color stone={190,184,159,255},support={236,132,43,255};
@@ -38,6 +39,15 @@ static void buildCrosscut(void) {
         crosscut_box(q,-.5f,.5f,0,3,13.5f,17,stone);
         crosscut_box(q,10,11,0,1,6,7,routes[q]);
         crosscut_box(q,11.5f,12.5f,0,1,6,7,stone);
+        /* Large roofed cutting sheds, open at both ends for flanking. */
+        crosscut_box(q,7,12,0,4.5f,2,2.5f,stone);
+        crosscut_box(q,7,12,0,4.5f,5,5.5f,stone);
+        crosscut_box(q,7,12,4.5f,5,2,5.5f,routes[q]);
+        /* Offset full-height cover breaks the outer diagonal sightlines. */
+        crosscut_box(q,12,15,0,3,13,13.5f,stone);
+        crosscut_box(q,14.5f,15,0,3,13.5f,16,stone);
+        crosscut_box(q,17,17.5f,0,3.5f,8,12,stone);
+        crosscut_box(q,3,4.5f,2.5f,4,9.5f,10.5f,routes[q]);
     }
     crosscut_box(0,-1.5f,1.5f,2,2.5f,-1.5f,1.5f,stone);
     for(int q=0;q<4;q++) crosscut_box(q,1,1.5f,0,2,1,1.5f,support);

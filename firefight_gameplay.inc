@@ -154,7 +154,7 @@ static bool ff_spawn_position(int slot, Vector3 *out) {
     for(int entrance=0;entrance<2;entrance++) {
         int side=(ffEntrance+entrance)%2 ? 1 : -1;
         for(int n=0;n<5;n++) {
-            Vector3 pos={(float)side*18.0f,BASE_EYE_HEIGHT, (float)(n-2)*2.0f};
+            Vector3 pos={(float)side*28.0f,BASE_EYE_HEIGHT, (float)(n-2)*3.0f};
             pos=nudge_spawn_clear(pos,spawn_clear_half(slot),4.0f,slot);
             if(spawn_position_clear_ex(pos,spawn_clear_half(slot),4.0f,slot)) { *out=pos; return true; }
         }
@@ -194,12 +194,13 @@ static void update_firefight_logic(float dt) {
         if(players[i].respawn_timer<=0) { living++; if(players[i].enemyType==ENEMY_TYPE_GOLIATH) goliaths++; }
         else if(slot<0) slot=i;
     }
-    if(slot<0 || living>=ff_cap(firefightHumans)) return;
+    int waveCap=ff_wave_cap(firefightWave,firefightHumans);
+    if(slot<0 || living>=waveCap) return;
     int type=-1;
     for(int n=0;n<3;n++) { int t=(ffSpawnOrdinal+n)%3; if(ffRemaining[t]>0 && (t!=2 || goliaths<2)) {type=t;break;} }
     if(type<0) return;
     int pack=type==ENEMY_TYPE_SWARMER?3:1;
-    for(int n=0;n<pack && ffRemaining[type]>0 && living<ff_cap(firefightHumans);n++) {
+    for(int n=0;n<pack && ffRemaining[type]>0 && living<waveCap;n++) {
         slot=-1;
         for(int i=MAX_PLAYERS;i<MAX_COMBATANTS;i++) if(players[i].respawn_timer>0) {slot=i;break;}
         if(slot<0) break;
@@ -213,5 +214,5 @@ static void update_firefight_logic(float dt) {
         ffRemaining[type]--; firefightEnemiesSpawned++; ffSpawnOrdinal++; living++;
     }
     ffEntrance=(firefightWave%5==4 || firefightWave%5==0)?1-ffEntrance:0;
-    ffSpawnTimer=2;
+    ffSpawnTimer=firefightWave<=2?4:2;
 }

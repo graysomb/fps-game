@@ -14,7 +14,16 @@ runs in linux and windows so far
 
 ## Couch sessions and Firefight
 
+Firefight ramps from swarmers to normals to Goliaths. Solo wave totals are
+3 swarmers; 6 swarmers; 6 swarmers plus 1 normal; 6 swarmers plus 2 normals and
+1 Goliath; then 9 swarmers plus 3 normals and 2 Goliaths. The first three waves
+cap simultaneous solo enemies at 2, 3, and 4 respectively, and the opening two
+waves space reinforcements four seconds apart. Totals scale with player count.
+
 Local Versus defaults to **Crosscut**, a symmetric quarry for 2–4 players.
+Crosscut and Foundry Holdout occupy 64×64-unit arenas, with larger structures,
+roofed side routes, and staggered full-height cover. Other worlds retain their
+original bounds. LAN peers must use the same build (protocol 6 includes map size).
 Use left/right in the lobby to cycle arenas; Tab or the top face button toggles
 the custom map slot selected in advanced setup. Crosscut is also world 9 there.
 Four raised terraces surround short bridges on orange breakable supports.

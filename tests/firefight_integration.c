@@ -26,6 +26,16 @@ static void test_down(int i) {
     assert(combatantLife[i]==LIFE_DOWNED);
 }
 
+static void capture_arena(const char *path) {
+    RenderTexture2D mapShot=LoadRenderTexture(1000,1000);
+    Camera3D mapCamera={.position={46,60,46},.target={0,0,0},.up={0,1,0},.fovy=48,.projection=CAMERA_PERSPECTIVE};
+    BeginTextureMode(mapShot);ClearBackground((Color){30,35,43,255});BeginMode3D(mapCamera);
+    DrawPlane((Vector3){0,0,0},(Vector2){64,64},(Color){74,77,72,255});
+    for(int v=0;v<voxel_count;v++) DrawCube(voxels[v].pos,VOXEL_SIZE,VOXEL_SIZE,VOXEL_SIZE,voxels[v].color);
+    EndMode3D();EndTextureMode();
+    Image mapImage=LoadImageFromTexture(mapShot.texture);ImageFlipVertical(&mapImage);
+    ExportImage(mapImage,path);UnloadImage(mapImage);UnloadRenderTexture(mapShot);
+}
 int main(int argc,char **argv) {
     if(!parse_physics_arguments(argc,argv))return 2;
     SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);
@@ -37,6 +47,11 @@ int main(int argc,char **argv) {
     multiplayerActivePlayers=4;firefightPractice=false;
     ResetGame();gameState=GAME_STATE_PLAYING;
     assert(activePlayers==16 && firefightHumans==4);
+    assert(FLOOR_SIZE==32);
+    /* Opening waves must actually spawn swarmers, not just label them easier. */
+    update_firefight_logic(2.1f);
+    for(int i=4;i<16;i++) if(players[i].respawn_timer<=0) assert(players[i].enemyType==ENEMY_TYPE_SWARMER);
+    ResetGame();
     for(int i=0;i<4;i++) assert(combatantLife[i]==LIFE_ALIVE);
     for(int i=4;i<16;i++) assert(players[i].respawn_timer>0);
     start_firefight_wave(5);
@@ -158,15 +173,16 @@ int main(int argc,char **argv) {
         }
     }
     int originalCount=voxel_count;
+    assert(FLOOR_SIZE==32 && originalCount<MAX_VOXELS);
     /* Cutting one isolated slab's feet must activate its debris locally. */
-    remove_static_voxels_in_region_recycle(-3,2,0,3,5,5);
-    assert(activate_static_voxels_near_region(-3,2,0,3,5,5,0));
+    remove_static_voxels_in_region_recycle(-5,4,0,3,8,8);
+    assert(activate_static_voxels_near_region(-5,4,0,3,8,8,0));
     bool slabDynamic=false;
-    for(int v=0;v<voxel_count;v++) if(voxels[v].simulate && fabsf(voxels[v].pos.x)<1.6f && voxels[v].pos.z>=2 && voxels[v].pos.z<4) slabDynamic=true;
+    for(int v=0;v<voxel_count;v++) if(voxels[v].simulate && fabsf(voxels[v].pos.x)<2.6f && voxels[v].pos.z>=3 && voxels[v].pos.z<6) slabDynamic=true;
     assert(slabDynamic);ResetGame();
     for(int phase=0;phase<2;phase++) {
         if(phase) {
-            for(int v=voxel_count-1;v>=0;v--) if(fabsf(voxels[v].pos.x)<9 && fabsf(voxels[v].pos.z)<9) remove_voxel_index(v);
+            for(int v=voxel_count-1;v>=0;v--) if(fabsf(voxels[v].pos.x)<13.5f && fabsf(voxels[v].pos.z)<13.5f) remove_voxel_index(v);
             init_static_hash();rebuild_all_voxel_surfaces();meshDirty=true;
         }
         RenderTexture2D views[MAX_PLAYERS]={0};int viewCount=0,vw=0,vh=0;
@@ -185,16 +201,9 @@ int main(int argc,char **argv) {
         for(int i=0;i<viewCount;i++)UnloadRenderTexture(views[i]);
     }
     ResetGame();
-    RenderTexture2D mapShot=LoadRenderTexture(1000,1000);
-    Camera3D mapCamera={.position={29,38,29},.target={0,0,0},.up={0,1,0},.fovy=48,.projection=CAMERA_PERSPECTIVE};
-    BeginTextureMode(mapShot);ClearBackground((Color){30,35,43,255});BeginMode3D(mapCamera);
-    DrawPlane((Vector3){0,0,0},(Vector2){40,40},(Color){74,77,72,255});
-    for(int v=0;v<voxel_count;v++) DrawCube(voxels[v].pos,VOXEL_SIZE,VOXEL_SIZE,VOXEL_SIZE,voxels[v].color);
-    EndMode3D();EndTextureMode();
-    Image mapImage=LoadImageFromTexture(mapShot.texture);ImageFlipVertical(&mapImage);
-    ExportImage(mapImage,"artifacts/crosscut-overview.png");UnloadImage(mapImage);UnloadRenderTexture(mapShot);
+    capture_arena("artifacts/crosscut-overview.png");
     /* Remove the crossing and verify all authored ground supplies/spawns survive. */
-    for(int v=voxel_count-1;v>=0;v--) if(fabsf(voxels[v].pos.x)<9 && fabsf(voxels[v].pos.z)<9) remove_voxel_index(v);
+    for(int v=voxel_count-1;v>=0;v--) if(fabsf(voxels[v].pos.x)<13.5f && fabsf(voxels[v].pos.z)<13.5f) remove_voxel_index(v);
     init_static_hash();
     for(int i=0;i<4;i++) {
         Vector3 p=pick_player_spawn(i);
@@ -206,6 +215,9 @@ int main(int argc,char **argv) {
     assert(currentWorldType==WORLD_TYPE_GREEK_TEMPLE && !couchReady[0]);
     testButtons[0][GAMEPAD_BUTTON_LEFT_FACE_LEFT]=true;couch_frame();memset(testButtons,0,sizeof(testButtons));
     assert(currentWorldType==WORLD_TYPE_CROSSCUT);
+    currentWorldType=WORLD_TYPE_TEST;ResetGame();assert(FLOOR_SIZE==20);
+    gameMode=GAME_MODE_FIREFIGHT;firefightFoundry=true;ResetGame();assert(FLOOR_SIZE==32);
+    capture_arena("artifacts/foundry-overview.png");
     puts("Crosscut: 2/3/4 seats, screened spawns, destruction fallback, rematch passed");
     shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();
     puts("Firefight integration passed");return 0;
