@@ -44,6 +44,21 @@ if glsl_slots != expected_slots:
 if not expected_slots.issubset(metal_slots):
     errors.append(f"Metal buffer slots differ: {sorted(metal_slots)}")
 
+# Combatant capacity is separate from the four local/network seats. Check both
+# uniform array declarations and the gold-tether offset/settling sentinel.
+c_uniforms = (ROOT / "physics_gpu_metal.h").read_text(encoding="utf-8")
+for name, source, declarations in (
+    ("GLSL", glsl_text, ("uPlayerPosHalf[16]", "uTetherTarget[16]")),
+    ("Metal", metal_text, ("players[16]", "tether_targets[16]")),
+    ("C", c_uniforms, ("players[16][4]", "tether_targets[16][4]")),
+):
+    for declaration in declarations:
+        if declaration not in source:
+            errors.append(f"{name} missing combatant uniform {declaration}")
+for name, source in (("GLSL", glsl_text), ("Metal", metal_text)):
+    if "owner >= 16 ? owner - 16" not in source:
+        errors.append(f"{name} gold tether offset must be 16")
+
 if errors:
     print("\n".join(errors), file=sys.stderr)
     raise SystemExit(1)

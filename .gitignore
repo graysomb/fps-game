@@ -21,4 +21,5 @@ fps_ray.log
 !.build/bin/fps_ray_cpu.exe
 !.build/bin/fps_ray_gpu.exe
 artifacts/
+couch_settings.cfg
 debug-artifacts/

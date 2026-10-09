@@ -69,8 +69,8 @@ uniform float uTetherSpring;
 uniform float uTetherDamping;
 uniform int uBreakDampFrames;
 uniform float uRestGridStep;
-uniform vec4 uPlayerPosHalf[4]; // xyz position, w < 0 when inactive
-uniform vec4 uTetherTarget[4];
+uniform vec4 uPlayerPosHalf[16]; // xyz position, w < 0 when inactive
+uniform vec4 uTetherTarget[16];
 
 const int MODE_RESET = 0;
 const int MODE_INTEGRATE = 1;
@@ -148,8 +148,8 @@ void integrateParticle(uint gid) {
         p.predicted_base_inv_mass.xyz += p.velocity.xyz * uDt;
         p.predicted_base_inv_mass.y -= uGravity * uDt * uDt;
         int owner = tetherOwner[id];
-        int tetherPlayer = owner >= 4 ? owner - 4 : owner;
-        if (tetherPlayer >= 0 && tetherPlayer < 4) {
+        int tetherPlayer = owner >= 16 ? owner - 16 : owner;
+        if (tetherPlayer >= 0 && tetherPlayer < 16) {
             float scale = uTetherTarget[tetherPlayer].w;
             vec3 accel = uTetherTarget[tetherPlayer].xyz * uTetherSpring * scale;
             p.predicted_base_inv_mass.xyz += accel * uDt * uDt;
@@ -188,7 +188,7 @@ void pairCollisions(uint gid) {
 
     vec3 scenePos = a.predicted_base_inv_mass.xyz;
     float sceneRadius = a.pos_radius.w;
-    for (int playerIndex = 0; playerIndex < uActivePlayers && playerIndex < 4; ++playerIndex) {
+    for (int playerIndex = 0; playerIndex < uActivePlayers && playerIndex < 16; ++playerIndex) {
         if (uPlayerPosHalf[playerIndex].w < 0.0) continue;
         float halfSize = uPlayerPosHalf[playerIndex].w;
         vec3 nearest = clamp(scenePos, uPlayerPosHalf[playerIndex].xyz - vec3(halfSize),
@@ -413,7 +413,7 @@ void staticCollisions(uint gid) {
         (pos.xz - p.prev_inv_mass.xz) * 0.05;
     pos.xz = clamp(pos.xz, vec2(-terrainLimit), vec2(terrainLimit));
     const float eps = 1e-6;
-    for (int i = 0; i < uActivePlayers && i < 4; ++i) {
+    for (int i = 0; i < uActivePlayers && i < 16; ++i) {
         if (uPlayerPosHalf[i].w < 0.0) continue;
         float halfSize = uPlayerPosHalf[i].w;
         vec3 nearest = clamp(pos, uPlayerPosHalf[i].xyz - vec3(halfSize),
@@ -470,8 +470,8 @@ void gatherBreakMask(uint gid) {
     }
     for (int i=0; i<8; ++i) {
         uint id=voxelParticle(v,i);
-        // Owners 4..7 are held gold groups; 8 is the short release settling window.
-        if (id<uint(gpuControl.x) && tetherOwner[id]>=4 && tetherOwner[id]<=8) return;
+        // Owners 16..31 are held gold groups; 32 is the short release settling window.
+        if (id<uint(gpuControl.x) && tetherOwner[id]>=16 && tetherOwner[id]<=32) return;
     }
     vec3 p[8];
     for (int i=0; i<8; ++i) {

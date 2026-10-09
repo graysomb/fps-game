@@ -12,6 +12,56 @@ runs in linux and windows so far
 
 # Raylib Split-Screen FPS with Voxel PBD Physics
 
+## Couch sessions and Firefight
+
+The offline menu offers Firefight, Local Versus, Learn Combat, controller settings,
+and the existing advanced world/LAN tools. Press Start on a controller to assign
+player one, then use the D-pad or left stick and bottom face button to navigate.
+Additional controllers join the lobby with Start. `K` adds a second keyboard seat;
+keyboard seats ready with Enter and Right Shift. Up to four humans can play
+alongside twelve active firefight enemies. Controller disconnects pause offline
+play; reconnect or press Start on an unused controller to explicitly reassign it.
+
+Firefight defaults to five authored waves on **Foundry Holdout**, with a victory
+screen and rematch. Left/right in the lobby selects Endless Survival; in Endless,
+Tab or the top face button switches between Foundry and the current advanced map.
+The arena has a raised holdout, two stair approaches, a lower circulation route,
+and two heavy slabs on orange breakable supports. Match destruction persists
+between waves; rematching rebuilds the arena.
+
+In cooperative Firefight, lethal damage downs a player for 15 seconds. Hold LB
+(keyboard P1 `X`, P2 comma) within two units and clear sight for three seconds to
+revive them. Completing a revive costs 25 Matter and restores 35 Matter plus two
+seconds of invulnerability. You must have more than 25 Matter to revive. Taking
+damage, moving out of range, or releasing cancels progress without charging.
+Bleeding out spends one of three shared respawn reserves; exhausted players wait
+for the next wave. Solo players use reserves directly. Clearing a wave restores
+the team, and every second cleared wave awards a reserve.
+
+Preparation lasts 20 seconds. Vote for cheaper building (5 Matter), improved
+harvesting (15 instead of 10 Matter), or 25% more tether throw impulse. The team
+gets one bonus for the next wave; ties default to cheaper building. Everyone can
+ready to skip the remaining break after five seconds. Top face (keyboard `V`/`N`)
+toggles the vote panel so the normal combat bindings remain available for building
+and harvesting. The vote panel uses D-pad left/right and bottom face to ready;
+keyboard players use their look keys and jump.
+
+Learn Combat teaches harvesting, exposure, melee finishing, and debris finishing
+through completed actions. Leave through the pause menu at any time. Per-seat
+sensitivity, deadzone, and invert-Y settings are saved in `couch_settings.cfg`.
+The new Firefight modes are local-only; existing LAN PvP and creative protocols
+remain four-player modes.
+
+After building raylib with `build.ps1`, run `tools/validate_firefight.ps1` and
+`tools/validate_firefight.ps1 -Gpu` to build and check CPU/OpenGL variants. These
+also produce `.build/couch/fps_ray_cpu.exe` and
+`.build/couch/fps_ray_gpu.exe`, alongside the matching shaders and runtime. Run
+these from `.build/couch` (or run the normal game from the repository root).
+Tests cover wave scaling, votes, combatant
+capacity, revives/reserves, solo play, tutorial progression, rendering layouts,
+and returning to PvP. `tools/validate_gpu_layout.py` checks shared shader layouts;
+Metal execution and real-controller couch play still require platform/device QA.
+
 This project is a split-screen First Person Shooter (FPS) prototype built using [Raylib](https://www.raylib.com/). It features a custom Voxel-based Position Based Dynamics (PBD) physics engine that supports destructible environments, multiscale voxels, and structural integrity.
 
 ## Physics Engine Overview

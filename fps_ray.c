@@ -410,6 +410,12 @@ static int firefightKillsTotal = 0;
 static float firefightIntermissionTimer = 0.0f;
 static float firefightWaveBannerTimer = 0.0f;
 static FirefightWaveState firefightWaveState = FIREFIGHT_STATE_ACTIVE;
+static int firefightHumans = 1;
+static bool firefightEndless = false;
+static bool firefightFoundry = true;
+static bool firefightPractice = false;
+static int practiceStep = 0;
+
 
 // Win condition globals
 static int winningScore = 7;
@@ -466,6 +472,9 @@ static void update_draw_confetti(void) {
 
 // Input type enum
 #define MAX_PLAYERS 4
+#define MAX_COMBATANTS 16
+#include "firefight_rules.h"
+_Static_assert(MAX_PLAYERS == FF_SEATS && MAX_COMBATANTS == FF_ACTORS, "Firefight capacity mismatch");
 typedef enum {
     INPUT_TYPE_KEYBOARD,
     INPUT_TYPE_GAMEPAD,
@@ -473,7 +482,7 @@ typedef enum {
     INPUT_TYPE_BOT_MEDIUM,
     INPUT_TYPE_BOT_HARD
 } InputType;
-static InputType playerInput[MAX_PLAYERS] = {
+static InputType playerInput[MAX_COMBATANTS] = {
     INPUT_TYPE_KEYBOARD,
     INPUT_TYPE_KEYBOARD,
     INPUT_TYPE_GAMEPAD,
@@ -487,7 +496,7 @@ static InputType multiplayerPlayerInput[MAX_PLAYERS] = {
 };
 
 static inline bool is_player_bot(int player_index) {
-    if (player_index < 0 || player_index >= MAX_PLAYERS) return false;
+    if (player_index < 0 || player_index >= MAX_COMBATANTS) return false;
     return (playerInput[player_index] == INPUT_TYPE_BOT_EASY ||
             playerInput[player_index] == INPUT_TYPE_BOT_MEDIUM ||
             playerInput[player_index] == INPUT_TYPE_BOT_HARD);
@@ -638,7 +647,7 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define TETHER_THROW_IMPULSE 50.0f
 #define TETHER_THROW_CCD_MIN_SPEED 30.0f
 #define TETHER_THROW_CCD_FRAMES 30
-#define TETHER_THROW_CCD_SNAPSHOT_CAPACITY (MAX_PLAYERS * TETHER_THROW_CCD_FRAMES)
+#define TETHER_THROW_CCD_SNAPSHOT_CAPACITY (MAX_COMBATANTS * TETHER_THROW_CCD_FRAMES)
 #define TETHER_THROW_CCD_SKIN (VOXEL_SIZE * 0.01f)
 #define TETHER_THROW_CCD_RESTITUTION 0.15f
 #define TETHER_THROW_IMPACT_LIFETIME_FRAMES 8
@@ -758,8 +767,37 @@ typedef struct {
     EnemyType enemyType;
     float contactDamageTimer;
 } Player;
-static Player players[MAX_PLAYERS];
-static WeaponVisual weaponVisuals[MAX_PLAYERS];
+static Player players[MAX_COMBATANTS];
+static CombatantLifeState combatantLife[MAX_COMBATANTS];
+static int combatantTeam[MAX_COMBATANTS];
+static float bleedTimer[MAX_PLAYERS], reviveProgress[MAX_PLAYERS];
+static int reviveOwner[MAX_PLAYERS], reviveCount[MAX_PLAYERS];
+static int prepVotes[MAX_PLAYERS];
+static bool prepReady[MAX_PLAYERS];
+static bool prepMenuOpen[MAX_PLAYERS];
+static TeamUpgrade teamUpgrade = UPGRADE_NONE;
+typedef struct { int device; float sensitivity, deadzone; bool invert; } LocalPlayerSeat;
+static LocalPlayerSeat localSeats[MAX_PLAYERS] = {{0,1,.15f,false},{1,1,.15f,false},{2,1,.15f,false},{3,1,.15f,false}};
+static int seat_device(int i) { return i>=0 && i<MAX_PLAYERS ? localSeats[i].device : -1; }
+static bool ff_bonus(int i, TeamUpgrade bonus) { return gameMode==GAME_MODE_FIREFIGHT && i>=0 && i<firefightHumans && teamUpgrade==bonus; }
+static float ff_harvest_amount(int i) {
+    if(gameMode==GAME_MODE_FIREFIGHT && i>=0 && i<firefightHumans)
+        return ff_bonus(i,UPGRADE_HARVEST)?15.0f:10.0f;
+    return MATTER_MELEE_HARVEST;
+}
+static void ff_restore_human(int i, float matter);
+static void ff_wave_complete(void);
+static void ff_resolve_death(int i);
+static void ff_update_coop(float dt);
+static void ff_draw_hud(int i, int w, int h);
+static bool couch_frame(void);
+static void couch_load_settings(void);
+static bool ff_input_blocked(int i) {
+    return gameMode==GAME_MODE_FIREFIGHT && i<firefightHumans &&
+        firefightWaveState==FIREFIGHT_STATE_INTERMISSION && prepMenuOpen[i];
+}
+
+static WeaponVisual weaponVisuals[MAX_COMBATANTS];
 static WeaponBloom weaponBlooms[MAX_PLAYERS];
 static bool weaponRenderingReady;
 
@@ -778,7 +816,7 @@ typedef struct {
     float launchTimer;
     float regenTimer;
 } GoliathState;
-static GoliathState goliathStates[MAX_PLAYERS];
+static GoliathState goliathStates[MAX_COMBATANTS];
 
 static const Vector3 goliathArmorOffsets[GOLIATH_MAX_ATTACHED] = {
     { 0.55f, 0.0f, 0.0f },
@@ -976,9 +1014,9 @@ static int tetherTag[MAX_VOXELS];
 static int tetherHoldClusterTag[MAX_VOXELS];
 static uint8_t goldReleaseGraceFrames[MAX_VOXELS];
 static int goldReleaseGraceActiveCount = 0;
-static Vector3 tetherTargetByPlayer[MAX_PLAYERS];
-static Vector3 tetherComByPlayer[MAX_PLAYERS];
-static float tetherScaleByPlayer[MAX_PLAYERS];
+static Vector3 tetherTargetByPlayer[MAX_COMBATANTS];
+static Vector3 tetherComByPlayer[MAX_COMBATANTS];
+static float tetherScaleByPlayer[MAX_COMBATANTS];
 
 typedef struct {
     float reactionTimer;
@@ -999,7 +1037,7 @@ typedef struct {
     float botStuckTime;
     float botStrafeSign;
 } BotState;
-static BotState botStates[MAX_PLAYERS];
+static BotState botStates[MAX_COMBATANTS];
 static bool randomSpawnEnabled = true;
 static const Vector3 playerSpawnPositions[MAX_PLAYERS] = {
     { 0.0f,  BASE_EYE_HEIGHT, -14.0f },
@@ -1722,6 +1760,7 @@ typedef enum {
     SFX_EXPLOSION,
     SFX_TETHER,
     SFX_WIN,
+    SFX_SHIELD_BREAK,
     SFX_COUNT
 } SfxId;
 
@@ -1738,7 +1777,8 @@ static const float sfxCooldowns[SFX_COUNT] = {
     0.0f,  // smush
     0.0f,  // explosion
     0.1f,  // tether
-    0.0f   // win
+    0.0f,  // win
+    0.1f   // shield break
 };
 static const float sfxChances[SFX_COUNT] = {
     1.00f,  // fire
@@ -1751,7 +1791,8 @@ static const float sfxChances[SFX_COUNT] = {
     1.00f,  // smush
     1.00f,  // explosion
     1.00f,  // tether
-    1.00f   // win
+    1.00f,  // win
+    1.00f   // shield break
 };
 static bool sfxReady = false;
 static float smushBannerTimer = 0.0f;
@@ -1768,8 +1809,8 @@ static bool debugLogClusterBreaksOnly = false;
 static bool debugSfxKeysEnabled = false;
 static bool aimAssistEnabled = true;
 static bool aimAssistDebugDraw = false;
-static Vector3 aimAssistDebugTarget[MAX_PLAYERS];
-static bool aimAssistDebugHasTarget[MAX_PLAYERS];
+static Vector3 aimAssistDebugTarget[MAX_COMBATANTS];
+static bool aimAssistDebugHasTarget[MAX_COMBATANTS];
 static bool creativeModeActive = false;
 static int creativeBrushSpan[MAX_PLAYERS] = { 3, 3, 3, 3 };
 static int creativePickupType[MAX_PLAYERS] = { 0, 0, 0, 0 };
@@ -2189,6 +2230,10 @@ static void init_sfx(void)
 
     wave = make_sfx_wave(980.0f, 2600.0f, 0.10f, 0.65f, 0.18f, 20.0f);
     sfxSounds[SFX_SHIELD] = LoadSoundFromWave(wave);
+    UnloadWave(wave);
+
+    wave = make_sfx_wave(180.0f, 420.0f, 0.24f, 0.7f, 0.45f, 12.0f);
+    sfxSounds[SFX_SHIELD_BREAK] = LoadSoundFromWave(wave);
     UnloadWave(wave);
 
     wave = make_sfx_wave(140.0f, 0.0f, 0.20f, 0.9f, 0.45f, 10.0f);
@@ -4529,7 +4574,7 @@ static void glue_neighbor_faces_for_voxel(int voxel_idx) {
 
         if (!b->simulate) {
             int holder = tetherTag[voxel_idx] - 1;
-            if (holder >= 0 && holder < MAX_PLAYERS && players[holder].goldTetherHolding)
+            if (holder >= 0 && holder < MAX_COMBATANTS && players[holder].goldTetherHolding)
                 continue;
             glue_dynamic_face_to_static(a, b, faceA, faceB);
             continue;
@@ -8412,7 +8457,12 @@ static void heal_structural_seams(void) {
 }
 
 // Build static demo cube of voxels
+#include "foundry_arena.inc"
 static void buildDemo(void) {
+    if(gameMode==GAME_MODE_FIREFIGHT && (firefightFoundry||firefightPractice)) {
+        current_sanctum_plan_valid=false;
+        buildFoundryHoldout(); rebuild_glue_constraints(); return;
+    }
     if (currentWorldType == WORLD_TYPE_GREEK_TEMPLE) {
         buildGreekTempleWorld(templeSeed, templeTargetStage);
     } else if (currentWorldType == WORLD_TYPE_MEGALITH) {
@@ -8680,6 +8730,15 @@ static bool load_map_slot(int slot) {
 }
 
 static void init_pickups(void) {
+    if(gameMode==GAME_MODE_FIREFIGHT && (firefightFoundry||firefightPractice)) {
+        clear_pickups();
+        for(int i=0;i<4;i++) {
+            pickups[i].pos=(Vector3){i<2?-4.0f:4.0f,3.0f,i%2?-3.0f:3.0f};
+            pickups[i].active=true; pickups[i].type=i%2?PICKUP_AMMO:PICKUP_HEALTH;
+        }
+        return;
+    }
+
     if (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM) {
         if (!current_sanctum_plan_valid) {
             current_sanctum_plan = generate_unified_sanctum_ex(sanctumSeed, sanctumGrowthSteps, sanctumTopologyMode);
@@ -8970,13 +9029,16 @@ static void ResetCreative(void) {
 }
 
 static void ResetGame(void) {
+    if(netTransport.role!=NET_ROLE_OFFLINE && gameMode==GAME_MODE_FIREFIGHT) gameMode=GAME_MODE_DEATHMATCH;
+    if(netTransport.role==NET_ROLE_OFFLINE && gameMode!=GAME_MODE_FIREFIGHT) activePlayers=clamp_active_players(multiplayerActivePlayers);
     creativeModeActive = false;
     winnerId = -1;
     pbdTimeAccumulator = 0.0f;
     init_confetti();
     init_pickups();
     // init players
-    for (int i = 0; i < MAX_PLAYERS; i++) {
+    for (int i = 0; i < MAX_COMBATANTS; i++) {
+        combatantLife[i]=LIFE_ALIVE; combatantTeam[i]=i;
         players[i].pos = pick_player_spawn(i);
         players[i].death_pos = players[i].pos;
         players[i].yaw = atan2f(players[i].pos.x, players[i].pos.z) * RAD2DEG;
@@ -9042,7 +9104,7 @@ static void ResetGame(void) {
     init_static_hash();
     if (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM) {
         init_pickups();
-        for (int i = 0; i < MAX_PLAYERS; i++) {
+        for (int i = 0; i < MAX_COMBATANTS; i++) {
             players[i].pos = pick_player_spawn(i);
             players[i].death_pos = players[i].pos;
             if (i == 0 && current_sanctum_plan.spawn_point_count > 0) {
@@ -9063,19 +9125,14 @@ static void ResetGame(void) {
             if (humans < 1) {
                 humans = 1;
             }
-            activePlayers = 4;
-            if (humans > activePlayers) {
-                humans = activePlayers;
-            }
-            for (int p = 0; p < humans; ++p) {
-                InputType human_input = multiplayerPlayerInput[p];
-                if (human_input != INPUT_TYPE_KEYBOARD && human_input != INPUT_TYPE_GAMEPAD) {
-                    human_input = (p == 0) ? INPUT_TYPE_KEYBOARD : INPUT_TYPE_GAMEPAD;
-                }
-                playerInput[p] = human_input;
-            }
-            for (int p = humans; p < activePlayers; ++p) {
-                playerInput[p] = INPUT_TYPE_BOT_EASY;
+            firefightHumans = humans;
+            activePlayers = MAX_COMBATANTS;
+            for (int p=0;p<MAX_COMBATANTS;p++) {
+                combatantTeam[p] = p<MAX_PLAYERS ? 0 : 1;
+                combatantLife[p] = p<humans ? LIFE_ALIVE : LIFE_UNUSED;
+                players[p].respawn_timer = p<humans ? 0.0f : 9999.0f;
+                playerInput[p] = p<humans ? multiplayerPlayerInput[p] : INPUT_TYPE_BOT_EASY;
+                if(p<humans && is_player_bot(p)) playerInput[p]=INPUT_TYPE_GAMEPAD;
             }
         }
         reset_firefight_match();
@@ -9762,12 +9819,29 @@ static void kill_player(int player_index, int attacker_index,
         return;
     }
     if (gameMode == GAME_MODE_FIREFIGHT && attacker_index >= 0 && attacker_index < activePlayers) {
-        if (is_player_bot(player_index) == is_player_bot(attacker_index)) {
+        if (combatantTeam[player_index] == combatantTeam[attacker_index]) {
             return; // Friendly fire disabled in Firefight
         }
     }
     Player *player = &players[player_index];
     if (player->respawn_timer > 0.0f) {
+        return;
+    }
+    if(gameMode==GAME_MODE_FIREFIGHT && player_index<firefightHumans && player->invuln_timer>0) return;
+    if(gameMode==GAME_MODE_FIREFIGHT && player_index<firefightHumans &&
+       firefightHumans>1 && player->pos.y>=-10.0f && !firefightPractice) {
+        combatantLife[player_index]=LIFE_DOWNED;
+        bleedTimer[player_index]=FF_BLEED_SECONDS;
+        reviveProgress[player_index]=0;
+        reviveOwner[player_index]=-1;
+        player->respawn_timer=9999;
+        player->death_pos=player->pos;
+        player->death_yaw=player->yaw;
+        player->vel=(Vector3){0};
+        player->tetherHolding=player->goldTetherHolding=false;
+        player->tetherVoxel=-1;
+        player->matter=0;
+        player->isExposed=true;
         return;
     }
     if (debugLogSmush && debugLogSmushDeaths) {
@@ -9820,6 +9894,8 @@ static void kill_player(int player_index, int attacker_index,
                 firefightWaveEnemiesRemaining--;
             }
             firefightKillsTotal++;
+            combatantLife[player_index]=LIFE_UNUSED;
+            if(firefightPractice && ((practiceStep==2 && !award_debris) || (practiceStep==3 && award_debris))) practiceStep++;
             if (player->enemyType == ENEMY_TYPE_GOLIATH) {
                 firefightScore += (award_debris ? 350 : 250);
             } else if (player->enemyType == ENEMY_TYPE_SWARMER) {
@@ -9833,30 +9909,12 @@ static void kill_player(int player_index, int attacker_index,
                 player->respawn_timer = 9999.0f; // No more spawns for this wave
             }
             if (firefightWaveEnemiesRemaining <= 0) {
-                firefightWaveState = FIREFIGHT_STATE_INTERMISSION;
-                firefightIntermissionTimer = 15.0f;
+                ff_wave_complete();
                 firefightScore += 500 * firefightWave;
                 play_sfx(SFX_WIN);
             }
         } else {
-            // Human player died
-            firefightTeamLives--;
-            if (firefightTeamLives > 0) {
-                player->respawn_timer = PLAYER_RESPAWN_TIME;
-            } else {
-                player->respawn_timer = 9999.0f;
-                bool any_human_alive = false;
-                for (int p = 0; p < activePlayers; ++p) {
-                    if (!is_player_bot(p) && p != player_index && players[p].respawn_timer <= 0.0f) {
-                        any_human_alive = true;
-                        break;
-                    }
-                }
-                if (!any_human_alive) {
-                    firefightWaveState = FIREFIGHT_STATE_DEFEAT;
-                    gameState = GAME_STATE_GAMEOVER;
-                }
-            }
+            ff_resolve_death(player_index);
         }
     } else {
         player->respawn_timer = PLAYER_RESPAWN_TIME;
@@ -9869,7 +9927,7 @@ static void apply_matter_damage(int player_index, int attacker_index, float dama
         return;
     }
     if (gameMode == GAME_MODE_FIREFIGHT && attacker_index >= 0 && attacker_index < activePlayers) {
-        if (is_player_bot(player_index) == is_player_bot(attacker_index)) {
+        if (combatantTeam[player_index] == combatantTeam[attacker_index]) {
             return; // Friendly fire disabled in Firefight
         }
     }
@@ -9886,6 +9944,8 @@ static void apply_matter_damage(int player_index, int attacker_index, float dama
     play_sfx(SFX_IMPACT);
     if (player->matter <= 0.0f) {
         player->isExposed = true;
+        if(firefightPractice && player_index>=MAX_PLAYERS && practiceStep==1) practiceStep=2;
+        play_sfx(SFX_SHIELD_BREAK);
         player->exposed_flash_timer = 0.35f;
         player->matter_flash_timer = 0.0f;
     }
@@ -10397,7 +10457,7 @@ static void evaluate_voxel_fracture(Voxel *voxel) {
     if (voxel_idx >= 0 && voxel_idx < voxel_count &&
         get_goliath_owner_of_voxel(voxel_idx) >= 0) return;
     int holder = (voxel_idx >= 0 && voxel_idx < voxel_count) ? tetherTag[voxel_idx] - 1 : -1;
-    if ((holder >= 0 && holder < MAX_PLAYERS && players[holder].goldTetherHolding) ||
+    if ((holder >= 0 && holder < MAX_COMBATANTS && players[holder].goldTetherHolding) ||
         goldReleaseGraceFrames[voxel_idx] > 0) return;
     if (voxel->rest_edge <= 0.0f) {
         return;
@@ -10589,7 +10649,7 @@ static void integrate_particles(float dt) {
         }
 
         int tether_player = tetherTag[i] - 1;
-        if (tether_player < 0 || tether_player >= MAX_PLAYERS) {
+        if (tether_player < 0 || tether_player >= MAX_COMBATANTS) {
             continue;
         }
         Vector3 tether_delta = v_sub(tetherTargetByPlayer[tether_player],
@@ -12315,7 +12375,7 @@ static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx)
         return;
     }
     int holder = tetherTag[voxel_idx] - 1;
-    if (holder >= 0 && holder < MAX_PLAYERS && players[holder].goldTetherHolding)
+    if (holder >= 0 && holder < MAX_COMBATANTS && players[holder].goldTetherHolding)
         return;
 
     for (int face = 0; face < 6; ++face) {
@@ -13614,7 +13674,7 @@ static void ensure_render_targets(RenderTexture2D *screens,
 }
 
 static float spawn_clear_half(int player_index) {
-    if (player_index >= 0 && player_index < MAX_PLAYERS) {
+    if (player_index >= 0 && player_index < MAX_COMBATANTS) {
         if (players[player_index].enemyType == ENEMY_TYPE_GOLIATH) return PLAYER_SIZE * 0.75f;
         if (players[player_index].enemyType == ENEMY_TYPE_SWARMER) return PLAYER_SIZE * 0.25f;
     }
@@ -13737,6 +13797,11 @@ static Vector3 sanctum_spawn_world(int spawn_index) {
 }
 
 static Vector3 pick_player_spawn(int player_index) {
+    if(gameMode==GAME_MODE_FIREFIGHT && (firefightFoundry||firefightPractice)) {
+        Vector3 pos=player_index<MAX_PLAYERS ? (Vector3){(float)(player_index%2)*3-1.5f,BASE_EYE_HEIGHT+2.0f,(float)(player_index/2)*3} : (Vector3){-18,BASE_EYE_HEIGHT,(float)(player_index%5-2)*2};
+        return nudge_spawn_clear(pos,spawn_clear_half(player_index),0,player_index);
+    }
+
     float half = spawn_clear_half(player_index);
     bool is_bot = is_player_bot(player_index);
     float desired_clearance = 0.0f;
@@ -13814,8 +13879,8 @@ static Vector3 pick_player_spawn(int player_index) {
         }
     }
 
-    if (player_index >= 0 && player_index < MAX_PLAYERS) {
-        Vector3 fallback = nudge_spawn_clear(playerSpawnPositions[player_index], half, 0.0f, player_index);
+    if (player_index >= 0 && player_index < MAX_COMBATANTS) {
+        Vector3 fallback = nudge_spawn_clear(playerSpawnPositions[player_index % MAX_PLAYERS], half, 0.0f, player_index);
         if (spawn_position_clear_ex(fallback, half, 0.0f, player_index)) {
             return fallback;
         }
@@ -14102,25 +14167,25 @@ static void explode_goliath_armor(int player_idx) {
     gs->count = 0;
 }
 
-static EnemyType pick_firefight_enemy_type(int wave, int spawn_index) {
-    if (wave <= 1) {
-        return (spawn_index == 0) ? ENEMY_TYPE_SWARMER : ENEMY_TYPE_STANDARD;
-    } else if (wave == 2) {
-        if (spawn_index % 3 == 2) return ENEMY_TYPE_GOLIATH;
-        return (spawn_index % 2 == 1) ? ENEMY_TYPE_SWARMER : ENEMY_TYPE_STANDARD;
-    } else {
-        int roll = (spawn_index + wave + GetRandomValue(0, 5)) % 6;
-        if (roll <= 1) return ENEMY_TYPE_SWARMER;
-        if (roll <= 3) return ENEMY_TYPE_STANDARD;
-        return ENEMY_TYPE_GOLIATH;
-    }
-}
-
 static void init_firefight_bot_entity(int i, EnemyType etype, InputType botDiff) {
+    for(int v=0;v<voxel_count;v++) {
+        if(voxels[v].owner==i) voxels[v].owner=-1;
+        if(voxels[v].activator==i) voxels[v].activator=-1;
+    }
+    for(int n=0;n<recycleQueueCount;n++) {
+        Voxel *snapshot=&recycleQueue[(recycleQueueHead+n)%MAX_VOXELS];
+        if(snapshot->owner==i) snapshot->owner=-1;
+        if(snapshot->activator==i) snapshot->activator=-1;
+    }
+    combatantLife[i]=LIFE_ALIVE;
+    combatantTeam[i]=1;
     playerInput[i] = botDiff;
     memset(&botStates[i], 0, sizeof(botStates[i]));
     botStates[i].targetIndex = -1;
     Player *b = &players[i];
+    memset(b,0,sizeof(*b));
+    b->last_shot_time=b->last_melee_time=b->last_build_time=-1000;
+    weapon_visual_reset(&weaponVisuals[i]);
     b->enemyType = etype;
     b->contactDamageTimer = 0.0f;
     b->respawn_timer = 0.0f;
@@ -14157,136 +14222,8 @@ static void init_firefight_bot_entity(int i, EnemyType etype, InputType botDiff)
     play_sfx(SFX_SHIELD);
 }
 
-static void spawn_firefight_enemy_group(EnemyType etype, InputType botDiff, int prefer_slot)
-{
-    int remaining = firefightWaveEnemiesTotal - firefightEnemiesSpawned;
-    if (remaining <= 0) {
-        return;
-    }
-    int pack = 1;
-    if (etype == ENEMY_TYPE_SWARMER) {
-        pack = (remaining >= 3) ? 3 : remaining;
-    }
-    Vector3 origin = { 0 };
-    for (int n = 0; n < pack; ++n) {
-        int slot = -1;
-        if (n == 0 && prefer_slot >= 0 && prefer_slot < activePlayers &&
-            is_player_bot(prefer_slot)) {
-            slot = prefer_slot;
-        } else {
-            for (int i = 0; i < activePlayers; ++i) {
-                if (!is_player_bot(i)) {
-                    continue;
-                }
-                if (players[i].respawn_timer > 0.0f && players[i].respawn_timer < 9000.0f) {
-                    slot = i;
-                    break;
-                }
-            }
-        }
-        if (slot < 0) {
-            break;
-        }
-        init_firefight_bot_entity(slot, etype, botDiff);
-        if (n == 0) {
-            origin = players[slot].pos;
-        } else {
-            float side = (n % 2 == 1) ? 1.0f : -1.0f;
-            float dist = 0.7f * (float)((n + 1) / 2);
-            float half = spawn_clear_half(slot);
-            Vector3 candidate = (Vector3){ origin.x + side * dist, origin.y, origin.z };
-            candidate = nudge_spawn_clear(candidate, half, 0.0f, slot);
-            if (spawn_position_clear_ex(candidate, half, 0.0f, slot)) {
-                players[slot].pos = candidate;
-            } else {
-                candidate = (Vector3){ origin.x, origin.y, origin.z + side * dist };
-                candidate = nudge_spawn_clear(candidate, half, 0.0f, slot);
-                if (spawn_position_clear_ex(candidate, half, 0.0f, slot)) {
-                    players[slot].pos = candidate;
-                }
-            }
-            players[slot].death_pos = players[slot].pos;
-        }
-        firefightEnemiesSpawned++;
-    }
-}
 
-static void start_firefight_wave(int wave_number) {
-    firefightWave = wave_number;
-    firefightWaveEnemiesTotal = 3 + (firefightWave - 1) * 2;
-    firefightWaveEnemiesRemaining = firefightWaveEnemiesTotal;
-    firefightEnemiesSpawned = 0;
-    firefightWaveState = FIREFIGHT_STATE_ACTIVE;
-    firefightWaveBannerTimer = 3.5f;
-
-    InputType botDiff = INPUT_TYPE_BOT_EASY;
-    if (firefightWave == 2) {
-        botDiff = INPUT_TYPE_BOT_MEDIUM;
-    } else if (firefightWave >= 3) {
-        botDiff = INPUT_TYPE_BOT_HARD;
-    }
-
-    for (int i = 0; i < activePlayers; ++i) {
-        if (is_player_bot(i)) {
-            players[i].respawn_timer = 1.0f;
-        }
-    }
-    while (firefightEnemiesSpawned < firefightWaveEnemiesTotal) {
-        int before = firefightEnemiesSpawned;
-        EnemyType etype = pick_firefight_enemy_type(firefightWave, firefightEnemiesSpawned);
-        spawn_firefight_enemy_group(etype, botDiff, -1);
-        if (firefightEnemiesSpawned == before) {
-            break;
-        }
-    }
-}
-
-static void reset_firefight_match(void) {
-    firefightWave = 1;
-    firefightScore = 0;
-    firefightKillsTotal = 0;
-    firefightTeamLives = 3;
-    firefightIntermissionTimer = 0.0f;
-    firefightWaveBannerTimer = 3.5f;
-    firefightWaveState = FIREFIGHT_STATE_ACTIVE;
-    for (int i = 0; i < MAX_PLAYERS; ++i) {
-        goliathStates[i].count = 0;
-    }
-    start_firefight_wave(1);
-}
-
-static void update_firefight_logic(float dt) {
-    if (firefightWaveBannerTimer > 0.0f) {
-        firefightWaveBannerTimer -= dt;
-    }
-
-    if (firefightWaveState == FIREFIGHT_STATE_INTERMISSION) {
-        firefightIntermissionTimer -= dt;
-        if (firefightIntermissionTimer <= 0.0f) {
-            if (firefightWave % 2 == 0) {
-                firefightTeamLives++;
-            }
-            start_firefight_wave(firefightWave + 1);
-        }
-    } else if (firefightWaveState == FIREFIGHT_STATE_ACTIVE) {
-        for (int i = 0; i < activePlayers; ++i) {
-            if (is_player_bot(i)) {
-                Player *b = &players[i];
-                if (b->respawn_timer > 0.0f && b->respawn_timer < 9000.0f) {
-                    b->respawn_timer -= dt;
-                    if (b->respawn_timer <= 0.0f) {
-                        if (firefightEnemiesSpawned < firefightWaveEnemiesTotal) {
-                            EnemyType etype = pick_firefight_enemy_type(firefightWave, firefightEnemiesSpawned);
-                            spawn_firefight_enemy_group(etype, playerInput[i], i);
-                        } else {
-                            b->respawn_timer = 9999.0f;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
+#include "firefight_gameplay.inc"
 
 static int brush_extent_for_voxel(const Voxel *v) {
     int base = (voxelBrushSpan < 1) ? 1 : voxelBrushSpan;
@@ -14793,7 +14730,8 @@ static bool melee_clear_overlapping_voxels(Player *p)
     activate_static_voxels_near_region(minx, maxx, miny, maxy, minz, maxz, activator);
     rebuild_all_voxel_surfaces();
     meshDirty = true;
-    add_player_matter(p, MATTER_MELEE_HARVEST);
+    add_player_matter(p, ff_harvest_amount((int)(p-players)));
+    if(firefightPractice && p==players && practiceStep==0) practiceStep=1;
     play_sfx(SFX_MELEE);
     return true;
 }
@@ -14863,7 +14801,8 @@ static bool melee_hit_voxels(Player *p, Vector3 start, Vector3 dir, float reach)
         rebuild_all_voxel_surfaces();
         meshDirty = true;
     }
-    add_player_matter(p, MATTER_MELEE_HARVEST);
+    add_player_matter(p, ff_harvest_amount((int)(p-players)));
+    if(firefightPractice && p==players && practiceStep==0) practiceStep=1;
     play_sfx(SFX_MELEE);
     return true;
 }
@@ -14968,7 +14907,7 @@ static void perform_build(int idx) {
     if (now - p->last_build_time < BUILD_COOLDOWN_SECONDS) {
         return;
     }
-    if (p->matter < MATTER_BUILD_COST) {
+    if (p->matter < (ff_bonus(idx, UPGRADE_BUILD) ? 5 : MATTER_BUILD_COST)) {
         return;
     }
     Vector3 dir = player_forward(p);
@@ -15057,7 +14996,7 @@ static void perform_build(int idx) {
     }
     if (placed > 0) {
         meshDirty = true;
-        p->matter = fmaxf(0.0f, p->matter - MATTER_BUILD_COST);
+        p->matter = fmaxf(0.0f, p->matter - (ff_bonus(idx, UPGRADE_BUILD) ? 5 : MATTER_BUILD_COST));
         p->last_build_time = now;
         play_sfx(SFX_SHIELD);
     }
@@ -15372,11 +15311,11 @@ static void measure_tether_cluster(int player_idx, const int *cluster, int clust
 static void prepare_tether_forces(void) {
     memset(tetherTag, 0, sizeof(tetherTag));
     memset(tetherHoldClusterTag, 0, sizeof(tetherHoldClusterTag));
-    for (int i = 0; i < MAX_PLAYERS; ++i) {
+    for (int i = 0; i < MAX_COMBATANTS; ++i) {
         tetherScaleByPlayer[i] = 1.0f;
         tetherComByPlayer[i] = tetherTargetByPlayer[i];
     }
-    int count = (activePlayers > 0) ? activePlayers : MAX_PLAYERS;
+    int count = (activePlayers > 0) ? activePlayers : MAX_COMBATANTS;
     for (int i = 0; i < count; ++i) {
         Player *p = &players[i];
         if (!p->tetherHolding) {
@@ -15478,6 +15417,7 @@ static void release_tether(int idx) {
             }
             Vector3 impulse = v_mul(dir, p->goldTetherHolding
                 ? TETHER_THROW_IMPULSE : TETHER_THROW_IMPULSE / (float)cluster_count);
+            if(ff_bonus((int)(p-players), UPGRADE_THROW)) impulse=v_mul(impulse,1.25f);
             int stamp = ++particle_sync_stamp;
             if (stamp == 0) {
                 stamp = 1;
@@ -17527,8 +17467,8 @@ static float weaponViewAspect = 1.0f;
 static bool drawWeaponModels;
 static bool weaponFrameSampled;
 static float weaponFrameTime;
-static WeaponMeleePose weaponMeleeSamples[MAX_PLAYERS];
-static WeaponKind weaponKindSamples[MAX_PLAYERS];
+static WeaponMeleePose weaponMeleeSamples[MAX_COMBATANTS];
+static WeaponKind weaponKindSamples[MAX_COMBATANTS];
 
 static WeaponKind player_weapon_kind(const Player *p) {
     return p->dynamicShotActive ? WEAPON_DYNAMIC_LAUNCHER : WEAPON_STANDARD;
@@ -17572,8 +17512,8 @@ static void draw_player_weapon(int player_index, Vector3 eye, bool first_person,
 }
 
 static void draw_remote_weapon_glass(int view_player, Vector3 eye) {
-    int order[MAX_PLAYERS], count = 0;
-    float distances[MAX_PLAYERS];
+    int order[MAX_COMBATANTS], count = 0;
+    float distances[MAX_COMBATANTS];
     for (int p = 0; p < activePlayers; ++p) {
         if (p == view_player || !player_has_gun(p)) continue;
         WeaponPose pose = player_weapon_pose(p, false);
@@ -17658,6 +17598,12 @@ static void draw_player_face(const Player *p, Vector3 render_pos, float body_siz
 static void draw_players(void) {
     for (int i = 0; i < activePlayers; i++) {
         Player *p = &players[i];
+        if(gameMode==GAME_MODE_FIREFIGHT && i<firefightHumans && combatantLife[i]==LIFE_DOWNED) {
+            DrawCube(p->death_pos,.9f,.3f,.9f,GOLD);
+            DrawCubeWires(v_add(p->death_pos,(Vector3){0,1,0}),.4f,.4f,.4f,GOLD);
+        }
+        if(gameMode==GAME_MODE_FIREFIGHT && i>=MAX_PLAYERS && p->respawn_timer<=0 && firefightWaveEnemiesRemaining<=3 && ffCleanupTimer>=20)
+            DrawCubeWires(v_add(p->pos,(Vector3){0,1.5f,0}),.5f,.5f,.5f,GOLD);
         if (p->respawn_timer > 0.0f) {
             continue;
         }
@@ -17806,15 +17752,15 @@ static void HandleKeyboardInput(int i, float dt) {
 }
 
 static void HandleGamepadInput(int i, float dt) {
-    if (!IsGamepadAvailable(i)) return;
+    if (!IsGamepadAvailable(seat_device(i))) return;
 
     Player *p = &players[i];
 
     // turn (right stick horizontal)
     float yaw_accel = 0.0f;
-    float yaw_axis = GetGamepadAxisMovement(i, GAMEPAD_AXIS_RIGHT_X);
-    if (fabsf(yaw_axis) > GAMEPAD_DEADZONE) {
-        yaw_accel = -yaw_axis * TURN_ACCELERATION;
+    float yaw_axis = GetGamepadAxisMovement(seat_device(i), GAMEPAD_AXIS_RIGHT_X);
+    if (fabsf(yaw_axis) > localSeats[i].deadzone) {
+        yaw_accel = -yaw_axis * TURN_ACCELERATION * localSeats[i].sensitivity;
     }
 
     if (yaw_accel != 0.0f) {
@@ -17829,14 +17775,14 @@ static void HandleGamepadInput(int i, float dt) {
             if (p->yaw_vel > 0) p->yaw_vel = 0;
         }
     }
-    p->yaw_vel = clampf(p->yaw_vel, -TURN_SPEED, TURN_SPEED);
+    p->yaw_vel = clampf(p->yaw_vel, -TURN_SPEED * localSeats[i].sensitivity, TURN_SPEED * localSeats[i].sensitivity);
     p->yaw += p->yaw_vel * dt;
 
     // look up/down (right stick vertical)
     float pitch_accel = 0.0f;
-    float pitch_axis = GetGamepadAxisMovement(i, GAMEPAD_AXIS_RIGHT_Y);
-    if (fabsf(pitch_axis) > GAMEPAD_DEADZONE) {
-        pitch_accel = -pitch_axis * TURN_ACCELERATION;
+    float pitch_axis = GetGamepadAxisMovement(seat_device(i), GAMEPAD_AXIS_RIGHT_Y) * (localSeats[i].invert ? -1.0f : 1.0f);
+    if (fabsf(pitch_axis) > localSeats[i].deadzone) {
+        pitch_accel = -pitch_axis * TURN_ACCELERATION * localSeats[i].sensitivity;
     }
 
     if (pitch_accel != 0.0f) {
@@ -17851,7 +17797,7 @@ static void HandleGamepadInput(int i, float dt) {
             if (p->pitch_vel > 0) p->pitch_vel = 0;
         }
     }
-    p->pitch_vel = clampf(p->pitch_vel, -TURN_SPEED, TURN_SPEED);
+    p->pitch_vel = clampf(p->pitch_vel, -TURN_SPEED * localSeats[i].sensitivity, TURN_SPEED * localSeats[i].sensitivity);
     p->pitch += p->pitch_vel * dt;
     p->pitch = clampf(p->pitch, -89, 89);
 
@@ -17865,13 +17811,13 @@ static void HandleGamepadInput(int i, float dt) {
 
     // acceleration (left stick)
     Vector3 accel = {0,0,0};
-    float accel_x = GetGamepadAxisMovement(i, GAMEPAD_AXIS_LEFT_X);
-    float accel_y = GetGamepadAxisMovement(i, GAMEPAD_AXIS_LEFT_Y);
+    float accel_x = GetGamepadAxisMovement(seat_device(i), GAMEPAD_AXIS_LEFT_X);
+    float accel_y = GetGamepadAxisMovement(seat_device(i), GAMEPAD_AXIS_LEFT_Y);
 
-    if (fabsf(accel_y) > GAMEPAD_DEADZONE) {
+    if (fabsf(accel_y) > localSeats[i].deadzone) {
         accel = v_add(accel, v_mul(forward, -accel_y));
     }
-    if (fabsf(accel_x) > GAMEPAD_DEADZONE) {
+    if (fabsf(accel_x) > localSeats[i].deadzone) {
         accel = v_add(accel, v_mul(right, accel_x));
     }
 
@@ -17971,7 +17917,7 @@ static bool player_aabb_hits_world(Vector3 pos, float half) {
 
 static void net_integrate_player(Player *p, float dt, bool query_world) {
     int player_idx = (int)(p - players);
-    if (player_idx < 0 || player_idx >= MAX_PLAYERS || &players[player_idx] != p) {
+    if (player_idx < 0 || player_idx >= MAX_COMBATANTS || &players[player_idx] != p) {
         player_idx = -1;
     }
     float half = player_collision_half(p);
@@ -18472,7 +18418,7 @@ static void bot_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float
     float len = v_length(desired_dir);
     float half = player_collision_half(bot);
     int player_idx = (int)(bot - players);
-    if (player_idx < 0 || player_idx >= MAX_PLAYERS || &players[player_idx] != bot) {
+    if (player_idx < 0 || player_idx >= MAX_COMBATANTS || &players[player_idx] != bot) {
         player_idx = -1;
     }
     float probe = speed * fmaxf(dt, 1.0f / 60.0f) + 0.2f;
@@ -19860,13 +19806,13 @@ static void render_gameplay_view(RenderTexture2D *screens,
                                  int *renderH,
                                  bool creative_mode) {
     voxel_render_frame++;
-    activePlayers = clamp_active_players(activePlayers);
+    activePlayers = (gameMode == GAME_MODE_FIREFIGHT && netTransport.role == NET_ROLE_OFFLINE) ? MAX_COMBATANTS : clamp_active_players(activePlayers);
     int viewCount = netTransport.role == NET_ROLE_OFFLINE ? activePlayers : netLocalPlayerCount;
     int humanPlayerSlots[MAX_PLAYERS];
     int humanCount = 0;
     if (gameMode == GAME_MODE_FIREFIGHT && netTransport.role == NET_ROLE_OFFLINE) {
         for (int p = 0; p < activePlayers; ++p) {
-            if (!is_player_bot(p)) {
+            if (p < firefightHumans) {
                 humanPlayerSlots[humanCount++] = p;
             }
         }
@@ -20046,6 +19992,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                     DrawText(banner_text, banner_x, banner_y, banner_size, banner_color);
                 }
             }
+            ff_draw_hud(i, view_w, view_h);
             draw_hud_bars(i, &players[i], view_w, view_h);
             draw_player_radar(i, view_w, view_h);
             if (players[i].matter_flash_timer > 0.0f &&
@@ -20059,7 +20006,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 float alpha = clampf(players[i].exposed_flash_timer / 0.35f, 0.0f, 1.0f);
                 DrawRectangle(0, 0, view_w, view_h, Fade(RED, 0.25f * alpha));
             }
-            if (!creative_mode && players[i].respawn_timer > 0.0f) {
+            if (!creative_mode && players[i].respawn_timer > 0.0f && combatantLife[i]!=LIFE_DOWNED) {
                 if (gameMode == GAME_MODE_FIREFIGHT && firefightTeamLives <= 0) {
                     const char *dead_text = "OUT OF LIVES - AWAITING WAVE VICTORY";
                     int font_size = 32;
@@ -20473,6 +20420,8 @@ static bool run_ai_awareness_smoke_test(void) {
 #define FPS_EXIT_GPU_CONTEXT_UNAVAILABLE 78
 #define FPS_EXIT_GPU_INITIALIZATION_FAILED 79
 
+#include "couch_ui.inc"
+
 int main(int argc, char **argv) {
     if (!parse_physics_arguments(argc, argv)) return 2;
     bool automatedRun = physicsSmokeSteps > 0 || debug_run_requested() || aiSmokeTestRequested;
@@ -20492,6 +20441,7 @@ int main(int argc, char **argv) {
     macos_gamepad_init();
 #endif
     SetWindowState(FLAG_WINDOW_RESIZABLE);
+    SetExitKey(KEY_NULL);
     if (!automatedRun) init_sfx();
     SetTargetFPS(TARGET_FRAME_RATE);
     // seed RNG
@@ -20537,6 +20487,7 @@ int main(int argc, char **argv) {
         gameState = GAME_STATE_MENU;
         fprintf(stderr, "Connecting to %s:%u\n", netConnectHost, (unsigned)netRequestedPort);
     }
+    couch_load_settings();
     init_pbd_thread_pool();
     if (!initialize_physics_backend()) {
         fprintf(stderr, "Requested physics backend '%s' is unavailable: %s\n",
@@ -20615,6 +20566,7 @@ int main(int argc, char **argv) {
         if (IsKeyPressed(KEY_F2)) {
             //SetLoggingEnabled(!logsEnabled);
         }
+        if (couch_frame()) continue;
         switch (gameState) {
             case GAME_STATE_MENU: {
                 int boxW = menuSetupSubmenuOpen ? 1040 : 580;
@@ -21049,7 +21001,7 @@ int main(int argc, char **argv) {
                             if (netTransport.role == NET_ROLE_OFFLINE) {
                                 netRequestedRole = NET_ROLE_HOST;
                                 netRequestedCreative = false;
-                                if (net_transport_host(&netTransport, netRequestedPort)) {
+                                if (gameMode != GAME_MODE_FIREFIGHT && net_transport_host(&netTransport, netRequestedPort)) {
                                     net_set_host_local_players(netRequestedLocalPlayers);
                                     netLobbyStarted = false;
                                     gameState = GAME_STATE_LOBBY;
@@ -21063,7 +21015,7 @@ int main(int argc, char **argv) {
                                 netRequestedRole = NET_ROLE_CLIENT;
                                 netRequestedCreative = false;
                                 net_prepare_client_local_players(netRequestedLocalPlayers);
-                                if (net_transport_connect(&netTransport, "127.0.0.1", netRequestedPort)) {
+                                if (gameMode != GAME_MODE_FIREFIGHT && net_transport_connect(&netTransport, "127.0.0.1", netRequestedPort)) {
                                     memset(netPlayerPresent, 0, sizeof(netPlayerPresent)); netWorldReady = false;
                                     memset(netPlayerReady, 0, sizeof(netPlayerReady)); netLobbyStarted = false;
                                 }
@@ -21214,7 +21166,7 @@ int main(int argc, char **argv) {
                         gameMode = GAME_MODE_DEATHMATCH;
                         netRequestedRole = NET_ROLE_HOST;
                         netRequestedCreative = false;
-                        if (net_transport_host(&netTransport, netRequestedPort)) {
+                        if (gameMode != GAME_MODE_FIREFIGHT && net_transport_host(&netTransport, netRequestedPort)) {
                             net_set_host_local_players(netRequestedLocalPlayers);
                             netLobbyStarted = false;
                             gameState = GAME_STATE_LOBBY;
@@ -21225,7 +21177,7 @@ int main(int argc, char **argv) {
                         netRequestedRole = NET_ROLE_CLIENT;
                         netRequestedCreative = false;
                         net_prepare_client_local_players(netRequestedLocalPlayers);
-                        if (net_transport_connect(&netTransport, "127.0.0.1", netRequestedPort)) {
+                        if (gameMode != GAME_MODE_FIREFIGHT && net_transport_connect(&netTransport, "127.0.0.1", netRequestedPort)) {
                             memset(netPlayerPresent, 0, sizeof(netPlayerPresent)); netWorldReady = false;
                             memset(netPlayerReady, 0, sizeof(netPlayerReady)); netLobbyStarted = false;
                         }
@@ -21365,7 +21317,7 @@ int main(int argc, char **argv) {
                         if (netTransport.role == NET_ROLE_OFFLINE && IsKeyPressed(KEY_H)) {
                             netRequestedRole = NET_ROLE_HOST;
                             netRequestedCreative = false;
-                            if (net_transport_host(&netTransport, netRequestedPort)) {
+                            if (gameMode != GAME_MODE_FIREFIGHT && net_transport_host(&netTransport, netRequestedPort)) {
                                 net_set_host_local_players(netRequestedLocalPlayers);
                                 netLobbyStarted = false;
                                 gameState = GAME_STATE_LOBBY;
@@ -21375,7 +21327,7 @@ int main(int argc, char **argv) {
                             netRequestedRole = NET_ROLE_CLIENT;
                             netRequestedCreative = false;
                             net_prepare_client_local_players(netRequestedLocalPlayers);
-                            if (net_transport_connect(&netTransport, "127.0.0.1", netRequestedPort)) {
+                            if (gameMode != GAME_MODE_FIREFIGHT && net_transport_connect(&netTransport, "127.0.0.1", netRequestedPort)) {
                                 memset(netPlayerPresent, 0, sizeof(netPlayerPresent)); netWorldReady = false;
                                 memset(netPlayerReady, 0, sizeof(netPlayerReady)); netLobbyStarted = false;
                             }
@@ -21571,8 +21523,8 @@ int main(int argc, char **argv) {
             }
         }
         for (int i = 0; i < activePlayers; ++i) {
-            if (gameMode == GAME_MODE_FIREFIGHT && is_player_bot(i)) {
-                continue; // Bots are respawned exclusively by update_firefight_logic
+            if (gameMode == GAME_MODE_FIREFIGHT) {
+                continue; // Firefight lifecycle is owned by update_firefight_logic
             }
             if (players[i].respawn_timer > 0.0f) {
                 players[i].respawn_timer -= dt;
@@ -21619,50 +21571,50 @@ int main(int argc, char **argv) {
         // input: shooting, bullet type, jump
         for (int i = 0; i < activePlayers; ++i) {
             if (netTransport.role == NET_ROLE_HOST && !net_player_is_local(i)) continue;
-            if (players[i].respawn_timer > 0.0f) {
+            if (players[i].respawn_timer > 0.0f || ff_input_blocked(i)) {
                 continue;
             }
             if (playerInput[i] == INPUT_TYPE_GAMEPAD) {
-                if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_RIGHT_TRIGGER_2)) {
+                if (IsGamepadButtonPressed(seat_device(i), GAMEPAD_BUTTON_RIGHT_TRIGGER_2)) {
                     FireVoxel(i);
                 }
-                if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_RIGHT_FACE_DOWN)) {
+                if (IsGamepadButtonPressed(seat_device(i), GAMEPAD_BUTTON_RIGHT_FACE_DOWN) && !ff_input_blocked(i)) {
                     perform_melee(i);
                 }
-                if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_RIGHT_TRIGGER_1)) {
+                if (IsGamepadButtonPressed(seat_device(i), GAMEPAD_BUTTON_RIGHT_TRIGGER_1)) {
                     perform_build(i);
                 }
-                if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_LEFT_TRIGGER_2)) {
+                if (IsGamepadButtonPressed(seat_device(i), GAMEPAD_BUTTON_LEFT_TRIGGER_2)) {
                     start_tether(i);
                 }
-                if (IsGamepadButtonReleased(i, GAMEPAD_BUTTON_LEFT_TRIGGER_2)) {
+                if (IsGamepadButtonReleased(seat_device(i), GAMEPAD_BUTTON_LEFT_TRIGGER_2)) {
                     release_tether(i);
                 }
-                if (IsGamepadButtonPressed(i, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT) && players[i].onGround) {
+                if (IsGamepadButtonPressed(seat_device(i), GAMEPAD_BUTTON_RIGHT_FACE_RIGHT) && players[i].onGround) {
                     players[i].vel.y = JUMP_SPEED;
                     players[i].onGround = false;
                 }
             }
         }
 
-        if (!debugConsoleOpen && playerInput[0] == INPUT_TYPE_KEYBOARD && players[0].respawn_timer <= 0.0f) {
+        if (!debugConsoleOpen && !ff_input_blocked(0) && playerInput[0] == INPUT_TYPE_KEYBOARD && players[0].respawn_timer <= 0.0f) {
             if (IsKeyPressed(KEY_LEFT_CONTROL))  FireVoxel(0);
             if (IsKeyPressed(KEY_Z)) perform_melee(0);
             if (IsKeyPressed(KEY_E)) perform_build(0);
             if (IsKeyPressed(KEY_R)) start_tether(0);
             if (IsKeyReleased(KEY_R)) release_tether(0);
-            if (IsKeyPressed(KEY_SPACE) && players[0].onGround) {
+            if (IsKeyPressed(KEY_SPACE) && players[0].onGround && !ff_input_blocked(0)) {
                 players[0].vel.y = JUMP_SPEED;
                 players[0].onGround = false;
             }
         }
-        if (!debugConsoleOpen && net_player_is_local(1) && playerInput[1] == INPUT_TYPE_KEYBOARD && players[1].respawn_timer <= 0.0f) {
+        if (!debugConsoleOpen && !ff_input_blocked(1) && net_player_is_local(1) && playerInput[1] == INPUT_TYPE_KEYBOARD && players[1].respawn_timer <= 0.0f) {
             if (IsKeyPressed(KEY_RIGHT_CONTROL)) FireVoxel(1);
             if (IsKeyPressed(KEY_M)) perform_melee(1);
             if (IsKeyPressed(KEY_O)) perform_build(1);
             if (IsKeyPressed(KEY_P)) start_tether(1);
             if (IsKeyReleased(KEY_P)) release_tether(1);
-            if (IsKeyPressed(KEY_RIGHT_SHIFT) && players[1].onGround) {
+            if (IsKeyPressed(KEY_RIGHT_SHIFT) && players[1].onGround && !ff_input_blocked(1)) {
                 players[1].vel.y = JUMP_SPEED;
                 players[1].onGround = false;
             }
@@ -21706,6 +21658,8 @@ int main(int argc, char **argv) {
             if (netTransport.role == NET_ROLE_HOST && !net_player_is_local(i)) {
                 /* Remote movement and integration run at the authoritative 60 Hz tick. */
                 continue;
+            } else if (ff_input_blocked(i)) {
+                players[i].vel.x=players[i].vel.z=0;
             } else if (playerInput[i] == INPUT_TYPE_KEYBOARD) {
                 if (!debugConsoleOpen) {
                     HandleKeyboardInput(i, dt);
@@ -21713,7 +21667,7 @@ int main(int argc, char **argv) {
             } else if (playerInput[i] == INPUT_TYPE_GAMEPAD) {
                 HandleGamepadInput(i, dt);
             } else {
-                UpdateBot(i, dt);
+                if(!(gameMode==GAME_MODE_FIREFIGHT && firefightPractice)) UpdateBot(i, dt);
             }
             Player *p = &players[i];
             if (p->dynamicShotActive && p->matter <= 0.0f) {

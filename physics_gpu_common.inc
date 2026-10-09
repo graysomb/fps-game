@@ -530,7 +530,7 @@ static bool gpu_pack_world(void) {
         Voxel *v = &voxels[i];
         if (!v->simulate || v->type != 0 || v->isBullet || !v->vgs_active || tetherTag[i] <= 0) continue;
         int player = tetherTag[i] - 1;
-        if (player < 0 || player >= MAX_PLAYERS) continue;
+        if (player < 0 || player >= MAX_COMBATANTS) continue;
         bool gold = players[player].goldTetherHolding;
         int tether_face = players[player].tetherFace;
         if (tether_face < 0 || tether_face >= 6) {
@@ -551,7 +551,7 @@ static bool gpu_pack_world(void) {
             if (pool_id < 0 || pool_id >= particle_pool_count) continue;
             int id = gpuPhysics.pool_to_compact[pool_id];
             if (id < 0 || gpuPhysics.tether_stage[id] >= 0) continue;
-            gpuPhysics.tether_stage[id] = gold ? player + MAX_PLAYERS : player;
+            gpuPhysics.tether_stage[id] = gold ? player + MAX_COMBATANTS : player;
         }
     }
     // Tether owner 8 protects a released voxel group without applying tether force.
@@ -564,7 +564,7 @@ static bool gpu_pack_world(void) {
                 ptrdiff_t pool_id = v->particles[c] - particles_pool;
                 if (pool_id < 0 || pool_id >= particle_pool_count) continue;
                 int id = gpuPhysics.pool_to_compact[pool_id];
-                if (id >= 0 && gpuPhysics.tether_stage[id] < 0) gpuPhysics.tether_stage[id] = 8;
+                if (id >= 0 && gpuPhysics.tether_stage[id] < 0) gpuPhysics.tether_stage[id] = 2 * MAX_COMBATANTS;
             }
         }
     }
@@ -859,9 +859,9 @@ static void gpu_set_uniforms(float dt) {
     float tether_spring = TETHER_SPRING, tether_damping = TETHER_DAMPING;
     int break_damp_frames = BREAK_DAMP_FRAMES;
     float rest_grid_step = VOXEL_SIZE * 0.5f;
-    float player_data[MAX_PLAYERS][4];
-    float tether_data[MAX_PLAYERS][4];
-    for (int i = 0; i < MAX_PLAYERS; ++i) {
+    float player_data[MAX_COMBATANTS][4];
+    float tether_data[MAX_COMBATANTS][4];
+    for (int i = 0; i < MAX_COMBATANTS; ++i) {
         player_data[i][0] = players[i].pos.x; player_data[i][1] = players[i].pos.y; player_data[i][2] = players[i].pos.z;
         player_data[i][3] = (i < activePlayers && players[i].respawn_timer <= 0.0f) ? PLAYER_SIZE * 0.5f : -1.0f;
         Vector3 pull = v_sub(tetherTargetByPlayer[i], tetherComByPlayer[i]);
@@ -909,8 +909,8 @@ static void gpu_set_uniforms(float dt) {
     rlSetUniform(gpuPhysics.loc[GPU_LOC_TETHER_DAMPING], &tether_damping, SHADER_UNIFORM_FLOAT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_BREAK_DAMP_FRAMES], &break_damp_frames, SHADER_UNIFORM_INT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_REST_GRID_STEP], &rest_grid_step, SHADER_UNIFORM_FLOAT, 1);
-    rlSetUniform(gpuPhysics.loc[GPU_LOC_PLAYERS], player_data, SHADER_UNIFORM_VEC4, MAX_PLAYERS);
-    rlSetUniform(gpuPhysics.loc[GPU_LOC_TETHER_TARGETS], tether_data, SHADER_UNIFORM_VEC4, MAX_PLAYERS);
+    rlSetUniform(gpuPhysics.loc[GPU_LOC_PLAYERS], player_data, SHADER_UNIFORM_VEC4, MAX_COMBATANTS);
+    rlSetUniform(gpuPhysics.loc[GPU_LOC_TETHER_TARGETS], tether_data, SHADER_UNIFORM_VEC4, MAX_COMBATANTS);
 #endif
 }
 
@@ -1006,7 +1006,7 @@ static bool gpu_validate_and_commit(void) {
         if (v->vgs_active && g->flags[0] == 0) {
             bool is_tethered = (voxel_id >= 0 && voxel_id < voxel_count && tetherTag[voxel_id] > 0);
             int holder = is_tethered ? tetherTag[voxel_id] - 1 : -1;
-            if ((holder >= 0 && holder < MAX_PLAYERS && players[holder].goldTetherHolding) ||
+            if ((holder >= 0 && holder < MAX_COMBATANTS && players[holder].goldTetherHolding) ||
                 goldReleaseGraceFrames[voxel_id] > 0) {
                 g->flags[0] = 1;
                 continue;
@@ -1148,7 +1148,7 @@ static bool gpu_refresh_tethers(void) {
         Voxel *v = &voxels[world_id];
         if (v->type != 0 || v->isBullet || !v->vgs_active || tetherTag[world_id] <= 0) continue;
         int player = tetherTag[world_id] - 1;
-        if (player < 0 || player >= MAX_PLAYERS) continue;
+        if (player < 0 || player >= MAX_COMBATANTS) continue;
         bool gold = players[player].goldTetherHolding;
         int tether_face = players[player].tetherFace;
         if (tether_face < 0 || tether_face >= 6) {
@@ -1169,7 +1169,7 @@ static bool gpu_refresh_tethers(void) {
             if (pool_id < 0 || pool_id >= particle_pool_count) continue;
             int id = gpuPhysics.pool_to_compact[pool_id];
             if (id < 0 || id >= gpuPhysics.compact_count || gpuPhysics.tether_stage[id] >= 0) continue;
-            gpuPhysics.tether_stage[id] = gold ? player + MAX_PLAYERS : player;
+            gpuPhysics.tether_stage[id] = gold ? player + MAX_COMBATANTS : player;
         }
     }
     if (goldReleaseGraceActiveCount > 0) {
@@ -1184,7 +1184,7 @@ static bool gpu_refresh_tethers(void) {
                 if (pool_id < 0 || pool_id >= particle_pool_count) continue;
                 int id = gpuPhysics.pool_to_compact[pool_id];
                 if (id >= 0 && id < gpuPhysics.compact_count && gpuPhysics.tether_stage[id] < 0)
-                    gpuPhysics.tether_stage[id] = 8;
+                    gpuPhysics.tether_stage[id] = 2 * MAX_COMBATANTS;
             }
         }
     }

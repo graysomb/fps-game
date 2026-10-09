@@ -34,11 +34,11 @@ typedef struct FpsGpuUniforms {
     float tether_damping;
     float rest_grid_step;
     float padding;
-    float players[4][4];
-    float tether_targets[4][4];
+    float players[16][4];
+    float tether_targets[16][4];
 } FpsGpuUniforms;
 
-_Static_assert(sizeof(FpsGpuUniforms) == 240, "Metal uniform layout mismatch");
+_Static_assert(sizeof(FpsGpuUniforms) == 624, "Metal uniform layout mismatch");
 
 typedef struct FpsMetalProfileInfo {
     double last_gpu_exec_ms;
