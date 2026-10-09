@@ -37,7 +37,7 @@ struct GpuUniforms {
 static_assert(sizeof(ParticleState) == 64, "ParticleState layout mismatch");
 static_assert(sizeof(VoxelState) == 128, "VoxelState layout mismatch");
 static_assert(sizeof(StaticCollider) == 48, "StaticCollider layout mismatch");
-static_assert(sizeof(GpuUniforms) == 240, "GpuUniforms layout mismatch");
+static_assert(sizeof(GpuUniforms) == 624, "GpuUniforms layout mismatch");
 
 constant int MODE_RESET = 0;
 constant int MODE_INTEGRATE = 1;

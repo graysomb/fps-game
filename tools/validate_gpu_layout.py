@@ -47,6 +47,16 @@ if not expected_slots.issubset(metal_slots):
 # Combatant capacity is separate from the four local/network seats. Check both
 # uniform array declarations and the gold-tether offset/settling sentinel.
 c_uniforms = (ROOT / "physics_gpu_metal.h").read_text(encoding="utf-8")
+# Twelve 32-bit integers, sixteen floats, and two arrays of sixteen float4s.
+uniform_size = 12 * 4 + 16 * 4 + 2 * 16 * 16
+for name, source, struct in (
+    ("C", c_uniforms, "FpsGpuUniforms"),
+    ("Metal", metal_text, "GpuUniforms"),
+):
+    assertion = re.search(rf"sizeof\({struct}\)\s*==\s*(\d+)", source)
+    if assertion is None or int(assertion.group(1)) != uniform_size:
+        errors.append(f"{name} uniform size assertion must be {uniform_size} bytes")
+
 for name, source, declarations in (
     ("GLSL", glsl_text, ("uPlayerPosHalf[16]", "uTetherTarget[16]")),
     ("Metal", metal_text, ("players[16]", "tether_targets[16]")),
