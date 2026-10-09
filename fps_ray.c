@@ -8156,6 +8156,7 @@ typedef enum {
     WORLD_TYPE_TEST,
     WORLD_TYPE_BLOOD,
     WORLD_TYPE_PROCEDURAL,
+    WORLD_TYPE_CROSSCUT,
     WORLD_TYPE_COUNT
 } WorldType;
 static WorldType currentWorldType = WORLD_TYPE_GREEK_TEMPLE;
@@ -8458,10 +8459,14 @@ static void heal_structural_seams(void) {
 
 // Build static demo cube of voxels
 #include "foundry_arena.inc"
+#include "crosscut_arena.inc"
 static void buildDemo(void) {
     if(gameMode==GAME_MODE_FIREFIGHT && (firefightFoundry||firefightPractice)) {
         current_sanctum_plan_valid=false;
         buildFoundryHoldout(); rebuild_glue_constraints(); return;
+    }
+    if (currentWorldType == WORLD_TYPE_CROSSCUT) {
+        buildCrosscut(); rebuild_glue_constraints(); return;
     }
     if (currentWorldType == WORLD_TYPE_GREEK_TEMPLE) {
         buildGreekTempleWorld(templeSeed, templeTargetStage);
@@ -8730,6 +8735,16 @@ static bool load_map_slot(int slot) {
 }
 
 static void init_pickups(void) {
+    if(currentWorldType==WORLD_TYPE_CROSSCUT && !useCustomMap &&
+       !(gameMode==GAME_MODE_FIREFIGHT && (firefightFoundry||firefightPractice))) {
+        clear_pickups();
+        for(int i=0;i<5;i++) {
+            pickups[i].pos=i?crosscut_supply_point(i-1):(Vector3){0,1,0};
+            pickups[i].active=true;
+            pickups[i].type=i?PICKUP_AMMO:PICKUP_GOLD_TETHER;
+        }
+        return;
+    }
     if(gameMode==GAME_MODE_FIREFIGHT && (firefightFoundry||firefightPractice)) {
         clear_pickups();
         for(int i=0;i<4;i++) {
@@ -9117,6 +9132,21 @@ static void ResetGame(void) {
 
     if (useCustomMap) {
         load_map_slot(creativeMapSlot);
+    }
+
+    if(currentWorldType==WORLD_TYPE_CROSSCUT && !useCustomMap && gameMode==GAME_MODE_DEATHMATCH) {
+        crosscutSpawnCursor=0; crosscutInitialSpawns=true;
+        for(int i=0;i<activePlayers;i++) players[i].respawn_timer=9999;
+        for(int i=0;i<activePlayers;i++) {
+            players[i].pos=pick_player_spawn(i);
+            players[i].death_pos=players[i].pos;
+            int sector=activePlayers==2?i*2:i;
+            Vector3 exitDirection=crosscut_rotate((Vector3){1,0,0},sector%4);
+            players[i].yaw=atan2f(-exitDirection.x,-exitDirection.z)*RAD2DEG;
+            players[i].death_yaw=players[i].yaw;
+            players[i].respawn_timer=0;
+        }
+        crosscutInitialSpawns=false;
     }
 
     if (gameMode == GAME_MODE_FIREFIGHT) {
@@ -13796,7 +13826,30 @@ static Vector3 sanctum_spawn_world(int spawn_index) {
     return (Vector3){ wx, wy, wz };
 }
 
+static bool is_view_occluded_by_voxels(Vector3 eye_pos, Vector3 target_pos);
 static Vector3 pick_player_spawn(int player_index) {
+    if(currentWorldType==WORLD_TYPE_CROSSCUT && !useCustomMap && gameMode==GAME_MODE_DEATHMATCH) {
+        float half=spawn_clear_half(player_index);
+        if(crosscutInitialSpawns) {
+            int sector=activePlayers==2?player_index*2:player_index;
+            return nudge_spawn_clear(crosscut_spawn_point((sector%4)*2),half,2,player_index);
+        }
+        float best=-1;int chosen=-1;
+        for(int n=0;n<8;n++) {
+            int s=(crosscutSpawnCursor+n)%8;
+            Vector3 p=crosscut_spawn_point(s);
+            if(!spawn_position_clear_ex(p,half,3,player_index)) continue;
+            float nearest=1000;bool hidden=true;
+            for(int j=0;j<activePlayers;j++) if(j!=player_index && players[j].respawn_timer<=0) {
+                nearest=fminf(nearest,v_length(v_sub(p,players[j].pos)));
+                if(!is_view_occluded_by_voxels(players[j].pos,p)) hidden=false;
+            }
+            float score=(hidden?10000:0)+nearest;
+            if(score>best) {best=score;chosen=s;}
+        }
+        if(chosen>=0) {crosscutSpawnCursor=(chosen+1)%8;return crosscut_spawn_point(chosen);}
+        return random_clear_spawn(half,3,player_index);
+    }
     if(gameMode==GAME_MODE_FIREFIGHT && (firefightFoundry||firefightPractice)) {
         Vector3 pos=player_index<MAX_PLAYERS ? (Vector3){(float)(player_index%2)*3-1.5f,BASE_EYE_HEIGHT+2.0f,(float)(player_index/2)*3} : (Vector3){-18,BASE_EYE_HEIGHT,(float)(player_index%5-2)*2};
         return nudge_spawn_clear(pos,spawn_clear_half(player_index),0,player_index);
@@ -20679,7 +20732,7 @@ int main(int argc, char **argv) {
                         const char *hyper_stages[] = { "Avenue", "Outer Henge", "Marble Peristyle", "Great Trilithons", "Full Sanctum" };
                         const char *forerunner_archetypes[] = { "Cartographer", "Crossroads", "Crucible", "Spire" };
                         const char *forerunner_stages[] = { "Chasm", "Gateway", "Skybridge", "Vault", "Cartographer" };
-                        const char *world_names[] = { "Greek Temple", "Prehistoric Megalith", "Hyperborean Sun-Henge", "Forerunner Installation", "Precursor Citadel", "Test", "Blood", "Procedural" };
+                        const char *world_names[] = { "Greek Temple", "Prehistoric Megalith", "Hyperborean Sun-Henge", "Forerunner Installation", "Precursor Citadel", "Test", "Blood", "Procedural", "Crosscut" };
                         const char *world_info = (currentWorldType == WORLD_TYPE_GREEK_TEMPLE) ?
                             TextFormat("World: Greek Temple [%s, #%u] (W Cycle, T Seed, G Stage)",
                                        stage_labels[templeTargetStage], templeSeed) :
@@ -20723,7 +20776,7 @@ int main(int argc, char **argv) {
                         DrawText(subHeader, boxX + 28, boxY + 48, 15, DARKGRAY);
 
                         // Section 1: World Archetype Selector
-                        DrawText("1. SELECT WORLD TYPE (Keys 1-8 or Click):", boxX + 28, boxY + 76, 16, (Color){ 30, 60, 120, 255 });
+                        DrawText("1. SELECT WORLD TYPE (Keys 1-9 or Click):", boxX + 28, boxY + 76, 16, (Color){ 30, 60, 120, 255 });
                         const char *world_btn_names[WORLD_TYPE_COUNT] = {
                             "1. Greek Temple",
                             "2. Megalith",
@@ -20732,17 +20785,17 @@ int main(int argc, char **argv) {
                             "5. Citadel Firefight",
                             "6. Test Arena",
                             "7. Blood Arena",
-                            "8. Procedural"
+                            "8. Procedural", "9. Crosscut"
                         };
                         int gridStartX = boxX + 28;
                         int gridStartY = boxY + 98;
-                        int btnW = 232;
+                        int btnW = 182;
                         int btnH = 38;
                         int gapX = 18;
                         int gapY = 8;
                         for (int i = 0; i < WORLD_TYPE_COUNT; ++i) {
-                            int col = i % 4;
-                            int row = i / 4;
+                            int col = i % 5;
+                            int row = i / 5;
                             Rectangle rec = { (float)(gridStartX + col * (btnW + gapX)), (float)(gridStartY + row * (btnH + gapY)), (float)btnW, (float)btnH };
                             bool isSel = (currentWorldType == (WorldType)i);
                             Color actCol = (Color){ 36, 100, 195, 255 };
@@ -21236,6 +21289,7 @@ int main(int argc, char **argv) {
                         if (IsKeyPressed(KEY_SIX) || IsKeyPressed(KEY_KP_6)) switch_world_type(WORLD_TYPE_TEST);
                         if (IsKeyPressed(KEY_SEVEN) || IsKeyPressed(KEY_KP_7)) switch_world_type(WORLD_TYPE_BLOOD);
                         if (IsKeyPressed(KEY_EIGHT) || IsKeyPressed(KEY_KP_8)) switch_world_type(WORLD_TYPE_PROCEDURAL);
+                        if (IsKeyPressed(KEY_NINE) || IsKeyPressed(KEY_KP_9)) switch_world_type(WORLD_TYPE_CROSSCUT);
 
                         if (IsKeyPressed(KEY_W)) switch_world_type((WorldType)((currentWorldType + 1) % WORLD_TYPE_COUNT));
                         if (IsKeyPressed(KEY_Q)) switch_world_type((WorldType)((currentWorldType + WORLD_TYPE_COUNT - 1) % WORLD_TYPE_COUNT));

@@ -14,6 +14,15 @@ runs in linux and windows so far
 
 ## Couch sessions and Firefight
 
+Local Versus defaults to **Crosscut**, a symmetric quarry for 2–4 players.
+Use left/right in the lobby to cycle arenas; Tab or the top face button toggles
+the custom map slot selected in advanced setup. Crosscut is also world 9 there.
+Four raised terraces surround short bridges on orange breakable supports.
+The ground circuit remains available after the crossings collapse. Contest the
+central gold tether or collect Matter at four equally spaced outer supplies.
+Screened perimeter respawns favor cover and distance from living opponents.
+Rematch restores the selected arena and its destructible geometry.
+
 The offline menu offers Firefight, Local Versus, Learn Combat, controller settings,
 and the existing advanced world/LAN tools. Press Start on a controller to assign
 player one, then use the D-pad or left stick and bottom face button to navigate.

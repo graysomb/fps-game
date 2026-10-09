@@ -148,6 +148,65 @@ int main(int argc,char **argv) {
     assert(firefightWaveState==FIREFIGHT_STATE_VICTORY);
     assert(physicsBackend.requested==PHYSICS_BACKEND_CPU_MT || physics_backend_is_gpu(physicsBackend.active));
     gameMode=GAME_MODE_DEATHMATCH;multiplayerActivePlayers=2;ResetGame();assert(activePlayers==2);
+    currentWorldType=WORLD_TYPE_CROSSCUT;useCustomMap=false;
+    for(int seats=2;seats<=4;seats++) {
+        multiplayerActivePlayers=seats;ResetGame();
+        assert(activePlayers==seats && pickups[0].type==PICKUP_GOLD_TETHER);
+        for(int i=0;i<seats;i++) {
+            assert(spawn_position_clear_ex(players[i].pos,spawn_clear_half(i),2,i));
+            for(int j=0;j<i;j++) assert(is_view_occluded_by_voxels(players[i].pos,players[j].pos));
+        }
+    }
+    int originalCount=voxel_count;
+    /* Cutting one isolated slab's feet must activate its debris locally. */
+    remove_static_voxels_in_region_recycle(-3,2,0,3,5,5);
+    assert(activate_static_voxels_near_region(-3,2,0,3,5,5,0));
+    bool slabDynamic=false;
+    for(int v=0;v<voxel_count;v++) if(voxels[v].simulate && fabsf(voxels[v].pos.x)<1.6f && voxels[v].pos.z>=2 && voxels[v].pos.z<4) slabDynamic=true;
+    assert(slabDynamic);ResetGame();
+    for(int phase=0;phase<2;phase++) {
+        if(phase) {
+            for(int v=voxel_count-1;v>=0;v--) if(fabsf(voxels[v].pos.x)<9 && fabsf(voxels[v].pos.z)<9) remove_voxel_index(v);
+            init_static_hash();rebuild_all_voxel_surfaces();meshDirty=true;
+        }
+        RenderTexture2D views[MAX_PLAYERS]={0};int viewCount=0,vw=0,vh=0;
+        double timings[30];
+        for(int n=0;n<35;n++) {
+            double start=GetTime();simulate_voxel_pbd_steps(1.0f/120,2);
+            render_gameplay_view(views,&viewCount,&vw,&vh,false);
+            if(n>=5)timings[n-5]=(GetTime()-start)*1000;
+        }
+        qsort(timings,30,sizeof(double),compare_ms);
+        printf("Crosscut four-view %s (%s): p50 %.2f ms, p95 %.2f ms\n",phase?"crossing removed":"intact",physics_backend_name(physicsBackend.active),timings[15],timings[28]);
+        if(!phase) {
+            Image eye=LoadImageFromTexture(views[0].texture);ImageFlipVertical(&eye);
+            ExportImage(eye,"artifacts/crosscut-player-view.png");UnloadImage(eye);
+        }
+        for(int i=0;i<viewCount;i++)UnloadRenderTexture(views[i]);
+    }
+    ResetGame();
+    RenderTexture2D mapShot=LoadRenderTexture(1000,1000);
+    Camera3D mapCamera={.position={29,38,29},.target={0,0,0},.up={0,1,0},.fovy=48,.projection=CAMERA_PERSPECTIVE};
+    BeginTextureMode(mapShot);ClearBackground((Color){30,35,43,255});BeginMode3D(mapCamera);
+    DrawPlane((Vector3){0,0,0},(Vector2){40,40},(Color){74,77,72,255});
+    for(int v=0;v<voxel_count;v++) DrawCube(voxels[v].pos,VOXEL_SIZE,VOXEL_SIZE,VOXEL_SIZE,voxels[v].color);
+    EndMode3D();EndTextureMode();
+    Image mapImage=LoadImageFromTexture(mapShot.texture);ImageFlipVertical(&mapImage);
+    ExportImage(mapImage,"artifacts/crosscut-overview.png");UnloadImage(mapImage);UnloadRenderTexture(mapShot);
+    /* Remove the crossing and verify all authored ground supplies/spawns survive. */
+    for(int v=voxel_count-1;v>=0;v--) if(fabsf(voxels[v].pos.x)<9 && fabsf(voxels[v].pos.z)<9) remove_voxel_index(v);
+    init_static_hash();
+    for(int i=0;i<4;i++) {
+        Vector3 p=pick_player_spawn(i);
+        assert(spawn_position_clear_ex(p,spawn_clear_half(i),3,i));
+    }
+    ResetGame();assert(voxel_count==originalCount && currentWorldType==WORLD_TYPE_CROSSCUT);
+    gameState=GAME_STATE_MENU;couchLobby=true;
+    testButtons[0][GAMEPAD_BUTTON_LEFT_FACE_RIGHT]=true;couch_frame();memset(testButtons,0,sizeof(testButtons));
+    assert(currentWorldType==WORLD_TYPE_GREEK_TEMPLE && !couchReady[0]);
+    testButtons[0][GAMEPAD_BUTTON_LEFT_FACE_LEFT]=true;couch_frame();memset(testButtons,0,sizeof(testButtons));
+    assert(currentWorldType==WORLD_TYPE_CROSSCUT);
+    puts("Crosscut: 2/3/4 seats, screened spawns, destruction fallback, rematch passed");
     shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();
     puts("Firefight integration passed");return 0;
 }

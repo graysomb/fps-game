@@ -49,6 +49,7 @@ static void couch_row(int row,const char *label,bool selected) {
     DrawText(label,56,y,24,selected?GOLD:LIGHTGRAY);
 }
 static void couch_begin_lobby(bool practice) {
+    if(gameMode==GAME_MODE_DEATHMATCH) {currentWorldType=WORLD_TYPE_CROSSCUT;useCustomMap=false;}
     firefightPractice=practice;
     couchLobby=true; couchSelection=0;
     multiplayerActivePlayers=1;
@@ -197,16 +198,27 @@ static bool couch_frame(void) {
             all &= couchReady[i];
         }
         int change=couch_axis(true);
+        if(change && gameMode==GAME_MODE_DEATHMATCH) {
+            currentWorldType=(WorldType)((currentWorldType+change+WORLD_TYPE_COUNT)%WORLD_TYPE_COUNT);
+            useCustomMap=false;memset(couchReady,0,sizeof(couchReady));all=false;
+        }
+        if(gameMode==GAME_MODE_DEATHMATCH && (IsKeyPressed(KEY_TAB)||couch_button(0,GAMEPAD_BUTTON_RIGHT_FACE_UP))) {
+            useCustomMap=!useCustomMap;memset(couchReady,0,sizeof(couchReady));all=false;
+        }
         if(change && gameMode==GAME_MODE_FIREFIGHT && !firefightPractice) {
             firefightEndless=!firefightEndless;firefightFoundry=true;memset(couchReady,0,sizeof(couchReady));all=false;
         }
-        if(firefightEndless && (IsKeyPressed(KEY_TAB)||couch_button(0,GAMEPAD_BUTTON_RIGHT_FACE_UP))) {firefightFoundry=!firefightFoundry;memset(couchReady,0,sizeof(couchReady));all=false;}
+        if(gameMode==GAME_MODE_FIREFIGHT && firefightEndless && (IsKeyPressed(KEY_TAB)||couch_button(0,GAMEPAD_BUTTON_RIGHT_FACE_UP))) {firefightFoundry=!firefightFoundry;memset(couchReady,0,sizeof(couchReady));all=false;}
         BeginDrawing();couch_title(firefightPractice?"LEARN COMBAT":gameMode==GAME_MODE_FIREFIGHT?"FIREFIGHT LOBBY":"LOCAL VERSUS LOBBY");
         couch_row(0,firefightPractice?"Harvest > expose > melee > throw":gameMode==GAME_MODE_FIREFIGHT?(firefightEndless?"Endless Survival (left/right changes mode)":"Five-wave Firefight (left/right changes mode)"):"Classic deathmatch",false);
         if(gameMode==GAME_MODE_FIREFIGHT)couch_row(1,firefightFoundry?"Arena: Foundry Holdout":"Arena: current world / custom map",false);
+        else {
+            const char *names[]={"Greek Temple","Megalith","Sun-Henge","Forerunner","Citadel","Test Arena","Blood Arena","Procedural","Crosscut"};
+            couch_row(1,useCustomMap?TextFormat("Custom map slot %d",creativeMapSlot+1):TextFormat("Arena: %s | Left/right: change",names[currentWorldType]),false);
+        }
         for(int i=0;i<count;i++) couch_row(i+2,TextFormat("P%d: %s %d | %s",i+1,multiplayerPlayerInput[i]==INPUT_TYPE_GAMEPAD?"Controller":"Keyboard",multiplayerPlayerInput[i]==INPUT_TYPE_GAMEPAD?seat_device(i)+1:i+1,couchReady[i]?"READY":"Not ready"),couchReady[i]);
         DrawText("Start: join | Bottom face / Enter / RShift: ready | K: add keyboard P2",48,440,20,LIGHTGRAY);
-        DrawText("Back: leave | Endless: top face / Tab changes arena",48,470,20,LIGHTGRAY);EndDrawing();
+        DrawText(gameMode==GAME_MODE_DEATHMATCH?"Back: leave | Top face / Tab: use custom map":"Back: leave | Endless: top face / Tab changes arena",48,470,20,LIGHTGRAY);EndDrawing();
         if(back) {couchLobby=false;memset(couchReady,0,sizeof(couchReady));}
         else if(all) couch_launch();
         return true;
