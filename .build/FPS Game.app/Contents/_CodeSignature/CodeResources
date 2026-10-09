@@ -180,6 +180,34 @@
 		<data>
 		twC2VFC3AEe5U0ryYShVUL76TWM=
 		</data>
+		<key>Resources/shaders/water/water_ca.comp</key>
+		<data>
+		yQS8GtsV1X4AfnhajUCQej2xfOw=
+		</data>
+		<key>Resources/shaders/water/water_ca.metal</key>
+		<data>
+		KcUgpP6ASxpdhvDutFJdJ8mVqKQ=
+		</data>
+		<key>Resources/shaders/water_instanced.frag</key>
+		<data>
+		xmpDJsD7ABk0gGYgVzLDADm4hVo=
+		</data>
+		<key>Resources/shaders/water_instanced.vert</key>
+		<data>
+		Y4aAORd8jcvnSHrjCQB7C0cgB0M=
+		</data>
+		<key>Resources/shaders/weapon.frag</key>
+		<data>
+		6Nj3ZIbB4cGWasz51d7dl+kwH1o=
+		</data>
+		<key>Resources/shaders/weapon.vert</key>
+		<data>
+		DQmvKndfxv/2M7EvMvOAOiX25Ww=
+		</data>
+		<key>Resources/shaders/weapon_blur.frag</key>
+		<data>
+		Z0gOKp2h1VVgwwjSPZbPMZiJDZ0=
+		</data>
 	</dict>
 	<key>files2</key>
 	<dict>
@@ -187,19 +215,19 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			1vBIDoLHdN4wFXAjRPe4fwV0T3s=
+			9c9oy77fcc3ymwNIOo9X4K8TqPg=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"d6f0480e82c774de3015702344f7b87f05744f7b"</string>
+			<string>cdhash H"f5cf68cbbedf71cdf29b03483a8f57e0af13a8f8"</string>
 		</dict>
 		<key>MacOS/fps_ray_gpu</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			DSiL8hXWRVwIOv2SYha9EX3ToKk=
+			SOLewQEUxCSfz0Dmsb5qVAW6aGs=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"0d288bf215d6455c083afd926216bd117dd3a0a9"</string>
+			<string>cdhash H"48e2dec10114c4249fcf40e6b1be6a5405ba686b"</string>
 		</dict>
 		<key>MacOS/game_song.mp3</key>
 		<dict>
@@ -509,6 +537,55 @@
 			<key>hash2</key>
 			<data>
 			37oLiPJxMdtkaFdppgqkRri7E1BrXKdRKMGH3Gs6Iuo=
+			</data>
+		</dict>
+		<key>Resources/shaders/water/water_ca.comp</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			uXtg+CuihhMBRfhzU926yP418qRQSsoylD+I7OAhJck=
+			</data>
+		</dict>
+		<key>Resources/shaders/water/water_ca.metal</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			athk0fcfXnyxLtYNneg9JGIvAzoEvPtZNGKmRlOs9uQ=
+			</data>
+		</dict>
+		<key>Resources/shaders/water_instanced.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			SwmVS8G//v7tQPSXT4vEekH9hq1PGE0DYXl2aJs32Po=
+			</data>
+		</dict>
+		<key>Resources/shaders/water_instanced.vert</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			sOz4SqBWo2y1AeZvxOQnfgo0J39SA3Omn8/XcgdauGY=
+			</data>
+		</dict>
+		<key>Resources/shaders/weapon.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			R3JK2YuEKzsknHPRN9xusRAMNWCj8AnXS1onztJL1Rg=
+			</data>
+		</dict>
+		<key>Resources/shaders/weapon.vert</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			ZczpbPAaEzzHFNJQ0Hwse26+RZY0ztaKJU5L9YcD9PE=
+			</data>
+		</dict>
+		<key>Resources/shaders/weapon_blur.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			5tEBmJ57ca7jCCXpMYr3JQmG3smYBgylCjiw2kNSrQI=
 			</data>
 		</dict>
 	</dict>
