@@ -84,7 +84,7 @@ int main(int argc,char **argv) {
     for(int i=0;i<4;i++){prepVotes[i]=UPGRADE_HARVEST;prepReady[i]=true;}
     update_firefight_logic(5.1f);assert(firefightWave==3 && teamUpgrade==UPGRADE_HARVEST);
     assert(ff_harvest_amount(0)==15 && ff_harvest_amount(4)==MATTER_MELEE_HARVEST);
-    firefightWave=5;firefightEndless=false;ff_wave_complete();assert(firefightWaveState==FIREFIGHT_STATE_VICTORY);
+    firefightWave=FF_WAVE_COUNT;firefightEndless=false;ff_wave_complete();assert(firefightWaveState==FIREFIGHT_STATE_VICTORY);
     firefightEndless=true;ff_wave_complete();assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION);
     /* Four views render without indexing enemy slots as cameras. */
     RenderTexture2D screens[4]={0};int count=0,w=0,h=0;
@@ -147,14 +147,17 @@ int main(int argc,char **argv) {
     assert(gameState==GAME_STATE_PLAYING && multiplayerActivePlayers==4 && firefightWave==1);
     /* Consume all authored queues through the real death handler. */
     multiplayerActivePlayers=1;ResetGame();gameState=GAME_STATE_PLAYING;
-    for(int wave=1;wave<=5;wave++) {
+    for(int wave=1;wave<=FF_WAVE_COUNT;wave++) {
         int watchdog=200;
         while(firefightWaveState==FIREFIGHT_STATE_ACTIVE && watchdog-->0) {
             update_firefight_logic(2.1f);
-            for(int i=4;i<16;i++) if(players[i].respawn_timer<=0) kill_player(i,0,true,true);
+            for(int i=4;i<16;i++) if(players[i].respawn_timer<=0) {
+                if(players[i].enemyType==ENEMY_TYPE_FOUNDRY) enemySpecial[i].lostMask=15;
+                kill_player(i,0,true,true);
+            }
         }
         assert(watchdog>0 && firefightWaveEnemiesRemaining==0);
-        if(wave<5) {
+        if(wave<FF_WAVE_COUNT) {
             assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION);
             prepReady[0]=true;update_firefight_logic(5.1f);
             assert(firefightWave==wave+1);
@@ -218,6 +221,16 @@ int main(int argc,char **argv) {
     currentWorldType=WORLD_TYPE_TEST;ResetGame();assert(FLOOR_SIZE==20);
     gameMode=GAME_MODE_FIREFIGHT;firefightFoundry=true;ResetGame();assert(FLOOR_SIZE==32);
     capture_arena("artifacts/foundry-overview.png");
+    /* The real lab controls must reset fixtures without consuming couch seats. */
+    enemy_lab_start(ENEMY_TYPE_SCRAPPER);
+    testKeys[KEY_F3]=true;enemy_lab_controls();memset(testKeys,0,sizeof(testKeys));
+    assert(enemyLabCase==ENEMY_TYPE_SHIELDBEARER && multiplayerActivePlayers==1);
+    testKeys[KEY_F5]=true;enemy_lab_controls();memset(testKeys,0,sizeof(testKeys));assert(enemyLabPaused);
+    testKeys[KEY_F6]=true;enemy_lab_controls();memset(testKeys,0,sizeof(testKeys));assert(enemyLabStep);
+    testKeys[KEY_F4]=true;enemy_lab_controls();memset(testKeys,0,sizeof(testKeys));assert(enemySpecial[4].equipmentCount==20);
+    enemyLabGod=false;players[0].invuln_timer=0;firefightTeamLives=0;kill_player(0,4,false,false);assert(players[0].respawn_timer==3);
+    enemyLabPaused=false;enemy_tick(3.1f);assert(players[0].respawn_timer==0);
+    enemy_lab_exit();assert(!enemyLab && firefightFoundry);
     puts("Crosscut: 2/3/4 seats, screened spawns, destruction fallback, rematch passed");
     shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();
     puts("Firefight integration passed");return 0;

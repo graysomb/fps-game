@@ -11,16 +11,27 @@
 #define FF_PREP_SECONDS 20.0f
 typedef enum { LIFE_ALIVE, LIFE_DOWNED, LIFE_WAITING, LIFE_SPECTATING, LIFE_UNUSED } CombatantLifeState;
 typedef enum { UPGRADE_BUILD, UPGRADE_HARVEST, UPGRADE_THROW, UPGRADE_NONE } TeamUpgrade;
-typedef struct { const char *name; int count[3]; } WaveDefinition;
-static const WaveDefinition ff_waves[5] = {
+#define FF_TYPE_COUNT 10
+#define FF_WAVE_COUNT 12
+typedef struct { const char *name; int count[FF_TYPE_COUNT]; } WaveDefinition;
+static const WaveDefinition ff_waves[FF_WAVE_COUNT] = {
     /* Storage order is normal, swarmer, Goliath; difficulty starts with swarmers. */
     {"First Contact", {0,3,0}}, {"Swarm Patrol", {0,6,0}},
     {"Heavy Contact", {1,6,0}}, {"First Goliath", {2,6,1}},
-    {"Last Stand", {3,9,2}}
+    {"Scrap Patrol", {1,6,0,1}},
+    {"Shield Line", {1,6,0,0,1}},
+    {"Demolition", {1,6,0,0,0,1}},
+    {"Incoming Scrap", {1,6,0,0,0,0,1}},
+    {"Field Works", {1,6,0,0,0,0,0,1}},
+    {"Anchored", {1,6,0,0,0,0,0,0,1}},
+    {"Combined Assault", {2,9,1,1,1,1,1,1,1}},
+    {"Walking Foundry", {0,6,0,0,0,0,0,0,0,1}}
 };
 static inline int ff_count(int wave, int humans, int type) {
-    int base = ff_waves[(wave-1)%5].count[type];
-    int cycle = (wave-1)/5;
+    if(wave<1 || type<0 || type>=FF_TYPE_COUNT) return 0;
+    int base = ff_waves[(wave-1)%FF_WAVE_COUNT].count[type];
+    if(type>=3 || (wave-1)%FF_WAVE_COUNT==FF_WAVE_COUNT-1) return base;
+    int cycle = (wave-1)/FF_WAVE_COUNT;
     return (base * (humans+1) * (4+cycle) + 7)/8;
 }
 static inline int ff_cap(int humans) { int n=4+2*humans; return n>12?12:n; }

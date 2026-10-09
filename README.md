@@ -14,9 +14,49 @@ runs in linux and windows so far
 
 ## Couch sessions and Firefight
 
-Firefight ramps from swarmers to normals to Goliaths. Solo wave totals are
-3 swarmers; 6 swarmers; 6 swarmers plus 1 normal; 6 swarmers plus 2 normals and
-1 Goliath; then 9 swarmers plus 3 normals and 2 Goliaths. The first three waves
+### Specialist enemies and Enemy Lab
+
+Specialists use destructible equipment and telegraphed abilities rather than the
+normal enemy's automatic fire. Scrappers collect resting debris as armor;
+Shieldbearers protect allies with slow-turning shields; Sappers plant disarmable
+four-second charges; Lobbers throw catchable ballistic scrap; Builders construct
+harvestable barricades and ramps; Anchors brace nearby allies against knockback.
+Break two of the Walking Foundry's four support assemblies to open its core for
+ten seconds, or all four to expose it permanently. Strip its Matter and finish
+the exposed core with melee or debris. Repairs and reinforcements are bounded.
+
+Open **Enemy Lab** from the couch menu or advanced setup (`L`). It has isolated
+fixtures and a mixed encounter, a fixed seed, and invulnerability enabled by
+default. `F3` / LB selects the next case; `F4` / top face resets it; `F5` / left
+face pauses; `F6` / RB advances one simulation step; `F7` / Back toggles
+invulnerability; Escape leaves. The overlay shows the ability state, target,
+timers, equipment count, and intended counterplay. Normal movement, shooting,
+melee, and tether controls remain available.
+
+Launch directly with `--enemy-lab=sapper`, `--enemy-lab=mixed`, or
+`--enemy-lab=all` (cycles isolated cases every 30 simulation seconds). Valid
+specialist names are `scrapper`, `shieldbearer`, `sapper`, `lobber`, `builder`,
+`anchor`, and `foundry`. The offline Firefight console also accepts `spawn NAME`
+and uses reserved enemy slots rather than replacing human seats.
+
+`--enemy-smoke=all` runs deterministic behavior checks and a mixed physics/render
+stress scenario, returns nonzero on failure, writes enemy previews under
+`artifacts/`, and reports four-view timing. A single name selects its behavior
+checks before the mixed scenario. Run from the repository root so shaders are
+available; select `--physics=cpu-mt` or `--physics=gpu` explicitly. The normal
+`tools/validate_firefight.ps1` build workflow runs these checks too.
+
+Specialists and the lab are offline-only. Ordinary enemies retain player-count
+scaling; specialist introductions stay at one, with one specialist active in
+waves 5–10 and at most two in wave 11. Endless repeats the twelve-wave cycle.
+
+Firefight ramps from swarmers to normals to Goliaths. Solo opening wave totals are
+3 swarmers; 6 swarmers; 6 swarmers plus 1 normal; then 6 swarmers plus 2 normals and
+1 Goliath. Waves 5–10 each introduce one specialist alongside six swarmers and a
+normal: Scrapper, Shieldbearer, Sapper, Lobber, Builder, then Anchor. Wave 11 mixes
+all six specialists with nine swarmers, two normals, and a Goliath. Wave 12 pits
+the team against the Walking Foundry and at most six swarmer reinforcements.
+The first three waves
 cap simultaneous solo enemies at 2, 3, and 4 respectively, and the opening two
 waves space reinforcements four seconds apart. Totals scale with player count.
 
@@ -40,7 +80,7 @@ keyboard seats ready with Enter and Right Shift. Up to four humans can play
 alongside twelve active firefight enemies. Controller disconnects pause offline
 play; reconnect or press Start on an unused controller to explicitly reassign it.
 
-Firefight defaults to five authored waves on **Foundry Holdout**, with a victory
+Firefight defaults to twelve authored waves on **Foundry Holdout**, with a victory
 screen and rematch. Left/right in the lobby selects Endless Survival; in Endless,
 Tab or the top face button switches between Foundry and the current advanced map.
 The arena has a raised holdout, two stair approaches, a lower circulation route,

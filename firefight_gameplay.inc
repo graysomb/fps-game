@@ -1,12 +1,12 @@
 /* Firefight orchestration; included after enemy initialization. */
-static int ffRemaining[3], ffSpawnOrdinal;
+static int ffRemaining[FF_TYPE_COUNT], ffSpawnOrdinal;
 static float ffSpawnTimer, ffCleanupTimer;
 static int ffEntrance;
 static const char *ff_upgrade_names[3] = {"Build: 5 Matter", "Harvest: +15 Matter", "Throws: +25% impulse"};
 
 static EnemyType pick_firefight_enemy_type(int wave, int spawn_index) {
     (void)wave; (void)spawn_index;
-    for(int t=0;t<3;t++) if(ffRemaining[t]>0) return (EnemyType)t;
+    for(int t=0;t<FF_TYPE_COUNT;t++) if(ffRemaining[t]>0) return (EnemyType)t;
     return ENEMY_TYPE_STANDARD;
 }
 
@@ -24,6 +24,7 @@ static void ff_restore_human(int i, float matter) {
 }
 
 static void ff_resolve_death(int i) {
+    if(enemyLab) {combatantLife[i]=LIFE_WAITING;players[i].respawn_timer=3;return;}
     if(firefightPractice) { ff_restore_human(i,MATTER_MAX_DEFAULT); return; }
     if(firefightTeamLives>0) {
         firefightTeamLives--; combatantLife[i]=LIFE_WAITING;
@@ -100,11 +101,12 @@ static void ff_update_coop(float dt) {
 }
 
 static void start_firefight_wave(int wave_number) {
+    enemy_cleanup(true);
     firefightWave=wave_number<1?1:wave_number;
     firefightWaveState=FIREFIGHT_STATE_ACTIVE;
     firefightWaveBannerTimer=3.5f;
     firefightWaveEnemiesTotal=0; firefightEnemiesSpawned=0;
-    for(int t=0;t<3;t++) {
+    for(int t=0;t<FF_TYPE_COUNT;t++) {
         ffRemaining[t]=firefightPractice ? (t==0?1:0) : ff_count(firefightWave,firefightHumans,t);
         firefightWaveEnemiesTotal+=ffRemaining[t];
     }
@@ -131,13 +133,15 @@ static void reset_firefight_match(void) {
 }
 
 static void ff_wave_complete(void) {
+    if(enemyLab) return;
+    enemyCleanupPending=true;
     if(firefightPractice) {
         if(practiceStep>=4) { firefightWaveState=FIREFIGHT_STATE_VICTORY; gameState=GAME_STATE_GAMEOVER; }
         else { ffRemaining[0]=1; firefightWaveEnemiesTotal++; firefightWaveEnemiesRemaining=1; ffSpawnTimer=2; }
         return;
     }
     teamUpgrade=UPGRADE_NONE;
-    if(!firefightEndless && firefightWave>=5) {
+    if(!firefightEndless && firefightWave>=FF_WAVE_COUNT) {
         firefightWaveState=FIREFIGHT_STATE_VICTORY; gameState=GAME_STATE_GAMEOVER; return;
     }
     firefightWaveState=FIREFIGHT_STATE_INTERMISSION;
@@ -163,6 +167,8 @@ static bool ff_spawn_position(int slot, Vector3 *out) {
 }
 
 static void update_firefight_logic(float dt) {
+    if(enemyLab) return;
+    enemy_tick(dt);
     if(firefightWaveState==FIREFIGHT_STATE_VICTORY || firefightWaveState==FIREFIGHT_STATE_DEFEAT) return;
     if(firefightWaveBannerTimer>0) firefightWaveBannerTimer-=dt;
     ff_update_coop(dt);
@@ -189,15 +195,18 @@ static void update_firefight_logic(float dt) {
     ffCleanupTimer+=dt;
     ffSpawnTimer-=dt;
     if(ffSpawnTimer>0) return;
-    int living=0,goliaths=0,slot=-1;
+    int living=0,goliaths=0,specialists=0,slot=-1;
     for(int i=MAX_PLAYERS;i<MAX_COMBATANTS;i++) {
-        if(players[i].respawn_timer<=0) { living++; if(players[i].enemyType==ENEMY_TYPE_GOLIATH) goliaths++; }
+        if(players[i].respawn_timer<=0) { living++; if(enemy_is_special(i)) specialists++; if(players[i].enemyType==ENEMY_TYPE_GOLIATH) goliaths++; }
         else if(slot<0) slot=i;
     }
     int waveCap=ff_wave_cap(firefightWave,firefightHumans);
     if(slot<0 || living>=waveCap) return;
     int type=-1;
-    for(int n=0;n<3;n++) { int t=(ffSpawnOrdinal+n)%3; if(ffRemaining[t]>0 && (t!=2 || goliaths<2)) {type=t;break;} }
+    for(int n=0;n<FF_TYPE_COUNT;n++) { int t=(ffSpawnOrdinal+n)%FF_TYPE_COUNT;
+        if(t==ENEMY_TYPE_SWARMER && (firefightWave-1)%FF_WAVE_COUNT==FF_WAVE_COUNT-1) continue;
+        int specialistCap=(firefightWave-1)%FF_WAVE_COUNT==10?2:1;
+        if(ffRemaining[t]>0 && (t!=2 || goliaths<2) && (t<3 || specialists<specialistCap)) {type=t;break;} }
     if(type<0) return;
     int pack=type==ENEMY_TYPE_SWARMER?3:1;
     for(int n=0;n<pack && ffRemaining[type]>0 && living<waveCap;n++) {
@@ -213,6 +222,6 @@ static void update_firefight_logic(float dt) {
         players[slot].death_pos=position;
         ffRemaining[type]--; firefightEnemiesSpawned++; ffSpawnOrdinal++; living++;
     }
-    ffEntrance=(firefightWave%5==4 || firefightWave%5==0)?1-ffEntrance:0;
+    ffEntrance=(firefightWave>=4)?1-ffEntrance:0;
     ffSpawnTimer=firefightWave<=2?4:2;
 }

@@ -25,4 +25,6 @@ try {
     Copy-Item -LiteralPath 'game_song.mp3' -Destination $gameDir -Force
     & gcc fps_ray.c @sources @flags -o "$gameDir/fps_ray_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Game build failed' }
+    & "$gameDir/fps_ray_$variant.exe" "--physics=$backend" --enemy-smoke=all
+    if ($LASTEXITCODE -ne 0) { throw 'Enemy behavior tests failed' }
 } finally { Pop-Location }

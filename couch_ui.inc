@@ -49,6 +49,7 @@ static void couch_row(int row,const char *label,bool selected) {
     DrawText(label,56,y,24,selected?GOLD:LIGHTGRAY);
 }
 static void couch_begin_lobby(bool practice) {
+    enemyLab=false;
     if(gameMode==GAME_MODE_DEATHMATCH) {currentWorldType=WORLD_TYPE_CROSSCUT;useCustomMap=false;}
     firefightPractice=practice;
     couchLobby=true; couchSelection=0;
@@ -61,6 +62,7 @@ static void couch_launch(void) {
     ResetGame(); gameState=GAME_STATE_PLAYING; couchLobby=false;
 }
 static void ff_draw_hud(int i,int w,int h) {
+    if(enemyLab) {enemy_lab_hud(w,h);return;}
     if(gameMode!=GAME_MODE_FIREFIGHT || i>=firefightHumans) return;
     int font=w<700?16:20;
     /* Reserve the lower-left corner for the existing radar. */
@@ -77,8 +79,10 @@ static void ff_draw_hud(int i,int w,int h) {
         int v=prepVotes[i]<0?0:prepVotes[i];
         text=TextFormat("%s %s",ff_upgrade_names[v],prepReady[i]?"[READY]":"");
         DrawText(playerInput[i]==INPUT_TYPE_GAMEPAD?(prepMenuOpen[i]?"D-pad: vote | Bottom: ready | Top: build":"Top face: vote menu"):(prepMenuOpen[i]?"Look: vote | Jump: ready | V/N: build":"V/N: vote menu"),panelX,h-112,font,RAYWHITE);
-        const WaveDefinition *next=&ff_waves[firefightWave%5];
-        DrawText(TextFormat("Next: %s (%d standard, %d swarm, %d giants)",next->name,ff_count(firefightWave+1,firefightHumans,0),ff_count(firefightWave+1,firefightHumans,1),ff_count(firefightWave+1,firefightHumans,2)),panelX,h-142,w<700?14:font,RAYWHITE);
+        const WaveDefinition *next=&ff_waves[firefightWave%FF_WAVE_COUNT];
+        int total=0,special=0;
+        for(int t=0;t<FF_TYPE_COUNT;t++) {int n=ff_count(firefightWave+1,firefightHumans,t);total+=n;if(t>=3)special+=n;}
+        DrawText(TextFormat("Next: %s (%d / %d special)",next->name,total,special),panelX,h-142,w<700?12:font,RAYWHITE);
     } else {
         for(int j=0;j<firefightHumans;j++) if(combatantLife[j]==LIFE_DOWNED) {
             text=TextFormat("P%d DOWN | Hold %s nearby: revive (25 Matter)",j+1,playerInput[i]==INPUT_TYPE_GAMEPAD?"LB":i==0?"X":","); break;
@@ -159,7 +163,7 @@ static bool couch_frame(void) {
         if(confirm || pausePressed) {
             if(couchSelection==0&&missing<0) gameState=GAME_STATE_PLAYING;
             if(couchSelection==1) couchSettings=true;
-            if(couchSelection==2) {gameState=GAME_STATE_MENU;couchLobby=true;memset(couchReady,0,sizeof(couchReady));}
+            if(couchSelection==2) {if(enemyLab) enemy_lab_exit();else {gameState=GAME_STATE_MENU;couchLobby=true;memset(couchReady,0,sizeof(couchReady));}}
         }
         return true;
     }
@@ -210,7 +214,7 @@ static bool couch_frame(void) {
         }
         if(gameMode==GAME_MODE_FIREFIGHT && firefightEndless && (IsKeyPressed(KEY_TAB)||couch_button(0,GAMEPAD_BUTTON_RIGHT_FACE_UP))) {firefightFoundry=!firefightFoundry;memset(couchReady,0,sizeof(couchReady));all=false;}
         BeginDrawing();couch_title(firefightPractice?"LEARN COMBAT":gameMode==GAME_MODE_FIREFIGHT?"FIREFIGHT LOBBY":"LOCAL VERSUS LOBBY");
-        couch_row(0,firefightPractice?"Harvest > expose > melee > throw":gameMode==GAME_MODE_FIREFIGHT?(firefightEndless?"Endless Survival (left/right changes mode)":"Five-wave Firefight (left/right changes mode)"):"Classic deathmatch",false);
+        couch_row(0,firefightPractice?"Harvest > expose > melee > throw":gameMode==GAME_MODE_FIREFIGHT?(firefightEndless?"Endless Survival (left/right changes mode)":"Twelve-wave Firefight (left/right changes mode)"):"Classic deathmatch",false);
         if(gameMode==GAME_MODE_FIREFIGHT)couch_row(1,firefightFoundry?"Arena: Foundry Holdout":"Arena: current world / custom map",false);
         else {
             const char *names[]={"Greek Temple","Megalith","Sun-Henge","Forerunner","Citadel","Test Arena","Blood Arena","Procedural","Crosscut"};
@@ -223,14 +227,15 @@ static bool couch_frame(void) {
         else if(all) couch_launch();
         return true;
     }
-    couchSelection=(couchSelection+couch_axis(false)+5)%5;
+    couchSelection=(couchSelection+couch_axis(false)+6)%6;
     BeginDrawing();couch_title("CONSTRUCTOR BRAWLER");
-    const char *items[]={"Firefight","Local versus","Learn combat","Controller settings","World builder / LAN / advanced setup"};
-    for(int i=0;i<5;i++) couch_row(i,items[i],couchSelection==i);
+    const char *items[]={"Firefight","Local versus","Learn combat","Controller settings","World builder / LAN / advanced setup","Enemy Lab"};
+    for(int i=0;i<6;i++) couch_row(i,items[i],couchSelection==i);
     DrawText("Start on a controller to use it | D-pad: navigate | Bottom face: confirm",48,405,20,LIGHTGRAY);EndDrawing();
     if(confirm) {
         if(couchSelection==0||couchSelection==1||couchSelection==2) {gameMode=couchSelection==1?GAME_MODE_DEATHMATCH:GAME_MODE_FIREFIGHT;couch_begin_lobby(couchSelection==2);}
         else if(couchSelection==3)couchSettings=true;
+        else if(couchSelection==5)enemy_lab_start(ENEMY_TYPE_SCRAPPER);
         else {couchAdvanced=true;firefightPractice=false;gameMode=GAME_MODE_DEATHMATCH;activePlayers=clamp_active_players(multiplayerActivePlayers);}
     }
     return true;

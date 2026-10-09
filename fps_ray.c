@@ -163,6 +163,7 @@ static int physicsSmokeBatchSize = 1;
 static bool tetherThrowCcdEnabled = true;
 static bool weaponBloomEnabled = true;
 static bool aiSmokeTestRequested = false;
+static const char *enemyLabRequested=NULL,*enemySmokeRequested=NULL;
 
 static NetTransport netTransport;
 static NetRole netRequestedRole = NET_ROLE_OFFLINE;
@@ -216,6 +217,8 @@ static bool parse_physics_arguments(int argc, char **argv) {
     physicsBackend.requested = PHYSICS_BACKEND_AUTO;
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
+        if(strncmp(arg,"--enemy-lab=",12)==0) {enemyLabRequested=arg+12;continue;}
+        if(strncmp(arg,"--enemy-smoke=",14)==0) {enemySmokeRequested=arg+14;continue;}
         if (strcmp(arg, "--no-weapon-bloom") == 0) {
             weaponBloomEnabled = false;
             continue;
@@ -390,7 +393,10 @@ static GameMode gameMode = GAME_MODE_DEATHMATCH;
 typedef enum {
     ENEMY_TYPE_STANDARD = 0,
     ENEMY_TYPE_SWARMER,
-    ENEMY_TYPE_GOLIATH
+    ENEMY_TYPE_GOLIATH,
+    ENEMY_TYPE_SCRAPPER, ENEMY_TYPE_SHIELDBEARER, ENEMY_TYPE_SAPPER,
+    ENEMY_TYPE_LOBBER, ENEMY_TYPE_BUILDER, ENEMY_TYPE_ANCHOR,
+    ENEMY_TYPE_FOUNDRY, ENEMY_TYPE_COUNT
 } EnemyType;
 
 typedef enum {
@@ -475,6 +481,7 @@ static void update_draw_confetti(void) {
 #define MAX_COMBATANTS 16
 #include "firefight_rules.h"
 _Static_assert(MAX_PLAYERS == FF_SEATS && MAX_COMBATANTS == FF_ACTORS, "Firefight capacity mismatch");
+_Static_assert(ENEMY_TYPE_COUNT == FF_TYPE_COUNT, "Enemy definitions and wave counts must match");
 typedef enum {
     INPUT_TYPE_KEYBOARD,
     INPUT_TYPE_GAMEPAD,
@@ -8184,6 +8191,7 @@ static bool menuSetupSubmenuOpen = false;
 
 static int clamp_active_players(int count);
 static void ResetGame(void);
+#include "enemy_specialists.h"
 static void reset_firefight_match(void);
 static void start_firefight_wave(int wave_number);
 static void update_firefight_logic(float dt);
@@ -9046,6 +9054,7 @@ static void ResetCreative(void) {
 }
 
 static void ResetGame(void) {
+    enemy_cleanup(true);
     worldFloorHalfSize=(!useCustomMap && (currentWorldType==WORLD_TYPE_CROSSCUT ||
         (gameMode==GAME_MODE_FIREFIGHT && (firefightFoundry||firefightPractice))))?32.0f:20.0f;
     if(netTransport.role!=NET_ROLE_OFFLINE && gameMode==GAME_MODE_FIREFIGHT) gameMode=GAME_MODE_DEATHMATCH;
@@ -9738,9 +9747,7 @@ static void UpdateKdRatio(int player_index) {
 
     if (gameMode == GAME_MODE_FIREFIGHT) {
         // Firefight Matter is fixed by enemy type, regardless of K/D.
-        p->matterMax = (is_player_bot(player_index) && p->enemyType == ENEMY_TYPE_SWARMER)
-                           ? MATTER_MAX_DEFAULT * 0.25f
-                           : MATTER_MAX_DEFAULT;
+        p->matterMax = is_player_bot(player_index)?enemy_matter(p->enemyType):MATTER_MAX_DEFAULT;
     } else {
         // Scale matter max based on K/D: Lower K/D -> More Matter.
         // Base 100 at K/D 1.0. Max ~200 at K/D 0. Min ~20 at K/D 9.
@@ -9858,6 +9865,8 @@ static void kill_player(int player_index, int attacker_index,
         }
     }
     Player *player = &players[player_index];
+    if(enemyLab && enemyLabGod && player_index<firefightHumans) return;
+    if(!enemy_core_open(player_index)) return;
     if (player->respawn_timer > 0.0f) {
         return;
     }
@@ -9885,6 +9894,7 @@ static void kill_player(int player_index, int attacker_index,
                  award_kill ? 1 : 0, award_debris ? 1 : 0,
                  player->matter, player->isExposed ? 1 : 0);
     }
+    if(enemy_is_special(player_index)) enemy_on_death(player_index);
     player->deaths++;
     UpdateKdRatio(player_index);
     if (attacker_index >= 0 && attacker_index < activePlayers && attacker_index != player_index) {
@@ -9965,6 +9975,8 @@ static void apply_matter_damage(int player_index, int attacker_index, float dama
             return; // Friendly fire disabled in Firefight
         }
     }
+    if(enemyLab && enemyLabGod && player_index<firefightHumans) return;
+    if(!enemy_core_open(player_index)) return;
     Player *player = &players[player_index];
     if (player->respawn_timer > 0.0f) {
         return;
@@ -14080,6 +14092,7 @@ static void update_goliath_armor_positions(int player_idx) {
 
 static int get_goliath_owner_of_voxel(int voxel_idx) {
     if (voxel_idx < 0 || voxel_idx >= voxel_count) return -1;
+    int special=enemy_equipment_owner(voxel_idx);if(special>=0) return special;
     uint64_t ident = voxels[voxel_idx].identity;
     for (int p = 0; p < activePlayers; ++p) {
         if (players[p].enemyType != ENEMY_TYPE_GOLIATH) continue;
@@ -14095,6 +14108,7 @@ static int get_goliath_owner_of_voxel(int voxel_idx) {
 
 static void detach_goliath_armor_voxel(int voxel_idx) {
     if (voxel_idx < 0 || voxel_idx >= voxel_count) return;
+    if(enemy_equipment_owner(voxel_idx)>=0) {enemy_detach(voxel_idx);return;}
     uint64_t ident = voxels[voxel_idx].identity;
     for (int p = 0; p < activePlayers; ++p) {
         if (players[p].enemyType != ENEMY_TYPE_GOLIATH) continue;
@@ -14225,6 +14239,7 @@ static void explode_goliath_armor(int player_idx) {
 }
 
 static void init_firefight_bot_entity(int i, EnemyType etype, InputType botDiff) {
+    enemy_release(i);
     for(int v=0;v<voxel_count;v++) {
         if(voxels[v].owner==i) voxels[v].owner=-1;
         if(voxels[v].activator==i) voxels[v].activator=-1;
@@ -14275,7 +14290,8 @@ static void init_firefight_bot_entity(int i, EnemyType etype, InputType botDiff)
         goliathStates[i].count = 0;
     }
 
-    spawn_player_explosion(b->pos, player_palette_color(i));
+    if(etype>=ENEMY_TYPE_SCRAPPER) enemy_init(i);
+    if(!enemyLab) spawn_player_explosion(b->pos, player_palette_color(i));
     play_sfx(SFX_SHIELD);
 }
 
@@ -14722,6 +14738,10 @@ static bool melee_hit_players(int attacker_idx, Vector3 start, Vector3 end, Vect
             !segment_intersects_aabb(attacker_pos, body_end, box_min, box_max)) {
             continue;
         }
+        /* Equipment intercepts frontal melee too; the voxel melee pass can strip it. */
+        Vector3 toVictim=v_sub(players[j].pos,attacker_pos);float victimDistance=v_length(toVictim);
+        int blocker=first_voxel_hit((Ray){attacker_pos,v_norm(toVictim)},fmaxf(0,victimDistance-.3f),-1);
+        if(blocker>=0 && enemy_equipment_owner(blocker)==j) continue;
         Vector3 knock_dir = v_sub(players[j].pos, attacker_pos);
         knock_dir.y = 0.0f;
         float knock_len = v_length(knock_dir);
@@ -14736,8 +14756,9 @@ static bool melee_hit_players(int attacker_idx, Vector3 start, Vector3 end, Vect
                 knock_dir = (Vector3){ 0.0f, 0.0f, -1.0f };
             }
         }
-        players[j].vel = v_add(players[j].vel, v_mul(knock_dir, MELEE_KNOCKBACK_SPEED));
-        players[j].vel.y += MELEE_UPWARD_BOOST;
+        float brace=enemy_knockback_scale(j);
+        players[j].vel = v_add(players[j].vel, v_mul(knock_dir, MELEE_KNOCKBACK_SPEED*brace));
+        players[j].vel.y += MELEE_UPWARD_BOOST*brace;
         players[j].meleeKnockbackActive = true;
         apply_matter_damage(j, attacker_idx, MATTER_MELEE_DAMAGE);
         if (players[j].isExposed) {
@@ -17656,6 +17677,7 @@ static void draw_player_face(const Player *p, Vector3 render_pos, float body_siz
 }
 
 static void draw_players(void) {
+    enemy_draw();
     for (int i = 0; i < activePlayers; i++) {
         Player *p = &players[i];
         if(gameMode==GAME_MODE_FIREFIGHT && i<firefightHumans && combatantLife[i]==LIFE_DOWNED) {
@@ -17669,6 +17691,7 @@ static void draw_players(void) {
         }
         float body_size = (p->enemyType == ENEMY_TYPE_SWARMER) ? (PLAYER_SIZE * 0.5f) : PLAYER_SIZE;
         Color base = player_palette_color(i);
+        if(enemy_is_special(i)) base=enemy_color(p->enemyType);
         if (p->enemyType == ENEMY_TYPE_SWARMER) {
             base = (Color){ 235, 70, 45, 255 };
         } else if (p->enemyType == ENEMY_TYPE_GOLIATH) {
@@ -17681,7 +17704,7 @@ static void draw_players(void) {
         }
         DrawCube(render_pos, body_size, body_size, body_size, base);
         DrawCubeWires(render_pos, body_size, body_size, body_size, base_dark);
-        if (drawWeaponModels && i != drawViewPlayerIndex) {
+        if (drawWeaponModels && i != drawViewPlayerIndex && !enemy_is_special(i)) {
             Vector3 eye = drawViewPlayerIndex >= 0 ? players[drawViewPlayerIndex].pos : p->pos;
             draw_player_weapon(i, eye, false, WEAPON_COLOR);
         }
@@ -18533,7 +18556,10 @@ static void bot_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float
     }
 }
 
+#include "enemy_specialists.inc"
 static void UpdateBot(int playerIdx, float dt) {
+    if(enemyLab && enemyLabPaused && !enemyLabStep) return;
+    if(enemy_is_special(playerIdx)) {enemy_update(playerIdx,dt);return;}
     Player *bot = &players[playerIdx];
     BotState *bs = &botStates[playerIdx];
 
@@ -19711,35 +19737,18 @@ static void debug_console_exec(const char *line)
         return;
     }
     if (strcmp(cmd, "spawn") == 0) {
-        const char *arg = strtok(NULL, " \t");
-        EnemyType etype = ENEMY_TYPE_STANDARD;
-        if (arg && strcmp(arg, "swarmer") == 0) {
-            etype = ENEMY_TYPE_SWARMER;
-        } else if (arg && strcmp(arg, "goliath") == 0) {
-            etype = ENEMY_TYPE_GOLIATH;
-        } else if (arg && strcmp(arg, "standard") != 0 && arg[0]) {
-            debug_console_print("usage: spawn swarmer|goliath|standard");
-            return;
+        if(netTransport.role!=NET_ROLE_OFFLINE || gameMode!=GAME_MODE_FIREFIGHT) {
+            debug_console_print("spawn: use offline Firefight or Enemy Lab");return;
         }
-        int slot = -1;
-        for (int i = 0; i < MAX_PLAYERS; ++i) {
-            if (i >= activePlayers || (is_player_bot(i) && players[i].respawn_timer > 9000.0f)) {
-                slot = i;
-                break;
-            }
-        }
-        if (slot < 0) {
-            debug_console_print("spawn: no free player slot");
-            return;
-        }
-        if (slot >= activePlayers) {
-            activePlayers = slot + 1;
-        }
-        init_firefight_bot_entity(slot, etype, INPUT_TYPE_BOT_MEDIUM);
-        debug_console_printf("spawned %s as p%d",
-                             etype == ENEMY_TYPE_SWARMER ? "swarmer" :
-                             (etype == ENEMY_TYPE_GOLIATH ? "goliath" : "standard"), slot);
-        return;
+        const char *arg=strtok(NULL," \t");int type=ENEMY_TYPE_STANDARD;
+        if(arg) {type=-1;for(int t=0;t<ENEMY_TYPE_COUNT;t++) if(!strcmp(arg,enemy_names[t]) || (t==0&&!strcmp(arg,"standard"))) type=t;}
+        if(type<0) {debug_console_print("spawn normal|swarmer|goliath|scrapper|shieldbearer|sapper|lobber|builder|anchor|foundry");return;}
+        int slot=-1;for(int i=MAX_PLAYERS;i<MAX_COMBATANTS;i++) if(players[i].respawn_timer>0) {slot=i;break;}
+        if(slot<0) {debug_console_print("spawn: no free enemy slot");return;}
+        init_firefight_bot_entity(slot,(EnemyType)type,INPUT_TYPE_BOT_MEDIUM);
+        players[slot].pos=nudge_spawn_clear(v_add(players[local].pos,v_mul(player_forward(&players[local]),8)),spawn_clear_half(slot),2,slot);
+        if(!enemyLab) {firefightWaveEnemiesTotal++;firefightWaveEnemiesRemaining++;firefightEnemiesSpawned++;}
+        debug_console_printf("spawned %s in enemy slot %d",enemy_names[type],slot);return;
     }
     debug_console_printf("unknown command: %s  (try help)", cmd);
 }
@@ -19989,6 +19998,9 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 DrawText(label, HUD_PADDING_X, HUD_PADDING_Y, HUD_FONT_SIZE, WHITE);
                 DrawRectangle(HUD_PADDING_X + 8, HUD_PADDING_Y + HUD_FONT_SIZE + 4, 36, 14, c);
                 draw_creative_help_overlay(i, view_w, view_h);
+            } else if(enemyLab) {
+                int living=0;for(int e=MAX_PLAYERS;e<activePlayers;e++) living+=players[e].respawn_timer<=0;
+                DrawText(TextFormat("P%d | ENEMY LAB | %d active enemies",i+1,living),HUD_PADDING_X,HUD_PADDING_Y,HUD_FONT_SIZE,WHITE);
             } else if (gameMode == GAME_MODE_FIREFIGHT) {
                 DrawText(TextFormat("P%d | LIVES: %d | SCORE: %d | KILLS: %d",
                                     i + 1, firefightTeamLives, firefightScore, firefightKillsTotal),
@@ -20485,14 +20497,15 @@ static bool run_ai_awareness_smoke_test(void) {
 #define FPS_EXIT_GPU_INITIALIZATION_FAILED 79
 
 #include "couch_ui.inc"
+#include "enemy_lab.inc"
 
 int main(int argc, char **argv) {
     if (!parse_physics_arguments(argc, argv)) return 2;
-    bool automatedRun = physicsSmokeSteps > 0 || debug_run_requested() || aiSmokeTestRequested;
+    bool automatedRun = physicsSmokeSteps > 0 || debug_run_requested() || aiSmokeTestRequested || enemySmokeRequested;
     int countFrame = 0;
     SetLoggingEnabled(getenv("FPS_SHADER_LOG") != NULL);
     SetTraceLogLevel(physicsReportRequested ? LOG_ALL : LOG_NONE);
-    if ((debug_run_requested() && !debug_show_window_requested()) || aiSmokeTestRequested || physicsSmokeSteps > 0) {
+    if ((debug_run_requested() && !debug_show_window_requested()) || aiSmokeTestRequested || physicsSmokeSteps > 0 || enemySmokeRequested) {
         SetConfigFlags(FLAG_WINDOW_HIDDEN);
     }
     // init window and render textures
@@ -20559,6 +20572,15 @@ int main(int argc, char **argv) {
         shutdown_pbd_thread_pool();
         CloseWindow();
         return FPS_EXIT_GPU_INITIALIZATION_FAILED;
+    }
+    if(enemySmokeRequested) {
+        bool ok=enemy_run_smoke(enemySmokeRequested);
+        shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();return ok?0:5;
+    }
+    if(enemyLabRequested) {
+        int which=enemy_parse_case(enemyLabRequested);
+        if(which<0 || netRequestedRole!=NET_ROLE_OFFLINE) {fprintf(stderr,"Invalid/offline-only Enemy Lab case\n");CloseWindow();return 2;}
+        enemyLabAll=!strcmp(enemyLabRequested,"all");enemy_lab_start(which);
     }
     if (physicsSmokeSteps > 0) {
         bool ok = run_physics_smoke_test(physicsSmokeSteps);
@@ -20630,6 +20652,7 @@ int main(int argc, char **argv) {
         if (IsKeyPressed(KEY_F2)) {
             //SetLoggingEnabled(!logsEnabled);
         }
+        if(enemyLab) enemy_lab_controls();
         if (couch_frame()) continue;
         switch (gameState) {
             case GAME_STATE_MENU: {
@@ -20777,6 +20800,7 @@ int main(int argc, char **argv) {
                         DrawRectangleLines(boxX + 1, boxY + 1, boxW - 2, boxH - 2, DARKGRAY);
 
                         DrawText("FIREFIGHT & WORLD GENERATOR SETUP", boxX + 28, boxY + 18, 26, (Color){ 25, 30, 45, 255 });
+                        if(DrawMenuButton((Rectangle){boxX+600,boxY+16,180,32},"Enemy Lab (L)",16,false,DARKBLUE,LIGHTGRAY,BLACK) || IsKeyPressed(KEY_L)) enemy_lab_start(ENEMY_TYPE_SCRAPPER);
                         Rectangle backRec = { (float)(boxX + boxW - 228), (float)(boxY + 16), 200.0f, 34.0f };
                         if (DrawMenuButton(backRec, "< Back to Menu (ESC)", 14, false, (Color){ 80, 90, 110, 255 }, (Color){ 230, 235, 242, 240 }, BLACK)) {
                             menuSetupSubmenuOpen = false;
@@ -21548,6 +21572,10 @@ int main(int argc, char **argv) {
                 break;
             case GAME_STATE_PLAYING: {
         float dt = GetFrameTime();
+        if(enemyLab) {
+            dt=enemyLabPaused?(enemyLabStep?1.0f/60:0):fminf(dt,.05f);
+            enemyLabClock+=dt;enemy_tick(dt);
+        }
         debug_console_update();
         if (netTransport.role == NET_ROLE_CLIENT) {
             net_client_update(dt);
@@ -21689,22 +21717,22 @@ int main(int argc, char **argv) {
             gameState = GAME_STATE_PAUSED;
         }
 
-        if (IsKeyPressed(KEY_F3)) {
+        if (!enemyLab && IsKeyPressed(KEY_F3)) {
             debugDrawParticles = !debugDrawParticles;
             if (!debugDrawParticles) {
                 debugColorParticlesByVelocity = false;
             }
         }
-        if (IsKeyPressed(KEY_F4)) {
+        if (!enemyLab && IsKeyPressed(KEY_F4)) {
             debugColorParticlesByVelocity = !debugColorParticlesByVelocity;
             if (debugColorParticlesByVelocity) {
                 debugDrawParticles = true;
             }
         }
-        if (IsKeyPressed(KEY_F6)) {
+        if (!enemyLab && IsKeyPressed(KEY_F6)) {
             debugSfxKeysEnabled = !debugSfxKeysEnabled;
         }
-        if (IsKeyPressed(KEY_F7)) {
+        if (!enemyLab && IsKeyPressed(KEY_F7)) {
             aimAssistDebugDraw = !aimAssistDebugDraw;
         }
         if (IsKeyPressed(KEY_F8)) {
@@ -21759,6 +21787,7 @@ int main(int argc, char **argv) {
             if (players[i].enemyType == ENEMY_TYPE_GOLIATH && players[i].respawn_timer <= 0.0f) {
                 update_goliath_armor_positions(i);
             }
+            if(enemy_is_special(i) && players[i].respawn_timer<=0) enemy_update_equipment(i);
         }
 
         for (int i = 0; i < activePlayers; ++i) {
@@ -21790,7 +21819,7 @@ int main(int argc, char **argv) {
                     knockDir.y = fmaxf(knockDir.y, 0.35f);
                     knockDir = v_norm(knockDir);
 
-                    victim->vel = v_add(victim->vel, v_mul(knockDir, knockbackImpulse));
+                    victim->vel = v_add(victim->vel, v_mul(knockDir, knockbackImpulse*enemy_knockback_scale(j)));
                     victim->meleeKnockbackActive = true;
                     apply_matter_damage(j, i, contactDamage);
                     bot->contactDamageTimer = (bot->enemyType == ENEMY_TYPE_SWARMER) ? 0.5f : 0.8f;
