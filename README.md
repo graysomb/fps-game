@@ -110,6 +110,14 @@ sensitivity, deadzone, and invert-Y settings are saved in `couch_settings.cfg`.
 The new Firefight modes are local-only; existing LAN PvP and creative protocols
 remain four-player modes.
 
+For a quick check without raylib or a display, run
+`python tools/validate_headless.py` with Python 3.9+ and GCC on your PATH.
+This compiles and runs the Firefight rules and network protocol tests, then
+checks the shared GPU shader layouts. Use `--cc clang` to select another C
+compiler, or `--sanitize` where AddressSanitizer and UndefinedBehaviorSanitizer
+are available. CI runs these checks with sanitizers on Linux for pushes and
+pull requests.
+
 After building raylib with `build.ps1`, run `tools/validate_firefight.ps1` and
 `tools/validate_firefight.ps1 -Gpu` to build and check CPU/OpenGL variants. These
 also produce `.build/couch/fps_ray_cpu.exe` and
