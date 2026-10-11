@@ -656,3 +656,16 @@ the first-step SSBOs and record static-hash differences or stale cluster cells, 
 `simId` mismatches or missing corners, and zero-mass tagged corners. The same counters
 appear in the capture overlay. Overhang reports additionally compare root and tip motion
 at step 30, require a retained static root anchor, and assert measurable relative bending.
+
+### Rat player characters
+
+Human-controlled characters use procedural low-poly rats with small black eyes, a transparent one-eye scouter,
+and player-colored gear. Bots retain their original appearances. Rat bodies, status flashes,
+walking/airborne/downed poses, and first-person weapon paws are cosmetic; collision
+and damage rules are unchanged. The scouter rim and gear share weapon bloom and remain luminous with
+`--no-weapon-bloom`. LAN human slots use the same appearance without a protocol change.
+
+Run `tools/validate_character.ps1` on Windows after building raylib. It checks both
+OpenGL versions, shader fallback, mesh data, emission occlusion, split-screen play,
+and a loopback host/client snapshot. Reference views and weapon-paw captures are
+written to `artifacts/rat`; logs and preview executables are in `.build/rat`.

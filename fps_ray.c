@@ -48,6 +48,7 @@
 #include "physics_backend.h"
 #include "net_transport.h"
 #include "weapon_renderer.h"
+#include "character_renderer.h"
 #if defined(GRAPHICS_API_OPENGL_43)
 #include "external/glad.h"
 #endif
@@ -17566,6 +17567,11 @@ static WeaponMeleePose player_weapon_melee_sample(const Player *p, float now) {
     return sample;
 }
 
+static bool player_uses_rat(int i) {
+    // LAN slots are human-owned; local input settings do not describe remote slots.
+    return i>=0 && i<MAX_PLAYERS && (netTransport.role!=NET_ROLE_OFFLINE ? netPlayerPresent[i] : !is_player_bot(i));
+}
+
 static WeaponPose player_weapon_pose(int player_index, bool first_person) {
     Player *p = &players[player_index];
     Vector3 forward = player_forward(p);
@@ -17575,8 +17581,27 @@ static WeaponPose player_weapon_pose(int player_index, bool first_person) {
     WeaponMeleePose melee = weaponFrameSampled ? weaponMeleeSamples[player_index] :
                                                player_weapon_melee_sample(p, now);
     WeaponKind kind = weaponFrameSampled ? weaponKindSamples[player_index] : player_weapon_kind(p);
-    return weapon_pose(kind, p->pos, forward, right, up, first_person, weaponViewAspect, &melee,
+    WeaponPose pose=weapon_pose(kind, p->pos, forward, right, up, first_person, weaponViewAspect, &melee,
                        weapon_shot_amount(&weaponVisuals[player_index], now));
+    if(!first_person && player_uses_rat(player_index)) {
+        // Fit the authored gun to the small rat. Gameplay rays and held-voxel targets
+        // never use this display transform; melee keeps its actual strike endpoint.
+        Vector3 originalHeel=pose.grip_heel;
+        Matrix scale=MatrixMultiply(MatrixTranslate(-p->pos.x,-p->pos.y,-p->pos.z),MatrixScale(.42f,.42f,.42f));
+        scale=MatrixMultiply(scale,MatrixTranslate(p->pos.x,p->pos.y,p->pos.z));
+        pose.transform=MatrixMultiply(pose.transform,scale);
+        pose.muzzle=Vector3Transform(pose.muzzle,scale);
+        pose.grip_heel=Vector3Transform(pose.grip_heel,scale);
+        if(melee.progress>=0 && melee.progress<=1) {
+            float enter=clampf(melee.progress/WEAPON_MELEE_ACTIVE_START,0,1);
+            float exit=clampf((1-melee.progress)/(1-WEAPON_MELEE_ACTIVE_END),0,1);
+            float amount=enter*enter*(3-2*enter)*exit*exit*(3-2*exit);
+            Vector3 correction=v_mul(v_sub(originalHeel,pose.grip_heel),amount);
+            pose.transform.m12+=correction.x;pose.transform.m13+=correction.y;pose.transform.m14+=correction.z;
+            pose.muzzle=v_add(pose.muzzle,correction);pose.grip_heel=v_add(pose.grip_heel,correction);
+        }
+    }
+    return pose;
 }
 
 static bool player_has_gun(int player_index) {
@@ -17676,17 +17701,80 @@ static void draw_player_face(const Player *p, Vector3 render_pos, float body_siz
     rlPopMatrix();
 }
 
+static CharacterPose characterSamples[MAX_COMBATANTS];
+static void sample_character(int i,float now) {
+    Player *p=&players[i];
+    bool down=gameMode==GAME_MODE_FIREFIGHT && combatantLife[i]==LIFE_DOWNED;
+    CharacterPose pose=character_pose(down?p->death_pos:p->pos,p->yaw,p->pitch,
+        sqrtf(p->vel.x*p->vel.x+p->vel.z*p->vel.z),p->onGround,down,player_palette_color(i),now);
+    if(p->isExposed) {pose.effect=RED;pose.effectAmount=.45f+.2f*sinf(now*6);}
+    else if(p->invuln_timer>0 || p->dynamicShotActive) {pose.effect=GOLD;pose.effectAmount=.3f+.15f*sinf(now*6);}
+    else if(p->matter_flash_timer>0) {pose.effect=pose.gear;pose.effectAmount=clampf(p->matter_flash_timer/.2f,0,1);}
+    characterSamples[i]=pose;
+}
+static void draw_rat_world(int i,bool emission) {
+    if(!weaponFrameSampled) sample_character(i,(float)GetTime());
+    character_draw(characterSamples[i],emission);
+    if(characterSamples[i].downed) return;
+    if(drawWeaponModels && player_has_gun(i)) {
+        WeaponPose weapon=player_weapon_pose(i,false);
+        character_draw_paws(weapon,player_palette_color(i),emission);
+        if(!emission) for(int side=-1;side<=1;side+=2) {
+            Vector3 f=player_forward(&players[i]);f.y=0;f=v_norm(f);
+            Vector3 right=v_cross(f,(Vector3){0,1,0});
+            Vector3 shoulder=v_add(players[i].pos,v_add(v_mul(right,side*.17f),(Vector3){0,.11f,0}));
+            Vector3 hand=Vector3Transform(side>0?(Vector3){.17f,-.67f,.40f}:
+                (Vector3){-.36f,-.33f,weapon.kind==WEAPON_DYNAMIC_LAUNCHER?-.55f:-.30f},weapon.transform);
+            character_draw_arm(shoulder,hand,player_palette_color(i));
+        }
+    } else if(!emission) {
+        for(int side=-1;side<=1;side+=2) {
+            Matrix root=MatrixMultiply(MatrixRotateY(players[i].yaw*DEG2RAD),MatrixTranslate(players[i].pos.x,players[i].pos.y,players[i].pos.z));
+            Vector3 shoulder=Vector3Transform((Vector3){side*.17f,.11f,0},root);
+            Vector3 hand=Vector3Transform((Vector3){side*.18f,.02f,-.16f},root);
+            if(side>0 && players[i].meleeSwingActive) hand=weaponMeleeSamples[i].strike_endpoint;
+            character_draw_arm(shoulder,hand,player_palette_color(i));
+        }
+    }
+}
+static void draw_rat_visors(int viewPlayer,Vector3 eye) {
+    int order[MAX_PLAYERS],count=0;float distances[MAX_PLAYERS];
+    for(int i=0;i<activePlayers;i++) {
+        if(i==viewPlayer || !player_uses_rat(i) || (players[i].respawn_timer>0 && !characterSamples[i].downed)) continue;
+        float distance=Vector3DistanceSqr(characterSamples[i].position,eye);int at=count++;
+        while(at>0 && distances[at-1]<distance) {order[at]=order[at-1];distances[at]=distances[at-1];at--;}
+        order[at]=i;distances[at]=distance;
+    }
+    for(int i=0;i<count;i++) character_draw_visor(characterSamples[order[i]]);
+}
 static void draw_players(void) {
     enemy_draw();
     for (int i = 0; i < activePlayers; i++) {
         Player *p = &players[i];
         if(gameMode==GAME_MODE_FIREFIGHT && i<firefightHumans && combatantLife[i]==LIFE_DOWNED) {
-            DrawCube(p->death_pos,.9f,.3f,.9f,GOLD);
+            if(player_uses_rat(i)) { if(i!=drawViewPlayerIndex) draw_rat_world(i,false); }
+            else DrawCube(p->death_pos,.9f,.3f,.9f,GOLD);
             DrawCubeWires(v_add(p->death_pos,(Vector3){0,1,0}),.4f,.4f,.4f,GOLD);
         }
         if(gameMode==GAME_MODE_FIREFIGHT && i>=MAX_PLAYERS && p->respawn_timer<=0 && firefightWaveEnemiesRemaining<=3 && ffCleanupTimer>=20)
             DrawCubeWires(v_add(p->pos,(Vector3){0,1.5f,0}),.5f,.5f,.5f,GOLD);
         if (p->respawn_timer > 0.0f) {
+            continue;
+        }
+        if(player_uses_rat(i)) {
+            if(i!=drawViewPlayerIndex) {
+                draw_rat_world(i,false);
+                if(drawWeaponModels) draw_player_weapon(i,players[i].pos,false,WEAPON_COLOR);
+            }
+            if(i==drawViewPlayerIndex && !drawWeaponModels && p->meleeSwingActive) {
+                float progress=melee_anim_progress(p,weaponFrameTime);
+                if(progress>=0 && progress<=1) {
+                    float reach=melee_reach_fraction(progress);
+                    Vector3 start=melee_swing_origin(p,reach);
+                    character_draw_arm(start,v_add(start,v_mul(melee_swing_direction(p,reach),MELEE_RANGE*reach)),player_palette_color(i));
+                }
+            }
+            draw_player_tether_world(i);
             continue;
         }
         float body_size = (p->enemyType == ENEMY_TYPE_SWARMER) ? (PLAYER_SIZE * 0.5f) : PLAYER_SIZE;
@@ -19932,6 +20020,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
     for (int p = 0; p < activePlayers; ++p) {
         weaponMeleeSamples[p] = player_weapon_melee_sample(&players[p], weaponFrameTime);
         weaponKindSamples[p] = player_weapon_kind(&players[p]);
+        sample_character(p,weaponFrameTime);
         Vector3 target;
         bool tether = drawWeaponModels && player_has_gun(p) && player_tether_visual_target(p, &target);
         weapon_visual_update(&weaponVisuals[p], tether, GetFrameTime());
@@ -19959,6 +20048,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 draw_pickups(cams[i]);
                 draw_players();
                 if (drawWeaponModels) draw_remote_weapon_glass(i, cams[i].position);
+                draw_rat_visors(i,cams[i].position);
                 drawViewPlayerIndex = -1;
             EndMode3D();
             // Preserve world depth for the remote-gun mask before drawing the viewmodel.
@@ -19967,13 +20057,17 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 weapon_bloom_begin(&weaponBlooms[view], screens[view]);
                 BeginMode3D(cams[i]);
                 for (int p = 0; p < activePlayers; ++p) {
-                    if (p != i) draw_player_weapon(p, cams[i].position, false, WEAPON_EMISSION);
+                    if (p != i) {
+                        if(player_uses_rat(p) && (players[p].respawn_timer<=0 || characterSamples[p].downed)) draw_rat_world(p,true);
+                        draw_player_weapon(p, cams[i].position, false, WEAPON_EMISSION);
+                    }
                 }
                 EndMode3D();
                 if (players[i].respawn_timer <= 0) {
                     weapon_clear_depth();
                     BeginMode3D(cams[i]);
                     draw_player_weapon(i, cams[i].position, true, WEAPON_EMISSION);
+                    if(player_uses_rat(i)) character_draw_paws(player_weapon_pose(i,true),player_palette_color(i),true);
                     EndMode3D();
                 }
                 weapon_bloom_composite(&weaponBlooms[view], screens[view]);
@@ -19982,6 +20076,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 weapon_clear_depth();
                 BeginMode3D(cams[i]);
                 draw_player_weapon(i, cams[i].position, true, WEAPON_COLOR);
+                if(player_uses_rat(i)) character_draw_paws(player_weapon_pose(i,true),player_palette_color(i),false);
                 draw_player_weapon(i, cams[i].position, true, WEAPON_GLASS);
                 EndMode3D();
             }
@@ -20574,7 +20669,9 @@ int main(int argc, char **argv) {
         return FPS_EXIT_GPU_INITIALIZATION_FAILED;
     }
     if(enemySmokeRequested) {
+        character_renderer_init();
         bool ok=enemy_run_smoke(enemySmokeRequested);
+        character_renderer_shutdown();
         shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();return ok?0:5;
     }
     if(enemyLabRequested) {
@@ -20623,6 +20720,7 @@ int main(int argc, char **argv) {
     }
 
     weaponRenderingReady = weapon_renderer_init();
+    character_renderer_init();
     // main loop
     while (!WindowShouldClose()) {
 #if defined(__APPLE__)
@@ -21509,9 +21607,13 @@ int main(int argc, char **argv) {
                             Player *p = &players[i];
                             Color base = player_palette_color(i);
                             Color base_dark = ColorBrightness(base, -0.2f);
+                            if(player_uses_rat(i)) {
+                                sample_character(i,(float)GetTime());draw_rat_world(i,false);continue;
+                            }
                             DrawCube(p->pos, PLAYER_SIZE,PLAYER_SIZE, PLAYER_SIZE, base_dark);
                             DrawCubeWires(p->pos, PLAYER_SIZE,PLAYER_SIZE,PLAYER_SIZE, base_dark);
                         }
+                        draw_rat_visors(-1,droneCam.position);
                     EndMode3D();
                     
                     DrawText("SCANNING MAP...", SCREEN_WIDTH / 2 - MeasureText("SCANNING MAP...", 30) / 2, SCREEN_HEIGHT - 100, 30, WHITE);
@@ -22083,6 +22185,7 @@ int main(int argc, char **argv) {
     }
     shutdown_shard_rendering();
     for (int i = 0; i < MAX_PLAYERS; ++i) weapon_bloom_unload(&weaponBlooms[i]);
+    character_renderer_shutdown();
     weapon_renderer_shutdown();
     if (goldPickupShader.id != 0) UnloadShader(goldPickupShader);
     shutdown_world_visuals();
