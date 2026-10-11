@@ -25,6 +25,11 @@ try {
         & ".build/rat/integration-$api.exe" *> ".build/rat/integration-$api.log"
         if ($LASTEXITCODE) { throw 'Character integration failed' }
         Get-Content ".build/rat/integration-$api.log" | Select-String 'Rat '
+        & gcc tests/character_grounding.c character_renderer.c weapon_renderer.c @network @flags -o ".build/rat/grounding-$api.exe"
+        if ($LASTEXITCODE) { throw 'Grounding build failed' }
+        $backend = if ($api -eq '43') { 'gpu' } else { 'cpu-mt' }
+        & ".build/rat/grounding-$api.exe" "--physics=$backend" *> ".build/rat/grounding-$api.log"
+        if ($LASTEXITCODE) { throw 'Grounding validation failed' }
     }
     & gcc tests/net_protocol_test.c net_protocol.c -I. -std=c11 -o .build/rat/net-test.exe
     if ($LASTEXITCODE) { throw 'Protocol build failed' }

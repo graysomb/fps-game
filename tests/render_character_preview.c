@@ -15,17 +15,17 @@ int main(int argc,char **argv) {
     assert(IsWindowReady());assert(character_renderer_init());assert(weapon_renderer_init());
     Color colors[]={SKYBLUE,RED,GREEN,GOLD};
     RenderTexture2D rt=LoadRenderTexture(960,720);
-    Camera3D camera={.position={1,.65f,-1.4f},.target={0,.05f,0},.up={0,1,0},.fovy=38};
+    Camera3D camera={.position={1,.65f,-1.4f},.target={0,.55f,0},.up={0,1,0},.fovy=38};
     for(int i=0;i<16;i++) {
         float angle=(i%4)*PI/2;
         if(i%4==3)angle=-PI/4;
-        camera.position=(Vector3){sinf(angle)*1.65f,.65f,-cosf(angle)*1.65f};
-        CharacterPose pose=character_pose((Vector3){0},0,0,i/4==1?3:0,i/4!=2,i/4==3,colors[i/4],.72f);
+        camera.position=(Vector3){sinf(angle)*3.0f,1.4f,-cosf(angle)*3.0f};
+        CharacterPose pose=character_pose((Vector3){0,1,0},0,0,i/4==1?3:0,i/4!=2,i/4==3,colors[i/4],.72f);
         BeginTextureMode(rt);ClearBackground((Color){214,216,218,255});BeginMode3D(camera);
-        DrawPlane((Vector3){0,-.25f,0},(Vector2){8,8},(Color){190,193,196,255});
+        DrawPlane((Vector3){0,0,0},(Vector2){8,8},(Color){190,193,196,255});
         character_draw(pose,false);
         if(!pose.downed) for(int s=-1;s<=1;s+=2)
-            character_draw_arm((Vector3){s*.17f,.11f,0},(Vector3){s*.18f,.03f,-.16f},pose.gear);
+            character_draw_arm(Vector3Transform((Vector3){s*.17f,.11f,0},character_body_transform(pose)),Vector3Transform((Vector3){s*.18f,.03f,-.16f},character_body_transform(pose)),pose.gear);
         character_draw_visor(pose);
         EndMode3D();DrawText("RAT / flat-shaded procedural mesh",20,20,22,DARKGRAY);EndTextureMode();
         char name[64];snprintf(name,sizeof(name),"pose-%d-view-%d",i/4,i%4);save(rt,out,name);

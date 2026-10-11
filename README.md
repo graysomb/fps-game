@@ -661,11 +661,15 @@ at step 30, require a retained static root anchor, and assert measurable relativ
 
 Human-controlled characters use procedural low-poly rats with small black eyes, a transparent one-eye scouter,
 and player-colored gear. Bots retain their original appearances. Rat bodies, status flashes,
-walking/airborne/downed poses, and first-person weapon paws are cosmetic; collision
-and damage rules are unchanged. The scouter rim and gear share weapon bloom and remain luminous with
-`--no-weapon-bloom`. LAN human slots use the same appearance without a protocol change.
+walking/airborne/downed poses, and first-person weapon paws share the same renderer.
+Human feet sit one unit below the unchanged eye anchor. Their collision and damage box
+is 0.78 units wide and 1.12 units tall; bot bounds are unchanged. Walking follows distance
+traveled with planted feet, short terrain adjustments, and a landing blend. The scouter
+rim and gear share weapon bloom and remain luminous with `--no-weapon-bloom`.
+LAN peers must use protocol 7, which includes the updated human collision rules.
 
 Run `tools/validate_character.ps1` on Windows after building raylib. It checks both
 OpenGL versions, shader fallback, mesh data, emission occlusion, split-screen play,
-and a loopback host/client snapshot. Reference views and weapon-paw captures are
+ground contact, swept walls/ceilings, platform landings, and a loopback host/client snapshot.
+Reference views and weapon-paw captures are
 written to `artifacts/rat`; logs and preview executables are in `.build/rat`.

@@ -64,6 +64,7 @@ enum {
     GPU_LOC_BREAK_DAMP_FRAMES,
     GPU_LOC_REST_GRID_STEP,
     GPU_LOC_PLAYERS,
+    GPU_LOC_PLAYER_EXTENTS,
     GPU_LOC_TETHER_TARGETS,
     GPU_LOC_COUNT
 };
@@ -860,9 +861,15 @@ static void gpu_set_uniforms(float dt) {
     int break_damp_frames = BREAK_DAMP_FRAMES;
     float rest_grid_step = VOXEL_SIZE * 0.5f;
     float player_data[MAX_COMBATANTS][4];
+    float player_extents[MAX_COMBATANTS][4];
     float tether_data[MAX_COMBATANTS][4];
     for (int i = 0; i < MAX_COMBATANTS; ++i) {
-        player_data[i][0] = players[i].pos.x; player_data[i][1] = players[i].pos.y; player_data[i][2] = players[i].pos.z;
+        BoundingBox body=combatant_bounds(i,PLAYER_SIZE*.5f);
+        for(int a=0;a<3;a++) {
+            player_data[i][a]=((&body.min.x)[a]+(&body.max.x)[a])*.5f;
+            player_extents[i][a]=((&body.max.x)[a]-(&body.min.x)[a])*.5f;
+        }
+        player_extents[i][3]=0;
         player_data[i][3] = (i < activePlayers && players[i].respawn_timer <= 0.0f) ? PLAYER_SIZE * 0.5f : -1.0f;
         Vector3 pull = v_sub(tetherTargetByPlayer[i], tetherComByPlayer[i]);
         tether_data[i][0] = pull.x;
@@ -883,6 +890,7 @@ static void gpu_set_uniforms(float dt) {
     uniforms.tether_spring = tether_spring; uniforms.tether_damping = tether_damping;
     uniforms.rest_grid_step = rest_grid_step;
     memcpy(uniforms.players, player_data, sizeof(player_data));
+    memcpy(uniforms.player_extents, player_extents, sizeof(player_extents));
     memcpy(uniforms.tether_targets, tether_data, sizeof(tether_data));
     fps_metal_set_uniforms(&uniforms);
 #else
@@ -909,6 +917,7 @@ static void gpu_set_uniforms(float dt) {
     rlSetUniform(gpuPhysics.loc[GPU_LOC_TETHER_DAMPING], &tether_damping, SHADER_UNIFORM_FLOAT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_BREAK_DAMP_FRAMES], &break_damp_frames, SHADER_UNIFORM_INT, 1);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_REST_GRID_STEP], &rest_grid_step, SHADER_UNIFORM_FLOAT, 1);
+    rlSetUniform(gpuPhysics.loc[GPU_LOC_PLAYER_EXTENTS], player_extents, SHADER_UNIFORM_VEC4, MAX_COMBATANTS);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_PLAYERS], player_data, SHADER_UNIFORM_VEC4, MAX_COMBATANTS);
     rlSetUniform(gpuPhysics.loc[GPU_LOC_TETHER_TARGETS], tether_data, SHADER_UNIFORM_VEC4, MAX_COMBATANTS);
 #endif
@@ -1421,7 +1430,7 @@ static bool gpu_physics_init(void) {
         "uActivePlayers", "uDt", "uVoxelSize", "uFloorSize", "uGravity", "uVelocityDamping",
         "uSor", "uCollisionRelaxation", "uVgsAlpha", "uVgsBeta", "uVgsEpsilon",
         "uStrainBreakThreshold", "uShearBreakThreshold", "uTetherSpring", "uTetherDamping",
-        "uBreakDampFrames", "uRestGridStep", "uPlayerPosHalf", "uTetherTarget"
+        "uBreakDampFrames", "uRestGridStep", "uPlayerPosHalf", "uPlayerExtents", "uTetherTarget"
     };
     for (int i = 0; i < GPU_LOC_COUNT; ++i) {
         gpuPhysics.loc[i] = rlGetLocationUniform(gpuPhysics.program, names[i]);

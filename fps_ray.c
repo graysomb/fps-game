@@ -777,6 +777,9 @@ typedef struct {
     float contactDamageTimer;
 } Player;
 static Player players[MAX_COMBATANTS];
+static CharacterAnimation characterAnimations[MAX_PLAYERS];
+static float characterSampleTime[MAX_PLAYERS];
+
 static CombatantLifeState combatantLife[MAX_COMBATANTS];
 static int combatantTeam[MAX_COMBATANTS];
 static float bleedTimer[MAX_PLAYERS], reviveProgress[MAX_PLAYERS];
@@ -848,6 +851,27 @@ static const Vector3 goliathArmorOffsets[GOLIATH_MAX_ATTACHED] = {
     { -0.55f, 0.0f, -0.55f }
 };
 static bool netPlayerPresent[MAX_PLAYERS] = { true, false, false, false };
+static bool player_uses_rat(int i) {
+    // LAN slots are human-owned; local input settings do not describe remote slots.
+    return i>=0 && i<MAX_PLAYERS && (netTransport.role!=NET_ROLE_OFFLINE ? netPlayerPresent[i] : !is_player_bot(i));
+}
+
+
+/* The gameplay position remains the eye/camera anchor for human players. */
+static BoundingBox combatant_bounds_at(int slot,Vector3 pos,float legacy_half) {
+    if(player_uses_rat(slot)) return (BoundingBox){
+        {pos.x-CHARACTER_HALF_WIDTH,pos.y-BASE_EYE_HEIGHT,pos.z-CHARACTER_HALF_WIDTH},
+        {pos.x+CHARACTER_HALF_WIDTH,pos.y+CHARACTER_BODY_TOP,pos.z+CHARACTER_HALF_WIDTH}};
+    return (BoundingBox){{pos.x-legacy_half,pos.y-legacy_half,pos.z-legacy_half},
+                         {pos.x+legacy_half,pos.y+legacy_half,pos.z+legacy_half}};
+}
+static BoundingBox combatant_bounds(int slot,float legacy_half) {
+    return combatant_bounds_at(slot,players[slot].pos,legacy_half);
+}
+static BoundingBox expand_bounds(BoundingBox b,float radius) {
+    b.min.x-=radius;b.min.y-=radius;b.min.z-=radius;
+    b.max.x+=radius;b.max.y+=radius;b.max.z+=radius;return b;
+}
 /* Each peer owns a mask of globally numbered player slots. */
 static uint8_t netPeerPlayerMask[MAX_PLAYERS] = { 1u, 0u, 0u, 0u };
 static int netLocalPlayerSlots[MAX_PLAYERS] = { 0, -1, -1, -1 };
@@ -10070,22 +10094,18 @@ static void update_projectiles(float dt)
             }
             Player *pl = &players[j];
             float bullet_radius = VOXEL_SIZE * 0.5f;
-            float body_size = (pl->enemyType == ENEMY_TYPE_SWARMER) ? (PLAYER_SIZE * 0.5f) : PLAYER_SIZE;
-            float hit_extent = body_size * 0.5f + bullet_radius;
-            Vector3 box_min = {
-                pl->pos.x - hit_extent,
-                pl->pos.y - hit_extent,
-                pl->pos.z - hit_extent
-            };
-            Vector3 box_max = {
-                pl->pos.x + hit_extent,
-                pl->pos.y + hit_extent,
-                pl->pos.z + hit_extent
-            };
+            float body_size = (pl->enemyType == ENEMY_TYPE_SWARMER) ? (PLAYER_SIZE*.5f) : PLAYER_SIZE;
+            float hit_extent=body_size*.5f+bullet_radius;
+            BoundingBox hitbox=expand_bounds(combatant_bounds(j,body_size*.5f),bullet_radius);
+            Vector3 box_min=hitbox.min,box_max=hitbox.max;
             if (segment_intersects_aabb(start, end, box_min, box_max)) {
                 Ray block_ray = { start, v_norm(v->vel) };
                 VoxelHit blocker;
                 float player_t = v_length(v_sub(pl->pos, start)) - hit_extent;
+                if(player_uses_rat(j)) {
+                    RayCollision contact=GetRayCollisionBox((Ray){start,v_norm(v_sub(end,start))},hitbox);
+                    if(contact.hit)player_t=contact.distance;
+                }
                 if (player_t < 0.0f) {
                     player_t = 0.0f;
                 }
@@ -10353,7 +10373,9 @@ static void handle_pbd_projectile_hits(void)
             float dz = v->pos.z - players[j].pos.z;
             float voxel_radius = VOXEL_SIZE * 0.5f;
             float threshold = (PLAYER_SIZE * 0.5f) + voxel_radius + 0.1f;
-            if (fabsf(dx) < threshold && fabsf(dy) < threshold && fabsf(dz) < threshold) {
+            BoundingBox smush=expand_bounds(combatant_bounds(j,PLAYER_SIZE*.5f),voxel_radius+.1f);
+            bool human_hit=(v->pos.x>=smush.min.x && v->pos.x<=smush.max.x && v->pos.y>=smush.min.y && v->pos.y<=smush.max.y && v->pos.z>=smush.min.z && v->pos.z<=smush.max.z);
+            if (player_uses_rat(j)?human_hit:(fabsf(dx) < threshold && fabsf(dy) < threshold && fabsf(dz) < threshold)) {
                 if (dynamic_voxel_glued_to_static(i)) {
                     ++i;
                     removed = true;
@@ -10991,10 +11013,8 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
         for (int player_idx = 0; player_idx < activePlayers; ++player_idx) {
             Player *pl = &players[player_idx];
             if (pl->respawn_timer > 0.0f) continue;
-            Vector3 box_min = { pl->pos.x - job->half_player, pl->pos.y - job->half_player,
-                                pl->pos.z - job->half_player };
-            Vector3 box_max = { pl->pos.x + job->half_player, pl->pos.y + job->half_player,
-                                pl->pos.z + job->half_player };
+            BoundingBox body = combatant_bounds(player_idx, PLAYER_SIZE*.5f);
+            Vector3 box_min=body.min, box_max=body.max;
             Vector3 nearest = { clampf(scene_pos.x, box_min.x, box_max.x),
                                 clampf(scene_pos.y, box_min.y, box_max.y),
                                 clampf(scene_pos.z, box_min.z, box_max.z) };
@@ -11004,7 +11024,7 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
                 float scene_dist = sqrtf(fmaxf(scene_dist_sq, eps));
                 float penetration = pa->radius - scene_dist;
                 Vector3 normal = (scene_dist > eps)
-                    ? v_mul(scene_delta, -1.0f / scene_dist)
+                    ? v_mul(scene_delta, 1.0f / scene_dist)
                     : (Vector3){ 0.0f, 1.0f, 0.0f };
                 scene_pos = v_add(scene_pos, v_mul(normal, penetration));
             }
@@ -12474,12 +12494,8 @@ static void solve_static_collision_particle(Particle *p, float half_player) {
     for (int player_idx = 0; player_idx < activePlayers; ++player_idx) {
         Player *pl = &players[player_idx];
         if (pl->respawn_timer > 0.0f) continue;
-        Vector3 box_min = {
-            pl->pos.x - half_player, pl->pos.y - half_player, pl->pos.z - half_player
-        };
-        Vector3 box_max = {
-            pl->pos.x + half_player, pl->pos.y + half_player, pl->pos.z + half_player
-        };
+        BoundingBox body = combatant_bounds(player_idx, PLAYER_SIZE*.5f);
+            Vector3 box_min=body.min, box_max=body.max;
         Vector3 nearest = {
             clampf(pos.x, box_min.x, box_max.x),
             clampf(pos.y, box_min.y, box_max.y),
@@ -12549,16 +12565,8 @@ static void solve_static_collisions_range(int start, int end, int worker_id, voi
             if (pl->respawn_timer > 0.0f) {
                 continue;
             }
-            Vector3 box_min = {
-                pl->pos.x - half_player,
-                pl->pos.y - half_player,
-                pl->pos.z - half_player
-            };
-            Vector3 box_max = {
-                pl->pos.x + half_player,
-                pl->pos.y + half_player,
-                pl->pos.z + half_player
-            };
+            BoundingBox body = combatant_bounds(player_idx, PLAYER_SIZE*.5f);
+            Vector3 box_min=body.min, box_max=body.max;
             Vector3 nearest = {
                 clampf(pos.x, box_min.x, box_max.x),
                 clampf(pos.y, box_min.y, box_max.y),
@@ -13728,14 +13736,15 @@ static float spawn_clear_half(int player_index) {
     return PLAYER_SIZE * 0.5f;
 }
 
-static bool spawn_aabb_blocked(Vector3 pos, float half) {
+static bool spawn_aabb_blocked_for(Vector3 pos, float half,int slot) {
+    BoundingBox bounds=combatant_bounds_at(slot,pos,half);
     const float eps = 1e-4f;
-    int minx = (int)floorf((pos.x - half) / VOXEL_SIZE);
-    int maxx = (int)floorf((pos.x + half - eps) / VOXEL_SIZE);
-    int miny = (int)floorf((pos.y - half) / VOXEL_SIZE);
-    int maxy = (int)floorf((pos.y + half - eps) / VOXEL_SIZE);
-    int minz = (int)floorf((pos.z - half) / VOXEL_SIZE);
-    int maxz = (int)floorf((pos.z + half - eps) / VOXEL_SIZE);
+    int minx = (int)floorf((bounds.min.x) / VOXEL_SIZE);
+    int maxx = (int)floorf((bounds.max.x - eps) / VOXEL_SIZE);
+    int miny = (int)floorf((bounds.min.y) / VOXEL_SIZE);
+    int maxy = (int)floorf((bounds.max.y - eps) / VOXEL_SIZE);
+    int minz = (int)floorf((bounds.min.z) / VOXEL_SIZE);
+    int maxz = (int)floorf((bounds.max.z - eps) / VOXEL_SIZE);
     for (int x = minx; x <= maxx; ++x) {
         for (int y = miny; y <= maxy; ++y) {
             for (int z = minz; z <= maxz; ++z) {
@@ -13748,8 +13757,10 @@ static bool spawn_aabb_blocked(Vector3 pos, float half) {
     return false;
 }
 
+static bool spawn_aabb_blocked(Vector3 pos,float half) { return spawn_aabb_blocked_for(pos,half,-1); }
+
 static bool spawn_position_clear_ex(Vector3 pos, float half, float min_dist, int ignore_player) {
-    if (spawn_aabb_blocked(pos, half)) {
+    if (spawn_aabb_blocked_for(pos, half,ignore_player>=0?ignore_player:0)) {
         return false;
     }
     if (min_dist > 0.0f) {
@@ -13845,6 +13856,7 @@ static Vector3 sanctum_spawn_world(int spawn_index) {
 
 static bool is_view_occluded_by_voxels(Vector3 eye_pos, Vector3 target_pos);
 static Vector3 pick_player_spawn(int player_index) {
+    if(player_index>=0 && player_index<MAX_PLAYERS) {characterAnimations[player_index].initialized=false;characterSampleTime[player_index]=0;}
     if(currentWorldType==WORLD_TYPE_CROSSCUT && !useCustomMap && gameMode==GAME_MODE_DEATHMATCH) {
         float half=spawn_clear_half(player_index);
         if(crosscutInitialSpawns) {
@@ -14719,22 +14731,13 @@ static bool melee_hit_players(int attacker_idx, Vector3 start, Vector3 end, Vect
                 continue;
             }
         }
-        float hit_extent = PLAYER_SIZE * 0.5f;
-        Vector3 box_min = {
-            players[j].pos.x - hit_extent,
-            players[j].pos.y - hit_extent,
-            players[j].pos.z - hit_extent
-        };
-        Vector3 box_max = {
-            players[j].pos.x + hit_extent,
-            players[j].pos.y + hit_extent,
-            players[j].pos.z + hit_extent
-        };
+        BoundingBox hitbox=combatant_bounds(j,PLAYER_SIZE*.5f);
+        Vector3 box_min=hitbox.min,box_max=hitbox.max;
         float hit_radius = PLAYER_RADIUS * 1.05f;
         float dist_sq = point_segment_distance_sq(players[j].pos, start, end);
         float body_dist_sq = point_segment_distance_sq(players[j].pos, attacker_pos, body_end);
-        if (dist_sq > hit_radius * hit_radius &&
-            body_dist_sq > hit_radius * hit_radius &&
+        if ((player_uses_rat(j) || (dist_sq > hit_radius * hit_radius &&
+            body_dist_sq > hit_radius * hit_radius)) &&
             !segment_intersects_aabb(start, end, box_min, box_max) &&
             !segment_intersects_aabb(attacker_pos, body_end, box_min, box_max)) {
             continue;
@@ -14782,14 +14785,15 @@ static bool melee_clear_overlapping_voxels(Player *p)
     } else if (p->enemyType == ENEMY_TYPE_SWARMER) {
         half = PLAYER_SIZE * 0.25f;
     }
-    half += VOXEL_SIZE * 0.25f;
+    if(!player_uses_rat((int)(p-players))) half += VOXEL_SIZE * .25f;
+    BoundingBox bounds=combatant_bounds_at((int)(p-players),p->pos,half);
     const float eps = 1e-4f;
-    int minx = (int)floorf((p->pos.x - half) / VOXEL_SIZE);
-    int maxx = (int)floorf((p->pos.x + half - eps) / VOXEL_SIZE);
-    int miny = (int)floorf((p->pos.y - half) / VOXEL_SIZE);
-    int maxy = (int)floorf((p->pos.y + half - eps) / VOXEL_SIZE);
-    int minz = (int)floorf((p->pos.z - half) / VOXEL_SIZE);
-    int maxz = (int)floorf((p->pos.z + half - eps) / VOXEL_SIZE);
+    int minx = (int)floorf((bounds.min.x) / VOXEL_SIZE);
+    int maxx = (int)floorf((bounds.max.x - eps) / VOXEL_SIZE);
+    int miny = (int)floorf((bounds.min.y) / VOXEL_SIZE);
+    int maxy = (int)floorf((bounds.max.y - eps) / VOXEL_SIZE);
+    int minz = (int)floorf((bounds.min.z) / VOXEL_SIZE);
+    int maxz = (int)floorf((bounds.max.z - eps) / VOXEL_SIZE);
     bool removed_dynamic = remove_dynamic_voxels_in_region(minx, maxx, miny, maxy, minz, maxz);
     int removed_static = 0;
     for (int x = minx; x <= maxx; ++x) {
@@ -17567,11 +17571,6 @@ static WeaponMeleePose player_weapon_melee_sample(const Player *p, float now) {
     return sample;
 }
 
-static bool player_uses_rat(int i) {
-    // LAN slots are human-owned; local input settings do not describe remote slots.
-    return i>=0 && i<MAX_PLAYERS && (netTransport.role!=NET_ROLE_OFFLINE ? netPlayerPresent[i] : !is_player_bot(i));
-}
-
 static WeaponPose player_weapon_pose(int player_index, bool first_person) {
     Player *p = &players[player_index];
     Vector3 forward = player_forward(p);
@@ -17587,7 +17586,7 @@ static WeaponPose player_weapon_pose(int player_index, bool first_person) {
         // Fit the authored gun to the small rat. Gameplay rays and held-voxel targets
         // never use this display transform; melee keeps its actual strike endpoint.
         Vector3 originalHeel=pose.grip_heel;
-        Matrix scale=MatrixMultiply(MatrixTranslate(-p->pos.x,-p->pos.y,-p->pos.z),MatrixScale(.42f,.42f,.42f));
+        Matrix scale=MatrixMultiply(MatrixTranslate(-p->pos.x,-p->pos.y,-p->pos.z),MatrixScale(.42f*CHARACTER_MODEL_SCALE,.42f*CHARACTER_MODEL_SCALE,.42f*CHARACTER_MODEL_SCALE));
         scale=MatrixMultiply(scale,MatrixTranslate(p->pos.x,p->pos.y,p->pos.z));
         pose.transform=MatrixMultiply(pose.transform,scale);
         pose.muzzle=Vector3Transform(pose.muzzle,scale);
@@ -17702,11 +17701,36 @@ static void draw_player_face(const Player *p, Vector3 render_pos, float body_siz
 }
 
 static CharacterPose characterSamples[MAX_COMBATANTS];
+static CharacterSupport character_ground_query(Vector3 sole,void *context) {
+    int slot=(int)(intptr_t)context;
+    CharacterSupport support={0};
+    if(fabsf(sole.x)<=FLOOR_SIZE && fabsf(sole.z)<=FLOOR_SIZE && fabsf(sole.y)<=.125f)
+        support=(CharacterSupport){.valid=true,.height=0};
+    Ray ray={{sole.x,sole.y+.125f,sole.z},{0,-1,0}};VoxelHit hit;
+    if(first_voxel_hit_detailed_ex(ray,.25f,-1,false,slot,&hit) && hit.normal.y>.5f) {
+        float height=ray.position.y-hit.t;
+        if(!support.valid || height>support.height) support=(CharacterSupport){true,height,voxels[hit.id].identity,voxels[hit.id].pos};
+    }
+    return support;
+}
+
 static void sample_character(int i,float now) {
     Player *p=&players[i];
     bool down=gameMode==GAME_MODE_FIREFIGHT && combatantLife[i]==LIFE_DOWNED;
     CharacterPose pose=character_pose(down?p->death_pos:p->pos,p->yaw,p->pitch,
         sqrtf(p->vel.x*p->vel.x+p->vel.z*p->vel.z),p->onGround,down,player_palette_color(i),now);
+    if(player_uses_rat(i)) {
+        float dt=characterSampleTime[i]>0?fmaxf(0,now-characterSampleTime[i]):0;
+        if(p->respawn_timer>0 || down)characterAnimations[i].initialized=false;
+        character_animate(&characterAnimations[i],&pose,dt,character_ground_query,(void*)(intptr_t)i);
+        characterSampleTime[i]=now;
+        if(down) {
+            Ray ray={{p->death_pos.x,p->death_pos.y+.1f,p->death_pos.z},{0,-1,0}};VoxelHit hit;
+            float surface=0;
+            if(first_voxel_hit_detailed_ex(ray,2,-1,false,i,&hit) && hit.normal.y>.5f)surface=ray.position.y-hit.t;
+            pose.position.y=surface+BASE_EYE_HEIGHT;
+        }
+    }
     if(p->isExposed) {pose.effect=RED;pose.effectAmount=.45f+.2f*sinf(now*6);}
     else if(p->invuln_timer>0 || p->dynamicShotActive) {pose.effect=GOLD;pose.effectAmount=.3f+.15f*sinf(now*6);}
     else if(p->matter_flash_timer>0) {pose.effect=pose.gear;pose.effectAmount=clampf(p->matter_flash_timer/.2f,0,1);}
@@ -17722,14 +17746,14 @@ static void draw_rat_world(int i,bool emission) {
         if(!emission) for(int side=-1;side<=1;side+=2) {
             Vector3 f=player_forward(&players[i]);f.y=0;f=v_norm(f);
             Vector3 right=v_cross(f,(Vector3){0,1,0});
-            Vector3 shoulder=v_add(players[i].pos,v_add(v_mul(right,side*.17f),(Vector3){0,.11f,0}));
+            Vector3 shoulder=Vector3Transform((Vector3){side*.17f,.11f,0},character_body_transform(characterSamples[i]));
             Vector3 hand=Vector3Transform(side>0?(Vector3){.17f,-.67f,.40f}:
                 (Vector3){-.36f,-.33f,weapon.kind==WEAPON_DYNAMIC_LAUNCHER?-.55f:-.30f},weapon.transform);
             character_draw_arm(shoulder,hand,player_palette_color(i));
         }
     } else if(!emission) {
         for(int side=-1;side<=1;side+=2) {
-            Matrix root=MatrixMultiply(MatrixRotateY(players[i].yaw*DEG2RAD),MatrixTranslate(players[i].pos.x,players[i].pos.y,players[i].pos.z));
+            Matrix root=character_body_transform(characterSamples[i]);
             Vector3 shoulder=Vector3Transform((Vector3){side*.17f,.11f,0},root);
             Vector3 hand=Vector3Transform((Vector3){side*.18f,.02f,-.16f},root);
             if(side>0 && players[i].meleeSwingActive) hand=weaponMeleeSamples[i].strike_endpoint;
@@ -18060,13 +18084,14 @@ static float player_collision_half(const Player *p) {
 }
 
 static bool player_aabb_hits_world_ex(Vector3 pos, float half, int player_idx) {
+    BoundingBox bounds=combatant_bounds_at(player_idx,pos,half);
     const float eps = 1e-4f;
-    int minx = (int)floorf((pos.x - half) / VOXEL_SIZE);
-    int maxx = (int)floorf((pos.x + half - eps) / VOXEL_SIZE);
-    int miny = (int)floorf((pos.y - half) / VOXEL_SIZE);
-    int maxy = (int)floorf((pos.y + half - eps) / VOXEL_SIZE);
-    int minz = (int)floorf((pos.z - half) / VOXEL_SIZE);
-    int maxz = (int)floorf((pos.z + half - eps) / VOXEL_SIZE);
+    int minx = (int)floorf((bounds.min.x) / VOXEL_SIZE);
+    int maxx = (int)floorf((bounds.max.x - eps) / VOXEL_SIZE);
+    int miny = (int)floorf((bounds.min.y) / VOXEL_SIZE);
+    int maxy = (int)floorf((bounds.max.y - eps) / VOXEL_SIZE);
+    int minz = (int)floorf((bounds.min.z) / VOXEL_SIZE);
+    int maxz = (int)floorf((bounds.max.z - eps) / VOXEL_SIZE);
     for (int x = minx; x <= maxx; ++x) {
         for (int y = miny; y <= maxy; ++y) {
             for (int z = minz; z <= maxz; ++z) {
@@ -18086,6 +18111,52 @@ static bool player_aabb_hits_world(Vector3 pos, float half) {
     return player_aabb_hits_world_ex(pos, half, -1);
 }
 
+/* Sweep one axis against collision grid cells. No stair assistance or tunneling. */
+static bool human_sweep_axis(int slot,int axis,float delta) {
+    if(fabsf(delta)<1e-8f) return false;
+    Player *p=&players[slot];BoundingBox b=combatant_bounds(slot,.25f),swept=b;
+    float *lo=&swept.min.x,*hi=&swept.max.x;
+    if(delta<0)lo[axis]+=delta;else hi[axis]+=delta;
+    int mins[3],maxs[3];
+    for(int a=0;a<3;a++){mins[a]=(int)floorf(lo[a]/VOXEL_SIZE);maxs[a]=(int)floorf((hi[a]-1e-5f)/VOXEL_SIZE);}
+    float move=delta;
+    for(int x=mins[0];x<=maxs[0];x++)for(int y=mins[1];y<=maxs[1];y++)for(int z=mins[2];z<=maxs[2];z++) {
+        int id=table_get(x,y,z);
+        if(id<0 || id>=voxel_count)continue;
+        if(get_goliath_owner_of_voxel(id)==slot && table_get_static_only(x,y,z)<0)continue;
+        float cellMin[3]={x*VOXEL_SIZE,y*VOXEL_SIZE,z*VOXEL_SIZE};
+        float cellMax[3]={(x+1)*VOXEL_SIZE,(y+1)*VOXEL_SIZE,(z+1)*VOXEL_SIZE};
+        float *bmin=&b.min.x,*bmax=&b.max.x;bool overlap=true;
+        for(int a=0;a<3;a++)if(a!=axis && (bmax[a]<=cellMin[a]+1e-5f || bmin[a]>=cellMax[a]-1e-5f))overlap=false;
+        if(!overlap)continue;
+        if(delta>0 && bmax[axis]<=cellMin[axis]+1e-4f) move=fminf(move,fmaxf(0,cellMin[axis]-bmax[axis]));
+        if(delta<0 && bmin[axis]>=cellMax[axis]-1e-4f) move=fmaxf(move,fminf(0,cellMax[axis]-bmin[axis]));
+    }
+    if(axis==1 && delta<0)move=fmaxf(move,BASE_EYE_HEIGHT-p->pos.y);
+    (&p->pos.x)[axis]+=move;
+    bool hit=fabsf(move-delta)>1e-6f;
+    if(hit)(&p->vel.x)[axis]=0;
+    return hit;
+}
+static void integrate_human_body(int slot,float dt,bool query_world) {
+    Player *p=&players[slot];
+    if(!p->onGround || p->vel.y>0)p->vel.y-=GRAVITY*dt;
+    bool collided=false;
+    if(query_world) {
+        collided|=human_sweep_axis(slot,0,p->vel.x*dt);
+        collided|=human_sweep_axis(slot,1,p->vel.y*dt);
+        collided|=human_sweep_axis(slot,2,p->vel.z*dt);
+    } else p->pos=v_add(p->pos,v_mul(p->vel,dt));
+    if(p->pos.y<BASE_EYE_HEIGHT){p->pos.y=BASE_EYE_HEIGHT;p->vel.y=0;collided=true;}
+    Vector3 probe=p->pos;probe.y-=.002f;
+    p->onGround=p->vel.y<=0 && (p->pos.y<=BASE_EYE_HEIGHT+.0001f ||
+        (query_world && player_aabb_hits_world_ex(probe,.25f,slot)));
+    if(p->onGround)p->vel.y=0;
+    float x=clampf(p->pos.x,-FLOOR_SIZE+CHARACTER_HALF_WIDTH,FLOOR_SIZE-CHARACTER_HALF_WIDTH);
+    float z=clampf(p->pos.z,-FLOOR_SIZE+CHARACTER_HALF_WIDTH,FLOOR_SIZE-CHARACTER_HALF_WIDTH);
+    collided|=x!=p->pos.x || z!=p->pos.z;p->pos.x=x;p->pos.z=z;
+    if(collided)p->meleeKnockbackActive=false;
+}
 static void net_integrate_player(Player *p, float dt, bool query_world) {
     int player_idx = (int)(p - players);
     if (player_idx < 0 || player_idx >= MAX_COMBATANTS || &players[player_idx] != p) {
@@ -18100,6 +18171,7 @@ static void net_integrate_player(Player *p, float dt, bool query_world) {
         p->vel.x *= max_speed / speed;
         p->vel.z *= max_speed / speed;
     }
+    if(player_uses_rat(player_idx)) {integrate_human_body(player_idx,dt,query_world);return;}
     bool collided = false;
     if (query_world && player_idx >= 0) {
         Vector3 try_x = { p->pos.x + p->vel.x * dt, p->pos.y, p->pos.z };

@@ -99,6 +99,91 @@ CharacterPose character_pose(Vector3 pos,float yaw,float pitch,float speed,bool 
         .stride=sinf(time*10)*Clamp(speed/3,0,1),.breath=sinf(time*2)*.003f,
         .time=time,.airborne=!grounded,.downed=downed,.gear=gear};
 }
+/* Body and view share an eye anchor; only the torso gets breathing/bobbing. */
+Matrix character_body_transform(CharacterPose p) {
+    Matrix root=MatrixScale(CHARACTER_MODEL_SCALE,CHARACTER_MODEL_SCALE,CHARACTER_MODEL_SCALE);
+    if(p.downed) root=MatrixMultiply(root,MatrixRotateZ(PI/2));
+    root=MatrixMultiply(root,MatrixRotateY(p.yaw*DEG2RAD));
+    float lift=p.downed?.205f*CHARACTER_MODEL_SCALE:.25f*CHARACTER_MODEL_SCALE+p.breath;
+    return MatrixMultiply(root,MatrixTranslate(p.position.x,p.position.y-1+lift,p.position.z));
+}
+static Vector3 nominal_sole(CharacterPose p,int foot) {
+    float side=foot?1:-1;
+    Vector3 local={side*.10f*CHARACTER_MODEL_SCALE,0,-.045f*CHARACTER_MODEL_SCALE};
+    local=Vector3Transform(local,MatrixRotateY(p.yaw*DEG2RAD));
+    return Vector3Add((Vector3){p.position.x,p.position.y-1,p.position.z},local);
+}
+void character_animate(CharacterAnimation *s,CharacterPose *p,float dt,CharacterGroundQuery query,void *context) {
+    dt=Clamp(dt,0,.1f);
+    Vector3 movement=Vector3Subtract(p->position,s->previous);
+    bool reset=!s->initialized || Vector3Length(movement)>1.5f || fabsf(movement.y)>.6f;
+    if(reset) {
+        *s=(CharacterAnimation){.initialized=true,.previous=p->position,.yaw=p->yaw,.grounded=!p->airborne,.landing=.1f};
+        for(int f=0;f<2;f++)s->soles[f]=nominal_sole(*p,f);
+        movement=(Vector3){0};
+    }
+    if(p->downed){s->initialized=false;return;}
+    float travel=sqrtf(movement.x*movement.x+movement.z*movement.z);
+    // Subtract motion of a shared support before advancing the walk cycle.
+    Vector3 platform={0};int supports=0;
+    for(int f=0;f<2;f++) if(!s->swinging[f] && s->support[f].valid && s->support[f].identity) {
+        CharacterSupport now=query(s->soles[f],context);
+        if(now.valid && now.identity==s->support[f].identity) {
+            Vector3 delta=Vector3Subtract(now.origin,s->support[f].origin);
+            s->soles[f]=Vector3Add(s->soles[f],delta);platform=Vector3Add(platform,delta);supports++;
+        }
+    }
+    if(supports){movement=Vector3Subtract(movement,Vector3Scale(platform,1.0f/supports));travel=sqrtf(movement.x*movement.x+movement.z*movement.z);}
+    float turn=fabsf(remainderf(p->yaw-s->yaw,360));
+    bool overextended=false;
+    for(int f=0;f<2;f++)if(Vector3Distance(s->soles[f],nominal_sole(*p,f))>.26f)overextended=true;
+    bool walking=travel>.00001f;
+    if(!p->airborne) {
+        if(walking)s->phase+=travel/.60f; // short strides suit the rat's legs
+        else if(turn>20 || overextended || s->swinging[0] || s->swinging[1])s->phase+=dt*1.8f;
+    }
+    if(!p->airborne && !s->grounded) {
+        s->landing=0;
+        for(int f=0;f<2;f++){s->landingStart[f]=s->soles[f];s->swinging[f]=false;}
+    }
+    s->landing=fminf(.1f,s->landing+dt);
+    for(int f=0;f<2;f++) {
+        Vector3 desired=nominal_sole(*p,f);
+        if(p->airborne) {
+            desired.y+=.065f*CHARACTER_MODEL_SCALE;desired.z+=.02f;
+            s->soles[f]=desired;s->support[f]=(CharacterSupport){0};s->swinging[f]=false;
+        } else {
+            // Land ahead of the hips, then let the body pass the planted paw.
+            if(walking) {
+                desired.x+=movement.x/travel*.15f;
+                desired.z+=movement.z/travel*.15f;
+            }
+            CharacterSupport ground=query(desired,context);
+            if(ground.valid && fabsf(ground.height-desired.y)<=.12f)desired.y=ground.height;
+            float phase=s->phase+f*.5f;phase-=floorf(phase);
+            bool swing=phase>=.6f && (walking || overextended || s->swinging[f] || turn>20);
+            CharacterSupport anchor=query(s->soles[f],context);
+            if(!anchor.valid || (s->support[f].identity && anchor.identity!=s->support[f].identity)) {
+                s->soles[f]=desired;s->support[f]=ground;
+            }
+            if(swing) {
+                if(!s->swinging[f])s->swingStart[f]=s->soles[f];
+                float t=Clamp((phase-.6f)/.4f,0,1),ease=t*t*(3-2*t);
+                s->soles[f]=Vector3Lerp(s->swingStart[f],desired,ease);
+                s->soles[f].y+=sinf(PI*t)*.10f;s->support[f]=ground;
+            } else if(s->swinging[f] || reset || !s->grounded) {
+                s->soles[f]=desired;s->support[f]=ground;
+            } else if(anchor.valid) {s->soles[f].y=anchor.height;s->support[f]=anchor;}
+            s->swinging[f]=swing;
+            if(s->landing<.1f)s->soles[f]=Vector3Lerp(s->landingStart[f],s->soles[f],s->landing/.1f);
+        }
+        p->soles[f]=s->soles[f];
+    }
+    p->feetResolved=true;
+    p->breath+=p->airborne?0:sinf(s->phase*4*PI)*.008f*fminf(1,travel/fmaxf(dt,.001f));
+    s->grounded=!p->airborne;s->previous=p->position;
+    if(walking || turn>20)s->yaw=p->yaw;
+}
 static void part(int id,Vector3 pos,Vector3 scale,Vector3 rotation,Matrix root,Color color,bool glow,bool emission) {
     if(!ready) return;
     if(!shaded && emission) return;
@@ -119,9 +204,7 @@ static Matrix scouter_frame(Matrix head) {
 }
 void character_draw(CharacterPose p,bool emission) {
     status(p);
-    Matrix root=MatrixRotateY(p.yaw*DEG2RAD);
-    if(p.downed) root=MatrixMultiply(MatrixRotateZ(PI/2),root);
-    root=MatrixMultiply(root,MatrixTranslate(p.position.x,p.position.y+(p.downed?-.04f:p.breath),p.position.z));
+    Matrix root=character_body_transform(p);
     part(CR_BODY,(Vector3){0,.015f,.035f},ONE,ZERO,root,WHITE,false,emission);
     part(CR_BADGE,(Vector3){0,.11f,.184f},ONE,ZERO,root,p.gear,true,emission);
     Matrix head=MatrixMultiply(MatrixRotateX(p.pitch*DEG2RAD),MatrixTranslate(0,.245f,-.055f));
@@ -133,10 +216,24 @@ void character_draw(CharacterPose p,bool emission) {
         part(CR_EAR,(Vector3){s*.105f,.105f,.045f},ONE,tilt,head,WHITE,false,emission);
         part(CR_INNER,(Vector3){s*.105f,.105f,.024f},ONE,tilt,head,WHITE,false,emission);
         part(CR_EYE,(Vector3){s*.059f,.042f,-.118f},ONE,ZERO,head,WHITE,false,emission);
-        bool tuck=p.airborne && !p.downed;
-        float step=p.downed?0:tuck?.055f:p.stride*s*.035f;
-        part(CR_LEG,(Vector3){s*.10f,tuck?-.095f:-.125f,step},ONE,(Vector3){tuck?-.5f:p.stride*s*.3f,0,0},root,WHITE,false,emission);
-        part(CR_PAW,(Vector3){s*.10f,tuck?-.14f:-.205f,-.045f+step},(Vector3){1,1,1.35f},ZERO,root,WHITE,false,emission);
+        if(p.feetResolved && !p.downed) {
+            Vector3 sole=p.soles[s>0?1:0];
+            Vector3 center=Vector3Add(sole,(Vector3){0,.045f*CHARACTER_MODEL_SCALE,0});
+            Vector3 localCenter=Vector3Transform(center,MatrixInvert(root));
+            Vector3 delta=Vector3Subtract(localCenter,(Vector3){s*.10f,-.105f,.015f});
+            float length=Vector3Length(delta);
+            Vector3 middle=Vector3Lerp(localCenter,(Vector3){s*.10f,-.105f,.015f},.5f);
+            Vector3 rotation={atan2f(delta.z,-delta.y),0,atan2f(delta.x,sqrtf(delta.y*delta.y+delta.z*delta.z))};
+            part(CR_LEG,middle,(Vector3){.8f,fmaxf(.3f,length/.17f),.8f},rotation,root,WHITE,false,emission);
+            Matrix footRoot=MatrixMultiply(MatrixScale(CHARACTER_MODEL_SCALE,CHARACTER_MODEL_SCALE,CHARACTER_MODEL_SCALE),MatrixRotateY(p.yaw*DEG2RAD));
+            footRoot=MatrixMultiply(footRoot,MatrixTranslate(center.x,center.y,center.z));
+            part(CR_PAW,ZERO,(Vector3){1,1,1.35f},ZERO,footRoot,WHITE,false,emission);
+        } else {
+            bool tuck=p.airborne && !p.downed;
+            float step=p.downed?0:tuck?.055f:p.stride*s*.035f;
+            part(CR_LEG,(Vector3){s*.10f,tuck?-.095f:-.125f,step},ONE,(Vector3){tuck?-.5f:p.stride*s*.3f,0,0},root,WHITE,false,emission);
+            part(CR_PAW,(Vector3){s*.10f,tuck?-.14f:-.205f,-.045f+step},(Vector3){1,1,1.35f},ZERO,root,WHITE,false,emission);
+        }
         if(p.downed) {
             part(CR_LEG,(Vector3){s*.18f,.09f,-.07f},(Vector3){.45f,.7f,.5f},(Vector3){.7f,0,0},root,WHITE,false,emission);
             part(CR_PAW,(Vector3){s*.18f,.035f,-.12f},ONE,ZERO,root,WHITE,false,emission);
@@ -163,9 +260,7 @@ void character_draw(CharacterPose p,bool emission) {
 }
 void character_draw_visor(CharacterPose p) {
     if(!ready) return;
-    Matrix root=MatrixRotateY(p.yaw*DEG2RAD);
-    if(p.downed) root=MatrixMultiply(MatrixRotateZ(PI/2),root);
-    root=MatrixMultiply(root,MatrixTranslate(p.position.x,p.position.y+(p.downed?-.04f:p.breath),p.position.z));
+    Matrix root=character_body_transform(p);
     Matrix head=MatrixMultiply(MatrixRotateX(p.pitch*DEG2RAD),MatrixTranslate(0,.245f,-.055f));
     head=MatrixMultiply(head,root);
     status((CharacterPose){0});
@@ -188,7 +283,7 @@ void character_draw_arm(Vector3 shoulder,Vector3 hand,Color gear) {
     status((CharacterPose){0});
     Vector3 d=Vector3Subtract(hand,shoulder);float length=Vector3Length(d);
     Matrix root=MatrixTranslate(hand.x,hand.y,hand.z);
-    part(CR_PAW,ZERO,ONE,ZERO,root,WHITE,false,false);
-    if(length>.001f) DrawCylinderEx(shoulder,hand,.022f,.028f,6,fur);
+    part(CR_PAW,ZERO,(Vector3){CHARACTER_MODEL_SCALE,CHARACTER_MODEL_SCALE,CHARACTER_MODEL_SCALE},ZERO,root,WHITE,false,false);
+    if(length>.001f) DrawCylinderEx(shoulder,hand,.022f*CHARACTER_MODEL_SCALE,.028f*CHARACTER_MODEL_SCALE,6,fur);
     (void)gear;
 }

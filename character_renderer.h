@@ -2,14 +2,36 @@
 #define CHARACTER_RENDERER_H
 #include "weapon_renderer.h"
 
-/* Presentation only. Position is the existing collision-box center. */
+#define CHARACTER_MODEL_SCALE (1.0f/.537f)
+#define CHARACTER_HALF_WIDTH .39f
+#define CHARACTER_BODY_TOP .12f
+/* Position is the eye/camera anchor; soles are one unit below it. */
 typedef struct CharacterPose {
     Vector3 position;
     float yaw, pitch, stride, breath, time;
     bool airborne, downed;
     Color gear, effect;
     float effectAmount;
+    Vector3 soles[2];
+    bool feetResolved;
+
 } CharacterPose;
+typedef struct CharacterSupport {
+    bool valid;
+    float height;
+    unsigned long long identity;
+    Vector3 origin;
+} CharacterSupport;
+typedef CharacterSupport (*CharacterGroundQuery)(Vector3 sole,void *context);
+typedef struct CharacterAnimation {
+    bool initialized, grounded, swinging[2];
+    Vector3 previous, soles[2], swingStart[2], landingStart[2];
+    CharacterSupport support[2];
+    float phase, yaw, landing;
+} CharacterAnimation;
+void character_animate(CharacterAnimation *state,CharacterPose *pose,float dt,
+                       CharacterGroundQuery query,void *context);
+Matrix character_body_transform(CharacterPose pose);
 bool character_renderer_init(void);
 void character_renderer_shutdown(void);
 CharacterPose character_pose(Vector3 position, float yaw, float pitch, float speed,
