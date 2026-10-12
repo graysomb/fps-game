@@ -1661,6 +1661,8 @@ static void update_projectiles(float dt);
 static void handle_pbd_projectile_hits(void);
 static bool keyboard_player_index(int index);
 static void mark_chunk_dirty_for_grid(int gx, int gy, int gz);
+static void mark_chunks_dirty_for_region(int minx,int maxx,int miny,int maxy,int minz,int maxz);
+static void refresh_surfaces_in_region(int minx,int maxx,int miny,int maxy,int minz,int maxz);
 static void mark_all_chunks_dirty(void);
 static void clear_all_chunks(void);
 #if defined(_MSC_VER)
@@ -3808,10 +3810,11 @@ static void remove_voxel_index(int idx)
     if (!victim->simulate) {
         mark_static_beliefs_dirty_for_voxel(victim);
         mark_static_hash_dirty();
-        mark_chunk_dirty_for_grid(victim->gx, victim->gy, victim->gz);
     }
     voxel_table_unregister(victim);
     bool was_static = !victim->simulate;
+    int dirty_minx,dirty_maxx,dirty_miny,dirty_maxy,dirty_minz,dirty_maxz;
+    voxel_grid_bounds(victim,&dirty_minx,&dirty_maxx,&dirty_miny,&dirty_maxy,&dirty_minz,&dirty_maxz);
     for (int j = 0; j < 8; ++j) {
         Particle *p = victim->particles[j];
         if (!p) {
@@ -3877,6 +3880,10 @@ static void remove_voxel_index(int idx)
         }
     }
     --voxel_count;
+    if(was_static) {
+        mark_chunks_dirty_for_region(dirty_minx,dirty_maxx,dirty_miny,dirty_maxy,dirty_minz,dirty_maxz);
+        refresh_surfaces_in_region(dirty_minx,dirty_maxx,dirty_miny,dirty_maxy,dirty_minz,dirty_maxz);
+    }
     dynamic_voxels_dirty = true;
     if (debugLogVoxelDeactivation) {
         TraceLog(LOG_INFO,
@@ -3897,6 +3904,7 @@ static int add_static_voxel_at_grid(int gx, int gy, int gz, Color color, int typ
     if (existing >= 0 && existing < voxel_count) {
         voxels[existing].color = color;
         voxels[existing].type = type;
+        mark_chunk_dirty_for_grid(gx,gy,gz);
         return existing;
     }
     float px = ((float)gx + 0.5f) * VOXEL_SIZE;
@@ -4423,6 +4431,14 @@ static void mark_surface_neighbors(Vector3 pos) {
     }
 }
 
+/* Mutation-time updates use coordinates, so voxel-array compaction cannot leave stale indices. */
+static void refresh_surfaces_in_region(int minx,int maxx,int miny,int maxy,int minz,int maxz) {
+    for(int z=minz-1;z<=maxz+1;z++)for(int y=miny-1;y<=maxy+1;y++)for(int x=minx-1;x<=maxx+1;x++) {
+        int idx=table_get(x,y,z);
+        if(idx>=0 && idx<voxel_count)mark_surface(idx);
+    }
+}
+
 static void rebuild_all_voxel_surfaces(void) {
     for (int i = 0; i < voxel_count; ++i) {
         mark_surface(i);
@@ -4568,6 +4584,8 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     if (!simulate) {
         mark_static_beliefs_dirty_for_voxel(v);
         mark_static_hash_dirty();
+        mark_chunk_dirty_for_grid(v->gx,v->gy,v->gz);
+        refresh_surfaces_in_region(v->gx,v->gx,v->gy,v->gy,v->gz,v->gz);
     } else {
         dynamic_voxels_dirty = true;
     }
@@ -5132,6 +5150,7 @@ static void deactivate_fluid_cell(int voxel_idx) {
     voxel->min_gz = voxel->max_gz = voxel->gz;
 
     voxel_table_register(voxel, voxel_idx);
+    mark_chunk_dirty_for_grid(voxel->gx,voxel->gy,voxel->gz);
 
     for (int c = 0; c < VOXEL_CORNER_COUNT; ++c) {
         if (voxel->particles[c]) {
@@ -5496,7 +5515,6 @@ static bool activate_static_voxels_near_dynamic(void)
         //rebuild_glue_constraints();
         glue_dynamic_voxel_to_static_neighbors();
         refresh_static_voxel_beliefs();
-        meshDirty = true;
         apply_pending_tether_impacts();
         return true;
     }
@@ -5543,7 +5561,6 @@ static bool activate_all_static_voxels(int activator)
         //rebuild_glue_constraints();
         glue_dynamic_voxel_to_static_neighbors();
         refresh_static_voxel_beliefs();
-        meshDirty = true;
     }
     return activated;
 }
@@ -5657,7 +5674,6 @@ static bool activate_static_voxels_near_region(int minx, int maxx,
         rebuild_glue_constraints();
         glue_dynamic_voxel_to_static_neighbors();
         refresh_static_voxel_beliefs();
-        meshDirty = true;
         return true;
     }
 
@@ -6178,14 +6194,13 @@ static bool freeze_lifetime_expired_islands(void)
         rebuild_all_voxel_surfaces();
         rebuild_glue_constraints();
         refresh_static_voxel_beliefs();
-        meshDirty = true;
     }
     return changed;
 }
 
 static void recycle_dead_voxels(void) {
     recycleFrameCounter++;
-    bool changed = false;
+
     bool has_sleeping_voxels = false;
     bool has_due_restoration = false;
 
@@ -6210,7 +6225,6 @@ static void recycle_dead_voxels(void) {
         if (voxel->isBullet) {
             if (voxel->lifeFrames > BULLET_MAX_FRAMES || voxel_outside_world_bounds(voxel)) {
                 remove_voxel_index(i);
-                changed = true;
                 --i;
             }
             continue;
@@ -6231,12 +6245,10 @@ static void recycle_dead_voxels(void) {
             }
             if (voxel->owner != -1 || voxel->restorationQueued) {
                 remove_voxel_index(i);
-                changed = true;
                 --i;
                 continue;
             }
             restore_dynamic_voxel_to_static(i);
-            changed = true;
             --i;
         }
     }
@@ -6244,12 +6256,10 @@ static void recycle_dead_voxels(void) {
     bool has_physical_islands = build_recycle_physical_island_graph();
     if (has_physical_islands && freeze_lifetime_expired_islands()) {
         has_sleeping_voxels = true;
-        changed = true;
     }
 
-    if (has_physical_islands && (has_sleeping_voxels || has_due_restoration) &&
-        recycle_sleeping_voxel_islands()) {
-        changed = true;
+    if (has_physical_islands && (has_sleeping_voxels || has_due_restoration)) {
+        recycle_sleeping_voxel_islands();
     }
 
     for (int i = 0; i < voxel_count; ++i) {
@@ -6272,7 +6282,6 @@ static void recycle_dead_voxels(void) {
                              i, voxel->owner, voxel->lifeFrames);
                 }
                 remove_voxel_index(i);
-                changed = true;
                 --i;
             }
             continue;
@@ -6288,7 +6297,6 @@ static void recycle_dead_voxels(void) {
                              voxel->rest_min_gz, voxel->rest_max_gz);
                 }
                 remove_voxel_index(i);
-                changed = true;
                 --i;
             }
         }
@@ -6319,18 +6327,9 @@ static void recycle_dead_voxels(void) {
                              snapshot.rest_min_gz, snapshot.rest_max_gz,
                              recycleQueueCount);
                 }
-                if (remove_all_debris_static()) {
-                    changed = true;
-                }
-                changed = true;
+                remove_all_debris_static();
             }
         }
-    }
-
-    if (changed) {
-        rebuild_voxel_hash();
-        rebuild_all_voxel_surfaces();
-        meshDirty = true;
     }
 }
 
@@ -7376,7 +7375,6 @@ static bool deactivate_sleeping_voxels(void)
         rebuild_all_voxel_surfaces();
         rebuild_glue_constraints();
         refresh_static_voxel_beliefs();
-        meshDirty = true;
     }
 
     return changed;
@@ -14869,7 +14867,6 @@ static bool melee_clear_overlapping_voxels(Player *p)
     int activator = (p >= players && p < players + activePlayers) ? (int)(p - players) : -1;
     activate_static_voxels_near_region(minx, maxx, miny, maxy, minz, maxz, activator);
     rebuild_all_voxel_surfaces();
-    meshDirty = true;
     add_player_matter(p, ff_harvest_amount((int)(p-players)));
     if(firefightPractice && p==players && practiceStep==0) practiceStep=1;
     play_sfx_at(SFX_MELEE,p->pos,(int)(p-players),1,p->enemyType==ENEMY_TYPE_GOLIATH?.65f:1);
@@ -14931,17 +14928,11 @@ static bool melee_hit_voxels(Player *p, Vector3 start, Vector3 dir, float reach)
     int maxy = miny + brushExtent - 1;
     int minz = hit->gz - halfBrush;
     int maxz = minz + brushExtent - 1;
-    bool removed_dynamic = remove_dynamic_voxels_in_region(minx, maxx, miny, maxy, minz, maxz);
+    remove_dynamic_voxels_in_region(minx, maxx, miny, maxy, minz, maxz);
     remove_static_voxels_in_region_recycle(minx, maxx, miny, maxy, minz, maxz);
     int activator = (p >= players && p < players + activePlayers) ? (int)(p - players) : -1;
     activate_static_voxels_near_region(minx, maxx, miny, maxy, minz, maxz, activator);
-    if (!removed_dynamic) {
-        rebuild_all_voxel_surfaces();
-        meshDirty = true;
-    } else {
-        rebuild_all_voxel_surfaces();
-        meshDirty = true;
-    }
+    rebuild_all_voxel_surfaces();
     add_player_matter(p, ff_harvest_amount((int)(p-players)));
     if(firefightPractice && p==players && practiceStep==0) practiceStep=1;
     play_sfx_at(SFX_MELEE,p->pos,(int)(p-players),1,p->enemyType==ENEMY_TYPE_GOLIATH?.65f:1);
@@ -15136,7 +15127,6 @@ static void perform_build(int idx) {
         }
     }
     if (placed > 0) {
-        meshDirty = true;
         p->matter = fmaxf(0.0f, p->matter - (ff_bonus(idx, UPGRADE_BUILD) ? 5 : MATTER_BUILD_COST));
         p->last_build_time = now;
         play_sfx(SFX_SHIELD);
@@ -15155,7 +15145,6 @@ static int activate_static_voxel_to_dynamic(int voxel_idx, int activator) {
     
     remove_voxel_index(voxel_idx);
     mark_surface_neighbors(v.pos);
-    meshDirty = true;
     
     int new_idx = addVoxel(v.pos.x, v.pos.y, v.pos.z, false, true, v.color, v.type);
     if (new_idx >= 0) {
@@ -15182,7 +15171,6 @@ static int rip_single_static_voxel(int voxel_idx, int activator) {
     
     remove_voxel_index(voxel_idx);
     mark_surface_neighbors(v.pos);
-    meshDirty = true;
     
     int new_idx = addVoxel(v.pos.x, v.pos.y, v.pos.z, false, true, v.color, v.type);
     if (new_idx >= 0) {
@@ -16030,7 +16018,7 @@ static VoxelChunk voxel_chunks[MAX_CHUNKS];
 static int voxel_chunk_count = 0;
 
 static inline int grid_to_chunk_coord(int g) {
-    return (g >= 0) ? (g >> CHUNK_SHIFT) : ((g - CHUNK_MASK) >> CHUNK_SHIFT);
+    return g / CHUNK_SIZE - (g < 0 && g % CHUNK_SIZE != 0);
 }
 
 static inline Frustum extract_frustum_from_matrix(Matrix m) {
@@ -16086,12 +16074,12 @@ static VoxelChunk *get_or_create_chunk(int cx, int cy, int cz) {
             .dirty = true,
             .voxel_count = 0,
             .bounds = (BoundingBox){
-                .min = (Vector3){ (float)(cx << CHUNK_SHIFT) * VOXEL_SIZE,
-                                  (float)(cy << CHUNK_SHIFT) * VOXEL_SIZE,
-                                  (float)(cz << CHUNK_SHIFT) * VOXEL_SIZE },
-                .max = (Vector3){ (float)((cx + 1) << CHUNK_SHIFT) * VOXEL_SIZE,
-                                  (float)((cy + 1) << CHUNK_SHIFT) * VOXEL_SIZE,
-                                  (float)((cz + 1) << CHUNK_SHIFT) * VOXEL_SIZE }
+                .min = (Vector3){ (float)(cx * CHUNK_SIZE) * VOXEL_SIZE,
+                                  (float)(cy * CHUNK_SIZE) * VOXEL_SIZE,
+                                  (float)(cz * CHUNK_SIZE) * VOXEL_SIZE },
+                .max = (Vector3){ (float)((cx + 1) * CHUNK_SIZE) * VOXEL_SIZE,
+                                  (float)((cy + 1) * CHUNK_SIZE) * VOXEL_SIZE,
+                                  (float)((cz + 1) * CHUNK_SIZE) * VOXEL_SIZE }
             },
             .mesh = (Mesh){ 0 },
             .mesh_loaded = false
@@ -16101,25 +16089,27 @@ static VoxelChunk *get_or_create_chunk(int cx, int cy, int cz) {
     return NULL;
 }
 
+static void mark_chunks_dirty_for_region(int minx,int maxx,int miny,int maxy,int minz,int maxz) {
+    /* Existing meshes only: an empty neighboring chunk has no faces to expose.
+       Diagonally adjacent chunks cannot share a face with the edited region. */
+    int lowx=grid_to_chunk_coord(minx),highx=grid_to_chunk_coord(maxx);
+    int lowy=grid_to_chunk_coord(miny),highy=grid_to_chunk_coord(maxy);
+    int lowz=grid_to_chunk_coord(minz),highz=grid_to_chunk_coord(maxz);
+    int exlow=grid_to_chunk_coord(minx-1),exhigh=grid_to_chunk_coord(maxx+1);
+    int eylow=grid_to_chunk_coord(miny-1),eyhigh=grid_to_chunk_coord(maxy+1);
+    int ezlow=grid_to_chunk_coord(minz-1),ezhigh=grid_to_chunk_coord(maxz+1);
+    for(int i=0;i<voxel_chunk_count;i++) {
+        VoxelChunk *c=&voxel_chunks[i];
+        if(!c->in_use || c->cx<exlow || c->cx>exhigh || c->cy<eylow || c->cy>eyhigh || c->cz<ezlow || c->cz>ezhigh)continue;
+        int outside=(c->cx<lowx || c->cx>highx)+(c->cy<lowy || c->cy>highy)+(c->cz<lowz || c->cz>highz);
+        if(outside<=1)c->dirty=true;
+    }
+}
+
 static void mark_chunk_dirty_for_grid(int gx, int gy, int gz) {
-    int cx = grid_to_chunk_coord(gx);
-    int cy = grid_to_chunk_coord(gy);
-    int cz = grid_to_chunk_coord(gz);
-    VoxelChunk *c = get_or_create_chunk(cx, cy, cz);
-    if (c) c->dirty = true;
-
-    int lx = gx - (cx << CHUNK_SHIFT);
-    int ly = gy - (cy << CHUNK_SHIFT);
-    int lz = gz - (cz << CHUNK_SHIFT);
-
-    if (lx == 0) { VoxelChunk *n = get_or_create_chunk(cx - 1, cy, cz); if (n) n->dirty = true; }
-    else if (lx == CHUNK_MASK) { VoxelChunk *n = get_or_create_chunk(cx + 1, cy, cz); if (n) n->dirty = true; }
-
-    if (ly == 0) { VoxelChunk *n = get_or_create_chunk(cx, cy - 1, cz); if (n) n->dirty = true; }
-    else if (ly == CHUNK_MASK) { VoxelChunk *n = get_or_create_chunk(cx, cy + 1, cz); if (n) n->dirty = true; }
-
-    if (lz == 0) { VoxelChunk *n = get_or_create_chunk(cx, cy, cz - 1); if (n) n->dirty = true; }
-    else if (lz == CHUNK_MASK) { VoxelChunk *n = get_or_create_chunk(cx, cy, cz + 1); if (n) n->dirty = true; }
+    VoxelChunk *c=get_or_create_chunk(grid_to_chunk_coord(gx),grid_to_chunk_coord(gy),grid_to_chunk_coord(gz));
+    if(c)c->dirty=true;
+    mark_chunks_dirty_for_region(gx,gx,gy,gy,gz,gz);
 }
 
 static void mark_all_chunks_dirty(void) {
@@ -16154,138 +16144,58 @@ static void clear_all_chunks(void) {
 }
 
 static void rebuild_chunk(VoxelChunk *chunk) {
-    if (!chunk || !chunk->dirty) return;
-    chunk->dirty = false;
-
-    if (chunk->mesh_loaded) {
-        if (chunk->mesh.vertices) {
-            UnloadMesh(chunk->mesh);
-        }
-        chunk->mesh = (Mesh){ 0 };
-        chunk->mesh_loaded = false;
+    if(!chunk || !chunk->dirty)return;
+    const int minx=chunk->cx*CHUNK_SIZE,miny=chunk->cy*CHUNK_SIZE,minz=chunk->cz*CHUNK_SIZE;
+    /* Render-thread scratch: one hash lookup per cell, then direct neighbor reads.
+       Each face row is a bitset, replacing face sorting and repeated binary searches. */
+    static int cells[CHUNK_SIZE][CHUNK_SIZE][CHUNK_SIZE];
+    uint32_t faces[6][CHUNK_SIZE][CHUNK_SIZE]={0};
+    int occupied_count=0;
+    for(int z=0;z<CHUNK_SIZE;z++)for(int y=0;y<CHUNK_SIZE;y++)for(int x=0;x<CHUNK_SIZE;x++) {
+        cells[z][y][x]=table_get_static_only(minx+x,miny+y,minz+z);
+        occupied_count+=cells[z][y][x]>=0;
     }
-
-    int min_gx = chunk->cx * CHUNK_SIZE;
-    int min_gy = chunk->cy * CHUNK_SIZE;
-    int min_gz = chunk->cz * CHUNK_SIZE;
-    int max_gx = min_gx + CHUNK_MASK;
-    int max_gy = min_gy + CHUNK_MASK;
-    int max_gz = min_gz + CHUNK_MASK;
-
-    StaticSurfaceFace *faces = NULL;
-    int face_count = 0, face_capacity = 0;
-    int occupied_voxels = 0;
-
-    for (int z = min_gz; z <= max_gz; ++z) {
-        for (int y = min_gy; y <= max_gy; ++y) {
-            for (int x = min_gx; x <= max_gx; ++x) {
-                int vidx = table_get_static_only(x, y, z);
-                if (vidx < 0) continue;
-                occupied_voxels++;
-
-                if (table_get_static_only(x + 1, y, z) < 0)
-                    append_static_surface_face(&faces, &face_count, &face_capacity, 2, true, x, y, z);
-                if (table_get_static_only(x - 1, y, z) < 0)
-                    append_static_surface_face(&faces, &face_count, &face_capacity, 2, false, x, y, z);
-                if (table_get_static_only(x, y + 1, z) < 0)
-                    append_static_surface_face(&faces, &face_count, &face_capacity, 1, true, y, x, z);
-                if (table_get_static_only(x, y - 1, z) < 0)
-                    append_static_surface_face(&faces, &face_count, &face_capacity, 1, false, y, x, z);
-                if (table_get_static_only(x, y, z + 1) < 0)
-                    append_static_surface_face(&faces, &face_count, &face_capacity, 0, true, z, x, y);
-                if (table_get_static_only(x, y, z - 1) < 0)
-                    append_static_surface_face(&faces, &face_count, &face_capacity, 0, false, z, x, y);
+    if(occupied_count)for(int z=0;z<CHUNK_SIZE;z++)for(int y=0;y<CHUNK_SIZE;y++)for(int x=0;x<CHUNK_SIZE;x++) {
+        if(cells[z][y][x]<0)continue;
+        if((z>0?cells[z-1][y][x]:table_get_static_only(minx+x,miny+y,minz-1))<0)faces[0][z][y]|=1u<<x;
+        if((z<CHUNK_MASK?cells[z+1][y][x]:table_get_static_only(minx+x,miny+y,minz+CHUNK_SIZE))<0)faces[1][z][y]|=1u<<x;
+        if((y>0?cells[z][y-1][x]:table_get_static_only(minx+x,miny-1,minz+z))<0)faces[2][y][z]|=1u<<x;
+        if((y<CHUNK_MASK?cells[z][y+1][x]:table_get_static_only(minx+x,miny+CHUNK_SIZE,minz+z))<0)faces[3][y][z]|=1u<<x;
+        if((x>0?cells[z][y][x-1]:table_get_static_only(minx-1,miny+y,minz+z))<0)faces[4][x][z]|=1u<<y;
+        if((x<CHUNK_MASK?cells[z][y][x+1]:table_get_static_only(minx+CHUNK_SIZE,miny+y,minz+z))<0)faces[5][x][z]|=1u<<y;
+    }
+    Patch *result=NULL;int count=0,capacity=0;
+    for(int face=0;face<6;face++)for(int layer=0;layer<CHUNK_SIZE;layer++)for(int j=0;j<CHUNK_SIZE;j++) {
+        uint32_t *rows=faces[face][layer];
+        while(rows[j]) {
+            int i=0,width=1;while(!(rows[j]&(1u<<i)))i++;
+            while(i+width<CHUNK_SIZE && (rows[j]&(1u<<(i+width))))width++;
+            uint32_t run=(UINT32_MAX>>(CHUNK_SIZE-width))<<i;
+            int height=1;
+            while(j+height<CHUNK_SIZE && (rows[j+height]&run)==run)height++;
+            for(int row=j;row<j+height;row++)rows[row]&=~run;
+            if(count==capacity) {
+                int next_capacity=capacity?capacity*2:128;
+                Patch *next=realloc(result,(size_t)next_capacity*sizeof(*next));
+                if(!next){free(result);return;} /* Retain previous mesh and retry next frame. */
+                result=next;capacity=next_capacity;
             }
+            int plane=face/2;
+            int voxel=plane==0?cells[layer][j][i]:plane==1?cells[j][layer][i]:cells[j][i][layer];
+            result[count++]=(Patch){.plane=plane,.positive=(face&1)!=0,
+                .layer=layer+(plane==0?minz:plane==1?miny:minx),
+                .i0=i+(plane==2?miny:minx),.j0=j+(plane==0?miny:minz),
+                .di=width,.dj=height,.col=voxel_display_color(&voxels[voxel]),.voxelIndex=voxel};
         }
     }
-
-    chunk->voxel_count = occupied_voxels;
-    chunk->bounds = (BoundingBox){
-        .min = (Vector3){ (float)min_gx * VOXEL_SIZE, (float)min_gy * VOXEL_SIZE, (float)min_gz * VOXEL_SIZE },
-        .max = (Vector3){ (float)(max_gx + 1) * VOXEL_SIZE, (float)(max_gy + 1) * VOXEL_SIZE, (float)(max_gz + 1) * VOXEL_SIZE }
-    };
-
-    if (face_count <= 0) {
-        if (faces) free(faces);
-        return;
-    }
-
-    qsort(faces, (size_t)face_count, sizeof(*faces), compare_static_surface_faces);
-
-    Patch *cpatches = NULL;
-    int cpatch_count = 0, cpatch_capacity = 0;
-
-    for (int index = 0; index < face_count; ++index) {
-        StaticSurfaceFace *face = &faces[index];
-        if (face->used) continue;
-        int width = 1;
-        for (;;) {
-            int next_i = face->i + width;
-            int limit_i = (face->plane == 2) ? max_gy : max_gx;
-            if (next_i > limit_i) break;
-            int found = find_static_surface_face(faces, face_count, face->plane, face->positive,
-                                                 face->layer, next_i, face->j);
-            if (found < 0 || faces[found].used) break;
-            ++width;
-        }
-        int height = 1;
-        for (;;) {
-            int next_j = face->j + height;
-            int limit_j = (face->plane == 0) ? max_gy : max_gz;
-            if (next_j > limit_j) break;
-            bool complete = true;
-            for (int di = 0; di < width; ++di) {
-                int found = find_static_surface_face(faces, face_count, face->plane, face->positive,
-                                                     face->layer, face->i + di, next_j);
-                if (found < 0 || faces[found].used) { complete = false; break; }
-            }
-            if (!complete) break;
-            ++height;
-        }
-        for (int dj = 0; dj < height; ++dj) {
-            for (int di = 0; di < width; ++di) {
-                int found = find_static_surface_face(faces, face_count, face->plane, face->positive,
-                                                     face->layer, face->i + di, face->j + dj);
-                if (found >= 0) faces[found].used = true;
-            }
-        }
-
-        if (cpatch_count >= cpatch_capacity) {
-            cpatch_capacity = cpatch_capacity ? cpatch_capacity * 2 : 128;
-            cpatches = realloc(cpatches, (size_t)cpatch_capacity * sizeof(Patch));
-        }
-
-        int baseIdx = -1;
-        switch (face->plane) {
-            case 0: baseIdx = table_get_static_only(face->i, face->j, face->layer); break;
-            case 1: baseIdx = table_get_static_only(face->i, face->layer, face->j); break;
-            case 2: baseIdx = table_get_static_only(face->layer, face->i, face->j); break;
-        }
-        Color baseColor = { 160, 160, 160, 255 };
-        if (baseIdx >= 0 && baseIdx < voxel_count) {
-            baseColor = voxel_display_color(&voxels[baseIdx]);
-        }
-
-        cpatches[cpatch_count++] = (Patch){
-            .plane = face->plane,
-            .layer = face->layer,
-            .i0 = face->i,
-            .j0 = face->j,
-            .di = width,
-            .dj = height,
-            .positive = face->positive,
-            .col = baseColor,
-            .voxelIndex = baseIdx
-        };
-    }
-
-    free(faces);
-
-    if (cpatch_count > 0) {
-        chunk->mesh = build_mesh_from_patches(cpatches, cpatch_count);
-        chunk->mesh_loaded = (chunk->mesh.vertexCount > 0);
-    }
-    if (cpatches) free(cpatches);
+    Mesh replacement=count?build_mesh_from_patches(result,count):(Mesh){0};
+    free(result);
+    if(chunk->mesh_loaded)UnloadMesh(chunk->mesh);
+    chunk->mesh=replacement;chunk->mesh_loaded=replacement.vertexCount>0;
+    chunk->voxel_count=occupied_count;
+    chunk->bounds=(BoundingBox){.min={minx*VOXEL_SIZE,miny*VOXEL_SIZE,minz*VOXEL_SIZE},
+        .max={(minx+CHUNK_SIZE)*VOXEL_SIZE,(miny+CHUNK_SIZE)*VOXEL_SIZE,(minz+CHUNK_SIZE)*VOXEL_SIZE}};
+    chunk->dirty=false;
 }
 
 static uint64_t voxel_render_frame = 1;
@@ -20771,7 +20681,6 @@ static bool run_ai_awareness_smoke_test(void) {
         int v1 = add_static_voxel_at_grid(1, 1, 0, BLUE, 0);
         init_static_hash();
         refresh_static_voxel_beliefs();
-
         if (v0 < 0 || v1 < 0) {
             fprintf(stderr, "ai-smoke FAIL: Failed to spawn static test voxels!\n");
             return false;

@@ -47,7 +47,7 @@ static void feedback_spawn_body(PendingRemains body) {
         part->pos=v_add(at,(Vector3){corner_signs[c][0]*edge*.5f,corner_signs[c][1]*edge*.5f,corner_signs[c][2]*edge*.5f});
         part->prev_pos=part->predicted_pos=part->pos;part->vel=x->vel;part->radius=voxel_particle_radius(x);
     }
-    enemyRemains[free]=(EnemyRemains){x->identity,clarityClock};meshDirty=true;
+    enemyRemains[free]=(EnemyRemains){x->identity,clarityClock};
 }
 static void feedback_tick(float dt) {
     if(netTransport.role!=NET_ROLE_CLIENT) {

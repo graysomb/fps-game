@@ -239,7 +239,6 @@ static void enemy_blast_terrain(EnemyCharge c) {
         }
     }
     rebuild_voxel_hash();rebuild_all_voxel_surfaces();
-    meshDirty=true;
 }
 /* Supplies are real glued voxel bundles, shared by players and enemies. */
 static void enemy_scrap_bundle(Vector3 origin) {
@@ -389,7 +388,7 @@ static bool enemy_build(int i) {
         int v=add_static_voxel_at_grid(ox+(int)cell.x,y,oz+(int)cell.z,enemy_color(ENEMY_TYPE_BUILDER),0);
         if(v>=0) {b->ids[b->count++]=voxels[v].identity;voxels[v].owner=ENEMY_CONSTRUCTION_OWNER;}
     }
-    rebuild_all_voxel_surfaces();rebuild_glue_constraints();meshDirty=true;return b->count>0;
+    rebuild_all_voxel_surfaces();rebuild_glue_constraints();return b->count>0;
 }
 static bool enemy_find_build_site(int i,Vector3 threat) {
     EnemySpecialState *s=&enemySpecial[i];float base=atan2f(threat.z,threat.x);

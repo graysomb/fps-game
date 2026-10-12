@@ -16,6 +16,10 @@ try {
     & gcc tests/firefight_integration.c @sources @flags -o ".build/firefight_integration_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Integration build failed' }
     $backend = if ($Gpu) { 'gpu' } else { 'cpu-mt' }
+    & gcc tests/chunk_mesh_test.c @sources @flags -o ".build/chunk_mesh_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Chunk mesh build failed' }
+    & ".build/chunk_mesh_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Chunk mesh regression failed' }
     & ".build/firefight_integration_$variant.exe" "--physics=$backend"
     if ($LASTEXITCODE -ne 0) { throw 'Integration test failed' }
     & gcc tests/firefight_playtest.c @sources @flags -o ".build/firefight_playtest_$variant.exe"
