@@ -18,7 +18,15 @@ static void enemy_lab_spawn(int slot,EnemyType type,Vector3 position) {
     if(enemy_is_special(slot)) enemy_update_equipment(slot);
 }
 static void enemy_lab_start(int which) {
-    if(!enemyLab) {enemyLabPreviousWorld=currentWorldType;enemyLabPreviousFoundry=firefightFoundry;enemyLabPreviousCustom=useCustomMap;enemyLabGod=true;enemyLabPaused=false;enemyLabStep=false;}
+    if(!enemyLab) {
+        enemyLabPreviousWorld=currentWorldType;enemyLabPreviousFoundry=firefightFoundry;enemyLabPreviousCustom=useCustomMap;
+        enemyLabGod=true;enemyLabPaused=false;enemyLabStep=false;
+        /* The lab skips the lobby, so bind its human seat on entry. Resets and
+         * case changes retain the seat, including explicit device reassignment. */
+        int device=couch_menu_device();
+        multiplayerPlayerInput[0]=device>=0?INPUT_TYPE_GAMEPAD:INPUT_TYPE_KEYBOARD;
+        if(device>=0)localSeats[0].device=device;
+    }
     enemyLab=true;enemyLabCase=which;enemyLabClock=0;
     gameMode=GAME_MODE_FIREFIGHT;firefightPractice=false;firefightFoundry=false;useCustomMap=false;
     currentWorldType=WORLD_TYPE_TEST;multiplayerActivePlayers=1;firefightHumans=1;

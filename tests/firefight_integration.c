@@ -2,10 +2,11 @@
 #include "raylib.h"
 /* Exercise the actual couch shell with deterministic virtual devices. */
 static bool testKeys[512],testPads[4],testButtons[4][32];
+static float testAxes[4][8];
 static bool test_key_pressed(int key) {return key>=0&&key<512&&testKeys[key];}
 static bool test_pad_available(int pad) {return pad>=0&&pad<4&&testPads[pad];}
 static bool test_button_pressed(int pad,int button) {return test_pad_available(pad)&&button>=0&&button<32&&testButtons[pad][button];}
-static float test_pad_axis(int pad,int axis) {(void)pad;(void)axis;return 0;}
+static float test_pad_axis(int pad,int axis) {return test_pad_available(pad)&&axis>=0&&axis<8?testAxes[pad][axis]:0;}
 #define IsKeyPressed test_key_pressed
 #define IsGamepadAvailable test_pad_available
 #define IsGamepadButtonPressed test_button_pressed
@@ -227,7 +228,21 @@ int main(int argc,char **argv) {
     gameMode=GAME_MODE_FIREFIGHT;firefightFoundry=true;ResetGame();assert(FLOOR_SIZE==40);
     capture_arena("artifacts/foundry-overview.png");
     /* The real lab controls must reset fixtures without consuming couch seats. */
-    enemy_lab_start(ENEMY_TYPE_SCRAPPER);
+    memset(testPads,0,sizeof(testPads));testPads[2]=true;couchMenuDevice=-1;
+    multiplayerPlayerInput[0]=INPUT_TYPE_KEYBOARD;localSeats[0].device=0;
+    gameState=GAME_STATE_MENU;couchLobby=false;couchSelection=5;
+    testButtons[2][GAMEPAD_BUTTON_RIGHT_FACE_DOWN]=true;couch_frame();memset(testButtons,0,sizeof(testButtons));
+    assert(enemyLab && playerInput[0]==INPUT_TYPE_GAMEPAD && multiplayerPlayerInput[0]==INPUT_TYPE_GAMEPAD && seat_device(0)==2);
+    testAxes[2][GAMEPAD_AXIS_RIGHT_X]=1;HandleGamepadInput(0,.1f);assert(players[0].yaw_vel!=0);memset(testAxes,0,sizeof(testAxes));
+    testButtons[2][GAMEPAD_BUTTON_LEFT_TRIGGER_1]=true;enemy_lab_controls();memset(testButtons,0,sizeof(testButtons));
+    assert(enemyLabCase==ENEMY_TYPE_SHIELDBEARER && seat_device(0)==2);
+    testButtons[2][GAMEPAD_BUTTON_RIGHT_FACE_LEFT]=true;enemy_lab_controls();memset(testButtons,0,sizeof(testButtons));assert(enemyLabPaused);
+    testButtons[2][GAMEPAD_BUTTON_RIGHT_TRIGGER_1]=true;enemy_lab_controls();memset(testButtons,0,sizeof(testButtons));assert(enemyLabStep);
+    testButtons[2][GAMEPAD_BUTTON_RIGHT_FACE_UP]=true;enemy_lab_controls();memset(testButtons,0,sizeof(testButtons));
+    assert(enemySpecial[4].equipmentCount==20 && playerInput[0]==INPUT_TYPE_GAMEPAD && seat_device(0)==2);
+    testButtons[2][GAMEPAD_BUTTON_MIDDLE_LEFT]=true;enemy_lab_controls();memset(testButtons,0,sizeof(testButtons));assert(!enemyLabGod);
+    enemy_lab_exit();memset(testPads,0,sizeof(testPads));enemy_lab_start(ENEMY_TYPE_SCRAPPER);
+    assert(playerInput[0]==INPUT_TYPE_KEYBOARD && multiplayerPlayerInput[0]==INPUT_TYPE_KEYBOARD);
     testKeys[KEY_F3]=true;enemy_lab_controls();memset(testKeys,0,sizeof(testKeys));
     assert(enemyLabCase==ENEMY_TYPE_SHIELDBEARER && multiplayerActivePlayers==1);
     testKeys[KEY_F5]=true;enemy_lab_controls();memset(testKeys,0,sizeof(testKeys));assert(enemyLabPaused);
