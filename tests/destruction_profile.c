@@ -1,6 +1,9 @@
 /* Destruction stress profiler. Run from repo root with --physics=gpu.
  * FPS_STRESS_GRENADES (0..24), FPS_STRESS_FRAMES (>=120) configure the workload.
+ * FPS_STRESS_ACTIVATE=region (or 1) / tether selects frame-180 activation.
+ * FPS_STRESS_CHECKSUM=1 reports state outside timed intervals.
  * Gameplay AI is disabled to isolate terrain activation, physics and rendering. */
+#define ACTIVATION_PROFILE
 #define main fps_application_main
 #include "../fps_ray.c"
 #undef main
@@ -11,6 +14,23 @@ static void profile_summary(const char *label,double *values,int count) {
     double sum=0;for(int i=0;i<count;i++)sum+=values[i];qsort(values,count,sizeof(*values),profile_compare);
     fprintf(stderr,"timing %s count=%d mean=%.3f p50=%.3f p95=%.3f p99=%.3f max=%.3f ms\n",label,count,sum/count,values[count/2],values[(int)((count-1)*.95)],values[(int)((count-1)*.99)],values[count-1]);
 }
+static unsigned long long diagnostic_hash_bytes(unsigned long long h,const void *p,size_t size){const unsigned char *b=p;for(size_t n=0;n<size;n++){h^=b[n];h*=1099511628211ull;}return h;}
+static unsigned long long diagnostic_state_hash(void) {
+    unsigned long long h=1469598103934665603ull;
+#define HASH_FIELD(value) h=diagnostic_hash_bytes(h,&(value),sizeof(value))
+    HASH_FIELD(voxel_count);HASH_FIELD(sim_particle_count);HASH_FIELD(recycleQueueCount);
+    for(int i=0;i<voxel_count;i++) {
+        Voxel *v=&voxels[i];HASH_FIELD(v->gx);HASH_FIELD(v->gy);HASH_FIELD(v->gz);HASH_FIELD(v->pos);HASH_FIELD(v->vel);
+        HASH_FIELD(v->simulate);HASH_FIELD(v->fixed);HASH_FIELD(v->sleeping);HASH_FIELD(v->owner);HASH_FIELD(v->color);HASH_FIELD(v->type);
+        HASH_FIELD(v->freezeBelief);HASH_FIELD(v->activationBelief);HASH_FIELD(v->restorationQueued);HASH_FIELD(v->restorationDeadlineFrame);HASH_FIELD(v->supportMask);HASH_FIELD(v->groundSupport);
+        HASH_FIELD(v->glued_faces);HASH_FIELD(v->glued_neighbors);
+        for(int c=0;c<8;c++){Particle *p=v->particles[c];int slot=p?(int)(p-particles_pool):-1;HASH_FIELD(slot);if(p){HASH_FIELD(p->pos);HASH_FIELD(p->vel);HASH_FIELD(p->inv_mass);HASH_FIELD(p->base_inv_mass);}}
+    }
+    for(int i=0;i<recycleQueueCount;i++){Voxel *v=&recycleQueue[(recycleQueueHead+i)%MAX_VOXELS];HASH_FIELD(v->orig_min_gx);HASH_FIELD(v->orig_max_gx);HASH_FIELD(v->orig_min_gy);HASH_FIELD(v->orig_max_gy);HASH_FIELD(v->orig_min_gz);HASH_FIELD(v->orig_max_gz);}
+#undef HASH_FIELD
+    return h;
+}
+
 int main(int argc,char **argv) {
     assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(640,360,"Grenade stress profile");SetTargetFPS(0);
@@ -29,15 +49,26 @@ multiplayerActivePlayers=1;multiplayerPlayerInput[0]=INPUT_TYPE_KEYBOARD;
     Vector3 targets[24];int count=0;
     for(int i=0;i<voxel_count && count<limit;i+=37)if(!voxels[i].simulate && voxels[i].pos.y>.4f && voxels[i].pos.y<5){targets[count++]=v_add(voxels[i].pos,(Vector3){0,2,0});}
     Camera3D cam={{24,18,24},{0,2,0},{0,1,0},65,CAMERA_PERSPECTIVE};
+    const char *activation=getenv("FPS_STRESS_ACTIVATE");
+    bool checksums=getenv("FPS_STRESS_CHECKSUM")!=NULL;
     double phases[9]={0};int ticks=0;
     fprintf(stderr,"frame,voxels,awake,sleep,sim_particles,pool,collision,chunks,queue,invisible,fixed_particles,blast_ms,activate_ms,physics_ms,recycle_ms,sleep_ms,hash_ms,mesh_ms,render_ms,total_ms\n");
     for(int f=0;f<frames;f++) {
+        memset(&activationProfile,0,sizeof(activationProfile));
+        double prior[9];memcpy(prior,phases,sizeof(prior));
         double t=GetTime(),start=t;uint64_t commitsBefore=regenerationCommits;
-        if(getenv("FPS_STRESS_ACTIVATE") && f==180) {
-            double begin=GetTime();bool activated=activate_static_voxels_near_region(39,46,0,9,-10,10,0);
+        if(activation && f==180) {
+            double begin=GetTime();bool activated;
+            if(!strcmp(activation,"tether")) {
+                int seed=table_get_static_only(versus?24:41,5,versus?6:-8);
+                assert(seed>=0);
+                activated=activate_static_voxel_for_tether(seed,0,ACTIVATION_TETHER_BELIEF);
+            } else activated=versus?activate_static_voxels_near_region(21,35,0,9,6,16,0):activate_static_voxels_near_region(39,46,0,9,-10,10,0);
+            assert(activated);
             double elapsed=(GetTime()-begin)*1000;int dynamic=0;
             for(int i=0;i<voxel_count;i++)dynamic+=voxels[i].simulate;
             fprintf(stderr,"activation changed=%d dynamic_voxels=%d synchronous_ms=%.3f\n",activated,dynamic,elapsed);
+            if(checksums){double checksumStart=GetTime();fprintf(stderr,"activation-state initial %016llx\n",diagnostic_state_hash());double overhead=GetTime()-checksumStart;start+=overhead;t+=overhead;}
         }
         if(f>=180 && (f-180)%30==0 && (f-180)/30<count){int n=(f-180)/30;grenades[n]=(GrenadeState){.id=100+n,.owner=-1,.pos=targets[n],.vel={0,-2,0},.fuse=-1};}
         clarity_tick(1.0f/60);phases[0]+=GetTime()-t;t=GetTime();
@@ -52,11 +83,15 @@ multiplayerActivePlayers=1;multiplayerPlayerInput[0]=INPUT_TYPE_KEYBOARD;
         voxel_render_frame++;
         BeginDrawing();ClearBackground(SKYBLUE);BeginMode3D(cam);draw_world_surfaces();DrawVoxels(cam);draw_pickups(cam);EndMode3D();EndDrawing();phases[7]+=GetTime()-t;
         frameTimes[f]=(GetTime()-start)*1000;
+        if(activation && f>=180 && f<=185) {
+            fprintf(stderr,"activation-frame frame=%d removal_ms=%.3f support_ms=%.3f support_refreshes=%llu column_scans=%llu column_visits=%llu followup_ms=%.3f physics_ms=%.3f mesh_ms=%.3f total_ms=%.3f\n",f+1,activationProfile.removalMs,activationProfile.supportMs,(unsigned long long)activationProfile.supportRefreshes,(unsigned long long)activationProfile.columnScans,(unsigned long long)activationProfile.columnVisits,(phases[1]-prior[1])*1000,(phases[2]-prior[2])*1000,(phases[6]-prior[6])*1000,frameTimes[f]);
+        }
         if(regenerationCommits!=commitsBefore) {
             if(commitCount<2048)commitTimes[commitCount++]=regenerationLastCommitMs;
             fprintf(stderr,"commit frame=%d blocks_remaining=%d transaction_ms=%.3f frame_ms=%.3f\n",f+1,recycleQueueCount,regenerationLastCommitMs,frameTimes[f]);
         }
-        phases[8]+=GetTime()-start;ticks++;
+        phases[8]+=frameTimes[f]/1000;ticks++;
+        if(checksums && activation && (f==181 || f==185))fprintf(stderr,"activation-state frame=%d %016llx\n",f+1,diagnostic_state_hash());
         if(f%120==119){int awake=0,sleep=0,invisible=0,fixed=0;for(int v=0;v<voxel_count;v++)invisible+=voxels[v].simulate && !voxels[v].vgs_active;for(int p=0;p<sim_particle_count;p++)fixed+=sim_particles[p]->inv_mass==0;for(int i=0;i<voxel_count;i++)if(voxels[i].simulate){if(voxels[i].sleeping)sleep++;else awake++;}
             fprintf(stderr,"%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",f+1,voxel_count,awake,sleep,sim_particle_count,particle_pool_count,collision_particle_count,voxel_chunk_count,recycleQueueCount,invisible,fixed);
             for(int k=0;k<9;k++){fprintf(stderr,",%.3f",phases[k]*1000/ticks);phases[k]=0;}fprintf(stderr,"\n");fflush(stderr);ticks=0;

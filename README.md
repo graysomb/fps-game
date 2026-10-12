@@ -774,6 +774,8 @@ On Windows, after building raylib, run:
 .\tools\profile_destruction.ps1 -Map foundry -Backend gpu
 .\tools\profile_destruction.ps1 -Map versus -Backend gpu
 .\tools\profile_destruction.ps1 -ActivateStructure -Frames 1800
+.\tools\profile_destruction.ps1 -ActivateStructure -Activation tether -Frames 360
+.\tools\profile_destruction.ps1 -ActivateStructure -Backend cpu-st -Frames 360 -StateChecksums
 ```
 
 The hidden-window harness disables AI and injects 24 grenades by default. Reports in
@@ -782,6 +784,15 @@ frame-time percentiles. `-RestorationOnly` isolates restoration and rendering wi
 physics; its numbers are not whole-game frame times. The full workload separates the
 quiet tail (frames 2401 onward) from active destruction. Large active-physics costs
 and occasional global collision/support refresh spikes can still remain.
+
+Activation removes static voxels in a support-invalidation batch, then retains the
+existing full support refresh. Tether activation invalidates only affected mesh chunks.
+Activation reports include removal/support timings, column-scan counts and individual
+activation-window frames. `-StateChecksums` compares captured voxel, particle, support,
+glue and restoration state outside measured intervals; use `cpu-st` for deterministic
+follow-on physics comparisons. Profiling counters compile only into the test harness.
+`tests/activation_batch_test.c` checks nesting, empty/failed operations, index compaction
+and preserved restoration deadlines; the mesh regression checks tether chunk seams.
 
 `tools/validate_firefight.ps1` includes chunk geometry and regeneration regressions.
 `tests/chunk_regeneration_test.c` covers deadlines, boundaries, occupancy, cancellation,

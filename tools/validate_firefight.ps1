@@ -16,6 +16,10 @@ try {
     & gcc tests/firefight_integration.c @sources @flags -o ".build/firefight_integration_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Integration build failed' }
     $backend = if ($Gpu) { 'gpu' } else { 'cpu-mt' }
+    & gcc tests/activation_batch_test.c @sources @flags -o ".build/activation_batch_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Activation batching build failed' }
+    & ".build/activation_batch_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Activation batching regression failed' }
     & gcc tests/chunk_mesh_test.c @sources @flags -o ".build/chunk_mesh_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Chunk mesh build failed' }
     & ".build/chunk_mesh_$variant.exe"

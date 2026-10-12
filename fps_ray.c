@@ -1337,6 +1337,16 @@ static int staticBeliefDirtyCount = 0;
 static uint8_t staticBeliefQueued[MAX_VOXELS];
 static bool staticBeliefsInitialized = false;
 static bool staticBeliefsForceFullRefresh = false;
+// Activation removes many static voxels before support is read again. During
+// that transaction, one full-refresh request replaces per-voxel world scans.
+static unsigned int staticBeliefBatchDepth = 0;
+
+#ifdef ACTIVATION_PROFILE
+static struct {
+    uint64_t columnScans, columnVisits, supportRefreshes;
+    double removalMs, supportMs;
+} activationProfile;
+#endif
 static int debugSmushLogBudget = 0;
 static Voxel recycleQueue[MAX_VOXELS];
 static Voxel recycleQueueScratch[MAX_VOXELS];
@@ -4795,6 +4805,10 @@ static void remove_buffered_static_voxels(UnitVoxelBuffer *buffer)
     if (!buffer) {
         return;
     }
+#ifdef ACTIVATION_PROFILE
+    double removalStart = GetTime();
+#endif
+    ++staticBeliefBatchDepth;
     int indices[VOXEL_ACTIVATION_UNIT_BUDGET];
     int idx_count = 0;
     for (int i = 0; i < buffer->count; ++i) {
@@ -4852,6 +4866,10 @@ static void remove_buffered_static_voxels(UnitVoxelBuffer *buffer)
             remove_voxel_index(idx);
         }
     }
+    --staticBeliefBatchDepth;
+#ifdef ACTIVATION_PROFILE
+    activationProfile.removalMs += (GetTime() - removalStart) * 1000.0;
+#endif
 }
 
 static bool activation_try_enqueue(int voxel_idx,
@@ -6410,6 +6428,10 @@ static void mark_static_belief_dirty_index(int idx)
 
 static void mark_static_beliefs_dirty_column_above(int gx, int gz, int gy)
 {
+#ifdef ACTIVATION_PROFILE
+    ++activationProfile.columnScans;
+    activationProfile.columnVisits += voxel_count;
+#endif
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *voxel = &voxels[i];
         if (voxel->simulate) {
@@ -6427,6 +6449,10 @@ static void mark_static_beliefs_dirty_column_above(int gx, int gz, int gy)
 static void mark_static_beliefs_dirty_for_voxel(const Voxel *voxel)
 {
     if (!voxel || voxel->simulate) {
+        return;
+    }
+    if (staticBeliefBatchDepth > 0) {
+        staticBeliefsForceFullRefresh = true;
         return;
     }
     int idx = (int)(voxel - voxels);
@@ -6586,11 +6612,18 @@ static void full_refresh_static_voxel_beliefs(void)
 
 static void refresh_static_voxel_beliefs(void)
 {
+#ifdef ACTIVATION_PROFILE
+    double supportStart = GetTime();
+#endif
     if (!staticBeliefsInitialized || staticBeliefsForceFullRefresh) {
         full_refresh_static_voxel_beliefs();
         staticBeliefsInitialized = true;
         staticBeliefsForceFullRefresh = false;
         clear_static_belief_dirty();
+#ifdef ACTIVATION_PROFILE
+        ++activationProfile.supportRefreshes;
+        activationProfile.supportMs += (GetTime() - supportStart) * 1000.0;
+#endif
         return;
     }
 
@@ -6601,6 +6634,10 @@ static void refresh_static_voxel_beliefs(void)
     staticBeliefsInitialized = true;
     staticBeliefsForceFullRefresh = false;
     clear_static_belief_dirty();
+#ifdef ACTIVATION_PROFILE
+    ++activationProfile.supportRefreshes;
+    activationProfile.supportMs += (GetTime() - supportStart) * 1000.0;
+#endif
 }
 
 static bool voxel_connected_to_static_world(const Voxel *voxel)
@@ -9777,7 +9814,7 @@ static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float
     rebuild_glue_constraints();
     glue_dynamic_voxel_to_static_neighbors();
     refresh_static_voxel_beliefs();
-    meshDirty = true;
+    // Removal already invalidates the affected chunks and their face neighbors.
     return true;
 }
 

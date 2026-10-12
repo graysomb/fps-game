@@ -1,3 +1,4 @@
+#define ACTIVATION_PROFILE
 #define main fps_application_main
 #include "../fps_ray.c"
 #undef main
@@ -51,5 +52,17 @@ int main(void) {
     /* Sparse deterministic geometry catches holes and incorrect greedy merges. */
     clear_world_voxels();clear_all_chunks();unsigned int seed=91;
     for(int k=0;k<300;k++){seed=seed*1664525u+1013904223u;int x=(seed>>8)%70-35;seed=seed*1664525u+1013904223u;int y=(seed>>8)%36;seed=seed*1664525u+1013904223u;int z=(seed>>8)%70-35;add_static_voxel_at_grid(x,y,z,GRAY,0);}
-    check_mesh_faces();clear_all_chunks();clear_world_voxels();CloseWindow();puts("Chunk mesh regression passed");return 0;
+    check_mesh_faces();
+    /* Tether activation crosses a negative chunk seam without invalidating the
+     * unrelated chunk. Compare every remaining static face after the removal. */
+    clear_all_chunks();clear_world_voxels();activePlayers=0;
+    for(int x=-34;x<=-30;x++)for(int y=10;y<=12;y++)add_static_voxel_at_grid(x,y,0,GRAY,0);
+    add_static_voxel_at_grid(200,10,200,BLUE,0);check_mesh_faces();
+    distant=get_or_create_chunk(grid_to_chunk_coord(200),grid_to_chunk_coord(10),grid_to_chunk_coord(200));vao=distant->mesh.vaoId;
+    meshDirty=false;memset(&activationProfile,0,sizeof(activationProfile));
+    assert(activate_static_voxel_for_tether(table_get_static_only(-32,11,0),0,ACTIVATION_TETHER_BELIEF));
+    assert(!meshDirty && !distant->dirty && activationProfile.columnScans==0);
+    assert(staticBeliefBatchDepth==0 && recycleQueueCount>0);
+    check_mesh_faces();assert(distant->mesh.vaoId==vao);
+    clear_all_chunks();clear_world_voxels();CloseWindow();puts("Chunk mesh regression passed");return 0;
 }
