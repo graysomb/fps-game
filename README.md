@@ -733,7 +733,7 @@ Human feet sit one unit below the unchanged eye anchor. Their collision and dama
 is 0.78 units wide and 1.12 units tall; bot bounds are unchanged. Walking follows distance
 traveled with planted feet, short terrain adjustments, and a landing blend. The scouter
 rim and gear share weapon bloom and remain luminous with `--no-weapon-bloom`.
-LAN peers must use protocol 8, which includes grenade input, inventory, snapshots, and unique combat events.
+LAN peers must use protocol 10, which also synchronizes chunk regeneration previews.
 
 Run `tools/validate_character.ps1` on Windows after building raylib. It checks both
 OpenGL versions, shader fallback, mesh data, emission occlusion, split-screen play,
@@ -757,3 +757,34 @@ without carrying residual sideways velocity, while gravity still affects their f
 Enemy Lab F8 / D-pad Down cycles through eight fixtures, including Anchor recovery,
 footstep audition, and an offset tether throw. Regression runs export blast previews and
 three footstep WAV samples under `artifacts/`.
+
+
+### Chunk regeneration and destruction profiling
+
+Terrain retains its existing restoration deadlines. Eligible missing cells are grouped
+by the 32-cell (16-metre) rendering chunk, previewed with a 0.6-second reconstruction
+scan, then restored together. Newer damage waits for its own deadline. Intact terrain
+and construction are preserved. Actors and dynamic debris can delay an overlapping
+chunk without preventing free chunks from regenerating. Collision, support and mesh
+updates are coalesced per batch; the preview is non-solid.
+
+On Windows, after building raylib, run:
+
+```powershell
+.\tools\profile_destruction.ps1 -Map foundry -Backend gpu
+.\tools\profile_destruction.ps1 -Map versus -Backend gpu
+.\tools\profile_destruction.ps1 -ActivateStructure -Frames 1800
+```
+
+The hidden-window harness disables AI and injects 24 grenades by default. Reports in
+`artifacts/profile-*` include phase averages, individual regeneration commits and
+frame-time percentiles. `-RestorationOnly` isolates restoration and rendering without
+physics; its numbers are not whole-game frame times. The full workload separates the
+quiet tail (frames 2401 onward) from active destruction. Large active-physics costs
+and occasional global collision/support refresh spikes can still remain.
+
+`tools/validate_firefight.ps1` includes chunk geometry and regeneration regressions.
+`tests/chunk_regeneration_test.c` covers deadlines, boundaries, occupancy, cancellation,
+capacity, preview depth and multipart network messages. Set `FPS_REGEN_SHADER_FALLBACK=1`
+to exercise the translucent fallback. `tests/combat_clarity_lan.c` additionally checks
+preview resynchronization and the authoritative terrain commit over loopback ENet.

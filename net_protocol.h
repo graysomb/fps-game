@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define FPS_NET_MAGIC 0x4650534eu /* "FPSN" */
-#define FPS_NET_PROTOCOL_VERSION 9u /* Grenades wait for first bounce before counting down. */
+#define FPS_NET_PROTOCOL_VERSION 10u /* Chunk regeneration previews. */
 #define FPS_NET_DEFAULT_PORT 27015u
 #define FPS_NET_DISCOVERY_PORT 27016u
 #define FPS_NET_MAX_PACKET 1100u
@@ -34,7 +34,8 @@ typedef enum NetMessageType {
     NET_MSG_SESSION_STATE,
     NET_MSG_CREATIVE_ACTION,
     NET_MSG_GAME_EVENT,
-    NET_MSG_GRENADES
+    NET_MSG_GRENADES,
+    NET_MSG_REGENERATION
 } NetMessageType;
 
 typedef enum NetInputButtons {

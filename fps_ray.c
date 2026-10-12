@@ -600,7 +600,9 @@ static float worldFloorHalfSize=20.0f;
 #define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
 #define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
 #define RECYCLE_DYNAMIC_MAX_FRAMES (60 * 10)
-#define RECYCLE_STATIC_RESTORE_INTERVAL 1
+#define CHUNK_SIZE 32
+#define CHUNK_SHIFT 5
+#define CHUNK_MASK (CHUNK_SIZE - 1)
 #define RECYCLE_STATIC_RESTORE_DELAY (60 * 15)
 #define RECYCLE_OWNED_STATIC_MAX_FRAMES (60 * 30)
 #define STATIC_DEBRIS_OWNER (-2)
@@ -1342,6 +1344,14 @@ static int recycleQueueHead = 0;
 static int recycleQueueTail = 0;
 static int recycleQueueCount = 0;
 static int recycleFrameCounter = 0;
+static bool staticEditBatch = false;
+static void regeneration_step(float dt);
+static void regeneration_reset(void);
+static void regeneration_shutdown(void);
+static void regeneration_draw(void);
+static void regeneration_net_send(int peer, bool active);
+static bool regeneration_net_receive(NetMessageType type, NetReader *reader);
+static inline int grid_to_chunk_coord(int g);
 static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Color color, int type);
 static int add_fluid_cell(float px, float py, float pz, Color color);
 static void rebuild_voxel_hash(void);
@@ -1649,14 +1659,12 @@ static bool push_particle_out_of_static(const Voxel *static_voxel, Particle *par
 static void glue_dynamic_voxel_to_static_neighbors(void);
 static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx);
 static bool recycle_queue_push(const Voxel *voxel);
-static bool recycle_queue_pop(Voxel *out);
 static void recycle_queue_remove_region(int minx, int maxx,
                                         int miny, int maxy,
                                         int minz, int maxz);
 static bool voxel_is_at_rest_location(const Voxel *voxel);
 static bool voxel_outside_world_bounds(const Voxel *voxel);
-static bool spawn_static_at_rest(const Voxel *snapshot);
-static void recycle_dead_voxels(void);
+static void recycle_dead_voxels(float dt);
 static void update_projectiles(float dt);
 static void handle_pbd_projectile_hits(void);
 static bool keyboard_player_index(int index);
@@ -3606,6 +3614,7 @@ static void init_static_hash(void) {
 
 static void mark_static_hash_dirty(void) {
     staticHashDirty = true;
+    if (staticEditBatch) return;
     staticHashGeneration++;
     if (staticHashGeneration == 0) staticHashGeneration = 1;
 }
@@ -4111,22 +4120,6 @@ static void remove_debris_static_in_columns(int minx, int maxx,
     }
 }
 
-static bool remove_all_debris_static(void)
-{
-    bool removed = false;
-    int i = 0;
-    while (i < voxel_count) {
-        Voxel *voxel = &voxels[i];
-        if (!voxel->simulate && voxel->owner == STATIC_DEBRIS_OWNER) {
-            remove_voxel_index(i);
-            removed = true;
-            continue;
-        }
-        ++i;
-    }
-    return removed;
-}
-
 static bool find_nearest_free_static_region(int base_minx, int base_maxx,
                                             int base_miny, int base_maxy,
                                             int base_minz, int base_maxz,
@@ -4582,10 +4575,12 @@ static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Col
     table_cache_invalidate();
     voxel_table_register(v, idx);
     if (!simulate) {
-        mark_static_beliefs_dirty_for_voxel(v);
+        if (!staticEditBatch) {
+            mark_static_beliefs_dirty_for_voxel(v);
+            mark_chunk_dirty_for_grid(v->gx,v->gy,v->gz);
+            refresh_surfaces_in_region(v->gx,v->gx,v->gy,v->gy,v->gz,v->gz);
+        }
         mark_static_hash_dirty();
-        mark_chunk_dirty_for_grid(v->gx,v->gy,v->gz);
-        refresh_surfaces_in_region(v->gx,v->gx,v->gy,v->gy,v->gz,v->gz);
     } else {
         dynamic_voxels_dirty = true;
     }
@@ -5754,16 +5749,6 @@ static bool recycle_queue_push(const Voxel *voxel) {
     return true;
 }
 
-static bool recycle_queue_pop(Voxel *out) {
-    if (!out || recycleQueueCount <= 0) {
-        return false;
-    }
-    *out = recycleQueue[recycleQueueHead];
-    recycleQueueHead = (recycleQueueHead + 1) % MAX_VOXELS;
-    --recycleQueueCount;
-    return true;
-}
-
 static void recycle_queue_remove_region(int minx, int maxx,
                                         int miny, int maxy,
                                         int minz, int maxz) {
@@ -5898,63 +5883,6 @@ static bool voxel_outside_world_bounds(const Voxel *voxel) {
         return true;
     }
     return false;
-}
-
-static bool spawn_static_at_rest(const Voxel *snapshot) {
-    if (!snapshot) {
-        return false;
-    }
-    int minx = snapshot->rest_min_gx;
-    int maxx = snapshot->rest_max_gx;
-    int miny = snapshot->rest_min_gy;
-    int maxy = snapshot->rest_max_gy;
-    int minz = snapshot->rest_min_gz;
-    int maxz = snapshot->rest_max_gz;
-    if (snapshot->orig_min_gx <= snapshot->orig_max_gx &&
-        snapshot->orig_min_gy <= snapshot->orig_max_gy &&
-        snapshot->orig_min_gz <= snapshot->orig_max_gz) {
-        minx = snapshot->orig_min_gx;
-        maxx = snapshot->orig_max_gx;
-        miny = snapshot->orig_min_gy;
-        maxy = snapshot->orig_max_gy;
-        minz = snapshot->orig_min_gz;
-        maxz = snapshot->orig_max_gz;
-    }
-    if (minx > maxx || miny > maxy || minz > maxz) {
-        return false;
-    }
-    int max_world_y = (int)ceilf((FLOOR_SIZE * 2.0f) / VOXEL_SIZE);
-    remove_debris_static_in_columns(minx, maxx, minz, maxz, 0, max_world_y);
-    remove_unowned_static_voxels_in_region(minx, maxx, miny, maxy, minz, maxz);
-    if (!grid_region_is_free(minx, maxx, miny, maxy, minz, maxz)) {
-        return false;
-    }
-
-    float center_x = 0.5f * ((float)minx + (float)maxx + 1.0f);
-    float center_y = 0.5f * ((float)miny + (float)maxy + 1.0f);
-    float center_z = 0.5f * ((float)minz + (float)maxz + 1.0f);
-    float px = center_x * VOXEL_SIZE;
-    float py = center_y * VOXEL_SIZE;
-    float pz = center_z * VOXEL_SIZE;
-    int idx = addVoxel(px, py, pz, true, false, snapshot->color, snapshot->type);
-    if (idx < 0) {
-        return false;
-    }
-    if (STATIC_REBUILD_ACTIVATION_COOLDOWN_FRAMES > 0) {
-        voxels[idx].activationCooldownFrames = STATIC_REBUILD_ACTIVATION_COOLDOWN_FRAMES;
-    }
-    voxels[idx].owner = snapshot->owner;
-    if (snapshot->orig_min_gx <= snapshot->orig_max_gx &&
-        snapshot->orig_min_gy <= snapshot->orig_max_gy &&
-        snapshot->orig_min_gz <= snapshot->orig_max_gz) {
-        voxels[idx].orig_min_gx = snapshot->orig_min_gx;
-        voxels[idx].orig_max_gx = snapshot->orig_max_gx;
-        voxels[idx].orig_min_gy = snapshot->orig_min_gy;
-        voxels[idx].orig_max_gy = snapshot->orig_max_gy;
-        voxels[idx].orig_min_gz = snapshot->orig_min_gz;
-        voxels[idx].orig_max_gz = snapshot->orig_max_gz;
-    }
-    return true;
 }
 
 // Sleeping voxels retain their deformed particle positions, so recycling them
@@ -6198,7 +6126,7 @@ static bool freeze_lifetime_expired_islands(void)
     return changed;
 }
 
-static void recycle_dead_voxels(void) {
+static void recycle_dead_voxels(float dt) {
     recycleFrameCounter++;
 
     bool has_sleeping_voxels = false;
@@ -6302,36 +6230,10 @@ static void recycle_dead_voxels(void) {
         }
     }
 
-    if ((recycleFrameCounter % RECYCLE_STATIC_RESTORE_INTERVAL) == 0 &&
-        recycleQueueCount > 0 &&
-        (recycleFrameCounter - recycleQueue[recycleQueueHead].lifeFrames) >= RECYCLE_STATIC_RESTORE_DELAY)
-    {
-        Voxel snapshot;
-        if (recycle_queue_pop(&snapshot)) {
-            if (!spawn_static_at_rest(&snapshot)) {
-                if (debugLogVoxelRecycle) {
-                    TraceLog(LOG_INFO,
-                             "[Recycle] restore-failed rest=(%d..%d,%d..%d,%d..%d) queue=%d",
-                             snapshot.rest_min_gx, snapshot.rest_max_gx,
-                             snapshot.rest_min_gy, snapshot.rest_max_gy,
-                             snapshot.rest_min_gz, snapshot.rest_max_gz,
-                             recycleQueueCount);
-                }
-                recycle_queue_push(&snapshot);
-            } else {
-                if (debugLogVoxelRecycle) {
-                    TraceLog(LOG_INFO,
-                             "[Recycle] restore-ok rest=(%d..%d,%d..%d,%d..%d) queue=%d",
-                             snapshot.rest_min_gx, snapshot.rest_max_gx,
-                             snapshot.rest_min_gy, snapshot.rest_max_gy,
-                             snapshot.rest_min_gz, snapshot.rest_max_gz,
-                             recycleQueueCount);
-                }
-                remove_all_debris_static();
-            }
-        }
-    }
+    regeneration_step(dt);
 }
+
+#include "chunk_regeneration.inc"
 
 static bool line_contains_static_along_x(int x, int miny, int maxy, int minz, int maxz)
 {
@@ -8655,6 +8557,8 @@ static void clear_pickups(void) {
 }
 
 static void clear_world_voxels(void) {
+    regeneration_reset();
+    recycleQueueHead = recycleQueueTail = recycleQueueCount = recycleFrameCounter = 0;
     voxel_count = 0;
     memset(goldReleaseGraceFrames, 0, sizeof(goldReleaseGraceFrames));
     goldReleaseGraceActiveCount = 0;
@@ -15991,9 +15895,6 @@ static Mesh gen_greedy_mesh(void) {
 // ----------------------------------------------------------------------------
 // Chunked Static World Meshing (Chunk Size 32x32x32)
 // ----------------------------------------------------------------------------
-#define CHUNK_SIZE 32
-#define CHUNK_SHIFT 5
-#define CHUNK_MASK 31
 #define MAX_CHUNKS 2048
 
 typedef struct {
@@ -16197,6 +16098,8 @@ static void rebuild_chunk(VoxelChunk *chunk) {
         .max={(minx+CHUNK_SIZE)*VOXEL_SIZE,(miny+CHUNK_SIZE)*VOXEL_SIZE,(minz+CHUNK_SIZE)*VOXEL_SIZE}};
     chunk->dirty=false;
 }
+
+#include "chunk_regeneration_render.inc"
 
 static uint64_t voxel_render_frame = 1;
 static uint64_t dynamic_transforms_cached_frame = 0;
@@ -17267,6 +17170,7 @@ static void DrawVoxels(Camera3D cam) {
     if (debugDrawParticles) {
         draw_particle_debug();
     }
+    regeneration_draw();
 }
 
 static Color scale_color(Color c, float scale, unsigned char alpha) {
@@ -18728,6 +18632,7 @@ static void bot_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float
 #include "enemy_specialists.inc"
 #include "combat_clarity.inc"
 #include "combat_clarity_net.inc"
+#include "chunk_regeneration_net.inc"
 static void UpdateBot(int playerIdx, float dt) {
     if(enemyLab && enemyLabPaused && !enemyLabStep) return;
     if(clarity_evade(playerIdx,dt))return;
@@ -19216,6 +19121,7 @@ static void net_send_world_to(int slot) {
     clarity_net_snapshot(slot);
     net_write_header(&writer, NET_MSG_WORLD_END, 0, netTransport.session_id, netServerTick);
     net_transport_send(&netTransport, slot, FPS_NET_CHANNEL_WORLD, packet, writer.length, true);
+    regeneration_net_send(slot, true);
 }
 
 static void net_send_hello(void) {
@@ -19482,6 +19388,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
     if (transport->role != NET_ROLE_CLIENT) return;
     if (header.type == NET_MSG_WELCOME) {
         clarity_net_reset();
+        regeneration_reset();regeneration.serial=0;
         transport->session_id = header.session_id;
         netLocalPlayerCount = net_read_u8(&reader);
         if (netLocalPlayerCount < 1 || netLocalPlayerCount > MAX_PLAYERS) return;
@@ -19507,6 +19414,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
         return;
     }
     if (header.session_id != transport->session_id) return;
+    if(regeneration_net_receive((NetMessageType)header.type,&reader))return;
     if(clarity_net_receive((NetMessageType)header.type,&reader,header.server_tick))return;
     if (header.type == NET_MSG_SESSION_STATE) {
         netRequestedCreative = net_read_u8(&reader) != 0;
@@ -20797,6 +20705,7 @@ int main(int argc, char **argv) {
     if(enemySmokeRequested) {
         character_renderer_init();
         bool ok=enemy_run_smoke(enemySmokeRequested);
+        regeneration_shutdown();
         character_renderer_shutdown();
         shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();return ok?0:5;
     }
@@ -22093,7 +22002,7 @@ int main(int argc, char **argv) {
             simulate_voxel_pbd_steps(pbd_fixed_dt, pbd_steps_due);
             pbdTimeAccumulator -= pbd_fixed_dt * (float)pbd_steps_due;
         }
-        recycle_dead_voxels();
+        recycle_dead_voxels(dt);
         log_dynamic_glue_cluster_breaks();
         handle_pbd_projectile_hits();
         voxelHashFramesSinceRebuild++;
@@ -22182,7 +22091,7 @@ int main(int argc, char **argv) {
                     simulate_voxel_pbd_steps(pbd_fixed_dt, pbd_steps_due);
                     pbdTimeAccumulator -= pbd_fixed_dt * (float)pbd_steps_due;
                 }
-                recycle_dead_voxels();
+                recycle_dead_voxels(dt);
                 log_dynamic_glue_cluster_breaks();
                 handle_pbd_projectile_hits();
                 voxelHashFramesSinceRebuild++;
@@ -22320,6 +22229,7 @@ int main(int argc, char **argv) {
     }
     shutdown_shard_rendering();
     for (int i = 0; i < MAX_PLAYERS; ++i) weapon_bloom_unload(&weaponBlooms[i]);
+    regeneration_shutdown();
     character_renderer_shutdown();
     weapon_renderer_shutdown();
     shutdown_world_visuals();

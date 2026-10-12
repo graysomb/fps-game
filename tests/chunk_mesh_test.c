@@ -41,7 +41,9 @@ int main(void) {
     VoxelChunk *distant=get_or_create_chunk(grid_to_chunk_coord(200),grid_to_chunk_coord(10),grid_to_chunk_coord(200));unsigned int vao=distant->mesh.vaoId;
     int idx=table_get_static_only(31,31,0);Voxel snapshot=voxels[idx];assert(recycle_queue_push(&snapshot));remove_voxel_index(idx);
     assert(!distant->dirty);check_mesh_faces();assert(distant->mesh.vaoId==vao);
-    recycleFrameCounter+=RECYCLE_STATIC_RESTORE_DELAY;meshDirty=false;recycle_dead_voxels();
+    recycleFrameCounter+=RECYCLE_STATIC_RESTORE_DELAY;meshDirty=false;recycle_dead_voxels(1.0f/60);
+    assert(regeneration.active && table_get_static_only(31,31,0)<0);
+    for(int f=0;f<REGEN_PREVIEW_FRAMES;f++)recycle_dead_voxels(1.0f/60);
     assert(table_get_static_only(31,31,0)>=0 && !meshDirty && !distant->dirty);check_mesh_faces();assert(distant->mesh.vaoId==vao);
     idx=table_get_static_only(31,31,0);voxels[idx].activationCooldownFrames=0;
     assert(rip_single_static_voxel(idx,0)>=0 && !meshDirty && !distant->dirty);

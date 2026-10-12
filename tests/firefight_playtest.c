@@ -49,7 +49,7 @@ int main(int argc,char **argv) {
     assert(voxels[0].sleeping && voxels[0].vgs_active);
     assert(build_glue_cluster_indices(0,glueClusterIndices)==8);
     for(int v=0;v<voxel_count;v++)voxels[v].lifeFrames=RECYCLE_DYNAMIC_MAX_FRAMES+10;
-    recycle_dead_voxels();assert(enemy_voxel(supply)>=0 && voxels[enemy_voxel(supply)].simulate);
+    recycle_dead_voxels(1.0f/60);assert(enemy_voxel(supply)>=0 && voxels[enemy_voxel(supply)].simulate);
     assert(wake_sleeping_cluster_in_place(enemy_voxel(supply)));
     // A charge dislodges a substantial region and accelerates surviving debris.
     clear_world_voxels();for(int i=0;i<activePlayers;i++)players[i].respawn_timer=9999;

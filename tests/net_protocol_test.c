@@ -100,6 +100,15 @@ int main(void) {
     assert(net_read_u8(&reader) == 3);
     assert(!net_read_input(&reader, &decoded));
 
+    net_writer_init(&writer, packet, sizeof(packet));
+    assert(net_write_header(&writer, NET_MSG_REGENERATION, 0, 77, 88));
+    net_reader_init(&reader, packet, writer.length);
+    assert(net_read_header(&reader, &header) && header.type == NET_MSG_REGENERATION);
+    packet[5] = (uint8_t)(FPS_NET_PROTOCOL_VERSION - 1);
+    net_reader_init(&reader, packet, writer.length);
+    assert(!net_read_header(&reader, &header));
+
+    packet[5] = (uint8_t)FPS_NET_PROTOCOL_VERSION;
     packet[0] ^= 1u;
     net_reader_init(&reader, packet, writer.length);
     assert(!net_read_header(&reader, &header));

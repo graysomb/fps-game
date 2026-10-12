@@ -3,11 +3,12 @@ param(
     [ValidateSet('gpu','cpu-mt')][string]$Backend='gpu',
     [ValidateRange(0,24)][int]$Grenades=24,
     [ValidateRange(120,36000)][int]$Frames=3600,
-    [switch]$RestorationOnly
+    [switch]$RestorationOnly,
+    [switch]$ActivateStructure
 )
 $ErrorActionPreference='Stop'
 $root=Split-Path -Parent $PSScriptRoot
-$keys=@('FPS_STRESS_MAP','FPS_STRESS_GRENADES','FPS_STRESS_FRAMES','FPS_STRESS_RESTORE_ONLY')
+$keys=@('FPS_STRESS_MAP','FPS_STRESS_GRENADES','FPS_STRESS_FRAMES','FPS_STRESS_RESTORE_ONLY','FPS_STRESS_ACTIVATE')
 $previous=@{}
 foreach($key in $keys){$previous[$key]=[Environment]::GetEnvironmentVariable($key,'Process')}
 Push-Location $root
@@ -20,12 +21,14 @@ try {
         '-lgdi32','-lwinmm','-lws2_32','-lpthread','-lm')
     & gcc tests/destruction_profile.c @sources @flags -o .build/destruction_profile.exe
     if($LASTEXITCODE -ne 0){throw 'Profiler build failed'}
+    $env:FPS_STRESS_ACTIVATE=if($ActivateStructure){'1'}else{$null}
     $env:FPS_STRESS_MAP=$Map
     $env:FPS_STRESS_GRENADES="$Grenades"
     $env:FPS_STRESS_FRAMES="$Frames"
     $env:FPS_STRESS_RESTORE_ONLY=if($RestorationOnly){'1'}else{$null}
     if($RestorationOnly){$env:FPS_STRESS_GRENADES='0';$env:FPS_STRESS_FRAMES='120'}
-    $suffix=if($RestorationOnly){'restoration'}else{'grenades'}
+    if($ActivateStructure){$env:FPS_STRESS_GRENADES='0'}
+    $suffix=if($ActivateStructure){'activation'}elseif($RestorationOnly){'restoration'}else{'grenades'}
     $report="artifacts/profile-$Map-$Backend-$suffix"
     # The harness prints measurements to stderr; keep native output out of PS error handling.
     $process=Start-Process -FilePath (Join-Path $root '.build/destruction_profile.exe') `

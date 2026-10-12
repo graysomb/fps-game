@@ -231,7 +231,7 @@ static void enemy_autonomous_step(float dt) {
         if(enemy_is_special(i))enemy_update_equipment(i);
     }
     prepare_tether_forces();simulate_voxel_pbd_steps(1.0f/120,2);
-    recycle_dead_voxels();deactivate_sleeping_voxels();
+    recycle_dead_voxels(1.0f/60);deactivate_sleeping_voxels();
     rebuild_voxel_hash();update_projectiles(dt);handle_pbd_projectile_hits();
 }
 static bool enemy_autonomous_checks(void) {

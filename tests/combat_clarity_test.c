@@ -52,7 +52,7 @@ int main(int argc,char **argv){assert(parse_physics_arguments(argc,argv));SetLog
     empty_arena();enemy_lab_spawn(4,ENEMY_TYPE_SWARMER,(Vector3){0,2,4});feedback_body(4);feedback_tick(.01f);
     int corpse=enemy_voxel(enemyRemains[0].id);assert(corpse>=0 && voxels[corpse].simulate && voxels[corpse].owner<0);
     uint64_t corpseId=voxels[corpse].identity;
-    for(int f=0;f<180;f++){feedback_tick(1.0f/60);prepare_tether_forces();simulate_voxel_pbd_steps(1.0f/120,2);recycle_dead_voxels();deactivate_sleeping_voxels();}
+    for(int f=0;f<180;f++){feedback_tick(1.0f/60);prepare_tether_forces();simulate_voxel_pbd_steps(1.0f/120,2);recycle_dead_voxels(1.0f/60);deactivate_sleeping_voxels();}
     corpse=enemy_voxel(corpseId);assert(corpse>=0 && voxels[corpse].simulate);assert(clarity_debris_hit(corpse,0));
     acquire_tether_hit(0,corpse,(Vector3){0,0,-1});assert(players[0].tetherHolding);
     clarityClock+=46;feedback_tick(.01f);assert(enemy_voxel(corpseId)>=0);release_tether_velocity(0,NULL);feedback_tick(.01f);assert(enemy_voxel(corpseId)<0);

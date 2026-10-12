@@ -2084,7 +2084,7 @@ static bool debug_setup_sleep_recycle(DebugRunState *state)
         }
     }
     state->recycle_queue_before = recycleQueueCount;
-    recycle_dead_voxels();
+    recycle_dead_voxels(1.0f/60);
     state->recycle_queue_after = recycleQueueCount;
     state->recycle_succeeded =
         debug_count_tagged(DEBUG_TEST_TAG, -1) == 0 &&
@@ -3933,7 +3933,7 @@ static void debug_physics_step(DebugRunState *state)
     wake_sleeping_voxels_near_awake();
     rebuild_static_hash_if_dirty();
     simulate_voxel_pbd(PBD_MAX_STEP_DT);
-    recycle_dead_voxels();
+    recycle_dead_voxels(1.0f/60);
     if (state && state->falling_cube_player_test) {
         float voxel_radius = VOXEL_SIZE * 0.5f;
         float threshold = (PLAYER_SIZE * 0.5f) + voxel_radius + 0.1f;
