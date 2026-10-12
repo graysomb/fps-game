@@ -35,7 +35,7 @@ int main(int argc,char **argv) {
     gameMode=GAME_MODE_DEATHMATCH;multiplayerActivePlayers=2;currentWorldType=WORLD_TYPE_TEST;ResetGame();enemy_cleanup(true);clear_world_voxels();clear_pickups();init_static_hash();
     netRequestedCreative=false;gameState=GAME_STATE_PLAYING;worldFloorHalfSize=32;
     assert(net_transport_global_init());
-    if(host){assert(net_transport_host(&netTransport,27937));net_set_host_local_players(1);netLobbyStarted=true;players[0].pos=(Vector3){-20,BASE_EYE_HEIGHT,-20};players[0].respawn_timer=0;assert(clarity_throw(0));}
+    if(host){assert(net_transport_host(&netTransport,27937));net_set_host_local_players(1);netLobbyStarted=true;players[0].pos=(Vector3){-20,BASE_EYE_HEIGHT,-20};players[0].respawn_timer=0;assert(clarity_throw(0));feedback_spawn_body((PendingRemains){.pos={0,1,0},.edge=1.25f,.color=RED});}
     else {netRequestedLocalPlayers=1;net_prepare_client_local_players(1);assert(net_transport_connect(&netTransport,"127.0.0.1",27937));}
     double start=GetTime(),previous=start,joined=-1;bool sent=false,repeated=false,deathSent=false;
     while(GetTime()-start<9) {
@@ -49,6 +49,6 @@ int main(int argc,char **argv) {
         WaitTime(1.0/60);
     }
     if(host){assert(joined>=0 && deathSent);assert(grenadeInventory[1]==1);for(int n=0;n<32;n++)assert(!grenades[n].id);puts("LAN host: one throw despite duplicates; ordnance cleaned up");}
-    else {assert(netWorldReady && sawLateGrenade && sent && repeated);assert(explosions==2 && deaths==1);assert(grenadeInventory[netLocalPlayerSlots[0]]==1);for(int n=0;n<32;n++)assert(!grenades[n].id);puts("LAN client: late join, inventory, snapshot loss and unique events passed");}
+    else {assert(netWorldReady && sawLateGrenade && sent && repeated);assert(explosions==2 && deaths==1);assert(netVoxelProxyCount==1 && voxel_count==0);assert(fabsf(v_length(netVoxelProxies[0].x_axis)-1.25f)<.01f);assert(grenadeInventory[netLocalPlayerSlots[0]]==1);for(int n=0;n<32;n++)assert(!grenades[n].id);puts("LAN client: late join, inventory, snapshot loss and unique events passed");}
     net_transport_shutdown(&netTransport);net_transport_global_shutdown();CloseWindow();return 0;
 }

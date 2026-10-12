@@ -1356,6 +1356,7 @@ static int gather_glued_neighbors_symmetric(int voxel_idx, int *out, int max_out
 static bool voxel_connected_to_static_world(const Voxel *voxel);
 static bool glue_cluster_has_static_support(const int *cluster, int cluster_count);
 static void measure_tether_cluster(int player_idx, const int *cluster, int cluster_count);
+static bool clarity_is_remains(uint64_t id);
 static bool freeze_dynamic_cluster_in_place(const int *cluster, int cluster_count);
 static int recycle_lifetime_find_root(int voxel_idx);
 static void recycle_lifetime_union(int a, int b);
@@ -1368,6 +1369,7 @@ static void activate_fluid_cell(int voxel_idx);
 static void activate_fluid_cluster(int seed_idx);
 static void deactivate_fluid_cell(int voxel_idx);
 static void log_dynamic_glue_cluster_breaks(void);
+static int enemy_voxel(uint64_t id);
 static int get_goliath_owner_of_voxel(int voxel_idx);
 typedef struct {
     int gx, gy, gz;
@@ -1800,6 +1802,7 @@ typedef enum {
     SFX_TETHER,
     SFX_WIN,
     SFX_SHIELD_BREAK,
+    SFX_STEP_1, SFX_STEP_2, SFX_STEP_3,
     SFX_COUNT
 } SfxId;
 
@@ -1817,7 +1820,8 @@ static const float sfxCooldowns[SFX_COUNT] = {
     0.0f,  // explosion
     0.1f,  // tether
     0.0f,  // win
-    0.1f   // shield break
+    0.1f,  // shield break
+    .08f,.08f,.08f
 };
 static const float sfxChances[SFX_COUNT] = {
     1.00f,  // fire
@@ -1831,7 +1835,8 @@ static const float sfxChances[SFX_COUNT] = {
     1.00f,  // explosion
     1.00f,  // tether
     1.00f,  // win
-    1.00f   // shield break
+    1.00f,  // shield break
+    1,1,1
 };
 static bool sfxReady = false;
 static float smushBannerTimer = 0.0f;
@@ -2105,6 +2110,21 @@ static Wave make_sfx_wave(float freq1, float freq2, float duration,
     return wave;
 }
 
+static Wave make_footstep_wave(int variant) {
+    Wave w={.frameCount=3969,.sampleRate=44100,.sampleSize=16,.channels=1};
+    short *data=calloc(w.frameCount,sizeof(short));if(!data)return (Wave){0};
+    unsigned seed=7919u+variant*101u;float filtered=0;
+    for(unsigned n=0;n<w.frameCount;n++) {
+        float t=(float)n/w.sampleRate;seed=1664525u*seed+1013904223u;
+        float noise=(float)(seed>>8)/8388607.5f-1;
+        filtered+=.18f*(noise-filtered);
+        float attack=fminf(1,t/.002f),release=fmaxf(0,1-t/.09f);
+        float tap=(.65f*filtered+.12f*sinf(2*PI*(80+variant*7)*t))*expf(-55*t);
+        data[n]=(short)(32767*tap*attack*release);
+    }
+    w.data=data;return w;
+}
+
 static Wave make_win_song_wave(void) {
     const int sample_rate = 44100;
     float notes[] = { 261.63f, 329.63f, 392.00f, 523.25f, 392.00f, 523.25f };
@@ -2291,6 +2311,10 @@ static void init_sfx(void)
     sfxSounds[SFX_WIN] = LoadSoundFromWave(wave);
     UnloadWave(wave);
 
+    for(int n=0;n<3;n++) {
+        wave=make_footstep_wave(n);
+        sfxSounds[SFX_STEP_1+n]=LoadSoundFromWave(wave);UnloadWave(wave);
+    }
     sfxReady = true;
     init_game_music();
 }
@@ -7258,7 +7282,7 @@ static bool deactivate_sleeping_voxels(void)
 
         bool near_original = cluster_is_near_original_grid_pose(glueClusterIndices,
                                                                  cluster_count);
-        for(int member=0;member<cluster_count;member++)if(voxels[glueClusterIndices[member]].owner==ENEMY_SCRAP_OWNER)near_original=false;
+        for(int member=0;member<cluster_count;member++)if(voxels[glueClusterIndices[member]].owner==ENEMY_SCRAP_OWNER || clarity_is_remains(voxels[glueClusterIndices[member]].identity))near_original=false;
         if (near_original) {
             if (!restore_glue_cluster_to_static(glueClusterIndices, cluster_count)) {
                 ++idx;
@@ -8237,6 +8261,7 @@ static void spawn_goliath_armor(int player_idx);
 static void update_goliath_armor_positions(int player_idx);
 static void detach_goliath_armor_voxel(int voxel_idx);
 static void detach_one_goliath_armor_voxel(int player_idx);
+static int enemy_voxel(uint64_t id);
 static int get_goliath_owner_of_voxel(int voxel_idx);
 static bool goliath_has_armor(int player_idx);
 static void goliath_launch_voxel(int bot_idx, int target_idx);
@@ -8851,7 +8876,7 @@ static void init_pickups_legacy(void) {
     }
 }
 
-static void init_pickups(void) {init_pickups_legacy();clarity_supply_layout();}
+static void init_pickups(void) {init_pickups_legacy();}
 static void update_pickups(float dt) {
     clarity_supply_update();
     for (int i = 0; i < MAX_PICKUPS; i++) {
@@ -8861,6 +8886,7 @@ static void update_pickups(float dt) {
             if (p->respawnTimer <= 0.0f) continue;
             p->respawnTimer -= dt;
             if (p->respawnTimer <= 0.0f) {
+                if(clarity_crosscut() && !useCustomMap && !clarity_supply_clear(p->pos)){p->respawnTimer=.5f;continue;}
                 p->active = true;
                 p->respawnTimer = 0.0f;
             }
@@ -9186,6 +9212,7 @@ static void ResetGame(void) {
     buildDemo();
     rebuild_all_voxel_surfaces();
     init_static_hash();
+    clarity_supply_layout();
     if (currentWorldType == WORLD_TYPE_UNIFIED_SANCTUM) {
         init_pickups();
         for (int i = 0; i < MAX_COMBATANTS; i++) {
@@ -10059,6 +10086,7 @@ static void apply_matter_damage(int player_index, int attacker_index, float dama
     play_sfx_at(SFX_IMPACT,player->pos,player_index,1,1);
     if (player->matter <= 0.0f) {
         player->isExposed = true;
+        enemySpecial[player_index].exposedAge=0;
         if(firefightPractice && player_index>=MAX_PLAYERS && practiceStep==1) practiceStep=2;
         play_sfx_at(SFX_SHIELD_BREAK,player->pos,player_index,2,1);
         player->exposed_flash_timer = 0.35f;
@@ -10174,6 +10202,12 @@ static void update_projectiles(float dt)
             play_sfx(SFX_IMPACT);
             if (voxels[hit_id].simulate && voxels[hit_id].sleeping) {
                 wake_sleeping_cluster_in_place(hit_id);
+            }
+            uint64_t projectileIdentity=v->identity;
+            if(clarity_shield_projectile(hit_id)) {
+                int projectile=enemy_voxel(projectileIdentity);
+                if(projectile>=0)remove_voxel_index(projectile);
+                continue;
             }
             int armor_owner = get_goliath_owner_of_voxel(hit_id);
             if (armor_owner >= 0) {
@@ -10415,7 +10449,7 @@ static void handle_pbd_projectile_hits(void)
             float dx = v->pos.x - players[j].pos.x;
             float dy = v->pos.y - players[j].pos.y;
             float dz = v->pos.z - players[j].pos.z;
-            float voxel_radius = VOXEL_SIZE * 0.5f;
+            float voxel_radius = v->rest_edge * 0.5f;
             float threshold = (PLAYER_SIZE * 0.5f) + voxel_radius + 0.1f;
             BoundingBox smush=expand_bounds(combatant_bounds(j,PLAYER_SIZE*.5f),voxel_radius+.1f);
             bool human_hit=(v->pos.x>=smush.min.x && v->pos.x<=smush.max.x && v->pos.y>=smush.min.y && v->pos.y<=smush.max.y && v->pos.z>=smush.min.z && v->pos.z<=smush.max.z);
@@ -10564,7 +10598,7 @@ static void decrement_particle_timers_range(int start, int end, int worker_id, v
 
 static void evaluate_voxel_fracture(Voxel *voxel) {
     if (!voxel->simulate || !voxel->vgs_active || voxel->isBullet ||
-        voxel->goliathProjectile || voxel->type != 0 ||
+        voxel->goliathProjectile || clarity_is_remains(voxel->identity) || voxel->type != 0 ||
         voxel->debugClusterTag == DEBUG_CONTAINER_TAG) {
         return;
     }
@@ -14308,6 +14342,7 @@ static void explode_goliath_armor(int player_idx) {
 
 static void init_firefight_bot_entity(int i, EnemyType etype, InputType botDiff) {
     enemy_release(i);
+    memset(&enemySpecial[i],0,sizeof(enemySpecial[i]));
     for(int v=0;v<voxel_count;v++) {
         if(voxels[v].owner==i) voxels[v].owner=-1;
         if(voxels[v].activator==i) voxels[v].activator=-1;
@@ -15549,9 +15584,35 @@ static void release_tether_velocity(int idx,const Vector3 *launch) {
                 glueClusterIndices[0] = p->tetherVoxel;
                 cluster_count = 1;
             }
+            if(!launch) {
+                Vector3 center={0};
+                for(int c=0;c<cluster_count;c++)center=v_add(center,voxels[glueClusterIndices[c]].pos);
+                center=v_mul(center,1.0f/cluster_count);
+                /* Same center ray as the gameplay camera; skip the held group. */
+                float nearest=100;
+                for(int n=0;n<voxel_count;n++) {
+                    if(tetherTag[n]==idx+1 || tetherHoldClusterTag[n]==idx+1 || voxels[n].isBullet)continue;
+                    bool held=false;for(int c=0;c<cluster_count;c++)if(glueClusterIndices[c]==n){held=true;break;}if(held)continue;
+                    VoxelWorldBounds b;if(voxels[n].simulate)voxel_particle_world_bounds(&voxels[n],&b);else voxel_world_bounds(&voxels[n],&b);
+                    RayCollision hit=GetRayCollisionBox((Ray){p->pos,dir},(BoundingBox){{b.minx,b.miny,b.minz},{b.maxx,b.maxy,b.maxz}});
+                    if(hit.hit && hit.distance>0 && hit.distance<nearest)nearest=hit.distance;
+                }
+                for(int n=0;n<activePlayers;n++)if(n!=idx && players[n].respawn_timer<=0) {
+                    RayCollision hit=GetRayCollisionBox((Ray){p->pos,dir},combatant_bounds(n,PLAYER_SIZE*.5f));
+                    if(hit.hit && hit.distance>0 && hit.distance<nearest)nearest=hit.distance;
+                }
+                Vector3 toward=v_sub(v_add(p->pos,v_mul(dir,nearest)),center);
+                if(v_dot(toward,dir)>.05f)dir=v_norm(toward);
+            }
             Vector3 impulse = v_mul(dir, p->goldTetherHolding
                 ? TETHER_THROW_IMPULSE : TETHER_THROW_IMPULSE / (float)cluster_count);
             if(ff_bonus((int)(p-players), UPGRADE_THROW)) impulse=v_mul(impulse,1.25f);
+            if(!launch) {
+                Vector3 average={0};for(int c=0;c<cluster_count;c++)average=v_add(average,voxels[glueClusterIndices[c]].vel);
+                /* Retain forward momentum, but discard side drift and per-corner jitter. */
+                float forwardSpeed=fmaxf(0,v_dot(v_mul(average,1.0f/cluster_count),dir));
+                impulse=v_add(impulse,v_mul(dir,forwardSpeed));
+            }
             int stamp = ++particle_sync_stamp;
             if (stamp == 0) {
                 stamp = 1;
@@ -15567,7 +15628,7 @@ static void release_tether_velocity(int idx,const Vector3 *launch) {
                     continue;
                 }
                 member->owner=member->activator=idx;
-                member->vel = launch?*launch:v_add(member->vel, impulse);
+                member->vel = launch?*launch:impulse;
                 if (p->goldTetherHolding) {
                     if (goldReleaseGraceFrames[v_idx] == 0) goldReleaseGraceActiveCount++;
                     goldReleaseGraceFrames[v_idx] = GOLD_TETHER_RELEASE_GRACE_STEPS;
@@ -15581,7 +15642,7 @@ static void release_tether_velocity(int idx,const Vector3 *launch) {
                         continue;
                     }
                     particle->sync_stamp = stamp;
-                    particle->vel = launch?*launch:v_add(particle->vel, impulse);
+                    particle->vel = launch?*launch:impulse;
                 }
             }
             v->tetherThrowCcdFrames =

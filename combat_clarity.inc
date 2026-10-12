@@ -1,3 +1,4 @@
+#include "combat_feedback.inc"
 /* Cosmetic effects and authoritative ordnance are sampled once, outside views. */
 typedef struct {Sound sound; int source,id,priority; float until;} ClarityVoice;
 static ClarityVoice clarityVoices[32];
@@ -22,14 +23,15 @@ static void play_sfx_at(SfxId id,Vector3 pos,int source,int priority,float pitch
     Vector3 delta=v_sub(pos,players[listener].pos),right=v_cross(player_forward(&players[listener]),(Vector3){0,1,0});
     float gain=clampf((30-distance)/27,0,1);VoxelHit hit;
     if(distance>.1f && first_voxel_hit_detailed((Ray){players[listener].pos,v_norm(delta)},distance-.2f,-1,true,&hit))gain*=.4f;
-    SetSoundVolume(v->sound,gain);SetSoundPan(v->sound,.5f+.45f*v_dot(v_norm(delta),v_norm(right)));
+    SetSoundVolume(v->sound,gain*(id>=SFX_STEP_1?.25f:1));SetSoundPan(v->sound,.5f+.45f*v_dot(v_norm(delta),v_norm(right)));
     SetSoundPitch(v->sound,pitch);PlaySound(v->sound);claritySoundLast[src][id]=clarityClock;
 }
 static void clarity_reset(void) {
     for(int n=0;n<32;n++)if(clarityVoices[n].sound.frameCount)StopSound(clarityVoices[n].sound);
+    pendingRemainsCount=0;memset(enemyRemains,0,sizeof(enemyRemains));memset(footTravel,0,sizeof(footTravel));memset(footVariant,0,sizeof(footVariant));
     memset(grenades,0,sizeof(grenades));memset(clarityEffects,0,sizeof(clarityEffects));
     memset(grenadeCooldown,0,sizeof(grenadeCooldown));memset(killConfirm,0,sizeof(killConfirm));
-    memset(enemyAudioTimer,0,sizeof(enemyAudioTimer));memset(swarmHintActive,0,sizeof(swarmHintActive));
+    memset(swarmHintActive,0,sizeof(swarmHintActive));
     swarmHintTimer=swarmPulseTimer=0;explosionDamageContext=false;
     for(int i=0;i<MAX_COMBATANTS;i++)grenadeInventory[i]=1;
 }
@@ -43,6 +45,7 @@ static void clarity_effect(ClarityEffect e,bool broadcast) {
 static void clarity_death(int slot,int attacker) {
     swarmHintActive[slot]=false;
     if(netTransport.role==NET_ROLE_CLIENT)return;
+    feedback_body(slot);
     clarity_effect((ClarityEffect){.id=clarityNextId++,.kind=1,.type=players[slot].enemyType,.attacker=attacker,.pos=players[slot].pos,.yaw=players[slot].yaw},true);
 }
 static bool clarity_shield_voxel(int v) {
@@ -69,7 +72,9 @@ static void clarity_actor_damage(int target,int owner,float damage,bool debris) 
     explosionDamageContext=prior;
 }
 static bool clarity_debris_hit(int v,int target) {
-    Voxel *x=&voxels[v];if(x->explosionUntil<=clarityClock || x->sleeping)return false;
+    Voxel *x=&voxels[v];
+    if(!x->wasTethered && clarity_is_remains(x->identity))return true;
+    if(x->explosionUntil<=clarityClock || x->sleeping)return false;
     if(v_length(x->vel)>2 && players[target].contactDamageTimer<=0) {
         clarity_actor_damage(target,x->owner,20,true);players[target].contactDamageTimer=.35f;
     }
@@ -131,8 +136,8 @@ static bool clarity_evade(int slot,float dt) {
     bot_apply_move(&players[slot],&botStates[slot],best,MOVE_SPEED,dt);return true;
 }
 static void clarity_tick(float dt) {
-    if(dt<=0)return;clarityClock+=dt;
-    for(int n=0;n<CLARITY_EFFECTS;n++)if(clarityEffects[n].id){clarityEffects[n].age+=dt;if(clarityEffects[n].age>.8f)clarityEffects[n].id=0;}
+    if(dt<=0)return;clarityClock+=dt;feedback_tick(dt);
+    for(int n=0;n<CLARITY_EFFECTS;n++)if(clarityEffects[n].id){clarityEffects[n].age+=dt;if(clarityEffects[n].age>(clarityEffects[n].kind==2?.9f:.8f))clarityEffects[n].id=0;}
     for(int i=0;i<activePlayers;i++){grenadeCooldown[i]=fmaxf(0,grenadeCooldown[i]-dt);killConfirm[i]=fmaxf(0,killConfirm[i]-dt);}
     for(int n=0;n<CLARITY_GRENADES;n++)if(grenades[n].id) {
         int oldBeat=(int)(grenades[n].fuse*3);
@@ -142,7 +147,7 @@ static void clarity_tick(float dt) {
     }
     int alive=0,queued=0;
     for(int i=MAX_PLAYERS;i<activePlayers;i++)if(players[i].respawn_timer<=0) {
-        alive++;enemyAudioTimer[i]-=dt;if(enemyAudioTimer[i]<=0){int type=players[i].enemyType;play_sfx_at(type==ENEMY_TYPE_SWARMER?SFX_MELEE:type==ENEMY_TYPE_GOLIATH?SFX_IMPACT:SFX_TETHER,players[i].pos,i,0,.65f+.12f*type);enemyAudioTimer[i]=v_length(players[i].vel)>.5f?.7f:2.5f;}
+        alive++;
     }
     for(int t=0;t<FF_TYPE_COUNT;t++)queued+=ffRemaining[t];
     if(gameMode==GAME_MODE_FIREFIGHT && !enemyLab && firefightWaveState==FIREFIGHT_STATE_ACTIVE && queued==0 && alive>0 && alive<=3){swarmHintTimer+=dt;swarmPulseTimer+=dt;if(swarmHintTimer>=8 && (swarmPulseTimer>=4)){swarmPulseTimer=0;for(int i=MAX_PLAYERS;i<activePlayers;i++){swarmHintActive[i]=players[i].respawn_timer<=0;swarmHints[i]=players[i].pos;}}}
@@ -151,6 +156,7 @@ static void clarity_tick(float dt) {
 static void clarity_draw(void) {
     for(int n=0;n<CLARITY_GRENADES;n++)if(grenades[n].id){GrenadeState *g=&grenades[n];DrawCube(g->pos,.22f,.3f,.22f,ORANGE);DrawCubeWires(g->pos,.26f,.34f,.26f,((int)(g->fuse*8)%2)?YELLOW:RED);DrawCircle3D(g->pos,4,(Vector3){1,0,0},90,Fade(ORANGE,.35f));}
     for(int n=0;n<CLARITY_EFFECTS;n++)if(clarityEffects[n].id){ClarityEffect *e=&clarityEffects[n];float t=e->age;Color color=e->kind==2?ORANGE:e->type==ENEMY_TYPE_SWARMER?RED:LIGHTGRAY;
+        if(e->kind==2){feedback_blast(e);continue;}
         if(t<.12f)DrawCube(e->pos,1-t*3,1-t*3,1-t*3,YELLOW);
         for(int c=0;c<8;c++){Vector3 p=v_add(e->pos,(Vector3){corner_signs[c][0]*t*2,corner_signs[c][1]*t-t*t*3,corner_signs[c][2]*t*2});DrawCube(p,.3f*(1-t),.3f*(1-t),.3f*(1-t),Fade(color,1-t/.8f));}
     }
@@ -170,7 +176,7 @@ static void clarity_draw(void) {
             Vector3 at=enemy_local(i,s->equipment[n].offset);
             rlPushMatrix();rlTranslatef(at.x,at.y,at.z);rlRotatef(players[i].yaw,0,1,0);
             DrawCube((Vector3){0},.49f,.49f,.1f,Fade(SKYBLUE,.3f));
-            DrawCubeWires((Vector3){0},.5f,.5f,.12f,players[i].matter_flash_timer>0?YELLOW:BLUE);
+            DrawCubeWires((Vector3){0},.5f,.5f,.12f,s->shieldFlash[s->equipment[n].group]>0?YELLOW:BLUE);
             rlPopMatrix();
         }
     }
@@ -188,16 +194,26 @@ static bool clarity_supply_position(Vector3 anchor,int quarter,Vector3 *out) {
         if(ring*.4f>2 || fabsf(at.x)>FLOOR_SIZE-1 || fabsf(at.z)>FLOOR_SIZE-1)continue;
         Ray ray={{at.x,12,at.z},{0,-1,0}};VoxelHit hit;float floor=0;
         if(first_voxel_hit_detailed(ray,12,-1,true,&hit))floor=12-hit.t;
-        if(currentWorldType==WORLD_TYPE_CROSSCUT && fabsf(anchor.x)+fabsf(anchor.z)>.1f && floor>.55f)continue;
-        at.y=floor+.8f;bool clear=true;
-        for(int x=-1;x<=1;x++)for(int z=-1;z<=1;z++)for(int y=0;y<3;y++)if(table_get_static_only((int)floorf(at.x*2)+x,(int)floorf(at.y*2)+y,(int)floorf(at.z*2)+z)>=0)clear=false;
+        if(clarity_crosscut() && fabsf(anchor.x)+fabsf(anchor.z)>.1f && floor>.55f)continue;
+        at.y=floor+.8f;
+        bool clear=true;
+        if(clarity_crosscut()) {
+            clear=clarity_supply_clear(at);
+            if(fabsf(anchor.x)+fabsf(anchor.z)>.1f)for(int q=1;q<4 && clear;q++) {
+                Vector3 other=crosscut_rotate(at,q);clear=clarity_supply_clear(other);
+                VoxelHit support;float ground=0;
+                if(first_voxel_hit_detailed((Ray){{other.x,12,other.z},{0,-1,0}},12,-1,true,&support))ground=12-support.t;
+                if(fabsf(ground+.8f-at.y)>.01f)clear=false;
+            }
+        }
+        else for(int x=-1;x<=1;x++)for(int z=-1;z<=1;z++)for(int y=0;y<3;y++)if(table_get_static_only((int)floorf(at.x*2)+x,(int)floorf(at.y*2)+y,(int)floorf(at.z*2)+z)>=0)clear=false;
         if(clear){*out=at;return true;}
     }
     return false;
 }
 static void clarity_supply_layout(void) {
     if(useCustomMap || firefightPractice)return;
-    bool foundry=gameMode==GAME_MODE_FIREFIGHT && firefightFoundry,crosscut=currentWorldType==WORLD_TYPE_CROSSCUT;
+    bool foundry=gameMode==GAME_MODE_FIREFIGHT && firefightFoundry,crosscut=clarity_crosscut();
     if(!foundry && !crosscut)return;
     clear_pickups();int count=0;
     if(foundry) {
@@ -205,7 +221,9 @@ static void clarity_supply_layout(void) {
         PickupType types[10]={PICKUP_HEALTH,PICKUP_HEALTH,PICKUP_AMMO,PICKUP_AMMO,PICKUP_DYNAMIC_SHOT,PICKUP_DYNAMIC_SHOT,PICKUP_GOLD_TETHER,PICKUP_GOLD_TETHER,PICKUP_GRENADE,PICKUP_GRENADE};
         for(int n=0;n<10;n++){Vector3 at;if(clarity_supply_position(anchors[n],0,&at))pickups[count++]=(Pickup){.pos=at,.active=true,.type=types[n]};}
     }else {
-        for(int q=0;q<4;q++)for(int k=0;k<3;k++){Vector3 anchor=k==0?crosscut_supply_point(q):crosscut_rotate(k==1?(Vector3){18,0,6}:(Vector3){9,0,6},q),at;if(clarity_supply_position(anchor,q,&at))pickups[count++]=(Pickup){.pos=at,.active=true,.type=k==0?PICKUP_AMMO:k==1?PICKUP_GRENADE:PICKUP_DYNAMIC_SHOT};}
+        Vector3 positions[3];bool valid[3];
+        for(int k=0;k<3;k++){Vector3 anchor=k==0?crosscut_supply_point(0):k==1?(Vector3){24,0,9}:(Vector3){9,0,6};valid[k]=clarity_supply_position(anchor,0,&positions[k]);if(!valid[k])TraceLog(LOG_ERROR,"Crosscut supply group %d has no accessible placement",k);}
+        for(int q=0;q<4;q++)for(int k=0;k<3;k++)if(valid[k])pickups[count++]=(Pickup){.pos=crosscut_rotate(positions[k],q),.active=true,.type=k==0?PICKUP_AMMO:k==1?PICKUP_GRENADE:PICKUP_DYNAMIC_SHOT};
         Vector3 at;if(clarity_supply_position((Vector3){0},0,&at))pickups[count++]=(Pickup){.pos=at,.active=true,.type=PICKUP_GOLD_TETHER};
     }
 }

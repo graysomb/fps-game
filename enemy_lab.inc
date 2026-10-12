@@ -1,7 +1,7 @@
 /* Interactive fixtures and smoke checks use the same specialist update functions. */
 static WorldType enemyLabPreviousWorld;
 static int enemyLabFixture=-1;
-static const char *enemyLabFixtureNames[]={"Grenade range: C / D-pad Up; full friendly fire", "Bomb avoidance: enemies flee a live Sapper charge", "Death feedback: exposed enemies, slot reuse", "Melee shield: remove one section per swing", "Lobber: elevated target and real structure flight"};
+static const char *enemyLabFixtureNames[]={"Grenade range: C / D-pad Up; full friendly fire", "Bomb avoidance: enemies flee a live Sapper charge", "Death feedback: exposed enemies, slot reuse", "Melee shield: remove one section per swing", "Lobber: elevated target and real structure flight", "Anchor: damage linked allies; exposed recovery after 2 seconds", "Footsteps: listen while enemies move", "Tether accuracy: throw the side-offset block at the target"};
 static bool enemyLabPreviousFoundry,enemyLabPreviousCustom;
 static void enemy_lab_exit(void) {
     enemy_cleanup(true);enemyLab=false;enemyLabAll=false;enemyLabPaused=false;
@@ -75,14 +75,16 @@ static void enemy_lab_start(int which) {
     gameState=GAME_STATE_PLAYING;couchLobby=false;couchAdvanced=false;
 }
 static void enemy_lab_fixture(int which) {
-    which=(which+5)%5;
-    enemy_lab_start(which==3?ENEMY_TYPE_SHIELDBEARER:which==4?ENEMY_TYPE_LOBBER:ENEMY_TYPE_SAPPER);
+    which=(which+8)%8;
+    enemy_lab_start(which==3?ENEMY_TYPE_SHIELDBEARER:which==4?ENEMY_TYPE_LOBBER:which==5?ENEMY_TYPE_ANCHOR:which==6?ENEMY_TYPE_SWARMER:ENEMY_TYPE_SAPPER);
     enemyLabFixture=which;grenadeInventory[0]=2;
     if(which==0){enemy_cleanup(true);players[4].respawn_timer=9999;add_static_box_at_grid(-4,4,0,5,16,16,GRAY);enemy_lab_spawn(5,ENEMY_TYPE_STANDARD,(Vector3){3,BASE_EYE_HEIGHT,8});}
     if(which==1){int v=addVoxel(0,.3f,9,false,true,ORANGE,0);enemyCharges[4]=(EnemyCharge){.active=true,.owner=4,.id=voxels[v].identity,.pos={0,.3f,9},.fuse=4};for(int i=5;i<8;i++)enemy_lab_spawn(i,ENEMY_TYPE_STANDARD,(Vector3){(i-6)*2,BASE_EYE_HEIGHT,10});}
     if(which==2){enemy_cleanup(true);players[4].respawn_timer=9999;for(int i=5;i<8;i++){enemy_lab_spawn(i,ENEMY_TYPE_SWARMER,(Vector3){(i-6)*3,BASE_EYE_HEIGHT,6});players[i].matter=0;players[i].isExposed=true;}}
     if(which==3){players[4].pos=(Vector3){0,BASE_EYE_HEIGHT,2};players[4].yaw=0;enemy_update_equipment(4);}
     if(which==4){add_static_box_at_grid(-3,3,0,5,-3,3,GRAY);players[0].pos.y=BASE_EYE_HEIGHT+3;}
+    if(which==5){for(int i=5;i<8;i++){enemy_lab_spawn(i,ENEMY_TYPE_STANDARD,(Vector3){(i-6)*2,BASE_EYE_HEIGHT,8});players[i].matter=i==5?0:20;players[i].isExposed=i==5;}}
+    if(which==7){enemy_cleanup(true);players[4].respawn_timer=9999;add_static_box_at_grid(-2,2,0,8,40,40,ORANGE);int v=addVoxel(1,BASE_EYE_HEIGHT,3,false,true,GRAY,0);players[0].yaw=180;acquire_tether_hit(0,v,(Vector3){0,0,1});}
     init_static_hash();rebuild_voxel_hash();meshDirty=true;
 }
 static bool enemy_lab_controls(void) {
@@ -153,10 +155,11 @@ static bool enemy_smoke_case(int type) {
         ENEMY_CHECK(enemy_plant(i),"sapper plants charge");enemy_tick(1);
         ENEMY_CHECK(enemyCharges[i].active,"charge honors fuse");
         /* Reusing the old Sapper's actor slot must not turn its planted charge invulnerable. */
+        uint64_t chargeSupportId=s->selected;
         init_firefight_bot_entity(i,ENEMY_TYPE_STANDARD,INPUT_TYPE_BOT_EASY);
         int v=enemy_voxel(enemyCharges[i].id);ENEMY_CHECK(enemy_equipment_owner(v)==i,"charge identity survives actor reuse");
         detach_goliath_armor_voxel(v);enemy_tick(.1f);
-        ENEMY_CHECK(!enemyCharges[i].active && enemy_voxel(s->selected)>=0,"shooting charge disarms without blast");
+        ENEMY_CHECK(!enemyCharges[i].active && enemy_voxel(chargeSupportId)>=0,"shooting charge disarms without blast");
         enemy_lab_start(type);s=&enemySpecial[i];s->selected=enemy_sapper_target(i,0);
         support=enemy_voxel(s->selected);players[i].pos=v_add(voxels[support].pos,(Vector3){0,0,1});
         ENEMY_CHECK(enemy_plant(i),"charge can be replanted");

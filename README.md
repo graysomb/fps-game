@@ -739,3 +739,20 @@ OpenGL versions, shader fallback, mesh data, emission occlusion, split-screen pl
 ground contact, swept walls/ceilings, platform landings, and a loopback host/client snapshot.
 Reference views and weapon-paw captures are
 written to `artifacts/rat`; logs and preview executables are in `.build/rat`.
+
+### Combat feedback tuning
+
+Shield sections absorb six ordinary projectile hits; one melee strike breaks a section.
+Anchors restore 8 Matter/second to up to three visible allies within eight units, without
+stacking. Exposed allies get a two-second finishing window before protection returns.
+Healing never rebuilds lost armor or shield sections.
+
+Enemy deaths leave one neutral, tetherable body voxel. Up to 32 remain for 45 seconds;
+held bodies are protected from cleanup. Footsteps use quiet, grounded movement-driven
+noise taps. Grenade and Sapper explosions show a brief four-unit blast envelope and
+light smoke; cover still blocks damage. Tether throws converge on the reticle target
+without carrying residual sideways velocity, while gravity still affects their flight.
+
+Enemy Lab F8 / D-pad Down cycles through eight fixtures, including Anchor recovery,
+footstep audition, and an offset tether throw. Regression runs export blast previews and
+three footstep WAV samples under `artifacts/`.

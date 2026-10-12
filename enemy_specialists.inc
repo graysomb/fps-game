@@ -116,6 +116,7 @@ static void enemy_cleanup(bool removeEquipment) {
 }
 static void enemy_init(int i) {
     EnemySpecialState *s=&enemySpecial[i];memset(s,0,sizeof(*s));
+    for(int g=0;g<4;g++)s->shieldHits[g]=6;
     s->generation=++enemyGeneration;s->cooldown=2;s->spawnTimer=15;s->target=-1;s->reason="seeking";
     s->coreMax=s->coreHealth=enemy_matter(players[i].enemyType);
     players[i].matter=players[i].matterMax=enemy_matter(players[i].enemyType);
@@ -159,7 +160,7 @@ static bool enemy_braces(int anchor,int target) {
     if(v_length(v_sub(players[anchor].pos,players[target].pos))>8 ||
        !enemy_clear_line(players[anchor].pos,players[target].pos)) return false;
     int rank=0;
-    for(int j=MAX_PLAYERS;j<target;j++) if(j!=anchor && players[j].respawn_timer<=0 &&
+    for(int j=MAX_PLAYERS;j<target;j++) if(j!=anchor && players[j].respawn_timer<=0 && combatantTeam[j]==combatantTeam[anchor] &&
         v_length(v_sub(players[anchor].pos,players[j].pos))<=8 && enemy_clear_line(players[anchor].pos,players[j].pos)) rank++;
     return rank<3;
 }
@@ -595,7 +596,10 @@ static void enemy_draw(void) {
         if(players[i].enemyType==ENEMY_TYPE_LOBBER) DrawCylinder(v_add(p,(Vector3){0,.25f,0}),.4f,.3f,1,8,c);
         if(players[i].enemyType==ENEMY_TYPE_ANCHOR) {
             DrawLine3D(p,v_add(p,(Vector3){0,1.1f,0}),c);
-            for(int j=MAX_PLAYERS;j<activePlayers;j++) if(enemy_braces(i,j)) DrawLine3D(v_add(p,(Vector3){0,.9f,0}),players[j].pos,c);
+            for(int j=MAX_PLAYERS;j<activePlayers;j++) if(enemy_braces(i,j)) {
+                Vector3 start=v_add(p,(Vector3){0,.9f,0});DrawLine3D(start,players[j].pos,c);
+                if(enemySpecial[j].healingPulse>0)DrawCube(Vector3Lerp(start,players[j].pos,fmodf(clarityClock*1.5f,1)),.12f,.12f,.12f,WHITE);
+            }
         }
         if(players[i].enemyType==ENEMY_TYPE_FOUNDRY) {
             DrawCube(p,1.5f,1.5f,1.5f,enemy_core_open(i)?GOLD:DARKGRAY);

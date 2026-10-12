@@ -29,6 +29,7 @@ try {
     & gcc tests/combat_clarity_lan.c @sources @flags -o ".build/combat_clarity_lan_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'LAN regression build failed' }
     $lanHost = Start-Process -FilePath (Join-Path $root ".build/combat_clarity_lan_$variant.exe") -ArgumentList 'host' -WindowStyle Hidden -PassThru -RedirectStandardOutput ".build/clarity-lan-host-$variant.log" -RedirectStandardError ".build/clarity-lan-host-$variant.err"
+    $null = $lanHost.Handle # Retain the process handle so Windows PowerShell can read ExitCode after exit.
     & ".build/combat_clarity_lan_$variant.exe" client
     $clientExit = $LASTEXITCODE
     $lanHost.WaitForExit()

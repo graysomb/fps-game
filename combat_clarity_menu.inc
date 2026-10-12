@@ -1,11 +1,11 @@
 static RenderTexture2D clarityShowcase;
 static int clarityShowcaseEntry;
 static float clarityShowcaseTimer;
-static void clarity_menu_shutdown(void){if(clarityShowcase.id){UnloadRenderTexture(clarityShowcase);clarityShowcase=(RenderTexture2D){0};}}
+static void clarity_menu_shutdown(void){feedback_shutdown();if(clarityShowcase.id){UnloadRenderTexture(clarityShowcase);clarityShowcase=(RenderTexture2D){0};}}
 static void clarity_menu(void) {
     static const int roster[]={-1,ENEMY_TYPE_SWARMER,ENEMY_TYPE_STANDARD,ENEMY_TYPE_GOLIATH,ENEMY_TYPE_SHIELDBEARER,ENEMY_TYPE_SAPPER,ENEMY_TYPE_LOBBER,ENEMY_TYPE_BUILDER,ENEMY_TYPE_ANCHOR,ENEMY_TYPE_FOUNDRY};
     static const char *names[]={"RAT OPERATOR","SWARMER","RIFLEMAN","GOLIATH","SHIELDBEARER","SAPPER","LOBBER","CONSTRUCTOR","ANCHOR","WALKING FOUNDRY"};
-    static const char *ability[]={"Build. Break. Survive.","Fast contact attacker.","Keeps pressure with gunfire.","Harvests material to rebuild armor.","Turns its shield toward threats.","Plants timed demolition charges.","Throws large tethered structures.","Builds cover and access ramps.","Braces nearby allies.","Heavy weapons and support legs."};
+    static const char *ability[]={"Build. Break. Survive.","Fast contact attacker.","Keeps pressure with gunfire.","Harvests material to rebuild armor.","Turns its shield toward threats.","Plants timed demolition charges.","Throws large tethered structures.","Builds cover and access ramps.","Heals and braces three nearby allies.","Heavy weapons and support legs."};
     static const char *counter[]={"Use cover and the environment.","Listen for skittering; keep moving.","Break sightlines; close the gap.","Strip its armor; interrupt harvesting.","Melee shield sections or flank.","Shoot the charge or leave its radius.","Watch the marker and dodge.","Interrupt construction; harvest cover.","Break the external anchor.","Break two supports, then attack core."};
     if(!clarityShowcase.id)clarityShowcase=LoadRenderTexture(720,720);
     clarityShowcaseTimer+=GetFrameTime();int direction=couch_axis(true);

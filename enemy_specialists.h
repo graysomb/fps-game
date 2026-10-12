@@ -7,6 +7,8 @@ typedef struct { uint64_t id; Vector3 offset; int group; } EnemyEquipment;
 typedef struct {
     float cooldown, windup, melee, exposure, repair, spawnTimer, disabled;
     float searchTimer, stompCooldown, coreHealth, coreMax, repositionTimer;
+    int shieldHits[4];
+    float shieldFlash[4], exposedAge, healingPulse;
     bool coreOpen, supplied;
     int actions, work;
     const char *reason;
