@@ -258,6 +258,21 @@ void character_draw(CharacterPose p,bool emission) {
         tail=Vector3Add(tail,delta);
     }
 }
+void character_draw_idle_arms(CharacterPose p) {
+    if(p.downed) return; /* Downed arms already belong to the body pass. */
+    status(p);
+    Matrix root=character_body_transform(p);
+    for(int side=-1;side<=1;side+=2) {
+        Vector3 joints[]={{side*.17f,.11f,0},{side*.23f,.035f,-.075f},{side*.20f,.065f,-.20f}};
+        for(int j=0;j<2;j++) {
+            Vector3 d=Vector3Subtract(joints[j+1],joints[j]);
+            Vector3 rotation={atan2f(d.z,-d.y),0,atan2f(d.x,sqrtf(d.y*d.y+d.z*d.z))};
+            part(CR_LEG,Vector3Lerp(joints[j],joints[j+1],.5f),
+                 (Vector3){.55f,Vector3Length(d)/.17f,.55f},rotation,root,WHITE,false,false);
+        }
+        part(CR_PAW,joints[2],ONE,ZERO,root,WHITE,false,false);
+    }
+}
 void character_draw_visor(CharacterPose p) {
     if(!ready) return;
     Matrix root=character_body_transform(p);
