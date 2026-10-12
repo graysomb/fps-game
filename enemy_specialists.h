@@ -6,7 +6,7 @@
 typedef struct { uint64_t id; Vector3 offset; int group; } EnemyEquipment;
 typedef struct {
     float cooldown, windup, melee, exposure, repair, spawnTimer, disabled;
-    float searchTimer, stompCooldown, coreHealth, coreMax;
+    float searchTimer, stompCooldown, coreHealth, coreMax, repositionTimer;
     bool coreOpen, supplied;
     int actions, work;
     const char *reason;
@@ -56,3 +56,5 @@ static void enemy_stock_scrap(bool initial);
 static void enemy_scrap_bundle(Vector3 origin);
 static bool enemy_lob_hit(int voxel,int victim);
 static void enemy_drop_payload(int i);
+
+static const char *enemy_description(int type){return type==ENEMY_TYPE_GOLIATH?"Strips terrain to rebuild armor; interrupt its harvesting":type>=ENEMY_TYPE_SCRAPPER && type<ENEMY_TYPE_COUNT?enemy_hints[type-ENEMY_TYPE_SCRAPPER]:"Use cover and listen for attacks";}

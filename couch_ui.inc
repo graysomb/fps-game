@@ -55,7 +55,7 @@ static void couch_title(const char *title) {
 }
 static void couch_row(int row,const char *label,bool selected) {
     int y=116+row*48;
-    if(selected) DrawRectangle(40,y-6,GetScreenWidth()-80,42,(Color){40,77,94,255});
+    if(selected) DrawRectangle(40,y-6,(gameState==GAME_STATE_MENU && !couchLobby && !couchSettings && !couchAdvanced?GetScreenWidth()/2-64:GetScreenWidth()-80),42,(Color){40,77,94,255});
     DrawText(label,56,y,24,selected?GOLD:LIGHTGRAY);
 }
 static void couch_begin_lobby(bool practice) {
@@ -244,10 +244,10 @@ static bool couch_frame(void) {
         return true;
     }
     couchSelection=(couchSelection+couch_axis(false)+6)%6;
-    BeginDrawing();couch_title("CONSTRUCTOR BRAWLER");
-    const char *items[]={"Firefight","Local versus","Learn combat","Controller settings","World builder / LAN / advanced setup","Enemy Lab"};
+    BeginDrawing();couch_title("CONSTRUCTOR BRAWLER");clarity_menu();
+    const char *items[]={"Firefight","Local versus","Learn combat","Controller settings","World builder / LAN","Enemy Lab"};
     for(int i=0;i<6;i++) couch_row(i,items[i],couchSelection==i);
-    DrawText(couch_menu_device()>=0?"D-pad / stick: navigate | Bottom face: confirm":"Arrow keys: navigate | Enter: confirm",48,405,20,LIGHTGRAY);EndDrawing();
+    DrawText(couch_menu_device()>=0?"D-pad / stick: navigate":"Arrow keys: navigate",48,425,18,LIGHTGRAY);DrawText(couch_menu_device()>=0?"Bottom face: confirm":"Enter: confirm",48,450,18,LIGHTGRAY);EndDrawing();
     if(confirm) {
         if(couchSelection==0||couchSelection==1||couchSelection==2) {gameMode=couchSelection==1?GAME_MODE_DEATHMATCH:GAME_MODE_FIREFIGHT;couch_begin_lobby(couchSelection==2);}
         else if(couchSelection==3)couchSettings=true;

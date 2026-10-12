@@ -1,5 +1,7 @@
 /* Interactive fixtures and smoke checks use the same specialist update functions. */
 static WorldType enemyLabPreviousWorld;
+static int enemyLabFixture=-1;
+static const char *enemyLabFixtureNames[]={"Grenade range: C / D-pad Up; full friendly fire", "Bomb avoidance: enemies flee a live Sapper charge", "Death feedback: exposed enemies, slot reuse", "Melee shield: remove one section per swing", "Lobber: elevated target and real structure flight"};
 static bool enemyLabPreviousFoundry,enemyLabPreviousCustom;
 static void enemy_lab_exit(void) {
     enemy_cleanup(true);enemyLab=false;enemyLabAll=false;enemyLabPaused=false;
@@ -7,7 +9,8 @@ static void enemy_lab_exit(void) {
     gameState=GAME_STATE_MENU;couchLobby=false;
 }
 static int enemy_parse_case(const char *name) {
-    if(!name || !strcmp(name,"all")) return ENEMY_TYPE_SCRAPPER;
+    if(!name || !strcmp(name,"all") || !strcmp(name,"scrapper")) return ENEMY_TYPE_GOLIATH;
+    if(!strcmp(name,"goliath"))return ENEMY_TYPE_GOLIATH;
     if(!strcmp(name,"mixed")) return ENEMY_TYPE_COUNT;
     for(int i=ENEMY_TYPE_SCRAPPER;i<ENEMY_TYPE_COUNT;i++) if(!strcmp(name,enemy_names[i])) return i;
     return -1;
@@ -18,6 +21,7 @@ static void enemy_lab_spawn(int slot,EnemyType type,Vector3 position) {
     if(enemy_is_special(slot)) enemy_update_equipment(slot);
 }
 static void enemy_lab_start(int which) {
+    if(which==ENEMY_TYPE_SCRAPPER)which=ENEMY_TYPE_GOLIATH;
     if(!enemyLab) {
         enemyLabPreviousWorld=currentWorldType;enemyLabPreviousFoundry=firefightFoundry;enemyLabPreviousCustom=useCustomMap;
         enemyLabGod=true;enemyLabPaused=false;enemyLabStep=false;
@@ -27,6 +31,7 @@ static void enemy_lab_start(int which) {
         multiplayerPlayerInput[0]=device>=0?INPUT_TYPE_GAMEPAD:INPUT_TYPE_KEYBOARD;
         if(device>=0)localSeats[0].device=device;
     }
+    enemyLabFixture=-1;
     enemyLab=true;enemyLabCase=which;enemyLabClock=0;
     gameMode=GAME_MODE_FIREFIGHT;firefightPractice=false;firefightFoundry=false;useCustomMap=false;
     currentWorldType=WORLD_TYPE_TEST;multiplayerActivePlayers=1;firefightHumans=1;
@@ -40,8 +45,9 @@ static void enemy_lab_start(int which) {
     firefightWaveBannerTimer=0;
     memset(ffRemaining,0,sizeof(ffRemaining));firefightWaveState=FIREFIGHT_STATE_ACTIVE;
     if(which==ENEMY_TYPE_COUNT) {
-        for(int t=ENEMY_TYPE_SCRAPPER;t<ENEMY_TYPE_COUNT;t++) {
-            int n=t-ENEMY_TYPE_SCRAPPER;
+        for(int t=ENEMY_TYPE_GOLIATH;t<ENEMY_TYPE_COUNT;t++) {
+            if(t==ENEMY_TYPE_SCRAPPER)continue;
+            int n=t-ENEMY_TYPE_GOLIATH-(t>ENEMY_TYPE_SCRAPPER);
             enemy_lab_spawn(4+n,(EnemyType)t,(Vector3){(n%3-1)*8,BASE_EYE_HEIGHT,10+n/3*7});
         }
     } else enemy_lab_spawn(4,(EnemyType)which,(Vector3){0,BASE_EYE_HEIGHT,which==ENEMY_TYPE_LOBBER?16:10});
@@ -49,7 +55,7 @@ static void enemy_lab_start(int which) {
         add_static_box_at_grid(-3,3,0,5,10,10,GRAY);
         add_static_box_at_grid(-6,6,6,6,9,14,LIGHTGRAY);
     }
-    if(which==ENEMY_TYPE_SCRAPPER || which==ENEMY_TYPE_FOUNDRY || which==ENEMY_TYPE_COUNT) {
+    if(which==ENEMY_TYPE_GOLIATH || which==ENEMY_TYPE_FOUNDRY || which==ENEMY_TYPE_COUNT) {
         for(int n=0;n<12;n++) {
             int v=addVoxel(-3+(n%4)*.6f,.3f,8+(n/4)*.6f,false,true,BROWN,0);
             if(v>=0) {voxels[v].owner=voxels[v].activator=-1;set_voxel_velocity(&voxels[v],(Vector3){0});}
@@ -68,30 +74,43 @@ static void enemy_lab_start(int which) {
     init_static_hash();rebuild_voxel_hash();rebuild_glue_constraints();rebuild_all_voxel_surfaces();meshDirty=true;
     gameState=GAME_STATE_PLAYING;couchLobby=false;couchAdvanced=false;
 }
+static void enemy_lab_fixture(int which) {
+    which=(which+5)%5;
+    enemy_lab_start(which==3?ENEMY_TYPE_SHIELDBEARER:which==4?ENEMY_TYPE_LOBBER:ENEMY_TYPE_SAPPER);
+    enemyLabFixture=which;grenadeInventory[0]=2;
+    if(which==0){enemy_cleanup(true);players[4].respawn_timer=9999;add_static_box_at_grid(-4,4,0,5,16,16,GRAY);enemy_lab_spawn(5,ENEMY_TYPE_STANDARD,(Vector3){3,BASE_EYE_HEIGHT,8});}
+    if(which==1){int v=addVoxel(0,.3f,9,false,true,ORANGE,0);enemyCharges[4]=(EnemyCharge){.active=true,.owner=4,.id=voxels[v].identity,.pos={0,.3f,9},.fuse=4};for(int i=5;i<8;i++)enemy_lab_spawn(i,ENEMY_TYPE_STANDARD,(Vector3){(i-6)*2,BASE_EYE_HEIGHT,10});}
+    if(which==2){enemy_cleanup(true);players[4].respawn_timer=9999;for(int i=5;i<8;i++){enemy_lab_spawn(i,ENEMY_TYPE_SWARMER,(Vector3){(i-6)*3,BASE_EYE_HEIGHT,6});players[i].matter=0;players[i].isExposed=true;}}
+    if(which==3){players[4].pos=(Vector3){0,BASE_EYE_HEIGHT,2};players[4].yaw=0;enemy_update_equipment(4);}
+    if(which==4){add_static_box_at_grid(-3,3,0,5,-3,3,GRAY);players[0].pos.y=BASE_EYE_HEIGHT+3;}
+    init_static_hash();rebuild_voxel_hash();meshDirty=true;
+}
 static bool enemy_lab_controls(void) {
     enemyLabStep=false;
     if(IsKeyPressed(KEY_F3)||couch_button(0,GAMEPAD_BUTTON_LEFT_TRIGGER_1)) {
-        int next=enemyLabCase+1;if(next>ENEMY_TYPE_COUNT) next=ENEMY_TYPE_SCRAPPER;
+        int next=enemyLabCase+1;if(next==ENEMY_TYPE_SCRAPPER)next++;if(next>ENEMY_TYPE_COUNT) next=ENEMY_TYPE_GOLIATH;
         enemy_lab_start(next);
     }
-    if(IsKeyPressed(KEY_F4)||couch_button(0,GAMEPAD_BUTTON_RIGHT_FACE_UP)) enemy_lab_start(enemyLabCase);
+    if(IsKeyPressed(KEY_F4)||couch_button(0,GAMEPAD_BUTTON_RIGHT_FACE_UP)) (enemyLabFixture>=0?enemy_lab_fixture(enemyLabFixture):enemy_lab_start(enemyLabCase));
+    if(IsKeyPressed(KEY_F8)||couch_button(0,GAMEPAD_BUTTON_LEFT_FACE_DOWN))enemy_lab_fixture(enemyLabFixture+1);
     if(IsKeyPressed(KEY_F5)||couch_button(0,GAMEPAD_BUTTON_RIGHT_FACE_LEFT)) enemyLabPaused=!enemyLabPaused;
     if(IsKeyPressed(KEY_F6)||couch_button(0,GAMEPAD_BUTTON_RIGHT_TRIGGER_1)) {enemyLabPaused=true;enemyLabStep=true;}
     if(IsKeyPressed(KEY_F7)||couch_button(0,GAMEPAD_BUTTON_MIDDLE_LEFT)) enemyLabGod=!enemyLabGod;
-    if(enemyLabAll && enemyLabClock>=30) {int n=enemyLabCase+1;enemy_lab_start(n>=ENEMY_TYPE_COUNT?ENEMY_TYPE_SCRAPPER:n);}
+    if(enemyLabAll && enemyLabClock>=30) {int n=enemyLabCase+1;if(n==ENEMY_TYPE_SCRAPPER)n++;enemy_lab_start(n>=ENEMY_TYPE_COUNT?ENEMY_TYPE_GOLIATH:n);}
     if(IsKeyPressed(KEY_ESCAPE)) enemy_lab_exit();
     return true;
 }
 static void enemy_lab_hud(int w,int h) {
     int fs=w<900?14:18;
-    DrawRectangle(8,70,w-16,155,Fade(BLACK,.8f));
+    DrawRectangle(8,70,w-16,180,Fade(BLACK,.8f));
     DrawText(TextFormat("ENEMY LAB: %s | %s | Invulnerable: %s",enemyLabCase==ENEMY_TYPE_COUNT?"mixed":enemy_names[enemyLabCase],enemyLabPaused?"PAUSED":"RUNNING",enemyLabGod?"ON":"OFF"),16,78,fs,GOLD);
     DrawText("F3/LB: next | F4/Top: reset | F5/Left face: pause",16,102,fs,RAYWHITE);
     DrawText("F6/RB: step | F7/Back button: invulnerability | Esc: exit",16,126,fs,RAYWHITE);
-    if(enemyLabCase<ENEMY_TYPE_COUNT) DrawText(enemy_hints[enemyLabCase-ENEMY_TYPE_SCRAPPER],16,150,fs,RAYWHITE);
+    if(enemyLabCase<ENEMY_TYPE_COUNT) DrawText(enemyLabFixture>=0?enemyLabFixtureNames[enemyLabFixture]:enemy_description(enemyLabCase),16,150,fs,RAYWHITE);
     EnemySpecialState *s=&enemySpecial[4];
     DrawText(TextFormat("State %d | Target P%d | Cooldown %.1f | Wind-up %.1f | Equipment %d",s->state,s->target+1,fmaxf(0,s->cooldown),s->windup,s->equipmentCount),16,174,fs,SKYBLUE);
     DrawText(TextFormat("%s | work %d | actions %d | resource %llu",s->reason?s->reason:"seeking",s->work,s->actions,(unsigned long long)s->selected),16,200,fs,SKYBLUE);
+    DrawText("F8 / D-pad Down: combat fixtures | C / D-pad Up: grenade",16,224,fs,ORANGE);
     (void)h;
 }
 #define ENEMY_CHECK(condition,message) do {if(!(condition)) {fprintf(stderr,"enemy-smoke FAIL: %s\n",message);return false;}} while(0)
@@ -101,13 +120,13 @@ static void enemy_lab_capture(int type) {
     Camera3D cam={.position={12,12,21},.target={0,1.5f,9},.up={0,1,0},.fovy=50,.projection=CAMERA_PERSPECTIVE};
     BeginTextureMode(shot);ClearBackground((Color){24,28,36,255});BeginMode3D(cam);
     DrawPlane((Vector3){0,0,8},(Vector2){30,30},(Color){65,70,76,255});
-    for(int v=0;v<voxel_count;v++) DrawCube(voxels[v].pos,.5f,.5f,.5f,voxels[v].color);
+    for(int v=0;v<voxel_count;v++) if(!clarity_shield_voxel(v)) DrawCube(voxels[v].pos,.5f,.5f,.5f,voxels[v].color);
     for(int i=4;i<activePlayers;i++) if(players[i].respawn_timer<=0) {
         DrawCube(players[i].pos,.5f,.5f,.5f,enemy_color(players[i].enemyType));
         DrawCubeWires(players[i].pos,.5f,.5f,.5f,WHITE);
     }
-    enemy_draw();EndMode3D();DrawText(enemy_names[type],24,24,28,RAYWHITE);
-    DrawText(enemy_hints[type-ENEMY_TYPE_SCRAPPER],24,660,18,GOLD);EndTextureMode();
+    enemy_draw();clarity_draw();EndMode3D();DrawText(enemy_names[type],24,24,28,RAYWHITE);
+    DrawText(enemy_description(type),24,660,18,GOLD);EndTextureMode();
     Image im=LoadImageFromTexture(shot.texture);ImageFlipVertical(&im);
     ExportImage(im,TextFormat("artifacts/enemy-%s.png",enemy_names[type]));UnloadImage(im);UnloadRenderTexture(shot);
 }
@@ -115,13 +134,10 @@ static bool enemy_smoke_case(int type) {
     enemy_lab_start(type);enemyLabPaused=false;int i=4;
     enemy_lab_capture(type);
     EnemySpecialState *s=&enemySpecial[i];
-    if(type==ENEMY_TYPE_SCRAPPER) {
-        players[i].pos=(Vector3){-2,BASE_EYE_HEIGHT,9};s->cooldown=0;enemy_update(i,.1f);ENEMY_CHECK(s->windup>0,"scrapper starts collection wind-up");
-        enemy_update(i,1.1f);ENEMY_CHECK(s->equipmentCount==1,"scrapper consumes actual debris");
-        int v=enemy_voxel(s->equipment[0].id);ENEMY_CHECK(v>=0 && !enemy_scrap_eligible(v,i),"equipment is ineligible scrap");
-        enemy_detach(v);ENEMY_CHECK(!s->equipmentCount,"scrapper armor can be stripped");
-        for(int n=0;n<20;n++) {s->cooldown=0;enemy_update(i,.01f);enemy_update(i,1.1f);}
-        ENEMY_CHECK(s->equipmentCount<=12,"scrapper armor stays bounded");
+    if(type==ENEMY_TYPE_GOLIATH) {
+        ENEMY_CHECK(goliathStates[i].count==GOLIATH_MAX_ATTACHED,"Goliath has meaningful armor");
+        int part=enemy_voxel(goliathStates[i].voxels[0].voxelIdentity);detach_goliath_armor_voxel(part);
+        players[i].matter=100;ENEMY_CHECK(goliath_try_regen_armor(i),"Goliath rebuilds armor");
     } else if(type==ENEMY_TYPE_SHIELDBEARER) {
         rebuild_voxel_hash();
         int front=first_voxel_hit((Ray){{0,BASE_EYE_HEIGHT,6},{0,0,1}},4,-1);
@@ -206,7 +222,7 @@ static bool enemy_smoke_case(int type) {
     fprintf(stderr,"enemy-smoke PASS: %s\n",enemy_names[type]);return true;
 }
 static void enemy_autonomous_step(float dt) {
-    enemy_tick(dt);
+    clarity_tick(dt);enemy_tick(dt);
     for(int i=MAX_PLAYERS;i<activePlayers;i++)if(players[i].respawn_timer<=0) {
         UpdateBot(i,dt);net_integrate_player(&players[i],dt,true);
         if(enemy_is_special(i))enemy_update_equipment(i);
@@ -216,8 +232,8 @@ static void enemy_autonomous_step(float dt) {
     rebuild_voxel_hash();update_projectiles(dt);handle_pbd_projectile_hits();
 }
 static bool enemy_autonomous_checks(void) {
-    const EnemyType types[]={ENEMY_TYPE_SCRAPPER,ENEMY_TYPE_BUILDER,ENEMY_TYPE_LOBBER};
-    for(int t=0;t<3;t++) {
+    const EnemyType types[]={ENEMY_TYPE_BUILDER,ENEMY_TYPE_LOBBER};
+    for(int t=0;t<2;t++) {
         enemy_lab_start(types[t]);enemyLabPaused=false;
         for(int frame=0;frame<1800 && !enemySpecial[4].actions;frame++)enemy_autonomous_step(1.0f/60);
         if(!enemySpecial[4].actions)fprintf(stderr,"autonomous %s stuck: %s pos=(%.1f %.1f %.1f) selected=%llu held=%d\n",enemy_names[types[t]],enemySpecial[4].reason,players[4].pos.x,players[4].pos.y,players[4].pos.z,(unsigned long long)enemySpecial[4].selected,players[4].tetherHolding);
@@ -255,7 +271,7 @@ static bool enemy_run_smoke(const char *which) {
     SetTargetFPS(0);
     int type=enemy_parse_case(which);if(type<0) {fprintf(stderr,"Unknown enemy case: %s\n",which);return false;}
     if(!strcmp(which,"all") || type==ENEMY_TYPE_COUNT) {
-        for(int t=ENEMY_TYPE_SCRAPPER;t<ENEMY_TYPE_COUNT;t++) if(!enemy_smoke_case(t)) return false;
+        for(int t=ENEMY_TYPE_GOLIATH;t<ENEMY_TYPE_COUNT;t++) if(t!=ENEMY_TYPE_SCRAPPER && !enemy_smoke_case(t)) return false;
     } else if(!enemy_smoke_case(type)) return false;
     if(!enemy_autonomous_checks())return false;
     /* Sustained mixed simulation exercises compaction, ownership, physics and render paths. */
@@ -265,7 +281,7 @@ static bool enemy_run_smoke(const char *which) {
     for(int i=1;i<4;i++) {players[i]=players[0];players[i].pos.x=i*2;combatantLife[i]=LIFE_ALIVE;combatantTeam[i]=0;playerInput[i]=INPUT_TYPE_KEYBOARD;}
     firefightHumans=multiplayerActivePlayers=4;
     for(int frame=0;frame<600;frame++) {
-        float dt=1.0f/30;double start=GetTime();enemy_tick(dt);
+        float dt=1.0f/30;double start=GetTime();clarity_tick(dt);enemy_tick(dt);
         for(int i=4;i<activePlayers;i++) if(players[i].respawn_timer<=0) {UpdateBot(i,dt);net_integrate_player(&players[i],dt,true);}
         prepare_tether_forces();simulate_voxel_pbd_steps(1.0f/120,4);update_projectiles(dt);handle_pbd_projectile_hits();
         if(frame>=570) {render_gameplay_view(views,&count,&w,&h,false);samples[frame-570]=(GetTime()-start)*1000;}

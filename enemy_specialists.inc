@@ -14,7 +14,7 @@ static Color enemy_color(EnemyType t) {
 }
 static void enemy_cue(int i) {
     const int sounds[7]={SFX_TETHER,SFX_IMPACT,SFX_SHIELD,SFX_FIRE,SFX_GLUE_BREAK,SFX_SHIELD_BREAK,SFX_EXPLOSION};
-    play_sfx(sounds[players[i].enemyType-ENEMY_TYPE_SCRAPPER]);
+    play_sfx_at(sounds[players[i].enemyType-ENEMY_TYPE_SCRAPPER],players[i].pos,i,2,1);
 }
 static float enemy_matter(EnemyType t) {
     const float m[FF_TYPE_COUNT]={100,25,100,50,75,50,60,50,60,200};
@@ -120,7 +120,7 @@ static void enemy_init(int i) {
     s->coreMax=s->coreHealth=enemy_matter(players[i].enemyType);
     players[i].matter=players[i].matterMax=enemy_matter(players[i].enemyType);
     if(players[i].enemyType==ENEMY_TYPE_SHIELDBEARER)
-        for(int x=0;x<4;x++) for(int y=0;y<5;y++) enemy_plate(i,(Vector3){(x-1.5f)*.5f,(y-1.5f)*.5f,-1},0);
+        for(int x=0;x<4;x++) for(int y=0;y<5;y++) enemy_plate(i,(Vector3){(x-1.5f)*.5f,(y-1.5f)*.5f,-1},x);
     if(players[i].enemyType==ENEMY_TYPE_ANCHOR) enemy_plate(i,(Vector3){0,.9f,.65f},0);
     if(players[i].enemyType==ENEMY_TYPE_FOUNDRY) {
         for(int g=0;g<4;g++) for(int y=0;y<4;y++)
@@ -212,7 +212,7 @@ static bool enemy_plant(int i) {
     enemyCharges[i]=(EnemyCharge){true,i,voxels[v].identity,s->selected,p,4,0};
     voxels[v].owner=i;enemy_pin(v,p,(Vector3){0});return true;
 }
-static void enemy_blast(EnemyCharge c) {
+static void enemy_blast_terrain(EnemyCharge c) {
     /* Excavation activation skips its interior; a blast must activate the radial shell explicitly. */
     static UnitVoxelBuffer shell;unit_voxel_buffer_clear(&shell);
     for(int v=0;v<voxel_count && shell.count<VOXEL_ACTIVATION_UNIT_BUDGET;v++) {
@@ -231,18 +231,14 @@ static void enemy_blast(EnemyCharge c) {
         for(int f=0;f<6;f++)break_face_link(x,f);
         Vector3 direction=v_sub(x->pos,c.pos);direction.y+=1;
         Vector3 impulse=v_mul(v_norm(direction),12*(1-distance/4));
-        x->owner=x->activator=c.owner;x->sleeping=false;x->vel=v_add(x->vel,impulse);
+        x->owner=x->activator=c.owner;x->explosionUntil=clarityClock+10;x->sleeping=false;x->vel=v_add(x->vel,impulse);
         for(int n=0;n<8;n++)if(x->particles[n] && x->particles[n]->sync_stamp!=stamp) {
             Particle *part=x->particles[n];part->sync_stamp=stamp;
             if(part->inv_mass>0)part->vel=v_add(part->vel,impulse);
         }
     }
-    for(int j=0;j<firefightHumans;j++)if(players[j].respawn_timer<=0) {
-        float d=v_length(v_sub(players[j].pos,c.pos));if(d>3)continue;
-        if(players[j].isExposed)kill_player(j,c.owner,true,false);else apply_matter_damage(j,c.owner,30*(1-d/3));
-    }
     rebuild_voxel_hash();rebuild_all_voxel_surfaces();
-    play_sfx(SFX_EXPLOSION);meshDirty=true;
+    meshDirty=true;
 }
 /* Supplies are real glued voxel bundles, shared by players and enemies. */
 static void enemy_scrap_bundle(Vector3 origin) {
@@ -298,20 +294,28 @@ static void enemy_drop_payload(int i) {
     for(int v=0;v<voxel_count;v++)if(tetherTag[v]==i+1 || tetherHoldClusterTag[v]==i+1){tetherTag[v]=tetherHoldClusterTag[v]=0;}
 }
 static bool enemy_lob_arc(Vector3 from,Vector3 target,Vector3 extent,Vector3 *velocity) {
-    Vector3 d=v_sub(target,from);float horizontal=sqrtf(d.x*d.x+d.z*d.z);
-    float t=fmaxf(1.1f,horizontal/10);t=fminf(t,3.5f);
-    *velocity=v_mul(d,1/t);velocity->y+=.5f*GRAVITY*t;
-    if(sqrtf(velocity->x*velocity->x+velocity->z*velocity->z)>12 || v_length(*velocity)>22)return false;
-    for(int corner=0;corner<9;corner++) {
-        Vector3 offset=corner==8?(Vector3){0}:(Vector3){corner_signs[corner][0]*extent.x,corner_signs[corner][1]*extent.y,corner_signs[corner][2]*extent.z};
-        Vector3 last=v_add(from,offset);
-        for(int n=1;n<=24;n++) {
-            float at=t*n/24;Vector3 next=v_add(v_add(from,offset),v_mul(*velocity,at));next.y-=.5f*GRAVITY*at*at;
-            Vector3 segment=v_sub(next,last);float length=v_length(segment);VoxelHit hit;
-            if(fabsf(next.x)>FLOOR_SIZE-.5f || fabsf(next.z)>FLOOR_SIZE-.5f ||
-               first_voxel_hit_detailed((Ray){last,v_norm(segment)},length,-1,true,&hit))return false;
-            last=next;
+    /* Match the damped fixed-step PBD integrator, not vacuum ballistics. */
+    const float dt=PBD_MAX_STEP_DT/PBD_SUBSTEPS,q=VELOCITY_DAMPING;
+    int steps=0;Vector3 d=v_sub(target,from);
+    for(int n=42*PBD_SUBSTEPS;n<=240*PBD_SUBSTEPS;n+=3*PBD_SUBSTEPS) {
+        float response=0,weight=1,gravityVelocity=0,gravityOffset=0;
+        for(int k=0;k<n;k++){weight*=q;response+=weight*dt;gravityVelocity=q*gravityVelocity-GRAVITY*dt;gravityOffset+=gravityVelocity*dt;}
+        Vector3 candidate={d.x/response,(d.y-gravityOffset)/response,d.z/response};
+        if(v_length(candidate)>40)continue;
+        float y=from.y,vy=candidate.y,apex=y;for(int k=0;k<n;k++){vy=q*vy-GRAVITY*dt;y+=vy*dt;apex=fmaxf(apex,y);}
+        if(apex>=fmaxf(from.y,target.y)+4){*velocity=candidate;steps=n;break;}
+    }
+    if(!steps)return false;
+    Vector3 position=from,vel=*velocity,last=from;
+    for(int n=1;n<=steps;n++) {
+        vel=v_mul(vel,q);vel.y-=GRAVITY*dt;position=v_add(position,v_mul(vel,dt));
+        if(n%4 && n!=steps)continue;
+        for(int corner=0;corner<9;corner++) {
+            Vector3 offset=corner==8?(Vector3){0}:(Vector3){corner_signs[corner][0]*extent.x,corner_signs[corner][1]*extent.y,corner_signs[corner][2]*extent.z};
+            Vector3 segment=v_sub(position,last);VoxelHit hit;float length=v_length(segment);
+            if(fabsf(position.x)>FLOOR_SIZE-.5f || fabsf(position.z)>FLOOR_SIZE-.5f || first_voxel_hit_detailed((Ray){v_add(last,offset),v_norm(segment)},length,-1,true,&hit))return false;
         }
+        last=position;
     }
     return true;
 }
@@ -402,7 +406,7 @@ static void enemy_stomp(int i) {
         Vector3 away=v_sub(players[j].pos,players[i].pos);away.y=.6f;
         players[j].vel=v_add(players[j].vel,v_mul(v_norm(away),6));players[j].onGround=false;players[j].meleeKnockbackActive=true;
     }
-    play_sfx(SFX_EXPLOSION);
+    play_sfx_at(SFX_EXPLOSION,players[i].pos,i,3,.7f);
 }
 static int enemy_target(int i) {
     int best=-1;float distance=1000;
@@ -435,7 +439,7 @@ static void enemy_tick(float dt) {
             if(!disarmed) enemy_blast(copy);
         } else {
             enemy_pin(v,c->pos,(Vector3){0});
-            if(c->beep<=0) {play_sfx(SFX_SHIELD);c->beep=fmaxf(.12f,c->fuse*.2f);}
+            if(c->beep<=0) {play_sfx_at(SFX_SHIELD,c->pos,c->owner,3,1);c->beep=fmaxf(.12f,c->fuse*.2f);}
         }
     }
     for(int n=0;n<MAX_COMBATANTS*2;n++)if(enemyLobs[n].id) {
@@ -467,7 +471,7 @@ static void enemy_update(int i,float dt) {
         }
         s->supplied=true;
     }
-    s->cooldown-=dt;s->melee-=dt;s->repair-=dt;s->searchTimer-=dt;s->stompCooldown-=dt;s->target=enemy_target(i);
+    s->cooldown-=dt;s->melee-=dt;s->repair-=dt;s->searchTimer-=dt;s->stompCooldown-=dt;s->repositionTimer=fmaxf(0,s->repositionTimer-dt);s->target=enemy_target(i);
     if(s->target<0){enemy_drop_payload(i);p->vel.x=p->vel.z=0;s->reason="no living target";return;}
     Vector3 to=v_sub(players[s->target].pos,p->pos);float distance=v_length(to);
     float yaw=atan2f(-to.x,-to.z)*RAD2DEG,turn=t==ENEMY_TYPE_SHIELDBEARER?120:180;
@@ -480,7 +484,7 @@ static void enemy_update(int i,float dt) {
             bool done=false;
             if(s->state==1)done=enemy_collect(i);
             if(s->state==2)done=enemy_plant(i);
-            if(s->state==3){done=enemy_launch(i);if(!done)enemy_drop_payload(i);}
+            if(s->state==3){done=enemy_launch(i);if(!done){enemy_drop_payload(i);s->repositionTimer=2;}}
             if(s->state==4)done=enemy_build(i);
             if(s->state==5){enemy_stomp(i);done=true;}
             s->actions+=done;s->reason=done?"recovering":"target invalid or blocked";
@@ -532,7 +536,8 @@ static void enemy_update(int i,float dt) {
     if(t==ENEMY_TYPE_LOBBER || t==ENEMY_TYPE_FOUNDRY) {
         speed=t==ENEMY_TYPE_FOUNDRY?.35f:.75f;
         if(distance<10)move=v_mul(to,-1);else if(distance<24)move=(Vector3){0};
-        if(!p->isExposed && s->cooldown<=0) {
+        if(s->repositionTimer>0){move=distance>24?to:(Vector3){to.z,0,-to.x};s->reason="repositioning for clear arc";}
+        if(!p->isExposed && s->cooldown<=0 && s->repositionTimer<=0) {
             if(s->searchTimer<=0 && !p->tetherHolding){s->selected=enemy_find_payload(i);s->searchTimer=s->selected?.5f:1;s->reason=s->selected?"seeking payload":"no throwable group";}
             int v=enemy_voxel(s->selected);
             if(v>=0 && !p->tetherHolding) {
@@ -545,7 +550,7 @@ static void enemy_update(int i,float dt) {
             if(p->tetherHolding) {
                 s->aim=players[s->target].pos;Vector3 velocity;
                 if(enemy_lob_velocity(player_tether_hold_position(p),s->aim,&velocity)) {s->state=3;s->windup=1.5f;enemy_cue(i);}
-                else {enemy_drop_payload(i);s->selected=0;s->searchTimer=s->cooldown=1;s->reason="blocked arc";move=(Vector3){to.z,0,-to.x};}
+                else {enemy_drop_payload(i);s->selected=0;s->searchTimer=s->cooldown=1;s->reason="blocked arc";s->repositionTimer=2;move=distance>24?to:(Vector3){to.z,0,-to.x};}
             }
         }
         if(t==ENEMY_TYPE_FOUNDRY && distance<3 && s->stompCooldown<=0 && s->windup<=0) {s->state=5;s->windup=1.25f;s->stompCooldown=6;enemy_cue(i);}
@@ -606,7 +611,7 @@ static void enemy_draw(void) {
     }
     for(int i=0;i<MAX_COMBATANTS;i++) if(enemyCharges[i].active) {
         EnemyCharge *c=&enemyCharges[i];Color col=((int)(c->fuse*8)%2)?RED:YELLOW;
-        DrawSphere(c->pos,.35f,col);DrawCircle3D(c->pos,3,(Vector3){1,0,0},90,Fade(col,.7f));
+        DrawSphere(c->pos,.35f,col);DrawCircle3D(c->pos,4,(Vector3){1,0,0},90,Fade(col,.7f));
     }
     for(int i=0;i<MAX_COMBATANTS*2;i++) if(enemyLobs[i].id) DrawCircle3D(enemyLobs[i].target,1.5f,(Vector3){1,0,0},90,ORANGE);
 }

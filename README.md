@@ -14,10 +14,56 @@ runs in linux and windows so far
 
 ## Couch sessions and Firefight
 
+### Combat clarity and grenades
+
+The main menu scans a slowly rotating rat and enemy roster. Left/right browses the
+entries; each explains its ability and counter. Scans advance automatically every ten
+seconds without spawning gameplay actors.
+
+Throw a grenade with **C** (keyboard P1), **period** (keyboard P2), or **D-pad Up**.
+Carry two, start with one, and receive at least one at Firefight intermissions.
+Reviving does not grant ammunition. Grenades bounce and detonate three seconds after
+release. Orange supply stations add one grenade and refill after 30 seconds. Grenades
+work in offline combat and LAN PvP; creative, paused, and downed players cannot throw.
+
+**Explosions hurt everyone**, including the thrower, teammates, and other enemies.
+Sapper charges and grenades share 60 damage falling to zero at four units, cover checks
+before terrain destruction, a two-unit demolition radius, and a four-unit debris impulse.
+Blast-driven debris retains friendly fire for ten seconds or until it sleeps.
+Enemies abandon work and retreat from nearby live bombs; the Walking Foundry holds its
+position. Sapper charges retain their four-second fuse and remain shootable to disarm.
+
+Melee removes one of a Shieldbearer's four vertical shield sections per swing. The
+shield has translucent blue panels and opaque outlines. Lobbers compute a damped arc
+from the held structure's center, lock their target during wind-up, and reposition if
+cover blocks the arc. Swept collision checks ignore the projectile's own glued group.
+Standard 60 Hz physics damping is preserved.
+
+Deaths produce a brief flash and collapsing angular fragments, distance-based sound,
+and kill confirmation. Enemy activity uses a 32-voice spatial sound pool; split-screen
+plays each cue once for the nearest living local listener. Swarmers have a bright top
+marking. When one to three enemies remain without reinforcements, radar hints start
+after eight seconds and refresh last known positions every four seconds.
+Debug particle spheres stay off unless explicitly enabled.
+
+Foundry supplies occupy health stations at (0, +/-10), Matter at (+/-12, 0), charged
+shots at (-14, +/-20), gold tethers at (14, +/-20), and grenades at (0, +/-28).
+Crosscut retains four outer Matter stations and central gold tether, with four grenade
+stations based on (18, 6) and four charged-shot stations based on (9, 6), rotated by
+quarter turns. Supported clear positions are chosen within two units; supplies drop
+when support is destroyed. Custom layouts and weapon loadouts remain unchanged.
+
+In Enemy Lab, **F8 / D-pad Down** cycles grenade range, bomb avoidance, death feedback,
+close shield melee, and elevated Lobber fixtures. F4 resets the selected fixture.
+`tools/validate_firefight.ps1` (and `-Gpu`) checks real structure flights, damage,
+supplies, inventory, events, and two-process LAN late join with dropped snapshots and
+duplicate inputs, alongside the existing Firefight regressions.
+LAN peers require protocol 8; use the same build on every machine.
+
 ### Specialist enemies and Enemy Lab
 
 Specialists use destructible equipment and telegraphed abilities rather than the
-normal enemy's automatic fire. Scrappers collect resting debris as armor;
+normal enemy's automatic fire. Goliaths harvest material to restore armor;
 Shieldbearers turn their shields toward threats; Sappers plant disarmable
 four-second demolition charges that launch surrounding debris; Lobbers seek and throw
 real 8–24-voxel groups using gold tethers; Builders construct
@@ -25,7 +71,8 @@ harvestable barricades and ramps; Anchors brace nearby allies against knockback.
 Break two of the Walking Foundry's four orange support assemblies to open its core
 permanently. Its HUD health bar can be depleted with bullets, melee, or thrown debris;
 it continues attacking with group throws, a telegraphed stomp, and bounded reinforcements.
-Scrappers seek abandoned debris; constructors search and approach clear building sites.
+Constructors search and approach clear building sites. Scrapper encounters now use Goliaths;
+the legacy `scrapper` debug name aliases `goliath`.
 Lobbers never generate replacement ammunition: control the arena's scrap supplies.
 
 Open **Enemy Lab** from the couch menu or advanced setup (`L`). It has isolated
@@ -38,7 +85,7 @@ melee, and tether controls remain available.
 
 Launch directly with `--enemy-lab=sapper`, `--enemy-lab=mixed`, or
 `--enemy-lab=all` (cycles isolated cases every 30 simulation seconds). Valid
-specialist names are `scrapper`, `shieldbearer`, `sapper`, `lobber`, `builder`,
+enemy names are `goliath`, `shieldbearer`, `sapper`, `lobber`, `builder`,
 `anchor`, and `foundry`. The offline Firefight console also accepts `spawn NAME`
 and uses reserved enemy slots rather than replacing human seats.
 
@@ -48,7 +95,7 @@ stress scenario, returns nonzero on failure, writes enemy previews under
 checks before the mixed scenario. Run from the repository root so shaders are
 available; select `--physics=cpu-mt` or `--physics=gpu` explicitly. The normal
 `tools/validate_firefight.ps1` build workflow runs these checks too, plus autonomous
-Scrapper/Constructor/Lobber scenarios inside the full arena, controller hot-plug tests,
+Constructor/Lobber scenarios inside the full arena, controller hot-plug tests,
 power-up replenishment, boss lifecycle, and demolition impulse checks.
 
 Specialists and the lab are offline-only. Ordinary enemies retain player-count
@@ -57,9 +104,9 @@ waves 5–10 and at most two in wave 11. Endless repeats the twelve-wave cycle.
 
 Firefight ramps from swarmers to normals to Goliaths. Solo opening wave totals are
 3 swarmers; 6 swarmers; 6 swarmers plus 1 normal; then 6 swarmers plus 2 normals and
-1 Goliath. Waves 5–10 each introduce one specialist alongside six swarmers and a
-normal: Scrapper, Shieldbearer, Sapper, Lobber, Builder, then Anchor. Wave 11 mixes
-all six specialists with nine swarmers, two normals, and a Goliath. Wave 12 pits
+1 Goliath. Wave 5 repeats a Goliath patrol. Waves 6–10 introduce Shieldbearer, Sapper,
+Lobber, Builder, then Anchor alongside six swarmers and a normal. Wave 11 mixes
+those five specialists with nine swarmers, two normals, and two Goliaths. Wave 12 pits
 the team against the Walking Foundry and at most six swarmer reinforcements.
 The first three waves
 cap simultaneous solo enemies at 2, 3, and 4 respectively, and the opening two
@@ -68,7 +115,7 @@ waves space reinforcements four seconds apart. Totals scale with player count.
 Local Versus defaults to **Crosscut**, a symmetric quarry for 2–4 players.
 Crosscut occupies a 64×64-unit arena; Foundry Holdout occupies 80×80 units, with
 reinforced factory bays, roofed side routes, and staggered full-height cover. Other worlds retain their
-original bounds. LAN peers must use the same build (protocol 7 includes human collision bounds).
+original bounds. LAN peers must use the same build (protocol 8 includes human collision bounds).
 Use left/right in the lobby to cycle arenas; Tab or the top face button toggles
 the custom map slot selected in advanced setup. Crosscut is also world 9 there.
 Four raised terraces surround short bridges on orange breakable supports.
@@ -685,7 +732,7 @@ Human feet sit one unit below the unchanged eye anchor. Their collision and dama
 is 0.78 units wide and 1.12 units tall; bot bounds are unchanged. Walking follows distance
 traveled with planted feet, short terrain adjustments, and a landing blend. The scouter
 rim and gear share weapon bloom and remain luminous with `--no-weapon-bloom`.
-LAN peers must use protocol 7, which includes the updated human collision rules.
+LAN peers must use protocol 8, which includes grenade input, inventory, snapshots, and unique combat events.
 
 Run `tools/validate_character.ps1` on Windows after building raylib. It checks both
 OpenGL versions, shader fallback, mesh data, emission occlusion, split-screen play,

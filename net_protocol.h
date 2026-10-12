@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define FPS_NET_MAGIC 0x4650534eu /* "FPSN" */
-#define FPS_NET_PROTOCOL_VERSION 7u /* Human body bounds changed; old movement prediction is incompatible. */
+#define FPS_NET_PROTOCOL_VERSION 8u /* Grenade state and inventory require matching peers. */
 #define FPS_NET_DEFAULT_PORT 27015u
 #define FPS_NET_DISCOVERY_PORT 27016u
 #define FPS_NET_MAX_PACKET 1100u
@@ -33,7 +33,8 @@ typedef enum NetMessageType {
     NET_MSG_DYNAMIC_DELETE,
     NET_MSG_SESSION_STATE,
     NET_MSG_CREATIVE_ACTION,
-    NET_MSG_GAME_EVENT
+    NET_MSG_GAME_EVENT,
+    NET_MSG_GRENADES
 } NetMessageType;
 
 typedef enum NetInputButtons {
@@ -48,7 +49,8 @@ typedef enum NetInputButtons {
     NET_INPUT_CREATIVE_REMOVE_PICKUP = 1u << 8,
     NET_INPUT_CREATIVE_ACTIVATE = 1u << 9,
     NET_INPUT_CREATIVE_UP = 1u << 10,
-    NET_INPUT_CREATIVE_DOWN = 1u << 11
+    NET_INPUT_CREATIVE_DOWN = 1u << 11,
+    NET_INPUT_GRENADE = 1u << 12
 } NetInputButtons;
 
 typedef struct NetPacketHeader {

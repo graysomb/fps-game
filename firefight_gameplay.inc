@@ -12,6 +12,7 @@ static EnemyType pick_firefight_enemy_type(int wave, int spawn_index) {
 
 static void ff_restore_human(int i, float matter) {
     Player *p=&players[i];
+    if(combatantLife[i]!=LIFE_DOWNED) grenadeInventory[i]=1;
     p->pos=pick_player_spawn(i); p->death_pos=p->pos;
     p->vel=(Vector3){0}; p->matter=matter; p->matterMax=MATTER_MAX_DEFAULT;
     p->isExposed=false; p->respawn_timer=0; p->invuln_timer=2;
@@ -140,10 +141,11 @@ static void ff_wave_complete(void) {
         else { ffRemaining[0]=1; firefightWaveEnemiesTotal++; firefightWaveEnemiesRemaining=1; ffSpawnTimer=2; }
         return;
     }
+    for(int i=0;i<firefightHumans;i++)grenadeInventory[i]=grenadeInventory[i]<1?1:grenadeInventory[i];
     teamUpgrade=UPGRADE_NONE;
     if(firefightFoundry && !firefightPractice) {
         enemy_stock_scrap(false);
-        for(int p=0;p<MAX_PICKUPS;p++)if(pickups[p].type==PICKUP_GOLD_TETHER || pickups[p].type==PICKUP_DYNAMIC_SHOT) {
+        for(int p=0;p<MAX_PICKUPS;p++)if(pickups[p].type==PICKUP_GOLD_TETHER || pickups[p].type==PICKUP_DYNAMIC_SHOT || pickups[p].type==PICKUP_GRENADE) {
             pickups[p].active=true;pickups[p].respawnTimer=0;
         }
     }

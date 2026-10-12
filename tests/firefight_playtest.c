@@ -20,17 +20,17 @@ int main(int argc,char **argv) {
     fprintf(stderr,"Arena: %d voxels, %d supply voxels\n",voxel_count,scrap);assert(scrap==64);
     int before=voxel_count;enemy_stock_scrap(false);assert(voxel_count==before);
     for(int k=4;k<8;k++) {
-        assert(pickups[k].active && pickups[k].type==(k%2?PICKUP_GOLD_TETHER:PICKUP_DYNAMIC_SHOT));
+        assert(pickups[k].active && pickups[k].type==(k>=6?PICKUP_GOLD_TETHER:PICKUP_DYNAMIC_SHOT));
         players[0].pos=pickups[k].pos;players[0].goldTetherCharged=players[0].dynamicShotActive=false;
         update_pickups(.01f);assert(!pickups[k].active);
-        assert(k%2?players[0].goldTetherCharged:players[0].dynamicShotActive);
+        assert(k>=6?players[0].goldTetherCharged:players[0].dynamicShotActive);
         players[0].pos=(Vector3){0,3,0};update_pickups(31);assert(pickups[k].active);
         pickups[k].active=false;pickups[k].respawnTimer=20;
     }
     ff_wave_complete();for(int k=4;k<8;k++)assert(pickups[k].active);
     // Real terrain, normal AI/movement/tether/physics: no forced ability state.
-    EnemyType types[]={ENEMY_TYPE_SCRAPPER,ENEMY_TYPE_BUILDER,ENEMY_TYPE_LOBBER};
-    for(int n=0;n<3;n++) {
+    EnemyType types[]={ENEMY_TYPE_BUILDER,ENEMY_TYPE_LOBBER};
+    for(int n=0;n<2;n++) {
         arena();players[4].enemyType=types[n];Vector3 spawn;assert(ff_spawn_position(4,&spawn));
         enemy_lab_spawn(4,types[n],spawn);
         assert(spawn_position_clear_ex(players[4].pos,spawn_clear_half(4),0,4));

@@ -18,13 +18,13 @@ static const WaveDefinition ff_waves[FF_WAVE_COUNT] = {
     /* Storage order is normal, swarmer, Goliath; difficulty starts with swarmers. */
     {"First Contact", {0,3,0}}, {"Swarm Patrol", {0,6,0}},
     {"Heavy Contact", {1,6,0}}, {"First Goliath", {2,6,1}},
-    {"Scrap Patrol", {1,6,0,1}},
+    {"Armored Patrol", {1,6,1,0}},
     {"Shield Line", {1,6,0,0,1}},
     {"Demolition", {1,6,0,0,0,1}},
     {"Incoming Scrap", {1,6,0,0,0,0,1}},
     {"Field Works", {1,6,0,0,0,0,0,1}},
     {"Anchored", {1,6,0,0,0,0,0,0,1}},
-    {"Combined Assault", {2,9,1,1,1,1,1,1,1}},
+    {"Combined Assault", {2,9,2,0,1,1,1,1,1}},
     {"Walking Foundry", {0,6,0,0,0,0,0,0,0,1}}
 };
 static inline int ff_count(int wave, int humans, int type) {

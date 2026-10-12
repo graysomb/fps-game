@@ -854,7 +854,7 @@ static void gpu_set_uniforms(float dt) {
     int hash_size = particle_hash_size_for_count(gpuPhysics.collision_count);
     int static_hash_size = HASH_SIZE;
     float voxel_size = VOXEL_SIZE, floor_size = FLOOR_SIZE, gravity = GRAVITY;
-    float damping = VELOCITY_DAMPING, sor = PBD_SOR_FACTOR, collision = COLLISION_RELAXATION;
+    float damping = powf(VELOCITY_DAMPING,dt/(PBD_MAX_STEP_DT/PBD_SUBSTEPS)), sor = PBD_SOR_FACTOR, collision = COLLISION_RELAXATION;
     float alpha = VGS_ALPHA, beta = VGS_BETA, eps = VGS_EPS;
     float strain = STRAIN_BREAK_THRESHOLD, shear = SHEAR_BREAK_THRESHOLD;
     float tether_spring = TETHER_SPRING, tether_damping = TETHER_DAMPING;

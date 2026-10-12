@@ -175,7 +175,7 @@ int main(int argc,char **argv) {
     currentWorldType=WORLD_TYPE_CROSSCUT;useCustomMap=false;
     for(int seats=2;seats<=4;seats++) {
         multiplayerActivePlayers=seats;ResetGame();
-        assert(activePlayers==seats && pickups[0].type==PICKUP_GOLD_TETHER);
+        assert(activePlayers==seats);int goldCount=0;for(int k=0;k<MAX_PICKUPS;k++)goldCount+=pickups[k].active && pickups[k].type==PICKUP_GOLD_TETHER;assert(goldCount==1);
         for(int i=0;i<seats;i++) {
             assert(spawn_position_clear_ex(players[i].pos,spawn_clear_half(i),2,i));
             for(int j=0;j<i;j++) assert(is_view_occluded_by_voxels(players[i].pos,players[j].pos));

@@ -22,6 +22,17 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Playtest regression build failed' }
     & ".build/firefight_playtest_$variant.exe" "--physics=$backend"
     if ($LASTEXITCODE -ne 0) { throw 'Playtest regression failed' }
+    & gcc tests/combat_clarity_test.c @sources @flags -o ".build/combat_clarity_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Combat clarity build failed' }
+    & ".build/combat_clarity_$variant.exe" "--physics=$backend"
+    if ($LASTEXITCODE -ne 0) { throw 'Combat clarity regression failed' }
+    & gcc tests/combat_clarity_lan.c @sources @flags -o ".build/combat_clarity_lan_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'LAN regression build failed' }
+    $lanHost = Start-Process -FilePath (Join-Path $root ".build/combat_clarity_lan_$variant.exe") -ArgumentList 'host' -WindowStyle Hidden -PassThru -RedirectStandardOutput ".build/clarity-lan-host-$variant.log" -RedirectStandardError ".build/clarity-lan-host-$variant.err"
+    & ".build/combat_clarity_lan_$variant.exe" client
+    $clientExit = $LASTEXITCODE
+    $lanHost.WaitForExit()
+    if ($clientExit -ne 0 -or $lanHost.ExitCode -ne 0) { throw 'LAN regression failed' }
     $gameDir = '.build/couch'
     New-Item -ItemType Directory -Force -Path $gameDir | Out-Null
     Copy-Item -LiteralPath shaders -Destination $gameDir -Recurse -Force
