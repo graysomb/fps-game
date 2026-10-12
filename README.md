@@ -18,12 +18,15 @@ runs in linux and windows so far
 
 Specialists use destructible equipment and telegraphed abilities rather than the
 normal enemy's automatic fire. Scrappers collect resting debris as armor;
-Shieldbearers protect allies with slow-turning shields; Sappers plant disarmable
-four-second charges; Lobbers throw catchable ballistic scrap; Builders construct
+Shieldbearers turn their shields toward threats; Sappers plant disarmable
+four-second demolition charges that launch surrounding debris; Lobbers seek and throw
+real 8–24-voxel groups using gold tethers; Builders construct
 harvestable barricades and ramps; Anchors brace nearby allies against knockback.
-Break two of the Walking Foundry's four support assemblies to open its core for
-ten seconds, or all four to expose it permanently. Strip its Matter and finish
-the exposed core with melee or debris. Repairs and reinforcements are bounded.
+Break two of the Walking Foundry's four orange support assemblies to open its core
+permanently. Its HUD health bar can be depleted with bullets, melee, or thrown debris;
+it continues attacking with group throws, a telegraphed stomp, and bounded reinforcements.
+Scrappers seek abandoned debris; constructors search and approach clear building sites.
+Lobbers never generate replacement ammunition: control the arena's scrap supplies.
 
 Open **Enemy Lab** from the couch menu or advanced setup (`L`). It has isolated
 fixtures and a mixed encounter, a fixed seed, and invulnerability enabled by
@@ -44,7 +47,9 @@ stress scenario, returns nonzero on failure, writes enemy previews under
 `artifacts/`, and reports four-view timing. A single name selects its behavior
 checks before the mixed scenario. Run from the repository root so shaders are
 available; select `--physics=cpu-mt` or `--physics=gpu` explicitly. The normal
-`tools/validate_firefight.ps1` build workflow runs these checks too.
+`tools/validate_firefight.ps1` build workflow runs these checks too, plus autonomous
+Scrapper/Constructor/Lobber scenarios inside the full arena, controller hot-plug tests,
+power-up replenishment, boss lifecycle, and demolition impulse checks.
 
 Specialists and the lab are offline-only. Ordinary enemies retain player-count
 scaling; specialist introductions stay at one, with one specialist active in
@@ -61,9 +66,9 @@ cap simultaneous solo enemies at 2, 3, and 4 respectively, and the opening two
 waves space reinforcements four seconds apart. Totals scale with player count.
 
 Local Versus defaults to **Crosscut**, a symmetric quarry for 2–4 players.
-Crosscut and Foundry Holdout occupy 64×64-unit arenas, with larger structures,
-roofed side routes, and staggered full-height cover. Other worlds retain their
-original bounds. LAN peers must use the same build (protocol 6 includes map size).
+Crosscut occupies a 64×64-unit arena; Foundry Holdout occupies 80×80 units, with
+reinforced factory bays, roofed side routes, and staggered full-height cover. Other worlds retain their
+original bounds. LAN peers must use the same build (protocol 7 includes human collision bounds).
 Use left/right in the lobby to cycle arenas; Tab or the top face button toggles
 the custom map slot selected in advanced setup. Crosscut is also world 9 there.
 Four raised terraces surround short bridges on orange breakable supports.
@@ -73,8 +78,10 @@ Screened perimeter respawns favor cover and distance from living opponents.
 Rematch restores the selected arena and its destructible geometry.
 
 The offline menu offers Firefight, Local Versus, Learn Combat, controller settings,
-and the existing advanced world/LAN tools. Press Start on a controller to assign
-player one, then use the D-pad or left stick and bottom face button to navigate.
+and the existing advanced world/LAN tools. Local menus automatically select a connected
+controller (D-pad/left stick, bottom face to confirm, right face to go back), or use
+keyboard arrows/Enter/Escape when none is connected. Menu hot-plugging does not change
+existing gameplay seats; entering a new lobby assigns its initiating device to player one.
 Additional controllers join the lobby with Start. `K` adds a second keyboard seat;
 keyboard seats ready with Enter and Right Shift. Up to four humans can play
 alongside twelve active firefight enemies. Controller disconnects pause offline
@@ -85,7 +92,11 @@ screen and rematch. Left/right in the lobby selects Endless Survival; in Endless
 Tab or the top face button switches between Foundry and the current advanced map.
 The arena has a raised holdout, two stair approaches, a lower circulation route,
 and two heavy slabs on orange breakable supports. Match destruction persists
-between waves; rematching rebuilds the arena.
+between waves; rematching rebuilds the arena. Opposing flank routes offer charged-shot
+and gold-tether power-ups with 30-second respawns and intermission replenishment.
+Eight real scrap bundles restock between waves only where their supply sites are clear.
+Ordinary walls/roofs are thicker and supports are redundant; marked demolition points
+remain vulnerable without changing global material strength.
 
 In cooperative Firefight, lethal damage downs a player for 15 seconds. Hold LB
 (keyboard P1 `X`, P2 comma) within two units and clear sight for three seconds to

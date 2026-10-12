@@ -25,14 +25,24 @@ static bool couch_button(int seat, int button) {
     return seat>=0 && seat<MAX_PLAYERS && multiplayerPlayerInput[seat]==INPUT_TYPE_GAMEPAD &&
         IsGamepadAvailable(seat_device(seat)) && IsGamepadButtonPressed(seat_device(seat),button);
 }
-static bool couch_confirm(void) { return IsKeyPressed(KEY_ENTER)||couch_button(0,GAMEPAD_BUTTON_RIGHT_FACE_DOWN); }
-static bool couch_back(void) { return IsKeyPressed(KEY_ESCAPE)||couch_button(0,GAMEPAD_BUTTON_RIGHT_FACE_RIGHT); }
+/* Menu ownership is independent of gameplay seats and survives hot-plugging. */
+static int couchMenuDevice=-1;
+static int couch_menu_device(void) {
+    if(couchMenuDevice>=0 && IsGamepadAvailable(couchMenuDevice)) return couchMenuDevice;
+    couchMenuDevice=-1;couchNavDelay=0;
+    for(int d=0;d<4;d++) if(IsGamepadAvailable(d)){couchMenuDevice=d;break;}
+    return couchMenuDevice;
+}
+static bool couch_menu_button(int button) {int d=couch_menu_device();return d>=0 && IsGamepadButtonPressed(d,button);}
+static bool couch_confirm(void) { return couch_menu_device()<0?IsKeyPressed(KEY_ENTER):couch_menu_button(GAMEPAD_BUTTON_RIGHT_FACE_DOWN); }
+static bool couch_back(void) { return couch_menu_device()<0?IsKeyPressed(KEY_ESCAPE):couch_menu_button(GAMEPAD_BUTTON_RIGHT_FACE_RIGHT); }
 static int couch_axis(bool horizontal) {
-    int minus=horizontal?KEY_LEFT:KEY_UP, plus=horizontal?KEY_RIGHT:KEY_DOWN;
-    if(IsKeyPressed(minus)) return -1;
-    if(IsKeyPressed(plus)) return 1;
-    if(multiplayerPlayerInput[0]!=INPUT_TYPE_GAMEPAD || !IsGamepadAvailable(seat_device(0))) return 0;
-    int d=seat_device(0);
+    int d=couch_menu_device();
+    if(d<0) {
+        if(IsKeyPressed(horizontal?KEY_LEFT:KEY_UP)) return -1;
+        if(IsKeyPressed(horizontal?KEY_RIGHT:KEY_DOWN)) return 1;
+        return 0;
+    }
     if(IsGamepadButtonPressed(d,horizontal?GAMEPAD_BUTTON_LEFT_FACE_LEFT:GAMEPAD_BUTTON_LEFT_FACE_UP)) return -1;
     if(IsGamepadButtonPressed(d,horizontal?GAMEPAD_BUTTON_LEFT_FACE_RIGHT:GAMEPAD_BUTTON_LEFT_FACE_DOWN)) return 1;
     float a=GetGamepadAxisMovement(d,horizontal?GAMEPAD_AXIS_LEFT_X:GAMEPAD_AXIS_LEFT_Y);
@@ -54,6 +64,9 @@ static void couch_begin_lobby(bool practice) {
     firefightPractice=practice;
     couchLobby=true; couchSelection=0;
     multiplayerActivePlayers=1;
+    int device=couch_menu_device();
+    multiplayerPlayerInput[0]=device>=0?INPUT_TYPE_GAMEPAD:INPUT_TYPE_KEYBOARD;
+    if(device>=0)localSeats[0].device=device;
     memset(couchReady,0,sizeof(couchReady));
 }
 static void couch_launch(void) {
@@ -65,6 +78,14 @@ static void ff_draw_hud(int i,int w,int h) {
     if(enemyLab) {enemy_lab_hud(w,h);return;}
     if(gameMode!=GAME_MODE_FIREFIGHT || i>=firefightHumans) return;
     int font=w<700?16:20;
+    for(int boss=MAX_PLAYERS;boss<activePlayers;boss++)if(players[boss].respawn_timer<=0 && players[boss].enemyType==ENEMY_TYPE_FOUNDRY) {
+        EnemySpecialState *s=&enemySpecial[boss];int lost=0;for(int bit=0;bit<4;bit++)lost+=(s->lostMask>>bit)&1;
+        int barWidth=w<700?230:340,x=(w-barWidth)/2,y=70;
+        DrawRectangle(x-6,y-5,barWidth+12,44,Fade(BLACK,.85f));
+        DrawText(enemy_core_open(boss)?TextFormat("FOUNDRY CORE %.0f / %.0f",s->coreHealth,s->coreMax):TextFormat("FOUNDRY: Break 2 supports (%d/2)",lost<2?lost:2),x,y,w<700?12:16,enemy_core_open(boss)?GOLD:ORANGE);
+        DrawRectangle(x,y+24,barWidth,7,DARKGRAY);
+        DrawRectangle(x,y+24,(int)(barWidth*clampf(s->coreHealth/fmaxf(1,s->coreMax),0,1)),7,GOLD);break;
+    }
     /* Reserve the lower-left corner for the existing radar. */
     int panelX=160, panelW=w-panelX-12;
     DrawRectangle(panelX-6,h-154,panelW+6,100,Fade(BLACK,.8f));
@@ -114,13 +135,8 @@ static bool couch_frame(void) {
     if(netTransport.role!=NET_ROLE_OFFLINE) return false;
     bool confirm=couch_confirm(), back=couch_back(), pausePressed=IsKeyPressed(KEY_PAUSE);
     couchNavDelay-=GetFrameTime();
-    /* Controller-only startup: Start assigns the first seat. */
-    if(gameState==GAME_STATE_MENU && !couchLobby) for(int d=0;d<4;d++)
-        if(IsGamepadAvailable(d)&&IsGamepadButtonPressed(d,GAMEPAD_BUTTON_MIDDLE_RIGHT)) {
-            multiplayerPlayerInput[0]=INPUT_TYPE_GAMEPAD;localSeats[0].device=d;
-        }
     if(couchAdvanced) {
-        if(IsKeyPressed(KEY_ESCAPE)) couchAdvanced=false;
+        if(back) couchAdvanced=false;
         return false;
     }
     if(gameState==GAME_STATE_PLAYING) {
@@ -206,13 +222,13 @@ static bool couch_frame(void) {
             currentWorldType=(WorldType)((currentWorldType+change+WORLD_TYPE_COUNT)%WORLD_TYPE_COUNT);
             useCustomMap=false;memset(couchReady,0,sizeof(couchReady));all=false;
         }
-        if(gameMode==GAME_MODE_DEATHMATCH && (IsKeyPressed(KEY_TAB)||couch_button(0,GAMEPAD_BUTTON_RIGHT_FACE_UP))) {
+        if(gameMode==GAME_MODE_DEATHMATCH && (IsKeyPressed(KEY_TAB)||couch_menu_button(GAMEPAD_BUTTON_RIGHT_FACE_UP))) {
             useCustomMap=!useCustomMap;memset(couchReady,0,sizeof(couchReady));all=false;
         }
         if(change && gameMode==GAME_MODE_FIREFIGHT && !firefightPractice) {
             firefightEndless=!firefightEndless;firefightFoundry=true;memset(couchReady,0,sizeof(couchReady));all=false;
         }
-        if(gameMode==GAME_MODE_FIREFIGHT && firefightEndless && (IsKeyPressed(KEY_TAB)||couch_button(0,GAMEPAD_BUTTON_RIGHT_FACE_UP))) {firefightFoundry=!firefightFoundry;memset(couchReady,0,sizeof(couchReady));all=false;}
+        if(gameMode==GAME_MODE_FIREFIGHT && firefightEndless && (IsKeyPressed(KEY_TAB)||couch_menu_button(GAMEPAD_BUTTON_RIGHT_FACE_UP))) {firefightFoundry=!firefightFoundry;memset(couchReady,0,sizeof(couchReady));all=false;}
         BeginDrawing();couch_title(firefightPractice?"LEARN COMBAT":gameMode==GAME_MODE_FIREFIGHT?"FIREFIGHT LOBBY":"LOCAL VERSUS LOBBY");
         couch_row(0,firefightPractice?"Harvest > expose > melee > throw":gameMode==GAME_MODE_FIREFIGHT?(firefightEndless?"Endless Survival (left/right changes mode)":"Twelve-wave Firefight (left/right changes mode)"):"Classic deathmatch",false);
         if(gameMode==GAME_MODE_FIREFIGHT)couch_row(1,firefightFoundry?"Arena: Foundry Holdout":"Arena: current world / custom map",false);
@@ -231,7 +247,7 @@ static bool couch_frame(void) {
     BeginDrawing();couch_title("CONSTRUCTOR BRAWLER");
     const char *items[]={"Firefight","Local versus","Learn combat","Controller settings","World builder / LAN / advanced setup","Enemy Lab"};
     for(int i=0;i<6;i++) couch_row(i,items[i],couchSelection==i);
-    DrawText("Start on a controller to use it | D-pad: navigate | Bottom face: confirm",48,405,20,LIGHTGRAY);EndDrawing();
+    DrawText(couch_menu_device()>=0?"D-pad / stick: navigate | Bottom face: confirm":"Arrow keys: navigate | Enter: confirm",48,405,20,LIGHTGRAY);EndDrawing();
     if(confirm) {
         if(couchSelection==0||couchSelection==1||couchSelection==2) {gameMode=couchSelection==1?GAME_MODE_DEATHMATCH:GAME_MODE_FIREFIGHT;couch_begin_lobby(couchSelection==2);}
         else if(couchSelection==3)couchSettings=true;

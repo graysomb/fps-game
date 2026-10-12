@@ -1012,7 +1012,9 @@ static bool gpu_validate_and_commit(void) {
         int voxel_id = gpuPhysics.compact_to_voxel[i];
         if (voxel_id < 0 || voxel_id >= voxel_count) return false;
         Voxel *v = &voxels[voxel_id]; GpuVoxelState *g = &gpuPhysics.voxel_stage[i];
-        if (v->vgs_active && g->flags[0] == 0) {
+        // flags.x is also zero for sleeping groups; only an awake constraint
+        // can have been broken by this dispatch. Preserve sleeping glue/mass.
+        if (!v->sleeping && v->vgs_active && g->flags[0] == 0) {
             bool is_tethered = (voxel_id >= 0 && voxel_id < voxel_count && tetherTag[voxel_id] > 0);
             int holder = is_tethered ? tetherTag[voxel_id] - 1 : -1;
             if ((holder >= 0 && holder < MAX_COMBATANTS && players[holder].goldTetherHolding) ||

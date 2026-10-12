@@ -18,6 +18,10 @@ try {
     $backend = if ($Gpu) { 'gpu' } else { 'cpu-mt' }
     & ".build/firefight_integration_$variant.exe" "--physics=$backend"
     if ($LASTEXITCODE -ne 0) { throw 'Integration test failed' }
+    & gcc tests/firefight_playtest.c @sources @flags -o ".build/firefight_playtest_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Playtest regression build failed' }
+    & ".build/firefight_playtest_$variant.exe" "--physics=$backend"
+    if ($LASTEXITCODE -ne 0) { throw 'Playtest regression failed' }
     $gameDir = '.build/couch'
     New-Item -ItemType Directory -Force -Path $gameDir | Out-Null
     Copy-Item -LiteralPath shaders -Destination $gameDir -Recurse -Force

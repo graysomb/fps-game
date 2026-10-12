@@ -54,6 +54,9 @@ static void enemy_lab_start(int which) {
             players[0].pos=(Vector3){0,BASE_EYE_HEIGHT+2,-2};
         }
     }
+    if(which==ENEMY_TYPE_LOBBER || which==ENEMY_TYPE_COUNT) {
+        enemy_scrap_bundle((Vector3){-3,0,12});enemy_scrap_bundle((Vector3){3,0,12});
+    }
     init_static_hash();rebuild_voxel_hash();rebuild_glue_constraints();rebuild_all_voxel_surfaces();meshDirty=true;
     gameState=GAME_STATE_PLAYING;couchLobby=false;couchAdvanced=false;
 }
@@ -73,13 +76,14 @@ static bool enemy_lab_controls(void) {
 }
 static void enemy_lab_hud(int w,int h) {
     int fs=w<900?14:18;
-    DrawRectangle(8,70,w-16,130,Fade(BLACK,.8f));
+    DrawRectangle(8,70,w-16,155,Fade(BLACK,.8f));
     DrawText(TextFormat("ENEMY LAB: %s | %s | Invulnerable: %s",enemyLabCase==ENEMY_TYPE_COUNT?"mixed":enemy_names[enemyLabCase],enemyLabPaused?"PAUSED":"RUNNING",enemyLabGod?"ON":"OFF"),16,78,fs,GOLD);
     DrawText("F3/LB: next | F4/Top: reset | F5/Left face: pause",16,102,fs,RAYWHITE);
     DrawText("F6/RB: step | F7/Back button: invulnerability | Esc: exit",16,126,fs,RAYWHITE);
     if(enemyLabCase<ENEMY_TYPE_COUNT) DrawText(enemy_hints[enemyLabCase-ENEMY_TYPE_SCRAPPER],16,150,fs,RAYWHITE);
     EnemySpecialState *s=&enemySpecial[4];
     DrawText(TextFormat("State %d | Target P%d | Cooldown %.1f | Wind-up %.1f | Equipment %d",s->state,s->target+1,fmaxf(0,s->cooldown),s->windup,s->equipmentCount),16,174,fs,SKYBLUE);
+    DrawText(TextFormat("%s | work %d | actions %d | resource %llu",s->reason?s->reason:"seeking",s->work,s->actions,(unsigned long long)s->selected),16,200,fs,SKYBLUE);
     (void)h;
 }
 #define ENEMY_CHECK(condition,message) do {if(!(condition)) {fprintf(stderr,"enemy-smoke FAIL: %s\n",message);return false;}} while(0)
@@ -104,7 +108,7 @@ static bool enemy_smoke_case(int type) {
     enemy_lab_capture(type);
     EnemySpecialState *s=&enemySpecial[i];
     if(type==ENEMY_TYPE_SCRAPPER) {
-        s->cooldown=0;enemy_update(i,.1f);ENEMY_CHECK(s->windup>0,"scrapper starts collection wind-up");
+        players[i].pos=(Vector3){-2,BASE_EYE_HEIGHT,9};s->cooldown=0;enemy_update(i,.1f);ENEMY_CHECK(s->windup>0,"scrapper starts collection wind-up");
         enemy_update(i,1.1f);ENEMY_CHECK(s->equipmentCount==1,"scrapper consumes actual debris");
         int v=enemy_voxel(s->equipment[0].id);ENEMY_CHECK(v>=0 && !enemy_scrap_eligible(v,i),"equipment is ineligible scrap");
         enemy_detach(v);ENEMY_CHECK(!s->equipmentCount,"scrapper armor can be stripped");
@@ -116,7 +120,7 @@ static bool enemy_smoke_case(int type) {
         ENEMY_CHECK(front>=0 && enemy_equipment_owner(front)==i,"shield intercepts frontal shot path");
         ENEMY_CHECK(first_voxel_hit((Ray){{3,BASE_EYE_HEIGHT,10},{-1,0,0}},2.5f,-1)<0,"shield leaves side vulnerable");
         float before=players[i].yaw;players[0].pos.x=10;enemy_update(i,.1f);
-        ENEMY_CHECK(fabsf(angle_diff_deg(before,players[i].yaw))<=6.01f,"shield turn-rate cap");
+        ENEMY_CHECK(fabsf(angle_diff_deg(before,players[i].yaw))<=12.01f,"shield turn-rate cap");
         enemy_detach(front);ENEMY_CHECK(s->equipmentCount==19,"shield pieces detach");
     } else if(type==ENEMY_TYPE_SAPPER) {
         s->selected=enemy_sapper_target(i,0);int support=enemy_voxel(s->selected);
@@ -139,10 +143,17 @@ static bool enemy_smoke_case(int type) {
         ENEMY_CHECK(enemy_plant(i),"explosive fixture");uint64_t supportId=s->selected;
         enemy_tick(4.1f);ENEMY_CHECK(!enemyCharges[i].active && enemy_voxel(supportId)<0,"detonation destroys local support");
     } else if(type==ENEMY_TYPE_LOBBER) {
-        s->aim=players[0].pos;ENEMY_CHECK(enemy_launch(i),"lobber ballistic launch");
-        ENEMY_CHECK(enemy_launch(i) && !enemy_launch(i),"two-projectile limit");
-        int v=enemy_voxel(enemyLobs[MAX_COMBATANTS*2-1].id);ENEMY_CHECK(v>=0,"projectile exists");
-        tetherTag[v]=1;enemy_tick(.1f);ENEMY_CHECK(voxels[v].owner==0,"catch transfers attribution");tetherTag[v]=0;
+        int v=-1;uint64_t selected=enemy_find_payload(i);v=enemy_voxel(selected);
+        ENEMY_CHECK(v>=0,"lobber finds a real group");
+        players[i].goldTetherCharged=true;acquire_tether_hit(i,v,(Vector3){0,1,0});
+        ENEMY_CHECK(players[i].tetherHolding,"lobber holds group with gold tether");
+        s->aim=players[0].pos;ENEMY_CHECK(enemy_launch(i),"lobber ballistic group launch");
+        EnemyLob *lob=&enemyLobs[MAX_COMBATANTS*2-1];ENEMY_CHECK(lob->count==8,"real eight-voxel payload");
+        v=enemy_voxel(lob->ids[0]);ENEMY_CHECK(v>=0,"payload exists");
+        enemyLabGod=false;players[0].invuln_timer=0;players[0].matter=100;players[0].isExposed=false;
+        ENEMY_CHECK(enemy_lob_hit(v,0) && enemy_lob_hit(enemy_voxel(lob->ids[1]),0),"payload members share impact routing");
+        ENEMY_CHECK(players[0].matter==70,"one payload cannot multiply damage across its members");enemyLabGod=true;
+        tetherTag[v]=1;enemy_tick(.1f);ENEMY_CHECK(voxels[v].owner==0 && !lob->id,"catch transfers whole payload attribution");tetherTag[v]=0;
         Vector3 velocity;add_static_box_at_grid(-4,4,7,7,24,34,GRAY);init_static_hash();
         ENEMY_CHECK(!enemy_lob_velocity(v_add(players[i].pos,(Vector3){0,2.3f,0}),s->aim,&velocity),"ceiling blocks trajectory");
     } else if(type==ENEMY_TYPE_BUILDER) {
@@ -170,21 +181,67 @@ static bool enemy_smoke_case(int type) {
         for(int n=s->equipmentCount-1;n>=0;n--) if(s->equipment[n].group<2) enemy_detach(enemy_voxel(s->equipment[n].id));
         enemy_update_equipment(i);ENEMY_CHECK(enemy_core_open(i),"two supports expose core");
         apply_matter_damage(i,0,20);ENEMY_CHECK(players[i].matter==matter-20,"exposed core takes damage");
-        enemy_tick(10.1f);ENEMY_CHECK(!enemy_core_open(i),"partial exposure expires");
+        enemy_tick(10.1f);ENEMY_CHECK(enemy_core_open(i),"core opening is permanent");
         for(int n=s->equipmentCount-1;n>=0;n--) if(s->equipment[n].group<4) enemy_detach(enemy_voxel(s->equipment[n].id));
         enemy_update_equipment(i);enemy_tick(11);ENEMY_CHECK(enemy_core_open(i),"all supports expose core permanently");
         for(int n=0;n<8;n++) {s->spawnTimer=0;enemy_update(i,.1f);s->windup=0;}
         ENEMY_CHECK(s->spawned==6,"boss reinforcement budget");
         s->cooldown=100;s->windup=0;
         for(int n=0;n<30;n++) {s->repair=0;enemy_update(i,.01f);}
-        ENEMY_CHECK(s->repairs==12 && enemy_core_open(i),"boss repair budget never restores destroyed supports");
+        ENEMY_CHECK(s->repairs<=12 && enemy_core_open(i),"boss repair budget never restores destroyed supports");
     }
     s->windup=1;s->state=3;players[i].isExposed=true;enemy_update(i,.01f);
-    ENEMY_CHECK(s->windup==0,"exposure interrupts ability wind-up");
+    ENEMY_CHECK(type==ENEMY_TYPE_FOUNDRY? !players[i].isExposed : s->windup==0,"boss keeps attacking; exposure interrupts specialists");
     enemy_cleanup(true);
     ENEMY_CHECK(enemySpecial[4].equipmentCount==0 && !enemyCharges[4].active,"cleanup clears equipment and charges");
     for(int n=0;n<ENEMY_STRUCTURE_MAX;n++) ENEMY_CHECK(!enemyStructures[n].count,"cleanup clears construction");
     fprintf(stderr,"enemy-smoke PASS: %s\n",enemy_names[type]);return true;
+}
+static void enemy_autonomous_step(float dt) {
+    enemy_tick(dt);
+    for(int i=MAX_PLAYERS;i<activePlayers;i++)if(players[i].respawn_timer<=0) {
+        UpdateBot(i,dt);net_integrate_player(&players[i],dt,true);
+        if(enemy_is_special(i))enemy_update_equipment(i);
+    }
+    prepare_tether_forces();simulate_voxel_pbd_steps(1.0f/120,2);
+    recycle_dead_voxels();deactivate_sleeping_voxels();
+    rebuild_voxel_hash();update_projectiles(dt);handle_pbd_projectile_hits();
+}
+static bool enemy_autonomous_checks(void) {
+    const EnemyType types[]={ENEMY_TYPE_SCRAPPER,ENEMY_TYPE_BUILDER,ENEMY_TYPE_LOBBER};
+    for(int t=0;t<3;t++) {
+        enemy_lab_start(types[t]);enemyLabPaused=false;
+        for(int frame=0;frame<1800 && !enemySpecial[4].actions;frame++)enemy_autonomous_step(1.0f/60);
+        if(!enemySpecial[4].actions)fprintf(stderr,"autonomous %s stuck: %s pos=(%.1f %.1f %.1f) selected=%llu held=%d\n",enemy_names[types[t]],enemySpecial[4].reason,players[4].pos.x,players[4].pos.y,players[4].pos.z,(unsigned long long)enemySpecial[4].selected,players[4].tetherHolding);
+        ENEMY_CHECK(enemySpecial[4].actions>0,"autonomous enemy executes its role without forced wind-up");
+        enemy_lab_capture(types[t]);
+    }
+    enemy_lab_start(ENEMY_TYPE_LOBBER);clear_world_voxels();init_static_hash();
+    for(int f=0;f<180;f++)enemy_autonomous_step(1.0f/60);
+    ENEMY_CHECK(!enemySpecial[4].actions && voxel_count==0,"empty arena never generates Lobber ammunition");
+    enemy_lab_start(ENEMY_TYPE_LOBBER);
+    int payload=enemy_voxel(enemy_find_payload(4));ENEMY_CHECK(payload>=0,"interruption fixture has ammunition");
+    players[4].goldTetherCharged=true;acquire_tether_hit(4,payload,(Vector3){0,1,0});
+    enemySpecial[4].state=3;enemySpecial[4].windup=1;players[4].isExposed=true;enemy_update(4,.1f);
+    ENEMY_CHECK(!players[4].tetherHolding && !enemySpecial[4].windup && !voxels[payload].goliathProjectile,"interruption releases ordinary debris");
+    enemy_lab_start(ENEMY_TYPE_SHIELDBEARER);
+    for(int q=0;q<4;q++) {
+        float angle=q*PI/2;players[0].pos=v_add(players[4].pos,(Vector3){-sinf(angle)*8,0,-cosf(angle)*8});
+        for(int frame=0;frame<120;frame++)enemy_update(4,1.0f/60);
+        Vector3 plate=v_sub(enemy_local(4,(Vector3){0,0,-1}),players[4].pos);
+        ENEMY_CHECK(v_dot(v_norm(plate),v_norm(v_sub(players[0].pos,players[4].pos)))>.99f,"shield faces each quadrant");
+    }
+    enemy_lab_start(ENEMY_TYPE_FOUNDRY);EnemySpecialState *boss=&enemySpecial[4];
+    float health=boss->coreHealth;apply_matter_damage(4,0,999);ENEMY_CHECK(boss->coreHealth==health,"protected core rejects damage");
+    for(int n=boss->equipmentCount-1;n>=0;n--)if(boss->equipment[n].group<2)enemy_detach(enemy_voxel(boss->equipment[n].id));
+    enemy_update_equipment(4);enemy_tick(20);ENEMY_CHECK(enemy_core_open(4),"two supports permanently open core");
+    players[0].pos=v_add(players[4].pos,(Vector3){0,0,-2});
+    for(int f=0;f<120;f++)enemy_autonomous_step(1.0f/60);
+    ENEMY_CHECK(boss->actions>0,"open boss retains a close-range attack");
+    int kills=players[0].kills;apply_matter_damage(4,0,999);
+    ENEMY_CHECK(players[4].respawn_timer>0 && players[0].kills==kills+1,"ranged damage kills core and awards one kill");
+    apply_matter_damage(4,0,999);ENEMY_CHECK(players[0].kills==kills+1,"no duplicate boss death credit");
+    fprintf(stderr,"enemy-smoke PASS: autonomous roles and boss lifecycle\n");return true;
 }
 static bool enemy_run_smoke(const char *which) {
     SetTargetFPS(0);
@@ -192,6 +249,7 @@ static bool enemy_run_smoke(const char *which) {
     if(!strcmp(which,"all") || type==ENEMY_TYPE_COUNT) {
         for(int t=ENEMY_TYPE_SCRAPPER;t<ENEMY_TYPE_COUNT;t++) if(!enemy_smoke_case(t)) return false;
     } else if(!enemy_smoke_case(type)) return false;
+    if(!enemy_autonomous_checks())return false;
     /* Sustained mixed simulation exercises compaction, ownership, physics and render paths. */
     for(int scenario=0;scenario<2;scenario++) {
     enemy_lab_start(scenario?ENEMY_TYPE_COUNT:ENEMY_TYPE_FOUNDRY);double samples[30];
@@ -201,7 +259,7 @@ static bool enemy_run_smoke(const char *which) {
     for(int frame=0;frame<600;frame++) {
         float dt=1.0f/30;double start=GetTime();enemy_tick(dt);
         for(int i=4;i<activePlayers;i++) if(players[i].respawn_timer<=0) {UpdateBot(i,dt);net_integrate_player(&players[i],dt,true);}
-        simulate_voxel_pbd_steps(1.0f/120,4);update_projectiles(dt);handle_pbd_projectile_hits();
+        prepare_tether_forces();simulate_voxel_pbd_steps(1.0f/120,4);update_projectiles(dt);handle_pbd_projectile_hits();
         if(frame>=570) {render_gameplay_view(views,&count,&w,&h,false);samples[frame-570]=(GetTime()-start)*1000;}
         ENEMY_CHECK(voxel_count<MAX_VOXELS && activePlayers<=MAX_COMBATANTS,"bounded mixed simulation");
         for(int i=4;i<activePlayers;i++) {

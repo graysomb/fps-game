@@ -604,6 +604,7 @@ static float worldFloorHalfSize=20.0f;
 #define RECYCLE_STATIC_RESTORE_DELAY (60 * 15)
 #define RECYCLE_OWNED_STATIC_MAX_FRAMES (60 * 30)
 #define STATIC_DEBRIS_OWNER (-2)
+#define ENEMY_SCRAP_OWNER (-3) /* Untouched supply groups remain available for later waves. */
 #define VOXEL_HASH_REBUILD_INTERVAL 2
 #define TABLE_CACHE_SIZE 4
 
@@ -859,6 +860,7 @@ static bool player_uses_rat(int i) {
 
 /* The gameplay position remains the eye/camera anchor for human players. */
 static BoundingBox combatant_bounds_at(int slot,Vector3 pos,float legacy_half) {
+    if(slot>=MAX_PLAYERS && slot<MAX_COMBATANTS && players[slot].enemyType==ENEMY_TYPE_FOUNDRY)legacy_half=.75f;
     if(player_uses_rat(slot)) return (BoundingBox){
         {pos.x-CHARACTER_HALF_WIDTH,pos.y-BASE_EYE_HEIGHT,pos.z-CHARACTER_HALF_WIDTH},
         {pos.x+CHARACTER_HALF_WIDTH,pos.y+CHARACTER_BODY_TOP,pos.z+CHARACTER_HALF_WIDTH}};
@@ -6168,7 +6170,8 @@ static void recycle_dead_voxels(void) {
             voxel->lifeFrames = 0;
             continue;
         }
-        voxel->lifeFrames++;
+        if(voxel->owner==ENEMY_SCRAP_OWNER)voxel->lifeFrames=0;
+        else voxel->lifeFrames++;
         if (voxel->restorationQueued && voxel->restorationDeadlineFrame > 0 &&
             recycleFrameCounter >= voxel->restorationDeadlineFrame) {
             has_due_restoration = true;
@@ -7247,6 +7250,7 @@ static bool deactivate_sleeping_voxels(void)
 
         bool near_original = cluster_is_near_original_grid_pose(glueClusterIndices,
                                                                  cluster_count);
+        for(int member=0;member<cluster_count;member++)if(voxels[glueClusterIndices[member]].owner==ENEMY_SCRAP_OWNER)near_original=false;
         if (near_original) {
             if (!restore_glue_cluster_to_static(glueClusterIndices, cluster_count)) {
                 ++idx;
@@ -8785,6 +8789,10 @@ static void init_pickups(void) {
             pickups[i].pos=(Vector3){i<2?-4.0f:4.0f,3.0f,i%2?-3.0f:3.0f};
             pickups[i].active=true; pickups[i].type=i%2?PICKUP_AMMO:PICKUP_HEALTH;
         }
+        if(!firefightPractice)for(int i=4;i<8;i++) {
+            pickups[i].pos=(Vector3){i<6?-12:12,1,i%2?-12:12};
+            pickups[i].active=true;pickups[i].type=i%2?PICKUP_GOLD_TETHER:PICKUP_DYNAMIC_SHOT;
+        }
         return;
     }
 
@@ -8859,7 +8867,7 @@ static void update_pickups(float dt) {
             if (p->type == PICKUP_VOID) hitRad += 1.0f; // Larger hitbox for void
 
             if (distSq < hitRad*hitRad) {
-                if (p->type == PICKUP_GOLD_TETHER && pl->goldTetherCharged) continue;
+                if ((p->type == PICKUP_GOLD_TETHER && pl->goldTetherCharged) || (p->type==PICKUP_DYNAMIC_SHOT && pl->dynamicShotActive)) continue;
                 // Collect
                 if (p->type == PICKUP_AMMO) {
                     add_player_matter(pl, 25.0f);
@@ -9082,6 +9090,7 @@ static void ResetGame(void) {
     enemy_cleanup(true);
     worldFloorHalfSize=(!useCustomMap && (currentWorldType==WORLD_TYPE_CROSSCUT ||
         (gameMode==GAME_MODE_FIREFIGHT && (firefightFoundry||firefightPractice))))?32.0f:20.0f;
+    if(gameMode==GAME_MODE_FIREFIGHT && (firefightFoundry||firefightPractice))worldFloorHalfSize=40.0f;
     if(netTransport.role!=NET_ROLE_OFFLINE && gameMode==GAME_MODE_FIREFIGHT) gameMode=GAME_MODE_DEATHMATCH;
     if(netTransport.role==NET_ROLE_OFFLINE && gameMode!=GAME_MODE_FIREFIGHT) activePlayers=clamp_active_players(multiplayerActivePlayers);
     creativeModeActive = false;
@@ -9878,6 +9887,7 @@ static void spawn_player_explosion(Vector3 pos, Color color) {
     }
 }
 
+static void apply_matter_damage(int player_index,int attacker_index,float damage);
 static void kill_player(int player_index, int attacker_index,
                         bool award_kill, bool award_debris)
 {
@@ -9890,6 +9900,9 @@ static void kill_player(int player_index, int attacker_index,
         }
     }
     Player *player = &players[player_index];
+    if(player->enemyType==ENEMY_TYPE_FOUNDRY && enemySpecial[player_index].coreHealth>0) {
+        apply_matter_damage(player_index,attacker_index,35);return;
+    }
     if(enemyLab && enemyLabGod && player_index<firefightHumans) return;
     if(!enemy_core_open(player_index)) return;
     if (player->respawn_timer > 0.0f) {
@@ -10004,6 +10017,13 @@ static void apply_matter_damage(int player_index, int attacker_index, float dama
     if(!enemy_core_open(player_index)) return;
     Player *player = &players[player_index];
     if (player->respawn_timer > 0.0f) {
+        return;
+    }
+    if(player->enemyType==ENEMY_TYPE_FOUNDRY) {
+        EnemySpecialState *boss=&enemySpecial[player_index];
+        boss->coreHealth=fmaxf(0,boss->coreHealth-fmaxf(0,damage));
+        player->matter=boss->coreHealth;player->matter_flash_timer=.2f;player->isExposed=false;
+        if(boss->coreHealth<=0)kill_player(player_index,attacker_index,true,false);
         return;
     }
     player->last_damage_time = (float)GetTime();
@@ -10375,7 +10395,8 @@ static void handle_pbd_projectile_hits(void)
             float threshold = (PLAYER_SIZE * 0.5f) + voxel_radius + 0.1f;
             BoundingBox smush=expand_bounds(combatant_bounds(j,PLAYER_SIZE*.5f),voxel_radius+.1f);
             bool human_hit=(v->pos.x>=smush.min.x && v->pos.x<=smush.max.x && v->pos.y>=smush.min.y && v->pos.y<=smush.max.y && v->pos.z>=smush.min.z && v->pos.z<=smush.max.z);
-            if (player_uses_rat(j)?human_hit:(fabsf(dx) < threshold && fabsf(dy) < threshold && fabsf(dz) < threshold)) {
+            if ((player_uses_rat(j)||players[j].enemyType==ENEMY_TYPE_FOUNDRY)?human_hit:(fabsf(dx) < threshold && fabsf(dy) < threshold && fabsf(dz) < threshold)) {
+                if(enemy_lob_hit(i,j))continue;
                 if (dynamic_voxel_glued_to_static(i)) {
                     ++i;
                     removed = true;
@@ -13880,7 +13901,7 @@ static Vector3 pick_player_spawn(int player_index) {
         return random_clear_spawn(half,3,player_index);
     }
     if(gameMode==GAME_MODE_FIREFIGHT && (firefightFoundry||firefightPractice)) {
-        Vector3 pos=player_index<MAX_PLAYERS ? (Vector3){(float)(player_index%2)*3-1.5f,BASE_EYE_HEIGHT+2.0f,(float)(player_index/2)*3} : (Vector3){-28,BASE_EYE_HEIGHT,(float)(player_index%5-2)*2};
+        Vector3 pos=player_index<MAX_PLAYERS ? (Vector3){(float)(player_index%2)*3-1.5f,BASE_EYE_HEIGHT+2.0f,(float)(player_index/2)*3} : (Vector3){-36,BASE_EYE_HEIGHT,(float)(player_index%5-2)*3};
         return nudge_spawn_clear(pos,spawn_clear_half(player_index),0,player_index);
     }
 
@@ -14502,6 +14523,7 @@ static Vector3 player_hand_position(const Player *p) {
 }
 
 static Vector3 player_tether_hold_position(const Player *p) {
+    if(p->enemyType==ENEMY_TYPE_LOBBER || p->enemyType==ENEMY_TYPE_FOUNDRY)return v_add(p->pos,(Vector3){0,3.5f,0});
     Vector3 forward = player_forward(p);
     Vector3 world_up = { 0.0f, 1.0f, 0.0f };
     Vector3 right = v_cross(forward, world_up);
@@ -15244,22 +15266,9 @@ static bool resolve_tether_voxel(Player *player)
     return false;
 }
 
-static void start_tether(int idx) {
-    Player *p = &players[idx];
-    if (p->respawn_timer > 0.0f || p->tetherHolding) {
-        return;
-    }
-    Vector3 dir = player_forward(p);
-    Ray ray = { p->pos, dir };
-    VoxelHit hit_info;
-    float reach = p->goldTetherCharged ? GOLD_TETHER_RANGE : TETHER_RANGE;
-    if (!first_voxel_hit_detailed(ray, reach, -1, false, &hit_info)) {
-        return;
-    }
-    int hit_id = hit_info.id;
-    if (hit_id < 0 || hit_id >= voxel_count) {
-        return;
-    }
+static void acquire_tether_hit(int idx,int hit_id,Vector3 normal) {
+    Player *p=&players[idx];
+    if(p->respawn_timer>0 || p->tetherHolding || hit_id<0 || hit_id>=voxel_count)return;
     Voxel *hit = &voxels[hit_id];
     if (hit->simulate && (!hit->vgs_active || hit->isBullet || hit->type != 0 || voxel_is_fluid(hit))) {
         return;
@@ -15270,12 +15279,12 @@ static void start_tether(int idx) {
     }
 
     int hit_face = 0;
-    if (hit_info.normal.x > 0.5f) hit_face = 0;
-    else if (hit_info.normal.x < -0.5f) hit_face = 1;
-    else if (hit_info.normal.y > 0.5f) hit_face = 2;
-    else if (hit_info.normal.y < -0.5f) hit_face = 3;
-    else if (hit_info.normal.z > 0.5f) hit_face = 4;
-    else if (hit_info.normal.z < -0.5f) hit_face = 5;
+    if (normal.x > 0.5f) hit_face = 0;
+    else if (normal.x < -0.5f) hit_face = 1;
+    else if (normal.y > 0.5f) hit_face = 2;
+    else if (normal.y < -0.5f) hit_face = 3;
+    else if (normal.z > 0.5f) hit_face = 4;
+    else if (normal.z < -0.5f) hit_face = 5;
 
     int tether_idx = -1;
     if (!hit->simulate) {
@@ -15333,6 +15342,13 @@ static void start_tether(int idx) {
         tetherScaleByPlayer[idx] = 1.0f;
     }
     play_sfx(SFX_TETHER);
+}
+
+static void start_tether(int idx) {
+    Player *p=&players[idx];VoxelHit hit;
+    if(p->respawn_timer>0 || p->tetherHolding)return;
+    if(first_voxel_hit_detailed((Ray){p->pos,player_forward(p)},p->goldTetherCharged?GOLD_TETHER_RANGE:TETHER_RANGE,-1,false,&hit))
+        acquire_tether_hit(idx,hit.id,hit.normal);
 }
 
 static void measure_tether_cluster(int player_idx, const int *cluster, int cluster_count)
@@ -15479,7 +15495,7 @@ static void prepare_tether_forces(void) {
     }
 }
 
-static void release_tether(int idx) {
+static void release_tether_velocity(int idx,const Vector3 *launch) {
     Player *p = &players[idx];
     if (!p->tetherHolding) {
         return;
@@ -15515,7 +15531,8 @@ static void release_tether(int idx) {
                 if (!member->simulate) {
                     continue;
                 }
-                member->vel = v_add(member->vel, impulse);
+                member->owner=member->activator=idx;
+                member->vel = launch?*launch:v_add(member->vel, impulse);
                 if (p->goldTetherHolding) {
                     if (goldReleaseGraceFrames[v_idx] == 0) goldReleaseGraceActiveCount++;
                     goldReleaseGraceFrames[v_idx] = GOLD_TETHER_RELEASE_GRACE_STEPS;
@@ -15529,7 +15546,7 @@ static void release_tether(int idx) {
                         continue;
                     }
                     particle->sync_stamp = stamp;
-                    particle->vel = v_add(particle->vel, impulse);
+                    particle->vel = launch?*launch:v_add(particle->vel, impulse);
                 }
             }
             v->tetherThrowCcdFrames =
@@ -15551,6 +15568,8 @@ static void release_tether(int idx) {
     p->tetherVoxel = -1;
     p->tetherVoxelIdentity = 0;
 }
+
+static void release_tether(int idx) {release_tether_velocity(idx,NULL);}
 
 static bool tether_cluster_center(int voxel_idx, Vector3 *out_center) {
     if (!out_center || voxel_idx < 0 || voxel_idx >= voxel_count) {
@@ -16324,9 +16343,12 @@ static void DrawParticlesInstancedFast(Mesh mesh, Material material, const Vecto
         rlSetVertexAttributeDivisor(particlePosRadiusLoc, 1);
     }
 
-    if (mesh.indices != NULL) rlEnableVertexBufferElement(mesh.vboId[RL_DEFAULT_SHADER_ATTRIB_LOCATION_INDICES]);
-
-    rlDrawVertexArrayElementsInstanced(0, mesh.triangleCount * 3, 0, count);
+    if (mesh.indices != NULL) {
+        rlEnableVertexBufferElement(mesh.vboId[RL_DEFAULT_SHADER_ATTRIB_LOCATION_INDICES]);
+        rlDrawVertexArrayElementsInstanced(0, mesh.triangleCount * 3, 0, count);
+    } else {
+        rlDrawVertexArrayInstanced(0, mesh.vertexCount, count);
+    }
 
     if (particlePosRadiusLoc != -1) {
         rlDisableVertexAttribute(particlePosRadiusLoc);
@@ -17801,7 +17823,7 @@ static void draw_players(void) {
             draw_player_tether_world(i);
             continue;
         }
-        float body_size = (p->enemyType == ENEMY_TYPE_SWARMER) ? (PLAYER_SIZE * 0.5f) : PLAYER_SIZE;
+        float body_size = p->enemyType==ENEMY_TYPE_FOUNDRY?1.5f:(p->enemyType == ENEMY_TYPE_SWARMER) ? (PLAYER_SIZE * 0.5f) : PLAYER_SIZE;
         Color base = player_palette_color(i);
         if(enemy_is_special(i)) base=enemy_color(p->enemyType);
         if (p->enemyType == ENEMY_TYPE_SWARMER) {

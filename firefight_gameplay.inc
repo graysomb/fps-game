@@ -141,6 +141,12 @@ static void ff_wave_complete(void) {
         return;
     }
     teamUpgrade=UPGRADE_NONE;
+    if(firefightFoundry && !firefightPractice) {
+        enemy_stock_scrap(false);
+        for(int p=0;p<MAX_PICKUPS;p++)if(pickups[p].type==PICKUP_GOLD_TETHER || pickups[p].type==PICKUP_DYNAMIC_SHOT) {
+            pickups[p].active=true;pickups[p].respawnTimer=0;
+        }
+    }
     if(!firefightEndless && firefightWave>=FF_WAVE_COUNT) {
         firefightWaveState=FIREFIGHT_STATE_VICTORY; gameState=GAME_STATE_GAMEOVER; return;
     }
@@ -158,7 +164,7 @@ static bool ff_spawn_position(int slot, Vector3 *out) {
     for(int entrance=0;entrance<2;entrance++) {
         int side=(ffEntrance+entrance)%2 ? 1 : -1;
         for(int n=0;n<5;n++) {
-            Vector3 pos={(float)side*28.0f,BASE_EYE_HEIGHT, (float)(n-2)*3.0f};
+            Vector3 pos={(float)side*36.0f,BASE_EYE_HEIGHT, (float)(n-2)*3.0f};
             pos=nudge_spawn_clear(pos,spawn_clear_half(slot),4.0f,slot);
             if(spawn_position_clear_ex(pos,spawn_clear_half(slot),4.0f,slot)) { *out=pos; return true; }
         }

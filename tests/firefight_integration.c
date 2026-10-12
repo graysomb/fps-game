@@ -28,9 +28,9 @@ static void test_down(int i) {
 
 static void capture_arena(const char *path) {
     RenderTexture2D mapShot=LoadRenderTexture(1000,1000);
-    Camera3D mapCamera={.position={46,60,46},.target={0,0,0},.up={0,1,0},.fovy=48,.projection=CAMERA_PERSPECTIVE};
+    Camera3D mapCamera={.position={FLOOR_SIZE*1.45f,FLOOR_SIZE*1.85f,FLOOR_SIZE*1.45f},.target={0,0,0},.up={0,1,0},.fovy=48,.projection=CAMERA_PERSPECTIVE};
     BeginTextureMode(mapShot);ClearBackground((Color){30,35,43,255});BeginMode3D(mapCamera);
-    DrawPlane((Vector3){0,0,0},(Vector2){64,64},(Color){74,77,72,255});
+    DrawPlane((Vector3){0,0,0},(Vector2){FLOOR_SIZE*2,FLOOR_SIZE*2},(Color){74,77,72,255});
     for(int v=0;v<voxel_count;v++) DrawCube(voxels[v].pos,VOXEL_SIZE,VOXEL_SIZE,VOXEL_SIZE,voxels[v].color);
     EndMode3D();EndTextureMode();
     Image mapImage=LoadImageFromTexture(mapShot.texture);ImageFlipVertical(&mapImage);
@@ -47,7 +47,7 @@ int main(int argc,char **argv) {
     multiplayerActivePlayers=4;firefightPractice=false;
     ResetGame();gameState=GAME_STATE_PLAYING;
     assert(activePlayers==16 && firefightHumans==4);
-    assert(FLOOR_SIZE==32);
+    assert(FLOOR_SIZE==40);
     /* Opening waves must actually spawn swarmers, not just label them easier. */
     update_firefight_logic(2.1f);
     for(int i=4;i<16;i++) if(players[i].respawn_timer<=0) assert(players[i].enemyType==ENEMY_TYPE_SWARMER);
@@ -132,7 +132,12 @@ int main(int argc,char **argv) {
     /* Controller-only menu -> four-seat lobby -> game -> disconnect pause -> rematch. */
     gameState=GAME_STATE_MENU;couchSelection=0;couchLobby=false;
     for(int i=0;i<4;i++)testPads[i]=true;
-    testButtons[0][GAMEPAD_BUTTON_MIDDLE_RIGHT]=true;couch_frame();memset(testButtons,0,sizeof(testButtons));
+    multiplayerPlayerInput[0]=INPUT_TYPE_KEYBOARD;
+    couch_frame();assert(couchMenuDevice==0 && multiplayerPlayerInput[0]==INPUT_TYPE_KEYBOARD);
+    testPads[0]=false;couch_frame();assert(couchMenuDevice==1);
+    memset(testPads,0,sizeof(testPads));couch_frame();assert(couchMenuDevice==-1);
+    for(int i=0;i<4;i++)testPads[i]=true;
+    couch_frame();assert(couchMenuDevice==0);
     testButtons[0][GAMEPAD_BUTTON_RIGHT_FACE_DOWN]=true;couch_frame();memset(testButtons,0,sizeof(testButtons));
     assert(couchLobby && multiplayerActivePlayers==1);
     for(int i=1;i<4;i++)testButtons[i][GAMEPAD_BUTTON_MIDDLE_RIGHT]=true;
@@ -152,7 +157,7 @@ int main(int argc,char **argv) {
         while(firefightWaveState==FIREFIGHT_STATE_ACTIVE && watchdog-->0) {
             update_firefight_logic(2.1f);
             for(int i=4;i<16;i++) if(players[i].respawn_timer<=0) {
-                if(players[i].enemyType==ENEMY_TYPE_FOUNDRY) enemySpecial[i].lostMask=15;
+                if(players[i].enemyType==ENEMY_TYPE_FOUNDRY){enemySpecial[i].lostMask=15;apply_matter_damage(i,0,9999);continue;}
                 kill_player(i,0,true,true);
             }
         }
@@ -219,7 +224,7 @@ int main(int argc,char **argv) {
     testButtons[0][GAMEPAD_BUTTON_LEFT_FACE_LEFT]=true;couch_frame();memset(testButtons,0,sizeof(testButtons));
     assert(currentWorldType==WORLD_TYPE_CROSSCUT);
     currentWorldType=WORLD_TYPE_TEST;ResetGame();assert(FLOOR_SIZE==20);
-    gameMode=GAME_MODE_FIREFIGHT;firefightFoundry=true;ResetGame();assert(FLOOR_SIZE==32);
+    gameMode=GAME_MODE_FIREFIGHT;firefightFoundry=true;ResetGame();assert(FLOOR_SIZE==40);
     capture_arena("artifacts/foundry-overview.png");
     /* The real lab controls must reset fixtures without consuming couch seats. */
     enemy_lab_start(ENEMY_TYPE_SCRAPPER);
