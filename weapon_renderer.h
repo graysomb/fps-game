@@ -61,6 +61,9 @@ WeaponPose weapon_pose(WeaponKind kind, Vector3 position, Vector3 forward, Vecto
 float weapon_shot_amount(const WeaponVisual *visual, float now);
 void weapon_draw(WeaponPose pose, const WeaponVisual *visual, Vector3 eye,
                  float now, bool gold, WeaponRenderPass pass);
+/* World pickup presentation, sharing cached weapon meshes and materials. */
+void weapon_draw_pickup(bool launcher, Vector3 position, Vector3 eye, float time,
+                        WeaponRenderPass pass);
 /* Local visual particle transform; never creates gameplay particles. */
 Matrix weapon_cube_transform(int cube, float now);
 bool weapon_bloom_resize(WeaponBloom *bloom, int width, int height);

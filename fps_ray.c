@@ -8616,10 +8616,6 @@ typedef struct {
 } Pickup;
 
 static Pickup pickups[MAX_PICKUPS];
-static Shader goldPickupShader = { 0 };
-static int goldPickupTimeLocation = -1;
-static bool goldPickupShaderAttempted = false;
-
 static const char *pickup_type_label(PickupType type) {
     switch (type) {
         case PICKUP_AMMO: return "Ammo";
@@ -8940,20 +8936,20 @@ static void update_pickups(float dt) {
     }
 }
 
+static void draw_pickup_models(Camera cam,WeaponRenderPass pass) {
+    for(int n=0;n<MAX_PICKUPS;n++) {
+        Pickup *p=&pickups[n];
+        if(!p->active || (p->type!=PICKUP_DYNAMIC_SHOT && p->type!=PICKUP_GOLD_TETHER))continue;
+        Vector3 pos=p->pos;pos.y+=sinf(p->bobTimer*2)*.2f;
+        weapon_draw_pickup(p->type==PICKUP_DYNAMIC_SHOT,pos,cam.position,p->bobTimer,pass);
+    }
+}
+
 static void draw_pickups(Camera cam) {
     Color dewGreen = (Color){ 100, 255, 0, 200 };
     Color healthRed = (Color){ 230, 40, 40, 200 };
     Color voidBlack = (Color){ 10, 10, 10, 255 };
     Color voidRing = (Color){ 255, 165, 0, 255 }; // Orange
-    Color dynamicGold = (Color){ 255, 210, 90, 230 };
-    Color dynamicBlue = (Color){ 80, 160, 255, 200 };
-    if (!goldPickupShaderAttempted) {
-        goldPickupShaderAttempted = true;
-        goldPickupShader = LoadShader("shaders/gold_pickup.vert", "shaders/gold_pickup.frag");
-        if (goldPickupShader.id != 0)
-            goldPickupTimeLocation = GetShaderLocation(goldPickupShader, "uTime");
-    }
-    
     for (int i = 0; i < MAX_PICKUPS; i++) {
         if (!pickups[i].active) continue;
         
@@ -8963,6 +8959,10 @@ static void draw_pickups(Camera cam) {
         
         if(p->type==PICKUP_GRENADE){DrawCube(drawPos,.4f,.5f,.4f,ORANGE);DrawCubeWires(drawPos,.44f,.54f,.44f,YELLOW);continue;}
         DrawCircle3D(v_add(p->pos,(Vector3){0,-.6f,0}),.6f,(Vector3){1,0,0},90,Fade(SKYBLUE,.5f));
+        if(p->type==PICKUP_DYNAMIC_SHOT || p->type==PICKUP_GOLD_TETHER) {
+            weapon_draw_pickup(p->type==PICKUP_DYNAMIC_SHOT,drawPos,cam.position,p->bobTimer,WEAPON_COLOR);
+            continue;
+        }
         rlPushMatrix();
         rlTranslatef(drawPos.x, drawPos.y, drawPos.z);
         
@@ -9023,40 +9023,6 @@ static void draw_pickups(Camera cam) {
                 float rOuter = PICKUP_SIZE * 1.8f;
                 int segs = 32;
                 for (int k=0; k<segs; k++) {
-                    float a1 = ((float)k/(float)segs)*2.0f*PI;
-                    float a2 = ((float)(k+1)/(float)segs)*2.0f*PI;
-                    rlVertex3f(cosf(a1)*rInner, sinf(a1)*rInner, 0);
-                    rlVertex3f(cosf(a1)*rOuter, sinf(a1)*rOuter, 0);
-                    rlVertex3f(cosf(a2)*rOuter, sinf(a2)*rOuter, 0);
-                    rlVertex3f(cosf(a2)*rInner, sinf(a2)*rInner, 0);
-                }
-                rlEnd();
-            rlPopMatrix();
-        } else if (p->type == PICKUP_GOLD_TETHER) {
-            rlRotatef(p->bobTimer * 65.0f, 0.0f, 1.0f, 0.0f);
-            if (goldPickupShader.id != 0) {
-                SetShaderValue(goldPickupShader, goldPickupTimeLocation, &p->bobTimer, SHADER_UNIFORM_FLOAT);
-                BeginShaderMode(goldPickupShader);
-            }
-            DrawSphere((Vector3){ 0 }, PICKUP_SIZE * 1.15f, WHITE);
-            if (goldPickupShader.id != 0) EndShaderMode();
-            DrawSphereWires((Vector3){ 0 }, PICKUP_SIZE * 1.28f, 12, 16, GOLD);
-        } else if (p->type == PICKUP_DYNAMIC_SHOT) {
-            // Dynamic shot: Gold core + blue orbit ring
-            DrawSphere((Vector3){0,0,0}, PICKUP_SIZE * 0.9f, dynamicGold);
-            DrawSphereWires((Vector3){0,0,0}, PICKUP_SIZE * 1.0f, 10, 10, Fade(WHITE, 0.4f));
-
-            rlPushMatrix();
-                Matrix mat = MatrixInvert(GetCameraMatrix(cam));
-                mat.m12 = 0; mat.m13 = 0; mat.m14 = 0;
-                rlMultMatrixf(MatrixToFloat(mat));
-
-                rlBegin(RL_QUADS);
-                rlColor4ub(dynamicBlue.r, dynamicBlue.g, dynamicBlue.b, dynamicBlue.a);
-                float rInner = PICKUP_SIZE * 1.2f;
-                float rOuter = PICKUP_SIZE * 1.45f;
-                int segs = 28;
-                for (int k = 0; k < segs; k++) {
                     float a1 = ((float)k/(float)segs)*2.0f*PI;
                     float a2 = ((float)(k+1)/(float)segs)*2.0f*PI;
                     rlVertex3f(cosf(a1)*rInner, sinf(a1)*rInner, 0);
@@ -20293,6 +20259,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 draw_players();
                 if (drawWeaponModels) draw_remote_weapon_glass(i, cams[i].position);
                 draw_rat_visors(i,cams[i].position);
+                draw_pickup_models(cams[i],WEAPON_GLASS);
                 drawViewPlayerIndex = -1;
             EndMode3D();
             // Preserve world depth for the remote-gun mask before drawing the viewmodel.
@@ -20300,6 +20267,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 EndTextureMode();
                 weapon_bloom_begin(&weaponBlooms[view], screens[view]);
                 BeginMode3D(cams[i]);
+                draw_pickup_models(cams[i],WEAPON_EMISSION);
                 for (int p = 0; p < activePlayers; ++p) {
                     if (p != i) {
                         if(player_uses_rat(p) && (players[p].respawn_timer<=0 || characterSamples[p].downed)) draw_rat_world(p,true);
@@ -22445,7 +22413,6 @@ int main(int argc, char **argv) {
     for (int i = 0; i < MAX_PLAYERS; ++i) weapon_bloom_unload(&weaponBlooms[i]);
     character_renderer_shutdown();
     weapon_renderer_shutdown();
-    if (goldPickupShader.id != 0) UnloadShader(goldPickupShader);
     shutdown_world_visuals();
     free(netVoxelProxies);
     free(netVoxelProxyMap);

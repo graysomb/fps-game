@@ -453,6 +453,40 @@ void weapon_draw(WeaponPose pose,const WeaponVisual *v,Vector3 eye,float now,
     }
 }
 
+void weapon_draw_pickup(bool launcher,Vector3 position,Vector3 eye,float now,WeaponRenderPass pass) {
+    if(!wr_ready) {
+        if(pass==WEAPON_COLOR){DrawCube(position,.4f,.4f,.4f,GOLD);DrawCubeWires(position,.42f,.42f,.42f,WHITE);}
+        return;
+    }
+    Matrix root=MatrixMultiply(MatrixScale(.55f,.55f,.55f),MatrixRotateY(now*.65f));
+    root=MatrixMultiply(root,MatrixTranslate(position.x,position.y,position.z));
+    if(launcher) {
+        WeaponVisual visual={.shot_time=-1000};
+        weapon_draw((WeaponPose){.transform=root,.kind=WEAPON_DYNAMIC_LAUNCHER},&visual,eye,now,false,pass);
+        return;
+    }
+    if(pass==WEAPON_GLASS)return;
+    Vector3 energy={1,.67f,.10f};float strength=1.1f;int mask=pass==WEAPON_EMISSION,variant=0;
+    SetShaderValue(wr_shader,wr_eye,&eye,SHADER_UNIFORM_VEC3);
+    SetShaderValue(wr_shader,wr_energy,&energy,SHADER_UNIFORM_VEC3);
+    SetShaderValue(wr_shader,wr_strength,&strength,SHADER_UNIFORM_FLOAT);
+    SetShaderValue(wr_shader,wr_mask,&mask,SHADER_UNIFORM_INT);
+    SetShaderValue(wr_shader,wr_time,&now,SHADER_UNIFORM_FLOAT);
+    SetShaderValue(wr_shader,wr_launcher,&variant,SHADER_UNIFORM_INT);
+    /* Three familiar tether jaws around a hovering cube; open upward like a claw. */
+    Matrix claw=MatrixMultiply(MatrixRotateX(PI/2),MatrixTranslate(0,-.28f,0));
+    claw=MatrixMultiply(claw,root);
+    wr_draw_part(WR_FLASH,MatrixMultiply(MatrixScale(2,2,2),claw));
+    for(int n=0;n<3;n++) {
+        Matrix finger=MatrixMultiply(MatrixRotateX((4+5*sinf(now*1.8f))*DEG2RAD),MatrixTranslate(0,.18f,0));
+        finger=MatrixMultiply(finger,MatrixRotateZ(n*2*PI/3));
+        wr_draw_part(WR_UPPER,MatrixMultiply(finger,claw));
+    }
+    Matrix cube=MatrixMultiply(MatrixScale(.24f,.24f,.24f),MatrixRotateXYZ((Vector3){now*.3f,now*.5f,0}));
+    cube=MatrixMultiply(cube,MatrixTranslate(0,0,-.55f));
+    wr_draw_part(WR_CUBE,MatrixMultiply(cube,claw));
+}
+
 void weapon_bloom_unload(WeaponBloom *b) {
     if (b->emission.id) UnloadRenderTexture(b->emission);
     for (int i=0;i<2;++i) if (b->blur[i].id) UnloadRenderTexture(b->blur[i]);
