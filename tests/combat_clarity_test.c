@@ -18,7 +18,7 @@ static void check_crosscut_routes(void) {
         assert(seen[end]);
     }
 }
-static void snapshot_packet(int part,uint32_t seq,bool broken){uint8_t data[1000];NetWriter w;net_writer_init(&w,data,sizeof(data));net_write_u32(&w,seq);net_write_u8(&w,part);for(int n=0;n<16;n++){net_write_u32(&w,n==0 && part==0?123:0);net_write_u8(&w,0);for(int c=0;c<6;c++)net_write_f32(&w,c==1?2:0);net_write_f32(&w,n==0?2:0);}NetReader r;net_reader_init(&r,data,broken?w.length-1:w.length);assert(clarity_net_receive(NET_MSG_GRENADES,&r,seq));}
+static void snapshot_packet(int part,uint32_t seq,bool broken){uint8_t data[1000];NetWriter w;net_writer_init(&w,data,sizeof(data));net_write_u32(&w,seq);net_write_u8(&w,part);for(int n=0;n<16;n++){net_write_u32(&w,n==0 && part==0?123:0);net_write_u8(&w,0);for(int c=0;c<6;c++)net_write_f32(&w,c==1?2:0);net_write_f32(&w,n==0?1:0);}NetReader r;net_reader_init(&r,data,broken?w.length-1:w.length);assert(clarity_net_receive(NET_MSG_GRENADES,&r,seq));}
 int main(int argc,char **argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,720,"Combat clarity regression");init_pbd_thread_pool();assert(initialize_physics_backend());
     empty_arena();players[1].pos=(Vector3){10,1,0};grenadeInventory[0]=2;
     assert(clarity_throw(0));assert(grenadeInventory[0]==1);assert(!clarity_throw(0));clarity_tick(.5f);assert(clarity_throw(0));assert(grenadeInventory[0]==0);assert(!clarity_throw(0));
@@ -85,7 +85,22 @@ int main(int argc,char **argv){assert(parse_physics_arguments(argc,argv));SetLog
     }
     empty_arena();players[4].enemyType=ENEMY_TYPE_STANDARD;players[4].respawn_timer=0;players[4].invuln_timer=0;players[4].pos=(Vector3){5,1,0};players[4].isExposed=true;combatantTeam[4]=1;kill_player(4,0,true,false);assert(killConfirm[0]>0);int effects=0;for(int n=0;n<64;n++)effects+=clarityEffects[n].id!=0;assert(effects==1);kill_player(4,0,true,false);int after=0;for(int n=0;n<64;n++)after+=clarityEffects[n].id!=0;assert(after==effects);
     clarity_net_reset();memset(grenades,0,sizeof(grenades));snapshot_packet(1,10,false);assert(!grenades[0].id);snapshot_packet(0,10,true);assert(!grenades[0].id);snapshot_packet(0,10,false);assert(grenades[0].id==123);snapshot_packet(0,9,false);assert(clarityReceiveSequence==10);
-    empty_arena();GrenadeState bounce={.id=1,.owner=0,.pos={0,.16f,0},.vel={0,-5,0},.fuse=3};clarity_grenade_step(&bounce,.02f);assert(bounce.vel.y>0 && bounce.fuse>2.9f);
+    empty_arena();
+    GrenadeState bounce={.id=1,.owner=0,.pos={0,.16f,0},.vel={0,-5,0},.fuse=-1};
+    clarity_grenade_step(&bounce,.02f);assert(bounce.vel.y>0 && fabsf(bounce.fuse-1.48f)<.0001f);
+    /* Further floor contacts cannot extend the original deadline. */
+    bounce.pos.y=.16f;bounce.vel.y=-5;clarity_grenade_step(&bounce,.02f);
+    assert(fabsf(bounce.fuse-1.46f)<.0001f);
+    for(int n=0;n<145;n++)clarity_grenade_step(&bounce,.01f);
+    assert(bounce.fuse>0);clarity_grenade_step(&bounce,.011f);assert(bounce.fuse==0);
+    /* No airburst at the old three-second deadline. */
+    GrenadeState late={.id=2,.pos={0,1000,0},.fuse=-1};
+    for(int n=0;n<400;n++)clarity_grenade_step(&late,.01f);
+    assert(late.fuse==-1 && late.age==1.5f);
+    late.pos.y=.16f;late.vel.y=-5;clarity_grenade_step(&late,.02f);
+    assert(late.fuse>.48f && late.fuse<.5f);
+    for(int n=0;n<47;n++)clarity_grenade_step(&late,.01f);
+    assert(late.fuse>0);clarity_grenade_step(&late,.03f);assert(late.fuse==0);
     empty_arena();players[0].invuln_timer=2;clarity_explode(players[0].pos,1);assert(players[0].matter==100);
     empty_arena();grenadeInventory[0]=0;combatantLife[0]=LIFE_DOWNED;ff_restore_human(0,30);assert(grenadeInventory[0]==0);combatantLife[0]=LIFE_WAITING;ff_restore_human(0,100);assert(grenadeInventory[0]==1);
     empty_arena();enemy_lab_spawn(4,ENEMY_TYPE_SWARMER,(Vector3){4,1,4});firefightWaveState=FIREFIGHT_STATE_ACTIVE;memset(ffRemaining,0,sizeof(ffRemaining));for(int n=0;n<81;n++)clarity_tick(.1f);assert(swarmHintActive[4]);firefightWaveState=FIREFIGHT_STATE_INTERMISSION;clarity_tick(.1f);assert(!swarmHintActive[4]);

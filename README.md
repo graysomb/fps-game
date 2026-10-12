@@ -22,8 +22,9 @@ seconds without spawning gameplay actors.
 
 Throw a grenade with **C** (keyboard P1), **period** (keyboard P2), or **D-pad Up**.
 Carry two, start with one, and receive at least one at Firefight intermissions.
-Reviving does not grant ammunition. Grenades bounce and detonate three seconds after
-release. Orange supply stations add one grenade and refill after 30 seconds. Grenades
+Reviving does not grant ammunition. Grenades detonate half a second after their first bounce, but never before
+1.5 seconds after release. Later bounces do not reset the countdown; grenades still
+in flight wait for their first impact. Orange supply stations add one grenade and refill after 30 seconds. Grenades
 work in offline combat and LAN PvP; creative, paused, and downed players cannot throw.
 
 **Explosions hurt everyone**, including the thrower, teammates, and other enemies.

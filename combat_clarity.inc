@@ -102,7 +102,7 @@ static bool clarity_throw(int slot) {
     Vector3 forward=player_forward(&players[slot]),pos=players[slot].pos;VoxelHit hit;
     float reach=first_voxel_hit_detailed((Ray){pos,forward},.6f,-1,false,&hit)?fmaxf(0,hit.t-.2f):.6f;
     pos=v_add(pos,v_mul(forward,reach));
-    grenades[free]=(GrenadeState){clarityNextId++,slot,pos,v_add(v_mul(forward,14),(Vector3){0,2,0}),3};
+    grenades[free]=(GrenadeState){.id=clarityNextId++,.owner=slot,.pos=pos,.vel=v_add(v_mul(forward,14),(Vector3){0,2,0}),.fuse=-1};
     grenadeInventory[slot]--;grenadeCooldown[slot]=.4f;play_sfx_at(SFX_MELEE,pos,slot,2,1.4f);return true;
 }
 static void clarity_grenade_step(GrenadeState *g,float dt) {
@@ -117,7 +117,11 @@ static void clarity_grenade_step(GrenadeState *g,float dt) {
         g->pos=v_add(g->pos,v_mul(movement,fraction));
         if(collision){float inward=v_dot(g->vel,normal);if(inward<0)g->vel=v_sub(g->vel,v_mul(normal,1.4f*inward));g->vel.x*=.8f;g->vel.z*=.8f;if(v_length(g->vel)<.6f)g->vel=(Vector3){0};g->pos=v_add(g->pos,v_mul(normal,.002f));}
     }
-    g->fuse-=dt;
+    /* Only the first contact starts the timer. Account for contact within this step. */
+    if(collision && g->fuse==-1)
+        g->fuse=fmaxf(1.5f-g->age,dt*fraction+.5f);
+    g->age=fminf(1.5f,g->age+dt);
+    if(g->fuse>=0)g->fuse=fmaxf(0,g->fuse-dt);
 }
 static bool clarity_evade(int slot,float dt) {
     if(slot<0 || !is_player_bot(slot) || players[slot].respawn_timer>0 || players[slot].enemyType==ENEMY_TYPE_FOUNDRY)return false;
@@ -141,8 +145,8 @@ static void clarity_tick(float dt) {
     for(int i=0;i<activePlayers;i++){grenadeCooldown[i]=fmaxf(0,grenadeCooldown[i]-dt);killConfirm[i]=fmaxf(0,killConfirm[i]-dt);}
     for(int n=0;n<CLARITY_GRENADES;n++)if(grenades[n].id) {
         int oldBeat=(int)(grenades[n].fuse*3);
-        if(netTransport.role==NET_ROLE_CLIENT){grenades[n].fuse=fmaxf(0,grenades[n].fuse-dt);grenades[n].pos=Vector3Lerp(grenades[n].pos,grenadeVisualTarget[n],fminf(1,dt*15));if((int)(grenades[n].fuse*3)!=oldBeat)play_sfx_at(SFX_SHIELD,grenades[n].pos,grenades[n].owner,2,1.4f);continue;}
-        float remaining=fminf(dt,.25f);while(remaining>0 && grenades[n].id){float step=fminf(remaining,1.0f/120);clarity_grenade_step(&grenades[n],step);remaining-=step;if(grenades[n].fuse<=0){GrenadeState g=grenades[n];grenades[n].id=0;clarity_explode(g.pos,g.owner);}}
+        if(netTransport.role==NET_ROLE_CLIENT){if(grenades[n].fuse>=0)grenades[n].fuse=fmaxf(0,grenades[n].fuse-dt);grenades[n].pos=Vector3Lerp(grenades[n].pos,grenadeVisualTarget[n],fminf(1,dt*15));if((int)(grenades[n].fuse*3)!=oldBeat)play_sfx_at(SFX_SHIELD,grenades[n].pos,grenades[n].owner,2,1.4f);continue;}
+        float remaining=fminf(dt,.25f);while(remaining>0 && grenades[n].id){float step=fminf(remaining,1.0f/120);clarity_grenade_step(&grenades[n],step);remaining-=step;if(grenades[n].fuse==0){GrenadeState g=grenades[n];grenades[n].id=0;clarity_explode(g.pos,g.owner);}}
         if(grenades[n].id && (int)(grenades[n].fuse*3)!=oldBeat)play_sfx_at(SFX_SHIELD,grenades[n].pos,grenades[n].owner,2,1.4f);
     }
     int alive=0,queued=0;
