@@ -794,6 +794,23 @@ follow-on physics comparisons. Profiling counters compile only into the test har
 `tests/activation_batch_test.c` checks nesting, empty/failed operations, index compaction
 and preserved restoration deadlines; the mesh regression checks tether chunk seams.
 
+Static support now caches face connections by voxel identity and recomputes beliefs
+for affected connected components. Collision patches and GPU collider ranges persist
+per chunk; normal edits update affected cells and buffer ranges before physics runs.
+Interior contacts resolve before edge contacts so chunk seams do not add sideways
+impulses. Cache allocations are reused and cleared on world/backend reset.
+
+`cache-frame` lines report support nodes, neighbor rebuilds, collision chunks, patch
+counts, static upload bytes, and cache timing. GPU static timing includes CPU cache
+work when it is first requested there; do not add these overlapping timings.
+Set `FPS_SUPPORT_FULL_REBUILD=1` or `FPS_COLLISION_CACHE_FULL=1` to use the original
+full support or surface-cache builders for comparison. Unexpected bulk edits and
+incremental-cache capacity failures use synchronous full rebuilds.
+`tests/static_cache_test.c` compares support against the full calculation, checks
+exposed-face coverage, probes chunk seams and hash deletion, verifies GPU readbacks,
+and exercises allocation reuse, restoration, and full-cache recovery. It runs in
+both CPU and GPU variants of the validation script.
+
 `tools/validate_firefight.ps1` includes chunk geometry and regeneration regressions.
 `tests/chunk_regeneration_test.c` covers deadlines, boundaries, occupancy, cancellation,
 capacity, preview depth and multipart network messages. Set `FPS_REGEN_SHADER_FALLBACK=1`

@@ -16,6 +16,10 @@ try {
     & gcc tests/firefight_integration.c @sources @flags -o ".build/firefight_integration_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Integration build failed' }
     $backend = if ($Gpu) { 'gpu' } else { 'cpu-mt' }
+    & gcc tests/static_cache_test.c @sources @flags -o ".build/static_cache_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Static cache build failed' }
+    & ".build/static_cache_$variant.exe" "--physics=$backend"
+    if ($LASTEXITCODE -ne 0) { throw 'Static cache regression failed' }
     & gcc tests/activation_batch_test.c @sources @flags -o ".build/activation_batch_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Activation batching build failed' }
     & ".build/activation_batch_$variant.exe"

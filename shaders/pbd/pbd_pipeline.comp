@@ -380,7 +380,7 @@ vec3 pushOutOfBox(vec3 pos, float radius, StaticCollider box) {
     return pos + normal * (radius + distances[best]);
 }
 
-vec3 pushOutOfPatch(vec3 pos, float radius, StaticCollider surfacePatch) {
+vec3 pushOutOfPatch(vec3 pos, float radius, StaticCollider surfacePatch, bool edges) {
     vec3 closest = clamp(pos, surfacePatch.bounds_min.xyz, surfacePatch.bounds_max.xyz);
     vec3 normal = surfacePatch.center.xyz;
     vec3 delta = pos - closest;
@@ -389,6 +389,7 @@ vec3 pushOutOfPatch(vec3 pos, float radius, StaticCollider surfacePatch) {
     if (normal.x != 0.0) projectedInside = pos.y >= surfacePatch.bounds_min.y && pos.y <= surfacePatch.bounds_max.y && pos.z >= surfacePatch.bounds_min.z && pos.z <= surfacePatch.bounds_max.z;
     else if (normal.y != 0.0) projectedInside = pos.x >= surfacePatch.bounds_min.x && pos.x <= surfacePatch.bounds_max.x && pos.z >= surfacePatch.bounds_min.z && pos.z <= surfacePatch.bounds_max.z;
     else projectedInside = pos.x >= surfacePatch.bounds_min.x && pos.x <= surfacePatch.bounds_max.x && pos.y >= surfacePatch.bounds_min.y && pos.y <= surfacePatch.bounds_max.y;
+    if (projectedInside == edges) return pos;
     if (projectedInside && signedDistance < 0.0 && signedDistance >= -radius) return pos + normal * (radius - signedDistance);
     if (signedDistance < 0.0) return pos;
     float distanceSq = dot(delta, delta);
@@ -428,6 +429,8 @@ void staticCollisions(uint gid) {
         }
     }
     ivec3 center = ivec3(floor(pos / uVoxelSize));
+    // Interior contacts first, so chunk seams cannot act as rounded edges.
+    for (int pass=0; pass<(dispatchArgs[12] == 0u ? 1 : 2); ++pass) {
     int seen[128]; int seenCount = 0;
     for (int z=-1; z<=1; ++z) for (int y=-1; y<=1; ++y) for (int x=-1; x<=1; ++x) {
         int item = findStaticCell(center + ivec3(x,y,z));
@@ -444,10 +447,11 @@ void staticCollisions(uint gid) {
             for (int s=0; s<seenCount; ++s) duplicate = duplicate || (seen[s] == patchId);
             if (!duplicate && seenCount < 128) {
                 seen[seenCount++] = patchId;
-                pos = pushOutOfPatch(pos, 0.25 * uVoxelSize, surfacePatch);
+                pos = pushOutOfPatch(pos, 0.25 * uVoxelSize, surfacePatch, pass != 0);
             }
             item = floatBitsToInt(surfacePatch.center.w);
         }
+    }
     }
     center = ivec3(floor(pos / uVoxelSize));
     int recovery = findStaticCell(center);

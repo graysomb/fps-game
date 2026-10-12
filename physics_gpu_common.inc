@@ -285,7 +285,10 @@ static void gpu_physics_release_resources(void) {
     gpuPhysics.resident_valid = false;
 }
 
+static void gpu_static_cache_reset(void);
+
 static void gpu_physics_shutdown(void) {
+    gpu_static_cache_reset();
     if (gpuTransferStatsEnabled && (gpuPhysics.full_uploads || gpuPhysics.sync_count)) {
         fprintf(stderr,
                 "gpu-transfer mode=%s uploads=%llu reuses=%llu staticUploads=%llu syncs=%llu clones=%llu uploadBytes=%llu readbackBytes=%llu packMs=%.3f uploadMs=%.3f dispatchMs=%.3f encodeMs=%.3f gpuExecMs=%.3f waitMs=%.3f readbackMs=%.3f commitMs=%.3f\n",
@@ -320,6 +323,7 @@ static void gpu_physics_shutdown(void) {
     free(gpuPhysics.world_to_dynamic);
     free(gpuPhysics.pool_to_compact);
     memset(&gpuPhysics, 0, sizeof(gpuPhysics));
+    support_cache_reset();static_cache_reset();
 }
 
 static void gpu_fail(const char *reason) {
@@ -614,7 +618,9 @@ static void gpu_fill_static_patch(GpuStaticCollider *collider, const Patch *patc
     collider->bounds_min[3] = gpu_int_bits_as_float(patch_index);
 }
 
-static bool gpu_rebuild_static_cells(void) {
+#include "gpu_static_cache.inc"
+
+static bool gpu_rebuild_static_cells_legacy(void) {
     bool use_surface_cache = getenv("FPS_COLLISION_STATIC_LEGACY") == NULL;
     if (use_surface_cache && !ensure_static_surface_cache()) return false;
     if (!gpuPhysics.static_stage) {
@@ -693,6 +699,15 @@ static bool gpu_rebuild_static_cells(void) {
     return true;
 }
 
+static bool gpu_rebuild_static_cells(void) {
+    double begin=GetTime();
+    if(!getenv("FPS_COLLISION_STATIC_LEGACY") && !ensure_static_surface_cache())return false;
+    bool result=false;
+    if(staticCacheReady && !getenv("FPS_COLLISION_STATIC_LEGACY"))result=gpu_build_static_chunks();
+    if(!result){gpu_static_cache_reset();result=gpu_rebuild_static_cells_legacy();}
+    gpuStaticRebuildMs+=(GetTime()-begin)*1000;return result;
+}
+
 static void gpu_bind_world_buffers(void) {
 #if defined(__APPLE__) && defined(FPS_GPU_METAL)
     GpuBuffer *buffers[FPS_GPU_BUFFER_COUNT] = {
@@ -742,6 +757,8 @@ static bool gpu_upload_world(void) {
     size_t sim_capacity_bytes = (size_t)gpuPhysics.sim_slot_capacity * sizeof(uint32_t);
     size_t collision_id_bytes = (size_t)gpuPhysics.collision_count * sizeof(uint32_t);
     size_t collision_meta_capacity_bytes = (size_t)gpuPhysics.particle_slot_capacity * sizeof(GpuCollisionMeta);
+    bool fullStaticCells=!gpuPhysics.static_cell_buffer.id || gpuPhysics.static_cell_buffer.capacity<static_bytes;
+    bool fullStaticColliders=!gpuPhysics.static_collider_buffer.id || gpuPhysics.static_collider_buffer.capacity<static_collider_bytes;
     if (!gpu_buffer_ensure(&gpuPhysics.particle_buffer, particle_capacity_bytes) ||
         !gpu_buffer_ensure(&gpuPhysics.correction_buffer, correction_capacity_bytes) ||
         !gpu_buffer_ensure(&gpuPhysics.cell_buffer, cell_capacity_bytes) ||
@@ -788,10 +805,14 @@ static bool gpu_upload_world(void) {
                           (size_t)gpuPhysics.dynamic_voxel_count * 2u * sizeof(GpuTopologyState), 0);
     }
     if (static_changed) {
+        if(gpuStaticIncremental){static_bytes=gpu_upload_static_pages(fullStaticCells,fullStaticColliders);static_collider_bytes=0;}
+        else {
         gpu_buffer_update(&gpuPhysics.static_cell_buffer, gpuPhysics.static_stage, static_bytes, 0);
         if (static_collider_bytes) gpu_buffer_update(&gpuPhysics.static_collider_buffer,
                                                      gpuPhysics.static_collider_stage,
                                                      static_collider_bytes, 0);
+        gpuStaticBytesUploaded+=static_bytes+static_collider_bytes;
+        }
         gpuPhysics.static_uploaded_generation = staticHashGeneration;
         gpuPhysics.static_uploads++;
     }

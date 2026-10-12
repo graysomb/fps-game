@@ -54,6 +54,8 @@ multiplayerActivePlayers=1;multiplayerPlayerInput[0]=INPUT_TYPE_KEYBOARD;
     double phases[9]={0};int ticks=0;
     fprintf(stderr,"frame,voxels,awake,sleep,sim_particles,pool,collision,chunks,queue,invisible,fixed_particles,blast_ms,activate_ms,physics_ms,recycle_ms,sleep_ms,hash_ms,mesh_ms,render_ms,total_ms\n");
     for(int f=0;f<frames;f++) {
+        uint64_t nodesBefore=supportVisitedNodes,neighborsBefore=supportNeighborBuilds,chunksBefore=staticCacheChunksBuilt,patchesBefore=staticCachePatchesBuilt,uploadBefore=gpuStaticBytesUploaded;
+        double cacheBefore=staticCacheBuildMs,gpuCacheBefore=gpuStaticRebuildMs;
         memset(&activationProfile,0,sizeof(activationProfile));
         double prior[9];memcpy(prior,phases,sizeof(prior));
         double t=GetTime(),start=t;uint64_t commitsBefore=regenerationCommits;
@@ -84,6 +86,7 @@ multiplayerActivePlayers=1;multiplayerPlayerInput[0]=INPUT_TYPE_KEYBOARD;
         BeginDrawing();ClearBackground(SKYBLUE);BeginMode3D(cam);draw_world_surfaces();DrawVoxels(cam);draw_pickups(cam);EndMode3D();EndDrawing();phases[7]+=GetTime()-t;
         frameTimes[f]=(GetTime()-start)*1000;
         if(activation && f>=180 && f<=185) {
+            fprintf(stderr,"cache-frame frame=%d support_nodes=%llu neighbor_builds=%llu collision_chunks=%llu patches=%llu static_upload_bytes=%llu cpu_cache_ms=%.3f gpu_static_ms=%.3f\n",f+1,(unsigned long long)(supportVisitedNodes-nodesBefore),(unsigned long long)(supportNeighborBuilds-neighborsBefore),(unsigned long long)(staticCacheChunksBuilt-chunksBefore),(unsigned long long)(staticCachePatchesBuilt-patchesBefore),(unsigned long long)(gpuStaticBytesUploaded-uploadBefore),staticCacheBuildMs-cacheBefore,gpuStaticRebuildMs-gpuCacheBefore);
             fprintf(stderr,"activation-frame frame=%d removal_ms=%.3f support_ms=%.3f support_refreshes=%llu column_scans=%llu column_visits=%llu followup_ms=%.3f physics_ms=%.3f mesh_ms=%.3f total_ms=%.3f\n",f+1,activationProfile.removalMs,activationProfile.supportMs,(unsigned long long)activationProfile.supportRefreshes,(unsigned long long)activationProfile.columnScans,(unsigned long long)activationProfile.columnVisits,(phases[1]-prior[1])*1000,(phases[2]-prior[2])*1000,(phases[6]-prior[6])*1000,frameTimes[f]);
         }
         if(regenerationCommits!=commitsBefore) {

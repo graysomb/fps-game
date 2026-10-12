@@ -3420,6 +3420,7 @@ static int *staticSurfaceHash = NULL;
 static int staticSurfaceHashSize = 0;
 static uint64_t staticSurfaceGeneration = 0;
 static int staticSurfaceOccupiedCellCount = 0;
+#include "static_cache_storage.inc"
 static Mesh  greedyMesh = { 0 };
 static Material greedyMaterial;
 static bool greedyMaterialInit = false;
@@ -3625,6 +3626,8 @@ static void init_static_hash(void) {
 static void mark_static_hash_dirty(void) {
     staticHashDirty = true;
     if (staticEditBatch) return;
+    if(staticCacheReady && staticCacheMutationSerial==staticCacheMarkedSerial)staticCacheForceRebuild=true;
+    staticCacheMarkedSerial=staticCacheMutationSerial;
     staticHashGeneration++;
     if (staticHashGeneration == 0) staticHashGeneration = 1;
 }
@@ -3777,6 +3780,7 @@ static void voxel_table_register(Voxel *v, int idx)
     v->min_gx = minx; v->max_gx = maxx;
     v->min_gy = miny; v->max_gy = maxy;
     v->min_gz = minz; v->max_gz = maxz;
+    if (!v->simulate) static_cache_dirty_bounds(minx,maxx,miny,maxy,minz,maxz);
     bool surface_only = false;
     for (int x = minx; x <= maxx; ++x) {
         for (int y = miny; y <= maxy; ++y) {
@@ -3804,6 +3808,7 @@ static void voxel_table_unregister(const Voxel *v)
     }
     int minx, maxx, miny, maxy, minz, maxz;
     voxel_grid_bounds(v, &minx, &maxx, &miny, &maxy, &minz, &maxz);
+    if (!v->simulate) static_cache_dirty_bounds(minx,maxx,miny,maxy,minz,maxz);
     for (int x = minx; x <= maxx; ++x) {
         for (int y = miny; y <= maxy; ++y) {
             for (int z = minz; z <= maxz; ++z) {
@@ -3828,9 +3833,9 @@ static void remove_voxel_index(int idx)
     if (goldReleaseGraceFrames[idx] > 0) goldReleaseGraceActiveCount--;
     if (!victim->simulate) {
         mark_static_beliefs_dirty_for_voxel(victim);
-        mark_static_hash_dirty();
     }
     voxel_table_unregister(victim);
+    if(!victim->simulate)mark_static_hash_dirty();
     bool was_static = !victim->simulate;
     int dirty_minx,dirty_maxx,dirty_miny,dirty_maxy,dirty_minz,dirty_maxz;
     voxel_grid_bounds(victim,&dirty_minx,&dirty_maxx,&dirty_miny,&dirty_maxy,&dirty_minz,&dirty_maxz);
@@ -3883,9 +3888,11 @@ static void remove_voxel_index(int idx)
     goldReleaseGraceFrames[last] = 0;
     if (idx != last) {
         Voxel *moved = &voxels[last];
+        staticCacheSuppressEdits=true;
         voxel_table_unregister(moved);
         voxels[idx] = *moved;
         voxel_table_register(&voxels[idx], idx);
+        staticCacheSuppressEdits=false;
         for (int f = 0; f < 6; ++f) {
             if (voxels[idx].glued_faces[f]) {
                 int nidx = voxels[idx].glued_neighbors[f];
@@ -3921,6 +3928,8 @@ static int add_static_voxel_at_grid(int gx, int gy, int gz, Color color, int typ
 {
     int existing = table_get_static_only(gx, gy, gz);
     if (existing >= 0 && existing < voxel_count) {
+        static_cache_dirty_bounds(gx,gx,gy,gy,gz,gz);
+        mark_static_hash_dirty();
         voxels[existing].color = color;
         voxels[existing].type = type;
         mark_chunk_dirty_for_grid(gx,gy,gz);
@@ -4800,6 +4809,13 @@ static int emit_unit_voxels_from_units(const UnitVoxelBuffer *buffer,
 }
 
 
+static void refresh_activation_surfaces(const UnitVoxelBuffer *buffer) {
+    for(int i=0;i<buffer->count;i++) {
+        const UnitVoxelSeed *v=&buffer->voxels[i];
+        refresh_surfaces_in_region(v->gx,v->gx,v->gy,v->gy,v->gz,v->gz);
+    }
+}
+
 static void remove_buffered_static_voxels(UnitVoxelBuffer *buffer)
 {
     if (!buffer) {
@@ -5524,7 +5540,7 @@ static bool activate_static_voxels_near_dynamic(void)
     if (spawned > 0) {
         wake_fluid_near_unit_buffer(&buffer);
         rebuild_voxel_hash();
-        rebuild_all_voxel_surfaces();
+        refresh_activation_surfaces(&buffer);
         //rebuild_glue_constraints();
         glue_dynamic_voxel_to_static_neighbors();
         refresh_static_voxel_beliefs();
@@ -5594,7 +5610,6 @@ static bool activate_static_voxels_near_region(int minx, int maxx,
         atomic_store_explicit(&activationClaims[i], 0, memory_order_relaxed);
     }
 
-    staticBeliefsForceFullRefresh = true;
     refresh_static_voxel_beliefs();
 
     int r_minx = minx - 1;
@@ -5683,7 +5698,7 @@ static bool activate_static_voxels_near_region(int minx, int maxx,
         wake_fluid_near_unit_buffer(&buffer);
         init_static_hash();
         rebuild_voxel_hash();
-        rebuild_all_voxel_surfaces();
+        refresh_activation_surfaces(&buffer);
         rebuild_glue_constraints();
         glue_dynamic_voxel_to_static_neighbors();
         refresh_static_voxel_beliefs();
@@ -6466,6 +6481,8 @@ static void mark_static_beliefs_dirty_for_voxel(const Voxel *voxel)
 }
 
 
+#include "support_cache.inc"
+
 static void recompute_static_freeze_beliefs_path_length(void)
 {
     int *queue = freezeQueue;
@@ -6605,9 +6622,152 @@ static void recompute_static_freeze_beliefs_path_length(void)
     }
 }
 
+static void recompute_static_freeze_beliefs_cached(void)
+{
+    int *queue = freezeQueue;
+    int head = 0;
+    int tail = 0;
+
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (voxel->simulate) {
+            voxel->supportMask = 0;
+            voxel->neighborSupport = 0;
+            voxel->groundSupport = 0.0f;
+            voxel->freezeBelief = 0.0f;
+            freezeBeliefScratch[i] = 0.0f;
+            freezeBoundaryFlags[i] = 0;
+            freezeDistance[i] = INT_MAX;
+            overhangDistance[i] = INT_MAX;
+            continue;
+        }
+
+        if (!supportNodes[supportByIndex[i]].affected) continue;
+        ++supportVisitedNodes;
+        uint8_t supportMask = supportNodes[supportByIndex[i]].mask;
+        voxel->supportMask = supportMask;
+        voxel->neighborSupport = (uint8_t)bitcount_u8(supportMask);
+
+        VoxelWorldBounds bounds;
+        voxel_world_bounds(voxel, &bounds);
+        bool touchesGround = (bounds.miny <= GRID_EPSILON);
+        voxel->groundSupport = touchesGround ? 1.0f : 0.0f;
+
+        freezeBoundaryFlags[i] = touchesGround ? 1u : 0u;
+        if (touchesGround) {
+            freezeDistance[i] = 0;
+            if (tail < MAX_VOXELS) {
+                queue[tail++] = i;
+            }
+        } else {
+            freezeDistance[i] = INT_MAX;
+        }
+        overhangDistance[i] = INT_MAX;
+    }
+
+    while (head < tail) {
+        int idx = queue[head++];
+        if (idx < 0 || idx >= voxel_count) {
+            continue;
+        }
+        const Voxel *voxel = &voxels[idx];
+        if (voxel->simulate) {
+            continue;
+        }
+        int neighbors[MAX_STATIC_COLLISION_NEIGHBORS];
+        int neighborCount = support_cached_neighbors(idx, neighbors);
+        for (int n = 0; n < neighborCount; ++n) {
+            int nidx = neighbors[n];
+            if (nidx < 0 || nidx >= voxel_count) {
+                continue;
+            }
+            if (voxels[nidx].simulate) {
+                continue;
+            }
+            int nextDist = freezeDistance[idx] + 1;
+            if (nextDist < freezeDistance[nidx]) {
+                freezeDistance[nidx] = nextDist;
+                if (tail < MAX_VOXELS) {
+                    queue[tail++] = nidx;
+                }
+            }
+        }
+    }
+
+    head = 0;
+    tail = 0;
+    for (int i = 0; i < voxel_count; ++i) {
+        if (voxels[i].simulate || !supportNodes[supportByIndex[i]].affected) {
+            continue;
+        }
+        bool touchesGround = (freezeBoundaryFlags[i] & 1u) != 0;
+        bool hasBelow = (voxels[i].supportMask & (1u << 3)) != 0;
+        if (touchesGround || hasBelow) {
+            continue;
+        }
+        overhangDistance[i] = 0;
+        if (tail < MAX_VOXELS) {
+            queue[tail++] = i;
+        }
+    }
+
+    while (head < tail) {
+        int idx = queue[head++];
+        if (idx < 0 || idx >= voxel_count) {
+            continue;
+        }
+        const Voxel *voxel = &voxels[idx];
+        if (voxel->simulate) {
+            continue;
+        }
+        int neighbors[MAX_STATIC_COLLISION_NEIGHBORS];
+        int neighborCount = support_cached_neighbors(idx, neighbors);
+        for (int n = 0; n < neighborCount; ++n) {
+            int nidx = neighbors[n];
+            if (nidx < 0 || nidx >= voxel_count) {
+                continue;
+            }
+            if (voxels[nidx].simulate) {
+                continue;
+            }
+            bool touchesGround = (freezeBoundaryFlags[nidx] & 1u) != 0;
+            bool hasBelow = (voxels[nidx].supportMask & (1u << 3)) != 0;
+            if (touchesGround || hasBelow) {
+                continue;
+            }
+            int nextDist = overhangDistance[idx] + 1;
+            if (nextDist < overhangDistance[nidx]) {
+                overhangDistance[nidx] = nextDist;
+                if (tail < MAX_VOXELS) {
+                    queue[tail++] = nidx;
+                }
+            }
+        }
+    }
+
+    for (int i = 0; i < voxel_count; ++i) {
+        Voxel *voxel = &voxels[i];
+        if (voxel->simulate || !supportNodes[supportByIndex[i]].affected) {
+            continue;
+        }
+        if (freezeDistance[i] == INT_MAX) {
+            voxel->freezeBelief = 0.0f;
+        } else {
+            voxel->freezeBelief = powf(FREEZE_PATH_DECAY, (float)freezeDistance[i]);
+        }
+        if (overhangDistance[i] != INT_MAX) {
+            voxel->freezeBelief *= powf(FREEZE_OVERHANG_DECAY,
+                                        (float)(overhangDistance[i] + 1));
+        }
+        freezeBeliefScratch[i] = voxel->freezeBelief;
+    }
+}
+
 static void full_refresh_static_voxel_beliefs(void)
 {
-    recompute_static_freeze_beliefs_path_length();
+    if (!getenv("FPS_SUPPORT_FULL_REBUILD") && support_cache_prepare())
+        recompute_static_freeze_beliefs_cached();
+    else recompute_static_freeze_beliefs_path_length();
 }
 
 static void refresh_static_voxel_beliefs(void)
@@ -8594,6 +8754,8 @@ static void clear_pickups(void) {
 }
 
 static void clear_world_voxels(void) {
+    static_cache_reset();
+    support_cache_reset();
     regeneration_reset();
     recycleQueueHead = recycleQueueTail = recycleQueueCount = recycleFrameCounter = 0;
     voxel_count = 0;
@@ -9810,7 +9972,7 @@ static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float
     }
     wake_fluid_near_unit_buffer(&buffer);
     rebuild_voxel_hash();
-    rebuild_all_voxel_surfaces();
+    refresh_activation_surfaces(&buffer);
     rebuild_glue_constraints();
     glue_dynamic_voxel_to_static_neighbors();
     refresh_static_voxel_beliefs();
@@ -11482,7 +11644,7 @@ static inline bool is_static_solid_cell(int x, int y, int z) {
     return !voxel_is_fluid(&voxels[idx]);
 }
 
-static bool rebuild_static_surface_cache(void)
+static bool rebuild_static_surface_cache_legacy(void)
 {
     StaticSurfaceFace *faces = NULL;
     StaticSurfaceRef *refs = NULL;
@@ -11621,6 +11783,8 @@ fail:
     free(refs);
     return false;
 }
+
+#include "static_collision_cache.inc"
 
 static bool ensure_static_surface_cache(void)
 {
@@ -12287,7 +12451,7 @@ static bool push_particle_out_of_static(const Voxel *static_voxel, Particle *par
     }
 }
 
-static bool push_particle_out_of_static_patch(const Patch *patch, Particle *particle, float radius) //pointer
+static bool push_particle_out_of_static_patch(const Patch *patch, Particle *particle, float radius, bool edges) //pointer
 {
     if (!patch || !particle || radius <= 0.0f) return false;
     Vector3 position = particle->predicted_pos;
@@ -12323,6 +12487,9 @@ static bool push_particle_out_of_static_patch(const Patch *patch, Particle *part
                            position.z >= min_j && position.z <= max_j;
     }
 
+    // Resolve face interiors before rounded edges: an internal chunk seam is
+    // not a physical edge and must not impart a tangential correction.
+    if (projected_inside == edges) return false;
     Vector3 from_surface = v_sub(position, closest);
     float signed_distance = v_dot(from_surface, normal);
     const float eps = 1e-6f;
@@ -12368,10 +12535,11 @@ static void collide_particle_with_static_surface(Particle *particle, float radiu
             }
         }
     }
+    for (int pass = 0; pass < 2; ++pass)
     for (int i = 0; i < candidate_count; ++i) {
         int patch_index = candidates[i];
         if (patch_index >= 0 && patch_index < patchCount) {
-            push_particle_out_of_static_patch(&patches[patch_index], particle, radius);
+            push_particle_out_of_static_patch(&patches[patch_index], particle, radius, pass != 0);
         }
     }
 
@@ -15926,7 +16094,9 @@ static Mesh build_mesh_from_patches(const Patch *patch_array, int count) {
 
 static Mesh gen_greedy_mesh(void) {
     if (!ensure_static_surface_cache()) return (Mesh){ 0 };
-    return build_mesh_from_patches(patches, patchCount);
+    Patch *live=malloc((size_t)patchCount*sizeof(Patch));if(!live && patchCount)return (Mesh){0};
+    int count=0;for(int p=0;p<patchCount;p++)if(patches[p].di>0 && patches[p].dj>0)live[count++]=patches[p];
+    Mesh result=build_mesh_from_patches(live,count);free(live);return result;
 }
 
 // ----------------------------------------------------------------------------
@@ -16156,8 +16326,11 @@ static void update_static_patch_colors(void)
 
     bool anyChange = false;
     unsigned char *colorBuffer = (unsigned char *)greedyMesh.colors;
+    int liveIndex=0;
     for (int p = 0; p < patchCount; ++p) {
         Patch *pt = &patches[p];
+        if(pt->di<=0 || pt->dj<=0)continue;
+        pt->voxelIndex=pt->plane==0?table_get_static_only(pt->i0,pt->j0,pt->layer):pt->plane==1?table_get_static_only(pt->i0,pt->layer,pt->j0):table_get_static_only(pt->layer,pt->i0,pt->j0);
         Color newColor = pt->col;
         if (pt->voxelIndex >= 0 && pt->voxelIndex < voxel_count) {
             newColor = voxel_display_color(&voxels[pt->voxelIndex]);
@@ -16168,7 +16341,7 @@ static void update_static_patch_colors(void)
             anyChange = true;
         }
 
-        int vofs = p * 4;
+        int vofs = liveIndex++ * 4;
         for (int k = 0; k < 4; ++k) {
             unsigned char *dst = &colorBuffer[(vofs + k) * 4];
             dst[0] = pt->col.r;
