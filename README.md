@@ -816,3 +816,28 @@ both CPU and GPU variants of the validation script.
 capacity, preview depth and multipart network messages. Set `FPS_REGEN_SHADER_FALLBACK=1`
 to exercise the translucent fallback. `tests/combat_clarity_lan.c` additionally checks
 preview resynchronization and the authoritative terrain commit over loopback ENet.
+
+
+### Abandoned factory setting
+
+Foundry Holdout and Crosscut retain their original occupied cells, routes, spawns,
+and supplies, with new industrial cladding and decorative factory scenery. Human
+access doors and workstations establish scale; idle production lines, operator
+messages, and mouse route markers suggest the factory's new inhabitants. All ten
+Firefight enemies share procedural industrial robot bodies in gameplay, Enemy Lab,
+and menu scans. AI, damage geometry, detachable equipment, and remains are unchanged.
+
+Factory geometry is cached on the GPU, with separate detail meshes that disappear
+when their backing terrain is removed and return with regeneration. Static-hash
+changes invalidate visibility only; they do not regenerate decorative meshes.
+Lighting is baked into vertex colors, so this art does not depend on a new shader.
+The existing depth-tested emission pass handles panels and robot optics.
+Custom maps and other built-in environments retain their original presentation.
+
+The existing WORLD_BEGIN header flags carry visual map identity (0: none,
+1: Foundry, 2: Crosscut); message types and payload sizes are unchanged. An old
+host's zero flags retain the generic presentation. LAN remains PvP-only.
+`tests/setting_visual_test.c` checks original layout hashes, decoration lifecycle,
+map reset, robot previews and one/four-view timings, and writes captures to artifacts.
+`tests/setting_lan_test.c` checks two-process Crosscut identity, destruction and
+restoration. Both are included in the Firefight validation script.

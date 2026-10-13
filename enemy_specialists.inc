@@ -588,21 +588,15 @@ static void enemy_update(int i,float dt) {
 static void enemy_draw(void) {
     for(int i=MAX_PLAYERS;i<activePlayers;i++) if(enemy_is_special(i) && players[i].respawn_timer<=0) {
         EnemySpecialState *s=&enemySpecial[i];Vector3 p=players[i].pos;Color c=enemy_color(players[i].enemyType);
-        /* Distinct silhouettes in addition to color: pack, mast, mortar, hardhat. */
-        if(players[i].enemyType==ENEMY_TYPE_SCRAPPER) DrawCube(v_add(p,(Vector3){0,.1f,.5f}),.8f,.8f,.4f,c);
-        if(players[i].enemyType==ENEMY_TYPE_SAPPER) {DrawCube(v_add(p,(Vector3){0,.4f,0}),.7f,.3f,.7f,c);DrawSphere(v_add(p,(Vector3){0,.7f,0}),.15f,ORANGE);}
-        if(players[i].enemyType==ENEMY_TYPE_BUILDER) DrawCube(v_add(p,(Vector3){0,.4f,0}),1,.2f,1,c);
-        if(players[i].enemyType==ENEMY_TYPE_LOBBER) DrawCylinder(v_add(p,(Vector3){0,.25f,0}),.4f,.3f,1,8,c);
         if(players[i].enemyType==ENEMY_TYPE_ANCHOR) {
-            DrawLine3D(p,v_add(p,(Vector3){0,1.1f,0}),c);
+
             for(int j=MAX_PLAYERS;j<activePlayers;j++) if(enemy_braces(i,j)) {
                 Vector3 start=v_add(p,(Vector3){0,.9f,0});DrawLine3D(start,players[j].pos,c);
                 if(enemySpecial[j].healingPulse>0)DrawCube(Vector3Lerp(start,players[j].pos,fmodf(clarityClock*1.5f,1)),.12f,.12f,.12f,WHITE);
             }
         }
         if(players[i].enemyType==ENEMY_TYPE_FOUNDRY) {
-            DrawCube(p,1.5f,1.5f,1.5f,enemy_core_open(i)?GOLD:DARKGRAY);
-            DrawCubeWires(p,1.53f,1.53f,1.53f,enemy_core_open(i)?YELLOW:c);
+
             for(int n=0;n<s->equipmentCount;n++)if(s->equipment[n].group<4)DrawCubeWires(enemy_local(i,s->equipment[n].offset),.52f,.52f,.52f,ORANGE);
         }
         if(s->windup>0) {

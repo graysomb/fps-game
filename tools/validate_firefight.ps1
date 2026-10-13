@@ -16,6 +16,19 @@ try {
     & gcc tests/firefight_integration.c @sources @flags -o ".build/firefight_integration_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Integration build failed' }
     $backend = if ($Gpu) { 'gpu' } else { 'cpu-mt' }
+    & gcc tests/setting_visual_test.c @sources @flags -o ".build/setting_visual_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Setting visual build failed' }
+    & ".build/setting_visual_$variant.exe" "--physics=$backend"
+    if ($LASTEXITCODE -ne 0) { throw 'Setting visual regression failed' }
+    & gcc tests/setting_lan_test.c @sources @flags -o ".build/setting_lan_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Setting LAN build failed' }
+    $settingHost = Start-Process -FilePath (Join-Path $root ".build/setting_lan_$variant.exe") -ArgumentList 'host' -WindowStyle Hidden -PassThru -RedirectStandardOutput ".build/setting-host-$variant.log" -RedirectStandardError ".build/setting-host-$variant.err"
+    $null = $settingHost.Handle
+    & ".build/setting_lan_$variant.exe" client
+    $settingClientExit = $LASTEXITCODE
+    $settingHost.WaitForExit()
+    if ($settingClientExit -ne 0 -or $settingHost.ExitCode -ne 0) { throw 'Setting LAN regression failed' }
+
     & gcc tests/launcher_recycling_test.c @sources @flags -o ".build/launcher_recycling_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Launcher recycling build failed' }
     & ".build/launcher_recycling_$variant.exe" "--physics=$backend"

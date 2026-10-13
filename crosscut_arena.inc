@@ -6,9 +6,10 @@ static Vector3 crosscut_rotate(Vector3 p,int quarter) {
 static void crosscut_box(int q,float x0,float x1,float y0,float y1,float z0,float z1,Color c) {
     x0*=1.5f;x1*=1.5f;z0*=1.5f;z1*=1.5f;
     Vector3 a=crosscut_rotate((Vector3){x0,y0,z0},q),b=crosscut_rotate((Vector3){x1,y1,z1},q);
-    add_static_box_at_grid((int)roundf(fminf(a.x,b.x)/VOXEL_SIZE),(int)roundf(fmaxf(a.x,b.x)/VOXEL_SIZE)-1,
+    if(!settingLayoutOnly)add_static_box_at_grid((int)roundf(fminf(a.x,b.x)/VOXEL_SIZE),(int)roundf(fmaxf(a.x,b.x)/VOXEL_SIZE)-1,
         (int)roundf(y0/VOXEL_SIZE),(int)roundf(y1/VOXEL_SIZE)-1,
         (int)roundf(fminf(a.z,b.z)/VOXEL_SIZE),(int)roundf(fmaxf(a.z,b.z)/VOXEL_SIZE)-1,c);
+    setting_register_box((int)roundf(fminf(a.x,b.x)/VOXEL_SIZE),(int)roundf(fmaxf(a.x,b.x)/VOXEL_SIZE)-1,(int)roundf(y0/VOXEL_SIZE),(int)roundf(y1/VOXEL_SIZE)-1,(int)roundf(fminf(a.z,b.z)/VOXEL_SIZE),(int)roundf(fmaxf(a.z,b.z)/VOXEL_SIZE)-1,c);
 }
 static Vector3 crosscut_spawn_point(int index) {
     return crosscut_rotate((Vector3){index%2?-6.75f:6.75f,BASE_EYE_HEIGHT,23.25f},index/2);
@@ -17,7 +18,8 @@ static Vector3 crosscut_supply_point(int index) {
     return crosscut_rotate((Vector3){13.5f,1,16.5f},index);
 }
 static void buildCrosscut(void) {
-    Color stone={190,184,159,255},support={236,132,43,255};
+    setting_begin(2);
+    Color stone={169,173,161,255},support={236,132,43,255};
     const Color routes[4]={{61,156,182,255},{187,88,107,255},{137,158,73,255},{146,113,185,255}};
     for(int q=0;q<4;q++) {
         /* Terraces and two three-metre-wide stepped approaches. */

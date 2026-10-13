@@ -1,11 +1,13 @@
 /* Expand horizontal grid bounds while retaining half-metre vertical steps. */
 static void foundry_box(int x0,int x1,int y0,int y1,int z0,int z1,Color c) {
-    add_static_box_at_grid((int)floorf(x0*1.875f),(int)ceilf((x1+1)*1.875f)-1,y0,y1,
+    if(!settingLayoutOnly)add_static_box_at_grid((int)floorf(x0*1.875f),(int)ceilf((x1+1)*1.875f)-1,y0,y1,
         (int)floorf(z0*1.875f),(int)ceilf((z1+1)*1.875f)-1,c);
+    setting_register_box((int)floorf(x0*1.875f),(int)ceilf((x1+1)*1.875f)-1,y0,y1,(int)floorf(z0*1.875f),(int)ceilf((z1+1)*1.875f)-1,c);
 }
 /* Deterministic arena in the same grid units/material palette as the citadel. */
 static void buildFoundryHoldout(void) {
-    Color stone={82,102,117,255}, trim={127,173,178,255}, support={235,155,45,255};
+    setting_begin(1);
+    Color stone={151,158,151,255}, trim={66,91,96,255}, support={235,155,45,255};
     /* Raised holdout, with stairs on north and south and an open lower ring. */
     foundry_box(-10,10,0,3,-8,8,stone);
     for(int step=0;step<4;step++) {
@@ -51,5 +53,5 @@ static void buildFoundryHoldout(void) {
         foundry_box(side*35-1,side*35+1,0,5,-3,3,stone);
         foundry_box(-4,4,0,5,side*33-1,side*33+1,stone);
     }
-    if(!firefightPractice)enemy_stock_scrap(true);
+    if(!settingLayoutOnly && !firefightPractice)enemy_stock_scrap(true);
 }

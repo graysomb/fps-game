@@ -8631,8 +8631,15 @@ static void heal_structural_seams(void) {
 }
 
 // Build static demo cube of voxels
+#include "setting_layout.inc"
 #include "foundry_arena.inc"
 #include "crosscut_arena.inc"
+static void setting_receive_layout(int map) {
+    settingLayoutOnly=true;
+    if(map==1)buildFoundryHoldout();else if(map==2)buildCrosscut();else setting_begin(0);
+    settingLayoutOnly=false;
+}
+
 static void buildDemo(void) {
     if(gameMode==GAME_MODE_FIREFIGHT && (firefightFoundry||firefightPractice)) {
         current_sanctum_plan_valid=false;
@@ -8758,6 +8765,7 @@ static void clear_pickups(void) {
 }
 
 static void clear_world_voxels(void) {
+    setting_begin(0);
     static_cache_reset();
     support_cache_reset();
     regeneration_reset();
@@ -17580,7 +17588,11 @@ static void init_world_visuals(void) {
     worldVisualsReady = true;
 }
 
+static int drawViewPlayerIndex = -1;
+#include "industrial_visuals.inc"
+
 static void draw_world_surfaces(void) {
+    if(setting_active()){setting_world();return;}
     init_world_visuals();
     float scale=FLOOR_SIZE/worldVisualsHalfSize;
     DrawModel(worldFloorModel, (Vector3){ 0.0f, 0.0f, 0.0f }, scale, WHITE);
@@ -17602,6 +17614,7 @@ static void draw_world_surfaces(void) {
 }
 
 static void shutdown_world_visuals(void) {
+    setting_shutdown();
     if (!worldVisualsReady) {
         return;
     }
@@ -17668,7 +17681,7 @@ static bool player_tether_visual_target(int player_index, Vector3 *out_target) {
     return true;
 }
 
-static int drawViewPlayerIndex = -1;
+
 static float weaponViewAspect = 1.0f;
 static bool drawWeaponModels;
 static bool weaponFrameSampled;
@@ -17924,24 +17937,26 @@ static void draw_players(void) {
         float body_size = p->enemyType==ENEMY_TYPE_FOUNDRY?1.5f:(p->enemyType == ENEMY_TYPE_SWARMER) ? (PLAYER_SIZE * 0.5f) : PLAYER_SIZE;
         Color base = player_palette_color(i);
         if(enemy_is_special(i)) base=enemy_color(p->enemyType);
+        bool robot = gameMode==GAME_MODE_FIREFIGHT && i>=MAX_PLAYERS;
         if (p->enemyType == ENEMY_TYPE_SWARMER) {
             base = (Color){ 235, 70, 45, 255 };
-            DrawCube(v_add(p->pos,(Vector3){0,.25f,0}),.55f,.08f,.55f,YELLOW);
+            if(!robot)DrawCube(v_add(p->pos,(Vector3){0,.25f,0}),.55f,.08f,.55f,YELLOW);
         } else if (p->enemyType == ENEMY_TYPE_GOLIATH) {
             base = (Color){ 35, 38, 48, 255 };
         }
         Color base_dark = scale_color(base, 0.75f, 255);
         Vector3 render_pos = p->pos;
-        if (p->enemyType == ENEMY_TYPE_SWARMER) {
+        if (p->enemyType == ENEMY_TYPE_SWARMER && !robot) {
             render_pos.y += sinf((float)GetTime() * 22.0f) * 0.03f;
         }
-        DrawCube(render_pos, body_size, body_size, body_size, base);
-        DrawCubeWires(render_pos, body_size, body_size, body_size, base_dark);
+        if(robot)robot_draw(p->enemyType,render_pos,p->yaw,body_size,base,weaponFrameTime,v_length(p->vel),enemySpecial[i].windup,enemySpecial[i].coreOpen);
+        else {DrawCube(render_pos, body_size, body_size, body_size, base);
+        DrawCubeWires(render_pos, body_size, body_size, body_size, base_dark); }
         if (drawWeaponModels && i != drawViewPlayerIndex && !enemy_is_special(i)) {
             Vector3 eye = drawViewPlayerIndex >= 0 ? players[drawViewPlayerIndex].pos : p->pos;
             draw_player_weapon(i, eye, false, WEAPON_COLOR);
         }
-        if (i != drawViewPlayerIndex) {
+        if (i != drawViewPlayerIndex && !robot) {
             draw_player_face(p, render_pos, body_size, base);
         }
         if (p->enemyType == ENEMY_TYPE_GOLIATH) {
@@ -17950,7 +17965,7 @@ static void draw_players(void) {
             DrawCubeWires(render_pos, body_size * 0.8f, body_size * 0.8f, body_size * 0.8f, coreEnergy);
         }
         if (p->enemyType != ENEMY_TYPE_SWARMER) {
-            if (!drawWeaponModels || !player_has_gun(i)) draw_melee_arm_world(i);
+            if (!robot && (!drawWeaponModels || !player_has_gun(i))) draw_melee_arm_world(i);
             draw_player_tether_world(i);
         }
         if (p->matter_flash_timer > 0.0f && !p->isExposed && p->matter > 0.0f) {
@@ -19290,7 +19305,7 @@ static void net_send_world_to(int slot) {
     for (int i = 0; i < voxel_count; ++i)
         if (!voxels[i].simulate && !voxels[i].isBullet) ++static_count;
     net_writer_init(&writer, packet, sizeof(packet));
-    net_write_header(&writer, NET_MSG_WORLD_BEGIN, 0, netTransport.session_id, netServerTick);
+    net_write_header(&writer, NET_MSG_WORLD_BEGIN, (uint8_t)settingMap, netTransport.session_id, netServerTick);
     net_write_u32(&writer, (uint32_t)static_count);
     net_write_u8(&writer, netRequestedCreative ? 1 : 0);
     net_write_f32(&writer, worldFloorHalfSize);
@@ -19651,6 +19666,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
         if(reader.failed || !isfinite(extent) || extent<20 || extent>32) return;
         worldFloorHalfSize=extent;
         clear_world_voxels(); clear_pickups(); net_proxy_map_clear(); netWorldReady = false;
+        settingPendingMap=header.flags<=2?header.flags:0;
     } else if (header.type == NET_MSG_WORLD_STATIC) {
         uint16_t count = net_read_u16(&reader);
         for (uint16_t i = 0; i < count && !reader.failed; ++i) {
@@ -19665,6 +19681,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
             }
         }
     } else if (header.type == NET_MSG_WORLD_END) {
+        setting_receive_layout(settingPendingMap);
         rebuild_all_voxel_surfaces(); init_static_hash(); meshDirty = true; netWorldReady = true;
         gameState = netRequestedCreative ? GAME_STATE_CREATIVE : GAME_STATE_PLAYING;
     } else if (header.type == NET_MSG_WORLD_PICKUPS) {
@@ -20282,7 +20299,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                      weapon_bloom_resize(&weaponBlooms[view], *renderW, *renderH);
         if (!drawWeaponModels || !weaponBloomEnabled) weapon_bloom_unload(&weaponBlooms[view]);
         BeginTextureMode(screens[view]);
-            ClearBackground(SKYBLUE);
+            ClearBackground(setting_active()?(Color){33,40,43,255}:SKYBLUE);
             BeginMode3D(cams[i]);
                 drawViewPlayerIndex = i;
                 draw_world_surfaces();
@@ -20299,6 +20316,8 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 EndTextureMode();
                 weapon_bloom_begin(&weaponBlooms[view], screens[view]);
                 BeginMode3D(cams[i]);
+                setting_draw(true);
+                robot_emission();
                 draw_pickup_models(cams[i],WEAPON_EMISSION);
                 for (int p = 0; p < activePlayers; ++p) {
                     if (p != i) {
@@ -21013,7 +21032,7 @@ int main(int argc, char **argv) {
                 Rectangle sBox = { (float)(boxX + 220), (float)(boxY + 314), 300.0f, 38.0f };
 
                 BeginDrawing();
-                    ClearBackground(SKYBLUE);
+                    ClearBackground(setting_active()?(Color){33,40,43,255}:SKYBLUE);
                     
                     // Drone Background
                     Camera3D menuCam = { 0 };
@@ -21840,7 +21859,7 @@ int main(int argc, char **argv) {
                 }
                 
                 BeginDrawing();
-                    ClearBackground(SKYBLUE);
+                    ClearBackground(setting_active()?(Color){33,40,43,255}:SKYBLUE);
                     Camera3D droneCam = { 0 };
                     float time = (3.0f - droneTimer);
                     float angle = time * 0.8f; // Speed of rotation
