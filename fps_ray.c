@@ -4568,6 +4568,10 @@ static bool init_voxel_struct(Voxel *v,
     v->tetherThrowCcdFrames = 0;
     v->lifeFrames = 0;
     v->debugClusterTag = 0;
+    // Dense-array slots can still contain an expired terrain descendant.
+    // Only activation's seed-copy path may attach a restoration deadline.
+    v->restorationQueued = false;
+    v->restorationDeadlineFrame = 0;
     v->prevGlueClusterId = -1;
     v->prevGlueClusterSize = 0;
     v->prevGlueClusterTag = 0;

@@ -16,6 +16,10 @@ try {
     & gcc tests/firefight_integration.c @sources @flags -o ".build/firefight_integration_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Integration build failed' }
     $backend = if ($Gpu) { 'gpu' } else { 'cpu-mt' }
+    & gcc tests/launcher_recycling_test.c @sources @flags -o ".build/launcher_recycling_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Launcher recycling build failed' }
+    & ".build/launcher_recycling_$variant.exe" "--physics=$backend"
+    if ($LASTEXITCODE -ne 0) { throw 'Launcher recycling regression failed' }
     & gcc tests/static_cache_test.c @sources @flags -o ".build/static_cache_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Static cache build failed' }
     & ".build/static_cache_$variant.exe" "--physics=$backend"
