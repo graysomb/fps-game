@@ -9,6 +9,16 @@ static Image sky_image(RenderTexture2D target,Camera3D cam) {
 int main(void) {
     SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Night sky regression");
     worldPeriodic=false;
+    for(unsigned slot=0;slot<100;slot++) {
+        Vector4 trail;float glow;double start=slot*5.0+2.7+.7*shooting_star_random(slot,1);
+        shooting_star_sample(slot*5.0,&trail,&glow);assert(glow==0);
+        shooting_star_sample(start+.3,&trail,&glow);assert(glow>.9f && isfinite(trail.x));
+        assert(hypotf(trail.x-trail.z,trail.y-trail.w)<.141f);
+        shooting_star_sample(start+.7,&trail,&glow);assert(glow>.9f);
+        assert(hypotf(trail.x-trail.z,trail.y-trail.w)>.139f);
+        shooting_star_sample(start+1.5,&trail,&glow);assert(glow==0);
+    }
+    puts("Shooting stars: 100 varied events, five-second average cadence, brief trails passed");
     Camera3D camera={{0,3,0},{0,23,-3},{0,1,0},65,CAMERA_PERSPECTIVE};
     for(int small=0;small<2;small++) {
         RenderTexture2D target=LoadRenderTexture(small?480:960,small?270:540);
@@ -26,6 +36,10 @@ int main(void) {
         }
         UnloadImageColors(pixels);UnloadImage(fog);UnloadRenderTexture(target);
     }
+    RenderTexture2D meteorTarget=LoadRenderTexture(960,540);
+    nightSkyTime=2.7+.7*shooting_star_random(0,1)+.3;
+    Image meteor=sky_image(meteorTarget,camera);ExportImage(meteor,"artifacts/shooting-star.png");
+    UnloadImage(meteor);UnloadRenderTexture(meteorTarget);nightSkyTime=0;
     voxel_ca_init();character_renderer_init();weaponRenderingReady=weapon_renderer_init();
     for(int map=0;map<2;map++) {
         gameMode=map?GAME_MODE_DEATHMATCH:GAME_MODE_FIREFIGHT;firefightFoundry=true;firefightPractice=false;

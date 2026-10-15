@@ -89,6 +89,28 @@ static bool periodic_camera(Camera3D camera,int image,Camera3D *result) {
     if(visible){periodicViewCamera=*result;periodicViewActive=true;}
     return visible;
 }
+// Sample once per rendered frame; every split-screen view shares one sky event.
+static double nightSkyTime;
+static float shooting_star_random(unsigned slot,unsigned salt) {
+    uint32_t x=slot*747796405u+salt*2891336453u+277803737u;
+    x=((x>>((x>>28u)+4u))^x)*277803737u;x=(x>>22u)^x;
+    return (x&0xffffffu)/16777216.f;
+}
+static void shooting_star_sample(double time,Vector4 *trail,float *glow) {
+    *trail=(Vector4){0};*glow=0;
+    if(time<0)return;
+    unsigned slot=(unsigned)(time/5.0);
+    float age=(float)(time-slot*5.0)-(2.7f+.7f*shooting_star_random(slot,1));
+    if(age<0 || age>1.4f)return;
+    float angle=shooting_star_random(slot,2)*2*PI;
+    float radius=.08f+.12f*shooting_star_random(slot,3);
+    float direction=shooting_star_random(slot,4)*2*PI;
+    float dx=cosf(direction),dy=sinf(direction),travel=age*.28f;
+    float x=cosf(angle)*radius+dx*(travel-.196f),y=sinf(angle)*radius+dy*(travel-.196f);
+    float length=fminf(.14f,travel);
+    *trail=(Vector4){x,y,x-dx*length,y-dy*length};
+    *glow=clampf(age/.08f,0,1)*clampf((1.4f-age)/.35f,0,1);
+}
 static void periodic_skyline(Camera3D camera) {
     // One sky per viewport, before periodic world images. Direction only: no
     // parallax, tile repetition or discontinuity when the player wraps.
@@ -105,6 +127,9 @@ static void periodic_skyline(Camera3D camera) {
         SetShaderValue(nightSkyShader,GetShaderLocation(nightSkyShader,"viewUp"),&up,SHADER_UNIFORM_VEC3);
         SetShaderValue(nightSkyShader,GetShaderLocation(nightSkyShader,"viewport"),&viewport,SHADER_UNIFORM_VEC4);
         SetShaderValue(nightSkyShader,GetShaderLocation(nightSkyShader,"hazeColor"),&haze,SHADER_UNIFORM_VEC3);
+        Vector4 trail;float glow;shooting_star_sample(nightSkyTime,&trail,&glow);
+        SetShaderValue(nightSkyShader,GetShaderLocation(nightSkyShader,"meteorTrail"),&trail,SHADER_UNIFORM_VEC4);
+        SetShaderValue(nightSkyShader,GetShaderLocation(nightSkyShader,"meteorGlow"),&glow,SHADER_UNIFORM_FLOAT);
         Texture2D space=generated_space_texture();
         rlDisableDepthMask();BeginShaderMode(nightSkyShader);
         SetShaderValueTexture(nightSkyShader,GetShaderLocation(nightSkyShader,"spaceTexture"),space);

@@ -20379,6 +20379,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                                  int *renderH,
                                  bool creative_mode) {
     voxel_render_frame++;
+    nightSkyTime=GetTime();
     activePlayers = (gameMode == GAME_MODE_FIREFIGHT && netTransport.role == NET_ROLE_OFFLINE) ? MAX_COMBATANTS : clamp_active_players(activePlayers);
     int viewCount = netTransport.role == NET_ROLE_OFFLINE ? activePlayers : netLocalPlayerCount;
     int humanPlayerSlots[MAX_PLAYERS];
@@ -21162,6 +21163,7 @@ int main(int argc, char **argv) {
         update_game_music();
         voxel_ca_update(GetTime());
         voxel_render_frame++;
+        nightSkyTime=GetTime();
         if (netTransport.role != NET_ROLE_OFFLINE) {
             net_transport_pump(&netTransport, net_on_receive, net_on_connect, NULL);
             if (netTransport.role == NET_ROLE_HOST) {

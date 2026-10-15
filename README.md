@@ -893,3 +893,7 @@ runtime validation requires macOS hardware.
 
 `tests/night_sky_test.c` checks shader loading, visible stars at full/split viewport
 sizes, translation invariance and cleanup, and captures both fogged arenas.
+
+The generated sky also has occasional shooting stars: one varied event about every
+five seconds, lasting 1.4 seconds with a long, bright blue-white trail and glowing head. All local
+viewports share the same event, anchored overhead and blended into the horizon fog.
