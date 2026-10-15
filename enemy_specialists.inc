@@ -214,6 +214,7 @@ static bool enemy_plant(int i) {
     voxels[v].owner=i;enemy_pin(v,p,(Vector3){0});return true;
 }
 static void enemy_blast_terrain(EnemyCharge c) {
+    foundry_traps_blast(c.pos,c.owner);
     /* Excavation activation skips its interior; a blast must activate the radial shell explicitly. */
     static UnitVoxelBuffer shell;unit_voxel_buffer_clear(&shell);
     for(int v=0;v<voxel_count && shell.count<VOXEL_ACTIVATION_UNIT_BUDGET;v++) {

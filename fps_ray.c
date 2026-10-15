@@ -1146,6 +1146,10 @@ typedef struct {
     bool pendingActivation;
     bool isBullet;
     bool goliathProjectile;
+    uint8_t foundryTrapId;
+    bool foundryTrapHeavy;
+    Vector3 foundryTrapPrevious;
+    float foundryTrapPreviousSpeed;
     float explosionUntil;
     bool wasTethered;
     int activationCooldownFrames;
@@ -1417,6 +1421,12 @@ static void mark_static_beliefs_dirty_for_voxel(const Voxel *voxel);
 static void mark_static_beliefs_dirty_column_above(int gx, int gz, int gy);
 static void update_dynamic_activation_beliefs(void);
 static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float activationBelief);
+static bool foundry_trap_hit(int voxel_idx,int actor,bool payload);
+static void foundry_traps_prepare(void);
+static void foundry_traps_blast(Vector3 pos,int owner);
+static void foundry_traps_hits(void);
+static void foundry_traps_reset(void);
+static void foundry_traps_draw(void);
 static int rip_single_static_voxel(int voxel_idx, int activator);
 static bool activate_static_voxels_near_region(int minx, int maxx,
                                                 int miny, int maxy,
@@ -4509,6 +4519,8 @@ static bool init_voxel_struct(Voxel *v,
     v->pendingActivation = false;
     v->isBullet = false;
     v->goliathProjectile = false;
+    v->foundryTrapId=0;v->foundryTrapHeavy=false;
+    v->foundryTrapPrevious=v->pos;v->foundryTrapPreviousSpeed=0;
     v->explosionUntil = 0;
     v->wasTethered = false;
     v->activationCooldownFrames = 0;
@@ -4706,6 +4718,7 @@ static void glue_neighbor_faces_for_voxel(int voxel_idx) {
         }
 
         Voxel *b = &voxels[neighbor_idx];
+        if(a->foundryTrapId!=b->foundryTrapId && (a->foundryTrapId || b->foundryTrapId))continue;
         if(!periodic_align_glue(voxel_idx,neighbor_idx))continue;
         int faceA = f;
         int faceB = opposite_face[f];
@@ -8391,6 +8404,7 @@ static int clamp_active_players(int count);
 static void ResetGame(void);
 #include "enemy_specialists.h"
 #include "combat_clarity.h"
+#include "foundry_traps.h"
 static void reset_firefight_match(void);
 static void start_firefight_wave(int wave_number);
 static void update_firefight_logic(float dt);
@@ -8794,6 +8808,7 @@ static void clear_pickups(void) {
 }
 
 static void clear_world_voxels(void) {
+    foundry_traps_reset();
     static_cache_reset();
     support_cache_reset();
     regeneration_reset();
@@ -9971,6 +9986,7 @@ static void add_player_matter(Player *p, float amount) {
 }
 
 static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float activationBelief) {
+    if(foundry_trap_hit(voxel_idx,activator,true))return false; // Release first; the falling payload can then be grabbed.
     static UnitVoxelBuffer buffer;
     unit_voxel_buffer_clear(&buffer);
     refresh_static_voxel_beliefs();
@@ -10314,6 +10330,7 @@ static void update_projectiles(float dt)
         Ray ray = { start, v_norm(v->vel) };
         int hit_id = first_voxel_hit(ray, distance, i);
         if (hit_id >= 0 && hit_id < voxel_count) {
+            foundry_trap_hit(hit_id,v->owner,false);
             play_sfx(SFX_IMPACT);
             if (voxels[hit_id].simulate && voxels[hit_id].sleeping) {
                 wake_sleeping_cluster_in_place(hit_id);
@@ -10534,12 +10551,14 @@ static bool dynamic_voxel_glued_to_static(int voxel_idx)
 
 static void handle_pbd_projectile_hits(void)
 {
+    foundry_traps_hits();
     if (debugLogSmush) {
         debugSmushLogBudget = 32;
     }
     int i = 0;
     while (i < voxel_count) {
         Voxel *v = &voxels[i];
+        if(v->foundryTrapHeavy){++i;continue;}
         if (!v->simulate || v->sleeping || voxel_is_fluid(v)) {
             ++i;
             continue;
@@ -13768,6 +13787,7 @@ static void advance_gold_release_grace(int fixed_steps) {
 }
 
 static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
+    if (fixed_steps > 0) foundry_traps_prepare();
     if (dynamic_particle_count() <= 0 || fixed_steps <= 0) return;
     if (sim_particle_count == 0 && fluid_should_skip_reduced_rate_step()) {
         return;
@@ -15062,6 +15082,7 @@ static bool melee_clear_overlapping_voxels(Player *p)
         for (int y = miny; y <= maxy; ++y) {
             for (int z = minz; z <= maxz; ++z) {
                 if (table_get_static_only(x, y, z) >= 0) {
+                    foundry_trap_hit(table_get_static_only(x,y,z),(int)(p-players),false);
                     removed_static++;
                 }
             }
@@ -15122,6 +15143,7 @@ static bool melee_hit_voxels(Player *p, Vector3 start, Vector3 dir, float reach)
         return false;
     }
     if(clarity_shield_melee(hit_id,player_idx))return true;
+    foundry_trap_hit(hit_id,player_idx,false);
     Voxel *hit = &voxels[hit_id];
     if (hit->simulate && hit->sleeping) {
         wake_sleeping_cluster_in_place(hit_id);
@@ -18129,6 +18151,7 @@ static void draw_players(void) {
         }
     }
     clarity_draw();
+    foundry_traps_draw();
 }
 
 static void HandleKeyboardInput(int i, float dt) {
@@ -18983,6 +19006,7 @@ static void bot_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float
 }
 
 #include "enemy_specialists.inc"
+#include "foundry_traps.inc"
 #include "combat_clarity.inc"
 #include "combat_clarity_net.inc"
 #include "chunk_regeneration_net.inc"

@@ -135,6 +135,26 @@ keyboard seats ready with Enter and Right Shift. Up to four humans can play
 alongside twelve active firefight enemies. Controller disconnects pause offline
 play; reconnect or press Start on an unused controller to explicitly reassign it.
 
+Foundry Holdout contrasts solid central platforms, stairs and entrance pylons with
+one-voxel factory walls/roofs, narrow piers and hollow flank machinery. Practice
+retains its original geometry; Crosscut is unchanged. Six orange-marked traps cover
+the lower routes: two falling choke-point slabs, two suspended bay plates, and two
+cargo stacks that tip toward the arena. Shoot or melee the orange release cell,
+blast the assembly, or tether its payload to release it. Floor outlines mark the
+fall/tipping zone; each moving payload contains at most 160 voxels (hard cap 256).
+
+A connected trap piece of at least eight voxels must actually hit an actor while
+moving at least 2.5 units/second to crush them. Invulnerability and cooperative
+downing still apply. A Walking Foundry keeps its core protection and takes 100 core
+damage per activation when exposed. Environmental credit goes to the activator;
+small fragments retain ordinary debris behavior. Traps rearm after normal chunk
+regeneration restores every payload/trigger cell and the previous debris is gone.
+
+`tests/foundry_traps_test.c` exercises solid volume, fragile counts, all six releases,
+CPU/GPU falling motion, regeneration/rearming, swept hits, misses, invulnerability,
+co-op downing, boss protection and kill credit. It also writes three arena captures
+to `artifacts/foundry-traps-*.png`. It is included in `tools/validate_firefight.ps1`.
+
 Firefight defaults to twelve authored waves on **Foundry Holdout**, with a victory
 screen and rematch. Left/right in the lobby selects Endless Survival; in Endless,
 Tab or the top face button switches between Foundry and the current advanced map.

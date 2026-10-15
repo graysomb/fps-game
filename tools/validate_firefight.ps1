@@ -16,6 +16,10 @@ try {
     & gcc tests/firefight_integration.c @sources @flags -o ".build/firefight_integration_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Integration build failed' }
     $backend = if ($Gpu) { 'gpu' } else { 'cpu-mt' }
+    & gcc tests/foundry_traps_test.c @sources @flags -o ".build/foundry_traps_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Foundry traps build failed' }
+    & ".build/foundry_traps_$variant.exe" "--physics=$backend"
+    if ($LASTEXITCODE -ne 0) { throw 'Foundry traps regression failed' }
     & gcc tests/launcher_recycling_test.c @sources @flags -o ".build/launcher_recycling_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Launcher recycling build failed' }
     & ".build/launcher_recycling_$variant.exe" "--physics=$backend"
