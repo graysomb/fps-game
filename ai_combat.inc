@@ -6,6 +6,8 @@ static float ai_random(int i) {
 }
 static void ai_reset(int i) {
     if(i<0 || i>=MAX_COMBATANTS)return;
+    players[i].drainTarget=0;players[i].netDrainVisualActive=false;
+    for(int j=0;j<MAX_COMBATANTS;j++)if(players[j].drainTarget==i+1)players[j].drainTarget=0;
     aiCombat[i]=(AiCombat){.target=-1,.pendingTarget=-1,.intent=-1,.lastFire=-1000,.initialized=true,.random=0x51a700u+(uint32_t)i*977u,.lastPosition=players[i].pos};
     botStates[i]=(BotState){.targetIndex=-1};
     // Invalidate memory when a slot is reused, including another bot's target.

@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define FPS_NET_MAGIC 0x4650534eu /* "FPSN" */
-#define FPS_NET_PROTOCOL_VERSION 11u /* Explicit periodic world topology in world snapshot. */
+#define FPS_NET_PROTOCOL_VERSION 12u /* Actor Matter-drain tether visual flag. */
 #define FPS_NET_DEFAULT_PORT 27015u
 #define FPS_NET_DISCOVERY_PORT 27016u
 #define FPS_NET_MAX_PACKET 1100u
@@ -79,7 +79,8 @@ typedef enum NetPlayerVisualFlags {
     NET_PLAYER_VISUAL_MELEE = 1u << 0,
     NET_PLAYER_VISUAL_TETHER = 1u << 1,
     NET_PLAYER_VISUAL_GOLD_TETHER = 1u << 2,
-    NET_PLAYER_VISUAL_POWERED_SHOT = 1u << 3
+    NET_PLAYER_VISUAL_POWERED_SHOT = 1u << 3,
+    NET_PLAYER_VISUAL_DRAIN = 1u << 4
 } NetPlayerVisualFlags;
 
 /* Optional bit in the existing player-state flags byte; no payload change. */

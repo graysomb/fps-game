@@ -16,6 +16,10 @@ try {
     & gcc tests/firefight_integration.c @sources @flags -o ".build/firefight_integration_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Integration build failed' }
     $backend = if ($Gpu) { 'gpu' } else { 'cpu-mt' }
+    & gcc tests/tether_drain_test.c @sources @flags -o ".build/tether_drain_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Tether drain build failed' }
+    & ".build/tether_drain_$variant.exe" "--physics=$backend"
+    if ($LASTEXITCODE -ne 0) { throw 'Tether drain regression failed' }
     & gcc tests/ai_combat_test.c @sources @flags -o ".build/ai_combat_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'AI combat build failed' }
     & ".build/ai_combat_$variant.exe" "--physics=$backend"

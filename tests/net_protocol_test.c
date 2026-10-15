@@ -68,7 +68,7 @@ int main(void) {
     assert(!net_read_player_visual(&reader, &decoded_visual));
 
     // Every combination has a bounded, exact wire length and rejects truncation.
-    for (unsigned int flags = 0; flags < 16; ++flags) {
+    for (unsigned int flags = 0; flags < 32; ++flags) {
         visual.flags = (uint8_t)flags;
         visual.shot_age_ms = 255;
         net_writer_init(&writer, packet, sizeof(packet));

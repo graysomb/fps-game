@@ -84,6 +84,16 @@ invulnerability; Escape leaves. The overlay shows the ability state, target,
 timers, equipment count, and intended counterplay. Normal movement, shooting,
 melee, and tether controls remain available.
 
+Hold the existing tether control while aiming at an opponent to lock on and drain
+Matter at twice your regular bullet damage per second. Actor drains use the normal
+8-unit tether range (gold upgrades still apply to voxel grabs). The lock follows
+the target within a 65-degree forward cone and breaks on release, cover, range,
+death/downing, or empty Matter. It costs no Matter, grants none, cannot kill, has
+no movement effects and does not parry another tether. Foundry core protection
+still applies; an exposed core retains its final health point. A pulsing cyan beam
+and rotating contact rings distinguish draining from a normal voxel tether, with
+depth-aware bloom and a visible fallback when the shader is unavailable.
+
 Enemy AI in Firefight, Versus and Enemy Lab remembers specific attackers for four
 seconds, investigates their last observed position, and reacts to damage, shield
 hits, nearby bullets and gunfire (24 units in sight, 8 through cover). Targets are
@@ -900,7 +910,7 @@ across periodic boundaries;
 the existing depth-aware fog still hides distant terrain. The first-person weapon
 and HUD remain clear. Set
 `FPS_BOUNDED_WORLD=1` before launching to restore the bounded arenas for comparison.
-LAN protocol 11 sends topology with the world; host and client need matching builds.
+LAN protocol 12 sends topology and actor-drain visuals; host and client need matching builds.
 
 `tests/periodic_world_test.c` runs in `tools/validate_firefight.ps1` for CPU/GPU.
 It checks seams/corners, collision-cache contact, rays, moving characters and

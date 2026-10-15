@@ -21,6 +21,34 @@ static Model wr_parts[WR_PART_COUNT];
 static Shader wr_shader, wr_blur;
 static int wr_eye, wr_energy, wr_strength, wr_mask, wr_direction, wr_time, wr_launcher;
 static bool wr_ready;
+static Shader wr_drain;
+static int wr_drain_start,wr_drain_axis,wr_drain_time;
+bool weapon_drain_shader_ready(void){return wr_drain.id!=0 && wr_drain.id!=rlGetShaderIdDefault();}
+static void wr_init_drain(void){
+    const char *vs="#version 330\nin vec3 vertexPosition;in vec4 vertexColor;uniform mat4 mvp;out vec3 point;out vec4 tint;void main(){point=vertexPosition;tint=vertexColor;gl_Position=mvp*vec4(vertexPosition,1.0);}";
+    const char *fs="#version 330\nin vec3 point;in vec4 tint;uniform vec3 beamStart;uniform vec3 beamAxis;uniform float effectTime;out vec4 finalColor;void main(){float d=dot(point-beamStart,beamAxis);float pulse=pow(0.5+0.5*cos(d*12.0-effectTime*20.0),5.0);vec3 color=mix(tint.rgb,vec3(0.85,1.0,1.0),pulse*0.85);finalColor=vec4(color*(0.7+0.3*pulse),tint.a);}";
+    wr_drain=LoadShaderFromMemory(vs,fs);
+    wr_drain_start=GetShaderLocation(wr_drain,"beamStart");wr_drain_axis=GetShaderLocation(wr_drain,"beamAxis");wr_drain_time=GetShaderLocation(wr_drain,"effectTime");
+}
+void weapon_draw_drain(Vector3 start,Vector3 target,float now){
+    Vector3 axis=Vector3Normalize(Vector3Subtract(target,start));
+    target=Vector3Subtract(target,Vector3Scale(axis,.45f)); // Keep contact rings on the near surface.
+    bool shader=weapon_drain_shader_ready();
+    if(shader){SetShaderValue(wr_drain,wr_drain_start,&start,SHADER_UNIFORM_VEC3);SetShaderValue(wr_drain,wr_drain_axis,&axis,SHADER_UNIFORM_VEC3);SetShaderValue(wr_drain,wr_drain_time,&now,SHADER_UNIFORM_FLOAT);BeginShaderMode(wr_drain);}
+    DrawCylinderEx(start,target,.045f,.07f,10,(Color){60,235,215,255});
+    Vector3 right=Vector3Normalize(Vector3CrossProduct(axis,fabsf(axis.y)>.9f?(Vector3){1,0,0}:(Vector3){0,1,0}));
+    Vector3 up=Vector3CrossProduct(axis,right);
+    for(int n=0;n<3;n++){
+        Vector3 previous={0};
+        for(int k=0;k<=24;k++){
+            float angle=k*2*PI/24+now*(n%2?-2:2),radius=.25f+.06f*n;
+            Vector3 point=Vector3Add(target,Vector3Add(Vector3Scale(right,cosf(angle)*radius),Vector3Scale(up,sinf(angle)*radius)));
+            if(k>0 && k%8<6)DrawCylinderEx(previous,point,.018f,.018f,5,(Color){100,255,225,255});
+            previous=point;
+        }
+    }
+    if(shader)EndShaderMode();
+}
 
 static Vector3 wr_rotate(Vector3 p, float angle) {
     return (Vector3){p.x, p.y*cosf(angle)-p.z*sinf(angle), p.y*sinf(angle)+p.z*cosf(angle)};
@@ -272,11 +300,12 @@ bool weapon_renderer_init(void) {
     wr_time=GetShaderLocation(wr_shader,"effectTime");
     wr_launcher=GetShaderLocation(wr_shader,"launcher");
     wr_direction=GetShaderLocation(wr_blur,"direction");
-    wr_ready=true; return true;
+    wr_init_drain();wr_ready=true; return true;
 }
 
 void weapon_renderer_shutdown(void) {
     if (!wr_ready) return;
+    if(weapon_drain_shader_ready())UnloadShader(wr_drain);wr_drain=(Shader){0};
     for (int i=0;i<WR_PART_COUNT;++i) UnloadModel(wr_parts[i]);
     UnloadShader(wr_shader); UnloadShader(wr_blur);
     memset(wr_parts,0,sizeof(wr_parts)); wr_ready=false;

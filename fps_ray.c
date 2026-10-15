@@ -767,6 +767,8 @@ typedef struct {
     float matter_flash_timer;
     float exposed_flash_timer;
     bool tetherHolding;
+    int drainTarget; // Target slot + 1; zero means no drain lock.
+    bool netDrainVisualActive;
     bool goldTetherCharged;
     bool goldTetherHolding;
     bool netGoldTetherVisualActive;
@@ -10190,6 +10192,7 @@ static void kill_player(int player_index, int attacker_index,
     }
 }
 
+static bool tetherDrainDamage;
 static void apply_matter_damage(int player_index, int attacker_index, float damage)
 {
     if (player_index < 0 || player_index >= activePlayers) {
@@ -10221,7 +10224,7 @@ static void apply_matter_damage(int player_index, int attacker_index, float dama
     }
     player->matter = fmaxf(0.0f, player->matter - damage);
     player->matter_flash_timer = 0.2f;
-    play_sfx_at(SFX_IMPACT,player->pos,player_index,1,1);
+    if(!tetherDrainDamage)play_sfx_at(SFX_IMPACT,player->pos,player_index,1,1);
     if (player->matter <= 0.0f) {
         player->isExposed = true;
         enemySpecial[player_index].exposedAge=0;
@@ -15617,9 +15620,11 @@ static void acquire_tether_hit(int idx,int hit_id,Vector3 normal) {
     play_sfx_at(SFX_TETHER,p->pos,idx,1,1);
 }
 
+#include "tether_drain.inc"
 static void start_tether(int idx) {
     Player *p=&players[idx];VoxelHit hit;
-    if(p->respawn_timer>0 || p->tetherHolding)return;
+    if(p->respawn_timer>0 || p->tetherHolding || p->drainTarget)return;
+    if(start_tether_drain(idx))return;
     if(first_voxel_hit_detailed((Ray){p->pos,player_forward(p)},p->goldTetherCharged?GOLD_TETHER_RANGE:TETHER_RANGE,-1,false,&hit))
         acquire_tether_hit(idx,hit.id,hit.normal);
 }
@@ -15770,6 +15775,7 @@ static void prepare_tether_forces(void) {
 
 static void release_tether_velocity(int idx,const Vector3 *launch) {
     Player *p = &players[idx];
+    p->drainTarget=0;
     if (!p->tetherHolding) {
         return;
     }
@@ -17812,6 +17818,7 @@ static bool player_tether_visual_target(int player_index, Vector3 *out_target) {
         *out_target = p->netTetherVisualTarget;
         *out_target=world_image(*out_target,p->pos);return true;
     }
+    if(p->drainTarget>0 && p->drainTarget<=activePlayers){*out_target=world_image(players[p->drainTarget-1].pos,p->pos);return true;}
     if (!p->tetherHolding || !resolve_tether_voxel(p)) return false;
     if (p->tetherVoxel < 0 || p->tetherVoxel >= voxel_count) return false;
     if (p->goldTetherHolding) {
@@ -17933,6 +17940,9 @@ static void draw_player_tether_world(int player_index) {
         hand = player_weapon_pose(player_index, player_index == drawViewPlayerIndex).muzzle;
     }
     float tether_radius = 0.05f;
+    if(players[player_index].drainTarget || players[player_index].netDrainVisualActive){
+        weapon_draw_drain(hand,center,weaponFrameTime);return;
+    }
     bool gold = players[player_index].goldTetherHolding ||
                 players[player_index].netGoldTetherVisualActive;
     DrawCylinderEx(hand, center, tether_radius * 1.6f, tether_radius * 1.6f, 6,
@@ -19594,6 +19604,11 @@ static void net_write_player_state(NetWriter *writer, int slot) {
             visual.tether_z = voxels[p->tetherVoxel].pos.z;
         }
     }
+    if(p->drainTarget>0 && p->drainTarget<=activePlayers){
+        visual.flags|=NET_PLAYER_VISUAL_TETHER|NET_PLAYER_VISUAL_DRAIN;
+        Vector3 target=players[p->drainTarget-1].pos;
+        visual.tether_x=target.x;visual.tether_y=target.y;visual.tether_z=target.z;
+    }
     net_write_u8(writer, (uint8_t)slot);
     net_write_u32(writer, netLastProcessedInput[slot]);
     net_write_f32(writer, p->pos.x); net_write_f32(writer, p->pos.y); net_write_f32(writer, p->pos.z);
@@ -19656,6 +19671,7 @@ static void net_on_connect(NetTransport *transport, int slot, bool connected, vo
             if (!(owned & (1u << player_slot))) continue;
             netPlayerPresent[player_slot] = false;
             if(players[player_slot].tetherHolding)release_tether(player_slot);
+            players[player_slot].drainTarget=0;
             players[player_slot].respawn_timer=9999;
             netPlayerReady[player_slot] = false;
             netHasPendingInput[player_slot] = false;
@@ -19878,6 +19894,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
                 }
             }
             p->netTetherVisualActive = (state.visual.flags & NET_PLAYER_VISUAL_TETHER) != 0;
+            p->netDrainVisualActive = (state.visual.flags & NET_PLAYER_VISUAL_DRAIN) != 0;
             p->dynamicShotActive = (state.visual.flags & NET_PLAYER_VISUAL_POWERED_SHOT) != 0;
             p->goldTetherCharged = (state.flags & NET_PLAYER_STATE_GOLD_TETHER_CHARGED) != 0;
             weapon_visual_receive(&weaponVisuals[slot], state.visual.shot_sequence,
@@ -20472,12 +20489,15 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 Camera3D imageCam;if(!periodic_camera(cams[i],image,&imageCam))continue;
                 BeginMode3D(imageCam);
                 draw_pickup_models(imageCam,WEAPON_EMISSION);
+                drawViewPlayerIndex=i;
                 for (int p = 0; p < activePlayers; ++p) {
+                    if(players[p].drainTarget || players[p].netDrainVisualActive)draw_player_tether_world(p);
                     if (p != i && periodic_visible(players[p].pos,3)) {
                         if(player_uses_rat(p) && (players[p].respawn_timer<=0 || characterSamples[p].downed)) draw_rat_world(p,true);
                         draw_player_weapon(p, imageCam.position, false, WEAPON_EMISSION);
                     }
                 }
+                drawViewPlayerIndex=-1;
                 EndMode3D();
                 }
                 periodic_fog(weaponBlooms[view].emission,cams[i],true,screens[view].depth);
@@ -22397,6 +22417,7 @@ int main(int argc, char **argv) {
         // }
         update_projectiles(dt);
         update_pickups(dt); // Update pickups
+        update_tether_drains(dt);
         prepare_tether_forces();
         wake_sleeping_voxels_near_awake();
         rebuild_static_hash_if_dirty();
