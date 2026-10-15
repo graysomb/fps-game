@@ -819,14 +819,19 @@ preview resynchronization and the authoritative terrain commit over loopback ENe
 
 ### Cellular voxel surfaces
 
-Solid voxel faces share four GPU-simulated Maze-rule (B3/S12345) patterns, updated
-at 12 Hz in a 256x256 atlas. Local face coordinates keep the pattern attached when
+Solid voxel faces share four GPU-simulated second-order binary patterns, updated
+at 20 Hz in a 256x256 atlas. The rule uses each cell's previous state as well as
+its current neighborhood, with short fading activity trails. It follows the default
+rule in https://xcont.com/cell/single_2nd.js. Each cube gets an atlas offset and
+rotation from its original grid position; remote dynamic proxies use their stable
+network identity. Local face coordinates keep the pattern attached when
 voxels activate or rotate; static greedy meshes are not rebuilt for animation.
 Material colors and black outlines remain intact, and fine patterns fade with
 screen-space distance. Patterns are cosmetic and not synchronized over LAN.
 Use `--no-voxel-ca` for the original plain surfaces. Shader/resource failures fall
 back automatically; `FPS_VOXEL_CA_FALLBACK=1` exercises that fallback explicitly.
 `tests/voxel_ca_test.c` compares GPU steps against a CPU reference, checks update
-limits and resource reinitialization, exports animation frames, and measures
-one/four-view rendering. The chunk-mesh regression checks static/dynamic visual
-continuity with the simulation held fixed.
+limits, sustained activity and resource reinitialization, exports eight seconds of
+animation frames, and measures one/four-view rendering. The chunk-mesh regression
+checks static/dynamic visual continuity and rotated sleeping cubes with the
+simulation held fixed.

@@ -20,6 +20,7 @@ out vec2 fragTexCoord;
 out vec4 fragColor;
 out vec3 caCoord;
 out vec3 caFace;
+flat out uint caKey;
 out vec3 fragNormal;
 
 void main()
@@ -50,6 +51,7 @@ void main()
     fragPosition = worldPos.xyz;
     fragTexCoord = vertexTexCoord;
     fragColor = color;
+    caKey = uint(round(instanceTransform[3][3]));
     caCoord = vertexPosition + vec3(0.5);
     caFace = vertexNormal;
     

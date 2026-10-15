@@ -1,10 +1,10 @@
 /* Shared, purely cosmetic CA. Update only outside a viewport/3D render pass. */
 #define VOXEL_CA_SIZE 256
-#define VOXEL_CA_STEP (1.0/12.0)
+#define VOXEL_CA_STEP (1.0/20.0)
 static RenderTexture2D voxelCaTargets[2];
 static Shader voxelCaStepShader;
 static bool voxelCaReady,voxelCaAttempted;
-static int voxelCaCurrent,voxelCaStepLoc,voxelCaSourceLoc;
+static int voxelCaCurrent,voxelCaSourceLoc;
 static unsigned voxelCaGeneration;
 static double voxelCaLastTime,voxelCaAccumulator;
 static float voxelCaBlend=1;
@@ -36,15 +36,15 @@ static bool voxel_ca_init(void) {
         if(!seed.data)goto failed;
         Color *cells=seed.data;
         for(unsigned i=0;i<VOXEL_CA_SIZE*VOXEL_CA_SIZE;i++) {
-            unsigned char v=voxel_ca_hash(i+0x1327u)%100<30?255:0;
-            cells[i]=(Color){v,v,0,255};
+            unsigned char current=(voxel_ca_hash(i+0x1327u)&1u)*255;
+            unsigned char previous=(voxel_ca_hash(i+0x937bu)&1u)*255;
+            cells[i]=(Color){current,previous,0,255};
         }
         for(int i=0;i<2;i++)UpdateTexture(voxelCaTargets[i].texture,seed.data);
         UnloadImage(seed);
     }
-    voxelCaStepLoc=GetShaderLocation(voxelCaStepShader,"generation");
     voxelCaSourceLoc=GetShaderLocation(voxelCaStepShader,"previousState");
-    if(voxelCaStepLoc<0 || voxelCaSourceLoc<0)goto failed;
+    if(voxelCaSourceLoc<0)goto failed;
     voxelCaLastTime=GetTime();voxelCaReady=true;return true;
 failed:
     voxel_ca_shutdown();voxelCaAttempted=true;
@@ -52,10 +52,9 @@ failed:
 }
 static void voxel_ca_step(void) {
     if(!voxelCaReady)return;
-    int next=1-voxelCaCurrent,generation=(int)voxelCaGeneration;
+    int next=1-voxelCaCurrent;
     BeginTextureMode(voxelCaTargets[next]);
     BeginShaderMode(voxelCaStepShader);
-    SetShaderValue(voxelCaStepShader,voxelCaStepLoc,&generation,SHADER_UNIFORM_INT);
     SetShaderValueTexture(voxelCaStepShader,voxelCaSourceLoc,voxelCaTargets[voxelCaCurrent].texture);
     DrawRectangle(0,0,VOXEL_CA_SIZE,VOXEL_CA_SIZE,WHITE);
     EndShaderMode();EndTextureMode();

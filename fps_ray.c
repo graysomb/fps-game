@@ -17183,6 +17183,11 @@ static void prepare_shard_transforms(void) {
     }
 }
 
+// Exact 24-bit integer transport in the unused homogeneous instance component.
+// Match voxelPatternKey in voxel_simple.frag; original grid coordinates survive motion.
+static float voxel_pattern_key(int x,int y,int z) {
+    return (float)(((uint32_t)x*73856093u ^ (uint32_t)y*19349663u ^ (uint32_t)z*83492791u)&0xffffffu);
+}
 static void prepare_dynamic_voxel_transforms(void) {
     if (dynamic_transforms_cached_frame == voxel_render_frame && voxel_render_frame > 0) {
         return;
@@ -17261,7 +17266,7 @@ static void prepare_dynamic_voxel_transforms(void) {
             t->v[12] = center.x;
             t->v[13] = center.y;
             t->v[14] = center.z;
-            t->v[15] = 1.0f;
+            t->v[15] = voxel_pattern_key(v->orig_min_gx,v->orig_min_gy,v->orig_min_gz);
         }
     }
 
@@ -17287,7 +17292,8 @@ static void prepare_dynamic_voxel_transforms(void) {
             t->v[12] = proxy->center.x;
             t->v[13] = proxy->center.y;
             t->v[14] = proxy->center.z;
-            t->v[15] = 1.0f;
+            // Remote cosmetic identity stays stable across pose updates.
+            t->v[15] = (float)(net_identity_hash(proxy->identity)&0xffffffu);
         }
     }
 }

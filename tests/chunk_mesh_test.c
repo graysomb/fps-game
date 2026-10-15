@@ -18,9 +18,9 @@ static void check_voxel_appearance(void) {
             add_static_voxel_at_grid(x,y,z,color,0);
         Camera3D cam={v_add((Vector3){0,1.25f,.25f},offsets[view]),{0,1.25f,.25f},
             view==4 || view==5?(Vector3){0,0,1}:(Vector3){0,1,0},4,CAMERA_ORTHOGRAPHIC};
-        Image images[2];
-        for(int dynamic=0;dynamic<2;dynamic++) {
-            if(dynamic) {
+        Image images[3];
+        for(int dynamic=0;dynamic<3;dynamic++) {
+            if(dynamic==1) {
                 // Tether activation is budgeted; activate the remaining groups
                 // without advancing physics until the whole fixture is dynamic.
                 for(int batch=0;batch<54;batch++) {
@@ -30,18 +30,48 @@ static void check_voxel_appearance(void) {
                 }
                 for(int i=0;i<voxel_count;i++)assert(voxels[i].simulate);
             }
+            if(dynamic==2) {
+                // Rotate the object and camera together: the image should stay
+                // unchanged if pattern coordinates are truly attached to the cube.
+                Matrix rotation=MatrixRotateY(.67f);Vector3 pivot=cam.target;
+                bool rotatedParticle[MAX_PARTICLES]={0};
+                for(int i=0;i<voxel_count;i++) {
+                    voxels[i].sleeping=true;
+                    for(int k=0;k<8;k++) {
+                        Particle *p=voxels[i].particles[k];int index=(int)(p-particles_pool);
+                        // Adjacent cubes share structural corner particles.
+                        if(!rotatedParticle[index])p->pos=v_add(pivot,Vector3Transform(v_sub(p->pos,pivot),rotation));
+                        rotatedParticle[index]=true;
+                    }
+                }
+                cam.position=v_add(pivot,Vector3Transform(v_sub(cam.position,pivot),rotation));
+                cam.up=Vector3Transform(cam.up,rotation);
+            }
             voxel_render_frame++;BeginTextureMode(target);ClearBackground((Color){30,35,40,255});BeginMode3D(cam);
             rlDisableBackfaceCulling();
             DrawVoxels(cam);
             rlEnableBackfaceCulling();EndMode3D();EndTextureMode();
             images[dynamic]=LoadImageFromTexture(target.texture);ImageFlipVertical(&images[dynamic]);
-            if(view==0)ExportImage(images[dynamic],dynamic?"artifacts/voxel-edges-dynamic.png":"artifacts/voxel-edges-static.png");
+            if(view==0 && dynamic<2)ExportImage(images[dynamic],dynamic?"artifacts/voxel-edges-dynamic.png":"artifacts/voxel-edges-static.png");
         }
         Color *a=LoadImageColors(images[0]),*b=LoadImageColors(images[1]);int different=0;
+        if(view==6 && voxelCaReady) {
+            // Front orthographic view: adjacent half-unit cubes are 45 pixels apart.
+            // Equal colors/faces must no longer repeat the same CA patch.
+            int varied=0;
+            for(int y=125;y<145;y++)for(int x=195;x<225;x++)
+                if(abs(a[y*640+x].r-a[y*640+x+45].r)>3)varied++;
+            assert(varied>30);
+        }
         for(int i=0;i<640*360;i++)if(abs(a[i].r-b[i].r)>3 || abs(a[i].g-b[i].g)>3 || abs(a[i].b-b[i].b)>3)different++;
         fprintf(stderr,"Voxel appearance view %d: %.4f%% differing pixels\n",view,100.0*different/(640*360));
         // Triangle rasterization can disagree at a handful of silhouette pixels.
         assert(different<640*360/100);
+        Color *rotated=LoadImageColors(images[2]);different=0;
+        for(int i=0;i<640*360;i++)if(abs(b[i].r-rotated[i].r)>3 || abs(b[i].g-rotated[i].g)>3 || abs(b[i].b-rotated[i].b)>3)different++;
+        fprintf(stderr,"Rotated sleeping voxel view %d: %.4f%% differing pixels\n",view,100.0*different/(640*360));
+        assert(different<640*360/100);
+        UnloadImageColors(rotated);UnloadImage(images[2]);
         UnloadImageColors(a);UnloadImageColors(b);UnloadImage(images[0]);UnloadImage(images[1]);
     }
     UnloadRenderTexture(target);
