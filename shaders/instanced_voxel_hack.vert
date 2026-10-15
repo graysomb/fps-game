@@ -18,6 +18,8 @@ uniform mat4 matProjection;
 out vec3 fragPosition;
 out vec2 fragTexCoord;
 out vec4 fragColor;
+out vec3 caCoord;
+out vec3 caFace;
 out vec3 fragNormal;
 
 void main()
@@ -48,6 +50,8 @@ void main()
     fragPosition = worldPos.xyz;
     fragTexCoord = vertexTexCoord;
     fragColor = color;
+    caCoord = vertexPosition + vec3(0.5);
+    caFace = vertexNormal;
     
     // Normal transform (using the 3x3 submatrix)
     fragNormal = normalize((cleanTransform * vec4(vertexNormal, 0.0)).xyz);

@@ -816,3 +816,17 @@ both CPU and GPU variants of the validation script.
 capacity, preview depth and multipart network messages. Set `FPS_REGEN_SHADER_FALLBACK=1`
 to exercise the translucent fallback. `tests/combat_clarity_lan.c` additionally checks
 preview resynchronization and the authoritative terrain commit over loopback ENet.
+
+### Cellular voxel surfaces
+
+Solid voxel faces share four GPU-simulated Maze-rule (B3/S12345) patterns, updated
+at 12 Hz in a 256x256 atlas. Local face coordinates keep the pattern attached when
+voxels activate or rotate; static greedy meshes are not rebuilt for animation.
+Material colors and black outlines remain intact, and fine patterns fade with
+screen-space distance. Patterns are cosmetic and not synchronized over LAN.
+Use `--no-voxel-ca` for the original plain surfaces. Shader/resource failures fall
+back automatically; `FPS_VOXEL_CA_FALLBACK=1` exercises that fallback explicitly.
+`tests/voxel_ca_test.c` compares GPU steps against a CPU reference, checks update
+limits and resource reinitialization, exports animation frames, and measures
+one/four-view rendering. The chunk-mesh regression checks static/dynamic visual
+continuity with the simulation held fixed.

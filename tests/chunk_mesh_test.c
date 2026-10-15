@@ -6,6 +6,9 @@
 /* Compare the two real shaders at identical cube positions, before simulation
  * can move or deform the activated representation. */
 static void check_voxel_appearance(void) {
+    assert(voxel_ca_init() == (getenv("FPS_VOXEL_CA_FALLBACK")==NULL));
+    for(int i=0;i<24;i++)voxel_ca_step();
+    voxelCaBlend=1; // Hold simulation time fixed across both representations.
     Color color={150,175,200,255};
     const Vector3 offsets[]={{6,3,6},{-6,3,-6},{6,0,0},{-6,0,0},{0,6,0},{0,-6,0},{0,0,6},{0,0,-6}};
     RenderTexture2D target=LoadRenderTexture(640,360);
@@ -42,6 +45,7 @@ static void check_voxel_appearance(void) {
         UnloadImageColors(a);UnloadImageColors(b);UnloadImage(images[0]);UnloadImage(images[1]);
     }
     UnloadRenderTexture(target);
+    voxel_ca_shutdown();
 }
 static void check_mesh_faces(void) {
     static unsigned char seen[MAX_VOXELS];memset(seen,0,sizeof(seen));

@@ -32,6 +32,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Chunk mesh build failed' }
     & ".build/chunk_mesh_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Chunk mesh regression failed' }
+    & gcc tests/voxel_ca_test.c @sources @flags -o ".build/voxel_ca_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Voxel CA build failed' }
+    & ".build/voxel_ca_$variant.exe" "--physics=$backend"
+    if ($LASTEXITCODE -ne 0) { throw 'Voxel CA regression failed' }
     & gcc tests/chunk_regeneration_test.c @sources @flags -o ".build/chunk_regeneration_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Chunk regeneration build failed' }
     & ".build/chunk_regeneration_$variant.exe"

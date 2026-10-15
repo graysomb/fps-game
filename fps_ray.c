@@ -163,6 +163,7 @@ static int physicsSmokeVoxels = 2;
 static int physicsSmokeBatchSize = 1;
 static bool tetherThrowCcdEnabled = true;
 static bool weaponBloomEnabled = true;
+static bool voxelCaEnabled = true;
 static bool aiSmokeTestRequested = false;
 static const char *enemyLabRequested=NULL,*enemySmokeRequested=NULL;
 
@@ -220,6 +221,7 @@ static bool parse_physics_arguments(int argc, char **argv) {
         const char *arg = argv[i];
         if(strncmp(arg,"--enemy-lab=",12)==0) {enemyLabRequested=arg+12;continue;}
         if(strncmp(arg,"--enemy-smoke=",14)==0) {enemySmokeRequested=arg+14;continue;}
+        if (strcmp(arg, "--no-voxel-ca") == 0) { voxelCaEnabled=false;continue; }
         if (strcmp(arg, "--no-weapon-bloom") == 0) {
             weaponBloomEnabled = false;
             continue;
@@ -16454,6 +16456,8 @@ static void DrawParticlesInstancedFast(Mesh mesh, Material material, const Vecto
     rlDisableShader();
 }
 
+#include "voxel_ca.inc"
+
 static unsigned int voxelInstanceVboId = 0;
 static uint64_t voxel_transforms_vbo_cached_frame = 0;
 
@@ -16519,6 +16523,8 @@ static void InitInstancing(void) {
 static void DrawVoxelsInstancedFast(Mesh mesh, Material material, const float16 *transforms, int count) {
     if (count <= 0 || mesh.vaoId == 0 || voxelInstanceVboId == 0) return;
 
+    voxel_ca_bind(material.shader);
+    rlActiveTextureSlot(0);rlEnableTexture(voxel_ca_texture().id);
     rlEnableShader(material.shader.id);
 
     Matrix matView = rlGetMatrixModelview();
@@ -17302,6 +17308,8 @@ static void DrawVoxels(Camera3D cam) {
         greedyMaterialInit = true;
     }
 
+    voxel_ca_bind(greedyMaterial.shader);
+    greedyMaterial.maps[MATERIAL_MAP_DIFFUSE].texture=voxel_ca_texture();
     rlDisableBackfaceCulling();
 
     Matrix matView = rlGetMatrixModelview();
@@ -17604,6 +17612,7 @@ static void draw_world_surfaces(void) {
 }
 
 static void shutdown_world_visuals(void) {
+    voxel_ca_shutdown();
     if (!worldVisualsReady) {
         return;
     }
@@ -20962,6 +20971,7 @@ int main(int argc, char **argv) {
             voxelInstanceVboId = 0;
         }
         if (greedyMaterialInit) {
+            greedyMaterial.maps[MATERIAL_MAP_DIFFUSE].texture=(Texture2D){0};
             UnloadMaterial(greedyMaterial);
             greedyMaterialInit = false;
         }
@@ -20975,12 +20985,14 @@ int main(int argc, char **argv) {
 
     weaponRenderingReady = weapon_renderer_init();
     character_renderer_init();
+    voxel_ca_init();
     // main loop
     while (!WindowShouldClose()) {
 #if defined(__APPLE__)
         macos_gamepad_poll();
 #endif
         update_game_music();
+        voxel_ca_update(GetTime());
         voxel_render_frame++;
         if (netTransport.role != NET_ROLE_OFFLINE) {
             net_transport_pump(&netTransport, net_on_receive, net_on_connect, NULL);
@@ -22440,6 +22452,7 @@ int main(int argc, char **argv) {
         voxelInstanceVboId = 0;
     }
     if (greedyMaterialInit) {
+        greedyMaterial.maps[MATERIAL_MAP_DIFFUSE].texture=(Texture2D){0};
         UnloadMaterial(greedyMaterial);
         greedyMaterialInit = false;
     }
