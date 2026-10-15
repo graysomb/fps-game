@@ -44,6 +44,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Chunk regeneration build failed' }
     & ".build/chunk_regeneration_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Chunk regeneration regression failed' }
+    & gcc tests/night_sky_test.c @sources @flags -o ".build/night_sky_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Night sky build failed' }
+    & ".build/night_sky_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Night sky regression failed' }
     & gcc tests/periodic_world_test.c @sources @flags -o ".build/periodic_world_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Periodic world build failed' }
     & ".build/periodic_world_$variant.exe" "--physics=$backend"

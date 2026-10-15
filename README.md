@@ -872,7 +872,15 @@ glue loops spanning an entire world circumference are rejected.
 
 Nearby images reuse the same meshes and simulation, with frustum/range culling.
 Gray-blue fog fades from 24 to 56 world units, with distant factory silhouettes
-drawn as sky scenery. The first-person weapon and HUD remain clear. Set
+drawn as sky scenery. The original generated space texture (glowing stars, blue nebulae and spiral
+galaxies) spans the sky on all maps, drawn
+once per viewport and anchored to viewing direction rather than player position.
+It shares the cached texture with the original bounded-map ceiling.
+The original fog bank and megastructure silhouettes stay visible around the
+horizon, gradually giving way to stars high overhead. Stars remain continuous
+across periodic boundaries;
+the existing depth-aware fog still hides distant terrain. The first-person weapon
+and HUD remain clear. Set
 `FPS_BOUNDED_WORLD=1` before launching to restore the bounded arenas for comparison.
 LAN protocol 11 sends topology with the world; host and client need matching builds.
 
@@ -882,3 +890,6 @@ grenades, connected islands, non-aligned chunk ownership and destructive stress.
 It exports center/edge/corner images and one/four-player previews to `artifacts/`,
 and reports bounded/periodic render timings. Metal has matching compute code;
 runtime validation requires macOS hardware.
+
+`tests/night_sky_test.c` checks shader loading, visible stars at full/split viewport
+sizes, translation invariance and cleanup, and captures both fogged arenas.

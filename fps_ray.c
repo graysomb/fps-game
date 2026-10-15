@@ -17724,6 +17724,12 @@ static void init_world_visuals(void) {
     worldVisualsReady = true;
 }
 
+// Share the original generated stars, nebulae and galaxies with the distant sky.
+static Texture2D generated_space_texture(void) {
+    init_world_visuals();
+    return worldSpaceTexture;
+}
+
 static void draw_world_surfaces(void) {
     init_world_visuals();
     float scale=FLOOR_SIZE/worldVisualsHalfSize;

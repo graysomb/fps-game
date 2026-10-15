@@ -1,5 +1,6 @@
 /* Shared post-process and bounded periodic camera images. No simulation copies. */
-static Shader periodicFogShader;
+static Shader periodicFogShader,nightSkyShader;
+static Texture2D generated_space_texture(void);
 static RenderTexture2D periodicFogScratch,periodicIntroScene;
 static const Color periodicSky={151,170,181,255};
 static Camera3D periodicViewCamera;
@@ -45,6 +46,8 @@ static void periodic_visuals_shutdown(void) {
     periodicIntroScene=(RenderTexture2D){0};
     if(periodicFogScratch.id)UnloadRenderTexture(periodicFogScratch);
     if(periodicFogShader.id && periodicFogShader.id!=rlGetShaderIdDefault())UnloadShader(periodicFogShader);
+    if(nightSkyShader.id && nightSkyShader.id!=rlGetShaderIdDefault())UnloadShader(nightSkyShader);
+    nightSkyShader=(Shader){0};
     periodicFogScratch=(RenderTexture2D){0};periodicFogShader=(Shader){0};
 }
 static void periodic_fullscreen(Texture2D t,int w,int h) {
@@ -87,6 +90,27 @@ static bool periodic_camera(Camera3D camera,int image,Camera3D *result) {
     return visible;
 }
 static void periodic_skyline(Camera3D camera) {
+    // One sky per viewport, before periodic world images. Direction only: no
+    // parallax, tile repetition or discontinuity when the player wraps.
+    if(!nightSkyShader.id)nightSkyShader=LoadShader(NULL,"shaders/night_sky.frag");
+    if(nightSkyShader.id!=rlGetShaderIdDefault() && nightSkyShader.id) {
+        int w=rlGetFramebufferWidth(),h=rlGetFramebufferHeight();
+        Vector3 forward=Vector3Normalize(Vector3Subtract(camera.target,camera.position));
+        Vector3 right=Vector3Normalize(Vector3CrossProduct(forward,camera.up));
+        Vector3 up=Vector3CrossProduct(right,forward);
+        Vector4 viewport={(float)w,(float)h,tanf(camera.fovy*DEG2RAD*.5f),(float)w/h};
+        Vector3 haze={periodicSky.r/255.f,periodicSky.g/255.f,periodicSky.b/255.f};
+        SetShaderValue(nightSkyShader,GetShaderLocation(nightSkyShader,"viewForward"),&forward,SHADER_UNIFORM_VEC3);
+        SetShaderValue(nightSkyShader,GetShaderLocation(nightSkyShader,"viewRight"),&right,SHADER_UNIFORM_VEC3);
+        SetShaderValue(nightSkyShader,GetShaderLocation(nightSkyShader,"viewUp"),&up,SHADER_UNIFORM_VEC3);
+        SetShaderValue(nightSkyShader,GetShaderLocation(nightSkyShader,"viewport"),&viewport,SHADER_UNIFORM_VEC4);
+        SetShaderValue(nightSkyShader,GetShaderLocation(nightSkyShader,"hazeColor"),&haze,SHADER_UNIFORM_VEC3);
+        Texture2D space=generated_space_texture();
+        rlDisableDepthMask();BeginShaderMode(nightSkyShader);
+        SetShaderValueTexture(nightSkyShader,GetShaderLocation(nightSkyShader,"spaceTexture"),space);
+        DrawRectangle(0,0,w,h,WHITE);EndShaderMode();
+        rlDrawRenderBatchActive();rlEnableDepthMask();
+    }
     if(!worldPeriodic)return;
     // Sky geometry follows translation but retains world orientation, like a skybox.
     BeginMode3D(camera);rlDisableDepthMask();
