@@ -52,7 +52,7 @@ static int cache_chunk_find(int x,int y,int z,bool create) {
     if(staticCacheChunkCount==STATIC_CACHE_CHUNKS){staticCacheOverflow=true;return -1;}
     int i=staticCacheChunkCount++;staticCacheChunks[i]=(StaticCacheChunk){.x=x,.y=y,.z=z,.patchesDirty=true,.dataDirty=true};return i;
 }
-static void static_cache_dirty_bounds(int minx,int maxx,int miny,int maxy,int minz,int maxz) {
+static void static_cache_dirty_bounds_local(int minx,int maxx,int miny,int maxy,int minz,int maxz) {
     if(!staticCacheReady || staticCacheSuppressEdits)return;
     ++staticCacheMutationSerial;
     for(int z=grid_to_chunk_coord(minz-1);z<=grid_to_chunk_coord(maxz+1);z++)
@@ -60,6 +60,16 @@ static void static_cache_dirty_bounds(int minx,int maxx,int miny,int maxy,int mi
     for(int x=grid_to_chunk_coord(minx-1);x<=grid_to_chunk_coord(maxx+1);x++){
         int c=cache_chunk_find(x,y,z,true);if(c>=0)staticCacheChunks[c].patchesDirty=true;
     }
+}
+static void static_cache_dirty_bounds(int minx,int maxx,int miny,int maxy,int minz,int maxz) {
+    static_cache_dirty_bounds_local(minx,maxx,miny,maxy,minz,maxz);
+    if(!worldPeriodic || !staticCacheReady || staticCacheSuppressEdits)return;
+    int half=(int)lroundf(FLOOR_SIZE/VOXEL_SIZE),period=2*half;
+    // Only seam-touching edits have counterpart chunks. Avoid creating empty remote chunks.
+    if(minx<=-half)static_cache_dirty_bounds_local(minx+period,maxx+period,miny,maxy,minz,maxz);
+    if(maxx>=half-1)static_cache_dirty_bounds_local(minx-period,maxx-period,miny,maxy,minz,maxz);
+    if(minz<=-half)static_cache_dirty_bounds_local(minx,maxx,miny,maxy,minz+period,maxz+period);
+    if(maxz>=half-1)static_cache_dirty_bounds_local(minx,maxx,miny,maxy,minz-period,maxz-period);
 }
 static void static_cache_reset(void) {
     staticCacheReady=false;staticCacheOverflow=false;staticCacheForceRebuild=false;staticCacheChunkCount=0;

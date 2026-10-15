@@ -98,6 +98,20 @@ uint voxelParticle(VoxelState v, int corner) {
     return (corner < 4) ? v.particle_0_3[corner] : v.particle_4_7[corner - 4];
 }
 
+// Negative floor size enables horizontal periodic topology without changing the ABI.
+vec3 periodicDelta(vec3 d) {
+    if(uFloorSize<0.0)d.xz-=floor((d.xz-uFloorSize)/(-2.0*uFloorSize))*(-2.0*uFloorSize);
+    return d;
+}
+ivec3 periodicCell(ivec3 c) {
+    if(uFloorSize<0.0){int h=int(round(-uFloorSize/uVoxelSize)),n=2*h;c.x=((c.x+h)%n+n)%n-h;c.z=((c.z+h)%n+n)%n-h;}
+    return c;
+}
+StaticCollider periodicCollider(StaticCollider b,vec3 pos) {
+    vec3 center=(b.bounds_min.xyz+b.bounds_max.xyz)*0.5;
+    vec3 shift=pos+periodicDelta(center-pos)-center;
+    b.bounds_min.xyz+=shift;b.bounds_max.xyz+=shift;return b;
+}
 uint hashCoord(ivec3 c, int size) {
     uint h = uint(c.x) * 73856093u;
     h ^= uint(c.y) * 19349663u;
@@ -173,7 +187,7 @@ void buildHash(uint gid) {
     uint id = simId[uint(gpuControl.z) + gid];
     if (particleRefcount[id] <= 0) return;
     ivec3 c = ivec3(floor(particle[id].predicted_base_inv_mass.xyz / uVoxelSize));
-    cell[id].xyz = c;
+    c=periodicCell(c);cell[id].xyz = c;
     uint h = hashCoord(c, uHashSize);
     hashNext[gid] = atomicExchange(hashHead[h], int(gid));
 }
@@ -192,8 +206,8 @@ void pairCollisions(uint gid) {
     for (int playerIndex = 0; playerIndex < uActivePlayers && playerIndex < 16; ++playerIndex) {
         if (uPlayerPosHalf[playerIndex].w < 0.0) continue;
         vec3 halfSize = uPlayerExtents[playerIndex].xyz;
-        vec3 nearest = clamp(scenePos, uPlayerPosHalf[playerIndex].xyz - vec3(halfSize),
-                                      uPlayerPosHalf[playerIndex].xyz + vec3(halfSize));
+        vec3 playerImage=scenePos+periodicDelta(uPlayerPosHalf[playerIndex].xyz-scenePos);
+        vec3 nearest=clamp(scenePos,playerImage-halfSize,playerImage+halfSize);
         vec3 sceneDelta = scenePos - nearest;
         float sceneDistSq = dot(sceneDelta, sceneDelta);
         if (sceneDistSq < sceneRadius * sceneRadius) {
@@ -211,7 +225,7 @@ void pairCollisions(uint gid) {
             for (int dx = -1; dx <= 1; ++dx) {
                 if (dz < 0 || (dz == 0 && dy < 0) ||
                     (dz == 0 && dy == 0 && dx < 0)) continue;
-                ivec3 nc = ac + ivec3(dx, dy, dz);
+                ivec3 nc = periodicCell(ac + ivec3(dx, dy, dz));
                 int item = hashHead[hashCoord(nc, uHashSize)];
                 int traversed = 0;
                 while (item >= 0 && item < int(dispatchArgs[8]) && traversed < int(dispatchArgs[8])) {
@@ -234,7 +248,7 @@ void pairCollisions(uint gid) {
                             }
                             float wb = b.prev_inv_mass.w;
                             float wsum = wa + wb;
-                            vec3 delta = a.predicted_base_inv_mass.xyz - b.predicted_base_inv_mass.xyz;
+                            vec3 delta = periodicDelta(a.predicted_base_inv_mass.xyz - b.predicted_base_inv_mass.xyz);
                             float distSq = dot(delta, delta);
                             float target = a.pos_radius.w + b.pos_radius.w;
                             if (wsum > 0.0 && distSq < target * target) {
@@ -330,6 +344,7 @@ void solveVgs(uint gid) {
 }
 
 int findStaticCell(ivec3 coord) {
+    coord=periodicCell(coord);
     uint h = hashCoord(coord, uStaticHashSize);
     for (int probe = 0; probe < uStaticHashSize; ++probe) {
         ivec4 entry = staticCell[h];
@@ -341,6 +356,7 @@ int findStaticCell(ivec3 coord) {
 }
 
 vec3 pushOutOfBox(vec3 pos, float radius, StaticCollider box) {
+    box=periodicCollider(box,pos);
     vec3 bmin = box.bounds_min.xyz;
     vec3 bmax = box.bounds_max.xyz;
     bool inside = all(greaterThanEqual(pos, bmin)) && all(lessThanEqual(pos, bmax));
@@ -381,6 +397,7 @@ vec3 pushOutOfBox(vec3 pos, float radius, StaticCollider box) {
 }
 
 vec3 pushOutOfPatch(vec3 pos, float radius, StaticCollider surfacePatch, bool edges) {
+    surfacePatch=periodicCollider(surfacePatch,pos);
     vec3 closest = clamp(pos, surfacePatch.bounds_min.xyz, surfacePatch.bounds_max.xyz);
     vec3 normal = surfacePatch.center.xyz;
     vec3 delta = pos - closest;
@@ -407,19 +424,19 @@ void staticCollisions(uint gid) {
     if (p.prev_inv_mass.w <= 0.0) return;
     float radius = p.pos_radius.w;
     vec3 pos = p.predicted_base_inv_mass.xyz;
-    float terrainLimit = uFloorSize - radius;
+    float terrainLimit = abs(uFloorSize) - radius;
     float floorLimit = max(0.0, 0.5 * uVoxelSize - radius);
     bool floorContact = pos.y < floorLimit;
     pos.y = max(pos.y, floorLimit);
     if (floorContact) p.prev_inv_mass.xz = pos.xz -
         (pos.xz - p.prev_inv_mass.xz) * 0.05;
-    pos.xz = clamp(pos.xz, vec2(-terrainLimit), vec2(terrainLimit));
+    if(uFloorSize>=0.0)pos.xz = clamp(pos.xz, vec2(-terrainLimit), vec2(terrainLimit));
     const float eps = 1e-6;
     for (int i = 0; i < uActivePlayers && i < 16; ++i) {
         if (uPlayerPosHalf[i].w < 0.0) continue;
         vec3 halfSize = uPlayerExtents[i].xyz;
-        vec3 nearest = clamp(pos, uPlayerPosHalf[i].xyz - vec3(halfSize),
-                                  uPlayerPosHalf[i].xyz + vec3(halfSize));
+        vec3 playerImage=pos+periodicDelta(uPlayerPosHalf[i].xyz-pos);
+        vec3 nearest=clamp(pos,playerImage-halfSize,playerImage+halfSize);
         vec3 delta = pos - nearest;
         float distSq = dot(delta, delta);
         if (distSq < radius * radius) {
@@ -660,10 +677,24 @@ void finalizeVoxel(uint gid) {
     v.pos_rest_edge.xyz=centerPos; voxel[gid]=v;
 }
 
+void wrapGather(uint gid) {
+    if(gid>=uint(gpuControl.y))return;
+    uint id=simId[gid],anchor=uint(round(particle[id].velocity.w));
+    vec3 p=particle[anchor].pos_radius.xyz;
+    correction[id]=uvec4(floatBitsToUint(periodicDelta(p)-p),0u);
+}
+void wrapApply(uint gid) {
+    if(gid>=uint(gpuControl.y))return;
+    uint id=simId[gid];vec3 shift=uintBitsToFloat(correction[id].xyz);
+    particle[id].pos_radius.xyz+=shift;particle[id].prev_inv_mass.xyz+=shift;
+    particle[id].predicted_base_inv_mass.xyz+=shift;
+}
 void main() {
     uint gid=gl_GlobalInvocationID.x;
     if (uParticleCount < 0 || uSimCount < 0) return;
-    if (uMode==MODE_RESET) resetCorrections(gid);
+    if (uMode==17) wrapGather(gid);
+    else if (uMode==18) wrapApply(gid);
+    else if (uMode==MODE_RESET) resetCorrections(gid);
     else if (uMode==MODE_INTEGRATE) integrateParticle(gid);
     else if (uMode==MODE_HASH_CLEAR) clearHash(gid);
     else if (uMode==MODE_HASH_BUILD) buildHash(gid);

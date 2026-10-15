@@ -573,6 +573,17 @@ static bool gpu_pack_world(void) {
             }
         }
     }
+    // velocity.w carries a stable compact particle anchor for each connected island.
+    static int periodicAnchor[MAX_VOXELS];
+    for(int i=0;i<voxel_count;i++)periodicAnchor[i]=-1;
+    for(int id=0;id<gpuPhysics.compact_count;id++) {
+        int g=gpuPhysics.compact_to_particle[id]->collision_group;
+        if(g>=0 && g<voxel_count && (periodicAnchor[g]<0 || gpuPhysics.compact_to_particle[id]->inv_mass==0))periodicAnchor[g]=id;
+    }
+    for(int id=0;id<gpuPhysics.compact_count;id++) {
+        int g=gpuPhysics.compact_to_particle[id]->collision_group;
+        gpuPhysics.particle_stage[id].velocity[3]=(float)(g>=0 && g<voxel_count?periodicAnchor[g]:id);
+    }
     return true;
 }
 
@@ -874,7 +885,7 @@ static void gpu_set_uniforms(float dt) {
     // in the upper buckets and can create self-referential chains.
     int hash_size = particle_hash_size_for_count(gpuPhysics.collision_count);
     int static_hash_size = HASH_SIZE;
-    float voxel_size = VOXEL_SIZE, floor_size = FLOOR_SIZE, gravity = GRAVITY;
+    float voxel_size = VOXEL_SIZE, floor_size = worldPeriodic?-FLOOR_SIZE:FLOOR_SIZE, gravity = GRAVITY;
     float damping = powf(VELOCITY_DAMPING,dt/(PBD_MAX_STEP_DT/PBD_SUBSTEPS)), sor = PBD_SOR_FACTOR, collision = COLLISION_RELAXATION;
     float alpha = VGS_ALPHA, beta = VGS_BETA, eps = VGS_EPS;
     float strain = STRAIN_BREAK_THRESHOLD, shear = SHEAR_BREAK_THRESHOLD;
@@ -892,7 +903,7 @@ static void gpu_set_uniforms(float dt) {
         }
         player_extents[i][3]=0;
         player_data[i][3] = (i < activePlayers && players[i].respawn_timer <= 0.0f) ? PLAYER_SIZE * 0.5f : -1.0f;
-        Vector3 pull = v_sub(tetherTargetByPlayer[i], tetherComByPlayer[i]);
+        Vector3 pull = world_delta(tetherTargetByPlayer[i], tetherComByPlayer[i]);
         tether_data[i][0] = pull.x;
         tether_data[i][1] = pull.y;
         tether_data[i][2] = pull.z;
@@ -1234,9 +1245,10 @@ static bool gpu_refresh_tethers(void) {
 
 static bool gpu_dispatch_substep(float sub_dt) {
     gpu_set_uniforms(sub_dt);
+    if(!gpu_dispatch(GPU_MODE_PREPARE_INDIRECT,1))return false;
+    if(worldPeriodic && (!gpu_dispatch_indirect(GPU_MODE_WRAP_GATHER) || !gpu_dispatch_indirect(GPU_MODE_WRAP_APPLY)))return false;
     int hash_size = particle_hash_size_for_count(gpuPhysics.collision_count);
-    bool ok = gpu_dispatch(GPU_MODE_PREPARE_INDIRECT, 1) &&
-              gpu_dispatch_indirect(GPU_MODE_INTEGRATE) &&
+    bool ok = gpu_dispatch_indirect(GPU_MODE_INTEGRATE) &&
               gpu_dispatch_indirect(GPU_MODE_RESET) &&
               gpu_dispatch(GPU_MODE_HASH_CLEAR, hash_size) &&
               gpu_dispatch_indirect_offset(GPU_MODE_HASH_BUILD, 16) &&

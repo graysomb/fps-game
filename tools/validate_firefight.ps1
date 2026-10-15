@@ -40,6 +40,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Chunk regeneration build failed' }
     & ".build/chunk_regeneration_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Chunk regeneration regression failed' }
+    & gcc tests/periodic_world_test.c @sources @flags -o ".build/periodic_world_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Periodic world build failed' }
+    & ".build/periodic_world_$variant.exe" "--physics=$backend"
+    if ($LASTEXITCODE -ne 0) { throw 'Periodic world regression failed' }
     & ".build/firefight_integration_$variant.exe" "--physics=$backend"
     if ($LASTEXITCODE -ne 0) { throw 'Integration test failed' }
     & gcc tests/firefight_playtest.c @sources @flags -o ".build/firefight_playtest_$variant.exe"

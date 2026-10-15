@@ -74,9 +74,9 @@ bool fps_metal_initialize(const char *library_path, long long *max_buffer_size,
             fps_metal_shutdown();
             return false;
         }
-        id<MTLFunction> function = [metal_state.library newFunctionWithName:@"pbd_pipeline"];
+        id<MTLFunction> function = [metal_state.library newFunctionWithName:@"pbd_pipeline_periodic"];
         if (!function) {
-            fps_metal_error(error, error_capacity, @"pbd_pipeline is missing from the Metal library");
+            fps_metal_error(error, error_capacity, @"pbd_pipeline_periodic is missing; rebuild the Metal library");
             fps_metal_shutdown();
             return false;
         }

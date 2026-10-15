@@ -685,6 +685,8 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define MAX_VOXELS    131072
 #define HASH_SIZE     524288    // must be power of two
 #define VOXEL_SIZE     0.5f    // size of each voxel cube
+#include "world_topology.h"
+static bool periodic_visible(Vector3 center,float radius);
 #define PARTICLE_RADIUS (VOXEL_SIZE * 0.5f)
 #define MAX_PARTICLES (MAX_VOXELS * 8)
 #define PARTICLE_HASH_SIZE 262144
@@ -2632,7 +2634,7 @@ static bool fluid_near_active_player(void) {
         for (int i = 0; i < fluid_particle_count; ++i) {
             Particle *particle = fluid_particles[i];
             if (!particle) continue;
-            Vector3 delta = v_sub(particle->pos, players[player].pos);
+            Vector3 delta = world_delta(particle->pos, players[player].pos);
             if (v_dot(delta, delta) <= wake_radius_sq) return true;
         }
     }
@@ -2956,6 +2958,7 @@ static void particle_promote_static_leftover(Particle *p)
 }
 
 static inline int particle_hash(int x, int y, int z) {
+    x=world_grid(x);z=world_grid(z);
     uint32_t h = (uint32_t)(x * 73856093) ^ (uint32_t)(y * 19349663) ^ (uint32_t)(z * 83492791);
     return (int)(h & (uint32_t)(particleHashActiveSize - 1));
 }
@@ -3002,9 +3005,9 @@ static void particle_hash_build_range(int start, int end, int worker_id, void *u
         int gx = (int)floorf(p->predicted_pos.x / VOXEL_SIZE);
         int gy = (int)floorf(p->predicted_pos.y / VOXEL_SIZE);
         int gz = (int)floorf(p->predicted_pos.z / VOXEL_SIZE);
-        p->cell_x = gx;
+        p->cell_x = world_grid(gx);
         p->cell_y = gy;
-        p->cell_z = gz;
+        p->cell_z = world_grid(gz);
         int h = particle_hash(gx, gy, gz);
         int prev = atomic_exchange_explicit(&particle_hash_head[h], i, memory_order_relaxed);
         particle_hash_next[i] = prev;
@@ -3073,10 +3076,10 @@ static void pbf_compute_lambda_range(int start, int end, int worker_id, void *us
                             if (item < 0 || item >= job->hash_count) break;
                             Particle *neighbor = job->hash_list[item];
                             if (!neighbor || neighbor->material != PARTICLE_MATERIAL_FLUID ||
-                                neighbor->cell_x != nx || neighbor->cell_y != ny || neighbor->cell_z != nz) {
+                                neighbor->cell_x != world_grid(nx) || neighbor->cell_y != ny || neighbor->cell_z != world_grid(nz)) {
                                 continue;
                             }
-                            Vector3 separation = v_sub(particle->predicted_pos, neighbor->predicted_pos);
+                            Vector3 separation = world_delta(particle->predicted_pos, neighbor->predicted_pos);
                             float distance_sq = v_dot(separation, separation);
                             if (distance_sq < PBF_H2) {
                                 if (pbf_neighbor_cache && nb_count < PBF_MAX_NEIGHBORS) {
@@ -3101,7 +3104,7 @@ static void pbf_compute_lambda_range(int start, int end, int worker_id, void *us
                 if (item < 0 || item >= job->hash_count) continue;
                 Particle *neighbor = job->hash_list[item];
                 if (!neighbor) continue;
-                Vector3 separation = v_sub(particle->predicted_pos, neighbor->predicted_pos);
+                Vector3 separation = world_delta(particle->predicted_pos, neighbor->predicted_pos);
                 float distance_sq = v_dot(separation, separation);
                 density += PBF_PARTICLE_MASS * pbf_poly6(distance_sq);
                 if (neighbor != particle) {
@@ -3138,7 +3141,7 @@ static void pbf_compute_delta_range(int start, int end, int worker_id, void *use
                     neighbor->material != PARTICLE_MATERIAL_FLUID) {
                     continue;
                 }
-                Vector3 separation = v_sub(particle->predicted_pos, neighbor->predicted_pos);
+                Vector3 separation = world_delta(particle->predicted_pos, neighbor->predicted_pos);
                 float distance_sq = v_dot(separation, separation);
                 float kernel = pbf_poly6(distance_sq);
                 if (kernel <= 0.0f) continue;
@@ -3162,10 +3165,10 @@ static void pbf_compute_delta_range(int start, int end, int worker_id, void *use
                             Particle *neighbor = job->hash_list[item];
                             if (!neighbor || neighbor == particle ||
                                 neighbor->material != PARTICLE_MATERIAL_FLUID ||
-                                neighbor->cell_x != nx || neighbor->cell_y != ny || neighbor->cell_z != nz) {
+                                neighbor->cell_x != world_grid(nx) || neighbor->cell_y != ny || neighbor->cell_z != world_grid(nz)) {
                                 continue;
                             }
-                            Vector3 separation = v_sub(particle->predicted_pos, neighbor->predicted_pos);
+                            Vector3 separation = world_delta(particle->predicted_pos, neighbor->predicted_pos);
                             float distance_sq = v_dot(separation, separation);
                             float kernel = pbf_poly6(distance_sq);
                             if (kernel <= 0.0f) continue;
@@ -3239,7 +3242,7 @@ static void pbf_compute_viscosity_range(int start, int end, int worker_id, void 
                     neighbor->material != PARTICLE_MATERIAL_FLUID) {
                     continue;
                 }
-                Vector3 separation = v_sub(particle->pos, neighbor->pos);
+                Vector3 separation = world_delta(particle->pos, neighbor->pos);
                 float kernel = pbf_poly6(v_dot(separation, separation));
                 float density = fmaxf(neighbor->pbf_density, PBF_REST_DENSITY * 0.1f);
                 float scale = PBF_XSPH_VISCOSITY * PBF_PARTICLE_MASS * kernel / density;
@@ -3260,10 +3263,10 @@ static void pbf_compute_viscosity_range(int start, int end, int worker_id, void 
                             Particle *neighbor = job->hash_list[item];
                             if (!neighbor || neighbor == particle ||
                                 neighbor->material != PARTICLE_MATERIAL_FLUID ||
-                                neighbor->cell_x != nx || neighbor->cell_y != ny || neighbor->cell_z != nz) {
+                                neighbor->cell_x != world_grid(nx) || neighbor->cell_y != ny || neighbor->cell_z != world_grid(nz)) {
                                 continue;
                             }
-                            Vector3 separation = v_sub(particle->pos, neighbor->pos);
+                            Vector3 separation = world_delta(particle->pos, neighbor->pos);
                             float kernel = pbf_poly6(v_dot(separation, separation));
                             float density = fmaxf(neighbor->pbf_density, PBF_REST_DENSITY * 0.1f);
                             float scale = PBF_XSPH_VISCOSITY * PBF_PARTICLE_MASS * kernel / density;
@@ -3645,7 +3648,7 @@ static void rebuild_static_hash_if_dirty(void) {
 
 static void static_table_insert(int x, int y, int z, int idx)
 {
-    uint64_t k = mortonKey(x, y, z);
+    uint64_t k = mortonKey(world_grid(x), y, world_grid(z));
     size_t   h = hashVoxelKey(k);
     while (static_table[h].key && static_table[h].key != k)
         h = (h + 1) & (HASH_SIZE - 1);
@@ -3655,7 +3658,7 @@ static void static_table_insert(int x, int y, int z, int idx)
 
 static void dynamic_table_insert(int x, int y, int z, int idx)
 {
-    uint64_t k = mortonKey(x, y, z);
+    uint64_t k = mortonKey(world_grid(x), y, world_grid(z));
     size_t   h = hashVoxelKey(k);
     while (dynamic_table[h].key && dynamic_table[h].key != k)
         h = (h + 1) & (HASH_SIZE - 1);
@@ -3667,7 +3670,7 @@ static void dynamic_table_insert(int x, int y, int z, int idx)
 static int table_get(int x, int y, int z)
 /*  Returns voxel index or –1 if empty */
 {
-    uint64_t k = mortonKey(x, y, z);
+    uint64_t k = mortonKey(world_grid(x), y, world_grid(z));
     for (int i = 0; i < TABLE_CACHE_SIZE; ++i) {
         if (tableCache[i].gen == tableCacheGeneration && tableCache[i].key == k) {
             int c_idx = tableCache[i].idx;
@@ -3725,7 +3728,7 @@ static int table_get(int x, int y, int z)
 }
 
 static void static_table_remove(int x, int y, int z) {
-    uint64_t k = mortonKey(x, y, z);
+    uint64_t k = mortonKey(world_grid(x), y, world_grid(z));
     size_t mask = HASH_SIZE - 1;
     size_t h = hashVoxelKey(k);
     while (static_table[h].key) {
@@ -3750,7 +3753,7 @@ static void static_table_remove(int x, int y, int z) {
 }
 
 static void dynamic_table_remove(int x, int y, int z) {
-    uint64_t k = mortonKey(x, y, z);
+    uint64_t k = mortonKey(world_grid(x), y, world_grid(z));
     size_t mask = HASH_SIZE - 1;
     size_t h = hashVoxelKey(k);
     while (dynamic_table[h].key) {
@@ -3928,6 +3931,7 @@ static bool occupied(int x, int y, int z) {
 
 static int add_static_voxel_at_grid(int gx, int gy, int gz, Color color, int type)
 {
+    gx=world_grid(gx);gz=world_grid(gz);
     int existing = table_get_static_only(gx, gy, gz);
     if (existing >= 0 && existing < voxel_count) {
         static_cache_dirty_bounds(gx,gx,gy,gy,gz,gz);
@@ -4646,6 +4650,35 @@ static int add_fluid_cell(float px, float py, float pz, Color color) {
 
 static void glue_dynamic_face_to_static(Voxel *dynamic, Voxel *stat, int face_dynamic, int face_static);
 
+/* Lift a newly joining island into its neighbor's image before sharing corners.
+ * Never move fixed terrain or close an inconsistent world-spanning glue loop. */
+static bool periodic_align_glue(int moving,int neighbor) {
+    if(!worldPeriodic)return true;
+    Vector3 shift=v_sub(world_image(voxels[moving].pos,voxels[neighbor].pos),voxels[moving].pos);
+    if(v_dot(shift,shift)<1)return true;
+    static int queue[MAX_VOXELS];static unsigned seen[MAX_VOXELS],stamp;
+    if(++stamp==0){memset(seen,0,sizeof(seen));stamp=1;}
+    int count=1;queue[0]=moving;seen[moving]=stamp;
+    for(int i=0;i<count;i++) {
+        Voxel *v=&voxels[queue[i]];
+        if(!v->simulate || queue[i]==neighbor)return false;
+        for(int f=0;f<6;f++)if(v->glued_faces[f]) {
+            int n=v->glued_neighbors[f];if(n<0 || n>=voxel_count || seen[n]==stamp)continue;
+            seen[n]=stamp;queue[count++]=n;
+        }
+    }
+    int particleStamp=++particle_sync_stamp;
+    for(int i=0;i<count;i++) {
+        Voxel *v=&voxels[queue[i]];v->pos=v_add(v->pos,shift);
+        for(int c=0;c<8;c++) {
+            Particle *p=v->particles[c];if(!p || p->sync_stamp==particleStamp)continue;
+            p->sync_stamp=particleStamp;p->pos=v_add(p->pos,shift);
+            p->prev_pos=v_add(p->prev_pos,shift);p->predicted_pos=v_add(p->predicted_pos,shift);
+        }
+    }
+    return true;
+}
+
 static void glue_neighbor_faces_for_voxel(int voxel_idx) {
     if (voxel_idx < 0 || voxel_idx >= voxel_count) {
         return;
@@ -4673,6 +4706,7 @@ static void glue_neighbor_faces_for_voxel(int voxel_idx) {
         }
 
         Voxel *b = &voxels[neighbor_idx];
+        if(!periodic_align_glue(voxel_idx,neighbor_idx))continue;
         int faceA = f;
         int faceB = opposite_face[f];
 
@@ -5163,7 +5197,7 @@ static int gather_adjacent_fluid_voxels(int voxel_idx, int *out, int max_out) {
         if (i == voxel_idx) continue;
         const Voxel *other = &voxels[i];
         if (!other->simulate || !voxel_is_fluid(other)) continue;
-        Vector3 d = v_sub(v->pos, other->pos);
+        Vector3 d = world_delta(v->pos, other->pos);
         if (v_dot(d, d) <= r_sq) {
             out[count++] = i;
         }
@@ -5912,10 +5946,10 @@ static bool voxel_outside_world_bounds(const Voxel *voxel) {
     }
     VoxelWorldBounds bounds;
     voxel_world_bounds(voxel, &bounds);
-    if (bounds.maxx < -FLOOR_SIZE || bounds.minx > FLOOR_SIZE) {
+    if (!worldPeriodic && (bounds.maxx < -FLOOR_SIZE || bounds.minx > FLOOR_SIZE)) {
         return true;
     }
-    if (bounds.maxz < -FLOOR_SIZE || bounds.minz > FLOOR_SIZE) {
+    if (!worldPeriodic && (bounds.maxz < -FLOOR_SIZE || bounds.minz > FLOOR_SIZE)) {
         return true;
     }
     if (bounds.maxy < -VOXEL_SIZE || bounds.miny > (FLOOR_SIZE * 2.0f)) {
@@ -9046,6 +9080,7 @@ static void update_pickups(float dt) {
 static void draw_pickup_models(Camera cam,WeaponRenderPass pass) {
     for(int n=0;n<MAX_PICKUPS;n++) {
         Pickup *p=&pickups[n];
+        if(!periodic_visible(p->pos,2))continue;
         if(!p->active || (p->type!=PICKUP_DYNAMIC_SHOT && p->type!=PICKUP_GOLD_TETHER))continue;
         Vector3 pos=p->pos;pos.y+=sinf(p->bobTimer*2)*.2f;
         weapon_draw_pickup(p->type==PICKUP_DYNAMIC_SHOT,pos,cam.position,p->bobTimer,pass);
@@ -9058,7 +9093,7 @@ static void draw_pickups(Camera cam) {
     Color voidBlack = (Color){ 10, 10, 10, 255 };
     Color voidRing = (Color){ 255, 165, 0, 255 }; // Orange
     for (int i = 0; i < MAX_PICKUPS; i++) {
-        if (!pickups[i].active) continue;
+        if (!pickups[i].active || !periodic_visible(pickups[i].pos,2)) continue;
         
         Pickup *p = &pickups[i];
         float bobOffset = sinf(p->bobTimer * 2.0f) * 0.2f;
@@ -9190,6 +9225,7 @@ static void reset_players_for_creative(void) {
 }
 
 static void ResetCreative(void) {
+    worldPeriodic=false;
     worldFloorHalfSize=20.0f;
     creativeModeActive = true;
     for (int i = 0; i < MAX_PLAYERS; ++i) {
@@ -9212,6 +9248,10 @@ static void ResetGame(void) {
     worldFloorHalfSize=(!useCustomMap && (currentWorldType==WORLD_TYPE_CROSSCUT ||
         (gameMode==GAME_MODE_FIREFIGHT && (firefightFoundry||firefightPractice))))?32.0f:20.0f;
     if(gameMode==GAME_MODE_FIREFIGHT && (firefightFoundry||firefightPractice))worldFloorHalfSize=40.0f;
+    worldPeriodicDisabled=getenv("FPS_BOUNDED_WORLD")!=NULL;
+    worldPeriodic=!worldPeriodicDisabled && !useCustomMap && !enemyLab &&
+        ((gameMode==GAME_MODE_FIREFIGHT && firefightFoundry && !firefightPractice) ||
+         (gameMode==GAME_MODE_DEATHMATCH && currentWorldType==WORLD_TYPE_CROSSCUT));
     if(netTransport.role!=NET_ROLE_OFFLINE && gameMode==GAME_MODE_FIREFIGHT) gameMode=GAME_MODE_DEATHMATCH;
     if(netTransport.role==NET_ROLE_OFFLINE && gameMode!=GAME_MODE_FIREFIGHT) activePlayers=clamp_active_players(multiplayerActivePlayers);
     creativeModeActive = false;
@@ -9407,13 +9447,15 @@ static void creative_place_voxels(int player_idx) {
     if (miny < 0) {
         miny = 0;
     }
-    if (maxx < min_g || minx > max_g || maxz < min_g || minz > max_g) {
+    if (!worldPeriodic && (maxx < min_g || minx > max_g || maxz < min_g || minz > max_g)) {
         return;
     }
-    if (minx < min_g) minx = min_g;
-    if (maxx > max_g) maxx = max_g;
-    if (minz < min_g) minz = min_g;
-    if (maxz > max_g) maxz = max_g;
+    if (!worldPeriodic) {
+        if (minx < min_g) minx = min_g;
+        if (maxx > max_g) maxx = max_g;
+        if (minz < min_g) minz = min_g;
+        if (maxz > max_g) maxz = max_g;
+    }
     if (maxy > max_y) maxy = max_y;
 
     int placed = 0;
@@ -9504,7 +9546,7 @@ static void creative_remove_pickup(int player_idx) {
         if (!pickups[i].active) {
             continue;
         }
-        Vector3 delta = v_sub(pickups[i].pos, p->pos);
+        Vector3 delta = world_delta(pickups[i].pos, p->pos);
         float d2 = v_dot(delta, delta);
         if (d2 < best) {
             best = d2;
@@ -10241,12 +10283,12 @@ static void update_projectiles(float dt)
             float bullet_radius = VOXEL_SIZE * 0.5f;
             float body_size = (pl->enemyType == ENEMY_TYPE_SWARMER) ? (PLAYER_SIZE*.5f) : PLAYER_SIZE;
             float hit_extent=body_size*.5f+bullet_radius;
-            BoundingBox hitbox=expand_bounds(combatant_bounds(j,body_size*.5f),bullet_radius);
+            BoundingBox hitbox=expand_bounds(combatant_bounds_at(j,world_image(pl->pos,start),body_size*.5f),bullet_radius);
             Vector3 box_min=hitbox.min,box_max=hitbox.max;
             if (segment_intersects_aabb(start, end, box_min, box_max)) {
                 Ray block_ray = { start, v_norm(v->vel) };
                 VoxelHit blocker;
-                float player_t = v_length(v_sub(pl->pos, start)) - hit_extent;
+                float player_t = v_length(world_delta(pl->pos, start)) - hit_extent;
                 if(player_uses_rat(j)) {
                     RayCollision contact=GetRayCollisionBox((Ray){start,v_norm(v_sub(end,start))},hitbox);
                     if(contact.hit)player_t=contact.distance;
@@ -10430,8 +10472,9 @@ static void update_projectiles(float dt)
             continue;
         }
 
-        v->pos = end;
-        translate_voxel_particles(v, displacement);
+        Vector3 wrappedEnd=world_wrap(end);
+        translate_voxel_particles(v,v_add(displacement,v_sub(wrappedEnd,end)));
+        v->pos = wrappedEnd;
         ++i;
     }
 
@@ -10519,12 +10562,11 @@ static void handle_pbd_projectile_hits(void)
             if (goliath_owner >= 0 && goliath_owner == j) {
                 continue;
             }
-            float dx = v->pos.x - players[j].pos.x;
-            float dy = v->pos.y - players[j].pos.y;
-            float dz = v->pos.z - players[j].pos.z;
+            Vector3 separation=world_delta(v->pos,players[j].pos);
+            float dx=separation.x,dy=separation.y,dz=separation.z;
             float voxel_radius = v->rest_edge * 0.5f;
             float threshold = (PLAYER_SIZE * 0.5f) + voxel_radius + 0.1f;
-            BoundingBox smush=expand_bounds(combatant_bounds(j,PLAYER_SIZE*.5f),voxel_radius+.1f);
+            BoundingBox smush=expand_bounds(combatant_bounds_at(j,world_image(players[j].pos,v->pos),PLAYER_SIZE*.5f),voxel_radius+.1f);
             bool human_hit=(v->pos.x>=smush.min.x && v->pos.x<=smush.max.x && v->pos.y>=smush.min.y && v->pos.y<=smush.max.y && v->pos.z>=smush.min.z && v->pos.z<=smush.max.z);
             if ((player_uses_rat(j)||players[j].enemyType==ENEMY_TYPE_FOUNDRY)?human_hit:(fabsf(dx) < threshold && fabsf(dy) < threshold && fabsf(dz) < threshold)) {
                 if(clarity_debris_hit(i,j))continue;
@@ -10585,7 +10627,7 @@ static void handle_pbd_projectile_hits(void)
 static int table_get_static_only(int x, int y, int z)
 /* Returns static voxel index or -1 if empty. Does not consult dynamic table. */
 {
-    uint64_t k = mortonKey(x, y, z);
+    uint64_t k = mortonKey(world_grid(x), y, world_grid(z));
     size_t h = hashVoxelKey(k);
     while (1) {
         uint64_t bk = static_table[h].key;
@@ -10601,7 +10643,7 @@ static int table_get_static_only(int x, int y, int z)
 
 
 static int table_get_uncached_for_physics(int x, int y, int z) {
-    uint64_t key = mortonKey(x, y, z);
+    uint64_t key = mortonKey(world_grid(x), y, world_grid(z));
     size_t h = hashVoxelKey(key);
     while (dynamic_table[h].key != 0) {
         if (dynamic_table[h].key == key) return dynamic_table[h].idx;
@@ -10875,7 +10917,7 @@ static void integrate_particles(float dt) {
         if (tether_player < 0 || tether_player >= MAX_COMBATANTS) {
             continue;
         }
-        Vector3 tether_delta = v_sub(tetherTargetByPlayer[tether_player],
+        Vector3 tether_delta = world_delta(tetherTargetByPlayer[tether_player],
                                      tetherComByPlayer[tether_player]);
         float tether_scale = tetherScaleByPlayer[tether_player];
         if (tether_scale <= 0.0f) {
@@ -10886,7 +10928,7 @@ static void integrate_particles(float dt) {
 
         int tether_face = players[tether_player].tetherFace;
         if (tether_face < 0 || tether_face >= 6) {
-            Vector3 delta = v_sub(tetherTargetByPlayer[tether_player], voxel->pos);
+            Vector3 delta = world_delta(tetherTargetByPlayer[tether_player], voxel->pos);
             float best_dot = -1e9f;
             for (int f = 0; f < 6; ++f) {
                 Vector3 fn = { (float)face_offsets[f][0], (float)face_offsets[f][1], (float)face_offsets[f][2] };
@@ -11169,6 +11211,8 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
             if (pl->respawn_timer > 0.0f) continue;
             BoundingBox body = combatant_bounds(player_idx, PLAYER_SIZE*.5f);
             Vector3 box_min=body.min, box_max=body.max;
+            Vector3 imageOffset=v_sub(world_image(pl->pos,scene_pos),pl->pos);
+            box_min=v_add(box_min,imageOffset);box_max=v_add(box_max,imageOffset);
             Vector3 nearest = { clampf(scene_pos.x, box_min.x, box_max.x),
                                 clampf(scene_pos.y, box_min.y, box_max.y),
                                 clampf(scene_pos.z, box_min.z, box_max.z) };
@@ -11218,7 +11262,7 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
                         if (dx == 0 && dy == 0 && dz == 0 && idx <= i) {
                             continue;
                         }
-                        if (pb->cell_x != nx || pb->cell_y != ny || pb->cell_z != nz) {
+                        if (pb->cell_x != world_grid(nx) || pb->cell_y != ny || pb->cell_z != world_grid(nz)) {
                             continue;
                         }
                         if (particles_are_local_structural_neighbors(pa, pb)) continue;
@@ -11231,7 +11275,7 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
 
                         float radiusA = pa->radius;
                         float radiusB = pb->radius;
-                        Vector3 delta = v_sub(pa->predicted_pos, pb->predicted_pos);
+                        Vector3 delta = world_delta(pa->predicted_pos, pb->predicted_pos);
                         float dist_sq = v_dot(delta, delta);
                         float target_dist = radiusA + radiusB;
 
@@ -11632,7 +11676,7 @@ static bool append_static_surface_ref(StaticSurfaceRef **refs, int *count, int *
         *refs = next;
         *capacity = next_capacity;
     }
-    (*refs)[(*count)++] = (StaticSurfaceRef){ x, y, z, patch };
+    (*refs)[(*count)++] = (StaticSurfaceRef){ world_grid(x), y, world_grid(z), patch };
     return true;
 }
 
@@ -11918,7 +11962,7 @@ static void rebuild_particle_collision_metadata(void)
     build_glue_cluster_ids(collisionVoxelClusterIds);
     for (int voxel_index = 0; voxel_index < voxel_count; ++voxel_index) {
         Voxel *voxel = &voxels[voxel_index];
-        if (!voxel->simulate || voxel->isBullet || voxel->type != 0) continue;
+        if (!voxel->simulate || voxel->type != 0) continue;
         int group = collisionVoxelClusterIds[voxel_index];
         if (group < 0) group = voxel_index;
         for (int corner = 0; corner < 8; ++corner) {
@@ -12369,6 +12413,9 @@ static bool push_particle_out_of_static(const Voxel *static_voxel, Particle *par
     VoxelWorldBounds bounds;
     voxel_world_bounds(static_voxel, &bounds);
     Vector3 pos = particle->predicted_pos;
+    Vector3 center={(bounds.minx+bounds.maxx)*.5f,0,(bounds.minz+bounds.maxz)*.5f};
+    Vector3 offset=v_sub(world_image(center,pos),center);
+    bounds.minx+=offset.x;bounds.maxx+=offset.x;bounds.minz+=offset.z;bounds.maxz+=offset.z;
 
     bool inside =
         (pos.x >= bounds.minx && pos.x <= bounds.maxx) &&
@@ -12526,7 +12573,7 @@ static void collide_particle_with_static_surface(Particle *particle, float radiu
     for (int dz = -1; dz <= 1; ++dz) {
         for (int dy = -1; dy <= 1; ++dy) {
             for (int dx = -1; dx <= 1; ++dx) {
-                const StaticSurfaceCell *cell = find_static_surface_cell(gx + dx, gy + dy, gz + dz);
+                const StaticSurfaceCell *cell = find_static_surface_cell(world_grid(gx + dx), gy + dy, world_grid(gz + dz));
                 if (!cell) continue;
                 for (int item = 0; item < cell->count; ++item) {
                     int patch_index = staticSurfacePatchRefs[cell->start + item];
@@ -12545,7 +12592,18 @@ static void collide_particle_with_static_surface(Particle *particle, float radiu
     for (int i = 0; i < candidate_count; ++i) {
         int patch_index = candidates[i];
         if (patch_index >= 0 && patch_index < patchCount) {
-            push_particle_out_of_static_patch(&patches[patch_index], particle, radius, pass != 0);
+            Patch image=patches[patch_index];
+            if(worldPeriodic) {
+                Vector3 center=image.plane==0?(Vector3){(image.i0+image.di*.5f)*VOXEL_SIZE,(image.j0+image.dj*.5f)*VOXEL_SIZE,image.layer*VOXEL_SIZE}:
+                    image.plane==1?(Vector3){(image.i0+image.di*.5f)*VOXEL_SIZE,image.layer*VOXEL_SIZE,(image.j0+image.dj*.5f)*VOXEL_SIZE}:
+                    (Vector3){image.layer*VOXEL_SIZE,(image.i0+image.di*.5f)*VOXEL_SIZE,(image.j0+image.dj*.5f)*VOXEL_SIZE};
+                Vector3 shift=v_sub(world_image(center,particle->predicted_pos),center);
+                int dx=(int)lroundf(shift.x/VOXEL_SIZE),dz=(int)lroundf(shift.z/VOXEL_SIZE);
+                if(image.plane==0){image.i0+=dx;image.layer+=dz;}
+                else if(image.plane==1){image.i0+=dx;image.j0+=dz;}
+                else {image.layer+=dx;image.j0+=dz;}
+            }
+            push_particle_out_of_static_patch(&image, particle, radius, pass != 0);
         }
     }
 
@@ -12567,6 +12625,7 @@ static void glue_dynamic_face_to_static(Voxel *dynamic, Voxel *stat,
     if (!dynamic || !stat) {
         return;
     }
+    if(!periodic_align_glue((int)(dynamic-voxels),(int)(stat-voxels)))return;
     for (int c = 0; c < 4; ++c) {
         int dyn_corner = face_corner_indices[face_dynamic][c];
         int stat_corner = face_corner_indices[face_static][c];
@@ -12648,14 +12707,16 @@ static void solve_static_collision_particle(Particle *p, float half_player) {
     if (pos.y < floor_limit) {
         pos.y = floor_limit;
     }
-    pos.x = clampf(pos.x, -terrain_limit, terrain_limit);
-    pos.z = clampf(pos.z, -terrain_limit, terrain_limit);
+    if(!worldPeriodic)pos.x = clampf(pos.x, -terrain_limit, terrain_limit);
+    if(!worldPeriodic)pos.z = clampf(pos.z, -terrain_limit, terrain_limit);
 
     for (int player_idx = 0; player_idx < activePlayers; ++player_idx) {
         Player *pl = &players[player_idx];
         if (pl->respawn_timer > 0.0f) continue;
         BoundingBox body = combatant_bounds(player_idx, PLAYER_SIZE*.5f);
             Vector3 box_min=body.min, box_max=body.max;
+            Vector3 imageOffset=v_sub(world_image(pl->pos,pos),pl->pos);
+            box_min=v_add(box_min,imageOffset);box_max=v_add(box_max,imageOffset);
         Vector3 nearest = {
             clampf(pos.x, box_min.x, box_max.x),
             clampf(pos.y, box_min.y, box_max.y),
@@ -12716,8 +12777,8 @@ static void solve_static_collisions_range(int start, int end, int worker_id, voi
             p->prev_pos.z = pos.z - travel.z * FLOOR_TANGENTIAL_VELOCITY_RETENTION;
             p->prev_pos.y = pos.y;
         }
-        pos.x = clampf(pos.x, -terrain_limit, terrain_limit);
-        pos.z = clampf(pos.z, -terrain_limit, terrain_limit);
+        if(!worldPeriodic)pos.x = clampf(pos.x, -terrain_limit, terrain_limit);
+        if(!worldPeriodic)pos.z = clampf(pos.z, -terrain_limit, terrain_limit);
 
         // Player collision
         for (int player_idx = 0; player_idx < activePlayers; ++player_idx) {
@@ -12727,6 +12788,8 @@ static void solve_static_collisions_range(int start, int end, int worker_id, voi
             }
             BoundingBox body = combatant_bounds(player_idx, PLAYER_SIZE*.5f);
             Vector3 box_min=body.min, box_max=body.max;
+            Vector3 imageOffset=v_sub(world_image(pl->pos,pos),pl->pos);
+            box_min=v_add(box_min,imageOffset);box_max=v_add(box_max,imageOffset);
             Vector3 nearest = {
                 clampf(pos.x, box_min.x, box_max.x),
                 clampf(pos.y, box_min.y, box_max.y),
@@ -13454,6 +13517,11 @@ static bool resolve_tether_throw_ccd_snapshot(const TetherThrowCcdSnapshot *snap
     if (!voxel_is_awake_dynamic(voxel) || voxel->isBullet ||
         voxel->tetherThrowCcdFrames == 0) return false;
 
+    TetherThrowCcdSnapshot localSnapshot=*snapshot;
+    for(int c=0;c<VOXEL_CORNER_COUNT;c++)if(voxel->particles[c])
+        localSnapshot.particle_start[c]=world_image(snapshot->particle_start[c],voxel->particles[c]->pos);
+    snapshot=&localSnapshot;
+
     float earliest_fraction = 2.0f;
     float earliest_path_length = 0.0f;
     Vector3 collision_normal = { 0.0f, 0.0f, 0.0f };
@@ -13561,6 +13629,26 @@ static void resolve_tether_throw_ccd_snapshots(const TetherThrowCcdSnapshot *sna
     }
 }
 
+static void periodic_wrap_particles(void) {
+    if(!worldPeriodic)return;
+    static Vector3 shift[MAX_PARTICLES];
+    static int anchor[MAX_VOXELS];
+    for(int i=0;i<voxel_count;i++)anchor[i]=-1;
+    for(int i=0;i<sim_particle_count;i++) {
+        Particle *p=sim_particles[i];int g=p->collision_group;
+        if(g>=0 && g<voxel_count && (anchor[g]<0 || p->inv_mass==0))anchor[g]=i;
+    }
+    // Gather first, then apply: shared corners and anchors cannot move twice.
+    for(int i=0;i<sim_particle_count;i++) {
+        Particle *p=sim_particles[i];int g=p->collision_group;
+        Particle *a=g>=0 && g<voxel_count?sim_particles[anchor[g]]:p;
+        shift[i]=v_sub(world_wrap(a->pos),a->pos);
+    }
+    for(int i=0;i<sim_particle_count;i++) {
+        Particle *p=sim_particles[i];p->pos=v_add(p->pos,shift[i]);
+        p->prev_pos=v_add(p->prev_pos,shift[i]);p->predicted_pos=v_add(p->predicted_pos,shift[i]);
+    }
+}
 static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
     rebuild_active_voxels();
     if (dynamic_particle_count() <= 0) {
@@ -13573,6 +13661,7 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
             debugBlowupLogBudget = 32;
         }
         double t0 = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
+        periodic_wrap_particles();
         integrate_particles(sub_dt);
         if (pbdProfileEnabled) pbdCpuProfile.t_integrate_ms += pbd_time_now_ms() - t0;
         rebuild_fluid_dynamic_voxel_list();
@@ -13760,6 +13849,7 @@ void simulate_voxel_pbd(float dt) { simulate_voxel_pbd_steps(dt, 1); }
  *
  *     for (int step = 0; step < substeps; ++step) {
  *         // 1. Kinematics + collisions for all particles (predict positions).
+ *         periodic_wrap_particles();
  *         integrate_particles(sub_dt);
  *         solve_particle_collisions(sub_dt);
  *
@@ -13866,6 +13956,8 @@ static void get_viewport(int index, int player_count, int *x, int *y, int *w, in
     }
 }
 
+#include "periodic_visuals.inc"
+
 static void ensure_render_targets(RenderTexture2D *screens,
                                   int *current_players,
                                   int *current_w,
@@ -13889,7 +13981,7 @@ static void ensure_render_targets(RenderTexture2D *screens,
     }
 
     for (int i = 0; i < player_count; ++i) {
-        screens[i] = LoadRenderTexture(view_w, view_h);
+        screens[i] = world_render_target(view_w, view_h);
     }
     *current_players = player_count;
     *current_w = view_w;
@@ -13940,7 +14032,7 @@ static bool spawn_position_clear_ex(Vector3 pos, float half, float min_dist, int
             if (players[i].respawn_timer > 0.0f) {
                 continue;
             }
-            Vector3 delta = v_sub(pos, players[i].pos);
+            Vector3 delta = world_delta(pos, players[i].pos);
             if (v_dot(delta, delta) < min_dist_sq) {
                 return false;
             }
@@ -14038,7 +14130,7 @@ static Vector3 pick_player_spawn(int player_index) {
             if(!spawn_position_clear_ex(p,half,3,player_index)) continue;
             float nearest=1000;bool hidden=true;
             for(int j=0;j<activePlayers;j++) if(j!=player_index && players[j].respawn_timer<=0) {
-                nearest=fminf(nearest,v_length(v_sub(p,players[j].pos)));
+                nearest=fminf(nearest,v_length(world_delta(p,players[j].pos)));
                 if(!is_view_occluded_by_voxels(players[j].pos,p)) hidden=false;
             }
             float score=(hidden?10000:0)+nearest;
@@ -14345,7 +14437,7 @@ static void goliath_launch_voxel(int bot_idx, int target_idx) {
     GoliathState *gs = &goliathStates[bot_idx];
     if (gs->count <= GOLIATH_MIN_ARMOR_TO_THROW) return;
 
-    Vector3 to_target = v_sub(players[target_idx].pos, players[bot_idx].pos);
+    Vector3 to_target = world_delta(players[target_idx].pos, players[bot_idx].pos);
     int pick = gs->count - 1;
     float best_dot = 1e9f;
     for (int i = 0; i < gs->count; ++i) {
@@ -14366,7 +14458,7 @@ static void goliath_launch_voxel(int bot_idx, int target_idx) {
         if (voxels[v].identity == ident) {
             Voxel *vox = &voxels[v];
             goliath_set_armor_attached(vox, false);
-            Vector3 toTarget = v_sub(players[target_idx].pos, vox->pos);
+            Vector3 toTarget = world_delta(players[target_idx].pos, vox->pos);
             toTarget.y += 0.2f;
             Vector3 dir = v_norm(toTarget);
             float launchSpeed = 22.0f;
@@ -14590,7 +14682,7 @@ static bool find_aim_assist_target(int idx, Vector3 *out_dir, float *out_angle) 
         }
         float aim_height = 0.35f - (PLAYER_SIZE * 0.5f);
         Vector3 target_pos = v_add(target->pos, (Vector3){ 0.0f, aim_height, 0.0f });
-        Vector3 to_target = v_sub(target_pos, p->pos);
+        Vector3 to_target = world_delta(target_pos, p->pos);
         float dist = v_length(to_target);
         if (dist <= 0.001f || dist > max_dist) {
             continue;
@@ -14697,7 +14789,7 @@ static int find_closest_dynamic_voxel(Vector3 pos, float radius) {
         if (!v->simulate || !v->vgs_active || v->type != 0 || v->isBullet || voxel_is_fluid(v)) {
             continue;
         }
-        Vector3 delta = v_sub(v->pos, pos);
+        Vector3 delta = world_delta(v->pos, pos);
         float d2 = v_dot(delta, delta);
         if (d2 <= best) {
             best = d2;
@@ -14901,11 +14993,11 @@ static bool melee_hit_players(int attacker_idx, Vector3 start, Vector3 end, Vect
                 continue;
             }
         }
-        BoundingBox hitbox=combatant_bounds(j,PLAYER_SIZE*.5f);
+        BoundingBox hitbox=combatant_bounds_at(j,world_image(players[j].pos,attacker_pos),PLAYER_SIZE*.5f);
         Vector3 box_min=hitbox.min,box_max=hitbox.max;
         float hit_radius = PLAYER_RADIUS * 1.05f;
-        float dist_sq = point_segment_distance_sq(players[j].pos, start, end);
-        float body_dist_sq = point_segment_distance_sq(players[j].pos, attacker_pos, body_end);
+        float dist_sq = point_segment_distance_sq(world_image(players[j].pos,attacker_pos), start, end);
+        float body_dist_sq = point_segment_distance_sq(world_image(players[j].pos,attacker_pos), attacker_pos, body_end);
         if ((player_uses_rat(j) || (dist_sq > hit_radius * hit_radius &&
             body_dist_sq > hit_radius * hit_radius)) &&
             !segment_intersects_aabb(start, end, box_min, box_max) &&
@@ -14913,10 +15005,10 @@ static bool melee_hit_players(int attacker_idx, Vector3 start, Vector3 end, Vect
             continue;
         }
         /* Equipment intercepts frontal melee too; the voxel melee pass can strip it. */
-        Vector3 toVictim=v_sub(players[j].pos,attacker_pos);float victimDistance=v_length(toVictim);
+        Vector3 toVictim=world_delta(players[j].pos,attacker_pos);float victimDistance=v_length(toVictim);
         int blocker=first_voxel_hit((Ray){attacker_pos,v_norm(toVictim)},fmaxf(0,victimDistance-.3f),-1);
         if(blocker>=0 && enemy_equipment_owner(blocker)==j) continue;
-        Vector3 knock_dir = v_sub(players[j].pos, attacker_pos);
+        Vector3 knock_dir = world_delta(players[j].pos, attacker_pos);
         knock_dir.y = 0.0f;
         float knock_len = v_length(knock_dir);
         if (knock_len > 1e-3f) {
@@ -15000,7 +15092,7 @@ static bool melee_hit_voxels(Player *p, Vector3 start, Vector3 dir, float reach)
         float target_dist_sq = FLT_MAX;
         int target = find_goliath_harvest_voxel(p, &target_dist_sq);
         if (target >= 0) {
-            Vector3 to_target = v_sub(voxels[target].pos, p->pos);
+            Vector3 to_target = world_delta(voxels[target].pos, p->pos);
             float dist = v_length(to_target);
             if (dist > 1e-4f) {
                 ray = (Ray){ p->pos, v_mul(to_target, 1.0f / dist) };
@@ -15215,13 +15307,15 @@ static void perform_build(int idx) {
     if (miny < 0) {
         miny = 0;
     }
-    if (maxx < min_g || minx > max_g || maxz < min_g || minz > max_g) {
+    if (!worldPeriodic && (maxx < min_g || minx > max_g || maxz < min_g || minz > max_g)) {
         return;
     }
-    if (minx < min_g) minx = min_g;
-    if (maxx > max_g) maxx = max_g;
-    if (minz < min_g) minz = min_g;
-    if (maxz > max_g) maxz = max_g;
+    if (!worldPeriodic) {
+        if (minx < min_g) minx = min_g;
+        if (maxx > max_g) maxx = max_g;
+        if (minz < min_g) minz = min_g;
+        if (maxz > max_g) maxz = max_g;
+    }
     if (maxy > max_y) maxy = max_y;
 
     int placed = 0;
@@ -15656,18 +15750,20 @@ static void release_tether_velocity(int idx,const Vector3 *launch) {
             if(!launch) {
                 Vector3 center={0};
                 for(int c=0;c<cluster_count;c++)center=v_add(center,voxels[glueClusterIndices[c]].pos);
-                center=v_mul(center,1.0f/cluster_count);
+                center=world_image(v_mul(center,1.0f/cluster_count),p->pos);
                 /* Same center ray as the gameplay camera; skip the held group. */
                 float nearest=100;
                 for(int n=0;n<voxel_count;n++) {
                     if(tetherTag[n]==idx+1 || tetherHoldClusterTag[n]==idx+1 || voxels[n].isBullet)continue;
                     bool held=false;for(int c=0;c<cluster_count;c++)if(glueClusterIndices[c]==n){held=true;break;}if(held)continue;
                     VoxelWorldBounds b;if(voxels[n].simulate)voxel_particle_world_bounds(&voxels[n],&b);else voxel_world_bounds(&voxels[n],&b);
-                    RayCollision hit=GetRayCollisionBox((Ray){p->pos,dir},(BoundingBox){{b.minx,b.miny,b.minz},{b.maxx,b.maxy,b.maxz}});
+                    Vector3 middle={(b.minx+b.maxx)*.5f,(b.miny+b.maxy)*.5f,(b.minz+b.maxz)*.5f};
+                    Vector3 shift=v_sub(world_image(middle,p->pos),middle);
+                    RayCollision hit=GetRayCollisionBox((Ray){p->pos,dir},(BoundingBox){v_add((Vector3){b.minx,b.miny,b.minz},shift),v_add((Vector3){b.maxx,b.maxy,b.maxz},shift)});
                     if(hit.hit && hit.distance>0 && hit.distance<nearest)nearest=hit.distance;
                 }
                 for(int n=0;n<activePlayers;n++)if(n!=idx && players[n].respawn_timer<=0) {
-                    RayCollision hit=GetRayCollisionBox((Ray){p->pos,dir},combatant_bounds(n,PLAYER_SIZE*.5f));
+                    RayCollision hit=GetRayCollisionBox((Ray){p->pos,dir},combatant_bounds_at(n,world_image(players[n].pos,p->pos),PLAYER_SIZE*.5f));
                     if(hit.hit && hit.distance>0 && hit.distance<nearest)nearest=hit.distance;
                 }
                 Vector3 toward=v_sub(v_add(p->pos,v_mul(dir,nearest)),center);
@@ -15851,7 +15947,7 @@ static void draw_player_radar(int player_index, int viewport_w, int viewport_h) 
         if (speed < RADAR_MOVE_SPEED_THRESHOLD) {
             continue;
         }
-        Vector3 delta = v_sub(other->pos, p->pos);
+        Vector3 delta = world_delta(other->pos, p->pos);
         float dist = sqrtf(delta.x * delta.x + delta.z * delta.z);
         if (dist > RADAR_WORLD_RADIUS || dist <= 0.001f) {
             continue;
@@ -15865,7 +15961,7 @@ static void draw_player_radar(int player_index, int viewport_w, int viewport_h) 
         DrawCircle(blip_x, blip_y, 3, (Color){ 120, 200, 255, 230 });
     }
     for(int j=MAX_PLAYERS;j<activePlayers;j++)if(swarmHintActive[j] && players[j].respawn_timer<=0) {
-        Vector3 d=v_sub(swarmHints[j],p->pos);float distance=sqrtf(d.x*d.x+d.z*d.z);
+        Vector3 d=world_delta(swarmHints[j],p->pos);float distance=sqrtf(d.x*d.x+d.z*d.z);
         float scale=(radius_px-4)/fmaxf(RADAR_WORLD_RADIUS,distance);
         DrawCircle((int)(cx+(d.x*right_xz.x+d.z*right_xz.y)*scale),(int)(cy-(d.x*forward_xz.x+d.z*forward_xz.y)*scale),4,Fade(YELLOW,clampf(1-swarmPulseTimer/4,.25f,1)));
     }
@@ -15962,7 +16058,7 @@ static bool first_voxel_hit_detailed_ex(Ray ray, float t_max, int ignore_id,
             }
             if (valid) {
                 if (out_hit) {
-                    *out_hit = (VoxelHit){ id, x, y, z, entry_t, entry_normal };
+                    *out_hit = (VoxelHit){ id, world_grid(x), y, world_grid(z), entry_t, entry_normal };
                 }
                 return true;
             }
@@ -16205,7 +16301,7 @@ static VoxelChunk *get_or_create_chunk(int cx, int cy, int cz) {
     return NULL;
 }
 
-static void mark_chunks_dirty_for_region(int minx,int maxx,int miny,int maxy,int minz,int maxz) {
+static void mark_chunks_dirty_for_region_local(int minx,int maxx,int miny,int maxy,int minz,int maxz) {
     /* Existing meshes only: an empty neighboring chunk has no faces to expose.
        Diagonally adjacent chunks cannot share a face with the edited region. */
     int lowx=grid_to_chunk_coord(minx),highx=grid_to_chunk_coord(maxx);
@@ -16222,6 +16318,11 @@ static void mark_chunks_dirty_for_region(int minx,int maxx,int miny,int maxy,int
     }
 }
 
+static void mark_chunks_dirty_for_region(int minx,int maxx,int miny,int maxy,int minz,int maxz) {
+    int n=worldPeriodic?1:0,period=(int)lroundf(2*FLOOR_SIZE/VOXEL_SIZE);
+    for(int z=-n;z<=n;z++)for(int x=-n;x<=n;x++)
+        mark_chunks_dirty_for_region_local(minx+x*period,maxx+x*period,miny,maxy,minz+z*period,maxz+z*period);
+}
 static void mark_chunk_dirty_for_grid(int gx, int gy, int gz) {
     VoxelChunk *c=get_or_create_chunk(grid_to_chunk_coord(gx),grid_to_chunk_coord(gy),grid_to_chunk_coord(gz));
     if(c)c->dirty=true;
@@ -16269,10 +16370,11 @@ static void rebuild_chunk(VoxelChunk *chunk) {
     int occupied_count=0;
     for(int z=0;z<CHUNK_SIZE;z++)for(int y=0;y<CHUNK_SIZE;y++)for(int x=0;x<CHUNK_SIZE;x++) {
         cells[z][y][x]=table_get_static_only(minx+x,miny+y,minz+z);
-        occupied_count+=cells[z][y][x]>=0;
+        occupied_count+=cells[z][y][x]>=0 && world_grid(minx+x)==minx+x && world_grid(minz+z)==minz+z;
     }
     if(occupied_count)for(int z=0;z<CHUNK_SIZE;z++)for(int y=0;y<CHUNK_SIZE;y++)for(int x=0;x<CHUNK_SIZE;x++) {
-        if(cells[z][y][x]<0)continue;
+        /* Wrapped neighbors hide seam faces, but only canonical cells own geometry. */
+        if(cells[z][y][x]<0 || world_grid(minx+x)!=minx+x || world_grid(minz+z)!=minz+z)continue;
         if((z>0?cells[z-1][y][x]:table_get_static_only(minx+x,miny+y,minz-1))<0)faces[0][z][y]|=1u<<x;
         if((z<CHUNK_MASK?cells[z+1][y][x]:table_get_static_only(minx+x,miny+y,minz+CHUNK_SIZE))<0)faces[1][z][y]|=1u<<x;
         if((y>0?cells[z][y-1][x]:table_get_static_only(minx+x,miny-1,minz+z))<0)faces[2][y][z]|=1u<<x;
@@ -17328,6 +17430,10 @@ static void DrawVoxels(Camera3D cam) {
         if (chunk->dirty) rebuild_chunk(chunk);
         if (!chunk->mesh_loaded || chunk->mesh.vertexCount <= 0) continue;
         if (!aabb_in_frustum(chunk->bounds, &frustum)) continue;
+        if(worldPeriodic) {
+            Vector3 nearest={clampf(cam.position.x,chunk->bounds.min.x,chunk->bounds.max.x),clampf(cam.position.y,chunk->bounds.min.y,chunk->bounds.max.y),clampf(cam.position.z,chunk->bounds.min.z,chunk->bounds.max.z)};
+            if(Vector3DistanceSqr(nearest,cam.position)>56*56)continue;
+        }
         DrawMesh(chunk->mesh, greedyMaterial, MatrixIdentity());
     }
 
@@ -17601,6 +17707,7 @@ static void draw_world_surfaces(void) {
     float scale=FLOOR_SIZE/worldVisualsHalfSize;
     DrawModel(worldFloorModel, (Vector3){ 0.0f, 0.0f, 0.0f }, scale, WHITE);
 
+    if(worldPeriodic)return;
     float wall_height = FLOOR_SIZE * 2.0f;
     float wall_y = wall_height * 0.5f;
     float wall_offset = FLOOR_SIZE;
@@ -17618,6 +17725,7 @@ static void draw_world_surfaces(void) {
 }
 
 static void shutdown_world_visuals(void) {
+    periodic_visuals_shutdown();
     voxel_ca_shutdown();
     if (!worldVisualsReady) {
         return;
@@ -17656,13 +17764,13 @@ static bool player_tether_visual_target(int player_index, Vector3 *out_target) {
     if (netTransport.role == NET_ROLE_CLIENT) {
         if (!p->netTetherVisualActive) return false;
         *out_target = p->netTetherVisualTarget;
-        return true;
+        *out_target=world_image(*out_target,p->pos);return true;
     }
     if (!p->tetherHolding || !resolve_tether_voxel(p)) return false;
     if (p->tetherVoxel < 0 || p->tetherVoxel >= voxel_count) return false;
     if (p->goldTetherHolding) {
         *out_target = tetherComByPlayer[player_index];
-        return true;
+        *out_target=world_image(*out_target,p->pos);return true;
     }
     Voxel *v = &voxels[p->tetherVoxel];
     int face = p->tetherFace;
@@ -17678,11 +17786,11 @@ static bool player_tether_visual_target(int player_index, Vector3 *out_target) {
         }
         if (count == 4) {
             *out_target = v_mul(face_center, 0.25f);
-            return true;
+            *out_target=world_image(*out_target,p->pos);return true;
         }
     }
     *out_target = v->pos;
-    return true;
+    *out_target=world_image(*out_target,p->pos);return true;
 }
 
 static int drawViewPlayerIndex = -1;
@@ -17757,7 +17865,7 @@ static void draw_remote_weapon_glass(int view_player, Vector3 eye) {
     int order[MAX_COMBATANTS], count = 0;
     float distances[MAX_COMBATANTS];
     for (int p = 0; p < activePlayers; ++p) {
-        if (p == view_player || !player_has_gun(p)) continue;
+        if (p == view_player || !player_has_gun(p) || !periodic_visible(players[p].pos,3)) continue;
         WeaponPose pose = player_weapon_pose(p, false);
         if (pose.kind != WEAPON_DYNAMIC_LAUNCHER) continue;
         Vector3 chamber = Vector3Transform((Vector3){0,.23f,.20f}, pose.transform);
@@ -17841,12 +17949,12 @@ static CharacterPose characterSamples[MAX_COMBATANTS];
 static CharacterSupport character_ground_query(Vector3 sole,void *context) {
     int slot=(int)(intptr_t)context;
     CharacterSupport support={0};
-    if(fabsf(sole.x)<=FLOOR_SIZE && fabsf(sole.z)<=FLOOR_SIZE && fabsf(sole.y)<=.125f)
+    if((worldPeriodic || (fabsf(sole.x)<=FLOOR_SIZE && fabsf(sole.z)<=FLOOR_SIZE)) && fabsf(sole.y)<=.125f)
         support=(CharacterSupport){.valid=true,.height=0};
     Ray ray={{sole.x,sole.y+.125f,sole.z},{0,-1,0}};VoxelHit hit;
     if(first_voxel_hit_detailed_ex(ray,.25f,-1,false,slot,&hit) && hit.normal.y>.5f) {
         float height=ray.position.y-hit.t;
-        if(!support.valid || height>support.height) support=(CharacterSupport){true,height,voxels[hit.id].identity,voxels[hit.id].pos};
+        if(!support.valid || height>support.height) support=(CharacterSupport){true,height,voxels[hit.id].identity,world_image(voxels[hit.id].pos,sole)};
     }
     return support;
 }
@@ -17859,7 +17967,18 @@ static void sample_character(int i,float now) {
     if(player_uses_rat(i)) {
         float dt=characterSampleTime[i]>0?fmaxf(0,now-characterSampleTime[i]):0;
         if(p->respawn_timer>0 || down)characterAnimations[i].initialized=false;
-        character_animate(&characterAnimations[i],&pose,dt,character_ground_query,(void*)(intptr_t)i);
+        CharacterAnimation *animation=&characterAnimations[i];
+        if(worldPeriodic && animation->initialized) {
+            Vector3 shift=v_sub(world_image(animation->previous,pose.position),animation->previous);
+            animation->previous=v_add(animation->previous,shift);
+            for(int foot=0;foot<2;foot++) {
+                animation->soles[foot]=v_add(animation->soles[foot],shift);
+                animation->swingStart[foot]=v_add(animation->swingStart[foot],shift);
+                animation->landingStart[foot]=v_add(animation->landingStart[foot],shift);
+                animation->support[foot].origin=v_add(animation->support[foot].origin,shift);
+            }
+        }
+        character_animate(animation,&pose,dt,character_ground_query,(void*)(intptr_t)i);
         characterSampleTime[i]=now;
         if(down) {
             Ray ray={{p->death_pos.x,p->death_pos.y+.1f,p->death_pos.z},{0,-1,0}};VoxelHit hit;
@@ -17901,7 +18020,7 @@ static void draw_rat_world(int i,bool emission) {
 static void draw_rat_visors(int viewPlayer,Vector3 eye) {
     int order[MAX_PLAYERS],count=0;float distances[MAX_PLAYERS];
     for(int i=0;i<activePlayers;i++) {
-        if(i==viewPlayer || !player_uses_rat(i) || (players[i].respawn_timer>0 && !characterSamples[i].downed)) continue;
+        if(!periodic_visible(players[i].pos,3) || i==viewPlayer || !player_uses_rat(i) || (players[i].respawn_timer>0 && !characterSamples[i].downed)) continue;
         float distance=Vector3DistanceSqr(characterSamples[i].position,eye);int at=count++;
         while(at>0 && distances[at-1]<distance) {order[at]=order[at-1];distances[at]=distances[at-1];at--;}
         order[at]=i;distances[at]=distance;
@@ -17912,6 +18031,7 @@ static void draw_players(void) {
     enemy_draw();
     for (int i = 0; i < activePlayers; i++) {
         Player *p = &players[i];
+        if(!periodic_visible(p->respawn_timer>0?p->death_pos:p->pos,4))continue;
         if(gameMode==GAME_MODE_FIREFIGHT && i<firefightHumans && combatantLife[i]==LIFE_DOWNED) {
             if(player_uses_rat(i)) { if(i!=drawViewPlayerIndex) draw_rat_world(i,false); }
             else DrawCube(p->death_pos,.9f,.3f,.9f,GOLD);
@@ -18291,9 +18411,10 @@ static void integrate_human_body(int slot,float dt,bool query_world) {
     p->onGround=p->vel.y<=0 && (p->pos.y<=BASE_EYE_HEIGHT+.0001f ||
         (query_world && player_aabb_hits_world_ex(probe,.25f,slot)));
     if(p->onGround)p->vel.y=0;
-    float x=clampf(p->pos.x,-FLOOR_SIZE+CHARACTER_HALF_WIDTH,FLOOR_SIZE-CHARACTER_HALF_WIDTH);
-    float z=clampf(p->pos.z,-FLOOR_SIZE+CHARACTER_HALF_WIDTH,FLOOR_SIZE-CHARACTER_HALF_WIDTH);
+    float x=worldPeriodic?p->pos.x:clampf(p->pos.x,-FLOOR_SIZE+CHARACTER_HALF_WIDTH,FLOOR_SIZE-CHARACTER_HALF_WIDTH);
+    float z=worldPeriodic?p->pos.z:clampf(p->pos.z,-FLOOR_SIZE+CHARACTER_HALF_WIDTH,FLOOR_SIZE-CHARACTER_HALF_WIDTH);
     collided|=x!=p->pos.x || z!=p->pos.z;p->pos.x=x;p->pos.z=z;
+    p->pos=world_wrap(p->pos);
     if(collided)p->meleeKnockbackActive=false;
 }
 static void net_integrate_player(Player *p, float dt, bool query_world) {
@@ -18344,11 +18465,12 @@ static void net_integrate_player(Player *p, float dt, bool query_world) {
         p->onGround = true;
         collided = true;
     }
-    float x = clampf(p->pos.x, -FLOOR_SIZE + PLAYER_RADIUS, FLOOR_SIZE - PLAYER_RADIUS);
-    float z = clampf(p->pos.z, -FLOOR_SIZE + PLAYER_RADIUS, FLOOR_SIZE - PLAYER_RADIUS);
+    float x = worldPeriodic?p->pos.x:clampf(p->pos.x, -FLOOR_SIZE + PLAYER_RADIUS, FLOOR_SIZE - PLAYER_RADIUS);
+    float z = worldPeriodic?p->pos.z:clampf(p->pos.z, -FLOOR_SIZE + PLAYER_RADIUS, FLOOR_SIZE - PLAYER_RADIUS);
     if (x != p->pos.x || z != p->pos.z) collided = true;
     p->pos.x = x;
     p->pos.z = z;
+    p->pos=world_wrap(p->pos);
     if (p->meleeKnockbackActive && collided) p->meleeKnockbackActive = false;
 }
 
@@ -18537,7 +18659,7 @@ static bool ray_hit_solid_voxel(Ray ray, float t_max) {
 
 // Ray trace to measure if the line of sight between two positions is occluded by solid voxels
 static bool is_view_occluded_by_voxels(Vector3 eye_pos, Vector3 target_pos) {
-    Vector3 diff = v_sub(target_pos, eye_pos);
+    Vector3 diff = world_delta(target_pos, eye_pos);
     float dist = v_length(diff);
     if (dist <= 0.3f) {
         return false; // Point-blank proximity, cannot be occluded
@@ -18557,7 +18679,7 @@ static bool is_view_occluded_by_voxels(Vector3 eye_pos, Vector3 target_pos) {
         // Primary ray occluded. Check secondary ray towards chest (target_pos.y - 0.4f)
         // in case the head is behind a low doorway lintel or beam
         Vector3 chest_pos = (Vector3){ target_pos.x, target_pos.y - 0.4f, target_pos.z };
-        Vector3 chest_diff = v_sub(chest_pos, eye_pos);
+        Vector3 chest_diff = world_delta(chest_pos, eye_pos);
         float chest_dist = v_length(chest_diff);
         if (chest_dist > 0.4f) {
             Vector3 chest_dir = v_mul(chest_diff, 1.0f / chest_dist);
@@ -18596,7 +18718,7 @@ static bool check_ai_awareness_of_player(int botIdx, int targetIdx, float *out_d
     Player *bot = &players[botIdx];
     Player *target = &players[targetIdx];
 
-    Vector3 to_target = v_sub(target->pos, bot->pos);
+    Vector3 to_target = world_delta(target->pos, bot->pos);
     float dist = v_length(to_target);
     if (out_dist) {
         *out_dist = dist;
@@ -18739,7 +18861,7 @@ static int find_goliath_harvest_voxel(const Player *bot, float *out_dist_sq) {
         float ground_y = bot->onGround ? bot->pos.y : BASE_EYE_HEIGHT;
         if (voxel->pos.y - ground_y > MELEE_RANGE * 0.95f)
             continue;
-        Vector3 delta = v_sub(voxel->pos, bot->pos);
+        Vector3 delta = world_delta(voxel->pos, bot->pos);
         float xz_sq = delta.x * delta.x + delta.z * delta.z;
         float distance_sq = v_dot(delta, delta);
         if (xz_sq < 0.2f * 0.2f && distance_sq > (MELEE_RANGE * 0.9f) * (MELEE_RANGE * 0.9f)) {
@@ -18915,7 +19037,7 @@ static void UpdateBot(int playerIdx, float dt) {
         bs->lostTrackTimer -= dt;
         enemyIdx = bs->targetIndex;
         hasEnemy = true;
-        enemyDist = v_length(v_sub(bs->lastKnownTargetPos, bot->pos));
+        enemyDist = v_length(world_delta(bs->lastKnownTargetPos, bot->pos));
         enemyDistSq = enemyDist * enemyDist;
     } else {
         bs->targetIndex = -1;
@@ -18931,7 +19053,7 @@ static void UpdateBot(int playerIdx, float dt) {
         if (isDirectlyVisible || hasEnemy) {
             bs->swarmerWanderPhase = SWARMER_WANDER_NEW;
             Vector3 targetDest = isDirectlyVisible ? players[enemyIdx].pos : bs->lastKnownTargetPos;
-            Vector3 toEnemy = v_sub(targetDest, bot->pos);
+            Vector3 toEnemy = world_delta(targetDest, bot->pos);
             toEnemy.y = 0.0f;
             float len = v_length(toEnemy);
             if (len > 0.05f) {
@@ -18982,7 +19104,7 @@ static void UpdateBot(int playerIdx, float dt) {
                     bs->swarmerWanderPhase = SWARMER_WANDER_MOVE;
                 }
             } else if (bs->swarmerWanderPhase == SWARMER_WANDER_MOVE) {
-                Vector3 traveled = v_sub(bot->pos, bs->swarmerWanderLastPos);
+                Vector3 traveled = world_delta(bot->pos, bs->swarmerWanderLastPos);
                 traveled.y = 0.0f;
                 float progress = v_length(traveled);
                 bs->swarmerWanderRemaining -= progress;
@@ -19028,7 +19150,7 @@ static void UpdateBot(int playerIdx, float dt) {
             (gs->count <= 0 || !hasEnemy || harvestDist <= MELEE_RANGE * 1.5f || bs->botStuckTime > 0.4f);
         float goliathSpeed = MOVE_SPEED * 0.85f;
         if (mineNow) {
-            Vector3 lookDir = v_sub(voxels[harvestVoxelIdx].pos, bot->pos);
+            Vector3 lookDir = world_delta(voxels[harvestVoxelIdx].pos, bot->pos);
             float targetYaw, targetPitch;
             dir_to_yaw_pitch(lookDir, &targetYaw, &targetPitch);
             bot->yaw += angle_diff_deg(bot->yaw, targetYaw) * fminf(1.0f, 12.0f * dt);
@@ -19064,7 +19186,7 @@ static void UpdateBot(int playerIdx, float dt) {
             }
         } else if (hasEnemy) {
             Vector3 targetDest = isDirectlyVisible ? players[enemyIdx].pos : bs->lastKnownTargetPos;
-            Vector3 toEnemy = v_sub(targetDest, bot->pos);
+            Vector3 toEnemy = world_delta(targetDest, bot->pos);
             toEnemy.y = 0.0f;
             float len = v_length(toEnemy);
             if (len > 0.8f) {
@@ -19085,10 +19207,10 @@ static void UpdateBot(int playerIdx, float dt) {
                 gs->launchTimer = (enemyDist < 10.0f) ? 0.55f : 0.9f;
             }
         } else if (needMatter && harvestVoxelIdx >= 0) {
-            bot_apply_move(bot, bs, v_sub(voxels[harvestVoxelIdx].pos, bot->pos),
+            bot_apply_move(bot, bs, world_delta(voxels[harvestVoxelIdx].pos, bot->pos),
                                goliathSpeed, dt);
         } else {
-            if (bs->pathTimer <= 0.0f || v_length(v_sub(bs->moveTarget, bot->pos)) < 1.0f || bs->botStuckTime > 1.0f) {
+            if (bs->pathTimer <= 0.0f || v_length(world_delta(bs->moveTarget, bot->pos)) < 1.0f || bs->botStuckTime > 1.0f) {
                 bs->moveTarget = (Vector3){
                     (float)GetRandomValue((int)(-FLOOR_SIZE * 0.7f), (int)(FLOOR_SIZE * 0.7f)),
                     bot->pos.y,
@@ -19096,7 +19218,7 @@ static void UpdateBot(int playerIdx, float dt) {
                 };
                 bs->pathTimer = randomInRange(3.0f, 6.0f);
             }
-            Vector3 wanderDir = v_sub(bs->moveTarget, bot->pos);
+            Vector3 wanderDir = world_delta(bs->moveTarget, bot->pos);
             wanderDir.y = 0.0f;
             bot_apply_move(bot, bs, wanderDir, goliathSpeed * 0.75f, dt);
             float targetYaw, targetPitch;
@@ -19144,19 +19266,19 @@ static void UpdateBot(int playerIdx, float dt) {
             bs->pathTimer = 5.0f;
         }
         lookTarget = bs->moveTarget;
-        moveDir = v_sub(bs->moveTarget, bot->pos);
+        moveDir = world_delta(bs->moveTarget, bot->pos);
         moveDir.y = 0.0f;
         moving = true;
     } else if (intent == BOT_INTENT_HARVEST && harvestVoxelIdx >= 0) {
         lookTarget = voxels[harvestVoxelIdx].pos;
-        moveDir = v_sub(lookTarget, bot->pos);
+        moveDir = world_delta(lookTarget, bot->pos);
         moveDir.y = 0.0f;
         moving = (harvestDist > MELEE_RANGE * 0.85f);
         if (harvestDist <= MELEE_RANGE * 0.95f && bs->reactionTimer <= 0.0f) {
             doMelee = true;
         }
     } else if (intent == BOT_INTENT_FLEE && hasEnemy) {
-        Vector3 away = v_sub(bot->pos, players[enemyIdx].pos);
+        Vector3 away = world_delta(bot->pos, players[enemyIdx].pos);
         away.y = 0.0f;
         if (v_length(away) > 1e-3f) {
             moveDir = v_norm(away);
@@ -19166,7 +19288,7 @@ static void UpdateBot(int playerIdx, float dt) {
 
         if (harvestVoxelIdx >= 0 && harvestDist <= 8.0f) {
             lookTarget = voxels[harvestVoxelIdx].pos;
-            moveDir = v_sub(lookTarget, bot->pos);
+            moveDir = world_delta(lookTarget, bot->pos);
             moveDir.y = 0.0f;
             moving = true;
             if (harvestDist <= MELEE_RANGE * 0.95f && bs->reactionTimer <= 0.0f) {
@@ -19186,7 +19308,7 @@ static void UpdateBot(int playerIdx, float dt) {
         lookTarget = targetDest;
 
         if (target->isExposed) {
-            moveDir = v_sub(targetDest, bot->pos);
+            moveDir = world_delta(targetDest, bot->pos);
             moveDir.y = 0.0f;
             moving = (enemyDist > MELEE_RANGE * 0.85f);
 
@@ -19211,11 +19333,11 @@ static void UpdateBot(int playerIdx, float dt) {
             const float desiredMin = 5.0f;
             const float desiredMax = 9.0f;
             if (enemyDist < desiredMin) {
-                moveDir = v_sub(bot->pos, targetDest);
+                moveDir = world_delta(bot->pos, targetDest);
                 moveDir.y = 0.0f;
                 moving = true;
             } else if (enemyDist > desiredMax) {
-                moveDir = v_sub(targetDest, bot->pos);
+                moveDir = world_delta(targetDest, bot->pos);
                 moveDir.y = 0.0f;
                 moving = true;
             } else {
@@ -19253,11 +19375,11 @@ static void UpdateBot(int playerIdx, float dt) {
     {
         Vector3 faceDir = { 0.0f, 0.0f, 0.0f };
         if (aimingAtEnemy) {
-            faceDir = v_sub(lookTarget, bot->pos);
+            faceDir = world_delta(lookTarget, bot->pos);
         } else if (moving && v_length(moveDir) > 0.01f) {
             faceDir = moveDir;
         } else {
-            faceDir = v_sub(lookTarget, bot->pos);
+            faceDir = world_delta(lookTarget, bot->pos);
         }
         if (v_length(faceDir) > 0.01f) {
             float yaw, pitch;
@@ -19311,6 +19433,7 @@ static void net_send_world_to(int slot) {
     net_write_u32(&writer, (uint32_t)static_count);
     net_write_u8(&writer, netRequestedCreative ? 1 : 0);
     net_write_f32(&writer, worldFloorHalfSize);
+    net_write_u8(&writer, worldPeriodic ? 1 : 0);
     net_transport_send(&netTransport, slot, FPS_NET_CHANNEL_WORLD, packet, writer.length, true);
 
     int cursor = 0;
@@ -19664,9 +19787,9 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
         netWorldReady = false;
     } else if (header.type == NET_MSG_WORLD_BEGIN) {
         (void)net_read_u32(&reader); netRequestedCreative = net_read_u8(&reader) != 0;
-        float extent=net_read_f32(&reader);
-        if(reader.failed || !isfinite(extent) || extent<20 || extent>32) return;
-        worldFloorHalfSize=extent;
+        float extent=net_read_f32(&reader);int periodic=net_read_u8(&reader);
+        if(reader.failed || !isfinite(extent) || extent<20 || extent>40 || periodic>1) return;
+        worldFloorHalfSize=extent;worldPeriodic=periodic!=0;
         clear_world_voxels(); clear_pickups(); net_proxy_map_clear(); netWorldReady = false;
     } else if (header.type == NET_MSG_WORLD_STATIC) {
         uint16_t count = net_read_u16(&reader);
@@ -20294,36 +20417,45 @@ static void render_gameplay_view(RenderTexture2D *screens,
         } else {
             i = netLocalPlayerSlots[view];
         }
-        weaponViewAspect = (float)(*renderW) / (float)(*renderH);
+        weaponViewAspect = periodicAspect = (float)(*renderW) / (float)(*renderH);
         bool bloom = drawWeaponModels && weaponBloomEnabled &&
                      weapon_bloom_resize(&weaponBlooms[view], *renderW, *renderH);
         if (!drawWeaponModels || !weaponBloomEnabled) weapon_bloom_unload(&weaponBlooms[view]);
         BeginTextureMode(screens[view]);
-            ClearBackground(SKYBLUE);
-            BeginMode3D(cams[i]);
+            ClearBackground(worldPeriodic?periodicSky:SKYBLUE);
+            periodic_skyline(cams[i]);
+            for(int image=0;image<(worldPeriodic?9:1);image++) {
+                Camera3D imageCam;if(!periodic_camera(cams[i],image,&imageCam))continue;
+            BeginMode3D(imageCam);
                 drawViewPlayerIndex = i;
                 draw_world_surfaces();
-                DrawVoxels(cams[i]);
-                draw_pickups(cams[i]);
+                DrawVoxels(imageCam);
+                draw_pickups(imageCam);
                 draw_players();
-                if (drawWeaponModels) draw_remote_weapon_glass(i, cams[i].position);
-                draw_rat_visors(i,cams[i].position);
-                draw_pickup_models(cams[i],WEAPON_GLASS);
+                if (drawWeaponModels) draw_remote_weapon_glass(i, imageCam.position);
+                draw_rat_visors(i,imageCam.position);
+                draw_pickup_models(imageCam,WEAPON_GLASS);
                 drawViewPlayerIndex = -1;
             EndMode3D();
+            }
+            periodic_fog(screens[view],cams[i],false,screens[view].depth);
             // Preserve world depth for the remote-gun mask before drawing the viewmodel.
             if (bloom) {
                 EndTextureMode();
                 weapon_bloom_begin(&weaponBlooms[view], screens[view]);
-                BeginMode3D(cams[i]);
-                draw_pickup_models(cams[i],WEAPON_EMISSION);
+                for(int image=0;image<(worldPeriodic?9:1);image++) {
+                Camera3D imageCam;if(!periodic_camera(cams[i],image,&imageCam))continue;
+                BeginMode3D(imageCam);
+                draw_pickup_models(imageCam,WEAPON_EMISSION);
                 for (int p = 0; p < activePlayers; ++p) {
-                    if (p != i) {
+                    if (p != i && periodic_visible(players[p].pos,3)) {
                         if(player_uses_rat(p) && (players[p].respawn_timer<=0 || characterSamples[p].downed)) draw_rat_world(p,true);
-                        draw_player_weapon(p, cams[i].position, false, WEAPON_EMISSION);
+                        draw_player_weapon(p, imageCam.position, false, WEAPON_EMISSION);
                     }
                 }
                 EndMode3D();
+                }
+                periodic_fog(weaponBlooms[view].emission,cams[i],true,screens[view].depth);
                 if (players[i].respawn_timer <= 0) {
                     weapon_clear_depth();
                     BeginMode3D(cams[i]);
@@ -21871,9 +22003,21 @@ int main(int argc, char **argv) {
                     droneCam.fovy = 60.0f;
                     droneCam.projection = CAMERA_PERSPECTIVE;
                     
-                    BeginMode3D(droneCam);
+
+                    int introW=GetScreenWidth(),introH=GetScreenHeight();
+                    if(periodicIntroScene.texture.width!=introW || periodicIntroScene.texture.height!=introH) {
+                        if(periodicIntroScene.id)UnloadRenderTexture(periodicIntroScene);
+                        periodicIntroScene=world_render_target(introW,introH);
+                    }
+                    periodicAspect=(float)introW/introH;
+                    BeginTextureMode(periodicIntroScene);ClearBackground(worldPeriodic?periodicSky:SKYBLUE);
+                    periodic_skyline(droneCam);
+                    for(int i=0;i<activePlayers;i++)if(player_uses_rat(i))sample_character(i,(float)GetTime());
+                    for(int image=0;image<(worldPeriodic?9:1);image++) {
+                    Camera3D imageCam;if(!periodic_camera(droneCam,image,&imageCam))continue;
+                    BeginMode3D(imageCam);
                         draw_world_surfaces();
-                        DrawVoxels(droneCam);
+                        DrawVoxels(imageCam);
                         // draw_pickups(droneCam);
                         // Draw players
                         for (int i = 0; i < activePlayers; i++) {
@@ -21881,14 +22025,18 @@ int main(int argc, char **argv) {
                             Color base = player_palette_color(i);
                             Color base_dark = ColorBrightness(base, -0.2f);
                             if(player_uses_rat(i)) {
-                                sample_character(i,(float)GetTime());draw_rat_world(i,false);continue;
+                                draw_rat_world(i,false);continue;
                             }
                             DrawCube(p->pos, PLAYER_SIZE,PLAYER_SIZE, PLAYER_SIZE, base_dark);
                             DrawCubeWires(p->pos, PLAYER_SIZE,PLAYER_SIZE,PLAYER_SIZE, base_dark);
                         }
-                        draw_rat_visors(-1,droneCam.position);
+                        draw_rat_visors(-1,imageCam.position);
                     EndMode3D();
                     
+                    }
+                    periodic_fog(periodicIntroScene,droneCam,false,periodicIntroScene.depth);EndTextureMode();
+                    periodic_fullscreen(periodicIntroScene.texture,introW,introH);
+                    if(gameState!=GAME_STATE_DRONE_INTRO){UnloadRenderTexture(periodicIntroScene);periodicIntroScene=(RenderTexture2D){0};}
                     DrawText("SCANNING MAP...", SCREEN_WIDTH / 2 - MeasureText("SCANNING MAP...", 30) / 2, SCREEN_HEIGHT - 100, 30, WHITE);
                     DrawText("Press SPACE to skip", SCREEN_WIDTH / 2 - MeasureText("Press SPACE to skip", 20) / 2, SCREEN_HEIGHT - 60, 20, LIGHTGRAY);
                 EndDrawing();
@@ -22191,7 +22339,7 @@ int main(int argc, char **argv) {
                 Player *victim = &players[j];
                 if (victim->respawn_timer > 0.0f || victim->invuln_timer > 0.0f) continue;
 
-                Vector3 diff = v_sub(victim->pos, bot->pos);
+                Vector3 diff = world_delta(victim->pos, bot->pos);
                 float distSq = v_dot(diff, diff);
                 if (distSq <= contactRadius * contactRadius) {
                     float dist = sqrtf(distSq);

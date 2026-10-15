@@ -835,3 +835,30 @@ limits, sustained activity and resource reinitialization, exports eight seconds 
 animation frames, and measures one/four-view rendering. The chunk-mesh regression
 checks static/dynamic visual continuity and rotated sleeping cubes with the
 simulation held fixed.
+
+### Periodic arenas
+
+Foundry Firefight and Crosscut Versus wrap horizontally in X/Z. Crossing an edge
+continues into the opposite side with velocity intact; the floor and vertical
+limits remain. Map geometry is unchanged. Crosscut's initial spawns use the
+inward side of their existing screens to retain cover across the new sightlines.
+Other maps, custom maps, Creative and Enemy Lab remain bounded.
+
+Terrain, players, projectiles, grenades, tethered islands, AI distances, damage,
+pickups, audio and revives share periodic coordinates. CPU and GPU physics use
+the same seam rules. GPU wrapping uses two compute passes and existing buffers,
+without additional readbacks. Connected objects move together; incompatible
+glue loops spanning an entire world circumference are rejected.
+
+Nearby images reuse the same meshes and simulation, with frustum/range culling.
+Gray-blue fog fades from 24 to 56 world units, with distant factory silhouettes
+drawn as sky scenery. The first-person weapon and HUD remain clear. Set
+`FPS_BOUNDED_WORLD=1` before launching to restore the bounded arenas for comparison.
+LAN protocol 11 sends topology with the world; host and client need matching builds.
+
+`tests/periodic_world_test.c` runs in `tools/validate_firefight.ps1` for CPU/GPU.
+It checks seams/corners, collision-cache contact, rays, moving characters and
+grenades, connected islands, non-aligned chunk ownership and destructive stress.
+It exports center/edge/corner images and one/four-player previews to `artifacts/`,
+and reports bounded/periodic render timings. Metal has matching compute code;
+runtime validation requires macOS hardware.

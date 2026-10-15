@@ -63,7 +63,7 @@ static void ff_update_coop(float dt) {
             int rescuer=-1;
             for(int j=0;j<firefightHumans;j++) {
                 if(j==i || combatantLife[j]!=LIFE_ALIVE || players[j].matter<=FF_REVIVE_COST || !ff_revive_held(j)) continue;
-                Vector3 delta=v_sub(players[i].death_pos,players[j].pos);
+                Vector3 delta=world_delta(players[i].death_pos,players[j].pos);
                 float distance=v_length(delta);
                 if(distance>2.0f || (float)GetTime()-players[j].last_damage_time<dt*1.5f) continue;
                 if(distance>0.05f && first_voxel_hit((Ray){players[j].pos,v_mul(delta,1.0f/distance)},distance,-1)>=0) continue;

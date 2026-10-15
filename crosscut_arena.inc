@@ -11,7 +11,8 @@ static void crosscut_box(int q,float x0,float x1,float y0,float y1,float z0,floa
         (int)roundf(fminf(a.z,b.z)/VOXEL_SIZE),(int)roundf(fmaxf(a.z,b.z)/VOXEL_SIZE)-1,c);
 }
 static Vector3 crosscut_spawn_point(int index) {
-    return crosscut_rotate((Vector3){index%2?-6.75f:6.75f,BASE_EYE_HEIGHT,23.25f},index/2);
+    /* Use the inward side of the existing screens when the perimeter wraps. */
+    return crosscut_rotate((Vector3){index%2?-6.75f:6.75f,BASE_EYE_HEIGHT,worldPeriodic?18.75f:23.25f},index/2);
 }
 static Vector3 crosscut_supply_point(int index) {
     return crosscut_rotate((Vector3){13.5f,1,16.5f},index);

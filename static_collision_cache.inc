@@ -86,12 +86,13 @@ static bool cache_build_cells(StaticCacheChunk *chunk) {
     int count=0;
     for(int c=0;c<staticCacheChunkCount;c++) {
         StaticCacheChunk *owner=&staticCacheChunks[c];
-        if(abs(owner->x-chunk->x)>1 || abs(owner->y-chunk->y)>1 || abs(owner->z-chunk->z)>1)continue;
+        if(abs(world_grid((owner->x-chunk->x)*CHUNK_SIZE))>CHUNK_SIZE || abs(owner->y-chunk->y)>1 || abs(world_grid((owner->z-chunk->z)*CHUNK_SIZE))>CHUNK_SIZE)continue;
         for(int p=owner->patchStart;p<owner->patchStart+owner->patchCount;p++) {
             Patch *pt=&patches[p];
             for(int j=0;j<pt->dj;j++)for(int i=0;i<pt->di;i++) {
                 int a=pt->i0+i,b=pt->j0+j,layer=pt->layer+(pt->positive?1:-1);
                 int x=pt->plane==2?layer:a,y=pt->plane==0?b:pt->plane==1?layer:a,z=pt->plane==0?layer:b;
+                x=world_grid(x);z=world_grid(z);
                 if(grid_to_chunk_coord(x)!=chunk->x || grid_to_chunk_coord(y)!=chunk->y || grid_to_chunk_coord(z)!=chunk->z)continue;
                 if(!append_static_surface_ref(&cacheRefs,&count,&cacheRefCapacity,x,y,z,p))return false;
             }
@@ -138,6 +139,26 @@ static bool cache_rebuild_chunks(void) {
     for(int c=0;c<owners;c++)if(staticCacheChunks[c].patchesDirty) {
         StaticCacheChunk *chunk=&staticCacheChunks[c];if(!cache_build_patches(chunk))return false;
         chunk->patchesDirty=false;
+        if(worldPeriodic) {
+            /* Air cells belong to canonical chunks even when their faces live
+             * across the seam. Rebuild old owners too when a face disappears. */
+            for(int n=0;n<staticCacheChunkCount;n++) {
+                StaticCacheChunk *other=&staticCacheChunks[n];
+                if(abs(world_grid((other->x-chunk->x)*CHUNK_SIZE))<=CHUNK_SIZE && abs(other->y-chunk->y)<=1 && abs(world_grid((other->z-chunk->z)*CHUNK_SIZE))<=CHUNK_SIZE)other->dataDirty=true;
+            }
+            for(int p=chunk->patchStart;p<chunk->patchStart+chunk->patchCount;p++) {
+                Patch *pt=&patches[p];
+                for(int j=0;j<pt->dj;j++)for(int i=0;i<pt->di;i++) {
+                    int a=pt->i0+i,b=pt->j0+j,layer=pt->layer+(pt->positive?1:-1);
+                    int x=world_grid(pt->plane==2?layer:a),y=pt->plane==0?b:pt->plane==1?layer:a,z=world_grid(pt->plane==0?layer:b);
+                    int old=staticCacheChunkCount,n=cache_chunk_find(grid_to_chunk_coord(x),grid_to_chunk_coord(y),grid_to_chunk_coord(z),true);
+                    if(n<0)return false;
+                    if(n==old)staticCacheChunks[n].patchesDirty=false;
+                    staticCacheChunks[n].dataDirty=true;
+                }
+            }
+            continue;
+        }
         // External-face references can land in the neighboring air chunk.
         for(int z=-1;z<=1;z++)for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++) {
             if(abs(x)+abs(y)+abs(z)>1)continue;
