@@ -3,6 +3,46 @@
 #include "../fps_ray.c"
 #undef main
 #include <assert.h>
+/* Compare the two real shaders at identical cube positions, before simulation
+ * can move or deform the activated representation. */
+static void check_voxel_appearance(void) {
+    Color color={150,175,200,255};
+    const Vector3 offsets[]={{6,3,6},{-6,3,-6},{6,0,0},{-6,0,0},{0,6,0},{0,-6,0},{0,0,6},{0,0,-6}};
+    RenderTexture2D target=LoadRenderTexture(640,360);
+    for(int view=0;view<8;view++) {
+        clear_all_chunks();clear_world_voxels();
+        for(int x=-3;x<3;x++)for(int y=1;y<4;y++)for(int z=-1;z<2;z++)
+            add_static_voxel_at_grid(x,y,z,color,0);
+        Camera3D cam={v_add((Vector3){0,1.25f,.25f},offsets[view]),{0,1.25f,.25f},
+            view==4 || view==5?(Vector3){0,0,1}:(Vector3){0,1,0},4,CAMERA_ORTHOGRAPHIC};
+        Image images[2];
+        for(int dynamic=0;dynamic<2;dynamic++) {
+            if(dynamic) {
+                // Tether activation is budgeted; activate the remaining groups
+                // without advancing physics until the whole fixture is dynamic.
+                for(int batch=0;batch<54;batch++) {
+                    int next=-1;for(int i=0;i<voxel_count;i++)if(!voxels[i].simulate){next=i;break;}
+                    if(next<0)break;
+                    assert(activate_static_voxel_for_tether(next,0,ACTIVATION_TETHER_BELIEF));
+                }
+                for(int i=0;i<voxel_count;i++)assert(voxels[i].simulate);
+            }
+            voxel_render_frame++;BeginTextureMode(target);ClearBackground((Color){30,35,40,255});BeginMode3D(cam);
+            rlDisableBackfaceCulling();
+            DrawVoxels(cam);
+            rlEnableBackfaceCulling();EndMode3D();EndTextureMode();
+            images[dynamic]=LoadImageFromTexture(target.texture);ImageFlipVertical(&images[dynamic]);
+            if(view==0)ExportImage(images[dynamic],dynamic?"artifacts/voxel-edges-dynamic.png":"artifacts/voxel-edges-static.png");
+        }
+        Color *a=LoadImageColors(images[0]),*b=LoadImageColors(images[1]);int different=0;
+        for(int i=0;i<640*360;i++)if(abs(a[i].r-b[i].r)>3 || abs(a[i].g-b[i].g)>3 || abs(a[i].b-b[i].b)>3)different++;
+        fprintf(stderr,"Voxel appearance view %d: %.4f%% differing pixels\n",view,100.0*different/(640*360));
+        // Triangle rasterization can disagree at a handful of silhouette pixels.
+        assert(different<640*360/100);
+        UnloadImageColors(a);UnloadImageColors(b);UnloadImage(images[0]);UnloadImage(images[1]);
+    }
+    UnloadRenderTexture(target);
+}
 static void check_mesh_faces(void) {
     static unsigned char seen[MAX_VOXELS];memset(seen,0,sizeof(seen));
     for(int c=0;c<voxel_chunk_count;c++) {
@@ -14,6 +54,12 @@ static void check_mesh_faces(void) {
             int face=axis*2+!positive;
             Vector3 du=v_sub(p[1],p[0]),dv=v_sub(p[3],p[0]);
             int width=(int)lroundf(v_length(du)),height=(int)lroundf(v_length(dv));assert(width>0 && height>0);
+            // Every merged face repeats the edge shader once per voxel.
+            // This also covers negative coordinates and restored chunk meshes.
+            for(int k=0;k<4;k++) {
+                assert(m->texcoords[(v+k)*2]==((k==1 || k==2)?width:0));
+                assert(m->texcoords[(v+k)*2+1]==(k>=2?height:0));
+            }
             du=v_mul(du,1.0f/width);dv=v_mul(dv,1.0f/height);
             for(int j=0;j<height;j++)for(int i=0;i<width;i++) {
                 Vector3 cell=v_add(p[0],v_add(v_mul(du,i+.5f),v_mul(dv,j+.5f)));cell=v_sub(cell,v_mul(n,.5f));
@@ -64,5 +110,6 @@ int main(void) {
     assert(!meshDirty && !distant->dirty && activationProfile.columnScans==0);
     assert(staticBeliefBatchDepth==0 && recycleQueueCount>0);
     check_mesh_faces();assert(distant->mesh.vaoId==vao);
+    check_voxel_appearance();
     clear_all_chunks();clear_world_voxels();CloseWindow();puts("Chunk mesh regression passed");return 0;
 }

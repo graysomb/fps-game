@@ -16069,8 +16069,10 @@ static Mesh build_mesh_from_patches(const Patch *patch_array, int count) {
             norms[(vofs+k)*3 + 0] = norm.x;
             norms[(vofs+k)*3 + 1] = norm.y;
             norms[(vofs+k)*3 + 2] = norm.z;
-            uvs[(vofs+k)*2 + 0] = (k==1||k==2);
-            uvs[(vofs+k)*2 + 1] = (k>=2);
+            // Repeat the dynamic cube's edge pattern once per voxel, even
+            // when many coplanar faces share this single greedy quad.
+            uvs[(vofs+k)*2 + 0] = (k==1||k==2) ? pt->di : 0;
+            uvs[(vofs+k)*2 + 1] = (k>=2) ? pt->dj : 0;
             cols[(vofs+k)*4 + 0] = pt->col.r;
             cols[(vofs+k)*4 + 1] = pt->col.g;
             cols[(vofs+k)*4 + 2] = pt->col.b;
