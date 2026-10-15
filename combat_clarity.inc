@@ -63,7 +63,7 @@ static bool clarity_shield_melee(int v,int attacker) {
     Vector3 at=voxels[v].pos;
     for(int n=s->equipmentCount-1;n>=0;n--)if(s->equipment[n].group==group){int part=enemy_voxel(s->equipment[n].id);if(part>=0){enemy_detach(part);remove_voxel_index(part);}}
     play_sfx_at(SFX_SHIELD_BREAK,at,owner,3,1);players[owner].matter_flash_timer=.2f;
-    (void)attacker;return true;
+    if(attacker>=0 && attacker<activePlayers)ai_alert(owner,attacker,players[attacker].pos,AI_ALERT_HIT);return true;
 }
 static void clarity_actor_damage(int target,int owner,float damage,bool debris) {
     if(target<0 || target>=activePlayers || players[target].respawn_timer>0 || players[target].invuln_timer>0)return;

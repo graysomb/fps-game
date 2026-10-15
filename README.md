@@ -84,6 +84,24 @@ invulnerability; Escape leaves. The overlay shows the ability state, target,
 timers, equipment count, and intended counterplay. Normal movement, shooting,
 melee, and tether controls remain available.
 
+Enemy AI in Firefight, Versus and Enemy Lab remembers specific attackers for four
+seconds, investigates their last observed position, and reacts to damage, shield
+hits, nearby bullets and gunfire (24 units in sight, 8 through cover). Targets are
+held for 1.5 seconds before a visible opponent at least 30% closer can replace them;
+damage can override that commitment once per second. Cover prevents firing and
+live position tracking. Specialist wind-ups keep their committed action.
+
+Ordinary enemy guns fire at most three rounds per second. Easy/Medium/Hard use
+0.6/0.4/0.3-second reactions, 2/3/3-round bursts, and 1.2/1.0/0.8-second recovery.
+Aim settles over a second; movement, taking a hit and target reversals reduce
+accuracy. Human weapon cadence and specialist ability cooldowns are unchanged.
+F8 / D-pad Down also cycles seven AI fixtures after the original eight: rear fire,
+near misses, shield alerts, alternating attackers, occlusion, stationary targets
+and reversing strafes. The overlay shows threat source, visibility, memory, aim
+cone, burst count and firing timers. `tests/ai_combat_test.c` exercises cadence at
+30/60/120 Hz, stalls, threat selection, occlusion, memory and specialist commitment;
+it runs through `tools/validate_firefight.ps1` on both physics backends.
+
 Launch directly with `--enemy-lab=sapper`, `--enemy-lab=mixed`, or
 `--enemy-lab=all` (cycles isolated cases every 30 simulation seconds). Valid
 enemy names are `goliath`, `shieldbearer`, `sapper`, `lobber`, `builder`,
@@ -774,7 +792,7 @@ noise taps. Grenade and Sapper explosions show a brief four-unit blast envelope 
 light smoke; cover still blocks damage. Tether throws converge on the reticle target
 without carrying residual sideways velocity, while gravity still affects their flight.
 
-Enemy Lab F8 / D-pad Down cycles through eight fixtures, including Anchor recovery,
+Enemy Lab F8 / D-pad Down cycles through fifteen fixtures, including Anchor recovery,
 footstep audition, and an offset tether throw. Regression runs export blast previews and
 three footstep WAV samples under `artifacts/`.
 

@@ -409,14 +409,8 @@ static void enemy_stomp(int i) {
     }
     play_sfx_at(SFX_EXPLOSION,players[i].pos,i,3,.7f);
 }
-static int enemy_target(int i) {
-    int best=-1;float distance=1000;
-    for(int j=0;j<firefightHumans;j++) if(players[j].respawn_timer<=0) {
-        float d=v_length(world_delta(players[j].pos,players[i].pos));
-        if(d<distance) {distance=d;best=j;}
-    }
-    return best;
-}
+static int enemy_target(int i) {return aiCombat[i].target;}
+
 static void enemy_tick(float dt) {
     if(enemyCleanupPending) enemy_cleanup(true);
     if(enemyLab && enemyLabPaused && !enemyLabStep) return;
@@ -456,8 +450,13 @@ static void enemy_tick(float dt) {
     }
 }
 static void enemy_update(int i,float dt) {
+    if(netTransport.role==NET_ROLE_CLIENT)return;
     if(enemyLab && enemyLabPaused && !enemyLabStep){players[i].vel=(Vector3){0};return;}
+    ai_tick(i,dt);
     EnemySpecialState *s=&enemySpecial[i];Player *p=&players[i];EnemyType t=p->enemyType;
+    if(t==ENEMY_TYPE_FOUNDRY)p->isExposed=false;
+    if(p->isExposed){enemy_drop_payload(i);s->windup=0;s->state=0;s->selected=0;s->reason="exposed";}
+    if(clarity_evade(i,dt))return;
     if(t==ENEMY_TYPE_FOUNDRY && !s->supplied) {
         int stocked=0;
         for(int n=0;n<16 && stocked<2;n++) {
@@ -473,12 +472,44 @@ static void enemy_update(int i,float dt) {
         s->supplied=true;
     }
     s->cooldown-=dt;s->melee-=dt;s->repair-=dt;s->searchTimer-=dt;s->stompCooldown-=dt;s->repositionTimer=fmaxf(0,s->repositionTimer-dt);s->target=enemy_target(i);
-    if(s->target<0){enemy_drop_payload(i);p->vel.x=p->vel.z=0;s->reason="no living target";return;}
-    Vector3 to=world_delta(players[s->target].pos,p->pos);float distance=v_length(to);
+    // Gathering nearby ammunition does not require sight of a player. Keep this
+    // preparation separate from the visible-target requirement for a throw.
+    if(!aiCombat[i].visible && !p->isExposed && !p->tetherHolding && s->windup<=0 &&
+       s->cooldown<=0 && (t==ENEMY_TYPE_LOBBER || t==ENEMY_TYPE_FOUNDRY)) {
+        if(s->searchTimer<=0){s->selected=enemy_find_payload(i);s->searchTimer=s->selected?.5f:1;}
+        int v=enemy_voxel(s->selected);
+        if(v>=0) {
+            Vector3 gather=world_delta(voxels[v].pos,p->pos);
+            if(v_length(gather)<=5 && enemy_clear_line(v_add(p->pos,(Vector3){0,1,0}),v_add(voxels[v].pos,(Vector3){0,1,0}))) {
+                int count;Vector3 center,extent;
+                if(enemy_payload(i,v,&count,&center,&extent)){p->goldTetherCharged=true;acquire_tether_hit(i,v,(Vector3){0,1,0});}
+            }
+            if(!p->tetherHolding){
+                s->reason="seeking payload";
+                float yaw=atan2f(-gather.x,-gather.z)*RAD2DEG;
+                p->yaw+=clampf(angle_diff_deg(p->yaw,yaw),-180*dt,180*dt);
+                bot_apply_move(p,&botStates[i],gather,MOVE_SPEED*(t==ENEMY_TYPE_FOUNDRY?.35f:.75f),dt);return;
+            }
+        }
+    }
+    if(s->target<0){
+        s->windup=0;s->state=0;s->reason="patrolling";
+        BotState *b=&botStates[i];b->pathTimer-=dt;
+        if(b->pathTimer<=0 || aiCombat[i].stuck>.6f){
+            // Search the arena, never an unseen player's current coordinates.
+            float radius=fminf(FLOOR_SIZE*.6f,24)*ai_random(i),angle=ai_random(i)*2*PI;
+            b->moveTarget=(Vector3){cosf(angle)*radius,p->pos.y,sinf(angle)*radius};b->pathTimer=4;
+        }
+        Vector3 search=world_delta(b->moveTarget,p->pos);search.y=0;
+        float yaw=atan2f(-search.x,-search.z)*RAD2DEG;
+        p->yaw+=clampf(angle_diff_deg(p->yaw,yaw),-120*dt,120*dt);
+        if(t!=ENEMY_TYPE_FOUNDRY)bot_apply_move(p,b,search,MOVE_SPEED*.7f,dt);
+        else p->vel.x=p->vel.z=0;
+        return;
+    }
+    Vector3 to=world_delta(aiCombat[i].known,p->pos);float distance=v_length(to);
     float yaw=atan2f(-to.x,-to.z)*RAD2DEG,turn=t==ENEMY_TYPE_SHIELDBEARER?120:180;
     p->yaw+=clampf(angle_diff_deg(p->yaw,yaw),-turn*dt,turn*dt);
-    if(t==ENEMY_TYPE_FOUNDRY)p->isExposed=false;
-    if(p->isExposed){enemy_drop_payload(i);s->windup=0;s->state=0;s->selected=0;s->reason="exposed";}
     if(s->windup>0) {
         s->windup-=dt;p->vel.x=p->vel.z=0;s->work=2;s->reason="wind-up";
         if(s->windup<=0) {
@@ -493,6 +524,12 @@ static void enemy_update(int i,float dt) {
             s->searchTimer=done?.5f:1;s->selected=0;s->state=0;s->work=3;
         }
         return;
+    }
+    if(!aiCombat[i].visible) {
+        Vector3 investigate=to;investigate.y=0;
+        if(v_length(investigate)>.5f)bot_apply_move(p,&botStates[i],investigate,MOVE_SPEED*.7f,dt);
+        else p->vel.x=p->vel.z=0;
+        s->reason="investigating last known position";return;
     }
     Vector3 move=to;float speed=1;s->work=0;
     if(t==ENEMY_TYPE_SHIELDBEARER) {

@@ -1,7 +1,8 @@
 /* Interactive fixtures and smoke checks use the same specialist update functions. */
 static WorldType enemyLabPreviousWorld;
 static int enemyLabFixture=-1;
-static const char *enemyLabFixtureNames[]={"Grenade range: C / D-pad Up; full friendly fire", "Bomb avoidance: enemies flee a live Sapper charge", "Death feedback: exposed enemies, slot reuse", "Melee shield: remove one section per swing", "Lobber: elevated target and real structure flight", "Anchor: damage linked allies; exposed recovery after 2 seconds", "Footsteps: listen while enemies move", "Tether accuracy: throw the side-offset block at the target"};
+static float enemyLabAiTime,enemyLabAiNext;
+static const char *enemyLabFixtureNames[]={"Grenade range: C / D-pad Up; full friendly fire", "Bomb avoidance: enemies flee a live Sapper charge", "Death feedback: exposed enemies, slot reuse", "Melee shield: remove one section per swing", "Lobber: elevated target and real structure flight", "Anchor: damage linked allies; exposed recovery after 2 seconds", "Footsteps: listen while enemies move", "Tether accuracy: throw the side-offset block at the target", "AI rear attack: fire at the bot facing away", "AI near miss: fire past the bot shoulder", "AI shield alert: shoot the shield from either side", "AI alternating attackers: two scripted shooters", "AI occlusion: attacker behind wall; investigate without tracking", "AI stationary target: observe bursts and recovery", "AI reversing target: observe tracking accuracy"};
 static bool enemyLabPreviousFoundry,enemyLabPreviousCustom;
 static void enemy_lab_exit(void) {
     enemy_cleanup(true);enemyLab=false;enemyLabAll=false;enemyLabPaused=false;
@@ -75,9 +76,9 @@ static void enemy_lab_start(int which) {
     gameState=GAME_STATE_PLAYING;couchLobby=false;couchAdvanced=false;
 }
 static void enemy_lab_fixture(int which) {
-    which=(which+8)%8;
-    enemy_lab_start(which==3?ENEMY_TYPE_SHIELDBEARER:which==4?ENEMY_TYPE_LOBBER:which==5?ENEMY_TYPE_ANCHOR:which==6?ENEMY_TYPE_SWARMER:ENEMY_TYPE_SAPPER);
-    enemyLabFixture=which;grenadeInventory[0]=2;
+    which=(which+15)%15;
+    enemy_lab_start(which>=8?(which==10?ENEMY_TYPE_SHIELDBEARER:ENEMY_TYPE_STANDARD):which==3?ENEMY_TYPE_SHIELDBEARER:which==4?ENEMY_TYPE_LOBBER:which==5?ENEMY_TYPE_ANCHOR:which==6?ENEMY_TYPE_SWARMER:ENEMY_TYPE_SAPPER);
+    enemyLabFixture=which;enemyLabAiTime=enemyLabAiNext=0;grenadeInventory[0]=2;
     if(which==0){enemy_cleanup(true);players[4].respawn_timer=9999;add_static_box_at_grid(-4,4,0,5,16,16,GRAY);enemy_lab_spawn(5,ENEMY_TYPE_STANDARD,(Vector3){3,BASE_EYE_HEIGHT,8});}
     if(which==1){int v=addVoxel(0,.3f,9,false,true,ORANGE,0);enemyCharges[4]=(EnemyCharge){.active=true,.owner=4,.id=voxels[v].identity,.pos={0,.3f,9},.fuse=4};for(int i=5;i<8;i++)enemy_lab_spawn(i,ENEMY_TYPE_STANDARD,(Vector3){(i-6)*2,BASE_EYE_HEIGHT,10});}
     if(which==2){enemy_cleanup(true);players[4].respawn_timer=9999;for(int i=5;i<8;i++){enemy_lab_spawn(i,ENEMY_TYPE_SWARMER,(Vector3){(i-6)*3,BASE_EYE_HEIGHT,6});players[i].matter=0;players[i].isExposed=true;}}
@@ -85,7 +86,39 @@ static void enemy_lab_fixture(int which) {
     if(which==4){add_static_box_at_grid(-3,3,0,5,-3,3,GRAY);players[0].pos.y=BASE_EYE_HEIGHT+3;}
     if(which==5){for(int i=5;i<8;i++){enemy_lab_spawn(i,ENEMY_TYPE_STANDARD,(Vector3){(i-6)*2,BASE_EYE_HEIGHT,8});players[i].matter=i==5?0:20;players[i].isExposed=i==5;}}
     if(which==7){enemy_cleanup(true);players[4].respawn_timer=9999;add_static_box_at_grid(-2,2,0,8,40,40,ORANGE);int v=addVoxel(1,BASE_EYE_HEIGHT,3,false,true,GRAY,0);players[0].yaw=180;acquire_tether_hit(0,v,(Vector3){0,0,1});}
+    if(which>=8) {
+        for(int i=5;i<activePlayers;i++)players[i].respawn_timer=9999;
+        players[4].pos=(Vector3){0,BASE_EYE_HEIGHT,12};players[4].yaw=which==8?180:0;
+        players[0].pos=(Vector3){which==9?1.2f:0,BASE_EYE_HEIGHT,0};players[0].yaw=180;
+        if(which==10)enemy_update_equipment(4);
+        if(which==12)add_static_box_at_grid(-7,7,0,8,12,12,GRAY);
+        if(which==11 || which>=13) {
+            firefightHumans=which==11?3:2;
+            for(int i=1;i<firefightHumans;i++) {
+                players[i]=players[0];players[i].pos=(Vector3){i==1?-5:5,BASE_EYE_HEIGHT,0};
+                playerInput[i]=INPUT_TYPE_KEYBOARD;combatantTeam[i]=0;combatantLife[i]=LIFE_ALIVE;
+            }
+            players[0].pos=(Vector3){25,BASE_EYE_HEIGHT,20};players[0].yaw=90;
+        }
+    }
     init_static_hash();rebuild_voxel_hash();meshDirty=true;
+}
+static void enemy_lab_ai_step(float dt) {
+    if(!enemyLab || enemyLabFixture<8 || (enemyLabPaused && !enemyLabStep))return;
+    enemyLabAiTime+=dt;
+    if(enemyLabFixture==11 && enemyLabAiTime>=enemyLabAiNext) {
+        int source=1+((int)(enemyLabAiNext/2)%2);enemyLabAiNext=enemyLabAiTime+2;
+        players[4].matter=players[4].matterMax;players[4].isExposed=false;
+        apply_matter_damage(4,source,1);
+    }
+    if(enemyLabFixture>=13) {
+        players[1].pos=(Vector3){0,BASE_EYE_HEIGHT,-8};players[1].vel=(Vector3){0};
+        if(enemyLabFixture==14) {
+            float phase=fmodf(enemyLabAiTime,4);
+            players[1].pos.x=phase<2?-6+phase*6:18-phase*6;
+            players[1].vel.x=phase<2?6:-6;
+        }
+    }
 }
 static bool enemy_lab_controls(void) {
     enemyLabStep=false;
@@ -104,7 +137,7 @@ static bool enemy_lab_controls(void) {
 }
 static void enemy_lab_hud(int w,int h) {
     int fs=w<900?14:18;
-    DrawRectangle(8,70,w-16,180,Fade(BLACK,.8f));
+    DrawRectangle(8,70,w-16,232,Fade(BLACK,.8f));
     DrawText(TextFormat("ENEMY LAB: %s | %s | Invulnerable: %s",enemyLabCase==ENEMY_TYPE_COUNT?"mixed":enemy_names[enemyLabCase],enemyLabPaused?"PAUSED":"RUNNING",enemyLabGod?"ON":"OFF"),16,78,fs,GOLD);
     DrawText("F3/LB: next | F4/Top: reset | F5/Left face: pause",16,102,fs,RAYWHITE);
     DrawText("F6/RB: step | F7/Back button: invulnerability | Esc: exit",16,126,fs,RAYWHITE);
@@ -113,6 +146,9 @@ static void enemy_lab_hud(int w,int h) {
     DrawText(TextFormat("State %d | Target P%d | Cooldown %.1f | Wind-up %.1f | Equipment %d",s->state,s->target+1,fmaxf(0,s->cooldown),s->windup,s->equipmentCount),16,174,fs,SKYBLUE);
     DrawText(TextFormat("%s | work %d | actions %d | resource %llu",s->reason?s->reason:"seeking",s->work,s->actions,(unsigned long long)s->selected),16,200,fs,SKYBLUE);
     DrawText("F8 / D-pad Down: combat fixtures | C / D-pad Up: grenade",16,224,fs,ORANGE);
+    AiCombat *a=&aiCombat[4];const char *alerts[]={"none","seen","heard","near miss","hit"};
+    DrawText(TextFormat("AI %s | P%d | %s | memory %.1f | aim %.1f deg",alerts[a->source],a->target+1,a->visible?"visible":"remembered",a->memory,a->error),16,250,fs,LIME);
+    DrawText(TextFormat("Burst %d | reaction %.2f | recovery %.2f",a->burstShots,a->reaction,a->recovery),16,276,fs,LIME);
     (void)h;
 }
 #define ENEMY_CHECK(condition,message) do {if(!(condition)) {fprintf(stderr,"enemy-smoke FAIL: %s\n",message);return false;}} while(0)

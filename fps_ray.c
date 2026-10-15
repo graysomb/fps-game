@@ -1082,6 +1082,7 @@ typedef struct {
     float botStrafeSign;
 } BotState;
 static BotState botStates[MAX_COMBATANTS];
+#include "ai_combat.h"
 static bool randomSpawnEnabled = true;
 static const Vector3 playerSpawnPositions[MAX_PLAYERS] = {
     { 0.0f,  BASE_EYE_HEIGHT, -14.0f },
@@ -1146,6 +1147,7 @@ typedef struct {
     bool pendingActivation;
     bool isBullet;
     bool goliathProjectile;
+    Vector3 shotOrigin;
     uint8_t foundryTrapId;
     bool foundryTrapHeavy;
     Vector3 foundryTrapPrevious;
@@ -4519,6 +4521,7 @@ static bool init_voxel_struct(Voxel *v,
     v->pendingActivation = false;
     v->isBullet = false;
     v->goliathProjectile = false;
+    v->shotOrigin=v->pos;
     v->foundryTrapId=0;v->foundryTrapHeavy=false;
     v->foundryTrapPrevious=v->pos;v->foundryTrapPreviousSpeed=0;
     v->explosionUntil = 0;
@@ -9276,6 +9279,7 @@ static void ResetGame(void) {
     init_pickups();
     // init players
     for (int i = 0; i < MAX_COMBATANTS; i++) {
+        ai_reset(i);
         combatantLife[i]=LIFE_ALIVE; combatantTeam[i]=i;
         players[i].pos = pick_player_spawn(i);
         players[i].death_pos = players[i].pos;
@@ -10114,6 +10118,7 @@ static void kill_player(int player_index, int attacker_index,
     }
     if(explosionDamageContext && (attacker_index==player_index || (gameMode==GAME_MODE_FIREFIGHT && attacker_index>=0 && combatantTeam[player_index]==combatantTeam[attacker_index])))award_kill=award_debris=false;
     clarity_death(player_index,award_kill||award_debris?attacker_index:-1);
+    ai_reset(player_index);
     if(enemy_is_special(player_index)) enemy_on_death(player_index);
     player->deaths++;
     UpdateKdRatio(player_index);
@@ -10201,6 +10206,8 @@ static void apply_matter_damage(int player_index, int attacker_index, float dama
     if (player->respawn_timer > 0.0f) {
         return;
     }
+    if(damage>0 && player->invuln_timer<=0 && attacker_index>=0 && attacker_index<activePlayers)
+        ai_alert(player_index,attacker_index,aiProjectileDamage?aiProjectileOrigin:players[attacker_index].pos,AI_ALERT_HIT);
     if(player->enemyType==ENEMY_TYPE_FOUNDRY) {
         EnemySpecialState *boss=&enemySpecial[player_index];
         boss->coreHealth=fmaxf(0,boss->coreHealth-fmaxf(0,damage));
@@ -10286,6 +10293,7 @@ static void update_projectiles(float dt)
 
         Vector3 start = v->pos;
         Vector3 end = v_add(start, displacement);
+        ai_near_miss(i,start,end);
 
         bool handled = false;
         for (int j = 0; j < activePlayers; ++j) {
@@ -10317,7 +10325,9 @@ static void update_projectiles(float dt)
                     break;
                 }
                 int damage = player_bullet_damage(v->owner);
+                aiProjectileDamage=true;aiProjectileOrigin=v->shotOrigin;
                 apply_matter_damage(j, v->owner, (float)damage);
+                aiProjectileDamage=false;
                 remove_voxel_index(i);
                 handled = true;
                 break;
@@ -10331,6 +10341,9 @@ static void update_projectiles(float dt)
         int hit_id = first_voxel_hit(ray, distance, i);
         if (hit_id >= 0 && hit_id < voxel_count) {
             foundry_trap_hit(hit_id,v->owner,false);
+            int equipmentOwner=enemy_equipment_owner(hit_id),armorAlert=get_goliath_owner_of_voxel(hit_id);
+            if(equipmentOwner>=0)ai_alert(equipmentOwner,v->owner,v->shotOrigin,AI_ALERT_HIT);
+            if(armorAlert>=0)ai_alert(armorAlert,v->owner,v->shotOrigin,AI_ALERT_HIT);
             play_sfx(SFX_IMPACT);
             if (voxels[hit_id].simulate && voxels[hit_id].sleeping) {
                 wake_sleeping_cluster_in_place(hit_id);
@@ -13889,14 +13902,14 @@ void simulate_voxel_pbd(float dt) { simulate_voxel_pbd_steps(dt, 1); }
  */
 
 // Fire a voxel bullet
-static void FireVoxel(int idx) {
+static bool FireVoxel(int idx) {
     Player *p = &players[idx];
     float now = (float)GetTime();
-    if (now - p->last_shot_time < BULLET_COOLDOWN_SECONDS) {
-        return;
+    if (is_player_bot(idx) ? !ai_shot_allowed(idx) : now - p->last_shot_time < BULLET_COOLDOWN_SECONDS) {
+        return false;
     }
     if (p->matter < MATTER_SHOT_COST || p->isExposed) {
-        return;
+        return false;
     }
     p->matter = fmaxf(0.0f, p->matter - MATTER_SHOT_COST);
     float yawRad = DEG2RAD * p->yaw;
@@ -13911,6 +13924,7 @@ static void FireVoxel(int idx) {
         Vector3 vel = v_mul(dir, 60.0f);
         shot->vel = vel;
         shot->owner = idx;
+        shot->shotOrigin=p->pos;
         shot->activator = idx;
         shot->isBullet = !dynamic_shot;
         shot->glueEligible = dynamic_shot;
@@ -13927,10 +13941,13 @@ static void FireVoxel(int idx) {
             // Original code had it commented out, but maybe because it wasn't working.
             // If simulate is true, particles should be active.
         }
+        if(is_player_bot(idx))ai_shot_fired(idx);
+        ai_gunfire(idx,p->pos);
         play_sfx_at(SFX_FIRE,p->pos,idx,1,1);
         weapon_visual_shot(&weaponVisuals[idx], now);
     }
     p->last_shot_time = now;
+    return vix>=0;
 }
 
 static int clamp_active_players(int count) {
@@ -14532,6 +14549,7 @@ static void explode_goliath_armor(int player_idx) {
 }
 
 static void init_firefight_bot_entity(int i, EnemyType etype, InputType botDiff) {
+    ai_reset(i);
     enemy_release(i);
     memset(&enemySpecial[i],0,sizeof(enemySpecial[i]));
     for(int v=0;v<voxel_count;v++) {
@@ -18786,9 +18804,8 @@ static bool check_ai_awareness_of_player(int botIdx, int targetIdx, float *out_d
 
     float dot = v_dot(ai_view, dir_to_target);
 
-    // If bot took damage very recently (< 1.2s ago), it is alerted towards its attacker
-    float damageDelta = (float)GetTime() - bot->last_damage_time;
-    bool recentlyDamaged = (damageDelta >= 0.0f && damageDelta < 1.2f);
+    // Specific remembered threats bypass the view cone, never line of sight.
+    bool recentlyDamaged = aiCombat[botIdx].target==targetIdx && aiCombat[botIdx].memory>0;
     bool inViewCone = (dot >= AI_FOV_DOT_THRESHOLD);
 
     if (!inViewCone && !recentlyDamaged) {
@@ -19011,6 +19028,7 @@ static void bot_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float
     }
 }
 
+#include "ai_combat.inc"
 #include "enemy_specialists.inc"
 #include "foundry_traps.inc"
 #include "combat_clarity.inc"
@@ -19018,30 +19036,28 @@ static void bot_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float
 #include "chunk_regeneration_net.inc"
 static void UpdateBot(int playerIdx, float dt) {
     if(enemyLab && enemyLabPaused && !enemyLabStep) return;
-    if(clarity_evade(playerIdx,dt))return;
+    if(netTransport.role==NET_ROLE_CLIENT)return;
     if(enemy_is_special(playerIdx)) {enemy_update(playerIdx,dt);return;}
+    ai_tick(playerIdx,dt);
+    if(clarity_evade(playerIdx,dt)){ai_cancel_burst(playerIdx);aiCombat[playerIdx].intentTime=0;return;}
     Player *bot = &players[playerIdx];
     BotState *bs = &botStates[playerIdx];
 
     // Difficulty Settings
     float reactionTime = 0.5f;
-    float accuracy = 0.8f;
     bool canBuild = false;
     bool aggressive = false;
 
     if (playerInput[playerIdx] == INPUT_TYPE_BOT_EASY) {
         reactionTime = 1.0f;
-        accuracy = 0.5f;
         canBuild = false;
         aggressive = false;
     } else if (playerInput[playerIdx] == INPUT_TYPE_BOT_MEDIUM) {
         reactionTime = 0.5f;
-        accuracy = 0.8f;
         canBuild = true;
         aggressive = false;
     } else if (playerInput[playerIdx] == INPUT_TYPE_BOT_HARD) {
         reactionTime = 0.1f;
-        accuracy = 0.98f;
         canBuild = true;
         aggressive = true;
     }
@@ -19050,30 +19066,11 @@ static void UpdateBot(int playerIdx, float dt) {
     bs->pathTimer -= dt;
     bs->stateTimer -= dt;
 
-    float enemyDistSq = FLT_MAX;
-    int enemyIdx = find_nearest_aware_enemy(playerIdx, &enemyDistSq);
-    bool isDirectlyVisible = (enemyIdx >= 0);
-    bool hasEnemy = isDirectlyVisible;
-    float enemyDist = isDirectlyVisible ? sqrtf(enemyDistSq) : FLT_MAX;
-
-    if (isDirectlyVisible) {
-        bs->targetIndex = enemyIdx;
-        bs->hasTarget = true;
-        bs->lastKnownTargetPos = players[enemyIdx].pos;
-        bs->lostTrackTimer = 1.5f;
-    } else if (bs->lostTrackTimer > 0.0f && bs->targetIndex >= 0 &&
-               bs->targetIndex < activePlayers && players[bs->targetIndex].respawn_timer <= 0.0f) {
-        // Target just broke line of sight: investigate last known position for 1.5s
-        bs->lostTrackTimer -= dt;
-        enemyIdx = bs->targetIndex;
-        hasEnemy = true;
-        enemyDist = v_length(world_delta(bs->lastKnownTargetPos, bot->pos));
-        enemyDistSq = enemyDist * enemyDist;
-    } else {
-        bs->targetIndex = -1;
-        bs->hasTarget = false;
-        bs->lostTrackTimer = 0.0f;
-    }
+    AiCombat *aw=&aiCombat[playerIdx];
+    int enemyIdx=aw->target;
+    bool isDirectlyVisible=aw->visible,hasEnemy=enemyIdx>=0;
+    float enemyDist=hasEnemy?v_length(world_delta(aw->known,bot->pos)):FLT_MAX;
+    float enemyDistSq=enemyDist*enemyDist;
 
     float harvestDistSq = FLT_MAX;
     int harvestVoxelIdx = find_nearest_static_voxel(&bot->pos, &harvestDistSq);
@@ -19227,7 +19224,8 @@ static void UpdateBot(int playerIdx, float dt) {
             }
             float targetYaw = atan2f(toEnemy.x, toEnemy.z) * RAD2DEG + 180.0f;
             bot->yaw += (targetYaw - bot->yaw) * 6.0f * dt;
-            if (bot->onGround && GetRandomValue(0, 100) < 3) {
+            if (bot->onGround && aw->stuck>=.6f && aw->jumpDelay<=0) {
+                aw->stuck=0;aw->jumpDelay=1;
                 bot->vel.y = JUMP_SPEED;
                 bot->onGround = false;
             }
@@ -19276,6 +19274,11 @@ static void UpdateBot(int playerIdx, float dt) {
         intent = BOT_INTENT_COMBAT;
     }
 
+    bool invalidIntent=(aw->intent==BOT_INTENT_HARVEST && harvestVoxelIdx<0) ||
+        (aw->intent==BOT_INTENT_COMBAT && !hasEnemy) || aw->stuck>.6f;
+    if(aw->intentTime>0 && !invalidIntent && !bot->isExposed && !(aw->intent==BOT_INTENT_WANDER && hasEnemy))intent=(BotIntent)aw->intent;
+    else {aw->intent=intent;aw->intentTime=1;}
+
     Vector3 lookTarget = bot->pos;
     Vector3 moveDir = (Vector3){ 0.0f, 0.0f, 0.0f };
     bool moving = false;
@@ -19289,9 +19292,9 @@ static void UpdateBot(int playerIdx, float dt) {
     if (intent == BOT_INTENT_WANDER) {
         if (bs->pathTimer <= 0.0f) {
             bs->moveTarget = (Vector3){
-                (float)GetRandomValue((int)(-FLOOR_SIZE), (int)(FLOOR_SIZE)),
+                (ai_random(playerIdx)*2-1)*FLOOR_SIZE,
                 bot->pos.y,
-                (float)GetRandomValue((int)(-FLOOR_SIZE), (int)(FLOOR_SIZE))
+                (ai_random(playerIdx)*2-1)*FLOOR_SIZE
             };
             bs->pathTimer = 5.0f;
         }
@@ -19308,12 +19311,12 @@ static void UpdateBot(int playerIdx, float dt) {
             doMelee = true;
         }
     } else if (intent == BOT_INTENT_FLEE && hasEnemy) {
-        Vector3 away = world_delta(bot->pos, players[enemyIdx].pos);
+        Vector3 away = world_delta(bot->pos, aw->known);
         away.y = 0.0f;
         if (v_length(away) > 1e-3f) {
             moveDir = v_norm(away);
         }
-        lookTarget = players[enemyIdx].pos;
+        lookTarget = aw->known;
         moving = true;
 
         if (harvestVoxelIdx >= 0 && harvestDist <= 8.0f) {
@@ -19327,7 +19330,7 @@ static void UpdateBot(int playerIdx, float dt) {
         }
 
         if (canBuild && bot->matter >= MATTER_BUILD_COST && !bs->justBuilt) {
-            if (!bot->isExposed && GetRandomValue(0, 100) < 20) {
+            if (!bot->isExposed && ai_random(playerIdx)<fminf(1,dt*2)) {
                 doBuild = true;
             }
         }
@@ -19337,7 +19340,11 @@ static void UpdateBot(int playerIdx, float dt) {
         Vector3 targetDest = isDirectlyVisible ? target->pos : bs->lastKnownTargetPos;
         lookTarget = targetDest;
 
-        if (target->isExposed) {
+        if (!isDirectlyVisible) {
+            moveDir = world_delta(targetDest, bot->pos);
+            moveDir.y = 0;
+            moving = v_length(moveDir) > 1;
+        } else if (target->isExposed) {
             moveDir = world_delta(targetDest, bot->pos);
             moveDir.y = 0.0f;
             moving = (enemyDist > MELEE_RANGE * 0.85f);
@@ -19377,7 +19384,7 @@ static void UpdateBot(int playerIdx, float dt) {
             float reserve = fmaxf(MATTER_SHOT_COST * 3.0f, bot->matterMax * 0.2f);
             bool criticalMatter = bot->matter < reserve;
             // Only shoot if target is directly visible (not through walls)
-            if (!criticalMatter && isDirectlyVisible && bs->reactionTimer <= 0.0f) {
+            if (!criticalMatter && isDirectlyVisible && ai_ready_to_fire(playerIdx)) {
                 doShoot = true;
             }
         }
@@ -19402,25 +19409,12 @@ static void UpdateBot(int playerIdx, float dt) {
         bot->vel.z = 0.0f;
     }
 
-    {
-        Vector3 faceDir = { 0.0f, 0.0f, 0.0f };
-        if (aimingAtEnemy) {
-            faceDir = world_delta(lookTarget, bot->pos);
-        } else if (moving && v_length(moveDir) > 0.01f) {
-            faceDir = moveDir;
-        } else {
-            faceDir = world_delta(lookTarget, bot->pos);
-        }
-        if (v_length(faceDir) > 0.01f) {
-            float yaw, pitch;
-            dir_to_yaw_pitch(faceDir, &yaw, &pitch);
-            bot->yaw += angle_diff_deg(bot->yaw, yaw) * fminf(1.0f, 10.0f * dt);
-            bot->pitch += (pitch - bot->pitch) * fminf(1.0f, 10.0f * dt);
-            if (aimingAtEnemy) {
-                bot->yaw += (float)GetRandomValue(-100, 100) * (1.0f - accuracy) * 0.05f;
-                bot->pitch += (float)GetRandomValue(-100, 100) * (1.0f - accuracy) * 0.05f;
-            }
-        }
+    if(aimingAtEnemy)ai_aim(playerIdx,lookTarget,dt);
+    else {
+        Vector3 direction=(moving && v_length(moveDir)>.01f)?moveDir:world_delta(lookTarget,bot->pos);
+        if(v_length(direction)>.01f){float yaw,pitch;dir_to_yaw_pitch(direction,&yaw,&pitch);
+            bot->yaw+=clampf(angle_diff_deg(bot->yaw,yaw),-180*dt,180*dt);
+            bot->pitch+=clampf(pitch-bot->pitch,-120*dt,120*dt);}
     }
 
     if (doMelee) {
@@ -19428,8 +19422,7 @@ static void UpdateBot(int playerIdx, float dt) {
         bs->reactionTimer = reactionTime;
     }
     if (doShoot) {
-        FireVoxel(playerIdx);
-        bs->reactionTimer = reactionTime + (float)GetRandomValue(0, 50) / 100.0f;
+        if(ai_ready_to_fire(playerIdx))FireVoxel(playerIdx);
     }
     if (doBuild) {
         perform_build(playerIdx);
@@ -19446,7 +19439,8 @@ static void UpdateBot(int playerIdx, float dt) {
     }
 
     // Jump if stuck (simple)
-    if (moving && bot->onGround && GetRandomValue(0, 100) < 5) {
+    if (moving && bot->onGround && aw->stuck>=.6f && aw->jumpDelay<=0) {
+        aw->jumpDelay=1;aw->stuck=0;
         bot->vel.y = JUMP_SPEED;
         bot->onGround = false;
     }
@@ -20888,14 +20882,14 @@ static bool run_ai_awareness_smoke_test(void) {
     }
     fprintf(stderr, "ai-smoke PASS: Target behind is undetected\n");
 
-    // Alerted state: Bot damaged recently (< 1.2s ago)
-    players[0].last_damage_time = (float)GetTime();
+    // Specific attacker memory alerts the bot without revealing other actors.
+    ai_reset(0);ai_alert(0,1,players[1].pos,AI_ALERT_HIT);
     if (!check_ai_awareness_of_player(0, 1, &dist)) {
         fprintf(stderr, "ai-smoke FAIL: Bot should be alerted to target behind after recent damage!\n");
         return false;
     }
-    fprintf(stderr, "ai-smoke PASS: Bot alerted to attacker behind within 1.2s of taking damage\n");
-    players[0].last_damage_time = -1000.0f;
+    fprintf(stderr, "ai-smoke PASS: Bot remembers the specific attacker behind\n");
+    ai_reset(0);
 
     // 4. Test Check 3: Ray trace occlusion
     // Target 10m in front
@@ -22178,6 +22172,7 @@ int main(int argc, char **argv) {
             if (players[i].respawn_timer > 0.0f) {
                 players[i].respawn_timer -= dt;
                 if (players[i].respawn_timer <= 0.0f) {
+                    ai_reset(i);
                     players[i].respawn_timer = 0.0f;
                     players[i].pos = pick_player_spawn(i);
                     players[i].death_pos = players[i].pos;
@@ -22320,6 +22315,7 @@ int main(int argc, char **argv) {
             } else if (playerInput[i] == INPUT_TYPE_GAMEPAD) {
                 HandleGamepadInput(i, dt);
             } else {
+                if(i==MAX_PLAYERS)enemy_lab_ai_step(dt);
                 if(!(gameMode==GAME_MODE_FIREFIGHT && firefightPractice)) UpdateBot(i, dt);
             }
             Player *p = &players[i];
