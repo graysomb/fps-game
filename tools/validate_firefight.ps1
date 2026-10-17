@@ -16,6 +16,10 @@ try {
     & gcc tests/firefight_integration.c @sources @flags -o ".build/firefight_integration_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Integration build failed' }
     $backend = if ($Gpu) { 'gpu' } else { 'cpu-mt' }
+    & gcc tests/mouse_input_test.c @sources @flags -o ".build/mouse_input_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Mouse input build failed' }
+    & ".build/mouse_input_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Mouse input regression failed' }
     & gcc tests/tether_drain_test.c @sources @flags -o ".build/tether_drain_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Tether drain build failed' }
     & ".build/tether_drain_$variant.exe" "--physics=$backend"

@@ -1,6 +1,7 @@
 #include "net_protocol.h"
 
 #include <string.h>
+#include <math.h>
 
 static void net_writer_reserve(NetWriter *writer, size_t amount) {
     if (!writer || writer->failed || amount > writer->capacity - writer->length) {
@@ -156,6 +157,8 @@ bool net_write_input(NetWriter *writer, const NetInputCommand *command) {
     net_write_u8(writer, command->creative_brush);
     net_write_u8(writer, command->creative_color);
     net_write_u8(writer, command->creative_pickup);
+    net_write_u8(writer, command->mouse_look);
+    net_write_f32(writer, command->aim_yaw);net_write_f32(writer, command->aim_pitch);
     return !writer->failed;
 }
 
@@ -173,6 +176,10 @@ bool net_read_input(NetReader *reader, NetInputCommand *command) {
     command->creative_brush = net_read_u8(reader);
     command->creative_color = net_read_u8(reader);
     command->creative_pickup = net_read_u8(reader);
+    command->mouse_look = net_read_u8(reader);
+    command->aim_yaw=net_read_f32(reader);command->aim_pitch=net_read_f32(reader);
+    if(command->mouse_look>1 || !isfinite(command->aim_yaw) || !isfinite(command->aim_pitch) ||
+       fabsf(command->aim_yaw)>180 || fabsf(command->aim_pitch)>89)reader->failed=true;
     return !reader->failed;
 }
 

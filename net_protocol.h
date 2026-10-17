@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define FPS_NET_MAGIC 0x4650534eu /* "FPSN" */
-#define FPS_NET_PROTOCOL_VERSION 12u /* Actor Matter-drain tether visual flag. */
+#define FPS_NET_PROTOCOL_VERSION 13u /* Absolute mouse aim in input commands. */
 #define FPS_NET_DEFAULT_PORT 27015u
 #define FPS_NET_DISCOVERY_PORT 27016u
 #define FPS_NET_MAX_PACKET 1100u
@@ -51,7 +51,8 @@ typedef enum NetInputButtons {
     NET_INPUT_CREATIVE_ACTIVATE = 1u << 9,
     NET_INPUT_CREATIVE_UP = 1u << 10,
     NET_INPUT_CREATIVE_DOWN = 1u << 11,
-    NET_INPUT_GRENADE = 1u << 12
+    NET_INPUT_GRENADE = 1u << 12,
+    NET_INPUT_TETHER_CANCEL = 1u << 13
 } NetInputButtons;
 
 typedef struct NetPacketHeader {
@@ -73,6 +74,8 @@ typedef struct NetInputCommand {
     uint8_t creative_brush;
     uint8_t creative_color;
     uint8_t creative_pickup;
+    uint8_t mouse_look;
+    float aim_yaw, aim_pitch;
 } NetInputCommand;
 
 typedef enum NetPlayerVisualFlags {

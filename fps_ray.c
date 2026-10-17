@@ -1819,6 +1819,13 @@ static inline float voxel_particle_radius(const Voxel *v) {
 static bool debugDrawParticles = false;
 static bool debugColorParticlesByVelocity = false;
 static bool debugConsoleOpen = false;
+static int mouseSeat=-1,mouseSlot=-1;
+static bool mouseCaptured,mouseButtonsArmed,mouseTetherHeld;
+static Vector2 mouseFrameDelta;
+static bool mouse_owns(int slot){return slot==mouseSlot && slot>=0;}
+static void mouse_sync(void);
+static void mouse_frame(float dt);
+static void mouse_command(NetInputCommand *command,int seat,int slot,float dt);
 static const float PARTICLE_DEBUG_MARKER_RADIUS = 0.6f;
 static const float PARTICLE_DEBUG_MAX_SPEED = 20.0f;
 static bool debugLogGlueClusters = false;
@@ -9709,6 +9716,7 @@ static void update_creative_player_keyboard(int player_idx, float dt) {
         }
     }
 
+    if(!mouse_owns(player_idx)) {
     if (yaw_accel != 0.0f) {
         p->yaw_vel += yaw_accel * dt;
     } else {
@@ -9738,6 +9746,7 @@ static void update_creative_player_keyboard(int player_idx, float dt) {
     p->pitch += p->pitch_vel * dt;
     p->pitch = clampf(p->pitch, -89, 89);
 
+    }
     float len = v_length(move);
     if (len > 0.01f) {
         move = v_mul(move, 1.0f / len);
@@ -18193,6 +18202,7 @@ static void HandleKeyboardInput(int i, float dt) {
         return;
     }
     Player *p = &players[i];
+    if(!mouse_owns(i)) {
     // turn
     float yaw_accel = 0.0f;
     if ((i==0 && IsKeyDown(KEY_F)) || (i==1 && IsKeyDown(KEY_LEFT)))  yaw_accel += TURN_ACCELERATION;
@@ -18236,6 +18246,7 @@ static void HandleKeyboardInput(int i, float dt) {
 
     float input_strength = (fabsf(yaw_accel) > 0.0f || fabsf(pitch_accel) > 0.0f) ? 1.0f : 0.0f;
     apply_aim_assist(i, dt, input_strength);
+    }
     // compute forward/right
     float yr = DEG2RAD * p->yaw;
     Vector3 forward = { sinf(-yr), 0, -cosf(yr) };
@@ -18355,6 +18366,8 @@ static float net_axis_value(int16_t value) {
 /* Shared by the authoritative host and client-side prediction.  World-changing
    actions are deliberately not handled here. */
 static void net_apply_movement_command(Player *p, const NetInputCommand *command, float dt) {
+    if(command->mouse_look){p->yaw=command->aim_yaw;p->pitch=command->aim_pitch;p->yaw_vel=p->pitch_vel=0;}
+    if(!command->mouse_look){
     float yaw_accel = -net_axis_value(command->look_x) * TURN_ACCELERATION;
     float pitch_accel = -net_axis_value(command->look_y) * TURN_ACCELERATION;
     if (fabsf(yaw_accel) > 0.01f) p->yaw_vel += yaw_accel * dt;
@@ -18368,6 +18381,7 @@ static void net_apply_movement_command(Player *p, const NetInputCommand *command
     p->yaw += p->yaw_vel * dt;
     p->pitch = clampf(p->pitch + p->pitch_vel * dt, -89.0f, 89.0f);
 
+    }
     float yr = DEG2RAD * p->yaw;
     Vector3 forward = { sinf(-yr), 0.0f, -cosf(yr) };
     Vector3 right = { -forward.z, 0.0f, forward.x };
@@ -18536,7 +18550,7 @@ static int16_t net_quantize_axis(float value) {
     return (int16_t)lrintf(value * 32767.0f);
 }
 
-static NetInputCommand net_sample_local_input(int local_index, int player_slot) {
+static NetInputCommand net_sample_local_input(int local_index, int player_slot, float dt) {
     NetInputCommand command = { 0 };
     command.sequence = ++netInputSequence[player_slot];
     command.client_tick = netServerTick;
@@ -18601,10 +18615,13 @@ static NetInputCommand net_sample_local_input(int local_index, int player_slot) 
         command.creative_color = (uint8_t)creativeBlockColorIndex[slot];
         command.creative_pickup = (uint8_t)creativePickupType[slot];
     }
+    mouse_command(&command,local_index,player_slot,dt);
     return command;
 }
 
 static void net_apply_creative_command(Player *p, const NetInputCommand *command, float dt) {
+    if(command->mouse_look){p->yaw=command->aim_yaw;p->pitch=command->aim_pitch;p->yaw_vel=p->pitch_vel=0;}
+    if(!command->mouse_look){
     float yaw_accel = -net_axis_value(command->look_x) * TURN_ACCELERATION;
     float pitch_accel = -net_axis_value(command->look_y) * TURN_ACCELERATION;
     p->yaw_vel = clampf(p->yaw_vel + yaw_accel * dt, -TURN_SPEED, TURN_SPEED);
@@ -18613,6 +18630,7 @@ static void net_apply_creative_command(Player *p, const NetInputCommand *command
     if (fabsf(pitch_accel) < 0.01f) p->pitch_vel *= fmaxf(0.0f, 1.0f - 12.0f * dt);
     p->yaw += p->yaw_vel * dt;
     p->pitch = clampf(p->pitch + p->pitch_vel * dt, -89.0f, 89.0f);
+    }
     Vector3 forward = player_forward(p);
     Vector3 right = v_norm(v_cross(forward, (Vector3){ 0.0f, 1.0f, 0.0f }));
     Vector3 move = v_add(v_mul(right, net_axis_value(command->move_x)),
@@ -19988,8 +20006,9 @@ static void net_host_tick(void) {
             if (command.pressed & NET_INPUT_FIRE) FireVoxel(slot);
             if (command.pressed & NET_INPUT_MELEE) perform_melee(slot);
             if (command.pressed & NET_INPUT_BUILD) perform_build(slot);
-            if ((command.held & NET_INPUT_TETHER) && !(netPreviousHeld[slot] & NET_INPUT_TETHER)) start_tether(slot);
-            if (!(command.held & NET_INPUT_TETHER) && (netPreviousHeld[slot] & NET_INPUT_TETHER)) release_tether(slot);
+            if(command.pressed & NET_INPUT_TETHER_CANCEL){Vector3 zero={0};release_tether_velocity(slot,&zero);}
+            else if ((command.held & NET_INPUT_TETHER) && !(netPreviousHeld[slot] & NET_INPUT_TETHER)) start_tether(slot);
+            if (!(command.pressed & NET_INPUT_TETHER_CANCEL) && !(command.held & NET_INPUT_TETHER) && (netPreviousHeld[slot] & NET_INPUT_TETHER)) release_tether(slot);
         }
         netPreviousHeld[slot] = command.held;
         netLastProcessedInput[slot] = command.sequence;
@@ -20028,7 +20047,7 @@ static void net_client_update(float dt) {
     for (int local_index = 0; local_index < netLocalPlayerCount; ++local_index) {
         int player_slot = netLocalPlayerSlots[local_index];
         if (player_slot < 0 || player_slot >= MAX_PLAYERS) continue;
-        NetInputCommand command = net_sample_local_input(local_index, player_slot);
+        NetInputCommand command = net_sample_local_input(local_index, player_slot, dt);
         uint8_t packet[128]; NetWriter writer;
         net_writer_init(&writer, packet, sizeof(packet));
         net_write_header(&writer, NET_MSG_INPUT, 0, netTransport.session_id, netServerTick);
@@ -21033,6 +21052,8 @@ static bool run_ai_awareness_smoke_test(void) {
 #include "couch_ui.inc"
 #include "enemy_lab.inc"
 
+#include "mouse_input.inc"
+
 int main(int argc, char **argv) {
     if (!parse_physics_arguments(argc, argv)) return 2;
     bool automatedRun = physicsSmokeSteps > 0 || debug_run_requested() || aiSmokeTestRequested || enemySmokeRequested;
@@ -21171,6 +21192,7 @@ int main(int argc, char **argv) {
     voxel_ca_init();
     // main loop
     while (!WindowShouldClose()) {
+        if(gameState!=GAME_STATE_PLAYING && gameState!=GAME_STATE_CREATIVE)mouse_sync();
 #if defined(__APPLE__)
         macos_gamepad_poll();
 #endif
@@ -22147,6 +22169,8 @@ int main(int argc, char **argv) {
         }
         clarity_tick(dt);
         debug_console_update();
+        if(IsKeyPressed(KEY_PAUSE)){gameState=GAME_STATE_PAUSED;mouse_sync();break;}
+        mouse_frame(dt);
         if (netTransport.role == NET_ROLE_CLIENT) {
             net_client_update(dt);
             render_gameplay_view(screens, &renderPlayers, &renderW, &renderH, false);
@@ -22265,11 +22289,11 @@ int main(int argc, char **argv) {
 
         if (!debugConsoleOpen && !ff_input_blocked(0) && playerInput[0] == INPUT_TYPE_KEYBOARD && players[0].respawn_timer <= 0.0f) {
             if(IsKeyPressed(KEY_C))clarity_throw(0);
-            if (IsKeyPressed(KEY_LEFT_CONTROL))  FireVoxel(0);
-            if (IsKeyPressed(KEY_Z)) perform_melee(0);
+            if (!mouse_owns(0) && IsKeyPressed(KEY_LEFT_CONTROL))  FireVoxel(0);
+            if (!mouse_owns(0) && IsKeyPressed(KEY_Z)) perform_melee(0);
             if (IsKeyPressed(KEY_E)) perform_build(0);
-            if (IsKeyPressed(KEY_R)) start_tether(0);
-            if (IsKeyReleased(KEY_R)) release_tether(0);
+            if (!mouse_owns(0) && IsKeyPressed(KEY_R)) start_tether(0);
+            if (!mouse_owns(0) && IsKeyReleased(KEY_R)) release_tether(0);
             if (IsKeyPressed(KEY_SPACE) && players[0].onGround && !ff_input_blocked(0)) {
                 players[0].vel.y = JUMP_SPEED;
                 players[0].onGround = false;
@@ -22277,11 +22301,11 @@ int main(int argc, char **argv) {
         }
         if (!debugConsoleOpen && !ff_input_blocked(1) && net_player_is_local(1) && playerInput[1] == INPUT_TYPE_KEYBOARD && players[1].respawn_timer <= 0.0f) {
             if(IsKeyPressed(KEY_PERIOD))clarity_throw(1);
-            if (IsKeyPressed(KEY_RIGHT_CONTROL)) FireVoxel(1);
-            if (IsKeyPressed(KEY_M)) perform_melee(1);
+            if (!mouse_owns(1) && IsKeyPressed(KEY_RIGHT_CONTROL)) FireVoxel(1);
+            if (!mouse_owns(1) && IsKeyPressed(KEY_M)) perform_melee(1);
             if (IsKeyPressed(KEY_O)) perform_build(1);
-            if (IsKeyPressed(KEY_P)) start_tether(1);
-            if (IsKeyReleased(KEY_P)) release_tether(1);
+            if (!mouse_owns(1) && IsKeyPressed(KEY_P)) start_tether(1);
+            if (!mouse_owns(1) && IsKeyReleased(KEY_P)) release_tether(1);
             if (IsKeyPressed(KEY_RIGHT_SHIFT) && players[1].onGround && !ff_input_blocked(1)) {
                 players[1].vel.y = JUMP_SPEED;
                 players[1].onGround = false;
@@ -22498,6 +22522,7 @@ int main(int argc, char **argv) {
             case GAME_STATE_CREATIVE: {
                 float dt = GetFrameTime();
                 debug_console_update();
+                mouse_frame(dt);
                 if (netTransport.role == NET_ROLE_CLIENT) {
                     net_client_update(dt);
                     render_gameplay_view(screens, &renderPlayers, &renderW, &renderH, true);
@@ -22579,6 +22604,7 @@ int main(int argc, char **argv) {
                     int controlsSize = 18;
                     int controlsSpacing = 24;
                     DrawText("Controls", 100, controlsY, 20, BLACK);
+                    DrawText("Mouse: first keyboard seat | Aim / Left: shoot / Right: tether / Middle: melee",100,controlsY+controlsSpacing*4,controlsSize,DARKGRAY);
                     DrawText("Keyboard P1: Move WASD | Look F/H (yaw), T/G (pitch) | Jump SPACE | Shoot LCTRL | Melee Z | Build E | Tether R",
                              100, controlsY + controlsSpacing * 1, controlsSize, DARKGRAY);
                     DrawText("Keyboard P2: Move IJKL | Look Arrows | Jump RSHIFT | Shoot RCTRL | Melee M | Build O | Tether P",

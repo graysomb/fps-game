@@ -84,6 +84,15 @@ invulnerability; Escape leaves. The overlay shows the ability state, target,
 timers, equipment count, and intended counterplay. Normal movement, shooting,
 melee, and tether controls remain available.
 
+The first local keyboard seat also uses mouse aim: left-click fires, hold
+right-click to tether, and middle-click melees. Existing keyboard actions and
+look keys remain available. Mouse aim is direct (0.15 degrees per mouse unit at
+1x sensitivity), uses the seat's Look sensitivity and Invert Y settings, and has
+no acceleration or aim assist. Other seats keep their controls. Menus, pause,
+console and focus loss release the cursor; leaving capture cancels a mouse-seat
+tether without throwing debris. Creative supports mouse aiming while keeping
+its existing editing keys. LAN mouse aim uses authoritative absolute angles.
+
 Hold the existing tether control while aiming at an opponent to lock on and drain
 Matter at twice your regular bullet damage per second. Actor drains use the normal
 8-unit tether range (gold upgrades still apply to voxel grabs). The lock follows
@@ -910,7 +919,7 @@ across periodic boundaries;
 the existing depth-aware fog still hides distant terrain. The first-person weapon
 and HUD remain clear. Set
 `FPS_BOUNDED_WORLD=1` before launching to restore the bounded arenas for comparison.
-LAN protocol 12 sends topology and actor-drain visuals; host and client need matching builds.
+LAN protocol 13 adds absolute mouse aim; host and client need matching builds.
 
 `tests/periodic_world_test.c` runs in `tools/validate_firefight.ps1` for CPU/GPU.
 It checks seams/corners, collision-cache contact, rays, moving characters and
