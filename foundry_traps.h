@@ -1,5 +1,5 @@
 /* Arena-only gameplay state; stable voxel tags survive compaction and GPU readback. */
-#define FOUNDRY_TRAPS 6
+#define FOUNDRY_TRAPS 32
 #define FOUNDRY_TRAP_PAYLOAD 256
 typedef enum { FOUNDRY_DROP, FOUNDRY_SWITCH, FOUNDRY_TIP } FoundryTrapKind;
 typedef struct {

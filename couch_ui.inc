@@ -82,7 +82,9 @@ static void ff_draw_hud(int i,int w,int h) {
         EnemySpecialState *s=&enemySpecial[boss];int lost=0;for(int bit=0;bit<4;bit++)lost+=(s->lostMask>>bit)&1;
         int barWidth=w<700?230:340,x=(w-barWidth)/2,y=70;
         DrawRectangle(x-6,y-5,barWidth+12,44,Fade(BLACK,.85f));
-        DrawText(enemy_core_open(boss)?TextFormat("FOUNDRY CORE %.0f / %.0f",s->coreHealth,s->coreMax):TextFormat("FOUNDRY: Break 2 supports (%d/2)",lost<2?lost:2),x,y,w<700?12:16,enemy_core_open(boss)?GOLD:ORANGE);
+        DrawText(enemy_core_open(boss)?TextFormat("CORE EXPOSED %.0f / %.0f",s->coreHealth,s->coreMax):TextFormat("FOUNDRY: Break 2 supports (%d/2)",lost<2?lost:2),x,y,w<700?12:16,enemy_core_open(boss)?GOLD:ORANGE);
+        if(s->blockedCue>0)DrawText("CORE PROTECTED - SHOOT ORANGE SUPPORTS",x,y+38,w<700?10:14,ORANGE);
+        if(s->coreCue>0)DrawText("SUPPORTS BROKEN - ATTACK THE GOLD CORE",x,y+38,w<700?10:14,GOLD);
         DrawRectangle(x,y+24,barWidth,7,DARKGRAY);
         DrawRectangle(x,y+24,(int)(barWidth*clampf(s->coreHealth/fmaxf(1,s->coreMax),0,1)),7,GOLD);break;
     }
@@ -98,7 +100,7 @@ static void ff_draw_hud(int i,int w,int h) {
         text=steps[practiceStep<5?practiceStep:4];
     } else if(firefightWaveState==FIREFIGHT_STATE_INTERMISSION) {
         int v=prepVotes[i]<0?0:prepVotes[i];
-        text=TextFormat("%s %s",ff_upgrade_names[v],prepReady[i]?"[READY]":"");
+        text=TextFormat("%s %s",ff_upgrade_label(v),prepReady[i]?"[READY]":"");
         DrawText(playerInput[i]==INPUT_TYPE_GAMEPAD?(prepMenuOpen[i]?"D-pad: vote | Bottom: ready | Top: build":"Top face: vote menu"):(prepMenuOpen[i]?"Look: vote | Jump: ready | V/N: build":"V/N: vote menu"),panelX,h-112,font,RAYWHITE);
         const WaveDefinition *next=&ff_waves[firefightWave%FF_WAVE_COUNT];
         int total=0,special=0;
@@ -106,7 +108,7 @@ static void ff_draw_hud(int i,int w,int h) {
         DrawText(TextFormat("Next: %s (%d / %d special)",next->name,total,special),panelX,h-142,w<700?12:font,RAYWHITE);
     } else {
         for(int j=0;j<firefightHumans;j++) if(combatantLife[j]==LIFE_DOWNED) {
-            text=TextFormat("P%d DOWN | Hold %s nearby: revive (25 Matter)",j+1,playerInput[i]==INPUT_TYPE_GAMEPAD?"LB":i==0?"X":","); break;
+            text=TextFormat("P%d DOWN | Hold %s nearby: revive (25 Matter)",j+1,playerInput[i]==INPUT_TYPE_GAMEPAD?"R-stick":i==0?"X":","); break;
         }
         if(!text && players[i].matter<1) text="No Matter: melee blocks to harvest";
         if(!text) {
@@ -128,7 +130,7 @@ static void ff_draw_hud(int i,int w,int h) {
         DrawText(text,panelX,h-82,fs,GOLD);
     }
     if(combatantLife[i]==LIFE_ALIVE && firefightWaveState!=FIREFIGHT_STATE_INTERMISSION)
-        DrawText(TextFormat("Shot 1 | Build %d | Harvest +%d",ff_bonus(i,UPGRADE_BUILD)?5:10,ff_bonus(i,UPGRADE_HARVEST)?15:10),panelX,h-112,font,RAYWHITE);
+        DrawText(TextFormat("Shot 1 | Build %.2g | Harvest +%.0f",ff_build_cost(i),ff_harvest_amount(i)),panelX,h-112,font,RAYWHITE);
 }
 
 static bool couch_frame(void) {

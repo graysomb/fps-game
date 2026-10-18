@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define FPS_NET_MAGIC 0x4650534eu /* "FPSN" */
-#define FPS_NET_PROTOCOL_VERSION 13u /* Absolute mouse aim in input commands. */
+#define FPS_NET_PROTOCOL_VERSION 14u /* Hologram input and authoritative snapshots. */
 #define FPS_NET_DEFAULT_PORT 27015u
 #define FPS_NET_DISCOVERY_PORT 27016u
 #define FPS_NET_MAX_PACKET 1100u
@@ -35,7 +35,8 @@ typedef enum NetMessageType {
     NET_MSG_CREATIVE_ACTION,
     NET_MSG_GAME_EVENT,
     NET_MSG_GRENADES,
-    NET_MSG_REGENERATION
+    NET_MSG_REGENERATION,
+    NET_MSG_HOLOGRAMS
 } NetMessageType;
 
 typedef enum NetInputButtons {
@@ -52,7 +53,8 @@ typedef enum NetInputButtons {
     NET_INPUT_CREATIVE_UP = 1u << 10,
     NET_INPUT_CREATIVE_DOWN = 1u << 11,
     NET_INPUT_GRENADE = 1u << 12,
-    NET_INPUT_TETHER_CANCEL = 1u << 13
+    NET_INPUT_TETHER_CANCEL = 1u << 13,
+    NET_INPUT_HOLOGRAM = 1u << 14
 } NetInputButtons;
 
 typedef struct NetPacketHeader {
@@ -83,7 +85,8 @@ typedef enum NetPlayerVisualFlags {
     NET_PLAYER_VISUAL_TETHER = 1u << 1,
     NET_PLAYER_VISUAL_GOLD_TETHER = 1u << 2,
     NET_PLAYER_VISUAL_POWERED_SHOT = 1u << 3,
-    NET_PLAYER_VISUAL_DRAIN = 1u << 4
+    NET_PLAYER_VISUAL_DRAIN = 1u << 4,
+    NET_PLAYER_VISUAL_DRAIN_IDLE = 1u << 5
 } NetPlayerVisualFlags;
 
 /* Optional bit in the existing player-state flags byte; no payload change. */

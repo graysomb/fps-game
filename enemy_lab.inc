@@ -122,7 +122,7 @@ static void enemy_lab_ai_step(float dt) {
 }
 static bool enemy_lab_controls(void) {
     enemyLabStep=false;
-    if(IsKeyPressed(KEY_F3)||couch_button(0,GAMEPAD_BUTTON_LEFT_TRIGGER_1)) {
+    if(IsKeyPressed(KEY_F3)||couch_button(0,GAMEPAD_BUTTON_LEFT_FACE_RIGHT)) {
         int next=enemyLabCase+1;if(next==ENEMY_TYPE_SCRAPPER)next++;if(next>ENEMY_TYPE_COUNT) next=ENEMY_TYPE_GOLIATH;
         enemy_lab_start(next);
     }
@@ -139,7 +139,7 @@ static void enemy_lab_hud(int w,int h) {
     int fs=w<900?14:18;
     DrawRectangle(8,70,w-16,232,Fade(BLACK,.8f));
     DrawText(TextFormat("ENEMY LAB: %s | %s | Invulnerable: %s",enemyLabCase==ENEMY_TYPE_COUNT?"mixed":enemy_names[enemyLabCase],enemyLabPaused?"PAUSED":"RUNNING",enemyLabGod?"ON":"OFF"),16,78,fs,GOLD);
-    DrawText("F3/LB: next | F4/Top: reset | F5/Left face: pause",16,102,fs,RAYWHITE);
+    DrawText("F3/D-right: next | F4/Top: reset | F5/Left face: pause",16,102,fs,RAYWHITE);
     DrawText("F6/RB: step | F7/Back button: invulnerability | Esc: exit",16,126,fs,RAYWHITE);
     if(enemyLabCase<ENEMY_TYPE_COUNT) DrawText(enemyLabFixture>=0?enemyLabFixtureNames[enemyLabFixture]:enemy_description(enemyLabCase),16,150,fs,RAYWHITE);
     EnemySpecialState *s=&enemySpecial[4];

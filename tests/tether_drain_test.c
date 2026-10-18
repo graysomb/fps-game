@@ -37,7 +37,7 @@ int main(int argc,char **argv){
         for(int frame=0;frame<hz;frame++)update_tether_drains(1.f/hz);
         assert(fabsf(players[1].matter-(100-2*player_bullet_damage(0)))<.01f);
         assert(players[0].matter==0 && Vector3Equals(pos,players[1].pos) && Vector3Equals(velocity,players[1].vel));
-        update_tether_drains(100);assert(players[1].matter==0 && players[1].isExposed && players[1].respawn_timer==0 && !players[0].drainTarget);
+        update_tether_drains(100);assert(players[1].matter==0 && players[1].isExposed && players[1].respawn_timer==0 && players[0].drainTarget==2);
     }
     setup();start_tether(0);players[1].pos.x=2;update_tether_drains(.1f);assert(players[0].drainTarget==2);
     Vector3 endpoint;assert(player_tether_visual_target(0,&endpoint) && Vector3Equals(endpoint,players[1].pos));
@@ -65,7 +65,7 @@ int main(int argc,char **argv){
     assert(!start_tether_drain(0));
     for(int n=boss->equipmentCount-1;n>=0;n--)if(boss->equipment[n].group<2)enemy_detach(enemy_voxel(boss->equipment[n].id));
     enemy_update_equipment(4);rebuild_voxel_hash();assert(start_tether_drain(0));
-    update_tether_drains(100);assert(boss->coreHealth==1 && players[4].respawn_timer==0 && !players[0].drainTarget);
+    update_tether_drains(100);assert(boss->coreHealth==1 && players[4].respawn_timer==0 && players[0].drainTarget==5);
     assert(weapon_renderer_init());assert(weapon_drain_shader_ready());
     MakeDirectory("artifacts");unsigned first=capture(0,"artifacts/tether-drain.png",false,false);
     assert(first!=capture(.15f,"artifacts/tether-drain-animated.png",false,false));capture(.15f,"artifacts/tether-drain-bloom.png",true,false);

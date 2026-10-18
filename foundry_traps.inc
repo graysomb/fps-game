@@ -123,12 +123,15 @@ static void foundry_traps_hits(void) {
         int group=collisionVoxelClusterIds[i];
         v->foundryTrapHeavy=v->vgs_active && group>=0 && sizes[group]>=8;
         if(!v->foundryTrapHeavy || v->sleeping || fmaxf(v_length(v->vel),v->foundryTrapPreviousSpeed)<2.5f)continue;
+        hologram_projectile(i,world_image(v->foundryTrapPrevious,v->pos),v->pos,100);
         FoundryTrap *t=&foundryTraps[v->foundryTrapId-1];
         Vector3 start=world_image(v->foundryTrapPrevious,v->pos),path=v_sub(v->pos,start);float length=v_length(path);
         for(int j=0;j<activePlayers;j++) {
+            if(tetherHoldClusterTag[i]==j+1 || tetherTag[i]==j+1)continue;
             if(t->victims&(1u<<j) || players[j].respawn_timer>0 || players[j].invuln_timer>0 || !enemy_core_open(j))continue;
-            BoundingBox b=expand_bounds(combatant_bounds_at(j,world_image(players[j].pos,start),PLAYER_SIZE*.5f),v->rest_edge*.5f+.03f);
+            BoundingBox b=expand_bounds(combatant_bounds_at(j,world_image(players[j].pos,start),PLAYER_SIZE*.5f),v->rest_edge*.5f+voxel_particle_radius(v)+.03f);
             bool hit=(start.x>=b.min.x && start.x<=b.max.x && start.y>=b.min.y && start.y<=b.max.y && start.z>=b.min.z && start.z<=b.max.z);
+            if(v->tetherReleaseOverlap==j+1){if(hit)continue;v->tetherReleaseOverlap=0;}
             if(!hit && length>.00001f){RayCollision c=GetRayCollisionBox((Ray){start,v_mul(path,1/length)},b);hit=c.hit && c.distance<=length;}
             if(!hit)continue;
             t->victims|=1u<<j;

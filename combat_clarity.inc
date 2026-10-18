@@ -81,6 +81,7 @@ static bool clarity_debris_hit(int v,int target) {
     return true;
 }
 static void clarity_explode(Vector3 pos,int owner) {
+    hologram_blast(pos,4,60);
     if(netTransport.role==NET_ROLE_CLIENT)return;
     float damage[MAX_COMBATANTS]={0};
     for(int i=0;i<activePlayers;i++)if(players[i].respawn_timer<=0) {

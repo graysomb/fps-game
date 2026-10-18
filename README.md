@@ -14,6 +14,31 @@ runs in linux and windows so far
 
 ## Couch sessions and Firefight
 
+### Hologram decoys and persistent upgrades
+
+Deploy a walking copy with **LB**, **V** (keyboard P1), or **/** (keyboard P2).
+It copies your rat colors and weapon, walks in your aim direction, follows terrain,
+and stops at walls. Enemies perceive and attack it normally. It has **50 damage
+capacity**, lasts eight seconds, and has a 15-second cooldown with no Matter cost.
+It cannot attack, harvest, block projectiles, or grant kill rewards. Revive now uses
+**hold right stick**; keyboard revive remains X/comma. Enemy Lab next-case is D-pad Right.
+
+Firefight votes accumulate team upgrade levels for the entire run. Build cost is
+`max(1, 10 / (1 + level))` (nine levels), harvest is `10 + 5 * level` (eight levels),
+and throw impulse is `1 + 0.25 * level` (eight levels). Voting shows current and next
+benefits, skips maxed choices, and stops once all upgrades are maxed. A rematch resets them.
+
+Attached Goliath armor blocks regular bullets. Use melee, explosives, tethering, or
+thrown debris to remove it. The Foundry HUD identifies its two-support requirement,
+blocked core hits, and the exposed-core phase.
+
+Crosscut's twelve route slabs and central slab are registered drop traps with orange
+release cells. Their footprints and routes remain in place; overhead clearance and
+support spacing allow the payloads to fall. The damage sweep includes the physics
+particle radius, so physical contact cannot stop a lethal drop just outside its damage bounds.
+`tests/playtest_fixes_test.c` releases all 19 arena traps over enemies, checks a miss
+outside the impact zone, restores them, and repeats the physical kills on CPU/GPU.
+
 ### Combat clarity and grenades
 
 The main menu scans a slowly rotating rat and enemy roster. Left/right browses the
@@ -59,7 +84,7 @@ close shield melee, and elevated Lobber fixtures. F4 resets the selected fixture
 `tools/validate_firefight.ps1` (and `-Gpu`) checks real structure flights, damage,
 supplies, inventory, events, and two-process LAN late join with dropped snapshots and
 duplicate inputs, alongside the existing Firefight regressions.
-LAN peers require protocol 8; use the same build on every machine.
+LAN peers require protocol 14; use the same build on every machine.
 
 ### Specialist enemies and Enemy Lab
 
@@ -78,7 +103,7 @@ Lobbers never generate replacement ammunition: control the arena's scrap supplie
 
 Open **Enemy Lab** from the couch menu or advanced setup (`L`). It has isolated
 fixtures and a mixed encounter, a fixed seed, and invulnerability enabled by
-default. `F3` / LB selects the next case; `F4` / top face resets it; `F5` / left
+default. `F3` / D-pad Right selects the next case; `F4` / top face resets it; `F5` / left
 face pauses; `F6` / RB advances one simulation step; `F7` / Back toggles
 invulnerability; Escape leaves. The overlay shows the ability state, target,
 timers, equipment count, and intended counterplay. Normal movement, shooting,
@@ -97,7 +122,8 @@ Hold the existing tether control while aiming at an opponent to lock on and drai
 Matter at twice your regular bullet damage per second. Actor drains use the normal
 8-unit tether range (gold upgrades still apply to voxel grabs). The lock follows
 the target within a 65-degree forward cone and breaks on release, cover, range,
-death/downing, or empty Matter. It costs no Matter, grants none, cannot kill, has
+or death/downing. At empty Matter the link stays connected with a subdued beam,
+and draining resumes if the target regenerates Matter. It costs no Matter, grants none, cannot kill, has
 no movement effects and does not parry another tether. Foundry core protection
 still applies; an exposed core retains its final health point. A pulsing cyan beam
 and rotating contact rings distinguish draining from a normal voxel tether, with
@@ -203,7 +229,7 @@ Eight real scrap bundles restock between waves only where their supply sites are
 Ordinary walls/roofs are thicker and supports are redundant; marked demolition points
 remain vulnerable without changing global material strength.
 
-In cooperative Firefight, lethal damage downs a player for 15 seconds. Hold LB
+In cooperative Firefight, lethal damage downs a player for 15 seconds. Hold the right stick button
 (keyboard P1 `X`, P2 comma) within two units and clear sight for three seconds to
 revive them. Completing a revive costs 25 Matter and restores 35 Matter plus two
 seconds of invulnerability. You must have more than 25 Matter to revive. Taking
@@ -212,9 +238,9 @@ Bleeding out spends one of three shared respawn reserves; exhausted players wait
 for the next wave. Solo players use reserves directly. Clearing a wave restores
 the team, and every second cleared wave awards a reserve.
 
-Preparation lasts 20 seconds. Vote for cheaper building (5 Matter), improved
-harvesting (15 instead of 10 Matter), or 25% more tether throw impulse. The team
-gets one bonus for the next wave; ties default to cheaper building. Everyone can
+Preparation lasts 20 seconds. Vote to increase the team's build, harvest, or throw
+upgrade level. Bonuses persist and stack across waves; ties default to building,
+or the next available upgrade when building is maxed. Everyone can
 ready to skip the remaining break after five seconds. Top face (keyboard `V`/`N`)
 toggles the vote panel so the normal combat bindings remain available for building
 and harvesting. The vote panel uses D-pad left/right and bottom face to ready;

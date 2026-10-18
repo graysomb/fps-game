@@ -30,7 +30,9 @@ static void wr_init_drain(void){
     wr_drain=LoadShaderFromMemory(vs,fs);
     wr_drain_start=GetShaderLocation(wr_drain,"beamStart");wr_drain_axis=GetShaderLocation(wr_drain,"beamAxis");wr_drain_time=GetShaderLocation(wr_drain,"effectTime");
 }
-void weapon_draw_drain(Vector3 start,Vector3 target,float now){
+void weapon_draw_drain(Vector3 start,Vector3 target,float now){weapon_draw_drain_state(start,target,now,true);}
+void weapon_draw_drain_state(Vector3 start,Vector3 target,float now,bool active){
+    if(!active){DrawCylinderEx(start,target,.025f,.025f,8,(Color){45,110,130,255});return;}
     Vector3 axis=Vector3Normalize(Vector3Subtract(target,start));
     target=Vector3Subtract(target,Vector3Scale(axis,.45f)); // Keep contact rings on the near surface.
     bool shader=weapon_drain_shader_ready();

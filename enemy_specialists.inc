@@ -114,21 +114,26 @@ static void enemy_cleanup(bool removeEquipment) {
     }
     memset(enemyCharges,0,sizeof(enemyCharges));memset(enemyLobs,0,sizeof(enemyLobs));memset(enemyStructures,0,sizeof(enemyStructures));
 }
+/* Authored equipment layout shared by simulation and isolated menu previews. */
+static int enemy_equipment_layout(EnemyType type,EnemyEquipment *out) {
+    int count=0;
+    if(type==ENEMY_TYPE_SHIELDBEARER)
+        for(int x=0;x<4;x++)for(int y=0;y<5;y++)out[count++]=(EnemyEquipment){.offset={(x-1.5f)*.5f,(y-1.5f)*.5f,-1},.group=x};
+    if(type==ENEMY_TYPE_ANCHOR)out[count++]=(EnemyEquipment){.offset={0,.9f,.65f},.group=0};
+    if(type==ENEMY_TYPE_FOUNDRY){
+        for(int g=0;g<4;g++)for(int y=0;y<4;y++)out[count++]=(EnemyEquipment){.offset={g%2?1.25f:-1.25f,-BASE_EYE_HEIGHT+.25f+y*.5f,g/2?1.25f:-1.25f},.group=g};
+        for(int x=0;x<4;x++)for(int z=0;z<2;z++)out[count++]=(EnemyEquipment){.offset={(x-1.5f)*.5f,1.6f,(z-.5f)*.5f},.group=4};
+    }
+    return count;
+}
 static void enemy_init(int i) {
     EnemySpecialState *s=&enemySpecial[i];memset(s,0,sizeof(*s));
     for(int g=0;g<4;g++)s->shieldHits[g]=6;
     s->generation=++enemyGeneration;s->cooldown=2;s->spawnTimer=15;s->target=-1;s->reason="seeking";
     s->coreMax=s->coreHealth=enemy_matter(players[i].enemyType);
     players[i].matter=players[i].matterMax=enemy_matter(players[i].enemyType);
-    if(players[i].enemyType==ENEMY_TYPE_SHIELDBEARER)
-        for(int x=0;x<4;x++) for(int y=0;y<5;y++) enemy_plate(i,(Vector3){(x-1.5f)*.5f,(y-1.5f)*.5f,-1},x);
-    if(players[i].enemyType==ENEMY_TYPE_ANCHOR) enemy_plate(i,(Vector3){0,.9f,.65f},0);
-    if(players[i].enemyType==ENEMY_TYPE_FOUNDRY) {
-        for(int g=0;g<4;g++) for(int y=0;y<4;y++)
-            enemy_plate(i,(Vector3){g%2?1.25f:-1.25f,-BASE_EYE_HEIGHT+.25f+y*.5f,g/2?1.25f:-1.25f},g);
-        for(int x=0;x<4;x++) for(int z=0;z<2;z++) enemy_plate(i,(Vector3){(x-1.5f)*.5f,1.6f,(z-.5f)*.5f},4);
-
-    }
+    EnemyEquipment layout[ENEMY_EQUIPMENT_MAX];int count=enemy_equipment_layout(players[i].enemyType,layout);
+    for(int n=0;n<count;n++)enemy_plate(i,layout[n].offset,layout[n].group);
 }
 static void enemy_update_equipment(int i) {
     EnemySpecialState *s=&enemySpecial[i];int before=s->equipmentCount,write=0,groups=0;
@@ -142,7 +147,7 @@ static void enemy_update_equipment(int i) {
     if(players[i].enemyType==ENEMY_TYPE_ANCHOR && before && !write) s->disabled=8;
     if(players[i].enemyType==ENEMY_TYPE_FOUNDRY) {
         int lost=(~groups)&15, count=0;for(int g=0;g<4;g++) count+=(lost>>g)&1;
-        if(count>=2)s->coreOpen=true;
+        if(count>=2 && !s->coreOpen){s->coreOpen=true;s->coreCue=3;play_sfx_at(SFX_SHIELD_BREAK,players[i].pos,i,2,.7f);}
         s->lostMask=lost;
     }
 }
@@ -193,7 +198,7 @@ static bool enemy_collect(int i) {
 }
 static uint64_t enemy_sapper_target(int i,int target) {
     float best=-1;uint64_t found=0;
-    Vector3 threat=v_norm(world_delta(players[target].pos,players[i].pos));
+    Vector3 threat=v_norm(world_delta(ai_target_body(target)->pos,players[i].pos));
     for(int v=0;v<voxel_count;v++) {
         Voxel *x=&voxels[v];if(x->simulate || x->pos.y>players[i].pos.y+1.5f) continue;
         Vector3 d=world_delta(x->pos,players[i].pos);float dist=v_length(d);
@@ -402,6 +407,7 @@ static bool enemy_find_build_site(int i,Vector3 threat) {
     return false;
 }
 static void enemy_stomp(int i) {
+    hologram_blast(players[i].pos,3,20);
     for(int j=0;j<firefightHumans;j++)if(players[j].respawn_timer<=0 && v_length(world_delta(players[j].pos,players[i].pos))<=3) {
         apply_matter_damage(j,i,20);
         Vector3 away=world_delta(players[j].pos,players[i].pos);away.y=.6f;
@@ -421,6 +427,8 @@ static void enemy_tick(float dt) {
     for(int i=MAX_PLAYERS;i<activePlayers;i++) if(enemy_is_special(i) && players[i].respawn_timer<=0) {
         enemySpecial[i].exposure=fmaxf(0,enemySpecial[i].exposure-dt);
         enemySpecial[i].disabled=fmaxf(0,enemySpecial[i].disabled-dt);
+        enemySpecial[i].coreCue=fmaxf(0,enemySpecial[i].coreCue-dt);
+        enemySpecial[i].blockedCue=fmaxf(0,enemySpecial[i].blockedCue-dt);
         enemy_update_equipment(i);
     }
     for(int i=0;i<MAX_COMBATANTS;i++) {
@@ -535,7 +543,7 @@ static void enemy_update(int i,float dt) {
     if(t==ENEMY_TYPE_SHIELDBEARER) {
         speed=.7f;
         for(int j=MAX_PLAYERS;j<activePlayers;j++)if(j!=i && players[j].respawn_timer<=0 && v_length(world_delta(p->pos,players[j].pos))<8) {
-            move=world_delta(v_add(players[j].pos,v_mul(v_norm(world_delta(players[s->target].pos,players[j].pos)),2)),p->pos);break;
+            move=world_delta(v_add(players[j].pos,v_mul(v_norm(world_delta(ai_target_body(s->target)->pos,players[j].pos)),2)),p->pos);break;
         }
     }
     if(t==ENEMY_TYPE_SCRAPPER && !p->isExposed && s->equipmentCount<12) {
@@ -558,7 +566,7 @@ static void enemy_update(int i,float dt) {
         speed=.85f;if(distance<6)move=v_mul(to,-1);else if(distance<10)move=(Vector3){0};
         if(!p->isExposed && s->cooldown<=0) {
             if(s->searchTimer<=0) {
-                s->buildKind=players[s->target].pos.y-p->pos.y>.5f?1:0;
+                s->buildKind=ai_target_body(s->target)->pos.y-p->pos.y>.5f?1:0;
                 s->work=enemy_find_build_site(i,to)?1:0;s->searchTimer=s->work?.5f:1;
                 s->reason=s->work?"seeking build site":"no clear build site";
                 if(s->work)s->state=4;else s->state=0;
@@ -586,7 +594,7 @@ static void enemy_update(int i,float dt) {
                 }
             }
             if(p->tetherHolding) {
-                s->aim=players[s->target].pos;Vector3 velocity;
+                s->aim=ai_target_body(s->target)->pos;Vector3 velocity;
                 if(enemy_lob_velocity(player_tether_hold_position(p),s->aim,&velocity)) {s->state=3;s->windup=1.5f;enemy_cue(i);}
                 else {enemy_drop_payload(i);s->selected=0;s->searchTimer=s->cooldown=1;s->reason="blocked arc";s->repositionTimer=2;move=distance>24?to:(Vector3){to.z,0,-to.x};}
             }
@@ -616,22 +624,26 @@ static void enemy_update(int i,float dt) {
             s->spawnTimer=added?15:1;
         }
     }
-    if(distance<1.4f && enemy_clear_line(p->pos,players[s->target].pos) && s->melee<=0 && s->windup<=0 && t!=ENEMY_TYPE_FOUNDRY) {
-        if(players[s->target].isExposed)kill_player(s->target,i,true,false);else apply_matter_damage(s->target,i,10);s->melee=1.5f;
+    if(distance<1.4f && enemy_clear_line(p->pos,ai_target_body(s->target)->pos) && s->melee<=0 && s->windup<=0 && t!=ENEMY_TYPE_FOUNDRY) {
+        if(target_is_hologram(s->target))hologram_damage(s->target,10);else if(players[s->target].isExposed)kill_player(s->target,i,true,false);else apply_matter_damage(s->target,i,10);s->melee=1.5f;
     }
     move.y=0;
     if(s->windup>0 || v_length(move)<.25f){p->vel.x=p->vel.z=0;return;}
     bot_apply_move(p,&botStates[i],move,MOVE_SPEED*speed,dt);
+}
+/* Shared silhouette details, independent of simulation state and usable in menus. */
+static void enemy_draw_details(EnemyType type,Vector3 p,Color c) {
+        if(type==ENEMY_TYPE_SCRAPPER) DrawCube(v_add(p,(Vector3){0,.1f,.5f}),.8f,.8f,.4f,c);
+        if(type==ENEMY_TYPE_SAPPER) {DrawCube(v_add(p,(Vector3){0,.4f,0}),.7f,.3f,.7f,c);DrawSphere(v_add(p,(Vector3){0,.7f,0}),.15f,ORANGE);}
+        if(type==ENEMY_TYPE_BUILDER) DrawCube(v_add(p,(Vector3){0,.4f,0}),1,.2f,1,c);
+        if(type==ENEMY_TYPE_LOBBER) DrawCylinder(v_add(p,(Vector3){0,.25f,0}),.4f,.3f,1,8,c);
 }
 static void enemy_draw(void) {
     for(int i=MAX_PLAYERS;i<activePlayers;i++) if(enemy_is_special(i) && players[i].respawn_timer<=0) {
         if(!periodic_visible(players[i].pos,5))continue;
         EnemySpecialState *s=&enemySpecial[i];Vector3 p=players[i].pos;Color c=enemy_color(players[i].enemyType);
         /* Distinct silhouettes in addition to color: pack, mast, mortar, hardhat. */
-        if(players[i].enemyType==ENEMY_TYPE_SCRAPPER) DrawCube(v_add(p,(Vector3){0,.1f,.5f}),.8f,.8f,.4f,c);
-        if(players[i].enemyType==ENEMY_TYPE_SAPPER) {DrawCube(v_add(p,(Vector3){0,.4f,0}),.7f,.3f,.7f,c);DrawSphere(v_add(p,(Vector3){0,.7f,0}),.15f,ORANGE);}
-        if(players[i].enemyType==ENEMY_TYPE_BUILDER) DrawCube(v_add(p,(Vector3){0,.4f,0}),1,.2f,1,c);
-        if(players[i].enemyType==ENEMY_TYPE_LOBBER) DrawCylinder(v_add(p,(Vector3){0,.25f,0}),.4f,.3f,1,8,c);
+        enemy_draw_details(players[i].enemyType,p,c);
         if(players[i].enemyType==ENEMY_TYPE_ANCHOR) {
             DrawLine3D(p,v_add(p,(Vector3){0,1.1f,0}),c);
             for(int j=MAX_PLAYERS;j<activePlayers;j++) if(enemy_braces(i,j)) {

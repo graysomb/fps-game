@@ -17,6 +17,8 @@ static void ai_reset(int i) {
     }
 }
 static bool ai_hostile(int i,int j) {
+    if(target_is_hologram(j))return i>=0 && i<activePlayers && holograms[j-MAX_COMBATANTS].life>0 &&
+        (gameMode!=GAME_MODE_FIREFIGHT || combatantTeam[i]!=combatantTeam[j-MAX_COMBATANTS]);
     return i>=0 && i<activePlayers && j>=0 && j<activePlayers && i!=j && players[j].respawn_timer<=0 &&
         (gameMode!=GAME_MODE_FIREFIGHT || combatantTeam[i]!=combatantTeam[j]);
 }
@@ -76,16 +78,21 @@ static void ai_tick(int i,float dt) {
     bool locked=enemy_is_special(i) && enemySpecial[i].windup>0;
     if(!locked && a->pendingTarget>=0){int target=a->pendingTarget;a->pendingTarget=-1;ai_alert(i,target,a->pendingPosition,a->pendingSource);}
     int nearest=find_nearest_aware_enemy(i,NULL);
+    float nearestDistance=nearest<0?FLT_MAX:v_length(world_delta(ai_target_body(nearest)->pos,players[i].pos));
+    for(int h=0;h<MAX_PLAYERS;h++) {
+        int ref=MAX_COMBATANTS+h;float distance;
+        if(ai_hostile(i,ref) && check_ai_awareness_of_player(i,ref,&distance) && distance<nearestDistance){nearest=ref;nearestDistance=distance;}
+    }
     bool valid=ai_hostile(i,a->target),visible=valid && check_ai_awareness_of_player(i,a->target,NULL);
     if(!locked && nearest>=0 && (!valid || a->memory<=0 || (a->commit<=0 &&
-        v_length(world_delta(players[nearest].pos,players[i].pos))<.7f*v_length(world_delta(a->known,players[i].pos))))) {
-        ai_select(i,nearest,players[nearest].pos,AI_ALERT_SEEN);valid=true;visible=true;
+        v_length(world_delta(ai_target_body(nearest)->pos,players[i].pos))<.7f*v_length(world_delta(a->known,players[i].pos))))) {
+        ai_select(i,nearest,ai_target_body(nearest)->pos,AI_ALERT_SEEN);valid=true;visible=true;
     }
     if(!valid || (!visible && a->memory<=0 && !locked)){a->target=-1;a->memory=0;visible=false;}
     if(visible) {
-        a->known=players[a->target].pos;a->memory=4;
+        a->known=ai_target_body(a->target)->pos;a->memory=4;
         if(!a->wasVisible){a->reaction=fmaxf(a->reaction,ai_reaction(i));a->tracking=0;}
-        Vector3 velocity=players[a->target].vel;velocity.y=0;
+        Vector3 velocity=ai_target_body(a->target)->vel;velocity.y=0;
         if(v_length(velocity)>1 && v_length(a->lastTargetVelocity)>1 && v_dot(v_norm(velocity),v_norm(a->lastTargetVelocity))<0)a->tracking=0;
         a->lastTargetVelocity=velocity;a->tracking=fminf(1,a->tracking+dt);
     } else {ai_cancel_burst(i);a->tracking=0;a->reaction=fmaxf(a->reaction,ai_reaction(i));}

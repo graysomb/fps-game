@@ -17,8 +17,16 @@ static Vector3 crosscut_spawn_point(int index) {
 static Vector3 crosscut_supply_point(int index) {
     return crosscut_rotate((Vector3){13.5f,1,16.5f},index);
 }
+/* Same release and regeneration mechanics as Foundry, in rotated grid space. */
+static void crosscut_trap(int q,float x0,float x1,float z0,float z1) {
+    Vector3 a=crosscut_rotate((Vector3){x0*1.5f,0,z0*1.5f},q);
+    Vector3 b=crosscut_rotate((Vector3){x1*1.5f,0,z1*1.5f},q);
+    int loX=(int)roundf(fminf(a.x,b.x)/VOXEL_SIZE),hiX=(int)roundf(fmaxf(a.x,b.x)/VOXEL_SIZE)-1;
+    int loZ=(int)roundf(fminf(a.z,b.z)/VOXEL_SIZE),hiZ=(int)roundf(fmaxf(a.z,b.z)/VOXEL_SIZE)-1;
+    foundry_trap_define(FOUNDRY_DROP,loX,hiX,7,7,loZ,hiZ,loX-1,7,loZ);
+}
 static void buildCrosscut(void) {
-    Color stone={190,184,159,255},support={236,132,43,255};
+    Color stone={190,184,159,255},support={130,137,140,255};
     const Color routes[4]={{61,156,182,255},{187,88,107,255},{137,158,73,255},{146,113,185,255}};
     for(int q=0;q<4;q++) {
         /* Terraces and two three-metre-wide stepped approaches. */
@@ -31,9 +39,9 @@ static void buildCrosscut(void) {
         /* Short independent slabs, separated by half-metre seams. */
         for(int s=0;s<3;s++) {
             float z=2+s*2.5f;
-            crosscut_box(q,-1.5f,1.5f,2,2.5f,z,z+2,stone);
-            crosscut_box(q,-1.5f,-1,0,2,z+.5f,z+1,support);
-            crosscut_box(q,1,1.5f,0,2,z+.5f,z+1,support);
+            crosscut_trap(q,-1.5f,1.5f,z,z+2);
+            crosscut_box(q,-2.5f,-2,0,4,z+.5f,z+1,support);
+            crosscut_box(q,2,2.5f,0,4,z+.5f,z+1,support);
         }
         /* Spawn screens leave both ends open to the perimeter circuit. */
         crosscut_box(q,-6.5f,6.5f,0,3,13,13.5f,stone);
@@ -50,8 +58,8 @@ static void buildCrosscut(void) {
         crosscut_box(q,17,17.5f,0,3.5f,8,12,stone);
         crosscut_box(q,3,4.5f,2.5f,4,9.5f,10.5f,routes[q]);
     }
-    crosscut_box(0,-1.5f,1.5f,2,2.5f,-1.5f,1.5f,stone);
-    for(int q=0;q<4;q++) crosscut_box(q,1,1.5f,0,2,1,1.5f,support);
+    crosscut_trap(0,-1.5f,1.5f,-1.5f,1.5f);
+    for(int q=0;q<4;q++) crosscut_box(q,2,2.5f,0,4,1,1.5f,support);
 }
 static int crosscutSpawnCursor=0;
 static bool crosscutInitialSpawns=false;

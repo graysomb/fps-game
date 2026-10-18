@@ -769,6 +769,7 @@ typedef struct {
     bool tetherHolding;
     int drainTarget; // Target slot + 1; zero means no drain lock.
     bool netDrainVisualActive;
+    bool netDrainIdle;
     bool goldTetherCharged;
     bool goldTetherHolding;
     bool netGoldTetherVisualActive;
@@ -796,14 +797,18 @@ static int reviveOwner[MAX_PLAYERS], reviveCount[MAX_PLAYERS];
 static int prepVotes[MAX_PLAYERS];
 static bool prepReady[MAX_PLAYERS];
 static bool prepMenuOpen[MAX_PLAYERS];
-static TeamUpgrade teamUpgrade = UPGRADE_NONE;
+static TeamUpgrade teamUpgrade = UPGRADE_NONE; /* Most recent vote, for diagnostics. */
+static unsigned teamUpgradeLevels[3];
+static const unsigned teamUpgradeCaps[3]={9,8,8};
+static float ff_build_cost(int i);
+static float ff_throw_multiplier(int i);
 typedef struct { int device; float sensitivity, deadzone; bool invert; } LocalPlayerSeat;
 static LocalPlayerSeat localSeats[MAX_PLAYERS] = {{0,1,.15f,false},{1,1,.15f,false},{2,1,.15f,false},{3,1,.15f,false}};
 static int seat_device(int i) { return i>=0 && i<MAX_PLAYERS ? localSeats[i].device : -1; }
-static bool ff_bonus(int i, TeamUpgrade bonus) { return gameMode==GAME_MODE_FIREFIGHT && i>=0 && i<firefightHumans && teamUpgrade==bonus; }
+static bool ff_bonus(int i, TeamUpgrade bonus) { return gameMode==GAME_MODE_FIREFIGHT && i>=0 && i<firefightHumans && teamUpgradeLevels[bonus]>0; }
 static float ff_harvest_amount(int i) {
     if(gameMode==GAME_MODE_FIREFIGHT && i>=0 && i<firefightHumans)
-        return ff_bonus(i,UPGRADE_HARVEST)?15.0f:10.0f;
+        return 10.0f+(ff_bonus(i,UPGRADE_HARVEST)?5.0f*teamUpgradeLevels[UPGRADE_HARVEST]:0);
     return MATTER_MELEE_HARVEST;
 }
 static void ff_restore_human(int i, float matter);
@@ -893,6 +898,7 @@ static uint32_t netInputSequence[MAX_PLAYERS] = { 0 };
 static uint32_t netPredictedMeleeSequence[MAX_PLAYERS] = { 0 };
 static uint32_t netLastProcessedInput[MAX_PLAYERS] = { 0 };
 static uint32_t netLastGrenadeInput[MAX_PLAYERS] = {0};
+static uint32_t netLastHologramInput[MAX_PLAYERS] = {0};
 static uint16_t netPreviousHeld[MAX_PLAYERS] = { 0 };
 static NetInputCommand netPendingInput[MAX_PLAYERS];
 static bool netHasPendingInput[MAX_PLAYERS] = { false };
@@ -949,6 +955,7 @@ static void net_set_host_local_players(int count) {
     memset(netInputSequence, 0, sizeof(netInputSequence));
     memset(netLastProcessedInput, 0, sizeof(netLastProcessedInput));
     memset(netLastGrenadeInput,0,sizeof(netLastGrenadeInput));
+    memset(netLastHologramInput,0,sizeof(netLastHologramInput));
     memset(netPreviousHeld, 0, sizeof(netPreviousHeld));
     memset(netHasPendingInput, 0, sizeof(netHasPendingInput));
     memset(netPredictionHead, 0, sizeof(netPredictionHead));
@@ -1085,6 +1092,7 @@ typedef struct {
 } BotState;
 static BotState botStates[MAX_COMBATANTS];
 #include "ai_combat.h"
+#include "hologram.h"
 static bool randomSpawnEnabled = true;
 static const Vector3 playerSpawnPositions[MAX_PLAYERS] = {
     { 0.0f,  BASE_EYE_HEIGHT, -14.0f },
@@ -1155,7 +1163,9 @@ typedef struct {
     Vector3 foundryTrapPrevious;
     float foundryTrapPreviousSpeed;
     float explosionUntil;
+    uint8_t hologramHitMask;
     bool wasTethered;
+    int tetherReleaseOverlap; /* Holder + 1, only until initial overlap ends. */
     int activationCooldownFrames;
     Color color;
     int type;
@@ -3905,12 +3915,14 @@ static void remove_voxel_index(int idx)
     }
     if (idx != last) {
         tetherTag[idx] = tetherTag[last];
+        tetherHoldClusterTag[idx] = tetherHoldClusterTag[last];
         goldReleaseGraceFrames[idx] = goldReleaseGraceFrames[last];
     } else {
         tetherTag[idx] = 0;
         goldReleaseGraceFrames[idx] = 0;
     }
     tetherTag[last] = 0;
+    tetherHoldClusterTag[last] = 0;
     goldReleaseGraceFrames[last] = 0;
     if (idx != last) {
         Voxel *moved = &voxels[last];
@@ -4535,6 +4547,8 @@ static bool init_voxel_struct(Voxel *v,
     v->foundryTrapPrevious=v->pos;v->foundryTrapPreviousSpeed=0;
     v->explosionUntil = 0;
     v->wasTethered = false;
+    v->hologramHitMask = 0;
+    v->tetherReleaseOverlap = 0;
     v->activationCooldownFrames = 0;
     v->color = color;
     v->type = type;
@@ -8821,6 +8835,7 @@ static void clear_pickups(void) {
 
 static void clear_world_voxels(void) {
     foundry_traps_reset();
+    memset(tetherTag,0,sizeof(tetherTag));memset(tetherHoldClusterTag,0,sizeof(tetherHoldClusterTag));
     static_cache_reset();
     support_cache_reset();
     regeneration_reset();
@@ -9270,6 +9285,7 @@ static void ResetCreative(void) {
 }
 
 static void ResetGame(void) {
+    memset(holograms,0,sizeof(holograms));hologramReceiveTick=0;
     clarity_reset();
     enemy_cleanup(true);
     worldFloorHalfSize=(!useCustomMap && (currentWorldType==WORLD_TYPE_CROSSCUT ||
@@ -10099,7 +10115,7 @@ static void kill_player(int player_index, int attacker_index,
         apply_matter_damage(player_index,attacker_index,35);return;
     }
     if(enemyLab && enemyLabGod && player_index<firefightHumans) return;
-    if(!enemy_core_open(player_index)) return;
+    if(!enemy_core_open(player_index)) {enemySpecial[player_index].blockedCue=.7f;return;}
     if (player->respawn_timer > 0.0f) {
         return;
     }
@@ -10213,7 +10229,7 @@ static void apply_matter_damage(int player_index, int attacker_index, float dama
         }
     }
     if(enemyLab && enemyLabGod && player_index<firefightHumans) return;
-    if(!enemy_core_open(player_index)) return;
+    if(!enemy_core_open(player_index)) {enemySpecial[player_index].blockedCue=.7f;return;}
     Player *player = &players[player_index];
     if (player->respawn_timer > 0.0f) {
         return;
@@ -10305,6 +10321,7 @@ static void update_projectiles(float dt)
 
         Vector3 start = v->pos;
         Vector3 end = v_add(start, displacement);
+        hologram_projectile(i,start,end,(float)player_bullet_damage(v->owner));
         ai_near_miss(i,start,end);
 
         bool handled = false;
@@ -10367,6 +10384,10 @@ static void update_projectiles(float dt)
                 continue;
             }
             int armor_owner = get_goliath_owner_of_voxel(hit_id);
+            if (armor_owner >= 0 && v->isBullet) {
+                remove_voxel_index(i);
+                continue;
+            }
             if (armor_owner >= 0) {
                 detach_goliath_armor_voxel(hit_id);
                 voxels[hit_id].glueEligible = true;
@@ -10596,6 +10617,7 @@ static void handle_pbd_projectile_hits(void)
             ++i;
             continue;
         }
+        hologram_projectile(i,v_sub(v->pos,v_mul(v->vel,PBD_MAX_STEP_DT)),v->pos,(float)VOXEL_DAMAGE);
         bool removed = false;
         for (int j = 0; j < activePlayers; ++j) {
             if (tetherTag[i] == j + 1 || tetherHoldClusterTag[i] == j + 1) {
@@ -10612,6 +10634,10 @@ static void handle_pbd_projectile_hits(void)
             float threshold = (PLAYER_SIZE * 0.5f) + voxel_radius + 0.1f;
             BoundingBox smush=expand_bounds(combatant_bounds_at(j,world_image(players[j].pos,v->pos),PLAYER_SIZE*.5f),voxel_radius+.1f);
             bool human_hit=(v->pos.x>=smush.min.x && v->pos.x<=smush.max.x && v->pos.y>=smush.min.y && v->pos.y<=smush.max.y && v->pos.z>=smush.min.z && v->pos.z<=smush.max.z);
+            if(v->tetherReleaseOverlap==j+1){
+                if(human_hit)continue;
+                v->tetherReleaseOverlap=0;
+            }
             if ((player_uses_rat(j)||players[j].enemyType==ENEMY_TYPE_FOUNDRY)?human_hit:(fabsf(dx) < threshold && fabsf(dy) < threshold && fabsf(dz) < threshold)) {
                 if(clarity_debris_hit(i,j))continue;
                 if(enemy_lob_hit(i,j))continue;
@@ -14482,11 +14508,11 @@ static bool goliath_has_armor(int player_idx) {
 }
 
 static void goliath_launch_voxel(int bot_idx, int target_idx) {
-    if (bot_idx < 0 || bot_idx >= activePlayers || target_idx < 0 || target_idx >= activePlayers) return;
+    if (bot_idx < 0 || bot_idx >= activePlayers || target_idx < 0 || target_idx >= MAX_COMBATANTS+MAX_PLAYERS) return;
     GoliathState *gs = &goliathStates[bot_idx];
     if (gs->count <= GOLIATH_MIN_ARMOR_TO_THROW) return;
 
-    Vector3 to_target = world_delta(players[target_idx].pos, players[bot_idx].pos);
+    Vector3 to_target = world_delta(ai_target_body(target_idx)->pos, players[bot_idx].pos);
     int pick = gs->count - 1;
     float best_dot = 1e9f;
     for (int i = 0; i < gs->count; ++i) {
@@ -14507,7 +14533,7 @@ static void goliath_launch_voxel(int bot_idx, int target_idx) {
         if (voxels[v].identity == ident) {
             Voxel *vox = &voxels[v];
             goliath_set_armor_attached(vox, false);
-            Vector3 toTarget = world_delta(players[target_idx].pos, vox->pos);
+            Vector3 toTarget = world_delta(ai_target_body(target_idx)->pos, vox->pos);
             toTarget.y += 0.2f;
             Vector3 dir = v_norm(toTarget);
             float launchSpeed = 22.0f;
@@ -15031,6 +15057,7 @@ static Vector3 melee_swing_direction(const Player *p, float reach_frac) {
 
 static bool melee_hit_players(int attacker_idx, Vector3 start, Vector3 end, Vector3 dir) {
     (void)dir;
+    hologram_melee(attacker_idx,start,end);
     Vector3 attacker_pos = players[attacker_idx].pos;
     Vector3 forward = player_forward(&players[attacker_idx]);
     Vector3 body_end = v_add(attacker_pos, v_mul(forward, MELEE_RANGE));
@@ -15298,7 +15325,7 @@ static void perform_build(int idx) {
     if (now - p->last_build_time < BUILD_COOLDOWN_SECONDS) {
         return;
     }
-    if (p->matter < (ff_bonus(idx, UPGRADE_BUILD) ? 5 : MATTER_BUILD_COST)) {
+    if (p->matter < (ff_build_cost(idx))) {
         return;
     }
     Vector3 dir = player_forward(p);
@@ -15388,7 +15415,7 @@ static void perform_build(int idx) {
         }
     }
     if (placed > 0) {
-        p->matter = fmaxf(0.0f, p->matter - (ff_bonus(idx, UPGRADE_BUILD) ? 5 : MATTER_BUILD_COST));
+        p->matter = fmaxf(0.0f, p->matter - (ff_build_cost(idx)));
         p->last_build_time = now;
         play_sfx(SFX_SHIELD);
     }
@@ -15826,7 +15853,7 @@ static void release_tether_velocity(int idx,const Vector3 *launch) {
             }
             Vector3 impulse = v_mul(dir, p->goldTetherHolding
                 ? TETHER_THROW_IMPULSE : TETHER_THROW_IMPULSE / (float)cluster_count);
-            if(ff_bonus((int)(p-players), UPGRADE_THROW)) impulse=v_mul(impulse,1.25f);
+            if(ff_bonus((int)(p-players), UPGRADE_THROW)) impulse=v_mul(impulse,ff_throw_multiplier((int)(p-players)));
             if(!launch) {
                 Vector3 average={0};for(int c=0;c<cluster_count;c++)average=v_add(average,voxels[glueClusterIndices[c]].vel);
                 /* Retain forward momentum, but discard side drift and per-corner jitter. */
@@ -15848,6 +15875,7 @@ static void release_tether_velocity(int idx,const Vector3 *launch) {
                     continue;
                 }
                 member->owner=member->activator=idx;
+                member->tetherReleaseOverlap=idx+1;
                 member->vel = launch?*launch:impulse;
                 if (p->goldTetherHolding) {
                     if (goldReleaseGraceFrames[v_idx] == 0) goldReleaseGraceActiveCount++;
@@ -17950,7 +17978,9 @@ static void draw_player_tether_world(int player_index) {
     }
     float tether_radius = 0.05f;
     if(players[player_index].drainTarget || players[player_index].netDrainVisualActive){
-        weapon_draw_drain(hand,center,weaponFrameTime);return;
+        int target=players[player_index].drainTarget-1;
+        bool idle=target>=0?(players[target].matter<=(players[target].enemyType==ENEMY_TYPE_FOUNDRY?1:0)):players[player_index].netDrainIdle;
+        weapon_draw_drain_state(hand,center,weaponFrameTime,!idle);return;
     }
     bool gold = players[player_index].goldTetherHolding ||
                 players[player_index].netGoldTetherVisualActive;
@@ -18194,6 +18224,7 @@ static void draw_players(void) {
         }
     }
     clarity_draw();
+    hologram_draw(false);
     foundry_traps_draw();
 }
 
@@ -18442,9 +18473,9 @@ static bool player_aabb_hits_world(Vector3 pos, float half) {
 }
 
 /* Sweep one axis against collision grid cells. No stair assistance or tunneling. */
-static bool human_sweep_axis(int slot,int axis,float delta) {
+static bool human_body_sweep(Player *p,int slot,int axis,float delta) {
     if(fabsf(delta)<1e-8f) return false;
-    Player *p=&players[slot];BoundingBox b=combatant_bounds(slot,.25f),swept=b;
+    BoundingBox b=combatant_bounds_at(slot,p->pos,.25f),swept=b;
     float *lo=&swept.min.x,*hi=&swept.max.x;
     if(delta<0)lo[axis]+=delta;else hi[axis]+=delta;
     int mins[3],maxs[3];
@@ -18473,9 +18504,9 @@ static void integrate_human_body(int slot,float dt,bool query_world) {
     if(!p->onGround || p->vel.y>0)p->vel.y-=GRAVITY*dt;
     bool collided=false;
     if(query_world) {
-        collided|=human_sweep_axis(slot,0,p->vel.x*dt);
-        collided|=human_sweep_axis(slot,1,p->vel.y*dt);
-        collided|=human_sweep_axis(slot,2,p->vel.z*dt);
+        collided|=human_body_sweep(p,slot,0,p->vel.x*dt);
+        collided|=human_body_sweep(p,slot,1,p->vel.y*dt);
+        collided|=human_body_sweep(p,slot,2,p->vel.z*dt);
     } else p->pos=v_add(p->pos,v_mul(p->vel,dt));
     if(p->pos.y<BASE_EYE_HEIGHT){p->pos.y=BASE_EYE_HEIGHT;p->vel.y=0;collided=true;}
     Vector3 probe=p->pos;probe.y-=.002f;
@@ -18568,6 +18599,7 @@ static NetInputCommand net_sample_local_input(int local_index, int player_slot, 
         if (IsGamepadButtonPressed(device, GAMEPAD_BUTTON_RIGHT_FACE_DOWN)) command.pressed |= NET_INPUT_MELEE;
         if (IsGamepadButtonPressed(device, GAMEPAD_BUTTON_RIGHT_TRIGGER_1)) command.pressed |= NET_INPUT_BUILD;
         if(IsGamepadButtonPressed(device,GAMEPAD_BUTTON_LEFT_FACE_UP))command.pressed|=NET_INPUT_GRENADE;
+        if(IsGamepadButtonPressed(device,GAMEPAD_BUTTON_LEFT_TRIGGER_1))command.pressed|=NET_INPUT_HOLOGRAM;
     } else if (local_index == 0) {
         mx = (IsKeyDown(KEY_D) ? 1.0f : 0.0f) - (IsKeyDown(KEY_A) ? 1.0f : 0.0f);
         my = (IsKeyDown(KEY_W) ? 1.0f : 0.0f) - (IsKeyDown(KEY_S) ? 1.0f : 0.0f);
@@ -18579,6 +18611,7 @@ static NetInputCommand net_sample_local_input(int local_index, int player_slot, 
         if (IsKeyPressed(KEY_Z)) command.pressed |= NET_INPUT_MELEE;
         if (IsKeyPressed(KEY_E)) command.pressed |= NET_INPUT_BUILD;
         if(IsKeyPressed(KEY_C))command.pressed|=NET_INPUT_GRENADE;
+        if(IsKeyPressed(KEY_V))command.pressed|=NET_INPUT_HOLOGRAM;
     } else {
         mx = (IsKeyDown(KEY_L) ? 1.0f : 0.0f) - (IsKeyDown(KEY_J) ? 1.0f : 0.0f);
         my = (IsKeyDown(KEY_I) ? 1.0f : 0.0f) - (IsKeyDown(KEY_K) ? 1.0f : 0.0f);
@@ -18590,13 +18623,14 @@ static NetInputCommand net_sample_local_input(int local_index, int player_slot, 
         if (IsKeyPressed(KEY_M)) command.pressed |= NET_INPUT_MELEE;
         if (IsKeyPressed(KEY_O)) command.pressed |= NET_INPUT_BUILD;
         if(IsKeyPressed(KEY_PERIOD))command.pressed|=NET_INPUT_GRENADE;
+        if(IsKeyPressed(KEY_SLASH))command.pressed|=NET_INPUT_HOLOGRAM;
     }
     command.move_x = net_quantize_axis(mx);
     command.move_y = net_quantize_axis(my);
     command.look_x = net_quantize_axis(lx);
     command.look_y = net_quantize_axis(ly);
     if (netRequestedCreative) {
-        command.pressed &= (uint16_t)~(NET_INPUT_FIRE | NET_INPUT_MELEE | NET_INPUT_BUILD | NET_INPUT_JUMP | NET_INPUT_GRENADE);
+        command.pressed &= (uint16_t)~(NET_INPUT_FIRE | NET_INPUT_MELEE | NET_INPUT_BUILD | NET_INPUT_JUMP | NET_INPUT_GRENADE | NET_INPUT_HOLOGRAM);
         command.held &= (uint16_t)~NET_INPUT_TETHER;
         if (IsKeyDown(KEY_E)) command.held |= NET_INPUT_CREATIVE_UP;
         if (IsKeyDown(KEY_Q)) command.held |= NET_INPUT_CREATIVE_DOWN;
@@ -18642,6 +18676,7 @@ static void net_apply_creative_command(Player *p, const NetInputCommand *command
     p->pos = v_add(p->pos, v_mul(move, CREATIVE_FLY_SPEED * dt));
     p->vel = (Vector3){ 0 };
     clarity_draw();
+    hologram_draw(false);
 }
 
 static void HandleKeyboardInput(int i, float dt);
@@ -18777,21 +18812,21 @@ static bool is_view_occluded_by_voxels(Vector3 eye_pos, Vector3 target_pos) {
 // 2. Check dot product of AI view to direction to player (view cone)
 // 3. Ray trace to measure if view is occluded
 static bool check_ai_awareness_of_player(int botIdx, int targetIdx, float *out_dist) {
-    if (botIdx < 0 || botIdx >= activePlayers || targetIdx < 0 || targetIdx >= activePlayers) {
+    if (botIdx < 0 || botIdx >= activePlayers || targetIdx < 0 || (targetIdx >= activePlayers && !target_is_hologram(targetIdx))) {
         return false;
     }
     if (botIdx == targetIdx) {
         return false;
     }
-    if (players[targetIdx].respawn_timer > 0.0f) {
+    if (ai_target_body(targetIdx)->respawn_timer > 0.0f || (target_is_hologram(targetIdx) && holograms[targetIdx-MAX_COMBATANTS].life<=0)) {
         return false;
     }
-    if (gameMode == GAME_MODE_FIREFIGHT && is_player_bot(targetIdx) == is_player_bot(botIdx)) {
+    if (gameMode == GAME_MODE_FIREFIGHT && (target_is_hologram(targetIdx)?false:is_player_bot(targetIdx)) == is_player_bot(botIdx)) {
         return false;
     }
 
     Player *bot = &players[botIdx];
-    Player *target = &players[targetIdx];
+    Player *target = ai_target_body(targetIdx);
 
     Vector3 to_target = world_delta(target->pos, bot->pos);
     float dist = v_length(to_target);
@@ -19061,6 +19096,7 @@ static void bot_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float
 #include "foundry_traps.inc"
 #include "combat_clarity.inc"
 #include "combat_clarity_net.inc"
+#include "hologram.inc"
 #include "chunk_regeneration_net.inc"
 static void UpdateBot(int playerIdx, float dt) {
     if(enemyLab && enemyLabPaused && !enemyLabStep) return;
@@ -19107,7 +19143,7 @@ static void UpdateBot(int playerIdx, float dt) {
     if (bot->enemyType == ENEMY_TYPE_SWARMER) {
         if (isDirectlyVisible || hasEnemy) {
             bs->swarmerWanderPhase = SWARMER_WANDER_NEW;
-            Vector3 targetDest = isDirectlyVisible ? players[enemyIdx].pos : bs->lastKnownTargetPos;
+            Vector3 targetDest = isDirectlyVisible ? ai_target_body(enemyIdx)->pos : bs->lastKnownTargetPos;
             Vector3 toEnemy = world_delta(targetDest, bot->pos);
             toEnemy.y = 0.0f;
             float len = v_length(toEnemy);
@@ -19240,7 +19276,7 @@ static void UpdateBot(int playerIdx, float dt) {
                 bot_apply_move(bot, bs, lookDir, goliathSpeed, dt);
             }
         } else if (hasEnemy) {
-            Vector3 targetDest = isDirectlyVisible ? players[enemyIdx].pos : bs->lastKnownTargetPos;
+            Vector3 targetDest = isDirectlyVisible ? ai_target_body(enemyIdx)->pos : bs->lastKnownTargetPos;
             Vector3 toEnemy = world_delta(targetDest, bot->pos);
             toEnemy.y = 0.0f;
             float len = v_length(toEnemy);
@@ -19363,7 +19399,7 @@ static void UpdateBot(int playerIdx, float dt) {
             }
         }
     } else if (intent == BOT_INTENT_COMBAT && hasEnemy) {
-        Player *target = &players[enemyIdx];
+        Player *target = ai_target_body(enemyIdx);
         aimingAtEnemy = true;
         Vector3 targetDest = isDirectlyVisible ? target->pos : bs->lastKnownTargetPos;
         lookTarget = targetDest;
@@ -19525,6 +19561,7 @@ static void net_send_world_to(int slot) {
     net_transport_send(&netTransport, slot, FPS_NET_CHANNEL_WORLD, packet, writer.length, true);
     net_writer_init(&writer, packet, sizeof(packet));
     clarity_net_snapshot(slot);
+    hologram_net_snapshot(slot);
     net_write_header(&writer, NET_MSG_WORLD_END, 0, netTransport.session_id, netServerTick);
     net_transport_send(&netTransport, slot, FPS_NET_CHANNEL_WORLD, packet, writer.length, true);
     regeneration_net_send(slot, true);
@@ -19624,6 +19661,8 @@ static void net_write_player_state(NetWriter *writer, int slot) {
     }
     if(p->drainTarget>0 && p->drainTarget<=activePlayers){
         visual.flags|=NET_PLAYER_VISUAL_TETHER|NET_PLAYER_VISUAL_DRAIN;
+        int targetSlot=p->drainTarget-1;
+        if(targetSlot>=0 && players[targetSlot].matter<=(players[targetSlot].enemyType==ENEMY_TYPE_FOUNDRY?1:0))visual.flags|=NET_PLAYER_VISUAL_DRAIN_IDLE;
         Vector3 target=players[p->drainTarget-1].pos;
         visual.tether_x=target.x;visual.tether_y=target.y;visual.tether_z=target.z;
     }
@@ -19779,6 +19818,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
         int player_slot = net_read_u8(&reader);
         if (header.session_id == transport->session_id && player_slot >= 0 && player_slot < MAX_PLAYERS &&
             (netPeerPlayerMask[peer_slot] & (1u << player_slot)) && net_read_input(&reader, &command)) {
+            if(command.pressed & NET_INPUT_HOLOGRAM){if(command.sequence<=netLastHologramInput[player_slot])command.pressed&=~NET_INPUT_HOLOGRAM;else netLastHologramInput[player_slot]=command.sequence;}
             if(command.pressed & NET_INPUT_GRENADE){if(command.sequence<=netLastGrenadeInput[player_slot])command.pressed&=~NET_INPUT_GRENADE;else netLastGrenadeInput[player_slot]=command.sequence;}
             uint16_t accumulated_pressed = netHasPendingInput[player_slot] ? netPendingInput[player_slot].pressed : 0;
             accumulated_pressed |= command.pressed;
@@ -19800,6 +19840,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
     if (transport->role != NET_ROLE_CLIENT) return;
     if (header.type == NET_MSG_WELCOME) {
         clarity_net_reset();
+        memset(holograms,0,sizeof(holograms));hologramReceiveTick=0;
         regeneration_reset();regeneration.serial=0;
         transport->session_id = header.session_id;
         netLocalPlayerCount = net_read_u8(&reader);
@@ -19827,6 +19868,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
     }
     if (header.session_id != transport->session_id) return;
     if(regeneration_net_receive((NetMessageType)header.type,&reader))return;
+    if(hologram_net_receive((NetMessageType)header.type,&reader,header.server_tick))return;
     if(clarity_net_receive((NetMessageType)header.type,&reader,header.server_tick))return;
     if (header.type == NET_MSG_SESSION_STATE) {
         netRequestedCreative = net_read_u8(&reader) != 0;
@@ -19913,6 +19955,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
             }
             p->netTetherVisualActive = (state.visual.flags & NET_PLAYER_VISUAL_TETHER) != 0;
             p->netDrainVisualActive = (state.visual.flags & NET_PLAYER_VISUAL_DRAIN) != 0;
+            p->netDrainIdle=(state.visual.flags & NET_PLAYER_VISUAL_DRAIN_IDLE)!=0;
             p->dynamicShotActive = (state.visual.flags & NET_PLAYER_VISUAL_POWERED_SHOT) != 0;
             p->goldTetherCharged = (state.flags & NET_PLAYER_STATE_GOLD_TETHER_CHARGED) != 0;
             weapon_visual_receive(&weaponVisuals[slot], state.visual.shot_sequence,
@@ -20003,6 +20046,7 @@ static void net_host_tick(void) {
             net_apply_movement_command(&players[slot], &command, 1.0f / FPS_NET_TICK_RATE);
             net_integrate_player(&players[slot], 1.0f / FPS_NET_TICK_RATE, true);
             if(command.pressed & NET_INPUT_GRENADE)clarity_throw(slot);
+            if(command.pressed & NET_INPUT_HOLOGRAM)hologram_deploy(slot);
             if (command.pressed & NET_INPUT_FIRE) FireVoxel(slot);
             if (command.pressed & NET_INPUT_MELEE) perform_melee(slot);
             if (command.pressed & NET_INPUT_BUILD) perform_build(slot);
@@ -20022,7 +20066,7 @@ static void net_host_tick(void) {
     for (int i = 0; i < MAX_PLAYERS; ++i) if (netPlayerPresent[i]) net_write_player_state(&writer, i);
     net_transport_broadcast(&netTransport, FPS_NET_CHANNEL_SNAPSHOT, packet, writer.length, false);
     net_host_send_dynamic_poses();
-    if(netServerTick%3u==0)clarity_net_snapshot(-1);
+    if(netServerTick%3u==0){clarity_net_snapshot(-1);hologram_net_snapshot(-1);}
     if ((netServerTick % 6u) == 0u) {
         net_writer_init(&writer, packet, sizeof(packet));
         net_write_header(&writer, NET_MSG_WORLD_PICKUPS, 0, netTransport.session_id, netServerTick);
@@ -20516,6 +20560,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                         draw_player_weapon(p, imageCam.position, false, WEAPON_EMISSION);
                     }
                 }
+                hologram_draw(true);
                 drawViewPlayerIndex=-1;
                 EndMode3D();
                 }
@@ -20621,6 +20666,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 }
             }
             clarity_hud(i,view_w,view_h);
+            hologram_hud(i,view_w,view_h);
             ff_draw_hud(i, view_w, view_h);
             draw_hud_bars(i, &players[i], view_w, view_h);
             draw_player_radar(i, view_w, view_h);
@@ -22168,6 +22214,7 @@ int main(int argc, char **argv) {
             enemyLabClock+=dt;enemy_tick(dt);
         }
         clarity_tick(dt);
+        hologram_tick(dt);
         debug_console_update();
         if(IsKeyPressed(KEY_PAUSE)){gameState=GAME_STATE_PAUSED;mouse_sync();break;}
         mouse_frame(dt);
@@ -22265,6 +22312,7 @@ int main(int argc, char **argv) {
             }
             if (playerInput[i] == INPUT_TYPE_GAMEPAD) {
                 if(IsGamepadButtonPressed(seat_device(i),GAMEPAD_BUTTON_LEFT_FACE_UP))clarity_throw(i);
+                if(IsGamepadButtonPressed(seat_device(i),GAMEPAD_BUTTON_LEFT_TRIGGER_1))hologram_deploy(i);
                 if (IsGamepadButtonPressed(seat_device(i), GAMEPAD_BUTTON_RIGHT_TRIGGER_2)) {
                     FireVoxel(i);
                 }
@@ -22289,6 +22337,7 @@ int main(int argc, char **argv) {
 
         if (!debugConsoleOpen && !ff_input_blocked(0) && playerInput[0] == INPUT_TYPE_KEYBOARD && players[0].respawn_timer <= 0.0f) {
             if(IsKeyPressed(KEY_C))clarity_throw(0);
+            if(IsKeyPressed(KEY_V))hologram_deploy(0);
             if (!mouse_owns(0) && IsKeyPressed(KEY_LEFT_CONTROL))  FireVoxel(0);
             if (!mouse_owns(0) && IsKeyPressed(KEY_Z)) perform_melee(0);
             if (IsKeyPressed(KEY_E)) perform_build(0);
@@ -22301,6 +22350,7 @@ int main(int argc, char **argv) {
         }
         if (!debugConsoleOpen && !ff_input_blocked(1) && net_player_is_local(1) && playerInput[1] == INPUT_TYPE_KEYBOARD && players[1].respawn_timer <= 0.0f) {
             if(IsKeyPressed(KEY_PERIOD))clarity_throw(1);
+            if(IsKeyPressed(KEY_SLASH))hologram_deploy(1);
             if (!mouse_owns(1) && IsKeyPressed(KEY_RIGHT_CONTROL)) FireVoxel(1);
             if (!mouse_owns(1) && IsKeyPressed(KEY_M)) perform_melee(1);
             if (IsKeyPressed(KEY_O)) perform_build(1);

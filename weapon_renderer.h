@@ -65,6 +65,7 @@ void weapon_draw(WeaponPose pose, const WeaponVisual *visual, Vector3 eye,
 void weapon_draw_pickup(bool launcher, Vector3 position, Vector3 eye, float time,
                         WeaponRenderPass pass);
 void weapon_draw_drain(Vector3 start, Vector3 target, float time);
+void weapon_draw_drain_state(Vector3 start,Vector3 target,float time,bool active);
 bool weapon_drain_shader_ready(void);
 /* Local visual particle transform; never creates gameplay particles. */
 Matrix weapon_cube_transform(int cube, float now);

@@ -2,7 +2,20 @@
 static int ffRemaining[FF_TYPE_COUNT], ffSpawnOrdinal;
 static float ffSpawnTimer, ffCleanupTimer;
 static int ffEntrance;
-static const char *ff_upgrade_names[3] = {"Build: 5 Matter", "Harvest: +15 Matter", "Throws: +25% impulse"};
+static float ff_build_cost(int i) {return ff_bonus(i,UPGRADE_BUILD)?fmaxf(1,10.f/(1+teamUpgradeLevels[0])):MATTER_BUILD_COST;}
+static float ff_throw_multiplier(int i) {return ff_bonus(i,UPGRADE_THROW)?1+.25f*teamUpgradeLevels[2]:1;}
+static bool ff_upgrades_maxed(void) {return teamUpgradeLevels[0]>=9 && teamUpgradeLevels[1]>=8 && teamUpgradeLevels[2]>=8;}
+static int ff_upgrade_choice(int choice,int direction) {
+    for(int n=0;n<3;n++){choice=(choice+direction+3)%3;if(teamUpgradeLevels[choice]<teamUpgradeCaps[choice])return choice;}
+    return -1;
+}
+static const char *ff_upgrade_label(int n) {
+    unsigned level=teamUpgradeLevels[n];
+    if(level>=teamUpgradeCaps[n])return TextFormat("%s Lv%u MAX",n==0?"Build":n==1?"Harvest":"Throw",level);
+    if(n==0)return TextFormat("Build Lv%u: %.2g -> %.2g Matter",level,fmaxf(1,10.f/(1+level)),fmaxf(1,10.f/(2+level)));
+    if(n==1)return TextFormat("Harvest Lv%u: %u -> %u Matter",level,10+5*level,15+5*level);
+    return TextFormat("Throw Lv%u: %.2gx -> %.2gx",level,1+.25f*level,1.25f+.25f*level);
+}
 
 static EnemyType pick_firefight_enemy_type(int wave, int spawn_index) {
     (void)wave; (void)spawn_index;
@@ -42,7 +55,7 @@ static bool ff_revive_held(int i) {
     return ffTestReviveHeld[i];
 #else
     return playerInput[i]==INPUT_TYPE_GAMEPAD ?
-        IsGamepadButtonDown(seat_device(i), GAMEPAD_BUTTON_LEFT_TRIGGER_1) :
+        IsGamepadButtonDown(seat_device(i), GAMEPAD_BUTTON_RIGHT_THUMB) :
         IsKeyDown(i==0?KEY_X:KEY_COMMA);
 #endif
 }
@@ -121,7 +134,7 @@ static void start_firefight_wave(int wave_number) {
 
 static void reset_firefight_match(void) {
     firefightScore=firefightKillsTotal=0; firefightTeamLives=3;
-    firefightIntermissionTimer=0; teamUpgrade=UPGRADE_NONE;
+    firefightIntermissionTimer=0; teamUpgrade=UPGRADE_NONE; memset(teamUpgradeLevels,0,sizeof(teamUpgradeLevels));
     memset(reviveCount,0,sizeof(reviveCount));
     for(int i=0;i<MAX_COMBATANTS;i++) goliathStates[i].count=0;
     for(int i=0;i<firefightHumans;i++) ff_restore_human(i,MATTER_MAX_DEFAULT);
@@ -142,7 +155,6 @@ static void ff_wave_complete(void) {
         return;
     }
     for(int i=0;i<firefightHumans;i++)grenadeInventory[i]=grenadeInventory[i]<1?1:grenadeInventory[i];
-    teamUpgrade=UPGRADE_NONE;
     if(firefightFoundry && !firefightPractice) {
         enemy_stock_scrap(false);
         for(int p=0;p<MAX_PICKUPS;p++)if(pickups[p].type==PICKUP_GOLD_TETHER || pickups[p].type==PICKUP_DYNAMIC_SHOT || pickups[p].type==PICKUP_GRENADE) {
@@ -156,7 +168,7 @@ static void ff_wave_complete(void) {
     firefightWaveBannerTimer=0; firefightIntermissionTimer=FF_PREP_SECONDS;
     if(firefightWave%2==0) firefightTeamLives++;
     for(int i=0;i<firefightHumans;i++) {
-        ff_restore_human(i,MATTER_MAX_DEFAULT); prepVotes[i]=-1; prepReady[i]=false; prepMenuOpen[i]=true;
+        ff_restore_human(i,MATTER_MAX_DEFAULT); prepVotes[i]=ff_upgrade_choice(2,1); prepReady[i]=false; prepMenuOpen[i]=true;
     }
 }
 
@@ -182,6 +194,7 @@ static void update_firefight_logic(float dt) {
     ff_update_coop(dt);
     if(gameState==GAME_STATE_GAMEOVER) return;
     if(firefightWaveState==FIREFIGHT_STATE_INTERMISSION) {
+        if(ff_upgrades_maxed()){start_firefight_wave(firefightWave+1);return;}
         firefightIntermissionTimer-=dt;
         bool ready=true;
         for(int i=0;i<firefightHumans;i++) {
@@ -190,12 +203,15 @@ static void update_firefight_logic(float dt) {
             if(!prepMenuOpen[i]) {ready &= prepReady[i];continue;}
             bool left=pad?IsGamepadButtonPressed(d,GAMEPAD_BUTTON_LEFT_FACE_LEFT):IsKeyPressed(i==0?KEY_F:KEY_LEFT);
             bool right=pad?IsGamepadButtonPressed(d,GAMEPAD_BUTTON_LEFT_FACE_RIGHT):IsKeyPressed(i==0?KEY_H:KEY_RIGHT);
-            if(left || right) { prepVotes[i]=(prepVotes[i]+(left?2:1)+3)%3; prepReady[i]=false; }
+            if(left || right) { prepVotes[i]=ff_upgrade_choice(prepVotes[i],left?-1:1); prepReady[i]=false; }
             if(pad?IsGamepadButtonPressed(d,GAMEPAD_BUTTON_RIGHT_FACE_DOWN):IsKeyPressed(i==0?KEY_SPACE:KEY_RIGHT_SHIFT)) prepReady[i]=!prepReady[i];
             ready &= prepReady[i];
         }
         if(firefightIntermissionTimer<=0 || (ready && firefightIntermissionTimer<=15)) {
-            teamUpgrade=ff_vote(prepVotes,firefightHumans); start_firefight_wave(firefightWave+1);
+            teamUpgrade=ff_vote(prepVotes,firefightHumans);
+            if(teamUpgradeLevels[teamUpgrade]>=teamUpgradeCaps[teamUpgrade])teamUpgrade=ff_upgrade_choice(teamUpgrade,1);
+            if((int)teamUpgrade>=0 && teamUpgrade<UPGRADE_NONE)teamUpgradeLevels[teamUpgrade]++;
+            start_firefight_wave(firefightWave+1);
         }
         return;
     }

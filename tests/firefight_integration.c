@@ -79,9 +79,9 @@ int main(int argc,char **argv) {
     test_down(1);ff_update_coop(16);assert(combatantLife[1]==LIFE_WAITING && firefightTeamLives==2);
     ff_update_coop(5.1f);assert(combatantLife[1]==LIFE_ALIVE);
     firefightTeamLives=0;test_down(1);ff_update_coop(16);assert(combatantLife[1]==LIFE_SPECTATING);
-    firefightWave=2;teamUpgrade=UPGRADE_THROW;ff_wave_complete();
+    firefightWave=2;teamUpgrade=UPGRADE_THROW;teamUpgradeLevels[UPGRADE_THROW]=1;ff_wave_complete();
     assert(combatantLife[1]==LIFE_ALIVE && players[1].matter==MATTER_MAX_DEFAULT);
-    assert(firefightTeamLives==1 && teamUpgrade==UPGRADE_NONE);
+    assert(firefightTeamLives==1 && teamUpgradeLevels[UPGRADE_THROW]==1);
     for(int i=0;i<4;i++){prepVotes[i]=UPGRADE_HARVEST;prepReady[i]=true;}
     update_firefight_logic(5.1f);assert(firefightWave==3 && teamUpgrade==UPGRADE_HARVEST);
     assert(ff_harvest_amount(0)==15 && ff_harvest_amount(4)==MATTER_MELEE_HARVEST);
@@ -100,6 +100,16 @@ int main(int argc,char **argv) {
         render_gameplay_view(screens,&count,&w,&h,false);assert(count==humans);
     }
     firefightHumans=4;
+    /* Compare identical four-view scenes with zero/four animated decoys. */
+    start_firefight_wave(1);
+    for(int pass=0;pass<2;pass++){
+        if(pass)for(int seat=0;seat<4;seat++){players[seat].respawn_timer=0;combatantLife[seat]=LIFE_ALIVE;assert(hologram_deploy(seat));}
+        double begin=GetTime();
+        for(int frame=0;frame<30;frame++){hologram_tick(1.f/60);render_gameplay_view(screens,&count,&w,&h,false);}
+        fprintf(stderr,"Four-view render with %d decoys: %.3f ms/frame\n",pass*4,1000*(GetTime()-begin)/30);
+        if(pass){Image capture=LoadImageFromTexture(screens[0].texture);ImageFlipVertical(&capture);ExportImage(capture,"artifacts/four-player-hologram.png");UnloadImage(capture);}
+    }
+    memset(holograms,0,sizeof(holograms));
     /* Refill the arena and measure actual simulation plus four-view rendering. */
     start_firefight_wave(5);
     for(int n=0;n<30;n++)update_firefight_logic(2.1f);
@@ -234,7 +244,7 @@ int main(int argc,char **argv) {
     testButtons[2][GAMEPAD_BUTTON_RIGHT_FACE_DOWN]=true;couch_frame();memset(testButtons,0,sizeof(testButtons));
     assert(enemyLab && playerInput[0]==INPUT_TYPE_GAMEPAD && multiplayerPlayerInput[0]==INPUT_TYPE_GAMEPAD && seat_device(0)==2);
     testAxes[2][GAMEPAD_AXIS_RIGHT_X]=1;HandleGamepadInput(0,.1f);assert(players[0].yaw_vel!=0);memset(testAxes,0,sizeof(testAxes));
-    testButtons[2][GAMEPAD_BUTTON_LEFT_TRIGGER_1]=true;enemy_lab_controls();memset(testButtons,0,sizeof(testButtons));
+    testButtons[2][GAMEPAD_BUTTON_LEFT_FACE_RIGHT]=true;enemy_lab_controls();memset(testButtons,0,sizeof(testButtons));
     assert(enemyLabCase==ENEMY_TYPE_SHIELDBEARER && seat_device(0)==2);
     testButtons[2][GAMEPAD_BUTTON_RIGHT_FACE_LEFT]=true;enemy_lab_controls();memset(testButtons,0,sizeof(testButtons));assert(enemyLabPaused);
     testButtons[2][GAMEPAD_BUTTON_RIGHT_TRIGGER_1]=true;enemy_lab_controls();memset(testButtons,0,sizeof(testButtons));assert(enemyLabStep);

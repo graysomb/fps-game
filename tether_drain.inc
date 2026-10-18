@@ -5,7 +5,7 @@ static bool drain_target_valid(int from,int to) {
     return p->respawn_timer<=0 && t->respawn_timer<=0 &&
         combatantLife[from]==LIFE_ALIVE && combatantLife[to]==LIFE_ALIVE &&
         (gameMode!=GAME_MODE_FIREFIGHT || combatantTeam[from]!=combatantTeam[to]) &&
-        t->matter>(t->enemyType==ENEMY_TYPE_FOUNDRY?1:0) && !t->isExposed && enemy_core_open(to);
+        enemy_core_open(to);
 }
 static bool drain_clear(int from,int to) {
     Vector3 delta=world_delta(players[to].pos,players[from].pos);float distance=v_length(delta);
@@ -39,8 +39,9 @@ static void update_tether_drains(float dt) {
         if(target->invuln_timer>0 || (enemyLab && enemyLabGod && to<firefightHumans))continue;
         // Foundry Matter is its lethal core health: leave one point rather than kill.
         float minimum=target->enemyType==ENEMY_TYPE_FOUNDRY?1:0;
-        float amount=fminf(2.f*player_bullet_damage(from)*dt,target->matter-minimum);
+        float amount=fminf(2.f*player_bullet_damage(from)*dt,fmaxf(0,target->matter-minimum));
+        if(amount<=0)continue;
         tetherDrainDamage=true;apply_matter_damage(to,from,amount);tetherDrainDamage=false;
-        if(target->matter<=minimum+.0001f){target->matter=minimum;p->drainTarget=0;}
+        if(target->matter<=minimum+.0001f){target->matter=minimum;}
     }
 }

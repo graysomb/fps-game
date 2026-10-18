@@ -8,7 +8,7 @@ typedef struct {
     float cooldown, windup, melee, exposure, repair, spawnTimer, disabled;
     float searchTimer, stompCooldown, coreHealth, coreMax, repositionTimer;
     int shieldHits[4];
-    float shieldFlash[4], exposedAge, healingPulse;
+    float shieldFlash[4], exposedAge, healingPulse, coreCue, blockedCue;
     bool coreOpen, supplied;
     int actions, work;
     const char *reason;
