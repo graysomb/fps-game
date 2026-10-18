@@ -1,4 +1,6 @@
 /* Host simulation and presentation, separate from real combatant slots. */
+static float hologram_max_range(void) {return 2.f*sqrtf(2.f)*FLOOR_SIZE;}
+static float hologram_max_life(void) {return 8.f+hologram_max_range()/MOVE_SPEED;}
 static bool hologram_deploy(int owner) {
     if(netTransport.role==NET_ROLE_CLIENT || owner<0 || owner>=MAX_PLAYERS || owner>=activePlayers ||
        !player_uses_rat(owner) || debugConsoleOpen || gameState!=GAME_STATE_PLAYING || creativeModeActive ||
@@ -9,7 +11,24 @@ static bool hologram_deploy(int owner) {
     h->body=players[owner];h->body.vel=(Vector3){0};h->body.pitch=0;
     h->body.isExposed=false;h->body.invuln_timer=0;h->body.respawn_timer=0;
     h->health=50;h->life=8;h->cooldown=15;h->generation=++hologramGeneration;
-    h->direction=player_forward(&h->body);h->direction.y=0;h->direction=v_norm(h->direction);
+    // Sample the owner's full aim once, before flattening the walking direction.
+    // Empty sky has a finite destination; floor and voxel surfaces shorten it.
+    Ray aim={players[owner].pos,player_forward(&players[owner])};
+    float distance=hologram_max_range();
+    if(!worldPeriodic) {
+        float limit=fmaxf(0,FLOOR_SIZE-.4f);
+        if(fabsf(aim.direction.x)>.0001f)
+            distance=fminf(distance,fmaxf(0,(copysignf(limit,aim.direction.x)-aim.position.x)/aim.direction.x));
+        if(fabsf(aim.direction.z)>.0001f)
+            distance=fminf(distance,fmaxf(0,(copysignf(limit,aim.direction.z)-aim.position.z)/aim.direction.z));
+    }
+    if(aim.direction.y<-.0001f)distance=fminf(distance,fmaxf(0,-aim.position.y/aim.direction.y));
+    VoxelHit surface;
+    if(first_voxel_hit_detailed(aim,distance,-1,false,&surface))distance=surface.t;
+    h->direction=aim.direction;h->direction.y=0;
+    h->travelRemaining=distance*v_length(h->direction);
+    h->life=8.f+h->travelRemaining/MOVE_SPEED;
+    h->direction=v_norm(h->direction);
     h->color=player_palette_color(owner);h->weapon=player_weapon_kind(&players[owner]);h->armed=player_has_gun(owner);
     h->visualTarget=h->body.pos;
     h->pose=character_pose(h->body.pos,h->body.yaw,0,0,h->body.onGround,false,h->color,(float)GetTime());
@@ -19,6 +38,7 @@ static bool hologram_deploy(int owner) {
 static void hologram_damage(int target,float damage) {
     if(netTransport.role==NET_ROLE_CLIENT || !target_is_hologram(target) || !isfinite(damage) || damage<=0)return;
     Hologram *h=&holograms[target-MAX_COMBATANTS];if(h->life<=0)return;
+    h->damageFlicker=.4f;
     h->health=fmaxf(0,h->health-damage);if(h->health<=0)h->life=0;
 }
 static BoundingBox hologram_bounds(int n,Vector3 origin) {
@@ -55,6 +75,7 @@ static void hologram_tick(float dt) {
     dt=clampf(dt,0,.25f);
     for(int n=0;n<MAX_PLAYERS;n++) {
         Hologram *h=&holograms[n];h->cooldown=fmaxf(0,h->cooldown-dt);
+        h->damageFlicker=fmaxf(0,h->damageFlicker-dt);
         if(h->life<=0)continue;
         if(netTransport.role==NET_ROLE_CLIENT){
             h->life=fmaxf(0,h->life-dt);
@@ -66,12 +87,18 @@ static void hologram_tick(float dt) {
             float remaining=dt;
             while(remaining>0){
                 float step=fminf(remaining,1.f/60);remaining-=step;
-                h->body.vel.x=h->direction.x*MOVE_SPEED;h->body.vel.z=h->direction.z*MOVE_SPEED;
+                float travel=fminf(h->travelRemaining,MOVE_SPEED*step);
+                h->body.vel.x=h->direction.x*travel/step;h->body.vel.z=h->direction.z*travel/step;
                 h->body.vel.y-=GRAVITY*step;
                 bool blocked=human_body_sweep(&h->body,n,0,h->body.vel.x*step);
                 blocked|=human_body_sweep(&h->body,n,2,h->body.vel.z*step);
                 human_body_sweep(&h->body,n,1,h->body.vel.y*step);
-                if(blocked)h->direction=(Vector3){0};
+                h->travelRemaining=fmaxf(0,h->travelRemaining-travel);
+                if(blocked || h->travelRemaining<=.0001f){
+                    h->travelRemaining=0;h->direction=(Vector3){0};
+                    h->body.vel.x=h->body.vel.z=0;
+                    h->life=fminf(h->life,8.f);
+                }
                 h->body.onGround=h->body.vel.y==0;
                 h->body.pos=world_wrap(h->body.pos);
                 if(!worldPeriodic){h->body.pos.x=clampf(h->body.pos.x,-FLOOR_SIZE+.4f,FLOOR_SIZE-.4f);h->body.pos.z=clampf(h->body.pos.z,-FLOOR_SIZE+.4f,FLOOR_SIZE-.4f);}
@@ -80,7 +107,6 @@ static void hologram_tick(float dt) {
                 bool swarm=players[i].enemyType==ENEMY_TYPE_SWARMER,goliath=players[i].enemyType==ENEMY_TYPE_GOLIATH;
                 if((swarm || goliath) && v_length(world_delta(players[i].pos,h->body.pos))<(swarm?.75f:1.6f)) {
                     hologram_damage(MAX_COMBATANTS+n,swarm?10:30);players[i].contactDamageTimer=swarm?.5f:.8f;
-                    if(swarm)kill_player(i,-1,false,false);
                 }
             }
         }
@@ -93,6 +119,9 @@ static void hologram_tick(float dt) {
 static void hologram_draw(bool emission) {
     for(int n=0;n<MAX_PLAYERS;n++) {
         Hologram *h=&holograms[n];if(h->life<=0 || !periodic_visible(h->body.pos,3))continue;
+        // Drop the complete projection in brief pulses, including its weapon and bloom.
+        // The simulation timer keeps every viewport and render pass in agreement.
+        if(h->damageFlicker>0 && ((int)((.4f-h->damageFlicker)*20)%2)==0)continue;
         if(drawViewPlayerIndex==n && v_length(world_delta(h->body.pos,players[n].pos))<.75f)continue;
         character_draw(h->pose,emission);
         if(h->armed && drawWeaponModels){
@@ -148,14 +177,17 @@ static bool hologram_net_receive(NetMessageType type,NetReader *r,uint32_t tick)
         h->color=(Color){net_read_u8(r),net_read_u8(r),net_read_u8(r),255};
         h->weapon=net_read_u8(r);h->armed=net_read_u8(r)!=0;h->body.onGround=net_read_u8(r)!=0;
         if(r->failed || !v_isfinite(h->body.pos) || !v_isfinite(h->body.vel) || !isfinite(h->body.yaw) ||
-           !isfinite(h->life) || h->life<0 || h->life>8 || !isfinite(h->health) || h->health<0 || h->health>50 ||
+           !isfinite(h->life) || h->life<0 || h->life>hologram_max_life()+.01f || !isfinite(h->health) || h->health<0 || h->health>50 ||
            !isfinite(h->cooldown) || h->cooldown<0 || h->cooldown>15 || h->weapon>WEAPON_DYNAMIC_LAUNCHER)return true;
     }
     memcpy(teamUpgradeLevels,levels,sizeof(levels));
     for(int n=0;n<MAX_PLAYERS;n++){
         Hologram old=holograms[n];holograms[n]=incoming[n];holograms[n].visualTarget=incoming[n].body.pos;
         holograms[n].pose=character_pose(incoming[n].body.pos,incoming[n].body.yaw,0,0,incoming[n].body.onGround,false,incoming[n].color,(float)GetTime());
-        if(old.generation==incoming[n].generation && old.life>0){holograms[n].body.pos=old.body.pos;holograms[n].animation=old.animation;holograms[n].pose=old.pose;}
+        if(old.generation==incoming[n].generation && old.life>0){
+            holograms[n].body.pos=old.body.pos;holograms[n].animation=old.animation;holograms[n].pose=old.pose;
+            holograms[n].damageFlicker=incoming[n].health<old.health?.4f:old.damageFlicker;
+        }
     }
     hologramReceiveTick=tick;return true;
 }

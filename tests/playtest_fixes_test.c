@@ -52,6 +52,38 @@ static void upgrades(void){
     reset_firefight_match();assert(teamUpgradeLevels[0]==0 && teamUpgradeLevels[1]==0 && teamUpgradeLevels[2]==0);
 }
 static void decoys(void){
+    // Aim at a floor point four meters ahead; stop precisely, then remain idle.
+    fresh();players[0].pos=(Vector3){0,BASE_EYE_HEIGHT,0};
+    players[0].pitch=-atan2f(BASE_EYE_HEIGHT,4)*RAD2DEG;
+    assert(hologram_deploy(0));assert(fabsf(holograms[0].travelRemaining-4)<.001f);
+    players[0].yaw=90; // Turning after deployment must not steer the decoy.
+    for(int frame=0;frame<180;frame++)hologram_tick(1.f/60);
+    assert(fabsf(holograms[0].body.pos.z+4)<.001f && fabsf(holograms[0].body.pos.x)<.001f);
+    assert(holograms[0].travelRemaining==0 && holograms[0].body.vel.z==0 && holograms[0].life>0);
+    Vector3 stopped=holograms[0].body.pos;
+    hologram_tick(.25f);assert(Vector3Equals(stopped,holograms[0].body.pos));
+    fresh();players[0].pos=(Vector3){0,BASE_EYE_HEIGHT,0};players[0].pitch=45;
+    assert(hologram_deploy(0));assert(holograms[0].travelRemaining>24 && holograms[0].travelRemaining<=hologram_max_range());
+    // Cross nearly the entire map, then idle for the remaining eight seconds.
+    fresh();players[0].pos=(Vector3){0,BASE_EYE_HEIGHT,35};
+    players[0].pitch=-atan2f(BASE_EYE_HEIGHT,70)*RAD2DEG;
+    assert(hologram_deploy(0));assert(fabsf(holograms[0].travelRemaining-70)<.01f);
+    assert(holograms[0].life>14 && holograms[0].life<=hologram_max_life());
+    for(int frame=0;frame<15*60;frame++)hologram_tick(1.f/60);
+    assert(fabsf(holograms[0].body.pos.z+35)<.01f && holograms[0].travelRemaining==0);
+    assert(holograms[0].life>6 && holograms[0].life<=8);
+    fresh();activePlayers=5;players[0].pos=(Vector3){0,BASE_EYE_HEIGHT,0};
+    assert(hologram_deploy(0));holograms[0].direction=(Vector3){0};
+    players[4].enemyType=ENEMY_TYPE_SWARMER;players[4].pos=players[0].pos;
+    for(int hit=0;hit<5;hit++){
+        players[4].contactDamageTimer=0;
+        hologram_tick(.01f);
+        assert(players[4].respawn_timer==0 && combatantLife[4]==LIFE_ALIVE);
+        assert(holograms[0].health==40-hit*10 && holograms[0].damageFlicker>0);
+        assert(players[4].contactDamageTimer==.5f);
+        hologram_tick(.01f);assert(holograms[0].health==40-hit*10);
+    }
+    assert(holograms[0].life==0);
     fresh();players[0].pos=(Vector3){0,BASE_EYE_HEIGHT,0};players[0].yaw=0;
     assert(hologram_deploy(0));assert(!hologram_deploy(0));
     for(int i=0;i<60;i++)hologram_tick(1.f/60);

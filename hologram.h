@@ -2,7 +2,7 @@
    Decoys never occupy actor slots or participate in spawn/score accounting. */
 typedef struct {
     Player body;
-    float health,life,cooldown;
+    float health,life,cooldown,damageFlicker,travelRemaining;
     uint32_t generation;
     Color color;
     WeaponKind weapon;

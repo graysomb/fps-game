@@ -530,7 +530,7 @@ static inline bool is_player_bot(int player_index) {
 #define HUD_BAR_SPACING     8
 #define HUD_BAR_TEXT_SIZE  22
 #define RADAR_PIXEL_RADIUS 64
-#define RADAR_WORLD_RADIUS 18.0f
+#define RADAR_WORLD_RADIUS 36.0f
 #define RADAR_MOVE_SPEED_THRESHOLD 0.35f
 #define CREATIVE_BRUSH_MIN 1
 #define CREATIVE_BRUSH_MAX 20
