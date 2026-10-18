@@ -69,6 +69,8 @@ constant int MODE_PREPARE_INDIRECT = 13;
 constant int MODE_WAKE_GATHER = 14;
 constant int MODE_WAKE_APPLY = 15;
 constant int MODE_TOPOLOGY_REBUILD_SERIAL = 16;
+constant int MODE_WRAP_GATHER = 17;
+constant int MODE_WRAP_APPLY = 18;
 constant int CONTROL_FLAG_OVERFLOW = 1;
 constant int CONTROL_FLAG_TOPOLOGY_DIRTY = 2;
 constant int CONTROL_FLAG_BREAK_OCCURRED = 4;
@@ -476,10 +478,10 @@ kernel void pbd_pipeline_periodic(
     device uint *collisionId=simId+uint(controlLoad(control,2));
     device atomic_int *collisionMember=reinterpret_cast<device atomic_int *>(cloneParent);
     device atomic_uint *collisionControl=reinterpret_cast<device atomic_uint *>(dispatchArgs+8);
-    if(u.mode==17 || u.mode==18) {
+    if(u.mode==MODE_WRAP_GATHER || u.mode==MODE_WRAP_APPLY) {
         if(gid>=uint(controlLoad(control,1)))return;
         uint id=simId[gid];
-        if(u.mode==17) {
+        if(u.mode==MODE_WRAP_GATHER) {
             uint anchor=uint(round(particle[id].velocity.w));float3 p=particle[anchor].pos_radius.xyz;
             float3 shift=periodicDelta(p,u)-p;
             for(int k=0;k<3;k++)atomic_store_explicit(&correction[id*4+k],as_type<uint>(shift[k]),memory_order_relaxed);

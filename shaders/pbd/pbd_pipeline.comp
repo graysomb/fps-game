@@ -90,6 +90,8 @@ const int MODE_PREPARE_INDIRECT = 13;
 const int MODE_WAKE_GATHER = 14;
 const int MODE_WAKE_APPLY = 15;
 const int MODE_TOPOLOGY_REBUILD_SERIAL = 16;
+const int MODE_WRAP_GATHER = 17;
+const int MODE_WRAP_APPLY = 18;
 const int CONTROL_FLAG_OVERFLOW = 1;
 const int CONTROL_FLAG_TOPOLOGY_DIRTY = 2;
 const int CONTROL_FLAG_BREAK_OCCURRED = 4;
@@ -692,8 +694,8 @@ void wrapApply(uint gid) {
 void main() {
     uint gid=gl_GlobalInvocationID.x;
     if (uParticleCount < 0 || uSimCount < 0) return;
-    if (uMode==17) wrapGather(gid);
-    else if (uMode==18) wrapApply(gid);
+    if (uMode==MODE_WRAP_GATHER) wrapGather(gid);
+    else if (uMode==MODE_WRAP_APPLY) wrapApply(gid);
     else if (uMode==MODE_RESET) resetCorrections(gid);
     else if (uMode==MODE_INTEGRATE) integrateParticle(gid);
     else if (uMode==MODE_HASH_CLEAR) clearHash(gid);
