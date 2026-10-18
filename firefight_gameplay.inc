@@ -238,7 +238,8 @@ static void update_firefight_logic(float dt) {
         players[slot].enemyType=(EnemyType)type;
         Vector3 position;
         if(!ff_spawn_position(slot,&position)) break;
-        init_firefight_bot_entity(slot,(EnemyType)type,firefightWave==1?INPUT_TYPE_BOT_EASY:firefightWave<=3?INPUT_TYPE_BOT_MEDIUM:INPUT_TYPE_BOT_HARD);
+        int level=ff_ai_level(firefightWave,type);
+        init_firefight_bot_entity(slot,(EnemyType)type,level==0?INPUT_TYPE_BOT_EASY:level==1?INPUT_TYPE_BOT_MEDIUM:INPUT_TYPE_BOT_HARD);
         /* Attached armor follows its owner in the normal gameplay update. */
         players[slot].pos=position;
         players[slot].death_pos=position;
