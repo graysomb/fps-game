@@ -14,6 +14,14 @@ int main(void) {
     }
     assert(ff_count(13,1,1)==4 && ff_count(11,4,2)==5);
     assert(ff_count(12,4,1)==6 && ff_count(12,4,9)==1);
+    const int specialistCounts[]={1,2,2,3};
+    for(int h=1;h<=4;h++) for(int w=1;w<=24;w++) {
+        for(int t=3;t<9;t++) {
+            int base=ff_waves[(w-1)%FF_WAVE_COUNT].count[t];
+            assert(ff_count(w,h,t)==base*specialistCounts[h-1]);
+        }
+        if(w%FF_WAVE_COUNT==0) assert(ff_count(w,h,9)==1);
+    }
     assert(ff_wave_cap(1,1)==2 && ff_wave_cap(2,1)==3);
     assert(ff_cap(1)==6 && ff_cap(4)==12);
     int votes[4]={-1,-1,-1,-1}; assert(ff_vote(votes,4)==UPGRADE_BUILD);

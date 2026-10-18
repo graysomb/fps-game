@@ -240,7 +240,10 @@ players use reserves directly. Wave clears restore the team.
 Early waves introduce Goliaths (2), Sappers (3), Shieldbearers and Builders (4),
 Lobbers (5), and Anchors (6). Riflemen appear in waves 2, 4, 5, and 7–10, with at
 most one per wave through wave 10. They are Easy before wave 5, Normal from wave
-5, and Hard from wave 10 onward. Dead Sappers leave a live four-second bomb; planted
+5, and Hard from wave 10 onward. Specialist wave totals scale with team size:
+a single specialist becomes 1/2/2/3 for 1/2/3/4 players. Concurrent specialist
+limits stay unchanged, so extras enter as reinforcements; Foundry bosses remain
+one per boss wave. Dead Sappers leave a live four-second bomb; planted
 bombs remain active. Lobbers acquire targets across the map and tear connected
 8–64 voxel pieces from destructible structures before throwing them along a clear
 ballistic arc. Screen-edge damage cues indicate incoming direction. Large rat and

@@ -32,7 +32,9 @@ static inline int ff_count(int wave, int humans, int type) {
     if(wave<1 || type<0 || type>=FF_TYPE_COUNT) return 0;
     int base = ff_waves[(wave-1)%FF_WAVE_COUNT].count[type];
     if(type==0 && (wave-1)%FF_WAVE_COUNT<10) return base;
-    if(type>=3 || (wave-1)%FF_WAVE_COUNT==FF_WAVE_COUNT-1) return base;
+    if(type==9 || (wave-1)%FF_WAVE_COUNT==FF_WAVE_COUNT-1) return base;
+    /* Specialists scale with team size, retaining their existing cycle counts. */
+    if(type>=3) return (base * (humans+1) + 1)/2;
     int cycle = (wave-1)/FF_WAVE_COUNT;
     return (base * (humans+1) * (4+cycle) + 7)/8;
 }
