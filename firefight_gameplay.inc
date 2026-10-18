@@ -34,7 +34,7 @@ static void ff_restore_human(int i, float matter) {
     p->meleeSwingActive=p->meleeSwingHitApplied=false;
     p->meleeKnockbackActive=false; p->onGround=false;
     combatantLife[i]=LIFE_ALIVE;
-    bleedTimer[i]=reviveProgress[i]=0; reviveOwner[i]=-1;
+    reviveProgress[i]=0; reviveOwner[i]=-1;
 }
 
 static void ff_resolve_death(int i) {
@@ -72,7 +72,6 @@ static void ff_update_coop(float dt) {
             if(playerInput[i]==INPUT_TYPE_GAMEPAD) look=-GetGamepadAxisMovement(seat_device(i),GAMEPAD_AXIS_RIGHT_X)*localSeats[i].sensitivity;
             else look=(IsKeyDown(i==0?KEY_F:KEY_LEFT)?1.0f:0)-(IsKeyDown(i==0?KEY_H:KEY_RIGHT)?1.0f:0);
             players[i].death_yaw+=look*90*dt;
-            bleedTimer[i]-=dt;
             int rescuer=-1;
             for(int j=0;j<firefightHumans;j++) {
                 if(j==i || combatantLife[j]!=LIFE_ALIVE || players[j].matter<=FF_REVIVE_COST || !ff_revive_held(j)) continue;
@@ -97,9 +96,6 @@ static void ff_update_coop(float dt) {
                     players[i].pos=position;
                     play_sfx(SFX_SHIELD);
                 }
-            }
-            if(combatantLife[i]==LIFE_DOWNED && bleedTimer[i]<=0) {
-                players[i].deaths++; ff_resolve_death(i);
             }
         }
         alive |= combatantLife[i]==LIFE_ALIVE;

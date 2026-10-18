@@ -76,9 +76,17 @@ int main(int argc,char **argv) {
     assert(combatantLife[1]==LIFE_ALIVE && players[1].matter==35);
     assert(players[0].matter==75 && reviveCount[0]==1);
     ffTestReviveHeld[0]=false;
-    test_down(1);ff_update_coop(16);assert(combatantLife[1]==LIFE_WAITING && firefightTeamLives==2);
+    test_down(1);int deaths=players[1].deaths;
+    ff_update_coop(300);assert(combatantLife[1]==LIFE_DOWNED && firefightTeamLives==3 && players[1].deaths==deaths);
+    players[0].pos=v_add(players[1].death_pos,(Vector3){1,0,0});players[0].last_damage_time=-1000;
+    ffTestReviveHeld[0]=true;ff_update_coop(3.1f);ffTestReviveHeld[0]=false;
+    assert(combatantLife[1]==LIFE_ALIVE);
+    // A complete wipe still resolves deaths against the existing shared lives.
+    for(int i=0;i<4;i++)test_down(i);
+    ff_update_coop(.1f);assert(firefightTeamLives==0 && combatantLife[3]==LIFE_SPECTATING);
+    for(int i=0;i<3;i++)assert(combatantLife[i]==LIFE_WAITING);
     ff_update_coop(5.1f);assert(combatantLife[1]==LIFE_ALIVE);
-    firefightTeamLives=0;test_down(1);ff_update_coop(16);assert(combatantLife[1]==LIFE_SPECTATING);
+    test_down(1);ff_update_coop(300);assert(combatantLife[1]==LIFE_DOWNED);
     firefightWave=2;teamUpgrade=UPGRADE_THROW;teamUpgradeLevels[UPGRADE_THROW]=1;ff_wave_complete();
     assert(combatantLife[1]==LIFE_ALIVE && players[1].matter==MATTER_MAX_DEFAULT);
     assert(firefightTeamLives==1 && teamUpgradeLevels[UPGRADE_THROW]==1);

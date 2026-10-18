@@ -92,7 +92,7 @@ static void ff_draw_hud(int i,int w,int h) {
     int panelX=160, panelW=w-panelX-12;
     DrawRectangle(panelX-6,h-154,panelW+6,100,Fade(BLACK,.8f));
     const char *text=NULL;
-    if(combatantLife[i]==LIFE_DOWNED) text=TextFormat("DOWNED %.0fs | Revive %.1f / 3s",bleedTimer[i],reviveProgress[i]);
+    if(combatantLife[i]==LIFE_DOWNED) text=TextFormat("DOWNED | Awaiting revive %.1f / 3s",reviveProgress[i]);
     else if(combatantLife[i]==LIFE_SPECTATING) text="Spectating until wave clear";
     else if(combatantLife[i]==LIFE_WAITING) text=TextFormat("Respawn in %.0fs",players[i].respawn_timer);
     else if(firefightPractice) {

@@ -792,7 +792,7 @@ static float characterSampleTime[MAX_PLAYERS];
 
 static CombatantLifeState combatantLife[MAX_COMBATANTS];
 static int combatantTeam[MAX_COMBATANTS];
-static float bleedTimer[MAX_PLAYERS], reviveProgress[MAX_PLAYERS];
+static float reviveProgress[MAX_PLAYERS];
 static int reviveOwner[MAX_PLAYERS], reviveCount[MAX_PLAYERS];
 static int prepVotes[MAX_PLAYERS];
 static bool prepReady[MAX_PLAYERS];
@@ -10123,7 +10123,6 @@ static void kill_player(int player_index, int attacker_index,
     if(gameMode==GAME_MODE_FIREFIGHT && player_index<firefightHumans &&
        firefightHumans>1 && player->pos.y>=-10.0f && !firefightPractice) {
         combatantLife[player_index]=LIFE_DOWNED;
-        bleedTimer[player_index]=FF_BLEED_SECONDS;
         reviveProgress[player_index]=0;
         reviveOwner[player_index]=-1;
         player->respawn_timer=9999;

@@ -4,7 +4,6 @@
 #define FF_SEATS 4
 #define FF_ENEMIES 12
 #define FF_ACTORS 16
-#define FF_BLEED_SECONDS 45.0f
 #define FF_REVIVE_SECONDS 3.0f
 #define FF_REVIVE_COST 25.0f
 #define FF_REVIVE_MATTER 35.0f
