@@ -27,6 +27,7 @@ static void play_sfx_at(SfxId id,Vector3 pos,int source,int priority,float pitch
     SetSoundPitch(v->sound,pitch);PlaySound(v->sound);claritySoundLast[src][id]=clarityClock;
 }
 static void clarity_reset(void) {
+    combat_ui_reset();
     for(int n=0;n<32;n++)if(clarityVoices[n].sound.frameCount)StopSound(clarityVoices[n].sound);
     pendingRemainsCount=0;memset(enemyRemains,0,sizeof(enemyRemains));memset(footTravel,0,sizeof(footTravel));memset(footVariant,0,sizeof(footVariant));
     memset(grenades,0,sizeof(grenades));memset(clarityEffects,0,sizeof(clarityEffects));
@@ -76,7 +77,8 @@ static bool clarity_debris_hit(int v,int target) {
     if(!x->wasTethered && clarity_is_remains(x->identity))return true;
     if(x->explosionUntil<=clarityClock || x->sleeping)return false;
     if(v_length(x->vel)>2 && players[target].contactDamageTimer<=0) {
-        clarity_actor_damage(target,x->owner,20,true);players[target].contactDamageTimer=.35f;
+        bool prior=damageOriginKnown;Vector3 origin=damageOrigin;damageOriginKnown=true;damageOrigin=v_sub(x->pos,v_mul(v_norm(x->vel),2));
+        clarity_actor_damage(target,x->owner,20,true);damageOriginKnown=prior;damageOrigin=origin;players[target].contactDamageTimer=.35f;
     }
     return true;
 }
@@ -89,10 +91,12 @@ static void clarity_explode(Vector3 pos,int owner) {
         if(distance<4 && (distance<.1f || !first_voxel_hit_detailed((Ray){pos,v_norm(d)},fmaxf(0,distance-.25f),-1,true,&hit)))damage[i]=60*(1-distance/4);
     }
     enemy_blast_terrain((EnemyCharge){.pos=pos,.owner=owner});
+    damageOriginKnown=true;damageOrigin=pos;
     for(int i=0;i<activePlayers;i++)if(damage[i]>0) {
         clarity_actor_damage(i,owner,damage[i],false);
         Vector3 d=world_delta(players[i].pos,pos);d.y+=1;players[i].vel=v_add(players[i].vel,v_mul(v_norm(d),damage[i]/10));players[i].onGround=false;players[i].meleeKnockbackActive=true;
     }
+    damageOriginKnown=false;
     clarity_effect((ClarityEffect){.id=clarityNextId++,.kind=2,.pos=pos,.attacker=owner},true);
 }
 static void enemy_blast(EnemyCharge c){clarity_explode(c.pos,c.owner);}
@@ -127,9 +131,9 @@ static void clarity_grenade_step(GrenadeState *g,float dt) {
 }
 static bool clarity_evade(int slot,float dt) {
     if(slot<0 || !is_player_bot(slot) || players[slot].respawn_timer>0 || players[slot].enemyType==ENEMY_TYPE_FOUNDRY)return false;
-    Vector3 threats[CLARITY_GRENADES+MAX_COMBATANTS];int count=0;
+    Vector3 threats[CLARITY_GRENADES+ENEMY_CHARGE_MAX];int count=0;
     for(int n=0;n<CLARITY_GRENADES;n++)if(grenades[n].id && v_length(world_delta(players[slot].pos,grenades[n].pos))<6)threats[count++]=grenades[n].pos;
-    for(int n=0;n<MAX_COMBATANTS;n++)if(enemyCharges[n].active && v_length(world_delta(players[slot].pos,enemyCharges[n].pos))<6)threats[count++]=enemyCharges[n].pos;
+    for(int n=0;n<ENEMY_CHARGE_MAX;n++)if(enemyCharges[n].active && v_length(world_delta(players[slot].pos,enemyCharges[n].pos))<6)threats[count++]=enemyCharges[n].pos;
     if(!count)return false;
     Vector3 best={0};float score=-1;
     for(int n=0;n<16;n++) {
@@ -142,6 +146,11 @@ static bool clarity_evade(int slot,float dt) {
     bot_apply_move(&players[slot],&botStates[slot],best,MOVE_SPEED,dt);return true;
 }
 static void clarity_tick(float dt) {
+    if(netTransport.role==NET_ROLE_CLIENT)for(int n=0;n<ENEMY_CHARGE_MAX;n++)if(enemyCharges[n].active){
+        EnemyCharge *c=&enemyCharges[n];c->fuse=fmaxf(0,c->fuse-dt);c->beep-=dt;
+        if(c->fuse>0 && c->beep<=0){play_sfx_at(SFX_SHIELD,c->pos,c->owner,3,1);c->beep=fmaxf(.12f,c->fuse*.2f);}
+    }
+    for(int i=0;i<MAX_PLAYERS;i++)reviveComplete[i]=fmaxf(0,reviveComplete[i]-dt);
     if(dt<=0)return;clarityClock+=dt;feedback_tick(dt);
     for(int n=0;n<CLARITY_EFFECTS;n++)if(clarityEffects[n].id){clarityEffects[n].age+=dt;if(clarityEffects[n].age>(clarityEffects[n].kind==2?.9f:.8f))clarityEffects[n].id=0;}
     for(int i=0;i<activePlayers;i++){grenadeCooldown[i]=fmaxf(0,grenadeCooldown[i]-dt);killConfirm[i]=fmaxf(0,killConfirm[i]-dt);}
@@ -193,7 +202,6 @@ static void clarity_draw(void) {
 static void clarity_hud(int slot,int w,int h) {
     if(slot<0 || slot>=MAX_PLAYERS || creativeModeActive)return;
     int local=netTransport.role==NET_ROLE_OFFLINE?slot:net_local_index_for_slot(slot);if(local<0)return;
-    DrawText(TextFormat("Grenades %d/2 [%s]",grenadeInventory[slot],playerInput[local]==INPUT_TYPE_GAMEPAD?"D-pad Up":local==0?"C":"."),w-225,h-60,16,ORANGE);
     if(killConfirm[slot]>0)DrawText("ELIMINATED",w/2-55,h/2+30,16,YELLOW);
 }
 static bool clarity_supply_position(Vector3 anchor,int quarter,Vector3 *out) {

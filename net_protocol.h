@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define FPS_NET_MAGIC 0x4650534eu /* "FPSN" */
-#define FPS_NET_PROTOCOL_VERSION 14u /* Hologram input and authoritative snapshots. */
+#define FPS_NET_PROTOCOL_VERSION 15u /* Revive feedback, damage cues and pooled Sapper bombs. */
 #define FPS_NET_DEFAULT_PORT 27015u
 #define FPS_NET_DISCOVERY_PORT 27016u
 #define FPS_NET_MAX_PACKET 1100u
@@ -36,7 +36,9 @@ typedef enum NetMessageType {
     NET_MSG_GAME_EVENT,
     NET_MSG_GRENADES,
     NET_MSG_REGENERATION,
-    NET_MSG_HOLOGRAMS
+    NET_MSG_HOLOGRAMS,
+    NET_MSG_COMBAT_UI,
+    NET_MSG_CHARGES
 } NetMessageType;
 
 typedef enum NetInputButtons {
@@ -54,7 +56,8 @@ typedef enum NetInputButtons {
     NET_INPUT_CREATIVE_DOWN = 1u << 11,
     NET_INPUT_GRENADE = 1u << 12,
     NET_INPUT_TETHER_CANCEL = 1u << 13,
-    NET_INPUT_HOLOGRAM = 1u << 14
+    NET_INPUT_HOLOGRAM = 1u << 14,
+    NET_INPUT_REVIVE = 1u << 15
 } NetInputButtons;
 
 typedef struct NetPacketHeader {

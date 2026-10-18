@@ -6,7 +6,7 @@
 #include <assert.h>
 bool ffTestReviveHeld[4];
 static int explosions,deaths,snapshots;
-static bool sawLateGrenade,sawRegeneration,sawSeamCrossing,sawHologram;
+static bool sawLateGrenade,sawRegeneration,sawSeamCrossing,sawHologram,sawDamageCue,sawRevive,sawCharge;
 static void receive_test(NetTransport *t,int peer,uint8_t channel,const uint8_t *data,size_t length,void *user) {
     NetReader r;NetPacketHeader h;net_reader_init(&r,data,length);
     if(!net_read_header(&r,&h))return;
@@ -22,6 +22,11 @@ static void receive_test(NetTransport *t,int peer,uint8_t channel,const uint8_t 
         net_on_receive(t,peer,channel,data,length,user); /* Duplicate delivery must be harmless. */
     }
     if(t->role==NET_ROLE_CLIENT && holograms[1].life>0 && holograms[1].health==50)sawHologram=true;
+    if(t->role==NET_ROLE_CLIENT){
+        for(int n=0;n<8;n++)if(damageCues[1][n].until>0)sawDamageCue=true;
+        if(reviveProgress[0]==1.5f && reviveOwner[0]==1)sawRevive=true;
+        if(enemyCharges[40].active && enemyCharges[40].owner==4)sawCharge=true;
+    }
     if(t->role==NET_ROLE_CLIENT && regeneration.active)sawRegeneration=true;
     if(t->role==NET_ROLE_CLIENT && players[0].pos.x<-30)sawSeamCrossing=true;
     for(int n=0;n<CLARITY_GRENADES;n++)if(grenades[n].id && grenades[n].owner==0)sawLateGrenade=true;
@@ -51,7 +56,10 @@ int main(int argc,char **argv) {
                 net_integrate_player(&players[0],.1f,true);players[0].vel=(Vector3){0};
                 assert(players[0].pos.x<-30);crossed=true;
             }
-            if(netTransport.peers[1].welcomed){if(joined<0)joined=now;clarity_tick(dt);hologram_tick(dt);net_host_tick();if(!deathSent && now-joined>4){clarity_death(0,1);deathSent=true;}}
+            if(netTransport.peers[1].welcomed){if(joined<0)joined=now;clarity_tick(dt);hologram_tick(dt);net_host_tick();if(!deathSent && now-joined>4){
+                clarity_death(0,1);combat_ui_damage(1,0);reviveProgress[0]=1.5f;reviveOwner[0]=1;
+                enemyCharges[40]=(EnemyCharge){.active=true,.owner=4,.id=12345,.pos={2,1,2},.fuse=4};
+                combat_ui_snapshot(-1);deathSent=true;}}
             if(joined>=0 && now-joined>1) {
                 if(!regenQueued) {
                     int idx=add_static_voxel_at_grid(8,0,0,GRAY,0);assert(idx>=0);
@@ -71,7 +79,7 @@ int main(int argc,char **argv) {
         WaitTime(1.0/60);
     }
     if(host){assert(joined>=0 && deathSent && regenResent && recycleQueueCount==0);assert(grenadeInventory[1]==1);assert(holograms[1].generation==1);for(int n=0;n<32;n++)assert(!grenades[n].id);puts("LAN host: one throw despite duplicates; ordnance cleaned up");}
-    else {assert(netWorldReady && sawLateGrenade && sent && repeated && sawHologram);assert(explosions==2 && deaths==1);assert(netVoxelProxyCount==1 && voxel_count==1 && table_get_static_only(8,0,0)>=0 && sawRegeneration && !regeneration.active);assert(fabsf(v_length(netVoxelProxies[0].x_axis)-1.25f)<.01f);assert(grenadeInventory[netLocalPlayerSlots[0]]==1);for(int n=0;n<32;n++)assert(!grenades[n].id);puts("LAN client: late join, inventory, snapshot loss and unique events passed");}
+    else {assert(netWorldReady && sawLateGrenade && sent && repeated && sawHologram && sawDamageCue && sawRevive && sawCharge);assert(explosions==2 && deaths==1);assert(netVoxelProxyCount==1 && voxel_count==1 && table_get_static_only(8,0,0)>=0 && sawRegeneration && !regeneration.active);assert(fabsf(v_length(netVoxelProxies[0].x_axis)-1.25f)<.01f);assert(grenadeInventory[netLocalPlayerSlots[0]]==1);for(int n=0;n<32;n++)assert(!grenades[n].id);puts("LAN client: late join, inventory, snapshot loss and unique events passed");}
     regeneration_shutdown();
     assert(host?crossed:sawSeamCrossing);
     net_transport_shutdown(&netTransport);net_transport_global_shutdown();shutdown_world_visuals();CloseWindow();return 0;

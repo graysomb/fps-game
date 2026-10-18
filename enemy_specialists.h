@@ -1,12 +1,13 @@
 /* Included after combat globals. Equipment references survive voxel compaction. */
 #define ENEMY_EQUIPMENT_MAX 48
 #define ENEMY_STRUCTURE_MAX 24
-#define ENEMY_LOB_MAX_VOXELS 24
+#define ENEMY_LOB_MAX_VOXELS 64
+#define ENEMY_CHARGE_MAX 64
 #define ENEMY_CONSTRUCTION_OWNER (-2) /* Temporary world material: never enqueue map restoration. */
 typedef struct { uint64_t id; Vector3 offset; int group; } EnemyEquipment;
 typedef struct {
     float cooldown, windup, melee, exposure, repair, spawnTimer, disabled;
-    float searchTimer, stompCooldown, coreHealth, coreMax, repositionTimer;
+    float searchTimer, stompCooldown, coreHealth, coreMax, repositionTimer, payloadFallback;
     int shieldHits[4];
     float shieldFlash[4], exposedAge, healingPulse, coreCue, blockedCue;
     bool coreOpen, supplied;
@@ -22,7 +23,7 @@ typedef struct { bool active; int owner; uint64_t id,support; Vector3 pos; float
 typedef struct { uint64_t id, ids[ENEMY_LOB_MAX_VOXELS]; int count, owner; float age, hitCooldown[MAX_COMBATANTS]; Vector3 target; } EnemyLob;
 typedef struct { int owner; unsigned generation; uint64_t ids[96]; int count; } EnemyStructure;
 static EnemySpecialState enemySpecial[MAX_COMBATANTS];
-static EnemyCharge enemyCharges[MAX_COMBATANTS];
+static EnemyCharge enemyCharges[ENEMY_CHARGE_MAX];
 static EnemyLob enemyLobs[MAX_COMBATANTS*2];
 static EnemyStructure enemyStructures[ENEMY_STRUCTURE_MAX];
 static unsigned enemyGeneration;

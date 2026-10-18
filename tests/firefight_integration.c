@@ -59,7 +59,7 @@ int main(int argc,char **argv) {
     for(int n=0;n<30;n++)update_firefight_logic(2.1f);
     int alive=0,giants=0;
     for(int i=4;i<16;i++) if(players[i].respawn_timer<=0) {alive++;giants+=players[i].enemyType==ENEMY_TYPE_GOLIATH;}
-    assert(alive==12 && giants<=2);
+    assert(alive==11 && giants<=2);
     /* A real 16-combatant solver dispatch catches GPU uniform/tether bounds. */
     simulate_voxel_pbd_steps(1.0f/120,2);
     players[0].pos=(Vector3){0,4,0};players[1].pos=(Vector3){1,4,0};
@@ -67,14 +67,14 @@ int main(int argc,char **argv) {
     ffTestReviveHeld[0]=true;players[0].last_damage_time=-1000;
     ff_update_coop(1);assert(reviveProgress[1]>0);
     ffTestReviveHeld[0]=false;ff_update_coop(.1f);assert(reviveProgress[1]==0);
-    players[0].matter=25;ffTestReviveHeld[0]=true;ff_update_coop(.1f);assert(reviveProgress[1]==0);
+    players[0].matter=0;ffTestReviveHeld[0]=true;ff_update_coop(.1f);assert(reviveProgress[1]>0);
     players[0].matter=100;players[0].pos.x=10;ff_update_coop(.1f);assert(reviveProgress[1]==0);
     players[0].pos.x=0;players[0].last_damage_time=(float)GetTime();ff_update_coop(.1f);assert(reviveProgress[1]==0);
     players[0].last_damage_time=-1000;
     ffTestReviveHeld[0]=true;
     ff_update_coop(3.1f);
     assert(combatantLife[1]==LIFE_ALIVE && players[1].matter==35);
-    assert(players[0].matter==75 && reviveCount[0]==1);
+    assert(players[0].matter==100 && reviveCount[0]==1);
     ffTestReviveHeld[0]=false;
     test_down(1);int deaths=players[1].deaths;
     ff_update_coop(300);assert(combatantLife[1]==LIFE_DOWNED && firefightTeamLives==3 && players[1].deaths==deaths);

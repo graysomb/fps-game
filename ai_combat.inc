@@ -83,7 +83,15 @@ static void ai_tick(int i,float dt) {
         int ref=MAX_COMBATANTS+h;float distance;
         if(ai_hostile(i,ref) && check_ai_awareness_of_player(i,ref,&distance) && distance<nearestDistance){nearest=ref;nearestDistance=distance;}
     }
-    bool valid=ai_hostile(i,a->target),visible=valid && check_ai_awareness_of_player(i,a->target,NULL);
+    bool mapAware=players[i].enemyType==ENEMY_TYPE_LOBBER;
+    if(mapAware){
+        nearest=-1;nearestDistance=FLT_MAX;
+        for(int target=0;target<MAX_COMBATANTS+MAX_PLAYERS;target++)if(ai_hostile(i,target)){
+            float d=v_length(world_delta(ai_target_body(target)->pos,players[i].pos));
+            if(d<nearestDistance){nearest=target;nearestDistance=d;}
+        }
+    }
+    bool valid=ai_hostile(i,a->target),visible=valid && (mapAware || check_ai_awareness_of_player(i,a->target,NULL));
     if(!locked && nearest>=0 && (!valid || a->memory<=0 || (a->commit<=0 &&
         v_length(world_delta(ai_target_body(nearest)->pos,players[i].pos))<.7f*v_length(world_delta(a->known,players[i].pos))))) {
         ai_select(i,nearest,ai_target_body(nearest)->pos,AI_ALERT_SEEN);valid=true;visible=true;

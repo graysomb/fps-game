@@ -5,7 +5,7 @@
 #define FF_ENEMIES 12
 #define FF_ACTORS 16
 #define FF_REVIVE_SECONDS 3.0f
-#define FF_REVIVE_COST 25.0f
+#define FF_REVIVE_COST 0.0f
 #define FF_REVIVE_MATTER 35.0f
 #define FF_PREP_SECONDS 20.0f
 typedef enum { LIFE_ALIVE, LIFE_DOWNED, LIFE_WAITING, LIFE_SPECTATING, LIFE_UNUSED } CombatantLifeState;
@@ -14,21 +14,19 @@ typedef enum { UPGRADE_BUILD, UPGRADE_HARVEST, UPGRADE_THROW, UPGRADE_NONE } Tea
 #define FF_WAVE_COUNT 12
 typedef struct { const char *name; int count[FF_TYPE_COUNT]; } WaveDefinition;
 static const WaveDefinition ff_waves[FF_WAVE_COUNT] = {
-    /* Storage order is normal, swarmer, Goliath; difficulty starts with swarmers. */
-    {"First Contact", {0,3,0}}, {"Swarm Patrol", {0,6,0}},
-    {"Heavy Contact", {1,6,0}}, {"First Goliath", {2,6,1}},
-    {"Armored Patrol", {1,6,1,0}},
-    {"Shield Line", {1,6,0,0,1}},
-    {"Demolition", {1,6,0,0,0,1}},
-    {"Incoming Scrap", {1,6,0,0,0,0,1}},
-    {"Field Works", {1,6,0,0,0,0,0,1}},
-    {"Anchored", {1,6,0,0,0,0,0,0,1}},
+    /* normal, swarmer, Goliath, scrapper, shield, sapper, lobber, builder, anchor, foundry */
+    {"First Contact", {0,3}}, {"Heavy Patrol", {0,4,1}},
+    {"Demolition", {0,4,0,0,0,1}}, {"Field Works", {0,3,0,0,1,0,0,1}},
+    {"Incoming Scrap", {0,4,0,0,0,0,1}}, {"Anchored Assault", {0,3,1,0,0,1,0,0,1}},
+    {"Fortified Patrol", {1,4,0,0,1,0,0,1}}, {"Siege Support", {1,4,0,0,0,0,1,0,1}},
+    {"Heavy Works", {1,4,1,0,0,1,0,1}}, {"Shielded Siege", {1,4,0,0,1,0,1,0,1}},
     {"Combined Assault", {2,9,2,0,1,1,1,1,1}},
     {"Walking Foundry", {0,6,0,0,0,0,0,0,0,1}}
 };
 static inline int ff_count(int wave, int humans, int type) {
     if(wave<1 || type<0 || type>=FF_TYPE_COUNT) return 0;
     int base = ff_waves[(wave-1)%FF_WAVE_COUNT].count[type];
+    if(type==0 && (wave-1)%FF_WAVE_COUNT<10) return base;
     if(type>=3 || (wave-1)%FF_WAVE_COUNT==FF_WAVE_COUNT-1) return base;
     int cycle = (wave-1)/FF_WAVE_COUNT;
     return (base * (humans+1) * (4+cycle) + 7)/8;

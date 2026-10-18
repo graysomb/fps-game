@@ -99,6 +99,7 @@ static bool clarity_shield_projectile(int v) {
     return false;
 }
 static void feedback_shutdown(void) {
+    combat_ui_shutdown();
     if(blastShader.id && blastShader.id!=rlGetShaderIdDefault())UnloadShader(blastShader);
     blastShader=(Shader){0};blastShaderAttempted=false;
 }

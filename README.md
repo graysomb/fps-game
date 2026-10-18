@@ -229,14 +229,22 @@ Eight real scrap bundles restock between waves only where their supply sites are
 Ordinary walls/roofs are thicker and supports are redundant; marked demolition points
 remain vulnerable without changing global material strength.
 
-In cooperative Firefight, lethal damage downs a player for 15 seconds. Hold the right stick button
-(keyboard P1 `X`, P2 comma) within two units and clear sight for three seconds to
-revive them. Completing a revive costs 25 Matter and restores 35 Matter plus two
-seconds of invulnerability. You must have more than 25 Matter to revive. Taking
-damage, moving out of range, or releasing cancels progress without charging.
-Bleeding out spends one of three shared respawn reserves; exhausted players wait
-for the next wave. Solo players use reserves directly. Clearing a wave restores
-the team, and every second cleared wave awards a reserve.
+In cooperative Firefight, downed players remain revivable while a teammate is alive.
+Hold the right stick button (keyboard P1 `X`, P2 comma) within two units and clear
+sight for three seconds. Reviving is free, including at zero Matter, and restores
+35 Matter plus two seconds of invulnerability. Animated bands and a progress ring
+show the revive; taking damage, moving away, or releasing interrupts it. A team
+wipe spends shared respawn reserves; with none remaining, the match ends. Solo
+players use reserves directly. Wave clears restore the team.
+
+Early waves introduce Goliaths (2), Sappers (3), Shieldbearers and Builders (4),
+Lobbers (5), and Anchors (6). Riflemen appear from wave 7 and are limited to one
+per wave through wave 10. Dead Sappers leave a live four-second bomb; planted
+bombs remain active. Lobbers acquire targets across the map and tear connected
+8–64 voxel pieces from destructible structures before throwing them along a clear
+ballistic arc. Screen-edge damage cues indicate incoming direction. Large rat and
+grenade HUD icons show availability, cooldown, and grenade count. LAN peers must
+use protocol 15 builds for the new feedback and bomb snapshots.
 
 Preparation lasts 20 seconds. Vote to increase the team's build, harvest, or throw
 upgrade level. Bonuses persist and stack across waves; ties default to building,

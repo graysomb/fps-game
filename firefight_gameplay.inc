@@ -50,6 +50,7 @@ static void ff_resolve_death(int i) {
 }
 
 static bool ff_revive_held(int i) {
+    if(netTransport.role==NET_ROLE_HOST && !net_player_is_local(i))return (netPendingInput[i].held&NET_INPUT_REVIVE)!=0;
 #ifdef FIREFIGHT_TESTING
     extern bool ffTestReviveHeld[4];
     return ffTestReviveHeld[i];
@@ -61,6 +62,7 @@ static bool ff_revive_held(int i) {
 }
 
 static void ff_update_coop(float dt) {
+    if(netTransport.role==NET_ROLE_CLIENT)return;
     bool alive=false, pending=false;
     for(int i=0;i<firefightHumans;i++) {
         if(combatantLife[i]==LIFE_WAITING) {
@@ -74,7 +76,7 @@ static void ff_update_coop(float dt) {
             players[i].death_yaw+=look*90*dt;
             int rescuer=-1;
             for(int j=0;j<firefightHumans;j++) {
-                if(j==i || combatantLife[j]!=LIFE_ALIVE || players[j].matter<=FF_REVIVE_COST || !ff_revive_held(j)) continue;
+                if(j==i || combatantLife[j]!=LIFE_ALIVE || !ff_revive_held(j)) continue;
                 Vector3 delta=world_delta(players[i].death_pos,players[j].pos);
                 float distance=v_length(delta);
                 if(distance>2.0f || (float)GetTime()-players[j].last_damage_time<dt*1.5f) continue;
@@ -90,7 +92,7 @@ static void ff_update_coop(float dt) {
                 reviveProgress[i]+=dt;
                 if(reviveProgress[i]>=FF_REVIVE_SECONDS) {
                     Vector3 position=players[i].death_pos;
-                    players[rescuer].matter-=FF_REVIVE_COST;
+                    reviveComplete[i]=.6f;
                     reviveCount[rescuer]++;
                     ff_restore_human(i,FF_REVIVE_MATTER);
                     players[i].pos=position;
@@ -225,7 +227,7 @@ static void update_firefight_logic(float dt) {
     int type=-1;
     for(int n=0;n<FF_TYPE_COUNT;n++) { int t=(ffSpawnOrdinal+n)%FF_TYPE_COUNT;
         if(t==ENEMY_TYPE_SWARMER && (firefightWave-1)%FF_WAVE_COUNT==FF_WAVE_COUNT-1) continue;
-        int specialistCap=(firefightWave-1)%FF_WAVE_COUNT==10?2:1;
+        int specialistCap=(firefightWave-1)%FF_WAVE_COUNT>=3?2:1;
         if(ffRemaining[t]>0 && (t!=2 || goliaths<2) && (t<3 || specialists<specialistCap)) {type=t;break;} }
     if(type<0) return;
     int pack=type==ENEMY_TYPE_SWARMER?3:1;

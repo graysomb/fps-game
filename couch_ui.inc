@@ -89,7 +89,7 @@ static void ff_draw_hud(int i,int w,int h) {
         DrawRectangle(x,y+24,(int)(barWidth*clampf(s->coreHealth/fmaxf(1,s->coreMax),0,1)),7,GOLD);break;
     }
     /* Reserve the lower-left corner for the existing radar. */
-    int panelX=160, panelW=w-panelX-12;
+    int panelX=160, panelW=w-panelX-12-2*((w<700?40:56)+12);
     DrawRectangle(panelX-6,h-154,panelW+6,100,Fade(BLACK,.8f));
     const char *text=NULL;
     if(combatantLife[i]==LIFE_DOWNED) text=TextFormat("DOWNED | Awaiting revive %.1f / 3s",reviveProgress[i]);
@@ -101,14 +101,14 @@ static void ff_draw_hud(int i,int w,int h) {
     } else if(firefightWaveState==FIREFIGHT_STATE_INTERMISSION) {
         int v=prepVotes[i]<0?0:prepVotes[i];
         text=TextFormat("%s %s",ff_upgrade_label(v),prepReady[i]?"[READY]":"");
-        DrawText(playerInput[i]==INPUT_TYPE_GAMEPAD?(prepMenuOpen[i]?"D-pad: vote | Bottom: ready | Top: build":"Top face: vote menu"):(prepMenuOpen[i]?"Look: vote | Jump: ready | V/N: build":"V/N: vote menu"),panelX,h-112,font,RAYWHITE);
+        DrawText(w<700?(playerInput[i]==INPUT_TYPE_GAMEPAD?"D-pad vote | A ready":"Look vote | Jump ready"):playerInput[i]==INPUT_TYPE_GAMEPAD?(prepMenuOpen[i]?"D-pad: vote | Bottom: ready | Top: build":"Top face: vote menu"):(prepMenuOpen[i]?"Look: vote | Jump: ready | V/N: build":"V/N: vote menu"),panelX,h-112,w<700?12:font,RAYWHITE);
         const WaveDefinition *next=&ff_waves[firefightWave%FF_WAVE_COUNT];
         int total=0,special=0;
         for(int t=0;t<FF_TYPE_COUNT;t++) {int n=ff_count(firefightWave+1,firefightHumans,t);total+=n;if(t>=3)special+=n;}
         DrawText(TextFormat("Next: %s (%d / %d special)",next->name,total,special),panelX,h-142,w<700?12:font,RAYWHITE);
     } else {
         for(int j=0;j<firefightHumans;j++) if(combatantLife[j]==LIFE_DOWNED) {
-            text=TextFormat("P%d DOWN | Hold %s nearby: revive (25 Matter)",j+1,playerInput[i]==INPUT_TYPE_GAMEPAD?"R-stick":i==0?"X":","); break;
+            text=TextFormat("P%d: Hold %s to revive",j+1,playerInput[i]==INPUT_TYPE_GAMEPAD?"R-stick":i==0?"X":","); break;
         }
         if(!text && players[i].matter<1) text="No Matter: melee blocks to harvest";
         if(!text) {
@@ -126,11 +126,11 @@ static void ff_draw_hud(int i,int w,int h) {
     }
     if(text) {
         int fs=font;
-        while(fs>12 && MeasureText(text,fs)>panelW) fs--;
+        while(fs>10 && MeasureText(text,fs)>panelW) fs--;
         DrawText(text,panelX,h-82,fs,GOLD);
     }
     if(combatantLife[i]==LIFE_ALIVE && firefightWaveState!=FIREFIGHT_STATE_INTERMISSION)
-        DrawText(TextFormat("Shot 1 | Build %.2g | Harvest +%.0f",ff_build_cost(i),ff_harvest_amount(i)),panelX,h-112,font,RAYWHITE);
+        DrawText(TextFormat("Shot 1 | Build %.2g | Harvest +%.0f",ff_build_cost(i),ff_harvest_amount(i)),panelX,h-112,w<700?12:font,RAYWHITE);
 }
 
 static bool couch_frame(void) {

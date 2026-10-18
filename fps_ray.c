@@ -8430,6 +8430,7 @@ static int clamp_active_players(int count);
 static void ResetGame(void);
 #include "enemy_specialists.h"
 #include "combat_clarity.h"
+#include "combat_ui.h"
 #include "foundry_traps.h"
 static void reset_firefight_match(void);
 static void start_firefight_wave(int wave_number);
@@ -10120,6 +10121,7 @@ static void kill_player(int player_index, int attacker_index,
         return;
     }
     if(gameMode==GAME_MODE_FIREFIGHT && player_index<firefightHumans && player->invuln_timer>0) return;
+    combat_ui_damage(player_index,attacker_index);
     if(gameMode==GAME_MODE_FIREFIGHT && player_index<firefightHumans &&
        firefightHumans>1 && player->pos.y>=-10.0f && !firefightPractice) {
         combatantLife[player_index]=LIFE_DOWNED;
@@ -10246,6 +10248,7 @@ static void apply_matter_damage(int player_index, int attacker_index, float dama
     if (player->invuln_timer > 0.0f || player->isExposed) {
         return;
     }
+    if(damage>0)combat_ui_damage(player_index,attacker_index);
     player->matter = fmaxf(0.0f, player->matter - damage);
     player->matter_flash_timer = 0.2f;
     if(!tetherDrainDamage)play_sfx_at(SFX_IMPACT,player->pos,player_index,1,1);
@@ -10675,12 +10678,15 @@ static void handle_pbd_projectile_hits(void)
                 float damage = (float)VOXEL_DAMAGE * (float)cluster_count;
                 bool lethal_hit = players[j].isExposed ||
                     (players[j].invuln_timer <= 0.0f && players[j].matter <= damage);
+                bool priorOriginKnown=damageOriginKnown;Vector3 priorOrigin=damageOrigin;
+                damageOriginKnown=true;damageOrigin=v_sub(v->pos,v_mul(v_norm(v->vel),2));
                 if (lethal_hit) {
                     kill_player(j, attacker, award_kill, award_debris);
                     smushBannerTimer = 1.0f;
                 } else {
                     apply_matter_damage(j, attacker, damage);
                 }
+                damageOriginKnown=priorOriginKnown;damageOrigin=priorOrigin;
                 remove_voxel_index(i);
                 removed = true;
                 break;
@@ -18226,6 +18232,7 @@ static void draw_players(void) {
     }
     clarity_draw();
     hologram_draw(false);
+    combat_ui_world();
     foundry_traps_draw();
 }
 
@@ -18600,6 +18607,7 @@ static NetInputCommand net_sample_local_input(int local_index, int player_slot, 
         if (IsGamepadButtonPressed(device, GAMEPAD_BUTTON_RIGHT_FACE_DOWN)) command.pressed |= NET_INPUT_MELEE;
         if (IsGamepadButtonPressed(device, GAMEPAD_BUTTON_RIGHT_TRIGGER_1)) command.pressed |= NET_INPUT_BUILD;
         if(IsGamepadButtonPressed(device,GAMEPAD_BUTTON_LEFT_FACE_UP))command.pressed|=NET_INPUT_GRENADE;
+        if(IsGamepadButtonDown(device,GAMEPAD_BUTTON_RIGHT_THUMB))command.held|=NET_INPUT_REVIVE;
         if(IsGamepadButtonPressed(device,GAMEPAD_BUTTON_LEFT_TRIGGER_1))command.pressed|=NET_INPUT_HOLOGRAM;
     } else if (local_index == 0) {
         mx = (IsKeyDown(KEY_D) ? 1.0f : 0.0f) - (IsKeyDown(KEY_A) ? 1.0f : 0.0f);
@@ -18612,6 +18620,7 @@ static NetInputCommand net_sample_local_input(int local_index, int player_slot, 
         if (IsKeyPressed(KEY_Z)) command.pressed |= NET_INPUT_MELEE;
         if (IsKeyPressed(KEY_E)) command.pressed |= NET_INPUT_BUILD;
         if(IsKeyPressed(KEY_C))command.pressed|=NET_INPUT_GRENADE;
+        if(IsKeyDown(KEY_X))command.held|=NET_INPUT_REVIVE;
         if(IsKeyPressed(KEY_V))command.pressed|=NET_INPUT_HOLOGRAM;
     } else {
         mx = (IsKeyDown(KEY_L) ? 1.0f : 0.0f) - (IsKeyDown(KEY_J) ? 1.0f : 0.0f);
@@ -18624,6 +18633,7 @@ static NetInputCommand net_sample_local_input(int local_index, int player_slot, 
         if (IsKeyPressed(KEY_M)) command.pressed |= NET_INPUT_MELEE;
         if (IsKeyPressed(KEY_O)) command.pressed |= NET_INPUT_BUILD;
         if(IsKeyPressed(KEY_PERIOD))command.pressed|=NET_INPUT_GRENADE;
+        if(IsKeyDown(KEY_COMMA))command.held|=NET_INPUT_REVIVE;
         if(IsKeyPressed(KEY_SLASH))command.pressed|=NET_INPUT_HOLOGRAM;
     }
     command.move_x = net_quantize_axis(mx);
@@ -18678,6 +18688,7 @@ static void net_apply_creative_command(Player *p, const NetInputCommand *command
     p->vel = (Vector3){ 0 };
     clarity_draw();
     hologram_draw(false);
+    combat_ui_world();
 }
 
 static void HandleKeyboardInput(int i, float dt);
@@ -19098,6 +19109,7 @@ static void bot_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float
 #include "combat_clarity.inc"
 #include "combat_clarity_net.inc"
 #include "hologram.inc"
+#include "combat_ui.inc"
 #include "chunk_regeneration_net.inc"
 static void UpdateBot(int playerIdx, float dt) {
     if(enemyLab && enemyLabPaused && !enemyLabStep) return;
@@ -19562,7 +19574,7 @@ static void net_send_world_to(int slot) {
     net_transport_send(&netTransport, slot, FPS_NET_CHANNEL_WORLD, packet, writer.length, true);
     net_writer_init(&writer, packet, sizeof(packet));
     clarity_net_snapshot(slot);
-    hologram_net_snapshot(slot);
+    hologram_net_snapshot(slot);combat_ui_snapshot(slot);
     net_write_header(&writer, NET_MSG_WORLD_END, 0, netTransport.session_id, netServerTick);
     net_transport_send(&netTransport, slot, FPS_NET_CHANNEL_WORLD, packet, writer.length, true);
     regeneration_net_send(slot, true);
@@ -19869,6 +19881,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
     }
     if (header.session_id != transport->session_id) return;
     if(regeneration_net_receive((NetMessageType)header.type,&reader))return;
+    if(combat_ui_receive((NetMessageType)header.type,&reader,header.server_tick))return;
     if(hologram_net_receive((NetMessageType)header.type,&reader,header.server_tick))return;
     if(clarity_net_receive((NetMessageType)header.type,&reader,header.server_tick))return;
     if (header.type == NET_MSG_SESSION_STATE) {
@@ -20067,7 +20080,7 @@ static void net_host_tick(void) {
     for (int i = 0; i < MAX_PLAYERS; ++i) if (netPlayerPresent[i]) net_write_player_state(&writer, i);
     net_transport_broadcast(&netTransport, FPS_NET_CHANNEL_SNAPSHOT, packet, writer.length, false);
     net_host_send_dynamic_poses();
-    if(netServerTick%3u==0){clarity_net_snapshot(-1);hologram_net_snapshot(-1);}
+    if(netServerTick%3u==0){clarity_net_snapshot(-1);hologram_net_snapshot(-1);combat_ui_snapshot(-1);}
     if ((netServerTick % 6u) == 0u) {
         net_writer_init(&writer, packet, sizeof(packet));
         net_write_header(&writer, NET_MSG_WORLD_PICKUPS, 0, netTransport.session_id, netServerTick);
@@ -20668,10 +20681,11 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 }
             }
             clarity_hud(i,view_w,view_h);
-            hologram_hud(i,view_w,view_h);
             ff_draw_hud(i, view_w, view_h);
             draw_hud_bars(i, &players[i], view_w, view_h);
             draw_player_radar(i, view_w, view_h);
+            combat_ui_abilities(i,view_w,view_h);
+            combat_ui_hud(i,cams[i],view_w,view_h);
             if (players[i].matter_flash_timer > 0.0f &&
                 !players[i].isExposed && players[i].matter > 0.0f) {
                 float alpha = clampf(players[i].matter_flash_timer / 0.2f, 0.0f, 1.0f);
