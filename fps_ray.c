@@ -15941,6 +15941,8 @@ static bool tether_cluster_center(int voxel_idx, Vector3 *out_center) {
     return true;
 }
 
+#include "teammate_hud.inc"
+
 static void draw_hud_bars(int player_index, const Player *p, int viewport_w, int viewport_h) {
     if (!p || viewport_w <= 0 || viewport_h <= 0) {
         return;
@@ -20584,6 +20586,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
             }
             int view_x = 0, view_y = 0, view_w = 0, view_h = 0;
             get_viewport(view, viewCount, &view_x, &view_y, &view_w, &view_h);
+            draw_teammate_markers(i,cams[i],view_w,view_h);
             DrawRectangle(0, 0, view_w, HUD_BAR_HEIGHT, Fade(BLACK, 0.5f));
             if (creative_mode) {
                 Color c = creative_block_palette(creativeBlockColorIndex[i]);
