@@ -13,6 +13,35 @@ static void setup(void){
         playerInput[i]=INPUT_TYPE_KEYBOARD;combatantLife[i]=LIFE_ALIVE;}
     players[0].matter=0;players[0].isExposed=true;
 }
+static void equipment_blocks_drain(EnemyType type,bool gold){
+    enemy_lab_start(type);
+    update_goliath_armor_positions(4);
+    players[0].pos=v_add(players[4].pos,(Vector3){0,0,-4});
+    players[0].yaw=180;players[0].pitch=0;players[0].goldTetherCharged=gold;
+    rebuild_voxel_hash();
+    float matter=players[4].matter;
+    VoxelHit hit;
+    assert(first_voxel_hit_detailed((Ray){players[0].pos,player_forward(&players[0])},TETHER_RANGE,-1,false,&hit));
+    assert(get_goliath_owner_of_voxel(hit.id)==4);
+    // A newly acquired tether must rip the equipment rather than drain its owner.
+    assert(!start_tether_drain(0));
+    start_tether(0);
+    assert(players[0].tetherHolding && !players[0].drainTarget);
+    assert(get_goliath_owner_of_voxel(players[0].tetherVoxel)<0);
+    update_tether_drains(.5f);assert(players[4].matter==matter);
+    release_tether(0);
+    // Remove equipment from the beam, then put it back during an existing lock.
+    enemy_lab_start(type);update_goliath_armor_positions(4);
+    players[0].pos=v_add(players[4].pos,(Vector3){0,0,-4});
+    players[0].yaw=180;players[0].pitch=0;matter=players[4].matter;
+    players[4].pos.x+=10;
+    players[0].pos.x+=10;
+    rebuild_voxel_hash();assert(start_tether_drain(0));
+    if(type==ENEMY_TYPE_GOLIATH)update_goliath_armor_positions(4);
+    else enemy_update_equipment(4);
+    rebuild_voxel_hash();update_tether_drains(.5f);
+    assert(!players[0].drainTarget && players[4].matter==matter);
+}
 static unsigned capture(float time,const char *path,bool bloom,bool covered){
     RenderTexture2D image=LoadRenderTexture(800,600);WeaponBloom effect={0};
     Camera3D camera={.position={3,3,4},.target={0,2,-3},.up={0,1,0},.fovy=55};
@@ -60,6 +89,10 @@ int main(int argc,char **argv){
     setup();players[0].matter=100;players[0].isExposed=false;players[1].yaw=180;
     start_tether(0);start_tether(1);update_tether_drains(.1f);
     assert(players[0].drainTarget==2 && players[1].drainTarget==1 && players[0].matter<100 && players[1].matter<100); // No parry.
+    equipment_blocks_drain(ENEMY_TYPE_GOLIATH,false);
+    equipment_blocks_drain(ENEMY_TYPE_GOLIATH,true);
+    equipment_blocks_drain(ENEMY_TYPE_SHIELDBEARER,false);
+    equipment_blocks_drain(ENEMY_TYPE_SHIELDBEARER,true);
     enemy_lab_start(ENEMY_TYPE_FOUNDRY);EnemySpecialState *boss=&enemySpecial[4];
     players[0].pos=v_add(players[4].pos,(Vector3){0,0,-4});players[0].yaw=180;
     assert(!start_tether_drain(0));

@@ -11,14 +11,16 @@ static bool drain_clear(int from,int to) {
     Vector3 delta=world_delta(players[to].pos,players[from].pos);float distance=v_length(delta);
     if(distance>TETHER_RANGE || distance<.001f)return false;
     VoxelHit hit;
-    if(!first_voxel_hit_detailed((Ray){players[from].pos,v_mul(delta,1/distance)},distance,-1,false,&hit))return true;
-    // An enemy's own armor is part of the target, not intervening world cover.
-    return enemy_equipment_owner(hit.id)==to || get_goliath_owner_of_voxel(hit.id)==to;
+    // Equipment blocks the beam just like world cover, including during a lock.
+    return !first_voxel_hit_detailed((Ray){players[from].pos,v_mul(delta,1/distance)},distance,-1,false,&hit);
 }
 static bool start_tether_drain(int from) {
     if(netTransport.role==NET_ROLE_CLIENT)return false;
     Player *p=&players[from];Ray aim={p->pos,player_forward(p)};
     int best=-1;float nearest=TETHER_RANGE;
+    // Let the ordinary voxel tether handle surfaces ahead of an aimed actor.
+    VoxelHit surface;
+    if(first_voxel_hit_detailed(aim,nearest,-1,false,&surface))nearest=surface.t;
     for(int to=0;to<activePlayers;to++)if(drain_target_valid(from,to)){
         BoundingBox bounds=combatant_bounds_at(to,world_image(players[to].pos,p->pos),PLAYER_SIZE*.5f);
         RayCollision hit=GetRayCollisionBox(aim,expand_bounds(bounds,.15f));
