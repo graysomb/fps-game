@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define FPS_NET_MAGIC 0x4650534eu /* "FPSN" */
-#define FPS_NET_PROTOCOL_VERSION 15u /* Revive feedback, damage cues and pooled Sapper bombs. */
+#define FPS_NET_PROTOCOL_VERSION 16u /* Reliable player death-cause notifications. */
 #define FPS_NET_DEFAULT_PORT 27015u
 #define FPS_NET_DISCOVERY_PORT 27016u
 #define FPS_NET_MAX_PACKET 1100u

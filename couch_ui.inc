@@ -187,6 +187,16 @@ static bool couch_frame(void) {
     }
     if(gameState==GAME_STATE_GAMEOVER) {
         couchSelection=(couchSelection+couch_axis(false)+2)%2;
+        if(gameMode==GAME_MODE_FIREFIGHT){
+            BeginDrawing();combat_ui_results();
+            int y=GetScreenHeight()-65;
+            DrawText(couchSelection==0?"> Retry":"  Retry",56,y,26,couchSelection==0?GOLD:LIGHTGRAY);
+            DrawText(couchSelection==1?"> Lobby":"  Lobby",240,y,26,couchSelection==1?GOLD:LIGHTGRAY);
+            DrawText(couch_menu_device()<0?"Arrows: select   Enter: confirm":"D-pad: select   A: confirm",56,y+34,16,LIGHTGRAY);
+            EndDrawing();
+            if(confirm){if(couchSelection==0)couch_launch();else {gameState=GAME_STATE_MENU;couchLobby=true;memset(couchReady,0,sizeof(couchReady));}}
+            return true;
+        }
         BeginDrawing();couch_title(gameMode==GAME_MODE_FIREFIGHT?(firefightWaveState==FIREFIGHT_STATE_VICTORY?"VICTORY":"FIREFIGHT DEFEAT"):TextFormat("PLAYER %d WINS",winnerId));
         couch_row(0,"Rematch",couchSelection==0);couch_row(1,"Lobby",couchSelection==1);
         DrawText(gameMode==GAME_MODE_FIREFIGHT?TextFormat("Wave %d | Team score %d",firefightWave,firefightScore):TextFormat("First to %d points",winningScore),56,230,24,GOLD);

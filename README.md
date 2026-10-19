@@ -248,7 +248,10 @@ bombs remain active. Lobbers acquire targets across the map and tear connected
 8–64 voxel pieces from destructible structures before throwing them along a clear
 ballistic arc. Screen-edge damage cues indicate incoming direction. Large rat and
 grenade HUD icons show availability, cooldown, and grenade count. LAN peers must
-use protocol 15 builds for the new feedback and bomb snapshots.
+use protocol 16 builds for death notifications, feedback, and bomb snapshots.
+Deaths and downs show the fatal hit's cause and attacker in the player's viewport.
+The Firefight defeat screen shows team-wipe status, final wave/score, player stats,
+and last-hit causes, with Retry and Lobby choices.
 
 Preparation lasts 20 seconds. Vote to increase the team's build, harvest, or throw
 upgrade level. Bonuses persist and stack across waves; ties default to building,

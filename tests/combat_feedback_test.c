@@ -90,9 +90,31 @@ static void preview(int w,int h,const char *path,bool fallback){
     if(!fallback)assert(reviveShader.id && reviveShader.id!=rlGetShaderIdDefault());
     Image image=LoadImageFromTexture(rt.texture);ImageFlipVertical(&image);ExportImage(image,path);UnloadImage(image);UnloadRenderTexture(rt);character_renderer_shutdown();combat_ui_shutdown();
 }
+static void death_feedback(void){
+    empty();players[4].enemyType=ENEMY_TYPE_SAPPER;
+    explosionDamageContext=true;kill_player(0,4,true,false);explosionDamageContext=false;
+    assert(combatantLife[0]==LIFE_DOWNED && deathNotices[0].cause==DEATH_EXPLOSION);
+    assert(strstr(combat_ui_death_text(0),"Sapper"));
+    float stamp=deathNotices[0].until;kill_player(0,4,true,true);assert(deathNotices[0].until==stamp);
+    firefightTeamLives=0;kill_player(1,4,true,true);ff_update_coop(.01f);
+    assert(gameState==GAME_STATE_GAMEOVER && firefightWaveState==FIREFIGHT_STATE_DEFEAT);
+    RenderTexture2D rt=LoadRenderTexture(960,540);BeginTextureMode(rt);combat_ui_results();EndTextureMode();
+    Image shot=LoadImageFromTexture(rt.texture);ImageFlipVertical(&shot);ExportImage(shot,"artifacts/firefight-defeat.png");UnloadImage(shot);UnloadRenderTexture(rt);
+    rt=LoadRenderTexture(480,270);BeginTextureMode(rt);ClearBackground(DARKGRAY);
+    Camera3D camera={{0,2,0},{0,2,-1},{0,1,0},60,CAMERA_PERSPECTIVE};combat_ui_hud(0,camera,480,270);EndTextureMode();
+    shot=LoadImageFromTexture(rt.texture);ImageFlipVertical(&shot);ExportImage(shot,"artifacts/death-notification.png");UnloadImage(shot);UnloadRenderTexture(rt);
+    empty();players[0].pos.y=-20;kill_player(0,-1,false,false);assert(deathNotices[0].cause==DEATH_FALL);
+    empty();deathContext=DEATH_PROJECTILE;kill_player(0,4,true,false);deathContext=DEATH_UNKNOWN;
+    assert(deathNotices[0].cause==DEATH_PROJECTILE);
+    uint8_t packet[16];NetWriter w;NetReader r;netTransport.role=NET_ROLE_CLIENT;
+    net_writer_init(&w,packet,sizeof(packet));net_write_u8(&w,2);net_write_u8(&w,1);net_write_u8(&w,DEATH_DEBRIS);net_write_u8(&w,5);net_write_u8(&w,ENEMY_TYPE_LOBBER+1);net_write_u8(&w,1);
+    net_reader_init(&r,packet,w.length);assert(combat_ui_receive(NET_MSG_COMBAT_UI,&r,1));
+    assert(deathNotices[1].cause==DEATH_DEBRIS && strstr(combat_ui_death_text(1),"Lobber"));
+    combat_ui_reset();assert(deathNotices[1].until==0);netTransport.role=NET_ROLE_OFFLINE;
+}
 int main(int argc,char **argv){
     assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Combat feedback");init_pbd_thread_pool();assert(initialize_physics_backend());
-    free_revive();bombs();lobbers();feedback();
+    free_revive();bombs();lobbers();feedback();death_feedback();
     preview(960,540,"artifacts/combat-feedback.png",false);preview(480,270,"artifacts/combat-feedback-split.png",false);preview(480,270,"artifacts/combat-feedback-fallback.png",true);
     clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Combat feedback checks passed");return 0;
 }

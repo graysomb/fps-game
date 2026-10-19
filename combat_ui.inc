@@ -1,6 +1,44 @@
 static void combat_ui_reset(void) {
+    memset(deathNotices,0,sizeof(deathNotices));deathContext=DEATH_UNKNOWN;
     memset(damageCues,0,sizeof(damageCues));memset(reviveComplete,0,sizeof(reviveComplete));
     combatUiReceiveTick=0;memset(chargeReceiveTick,0,sizeof(chargeReceiveTick));damageOriginKnown=false;
+}
+static const char *combat_ui_death_text(int victim) {
+    DeathNotice *n=&deathNotices[victim];
+    const char *causes[]={"Unknown cause","Fell out of the arena","Voxel shot","Crushed by debris","Explosion","Melee"};
+    if(n->cause==DEATH_FALL || n->attacker<0)return causes[n->cause];
+    if(n->attacker==victim)return TextFormat("%s - self-inflicted",causes[n->cause]);
+    const char *names[]={"Rifleman","Swarmer","Goliath","Scrapper","Shieldbearer","Sapper","Lobber","Builder","Anchor","Foundry"};
+    return n->enemy>=0?TextFormat("%s - %s",causes[n->cause],names[n->enemy]):TextFormat("%s - Player %d",causes[n->cause],n->attacker+1);
+}
+static void combat_ui_death(int victim,int attacker,bool debris,bool downed) {
+    if(victim<0 || victim>=MAX_PLAYERS || is_player_bot(victim) || netTransport.role==NET_ROLE_CLIENT)return;
+    DeathCause cause=deathContext;
+    if(cause==DEATH_UNKNOWN)cause=players[victim].pos.y< -10?DEATH_FALL:debris?DEATH_DEBRIS:explosionDamageContext?DEATH_EXPLOSION:attacker>=0?DEATH_MELEE:DEATH_UNKNOWN;
+    int enemy=attacker>=0 && attacker<activePlayers && is_player_bot(attacker)?players[attacker].enemyType:-1;
+    deathNotices[victim]=(DeathNotice){cause,attacker,enemy,downed,(float)GetTime()+5};
+    if(netTransport.role==NET_ROLE_HOST){
+        uint8_t packet[48];NetWriter w;net_writer_init(&w,packet,sizeof(packet));net_write_header(&w,NET_MSG_COMBAT_UI,0,netTransport.session_id,netServerTick);
+        net_write_u8(&w,2);net_write_u8(&w,victim);net_write_u8(&w,cause);net_write_u8(&w,attacker+1);net_write_u8(&w,enemy+1);net_write_u8(&w,downed);
+        net_transport_broadcast(&netTransport,FPS_NET_CHANNEL_CONTROL,packet,w.length,true);
+    }
+}
+static void combat_ui_results(void) {
+    int w=GetScreenWidth();bool victory=firefightWaveState==FIREFIGHT_STATE_VICTORY;
+    ClearBackground((Color){15,18,26,255});
+    Color accent=victory?GOLD:(Color){235,75,65,255};
+    DrawRectangle(0,0,w,8,accent);
+    const char *title=victory?"FIREFIGHT VICTORY":"FIREFIGHT DEFEAT";
+    int font=w<800?32:52;DrawText(title,(w-MeasureText(title,font))/2,30,font,accent);
+    const char *subtitle=victory?"The arena is clear.":"TEAM WIPED - No teammates or reserves remaining.";
+    int small=w<800?16:20;DrawText(subtitle,(w-MeasureText(subtitle,small))/2,95,small,RAYWHITE);
+    const char *stats=TextFormat("Wave %d  |  Score %d  |  Enemies defeated %d",firefightWave,firefightScore,firefightKillsTotal);
+    DrawText(stats,(w-MeasureText(stats,small))/2,130,small,GOLD);
+    for(int i=0;i<firefightHumans;i++){
+        int y=180+i*60;DrawRectangle(30,y-6,w-60,54,(Color){27,32,44,255});
+        DrawText(TextFormat("P%d   %d kills   %d physics kills   %d revives",i+1,players[i].kills,players[i].debrisKills,reviveCount[i]),45,y,small,player_palette_color(i));
+        if(deathNotices[i].until>0)DrawText(TextFormat("Last hit: %s",combat_ui_death_text(i)),45,y+25,small-2,LIGHTGRAY);
+    }
 }
 static void combat_ui_add_damage(int victim,Vector3 origin,bool known) {
     if(victim<0 || victim>=MAX_PLAYERS)return;
@@ -63,6 +101,15 @@ static Vector2 combat_ui_direction(Vector3 delta,Camera3D camera) {
 }
 static void combat_ui_hud(int viewer,Camera3D camera,int w,int h) {
     if(viewer<0 || viewer>=MAX_PLAYERS)return;
+    DeathNotice *notice=&deathNotices[viewer];
+    if(notice->until>0 && players[viewer].respawn_timer>0){
+        int font=w<700?16:24,y=(int)(h*.32f);
+        DrawRectangle(12,y-12,w-24,font*2+32,Fade(BLACK,.8f));
+        const char *title=notice->downed && combatantLife[viewer]==LIFE_DOWNED?"DOWNED":"YOU DIED";
+        DrawText(title,(w-MeasureText(title,font))/2,y,font,RED);
+        const char *cause=combat_ui_death_text(viewer);int detail=font-2;
+        DrawText(cause,(w-MeasureText(cause,detail))/2,y+font+8,detail,RAYWHITE);
+    }
     for(int n=0;n<8;n++){
         DamageCue *cue=&damageCues[viewer][n];float alpha=clampf(cue->until-(float)GetTime(),0,1);if(alpha<=0)continue;
         Color color=Fade(RED,alpha*.85f);
@@ -138,6 +185,12 @@ static bool combat_ui_receive(NetMessageType type,NetReader *r,uint32_t tick) {
         memcpy(enemyCharges+part*16,incoming,sizeof(incoming));chargeReceiveTick[part]=tick;return true;
     }
     int kind=net_read_u8(r);
+    if(kind==2){
+        int victim=net_read_u8(r),cause=net_read_u8(r),attacker=(int)net_read_u8(r)-1,enemy=(int)net_read_u8(r)-1,downed=net_read_u8(r);
+        if(!r->failed && victim<MAX_PLAYERS && cause<DEATH_CAUSE_COUNT && attacker<MAX_COMBATANTS && enemy<ENEMY_TYPE_COUNT && downed<=1)
+            deathNotices[victim]=(DeathNotice){cause,attacker,enemy,downed,(float)GetTime()+5};
+        return true;
+    }
     if(kind==1){int victim=net_read_u8(r),known=net_read_u8(r);Vector3 origin={net_read_f32(r),net_read_f32(r),net_read_f32(r)};
         if(!r->failed && victim<MAX_PLAYERS && known<=1 && v_isfinite(origin))combat_ui_add_damage(victim,origin,known);return true;}
     if(kind!=0 || tick<combatUiReceiveTick)return true;

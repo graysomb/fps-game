@@ -2,6 +2,13 @@
 typedef struct {Vector3 origin; float until; bool known;} DamageCue;
 static DamageCue damageCues[MAX_PLAYERS][8];
 static float reviveComplete[MAX_PLAYERS];
+typedef enum { DEATH_UNKNOWN, DEATH_FALL, DEATH_PROJECTILE, DEATH_DEBRIS, DEATH_EXPLOSION, DEATH_MELEE, DEATH_CAUSE_COUNT } DeathCause;
+typedef struct {DeathCause cause; int attacker,enemy; bool downed; float until;} DeathNotice;
+static DeathNotice deathNotices[MAX_PLAYERS];
+static DeathCause deathContext;
+static void combat_ui_death(int victim,int attacker,bool debris,bool downed);
+static const char *combat_ui_death_text(int victim);
+static void combat_ui_results(void);
 static bool damageOriginKnown;
 static Vector3 damageOrigin;
 static Shader reviveShader;

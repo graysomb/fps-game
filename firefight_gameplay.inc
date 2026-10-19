@@ -93,6 +93,7 @@ static void ff_update_coop(float dt) {
                 if(reviveProgress[i]>=FF_REVIVE_SECONDS) {
                     Vector3 position=players[i].death_pos;
                     reviveComplete[i]=.6f;
+                    deathNotices[i].until=0;
                     reviveCount[rescuer]++;
                     ff_restore_human(i,FF_REVIVE_MATTER);
                     players[i].pos=position;

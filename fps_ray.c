@@ -10122,6 +10122,9 @@ static void kill_player(int player_index, int attacker_index,
     }
     if(gameMode==GAME_MODE_FIREFIGHT && player_index<firefightHumans && player->invuln_timer>0) return;
     combat_ui_damage(player_index,attacker_index);
+    combat_ui_death(player_index,attacker_index,award_debris,
+        gameMode==GAME_MODE_FIREFIGHT && player_index<firefightHumans &&
+        firefightHumans>1 && player->pos.y>=-10.0f && !firefightPractice);
     if(gameMode==GAME_MODE_FIREFIGHT && player_index<firefightHumans &&
        firefightHumans>1 && player->pos.y>=-10.0f && !firefightPractice) {
         combatantLife[player_index]=LIFE_DOWNED;
@@ -10681,7 +10684,9 @@ static void handle_pbd_projectile_hits(void)
                 bool priorOriginKnown=damageOriginKnown;Vector3 priorOrigin=damageOrigin;
                 damageOriginKnown=true;damageOrigin=v_sub(v->pos,v_mul(v_norm(v->vel),2));
                 if (lethal_hit) {
+                    DeathCause priorCause=deathContext;deathContext=is_projectile?DEATH_PROJECTILE:DEATH_DEBRIS;
                     kill_player(j, attacker, award_kill, award_debris);
+                    deathContext=priorCause;
                     smushBannerTimer = 1.0f;
                 } else {
                     apply_matter_damage(j, attacker, damage);
@@ -22174,24 +22179,9 @@ int main(int argc, char **argv) {
             case GAME_STATE_GAMEOVER:
                 if (gameMode == GAME_MODE_FIREFIGHT) {
                     BeginDrawing();
-                        ClearBackground((Color){ 18, 20, 28, 255 });
-                        const char *title = (firefightWaveState == FIREFIGHT_STATE_VICTORY) ? "FIREFIGHT VICTORY!" : "FIREFIGHT DEFEAT";
-                        Color titleColor = (firefightWaveState == FIREFIGHT_STATE_VICTORY) ? GOLD : (Color){ 220, 60, 60, 255 };
-                        int fontSize = 64;
-                        int textW = MeasureText(title, fontSize);
-                        DrawText(title, SCREEN_WIDTH / 2 - textW / 2, SCREEN_HEIGHT / 2 - 130, fontSize, titleColor);
-
-                        const char *statsWave = TextFormat("Survived to Wave %d", firefightWave);
-                        int waveW = MeasureText(statsWave, 32);
-                        DrawText(statsWave, SCREEN_WIDTH / 2 - waveW / 2, SCREEN_HEIGHT / 2 - 40, 32, RAYWHITE);
-
-                        const char *statsScore = TextFormat("Final Score: %d   |   Hostiles Slain: %d", firefightScore, firefightKillsTotal);
-                        int scoreW = MeasureText(statsScore, 24);
-                        DrawText(statsScore, SCREEN_WIDTH / 2 - scoreW / 2, SCREEN_HEIGHT / 2 + 15, 24, LIGHTGRAY);
-
+                        combat_ui_results();
                         const char *prompt = "Press R to Retry   |   Press M for Main Menu";
-                        int promptW = MeasureText(prompt, 22);
-                        DrawText(prompt, SCREEN_WIDTH / 2 - promptW / 2, SCREEN_HEIGHT / 2 + 80, 22, GOLD);
+                        DrawText(prompt,(GetScreenWidth()-MeasureText(prompt,20))/2,GetScreenHeight()-45,20,GOLD);
                     EndDrawing();
 
                     if (IsKeyPressed(KEY_R)) {
