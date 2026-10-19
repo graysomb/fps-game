@@ -1,0 +1,42 @@
+{
+  "tool": "Built-in image generation",
+  "stylePrompt": "Use case: stylized-concept. Generate a polished weapon design concept sheet for the user's low-poly voxel FPS, closely matching the supplied existing weapon render references: chunky beveled light silver rectangular shells, charcoal inner mechanisms and grips, crisp thin dark mesh edges, flat shaded simple geometry, luminous solid-color energy inserts. These are practical procedural-mesh game designs, not realistic military guns: avoid fine greebles, tiny screws, photorealism, weathered textures, and excessive bloom. Muted navy background, clean readable white typography, strong silhouette, large three-quarter hero view with a smaller side silhouette and small action/detail inset. All design geometry should be clearly visible and buildable from simple meshes. Image references are style/design ancestry only; create the specified new weapon. ",
+  "concepts": [
+    [
+      "impulse-shotgun",
+      "IMPULSE SHOTGUN",
+      "A squat wide-bodied sibling of the existing silver claw gun. A broad horizontal muzzle with three square dark ports, orange luminous recessed impulse chambers, sturdy short grip, low top handle, thick fore-end. The defining feature is width, not length; it looks like an industrial air hammer. Action inset shows an orange cone pushing three loose gray voxel cubes outward; no bullets made of fire. Callout labels: 'WIDE IMPULSE MUZZLE', 'RUBBLE PUSH'. Distinct orange energy."
+    ],
+    [
+      "cutter-beam",
+      "CUTTER BEAM",
+      "A narrow precision industrial cutting tool descended from the existing silver claw gun. Elongated slim rectangular body, two parallel short silver fork prongs at the front surrounding one fine luminous lime-green line, black cooling spine, compact grip and rectangular green charge gauge. Main view beam off to show geometry. Action inset shows a hairline green beam severing one connection in a stack of cubic support blocks, not a huge explosion. Callouts: 'PRECISION FORK', 'CUT STRUCTURAL LINKS'. Distinct green energy."
+    ],
+    [
+      "adhesive-grenade",
+      "ADHESIVE GRENADE",
+      "Upgrade comparison sheet with two equally readable objects: left labeled 'STANDARD' simple chunky charcoal low-poly cube grenade with silver corner caps and small orange fuse light; right labeled 'ADHESIVE UPGRADE' same exact core silhouette with four added fold-out triangular gripping feet / adhesive pads and a prominent segmented amber fuse ring. Right upgraded grenade is larger hero. Detail inset shows upgraded grenade stuck to vertical gray cube wall, pads flattened against it, bright red blinking fuse segments represented by two small states. Title and only brief labels 'GRIP PADS', 'BLINKING FUSE'. Preserve shared body so upgrade is immediately obvious. Not spherical military pineapple grenade."
+    ],
+    [
+      "railgun",
+      "RAILGUN",
+      "Long narrow silver and charcoal precision weapon, unmistakably longer than the supplied gun, two exposed rectangular silver rails separated by an open dark channel, violet luminous accelerator segments along both inside faces, small angular sight and rear violet capacitor, compact butt brace. Thin straight muzzle and no oversized barrel cylinder. Side profile shows its long fork silhouette. Charge inset shows two rail banks lighting sequentially; action inset a single straight violet line passing through a gray cube wall. Labels 'TWIN ACCELERATOR RAILS', 'VISIBLE CHARGE'. No damage numbers or claims; two-hit kill design."
+    ],
+    [
+      "rocket-launcher",
+      "ROCKET LAUNCHER",
+      "Heavy shoulder-fired box launcher related to supplied dynamic cube launcher but clearly distinct: long broad square silver outer tube, black recessed bore, visible red-orange square-finned rocket nose inside, rear exhaust opening, under-slung black handle, thick top carrying handle. Rocket itself is separately shown as a chunky faceted red-orange tip on gray body with four square fins. No floating cubes inside and no glass cube reservoir: those identify the existing voxel launcher, not this rocket launcher. Action inset depicts one slow rocket with short orange exhaust and a localized cube blast. Labels 'SINGLE ROCKET', 'IMPACT BLAST'. Energy accent red-orange."
+    ],
+    [
+      "sword",
+      "SWORD",
+      "A distinctive low-poly industrial power sword sized for a small rat humanoid, no character necessary. Broad straight silver slab blade with a clipped angular tip, dark central spine, luminous cyan cutting edge along one side, blocky small handguard and charcoal grip with silver pommel, visibly related to reference claw weapon's silver/cyan materials. Hero three-quarter view entire blade uncut; smaller side silhouette; inset shows blade slashing a shield made of gray voxel plates with separated connection points. Labels 'LUMINOUS CUTTING EDGE', 'SHIELD BREAKER'. Do not make a lightsaber, medieval ornate sword, or thin katana."
+    ],
+    [
+      "reinforced-building",
+      "REINFORCED BUILDING",
+      "Before and after upgrade concept sheet. Left smaller 'STANDARD BUILD': existing silver cyan claw-style handheld tool from first reference projecting one gray cube. Right large 'REINFORCED BUILD': same recognizable tool retains grip, core and upper/lower claws but gains two folding lateral silver construction arms with amber tips, and a clearly visible three-square amber status strip on its side. The arms frame a floating translucent amber preview of exactly three adjacent gray cubes forming a horizontal panel, with luminous joining seams and dark physical braces. Bottom detail shows the three-cube panel placed as solid cover, joined by reinforced corner rails. Labels 'FOLD-OUT BUILD ARMS', 'THREE-CUBE PANEL', 'REINFORCED JOINTS'. Make upgrade geometry very evident, not just a color swap."
+    ]
+  ],
+  "adhesiveFinalRevision": "External cosmetic comparison: charcoal cube with silver corner caps; upgrade adds purple adhesive pads and an amber light ring. No internal mechanism. Navy background."
+}
