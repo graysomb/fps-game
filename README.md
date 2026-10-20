@@ -566,14 +566,30 @@ are unchanged. Goliaths retain their arm attack. The gun is hidden in creative m
 and respawn. LAN peers must all use protocol
 version 5, which adds successful-shot sequence/age and powered-shot visual state.
 
-The renderer also exposes seven presentation-only concept variants: impulse
-shotgun, cutter, adhesive grenade, railgun, rocket launcher, sword, and reinforced
-builder. Their meshes in `weapon_concepts.inc` share the existing edge and bloom
-shaders. `WeaponVisual.charge` and `.activity` (0–1) drive rail charge, grenade
-warning lights, energy animation, and build-arm deployment. They are not yet
-equippable gameplay weapons: damage, inventory, projectiles, and pickups are
-unchanged. Concept previews are generated under `artifacts/weapon/concepts-gl33`
-and `concepts-gl43`, including `all-weapons.png` and first-person views.
+Human players now have two gun slots (default plus one empty at spawn). New gun
+pickups fill the empty slot and equip automatically. Once full, replace the selected
+gun with D-pad Right / B (second keyboard: Y). Switch with D-pad Left / Q (second
+keyboard: U), or the mouse wheel. Duplicates remain on the map. Switching takes
+0.25 seconds and cancels beams/charging without resetting cooldowns. All guns use
+Matter; empty Matter does not remove equipment. Tether and melee remain free.
+
+Shotgun, cutter, railgun, rocket and voxel launcher are selectable guns. Sword,
+adhesive grenades and reinforced three-cube building panels are separate upgrades.
+Hold/release the railgun after charging; hold the cutter to cut. Railgun and rockets
+kill when their damage depletes Matter. Equipment survives downs, revives and
+intermissions; true death and new matches reset it. Bots retain their old loadouts.
+Central tuning is in `equipment.h`.
+
+Foundry and Crosscut have authored equipment placements, with fourfold symmetry in
+versus. Equipment respawns in 30 seconds; railguns/rockets take 60 seconds and are
+not replenished between waves. All pickups are in the world-builder palette.
+Enter `weaponlab` in the debug console for a repeatable equipment arena (F4 resets,
+F7 toggles invulnerability). Network protocol 17 requires matching builds.
+
+The procedural meshes in `weapon_concepts.inc` share the existing edge and bloom
+shaders. Charge, beam activity, grenade warning lights and builder deployment now
+follow gameplay. Run `tools/validate_equipment.ps1` for combat, inventory, map,
+rendering and loopback LAN checks. Captures are `artifacts/equipment-*.png`.
 
 After building raylib with `build.ps1`, run the Windows visual checks from the
 repository root:

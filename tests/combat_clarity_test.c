@@ -18,7 +18,7 @@ static void check_crosscut_routes(void) {
         assert(seen[end]);
     }
 }
-static void snapshot_packet(int part,uint32_t seq,bool broken){uint8_t data[1000];NetWriter w;net_writer_init(&w,data,sizeof(data));net_write_u32(&w,seq);net_write_u8(&w,part);for(int n=0;n<16;n++){net_write_u32(&w,n==0 && part==0?123:0);net_write_u8(&w,0);for(int c=0;c<6;c++)net_write_f32(&w,c==1?2:0);net_write_f32(&w,n==0?1:0);}NetReader r;net_reader_init(&r,data,broken?w.length-1:w.length);assert(clarity_net_receive(NET_MSG_GRENADES,&r,seq));}
+static void snapshot_packet(int part,uint32_t seq,bool broken){uint8_t data[1000];NetWriter w;net_writer_init(&w,data,sizeof(data));net_write_u32(&w,seq);net_write_u8(&w,part);for(int n=0;n<16;n++){net_write_u32(&w,n==0 && part==0?123:0);net_write_u8(&w,0);for(int c=0;c<6;c++)net_write_f32(&w,c==1?2:0);net_write_f32(&w,n==0?1:0);net_write_u8(&w,0);net_write_u8(&w,0);net_write_u64(&w,0);for(int a=0;a<3;a++)net_write_f32(&w,0);}NetReader r;net_reader_init(&r,data,broken?w.length-1:w.length);assert(clarity_net_receive(NET_MSG_GRENADES,&r,seq));}
 int main(int argc,char **argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,720,"Combat clarity regression");init_pbd_thread_pool();assert(initialize_physics_backend());
     empty_arena();players[1].pos=(Vector3){10,1,0};grenadeInventory[0]=2;
     assert(clarity_throw(0));assert(grenadeInventory[0]==1);assert(!clarity_throw(0));clarity_tick(.5f);assert(clarity_throw(0));assert(grenadeInventory[0]==0);assert(!clarity_throw(0));
@@ -104,11 +104,11 @@ int main(int argc,char **argv){assert(parse_physics_arguments(argc,argv));SetLog
     empty_arena();players[0].invuln_timer=2;clarity_explode(players[0].pos,1);assert(players[0].matter==100);
     empty_arena();grenadeInventory[0]=0;combatantLife[0]=LIFE_DOWNED;ff_restore_human(0,30);assert(grenadeInventory[0]==0);combatantLife[0]=LIFE_WAITING;ff_restore_human(0,100);assert(grenadeInventory[0]==1);
     empty_arena();enemy_lab_spawn(4,ENEMY_TYPE_SWARMER,(Vector3){4,1,4});firefightWaveState=FIREFIGHT_STATE_ACTIVE;memset(ffRemaining,0,sizeof(ffRemaining));for(int n=0;n<81;n++)clarity_tick(.1f);assert(swarmHintActive[4]);firefightWaveState=FIREFIGHT_STATE_INTERMISSION;clarity_tick(.1f);assert(!swarmHintActive[4]);
-    gameMode=GAME_MODE_DEATHMATCH;currentWorldType=WORLD_TYPE_CROSSCUT;firefightFoundry=false;enemyLab=false;ResetGame();int supplyCount=0;for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].active)supplyCount++;fprintf(stderr,"Crosscut supplies %d\n",supplyCount);assert(supplyCount==13);for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].active)assert(clarity_supply_clear(pickups[n].pos));
+    gameMode=GAME_MODE_DEATHMATCH;currentWorldType=WORLD_TYPE_CROSSCUT;firefightFoundry=false;enemyLab=false;ResetGame();int supplyCount=0;for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].active)supplyCount++;fprintf(stderr,"Crosscut supplies %d\n",supplyCount);assert(supplyCount==41);for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].active)assert(clarity_supply_clear(pickups[n].pos));
     for(int q=0;q<4;q++)for(int k=0;k<3;k++){Vector3 expected=crosscut_rotate(pickups[k].pos,q);assert(v_length(v_sub(pickups[q*3+k].pos,expected))<.01f);assert(pickups[q*3+k].pos.y<1.4f);}
     check_crosscut_routes();
     gameMode=GAME_MODE_FIREFIGHT;firefightFoundry=true;enemyLab=false;ResetGame();int types[PICKUP_TYPE_COUNT]={0};for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].active)types[pickups[n].type]++;assert(types[PICKUP_GRENADE]==2 && types[PICKUP_HEALTH]==2 && types[PICKUP_GOLD_TETHER]==2 && types[PICKUP_DYNAMIC_SHOT]==2);
-    ff_wave_complete();int validSupplies=0;for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].active){assert(pickups[n].pos.y>=0);validSupplies++;}assert(validSupplies==10);
+    ff_wave_complete();int validSupplies=0;for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].active){assert(pickups[n].pos.y>=0);validSupplies++;}assert(validSupplies==24);
     character_renderer_init();gameState=GAME_STATE_MENU;BeginDrawing();couch_title("CONSTRUCTOR BRAWLER");clarity_menu();couch_row(0,"Local Multiplayer",true);couch_row(1,"Firefight",false);couch_row(2,"Enemy Lab",false);rlDrawRenderBatchActive();TakeScreenshot("artifacts/clarity-menu.png");EndDrawing();
     enemy_lab_start(ENEMY_TYPE_SHIELDBEARER);enemy_lab_capture(ENEMY_TYPE_SHIELDBEARER);
     for(int fixture=0;fixture<8;fixture++){enemy_lab_fixture(fixture);assert(enemyLabFixture==fixture && grenadeInventory[0]==2);}

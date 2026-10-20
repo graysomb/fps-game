@@ -122,6 +122,7 @@ static void enemy_lab_ai_step(float dt) {
 }
 static bool enemy_lab_controls(void) {
     enemyLabStep=false;
+    if(equipmentLab){if(IsKeyPressed(KEY_F4))eq_lab();if(IsKeyPressed(KEY_F7))enemyLabGod=!enemyLabGod;if(IsKeyPressed(KEY_ESCAPE))enemy_lab_exit();return true;}
     if(IsKeyPressed(KEY_F3)||couch_button(0,GAMEPAD_BUTTON_LEFT_FACE_RIGHT)) {
         int next=enemyLabCase+1;if(next==ENEMY_TYPE_SCRAPPER)next++;if(next>ENEMY_TYPE_COUNT) next=ENEMY_TYPE_GOLIATH;
         enemy_lab_start(next);
@@ -137,6 +138,7 @@ static bool enemy_lab_controls(void) {
 }
 static void enemy_lab_hud(int w,int h) {
     int fs=w<900?14:18;
+    if(equipmentLab){DrawText("WEAPON LAB | F4 reset | F7 god | Esc exit",16,75,fs,GOLD);return;}
     DrawRectangle(8,70,w-16,232,Fade(BLACK,.8f));
     DrawText(TextFormat("ENEMY LAB: %s | %s | Invulnerable: %s",enemyLabCase==ENEMY_TYPE_COUNT?"mixed":enemy_names[enemyLabCase],enemyLabPaused?"PAUSED":"RUNNING",enemyLabGod?"ON":"OFF"),16,78,fs,GOLD);
     DrawText("F3/D-right: next | F4/Top: reset | F5/Left face: pause",16,102,fs,RAYWHITE);

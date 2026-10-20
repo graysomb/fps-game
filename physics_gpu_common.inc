@@ -507,6 +507,7 @@ static bool gpu_pack_world(void) {
         g->lifecycle[3] = ((uint32_t)v->orig_min_gx & 1u) |
                          (((uint32_t)v->orig_min_gy & 1u) << 1) |
                          (((uint32_t)v->orig_min_gz & 1u) << 2);
+        if(v->reinforced)g->lifecycle[3]|=0x40000000u;
         if (v->goliathProjectile || clarity_is_remains(v->identity)) g->lifecycle[3] |= 0x80000000u;
     }
 

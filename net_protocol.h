@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define FPS_NET_MAGIC 0x4650534eu /* "FPSN" */
-#define FPS_NET_PROTOCOL_VERSION 16u /* Reliable player death-cause notifications. */
+#define FPS_NET_PROTOCOL_VERSION 17u /* Two-slot equipment and 32-bit input. */
 #define FPS_NET_DEFAULT_PORT 27015u
 #define FPS_NET_DISCOVERY_PORT 27016u
 #define FPS_NET_MAX_PACKET 1100u
@@ -38,7 +38,7 @@ typedef enum NetMessageType {
     NET_MSG_REGENERATION,
     NET_MSG_HOLOGRAMS,
     NET_MSG_COMBAT_UI,
-    NET_MSG_CHARGES
+    NET_MSG_CHARGES, NET_MSG_EQUIPMENT
 } NetMessageType;
 
 typedef enum NetInputButtons {
@@ -57,7 +57,8 @@ typedef enum NetInputButtons {
     NET_INPUT_GRENADE = 1u << 12,
     NET_INPUT_TETHER_CANCEL = 1u << 13,
     NET_INPUT_HOLOGRAM = 1u << 14,
-    NET_INPUT_REVIVE = 1u << 15
+    NET_INPUT_REVIVE = 1u << 15,
+    NET_INPUT_SWITCH=1u<<16, NET_INPUT_EQUIP=1u<<17
 } NetInputButtons;
 
 typedef struct NetPacketHeader {
@@ -74,8 +75,8 @@ typedef struct NetInputCommand {
     int16_t move_y;
     int16_t look_x;
     int16_t look_y;
-    uint16_t held;
-    uint16_t pressed;
+    uint32_t held;
+    uint32_t pressed;
     uint8_t creative_brush;
     uint8_t creative_color;
     uint8_t creative_pickup;

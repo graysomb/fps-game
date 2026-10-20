@@ -5,7 +5,7 @@ static void combat_ui_reset(void) {
 }
 static const char *combat_ui_death_text(int victim) {
     DeathNotice *n=&deathNotices[victim];
-    const char *causes[]={"Unknown cause","Fell out of the arena","Voxel shot","Crushed by debris","Explosion","Melee"};
+    const char *causes[]={"Unknown cause","Fell out of the arena","Voxel shot","Crushed by debris","Explosion","Melee","Shotgun","Cutter beam","Railgun","Rocket","Sword"};
     if(n->cause==DEATH_FALL || n->attacker<0)return causes[n->cause];
     if(n->attacker==victim)return TextFormat("%s - self-inflicted",causes[n->cause]);
     const char *names[]={"Rifleman","Swarmer","Goliath","Scrapper","Shieldbearer","Sapper","Lobber","Builder","Anchor","Foundry"};

@@ -388,16 +388,17 @@ inline void gatherBreakMask(uint gid, device ParticleState *particle,
     float3 strain = fabs(lengths-float3(v.pos_rest_edge.w))/v.pos_rest_edge.w;
     uint glued = v.lifecycle.z, mask = 0u;
     bool exceeded = false;
-    if (strain.x > u.strain_threshold) { exceeded=true; mask|=glued&3u; }
-    if (strain.y > u.strain_threshold) { exceeded=true; mask|=glued&12u; }
-    if (strain.z > u.strain_threshold) { exceeded=true; mask|=glued&48u; }
+    float durability=(v.lifecycle.w & 0x40000000u)!=0u?2.0f:1.0f;
+    if (strain.x > u.strain_threshold*durability) { exceeded=true; mask|=glued&3u; }
+    if (strain.y > u.strain_threshold*durability) { exceeded=true; mask|=glued&12u; }
+    if (strain.z > u.strain_threshold*durability) { exceeded=true; mask|=glued&48u; }
     float3 n0 = lengths.x > u.vgs_epsilon ? axis0/lengths.x : float3(0);
     float3 n1 = lengths.y > u.vgs_epsilon ? axis1/lengths.y : float3(0);
     float3 n2 = lengths.z > u.vgs_epsilon ? axis2/lengths.z : float3(0);
-    if (fabs(dot(n0,n1)) > u.shear_threshold) { exceeded=true; mask|=glued&48u; }
-    if (fabs(dot(n0,n2)) > u.shear_threshold) { exceeded=true; mask|=glued&12u; }
-    if (fabs(dot(n1,n2)) > u.shear_threshold) { exceeded=true; mask|=glued&3u; }
-    constexpr float hingeCosLimit = 0.9396926208f;
+    if (fabs(dot(n0,n1)) > u.shear_threshold*durability) { exceeded=true; mask|=glued&48u; }
+    if (fabs(dot(n0,n2)) > u.shear_threshold*durability) { exceeded=true; mask|=glued&12u; }
+    if (fabs(dot(n1,n2)) > u.shear_threshold*durability) { exceeded=true; mask|=glued&3u; }
+    float hingeCosLimit = cos(0.3490658504f*durability);
     for (int face = 0; face < 6; ++face) {
         if ((glued & (1u << face)) == 0u) continue;
         int sharedCornerCount = 0;

@@ -39,6 +39,8 @@ static void mouse_command(NetInputCommand *c,int seat,int slot,float dt){
     if(!playable){c->pressed=c->held=0;c->move_x=c->move_y=0;}
     if(playable && mouseButtonsArmed && !netRequestedCreative && gameState!=GAME_STATE_CREATIVE){
         if(IsMouseButtonPressed(MOUSE_BUTTON_LEFT))c->pressed|=NET_INPUT_FIRE;
+        if(IsMouseButtonDown(MOUSE_BUTTON_LEFT))c->held|=NET_INPUT_FIRE;
+        if(GetMouseWheelMove()!=0)c->pressed|=NET_INPUT_SWITCH;
         if(IsMouseButtonPressed(MOUSE_BUTTON_MIDDLE))c->pressed|=NET_INPUT_MELEE;
         if(IsMouseButtonDown(MOUSE_BUTTON_RIGHT))c->held|=NET_INPUT_TETHER;
     }
@@ -60,7 +62,7 @@ static void mouse_frame(float dt){
     mouse_command(&c,mouseSeat,i,dt);
     players[i].yaw=c.aim_yaw;players[i].pitch=c.aim_pitch;players[i].yaw_vel=players[i].pitch_vel=0;
     if(gameState!=GAME_STATE_PLAYING || !mouseCaptured)return;
-    if(c.pressed&NET_INPUT_FIRE)FireVoxel(i);
+
     if(c.pressed&NET_INPUT_MELEE)perform_melee(i);
     bool held=(c.held&NET_INPUT_TETHER)!=0;
     if(held && !mouseTetherHeld)start_tether(i);

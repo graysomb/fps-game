@@ -38,6 +38,7 @@ static void ff_restore_human(int i, float matter) {
 }
 
 static void ff_resolve_death(int i) {
+    eq_reset(i);
     if(enemyLab) {combatantLife[i]=LIFE_WAITING;players[i].respawn_timer=3;return;}
     if(firefightPractice) { ff_restore_human(i,MATTER_MAX_DEFAULT); return; }
     if(firefightTeamLives>0) {

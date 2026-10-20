@@ -507,17 +507,18 @@ void gatherBreakMask(uint gid) {
     vec3 axis2=((p[4]-p[0])+(p[5]-p[1])+(p[6]-p[2])+(p[7]-p[3]))*0.25;
     vec3 lengths=vec3(length(axis0),length(axis1),length(axis2));
     vec3 strain=abs(lengths-vec3(v.pos_rest_edge.w))/v.pos_rest_edge.w;
+    float durability=(v.lifecycle.w & 0x40000000u)!=0u?2.0:1.0;
     uint glued=v.lifecycle.z; uint mask=0u; bool exceeded=false;
-    if (strain.x>uStrainBreakThreshold) { exceeded=true; mask |= glued & ((1u<<0)|(1u<<1)); }
-    if (strain.y>uStrainBreakThreshold) { exceeded=true; mask |= glued & ((1u<<2)|(1u<<3)); }
-    if (strain.z>uStrainBreakThreshold) { exceeded=true; mask |= glued & ((1u<<4)|(1u<<5)); }
+    if (strain.x>uStrainBreakThreshold*durability) { exceeded=true; mask |= glued & ((1u<<0)|(1u<<1)); }
+    if (strain.y>uStrainBreakThreshold*durability) { exceeded=true; mask |= glued & ((1u<<2)|(1u<<3)); }
+    if (strain.z>uStrainBreakThreshold*durability) { exceeded=true; mask |= glued & ((1u<<4)|(1u<<5)); }
     vec3 n0=(lengths.x>uVgsEpsilon)?axis0/lengths.x:vec3(0.0);
     vec3 n1=(lengths.y>uVgsEpsilon)?axis1/lengths.y:vec3(0.0);
     vec3 n2=(lengths.z>uVgsEpsilon)?axis2/lengths.z:vec3(0.0);
-    if (abs(dot(n0,n1))>uShearBreakThreshold) { exceeded=true; mask |= glued & ((1u<<4)|(1u<<5)); }
-    if (abs(dot(n0,n2))>uShearBreakThreshold) { exceeded=true; mask |= glued & ((1u<<2)|(1u<<3)); }
-    if (abs(dot(n1,n2))>uShearBreakThreshold) { exceeded=true; mask |= glued & ((1u<<0)|(1u<<1)); }
-    const float hingeCosLimit = 0.9396926208; // cos(20 degrees)
+    if (abs(dot(n0,n1))>uShearBreakThreshold*durability) { exceeded=true; mask |= glued & ((1u<<4)|(1u<<5)); }
+    if (abs(dot(n0,n2))>uShearBreakThreshold*durability) { exceeded=true; mask |= glued & ((1u<<2)|(1u<<3)); }
+    if (abs(dot(n1,n2))>uShearBreakThreshold*durability) { exceeded=true; mask |= glued & ((1u<<0)|(1u<<1)); }
+    float hingeCosLimit = cos(radians(20.0*durability)); // cos(20 degrees)
     const int faceCorners[24] = int[24](
         1,3,5,7, 0,2,4,6, 2,3,6,7,
         0,1,4,5, 4,5,6,7, 0,1,2,3);

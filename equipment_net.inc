@@ -1,0 +1,25 @@
+static void eq_write_vec(NetWriter *w,Vector3 v){net_write_f32(w,v.x);net_write_f32(w,v.y);net_write_f32(w,v.z);}
+static Vector3 eq_read_vec(NetReader *r){Vector3 v={net_read_f32(r),net_read_f32(r),net_read_f32(r)};return v;}
+static void eq_snapshot(int peer){
+    if(netTransport.role!=NET_ROLE_HOST)return;
+    for(int part=0;part<3;part++){
+        uint8_t packet[FPS_NET_MAX_PACKET];NetWriter w;net_writer_init(&w,packet,sizeof(packet));net_write_header(&w,NET_MSG_EQUIPMENT,0,netTransport.session_id,netServerTick);net_write_u8(&w,part);
+        if(part==0)for(int i=0;i<MAX_PLAYERS;i++){Equipment *e=&equipment[i];net_write_u8(&w,e->gun[0]);net_write_u8(&w,e->gun[1]);net_write_u8(&w,e->selected);net_write_u8(&w,e->upgrades);net_write_u8(&w,e->held);net_write_f32(&w,e->switchTime);net_write_f32(&w,e->charge);net_write_f32(&w,e->buildTime);for(int g=0;g<EQ_GUN_COUNT;g++)net_write_f32(&w,e->cooldown[g]);eq_write_vec(&w,e->beamEnd);}
+        if(part==1)for(int n=0;n<32;n++){EquipmentRocket *r=&eqRockets[n];net_write_u8(&w,r->active);net_write_u8(&w,r->owner);eq_write_vec(&w,r->pos);eq_write_vec(&w,r->vel);net_write_f32(&w,r->life);}
+        if(part==2)for(int n=0;n<32;n++){EquipmentTrace *t=&eqTraces[n];eq_write_vec(&w,t->start);eq_write_vec(&w,t->end);net_write_f32(&w,t->life);net_write_u8(&w,t->gun);}
+        if(w.failed){TraceLog(LOG_ERROR,"Equipment packet overflow");continue;}
+        if(peer>=0)net_transport_send(&netTransport,peer,FPS_NET_CHANNEL_WORLD,packet,w.length,true);else net_transport_broadcast(&netTransport,FPS_NET_CHANNEL_SNAPSHOT,packet,w.length,false);
+    }
+}
+
+static bool eq_receive(NetMessageType type,NetReader *r,uint32_t tick){
+    if(type!=NET_MSG_EQUIPMENT)return false;if(netTransport.role!=NET_ROLE_CLIENT)return true;
+    int part=net_read_u8(r);if(part>2 || tick<eqPartTick[part])return true;
+    if(part==0){Equipment temp[MAX_PLAYERS]={0};for(int i=0;i<MAX_PLAYERS;i++){
+        Equipment *e=&temp[i];e->gun[0]=net_read_u8(r);e->gun[1]=net_read_u8(r);e->selected=net_read_u8(r);e->upgrades=net_read_u8(r);int held=net_read_u8(r);e->held=held!=0;e->switchTime=net_read_f32(r);e->charge=net_read_f32(r);e->buildTime=net_read_f32(r);for(int g=0;g<EQ_GUN_COUNT;g++){e->cooldown[g]=net_read_f32(r);if(!isfinite(e->cooldown[g])||e->cooldown[g]<0||e->cooldown[g]>3)return true;}e->beamEnd=eq_read_vec(r);e->initialized=true;
+        if(r->failed || e->selected>1 || held>1 || e->upgrades>7 || e->gun[0]>=EQ_GUN_COUNT || (e->gun[1]>=EQ_GUN_COUNT&&e->gun[1]!=EQ_EMPTY) || e->gun[e->selected]==EQ_EMPTY || !v_isfinite(e->beamEnd) || !isfinite(e->charge)||e->charge<0||e->charge>.66f || !isfinite(e->switchTime)||e->switchTime<0||e->switchTime>.26f || !isfinite(e->buildTime)||e->buildTime<0||e->buildTime>.61f)return true;
+    }memcpy(equipment,temp,sizeof(temp));for(int i=0;i<MAX_PLAYERS;i++)players[i].dynamicShotActive=eq_gun(i)==EQ_VOXEL;}
+    if(part==1){EquipmentRocket temp[32]={0};for(int n=0;n<32;n++){EquipmentRocket *a=&temp[n];int active=net_read_u8(r);a->active=active!=0;a->owner=net_read_u8(r);a->pos=eq_read_vec(r);a->vel=eq_read_vec(r);a->life=net_read_f32(r);if(r->failed||active>1||a->owner>=MAX_PLAYERS||!v_isfinite(a->pos)||!v_isfinite(a->vel)||!isfinite(a->life)||a->life<-.1f||a->life>5)return true;}memcpy(eqRockets,temp,sizeof(temp));}
+    if(part==2){EquipmentTrace temp[32]={0};for(int n=0;n<32;n++){EquipmentTrace *t=&temp[n];t->start=eq_read_vec(r);t->end=eq_read_vec(r);t->life=net_read_f32(r);t->gun=net_read_u8(r);if(r->failed||t->gun>=EQ_GUN_COUNT||!v_isfinite(t->start)||!v_isfinite(t->end)||!isfinite(t->life)||t->life<0||t->life>.23f)return true;}memcpy(eqTraces,temp,sizeof(temp));}
+    eqPartTick[part]=tick;return true;
+}

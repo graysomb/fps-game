@@ -2,7 +2,8 @@
 typedef struct {Vector3 origin; float until; bool known;} DamageCue;
 static DamageCue damageCues[MAX_PLAYERS][8];
 static float reviveComplete[MAX_PLAYERS];
-typedef enum { DEATH_UNKNOWN, DEATH_FALL, DEATH_PROJECTILE, DEATH_DEBRIS, DEATH_EXPLOSION, DEATH_MELEE, DEATH_CAUSE_COUNT } DeathCause;
+typedef enum { DEATH_UNKNOWN, DEATH_FALL, DEATH_PROJECTILE, DEATH_DEBRIS, DEATH_EXPLOSION, DEATH_MELEE,
+    DEATH_SHOTGUN,DEATH_CUTTER,DEATH_RAIL,DEATH_ROCKET,DEATH_SWORD,DEATH_CAUSE_COUNT } DeathCause;
 typedef struct {DeathCause cause; int attacker,enemy; bool downed; float until;} DeathNotice;
 static DeathNotice deathNotices[MAX_PLAYERS];
 static DeathCause deathContext;

@@ -899,7 +899,7 @@ static uint32_t netPredictedMeleeSequence[MAX_PLAYERS] = { 0 };
 static uint32_t netLastProcessedInput[MAX_PLAYERS] = { 0 };
 static uint32_t netLastGrenadeInput[MAX_PLAYERS] = {0};
 static uint32_t netLastHologramInput[MAX_PLAYERS] = {0};
-static uint16_t netPreviousHeld[MAX_PLAYERS] = { 0 };
+static uint32_t netPreviousHeld[MAX_PLAYERS] = { 0 };
 static NetInputCommand netPendingInput[MAX_PLAYERS];
 static bool netHasPendingInput[MAX_PLAYERS] = { false };
 static double netTickAccumulator = 0.0;
@@ -1175,6 +1175,7 @@ typedef struct {
        0=+X,1=-X,2=+Y,3=-Y,4=+Z,5=-Z */
     bool surface[6];
     int  gx, gy, gz;
+    bool reinforced;
     uint64_t identity;
     int  min_gx, max_gx;
     int  min_gy, max_gy;
@@ -1418,6 +1419,7 @@ typedef struct {
     Color color;
     int type;
     bool fixed;
+    bool reinforced;
     int voxelIndex;
     int debugTag;
     int activator;
@@ -1789,6 +1791,7 @@ static bool unit_voxel_buffer_push(UnitVoxelBuffer *buffer,
         .type = type,
         .fixed = fixed,
         .voxelIndex = voxelIndex,
+        .reinforced = voxelIndex>=0 && voxelIndex<voxel_count && voxels[voxelIndex].reinforced,
         .debugTag = debugTag,
         .activator = activator,
         .restorationQueued = false,
@@ -4559,6 +4562,7 @@ static bool init_voxel_struct(Voxel *v,
     v->gy = (int)floorf(py / VOXEL_SIZE);
     v->gz = (int)floorf(pz / VOXEL_SIZE);
     v->identity = nextVoxelIdentity++;
+    v->reinforced=false;
     if (nextVoxelIdentity == 0) nextVoxelIdentity = 1;
     v->min_gx = v->max_gx = v->gx;
     v->min_gy = v->max_gy = v->gy;
@@ -4872,6 +4876,7 @@ static int emit_unit_voxels_from_units(const UnitVoxelBuffer *buffer,
         float pz = ((float)gz + 0.5f) * VOXEL_SIZE;
         int new_idx = addVoxel(px, py, pz, fixed, simulate, color, spawn_type);
         if (new_idx >= 0) {
+            voxels[new_idx].reinforced=seed->reinforced;
             voxels[new_idx].debugClusterTag = seed->debugTag;
             voxels[new_idx].activator = seed->activator;;
             voxels[new_idx].restorationQueued = seed->restorationQueued;
@@ -8431,6 +8436,7 @@ static void ResetGame(void);
 #include "enemy_specialists.h"
 #include "combat_clarity.h"
 #include "combat_ui.h"
+#include "equipment.h"
 #include "foundry_traps.h"
 static void reset_firefight_match(void);
 static void start_firefight_wave(int wave_number);
@@ -8770,7 +8776,7 @@ static bool find_world_build_plane_hit(const Ray *ray,
 
 // Reset game: players and voxels
 // Pickups
-#define MAX_PICKUPS 32
+#define MAX_PICKUPS 48
 #define PICKUP_RESPAWN_TIME 30.0f
 #define PICKUP_VOID_RESPAWN_TIME 300.0f
 #define PICKUP_SIZE 0.4f
@@ -8782,6 +8788,8 @@ typedef enum {
     PICKUP_DYNAMIC_SHOT,
     PICKUP_GOLD_TETHER,
     PICKUP_GRENADE,
+    PICKUP_SHOTGUN, PICKUP_CUTTER, PICKUP_RAILGUN, PICKUP_ROCKET,
+    PICKUP_SWORD, PICKUP_ADHESIVE, PICKUP_REINFORCED,
     PICKUP_TYPE_COUNT
 } PickupType;
 
@@ -8802,6 +8810,9 @@ static const char *pickup_type_label(PickupType type) {
         case PICKUP_DYNAMIC_SHOT: return "Dynamic";
         case PICKUP_GOLD_TETHER: return "Gold Tether";
         case PICKUP_GRENADE: return "Grenade";
+        case PICKUP_SHOTGUN:return "Shotgun";case PICKUP_CUTTER:return "Cutter";
+        case PICKUP_RAILGUN:return "Railgun";case PICKUP_ROCKET:return "Rocket";
+        case PICKUP_SWORD:return "Sword";case PICKUP_ADHESIVE:return "Adhesive";case PICKUP_REINFORCED:return "Reinforced";
         default: return "Unknown";
     }
 }
@@ -9089,6 +9100,7 @@ static void update_pickups(float dt) {
             if (distSq < hitRad*hitRad) {
                 if ((p->type == PICKUP_GOLD_TETHER && pl->goldTetherCharged) || (p->type==PICKUP_DYNAMIC_SHOT && pl->dynamicShotActive)) continue;
                 if(p->type==PICKUP_GRENADE && grenadeInventory[j]>=2)continue;
+                if(eq_pickup_kind(p->type)>=0 && !(is_player_bot(j)&&p->type==PICKUP_DYNAMIC_SHOT)){if(!eq_pickup(j,p->type,false))continue;p->active=false;p->respawnTimer=(p->type==PICKUP_RAILGUN||p->type==PICKUP_ROCKET)?60:30;play_sfx(SFX_SHIELD);break;}
                 // Collect
                 if (p->type == PICKUP_AMMO) {
                     add_player_matter(pl, 25.0f);
@@ -9124,9 +9136,9 @@ static void draw_pickup_models(Camera cam,WeaponRenderPass pass) {
     for(int n=0;n<MAX_PICKUPS;n++) {
         Pickup *p=&pickups[n];
         if(!periodic_visible(p->pos,2))continue;
-        if(!p->active || (p->type!=PICKUP_DYNAMIC_SHOT && p->type!=PICKUP_GOLD_TETHER))continue;
+        if(!p->active || (eq_pickup_kind(p->type)<0 && p->type!=PICKUP_GOLD_TETHER))continue;
         Vector3 pos=p->pos;pos.y+=sinf(p->bobTimer*2)*.2f;
-        weapon_draw_pickup(p->type==PICKUP_DYNAMIC_SHOT,pos,cam.position,p->bobTimer,pass);
+        if(eq_pickup_kind(p->type)>=0){WeaponVisual vis={.shot_time=-1000,.charge=.8f,.activity=1};Matrix m=MatrixMultiply(MatrixScale(.4f,.4f,.4f),MatrixRotateY(p->bobTimer*.65f));m=MatrixMultiply(m,MatrixTranslate(pos.x,pos.y,pos.z));weapon_draw((WeaponPose){.kind=eq_pickup_kind(p->type),.transform=m},&vis,cam.position,p->bobTimer,false,pass);}else weapon_draw_pickup(false,pos,cam.position,p->bobTimer,pass);
     }
 }
 
@@ -9144,8 +9156,8 @@ static void draw_pickups(Camera cam) {
         
         if(p->type==PICKUP_GRENADE){DrawCube(drawPos,.4f,.5f,.4f,ORANGE);DrawCubeWires(drawPos,.44f,.54f,.44f,YELLOW);continue;}
         DrawCircle3D(v_add(p->pos,(Vector3){0,-.6f,0}),.6f,(Vector3){1,0,0},90,Fade(SKYBLUE,.5f));
-        if(p->type==PICKUP_DYNAMIC_SHOT || p->type==PICKUP_GOLD_TETHER) {
-            weapon_draw_pickup(p->type==PICKUP_DYNAMIC_SHOT,drawPos,cam.position,p->bobTimer,WEAPON_COLOR);
+        if(eq_pickup_kind(p->type)>=0 || p->type==PICKUP_GOLD_TETHER) {
+            if(eq_pickup_kind(p->type)>=0){WeaponVisual vis={.shot_time=-1000,.charge=.8f,.activity=1};Matrix m=MatrixMultiply(MatrixScale(.4f,.4f,.4f),MatrixRotateY(p->bobTimer*.65f));m=MatrixMultiply(m,MatrixTranslate(drawPos.x,drawPos.y,drawPos.z));weapon_draw((WeaponPose){.kind=eq_pickup_kind(p->type),.transform=m},&vis,cam.position,p->bobTimer,false,WEAPON_COLOR);}else weapon_draw_pickup(false,drawPos,cam.position,p->bobTimer,WEAPON_COLOR);
             continue;
         }
         rlPushMatrix();
@@ -9288,6 +9300,7 @@ static void ResetCreative(void) {
 static void ResetGame(void) {
     memset(holograms,0,sizeof(holograms));hologramReceiveTick=0;
     clarity_reset();
+    eq_reset_all();equipmentLab=false;
     enemy_cleanup(true);
     worldFloorHalfSize=(!useCustomMap && (currentWorldType==WORLD_TYPE_CROSSCUT ||
         (gameMode==GAME_MODE_FIREFIGHT && (firefightFoundry||firefightPractice))))?32.0f:20.0f;
@@ -10148,6 +10161,7 @@ static void kill_player(int player_index, int attacker_index,
                  player->matter, player->isExposed ? 1 : 0);
     }
     if(explosionDamageContext && (attacker_index==player_index || (gameMode==GAME_MODE_FIREFIGHT && attacker_index>=0 && combatantTeam[player_index]==combatantTeam[attacker_index])))award_kill=award_debris=false;
+    if(player_index<MAX_PLAYERS)eq_reset(player_index);
     clarity_death(player_index,award_kill||award_debris?attacker_index:-1);
     ai_reset(player_index);
     if(enemy_is_special(player_index)) enemy_on_death(player_index);
@@ -10842,16 +10856,17 @@ static void evaluate_voxel_fracture(Voxel *voxel) {
     float shear_xz = (inv_len0 > 0.0f && inv_len2 > 0.0f) ? fabsf(v_dot(v0, v2)) * inv_len0 * inv_len2 : 0.0f;
     float shear_yz = (inv_len1 > 0.0f && inv_len2 > 0.0f) ? fabsf(v_dot(v1, v2)) * inv_len1 * inv_len2 : 0.0f;
 
-    bool should_break = (strain_x > STRAIN_BREAK_THRESHOLD ||
-                         strain_y > STRAIN_BREAK_THRESHOLD ||
-                         strain_z > STRAIN_BREAK_THRESHOLD ||
-                         shear_xy > SHEAR_BREAK_THRESHOLD ||
-                         shear_xz > SHEAR_BREAK_THRESHOLD ||
-                         shear_yz > SHEAR_BREAK_THRESHOLD);
+    float durability=voxel->reinforced?2.f:1.f;
+    bool should_break = (strain_x > STRAIN_BREAK_THRESHOLD*durability ||
+                         strain_y > STRAIN_BREAK_THRESHOLD*durability ||
+                         strain_z > STRAIN_BREAK_THRESHOLD*durability ||
+                         shear_xy > SHEAR_BREAK_THRESHOLD*durability ||
+                         shear_xz > SHEAR_BREAK_THRESHOLD*durability ||
+                         shear_yz > SHEAR_BREAK_THRESHOLD*durability);
 
     if (!should_break) {
         Vector3 axes[3] = { v_mul(v0, inv_len0), v_mul(v1, inv_len1), v_mul(v2, inv_len2) };
-        const float hinge_cos_limit = cosf(GLUE_BREAK_HINGE_ANGLE_DEG * DEG2RAD);
+        const float hinge_cos_limit = cosf(GLUE_BREAK_HINGE_ANGLE_DEG * durability * DEG2RAD);
         for (int face = 0; face < 6; ++face) {
             if (!voxel->glued_faces[face]) continue;
             int shared_corner_count = 0;
@@ -13951,6 +13966,8 @@ void simulate_voxel_pbd(float dt) { simulate_voxel_pbd_steps(dt, 1); }
 
 // Fire a voxel bullet
 static bool FireVoxel(int idx) {
+    if(idx<MAX_PLAYERS && !is_player_bot(idx) && eq_gun(idx)>=EQ_SHOTGUN)return eq_fire(idx);
+    if(idx<MAX_PLAYERS && equipment[idx].initialized && equipment[idx].switchTime>0)return false;
     Player *p = &players[idx];
     float now = (float)GetTime();
     if (is_player_bot(idx) ? !ai_shot_allowed(idx) : now - p->last_shot_time < BULLET_COOLDOWN_SECONDS) {
@@ -13959,7 +13976,7 @@ static bool FireVoxel(int idx) {
     if (p->matter < MATTER_SHOT_COST || p->isExposed) {
         return false;
     }
-    p->matter = fmaxf(0.0f, p->matter - MATTER_SHOT_COST);
+
     float yawRad = DEG2RAD * p->yaw;
     float pitchRad = DEG2RAD * p->pitch;
     Vector3 dir = { sinf(-yawRad)*cosf(pitchRad), sinf(pitchRad), -cosf(yawRad)*cosf(pitchRad) };
@@ -13968,6 +13985,7 @@ static bool FireVoxel(int idx) {
     Color col = dynamic_shot ? (Color){ 255, 210, 90, 255 } : (Color){ 80, 170, 255, 255 };
     int vix = addVoxel(start.x, start.y, start.z, false, true, col, 0);
     if (vix >= 0) {
+        p->matter=fmaxf(0,p->matter-MATTER_SHOT_COST);p->isExposed=p->matter<=0;
         Voxel *shot = &voxels[vix];
         Vector3 vel = v_mul(dir, 60.0f);
         shot->vel = vel;
@@ -13994,7 +14012,8 @@ static bool FireVoxel(int idx) {
         play_sfx_at(SFX_FIRE,p->pos,idx,1,1);
         weapon_visual_shot(&weaponVisuals[idx], now);
     }
-    p->last_shot_time = now;
+    if(vix>=0)p->last_shot_time = now;
+    if(vix>=0 && idx<MAX_PLAYERS && !is_player_bot(idx))equipment[idx].cooldown[eq_gun(idx)]=BULLET_COOLDOWN_SECONDS;
     return vix>=0;
 }
 
@@ -15273,6 +15292,7 @@ static void perform_melee(int idx) {
     }
     float now = (float)GetTime();
     float min_cooldown = fmaxf(MELEE_COOLDOWN_SECONDS, MELEE_ANIM_DURATION_SECONDS);
+    if(eq_upgrade(idx,EQ_SWORD))min_cooldown=.8f;
     if (now - p->last_melee_time < min_cooldown) {
         return;
     }
@@ -15304,6 +15324,7 @@ static void update_melee_swings(void) {
         if (progress < 0.0f || !melee_is_active_window(progress) || p->meleeSwingHitApplied) {
             continue;
         }
+        if(eq_upgrade(i,EQ_SWORD)){eq_sword(i);p->meleeSwingHitApplied=true;continue;}
         float reach_frac = melee_reach_fraction(progress);
         float reach = MELEE_RANGE * reach_frac;
         if (reach <= 0.05f) {
@@ -15327,6 +15348,7 @@ static void update_melee_swings(void) {
 }
 
 static void perform_build(int idx) {
+    if(eq_upgrade(idx,EQ_BUILD)){eq_build(idx);return;}
     Player *p = &players[idx];
     if (p->respawn_timer > 0.0f || p->isExposed) {
         return;
@@ -15446,6 +15468,7 @@ static int activate_static_voxel_to_dynamic(int voxel_idx, int activator) {
     
     int new_idx = addVoxel(v.pos.x, v.pos.y, v.pos.z, false, true, v.color, v.type);
     if (new_idx >= 0) {
+        voxels[new_idx].reinforced=v.reinforced;
         voxels[new_idx].owner = activator;
         voxels[new_idx].activator = activator;
         voxels[new_idx].glueEligible = true;
@@ -15472,6 +15495,7 @@ static int rip_single_static_voxel(int voxel_idx, int activator) {
     
     int new_idx = addVoxel(v.pos.x, v.pos.y, v.pos.z, false, true, v.color, v.type);
     if (new_idx >= 0) {
+        voxels[new_idx].reinforced=v.reinforced;
         voxels[new_idx].owner = activator;
         voxels[new_idx].activator = activator;
     }
@@ -17904,6 +17928,12 @@ static WeaponMeleePose weaponMeleeSamples[MAX_COMBATANTS];
 static WeaponKind weaponKindSamples[MAX_COMBATANTS];
 
 static WeaponKind player_weapon_kind(const Player *p) {
+    int i=-1;for(int n=0;n<MAX_PLAYERS;n++)if(p==&players[n]){i=n;break;}
+    if(i>=0 && i<MAX_PLAYERS && equipment[i].initialized && !is_player_bot(i)){
+        if(eq_upgrade(i,EQ_SWORD) && p->meleeSwingActive)return WEAPON_SWORD;
+        if(equipment[i].buildTime>0)return WEAPON_REINFORCED_BUILDER;
+        return eqGuns[eq_gun(i)].visual;
+    }
     return p->dynamicShotActive ? WEAPON_DYNAMIC_LAUNCHER : WEAPON_STANDARD;
 }
 
@@ -17946,6 +17976,11 @@ static WeaponPose player_weapon_pose(int player_index, bool first_person) {
             pose.transform.m12+=correction.x;pose.transform.m13+=correction.y;pose.transform.m14+=correction.z;
             pose.muzzle=v_add(pose.muzzle,correction);pose.grip_heel=v_add(pose.grip_heel,correction);
         }
+    }
+    if(player_index<MAX_PLAYERS && equipment[player_index].switchTime>0){
+        Vector3 dip=v_mul(up,-.45f*sinf(PI*equipment[player_index].switchTime/.25f));
+        pose.transform.m12+=dip.x;pose.transform.m13+=dip.y;pose.transform.m14+=dip.z;
+        pose.muzzle=v_add(pose.muzzle,dip);pose.grip_heel=v_add(pose.grip_heel,dip);
     }
     return pose;
 }
@@ -18238,6 +18273,7 @@ static void draw_players(void) {
     clarity_draw();
     hologram_draw(false);
     combat_ui_world();
+    eq_world();
     foundry_traps_draw();
 }
 
@@ -18641,12 +18677,22 @@ static NetInputCommand net_sample_local_input(int local_index, int player_slot, 
         if(IsKeyDown(KEY_COMMA))command.held|=NET_INPUT_REVIVE;
         if(IsKeyPressed(KEY_SLASH))command.pressed|=NET_INPUT_HOLOGRAM;
     }
+    if(playerInput[netTransport.role==NET_ROLE_CLIENT?local_index:player_slot]==INPUT_TYPE_GAMEPAD){
+        int d=seat_device(local_index);
+        if(IsGamepadButtonDown(d,GAMEPAD_BUTTON_RIGHT_TRIGGER_2))command.held|=NET_INPUT_FIRE;
+        if(IsGamepadButtonPressed(d,GAMEPAD_BUTTON_LEFT_FACE_LEFT))command.pressed|=NET_INPUT_SWITCH;
+        if(IsGamepadButtonPressed(d,GAMEPAD_BUTTON_LEFT_FACE_RIGHT))command.pressed|=NET_INPUT_EQUIP;
+    }else{
+        if(IsKeyDown(local_index==0?KEY_LEFT_CONTROL:KEY_RIGHT_CONTROL))command.held|=NET_INPUT_FIRE;
+        if(IsKeyPressed(local_index==0?KEY_Q:KEY_U))command.pressed|=NET_INPUT_SWITCH;
+        if(IsKeyPressed(local_index==0?KEY_B:KEY_Y))command.pressed|=NET_INPUT_EQUIP;
+    }
     command.move_x = net_quantize_axis(mx);
     command.move_y = net_quantize_axis(my);
     command.look_x = net_quantize_axis(lx);
     command.look_y = net_quantize_axis(ly);
     if (netRequestedCreative) {
-        command.pressed &= (uint16_t)~(NET_INPUT_FIRE | NET_INPUT_MELEE | NET_INPUT_BUILD | NET_INPUT_JUMP | NET_INPUT_GRENADE | NET_INPUT_HOLOGRAM);
+        command.pressed &= (uint32_t)~(NET_INPUT_FIRE | NET_INPUT_MELEE | NET_INPUT_BUILD | NET_INPUT_JUMP | NET_INPUT_GRENADE | NET_INPUT_HOLOGRAM);
         command.held &= (uint16_t)~NET_INPUT_TETHER;
         if (IsKeyDown(KEY_E)) command.held |= NET_INPUT_CREATIVE_UP;
         if (IsKeyDown(KEY_Q)) command.held |= NET_INPUT_CREATIVE_DOWN;
@@ -18694,6 +18740,7 @@ static void net_apply_creative_command(Player *p, const NetInputCommand *command
     clarity_draw();
     hologram_draw(false);
     combat_ui_world();
+    eq_world();
 }
 
 static void HandleKeyboardInput(int i, float dt);
@@ -19115,6 +19162,7 @@ static void bot_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float
 #include "combat_clarity_net.inc"
 #include "hologram.inc"
 #include "combat_ui.inc"
+#include "equipment.inc"
 #include "chunk_regeneration_net.inc"
 static void UpdateBot(int playerIdx, float dt) {
     if(enemyLab && enemyLabPaused && !enemyLabStep) return;
@@ -19579,7 +19627,7 @@ static void net_send_world_to(int slot) {
     net_transport_send(&netTransport, slot, FPS_NET_CHANNEL_WORLD, packet, writer.length, true);
     net_writer_init(&writer, packet, sizeof(packet));
     clarity_net_snapshot(slot);
-    hologram_net_snapshot(slot);combat_ui_snapshot(slot);
+    hologram_net_snapshot(slot);combat_ui_snapshot(slot);eq_snapshot(slot);
     net_write_header(&writer, NET_MSG_WORLD_END, 0, netTransport.session_id, netServerTick);
     net_transport_send(&netTransport, slot, FPS_NET_CHANNEL_WORLD, packet, writer.length, true);
     regeneration_net_send(slot, true);
@@ -19801,6 +19849,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
             ++assigned_count;
             netPlayerPresent[player_slot] = true;
             netPlayerReady[player_slot] = false;
+            eq_reset(player_slot);
             grenadeInventory[player_slot]=1;grenadeCooldown[player_slot]=0;netLastGrenadeInput[player_slot]=0;
             players[player_slot].respawn_timer=0;players[player_slot].invuln_timer=2;
             players[player_slot].matter=players[player_slot].matterMax=MATTER_MAX_DEFAULT;players[player_slot].isExposed=false;
@@ -19838,7 +19887,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
             (netPeerPlayerMask[peer_slot] & (1u << player_slot)) && net_read_input(&reader, &command)) {
             if(command.pressed & NET_INPUT_HOLOGRAM){if(command.sequence<=netLastHologramInput[player_slot])command.pressed&=~NET_INPUT_HOLOGRAM;else netLastHologramInput[player_slot]=command.sequence;}
             if(command.pressed & NET_INPUT_GRENADE){if(command.sequence<=netLastGrenadeInput[player_slot])command.pressed&=~NET_INPUT_GRENADE;else netLastGrenadeInput[player_slot]=command.sequence;}
-            uint16_t accumulated_pressed = netHasPendingInput[player_slot] ? netPendingInput[player_slot].pressed : 0;
+            uint32_t accumulated_pressed = netHasPendingInput[player_slot] ? netPendingInput[player_slot].pressed : 0;
             accumulated_pressed |= command.pressed;
             if (command.sequence > netLastProcessedInput[player_slot] &&
                 (!netHasPendingInput[player_slot] || command.sequence >= netPendingInput[player_slot].sequence)) {
@@ -19886,6 +19935,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
     }
     if (header.session_id != transport->session_id) return;
     if(regeneration_net_receive((NetMessageType)header.type,&reader))return;
+    if(eq_receive((NetMessageType)header.type,&reader,header.server_tick))return;
     if(combat_ui_receive((NetMessageType)header.type,&reader,header.server_tick))return;
     if(hologram_net_receive((NetMessageType)header.type,&reader,header.server_tick))return;
     if(clarity_net_receive((NetMessageType)header.type,&reader,header.server_tick))return;
@@ -20066,7 +20116,9 @@ static void net_host_tick(void) {
             net_integrate_player(&players[slot], 1.0f / FPS_NET_TICK_RATE, true);
             if(command.pressed & NET_INPUT_GRENADE)clarity_throw(slot);
             if(command.pressed & NET_INPUT_HOLOGRAM)hologram_deploy(slot);
-            if (command.pressed & NET_INPUT_FIRE) FireVoxel(slot);
+            eq_command(slot,&command,1.0f/FPS_NET_TICK_RATE);
+
+
             if (command.pressed & NET_INPUT_MELEE) perform_melee(slot);
             if (command.pressed & NET_INPUT_BUILD) perform_build(slot);
             if(command.pressed & NET_INPUT_TETHER_CANCEL){Vector3 zero={0};release_tether_velocity(slot,&zero);}
@@ -20085,7 +20137,7 @@ static void net_host_tick(void) {
     for (int i = 0; i < MAX_PLAYERS; ++i) if (netPlayerPresent[i]) net_write_player_state(&writer, i);
     net_transport_broadcast(&netTransport, FPS_NET_CHANNEL_SNAPSHOT, packet, writer.length, false);
     net_host_send_dynamic_poses();
-    if(netServerTick%3u==0){clarity_net_snapshot(-1);hologram_net_snapshot(-1);combat_ui_snapshot(-1);}
+    if(netServerTick%3u==0){clarity_net_snapshot(-1);hologram_net_snapshot(-1);combat_ui_snapshot(-1);eq_snapshot(-1);}
     if ((netServerTick % 6u) == 0u) {
         net_writer_init(&writer, packet, sizeof(packet));
         net_write_header(&writer, NET_MSG_WORLD_PICKUPS, 0, netTransport.session_id, netServerTick);
@@ -20200,8 +20252,9 @@ static void debug_console_exec(const char *line)
         return;
     }
     int local = debug_console_local_player();
+    if (strcmp(cmd, "weaponlab") == 0) {eq_lab();debug_console_print("Weapon lab: pickups on left, targets ahead, panels on right.");return;}
     if (strcmp(cmd, "help") == 0) {
-        debug_console_print("help | clear | god [on|off] | matter [n] | exposed");
+        debug_console_print("help | weaponlab | clear | god [on|off] | matter [n] | exposed");
         debug_console_print("kill | pos | tp x y z | players | particles | belief | smush");
         debug_console_print("wave n | nextwave | lives n | armor | spawn swarmer|goliath|standard");
         return;
@@ -20579,6 +20632,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                         draw_player_weapon(p, imageCam.position, false, WEAPON_EMISSION);
                     }
                 }
+                equipmentEmission=true;eq_world();equipmentEmission=false;
                 hologram_draw(true);
                 drawViewPlayerIndex=-1;
                 EndMode3D();
@@ -20604,6 +20658,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
             int view_x = 0, view_y = 0, view_w = 0, view_h = 0;
             get_viewport(view, viewCount, &view_x, &view_y, &view_w, &view_h);
             draw_teammate_markers(i,cams[i],view_w,view_h);
+            int hudFont=view_w<700?12:HUD_FONT_SIZE;
             DrawRectangle(0, 0, view_w, HUD_BAR_HEIGHT, Fade(BLACK, 0.5f));
             if (creative_mode) {
                 Color c = creative_block_palette(creativeBlockColorIndex[i]);
@@ -20612,26 +20667,26 @@ static void render_gameplay_view(RenderTexture2D *screens,
                                                creativeBrushSpan[i],
                                                pickup_type_label((PickupType)creativePickupType[i]),
                                                (creativeBlockColorIndex[i] % 6 + 6) % 6 + 1);
-                DrawText(label, HUD_PADDING_X, HUD_PADDING_Y, HUD_FONT_SIZE, WHITE);
-                DrawRectangle(HUD_PADDING_X + 8, HUD_PADDING_Y + HUD_FONT_SIZE + 4, 36, 14, c);
+                DrawText(label, HUD_PADDING_X, HUD_PADDING_Y, hudFont, WHITE);
+                DrawRectangle(HUD_PADDING_X + 8, HUD_PADDING_Y + hudFont + 4, 36, 14, c);
                 draw_creative_help_overlay(i, view_w, view_h);
             } else if(enemyLab) {
                 int living=0;for(int e=MAX_PLAYERS;e<activePlayers;e++) living+=players[e].respawn_timer<=0;
-                DrawText(TextFormat("P%d | ENEMY LAB | %d active enemies",i+1,living),HUD_PADDING_X,HUD_PADDING_Y,HUD_FONT_SIZE,WHITE);
+                DrawText(TextFormat("P%d | ENEMY LAB | %d active enemies",i+1,living),HUD_PADDING_X,HUD_PADDING_Y,hudFont,WHITE);
             } else if (gameMode == GAME_MODE_FIREFIGHT) {
-                DrawText(TextFormat("P%d | LIVES: %d | SCORE: %d | KILLS: %d",
+                DrawText(TextFormat(view_w<700?"P%d L%d S%d K%d":"P%d | LIVES: %d | SCORE: %d | KILLS: %d",
                                     i + 1, firefightTeamLives, firefightScore, firefightKillsTotal),
-                         HUD_PADDING_X, HUD_PADDING_Y, HUD_FONT_SIZE, WHITE);
+                         HUD_PADDING_X, HUD_PADDING_Y, hudFont, WHITE);
                 {
-                    const char *wave_text = TextFormat("WAVE %d | HOSTILES: %d/%d",
+                    const char *wave_text = TextFormat(view_w<700?"W%d HOSTILES %d/%d":"WAVE %d | HOSTILES: %d/%d",
                                                        firefightWave, firefightWaveEnemiesRemaining, firefightWaveEnemiesTotal);
-                    int wave_w = MeasureText(wave_text, HUD_FONT_SIZE);
+                    int wave_w = MeasureText(wave_text, hudFont);
                     int wave_x = view_w - HUD_PADDING_X - wave_w;
                     int wave_y = HUD_PADDING_Y;
-                    DrawText(wave_text, wave_x, wave_y, HUD_FONT_SIZE, (firefightWaveEnemiesRemaining <= 1) ? RED : ORANGE);
+                    DrawText(wave_text, wave_x, wave_y, hudFont, (firefightWaveEnemiesRemaining <= 1) ? RED : ORANGE);
                 }
                 if (firefightWaveBannerTimer > 0.0f) {
-                    int banner_size = 48;
+                    int banner_size = view_w<700?24:48;
                     float alpha = clampf(firefightWaveBannerTimer / 1.0f, 0.0f, 1.0f);
                     Color banner_color = Fade((firefightWave >= 3) ? RED : GOLD, 0.9f * alpha);
                     const char *banner_text = TextFormat("WAVE %d - INCOMING!", firefightWave);
@@ -20640,7 +20695,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                     int banner_y = (view_h / 4);
                     DrawText(banner_text, banner_x, banner_y, banner_size, banner_color);
                 } else if (firefightWaveState == FIREFIGHT_STATE_INTERMISSION) {
-                    int banner_size = 46;
+                    int banner_size = view_w<700?24:46;
                     Color banner_color = Fade(GREEN, 0.9f);
                     const char *banner_text = TextFormat("WAVE %d CLEARED!", firefightWave);
                     int banner_w = MeasureText(banner_text, banner_size);
@@ -20656,11 +20711,11 @@ static void render_gameplay_view(RenderTexture2D *screens,
             } else {
                 DrawText(TextFormat("P%d | Shmush: %d | Kills: %d Deaths: %d",
                                     i + 1, players[i].debrisKills, players[i].kills, players[i].deaths),
-                         HUD_PADDING_X, HUD_PADDING_Y, HUD_FONT_SIZE, WHITE);
+                         HUD_PADDING_X, HUD_PADDING_Y, hudFont, WHITE);
                 {
                     int points = player_points(&players[i]);
                     const char *points_text = TextFormat("PTS %d/%d", points, winningScore);
-                    int points_w = MeasureText(points_text, HUD_FONT_SIZE);
+                    int points_w = MeasureText(points_text, hudFont);
                     float anim = players[i].points_update_timer / POINTS_UPDATE_DURATION;
                     int jiggle = 0;
                     if (anim > 0.0f) {
@@ -20670,12 +20725,12 @@ static void render_gameplay_view(RenderTexture2D *screens,
                     int points_y = HUD_PADDING_Y + jiggle;
                     if (anim > 0.0f) {
                         Color glow = Fade(GOLD, 0.4f + 0.6f * anim);
-                        DrawText(points_text, points_x + 1, points_y + 1, HUD_FONT_SIZE, glow);
+                        DrawText(points_text, points_x + 1, points_y + 1, hudFont, glow);
                     }
-                    DrawText(points_text, points_x, points_y, HUD_FONT_SIZE, GOLD);
+                    DrawText(points_text, points_x, points_y, hudFont, GOLD);
                 }
                 if (smushBannerTimer > 0.0f) {
-                    int banner_size = 48;
+                    int banner_size = view_w<700?24:48;
                     float alpha = clampf(smushBannerTimer / 1.0f, 0.0f, 1.0f);
                     Color banner_color = Fade(RED, 0.8f * alpha);
                     const char *banner_text = "SMUSH!!!";
@@ -20691,6 +20746,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
             draw_player_radar(i, view_w, view_h);
             combat_ui_abilities(i,view_w,view_h);
             combat_ui_hud(i,cams[i],view_w,view_h);
+            eq_hud(i,view_w,view_h);
             if (players[i].matter_flash_timer > 0.0f &&
                 !players[i].isExposed && players[i].matter > 0.0f) {
                 float alpha = clampf(players[i].matter_flash_timer / 0.2f, 0.0f, 1.0f);
@@ -21118,6 +21174,19 @@ static bool run_ai_awareness_smoke_test(void) {
 #include "combat_clarity_menu.inc"
 #include "couch_ui.inc"
 #include "enemy_lab.inc"
+static void eq_lab(void){
+    enemy_lab_start(ENEMY_TYPE_STANDARD);equipmentLab=true;enemy_cleanup(true);clear_world_voxels();clear_pickups();eq_reset_all();
+    for(int i=4;i<activePlayers;i++)players[i].respawn_timer=9999;
+    const int types[]={PICKUP_DYNAMIC_SHOT,PICKUP_SHOTGUN,PICKUP_CUTTER,PICKUP_RAILGUN,PICKUP_ROCKET,PICKUP_SWORD,PICKUP_ADHESIVE,PICKUP_REINFORCED,PICKUP_AMMO,PICKUP_GRENADE};
+    for(int n=0;n<10;n++)pickups[n]=(Pickup){.active=true,.type=types[n],.pos={-4,.7f,2+n*2}};
+    enemy_lab_spawn(4,ENEMY_TYPE_STANDARD,(Vector3){0,BASE_EYE_HEIGHT,8});
+    enemy_lab_spawn(5,ENEMY_TYPE_GOLIATH,(Vector3){6,BASE_EYE_HEIGHT,12});
+    enemy_lab_spawn(6,ENEMY_TYPE_SHIELDBEARER,(Vector3){-6,BASE_EYE_HEIGHT,16});
+    enemy_lab_spawn(7,ENEMY_TYPE_FOUNDRY,(Vector3){0,BASE_EYE_HEIGHT,24});
+    add_static_box_at_grid(14,20,0,6,12,12,GRAY);
+    add_static_box_at_grid(14,20,7,7,12,20,LIGHTGRAY);
+    grenadeInventory[0]=4;init_static_hash();rebuild_voxel_hash();rebuild_glue_constraints();rebuild_all_voxel_surfaces();meshDirty=true;
+}
 
 #include "mouse_input.inc"
 
@@ -22220,10 +22289,12 @@ int main(int argc, char **argv) {
             enemyLabClock+=dt;enemy_tick(dt);
         }
         clarity_tick(dt);
+        eq_tick(dt);
         hologram_tick(dt);
         debug_console_update();
         if(IsKeyPressed(KEY_PAUSE)){gameState=GAME_STATE_PAUSED;mouse_sync();break;}
         mouse_frame(dt);
+        if(gameState==GAME_STATE_PLAYING)eq_local(dt);
         if (netTransport.role == NET_ROLE_CLIENT) {
             net_client_update(dt);
             render_gameplay_view(screens, &renderPlayers, &renderW, &renderH, false);
@@ -22319,9 +22390,7 @@ int main(int argc, char **argv) {
             if (playerInput[i] == INPUT_TYPE_GAMEPAD) {
                 if(IsGamepadButtonPressed(seat_device(i),GAMEPAD_BUTTON_LEFT_FACE_UP))clarity_throw(i);
                 if(IsGamepadButtonPressed(seat_device(i),GAMEPAD_BUTTON_LEFT_TRIGGER_1))hologram_deploy(i);
-                if (IsGamepadButtonPressed(seat_device(i), GAMEPAD_BUTTON_RIGHT_TRIGGER_2)) {
-                    FireVoxel(i);
-                }
+
                 if (IsGamepadButtonPressed(seat_device(i), GAMEPAD_BUTTON_RIGHT_FACE_DOWN) && !ff_input_blocked(i)) {
                     perform_melee(i);
                 }
@@ -22344,7 +22413,7 @@ int main(int argc, char **argv) {
         if (!debugConsoleOpen && !ff_input_blocked(0) && playerInput[0] == INPUT_TYPE_KEYBOARD && players[0].respawn_timer <= 0.0f) {
             if(IsKeyPressed(KEY_C))clarity_throw(0);
             if(IsKeyPressed(KEY_V))hologram_deploy(0);
-            if (!mouse_owns(0) && IsKeyPressed(KEY_LEFT_CONTROL))  FireVoxel(0);
+
             if (!mouse_owns(0) && IsKeyPressed(KEY_Z)) perform_melee(0);
             if (IsKeyPressed(KEY_E)) perform_build(0);
             if (!mouse_owns(0) && IsKeyPressed(KEY_R)) start_tether(0);
@@ -22357,7 +22426,7 @@ int main(int argc, char **argv) {
         if (!debugConsoleOpen && !ff_input_blocked(1) && net_player_is_local(1) && playerInput[1] == INPUT_TYPE_KEYBOARD && players[1].respawn_timer <= 0.0f) {
             if(IsKeyPressed(KEY_PERIOD))clarity_throw(1);
             if(IsKeyPressed(KEY_SLASH))hologram_deploy(1);
-            if (!mouse_owns(1) && IsKeyPressed(KEY_RIGHT_CONTROL)) FireVoxel(1);
+
             if (!mouse_owns(1) && IsKeyPressed(KEY_M)) perform_melee(1);
             if (IsKeyPressed(KEY_O)) perform_build(1);
             if (!mouse_owns(1) && IsKeyPressed(KEY_P)) start_tether(1);
@@ -22419,7 +22488,7 @@ int main(int argc, char **argv) {
                 if(!(gameMode==GAME_MODE_FIREFIGHT && firefightPractice)) UpdateBot(i, dt);
             }
             Player *p = &players[i];
-            if (p->dynamicShotActive && p->matter <= 0.0f) {
+            if (p->dynamicShotActive && p->matter <= 0.0f && (i>=MAX_PLAYERS || !equipment[i].initialized)) {
                 p->dynamicShotActive = false;
             }
             net_integrate_player(p, dt, true);

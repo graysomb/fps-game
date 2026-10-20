@@ -127,10 +127,9 @@ static void ff_draw_hud(int i,int w,int h) {
     if(text) {
         int fs=font;
         while(fs>10 && MeasureText(text,fs)>panelW) fs--;
-        DrawText(text,panelX,h-82,fs,GOLD);
+        DrawText(text,panelX,h-155,fs,GOLD);
     }
-    if(combatantLife[i]==LIFE_ALIVE && firefightWaveState!=FIREFIGHT_STATE_INTERMISSION)
-        DrawText(TextFormat("Shot 1 | Build %.2g | Harvest +%.0f",ff_build_cost(i),ff_harvest_amount(i)),panelX,h-112,w<700?12:font,RAYWHITE);
+    /* Equipped gun costs are shown beside the two-slot equipment HUD. */
 }
 
 static bool couch_frame(void) {

@@ -108,21 +108,32 @@ static bool clarity_throw(int slot) {
     float reach=first_voxel_hit_detailed((Ray){pos,forward},.6f,-1,false,&hit)?fmaxf(0,hit.t-.2f):.6f;
     pos=v_add(pos,v_mul(forward,reach));
     grenades[free]=(GrenadeState){.id=clarityNextId++,.owner=slot,.pos=pos,.vel=v_add(v_mul(forward,14),(Vector3){0,2,0}),.fuse=-1};
+    grenades[free].adhesive=eq_upgrade(slot,EQ_ADHESIVE);
     grenadeInventory[slot]--;grenadeCooldown[slot]=.4f;play_sfx_at(SFX_MELEE,pos,slot,2,1.4f);return true;
 }
+static Matrix grenade_support_basis(int v){
+    Voxel *x=&voxels[v];Vector3 o=x->particles[0]->pos,a=v_sub(x->particles[1]->pos,o),b=v_sub(x->particles[2]->pos,o),c=v_sub(x->particles[4]->pos,o);
+    Matrix m=MatrixIdentity();m.m0=a.x;m.m1=a.y;m.m2=a.z;m.m4=b.x;m.m5=b.y;m.m6=b.z;m.m8=c.x;m.m9=c.y;m.m10=c.z;m.m12=o.x;m.m13=o.y;m.m14=o.z;return m;
+}
 static void clarity_grenade_step(GrenadeState *g,float dt) {
+    if(g->attached){int v=g->support?enemy_voxel(g->support):-1;
+        if(!g->support || v>=0){if(v>=0)g->pos=world_wrap(Vector3Transform(g->attachment,grenade_support_basis(v)));g->age=fminf(1.5f,g->age+dt);g->fuse=fmaxf(0,g->fuse-dt);return;}
+        g->attached=false;g->vel=(Vector3){0};
+    }
     const float radius=.15f;g->vel.y-=GRAVITY*dt;
+    int support=-1;
     Vector3 movement=v_mul(g->vel,dt),normal={0};float length=v_length(movement),fraction=1;bool collision=false;
     if(length>1e-5f) {
         for(int c=0;c<9;c++) {
             Vector3 offset=c==8?(Vector3){0}:(Vector3){corner_signs[c][0]*radius,corner_signs[c][1]*radius,corner_signs[c][2]*radius};VoxelHit hit;
-            if(first_voxel_hit_detailed((Ray){v_add(g->pos,offset),v_norm(movement)},length,-1,false,&hit) && hit.t/length<=fraction){fraction=fmaxf(0,hit.t/length-.001f);normal=hit.normal;collision=true;}
+            if(first_voxel_hit_detailed((Ray){v_add(g->pos,offset),v_norm(movement)},length,-1,false,&hit) && hit.t/length<=fraction){fraction=fmaxf(0,hit.t/length-.001f);normal=hit.normal;collision=true;support=hit.id;}
         }
-        if(g->pos.y+movement.y<radius && movement.y<0){float f=clampf((radius-g->pos.y)/movement.y,0,1);if(f<=fraction){fraction=f;normal=(Vector3){0,1,0};collision=true;}}
+        if(g->pos.y+movement.y<radius && movement.y<0){float f=clampf((radius-g->pos.y)/movement.y,0,1);if(f<=fraction){fraction=f;normal=(Vector3){0,1,0};collision=true;support=-1;}}
         g->pos=v_add(g->pos,v_mul(movement,fraction));
         if(collision){float inward=v_dot(g->vel,normal);if(inward<0)g->vel=v_sub(g->vel,v_mul(normal,1.4f*inward));g->vel.x*=.8f;g->vel.z*=.8f;if(v_length(g->vel)<.6f)g->vel=(Vector3){0};g->pos=v_add(g->pos,v_mul(normal,.002f));}
     }
     g->pos=world_wrap(g->pos);
+    if(collision && g->adhesive && g->fuse==-1){g->attached=true;g->support=support>=0?voxels[support].identity:0;g->vel=(Vector3){0};if(support>=0)g->attachment=Vector3Transform(world_image(g->pos,voxels[support].pos),MatrixInvert(grenade_support_basis(support)));}
     /* Only the first contact starts the timer. Account for contact within this step. */
     if(collision && g->fuse==-1)
         g->fuse=fmaxf(1.5f-g->age,dt*fraction+.5f);
@@ -169,7 +180,7 @@ static void clarity_tick(float dt) {
     else {swarmHintTimer=swarmPulseTimer=0;memset(swarmHintActive,0,sizeof(swarmHintActive));}
 }
 static void clarity_draw(void) {
-    for(int n=0;n<CLARITY_GRENADES;n++)if(grenades[n].id && periodic_visible(grenades[n].pos,4)){GrenadeState *g=&grenades[n];DrawCube(g->pos,.22f,.3f,.22f,ORANGE);DrawCubeWires(g->pos,.26f,.34f,.26f,((int)(g->fuse*8)%2)?YELLOW:RED);DrawCircle3D(g->pos,4,(Vector3){1,0,0},90,Fade(ORANGE,.35f));}
+    for(int n=0;n<CLARITY_GRENADES;n++)if(grenades[n].id && periodic_visible(grenades[n].pos,4)){GrenadeState *g=&grenades[n];if(g->adhesive){WeaponVisual v={.shot_time=-1000,.activity=g->fuse>=0,.charge=g->fuse>=0?1-clampf(g->fuse/1.5f,0,1):0};Matrix m=MatrixMultiply(MatrixScale(.45f,.45f,.45f),MatrixTranslate(g->pos.x,g->pos.y,g->pos.z));weapon_draw((WeaponPose){.kind=WEAPON_ADHESIVE_GRENADE,.transform=m},&v,(Vector3){0},clarityClock,false,WEAPON_COLOR);}else DrawCube(g->pos,.22f,.3f,.22f,ORANGE);DrawCubeWires(g->pos,.26f,.34f,.26f,((int)(g->fuse*8)%2)?YELLOW:RED);DrawCircle3D(g->pos,4,(Vector3){1,0,0},90,Fade(ORANGE,.35f));}
     for(int n=0;n<CLARITY_EFFECTS;n++)if(clarityEffects[n].id){ClarityEffect *e=&clarityEffects[n];float t=e->age;Color color=e->kind==2?ORANGE:e->type==ENEMY_TYPE_SWARMER?RED:LIGHTGRAY;
         if(!periodic_visible(e->pos,4))continue;
         if(e->kind==2){feedback_blast(e);continue;}
@@ -242,12 +253,13 @@ static void clarity_supply_layout(void) {
         for(int q=0;q<4;q++)for(int k=0;k<3;k++)if(valid[k])pickups[count++]=(Pickup){.pos=crosscut_rotate(positions[k],q),.active=true,.type=k==0?PICKUP_AMMO:k==1?PICKUP_GRENADE:PICKUP_DYNAMIC_SHOT};
         Vector3 at;if(clarity_supply_position((Vector3){0},0,&at))pickups[count++]=(Pickup){.pos=at,.active=true,.type=PICKUP_GOLD_TETHER};
     }
+    eq_layout();
 }
 static void clarity_supply_update(void) {
     if(useCustomMap || firefightPractice || (!firefightFoundry && currentWorldType!=WORLD_TYPE_CROSSCUT))return;
     for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].active || pickups[n].respawnTimer>0) {
         Vector3 at=pickups[n].pos;VoxelHit hit;float floor=0;
-        if(first_voxel_hit_detailed((Ray){at,{0,-1,0}},at.y,-1,true,&hit))floor=at.y-hit.t;
-        if(at.y>floor+.85f)pickups[n].pos.y=floor+.8f;
+        if(first_voxel_hit_detailed((Ray){{at.x,12,at.z},{0,-1,0}},12,-1,true,&hit))floor=12-hit.t;
+        if(fabsf(at.y-(floor+.8f))>.05f)pickups[n].pos.y=floor+.8f;
     }
 }

@@ -4,6 +4,9 @@
 #define CLARITY_EFFECTS 64
 typedef struct {uint32_t id; int owner; Vector3 pos,vel; float fuse; /* -1 until first bounce; otherwise remaining seconds. */
     float age; /* Host-only flight time, capped at the minimum arming time. */
+    bool adhesive,attached;
+    uint64_t support;
+    Vector3 attachment;
 } GrenadeState;
 typedef struct {uint32_t id; int kind,type,attacker; Vector3 pos; float age,yaw;} ClarityEffect;
 static GrenadeState grenades[CLARITY_GRENADES];

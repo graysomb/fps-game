@@ -35,7 +35,7 @@ int main(void){
     localSeats[0].sensitivity=2;localSeats[0].invert=true;mouse_angles(&players[0],(Vector2){0,1000},0,0,.01f,0);assert(players[0].pitch==89);
     setup();playerInput[0]=INPUT_TYPE_GAMEPAD;mouse_frame(.016f);assert(mouseSeat==1 && mouseSlot==1);delta.x=10;mouse_frame(.016f);assert(players[1].yaw==-1.5f && players[0].yaw==0);
     setup();buttons[MOUSE_BUTTON_LEFT]=clicks[MOUSE_BUTTON_LEFT]=true;mouse_frame(.016f);assert(!mouseButtonsArmed);mouse_frame(.016f);assert(voxel_count==0);buttons[0]=clicks[0]=false;mouse_frame(.016f);assert(mouseButtonsArmed);
-    players[0].last_shot_time=-100;buttons[0]=clicks[0]=true;mouse_frame(.016f);assert(voxel_count==1);clicks[0]=false;mouse_frame(.016f);assert(voxel_count==1);
+    players[0].last_shot_time=-100;buttons[0]=clicks[0]=true;mouse_frame(.016f);eq_local(.016f);assert(voxel_count==1);clicks[0]=false;mouse_frame(.016f);eq_local(.016f);assert(voxel_count==1);
     setup();mouse_frame(.016f);mouse_frame(.016f);buttons[MOUSE_BUTTON_RIGHT]=true;mouse_frame(.016f);assert(players[0].drainTarget==2);keys[KEY_R]=true;buttons[MOUSE_BUTTON_RIGHT]=false;mouse_frame(.016f);assert(players[0].drainTarget==2);keys[KEY_R]=false;mouse_frame(.016f);assert(!players[0].drainTarget);
     buttons[MOUSE_BUTTON_RIGHT]=true;mouse_frame(.016f);focused=false;mouse_frame(.016f);assert(!mouseCaptured && !players[0].drainTarget && releases>0);
     focused=true;delta.x=500;mouse_frame(.016f);assert(players[0].yaw==0);gameState=GAME_STATE_PAUSED;mouse_sync();assert(!mouseCaptured);gameState=GAME_STATE_PLAYING;debugConsoleOpen=true;mouse_sync();assert(!mouseCaptured);

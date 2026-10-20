@@ -152,8 +152,8 @@ bool net_write_input(NetWriter *writer, const NetInputCommand *command) {
     net_write_i16(writer, command->move_y);
     net_write_i16(writer, command->look_x);
     net_write_i16(writer, command->look_y);
-    net_write_u16(writer, command->held);
-    net_write_u16(writer, command->pressed);
+    net_write_u32(writer, command->held);
+    net_write_u32(writer, command->pressed);
     net_write_u8(writer, command->creative_brush);
     net_write_u8(writer, command->creative_color);
     net_write_u8(writer, command->creative_pickup);
@@ -171,8 +171,8 @@ bool net_read_input(NetReader *reader, NetInputCommand *command) {
     command->move_y = net_read_i16(reader);
     command->look_x = net_read_i16(reader);
     command->look_y = net_read_i16(reader);
-    command->held = net_read_u16(reader);
-    command->pressed = net_read_u16(reader);
+    command->held = net_read_u32(reader);
+    command->pressed = net_read_u32(reader);
     command->creative_brush = net_read_u8(reader);
     command->creative_color = net_read_u8(reader);
     command->creative_pickup = net_read_u8(reader);

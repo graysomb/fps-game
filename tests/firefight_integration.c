@@ -59,7 +59,8 @@ int main(int argc,char **argv) {
     for(int n=0;n<30;n++)update_firefight_logic(2.1f);
     int alive=0,giants=0;
     for(int i=4;i<16;i++) if(players[i].respawn_timer<=0) {alive++;giants+=players[i].enemyType==ENEMY_TYPE_GOLIATH;}
-    assert(alive==11 && giants<=2);
+    /* Wave 5 now includes team-scaled Lobbers and fills the 12 enemy cap. */
+    assert(alive==12 && giants==0);
     /* A real 16-combatant solver dispatch catches GPU uniform/tether bounds. */
     simulate_voxel_pbd_steps(1.0f/120,2);
     players[0].pos=(Vector3){0,4,0};players[1].pos=(Vector3){1,4,0};
