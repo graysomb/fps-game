@@ -14,6 +14,7 @@ uniform float effectTime;
 uniform int weaponKind;
 uniform float charge;
 uniform float activity;
+uniform float viewHide;
 out vec4 finalColor;
 void main() {
     if (energy > 2.5) {
@@ -60,4 +61,6 @@ void main() {
     } else {
         finalColor = vec4(energy > 0.5 ? emissive + vec3(0.16) : base, color.a);
     }
+    finalColor.rgb*=1.0-viewHide;
+    finalColor.a*=1.0-viewHide;
 }

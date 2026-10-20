@@ -57,7 +57,7 @@ static bool ff_revive_held(int i) {
     return ffTestReviveHeld[i];
 #else
     return playerInput[i]==INPUT_TYPE_GAMEPAD ?
-        IsGamepadButtonDown(seat_device(i), GAMEPAD_BUTTON_RIGHT_THUMB) :
+        aimStates[i].revive :
         IsKeyDown(i==0?KEY_X:KEY_COMMA);
 #endif
 }

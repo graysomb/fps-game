@@ -87,4 +87,6 @@ void weapon_clear_depth(void);
 /* Ends the mask, blurs it, then leaves the requested scene target active. */
 void weapon_bloom_composite(WeaponBloom *bloom, RenderTexture2D scene);
 
+void weapon_view_hide(float amount);
+
 #endif

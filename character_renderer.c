@@ -10,7 +10,7 @@ enum { CR_BODY, CR_HEAD, CR_EAR, CR_INNER, CR_PAW, CR_LEG, CR_TAIL,
 static Model parts[CR_COUNT];
 static Shader shader;
 static bool ready, shaded;
-static int maskLoc, glowLoc, tintLoc;
+static int maskLoc, glowLoc, tintLoc,hideLoc;
 typedef struct Builder { float v[6144], n[6144]; unsigned char c[8192]; int count; } Builder;
 static Builder builder;
 static const Color fur={83,84,86,255}, white={224,226,224,255};
@@ -83,7 +83,7 @@ bool character_renderer_init(void) {
     shaded=shader.id!=0 && shader.id!=rlGetShaderIdDefault();
     if(shaded) {
         maskLoc=GetShaderLocation(shader,"emissionOnly");glowLoc=GetShaderLocation(shader,"luminous");
-        tintLoc=GetShaderLocation(shader,"statusTint");
+        tintLoc=GetShaderLocation(shader,"statusTint");hideLoc=GetShaderLocation(shader,"viewHide");
         for(int i=0;i<CR_COUNT;i++) parts[i].materials[0].shader=shader;
     }
     ready=true;return true;
@@ -301,4 +301,8 @@ void character_draw_arm(Vector3 shoulder,Vector3 hand,Color gear) {
     part(CR_PAW,ZERO,(Vector3){CHARACTER_MODEL_SCALE,CHARACTER_MODEL_SCALE,CHARACTER_MODEL_SCALE},ZERO,root,WHITE,false,false);
     if(length>.001f) DrawCylinderEx(shoulder,hand,.022f*CHARACTER_MODEL_SCALE,.028f*CHARACTER_MODEL_SCALE,6,fur);
     (void)gear;
+}
+
+void character_view_hide(float amount){
+    if(shader.id && shader.id!=rlGetShaderIdDefault()){SetShaderValue(shader,hideLoc,&amount,SHADER_UNIFORM_FLOAT);}
 }

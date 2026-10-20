@@ -101,6 +101,7 @@ static void clarity_explode(Vector3 pos,int owner) {
 }
 static void enemy_blast(EnemyCharge c){clarity_explode(c.pos,c.owner);}
 static bool clarity_throw(int slot) {
+    aim_cancel(slot);
     if(netTransport.role==NET_ROLE_CLIENT || slot<0 || slot>=activePlayers || creativeModeActive || (netTransport.role!=NET_ROLE_OFFLINE && netRequestedCreative) || gameState!=GAME_STATE_PLAYING || players[slot].respawn_timer>0 || ff_input_blocked(slot) || (enemyLab && enemyLabPaused) || grenadeInventory[slot]<=0 || grenadeCooldown[slot]>0)return false;
     int free=-1,owned=0;for(int n=0;n<CLARITY_GRENADES;n++){if(!grenades[n].id)free=n;else if(grenades[n].owner==slot)owned++;}
     if(free<0 || owned>=2)return false;

@@ -22,7 +22,7 @@ static Model wr_parts[WR_PART_COUNT];
 static Shader wr_shader, wr_blur;
 static int wr_eye, wr_energy, wr_strength, wr_mask, wr_direction, wr_time, wr_launcher;
 static bool wr_ready;
-static int wr_kind,wr_charge,wr_activity;
+static int wr_kind,wr_charge,wr_activity,wr_hide;
 static Shader wr_drain;
 static int wr_drain_start,wr_drain_axis,wr_drain_time;
 bool weapon_drain_shader_ready(void){return wr_drain.id!=0 && wr_drain.id!=rlGetShaderIdDefault();}
@@ -308,6 +308,7 @@ bool weapon_renderer_init(void) {
     wr_kind=GetShaderLocation(wr_shader,"weaponKind");
     wr_charge=GetShaderLocation(wr_shader,"charge");
     wr_activity=GetShaderLocation(wr_shader,"activity");
+    wr_hide=GetShaderLocation(wr_shader,"viewHide");
     wr_direction=GetShaderLocation(wr_blur,"direction");
     wr_init_drain();wr_ready=true; return true;
 }
@@ -591,4 +592,8 @@ void weapon_bloom_composite(WeaponBloom *b,RenderTexture2D scene) {
     DrawTexturePro(b->blur[1].texture,(Rectangle){0,0,(float)b->blur[1].texture.width,-(float)b->blur[1].texture.height},
                    (Rectangle){0,0,(float)b->width,(float)b->height},(Vector2){0},0,(Color){110,110,110,255});
     EndBlendMode();
+}
+
+void weapon_view_hide(float amount){
+    if(wr_shader.id && wr_shader.id!=rlGetShaderIdDefault()){SetShaderValue(wr_shader,wr_hide,&amount,SHADER_UNIFORM_FLOAT);}
 }

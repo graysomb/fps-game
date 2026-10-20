@@ -14,6 +14,10 @@ try {
  if($LASTEXITCODE){throw 'Equipment build failed'}
  & ".build/equipment-$api.exe" "--physics=$backend"
  if($LASTEXITCODE){throw 'Equipment checks failed'}
+ & gcc tests/aiming_test.c @sources @flags -o ".build/aiming-$api.exe"
+ if($LASTEXITCODE){throw 'Aiming build failed'}
+ & ".build/aiming-$api.exe" "--physics=$backend"
+ if($LASTEXITCODE){throw 'Aiming checks failed'}
  & gcc tests/equipment_lan.c @sources @flags -o ".build/equipment-lan-$api.exe"
  if($LASTEXITCODE){throw 'LAN build failed'}
  $hostProcess=Start-Process -FilePath "$root/.build/equipment-lan-$api.exe" -ArgumentList host -WindowStyle Hidden -PassThru -RedirectStandardOutput "$root/.build/equipment-host-$api.log" -RedirectStandardError "$root/.build/equipment-host-$api.err"

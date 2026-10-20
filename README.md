@@ -21,7 +21,7 @@ It copies your rat colors and weapon, walks in your aim direction, follows terra
 and stops at walls. Enemies perceive and attack it normally. It has **50 damage
 capacity**, lasts eight seconds, and has a 15-second cooldown with no Matter cost.
 It cannot attack, harvest, block projectiles, or grant kill rewards. Revive now uses
-**hold right stick**; keyboard revive remains X/comma. Enemy Lab next-case is D-pad Right.
+**hold X / Square**; keyboard revive remains X/comma. Enemy Lab next-case is D-pad Right.
 
 Firefight votes accumulate team upgrade levels for the entire run. Build cost is
 `max(1, 10 / (1 + level))` (nine levels), harvest is `10 + 5 * level` (eight levels),
@@ -230,7 +230,7 @@ Ordinary walls/roofs are thicker and supports are redundant; marked demolition p
 remain vulnerable without changing global material strength.
 
 In cooperative Firefight, downed players remain revivable while a teammate is alive.
-Hold the right stick button (keyboard P1 `X`, P2 comma) within two units and clear
+Hold X / Square on the controller (keyboard P1 `X`, P2 comma) within two units and clear
 sight for three seconds. Reviving is free, including at zero Matter, and restores
 35 Matter plus two seconds of invulnerability. Animated bands and a progress ring
 show the revive; taking damage, moving away, or releasing interrupts it. A team
@@ -568,7 +568,7 @@ version 5, which adds successful-shot sequence/age and powered-shot visual state
 
 Human players now have two gun slots (default plus one empty at spawn). New gun
 pickups fill the empty slot and equip automatically. Once full, replace the selected
-gun with D-pad Right / B (second keyboard: Y). Switch with D-pad Left / Q (second
+gun with a tap of X / Square, or keyboard B (second keyboard: Y). Switch with D-pad Left / Q (second
 keyboard: U), or the mouse wheel. Duplicates remain on the map. Switching takes
 0.25 seconds and cancels beams/charging without resetting cooldowns. All guns use
 Matter; empty Matter does not remove equipment. Tether and melee remain free.
@@ -584,7 +584,22 @@ Foundry and Crosscut have authored equipment placements, with fourfold symmetry 
 versus. Equipment respawns in 30 seconds; railguns/rockets take 60 seconds and are
 not replenished between waves. All pickups are in the world-builder palette.
 Enter `weaponlab` in the debug console for a repeatable equipment arena (F4 resets,
-F7 toggles invulnerability). Network protocol 17 requires matching builds.
+F7 toggles invulnerability). Network protocol 18 requires matching builds.
+
+Toggle aiming with right-stick click (R3), Left Shift for keyboard player 1,
+or Enter for keyboard player 2, including the mouse owner. Zoom is 1.5x default,
+1.25x voxel launcher, 1.2x shotgun, 2x cutter, 4x railgun, and 1.75x rocket.
+Transitions take 0.15 seconds; look sensitivity scales with magnification.
+Aiming changes camera FOV and sights, not weapon damage, spread, speed, or costs.
+Other combat actions and switching cancel it; firing and charging do not.
+
+Controller X uses a 0.25-second tap/hold threshold: release before the threshold
+to replace a gun, or hold to revive. A hold never replaces equipment on release.
+D-pad Right is no longer a gameplay pickup action. Menus, creative mode and the
+regular Enemy Lab retain their existing controls; Weapon Lab uses gameplay binds.
+Pause, focus loss, disconnection and death clear aiming. Scope overlays are cached,
+work with bloom disabled, and fall back to drawn reticles if the shader fails.
+Aiming uses transparent reticles without scope masks or edge darkening. HUD icons keep their normal screen-space size. The railgun viewmodel fades while zooming; other guns shift inward.
 
 The procedural meshes in `weapon_concepts.inc` share the existing edge and bloom
 shaders. Charge, beam activity, grenade warning lights and builder deployment now

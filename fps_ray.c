@@ -460,11 +460,11 @@ static void init_confetti(void) {
 static void update_draw_confetti(void) {
     for (int i = 0; i < 1000; ++i) {
         if (!confetti[i].active) continue;
-        
+
         confetti[i].pos.x += confetti[i].vel.x;
         confetti[i].pos.y += confetti[i].vel.y;
         confetti[i].rotation += confetti[i].rotSpeed;
-        
+
         if (confetti[i].pos.y > GetScreenHeight()) {
              confetti[i].pos.y = -10.0f;
              confetti[i].pos.x = (float)GetRandomValue(0, GetScreenWidth());
@@ -3640,7 +3640,7 @@ static void init_static_hash(void) {
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
         if (v->simulate) continue;
-        
+
         // Ensure grid coordinates are up to date
         v->gx = (int)floorf(v->pos.x / VOXEL_SIZE);
         v->gy = (int)floorf(v->pos.y / VOXEL_SIZE);
@@ -4742,7 +4742,7 @@ static void glue_neighbor_faces_for_voxel(int voxel_idx) {
             // Also check pure static table if dynamic table missed (e.g. during build)
             neighbor_idx = table_get_static_only(nx, ny, nz);
         }
-        
+
         if (neighbor_idx < 0 || neighbor_idx >= voxel_count) {
             continue;
         }
@@ -8031,7 +8031,7 @@ static void buildProceduralWorld(void) {
         int cz = GetRandomValue(5, M - 5);
         int cy;
         int size;
-        
+
         // At least half grounded
         if (i < numStructures / 2) {
             cy = 0; // Grounded at floor level
@@ -8040,9 +8040,9 @@ static void buildProceduralWorld(void) {
             cy = GetRandomValue(6, 20); // Floating
             size = GetRandomValue(1, 16); // Normal floating debris
         }
-        
+
         Color c = (Color){ GetRandomValue(50, 200), GetRandomValue(50, 200), GetRandomValue(50, 200), 255 };
-        
+
         for (int j = 0; j < size; ++j) {
             if (cy >= 0) {
                 addVoxelAt(cx, cy, cz, c);
@@ -9072,7 +9072,7 @@ static void update_pickups(float dt) {
     clarity_supply_update();
     for (int i = 0; i < MAX_PICKUPS; i++) {
         Pickup *p = &pickups[i];
-        
+
         if (!p->active) {
             if (p->respawnTimer <= 0.0f) continue;
             p->respawnTimer -= dt;
@@ -9149,11 +9149,11 @@ static void draw_pickups(Camera cam) {
     Color voidRing = (Color){ 255, 165, 0, 255 }; // Orange
     for (int i = 0; i < MAX_PICKUPS; i++) {
         if (!pickups[i].active || !periodic_visible(pickups[i].pos,2)) continue;
-        
+
         Pickup *p = &pickups[i];
         float bobOffset = sinf(p->bobTimer * 2.0f) * 0.2f;
         Vector3 drawPos = { p->pos.x, p->pos.y + bobOffset, p->pos.z };
-        
+
         if(p->type==PICKUP_GRENADE){DrawCube(drawPos,.4f,.5f,.4f,ORANGE);DrawCubeWires(drawPos,.44f,.54f,.44f,YELLOW);continue;}
         DrawCircle3D(v_add(p->pos,(Vector3){0,-.6f,0}),.6f,(Vector3){1,0,0},90,Fade(SKYBLUE,.5f));
         if(eq_pickup_kind(p->type)>=0 || p->type==PICKUP_GOLD_TETHER) {
@@ -9162,7 +9162,7 @@ static void draw_pickups(Camera cam) {
         }
         rlPushMatrix();
         rlTranslatef(drawPos.x, drawPos.y, drawPos.z);
-        
+
         if (p->type == PICKUP_AMMO) {
             // Ammo: Spinning Diamond
             rlRotatef(p->bobTimer * 90.0f, 0, 1, 0); 
@@ -9230,7 +9230,7 @@ static void draw_pickups(Camera cam) {
                 rlEnd();
             rlPopMatrix();
         }
-        
+
         rlPopMatrix();
     }
 }
@@ -10134,6 +10134,7 @@ static void kill_player(int player_index, int attacker_index,
         return;
     }
     if(gameMode==GAME_MODE_FIREFIGHT && player_index<firefightHumans && player->invuln_timer>0) return;
+    aim_cancel(player_index);
     combat_ui_damage(player_index,attacker_index);
     combat_ui_death(player_index,attacker_index,award_debris,
         gameMode==GAME_MODE_FIREFIGHT && player_index<firefightHumans &&
@@ -10291,7 +10292,7 @@ static void rebuild_voxel_hash(void) {
         Voxel *v = &voxels[i];
         if (!v->simulate) continue; // Skip static voxels
         if (!v->vgs_active || v->isBullet || v->type != 0 || voxel_is_fluid(v)) continue;
-        
+
         v->gx = (int)floorf(v->pos.x / VOXEL_SIZE);
         v->gy = (int)floorf(v->pos.y / VOXEL_SIZE);
         v->gz = (int)floorf(v->pos.z / VOXEL_SIZE);
@@ -11100,7 +11101,7 @@ static void gather_voxel_shape_constraints(Voxel *voxel) {
         Particle *part = voxel->particles[i]; //pointer
         p[i] = part->predicted_pos;
         orig[i] = part->predicted_pos;
-        
+
         if (part->inv_mass <= 0.0f) {
             // Fixed/glued corners should influence the shape fit but not receive
             // accumulated corrections (they are not in sim_particles).
@@ -12795,7 +12796,7 @@ static void solve_static_collision_particle(Particle *p, float half_player) {
     const float eps = 1e-6f;
     float particle_radius = p->radius;
     float terrain_limit = FLOOR_SIZE - particle_radius;
-        
+
     Vector3 pos = p->predicted_pos;
     float floor_offset = 0.5f * VOXEL_SIZE;
     float floor_limit = fmaxf(0.0f, floor_offset - particle_radius);
@@ -12859,7 +12860,7 @@ static void solve_static_collisions_range(int start, int end, int worker_id, voi
         // p->radius holds the voxel radius (0.25)
         float voxel_radius = p->radius;
         float terrain_limit = FLOOR_SIZE - voxel_radius;
-        
+
         // Floor collision
         Vector3 pos = p->predicted_pos;
         float floor_offset = 0.5f * VOXEL_SIZE;
@@ -15286,6 +15287,7 @@ static void draw_melee_arm_world(int playerIdx) {
 }
 
 static void perform_melee(int idx) {
+    aim_cancel(idx);
     Player *p = &players[idx];
     if (p->respawn_timer > 0.0f || p->meleeSwingActive) {
         return;
@@ -15348,6 +15350,7 @@ static void update_melee_swings(void) {
 }
 
 static void perform_build(int idx) {
+    aim_cancel(idx);
     if(eq_upgrade(idx,EQ_BUILD)){eq_build(idx);return;}
     Player *p = &players[idx];
     if (p->respawn_timer > 0.0f || p->isExposed) {
@@ -15692,6 +15695,7 @@ static void acquire_tether_hit(int idx,int hit_id,Vector3 normal) {
 
 #include "tether_drain.inc"
 static void start_tether(int idx) {
+    aim_cancel(idx);
     Player *p=&players[idx];VoxelHit hit;
     if(p->respawn_timer>0 || p->tetherHolding || p->drainTarget)return;
     if(start_tether_drain(idx))return;
@@ -17566,7 +17570,7 @@ static void DrawVoxels(Camera3D cam) {
         Vector3 center = {0};
         for(int k=0; k<8; ++k) center = v_add(center, v->particles[k]->pos);
         center = v_mul(center, 0.125f);
-        
+
         Matrix matModel = MatrixTranslate(center.x, center.y, center.z);
         Material mat = LoadMaterialDefault();
         mat.shader = orbShader;
@@ -17850,6 +17854,7 @@ static void draw_world_surfaces(void) {
 }
 
 static void shutdown_world_visuals(void) {
+    aim_shutdown();
     periodic_visuals_shutdown();
     voxel_ca_shutdown();
     if (!worldVisualsReady) {
@@ -17977,10 +17982,23 @@ static WeaponPose player_weapon_pose(int player_index, bool first_person) {
             pose.muzzle=v_add(pose.muzzle,correction);pose.grip_heel=v_add(pose.grip_heel,correction);
         }
     }
+    if(player_index<MAX_PLAYERS && aimStates[player_index].blend>0){
+        float a=aimStates[player_index].blend;
+        Vector3 offset=v_add(v_mul(right,-.10f*a),v_mul(up,.035f*a));
+        if(first_person && eq_gun(player_index)==EQ_RAIL)offset=v_add(offset,v_mul(up,-1.5f*a*a));
+        pose.transform.m12+=offset.x;pose.transform.m13+=offset.y;pose.transform.m14+=offset.z;pose.muzzle=v_add(pose.muzzle,offset);pose.grip_heel=v_add(pose.grip_heel,offset);
+    }
     if(player_index<MAX_PLAYERS && equipment[player_index].switchTime>0){
         Vector3 dip=v_mul(up,-.45f*sinf(PI*equipment[player_index].switchTime/.25f));
         pose.transform.m12+=dip.x;pose.transform.m13+=dip.y;pose.transform.m14+=dip.z;
         pose.muzzle=v_add(pose.muzzle,dip);pose.grip_heel=v_add(pose.grip_heel,dip);
+    }
+    // Beams render with the world camera while the gun keeps its 60-degree
+    // projection. Reproject the cosmetic muzzle so both meet on screen.
+    if(first_person && player_index<MAX_PLAYERS){
+        Vector3 delta=v_sub(pose.muzzle,p->pos);
+        Vector3 axial=v_mul(forward,v_dot(delta,forward));
+        pose.muzzle=v_add(p->pos,v_add(axial,v_mul(v_sub(delta,axial),aim_scale(player_index))));
     }
     return pose;
 }
@@ -18285,8 +18303,8 @@ static void HandleKeyboardInput(int i, float dt) {
     if(!mouse_owns(i)) {
     // turn
     float yaw_accel = 0.0f;
-    if ((i==0 && IsKeyDown(KEY_F)) || (i==1 && IsKeyDown(KEY_LEFT)))  yaw_accel += TURN_ACCELERATION;
-    if ((i==0 && IsKeyDown(KEY_H)) || (i==1 && IsKeyDown(KEY_RIGHT))) yaw_accel -= TURN_ACCELERATION;
+    if ((i==0 && IsKeyDown(KEY_F)) || (i==1 && IsKeyDown(KEY_LEFT)))  yaw_accel += (TURN_ACCELERATION*aim_scale(i));
+    if ((i==0 && IsKeyDown(KEY_H)) || (i==1 && IsKeyDown(KEY_RIGHT))) yaw_accel -= (TURN_ACCELERATION*aim_scale(i));
 
     if (yaw_accel != 0.0f) {
         p->yaw_vel += yaw_accel * dt;
@@ -18300,13 +18318,13 @@ static void HandleKeyboardInput(int i, float dt) {
             if (p->yaw_vel > 0) p->yaw_vel = 0;
         }
     }
-    p->yaw_vel = clampf(p->yaw_vel, -TURN_SPEED, TURN_SPEED);
+    p->yaw_vel = clampf(p->yaw_vel, -(TURN_SPEED*aim_scale(i)), (TURN_SPEED*aim_scale(i)));
     p->yaw += p->yaw_vel * dt;
 
     // look up/down
     float pitch_accel = 0.0f;
-    if ((i==0 && IsKeyDown(KEY_T)) || (i==1 && IsKeyDown(KEY_UP)))   pitch_accel += TURN_ACCELERATION;
-    if ((i==0 && IsKeyDown(KEY_G)) || (i==1 && IsKeyDown(KEY_DOWN))) pitch_accel -= TURN_ACCELERATION;
+    if ((i==0 && IsKeyDown(KEY_T)) || (i==1 && IsKeyDown(KEY_UP)))   pitch_accel += (TURN_ACCELERATION*aim_scale(i));
+    if ((i==0 && IsKeyDown(KEY_G)) || (i==1 && IsKeyDown(KEY_DOWN))) pitch_accel -= (TURN_ACCELERATION*aim_scale(i));
 
     if (pitch_accel != 0.0f) {
         p->pitch_vel += pitch_accel * dt;
@@ -18320,7 +18338,7 @@ static void HandleKeyboardInput(int i, float dt) {
             if (p->pitch_vel > 0) p->pitch_vel = 0;
         }
     }
-    p->pitch_vel = clampf(p->pitch_vel, -TURN_SPEED, TURN_SPEED);
+    p->pitch_vel = clampf(p->pitch_vel, -(TURN_SPEED*aim_scale(i)), (TURN_SPEED*aim_scale(i)));
     p->pitch += p->pitch_vel * dt;
     p->pitch = clampf(p->pitch, -89, 89);
 
@@ -18362,7 +18380,7 @@ static void HandleGamepadInput(int i, float dt) {
     float yaw_accel = 0.0f;
     float yaw_axis = GetGamepadAxisMovement(seat_device(i), GAMEPAD_AXIS_RIGHT_X);
     if (fabsf(yaw_axis) > localSeats[i].deadzone) {
-        yaw_accel = -yaw_axis * TURN_ACCELERATION * localSeats[i].sensitivity;
+        yaw_accel = -yaw_axis * (TURN_ACCELERATION*aim_scale(i)) * localSeats[i].sensitivity;
     }
 
     if (yaw_accel != 0.0f) {
@@ -18377,14 +18395,14 @@ static void HandleGamepadInput(int i, float dt) {
             if (p->yaw_vel > 0) p->yaw_vel = 0;
         }
     }
-    p->yaw_vel = clampf(p->yaw_vel, -TURN_SPEED * localSeats[i].sensitivity, TURN_SPEED * localSeats[i].sensitivity);
+    p->yaw_vel = clampf(p->yaw_vel, -(TURN_SPEED*aim_scale(i)) * localSeats[i].sensitivity, (TURN_SPEED*aim_scale(i)) * localSeats[i].sensitivity);
     p->yaw += p->yaw_vel * dt;
 
     // look up/down (right stick vertical)
     float pitch_accel = 0.0f;
     float pitch_axis = GetGamepadAxisMovement(seat_device(i), GAMEPAD_AXIS_RIGHT_Y) * (localSeats[i].invert ? -1.0f : 1.0f);
     if (fabsf(pitch_axis) > localSeats[i].deadzone) {
-        pitch_accel = -pitch_axis * TURN_ACCELERATION * localSeats[i].sensitivity;
+        pitch_accel = -pitch_axis * (TURN_ACCELERATION*aim_scale(i)) * localSeats[i].sensitivity;
     }
 
     if (pitch_accel != 0.0f) {
@@ -18399,7 +18417,7 @@ static void HandleGamepadInput(int i, float dt) {
             if (p->pitch_vel > 0) p->pitch_vel = 0;
         }
     }
-    p->pitch_vel = clampf(p->pitch_vel, -TURN_SPEED * localSeats[i].sensitivity, TURN_SPEED * localSeats[i].sensitivity);
+    p->pitch_vel = clampf(p->pitch_vel, -(TURN_SPEED*aim_scale(i)) * localSeats[i].sensitivity, (TURN_SPEED*aim_scale(i)) * localSeats[i].sensitivity);
     p->pitch += p->pitch_vel * dt;
     p->pitch = clampf(p->pitch, -89, 89);
 
@@ -18448,16 +18466,16 @@ static float net_axis_value(int16_t value) {
 static void net_apply_movement_command(Player *p, const NetInputCommand *command, float dt) {
     if(command->mouse_look){p->yaw=command->aim_yaw;p->pitch=command->aim_pitch;p->yaw_vel=p->pitch_vel=0;}
     if(!command->mouse_look){
-    float yaw_accel = -net_axis_value(command->look_x) * TURN_ACCELERATION;
-    float pitch_accel = -net_axis_value(command->look_y) * TURN_ACCELERATION;
+    float yaw_accel = -net_axis_value(command->look_x) * (TURN_ACCELERATION*aim_player_scale(p));
+    float pitch_accel = -net_axis_value(command->look_y) * (TURN_ACCELERATION*aim_player_scale(p));
     if (fabsf(yaw_accel) > 0.01f) p->yaw_vel += yaw_accel * dt;
     else if (p->yaw_vel > 0.0f) p->yaw_vel = fmaxf(0.0f, p->yaw_vel - TURN_FRICTION * dt);
     else p->yaw_vel = fminf(0.0f, p->yaw_vel + TURN_FRICTION * dt);
     if (fabsf(pitch_accel) > 0.01f) p->pitch_vel += pitch_accel * dt;
     else if (p->pitch_vel > 0.0f) p->pitch_vel = fmaxf(0.0f, p->pitch_vel - TURN_FRICTION * dt);
     else p->pitch_vel = fminf(0.0f, p->pitch_vel + TURN_FRICTION * dt);
-    p->yaw_vel = clampf(p->yaw_vel, -TURN_SPEED, TURN_SPEED);
-    p->pitch_vel = clampf(p->pitch_vel, -TURN_SPEED, TURN_SPEED);
+    p->yaw_vel = clampf(p->yaw_vel, -(TURN_SPEED*aim_player_scale(p)), (TURN_SPEED*aim_player_scale(p)));
+    p->pitch_vel = clampf(p->pitch_vel, -(TURN_SPEED*aim_player_scale(p)), (TURN_SPEED*aim_player_scale(p)));
     p->yaw += p->yaw_vel * dt;
     p->pitch = clampf(p->pitch + p->pitch_vel * dt, -89.0f, 89.0f);
 
@@ -18648,7 +18666,7 @@ static NetInputCommand net_sample_local_input(int local_index, int player_slot, 
         if (IsGamepadButtonPressed(device, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT)) command.pressed |= NET_INPUT_MELEE;
         if (IsGamepadButtonPressed(device, GAMEPAD_BUTTON_RIGHT_TRIGGER_1)) command.pressed |= NET_INPUT_BUILD;
         if(IsGamepadButtonPressed(device,GAMEPAD_BUTTON_LEFT_FACE_UP))command.pressed|=NET_INPUT_GRENADE;
-        if(IsGamepadButtonDown(device,GAMEPAD_BUTTON_RIGHT_THUMB))command.held|=NET_INPUT_REVIVE;
+
         if(IsGamepadButtonPressed(device,GAMEPAD_BUTTON_LEFT_TRIGGER_1))command.pressed|=NET_INPUT_HOLOGRAM;
     } else if (local_index == 0) {
         mx = (IsKeyDown(KEY_D) ? 1.0f : 0.0f) - (IsKeyDown(KEY_A) ? 1.0f : 0.0f);
@@ -18681,7 +18699,7 @@ static NetInputCommand net_sample_local_input(int local_index, int player_slot, 
         int d=seat_device(local_index);
         if(IsGamepadButtonDown(d,GAMEPAD_BUTTON_RIGHT_TRIGGER_2))command.held|=NET_INPUT_FIRE;
         if(IsGamepadButtonPressed(d,GAMEPAD_BUTTON_LEFT_FACE_LEFT))command.pressed|=NET_INPUT_SWITCH;
-        if(IsGamepadButtonPressed(d,GAMEPAD_BUTTON_LEFT_FACE_RIGHT))command.pressed|=NET_INPUT_EQUIP;
+
     }else{
         if(IsKeyDown(local_index==0?KEY_LEFT_CONTROL:KEY_RIGHT_CONTROL))command.held|=NET_INPUT_FIRE;
         if(IsKeyPressed(local_index==0?KEY_Q:KEY_U))command.pressed|=NET_INPUT_SWITCH;
@@ -18693,7 +18711,7 @@ static NetInputCommand net_sample_local_input(int local_index, int player_slot, 
     command.look_y = net_quantize_axis(ly);
     if (netRequestedCreative) {
         command.pressed &= (uint32_t)~(NET_INPUT_FIRE | NET_INPUT_MELEE | NET_INPUT_BUILD | NET_INPUT_JUMP | NET_INPUT_GRENADE | NET_INPUT_HOLOGRAM);
-        command.held &= (uint16_t)~NET_INPUT_TETHER;
+        command.held &= (uint32_t)~NET_INPUT_TETHER;
         if (IsKeyDown(KEY_E)) command.held |= NET_INPUT_CREATIVE_UP;
         if (IsKeyDown(KEY_Q)) command.held |= NET_INPUT_CREATIVE_DOWN;
         if (IsKeyPressed(KEY_LEFT_CONTROL)) command.pressed |= NET_INPUT_CREATIVE_PLACE;
@@ -18711,6 +18729,7 @@ static NetInputCommand net_sample_local_input(int local_index, int player_slot, 
         command.creative_color = (uint8_t)creativeBlockColorIndex[slot];
         command.creative_pickup = (uint8_t)creativePickupType[slot];
     }
+    if(!netRequestedCreative)aim_sample(local_index,player_slot,dt,&command);
     mouse_command(&command,local_index,player_slot,dt);
     return command;
 }
@@ -19885,16 +19904,18 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
         int player_slot = net_read_u8(&reader);
         if (header.session_id == transport->session_id && player_slot >= 0 && player_slot < MAX_PLAYERS &&
             (netPeerPlayerMask[peer_slot] & (1u << player_slot)) && net_read_input(&reader, &command)) {
+            if(command.pressed & NET_INPUT_AIM){if((command.sequence<=netLastAimInput[player_slot] || command.sequence<=netLastProcessedInput[player_slot]))command.pressed&=~NET_INPUT_AIM;else netLastAimInput[player_slot]=command.sequence;}
             if(command.pressed & NET_INPUT_HOLOGRAM){if(command.sequence<=netLastHologramInput[player_slot])command.pressed&=~NET_INPUT_HOLOGRAM;else netLastHologramInput[player_slot]=command.sequence;}
             if(command.pressed & NET_INPUT_GRENADE){if(command.sequence<=netLastGrenadeInput[player_slot])command.pressed&=~NET_INPUT_GRENADE;else netLastGrenadeInput[player_slot]=command.sequence;}
             uint32_t accumulated_pressed = netHasPendingInput[player_slot] ? netPendingInput[player_slot].pressed : 0;
-            accumulated_pressed |= command.pressed;
+            uint32_t aimToggle=(accumulated_pressed^command.pressed)&NET_INPUT_AIM;
+            accumulated_pressed=((accumulated_pressed|command.pressed)&~NET_INPUT_AIM)|aimToggle;
             if (command.sequence > netLastProcessedInput[player_slot] &&
                 (!netHasPendingInput[player_slot] || command.sequence >= netPendingInput[player_slot].sequence)) {
                 netPendingInput[player_slot] = command;
             }
+            netPendingInput[player_slot].pressed=accumulated_pressed;
             if (accumulated_pressed) {
-                netPendingInput[player_slot].pressed |= accumulated_pressed;
                 if (netPendingInput[player_slot].sequence < netLastProcessedInput[player_slot])
                     netPendingInput[player_slot].sequence = netLastProcessedInput[player_slot];
                 netHasPendingInput[player_slot] = true;
@@ -20163,6 +20184,7 @@ static void net_client_update(float dt) {
         int player_slot = netLocalPlayerSlots[local_index];
         if (player_slot < 0 || player_slot >= MAX_PLAYERS) continue;
         NetInputCommand command = net_sample_local_input(local_index, player_slot, dt);
+        if(!netRequestedCreative)aim_command(player_slot,&command);
         uint8_t packet[128]; NetWriter writer;
         net_writer_init(&writer, packet, sizeof(packet));
         net_write_header(&writer, NET_MSG_INPUT, 0, netTransport.session_id, netServerTick);
@@ -20554,7 +20576,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
             i = netLocalPlayerSlots[view];
         }
         cams[i].up = (Vector3){0,1,0};
-        cams[i].fovy = 60;
+        cams[i].fovy = aim_fov(i);
         cams[i].projection = CAMERA_PERSPECTIVE;
         if (players[i].respawn_timer > 0.0f) {
             float yr = DEG2RAD * players[i].death_yaw;
@@ -20640,23 +20662,26 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 periodic_fog(weaponBlooms[view].emission,cams[i],true,screens[view].depth);
                 if (players[i].respawn_timer <= 0) {
                     weapon_clear_depth();
-                    BeginMode3D(cams[i]);
+                    float viewHide=eq_gun(i)==EQ_RAIL?aimStates[i].blend:0;weapon_view_hide(viewHide);character_view_hide(viewHide);
+                    Camera3D handsCam=cams[i];handsCam.fovy=60;BeginMode3D(handsCam);
                     draw_player_weapon(i, cams[i].position, true, WEAPON_EMISSION);
                     if(player_uses_rat(i)) character_draw_paws(player_weapon_pose(i,true),player_palette_color(i),true);
-                    EndMode3D();
+                    EndMode3D();weapon_view_hide(0);character_view_hide(0);
                 }
                 weapon_bloom_composite(&weaponBlooms[view], screens[view]);
             }
             if (drawWeaponModels && players[i].respawn_timer <= 0) {
                 weapon_clear_depth();
-                BeginMode3D(cams[i]);
+                float viewHide=eq_gun(i)==EQ_RAIL?aimStates[i].blend:0;weapon_view_hide(viewHide);character_view_hide(viewHide);
+                    Camera3D handsCam=cams[i];handsCam.fovy=60;BeginMode3D(handsCam);
                 draw_player_weapon(i, cams[i].position, true, WEAPON_COLOR);
                 if(player_uses_rat(i)) character_draw_paws(player_weapon_pose(i,true),player_palette_color(i),false);
                 draw_player_weapon(i, cams[i].position, true, WEAPON_GLASS);
-                EndMode3D();
+                EndMode3D();weapon_view_hide(0);character_view_hide(0);
             }
             int view_x = 0, view_y = 0, view_w = 0, view_h = 0;
             get_viewport(view, viewCount, &view_x, &view_y, &view_w, &view_h);
+            aim_overlay(i,view_w,view_h);
             draw_teammate_markers(i,cams[i],view_w,view_h);
             int hudFont=view_w<700?12:HUD_FONT_SIZE;
             DrawRectangle(0, 0, view_w, HUD_BAR_HEIGHT, Fade(BLACK, 0.5f));
@@ -20780,8 +20805,8 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 int cy = view_h / 2;
                 int cross = 9;
                 Color cross_color = Fade(WHITE,1.0f);
-                DrawLine(cx - cross, cy, cx + cross, cy, cross_color);
-                DrawLine(cx, cy - cross, cx, cy + cross, cross_color);
+                if(aimStates[i].blend<.02f)DrawLine(cx - cross, cy, cx + cross, cy, cross_color);
+                if(aimStates[i].blend<.02f)DrawLine(cx, cy - cross, cx, cy + cross, cross_color);
             }
         EndTextureMode();
     }
@@ -21328,6 +21353,7 @@ int main(int argc, char **argv) {
     voxel_ca_init();
     // main loop
     while (!WindowShouldClose()) {
+        aim_focus_tick();
         if(gameState!=GAME_STATE_PLAYING && gameState!=GAME_STATE_CREATIVE)mouse_sync();
 #if defined(__APPLE__)
         macos_gamepad_poll();
@@ -22734,9 +22760,10 @@ int main(int argc, char **argv) {
                              100, controlsY + controlsSpacing * 1, controlsSize, DARKGRAY);
                     DrawText("Keyboard P2: Move IJKL | Look Arrows | Jump RSHIFT | Shoot RCTRL | Melee M | Build O | Tether P",
                              100, controlsY + controlsSpacing * 2, controlsSize, DARKGRAY);
-                    DrawText("Gamepad: Move LS | Look RS | Jump A | Shoot RT | Melee B | Build RB | Tether LT",
+                    DrawText("Gamepad: LS move | RS look | A jump | RT fire | B melee | RB build | LT tether | R3 aim",
                              100, controlsY + controlsSpacing * 3, controlsSize, DARKGRAY);
 
+                    DrawText("X: tap replace / hold revive | Keyboard aim: Left Shift (P1), Enter (P2)",100,controlsY+controlsSpacing*5,controlsSize,DARKGRAY);
                     DrawText("Press M to return to Main Menu", 100, SCREEN_HEIGHT - 60, 20, DARKGRAY);
                 EndDrawing();
 

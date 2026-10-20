@@ -1,8 +1,9 @@
 /* One physical mouse belongs to the first local keyboard seat. */
 static void mouse_angles(Player *p,Vector2 delta,float keysX,float keysY,float dt,int seat){
-    float scale=.15f*localSeats[seat].sensitivity;
-    p->yaw=remainderf(p->yaw-delta.x*scale-keysX*TURN_SPEED*dt,360);
-    p->pitch=clampf(p->pitch-delta.y*scale*(localSeats[seat].invert?-1:1)-keysY*TURN_SPEED*dt,-89,89);
+    float zoomScale=aim_seat_scale(seat);
+    float scale=.15f*localSeats[seat].sensitivity*zoomScale;
+    p->yaw=remainderf(p->yaw-delta.x*scale-keysX*TURN_SPEED*zoomScale*dt,360);
+    p->pitch=clampf(p->pitch-delta.y*scale*(localSeats[seat].invert?-1:1)-keysY*TURN_SPEED*zoomScale*dt,-89,89);
     p->yaw_vel=p->pitch_vel=0;
 }
 static void mouse_sync(void){

@@ -2,6 +2,7 @@
 static float hologram_max_range(void) {return 2.f*sqrtf(2.f)*FLOOR_SIZE;}
 static float hologram_max_life(void) {return 8.f+hologram_max_range()/MOVE_SPEED;}
 static bool hologram_deploy(int owner) {
+    aim_cancel(owner);
     if(netTransport.role==NET_ROLE_CLIENT || owner<0 || owner>=MAX_PLAYERS || owner>=activePlayers ||
        !player_uses_rat(owner) || debugConsoleOpen || gameState!=GAME_STATE_PLAYING || creativeModeActive ||
        players[owner].respawn_timer>0 || combatantLife[owner]!=LIFE_ALIVE || ff_input_blocked(owner) ||

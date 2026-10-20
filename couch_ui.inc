@@ -108,7 +108,7 @@ static void ff_draw_hud(int i,int w,int h) {
         DrawText(TextFormat("Next: %s (%d / %d special)",next->name,total,special),panelX,h-142,w<700?12:font,RAYWHITE);
     } else {
         for(int j=0;j<firefightHumans;j++) if(combatantLife[j]==LIFE_DOWNED) {
-            text=TextFormat("P%d: Hold %s to revive",j+1,playerInput[i]==INPUT_TYPE_GAMEPAD?"R-stick":i==0?"X":","); break;
+            text=TextFormat("P%d: Hold %s to revive",j+1,playerInput[i]==INPUT_TYPE_GAMEPAD?"X":i==0?"X":","); break;
         }
         if(!text && players[i].matter<1) text="No Matter: melee blocks to harvest";
         if(!text) {

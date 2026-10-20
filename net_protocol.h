@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define FPS_NET_MAGIC 0x4650534eu /* "FPSN" */
-#define FPS_NET_PROTOCOL_VERSION 17u /* Two-slot equipment and 32-bit input. */
+#define FPS_NET_PROTOCOL_VERSION 18u /* Weapon aiming state and interaction controls. */
 #define FPS_NET_DEFAULT_PORT 27015u
 #define FPS_NET_DISCOVERY_PORT 27016u
 #define FPS_NET_MAX_PACKET 1100u
@@ -58,7 +58,7 @@ typedef enum NetInputButtons {
     NET_INPUT_TETHER_CANCEL = 1u << 13,
     NET_INPUT_HOLOGRAM = 1u << 14,
     NET_INPUT_REVIVE = 1u << 15,
-    NET_INPUT_SWITCH=1u<<16, NET_INPUT_EQUIP=1u<<17
+    NET_INPUT_SWITCH=1u<<16, NET_INPUT_EQUIP=1u<<17, NET_INPUT_AIM=1u<<18, NET_INPUT_AIM_CANCEL=1u<<19
 } NetInputButtons;
 
 typedef struct NetPacketHeader {
