@@ -6,7 +6,8 @@
 
 enum { WR_BODY, WR_UPPER, WR_LOWER, WR_FLASH, WR_LAUNCH_BARREL, WR_LAUNCH_FRAME,
        WR_LAUNCH_GRIP, WR_LAUNCH_STOCK, WR_CUBE, WR_GLASS_LEFT, WR_GLASS_RIGHT,
-       WR_GLASS_FRONT, WR_GLASS_BACK, WR_AURA, WR_PART_COUNT };
+       WR_GLASS_FRONT, WR_GLASS_BACK, WR_AURA, WR_CONCEPT_FIRST,
+       WR_PART_COUNT=WR_CONCEPT_FIRST+7 };
 enum { WR_SILVER, WR_DARK, WR_ENERGY, WR_CHARCOAL, WR_PARTICLE, WR_GLASS, WR_GOLD_AURA };
 static const Color wr_colors[] = { {184,190,201,255}, {37,43,58,255}, {255,255,255,255},
                                  {47,49,56,255}, {255,255,255,255}, {255,235,170,24}, {255,255,255,255} };
@@ -21,6 +22,7 @@ static Model wr_parts[WR_PART_COUNT];
 static Shader wr_shader, wr_blur;
 static int wr_eye, wr_energy, wr_strength, wr_mask, wr_direction, wr_time, wr_launcher;
 static bool wr_ready;
+static int wr_kind,wr_charge,wr_activity;
 static Shader wr_drain;
 static int wr_drain_start,wr_drain_axis,wr_drain_time;
 bool weapon_drain_shader_ready(void){return wr_drain.id!=0 && wr_drain.id!=rlGetShaderIdDefault();}
@@ -205,8 +207,10 @@ static void wr_launcher_part(WrBuilder *b,int part) {
     }
 }
 
+#include "weapon_concepts.inc"
 static void wr_build_part(WrBuilder *b, int part) {
     memset(b,0,sizeof(*b));
+    if(part>=WR_CONCEPT_FIRST){wc_build(b,WEAPON_IMPULSE_SHOTGUN+part-WR_CONCEPT_FIRST);return;}
     if (part==WR_AURA) {
         // Parameter-space ribbons: the vertex shader orbits and ripples them.
         for (int strand=0;strand<2;++strand) for (int step=0;step<64;++step) {
@@ -301,6 +305,9 @@ bool weapon_renderer_init(void) {
     wr_mask=GetShaderLocation(wr_shader,"emissionOnly");
     wr_time=GetShaderLocation(wr_shader,"effectTime");
     wr_launcher=GetShaderLocation(wr_shader,"launcher");
+    wr_kind=GetShaderLocation(wr_shader,"weaponKind");
+    wr_charge=GetShaderLocation(wr_shader,"charge");
+    wr_activity=GetShaderLocation(wr_shader,"activity");
     wr_direction=GetShaderLocation(wr_blur,"direction");
     wr_init_drain();wr_ready=true; return true;
 }
@@ -398,6 +405,12 @@ WeaponPose weapon_pose(WeaponKind kind,Vector3 pos,Vector3 forward,Vector3 right
         }
     }
     Vector3 muzzle={0,0,kind==WEAPON_DYNAMIC_LAUNCHER ? -1.46f : -.84f};
+    if(kind==WEAPON_IMPULSE_SHOTGUN)muzzle.z=-1.06f;
+    if(kind==WEAPON_CUTTER)muzzle.z=-1.34f;
+    if(kind==WEAPON_RAILGUN)muzzle.z=-1.90f;
+    if(kind==WEAPON_ROCKET_LAUNCHER)muzzle.z=-1.22f;
+    if(kind==WEAPON_SWORD)muzzle=(Vector3){-.2f,0,-1.53f};
+    if(kind==WEAPON_ADHESIVE_GRENADE)muzzle=(Vector3){0,0,-.42f};
     return (WeaponPose){m,Vector3Transform(muzzle,m),Vector3Transform(heel,m),kind};
 }
 
@@ -419,11 +432,17 @@ static void wr_draw_part(int part,Matrix transform) {
 
 void weapon_draw(WeaponPose pose,const WeaponVisual *v,Vector3 eye,float now,
                  bool gold,WeaponRenderPass pass) {
-    if (!wr_ready) return;
+    if (!wr_ready || pose.kind<0 || pose.kind>=WEAPON_KIND_COUNT) return;
+    bool concept=pose.kind>=WEAPON_IMPULSE_SHOTGUN;
     bool launcher=pose.kind==WEAPON_DYNAMIC_LAUNCHER;
     if (pass==WEAPON_GLASS && !launcher) return;
     float shot=weapon_shot_amount(v,now);
     Vector3 energy=launcher ? (Vector3){1,.85f,.035f} : gold ? (Vector3){1,.67f,.10f} : (Vector3){0,.95f,1};
+    if(concept)energy=wc_energy(pose.kind);
+    int kind=pose.kind;float charge=Clamp(v->charge,0,1),activity=Clamp(v->activity,0,1);
+    SetShaderValue(wr_shader,wr_kind,&kind,SHADER_UNIFORM_INT);
+    SetShaderValue(wr_shader,wr_charge,&charge,SHADER_UNIFORM_FLOAT);
+    SetShaderValue(wr_shader,wr_activity,&activity,SHADER_UNIFORM_FLOAT);
     float strength=.82f+v->claw_open*(.34f+.12f*sinf(now*9)) + shot*.70f;
     int mask=pass==WEAPON_EMISSION ? 1 : 0;
     SetShaderValue(wr_shader,wr_eye,&eye,SHADER_UNIFORM_VEC3);
@@ -448,6 +467,10 @@ void weapon_draw(WeaponPose pose,const WeaponVisual *v,Vector3 eye,float now,
         BeginBlendMode(BLEND_ALPHA); rlDisableDepthMask();
         for (int pane=0;pane<4;++pane) wr_draw_part(order[pane],pose.transform);
         rlDrawRenderBatchActive(); rlEnableDepthMask(); EndBlendMode();
+        return;
+    }
+    if(concept){
+        wr_draw_part(WR_CONCEPT_FIRST+pose.kind-WEAPON_IMPULSE_SHOTGUN,pose.transform);
         return;
     }
     if (launcher) {
@@ -498,6 +521,7 @@ void weapon_draw_pickup(bool launcher,Vector3 position,Vector3 eye,float now,Wea
     }
     if(pass==WEAPON_GLASS)return;
     Vector3 energy={1,.67f,.10f};float strength=1.1f;int mask=pass==WEAPON_EMISSION,variant=0;
+    SetShaderValue(wr_shader,wr_kind,&variant,SHADER_UNIFORM_INT);
     SetShaderValue(wr_shader,wr_eye,&eye,SHADER_UNIFORM_VEC3);
     SetShaderValue(wr_shader,wr_energy,&energy,SHADER_UNIFORM_VEC3);
     SetShaderValue(wr_shader,wr_strength,&strength,SHADER_UNIFORM_FLOAT);

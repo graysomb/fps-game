@@ -75,7 +75,7 @@ static void capture_melee_sequence(const char *out) {
 }
 
 static void test_melee_hits(void) {
-    Player saved[MAX_PLAYERS]; memcpy(saved,players,sizeof(players));
+    Player saved[MAX_COMBATANTS]; memcpy(saved,players,sizeof(players));
     activePlayers=2;
     players[1].pos=v_add(players[0].pos,(Vector3){0,0,-1.5f});
     perform_melee(0); assert(players[0].meleeSwingActive);
@@ -114,7 +114,7 @@ static void test_melee_hits(void) {
 }
 
 static void test_launcher_pickup(void) {
-    Player saved[MAX_PLAYERS]; memcpy(saved,players,sizeof(players));
+    Player saved[MAX_COMBATANTS]; memcpy(saved,players,sizeof(players));
     assert(player_weapon_pose(0,true).kind==WEAPON_STANDARD);
     pickups[0]=(Pickup){.pos=players[0].pos,.type=PICKUP_DYNAMIC_SHOT,.active=true};
     update_pickups(0);
@@ -240,7 +240,7 @@ int main(int argc,char **argv) {
     assert(IsWindowReady()); SetRandomSeed(1);
     clear_world_voxels(); clear_pickups(); init_static_hash();
     weaponRenderingReady=weapon_renderer_init(); assert(weaponRenderingReady);
-    gameMode=GAME_MODE_DEATHMATCH; activePlayers=4;
+    gameMode=GAME_MODE_DEATHMATCH; currentWorldType=WORLD_TYPE_TEST; firefightFoundry=false; activePlayers=4;
     for (int i=0;i<4;++i) {
         players[i]=(Player){.pos={i==0 ? 0 : (i-2)*1.5f,2.0f,i==0 ? 0 : -4},.matter=100,.matterMax=100,
                             .last_shot_time=-1000,.tetherVoxel=-1,.last_melee_time=-1000};

@@ -11,7 +11,15 @@
 
 typedef enum WeaponKind {
     WEAPON_STANDARD,
-    WEAPON_DYNAMIC_LAUNCHER
+    WEAPON_DYNAMIC_LAUNCHER,
+    WEAPON_IMPULSE_SHOTGUN,
+    WEAPON_CUTTER,
+    WEAPON_ADHESIVE_GRENADE,
+    WEAPON_RAILGUN,
+    WEAPON_ROCKET_LAUNCHER,
+    WEAPON_SWORD,
+    WEAPON_REINFORCED_BUILDER,
+    WEAPON_KIND_COUNT
 } WeaponKind;
 
 typedef enum WeaponRenderPass {
@@ -27,6 +35,8 @@ typedef struct WeaponVisual {
     uint32_t shot_sequence;
     float shot_time;
     float claw_open;
+    /* Cosmetic state supplied by gameplay: charge and active effect in [0,1]. */
+    float charge, activity;
 } WeaponVisual;
 
 typedef struct WeaponPose {

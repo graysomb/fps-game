@@ -11,6 +11,9 @@ uniform vec3 energyColor;
 uniform float energyStrength;
 uniform int emissionOnly;
 uniform float effectTime;
+uniform int weaponKind;
+uniform float charge;
+uniform float activity;
 out vec4 finalColor;
 void main() {
     if (energy > 2.5) {
@@ -35,6 +38,23 @@ void main() {
     // Cubes keep subtle face tints and outlined edges while emitting energy.
     float energyEdge = energy > 1.5 ? mix(0.45, 1.0, interior) : 1.0;
     vec3 emissive = energyColor * color.r * energyStrength * energyEdge;
+    // Distinct readable signals; opaque color pass keeps these visible without bloom.
+    float signal=1.0;
+    if(weaponKind==2)signal=.8+.2*sin(effectTime*5.0)+activity*.6; // impulse chambers
+    if(weaponKind==3)signal=.75+.25*sin(localPosition.z*30.0+effectTime*16.0)+activity*.5;
+    if(weaponKind==4){ // Adhesive fuse accelerates with supplied fuse progress.
+        float blink=step(.45,fract(effectTime*(1.0+charge*7.0)));
+        signal=mix(.7,.35+blink*1.1,activity);
+        emissive=mix(emissive,vec3(1,.04,.01),charge*activity*.85);
+    }
+    if(weaponKind==5){ // Rear-to-tip rail bank filling, not random flicker.
+        float bank=clamp((-localPosition.z-.35)/1.4,0.0,1.0);
+        signal=.22+1.1*(1.0-smoothstep(charge,charge+.06,bank));
+    }
+    if(weaponKind==6)signal=.8+.15*sin(effectTime*4.0)+activity*.7;
+    if(weaponKind==7)signal=.8+.2*pow(.5+.5*sin(localPosition.z*12.0+effectTime*6.0),3.0)+activity*.4;
+    if(weaponKind==8)signal=.6+.4*pow(.5+.5*sin(localPosition.y*18.0-effectTime*5.0),2.0);
+    emissive*=signal;
     if (emissionOnly != 0) {
         finalColor = vec4(energy > 0.5 ? emissive : vec3(0.0), 1.0);
     } else {

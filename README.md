@@ -566,6 +566,15 @@ are unchanged. Goliaths retain their arm attack. The gun is hidden in creative m
 and respawn. LAN peers must all use protocol
 version 5, which adds successful-shot sequence/age and powered-shot visual state.
 
+The renderer also exposes seven presentation-only concept variants: impulse
+shotgun, cutter, adhesive grenade, railgun, rocket launcher, sword, and reinforced
+builder. Their meshes in `weapon_concepts.inc` share the existing edge and bloom
+shaders. `WeaponVisual.charge` and `.activity` (0–1) drive rail charge, grenade
+warning lights, energy animation, and build-arm deployment. They are not yet
+equippable gameplay weapons: damage, inventory, projectiles, and pickups are
+unchanged. Concept previews are generated under `artifacts/weapon/concepts-gl33`
+and `concepts-gl43`, including `all-weapons.png` and first-person views.
+
 After building raylib with `build.ps1`, run the Windows visual checks from the
 repository root:
 

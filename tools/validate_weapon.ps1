@@ -37,6 +37,14 @@ try {
         New-Item -ItemType Directory -Force -Path $destination | Out-Null
         & $preview $destination *> "$weaponBuildDir\gl$api.log"
         if ($LASTEXITCODE -ne 0) { throw "OpenGL $api preview failed; see .build/weapon/gl$api.log" }
+        $conceptPreview = "$weaponBuildDir\render_concepts_gl$api.exe"
+        Invoke-WeaponCompiler @('-std=c11', '-O2', "-DGRAPHICS_API_OPENGL_$api",
+            '-I.', "-I$raylibDir", 'tests/render_weapon_concepts.c', 'weapon_renderer.c',
+            "-L$raylibDir", '-lraylib', '-lopengl32', '-lgdi32', '-lwinmm', '-lm', '-o', $conceptPreview)
+        $conceptDir = Join-Path $weaponArtifactDir "concepts-gl$api"
+        New-Item -ItemType Directory -Force -Path $conceptDir | Out-Null
+        & $conceptPreview $conceptDir *> "$weaponBuildDir\concepts-gl$api.log"
+        if ($LASTEXITCODE -ne 0) { throw "OpenGL $api concept preview failed" }
     }
     $noBloomDir = Join-Path $weaponArtifactDir 'no-bloom'
     New-Item -ItemType Directory -Force -Path $noBloomDir | Out-Null

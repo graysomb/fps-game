@@ -9,6 +9,8 @@ uniform mat4 matModel;
 uniform mat4 matNormal;
 uniform float effectTime;
 uniform int launcher;
+uniform int weaponKind;
+uniform float activity;
 out vec3 position;
 out vec3 normal;
 out vec4 color;
@@ -19,6 +21,8 @@ flat out int edgeMask;
 void main() {
     localPosition = vertexPosition;
     vec3 p = vertexPosition;
+    // Construction arms deploy laterally without moving the grip or receiver.
+    if(weaponKind==8 && abs(p.x)>.35) p.x=sign(p.x)*(.35+(abs(p.x)-.35)*(.35+.65*activity));
     if (vertexTexCoord.x > 2.5) {
         float t = vertexPosition.z;
         float radius = (launcher != 0 ? 0.68 : 0.54) + 0.025 * sin(t * 31.0 - effectTime * 8.0);
