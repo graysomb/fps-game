@@ -117,7 +117,7 @@ static void ff_draw_hud(int i,int w,int h) {
                 for(int j=MAX_PLAYERS;j<MAX_COMBATANTS;j++) if(players[j].respawn_timer<=0 && players[j].isExposed) {
                     Vector3 delta=v_norm(v_sub(players[j].pos,players[i].pos));
                     if(v_dot(delta,player_forward(&players[i]))>.97f) {
-                        text=playerInput[i]==INPUT_TYPE_GAMEPAD?"EXPOSED: melee (bottom face) or throw (LT)":i==0?"EXPOSED: melee Z or throw R":"EXPOSED: melee M or throw P"; break;
+                        text=playerInput[i]==INPUT_TYPE_GAMEPAD?"EXPOSED: melee (B/right face) or throw (LT)":i==0?"EXPOSED: melee Z or throw R":"EXPOSED: melee M or throw P"; break;
                     }
                 }
             }
