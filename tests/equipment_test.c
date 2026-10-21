@@ -23,6 +23,42 @@ static void attacks(void){fixture();eq_pickup(0,PICKUP_RAILGUN,false);equipment[
  fixture();add_static_box_at_grid(-2,2,0,6,-4,-4,GRAY);init_static_hash();rebuild_voxel_hash();eq_pickup(0,PICKUP_CUTTER,false);equipment[0].switchTime=0;eq_command(0,&hold,.01f);assert(players[1].matter==100);eq_rocket_blast((EquipmentRocket){.owner=0,.pos={0,2,-1}});assert(players[1].matter==100);
  fixture();players[1].invuln_timer=1;eq_damage(0,1,100,true,DEATH_ROCKET,players[0].pos);assert(players[1].matter==100);gameMode=GAME_MODE_FIREFIGHT;combatantTeam[1]=0;players[1].invuln_timer=0;eq_damage(0,1,100,true,DEATH_RAIL,players[0].pos);assert(players[1].matter==100);
 }
+static void rail_reservation(void){
+ NetInputCommand hold={.held=NET_INPUT_FIRE},release={0},swap={.pressed=NET_INPUT_SWITCH};
+ fixture();eq_pickup(0,PICKUP_RAILGUN,false);equipment[0].switchTime=0;
+ eq_command(0,&hold,eqRailCharge*.5f);assert(fabsf(players[0].matter-92.5f)<.001f);
+ exSuppression[0]=5;eq_command(0,&release,.01f);assert(players[0].matter==100 && equipment[0].charge==0 && players[1].matter==100);exSuppression[0]=0;
+ // Damage to the remaining bar does not confiscate an already loaded shot.
+ eq_command(0,&hold,eqRailCharge);assert(players[0].matter==85);
+ apply_matter_damage(0,1,85);assert(players[0].matter==0 && players[0].isExposed);
+ eq_tick(.01f);assert(weaponVisuals[0].depleted==0);
+ eq_command(0,&hold,.1f);assert(equipment[0].charge==eqRailCharge);
+ eq_command(0,&release,.01f);assert(players[1].matter==50 && players[0].matter==0 && equipment[0].charge==0 && equipment[0].cooldown[EQ_RAIL]>0);
+ eq_command(0,&release,.01f);assert(players[1].matter==50 && players[0].matter==0);
+ // Loading the last 15 Matter over multiple frames still reaches full charge.
+ const int rates[]={20,30,60,90,120,144,165,240,360,1000};
+ for(int hz=0;hz<10;hz++){
+  fixture();eq_pickup(0,PICKUP_RAILGUN,false);equipment[0].switchTime=0;players[0].matter=15;
+  for(int n=0;n<rates[hz];n++)eq_command(0,&hold,1.f/rates[hz]);
+  assert(equipment[0].charge==eqRailCharge && players[0].matter==0 && players[0].isExposed);
+  eq_command(0,&release,.01f);assert(players[1].matter==50 && players[0].matter==0);
+ }
+ // Insufficient charge cannot fire; release refunds exactly what was loaded.
+ fixture();eq_pickup(0,PICKUP_RAILGUN,false);equipment[0].switchTime=0;players[0].matter=5;
+ eq_command(0,&hold,eqRailCharge);assert(players[0].matter==0 && equipment[0].charge<eqRailCharge);
+ eq_command(0,&release,.01f);assert(fabsf(players[0].matter-5)<.001f && !players[0].isExposed && players[1].matter==100);
+ // Switching, replacement, melee and paused input cancel rather than fire.
+ players[0].matter=100;eq_command(0,&hold,eqRailCharge);eq_command(0,&swap,.01f);assert(players[0].matter==100 && equipment[0].charge==0);
+ eq_command(0,&swap,.01f);equipment[0].switchTime=0;eq_command(0,&hold,eqRailCharge);
+ assert(eq_pickup(0,PICKUP_SHOTGUN,true));assert(players[0].matter==100 && equipment[0].charge==0);
+ assert(eq_pickup(0,PICKUP_RAILGUN,true));equipment[0].switchTime=0;eq_command(0,&hold,.2f);players[0].meleeSwingActive=true;
+ eq_command(0,&release,.01f);assert(players[0].matter==100 && players[1].matter==100);players[0].meleeSwingActive=false;
+ eq_command(0,&hold,.2f);enemyLab=true;enemyLabPaused=true;eq_tick(.01f);assert(players[0].matter==100 && equipment[0].charge==0);enemyLab=false;enemyLabPaused=false;
+ // Death/reset discards the capacitor; it must never refund into a new life.
+ eq_command(0,&hold,eqRailCharge);players[0].matter=0;players[0].isExposed=true;kill_player(0,1,false,false);
+ assert(equipment[0].charge==0);float afterDeath=players[0].matter;eq_tick(.01f);assert(players[0].matter==afterDeath);
+ puts("Railgun reservation, zero-Matter firing, refunds and lifecycle passed");
+}
 static void panels(void){fixture();eq_pickup(0,PICKUP_REINFORCED,false);players[0].pitch=-40;players[1].pos.x=20;Vector3 points[EQ_PANEL_CUBES];assert(eq_panel_positions(0,points));float cost=ff_build_cost(0);assert(eq_build(0));assert(voxel_count==EQ_PANEL_CUBES && players[0].matter==100-cost);for(int i=0;i<EQ_PANEL_CUBES;i++)assert(voxels[i].reinforced);float m=players[0].matter;assert(!eq_build(0)&&players[0].matter==m);}
 static void sticky(void){fixture();GrenadeState g={.id=1,.owner=0,.pos={0,.2f,0},.vel={0,-1,0},.fuse=-1,.adhesive=true};clarity_grenade_step(&g,.1f);assert(g.attached && g.fuse>1.3f);for(int n=0;n<13;n++)clarity_grenade_step(&g,.1f);assert(g.fuse>0);clarity_grenade_step(&g,.11f);assert(g.fuse==0);
  int v=addVoxel(0,2,0,false,true,GRAY,0);g=(GrenadeState){.id=2,.attached=true,.adhesive=true,.support=voxels[v].identity,.attachment={.5f,.5f,.5f},.fuse=.4f};clarity_grenade_step(&g,.01f);Vector3 old=g.pos;for(int p=0;p<8;p++)voxels[v].particles[p]->pos.x+=2;clarity_grenade_step(&g,.01f);assert(fabsf(g.pos.x-old.x-2)<.001f);remove_voxel_index(v);clarity_grenade_step(&g,.01f);assert(!g.attached && g.fuse<.4f && g.fuse>0);}
@@ -203,4 +239,4 @@ static void polish_presentation(void){
  equipment[0].cooldown[EQ_ROCKET]=0;players[0].matter=0;eq_tick(.2f);assert(weaponVisuals[0].depleted==1 && weaponVisuals[0].cooldown==0);
  eq_reset(0);assert(weaponVisuals[0].deployment==0 && weaponVisuals[0].build_pulse==0);
 }
-int main(int argc,char**argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Equipment tests");init_pbd_thread_pool();assert(initialize_physics_backend());inventory();polish_presentation();matter_build_changes();persistent_tether();revised_weapons();attacks();panels();sticky();lifecycle();sword();shotgun_structures();protection();supplies_regenerate();maps();stress();captures();beam_captures();sword_reach_and_visuals();matter_captures();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Equipment tests passed");return 0;}
+int main(int argc,char**argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Equipment tests");init_pbd_thread_pool();assert(initialize_physics_backend());inventory();rail_reservation();polish_presentation();matter_build_changes();persistent_tether();revised_weapons();attacks();panels();sticky();lifecycle();sword();shotgun_structures();protection();supplies_regenerate();maps();stress();captures();beam_captures();sword_reach_and_visuals();matter_captures();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Equipment tests passed");return 0;}

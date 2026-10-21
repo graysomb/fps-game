@@ -5,6 +5,16 @@ static int eq_gun(int i){if(i<0 || i>=MAX_PLAYERS || is_player_bot(i))return EQ_
 static bool eq_upgrade(int i,int flag){return i>=0 && i<MAX_PLAYERS && !is_player_bot(i) && (equipment[i].upgrades&flag)!=0;}
 static bool eq_usable(int i){return i>=0 && i<MAX_PLAYERS && !is_player_bot(i) && netTransport.role!=NET_ROLE_CLIENT && gameState==GAME_STATE_PLAYING && players[i].respawn_timer<=0 && !ff_input_blocked(i) && !creativeModeActive && !(enemyLab&&enemyLabPaused);}
 static void eq_spend(int i,float cost){players[i].matter=fmaxf(0,players[i].matter-cost);players[i].isExposed=players[i].matter<=0;}
+// Charge time represents Matter already transferred into the railgun capacitor.
+// Refunds return owned Matter, so Glob's restoration suppression does not apply.
+static void eq_cancel_charge(int i){
+    Equipment *e=&equipment[i];Player *p=&players[i];
+    if(netTransport.role!=NET_ROLE_CLIENT && e->charge>0 && p->respawn_timer<=0 && combatantLife[i]==LIFE_ALIVE){
+        p->matter=fminf(player_max_matter(p),p->matter+eqGuns[EQ_RAIL].cost*e->charge/eqRailCharge);
+        p->isExposed=p->matter<=0;
+    }
+    e->charge=0;e->held=false;
+}
 static int eq_pickup_gun(int type){switch(type){case PICKUP_DYNAMIC_SHOT:return EQ_VOXEL;case PICKUP_SHOTGUN:return EQ_SHOTGUN;case PICKUP_CUTTER:return EQ_CUTTER;case PICKUP_RAILGUN:return EQ_RAIL;case PICKUP_ROCKET:return EQ_ROCKET;case PICKUP_GLOB:return EQ_GLOB;case PICKUP_GLOCK:return EQ_GLOCK;case PICKUP_DMR:return EQ_DMR;case PICKUP_SWORD:return EQ_BLADE;default:return -1;}}
 static int eq_pickup_kind(int type){int gun=eq_pickup_gun(type);if(gun>=0)return eqGuns[gun].visual;return type==PICKUP_BLACK_HOLE?WEAPON_BLACK_HOLE_BOMB:type==PICKUP_IGLOO?WEAPON_IGLOO_GRENADE:type==PICKUP_SWORD?WEAPON_SWORD:type==PICKUP_ADHESIVE?WEAPON_ADHESIVE_GRENADE:type==PICKUP_REINFORCED?WEAPON_REINFORCED_BUILDER:-1;}
 static bool eq_pickup(int i,int type,bool replace){
@@ -13,7 +23,7 @@ static bool eq_pickup(int i,int type,bool replace){
     if(gun>=0){
         if(e->gun[0]==gun || e->gun[1]==gun)return false;
         int slot=e->gun[0]==EQ_EMPTY?0:e->gun[1]==EQ_EMPTY?1:replace?e->selected:-1;
-        if(slot<0)return false;aim_cancel(i);e->gun[slot]=gun;e->selected=slot;e->switchTime=eqSwitchSeconds;e->charge=0;e->held=false;
+        if(slot<0)return false;aim_cancel(i);eq_cancel_charge(i);e->gun[slot]=gun;e->selected=slot;e->switchTime=eqSwitchSeconds;e->charge=0;e->held=false;
         players[i].dynamicShotActive=gun==EQ_VOXEL;return true;
     }
     int flag=type==PICKUP_ADHESIVE?EQ_ADHESIVE:type==PICKUP_REINFORCED?EQ_BUILD:0;
@@ -171,18 +181,30 @@ static void eq_command(int i,const NetInputCommand *c,float dt){
     if(i<0 || i>=MAX_PLAYERS)return;Equipment *e=&equipment[i];eq_gun(i);
     aim_command(i,c);
     eq_build_command(i,c);
-    if(!eq_usable(i)){e->held=false;e->charge=0;return;}
+    if(!eq_usable(i)){eq_cancel_charge(i);return;}
     if(c->pressed&NET_INPUT_GRENADE_CYCLE)ex_cycle(i);
-    if((c->pressed&NET_INPUT_SWITCH) && !players[i].meleeSwingActive){int other=1-e->selected;if(e->gun[other]!=EQ_EMPTY){e->selected=other;e->switchTime=eqSwitchSeconds;e->charge=0;e->held=false;players[i].dynamicShotActive=eq_gun(i)==EQ_VOXEL;}}
+    if((c->pressed&NET_INPUT_SWITCH) && !players[i].meleeSwingActive){int other=1-e->selected;if(e->gun[other]!=EQ_EMPTY){eq_cancel_charge(i);e->selected=other;e->switchTime=eqSwitchSeconds;e->charge=0;e->held=false;players[i].dynamicShotActive=eq_gun(i)==EQ_VOXEL;}}
     if((c->pressed&NET_INPUT_EQUIP) && !players[i].meleeSwingActive){int n=eq_near_pickup(i);if(n>=0 && eq_pickup(i,pickups[n].type,true)){pickups[n].active=false;pickups[n].respawnTimer=pickups[n].type==PICKUP_RAILGUN||pickups[n].type==PICKUP_ROCKET||pickups[n].type==PICKUP_DMR?60:30;}}
     bool held=(c->held&NET_INPUT_FIRE)!=0;int gun=eq_gun(i);Player *p=&players[i];
-    if(e->switchTime>0 || (p->isExposed && gun!=EQ_BLADE) || p->meleeSwingActive || e->cooldown[gun]>0){e->held=false;e->charge=0;return;}
+    if(e->switchTime>0 || (p->isExposed && gun!=EQ_BLADE && !(gun==EQ_RAIL && e->charge>0)) || p->meleeSwingActive || e->cooldown[gun]>0){eq_cancel_charge(i);return;}
     if((c->pressed&NET_INPUT_FIRE) && gun!=EQ_CUTTER && gun!=EQ_RAIL)FireVoxel(i);
     if(gun==EQ_GLOB && held)eq_fire(i);
     Ray ray={p->pos,player_forward(p)};
     if(gun==EQ_RAIL){
-        if(held && p->matter>=eqGuns[gun].cost)e->charge=fminf(eqRailCharge,e->charge+dt);
-        if(!held && e->held && e->charge>=eqRailCharge && p->matter>=eqGuns[gun].cost){
+        if(held && e->charge<eqRailCharge){
+            float next=fminf(eqRailCharge,e->charge+fmaxf(0,dt));
+            float needed=(next-e->charge)*eqGuns[gun].cost/eqRailCharge;
+            float loaded=fminf(p->matter,needed);
+            e->charge=loaded>=needed?next:e->charge+loaded*eqRailCharge/eqGuns[gun].cost;
+            eq_spend(i,loaded);
+            // Repeated float transfers must not strand a fully paid shot just
+            // below the charge threshold (or leave a microscopic Matter shield).
+            if(e->charge>=eqRailCharge-1e-5f){
+                e->charge=eqRailCharge;
+                if(p->matter<1e-4f)eq_spend(i,p->matter);
+            }
+        }
+        if(!held && e->held && e->charge>=eqRailCharge){
             for(int j=0;j<activePlayers;j++)if(eq_hostile(i,j)){
                 bool hitActor=false;float period=worldFloorHalfSize*2;int images=worldPeriodic?(int)ceilf(eqGuns[gun].range/period)+1:0;
                 Vector3 nearest=world_image(players[j].pos,p->pos);
@@ -193,9 +215,9 @@ static void eq_command(int i,const NetInputCommand *c,float dt){
                 if(hitActor)eq_damage(i,j,eqGuns[gun].damage,true,DEATH_RAIL,p->pos);
             }
             eq_rail_terrain(i,ray);
-            eq_trace(player_weapon_pose(i,false).muzzle,v_add(p->pos,v_mul(ray.direction,100)),EQ_RAIL,i);eq_spend(i,eqGuns[gun].cost);e->cooldown[gun]=eqGuns[gun].cooldown;weapon_visual_shot(&weaponVisuals[i],(float)GetTime());play_sfx_at(SFX_FIRE,p->pos,i,2,.65f);ai_gunfire(i,p->pos);
+            eq_trace(player_weapon_pose(i,false).muzzle,v_add(p->pos,v_mul(ray.direction,100)),EQ_RAIL,i);e->charge=0;e->cooldown[gun]=eqGuns[gun].cooldown;weapon_visual_shot(&weaponVisuals[i],(float)GetTime());play_sfx_at(SFX_FIRE,p->pos,i,2,.65f);ai_gunfire(i,p->pos);
         }
-        if(!held)e->charge=0;
+        if(!held)eq_cancel_charge(i);
     }else if(gun==EQ_CUTTER && held && p->matter>0){
         float step=fminf(dt,p->matter/eqGuns[gun].cost),length=eqGuns[gun].range;VoxelHit hit;bool wall=first_voxel_hit_detailed(ray,length,-1,false,&hit);if(wall)length=hit.t;
         int target=eq_actor_ray(i,ray,&length);e->beamEnd=v_add(p->pos,v_mul(ray.direction,length));
@@ -221,7 +243,7 @@ static void eq_local(float dt){
         ex_input(i,&c);
         eq_build_sample(i,i,&c);
         aim_sample(netTransport.role==NET_ROLE_OFFLINE?i:net_local_index_for_slot(i),i,dt,&c);
-        if(debugConsoleOpen || !IsWindowFocused()){c.held=c.pressed=0;equipment[i].charge=0;equipment[i].held=false;}
+        if(debugConsoleOpen || !IsWindowFocused()){c.held=c.pressed=0;eq_cancel_charge(i);}
         eq_command(i,&c,dt);
     }
 }
@@ -231,13 +253,14 @@ static void eq_tick(float dt){
     aim_tick(dt);
     eq_sword_tick(dt);
     for(int i=0;i<MAX_PLAYERS;i++){Equipment *e=&equipment[i];for(int g=0;g<EQ_GUN_COUNT;g++)e->cooldown[g]=fmaxf(0,e->cooldown[g]-dt);e->switchTime=fmaxf(0,e->switchTime-dt);e->buildTime=fmaxf(0,e->buildTime-dt);
+        if(netTransport.role!=NET_ROLE_CLIENT && !eq_usable(i))eq_cancel_charge(i);
         if(e->initialized && !is_player_bot(i))players[i].dynamicShotActive=eq_gun(i)==EQ_VOXEL;
         if(gameState!=GAME_STATE_PLAYING || ff_input_blocked(i) || players[i].respawn_timer>0)e->buildHeld=false;
         float empty=players[i].matter<=0 && players[i].respawn_timer<=0?1:0;
         if(empty && !e->wasEmpty)e->depletionPulse=.45f;
         e->wasEmpty=empty!=0;e->depletionPulse=empty?fmaxf(0,e->depletionPulse-dt):0;
         e->depleted+=(empty-e->depleted)*fminf(1,dt*10);
-        weaponVisuals[i].depleted=e->depleted;
+        weaponVisuals[i].depleted=eq_gun(i)==EQ_RAIL && e->charge>0?0:e->depleted;
         weaponVisuals[i].charge=e->charge/.65f;weaponVisuals[i].activity=e->held||e->buildTime>0;
         float duration=eqGuns[eq_gun(i)].cooldown;
         weaponVisuals[i].cooldown=duration>0?Clamp(e->cooldown[eq_gun(i)]/duration,0,1):0;

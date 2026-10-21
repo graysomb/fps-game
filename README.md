@@ -1192,3 +1192,9 @@ and LAN checks; add `-Stress` for the four-player Foundry test. Gameplay screens
 are written to `artifacts/expansion-gameplay-*.png` and stress screenshots to
 `artifacts/expansion-four-*.png`. See `docs/weapon-expansion-validation.md` for the
 measured costs and validation limits.
+
+Railgun charging transfers up to 15 Matter from the bar into its capacitor over
+0.65 seconds. Releasing early or canceling (switching, replacing, melee, or losing
+focus) refunds the loaded amount, capped at the Matter bar maximum. A full charge
+fires on release even if the remaining bar has been drained to zero, without a
+second payment. Death discards the charge. The loaded railgun retains its glow.
