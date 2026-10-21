@@ -1198,3 +1198,17 @@ Railgun charging transfers up to 15 Matter from the bar into its capacitor over
 focus) refunds the loaded amount, capped at the Matter bar maximum. A full charge
 fires on release even if the remaining bar has been drained to zero, without a
 second payment. Death discards the charge. The loaded railgun retains its glow.
+
+The default voxel tether also pulls its human holder toward the grabbed face. It
+remains free, with the existing 8 m grab range. Heavy supported structures act as
+grapple anchors; loose debris moves toward you as you move toward it. Hold the
+existing tether control to pull, release to stop pulling and throw as before.
+Steering, jumping, gravity and player collision remain active. Pull tapers near
+1.5 m and adds at most 30 m/s² acceleration up to 12 m/s relative approach speed.
+Gold grabs and Matter-drain links do not grapple; an unaffordable gold grab that
+falls back to the default tether does. The behavior is shared by local movement,
+the authoritative host, and client prediction using existing tether snapshots.
+
+Grapple regression harnesses: `tests/tether_grapple_test.c` (CPU/GPU, collisions,
+upward pull, both moving endpoints, lifecycle, frame rates, prediction) and
+`tests/tether_grapple_lan.c` (real ENet host/client on loopback port 27941).
