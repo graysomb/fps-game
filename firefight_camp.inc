@@ -7,6 +7,7 @@ static bool campResources;
 static int campTimeLoc, campModeLoc, campEmissionLoc;
 /* Keep the stew below a standing rat's eyes. */
 static const float campHeightScale=.75f;
+static const float campScale=.5f;
 typedef struct { Mesh mesh; int count; } CampMesh;
 #define CAMP_VERTICES 18000
 static CampMesh camp_mesh_begin(void) {
@@ -144,21 +145,21 @@ static void camp_begin(void){
 static bool camp_visible(void){return camp.active && gameMode==GAME_MODE_FIREFIGHT && firefightWaveState==FIREFIGHT_STATE_INTERMISSION && (gameState==GAME_STATE_PLAYING || gameState==GAME_STATE_PAUSED) && !enemyLab && !firefightPractice;}
 static void camp_update(float dt){if(camp_visible()){if(gameState==GAME_STATE_PLAYING)camp.age+=fmaxf(0,dt);}else if(camp.active)camp_end();}
 static void camp_draw(Camera3D camera,bool emission){
-    if(!camp_visible() || !periodic_visible_box(camera,v_add(camp.pos,(Vector3){0,1.4f,0}),(Vector3){1,1.5f,1}))return;
+    if(!camp_visible() || !periodic_visible_box(camera,v_add(camp.pos,(Vector3){0,1.4f*campScale,0}),v_mul((Vector3){1,1.5f,1},campScale)))return;
     camp_init();bool shader=campShader.id && campShader.id!=rlGetShaderIdDefault();int pass=emission?1:0,mode=0;
     if(shader){SetShaderValue(campShader,campTimeLoc,&camp.age,SHADER_UNIFORM_FLOAT);SetShaderValue(campShader,campEmissionLoc,&pass,SHADER_UNIFORM_INT);SetShaderValue(campShader,campModeLoc,&mode,SHADER_UNIFORM_INT);}
-    if(!emission)DrawModelEx(campSolid,camp.pos,(Vector3){0,1,0},0,(Vector3){1,campHeightScale,1},WHITE);
+    if(!emission)DrawModelEx(campSolid,camp.pos,(Vector3){0,1,0},0,v_mul((Vector3){1,campHeightScale,1},campScale),WHITE);
     mode=1;if(shader)SetShaderValue(campShader,campModeLoc,&mode,SHADER_UNIFORM_INT);
-    rlDisableBackfaceCulling();DrawModelEx(campFlames,camp.pos,(Vector3){0,1,0},0,(Vector3){1,campHeightScale*(shader?1:.93f+.12f*sinf(camp.age*8)),1},WHITE);
+    rlDisableBackfaceCulling();DrawModelEx(campFlames,camp.pos,(Vector3){0,1,0},0,v_mul((Vector3){1,campHeightScale*(shader?1:.93f+.12f*sinf(camp.age*8)),1},campScale),WHITE);
     if(!emission){
         mode=2;if(shader)SetShaderValue(campShader,campModeLoc,&mode,SHADER_UNIFORM_INT);
         Vector3 origins[3];int order[3]={0,1,2};float distances[3];
-        for(int n=0;n<3;n++){origins[n]=v_add(camp.pos,(Vector3){(n-1)*.13f,1.16f*campHeightScale,.08f*sinf(n*2.f)});distances[n]=Vector3DistanceSqr(origins[n],camera.position);}
+        for(int n=0;n<3;n++){origins[n]=v_add(camp.pos,v_mul((Vector3){(n-1)*.13f,1.16f*campHeightScale,.08f*sinf(n*2.f)},campScale));distances[n]=Vector3DistanceSqr(origins[n],camera.position);}
         for(int a=0;a<3;a++)for(int b=a+1;b<3;b++)if(distances[order[a]]<distances[order[b]]){int t=order[a];order[a]=order[b];order[b]=t;}
         rlDrawRenderBatchActive();rlDisableDepthMask();
         for(int k=0;k<3;k++){int n=order[k];Vector3 p=origins[n];float angle=atan2f(camera.position.x-p.x,camera.position.z-p.z)*RAD2DEG;
-            if(!shader){p.x+=.06f*sinf(camp.age+n);DrawModelEx(campSmoke,p,(Vector3){0,1,0},angle,(Vector3){.06f,1.15f,1},(Color){185,185,180,15});}
-            else DrawModelEx(campSmoke,p,(Vector3){0,1,0},angle,(Vector3){.20f+n*.05f,(1.25f+n*.18f)*campHeightScale,1},(Color){220,223,218,255});
+            if(!shader){p.x+=.06f*campScale*sinf(camp.age+n);DrawModelEx(campSmoke,p,(Vector3){0,1,0},angle,v_mul((Vector3){.06f,1.15f,1},campScale),(Color){185,185,180,15});}
+            else DrawModelEx(campSmoke,p,(Vector3){0,1,0},angle,v_mul((Vector3){.20f+n*.05f,(1.25f+n*.18f)*campHeightScale,1},campScale),(Color){220,223,218,255});
         }
         rlDrawRenderBatchActive();rlEnableDepthMask();
     }
