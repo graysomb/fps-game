@@ -21,12 +21,15 @@ static void aim_command(int i,const NetInputCommand *c){
     else if(c->pressed&NET_INPUT_AIM){a->active=!a->active;if(a->active)aimLensGun[i]=eq_gun(i);}
     if(netTransport.role==NET_ROLE_CLIENT && (interrupted || (c->pressed&NET_INPUT_AIM)))a->pending=c->sequence;
 }
-/* A hold never becomes a pickup tap on release, even if revival was unavailable. */
+/* A hold performs one equipment interaction; otherwise it continues revival. */
 static void aim_interact(int i,bool down,float dt,NetInputCommand *c){
     AimState *a=&aimStates[i];a->revive=false;
     if(!a->tapArmed){if(!down)a->tapArmed=true;return;}
-    if(down){a->tapTime+=fmaxf(0,dt);a->tapDown=true;if(a->tapTime>=.25f){a->revive=true;c->held|=NET_INPUT_REVIVE;}}
-    else {if(a->tapDown && a->tapTime<.25f)c->pressed|=NET_INPUT_EQUIP;a->tapDown=false;a->tapTime=0;}
+    if(down){a->tapTime+=fmaxf(0,dt);a->tapDown=true;if(a->tapTime>=.25f){
+        if(eq_near_pickup(i)>=0){if(!a->holdUsed)c->pressed|=NET_INPUT_EQUIP;a->holdUsed=true;}
+        else if(!a->holdUsed){a->revive=true;c->held|=NET_INPUT_REVIVE;}
+    }}
+    else {if(a->tapDown && a->tapTime<.25f)c->pressed|=NET_INPUT_SWITCH;a->tapDown=false;a->tapTime=0;a->holdUsed=false;}
 }
 static void aim_sample(int seat,int i,float dt,NetInputCommand *c){
     if(seat<0 || i<0 || i>=MAX_PLAYERS || gameState!=GAME_STATE_PLAYING || creativeModeActive || (enemyLab&&!equipmentLab))return;
@@ -65,7 +68,7 @@ static void aim_focus_tick(void){
         }
     }
 }
-static void aim_shutdown(void){if(aimShader.id && aimShader.id!=rlGetShaderIdDefault())UnloadShader(aimShader);aimShader=(Shader){0};aimShaderTried=false;}
+static void aim_shutdown(void){eq_beam_shutdown();if(aimShader.id && aimShader.id!=rlGetShaderIdDefault())UnloadShader(aimShader);aimShader=(Shader){0};aimShaderTried=false;}
 static void aim_overlay(int i,int w,int h){
     if(i<0 || i>=MAX_PLAYERS || aimStates[i].blend<=.001f || players[i].respawn_timer>0)return;
     float blend=aimStates[i].blend,charge=equipment[i].charge/eqRailCharge;int style=aimLensGun[i];

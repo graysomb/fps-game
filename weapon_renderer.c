@@ -363,8 +363,8 @@ WeaponPose weapon_pose(WeaponKind kind,Vector3 pos,Vector3 forward,Vector3 right
     if (first_person) {
         // Keep the standard rear cap near the right edge. For the launcher,
         // place the stock's innermost corner beyond it, clipping the whole stock.
-        // Both include the existing 22-degree inward gun rotation.
-        float angle=22*DEG2RAD;
+        // Keep barrels parallel to the aim direction.
+        float angle=0;
         bool launcher=kind==WEAPON_DYNAMIC_LAUNCHER;
         float rear_x=launcher ? -.48f*.5f : .58f*.5f-.065f*.45f;
         float rear_z=launcher ? .82f-.16f*.5f : .59f+.13f*.5f;
@@ -381,10 +381,16 @@ WeaponPose weapon_pose(WeaponKind kind,Vector3 pos,Vector3 forward,Vector3 right
     Matrix m={right.x*scale,up.x*scale,-forward.x*scale,pos.x,
               right.y*scale,up.y*scale,-forward.y*scale,pos.y,
               right.z*scale,up.z*scale,-forward.z*scale,pos.z,0,0,0,1};
-    if (first_person) m=MatrixMultiply(MatrixRotateY(22*(1-anchor)*DEG2RAD),m);
+
     // Center of the underside of the silver grip cap (which is tilted -0.25 rad).
     const Vector3 heel={0,-1.01f-.085f*cosf(.25f),.39f+.085f*sinf(.25f)};
-    if (swinging) {
+    if (swinging && kind==WEAPON_SWORD) {
+        float sweep=(-55*windup+110*extend)*(1-recover)*DEG2RAD;
+        m=MatrixMultiply(MatrixRotate(Vector3Normalize((Vector3){1,1,0}),sweep),m);
+        Vector3 shift=Vector3Add(Vector3Scale(right,-.5f*extend*(1-recover)),
+                                Vector3Scale(up,.25f*windup-.5f*extend*(1-recover)));
+        m.m12+=shift.x;m.m13+=shift.y;m.m14+=shift.z;
+    }else if (swinging) {
         // Rigid rotation around the grip; the heel turns forward for the strike.
         const Vector3 pivot={0,-.55f,.28f};
         // Tip past vertical in windup so the claws clear the top of the view.

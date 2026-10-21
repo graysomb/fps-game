@@ -9100,7 +9100,7 @@ static void update_pickups(float dt) {
             if (distSq < hitRad*hitRad) {
                 if ((p->type == PICKUP_GOLD_TETHER && pl->goldTetherCharged) || (p->type==PICKUP_DYNAMIC_SHOT && pl->dynamicShotActive)) continue;
                 if(p->type==PICKUP_GRENADE && grenadeInventory[j]>=2)continue;
-                if(eq_pickup_kind(p->type)>=0 && !(is_player_bot(j)&&p->type==PICKUP_DYNAMIC_SHOT)){if(!eq_pickup(j,p->type,false))continue;p->active=false;p->respawnTimer=(p->type==PICKUP_RAILGUN||p->type==PICKUP_ROCKET)?60:30;play_sfx(SFX_SHIELD);break;}
+                if(eq_pickup_kind(p->type)>=0 && !(is_player_bot(j)&&p->type==PICKUP_DYNAMIC_SHOT)){if(eq_pickup_gun(p->type)>=0 || !eq_pickup(j,p->type,false))continue;p->active=false;p->respawnTimer=(p->type==PICKUP_RAILGUN||p->type==PICKUP_ROCKET)?60:30;play_sfx(SFX_SHIELD);break;}
                 // Collect
                 if (p->type == PICKUP_AMMO) {
                     add_player_matter(pl, 25.0f);
@@ -15295,7 +15295,7 @@ static void perform_melee(int idx) {
     }
     float now = (float)GetTime();
     float min_cooldown = fmaxf(MELEE_COOLDOWN_SECONDS, MELEE_ANIM_DURATION_SECONDS);
-    if(eq_upgrade(idx,EQ_SWORD))min_cooldown=.8f;
+    if(eq_gun(idx)==EQ_BLADE)min_cooldown=.8f;
     if (now - p->last_melee_time < min_cooldown) {
         return;
     }
@@ -15327,7 +15327,7 @@ static void update_melee_swings(void) {
         if (progress < 0.0f || !melee_is_active_window(progress) || p->meleeSwingHitApplied) {
             continue;
         }
-        if(eq_upgrade(i,EQ_SWORD)){eq_sword(i);p->meleeSwingHitApplied=true;continue;}
+        if(eq_gun(i)==EQ_BLADE){eq_sword(i);p->meleeSwingHitApplied=true;continue;}
         float reach_frac = melee_reach_fraction(progress);
         float reach = MELEE_RANGE * reach_frac;
         if (reach <= 0.05f) {
@@ -17937,7 +17937,7 @@ static WeaponKind weaponKindSamples[MAX_COMBATANTS];
 static WeaponKind player_weapon_kind(const Player *p) {
     int i=-1;for(int n=0;n<MAX_PLAYERS;n++)if(p==&players[n]){i=n;break;}
     if(i>=0 && i<MAX_PLAYERS && equipment[i].initialized && !is_player_bot(i)){
-        if(eq_upgrade(i,EQ_SWORD) && p->meleeSwingActive)return WEAPON_SWORD;
+        if(eq_gun(i)==EQ_BLADE && p->meleeSwingActive)return WEAPON_SWORD;
         if(equipment[i].buildTime>0)return WEAPON_REINFORCED_BUILDER;
         return eqGuns[eq_gun(i)].visual;
     }
@@ -22760,7 +22760,7 @@ int main(int argc, char **argv) {
                     DrawText("Gamepad: LS move | RS look | B jump | RT fire | A melee | RB build | LT tether | R3 aim",
                              100, controlsY + controlsSpacing * 3, controlsSize, DARKGRAY);
 
-                    DrawText("X: tap replace / hold revive | Keyboard aim: Left Shift (P1), Enter (P2)",100,controlsY+controlsSpacing*5,controlsSize,DARKGRAY);
+                    DrawText("X: tap switch / hold pickup or revive | Keyboard aim: Left Shift (P1), Enter (P2)",100,controlsY+controlsSpacing*5,controlsSize,DARKGRAY);
                     DrawText("Press M to return to Main Menu", 100, SCREEN_HEIGHT - 60, 20, DARKGRAY);
                 EndDrawing();
 
