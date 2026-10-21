@@ -115,6 +115,7 @@ static void ff_update_coop(float dt) {
 }
 
 static void start_firefight_wave(int wave_number) {
+    camp_end();
     enemy_cleanup(true);
     firefightWave=wave_number<1?1:wave_number;
     firefightWaveState=FIREFIGHT_STATE_ACTIVE;
@@ -170,6 +171,7 @@ static void ff_wave_complete(void) {
     for(int i=0;i<firefightHumans;i++) {
         ff_restore_human(i,MATTER_MAX_DEFAULT); prepVotes[i]=ff_upgrade_choice(2,1); prepReady[i]=false; prepMenuOpen[i]=true;
     }
+    camp_begin();
 }
 
 static bool ff_spawn_position(int slot, Vector3 *out) {
@@ -187,6 +189,7 @@ static bool ff_spawn_position(int slot, Vector3 *out) {
 }
 
 static void update_firefight_logic(float dt) {
+    camp_update(dt);
     if(enemyLab) return;
     enemy_tick(dt);
     if(firefightWaveState==FIREFIGHT_STATE_VICTORY || firefightWaveState==FIREFIGHT_STATE_DEFEAT) return;
@@ -194,7 +197,6 @@ static void update_firefight_logic(float dt) {
     ff_update_coop(dt);
     if(gameState==GAME_STATE_GAMEOVER) return;
     if(firefightWaveState==FIREFIGHT_STATE_INTERMISSION) {
-        if(ff_upgrades_maxed()){start_firefight_wave(firefightWave+1);return;}
         firefightIntermissionTimer-=dt;
         bool ready=true;
         for(int i=0;i<firefightHumans;i++) {
@@ -203,14 +205,17 @@ static void update_firefight_logic(float dt) {
             if(!prepMenuOpen[i]) {ready &= prepReady[i];continue;}
             bool left=pad?IsGamepadButtonPressed(d,GAMEPAD_BUTTON_LEFT_FACE_LEFT):IsKeyPressed(i==0?KEY_F:KEY_LEFT);
             bool right=pad?IsGamepadButtonPressed(d,GAMEPAD_BUTTON_LEFT_FACE_RIGHT):IsKeyPressed(i==0?KEY_H:KEY_RIGHT);
-            if(left || right) { prepVotes[i]=ff_upgrade_choice(prepVotes[i],left?-1:1); prepReady[i]=false; }
+            if((left || right) && !ff_upgrades_maxed()) { prepVotes[i]=ff_upgrade_choice(prepVotes[i],left?-1:1); prepReady[i]=false; }
             if(pad?IsGamepadButtonPressed(d,GAMEPAD_BUTTON_RIGHT_FACE_DOWN):IsKeyPressed(i==0?KEY_SPACE:KEY_RIGHT_SHIFT)) prepReady[i]=!prepReady[i];
             ready &= prepReady[i];
         }
-        if(firefightIntermissionTimer<=0 || (ready && firefightIntermissionTimer<=15)) {
-            teamUpgrade=ff_vote(prepVotes,firefightHumans);
-            if(teamUpgradeLevels[teamUpgrade]>=teamUpgradeCaps[teamUpgrade])teamUpgrade=ff_upgrade_choice(teamUpgrade,1);
-            if((int)teamUpgrade>=0 && teamUpgrade<UPGRADE_NONE)teamUpgradeLevels[teamUpgrade]++;
+        if(firefightIntermissionTimer<=0 || (ready && firefightIntermissionTimer<=FF_PREP_SECONDS-FF_PREP_MIN_SECONDS)) {
+            teamUpgrade=UPGRADE_NONE;
+            if(!ff_upgrades_maxed()) {
+                teamUpgrade=ff_vote(prepVotes,firefightHumans);
+                if((int)teamUpgrade<0 || teamUpgrade>=UPGRADE_NONE || teamUpgradeLevels[teamUpgrade]>=teamUpgradeCaps[teamUpgrade])teamUpgrade=ff_upgrade_choice(2,1);
+                if((int)teamUpgrade>=0 && teamUpgrade<UPGRADE_NONE)teamUpgradeLevels[teamUpgrade]++;
+            }
             start_firefight_wave(firefightWave+1);
         }
         return;

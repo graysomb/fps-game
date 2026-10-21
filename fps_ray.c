@@ -14676,6 +14676,7 @@ static void init_firefight_bot_entity(int i, EnemyType etype, InputType botDiff)
 }
 
 
+#include "firefight_camp.inc"
 #include "firefight_gameplay.inc"
 
 static int brush_extent_for_voxel(const Voxel *v) {
@@ -17854,6 +17855,7 @@ static void draw_world_surfaces(void) {
 }
 
 static void shutdown_world_visuals(void) {
+    camp_shutdown();
     aim_shutdown();
     periodic_visuals_shutdown();
     voxel_ca_shutdown();
@@ -20548,6 +20550,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                                  bool creative_mode) {
     voxel_render_frame++;
     nightSkyTime=GetTime();
+    if(camp.active && !camp_visible())camp_end();
     activePlayers = (gameMode == GAME_MODE_FIREFIGHT && netTransport.role == NET_ROLE_OFFLINE) ? MAX_COMBATANTS : clamp_active_players(activePlayers);
     int viewCount = netTransport.role == NET_ROLE_OFFLINE ? activePlayers : netLocalPlayerCount;
     int humanPlayerSlots[MAX_PLAYERS];
@@ -20634,6 +20637,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 if (drawWeaponModels) draw_remote_weapon_glass(i, imageCam.position);
                 draw_rat_visors(i,imageCam.position);
                 draw_pickup_models(imageCam,WEAPON_GLASS);
+                camp_draw(imageCam,false);
                 drawViewPlayerIndex = -1;
             EndMode3D();
             }
@@ -20656,6 +20660,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 }
                 equipmentEmission=true;eq_world();equipmentEmission=false;
                 hologram_draw(true);
+                camp_draw(imageCam,true);
                 drawViewPlayerIndex=-1;
                 EndMode3D();
                 }
@@ -20720,18 +20725,9 @@ static void render_gameplay_view(RenderTexture2D *screens,
                     int banner_y = (view_h / 4);
                     DrawText(banner_text, banner_x, banner_y, banner_size, banner_color);
                 } else if (firefightWaveState == FIREFIGHT_STATE_INTERMISSION) {
-                    int banner_size = view_w<700?24:46;
-                    Color banner_color = Fade(GREEN, 0.9f);
-                    const char *banner_text = TextFormat("WAVE %d CLEARED!", firefightWave);
-                    int banner_w = MeasureText(banner_text, banner_size);
-                    int banner_x = (view_w - banner_w) / 2;
-                    int banner_y = (view_h / 4);
-                    DrawText(banner_text, banner_x, banner_y, banner_size, banner_color);
-
-                    const char *sub_text = TextFormat("NEXT WAVE IN %.1f s", firefightIntermissionTimer);
-                    int sub_size = 26;
-                    int sub_w = MeasureText(sub_text, sub_size);
-                    DrawText(sub_text, (view_w - sub_w) / 2, banner_y + 55, sub_size, RAYWHITE);
+                    int size=view_w<700?12:20;
+                    const char *line=TextFormat("WAVE %d CLEARED | NEXT IN %.1fs",firefightWave,firefightIntermissionTimer);
+                    DrawText(line,(view_w-MeasureText(line,size))/2,44,size,GREEN);
                 }
             } else {
                 DrawText(TextFormat("P%d | Shmush: %d | Kills: %d Deaths: %d",
@@ -21353,6 +21349,7 @@ int main(int argc, char **argv) {
     voxel_ca_init();
     // main loop
     while (!WindowShouldClose()) {
+        if(camp.active && !camp_visible())camp_end();
         aim_focus_tick();
         if(gameState!=GAME_STATE_PLAYING && gameState!=GAME_STATE_CREATIVE)mouse_sync();
 #if defined(__APPLE__)

@@ -16,6 +16,10 @@ try {
     & gcc tests/firefight_integration.c @sources @flags -o ".build/firefight_integration_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Integration build failed' }
     $backend = if ($Gpu) { 'gpu' } else { 'cpu-mt' }
+    & gcc tests/camp_test.c @sources @flags -o ".build/camp_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Camp build failed' }
+    & ".build/camp_$variant.exe" "--physics=$backend"
+    if ($LASTEXITCODE -ne 0) { throw 'Camp checks failed' }
     & gcc tests/combat_feedback_test.c @sources @flags -o ".build/combat_feedback_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Combat feedback build failed' }
     & ".build/combat_feedback_$variant.exe" "--physics=$backend"

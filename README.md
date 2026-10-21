@@ -253,13 +253,23 @@ Deaths and downs show the fatal hit's cause and attacker in the player's viewpor
 The Firefight defeat screen shows team-wipe status, final wave/score, player stats,
 and last-hit causes, with Retry and Lobby choices.
 
-Preparation lasts 20 seconds. Vote to increase the team's build, harvest, or throw
+Preparation lasts 30 seconds. Vote to increase the team's build, harvest, or throw
 upgrade level. Bonuses persist and stack across waves; ties default to building,
 or the next available upgrade when building is maxed. Everyone can
 ready to skip the remaining break after five seconds. Top face (keyboard `V`/`N`)
 toggles the vote panel so the normal combat bindings remain available for building
 and harvesting. The vote panel uses D-pad left/right and bottom face to ready;
 keyboard players use their look keys and jump.
+
+Between waves, players gather facing a low-poly cooking pot on a short stand,
+with leafy stew, animated fire and wispy smoke. The camp is decorative: it cannot
+damage, heal, block or be tethered. Players can leave it freely. Placement checks
+ground and standing clearance, searching outward if the central platform is
+blocked; if no shared safe site exists, ordinary spawns are retained. The camp
+disappears at the next wave. Maxed upgrades still get the break and ready-up.
+The camp uses cached meshes and shaders, no physics voxels or debug particles.
+`tests/camp_test.c` checks timing, placement, resources and split-screen rendering;
+captures are written to `artifacts/camp-*.png` by the Firefight validation script.
 
 Learn Combat teaches harvesting, exposure, melee finishing, and debris finishing
 through completed actions. Leave through the pause menu at any time. Per-seat

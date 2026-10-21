@@ -77,6 +77,20 @@ static void couch_launch(void) {
 static void ff_draw_hud(int i,int w,int h) {
     if(enemyLab) {enemy_lab_hud(w,h);return;}
     if(gameMode!=GAME_MODE_FIREFIGHT || i>=firefightHumans) return;
+    if(firefightWaveState==FIREFIGHT_STATE_INTERMISSION && !firefightPractice && combatantLife[i]==LIFE_ALIVE){
+        int fs=w<700?12:16,step=fs+4,y=64;
+        bool pad=playerInput[i]==INPUT_TYPE_GAMEPAD;
+        const WaveDefinition *next=&ff_waves[firefightWave%FF_WAVE_COUNT];int total=0;
+        for(int t=0;t<FF_TYPE_COUNT;t++)total+=ff_count(firefightWave+1,firefightHumans,t);
+        const char *lines[3];
+        lines[0]=TextFormat("%s %s",ff_upgrades_maxed()?"All upgrades maxed":ff_upgrade_label(prepVotes[i]<0?0:prepVotes[i]),prepReady[i]?"[READY]":"");
+        lines[1]=TextFormat("Next: %s (%d enemies)",next->name,total);
+        lines[2]=prepMenuOpen[i]?(pad?"D-pad vote | A ready | Y build":"Look vote | Jump ready | V/N build"):(pad?"Y: vote menu":"V/N: vote menu");
+        int rows=prepMenuOpen[i]?3:1;
+        for(int n=0;n<rows;n++){const char *line=rows==1?lines[2]:lines[n];int width=MeasureText(line,fs),x=(w-width)/2;
+            DrawRectangle(x-5,y+n*step-2,width+10,step,Fade(BLACK,.65f));DrawText(line,x,y+n*step,fs,n==0?GOLD:RAYWHITE);}
+        return;
+    }
     int font=w<700?16:20;
     for(int boss=MAX_PLAYERS;boss<activePlayers;boss++)if(players[boss].respawn_timer<=0 && players[boss].enemyType==ENEMY_TYPE_FOUNDRY) {
         EnemySpecialState *s=&enemySpecial[boss];int lost=0;for(int bit=0;bit<4;bit++)lost+=(s->lostMask>>bit)&1;
@@ -98,14 +112,6 @@ static void ff_draw_hud(int i,int w,int h) {
     else if(firefightPractice) {
         const char *steps[]={"Melee a block to harvest Matter", "Shoot the enemy until its shield breaks", "Finish the exposed enemy with melee", "Expose the next enemy; throw debris to finish", "Training complete!"};
         text=steps[practiceStep<5?practiceStep:4];
-    } else if(firefightWaveState==FIREFIGHT_STATE_INTERMISSION) {
-        int v=prepVotes[i]<0?0:prepVotes[i];
-        text=TextFormat("%s %s",ff_upgrade_label(v),prepReady[i]?"[READY]":"");
-        DrawText(w<700?(playerInput[i]==INPUT_TYPE_GAMEPAD?"D-pad vote | A ready":"Look vote | Jump ready"):playerInput[i]==INPUT_TYPE_GAMEPAD?(prepMenuOpen[i]?"D-pad: vote | Bottom: ready | Top: build":"Top face: vote menu"):(prepMenuOpen[i]?"Look: vote | Jump: ready | V/N: build":"V/N: vote menu"),panelX,h-112,w<700?12:font,RAYWHITE);
-        const WaveDefinition *next=&ff_waves[firefightWave%FF_WAVE_COUNT];
-        int total=0,special=0;
-        for(int t=0;t<FF_TYPE_COUNT;t++) {int n=ff_count(firefightWave+1,firefightHumans,t);total+=n;if(t>=3)special+=n;}
-        DrawText(TextFormat("Next: %s (%d / %d special)",next->name,total,special),panelX,h-142,w<700?12:font,RAYWHITE);
     } else {
         for(int j=0;j<firefightHumans;j++) if(combatantLife[j]==LIFE_DOWNED) {
             text=TextFormat("P%d: Hold %s to revive",j+1,playerInput[i]==INPUT_TYPE_GAMEPAD?"X":i==0?"X":","); break;
