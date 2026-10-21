@@ -70,7 +70,8 @@ static void feedback_tick(float dt) {
             if(p->isExposed && s->exposedAge<2)continue;
             if(p->matter>=p->matterMax)continue;
             for(int a=MAX_PLAYERS;a<activePlayers;a++)if(enemy_braces(a,i)) {
-                p->matter=fminf(p->matterMax,p->matter+8*dt);p->isExposed=false;
+                if(ex_suppressed(i))continue;
+                add_player_matter(p,8*dt);
                 if(p->enemyType==ENEMY_TYPE_FOUNDRY)s->coreHealth=p->matter;
                 s->healingPulse=.2f;break;
             }

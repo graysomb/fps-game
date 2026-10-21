@@ -1178,6 +1178,7 @@ typedef struct {
     bool surface[6];
     int  gx, gy, gz;
     bool reinforced;
+    bool persistentConstruction;
     uint64_t identity;
     int  min_gx, max_gx;
     int  min_gy, max_gy;
@@ -1422,6 +1423,7 @@ typedef struct {
     int type;
     bool fixed;
     bool reinforced;
+    bool persistentConstruction;
     int voxelIndex;
     int debugTag;
     int activator;
@@ -1794,6 +1796,7 @@ static bool unit_voxel_buffer_push(UnitVoxelBuffer *buffer,
         .fixed = fixed,
         .voxelIndex = voxelIndex,
         .reinforced = voxelIndex>=0 && voxelIndex<voxel_count && voxels[voxelIndex].reinforced,
+        .persistentConstruction = voxelIndex>=0 && voxelIndex<voxel_count && voxels[voxelIndex].persistentConstruction,
         .debugTag = debugTag,
         .activator = activator,
         .restorationQueued = false,
@@ -4388,6 +4391,7 @@ static bool spawn_static_covering_voxel(const Voxel *voxel)
                     voxels[idx].owner = voxel->owner;
                     voxels[idx].lifeFrames = 0;
                 }
+                voxels[idx].reinforced=voxel->reinforced;voxels[idx].persistentConstruction=voxel->persistentConstruction;
                 voxels[idx].debugClusterTag = voxel->debugClusterTag;
             }
         }
@@ -4565,7 +4569,7 @@ static bool init_voxel_struct(Voxel *v,
     v->gy = (int)floorf(py / VOXEL_SIZE);
     v->gz = (int)floorf(pz / VOXEL_SIZE);
     v->identity = nextVoxelIdentity++;
-    v->reinforced=false;
+    v->reinforced=false;v->persistentConstruction=false;
     if (nextVoxelIdentity == 0) nextVoxelIdentity = 1;
     v->min_gx = v->max_gx = v->gx;
     v->min_gy = v->max_gy = v->gy;
@@ -4879,7 +4883,7 @@ static int emit_unit_voxels_from_units(const UnitVoxelBuffer *buffer,
         float pz = ((float)gz + 0.5f) * VOXEL_SIZE;
         int new_idx = addVoxel(px, py, pz, fixed, simulate, color, spawn_type);
         if (new_idx >= 0) {
-            voxels[new_idx].reinforced=seed->reinforced;
+            voxels[new_idx].reinforced=seed->reinforced;voxels[new_idx].persistentConstruction=seed->persistentConstruction;
             voxels[new_idx].debugClusterTag = seed->debugTag;
             voxels[new_idx].activator = seed->activator;;
             voxels[new_idx].restorationQueued = seed->restorationQueued;
@@ -5858,7 +5862,7 @@ static bool cell_contains_static_voxel(int x, int y, int z)
 }
 
 static bool recycle_queue_push(const Voxel *voxel) {
-    if (!voxel || recycleQueueCount >= MAX_VOXELS) {
+    if (!voxel || voxel->persistentConstruction || recycleQueueCount >= MAX_VOXELS) {
         return false;
     }
     Voxel snapshot = *voxel;
@@ -6027,7 +6031,7 @@ static bool recycle_sleeping_voxel_islands(void)
         if (!voxels[i].sleeping) {
             recycleComponentAllSleeping[root] = 0;
         }
-        if (voxels[i].lifeFrames <= RECYCLE_DYNAMIC_MAX_FRAMES) {
+        if (voxels[i].persistentConstruction || voxels[i].lifeFrames <= RECYCLE_DYNAMIC_MAX_FRAMES) {
             recycleLifetimeExpired[root] = 0;
         }
         if (voxel_outside_world_bounds(&voxels[i])) {
@@ -6073,7 +6077,7 @@ static bool recycle_sleeping_voxel_islands(void)
 
         for (int idx = recycleLifetimeHead[root]; idx >= 0;
              idx = recycleLifetimeNext[idx]) {
-            recycleSleepReady[idx] = 1;
+            recycleSleepReady[idx] = !voxels[idx].persistentConstruction;
         }
         reserved_restore_slots += restore_count;
         ready_voxels += component_count;
@@ -6321,6 +6325,7 @@ static void recycle_dead_voxels(float dt) {
         if (voxel_is_fluid(voxel)) {
             continue;
         }
+        if(voxel->persistentConstruction)continue;
         if (voxel->owner >= 0) {
             voxel->lifeFrames++;
             if (voxel->lifeFrames > RECYCLE_OWNED_STATIC_MAX_FRAMES) {
@@ -8440,6 +8445,8 @@ static void ResetGame(void);
 #include "combat_clarity.h"
 #include "combat_ui.h"
 #include "equipment.h"
+#include "equipment_expansion.h"
+#include "igloo_blueprint.h"
 #include "foundry_traps.h"
 static void reset_firefight_match(void);
 static void start_firefight_wave(int wave_number);
@@ -8779,7 +8786,7 @@ static bool find_world_build_plane_hit(const Ray *ray,
 
 // Reset game: players and voxels
 // Pickups
-#define MAX_PICKUPS 48
+#define MAX_PICKUPS 96
 #define PICKUP_RESPAWN_TIME 30.0f
 #define PICKUP_VOID_RESPAWN_TIME 300.0f
 #define PICKUP_SIZE 0.4f
@@ -8793,6 +8800,7 @@ typedef enum {
     PICKUP_GRENADE,
     PICKUP_SHOTGUN, PICKUP_CUTTER, PICKUP_RAILGUN, PICKUP_ROCKET,
     PICKUP_SWORD, PICKUP_ADHESIVE, PICKUP_REINFORCED,
+    PICKUP_GLOB, PICKUP_GLOCK, PICKUP_DMR, PICKUP_BLACK_HOLE, PICKUP_IGLOO,
     PICKUP_TYPE_COUNT
 } PickupType;
 
@@ -8816,6 +8824,7 @@ static const char *pickup_type_label(PickupType type) {
         case PICKUP_SHOTGUN:return "Shotgun";case PICKUP_CUTTER:return "Cutter";
         case PICKUP_RAILGUN:return "Railgun";case PICKUP_ROCKET:return "Rocket";
         case PICKUP_SWORD:return "Sword";case PICKUP_ADHESIVE:return "Adhesive";case PICKUP_REINFORCED:return "Reinforced";
+        case PICKUP_GLOB:return "Glob";case PICKUP_GLOCK:return "Glock";case PICKUP_DMR:return "DMR";case PICKUP_BLACK_HOLE:return "Black hole";case PICKUP_IGLOO:return "Igloo";
         default: return "Unknown";
     }
 }
@@ -9102,8 +9111,10 @@ static void update_pickups(float dt) {
 
             if (distSq < hitRad*hitRad) {
                 if ((p->type == PICKUP_GOLD_TETHER && pl->goldTetherCharged) || (p->type==PICKUP_DYNAMIC_SHOT && pl->dynamicShotActive)) continue;
+                if((p->type==PICKUP_AMMO || p->type==PICKUP_HEALTH) && ex_suppressed(j))continue;
+                if(p->type==PICKUP_BLACK_HOLE||p->type==PICKUP_IGLOO){if(!ex_grenade_pickup(j,p->type==PICKUP_BLACK_HOLE?GRENADE_GRAVITY:GRENADE_IGLOO))continue;p->active=false;p->respawnTimer=p->type==PICKUP_BLACK_HOLE?60:30;play_sfx(SFX_SHIELD);break;}
                 if(p->type==PICKUP_GRENADE && grenadeInventory[j]>=2)continue;
-                if(eq_pickup_kind(p->type)>=0 && !(is_player_bot(j)&&p->type==PICKUP_DYNAMIC_SHOT)){if(eq_pickup_gun(p->type)>=0 || !eq_pickup(j,p->type,false))continue;p->active=false;p->respawnTimer=(p->type==PICKUP_RAILGUN||p->type==PICKUP_ROCKET)?60:30;play_sfx(SFX_SHIELD);break;}
+                if(eq_pickup_kind(p->type)>=0 && !(is_player_bot(j)&&p->type==PICKUP_DYNAMIC_SHOT)){if(!eq_pickup(j,p->type,false))continue;p->active=false;p->respawnTimer=(p->type==PICKUP_RAILGUN||p->type==PICKUP_ROCKET||p->type==PICKUP_DMR)?60:30;play_sfx(SFX_SHIELD);break;}
                 // Collect
                 if (p->type == PICKUP_AMMO) {
                     add_player_matter(pl, 25.0f);
@@ -9111,6 +9122,7 @@ static void update_pickups(float dt) {
                     if(currentWorldType!=WORLD_TYPE_CROSSCUT && !(gameMode==GAME_MODE_FIREFIGHT && firefightFoundry))grenadeInventory[j]=clampi(grenadeInventory[j]+1,0,2);
                 } else if(p->type==PICKUP_GRENADE) {
                     grenadeInventory[j]=clampi(grenadeInventory[j]+1,0,2);
+                    if(j<MAX_PLAYERS&&!ex_grenade_count(j,exSelectedGrenade[j]))exSelectedGrenade[j]=GRENADE_REGULAR;
                     play_sfx(SFX_SHIELD);
                 } else if (p->type == PICKUP_HEALTH) {
                     add_player_matter(pl, 50.0f);
@@ -10026,6 +10038,7 @@ static void add_player_matter(Player *p, float amount) {
     if (!p) {
         return;
     }
+    if(amount>0 && ex_suppressed((int)(p-players)))return;
     float max_matter = player_max_matter(p);
     p->matter = clampf(p->matter + amount, 0.0f, max_matter);
     if (p->matter > 0.0f) {
@@ -10165,6 +10178,7 @@ static void kill_player(int player_index, int attacker_index,
                  player->matter, player->isExposed ? 1 : 0);
     }
     if(explosionDamageContext && (attacker_index==player_index || (gameMode==GAME_MODE_FIREFIGHT && attacker_index>=0 && combatantTeam[player_index]==combatantTeam[attacker_index])))award_kill=award_debris=false;
+    ex_reset_player(player_index);
     if(player_index<MAX_PLAYERS)eq_reset(player_index);
     clarity_death(player_index,award_kill||award_debris?attacker_index:-1);
     ai_reset(player_index);
@@ -15487,7 +15501,7 @@ static int activate_static_voxel_to_dynamic(int voxel_idx, int activator) {
     
     int new_idx = addVoxel(v.pos.x, v.pos.y, v.pos.z, false, true, v.color, v.type);
     if (new_idx >= 0) {
-        voxels[new_idx].reinforced=v.reinforced;
+        voxels[new_idx].reinforced=v.reinforced;voxels[new_idx].persistentConstruction=v.persistentConstruction;
         voxels[new_idx].owner = activator;
         voxels[new_idx].activator = activator;
         voxels[new_idx].glueEligible = true;
@@ -15514,7 +15528,7 @@ static int rip_single_static_voxel(int voxel_idx, int activator) {
     
     int new_idx = addVoxel(v.pos.x, v.pos.y, v.pos.z, false, true, v.color, v.type);
     if (new_idx >= 0) {
-        voxels[new_idx].reinforced=v.reinforced;
+        voxels[new_idx].reinforced=v.reinforced;voxels[new_idx].persistentConstruction=v.persistentConstruction;
         voxels[new_idx].owner = activator;
         voxels[new_idx].activator = activator;
     }
@@ -18388,7 +18402,7 @@ static void HandleKeyboardInput(int i, float dt) {
         float len = sqrtf(accel.x*accel.x + accel.z*accel.z);
         accel = v_mul(accel, 1/len);
         p->vel = v_add(p->vel, v_mul(accel, ACCELERATION * dt));
-    } else if (!p->meleeKnockbackActive) {
+    } else if (!p->meleeKnockbackActive && !ex_in_field((int)(p-players))) {
         // friction
         float sp = sqrtf(p->vel.x*p->vel.x + p->vel.z*p->vel.z);
         if (sp > 0) {
@@ -18519,7 +18533,7 @@ static void net_apply_movement_command(Player *p, const NetInputCommand *command
     if (!p->meleeKnockbackActive && accel_len > 0.01f) {
         if (accel_len > 1.0f) accel = v_mul(accel, 1.0f / accel_len);
         p->vel = v_add(p->vel, v_mul(accel, ACCELERATION * dt));
-    } else if (!p->meleeKnockbackActive) {
+    } else if (!p->meleeKnockbackActive && !ex_in_field((int)(p-players))) {
         float speed = sqrtf(p->vel.x * p->vel.x + p->vel.z * p->vel.z);
         if (speed > 0.0f) {
             float next = fmaxf(0.0f, speed - FRICTION * dt);
@@ -18624,11 +18638,13 @@ static void net_integrate_player(Player *p, float dt, bool query_world) {
     float max_speed = MOVE_SPEED;
     if (p->enemyType == ENEMY_TYPE_SWARMER) max_speed = MOVE_SPEED * 1.35f;
     else if (p->enemyType == ENEMY_TYPE_GOLIATH) max_speed = MOVE_SPEED * 0.85f;
+    if(ex_in_field(player_idx))max_speed+=12;
     float speed = sqrtf(p->vel.x * p->vel.x + p->vel.z * p->vel.z);
     if (!p->meleeKnockbackActive && speed > max_speed) {
         p->vel.x *= max_speed / speed;
         p->vel.z *= max_speed / speed;
     }
+    ex_actor_pull(player_idx,dt);
     if(player_uses_rat(player_idx)) {integrate_human_body(player_idx,dt,query_world);return;}
     bool collided = false;
     if (query_world && player_idx >= 0) {
@@ -18724,6 +18740,7 @@ static NetInputCommand net_sample_local_input(int local_index, int player_slot, 
         if(IsKeyDown(KEY_COMMA))command.held|=NET_INPUT_REVIVE;
         if(IsKeyPressed(KEY_SLASH))command.pressed|=NET_INPUT_HOLOGRAM;
     }
+    ex_input(local_index,&command);
     if(playerInput[netTransport.role==NET_ROLE_CLIENT?local_index:player_slot]==INPUT_TYPE_GAMEPAD){
         int d=seat_device(local_index);
         if(IsGamepadButtonDown(d,GAMEPAD_BUTTON_RIGHT_TRIGGER_2))command.held|=NET_INPUT_FIRE;
@@ -18739,7 +18756,7 @@ static NetInputCommand net_sample_local_input(int local_index, int player_slot, 
     command.look_x = net_quantize_axis(lx);
     command.look_y = net_quantize_axis(ly);
     if (netRequestedCreative) {
-        command.pressed &= (uint32_t)~(NET_INPUT_FIRE | NET_INPUT_MELEE | NET_INPUT_BUILD | NET_INPUT_JUMP | NET_INPUT_GRENADE | NET_INPUT_HOLOGRAM);
+        command.pressed &= (uint32_t)~(NET_INPUT_GRENADE_CYCLE | NET_INPUT_FIRE | NET_INPUT_MELEE | NET_INPUT_BUILD | NET_INPUT_JUMP | NET_INPUT_GRENADE | NET_INPUT_HOLOGRAM);
         command.held &= (uint32_t)~NET_INPUT_TETHER;
         if (IsKeyDown(KEY_E)) command.held |= NET_INPUT_CREATIVE_UP;
         if (IsKeyDown(KEY_Q)) command.held |= NET_INPUT_CREATIVE_DOWN;
@@ -19214,6 +19231,7 @@ static void bot_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float
 #include "equipment.inc"
 #include "chunk_regeneration_net.inc"
 static void UpdateBot(int playerIdx, float dt) {
+    players[playerIdx].vel=v_sub(players[playerIdx].vel,exBotApplied[playerIdx]);exBotApplied[playerIdx]=(Vector3){0};
     if(enemyLab && enemyLabPaused && !enemyLabStep) return;
     if(netTransport.role==NET_ROLE_CLIENT)return;
     if(enemy_is_special(playerIdx)) {enemy_update(playerIdx,dt);return;}
@@ -19664,19 +19682,10 @@ static void net_send_world_to(int slot) {
         packet[count_offset + 1] = (uint8_t)count;
         if (count) net_transport_send(&netTransport, slot, FPS_NET_CHANNEL_WORLD, packet, writer.length, true);
     }
-    net_writer_init(&writer, packet, sizeof(packet));
-    net_write_header(&writer, NET_MSG_WORLD_PICKUPS, 0, netTransport.session_id, netServerTick);
-    net_write_u8(&writer, MAX_PICKUPS);
-    for (int i = 0; i < MAX_PICKUPS; ++i) {
-        net_write_f32(&writer, pickups[i].pos.x); net_write_f32(&writer, pickups[i].pos.y); net_write_f32(&writer, pickups[i].pos.z);
-        net_write_f32(&writer, pickups[i].respawnTimer);
-        net_write_u8(&writer, (uint8_t)pickups[i].type);
-        net_write_u8(&writer, pickups[i].active ? 1 : 0);
-    }
-    net_transport_send(&netTransport, slot, FPS_NET_CHANNEL_WORLD, packet, writer.length, true);
+    ex_pickup_snapshot(slot);
     net_writer_init(&writer, packet, sizeof(packet));
     clarity_net_snapshot(slot);
-    hologram_net_snapshot(slot);combat_ui_snapshot(slot);eq_snapshot(slot);
+    hologram_net_snapshot(slot);combat_ui_snapshot(slot);eq_snapshot(slot);ex_snapshot(slot);
     net_write_header(&writer, NET_MSG_WORLD_END, 0, netTransport.session_id, netServerTick);
     net_transport_send(&netTransport, slot, FPS_NET_CHANNEL_WORLD, packet, writer.length, true);
     regeneration_net_send(slot, true);
@@ -19842,6 +19851,9 @@ static void net_on_connect(NetTransport *transport, int slot, bool connected, vo
         uint8_t owned = netPeerPlayerMask[slot];
         for (int player_slot = 0; player_slot < MAX_PLAYERS; ++player_slot) {
             if (!(owned & (1u << player_slot))) continue;
+            ex_reset_player(player_slot);exLastCycleInput[player_slot]=0;
+            for(int n=0;n<EX_GLOBS;n++)if(exGlobs[n].owner==player_slot)exGlobs[n].id=0;
+            for(int n=0;n<EX_FIELDS;n++)if(exFields[n].owner==player_slot)exFields[n].owner=-1;
             netPlayerPresent[player_slot] = false;
             if(players[player_slot].tetherHolding)release_tether(player_slot);
             players[player_slot].drainTarget=0;
@@ -19935,6 +19947,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
         int player_slot = net_read_u8(&reader);
         if (header.session_id == transport->session_id && player_slot >= 0 && player_slot < MAX_PLAYERS &&
             (netPeerPlayerMask[peer_slot] & (1u << player_slot)) && net_read_input(&reader, &command)) {
+            if(command.pressed & NET_INPUT_GRENADE_CYCLE){if(command.sequence<=exLastCycleInput[player_slot] || command.sequence<=netLastProcessedInput[player_slot])command.pressed&=~NET_INPUT_GRENADE_CYCLE;else exLastCycleInput[player_slot]=command.sequence;}
             if(command.pressed & NET_INPUT_AIM){if((command.sequence<=netLastAimInput[player_slot] || command.sequence<=netLastProcessedInput[player_slot]))command.pressed&=~NET_INPUT_AIM;else netLastAimInput[player_slot]=command.sequence;}
             if(command.pressed & NET_INPUT_HOLOGRAM){if(command.sequence<=netLastHologramInput[player_slot])command.pressed&=~NET_INPUT_HOLOGRAM;else netLastHologramInput[player_slot]=command.sequence;}
             if(command.pressed & NET_INPUT_GRENADE){if(command.sequence<=netLastGrenadeInput[player_slot])command.pressed&=~NET_INPUT_GRENADE;else netLastGrenadeInput[player_slot]=command.sequence;}
@@ -19987,6 +20000,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
     }
     if (header.session_id != transport->session_id) return;
     if(regeneration_net_receive((NetMessageType)header.type,&reader))return;
+    if(ex_receive((NetMessageType)header.type,&reader,header.server_tick))return;
     if(eq_receive((NetMessageType)header.type,&reader,header.server_tick))return;
     if(combat_ui_receive((NetMessageType)header.type,&reader,header.server_tick))return;
     if(hologram_net_receive((NetMessageType)header.type,&reader,header.server_tick))return;
@@ -20029,8 +20043,9 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
         rebuild_all_voxel_surfaces(); init_static_hash(); meshDirty = true; netWorldReady = true;
         gameState = netRequestedCreative ? GAME_STATE_CREATIVE : GAME_STATE_PLAYING;
     } else if (header.type == NET_MSG_WORLD_PICKUPS) {
-        uint8_t count = net_read_u8(&reader);
-        for (uint8_t i = 0; i < count && i < MAX_PICKUPS && !reader.failed; ++i) {
+        int start=net_read_u8(&reader),count=net_read_u8(&reader);
+        if(start+count>MAX_PICKUPS || count>48)return;
+        for (int i=start; i<start+count && !reader.failed; ++i) {
             pickups[i].pos = (Vector3){ net_read_f32(&reader), net_read_f32(&reader), net_read_f32(&reader) };
             pickups[i].respawnTimer = net_read_f32(&reader);
             pickups[i].type = (PickupType)(net_read_u8(&reader) % PICKUP_TYPE_COUNT);
@@ -20168,9 +20183,9 @@ static void net_host_tick(void) {
         } else {
             net_apply_movement_command(&players[slot], &command, 1.0f / FPS_NET_TICK_RATE);
             net_integrate_player(&players[slot], 1.0f / FPS_NET_TICK_RATE, true);
+            eq_command(slot,&command,1.0f/FPS_NET_TICK_RATE);
             if(command.pressed & NET_INPUT_GRENADE)clarity_throw(slot);
             if(command.pressed & NET_INPUT_HOLOGRAM)hologram_deploy(slot);
-            eq_command(slot,&command,1.0f/FPS_NET_TICK_RATE);
 
 
             if (command.pressed & NET_INPUT_MELEE) perform_melee(slot);
@@ -20191,18 +20206,9 @@ static void net_host_tick(void) {
     for (int i = 0; i < MAX_PLAYERS; ++i) if (netPlayerPresent[i]) net_write_player_state(&writer, i);
     net_transport_broadcast(&netTransport, FPS_NET_CHANNEL_SNAPSHOT, packet, writer.length, false);
     net_host_send_dynamic_poses();
-    if(netServerTick%3u==0){clarity_net_snapshot(-1);hologram_net_snapshot(-1);combat_ui_snapshot(-1);eq_snapshot(-1);}
+    if(netServerTick%3u==0){clarity_net_snapshot(-1);hologram_net_snapshot(-1);combat_ui_snapshot(-1);eq_snapshot(-1);ex_snapshot(-1);}
     if ((netServerTick % 6u) == 0u) {
-        net_writer_init(&writer, packet, sizeof(packet));
-        net_write_header(&writer, NET_MSG_WORLD_PICKUPS, 0, netTransport.session_id, netServerTick);
-        net_write_u8(&writer, MAX_PICKUPS);
-        for (int i = 0; i < MAX_PICKUPS; ++i) {
-            net_write_f32(&writer, pickups[i].pos.x); net_write_f32(&writer, pickups[i].pos.y); net_write_f32(&writer, pickups[i].pos.z);
-            net_write_f32(&writer, pickups[i].respawnTimer);
-            net_write_u8(&writer, (uint8_t)pickups[i].type);
-            net_write_u8(&writer, pickups[i].active ? 1 : 0);
-        }
-        net_transport_broadcast(&netTransport, FPS_NET_CHANNEL_SNAPSHOT, packet, writer.length, false);
+        ex_pickup_snapshot(-1);
     }
     if (netLastStaticGenerationSent != staticHashGeneration) {
         netLastStaticGenerationSent = staticHashGeneration;
@@ -20307,8 +20313,16 @@ static void debug_console_exec(const char *line)
         return;
     }
     int local = debug_console_local_player();
+    if(!strcmp(cmd,"give")){
+        if(netTransport.role!=NET_ROLE_OFFLINE){debug_console_print("give: offline lab only");return;}
+        const char *name=strtok(NULL," \t");
+        if(name && (!strcmp(name,"gravity")||!strcmp(name,"igloo"))){int kind=!strcmp(name,"gravity")?1:2;exGrenades[local][kind-1]=2;exSelectedGrenade[local]=kind;debug_console_printf("2 %s grenades",name);return;}
+        for(int g=0;name && g<EQ_GUN_COUNT;g++)if(!strcasecmp(name,eqGuns[g].name)){equipment[local].gun[equipment[local].selected]=g;equipment[local].switchTime=.25f;aim_cancel(local);debug_console_printf("Equipped %s",eqGuns[g].name);return;}
+        debug_console_print("give glob|glock|dmr|gravity|igloo (or existing gun name)");return;
+    }
     if (strcmp(cmd, "weaponlab") == 0) {eq_lab();debug_console_print("Weapon lab: pickups on left, targets ahead, panels on right.");return;}
     if (strcmp(cmd, "help") == 0) {
+        debug_console_print("give glob|glock|dmr|gravity|igloo; cycle grenades: D-pad Down / Tab / ;");
         debug_console_print("help | weaponlab | clear | god [on|off] | matter [n] | exposed");
         debug_console_print("kill | pos | tp x y z | players | particles | belief | smush");
         debug_console_print("wave n | nextwave | lives n | armor | spawn swarmer|goliath|standard");
@@ -21231,15 +21245,15 @@ static bool run_ai_awareness_smoke_test(void) {
 static void eq_lab(void){
     enemy_lab_start(ENEMY_TYPE_STANDARD);equipmentLab=true;enemy_cleanup(true);clear_world_voxels();clear_pickups();eq_reset_all();
     for(int i=4;i<activePlayers;i++)players[i].respawn_timer=9999;
-    const int types[]={PICKUP_DYNAMIC_SHOT,PICKUP_SHOTGUN,PICKUP_CUTTER,PICKUP_RAILGUN,PICKUP_ROCKET,PICKUP_SWORD,PICKUP_ADHESIVE,PICKUP_REINFORCED,PICKUP_AMMO,PICKUP_GRENADE};
-    for(int n=0;n<10;n++)pickups[n]=(Pickup){.active=true,.type=types[n],.pos={-4,.7f,2+n*2}};
+    const int types[]={PICKUP_DYNAMIC_SHOT,PICKUP_SHOTGUN,PICKUP_CUTTER,PICKUP_RAILGUN,PICKUP_ROCKET,PICKUP_SWORD,PICKUP_ADHESIVE,PICKUP_REINFORCED,PICKUP_AMMO,PICKUP_GRENADE,PICKUP_GLOB,PICKUP_GLOCK,PICKUP_DMR,PICKUP_BLACK_HOLE,PICKUP_IGLOO};
+    for(int n=0;n<(int)(sizeof(types)/sizeof(types[0]));n++)pickups[n]=(Pickup){.active=true,.type=types[n],.pos={-4,.7f,2+n*2}};
     enemy_lab_spawn(4,ENEMY_TYPE_STANDARD,(Vector3){0,BASE_EYE_HEIGHT,8});
     enemy_lab_spawn(5,ENEMY_TYPE_GOLIATH,(Vector3){6,BASE_EYE_HEIGHT,12});
     enemy_lab_spawn(6,ENEMY_TYPE_SHIELDBEARER,(Vector3){-6,BASE_EYE_HEIGHT,16});
     enemy_lab_spawn(7,ENEMY_TYPE_FOUNDRY,(Vector3){0,BASE_EYE_HEIGHT,24});
     add_static_box_at_grid(14,20,0,6,12,12,GRAY);
     add_static_box_at_grid(14,20,7,7,12,20,LIGHTGRAY);
-    grenadeInventory[0]=4;init_static_hash();rebuild_voxel_hash();rebuild_glue_constraints();rebuild_all_voxel_surfaces();meshDirty=true;
+    grenadeInventory[0]=2;exGrenades[0][0]=exGrenades[0][1]=2;init_static_hash();rebuild_voxel_hash();rebuild_glue_constraints();rebuild_all_voxel_surfaces();meshDirty=true;
 }
 
 #include "mouse_input.inc"

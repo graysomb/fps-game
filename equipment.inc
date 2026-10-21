@@ -5,8 +5,8 @@ static int eq_gun(int i){if(i<0 || i>=MAX_PLAYERS || is_player_bot(i))return EQ_
 static bool eq_upgrade(int i,int flag){return i>=0 && i<MAX_PLAYERS && !is_player_bot(i) && (equipment[i].upgrades&flag)!=0;}
 static bool eq_usable(int i){return i>=0 && i<MAX_PLAYERS && !is_player_bot(i) && netTransport.role!=NET_ROLE_CLIENT && gameState==GAME_STATE_PLAYING && players[i].respawn_timer<=0 && !ff_input_blocked(i) && !creativeModeActive && !(enemyLab&&enemyLabPaused);}
 static void eq_spend(int i,float cost){players[i].matter=fmaxf(0,players[i].matter-cost);players[i].isExposed=players[i].matter<=0;}
-static int eq_pickup_gun(int type){switch(type){case PICKUP_DYNAMIC_SHOT:return EQ_VOXEL;case PICKUP_SHOTGUN:return EQ_SHOTGUN;case PICKUP_CUTTER:return EQ_CUTTER;case PICKUP_RAILGUN:return EQ_RAIL;case PICKUP_ROCKET:return EQ_ROCKET;case PICKUP_SWORD:return EQ_BLADE;default:return -1;}}
-static int eq_pickup_kind(int type){int gun=eq_pickup_gun(type);if(gun>=0)return eqGuns[gun].visual;return type==PICKUP_SWORD?WEAPON_SWORD:type==PICKUP_ADHESIVE?WEAPON_ADHESIVE_GRENADE:type==PICKUP_REINFORCED?WEAPON_REINFORCED_BUILDER:-1;}
+static int eq_pickup_gun(int type){switch(type){case PICKUP_DYNAMIC_SHOT:return EQ_VOXEL;case PICKUP_SHOTGUN:return EQ_SHOTGUN;case PICKUP_CUTTER:return EQ_CUTTER;case PICKUP_RAILGUN:return EQ_RAIL;case PICKUP_ROCKET:return EQ_ROCKET;case PICKUP_GLOB:return EQ_GLOB;case PICKUP_GLOCK:return EQ_GLOCK;case PICKUP_DMR:return EQ_DMR;case PICKUP_SWORD:return EQ_BLADE;default:return -1;}}
+static int eq_pickup_kind(int type){int gun=eq_pickup_gun(type);if(gun>=0)return eqGuns[gun].visual;return type==PICKUP_BLACK_HOLE?WEAPON_BLACK_HOLE_BOMB:type==PICKUP_IGLOO?WEAPON_IGLOO_GRENADE:type==PICKUP_SWORD?WEAPON_SWORD:type==PICKUP_ADHESIVE?WEAPON_ADHESIVE_GRENADE:type==PICKUP_REINFORCED?WEAPON_REINFORCED_BUILDER:-1;}
 static bool eq_pickup(int i,int type,bool replace){
     if(i<0 || i>=MAX_PLAYERS || is_player_bot(i))return false;
     eq_gun(i);Equipment *e=&equipment[i];int gun=eq_pickup_gun(type);
@@ -19,7 +19,7 @@ static bool eq_pickup(int i,int type,bool replace){
     int flag=type==PICKUP_ADHESIVE?EQ_ADHESIVE:type==PICKUP_REINFORCED?EQ_BUILD:0;
     if(!flag || (e->upgrades&flag))return false;e->upgrades|=flag;return true;
 }
-static int eq_near_pickup(int i){int best=-1;float distance=1.4f;for(int p=0;p<MAX_PICKUPS;p++)if(pickups[p].active && eq_pickup_kind(pickups[p].type)>=0){float d=v_length(world_delta(pickups[p].pos,players[i].pos));if(d<distance){distance=d;best=p;}}return best;}
+static int eq_near_pickup(int i){int best=-1;float distance=1.4f;for(int p=0;p<MAX_PICKUPS;p++)if(pickups[p].active && eq_pickup_kind(pickups[p].type)>=0 && pickups[p].type!=PICKUP_BLACK_HOLE && pickups[p].type!=PICKUP_IGLOO){float d=v_length(world_delta(pickups[p].pos,players[i].pos));if(d<distance){distance=d;best=p;}}return best;}
 static bool eq_hostile(int i,int j){return i!=j && players[j].respawn_timer<=0 && (gameMode!=GAME_MODE_FIREFIGHT || combatantTeam[i]!=combatantTeam[j]);}
 static void eq_damage(int i,int target,float amount,bool lethal,DeathCause cause,Vector3 origin){
     if(amount<=0 || !eq_hostile(i,target) || players[target].invuln_timer>0 || !enemy_core_open(target))return;
@@ -30,9 +30,14 @@ static void eq_damage(int i,int target,float amount,bool lethal,DeathCause cause
     damageOriginKnown=known;damageOrigin=old;deathContext=prev;
 }
 static int eq_actor_ray(int owner,Ray ray,float *distance){
-    int found=-1;for(int j=0;j<activePlayers;j++)if(j!=owner && players[j].respawn_timer<=0){
-        BoundingBox box=combatant_bounds_at(j,world_image(players[j].pos,ray.position),PLAYER_SIZE*.5f);
-        RayCollision hit=GetRayCollisionBox(ray,box);if(hit.hit && hit.distance>=0 && hit.distance<*distance){*distance=hit.distance;found=j;}
+    int found=-1;float period=worldFloorHalfSize*2;int images=worldPeriodic?(int)ceilf(*distance/period):0;
+    for(int j=0;j<activePlayers;j++)if(j!=owner && players[j].respawn_timer<=0){
+        Vector3 nearest=world_image(players[j].pos,ray.position);
+        for(int x=-images;x<=images;x++)for(int z=-images;z<=images;z++){
+            Vector3 at=v_add(nearest,(Vector3){x*period,0,z*period});
+            RayCollision hit=GetRayCollisionBox(ray,combatant_bounds_at(j,at,PLAYER_SIZE*.5f));
+            if(hit.hit && hit.distance>=0 && hit.distance<*distance){*distance=hit.distance;found=j;}
+        }
     }return found;
 }
 static void eq_trace(Vector3 a,Vector3 b,int gun,int owner){int slot=0;for(int n=0;n<32;n++)if(eqTraces[n].life<=0){slot=n;break;}eqTraces[slot]=(EquipmentTrace){a,b,.22f,gun,owner};}
@@ -136,6 +141,7 @@ static void eq_rocket_blast(EquipmentRocket rocket){
     }
     hologram_blast(rocket.pos,4,100);clarity_effect((ClarityEffect){.id=clarityNextId++,.kind=2,.pos=rocket.pos,.attacker=rocket.owner},true);
 }
+#include "equipment_expansion.inc"
 static bool eq_fire(int i){
     if(!eq_usable(i))return false;int gun=eq_gun(i);if(gun<EQ_SHOTGUN || gun==EQ_CUTTER || gun==EQ_RAIL)return false;
     Equipment *e=&equipment[i];Player *p=&players[i];const GunDefinition *def=&eqGuns[gun];
@@ -153,23 +159,26 @@ static bool eq_fire(int i){
         }
         for(int j=0;j<activePlayers;j++)if(damage[j]>0)eq_damage(i,j,damage[j],true,DEATH_SHOTGUN,p->pos);
         eq_shotgun_impacts(i,hits,hitCount);
+    }else if(gun==EQ_GLOB||gun==EQ_GLOCK||gun==EQ_DMR){if(!ex_fire(i,gun,ray))return false;
     }else {
         int free=-1;for(int n=0;n<32;n++)if(!eqRockets[n].active){free=n;break;}if(free<0)return false;
         // Start at the eye and sweep from it: no spawning through nearby walls.
         eqRockets[free]=(EquipmentRocket){true,i,p->pos,v_mul(f,eqRocketSpeed),eqRocketLife};
     }
-    eq_spend(i,def->cost);e->cooldown[gun]=def->cooldown;weapon_visual_shot(&weaponVisuals[i],(float)GetTime());play_sfx_at(SFX_FIRE,p->pos,i,2,gun==EQ_ROCKET?.55f:.8f);ai_gunfire(i,p->pos);return true;
+    eq_spend(i,def->cost);e->cooldown[gun]=def->cooldown;weapon_visual_shot(&weaponVisuals[i],(float)GetTime());play_sfx_at(SFX_FIRE,p->pos,i,2,gun==EQ_ROCKET?.55f:gun==EQ_GLOCK?1.25f:gun==EQ_GLOB?1.6f:gun==EQ_DMR?.95f:.8f);ai_gunfire(i,p->pos);return true;
 }
 static void eq_command(int i,const NetInputCommand *c,float dt){
     if(i<0 || i>=MAX_PLAYERS)return;Equipment *e=&equipment[i];eq_gun(i);
     aim_command(i,c);
     eq_build_command(i,c);
     if(!eq_usable(i)){e->held=false;e->charge=0;return;}
+    if(c->pressed&NET_INPUT_GRENADE_CYCLE)ex_cycle(i);
     if((c->pressed&NET_INPUT_SWITCH) && !players[i].meleeSwingActive){int other=1-e->selected;if(e->gun[other]!=EQ_EMPTY){e->selected=other;e->switchTime=eqSwitchSeconds;e->charge=0;e->held=false;players[i].dynamicShotActive=eq_gun(i)==EQ_VOXEL;}}
-    if((c->pressed&NET_INPUT_EQUIP) && !players[i].meleeSwingActive){int n=eq_near_pickup(i);if(n>=0 && eq_pickup(i,pickups[n].type,true)){pickups[n].active=false;pickups[n].respawnTimer=pickups[n].type==PICKUP_RAILGUN||pickups[n].type==PICKUP_ROCKET?60:30;}}
+    if((c->pressed&NET_INPUT_EQUIP) && !players[i].meleeSwingActive){int n=eq_near_pickup(i);if(n>=0 && eq_pickup(i,pickups[n].type,true)){pickups[n].active=false;pickups[n].respawnTimer=pickups[n].type==PICKUP_RAILGUN||pickups[n].type==PICKUP_ROCKET||pickups[n].type==PICKUP_DMR?60:30;}}
     bool held=(c->held&NET_INPUT_FIRE)!=0;int gun=eq_gun(i);Player *p=&players[i];
     if(e->switchTime>0 || (p->isExposed && gun!=EQ_BLADE) || p->meleeSwingActive || e->cooldown[gun]>0){e->held=false;e->charge=0;return;}
     if((c->pressed&NET_INPUT_FIRE) && gun!=EQ_CUTTER && gun!=EQ_RAIL)FireVoxel(i);
+    if(gun==EQ_GLOB && held)eq_fire(i);
     Ray ray={p->pos,player_forward(p)};
     if(gun==EQ_RAIL){
         if(held && p->matter>=eqGuns[gun].cost)e->charge=fminf(eqRailCharge,e->charge+dt);
@@ -209,6 +218,7 @@ static void eq_local(float dt){
         if(pad){if(IsGamepadButtonPressed(d,GAMEPAD_BUTTON_RIGHT_TRIGGER_2))c.pressed|=NET_INPUT_FIRE;if(IsGamepadButtonPressed(d,GAMEPAD_BUTTON_LEFT_FACE_LEFT))c.pressed|=NET_INPUT_SWITCH;if(IsGamepadButtonDown(d,GAMEPAD_BUTTON_RIGHT_TRIGGER_2))c.held|=NET_INPUT_FIRE;}
         else {if(!mouse_owns(i) && IsKeyPressed(i==0?KEY_LEFT_CONTROL:KEY_RIGHT_CONTROL))c.pressed|=NET_INPUT_FIRE;if(IsKeyPressed(i==0?KEY_Q:KEY_U))c.pressed|=NET_INPUT_SWITCH;if(IsKeyPressed(i==0?KEY_B:KEY_Y))c.pressed|=NET_INPUT_EQUIP;if(IsKeyDown(i==0?KEY_LEFT_CONTROL:KEY_RIGHT_CONTROL))c.held|=NET_INPUT_FIRE;}
         if(mouse_owns(i)){if(mouseCaptured&&mouseButtonsArmed&&IsMouseButtonPressed(MOUSE_BUTTON_LEFT))c.pressed|=NET_INPUT_FIRE;if(mouseCaptured&&mouseButtonsArmed&&IsMouseButtonDown(MOUSE_BUTTON_LEFT))c.held|=NET_INPUT_FIRE;if(mouseCaptured&&GetMouseWheelMove()!=0)c.pressed|=NET_INPUT_SWITCH;}
+        ex_input(i,&c);
         eq_build_sample(i,i,&c);
         aim_sample(netTransport.role==NET_ROLE_OFFLINE?i:net_local_index_for_slot(i),i,dt,&c);
         if(debugConsoleOpen || !IsWindowFocused()){c.held=c.pressed=0;equipment[i].charge=0;equipment[i].held=false;}
@@ -217,6 +227,7 @@ static void eq_local(float dt){
 }
 static void eq_tick(float dt){
     if(dt<=0)return;
+    ex_tick(dt);
     aim_tick(dt);
     eq_sword_tick(dt);
     for(int i=0;i<MAX_PLAYERS;i++){Equipment *e=&equipment[i];for(int g=0;g<EQ_GUN_COUNT;g++)e->cooldown[g]=fmaxf(0,e->cooldown[g]-dt);e->switchTime=fmaxf(0,e->switchTime-dt);e->buildTime=fmaxf(0,e->buildTime-dt);
@@ -305,7 +316,7 @@ static void eq_world(void){
     for(int n=0;n<32;n++){EquipmentTrace *t=&eqTraces[n];if(t->life>0){
             Vector3 start=t->start;if(t->owner==drawViewPlayerIndex)start=player_weapon_pose(t->owner,true).muzzle;
             float width=t->gun==EQ_RAIL?.065f:.008f;
-            DrawCylinderEx(start,t->end,width,width,8,Fade(t->gun==EQ_RAIL?PURPLE:ORANGE,t->life/.22f));
+            DrawCylinderEx(start,t->end,width,width,8,Fade(t->gun==EQ_RAIL?PURPLE:t->gun==EQ_DMR?SKYBLUE:t->gun==EQ_GLOCK?LIGHTGRAY:ORANGE,t->life/.22f));
             if(t->gun==EQ_RAIL){DrawSphere(start,.10f*t->life/.22f,WHITE);DrawCylinderEx(start,t->end,.018f,.018f,6,Fade(WHITE,t->life/.22f));}
         }
         EquipmentRocket *r=&eqRockets[n];if(r->active){
@@ -330,10 +341,13 @@ static void eq_world(void){
     if(shader)EndShaderMode();
     Vector3 eye=drawViewPlayerIndex>=0?players[drawViewPlayerIndex].pos:(Vector3){0};
     for(int n=0;n<32;n++)if(eqRockets[n].active && periodic_visible(eqRockets[n].pos,2))weapon_draw_rocket(eqRockets[n].pos,eqRockets[n].vel,eye,time,equipmentEmission?WEAPON_EMISSION:WEAPON_COLOR);
-    eq_sword_draw();
+    eq_sword_draw();ex_draw(equipmentEmission?WEAPON_EMISSION:WEAPON_COLOR);
 }
 static void eq_icon(int gun,int x,int y,Color c){
     if(gun==EQ_BLADE){DrawLineEx((Vector2){x-5,y+22},(Vector2){x+22,y-2},4,c);DrawLine(x-3,y+9,x+10,y+22,c);return;}
+    if(gun==EQ_GLOB){DrawCircle(x+6,y+10,7,c);DrawRectangleLines(x+17,y+2,10,14,c);}
+    if(gun==EQ_DMR){DrawRectangleLines(x+7,y-2,13,5,c);DrawLine(x-12,y+9,x+30,y+9,c);}
+    if(gun==EQ_GLOCK){DrawRectangle(x,y+5,24,6,c);DrawRectangle(x+16,y+11,6,12,c);return;}
     DrawRectangle(x,y+5,25,9,c);DrawRectangle(x+17,y+13,5,10,c);
     if(gun==EQ_SHOTGUN){for(int n=0;n<3;n++)DrawRectangle(x-4,y+1+n*6,5,4,c);}
     if(gun==EQ_RAIL||gun==EQ_CUTTER){DrawRectangle(x-12,y+3,18,3,c);DrawRectangle(x-12,y+12,18,3,c);}
@@ -342,6 +356,7 @@ static void eq_icon(int gun,int x,int y,Color c){
 }
 static void eq_hud(int i,int w,int h){
     if(i<0||i>=MAX_PLAYERS)return;Equipment *e=&equipment[i];if(!e->initialized)return;int sz=w<700?12:16;
+    ex_hud(i,w,h);
     int radius=hud_radar_radius(h);
     int radarCenter=h-HUD_PADDING_Y-radius-HUD_BAR_THICKNESS-6;
     radarCenter=radarCenter-radius<HUD_PADDING_Y+HUD_BAR_HEIGHT?HUD_PADDING_Y+HUD_BAR_HEIGHT+radius+4:radarCenter;
@@ -357,7 +372,9 @@ static void eq_layout(void){
     const int types[]={PICKUP_SHOTGUN,PICKUP_CUTTER,PICKUP_RAILGUN,PICKUP_ROCKET,PICKUP_SWORD,PICKUP_ADHESIVE,PICKUP_REINFORCED};
     const Vector3 anchors[]={{20,0,14},{28,0,14},{6,0,3},{3,0,6},{20,0,25},{28,0,25},{32,0,7}};
     for(int t=0;t<7;t++){Vector3 at;if(!clarity_supply_position(anchors[t],0,&at))continue;for(int q=0;q<(foundry?2:4);q++){int free=-1;for(int n=0;n<MAX_PICKUPS;n++)if(!pickups[n].active && pickups[n].respawnTimer<=0){free=n;break;}if(free<0)return;Vector3 pos=crosscut_rotate(at,foundry?q*2:q);Vector3 clear;if(!clarity_supply_position(pos,0,&clear))continue;pickups[free]=(Pickup){.pos=clear,.active=true,.type=types[t]};}}
+    ex_layout();
 }
 #include "equipment_net.inc"
+#include "equipment_expansion_net.inc"
 
 #include "aiming.inc"

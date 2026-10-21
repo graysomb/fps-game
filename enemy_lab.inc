@@ -138,7 +138,7 @@ static bool enemy_lab_controls(void) {
 }
 static void enemy_lab_hud(int w,int h) {
     int fs=w<900?14:18;
-    if(equipmentLab){DrawText("WEAPON LAB | F4 reset | F7 god | Esc exit",16,75,fs,GOLD);return;}
+    if(equipmentLab){DrawText("WEAPON LAB | F4 reset | F7 god | Esc exit",16,75,fs,GOLD);DrawText("Cycle grenades: D-pad Down / Tab / ;  |  Console: give glob|glock|dmr|gravity|igloo",16,99,w<900?12:16,SKYBLUE);return;}
     DrawRectangle(8,70,w-16,232,Fade(BLACK,.8f));
     DrawText(TextFormat("ENEMY LAB: %s | %s | Invulnerable: %s",enemyLabCase==ENEMY_TYPE_COUNT?"mixed":enemy_names[enemyLabCase],enemyLabPaused?"PAUSED":"RUNNING",enemyLabGod?"ON":"OFF"),16,78,fs,GOLD);
     DrawText("F3/D-right: next | F4/Top: reset | F5/Left face: pause",16,102,fs,RAYWHITE);

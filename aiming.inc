@@ -72,6 +72,7 @@ static void aim_shutdown(void){eq_beam_shutdown();if(aimShader.id && aimShader.i
 static void aim_overlay(int i,int w,int h){
     if(i<0 || i>=MAX_PLAYERS || aimStates[i].blend<=.001f || players[i].respawn_timer>0)return;
     float blend=aimStates[i].blend,charge=equipment[i].charge/eqRailCharge;int style=aimLensGun[i];
+    if(style==EQ_DMR){weapon_draw_dmr_reticle(w,h,blend);return;}
     if(!aimShaderTried){aimShaderTried=true;aimShader=LoadShader(NULL,"shaders/aim_sight.frag");aimResolutionLoc=GetShaderLocation(aimShader,"resolution");aimBlendLoc=GetShaderLocation(aimShader,"blend");aimStyleLoc=GetShaderLocation(aimShader,"style");aimChargeLoc=GetShaderLocation(aimShader,"railCharge");}
     if(aimShader.id && aimShader.id!=rlGetShaderIdDefault()){
         Vector2 size={(float)w,(float)h};SetShaderValue(aimShader,aimResolutionLoc,&size,SHADER_UNIFORM_VEC2);SetShaderValue(aimShader,aimBlendLoc,&blend,SHADER_UNIFORM_FLOAT);SetShaderValue(aimShader,aimStyleLoc,&style,SHADER_UNIFORM_INT);SetShaderValue(aimShader,aimChargeLoc,&charge,SHADER_UNIFORM_FLOAT);

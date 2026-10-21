@@ -5,7 +5,7 @@ static void combat_ui_reset(void) {
 }
 static const char *combat_ui_death_text(int victim) {
     DeathNotice *n=&deathNotices[victim];
-    const char *causes[]={"Unknown cause","Fell out of the arena","Voxel shot","Crushed by debris","Explosion","Melee","Shotgun","Cutter beam","Railgun","Rocket","Sword"};
+    const char *causes[]={"Unknown cause","Fell out of the arena","Voxel shot","Crushed by debris","Explosion","Melee","Shotgun","Cutter beam","Railgun","Rocket","Sword","Glob gun","Glock","DMR"};
     if(n->cause==DEATH_FALL || n->attacker<0)return causes[n->cause];
     if(n->attacker==victim)return TextFormat("%s - self-inflicted",causes[n->cause]);
     const char *names[]={"Rifleman","Swarmer","Goliath","Scrapper","Shieldbearer","Sapper","Lobber","Builder","Anchor","Foundry"};
@@ -134,13 +134,14 @@ static void combat_ui_abilities(int viewer,int w,int h) {
     bool usable=players[viewer].respawn_timer<=0 && combatantLife[viewer]==LIFE_ALIVE && !ff_input_blocked(viewer);
     for(int n=0;n<2;n++){
         float x=w-18-(2-n)*(size+12);Vector2 c={x+size*.5f,y+size*.5f};
-        bool ready=usable && (n?grenadeInventory[viewer]>0 && grenadeCooldown[viewer]<=0:holograms[viewer].cooldown<=0);
-        Color ink=ready?(n?ORANGE:SKYBLUE):(Color){100,106,114,255};
+        bool ready=usable && (n?ex_grenade_count(viewer,exSelectedGrenade[viewer])>0 && grenadeCooldown[viewer]<=0:holograms[viewer].cooldown<=0);
+        Color ink=ready?(n?(exSelectedGrenade[viewer]==GRENADE_GRAVITY?PURPLE:exSelectedGrenade[viewer]==GRENADE_IGLOO?SKYBLUE:ORANGE):SKYBLUE):(Color){100,106,114,255};
         DrawRectangleRounded((Rectangle){x,y,size,size},.2f,6,Fade(BLACK,.8f));
         if(n){
-            DrawEllipse((int)c.x-5,(int)c.y+2,size*.19f,size*.25f,ink);
-            DrawRectangle((int)c.x-10,(int)y+6,12,6,ink);DrawLineEx((Vector2){c.x,y+8},(Vector2){c.x+7,y+18},3,ink);
-            DrawText(TextFormat("%d",grenadeInventory[viewer]),(int)x+size-17,(int)y+size-25,size<50?22:28,ink);
+            if(exSelectedGrenade[viewer]==GRENADE_GRAVITY){DrawRing(c,size*.16f,size*.24f,0,360,24,ink);DrawEllipseLines((int)c.x,(int)c.y,size*.32f,size*.12f,ink);}
+            else if(exSelectedGrenade[viewer]==GRENADE_IGLOO){DrawCircleSector((Vector2){c.x-3,c.y+8},size*.28f,180,360,8,ink);DrawRectangle(c.x-6,c.y,8,12,BLACK);DrawRectangle(c.x+4,c.y-size*.28f,6,12,ink);}
+            else {DrawEllipse((int)c.x-5,(int)c.y+2,size*.19f,size*.25f,ink);DrawRectangle((int)c.x-10,(int)y+6,12,6,ink);DrawLineEx((Vector2){c.x,y+8},(Vector2){c.x+7,y+18},3,ink);}
+            DrawText(TextFormat("%d",ex_grenade_count(viewer,exSelectedGrenade[viewer])),(int)x+size-17,(int)y+size-25,size<50?22:28,ink);
         }else{
             DrawCircleV((Vector2){c.x-9,c.y-8},size*.13f,ink);DrawCircleV((Vector2){c.x+8,c.y-8},size*.13f,ink);
             DrawEllipse((int)c.x,(int)c.y+3,size*.18f,size*.23f,ink);DrawCircleV((Vector2){c.x,c.y+10},3,BLACK);

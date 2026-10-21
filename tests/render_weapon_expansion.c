@@ -133,7 +133,7 @@ static void geometry_checks(void){
  int d[6][3]={{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
  while(head<tail){int x=queue[head][0],y=queue[head][1],z=queue[head++][2];for(int i=0;i<6;i++){
   int a=x+d[i][0],b=y+d[i][1],c=z+d[i][2];if(wx_cell(a,b,c,false)&&!visited[b][c][a]){visited[b][c][a]=true;queue[tail][0]=a;queue[tail][1]=b;queue[tail++][2]=c;}}}
- assert(tail==total);for(int y=1;y<=10;y++)assert(!wx_cell(9,y,9,false));
+ assert(tail==total);for(int y=1;y<WX_HIGH;y++)assert(!wx_cell(WX_GRID/2,y,WX_GRID/2,false));
  printf("IGLOO %d connected cells, %d cached surface triangles, open chimney\n",total,wr_parts[WR_FX_IGLOO].meshes[0].triangleCount);
 }
 static void emission_checks(void){

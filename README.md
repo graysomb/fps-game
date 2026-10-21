@@ -1092,9 +1092,8 @@ spend nothing. Spending the last 25 Matter lets that slash finish.
 
 The Glob Gun, Black Hole Bomb, Glock, chimney Igloo Grenade, and DMR have cached
 procedural models, materials, rigid animations, and reusable visual effects.
-They are deliberately absent from equipment inventories and normal matches in
-this phase. The sandbox scripts attraction, impacts, and construction without
-creating gameplay entities or changing the network protocol.
+They are available in normal matches and the weapon lab. The standalone visual
+sandbox remains useful for inspecting the models without gameplay simulation.
 
 On Windows, with the existing raylib builds and GCC available:
 
@@ -1128,7 +1127,8 @@ consume `WeaponEffect` samples; attachment transforms are composed by the caller
 Pass one sampled frame time to every viewport and both color/emission passes.
 Effects own no simulation and allocate no meshes or entities during drawing.
 The igloo is a cached exposed-face mesh with a continuous chimney flue; connected
-cells are checked, but activation stability still needs future physics testing.
+cells are shared with gameplay and checked for connectivity. Activated stability
+is covered by the CPU/GPU gameplay regression.
 
 The renderer loads `weapon_glock.frag` and `weapon_effect.vert/.frag` alongside
 the existing shaders. Existing Windows/Linux/macOS packaging copies the whole
@@ -1143,4 +1143,52 @@ four 640×360 viewports, depth-aware bloom and GPU synchronization: effects add
 Individual-run tail timings vary (one p95 increment reached 1.23 ms). Raw samples,
 per-run statistics and validation results are in
 `artifacts/weapon-expansion/benchmark.csv`, `benchmark.json`, and `validation.json`.
-This measures the scripted visual effects, not future gameplay physics.
+This measures the scripted visual effects, not gameplay physics.
+
+
+### Weapon expansion gameplay
+
+Foundry and Crosscut now have symmetric authored pickups for all five items.
+Glob, Glock and DMR use the existing two-slot gun inventory. Empty slots fill on
+contact; with two guns, hold X (keyboard B / second player Y) to replace the
+selected gun. Duplicates stay on the ground. Guns and igloo supplies respawn in
+30 seconds; DMR and gravity supplies take 60 seconds. Wave completion does not
+restock the new supplies.
+
+| Item | Initial gameplay tuning |
+| --- | --- |
+| Glob Gun | Full auto, 6 shots/s, 1 Matter/shot, 18 damage, 60 m range. Body hits block all Matter restoration for 5 seconds; further hits refresh the timer. |
+| Glock | Semi-auto, up to 4 shots/s, 1 Matter/shot, 15 damage, 60 m range. Can execute exposed targets. |
+| DMR | Semi-auto, 2.5 shots/s, 3 Matter/shot, 25 damage, 75 m range, clear-view 3x zoom. Four hits kill an unprotected 100-Matter target. Cuts one contacted voxel and stops; activates adjacent terrain and shares a quarter of normal tether impulse across nearby loose islands. |
+| Black Hole Bomb | Regular minimum/bounce fuse, then a stationary 6 m field for 5 seconds. Pulls everyone, including its owner, with no direct damage. Pulled debris uses normal collision damage. Goliaths resist pull; Foundries are immovable. |
+| Igloo Grenade | Deploys a connected 0.5 m voxel shelter, entrance facing the launch position, with an open square chimney. Reinforced shell persists until destroyed. Requires a supported footprint and clear shell/doorway; failed placement refunds one grenade to the same living player incarnation. |
+
+Grenade counts are separate: up to two regular, two gravity and two igloo.
+**D-pad Down / Tab / semicolon** cycles stocked types. Existing throw controls
+remain **D-pad Up / C / period**. Last-use selection advances to another stocked
+type. Adhesive upgrades affect regular grenades only. Downs and revives preserve
+equipment; true death resets special supplies. Reviving clears Glob suppression.
+
+Glob and Glock stop at armor/shields. A DMR hit on equipment removes the contacted
+voxel without also damaging the actor behind it. All guns respect invulnerability,
+Firefight friendly-fire rules and Foundry core vulnerability. Suppressed Matter
+pickups remain available; mining still cuts terrain but awards no Matter.
+
+Use `weaponlab` in the console, or `give glob`, `give glock`, `give dmr`,
+`give gravity`, `give igloo` in an offline session. `help` lists these commands.
+The world-builder pickup palette includes the five items. Enemy Lab's fixture
+controls are unchanged; use Weapon Lab to test grenade cycling on a controller.
+
+Gameplay is host authoritative. Protocol **24** requires matching builds.
+Glob projectiles (128), splats (64), fields (4; one per owner including in-flight
+reservations) and construction highlights (8) use fixed pools. Gravity admits
+at most 256 terrain units per field and 32 units globally per frame. It preserves
+foundation cells and batches localized activation. Igloo placement validates and
+reserves the complete shell before committing; capacity failures do not consume
+Matter or partially build shelters.
+
+Run `tools/validate_weapon_expansion.ps1 -Backend 33` or `-Backend 43` for gameplay
+and LAN checks; add `-Stress` for the four-player Foundry test. Gameplay screenshots
+are written to `artifacts/expansion-gameplay-*.png` and stress screenshots to
+`artifacts/expansion-four-*.png`. See `docs/weapon-expansion-validation.md` for the
+measured costs and validation limits.

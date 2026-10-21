@@ -27,7 +27,7 @@ static void play_sfx_at(SfxId id,Vector3 pos,int source,int priority,float pitch
     SetSoundPitch(v->sound,pitch);PlaySound(v->sound);claritySoundLast[src][id]=clarityClock;
 }
 static void clarity_reset(void) {
-    combat_ui_reset();
+    combat_ui_reset();ex_reset();
     for(int n=0;n<32;n++)if(clarityVoices[n].sound.frameCount)StopSound(clarityVoices[n].sound);
     pendingRemainsCount=0;memset(enemyRemains,0,sizeof(enemyRemains));memset(footTravel,0,sizeof(footTravel));memset(footVariant,0,sizeof(footVariant));
     memset(grenades,0,sizeof(grenades));memset(clarityEffects,0,sizeof(clarityEffects));
@@ -102,15 +102,15 @@ static void clarity_explode(Vector3 pos,int owner) {
 static void enemy_blast(EnemyCharge c){clarity_explode(c.pos,c.owner);}
 static bool clarity_throw(int slot) {
     aim_cancel(slot);
-    if(netTransport.role==NET_ROLE_CLIENT || slot<0 || slot>=activePlayers || creativeModeActive || (netTransport.role!=NET_ROLE_OFFLINE && netRequestedCreative) || gameState!=GAME_STATE_PLAYING || players[slot].respawn_timer>0 || ff_input_blocked(slot) || (enemyLab && enemyLabPaused) || grenadeInventory[slot]<=0 || grenadeCooldown[slot]>0)return false;
+    if(netTransport.role==NET_ROLE_CLIENT || slot<0 || slot>=MAX_PLAYERS || slot>=activePlayers || creativeModeActive || (netTransport.role!=NET_ROLE_OFFLINE && netRequestedCreative) || gameState!=GAME_STATE_PLAYING || players[slot].respawn_timer>0 || ff_input_blocked(slot) || (enemyLab && enemyLabPaused) || !ex_throw_available(slot,exSelectedGrenade[slot]) || grenadeCooldown[slot]>0)return false;
     int free=-1,owned=0;for(int n=0;n<CLARITY_GRENADES;n++){if(!grenades[n].id)free=n;else if(grenades[n].owner==slot)owned++;}
     if(free<0 || owned>=2)return false;
     Vector3 forward=player_forward(&players[slot]),pos=players[slot].pos;VoxelHit hit;
     float reach=first_voxel_hit_detailed((Ray){pos,forward},.6f,-1,false,&hit)?fmaxf(0,hit.t-.2f):.6f;
     pos=v_add(pos,v_mul(forward,reach));
-    grenades[free]=(GrenadeState){.id=clarityNextId++,.owner=slot,.pos=pos,.vel=v_add(v_mul(forward,14),(Vector3){0,2,0}),.fuse=-1};
-    grenades[free].adhesive=eq_upgrade(slot,EQ_ADHESIVE);
-    grenadeInventory[slot]--;grenadeCooldown[slot]=.4f;play_sfx_at(SFX_MELEE,pos,slot,2,1.4f);return true;
+    grenades[free]=(GrenadeState){.id=clarityNextId++,.owner=slot,.pos=pos,.vel=v_add(v_mul(forward,14),(Vector3){0,2,0}),.fuse=-1,.kind=exSelectedGrenade[slot],.incarnation=exIncarnation[slot],.launchOrigin=players[slot].pos};
+    int kind=grenades[free].kind;grenades[free].adhesive=kind==GRENADE_REGULAR&&eq_upgrade(slot,EQ_ADHESIVE);
+    if(kind)exGrenades[slot][kind-1]--;else grenadeInventory[slot]--;if(!ex_grenade_count(slot,kind))ex_cycle(slot);grenadeCooldown[slot]=.4f;play_sfx_at(SFX_MELEE,pos,slot,2,1.4f);return true;
 }
 static Matrix grenade_support_basis(int v){
     Voxel *x=&voxels[v];Vector3 o=x->particles[0]->pos,a=v_sub(x->particles[1]->pos,o),b=v_sub(x->particles[2]->pos,o),c=v_sub(x->particles[4]->pos,o);
@@ -138,13 +138,14 @@ static void clarity_grenade_step(GrenadeState *g,float dt) {
     /* Only the first contact starts the timer. Account for contact within this step. */
     if(collision && g->fuse==-1)
         g->fuse=fmaxf(1.5f-g->age,dt*fraction+.5f);
+    if(collision)ex_grenade_landed(g);
     g->age=fminf(1.5f,g->age+dt);
     if(g->fuse>=0)g->fuse=fmaxf(0,g->fuse-dt);
 }
 static bool clarity_evade(int slot,float dt) {
     if(slot<0 || !is_player_bot(slot) || players[slot].respawn_timer>0 || players[slot].enemyType==ENEMY_TYPE_FOUNDRY)return false;
     Vector3 threats[CLARITY_GRENADES+ENEMY_CHARGE_MAX];int count=0;
-    for(int n=0;n<CLARITY_GRENADES;n++)if(grenades[n].id && v_length(world_delta(players[slot].pos,grenades[n].pos))<6)threats[count++]=grenades[n].pos;
+    for(int n=0;n<CLARITY_GRENADES;n++)if(grenades[n].id && grenades[n].kind!=GRENADE_IGLOO && v_length(world_delta(players[slot].pos,grenades[n].pos))<6)threats[count++]=grenades[n].pos;
     for(int n=0;n<ENEMY_CHARGE_MAX;n++)if(enemyCharges[n].active && v_length(world_delta(players[slot].pos,enemyCharges[n].pos))<6)threats[count++]=enemyCharges[n].pos;
     if(!count)return false;
     Vector3 best={0};float score=-1;
@@ -169,7 +170,7 @@ static void clarity_tick(float dt) {
     for(int n=0;n<CLARITY_GRENADES;n++)if(grenades[n].id) {
         int oldBeat=(int)(grenades[n].fuse*3);
         if(netTransport.role==NET_ROLE_CLIENT){if(grenades[n].fuse>=0)grenades[n].fuse=fmaxf(0,grenades[n].fuse-dt);grenades[n].pos=Vector3Lerp(grenades[n].pos,grenadeVisualTarget[n],fminf(1,dt*15));if((int)(grenades[n].fuse*3)!=oldBeat)play_sfx_at(SFX_SHIELD,grenades[n].pos,grenades[n].owner,2,1.4f);continue;}
-        float remaining=fminf(dt,.25f);while(remaining>0 && grenades[n].id){float step=fminf(remaining,1.0f/120);clarity_grenade_step(&grenades[n],step);remaining-=step;if(grenades[n].fuse==0){GrenadeState g=grenades[n];grenades[n].id=0;clarity_explode(g.pos,g.owner);}}
+        float remaining=fminf(dt,.25f);while(remaining>0 && grenades[n].id){float step=fminf(remaining,1.0f/120);clarity_grenade_step(&grenades[n],step);remaining-=step;if(grenades[n].fuse==0){GrenadeState g=grenades[n];grenades[n].id=0;ex_grenade_deploy(g);}}
         if(grenades[n].id && (int)(grenades[n].fuse*3)!=oldBeat)play_sfx_at(SFX_SHIELD,grenades[n].pos,grenades[n].owner,2,1.4f);
     }
     int alive=0,queued=0;
@@ -184,13 +185,13 @@ static void clarity_grenades_draw(WeaponRenderPass pass){
     Vector3 eye=drawViewPlayerIndex>=0?players[drawViewPlayerIndex].pos:(Vector3){0};
     for(int n=0;n<CLARITY_GRENADES;n++)if(grenades[n].id && periodic_visible(grenades[n].pos,4)){
         GrenadeState *g=&grenades[n];
-        if(g->adhesive){
+        if(g->adhesive || g->kind){
             WeaponVisual v={.shot_time=-1000,.activity=g->fuse>=0,.attached=g->attached,
                 .charge=g->fuse>=0?1-clampf(g->fuse/1.5f,0,1):0};
             Matrix m=MatrixMultiply(MatrixScale(.45f,.45f,.45f),MatrixTranslate(g->pos.x,g->pos.y,g->pos.z));
-            weapon_draw((WeaponPose){.kind=WEAPON_ADHESIVE_GRENADE,.transform=m},&v,eye,clarityClock,false,pass);
+            weapon_draw((WeaponPose){.kind=g->kind==GRENADE_GRAVITY?WEAPON_BLACK_HOLE_BOMB:g->kind==GRENADE_IGLOO?WEAPON_IGLOO_GRENADE:WEAPON_ADHESIVE_GRENADE,.transform=m},&v,eye,clarityClock,false,pass);
         }else if(pass==WEAPON_COLOR)DrawCube(g->pos,.22f,.3f,.22f,ORANGE);
-        if(pass==WEAPON_COLOR){DrawCubeWires(g->pos,.26f,.34f,.26f,((int)(g->fuse*8)%2)?YELLOW:RED);DrawCircle3D(g->pos,4,(Vector3){1,0,0},90,Fade(ORANGE,.35f));}
+        if(pass==WEAPON_COLOR && g->kind!=GRENADE_IGLOO){DrawCubeWires(g->pos,.26f,.34f,.26f,((int)(g->fuse*8)%2)?YELLOW:RED);DrawCircle3D(g->pos,4,(Vector3){1,0,0},90,Fade(ORANGE,.35f));}
     }
 }
 static void clarity_draw(void) {

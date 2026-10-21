@@ -48,28 +48,15 @@ static void wx_flash(WrBuilder *b,float z,float y){
   wr_triangle(b,p,q,c,WR_ENERGY,1,0);wr_triangle(b,q,p,c,WR_ENERGY,1,0);
  }b->part=0;
 }
-/* 0.3m cells: >1.5m clear interior height, doorway and a continuous 0.3m flue.
- * Surface extraction occurs once; each view draws one cached mesh. */
-enum { WX_GRID=19, WX_HIGH=12 };
-static bool wx_cell(int x,int y,int z,bool cut){
- if(x<0||z<0||y<0||x>=WX_GRID||z>=WX_GRID||y>=WX_HIGH)return false;
- x-=9;z-=9;
- if(cut && z<0)return false;
- if(y==0)return x*x+z*z<=81;
- if(y>=9)return y<=10 && abs(x)<=1&&abs(z)<=1&&(x!=0||z!=0);
- if(x==0&&z==0)return false; // Chimney flue continues through crown.
- int r[9]={9,8,8,7,7,6,5,4,2};
- bool shell=x*x+z*z<=r[y]*r[y] && x*x+z*z>(r[y]-2)*(r[y]-2);
- if(y==8)shell=abs(x)<=2&&abs(z)<=2&&(x!=0||z!=0);
- if(z<0&&abs(x)<=1&&y<=4)return false;
- return shell;
-}
+#include "igloo_blueprint.h"
+enum {WX_GRID=IGLOO_SIDE,WX_HIGH=IGLOO_HEIGHT};
+static bool wx_cell(int x,int y,int z,bool cut){return igloo_cell(x,y,z,cut);}
 static void wx_igloo(WrBuilder *b,bool cut){
  const int dirs[6][3]={{0,0,-1},{0,0,1},{-1,0,0},{1,0,0},{0,-1,0},{0,1,0}};
  const int f[6][4]={{0,3,2,1},{4,5,6,7},{0,4,7,3},{1,2,6,5},{0,1,5,4},{3,7,6,2}};
  for(int y=0;y<WX_HIGH;y++)for(int z=0;z<WX_GRID;z++)for(int x=0;x<WX_GRID;x++)if(wx_cell(x,y,z,cut)){
   Vector3 p[8]={{0,0,0},{1,0,0},{1,1,0},{0,1,0},{0,0,1},{1,0,1},{1,1,1},{0,1,1}};
-  for(int i=0;i<8;i++)p[i]=(Vector3){(x-9.5f+p[i].x)*.3f,(y+p[i].y)*.3f,(z-9.5f+p[i].z)*.3f};
+  for(int i=0;i<8;i++)p[i]=(Vector3){(x-5.5f+p[i].x)*IGLOO_CELL_SIZE,(y+p[i].y)*IGLOO_CELL_SIZE,(z-5.5f+p[i].z)*IGLOO_CELL_SIZE};
   b->part=y;
   for(int i=0;i<6;i++)if(!wx_cell(x+dirs[i][0],y+dirs[i][1],z+dirs[i][2],cut))
    wr_quad(b,p[f[i][0]],p[f[i][1]],p[f[i][2]],p[f[i][3]],y==0?WR_CHARCOAL:WR_SILVER,.88f+.02f*((x*7+z*3+y)%6));

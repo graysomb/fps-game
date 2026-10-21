@@ -36,13 +36,13 @@ void main(){
   }
  }
  if(effectKind==3){
-  if(float(course)+.01>progress*11.0)discard;
+  if(float(course)+.01>progress*7.0)discard;
   vec3 cov=smoothstep(vec3(0),max(fwidth(edge),vec3(.00001)),edge);
   float interior=1.0;
   if((edgeMask&1)!=0)interior=min(interior,cov.x);
   if((edgeMask&2)!=0)interior=min(interior,cov.y);
   if((edgeMask&4)!=0)interior=min(interior,cov.z);
-  float fresh=clamp(1.0-(progress*11.0-float(course))*1.5,0,1)*(1.0-step(.999,progress));
+  float fresh=clamp(1.0-(progress*7.0-float(course))*1.5,0,1)*(1.0-step(.999,progress));
   light=vec3(.1,.55,1)*(1.0-interior)*fresh*1.6;
   base=mix(vec3(.09,.12,.15),base,interior)+light;
  }
