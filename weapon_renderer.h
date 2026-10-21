@@ -28,6 +28,11 @@ typedef enum WeaponKind {
     WEAPON_ROCKET_LAUNCHER,
     WEAPON_SWORD,
     WEAPON_REINFORCED_BUILDER,
+    WEAPON_GLOB_GUN,
+    WEAPON_BLACK_HOLE_BOMB,
+    WEAPON_GLOCK,
+    WEAPON_IGLOO_GRENADE,
+    WEAPON_DMR,
     WEAPON_KIND_COUNT
 } WeaponKind;
 
@@ -71,6 +76,25 @@ typedef struct WeaponBloom {
     RenderTexture2D blur[2];
     int width, height;
 } WeaponBloom;
+
+/* Local model-space anchors, independent of inventory and gameplay. */
+typedef struct WeaponAnchors { Vector3 grip, support, muzzle; } WeaponAnchors;
+WeaponAnchors weapon_anchors(WeaponKind kind);
+const char *weapon_visual_name(WeaponKind kind);
+/* Effects are stateless samples; caller supplies the same age/time to every view.
+ * Attachment transform is target-world * contact-local composed by the caller.
+ * No particles, forces, or game entities are allocated by these calls. */
+typedef struct WeaponEffect {
+    Matrix transform;
+    float age, lifetime, progress;
+    uint32_t seed;
+    bool attached, cutaway;
+} WeaponEffect;
+void weapon_draw_glob(const WeaponEffect *effect,Vector3 eye,float time,WeaponRenderPass pass);
+void weapon_draw_gravity(const WeaponEffect *effect,Vector3 eye,float time,WeaponRenderPass pass);
+void weapon_draw_construction(const WeaponEffect *effect,Vector3 eye,float time,WeaponRenderPass pass);
+void weapon_draw_dmr_impact(const WeaponEffect *effect,Vector3 eye,float time,WeaponRenderPass pass);
+void weapon_draw_dmr_reticle(int width,int height,float opacity);
 
 bool weapon_renderer_init(void);
 void weapon_renderer_shutdown(void);

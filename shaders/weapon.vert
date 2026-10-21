@@ -60,6 +60,22 @@ void main() {
         visibility=max(0.0,1.0-shotAge/.10);
         p.y+=sin(effectTime*91.0+p.z*13.0)*.025*visibility;
     }
+    if(partId==13)p.z+=.045*kick*kick;
+    if(partId==20 || partId==21){
+        mat3 r=turnY((partId==20?1.0:-1.0)*effectTime*(.35+deployment*3.0));
+        p=r*p;n=r*n;
+    }
+    if(partId>=22 && partId<=25){
+        vec3 axis=vec3((partId==23||partId==25)?1:-1,partId>=24?1:-1,0);
+        p+=axis*.14*deployment;
+    }
+    if(partId>=26 && partId<=29){
+        float side=(partId==27||partId==29)?1.0:-1.0;
+        vec3 pivot=vec3(side*.35,-.32,0);
+        mat3 r=turnX((partId>=28?1.0:-1.0)*deployment*1.1);
+        p=pivot+r*(p-pivot);p.x+=side*deployment*.12;n=r*n;
+    }
+    if(partId==30)p.z+=.19*kick*kick;
     if (energy > 2.5) {
         float t = vertexPosition.z;
         float radius = (launcher != 0 ? 0.68 : 0.54) + 0.025 * sin(t * 31.0 - effectTime * 8.0);

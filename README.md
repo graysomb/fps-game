@@ -1086,3 +1086,61 @@ Fire/trigger with the sword performs a 25-Matter energy slash. The melee button
 always performs the ordinary free melee attack and harvests normally, even with
 the sword equipped and zero Matter. Failed or cooldown-blocked slash attempts
 spend nothing. Spending the last 25 Matter lets that slash finish.
+
+
+### Weapon expansion visual lab
+
+The Glob Gun, Black Hole Bomb, Glock, chimney Igloo Grenade, and DMR have cached
+procedural models, materials, rigid animations, and reusable visual effects.
+They are deliberately absent from equipment inventories and normal matches in
+this phase. The sandbox scripts attraction, impacts, and construction without
+creating gameplay entities or changing the network protocol.
+
+On Windows, with the existing raylib builds and GCC available:
+
+```powershell
+./tools/preview_weapon_expansion.ps1
+./tools/preview_weapon_expansion.ps1 -Mode checks -Backend 33
+./tools/preview_weapon_expansion.ps1 -Mode checks -Backend 43
+./tools/preview_weapon_expansion.ps1 -Mode fallback
+./tools/preview_weapon_expansion.ps1 -Mode capture
+python tools/weapon_expansion_media.py
+./tools/preview_weapon_expansion.ps1 -Mode benchmark -Output artifacts/weapon-expansion
+```
+
+The interactive lab uses **1–5/Tab** to select, **Space** to pause, **Left/Right**
+to scrub, **R** to reset, **V** for camera views, **B** for bloom, **P** for depleted
+power, **C** for the igloo cutaway, and **O** for an occluding wall. The DMR demo
+uses a clear 2x world zoom with a fixed hand projection and pixel-sized HUD.
+These timings and zoom values are preview settings, not gameplay tuning.
+
+Captures go to `artifacts/weapon-expansion/rendered`: four model views, full and
+quarter-size first-person views, four-player sheets, bloom-off/depleted/fallback
+variants, igloo exterior/cutaway, 160 deterministic frames per item, five GIFs,
+and a concept comparison sheet. The GIF packager requires Pillow. Generated
+captures are ignored by Git and can be reproduced with the commands above.
+
+Integration entry points are in `weapon_renderer.h`. New visual IDs are appended
+at 9–13; the original IDs remain unchanged. `weapon_anchors` supplies local grip,
+support and muzzle points for the five new kinds. `weapon_draw` accepts a supplied
+world/held/thrown transform. Glob, gravity, construction, and impact interfaces
+consume `WeaponEffect` samples; attachment transforms are composed by the caller.
+Pass one sampled frame time to every viewport and both color/emission passes.
+Effects own no simulation and allocate no meshes or entities during drawing.
+The igloo is a cached exposed-face mesh with a continuous chimney flue; connected
+cells are checked, but activation stability still needs future physics testing.
+
+The renderer loads `weapon_glock.frag` and `weapon_effect.vert/.frag` alongside
+the existing shaders. Existing Windows/Linux/macOS packaging copies the whole
+shader directory. The visual lab checks geometry budgets, finite positions and
+normals, mesh connectivity, depleted emission, wall occlusion, effect expiration,
+and shutdown/reinitialization. Shader failure has a static vertex-color fallback.
+Windows OpenGL 3.3 and 4.3 have been exercised; Linux/macOS execution is unverified.
+
+The recorded Windows Quadro RTX 4000 preview benchmark uses three paired runs,
+four 640×360 viewports, depth-aware bloom and GPU synchronization: effects add
+**0.314 ms median / 0.196 ms aggregate p95** across 540 samples per condition.
+Individual-run tail timings vary (one p95 increment reached 1.23 ms). Raw samples,
+per-run statistics and validation results are in
+`artifacts/weapon-expansion/benchmark.csv`, `benchmark.json`, and `validation.json`.
+This measures the scripted visual effects, not future gameplay physics.

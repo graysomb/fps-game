@@ -2,24 +2,36 @@
 #include "raymath.h"
 #include "rlgl.h"
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 enum { WR_BODY, WR_UPPER, WR_LOWER, WR_FLASH, WR_LAUNCH_BARREL, WR_LAUNCH_FRAME,
        WR_LAUNCH_GRIP, WR_LAUNCH_STOCK, WR_CUBE, WR_GLASS_LEFT, WR_GLASS_RIGHT,
        WR_GLASS_FRONT, WR_GLASS_BACK, WR_AURA, WR_CONCEPT_FIRST,
-       WR_ROCKET=WR_CONCEPT_FIRST+7, WR_PART_COUNT };
-enum { WR_SILVER, WR_DARK, WR_ENERGY, WR_CHARCOAL, WR_PARTICLE, WR_GLASS, WR_GOLD_AURA };
+       WR_SHOTGUN=WR_CONCEPT_FIRST, WR_CUTTER, WR_ADHESIVE, WR_RAIL, WR_ROCKET_GUN,
+       WR_SWORD, WR_BUILDER, WR_ROCKET, WR_GLOB, WR_BLACK_HOLE, WR_GLOCK,
+       WR_IGLOO, WR_DMR, WR_GEL_GLASS, WR_SCOPE_GLASS,
+       WR_FX_GLOB, WR_FX_ATTACHED, WR_FX_RING, WR_FX_RIBBON, WR_FX_CUBE, WR_FX_IGLOO, WR_FX_CUTAWAY, WR_PART_COUNT };
+enum { WR_SILVER, WR_DARK, WR_ENERGY, WR_CHARCOAL, WR_PARTICLE, WR_GLASS, WR_GOLD_AURA, WR_AMBER, WR_ICE, WR_STEEL, WR_POLYMER };
 static const Color wr_colors[] = { {184,190,201,255}, {37,43,58,255}, {255,255,255,255},
-                                 {47,49,56,255}, {255,255,255,255}, {255,235,170,24}, {255,255,255,255} };
+                                 {47,49,56,255}, {255,255,255,255}, {255,235,170,24}, {255,255,255,255}, {244,153,41,255}, {152,206,232,255}, {69,76,85,255}, {33,34,37,255} };
 typedef struct WrBuilder {
-    float vertices[8192 * 3], normals[8192 * 3], uv[8192 * 2];
-    float edge_uv[8192 * 2];
-    unsigned char colors[8192 * 4];
+    float vertices[60000 * 3], normals[60000 * 3], uv[60000 * 2];
+    float edge_uv[60000 * 2];
+    unsigned char colors[60000 * 4];
     int count, part;
     bool overflow;
 } WrBuilder;
 static Model wr_parts[WR_PART_COUNT];
-static Shader wr_shader, wr_blur;
+static Shader wr_shader, wr_blur, wr_glock, wr_effect;
+/* Auxiliary shader uniforms are resolved once, never looked up per effect/view. */
+static const char *wx_uniform_names[]={"eyePosition","emissionOnly","weaponKind","effectTime","shotAge","effectKind","tint","age","lifetime","progress","seed","viewHide"};
+static int wx_uniform_locs[2][12];
+static int wx_location(Shader s,const char *name){
+    int shader=s.id==wr_glock.id?0:1;
+    for(int i=0;i<12;i++)if(strcmp(name,wx_uniform_names[i])==0)return wx_uniform_locs[shader][i];
+    return -1;
+}
 static int wr_eye, wr_energy, wr_strength, wr_mask, wr_direction, wr_time, wr_launcher;
 static bool wr_ready,wr_fallback;
 static float wr_fallback_dark;
@@ -60,7 +72,7 @@ static Vector3 wr_rotate(Vector3 p, float angle) {
 }
 
 static void wr_triangle(WrBuilder *b, Vector3 a, Vector3 c, Vector3 d, int material, float tint, int edge_mask) {
-    if (b->count + 3 > 8192) { b->overflow=true; return; }
+    if (b->count + 3 > 60000) { b->overflow=true; return; }
     Vector3 n = Vector3Normalize(Vector3CrossProduct(Vector3Subtract(c,a), Vector3Subtract(d,a)));
     Vector3 points[3] = {a,c,d};
     Color color = wr_colors[material];
@@ -210,10 +222,12 @@ static void wr_launcher_part(WrBuilder *b,int part) {
 }
 
 #include "weapon_concepts.inc"
+#include "weapon_expansion.inc"
 static void wr_build_part(WrBuilder *b, int part) {
     memset(b,0,sizeof(*b));
     if(part==WR_ROCKET){wc_rocket(b);return;}
-    if(part>=WR_CONCEPT_FIRST){wc_build(b,WEAPON_IMPULSE_SHOTGUN+part-WR_CONCEPT_FIRST);return;}
+    if(part>=WR_GLOB){wx_build(b,part);return;}
+    if(part>=WR_CONCEPT_FIRST){wc_build(b,wr_part_kind(part));return;}
     if (part==WR_AURA) {
         // Parameter-space ribbons: the vertex shader orbits and ripples them.
         for (int strand=0;strand<2;++strand) for (int step=0;step<64;++step) {
@@ -263,21 +277,27 @@ bool weapon_renderer_init(void) {
     if (wr_ready) return true;
     wr_shader=LoadShader("shaders/weapon.vert","shaders/weapon.frag");
     wr_blur=LoadShader(NULL,"shaders/weapon_blur.frag");
+    wr_glock=LoadShader("shaders/weapon.vert","shaders/weapon_glock.frag");
+    wr_effect=LoadShader("shaders/weapon_effect.vert","shaders/weapon_effect.frag");
+    for(int i=0;i<12;i++){
+        wx_uniform_locs[0][i]=GetShaderLocation(wr_glock,wx_uniform_names[i]);
+        wx_uniform_locs[1][i]=GetShaderLocation(wr_effect,wx_uniform_names[i]);
+    }
     unsigned int default_shader=rlGetShaderIdDefault();
     wr_fallback=!wr_shader.id || wr_shader.id==default_shader;
     if(wr_fallback){wr_shader=(Shader){.id=rlGetShaderIdDefault(),.locs=rlGetShaderLocsDefault()};TraceLog(LOG_WARNING,"WEAPON: using vertex-color fallback");}
     WrBuilder *builder=MemAlloc(sizeof(WrBuilder));
-    if (!builder) { UnloadShader(wr_shader); UnloadShader(wr_blur); return false; }
+    if (!builder) { UnloadShader(wr_shader); UnloadShader(wr_blur); UnloadShader(wr_glock); UnloadShader(wr_effect); return false; }
     for (int p=0;p<WR_PART_COUNT;++p) {
         wr_build_part(builder,p);
-        if (builder->overflow || !builder->count || (p>=WR_CONCEPT_FIRST && builder->count>6000)) {
+        if (builder->overflow || !builder->count || (p>=WR_CONCEPT_FIRST && p<WR_FX_GLOB && builder->count>(p==WR_GLOCK?12000:6000))) {
             TraceLog(LOG_WARNING,"WEAPON: invalid procedural mesh %d",p);
             MemFree(builder);
             for (int i=0;i<p;++i) UnloadModel(wr_parts[i]);
-            UnloadShader(wr_shader); UnloadShader(wr_blur); return false;
+            UnloadShader(wr_shader); UnloadShader(wr_blur); UnloadShader(wr_glock); UnloadShader(wr_effect); return false;
         }
-        if(wr_fallback && p>=WR_CONCEPT_FIRST && p!=WR_CONCEPT_FIRST+WEAPON_SWORD-WEAPON_IMPULSE_SHOTGUN){
-            Vector3 tint=wc_energy(p==WR_ROCKET?WEAPON_ROCKET_LAUNCHER:WEAPON_IMPULSE_SHOTGUN+p-WR_CONCEPT_FIRST);
+        if(wr_fallback && p>=WR_CONCEPT_FIRST && p<WR_FX_GLOB && p!=WR_SWORD){
+            Vector3 tint=wx_energy(wr_part_kind(p));
             for(int v=0;v<builder->count;v++)if(fmodf(builder->uv[v*2],8)>.5f){
                 builder->colors[v*4]=(unsigned char)(builder->colors[v*4]*tint.x);
                 builder->colors[v*4+1]=(unsigned char)(builder->colors[v*4+1]*tint.y);
@@ -293,7 +313,7 @@ bool weapon_renderer_init(void) {
         if (!mesh.vertices || !mesh.normals || !mesh.texcoords || !mesh.texcoords2 || !mesh.colors) {
             UnloadMesh(mesh); MemFree(builder);
             for (int i=0;i<p;++i) UnloadModel(wr_parts[i]);
-            UnloadShader(wr_shader); UnloadShader(wr_blur); return false;
+            UnloadShader(wr_shader); UnloadShader(wr_blur); UnloadShader(wr_glock); UnloadShader(wr_effect); return false;
         }
         memcpy(mesh.vertices,builder->vertices,mesh.vertexCount*3*sizeof(float));
         memcpy(mesh.normals,builder->normals,mesh.vertexCount*3*sizeof(float));
@@ -302,7 +322,7 @@ bool weapon_renderer_init(void) {
         memcpy(mesh.colors,builder->colors,mesh.vertexCount*4);
         UploadMesh(&mesh,false);
         wr_parts[p]=LoadModelFromMesh(mesh);
-        wr_parts[p].materials[0].shader=wr_shader;
+        wr_parts[p].materials[0].shader=p==WR_GLOCK?wr_glock:p>=WR_FX_GLOB?wr_effect:wr_shader;
     }
     MemFree(builder);
     wr_eye=GetShaderLocation(wr_shader,"eyePosition");
@@ -325,7 +345,7 @@ void weapon_renderer_shutdown(void) {
     if (!wr_ready) return;
     if(weapon_drain_shader_ready())UnloadShader(wr_drain);wr_drain=(Shader){0};
     for (int i=0;i<WR_PART_COUNT;++i) UnloadModel(wr_parts[i]);
-    UnloadShader(wr_shader); UnloadShader(wr_blur);
+    UnloadShader(wr_shader); UnloadShader(wr_blur); UnloadShader(wr_glock); UnloadShader(wr_effect);
     memset(wr_parts,0,sizeof(wr_parts)); wr_ready=false;
 }
 
@@ -460,6 +480,7 @@ WeaponPose weapon_pose(WeaponKind kind,Vector3 pos,Vector3 forward,Vector3 right
             m.m12+=dip.x; m.m13+=dip.y; m.m14+=dip.z;
         }
     }
+    if(kind>=WEAPON_GLOB_GUN)heel=weapon_anchors(kind).grip;
     Vector3 muzzle={0,0,kind==WEAPON_DYNAMIC_LAUNCHER ? -1.46f : -.84f};
     if(kind==WEAPON_IMPULSE_SHOTGUN)muzzle.z=-1.06f;
     if(kind==WEAPON_CUTTER)muzzle.z=-1.34f;
@@ -467,6 +488,7 @@ WeaponPose weapon_pose(WeaponKind kind,Vector3 pos,Vector3 forward,Vector3 right
     if(kind==WEAPON_ROCKET_LAUNCHER)muzzle.z=-1.22f;
     if(kind==WEAPON_SWORD)muzzle=(Vector3){-.2f,0,-1.53f};
     if(kind==WEAPON_ADHESIVE_GRENADE)muzzle=(Vector3){0,0,-.42f};
+    if(kind>=WEAPON_GLOB_GUN)muzzle=weapon_anchors(kind).muzzle;
     return (WeaponPose){m,Vector3Transform(muzzle,m),Vector3Transform(heel,m),kind};
 }
 
@@ -489,6 +511,8 @@ static void wr_draw_part(int part,Matrix transform) {
     material.maps[MATERIAL_MAP_DIFFUSE].color=previous;
 }
 
+#include "weapon_effects.inc"
+
 void weapon_draw(WeaponPose pose,const WeaponVisual *v,Vector3 eye,float now,
                  bool gold,WeaponRenderPass pass) {
     if (!wr_ready || pose.kind<0 || pose.kind>=WEAPON_KIND_COUNT) return;
@@ -496,14 +520,16 @@ void weapon_draw(WeaponPose pose,const WeaponVisual *v,Vector3 eye,float now,
     if(wr_fallback && pass!=WEAPON_COLOR)return;
     bool concept=pose.kind>=WEAPON_IMPULSE_SHOTGUN;
     bool launcher=pose.kind==WEAPON_DYNAMIC_LAUNCHER;
-    if (pass==WEAPON_GLASS && !launcher) return;
+    bool glass=pose.kind==WEAPON_GLOB_GUN || pose.kind==WEAPON_DMR;
+    if (pass==WEAPON_GLASS && !launcher && !glass) return;
+    if(pose.kind==WEAPON_GLOCK){wx_draw_glock(pose,v,eye,now,pass);return;}
     float shot=weapon_shot_amount(v,now);
     float shotAge=fmaxf(0,now-v->shot_time);
     float cooldown=Clamp(v->cooldown,0,1),deployment=Clamp(v->deployment,0,1),attached=Clamp(v->attached,0,1),buildPulse=Clamp(v->build_pulse,0,1);
     SetShaderValue(wr_shader,wr_cooldown,&cooldown,SHADER_UNIFORM_FLOAT);SetShaderValue(wr_shader,wr_deployment,&deployment,SHADER_UNIFORM_FLOAT);
     SetShaderValue(wr_shader,wr_attached,&attached,SHADER_UNIFORM_FLOAT);SetShaderValue(wr_shader,wr_buildPulse,&buildPulse,SHADER_UNIFORM_FLOAT);SetShaderValue(wr_shader,wr_shotAge,&shotAge,SHADER_UNIFORM_FLOAT);
     Vector3 energy=launcher ? (Vector3){1,.85f,.035f} : gold ? (Vector3){1,.67f,.10f} : (Vector3){0,.95f,1};
-    if(concept)energy=wc_energy(pose.kind);
+    if(concept)energy=wx_energy(pose.kind);
     int kind=pose.kind;float charge=Clamp(v->charge,0,1),activity=Clamp(v->activity,0,1);
     SetShaderValue(wr_shader,wr_kind,&kind,SHADER_UNIFORM_INT);
     SetShaderValue(wr_shader,wr_charge,&charge,SHADER_UNIFORM_FLOAT);
@@ -518,6 +544,11 @@ void weapon_draw(WeaponPose pose,const WeaponVisual *v,Vector3 eye,float now,
     SetShaderValue(wr_shader,wr_time,&now,SHADER_UNIFORM_FLOAT);
     int variant=launcher ? 1 : 0;
     SetShaderValue(wr_shader,wr_launcher,&variant,SHADER_UNIFORM_INT);
+    if(pass==WEAPON_GLASS && glass){
+        rlDrawRenderBatchActive();rlDisableDepthMask();rlDisableBackfaceCulling();
+        wr_draw_part(pose.kind==WEAPON_GLOB_GUN?WR_GEL_GLASS:WR_SCOPE_GLASS,pose.transform);
+        rlDrawRenderBatchActive();rlEnableBackfaceCulling();rlEnableDepthMask();return;
+    }
     if (pass==WEAPON_GLASS) {
         const Vector3 centers[4]={{-.411f,.23f,.20f},{.411f,.23f,.20f},{0,.23f,-.16f},{0,.23f,.56f}};
         int order[4]; float distances[4];
@@ -536,7 +567,7 @@ void weapon_draw(WeaponPose pose,const WeaponVisual *v,Vector3 eye,float now,
         return;
     }
     if(concept){
-        wr_draw_part(WR_CONCEPT_FIRST+pose.kind-WEAPON_IMPULSE_SHOTGUN,pose.transform);
+        wr_draw_part(wr_models[pose.kind].part,pose.transform);
         return;
     }
     if (launcher) {
@@ -674,4 +705,5 @@ void weapon_bloom_composite(WeaponBloom *b,RenderTexture2D scene) {
 
 void weapon_view_hide(float amount){
     if(wr_shader.id && wr_shader.id!=rlGetShaderIdDefault()){SetShaderValue(wr_shader,wr_hide,&amount,SHADER_UNIFORM_FLOAT);}
+    if(wx_shader(wr_glock))wx_float(wr_glock,"viewHide",amount);
 }

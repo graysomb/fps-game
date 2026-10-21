@@ -76,6 +76,31 @@ void main() {
         float travel=(1.0-buildPulse)*1.9;
         signal+=2.0*buildPulse*exp(-35.0*pow(-localPosition.z+.30-travel,2.0));
     }
+    if(weaponKind==9){
+        signal=.75+.18*sin(effectTime*4.0-localPosition.z*8.0)+activity*.20;
+        if(partId==14){
+            // Analytic bubbles appear beneath the glossy gel; no particles allocated.
+            float bubbles=0.0;
+            for(int i=0;i<9;i++){
+                float f=float(i);
+                vec2 center=vec2(-.31+fract(f*.618)*.52,-.14+fract(effectTime*.15+f*.371)*.29);
+                float d=length((localPosition.zy-center)*vec2(1,1.5));
+                bubbles+=1.0-smoothstep(.018,.030,d);
+            }
+            float spec=pow(max(0.0,dot(normalize(normal),normalize(normalize(eyePosition-position)+normalize(vec3(-.5,1,-.6))))),48.0);
+            emissive=energyColor*(.45+.3*bubbles)*energyStrength;
+            if(emissionOnly==0)emissive+=vec3(.5,.7,.3)*spec;
+        }
+    }
+    if(weaponKind==10){signal=.7+.25*sin(effectTime*(2.0+deployment*6.0));if(partId==32)base*=.12;}
+    if(weaponKind==12)signal=.6+deployment*.6;
+    if(weaponKind==13)signal=.7+.2*activity;
+    if(partId==15 || partId==16){
+        vec3 n=normalize(normal),view=normalize(eyePosition-position);
+        float rim=pow(1.0-abs(dot(n,view)),3.0);
+        float highlight=pow(max(0.0,abs(dot(n,normalize(view+normalize(vec3(-.4,1,-.5)))))),48.0);
+        finalColor=vec4(mix(vec3(.08,.26,.42),vec3(.7,.9,1),highlight),.20+.20*rim+.25*highlight);return;
+    }
     if(partId==11 || partId==12){
         // Fired energy completes even if the last Matter paid for the shot.
         finalColor=vec4(energyColor*(1.2+visibility),visibility);return;

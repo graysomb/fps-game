@@ -19,7 +19,7 @@ static WeaponVisual sample(int kind,float t){
 }
 static void meshes(void){
  for(int k=0;k<6;k++){
-  Mesh *m=&wr_parts[WR_CONCEPT_FIRST+kinds[k]-2].meshes[0];assert(m->triangleCount<=2000 && m->vertexCount>0);
+  Mesh *m=&wr_parts[wr_models[kinds[k]].part].meshes[0];assert(m->triangleCount<=2000 && m->vertexCount>0);
   for(int v=0;v<m->vertexCount;v++){
    Vector3 p,n;memcpy(&p,m->vertices+v*3,sizeof(p));memcpy(&n,m->normals+v*3,sizeof(n));
    assert(isfinite(p.x)&&isfinite(p.y)&&isfinite(p.z)&&fabsf(p.x)<2&&fabsf(p.y)<2&&fabsf(p.z)<3);

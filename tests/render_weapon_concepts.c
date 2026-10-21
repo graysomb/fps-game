@@ -10,7 +10,7 @@ int main(int argc,char **argv){
     RenderTexture2D gallery=LoadRenderTexture(1440,780);
     BeginTextureMode(gallery);ClearBackground((Color){29,55,94,255});EndTextureMode();
     Camera3D camera={{-2.8f,1.5f,-3.5f},{0,-.1f,-.4f},{0,1,0},42,CAMERA_PERSPECTIVE};
-    for(int k=WEAPON_IMPULSE_SHOTGUN;k<WEAPON_KIND_COUNT;k++){
+    for(int k=WEAPON_IMPULSE_SHOTGUN;k<=WEAPON_REINFORCED_BUILDER;k++){
         WeaponVisual visual;weapon_visual_reset(&visual);visual.charge=.8f;visual.activity=1;visual.deployment=1;
         WeaponPose pose={.kind=k,.transform=MatrixIdentity()};
         RenderTexture2D scene=LoadRenderTexture(900,900);

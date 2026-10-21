@@ -292,6 +292,14 @@ void character_draw_paws(WeaponPose weapon,Color gear,bool emission) {
         part(CR_PAW,(Vector3){-.09f,0,.68f},(Vector3){2.5f,2.8f,2.3f},ZERO,weapon.transform,WHITE,false,emission);
         return;
     }
+    if(weapon.kind>=WEAPON_GLOB_GUN){
+        WeaponAnchors a=weapon_anchors(weapon.kind);
+        part(CR_PAW,a.grip,(Vector3){2.5f,2.8f,2.5f},(Vector3){-.2f,0,0},weapon.transform,WHITE,false,emission);
+        part(CR_PAW,a.support,(Vector3){2.5f,2.5f,2.5f},ZERO,weapon.transform,WHITE,false,emission);
+        part(CR_LEG,Vector3Add(a.grip,(Vector3){.06f,-.25f,.22f}),(Vector3){1.8f,3,3},(Vector3){-.6f,0,0},weapon.transform,WHITE,false,emission);
+        part(CR_LEG,Vector3Add(a.support,(Vector3){-.06f,-.22f,.20f}),(Vector3){1.6f,2.5f,2.5f},(Vector3){-.65f,0,0},weapon.transform,WHITE,false,emission);
+        return;
+    }
     // Positions are in the existing weapon's authored local coordinate system.
     part(CR_PAW,(Vector3){.17f,-.67f,.40f},(Vector3){3.2f,3.2f,2.7f},(Vector3){-.25f,0,0},weapon.transform,WHITE,false,emission);
     part(CR_PAW,(Vector3){-.36f,-.33f,weapon.kind==WEAPON_DYNAMIC_LAUNCHER?-.55f:-.30f},(Vector3){3,2.5f,3},ZERO,weapon.transform,WHITE,false,emission);
