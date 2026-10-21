@@ -15031,7 +15031,10 @@ static float melee_anim_progress(const Player *p, float now) {
     if (!p->meleeSwingActive) {
         return -1.0f;
     }
-    float t = (now - p->meleeSwingStartTime) / MELEE_ANIM_DURATION_SECONDS;
+    int slot=(int)(p-players);
+    if(slot>=0 && slot<MAX_PLAYERS && eq_gun(slot)==EQ_BLADE && swordWaves[slot].active)return clampf(swordWaves[slot].age/SWORD_ANIM_SECONDS,0,1);
+    float duration=slot>=0 && slot<MAX_PLAYERS && eq_gun(slot)==EQ_BLADE?SWORD_ANIM_SECONDS:MELEE_ANIM_DURATION_SECONDS;
+    float t = (now - p->meleeSwingStartTime) / duration;
     return saturatef(t);
 }
 
@@ -15303,6 +15306,7 @@ static void perform_melee(int idx) {
     p->meleeSwingActive = true;
     p->meleeSwingHitApplied = false;
     p->meleeSwingStartTime = now;
+    if(eq_gun(idx)==EQ_BLADE)eq_sword(idx);
 }
 
 static void update_melee_swings(void) {
@@ -15317,17 +15321,17 @@ static void update_melee_swings(void) {
             p->meleeSwingHitApplied = false;
             continue;
         }
-        float raw_progress = (now - p->meleeSwingStartTime) / MELEE_ANIM_DURATION_SECONDS;
+        float raw_progress = i<MAX_PLAYERS && eq_gun(i)==EQ_BLADE ? swordWaves[i].age/SWORD_ANIM_SECONDS : (now - p->meleeSwingStartTime) / MELEE_ANIM_DURATION_SECONDS;
         if (raw_progress >= 1.0f) {
             p->meleeSwingActive = false;
             p->meleeSwingHitApplied = false;
             continue;
         }
+        if(i<MAX_PLAYERS && eq_gun(i)==EQ_BLADE)continue;
         float progress = melee_anim_progress(p, now);
         if (progress < 0.0f || !melee_is_active_window(progress) || p->meleeSwingHitApplied) {
             continue;
         }
-        if(eq_gun(i)==EQ_BLADE){eq_sword(i);p->meleeSwingHitApplied=true;continue;}
         float reach_frac = melee_reach_fraction(progress);
         float reach = MELEE_RANGE * reach_frac;
         if (reach <= 0.05f) {
@@ -17951,7 +17955,8 @@ static WeaponKind player_weapon_kind(const Player *p) {
 
 static WeaponMeleePose player_weapon_melee_sample(const Player *p, float now) {
     float progress = p->respawn_timer > 0 ? -1 : melee_anim_progress(p, now);
-    WeaponMeleePose sample = { .progress = progress };
+    int slot=(int)(p-players);
+    WeaponMeleePose sample = { .progress = progress,.sword_direction=slot<MAX_PLAYERS?swordDirection[slot]:0 };
     if (progress >= 0 && progress <= 1) {
         float fraction = melee_reach_fraction(progress);
         sample.strike_endpoint = v_add(melee_swing_origin(p, fraction),
@@ -17980,7 +17985,7 @@ static WeaponPose player_weapon_pose(int player_index, bool first_person) {
         pose.transform=MatrixMultiply(pose.transform,scale);
         pose.muzzle=Vector3Transform(pose.muzzle,scale);
         pose.grip_heel=Vector3Transform(pose.grip_heel,scale);
-        if(melee.progress>=0 && melee.progress<=1) {
+        if(kind!=WEAPON_SWORD && melee.progress>=0 && melee.progress<=1) {
             float enter=clampf(melee.progress/WEAPON_MELEE_ACTIVE_START,0,1);
             float exit=clampf((1-melee.progress)/(1-WEAPON_MELEE_ACTIVE_END),0,1);
             float amount=enter*enter*(3-2*enter)*exit*exit*(3-2*exit);
@@ -19725,6 +19730,7 @@ static void net_host_start_match(void) {
 static void net_write_player_state(NetWriter *writer, int slot) {
     Player *p = &players[slot];
     NetPlayerVisualState visual = { 0 };
+    if(slot<MAX_PLAYERS && eq_gun(slot)==EQ_BLADE){visual.flags|=NET_PLAYER_VISUAL_SWORD;if(swordDirection[slot])visual.flags|=NET_PLAYER_VISUAL_SWORD_REVERSE;}
     visual.shot_sequence = weaponVisuals[slot].shot_sequence;
     if (p->dynamicShotActive) visual.flags |= NET_PLAYER_VISUAL_POWERED_SHOT;
     float shot_age = (float)GetTime() - weaponVisuals[slot].shot_time;
@@ -20039,7 +20045,8 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
             if (authoritative_melee) {
                 float progress = (float)state.visual.melee_progress / 255.0f;
                 p->meleeSwingActive = true;
-                p->meleeSwingStartTime = (float)GetTime() - progress * MELEE_ANIM_DURATION_SECONDS;
+                p->meleeSwingStartTime = (float)GetTime() - progress * ((state.visual.flags&NET_PLAYER_VISUAL_SWORD)?SWORD_ANIM_SECONDS:MELEE_ANIM_DURATION_SECONDS);
+                if(state.visual.flags&NET_PLAYER_VISUAL_SWORD)swordDirection[slot]=(state.visual.flags&NET_PLAYER_VISUAL_SWORD_REVERSE)!=0;
                 if (local_slot && state.acknowledged_input >= netPredictedMeleeSequence[slot]) {
                     netPredictedMeleeSequence[slot] = 0;
                 }

@@ -1,6 +1,6 @@
 /* Authoritative equipment behavior. All simulation runs once, outside viewports. */
-static void eq_reset(int i){if(i<0 || i>=MAX_PLAYERS)return;aimStates[i]=(AimState){0};netLastAimInput[i]=0;equipment[i]=(Equipment){.gun={EQ_DEFAULT,EQ_EMPTY},.initialized=true};players[i].dynamicShotActive=false;}
-static void eq_reset_all(void){for(int i=0;i<MAX_PLAYERS;i++)eq_reset(i);memset(eqRockets,0,sizeof(eqRockets));memset(eqTraces,0,sizeof(eqTraces));eqReceiveTick=0;memset(eqPartTick,0,sizeof(eqPartTick));}
+static void eq_reset(int i){if(i<0 || i>=MAX_PLAYERS)return;swordNextDirection[i]=swordDirection[i]=0;if(!swordWaves[i].emitted)swordWaves[i].active=false;aimStates[i]=(AimState){0};netLastAimInput[i]=0;equipment[i]=(Equipment){.gun={EQ_DEFAULT,EQ_EMPTY},.initialized=true};players[i].dynamicShotActive=false;}
+static void eq_reset_all(void){for(int i=0;i<MAX_PLAYERS;i++)eq_reset(i);memset(swordWaves,0,sizeof(swordWaves));memset(swordSequences,0,sizeof(swordSequences));memset(eqRockets,0,sizeof(eqRockets));memset(eqTraces,0,sizeof(eqTraces));eqReceiveTick=0;memset(eqPartTick,0,sizeof(eqPartTick));}
 static int eq_gun(int i){if(i<0 || i>=MAX_PLAYERS || is_player_bot(i))return EQ_DEFAULT;if(!equipment[i].initialized)eq_reset(i);return equipment[i].gun[equipment[i].selected];}
 static bool eq_upgrade(int i,int flag){return i>=0 && i<MAX_PLAYERS && !is_player_bot(i) && (equipment[i].upgrades&flag)!=0;}
 static bool eq_usable(int i){return i>=0 && i<MAX_PLAYERS && !is_player_bot(i) && netTransport.role!=NET_ROLE_CLIENT && gameState==GAME_STATE_PLAYING && players[i].respawn_timer<=0 && !ff_input_blocked(i) && !creativeModeActive && !(enemyLab&&enemyLabPaused);}
@@ -216,6 +216,7 @@ static void eq_local(float dt){
 static void eq_tick(float dt){
     if(dt<=0)return;
     aim_tick(dt);
+    eq_sword_tick(dt);
     for(int i=0;i<MAX_PLAYERS;i++){Equipment *e=&equipment[i];for(int g=0;g<EQ_GUN_COUNT;g++)e->cooldown[g]=fmaxf(0,e->cooldown[g]-dt);e->switchTime=fmaxf(0,e->switchTime-dt);e->buildTime=fmaxf(0,e->buildTime-dt);
         if(e->initialized && !is_player_bot(i))players[i].dynamicShotActive=eq_gun(i)==EQ_VOXEL;
         weaponVisuals[i].charge=e->charge/.65f;weaponVisuals[i].activity=e->held||e->buildTime>0;
@@ -231,22 +232,9 @@ static void eq_tick(float dt){
         }
     }
 }
-static void eq_sword(int i){
-    Ray center={players[i].pos,player_forward(&players[i])};
-    for(int j=0;j<activePlayers;j++)if(eq_hostile(i,j)){Vector3 d=world_delta(players[j].pos,center.position);float length=v_length(d);if(length>eqSwordReach || v_dot(v_norm(d),center.direction)<cosf(eqSwordSweep*.5f*DEG2RAD))continue;
-        VoxelHit wall;if(first_voxel_hit_detailed((Ray){center.position,v_norm(d)},fmaxf(0,length-.3f),-1,false,&wall))continue;
-        eq_damage(i,j,eqSwordDamage,true,DEATH_SWORD,center.position);
-    }
-    // Sample a diagonal cutting plane densely, then cut through its depth.
-    Vector3 right=v_norm(v_cross(center.direction,(Vector3){0,1,0})),up=v_cross(right,center.direction);
-    Vector3 diagonal=v_norm(v_sub(right,up));int cuts=0;
-    for(int depth=0;depth<3;depth++)for(int n=0;n<16 && cuts<EQ_SWORD_CUTS;n++){
-        float angle=(-35+70*n/15.f)*DEG2RAD;
-        Vector3 dir=v_norm(v_add(v_mul(center.direction,cosf(angle)),v_mul(diagonal,sinf(angle))));
-        if(eq_cut(i,(Ray){center.position,dir},eqSwordReach))cuts++;
-    }
-    if(cuts)add_player_matter(&players[i],ff_harvest_amount(i));play_sfx_at(SFX_MELEE,center.position,i,1,.7f);
-}
+static Shader eqSlashShader;
+static bool eqSlashTried;
+#include "sword_wave.inc"
 static bool eq_panel_positions(int i,Vector3 out[EQ_PANEL_CUBES]){
     Ray ray={players[i].pos,player_forward(&players[i])};VoxelHit hit;Vector3 at;
     if(first_voxel_hit_detailed(ray,TETHER_RANGE,-1,false,&hit))at=v_add(ray.position,v_add(v_mul(ray.direction,hit.t),v_mul(hit.normal,VOXEL_SIZE*.51f)));
@@ -269,43 +257,6 @@ static bool eq_build(int i){
     eq_spend(i,cost);p->last_build_time=GetTime();equipment[i].buildTime=.6f;play_sfx(SFX_SHIELD);return true;
 }
 
-static Shader eqSlashShader;
-static bool eqSlashTried;
-static void eq_sword_trails(void){
-    float now=weaponFrameSampled?weaponFrameTime:(float)GetTime();
-    for(int i=0;i<MAX_PLAYERS;i++){
-        if(!equipment[i].initialized || eq_gun(i)!=EQ_BLADE || players[i].respawn_timer>0)continue;
-        float p=melee_anim_progress(&players[i],now);
-        if(p<WEAPON_MELEE_ACTIVE_START || p>.84f)continue;
-        if(!eqSlashTried){eqSlashTried=true;eqSlashShader=LoadShader(NULL,"shaders/sword_slash.frag");}
-        float sweep=clampf((p-WEAPON_MELEE_ACTIVE_START)/(WEAPON_MELEE_ACTIVE_END-WEAPON_MELEE_ACTIVE_START),0,1);
-        float fade=1-clampf((p-WEAPON_MELEE_ACTIVE_END)/(.84f-WEAPON_MELEE_ACTIVE_END),0,1);
-        Vector3 f=player_forward(&players[i]),r=v_norm(v_cross(f,(Vector3){0,1,0})),u=v_cross(r,f);
-        Vector3 diagonal=v_norm(v_sub(r,u)),ribbonNormal=v_norm(v_cross(f,diagonal));
-        bool shader=eqSlashShader.id && eqSlashShader.id!=rlGetShaderIdDefault();
-        if(shader){SetShaderValue(eqSlashShader,GetShaderLocation(eqSlashShader,"effectTime"),&now,SHADER_UNIFORM_FLOAT);BeginShaderMode(eqSlashShader);}
-        BeginBlendMode(BLEND_ADDITIVE);
-        rlDrawRenderBatchActive();rlDisableDepthMask();rlDisableBackfaceCulling();
-        rlBegin(RL_TRIANGLES);
-        for(int n=0;n<24;n++){
-            float t[2]={n/24.f,(n+1)/24.f};Vector3 outer[2],inner[2];
-            for(int k=0;k<2;k++){
-                float along=fmaxf(0,sweep-.48f)+t[k]*fminf(sweep,.48f);
-                float angle=(-eqSwordSweep*.5f+eqSwordSweep*along)*DEG2RAD;
-                Vector3 d=v_add(v_mul(f,cosf(angle)),v_mul(diagonal,sinf(angle)));
-                // Give the ribbon width across the cutting plane; a radial-only
-                // strip is edge-on and invisible to the attacking player.
-                outer[k]=v_add(players[i].pos,v_add(v_mul(d,eqSwordReach),v_mul(ribbonNormal,.08f)));
-                inner[k]=v_add(players[i].pos,v_add(v_mul(d,eqSwordReach*.94f),v_mul(ribbonNormal,-.40f)));
-            }
-            Vector3 v[6]={inner[0],outer[0],outer[1],inner[0],outer[1],inner[1]};
-            Vector2 uv[6]={{t[0],0},{t[0],1},{t[1],1},{t[0],0},{t[1],1},{t[1],0}};
-            for(int k=0;k<6;k++){rlColor4ub(35,135,255,(unsigned char)(210*fade));rlTexCoord2f(uv[k].x,uv[k].y);rlVertex3f(v[k].x,v[k].y,v[k].z);}
-        }
-        rlEnd();rlDrawRenderBatchActive();rlEnableBackfaceCulling();rlEnableDepthMask();
-        EndBlendMode();if(shader)EndShaderMode();
-    }
-}
 static Shader eqBeamShader;
 static bool eqBeamTried;
 static void eq_beam_shutdown(void){if(eqSlashShader.id && eqSlashShader.id!=rlGetShaderIdDefault())UnloadShader(eqSlashShader);eqSlashShader=(Shader){0};eqSlashTried=false;if(eqBeamShader.id && eqBeamShader.id!=rlGetShaderIdDefault())UnloadShader(eqBeamShader);eqBeamShader=(Shader){0};eqBeamTried=false;}
@@ -326,7 +277,7 @@ static void eq_world(void){
         if(!equipmentEmission && i==drawViewPlayerIndex && eq_upgrade(i,EQ_BUILD) && players[i].respawn_timer<=0){Vector3 pos[EQ_PANEL_CUBES]={{0}};bool valid=eq_panel_positions(i,pos)&&players[i].matter>=3*ff_build_cost(i);if(v_length(pos[1])>.01f)for(int n=0;n<EQ_PANEL_CUBES;n++)DrawCubeWires(pos[n],VOXEL_SIZE,VOXEL_SIZE,VOXEL_SIZE,valid?GOLD:RED);}
     }
     if(shader)EndShaderMode();
-    eq_sword_trails();
+    eq_sword_draw();
 }
 static void eq_icon(int gun,int x,int y,Color c){
     if(gun==EQ_BLADE){DrawLineEx((Vector2){x-5,y+22},(Vector2){x+22,y-2},4,c);DrawLine(x-3,y+9,x+10,y+22,c);return;}

@@ -14,6 +14,10 @@ try {
  if($LASTEXITCODE){throw 'Equipment build failed'}
  & ".build/equipment-$api.exe" "--physics=$backend"
  if($LASTEXITCODE){throw 'Equipment checks failed'}
+ & gcc tests/sword_wave_test.c @sources @flags -o ".build/sword-wave-$api.exe"
+ if($LASTEXITCODE){throw "Sword wave build failed"}
+ & ".build/sword-wave-$api.exe" "--physics=$backend"
+ if($LASTEXITCODE){throw "Sword wave checks failed"}
  & gcc tests/aiming_test.c @sources @flags -o ".build/aiming-$api.exe"
  if($LASTEXITCODE){throw 'Aiming build failed'}
  & ".build/aiming-$api.exe" "--physics=$backend"

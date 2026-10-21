@@ -8,6 +8,15 @@
 #define WEAPON_MELEE_ACTIVE_START 0.28f
 #define WEAPON_MELEE_ACTIVE_END 0.62f
 #define WEAPON_MELEE_PEAK 0.52f
+#define SWORD_ANIM_SECONDS .6f
+#define SWORD_EMIT_SECONDS .15f
+#define SWORD_SLASH_END .35f
+#define SWORD_WAVE_END .5f
+#define SWORD_REACH 6.f
+#define SWORD_SWEEP_DEGREES 100.f
+typedef struct SwordSwingSample {float sweep,fade;Vector3 direction,edge_direction;} SwordSwingSample;
+SwordSwingSample weapon_sword_sample(float age,int direction);
+float weapon_sword_radius(float age,float lane);
 
 typedef enum WeaponKind {
     WEAPON_STANDARD,
@@ -51,6 +60,7 @@ typedef struct WeaponPose {
 typedef struct WeaponMeleePose {
     float progress;
     Vector3 strike_endpoint;
+    int sword_direction; /* 0: upper-right to lower-left; 1: upper-left to lower-right. */
 } WeaponMeleePose;
 
 typedef struct WeaponBloom {

@@ -31,7 +31,7 @@ static void maps(void){for(int map=0;map<2;map++){fixture();currentWorldType=map
 static void lifecycle(void){
  fixture();gameMode=GAME_MODE_FIREFIGHT;firefightHumans=2;combatantTeam[1]=0;firefightPractice=false;eq_pickup(0,PICKUP_ROCKET,false);eq_pickup(0,PICKUP_ADHESIVE,false);players[0].isExposed=true;kill_player(0,-1,false,false);assert(combatantLife[0]==LIFE_DOWNED&&eq_gun(0)==EQ_ROCKET&&eq_upgrade(0,EQ_ADHESIVE));ff_restore_human(0,35);assert(eq_gun(0)==EQ_ROCKET&&eq_upgrade(0,EQ_ADHESIVE));firefightWave=1;firefightEndless=true;firefightFoundry=false;ff_wave_complete();assert(eq_gun(0)==EQ_ROCKET);eq_reset_all();assert(eq_gun(0)==EQ_DEFAULT&&!equipment[0].upgrades);
 }
-static void sword(void){fixture();eq_pickup(0,PICKUP_SWORD,false);players[1].pos.z=-2;eq_sword(0);assert(players[1].respawn_timer>0);}
+static void sword(void){fixture();eq_pickup(0,PICKUP_SWORD,false);players[1].pos.z=-2;eq_sword(0);eq_sword_tick(.6f);assert(players[1].respawn_timer>0);}
 static void shotgun_structures(void){
  fixture();players[1].pos.z=-5;
  add_static_box_at_grid(-2,2,2,6,-6,-6,GRAY);init_static_hash();rebuild_voxel_hash();
@@ -87,7 +87,7 @@ static void revised_weapons(void){
  fixture();eq_pickup(0,PICKUP_SWORD,false);equipment[0].switchTime=0;assert(eq_gun(0)==EQ_BLADE && !(equipment[0].upgrades&EQ_SWORD));
  players[0].matter=0;players[0].isExposed=true;players[0].last_melee_time=-100;assert(eq_fire(0));assert(players[0].meleeSwingActive);
  fixture();players[1].pos.x=20;add_static_box_at_grid(-5,5,0,8,-7,-3,GRAY);init_static_hash();rebuild_voxel_hash();int before=voxel_count;
- eq_sword(0);assert(voxel_count<before);for(int v=0;v<voxel_count;v++)assert(v_isfinite(voxels[v].pos));
+ eq_sword(0);eq_sword_tick(.6f);assert(voxel_count<before);for(int v=0;v<voxel_count;v++)assert(v_isfinite(voxels[v].pos));
 }
 static void beam_captures(void){
  fixture();weapon_renderer_init();weaponFrameSampled=false;drawViewPlayerIndex=0;
@@ -104,12 +104,12 @@ static void beam_captures(void){
  eq_beam_shutdown();weapon_renderer_shutdown();
 }
 static void sword_reach_and_visuals(void){
- fixture();eq_pickup(0,PICKUP_SWORD,false);players[1].pos.z=-5.5f;eq_sword(0);assert(players[1].respawn_timer>0);
- fixture();eq_pickup(0,PICKUP_SWORD,false);players[1].pos.z=-6.1f;eq_sword(0);assert(players[1].respawn_timer==0);
+ fixture();eq_pickup(0,PICKUP_SWORD,false);players[1].pos.z=-5.5f;eq_sword(0);eq_sword_tick(.6f);assert(players[1].respawn_timer>0);
+ fixture();eq_pickup(0,PICKUP_SWORD,false);players[1].pos.z=-7.1f;eq_sword(0);eq_sword_tick(.6f);assert(players[1].respawn_timer==0);
  weapon_renderer_init();character_renderer_init();weaponFrameSampled=false;drawViewPlayerIndex=0;equipment[0].switchTime=0;
  for(int small=0;small<2;small++)for(int phase=0;phase<3;phase++){
   int w=small?480:960,h=small?270:540;weaponViewAspect=(float)w/h;
-  players[0].meleeSwingActive=phase>0;players[0].meleeSwingStartTime=GetTime()-(phase==1?.44f:.60f)*MELEE_ANIM_DURATION_SECONDS;
+  swordWaves[0]=(SwordWave){0};eq_sword(0);eq_sword_tick(phase==0?0:phase==1?.25f:.45f);players[0].meleeSwingActive=phase>0;players[0].meleeSwingStartTime=GetTime()-swordWaves[0].age;
   WeaponPose pose=player_weapon_pose(0,true);assert(v_isfinite(pose.muzzle)&&v_isfinite(pose.grip_heel));
   if(!phase)assert(pose.muzzle.y>pose.grip_heel.y+.4f);
   RenderTexture2D rt=LoadRenderTexture(w,h);Camera3D cam={players[0].pos,{0,2,-20},{0,1,0},60,CAMERA_PERSPECTIVE};

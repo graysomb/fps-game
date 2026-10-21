@@ -344,6 +344,19 @@ static float wr_ease(float t) {
     return t*t*(3-2*t);
 }
 
+SwordSwingSample weapon_sword_sample(float age,int direction){
+    float sweep=Clamp((age-SWORD_EMIT_SECONDS)/(SWORD_SLASH_END-SWORD_EMIT_SECONDS),0,1);
+    float angle=(50-100*sweep)*DEG2RAD;
+    float side=direction?-1.f:1.f;
+    return (SwordSwingSample){sweep,1-Clamp((age-SWORD_WAVE_END)/(SWORD_ANIM_SECONDS-SWORD_WAVE_END),0,1),
+        {side*.70710678f*sinf(angle),.70710678f*sinf(angle),-cosf(angle)},
+        {-side*.70710678f*cosf(angle),-.70710678f*cosf(angle),-sinf(angle)}};
+}
+float weapon_sword_radius(float age,float lane){
+    float birth=SWORD_EMIT_SECONDS+(SWORD_SLASH_END-SWORD_EMIT_SECONDS)*lane;
+    if(age<birth)return -1;
+    return 1+(SWORD_REACH-1)*Clamp((age-birth)/(SWORD_WAVE_END-birth),0,1);
+}
 WeaponPose weapon_pose(WeaponKind kind,Vector3 pos,Vector3 forward,Vector3 right,Vector3 up,
                        bool first_person,float aspect,const WeaponMeleePose *melee,float recoil) {
     bool swinging=melee && melee->progress>=0 && melee->progress<=1;
@@ -387,15 +400,36 @@ WeaponPose weapon_pose(WeaponKind kind,Vector3 pos,Vector3 forward,Vector3 right
     Vector3 heel={0,-1.01f-.085f*cosf(.25f),.39f+.085f*sinf(.25f)};
     if(kind==WEAPON_SWORD)heel=(Vector3){0,0,.64f};
     if (kind==WEAPON_SWORD) {
-        // Rotate about the actual hilt, keeping both paws on the handle.
-        float pitch=(65+(20*windup-120*extend)*(1-recover))*DEG2RAD;
-        float roll=(-18+(-15*windup+95*extend)*(1-recover))*DEG2RAD;
+        int direction=melee?melee->sword_direction:0;
+        float side=direction?-1.f:1.f;
+        float age=swinging?melee->progress*SWORD_ANIM_SECONDS:0;
+        SwordSwingSample sample=weapon_sword_sample(age,direction);
+        float recoverSword=wr_ease((age-SWORD_SLASH_END)/(SWORD_ANIM_SECONDS-SWORD_SLASH_END));
+        float angle=swinging?(50-100*sample.sweep)*(1-recoverSword)+65*recoverSword:65;
+        if(swinging && age<SWORD_EMIT_SECONDS)angle=65-15*wr_ease(age/SWORD_EMIT_SECONDS);
+        // The same diagonal and sweep drive the wave and collision front.
+        float a=angle*DEG2RAD;
+        // Local -X is the luminous cutting edge. Point it along the
+        // angular velocity, while local -Z remains the blade's long axis.
+        Vector3 x={side*.70710678f*cosf(a),.70710678f*cosf(a),sinf(a)};
+        Vector3 z={-side*.70710678f*sinf(a),-.70710678f*sinf(a),cosf(a)};
+        Vector3 y=Vector3CrossProduct(z,x);
+        Matrix facing={x.x,y.x,z.x,0,x.y,y.y,z.y,0,x.z,y.z,z.z,0,0,0,0,1};
+        // Recover to one shared guard pose, then smoothly wind up toward
+        // either diagonal; alternating attacks must not flip the blade instantly.
+        float guardAngle=65*DEG2RAD;
+        Vector3 gx={.70710678f*cosf(guardAngle),.70710678f*cosf(guardAngle),sinf(guardAngle)};
+        Vector3 gz={-.70710678f*sinf(guardAngle),-.70710678f*sinf(guardAngle),cosf(guardAngle)};
+        Vector3 gy=Vector3CrossProduct(gz,gx);
+        Matrix guard={gx.x,gy.x,gz.x,0,gx.y,gy.y,gz.y,0,gx.z,gy.z,gz.z,0,0,0,0,1};
+        if(!swinging)facing=guard;
+        else if(age<SWORD_EMIT_SECONDS)facing=QuaternionToMatrix(QuaternionSlerp(QuaternionFromMatrix(guard),QuaternionFromMatrix(facing),wr_ease(age/SWORD_EMIT_SECONDS)));
+        else if(age>SWORD_SLASH_END)facing=QuaternionToMatrix(QuaternionSlerp(QuaternionFromMatrix(facing),QuaternionFromMatrix(guard),recoverSword));
         Matrix grip=MatrixTranslate(0,0,-.52f);
-        grip=MatrixMultiply(grip,MatrixRotateX(pitch));
-        grip=MatrixMultiply(grip,MatrixRotateZ(roll));
+        grip=MatrixMultiply(grip,facing);
         m=MatrixMultiply(grip,m);
-        Vector3 shift=Vector3Add(Vector3Scale(right,-.60f*extend*(1-recover)),
-                                Vector3Scale(up,-.12f+.10f*windup-.22f*extend*(1-recover)));
+        Vector3 shift=Vector3Add(Vector3Scale(right,side*(-.50f*sample.sweep*(1-recoverSword))),
+                                Vector3Scale(up,-.12f-.20f*sample.sweep*(1-recoverSword)));
         m.m12+=shift.x;m.m13+=shift.y;m.m14+=shift.z;
     }else if (swinging) {
         // Rigid rotation around the grip; the heel turns forward for the strike.

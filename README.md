@@ -589,8 +589,14 @@ Shotgun, cutter, railgun, rocket, sword and voxel launcher occupy weapon slots.
 Adhesive grenades and reinforced building are separate upgrades. Reinforced building
 places a connected 5x5 upright cover panel for three normal blocks worth of Matter.
 The cutter has a 24-metre range and cuts 24 voxels/second for 4 Matter/second, with a thicker visible beam.
-The sword uses a free diagonal slash (fire or melee), instantly killing unprotected
-enemies and cutting a broad diagonal through structures within six metres, with an upright two-paw grip and a blue slash trail.
+The sword alternates two 100-degree diagonal slashes (fire or melee), with a free
+0.8-second attack cycle and 0.6-second animation. A blue wave grows from the blade
+and reaches six metres, killing unprotected enemies and cutting terrain when it
+arrives. Each wave cuts at most 96 voxels and hits each actor once. Intact cover
+blocks sections that cannot be cut. Switching and revives preserve the next swing
+direction; true death resets it. Emitted waves finish even if their owner dies.
+The luminous blade edge leads both swing directions; all viewports and LAN peers
+share the same swing direction and wave state.
 Invulnerability, friendly fire and closed Foundry cores retain their protection.
 Railgun shots bore through terrain along their 100-metre path and leave a luminous trail.
 Hold/release the railgun after charging; hold the cutter to cut. Railgun and rockets
@@ -609,7 +615,7 @@ Foundry and Crosscut have authored equipment placements, with fourfold symmetry 
 versus. Equipment respawns in 30 seconds; railguns/rockets take 60 seconds and are
 not replenished between waves. All pickups are in the world-builder palette.
 Enter `weaponlab` in the debug console for a repeatable equipment arena (F4 resets,
-F7 toggles invulnerability). Network protocol 19 requires matching builds.
+F7 toggles invulnerability). Network protocol 20 requires matching builds.
 
 Toggle aiming with right-stick click (R3), Left Shift for keyboard player 1,
 or Enter for keyboard player 2, including the mouse owner. Zoom is 1.5x default,

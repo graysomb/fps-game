@@ -206,9 +206,12 @@ bool net_read_player_visual(NetReader *reader, NetPlayerVisualState *state) {
     state->shot_sequence = net_read_u32(reader);
     state->shot_age_ms = net_read_u8(reader);
     if (state->flags & ~(NET_PLAYER_VISUAL_MELEE | NET_PLAYER_VISUAL_TETHER |
-                         NET_PLAYER_VISUAL_GOLD_TETHER | NET_PLAYER_VISUAL_POWERED_SHOT | NET_PLAYER_VISUAL_DRAIN | NET_PLAYER_VISUAL_DRAIN_IDLE)) {
+                         NET_PLAYER_VISUAL_GOLD_TETHER | NET_PLAYER_VISUAL_POWERED_SHOT | NET_PLAYER_VISUAL_DRAIN | NET_PLAYER_VISUAL_DRAIN_IDLE | NET_PLAYER_VISUAL_SWORD | NET_PLAYER_VISUAL_SWORD_REVERSE)) {
         reader->failed = true;
         return false;
+    }
+    if ((state->flags & NET_PLAYER_VISUAL_SWORD_REVERSE) && !(state->flags & NET_PLAYER_VISUAL_SWORD)) {
+        reader->failed=true;return false;
     }
     if (state->flags & NET_PLAYER_VISUAL_MELEE) {
         state->melee_progress = net_read_u8(reader);

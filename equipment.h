@@ -6,11 +6,11 @@ static const GunDefinition eqGuns[EQ_GUN_COUNT]={
     {"Default",WEAPON_STANDARD,MATTER_SHOT_COST,BULLET_COOLDOWN_SECONDS,100,34,1.5f},{"Voxel",WEAPON_DYNAMIC_LAUNCHER,MATTER_SHOT_COST,BULLET_COOLDOWN_SECONDS,100,34,1.25f},
     {"Shotgun",WEAPON_IMPULSE_SHOTGUN,6,.8f,12,5,1.2f},{"Cutter",WEAPON_CUTTER,4,0,24,20,2},
     {"Railgun",WEAPON_RAILGUN,15,1.8f,100,50,4},{"Rocket",WEAPON_ROCKET_LAUNCHER,25,1.5f,110,100,1.75f},{"Sword",WEAPON_SWORD,0,.8f,6,10000,1}};
-enum { EQ_PELLETS=8, EQ_PANEL_SIDE=5, EQ_PANEL_CUBES=EQ_PANEL_SIDE*EQ_PANEL_SIDE, EQ_SWORD_CUTS=48 };
+enum { EQ_PELLETS=8, EQ_PANEL_SIDE=5, EQ_PANEL_CUBES=EQ_PANEL_SIDE*EQ_PANEL_SIDE, EQ_SWORD_CUTS=96 };
 static const float eqSwitchSeconds=.25f,eqRailCharge=.65f,eqCutterUnitSeconds=1.f/24;
 static const float eqShotgunCone=12,eqRocketSpeed=22,eqRocketLife=5,eqRocketInner=1,eqRocketOuter=4;
 static const float eqShotgunImpulse=48,eqShotgunActivationBelief=1;
-static const float eqSwordReach=6.f,eqSwordSweep=70,eqSwordCycle=.8f,eqSwordDamage=10000;
+static const float eqSwordReach=SWORD_REACH,eqSwordSweep=SWORD_SWEEP_DEGREES,eqSwordCycle=.8f,eqSwordDamage=10000;
 typedef struct {int gun[2],selected,upgrades;float cooldown[EQ_GUN_COUNT],switchTime,charge,cutTime,buildTime;bool initialized,held;Vector3 beamEnd;} Equipment;
 static Equipment equipment[MAX_PLAYERS];
 static bool equipmentLab;
@@ -19,7 +19,20 @@ typedef struct {bool active;int owner;Vector3 pos,vel;float life;} EquipmentRock
 static EquipmentRocket eqRockets[32];
 typedef struct {Vector3 start,end;float life;int gun,owner;} EquipmentTrace;
 static EquipmentTrace eqTraces[32];
-static uint32_t eqReceiveTick,eqPartTick[3];
+enum { SWORD_LANES=41 };
+typedef struct {
+    bool active,emitted,rewarded;
+    uint32_t sequence;
+    int direction,cuts;
+    float age,stop[SWORD_LANES];
+    Vector3 origin,forward;
+    bool hit[MAX_COMBATANTS];
+} SwordWave;
+static SwordWave swordWaves[MAX_PLAYERS];
+static uint32_t swordSequences[MAX_PLAYERS];
+static int swordNextDirection[MAX_PLAYERS],swordDirection[MAX_PLAYERS];
+static void eq_sword_tick(float dt);
+static uint32_t eqReceiveTick,eqPartTick[4];
 static void eq_reset(int i);
 static void eq_reset_all(void);
 static int eq_gun(int i);
