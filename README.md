@@ -590,6 +590,12 @@ kill when their damage depletes Matter. Equipment survives downs, revives and
 intermissions; true death and new matches reset it. Bots retain their old loadouts.
 Central tuning is in `equipment.h`.
 
+Shotgun pellets activate struck structures using dynamic-voxel impact resistance
+and push connected debris away from the shooter. Force falls with distance and
+is shared across the struck mass. Each volley batches terrain activation and
+resolves all hits before removing cover; it cannot shoot through a wall it just
+activated. Attached enemy armor still blocks the pellets.
+
 Foundry and Crosscut have authored equipment placements, with fourfold symmetry in
 versus. Equipment respawns in 30 seconds; railguns/rockets take 60 seconds and are
 not replenished between waves. All pickups are in the world-builder palette.

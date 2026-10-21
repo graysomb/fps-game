@@ -49,13 +49,59 @@ static bool eq_cut(int owner,Ray ray,float reach){
     }else {Vector3 at=voxels[v].pos;enemy_detach(v);detach_goliath_armor_voxel(v);remove_voxel_index(v);mark_surface_neighbors(at);}
     return true;
 }
-static void eq_impulse(Vector3 at,Vector3 forward,float radius,float strength){
-    for(int n=0;n<voxel_count;n++){Voxel *v=&voxels[n];if(!v->simulate || v->isBullet || v_length(world_delta(v->pos,at))>radius)continue;
-        Vector3 d=world_delta(v->pos,at);if(v_dot(v_norm(d),forward)<.75f)continue;
-        if(v->sleeping)wake_sleeping_cluster_in_place(n);
-        Vector3 impulse=v_mul(forward,strength*(1-v_length(d)/radius));v->vel=v_add(v->vel,impulse);
-        for(int p=0;p<8;p++)v->particles[p]->vel=v_add(v->particles[p]->vel,impulse);
+typedef struct { uint64_t id; VoxelHit hit; Vector3 direction; float distance; bool wasStatic; } ShotgunImpact;
+static void eq_shotgun_impacts(int owner,ShotgunImpact *hits,int count){
+    if(!count)return;
+    static UnitVoxelBuffer buffer;unit_voxel_buffer_clear(&buffer);
+    refresh_static_voxel_beliefs();
+    for(int v=0;v<voxel_count;v++)atomic_store_explicit(&activationClaims[v],0,memory_order_relaxed);
+    // Collect once for the entire volley; use the same resistance and bounded
+    // connected-voxel activation as an impacting dynamic voxel.
+    for(int n=0;n<count;n++){
+        ShotgunImpact *h=&hits[n];int v=enemy_voxel(h->id);if(v<0)continue;
+        int gear=enemy_equipment_owner(v),armor=get_goliath_owner_of_voxel(v);
+        if(gear>=0)ai_alert(gear,owner,players[owner].pos,AI_ALERT_HIT);
+        if(armor>=0)ai_alert(armor,owner,players[owner].pos,AI_ALERT_HIT);
+        if(gear>=0 || armor>=0 || voxel_is_fluid(&voxels[v]) || voxels[v].isBullet){h->id=0;continue;}
+        if(!h->wasStatic)continue;
+        if(foundry_trap_hit(v,owner,false)){
+            uint64_t id=h->id;for(int k=n;k<count;k++)if(hits[k].id==id)hits[k].id=0;
+            continue;
+        }
+        if(voxels[v].pendingActivation || voxels[v].activationCooldownFrames>0)continue;
+        int start=buffer.count;
+        if(collect_static_activation_cluster(v,owner,h->hit.x,h->hit.y,h->hit.z,
+            (float)(VOXEL_ACTIVATION_RADIUS*VOXEL_ACTIVATION_RADIUS),&buffer)<=0)continue;
+        if(!dynamic_belief_overcomes_static(eqShotgunActivationBelief,compute_cluster_freeze_belief(&buffer,start))){rollback_activation_buffer(&buffer,start);continue;}
+        expand_activation_cluster_unbounded(&buffer,start,eqShotgunActivationBelief,owner);
     }
+    if(buffer.count && (voxel_count+buffer.count>=MAX_VOXELS || particle_pool_count-free_particle_count+8*buffer.count>=MAX_PARTICLES || recycleQueueCount+buffer.count>=MAX_VOXELS))rollback_activation_buffer(&buffer,0);
+    if(buffer.count){
+        qsort(buffer.voxels,(size_t)buffer.count,sizeof(UnitVoxelSeed),compare_unit_voxel_seed);
+        remove_buffered_static_voxels(&buffer);
+        emit_unit_voxels_from_units(&buffer,false,true,-1);
+        wake_fluid_near_unit_buffer(&buffer);rebuild_voxel_hash();refresh_activation_surfaces(&buffer);
+        glue_dynamic_voxel_to_static_neighbors();refresh_static_voxel_beliefs();
+    }
+    int targets[EQ_PELLETS];
+    for(int n=0;n<count;n++){ShotgunImpact *h=&hits[n];targets[n]=!h->id?-1:h->wasStatic?table_get(h->hit.x,h->hit.y,h->hit.z):enemy_voxel(h->id);}
+    for(int n=0;n<count;n++){
+        int v=targets[n];
+        if(v<0 || !voxels[v].simulate)continue;
+        if(voxels[v].sleeping)wake_sleeping_cluster_in_place(v);
+        int members=build_glue_cluster_indices(v,glueClusterIndices);Vector3 impulse={0};
+        for(int k=0;k<members;k++){
+            int member=glueClusterIndices[k];voxels[member].activator=owner;
+            for(int hit=n;hit<count;hit++)if(targets[hit]==member){
+                float falloff=1-.75f*clampf(hits[hit].distance/eqGuns[EQ_SHOTGUN].range,0,1);
+                impulse=v_add(impulse,v_mul(hits[hit].direction,eqShotgunImpulse/EQ_PELLETS*falloff));targets[hit]=-1;
+            }
+        }
+        // Shared impact code conserves total momentum across connected mass and
+        // updates shared particles once per volley, not once per pellet/corner.
+        apply_tether_impact_to_dynamic_island(v,0,impulse);
+    }
+    play_sfx_at(SFX_IMPACT,world_wrap(v_add(players[owner].pos,v_mul(hits[0].direction,hits[0].distance))),owner,1,.8f);
 }
 static void eq_rocket_blast(EquipmentRocket rocket){
     float damages[MAX_COMBATANTS]={0};
@@ -78,14 +124,16 @@ static bool eq_fire(int i){
     if(e->switchTime>0 || e->cooldown[gun]>0 || p->isExposed || p->matter<def->cost)return false;
     Vector3 f=player_forward(p);Ray ray={p->pos,f};
     if(gun==EQ_SHOTGUN){
+        ShotgunImpact hits[EQ_PELLETS];int hitCount=0;
         float damage[MAX_COMBATANTS]={0};Vector3 r=v_norm(v_cross(f,(Vector3){0,1,0})),up=v_cross(r,f);
         for(int n=0;n<EQ_PELLETS;n++){float angle=n*2*PI/EQ_PELLETS;Vector3 d=v_norm(v_add(f,v_add(v_mul(r,cosf(angle)*tanf(eqShotgunCone*.5f*DEG2RAD)),v_mul(up,sinf(angle)*tanf(eqShotgunCone*.5f*DEG2RAD)))));Ray pellet={p->pos,d};float length=def->range;VoxelHit hit;
-            if(first_voxel_hit_detailed(pellet,length,-1,false,&hit))length=hit.t;
+            bool blocked=first_voxel_hit_detailed(pellet,length,-1,false,&hit);if(blocked)length=hit.t;
             int target=eq_actor_ray(i,pellet,&length);if(target>=0)damage[target]+=def->damage;
+            else if(blocked)hits[hitCount++]=(ShotgunImpact){voxels[hit.id].identity,hit,d,length,!voxels[hit.id].simulate};
             eq_trace(p->pos,v_add(p->pos,v_mul(d,length)),gun);
         }
         for(int j=0;j<activePlayers;j++)if(damage[j]>0)eq_damage(i,j,damage[j],false,DEATH_SHOTGUN,p->pos);
-        eq_impulse(p->pos,f,8,18);
+        eq_shotgun_impacts(i,hits,hitCount);
     }else {
         int free=-1;for(int n=0;n<32;n++)if(!eqRockets[n].active){free=n;break;}if(free<0)return false;
         // Start at the eye and sweep from it: no spawning through nearby walls.

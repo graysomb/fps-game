@@ -9,6 +9,7 @@ static const GunDefinition eqGuns[EQ_GUN_COUNT]={
 enum { EQ_PELLETS=8, EQ_PANEL_CUBES=3, EQ_SWORD_CUTS=4 };
 static const float eqSwitchSeconds=.25f,eqRailCharge=.65f,eqCutterUnitSeconds=.25f;
 static const float eqShotgunCone=12,eqRocketSpeed=22,eqRocketLife=5,eqRocketInner=1,eqRocketOuter=4;
+static const float eqShotgunImpulse=48,eqShotgunActivationBelief=1;
 static const float eqSwordReach=2.7f,eqSwordSweep=70,eqSwordCycle=.8f,eqSwordDamage=40;
 typedef struct {int gun[2],selected,upgrades;float cooldown[EQ_GUN_COUNT],switchTime,charge,cutTime,buildTime;bool initialized,held;Vector3 beamEnd;} Equipment;
 static Equipment equipment[MAX_PLAYERS];
