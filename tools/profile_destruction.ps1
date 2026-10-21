@@ -17,7 +17,7 @@ foreach($key in $keys){$previous[$key]=[Environment]::GetEnvironmentVariable($ke
 Push-Location $root
 try {
     New-Item -ItemType Directory -Force .build,artifacts | Out-Null
-    $sources=@('weapon_renderer.c','character_renderer.c','net_protocol.c','net_transport.c')
+    $sources=@('weapon_renderer.c','character_renderer.c','duck_renderer.c','net_protocol.c','net_transport.c')
     $sources+=@('callbacks','compress','host','list','packet','peer','protocol','win32') | ForEach-Object {"third_party/enet/$_.c"}
     $flags=@('-std=c11','-O1','-g','-DGRAPHICS_API_OPENGL_43','-I.build/raylib-gl43/src',
         '-Ithird_party/enet/include','-L.build/raylib-gl43/src','-lraylib','-lopengl32',

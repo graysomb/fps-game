@@ -61,7 +61,7 @@ try {
         'third_party/enet/callbacks.c', 'third_party/enet/compress.c',
         'third_party/enet/host.c', 'third_party/enet/list.c', 'third_party/enet/packet.c',
         'third_party/enet/peer.c', 'third_party/enet/protocol.c', 'third_party/enet/win32.c')
-    Invoke-WeaponCompiler (@('tests/render_weapon_gameplay.c', 'weapon_renderer.c','character_renderer.c') + $networkSources +
+    Invoke-WeaponCompiler (@('tests/render_weapon_gameplay.c', 'weapon_renderer.c','character_renderer.c','duck_renderer.c') + $networkSources +
         @('-std=c11', '-O2', '-I.', '-Ithird_party/enet/include', '-I.build/raylib-gl33/src',
           '-L.build/raylib-gl33/src', '-lraylib', '-lopengl32', '-lgdi32', '-lwinmm',
           '-lws2_32', '-lpthread', '-lm', '-o', "$weaponBuildDir\render_weapon_gameplay.exe"))

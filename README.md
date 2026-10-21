@@ -1262,3 +1262,38 @@ the authoritative host, and client prediction using existing tether snapshots.
 Grapple regression harnesses: `tests/tether_grapple_test.c` (CPU/GPU, collisions,
 upward pull, both moving endpoints, lifecycle, frame rates, prediction) and
 `tests/tether_grapple_lan.c` (real ENet host/client on loopback port 27941).
+
+### Swimming mallard visual preview
+
+`tools/preview_duck.ps1` opens the standalone low-poly mallard preview. Space
+pauses, arrows scrub, M toggles swimming/idle, W toggles the floor wake, and R
+restarts. The duck glides on a solid floor with folded wings, no visible feet,
+a small paddling roll, counterbalanced head, and tail sway.
+
+Four ambient mallards swim in the sheltered factory bays of Foundry Holdout
+and the cutting sheds of Crosscut. Weapon/tether hits, explosions, player/enemy
+contact, and moving debris make them disappear into a short puff of feathers.
+They return after 90 seconds of gameplay; blocked respawn spots wait until clear.
+They do not award points, drop equipment, or count toward Firefight waves.
+Feathers are bounded cosmetic geometry, not dynamic voxel bodies. LAN state is
+host authoritative; protocol **26** requires matching builds.
+
+`tools/validate_ducks.ps1 -Backend 33` (or `43`) validates authored routes, hit
+paths, cover occlusion, respawn timing, pause behavior, periodic seams, and network
+state validation. Set `FPS_DUCK_LAN=host` / `client` when running the resulting
+`.build/duck/gameplay-43.exe` to exercise real loopback late join, feather puffs,
+and respawns on port 27946.
+
+Run `tools/preview_duck.ps1 -Mode capture` to render four inspection views and
+160 deterministic swimming frames under `artifacts/duck`. Then run
+`python tools/duck_media.py` (requires Pillow) to create `mallard-swimming.gif`.
+Use `-Mode checks` or `-Mode fallback` with `-Backend 33` / `43` for geometry,
+occlusion, shader fallback, and resource lifecycle checks.
+
+`duck_renderer.h` accepts a floor position, yaw, scale, speed, and caller-sampled
+animation time. All 976 mesh triangles are cached once. Call `duck_draw_floor`
+on an exposed flat surface for the optional soft shadow/wake, then `duck_draw`
+for the opaque mallard. The renderer allocates no meshes per frame and does not
+change simulation itself; `duck_gameplay.inc` supplies map behavior. Shader assets live in
+`shaders/duck*`; missing shaders fall back to the vertex-colored duck and omit
+the floor effect. Link `duck_renderer.c` with raylib to use it elsewhere.

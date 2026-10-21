@@ -5,7 +5,7 @@ Push-Location (Split-Path -Parent $PSScriptRoot)
 try {
     $env:PATH = "$ToolchainBin;$oldPath"
     New-Item -ItemType Directory -Force '.build/rat','artifacts/rat' | Out-Null
-    $network = @('net_protocol.c','net_transport.c')
+    $network = @('duck_renderer.c','net_protocol.c','net_transport.c')
     $network += @('callbacks','compress','host','list','packet','peer','protocol','win32') | ForEach-Object { "third_party/enet/$_.c" }
     foreach ($api in @('33','43')) {
         $raylib = ".build/raylib-gl$api/src"

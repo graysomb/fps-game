@@ -1098,6 +1098,7 @@ typedef struct {
 static BotState botStates[MAX_COMBATANTS];
 #include "ai_combat.h"
 #include "hologram.h"
+#include "duck_gameplay.h"
 static bool randomSpawnEnabled = true;
 static const Vector3 playerSpawnPositions[MAX_PLAYERS] = {
     { 0.0f,  BASE_EYE_HEIGHT, -14.0f },
@@ -9319,6 +9320,7 @@ static void ResetCreative(void) {
 }
 
 static void ResetGame(void) {
+    ducks_reset();
     fp_new_run();
     memset(holograms,0,sizeof(holograms));hologramReceiveTick=0;
     clarity_reset();
@@ -10368,6 +10370,7 @@ static void update_projectiles(float dt)
         Vector3 start = v->pos;
         Vector3 end = v_add(start, displacement);
         hologram_projectile(i,start,end,(float)player_bullet_damage(v->owner));
+        ducks_segment(start,end,VOXEL_SIZE*.5f,i);
         ai_near_miss(i,start,end);
 
         bool handled = false;
@@ -10650,6 +10653,8 @@ static void handle_pbd_projectile_hits(void)
     int i = 0;
     while (i < voxel_count) {
         Voxel *v = &voxels[i];
+        if(v->simulate && !v->sleeping && !voxel_is_fluid(v))
+            ducks_segment(v_sub(v->pos,v_mul(v->vel,PBD_MAX_STEP_DT)),v->pos,v->rest_edge*.6f,i);
         if(v->foundryTrapHeavy){++i;continue;}
         if (!v->simulate || v->sleeping || voxel_is_fluid(v)) {
             ++i;
@@ -15118,6 +15123,7 @@ static Vector3 melee_swing_direction(const Player *p, float reach_frac) {
 static bool melee_hit_players(int attacker_idx, Vector3 start, Vector3 end, Vector3 dir) {
     (void)dir;
     hologram_melee(attacker_idx,start,end);
+    ducks_segment(start,end,.25f,-1);
     Vector3 attacker_pos = players[attacker_idx].pos;
     Vector3 forward = player_forward(&players[attacker_idx]);
     Vector3 body_end = v_add(attacker_pos, v_mul(forward, MELEE_RANGE));
@@ -15740,6 +15746,7 @@ static void start_tether(int idx) {
     aim_cancel(idx);
     Player *p=&players[idx];VoxelHit hit;
     if(p->respawn_timer>0 || p->tetherHolding || p->drainTarget)return;
+    ducks_ray((Ray){p->pos,player_forward(p)},p->goldTetherCharged?GOLD_TETHER_RANGE:TETHER_RANGE,.03f,-1,false);
     if(start_tether_drain(idx))return;
     if(first_voxel_hit_detailed((Ray){p->pos,player_forward(p)},(p->goldTetherCharged && ((is_player_bot(idx)&&!fp_carrier(idx)) || p->matter>=eqGoldGrabCost))?GOLD_TETHER_RANGE:TETHER_RANGE,-1,false,&hit))
         acquire_tether_hit(idx,hit.id,hit.normal);
@@ -17906,6 +17913,7 @@ static void draw_world_surfaces(void) {
 
 static void shutdown_world_visuals(void) {
     camp_shutdown();
+    duck_renderer_shutdown();
     aim_shutdown();
     periodic_visuals_shutdown();
     voxel_ca_shutdown();
@@ -18350,6 +18358,7 @@ static void draw_players(void) {
     combat_ui_world();
     eq_world();
     foundry_traps_draw();
+    ducks_draw();
 }
 
 static void HandleKeyboardInput(int i, float dt) {
@@ -19250,6 +19259,7 @@ static void bot_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float
 #include "combat_clarity.inc"
 #include "combat_clarity_net.inc"
 #include "hologram.inc"
+#include "duck_gameplay.inc"
 #include "combat_ui.inc"
 #include "equipment.inc"
 #include "firefight_progression.inc"
@@ -19710,7 +19720,7 @@ static void net_send_world_to(int slot) {
     ex_pickup_snapshot(slot);
     net_writer_init(&writer, packet, sizeof(packet));
     clarity_net_snapshot(slot);
-    hologram_net_snapshot(slot);combat_ui_snapshot(slot);eq_snapshot(slot);ex_snapshot(slot);fp_snapshot(slot);
+    hologram_net_snapshot(slot);combat_ui_snapshot(slot);eq_snapshot(slot);ex_snapshot(slot);fp_snapshot(slot);ducks_snapshot(slot);
     net_write_header(&writer, NET_MSG_WORLD_END, 0, netTransport.session_id, netServerTick);
     net_transport_send(&netTransport, slot, FPS_NET_CHANNEL_WORLD, packet, writer.length, true);
     regeneration_net_send(slot, true);
@@ -20005,6 +20015,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
     }
     if (transport->role != NET_ROLE_CLIENT) return;
     if (header.type == NET_MSG_WELCOME) {
+        ducks_reset();
         fp_new_run();fpStateTick=fpReceivedRevision=0;memset(fpActorTick,0,sizeof(fpActorTick));free(fpIncoming);fpIncoming=NULL;fpIncomingNext=fpIncomingCount=0;
         clarity_net_reset();
         memset(holograms,0,sizeof(holograms));hologramReceiveTick=0;
@@ -20041,6 +20052,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
     if(eq_receive((NetMessageType)header.type,&reader,header.server_tick))return;
     if(combat_ui_receive((NetMessageType)header.type,&reader,header.server_tick))return;
     if(hologram_net_receive((NetMessageType)header.type,&reader,header.server_tick))return;
+    if(ducks_receive((NetMessageType)header.type,&reader,header.server_tick))return;
     if(clarity_net_receive((NetMessageType)header.type,&reader,header.server_tick))return;
     if (header.type == NET_MSG_SESSION_STATE) {
         netRequestedCreative = net_read_u8(&reader) != 0;
@@ -20256,7 +20268,7 @@ static void net_host_tick(void) {
     for (int i = 0; i < MAX_PLAYERS; ++i) if (netPlayerPresent[i]) net_write_player_state(&writer, i);
     net_transport_broadcast(&netTransport, FPS_NET_CHANNEL_SNAPSHOT, packet, writer.length, false);
     net_host_send_dynamic_poses();
-    if(netServerTick%3u==0){clarity_net_snapshot(-1);hologram_net_snapshot(-1);combat_ui_snapshot(-1);eq_snapshot(-1);ex_snapshot(-1);fp_snapshot(-1);}
+    if(netServerTick%3u==0){clarity_net_snapshot(-1);hologram_net_snapshot(-1);combat_ui_snapshot(-1);eq_snapshot(-1);ex_snapshot(-1);fp_snapshot(-1);ducks_snapshot(-1);}
     if ((netServerTick % 6u) == 0u) {
         ex_pickup_snapshot(-1);
     }
@@ -22412,6 +22424,7 @@ int main(int argc, char **argv) {
         clarity_tick(dt);
         eq_tick(dt);
         hologram_tick(dt);
+        ducks_tick(dt);
         debug_console_update();
         if(IsKeyPressed(KEY_PAUSE)){gameState=GAME_STATE_PAUSED;mouse_sync();break;}
         mouse_frame(dt);

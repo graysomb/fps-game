@@ -24,6 +24,7 @@ static Vector3 ex_pull_delta(Vector3 velocity,Vector3 delta,float acceleration,f
     float speed=fmaxf(0,12-v_dot(velocity,direction));return v_mul(direction,fminf(speed,acceleration*(1-distance/6)*dt*ramp));
 }
 static void ex_gravity_pull(GravityField *f,float dt){
+    ducks_blast(f->pos,6);
     float ramp=clampf(f->age/.5f,0,1)*clampf((5-f->age)/.5f,0,1);
     // Wake first: waking assigns particle stamps and restores inverse masses.
     // Keep that separate from force deduplication across shared corners.

@@ -46,7 +46,7 @@ static bool fp_receive(NetMessageType type,NetReader *r,uint32_t tick){
   netTransport.session_id=session;fpGeneration=generation;fpCount=0;fpUnlocked=0;fpReceivedRevision=fpStateTick=0;memset(fpActorTick,0,sizeof(fpActorTick));
   free(fpIncoming);fpIncoming=NULL;fpIncomingNext=fpIncomingCount=0;fpBannerRead=fpBannerWrite=0;fpBannerTimer=0;
   memset(netPredictionCount,0,sizeof(netPredictionCount));memset(netPredictionHead,0,sizeof(netPredictionHead));
-  clarity_reset();eq_reset_all();memset(holograms,0,sizeof(holograms));netWorldReady=false;return true;
+  clarity_reset();eq_reset_all();ducks_reset();memset(holograms,0,sizeof(holograms));netWorldReady=false;return true;
  }
  if(type!=NET_MSG_FIREFIGHT)return false;if(netTransport.role!=NET_ROLE_CLIENT)return true;
  int part=net_read_u8(r);

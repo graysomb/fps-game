@@ -82,6 +82,7 @@ static void sword_step(int owner,SwordWave *w,float previous){
         // front reaches that terrain. A blocked section never damages through cover.
         if(end<=begin)continue;
         Ray ray={world_wrap(v_add(w->origin,v_mul(d,begin))),d};
+        ducks_ray(ray,end-begin,.25f,-1,false);
         for(int j=0;j<activePlayers;j++)if(!w->hit[j] && eq_hostile(owner,j)){
             BoundingBox box=combatant_bounds_at(j,world_image(players[j].pos,ray.position),PLAYER_SIZE*.5f);
             Vector3 pad={.25f,.25f,.25f};box.min=v_sub(box.min,pad);box.max=v_add(box.max,pad);

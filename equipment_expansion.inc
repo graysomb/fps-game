@@ -54,6 +54,7 @@ static bool ex_fire(int i,int gun,Ray ray){
     if(gun==EQ_GLOB){int free=-1;for(int n=0;n<EX_GLOBS;n++)if(!exGlobs[n].id){free=n;break;}if(free<0)return false;exGlobs[free]=(GlobProjectile){.id=exNextId++,.owner=i,.pos=ray.position,.velocity=v_mul(ray.direction,60)};return true;}
     float length=eqGuns[gun].range;VoxelHit hit;bool wall=first_voxel_hit_detailed(ray,length,-1,false,&hit);if(wall)length=hit.t;
     int target=eq_actor_ray(i,ray,&length);
+    ducks_ray(ray,length,0,-1,false);
     if(target>=0)eq_damage(i,target,eqGuns[gun].damage,gun==EQ_DMR,gun==EQ_DMR?DEATH_DMR:DEATH_GLOCK,ray.position);
     else if(wall && gun==EQ_DMR)ex_dmr_cut(i,ray,hit);
     eq_trace(player_weapon_pose(i,false).muzzle,v_add(ray.position,v_mul(ray.direction,length)),gun,i);return true;
@@ -80,12 +81,13 @@ static void ex_tick(float dt){
         if(client){g->pos=world_wrap(v_add(g->pos,v_mul(g->velocity,step)));if(g->age>=1)g->id=0;continue;}
         float length=60*step;Ray ray={g->pos,v_norm(g->velocity)};VoxelHit hit;bool wall=first_voxel_hit_detailed(ray,length,-1,false,&hit);if(wall)length=hit.t;int actor=eq_actor_ray(g->owner,ray,&length);
         bool floor=ray.direction.y<0 && ray.position.y+ray.direction.y*length<0;if(floor){length=-ray.position.y/ray.direction.y;actor=-1;}
+        bool duck=ducks_ray(ray,length,.06f,-1,false);
         g->pos=world_wrap(v_add(ray.position,v_mul(ray.direction,length)));
         if(actor>=0){if(eq_hostile(g->owner,actor)&&players[actor].invuln_timer<=0&&enemy_core_open(actor)){
                 eq_damage(g->owner,actor,eqGuns[EQ_GLOB].damage,false,DEATH_GLOB,ray.position);
                 if(players[actor].respawn_timer<=0){exSuppression[actor]=5;ex_splat(g->pos,actor,-1,false);}
             }g->id=0;
-        }else if(wall||floor){ex_splat(g->pos,-1,wall&&!floor?hit.id:-1,false);g->id=0;}else if(g->age>=1)g->id=0;
+        }else if(wall||floor||duck){ex_splat(g->pos,-1,wall&&!floor?hit.id:-1,false);g->id=0;}else if(g->age>=1)g->id=0;
     }
     int budget=32;for(int n=0;n<EX_FIELDS;n++)if(exFields[n].id){GravityField *f=&exFields[n];f->age+=dt;if(f->age>=5){f->id=0;continue;}if(!client){ex_gravity_activate(f,&budget);ex_gravity_pull(f,dt);}}
     ex_construction_tick(dt);

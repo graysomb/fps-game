@@ -137,6 +137,7 @@ static void eq_shotgun_impacts(int owner,ShotgunImpact *hits,int count){
     play_sfx_at(SFX_IMPACT,world_wrap(v_add(players[owner].pos,v_mul(hits[0].direction,hits[0].distance))),owner,1,.8f);
 }
 static void eq_rocket_blast(EquipmentRocket rocket){
+    ducks_blast(rocket.pos,4);
     float damages[MAX_COMBATANTS]={0};
     for(int j=0;j<activePlayers;j++)if(players[j].respawn_timer<=0){Vector3 d=world_delta(players[j].pos,rocket.pos);float dist=v_length(d);VoxelHit hit;
         if(dist<eqRocketOuter && (dist<.15f || !first_voxel_hit_detailed((Ray){rocket.pos,v_norm(d)},fmaxf(0,dist-.3f),-1,false,&hit)))damages[j]=eqGuns[EQ_ROCKET].damage*(1-clampf((dist-eqRocketInner)/(eqRocketOuter-eqRocketInner),0,1));
@@ -165,6 +166,7 @@ static bool eq_fire(int i){
             bool blocked=first_voxel_hit_detailed(pellet,length,-1,false,&hit);if(blocked)length=hit.t;
             int target=eq_actor_ray(i,pellet,&length);if(target>=0)damage[target]+=def->damage;
             else if(blocked)hits[hitCount++]=(ShotgunImpact){voxels[hit.id].identity,hit,d,length,!voxels[hit.id].simulate};
+            ducks_ray(pellet,length,0,-1,false);
             eq_trace(p->pos,v_add(p->pos,v_mul(d,length)),gun,i);
         }
         for(int j=0;j<activePlayers;j++)if(damage[j]>0)eq_damage(i,j,damage[j],true,DEATH_SHOTGUN,p->pos);
@@ -205,6 +207,7 @@ static void eq_command(int i,const NetInputCommand *c,float dt){
             }
         }
         if(!held && e->held && e->charge>=eqRailCharge){
+            ducks_ray(ray,eqGuns[gun].range,0,-1,true);
             for(int j=0;j<activePlayers;j++)if(eq_hostile(i,j)){
                 bool hitActor=false;float period=worldFloorHalfSize*2;int images=worldPeriodic?(int)ceilf(eqGuns[gun].range/period)+1:0;
                 Vector3 nearest=world_image(players[j].pos,p->pos);
@@ -221,6 +224,7 @@ static void eq_command(int i,const NetInputCommand *c,float dt){
     }else if(gun==EQ_CUTTER && held && p->matter>0){
         float step=fminf(dt,p->matter/eqGuns[gun].cost),length=eqGuns[gun].range;VoxelHit hit;bool wall=first_voxel_hit_detailed(ray,length,-1,false,&hit);if(wall)length=hit.t;
         int target=eq_actor_ray(i,ray,&length);e->beamEnd=v_add(p->pos,v_mul(ray.direction,length));
+        ducks_ray(ray,length,.08f,-1,false);
         if(target>=0)eq_damage(i,target,eqGuns[gun].damage*step,true,DEATH_CUTTER,p->pos);
         e->cutTime+=step;bool cut=false;
         for(int cuts=0;cuts<24 && e->cutTime>=eqCutterUnitSeconds;cuts++){
@@ -275,8 +279,9 @@ static void eq_tick(float dt){
     for(int n=0;n<32;n++){EquipmentRocket *r=&eqRockets[n];if(!r->active)continue;float remaining=fminf(dt,.25f);
         while(remaining>0 && r->active){float step=fminf(remaining,1.f/120);remaining-=step;float length=v_length(r->vel)*step;Ray ray={r->pos,v_norm(r->vel)};VoxelHit hit;
             bool collision=first_voxel_hit_detailed(ray,length,-1,false,&hit);if(collision)length=hit.t;int actor=eq_actor_ray(r->owner,ray,&length);
+            bool duck=ducks_ray(ray,length,.12f,-1,false);
             r->pos=world_wrap(v_add(r->pos,v_mul(ray.direction,length)));r->life-=step;
-            if(collision || actor>=0 || r->pos.y<.1f){EquipmentRocket copy=*r;r->active=false;eq_rocket_blast(copy);}else if(r->life<=0)r->active=false;
+            if(collision || actor>=0 || duck || r->pos.y<.1f){EquipmentRocket copy=*r;r->active=false;eq_rocket_blast(copy);}else if(r->life<=0)r->active=false;
         }
     }
 }

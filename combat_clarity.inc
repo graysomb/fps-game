@@ -83,6 +83,7 @@ static bool clarity_debris_hit(int v,int target) {
     return true;
 }
 static void clarity_explode(Vector3 pos,int owner) {
+    ducks_blast(pos,4);
     hologram_blast(pos,4,60);
     if(netTransport.role==NET_ROLE_CLIENT)return;
     float damage[MAX_COMBATANTS]={0};
@@ -124,6 +125,7 @@ static void clarity_grenade_step(GrenadeState *g,float dt) {
     const float radius=.15f;g->vel.y-=GRAVITY*dt;
     int support=-1;
     Vector3 movement=v_mul(g->vel,dt),normal={0};float length=v_length(movement),fraction=1;bool collision=false;
+    ducks_segment(g->pos,v_add(g->pos,movement),radius,-1);
     if(length>1e-5f) {
         for(int c=0;c<9;c++) {
             Vector3 offset=c==8?(Vector3){0}:(Vector3){corner_signs[c][0]*radius,corner_signs[c][1]*radius,corner_signs[c][2]*radius};VoxelHit hit;

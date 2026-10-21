@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define FPS_NET_MAGIC 0x4650534eu /* "FPSN" */
-#define FPS_NET_PROTOCOL_VERSION 25u /* Firefight progression, carrier state and checkpoint session resets. */
+#define FPS_NET_PROTOCOL_VERSION 26u /* Authoritative ambient mallard snapshots. */
 #define FPS_NET_DEFAULT_PORT 27015u
 #define FPS_NET_DISCOVERY_PORT 27016u
 #define FPS_NET_MAX_PACKET 1100u
@@ -38,7 +38,7 @@ typedef enum NetMessageType {
     NET_MSG_REGENERATION,
     NET_MSG_HOLOGRAMS,
     NET_MSG_COMBAT_UI,
-    NET_MSG_CHARGES, NET_MSG_EQUIPMENT, NET_MSG_EXPANSION, NET_MSG_FIREFIGHT, NET_MSG_FIREFIGHT_RESET
+    NET_MSG_CHARGES, NET_MSG_EQUIPMENT, NET_MSG_EXPANSION, NET_MSG_FIREFIGHT, NET_MSG_FIREFIGHT_RESET, NET_MSG_DUCKS
 } NetMessageType;
 
 typedef enum NetInputButtons {
