@@ -61,9 +61,9 @@ static void aim_focus_tick(void){
         bool pad=playerInput[netTransport.role==NET_ROLE_CLIENT?seat:i]==INPUT_TYPE_GAMEPAD;
         int device=pad?seat_device(seat):-1,input=pad?1:0;bool changed=aimDevices[i]!=device || aimInputs[i]!=input;aimDevices[i]=device;aimInputs[i]=input;
         if(!changed && gameState==GAME_STATE_PLAYING && IsWindowFocused() && !debugConsoleOpen && !(enemyLab&&enemyLabPaused) && (!pad||IsGamepadAvailable(seat_device(seat))))continue;
-        AimState *a=&aimStates[i];bool notify=a->active||a->blend>0;uint32_t pending=a->pending;*a=(AimState){.pending=pending};
+        AimState *a=&aimStates[i];bool notify=a->active||a->blend>0||equipment[i].buildHeld;equipment[i].buildHeld=false;uint32_t pending=a->pending;*a=(AimState){.pending=pending};
         if(notify && netTransport.role==NET_ROLE_CLIENT && netTransport.connected){
-            NetInputCommand c={.sequence=++netInputSequence[i],.pressed=NET_INPUT_AIM_CANCEL};a->pending=c.sequence;
+            NetInputCommand c={.sequence=++netInputSequence[i],.pressed=NET_INPUT_AIM_CANCEL|NET_INPUT_BUILD_CANCEL};a->pending=c.sequence;
             uint8_t data[128];NetWriter w;net_writer_init(&w,data,sizeof(data));net_write_header(&w,NET_MSG_INPUT,0,netTransport.session_id,netServerTick);net_write_u8(&w,i);net_write_input(&w,&c);net_transport_send(&netTransport,0,FPS_NET_CHANNEL_INPUT,data,w.length,true);
         }
     }

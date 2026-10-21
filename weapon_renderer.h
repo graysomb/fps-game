@@ -45,7 +45,7 @@ typedef struct WeaponVisual {
     float shot_time;
     float claw_open;
     /* Cosmetic state supplied by gameplay: charge and active effect in [0,1]. */
-    float charge, activity;
+    float charge, activity, depleted;
 } WeaponVisual;
 
 typedef struct WeaponPose {

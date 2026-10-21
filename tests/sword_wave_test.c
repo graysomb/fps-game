@@ -39,17 +39,39 @@ static void behavior(void){
    assert(v_dot(edge,shared.edge_direction)>.999f);}
  }
 }
+static void swing_cost(void){
+ int balances[]={0,24,25,100};
+ for(int n=0;n<4;n++){
+  setup();players[0].matter=balances[n];players[0].isExposed=balances[n]==0;
+  perform_melee(0);bool affordable=balances[n]>=25;
+  assert(players[0].meleeSwingActive==affordable && swordWaves[0].active==affordable);
+  assert(players[0].matter==balances[n]-(affordable?25:0));
+  assert(swordNextDirection[0]==(affordable?1:0));float matter=players[0].matter;
+  perform_melee(0);assert(players[0].matter==matter);assert(!eq_fire(0));assert(players[0].matter==matter);
+  if(affordable){assert(players[0].isExposed==(balances[n]==25));advance(.6f,60);assert(!swordWaves[0].active);}
+ }
+ setup();assert(eq_fire(0));assert(players[0].matter==75);advance(.6f,60);perform_melee(0);assert(players[0].matter==75); // Real-time cooldown rejects another attack.
+ setup();netTransport.role=NET_ROLE_CLIENT;perform_melee(0);assert(players[0].matter==100 && swordWaves[0].active);netTransport.role=NET_ROLE_OFFLINE;
+}
 static void terrain(void){
  int counts[3]={0};int trial=0;
  for(int fps=30;fps<=120;fps*=2){
   setup();add_static_box_at_grid(-7,7,0,12,-8,-8,GRAY);init_static_hash();rebuild_voxel_hash();
-  int before=voxel_count;perform_melee(0);advance(.6f,fps);counts[trial++]=before-voxel_count;assert(counts[trial-1]>0 && swordWaves[0].cuts<=96);
-  int first=voxel_count;players[0].last_melee_time=-100;perform_melee(0);advance(.6f,fps);assert(voxel_count<first);
+  int before=voxel_count;perform_melee(0);advance(.6f,fps);counts[trial++]=swordWaves[0].cuts;assert(voxel_count==before);int active=0;for(int v=0;v<voxel_count;v++)active+=voxels[v].simulate;assert(active>=swordWaves[0].cuts);assert(counts[trial-1]>0 && swordWaves[0].cuts<=96);
+  int first=voxel_count;players[0].last_melee_time=-100;perform_melee(0);advance(.6f,fps);assert(voxel_count==first && swordWaves[0].cuts>0);
  }
  assert(counts[0]==counts[1] && counts[1]==counts[2]);
  setup();players[1].pos=(Vector3){0,3,-5};add_static_box_at_grid(-10,10,0,15,-8,-4,GRAY);init_static_hash();rebuild_voxel_hash();
  perform_melee(0);eq_tick(.15f);swordWaves[0].cuts=96;advance(.45f,60);assert(players[1].matter==100);
  int stopped=0;for(int n=0;n<SWORD_LANES;n++)stopped+=swordWaves[0].stop[n]<6;assert(stopped>0);
+ setup();players[1].pos.x=30;int v=add_static_voxel_at_grid(0,5,-5,GRAY,0);init_static_hash();rebuild_voxel_hash();
+ SwordWave wave={0};assert(sword_cut_hit(0,&wave,(VoxelHit){.id=v,.x=0,.y=5,.z=-5}));wave.cuts=1;
+ v=enemy_voxel(wave.cutIds[0]);assert(v>=0 && voxels[v].simulate && voxels[v].glueEligible && voxels[v].cutDetached);
+ float height=voxels[v].pos.y;for(int n=0;n<12;n++)simulate_voxel_pbd_steps(1.f/60,1);
+ v=enemy_voxel(wave.cutIds[0]);assert(v>=0 && voxels[v].pos.y<height && v_isfinite(voxels[v].pos));
+ acquire_tether_hit(0,v,(Vector3){0,1,0});assert(players[0].tetherHolding);release_tether(0);
+ setup();v=add_static_voxel_at_grid(0,5,-5,GRAY,0);init_static_hash();int count=voxel_count,saved=particle_pool_count,freeSaved=free_particle_count;particle_pool_count=MAX_PARTICLES;free_particle_count=0;
+ assert(!sword_cut_hit(0,&wave,(VoxelHit){.id=v,.x=0,.y=5,.z=-5}) && voxel_count==count && !voxels[v].simulate);particle_pool_count=saved;free_particle_count=freeSaved;
  fprintf(stderr,"Sword cut counts at 30/60/120 FPS: %d %d %d\n",counts[0],counts[1],counts[2]);
 }
 static void lifecycle_and_protection(void){
@@ -72,7 +94,7 @@ static void stress(void){
  add_static_box_at_grid(i*20-7,i*20+7,0,12,-8,-8,GRAY);}
  init_static_hash();rebuild_voxel_hash();double first=0,last=0,worst=0;
  for(int frame=0;frame<480;frame++){
-  double start=GetTime();if(frame%48==0)for(int i=0;i<4;i++){players[i].last_melee_time=-100;perform_melee(i);}
+  double start=GetTime();if(frame%48==0)for(int i=0;i<4;i++){players[i].last_melee_time=-100;players[i].matter=100;perform_melee(i);}
   eq_tick(1.f/60);int active=0;for(int i=0;i<4;i++){active+=swordWaves[i].active;assert(swordWaves[i].cuts<=96 && v_isfinite(swordWaves[i].origin));}
   assert(active<=4);double ms=1000*(GetTime()-start);worst=fmax(worst,ms);if(frame<60)first+=ms;if(frame>=420)last+=ms;
  }
@@ -96,7 +118,7 @@ static void preview(void){
  }
  assert(eqSlashShader.id && eqSlashShader.id!=rlGetShaderIdDefault());
  for(int view=0;view<3;view++){
-  swordWaves[0]=(SwordWave){0};eq_sword(0);players[0].meleeSwingActive=true;eq_tick(.27f);
+  swordWaves[0]=(SwordWave){0};players[0].matter=100;eq_sword(0);players[0].meleeSwingActive=true;eq_tick(.27f);
   bool third=view==1;drawViewPlayerIndex=third?-1:0;weaponViewAspect=view==0?480.f/270:960.f/540;
   RenderTexture2D shot=LoadRenderTexture(view==0?480:960,view==0?270:540);
   Camera3D camera={third?(Vector3){5,5,4}:players[0].pos,third?(Vector3){0,3,-2}:v_add(players[0].pos,(Vector3){0,0,-1}),{0,1,0},60,CAMERA_PERSPECTIVE};
@@ -120,6 +142,6 @@ static void preview(void){
 }
 int main(int argc,char **argv){
  assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Sword wave regression");
- init_pbd_thread_pool();assert(initialize_physics_backend());behavior();terrain();lifecycle_and_protection();stress();preview();
+ init_pbd_thread_pool();assert(initialize_physics_backend());behavior();swing_cost();terrain();lifecycle_and_protection();stress();preview();
  clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Sword wave tests passed");return 0;
 }

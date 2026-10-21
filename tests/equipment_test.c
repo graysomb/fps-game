@@ -23,7 +23,7 @@ static void attacks(void){fixture();eq_pickup(0,PICKUP_RAILGUN,false);equipment[
  fixture();add_static_box_at_grid(-2,2,0,6,-4,-4,GRAY);init_static_hash();rebuild_voxel_hash();eq_pickup(0,PICKUP_CUTTER,false);equipment[0].switchTime=0;eq_command(0,&hold,.01f);assert(players[1].matter==100);eq_rocket_blast((EquipmentRocket){.owner=0,.pos={0,2,-1}});assert(players[1].matter==100);
  fixture();players[1].invuln_timer=1;eq_damage(0,1,100,true,DEATH_ROCKET,players[0].pos);assert(players[1].matter==100);gameMode=GAME_MODE_FIREFIGHT;combatantTeam[1]=0;players[1].invuln_timer=0;eq_damage(0,1,100,true,DEATH_RAIL,players[0].pos);assert(players[1].matter==100);
 }
-static void panels(void){fixture();eq_pickup(0,PICKUP_REINFORCED,false);players[0].pitch=-40;players[1].pos.x=20;Vector3 points[EQ_PANEL_CUBES];assert(eq_panel_positions(0,points));float cost=3*ff_build_cost(0);assert(eq_build(0));assert(voxel_count==EQ_PANEL_CUBES && players[0].matter==100-cost);for(int i=0;i<EQ_PANEL_CUBES;i++)assert(voxels[i].reinforced);float m=players[0].matter;assert(!eq_build(0)&&players[0].matter==m);}
+static void panels(void){fixture();eq_pickup(0,PICKUP_REINFORCED,false);players[0].pitch=-40;players[1].pos.x=20;Vector3 points[EQ_PANEL_CUBES];assert(eq_panel_positions(0,points));float cost=ff_build_cost(0);assert(eq_build(0));assert(voxel_count==EQ_PANEL_CUBES && players[0].matter==100-cost);for(int i=0;i<EQ_PANEL_CUBES;i++)assert(voxels[i].reinforced);float m=players[0].matter;assert(!eq_build(0)&&players[0].matter==m);}
 static void sticky(void){fixture();GrenadeState g={.id=1,.owner=0,.pos={0,.2f,0},.vel={0,-1,0},.fuse=-1,.adhesive=true};clarity_grenade_step(&g,.1f);assert(g.attached && g.fuse>1.3f);for(int n=0;n<13;n++)clarity_grenade_step(&g,.1f);assert(g.fuse>0);clarity_grenade_step(&g,.11f);assert(g.fuse==0);
  int v=addVoxel(0,2,0,false,true,GRAY,0);g=(GrenadeState){.id=2,.attached=true,.adhesive=true,.support=voxels[v].identity,.attachment={.5f,.5f,.5f},.fuse=.4f};clarity_grenade_step(&g,.01f);Vector3 old=g.pos;for(int p=0;p<8;p++)voxels[v].particles[p]->pos.x+=2;clarity_grenade_step(&g,.01f);assert(fabsf(g.pos.x-old.x-2)<.001f);remove_voxel_index(v);clarity_grenade_step(&g,.01f);assert(!g.attached && g.fuse<.4f && g.fuse>0);}
 static void supplies_regenerate(void){fixture();gameMode=GAME_MODE_FIREFIGHT;firefightFoundry=true;firefightPractice=false;useCustomMap=false;pickups[0]=(Pickup){.active=true,.type=PICKUP_RAILGUN,.pos={5,.8f,5}};add_static_box_at_grid(9,11,0,3,9,11,GRAY);init_static_hash();clarity_supply_update();assert(pickups[0].pos.y>2.7f);clear_world_voxels();init_static_hash();clarity_supply_update();assert(fabsf(pickups[0].pos.y-.8f)<.01f);}
@@ -85,9 +85,9 @@ static void revised_weapons(void){
  eq_pickup(0,PICKUP_CUTTER,false);equipment[0].switchTime=0;eq_command(0,&held,.25f);assert(fabsf(players[0].matter-99)<.001f);
  assert(eqCutterUnitSeconds==1.f/24);
  fixture();eq_pickup(0,PICKUP_SWORD,false);equipment[0].switchTime=0;assert(eq_gun(0)==EQ_BLADE && !(equipment[0].upgrades&EQ_SWORD));
- players[0].matter=0;players[0].isExposed=true;players[0].last_melee_time=-100;assert(eq_fire(0));assert(players[0].meleeSwingActive);
+ players[0].matter=0;players[0].isExposed=true;players[0].last_melee_time=-100;assert(!eq_fire(0));assert(!players[0].meleeSwingActive);
  fixture();players[1].pos.x=20;add_static_box_at_grid(-5,5,0,8,-7,-3,GRAY);init_static_hash();rebuild_voxel_hash();int before=voxel_count;
- eq_sword(0);eq_sword_tick(.6f);assert(voxel_count<before);for(int v=0;v<voxel_count;v++)assert(v_isfinite(voxels[v].pos));
+ eq_sword(0);eq_sword_tick(.6f);assert(voxel_count==before && swordWaves[0].cuts>0);for(int v=0;v<voxel_count;v++)assert(v_isfinite(voxels[v].pos));
 }
 static void beam_captures(void){
  fixture();weapon_renderer_init();weaponFrameSampled=false;drawViewPlayerIndex=0;
@@ -109,7 +109,7 @@ static void sword_reach_and_visuals(void){
  weapon_renderer_init();character_renderer_init();weaponFrameSampled=false;drawViewPlayerIndex=0;equipment[0].switchTime=0;
  for(int small=0;small<2;small++)for(int phase=0;phase<3;phase++){
   int w=small?480:960,h=small?270:540;weaponViewAspect=(float)w/h;
-  swordWaves[0]=(SwordWave){0};eq_sword(0);eq_sword_tick(phase==0?0:phase==1?.25f:.45f);players[0].meleeSwingActive=phase>0;players[0].meleeSwingStartTime=GetTime()-swordWaves[0].age;
+  swordWaves[0]=(SwordWave){0};players[0].matter=100;eq_sword(0);eq_sword_tick(phase==0?0:phase==1?.25f:.45f);players[0].meleeSwingActive=phase>0;players[0].meleeSwingStartTime=GetTime()-swordWaves[0].age;
   WeaponPose pose=player_weapon_pose(0,true);assert(v_isfinite(pose.muzzle)&&v_isfinite(pose.grip_heel));
   if(!phase)assert(pose.muzzle.y>pose.grip_heel.y+.4f);
   RenderTexture2D rt=LoadRenderTexture(w,h);Camera3D cam={players[0].pos,{0,2,-20},{0,1,0},60,CAMERA_PERSPECTIVE};
@@ -120,6 +120,63 @@ static void sword_reach_and_visuals(void){
   Image im=LoadImageFromTexture(rt.texture);ImageFlipVertical(&im);ExportImage(im,TextFormat("artifacts/sword-pose-%d-%d.png",small,phase));UnloadImage(im);UnloadRenderTexture(rt);
  }
  eq_beam_shutdown();assert(!eqSlashShader.id);character_renderer_shutdown();weapon_renderer_shutdown();
+}
+static void matter_build_changes(void){
+ for(int upgraded=0;upgraded<2;upgraded++){
+  fixture();players[0].pitch=-40;players[1].pos.x=20;equipment[0].upgrades=upgraded?EQ_BUILD:0;
+  NetInputCommand press={.held=NET_INPUT_BUILD,.pressed=NET_INPUT_BUILD},hold={.held=NET_INPUT_BUILD},release={0},cancel={.pressed=NET_INPUT_BUILD_CANCEL};
+  eq_build_command(0,&release);assert(!voxel_count);
+  eq_build_command(0,&press);assert(equipment[0].buildHeld && !voxel_count);
+  eq_build_command(0,&hold);assert(!voxel_count);eq_build_command(0,&cancel);eq_build_command(0,&release);assert(!voxel_count);
+  eq_build_command(0,&press);eq_build_command(0,&release);assert(voxel_count==(upgraded?125:27) && players[0].matter==90);
+  eq_build_command(0,&release);assert(players[0].matter==90);
+ }
+ int balances[]={0,24,25,100};
+ for(int n=0;n<4;n++){
+  fixture();players[0].goldTetherCharged=true;players[0].matter=balances[n];players[0].isExposed=balances[n]==0;
+  acquire_tether_hit(0,-1,(Vector3){0,1,0});assert(players[0].matter==balances[n]);
+  int v=addVoxel(0,2,-3,false,true,GRAY,0);acquire_tether_hit(0,v,(Vector3){0,1,0});
+  assert(players[0].tetherHolding && players[0].goldTetherHolding==(balances[n]>=25));
+  assert(players[0].matter==balances[n]-(balances[n]>=25?25:0));float matter=players[0].matter;
+  release_tether(0);assert(players[0].matter==matter && players[0].goldTetherCharged);
+ }
+ fixture();players[0].matter=0;players[0].isExposed=true;eq_tick(.2f);assert(weaponVisuals[0].depleted==1);players[0].matter=1;eq_tick(.2f);assert(weaponVisuals[0].depleted==0);
+ assert(eqGuns[EQ_SHOTGUN].damage*EQ_PELLETS==50 && eqShotgunImpulse==TETHER_THROW_IMPULSE);
+ fixture();players[1].pos.z=-1;eq_pickup(0,PICKUP_SHOTGUN,false);equipment[0].switchTime=0;assert(eq_fire(0));assert(players[1].matter==50);
+ fixture();players[0].pitch=-40;players[1].pos.x=20;equipment[0].upgrades=EQ_BUILD;players[0].matter=9;assert(!eq_build(0) && !voxel_count && players[0].matter==9);
+ players[0].matter=100;Vector3 points[EQ_PANEL_CUBES];assert(eq_panel_positions(0,points));players[1].pos=points[60];assert(!eq_build(0) && !voxel_count && players[0].matter==100);players[1].pos.x=20;
+ int pool=particle_pool_count,freeCount=free_particle_count;particle_pool_count=MAX_PARTICLES;free_particle_count=0;assert(!eq_build(0) && !voxel_count && players[0].matter==100);particle_pool_count=pool;free_particle_count=freeCount;
+
+ // Explicit pellet contacts isolate the impulse from spread and target size.
+ for(int size=1;size<=4;size++){
+  fixture();players[1].pos.x=20;int target=-1;
+  for(int n=0;n<size;n++){int v=addVoxel(n*VOXEL_SIZE,2,-3,false,true,GRAY,0);glue_neighbor_faces_for_voxel(v);if(!n)target=v;}
+  ShotgunImpact hits[EQ_PELLETS]={0};for(int n=0;n<EQ_PELLETS;n++)hits[n]=(ShotgunImpact){.id=voxels[target].identity,.direction={0,0,-1},.distance=12};
+  eq_shotgun_impacts(0,hits,EQ_PELLETS);float momentum=0;for(int n=0;n<voxel_count;n++)momentum-=voxels[n].vel.z*voxel_mass_units(&voxels[n]);assert(fabsf(momentum-TETHER_THROW_IMPULSE)<.01f);
+ }
+}
+static void matter_captures(void){
+ weaponRenderingReady=weapon_renderer_init();character_renderer_init();
+ for(int split=0;split<2;split++)for(int bloom=0;bloom<2;bloom++)for(int empty=0;empty<2;empty++){
+  fixture();activePlayers=multiplayerActivePlayers=split?4:1;drawWeaponModels=true;weaponBloomEnabled=bloom;
+  for(int i=0;i<activePlayers;i++){players[i].pos=(Vector3){i*10.f,3,0};players[i].pitch=-40;equipment[i].gun[0]=i%2?EQ_RAIL:EQ_SHOTGUN;equipment[i].upgrades=i%2?0:EQ_BUILD;equipment[i].buildHeld=true;players[i].matter=empty?0:100;players[i].isExposed=empty;equipment[i].depleted=empty;weaponVisuals[i].depleted=empty;}
+  Vector3 at[EQ_PANEL_CUBES];assert(eq_panel_positions(0,at));
+  RenderTexture2D views[4]={0};int count=0,w=0,h=0;render_gameplay_view(views,&count,&w,&h,false);
+  Image out=GenImageColor(960,540,BLACK);
+  for(int i=0;i<count;i++){Image tile=LoadImageFromTexture(views[i].texture);ImageFlipVertical(&tile);ImageDraw(&out,tile,(Rectangle){0,0,tile.width,tile.height},(Rectangle){split?(i%2)*480:0,split?(i/2)*270:0,split?480:960,split?270:540},WHITE);UnloadImage(tile);UnloadRenderTexture(views[i]);weapon_bloom_unload(&weaponBlooms[i]);}
+  ExportImage(out,TextFormat("artifacts/matter-build-%d-%d-%d.png",split,bloom,empty));UnloadImage(out);
+ }
+ eq_beam_shutdown();character_renderer_shutdown();weapon_renderer_shutdown();
+ // Exercise the real shader-loading fallback from a directory without shader assets.
+ assert(ChangeDirectory("artifacts"));assert(weapon_renderer_init());assert(ChangeDirectory(".."));
+ RenderTexture2D rt=LoadRenderTexture(480,270);double brightness[2]={0};
+ for(int empty=0;empty<2;empty++){
+  WeaponVisual visual={.shot_time=-1000,.depleted=empty};Camera3D camera={{0,0,0},{0,0,-1},{0,1,0},60,CAMERA_PERSPECTIVE};
+  WeaponPose pose=weapon_pose(WEAPON_IMPULSE_SHOTGUN,camera.position,(Vector3){0,0,-1},(Vector3){1,0,0},(Vector3){0,1,0},true,480.f/270,NULL,0);
+  BeginTextureMode(rt);ClearBackground(BLACK);BeginMode3D(camera);weapon_draw(pose,&visual,camera.position,0,false,WEAPON_COLOR);EndMode3D();EndTextureMode();
+  Image im=LoadImageFromTexture(rt.texture);ImageFlipVertical(&im);Color *pixels=LoadImageColors(im);for(int n=0;n<im.width*im.height;n++)brightness[empty]+=pixels[n].r+pixels[n].g+pixels[n].b;UnloadImageColors(pixels);ExportImage(im,TextFormat("artifacts/matter-fallback-%d.png",empty));UnloadImage(im);
+ }
+ assert(brightness[0]>0 && brightness[1]<brightness[0]*.3);UnloadRenderTexture(rt);weapon_renderer_shutdown();
 }
 static void persistent_tether(void){
  fixture();players[0].goldTetherCharged=true;
@@ -134,4 +191,4 @@ static void persistent_tether(void){
  assert(combatantLife[0]==LIFE_DOWNED && players[0].goldTetherCharged);
  ff_restore_human(0,35);assert(players[0].goldTetherCharged);
 }
-int main(int argc,char**argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Equipment tests");init_pbd_thread_pool();assert(initialize_physics_backend());inventory();persistent_tether();revised_weapons();attacks();panels();sticky();lifecycle();sword();shotgun_structures();protection();supplies_regenerate();maps();stress();captures();beam_captures();sword_reach_and_visuals();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Equipment tests passed");return 0;}
+int main(int argc,char**argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Equipment tests");init_pbd_thread_pool();assert(initialize_physics_backend());inventory();matter_build_changes();persistent_tether();revised_weapons();attacks();panels();sticky();lifecycle();sword();shotgun_structures();protection();supplies_regenerate();maps();stress();captures();beam_captures();sword_reach_and_visuals();matter_captures();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Equipment tests passed");return 0;}

@@ -5,25 +5,52 @@ static Vector3 sword_lane_direction(const SwordWave *w,int lane){
     Vector3 local=weapon_sword_sample(birth,w->direction).direction;
     return v_add(v_add(v_mul(r,local.x),v_mul(u,local.y)),v_mul(f,-local.z));
 }
-static void eq_sword(int i){
-    if(i<0 || i>=MAX_PLAYERS || swordWaves[i].active)return;
+static bool eq_sword(int i){
+    if(i<0 || i>=MAX_PLAYERS || swordWaves[i].active || players[i].matter<eqGuns[EQ_BLADE].cost)return false;
     SwordWave *w=&swordWaves[i];
     *w=(SwordWave){.active=true,.sequence=++swordSequences[i],.direction=swordNextDirection[i]};
     swordDirection[i]=w->direction;swordNextDirection[i]^=1;
     for(int n=0;n<SWORD_LANES;n++)w->stop[n]=SWORD_REACH;
     equipment[i].cooldown[EQ_BLADE]=eqSwordCycle;
+    if(netTransport.role!=NET_ROLE_CLIENT)eq_spend(i,eqGuns[EQ_BLADE].cost);
+    return true;
 }
-static bool sword_cut_hit(int owner,VoxelHit hit){
+static bool sword_cut_hit(int owner,SwordWave *w,VoxelHit hit){
     int v=hit.id;if(v<0 || v>=voxel_count || voxel_is_fluid(&voxels[v]))return false;
     uint64_t id=voxels[v].identity;Vector3 at=voxels[v].pos;
     if(clarity_shield_voxel(v)){clarity_shield_melee(v,owner);return enemy_voxel(id)<0;}
+    // Reserve all eight replacement corners before modifying topology.
+    if(MAX_PARTICLES-particle_pool_count+free_particle_count<8 || voxel_count+1>=MAX_VOXELS)return false;
     if(!voxels[v].simulate){
+        if(voxels[v].activationCooldownFrames>0)return false;
         if(foundry_trap_hit(v,owner,false))return true;
-        remove_static_voxels_in_region_recycle(hit.x,hit.x,hit.y,hit.y,hit.z,hit.z);
-    }else {enemy_detach(v);detach_goliath_armor_voxel(v);remove_voxel_index(v);}
-    mark_surface_neighbors(at);
-    return enemy_voxel(id)<0;
+        Vector3 local=world_image(at,w->origin);int bx=floorf(local.x/VOXEL_SIZE),by=floorf(local.y/VOXEL_SIZE),bz=floorf(local.z/VOXEL_SIZE);
+        if(!w->terrainChanged){w->minx=w->maxx=bx;w->miny=w->maxy=by;w->minz=w->maxz=bz;}
+        else {w->minx=fminf(w->minx,bx);w->maxx=fmaxf(w->maxx,bx);w->miny=fminf(w->miny,by);w->maxy=fmaxf(w->maxy,by);w->minz=fminf(w->minz,bz);w->maxz=fmaxf(w->maxz,bz);}
+        Voxel copy=voxels[v];
+        // Coarse spans must not disappear when only one unit is contacted.
+        int x0,x1,y0,y1,z0,z1;voxel_grid_bounds(&copy,&x0,&x1,&y0,&y1,&z0,&z1);
+        if(x0!=x1 || y0!=y1 || z0!=z1)return false;
+        if(copy.owner<0 && !recycle_queue_push(&copy))return false;
+        remove_voxel_index(v);
+        v=addVoxel(at.x,at.y,at.z,false,true,copy.color,copy.type);
+        if(v<0)return false;
+        w->terrainChanged=true;
+        voxels[v].reinforced=copy.reinforced;
+        voxels[v].restorationQueued=copy.owner<0;
+        voxels[v].restorationDeadlineFrame=recycleFrameCounter+RECYCLE_STATIC_RESTORE_DELAY;
+    }else{
+        enemy_detach(v);detach_goliath_armor_voxel(v);
+        for(int face=0;face<6;face++)break_face_link(&voxels[v],face);
+        if(voxels[v].sleeping)wake_sleeping_cluster_in_place(v);
+    }
+    voxels[v].owner=voxels[v].activator=owner;voxels[v].glueEligible=true;voxels[v].cutDetached=true;
+    voxels[v].sleeping=false;voxels[v].wake_source=true;voxels[v].wake_timer=COARSENING_WAKE_FRAMES;
+    w->cutIds[w->cuts]=voxels[v].identity;
+    mark_surface(v);mark_surface_neighbors(at);
+    return true;
 }
+static bool sword_trace(SwordWave *w,Ray ray,float reach,VoxelHit *hit){return first_voxel_hit_filtered(ray,reach,-1,false,-1,hit,w->cutIds,w->cuts);}
 static void sword_step(int owner,SwordWave *w,float previous){
     Vector3 r=v_norm(v_cross(w->forward,(Vector3){0,1,0})),u=v_cross(r,w->forward);
     Vector3 diagonal=v_norm(v_add(v_mul(r,w->direction?-1:1),u)),normal=v_norm(v_cross(w->forward,diagonal));
@@ -39,9 +66,9 @@ static void sword_step(int owner,SwordWave *w,float previous){
             float cursor=begin;
             for(int attempt=0;attempt<=EQ_SWORD_CUTS && cursor<end;attempt++){
                 Ray ray={world_wrap(v_add(origin,v_mul(d,cursor))),d};VoxelHit hit;
-                if(!first_voxel_hit_detailed(ray,end-cursor,-1,false,&hit))break;
+                if(!sword_trace(w,ray,end-cursor,&hit))break;
                 float distance=cursor+fmaxf(0,hit.t);
-                if(w->cuts>=EQ_SWORD_CUTS || !sword_cut_hit(owner,hit)){
+                if(w->cuts>=EQ_SWORD_CUTS || !sword_cut_hit(owner,w,hit)){
                     end=fmaxf(begin,distance-.002f);w->stop[lane]=fminf(w->stop[lane],end);break;
                 }
                 w->cuts++;
@@ -60,7 +87,7 @@ static void sword_step(int owner,SwordWave *w,float previous){
             RayCollision hit=GetRayCollisionBox(ray,box);
             if(hit.hit && hit.distance>=0 && hit.distance<=end-begin){
                 VoxelHit shield;float centerDistance=v_length(world_delta(players[j].pos,ray.position));
-                if(first_voxel_hit_detailed(ray,centerDistance,-1,false,&shield))continue;
+                if(sword_trace(w,ray,centerDistance,&shield))continue;
                 w->hit[j]=true;eq_damage(owner,j,eqSwordDamage,true,DEATH_SWORD,w->origin);
             }
         }
@@ -78,7 +105,12 @@ static void eq_sword_tick(float dt){
                 play_sfx_at(SFX_MELEE,w->origin,i,1,.7f);
             }
             if(w->emitted && netTransport.role!=NET_ROLE_CLIENT)sword_step(i,w,previous);
-            if(w->age>=SWORD_ANIM_SECONDS-1e-6f){w->age=SWORD_ANIM_SECONDS;w->active=false;players[i].meleeSwingActive=false;}
+            if(w->age>=SWORD_ANIM_SECONDS-1e-6f){w->age=SWORD_ANIM_SECONDS;
+                if(w->terrainChanged && netTransport.role!=NET_ROLE_CLIENT){
+                    // One localized support wake per completed cut, not one global rebuild per ray.
+                    activate_static_voxels_near_region(w->minx,w->maxx,w->miny,w->maxy,w->minz,w->maxz,i);
+                }
+                w->active=false;players[i].meleeSwingActive=false;}
         }
     }
 }

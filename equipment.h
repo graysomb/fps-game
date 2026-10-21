@@ -4,14 +4,15 @@ enum { EQ_SWORD=1,EQ_ADHESIVE=2,EQ_BUILD=4 };
 typedef struct {const char *name;WeaponKind visual;float cost,cooldown,range,damage,zoom;} GunDefinition;
 static const GunDefinition eqGuns[EQ_GUN_COUNT]={
     {"Default",WEAPON_STANDARD,MATTER_SHOT_COST,BULLET_COOLDOWN_SECONDS,100,34,1.5f},{"Voxel",WEAPON_DYNAMIC_LAUNCHER,MATTER_SHOT_COST,BULLET_COOLDOWN_SECONDS,100,34,1.25f},
-    {"Shotgun",WEAPON_IMPULSE_SHOTGUN,6,.8f,12,5,1.2f},{"Cutter",WEAPON_CUTTER,4,0,24,20,2},
-    {"Railgun",WEAPON_RAILGUN,15,1.8f,100,50,4},{"Rocket",WEAPON_ROCKET_LAUNCHER,25,1.5f,110,100,1.75f},{"Sword",WEAPON_SWORD,0,.8f,6,10000,1}};
-enum { EQ_PELLETS=8, EQ_PANEL_SIDE=5, EQ_PANEL_CUBES=EQ_PANEL_SIDE*EQ_PANEL_SIDE, EQ_SWORD_CUTS=96 };
+    {"Shotgun",WEAPON_IMPULSE_SHOTGUN,6,.8f,12,6.25f,1.2f},{"Cutter",WEAPON_CUTTER,4,0,24,20,2},
+    {"Railgun",WEAPON_RAILGUN,15,1.8f,100,50,4},{"Rocket",WEAPON_ROCKET_LAUNCHER,25,1.5f,110,100,1.75f},{"Sword",WEAPON_SWORD,25,.8f,6,10000,1}};
+enum { EQ_PELLETS=8, EQ_PANEL_SIDE=5, EQ_PANEL_CUBES=EQ_PANEL_SIDE*EQ_PANEL_SIDE*EQ_PANEL_SIDE, EQ_SWORD_CUTS=96 };
 static const float eqSwitchSeconds=.25f,eqRailCharge=.65f,eqCutterUnitSeconds=1.f/24;
 static const float eqShotgunCone=12,eqRocketSpeed=22,eqRocketLife=5,eqRocketInner=1,eqRocketOuter=4;
-static const float eqShotgunImpulse=48,eqShotgunActivationBelief=1;
+static const float eqShotgunImpulse=TETHER_THROW_IMPULSE,eqShotgunActivationBelief=1;
+static const float eqGoldGrabCost=25;
 static const float eqSwordReach=SWORD_REACH,eqSwordSweep=SWORD_SWEEP_DEGREES,eqSwordCycle=.8f,eqSwordDamage=10000;
-typedef struct {int gun[2],selected,upgrades;float cooldown[EQ_GUN_COUNT],switchTime,charge,cutTime,buildTime;bool initialized,held;Vector3 beamEnd;} Equipment;
+typedef struct {int gun[2],selected,upgrades;float cooldown[EQ_GUN_COUNT],switchTime,charge,cutTime,buildTime;bool initialized,held,buildHeld,wasEmpty;float depleted,depletionPulse;Vector3 beamEnd;} Equipment;
 static Equipment equipment[MAX_PLAYERS];
 static bool equipmentLab;
 static bool equipmentEmission;
@@ -27,6 +28,8 @@ typedef struct {
     float age,stop[SWORD_LANES];
     Vector3 origin,forward;
     bool hit[MAX_COMBATANTS];
+    uint64_t cutIds[EQ_SWORD_CUTS];
+    bool terrainChanged;int minx,maxx,miny,maxy,minz,maxz;
 } SwordWave;
 static SwordWave swordWaves[MAX_PLAYERS];
 static uint32_t swordSequences[MAX_PLAYERS];
@@ -47,8 +50,10 @@ static int eq_pickup_gun(int type);
 static void eq_layout(void);
 static void eq_world(void);
 static void eq_hud(int i,int w,int h);
-static void eq_sword(int i);
+static bool eq_sword(int i);
 static bool eq_build(int i);
+static void eq_build_command(int i,const NetInputCommand *c);
+static void eq_build_sample(int seat,int slot,NetInputCommand *c);
 static void eq_snapshot(int peer);
 static bool eq_receive(NetMessageType type,NetReader *r,uint32_t tick);
 static void eq_lab(void);

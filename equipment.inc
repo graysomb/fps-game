@@ -111,7 +111,7 @@ static void eq_shotgun_impacts(int owner,ShotgunImpact *hits,int count){
         for(int k=0;k<members;k++){
             int member=glueClusterIndices[k];voxels[member].activator=owner;
             for(int hit=n;hit<count;hit++)if(targets[hit]==member){
-                float falloff=1-.75f*clampf(hits[hit].distance/eqGuns[EQ_SHOTGUN].range,0,1);
+                float falloff=1;
                 impulse=v_add(impulse,v_mul(hits[hit].direction,eqShotgunImpulse/EQ_PELLETS*falloff));targets[hit]=-1;
             }
         }
@@ -139,7 +139,7 @@ static void eq_rocket_blast(EquipmentRocket rocket){
 static bool eq_fire(int i){
     if(!eq_usable(i))return false;int gun=eq_gun(i);if(gun<EQ_SHOTGUN || gun==EQ_CUTTER || gun==EQ_RAIL)return false;
     Equipment *e=&equipment[i];Player *p=&players[i];const GunDefinition *def=&eqGuns[gun];
-    if(gun==EQ_BLADE){if(e->switchTime>0)return false;perform_melee(i);return p->meleeSwingActive;}
+    if(gun==EQ_BLADE){if(e->switchTime>0 || p->meleeSwingActive)return false;perform_melee(i);return p->meleeSwingActive;}
     if(e->switchTime>0 || e->cooldown[gun]>0 || p->isExposed || p->matter<def->cost)return false;
     Vector3 f=player_forward(p);Ray ray={p->pos,f};
     if(gun==EQ_SHOTGUN){
@@ -163,6 +163,7 @@ static bool eq_fire(int i){
 static void eq_command(int i,const NetInputCommand *c,float dt){
     if(i<0 || i>=MAX_PLAYERS)return;Equipment *e=&equipment[i];eq_gun(i);
     aim_command(i,c);
+    eq_build_command(i,c);
     if(!eq_usable(i)){e->held=false;e->charge=0;return;}
     if((c->pressed&NET_INPUT_SWITCH) && !players[i].meleeSwingActive){int other=1-e->selected;if(e->gun[other]!=EQ_EMPTY){e->selected=other;e->switchTime=eqSwitchSeconds;e->charge=0;e->held=false;players[i].dynamicShotActive=eq_gun(i)==EQ_VOXEL;}}
     if((c->pressed&NET_INPUT_EQUIP) && !players[i].meleeSwingActive){int n=eq_near_pickup(i);if(n>=0 && eq_pickup(i,pickups[n].type,true)){pickups[n].active=false;pickups[n].respawnTimer=pickups[n].type==PICKUP_RAILGUN||pickups[n].type==PICKUP_ROCKET?60:30;}}
@@ -208,6 +209,7 @@ static void eq_local(float dt){
         if(pad){if(IsGamepadButtonPressed(d,GAMEPAD_BUTTON_RIGHT_TRIGGER_2))c.pressed|=NET_INPUT_FIRE;if(IsGamepadButtonPressed(d,GAMEPAD_BUTTON_LEFT_FACE_LEFT))c.pressed|=NET_INPUT_SWITCH;if(IsGamepadButtonDown(d,GAMEPAD_BUTTON_RIGHT_TRIGGER_2))c.held|=NET_INPUT_FIRE;}
         else {if(!mouse_owns(i) && IsKeyPressed(i==0?KEY_LEFT_CONTROL:KEY_RIGHT_CONTROL))c.pressed|=NET_INPUT_FIRE;if(IsKeyPressed(i==0?KEY_Q:KEY_U))c.pressed|=NET_INPUT_SWITCH;if(IsKeyPressed(i==0?KEY_B:KEY_Y))c.pressed|=NET_INPUT_EQUIP;if(IsKeyDown(i==0?KEY_LEFT_CONTROL:KEY_RIGHT_CONTROL))c.held|=NET_INPUT_FIRE;}
         if(mouse_owns(i)){if(mouseCaptured&&mouseButtonsArmed&&IsMouseButtonPressed(MOUSE_BUTTON_LEFT))c.pressed|=NET_INPUT_FIRE;if(mouseCaptured&&mouseButtonsArmed&&IsMouseButtonDown(MOUSE_BUTTON_LEFT))c.held|=NET_INPUT_FIRE;if(mouseCaptured&&GetMouseWheelMove()!=0)c.pressed|=NET_INPUT_SWITCH;}
+        eq_build_sample(i,i,&c);
         aim_sample(netTransport.role==NET_ROLE_OFFLINE?i:net_local_index_for_slot(i),i,dt,&c);
         if(debugConsoleOpen || !IsWindowFocused()){c.held=c.pressed=0;equipment[i].charge=0;equipment[i].held=false;}
         eq_command(i,&c,dt);
@@ -219,6 +221,12 @@ static void eq_tick(float dt){
     eq_sword_tick(dt);
     for(int i=0;i<MAX_PLAYERS;i++){Equipment *e=&equipment[i];for(int g=0;g<EQ_GUN_COUNT;g++)e->cooldown[g]=fmaxf(0,e->cooldown[g]-dt);e->switchTime=fmaxf(0,e->switchTime-dt);e->buildTime=fmaxf(0,e->buildTime-dt);
         if(e->initialized && !is_player_bot(i))players[i].dynamicShotActive=eq_gun(i)==EQ_VOXEL;
+        if(gameState!=GAME_STATE_PLAYING || ff_input_blocked(i) || players[i].respawn_timer>0)e->buildHeld=false;
+        float empty=players[i].matter<=0 && players[i].respawn_timer<=0?1:0;
+        if(empty && !e->wasEmpty)e->depletionPulse=.45f;
+        e->wasEmpty=empty!=0;e->depletionPulse=empty?fmaxf(0,e->depletionPulse-dt):0;
+        e->depleted+=(empty-e->depleted)*fminf(1,dt*10);
+        weaponVisuals[i].depleted=e->depleted;
         weaponVisuals[i].charge=e->charge/.65f;weaponVisuals[i].activity=e->held||e->buildTime>0;
         if(players[i].respawn_timer>0){e->held=false;e->charge=0;}
     }
@@ -235,26 +243,49 @@ static void eq_tick(float dt){
 static Shader eqSlashShader;
 static bool eqSlashTried;
 #include "sword_wave.inc"
+static int eq_build_side(int i){return eq_upgrade(i,EQ_BUILD)?5:3;}
+static int eq_build_count(int i){int side=eq_build_side(i);return side*side*side;}
 static bool eq_panel_positions(int i,Vector3 out[EQ_PANEL_CUBES]){
-    Ray ray={players[i].pos,player_forward(&players[i])};VoxelHit hit;Vector3 at;
-    if(first_voxel_hit_detailed(ray,TETHER_RANGE,-1,false,&hit))at=v_add(ray.position,v_add(v_mul(ray.direction,hit.t),v_mul(hit.normal,VOXEL_SIZE*.51f)));
-    else {if(ray.direction.y>=-.001f)return false;float t=-ray.position.y/ray.direction.y;if(t>TETHER_RANGE)return false;at=v_add(ray.position,v_mul(ray.direction,t));at.y=VOXEL_SIZE*.5f;}
+    Ray ray={players[i].pos,player_forward(&players[i])};VoxelHit hit;Vector3 at,normal={0,1,0};
+    int side=eq_build_side(i),half=side/2;
+    if(first_voxel_hit_detailed(ray,TETHER_RANGE,-1,false,&hit)){
+        normal=hit.normal;at=(Vector3){(hit.x+.5f)*VOXEL_SIZE,(hit.y+.5f)*VOXEL_SIZE,(hit.z+.5f)*VOXEL_SIZE};
+        at=v_add(at,v_mul(normal,(half+1)*VOXEL_SIZE));
+    }else {if(ray.direction.y>=-.001f)return false;float t=-ray.position.y/ray.direction.y;if(t<0 || t>TETHER_RANGE)return false;
+        at=v_add(ray.position,v_mul(ray.direction,t));at.y=(half+.5f)*VOXEL_SIZE;}
     at=world_wrap(at);at=(Vector3){(floorf(at.x/VOXEL_SIZE)+.5f)*VOXEL_SIZE,(floorf(at.y/VOXEL_SIZE)+.5f)*VOXEL_SIZE,(floorf(at.z/VOXEL_SIZE)+.5f)*VOXEL_SIZE};
-    Vector3 side=fabsf(ray.direction.z)>=fabsf(ray.direction.x)?(Vector3){VOXEL_SIZE,0,0}:(Vector3){0,0,VOXEL_SIZE};bool valid=true;
-    for(int n=0;n<EQ_PANEL_CUBES;n++){out[n]=world_wrap(v_add(at,v_add(v_mul(side,n%EQ_PANEL_SIDE-EQ_PANEL_SIDE/2),(Vector3){0,(n/EQ_PANEL_SIDE)*VOXEL_SIZE,0})));int x=floorf(out[n].x/VOXEL_SIZE),y=floorf(out[n].y/VOXEL_SIZE),z=floorf(out[n].z/VOXEL_SIZE);
-        if(y<0 || occupied(x,y,z) || (!worldPeriodic && (fabsf(out[n].x)>FLOOR_SIZE || fabsf(out[n].z)>FLOOR_SIZE)))valid=false;
-        BoundingBox cube={v_sub(out[n],(Vector3){.25f,.25f,.25f}),v_add(out[n],(Vector3){.25f,.25f,.25f})};
-        for(int v=0;v<voxel_count;v++)if(voxels[v].simulate && !voxels[v].isBullet){float radius=voxels[v].rest_edge*.5f;Vector3 center=world_image(voxels[v].pos,out[n]);if(CheckCollisionBoxes(cube,(BoundingBox){v_sub(center,(Vector3){radius,radius,radius}),v_add(center,(Vector3){radius,radius,radius})}))valid=false;}
+    bool valid=true;int count=eq_build_count(i);
+    for(int n=0;n<count;n++){
+        out[n]=world_wrap(v_add(at,(Vector3){(n%side-half)*VOXEL_SIZE,((n/side)%side-half)*VOXEL_SIZE,(n/(side*side)-half)*VOXEL_SIZE}));
+        int x=floorf(out[n].x/VOXEL_SIZE),y=floorf(out[n].y/VOXEL_SIZE),z=floorf(out[n].z/VOXEL_SIZE);
+        if(y<0 || out[n].y>FLOOR_SIZE*2 || occupied(x,y,z) || (!worldPeriodic && (fabsf(out[n].x)>FLOOR_SIZE || fabsf(out[n].z)>FLOOR_SIZE)))valid=false;
+        Vector3 extent={VOXEL_SIZE*.499f,VOXEL_SIZE*.499f,VOXEL_SIZE*.499f};BoundingBox cube={v_sub(out[n],extent),v_add(out[n],extent)};
+        for(int v=0;v<voxel_count;v++)if(voxels[v].simulate && !voxels[v].isBullet){VoxelWorldBounds b;voxel_particle_world_bounds(&voxels[v],&b);Vector3 center={(b.minx+b.maxx)*.5f,(b.miny+b.maxy)*.5f,(b.minz+b.maxz)*.5f};Vector3 shift=v_sub(world_image(center,out[n]),center);if(CheckCollisionBoxes(cube,(BoundingBox){v_add((Vector3){b.minx,b.miny,b.minz},shift),v_add((Vector3){b.maxx,b.maxy,b.maxz},shift)}))valid=false;}
         for(int j=0;j<activePlayers;j++)if((players[j].respawn_timer<=0 || combatantLife[j]==LIFE_DOWNED) && CheckCollisionBoxes(cube,combatant_bounds_at(j,world_image(players[j].pos,out[n]),PLAYER_SIZE*.5f)))valid=false;
     }return valid;
 }
+static bool eq_build_ready(int i){int count=eq_build_count(i);return !players[i].isExposed && players[i].matter>=ff_build_cost(i) && GetTime()-players[i].last_build_time>=BUILD_COOLDOWN_SECONDS && voxel_count+count<MAX_VOXELS && MAX_PARTICLES-particle_pool_count+free_particle_count>=8*count;}
 static bool eq_build(int i){
-    if(!eq_usable(i))return false;Player *p=&players[i];float cost=3*ff_build_cost(i);Vector3 at[EQ_PANEL_CUBES];
-    if(p->isExposed || p->matter<cost || GetTime()-p->last_build_time<BUILD_COOLDOWN_SECONDS || !eq_panel_positions(i,at) || voxel_count+EQ_PANEL_CUBES>=MAX_VOXELS || MAX_PARTICLES-particle_pool_count+free_particle_count<8*EQ_PANEL_CUBES)return false;
-    uint64_t ids[EQ_PANEL_CUBES]={0};int made=0;
-    for(int n=0;n<EQ_PANEL_CUBES;n++){int v=add_static_voxel_at_grid(floorf(at[n].x/VOXEL_SIZE),floorf(at[n].y/VOXEL_SIZE),floorf(at[n].z/VOXEL_SIZE),player_palette_color(i),0);if(v<0)break;ids[made++]=voxels[v].identity;voxels[v].reinforced=true;tag_owned_static_voxel(v,i);mark_surface(v);mark_surface_neighbors(at[n]);}
-    if(made!=EQ_PANEL_CUBES){for(int n=0;n<made;n++){int v=enemy_voxel(ids[n]);if(v>=0)remove_voxel_index(v);}return false;}
-    eq_spend(i,cost);p->last_build_time=GetTime();equipment[i].buildTime=.6f;play_sfx(SFX_SHIELD);return true;
+    if(!eq_usable(i) || !eq_build_ready(i))return false;Player *p=&players[i];Vector3 at[EQ_PANEL_CUBES];
+    if(!eq_panel_positions(i,at))return false;
+    int count=eq_build_count(i);uint64_t ids[EQ_PANEL_CUBES]={0};int made=0;
+    for(int n=0;n<count;n++){int v=add_static_voxel_at_grid(floorf(at[n].x/VOXEL_SIZE),floorf(at[n].y/VOXEL_SIZE),floorf(at[n].z/VOXEL_SIZE),player_palette_color(i),0);if(v<0)break;ids[made++]=voxels[v].identity;voxels[v].reinforced=eq_upgrade(i,EQ_BUILD);tag_owned_static_voxel(v,i);mark_surface(v);mark_surface_neighbors(at[n]);}
+    if(made!=count){for(int n=0;n<made;n++){int v=enemy_voxel(ids[n]);if(v>=0)remove_voxel_index(v);}return false;}
+    eq_spend(i,ff_build_cost(i));p->last_build_time=GetTime();equipment[i].buildTime=.6f;play_sfx(SFX_SHIELD);return true;
+}
+static void eq_build_command(int i,const NetInputCommand *c){
+    if(i<0 || i>=MAX_PLAYERS)return;Equipment *e=&equipment[i];
+    if((c->pressed&NET_INPUT_BUILD_CANCEL) || gameState!=GAME_STATE_PLAYING || creativeModeActive || ff_input_blocked(i) || players[i].respawn_timer>0){e->buildHeld=false;return;}
+    if(c->pressed&NET_INPUT_BUILD){e->buildHeld=true;aim_cancel(i);}
+    if(e->buildHeld && !(c->held&NET_INPUT_BUILD)){e->buildHeld=false;if(netTransport.role!=NET_ROLE_CLIENT)eq_build(i);}
+}
+static void eq_build_sample(int seat,int slot,NetInputCommand *c){
+    bool pad=playerInput[seat]==INPUT_TYPE_GAMEPAD;int device=seat_device(seat);
+    if(debugConsoleOpen || !IsWindowFocused() || gameState!=GAME_STATE_PLAYING || (pad && !IsGamepadAvailable(device))){c->pressed|=NET_INPUT_BUILD_CANCEL;equipment[slot].buildHeld=false;return;}
+    bool down=pad?IsGamepadButtonDown(device,GAMEPAD_BUTTON_RIGHT_TRIGGER_1):IsKeyDown(seat==0?KEY_E:KEY_O);
+    bool press=pad?IsGamepadButtonPressed(device,GAMEPAD_BUTTON_RIGHT_TRIGGER_1):IsKeyPressed(seat==0?KEY_E:KEY_O);
+    if(down)c->held|=NET_INPUT_BUILD;if(press)c->pressed|=NET_INPUT_BUILD;
+    if(netTransport.role==NET_ROLE_CLIENT)eq_build_command(slot,c);
 }
 
 static Shader eqBeamShader;
@@ -274,7 +305,7 @@ static void eq_world(void){
         EquipmentRocket *r=&eqRockets[n];if(r->active){DrawCube(r->pos,.22f,.22f,.3f,ORANGE);DrawCylinderEx(r->pos,v_sub(r->pos,v_mul(v_norm(r->vel),.8f)),.1f,.02f,5,RED);}}
     for(int i=0;i<MAX_PLAYERS;i++){Equipment *e=&equipment[i];if(e->initialized && e->held && eq_gun(i)==EQ_CUTTER && players[i].respawn_timer<=0){WeaponPose pose=player_weapon_pose(i,i==drawViewPlayerIndex);DrawCylinderEx(pose.muzzle,e->beamEnd,.055f,.055f,8,LIME);DrawSphere(e->beamEnd,.11f,LIME);}
         if(e->charge>0 && eq_gun(i)==EQ_RAIL){Vector3 end=v_add(players[i].pos,v_mul(player_forward(&players[i]),100));DrawCylinderEx(player_weapon_pose(i,i==drawViewPlayerIndex).muzzle,end,.006f,.006f,4,Fade(PURPLE,.5f));}
-        if(!equipmentEmission && i==drawViewPlayerIndex && eq_upgrade(i,EQ_BUILD) && players[i].respawn_timer<=0){Vector3 pos[EQ_PANEL_CUBES]={{0}};bool valid=eq_panel_positions(i,pos)&&players[i].matter>=3*ff_build_cost(i);if(v_length(pos[1])>.01f)for(int n=0;n<EQ_PANEL_CUBES;n++)DrawCubeWires(pos[n],VOXEL_SIZE,VOXEL_SIZE,VOXEL_SIZE,valid?GOLD:RED);}
+        if(!equipmentEmission && i==drawViewPlayerIndex && e->buildHeld && players[i].respawn_timer<=0){Vector3 pos[EQ_PANEL_CUBES]={{0}};bool valid=eq_panel_positions(i,pos)&&eq_build_ready(i);if(v_length(pos[1])>.01f)for(int n=0;n<eq_build_count(i);n++)DrawCubeWires(pos[n],VOXEL_SIZE,VOXEL_SIZE,VOXEL_SIZE,valid?player_palette_color(i):RED);}
     }
     if(shader)EndShaderMode();
     eq_sword_draw();
@@ -296,7 +327,7 @@ static void eq_hud(int i,int w,int h){
     for(int s=0;s<2;s++){int x=14+s*105,g=e->gun[s];Color c=s==e->selected?GOLD:GRAY;DrawRectangle(x,y,98,46,Fade(BLACK,.7f));DrawRectangleLines(x,y,98,46,c);if(g!=EQ_EMPTY){eq_icon(g,x+20,y+2,c);DrawText(eqGuns[g].name,x+5,y+27,sz,c);}else DrawText("Empty",x+5,y+27,sz,GRAY);}
     int g=eq_gun(i);DrawText(TextFormat("%.0f Matter%s  %.1fs",eqGuns[g].cost,g==EQ_CUTTER?"/s":"",e->cooldown[g]),14,y-19,sz,RAYWHITE);
     if(g==EQ_RAIL && e->charge>0 && aimStates[i].blend<.02f)DrawRectangle(w/2-40,h/2+35,(int)(80*e->charge/.65f),5,PURPLE);
-    DrawText(TextFormat("%s %s %s","",e->upgrades&EQ_ADHESIVE?"STICKY":"",e->upgrades&EQ_BUILD?"PANEL":""),230,y+27,sz,GOLD);
+    DrawText(TextFormat("%s %s %s","",e->upgrades&EQ_ADHESIVE?"STICKY":"",e->upgrades&EQ_BUILD?"5x5x5":""),230,y+27,sz,GOLD);
     int n=eq_near_pickup(i);if(n>=0 && eq_pickup_gun(pickups[n].type)>=0 && e->gun[0]!=eq_pickup_gun(pickups[n].type) && e->gun[1]!=eq_pickup_gun(pickups[n].type)){const char *key=playerInput[i]==INPUT_TYPE_GAMEPAD?"Hold X":i==0?"B":"Y";const char *label=TextFormat("%s: equip %s",key,pickup_type_label(pickups[n].type));DrawText(label,(w-MeasureText(label,sz))/2,h/2+55,sz,WHITE);}
 }
 static void eq_layout(void){

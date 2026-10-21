@@ -78,4 +78,18 @@ static void four_views(void){fixture();activePlayers=multiplayerActivePlayers=4;
  for(int mode=0;mode<2;mode++){for(int i=0;i<4;i++)aimStates[i].active=mode!=0;aim_tick(.15f);for(int warm=0;warm<15;warm++)render_gameplay_view(views,&count,&w,&h,false);double start=GetTime();for(int n=0;n<45;n++){render_gameplay_view(views,&count,&w,&h,false);rlDrawRenderBatchActive();}assert(count==4);fprintf(stderr,"Four views aim=%d pass=%d %.3f ms/frame\n",mode,bloom,(GetTime()-start)*1000/45);if(mode){for(int i=0;i<4;i++){Image im=LoadImageFromTexture(views[i].texture);ImageFlipVertical(&im);ExportImage(im,TextFormat("artifacts/aim-four-%d.png",i));UnloadImage(im);}}}}
  for(int i=0;i<count;i++)UnloadRenderTexture(views[i]);
 }
-int main(int argc,char**argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Aiming checks");init_pbd_thread_pool();assert(initialize_physics_backend());behavior();interaction();pickup_hold();bindings();duplicate();captures();unobstructed_hud();hud_gameplay_capture();four_views();aim_shutdown();assert(!aimShader.id);for(int i=0;i<4;i++)weapon_bloom_unload(&weaponBlooms[i]);shutdown_world_visuals();weapon_renderer_shutdown();character_renderer_shutdown();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Aiming checks passed");return 0;}
+static void build_bindings(void){
+ for(int mode=0;mode<3;mode++){
+  fixture();memset(keysDown,0,sizeof(keysDown));memset(keysPressed,0,sizeof(keysPressed));memset(padDown,0,sizeof(padDown));memset(padPressed,0,sizeof(padPressed));
+  int slot=mode==1?1:0,key=slot?KEY_O:KEY_E;padAvailable=mode==2;playerInput[slot]=mode==2?INPUT_TYPE_GAMEPAD:INPUT_TYPE_KEYBOARD;players[slot].pitch=-40;players[slot].last_build_time=-100;
+  if(mode==2)padDown[GAMEPAD_BUTTON_RIGHT_TRIGGER_1]=padPressed[GAMEPAD_BUTTON_RIGHT_TRIGGER_1]=true;else keysDown[key]=keysPressed[key]=true;
+  NetInputCommand c={0};eq_build_sample(slot,slot,&c);eq_build_command(slot,&c);assert(equipment[slot].buildHeld && !voxel_count);
+  memset(keysPressed,0,sizeof(keysPressed));memset(padPressed,0,sizeof(padPressed));c=(NetInputCommand){0};eq_build_sample(slot,slot,&c);eq_build_command(slot,&c);assert(!voxel_count);
+  memset(keysDown,0,sizeof(keysDown));memset(padDown,0,sizeof(padDown));c=(NetInputCommand){0};eq_build_sample(slot,slot,&c);eq_build_command(slot,&c);assert(voxel_count==27 && players[slot].matter==90);
+ }
+ fixture();equipment[0].buildHeld=true;testFocused=false;aim_focus_tick();assert(!equipment[0].buildHeld && !voxel_count);
+ testFocused=true;equipment[0].buildHeld=true;gameState=GAME_STATE_PAUSED;aim_focus_tick();assert(!equipment[0].buildHeld && !voxel_count);
+ gameState=GAME_STATE_PLAYING;equipment[0].buildHeld=true;playerInput[0]=INPUT_TYPE_GAMEPAD;padAvailable=false;NetInputCommand cancel={0};eq_build_sample(0,0,&cancel);assert(cancel.pressed&NET_INPUT_BUILD_CANCEL);eq_build_command(0,&cancel);assert(!equipment[0].buildHeld && !voxel_count);
+ testFocused=true;padAvailable=false;memset(keysDown,0,sizeof(keysDown));memset(keysPressed,0,sizeof(keysPressed));memset(padDown,0,sizeof(padDown));memset(padPressed,0,sizeof(padPressed));
+}
+int main(int argc,char**argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Aiming checks");init_pbd_thread_pool();assert(initialize_physics_backend());build_bindings();behavior();interaction();pickup_hold();bindings();duplicate();captures();unobstructed_hud();hud_gameplay_capture();four_views();aim_shutdown();assert(!aimShader.id);for(int i=0;i<4;i++)weapon_bloom_unload(&weaponBlooms[i]);shutdown_world_visuals();weapon_renderer_shutdown();character_renderer_shutdown();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Aiming checks passed");return 0;}

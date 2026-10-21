@@ -1154,6 +1154,7 @@ typedef struct {
     bool sleeping;
     bool fixed;
     bool glueEligible;
+    bool cutDetached; // Sword debris remains physical but cannot weld the cut closed.
     bool pendingActivation;
     bool isBullet;
     bool goliathProjectile;
@@ -4542,6 +4543,7 @@ static bool init_voxel_struct(Voxel *v,
     v->simulate = simulate;
     v->sleeping = false;
     v->glueEligible = simulate;
+    v->cutDetached = false;
     v->pendingActivation = false;
     v->isBullet = false;
     v->goliathProjectile = false;
@@ -4727,7 +4729,7 @@ static void glue_neighbor_faces_for_voxel(int voxel_idx) {
     }
 
     Voxel *a = &voxels[voxel_idx];
-    if (!a->simulate || a->isBullet || !a->glueEligible) {
+    if (!a->simulate || a->isBullet || !a->glueEligible || a->cutDetached) {
         return;
     }
 
@@ -4761,7 +4763,7 @@ static void glue_neighbor_faces_for_voxel(int voxel_idx) {
             continue;
         }
 
-        if (b->isBullet || !b->glueEligible) {
+        if (b->isBullet || !b->glueEligible || b->cutDetached) {
             continue;
         }
 
@@ -12753,7 +12755,7 @@ static void glue_dynamic_voxel_to_static_neighbors_for_voxel(int voxel_idx)
         return;
     }
     Voxel *dynamic = &voxels[voxel_idx];
-    if (!dynamic->simulate || !dynamic->glueEligible) {
+    if (!dynamic->simulate || !dynamic->glueEligible || dynamic->cutDetached) {
         return;
     }
     int holder = tetherTag[voxel_idx] - 1;
@@ -15302,11 +15304,11 @@ static void perform_melee(int idx) {
     if (now - p->last_melee_time < min_cooldown) {
         return;
     }
+    if(eq_gun(idx)==EQ_BLADE && !eq_sword(idx))return;
     p->last_melee_time = now;
     p->meleeSwingActive = true;
     p->meleeSwingHitApplied = false;
     p->meleeSwingStartTime = now;
-    if(eq_gun(idx)==EQ_BLADE)eq_sword(idx);
 }
 
 static void update_melee_swings(void) {
@@ -15356,7 +15358,7 @@ static void update_melee_swings(void) {
 
 static void perform_build(int idx) {
     aim_cancel(idx);
-    if(eq_upgrade(idx,EQ_BUILD)){eq_build(idx);return;}
+    if(idx<MAX_PLAYERS && !is_player_bot(idx)){eq_build(idx);return;}
     Player *p = &players[idx];
     if (p->respawn_timer > 0.0f || p->isExposed) {
         return;
@@ -15666,8 +15668,10 @@ static void acquire_tether_hit(int idx,int hit_id,Vector3 normal) {
         return;
     }
 
+    bool paidHuman=idx<MAX_PLAYERS && !is_player_bot(idx);
+    bool gold=p->goldTetherCharged && (!paidHuman || p->matter>=eqGoldGrabCost);
     int gold_count = 0;
-    if (p->goldTetherCharged) {
+    if (gold) {
         gold_count = build_glue_cluster_indices(tether_idx, glueClusterIndices);
         if (gold_count <= 0) return;
         for (int c = 0; c < gold_count; ++c) {
@@ -15685,7 +15689,8 @@ static void acquire_tether_hit(int idx,int hit_id,Vector3 normal) {
     }
 
     p->tetherHolding = true;
-    p->goldTetherHolding = p->goldTetherCharged;
+    p->goldTetherHolding = gold;
+    if(gold && paidHuman){p->matter=fmaxf(0,p->matter-eqGoldGrabCost);p->isExposed=p->matter<=0;}
     p->tetherVoxel = tether_idx;
     p->tetherVoxelIdentity = voxels[tether_idx].identity;
     p->tetherFace = hit_face;
@@ -15704,7 +15709,7 @@ static void start_tether(int idx) {
     Player *p=&players[idx];VoxelHit hit;
     if(p->respawn_timer>0 || p->tetherHolding || p->drainTarget)return;
     if(start_tether_drain(idx))return;
-    if(first_voxel_hit_detailed((Ray){p->pos,player_forward(p)},p->goldTetherCharged?GOLD_TETHER_RANGE:TETHER_RANGE,-1,false,&hit))
+    if(first_voxel_hit_detailed((Ray){p->pos,player_forward(p)},(p->goldTetherCharged && (is_player_bot(idx) || p->matter>=eqGoldGrabCost))?GOLD_TETHER_RANGE:TETHER_RANGE,-1,false,&hit))
         acquire_tether_hit(idx,hit.id,hit.normal);
 }
 
@@ -16151,9 +16156,9 @@ static inline float ray_t_to_next_plane(float p,      // ray.position.x  (or y /
     return (nextPlane - p) / d;              // d has sign, so t is positive
 }
 
-static bool first_voxel_hit_detailed_ex(Ray ray, float t_max, int ignore_id,
+static bool first_voxel_hit_filtered(Ray ray, float t_max, int ignore_id,
                                         bool static_only, int ignore_goliath_owner,
-                                        VoxelHit *out_hit)
+                                        VoxelHit *out_hit,const uint64_t *ignored,int ignore_count)
 {
     float direction_length = v_length(ray.direction);
     if (direction_length <= 1e-8f || t_max < 0.0f) return false;
@@ -16189,6 +16194,7 @@ static bool first_voxel_hit_detailed_ex(Ray ray, float t_max, int ignore_id,
             } else {
                 valid = (v->vgs_active && !v->isBullet && v->type == 0 && !voxel_is_fluid(v));
             }
+            for(int n=0;valid && n<ignore_count;n++)if(v->identity==ignored[n])valid=false;
             if (valid) {
                 if (out_hit) {
                     *out_hit = (VoxelHit){ id, world_grid(x), y, world_grid(z), entry_t, entry_normal };
@@ -16219,6 +16225,8 @@ static bool first_voxel_hit_detailed_ex(Ray ray, float t_max, int ignore_id,
     }
     return false;
 }
+
+static bool first_voxel_hit_detailed_ex(Ray ray,float t_max,int ignore_id,bool static_only,int ignore_goliath_owner,VoxelHit *out_hit){return first_voxel_hit_filtered(ray,t_max,ignore_id,static_only,ignore_goliath_owner,out_hit,NULL,0);}
 
 static bool first_voxel_hit_detailed(Ray ray, float t_max, int ignore_id,
                                      bool static_only, VoxelHit *out_hit)
@@ -18743,6 +18751,7 @@ static NetInputCommand net_sample_local_input(int local_index, int player_slot, 
     }
     if(!netRequestedCreative)aim_sample(local_index,player_slot,dt,&command);
     mouse_command(&command,local_index,player_slot,dt);
+    eq_build_sample(local_index,player_slot,&command);
     return command;
 }
 
@@ -20155,7 +20164,7 @@ static void net_host_tick(void) {
 
 
             if (command.pressed & NET_INPUT_MELEE) perform_melee(slot);
-            if (command.pressed & NET_INPUT_BUILD) perform_build(slot);
+
             if(command.pressed & NET_INPUT_TETHER_CANCEL){Vector3 zero={0};release_tether_velocity(slot,&zero);}
             else if ((command.held & NET_INPUT_TETHER) && !(netPreviousHeld[slot] & NET_INPUT_TETHER)) start_tether(slot);
             if (!(command.pressed & NET_INPUT_TETHER_CANCEL) && !(command.held & NET_INPUT_TETHER) && (netPreviousHeld[slot] & NET_INPUT_TETHER)) release_tether(slot);
@@ -20698,6 +20707,8 @@ static void render_gameplay_view(RenderTexture2D *screens,
             }
             int view_x = 0, view_y = 0, view_w = 0, view_h = 0;
             get_viewport(view, viewCount, &view_x, &view_y, &view_w, &view_h);
+            float depleted=equipment[i].depleted;
+            if(!creative_mode && depleted>.001f){float t=(float)GetTime();float flicker=.025f*sinf(t*13.7f)*sinf(t*7.3f);float onset=.18f*(equipment[i].depletionPulse/.45f)*(.7f+.3f*sinf(t*24));DrawRectangle(0,0,view_w,view_h,Fade(BLACK,depleted*(.20f+flicker)+onset));}
             aim_overlay(i,view_w,view_h);
             draw_teammate_markers(i,cams[i],view_w,view_h);
             int hudFont=view_w<700?12:HUD_FONT_SIZE;
@@ -21394,7 +21405,8 @@ int main(int argc, char **argv) {
             //SetLoggingEnabled(!logsEnabled);
         }
         if(enemyLab) enemy_lab_controls();
-        if (couch_frame()) continue;
+        if (couch_frame()){aim_focus_tick();for(int i=0;i<MAX_PLAYERS;i++)equipment[i].buildHeld=false;continue;}
+        if(gameState!=GAME_STATE_PLAYING)for(int i=0;i<MAX_PLAYERS;i++)equipment[i].buildHeld=false;
         switch (gameState) {
             case GAME_STATE_MENU: {
                 int boxW = menuSetupSubmenuOpen ? 1040 : 580;
@@ -22429,9 +22441,7 @@ int main(int argc, char **argv) {
                 if (IsGamepadButtonPressed(seat_device(i), GAMEPAD_BUTTON_RIGHT_FACE_DOWN) && !ff_input_blocked(i)) {
                     perform_melee(i);
                 }
-                if (IsGamepadButtonPressed(seat_device(i), GAMEPAD_BUTTON_RIGHT_TRIGGER_1)) {
-                    perform_build(i);
-                }
+
                 if (IsGamepadButtonPressed(seat_device(i), GAMEPAD_BUTTON_LEFT_TRIGGER_2)) {
                     start_tether(i);
                 }
@@ -22450,7 +22460,7 @@ int main(int argc, char **argv) {
             if(IsKeyPressed(KEY_V))hologram_deploy(0);
 
             if (!mouse_owns(0) && IsKeyPressed(KEY_Z)) perform_melee(0);
-            if (IsKeyPressed(KEY_E)) perform_build(0);
+
             if (!mouse_owns(0) && IsKeyPressed(KEY_R)) start_tether(0);
             if (!mouse_owns(0) && IsKeyReleased(KEY_R)) release_tether(0);
             if (IsKeyPressed(KEY_SPACE) && players[0].onGround && !ff_input_blocked(0)) {
@@ -22463,7 +22473,7 @@ int main(int argc, char **argv) {
             if(IsKeyPressed(KEY_SLASH))hologram_deploy(1);
 
             if (!mouse_owns(1) && IsKeyPressed(KEY_M)) perform_melee(1);
-            if (IsKeyPressed(KEY_O)) perform_build(1);
+
             if (!mouse_owns(1) && IsKeyPressed(KEY_P)) start_tether(1);
             if (!mouse_owns(1) && IsKeyReleased(KEY_P)) release_tether(1);
             if (IsKeyPressed(KEY_RIGHT_SHIFT) && players[1].onGround && !ff_input_blocked(1)) {

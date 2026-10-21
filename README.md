@@ -587,9 +587,12 @@ Matter; empty Matter does not remove equipment. Tether and melee remain free.
 
 Shotgun, cutter, railgun, rocket, sword and voxel launcher occupy weapon slots.
 Adhesive grenades and reinforced building are separate upgrades. Reinforced building
-places a connected 5x5 upright cover panel for three normal blocks worth of Matter.
+places a solid reinforced 5x5x5 block for the same Matter cost as the standard
+3x3x3 block (normally 10, with Firefight discounts). Hold the build button to aim
+a wireframe preview, then release to build. Invalid placement is red and spends
+nothing; menus, downing, focus loss, and device disconnect cancel the preview.
 The cutter has a 24-metre range and cuts 24 voxels/second for 4 Matter/second, with a thicker visible beam.
-The sword alternates two 100-degree diagonal slashes (fire or melee), with a free
+The sword alternates two 100-degree diagonal slashes (fire or melee), costing 25 Matter per successful swing, with a
 0.8-second attack cycle and 0.6-second animation. A blue wave grows from the blade
 and reaches six metres, killing unprotected enemies and cutting terrain when it
 arrives. Each wave cuts at most 96 voxels and hits each actor once. Intact cover
@@ -606,8 +609,9 @@ intermissions; true death and new matches reset it. Bots retain their old loadou
 Central tuning is in `equipment.h`.
 
 Shotgun pellets activate struck structures using dynamic-voxel impact resistance
-and push connected debris away from the shooter. Force falls with distance and
-is shared across the struck mass. Each volley batches terrain activation and
+and push connected debris away from the shooter. Eight pellets deal up to 50
+damage. A complete volley has the normal tether throw impulse, shared across
+the struck mass; partial hits contribute proportionally, without distance falloff. Each volley batches terrain activation and
 resolves all hits before removing cover; it cannot shoot through a wall it just
 activated. Attached enemy armor still blocks the pellets.
 
@@ -615,7 +619,7 @@ Foundry and Crosscut have authored equipment placements, with fourfold symmetry 
 versus. Equipment respawns in 30 seconds; railguns/rockets take 60 seconds and are
 not replenished between waves. All pickups are in the world-builder palette.
 Enter `weaponlab` in the debug console for a repeatable equipment arena (F4 resets,
-F7 toggles invulnerability). Network protocol 20 requires matching builds.
+F7 toggles invulnerability). Network protocol 21 requires matching builds.
 
 Toggle aiming with right-stick click (R3), Left Shift for keyboard player 1,
 or Enter for keyboard player 2, including the mouse owner. Zoom is 1.5x default,
@@ -1050,3 +1054,16 @@ viewports share the same event, anchored overhead and blended into the horizon f
 
 The HUD radar has a 256-pixel diameter (twice its previous size), capped to fit
 small split-screen viewports. Weapon slots remain above it; detection range is unchanged.
+
+Upgraded tether grabs cost 25 Matter on successful acquisition. Holding and
+throwing are free; below 25 Matter, ordinary tether rules and range apply. The
+upgrade remains owned until true death, and actor Matter-draining stays free.
+At zero Matter, gun energy turns off and the world view dims and gently flickers;
+the HUD, reticle, sword effects, and free tether remain readable.
+Sword cuts now create detached, active debris instead of deleting terrain. Cut
+contacts are deduplicated per wave, remain tetherable, and wake nearby supports
+through the existing localized activation path.
+
+Sword swings require 25 Matter, whether started with fire or melee. Failed or
+cooldown-blocked attempts spend nothing. Spending the last 25 Matter exposes
+the wielder but lets that swing finish; ordinary melee remains free.

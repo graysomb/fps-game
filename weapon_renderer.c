@@ -21,7 +21,8 @@ typedef struct WrBuilder {
 static Model wr_parts[WR_PART_COUNT];
 static Shader wr_shader, wr_blur;
 static int wr_eye, wr_energy, wr_strength, wr_mask, wr_direction, wr_time, wr_launcher;
-static bool wr_ready;
+static bool wr_ready,wr_fallback;
+static float wr_fallback_dark;
 static int wr_kind,wr_charge,wr_activity,wr_hide;
 static Shader wr_drain;
 static int wr_drain_start,wr_drain_axis,wr_drain_time;
@@ -261,13 +262,8 @@ bool weapon_renderer_init(void) {
     wr_shader=LoadShader("shaders/weapon.vert","shaders/weapon.frag");
     wr_blur=LoadShader(NULL,"shaders/weapon_blur.frag");
     unsigned int default_shader=rlGetShaderIdDefault();
-    if (!wr_shader.id || !wr_blur.id || wr_shader.id==default_shader || wr_blur.id==default_shader) {
-        if (wr_shader.id && wr_shader.id!=default_shader) UnloadShader(wr_shader);
-        if (wr_blur.id && wr_blur.id!=default_shader) UnloadShader(wr_blur);
-        wr_shader=(Shader){0}; wr_blur=(Shader){0};
-        TraceLog(LOG_WARNING,"WEAPON: shaders unavailable; skipping weapon rendering");
-        return false;
-    }
+    wr_fallback=!wr_shader.id || wr_shader.id==default_shader;
+    if(wr_fallback){wr_shader=(Shader){.id=rlGetShaderIdDefault(),.locs=rlGetShaderLocsDefault()};TraceLog(LOG_WARNING,"WEAPON: using vertex-color fallback");}
     WrBuilder *builder=MemAlloc(sizeof(WrBuilder));
     if (!builder) { UnloadShader(wr_shader); UnloadShader(wr_blur); return false; }
     for (int p=0;p<WR_PART_COUNT;++p) {
@@ -475,12 +471,17 @@ Matrix weapon_cube_transform(int cube,float now) {
 }
 
 static void wr_draw_part(int part,Matrix transform) {
-    DrawMesh(wr_parts[part].meshes[0],wr_parts[part].materials[0],transform);
+    Material material=wr_parts[part].materials[0];Color previous=material.maps[MATERIAL_MAP_DIFFUSE].color;
+    if(wr_fallback)material.maps[MATERIAL_MAP_DIFFUSE].color=ColorBrightness(WHITE,-.8f*wr_fallback_dark);
+    DrawMesh(wr_parts[part].meshes[0],material,transform);
+    material.maps[MATERIAL_MAP_DIFFUSE].color=previous;
 }
 
 void weapon_draw(WeaponPose pose,const WeaponVisual *v,Vector3 eye,float now,
                  bool gold,WeaponRenderPass pass) {
     if (!wr_ready || pose.kind<0 || pose.kind>=WEAPON_KIND_COUNT) return;
+    wr_fallback_dark=pose.kind==WEAPON_SWORD?0:Clamp(v->depleted,0,1);
+    if(wr_fallback && pass!=WEAPON_COLOR)return;
     bool concept=pose.kind>=WEAPON_IMPULSE_SHOTGUN;
     bool launcher=pose.kind==WEAPON_DYNAMIC_LAUNCHER;
     if (pass==WEAPON_GLASS && !launcher) return;
@@ -492,6 +493,7 @@ void weapon_draw(WeaponPose pose,const WeaponVisual *v,Vector3 eye,float now,
     SetShaderValue(wr_shader,wr_charge,&charge,SHADER_UNIFORM_FLOAT);
     SetShaderValue(wr_shader,wr_activity,&activity,SHADER_UNIFORM_FLOAT);
     float strength=.82f+v->claw_open*(.34f+.12f*sinf(now*9)) + shot*.70f;
+    if(pose.kind!=WEAPON_SWORD)strength*=1-Clamp(v->depleted,0,1);
     int mask=pass==WEAPON_EMISSION ? 1 : 0;
     SetShaderValue(wr_shader,wr_eye,&eye,SHADER_UNIFORM_VEC3);
     SetShaderValue(wr_shader,wr_energy,&energy,SHADER_UNIFORM_VEC3);
@@ -545,7 +547,7 @@ void weapon_draw(WeaponPose pose,const WeaponVisual *v,Vector3 eye,float now,
         tip=MatrixMultiply(tip,pose.transform);
         wr_draw_part(WR_FLASH,tip);
     }
-    if (gold) {
+    if (gold && v->depleted<.01f && !wr_fallback) {
         // Keep world occlusion, but do not write translucent ribbons into depth.
         rlDrawRenderBatchActive();
         BeginBlendMode(BLEND_ADDITIVE); rlDisableDepthMask(); rlDisableBackfaceCulling();
