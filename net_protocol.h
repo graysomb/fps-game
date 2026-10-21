@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define FPS_NET_MAGIC 0x4650534eu /* "FPSN" */
-#define FPS_NET_PROTOCOL_VERSION 21u /* Build hold/release cancellation. */
+#define FPS_NET_PROTOCOL_VERSION 22u /* Distinguish ordinary melee from equipped sword slashes. */
 #define FPS_NET_DEFAULT_PORT 27015u
 #define FPS_NET_DISCOVERY_PORT 27016u
 #define FPS_NET_MAX_PACKET 1100u

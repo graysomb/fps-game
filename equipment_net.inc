@@ -41,7 +41,7 @@ static bool eq_receive(NetMessageType type,NetReader *r,uint32_t tick){
         for(int i=0;i<MAX_PLAYERS;i++){
             swordNextDirection[i]=next[i];swordDirection[i]=temp[i].direction;swordSequences[i]=temp[i].sequence;
             if(temp[i].active && players[i].respawn_timer<=0 && eq_gun(i)==EQ_BLADE){
-                players[i].meleeSwingActive=true;players[i].meleeSwingStartTime=(float)GetTime()-temp[i].age;
+                players[i].swordSwing=true;players[i].meleeSwingActive=true;players[i].meleeSwingStartTime=(float)GetTime()-temp[i].age;
             }
         }
     }

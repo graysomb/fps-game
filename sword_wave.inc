@@ -7,6 +7,7 @@ static Vector3 sword_lane_direction(const SwordWave *w,int lane){
 }
 static bool eq_sword(int i){
     if(i<0 || i>=MAX_PLAYERS || swordWaves[i].active || players[i].matter<eqGuns[EQ_BLADE].cost)return false;
+    players[i].swordSwing=true;
     SwordWave *w=&swordWaves[i];
     *w=(SwordWave){.active=true,.sequence=++swordSequences[i],.direction=swordNextDirection[i]};
     swordDirection[i]=w->direction;swordNextDirection[i]^=1;
@@ -110,7 +111,7 @@ static void eq_sword_tick(float dt){
                     // One localized support wake per completed cut, not one global rebuild per ray.
                     activate_static_voxels_near_region(w->minx,w->maxx,w->miny,w->maxy,w->minz,w->maxz,i);
                 }
-                w->active=false;players[i].meleeSwingActive=false;}
+                w->active=false;if(players[i].swordSwing)players[i].meleeSwingActive=false;}
         }
     }
 }

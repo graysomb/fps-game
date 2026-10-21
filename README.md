@@ -592,7 +592,7 @@ places a solid reinforced 5x5x5 block for the same Matter cost as the standard
 a wireframe preview, then release to build. Invalid placement is red and spends
 nothing; menus, downing, focus loss, and device disconnect cancel the preview.
 The cutter has a 24-metre range and cuts 24 voxels/second for 4 Matter/second, with a thicker visible beam.
-The sword alternates two 100-degree diagonal slashes (fire or melee), costing 25 Matter per successful swing, with a
+The sword alternates two 100-degree diagonal slashes (fire/trigger), costing 25 Matter per successful swing, with a
 0.8-second attack cycle and 0.6-second animation. A blue wave grows from the blade
 and reaches six metres, killing unprotected enemies and cutting terrain when it
 arrives. Each wave cuts at most 96 voxels and hits each actor once. Intact cover
@@ -619,7 +619,7 @@ Foundry and Crosscut have authored equipment placements, with fourfold symmetry 
 versus. Equipment respawns in 30 seconds; railguns/rockets take 60 seconds and are
 not replenished between waves. All pickups are in the world-builder palette.
 Enter `weaponlab` in the debug console for a repeatable equipment arena (F4 resets,
-F7 toggles invulnerability). Network protocol 21 requires matching builds.
+F7 toggles invulnerability). Network protocol 22 requires matching builds.
 
 Toggle aiming with right-stick click (R3), Left Shift for keyboard player 1,
 or Enter for keyboard player 2, including the mouse owner. Zoom is 1.5x default,
@@ -1064,6 +1064,7 @@ Sword cuts now create detached, active debris instead of deleting terrain. Cut
 contacts are deduplicated per wave, remain tetherable, and wake nearby supports
 through the existing localized activation path.
 
-Sword swings require 25 Matter, whether started with fire or melee. Failed or
-cooldown-blocked attempts spend nothing. Spending the last 25 Matter exposes
-the wielder but lets that swing finish; ordinary melee remains free.
+Fire/trigger with the sword performs a 25-Matter energy slash. The melee button
+always performs the ordinary free melee attack and harvests normally, even with
+the sword equipped and zero Matter. Failed or cooldown-blocked slash attempts
+spend nothing. Spending the last 25 Matter lets that slash finish.

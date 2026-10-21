@@ -139,7 +139,7 @@ static void eq_rocket_blast(EquipmentRocket rocket){
 static bool eq_fire(int i){
     if(!eq_usable(i))return false;int gun=eq_gun(i);if(gun<EQ_SHOTGUN || gun==EQ_CUTTER || gun==EQ_RAIL)return false;
     Equipment *e=&equipment[i];Player *p=&players[i];const GunDefinition *def=&eqGuns[gun];
-    if(gun==EQ_BLADE){if(e->switchTime>0 || p->meleeSwingActive)return false;perform_melee(i);return p->meleeSwingActive;}
+    if(gun==EQ_BLADE){if(e->switchTime>0 || p->meleeSwingActive)return false;return perform_sword(i);}
     if(e->switchTime>0 || e->cooldown[gun]>0 || p->isExposed || p->matter<def->cost)return false;
     Vector3 f=player_forward(p);Ray ray={p->pos,f};
     if(gun==EQ_SHOTGUN){
