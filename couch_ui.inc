@@ -81,7 +81,7 @@ static void ff_draw_hud(int i,int w,int h) {
         int fs=w<700?12:16,step=fs+4,y=64;
         bool pad=playerInput[i]==INPUT_TYPE_GAMEPAD;
         const WaveDefinition *next=&ff_waves[firefightWave%FF_WAVE_COUNT];int total=0;
-        for(int t=0;t<FF_TYPE_COUNT;t++)total+=ff_count(firefightWave+1,firefightHumans,t);
+        for(int t=0;t<FF_TYPE_COUNT;t++)total+=ff_count(firefightWave+1,fp_team_size(),t);
         const char *lines[3];
         lines[0]=TextFormat("%s %s",ff_upgrades_maxed()?"All upgrades maxed":ff_upgrade_label(prepVotes[i]<0?0:prepVotes[i]),prepReady[i]?"[READY]":"");
         lines[1]=TextFormat("Next: %s (%d enemies)",next->name,total);
@@ -139,7 +139,13 @@ static void ff_draw_hud(int i,int w,int h) {
 }
 
 static bool couch_frame(void) {
-    if(netTransport.role!=NET_ROLE_OFFLINE) return false;
+    if(netTransport.role!=NET_ROLE_OFFLINE){
+        if(gameMode!=GAME_MODE_FIREFIGHT||gameState!=GAME_STATE_GAMEOVER)return false;
+        BeginDrawing();combat_ui_results();DrawText(netTransport.role==NET_ROLE_HOST?"Enter / A: new run   Esc / B: leave":"Waiting for host   Esc / B: leave",48,GetScreenHeight()-45,22,GOLD);EndDrawing();
+        if(couch_back()){net_transport_shutdown(&netTransport);netRequestedRole=NET_ROLE_OFFLINE;netLobbyStarted=false;gameState=GAME_STATE_MENU;couchLobby=false;}
+        else if(netTransport.role==NET_ROLE_HOST&&couch_confirm()){ResetGame();gameState=GAME_STATE_PLAYING;fp_network_reset();}
+        return true;
+    }
     bool confirm=couch_confirm(), back=couch_back(), pausePressed=IsKeyPressed(KEY_PAUSE);
     couchNavDelay-=GetFrameTime();
     if(couchAdvanced) {
@@ -246,6 +252,11 @@ static bool couch_frame(void) {
             firefightEndless=!firefightEndless;firefightFoundry=true;memset(couchReady,0,sizeof(couchReady));all=false;
         }
         if(gameMode==GAME_MODE_FIREFIGHT && firefightEndless && (IsKeyPressed(KEY_TAB)||couch_menu_button(GAMEPAD_BUTTON_RIGHT_FACE_UP))) {firefightFoundry=!firefightFoundry;memset(couchReady,0,sizeof(couchReady));all=false;}
+        if(gameMode==GAME_MODE_FIREFIGHT && !firefightPractice && (IsKeyPressed(KEY_C)||couch_menu_button(GAMEPAD_BUTTON_RIGHT_FACE_LEFT))){firefightCheckpoints=!firefightCheckpoints;memset(couchReady,0,sizeof(couchReady));all=false;}
+        if(gameMode==GAME_MODE_FIREFIGHT && !firefightPractice && IsKeyPressed(KEY_H)){
+            netRequestedRole=NET_ROLE_HOST;netRequestedCreative=false;netRequestedLocalPlayers=count;
+            if(net_transport_host(&netTransport,netRequestedPort)){net_set_host_local_players(count);netLobbyStarted=false;couchLobby=false;gameState=GAME_STATE_LOBBY;return true;}
+        }
         BeginDrawing();couch_title(firefightPractice?"LEARN COMBAT":gameMode==GAME_MODE_FIREFIGHT?"FIREFIGHT LOBBY":"LOCAL VERSUS LOBBY");
         couch_row(0,firefightPractice?"Harvest > expose > melee > throw":gameMode==GAME_MODE_FIREFIGHT?(firefightEndless?"Endless Survival (left/right changes mode)":"Twelve-wave Firefight (left/right changes mode)"):"Classic deathmatch",false);
         if(gameMode==GAME_MODE_FIREFIGHT)couch_row(1,firefightFoundry?"Arena: Foundry Holdout":"Arena: current world / custom map",false);
@@ -253,9 +264,10 @@ static bool couch_frame(void) {
             const char *names[]={"Greek Temple","Megalith","Sun-Henge","Forerunner","Citadel","Test Arena","Blood Arena","Procedural","Crosscut"};
             couch_row(1,useCustomMap?TextFormat("Custom map slot %d",creativeMapSlot+1):TextFormat("Arena: %s | Left/right: change",names[currentWorldType]),false);
         }
-        for(int i=0;i<count;i++) couch_row(i+2,TextFormat("P%d: %s %d | %s",i+1,multiplayerPlayerInput[i]==INPUT_TYPE_GAMEPAD?"Controller":"Keyboard",multiplayerPlayerInput[i]==INPUT_TYPE_GAMEPAD?seat_device(i)+1:i+1,couchReady[i]?"READY":"Not ready"),couchReady[i]);
-        DrawText("Start: join | Bottom face / Enter / RShift: ready | K: add keyboard P2",48,440,20,LIGHTGRAY);
-        DrawText(gameMode==GAME_MODE_DEATHMATCH?"Back: leave | Top face / Tab: use custom map":"Back: leave | Endless: top face / Tab changes arena",48,470,20,LIGHTGRAY);EndDrawing();
+        if(gameMode==GAME_MODE_FIREFIGHT && !firefightPractice)couch_row(2,TextFormat("Checkpoints: %s | X / C: toggle",firefightCheckpoints?"ON (retry current wave)":"OFF"),false);
+        for(int i=0;i<count;i++) couch_row(i+2+(gameMode==GAME_MODE_FIREFIGHT&&!firefightPractice),TextFormat("P%d: %s %d | %s",i+1,multiplayerPlayerInput[i]==INPUT_TYPE_GAMEPAD?"Controller":"Keyboard",multiplayerPlayerInput[i]==INPUT_TYPE_GAMEPAD?seat_device(i)+1:i+1,couchReady[i]?"READY":"Not ready"),couchReady[i]);
+        DrawText("Start: join | Bottom face / Enter / RShift: ready | K: add keyboard P2",48,465,18,LIGHTGRAY);
+        DrawText(gameMode==GAME_MODE_DEATHMATCH?"Back: leave | Top face / Tab: use custom map":"Back: leave | Y / Tab: endless arena | H: host LAN",48,492,18,LIGHTGRAY);EndDrawing();
         if(back) {couchLobby=false;memset(couchReady,0,sizeof(couchReady));}
         else if(all) couch_launch();
         return true;

@@ -1,9 +1,9 @@
 /* Authoritative equipment behavior. All simulation runs once, outside viewports. */
-static void eq_reset(int i){if(i<0 || i>=MAX_PLAYERS)return;swordNextDirection[i]=swordDirection[i]=0;if(!swordWaves[i].emitted)swordWaves[i].active=false;aimStates[i]=(AimState){0};netLastAimInput[i]=0;equipment[i]=(Equipment){.gun={EQ_DEFAULT,EQ_EMPTY},.initialized=true};players[i].dynamicShotActive=false;players[i].grappleInputHeld=false;players[i].netGrappleAnchorTick=0;players[i].netGrappleAnchorVelocity=(Vector3){0};weaponVisuals[i].deployment=weaponVisuals[i].build_pulse=weaponVisuals[i].cooldown=0;}
-static void eq_reset_all(void){for(int i=0;i<MAX_PLAYERS;i++)eq_reset(i);memset(swordWaves,0,sizeof(swordWaves));memset(swordSequences,0,sizeof(swordSequences));memset(eqRockets,0,sizeof(eqRockets));memset(eqTraces,0,sizeof(eqTraces));eqReceiveTick=0;memset(eqPartTick,0,sizeof(eqPartTick));}
-static int eq_gun(int i){if(i<0 || i>=MAX_PLAYERS || is_player_bot(i))return EQ_DEFAULT;if(!equipment[i].initialized)eq_reset(i);return equipment[i].gun[equipment[i].selected];}
-static bool eq_upgrade(int i,int flag){return i>=0 && i<MAX_PLAYERS && !is_player_bot(i) && (equipment[i].upgrades&flag)!=0;}
-static bool eq_usable(int i){return i>=0 && i<MAX_PLAYERS && !is_player_bot(i) && netTransport.role!=NET_ROLE_CLIENT && gameState==GAME_STATE_PLAYING && players[i].respawn_timer<=0 && !ff_input_blocked(i) && !creativeModeActive && !(enemyLab&&enemyLabPaused);}
+static void eq_reset(int i){if(i<0 || i>=MAX_COMBATANTS)return;swordNextDirection[i]=swordDirection[i]=0;if(!swordWaves[i].emitted)swordWaves[i].active=false;aimStates[i]=(AimState){0};netLastAimInput[i]=0;equipment[i]=(Equipment){.gun={EQ_DEFAULT,EQ_EMPTY},.initialized=true};players[i].dynamicShotActive=false;players[i].grappleInputHeld=false;players[i].netGrappleAnchorTick=0;players[i].netGrappleAnchorVelocity=(Vector3){0};weaponVisuals[i].deployment=weaponVisuals[i].build_pulse=weaponVisuals[i].cooldown=0;}
+static void eq_reset_all(void){for(int i=0;i<MAX_COMBATANTS;i++)eq_reset(i);memset(swordWaves,0,sizeof(swordWaves));memset(swordSequences,0,sizeof(swordSequences));memset(eqRockets,0,sizeof(eqRockets));memset(eqTraces,0,sizeof(eqTraces));eqReceiveTick=0;memset(eqPartTick,0,sizeof(eqPartTick));}
+static int eq_gun(int i){if(i<0 || i>=MAX_COMBATANTS || (is_player_bot(i)&&!fp_carrier(i)))return EQ_DEFAULT;if(!equipment[i].initialized)eq_reset(i);return equipment[i].gun[equipment[i].selected];}
+static bool eq_upgrade(int i,int flag){return i>=0 && i<MAX_COMBATANTS && (!is_player_bot(i)||fp_carrier(i)) && (equipment[i].upgrades&flag)!=0;}
+static bool eq_usable(int i){return i>=0 && i<MAX_COMBATANTS && (!is_player_bot(i)||fp_carrier(i)) && netTransport.role!=NET_ROLE_CLIENT && gameState==GAME_STATE_PLAYING && players[i].respawn_timer<=0 && !ff_input_blocked(i) && !creativeModeActive && !(enemyLab&&enemyLabPaused);}
 static void eq_spend(int i,float cost){players[i].matter=fmaxf(0,players[i].matter-cost);players[i].isExposed=players[i].matter<=0;}
 // Charge time represents Matter already transferred into the railgun capacitor.
 // Refunds return owned Matter, so Glob's restoration suppression does not apply.
@@ -178,13 +178,13 @@ static bool eq_fire(int i){
     eq_spend(i,def->cost);e->cooldown[gun]=def->cooldown;weapon_visual_shot(&weaponVisuals[i],(float)GetTime());play_sfx_at(SFX_FIRE,p->pos,i,2,gun==EQ_ROCKET?.55f:gun==EQ_GLOCK?1.25f:gun==EQ_GLOB?1.6f:gun==EQ_DMR?.95f:.8f);ai_gunfire(i,p->pos);return true;
 }
 static void eq_command(int i,const NetInputCommand *c,float dt){
-    if(i<0 || i>=MAX_PLAYERS)return;Equipment *e=&equipment[i];eq_gun(i);
+    if(i<0 || i>=MAX_COMBATANTS)return;Equipment *e=&equipment[i];eq_gun(i);
     aim_command(i,c);
     eq_build_command(i,c);
     if(!eq_usable(i)){eq_cancel_charge(i);return;}
     if(c->pressed&NET_INPUT_GRENADE_CYCLE)ex_cycle(i);
     if((c->pressed&NET_INPUT_SWITCH) && !players[i].meleeSwingActive){int other=1-e->selected;if(e->gun[other]!=EQ_EMPTY){eq_cancel_charge(i);e->selected=other;e->switchTime=eqSwitchSeconds;e->charge=0;e->held=false;players[i].dynamicShotActive=eq_gun(i)==EQ_VOXEL;}}
-    if((c->pressed&NET_INPUT_EQUIP) && !players[i].meleeSwingActive){int n=eq_near_pickup(i);if(n>=0 && eq_pickup(i,pickups[n].type,true)){pickups[n].active=false;pickups[n].respawnTimer=pickups[n].type==PICKUP_RAILGUN||pickups[n].type==PICKUP_ROCKET||pickups[n].type==PICKUP_DMR?60:30;}}
+    if((c->pressed&NET_INPUT_EQUIP) && !players[i].meleeSwingActive && !fp_interact(i)){int n=eq_near_pickup(i);if(n>=0 && eq_pickup(i,pickups[n].type,true)){pickups[n].active=false;pickups[n].respawnTimer=pickups[n].type==PICKUP_RAILGUN||pickups[n].type==PICKUP_ROCKET||pickups[n].type==PICKUP_DMR?60:30;}}
     bool held=(c->held&NET_INPUT_FIRE)!=0;int gun=eq_gun(i);Player *p=&players[i];
     if(e->switchTime>0 || (p->isExposed && gun!=EQ_BLADE && !(gun==EQ_RAIL && e->charge>0)) || p->meleeSwingActive || e->cooldown[gun]>0){eq_cancel_charge(i);return;}
     if((c->pressed&NET_INPUT_FIRE) && gun!=EQ_CUTTER && gun!=EQ_RAIL)FireVoxel(i);
@@ -249,12 +249,13 @@ static void eq_local(float dt){
 }
 static void eq_tick(float dt){
     if(dt<=0)return;
+    fp_tick(dt);
     ex_tick(dt);
     aim_tick(dt);
     eq_sword_tick(dt);
-    for(int i=0;i<MAX_PLAYERS;i++){Equipment *e=&equipment[i];for(int g=0;g<EQ_GUN_COUNT;g++)e->cooldown[g]=fmaxf(0,e->cooldown[g]-dt);e->switchTime=fmaxf(0,e->switchTime-dt);e->buildTime=fmaxf(0,e->buildTime-dt);
+    for(int i=0;i<MAX_COMBATANTS;i++){Equipment *e=&equipment[i];for(int g=0;g<EQ_GUN_COUNT;g++)e->cooldown[g]=fmaxf(0,e->cooldown[g]-dt);e->switchTime=fmaxf(0,e->switchTime-dt);e->buildTime=fmaxf(0,e->buildTime-dt);
         if(netTransport.role!=NET_ROLE_CLIENT && !eq_usable(i))eq_cancel_charge(i);
-        if(e->initialized && !is_player_bot(i))players[i].dynamicShotActive=eq_gun(i)==EQ_VOXEL;
+        if(e->initialized && (!is_player_bot(i)||fp_carrier(i)))players[i].dynamicShotActive=eq_gun(i)==EQ_VOXEL;
         if(gameState!=GAME_STATE_PLAYING || ff_input_blocked(i) || players[i].respawn_timer>0)e->buildHeld=false;
         float empty=players[i].matter<=0 && players[i].respawn_timer<=0?1:0;
         if(empty && !e->wasEmpty)e->depletionPulse=.45f;
@@ -350,7 +351,7 @@ static void eq_world(void){
                 Vector3 point=v_add(v_sub(tail,v_mul(axis,age*1.7f)),v_add(v_mul(right,cosf(angle)*age*.18f),v_mul(up,sinf(angle)*age*.18f)));
                 float size=.055f*(1-age);DrawCube(point,size,size,size,Fade(ORANGE,1-age));}
         }}
-    for(int i=0;i<MAX_PLAYERS;i++){Equipment *e=&equipment[i];if(e->initialized && e->held && eq_gun(i)==EQ_CUTTER && players[i].respawn_timer<=0){WeaponPose pose=player_weapon_pose(i,i==drawViewPlayerIndex);DrawCylinderEx(pose.muzzle,e->beamEnd,.075f,.06f,8,Fade(LIME,.40f));DrawCylinderEx(pose.muzzle,e->beamEnd,.026f,.025f,6,(Color){220,255,185,255});
+    for(int i=0;i<MAX_COMBATANTS;i++){Equipment *e=&equipment[i];if(e->initialized && e->held && eq_gun(i)==EQ_CUTTER && players[i].respawn_timer<=0){WeaponPose pose=player_weapon_pose(i,i==drawViewPlayerIndex);DrawCylinderEx(pose.muzzle,e->beamEnd,.075f,.06f,8,Fade(LIME,.40f));DrawCylinderEx(pose.muzzle,e->beamEnd,.026f,.025f,6,(Color){220,255,185,255});
             /* Full-range misses have no contact effect. A shorter actor/voxel ray does. */
             if(v_length(v_sub(e->beamEnd,players[i].pos))<eqGuns[EQ_CUTTER].range-.01f){
                 DrawSphere(e->beamEnd,.085f,(Color){210,255,160,255});
@@ -364,6 +365,7 @@ static void eq_world(void){
     if(shader)EndShaderMode();
     Vector3 eye=drawViewPlayerIndex>=0?players[drawViewPlayerIndex].pos:(Vector3){0};
     for(int n=0;n<32;n++)if(eqRockets[n].active && periodic_visible(eqRockets[n].pos,2))weapon_draw_rocket(eqRockets[n].pos,eqRockets[n].vel,eye,time,equipmentEmission?WEAPON_EMISSION:WEAPON_COLOR);
+    fp_draw(equipmentEmission?WEAPON_EMISSION:WEAPON_COLOR);
     eq_sword_draw();ex_draw(equipmentEmission?WEAPON_EMISSION:WEAPON_COLOR);
 }
 static void eq_icon(int gun,int x,int y,Color c){
@@ -378,6 +380,7 @@ static void eq_icon(int gun,int x,int y,Color c){
     if(gun==EQ_VOXEL)DrawRectangleLines(x+22,y-2,12,17,c);
 }
 static void eq_hud(int i,int w,int h){
+    fp_hud(i,w,h);
     if(i<0||i>=MAX_PLAYERS)return;Equipment *e=&equipment[i];if(!e->initialized)return;int sz=w<700?12:16;
     ex_hud(i,w,h);
     int radius=hud_radar_radius(h);
@@ -391,6 +394,7 @@ static void eq_hud(int i,int w,int h){
     int n=eq_near_pickup(i);if(n>=0 && eq_pickup_gun(pickups[n].type)>=0 && e->gun[0]!=eq_pickup_gun(pickups[n].type) && e->gun[1]!=eq_pickup_gun(pickups[n].type)){const char *key=playerInput[i]==INPUT_TYPE_GAMEPAD?"Hold X":i==0?"B":"Y";const char *label=TextFormat("%s: equip %s",key,pickup_type_label(pickups[n].type));DrawText(label,(w-MeasureText(label,sz))/2,h/2+55,sz,WHITE);}
 }
 static void eq_layout(void){
+    if(fp_active())return;
     if(useCustomMap||firefightPractice)return;bool foundry=gameMode==GAME_MODE_FIREFIGHT&&firefightFoundry;if(!foundry&&!clarity_crosscut())return;
     const int types[]={PICKUP_SHOTGUN,PICKUP_CUTTER,PICKUP_RAILGUN,PICKUP_ROCKET,PICKUP_SWORD,PICKUP_ADHESIVE,PICKUP_REINFORCED};
     const Vector3 anchors[]={{20,0,14},{28,0,14},{6,0,3},{3,0,6},{20,0,25},{28,0,25},{32,0,7}};

@@ -30,7 +30,7 @@ static bool clarity_net_receive(NetMessageType type,NetReader *r,uint32_t tick) 
     uint32_t sequence=net_read_u32(r);int part=net_read_u8(r);GrenadeState incoming[16]={0};
     if(part>1 || sequence<=clarityReceiveSequence || sequence<clarityPendingSequence)return true;
     for(int n=0;n<16;n++){GrenadeState *g=&incoming[n];g->id=net_read_u32(r);int owner=net_read_u8(r);g->owner=owner==255?-1:owner;g->pos=(Vector3){net_read_f32(r),net_read_f32(r),net_read_f32(r)};g->vel=(Vector3){net_read_f32(r),net_read_f32(r),net_read_f32(r)};g->fuse=net_read_f32(r);g->kind=net_read_u8(r);g->adhesive=net_read_u8(r)!=0;g->attached=net_read_u8(r)!=0;g->support=net_read_u64(r);g->attachment=(Vector3){net_read_f32(r),net_read_f32(r),net_read_f32(r)};
-        if(r->failed || g->kind>=GRENADE_KIND_COUNT || !v_isfinite(g->attachment) || !v_isfinite(g->pos) || !v_isfinite(g->vel) || !isfinite(g->fuse) || (g->fuse<0 && g->fuse!=-1) || g->fuse>1.5f || (g->id && (g->owner< -1 || g->owner>=MAX_PLAYERS)))return true;}
+        if(r->failed || g->kind>=GRENADE_KIND_COUNT || !v_isfinite(g->attachment) || !v_isfinite(g->pos) || !v_isfinite(g->vel) || !isfinite(g->fuse) || (g->fuse<0 && g->fuse!=-1) || g->fuse>1.5f || (g->id && (g->owner< -1 || g->owner>=MAX_COMBATANTS)))return true;}
     if(sequence!=clarityPendingSequence){clarityPendingSequence=sequence;clarityReceiveMask=0;}
     memcpy(&clarityPending[part*16],incoming,sizeof(incoming));clarityReceiveMask|=1u<<part;
     if(clarityReceiveMask==3){for(int n=0;n<CLARITY_GRENADES;n++){GrenadeState old=grenades[n];grenades[n]=clarityPending[n];grenadeVisualTarget[n]=grenades[n].pos;if(old.id && old.id==grenades[n].id)grenades[n].pos=old.pos;}clarityReceiveSequence=sequence;}

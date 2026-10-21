@@ -16,6 +16,10 @@ try {
     & gcc tests/firefight_integration.c @sources @flags -o ".build/firefight_integration_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Integration build failed' }
     $backend = if ($Gpu) { 'gpu' } else { 'cpu-mt' }
+    & gcc tests/firefight_progression_test.c @sources @flags -o ".build/firefight_progression_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Progression build failed' }
+    & ".build/firefight_progression_$variant.exe" "--physics=$backend"
+    if ($LASTEXITCODE -ne 0) { throw 'Progression checks failed' }
     & gcc tests/camp_test.c @sources @flags -o ".build/camp_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Camp build failed' }
     & ".build/camp_$variant.exe" "--physics=$backend"
@@ -98,6 +102,16 @@ try {
     $clientExit = $LASTEXITCODE
     $lanHost.WaitForExit()
     if ($clientExit -ne 0 -or $lanHost.ExitCode -ne 0) { throw 'LAN regression failed' }
+    & gcc tests/firefight_progression_lan.c @sources @flags -o ".build/firefight_progression_lan_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Progression LAN build failed' }
+    foreach ($joinMode in @('host','late-host')) {
+    $progressionHost = Start-Process -FilePath (Join-Path $root ".build/firefight_progression_lan_$variant.exe") -ArgumentList $joinMode -WorkingDirectory $root -WindowStyle Hidden -PassThru
+    $null = $progressionHost.Handle
+    & ".build/firefight_progression_lan_$variant.exe" client
+    $progressionClientExit = $LASTEXITCODE
+    $progressionHost.WaitForExit()
+    if ($progressionClientExit -ne 0 -or $progressionHost.ExitCode -ne 0) { throw 'Progression LAN checks failed' }
+    }
     $gameDir = '.build/couch'
     New-Item -ItemType Directory -Force -Path $gameDir | Out-Null
     Copy-Item -LiteralPath shaders -Destination $gameDir -Recurse -Force

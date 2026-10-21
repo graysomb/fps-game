@@ -12,7 +12,7 @@ int main(void) {
         .look_x = 222,
         .look_y = -333,
         .held = NET_INPUT_TETHER,
-        .pressed = NET_INPUT_FIRE | NET_INPUT_JUMP | NET_INPUT_GRENADE | NET_INPUT_SWITCH | NET_INPUT_EQUIP | NET_INPUT_AIM | NET_INPUT_AIM_CANCEL,
+        .pressed = NET_INPUT_PREP_LEFT | NET_INPUT_PREP_RIGHT | NET_INPUT_PREP_READY | NET_INPUT_PREP_MENU | NET_INPUT_FIRE | NET_INPUT_JUMP | NET_INPUT_GRENADE | NET_INPUT_SWITCH | NET_INPUT_EQUIP | NET_INPUT_AIM | NET_INPUT_AIM_CANCEL,
         .creative_brush = 7,
         .creative_color = 4,
         .creative_pickup = 3

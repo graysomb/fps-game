@@ -406,7 +406,7 @@ typedef enum {
     FIREFIGHT_STATE_ACTIVE = 0,
     FIREFIGHT_STATE_INTERMISSION,
     FIREFIGHT_STATE_VICTORY,
-    FIREFIGHT_STATE_DEFEAT
+    FIREFIGHT_STATE_DEFEAT, FIREFIGHT_STATE_RESTART
 } FirefightWaveState;
 
 static int firefightWave = 1;
@@ -507,6 +507,7 @@ static InputType multiplayerPlayerInput[MAX_PLAYERS] = {
 
 static inline bool is_player_bot(int player_index) {
     if (player_index < 0 || player_index >= MAX_COMBATANTS) return false;
+    if(netTransport.role!=NET_ROLE_OFFLINE && player_index<MAX_PLAYERS)return false;
     return (playerInput[player_index] == INPUT_TYPE_BOT_EASY ||
             playerInput[player_index] == INPUT_TYPE_BOT_MEDIUM ||
             playerInput[player_index] == INPUT_TYPE_BOT_HARD);
@@ -824,7 +825,7 @@ static bool couch_frame(void);
 static void couch_load_settings(void);
 static bool ff_input_blocked(int i) {
     return gameMode==GAME_MODE_FIREFIGHT && i<firefightHumans &&
-        firefightWaveState==FIREFIGHT_STATE_INTERMISSION && prepMenuOpen[i];
+        (firefightWaveState==FIREFIGHT_STATE_RESTART || (firefightWaveState==FIREFIGHT_STATE_INTERMISSION && prepMenuOpen[i]));
 }
 
 static WeaponVisual weaponVisuals[MAX_COMBATANTS];
@@ -8449,6 +8450,7 @@ static void ResetGame(void);
 #include "combat_ui.h"
 #include "equipment.h"
 #include "equipment_expansion.h"
+#include "firefight_progression.h"
 #include "igloo_blueprint.h"
 #include "foundry_traps.h"
 static void reset_firefight_match(void);
@@ -9084,6 +9086,7 @@ static void init_pickups_legacy(void) {
 
 static void init_pickups(void) {init_pickups_legacy();}
 static void update_pickups(float dt) {
+    if(fp_active())for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].type!=PICKUP_HEALTH && pickups[n].type!=PICKUP_AMMO)pickups[n].active=false,pickups[n].respawnTimer=0;
     clarity_supply_update();
     for (int i = 0; i < MAX_PICKUPS; i++) {
         Pickup *p = &pickups[i];
@@ -9316,6 +9319,7 @@ static void ResetCreative(void) {
 }
 
 static void ResetGame(void) {
+    fp_new_run();
     memset(holograms,0,sizeof(holograms));hologramReceiveTick=0;
     clarity_reset();
     eq_reset_all();equipmentLab=false;
@@ -9327,7 +9331,7 @@ static void ResetGame(void) {
     worldPeriodic=!worldPeriodicDisabled && !useCustomMap && !enemyLab &&
         ((gameMode==GAME_MODE_FIREFIGHT && firefightFoundry && !firefightPractice) ||
          (gameMode==GAME_MODE_DEATHMATCH && currentWorldType==WORLD_TYPE_CROSSCUT));
-    if(netTransport.role!=NET_ROLE_OFFLINE && gameMode==GAME_MODE_FIREFIGHT) gameMode=GAME_MODE_DEATHMATCH;
+
     if(netTransport.role==NET_ROLE_OFFLINE && gameMode!=GAME_MODE_FIREFIGHT) activePlayers=clamp_active_players(multiplayerActivePlayers);
     creativeModeActive = false;
     winnerId = -1;
@@ -9435,8 +9439,9 @@ static void ResetGame(void) {
     }
 
     if (gameMode == GAME_MODE_FIREFIGHT) {
-        if (netTransport.role == NET_ROLE_OFFLINE) {
+        if (netTransport.role != NET_ROLE_CLIENT) {
             int humans = clamp_active_players(multiplayerActivePlayers);
+            if(netTransport.role==NET_ROLE_HOST){humans=1;for(int n=0;n<MAX_PLAYERS;n++)if(netPlayerPresent[n])humans=n+1;}
             if (humans < 1) {
                 humans = 1;
             }
@@ -9908,7 +9913,7 @@ static void update_creative_player_gamepad(int player_idx, float dt) {
 
 static void update_creative_mode(float dt) {
     for (int i = 0; i < activePlayers; ++i) {
-        if (netTransport.role == NET_ROLE_HOST && !net_player_is_local(i)) continue;
+        if (netTransport.role == NET_ROLE_HOST && i<MAX_PLAYERS && !net_player_is_local(i)) continue;
         if (playerInput[i] == INPUT_TYPE_KEYBOARD) {
             update_creative_player_keyboard(i, dt);
         } else if (playerInput[i] == INPUT_TYPE_GAMEPAD) {
@@ -10181,8 +10186,9 @@ static void kill_player(int player_index, int attacker_index,
                  player->matter, player->isExposed ? 1 : 0);
     }
     if(explosionDamageContext && (attacker_index==player_index || (gameMode==GAME_MODE_FIREFIGHT && attacker_index>=0 && combatantTeam[player_index]==combatantTeam[attacker_index])))award_kill=award_debris=false;
+    fp_death(player_index,player->pos);
     ex_reset_player(player_index);
-    if(player_index<MAX_PLAYERS)eq_reset(player_index);
+    eq_reset(player_index);
     clarity_death(player_index,award_kill||award_debris?attacker_index:-1);
     ai_reset(player_index);
     if(enemy_is_special(player_index)) enemy_on_death(player_index);
@@ -13987,7 +13993,7 @@ void simulate_voxel_pbd(float dt) { simulate_voxel_pbd_steps(dt, 1); }
 
 // Fire a voxel bullet
 static bool FireVoxel(int idx) {
-    if(idx<MAX_PLAYERS && !is_player_bot(idx) && eq_gun(idx)>=EQ_SHOTGUN)return eq_fire(idx);
+    if(idx<MAX_COMBATANTS && (!is_player_bot(idx)||fp_carrier(idx)) && eq_gun(idx)>=EQ_SHOTGUN)return eq_fire(idx);
     if(idx<MAX_PLAYERS && equipment[idx].initialized && equipment[idx].switchTime>0)return false;
     Player *p = &players[idx];
     float now = (float)GetTime();
@@ -15051,9 +15057,9 @@ static float melee_anim_progress(const Player *p, float now) {
     if (!p->meleeSwingActive) {
         return -1.0f;
     }
-    int slot=(int)(p-players);
-    if(slot>=0 && slot<MAX_PLAYERS && p->swordSwing && swordWaves[slot].active)return clampf(swordWaves[slot].age/SWORD_ANIM_SECONDS,0,1);
-    float duration=slot>=0 && slot<MAX_PLAYERS && p->swordSwing?SWORD_ANIM_SECONDS:MELEE_ANIM_DURATION_SECONDS;
+    int slot=-1;for(int n=0;n<MAX_COMBATANTS;n++)if(p==&players[n]){slot=n;break;}
+    if(slot>=0 && slot<MAX_COMBATANTS && p->swordSwing && swordWaves[slot].active)return clampf(swordWaves[slot].age/SWORD_ANIM_SECONDS,0,1);
+    float duration=slot>=0 && slot<MAX_COMBATANTS && p->swordSwing?SWORD_ANIM_SECONDS:MELEE_ANIM_DURATION_SECONDS;
     float t = (now - p->meleeSwingStartTime) / duration;
     return saturatef(t);
 }
@@ -15329,7 +15335,7 @@ static void perform_melee(int idx) {
 }
 
 static bool perform_sword(int idx){
-    if(idx<0 || idx>=MAX_PLAYERS || eq_gun(idx)!=EQ_BLADE)return false;
+    if(idx<0 || idx>=MAX_COMBATANTS || eq_gun(idx)!=EQ_BLADE)return false;
     Player *p=&players[idx];float now=(float)GetTime();
     if(p->respawn_timer>0 || p->meleeSwingActive || now-p->last_melee_time<eqSwordCycle)return false;
     if(!eq_sword(idx))return false;
@@ -15694,7 +15700,7 @@ static void acquire_tether_hit(int idx,int hit_id,Vector3 normal) {
         return;
     }
 
-    bool paidHuman=idx<MAX_PLAYERS && !is_player_bot(idx);
+    bool paidHuman=(idx<MAX_PLAYERS && !is_player_bot(idx)) || fp_carrier(idx);
     bool gold=p->goldTetherCharged && (!paidHuman || p->matter>=eqGoldGrabCost);
     int gold_count = 0;
     if (gold) {
@@ -15735,7 +15741,7 @@ static void start_tether(int idx) {
     Player *p=&players[idx];VoxelHit hit;
     if(p->respawn_timer>0 || p->tetherHolding || p->drainTarget)return;
     if(start_tether_drain(idx))return;
-    if(first_voxel_hit_detailed((Ray){p->pos,player_forward(p)},(p->goldTetherCharged && (is_player_bot(idx) || p->matter>=eqGoldGrabCost))?GOLD_TETHER_RANGE:TETHER_RANGE,-1,false,&hit))
+    if(first_voxel_hit_detailed((Ray){p->pos,player_forward(p)},(p->goldTetherCharged && ((is_player_bot(idx)&&!fp_carrier(idx)) || p->matter>=eqGoldGrabCost))?GOLD_TETHER_RANGE:TETHER_RANGE,-1,false,&hit))
         acquire_tether_hit(idx,hit.id,hit.normal);
 }
 
@@ -16087,6 +16093,7 @@ static void draw_player_radar(int player_index, int viewport_w, int viewport_h) 
     DrawCircle(cx, cy, radius_px, fill);
     DrawCircleLines(cx, cy, radius_px, ring);
     DrawCircleLines(cx, cy, radius_px / 2, Fade(ring, 0.5f));
+    fp_radar(player_index,cx,cy,radius_px,RADAR_WORLD_RADIUS);
 
     Vector3 forward = player_forward(p);
     Vector2 forward_xz = { forward.x, forward.z };
@@ -17980,7 +17987,8 @@ static WeaponMeleePose weaponMeleeSamples[MAX_COMBATANTS];
 static WeaponKind weaponKindSamples[MAX_COMBATANTS];
 
 static WeaponKind player_weapon_kind(const Player *p) {
-    int i=-1;for(int n=0;n<MAX_PLAYERS;n++)if(p==&players[n]){i=n;break;}
+    int i=-1;for(int n=0;n<MAX_COMBATANTS;n++)if(p==&players[n]){i=n;break;}
+    if(fp_carrier(i))return (WeaponKind)fp_carrier_visual(i);
     if(i>=0 && i<MAX_PLAYERS && equipment[i].initialized && !is_player_bot(i)){
         if(eq_gun(i)==EQ_BLADE && p->meleeSwingActive)return p->swordSwing?WEAPON_SWORD:WEAPON_STANDARD;
         if(equipment[i].buildHeld || equipment[i].buildTime>0 || weaponVisuals[i].deployment>0)return WEAPON_REINFORCED_BUILDER;
@@ -17991,8 +17999,8 @@ static WeaponKind player_weapon_kind(const Player *p) {
 
 static WeaponMeleePose player_weapon_melee_sample(const Player *p, float now) {
     float progress = p->respawn_timer > 0 ? -1 : melee_anim_progress(p, now);
-    int slot=(int)(p-players);
-    WeaponMeleePose sample = { .progress = progress,.sword_direction=slot<MAX_PLAYERS?swordDirection[slot]:0 };
+    int slot=-1;for(int n=0;n<MAX_COMBATANTS;n++)if(p==&players[n]){slot=n;break;}
+    WeaponMeleePose sample = { .progress = progress,.sword_direction=slot>=0&&slot<MAX_COMBATANTS?swordDirection[slot]:0 };
     if (progress >= 0 && progress <= 1) {
         float fraction = melee_reach_fraction(progress);
         sample.strike_endpoint = v_add(melee_swing_origin(p, fraction),
@@ -18052,6 +18060,7 @@ static WeaponPose player_weapon_pose(int player_index, bool first_person) {
 }
 
 static bool player_has_gun(int player_index) {
+    if(fp_carrier(player_index) && players[player_index].respawn_timer<=0)return true;
     return players[player_index].respawn_timer <= 0 &&
            players[player_index].enemyType == ENEMY_TYPE_STANDARD;
 }
@@ -18758,6 +18767,10 @@ static NetInputCommand net_sample_local_input(int local_index, int player_slot, 
         if(IsKeyPressed(local_index==0?KEY_Q:KEY_U))command.pressed|=NET_INPUT_SWITCH;
         if(IsKeyPressed(local_index==0?KEY_B:KEY_Y))command.pressed|=NET_INPUT_EQUIP;
     }
+    if(fp_active()&&netTransport.role==NET_ROLE_CLIENT&&firefightWaveState==FIREFIGHT_STATE_INTERMISSION){
+        uint32_t prep=command.pressed&(NET_INPUT_PREP_LEFT|NET_INPUT_PREP_RIGHT|NET_INPUT_PREP_READY|NET_INPUT_PREP_MENU);
+        if(prep)command.pressed=prep;
+    }
     command.move_x = net_quantize_axis(mx);
     command.move_y = net_quantize_axis(my);
     command.look_x = net_quantize_axis(lx);
@@ -18785,6 +18798,9 @@ static NetInputCommand net_sample_local_input(int local_index, int player_slot, 
     if(!netRequestedCreative)aim_sample(local_index,player_slot,dt,&command);
     mouse_command(&command,local_index,player_slot,dt);
     eq_build_sample(local_index,player_slot,&command);
+    if(fp_active() && (ff_input_blocked(player_slot)||players[player_slot].respawn_timer>0)){
+        command.move_x=command.move_y=0;command.held=0;command.pressed&=NET_INPUT_PREP_LEFT|NET_INPUT_PREP_RIGHT|NET_INPUT_PREP_READY|NET_INPUT_PREP_MENU;
+    }
     return command;
 }
 
@@ -19236,11 +19252,13 @@ static void bot_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float
 #include "hologram.inc"
 #include "combat_ui.inc"
 #include "equipment.inc"
+#include "firefight_progression.inc"
 #include "chunk_regeneration_net.inc"
 static void UpdateBot(int playerIdx, float dt) {
     players[playerIdx].vel=v_sub(players[playerIdx].vel,exBotApplied[playerIdx]);exBotApplied[playerIdx]=(Vector3){0};
     if(enemyLab && enemyLabPaused && !enemyLabStep) return;
     if(netTransport.role==NET_ROLE_CLIENT)return;
+    if(fp_carrier(playerIdx)){fp_update_carrier(playerIdx,dt);return;}
     if(enemy_is_special(playerIdx)) {enemy_update(playerIdx,dt);return;}
     ai_tick(playerIdx,dt);
     if(clarity_evade(playerIdx,dt)){ai_cancel_burst(playerIdx);aiCombat[playerIdx].intentTime=0;return;}
@@ -19692,7 +19710,7 @@ static void net_send_world_to(int slot) {
     ex_pickup_snapshot(slot);
     net_writer_init(&writer, packet, sizeof(packet));
     clarity_net_snapshot(slot);
-    hologram_net_snapshot(slot);combat_ui_snapshot(slot);eq_snapshot(slot);ex_snapshot(slot);
+    hologram_net_snapshot(slot);combat_ui_snapshot(slot);eq_snapshot(slot);ex_snapshot(slot);fp_snapshot(slot);
     net_write_header(&writer, NET_MSG_WORLD_END, 0, netTransport.session_id, netServerTick);
     net_transport_send(&netTransport, slot, FPS_NET_CHANNEL_WORLD, packet, writer.length, true);
     regeneration_net_send(slot, true);
@@ -19717,6 +19735,7 @@ static void net_broadcast_lobby_state(void) {
     net_write_header(&writer, NET_MSG_SESSION_STATE, 0, netTransport.session_id, netServerTick);
     net_write_u8(&writer, netRequestedCreative ? 1 : 0);
     net_write_u8(&writer, netLobbyStarted ? 1 : 0);
+    net_write_u8(&writer,gameMode);net_write_u8(&writer,firefightCheckpoints);
     for (int i = 0; i < MAX_PLAYERS; ++i) {
         net_write_u8(&writer, netPlayerPresent[i] ? 1 : 0);
         net_write_u8(&writer, netPlayerReady[i] ? 1 : 0);
@@ -19748,6 +19767,7 @@ static void net_host_start_match(void) {
     for (int i = 1; i < MAX_PLAYERS; ++i) {
         if (netPlayerPresent[i]) activePlayers = i + 1;
     }
+    if(gameMode==GAME_MODE_FIREFIGHT)activePlayers=MAX_COMBATANTS;
     uint8_t packet[48];
     NetWriter writer;
     net_writer_init(&writer, packet, sizeof(packet));
@@ -19834,6 +19854,7 @@ static void net_reconcile_local(int slot, const NetPlayerWireState *state) {
     p->pos = state->pos; p->vel = state->vel;
     p->yaw = state->yaw; p->pitch = state->pitch;
     p->yaw_vel = state->yaw_vel; p->pitch_vel = state->pitch_vel;
+    if(fp_active()&&(ff_input_blocked(slot)||p->respawn_timer>0)){netPredictionCount[slot]=netPredictionHead[slot]=0;return;}
     int kept = 0;
     NetPredictedCommand replay[NET_PREDICTION_HISTORY];
     for (int i = 0; i < netPredictionCount[slot]; ++i) {
@@ -19858,20 +19879,21 @@ static void net_on_connect(NetTransport *transport, int slot, bool connected, vo
         uint8_t owned = netPeerPlayerMask[slot];
         for (int player_slot = 0; player_slot < MAX_PLAYERS; ++player_slot) {
             if (!(owned & (1u << player_slot))) continue;
+            fp_death(player_slot,players[player_slot].pos);
             ex_reset_player(player_slot);exLastCycleInput[player_slot]=0;
             for(int n=0;n<EX_GLOBS;n++)if(exGlobs[n].owner==player_slot)exGlobs[n].id=0;
             for(int n=0;n<EX_FIELDS;n++)if(exFields[n].owner==player_slot)exFields[n].owner=-1;
             netPlayerPresent[player_slot] = false;
             if(players[player_slot].tetherHolding)release_tether(player_slot);
             players[player_slot].drainTarget=0;
-            players[player_slot].respawn_timer=9999;
+            players[player_slot].respawn_timer=9999;combatantLife[player_slot]=LIFE_UNUSED;prepReady[player_slot]=true;prepVotes[player_slot]=-1;
             netPlayerReady[player_slot] = false;
             netHasPendingInput[player_slot] = false;
             for(int n=0;n<CLARITY_GRENADES;n++)if(grenades[n].id && grenades[n].owner==player_slot)grenades[n].owner=-1;
             for(int v=0;v<voxel_count;v++)if(voxels[v].explosionUntil>clarityClock && voxels[v].owner==player_slot)voxels[v].owner=-1;
         }
         netPeerPlayerMask[slot] = 0;
-        while (activePlayers > 1 && !netPlayerPresent[activePlayers - 1]) --activePlayers;
+        if(gameMode!=GAME_MODE_FIREFIGHT)while (activePlayers > 1 && !netPlayerPresent[activePlayers - 1]) --activePlayers;
         net_broadcast_lobby_state();
     }
 }
@@ -19919,10 +19941,14 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
             netPlayerPresent[player_slot] = true;
             netPlayerReady[player_slot] = false;
             eq_reset(player_slot);
-            grenadeInventory[player_slot]=1;grenadeCooldown[player_slot]=0;netLastGrenadeInput[player_slot]=0;
+            ex_reset_player(player_slot);players[player_slot].goldTetherCharged=false;
+            grenadeInventory[player_slot]=fp_active()?0:1;grenadeCooldown[player_slot]=0;netLastGrenadeInput[player_slot]=0;
             players[player_slot].respawn_timer=0;players[player_slot].invuln_timer=2;
             players[player_slot].matter=players[player_slot].matterMax=MATTER_MAX_DEFAULT;players[player_slot].isExposed=false;
             combatantLife[player_slot]=LIFE_ALIVE;
+            if(gameMode==GAME_MODE_FIREFIGHT){combatantTeam[player_slot]=0;playerInput[player_slot]=INPUT_TYPE_KEYBOARD;firefightHumans=firefightHumans>player_slot?firefightHumans:player_slot+1;
+                if(fpCheckpoint.valid){fpCheckpoint.humans[player_slot]=players[player_slot];fpCheckpoint.equipment[player_slot]=equipment[player_slot];fpCheckpoint.grenades[player_slot]=0;fpCheckpoint.selected[player_slot]=0;memset(fpCheckpoint.special[player_slot],0,sizeof(fpCheckpoint.special[player_slot]));}
+            }
             players[player_slot].pos = pick_player_spawn(player_slot);
             if (player_slot + 1 > activePlayers) activePlayers = player_slot + 1;
         }
@@ -19934,6 +19960,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
             if (assigned_mask & (1u << player_slot)) net_write_u8(&writer, (uint8_t)player_slot);
         net_write_u8(&writer, creative ? 1 : 0);
         net_write_u8(&writer, netLobbyStarted ? 1 : 0);
+        net_write_u8(&writer,gameMode);net_write_u8(&writer,firefightCheckpoints);
         net_transport_send(transport, peer_slot, FPS_NET_CHANNEL_CONTROL, packet, writer.length, true);
         if (netStatsEnabled) {
             fprintf(stderr, "[net] peer=%d assigned player mask=0x%02x\n", peer_slot, assigned_mask);
@@ -19978,6 +20005,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
     }
     if (transport->role != NET_ROLE_CLIENT) return;
     if (header.type == NET_MSG_WELCOME) {
+        fp_new_run();fpStateTick=fpReceivedRevision=0;memset(fpActorTick,0,sizeof(fpActorTick));free(fpIncoming);fpIncoming=NULL;fpIncomingNext=fpIncomingCount=0;
         clarity_net_reset();
         memset(holograms,0,sizeof(holograms));hologramReceiveTick=0;
         regeneration_reset();regeneration.serial=0;
@@ -19995,6 +20023,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
         transport->local_player_slot = netLocalPlayerSlots[0];
         netRequestedCreative = net_read_u8(&reader) != 0;
         bool joiningMatch=net_read_u8(&reader)!=0;
+        gameMode=(GameMode)net_read_u8(&reader);firefightCheckpoints=net_read_u8(&reader)!=0;
         if (reader.failed) return;
         activePlayers = clamp_active_players(netLocalPlayerSlots[netLocalPlayerCount - 1] + 1);
         if (netStatsEnabled) {
@@ -20006,6 +20035,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
         return;
     }
     if (header.session_id != transport->session_id) return;
+    if(fp_receive((NetMessageType)header.type,&reader,header.server_tick))return;
     if(regeneration_net_receive((NetMessageType)header.type,&reader))return;
     if(ex_receive((NetMessageType)header.type,&reader,header.server_tick))return;
     if(eq_receive((NetMessageType)header.type,&reader,header.server_tick))return;
@@ -20015,12 +20045,14 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
     if (header.type == NET_MSG_SESSION_STATE) {
         netRequestedCreative = net_read_u8(&reader) != 0;
         netLobbyStarted = net_read_u8(&reader) != 0;
+        gameMode=(GameMode)net_read_u8(&reader);firefightCheckpoints=net_read_u8(&reader)!=0;
         activePlayers = 1;
         for (int i = 0; i < MAX_PLAYERS; ++i) {
             netPlayerPresent[i] = net_read_u8(&reader) != 0;
             netPlayerReady[i] = net_read_u8(&reader) != 0;
             if (netPlayerPresent[i]) activePlayers = i + 1;
         }
+        if(netLobbyStarted && gameMode==GAME_MODE_FIREFIGHT)activePlayers=MAX_COMBATANTS;
         if (!netLobbyStarted) gameState = GAME_STATE_LOBBY;
     } else if (header.type == NET_MSG_START) {
         for (int i = 0; i < MAX_PLAYERS; ++i) weapon_visual_reset(&weaponVisuals[i]);
@@ -20180,6 +20212,14 @@ static void net_host_tick(void) {
         if (!netPlayerPresent[slot] || !netHasPendingInput[slot]) continue;
         NetInputCommand command = netPendingInput[slot];
         netHasPendingInput[slot] = false;
+        if(gameMode==GAME_MODE_FIREFIGHT && firefightWaveState==FIREFIGHT_STATE_INTERMISSION){
+            if(command.pressed&NET_INPUT_PREP_MENU)prepMenuOpen[slot]=!prepMenuOpen[slot];
+            if(prepMenuOpen[slot]){
+                if(command.pressed&(NET_INPUT_PREP_LEFT|NET_INPUT_PREP_RIGHT)){prepVotes[slot]=ff_upgrade_choice(prepVotes[slot],command.pressed&NET_INPUT_PREP_LEFT?-1:1);prepReady[slot]=false;}
+                if(command.pressed&NET_INPUT_PREP_READY)prepReady[slot]=!prepReady[slot];
+            }
+        }
+        if(gameMode==GAME_MODE_FIREFIGHT && (players[slot].respawn_timer>0 || ff_input_blocked(slot))){netLastProcessedInput[slot]=command.sequence;continue;}
         if (netRequestedCreative) {
             creativeBrushSpan[slot] = clampi(command.creative_brush, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
             creativeBlockColorIndex[slot] = command.creative_color;
@@ -20216,7 +20256,7 @@ static void net_host_tick(void) {
     for (int i = 0; i < MAX_PLAYERS; ++i) if (netPlayerPresent[i]) net_write_player_state(&writer, i);
     net_transport_broadcast(&netTransport, FPS_NET_CHANNEL_SNAPSHOT, packet, writer.length, false);
     net_host_send_dynamic_poses();
-    if(netServerTick%3u==0){clarity_net_snapshot(-1);hologram_net_snapshot(-1);combat_ui_snapshot(-1);eq_snapshot(-1);ex_snapshot(-1);}
+    if(netServerTick%3u==0){clarity_net_snapshot(-1);hologram_net_snapshot(-1);combat_ui_snapshot(-1);eq_snapshot(-1);ex_snapshot(-1);fp_snapshot(-1);}
     if ((netServerTick % 6u) == 0u) {
         ex_pickup_snapshot(-1);
     }
@@ -20240,6 +20280,7 @@ static void net_client_update(float dt) {
         net_write_u8(&writer, (uint8_t)player_slot);
         net_write_input(&writer, &command);
         net_transport_send(&netTransport, 0, FPS_NET_CHANNEL_INPUT, packet, writer.length, command.pressed != 0);
+        if(fp_active()&&(ff_input_blocked(player_slot)||players[player_slot].respawn_timer>0))continue;
         int insert = (netPredictionHead[player_slot] + netPredictionCount[player_slot]) % NET_PREDICTION_HISTORY;
         if (netPredictionCount[player_slot] == NET_PREDICTION_HISTORY) {
             netPredictionHead[player_slot] = (netPredictionHead[player_slot] + 1) % NET_PREDICTION_HISTORY;
@@ -20606,7 +20647,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
     voxel_render_frame++;
     nightSkyTime=GetTime();
     if(camp.active && !camp_visible())camp_end();
-    activePlayers = (gameMode == GAME_MODE_FIREFIGHT && netTransport.role == NET_ROLE_OFFLINE) ? MAX_COMBATANTS : clamp_active_players(activePlayers);
+    activePlayers = (gameMode == GAME_MODE_FIREFIGHT) ? MAX_COMBATANTS : clamp_active_players(activePlayers);
     int viewCount = netTransport.role == NET_ROLE_OFFLINE ? activePlayers : netLocalPlayerCount;
     int humanPlayerSlots[MAX_PLAYERS];
     int humanCount = 0;
@@ -20691,7 +20732,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 draw_players();
                 if (drawWeaponModels) draw_remote_weapon_glass(i, imageCam.position);
                 draw_rat_visors(i,imageCam.position);
-                draw_pickup_models(imageCam,WEAPON_GLASS);
+                draw_pickup_models(imageCam,WEAPON_GLASS);fp_draw(WEAPON_GLASS);
                 camp_draw(imageCam,false);
                 drawViewPlayerIndex = -1;
             EndMode3D();
@@ -21876,7 +21917,7 @@ int main(int argc, char **argv) {
                             if (netTransport.role == NET_ROLE_OFFLINE) {
                                 netRequestedRole = NET_ROLE_HOST;
                                 netRequestedCreative = false;
-                                if (gameMode != GAME_MODE_FIREFIGHT && net_transport_host(&netTransport, netRequestedPort)) {
+                                if (net_transport_host(&netTransport, netRequestedPort)) {
                                     net_set_host_local_players(netRequestedLocalPlayers);
                                     netLobbyStarted = false;
                                     gameState = GAME_STATE_LOBBY;
@@ -21890,7 +21931,7 @@ int main(int argc, char **argv) {
                                 netRequestedRole = NET_ROLE_CLIENT;
                                 netRequestedCreative = false;
                                 net_prepare_client_local_players(netRequestedLocalPlayers);
-                                if (gameMode != GAME_MODE_FIREFIGHT && net_transport_connect(&netTransport, "127.0.0.1", netRequestedPort)) {
+                                if (net_transport_connect(&netTransport, "127.0.0.1", netRequestedPort)) {
                                     memset(netPlayerPresent, 0, sizeof(netPlayerPresent)); netWorldReady = false;
                                     memset(netPlayerReady, 0, sizeof(netPlayerReady)); netLobbyStarted = false;
                                 }
@@ -22038,10 +22079,9 @@ int main(int argc, char **argv) {
                         }
                     }
                     if (netTransport.role == NET_ROLE_OFFLINE && IsKeyPressed(KEY_H)) {
-                        gameMode = GAME_MODE_DEATHMATCH;
                         netRequestedRole = NET_ROLE_HOST;
                         netRequestedCreative = false;
-                        if (gameMode != GAME_MODE_FIREFIGHT && net_transport_host(&netTransport, netRequestedPort)) {
+                        if (net_transport_host(&netTransport, netRequestedPort)) {
                             net_set_host_local_players(netRequestedLocalPlayers);
                             netLobbyStarted = false;
                             gameState = GAME_STATE_LOBBY;
@@ -22052,7 +22092,7 @@ int main(int argc, char **argv) {
                         netRequestedRole = NET_ROLE_CLIENT;
                         netRequestedCreative = false;
                         net_prepare_client_local_players(netRequestedLocalPlayers);
-                        if (gameMode != GAME_MODE_FIREFIGHT && net_transport_connect(&netTransport, "127.0.0.1", netRequestedPort)) {
+                        if (net_transport_connect(&netTransport, "127.0.0.1", netRequestedPort)) {
                             memset(netPlayerPresent, 0, sizeof(netPlayerPresent)); netWorldReady = false;
                             memset(netPlayerReady, 0, sizeof(netPlayerReady)); netLobbyStarted = false;
                         }
@@ -22193,7 +22233,7 @@ int main(int argc, char **argv) {
                         if (netTransport.role == NET_ROLE_OFFLINE && IsKeyPressed(KEY_H)) {
                             netRequestedRole = NET_ROLE_HOST;
                             netRequestedCreative = false;
-                            if (gameMode != GAME_MODE_FIREFIGHT && net_transport_host(&netTransport, netRequestedPort)) {
+                            if (net_transport_host(&netTransport, netRequestedPort)) {
                                 net_set_host_local_players(netRequestedLocalPlayers);
                                 netLobbyStarted = false;
                                 gameState = GAME_STATE_LOBBY;
@@ -22203,7 +22243,7 @@ int main(int argc, char **argv) {
                             netRequestedRole = NET_ROLE_CLIENT;
                             netRequestedCreative = false;
                             net_prepare_client_local_players(netRequestedLocalPlayers);
-                            if (gameMode != GAME_MODE_FIREFIGHT && net_transport_connect(&netTransport, "127.0.0.1", netRequestedPort)) {
+                            if (net_transport_connect(&netTransport, "127.0.0.1", netRequestedPort)) {
                                 memset(netPlayerPresent, 0, sizeof(netPlayerPresent)); netWorldReady = false;
                                 memset(netPlayerReady, 0, sizeof(netPlayerReady)); netLobbyStarted = false;
                             }
@@ -22237,7 +22277,7 @@ int main(int argc, char **argv) {
                     }
                     if (netTransport.role == NET_ROLE_HOST) {
                         const char *host_help = net_lobby_can_start() ?
-                            "Press ENTER to start | ESC to close lobby" :
+                            "Enter / A: start | Esc / B: close lobby" :
                             "Waiting for players to ready | ESC to close lobby";
                         DrawText(host_help,
                                  GetScreenWidth()/2 - MeasureText(host_help, 22)/2,
@@ -22245,14 +22285,14 @@ int main(int argc, char **argv) {
                     } else {
                         int slot = netTransport.local_player_slot;
                         const char *ready_text = (slot >= 0 && netPlayerReady[slot]) ?
-                            "Press R to unready | ESC to leave" : "Press R when ready | ESC to leave";
+                            "R / A: unready | Esc / B: leave" : "R / A: ready | Esc / B: leave";
                         DrawText(ready_text, GetScreenWidth()/2 - MeasureText(ready_text, 22)/2,
                                  GetScreenHeight() - 90, 22, RAYWHITE);
                     }
                 EndDrawing();
-                if (netTransport.role == NET_ROLE_HOST && net_lobby_can_start() && IsKeyPressed(KEY_ENTER)) {
+                if (netTransport.role == NET_ROLE_HOST && net_lobby_can_start() && couch_confirm()) {
                     net_host_start_match();
-                } else if (netTransport.role == NET_ROLE_CLIENT && IsKeyPressed(KEY_R) &&
+                } else if (netTransport.role == NET_ROLE_CLIENT && (IsKeyPressed(KEY_R)||couch_confirm()) &&
                            netTransport.local_player_slot >= 0) {
                     int slot = netTransport.local_player_slot;
                     bool ready = !netPlayerReady[slot];
@@ -22262,7 +22302,7 @@ int main(int argc, char **argv) {
                     }
                     net_send_ready(ready);
                 }
-                if (IsKeyPressed(KEY_ESCAPE)) {
+                if (couch_back()) {
                     net_transport_shutdown(&netTransport);
                     netRequestedRole = NET_ROLE_OFFLINE;
                     netLobbyStarted = false;
@@ -22464,7 +22504,7 @@ int main(int argc, char **argv) {
         }
         // input: shooting, bullet type, jump
         for (int i = 0; i < activePlayers; ++i) {
-            if (netTransport.role == NET_ROLE_HOST && !net_player_is_local(i)) continue;
+            if (netTransport.role == NET_ROLE_HOST && i<MAX_PLAYERS && !net_player_is_local(i)) continue;
             if (players[i].respawn_timer > 0.0f || ff_input_blocked(i)) {
                 continue;
             }
@@ -22551,7 +22591,7 @@ int main(int argc, char **argv) {
             if (players[i].respawn_timer > 0.0f) {
                 continue;
             }
-            if (netTransport.role == NET_ROLE_HOST && !net_player_is_local(i)) {
+            if (netTransport.role == NET_ROLE_HOST && i<MAX_PLAYERS && !net_player_is_local(i)) {
                 /* Remote movement and integration run at the authoritative 60 Hz tick. */
                 continue;
             } else if (ff_input_blocked(i)) {
@@ -22902,6 +22942,7 @@ int main(int argc, char **argv) {
     netVoxelProxyMap = NULL;
     shutdown_sfx();
     clarity_menu_shutdown();
+    fp_shutdown();
     CloseWindow();
     if (debugLogFile) {
         fclose(debugLogFile);

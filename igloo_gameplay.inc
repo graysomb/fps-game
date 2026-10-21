@@ -10,7 +10,7 @@ static bool ex_cell_free(Vector3 at,bool actors){
     return true;
 }
 static bool ex_igloo(GrenadeState g){
-    if(g.owner<0||g.owner>=MAX_PLAYERS)return false;
+    if(g.owner<0||g.owner>=MAX_COMBATANTS)return false;
     Vector3 ground=g.pos;VoxelHit hit;Ray down={v_add(g.pos,(Vector3){0,.2f,0}),{0,-1,0}};
     if(first_voxel_hit_detailed(down,3.2f,-1,false,&hit)){if(voxels[hit.id].simulate)return false;ground.y=down.position.y-hit.t;}
     else {if(g.pos.y>3)return false;ground.y=0;}

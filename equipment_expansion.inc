@@ -2,11 +2,11 @@
 static uint32_t exPartTick[16];
 static bool ex_suppressed(int i){return i>=0 && i<MAX_COMBATANTS && exSuppression[i]>0;}
 static void ex_clear_status(int i){if(i<0||i>=MAX_COMBATANTS)return;exSuppression[i]=0;for(int n=0;n<EX_SPLATS;n++)if(exSplats[n].actor==i)exSplats[n].id=0;}
-static void ex_reset_player(int i){if(i<0||i>=MAX_COMBATANTS)return;ex_clear_status(i);exBotPull[i]=exBotApplied[i]=(Vector3){0};++exIncarnation[i];if(i<MAX_PLAYERS){memset(exGrenades[i],0,sizeof(exGrenades[i]));exSelectedGrenade[i]=0;exFailedBuild[i]=0;}}
+static void ex_reset_player(int i){if(i<0||i>=MAX_COMBATANTS)return;ex_clear_status(i);exBotPull[i]=exBotApplied[i]=(Vector3){0};++exIncarnation[i];if(i<MAX_COMBATANTS){memset(exGrenades[i],0,sizeof(exGrenades[i]));exSelectedGrenade[i]=0;exFailedBuild[i]=0;}}
 static void ex_reset(void){memset(exGlobs,0,sizeof(exGlobs));memset(exFields,0,sizeof(exFields));memset(exSplats,0,sizeof(exSplats));memset(exPartTick,0,sizeof(exPartTick));memset(exLastCycleInput,0,sizeof(exLastCycleInput));for(int i=0;i<MAX_COMBATANTS;i++)ex_reset_player(i);exClock=0;ex_construction_reset();}
-static int ex_grenade_count(int i,int kind){if(i<0||i>=MAX_PLAYERS||kind<0||kind>=GRENADE_KIND_COUNT)return 0;return kind?exGrenades[i][kind-1]:grenadeInventory[i];}
-static void ex_cycle(int i){if(i<0||i>=MAX_PLAYERS)return;for(int n=1;n<=GRENADE_KIND_COUNT;n++){int k=(exSelectedGrenade[i]+n)%GRENADE_KIND_COUNT;if(ex_grenade_count(i,k)>0){exSelectedGrenade[i]=k;return;}}}
-static bool ex_grenade_pickup(int i,int kind){if(i<0||i>=MAX_PLAYERS||kind<1||kind>2||exGrenades[i][kind-1]>=2)return false;bool empty=ex_grenade_count(i,exSelectedGrenade[i])==0;exGrenades[i][kind-1]++;if(empty)exSelectedGrenade[i]=kind;return true;}
+static int ex_grenade_count(int i,int kind){if(i<0||i>=MAX_COMBATANTS||kind<0||kind>=GRENADE_KIND_COUNT)return 0;return kind?exGrenades[i][kind-1]:grenadeInventory[i];}
+static void ex_cycle(int i){if(i<0||i>=MAX_COMBATANTS)return;for(int n=1;n<=GRENADE_KIND_COUNT;n++){int k=(exSelectedGrenade[i]+n)%GRENADE_KIND_COUNT;if(ex_grenade_count(i,k)>0){exSelectedGrenade[i]=k;return;}}}
+static bool ex_grenade_pickup(int i,int kind){if(i<0||i>=MAX_COMBATANTS||kind<1||kind>2||exGrenades[i][kind-1]>=2)return false;bool empty=ex_grenade_count(i,exSelectedGrenade[i])==0;exGrenades[i][kind-1]++;if(empty)exSelectedGrenade[i]=kind;return true;}
 static bool ex_throw_available(int i,int kind){
     if(!ex_grenade_count(i,kind))return false;if(kind!=GRENADE_GRAVITY)return true;
     int count=0;for(int n=0;n<EX_FIELDS;n++)if(exFields[n].id){if(exFields[n].owner==i)return false;count++;}
@@ -17,6 +17,13 @@ static void ex_input(int seat,NetInputCommand *c){
     if(seat<0||seat>=MAX_PLAYERS||creativeModeActive||(enemyLab&&!equipmentLab))return;
     bool pressed=playerInput[seat]==INPUT_TYPE_GAMEPAD?IsGamepadButtonPressed(seat_device(seat),GAMEPAD_BUTTON_LEFT_FACE_DOWN):IsKeyPressed(seat==0?KEY_TAB:KEY_SEMICOLON);
     if(pressed)c->pressed|=NET_INPUT_GRENADE_CYCLE;
+    if(fp_active() && firefightWaveState==FIREFIGHT_STATE_INTERMISSION && netTransport.role==NET_ROLE_CLIENT){
+        bool pad=playerInput[seat]==INPUT_TYPE_GAMEPAD;int d=seat_device(seat);
+        if(pad?IsGamepadButtonPressed(d,GAMEPAD_BUTTON_LEFT_FACE_LEFT):IsKeyPressed(seat==0?KEY_F:KEY_LEFT))c->pressed|=NET_INPUT_PREP_LEFT;
+        if(pad?IsGamepadButtonPressed(d,GAMEPAD_BUTTON_LEFT_FACE_RIGHT):IsKeyPressed(seat==0?KEY_H:KEY_RIGHT))c->pressed|=NET_INPUT_PREP_RIGHT;
+        if(pad?IsGamepadButtonPressed(d,GAMEPAD_BUTTON_RIGHT_FACE_DOWN):IsKeyPressed(seat==0?KEY_SPACE:KEY_RIGHT_SHIFT))c->pressed|=NET_INPUT_PREP_READY;
+        if(pad?IsGamepadButtonPressed(d,GAMEPAD_BUTTON_RIGHT_FACE_UP):IsKeyPressed(seat==0?KEY_V:KEY_N))c->pressed|=NET_INPUT_PREP_MENU;
+    }
 }
 static void ex_splat(Vector3 at,int actor,int voxel,bool impact){
     int free=-1,oldest=0,count=0,actorOld=-1;
@@ -57,7 +64,7 @@ static void ex_grenade_landed(GrenadeState *g){g->landed=true;if(g->kind==GRENAD
 static void ex_grenade_deploy(GrenadeState g){
     if(g.kind==GRENADE_REGULAR){clarity_explode(g.pos,g.owner);return;}
     if(g.kind==GRENADE_IGLOO){
-        if(!ex_igloo(g)){int i=g.owner;if(i>=0&&i<MAX_PLAYERS&&exIncarnation[i]==g.incarnation&&players[i].respawn_timer<=0){exGrenades[i][1]=(int)fminf(2,exGrenades[i][1]+1);exSelectedGrenade[i]=GRENADE_IGLOO;exFailedBuild[i]=2;}}return;
+        if(!ex_igloo(g)){int i=g.owner;if(i>=0&&i<MAX_COMBATANTS&&exIncarnation[i]==g.incarnation&&players[i].respawn_timer<=0){exGrenades[i][1]=(int)fminf(2,exGrenades[i][1]+1);exSelectedGrenade[i]=GRENADE_IGLOO;exFailedBuild[i]=2;}}return;
     }
     for(int n=0;n<EX_FIELDS;n++)if(!exFields[n].id){exFields[n]=(GravityField){.id=exNextId++,.owner=g.owner,.pos=g.pos};play_sfx_at(SFX_SHIELD,g.pos,g.owner,2,.6f);return;}
 }
@@ -89,7 +96,7 @@ static void ex_draw(WeaponRenderPass pass){
     for(int n=0;n<EX_SPLATS;n++){ExpansionSplat *s=&exSplats[n];if(!s->id||!periodic_visible(s->pos,1))continue;WeaponEffect e={.transform=MatrixTranslate(s->pos.x,s->pos.y,s->pos.z),.age=s->age,.lifetime=s->impact?.65f:5,.seed=s->id,.attached=true};if(s->impact)weapon_draw_dmr_impact(&e,eye,exClock,pass);else weapon_draw_glob(&e,eye,exClock,pass);}
     for(int n=0;n<EX_FIELDS;n++){GravityField *f=&exFields[n];if(!f->id||!periodic_visible(f->pos,6))continue;WeaponEffect e={.transform=MatrixMultiply(MatrixScale(2,2,2),MatrixTranslate(f->pos.x,f->pos.y,f->pos.z)),.age=f->age,.lifetime=5,.seed=f->id};weapon_draw_gravity(&e,eye,exClock,pass);WeaponVisual v={.shot_time=-1000,.deployment=clampf(f->age/.35f,0,1),.activity=1};weapon_draw((WeaponPose){.kind=WEAPON_BLACK_HOLE_BOMB,.transform=MatrixMultiply(MatrixScale(.6f,.6f,.6f),MatrixTranslate(f->pos.x,f->pos.y,f->pos.z))},&v,eye,exClock,false,pass);}
     float now=weaponFrameSampled?weaponFrameTime:(float)GetTime();
-    for(int i=0;i<MAX_PLAYERS;i++){int gun=eq_gun(i);if(gun<EQ_GLOB||players[i].respawn_timer>0)continue;float age=now-weaponVisuals[i].shot_time;if(age<0||age>.065f)continue;
+    for(int i=0;i<MAX_COMBATANTS;i++){int gun=eq_gun(i);if(gun<EQ_GLOB||players[i].respawn_timer>0)continue;float age=now-weaponVisuals[i].shot_time;if(age<0||age>.065f)continue;
         WeaponPose pose=player_weapon_pose(i,i==drawViewPlayerIndex);Vector3 end=v_add(pose.muzzle,v_mul(player_forward(&players[i]),.18f*(1-age/.065f)));
         Color tint=gun==EQ_GLOB?LIME:gun==EQ_DMR?SKYBLUE:(Color){255,220,150,255};DrawCylinderEx(pose.muzzle,end,.055f*(1-age/.065f),.001f,5,tint);
     }

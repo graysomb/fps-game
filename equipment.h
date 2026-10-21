@@ -14,7 +14,7 @@ static const float eqShotgunImpulse=TETHER_THROW_IMPULSE,eqShotgunActivationBeli
 static const float eqGoldGrabCost=25;
 static const float eqSwordReach=SWORD_REACH,eqSwordSweep=SWORD_SWEEP_DEGREES,eqSwordCycle=.8f,eqSwordDamage=10000;
 typedef struct {int gun[2],selected,upgrades;float cooldown[EQ_GUN_COUNT],switchTime,charge,cutTime,buildTime;bool initialized,held,buildHeld,wasEmpty;float depleted,depletionPulse;Vector3 beamEnd;} Equipment;
-static Equipment equipment[MAX_PLAYERS];
+static Equipment equipment[MAX_COMBATANTS];
 static bool equipmentLab;
 static bool equipmentEmission;
 typedef struct {bool active;int owner;Vector3 pos,vel;float life;} EquipmentRocket;
@@ -32,9 +32,9 @@ typedef struct {
     uint64_t cutIds[EQ_SWORD_CUTS];
     bool terrainChanged;int minx,maxx,miny,maxy,minz,maxz;
 } SwordWave;
-static SwordWave swordWaves[MAX_PLAYERS];
-static uint32_t swordSequences[MAX_PLAYERS];
-static int swordNextDirection[MAX_PLAYERS],swordDirection[MAX_PLAYERS];
+static SwordWave swordWaves[MAX_COMBATANTS];
+static uint32_t swordSequences[MAX_COMBATANTS];
+static int swordNextDirection[MAX_COMBATANTS],swordDirection[MAX_COMBATANTS];
 static void eq_sword_tick(float dt);
 static uint32_t eqReceiveTick,eqPartTick[4];
 static void eq_reset(int i);
@@ -61,8 +61,8 @@ static void eq_lab(void);
 
 /* Local blend is never overwritten by network snapshots. */
 typedef struct {bool active;float blend,tapTime;bool tapDown,tapArmed,revive,toggleArmed,holdUsed;uint32_t pending;} AimState;
-static AimState aimStates[MAX_PLAYERS];
-static uint32_t netLastAimInput[MAX_PLAYERS];
+static AimState aimStates[MAX_COMBATANTS];
+static uint32_t netLastAimInput[MAX_COMBATANTS];
 static void aim_cancel(int i);
 static void aim_command(int i,const NetInputCommand *c);
 static void aim_sample(int seat,int slot,float dt,NetInputCommand *c);

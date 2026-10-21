@@ -26,7 +26,8 @@ static EnemyType pick_firefight_enemy_type(int wave, int spawn_index) {
 static void ff_restore_human(int i, float matter) {
     ex_clear_status(i);
     Player *p=&players[i];
-    if(combatantLife[i]!=LIFE_DOWNED) grenadeInventory[i]=1;
+    if(netTransport.role==NET_ROLE_HOST&&!netPlayerPresent[i]){combatantLife[i]=LIFE_UNUSED;p->respawn_timer=9999;return;}
+    if(combatantLife[i]!=LIFE_DOWNED && !fp_active()) grenadeInventory[i]=1;
     p->pos=pick_player_spawn(i); p->death_pos=p->pos;
     p->vel=(Vector3){0}; p->matter=matter; p->matterMax=MATTER_MAX_DEFAULT;
     p->isExposed=false; p->respawn_timer=0; p->invuln_timer=2;
@@ -39,8 +40,10 @@ static void ff_restore_human(int i, float matter) {
 }
 
 static void ff_resolve_death(int i) {
+    fp_death(i,players[i].death_pos);
     ex_reset_player(i);
     eq_reset(i);
+    players[i].goldTetherCharged=false;grenadeInventory[i]=fp_active()?0:1;
     if(enemyLab) {combatantLife[i]=LIFE_WAITING;players[i].respawn_timer=3;return;}
     if(firefightPractice) { ff_restore_human(i,MATTER_MAX_DEFAULT); return; }
     if(firefightTeamLives>0) {
@@ -112,7 +115,7 @@ static void ff_update_coop(float dt) {
             players[i].deaths++; ff_resolve_death(i);
             pending |= combatantLife[i]==LIFE_WAITING;
         }
-        if(!pending) { firefightWaveState=FIREFIGHT_STATE_DEFEAT; gameState=GAME_STATE_GAMEOVER; }
+        if(!pending && !fp_retry()) { firefightWaveState=FIREFIGHT_STATE_DEFEAT; gameState=GAME_STATE_GAMEOVER; }
     }
 }
 
@@ -124,15 +127,17 @@ static void start_firefight_wave(int wave_number) {
     firefightWaveBannerTimer=3.5f;
     firefightWaveEnemiesTotal=0; firefightEnemiesSpawned=0;
     for(int t=0;t<FF_TYPE_COUNT;t++) {
-        ffRemaining[t]=firefightPractice ? (t==0?1:0) : ff_count(firefightWave,firefightHumans,t);
+        ffRemaining[t]=firefightPractice ? (t==0?1:0) : ff_count(firefightWave,fp_team_size(),t);
         firefightWaveEnemiesTotal+=ffRemaining[t];
     }
+    fp_prepare_wave(firefightWave);
     firefightWaveEnemiesRemaining=firefightWaveEnemiesTotal;
     ffSpawnOrdinal=0; ffSpawnTimer=2; ffCleanupTimer=0; ffEntrance=0;
     for(int i=MAX_PLAYERS;i<MAX_COMBATANTS;i++) {
         if(goliathStates[i].count>0) explode_goliath_armor(i);
         players[i].respawn_timer=9999; combatantLife[i]=LIFE_UNUSED;
     }
+    fp_capture();
 }
 
 static void reset_firefight_match(void) {
@@ -140,7 +145,7 @@ static void reset_firefight_match(void) {
     firefightIntermissionTimer=0; teamUpgrade=UPGRADE_NONE; memset(teamUpgradeLevels,0,sizeof(teamUpgradeLevels));
     memset(reviveCount,0,sizeof(reviveCount));
     for(int i=0;i<MAX_COMBATANTS;i++) goliathStates[i].count=0;
-    for(int i=0;i<firefightHumans;i++) ff_restore_human(i,MATTER_MAX_DEFAULT);
+    for(int i=0;i<firefightHumans;i++){if(fp_active())grenadeInventory[i]=0;ff_restore_human(i,MATTER_MAX_DEFAULT);}
     practiceStep=0;
     if(firefightPractice) {
         players[0].pos=(Vector3){0,BASE_EYE_HEIGHT+2,1.5f};
@@ -157,9 +162,9 @@ static void ff_wave_complete(void) {
         else { ffRemaining[0]=1; firefightWaveEnemiesTotal++; firefightWaveEnemiesRemaining=1; ffSpawnTimer=2; }
         return;
     }
-    for(int i=0;i<firefightHumans;i++)grenadeInventory[i]=grenadeInventory[i]<1?1:grenadeInventory[i];
-    if(firefightFoundry && !firefightPractice) {
-        enemy_stock_scrap(false);
+    if(!fp_active())for(int i=0;i<firefightHumans;i++)grenadeInventory[i]=grenadeInventory[i]<1?1:grenadeInventory[i];
+    if(firefightFoundry && !firefightPractice) enemy_stock_scrap(false);
+    if(firefightFoundry && !firefightPractice && !fp_active()) {
         for(int p=0;p<MAX_PICKUPS;p++)if(pickups[p].type==PICKUP_GOLD_TETHER || pickups[p].type==PICKUP_DYNAMIC_SHOT || pickups[p].type==PICKUP_GRENADE) {
             pickups[p].active=true;pickups[p].respawnTimer=0;
         }
@@ -193,15 +198,18 @@ static bool ff_spawn_position(int slot, Vector3 *out) {
 static void update_firefight_logic(float dt) {
     camp_update(dt);
     if(enemyLab) return;
+    if(firefightWaveState==FIREFIGHT_STATE_RESTART)return;
     enemy_tick(dt);
     if(firefightWaveState==FIREFIGHT_STATE_VICTORY || firefightWaveState==FIREFIGHT_STATE_DEFEAT) return;
     if(firefightWaveBannerTimer>0) firefightWaveBannerTimer-=dt;
     ff_update_coop(dt);
-    if(gameState==GAME_STATE_GAMEOVER) return;
+    if(gameState==GAME_STATE_GAMEOVER || firefightWaveState==FIREFIGHT_STATE_RESTART) return;
     if(firefightWaveState==FIREFIGHT_STATE_INTERMISSION) {
         firefightIntermissionTimer-=dt;
         bool ready=true;
         for(int i=0;i<firefightHumans;i++) {
+            if(combatantLife[i]==LIFE_UNUSED)continue;
+            if(netTransport.role==NET_ROLE_HOST && !net_player_is_local(i)){ready &= prepReady[i];continue;}
             bool pad=playerInput[i]==INPUT_TYPE_GAMEPAD; int d=seat_device(i);
             if(pad?IsGamepadButtonPressed(d,GAMEPAD_BUTTON_RIGHT_FACE_UP):IsKeyPressed(i==0?KEY_V:KEY_N)) prepMenuOpen[i]=!prepMenuOpen[i];
             if(!prepMenuOpen[i]) {ready &= prepReady[i];continue;}
@@ -231,7 +239,7 @@ static void update_firefight_logic(float dt) {
         if(players[i].respawn_timer<=0) { living++; if(enemy_is_special(i)) specialists++; if(players[i].enemyType==ENEMY_TYPE_GOLIATH) goliaths++; }
         else if(slot<0) slot=i;
     }
-    int waveCap=ff_wave_cap(firefightWave,firefightHumans);
+    int waveCap=ff_wave_cap(firefightWave,fp_team_size());
     if(slot<0 || living>=waveCap) return;
     int type=-1;
     for(int n=0;n<FF_TYPE_COUNT;n++) { int t=(ffSpawnOrdinal+n)%FF_TYPE_COUNT;
@@ -252,6 +260,7 @@ static void update_firefight_logic(float dt) {
         /* Attached armor follows its owner in the normal gameplay update. */
         players[slot].pos=position;
         players[slot].death_pos=position;
+        fp_spawn(slot,type);
         ffRemaining[type]--; firefightEnemiesSpawned++; ffSpawnOrdinal++; living++;
     }
     ffEntrance=(firefightWave>=4)?1-ffEntrance:0;

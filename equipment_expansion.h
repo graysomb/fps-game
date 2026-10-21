@@ -6,9 +6,9 @@ typedef struct {uint32_t id;int actor;uint64_t support;Vector3 pos,local;float a
 static GlobProjectile exGlobs[EX_GLOBS];
 static GravityField exFields[EX_FIELDS];
 static ExpansionSplat exSplats[EX_SPLATS];
-static float exSuppression[MAX_COMBATANTS],exFailedBuild[MAX_PLAYERS];
+static float exSuppression[MAX_COMBATANTS],exFailedBuild[MAX_COMBATANTS];
 static uint32_t exIncarnation[MAX_COMBATANTS],exNextId=1;
-static int exGrenades[MAX_PLAYERS][2],exSelectedGrenade[MAX_PLAYERS];
+static int exGrenades[MAX_COMBATANTS][2],exSelectedGrenade[MAX_COMBATANTS];
 static float exClock;
 static bool ex_suppressed(int i);
 static void ex_reset(void);

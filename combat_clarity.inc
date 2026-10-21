@@ -34,7 +34,7 @@ static void clarity_reset(void) {
     memset(grenadeCooldown,0,sizeof(grenadeCooldown));memset(killConfirm,0,sizeof(killConfirm));
     memset(swarmHintActive,0,sizeof(swarmHintActive));
     swarmHintTimer=swarmPulseTimer=0;explosionDamageContext=false;
-    for(int i=0;i<MAX_COMBATANTS;i++)grenadeInventory[i]=1;
+    for(int i=0;i<MAX_COMBATANTS;i++)grenadeInventory[i]=fp_active()?0:1;
 }
 static void clarity_effect(ClarityEffect e,bool broadcast) {
     int slot=0;for(int n=0;n<CLARITY_EFFECTS;n++){if(!clarityEffects[n].id){slot=n;break;}if(clarityEffects[n].age>clarityEffects[slot].age)slot=n;}
@@ -102,7 +102,7 @@ static void clarity_explode(Vector3 pos,int owner) {
 static void enemy_blast(EnemyCharge c){clarity_explode(c.pos,c.owner);}
 static bool clarity_throw(int slot) {
     aim_cancel(slot);
-    if(netTransport.role==NET_ROLE_CLIENT || slot<0 || slot>=MAX_PLAYERS || slot>=activePlayers || creativeModeActive || (netTransport.role!=NET_ROLE_OFFLINE && netRequestedCreative) || gameState!=GAME_STATE_PLAYING || players[slot].respawn_timer>0 || ff_input_blocked(slot) || (enemyLab && enemyLabPaused) || !ex_throw_available(slot,exSelectedGrenade[slot]) || grenadeCooldown[slot]>0)return false;
+    if(netTransport.role==NET_ROLE_CLIENT || slot<0 || slot>=MAX_COMBATANTS || slot>=activePlayers || creativeModeActive || (netTransport.role!=NET_ROLE_OFFLINE && netRequestedCreative) || gameState!=GAME_STATE_PLAYING || players[slot].respawn_timer>0 || ff_input_blocked(slot) || (enemyLab && enemyLabPaused) || !ex_throw_available(slot,exSelectedGrenade[slot]) || grenadeCooldown[slot]>0)return false;
     int free=-1,owned=0;for(int n=0;n<CLARITY_GRENADES;n++){if(!grenades[n].id)free=n;else if(grenades[n].owner==slot)owned++;}
     if(free<0 || owned>=2)return false;
     Vector3 forward=player_forward(&players[slot]),pos=players[slot].pos;VoxelHit hit;
@@ -268,6 +268,7 @@ static void clarity_supply_layout(void) {
         for(int q=0;q<4;q++)for(int k=0;k<3;k++)if(valid[k])pickups[count++]=(Pickup){.pos=crosscut_rotate(positions[k],q),.active=true,.type=k==0?PICKUP_AMMO:k==1?PICKUP_GRENADE:PICKUP_DYNAMIC_SHOT};
         Vector3 at;if(clarity_supply_position((Vector3){0},0,&at))pickups[count++]=(Pickup){.pos=at,.active=true,.type=PICKUP_GOLD_TETHER};
     }
+    if(fp_active())for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].type!=PICKUP_HEALTH&&pickups[n].type!=PICKUP_AMMO)pickups[n].active=false,pickups[n].respawnTimer=0;
     eq_layout();
 }
 static void clarity_supply_update(void) {

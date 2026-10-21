@@ -6,7 +6,7 @@ static Vector3 sword_lane_direction(const SwordWave *w,int lane){
     return v_add(v_add(v_mul(r,local.x),v_mul(u,local.y)),v_mul(f,-local.z));
 }
 static bool eq_sword(int i){
-    if(i<0 || i>=MAX_PLAYERS || swordWaves[i].active || players[i].matter<eqGuns[EQ_BLADE].cost)return false;
+    if(i<0 || i>=MAX_COMBATANTS || swordWaves[i].active || players[i].matter<eqGuns[EQ_BLADE].cost)return false;
     players[i].swordSwing=true;
     SwordWave *w=&swordWaves[i];
     *w=(SwordWave){.active=true,.sequence=++swordSequences[i],.direction=swordNextDirection[i]};
@@ -95,7 +95,7 @@ static void sword_step(int owner,SwordWave *w,float previous){
     }
 }
 static void eq_sword_tick(float dt){
-    for(int i=0;i<MAX_PLAYERS;i++){
+    for(int i=0;i<MAX_COMBATANTS;i++){
         SwordWave *w=&swordWaves[i];if(!w->active)continue;
         if(!w->emitted && (players[i].respawn_timer>0 || ff_input_blocked(i))){w->active=false;continue;}
         float left=fminf(dt,SWORD_ANIM_SECONDS-w->age);
@@ -116,7 +116,7 @@ static void eq_sword_tick(float dt){
     }
 }
 static void eq_sword_draw(void){
-    for(int i=0;i<MAX_PLAYERS;i++){
+    for(int i=0;i<MAX_COMBATANTS;i++){
         SwordWave *w=&swordWaves[i];if(!w->active || !w->emitted)continue;
         if(!eqSlashTried){eqSlashTried=true;eqSlashShader=LoadShader(NULL,"shaders/sword_slash.frag");}
         SwordSwingSample sample=weapon_sword_sample(w->age,w->direction);

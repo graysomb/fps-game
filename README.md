@@ -223,8 +223,8 @@ screen and rematch. Left/right in the lobby selects Endless Survival; in Endless
 Tab or the top face button switches between Foundry and the current advanced map.
 The arena has a raised holdout, two stair approaches, a lower circulation route,
 and two heavy slabs on orange breakable supports. Match destruction persists
-between waves; rematching rebuilds the arena. Opposing flank routes offer charged-shot
-and gold-tether power-ups with 30-second respawns and intermission replenishment.
+between waves; rematching rebuilds the arena. Weapons and upgrades come from
+defeated enemy carriers, not timed map spawners.
 Eight real scrap bundles restock between waves only where their supply sites are clear.
 Ordinary walls/roofs are thicker and supports are redundant; marked demolition points
 remain vulnerable without changing global material strength.
@@ -234,7 +234,8 @@ Hold X / Square on the controller (keyboard P1 `X`, P2 comma) within two units a
 sight for three seconds. Reviving is free, including at zero Matter, and restores
 35 Matter plus two seconds of invulnerability. Animated bands and a progress ring
 show the revive; taking damage, moving away, or releasing interrupts it. A team
-wipe spends shared respawn reserves; with none remaining, the match ends. Solo
+wipe spends shared respawn reserves; with none remaining, the match ends unless
+checkpoints are enabled. Solo
 players use reserves directly. Wave clears restore the team.
 
 Early waves introduce Goliaths (2), Sappers (3), Shieldbearers and Builders (4),
@@ -248,10 +249,57 @@ bombs remain active. Lobbers acquire targets across the map and tear connected
 8–64 voxel pieces from destructible structures before throwing them along a clear
 ballistic arc. Screen-edge damage cues indicate incoming direction. Large rat and
 grenade HUD icons show availability, cooldown, and grenade count. LAN peers must
-use protocol 16 builds for death notifications, feedback, and bomb snapshots.
+use matching protocol 25 builds for progression, death feedback, and bomb snapshots.
 Deaths and downs show the fatal hit's cause and attacker in the player's viewport.
 The Firefight defeat screen shows team-wipe status, final wave/score, player stats,
 and last-hit causes, with Retry and Lobby choices.
+
+Firefight equipment progression is run-local:
+
+| First wave | Carrier equipment | Tier |
+|---|---|---|
+| 1 | Default guns only | D |
+| 2 | Glob Gun, reinforced building | E |
+| 3 | Glock, regular grenade supply | C |
+| 4 | Adhesive grenade upgrade | C |
+| 5 | Shotgun, igloo grenade supply | B |
+| 6 | Cutter, DMR | B |
+| 7 | Voxel launcher, sword | A |
+| 8 | Black hole grenade supply | A |
+| 9 | Gold tether upgrade | S |
+| 10 | Railgun | S |
+| 11 | Rocket launcher | S |
+| 12+ | Previously introduced equipment mixes | All |
+
+Each introduction guarantees a carrier. Starting at wave 3, one repeat carrier
+for one/two humans or two for three/four humans rotates through earlier equipment.
+These replace ordinary enemies, preserving the wave total and specialist/boss counts.
+Carriers use the same weapon costs, damage and terrain effects as players, with
+existing enemy reaction and aim error. Grenadiers have two throws and a supply drop;
+builders use reinforced cover, and gold-tether carriers grab and throw scrap.
+
+A carrier's death releases one copy immediately. Guns and permanent upgrades persist
+at the last owner's death location; replacing a gun drops that same copy at your
+feet. Duplicates stay on the ground. Downing, revival and intermissions preserve
+owned equipment. Ground items have gold radar markers, safe placement after terrain
+changes, and no respawn timer. Nearby identical copies share a display model; distant items
+use simple glowing markers, with at most 48 detailed models per viewport/pass.
+Each item remains independently collectible. The first team pickup of each type shows a queued
+**WEAPON UNLOCKED!** banner. Grenade supplies are consumable; no free grenades or
+weapons are granted at spawn or intermission. Health and Matter supplies remain.
+
+**Checkpoints** default OFF. Toggle with `C` or controller `X` in the Firefight lobby
+before starting. When ON, exhausting the team's respawn reserves restarts the current
+wave after a three-second message. The checkpoint restores wave-start equipment,
+grenades, upgrades, team lives, scores and unlocks, rebuilds a fresh arena, and
+places living players safely with full Matter. Failed-attempt loot is rolled back;
+revives and individual reserve respawns do not trigger a checkpoint. The LAN host
+owns the checkpoint and changes the session generation to reject old input/snapshots.
+
+`tests/firefight_progression_test.c` covers schedules, shared enemy combat, copy
+conservation, repeated checkpoint restoration and controller/keyboard settings.
+`tests/firefight_progression_lan.c` checks real host/client inventory transfer,
+carrier state, charging, wave votes, retry synchronization and stale input rejection.
 
 Preparation lasts 30 seconds. Vote to increase the team's build, harvest, or throw
 upgrade level. Bonuses persist and stack across waves; ties default to building,
@@ -274,7 +322,9 @@ captures are written to `artifacts/camp-*.png` by the Firefight validation scrip
 Learn Combat teaches harvesting, exposure, melee finishing, and debris finishing
 through completed actions. Leave through the pause menu at any time. Per-seat
 sensitivity, deadzone, and invert-Y settings are saved in `couch_settings.cfg`.
-The new Firefight modes are local-only; existing LAN PvP and creative protocols
+Firefight supports local split-screen and LAN (up to four humans). In the Firefight
+lobby, `H` hosts with the current local seats; clients join through the existing LAN
+connection flow. All peers must use the same protocol 25 build. PvP and creative
 remain four-player modes.
 
 For a quick check without raylib or a display, run
