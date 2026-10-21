@@ -191,4 +191,16 @@ static void persistent_tether(void){
  assert(combatantLife[0]==LIFE_DOWNED && players[0].goldTetherCharged);
  ff_restore_human(0,35);assert(players[0].goldTetherCharged);
 }
-int main(int argc,char**argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Equipment tests");init_pbd_thread_pool();assert(initialize_physics_backend());inventory();matter_build_changes();persistent_tether();revised_weapons();attacks();panels();sticky();lifecycle();sword();shotgun_structures();protection();supplies_regenerate();maps();stress();captures();beam_captures();sword_reach_and_visuals();matter_captures();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Equipment tests passed");return 0;}
+static void polish_presentation(void){
+ fixture();players[1].pos.x=20;players[0].pitch=-40;equipment[0].upgrades=EQ_BUILD;
+ NetInputCommand press={.pressed=NET_INPUT_BUILD,.held=NET_INPUT_BUILD},release={0},cancel={.pressed=NET_INPUT_BUILD_CANCEL};
+ eq_build_command(0,&press);eq_tick(.075f);assert(player_weapon_kind(&players[0])==WEAPON_REINFORCED_BUILDER);assert(fabsf(weaponVisuals[0].deployment-.5f)<.001f);
+ eq_tick(.075f);assert(weaponVisuals[0].deployment==1);eq_build_command(0,&cancel);eq_tick(.075f);assert(weaponVisuals[0].build_pulse==0 && weaponVisuals[0].deployment>.4f);
+ eq_tick(.075f);assert(weaponVisuals[0].deployment==0 && player_weapon_kind(&players[0])==WEAPON_STANDARD);
+ eq_build_command(0,&press);eq_tick(.15f);eq_build_command(0,&release);eq_tick(.01f);assert(weaponVisuals[0].build_pulse>.9f && voxel_count==125 && players[0].matter==90);
+ eq_tick(.6f);assert(weaponVisuals[0].build_pulse==0 && weaponVisuals[0].deployment==0);
+ fixture();equipment[0].gun[0]=EQ_ROCKET;equipment[0].cooldown[EQ_ROCKET]=1.5f;eq_tick(.3f);assert(fabsf(weaponVisuals[0].cooldown-.8f)<.001f);
+ equipment[0].cooldown[EQ_ROCKET]=0;players[0].matter=0;eq_tick(.2f);assert(weaponVisuals[0].depleted==1 && weaponVisuals[0].cooldown==0);
+ eq_reset(0);assert(weaponVisuals[0].deployment==0 && weaponVisuals[0].build_pulse==0);
+}
+int main(int argc,char**argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Equipment tests");init_pbd_thread_pool();assert(initialize_physics_backend());inventory();polish_presentation();matter_build_changes();persistent_tether();revised_weapons();attacks();panels();sticky();lifecycle();sword();shotgun_structures();protection();supplies_regenerate();maps();stress();captures();beam_captures();sword_reach_and_visuals();matter_captures();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Equipment tests passed");return 0;}

@@ -180,8 +180,21 @@ static void clarity_tick(float dt) {
     if(gameMode==GAME_MODE_FIREFIGHT && !enemyLab && firefightWaveState==FIREFIGHT_STATE_ACTIVE && queued==0 && alive>0 && alive<=3){swarmHintTimer+=dt;swarmPulseTimer+=dt;if(swarmHintTimer>=8 && (swarmPulseTimer>=4)){swarmPulseTimer=0;for(int i=MAX_PLAYERS;i<activePlayers;i++){swarmHintActive[i]=players[i].respawn_timer<=0;swarmHints[i]=players[i].pos;}}}
     else {swarmHintTimer=swarmPulseTimer=0;memset(swarmHintActive,0,sizeof(swarmHintActive));}
 }
+static void clarity_grenades_draw(WeaponRenderPass pass){
+    Vector3 eye=drawViewPlayerIndex>=0?players[drawViewPlayerIndex].pos:(Vector3){0};
+    for(int n=0;n<CLARITY_GRENADES;n++)if(grenades[n].id && periodic_visible(grenades[n].pos,4)){
+        GrenadeState *g=&grenades[n];
+        if(g->adhesive){
+            WeaponVisual v={.shot_time=-1000,.activity=g->fuse>=0,.attached=g->attached,
+                .charge=g->fuse>=0?1-clampf(g->fuse/1.5f,0,1):0};
+            Matrix m=MatrixMultiply(MatrixScale(.45f,.45f,.45f),MatrixTranslate(g->pos.x,g->pos.y,g->pos.z));
+            weapon_draw((WeaponPose){.kind=WEAPON_ADHESIVE_GRENADE,.transform=m},&v,eye,clarityClock,false,pass);
+        }else if(pass==WEAPON_COLOR)DrawCube(g->pos,.22f,.3f,.22f,ORANGE);
+        if(pass==WEAPON_COLOR){DrawCubeWires(g->pos,.26f,.34f,.26f,((int)(g->fuse*8)%2)?YELLOW:RED);DrawCircle3D(g->pos,4,(Vector3){1,0,0},90,Fade(ORANGE,.35f));}
+    }
+}
 static void clarity_draw(void) {
-    for(int n=0;n<CLARITY_GRENADES;n++)if(grenades[n].id && periodic_visible(grenades[n].pos,4)){GrenadeState *g=&grenades[n];if(g->adhesive){WeaponVisual v={.shot_time=-1000,.activity=g->fuse>=0,.charge=g->fuse>=0?1-clampf(g->fuse/1.5f,0,1):0};Matrix m=MatrixMultiply(MatrixScale(.45f,.45f,.45f),MatrixTranslate(g->pos.x,g->pos.y,g->pos.z));weapon_draw((WeaponPose){.kind=WEAPON_ADHESIVE_GRENADE,.transform=m},&v,(Vector3){0},clarityClock,false,WEAPON_COLOR);}else DrawCube(g->pos,.22f,.3f,.22f,ORANGE);DrawCubeWires(g->pos,.26f,.34f,.26f,((int)(g->fuse*8)%2)?YELLOW:RED);DrawCircle3D(g->pos,4,(Vector3){1,0,0},90,Fade(ORANGE,.35f));}
+    clarity_grenades_draw(WEAPON_COLOR);
     for(int n=0;n<CLARITY_EFFECTS;n++)if(clarityEffects[n].id){ClarityEffect *e=&clarityEffects[n];float t=e->age;Color color=e->kind==2?ORANGE:e->type==ENEMY_TYPE_SWARMER?RED:LIGHTGRAY;
         if(!periodic_visible(e->pos,4))continue;
         if(e->kind==2){feedback_blast(e);continue;}

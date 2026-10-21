@@ -17964,7 +17964,7 @@ static WeaponKind player_weapon_kind(const Player *p) {
     int i=-1;for(int n=0;n<MAX_PLAYERS;n++)if(p==&players[n]){i=n;break;}
     if(i>=0 && i<MAX_PLAYERS && equipment[i].initialized && !is_player_bot(i)){
         if(eq_gun(i)==EQ_BLADE && p->meleeSwingActive)return p->swordSwing?WEAPON_SWORD:WEAPON_STANDARD;
-        if(equipment[i].buildTime>0)return WEAPON_REINFORCED_BUILDER;
+        if(equipment[i].buildHeld || equipment[i].buildTime>0 || weaponVisuals[i].deployment>0)return WEAPON_REINFORCED_BUILDER;
         return eqGuns[eq_gun(i)].visual;
     }
     return p->dynamicShotActive ? WEAPON_DYNAMIC_LAUNCHER : WEAPON_STANDARD;
@@ -20689,7 +20689,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                         draw_player_weapon(p, imageCam.position, false, WEAPON_EMISSION);
                     }
                 }
-                equipmentEmission=true;eq_world();equipmentEmission=false;
+                equipmentEmission=true;eq_world();clarity_grenades_draw(WEAPON_EMISSION);equipmentEmission=false;
                 hologram_draw(true);
                 camp_draw(imageCam,true);
                 drawViewPlayerIndex=-1;

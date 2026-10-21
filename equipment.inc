@@ -1,5 +1,5 @@
 /* Authoritative equipment behavior. All simulation runs once, outside viewports. */
-static void eq_reset(int i){if(i<0 || i>=MAX_PLAYERS)return;swordNextDirection[i]=swordDirection[i]=0;if(!swordWaves[i].emitted)swordWaves[i].active=false;aimStates[i]=(AimState){0};netLastAimInput[i]=0;equipment[i]=(Equipment){.gun={EQ_DEFAULT,EQ_EMPTY},.initialized=true};players[i].dynamicShotActive=false;}
+static void eq_reset(int i){if(i<0 || i>=MAX_PLAYERS)return;swordNextDirection[i]=swordDirection[i]=0;if(!swordWaves[i].emitted)swordWaves[i].active=false;aimStates[i]=(AimState){0};netLastAimInput[i]=0;equipment[i]=(Equipment){.gun={EQ_DEFAULT,EQ_EMPTY},.initialized=true};players[i].dynamicShotActive=false;weaponVisuals[i].deployment=weaponVisuals[i].build_pulse=weaponVisuals[i].cooldown=0;}
 static void eq_reset_all(void){for(int i=0;i<MAX_PLAYERS;i++)eq_reset(i);memset(swordWaves,0,sizeof(swordWaves));memset(swordSequences,0,sizeof(swordSequences));memset(eqRockets,0,sizeof(eqRockets));memset(eqTraces,0,sizeof(eqTraces));eqReceiveTick=0;memset(eqPartTick,0,sizeof(eqPartTick));}
 static int eq_gun(int i){if(i<0 || i>=MAX_PLAYERS || is_player_bot(i))return EQ_DEFAULT;if(!equipment[i].initialized)eq_reset(i);return equipment[i].gun[equipment[i].selected];}
 static bool eq_upgrade(int i,int flag){return i>=0 && i<MAX_PLAYERS && !is_player_bot(i) && (equipment[i].upgrades&flag)!=0;}
@@ -228,6 +228,11 @@ static void eq_tick(float dt){
         e->depleted+=(empty-e->depleted)*fminf(1,dt*10);
         weaponVisuals[i].depleted=e->depleted;
         weaponVisuals[i].charge=e->charge/.65f;weaponVisuals[i].activity=e->held||e->buildTime>0;
+        float duration=eqGuns[eq_gun(i)].cooldown;
+        weaponVisuals[i].cooldown=duration>0?Clamp(e->cooldown[eq_gun(i)]/duration,0,1):0;
+        float deploy=e->buildHeld || e->buildTime>.35f?1:0;
+        float step=dt/.15f;weaponVisuals[i].deployment+=Clamp(deploy-weaponVisuals[i].deployment,-step,step);
+        weaponVisuals[i].build_pulse=e->buildTime/.6f;
         if(players[i].respawn_timer>0){e->held=false;e->charge=0;}
     }
     for(int n=0;n<32;n++)eqTraces[n].life=fmaxf(0,eqTraces[n].life-dt);
@@ -294,7 +299,8 @@ static void eq_beam_shutdown(void){if(eqSlashShader.id && eqSlashShader.id!=rlGe
 static void eq_world(void){
     if(!eqBeamTried){eqBeamTried=true;eqBeamShader=LoadShader(NULL,"shaders/equipment_beam.frag");}
     bool shader=eqBeamShader.id && eqBeamShader.id!=rlGetShaderIdDefault();
-    if(shader){float time=(float)GetTime();SetShaderValue(eqBeamShader,GetShaderLocation(eqBeamShader,"effectTime"),&time,SHADER_UNIFORM_FLOAT);BeginShaderMode(eqBeamShader);}
+    float time=weaponFrameSampled?weaponFrameTime:(float)GetTime();
+    if(shader){SetShaderValue(eqBeamShader,GetShaderLocation(eqBeamShader,"effectTime"),&time,SHADER_UNIFORM_FLOAT);BeginShaderMode(eqBeamShader);}
 
     for(int n=0;n<32;n++){EquipmentTrace *t=&eqTraces[n];if(t->life>0){
             Vector3 start=t->start;if(t->owner==drawViewPlayerIndex)start=player_weapon_pose(t->owner,true).muzzle;
@@ -302,12 +308,28 @@ static void eq_world(void){
             DrawCylinderEx(start,t->end,width,width,8,Fade(t->gun==EQ_RAIL?PURPLE:ORANGE,t->life/.22f));
             if(t->gun==EQ_RAIL){DrawSphere(start,.10f*t->life/.22f,WHITE);DrawCylinderEx(start,t->end,.018f,.018f,6,Fade(WHITE,t->life/.22f));}
         }
-        EquipmentRocket *r=&eqRockets[n];if(r->active){DrawCube(r->pos,.22f,.22f,.3f,ORANGE);DrawCylinderEx(r->pos,v_sub(r->pos,v_mul(v_norm(r->vel),.8f)),.1f,.02f,5,RED);}}
-    for(int i=0;i<MAX_PLAYERS;i++){Equipment *e=&equipment[i];if(e->initialized && e->held && eq_gun(i)==EQ_CUTTER && players[i].respawn_timer<=0){WeaponPose pose=player_weapon_pose(i,i==drawViewPlayerIndex);DrawCylinderEx(pose.muzzle,e->beamEnd,.055f,.055f,8,LIME);DrawSphere(e->beamEnd,.11f,LIME);}
+        EquipmentRocket *r=&eqRockets[n];if(r->active){
+            Vector3 axis=v_norm(r->vel),tail=v_sub(r->pos,v_mul(axis,.35f));
+            DrawCylinderEx(tail,v_sub(tail,v_mul(axis,.7f)),.08f,.012f,5,ORANGE);
+            Vector3 right=v_norm(v_cross(axis,fabsf(axis.y)>.9f?(Vector3){1,0,0}:(Vector3){0,1,0})),up=v_cross(axis,right);
+            for(int k=0;k<4;k++){float age=fmodf(time*2+k*.25f+n*.13f,1),angle=k*2.4f+n;
+                Vector3 point=v_add(v_sub(tail,v_mul(axis,age*1.7f)),v_add(v_mul(right,cosf(angle)*age*.18f),v_mul(up,sinf(angle)*age*.18f)));
+                float size=.055f*(1-age);DrawCube(point,size,size,size,Fade(ORANGE,1-age));}
+        }}
+    for(int i=0;i<MAX_PLAYERS;i++){Equipment *e=&equipment[i];if(e->initialized && e->held && eq_gun(i)==EQ_CUTTER && players[i].respawn_timer<=0){WeaponPose pose=player_weapon_pose(i,i==drawViewPlayerIndex);DrawCylinderEx(pose.muzzle,e->beamEnd,.075f,.06f,8,Fade(LIME,.40f));DrawCylinderEx(pose.muzzle,e->beamEnd,.026f,.025f,6,(Color){220,255,185,255});
+            /* Full-range misses have no contact effect. A shorter actor/voxel ray does. */
+            if(v_length(v_sub(e->beamEnd,players[i].pos))<eqGuns[EQ_CUTTER].range-.01f){
+                DrawSphere(e->beamEnd,.085f,(Color){210,255,160,255});
+                for(int k=0;k<6;k++){float age=fmodf(time*3+k/6.f,1),angle=k*2.4f;
+                    Vector3 offset={cosf(angle)*age*.34f,age*.30f-age*age*.4f,sinf(angle)*age*.34f};
+                    Vector3 point=v_add(e->beamEnd,offset);DrawLine3D(point,v_add(point,v_mul(offset,.25f)),Fade(LIME,1-age));}
+            }}
         if(e->charge>0 && eq_gun(i)==EQ_RAIL){Vector3 end=v_add(players[i].pos,v_mul(player_forward(&players[i]),100));DrawCylinderEx(player_weapon_pose(i,i==drawViewPlayerIndex).muzzle,end,.006f,.006f,4,Fade(PURPLE,.5f));}
         if(!equipmentEmission && i==drawViewPlayerIndex && e->buildHeld && players[i].respawn_timer<=0){Vector3 pos[EQ_PANEL_CUBES]={{0}};bool valid=eq_panel_positions(i,pos)&&eq_build_ready(i);if(v_length(pos[1])>.01f)for(int n=0;n<eq_build_count(i);n++)DrawCubeWires(pos[n],VOXEL_SIZE,VOXEL_SIZE,VOXEL_SIZE,valid?player_palette_color(i):RED);}
     }
     if(shader)EndShaderMode();
+    Vector3 eye=drawViewPlayerIndex>=0?players[drawViewPlayerIndex].pos:(Vector3){0};
+    for(int n=0;n<32;n++)if(eqRockets[n].active && periodic_visible(eqRockets[n].pos,2))weapon_draw_rocket(eqRockets[n].pos,eqRockets[n].vel,eye,time,equipmentEmission?WEAPON_EMISSION:WEAPON_COLOR);
     eq_sword_draw();
 }
 static void eq_icon(int gun,int x,int y,Color c){

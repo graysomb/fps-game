@@ -46,6 +46,9 @@ typedef struct WeaponVisual {
     float claw_open;
     /* Cosmetic state supplied by gameplay: charge and active effect in [0,1]. */
     float charge, activity, depleted;
+    /* Normalized remaining cooldown, rigid tool deployment, attachment, and
+     * successful build pulse. Updated by the owner once, never by a viewport. */
+    float cooldown, deployment, attached, build_pulse;
 } WeaponVisual;
 
 typedef struct WeaponPose {
@@ -82,6 +85,7 @@ float weapon_shot_amount(const WeaponVisual *visual, float now);
 void weapon_draw(WeaponPose pose, const WeaponVisual *visual, Vector3 eye,
                  float now, bool gold, WeaponRenderPass pass);
 /* World pickup presentation, sharing cached weapon meshes and materials. */
+void weapon_draw_rocket(Vector3 position,Vector3 direction,Vector3 eye,float now,WeaponRenderPass pass);
 void weapon_draw_pickup(bool launcher, Vector3 position, Vector3 eye, float time,
                         WeaponRenderPass pass);
 void weapon_draw_drain(Vector3 start, Vector3 target, float time);

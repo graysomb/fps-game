@@ -619,7 +619,25 @@ Foundry and Crosscut have authored equipment placements, with fourfold symmetry 
 versus. Equipment respawns in 30 seconds; railguns/rockets take 60 seconds and are
 not replenished between waves. All pickups are in the world-builder palette.
 Enter `weaponlab` in the debug console for a repeatable equipment arena (F4 resets,
-F7 toggles invulnerability). Network protocol 22 requires matching builds.
+F7 toggles invulnerability). Network protocol 23 requires matching builds.
+
+The shotgun, cutter, railgun, rocket launcher, adhesive grenade and building tool
+use cached layered meshes with faceted metal lighting, recessed energy panels,
+and animated mechanical parts. The shotgun chambers refill over cooldown, cutter
+forks focus while cutting, rail capacitors fill with charge, and the rocket inside
+the launcher assembles during cooldown. Adhesive pads extend on attachment and
+keep their fuse warning lit independently of the thrower's Matter. The building
+tool opens during the held preview, pulses only after a successful build, then
+folds away; cancellation only retracts it. This state is also visible to LAN peers.
+Default, voxel-launcher and sword visuals and all combat tuning are unchanged.
+Powered guns lose emission at zero Matter; already-fired effects finish normally.
+New models stay below 2,000 triangles each and allocate no meshes during gameplay.
+Run `tests/render_weapon_polish.c` for geometry, zero-Matter emission, world-depth
+occlusion, resource cleanup and deterministic action/paw previews. Compile it with
+`character_renderer.c` and raylib (it includes `weapon_renderer.c` itself); pass
+an existing output directory, optionally followed by `--checks-only` to skip the
+full 72-frame sequences. `tests/weapon_polish_benchmark.c` measures a warmed,
+synchronized four-player Foundry render at 1280x720 with bloom enabled.
 
 Toggle aiming with right-stick click (R3), Left Shift for keyboard player 1,
 or Enter for keyboard player 2, including the mouse owner. Zoom is 1.5x default,
