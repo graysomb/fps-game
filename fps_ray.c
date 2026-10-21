@@ -529,7 +529,7 @@ static inline bool is_player_bot(int player_index) {
 #define HUD_BAR_THICKNESS  30
 #define HUD_BAR_SPACING     8
 #define HUD_BAR_TEXT_SIZE  22
-#define RADAR_PIXEL_RADIUS 64
+#define RADAR_PIXEL_RADIUS 128
 #define RADAR_WORLD_RADIUS 36.0f
 #define RADAR_MOVE_SPEED_THRESHOLD 0.35f
 #define CREATIVE_BRUSH_MIN 1
@@ -15940,7 +15940,8 @@ static void release_tether_velocity(int idx,const Vector3 *launch) {
             // dynamic wall voxels must not adopt its corner particles.
             if (v->tetherThrowCcdFrames > 0) v->glueEligible = false;
             track_tether_throw_ccd(v);
-            if (p->goldTetherHolding) p->goldTetherCharged = false;
+            // Human upgrades persist until true death; bots retain their existing charges.
+            if (p->goldTetherHolding && is_player_bot(idx)) p->goldTetherCharged = false;
         }
     }
     for (int i = 0; i < voxel_count; ++i)
@@ -16027,6 +16028,10 @@ static void draw_hud_bars(int player_index, const Player *p, int viewport_w, int
     }
 }
 
+static int hud_radar_radius(int viewport_h) {
+    // Leave room for the inventory above and Matter bar below on small views.
+    return clampi((viewport_h-140)/2,32,RADAR_PIXEL_RADIUS);
+}
 static void draw_player_radar(int player_index, int viewport_w, int viewport_h) {
     if (player_index < 0 || player_index >= activePlayers) {
         return;
@@ -16035,7 +16040,7 @@ static void draw_player_radar(int player_index, int viewport_w, int viewport_h) 
     if (p->respawn_timer > 0.0f) {
         return;
     }
-    int radius_px = RADAR_PIXEL_RADIUS;
+    int radius_px = hud_radar_radius(viewport_h);
     int cx = HUD_PADDING_X + radius_px + 4;
     int cy = viewport_h - HUD_PADDING_Y - radius_px - HUD_BAR_THICKNESS - 6;
     if (cy - radius_px < HUD_PADDING_Y + HUD_BAR_HEIGHT) {

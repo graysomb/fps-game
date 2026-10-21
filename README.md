@@ -553,6 +553,8 @@ The shared bullet/tether gun is generated from beveled low-poly meshes and uses
 the GLSL 330 shaders in `shaders/weapon*`. It appears in first-person views and on
 standard players/bots; claw opening and cyan energy intensify while tethering.
 Successful shots drive muzzle flash and recoil. Gold tether uses amber energy.
+For human players, the tether upgrade persists through throws, downs and revives;
+true death or a new match removes it.
 While Gold Tether is charged or held, two pulsing gold ribbons orbit the gun through
 its vertex/fragment shaders. They follow recoil and melee on either gun, remain
 visible with bloom disabled, and disappear when the charge is spent. The charged
@@ -586,13 +588,14 @@ Matter; empty Matter does not remove equipment. Tether and melee remain free.
 Shotgun, cutter, railgun, rocket, sword and voxel launcher occupy weapon slots.
 Adhesive grenades and reinforced building are separate upgrades. Reinforced building
 places a connected 5x5 upright cover panel for three normal blocks worth of Matter.
-The cutter cuts 12 voxels/second for 4 Matter/second, with a thicker visible beam.
+The cutter has a 24-metre range and cuts 24 voxels/second for 4 Matter/second, with a thicker visible beam.
 The sword uses a free diagonal slash (fire or melee), instantly killing unprotected
 enemies and cutting a broad diagonal through structures within six metres, with an upright two-paw grip and a blue slash trail.
 Invulnerability, friendly fire and closed Foundry cores retain their protection.
 Railgun shots bore through terrain along their 100-metre path and leave a luminous trail.
 Hold/release the railgun after charging; hold the cutter to cut. Railgun and rockets
-kill when their damage depletes Matter. Equipment survives downs, revives and
+kill when their damage depletes Matter. Shotgun and cutter damage now also kills
+on Matter depletion, while retaining armor, cover, invulnerability and team protection. Equipment survives downs, revives and
 intermissions; true death and new matches reset it. Bots retain their old loadouts.
 Central tuning is in `equipment.h`.
 
@@ -1038,3 +1041,6 @@ sizes, translation invariance and cleanup, and captures both fogged arenas.
 The generated sky also has occasional shooting stars: one varied event about every
 five seconds, lasting 1.4 seconds with a long, bright blue-white trail and glowing head. All local
 viewports share the same event, anchored overhead and blended into the horizon fog.
+
+The HUD radar has a 256-pixel diameter (twice its previous size), capped to fit
+small split-screen viewports. Weapon slots remain above it; detection range is unchanged.

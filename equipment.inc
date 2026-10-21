@@ -151,7 +151,7 @@ static bool eq_fire(int i){
             else if(blocked)hits[hitCount++]=(ShotgunImpact){voxels[hit.id].identity,hit,d,length,!voxels[hit.id].simulate};
             eq_trace(p->pos,v_add(p->pos,v_mul(d,length)),gun,i);
         }
-        for(int j=0;j<activePlayers;j++)if(damage[j]>0)eq_damage(i,j,damage[j],false,DEATH_SHOTGUN,p->pos);
+        for(int j=0;j<activePlayers;j++)if(damage[j]>0)eq_damage(i,j,damage[j],true,DEATH_SHOTGUN,p->pos);
         eq_shotgun_impacts(i,hits,hitCount);
     }else {
         int free=-1;for(int n=0;n<32;n++)if(!eqRockets[n].active){free=n;break;}if(free<0)return false;
@@ -189,9 +189,9 @@ static void eq_command(int i,const NetInputCommand *c,float dt){
     }else if(gun==EQ_CUTTER && held && p->matter>0){
         float step=fminf(dt,p->matter/eqGuns[gun].cost),length=eqGuns[gun].range;VoxelHit hit;bool wall=first_voxel_hit_detailed(ray,length,-1,false,&hit);if(wall)length=hit.t;
         int target=eq_actor_ray(i,ray,&length);e->beamEnd=v_add(p->pos,v_mul(ray.direction,length));
-        if(target>=0)eq_damage(i,target,eqGuns[gun].damage*step,false,DEATH_CUTTER,p->pos);
+        if(target>=0)eq_damage(i,target,eqGuns[gun].damage*step,true,DEATH_CUTTER,p->pos);
         e->cutTime+=step;bool cut=false;
-        for(int cuts=0;cuts<12 && e->cutTime>=eqCutterUnitSeconds;cuts++){
+        for(int cuts=0;cuts<24 && e->cutTime>=eqCutterUnitSeconds;cuts++){
             e->cutTime-=eqCutterUnitSeconds;float stop=eqGuns[gun].range;VoxelHit surface;
             bool blocked=first_voxel_hit_detailed(ray,stop,-1,false,&surface);if(blocked)stop=surface.t;
             if(eq_actor_ray(i,ray,&stop)<0 && blocked)cut|=eq_cut(i,ray,eqGuns[gun].range);
@@ -338,9 +338,10 @@ static void eq_icon(int gun,int x,int y,Color c){
 }
 static void eq_hud(int i,int w,int h){
     if(i<0||i>=MAX_PLAYERS)return;Equipment *e=&equipment[i];if(!e->initialized)return;int sz=w<700?12:16;
-    int radarCenter=h-HUD_PADDING_Y-RADAR_PIXEL_RADIUS-HUD_BAR_THICKNESS-6;
-    radarCenter=radarCenter-RADAR_PIXEL_RADIUS<HUD_PADDING_Y+HUD_BAR_HEIGHT?HUD_PADDING_Y+HUD_BAR_HEIGHT+RADAR_PIXEL_RADIUS+4:radarCenter;
-    int y=radarCenter-RADAR_PIXEL_RADIUS-8-46;
+    int radius=hud_radar_radius(h);
+    int radarCenter=h-HUD_PADDING_Y-radius-HUD_BAR_THICKNESS-6;
+    radarCenter=radarCenter-radius<HUD_PADDING_Y+HUD_BAR_HEIGHT?HUD_PADDING_Y+HUD_BAR_HEIGHT+radius+4:radarCenter;
+    int y=radarCenter-radius-8-46;
     for(int s=0;s<2;s++){int x=14+s*105,g=e->gun[s];Color c=s==e->selected?GOLD:GRAY;DrawRectangle(x,y,98,46,Fade(BLACK,.7f));DrawRectangleLines(x,y,98,46,c);if(g!=EQ_EMPTY){eq_icon(g,x+20,y+2,c);DrawText(eqGuns[g].name,x+5,y+27,sz,c);}else DrawText("Empty",x+5,y+27,sz,GRAY);}
     int g=eq_gun(i);DrawText(TextFormat("%.0f Matter%s  %.1fs",eqGuns[g].cost,g==EQ_CUTTER?"/s":"",e->cooldown[g]),14,y-19,sz,RAYWHITE);
     if(g==EQ_RAIL && e->charge>0 && aimStates[i].blend<.02f)DrawRectangle(w/2-40,h/2+35,(int)(80*e->charge/.65f),5,PURPLE);

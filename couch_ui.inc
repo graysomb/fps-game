@@ -103,7 +103,7 @@ static void ff_draw_hud(int i,int w,int h) {
         DrawRectangle(x,y+24,(int)(barWidth*clampf(s->coreHealth/fmaxf(1,s->coreMax),0,1)),7,GOLD);break;
     }
     /* Reserve the lower-left corner for the existing radar. */
-    int panelX=160, panelW=w-panelX-12-2*((w<700?40:56)+12);
+    int panelX=HUD_PADDING_X+2*hud_radar_radius(h)+16, panelW=w-panelX-12-2*((w<700?40:56)+12);
     DrawRectangle(panelX-6,h-154,panelW+6,100,Fade(BLACK,.8f));
     const char *text=NULL;
     if(combatantLife[i]==LIFE_DOWNED) text=TextFormat("DOWNED | Awaiting revive %.1f / 3s",reviveProgress[i]);

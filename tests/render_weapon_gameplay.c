@@ -134,7 +134,7 @@ static void test_launcher_pickup(void) {
     players[0].tetherHolding=true; players[0].goldTetherHolding=true;
     players[0].tetherVoxel=0; players[0].tetherVoxelIdentity=shot->identity;
     release_tether(0);
-    assert(!players[0].goldTetherCharged && !players[0].goldTetherHolding);
+    assert(players[0].goldTetherCharged && !players[0].goldTetherHolding);
     kill_player(0,-1,false,false);
     assert(!players[0].dynamicShotActive && !player_has_gun(0));
     clear_world_voxels(); clear_pickups();

@@ -14,7 +14,11 @@ static void fixture(void){
 static void inventory(void){fixture();assert(eq_gun(0)==EQ_DEFAULT);assert(eq_pickup(0,PICKUP_SHOTGUN,false));assert(eq_gun(0)==EQ_SHOTGUN);assert(!eq_pickup(0,PICKUP_SHOTGUN,true));assert(!eq_pickup(0,PICKUP_RAILGUN,false));equipment[0].cooldown[EQ_SHOTGUN]=.8f;NetInputCommand c={.pressed=NET_INPUT_SWITCH};eq_command(0,&c,.01f);assert(eq_gun(0)==EQ_DEFAULT);eq_command(0,&c,.01f);assert(equipment[0].cooldown[EQ_SHOTGUN]==.8f);assert(eq_pickup(0,PICKUP_RAILGUN,true));players[0].matter=0;players[0].isExposed=true;eq_tick(.3f);assert(eq_gun(0)==EQ_RAIL);kill_player(0,1,false,false);assert(eq_gun(0)==EQ_DEFAULT);}
 static void attacks(void){fixture();eq_pickup(0,PICKUP_RAILGUN,false);equipment[0].switchTime=0;NetInputCommand hold={.held=NET_INPUT_FIRE},release={0};eq_command(0,&hold,.65f);eq_command(0,&release,.01f);assert(players[1].matter==50 && players[1].respawn_timer==0 && players[0].matter==85);eq_tick(2);eq_command(0,&hold,.65f);eq_command(0,&release,.01f);assert(players[1].respawn_timer>0);
  fixture();eq_rocket_blast((EquipmentRocket){.owner=0,.pos={0,2,-3}});assert(players[1].respawn_timer>0);
- fixture();players[1].pos.z=-1;eq_pickup(0,PICKUP_SHOTGUN,false);equipment[0].switchTime=0;players[1].matter=5;assert(eq_fire(0));assert(players[1].isExposed && players[1].respawn_timer==0);assert(players[0].matter==94);assert(!eq_fire(0));
+ fixture();players[1].pos.z=-1;eq_pickup(0,PICKUP_SHOTGUN,false);equipment[0].switchTime=0;players[0].matter=50;players[1].matter=5;assert(eq_fire(0));assert(players[1].respawn_timer>0);assert(players[0].matter==44);assert(!eq_fire(0));
+ fixture();eq_pickup(0,PICKUP_CUTTER,false);equipment[0].switchTime=0;players[0].matter=50;players[1].matter=1;
+ eq_command(0,&hold,.05f);assert(players[1].respawn_timer>0 && fabsf(players[0].matter-49.8f)<.001f);
+ fixture();eq_pickup(0,PICKUP_CUTTER,false);equipment[0].switchTime=0;players[1].matter=1;players[1].invuln_timer=1;
+ eq_command(0,&hold,.05f);assert(players[1].respawn_timer==0 && players[1].matter==1);
  fixture();eq_pickup(0,PICKUP_ROCKET,false);equipment[0].switchTime=0;for(int n=0;n<32;n++)eqRockets[n].active=true;assert(!eq_fire(0) && players[0].matter==100);memset(eqRockets,0,sizeof(eqRockets));players[0].matter=25;assert(eq_fire(0)&&players[0].isExposed&&eq_gun(0)==EQ_ROCKET);
  fixture();add_static_box_at_grid(-2,2,0,6,-4,-4,GRAY);init_static_hash();rebuild_voxel_hash();eq_pickup(0,PICKUP_CUTTER,false);equipment[0].switchTime=0;eq_command(0,&hold,.01f);assert(players[1].matter==100);eq_rocket_blast((EquipmentRocket){.owner=0,.pos={0,2,-1}});assert(players[1].matter==100);
  fixture();players[1].invuln_timer=1;eq_damage(0,1,100,true,DEATH_ROCKET,players[0].pos);assert(players[1].matter==100);gameMode=GAME_MODE_FIREFIGHT;combatantTeam[1]=0;players[1].invuln_timer=0;eq_damage(0,1,100,true,DEATH_RAIL,players[0].pos);assert(players[1].matter==100);
@@ -79,7 +83,7 @@ static void revised_weapons(void){
  assert(eqTraces[0].life>0 && v_length(v_sub(eqTraces[0].start,players[0].pos))>.2f);
  fixture();players[1].pos.x=20;add_static_box_at_grid(-1,1,1,6,-20,-2,GRAY);init_static_hash();rebuild_voxel_hash();
  eq_pickup(0,PICKUP_CUTTER,false);equipment[0].switchTime=0;eq_command(0,&held,.25f);assert(fabsf(players[0].matter-99)<.001f);
- assert(eqCutterUnitSeconds==1.f/12);
+ assert(eqCutterUnitSeconds==1.f/24);
  fixture();eq_pickup(0,PICKUP_SWORD,false);equipment[0].switchTime=0;assert(eq_gun(0)==EQ_BLADE && !(equipment[0].upgrades&EQ_SWORD));
  players[0].matter=0;players[0].isExposed=true;players[0].last_melee_time=-100;assert(eq_fire(0));assert(players[0].meleeSwingActive);
  fixture();players[1].pos.x=20;add_static_box_at_grid(-5,5,0,8,-7,-3,GRAY);init_static_hash();rebuild_voxel_hash();int before=voxel_count;
@@ -117,4 +121,17 @@ static void sword_reach_and_visuals(void){
  }
  eq_beam_shutdown();assert(!eqSlashShader.id);character_renderer_shutdown();weapon_renderer_shutdown();
 }
-int main(int argc,char**argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Equipment tests");init_pbd_thread_pool();assert(initialize_physics_backend());inventory();revised_weapons();attacks();panels();sticky();lifecycle();sword();shotgun_structures();protection();supplies_regenerate();maps();stress();captures();beam_captures();sword_reach_and_visuals();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Equipment tests passed");return 0;}
+static void persistent_tether(void){
+ fixture();players[0].goldTetherCharged=true;
+ for(int n=0;n<3;n++){
+  int v=addVoxel(0,2,-3,false,true,GRAY,0);acquire_tether_hit(0,v,(Vector3){0,1,0});
+  assert(players[0].tetherHolding && players[0].goldTetherHolding);
+  release_tether(0);assert(players[0].goldTetherCharged && !players[0].tetherHolding);
+ }
+ kill_player(0,-1,false,false);assert(!players[0].goldTetherCharged);
+ fixture();gameMode=GAME_MODE_FIREFIGHT;firefightHumans=2;firefightPractice=false;
+ players[0].goldTetherCharged=true;kill_player(0,-1,false,false);
+ assert(combatantLife[0]==LIFE_DOWNED && players[0].goldTetherCharged);
+ ff_restore_human(0,35);assert(players[0].goldTetherCharged);
+}
+int main(int argc,char**argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Equipment tests");init_pbd_thread_pool();assert(initialize_physics_backend());inventory();persistent_tether();revised_weapons();attacks();panels();sticky();lifecycle();sword();shotgun_structures();protection();supplies_regenerate();maps();stress();captures();beam_captures();sword_reach_and_visuals();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Equipment tests passed");return 0;}
