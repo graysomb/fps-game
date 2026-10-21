@@ -99,4 +99,22 @@ static void beam_captures(void){
  }
  eq_beam_shutdown();weapon_renderer_shutdown();
 }
-int main(int argc,char**argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Equipment tests");init_pbd_thread_pool();assert(initialize_physics_backend());inventory();revised_weapons();attacks();panels();sticky();lifecycle();sword();shotgun_structures();protection();supplies_regenerate();maps();stress();captures();beam_captures();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Equipment tests passed");return 0;}
+static void sword_reach_and_visuals(void){
+ fixture();eq_pickup(0,PICKUP_SWORD,false);players[1].pos.z=-5.5f;eq_sword(0);assert(players[1].respawn_timer>0);
+ fixture();eq_pickup(0,PICKUP_SWORD,false);players[1].pos.z=-6.1f;eq_sword(0);assert(players[1].respawn_timer==0);
+ weapon_renderer_init();character_renderer_init();weaponFrameSampled=false;drawViewPlayerIndex=0;equipment[0].switchTime=0;
+ for(int small=0;small<2;small++)for(int phase=0;phase<3;phase++){
+  int w=small?480:960,h=small?270:540;weaponViewAspect=(float)w/h;
+  players[0].meleeSwingActive=phase>0;players[0].meleeSwingStartTime=GetTime()-(phase==1?.44f:.60f)*MELEE_ANIM_DURATION_SECONDS;
+  WeaponPose pose=player_weapon_pose(0,true);assert(v_isfinite(pose.muzzle)&&v_isfinite(pose.grip_heel));
+  if(!phase)assert(pose.muzzle.y>pose.grip_heel.y+.4f);
+  RenderTexture2D rt=LoadRenderTexture(w,h);Camera3D cam={players[0].pos,{0,2,-20},{0,1,0},60,CAMERA_PERSPECTIVE};
+  BeginTextureMode(rt);ClearBackground((Color){24,32,45,255});BeginMode3D(cam);
+  DrawPlane((Vector3){0},(Vector2){60,60},DARKGRAY);eq_world();
+  weapon_draw(pose,&weaponVisuals[0],cam.position,GetTime(),false,WEAPON_COLOR);character_draw_paws(pose,BLUE,false);
+  EndMode3D();EndTextureMode();if(phase)assert(eqSlashShader.id && eqSlashShader.id!=rlGetShaderIdDefault());
+  Image im=LoadImageFromTexture(rt.texture);ImageFlipVertical(&im);ExportImage(im,TextFormat("artifacts/sword-pose-%d-%d.png",small,phase));UnloadImage(im);UnloadRenderTexture(rt);
+ }
+ eq_beam_shutdown();assert(!eqSlashShader.id);character_renderer_shutdown();weapon_renderer_shutdown();
+}
+int main(int argc,char**argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Equipment tests");init_pbd_thread_pool();assert(initialize_physics_backend());inventory();revised_weapons();attacks();panels();sticky();lifecycle();sword();shotgun_structures();protection();supplies_regenerate();maps();stress();captures();beam_captures();sword_reach_and_visuals();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Equipment tests passed");return 0;}

@@ -269,9 +269,46 @@ static bool eq_build(int i){
     eq_spend(i,cost);p->last_build_time=GetTime();equipment[i].buildTime=.6f;play_sfx(SFX_SHIELD);return true;
 }
 
+static Shader eqSlashShader;
+static bool eqSlashTried;
+static void eq_sword_trails(void){
+    float now=weaponFrameSampled?weaponFrameTime:(float)GetTime();
+    for(int i=0;i<MAX_PLAYERS;i++){
+        if(!equipment[i].initialized || eq_gun(i)!=EQ_BLADE || players[i].respawn_timer>0)continue;
+        float p=melee_anim_progress(&players[i],now);
+        if(p<WEAPON_MELEE_ACTIVE_START || p>.84f)continue;
+        if(!eqSlashTried){eqSlashTried=true;eqSlashShader=LoadShader(NULL,"shaders/sword_slash.frag");}
+        float sweep=clampf((p-WEAPON_MELEE_ACTIVE_START)/(WEAPON_MELEE_ACTIVE_END-WEAPON_MELEE_ACTIVE_START),0,1);
+        float fade=1-clampf((p-WEAPON_MELEE_ACTIVE_END)/(.84f-WEAPON_MELEE_ACTIVE_END),0,1);
+        Vector3 f=player_forward(&players[i]),r=v_norm(v_cross(f,(Vector3){0,1,0})),u=v_cross(r,f);
+        Vector3 diagonal=v_norm(v_sub(r,u)),ribbonNormal=v_norm(v_cross(f,diagonal));
+        bool shader=eqSlashShader.id && eqSlashShader.id!=rlGetShaderIdDefault();
+        if(shader){SetShaderValue(eqSlashShader,GetShaderLocation(eqSlashShader,"effectTime"),&now,SHADER_UNIFORM_FLOAT);BeginShaderMode(eqSlashShader);}
+        BeginBlendMode(BLEND_ADDITIVE);
+        rlDrawRenderBatchActive();rlDisableDepthMask();rlDisableBackfaceCulling();
+        rlBegin(RL_TRIANGLES);
+        for(int n=0;n<24;n++){
+            float t[2]={n/24.f,(n+1)/24.f};Vector3 outer[2],inner[2];
+            for(int k=0;k<2;k++){
+                float along=fmaxf(0,sweep-.48f)+t[k]*fminf(sweep,.48f);
+                float angle=(-eqSwordSweep*.5f+eqSwordSweep*along)*DEG2RAD;
+                Vector3 d=v_add(v_mul(f,cosf(angle)),v_mul(diagonal,sinf(angle)));
+                // Give the ribbon width across the cutting plane; a radial-only
+                // strip is edge-on and invisible to the attacking player.
+                outer[k]=v_add(players[i].pos,v_add(v_mul(d,eqSwordReach),v_mul(ribbonNormal,.08f)));
+                inner[k]=v_add(players[i].pos,v_add(v_mul(d,eqSwordReach*.94f),v_mul(ribbonNormal,-.40f)));
+            }
+            Vector3 v[6]={inner[0],outer[0],outer[1],inner[0],outer[1],inner[1]};
+            Vector2 uv[6]={{t[0],0},{t[0],1},{t[1],1},{t[0],0},{t[1],1},{t[1],0}};
+            for(int k=0;k<6;k++){rlColor4ub(35,135,255,(unsigned char)(210*fade));rlTexCoord2f(uv[k].x,uv[k].y);rlVertex3f(v[k].x,v[k].y,v[k].z);}
+        }
+        rlEnd();rlDrawRenderBatchActive();rlEnableBackfaceCulling();rlEnableDepthMask();
+        EndBlendMode();if(shader)EndShaderMode();
+    }
+}
 static Shader eqBeamShader;
 static bool eqBeamTried;
-static void eq_beam_shutdown(void){if(eqBeamShader.id && eqBeamShader.id!=rlGetShaderIdDefault())UnloadShader(eqBeamShader);eqBeamShader=(Shader){0};eqBeamTried=false;}
+static void eq_beam_shutdown(void){if(eqSlashShader.id && eqSlashShader.id!=rlGetShaderIdDefault())UnloadShader(eqSlashShader);eqSlashShader=(Shader){0};eqSlashTried=false;if(eqBeamShader.id && eqBeamShader.id!=rlGetShaderIdDefault())UnloadShader(eqBeamShader);eqBeamShader=(Shader){0};eqBeamTried=false;}
 static void eq_world(void){
     if(!eqBeamTried){eqBeamTried=true;eqBeamShader=LoadShader(NULL,"shaders/equipment_beam.frag");}
     bool shader=eqBeamShader.id && eqBeamShader.id!=rlGetShaderIdDefault();
@@ -289,6 +326,7 @@ static void eq_world(void){
         if(!equipmentEmission && i==drawViewPlayerIndex && eq_upgrade(i,EQ_BUILD) && players[i].respawn_timer<=0){Vector3 pos[EQ_PANEL_CUBES]={{0}};bool valid=eq_panel_positions(i,pos)&&players[i].matter>=3*ff_build_cost(i);if(v_length(pos[1])>.01f)for(int n=0;n<EQ_PANEL_CUBES;n++)DrawCubeWires(pos[n],VOXEL_SIZE,VOXEL_SIZE,VOXEL_SIZE,valid?GOLD:RED);}
     }
     if(shader)EndShaderMode();
+    eq_sword_trails();
 }
 static void eq_icon(int gun,int x,int y,Color c){
     if(gun==EQ_BLADE){DrawLineEx((Vector2){x-5,y+22},(Vector2){x+22,y-2},4,c);DrawLine(x-3,y+9,x+10,y+22,c);return;}

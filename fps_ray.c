@@ -18165,7 +18165,7 @@ static void draw_rat_world(int i,bool emission) {
             Vector3 f=player_forward(&players[i]);f.y=0;f=v_norm(f);
             Vector3 right=v_cross(f,(Vector3){0,1,0});
             Vector3 shoulder=Vector3Transform((Vector3){side*.17f,.11f,0},character_body_transform(characterSamples[i]));
-            Vector3 hand=Vector3Transform(side>0?(Vector3){.17f,-.67f,.40f}:
+            Vector3 hand=Vector3Transform(weapon.kind==WEAPON_SWORD?(side>0?(Vector3){.09f,0,.43f}:(Vector3){-.09f,0,.68f}):side>0?(Vector3){.17f,-.67f,.40f}:
                 (Vector3){-.36f,-.33f,weapon.kind==WEAPON_DYNAMIC_LAUNCHER?-.55f:-.30f},weapon.transform);
             character_draw_arm(shoulder,hand,player_palette_color(i));
         }

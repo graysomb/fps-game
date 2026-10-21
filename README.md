@@ -588,7 +588,7 @@ Adhesive grenades and reinforced building are separate upgrades. Reinforced buil
 places a connected 5x5 upright cover panel for three normal blocks worth of Matter.
 The cutter cuts 12 voxels/second for 4 Matter/second, with a thicker visible beam.
 The sword uses a free diagonal slash (fire or melee), instantly killing unprotected
-enemies and cutting a broad diagonal through structures within four metres.
+enemies and cutting a broad diagonal through structures within six metres, with an upright two-paw grip and a blue slash trail.
 Invulnerability, friendly fire and closed Foundry cores retain their protection.
 Railgun shots bore through terrain along their 100-metre path and leave a luminous trail.
 Hold/release the railgun after charging; hold the cutter to cut. Railgun and rockets

@@ -373,6 +373,7 @@ WeaponPose weapon_pose(WeaponKind kind,Vector3 pos,Vector3 forward,Vector3 right
         float edge=launcher ? 1.02f : .97f;
         right_offset=edge*tanf(30*DEG2RAD)*aspect*(distance-corner_z)-corner_x;
     }
+    if(kind==WEAPON_SWORD){right_offset=first_person?.42f*fminf(1,aspect):.30f;distance=first_person?.95f:.65f;}
     Vector3 offset=Vector3Add(Vector3Scale(right,right_offset),
                     Vector3Add(Vector3Scale(up,-.25f),
                                Vector3Scale(forward,distance)));
@@ -383,12 +384,18 @@ WeaponPose weapon_pose(WeaponKind kind,Vector3 pos,Vector3 forward,Vector3 right
               right.z*scale,up.z*scale,-forward.z*scale,pos.z,0,0,0,1};
 
     // Center of the underside of the silver grip cap (which is tilted -0.25 rad).
-    const Vector3 heel={0,-1.01f-.085f*cosf(.25f),.39f+.085f*sinf(.25f)};
-    if (swinging && kind==WEAPON_SWORD) {
-        float sweep=(-55*windup+110*extend)*(1-recover)*DEG2RAD;
-        m=MatrixMultiply(MatrixRotate(Vector3Normalize((Vector3){1,1,0}),sweep),m);
-        Vector3 shift=Vector3Add(Vector3Scale(right,-.5f*extend*(1-recover)),
-                                Vector3Scale(up,.25f*windup-.5f*extend*(1-recover)));
+    Vector3 heel={0,-1.01f-.085f*cosf(.25f),.39f+.085f*sinf(.25f)};
+    if(kind==WEAPON_SWORD)heel=(Vector3){0,0,.64f};
+    if (kind==WEAPON_SWORD) {
+        // Rotate about the actual hilt, keeping both paws on the handle.
+        float pitch=(65+(20*windup-120*extend)*(1-recover))*DEG2RAD;
+        float roll=(-18+(-15*windup+95*extend)*(1-recover))*DEG2RAD;
+        Matrix grip=MatrixTranslate(0,0,-.52f);
+        grip=MatrixMultiply(grip,MatrixRotateX(pitch));
+        grip=MatrixMultiply(grip,MatrixRotateZ(roll));
+        m=MatrixMultiply(grip,m);
+        Vector3 shift=Vector3Add(Vector3Scale(right,-.60f*extend*(1-recover)),
+                                Vector3Scale(up,-.12f+.10f*windup-.22f*extend*(1-recover)));
         m.m12+=shift.x;m.m13+=shift.y;m.m14+=shift.z;
     }else if (swinging) {
         // Rigid rotation around the grip; the heel turns forward for the strike.
