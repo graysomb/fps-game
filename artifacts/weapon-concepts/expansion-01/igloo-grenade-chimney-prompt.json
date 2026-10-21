@@ -1,0 +1,6 @@
+{
+  "tool": "Built-in image generation",
+  "source": "igloo-grenade.png",
+  "output": "igloo-grenade-chimney.png",
+  "prompt": "Use case: precise-object-edit. Edit the supplied IGLOO GRENADE concept sheet. Change only the completed igloo structures by adding a clearly visible short, hollow square chimney built from the same chunky light-gray voxel blocks. Add the same consistent chimney near the dome's crown in the large cutaway view and both small completed exterior views. The chimney should connect naturally into the bonded dome shell, with a dark open flue at the top and an opening through the roof visible where appropriate in the cutaway; make it sturdy and modest in height, approximately two or three voxel courses tall. Keep clear of the existing heading text. Preserve the grenade device designs exactly, all text, typography, navy background, mouse scale figure, foundation, doorway, scene layout, lighting, palette and low-poly rendering. Do not add a fireplace, flames, smoke, new labels, or other unrelated changes."
+}
