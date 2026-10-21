@@ -18663,9 +18663,9 @@ static NetInputCommand net_sample_local_input(int local_index, int player_slot, 
         lx = GetGamepadAxisMovement(device, GAMEPAD_AXIS_RIGHT_X);
         ly = GetGamepadAxisMovement(device, GAMEPAD_AXIS_RIGHT_Y);
         if (IsGamepadButtonDown(device, GAMEPAD_BUTTON_LEFT_TRIGGER_2)) command.held |= NET_INPUT_TETHER;
-        if (IsGamepadButtonPressed(device, GAMEPAD_BUTTON_RIGHT_FACE_DOWN)) command.pressed |= NET_INPUT_JUMP;
+        if (IsGamepadButtonPressed(device, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT)) command.pressed |= NET_INPUT_JUMP;
         if (IsGamepadButtonPressed(device, GAMEPAD_BUTTON_RIGHT_TRIGGER_2)) command.pressed |= NET_INPUT_FIRE;
-        if (IsGamepadButtonPressed(device, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT)) command.pressed |= NET_INPUT_MELEE;
+        if (IsGamepadButtonPressed(device, GAMEPAD_BUTTON_RIGHT_FACE_DOWN)) command.pressed |= NET_INPUT_MELEE;
         if (IsGamepadButtonPressed(device, GAMEPAD_BUTTON_RIGHT_TRIGGER_1)) command.pressed |= NET_INPUT_BUILD;
         if(IsGamepadButtonPressed(device,GAMEPAD_BUTTON_LEFT_FACE_UP))command.pressed|=NET_INPUT_GRENADE;
 
@@ -22414,7 +22414,7 @@ int main(int argc, char **argv) {
                 if(IsGamepadButtonPressed(seat_device(i),GAMEPAD_BUTTON_LEFT_FACE_UP))clarity_throw(i);
                 if(IsGamepadButtonPressed(seat_device(i),GAMEPAD_BUTTON_LEFT_TRIGGER_1))hologram_deploy(i);
 
-                if (IsGamepadButtonPressed(seat_device(i), GAMEPAD_BUTTON_RIGHT_FACE_RIGHT) && !ff_input_blocked(i)) {
+                if (IsGamepadButtonPressed(seat_device(i), GAMEPAD_BUTTON_RIGHT_FACE_DOWN) && !ff_input_blocked(i)) {
                     perform_melee(i);
                 }
                 if (IsGamepadButtonPressed(seat_device(i), GAMEPAD_BUTTON_RIGHT_TRIGGER_1)) {
@@ -22426,7 +22426,7 @@ int main(int argc, char **argv) {
                 if (IsGamepadButtonReleased(seat_device(i), GAMEPAD_BUTTON_LEFT_TRIGGER_2)) {
                     release_tether(i);
                 }
-                if (IsGamepadButtonPressed(seat_device(i), GAMEPAD_BUTTON_RIGHT_FACE_DOWN) && players[i].onGround) {
+                if (IsGamepadButtonPressed(seat_device(i), GAMEPAD_BUTTON_RIGHT_FACE_RIGHT) && players[i].onGround) {
                     players[i].vel.y = JUMP_SPEED;
                     players[i].onGround = false;
                 }
@@ -22757,7 +22757,7 @@ int main(int argc, char **argv) {
                              100, controlsY + controlsSpacing * 1, controlsSize, DARKGRAY);
                     DrawText("Keyboard P2: Move IJKL | Look Arrows | Jump RSHIFT | Shoot RCTRL | Melee M | Build O | Tether P",
                              100, controlsY + controlsSpacing * 2, controlsSize, DARKGRAY);
-                    DrawText("Gamepad: LS move | RS look | A jump | RT fire | B melee | RB build | LT tether | R3 aim",
+                    DrawText("Gamepad: LS move | RS look | B jump | RT fire | A melee | RB build | LT tether | R3 aim",
                              100, controlsY + controlsSpacing * 3, controlsSize, DARKGRAY);
 
                     DrawText("X: tap replace / hold revive | Keyboard aim: Left Shift (P1), Enter (P2)",100,controlsY+controlsSpacing*5,controlsSize,DARKGRAY);

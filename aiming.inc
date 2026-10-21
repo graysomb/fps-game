@@ -36,7 +36,7 @@ static void aim_sample(int seat,int i,float dt,NetInputCommand *c){
         aim_interact(i,IsGamepadButtonDown(d,GAMEPAD_BUTTON_RIGHT_FACE_LEFT),dt,c);
         if(!IsGamepadButtonDown(d,GAMEPAD_BUTTON_RIGHT_THUMB))aimStates[i].toggleArmed=true;
         if(aimStates[i].toggleArmed && IsGamepadButtonPressed(d,GAMEPAD_BUTTON_RIGHT_THUMB))c->pressed|=NET_INPUT_AIM;
-        if(IsGamepadButtonPressed(d,GAMEPAD_BUTTON_RIGHT_FACE_RIGHT)||IsGamepadButtonPressed(d,GAMEPAD_BUTTON_RIGHT_TRIGGER_1)||IsGamepadButtonPressed(d,GAMEPAD_BUTTON_LEFT_TRIGGER_1)||IsGamepadButtonPressed(d,GAMEPAD_BUTTON_LEFT_FACE_UP)||IsGamepadButtonDown(d,GAMEPAD_BUTTON_LEFT_TRIGGER_2))c->pressed|=NET_INPUT_AIM_CANCEL;
+        if(IsGamepadButtonPressed(d,GAMEPAD_BUTTON_RIGHT_FACE_DOWN)||IsGamepadButtonPressed(d,GAMEPAD_BUTTON_RIGHT_TRIGGER_1)||IsGamepadButtonPressed(d,GAMEPAD_BUTTON_LEFT_TRIGGER_1)||IsGamepadButtonPressed(d,GAMEPAD_BUTTON_LEFT_FACE_UP)||IsGamepadButtonDown(d,GAMEPAD_BUTTON_LEFT_TRIGGER_2))c->pressed|=NET_INPUT_AIM_CANCEL;
     }else{
         bool first=seat==0;
         if(!IsKeyDown(first?KEY_LEFT_SHIFT:KEY_ENTER))aimStates[i].toggleArmed=true;
