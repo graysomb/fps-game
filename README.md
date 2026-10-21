@@ -585,7 +585,7 @@ Matter; empty Matter does not remove equipment. Tether and melee remain free.
 
 Shotgun, cutter, railgun, rocket, sword and voxel launcher occupy weapon slots.
 Adhesive grenades and reinforced building are separate upgrades. Reinforced building
-places a connected 3x3 upright cover panel for three normal blocks worth of Matter.
+places a connected 5x5 upright cover panel for three normal blocks worth of Matter.
 The cutter cuts 12 voxels/second for 4 Matter/second, with a thicker visible beam.
 The sword uses a free diagonal slash (fire or melee), instantly killing unprotected
 enemies and cutting a broad diagonal through structures within four metres.

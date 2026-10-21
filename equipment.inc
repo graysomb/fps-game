@@ -253,7 +253,7 @@ static bool eq_panel_positions(int i,Vector3 out[EQ_PANEL_CUBES]){
     else {if(ray.direction.y>=-.001f)return false;float t=-ray.position.y/ray.direction.y;if(t>TETHER_RANGE)return false;at=v_add(ray.position,v_mul(ray.direction,t));at.y=VOXEL_SIZE*.5f;}
     at=world_wrap(at);at=(Vector3){(floorf(at.x/VOXEL_SIZE)+.5f)*VOXEL_SIZE,(floorf(at.y/VOXEL_SIZE)+.5f)*VOXEL_SIZE,(floorf(at.z/VOXEL_SIZE)+.5f)*VOXEL_SIZE};
     Vector3 side=fabsf(ray.direction.z)>=fabsf(ray.direction.x)?(Vector3){VOXEL_SIZE,0,0}:(Vector3){0,0,VOXEL_SIZE};bool valid=true;
-    for(int n=0;n<EQ_PANEL_CUBES;n++){out[n]=world_wrap(v_add(at,v_add(v_mul(side,n%3-1),(Vector3){0,(n/3)*VOXEL_SIZE,0})));int x=floorf(out[n].x/VOXEL_SIZE),y=floorf(out[n].y/VOXEL_SIZE),z=floorf(out[n].z/VOXEL_SIZE);
+    for(int n=0;n<EQ_PANEL_CUBES;n++){out[n]=world_wrap(v_add(at,v_add(v_mul(side,n%EQ_PANEL_SIDE-EQ_PANEL_SIDE/2),(Vector3){0,(n/EQ_PANEL_SIDE)*VOXEL_SIZE,0})));int x=floorf(out[n].x/VOXEL_SIZE),y=floorf(out[n].y/VOXEL_SIZE),z=floorf(out[n].z/VOXEL_SIZE);
         if(y<0 || occupied(x,y,z) || (!worldPeriodic && (fabsf(out[n].x)>FLOOR_SIZE || fabsf(out[n].z)>FLOOR_SIZE)))valid=false;
         BoundingBox cube={v_sub(out[n],(Vector3){.25f,.25f,.25f}),v_add(out[n],(Vector3){.25f,.25f,.25f})};
         for(int v=0;v<voxel_count;v++)if(voxels[v].simulate && !voxels[v].isBullet){float radius=voxels[v].rest_edge*.5f;Vector3 center=world_image(voxels[v].pos,out[n]);if(CheckCollisionBoxes(cube,(BoundingBox){v_sub(center,(Vector3){radius,radius,radius}),v_add(center,(Vector3){radius,radius,radius})}))valid=false;}
@@ -299,11 +299,14 @@ static void eq_icon(int gun,int x,int y,Color c){
     if(gun==EQ_VOXEL)DrawRectangleLines(x+22,y-2,12,17,c);
 }
 static void eq_hud(int i,int w,int h){
-    if(i<0||i>=MAX_PLAYERS)return;Equipment *e=&equipment[i];if(!e->initialized)return;int y=h-105,sz=w<700?12:16;
+    if(i<0||i>=MAX_PLAYERS)return;Equipment *e=&equipment[i];if(!e->initialized)return;int sz=w<700?12:16;
+    int radarCenter=h-HUD_PADDING_Y-RADAR_PIXEL_RADIUS-HUD_BAR_THICKNESS-6;
+    radarCenter=radarCenter-RADAR_PIXEL_RADIUS<HUD_PADDING_Y+HUD_BAR_HEIGHT?HUD_PADDING_Y+HUD_BAR_HEIGHT+RADAR_PIXEL_RADIUS+4:radarCenter;
+    int y=radarCenter-RADAR_PIXEL_RADIUS-8-46;
     for(int s=0;s<2;s++){int x=14+s*105,g=e->gun[s];Color c=s==e->selected?GOLD:GRAY;DrawRectangle(x,y,98,46,Fade(BLACK,.7f));DrawRectangleLines(x,y,98,46,c);if(g!=EQ_EMPTY){eq_icon(g,x+20,y+2,c);DrawText(eqGuns[g].name,x+5,y+27,sz,c);}else DrawText("Empty",x+5,y+27,sz,GRAY);}
     int g=eq_gun(i);DrawText(TextFormat("%.0f Matter%s  %.1fs",eqGuns[g].cost,g==EQ_CUTTER?"/s":"",e->cooldown[g]),14,y-19,sz,RAYWHITE);
     if(g==EQ_RAIL && e->charge>0 && aimStates[i].blend<.02f)DrawRectangle(w/2-40,h/2+35,(int)(80*e->charge/.65f),5,PURPLE);
-    DrawText(TextFormat("%s %s %s","",e->upgrades&EQ_ADHESIVE?"STICKY":"",e->upgrades&EQ_BUILD?"PANEL":""),14,y-36,sz,GOLD);
+    DrawText(TextFormat("%s %s %s","",e->upgrades&EQ_ADHESIVE?"STICKY":"",e->upgrades&EQ_BUILD?"PANEL":""),230,y+27,sz,GOLD);
     int n=eq_near_pickup(i);if(n>=0 && eq_pickup_gun(pickups[n].type)>=0 && e->gun[0]!=eq_pickup_gun(pickups[n].type) && e->gun[1]!=eq_pickup_gun(pickups[n].type)){const char *key=playerInput[i]==INPUT_TYPE_GAMEPAD?"Hold X":i==0?"B":"Y";const char *label=TextFormat("%s: equip %s",key,pickup_type_label(pickups[n].type));DrawText(label,(w-MeasureText(label,sz))/2,h/2+55,sz,WHITE);}
 }
 static void eq_layout(void){

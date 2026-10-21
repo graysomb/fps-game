@@ -6,7 +6,7 @@ static const GunDefinition eqGuns[EQ_GUN_COUNT]={
     {"Default",WEAPON_STANDARD,MATTER_SHOT_COST,BULLET_COOLDOWN_SECONDS,100,34,1.5f},{"Voxel",WEAPON_DYNAMIC_LAUNCHER,MATTER_SHOT_COST,BULLET_COOLDOWN_SECONDS,100,34,1.25f},
     {"Shotgun",WEAPON_IMPULSE_SHOTGUN,6,.8f,12,5,1.2f},{"Cutter",WEAPON_CUTTER,4,0,12,20,2},
     {"Railgun",WEAPON_RAILGUN,15,1.8f,100,50,4},{"Rocket",WEAPON_ROCKET_LAUNCHER,25,1.5f,110,100,1.75f},{"Sword",WEAPON_SWORD,0,.8f,4,10000,1}};
-enum { EQ_PELLETS=8, EQ_PANEL_CUBES=9, EQ_SWORD_CUTS=48 };
+enum { EQ_PELLETS=8, EQ_PANEL_SIDE=5, EQ_PANEL_CUBES=EQ_PANEL_SIDE*EQ_PANEL_SIDE, EQ_SWORD_CUTS=48 };
 static const float eqSwitchSeconds=.25f,eqRailCharge=.65f,eqCutterUnitSeconds=1.f/12;
 static const float eqShotgunCone=12,eqRocketSpeed=22,eqRocketLife=5,eqRocketInner=1,eqRocketOuter=4;
 static const float eqShotgunImpulse=48,eqShotgunActivationBelief=1;
