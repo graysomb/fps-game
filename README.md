@@ -1297,3 +1297,12 @@ for the opaque mallard. The renderer allocates no meshes per frame and does not
 change simulation itself; `duck_gameplay.inc` supplies map behavior. Shader assets live in
 `shaders/duck*`; missing shaders fall back to the vertex-colored duck and omit
 the floor effect. Link `duck_renderer.c` with raylib to use it elsewhere.
+
+### Foundry golem visual prototype
+
+`tools/preview_golem.ps1` opens the separate voxel golem animation lab: planted
+walking/turning, slam, sweep, thrown forearm, limb-loss reactions, kneeling,
+exposed reactor, and cyan regeneration. Tab selects a scenario; Space pauses;
+arrows scrub; S shows the skeleton. This is presentation-only and does not replace
+the existing Foundry fight. See [preview instructions](docs/foundry-golem-preview.md)
+for captures, shader fallback, renderer integration, and measured cost.
