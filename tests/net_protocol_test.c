@@ -67,6 +67,13 @@ int main(void) {
     net_reader_init(&reader, packet, writer.length - 1);
     assert(!net_read_player_visual(&reader, &decoded_visual));
 
+    visual.flags=NET_PLAYER_VISUAL_TETHER;visual.tether_identity=UINT64_C(0x123456789abcdef0);
+    visual.tether_vx=2;visual.tether_vy=-.5f;visual.tether_vz=4;visual.tether_inverse_mass=.125f;
+    net_writer_init(&writer,packet,sizeof(packet));assert(net_write_player_visual(&writer,&visual));
+    net_reader_init(&reader,packet,writer.length);assert(net_read_player_visual(&reader,&decoded_visual));
+    assert(decoded_visual.tether_identity==visual.tether_identity&&decoded_visual.tether_vx==2&&decoded_visual.tether_vy==-.5f&&decoded_visual.tether_vz==4&&decoded_visual.tether_inverse_mass==.125f);
+    visual.tether_inverse_mass=-1;net_writer_init(&writer,packet,sizeof(packet));net_write_player_visual(&writer,&visual);
+    net_reader_init(&reader,packet,writer.length);assert(!net_read_player_visual(&reader,&decoded_visual));visual.tether_inverse_mass=.125f;
     // Every combination has a bounded, exact wire length and rejects truncation.
     for (unsigned int flags = 0; flags < 32; ++flags) {
         visual.flags = (uint8_t)flags;
@@ -74,7 +81,8 @@ int main(void) {
         net_writer_init(&writer, packet, sizeof(packet));
         assert(net_write_player_visual(&writer, &visual));
         assert(writer.length == 6u + ((flags & NET_PLAYER_VISUAL_MELEE) ? 1u : 0u) +
-               ((flags & NET_PLAYER_VISUAL_TETHER) ? 12u : 0u));
+               ((flags & NET_PLAYER_VISUAL_TETHER) ? 12u : 0u) +
+               (((flags & NET_PLAYER_VISUAL_TETHER) && !(flags & (NET_PLAYER_VISUAL_GOLD_TETHER | NET_PLAYER_VISUAL_DRAIN))) ? 24u : 0u));
         net_reader_init(&reader, packet, writer.length);
         assert(net_read_player_visual(&reader, &decoded_visual));
         assert(reader.offset == writer.length);

@@ -35,6 +35,7 @@ static void ff_restore_human(int i, float matter) {
     p->tetherHolding=p->goldTetherHolding=false; p->tetherVoxel=-1;
     p->meleeSwingActive=p->meleeSwingHitApplied=false;
     p->meleeKnockbackActive=false; p->onGround=false;
+    p->grappleAirborne=false;
     combatantLife[i]=LIFE_ALIVE;
     reviveProgress[i]=0; reviveOwner[i]=-1;
 }

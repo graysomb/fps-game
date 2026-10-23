@@ -169,6 +169,8 @@ void integrateParticle(uint gid) {
         p.predicted_base_inv_mass.xyz += p.velocity.xyz * uDt;
         p.predicted_base_inv_mass.y -= uGravity * uDt * uDt;
         int owner = tetherOwner[id];
+        int weakMask=owner>=64?owner>>6:0;
+        if(owner>=64)owner=(owner&63)-1;
         int tetherPlayer = owner >= 16 ? owner - 16 : owner;
         if (tetherPlayer >= 0 && tetherPlayer < 16) {
             float scale = uTetherTarget[tetherPlayer].w;
@@ -179,6 +181,10 @@ void integrateParticle(uint gid) {
             vec3 disp = p.predicted_base_inv_mass.xyz - p.prev_inv_mass.xyz;
             p.predicted_base_inv_mass.xyz = p.prev_inv_mass.xyz + disp * (1.0 - damp);
             p.velocity.xyz *= 1.0 - damp;
+        }
+        for(int i=0;i<4;i++)if((weakMask&(1<<i))!=0){
+            vec3 dv=uTetherTarget[i].xyz*p.prev_inv_mass.w*uDt/float(max(1,particleRefcount[id]));
+            p.velocity.xyz+=dv;p.predicted_base_inv_mass.xyz+=dv*uDt;
         }
     }
     particle[id] = p;
@@ -507,7 +513,7 @@ void gatherBreakMask(uint gid) {
     for (int i=0; i<8; ++i) {
         uint id=voxelParticle(v,i);
         // Owners 16..31 are held gold groups; 32 is the short release settling window.
-        if (id<uint(gpuControl.x) && tetherOwner[id]>=16 && tetherOwner[id]<=32) return;
+        if(id<uint(gpuControl.x)){int owner=tetherOwner[id];if(owner>=64)owner=(owner&63)-1;if(owner>=16&&owner<=32)return;}
     }
     vec3 p[8];
     for (int i=0; i<8; ++i) {

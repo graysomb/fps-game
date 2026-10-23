@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define FPS_NET_MAGIC 0x4650534eu /* "FPSN" */
-#define FPS_NET_PROTOCOL_VERSION 27u /* Firefight loot phase before upgrade preparation. */
+#define FPS_NET_PROTOCOL_VERSION 28u /* Coupled weak tether mass, velocity and airborne carry. */
 #define FPS_NET_DEFAULT_PORT 27015u
 #define FPS_NET_DISCOVERY_PORT 27016u
 #define FPS_NET_MAX_PACKET 1100u
@@ -98,6 +98,7 @@ typedef enum NetPlayerVisualFlags {
 
 /* Optional bit in the existing player-state flags byte; no payload change. */
 #define NET_PLAYER_STATE_GOLD_TETHER_CHARGED (1u << 2)
+#define NET_PLAYER_STATE_GRAPPLE_CARRY (1u << 3)
 
 typedef struct NetPlayerVisualState {
     uint8_t flags;
@@ -107,6 +108,8 @@ typedef struct NetPlayerVisualState {
     float tether_x;
     float tether_y;
     float tether_z;
+    uint64_t tether_identity;
+    float tether_vx,tether_vy,tether_vz,tether_inverse_mass;
 } NetPlayerVisualState;
 
 typedef struct NetWriter {

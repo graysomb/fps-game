@@ -195,6 +195,10 @@ bool net_write_player_visual(NetWriter *writer, const NetPlayerVisualState *stat
         net_write_f32(writer, state->tether_x);
         net_write_f32(writer, state->tether_y);
         net_write_f32(writer, state->tether_z);
+        if(!(state->flags&(NET_PLAYER_VISUAL_GOLD_TETHER|NET_PLAYER_VISUAL_DRAIN))){
+            net_write_u64(writer,state->tether_identity);
+            net_write_f32(writer,state->tether_vx);net_write_f32(writer,state->tether_vy);net_write_f32(writer,state->tether_vz);net_write_f32(writer,state->tether_inverse_mass);
+        }
     }
     return !writer->failed;
 }
@@ -220,6 +224,11 @@ bool net_read_player_visual(NetReader *reader, NetPlayerVisualState *state) {
         state->tether_x = net_read_f32(reader);
         state->tether_y = net_read_f32(reader);
         state->tether_z = net_read_f32(reader);
+        if(!(state->flags&(NET_PLAYER_VISUAL_GOLD_TETHER|NET_PLAYER_VISUAL_DRAIN))){
+            state->tether_identity=net_read_u64(reader);
+            state->tether_vx=net_read_f32(reader);state->tether_vy=net_read_f32(reader);state->tether_vz=net_read_f32(reader);state->tether_inverse_mass=net_read_f32(reader);
+            if(!isfinite(state->tether_vx)||!isfinite(state->tether_vy)||!isfinite(state->tether_vz)||!isfinite(state->tether_inverse_mass)||state->tether_inverse_mass<0||state->tether_inverse_mass>1e6f)reader->failed=true;
+        }
     }
     return !reader->failed;
 }

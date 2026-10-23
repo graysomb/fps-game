@@ -520,7 +520,9 @@ static inline bool is_player_bot(int player_index) {
 #define MOVE_SPEED      5.0f    // units per second (unused: using acceleration)
 #define TURN_SPEED     90.0f    // degrees per second
 #define JUMP_SPEED     7.5f    // initial jump velocity
+#ifndef GRAVITY
 #define GRAVITY         9.8f*1.0f    // gravity acceleration
+#endif
 #define BASE_EYE_HEIGHT 1.0f    // player eye height above floor
 #define HUD_FONT_SIZE      28
 #define HUD_BAR_HEIGHT      6
@@ -784,6 +786,8 @@ typedef struct {
     Vector3 netGrappleAnchorVelocity;
     uint32_t netGrappleAnchorTick;
     bool grappleInputHeld;
+    bool grappleAirborne;
+    float netGrappleInverseMass;
     bool meleeKnockbackActive;
     bool meleeSwingActive;
     bool swordSwing; // Attack kind is independent of the equipped weapon.
@@ -8464,6 +8468,7 @@ static void ResetGame(void);
 #include "firefight_progression.h"
 #include "igloo_blueprint.h"
 #include "foundry_traps.h"
+#include "tether_coupling.h"
 static void reset_firefight_match(void);
 static void start_firefight_wave(int wave_number);
 static void update_firefight_logic(float dt);
@@ -8877,6 +8882,7 @@ static void clear_world_voxels(void) {
     golem_physics_reset();
     foundry_traps_reset();
     memset(tetherTag,0,sizeof(tetherTag));memset(tetherHoldClusterTag,0,sizeof(tetherHoldClusterTag));
+    memset(weakTethers,0,sizeof(weakTethers));
     static_cache_reset();
     support_cache_reset();
     regeneration_reset();
@@ -11057,6 +11063,7 @@ static void integrate_particles(float dt) {
         if (tether_player < 0 || tether_player >= MAX_COMBATANTS) {
             continue;
         }
+        if(weak_tether_enabled(tether_player))continue;
         Vector3 tether_delta = world_delta(tetherTargetByPlayer[tether_player],
                                      tetherComByPlayer[tether_player]);
         float tether_scale = tetherScaleByPlayer[tether_player];
@@ -11102,6 +11109,7 @@ static void integrate_particles(float dt) {
             p->vel = v_mul(p->vel, 1.0f - tether_damp);
         }
     }
+    weak_tether_integrate(dt);
 }
 
 FORCE_INLINE Vector3 vgs_project(Vector3 onto, Vector3 vec) {
@@ -13459,6 +13467,7 @@ static void voxel_measure_strain(const Voxel *voxel,
 
 #include "skeleton_constraints.inc"
 #include "golem_physics.inc"
+#include "tether_coupling.inc"
 #include "physics_gpu_common.inc"
 
 static void select_cpu_physics_backend(void) {
@@ -13930,9 +13939,10 @@ static void advance_gold_release_grace(int fixed_steps) {
 
 static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
     /* Animated constraints need a committed body between fixed ticks. */
-    if(goActive&&fixed_steps>1){for(int i=0;i<fixed_steps;i++)simulate_voxel_pbd_steps(dt,1);return;}
+    if((goActive||weak_tether_any())&&fixed_steps>1){for(int i=0;i<fixed_steps;i++)simulate_voxel_pbd_steps(dt,1);return;}
     if (fixed_steps > 0) { foundry_traps_prepare();golem_physics_prepare(); }
-    if (dynamic_particle_count() <= 0 || fixed_steps <= 0) return;
+    if(fixed_steps<=0)return;
+    if(dynamic_particle_count()<=0){for(int fixed=0;fixed<fixed_steps;fixed++)weak_tether_prepare(dt);return;}
     if (sim_particle_count == 0 && fluid_should_skip_reduced_rate_step()) {
         return;
     }
@@ -13942,6 +13952,9 @@ static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
     double t_meta = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
     rebuild_particle_collision_metadata();
     if (pbdProfileEnabled) pbdCpuProfile.t_metadata_ms += pbd_time_now_ms() - t_meta;
+    /* Prepare the paired impulse once, outside the GPU attempt/fallback. The
+     * same immutable force is integrated on either backend; recoil cannot replay. */
+    weak_tether_prepare(dt);
 
     double started = pbdProfileEnabled ? pbd_time_now_ms() : GetTime();
     const float sub_dt = dt / (float)PBD_SUBSTEPS;
@@ -18464,11 +18477,11 @@ static void HandleKeyboardInput(int i, float dt) {
         float len = sqrtf(accel.x*accel.x + accel.z*accel.z);
         accel = v_mul(accel, 1/len);
         p->vel = v_add(p->vel, v_mul(accel, ACCELERATION * dt));
-    } else if (!p->meleeKnockbackActive && !ex_in_field((int)(p-players)) && !tether_grapple_active((int)(p-players))) {
+    } else if (!p->meleeKnockbackActive && !ex_in_field((int)(p-players)) && !tether_grapple_airborne((int)(p-players))) {
         // friction
         float sp = sqrtf(p->vel.x*p->vel.x + p->vel.z*p->vel.z);
         if (sp > 0) {
-            float dec = FRICTION * dt;
+            float dec = tether_grapple_ground_friction(i) * dt;
             float ns = sp - dec; if (ns < 0) ns = 0;
             p->vel.x *= ns/sp;
             p->vel.z *= ns/sp;
@@ -18550,11 +18563,11 @@ static void HandleGamepadInput(int i, float dt) {
         float len = sqrtf(accel.x*accel.x + accel.z*accel.z);
         accel = v_mul(accel, 1/len);
         p->vel = v_add(p->vel, v_mul(accel, ACCELERATION * dt));
-    } else if (!tether_grapple_active(i) && !ex_in_field(i)) {
+    } else if (!tether_grapple_airborne(i) && !ex_in_field(i)) {
         // friction
         float sp = sqrtf(p->vel.x*p->vel.x + p->vel.z*p->vel.z);
         if (sp > 0) {
-            float dec = FRICTION * dt;
+            float dec = tether_grapple_ground_friction(i) * dt;
             float ns = sp - dec; if (ns < 0) ns = 0;
             p->vel.x *= ns/sp;
             p->vel.z *= ns/sp;
@@ -18596,10 +18609,10 @@ static void net_apply_movement_command(Player *p, const NetInputCommand *command
     if (!p->meleeKnockbackActive && accel_len > 0.01f) {
         if (accel_len > 1.0f) accel = v_mul(accel, 1.0f / accel_len);
         p->vel = v_add(p->vel, v_mul(accel, ACCELERATION * dt));
-    } else if (!p->meleeKnockbackActive && !ex_in_field((int)(p-players)) && !tether_grapple_active((int)(p-players))) {
+    } else if (!p->meleeKnockbackActive && !ex_in_field((int)(p-players)) && !tether_grapple_airborne((int)(p-players))) {
         float speed = sqrtf(p->vel.x * p->vel.x + p->vel.z * p->vel.z);
         if (speed > 0.0f) {
-            float next = fmaxf(0.0f, speed - FRICTION * dt);
+            float next = fmaxf(0.0f, speed - tether_grapple_ground_friction((int)(p-players)) * dt);
             p->vel.x *= next / speed;
             p->vel.z *= next / speed;
         }
@@ -18685,7 +18698,7 @@ static void integrate_human_body(int slot,float dt,bool query_world) {
     Vector3 probe=p->pos;probe.y-=.002f;
     p->onGround=p->vel.y<=0 && (p->pos.y<=BASE_EYE_HEIGHT+.0001f ||
         (query_world && player_aabb_hits_world_ex(probe,.25f,slot)));
-    if(p->onGround)p->vel.y=0;
+    if(p->onGround){p->vel.y=0;p->grappleAirborne=false;}
     float x=worldPeriodic?p->pos.x:clampf(p->pos.x,-FLOOR_SIZE+CHARACTER_HALF_WIDTH,FLOOR_SIZE-CHARACTER_HALF_WIDTH);
     float z=worldPeriodic?p->pos.z:clampf(p->pos.z,-FLOOR_SIZE+CHARACTER_HALF_WIDTH,FLOOR_SIZE-CHARACTER_HALF_WIDTH);
     collided|=x!=p->pos.x || z!=p->pos.z;p->pos.x=x;p->pos.z=z;
@@ -18701,7 +18714,7 @@ static void net_integrate_player(Player *p, float dt, bool query_world) {
     float max_speed = MOVE_SPEED;
     if (p->enemyType == ENEMY_TYPE_SWARMER) max_speed = MOVE_SPEED * 1.35f;
     else if (p->enemyType == ENEMY_TYPE_GOLIATH) max_speed = MOVE_SPEED * 0.85f;
-    if(ex_in_field(player_idx) || tether_grapple_active(player_idx))max_speed+=TETHER_GRAPPLE_MAX_APPROACH;
+    if(ex_in_field(player_idx) || tether_grapple_active(player_idx) || tether_grapple_airborne(player_idx))max_speed+=TETHER_GRAPPLE_MAX_APPROACH;
     float speed = sqrtf(p->vel.x * p->vel.x + p->vel.z * p->vel.z);
     if (!p->meleeKnockbackActive && speed > max_speed) {
         p->vel.x *= max_speed / speed;
@@ -19867,6 +19880,14 @@ static void net_write_player_state(NetWriter *writer, int slot) {
         Vector3 target=players[p->drainTarget-1].pos;
         visual.tether_x=target.x;visual.tether_y=target.y;visual.tether_z=target.z;
     }
+    if((visual.flags&NET_PLAYER_VISUAL_TETHER)&&!(visual.flags&(NET_PLAYER_VISUAL_GOLD_TETHER|NET_PLAYER_VISUAL_DRAIN))&&slot<MAX_PLAYERS){
+        WeakTetherCoupling c=weakTethers[slot];
+        if(weak_tether_sample(slot,&c)){
+            visual.tether_x=c.target.x;visual.tether_y=c.target.y;visual.tether_z=c.target.z;
+            visual.tether_identity=c.identity;visual.tether_vx=c.velocity.x;visual.tether_vy=c.velocity.y;visual.tether_vz=c.velocity.z;
+            visual.tether_inverse_mass=c.anchored?0:1/fmaxf(c.mass,TETHER_REFERENCE_MASS);
+        }
+    }
     net_write_u8(writer, (uint8_t)slot);
     net_write_u32(writer, netLastProcessedInput[slot]);
     net_write_f32(writer, p->pos.x); net_write_f32(writer, p->pos.y); net_write_f32(writer, p->pos.z);
@@ -19877,7 +19898,8 @@ static void net_write_player_state(NetWriter *writer, int slot) {
     net_write_i16(writer, (int16_t)p->kills); net_write_i16(writer, (int16_t)p->deaths);
     net_write_i16(writer, (int16_t)p->debrisKills);
     net_write_u8(writer, (p->onGround ? 1u : 0u) | (p->isExposed ? 2u : 0u) |
-                        (p->goldTetherCharged ? NET_PLAYER_STATE_GOLD_TETHER_CHARGED : 0u));
+                        (p->goldTetherCharged ? NET_PLAYER_STATE_GOLD_TETHER_CHARGED : 0u) |
+                        (p->grappleAirborne ? NET_PLAYER_STATE_GRAPPLE_CARRY : 0u));
     net_write_u8(writer,grenadeInventory[slot]);
     net_write_player_visual(writer, &visual);
 }
@@ -19901,6 +19923,7 @@ static bool net_read_player_state(NetReader *reader, int *slot_out, NetPlayerWir
 static void net_reconcile_local(int slot, const NetPlayerWireState *state) {
     Player *p = &players[slot];
     p->pos = state->pos; p->vel = state->vel;
+    p->onGround=(state->flags&1u)!=0;p->grappleAirborne=(state->flags&NET_PLAYER_STATE_GRAPPLE_CARRY)!=0;
     p->yaw = state->yaw; p->pitch = state->pitch;
     p->yaw_vel = state->yaw_vel; p->pitch_vel = state->pitch_vel;
     if(fp_active()&&(ff_input_blocked(slot)||p->respawn_timer>0)){netPredictionCount[slot]=netPredictionHead[slot]=0;return;}
@@ -20150,19 +20173,21 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
             netPlayerPresent[slot] = true;
             if (slot + 1 > activePlayers) activePlayers = slot + 1;
             tether_grapple_receive(slot,state.visual.flags,
-                (Vector3){state.visual.tether_x,state.visual.tether_y,state.visual.tether_z},header.server_tick);
+                (Vector3){state.visual.tether_x,state.visual.tether_y,state.visual.tether_z},
+                (Vector3){state.visual.tether_vx,state.visual.tether_vy,state.visual.tether_vz},state.visual.tether_inverse_mass,header.server_tick);
             players[slot].respawn_timer=state.respawn_timer;
             if (net_local_index_for_slot(slot) >= 0) net_reconcile_local(slot, &state);
             else {
                 Player *p = &players[slot];
                 p->pos = state.pos; p->vel = state.vel; p->yaw = state.yaw; p->pitch = state.pitch;
                 p->yaw_vel = state.yaw_vel; p->pitch_vel = state.pitch_vel;
+                p->onGround=(state.flags&1u)!=0;p->grappleAirborne=(state.flags&NET_PLAYER_STATE_GRAPPLE_CARRY)!=0;
             }
             Player *p = &players[slot];
             grenadeInventory[slot]=state.grenades;
             p->matter = state.matter; p->respawn_timer = state.respawn_timer;
             p->kills = state.kills; p->deaths = state.deaths; p->debrisKills = state.debris_kills;
-            p->onGround = (state.flags & 1u) != 0; p->isExposed = (state.flags & 2u) != 0;
+            p->isExposed = (state.flags & 2u) != 0;
             bool authoritative_melee = (state.visual.flags & NET_PLAYER_VISUAL_MELEE) != 0;
             bool local_slot = net_local_index_for_slot(slot) >= 0;
             bool pending_local_melee = local_slot &&

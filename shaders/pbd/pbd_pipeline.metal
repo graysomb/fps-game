@@ -152,6 +152,8 @@ inline void integrateParticle(uint gid, device ParticleState *particle,
         p.predicted_base_inv_mass.xyz += p.velocity.xyz * u.dt;
         p.predicted_base_inv_mass.y -= u.gravity * u.dt * u.dt;
         int owner = tetherOwner[id];
+        int weakMask=owner>=64?owner>>6:0;
+        if(owner>=64)owner=(owner&63)-1;
         int player = owner >= 16 ? owner - 16 : owner;
         if (player >= 0 && player < 16) {
             float scale = u.tether_targets[player].w;
@@ -162,6 +164,10 @@ inline void integrateParticle(uint gid, device ParticleState *particle,
             float3 disp = p.predicted_base_inv_mass.xyz - p.prev_inv_mass.xyz;
             p.predicted_base_inv_mass.xyz = p.prev_inv_mass.xyz + disp * (1.0f - damp);
             p.velocity.xyz *= 1.0f - damp;
+        }
+        for(int i=0;i<4;i++)if((weakMask&(1<<i))!=0){
+            float3 dv=u.tether_targets[i].xyz*p.prev_inv_mass.w*u.dt/float(max(1,refcount[id]));
+            p.velocity.xyz+=dv;p.predicted_base_inv_mass.xyz+=dv*u.dt;
         }
     }
     particle[id] = p;
@@ -383,8 +389,7 @@ inline void gatherBreakMask(uint gid, device ParticleState *particle,
     for (int i = 0; i < 8; ++i) {
         uint id = voxelParticle(v, i);
         // Owners 16..31 are held gold groups; 32 is the short release settling window.
-        if (id < uint(controlLoad(control, 0)) && tetherOwner[id] >= 16 && tetherOwner[id] <= 32)
-            return;
+        if(id<uint(controlLoad(control,0))){int owner=tetherOwner[id];if(owner>=64)owner=(owner&63)-1;if(owner>=16&&owner<=32)return;}
     }
     float3 p[8];
     for (int i = 0; i < 8; ++i) {
@@ -481,7 +486,7 @@ inline void solveSkeleton(uint gid,device ParticleState *particle,device atomic_
  accumulate(correction,control,id,delta*particle[id].prev_inv_mass.w,1.0f);
  for(int k=0;k<8;k++){uint j=c.corner[(k+1)/4][(k+1)%4];float w=c.weight[k/4][k%4];if(j<uint(controlLoad(control,0)))accumulate(correction,control,j,-delta*w*particle[j].prev_inv_mass.w,1.0f);}
 }
-kernel void pbd_pipeline_articulated(
+kernel void pbd_pipeline_coupled_tether(
     device ParticleState *particle [[buffer(0)]],
     device atomic_uint *correction [[buffer(1)]],
     device int4 *cell [[buffer(2)]],

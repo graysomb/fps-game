@@ -1253,19 +1253,26 @@ focus) refunds the loaded amount, capped at the Matter bar maximum. A full charg
 fires on release even if the remaining bar has been drained to zero, without a
 second payment. Death discards the charge. The loaded railgun retains its glow.
 
-The default voxel tether also pulls its human holder toward the grabbed face. It
-remains free, with the existing 8 m grab range. Heavy supported structures act as
-grapple anchors; loose debris moves toward you as you move toward it. Hold the
-existing tether control to pull, release to stop pulling and throw as before.
-Steering, jumping, gravity and player collision remain active. Pull tapers near
-1.5 m and adds at most 30 m/s² acceleration up to 12 m/s relative approach speed.
-Gold grabs and Matter-drain links do not grapple; an unaffordable gold grab that
-falls back to the default tether does. The behavior is shared by local movement,
-the authoritative host, and client prediction using existing tether snapshots.
+The default voxel tether exchanges equal-and-opposite impulses with its human
+holder. The player weighs sixteen standard voxels for this interaction: a loose
+cube comes mainly toward you, while a heavy or anchored structure supports
+rapid grappling. Shared corners retain the material mass of all their owning
+cells, and the spring damps relative motion rather than world velocity. The
+existing grab range, activation, face attachment and powered release remain.
 
-Grapple regression harnesses: `tests/tether_grapple_test.c` (CPU/GPU, collisions,
-upward pull, both moving endpoints, lifecycle, frame rates, prediction) and
-`tests/tether_grapple_lan.c` (real ENet host/client on loopback port 27941).
+Loose cubes retain normal ground braking. A heavy or fixed anchor uses finite
+12 m/s² ground drag so it can overcome braking; there is no friction exemption
+for standing with a loose cube. Grapple momentum carries through an airborne
+release until landing restores walking brakes. Pull is limited to 30 m/s² player
+acceleration, 60 m/s² free-group acceleration and 12 m/s relative closing speed.
+Gold grabs and Matter-drain links do not grapple. Unaffordable gold grabs still
+fall back to the free weak tether.
+
+`tools/validate_tether_coupling.ps1 -Backend 43` runs movement, isolated physical
+momentum, CPU comparison, forced GPU fallback, and host/client tests. Use
+`-Backend 33` for the OpenGL 3.3 CPU build. Protocol **28** replicates target mass,
+velocity and airborne carry; all LAN players require matching builds. See
+[implementation and measured validation](docs/tether-coupling.md).
 
 ### Swimming mallard visual preview
 
@@ -1282,7 +1289,7 @@ contact, and moving debris make them disappear into a short puff of feathers.
 They return after 90 seconds of gameplay; blocked respawn spots wait until clear.
 They do not award points, drop equipment, or count toward Firefight waves.
 Feathers are bounded cosmetic geometry, not dynamic voxel bodies. LAN state is
-host authoritative; protocol **27** requires matching builds.
+host authoritative; protocol **28** requires matching builds.
 
 `tools/validate_ducks.ps1 -Backend 33` (or `43`) validates authored routes, hit
 paths, cover occlusion, respawn timing, pause behavior, periodic seams, and network

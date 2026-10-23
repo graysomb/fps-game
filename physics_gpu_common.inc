@@ -402,6 +402,19 @@ static uint32_t gpu_glued_face_mask(const Voxel *v) {
     return mask;
 }
 
+/* Preserve the legacy owner in the low six bits; high bits hold a weak-player
+ * mask so two people can pull the same particle without losing either impulse. */
+static void gpu_map_weak_tethers(void){
+    for(int i=0;i<MAX_PLAYERS;i++){
+        WeakTetherCoupling *c=&weakTethers[i];if(!c->active||!weak_tether_enabled(i))continue;
+        for(int k=0;k<c->count;k++){
+            ptrdiff_t pool=c->corner[k]-particles_pool;if(pool<0||pool>=particle_pool_count)continue;
+            int id=gpuPhysics.pool_to_compact[pool];if(id<0||id>=gpuPhysics.compact_count)continue;
+            int owner=gpuPhysics.tether_stage[id];
+            gpuPhysics.tether_stage[id]=(owner>=64?owner:owner+1)|((1<<i)<<6);
+        }
+    }
+}
 static bool gpu_pack_world(void) {
     int dynamic_count = 0;
     for (int i = 0; i < voxel_count; ++i) if (voxels[i].simulate) dynamic_count++;
@@ -543,6 +556,7 @@ static bool gpu_pack_world(void) {
         Voxel *v = &voxels[i];
         if (!v->simulate || v->type != 0 || v->isBullet || !v->vgs_active || tetherTag[i] <= 0) continue;
         int player = tetherTag[i] - 1;
+        if(weak_tether_enabled(player))continue;
         if (player < 0 || player >= MAX_COMBATANTS) continue;
         bool gold = players[player].goldTetherHolding;
         int tether_face = players[player].tetherFace;
@@ -581,6 +595,7 @@ static bool gpu_pack_world(void) {
             }
         }
     }
+    gpu_map_weak_tethers();
     // velocity.w carries a stable compact particle anchor for each connected island.
     static int periodicAnchor[MAX_VOXELS];
     for(int i=0;i<voxel_count;i++)periodicAnchor[i]=-1;
@@ -916,6 +931,10 @@ static void gpu_set_uniforms(float dt) {
         tether_data[i][1] = pull.y;
         tether_data[i][2] = pull.z;
         tether_data[i][3] = tetherScaleByPlayer[i];
+        if(i<MAX_PLAYERS&&weakTethers[i].active&&weak_tether_enabled(i)){
+            Vector3 force=weakTethers[i].count?v_mul(weakTethers[i].force,1.f/weakTethers[i].count):(Vector3){0};
+            tether_data[i][0]=force.x;tether_data[i][1]=force.y;tether_data[i][2]=force.z;tether_data[i][3]=-1;
+        }
     }
 #if defined(__APPLE__) && defined(FPS_GPU_METAL)
     FpsGpuUniforms uniforms = { 0 };
@@ -1199,6 +1218,7 @@ static bool gpu_refresh_tethers(void) {
         Voxel *v = &voxels[world_id];
         if (v->type != 0 || v->isBullet || !v->vgs_active || tetherTag[world_id] <= 0) continue;
         int player = tetherTag[world_id] - 1;
+        if(weak_tether_enabled(player))continue;
         if (player < 0 || player >= MAX_COMBATANTS) continue;
         bool gold = players[player].goldTetherHolding;
         int tether_face = players[player].tetherFace;
@@ -1239,6 +1259,7 @@ static bool gpu_refresh_tethers(void) {
             }
         }
     }
+    gpu_map_weak_tethers();
     bool changed = memcmp(gpuPhysics.tether_compare_stage, gpuPhysics.tether_stage,
                           (size_t)gpuPhysics.compact_count * sizeof(*gpuPhysics.tether_compare_stage)) != 0;
     if (changed) {
