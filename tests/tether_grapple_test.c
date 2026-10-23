@@ -22,6 +22,50 @@ static int anchor(Vector3 pos,bool fixed){
     init_static_hash();rebuild_voxel_hash();acquire_tether_hit(0,v,(Vector3){0,0,1});assert(players[0].tetherHolding);return v;
 }
 static float accumulator;
+static void step(float dt,bool physics);
+static void walking_speed(void){
+    /* Movement input alone must not spend the extra speed allowance reserved
+     * for physical grapple impulses, even before the next physics tick. */
+    for(int mode=0;mode<3;mode++){
+        fixture();if(mode)anchor((Vector3){0,BASE_EYE_HEIGHT,-5},false);
+        if(mode==2){netTransport.role=NET_ROLE_CLIENT;players[0].grappleInputHeld=true;
+            tether_grapple_receive(0,NET_PLAYER_VISUAL_TETHER,(Vector3){0,BASE_EYE_HEIGHT,-5},(Vector3){0},.125f,1);}
+        NetInputCommand command={.held=mode?NET_INPUT_TETHER:0,.move_x=32767};
+        for(int f=0;f<60;f++){
+            net_apply_movement_command(&players[0],&command,1.f/60);
+            if(mode==2){players[0].netTetherVisualTarget=player_tether_hold_position(&players[0]);players[0].netGrappleAnchorVelocity=players[0].vel;}
+            net_integrate_player(&players[0],1.f/60,false);
+        }
+        float speed=hypotf(players[0].vel.x,players[0].vel.z);
+        printf("Walking mode %d: %.3f m/s (normal %.3f)\n",mode,speed,(float)MOVE_SPEED);fflush(stdout);
+        assert(speed<=MOVE_SPEED+.001f);
+    }
+    netTransport.role=NET_ROLE_OFFLINE;
+    const int rates[]={30,60,144};
+    for(int r=0;r<3;r++)for(int direction=0;direction<3;direction++){
+        fixture();anchor((Vector3){0,BASE_EYE_HEIGHT,-5},false);accumulator=0;
+        /* Let the acquisition impulse settle before measuring walking. Its
+         * brief physical recoil is tested separately by conservation(). */
+        for(int f=0;f<120;f++)step(1.f/60,true);
+        NetInputCommand command={.held=NET_INPUT_TETHER,.move_x=direction?32767:0,.move_y=direction==1?0:32767};
+        float peak=0;
+        for(int f=0;f<rates[r]*2;f++){
+            float dt=1.f/rates[r];net_apply_movement_command(&players[0],&command,dt);net_integrate_player(&players[0],dt,true);
+            peak=fmaxf(peak,hypotf(players[0].vel.x,players[0].vel.z));
+            accumulator+=dt;while(accumulator>=1.f/60-1e-7f){prepare_tether_forces();simulate_voxel_pbd_steps(1.f/60,1);rebuild_voxel_hash();accumulator-=1.f/60;}
+        }
+        fprintf(stderr,"Walking with loose cube: %d FPS direction %d peak %.3f m/s\n",rates[r],direction,peak);
+        assert(peak<=MOVE_SPEED+.15f);
+    }
+    fixture();players[0].onGround=false;players[0].grappleAirborne=true;players[0].vel=(Vector3){0,2,-12};
+    NetInputCommand forward={.move_y=32767};net_apply_movement_command(&players[0],&forward,.02f);
+    assert(fabsf(players[0].vel.z+12)<.001f&&players[0].vel.y==2);
+    NetInputCommand side={.move_x=32767};net_apply_movement_command(&players[0],&side,.02f);
+    assert(fabsf(hypotf(players[0].vel.x,players[0].vel.z)-12)<.001f);
+    NetInputCommand brake={.move_y=-32767};net_apply_movement_command(&players[0],&brake,.01f);
+    assert(hypotf(players[0].vel.x,players[0].vel.z)<12);
+    puts("Walk motor cap, client prediction, directional input and airborne steering passed");
+}
 static void step(float dt,bool physics){
     NetInputCommand command={.held=players[0].tetherHolding?NET_INPUT_TETHER:0};net_apply_movement_command(&players[0],&command,dt);
     net_integrate_player(&players[0],dt,true);
@@ -115,7 +159,7 @@ int main(int argc,char **argv){
 #ifdef TETHER_COUPLING_ISOLATED
     physical_momentum();
 #else
-    conservation();behavior();moving_voxels();rates_and_prediction();
+    walking_speed();conservation();behavior();moving_voxels();rates_and_prediction();
 #endif
     clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();
     puts("Default tether grapple passed");return 0;

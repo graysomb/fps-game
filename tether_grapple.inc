@@ -16,6 +16,17 @@ static bool tether_grapple_active(int i){Vector3 target,velocity;return tether_g
 static bool tether_grapple_airborne(int i){
     return i>=0&&i<MAX_PLAYERS&&!players[i].onGround&&(players[i].grappleAirborne||tether_grapple_active(i));
 }
+static void player_walk_accelerate(Player *p,Vector3 direction,float dt){
+    float previousSpeed=hypotf(p->vel.x,p->vel.z);
+    p->vel=v_add(p->vel,v_mul(direction,ACCELERATION*dt));
+    int i=(int)(p-players);
+    if(!tether_grapple_active(i)&&!tether_grapple_airborne(i))return;
+    /* The higher grapple ceiling belongs to physical impulses, not the walk
+     * motor. Steering may preserve existing momentum, but cannot manufacture
+     * extra speed above walking speed. Braking input can still reduce it. */
+    float limit=fmaxf(MOVE_SPEED,previousSpeed),speed=hypotf(p->vel.x,p->vel.z);
+    if(speed>limit){p->vel.x*=limit/speed;p->vel.z*=limit/speed;}
+}
 static float tether_grapple_ground_friction(int i){
     if(i<0||i>=MAX_PLAYERS||!players[i].onGround)return FRICTION;
     float inverseMass=players[i].netGrappleInverseMass;

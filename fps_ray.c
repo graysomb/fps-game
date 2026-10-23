@@ -18487,7 +18487,7 @@ static void HandleKeyboardInput(int i, float dt) {
     if (!p->meleeKnockbackActive && (accel.x!=0 || accel.z!=0)) {
         float len = sqrtf(accel.x*accel.x + accel.z*accel.z);
         accel = v_mul(accel, 1/len);
-        p->vel = v_add(p->vel, v_mul(accel, ACCELERATION * dt));
+        player_walk_accelerate(p, accel, dt);
     } else if (!p->meleeKnockbackActive && !ex_in_field((int)(p-players)) && !tether_grapple_airborne((int)(p-players))) {
         // friction
         float sp = sqrtf(p->vel.x*p->vel.x + p->vel.z*p->vel.z);
@@ -18573,7 +18573,7 @@ static void HandleGamepadInput(int i, float dt) {
     if (accel.x!=0 || accel.z!=0) {
         float len = sqrtf(accel.x*accel.x + accel.z*accel.z);
         accel = v_mul(accel, 1/len);
-        p->vel = v_add(p->vel, v_mul(accel, ACCELERATION * dt));
+        player_walk_accelerate(p, accel, dt);
     } else if (!tether_grapple_airborne(i) && !ex_in_field(i)) {
         // friction
         float sp = sqrtf(p->vel.x*p->vel.x + p->vel.z*p->vel.z);
@@ -18619,7 +18619,7 @@ static void net_apply_movement_command(Player *p, const NetInputCommand *command
     float accel_len = sqrtf(accel.x * accel.x + accel.z * accel.z);
     if (!p->meleeKnockbackActive && accel_len > 0.01f) {
         if (accel_len > 1.0f) accel = v_mul(accel, 1.0f / accel_len);
-        p->vel = v_add(p->vel, v_mul(accel, ACCELERATION * dt));
+        player_walk_accelerate(p, accel, dt);
     } else if (!p->meleeKnockbackActive && !ex_in_field((int)(p-players)) && !tether_grapple_airborne((int)(p-players))) {
         float speed = sqrtf(p->vel.x * p->vel.x + p->vel.z * p->vel.z);
         if (speed > 0.0f) {

@@ -41,6 +41,14 @@ Airborne weak-grapple carry bypasses no-input air braking and uses the existing
 landing clears carry and restores normal brakes. Reset, true death and revival
 clear the carry state.
 
+Keyboard, gamepad and network movement share a walking acceleration limiter.
+Holding a tether no longer lets movement input accelerate to the 17 m/s grapple
+ceiling: the walk motor stops adding speed at the normal 5 m/s. If physical
+pulling has already produced a higher speed, input can steer or brake that
+momentum but cannot increase its magnitude. Actual tether impulses and airborne
+release momentum retain their existing behavior. This fixes the reproduced
+5-to-17 m/s walking boost without changing the paired physics impulse.
+
 Protocol 28 adds target identity, point velocity and inverse mass to weak-tether
 snapshots, plus an airborne-carry flag in player state. Client prediction uses
 the same impulse function, never modifies authoritative voxels, and restores
@@ -60,6 +68,9 @@ upward grappling, zero-Matter eligibility, loose-cube ground braking, airborne
 release and landing, collisions, periodic distance, anchor deletion, prediction
 and lifecycle resets. The isolated physical test disables gravity and global
 velocity damping in its own executable, retaining the full shape solver.
+Walking tests compare untethered, tethered and predicted input, then exercise
+forward, sideways and diagonal movement with a settled loose cube at 30/60/144
+FPS. They also check steering and braking while carrying airborne momentum.
 
 Measured momentum error, relative to the exchanged impulse:
 
