@@ -142,3 +142,45 @@ that damping. These are diagnostic results, not passing accuracy thresholds.
 Single-thread CPU reproduces the same pattern: center misses of 0.13–0.19 m,
 0.52–1.09 m, 4.62–6.09 m and 13.07–14.61 m respectively. Raw results are in
 `artifacts/golem/physics/accuracy-gpu.csv` and `accuracy-cpu.txt`.
+
+### Experimental damping comparison
+
+The validation script accepts `-Damping 0.999` (default `0.99`), builds a
+separate executable named `test-43-damping-0.999.exe`, and prints its damping
+value. Normal game builds retain `0.99`; this experiment does not retune them.
+
+```powershell
+./tools/validate_golem_physics.ps1 -Backend 43 -Damping 0.999
+./tools/validate_golem_physics.ps1 -Backend 43 -Damping 0.999 -SkipBuild -Accuracy
+./tools/validate_golem_physics.ps1 -Backend 43 -Damping 0.999 -SkipBuild -StressSeconds 120
+```
+
+GPU nearest fist-center miss, across the same three stationary target angles:
+
+| Range | Damping 0.99 | Damping 0.999 |
+| --- | ---: | ---: |
+| 6 m | 0.12–0.18 m | 0.05–0.22 m |
+| 12 m | 0.50–1.07 m | 0.17–0.21 m |
+| 20 m | 4.43–6.02 m | 0.34–0.54 m |
+| 30 m | 12.77–14.51 m | 1.13–1.42 m |
+
+CPU at 0.999 shows the same improvement, with center misses of 0.05–0.23 m,
+0.16–0.25 m, 0.36–0.72 m and 1.31–1.82 m respectively. The CPU and GPU
+trajectories are similar, not identical.
+
+Fist forward travel over the first third of a second increases from 5.83 m to
+7.11 m. All nine target points at 6–20 m enter the fist's bounding box;
+the three 30 m points still miss that envelope by 0.38–0.71 m. Bounding-box
+overlap is not an exact actor collision test. The long-range shot still needs
+damping-aware aim; merely reducing damping does not make it exact.
+
+At 0.999 the full stability suite passes on GPU and single-thread CPU (using
+the same GL 4.3 test binary with `--physics=cpu-st`): idle, walking, slam,
+sweep, launched hand, arm/leg loss, kneeling, regeneration, cut links, tether
+detachment, obstructed regrowth, compaction and cleanup. The 120-second GPU
+stress run peaks at 340 cells including debris, with finite positions and zero
+terrain-restoration queue entries. It ends with 258 attached cells and 283 total;
+obstruction-aware regrowth is not asserted to finish during that stress run.
+This is a golem-fixture test, not a full-map destruction or multiplayer soak.
+Logs use `damping-0999-*`, `accuracy-0999-*`, and `stress-0999-gpu.txt` in
+`artifacts/golem/physics`.

@@ -17,6 +17,7 @@ static void ex_clear_status(int i);
 static int ex_grenade_count(int i,int kind);
 static void ex_cycle(int i);
 static bool ex_grenade_pickup(int i,int kind);
+static bool ex_refill_grenades(int i);
 static bool ex_throw_available(int i,int kind);
 static void ex_grenade_landed(GrenadeState *g);
 static void ex_grenade_deploy(GrenadeState g);

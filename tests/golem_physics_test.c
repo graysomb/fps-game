@@ -66,6 +66,7 @@ static void accuracy_check(void){
     }
 }
 int main(int argc,char **argv){
+    printf("Velocity damping: %.6f per 1/120 second\n",(double)VELOCITY_DAMPING);
     setvbuf(stdout,NULL,_IONBF,0);assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(800,600,"Physical golem checks");init_pbd_thread_pool();if(!initialize_physics_backend()){fprintf(stderr,"Backend init: %s\n",physicsBackend.fallback_reason);return 2;}
     if(getenv("GOLEM_ACCURACY")){accuracy_check();goto cleanup;}

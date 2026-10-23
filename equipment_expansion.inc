@@ -7,6 +7,18 @@ static void ex_reset(void){memset(exGlobs,0,sizeof(exGlobs));memset(exFields,0,s
 static int ex_grenade_count(int i,int kind){if(i<0||i>=MAX_COMBATANTS||kind<0||kind>=GRENADE_KIND_COUNT)return 0;return kind?exGrenades[i][kind-1]:grenadeInventory[i];}
 static void ex_cycle(int i){if(i<0||i>=MAX_COMBATANTS)return;for(int n=1;n<=GRENADE_KIND_COUNT;n++){int k=(exSelectedGrenade[i]+n)%GRENADE_KIND_COUNT;if(ex_grenade_count(i,k)>0){exSelectedGrenade[i]=k;return;}}}
 static bool ex_grenade_pickup(int i,int kind){if(i<0||i>=MAX_COMBATANTS||kind<1||kind>2||exGrenades[i][kind-1]>=2)return false;bool empty=ex_grenade_count(i,exSelectedGrenade[i])==0;exGrenades[i][kind-1]++;if(empty)exSelectedGrenade[i]=kind;return true;}
+static bool ex_refill_grenades(int i){
+    if(i<0||i>=MAX_PLAYERS||is_player_bot(i))return false;
+    const int types[]={PICKUP_GRENADE,PICKUP_BLACK_HOLE,PICKUP_IGLOO};bool changed=false;
+    for(int kind=0;kind<GRENADE_KIND_COUNT;kind++){
+        int rule=fp_rule(types[kind]);
+        if(fp_active() && (rule<0 || !(fpUnlocked&(1u<<rule))))continue;
+        int *count=kind?&exGrenades[i][kind-1]:&grenadeInventory[i];
+        if(*count<2){*count=2;changed=true;}
+    }
+    if(!ex_grenade_count(i,exSelectedGrenade[i]))ex_cycle(i);
+    return changed;
+}
 static bool ex_throw_available(int i,int kind){
     if(!ex_grenade_count(i,kind))return false;if(kind!=GRENADE_GRAVITY)return true;
     int count=0;for(int n=0;n<EX_FIELDS;n++)if(exFields[n].id){if(exFields[n].owner==i)return false;count++;}
@@ -94,8 +106,8 @@ static void ex_tick(float dt){
 }
 static void ex_draw(WeaponRenderPass pass){
     Vector3 eye=drawViewPlayerIndex>=0?players[drawViewPlayerIndex].pos:(Vector3){0};
-    for(int n=0;n<EX_GLOBS;n++){GlobProjectile *g=&exGlobs[n];if(!g->id||!periodic_visible(g->pos,1))continue;WeaponEffect e={.transform=MatrixTranslate(g->pos.x,g->pos.y,g->pos.z),.age=g->age,.lifetime=1,.seed=g->id};weapon_draw_glob(&e,eye,exClock,pass);}
-    for(int n=0;n<EX_SPLATS;n++){ExpansionSplat *s=&exSplats[n];if(!s->id||!periodic_visible(s->pos,1))continue;WeaponEffect e={.transform=MatrixTranslate(s->pos.x,s->pos.y,s->pos.z),.age=s->age,.lifetime=s->impact?.65f:5,.seed=s->id,.attached=true};if(s->impact)weapon_draw_dmr_impact(&e,eye,exClock,pass);else weapon_draw_glob(&e,eye,exClock,pass);}
+    for(int n=0;n<EX_GLOBS;n++){GlobProjectile *g=&exGlobs[n];if(!g->id||!periodic_visible(g->pos,1)||v_length(world_delta(g->pos,eye))<.75f)continue;WeaponEffect e={.transform=MatrixTranslate(g->pos.x,g->pos.y,g->pos.z),.age=g->age,.lifetime=1,.seed=g->id};weapon_draw_glob(&e,eye,exClock,pass);}
+    for(int n=0;n<EX_SPLATS;n++){ExpansionSplat *s=&exSplats[n];if(!s->id||!periodic_visible(s->pos,1)||(!s->impact&&((drawViewPlayerIndex>=0&&s->actor==drawViewPlayerIndex)||v_length(world_delta(s->pos,eye))<.75f)))continue;WeaponEffect e={.transform=MatrixTranslate(s->pos.x,s->pos.y,s->pos.z),.age=s->age,.lifetime=s->impact?.65f:5,.seed=s->id,.attached=true};if(s->impact)weapon_draw_dmr_impact(&e,eye,exClock,pass);else weapon_draw_glob(&e,eye,exClock,pass);}
     for(int n=0;n<EX_FIELDS;n++){GravityField *f=&exFields[n];if(!f->id||!periodic_visible(f->pos,6))continue;WeaponEffect e={.transform=MatrixMultiply(MatrixScale(2,2,2),MatrixTranslate(f->pos.x,f->pos.y,f->pos.z)),.age=f->age,.lifetime=5,.seed=f->id};weapon_draw_gravity(&e,eye,exClock,pass);WeaponVisual v={.shot_time=-1000,.deployment=clampf(f->age/.35f,0,1),.activity=1};weapon_draw((WeaponPose){.kind=WEAPON_BLACK_HOLE_BOMB,.transform=MatrixMultiply(MatrixScale(.6f,.6f,.6f),MatrixTranslate(f->pos.x,f->pos.y,f->pos.z))},&v,eye,exClock,false,pass);}
     float now=weaponFrameSampled?weaponFrameTime:(float)GetTime();
     for(int i=0;i<MAX_COMBATANTS;i++){int gun=eq_gun(i);if(gun<EQ_GLOB||players[i].respawn_timer>0)continue;float age=now-weaponVisuals[i].shot_time;if(age<0||age>.065f)continue;

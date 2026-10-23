@@ -40,18 +40,20 @@ static void ex_gravity_pull(GravityField *f,float dt){
 static bool ex_in_field(int i){
  if(i<0||i>=activePlayers||players[i].enemyType==ENEMY_TYPE_FOUNDRY)return false;
  for(int n=0;n<EX_FIELDS;n++)if(exFields[n].id){Vector3 d=world_delta(exFields[n].pos,players[i].pos);float length=v_length(d);VoxelHit hit;
-  if(length<6 && (length<.3f||!first_voxel_hit_detailed((Ray){players[i].pos,v_norm(d)},length-.25f,-1,false,&hit)))return true;
+  if(length<6 && (length<.3f||!first_voxel_hit_detailed((Ray){players[i].pos,v_norm(d)},length-.25f,-1,true,&hit)))return true;
  }return false;
 }
 static void ex_actor_pull(int i,float dt){
  if(i<0||i>=activePlayers||players[i].respawn_timer>0||players[i].enemyType==ENEMY_TYPE_FOUNDRY)return;
- bool bot=is_player_bot(i);if(bot)exBotPull[i]=v_mul(exBotPull[i],expf(-dt*1.5f));
+ bool bot=is_player_bot(i);if(bot)exBotPull[i]=v_mul(exBotPull[i],expf(-dt*.5f));
  Vector3 velocity=v_add(players[i].vel,bot?exBotPull[i]:(Vector3){0}),delta={0};
  for(int n=0;n<EX_FIELDS;n++){GravityField *f=&exFields[n];if(!f->id)continue;
   float ramp=clampf(f->age/.5f,0,1)*clampf((5-f->age)/.5f,0,1);
   Vector3 d=world_delta(f->pos,players[i].pos);float distance=v_length(d);if(distance>=6)continue;VoxelHit block;
-  if(distance>.3f&&first_voxel_hit_detailed((Ray){players[i].pos,v_norm(d)},distance-.25f,-1,false,&block))continue;
-  Vector3 dv=ex_pull_delta(v_add(velocity,delta),d,players[i].enemyType==ENEMY_TYPE_GOLIATH?6:18,dt,ramp);delta=v_add(delta,dv);
+  // Moving rubble and worn armor are pulled objects, not protection from the
+  // field. Intact static cover still blocks attraction.
+  if(distance>.3f&&first_voxel_hit_detailed((Ray){players[i].pos,v_norm(d)},distance-.25f,-1,true,&block))continue;
+  Vector3 dv=ex_pull_delta(v_add(velocity,delta),d,players[i].enemyType==ENEMY_TYPE_GOLIATH?24:45,dt,ramp);delta=v_add(delta,dv);
  }
  if(bot){
   // AI chooses a desired walking velocity each frame. Keep pull momentum

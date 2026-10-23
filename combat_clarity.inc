@@ -270,7 +270,7 @@ static void clarity_supply_layout(void) {
         for(int q=0;q<4;q++)for(int k=0;k<3;k++)if(valid[k])pickups[count++]=(Pickup){.pos=crosscut_rotate(positions[k],q),.active=true,.type=k==0?PICKUP_AMMO:k==1?PICKUP_GRENADE:PICKUP_DYNAMIC_SHOT};
         Vector3 at;if(clarity_supply_position((Vector3){0},0,&at))pickups[count++]=(Pickup){.pos=at,.active=true,.type=PICKUP_GOLD_TETHER};
     }
-    if(fp_active())for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].type!=PICKUP_HEALTH&&pickups[n].type!=PICKUP_AMMO)pickups[n].active=false,pickups[n].respawnTimer=0;
+    if(fp_active())for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].type!=PICKUP_HEALTH&&pickups[n].type!=PICKUP_AMMO&&pickups[n].type!=PICKUP_GRENADE)pickups[n].active=false,pickups[n].respawnTimer=0;
     eq_layout();
 }
 static void clarity_supply_update(void) {

@@ -20,6 +20,7 @@ typedef struct {
 } FfCheckpoint;
 static FfCheckpoint fpCheckpoint;
 static bool fp_active(void);
+static int fp_rule(int type);
 static int fp_team_size(void);
 static bool fp_carrier(int i);
 static void fp_new_run(void);

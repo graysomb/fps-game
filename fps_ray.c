@@ -592,7 +592,9 @@ static float worldFloorHalfSize=20.0f;
 #define COLLISION_CENTROID_ONLY_DT 10.2f
 #define SPLIT_VELOCITY_DAMP 0.1f
 #define CENTER_RELAXATION 0.99f
+#ifndef VELOCITY_DAMPING
 #define VELOCITY_DAMPING .99f
+#endif
 #define GLUE_RELAXATION 0.9f
 //#define GLUE_EPS 1e-6f
 #define GLUE_EPS 0.0002f
@@ -9096,7 +9098,7 @@ static void init_pickups_legacy(void) {
 
 static void init_pickups(void) {init_pickups_legacy();}
 static void update_pickups(float dt) {
-    if(fp_active())for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].type!=PICKUP_HEALTH && pickups[n].type!=PICKUP_AMMO)pickups[n].active=false,pickups[n].respawnTimer=0;
+    if(fp_active())for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].type!=PICKUP_HEALTH && pickups[n].type!=PICKUP_AMMO && pickups[n].type!=PICKUP_GRENADE)pickups[n].active=false,pickups[n].respawnTimer=0;
     clarity_supply_update();
     for (int i = 0; i < MAX_PICKUPS; i++) {
         Pickup *p = &pickups[i];
@@ -9129,7 +9131,7 @@ static void update_pickups(float dt) {
                 if ((p->type == PICKUP_GOLD_TETHER && pl->goldTetherCharged) || (p->type==PICKUP_DYNAMIC_SHOT && pl->dynamicShotActive)) continue;
                 if((p->type==PICKUP_AMMO || p->type==PICKUP_HEALTH) && ex_suppressed(j))continue;
                 if(p->type==PICKUP_BLACK_HOLE||p->type==PICKUP_IGLOO){if(!ex_grenade_pickup(j,p->type==PICKUP_BLACK_HOLE?GRENADE_GRAVITY:GRENADE_IGLOO))continue;p->active=false;p->respawnTimer=p->type==PICKUP_BLACK_HOLE?60:30;play_sfx(SFX_SHIELD);break;}
-                if(p->type==PICKUP_GRENADE && grenadeInventory[j]>=2)continue;
+                if(p->type==PICKUP_GRENADE && !ex_refill_grenades(j))continue;
                 if(eq_pickup_kind(p->type)>=0 && !(is_player_bot(j)&&p->type==PICKUP_DYNAMIC_SHOT)){if(!eq_pickup(j,p->type,false))continue;p->active=false;p->respawnTimer=(p->type==PICKUP_RAILGUN||p->type==PICKUP_ROCKET||p->type==PICKUP_DMR)?60:30;play_sfx(SFX_SHIELD);break;}
                 // Collect
                 if (p->type == PICKUP_AMMO) {
@@ -9137,8 +9139,7 @@ static void update_pickups(float dt) {
                     play_sfx(SFX_SHIELD); 
                     if(currentWorldType!=WORLD_TYPE_CROSSCUT && !(gameMode==GAME_MODE_FIREFIGHT && firefightFoundry))grenadeInventory[j]=clampi(grenadeInventory[j]+1,0,2);
                 } else if(p->type==PICKUP_GRENADE) {
-                    grenadeInventory[j]=clampi(grenadeInventory[j]+1,0,2);
-                    if(j<MAX_PLAYERS&&!ex_grenade_count(j,exSelectedGrenade[j]))exSelectedGrenade[j]=GRENADE_REGULAR;
+                    // All available grenade types were refilled above.
                     play_sfx(SFX_SHIELD);
                 } else if (p->type == PICKUP_HEALTH) {
                     add_player_matter(pl, 50.0f);
@@ -18091,7 +18092,7 @@ static WeaponPose player_weapon_pose(int player_index, bool first_person) {
         pose.transform.m12+=offset.x;pose.transform.m13+=offset.y;pose.transform.m14+=offset.z;pose.muzzle=v_add(pose.muzzle,offset);pose.grip_heel=v_add(pose.grip_heel,offset);
     }
     if(player_index<MAX_PLAYERS && equipment[player_index].switchTime>0){
-        Vector3 dip=v_mul(up,-.45f*sinf(PI*equipment[player_index].switchTime/.25f));
+        Vector3 dip=v_mul(up,-.45f*sinf(PI*equipment[player_index].switchTime/eqSwitchSeconds));
         pose.transform.m12+=dip.x;pose.transform.m13+=dip.y;pose.transform.m14+=dip.z;
         pose.muzzle=v_add(pose.muzzle,dip);pose.grip_heel=v_add(pose.grip_heel,dip);
     }
@@ -20418,7 +20419,7 @@ static void debug_console_exec(const char *line)
         if(netTransport.role!=NET_ROLE_OFFLINE){debug_console_print("give: offline lab only");return;}
         const char *name=strtok(NULL," \t");
         if(name && (!strcmp(name,"gravity")||!strcmp(name,"igloo"))){int kind=!strcmp(name,"gravity")?1:2;exGrenades[local][kind-1]=2;exSelectedGrenade[local]=kind;debug_console_printf("2 %s grenades",name);return;}
-        for(int g=0;name && g<EQ_GUN_COUNT;g++)if(!strcasecmp(name,eqGuns[g].name)){equipment[local].gun[equipment[local].selected]=g;equipment[local].switchTime=.25f;aim_cancel(local);debug_console_printf("Equipped %s",eqGuns[g].name);return;}
+        for(int g=0;name && g<EQ_GUN_COUNT;g++)if(!strcasecmp(name,eqGuns[g].name)){equipment[local].gun[equipment[local].selected]=g;equipment[local].switchTime=eqSwitchSeconds;aim_cancel(local);debug_console_printf("Equipped %s",eqGuns[g].name);return;}
         debug_console_print("give glob|glock|dmr|gravity|igloo (or existing gun name)");return;
     }
     if (strcmp(cmd, "weaponlab") == 0) {eq_lab();debug_console_print("Weapon lab: pickups on left, targets ahead, panels on right.");return;}

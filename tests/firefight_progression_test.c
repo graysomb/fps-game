@@ -73,7 +73,7 @@ static void autonomous_carriers(void){
 }
 static void checkpoints(void){
  fixture();firefightFoundry=true;multiplayerActivePlayers=2;firefightCheckpoints=true;ResetGame();gameState=GAME_STATE_PLAYING;
- assert(fpCheckpoint.valid&&fpCheckpoint.wave==1);for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].active)assert(pickups[n].type==PICKUP_HEALTH||pickups[n].type==PICKUP_AMMO);assert(!grenadeInventory[0]);
+ assert(fpCheckpoint.valid&&fpCheckpoint.wave==1);for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].active)assert(pickups[n].type==PICKUP_HEALTH||pickups[n].type==PICKUP_AMMO||pickups[n].type==PICKUP_GRENADE);assert(!grenadeInventory[0]);
  size_t glob=carrier(PICKUP_GLOB,4);fp_death(4,players[0].pos);assert(fp_collect(0,glob,false));size_t ground=carrier(PICKUP_REINFORCED,5);fp_death(5,players[1].pos);
  grenadeInventory[0]=1;firefightScore=123;players[0].kills=7;teamUpgradeLevels[1]=2;start_firefight_wave(3);size_t count=fpCount;uint32_t next=fpNextId,unlocks=fpUnlocked;int voxelsBefore=voxel_count;
  for(int attempt=0;attempt<3;attempt++){

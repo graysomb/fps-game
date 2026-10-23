@@ -35,7 +35,12 @@ static void eq_damage(int i,int target,float amount,bool lethal,DeathCause cause
     if(amount<=0 || !eq_hostile(i,target) || players[target].invuln_timer>0 || !enemy_core_open(target))return;
     bool exposed=players[target].isExposed;float matter=players[target].matter;
     DeathCause prev=deathContext;deathContext=cause;bool known=damageOriginKnown;Vector3 old=damageOrigin;damageOriginKnown=true;damageOrigin=origin;
-    if(exposed)kill_player(target,i,true,false);
+    if(cause==DEATH_GLOB){
+        // Suppression never executes exposed actors, including the Foundry's
+        // special core-health path which normally kills at zero Matter.
+        if(!exposed){if(players[target].enemyType==ENEMY_TYPE_FOUNDRY)amount=fminf(amount,fmaxf(0,enemySpecial[target].coreHealth-.01f));apply_matter_damage(target,i,amount);}
+    }
+    else if(exposed)kill_player(target,i,true,false);
     else {apply_matter_damage(target,i,amount);if(lethal && matter<=amount && players[target].respawn_timer<=0)kill_player(target,i,true,false);}
     damageOriginKnown=known;damageOrigin=old;deathContext=prev;
 }
@@ -303,19 +308,35 @@ static bool eq_panel_positions(int i,Vector3 out[EQ_PANEL_CUBES]){
     for(int n=0;n<count;n++){
         out[n]=world_wrap(v_add(at,(Vector3){(n%side-half)*VOXEL_SIZE,((n/side)%side-half)*VOXEL_SIZE,(n/(side*side)-half)*VOXEL_SIZE}));
         int x=floorf(out[n].x/VOXEL_SIZE),y=floorf(out[n].y/VOXEL_SIZE),z=floorf(out[n].z/VOXEL_SIZE);
-        if(y<0 || out[n].y>FLOOR_SIZE*2 || occupied(x,y,z) || (!worldPeriodic && (fabsf(out[n].x)>FLOOR_SIZE || fabsf(out[n].z)>FLOOR_SIZE)))valid=false;
+        int existing=table_get(x,y,z);
+        bool blocked=existing>=0 && !voxel_is_fluid(&voxels[existing]) && enemy_equipment_owner(existing)<0 && get_goliath_owner_of_voxel(existing)<0;
+        if(y<0 || out[n].y>FLOOR_SIZE*2 || blocked || (!worldPeriodic && (fabsf(out[n].x)>FLOOR_SIZE || fabsf(out[n].z)>FLOOR_SIZE)))valid=false;
         Vector3 extent={VOXEL_SIZE*.499f,VOXEL_SIZE*.499f,VOXEL_SIZE*.499f};BoundingBox cube={v_sub(out[n],extent),v_add(out[n],extent)};
-        for(int v=0;v<voxel_count;v++)if(voxels[v].simulate && !voxels[v].isBullet){VoxelWorldBounds b;voxel_particle_world_bounds(&voxels[v],&b);Vector3 center={(b.minx+b.maxx)*.5f,(b.miny+b.maxy)*.5f,(b.minz+b.maxz)*.5f};Vector3 shift=v_sub(world_image(center,out[n]),center);if(CheckCollisionBoxes(cube,(BoundingBox){v_add((Vector3){b.minx,b.miny,b.minz},shift),v_add((Vector3){b.maxx,b.maxy,b.maxz},shift)}))valid=false;}
-        for(int j=0;j<activePlayers;j++)if((players[j].respawn_timer<=0 || combatantLife[j]==LIFE_DOWNED) && CheckCollisionBoxes(cube,combatant_bounds_at(j,world_image(players[j].pos,out[n]),PLAYER_SIZE*.5f)))valid=false;
+        for(int v=0;v<voxel_count;v++)if(voxels[v].simulate && !voxels[v].isBullet){VoxelWorldBounds b;voxel_particle_world_bounds(&voxels[v],&b);Vector3 center={(b.minx+b.maxx)*.5f,(b.miny+b.maxy)*.5f,(b.minz+b.maxz)*.5f};Vector3 shift=v_sub(world_image(center,out[n]),center);if(CheckCollisionBoxes(cube,(BoundingBox){v_add((Vector3){b.minx,b.miny,b.minz},shift),v_add((Vector3){b.maxx,b.maxy,b.maxz},shift)}) && get_goliath_owner_of_voxel(v)<0)valid=false;}
     }return valid;
 }
 static bool eq_build_ready(int i){int count=eq_build_count(i);return !players[i].isExposed && players[i].matter>=ff_build_cost(i) && GetTime()-players[i].last_build_time>=BUILD_COOLDOWN_SECONDS && voxel_count+count<MAX_VOXELS && MAX_PARTICLES-particle_pool_count+free_particle_count>=8*count;}
+static bool eq_build_lifts(int count,const Vector3 *at,float lifts[MAX_COMBATANTS]){
+    float roof=0;for(int n=0;n<count;n++)roof=fmaxf(roof,at[n].y+VOXEL_SIZE*.5f);
+    memset(lifts,0,sizeof(float)*MAX_COMBATANTS);
+    for(int j=0;j<activePlayers;j++)if(players[j].respawn_timer<=0 || combatantLife[j]==LIFE_DOWNED){
+        BoundingBox body=combatant_bounds_at(j,players[j].pos,player_collision_half(&players[j]));bool overlap=false;
+        for(int n=0;n<count&&!overlap;n++){Vector3 center=world_image(at[n],players[j].pos),extent={VOXEL_SIZE*.499f,VOXEL_SIZE*.499f,VOXEL_SIZE*.499f};overlap=CheckCollisionBoxes(body,(BoundingBox){v_sub(center,extent),v_add(center,extent)});}
+        if(overlap){
+            lifts[j]=fmaxf(0,roof-body.min.y+.02f);
+            Vector3 raised=v_add(players[j].pos,(Vector3){0,lifts[j],0});
+            if(player_aabb_hits_world_ex(raised,player_collision_half(&players[j]),j))return false;
+        }
+    }return true;
+}
 static bool eq_build(int i){
     if(!eq_usable(i) || !eq_build_ready(i))return false;Player *p=&players[i];Vector3 at[EQ_PANEL_CUBES];
     if(!eq_panel_positions(i,at))return false;
+    float lifts[MAX_COMBATANTS];if(!eq_build_lifts(eq_build_count(i),at,lifts))return false;
     int count=eq_build_count(i);uint64_t ids[EQ_PANEL_CUBES]={0};int made=0;
     for(int n=0;n<count;n++){int v=add_static_voxel_at_grid(floorf(at[n].x/VOXEL_SIZE),floorf(at[n].y/VOXEL_SIZE),floorf(at[n].z/VOXEL_SIZE),player_palette_color(i),0);if(v<0)break;ids[made++]=voxels[v].identity;voxels[v].reinforced=eq_upgrade(i,EQ_BUILD);tag_owned_static_voxel(v,i);mark_surface(v);mark_surface_neighbors(at[n]);}
     if(made!=count){for(int n=0;n<made;n++){int v=enemy_voxel(ids[n]);if(v>=0)remove_voxel_index(v);}return false;}
+    for(int j=0;j<activePlayers;j++)if(lifts[j]>0){players[j].pos.y+=lifts[j];players[j].vel.y=fmaxf(0,players[j].vel.y);players[j].onGround=false;}
     eq_spend(i,ff_build_cost(i));p->last_build_time=GetTime();equipment[i].buildTime=.6f;play_sfx(SFX_SHIELD);return true;
 }
 static void eq_build_command(int i,const NetInputCommand *c){
@@ -365,7 +386,7 @@ static void eq_world(void){
                     Vector3 point=v_add(e->beamEnd,offset);DrawLine3D(point,v_add(point,v_mul(offset,.25f)),Fade(LIME,1-age));}
             }}
         if(e->charge>0 && eq_gun(i)==EQ_RAIL){Vector3 end=v_add(players[i].pos,v_mul(player_forward(&players[i]),100));DrawCylinderEx(player_weapon_pose(i,i==drawViewPlayerIndex).muzzle,end,.006f,.006f,4,Fade(PURPLE,.5f));}
-        if(!equipmentEmission && i==drawViewPlayerIndex && e->buildHeld && players[i].respawn_timer<=0){Vector3 pos[EQ_PANEL_CUBES]={{0}};bool valid=eq_panel_positions(i,pos)&&eq_build_ready(i);if(v_length(pos[1])>.01f)for(int n=0;n<eq_build_count(i);n++)DrawCubeWires(pos[n],VOXEL_SIZE,VOXEL_SIZE,VOXEL_SIZE,valid?player_palette_color(i):RED);}
+        if(!equipmentEmission && i==drawViewPlayerIndex && e->buildHeld && players[i].respawn_timer<=0){Vector3 pos[EQ_PANEL_CUBES]={{0}};float lifts[MAX_COMBATANTS];bool valid=eq_panel_positions(i,pos)&&eq_build_ready(i)&&eq_build_lifts(eq_build_count(i),pos,lifts);if(v_length(pos[1])>.01f)for(int n=0;n<eq_build_count(i);n++)DrawCubeWires(pos[n],VOXEL_SIZE,VOXEL_SIZE,VOXEL_SIZE,valid?player_palette_color(i):RED);}
     }
     if(shader)EndShaderMode();
     Vector3 eye=drawViewPlayerIndex>=0?players[drawViewPlayerIndex].pos:(Vector3){0};

@@ -180,7 +180,8 @@ static void matter_build_changes(void){
  assert(eqGuns[EQ_SHOTGUN].damage*EQ_PELLETS==50 && eqShotgunImpulse==TETHER_THROW_IMPULSE);
  fixture();players[1].pos.z=-1;eq_pickup(0,PICKUP_SHOTGUN,false);equipment[0].switchTime=0;assert(eq_fire(0));assert(players[1].matter==50);
  fixture();players[0].pitch=-40;players[1].pos.x=20;equipment[0].upgrades=EQ_BUILD;players[0].matter=9;assert(!eq_build(0) && !voxel_count && players[0].matter==9);
- players[0].matter=100;Vector3 points[EQ_PANEL_CUBES];assert(eq_panel_positions(0,points));players[1].pos=points[60];assert(!eq_build(0) && !voxel_count && players[0].matter==100);players[1].pos.x=20;
+ players[0].matter=100;Vector3 points[EQ_PANEL_CUBES];assert(eq_panel_positions(0,points));players[1].pos=points[60];assert(eq_build(0) && voxel_count==125 && players[0].matter==90);assert(players[1].pos.y>points[60].y);
+ clear_world_voxels();init_static_hash();players[0].matter=100;players[0].last_build_time=-100;players[1].pos.x=20;
  int pool=particle_pool_count,freeCount=free_particle_count;particle_pool_count=MAX_PARTICLES;free_particle_count=0;assert(!eq_build(0) && !voxel_count && players[0].matter==100);particle_pool_count=pool;free_particle_count=freeCount;
 
  // Explicit pellet contacts isolate the impulse from spread and target size.

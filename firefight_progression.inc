@@ -144,7 +144,7 @@ static void fp_draw(WeaponRenderPass pass){
   if(duplicate)continue;p.y+=sinf(now*2+item->id)*.12f;
   if(v_length(world_delta(p,eye))>18 || detailed>=48){if(pass!=WEAPON_GLASS)DrawCube(p,.18f,.18f,.18f,GOLD);continue;}
   detailed++;int kind=eq_pickup_kind(item->type);
-  if(item->type==PICKUP_GOLD_TETHER)weapon_draw_pickup(true,p,eye,now,pass);
+  if(item->type==PICKUP_GOLD_TETHER)weapon_draw_pickup(false,p,eye,now,pass);
   else {if(kind<0)kind=WEAPON_ADHESIVE_GRENADE;WeaponVisual visual={.shot_time=-1000,.charge=.7f,.activity=1};Matrix m=MatrixMultiply(MatrixScale(.4f,.4f,.4f),MatrixRotateY(now*.6f));m=MatrixMultiply(m,MatrixTranslate(p.x,p.y,p.z));weapon_draw((WeaponPose){.kind=kind,.transform=m},&visual,eye,now,false,pass);}
  }
 }

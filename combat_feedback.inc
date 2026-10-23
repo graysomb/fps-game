@@ -71,7 +71,7 @@ static void feedback_tick(float dt) {
             if(p->matter>=p->matterMax)continue;
             for(int a=MAX_PLAYERS;a<activePlayers;a++)if(enemy_braces(a,i)) {
                 if(ex_suppressed(i))continue;
-                add_player_matter(p,8*dt);
+                add_player_matter(p,16*dt);
                 if(p->enemyType==ENEMY_TYPE_FOUNDRY)s->coreHealth=p->matter;
                 s->healingPulse=.2f;break;
             }

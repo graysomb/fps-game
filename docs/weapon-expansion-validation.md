@@ -94,3 +94,44 @@ simulation costs.
 The harness prints phase medians/tails and per-stage timing for slow frames. Local
 raw output for this run is `.build/expansion-clean-benchmark.log`; rerun with `-Stress`
 to reproduce on another machine.
+# Playtest tuning and fixes
+
+The latest playtest pass makes Glob hits Matter-only, including repeated hits on
+exposed actors. The Foundry core is left at a minimal positive value so Glob
+cannot trigger its special death rule. Five-second restoration suppression is
+unchanged. Attached globs are hidden from their victim's viewport in color and
+emission passes; nearby glob geometry is also omitted to keep the camera clear.
+
+Glock damage is now 8 (previously 15), switching is 0.12 seconds (previously
+0.25), and Anchor healing is 16 Matter/second (previously 8). Weapon cooldowns,
+Anchor exposure delay, and restoration suppression still apply.
+
+Both 3x3x3 and upgraded 5x5x5 building allow actor overlap. Successful construction
+lifts affected actors onto the roof; failed placement/allocation spends no Matter
+and moves nobody. Existing terrain, loose debris and insufficient headroom still
+block placement. Worn equipment does not reject an otherwise valid build.
+
+Grenade supply pickups fill frag, gravity and igloo inventories to two each.
+In Firefight only team-unlocked types refill, so early supplies cannot bypass
+wave progression. Foundry retains two authored refill positions (near z +/-28),
+and Crosscut retains four symmetric positions; each respawns after 30 seconds.
+Carrier weapon drops and unlock celebrations are unchanged. Firefight's gold
+tether pickup now renders the claw, matching the normal pickup path.
+
+Gravity fields ignore dynamic debris/armor for actor-attraction visibility, while
+intact static cover still blocks them. Actor acceleration is 45 (24 for Goliaths),
+with the existing six-meter falloff and 12 m/s approach cap; bot pull momentum
+decays at 0.5/s instead of 1.5/s. The Foundry remains immovable.
+
+Reproduce focused gameplay and render checks with
+`./tools/validate_playtest_fixes.ps1 -Backend 43` (or `33`). The test exercises
+nonlethal projectile hits, exposed actors, the Foundry, switch cooldowns, Anchor
+healing/suppression, overlapping builds, refill unlock gating, running bots,
+armor and static occlusion, and unchanged victim-view pixels with an attached
+glob. It writes `artifacts/playtest-tether-pickup.png`.
+
+Validation for this pass: focused checks pass on OpenGL 3.3 and 4.3; expansion
+gameplay and localhost host/client tests pass on both builds. GPU equipment,
+sword, aiming, four-player equipment stress and equipment LAN regressions pass.
+Firefight progression/carrier/checkpoint regressions pass. The tether pickup
+capture was visually inspected, and both Windows game executables were rebuilt.
