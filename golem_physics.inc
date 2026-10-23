@@ -68,7 +68,11 @@ static Matrix go_matrix(int part){return part<GOLEM_JOINT_COUNT?goPose.joint[par
 static Matrix go_smooth_matrix(Matrix a,Matrix b,float amount){
     Vector3 pa,pb,sa,sb;Quaternion qa,qb;
     MatrixDecompose(a,&pa,&qa,&sa);MatrixDecompose(b,&pb,&qb,&sb);
-    return MatrixCompose(Vector3Lerp(pa,pb,amount),QuaternionSlerp(qa,qb,amount),sb);
+    Vector3 position=Vector3Lerp(pa,pb,amount);
+    /* Compose scale, rotation and translation with the raylib 5.5 API. */
+    Matrix result=MatrixMultiply(MatrixScale(sb.x,sb.y,sb.z),QuaternionToMatrix(QuaternionSlerp(qa,qb,amount)));
+    result.m12=position.x;result.m13=position.y;result.m14=position.z;
+    return result;
 }
 static Vector3 go_corner(GoCell *c,int corner){return v_add(c->center,(Vector3){corner_signs[corner][0]*c->size.x*.5f,corner_signs[corner][1]*c->size.y*.5f,corner_signs[corner][2]*c->size.z*.5f});}
 static void golem_physics_reset(void){
