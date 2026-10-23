@@ -1118,6 +1118,7 @@ typedef struct {
     Vector3 predicted_pos;
     Vector3 vel;
     float radius;
+    bool authored_shape;
     float inv_mass;
     float base_inv_mass;
     _Atomic uint32_t corr_sum_x;
@@ -1184,6 +1185,7 @@ typedef struct {
     int  gx, gy, gz;
     bool reinforced;
     bool persistentConstruction;
+    bool golemOwned;
     uint64_t identity;
     int  min_gx, max_gx;
     int  min_gy, max_gy;
@@ -1196,6 +1198,7 @@ typedef struct {
     int  orig_min_gz, orig_max_gz;
     Particle *particles[8]; //pointer
     float rest_volume;
+    Vector3 rest_dimensions; /* Cuboids default to the legacy scalar edge. */
     float rest_edge;
     float particle_radius;
     bool glued_faces[6];
@@ -1394,6 +1397,9 @@ static void regeneration_net_send(int peer, bool active);
 static bool regeneration_net_receive(NetMessageType type, NetReader *reader);
 static inline int grid_to_chunk_coord(int g);
 static int addVoxel(float px, float py, float pz, bool fixed, bool simulate, Color color, int type);
+static void golem_physics_reset(void);
+static void golem_lab_draw(void);
+static void golem_collision_groups(void);
 static int add_fluid_cell(float px, float py, float pz, Color color);
 static void rebuild_voxel_hash(void);
 static void voxel_measure_strain(const Voxel *voxel,
@@ -2871,7 +2877,7 @@ static Particle *particle_create(Vector3 pos, float inv_mass) { //pointer
     p->prev_pos = pos;
     p->predicted_pos = pos;
     p->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
-    p->radius = PARTICLE_RADIUS;
+    p->radius = PARTICLE_RADIUS;p->authored_shape=false;
     p->inv_mass = inv_mass;
     p->base_inv_mass = inv_mass;
     atomic_store_explicit(&p->corr_sum_x, float_to_bits(0.0f), memory_order_relaxed);
@@ -4574,7 +4580,7 @@ static bool init_voxel_struct(Voxel *v,
     v->gy = (int)floorf(py / VOXEL_SIZE);
     v->gz = (int)floorf(pz / VOXEL_SIZE);
     v->identity = nextVoxelIdentity++;
-    v->reinforced=false;v->persistentConstruction=false;
+    v->reinforced=false;v->persistentConstruction=false;v->golemOwned=false;
     if (nextVoxelIdentity == 0) nextVoxelIdentity = 1;
     v->min_gx = v->max_gx = v->gx;
     v->min_gy = v->max_gy = v->gy;
@@ -4585,6 +4591,7 @@ static bool init_voxel_struct(Voxel *v,
     v->orig_min_gx = v->orig_max_gx = v->gx;
     v->orig_min_gy = v->orig_max_gy = v->gy;
     v->orig_min_gz = v->orig_max_gz = v->gz;
+    v->rest_dimensions = (Vector3){edge,edge,edge};
     v->rest_edge = edge;
     v->rest_volume = edge * edge * edge;
     v->particle_radius = 0.5f * edge;
@@ -6997,6 +7004,7 @@ static bool cluster_is_near_original_grid_pose(const int *cluster, int cluster_c
         }
         sleepClusterVisited[idx] = 1;
         Voxel *v = &voxels[idx];
+        if(v->golemOwned)return false; /* Preserve authored cuboids when they sleep. */
         if (v->orig_min_gx > v->orig_max_gx ||
             v->orig_min_gy > v->orig_max_gy ||
             v->orig_min_gz > v->orig_max_gz) {
@@ -8864,6 +8872,7 @@ static void clear_pickups(void) {
 }
 
 static void clear_world_voxels(void) {
+    golem_physics_reset();
     foundry_traps_reset();
     memset(tetherTag,0,sizeof(tetherTag));memset(tetherHoldClusterTag,0,sizeof(tetherHoldClusterTag));
     static_cache_reset();
@@ -10876,9 +10885,12 @@ static void evaluate_voxel_fracture(Voxel *voxel) {
     float len_v1 = v_length(v1);
     float len_v2 = v_length(v2);
 
-    float strain_x = fabsf(len_v0 - voxel->rest_edge) / voxel->rest_edge;
-    float strain_y = fabsf(len_v1 - voxel->rest_edge) / voxel->rest_edge;
-    float strain_z = fabsf(len_v2 - voxel->rest_edge) / voxel->rest_edge;
+    float dim_x=voxel->rest_dimensions.x>0?voxel->rest_dimensions.x:voxel->rest_edge;
+    float strain_x = fabsf(len_v0 - dim_x) / dim_x;
+    float dim_y=voxel->rest_dimensions.y>0?voxel->rest_dimensions.y:voxel->rest_edge;
+    float strain_y = fabsf(len_v1 - dim_y) / dim_y;
+    float dim_z=voxel->rest_dimensions.z>0?voxel->rest_dimensions.z:voxel->rest_edge;
+    float strain_z = fabsf(len_v2 - dim_z) / dim_z;
 
     float inv_len0 = (len_v0 > VGS_EPS) ? 1.0f / len_v0 : 0.0f;
     float inv_len1 = (len_v1 > VGS_EPS) ? 1.0f / len_v1 : 0.0f;
@@ -11151,6 +11163,9 @@ static void gather_voxel_shape_constraints(Voxel *voxel) {
 
     const float rest_volume = voxel->rest_volume;
     const float rest_edge = voxel->rest_edge;
+    const float shape_beta=voxel->golemOwned?.05f:VGS_BETA;
+    Vector3 shape=voxel->rest_dimensions;
+    if(shape.x<=0||shape.y<=0||shape.z<=0)shape=(Vector3){rest_edge,rest_edge,rest_edge};
     Vector3 centroid = { 0.0f, 0.0f, 0.0f };
 
     for (int iter = 0; iter < VGS_ITERS; ++iter) {
@@ -11177,9 +11192,9 @@ static void gather_voxel_shape_constraints(Voxel *voxel) {
         float len_v2 = v_length(v2);
 
         if (iter > 0 &&
-            fabsf(len_v0 - rest_edge) < VGS_EARLY_OUT_EPS &&
-            fabsf(len_v1 - rest_edge) < VGS_EARLY_OUT_EPS &&
-            fabsf(len_v2 - rest_edge) < VGS_EARLY_OUT_EPS) {
+            fabsf(len_v0 - shape.x) < VGS_EARLY_OUT_EPS &&
+            fabsf(len_v1 - shape.y) < VGS_EARLY_OUT_EPS &&
+            fabsf(len_v2 - shape.z) < VGS_EARLY_OUT_EPS) {
             float dot01 = v_dot(v0, v1);
             float dot02 = v_dot(v0, v2);
             float dot12 = v_dot(v1, v2);
@@ -11201,9 +11216,9 @@ static void gather_voxel_shape_constraints(Voxel *voxel) {
         float len1 = v_length(u1);
         float len2 = v_length(u2);
 
-        float target0 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * len_v0);
-        float target1 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * len_v1);
-        float target2 = ((1.0f - VGS_BETA) * rest_edge) + (VGS_BETA * len_v2);
+        float target0 = ((1.0f - shape_beta) * shape.x) + (shape_beta * len_v0);
+        float target1 = ((1.0f - shape_beta) * shape.y) + (shape_beta * len_v1);
+        float target2 = ((1.0f - shape_beta) * shape.z) + (shape_beta * len_v2);
 
         if (len0 > VGS_EPS) u0 = v_mul(u0, target0 / len0);
         if (len1 > VGS_EPS) u1 = v_mul(u1, target1 / len1);
@@ -11298,7 +11313,14 @@ static inline void accumulate_pair_correction(ParticleCollisionJob *job, int wor
 }
 
 static bool particles_are_local_structural_neighbors(const Particle *a, const Particle *b) {
-    if (!a || !b || a->collision_group < 0 || a->collision_group != b->collision_group) {
+    if(!a||!b)return false;
+    if(a->collision_group>=MAX_VOXELS && b->collision_group>=MAX_VOXELS){
+        /* Same segment, parent/child and adjacent sockets do not self-collide. */
+        const int parent[19]={-1,0,1,2,2,4,5,2,7,8,1,10,11,1,13,14,2,2,3};
+        int x=a->collision_group-MAX_VOXELS,y=b->collision_group-MAX_VOXELS;
+        if(x<19&&y<19)return x==y||parent[x]==y||parent[y]==x||parent[x]==parent[y];
+    }
+    if (a->collision_group < 0 || a->collision_group != b->collision_group) {
         return false;
     }
     const float step = VOXEL_SIZE * 0.5f;
@@ -12104,6 +12126,7 @@ static void rebuild_particle_collision_metadata(void)
             sim_particles[i]->collision_group = -1;
         }
     }
+    golem_collision_groups();
     rebuild_dynamic_collision_particles();
     ++collisionMetadataGeneration;
     if (collisionMetadataGeneration == 0) collisionMetadataGeneration = 1;
@@ -12830,7 +12853,7 @@ static void solve_static_collision_particle(Particle *p, float half_player) {
 
     Vector3 pos = p->predicted_pos;
     float floor_offset = 0.5f * VOXEL_SIZE;
-    float floor_limit = fmaxf(0.0f, floor_offset - particle_radius);
+    float floor_limit = p->authored_shape?particle_radius:fmaxf(0.0f, floor_offset - particle_radius);
     if (pos.y < floor_limit) {
         pos.y = floor_limit;
     }
@@ -12895,7 +12918,7 @@ static void solve_static_collisions_range(int start, int end, int worker_id, voi
         // Floor collision
         Vector3 pos = p->predicted_pos;
         float floor_offset = 0.5f * VOXEL_SIZE;
-        float floor_limit = fmaxf(0.0f, floor_offset - voxel_radius);
+        float floor_limit = p->authored_shape?voxel_radius:fmaxf(0.0f, floor_offset - voxel_radius);
         bool floor_contact = pos.y < floor_limit;
         if (floor_contact) {
             pos.y = floor_limit;
@@ -13391,7 +13414,9 @@ static void voxel_measure_strain(const Voxel *voxel,
         Vector3 a = voxel->particles[a_idx]->predicted_pos;
         Vector3 b = voxel->particles[b_idx]->predicted_pos;
         float len = v_length(v_sub(a, b));
-        float strain = fabsf(len - rest_edge) * inv_rest_edge;
+        int axis=(a_idx^b_idx)==1?0:(a_idx^b_idx)==2?1:2;
+        float dimension=(&voxel->rest_dimensions.x)[axis];if(dimension<=0)dimension=rest_edge;
+        float strain = fabsf(len - dimension) / dimension;
         if (strain > max_strain) {
             max_strain = strain;
         }
@@ -13431,6 +13456,8 @@ static void voxel_measure_strain(const Voxel *voxel,
 }
 
 
+#include "skeleton_constraints.inc"
+#include "golem_physics.inc"
 #include "physics_gpu_common.inc"
 
 static void select_cpu_physics_backend(void) {
@@ -13788,6 +13815,7 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
             debugBlowupLogBudget = 32;
         }
         double t0 = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
+        golem_physics_tick(sub_dt);
         periodic_wrap_particles();
         integrate_particles(sub_dt);
         if (pbdProfileEnabled) pbdCpuProfile.t_integrate_ms += pbd_time_now_ms() - t0;
@@ -13833,9 +13861,14 @@ static void simulate_voxel_pbd_cpu_steps(float sub_dt, int substeps) {
 
             double tv = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
             reset_particle_accumulators();
-            for (int it = 0; it < constraint_iterations; ++it) {
-                pbd_parallel_for(0, active_voxel_count, gather_voxel_shape_constraints_range, NULL);
+            for (int it = 0; it < (skeletonConstraintCount ? 12 : constraint_iterations); ++it) {
+                if(it<constraint_iterations) pbd_parallel_for(0, active_voxel_count, gather_voxel_shape_constraints_range, NULL);
+                else for(int n=0;n<active_voxel_count;n++) {
+                    Voxel *v=&voxels[active_voxels[n]];
+                    if(v->golemOwned)gather_voxel_shape_constraints(v);
+                }
                 apply_particle_accumulators();
+                skeleton_solve_cpu(sub_dt);
             }
             if (pbdProfileEnabled) pbdCpuProfile.t_vgs_shape_ms += pbd_time_now_ms() - tv;
         }
@@ -13895,7 +13928,9 @@ static void advance_gold_release_grace(int fixed_steps) {
 }
 
 static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
-    if (fixed_steps > 0) foundry_traps_prepare();
+    /* Animated constraints need a committed body between fixed ticks. */
+    if(goActive&&fixed_steps>1){for(int i=0;i<fixed_steps;i++)simulate_voxel_pbd_steps(dt,1);return;}
+    if (fixed_steps > 0) { foundry_traps_prepare();golem_physics_prepare(); }
     if (dynamic_particle_count() <= 0 || fixed_steps <= 0) return;
     if (sim_particle_count == 0 && fluid_should_skip_reduced_rate_step()) {
         return;
@@ -13922,6 +13957,7 @@ static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
             run_gpu = false;
         }
     }
+    if(run_gpu&&!golem_checkpoint_save())run_gpu=false;
     if (run_gpu) {
         int completed_steps = gpu_physics_steps(dt, fixed_steps);
         if (completed_steps >= fixed_steps) {
@@ -13933,6 +13969,7 @@ static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
             physicsBackend.last_step_ms = pbdProfileEnabled ? (pbd_time_now_ms() - started) : (GetTime() - started) * 1000.0;
             return;
         }
+        golem_checkpoint_restore();
         physics_handle_gpu_runtime_failure();
         for (int fixed = 0; fixed < fixed_steps; ++fixed) {
             double tm2 = pbdProfileEnabled ? pbd_time_now_ms() : 0.0;
@@ -17583,6 +17620,7 @@ static void prepare_dynamic_voxel_transforms(void) {
 
 // Draw all voxels via greedy mesh instead of per-voxel raycasting
 static void DrawVoxels(Camera3D cam) {
+    golem_lab_draw();
     if (!instancingInitialized) {
         InitInstancing();
     }
@@ -20766,7 +20804,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                         draw_player_weapon(p, imageCam.position, false, WEAPON_EMISSION);
                     }
                 }
-                equipmentEmission=true;eq_world();clarity_grenades_draw(WEAPON_EMISSION);equipmentEmission=false;
+                equipmentEmission=true;eq_world();clarity_grenades_draw(WEAPON_EMISSION);golem_emission();equipmentEmission=false;
                 hologram_draw(true);
                 camp_draw(imageCam,true);
                 drawViewPlayerIndex=-1;
@@ -22921,6 +22959,7 @@ int main(int argc, char **argv) {
         }
     }
     shutdown_pbd_thread_pool();
+    golem_physics_reset();
     net_transport_shutdown(&netTransport);
     gpu_physics_shutdown();
     // cleanup

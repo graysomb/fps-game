@@ -22,13 +22,15 @@ static void ducks_reset(void) {
     memset(mapDucks,0,sizeof(mapDucks));ducksInitialized=false;duckClock=0;duckReceiveTick=0;
 }
 static Vector3 duck_route(MapDuck *d,float phase) {
-    return v_add(d->home,(Vector3){.55f*cosf(phase),0,.55f*sinf(phase)});
+    return world_wrap(v_add(d->home,(Vector3){DUCK_ROUTE_RADIUS*cosf(phase),0,DUCK_ROUTE_RADIUS*sinf(phase)}));
 }
 static void ducks_initialize(void) {
     if(ducksInitialized || !ducks_enabled())return;
     for(int n=0;n<MAP_DUCKS;n++) {
-        Vector3 home=gameMode==GAME_MODE_FIREFIGHT?(Vector3){n&1?18.5f:-18.5f,0,n&2?20.5f:-20.5f}:
-            crosscut_rotate((Vector3){11.8f,0,5.6f},n);
+        // Four distinct open stretches between repeated arenas, away from the
+        // centerline machinery. Swim across seams; keep bounded maps inside walls.
+        float edge=worldFloorHalfSize-(worldPeriodic?1.0f:DUCK_ROUTE_RADIUS+2.0f);
+        Vector3 home=crosscut_rotate((Vector3){edge,0,worldFloorHalfSize*.4f},n);
         MapDuck *d=&mapDucks[n];*d=(MapDuck){.home=home,.phase=n*PI*.5f};
         d->pos=duck_route(d,d->phase);d->yaw=180-d->phase*RAD2DEG;
         d->alive=duck_clear(d->pos,true);
@@ -97,7 +99,7 @@ static void ducks_tick(float dt) {
             CheckCollisionBoxes(duck_bounds(d->pos,0),combatant_bounds_at(i,world_image(players[i].pos,d->pos),PLAYER_SIZE*.5f)))duck_pop(n);
         if(!d->alive)continue;
         if(!duck_clear(d->pos,false)){duck_pop(n);continue;}
-        float next=d->phase+dt*.36f;Vector3 at=duck_route(d,next);
+        float next=d->phase+dt*(DUCK_SWIM_SPEED/DUCK_ROUTE_RADIUS);Vector3 at=duck_route(d,next);
         if(duck_clear(at,false)){d->pos=at;d->phase=fmodf(next,2*PI);d->yaw=180-d->phase*RAD2DEG;}
     }
 }
@@ -122,7 +124,7 @@ static void ducks_draw(void) {
     duck_renderer_init(NULL);
     for(int n=0;n<MAP_DUCKS;n++) {
         MapDuck *d=&mapDucks[n];if(!periodic_visible(d->alive?d->pos:d->puff,3))continue;
-        if(d->alive){DuckPose p={.position=d->pos,.yaw=d->yaw,.scale=.75f,.time=duckClock,.speed=.2f,.phase=n*1.7f};duck_draw_floor(p,true);duck_draw(p);}
+        if(d->alive){DuckPose p={.position=d->pos,.yaw=d->yaw,.scale=.75f,.time=duckClock,.speed=DUCK_SWIM_SPEED,.phase=n*1.7f};duck_draw_floor(p,true);duck_draw(p);}
         else duck_feathers(d,n);
     }
 }

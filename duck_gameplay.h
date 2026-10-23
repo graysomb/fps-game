@@ -1,6 +1,8 @@
 #include "duck_renderer.h"
 #define MAP_DUCKS 4
 #define DUCK_RESPAWN_SECONDS 90.0f
+#define DUCK_ROUTE_RADIUS 3.0f
+#define DUCK_SWIM_SPEED .36f
 typedef struct MapDuck {
     Vector3 home,pos,puff;
     float yaw,phase,respawn;

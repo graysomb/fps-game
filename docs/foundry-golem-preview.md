@@ -24,8 +24,8 @@ python tools/golem_media.py
 The standalone executables are `.build/golem/preview-gl33.exe` and
 `preview-gl43.exe`. Outputs go to `artifacts/golem/rendered` by default.
 Captures comprise front/side/rear/three-quarter PNGs, a skeleton view,
-bloom-disabled view, four-view montage, a concept comparison sheet, and nine
-six-second, 20 fps GIFs: walking, slam, sweep, forearm throw, arm loss, leg loss,
+bloom-disabled view, four-view montage, a concept comparison sheet, and ten
+six-second, 20 fps GIFs: idle, walking, slam, sweep, forearm throw, arm loss, leg loss,
 chest loss, both-leg loss, and localized hit response. Each GIF starts from a
 fresh deterministic timeline. Raw PNGs and GIFs are generated artifacts and are
 not tracked; the source concept and capture tools are tracked.

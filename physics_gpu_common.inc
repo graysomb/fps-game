@@ -6,6 +6,8 @@ typedef struct { uint32_t bits[4]; } GpuCorrectionState;
 typedef struct { int32_t value[4]; } GpuCellState;
 typedef struct { int32_t value[4]; } GpuCollisionMeta;
 typedef int32_t GpuTetherState;
+static SkeletonGpuConstraint *gpuSkeletonStage;
+static int gpuSkeletonCapacity;
 typedef struct { int32_t value[4]; } GpuStaticCell;
 typedef struct {
     float center[4];
@@ -22,13 +24,14 @@ typedef struct {
     float bounds_min[4];
     float bounds_max[4];
     uint32_t lifecycle[4];
+    float rest_shape[4];
 } GpuVoxelState;
 
 _Static_assert(sizeof(GpuParticleState) == 64, "GpuParticleState/std430 mismatch");
 _Static_assert(sizeof(GpuCorrectionState) == 16, "GpuCorrectionState/std430 mismatch");
 _Static_assert(sizeof(GpuCellState) == 16, "GpuCellState/std430 mismatch");
 _Static_assert(sizeof(GpuCollisionMeta) == 16, "GpuCollisionMeta/std430 mismatch");
-_Static_assert(sizeof(GpuVoxelState) == 128, "GpuVoxelState/std430 mismatch");
+_Static_assert(sizeof(GpuVoxelState) == 144, "GpuVoxelState/std430 mismatch");
 _Static_assert(sizeof(GpuStaticCell) == 16, "GpuStaticCell/std430 mismatch");
 _Static_assert(sizeof(GpuStaticCollider) == 48, "GpuStaticCollider/std430 mismatch");
 _Static_assert(sizeof(GpuControlState) == 16, "GpuControlState/std430 mismatch");
@@ -307,6 +310,7 @@ static void gpu_physics_shutdown(void) {
     gpu_physics_release_resources();
     free(gpuPhysics.particle_stage);
     free(gpuPhysics.cell_stage);
+    free(gpuSkeletonStage);gpuSkeletonStage=NULL;gpuSkeletonCapacity=0;
     free(gpuPhysics.tether_stage);
     free(gpuPhysics.tether_compare_stage);
     free(gpuPhysics.collision_meta_stage);
@@ -384,7 +388,7 @@ static int gpu_add_particle(Particle *p) {
     gpuPhysics.cell_stage[id].value[1] = p->cell_y;
     gpuPhysics.cell_stage[id].value[2] = p->cell_z;
     gpuPhysics.cell_stage[id].value[3] = p->break_timer;
-    gpuPhysics.collision_meta_stage[id].value[0] = p->rest_cell_x;
+    gpuPhysics.collision_meta_stage[id].value[0] = p->rest_cell_x + (p->authored_shape?0x40000000:0);
     gpuPhysics.collision_meta_stage[id].value[1] = p->rest_cell_y;
     gpuPhysics.collision_meta_stage[id].value[2] = p->rest_cell_z;
     gpuPhysics.collision_meta_stage[id].value[3] = p->collision_group;
@@ -479,6 +483,9 @@ static bool gpu_pack_world(void) {
         gpuPhysics.world_to_dynamic[i] = dynamic_id;
         GpuVoxelState *g = &gpuPhysics.voxel_stage[dynamic_id];
         memset(g, 0, sizeof(*g));
+        Vector3 shape=v->rest_dimensions;
+        if(shape.x<=0||shape.y<=0||shape.z<=0)shape=(Vector3){v->rest_edge,v->rest_edge,v->rest_edge};
+        g->rest_shape[0]=shape.x;g->rest_shape[1]=shape.y;g->rest_shape[2]=shape.z;g->rest_shape[3]=v->golemOwned?.05f:VGS_BETA;
         for (int c = 0; c < 8; ++c) {
             g->particle[c] = UINT32_MAX;
             if (v->particles[c]) {
@@ -783,7 +790,7 @@ static bool gpu_upload_world(void) {
         !gpu_buffer_ensure(&gpuPhysics.tether_buffer, (size_t)gpuPhysics.particle_slot_capacity * sizeof(GpuTetherState)) ||
         !gpu_buffer_ensure(&gpuPhysics.collision_meta_buffer, collision_meta_capacity_bytes) ||
         !gpu_buffer_ensure(&gpuPhysics.refcount_buffer, (size_t)gpuPhysics.particle_slot_capacity * sizeof(int32_t)) ||
-        !gpu_buffer_ensure(&gpuPhysics.control_buffer, sizeof(GpuControlState)) ||
+        !gpu_buffer_ensure(&gpuPhysics.control_buffer, sizeof(GpuControlState)+16) ||
         !gpu_buffer_ensure(&gpuPhysics.clone_parent_buffer, (size_t)gpuPhysics.particle_slot_capacity * sizeof(int32_t)) ||
         !gpu_buffer_ensure(&gpuPhysics.dispatch_buffer, 64) ||
         !gpu_buffer_ensure(&gpuPhysics.topology_buffer,
@@ -1244,7 +1251,34 @@ static bool gpu_refresh_tethers(void) {
     return true;
 }
 
+static bool gpu_upload_skeleton(void){
+    int count=skeletonConstraintCount;
+    if(!count)return true;
+    if(count>gpuSkeletonCapacity){
+        SkeletonGpuConstraint *next=realloc(gpuSkeletonStage,(size_t)count*sizeof(*next));
+        if(!next)return false;gpuSkeletonStage=next;gpuSkeletonCapacity=count;
+    }
+    for(int i=0;i<count;i++){
+        SkeletonConstraint *c=&skeletonConstraints[i];SkeletonGpuConstraint *g=&gpuSkeletonStage[i];memset(g,0,sizeof(*g));
+        for(int k=0;k<9;k++){
+            Particle *p=k?c->support[k-1]:c->corner;g->corner[k]=UINT32_MAX;
+            if(p){ptrdiff_t index=p-particles_pool;if(index>=0&&index<particle_pool_count){int id=gpuPhysics.pool_to_compact[index];if(id>=0)g->corner[k]=(uint32_t)id;}}
+        }
+        memcpy(g->weight,c->weight,sizeof(g->weight));g->target[0]=c->target.x;g->target[1]=c->target.y;g->target[2]=c->target.z;
+        g->previous_target[0]=c->previous_target.x;g->previous_target[1]=c->previous_target.y;g->previous_target[2]=c->previous_target.z;
+        g->parameters[0]=c->compliance;g->parameters[1]=c->limit;
+    }
+    size_t required=32+(size_t)count*sizeof(*gpuSkeletonStage);
+    bool grew=gpuPhysics.control_buffer.capacity<required;
+    if(!gpu_buffer_ensure(&gpuPhysics.control_buffer,required))return false;
+    if(grew)gpu_buffer_update(&gpuPhysics.control_buffer,&gpuPhysics.control_stage,16,0);
+    int header[4]={count,0,0,0};gpu_buffer_update(&gpuPhysics.control_buffer,header,16,16);
+    if(count)gpu_buffer_update(&gpuPhysics.control_buffer,gpuSkeletonStage,(size_t)count*sizeof(*gpuSkeletonStage),32);
+    gpu_bind_world_buffers();return true;
+}
 static bool gpu_dispatch_substep(float sub_dt) {
+    golem_physics_tick(sub_dt);
+    if(!gpu_upload_skeleton())return false;
     gpu_set_uniforms(sub_dt);
     if(!gpu_dispatch(GPU_MODE_PREPARE_INDIRECT,1))return false;
     if(worldPeriodic && (!gpu_dispatch_indirect(GPU_MODE_WRAP_GATHER) || !gpu_dispatch_indirect(GPU_MODE_WRAP_APPLY)))return false;
@@ -1256,9 +1290,10 @@ static bool gpu_dispatch_substep(float sub_dt) {
               gpu_dispatch_indirect_offset(GPU_MODE_PAIR_COLLISIONS, 16) &&
               gpu_dispatch_indirect(GPU_MODE_APPLY) &&
               gpu_dispatch(GPU_MODE_BREAK_MASK, gpuPhysics.dynamic_voxel_count);
-    for (int it = 0; ok && it < PBD_CONSTRAINT_ITERS; ++it) {
-        ok = gpu_dispatch(GPU_MODE_VGS, gpuPhysics.dynamic_voxel_count) &&
+    for (int it = 0; ok && it < (skeletonConstraintCount ? 12 : PBD_CONSTRAINT_ITERS); ++it) {
+        ok = gpu_dispatch(it<PBD_CONSTRAINT_ITERS?GPU_MODE_VGS:GPU_MODE_SKELETON_SHAPE, gpuPhysics.dynamic_voxel_count) &&
              gpu_dispatch_indirect(GPU_MODE_APPLY);
+        if(ok && skeletonConstraintCount)ok=gpu_dispatch(GPU_MODE_SKELETON,skeletonConstraintCount) && gpu_dispatch_indirect(GPU_MODE_APPLY);
     }
     ok = ok && gpu_dispatch_indirect_offset(GPU_MODE_STATIC_COLLISIONS, 16) &&
          gpu_dispatch(GPU_MODE_WAKE_GATHER, gpuPhysics.dynamic_voxel_count) &&
@@ -1317,6 +1352,13 @@ static int gpu_physics_steps(float dt, int fixed_steps) {
     bool ok = true;
     for (int fixed = 0; ok && fixed < fixed_steps; ++fixed) {
         for (int step = 0; step < PBD_SUBSTEPS; ++step) {
+            #if defined(__APPLE__) && defined(FPS_GPU_METAL)
+            /* Targets live in a shared buffer. Finish its previous use before
+             * rewriting it; normal gameplay retains batched submission. */
+            if(goActive && (fixed || step)) {
+                if(!fps_metal_end_batch() || !fps_metal_begin_batch()){ok=false;break;}
+            }
+#endif
             if (!gpu_dispatch_substep(sub_dt)) { ok = false; break; }
         }
         if (ok) ok = gpu_rebuild_topology_if_needed();

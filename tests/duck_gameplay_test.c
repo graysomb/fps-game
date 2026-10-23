@@ -18,19 +18,29 @@ static void placements(void) {
             if(!mapDucks[n].alive){fprintf(stderr,"Blocked duck map=%d index=%d at %.2f %.2f\n",mode,n,mapDucks[n].pos.x,mapDucks[n].pos.z);
                 BoundingBox b=duck_bounds(mapDucks[n].pos,.06f);for(int z=floorf(b.min.z/VOXEL_SIZE);z<=floorf(b.max.z/VOXEL_SIZE);z++)for(int x=floorf(b.min.x/VOXEL_SIZE);x<=floorf(b.max.x/VOXEL_SIZE);x++)for(int y=0;y<2;y++){int v=table_get(x,y,z);if(v>=0)fprintf(stderr," occupied cell %d %d %d voxel center %.2f %.2f %.2f\n",x,y,z,voxels[v].pos.x,voxels[v].pos.y,voxels[v].pos.z);}}
             assert(mapDucks[n].alive);
-            for(int step=0;step<64;step++)assert(duck_clear(duck_route(&mapDucks[n],step*2*PI/64),true));
+            bool crossed=false;
+            Vector3 previous=duck_route(&mapDucks[n],0);
+            for(int step=1;step<=128;step++) {
+                Vector3 at=duck_route(&mapDucks[n],step*2*PI/128);
+                assert(duck_clear(at,true));
+                assert(fmaxf(fabsf(at.x),fabsf(at.z))>worldFloorHalfSize-5);
+                assert(v_length(world_delta(at,previous))<.16f);
+                crossed|=v_length(v_sub(at,previous))>worldFloorHalfSize;
+                previous=at;
+            }
+            assert(!worldPeriodic || crossed);
         }
         int count=voxel_count;for(int frame=0;frame<120;frame++)ducks_tick(1.f/60);
         assert(voxel_count==count);for(int n=0;n<4;n++)assert(mapDucks[n].alive);
     }
-    puts("Duck placement: both maps, all four sheltered routes and no physics allocations passed");
+    puts("Duck placement: both maps, four clear perimeter routes, continuous seam crossings and no physics allocations passed");
 }
 static void empty_fixture(void) {
     fixture(false);clear_world_voxels();init_static_hash();rebuild_voxel_hash();
     worldPeriodic=false;activePlayers=1;players[0].pos=(Vector3){0,1,4};players[0].yaw=0;players[0].pitch=-10;
     playerInput[0]=INPUT_TYPE_KEYBOARD;players[0].matter=100;players[0].matterMax=100;players[0].isExposed=false;combatantLife[0]=LIFE_ALIVE;
     for(int n=0;n<4;n++)mapDucks[n]=(MapDuck){.home={20,0,20},.pos={20,0,20},.alive=false,.respawn=90};
-    mapDucks[0]=(MapDuck){.home={-.55f,0,0},.pos={0,0,0},.alive=true};
+    mapDucks[0]=(MapDuck){.home={-DUCK_ROUTE_RADIUS,0,0},.pos={0,0,0},.alive=true};
 }
 static Ray shot(void){return (Ray){{0,.3f,3},{0,0,-1}};}
 static void revive_duck(void){mapDucks[0].alive=true;mapDucks[0].respawn=0;}

@@ -5,11 +5,13 @@ static float enemyLabAiTime,enemyLabAiNext;
 static const char *enemyLabFixtureNames[]={"Grenade range: C / D-pad Up; full friendly fire", "Bomb avoidance: enemies flee a live Sapper charge", "Death feedback: exposed enemies, slot reuse", "Melee shield: remove one section per swing", "Lobber: elevated target and real structure flight", "Anchor: damage linked allies; exposed recovery after 2 seconds", "Footsteps: listen while enemies move", "Tether accuracy: throw the side-offset block at the target", "AI rear attack: fire at the bot facing away", "AI near miss: fire past the bot shoulder", "AI shield alert: shoot the shield from either side", "AI alternating attackers: two scripted shooters", "AI occlusion: attacker behind wall; investigate without tracking", "AI stationary target: observe bursts and recovery", "AI reversing target: observe tracking accuracy"};
 static bool enemyLabPreviousFoundry,enemyLabPreviousCustom;
 static void enemy_lab_exit(void) {
+    if(goActive){for(int i=voxel_count-1;i>=0;i--)if(voxels[i].golemOwned)remove_voxel_index(i);golem_physics_reset();}
     enemy_cleanup(true);enemyLab=false;enemyLabAll=false;enemyLabPaused=false;
     currentWorldType=enemyLabPreviousWorld;firefightFoundry=enemyLabPreviousFoundry;useCustomMap=enemyLabPreviousCustom;
     gameState=GAME_STATE_MENU;couchLobby=false;
 }
 static int enemy_parse_case(const char *name) {
+    if(name&&!strcmp(name,"golem"))return ENEMY_TYPE_COUNT+1;
     if(!name || !strcmp(name,"all") || !strcmp(name,"scrapper")) return ENEMY_TYPE_GOLIATH;
     if(!strcmp(name,"goliath"))return ENEMY_TYPE_GOLIATH;
     if(!strcmp(name,"mixed")) return ENEMY_TYPE_COUNT;
@@ -22,6 +24,15 @@ static void enemy_lab_spawn(int slot,EnemyType type,Vector3 position) {
     if(enemy_is_special(slot)) enemy_update_equipment(slot);
 }
 static void enemy_lab_start(int which) {
+    if(which==ENEMY_TYPE_COUNT+1){
+        enemy_lab_start(ENEMY_TYPE_STANDARD);enemy_cleanup(true);clear_world_voxels();clear_pickups();
+        for(int i=MAX_PLAYERS;i<MAX_COMBATANTS;i++){combatantLife[i]=LIFE_UNUSED;players[i].respawn_timer=9999;}
+        enemyLabCase=which;worldPeriodic=false;worldFloorHalfSize=32;
+        if(!golem_physics_start()){enemy_lab_exit();TraceLog(LOG_WARNING,"Unable to allocate physical golem");return;}
+        add_static_box_at_grid(-12,-10,0,4,20,24,GRAY);
+        add_static_box_at_grid(10,12,0,8,20,24,GRAY);
+        init_static_hash();rebuild_voxel_hash();return;
+    }
     if(which==ENEMY_TYPE_SCRAPPER)which=ENEMY_TYPE_GOLIATH;
     if(!enemyLab) {
         enemyLabPreviousWorld=currentWorldType;enemyLabPreviousFoundry=firefightFoundry;enemyLabPreviousCustom=useCustomMap;
@@ -122,9 +133,22 @@ static void enemy_lab_ai_step(float dt) {
 }
 static bool enemy_lab_controls(void) {
     enemyLabStep=false;
+    if(goActive){
+        if(IsKeyPressed(KEY_F3)||couch_button(0,GAMEPAD_BUTTON_LEFT_FACE_RIGHT)){goAction=(goAction+1)%5;goActionStart=goClock;}
+        if(IsKeyPressed(KEY_F4)||couch_button(0,GAMEPAD_BUTTON_RIGHT_FACE_UP)){enemy_lab_start(ENEMY_TYPE_COUNT+1);return true;}
+        if(IsKeyPressed(KEY_F5)||couch_button(0,GAMEPAD_BUTTON_RIGHT_FACE_LEFT))enemyLabPaused=!enemyLabPaused;
+        if(IsKeyPressed(KEY_F6)||couch_button(0,GAMEPAD_BUTTON_RIGHT_TRIGGER_1)){enemyLabPaused=true;enemyLabStep=true;}
+        if(IsKeyPressed(KEY_F7)||couch_button(0,GAMEPAD_BUTTON_MIDDLE_LEFT))enemyLabGod=!enemyLabGod;
+        if(IsKeyPressed(KEY_F8)||couch_button(0,GAMEPAD_BUTTON_LEFT_FACE_DOWN))goRegen=!goRegen;
+        if(IsKeyPressed(KEY_F9))goOverlay=!goOverlay;
+        if(IsKeyPressed(KEY_F10)||couch_button(0,GAMEPAD_BUTTON_LEFT_TRIGGER_1))go_release_part(GOLEM_ARM_R);
+        if(IsKeyPressed(KEY_F11))go_release_part(GOLEM_SHIN_L);
+        if(IsKeyPressed(KEY_F12))go_release_part(GM_CHEST);
+        if(IsKeyPressed(KEY_ESCAPE))enemy_lab_exit();return true;
+    }
     if(equipmentLab){if(IsKeyPressed(KEY_F4))eq_lab();if(IsKeyPressed(KEY_F7))enemyLabGod=!enemyLabGod;if(IsKeyPressed(KEY_ESCAPE))enemy_lab_exit();return true;}
     if(IsKeyPressed(KEY_F3)||couch_button(0,GAMEPAD_BUTTON_LEFT_FACE_RIGHT)) {
-        int next=enemyLabCase+1;if(next==ENEMY_TYPE_SCRAPPER)next++;if(next>ENEMY_TYPE_COUNT) next=ENEMY_TYPE_GOLIATH;
+        int next=enemyLabCase+1;if(next==ENEMY_TYPE_SCRAPPER)next++;if(next>ENEMY_TYPE_COUNT+1) next=ENEMY_TYPE_GOLIATH;
         enemy_lab_start(next);
     }
     if(IsKeyPressed(KEY_F4)||couch_button(0,GAMEPAD_BUTTON_RIGHT_FACE_UP)) (enemyLabFixture>=0?enemy_lab_fixture(enemyLabFixture):enemy_lab_start(enemyLabCase));
@@ -138,6 +162,15 @@ static bool enemy_lab_controls(void) {
 }
 static void enemy_lab_hud(int w,int h) {
     int fs=w<900?14:18;
+    if(goActive){
+        int attached=0,owned=0;for(int i=0;i<goCount;i++)attached+=goCells[i].index>=0;for(int i=0;i<voxel_count;i++)owned+=voxels[i].golemOwned;
+        DrawRectangle(8,70,w-16,156,Fade(BLACK,.75f));
+        DrawText(TextFormat("DYNAMIC GOLEM | action %d | %s | regeneration %s",goAction,enemyLabPaused?"PAUSED":"RUNNING",goRegen?"ON":"OFF"),16,78,fs,GOLD);
+        DrawText(TextFormat("Body %d/%d | owned %d | constraints %d | error %.3fm | physics %.2fms",attached,goCount,owned,skeletonConstraintCount,goError,physicsBackend.last_step_ms),16,102,fs,SKYBLUE);
+        DrawText("F3/D-right action | F4/Top reset | F5/Left pause | F6/RB step",16,126,fs,RAYWHITE);
+        DrawText("F8/D-down regen | F9 skeleton | F10/LB arm | F11 leg | F12 chest",16,150,fs,RAYWHITE);
+        DrawText("F7/Back god | Console: give weapons | Esc exit",16,174,fs,RAYWHITE);return;
+    }
     if(equipmentLab){DrawText("WEAPON LAB | F4 reset | F7 god | Esc exit",16,75,fs,GOLD);DrawText("Cycle grenades: D-pad Down / Tab / ;  |  Console: give glob|glock|dmr|gravity|igloo",16,99,w<900?12:16,SKYBLUE);return;}
     DrawRectangle(8,70,w-16,232,Fade(BLACK,.8f));
     DrawText(TextFormat("ENEMY LAB: %s | %s | Invulnerable: %s",enemyLabCase==ENEMY_TYPE_COUNT?"mixed":enemy_names[enemyLabCase],enemyLabPaused?"PAUSED":"RUNNING",enemyLabGod?"ON":"OFF"),16,78,fs,GOLD);
@@ -340,6 +373,7 @@ static bool enemy_run_smoke(const char *which) {
     }
     for(int i=0;i<count;i++) UnloadRenderTexture(views[i]);
     }
+    if(goActive){for(int i=voxel_count-1;i>=0;i--)if(voxels[i].golemOwned)remove_voxel_index(i);golem_physics_reset();}
     enemy_cleanup(true);enemyLab=false;return true;
 }
 #undef ENEMY_CHECK

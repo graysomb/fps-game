@@ -20,6 +20,7 @@ struct VoxelState {
     vec4 bounds_min;
     vec4 bounds_max;
     uvec4 lifecycle;   // skipVelocityFrames, wakeSource, gluedFaceMask, breakMask
+    vec4 rest_shape;
 };
 
 struct StaticCollider {
@@ -40,7 +41,8 @@ layout(std430, binding = 8) buffer TetherBuffer { int tetherOwner[]; };
 layout(std430, binding = 9) buffer CollisionMetaBuffer { ivec4 collisionMeta[]; };
 layout(std430, binding = 10) readonly buffer StaticColliderBuffer { StaticCollider staticCollider[]; };
 layout(std430, binding = 11) readonly buffer RefcountBuffer { int particleRefcount[]; };
-layout(std430, binding = 12) readonly buffer ControlBuffer { ivec4 gpuControl; };
+struct SkeletonConstraint { uvec4 corner[3]; vec4 weight[2]; vec4 target; vec4 parameters; vec4 previous_target; };
+layout(std430, binding = 12) readonly buffer ControlBuffer { ivec4 gpuControl; ivec4 skeletonHeader; SkeletonConstraint skeleton[]; };
 layout(std430, binding = 13) buffer CloneParentBuffer { int cloneParent[]; };
 layout(std430, binding = 14) buffer DispatchBuffer { uint dispatchArgs[]; };
 layout(std430, binding = 15) buffer TopologyBuffer { ivec4 topology[]; };
@@ -92,6 +94,8 @@ const int MODE_WAKE_APPLY = 15;
 const int MODE_TOPOLOGY_REBUILD_SERIAL = 16;
 const int MODE_WRAP_GATHER = 17;
 const int MODE_WRAP_APPLY = 18;
+const int MODE_SKELETON = 19;
+const int MODE_SKELETON_SHAPE = 20;
 const int CONTROL_FLAG_OVERFLOW = 1;
 const int CONTROL_FLAG_TOPOLOGY_DIRTY = 2;
 const int CONTROL_FLAG_BREAK_OCCURRED = 4;
@@ -194,6 +198,12 @@ void buildHash(uint gid) {
     hashNext[gid] = atomicExchange(hashHead[h], int(gid));
 }
 
+bool skeletonNeighbors(int a,int b){
+ if(a<131072||b<131072)return false;a-=131072;b-=131072;
+ if(a>=19||b>=19)return false;
+ const int parent[19]=int[19](-1,0,1,2,2,4,5,2,7,8,1,10,11,1,13,14,2,2,3);
+ return a==b||parent[a]==b||parent[b]==a||parent[a]==parent[b];
+}
 void pairCollisions(uint gid) {
     if (gid >= dispatchArgs[8]) return;
     uint aid = simId[uint(gpuControl.z) + gid];
@@ -240,6 +250,7 @@ void pairCollisions(uint gid) {
                             ParticleState b = particle[bid];
                             ivec4 metaA = collisionMeta[aid];
                             ivec4 metaB = collisionMeta[bid];
+                            if(skeletonNeighbors(metaA.w,metaB.w)){item=hashNext[item];continue;}
                             if (metaA.w >= 0 && metaA.w == metaB.w) {
                                 vec3 restDelta = vec3(metaA.xyz - metaB.xyz) * uRestGridStep;
                                 float restTarget = a.pos_radius.w + b.pos_radius.w + 1e-5;
@@ -310,6 +321,7 @@ void solveVgs(uint gid) {
     if (!dynamicParticle) return;
 
     float restEdge = v.pos_rest_edge.w;
+    float shapeBeta=v.rest_shape.w>0.0?v.rest_shape.w:uVgsBeta;
     float restVolume = v.velocity_rest_volume.w;
     for (int iteration = 0; iteration < 3; ++iteration) {
         vec3 centerPos = vec3(0.0);
@@ -321,9 +333,9 @@ void solveVgs(uint gid) {
         vec3 u0 = v0 - uVgsAlpha * (projectOnto(v1, v0) + projectOnto(v2, v0));
         vec3 u1 = v1 - uVgsAlpha * (projectOnto(v2, v1) + projectOnto(v0, v1));
         vec3 u2 = v2 - uVgsAlpha * (projectOnto(v0, v2) + projectOnto(v1, v2));
-        float target0 = mix(restEdge, length(v0), uVgsBeta);
-        float target1 = mix(restEdge, length(v1), uVgsBeta);
-        float target2 = mix(restEdge, length(v2), uVgsBeta);
+        float target0 = mix(v.rest_shape.x, length(v0), shapeBeta);
+        float target1 = mix(v.rest_shape.y, length(v1), shapeBeta);
+        float target2 = mix(v.rest_shape.z, length(v2), shapeBeta);
         if (length(u0) > uVgsEpsilon) u0 *= target0 / length(u0);
         if (length(u1) > uVgsEpsilon) u1 *= target1 / length(u1);
         if (length(u2) > uVgsEpsilon) u2 *= target2 / length(u2);
@@ -427,7 +439,7 @@ void staticCollisions(uint gid) {
     float radius = p.pos_radius.w;
     vec3 pos = p.predicted_base_inv_mass.xyz;
     float terrainLimit = abs(uFloorSize) - radius;
-    float floorLimit = max(0.0, 0.5 * uVoxelSize - radius);
+    float floorLimit = collisionMeta[id].x>500000000?radius:max(0.0, 0.5 * uVoxelSize - radius);
     bool floorContact = pos.y < floorLimit;
     pos.y = max(pos.y, floorLimit);
     if (floorContact) p.prev_inv_mass.xz = pos.xz -
@@ -506,7 +518,7 @@ void gatherBreakMask(uint gid) {
     vec3 axis1=((p[2]-p[0])+(p[3]-p[1])+(p[6]-p[4])+(p[7]-p[5]))*0.25;
     vec3 axis2=((p[4]-p[0])+(p[5]-p[1])+(p[6]-p[2])+(p[7]-p[3]))*0.25;
     vec3 lengths=vec3(length(axis0),length(axis1),length(axis2));
-    vec3 strain=abs(lengths-vec3(v.pos_rest_edge.w))/v.pos_rest_edge.w;
+    vec3 strain=abs(lengths-v.rest_shape.xyz)/v.rest_shape.xyz;
     float durability=(v.lifecycle.w & 0x40000000u)!=0u?2.0:1.0;
     uint glued=v.lifecycle.z; uint mask=0u; bool exceeded=false;
     if (strain.x>uStrainBreakThreshold*durability) { exceeded=true; mask |= glued & ((1u<<0)|(1u<<1)); }
@@ -692,10 +704,21 @@ void wrapApply(uint gid) {
     particle[id].pos_radius.xyz+=shift;particle[id].prev_inv_mass.xyz+=shift;
     particle[id].predicted_base_inv_mass.xyz+=shift;
 }
+void solveSkeleton(uint gid){
+ if(gid>=uint(skeletonHeader.x))return;
+ SkeletonConstraint c=skeleton[gid];uint id=c.corner[0].x;if(id>=uint(gpuControl.x))return;
+ vec3 target=c.target.xyz,previous=c.previous_target.xyz;float denom=particle[id].prev_inv_mass.w+c.parameters.x/(uDt*uDt);
+ for(int k=0;k<8;k++){uint j=c.corner[(k+1)/4][(k+1)%4];float w=c.weight[k/4][k%4];if(j<uint(gpuControl.x)){target+=particle[j].predicted_base_inv_mass.xyz*w;previous+=particle[j].pos_radius.xyz*w;denom+=particle[j].prev_inv_mass.w*w*w;}}
+ if(denom<=0)return;
+ vec3 delta=target-particle[id].predicted_base_inv_mass.xyz-((particle[id].predicted_base_inv_mass.xyz-particle[id].pos_radius.xyz)-(target-previous))*(20.0*uDt/12.0);float len=length(delta);if(len>c.parameters.y)delta*=c.parameters.y/len;delta/=denom;
+ accumulate(id,delta*particle[id].prev_inv_mass.w,1.0);
+ for(int k=0;k<8;k++){uint j=c.corner[(k+1)/4][(k+1)%4];float w=c.weight[k/4][k%4];if(j<uint(gpuControl.x))accumulate(j,-delta*w*particle[j].prev_inv_mass.w,1.0);}
+}
 void main() {
     uint gid=gl_GlobalInvocationID.x;
     if (uParticleCount < 0 || uSimCount < 0) return;
-    if (uMode==MODE_WRAP_GATHER) wrapGather(gid);
+    if (uMode==MODE_SKELETON) solveSkeleton(gid);
+    else if (uMode==MODE_WRAP_GATHER) wrapGather(gid);
     else if (uMode==MODE_WRAP_APPLY) wrapApply(gid);
     else if (uMode==MODE_RESET) resetCorrections(gid);
     else if (uMode==MODE_INTEGRATE) integrateParticle(gid);
@@ -703,7 +726,7 @@ void main() {
     else if (uMode==MODE_HASH_BUILD) buildHash(gid);
     else if (uMode==MODE_PAIR_COLLISIONS) pairCollisions(gid);
     else if (uMode==MODE_APPLY) applyCorrections(gid);
-    else if (uMode==MODE_VGS) solveVgs(gid);
+    else if (uMode==MODE_VGS || (uMode==MODE_SKELETON_SHAPE && gid<uint(uVoxelCount) && voxel[gid].rest_shape.w<0.1)) solveVgs(gid);
     else if (uMode==MODE_STATIC_COLLISIONS) staticCollisions(gid);
     else if (uMode==MODE_BREAK_MASK) gatherBreakMask(gid);
     else if (uMode==MODE_FINALIZE_PARTICLES) finalizeParticle(gid);

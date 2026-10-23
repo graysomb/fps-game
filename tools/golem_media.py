@@ -6,7 +6,7 @@ from PIL import Image, ImageDraw
 p = argparse.ArgumentParser()
 p.add_argument('directory', type=Path, nargs='?', default=Path('artifacts/golem/rendered'))
 root = p.parse_args().directory
-names = ['walk', 'slam', 'sweep', 'throw', 'arm-loss', 'leg-loss', 'chest-loss', 'both-legs', 'hit']
+names = ['idle', 'walk', 'slam', 'sweep', 'throw', 'arm-loss', 'leg-loss', 'chest-loss', 'both-legs', 'hit']
 for name in names:
     files = sorted(root.glob(f'{name}-[0-9][0-9][0-9].png'))
     if len(files) != 120:
@@ -40,4 +40,4 @@ for index, (path, label) in enumerate(images):
         im.thumbnail((730, 340))
         sheet.paste(im, (x+(750-im.width)//2, y+30))
 sheet.save(root / 'comparison.png')
-print('Wrote nine GIFs and comparison.png')
+print('Wrote ten GIFs and comparison.png')

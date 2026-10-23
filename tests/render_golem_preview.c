@@ -150,7 +150,7 @@ int main(int argc,char **argv){
   }
   save(four,out,"four-view");UnloadRenderTexture(four);UnloadRenderTexture(tile);
   RenderTexture2D frames=LoadRenderTexture(720,544);
-  for(int s=1;s<10;s++)for(int frame=0;frame<120;frame++){
+  for(int s=0;s<10;s++)for(int frame=0;frame<120;frame++){
    GolemPose p=sample(s,frame/20.0f,0);render(frames,&p,0);
    BeginTextureMode(frames);DrawText("FOUNDRY / VOXEL GOLEM",20,18,22,RAYWHITE);DrawText(TextFormat("%s   %.2fs",names[s],frame/20.0f),20,48,18,SKYBLUE);DrawText("PRESENTATION PROTOTYPE - RAT SHOWN FOR SCALE",20,frames.texture.height-27,14,LIGHTGRAY);EndTextureMode();
    char name[80];snprintf(name,sizeof(name),"%s-%03d",names[s],frame);save(frames,out,name);

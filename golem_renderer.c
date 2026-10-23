@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 
-enum { GM_CHEST=GOLEM_JOINT_COUNT, GM_CORE, GM_EYE, GM_COUNT };
+#include "golem_body.h"
 static Model gm[GM_COUNT];
 static BoundingBox grBounds[GM_COUNT];
 static Shader gs;
@@ -144,9 +144,6 @@ static void gr_cube(Vector3 center,Vector3 size,Color col){
         }
     }gb.cubes++;
 }
-static void gr_grid(int nx,int ny,int nz,Vector3 bottom,Color color){
-    for(int y=ny-1;y>=0;y--)for(int z=0;z<nz;z++)for(int x=0;x<nx;x++)gr_cube(gr_add(bottom,(Vector3){(x-(nx-1)*.5f)*.26f,(y+.5f)*.26f,(z-(nz-1)*.5f)*.26f}),(Vector3){.254f,.254f,.254f},color);
-}
 static void gr_finish(int kind){
     if(!gb.vertices)return;
     Mesh m={0};m.vertexCount=gb.vertices;m.triangleCount=m.vertexCount/3;
@@ -161,27 +158,7 @@ static void gr_finish(int kind){
 bool golem_renderer_init(const char *dir){
     if(grReady)return true;
     grStats=(GolemStats){0};grUniformValid=false;memset(&gb,0,sizeof(gb));
-    gr_grid(4,2,2,(Vector3){0,-.25f,0},grDark);gr_finish(GOLEM_PELVIS);
-    for(int y=3;y>=0;y--)for(int z=0;z<3;z++)for(int x=0;x<6;x++){
-        if(x>=1&&x<=4&&y>=1&&y<=2&&z<2)continue;
-        gr_cube((Vector3){(x-2.5f)*.26f,(y+.5f)*.26f,(z-1)*.26f},(Vector3){.254f,.254f,.254f},grSteel);
-    }gr_finish(GOLEM_TORSO);
-    gr_grid(3,2,2,(Vector3){0,0,0},grSteel);gr_cube((Vector3){0,-.13f,0},(Vector3){.35f,.25f,.35f},grDark);gr_finish(GOLEM_HEAD);
-    for(int s=0;s<2;s++){
-        int a=s?GOLEM_ARM_R:GOLEM_ARM_L;
-        gr_grid(2,2,2,(Vector3){0,-.72f,0},grSteel);gr_grid(3,2,3,(Vector3){0,-.19f,0},grOrange);gr_finish(a);
-        gr_grid(3,2,3,(Vector3){0,-.64f,0},grOrange);gr_cube((Vector3){0,-.05f,0},(Vector3){.25f,.22f,.25f},grDark);gr_finish(a+1);
-        for(int y=0;y<2;y++)for(int z=0;z<2;z++)for(int x=0;x<3;x++)
-            gr_cube((Vector3){(x-1)*.26f,-(y+.5f)*.195f,(z-.5f)*.26f-.04f},(Vector3){.254f,.189f,.254f},grDark);
-        gr_finish(a+2);
-        int l=s?GOLEM_THIGH_R:GOLEM_THIGH_L;
-        gr_grid(2,3,2,(Vector3){0,-.78f,0},grSteel);gr_finish(l);
-        gr_grid(2,3,2,(Vector3){0,-.81f,0},grSteel);gr_cube((Vector3){0,0,0},(Vector3){.54f,.18f,.54f},grOrange);gr_finish(l+1);
-        gr_grid(3,1,4,(Vector3){0,-.217f,-.15f},grDark);gr_finish(l+2);
-    }
-    gr_grid(4,2,1,(Vector3){0,.26f,-.52f},grSteel);gr_finish(GM_CHEST);
-    gr_cube((Vector3){0,.52f,-.06f},(Vector3){.40f,.40f,.40f},(Color){255,191,52,255});gr_finish(GM_CORE);
-    gr_cube((Vector3){0,.30f,-.268f},(Vector3){.48f,.09f,.035f},(Color){255,170,31,255});gr_finish(GM_EYE);
+    golem_body_generate(gr_cube,gr_finish);
     char v[512],f[512];if(!dir)dir="shaders";snprintf(v,sizeof(v),"%s/golem.vert",dir);snprintf(f,sizeof(f),"%s/golem.frag",dir);
     gs=LoadShader(v,f);grShaded=gs.id && gs.id!=rlGetShaderIdDefault();
     if(grShaded){

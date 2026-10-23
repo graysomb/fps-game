@@ -1270,8 +1270,10 @@ pauses, arrows scrub, M toggles swimming/idle, W toggles the floor wake, and R
 restarts. The duck glides on a solid floor with folded wings, no visible feet,
 a small paddling roll, counterbalanced head, and tail sway.
 
-Four ambient mallards swim in the sheltered factory bays of Foundry Holdout
-and the cutting sheds of Crosscut. Weapon/tether hits, explosions, player/enemy
+Four ambient mallards swim in the open perimeter spaces between repeated arenas
+on Foundry Holdout and Crosscut. Their six-metre-wide loops cross the periodic
+seams smoothly; bounded maps keep the loops inside the walls.
+Weapon/tether hits, explosions, player/enemy
 contact, and moving debris make them disappear into a short puff of feathers.
 They return after 90 seconds of gameplay; blocked respawn spots wait until clear.
 They do not award points, drop equipment, or count toward Firefight waves.
@@ -1299,6 +1301,11 @@ change simulation itself; `duck_gameplay.inc` supplies map behavior. Shader asse
 the floor effect. Link `duck_renderer.c` with raylib to use it elsewhere.
 
 ### Foundry golem visual prototype
+
+The complete design also has an offline physical fixture:
+`--enemy-lab=golem`. Its 283 actual dynamic cells follow breakable skeleton
+mounts, detach under damage/tether forces, and regenerate after obstructions
+clear. See [physical golem controls and validation](docs/foundry-golem-physics.md).
 
 `tools/preview_golem.ps1` opens the separate voxel golem animation lab: planted
 walking/turning, slam, sweep, thrown forearm, limb-loss reactions, kneeling,
