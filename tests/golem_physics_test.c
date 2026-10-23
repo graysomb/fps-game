@@ -10,6 +10,35 @@ static void healthy(void){
     for(int c=0;c<goCount;c++)assert(voxels[goCells[c].index].vgs_active);
 }
 static int compare_time(const void *a,const void *b){float x=*(const float*)a,y=*(const float*)b;return (x>y)-(x<y);}
+static void lab_frame(float dt){
+    activate_static_voxels_near_dynamic();update_projectiles(dt);prepare_tether_forces();
+    wake_sleeping_voxels_near_awake();rebuild_static_hash_if_dirty();
+    pbdTimeAccumulator+=dt;
+    int steps=(int)(pbdTimeAccumulator/PBD_MAX_STEP_DT);
+    if(steps>PBD_MAX_ACCUM_STEPS)steps=PBD_MAX_ACCUM_STEPS;
+    if(steps){simulate_voxel_pbd_steps(PBD_MAX_STEP_DT,steps);pbdTimeAccumulator-=steps*PBD_MAX_STEP_DT;}
+    recycle_dead_voxels(dt);handle_pbd_projectile_hits();
+    if(++voxelHashFramesSinceRebuild>=VOXEL_HASH_REBUILD_INTERVAL)rebuild_voxel_hash();
+    deactivate_sleeping_voxels();rebuild_static_hash_if_dirty();
+}
+static void lab_check(void){
+    const int rates[]={30,60,144};
+    for(int r=0;r<3;r++){
+        enemy_lab_start(ENEMY_TYPE_COUNT+1);pbdTimeAccumulator=0;
+        Vector3 inactive=players[MAX_PLAYERS].pos;
+        int probe=addVoxel(inactive.x,inactive.y,inactive.z,false,true,GRAY,0);assert(probe>=0);
+        uint64_t probeId=voxels[probe].identity;handle_pbd_projectile_hits();
+        probe=go_find(probeId,probe);assert(probe>=0);remove_voxel_index(probe);
+        for(int f=0;f<rates[r]*60;f++){
+            lab_frame(1.f/rates[r]);
+            int live=0;for(int c=0;c<goCount;c++)live+=go_find(goCells[c].id,goCells[c].index)>=0;
+            if(live!=goCount){printf("LAB LOSS fps=%d frame=%d live=%d/%d\n",rates[r],f,live,goCount);fflush(stdout);}
+            assert(live==goCount);healthy();
+        }
+        for(int f=0;f<20;f++){lab_frame(.10f);healthy();}
+        printf("Lab startup: 60 seconds at %d FPS passed\n",rates[r]);
+    }
+}
 static void fixture(void){
     clear_all_chunks();clear_world_voxels();clear_pickups();init_static_hash();
     memset(players,0,sizeof(players));netTransport.role=NET_ROLE_OFFLINE;activePlayers=1;worldPeriodic=false;worldFloorHalfSize=32;
@@ -65,10 +94,86 @@ static void accuracy_check(void){
         printf("ACCURACY %s,%.0f,%.0f,%.3f,%.3f,%.3f\n",physics_backend_name(physicsBackend.active),ranges[r],angles[a],closest,boxMiss,shortfall);
     }
 }
+static void repair_check(void){
+    const int losses[]={GOLEM_SHIN_L,GOLEM_THIGH_L,GOLEM_ARM_R,GOLEM_HAND_R,GM_CHEST,GOLEM_HEAD};
+    for(int t=0;t<6;t++){
+        fixture();goRegen=true;go_release_part(losses[t]);
+        if(t==1)go_release_part(GOLEM_THIGH_R);
+        int before=attached_count();bool restored=false;
+        for(int f=0;f<480;f++){
+            simulate_voxel_pbd_steps(1.f/60,1);recycle_dead_voxels(1.f/60);
+            int now=attached_count();assert(now==before||now==goCount);
+            if(now==goCount)restored=true;
+            if(restored)healthy();
+            if(getenv("GOLEM_CAPTURE")&&t==1&&f<360&&f%3==0)capture(TextFormat("leg-regrowth/%03d",f/3));
+        }
+        healthy();assert(goPose.kneel<.01f);
+        for(int part=1;part<GM_COUNT;part++){
+            int cluster=build_glue_cluster_indices(goCells[goMount[part]].index,glueClusterIndices);
+            for(int c=0;c<goCount;c++)if(goCells[c].part==part){
+                bool found=false;for(int n=0;n<cluster;n++)found|=glueClusterIndices[n]==goCells[c].index;
+                assert(found);
+            }
+        }
+        printf("Atomic repair with debris: part %d passed\n",losses[t]);
+    }
+    /* An allocation failure after some cells were created must not publish
+     * any part of the replacement, consume debris, or advance recovery. */
+    fixture();goRegen=true;go_release_part(GOLEM_ARM_R);goClock=2;
+    int before=attached_count(),total=voxel_count;
+    goRepairFailAfter=3;
+    for(int f=0;f<30;f++)simulate_voxel_pbd_steps(1.f/60,1);
+    assert(attached_count()==before&&voxel_count==total);
+    goRepairFailAfter=-1;
+    for(int f=0;f<300;f++)simulate_voxel_pbd_steps(1.f/60,1);
+    healthy();
+    /* Remove just one cell and verify the complete authored graph is restored. */
+    fixture();goRegen=true;remove_voxel_index(goCells[goMount[GOLEM_HAND_L]].index);
+    for(int f=0;f<360;f++)simulate_voxel_pbd_steps(1.f/60,1);
+    healthy();
+    /* A held piece cannot be reclaimed even when it occupies the exact target. */
+    fixture();goRegen=true;
+    int cell=goMount[GOLEM_HAND_R],held=goCells[cell].index;uint64_t heldId=voxels[held].identity;
+    go_release_part(GOLEM_HAND_R);goClock=2;
+    players[0].tetherHolding=true;players[0].tetherVoxel=held;players[0].tetherVoxelIdentity=heldId;
+    for(int i=0;i<20;i++)golem_physics_prepare();
+    assert(goCells[cell].index<0&&go_find(heldId,held)>=0&&voxels[held].golemReclaimStart==0);
+    players[0].tetherHolding=false;
+    for(int f=0;f<300;f++)simulate_voxel_pbd_steps(1.f/60,1);
+    healthy();
+    /* An actor blocks the repair; clearing it doesn't restart the delay. */
+    fixture();goRegen=true;cell=goMount[GOLEM_HAND_R];
+    Vector3 target=Vector3Transform(goCells[cell].center,go_matrix(GOLEM_HAND_R));
+    go_release_part(GOLEM_HAND_R);goClock=2;
+    players[0].pos=target;players[0].respawn_timer=0;
+    golem_physics_prepare();assert(goCells[cell].index<0);
+    assert(goRepair[GOLEM_ARM_R].phase==GO_REPAIR_BLOCKED);
+    players[0].respawn_timer=9999;
+    for(int f=0;f<300;f++)simulate_voxel_pbd_steps(1.f/60,1);
+    healthy();puts("Allocation rollback, isolated cell, held debris and actor obstruction passed");
+}
+static void repair_edges(void){
+    fixture();goRegen=true;go_release_part(GOLEM_SHIN_L);
+    for(int f=0;f<300&&attached_count()<goCount;f++)simulate_voxel_pbd_steps(1.f/60,1);
+    healthy();assert(goRepair[GOLEM_THIGH_L].phase==GO_REPAIR_RECOVER);
+    remove_voxel_index(goCells[goMount[GOLEM_SHIN_R]].index);
+    for(int f=0;f<360;f++)simulate_voxel_pbd_steps(1.f/60,1);
+    healthy();assert(goPose.kneel<.01f);
+    fixture();goRegen=true;go_release_part(GOLEM_HAND_R);goClock=2;
+    golem_physics_prepare();assert(goRepair[GOLEM_ARM_R].phase==GO_REPAIR_BUILD);
+    goRegen=false;golem_physics_prepare();
+    for(int n=0;n<voxel_count;n++)assert(voxels[n].golemReclaimStart==0);
+    goRegen=true;
+    for(int f=0;f<300;f++)simulate_voxel_pbd_steps(1.f/60,1);
+    healthy();puts("Damage during recovery and canceled dissolve passed");
+}
 int main(int argc,char **argv){
     printf("Velocity damping: %.6f per 1/120 second\n",(double)VELOCITY_DAMPING);
     setvbuf(stdout,NULL,_IONBF,0);assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(800,600,"Physical golem checks");init_pbd_thread_pool();if(!initialize_physics_backend()){fprintf(stderr,"Backend init: %s\n",physicsBackend.fallback_reason);return 2;}
+    if(getenv("GOLEM_REPAIR_EDGES")){repair_edges();goto cleanup;}
+    if(getenv("GOLEM_LAB_CHECK")){lab_check();goto cleanup;}
+    if(getenv("GOLEM_REPAIR_CHECK")){repair_check();repair_edges();goto cleanup;}
     if(getenv("GOLEM_ACCURACY")){accuracy_check();goto cleanup;}
     fixture();capture("initial");float timings[360];
     for(int frame=0;frame<360;frame++){
@@ -127,9 +232,8 @@ int main(int argc,char **argv){
         if(getenv("GOLEM_CAPTURE")&&f%3==0)capture(TextFormat("leg-loss/%03d",f/3));
     }
     assert(goInput.damage[GOLEM_LEFT_LEG].removed);capture("kneeling");
-    /* Remove a complete arm and its debris, then regenerate real new cells. */
+    /* Regrow while the fallen arm remains in the world. */
     fixture();go_release_part(GOLEM_ARM_R);
-    for(int i=voxel_count-1;i>=0;i--)if(voxels[i].golemOwned&&!voxels[i].persistentConstruction)remove_voxel_index(i);
     goRegen=true;
     for(int f=0;f<360;f++){
         simulate_voxel_pbd_steps(1.f/60,1);

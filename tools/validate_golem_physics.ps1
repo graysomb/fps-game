@@ -1,17 +1,21 @@
-param([ValidateSet('33','43')][string]$Backend='43', [switch]$Capture, [switch]$SkipBuild, [switch]$Accuracy,
+param([ValidateSet('33','43')][string]$Backend='43', [switch]$Capture, [switch]$SkipBuild, [switch]$Accuracy, [switch]$Lab, [switch]$Repair,
       [ValidateRange(0,3600)][int]$StressSeconds=0,
       [ValidateRange(0.9,1.0)][double]$Damping=0.99)
 $ErrorActionPreference='Stop'
 $oldCapture=$env:GOLEM_CAPTURE
 $oldStress=$env:GOLEM_STRESS_SECONDS
 $oldAccuracy=$env:GOLEM_ACCURACY
+$oldLab=$env:GOLEM_LAB_CHECK
+$oldRepair=$env:GOLEM_REPAIR_CHECK
 Push-Location -LiteralPath (Split-Path -Parent $PSScriptRoot)
 try {
     if($Accuracy){$env:GOLEM_ACCURACY='1'}
+    if($Lab){$env:GOLEM_LAB_CHECK='1'}
+    if($Repair){$env:GOLEM_REPAIR_CHECK='1'}
     New-Item -ItemType Directory -Force -Path '.build/golem','artifacts/golem/physics' | Out-Null
     if($Capture){
         $env:GOLEM_CAPTURE='1'
-        @('idle','motion-1','motion-2','motion-3','motion-4','leg-loss','regeneration') | ForEach-Object {
+        @('idle','motion-1','motion-2','motion-3','motion-4','leg-loss','regeneration','leg-regrowth') | ForEach-Object {
             New-Item -ItemType Directory -Force -Path "artifacts/golem/physics/$_" | Out-Null
         }
     }
@@ -28,4 +32,4 @@ try {
     $physics=if($Backend -eq '43'){'gpu'}else{'cpu-st'}
     & $executable "--physics=$physics"
     if($LASTEXITCODE){throw 'Golem physics checks failed'}
-} finally { $env:GOLEM_CAPTURE=$oldCapture;$env:GOLEM_STRESS_SECONDS=$oldStress;$env:GOLEM_ACCURACY=$oldAccuracy;Pop-Location }
+} finally { $env:GOLEM_CAPTURE=$oldCapture;$env:GOLEM_STRESS_SECONDS=$oldStress;$env:GOLEM_ACCURACY=$oldAccuracy;$env:GOLEM_LAB_CHECK=$oldLab;$env:GOLEM_REPAIR_CHECK=$oldRepair;Pop-Location }

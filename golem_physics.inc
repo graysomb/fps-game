@@ -6,7 +6,7 @@ typedef struct GoWeld {GoLink definition;uint64_t a,b;int ia,ib;} GoWeld;
 static GoCell *goCells;
 static GoLink *goLinks;
 static GoWeld *goWelds;
-static int goCount,goPartStart,goLinkCount,goWeldCount;
+static int goCount,goPartStart,goLinkCount,goWeldCount,goWeldCapacity;
 static bool goActive,goRegen=true,goOverlay,goAllocationFailed,goConnectNeeded;
 static GolemPose goPose,goPreviousPose;
 static float goLastDt;
@@ -17,10 +17,17 @@ static int goAction;
 static float goActionStart;
 static float goLastHandLaunch=-1;
 static const float goScale=1.5f;
+typedef enum GoRepairPhase { GO_REPAIR_IDLE, GO_REPAIR_WAIT, GO_REPAIR_BLOCKED, GO_REPAIR_BUILD, GO_REPAIR_RECOVER } GoRepairPhase;
+typedef struct GoRepair {GoRepairPhase phase;float since;} GoRepair;
+static GoRepair goRepair[GM_COUNT];
+#ifdef FIREFIGHT_TESTING
+static int goRepairFailAfter=-1;
+#endif
 static struct {
     GoCell *cells;int capacity;
     GolemInput input;GolemPose pose,previous;
     float clock,lastDt,overload[GM_COUNT],lost[GM_COUNT];
+    GoRepair repair[GM_COUNT];
 } goRollback;
 static bool golem_checkpoint_save(void){
     if(!goActive)return true;
@@ -30,6 +37,7 @@ static bool golem_checkpoint_save(void){
     }
     memcpy(goRollback.cells,goCells,(size_t)goCount*sizeof(*goCells));
     goRollback.input=goInput;goRollback.pose=goPose;goRollback.previous=goPreviousPose;
+    memcpy(goRollback.repair,goRepair,sizeof(goRepair));
     goRollback.clock=goClock;goRollback.lastDt=goLastDt;
     memcpy(goRollback.overload,goOverload,sizeof(goOverload));memcpy(goRollback.lost,goLost,sizeof(goLost));
     return true;
@@ -38,6 +46,7 @@ static void golem_checkpoint_restore(void){
     if(!goActive)return;
     memcpy(goCells,goRollback.cells,(size_t)goCount*sizeof(*goCells));
     goInput=goRollback.input;goPose=goRollback.pose;goPreviousPose=goRollback.previous;
+    memcpy(goRepair,goRollback.repair,sizeof(goRepair));
     goClock=goRollback.clock;goLastDt=goRollback.lastDt;
     memcpy(goOverload,goRollback.overload,sizeof(goOverload));memcpy(goLost,goRollback.lost,sizeof(goLost));
     for(int i=0;i<goCount;i++)if(goCells[i].index>=0)voxels[goCells[i].index].persistentConstruction=true;
@@ -67,18 +76,14 @@ static void golem_physics_reset(void){
     free(goCells);free(goLinks);free(goWelds);free(skeletonConstraints);
     free(goRollback.cells);memset(&goRollback,0,sizeof(goRollback));
     goCells=NULL;goLinks=NULL;goWelds=NULL;skeletonConstraints=NULL;
-    goCount=goPartStart=goLinkCount=goWeldCount=skeletonConstraintCapacity=0;
+    goCount=goPartStart=goLinkCount=goWeldCount=goWeldCapacity=skeletonConstraintCapacity=0;
     goAllocationFailed=false;goConnectNeeded=false;goLastDt=0;goClock=goError=goLoad=0;goAction=0;goActionStart=0;
     goLastHandLaunch=-1;
+    memset(goRepair,0,sizeof(goRepair));
     memset(goOverload,0,sizeof(goOverload));memset(goLost,0,sizeof(goLost));
 }
 static bool go_spawn_cell(int i,bool initial){
     GoCell *c=&goCells[i];Matrix transform=go_matrix(c->part);Vector3 position=Vector3Transform(c->center,transform);
-    if(!initial){
-        Vector3 half=v_mul(c->size,goScale*.6f);
-        for(int a=0;a<activePlayers;a++)if(players[a].respawn_timer<=0&&v_length(world_delta(players[a].pos,position))<v_length(half)+.8f)return false;
-        for(int n=0;n<voxel_count;n++)if(!(voxels[n].golemOwned&&voxels[n].persistentConstruction)&&v_length(world_delta(voxels[n].pos,position))<v_length(half)+voxels[n].rest_edge*.5f)return false;
-    }
     int id=addVoxel(position.x,position.y,position.z,false,true,c->color,0);if(id<0)return false;
     Voxel *v=&voxels[id];v->golemOwned=true;v->persistentConstruction=true;v->glueEligible=false;
     v->owner=STATIC_DEBRIS_OWNER; /* A manufactured body has no terrain to restore. */
@@ -117,7 +122,10 @@ static void go_connect(void){
         bool known=false;for(int w=0;w<goWeldCount;w++)if(goWelds[w].a==a->id&&goWelds[w].b==b->id){known=true;break;}
         if(known)continue;
         if(va->glued_faces[face]||vb->glued_faces[opposite_face[face]])continue;
-        GoWeld *next=realloc(goWelds,(size_t)(goWeldCount+1)*sizeof(*next));if(!next)continue;goWelds=next;
+        if(goWeldCount==goWeldCapacity){
+            int capacity=goWeldCapacity+goLinkCount;
+            GoWeld *next=realloc(goWelds,(size_t)capacity*sizeof(*next));if(!next){goConnectNeeded=true;return;}goWelds=next;goWeldCapacity=capacity;
+        }
         goWelds[goWeldCount++]=(GoWeld){*d,a->id,b->id,a->index,b->index};
         va->glued_faces[face]=vb->glued_faces[opposite_face[face]]=true;
         va->glued_neighbors[face]=b->index;vb->glued_neighbors[opposite_face[face]]=a->index;collisionTopologyDirty=true;
@@ -133,6 +141,7 @@ static void go_release_part(int part){
     collisionTopologyDirty=true;
     if(part==GOLEM_ARM_L||part==GOLEM_FOREARM_L||part==GOLEM_ARM_R||part==GOLEM_FOREARM_R||part==GOLEM_THIGH_L||part==GOLEM_SHIN_L||part==GOLEM_THIGH_R||part==GOLEM_SHIN_R)go_release_part(part+1);
 }
+#include "golem_repair.inc"
 static void go_launch_hand(void){
     Vector3 origin={0};int count=0;
     for(int i=0;i<goCount;i++)if(goCells[i].part==GOLEM_HAND_R&&goCells[i].index>=0){
@@ -160,7 +169,7 @@ static void golem_physics_prepare(void){
     for(int i=0;i<goCount;i++){
         GoCell *c=&goCells[i];int old=c->index;c->index=go_find(c->id,c->index);
         if(c->index>=0&&!voxels[c->index].vgs_active){voxels[c->index].persistentConstruction=false;c->index=-1;}
-        if(c->index<0&&old>=0){c->id=0;c->missing=goClock;if(goMount[c->part]==i)go_release_part(c->part);}
+        if(c->index<0&&old>=0){if(getenv("GOLEM_DEBUG"))printf("Golem detach: removed/inactive cell=%d part=%d time=%.3f\n",i,c->part,goClock);c->id=0;c->missing=goClock;if(goMount[c->part]==i)go_release_part(c->part);}
         if(c->index>=0){Voxel *v=&voxels[c->index];if(v->sleeping)wake_sleeping_cluster_in_place(c->index);v->sleepFrames=0;v->lifeFrames=0;v->wake_source=true;}
     }
     /* Connectivity is checked against live face links, including gun/sword cuts. */
@@ -172,13 +181,11 @@ static void golem_physics_prepare(void){
         if(seen[d->a]!=seen[d->b]){seen[d->a]=seen[d->b]=true;changed=true;}
     }}
     for(int i=0;i<goCount;i++)if(goCells[i].index>=0&&!seen[i]){
+        if(getenv("GOLEM_DEBUG"))printf("Golem detach: broken connection cell=%d part=%d time=%.3f\n",i,goCells[i].part,goClock);
         voxels[goCells[i].index].persistentConstruction=false;goCells[i].index=-1;goCells[i].id=0;goCells[i].missing=goClock;
     }free(seen);
-    if(goRegen)for(int i=0;i<goCount;i++)if(goCells[i].index<0&&goClock-goCells[i].missing>1.25f+(i/(float)goCount)*2){
-        int part=goCells[i].part;const int parent[19]={-1,0,1,2,2,4,5,2,7,8,1,10,11,1,13,14,2,2,3};
-        if(parent[part]>0 && goCells[goMount[parent[part]]].index<0)continue;
-        int mount=goMount[part];if(i==mount||goCells[mount].index>=0)go_spawn_cell(i,false);
-    }
+    go_mount_loads();
+    go_repair_prepare();
     go_connect();
     float cycleStart=goActionStart+floorf((goClock-goActionStart)/6)*6;
     if(goAction==GOLEM_THROW&&goClock-cycleStart>=.7f+.6f*golem_action_seconds(GOLEM_THROW)&&goLastHandLaunch<cycleStart){
@@ -206,12 +213,7 @@ static void golem_physics_tick(float dt){
     goPose.eye=go_smooth_matrix(previousPose.eye,goPose.eye,blend);
     /* The authored poses assume a point foot. Keep the physical cuboid soles
      * above the lab floor, including crouches and the planted slam fist. */
-    float bottom=0;
-    for(int i=0;i<goCount;i++)if(goCells[i].index>=0)for(int k=0;k<8;k++)bottom=fminf(bottom,Vector3Transform(go_corner(&goCells[i],k),go_matrix(goCells[i].part)).y-.012f);
-    if(bottom<0){
-        for(int p=0;p<GOLEM_JOINT_COUNT;p++)goPose.joint[p].m13-=bottom;
-        goPose.chest.m13-=bottom;goPose.core.m13-=bottom;goPose.eye.m13-=bottom;
-    }
+    go_floor_pose();
     if(!skeleton_reserve(goWeldCount*4+GM_COUNT*4+goCount*8))return;
     for(int n=0;n<goWeldCount;){
         GoWeld *w=&goWelds[n];w->ia=go_find(w->a,w->ia);w->ib=go_find(w->b,w->ib);
@@ -234,22 +236,16 @@ static void golem_physics_tick(float dt){
             .corner=v->particles[k],.target=Vector3Transform(go_corner(cell,k),go_matrix(part)),
             .previous_target=Vector3Transform(go_corner(cell,k),previous),.compliance=1e-3f,.limit=v->rest_edge*.25f};
     }
-    goError=goLoad=0;
     for(int part=1;part<GM_COUNT;part++){
-        int mount=goMount[part];if(mount<0||goCells[mount].index<0)continue;GoCell *cell=&goCells[mount];Voxel *v=&voxels[cell->index];float error=0,load=0,mass=0;
-        for(int i=0;i<goCount;i++)if(goCells[i].part==part&&goCells[i].index>=0)for(int k=0;k<8;k++){float im=voxels[goCells[i].index].particles[k]->inv_mass;if(im>0)mass+=1/im;}
+        int mount=goMount[part];if(mount<0||goCells[mount].index<0)continue;GoCell *cell=&goCells[mount];Voxel *v=&voxels[cell->index];
         Matrix previous=part<GOLEM_JOINT_COUNT?previousPose.joint[part]:part==GM_CHEST?previousPose.chest:part==GM_CORE?previousPose.core:previousPose.eye;
         for(int k=0;k<4;k++){
             int anchor=goAnchor[part][k];if(anchor<0||goCells[anchor].index<0)continue;
             GoCell *ac=&goCells[anchor];int corner=goAnchorCorner[part][k];
             Vector3 target=Vector3Transform(go_corner(ac,corner),go_matrix(part));
-            Particle *p=voxels[ac->index].particles[corner];error=fmaxf(error,v_length(v_sub(target,p->pos)));
-            if(p->inv_mass>0)load+=v_length(v_sub(target,v_add(p->pos,v_mul(p->vel,dt))))/(dt*dt*p->inv_mass);
+            Particle *p=voxels[ac->index].particles[corner];
             skeletonConstraints[skeletonConstraintCount++]=(SkeletonConstraint){.corner=p,.target=target,.previous_target=Vector3Transform(go_corner(ac,corner),previous),.compliance=1e-7f,.limit=v->rest_edge*.25f};
         }
-        goError=fmaxf(goError,error);goLoad=fmaxf(goLoad,load/fmaxf(mass*GRAVITY,1));
-        goOverload[part]=load>8*mass*GRAVITY?goOverload[part]+dt:0;
-        if(goOverload[part]>.12f){if(getenv("GOLEM_DEBUG"))printf("Mount overload part %d at %.2f load %.1fx weight\n",part,goClock,load/fmaxf(mass*GRAVITY,1));go_release_part(part);}
     }
 }
 static bool golem_physics_start(void){
@@ -285,6 +281,7 @@ static bool golem_physics_start(void){
         }
         if(best>a&&!go_link_definition(a,best,face)){golem_physics_reset();return false;}
     }
+    go_floor_pose();goPreviousPose=goPose;
     goActive=true;
     for(int i=0;i<goCount;i++)if(!go_spawn_cell(i,true)){goAllocationFailed=true;break;}
     if(goAllocationFailed){
@@ -297,7 +294,9 @@ static void golem_lab_draw(void){
     if(!goActive)return;
     if(goOverlay)golem_draw_skeleton(&goPose);
     if(goRegen)for(int i=0;i<goCount;i++)if(goCells[i].index<0&&goClock-goCells[i].missing>1.25f){
-        GoCell *c=&goCells[i];Vector3 p=Vector3Transform(c->center,go_matrix(c->part));DrawCubeWiresV(p,v_mul(c->size,goScale),Fade(SKYBLUE,.45f));
+        Vector3 corners[8];go_cell_points(i,corners);
+        Color color=goRepair[go_repair_group(goCells[i].part)].phase==GO_REPAIR_BLOCKED?ORANGE:SKYBLUE;
+        for(int k=0;k<8;k++)for(int axis=1;axis<=4;axis*=2)if(!(k&axis))DrawLine3D(corners[k],corners[k|axis],Fade(color,.45f));
     }
 }
 
@@ -308,11 +307,15 @@ static void golem_emission(void){
     for(int i=0;i<voxel_count;i++){
         Voxel *v=&voxels[i];
         if(!v->golemOwned||!v->vgs_active||v->color.r!=255)continue;
+        float remaining=v->golemReclaimStart>0?Clamp(1-(goClock-v->golemReclaimStart)/.25f,0,1):1;
+        Vector3 center={0};for(int k=0;k<8;k++)center=v_add(center,v_mul(v->particles[k]->pos,.125f));
         for(int face=0;face<6;face++){
             Vector3 a=v->particles[face_corner_indices[face][0]]->pos;
             Vector3 b=v->particles[face_corner_indices[face][1]]->pos;
             Vector3 c=v->particles[face_corner_indices[face][3]]->pos;
             Vector3 d=v->particles[face_corner_indices[face][2]]->pos;
+            a=Vector3Lerp(center,a,remaining);b=Vector3Lerp(center,b,remaining);
+            c=Vector3Lerp(center,c,remaining);d=Vector3Lerp(center,d,remaining);
             DrawTriangle3D(a,b,c,v->color);DrawTriangle3D(c,b,a,v->color);
             DrawTriangle3D(a,c,d,v->color);DrawTriangle3D(d,c,a,v->color);
         }

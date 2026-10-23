@@ -169,7 +169,7 @@ static void enemy_lab_hud(int w,int h) {
         DrawText(TextFormat("Body %d/%d | owned %d | constraints %d | error %.3fm | physics %.2fms",attached,goCount,owned,skeletonConstraintCount,goError,physicsBackend.last_step_ms),16,102,fs,SKYBLUE);
         DrawText("F3/D-right action | F4/Top reset | F5/Left pause | F6/RB step",16,126,fs,RAYWHITE);
         DrawText("F8/D-down regen | F9 skeleton | F10/LB arm | F11 leg | F12 chest",16,150,fs,RAYWHITE);
-        DrawText("F7/Back god | Console: give weapons | Esc exit",16,174,fs,RAYWHITE);return;
+        DrawText(TextFormat("Repair: %s | F7/Back god | Console: give weapons | Esc exit",go_repair_status()),16,174,fs,RAYWHITE);return;
     }
     if(equipmentLab){DrawText("WEAPON LAB | F4 reset | F7 god | Esc exit",16,75,fs,GOLD);DrawText("Cycle grenades: D-pad Down / Tab / ;  |  Console: give glob|glock|dmr|gravity|igloo",16,99,w<900?12:16,SKYBLUE);return;}
     DrawRectangle(8,70,w-16,232,Fade(BLACK,.8f));

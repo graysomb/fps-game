@@ -59,12 +59,27 @@ horizontal travel with gravity compensation. With no player target it fires
 sixteen meters forward. Release and velocity assignment happen once before
 physics upload, so CPU and GPU receive the same launch.
 
-Regeneration starts after 1.25 seconds and distributes cell creation across a
-two-second schedule. It restores actual cells with the current pose velocity,
-checks actors, terrain and detached debris, and retries obstructed cells. Parent
-mounts must return before dependent segments. Cyan wireframes indicate pending
-cells. Detached cells use normal debris expiry and never enter terrain
-restoration queues.
+Regeneration starts after 1.25 seconds and restores a complete missing limb
+assembly in one transaction. The arm's upper arm, forearm and hand remain
+separate articulated groups; both legs share a repair transaction. Surviving
+cells keep their identity. Every new cell and weld is ready before physics
+advances. Allocation failure rolls back newly created cells and retries.
+
+Placement uses oriented cell geometry against actors, terrain and debris.
+Only overlapping, unheld debris belonging to this golem is reclaimed, with a
+quarter-second cyan shrink effect. Other fallen pieces remain available to
+throw. Actors, held debris and unrelated structures block repair until cleared.
+The lab HUD reports waiting, blocked, rebuilding and recovering; pending cells
+have correctly oriented cyan outlines (orange when blocked). Leg recovery only
+starts after the assembly exists and takes 0.8 seconds. Missing geometry is
+included in floor clearance so the replacement cannot spawn under the floor.
+
+Mount loads are evaluated once per fixed tick from committed physics state,
+not stale CPU particle positions midway through a GPU dispatch. The recovery
+interval excludes motor-driven pose correction from overload detachment;
+weapon destruction and connection cuts still work throughout recovery.
+Detached cells use normal debris expiry and never enter terrain restoration
+queues.
 
 The golem uses twelve constraint iterations; additional shape passes visit only
 golem cells. Ordinary gameplay retains its existing iteration count. CPU, GLSL
@@ -184,3 +199,39 @@ obstruction-aware regrowth is not asserted to finish during that stress run.
 This is a golem-fixture test, not a full-map destruction or multiplayer soak.
 Logs use `damping-0999-*`, `accuracy-0999-*`, and `stress-0999-gpu.txt` in
 `artifacts/golem/physics`.
+
+## Lab startup and atomic repair regression
+
+The startup failure came from the normal debris-hit path testing inactive
+combatants. The lab's cleared enemy slot retained a position inside the new
+golem, and contact removed 14 body cells on the first frame. Inactive slots now
+skip debris hits. Mounted golem cells use physical collisions and are not
+consumed as disposable projectiles when a player touches them.
+
+Run the actual lab initialization plus gameplay physics/maintenance loop with:
+
+```powershell
+./tools/validate_golem_physics.ps1 -Backend 43 -Lab
+./tools/validate_golem_physics.ps1 -Backend 33 -Lab
+./tools/validate_golem_physics.ps1 -Backend 43 -Repair -Capture
+./tools/validate_golem_physics.ps1 -Backend 33 -Repair
+```
+
+`-Lab` checks 60 seconds each at 30, 60 and 144 FPS plus catch-up frames.
+`-Repair` retains fallen debris and checks complete segment connectivity,
+both-leg regrowth, arm/hand/chest/head replacement, partial allocation rollback,
+individual-cell loss, held debris and actor obstruction. The regular suite also
+checks terrain obstruction, weapons/tether detachment and launched-hand travel.
+Leg-regrowth captures are in `artifacts/golem/physics/leg-regrowth`.
+
+Validated on Windows after the repair fix: OpenGL 3.3/CPU and OpenGL 4.3/GPU
+passed all three 60-second lab runs and catch-up frames, the original action
+suite, and the atomic repair suite. Damage during standing recovery and
+canceling a debris dissolve passed on both backends. A forced GPU validation
+failure fell back to CPU, completed regeneration and recovered to GPU. The
+four-player Firefight/Crosscut integration regression passed. Both packaged
+Windows game executables were rebuilt; Metal runtime validation remains
+unavailable on this machine.
+
+Run `python tools/golem_physics_media.py` after the capture commands to produce
+`physical-leg-regrowth.gif` alongside the existing action GIFs.

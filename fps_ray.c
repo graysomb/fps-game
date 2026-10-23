@@ -1192,6 +1192,7 @@ typedef struct {
     bool reinforced;
     bool persistentConstruction;
     bool golemOwned;
+    float golemReclaimStart;
     uint64_t identity;
     int  min_gx, max_gx;
     int  min_gy, max_gy;
@@ -4586,7 +4587,7 @@ static bool init_voxel_struct(Voxel *v,
     v->gy = (int)floorf(py / VOXEL_SIZE);
     v->gz = (int)floorf(pz / VOXEL_SIZE);
     v->identity = nextVoxelIdentity++;
-    v->reinforced=false;v->persistentConstruction=false;v->golemOwned=false;
+    v->reinforced=false;v->persistentConstruction=false;v->golemOwned=false;v->golemReclaimStart=0;
     if (nextVoxelIdentity == 0) nextVoxelIdentity = 1;
     v->min_gx = v->max_gx = v->gx;
     v->min_gy = v->max_gy = v->gy;
@@ -10672,6 +10673,9 @@ static void handle_pbd_projectile_hits(void)
         if(v->simulate && !v->sleeping && !voxel_is_fluid(v))
             ducks_segment(v_sub(v->pos,v_mul(v->vel,PBD_MAX_STEP_DT)),v->pos,v->rest_edge*.6f,i);
         if(v->foundryTrapHeavy){++i;continue;}
+        /* Mounted body cells collide through the particle solver. They are not
+         * disposable projectiles when a player walks into the golem. */
+        if(v->golemOwned && v->persistentConstruction){++i;continue;}
         if (!v->simulate || v->sleeping || voxel_is_fluid(v)) {
             ++i;
             continue;
@@ -10687,6 +10691,7 @@ static void handle_pbd_projectile_hits(void)
         hologram_projectile(i,v_sub(v->pos,v_mul(v->vel,PBD_MAX_STEP_DT)),v->pos,(float)VOXEL_DAMAGE);
         bool removed = false;
         for (int j = 0; j < activePlayers; ++j) {
+            if(players[j].respawn_timer>0)continue;
             if (tetherTag[i] == j + 1 || tetherHoldClusterTag[i] == j + 1) {
                 continue;
             }
@@ -17571,6 +17576,12 @@ static void prepare_dynamic_voxel_transforms(void) {
         Vector3 xAxis = v_sub(p1, p0);
         Vector3 yAxis = v_sub(p2, p0);
         Vector3 zAxis = v_sub(p4, p0);
+
+        if(v->golemReclaimStart>0){
+            float remaining=Clamp(1-(goClock-v->golemReclaimStart)/.25f,0,1);
+            xAxis=v_mul(xAxis,remaining);yAxis=v_mul(yAxis,remaining);zAxis=v_mul(zAxis,remaining);
+            r=Lerp(.2f,r,remaining);g=Lerp(.9f,g,remaining);b=Lerp(1.f,b,remaining);
+        }
 
         Vector3 center = {0};
         for(int k=0; k<8; ++k) center = v_add(center, v->particles[k]->pos);
