@@ -13,21 +13,31 @@ static void fixture(int humans){
     for(int i=0;i<MAX_PLAYERS;i++)playerInput[i]=INPUT_TYPE_KEYBOARD;
 }
 static void timing(void){
-    fixture(2);ff_wave_complete();assert(camp.active && firefightIntermissionTimer==30);
-    for(int i=0;i<2;i++)prepReady[i]=true;
+    fixture(2);Vector3 before[2]={players[0].pos,players[1].pos};
+    equipment[0].gun[0]=EQ_RAIL;players[0].goldTetherCharged=true;
+    ff_wave_complete();assert(!camp.active && firefightWaveState==FIREFIGHT_STATE_LOOT && firefightIntermissionTimer==30);
+    for(int i=0;i<2;i++){assert(Vector3Distance(players[i].pos,before[i])==0);assert(!prepMenuOpen[i] && !ff_input_blocked(i));prepReady[i]=true;}
+    update_firefight_logic(29.9f);assert(firefightWaveState==FIREFIGHT_STATE_LOOT && !camp.active);
+    for(int i=0;i<2;i++)assert(Vector3Distance(players[i].pos,before[i])==0);
+    assert(fp_reserve(1));fpCount=1;fpItems[0]=(FfItem){.id=1,.owner=-1,.type=PICKUP_GLOB,.pos=players[0].pos};
+    fp_tick(0);assert(fpItems[0].owner==0 && eq_gun(0)==EQ_GLOB);
+    update_firefight_logic(.11f);assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION && camp.active && firefightIntermissionTimer==30);
+    assert(equipment[0].gun[0]==EQ_RAIL && eq_gun(0)==EQ_GLOB && players[0].goldTetherCharged);
+    for(int i=0;i<2;i++){assert(prepMenuOpen[i] && !prepReady[i]);prepReady[i]=true;}
     update_firefight_logic(4.9f);assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION && camp.active);
     prepReady[1]=false;update_firefight_logic(.2f);assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION);
     prepReady[1]=true;update_firefight_logic(.01f);assert(firefightWave==2 && !camp.active);
-    ff_wave_complete();update_firefight_logic(29.9f);assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION);
+    ff_wave_complete();update_firefight_logic(FF_LOOT_SECONDS);
+    update_firefight_logic(29.9f);assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION);
     update_firefight_logic(.2f);assert(firefightWave==3 && !camp.active);
     for(int n=0;n<3;n++)teamUpgradeLevels[n]=teamUpgradeCaps[n];
-    ff_wave_complete();update_firefight_logic(1);assert(camp.active && firefightWaveState==FIREFIGHT_STATE_INTERMISSION);
+    ff_wave_complete();update_firefight_logic(FF_LOOT_SECONDS);update_firefight_logic(1);assert(camp.active && firefightWaveState==FIREFIGHT_STATE_INTERMISSION);
     for(int i=0;i<2;i++)prepReady[i]=true;update_firefight_logic(4.1f);
     assert(firefightWave==4 && !camp.active && ff_upgrades_maxed());
 }
 static void placement(void){
     for(int humans=1;humans<=4;humans++){
-        fixture(humans);int count=voxel_count;ff_wave_complete();assert(camp.active);
+        fixture(humans);int count=voxel_count;ff_wave_complete();update_firefight_logic(FF_LOOT_SECONDS);assert(camp.active);
         for(int i=0;i<humans;i++){
             assert(v_isfinite(players[i].pos));assert(spawn_position_clear_ex(players[i].pos,spawn_clear_half(i),0,i));
             Vector3 d=world_delta(camp.pos,players[i].pos);d.y=0;assert(v_dot(v_norm(d),player_forward(&players[i]))>.999f);
@@ -48,7 +58,7 @@ static void placement(void){
     enemyLab=true;camp_begin();assert(!camp.active);enemyLab=false;firefightPractice=true;camp_begin();assert(!camp.active);
 }
 static void captures(void){
-    fixture(4);ff_wave_complete();assert(camp.active);camp_init();assert(campShader.id && campShader.id!=rlGetShaderIdDefault());
+    fixture(4);ff_wave_complete();update_firefight_logic(FF_LOOT_SECONDS);assert(camp.active);camp_init();assert(campShader.id && campShader.id!=rlGetShaderIdDefault());
     gameState=GAME_STATE_PAUSED;float age=camp.age;camp_update(2);assert(camp.active && camp.age==age);gameState=GAME_STATE_PLAYING;
     Model models[3]={campSolid,campFlames,campSmoke};for(int m=0;m<3;m++)for(int n=0;n<models[m].meshes[0].vertexCount*3;n++)assert(isfinite(models[m].meshes[0].vertices[n]));
     unsigned int vao=campSolid.meshes[0].vaoId;int count=voxel_count;

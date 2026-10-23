@@ -301,7 +301,11 @@ conservation, repeated checkpoint restoration and controller/keyboard settings.
 `tests/firefight_progression_lan.c` checks real host/client inventory transfer,
 carrier state, charging, wave votes, retry synchronization and stale input rejection.
 
-Preparation lasts 30 seconds. Vote to increase the team's build, harvest, or throw
+After the last enemy dies, a 30-second loot period lets players explore and pick
+up dropped equipment before regrouping. A countdown shows when regrouping starts;
+the upgrade menu stays closed and ready-up cannot skip this loot period.
+Players then gather at the camp for a separate 30-second preparation period.
+Vote to increase the team's build, harvest, or throw
 upgrade level. Bonuses persist and stack across waves; ties default to building,
 or the next available upgrade when building is maxed. Everyone can
 ready to skip the remaining break after five seconds. Top face (keyboard `V`/`N`)
@@ -1278,7 +1282,7 @@ contact, and moving debris make them disappear into a short puff of feathers.
 They return after 90 seconds of gameplay; blocked respawn spots wait until clear.
 They do not award points, drop equipment, or count toward Firefight waves.
 Feathers are bounded cosmetic geometry, not dynamic voxel bodies. LAN state is
-host authoritative; protocol **26** requires matching builds.
+host authoritative; protocol **27** requires matching builds.
 
 `tools/validate_ducks.ps1 -Backend 33` (or `43`) validates authored routes, hit
 paths, cover occlusion, respawn timing, pause behavior, periodic seams, and network

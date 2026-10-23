@@ -59,7 +59,7 @@ static void ordinary_melee_with_sword(void){
   setup();equipment[0].gun[equipment[0].selected]=blade?EQ_BLADE:EQ_DEFAULT;players[0].matter=0;players[0].isExposed=true;
   add_static_box_at_grid(-3,3,2,9,-3,-3,GRAY);init_static_hash();rebuild_voxel_hash();
   perform_melee(0);assert(players[0].meleeSwingActive && !players[0].swordSwing && !swordWaves[0].active && players[0].matter==0);
-  assert(swordNextDirection[0]==0 && player_weapon_kind(&players[0])==WEAPON_STANDARD);
+  assert(swordNextDirection[0]==0 && player_weapon_kind(&players[0])==(blade?WEAPON_SWORD:WEAPON_STANDARD));
   players[0].meleeSwingStartTime=(float)GetTime()-MELEE_ANIM_DURATION_SECONDS*WEAPON_MELEE_PEAK;
   update_melee_swings();harvested[blade]=players[0].matter;remaining[blade]=voxel_count;
   assert(players[0].meleeSwingHitApplied && !swordWaves[0].active);
@@ -119,6 +119,17 @@ static void preview(void){
  setup();activePlayers=1;weaponRenderingReady=weapon_renderer_init();character_renderer_init();weaponFrameSampled=false;
  add_static_box_at_grid(-7,7,0,12,-8,-8,GRAY);init_static_hash();rebuild_voxel_hash();
  RenderTexture2D rt=LoadRenderTexture(960,540);weaponViewAspect=960.f/540;
+ for(int balance=0;balance<=100;balance+=100){
+  setup();weaponFrameSampled=false;players[0].matter=balance;players[0].isExposed=balance==0;
+  perform_melee(0);eq_tick(.01f);players[0].meleeSwingStartTime=(float)GetTime()-MELEE_ANIM_DURATION_SECONDS*.5f;
+  assert(!players[0].swordSwing && !swordWaves[0].active && players[0].matter==balance);
+  WeaponPose held=player_weapon_pose(0,true),world=player_weapon_pose(0,false);assert(held.kind==WEAPON_SWORD && world.kind==WEAPON_SWORD);
+  Camera3D camera={players[0].pos,v_add(players[0].pos,(Vector3){0,0,-1}),{0,1,0},60,CAMERA_PERSPECTIVE};
+  BeginTextureMode(rt);ClearBackground((Color){21,29,43,255});BeginMode3D(camera);weapon_draw(held,&weaponVisuals[0],camera.position,(float)GetTime(),false,WEAPON_COLOR);character_draw_paws(held,BLUE,false);EndMode3D();EndTextureMode();
+  Image im=LoadImageFromTexture(rt.texture);ImageFlipVertical(&im);ExportImage(im,TextFormat("artifacts/sword-free-melee-%d.png",balance));UnloadImage(im);
+ }
+ setup();weaponFrameSampled=false;
+ add_static_box_at_grid(-7,7,0,12,-8,-8,GRAY);init_static_hash();rebuild_voxel_hash();
  for(int frame=0;frame<48;frame++){
   if(frame==0 || frame==24){players[0].last_melee_time=-100;perform_sword(0);}
   eq_tick(1.f/30);drawViewPlayerIndex=0;

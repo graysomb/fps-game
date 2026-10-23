@@ -56,7 +56,7 @@ static bool fp_receive(NetMessageType type,NetReader *r,uint32_t tick){
   float prep=net_read_f32(r),restart=net_read_f32(r);uint32_t unlocked=net_read_u32(r);unsigned upgrades[3];for(int k=0;k<3;k++)upgrades[k]=net_read_u8(r);
   int life[4],ready[4],votes[4],menus[4],owners[4];float progress[4];for(int i=0;i<4;i++){life[i]=net_read_u8(r);ready[i]=net_read_u8(r);votes[i]=net_read_u8(r);menus[i]=net_read_u8(r);progress[i]=net_read_f32(r);owners[i]=net_read_u8(r)-1;}
   for(int n=0;n<4;n++)if(life[n]>LIFE_UNUSED||ready[n]>1||menus[n]>1||(votes[n]>2&&votes[n]!=255)||!isfinite(progress[n])||progress[n]<0||owners[n]>=4)return true;
-  if(r->failed || humans<1||humans>4||wave<1||state>FIREFIGHT_STATE_RESTART||!isfinite(prep)||!isfinite(restart))return true;
+  if(r->failed || humans<1||humans>4||wave<1||state>FIREFIGHT_STATE_LOOT||!isfinite(prep)||!isfinite(restart))return true;
   gameMode=GAME_MODE_FIREFIGHT;firefightPractice=false;activePlayers=MAX_COMBATANTS;firefightHumans=humans;firefightCheckpoints=checkpoints;firefightEndless=endless;firefightFoundry=foundry;
   firefightWave=wave;firefightWaveState=state;firefightTeamLives=lives;firefightScore=score;firefightKillsTotal=kills;firefightWaveEnemiesTotal=total;firefightWaveEnemiesRemaining=remaining;firefightEnemiesSpawned=spawned;
   firefightIntermissionTimer=prep;fpRestartTimer=restart;memcpy(teamUpgradeLevels,upgrades,sizeof(upgrades));

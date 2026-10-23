@@ -172,13 +172,17 @@ static void ff_wave_complete(void) {
     if(!firefightEndless && firefightWave>=FF_WAVE_COUNT) {
         firefightWaveState=FIREFIGHT_STATE_VICTORY; gameState=GAME_STATE_GAMEOVER; return;
     }
-    firefightWaveState=FIREFIGHT_STATE_INTERMISSION;
-    firefightWaveBannerTimer=0; firefightIntermissionTimer=FF_PREP_SECONDS;
+    firefightWaveState=FIREFIGHT_STATE_LOOT;
+    firefightWaveBannerTimer=0; firefightIntermissionTimer=FF_LOOT_SECONDS;
     if(firefightWave%2==0) firefightTeamLives++;
     for(int i=0;i<firefightHumans;i++) {
-        ff_restore_human(i,MATTER_MAX_DEFAULT); prepVotes[i]=ff_upgrade_choice(2,1); prepReady[i]=false; prepMenuOpen[i]=true;
+        Vector3 position=players[i].pos,velocity=players[i].vel;
+        bool present=combatantLife[i]==LIFE_ALIVE || combatantLife[i]==LIFE_DOWNED;
+        ff_restore_human(i,MATTER_MAX_DEFAULT);
+        if(present){players[i].pos=players[i].death_pos=position;players[i].vel=velocity;}
+        prepVotes[i]=ff_upgrade_choice(2,1); prepReady[i]=false; prepMenuOpen[i]=false;
     }
-    camp_begin();
+    camp_end();
 }
 
 static bool ff_spawn_position(int slot, Vector3 *out) {
@@ -204,6 +208,16 @@ static void update_firefight_logic(float dt) {
     if(firefightWaveBannerTimer>0) firefightWaveBannerTimer-=dt;
     ff_update_coop(dt);
     if(gameState==GAME_STATE_GAMEOVER || firefightWaveState==FIREFIGHT_STATE_RESTART) return;
+    if(firefightWaveState==FIREFIGHT_STATE_LOOT) {
+        firefightIntermissionTimer=fmaxf(0,firefightIntermissionTimer-dt);
+        if(firefightIntermissionTimer<=0){
+            firefightWaveState=FIREFIGHT_STATE_INTERMISSION;
+            firefightIntermissionTimer=FF_PREP_SECONDS;
+            for(int i=0;i<firefightHumans;i++){prepReady[i]=false;prepMenuOpen[i]=true;}
+            camp_begin();
+        }
+        return;
+    }
     if(firefightWaveState==FIREFIGHT_STATE_INTERMISSION) {
         firefightIntermissionTimer-=dt;
         bool ready=true;

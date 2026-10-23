@@ -406,7 +406,7 @@ typedef enum {
     FIREFIGHT_STATE_ACTIVE = 0,
     FIREFIGHT_STATE_INTERMISSION,
     FIREFIGHT_STATE_VICTORY,
-    FIREFIGHT_STATE_DEFEAT, FIREFIGHT_STATE_RESTART
+    FIREFIGHT_STATE_DEFEAT, FIREFIGHT_STATE_RESTART, FIREFIGHT_STATE_LOOT
 } FirefightWaveState;
 
 static int firefightWave = 1;
@@ -18037,7 +18037,7 @@ static WeaponKind player_weapon_kind(const Player *p) {
     int i=-1;for(int n=0;n<MAX_COMBATANTS;n++)if(p==&players[n]){i=n;break;}
     if(fp_carrier(i))return (WeaponKind)fp_carrier_visual(i);
     if(i>=0 && i<MAX_PLAYERS && equipment[i].initialized && !is_player_bot(i)){
-        if(eq_gun(i)==EQ_BLADE && p->meleeSwingActive)return p->swordSwing?WEAPON_SWORD:WEAPON_STANDARD;
+        if(eq_gun(i)==EQ_BLADE && p->meleeSwingActive)return WEAPON_SWORD;
         if(equipment[i].buildHeld || equipment[i].buildTime>0 || weaponVisuals[i].deployment>0)return WEAPON_REINFORCED_BUILDER;
         return eqGuns[eq_gun(i)].visual;
     }
@@ -20873,6 +20873,10 @@ static void render_gameplay_view(RenderTexture2D *screens,
                     int banner_x = (view_w - banner_w) / 2;
                     int banner_y = (view_h / 4);
                     DrawText(banner_text, banner_x, banner_y, banner_size, banner_color);
+                } else if (firefightWaveState == FIREFIGHT_STATE_LOOT) {
+                    int size=view_w<700?12:20;
+                    const char *line=TextFormat("WAVE %d CLEARED | COLLECT LOOT | REGROUP IN %.1fs",firefightWave,fmaxf(0,firefightIntermissionTimer));
+                    DrawText(line,(view_w-MeasureText(line,size))/2,44,size,GREEN);
                 } else if (firefightWaveState == FIREFIGHT_STATE_INTERMISSION) {
                     int size=view_w<700?12:20;
                     const char *line=TextFormat("WAVE %d CLEARED | NEXT IN %.1fs",firefightWave,firefightIntermissionTimer);

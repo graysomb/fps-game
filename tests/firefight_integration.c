@@ -92,11 +92,12 @@ int main(int argc,char **argv) {
     firefightWave=2;teamUpgrade=UPGRADE_THROW;teamUpgradeLevels[UPGRADE_THROW]=1;ff_wave_complete();
     assert(combatantLife[1]==LIFE_ALIVE && players[1].matter==MATTER_MAX_DEFAULT);
     assert(firefightTeamLives==1 && teamUpgradeLevels[UPGRADE_THROW]==1);
+    update_firefight_logic(FF_LOOT_SECONDS);
     for(int i=0;i<4;i++){prepVotes[i]=UPGRADE_HARVEST;prepReady[i]=true;}
     update_firefight_logic(5.1f);assert(firefightWave==3 && teamUpgrade==UPGRADE_HARVEST);
     assert(ff_harvest_amount(0)==15 && ff_harvest_amount(4)==MATTER_MELEE_HARVEST);
     firefightWave=FF_WAVE_COUNT;firefightEndless=false;ff_wave_complete();assert(firefightWaveState==FIREFIGHT_STATE_VICTORY);
-    firefightEndless=true;ff_wave_complete();assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION);
+    firefightEndless=true;ff_wave_complete();assert(firefightWaveState==FIREFIGHT_STATE_LOOT);
     /* Four views render without indexing enemy slots as cameras. */
     RenderTexture2D screens[4]={0};int count=0,w=0,h=0;
     gameState=GAME_STATE_PLAYING;
@@ -184,6 +185,8 @@ int main(int argc,char **argv) {
         }
         assert(watchdog>0 && firefightWaveEnemiesRemaining==0);
         if(wave<FF_WAVE_COUNT) {
+            assert(firefightWaveState==FIREFIGHT_STATE_LOOT);
+            update_firefight_logic(FF_LOOT_SECONDS);
             assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION);
             prepReady[0]=true;update_firefight_logic(5.1f);
             assert(firefightWave==wave+1);
