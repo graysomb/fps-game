@@ -76,6 +76,7 @@ static Matrix go_smooth_matrix(Matrix a,Matrix b,float amount){
 }
 static Vector3 go_corner(GoCell *c,int corner){return v_add(c->center,(Vector3){corner_signs[corner][0]*c->size.x*.5f,corner_signs[corner][1]*c->size.y*.5f,corner_signs[corner][2]*c->size.z*.5f});}
 static void golem_physics_reset(void){
+    go_combat_reset();
     goActive=false;skeletonConstraintCount=0;
     free(goCells);free(goLinks);free(goWelds);free(skeletonConstraints);
     free(goRollback.cells);memset(&goRollback,0,sizeof(goRollback));
@@ -137,6 +138,7 @@ static void go_connect(void){
 }
 static void go_release_part(int part){
     if(part<=0||part>=GM_COUNT)return;
+    if(part==GM_CORE&&goCombatEnabled&&!goCombatDead)return;
     goLost[part]=goClock;goOverload[part]=0;
     for(int i=0;i<goCount;i++)if(goCells[i].part==part&&goCells[i].index>=0){
         int index=go_find(goCells[i].id,goCells[i].index);
@@ -162,6 +164,7 @@ static void go_launch_hand(void){
     Vector3 delta=v_sub(target,origin);
     float flight=fmaxf(.15f,sqrtf(delta.x*delta.x+delta.z*delta.z)/22.f);
     Vector3 velocity=v_mul(delta,1/flight);velocity.y+=.5f*GRAVITY*flight;
+    go_combat_launch(origin,&target,&velocity);
     /* Apply before GPU packing, not during a GPU substep: both backends must
      * receive the impulse once. Equal corner velocities preserve the fist. */
     for(int i=0;i<goCount;i++)if(goCells[i].part==GOLEM_HAND_R&&goCells[i].index>=0)
@@ -169,7 +172,7 @@ static void go_launch_hand(void){
     go_release_part(GOLEM_HAND_R);
 }
 static void golem_physics_prepare(void){
-    if(!goActive)return;
+    if(!goActive||goCombatDead)return;
     for(int i=0;i<goCount;i++){
         GoCell *c=&goCells[i];int old=c->index;c->index=go_find(c->id,c->index);
         if(c->index>=0&&!voxels[c->index].vgs_active){voxels[c->index].persistentConstruction=false;c->index=-1;}
@@ -192,14 +195,15 @@ static void golem_physics_prepare(void){
     go_repair_prepare();
     go_connect();
     float cycleStart=goActionStart+floorf((goClock-goActionStart)/6)*6;
-    if(goAction==GOLEM_THROW&&goClock-cycleStart>=.7f+.6f*golem_action_seconds(GOLEM_THROW)&&goLastHandLaunch<cycleStart){
+    if(!goCombatEnabled&&goAction==GOLEM_THROW&&goClock-cycleStart>=.7f+.6f*golem_action_seconds(GOLEM_THROW)&&goLastHandLaunch<cycleStart){
         goLastHandLaunch=cycleStart;go_launch_hand();
     }
 }
 static void golem_physics_tick(float dt){
-    skeletonConstraintCount=0;if(!goActive)return;
+    skeletonConstraintCount=0;if(!goActive||goCombatDead)return;
     goClock+=dt;goInput.position.y=.04f;goInput.time=goClock;goInput.action=(GolemAction)goAction;goInput.actionProgress=Clamp((fmodf(goClock-goActionStart,6)-.7f)/golem_action_seconds(goInput.action),0,1);
-    if(goAction==GOLEM_WALK){goInput.travel=goClock*.45f;goInput.position.x=sinf(goClock*.25f)*1.0f;goInput.yaw=sinf(goClock*.25f)*20;}
+    if(!goCombatEnabled&&goAction==GOLEM_WALK){goInput.travel=goClock*.45f;goInput.position.x=sinf(goClock*.25f)*1.0f;goInput.yaw=sinf(goClock*.25f)*20;}
+    if(goCombatEnabled)go_combat_pose();
     for(int side=0;side<2;side++){
         int arm=side?GOLEM_ARM_R:GOLEM_ARM_L,shin=side?GOLEM_SHIN_R:GOLEM_SHIN_L;
         int parts[2]={arm,shin};for(int j=0;j<2;j++){
@@ -212,6 +216,10 @@ static void golem_physics_tick(float dt){
     goPose=golem_sample(&goInput);
     float blend=1-expf(-dt/0.15f);
     for(int p=0;p<GOLEM_JOINT_COUNT;p++)goPose.joint[p]=go_smooth_matrix(previousPose.joint[p],goPose.joint[p],blend);
+    if(goCombatEnabled && goPose.kneel>.01f){
+        goPose.chest.m12+=goPose.joint[GOLEM_ROOT].m0*.9f;
+        goPose.chest.m14+=goPose.joint[GOLEM_ROOT].m2*.9f;
+    }
     goPose.chest=go_smooth_matrix(previousPose.chest,goPose.chest,blend);
     goPose.core=go_smooth_matrix(previousPose.core,goPose.core,blend);
     goPose.eye=go_smooth_matrix(previousPose.eye,goPose.eye,blend);
@@ -296,6 +304,7 @@ static bool golem_physics_start(void){
 }
 static void golem_lab_draw(void){
     if(!goActive)return;
+    go_combat_draw();
     if(goOverlay)golem_draw_skeleton(&goPose);
     if(goRegen)for(int i=0;i<goCount;i++)if(goCells[i].index<0&&goClock-goCells[i].missing>1.25f){
         Vector3 corners[8];go_cell_points(i,corners);
@@ -307,7 +316,7 @@ static void golem_lab_draw(void){
 /* Only the reactor and visor emit. Use their simulated corners, never the
  * animated bone transform, so glow follows impacts and detached cells. */
 static void golem_emission(void){
-    if(!goActive)return;
+    if(!goActive||goCombatDead)return;
     for(int i=0;i<voxel_count;i++){
         Voxel *v=&voxels[i];
         if(!v->golemOwned||!v->vgs_active||v->color.r!=255)continue;

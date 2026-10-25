@@ -32,6 +32,8 @@ typedef struct GolemInput {
     /* Optional caller-resolved contacts enable planted feet on arbitrary paths.
      * Contacts are ankle positions, in world units, not sole positions. */
     bool feetResolved;
+    bool combatReach; /* Optional lab controller target; demos retain their authored poses. */
+    Vector3 attackTarget;
     Vector3 feet[2];
     float footYaw[2];
 } GolemInput;

@@ -60,6 +60,8 @@ GolemPose golem_sample(const GolemInput *source){
     bool walking=in->action==GOLEM_WALK && p.kneel<.001f;
     float bob=walking?.025f*cosf(gait*4*PI):.006f*sinf(time*1.6f);
     float pelvisY=Lerp(1.82f,.78f,p.kneel)+bob*(1-p.kneel)-slam*.95f;
+    float lowSweep=in->combatReach&&action==GOLEM_SWEEP?gr_ease(0,.35f,progress)*(1-gr_ease(.7f,1,progress)):0;
+    pelvisY-=.70f*lowSweep;
     Matrix pelvis=gr_local((Vector3){0,pelvisY,0},(Vector3){0,0,stagger},MatrixIdentity());
     p.joint[GOLEM_PELVIS]=MatrixMultiply(pelvis,root);
     float recoil=sinf(PI*Clamp(in->hitAge/.6f,0,1))*.10f;
@@ -67,6 +69,7 @@ GolemPose golem_sample(const GolemInput *source){
     if(in->hitJoint==GOLEM_TORSO)lean+=recoil;
     if(action==GOLEM_SWEEP)torsion=(in->side?1:-1)*(-.55f*gr_ease(0,.35f,progress)+1.2f*gr_ease(.35f,.62f,progress))*(1-gr_ease(.72f,1,progress));
     if(action==GOLEM_SLAM)lean-=.90f*slam;
+    lean-=.65f*lowSweep;
     Matrix torso=gr_local((Vector3){0,.28f,0},(Vector3){lean,torsion,0},pelvis);
     p.joint[GOLEM_TORSO]=MatrixMultiply(torso,root);
     p.joint[GOLEM_HEAD]=gr_local((Vector3){0,1.28f,0},(Vector3){.15f*p.kneel,.08f*sinf(time*.6f),0},p.joint[GOLEM_TORSO]);
@@ -104,9 +107,15 @@ GolemPose golem_sample(const GolemInput *source){
         Matrix lower=gr_local((Vector3){0,-.72f,0},(Vector3){elbow,0,0},upper);
         Matrix palm=gr_local((Vector3){0,-.68f,0},(Vector3){0},lower);
         bool brace=p.kneel>.01f && !in->damage[s].removed && ((left>.01f&&s==0) || (right>.01f&&s==1) || in->damage[1-s].removed);
-        if(brace || (action==GOLEM_SLAM && s==in->side && slam>0)){
-            float weight=brace?p.kneel:slam;
+        bool combatSweep=in->combatReach&&action==GOLEM_SWEEP&&s==in->side;
+        if(brace || combatSweep || (action==GOLEM_SLAM && s==in->side && slam>0)){
+            float weight=brace?p.kneel:combatSweep?lowSweep:slam;
             Vector3 shoulder=gr_origin(upper),wrist={side*1.20f,.39f,shoulder.z-.10f};
+            if(in->combatReach&&!brace){
+                wrist=Vector3Transform(in->attackTarget,MatrixInvert(root));
+                wrist.y=combatSweep?1.0f:.42f;
+                if(combatSweep)wrist.x+=Lerp(-1.2f,1.2f,gr_ease(.35f,.7f,progress));
+            }
             wrist=Vector3Lerp(gr_origin(palm),wrist,weight);
             Vector3 reach=Vector3Subtract(wrist,shoulder);
             if(Vector3Length(reach)>1.399f)wrist=gr_add(shoulder,Vector3Scale(Vector3Normalize(reach),1.399f));

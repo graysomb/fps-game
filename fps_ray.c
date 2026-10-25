@@ -882,8 +882,11 @@ static bool player_uses_rat(int i) {
 }
 
 
+#include "golem_combat.h"
+
 /* The gameplay position remains the eye/camera anchor for human players. */
 static BoundingBox combatant_bounds_at(int slot,Vector3 pos,float legacy_half) {
+    if(go_combat_actor(slot))legacy_half=.30f;
     if(slot>=MAX_PLAYERS && slot<MAX_COMBATANTS && players[slot].enemyType==ENEMY_TYPE_FOUNDRY)legacy_half=.75f;
     if(player_uses_rat(slot)) return (BoundingBox){
         {pos.x-CHARACTER_HALF_WIDTH,pos.y-BASE_EYE_HEIGHT,pos.z-CHARACTER_HALF_WIDTH},
@@ -1193,6 +1196,7 @@ typedef struct {
     bool persistentConstruction;
     bool golemOwned;
     float golemReclaimStart;
+    float golemDebrisAge;
     uint64_t identity;
     int  min_gx, max_gx;
     int  min_gy, max_gy;
@@ -4587,7 +4591,7 @@ static bool init_voxel_struct(Voxel *v,
     v->gy = (int)floorf(py / VOXEL_SIZE);
     v->gz = (int)floorf(pz / VOXEL_SIZE);
     v->identity = nextVoxelIdentity++;
-    v->reinforced=false;v->persistentConstruction=false;v->golemOwned=false;v->golemReclaimStart=0;
+    v->reinforced=false;v->persistentConstruction=false;v->golemOwned=false;v->golemReclaimStart=0;v->golemDebrisAge=0;
     if (nextVoxelIdentity == 0) nextVoxelIdentity = 1;
     v->min_gx = v->max_gx = v->gx;
     v->min_gy = v->max_gy = v->gy;
@@ -10167,6 +10171,7 @@ static void kill_player(int player_index, int attacker_index,
             return; // Friendly fire disabled in Firefight
         }
     }
+    if(go_combat_actor(player_index)){if(players[player_index].invuln_timer<=0)go_combat_damage(35,false);return;}
     Player *player = &players[player_index];
     if(player->enemyType==ENEMY_TYPE_FOUNDRY && enemySpecial[player_index].coreHealth>0) {
         apply_matter_damage(player_index,attacker_index,35);return;
@@ -10298,6 +10303,7 @@ static void apply_matter_damage(int player_index, int attacker_index, float dama
     if (player->respawn_timer > 0.0f) {
         return;
     }
+    if(go_combat_actor(player_index)){if(player->invuln_timer<=0)go_combat_damage(damage,tetherDrainDamage);return;}
     if(damage>0 && player->invuln_timer<=0 && attacker_index>=0 && attacker_index<activePlayers)
         ai_alert(player_index,attacker_index,aiProjectileDamage?aiProjectileOrigin:players[attacker_index].pos,AI_ALERT_HIT);
     if(player->enemyType==ENEMY_TYPE_FOUNDRY) {
@@ -10675,7 +10681,7 @@ static void handle_pbd_projectile_hits(void)
         if(v->foundryTrapHeavy){++i;continue;}
         /* Mounted body cells collide through the particle solver. They are not
          * disposable projectiles when a player walks into the golem. */
-        if(v->golemOwned && v->persistentConstruction){++i;continue;}
+        if(v->golemOwned && (v->persistentConstruction || (goCombatEnabled&&!v->wasTethered))){++i;continue;}
         if (!v->simulate || v->sleeping || voxel_is_fluid(v)) {
             ++i;
             continue;
@@ -11371,7 +11377,7 @@ static void gather_particle_pair_collisions_range(int start, int end, int worker
         float scene_radius_sq = pa->radius * pa->radius;
         for (int player_idx = 0; player_idx < activePlayers; ++player_idx) {
             Player *pl = &players[player_idx];
-            if (pl->respawn_timer > 0.0f) continue;
+            if (pl->respawn_timer > 0.0f || go_combat_actor(player_idx)) continue;
             BoundingBox body = combatant_bounds(player_idx, PLAYER_SIZE*.5f);
             Vector3 box_min=body.min, box_max=body.max;
             Vector3 imageOffset=v_sub(world_image(pl->pos,scene_pos),pl->pos);
@@ -12876,7 +12882,7 @@ static void solve_static_collision_particle(Particle *p, float half_player) {
 
     for (int player_idx = 0; player_idx < activePlayers; ++player_idx) {
         Player *pl = &players[player_idx];
-        if (pl->respawn_timer > 0.0f) continue;
+        if (pl->respawn_timer > 0.0f || go_combat_actor(player_idx)) continue;
         BoundingBox body = combatant_bounds(player_idx, PLAYER_SIZE*.5f);
             Vector3 box_min=body.min, box_max=body.max;
             Vector3 imageOffset=v_sub(world_image(pl->pos,pos),pl->pos);
@@ -12947,7 +12953,7 @@ static void solve_static_collisions_range(int start, int end, int worker_id, voi
         // Player collision
         for (int player_idx = 0; player_idx < activePlayers; ++player_idx) {
             Player *pl = &players[player_idx];
-            if (pl->respawn_timer > 0.0f) {
+            if (pl->respawn_timer > 0.0f || go_combat_actor(player_idx)) {
                 continue;
             }
             BoundingBox body = combatant_bounds(player_idx, PLAYER_SIZE*.5f);
@@ -13472,6 +13478,7 @@ static void voxel_measure_strain(const Voxel *voxel,
 
 #include "skeleton_constraints.inc"
 #include "golem_physics.inc"
+#include "golem_combat.inc"
 #include "tether_coupling.inc"
 #include "physics_gpu_common.inc"
 
@@ -13945,7 +13952,7 @@ static void advance_gold_release_grace(int fixed_steps) {
 static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
     /* Animated constraints need a committed body between fixed ticks. */
     if((goActive||weak_tether_any())&&fixed_steps>1){for(int i=0;i<fixed_steps;i++)simulate_voxel_pbd_steps(dt,1);return;}
-    if (fixed_steps > 0) { foundry_traps_prepare();golem_physics_prepare(); }
+    if (fixed_steps > 0) { go_combat_prepare(dt);foundry_traps_prepare();golem_physics_prepare(); }
     if(fixed_steps<=0)return;
     if(dynamic_particle_count()<=0){for(int fixed=0;fixed<fixed_steps;fixed++)weak_tether_prepare(dt);return;}
     if (sim_particle_count == 0 && fluid_should_skip_reduced_rate_step()) {
@@ -13983,6 +13990,7 @@ static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
             physics_mark_gpu_recovered();
             resolve_tether_throw_ccd_snapshots(tether_ccd_snapshots,
                                                tether_ccd_snapshot_count, fixed_steps);
+            go_combat_commit(dt);
             fluid_note_completed_step(dt);
             advance_gold_release_grace(fixed_steps);
             physicsBackend.last_step_ms = pbdProfileEnabled ? (pbd_time_now_ms() - started) : (GetTime() - started) * 1000.0;
@@ -13998,6 +14006,7 @@ static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
         }
         resolve_tether_throw_ccd_snapshots(tether_ccd_snapshots,
                                            tether_ccd_snapshot_count, fixed_steps);
+        go_combat_commit(dt);
         fluid_note_completed_step(dt);
         advance_gold_release_grace(fixed_steps);
         double step_ms = pbdProfileEnabled ? (pbd_time_now_ms() - started) : (GetTime() - started) * 1000.0;
@@ -14015,6 +14024,7 @@ static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
     }
     resolve_tether_throw_ccd_snapshots(tether_ccd_snapshots,
                                        tether_ccd_snapshot_count, fixed_steps);
+    go_combat_commit(dt);
     fluid_note_completed_step(dt);
     advance_gold_release_grace(fixed_steps);
     double step_ms = pbdProfileEnabled ? (pbd_time_now_ms() - started) : (GetTime() - started) * 1000.0;
@@ -16252,10 +16262,29 @@ static inline float ray_t_to_next_plane(float p,      // ray.position.x  (or y /
     return (nextPlane - p) / d;              // d has sign, so t is positive
 }
 
+static bool go_body_ray(Ray ray,float reach,int ignore,const uint64_t *ignored,int ignoreCount,VoxelHit *out){
+    if(!goActive||v_length(ray.direction)<1e-8f)return false;
+    float nearest=reach;bool found=false;Vector3 dir=v_norm(ray.direction);
+    uint64_t core=goCombatEnabled&&goMount[GM_CORE]>=0?goCells[goMount[GM_CORE]].id:0;
+    for(int n=0;n<voxel_count;n++){
+        Voxel *v=&voxels[n];if(n==ignore||!v->golemOwned||!v->vgs_active||v->identity==core)continue;
+        bool skip=false;for(int k=0;k<ignoreCount;k++)if(v->identity==ignored[k])skip=true;if(skip)continue;
+        if(tetherCcdTracing&&tetherCcdIgnore[n]==tetherCcdStamp)continue;
+        Vector3 a=v->particles[0]->pos,axis[3];float lengths[3];
+        for(int k=0;k<3;k++){axis[k]=v_sub(v->particles[1<<k]->pos,a);lengths[k]=v_length(axis[k]);axis[k]=v_norm(axis[k]);}
+        Vector3 rel=v_sub(ray.position,a);Ray local={0};
+        for(int k=0;k<3;k++){(&local.position.x)[k]=v_dot(rel,axis[k]);(&local.direction.x)[k]=v_dot(dir,axis[k]);}
+        RayCollision h=GetRayCollisionBox(local,(BoundingBox){{-.008f,-.008f,-.008f},{lengths[0]+.008f,lengths[1]+.008f,lengths[2]+.008f}});
+        if(h.hit&&h.distance>=0&&h.distance<=nearest){nearest=h.distance;Vector3 normal=v_add(v_add(v_mul(axis[0],h.normal.x),v_mul(axis[1],h.normal.y)),v_mul(axis[2],h.normal.z));*out=(VoxelHit){n,v->gx,v->gy,v->gz,nearest,normal};found=true;}
+    }return found;
+}
+
 static bool first_voxel_hit_filtered(Ray ray, float t_max, int ignore_id,
                                         bool static_only, int ignore_goliath_owner,
                                         VoxelHit *out_hit,const uint64_t *ignored,int ignore_count)
 {
+    VoxelHit goHit;bool hitGolem=!static_only && go_body_ray(ray,t_max,ignore_id,ignored,ignore_count,&goHit);
+    if(hitGolem)t_max=fminf(t_max,goHit.t);
     float direction_length = v_length(ray.direction);
     if (direction_length <= 1e-8f || t_max < 0.0f) return false;
     Vector3 dir = v_mul(ray.direction, 1.0f / direction_length);
@@ -16290,6 +16319,7 @@ static bool first_voxel_hit_filtered(Ray ray, float t_max, int ignore_id,
             } else {
                 valid = (v->vgs_active && !v->isBullet && v->type == 0 && !voxel_is_fluid(v));
             }
+            if(v->golemOwned)valid=false;
             for(int n=0;valid && n<ignore_count;n++)if(v->identity==ignored[n])valid=false;
             if (valid) {
                 if (out_hit) {
@@ -16319,6 +16349,7 @@ static bool first_voxel_hit_filtered(Ray ray, float t_max, int ignore_id,
             entry_normal = (Vector3){ 0.0f, 0.0f, (float)-step_z };
         }
     }
+    if(hitGolem){if(out_hit)*out_hit=goHit;return true;}
     return false;
 }
 
@@ -17645,7 +17676,6 @@ static void prepare_dynamic_voxel_transforms(void) {
 
 // Draw all voxels via greedy mesh instead of per-voxel raycasting
 static void DrawVoxels(Camera3D cam) {
-    golem_lab_draw();
     if (!instancingInitialized) {
         InitInstancing();
     }
@@ -17751,6 +17781,7 @@ static void DrawVoxels(Camera3D cam) {
         draw_particle_debug();
     }
     regeneration_draw();
+    golem_lab_draw();
 }
 
 static Color scale_color(Color c, float scale, unsigned char alpha) {
@@ -18137,7 +18168,7 @@ static bool player_has_gun(int player_index) {
 }
 
 static void draw_player_weapon(int player_index, Vector3 eye, bool first_person, WeaponRenderPass pass) {
-    if (!player_has_gun(player_index)) return;
+    if (go_combat_actor(player_index) || !player_has_gun(player_index)) return;
     Player *p = &players[player_index];
     weapon_draw(player_weapon_pose(player_index, first_person), &weaponVisuals[player_index],
                 eye, weaponFrameSampled ? weaponFrameTime : (float)GetTime(),
@@ -18318,6 +18349,7 @@ static void draw_rat_visors(int viewPlayer,Vector3 eye) {
 static void draw_players(void) {
     enemy_draw();
     for (int i = 0; i < activePlayers; i++) {
+        if(go_combat_actor(i))continue;
         Player *p = &players[i];
         if(!periodic_visible(p->respawn_timer>0?p->death_pos:p->pos,4))continue;
         if(gameMode==GAME_MODE_FIREFIGHT && i<firefightHumans && combatantLife[i]==LIFE_DOWNED) {
@@ -19328,6 +19360,7 @@ static void bot_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float
 #include "firefight_progression.inc"
 #include "chunk_regeneration_net.inc"
 static void UpdateBot(int playerIdx, float dt) {
+    if(go_combat_actor(playerIdx))return;
     players[playerIdx].vel=v_sub(players[playerIdx].vel,exBotApplied[playerIdx]);exBotApplied[playerIdx]=(Vector3){0};
     if(enemyLab && enemyLabPaused && !enemyLabStep) return;
     if(netTransport.role==NET_ROLE_CLIENT)return;
@@ -22680,6 +22713,7 @@ int main(int argc, char **argv) {
 
         // update players
         for (int i = 0; i < activePlayers; i++) {
+            if(go_combat_actor(i))continue;
             if (players[i].respawn_timer > 0.0f) {
                 continue;
             }

@@ -24,7 +24,7 @@ static void lab_frame(float dt){
 static void lab_check(void){
     const int rates[]={30,60,144};
     for(int r=0;r<3;r++){
-        enemy_lab_start(ENEMY_TYPE_COUNT+1);pbdTimeAccumulator=0;
+        enemy_lab_start(ENEMY_TYPE_COUNT+1);go_combat_reset();pbdTimeAccumulator=0;
         Vector3 inactive=players[MAX_PLAYERS].pos;
         int probe=addVoxel(inactive.x,inactive.y,inactive.z,false,true,GRAY,0);assert(probe>=0);
         uint64_t probeId=voxels[probe].identity;handle_pbd_projectile_hits();

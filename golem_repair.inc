@@ -21,7 +21,7 @@ static void go_mount_loads(void){
             error=fmaxf(error,distance);if(p->inv_mass>0)load+=distance/(goLastDt*goLastDt*p->inv_mass);
         }
         goError=fmaxf(goError,error);goLoad=fmaxf(goLoad,load/fmaxf(mass*GRAVITY,1));
-        bool recovering=goRepair[go_repair_group(part)].phase==GO_REPAIR_RECOVER;
+        bool recovering=goRepair[go_repair_group(part)].phase==GO_REPAIR_RECOVER || go_combat_motor_grace(part);
         goOverload[part]=!recovering&&load>8*mass*GRAVITY?goOverload[part]+2*goLastDt:0;
         if(goOverload[part]>.12f){
             if(getenv("GOLEM_DEBUG"))printf("Golem detach: overload part=%d time=%.3f error=%.4f load=%.2fx\n",part,goClock,error,load/fmaxf(mass*GRAVITY,1));
@@ -92,7 +92,7 @@ static void go_repair_prepare(void){
             int cell=pending[k],parent=goParent[goCells[cell].part];
             if(parent>0&&goCells[goMount[parent]].index<0&&go_repair_group(parent)!=group){blocked=true;break;}
             Vector3 a[8];go_cell_points(cell,a);
-            for(int p=0;p<activePlayers&&!blocked;p++)if(players[p].respawn_timer<=0){
+            for(int p=0;p<activePlayers&&!blocked;p++)if(players[p].respawn_timer<=0 && !go_combat_actor(p)){
                 Vector3 b[8];go_box_points(combatant_bounds_at(p,players[p].pos,PLAYER_SIZE*.5f),b);
                 if(go_boxes_overlap(a,b))blocked=true;
             }

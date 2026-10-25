@@ -925,7 +925,7 @@ static void gpu_set_uniforms(float dt) {
             player_extents[i][a]=((&body.max.x)[a]-(&body.min.x)[a])*.5f;
         }
         player_extents[i][3]=0;
-        player_data[i][3] = (i < activePlayers && players[i].respawn_timer <= 0.0f) ? PLAYER_SIZE * 0.5f : -1.0f;
+        player_data[i][3] = (i < activePlayers && players[i].respawn_timer <= 0.0f && !go_combat_actor(i)) ? PLAYER_SIZE * 0.5f : -1.0f;
         Vector3 pull = world_delta(tetherTargetByPlayer[i], tetherComByPlayer[i]);
         tether_data[i][0] = pull.x;
         tether_data[i][1] = pull.y;

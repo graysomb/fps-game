@@ -29,6 +29,7 @@ static void enemy_lab_start(int which) {
         for(int i=MAX_PLAYERS;i<MAX_COMBATANTS;i++){combatantLife[i]=LIFE_UNUSED;players[i].respawn_timer=9999;}
         enemyLabCase=which;worldPeriodic=false;worldFloorHalfSize=32;
         if(!golem_physics_start()){enemy_lab_exit();TraceLog(LOG_WARNING,"Unable to allocate physical golem");return;}
+        go_combat_start();enemyLabGod=false;
         add_static_box_at_grid(-12,-10,0,4,20,24,GRAY);
         add_static_box_at_grid(10,12,0,8,20,24,GRAY);
         init_static_hash();rebuild_voxel_hash();return;
@@ -134,7 +135,12 @@ static void enemy_lab_ai_step(float dt) {
 static bool enemy_lab_controls(void) {
     enemyLabStep=false;
     if(goActive){
-        if(IsKeyPressed(KEY_F3)||couch_button(0,GAMEPAD_BUTTON_LEFT_FACE_RIGHT)){goAction=(goAction+1)%5;goActionStart=goClock;}
+        if(IsKeyPressed(KEY_F3)||couch_button(0,GAMEPAD_BUTTON_LEFT_FACE_RIGHT)){
+            if(goCombatEnabled){go_combat_reset();goAction=GOLEM_IDLE;}
+            else if(goAction==GOLEM_THROW)go_combat_start();
+            else goAction++;
+            goActionStart=goClock;
+        }
         if(IsKeyPressed(KEY_F4)||couch_button(0,GAMEPAD_BUTTON_RIGHT_FACE_UP)){enemy_lab_start(ENEMY_TYPE_COUNT+1);return true;}
         if(IsKeyPressed(KEY_F5)||couch_button(0,GAMEPAD_BUTTON_RIGHT_FACE_LEFT))enemyLabPaused=!enemyLabPaused;
         if(IsKeyPressed(KEY_F6)||couch_button(0,GAMEPAD_BUTTON_RIGHT_TRIGGER_1)){enemyLabPaused=true;enemyLabStep=true;}
@@ -164,12 +170,23 @@ static void enemy_lab_hud(int w,int h) {
     int fs=w<900?14:18;
     if(goActive){
         int attached=0,owned=0;for(int i=0;i<goCount;i++)attached+=goCells[i].index>=0;for(int i=0;i<voxel_count;i++)owned+=voxels[i].golemOwned;
-        DrawRectangle(8,70,w-16,156,Fade(BLACK,.75f));
-        DrawText(TextFormat("DYNAMIC GOLEM | action %d | %s | regeneration %s",goAction,enemyLabPaused?"PAUSED":"RUNNING",goRegen?"ON":"OFF"),16,78,fs,GOLD);
-        DrawText(TextFormat("Body %d/%d | owned %d | constraints %d | error %.3fm | physics %.2fms",attached,goCount,owned,skeletonConstraintCount,goError,physicsBackend.last_step_ms),16,102,fs,SKYBLUE);
-        DrawText("F3/D-right action | F4/Top reset | F5/Left pause | F6/RB step",16,126,fs,RAYWHITE);
-        DrawText("F8/D-down regen | F9 skeleton | F10/LB arm | F11 leg | F12 chest",16,150,fs,RAYWHITE);
-        DrawText(TextFormat("Repair: %s | F7/Back god | Console: give weapons | Esc exit",go_repair_status()),16,174,fs,RAYWHITE);return;
+        if(goCombatEnabled){
+            int width=(w-48)/2;
+            DrawRectangle(8,70,w-16,76,Fade(BLACK,.65f));
+            DrawText(TextFormat("GOLEM | %s | %s",go_combat_status(),enemyLabGod?"GOD MODE":"COMBAT"),16,76,fs,GOLD);
+            DrawRectangle(16,101,width,10,DARKGRAY);DrawRectangle(16,101,(int)(width*goFight.shield/goShieldMax),10,SKYBLUE);
+            DrawRectangle(32+width,101,width,10,DARKGRAY);DrawRectangle(32+width,101,(int)(width*goFight.health/goCoreMax),10,ORANGE);
+            const char *charge=goFight.suppressed>0?"SUPPRESSED":goFight.shield>=goShieldMax?"FULL":goFight.time-goFight.lastHit<goShieldDelay?"RECHARGE DELAY":"REGENERATING";
+            DrawText(TextFormat("SHIELD %.0f/150 | %s",goFight.shield,charge),16,118,fs,SKYBLUE);
+            DrawText(TextFormat("REACTOR %.0f/200",goFight.health),32+width,118,fs,ORANGE);
+        }
+        int y=h-106;
+        DrawRectangle(8,y-8,w-16,104,Fade(BLACK,.65f));
+        DrawText(goCombatDead?"GOLEM DEFEATED - F4 / Top to fight again":goCombatEnabled?"Break legs to open chest. Drain shield, then damage reactor.":TextFormat("MANUAL DEMO %d | %s",goAction,enemyLabPaused?"PAUSED":"RUNNING"),16,y,fs,GOLD);
+        DrawText("F3/D-right mode | F4/Top reset | F5/Left pause | F6/RB step",16,y+22,fs,RAYWHITE);
+        DrawText("F7/Back god | F8/D-down regen | F9 skeleton | F10/LB arm | F11 leg | F12 chest",16,y+44,w<900?11:14,RAYWHITE);
+        DrawText(TextFormat("Body %d/%d | debris %d | repair %s | %.2fms | Esc exit",attached,goCount,owned-attached,go_repair_status(),physicsBackend.last_step_ms),16,y+66,fs,SKYBLUE);
+        return;
     }
     if(equipmentLab){DrawText("WEAPON LAB | F4 reset | F7 god | Esc exit",16,75,fs,GOLD);DrawText("Cycle grenades: D-pad Down / Tab / ;  |  Console: give glob|glock|dmr|gravity|igloo",16,99,w<900?12:16,SKYBLUE);return;}
     DrawRectangle(8,70,w-16,232,Fade(BLACK,.8f));
