@@ -19289,6 +19289,30 @@ static float CalculateUtility_Flee(const Player *bot, int enemyIdx) {
     return bot->isExposed ? 1.0f : 0.35f;
 }
 
+/* Fan out only during the visible final approach. A fixed heading per slot
+ * avoids random frame-to-frame zigzags; inward pressure never drops to zero. */
+static Vector3 swarmer_approach(int index,int target,Vector3 destination,bool visible) {
+    Vector3 inward=world_delta(destination,players[index].pos);inward.y=0;
+    float distance=v_length(inward);
+    if(!visible || distance<.85f || distance>=12)return inward;
+    Vector3 radial=v_mul(inward,1/distance);
+    Vector3 tangent={radial.z,0,-radial.x};
+    float separation=0;bool pack=false;
+    for(int j=0;j<activePlayers;j++){
+        if(j==index || players[j].enemyType!=ENEMY_TYPE_SWARMER || players[j].respawn_timer>0 || aiCombat[j].target!=target)continue;
+        Vector3 away=world_delta(players[index].pos,players[j].pos);away.y=0;
+        float d=v_length(away);if(d<8)pack=true;
+        if(d>.001f && d<2)separation+=(away.x*tangent.x+away.z*tangent.z)/d*(1-d/2);
+        else if(d<=.001f)separation+=index>j?1:-1;
+    }
+    if(!pack)return inward;
+    float heading=atan2f(-radial.z,-radial.x)*RAD2DEG;
+    float preferred=fmodf(index*137.50776f,360.f);
+    float turn=clampf(angle_diff_deg(heading,preferred)/60.f,-1,1);
+    float blend=clampf((12-distance)/4,0,1)*clampf((distance-.85f)/.8f,0,1);
+    return v_add(radial,v_mul(tangent,blend*clampf(turn*1.4f+separation*.7f,-1.8f,1.8f)));
+}
+
 static void bot_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float speed, float dt)
 {
     desired_dir.y = 0.0f;
@@ -19415,7 +19439,7 @@ static void UpdateBot(int playerIdx, float dt) {
             float len = v_length(toEnemy);
             if (len > 0.05f) {
                 float swarmerSpeed = MOVE_SPEED * 1.35f;
-                bot_apply_move(bot, bs, toEnemy, swarmerSpeed, dt);
+                bot_apply_move(bot, bs, swarmer_approach(playerIdx,enemyIdx,targetDest,isDirectlyVisible), swarmerSpeed, dt);
                 float targetYaw, targetPitch;
                 dir_to_yaw_pitch(toEnemy, &targetYaw, &targetPitch);
                 bot->yaw += angle_diff_deg(bot->yaw, targetYaw) * fminf(1.0f, 12.0f * dt);

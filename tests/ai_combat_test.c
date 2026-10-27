@@ -53,11 +53,45 @@ static void swarmer_checks(void) {
     update_enemy_contact_damage(.1f);assert(players[0].matter==100);netTransport.role=NET_ROLE_OFFLINE;
     fprintf(stderr,"Swarmer 25 damage, exposed finish, invulnerability, authority and local rally passed\n");
 }
+static void swarmer_spread_checks(void) {
+    arena(INPUT_TYPE_BOT_EASY);worldPeriodic=false;activePlayers=12;
+    Vector3 target={0,2,0};players[0].pos=target;
+    for(int i=4;i<12;i++){
+        enemy_lab_spawn(i,ENEMY_TYPE_SWARMER,(Vector3){(i-7.5f)*.12f,2,7});
+        aiCombat[i].target=0;
+    }
+    bool arrived[12]={0};int left=0,right=0,hits=0;float low=1000,high=-1000;
+    for(int frame=0;frame<360;frame++){
+        Vector3 next[12];
+        for(int i=4;i<12;i++){
+            next[i]=players[i].pos;if(arrived[i])continue;
+            Vector3 delta=world_delta(target,players[i].pos);delta.y=0;
+            if(v_length(delta)<.85f){
+                arrived[i]=true;hits++;left+=players[i].pos.x<-.15f;right+=players[i].pos.x>.15f;
+                float a=atan2f(players[i].pos.x,players[i].pos.z);low=fminf(low,a);high=fmaxf(high,a);continue;
+            }
+            Vector3 move=swarmer_approach(i,0,target,true);
+            assert(isfinite(move.x) && isfinite(move.z));
+            assert(move.x*delta.x+move.z*delta.z>0);
+            next[i]=v_add(players[i].pos,v_mul(move,(MOVE_SPEED*1.35f/60)/v_length(move)));
+        }
+        for(int i=4;i<12;i++)players[i].pos=next[i];
+    }
+    assert(hits==8 && left>=2 && right>=2 && high-low>1.5f);
+    players[4].pos=(Vector3){0,2,5};
+    Vector3 unseen=swarmer_approach(4,0,target,false);assert(unseen.x==0 && unseen.z==-5);
+    for(int i=5;i<12;i++)players[i].respawn_timer=1;
+    Vector3 lone=swarmer_approach(4,0,target,true);assert(lone.x==0 && lone.z==-5);
+    worldPeriodic=true;worldFloorHalfSize=40;players[4].pos=(Vector3){39,2,0};
+    Vector3 wrapped=swarmer_approach(4,0,(Vector3){-39,2,0},true);assert(wrapped.x>0 && fabsf(wrapped.x-2)<.01f);
+    worldPeriodic=false;
+    fprintf(stderr,"Eight swarmers converge from both sides across %.1f degrees; memory, lone pursuit and periodic seam passed\n",(high-low)*RAD2DEG);
+}
 int main(int argc,char **argv) {
     assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);
     SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);
     InitWindow(640,480,"AI combat regression");init_pbd_thread_pool();assert(initialize_physics_backend());
-    swarmer_checks();
+    swarmer_checks();swarmer_spread_checks();
     int levels[]={INPUT_TYPE_BOT_EASY,INPUT_TYPE_BOT_MEDIUM,INPUT_TYPE_BOT_HARD};
     int rates[]={30,60,120};
     for(int d=0;d<3;d++)for(int r=0;r<3;r++){
