@@ -87,6 +87,7 @@ static void buildFoundryHoldout(void) {
         foundry_shell(-4,4,0,5,side*33-1,side*33+1,stone,3);
     }
     if(!firefightPractice) {
+        for(int sx=-1;sx<=1;sx+=2)for(int sz=-1;sz<=1;sz+=2)foundry_corner_pillar(sx,sz);
         enemy_stock_scrap(true);
     }
 }

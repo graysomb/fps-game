@@ -20,7 +20,7 @@ static bool foundry_trap_complete(const FoundryTrap *t) {
 }
 static void foundry_trap_release(int n) {
     FoundryTrap *t=&foundryTraps[n];
-    int total=t->kind==FOUNDRY_BAY?t->originalCount:(t->x1-t->x0+1)*(t->y1-t->y0+1)*(t->z1-t->z0+1);
+    int total=foundry_fractured(t)?t->originalCount:(t->x1-t->x0+1)*(t->y1-t->y0+1)*(t->z1-t->z0+1);
     /* Capacity preflight keeps exhausted pools from starting a release. */
     if(total>FOUNDRY_TRAP_PAYLOAD || voxel_count+total>=MAX_VOXELS || particle_pool_count-free_particle_count+8*total>=MAX_PARTICLES || recycleQueueCount+t->originalCount>MAX_VOXELS)return;
     t->active=true;t->pending=false;t->victims=0;t->activation++;
@@ -35,10 +35,10 @@ static void foundry_trap_release(int n) {
         if(release>=0){recycle_queue_push(&voxels[release]);remove_voxel_index(release);}
     }
     // A blast may have activated orange supports before the linked release.
-    if(t->fourPosts || t->kind==FOUNDRY_BAY)for(int id=voxel_count-1;id>=0;id--){
+    if(t->fourPosts || foundry_fractured(t))for(int id=voxel_count-1;id>=0;id--){
         Voxel *v=&voxels[id];
         if(v->simulate && !v->isBullet && v->type==0 &&
-           ((t->kind==FOUNDRY_BAY && foundry_trap_trigger(t,v->orig_min_gx,v->orig_min_gy,v->orig_min_gz)) ||
+           ((foundry_fractured(t) && foundry_trap_trigger(t,v->orig_min_gx,v->orig_min_gy,v->orig_min_gz)) ||
            (t->fourPosts && v->orig_min_gy>=t->ry && v->orig_min_gy<t->y0 &&
            (v->orig_min_gx==t->x0 || v->orig_min_gx==t->x1) &&
            (v->orig_min_gz==t->z0 || v->orig_min_gz==t->z1))))remove_voxel_index(id);
@@ -91,6 +91,11 @@ static void foundry_trap_release(int n) {
             if(t->kind==FOUNDRY_BAY && v->orig_min_gy<t->y1){
                 float push=.8f+1.2f*clampf((p->pos.y-2)/3,0,1);
                 p->vel.z+=v->orig_min_gz<(t->z0+t->z1)/2?push:-push;
+            }
+            if(t->kind==FOUNDRY_PILLAR){
+                float push=.5f+1.5f*clampf(p->pos.y/10,0,1);
+                p->vel.x+=t->x0>0?-push:push;
+                p->vel.z+=t->z0>0?-push:push;
             }
             if(t->kind==FOUNDRY_TIP)p->vel.z+=1.2f+1.8f*clampf(p->pos.y-t->y0*VOXEL_SIZE,0,3);
         }
@@ -169,7 +174,7 @@ static void foundry_traps_draw(void) {
         for(float x=-width*.5f;x<width*.5f;x+=.75f)DrawLine3D(v_add(center,(Vector3){x,0,-depth*.5f}),v_add(center,(Vector3){x+.35f,0,-depth*.5f+.35f}),c);
         if(t->active)continue;
         Vector3 release={(t->rx+.5f)*.5f,(t->ry+.5f)*.5f,(t->rz+.5f)*.5f};
-        if(t->kind==FOUNDRY_BAY){
+        if(foundry_fractured(t)){
             for(int k=0;k<t->originalCount;k++){const Voxel *v=&t->original[k];
                 if(v->gx==t->rx && v->gy==t->ry && v->gz==t->rz)DrawCubeWires(v->pos,.6f,.6f,.6f,YELLOW);
             }

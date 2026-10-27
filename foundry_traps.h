@@ -1,7 +1,7 @@
 /* Arena-only gameplay state; stable voxel tags survive compaction and GPU readback. */
 #define FOUNDRY_TRAPS 32
 #define FOUNDRY_TRAP_PAYLOAD 2048
-typedef enum { FOUNDRY_DROP, FOUNDRY_SWITCH, FOUNDRY_TIP, FOUNDRY_BAY } FoundryTrapKind;
+typedef enum { FOUNDRY_DROP, FOUNDRY_SWITCH, FOUNDRY_TIP, FOUNDRY_BAY, FOUNDRY_PILLAR } FoundryTrapKind;
 typedef struct {
     FoundryTrapKind kind;
     int x0,x1,y0,y1,z0,z1,rx,ry,rz,owner;
@@ -31,8 +31,9 @@ static bool foundry_bay_crack(const FoundryTrap *t,int x,int y,int z) {
     int k=foundry_bay_index(t,x,y,z);
     return k>=0 && ColorToInt(t->original[k].color)==ColorToInt(ORANGE);
 }
+static bool foundry_fractured(const FoundryTrap *t) { return t->kind==FOUNDRY_BAY || t->kind==FOUNDRY_PILLAR; }
 static bool foundry_trap_contains(const FoundryTrap *t,int x,int y,int z) {
-    if(t->kind==FOUNDRY_BAY)return y>0 && foundry_bay_index(t,x,y,z)>=0 && !foundry_bay_crack(t,x,y,z);
+    if(foundry_fractured(t))return y>0 && foundry_bay_index(t,x,y,z)>=0 && !foundry_bay_crack(t,x,y,z);
     return x>=t->x0 && x<=t->x1 && y>=t->y0 && y<=t->y1 && z>=t->z0 && z<=t->z1;
 }
 static void foundry_trap_define(FoundryTrapKind kind,int x0,int x1,int y0,int y1,int z0,int z1,int rx,int ry,int rz) {
@@ -53,7 +54,7 @@ static void foundry_trap_define(FoundryTrapKind kind,int x0,int x1,int y0,int y1
 }
 
 static bool foundry_trap_trigger(const FoundryTrap *t,int x,int y,int z) {
-    if(t->kind==FOUNDRY_BAY)return foundry_bay_crack(t,x,y,z);
+    if(foundry_fractured(t))return foundry_bay_crack(t,x,y,z);
     if(t->fourPosts)return y==t->ry && (x==t->x0 || x==t->x1) && (z==t->z0 || z==t->z1);
     return x==t->rx && y==t->ry && z==t->rz;
 }
@@ -125,6 +126,30 @@ static void foundry_bay_trap(int x,int z) {
             gz<(t.z0+back)/2?gy:height-gy;
         if(gy>0 && cracks[v][gx-t.x0]){add_static_voxel_at_grid(gx,gy,gz,ORANGE,0);id=table_get_static_only(gx,gy,gz);}
         t.original[t.originalCount++]=voxels[id];
+    }
+    foundryTraps[foundryTrapCount++]=t;
+}
+
+/* Four metres square, ten metres tall; fracture sheets continue through the
+ * solid interior so visible cracks also separate the physical chunks. */
+static void foundry_corner_pillar(int sx,int sz) {
+    if(foundryTrapCount>=FOUNDRY_TRAPS)return;
+    int cx=sx*70,cz=sz*70;
+    FoundryTrap t={.kind=FOUNDRY_PILLAR,.x0=cx-4,.x1=cx+3,.y0=0,.y1=19,
+        .z0=cz-4,.z1=cz+3,.owner=-1};
+    t.original=calloc(8*8*20,sizeof(Voxel));if(!t.original)return;
+    unsigned seed=0xa137u^(unsigned)cx*73856093u^(unsigned)cz*19349663u;
+    bool cracks[64][64]={0};
+    for(int y=4;y<=16;y+=6)foundry_crack_path(cracks,0,y,7,y+1,&seed);
+    foundry_crack_path(cracks,3,4,4,19,&seed);
+    bool marked=false;
+    for(int z=t.z0;z<=t.z1;z++)for(int y=0;y<=19;y++)for(int x=t.x0;x<=t.x1;x++){
+        bool crack=y>0 && cracks[y][x-t.x0];
+        Color color=crack?ORANGE:(Color){127,173,178,255};
+        add_static_voxel_at_grid(x,y,z,color,0);
+        int id=table_get_static_only(x,y,z);
+        if(id>=0)t.original[t.originalCount++]=voxels[id];
+        if(crack && !marked){t.rx=x;t.ry=y;t.rz=z;marked=true;}
     }
     foundryTraps[foundryTrapCount++]=t;
 }
