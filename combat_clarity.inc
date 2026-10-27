@@ -40,8 +40,15 @@ static void clarity_effect(ClarityEffect e,bool broadcast) {
     int slot=0;for(int n=0;n<CLARITY_EFFECTS;n++){if(!clarityEffects[n].id){slot=n;break;}if(clarityEffects[n].age>clarityEffects[slot].age)slot=n;}
     clarityEffects[slot]=e;
     if(e.kind==1){play_sfx_at(SFX_DEATH,e.pos,-1,3,e.type==ENEMY_TYPE_SWARMER?1.6f:.8f);if(e.attacker>=0 && e.attacker<MAX_COMBATANTS){killConfirm[e.attacker]=.45f;if(net_player_is_local(e.attacker) && !is_player_bot(e.attacker))play_sfx(SFX_KILL);}}
+    else if(e.kind==3) play_sfx_at(SFX_SHIELD,e.pos,-1,1,1);
     else play_sfx_at(SFX_EXPLOSION,e.pos,-1,3,1);
     if(broadcast)clarity_net_event(e);
+}
+/* Pure presentation: spawn bursts must never allocate recyclable terrain.
+   Call only after the actor has its final entrance position. */
+static void clarity_spawn(int slot) {
+    if(enemyLab || netTransport.role==NET_ROLE_CLIENT)return;
+    clarity_effect((ClarityEffect){.id=clarityNextId++,.kind=3,.type=players[slot].enemyType,.attacker=-1,.pos=players[slot].pos},true);
 }
 static void clarity_death(int slot,int attacker) {
     swarmHintActive[slot]=false;
@@ -201,6 +208,15 @@ static void clarity_draw(void) {
     for(int n=0;n<CLARITY_EFFECTS;n++)if(clarityEffects[n].id){ClarityEffect *e=&clarityEffects[n];float t=e->age;Color color=e->kind==2?ORANGE:e->type==ENEMY_TYPE_SWARMER?RED:LIGHTGRAY;
         if(!periodic_visible(e->pos,4))continue;
         if(e->kind==2){feedback_blast(e);continue;}
+        if(e->kind==3){
+            float fade=clampf(1-t/.8f,0,1),radius=.3f+t*1.5f;
+            Color flash=Fade(SKYBLUE,fade);
+            rlDrawRenderBatchActive();rlDisableDepthMask();
+            DrawSphereWires(e->pos,radius,5,12,flash);
+            if(t<.16f)DrawSphere(e->pos,.25f*(1-t/.16f),Fade(RAYWHITE,fade));
+            rlDrawRenderBatchActive();rlEnableDepthMask();
+            continue;
+        }
         if(t<.12f)DrawCube(e->pos,1-t*3,1-t*3,1-t*3,YELLOW);
         for(int c=0;c<8;c++){Vector3 p=v_add(e->pos,(Vector3){corner_signs[c][0]*t*2,corner_signs[c][1]*t-t*t*3,corner_signs[c][2]*t*2});DrawCube(p,.3f*(1-t),.3f*(1-t),.3f*(1-t),Fade(color,1-t/.8f));}
     }

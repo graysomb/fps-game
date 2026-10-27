@@ -701,6 +701,7 @@ static void enemy_update(int i,float dt) {
                 at=nudge_spawn_clear(at,PLAYER_SIZE*.25f,1,j);
                 if(!spawn_position_clear_ex(at,PLAYER_SIZE*.25f,1,j)) continue;
                 init_firefight_bot_entity(j,ENEMY_TYPE_SWARMER,INPUT_TYPE_BOT_EASY);players[j].pos=at;
+                clarity_spawn(j);
                 if(!enemyLab) {ffRemaining[ENEMY_TYPE_SWARMER]--;firefightEnemiesSpawned++;}
                 s->spawned++;added++;
             }

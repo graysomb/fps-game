@@ -11,6 +11,27 @@ static void empty(void){
     netTransport.role=NET_ROLE_OFFLINE;worldFloorHalfSize=40;firefightWaveState=FIREFIGHT_STATE_ACTIVE;
     for(int i=0;i<MAX_COMBATANTS;i++){players[i].pos=(Vector3){20+i,BASE_EYE_HEIGHT,20};players[i].matter=100;players[i].matterMax=100;players[i].kd_ratio=1;players[i].last_damage_time=-1000;combatantLife[i]=i<2?LIFE_ALIVE:LIFE_UNUSED;combatantTeam[i]=i<2?0:1;playerInput[i]=i<2?INPUT_TYPE_KEYBOARD:INPUT_TYPE_BOT_HARD;reviveOwner[i<4?i:0]=-1;}
 }
+static void spawn_feedback(void){
+    empty();clarity_reset();
+    int before=voxel_count;
+    for(int n=0;n<100;n++){
+        init_firefight_bot_entity(4,ENEMY_TYPE_SWARMER,INPUT_TYPE_BOT_EASY);
+        players[4].pos=(Vector3){-12,2,17};
+        clarity_spawn(4);
+        assert(voxel_count==before);
+    }
+    int count=0;
+    for(int n=0;n<CLARITY_EFFECTS;n++)if(clarityEffects[n].id){
+        assert(clarityEffects[n].kind==3);
+        assert(v_length(v_sub(clarityEffects[n].pos,players[4].pos))<.001f);
+        count++;
+    }
+    assert(count>0 && count<=CLARITY_EFFECTS);
+    clarity_tick(1);
+    for(int n=0;n<CLARITY_EFFECTS;n++)assert(!clarityEffects[n].id);
+    assert(voxel_count==before);
+    puts("100 enemy spawns: no debris, correct flash position, bounded pool and expiry passed");
+}
 static void free_revive(void){
     empty();players[0].pos=(Vector3){0,BASE_EYE_HEIGHT,0};players[1].pos=(Vector3){1,BASE_EYE_HEIGHT,0};
     players[1].isExposed=true;kill_player(1,4,false,false);players[0].matter=0;ffTestReviveHeld[0]=true;
@@ -114,7 +135,7 @@ static void death_feedback(void){
 }
 int main(int argc,char **argv){
     assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Combat feedback");init_pbd_thread_pool();assert(initialize_physics_backend());
-    free_revive();bombs();lobbers();feedback();death_feedback();
+    spawn_feedback();free_revive();bombs();lobbers();feedback();death_feedback();
     preview(960,540,"artifacts/combat-feedback.png",false);preview(480,270,"artifacts/combat-feedback-split.png",false);preview(480,270,"artifacts/combat-feedback-fallback.png",true);
     clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Combat feedback checks passed");return 0;
 }

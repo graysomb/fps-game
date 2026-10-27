@@ -10136,29 +10136,6 @@ static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float
     return true;
 }
 
-static void spawn_player_explosion(Vector3 pos, Color color) {
-    play_sfx(SFX_EXPLOSION);
-    for (int i = 0; i < 4; ++i) {
-        float vx = (float)GetRandomValue(-200, 200) / 10.0f;
-        float vy = (float)GetRandomValue(50, 250) / 10.0f;
-        float vz = (float)GetRandomValue(-200, 200) / 10.0f;
-        float off_x = (float)GetRandomValue(-5, 5) * 0.1f;
-        float off_y = (float)GetRandomValue(-5, 5) * 0.1f;
-        float off_z = (float)GetRandomValue(-5, 5) * 0.1f;
-
-        int idx = addVoxel(pos.x + off_x, pos.y + off_y, pos.z + off_z, false, true, color, 0);
-        if (idx >= 0) {
-            voxels[idx].vel = (Vector3){ vx, vy, vz };
-            voxels[idx].lifeFrames = RECYCLE_DYNAMIC_MAX_FRAMES - GetRandomValue(60, 120);
-            for (int p = 0; p < 8; ++p) {
-                if (voxels[idx].particles[p]) {
-                    voxels[idx].particles[p]->vel = voxels[idx].vel;
-                }
-            }
-        }
-    }
-}
-
 static void apply_matter_damage(int player_index,int attacker_index,float damage);
 static void kill_player(int player_index, int attacker_index,
                         bool award_kill, bool award_debris)
@@ -14768,7 +14745,6 @@ static void init_firefight_bot_entity(int i, EnemyType etype, InputType botDiff)
     }
 
     if(etype>=ENEMY_TYPE_SCRAPPER) enemy_init(i);
-    if(!enemyLab) spawn_player_explosion(b->pos, player_palette_color(i));
     play_sfx(SFX_SHIELD);
 }
 
@@ -20633,6 +20609,7 @@ static void debug_console_exec(const char *line)
         if(slot<0) {debug_console_print("spawn: no free enemy slot");return;}
         init_firefight_bot_entity(slot,(EnemyType)type,INPUT_TYPE_BOT_MEDIUM);
         players[slot].pos=nudge_spawn_clear(v_add(players[local].pos,v_mul(player_forward(&players[local]),8)),spawn_clear_half(slot),2,slot);
+        clarity_spawn(slot);
         if(!enemyLab) {firefightWaveEnemiesTotal++;firefightWaveEnemiesRemaining++;firefightEnemiesSpawned++;}
         debug_console_printf("spawned %s in enemy slot %d",enemy_names[type],slot);return;
     }

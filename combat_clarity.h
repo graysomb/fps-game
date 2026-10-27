@@ -24,6 +24,7 @@ static void clarity_reset(void);
 static void clarity_tick(float dt);
 static void clarity_draw(void);
 static void clarity_hud(int slot,int w,int h);
+static void clarity_spawn(int slot);
 static void clarity_death(int slot,int attacker);
 static void clarity_explode(Vector3 pos,int owner);
 static void enemy_blast(EnemyCharge c);

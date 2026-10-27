@@ -275,6 +275,7 @@ static void update_firefight_logic(float dt) {
         /* Attached armor follows its owner in the normal gameplay update. */
         players[slot].pos=position;
         players[slot].death_pos=position;
+        clarity_spawn(slot);
         fp_spawn(slot,type);
         ffRemaining[type]--; firefightEnemiesSpawned++; ffSpawnOrdinal++; living++;
     }

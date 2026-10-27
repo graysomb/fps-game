@@ -25,7 +25,7 @@ static bool clarity_net_receive(NetMessageType type,NetReader *r,uint32_t tick) 
     (void)tick;
     if(type==NET_MSG_GAME_EVENT){ClarityEffect e={0};e.id=net_read_u32(r);e.kind=net_read_u8(r);e.type=net_read_u8(r);int owner=net_read_u8(r);e.attacker=owner==255?-1:owner;
         e.pos=(Vector3){net_read_f32(r),net_read_f32(r),net_read_f32(r)};e.yaw=net_read_f32(r);
-        if(!r->failed && e.id>clarityLastEvent && (e.kind==1 || e.kind==2) && e.type<ENEMY_TYPE_COUNT && v_isfinite(e.pos) && isfinite(e.yaw) && (owner==255 || owner<MAX_COMBATANTS)){clarityLastEvent=e.id;clarity_effect(e,false);}return true;}
+        if(!r->failed && e.id>clarityLastEvent && (e.kind==1 || e.kind==2 || e.kind==3) && e.type<ENEMY_TYPE_COUNT && v_isfinite(e.pos) && isfinite(e.yaw) && (owner==255 || owner<MAX_COMBATANTS)){clarityLastEvent=e.id;clarity_effect(e,false);}return true;}
     if(type!=NET_MSG_GRENADES)return false;
     uint32_t sequence=net_read_u32(r);int part=net_read_u8(r);GrenadeState incoming[16]={0};
     if(part>1 || sequence<=clarityReceiveSequence || sequence<clarityPendingSequence)return true;
