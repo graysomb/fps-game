@@ -124,6 +124,7 @@ static void start_firefight_wave(int wave_number) {
     camp_end();
     enemy_cleanup(true);
     firefightWave=wave_number<1?1:wave_number;
+    firefightRound=1;
     firefightWaveState=FIREFIGHT_STATE_ACTIVE;
     firefightWaveBannerTimer=3.5f;
     firefightWaveEnemiesTotal=0; firefightEnemiesSpawned=0;
@@ -158,6 +159,15 @@ static void reset_firefight_match(void) {
 
 static void ff_wave_complete(void) {
     if(enemyLab) return;
+    if(!firefightPractice && firefightWave==1 && firefightRound<3) {
+        firefightRound++;
+        memset(ffRemaining,0,sizeof(ffRemaining));
+        ffRemaining[ENEMY_TYPE_SWARMER]=6 << (firefightRound-1);
+        firefightWaveEnemiesTotal=firefightWaveEnemiesRemaining=ffRemaining[ENEMY_TYPE_SWARMER];
+        firefightEnemiesSpawned=0;ffSpawnOrdinal=0;ffCleanupTimer=0;
+        ffSpawnTimer=5;firefightWaveBannerTimer=5;
+        return;
+    }
     enemyCleanupPending=true;
     if(firefightPractice) {
         if(practiceStep>=4) { firefightWaveState=FIREFIGHT_STATE_VICTORY; gameState=GAME_STATE_GAMEOVER; }
@@ -297,5 +307,5 @@ static void update_firefight_logic(float dt) {
         ffRemaining[type]--; firefightEnemiesSpawned++; ffSpawnOrdinal++; living++; spawned++;
     }
     if(spawned) ffEntrance=1-ffEntrance;
-    ffSpawnTimer=firefightWave<=2?4:2;
+    ffSpawnTimer=firefightWave==1?0.5f:firefightWave==2?4:2;
 }

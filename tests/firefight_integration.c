@@ -47,22 +47,22 @@ int main(int argc,char **argv) {
     gameMode=GAME_MODE_FIREFIGHT;firefightFoundry=true;
     multiplayerActivePlayers=4;firefightPractice=false;
     ResetGame();gameState=GAME_STATE_PLAYING;
-    assert(activePlayers==16 && firefightHumans==4);
+    assert(activePlayers==MAX_COMBATANTS && firefightHumans==4);
     assert(FLOOR_SIZE==40);
     /* Opening waves must actually spawn swarmers, not just label them easier. */
     update_firefight_logic(2.1f);
-    for(int i=4;i<16;i++) if(players[i].respawn_timer<=0) assert(players[i].enemyType==ENEMY_TYPE_SWARMER);
+    for(int i=4;i<MAX_COMBATANTS;i++) if(players[i].respawn_timer<=0) assert(players[i].enemyType==ENEMY_TYPE_SWARMER);
     ResetGame();
     for(int i=0;i<4;i++) assert(combatantLife[i]==LIFE_ALIVE);
-    for(int i=4;i<16;i++) assert(players[i].respawn_timer>0);
+    for(int i=4;i<MAX_COMBATANTS;i++) assert(players[i].respawn_timer>0);
     start_firefight_wave(5);
     for(int n=0;n<30;n++)update_firefight_logic(2.1f);
     int alive=0,giants=0;
-    for(int i=4;i<16;i++) if(players[i].respawn_timer<=0) {alive++;giants+=players[i].enemyType==ENEMY_TYPE_GOLIATH;}
+    for(int i=4;i<MAX_COMBATANTS;i++) if(players[i].respawn_timer<=0) {alive++;giants+=players[i].enemyType==ENEMY_TYPE_GOLIATH;}
     /* Carrier substitutions preserve totals and the existing two-specialist cap;
        one more reinforcement now waits until a specialist dies. */
     assert(alive==11 && giants==0);
-    /* A real 16-combatant solver dispatch catches GPU uniform/tether bounds. */
+    /* A real full-capacity combatant solver dispatch catches GPU uniform/tether bounds. */
     simulate_voxel_pbd_steps(1.0f/120,2);
     players[0].pos=(Vector3){0,4,0};players[1].pos=(Vector3){1,4,0};
     test_down(1);assert(firefightTeamLives==3);
@@ -178,7 +178,7 @@ int main(int argc,char **argv) {
         int watchdog=200;
         while(firefightWaveState==FIREFIGHT_STATE_ACTIVE && watchdog-->0) {
             update_firefight_logic(2.1f);
-            for(int i=4;i<16;i++) if(players[i].respawn_timer<=0) {
+            for(int i=4;i<MAX_COMBATANTS;i++) if(players[i].respawn_timer<=0) {
                 if(players[i].enemyType==ENEMY_TYPE_FOUNDRY){enemySpecial[i].lostMask=15;apply_matter_damage(i,0,9999);continue;}
                 kill_player(i,0,true,true);
             }

@@ -411,7 +411,8 @@ typedef enum {
 
 static int firefightWave = 1;
 static int firefightWaveEnemiesTotal = 3;
-static int firefightWaveEnemiesRemaining = 3;
+static int firefightWaveEnemiesRemaining = 6;
+static int firefightRound = 1;
 static int firefightEnemiesSpawned = 3;
 static int firefightTeamLives = 3;
 static int firefightScore = 0;
@@ -481,7 +482,7 @@ static void update_draw_confetti(void) {
 
 // Input type enum
 #define MAX_PLAYERS 4
-#define MAX_COMBATANTS 16
+#define MAX_COMBATANTS 28
 #include "firefight_rules.h"
 _Static_assert(MAX_PLAYERS == FF_SEATS && MAX_COMBATANTS == FF_ACTORS, "Firefight capacity mismatch");
 _Static_assert(ENEMY_TYPE_COUNT == FF_TYPE_COUNT, "Enemy definitions and wave counts must match");
@@ -20924,6 +20925,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 {
                     const char *wave_text = TextFormat(view_w<700?"W%d HOSTILES %d/%d":"WAVE %d | HOSTILES: %d/%d",
                                                        firefightWave, firefightWaveEnemiesRemaining, firefightWaveEnemiesTotal);
+                    if(firefightWave==1 && !firefightPractice)wave_text=TextFormat("W1 R%d/3 | HOSTILES %d/%d",firefightRound,firefightWaveEnemiesRemaining,firefightWaveEnemiesTotal);
                     int wave_w = MeasureText(wave_text, hudFont);
                     int wave_x = view_w - HUD_PADDING_X - wave_w;
                     int wave_y = HUD_PADDING_Y;
@@ -20933,7 +20935,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                     int banner_size = view_w<700?24:48;
                     float alpha = clampf(firefightWaveBannerTimer / 1.0f, 0.0f, 1.0f);
                     Color banner_color = Fade((firefightWave >= 3) ? RED : GOLD, 0.9f * alpha);
-                    const char *banner_text = TextFormat("WAVE %d - INCOMING!", firefightWave);
+                    const char *banner_text = firefightWave==1 && !firefightPractice ? TextFormat("WAVE 1 - ROUND %d/3",firefightRound) : TextFormat("WAVE %d - INCOMING!", firefightWave);
                     int banner_w = MeasureText(banner_text, banner_size);
                     int banner_x = (view_w - banner_w) / 2;
                     int banner_y = (view_h / 4);

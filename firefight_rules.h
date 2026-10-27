@@ -2,8 +2,8 @@
 #define FIREFIGHT_RULES_H
 #include <stdbool.h>
 #define FF_SEATS 4
-#define FF_ENEMIES 12
-#define FF_ACTORS 16
+#define FF_ENEMIES 24
+#define FF_ACTORS (FF_SEATS + FF_ENEMIES)
 #define FF_REVIVE_SECONDS 3.0f
 #define FF_REVIVE_COST 0.0f
 #define FF_REVIVE_MATTER 35.0f
@@ -32,6 +32,7 @@ static inline int ff_ai_level(int wave, int type) {
 }
 static inline int ff_count(int wave, int humans, int type) {
     if(wave<1 || type<0 || type>=FF_TYPE_COUNT) return 0;
+    if(wave==1) return type==1?6:0;
     int base = ff_waves[(wave-1)%FF_WAVE_COUNT].count[type];
     if(type==0 && (wave-1)%FF_WAVE_COUNT<10) return base;
     if(type==9 || (wave-1)%FF_WAVE_COUNT==FF_WAVE_COUNT-1) return base;
@@ -42,7 +43,7 @@ static inline int ff_count(int wave, int humans, int type) {
 }
 static inline int ff_cap(int humans) { int n=4+2*humans; return n>12?12:n; }
 static inline int ff_wave_cap(int wave,int humans) {
-    if(wave==1) return humans+1;
+    if(wave==1) return 24;
     if(wave==2) return humans+2;
     if(wave==3) return humans+3;
     return ff_cap(humans);
