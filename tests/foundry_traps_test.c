@@ -36,6 +36,40 @@ static void release_checks(void) {
     foundry_traps_prepare();for(int n=0;n<6;n++){assert(foundry_trap_complete(&foundryTraps[n]));assert(!foundryTraps[n].active);}
     assert(foundry_trap_hit(table_get_static_only(foundryTraps[0].rx,foundryTraps[0].ry,foundryTraps[0].rz),0,false));foundry_traps_prepare();assert(foundryTraps[0].activation==2);
 }
+static void post_checks(void) {
+    for(int corner=0;corner<4;corner++) {
+        fresh();buildFoundryHoldout();FoundryTrap *t=&foundryTraps[0];assert(t->fourPosts);
+        int x=corner&1?t->x1:t->x0,z=corner&2?t->z1:t->z0;
+        if(corner==3){
+            int id=table_get_static_only(x,t->ry+1,z);Vector3 at=voxels[id].pos;
+            remove_voxel_index(id);assert(addVoxel(at.x,at.y,at.z,false,true,ORANGE,0)>=0);
+        }
+
+        assert(foundry_trap_hit(table_get_static_only(x,t->ry,z),0,false));foundry_traps_prepare();
+        for(int a=0;a<4;a++){x=a&1?t->x1:t->x0;z=a&2?t->z1:t->z0;
+            assert(table_get_static_only(x,t->ry,z)<0);
+            assert(table_get_static_only(x,t->ry-1,z)>=0);
+            assert(table_get_static_only(x,t->ry+1,z)<0);
+        }
+        for(int v=0;v<voxel_count;v++)if(voxels[v].foundryTrapId==1){
+            assert(voxels[v].orig_min_gy>=t->y0);
+            assert(ColorToInt(voxels[v].color)!=ColorToInt(ORANGE));
+        }
+        for(int v=0;v<voxel_count;v++){
+            Voxel *cell=&voxels[v];
+            assert(!(cell->simulate && !cell->isBullet && cell->orig_min_gy>=t->ry && cell->orig_min_gy<t->y0 &&
+                (cell->orig_min_gx==t->x0 || cell->orig_min_gx==t->x1) && (cell->orig_min_gz==t->z0 || cell->orig_min_gz==t->z1)));
+        }
+        assert(!foundryTraps[1].active);
+        if(corner==0){
+            activePlayers=1;playerInput[0]=INPUT_TYPE_KEYBOARD;combatantTeam[0]=0;combatantLife[0]=LIFE_ALIVE;
+            players[0]=(Player){.pos={(t->x0+t->x1+1)*.25f,1.5f,(t->z0+t->z1+1)*.25f},.matter=100};
+            for(int frame=0;frame<90 && players[0].respawn_timer<=0;frame++){simulate_voxel_pbd_steps(1.f/60,1);foundry_traps_hits();}
+            assert(players[0].respawn_timer>0);
+        }
+    }
+    puts("Each corner trigger releases all four posts; other slab stays supported");
+}
 static void damage_checks(void) {
     fresh();foundry_trap_define(FOUNDRY_DROP,0,3,8,8,0,3,-1,8,0);
     foundry_trap_hit(table_get_static_only(-1,8,0),0,false);foundry_traps_prepare();
@@ -87,6 +121,6 @@ static void capture(void) {
 int main(int argc,char **argv) {
     assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Foundry traps");init_pbd_thread_pool();assert(initialize_physics_backend());
-    release_checks();damage_checks();trigger_checks();capture();clear_all_chunks();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Foundry traps passed");
+    release_checks();post_checks();damage_checks();trigger_checks();capture();clear_all_chunks();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Foundry traps passed");
 }
 

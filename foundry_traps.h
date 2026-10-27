@@ -5,11 +5,11 @@ typedef enum { FOUNDRY_DROP, FOUNDRY_SWITCH, FOUNDRY_TIP } FoundryTrapKind;
 typedef struct {
     FoundryTrapKind kind;
     int x0,x1,y0,y1,z0,z1,rx,ry,rz,owner;
-    bool active,pending;
+    bool active,pending,fourPosts;
     unsigned activation;
     uint32_t victims;
     Color color;
-    Voxel original[FOUNDRY_TRAP_PAYLOAD+1];
+    Voxel original[FOUNDRY_TRAP_PAYLOAD+32];
     int originalCount;
 } FoundryTrap;
 static FoundryTrap foundryTraps[FOUNDRY_TRAPS];
@@ -31,4 +31,18 @@ static void foundry_trap_define(FoundryTrapKind kind,int x0,int x1,int y0,int y1
     }
     int release=table_get_static_only(rx,ry,rz);
     if(release>=0)t->original[t->originalCount++]=voxels[release];
+}
+
+static bool foundry_trap_trigger(const FoundryTrap *t,int x,int y,int z) {
+    if(t->fourPosts)return y==t->ry && (x==t->x0 || x==t->x1) && (z==t->z0 || z==t->z1);
+    return x==t->rx && y==t->ry && z==t->rz;
+}
+static void foundry_trap_posts(FoundryTrap *t) {
+    t->fourPosts=true;
+    for(int x=t->x0;x<=t->x1;x+=t->x1-t->x0)for(int z=t->z0;z<=t->z1;z+=t->z1-t->z0)
+        for(int y=0;y<t->y0;y++) {
+            if(x==t->rx && y==t->ry && z==t->rz)continue;
+            add_static_voxel_at_grid(x,y,z,y>=t->ry?ORANGE:(Color){82,102,117,255},0);
+            if(y>=t->ry){int id=table_get_static_only(x,y,z);if(id>=0)t->original[t->originalCount++]=voxels[id];}
+        }
 }

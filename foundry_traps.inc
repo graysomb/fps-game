@@ -7,16 +7,16 @@ static bool foundry_trap_hit(int id,int actor,bool payload) {
     Voxel *v=&voxels[id];
     for(int n=0;n<foundryTrapCount;n++) {
         FoundryTrap *t=&foundryTraps[n];if(t->active || t->pending)continue;
-        if((v->gx==t->rx && v->gy==t->ry && v->gz==t->rz) || (payload && foundry_trap_contains(t,v->gx,v->gy,v->gz))) {
+        if(foundry_trap_trigger(t,v->gx,v->gy,v->gz) || (payload && foundry_trap_contains(t,v->gx,v->gy,v->gz))) {
             t->pending=true;t->owner=actor;return true;
         }
     }
     return false;
 }
 static bool foundry_trap_complete(const FoundryTrap *t) {
-    int release=table_get_static_only(t->rx,t->ry,t->rz);
-    if(release<0 || voxels[release].owner!=-1)return false;
-    for(int z=t->z0;z<=t->z1;z++)for(int y=t->y0;y<=t->y1;y++)for(int x=t->x0;x<=t->x1;x++) {
+    for(int k=0;k<t->originalCount;k++){const Voxel *v=&t->original[k];int id=table_get_static_only(v->gx,v->gy,v->gz);if(id<0 || voxels[id].owner!=-1)return false;}
+    for(int z=t->z0;z<=t->z1;z++)for(int y=t->fourPosts?t->ry+1:t->y0;y<=t->y1;y++)for(int x=t->x0;x<=t->x1;x++) {
+        if(!foundry_trap_contains(t,x,y,z))continue;
         int id=table_get_static_only(x,y,z);if(id<0 || voxels[id].owner!=-1)return false;
     }
     return true;
@@ -28,12 +28,23 @@ static void foundry_trap_release(int n) {
     if(total>FOUNDRY_TRAP_PAYLOAD || voxel_count+total>=MAX_VOXELS || particle_pool_count-free_particle_count+8*total>=MAX_PARTICLES || recycleQueueCount+t->originalCount>MAX_VOXELS)return;
     t->active=true;t->pending=false;t->victims=0;t->activation++;
     static UnitVoxelBuffer buffer; buffer.count=0;
-    for(int z=t->z0;z<=t->z1;z++)for(int y=t->y0;y<=t->y1;y++)for(int x=t->x0;x<=t->x1;x++) {
+    for(int z=t->z0;z<=t->z1;z++)for(int y=t->fourPosts?t->ry+1:t->y0;y<=t->y1;y++)for(int x=t->x0;x<=t->x1;x++) {
+        if(!foundry_trap_contains(t,x,y,z))continue;
         int id=table_get_static_only(x,y,z);
         if(id>=0)unit_voxel_buffer_push(&buffer,x,y,z,voxels[id].color,0,false,id,0,t->owner);
     }
-    int release=table_get_static_only(t->rx,t->ry,t->rz);
-    if(release>=0){recycle_queue_push(&voxels[release]);remove_voxel_index(release);}
+    for(int k=0;k<t->originalCount;k++){const Voxel *v=&t->original[k];if(!foundry_trap_trigger(t,v->gx,v->gy,v->gz) && !(t->fourPosts && v->gy>=t->ry && v->gy<t->y0))continue;
+        int release=table_get_static_only(v->gx,v->gy,v->gz);
+        if(release>=0){recycle_queue_push(&voxels[release]);remove_voxel_index(release);}
+    }
+    // A blast may have activated orange supports before the linked release.
+    if(t->fourPosts)for(int id=voxel_count-1;id>=0;id--){
+        Voxel *v=&voxels[id];
+        if(v->simulate && !v->isBullet && v->type==0 &&
+           v->orig_min_gy>=t->ry && v->orig_min_gy<t->y0 &&
+           (v->orig_min_gx==t->x0 || v->orig_min_gx==t->x1) &&
+           (v->orig_min_gz==t->z0 || v->orig_min_gz==t->z1))remove_voxel_index(id);
+    }
     // Removing the switch may compact the voxel array; refresh seed indices.
     for(int k=0;k<buffer.count;k++)buffer.voxels[k].voxelIndex=table_get_static_only(buffer.voxels[k].gx,buffer.voxels[k].gy,buffer.voxels[k].gz);
     remove_buffered_static_voxels(&buffer);
@@ -91,6 +102,8 @@ static void foundry_traps_blast(Vector3 pos,int owner) {
         Vector3 release={(t->rx+.5f)*VOXEL_SIZE,(t->ry+.5f)*VOXEL_SIZE,(t->rz+.5f)*VOXEL_SIZE};
         Vector3 at=world_image(pos,release);
         Vector3 nearest={clampf(at.x,t->x0*VOXEL_SIZE,(t->x1+1)*VOXEL_SIZE),clampf(at.y,t->y0*VOXEL_SIZE,(t->y1+1)*VOXEL_SIZE),clampf(at.z,t->z0*VOXEL_SIZE,(t->z1+1)*VOXEL_SIZE)};
+        if(t->fourPosts)for(int x=t->x0;x<=t->x1;x+=t->x1-t->x0)for(int z=t->z0;z<=t->z1;z+=t->z1-t->z0)
+            if(v_length(world_delta((Vector3){(x+.5f)*VOXEL_SIZE,(t->ry+.5f)*VOXEL_SIZE,(z+.5f)*VOXEL_SIZE},pos))<4){t->pending=true;t->owner=owner;}
         if(v_length(world_delta(release,pos))<4 || v_length(v_sub(at,nearest))<4){t->pending=true;t->owner=owner;}
     }
 }
@@ -153,7 +166,10 @@ static void foundry_traps_draw(void) {
         for(float x=-width*.5f;x<width*.5f;x+=.75f)DrawLine3D(v_add(center,(Vector3){x,0,-depth*.5f}),v_add(center,(Vector3){x+.35f,0,-depth*.5f+.35f}),c);
         if(t->active)continue;
         Vector3 release={(t->rx+.5f)*.5f,(t->ry+.5f)*.5f,(t->rz+.5f)*.5f};
-        DrawCubeWires(release,.6f,.6f,.6f,YELLOW);
+        if(t->fourPosts){
+            for(int x=t->x0;x<=t->x1;x+=t->x1-t->x0)for(int z=t->z0;z<=t->z1;z+=t->z1-t->z0)
+                DrawCubeWires((Vector3){(x+.5f)*VOXEL_SIZE,(t->ry+.5f)*VOXEL_SIZE,(z+.5f)*VOXEL_SIZE},.6f,.6f,.6f,YELLOW);
+        }else DrawCubeWires(release,.6f,.6f,.6f,YELLOW);
         if(t->kind==FOUNDRY_SWITCH){
             DrawCubeWires(release,.75f,.75f,.75f,ORANGE);
             for(int x=t->x0;x<=t->x1;x+=t->x1-t->x0)for(int z=t->z0;z<=t->z1;z+=t->z1-t->z0)

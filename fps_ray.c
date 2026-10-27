@@ -16622,16 +16622,22 @@ static void clear_all_chunks(void) {
     voxel_chunk_count = 0;
 }
 
+static uint32_t chunk_face_color(uint32_t colors[CHUNK_SIZE][CHUNK_SIZE][CHUNK_SIZE],int plane,int layer,int i,int j) {
+    return plane==0?colors[layer][j][i]:plane==1?colors[j][layer][i]:colors[j][i][layer];
+}
+
 static void rebuild_chunk(VoxelChunk *chunk) {
     if(!chunk || !chunk->dirty)return;
     const int minx=chunk->cx*CHUNK_SIZE,miny=chunk->cy*CHUNK_SIZE,minz=chunk->cz*CHUNK_SIZE;
     /* Render-thread scratch: one hash lookup per cell, then direct neighbor reads.
        Each face row is a bitset, replacing face sorting and repeated binary searches. */
     static int cells[CHUNK_SIZE][CHUNK_SIZE][CHUNK_SIZE];
+    static uint32_t colors[CHUNK_SIZE][CHUNK_SIZE][CHUNK_SIZE];
     uint32_t faces[6][CHUNK_SIZE][CHUNK_SIZE]={0};
     int occupied_count=0;
     for(int z=0;z<CHUNK_SIZE;z++)for(int y=0;y<CHUNK_SIZE;y++)for(int x=0;x<CHUNK_SIZE;x++) {
         cells[z][y][x]=table_get_static_only(minx+x,miny+y,minz+z);
+        colors[z][y][x]=cells[z][y][x]>=0?ColorToInt(voxel_display_color(&voxels[cells[z][y][x]])):0;
         occupied_count+=cells[z][y][x]>=0 && world_grid(minx+x)==minx+x && world_grid(minz+z)==minz+z;
     }
     if(occupied_count)for(int z=0;z<CHUNK_SIZE;z++)for(int y=0;y<CHUNK_SIZE;y++)for(int x=0;x<CHUNK_SIZE;x++) {
@@ -16649,10 +16655,16 @@ static void rebuild_chunk(VoxelChunk *chunk) {
         uint32_t *rows=faces[face][layer];
         while(rows[j]) {
             int i=0,width=1;while(!(rows[j]&(1u<<i)))i++;
-            while(i+width<CHUNK_SIZE && (rows[j]&(1u<<(i+width))))width++;
+            uint32_t material=chunk_face_color(colors,face/2,layer,i,j);
+            while(i+width<CHUNK_SIZE && (rows[j]&(1u<<(i+width))) && chunk_face_color(colors,face/2,layer,i+width,j)==material)width++;
             uint32_t run=(UINT32_MAX>>(CHUNK_SIZE-width))<<i;
             int height=1;
-            while(j+height<CHUNK_SIZE && (rows[j+height]&run)==run)height++;
+            while(j+height<CHUNK_SIZE && (rows[j+height]&run)==run){
+                bool same=true;
+                for(int dx=0;dx<width;dx++)if(chunk_face_color(colors,face/2,layer,i+dx,j+height)!=material){same=false;break;}
+                if(!same)break;
+                height++;
+            }
             for(int row=j;row<j+height;row++)rows[row]&=~run;
             if(count==capacity) {
                 int next_capacity=capacity?capacity*2:128;

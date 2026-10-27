@@ -15,7 +15,7 @@ static void check_voxel_appearance(void) {
     for(int view=0;view<8;view++) {
         clear_all_chunks();clear_world_voxels();
         for(int x=-3;x<3;x++)for(int y=1;y<4;y++)for(int z=-1;z<2;z++)
-            add_static_voxel_at_grid(x,y,z,color,0);
+            add_static_voxel_at_grid(x,y,z,view==0 && y==2?ORANGE:color,0);
         Camera3D cam={v_add((Vector3){0,1.25f,.25f},offsets[view]),{0,1.25f,.25f},
             view==4 || view==5?(Vector3){0,0,1}:(Vector3){0,1,0},4,CAMERA_ORTHOGRAPHIC};
         Image images[3];

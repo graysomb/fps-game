@@ -42,7 +42,7 @@ static void buildFoundryHoldout(void) {
     }
     foundry_box(-10,-9,4,5,-5,-1,trim);
     foundry_box(9,10,4,5,1,5,trim);
-    /* Heavy slabs at east/west choke points. Two colored supports each. */
+    /* Heavy slabs at east/west choke points, with four linked release posts. */
     for(int side=-1;side<=1;side+=2) {
         int x=side*23;
         if(firefightPractice) {
@@ -51,8 +51,8 @@ static void buildFoundryHoldout(void) {
             foundry_box(x-1,x+1,0,6,4,5,support);
         } else {
             int cx=(int)roundf(x*1.875f);
-            add_static_box_at_grid(cx-5,cx-5,0,6,-10,-10,support);
-            foundry_trap_define(FOUNDRY_DROP,cx-4,cx+3,7,7,-10,9,cx-5,7,-10);
+            foundry_trap_define(FOUNDRY_DROP,cx-4,cx+3,7,7,-10,9,cx-4,3,-10);
+            foundry_trap_posts(&foundryTraps[foundryTrapCount-1]);
         }
         /* Loose quarry chunks, separated from supports and alternate routes. */
         for(int z=-10;z<=10;z+=20) foundry_box(x-2,x,0,1,z,z+1,trim);
