@@ -32,7 +32,12 @@ static void foundry_shell(int x0,int x1,int y0,int y1,int z0,int z1,Color c,int 
     foundryFragileCells+=voxel_count-before;
 }
 /* Deterministic arena in the same grid units/material palette as the citadel. */
+static int foundryCrackedBay=-1,foundryCrackedPillar=-1;
 static void buildFoundryHoldout(void) {
+    if(!firefightPractice && (!fpRestoring || foundryCrackedBay<0 || foundryCrackedPillar<0)){
+        foundryCrackedBay=GetRandomValue(0,3);foundryCrackedPillar=GetRandomValue(0,3);
+    }
+    int crackedBay=foundryCrackedBay,crackedPillar=foundryCrackedPillar;
     Color stone={82,102,117,255}, trim={127,173,178,255}, support={235,155,45,255};
     /* Raised holdout, with stairs on north and south and an open lower ring. */
     foundry_box(-10,10,0,3,-8,8,stone);
@@ -75,7 +80,7 @@ static void buildFoundryHoldout(void) {
         int x=sx*23,z=sz*22;
         foundry_shell(x-5,x-4,0,9,z-4,z-3,stone,2);
         foundry_shell(x+4,x+5,0,9,z+3,z+4,stone,2);
-        if(!firefightPractice)foundry_bay_trap(x,z);
+        if(!firefightPractice && (sx>0?2:0)+(sz>0?1:0)==crackedBay)foundry_bay_trap(x,z);
         foundry_box(sx*14-2,sx*14+2,0,4,sz*24-1,sz*24,stone);
         foundry_box(sx*28-1,sx*28,0,4,sz*10-2,sz*10+2,stone);
     }
@@ -87,7 +92,7 @@ static void buildFoundryHoldout(void) {
         foundry_shell(-4,4,0,5,side*33-1,side*33+1,stone,3);
     }
     if(!firefightPractice) {
-        for(int sx=-1;sx<=1;sx+=2)for(int sz=-1;sz<=1;sz+=2)foundry_corner_pillar(sx,sz);
+        for(int sx=-1;sx<=1;sx+=2)for(int sz=-1;sz<=1;sz+=2)foundry_corner_pillar(sx,sz,(sx>0?2:0)+(sz>0?1:0)==crackedPillar);
         enemy_stock_scrap(true);
     }
 }

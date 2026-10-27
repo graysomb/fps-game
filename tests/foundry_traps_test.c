@@ -7,7 +7,7 @@ static void fresh(void) {
     gameMode=GAME_MODE_FIREFIGHT;firefightHumans=1;firefightPractice=false;firefightFoundry=true;
 }
 static void release_checks(void) {
-    fresh();buildFoundryHoldout();assert(foundryTrapCount==10);
+    fresh();buildFoundryHoldout();assert(foundryTrapCount==4);
     fprintf(stderr,"Foundry cells=%d, fragile=%d vs %d (%.1f%% reduction)\n",voxel_count,foundryFragileCells,foundryFragileReferenceCells,100.f*(1-(float)foundryFragileCells/foundryFragileReferenceCells));
     assert(foundryFragileCells*2<foundryFragileReferenceCells);
     for(int x=-18;x<18;x++)for(int y=0;y<4;y++)for(int z=-14;z<14;z++)assert(table_get_static_only(x,y,z)>=0);
@@ -71,8 +71,17 @@ static void post_checks(void) {
     }
     puts("Each corner trigger releases all four posts; other slab stays supported");
 }
+/* Seed the public random map construction, without a production test override. */
+static unsigned selection_seed(int corner,bool pillar) {
+    for(unsigned seed=1;seed<10000;seed++){
+        SetRandomSeed(seed);int bay=GetRandomValue(0,3),post=GetRandomValue(0,3);
+        if((pillar?post:bay)==corner)return seed;
+    }
+    assert(false);return 1;
+}
 static void bay_checks(void) {
-    for(int bay=2;bay<6;bay++){
+    for(int corner=0;corner<4;corner++){
+        int bay=2;unsigned seed=selection_seed(corner,false);SetRandomSeed(seed);
         fresh();buildFoundryHoldout();FoundryTrap *t=&foundryTraps[bay];assert(t->kind==FOUNDRY_BAY);
         int orange=0,roof=0,wall=0;unsigned signature=2166136261u;
         for(int k=0;k<t->originalCount;k++){
@@ -82,7 +91,7 @@ static void bay_checks(void) {
         }
         assert(roof>10 && wall>20 && orange<t->originalCount/2);
         /* Rebuilding the same map must reproduce the exact crack network. */
-        fresh();buildFoundryHoldout();t=&foundryTraps[bay];unsigned rebuilt=2166136261u;
+        fresh();SetRandomSeed(seed);buildFoundryHoldout();t=&foundryTraps[bay];unsigned rebuilt=2166136261u;
         for(int k=0;k<t->originalCount;k++){Voxel *v=&t->original[k];rebuilt=(rebuilt^(unsigned)foundry_bay_crack(t,v->gx,v->gy,v->gz))*16777619u;}
         assert(signature==rebuilt);
         int trigger=table_get_static_only(t->rx,t->ry,t->rz);assert(trigger>=0 && ColorToInt(voxels[trigger].color)==ColorToInt(ORANGE));
@@ -112,7 +121,8 @@ static void bay_checks(void) {
     puts("Four sparse factory bays: branching orange fractures, isolated activation and lethal roof collapse passed");
 }
 static void pillar_checks(void) {
-    for(int n=6;n<10;n++){
+    for(int corner=0;corner<4;corner++){
+        int n=3;SetRandomSeed(selection_seed(corner,true));
         fresh();buildFoundryHoldout();FoundryTrap *t=&foundryTraps[n];
         assert(t->kind==FOUNDRY_PILLAR && t->originalCount==1280);
         assert(t->x1-t->x0+1==8 && t->z1-t->z0+1==8 && t->y1==19);
@@ -135,6 +145,36 @@ static void pillar_checks(void) {
         assert(after<before-actual*.5f);
         fprintf(stderr,"Corner pillar %d: %d fragments, %d falling cells\n",n,fragments,actual);
     }
+}
+static void selection_checks(void) {
+    unsigned bayMask=0,pillarMask=0;
+    for(unsigned seed=1;seed<=16;seed++){
+        fresh();SetRandomSeed(seed);buildFoundryHoldout();assert(foundryTrapCount==4);
+        FoundryTrap *bay=&foundryTraps[2],*pillar=&foundryTraps[3];
+        assert(bay->kind==FOUNDRY_BAY && pillar->kind==FOUNDRY_PILLAR);
+        int b=(bay->x0>0?2:0)+(bay->z0>0?1:0),p=(pillar->x0>0?2:0)+(pillar->z0>0?1:0);
+        bayMask|=1u<<b;pillarMask|=1u<<p;
+        for(int corner=0;corner<4;corner++){
+            int sx=corner&2?1:-1,sz=corner&1?1:-1;
+            if(corner!=p)for(int z=sz*70-4;z<=sz*70+3;z++)for(int y=0;y<20;y++)for(int x=sx*70-4;x<=sx*70+3;x++){
+                int id=table_get_static_only(x,y,z);assert(id>=0);
+                assert(ColorToInt(voxels[id].color)!=ColorToInt(ORANGE));assert(!foundry_trap_hit(id,-1,false));
+            }
+            if(corner!=b){
+                int x0=(int)floorf((sx*23-6)*1.875f),x1=(int)ceilf((sx*23+7)*1.875f)-1;
+                int z0=(int)floorf((sz*22-5)*1.875f),z1=(int)ceilf((sz*22+6)*1.875f)-1;
+                for(int z=z0;z<=z1;z++)for(int y=0;y<=11;y++)for(int x=x0;x<=x1;x++){
+                    int id=table_get_static_only(x,y,z);if(id<0)continue;
+                    assert(ColorToInt(voxels[id].color)!=ColorToInt(ORANGE));assert(!foundry_trap_hit(id,-1,false));
+                }
+            }
+        }
+    }
+    assert(bayMask==15 && pillarMask==15);
+    int previousBay=foundryCrackedBay,previousPillar=foundryCrackedPillar;
+    fresh();fpRestoring=true;buildFoundryHoldout();fpRestoring=false;
+    assert(foundryCrackedBay==previousBay && foundryCrackedPillar==previousPillar && foundryTrapCount==4);
+    puts("Random selection: exactly one bay and one pillar, normal unselected structures, all corners covered");
 }
 static void damage_checks(void) {
     fresh();foundry_trap_define(FOUNDRY_DROP,0,3,8,8,0,3,-1,8,0);
@@ -187,6 +227,6 @@ static void capture(void) {
 int main(int argc,char **argv) {
     assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Foundry traps");init_pbd_thread_pool();assert(initialize_physics_backend());
-    release_checks();post_checks();bay_checks();pillar_checks();damage_checks();trigger_checks();capture();clear_all_chunks();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Foundry traps passed");
+    release_checks();post_checks();bay_checks();pillar_checks();selection_checks();damage_checks();trigger_checks();capture();clear_all_chunks();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Foundry traps passed");
 }
 

@@ -132,9 +132,13 @@ static void foundry_bay_trap(int x,int z) {
 
 /* Four metres square, ten metres tall; fracture sheets continue through the
  * solid interior so visible cracks also separate the physical chunks. */
-static void foundry_corner_pillar(int sx,int sz) {
-    if(foundryTrapCount>=FOUNDRY_TRAPS)return;
+static void foundry_corner_pillar(int sx,int sz,bool trapped) {
     int cx=sx*70,cz=sz*70;
+    if(!trapped){
+        add_static_box_at_grid(cx-4,cx+3,0,19,cz-4,cz+3,(Color){127,173,178,255});
+        return;
+    }
+    if(foundryTrapCount>=FOUNDRY_TRAPS)return;
     FoundryTrap t={.kind=FOUNDRY_PILLAR,.x0=cx-4,.x1=cx+3,.y0=0,.y1=19,
         .z0=cz-4,.z1=cz+3,.owner=-1};
     t.original=calloc(8*8*20,sizeof(Voxel));if(!t.original)return;

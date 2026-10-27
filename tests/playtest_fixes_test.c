@@ -120,7 +120,7 @@ static void appearance(void){
 }
 static void trap_map(bool crosscut){
     fresh();activePlayers=0;if(crosscut)buildCrosscut();else buildFoundryHoldout();
-    assert(foundryTrapCount==(crosscut?13:6));rebuild_voxel_hash();rebuild_static_hash_if_dirty();
+    assert(foundryTrapCount==(crosscut?13:4));rebuild_voxel_hash();rebuild_static_hash_if_dirty();
     activePlayers=3;players[0].pos=(Vector3){38,2,38};players[2].pos=(Vector3){-38,2,38};
     playerInput[1]=INPUT_TYPE_BOT_HARD;players[1].enemyType=ENEMY_TYPE_STANDARD;
     for(int round=0;round<2;round++){

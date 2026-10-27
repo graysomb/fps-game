@@ -8,10 +8,15 @@ int main(int argc,char **argv) {
     init_pbd_thread_pool();assert(initialize_physics_backend());
     activePlayers=0;worldPeriodic=false;worldFloorHalfSize=40;
     gameMode=GAME_MODE_FIREFIGHT;firefightHumans=1;firefightPractice=false;firefightFoundry=true;
-    clear_all_chunks();clear_world_voxels();buildFoundryHoldout();voxel_ca_init();
+    clear_all_chunks();clear_world_voxels();
+    for(unsigned seed=1;seed<10000;seed++){
+        SetRandomSeed(seed);int b=GetRandomValue(0,3),p=GetRandomValue(0,3);
+        if(b==3 && p==3){SetRandomSeed(seed);break;}
+    }
+    buildFoundryHoldout();voxel_ca_init();
     bool bay=getenv("FPS_BAY_PREVIEW")!=NULL;
     bool pillar=getenv("FPS_PILLAR_PREVIEW")!=NULL;
-    FoundryTrap *trap=&foundryTraps[pillar?9:bay?5:1];
+    FoundryTrap *trap=&foundryTraps[pillar?3:bay?2:1];
     Vector3 trigger={(trap->x1+.5f)*VOXEL_SIZE,(trap->ry+.5f)*VOXEL_SIZE,(trap->z1+.5f)*VOXEL_SIZE};
     Camera3D camera={{29,6.5f,12},{21.5f,1.8f,0},{0,1,0},55,CAMERA_PERSPECTIVE};
     if(bay){trigger=(Vector3){(trap->rx+.5f)*VOXEL_SIZE,(trap->ry+.5f)*VOXEL_SIZE,(trap->rz+.5f)*VOXEL_SIZE};camera=(Camera3D){{35,10,8},{21.5f,2.5f,21},{0,1,0},55,CAMERA_PERSPECTIVE};}
