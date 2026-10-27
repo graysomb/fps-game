@@ -44,7 +44,7 @@ static void fixture(void){
     memset(players,0,sizeof(players));netTransport.role=NET_ROLE_OFFLINE;activePlayers=1;worldPeriodic=false;worldFloorHalfSize=32;
     players[0].pos=(Vector3){-6,BASE_EYE_HEIGHT,0};players[0].matter=100;players[0].respawn_timer=9999;
     assert(golem_physics_start());goRegen=false;
-    assert(goCount==283);
+    assert(goCount==291);
     for(int i=0;i<goCount;i++){
         Voxel *v=&voxels[goCells[i].index];assert(v->simulate&&!v->fixed&&v->golemOwned);
         assert(v->rest_volume>0 && v->rest_dimensions.x>0 && v->rest_dimensions.y>0 && v->rest_dimensions.z>0);

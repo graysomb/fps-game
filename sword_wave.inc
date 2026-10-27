@@ -19,6 +19,9 @@ static bool eq_sword(int i){
 static bool sword_cut_hit(int owner,SwordWave *w,VoxelHit hit){
     int v=hit.id;if(v<0 || v>=voxel_count || voxel_is_fluid(&voxels[v]))return false;
     uint64_t id=voxels[v].identity;Vector3 at=voxels[v].pos;
+    int part=go_shield_part(v);
+    if(part>=0 && (w->golemShieldParts&(1u<<part)))return false;
+    if(part>=0 && go_shield_hit(v,eqSwordDamage)){w->golemShieldParts|=1u<<part;return false;}
     if(clarity_shield_voxel(v)){clarity_shield_melee(v,owner);return enemy_voxel(id)<0;}
     // Reserve all eight replacement corners before modifying topology.
     if(MAX_PARTICLES-particle_pool_count+free_particle_count<8 || voxel_count+1>=MAX_VOXELS)return false;

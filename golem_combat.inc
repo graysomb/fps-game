@@ -2,8 +2,8 @@
  * sampling is replayable; attacks and health never run inside a GPU attempt. */
 typedef enum { GC_IDLE,GC_APPROACH,GC_WINDUP,GC_STRIKE,GC_RECOVER,GC_KNEEL,GC_DEAD } GoCombatState;
 static const struct {float range,windup,strike,recovery,cooldown,damage;} goAttacks[3]={
-    {4,1,.4f,1.2f,4,40},{5,.8f,.5f,1,3,25},{25,1.2f,.35f,1.5f,7,50}};
-static const float goShieldMax=150,goCoreMax=200,goShieldDelay=4,goShieldRate=15;
+    {4,1,.4f,1.2f,4,40},{5,.8f,.5f,1,3,25},{GOLD_TETHER_RANGE,1.5f,.35f,1.5f,10,50}};
+static const float goShieldMax=150,goCoreMax=200,goShieldDelay=8,goShieldRate=5;
 static struct {
     GoCombatState state;
     int target,attack,sequence,actions[3];
@@ -13,7 +13,9 @@ static struct {
     bool hit[MAX_COMBATANTS+MAX_PLAYERS],launched,terrainHit;
     struct {uint64_t id[32];int count;float age;Vector3 previous[32];bool hit[MAX_COMBATANTS+MAX_PLAYERS];} fist;
 } goFight;
+#include "golem_arsenal.inc"
 static void go_combat_reset(void){
+    go_arsenal_reset();
     if(goCombatEnabled){players[MAX_PLAYERS].respawn_timer=9999;combatantLife[MAX_PLAYERS]=LIFE_UNUSED;}
     goInput.combatReach=false;goCombatEnabled=goCombatDead=false;memset(&goFight,0,sizeof(goFight));goFight.target=-1;
 }
@@ -40,7 +42,7 @@ static void go_combat_start(void){
     goFight.shield=goShieldMax;goFight.health=goCoreMax;goFight.lastHit=-goShieldDelay;
     players[MAX_PLAYERS].invuln_timer=0;players[MAX_PLAYERS].enemyType=ENEMY_TYPE_STANDARD;playerInput[MAX_PLAYERS]=INPUT_TYPE_BOT_MEDIUM;
     combatantTeam[MAX_PLAYERS]=1;goFight.lastLimb[0]=goPose.hand[0];goFight.lastLimb[1]=goPose.hand[1];
-    go_combat_sync();
+    go_arsenal_start();go_combat_sync();
 }
 static void go_combat_damage(float amount,bool shieldOnly){
     if(!goCombatEnabled||goCombatDead||amount<=0||!isfinite(amount))return;
@@ -51,6 +53,7 @@ static void go_combat_damage(float amount,bool shieldOnly){
     goFight.lastHit=goFight.time;goFight.flash=.25f;
     if(shield>0&&goFight.shield<=0){goFight.broken=.8f;play_sfx_at(SFX_SHIELD_BREAK,go_core_position(),MAX_PLAYERS,2,.7f);}
     if(goFight.health<=0){
+        go_arsenal_drop();
         goCombatDead=true;goFight.broken=1.2f;goFight.state=GC_DEAD;goRegen=false;goFight.fist.count=0;
         for(int p=1;p<GM_COUNT;p++)go_release_part(p);
         skeletonConstraintCount=0;play_sfx_at(SFX_EXPLOSION,go_core_position(),MAX_PLAYERS,2,.65f);
@@ -124,27 +127,30 @@ static void go_combat_prepare(float dt){
         if(v->golemDebrisAge>=45)remove_voxel_index(n);
     }
     if(goCombatDead){goFight.broken=fmaxf(0,goFight.broken-dt);return;}
+    go_shields_tick(dt);
     goFight.time+=dt;goFight.elapsed+=dt;goFight.flash=fmaxf(0,goFight.flash-dt);goFight.broken=fmaxf(0,goFight.broken-dt);
     goFight.suppressed=fmaxf(0,goFight.suppressed-dt);goFight.routeTimer-=dt;
     for(int n=0;n<3;n++)goFight.cooldown[n]=fmaxf(0,goFight.cooldown[n]-dt);
     if(goFight.time-goFight.lastHit>=goShieldDelay&&goFight.suppressed<=0&&!ex_suppressed(MAX_PLAYERS))goFight.shield=fminf(goShieldMax,goFight.shield+goShieldRate*dt);
     bool kneel=!go_part_alive(GOLEM_SHIN_L)||!go_part_alive(GOLEM_SHIN_R)||goPose.kneel>.01f;
-    if(kneel){goFight.state=GC_KNEEL;goFight.elapsed=0;goFight.progress=0;go_combat_sync();return;}
-    if(goFight.state==GC_KNEEL){goFight.state=GC_RECOVER;goFight.elapsed=0;}
+    if(kneel){go_arsenal_drop();goArsenal.rocketWindup=0;goFight.state=GC_KNEEL;goFight.elapsed=0;goFight.progress=0;go_combat_sync();return;}
+    if(goFight.state==GC_KNEEL){go_arsenal_drop();goFight.state=GC_RECOVER;goFight.elapsed=0;}
     if(!go_target_valid(goFight.target)){
         goFight.target=-1;float nearest=FLT_MAX;
         for(int k=0;k<MAX_PLAYERS*2;k++){int t=k<MAX_PLAYERS?k:MAX_COMBATANTS+k-MAX_PLAYERS;if(!go_target_valid(t))continue;
             float distance=Vector3DistanceSqr(goFight.position,ai_target_body(t)->pos);if(distance<nearest){goFight.target=t;nearest=distance;}}
     }
-    if(goFight.target<0){goFight.state=GC_IDLE;goFight.progress=0;go_combat_sync();return;}
+    if(goFight.target<0){go_arsenal_drop();goArsenal.rocketWindup=0;goFight.state=GC_IDLE;goFight.progress=0;go_combat_sync();return;}
     Vector3 target=go_target_center(goFight.target),delta=v_sub(target,goFight.position);delta.y=0;float distance=v_length(delta);
     bool attackState=goFight.state==GC_WINDUP||goFight.state==GC_STRIKE;
     bool locked=goFight.state==GC_STRIKE||(goFight.state==GC_WINDUP&&goFight.elapsed>=goAttacks[goFight.attack].windup-.25f);
     if(!locked){goFight.aim=target;float yaw=atan2f(-delta.x,-delta.z)*RAD2DEG;
         float change=fmodf(yaw-goFight.yaw+540,360)-180;goFight.yaw+=Clamp(change,-90*dt,90*dt);}
+    bool ranged=go_arsenal_tick(dt,distance,attackState);
+    if(ranged){go_combat_sync();return;}
     if(attackState){
         int arm=goFight.attack==1?GOLEM_ARM_L:GOLEM_ARM_R;
-        if(!go_part_alive(arm)||(!goFight.launched&&!go_part_alive(arm+2))){goFight.state=GC_RECOVER;goFight.elapsed=0;}
+        if(!go_part_alive(arm)||(!goFight.launched&&!go_part_alive(arm+2))||(goFight.attack==2&&!goFight.launched&&!players[MAX_PLAYERS].tetherHolding)){goFight.state=GC_RECOVER;goFight.elapsed=0;}
         else if(goFight.state==GC_WINDUP){
             if(goFight.attack<2&&!locked&&distance>2.2f){
                 float step=fminf(2*dt,distance-2.2f);Vector3 next=v_add(goFight.position,v_mul(v_norm(delta),step));
@@ -154,7 +160,7 @@ static void go_combat_prepare(float dt){
             if(goFight.elapsed>=goAttacks[goFight.attack].windup){goFight.state=GC_STRIKE;goFight.elapsed=0;play_sfx_at(SFX_IMPACT,go_core_position(),MAX_PLAYERS,2,.6f);}
         }else{
             goFight.progress=Lerp(.4f,.7f,Clamp(goFight.elapsed/goAttacks[goFight.attack].strike,0,1));
-            if(goFight.attack==2&&!goFight.launched&&goFight.progress>=.6f){goFight.launched=true;go_launch_hand();}
+            if(goFight.attack==2&&!goFight.launched&&goFight.progress>=.6f){goFight.launched=true;go_arsenal_throw();}
             if(goFight.elapsed>=goAttacks[goFight.attack].strike){goFight.state=GC_RECOVER;goFight.elapsed=0;}
         }
     }else if(goFight.state==GC_RECOVER){
@@ -165,7 +171,9 @@ static void go_combat_prepare(float dt){
         for(int a=0;a<3;a++){int arm=a==1?GOLEM_ARM_L:GOLEM_ARM_R;
             if(goFight.cooldown[a]<=0&&go_part_alive(arm)&&go_part_alive(arm+2)&&clear&&distance<=goAttacks[a].range&&(a!=2||distance>=5)) {choice=a;break;}}
         float angle=fabsf(fmodf(atan2f(-delta.x,-delta.z)*RAD2DEG-goFight.yaw+540,360)-180);
+        if(choice==2 && angle<20 && !go_arsenal_grab()){goFight.cooldown[2]=2;choice=-1;}
         if(choice>=0&&angle<20)go_begin_attack(choice);
+        else if(choice==2)go_arsenal_drop();
         else if(distance>3.2f||!clear){
             goFight.state=GC_APPROACH;
             if(goFight.routeTimer<=0||Vector3Distance(goFight.position,goFight.waypoint)<.15f)go_route(target);
@@ -242,7 +250,7 @@ static const char *go_combat_status(void){
     return state[goFight.state];
 }
 static void go_combat_draw(void){
-    if(!goCombatEnabled)return;Vector3 core=go_core_position();
+    if(!goCombatEnabled)return;go_arsenal_draw();Vector3 core=go_core_position();
     if(goCombatDead){if(goFight.broken>0)DrawSphereWires(core,.4f+(1.2f-goFight.broken)*1.5f,6,8,Fade(ORANGE,goFight.broken*.4f));return;}
     float radius=.52f+.015f*sinf(goFight.time*4);Color color=goFight.flash>0?WHITE:goFight.time-goFight.lastHit>=goShieldDelay&&goFight.suppressed<=0?SKYBLUE:BLUE;
     rlDrawRenderBatchActive();rlDisableDepthMask();

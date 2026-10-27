@@ -1,7 +1,8 @@
 /* Repairs are committed between physics steps. Each articulated segment keeps
  * its own weld graph; a transaction may contain several dependent segments. */
-static const int goParent[GM_COUNT]={-1,0,1,2,2,4,5,2,7,8,1,10,11,1,13,14,2,2,3};
 static int go_repair_group(int part){
+    if(part==GM_TURRET_L)return GOLEM_ARM_L;
+    if(part==GM_TURRET_R)return GOLEM_ARM_R;
     if(part>=GOLEM_ARM_L&&part<=GOLEM_HAND_L)return GOLEM_ARM_L;
     if(part>=GOLEM_ARM_R&&part<=GOLEM_HAND_R)return GOLEM_ARM_R;
     if(part>=GOLEM_THIGH_L&&part<=GOLEM_FOOT_R)return GOLEM_THIGH_L;
@@ -23,7 +24,7 @@ static void go_mount_loads(void){
         goError=fmaxf(goError,error);goLoad=fmaxf(goLoad,load/fmaxf(mass*GRAVITY,1));
         bool recovering=goRepair[go_repair_group(part)].phase==GO_REPAIR_RECOVER || go_combat_motor_grace(part);
         goOverload[part]=!recovering&&load>8*mass*GRAVITY?goOverload[part]+2*goLastDt:0;
-        if(goOverload[part]>.12f){
+        if(goOverload[part]>.12f && !(goCombatEnabled && go_shielded(goCells[goMount[part]].index))){
             if(getenv("GOLEM_DEBUG"))printf("Golem detach: overload part=%d time=%.3f error=%.4f load=%.2fx\n",part,goClock,error,load/fmaxf(mass*GRAVITY,1));
             go_release_part(part);
         }

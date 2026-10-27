@@ -176,6 +176,11 @@ static void enemy_lab_hud(int w,int h) {
             DrawText(TextFormat("GOLEM | %s | %s",go_combat_status(),enemyLabGod?"GOD MODE":"COMBAT"),16,76,fs,GOLD);
             DrawRectangle(16,101,width,10,DARKGRAY);DrawRectangle(16,101,(int)(width*goFight.shield/goShieldMax),10,SKYBLUE);
             DrawRectangle(32+width,101,width,10,DARKGRAY);DrawRectangle(32+width,101,(int)(width*goFight.health/goCoreMax),10,ORANGE);
+            VoxelHit aimed;
+            if(first_voxel_hit_detailed((Ray){players[0].pos,player_forward(&players[0])},100,-1,false,&aimed)){
+                int part=go_shield_part(aimed.id);
+                if(part>=0){DrawRectangle(8,140,w-16,34,Fade(BLACK,.65f));DrawText(TextFormat("%s  MATTER %.0f / %.0f",go_part_name(part),goShields[part].value,go_shield_max(part)),16,143,fs,SKYBLUE);DrawRectangle(16,166,width,5,DARKGRAY);DrawRectangle(16,166,(int)(width*goShields[part].value/go_shield_max(part)),5,SKYBLUE);}
+            }
             const char *charge=goFight.suppressed>0?"SUPPRESSED":goFight.shield>=goShieldMax?"FULL":goFight.time-goFight.lastHit<goShieldDelay?"RECHARGE DELAY":"REGENERATING";
             DrawText(TextFormat("SHIELD %.0f/150 | %s",goFight.shield,charge),16,118,fs,SKYBLUE);
             DrawText(TextFormat("REACTOR %.0f/200",goFight.health),32+width,118,fs,ORANGE);

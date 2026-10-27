@@ -81,6 +81,7 @@ static void geometry_checks(void){
  GolemStats stats=golem_renderer_stats();assert(stats.cubes<=384&&stats.triangles<=5000&&stats.models==18);
  unsigned vao=gm[GOLEM_TORSO].meshes[0].vaoId;assert(golem_renderer_init(NULL));assert(gm[GOLEM_TORSO].meshes[0].vaoId==vao);
  for(int k=1;k<GM_COUNT;k++){
+  if(!gm[k].meshCount)continue; /* Physics-only shoulder mounts have no cached mesh. */
   Mesh m=gm[k].meshes[0];for(int i=0;i<m.vertexCount;i++){
    Vector3 n={m.normals[i*3],m.normals[i*3+1],m.normals[i*3+2]};assert(fabsf(Vector3Length(n)-1)<.0001f);
    for(int a=0;a<3;a++)assert(isfinite(m.vertices[i*3+a]));

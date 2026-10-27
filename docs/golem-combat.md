@@ -1,91 +1,100 @@
 # Enemy Lab golem combat
 
-The physical golem now starts an autonomous local encounter in Enemy Lab. The
-existing Firefight Foundry and network protocol are unchanged. This is not yet
-an online boss. All 283 authored cells and existing articulated connections
-are retained.
+The golem remains an Enemy Lab encounter. Firefight and LAN boss integration are unchanged.
+The physical body retains its original 283 cells, with eight additional cells for two
+independently destructible shoulder-gun mounts.
 
-## Playing
+## Shields and counterplay
 
-F3 / D-pad Right cycles Combat, Idle, Walk, Slam, Sweep, Hand Launch, then Combat.
-F4 / top face button resets the encounter. F5 / left face pauses, F6 / RB steps,
-F7 / Back toggles invulnerability (off initially), F8 / D-pad Down toggles limb
-repair, F9 shows the skeleton, F10 / LB removes an arm, F11 removes a shin, and
-F12 removes chest armor. Escape exits. The existing console `give` commands can
-supply weapons. The compact HUD displays separate shield and reactor bars.
+Every attached physical segment has independent Matter. Hands and feet have 50;
+arm/leg segments, eye and gun mounts have 75; head and pelvis have 100; torso,
+chest and reactor have 150. The reactor also has 200 permanent health.
 
-Destroy limbs normally or pull them off with the tether. Leg loss kneels the
-boss and opens its chest. Shoot the exposed reactor: 150 Matter shields 200
-permanent reactor health. Damage beyond remaining shield carries into health.
-The shield regenerates at 15 Matter/second after four seconds without a reactor
-hit. Limb hits do not postpone recharge. Glob and tether drain only the shield;
-glob suppresses recharge for five seconds. Railgun penetration and rocket
-occlusion retain their normal rules. Health never regenerates. Reactor death
-stops all repairs and releases the whole body as physical debris.
+Shields wait eight seconds after their last hit, then restore five Matter per second.
+Glob suppression lasts five seconds. Shielded segments block cutting, mining and
+physical tether grabs. Tether locks onto the contacted part and drains at the normal
+two-bullets-per-second rate. Release and grab again after depletion to rip it off.
+The empty lock prevents recharge until released.
 
-The boss tracks living humans and holograms, navigates around intact lab
-structures at 2 m/s, and turns at 90 degrees/second. Slam, sweep, and launched
-hand deal 40, 25, and 50 Matter respectively, once per attack per victim. Windups
-are 1, 0.8, and 1.2 seconds; cooldowns are 4, 3, and 7 seconds. Melee attacks step
-closer during the early windup and lock aim for the final quarter second.
-Existing exposure/execution and invulnerability rules apply. The hand launch
-solves the actual damped substep trajectory instead of changing game damping.
+The hit that breaks a body shield cannot also cut its voxels. Shotgun pellets aggregate
+per part; sword damage is deduplicated per swing. Rail shots stop at shielded parts;
+exposed terrain retains normal penetration. Rockets evaluate protection before terrain
+damage. Reactor damage still overflows into permanent health, which does not regenerate.
 
-Unclaimed golem fragments collide physically but cannot multiply an attack's
-damage through the generic debris handler. Player-thrown pieces retain normal
-debris damage. Detached pieces expire after 45 unheld seconds; holding a piece
-resets this timer. This bounds long encounters without reducing the body design.
+Detached parts have no shields. Regrown parts start empty and wait before recharging.
+Losing a parent releases dependent parts; grouped physical repairs and kneeling remain.
+Breaking legs opens the reactor and suspends ranged attacks.
 
-## Implementation boundaries
+## Attacks
 
-`golem_combat.inc` owns decisions, shield/health, telegraphs, deduplication, and
-physical hand tracking. The controller supplies pose inputs to the existing
-renderer and articulated solver. The reactor reserves one non-rendered enemy
-slot for shared weapon targeting; it does not run generic bot AI, movement, or
-actor collision projection. Oriented cuboid ray tests use simulated body corners
-and a small seam tolerance. Chest armor remains genuine physical cover.
+- Slams: 40 Matter, one-second windup, four-second cooldown.
+- Sweeps: 25 Matter, 0.8-second windup, three-second cooldown.
+- Shoulder guns: existing default projectile construction and impact behavior,
+  three-shot bursts at three shots/second, two-second gaps, alternating shoulders,
+  30 m range and deterministic spread within four degrees.
+- Head rockets: existing rocket pool, speed, lifetime, blast and terrain behavior.
+  One-second warning, final 0.3 seconds of locked aim, 15-second cooldown, 8–35 m range.
+- Right-hand structure throw: replaces the autonomous fist launch. Acquires an eligible
+  visible structure within the player's upgraded-tether range, lifts for 1.5 seconds,
+  and releases through the shared upgraded-tether implementation. Ten-second cooldown;
+  failed acquisitions retry after two seconds. No golem-specific voxel cap or Lobber
+  extraction shortcut. Defensive Matter is not weapon ammunition.
 
-Combat preparation and damage resolution bracket a committed fixed step.
-GPU attempts only sample poses, so fallback cannot replay attacks, launches,
-shield regeneration, or damage. Manual fixtures keep the original animations;
-combat uses an optional reach target and lower sweep stance to reach rat height.
-Commanded attack motion receives mount-load grace, as repairs already do;
-held segments still evaluate overload, and structural cuts always apply.
-Shield effects use ordinary depth-tested geometry, work without bloom, and
-allocate no runtime meshes or materials.
+Arm/mount loss disables the corresponding gun; head loss disables rockets; right-arm
+loss drops a held payload without a throw. Ranged attacks pause during melee, throws,
+recovery and kneeling. Holograms remain valid targets. Failed projectile allocation
+does not register a shot. Existing projectiles finish naturally after boss death.
 
-## Reproduction
+The body, turret recoil, head aperture, part shields, target-part HUD and upgraded
+tether beam are sampled from the same simulation state. Effects use existing cached
+weapon materials and depth-tested geometry; no new full-screen pass or runtime mesh
+generation is required.
 
-- `./tools/validate_golem_combat.ps1 -Backend 43`
-- `./tools/validate_golem_combat.ps1 -Backend 33`
-- `./tools/validate_golem_combat.ps1 -Backend 43 -SkipBuild -Fallback`
-- `./tools/validate_golem_combat.ps1 -Backend 43 -SkipBuild -Preview`
-- `python tools/golem_combat_media.py` (requires Pillow)
-- `./tools/validate_golem_combat.ps1 -Backend 43 -SkipBuild -StressSeconds 600`
-- Existing `validate_golem_physics.ps1` covers manual poses and atomic repairs.
+## Implementation
 
-Captures go to `artifacts/golem/combat`. The stress test reports whole fixture
-frame median/p95, early/late means, peak cells, and action counts; its cell-count
-assertion is a test guard, not a production voxel cap.
+golem_arsenal.inc owns part shields, drain locks, ranged timers and attack presentation.
+The reactor proxy retains its position: explicit hand-anchor and release-aim hooks
+adapt the shared player tether without teleporting the proxy. Default bullets share
+a projectile-construction helper; rockets share the existing bounded pool.
 
-## Validation results (Windows, 2026-10-25)
+Combat timers and event creation run outside GPU retry attempts. Authored golem welds
+are preserved during unrelated world glue rebuilds, so grabbing terrain does not
+silently detach the body. Existing cuts are preserved too.
 
-- OpenGL 3.3 CPU and OpenGL 4.3 GPU combat suites passed, including actual
-  single-hit slam/sweep damage and physical hand hits at 6, 12, 20 and 25 m.
-- Shield overflow, nonlethal glob/tether damage, suppression, reactor persistence,
-  rocket cover protection, invulnerability, friendly fire, limb cancellation,
-  chest opening, hologram targeting, reset and exit checks passed.
-- Forced GPU validation failure around hand launch produced one launch and one
-  hit with one clock advance. CPU fallback and subsequent GPU recovery passed.
-- Existing GPU manual-pose/physics regression and CPU atomic repair tests passed,
-  including allocation rollback, held debris, actor obstruction and recovery damage.
-- A 600-second GPU simulation run completed 60 slams, 45 sweeps and 59 launches.
-  Peak voxel count was 606; final count was 534. Every sampled transform remained
-  finite. No body-detail cap was introduced.
-- Whole fixture simulation/update time (rendering excluded, O1 test build):
-  **8.383 ms median, 9.241 ms p95**. Mean of the first and last two minutes was
-  **8.667 ms and 8.729 ms**, respectively; no progressive slowdown was observed.
-  This is a lab measurement, not a full Firefight or split-screen benchmark.
-- Updated optimized Windows CPU/GPU executables and visually reviewed attack,
-  reactor/shield and defeat captures are available. LAN and live Firefight boss
-  integration remain outside this local-lab phase.
+## Controls and reproduction
+
+F3 / D-pad Right cycles combat and manual demonstrations. F4 resets; F5 pauses;
+F6 single-steps; F7 toggles god mode; F8 toggles repair; F9 shows the skeleton;
+F10 removes an arm; F11 removes a shin; F12 removes the chest. The original fist launch
+remains a manual demonstration.
+
+- ./tools/validate_golem_combat.ps1 -Backend 43
+- ./tools/validate_golem_combat.ps1 -Backend 33
+- ./tools/validate_golem_combat.ps1 -Backend 43 -SkipBuild -Fallback
+- ./tools/validate_golem_combat.ps1 -Backend 43 -SkipBuild -Preview
+- python tools/golem_combat_media.py (Pillow required)
+- ./tools/validate_golem_combat.ps1 -Backend 43 -SkipBuild -StressSeconds 600
+- ./tools/validate_golem_physics.ps1 -Backend 33 -Repair
+
+Captures are written to artifacts/golem/combat: part-shields.gif,
+shoulder-guns.gif, head-rocket.gif, and structure-throw.gif.
+Stress timing measures simulation/update in the lab fixture, excluding rendering.
+
+## Validation (Windows, 2026-10-26)
+
+- CPU and GPU combat checks passed: independent part shields, delayed regeneration,
+  shield drain/release, shotgun aggregation, sword deduplication, rocket protection,
+  projectile pool exhaustion, timed gun bursts, head loss and shared upgraded tether.
+- Existing equipment regression and CPU grouped-repair regression passed, including
+  allocation rollback, held debris, actor obstruction and damage during recovery.
+- Forced GPU validation failure during a structure throw produced one throw and one
+  clock advance, retaining the hand; CPU fallback completed the combat suite.
+- The 600-second GPU fixture completed 45 slams, 32 sweeps, 459 turret shots,
+  29 rockets and 30 structure throws. Peak voxel count was 575, final count 500;
+  all checked particle positions remained finite.
+- Whole fixture simulation/update timing: median 8.591 ms, p95 12.871 ms;
+  first/last two-minute means 9.308/9.093 ms. Rendering is excluded, and preview
+  compilation overlapped the early portion, so these are endurance-run observations,
+  not a controlled before/after performance benchmark.
+- Optimized Windows OpenGL 3.3 CPU and OpenGL 4.3 GPU builds were rebuilt.
+  Other operating systems and LAN boss gameplay are outside this local-lab phase.

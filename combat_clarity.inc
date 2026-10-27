@@ -98,6 +98,7 @@ static void clarity_explode(Vector3 pos,int owner) {
         Vector3 d=world_delta(players[i].pos,pos);float distance=v_length(d);VoxelHit hit;
         if(distance<4 && (distance<.1f || !first_voxel_hit_detailed((Ray){pos,v_norm(d)},fmaxf(0,distance-.25f),-1,true,&hit)))damage[i]=60*(1-distance/4);
     }
+    go_shield_blast(pos,4,60);
     enemy_blast_terrain((EnemyCharge){.pos=pos,.owner=owner});
     damageOriginKnown=true;damageOrigin=pos;
     for(int i=0;i<activePlayers;i++)if(damage[i]>0) {

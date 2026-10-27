@@ -3,6 +3,7 @@
 typedef struct GoCell {Vector3 center,size;Color color;int part,index;uint64_t id;float missing;} GoCell;
 typedef struct GoLink {int a,b,face;float weight[4][8];int corner[4];} GoLink;
 typedef struct GoWeld {GoLink definition;uint64_t a,b;int ia,ib;} GoWeld;
+static const int goParent[GM_COUNT]={-1,0,1,2,2,4,5,2,7,8,1,10,11,1,13,14,2,2,3,GOLEM_ARM_L,GOLEM_ARM_R};
 static GoCell *goCells;
 static GoLink *goLinks;
 static GoWeld *goWelds;
@@ -64,7 +65,7 @@ static int go_find(uint64_t id,int cached){
     for(int i=0;i<voxel_count;i++)if(voxels[i].identity==id)return i;
     return -1;
 }
-static Matrix go_matrix(int part){return part<GOLEM_JOINT_COUNT?goPose.joint[part]:part==GM_CHEST?goPose.chest:part==GM_CORE?goPose.core:goPose.eye;}
+static Matrix go_matrix(int part){if(part>=GM_TURRET_L)return goPose.joint[part==GM_TURRET_L?GOLEM_ARM_L:GOLEM_ARM_R];return part<GOLEM_JOINT_COUNT?goPose.joint[part]:part==GM_CHEST?goPose.chest:part==GM_CORE?goPose.core:goPose.eye;}
 static Matrix go_smooth_matrix(Matrix a,Matrix b,float amount){
     Vector3 pa,pb,sa,sb;Quaternion qa,qb;
     MatrixDecompose(a,&pa,&qa,&sa);MatrixDecompose(b,&pb,&qb,&sb);
@@ -99,7 +100,7 @@ static bool go_spawn_cell(int i,bool initial){
         Particle *p=v->particles[k];p->pos=Vector3Transform(go_corner(c,k),transform);p->prev_pos=p->predicted_pos=p->pos;
         p->radius=v->particle_radius;p->authored_shape=true;p->vel=(Vector3){0};
         if(!initial&&goLastDt>0){
-            Matrix previous=c->part<GOLEM_JOINT_COUNT?goPreviousPose.joint[c->part]:c->part==GM_CHEST?goPreviousPose.chest:c->part==GM_CORE?goPreviousPose.core:goPreviousPose.eye;
+            Matrix previous=c->part>=GM_TURRET_L?goPreviousPose.joint[c->part==GM_TURRET_L?GOLEM_ARM_L:GOLEM_ARM_R]:(c->part<GOLEM_JOINT_COUNT?goPreviousPose.joint[c->part]:c->part==GM_CHEST?goPreviousPose.chest:c->part==GM_CORE?goPreviousPose.core:goPreviousPose.eye);
             p->vel=v_mul(v_sub(p->pos,Vector3Transform(go_corner(c,k),previous)),1/goLastDt);
             p->prev_pos=v_sub(p->pos,v_mul(p->vel,goLastDt));
         }
@@ -145,7 +146,7 @@ static void go_release_part(int part){
         if(index>=0)voxels[index].persistentConstruction=false;goCells[i].id=0;goCells[i].index=-1;goCells[i].missing=goClock;
     }
     collisionTopologyDirty=true;
-    if(part==GOLEM_ARM_L||part==GOLEM_FOREARM_L||part==GOLEM_ARM_R||part==GOLEM_FOREARM_R||part==GOLEM_THIGH_L||part==GOLEM_SHIN_L||part==GOLEM_THIGH_R||part==GOLEM_SHIN_R)go_release_part(part+1);
+    for(int child=1;child<GM_COUNT;child++)if(goParent[child]==part)go_release_part(child);
 }
 #include "golem_repair.inc"
 static void go_launch_hand(void){
@@ -243,14 +244,14 @@ static void golem_physics_tick(float dt){
      * Disconnected cells immediately lose this drive and retain momentum. */
     for(int i=0;i<goCount;i++)if(goCells[i].index>=0){
         GoCell *cell=&goCells[i];int part=cell->part;Voxel *v=&voxels[cell->index];
-        Matrix previous=part<GOLEM_JOINT_COUNT?previousPose.joint[part]:part==GM_CHEST?previousPose.chest:part==GM_CORE?previousPose.core:previousPose.eye;
+        Matrix previous=part>=GM_TURRET_L?previousPose.joint[part==GM_TURRET_L?GOLEM_ARM_L:GOLEM_ARM_R]:(part<GOLEM_JOINT_COUNT?previousPose.joint[part]:part==GM_CHEST?previousPose.chest:part==GM_CORE?previousPose.core:previousPose.eye);
         for(int k=0;k<8;k++)skeletonConstraints[skeletonConstraintCount++]=(SkeletonConstraint){
             .corner=v->particles[k],.target=Vector3Transform(go_corner(cell,k),go_matrix(part)),
             .previous_target=Vector3Transform(go_corner(cell,k),previous),.compliance=1e-3f,.limit=v->rest_edge*.25f};
     }
     for(int part=1;part<GM_COUNT;part++){
         int mount=goMount[part];if(mount<0||goCells[mount].index<0)continue;GoCell *cell=&goCells[mount];Voxel *v=&voxels[cell->index];
-        Matrix previous=part<GOLEM_JOINT_COUNT?previousPose.joint[part]:part==GM_CHEST?previousPose.chest:part==GM_CORE?previousPose.core:previousPose.eye;
+        Matrix previous=part>=GM_TURRET_L?previousPose.joint[part==GM_TURRET_L?GOLEM_ARM_L:GOLEM_ARM_R]:(part<GOLEM_JOINT_COUNT?previousPose.joint[part]:part==GM_CHEST?previousPose.chest:part==GM_CORE?previousPose.core:previousPose.eye);
         for(int k=0;k<4;k++){
             int anchor=goAnchor[part][k];if(anchor<0||goCells[anchor].index<0)continue;
             GoCell *ac=&goCells[anchor];int corner=goAnchorCorner[part][k];
@@ -262,7 +263,9 @@ static void golem_physics_tick(float dt){
 }
 static bool golem_physics_start(void){
     golem_physics_reset();goRegen=true;goInput=golem_input();goInput.scale=goScale;goInput.position=(Vector3){0,.04f,10};goInput.side=1;goPose=golem_sample(&goInput);
-    golem_body_generate(go_collect,go_finish);if(goAllocationFailed){golem_physics_reset();return false;}
+    golem_body_generate(go_collect,go_finish);
+    for(int side=0;side<2;side++){go_body_grid(go_collect,2,1,2,(Vector3){0,.55f,0},GRAY);go_finish(GM_TURRET_L+side);}
+    if(goAllocationFailed){golem_physics_reset();return false;}
     for(int p=0;p<GM_COUNT;p++)goMount[p]=-1;
     for(int i=0;i<goCount;i++){int p=goCells[i].part;int old=goMount[p];if(old<0||v_length(goCells[i].center)<v_length(goCells[old].center))goMount[p]=i;}
     /* Four widely separated material points mount each connected segment.

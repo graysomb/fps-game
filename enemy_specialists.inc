@@ -243,11 +243,11 @@ static void enemy_blast_terrain(EnemyCharge c) {
     }
     remove_buffered_static_voxels(&shell);emit_unit_voxels_from_units(&shell,false,true,-1);
     init_static_hash();rebuild_voxel_hash();
-    for(int v=voxel_count-1;v>=0;v--)if(v_length(world_delta(voxels[v].pos,c.pos))<2 && enemy_equipment_owner(v)<0)remove_voxel_index(v);
+    for(int v=voxel_count-1;v>=0;v--)if(v_length(world_delta(voxels[v].pos,c.pos))<2 && enemy_equipment_owner(v)<0 && !go_shield_hit(v,0))remove_voxel_index(v);
     int stamp=++particle_sync_stamp;
     for(int v=0;v<voxel_count;v++) {
         Voxel *x=&voxels[v];float distance=v_length(world_delta(x->pos,c.pos));
-        if(!x->simulate || distance>=4 || enemy_equipment_owner(v)>=0)continue;
+        if(!x->simulate || distance>=4 || enemy_equipment_owner(v)>=0 || go_shield_hit(v,0))continue;
         if(x->sleeping)wake_sleeping_cluster_in_place(v);
         for(int f=0;f<6;f++)break_face_link(x,f);
         Vector3 direction=world_delta(x->pos,c.pos);direction.y+=1;

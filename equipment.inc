@@ -60,6 +60,7 @@ static void eq_trace(Vector3 a,Vector3 b,int gun,int owner){int slot=0;for(int n
 static bool eq_cut(int owner,Ray ray,float reach){
     VoxelHit hit;if(!first_voxel_hit_detailed(ray,reach,-1,false,&hit))return false;
     int v=first_voxel_hit(ray,reach,-1);if(v<0)return false;
+    if(go_shield_hit(v,0))return true;
     if(clarity_shield_voxel(v)){clarity_shield_melee(v,owner);return true;}
     if(!voxels[v].simulate){
         Vector3 at=world_wrap(v_add(ray.position,v_mul(ray.direction,hit.t+.01f)));
@@ -76,6 +77,7 @@ static void eq_rail_terrain(int owner,Ray ray){
     for(int n=0;n<512;n++){
         VoxelHit hit;if(!first_voxel_hit_detailed(ray,eqGuns[EQ_RAIL].range,-1,false,&hit))break;
         int v=hit.id;if(v<0 || v>=voxel_count)break;
+        if(go_shield_hit(v,eqGuns[EQ_RAIL].damage))break;
         Vector3 at=world_wrap(v_add(ray.position,v_mul(ray.direction,hit.t+.01f)));
         uint64_t id=voxels[v].identity;
         if(!voxels[v].simulate){
@@ -91,6 +93,10 @@ static void eq_rail_terrain(int owner,Ray ray){
 typedef struct { uint64_t id; VoxelHit hit; Vector3 direction; float distance; bool wasStatic; } ShotgunImpact;
 static void eq_shotgun_impacts(int owner,ShotgunImpact *hits,int count){
     if(!count)return;
+    float shieldDamage[GM_COUNT]={0};int shieldIndex[GM_COUNT];for(int p=0;p<GM_COUNT;p++)shieldIndex[p]=-1;
+    for(int n=0;n<count;n++){int v=enemy_voxel(hits[n].id),p=go_shield_part(v);
+        if(p>=0 && go_shield_hit(v,0)){shieldDamage[p]+=eqGuns[EQ_SHOTGUN].damage;shieldIndex[p]=v;hits[n].id=0;}}
+    for(int p=0;p<GM_COUNT;p++)if(shieldIndex[p]>=0)go_shield_hit(shieldIndex[p],shieldDamage[p]);
     static UnitVoxelBuffer buffer;unit_voxel_buffer_clear(&buffer);
     refresh_static_voxel_beliefs();
     for(int v=0;v<voxel_count;v++)atomic_store_explicit(&activationClaims[v],0,memory_order_relaxed);
@@ -148,6 +154,7 @@ static void eq_rocket_blast(EquipmentRocket rocket){
     for(int j=0;j<activePlayers;j++)if(players[j].respawn_timer<=0){Vector3 d=world_delta(players[j].pos,rocket.pos);float dist=v_length(d);VoxelHit hit;
         if(dist<eqRocketOuter && (dist<.15f || !first_voxel_hit_detailed((Ray){rocket.pos,v_norm(d)},fmaxf(0,dist-.3f),-1,false,&hit)))damages[j]=eqGuns[EQ_ROCKET].damage*(1-clampf((dist-eqRocketInner)/(eqRocketOuter-eqRocketInner),0,1));
     }
+    go_shield_blast(rocket.pos,eqRocketOuter,eqGuns[EQ_ROCKET].damage);
     // Protection is evaluated before the terrain becomes debris.
     enemy_blast_terrain((EnemyCharge){.pos=rocket.pos,.owner=rocket.owner});
     for(int j=0;j<activePlayers;j++)if(damages[j]>0){
@@ -214,17 +221,23 @@ static void eq_command(int i,const NetInputCommand *c,float dt){
         }
         if(!held && e->held && e->charge>=eqRailCharge){
             ducks_ray(ray,eqGuns[gun].range,0,-1,true);
+            float shieldStop=eqGuns[gun].range;
+            uint64_t passed[goCount>0?goCount:1];int passCount=0;VoxelHit barrier;
+            while(goCombatEnabled&&passCount<goCount&&go_body_ray(ray,shieldStop,-1,passed,passCount,&barrier)){
+                if(go_shielded(barrier.id)){shieldStop=barrier.t;break;}
+                passed[passCount++]=voxels[barrier.id].identity;
+            }
             for(int j=0;j<activePlayers;j++)if(eq_hostile(i,j)){
                 bool hitActor=false;float period=worldFloorHalfSize*2;int images=worldPeriodic?(int)ceilf(eqGuns[gun].range/period)+1:0;
                 Vector3 nearest=world_image(players[j].pos,p->pos);
                 for(int x=-images;x<=images && !hitActor;x++)for(int z=-images;z<=images && !hitActor;z++){
                     Vector3 at=v_add(nearest,(Vector3){x*period,0,z*period});RayCollision hit=GetRayCollisionBox(ray,combatant_bounds_at(j,at,PLAYER_SIZE*.5f));
-                    hitActor=hit.hit && hit.distance>=0 && hit.distance<=eqGuns[gun].range;
+                    hitActor=hit.hit && hit.distance>=0 && hit.distance<=shieldStop;
                 }
                 if(hitActor)eq_damage(i,j,eqGuns[gun].damage,true,DEATH_RAIL,p->pos);
             }
             eq_rail_terrain(i,ray);
-            eq_trace(player_weapon_pose(i,false).muzzle,v_add(p->pos,v_mul(ray.direction,100)),EQ_RAIL,i);e->charge=0;e->cooldown[gun]=eqGuns[gun].cooldown;weapon_visual_shot(&weaponVisuals[i],(float)GetTime());play_sfx_at(SFX_FIRE,p->pos,i,2,.65f);ai_gunfire(i,p->pos);
+            eq_trace(player_weapon_pose(i,false).muzzle,v_add(p->pos,v_mul(ray.direction,shieldStop)),EQ_RAIL,i);e->charge=0;e->cooldown[gun]=eqGuns[gun].cooldown;weapon_visual_shot(&weaponVisuals[i],(float)GetTime());play_sfx_at(SFX_FIRE,p->pos,i,2,.65f);ai_gunfire(i,p->pos);
         }
         if(!held)eq_cancel_charge(i);
     }else if(gun==EQ_CUTTER && held && p->matter>0){
@@ -232,12 +245,14 @@ static void eq_command(int i,const NetInputCommand *c,float dt){
         int target=eq_actor_ray(i,ray,&length);e->beamEnd=v_add(p->pos,v_mul(ray.direction,length));
         ducks_ray(ray,length,.08f,-1,false);
         if(target>=0)eq_damage(i,target,eqGuns[gun].damage*step,true,DEATH_CUTTER,p->pos);
+        bool shieldContact=target<0&&wall&&go_shield_hit(hit.id,eqGuns[gun].damage*step);
         e->cutTime+=step;bool cut=false;
-        for(int cuts=0;cuts<24 && e->cutTime>=eqCutterUnitSeconds;cuts++){
+        for(int cuts=0;!shieldContact && cuts<24 && e->cutTime>=eqCutterUnitSeconds;cuts++){
             e->cutTime-=eqCutterUnitSeconds;float stop=eqGuns[gun].range;VoxelHit surface;
             bool blocked=first_voxel_hit_detailed(ray,stop,-1,false,&surface);if(blocked)stop=surface.t;
             if(eq_actor_ray(i,ray,&stop)<0 && blocked)cut|=eq_cut(i,ray,eqGuns[gun].range);
         }
+        if(shieldContact)e->cutTime=0;
         if(cut){play_sfx_at(SFX_FIRE,p->pos,i,1,1.6f);ai_gunfire(i,p->pos);}
         eq_spend(i,eqGuns[gun].cost*step);
     }else e->cutTime=0;
@@ -284,7 +299,7 @@ static void eq_tick(float dt){
     if(netTransport.role==NET_ROLE_CLIENT){for(int n=0;n<32;n++)if(eqRockets[n].active)eqRockets[n].pos=world_wrap(v_add(eqRockets[n].pos,v_mul(eqRockets[n].vel,dt)));return;}
     for(int n=0;n<32;n++){EquipmentRocket *r=&eqRockets[n];if(!r->active)continue;float remaining=fminf(dt,.25f);
         while(remaining>0 && r->active){float step=fminf(remaining,1.f/120);remaining-=step;float length=v_length(r->vel)*step;Ray ray={r->pos,v_norm(r->vel)};VoxelHit hit;
-            bool collision=first_voxel_hit_detailed(ray,length,-1,false,&hit);if(collision)length=hit.t;int actor=eq_actor_ray(r->owner,ray,&length);
+            bool collision=go_combat_actor(r->owner)?go_world_ray(ray,length,&hit):first_voxel_hit_detailed(ray,length,-1,false,&hit);if(collision)length=hit.t;int actor=eq_actor_ray(r->owner,ray,&length);
             bool duck=ducks_ray(ray,length,.12f,-1,false);
             r->pos=world_wrap(v_add(r->pos,v_mul(ray.direction,length)));r->life-=step;
             if(collision || actor>=0 || duck || r->pos.y<.1f){EquipmentRocket copy=*r;r->active=false;eq_rocket_blast(copy);}else if(r->life<=0)r->active=false;

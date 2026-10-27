@@ -30,6 +30,7 @@ typedef struct {
     Vector3 origin,forward;
     bool hit[MAX_COMBATANTS];
     uint64_t cutIds[EQ_SWORD_CUTS];
+    uint32_t golemShieldParts;
     bool terrainChanged;int minx,maxx,miny,maxy,minz,maxz;
 } SwordWave;
 static SwordWave swordWaves[MAX_COMBATANTS];

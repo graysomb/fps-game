@@ -32,6 +32,8 @@ static bool start_tether_drain(int from) {
 static void update_tether_drains(float dt) {
     if(netTransport.role==NET_ROLE_CLIENT || dt<=0)return;
     for(int from=0;from<activePlayers;from++){
+        go_drain_tick(from,dt);
+        if(goCombatEnabled && from<MAX_PLAYERS && goDrainPart[from]>=0)continue;
         Player *p=&players[from];int to=p->drainTarget-1;
         if(to<0)continue;
         Vector3 delta=to<activePlayers?world_delta(players[to].pos,p->pos):(Vector3){0};

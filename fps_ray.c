@@ -10418,6 +10418,7 @@ static void update_projectiles(float dt)
         Ray ray = { start, v_norm(v->vel) };
         int hit_id = first_voxel_hit(ray, distance, i);
         if (hit_id >= 0 && hit_id < voxel_count) {
+            if(go_shield_hit(hit_id,player_bullet_damage(v->owner))){remove_voxel_index(i);continue;}
             foundry_trap_hit(hit_id,v->owner,false);
             int equipmentOwner=enemy_equipment_owner(hit_id),armorAlert=get_goliath_owner_of_voxel(hit_id);
             if(equipmentOwner>=0)ai_alert(equipmentOwner,v->owner,v->shotOrigin,AI_ALERT_HIT);
@@ -11540,6 +11541,9 @@ static void gather_voxel_shape_constraints_range(int start, int end, int worker_
 static void rebuild_glue_constraints(void) {
     collisionTopologyDirty = true;
     for (int i = 0; i < voxel_count; ++i) {
+        // Authored articulated welds are not grid-neighbor glue. Preserve live
+        // links (including real cuts) when activating unrelated world terrain.
+        if(voxels[i].golemOwned && voxels[i].persistentConstruction)continue;
         memset(voxels[i].glued_faces, 0, sizeof(voxels[i].glued_faces));
         for (int f = 0; f < 6; ++f) voxels[i].glued_neighbors[f] = -1;
     }
@@ -14040,6 +14044,35 @@ void simulate_voxel_pbd(float dt) { simulate_voxel_pbd_steps(dt, 1); }
  */
 
 // Fire a voxel bullet
+static bool spawn_default_projectile(int idx,Vector3 start,Vector3 dir,bool dynamic) {
+    Color col = dynamic ? (Color){ 255, 210, 90, 255 } : (Color){ 80, 170, 255, 255 };
+    int vix = addVoxel(start.x, start.y, start.z, false, true, col, 0);
+    if (vix >= 0) {
+        Voxel *shot = &voxels[vix];
+        Vector3 vel = v_mul(dir, 60.0f);
+        shot->vel = vel;
+        shot->owner = idx;
+        shot->shotOrigin=start;
+        shot->activator = idx;
+        shot->isBullet = !dynamic;
+        shot->glueEligible = dynamic;
+        shot->simulate = true;
+        shot->activationBelief = dynamic ? 1.0f : ACTIVATION_TYPE0_BULLET_BELIEF;
+        shot->wasTethered = dynamic;
+        for (int i = 0; i < 8; ++i) {
+            shot->particles[i]->vel = vel;
+            shot->particles[i]->inv_mass = 1.0f;
+            shot->particles[i]->base_inv_mass = 1.0f;
+            shot->particles[i]->active = true;
+            // sim_particles_remove(shot->particles[i]); // Keep them in sim? Or remove?
+            // If we remove them, they won't collide. But bullets need to collide.
+            // Original code had it commented out, but maybe because it wasn't working.
+            // If simulate is true, particles should be active.
+        }
+    }
+    return vix>=0;
+}
+
 static bool FireVoxel(int idx) {
     if(idx<MAX_COMBATANTS && (!is_player_bot(idx)||fp_carrier(idx)) && eq_gun(idx)>=EQ_SHOTGUN)return eq_fire(idx);
     if(idx<MAX_PLAYERS && equipment[idx].initialized && equipment[idx].switchTime>0)return false;
@@ -14057,31 +14090,9 @@ static bool FireVoxel(int idx) {
     Vector3 dir = { sinf(-yawRad)*cosf(pitchRad), sinf(pitchRad), -cosf(yawRad)*cosf(pitchRad) };
     Vector3 start = v_add(p->pos, v_mul(dir, 0.8f));
     bool dynamic_shot = p->dynamicShotActive;
-    Color col = dynamic_shot ? (Color){ 255, 210, 90, 255 } : (Color){ 80, 170, 255, 255 };
-    int vix = addVoxel(start.x, start.y, start.z, false, true, col, 0);
-    if (vix >= 0) {
+    int vix=spawn_default_projectile(idx,start,dir,dynamic_shot)?0:-1;
+    if(vix>=0){
         p->matter=fmaxf(0,p->matter-MATTER_SHOT_COST);p->isExposed=p->matter<=0;
-        Voxel *shot = &voxels[vix];
-        Vector3 vel = v_mul(dir, 60.0f);
-        shot->vel = vel;
-        shot->owner = idx;
-        shot->shotOrigin=p->pos;
-        shot->activator = idx;
-        shot->isBullet = !dynamic_shot;
-        shot->glueEligible = dynamic_shot;
-        shot->simulate = true;
-        shot->activationBelief = dynamic_shot ? 1.0f : ACTIVATION_TYPE0_BULLET_BELIEF;
-        shot->wasTethered = dynamic_shot;
-        for (int i = 0; i < 8; ++i) {
-            shot->particles[i]->vel = vel;
-            shot->particles[i]->inv_mass = 1.0f;
-            shot->particles[i]->base_inv_mass = 1.0f;
-            shot->particles[i]->active = true;
-            // sim_particles_remove(shot->particles[i]); // Keep them in sim? Or remove?
-            // If we remove them, they won't collide. But bullets need to collide.
-            // Original code had it commented out, but maybe because it wasn't working.
-            // If simulate is true, particles should be active.
-        }
         if(is_player_bot(idx))ai_shot_fired(idx);
         ai_gunfire(idx,p->pos);
         play_sfx_at(SFX_FIRE,p->pos,idx,1,1);
@@ -14943,6 +14954,7 @@ static Vector3 player_hand_position(const Player *p) {
 }
 
 static Vector3 player_tether_hold_position(const Player *p) {
+    if(goCombatEnabled&&p==&players[MAX_PLAYERS])return go_tether_anchor();
     if(p->enemyType==ENEMY_TYPE_LOBBER || p->enemyType==ENEMY_TYPE_FOUNDRY)return v_add(p->pos,(Vector3){0,3.5f,0});
     Vector3 forward = player_forward(p);
     Vector3 world_up = { 0.0f, 1.0f, 0.0f };
@@ -15307,6 +15319,7 @@ static bool melee_hit_voxels(Player *p, Vector3 start, Vector3 dir, float reach)
     if (hit_id < 0 || hit_id >= voxel_count) {
         return false;
     }
+    if(go_shield_hit(hit_id,40))return true;
     if(clarity_shield_melee(hit_id,player_idx))return true;
     foundry_trap_hit(hit_id,player_idx,false);
     Voxel *hit = &voxels[hit_id];
@@ -15705,6 +15718,7 @@ static bool resolve_tether_voxel(Player *player)
 static void acquire_tether_hit(int idx,int hit_id,Vector3 normal) {
     Player *p=&players[idx];
     if(p->respawn_timer>0 || p->tetherHolding || hit_id<0 || hit_id>=voxel_count)return;
+    if(go_drain_start(idx,hit_id))return;
     Voxel *hit = &voxels[hit_id];
     if (hit->simulate && (!hit->vgs_active || hit->isBullet || hit->type != 0 || voxel_is_fluid(hit))) {
         return;
@@ -15941,6 +15955,7 @@ static void prepare_tether_forces(void) {
 static void release_tether_velocity(int idx,const Vector3 *launch) {
     Player *p = &players[idx];
     p->drainTarget=0;
+    go_drain_cancel(idx);
     if (!p->tetherHolding) {
         return;
     }
@@ -15980,6 +15995,7 @@ static void release_tether_velocity(int idx,const Vector3 *launch) {
                 Vector3 toward=v_sub(v_add(p->pos,v_mul(dir,nearest)),center);
                 if(v_dot(toward,dir)>.05f)dir=v_norm(toward);
             }
+            if(go_combat_actor(idx))dir=v_norm(v_sub(go_tether_aim(),tetherComByPlayer[idx]));
             Vector3 impulse = v_mul(dir, p->goldTetherHolding
                 ? TETHER_THROW_IMPULSE : TETHER_THROW_IMPULSE / (float)cluster_count);
             if(ff_bonus((int)(p-players), UPGRADE_THROW)) impulse=v_mul(impulse,ff_throw_multiplier((int)(p-players)));
@@ -16240,6 +16256,7 @@ static inline float ray_t_to_next_plane(float p,      // ray.position.x  (or y /
 
 static bool go_body_ray(Ray ray,float reach,int ignore,const uint64_t *ignored,int ignoreCount,VoxelHit *out){
     if(!goActive||v_length(ray.direction)<1e-8f)return false;
+    if(ignore>=0 && ignore<voxel_count && go_combat_actor(voxels[ignore].owner))return false;
     float nearest=reach;bool found=false;Vector3 dir=v_norm(ray.direction);
     uint64_t core=goCombatEnabled&&goMount[GM_CORE]>=0?goCells[goMount[GM_CORE]].id:0;
     for(int n=0;n<voxel_count;n++){
@@ -18026,6 +18043,7 @@ static bool player_tether_visual_target(int player_index, Vector3 *out_target) {
         *out_target = p->netTetherVisualTarget;
         *out_target=world_image(*out_target,p->pos);return true;
     }
+    if(goCombatEnabled&&player_index<MAX_PLAYERS&&goDrainPart[player_index]>=0){*out_target=go_part_center(goDrainPart[player_index]);return true;}
     if(p->drainTarget>0 && p->drainTarget<=activePlayers){*out_target=world_image(players[p->drainTarget-1].pos,p->pos);return true;}
     if (!p->tetherHolding || !resolve_tether_voxel(p)) return false;
     if (p->tetherVoxel < 0 || p->tetherVoxel >= voxel_count) return false;
@@ -18179,7 +18197,7 @@ static void draw_player_tether_world(int player_index) {
     float tether_radius = 0.05f;
     if(players[player_index].drainTarget || players[player_index].netDrainVisualActive){
         int target=players[player_index].drainTarget-1;
-        bool idle=target>=0?(players[target].matter<=(players[target].enemyType==ENEMY_TYPE_FOUNDRY?1:0)):players[player_index].netDrainIdle;
+        bool idle=goCombatEnabled&&player_index<MAX_PLAYERS&&goDrainPart[player_index]>=0?goShields[goDrainPart[player_index]].value<=0:target>=0&&target<activePlayers?(players[target].matter<=(players[target].enemyType==ENEMY_TYPE_FOUNDRY?1:0)):players[player_index].netDrainIdle;
         weapon_draw_drain_state(hand,center,weaponFrameTime,!idle);return;
     }
     bool gold = players[player_index].goldTetherHolding ||

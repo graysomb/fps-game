@@ -3,7 +3,7 @@
 #include "golem_renderer.h"
 #include "raymath.h"
 /* One authoritative cell definition for rendering and physical construction. */
-enum { GM_CHEST=GOLEM_JOINT_COUNT, GM_CORE, GM_EYE, GM_COUNT };
+enum { GM_CHEST=GOLEM_JOINT_COUNT, GM_CORE, GM_EYE, GM_TURRET_L, GM_TURRET_R, GM_COUNT };
 typedef void (*GolemCellCallback)(Vector3 center,Vector3 size,Color color);
 typedef void (*GolemPartCallback)(int part);
 static inline void go_body_grid(GolemCellCallback cube,int nx,int ny,int nz,Vector3 bottom,Color color){
