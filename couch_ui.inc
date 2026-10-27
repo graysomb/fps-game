@@ -112,9 +112,6 @@ static void ff_draw_hud(int i,int w,int h) {
         DrawRectangle(x,y+24,barWidth,7,DARKGRAY);
         DrawRectangle(x,y+24,(int)(barWidth*clampf(s->coreHealth/fmaxf(1,s->coreMax),0,1)),7,GOLD);break;
     }
-    /* Reserve the lower-left corner for the existing radar. */
-    int panelX=HUD_PADDING_X+2*hud_radar_radius(h)+16, panelW=w-panelX-12-2*((w<700?40:56)+12);
-    DrawRectangle(panelX-6,h-154,panelW+6,100,Fade(BLACK,.8f));
     const char *text=NULL;
     if(combatantLife[i]==LIFE_DOWNED) text=TextFormat("DOWNED | Awaiting revive %.1f / 3s",reviveProgress[i]);
     else if(combatantLife[i]==LIFE_SPECTATING) text="Spectating until wave clear";
@@ -141,9 +138,31 @@ static void ff_draw_hud(int i,int w,int h) {
         if(!text && firefightEnemiesSpawned<firefightWaveEnemiesTotal) text=TextFormat("Incoming: %s entrance",ffEntrance?"EAST":"WEST");
     }
     if(text) {
+        /* Keep the hint between the radar and ability icons, above the grenade row. */
+        int panelX=HUD_PADDING_X+2*hud_radar_radius(h)+16;
+        int panelW=w-18-2*((w<700?40:56)+12)-8-panelX-6;
+        if(panelW<1)return;
         int fs=font;
-        while(fs>10 && MeasureText(text,fs)>panelW) fs--;
-        DrawText(text,panelX,h-155,fs,GOLD);
+        while(fs>12 && MeasureText(text,fs)>panelW) fs--;
+        char lines[4][128]={{0}};int count=0,width=0;
+        const char *next=text;
+        while(*next && count<4){
+            int length=0,space=0;
+            while(next[length] && length<(int)sizeof(lines[0])-1){
+                lines[count][length]=next[length];lines[count][length+1]=0;
+                if(MeasureText(lines[count],fs)>panelW && length>0)break;
+                if(next[length]==' ')space=length;
+                length++;
+            }
+            if(next[length] && space>0)length=space;
+            lines[count][length]=0;
+            int lineWidth=MeasureText(lines[count],fs);if(lineWidth>width)width=lineWidth;
+            next+=length;while(*next==' ')next++;
+            count++;
+        }
+        int y=h-155;
+        DrawRectangle(panelX-6,y-4,width+12,count*(fs+2)+6,Fade(BLACK,.8f));
+        for(int n=0;n<count;n++)DrawText(lines[n],panelX,y+n*(fs+2),fs,GOLD);
     }
     /* Equipped gun costs are shown beside the two-slot equipment HUD. */
 }
