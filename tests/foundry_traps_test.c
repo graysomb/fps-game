@@ -19,7 +19,8 @@ static void release_checks(void) {
     for(int n=0;n<6;n++) {
         FoundryTrap *t=&foundryTraps[n];int count=0;
         for(int i=0;i<voxel_count;i++)if(voxels[i].foundryTrapId==n+1){count++;assert(voxels[i].restorationQueued);assert(voxels[i].owner==0);}
-        assert(count==(t->x1-t->x0+1)*(t->y1-t->y0+1)*(t->z1-t->z0+1));assert(count<=256);
+        int expected=0;for(int k=0;k<t->originalCount;k++){Voxel *v=&t->original[k];expected+=foundry_trap_contains(t,v->gx,v->gy,v->gz);}
+        assert(count==expected);assert(count<=FOUNDRY_TRAP_PAYLOAD);
         assert(table_get_static_only(t->rx,t->ry,t->rz)<0);
     }
     float before=0,after=0;int count=0;
@@ -69,6 +70,46 @@ static void post_checks(void) {
         }
     }
     puts("Each corner trigger releases all four posts; other slab stays supported");
+}
+static void bay_checks(void) {
+    for(int bay=2;bay<6;bay++){
+        fresh();buildFoundryHoldout();FoundryTrap *t=&foundryTraps[bay];assert(t->kind==FOUNDRY_BAY);
+        int orange=0,roof=0,wall=0;unsigned signature=2166136261u;
+        for(int k=0;k<t->originalCount;k++){
+            Voxel *v=&t->original[k];bool crack=foundry_bay_crack(t,v->gx,v->gy,v->gz);
+            signature=(signature^(unsigned)crack)*16777619u;
+            if(crack){orange++;roof+=v->gy==11;wall+=v->gy<11;assert(v->gy>0);}
+        }
+        assert(roof>10 && wall>20 && orange<t->originalCount/2);
+        /* Rebuilding the same map must reproduce the exact crack network. */
+        fresh();buildFoundryHoldout();t=&foundryTraps[bay];unsigned rebuilt=2166136261u;
+        for(int k=0;k<t->originalCount;k++){Voxel *v=&t->original[k];rebuilt=(rebuilt^(unsigned)foundry_bay_crack(t,v->gx,v->gy,v->gz))*16777619u;}
+        assert(signature==rebuilt);
+        int trigger=table_get_static_only(t->rx,t->ry,t->rz);assert(trigger>=0 && ColorToInt(voxels[trigger].color)==ColorToInt(ORANGE));
+        assert(foundry_trap_hit(trigger,-1,false));foundry_traps_prepare();assert(t->active);
+        int payload=0;
+        for(int k=0;k<t->originalCount;k++){Voxel *v=&t->original[k];int id=table_get_static_only(v->gx,v->gy,v->gz);
+            if(v->gy>=1)assert(id<0);else assert(id>=0);
+            payload+=foundry_trap_contains(t,v->gx,v->gy,v->gz);
+        }
+        int actual=0;for(int v=0;v<voxel_count;v++)if(voxels[v].foundryTrapId==bay+1){actual++;assert(ColorToInt(voxels[v].color)!=ColorToInt(ORANGE));}
+        assert(actual==payload);
+        rebuild_glue_topology_neighbors();build_glue_cluster_ids(collisionVoxelClusterIds);
+        int fragments=0;bool seen[MAX_VOXELS]={0};
+        for(int v=0;v<voxel_count;v++)if(voxels[v].foundryTrapId==bay+1){
+            int group=collisionVoxelClusterIds[v];assert(group>=0);
+            if(!seen[group]){seen[group]=true;fragments++;}
+        }
+        fprintf(stderr,"Bay %d: %d orange crack cells, %d physical fragments\n",bay,orange,fragments);
+        assert(fragments>=4);
+        for(int n=0;n<6;n++)if(n!=bay)assert(!foundryTraps[n].active && foundry_trap_complete(&foundryTraps[n]));
+        activePlayers=1;playerInput[0]=INPUT_TYPE_KEYBOARD;combatantTeam[0]=0;combatantLife[0]=LIFE_ALIVE;
+        players[0]=(Player){.pos={(t->x0+t->x1+1)*.25f,1.5f,(t->z0+t->z1+1)*.25f},.matter=100};
+        for(int frame=0;frame<180 && players[0].respawn_timer<=0;frame++){simulate_voxel_pbd_steps(1.f/60,1);foundry_traps_hits();}
+        fprintf(stderr,"Bay %d: %d dynamic cells, center crush=%d\n",bay,payload,players[0].respawn_timer>0);
+        assert(players[0].respawn_timer>0);
+    }
+    puts("Four sparse factory bays: branching orange fractures, isolated activation and lethal roof collapse passed");
 }
 static void damage_checks(void) {
     fresh();foundry_trap_define(FOUNDRY_DROP,0,3,8,8,0,3,-1,8,0);
@@ -121,6 +162,6 @@ static void capture(void) {
 int main(int argc,char **argv) {
     assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Foundry traps");init_pbd_thread_pool();assert(initialize_physics_backend());
-    release_checks();post_checks();damage_checks();trigger_checks();capture();clear_all_chunks();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Foundry traps passed");
+    release_checks();post_checks();bay_checks();damage_checks();trigger_checks();capture();clear_all_chunks();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Foundry traps passed");
 }
 

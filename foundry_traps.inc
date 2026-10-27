@@ -1,4 +1,5 @@
 static void foundry_traps_reset(void) {
+    for(int n=0;n<foundryTrapCount;n++)free(foundryTraps[n].original);
     memset(foundryTraps,0,sizeof(foundryTraps));foundryTrapCount=0;
     foundryFragileReferenceCells=foundryFragileCells=foundryFragileReferenceCount=0;
 }
@@ -15,15 +16,11 @@ static bool foundry_trap_hit(int id,int actor,bool payload) {
 }
 static bool foundry_trap_complete(const FoundryTrap *t) {
     for(int k=0;k<t->originalCount;k++){const Voxel *v=&t->original[k];int id=table_get_static_only(v->gx,v->gy,v->gz);if(id<0 || voxels[id].owner!=-1)return false;}
-    for(int z=t->z0;z<=t->z1;z++)for(int y=t->fourPosts?t->ry+1:t->y0;y<=t->y1;y++)for(int x=t->x0;x<=t->x1;x++) {
-        if(!foundry_trap_contains(t,x,y,z))continue;
-        int id=table_get_static_only(x,y,z);if(id<0 || voxels[id].owner!=-1)return false;
-    }
     return true;
 }
 static void foundry_trap_release(int n) {
     FoundryTrap *t=&foundryTraps[n];
-    int total=(t->x1-t->x0+1)*(t->y1-t->y0+1)*(t->z1-t->z0+1);
+    int total=t->kind==FOUNDRY_BAY?t->originalCount:(t->x1-t->x0+1)*(t->y1-t->y0+1)*(t->z1-t->z0+1);
     /* Capacity preflight keeps exhausted pools from starting a release. */
     if(total>FOUNDRY_TRAP_PAYLOAD || voxel_count+total>=MAX_VOXELS || particle_pool_count-free_particle_count+8*total>=MAX_PARTICLES || recycleQueueCount+t->originalCount>MAX_VOXELS)return;
     t->active=true;t->pending=false;t->victims=0;t->activation++;
@@ -38,12 +35,13 @@ static void foundry_trap_release(int n) {
         if(release>=0){recycle_queue_push(&voxels[release]);remove_voxel_index(release);}
     }
     // A blast may have activated orange supports before the linked release.
-    if(t->fourPosts)for(int id=voxel_count-1;id>=0;id--){
+    if(t->fourPosts || t->kind==FOUNDRY_BAY)for(int id=voxel_count-1;id>=0;id--){
         Voxel *v=&voxels[id];
         if(v->simulate && !v->isBullet && v->type==0 &&
-           v->orig_min_gy>=t->ry && v->orig_min_gy<t->y0 &&
+           ((t->kind==FOUNDRY_BAY && foundry_trap_trigger(t,v->orig_min_gx,v->orig_min_gy,v->orig_min_gz)) ||
+           (t->fourPosts && v->orig_min_gy>=t->ry && v->orig_min_gy<t->y0 &&
            (v->orig_min_gx==t->x0 || v->orig_min_gx==t->x1) &&
-           (v->orig_min_gz==t->z0 || v->orig_min_gz==t->z1))remove_voxel_index(id);
+           (v->orig_min_gz==t->z0 || v->orig_min_gz==t->z1))))remove_voxel_index(id);
     }
     // Removing the switch may compact the voxel array; refresh seed indices.
     for(int k=0;k<buffer.count;k++)buffer.voxels[k].voxelIndex=table_get_static_only(buffer.voxels[k].gx,buffer.voxels[k].gy,buffer.voxels[k].gz);
@@ -84,11 +82,16 @@ static void foundry_trap_release(int n) {
         v->restorationDeadlineFrame=recycleFrameCounter+RECYCLE_STATIC_RESTORE_DELAY;
     }
     detach_gold_tether_static_boundary(members,count);
+    /* Removed crack cells separate the actual irregular physical fragments. */
     int stamp=++particle_sync_stamp;
     for(int k=0;k<count;k++) {
         Voxel *v=&voxels[members[k]];v->sleeping=false;v->sleepFrames=0;v->wake_source=true;v->wake_timer=COARSENING_WAKE_FRAMES;
         for(int c=0;c<8;c++) {
             Particle *p=v->particles[c];if(!p || p->sync_stamp==stamp)continue;p->sync_stamp=stamp;
+            if(t->kind==FOUNDRY_BAY && v->orig_min_gy<t->y1){
+                float push=.8f+1.2f*clampf((p->pos.y-2)/3,0,1);
+                p->vel.z+=v->orig_min_gz<(t->z0+t->z1)/2?push:-push;
+            }
             if(t->kind==FOUNDRY_TIP)p->vel.z+=1.2f+1.8f*clampf(p->pos.y-t->y0*VOXEL_SIZE,0,3);
         }
     }
@@ -166,7 +169,11 @@ static void foundry_traps_draw(void) {
         for(float x=-width*.5f;x<width*.5f;x+=.75f)DrawLine3D(v_add(center,(Vector3){x,0,-depth*.5f}),v_add(center,(Vector3){x+.35f,0,-depth*.5f+.35f}),c);
         if(t->active)continue;
         Vector3 release={(t->rx+.5f)*.5f,(t->ry+.5f)*.5f,(t->rz+.5f)*.5f};
-        if(t->fourPosts){
+        if(t->kind==FOUNDRY_BAY){
+            for(int k=0;k<t->originalCount;k++){const Voxel *v=&t->original[k];
+                if(v->gx==t->rx && v->gy==t->ry && v->gz==t->rz)DrawCubeWires(v->pos,.6f,.6f,.6f,YELLOW);
+            }
+        }else if(t->fourPosts){
             for(int x=t->x0;x<=t->x1;x+=t->x1-t->x0)for(int z=t->z0;z<=t->z1;z+=t->z1-t->z0)
                 DrawCubeWires((Vector3){(x+.5f)*VOXEL_SIZE,(t->ry+.5f)*VOXEL_SIZE,(z+.5f)*VOXEL_SIZE},.6f,.6f,.6f,YELLOW);
         }else DrawCubeWires(release,.6f,.6f,.6f,YELLOW);

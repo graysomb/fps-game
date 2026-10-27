@@ -4931,6 +4931,9 @@ static void refresh_activation_surfaces(const UnitVoxelBuffer *buffer) {
     }
 }
 
+static int activation_index_descending(const void *a,const void *b) {
+    int left=*(const int *)a,right=*(const int *)b;return (right>left)-(right<left);
+}
 static void remove_buffered_static_voxels(UnitVoxelBuffer *buffer)
 {
     if (!buffer) {
@@ -4940,23 +4943,15 @@ static void remove_buffered_static_voxels(UnitVoxelBuffer *buffer)
     double removalStart = GetTime();
 #endif
     ++staticBeliefBatchDepth;
-    int indices[VOXEL_ACTIVATION_UNIT_BUDGET];
+    static int indices[MAX_VOXELS];
     int idx_count = 0;
     for (int i = 0; i < buffer->count; ++i) {
         const UnitVoxelSeed *seed = &buffer->voxels[i];
-        if (seed->voxelIndex >= 0 && idx_count < VOXEL_ACTIVATION_UNIT_BUDGET) {
+        if (seed->voxelIndex >= 0 && idx_count < MAX_VOXELS) {
             indices[idx_count++] = seed->voxelIndex;
         }
     }
-    for (int i = 0; i < idx_count - 1; ++i) {
-        for (int j = i + 1; j < idx_count; ++j) {
-            if (indices[i] < indices[j]) {
-                int tmp = indices[i];
-                indices[i] = indices[j];
-                indices[j] = tmp;
-            }
-        }
-    }
+    qsort(indices,(size_t)idx_count,sizeof(indices[0]),activation_index_descending);
     // Deduplicate indices (must be done after sort, descending order)
     if (idx_count > 0) {
         int write = 0;
@@ -23053,6 +23048,7 @@ int main(int argc, char **argv) {
     }
     shutdown_pbd_thread_pool();
     golem_physics_reset();
+    foundry_traps_reset();
     net_transport_shutdown(&netTransport);
     gpu_physics_shutdown();
     // cleanup

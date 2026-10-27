@@ -75,6 +75,7 @@ static void buildFoundryHoldout(void) {
         int x=sx*23,z=sz*22;
         foundry_shell(x-5,x-4,0,9,z-4,z-3,stone,2);
         foundry_shell(x+4,x+5,0,9,z+3,z+4,stone,2);
+        if(!firefightPractice)foundry_bay_trap(x,z);
         foundry_box(sx*14-2,sx*14+2,0,4,sz*24-1,sz*24,stone);
         foundry_box(sx*28-1,sx*28,0,4,sz*10-2,sz*10+2,stone);
     }
@@ -86,11 +87,6 @@ static void buildFoundryHoldout(void) {
         foundry_shell(-4,4,0,5,side*33-1,side*33+1,stone,3);
     }
     if(!firefightPractice) {
-        for(int side=-1;side<=1;side+=2) {
-            int cx=(int)roundf(side*23*1.875f);
-            foundry_trap_define(FOUNDRY_SWITCH,cx-4,cx+3,7,7,36,45,cx-6,2,40);
-            foundry_trap_define(FOUNDRY_TIP,cx-2,cx+1,1,6,-43,-40,cx-2,0,-40);
-        }
         enemy_stock_scrap(true);
     }
 }
