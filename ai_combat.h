@@ -1,3 +1,6 @@
+#define SWARMER_CONTACT_DAMAGE 25.0f
+#define SWARMER_RALLY_RADIUS 18.0f
+
 /* Shared host-side perception and gun discipline; never serialized. */
 typedef enum { AI_ALERT_NONE,AI_ALERT_SEEN,AI_ALERT_HEARD,AI_ALERT_NEAR,AI_ALERT_HIT } AiAlert;
 typedef struct {
@@ -6,6 +9,7 @@ typedef struct {
     AiAlert source,pendingSource;
     bool visible,wasVisible,initialized;
     double clock,lastFire;
+    float rallyCooldown;
     float memory,commit,overrideDelay,reaction,recovery,tracking,intentTime;
     float aimYaw,aimPitch,goalYaw,goalPitch,aimTimer,error,stuck,jumpDelay;
     uint32_t random;

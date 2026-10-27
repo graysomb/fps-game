@@ -19,10 +19,45 @@ static void arena(int difficulty) {
     players[4].matter=10000;players[4].invuln_timer=0;
     players[1].respawn_timer=9999;ai_reset(4);
 }
+static void swarmer_checks(void) {
+    arena(INPUT_TYPE_BOT_EASY);worldPeriodic=false;players[0].pos=(Vector3){0,2,-5};
+    activePlayers=7;
+    enemy_lab_spawn(4,ENEMY_TYPE_SWARMER,(Vector3){0,2,0});
+    enemy_lab_spawn(5,ENEMY_TYPE_SWARMER,(Vector3){12,2,0});
+    enemy_lab_spawn(6,ENEMY_TYPE_SWARMER,(Vector3){29,2,0});
+    players[4].yaw=0;players[5].yaw=players[6].yaw=180;
+    ai_tick(4,.1f);
+    assert(aiCombat[4].visible && aiCombat[4].target==0);
+    assert(aiCombat[5].target==0 && aiCombat[5].source==AI_ALERT_HEARD);
+    assert(!aiCombat[5].visible && aiCombat[6].target==-1);
+    ai_swarmer_rally(5);assert(aiCombat[6].target==-1);
+    Vector3 known=aiCombat[5].known;players[0].pos.x=3;
+    ai_tick(4,.1f);assert(v_length(v_sub(known,aiCombat[5].known))<.001f);
+    ai_tick(4,1);assert(v_length(v_sub(players[0].pos,aiCombat[5].known))<.001f);
+    aiCombat[4].visible=false;aiCombat[4].rallyCooldown=0;
+    players[0].pos.x=7;ai_swarmer_rally(4);assert(aiCombat[5].known.x==3);
+    arena(INPUT_TYPE_BOT_EASY);firefightWave=2;firefightWaveEnemiesRemaining=999;
+    players[0].matter=100;players[0].isExposed=false;players[0].invuln_timer=0;
+    for(int hit=1;hit<=5;hit++) {
+        enemy_lab_spawn(4,ENEMY_TYPE_SWARMER,players[0].pos);
+        players[4].invuln_timer=0;players[4].contactDamageTimer=0;
+        update_enemy_contact_damage(.1f);
+        assert(players[4].respawn_timer>0);
+        if(hit<=4){assert(players[0].matter==100-25*hit);assert(players[0].respawn_timer<=0);}
+    }
+    assert(combatantLife[0]==LIFE_DOWNED);
+    arena(INPUT_TYPE_BOT_EASY);enemy_lab_spawn(4,ENEMY_TYPE_SWARMER,players[0].pos);
+    players[0].invuln_timer=1;players[0].matter=100;players[0].isExposed=false;
+    update_enemy_contact_damage(.1f);assert(players[0].matter==100 && players[4].respawn_timer<=0);
+    netTransport.role=NET_ROLE_CLIENT;players[0].invuln_timer=0;
+    update_enemy_contact_damage(.1f);assert(players[0].matter==100);netTransport.role=NET_ROLE_OFFLINE;
+    fprintf(stderr,"Swarmer 25 damage, exposed finish, invulnerability, authority and local rally passed\n");
+}
 int main(int argc,char **argv) {
     assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);
     SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);
     InitWindow(640,480,"AI combat regression");init_pbd_thread_pool();assert(initialize_physics_backend());
+    swarmer_checks();
     int levels[]={INPUT_TYPE_BOT_EASY,INPUT_TYPE_BOT_MEDIUM,INPUT_TYPE_BOT_HARD};
     int rates[]={30,60,120};
     for(int d=0;d<3;d++)for(int r=0;r<3;r++){

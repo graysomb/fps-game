@@ -107,7 +107,7 @@ static void hologram_tick(float dt) {
             for(int i=0;i<activePlayers;i++)if(is_player_bot(i) && players[i].respawn_timer<=0 && ai_hostile(i,MAX_COMBATANTS+n) && players[i].contactDamageTimer<=0) {
                 bool swarm=players[i].enemyType==ENEMY_TYPE_SWARMER,goliath=players[i].enemyType==ENEMY_TYPE_GOLIATH;
                 if((swarm || goliath) && v_length(world_delta(players[i].pos,h->body.pos))<(swarm?.75f:1.6f)) {
-                    hologram_damage(MAX_COMBATANTS+n,swarm?10:30);players[i].contactDamageTimer=swarm?.5f:.8f;
+                    hologram_damage(MAX_COMBATANTS+n,swarm?SWARMER_CONTACT_DAMAGE:30);players[i].contactDamageTimer=swarm?.5f:.8f;
                 }
             }
         }

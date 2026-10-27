@@ -44,6 +44,20 @@ static void ai_alert(int victim,int attacker,Vector3 position,AiAlert source) {
         ai_select(victim,attacker,position,source);
     }
 }
+/* Only firsthand sightings rally neighbors; heard alerts never relay themselves. */
+static void ai_swarmer_rally(int i) {
+    AiCombat *a=&aiCombat[i];
+    if(netTransport.role==NET_ROLE_CLIENT || players[i].respawn_timer>0 ||
+       players[i].enemyType!=ENEMY_TYPE_SWARMER || !a->visible ||
+       !ai_hostile(i,a->target) || a->rallyCooldown>0)return;
+    a->rallyCooldown=1.0f;
+    for(int j=0;j<activePlayers;j++) {
+        if(j==i || players[j].enemyType!=ENEMY_TYPE_SWARMER || players[j].respawn_timer>0 ||
+           !is_player_bot(j) || combatantTeam[j]!=combatantTeam[i])continue;
+        if(v_length(world_delta(players[j].pos,players[i].pos))<=SWARMER_RALLY_RADIUS)
+            ai_alert(j,a->target,a->known,AI_ALERT_HEARD);
+    }
+}
 static void ai_gunfire(int shooter,Vector3 origin) {
     if(netTransport.role==NET_ROLE_CLIENT)return;
     for(int i=0;i<activePlayers;i++)if(is_player_bot(i) && ai_hostile(i,shooter)) {
@@ -72,7 +86,7 @@ static void ai_near_miss(int projectile,Vector3 start,Vector3 end) {
 }
 static void ai_tick(int i,float dt) {
     AiCombat *a=&aiCombat[i];if(!a->initialized)ai_reset(i);
-    dt=fmaxf(0,dt);a->clock+=dt;a->memory=fmaxf(0,a->memory-dt);a->commit=fmaxf(0,a->commit-dt);
+    dt=fmaxf(0,dt);a->rallyCooldown=fmaxf(0,a->rallyCooldown-dt);a->clock+=dt;a->memory=fmaxf(0,a->memory-dt);a->commit=fmaxf(0,a->commit-dt);
     a->overrideDelay=fmaxf(0,a->overrideDelay-dt);a->reaction=fmaxf(0,a->reaction-dt);a->recovery=fmaxf(0,a->recovery-dt);
     a->intentTime=fmaxf(0,a->intentTime-dt);a->jumpDelay=fmaxf(0,a->jumpDelay-dt);
     bool locked=enemy_is_special(i) && enemySpecial[i].windup>0;
@@ -105,6 +119,7 @@ static void ai_tick(int i,float dt) {
         a->lastTargetVelocity=velocity;a->tracking=fminf(1,a->tracking+dt);
     } else {ai_cancel_burst(i);a->tracking=0;a->reaction=fmaxf(a->reaction,ai_reaction(i));}
     a->visible=visible;a->wasVisible=visible;
+    ai_swarmer_rally(i);
     BotState *b=&botStates[i];b->targetIndex=a->target;b->hasTarget=a->target>=0;b->lastKnownTargetPos=a->known;b->lostTrackTimer=a->memory;
     Vector3 travel=world_delta(players[i].pos,a->lastPosition);travel.y=0;
     if(v_length(travel)<dt*.2f && v_length(players[i].vel)>.5f)a->stuck+=dt;else a->stuck=0;

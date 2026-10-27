@@ -21431,6 +21431,54 @@ static void eq_lab(void){
 
 #include "mouse_input.inc"
 
+static void update_enemy_contact_damage(float dt) {
+    if(netTransport.role==NET_ROLE_CLIENT)return;
+        for (int i = 0; i < activePlayers; ++i) {
+            if (players[i].contactDamageTimer > 0.0f) {
+                players[i].contactDamageTimer -= dt;
+            }
+        }
+        for (int i = 0; i < activePlayers; ++i) {
+            Player *bot = &players[i];
+            if (bot->respawn_timer > 0.0f) continue;
+            if (bot->enemyType != ENEMY_TYPE_SWARMER && bot->enemyType != ENEMY_TYPE_GOLIATH) continue;
+            if (bot->contactDamageTimer > 0.0f) continue;
+
+            float contactRadius = (bot->enemyType == ENEMY_TYPE_SWARMER) ? 0.75f : 1.6f;
+            float contactDamage = (bot->enemyType == ENEMY_TYPE_SWARMER) ? SWARMER_CONTACT_DAMAGE : 30.0f;
+            float knockbackImpulse = (bot->enemyType == ENEMY_TYPE_SWARMER) ? 2.5f : 16.0f;
+
+            for (int j = 0; j < activePlayers; ++j) {
+                if (i == j) continue;
+                if (gameMode == GAME_MODE_FIREFIGHT && is_player_bot(i) == is_player_bot(j)) continue;
+                Player *victim = &players[j];
+                if (victim->respawn_timer > 0.0f || victim->invuln_timer > 0.0f) continue;
+
+                Vector3 diff = world_delta(victim->pos, bot->pos);
+                float distSq = v_dot(diff, diff);
+                if (distSq <= contactRadius * contactRadius) {
+                    float dist = sqrtf(distSq);
+                    Vector3 knockDir = (dist > 1e-4f) ? v_mul(diff, 1.0f / dist) : (Vector3){ 0.0f, 0.5f, 1.0f };
+                    knockDir.y = fmaxf(knockDir.y, 0.35f);
+                    knockDir = v_norm(knockDir);
+
+                    victim->vel = v_add(victim->vel, v_mul(knockDir, knockbackImpulse*enemy_knockback_scale(j)));
+                    victim->meleeKnockbackActive = true;
+                    if(bot->enemyType==ENEMY_TYPE_SWARMER && victim->isExposed)
+                        kill_player(j,i,true,false);
+                    else apply_matter_damage(j, i, contactDamage);
+                    bot->contactDamageTimer = (bot->enemyType == ENEMY_TYPE_SWARMER) ? 0.5f : 0.8f;
+                    play_sfx(SFX_IMPACT);
+                    if (bot->enemyType == ENEMY_TYPE_SWARMER) {
+                        kill_player(i, -1, false, false);
+                    }
+                    break;
+                }
+            }
+        }
+
+}
+
 int main(int argc, char **argv) {
     if (!parse_physics_arguments(argc, argv)) return 2;
     bool automatedRun = physicsSmokeSteps > 0 || debug_run_requested() || aiSmokeTestRequested || enemySmokeRequested;
@@ -22758,47 +22806,7 @@ int main(int argc, char **argv) {
             if(enemy_is_special(i) && players[i].respawn_timer<=0) enemy_update_equipment(i);
         }
 
-        for (int i = 0; i < activePlayers; ++i) {
-            if (players[i].contactDamageTimer > 0.0f) {
-                players[i].contactDamageTimer -= dt;
-            }
-        }
-        for (int i = 0; i < activePlayers; ++i) {
-            Player *bot = &players[i];
-            if (bot->respawn_timer > 0.0f) continue;
-            if (bot->enemyType != ENEMY_TYPE_SWARMER && bot->enemyType != ENEMY_TYPE_GOLIATH) continue;
-            if (bot->contactDamageTimer > 0.0f) continue;
-
-            float contactRadius = (bot->enemyType == ENEMY_TYPE_SWARMER) ? 0.75f : 1.6f;
-            float contactDamage = (bot->enemyType == ENEMY_TYPE_SWARMER) ? 10.0f : 30.0f;
-            float knockbackImpulse = (bot->enemyType == ENEMY_TYPE_SWARMER) ? 2.5f : 16.0f;
-
-            for (int j = 0; j < activePlayers; ++j) {
-                if (i == j) continue;
-                if (gameMode == GAME_MODE_FIREFIGHT && is_player_bot(i) == is_player_bot(j)) continue;
-                Player *victim = &players[j];
-                if (victim->respawn_timer > 0.0f || victim->invuln_timer > 0.0f) continue;
-
-                Vector3 diff = world_delta(victim->pos, bot->pos);
-                float distSq = v_dot(diff, diff);
-                if (distSq <= contactRadius * contactRadius) {
-                    float dist = sqrtf(distSq);
-                    Vector3 knockDir = (dist > 1e-4f) ? v_mul(diff, 1.0f / dist) : (Vector3){ 0.0f, 0.5f, 1.0f };
-                    knockDir.y = fmaxf(knockDir.y, 0.35f);
-                    knockDir = v_norm(knockDir);
-
-                    victim->vel = v_add(victim->vel, v_mul(knockDir, knockbackImpulse*enemy_knockback_scale(j)));
-                    victim->meleeKnockbackActive = true;
-                    apply_matter_damage(j, i, contactDamage);
-                    bot->contactDamageTimer = (bot->enemyType == ENEMY_TYPE_SWARMER) ? 0.5f : 0.8f;
-                    play_sfx(SFX_IMPACT);
-                    if (bot->enemyType == ENEMY_TYPE_SWARMER) {
-                        kill_player(i, -1, false, false);
-                    }
-                    break;
-                }
-            }
-        }
+        update_enemy_contact_damage(dt);
 
         activate_static_voxels_near_dynamic();
         //batch_glued_dynamic_voxels();
