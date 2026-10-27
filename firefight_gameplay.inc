@@ -1,7 +1,7 @@
 /* Firefight orchestration; included after enemy initialization. */
 static int ffRemaining[FF_TYPE_COUNT], ffSpawnOrdinal;
 static float ffSpawnTimer, ffCleanupTimer;
-static int ffEntrance;
+static int ffEntrance, ffEntrancePosition[2];
 static float ff_build_cost(int i) {return ff_bonus(i,UPGRADE_BUILD)?fmaxf(1,10.f/(1+teamUpgradeLevels[0])):MATTER_BUILD_COST;}
 static float ff_throw_multiplier(int i) {return ff_bonus(i,UPGRADE_THROW)?1+.25f*teamUpgradeLevels[2]:1;}
 static bool ff_upgrades_maxed(void) {return teamUpgradeLevels[0]>=9 && teamUpgradeLevels[1]>=8 && teamUpgradeLevels[2]>=8;}
@@ -133,7 +133,8 @@ static void start_firefight_wave(int wave_number) {
     }
     fp_prepare_wave(firefightWave);
     firefightWaveEnemiesRemaining=firefightWaveEnemiesTotal;
-    ffSpawnOrdinal=0; ffSpawnTimer=2; ffCleanupTimer=0; ffEntrance=0;
+    ffSpawnOrdinal=0; ffSpawnTimer=2; ffCleanupTimer=0; ffEntrance=(firefightWave-1)%2;
+    ffEntrancePosition[0]=ffEntrancePosition[1]=0;
     for(int i=MAX_PLAYERS;i<MAX_COMBATANTS;i++) {
         if(goliathStates[i].count>0) explode_goliath_armor(i);
         players[i].respawn_timer=9999; combatantLife[i]=LIFE_UNUSED;
@@ -190,11 +191,18 @@ static bool ff_spawn_position(int slot, Vector3 *out) {
     if(firefightPractice) { *out=(Vector3){0,BASE_EYE_HEIGHT+2,-1}; return true; }
     if(!firefightFoundry && !firefightPractice) { *out=pick_player_spawn(slot); return spawn_position_clear_ex(*out,spawn_clear_half(slot),4,slot); }
     for(int entrance=0;entrance<2;entrance++) {
-        int side=(ffEntrance+entrance)%2 ? 1 : -1;
+        int index=(ffEntrance+entrance)%2;
+        int side=index ? 1 : -1;
         for(int n=0;n<5;n++) {
-            Vector3 pos={(float)side*36.0f,BASE_EYE_HEIGHT, (float)(n-2)*3.0f};
+            int position=(ffEntrancePosition[index]+n)%5;
+            Vector3 pos={(float)side*36.0f,BASE_EYE_HEIGHT, (float)(position-2)*3.0f};
             pos=nudge_spawn_clear(pos,spawn_clear_half(slot),4.0f,slot);
-            if(spawn_position_clear_ex(pos,spawn_clear_half(slot),4.0f,slot)) { *out=pos; return true; }
+            if(spawn_position_clear_ex(pos,spawn_clear_half(slot),4.0f,slot)) {
+                *out=pos;
+                ffEntrancePosition[index]=(position+1)%5;
+                ffEntrance=index; /* Keep the rest of this pack at the chosen entrance. */
+                return true;
+            }
         }
     }
     return false;
@@ -271,7 +279,7 @@ static void update_firefight_logic(float dt) {
         int specialistCap=(firefightWave-1)%FF_WAVE_COUNT>=3?2:1;
         if(ffRemaining[t]>0 && (t!=2 || goliaths<2) && (t<3 || specialists<specialistCap)) {type=t;break;} }
     if(type<0) return;
-    int pack=type==ENEMY_TYPE_SWARMER?3:1;
+    int pack=type==ENEMY_TYPE_SWARMER?3:1, spawned=0;
     for(int n=0;n<pack && ffRemaining[type]>0 && living<waveCap;n++) {
         slot=-1;
         for(int i=MAX_PLAYERS;i<MAX_COMBATANTS;i++) if(players[i].respawn_timer>0) {slot=i;break;}
@@ -286,8 +294,8 @@ static void update_firefight_logic(float dt) {
         players[slot].death_pos=position;
         clarity_spawn(slot);
         fp_spawn(slot,type);
-        ffRemaining[type]--; firefightEnemiesSpawned++; ffSpawnOrdinal++; living++;
+        ffRemaining[type]--; firefightEnemiesSpawned++; ffSpawnOrdinal++; living++; spawned++;
     }
-    ffEntrance=(firefightWave>=4)?1-ffEntrance:0;
+    if(spawned) ffEntrance=1-ffEntrance;
     ffSpawnTimer=firefightWave<=2?4:2;
 }
