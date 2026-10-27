@@ -20308,6 +20308,7 @@ static void net_host_tick(void) {
         if (!netPlayerPresent[slot] || !netHasPendingInput[slot]) continue;
         NetInputCommand command = netPendingInput[slot];
         netHasPendingInput[slot] = false;
+        if(gameMode==GAME_MODE_FIREFIGHT && firefightWaveState==FIREFIGHT_STATE_LOOT && (command.pressed&NET_INPUT_PREP_READY))prepReady[slot]=!prepReady[slot];
         if(gameMode==GAME_MODE_FIREFIGHT && firefightWaveState==FIREFIGHT_STATE_INTERMISSION){
             if(command.pressed&NET_INPUT_PREP_MENU)prepMenuOpen[slot]=!prepMenuOpen[slot];
             if(prepMenuOpen[slot]){

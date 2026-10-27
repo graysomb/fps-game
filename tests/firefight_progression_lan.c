@@ -7,7 +7,7 @@ static bool focused(void){return true;}
 #undef main
 #include <assert.h>
 bool ffTestReviveHeld[4];
-static bool joined,sawItems,sawGun,sawCharge,sawCarrier,sawRestart,sawRestore,sawReady,sawRejected,sawLoot;
+static bool joined,sawItems,sawGun,sawCharge,sawCarrier,sawRestart,sawRestore,sawReady,sawRejected,sawLoot,sawLootReady;
 static uint32_t initialSession;
 static size_t savedCount;
 static void receive(NetTransport*t,int peer,uint8_t channel,const uint8_t*data,size_t length,void*u){
@@ -33,7 +33,7 @@ int main(int argc,char**argv){bool late=argc>1&&!strcmp(argv[1],"late-host");boo
  gameMode=GAME_MODE_FIREFIGHT;firefightFoundry=true;firefightPractice=false;firefightCheckpoints=true;multiplayerActivePlayers=1;ResetGame();assert(net_transport_global_init());
  if(host){assert(net_transport_host(&netTransport,27942));net_set_host_local_players(1);netLobbyStarted=late;gameState=late?GAME_STATE_PLAYING:GAME_STATE_LOBBY;if(late)activePlayers=MAX_COMBATANTS;}
  else {netRequestedLocalPlayers=1;net_prepare_client_local_players(1);assert(net_transport_connect(&netTransport,"127.0.0.1",27942));}
- double start=GetTime(),at=-1;uint32_t seq=0;bool replaced=false,captured=false,failed=false,restored=false,vote=false;uint32_t original=0;
+ double start=GetTime(),at=-1;uint32_t seq=0;bool replaced=false,captured=false,failed=false,restored=false,vote=false,lootVote=false;uint32_t original=0;
  while(GetTime()-start<30){net_transport_pump(&netTransport,receive,net_on_connect,NULL);double now=GetTime();
   if((host&&joined)||(!host&&netWorldReady)){if(at<0)at=now;float age=now-at;
    if(host){
@@ -45,12 +45,15 @@ int main(int argc,char**argv){bool late=argc>1&&!strcmp(argv[1],"late-host");boo
      uint8_t packet[128];NetWriter w;net_writer_init(&w,packet,sizeof(packet));net_write_header(&w,NET_MSG_INPUT,0,original,0);net_write_u8(&w,1);NetInputCommand bad={.sequence=99999,.pressed=NET_INPUT_EQUIP};net_write_input(&w,&bad);net_on_receive(&netTransport,1,FPS_NET_CHANNEL_INPUT,packet,w.length,NULL);assert(!netHasPendingInput[1]);sawRejected=true;
     }
     if(age>9&&restored&&!vote){ff_wave_complete();vote=true;}
-    if(age>11&&firefightWaveState==FIREFIGHT_STATE_LOOT){assert(!prepReady[1]);update_firefight_logic(FF_LOOT_SECONDS);}
+    if(vote&&firefightWaveState==FIREFIGHT_STATE_LOOT){
+     sawLootReady|=prepReady[1];
+     if(sawLootReady){assert(!prepReady[0] && firefightIntermissionTimer>FF_LOOT_SECONDS-1);prepReady[0]=true;update_firefight_logic(.01f);assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION && !prepReady[0] && !prepReady[1]);}
+    }
     if(vote&&prepReady[1])sawReady=true;
    }else{
     NetInputCommand c={.sequence=++seq};if(age>1&&eq_gun(1)==EQ_GLOB&&!replaced){c.pressed|=NET_INPUT_EQUIP;replaced=true;}
     if(age>3.2&&!sawRestart)c.held|=NET_INPUT_FIRE;
-    if(firefightWaveState==FIREFIGHT_STATE_LOOT)c.pressed|=NET_INPUT_PREP_RIGHT|NET_INPUT_PREP_READY;
+    if(firefightWaveState==FIREFIGHT_STATE_LOOT&&!lootVote){c.pressed|=NET_INPUT_PREP_READY;lootVote=true;}
     if(firefightWaveState==FIREFIGHT_STATE_INTERMISSION&&!vote){c.pressed|=NET_INPUT_PREP_RIGHT|NET_INPUT_PREP_READY;vote=true;}
     uint8_t packet[128];NetWriter w;net_writer_init(&w,packet,sizeof(packet));net_write_header(&w,NET_MSG_INPUT,0,netTransport.session_id,0);net_write_u8(&w,netLocalPlayerSlots[0]);net_write_input(&w,&c);net_transport_send(&netTransport,0,FPS_NET_CHANNEL_INPUT,packet,w.length,c.pressed!=0);
    }
@@ -58,7 +61,7 @@ int main(int argc,char**argv){bool late=argc>1&&!strcmp(argv[1],"late-host");boo
   }
   WaitTime(1.f/60);
  }
- if(host){fprintf(stderr,"host joined%d capture%d failed%d restored%d rejected%d ready%d\n",joined,captured,failed,restored,sawRejected,sawReady);assert(joined&&captured&&failed&&restored&&sawRejected&&sawReady);puts("Firefight LAN host passed");}
+ if(host){fprintf(stderr,"host joined%d capture%d failed%d restored%d rejected%d ready%d lootReady%d\n",joined,captured,failed,restored,sawRejected,sawReady,sawLootReady);assert(joined&&captured&&failed&&restored&&sawRejected&&sawReady&&sawLootReady);puts("Firefight LAN host passed");}
  else {fprintf(stderr,"client items%d gun%d charge%d carrier%d restart%d restore%d loot%d\n",sawItems,sawGun,sawCharge,sawCarrier,sawRestart,sawRestore,sawLoot);assert(sawItems&&sawGun&&sawCharge&&sawCarrier&&sawRestart&&sawRestore&&sawLoot&&firefightCheckpoints);puts("Firefight LAN client passed");}
  net_transport_shutdown(&netTransport);net_transport_global_shutdown();fp_shutdown();CloseWindow();return 0;
 }

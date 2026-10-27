@@ -303,7 +303,10 @@ carrier state, charging, wave votes, retry synchronization and stale input rejec
 
 After the last enemy dies, a 30-second loot period lets players explore and pick
 up dropped equipment before regrouping. A countdown shows when regrouping starts;
-the upgrade menu stays closed and ready-up cannot skip this loot period.
+the upgrade menu stays closed. Press bottom face (`A`), `Space` (keyboard seat 1),
+or `Right Shift` (keyboard seat 2) to toggle ready to skip looting. When everyone
+is ready, regrouping starts immediately. The HUD shows the vote count, and ready
+votes reset when preparation begins. This works in local and LAN sessions.
 Players then gather at the camp for a separate 30-second preparation period.
 Vote to increase the team's build, harvest, or throw
 upgrade level. Bonuses persist and stack across waves; ties default to building,

@@ -29,6 +29,9 @@ static void ex_input(int seat,NetInputCommand *c){
     if(seat<0||seat>=MAX_PLAYERS||creativeModeActive||(enemyLab&&!equipmentLab))return;
     bool pressed=playerInput[seat]==INPUT_TYPE_GAMEPAD?IsGamepadButtonPressed(seat_device(seat),GAMEPAD_BUTTON_LEFT_FACE_DOWN):IsKeyPressed(seat==0?KEY_TAB:KEY_SEMICOLON);
     if(pressed)c->pressed|=NET_INPUT_GRENADE_CYCLE;
+    if(fp_active() && firefightWaveState==FIREFIGHT_STATE_LOOT && netTransport.role==NET_ROLE_CLIENT && !debugConsoleOpen){
+        if(playerInput[seat]==INPUT_TYPE_GAMEPAD?IsGamepadButtonPressed(seat_device(seat),GAMEPAD_BUTTON_RIGHT_FACE_DOWN):IsKeyPressed(seat==0?KEY_SPACE:KEY_RIGHT_SHIFT))c->pressed|=NET_INPUT_PREP_READY;
+    }
     if(fp_active() && firefightWaveState==FIREFIGHT_STATE_INTERMISSION && netTransport.role==NET_ROLE_CLIENT){
         bool pad=playerInput[seat]==INPUT_TYPE_GAMEPAD;int d=seat_device(seat);
         if(pad?IsGamepadButtonPressed(d,GAMEPAD_BUTTON_LEFT_FACE_LEFT):IsKeyPressed(seat==0?KEY_F:KEY_LEFT))c->pressed|=NET_INPUT_PREP_LEFT;

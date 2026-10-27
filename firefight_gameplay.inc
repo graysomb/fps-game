@@ -211,7 +211,16 @@ static void update_firefight_logic(float dt) {
     if(gameState==GAME_STATE_GAMEOVER || firefightWaveState==FIREFIGHT_STATE_RESTART) return;
     if(firefightWaveState==FIREFIGHT_STATE_LOOT) {
         firefightIntermissionTimer=fmaxf(0,firefightIntermissionTimer-dt);
-        if(firefightIntermissionTimer<=0){
+        bool ready=true;
+        for(int i=0;i<firefightHumans;i++) {
+            if(combatantLife[i]==LIFE_UNUSED)continue;
+            if(netTransport.role!=NET_ROLE_HOST || net_player_is_local(i)) {
+                bool pad=playerInput[i]==INPUT_TYPE_GAMEPAD;
+                if(!debugConsoleOpen && (pad?IsGamepadButtonPressed(seat_device(i),GAMEPAD_BUTTON_RIGHT_FACE_DOWN):IsKeyPressed(i==0?KEY_SPACE:KEY_RIGHT_SHIFT)))prepReady[i]=!prepReady[i];
+            }
+            ready &= prepReady[i];
+        }
+        if(firefightIntermissionTimer<=0 || ready){
             firefightWaveState=FIREFIGHT_STATE_INTERMISSION;
             firefightIntermissionTimer=FF_PREP_SECONDS;
             for(int i=0;i<firefightHumans;i++){prepReady[i]=false;prepMenuOpen[i]=true;}

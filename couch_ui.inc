@@ -77,6 +77,16 @@ static void couch_launch(void) {
 static void ff_draw_hud(int i,int w,int h) {
     if(enemyLab) {enemy_lab_hud(w,h);return;}
     if(gameMode!=GAME_MODE_FIREFIGHT || i>=firefightHumans) return;
+    if(firefightWaveState==FIREFIGHT_STATE_LOOT && combatantLife[i]==LIFE_ALIVE){
+        int ready=0,total=0,fs=w<700?12:16;
+        for(int n=0;n<firefightHumans;n++)if(combatantLife[n]!=LIFE_UNUSED){total++;ready+=prepReady[n];}
+        int seat=netTransport.role==NET_ROLE_CLIENT?net_local_index_for_slot(i):i;
+        if(seat<0)seat=i;
+        const char *key=playerInput[seat]==INPUT_TYPE_GAMEPAD?"A":seat==0?"Space":"Right Shift";
+        const char *line=TextFormat("%s: %s | Skip loot (%d/%d ready)",key,prepReady[i]?"Cancel":"Ready",ready,total);
+        int width=MeasureText(line,fs),x=(w-width)/2;
+        DrawRectangle(x-5,62,width+10,fs+4,Fade(BLACK,.65f));DrawText(line,x,64,fs,prepReady[i]?GOLD:RAYWHITE);
+    }
     if(firefightWaveState==FIREFIGHT_STATE_INTERMISSION && !firefightPractice && combatantLife[i]==LIFE_ALIVE){
         int fs=w<700?12:16,step=fs+4,y=64;
         bool pad=playerInput[i]==INPUT_TYPE_GAMEPAD;

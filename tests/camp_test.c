@@ -1,7 +1,10 @@
 #define FIREFIGHT_TESTING
 #include "raylib.h"
-static bool testKey(int key){(void)key;return false;}
+static int pressedKey,pressedButton;
+static bool testKey(int key){return key!=0 && key==pressedKey;}
+static bool testButton(int device,int button){(void)device;return button!=0 && button==pressedButton;}
 #define IsKeyPressed testKey
+#define IsGamepadButtonPressed testButton
 #define main fps_application_main
 #include "../fps_ray.c"
 #undef main
@@ -11,12 +14,13 @@ static void fixture(int humans){
     netTransport.role=NET_ROLE_OFFLINE;gameMode=GAME_MODE_FIREFIGHT;firefightFoundry=true;firefightPractice=false;enemyLab=false;
     multiplayerActivePlayers=humans;ResetGame();gameState=GAME_STATE_PLAYING;firefightEndless=true;
     for(int i=0;i<MAX_PLAYERS;i++)playerInput[i]=INPUT_TYPE_KEYBOARD;
+    pressedKey=pressedButton=0;
 }
 static void timing(void){
     fixture(2);Vector3 before[2]={players[0].pos,players[1].pos};
     equipment[0].gun[0]=EQ_RAIL;players[0].goldTetherCharged=true;
     ff_wave_complete();assert(!camp.active && firefightWaveState==FIREFIGHT_STATE_LOOT && firefightIntermissionTimer==30);
-    for(int i=0;i<2;i++){assert(Vector3Distance(players[i].pos,before[i])==0);assert(!prepMenuOpen[i] && !ff_input_blocked(i));prepReady[i]=true;}
+    for(int i=0;i<2;i++){assert(Vector3Distance(players[i].pos,before[i])==0);assert(!prepMenuOpen[i] && !ff_input_blocked(i));assert(!prepReady[i]);}
     update_firefight_logic(29.9f);assert(firefightWaveState==FIREFIGHT_STATE_LOOT && !camp.active);
     for(int i=0;i<2;i++)assert(Vector3Distance(players[i].pos,before[i])==0);
     assert(fp_reserve(1));fpCount=1;fpItems[0]=(FfItem){.id=1,.owner=-1,.type=PICKUP_GLOB,.pos=players[0].pos};
@@ -34,6 +38,31 @@ static void timing(void){
     ff_wave_complete();update_firefight_logic(FF_LOOT_SECONDS);update_firefight_logic(1);assert(camp.active && firefightWaveState==FIREFIGHT_STATE_INTERMISSION);
     for(int i=0;i<2;i++)prepReady[i]=true;update_firefight_logic(4.1f);
     assert(firefightWave==4 && !camp.active && ff_upgrades_maxed());
+}
+static void skip_loot(void){
+    fixture(2);ff_wave_complete();
+    pressedKey=KEY_SPACE;update_firefight_logic(.1f);pressedKey=0;
+    assert(prepReady[0] && !prepReady[1] && firefightWaveState==FIREFIGHT_STATE_LOOT);
+    pressedKey=KEY_SPACE;update_firefight_logic(.1f);pressedKey=0;
+    assert(!prepReady[0] && firefightWaveState==FIREFIGHT_STATE_LOOT);
+    pressedKey=KEY_RIGHT_SHIFT;update_firefight_logic(.1f);pressedKey=0;
+    assert(!prepReady[0] && prepReady[1] && firefightWaveState==FIREFIGHT_STATE_LOOT);
+    playerInput[0]=INPUT_TYPE_GAMEPAD;pressedButton=GAMEPAD_BUTTON_RIGHT_FACE_DOWN;
+    update_firefight_logic(.1f);pressedButton=0;
+    assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION && camp.active && firefightIntermissionTimer==FF_PREP_SECONDS);
+    for(int i=0;i<2;i++)assert(!prepReady[i] && prepMenuOpen[i]);
+    update_firefight_logic(5.1f);assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION);
+    fixture(1);ff_wave_complete();pressedKey=KEY_SPACE;update_firefight_logic(.1f);pressedKey=0;
+    assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION);
+    fixture(2);ff_wave_complete();combatantLife[1]=LIFE_UNUSED;
+    pressedKey=KEY_SPACE;update_firefight_logic(.1f);pressedKey=0;
+    assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION);
+    fixture(1);ff_wave_complete();netTransport.role=NET_ROLE_CLIENT;
+    NetInputCommand c={0};pressedKey=KEY_SPACE;ex_input(0,&c);pressedKey=0;
+    assert(c.pressed&NET_INPUT_PREP_READY);
+    c=(NetInputCommand){0};playerInput[0]=INPUT_TYPE_GAMEPAD;pressedButton=GAMEPAD_BUTTON_RIGHT_FACE_DOWN;
+    ex_input(0,&c);pressedButton=0;assert(c.pressed&NET_INPUT_PREP_READY);
+    netTransport.role=NET_ROLE_OFFLINE;
 }
 static void placement(void){
     for(int humans=1;humans<=4;humans++){
@@ -103,7 +132,7 @@ static void captures(void){
 }
 int main(int argc,char **argv){
     assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Camp validation");
-    init_pbd_thread_pool();assert(initialize_physics_backend());timing();placement();captures();
+    init_pbd_thread_pool();assert(initialize_physics_backend());timing();skip_loot();placement();captures();
     for(int i=0;i<4;i++)weapon_bloom_unload(&weaponBlooms[i]);shutdown_world_visuals();weapon_renderer_shutdown();character_renderer_shutdown();
     clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Camp checks passed");return 0;
 }
