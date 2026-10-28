@@ -8,7 +8,8 @@ static void tower_blueprint(void){
         bool stair=z<12 && x>=1 && x<=3 && y<=z*8/12;
         bool deck=z>=12 && y==7;
         bool corner=z>=12 && (z==12 || z==17) && (x==0 || x==5);
-        if(stair || deck || corner){if(towerCellCount>=ENEMY_STRUCTURE_CELLS)return;towerCells[towerCellCount++]=(TowerCell){x,y,z};}
+        bool shelter=z>=12 && (y==4 || (y<4 && (x==0 || x==5 || z==12 || (z==17 && (x<2 || x>3)))));
+        if(stair || deck || corner || shelter){if(towerCellCount>=ENEMY_STRUCTURE_CELLS)return;towerCells[towerCellCount++]=(TowerCell){x,y,z};}
     }
 }
 static Vector3 tower_point(const EnemyStructure *t,Vector3 local){return world_wrap(v_add(t->origin,crosscut_rotate(local,t->quarter)));}
@@ -95,9 +96,9 @@ static bool tower_search(int i){
     Vector3 desired=players[i].pos;float nearest=16;
     for(int j=MAX_PLAYERS;j<activePlayers;j++)if(tower_eligible(j)){float d=v_length(world_delta(players[j].pos,players[i].pos));if(d<nearest){nearest=d;desired=players[j].pos;}}
     Vector3 dir=world_delta(desired,players[i].pos);float base=atan2f(dir.z,dir.x)+enemySpecial[i].buildQuarter*PI/4;
-    int start=(int)(enemySpecial[i].selected%96);enemySpecial[i].selected=(start+8)%96;
-    for(int attempt=0;attempt<8;attempt++){
-        int candidateIndex=(start+attempt)%96,n=candidateIndex/4,q=candidateIndex%4;
+    int start=(int)(enemySpecial[i].selected%352);enemySpecial[i].selected=(start+16)%352;
+    for(int attempt=0;attempt<16;attempt++){
+        int candidateIndex=(start+attempt)%352,n=candidateIndex/4,q=candidateIndex%4;
         float a=base+(n%8)*PI/4,r=6+(n/8)*2;
         Vector3 center=v_add(players[i].pos,(Vector3){cosf(a)*r,0,sinf(a)*r});center.y=0;
         Vector3 origin=v_sub(center,crosscut_rotate((Vector3){1.5f,0,4.5f},q));origin.x=floorf(origin.x*2)*.5f;origin.z=floorf(origin.z*2)*.5f;
@@ -114,15 +115,23 @@ static void tower_builder(int i,float dt){
     EnemyStructure *t=NULL;for(int b=0;b<ENEMY_STRUCTURE_MAX;b++)if(enemyStructures[b].tower && enemyStructures[b].owner==i && enemyStructures[b].generation==s->generation){t=&enemyStructures[b];break;}
     if(!t){
         s->reason="seeking tower site";players[i].vel.x=players[i].vel.z=0;
-        if(s->searchTimer<=0){s->searchTimer=2;tower_search(i);}return;
+        if(s->searchTimer<=0){s->searchTimer=.25f;tower_search(i);}return;
     }
-    Vector3 service=tower_point(t,(Vector3){-1,BASE_EYE_HEIGHT,6.5f});Vector3 to=world_delta(service,players[i].pos);to.y=0;
+    Vector3 service=tower_point(t,(Vector3){-1,BASE_EYE_HEIGHT,6.5f});
+    if(t->built){
+        /* Approach the rear door around the outside, then enter the sheltered room. */
+        const Vector3 route[3]={{-.65f,BASE_EYE_HEIGHT,9.5f},{1.5f,BASE_EYE_HEIGHT,9.5f},{1.5f,BASE_EYE_HEIGHT,7.5f}};
+        service=tower_point(t,route[t->shelterStep]);
+        Vector3 delta=world_delta(service,players[i].pos);delta.y=0;
+        if(v_length(delta)<.2f && t->shelterStep<2)service=tower_point(t,route[++t->shelterStep]);
+    }
+    Vector3 to=world_delta(service,players[i].pos);to.y=0;
     float distance=v_length(to);s->buildOrigin=t->origin;s->buildKind=2;
     if(!t->built && distance>4){
         if(distance<t->bestDistance-.1f){t->bestDistance=distance;t->approach=0;}else t->approach+=dt;
         if(t->approach>5){memset(t,0,sizeof(*t));s->searchTimer=2;s->buildQuarter=(s->buildQuarter+1)%8;return;}
     }
-    if(distance>1){bot_apply_move(&players[i],&botStates[i],to,MOVE_SPEED*.65f,dt);s->reason="approaching watchtower";}
+    if(distance>(t->built?.15f:1)){bot_apply_move(&players[i],&botStates[i],to,fminf(MOVE_SPEED*.65f,distance/fmaxf(dt,.001f)),dt);s->reason=t->built?"entering tower shelter":"approaching watchtower";}
     else {players[i].vel.x=players[i].vel.z=0;s->reason=t->built?"maintaining watchtower":"constructing watchtower";}
     ai_aim(i,tower_point(t,(Vector3){1.5f,3,7.5f}),dt);
     Vector3 local=crosscut_rotate(world_delta(players[i].pos,t->origin),(4-t->quarter)%4);
@@ -150,7 +159,7 @@ static bool tower_floor(Vector3 waypoint,uint32_t tag){Vector3 at=waypoint;at.y-
 static bool tower_move(int i,Vector3 goal,float dt,bool stairs){
     Player *p=&players[i];TowerRifle *r=&towerRifles[i];Vector3 to=world_delta(goal,p->pos);float height=to.y;to.y=0;float d=v_length(to);
     if(d<(stairs?.22f:.06f) && height<.2f)return true;
-    float speed=fminf(MOVE_SPEED*.55f,d/fmaxf(dt,.001f));
+    float speed=fminf(MOVE_SPEED,d/fmaxf(dt,.001f));
     r->jump=fmaxf(0,r->jump-dt);
     if(stairs){
         if(height>.12f && p->onGround && r->jump<=0){p->vel.y=sqrtf(2*GRAVITY*.85f);p->onGround=false;r->jump=.3f;}

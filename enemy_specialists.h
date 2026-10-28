@@ -24,7 +24,7 @@ typedef struct { uint64_t id, ids[ENEMY_LOB_MAX_VOXELS]; int count, owner; float
 #define ENEMY_STRUCTURE_CELLS 512
 typedef struct {
     int owner; unsigned generation; uint64_t ids[ENEMY_STRUCTURE_CELLS]; int count;
-    bool tower,built; uint32_t tag; Vector3 origin; int quarter,occupant;
+    bool tower,built; uint32_t tag; Vector3 origin; int quarter,occupant,shelterStep;
     float construction,repairClock,pulse,blocked,approach,bestDistance;
 } EnemyStructure;
 typedef struct {uint32_t tag;int waypoint,state,target,post;float stuck,blocked,lost,jump,retry;Vector3 last;} TowerRifle;

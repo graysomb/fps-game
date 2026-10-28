@@ -82,6 +82,13 @@ static void garrison_checks(void){
 }
 static void safety_checks(void){
     EnemyStructure *t=ready_tower();int n=voxel_count;
+    Vector3 room=tower_point(t,(Vector3){1.5f,1,7.5f});
+    assert(is_view_occluded_by_voxels(room,tower_point(t,(Vector3){-2,1,7.5f})));
+    assert(is_view_occluded_by_voxels(room,tower_point(t,(Vector3){1.5f,1,5})));
+    assert(!is_view_occluded_by_voxels(room,tower_point(t,(Vector3){1.5f,1,10})));
+    players[5].pos=tower_point(t,(Vector3){-3,1,-3});
+    tower_move(5,tower_point(t,(Vector3){-3,1,2}),1.f/60,false);
+    assert(hypotf(players[5].vel.x,players[5].vel.z)>MOVE_SPEED*.99f);
     int v=enemy_voxel(t->ids[0]);Vector3 at=voxels[v].pos;remove_voxel_index(v);
     players[0].pos=v_add(at,(Vector3){0,.1f,0});assert(!tower_place(t));assert(voxel_count==n-1);
     players[0].pos=(Vector3){-20,1,-20};int obstruction=add_static_voxel_at_grid((int)floorf(at.x*2),(int)floorf(at.y*2),(int)floorf(at.z*2),RED,0);
