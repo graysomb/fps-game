@@ -24,7 +24,7 @@ int main(void) {
     }
     assert(ff_wave_cap(1,1)==24 && ff_wave_cap(2,1)==3);
     assert(ff_cap(1)==6 && ff_cap(4)==12);
-    const int expected[4][3]={{6,10,12},{9,14,18},{11,17,22},{14,22,28}};
+    const int expected[4][3]={{5,10,13},{8,14,19},{10,17,23},{13,22,29}};
     for(int h=1;h<=4;h++)for(int r=1;r<=3;r++){
         int total=0;for(int t=0;t<FF_TYPE_COUNT;t++)total+=ff_round_count(2,r,h,t);
         assert(total==expected[h-1][r-1]);

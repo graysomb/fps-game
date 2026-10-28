@@ -26,6 +26,7 @@ static bool fp_carrier(int i);
 static void fp_new_run(void);
 static void fp_shutdown(void);
 static void fp_prepare_wave(int wave);
+static void fp_prepare_round(int wave,int round);
 static void fp_spawn(int i,int chassis);
 static void fp_death(int i,Vector3 position);
 static int fp_near(int i,bool automatic);

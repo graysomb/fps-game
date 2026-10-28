@@ -129,7 +129,7 @@ static void start_firefight_wave(int wave_number) {
     firefightWaveBannerTimer=3.5f;
     firefightWaveEnemiesTotal=0; firefightEnemiesSpawned=0;
     for(int t=0;t<FF_TYPE_COUNT;t++) {
-        ffRemaining[t]=firefightPractice ? (t==0?1:0) : ff_count(firefightWave,fp_team_size(),t);
+        ffRemaining[t]=firefightPractice ? (t==0?1:0) : ff_round_count(firefightWave,1,fp_team_size(),t);
         firefightWaveEnemiesTotal+=ffRemaining[t];
     }
     fp_prepare_wave(firefightWave);
@@ -167,6 +167,7 @@ static void ff_wave_complete(void) {
             ffRemaining[t]=ff_round_count(firefightWave,firefightRound,fp_team_size(),t);
             firefightWaveEnemiesTotal+=ffRemaining[t];
         }
+        fp_prepare_round(firefightWave,firefightRound);
         firefightWaveEnemiesRemaining=firefightWaveEnemiesTotal;
         firefightEnemiesSpawned=0;ffSpawnOrdinal=0;ffCleanupTimer=0;
         ffSpawnTimer=5;firefightWaveBannerTimer=5;

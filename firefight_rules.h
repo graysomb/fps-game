@@ -45,7 +45,13 @@ static inline int ff_rounds(int wave) { return wave==1 || wave==2?3:1; }
 static inline int ff_round_count(int wave,int round,int humans,int type) {
     int base=ff_count(wave,humans,type);
     if(wave==1)return base << (round-1);
-    if(wave==2)return (base*(round+1)+1)/2; /* 1x, 1.5x, 2x, rounded up. */
+    if(wave==2){
+        if(type==0)return round==3?2:1;
+        if(type==7)return round>=2?1:0;
+        /* Preserve the existing swarmer/Goliath quotas, including round one's carrier replacement. */
+        if(type==1 && round==1)return base-1;
+        return (base*(round+1)+1)/2;
+    }
     return base;
 }
 static inline int ff_cap(int humans) { int n=4+2*humans; return n>12?12:n; }

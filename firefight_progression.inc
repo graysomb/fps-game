@@ -81,10 +81,17 @@ static int fp_near(int i,bool automatic){
  }return best;
 }
 static bool fp_interact(int i){int n=fp_near(i,false);return n>=0 && fp_collect(i,(size_t)n,true);}
+static void fp_prepare_round(int wave,int round){
+ if(wave!=2 || !fp_active())return;
+ fpPendingCount=0;
+ if(round>=2)fpPending[fpPendingCount++]=fp_rule(PICKUP_REINFORCED);
+ if(round==3){fpPending[fpPendingCount++]=fp_rule(PICKUP_GLOB);fpPending[fpPendingCount++]=fp_rule(PICKUP_GLOB);}
+}
 static void fp_prepare_wave(int wave){
  fpPendingCount=0;memset(fpCarrierType,0,sizeof(fpCarrierType));if(!fp_active())return;
  size_t kept=0;for(size_t n=0;n<fpCount;n++)if(fpItems[n].owner!=-2)fpItems[kept++]=fpItems[n];
  if(kept!=fpCount){fpCount=kept;++fpRevision;}
+ if(wave==2){fp_prepare_round(wave,1);return;}
  int wanted[8],count=0;
  for(int n=0;n<FP_RULE_COUNT;n++)if(fpRules[n].wave==wave)wanted[count++]=n;
  if(wave>=3){int repeats=(fp_team_size()+1)/2;for(int k=0;k<repeats;k++)for(int n=0;n<FP_RULE_COUNT;n++){

@@ -25,7 +25,7 @@ static void schedule(void){
   for(int wave=1;wave<=36;wave++){
    int before[10],sum=0;for(int t=0;t<10;t++)sum+=(before[t]=ffRemaining[t]=ff_count(wave,humans,t));
    fp_prepare_wave(wave);int after=0;for(int t=0;t<10;t++){after+=ffRemaining[t];assert(ffRemaining[t]>=0);if(t>=2)assert(ffRemaining[t]>=before[t]);}assert(sum==after);
-   int introduced=0;for(int r=0;r<FP_RULE_COUNT;r++)if(fpRules[r].wave==wave){int found=0;for(int n=0;n<fpPendingCount;n++)found+=fpPending[n]==r;assert(found==1);introduced++;}
+   int introduced=0;for(int r=0;r<FP_RULE_COUNT;r++)if(fpRules[r].wave==wave && wave!=2){int found=0;for(int n=0;n<fpPendingCount;n++)found+=fpPending[n]==r;assert(found==1);introduced++;}
    assert(fpPendingCount==introduced+(wave>=3?(humans+1)/2:0));for(int n=0;n<fpPendingCount;n++)assert(fpRules[fpPending[n]].wave<=wave);
   }
  }
@@ -52,21 +52,24 @@ static void second_wave_rounds(void){
   for(int round=1;round<=3;round++){
    int total=0;for(int t=0;t<FF_TYPE_COUNT;t++)total+=ff_round_count(2,round,humans,t);
    assert(firefightRound==round && firefightWaveEnemiesTotal==total);
-   int watchdog=1000;
+   int watchdog=1000,roster[FF_TYPE_COUNT]={0},globRound=0;
    while(firefightWaveState==FIREFIGHT_STATE_ACTIVE && firefightRound==round && watchdog-->0){
     update_firefight_logic(.5f);
     for(int i=4;i<MAX_COMBATANTS;i++)if(players[i].respawn_timer<=0){
+     roster[players[i].enemyType]++;globRound+=fpCarrierType[i]==PICKUP_GLOB;
      players[i].invuln_timer=0;players[i].isExposed=true;kill_player(i,0,false,false);
     }
    }
    assert(watchdog>0);
+   for(int t=0;t<FF_TYPE_COUNT;t++)assert(roster[t]==ff_round_count(2,round,humans,t));
+   assert(roster[ENEMY_TYPE_STANDARD]==(round==3?2:1));assert(roster[ENEMY_TYPE_BUILDER]==(round>=2?1:0));assert(globRound==(round==3?2:0));
    if(round<3){assert(firefightWaveState==FIREFIGHT_STATE_ACTIVE && ffSpawnTimer==5 && firefightTeamLives==3);update_firefight_logic(1);assert(firefightEnemiesSpawned==0);}
   }
   assert(firefightWaveState==FIREFIGHT_STATE_LOOT && firefightTeamLives==4);
   int glob=0,build=0;for(size_t n=0;n<fpCount;n++){glob+=fpItems[n].type==PICKUP_GLOB;build+=fpItems[n].type==PICKUP_REINFORCED;}
-  assert(glob==1 && build==1);
+  assert(glob==2 && build==2);
  }
- puts("Wave 2: three escalating rounds, 1-4 players, pauses, one reward and no duplicate unlock carriers passed");
+ puts("Wave 2: exact per-round rifleman/builder rosters, 1-4 players, preserved other enemies and carrier drops passed");
 }
 static void ownership(void){
  fixture();size_t glob=carrier(PICKUP_GLOB,4);uint32_t id=fpItems[glob].id;fp_death(4,(Vector3){0,1,0});assert(fpItems[glob].owner==-1&&fpItems[glob].id==id);
