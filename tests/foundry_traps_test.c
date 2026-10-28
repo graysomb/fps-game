@@ -213,6 +213,22 @@ static void trigger_checks(void) {
     foundry_traps_prepare();assert(foundry_trap_complete(&foundryTraps[0]) && !foundryTraps[0].active);
     puts("Projectile release and blast-destroyed assembly regeneration passed");
 }
+static void expansion_trigger_checks(void) {
+    const int guns[]={EQ_GLOB,EQ_GLOCK,EQ_DMR};
+    for(int g=0;g<3;g++)for(int blocked=0;blocked<2;blocked++){
+        fresh();ex_reset();eq_reset_all();foundry_trap_define(FOUNDRY_DROP,0,3,8,8,0,3,-1,8,0);
+        activePlayers=1;players[0]=(Player){.pos={-2,4.25f,.25f},.matter=100};playerInput[0]=INPUT_TYPE_KEYBOARD;combatantLife[0]=LIFE_ALIVE;
+        if(blocked)add_static_voxel_at_grid(-3,8,0,GRAY,0);
+        Ray ray={players[0].pos,{1,0,0}};assert(ex_fire(0,guns[g],ray));ex_tick(.1f);
+        assert(foundryTraps[0].pending==!blocked);
+        if(!blocked){
+            assert(foundryTraps[0].owner==0);foundry_traps_prepare();assert(foundryTraps[0].active && foundryTraps[0].activation==1);
+            assert(table_get_static_only(-1,8,0)<0);
+            assert(ex_fire(0,guns[g],ray));ex_tick(.1f);foundry_traps_prepare();assert(foundryTraps[0].activation==1);
+        }
+    }
+    puts("Glob/Glock/DMR impacts trigger traps, remove triggers, credit owner, respect cover and activate once");
+}
 static void capture(void) {
     fresh();buildFoundryHoldout();voxel_ca_init();
     Camera3D cameras[3]={{{29,22,29},{0,0,0},{0,1,0},65,CAMERA_PERSPECTIVE},{{28,5,9},{21,2,0},{0,1,0},65,CAMERA_PERSPECTIVE},{{13,4,14},{21,2,21},{0,1,0},65,CAMERA_PERSPECTIVE}};
@@ -227,6 +243,6 @@ static void capture(void) {
 int main(int argc,char **argv) {
     assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Foundry traps");init_pbd_thread_pool();assert(initialize_physics_backend());
-    release_checks();post_checks();bay_checks();pillar_checks();selection_checks();damage_checks();trigger_checks();capture();clear_all_chunks();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Foundry traps passed");
+    expansion_trigger_checks();release_checks();post_checks();bay_checks();pillar_checks();selection_checks();damage_checks();trigger_checks();capture();clear_all_chunks();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Foundry traps passed");
 }
 
