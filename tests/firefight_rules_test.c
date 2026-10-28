@@ -24,6 +24,12 @@ int main(void) {
     }
     assert(ff_wave_cap(1,1)==24 && ff_wave_cap(2,1)==3);
     assert(ff_cap(1)==6 && ff_cap(4)==12);
+    const int expected[4][3]={{6,10,12},{9,14,18},{11,17,22},{14,22,28}};
+    for(int h=1;h<=4;h++)for(int r=1;r<=3;r++){
+        int total=0;for(int t=0;t<FF_TYPE_COUNT;t++)total+=ff_round_count(2,r,h,t);
+        assert(total==expected[h-1][r-1]);
+    }
+    assert(ff_rounds(1)==3 && ff_rounds(2)==3 && ff_rounds(3)==1);
     int votes[4]={-1,-1,-1,-1}; assert(ff_vote(votes,4)==UPGRADE_BUILD);
     votes[0]=1; votes[1]=2; assert(ff_vote(votes,2)==UPGRADE_BUILD);
     votes[2]=1; assert(ff_vote(votes,3)==UPGRADE_HARVEST);

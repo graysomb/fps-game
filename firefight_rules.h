@@ -41,6 +41,13 @@ static inline int ff_count(int wave, int humans, int type) {
     int cycle = (wave-1)/FF_WAVE_COUNT;
     return (base * (humans+1) * (4+cycle) + 7)/8;
 }
+static inline int ff_rounds(int wave) { return wave==1 || wave==2?3:1; }
+static inline int ff_round_count(int wave,int round,int humans,int type) {
+    int base=ff_count(wave,humans,type);
+    if(wave==1)return base << (round-1);
+    if(wave==2)return (base*(round+1)+1)/2; /* 1x, 1.5x, 2x, rounded up. */
+    return base;
+}
 static inline int ff_cap(int humans) { int n=4+2*humans; return n>12?12:n; }
 static inline int ff_wave_cap(int wave,int humans) {
     if(wave==1) return 24;

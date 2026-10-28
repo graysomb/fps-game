@@ -159,11 +159,15 @@ static void reset_firefight_match(void) {
 
 static void ff_wave_complete(void) {
     if(enemyLab) return;
-    if(!firefightPractice && firefightWave==1 && firefightRound<3) {
+    if(!firefightPractice && firefightRound<ff_rounds(firefightWave)) {
         firefightRound++;
         memset(ffRemaining,0,sizeof(ffRemaining));
-        ffRemaining[ENEMY_TYPE_SWARMER]=6 << (firefightRound-1);
-        firefightWaveEnemiesTotal=firefightWaveEnemiesRemaining=ffRemaining[ENEMY_TYPE_SWARMER];
+        firefightWaveEnemiesTotal=0;
+        for(int t=0;t<FF_TYPE_COUNT;t++){
+            ffRemaining[t]=ff_round_count(firefightWave,firefightRound,fp_team_size(),t);
+            firefightWaveEnemiesTotal+=ffRemaining[t];
+        }
+        firefightWaveEnemiesRemaining=firefightWaveEnemiesTotal;
         firefightEnemiesSpawned=0;ffSpawnOrdinal=0;ffCleanupTimer=0;
         ffSpawnTimer=5;firefightWaveBannerTimer=5;
         return;

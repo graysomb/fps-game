@@ -43,8 +43,30 @@ static void opening_rounds(void){
  }
  assert(firefightWaveState==FIREFIGHT_STATE_LOOT);
  start_firefight_wave(1);assert(firefightRound==1 && firefightWaveEnemiesTotal==6);
- start_firefight_wave(2);assert(firefightRound==1);ff_wave_complete();assert(firefightWaveState==FIREFIGHT_STATE_LOOT);
+ start_firefight_wave(2);assert(firefightRound==1);ff_wave_complete();assert(firefightRound==2 && firefightWaveState==FIREFIGHT_STATE_ACTIVE);
  puts("Opening rounds: 6/12/24 simultaneous swarmers, pauses, loot and reset passed");
+}
+static void second_wave_rounds(void){
+ for(int humans=1;humans<=4;humans++){
+  fixture();firefightHumans=humans;firefightFoundry=false;firefightTeamLives=3;start_firefight_wave(2);
+  for(int round=1;round<=3;round++){
+   int total=0;for(int t=0;t<FF_TYPE_COUNT;t++)total+=ff_round_count(2,round,humans,t);
+   assert(firefightRound==round && firefightWaveEnemiesTotal==total);
+   int watchdog=1000;
+   while(firefightWaveState==FIREFIGHT_STATE_ACTIVE && firefightRound==round && watchdog-->0){
+    update_firefight_logic(.5f);
+    for(int i=4;i<MAX_COMBATANTS;i++)if(players[i].respawn_timer<=0){
+     players[i].invuln_timer=0;players[i].isExposed=true;kill_player(i,0,false,false);
+    }
+   }
+   assert(watchdog>0);
+   if(round<3){assert(firefightWaveState==FIREFIGHT_STATE_ACTIVE && ffSpawnTimer==5 && firefightTeamLives==3);update_firefight_logic(1);assert(firefightEnemiesSpawned==0);}
+  }
+  assert(firefightWaveState==FIREFIGHT_STATE_LOOT && firefightTeamLives==4);
+  int glob=0,build=0;for(size_t n=0;n<fpCount;n++){glob+=fpItems[n].type==PICKUP_GLOB;build+=fpItems[n].type==PICKUP_REINFORCED;}
+  assert(glob==1 && build==1);
+ }
+ puts("Wave 2: three escalating rounds, 1-4 players, pauses, one reward and no duplicate unlock carriers passed");
 }
 static void ownership(void){
  fixture();size_t glob=carrier(PICKUP_GLOB,4);uint32_t id=fpItems[glob].id;fp_death(4,(Vector3){0,1,0});assert(fpItems[glob].owner==-1&&fpItems[glob].id==id);
@@ -109,6 +131,6 @@ static void lobby(void){
  RenderTexture2D rt=LoadRenderTexture(960,540);BeginTextureMode(rt);couch_title("FIREFIGHT LOBBY");couch_row(0,"Twelve-wave Firefight",false);couch_row(1,"Arena: Foundry Holdout",false);couch_row(2,"Checkpoints: OFF | X / C: toggle",false);couch_row(3,"P1: Keyboard | Not ready",false);EndTextureMode();Image im=LoadImageFromTexture(rt.texture);ImageFlipVertical(&im);ExportImage(im,".build/playtest-run/firefight-checkpoints.png");UnloadImage(im);UnloadRenderTexture(rt);
  puts("Keyboard/controller checkpoint lobby toggle passed");
 }
-int main(int argc,char **argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Firefight progression tests");init_pbd_thread_pool();assert(initialize_physics_backend());schedule();opening_rounds();ownership();enemy_weapons();autonomous_carriers();checkpoints();lobby();fp_shutdown();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Firefight progression passed");return 0;}
+int main(int argc,char **argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Firefight progression tests");init_pbd_thread_pool();assert(initialize_physics_backend());schedule();opening_rounds();second_wave_rounds();ownership();enemy_weapons();autonomous_carriers();checkpoints();lobby();fp_shutdown();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Firefight progression passed");return 0;}
 
 
