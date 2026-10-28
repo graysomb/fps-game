@@ -1176,6 +1176,7 @@ typedef struct {
     bool isBullet;
     bool goliathProjectile;
     Vector3 shotOrigin;
+    uint32_t towerTag;
     uint8_t foundryTrapId;
     bool foundryTrapHeavy;
     Vector3 foundryTrapPrevious;
@@ -1449,6 +1450,7 @@ typedef struct {
     bool persistentConstruction;
     int voxelIndex;
     int debugTag;
+    uint32_t towerTag;
     int activator;
     bool restorationQueued;
     int restorationDeadlineFrame;
@@ -1820,6 +1822,7 @@ static bool unit_voxel_buffer_push(UnitVoxelBuffer *buffer,
         .voxelIndex = voxelIndex,
         .reinforced = voxelIndex>=0 && voxelIndex<voxel_count && voxels[voxelIndex].reinforced,
         .persistentConstruction = voxelIndex>=0 && voxelIndex<voxel_count && voxels[voxelIndex].persistentConstruction,
+        .towerTag=voxelIndex>=0 && voxelIndex<voxel_count?voxels[voxelIndex].towerTag:0,
         .debugTag = debugTag,
         .activator = activator,
         .restorationQueued = false,
@@ -4414,7 +4417,7 @@ static bool spawn_static_covering_voxel(const Voxel *voxel)
                     voxels[idx].owner = voxel->owner;
                     voxels[idx].lifeFrames = 0;
                 }
-                voxels[idx].reinforced=voxel->reinforced;voxels[idx].persistentConstruction=voxel->persistentConstruction;
+                voxels[idx].towerTag=voxel->towerTag;voxels[idx].reinforced=voxel->reinforced;voxels[idx].persistentConstruction=voxel->persistentConstruction;
                 voxels[idx].debugClusterTag = voxel->debugClusterTag;
             }
         }
@@ -4576,6 +4579,7 @@ static bool init_voxel_struct(Voxel *v,
     v->isBullet = false;
     v->goliathProjectile = false;
     v->shotOrigin=v->pos;
+    v->towerTag=0;
     v->foundryTrapId=0;v->foundryTrapHeavy=false;
     v->foundryTrapPrevious=v->pos;v->foundryTrapPreviousSpeed=0;
     v->explosionUntil = 0;
@@ -4779,6 +4783,7 @@ static void glue_neighbor_faces_for_voxel(int voxel_idx) {
         }
 
         Voxel *b = &voxels[neighbor_idx];
+        if(a->towerTag!=b->towerTag)continue;
         if(a->foundryTrapId!=b->foundryTrapId && (a->foundryTrapId || b->foundryTrapId))continue;
         if(!periodic_align_glue(voxel_idx,neighbor_idx))continue;
         int faceA = f;
@@ -4908,6 +4913,7 @@ static int emit_unit_voxels_from_units(const UnitVoxelBuffer *buffer,
         int new_idx = addVoxel(px, py, pz, fixed, simulate, color, spawn_type);
         if (new_idx >= 0) {
             voxels[new_idx].reinforced=seed->reinforced;voxels[new_idx].persistentConstruction=seed->persistentConstruction;
+            voxels[new_idx].towerTag=seed->towerTag;
             voxels[new_idx].debugClusterTag = seed->debugTag;
             voxels[new_idx].activator = seed->activator;;
             voxels[new_idx].restorationQueued = seed->restorationQueued;
@@ -5881,7 +5887,7 @@ static bool cell_contains_static_voxel(int x, int y, int z)
 }
 
 static bool recycle_queue_push(const Voxel *voxel) {
-    if (!voxel || voxel->persistentConstruction || recycleQueueCount >= MAX_VOXELS) {
+    if (!voxel || voxel->towerTag || voxel->persistentConstruction || recycleQueueCount >= MAX_VOXELS) {
         return false;
     }
     Voxel snapshot = *voxel;
@@ -19105,6 +19111,7 @@ static bool check_ai_awareness_of_player(int botIdx, int targetIdx, float *out_d
         maxDist = 42.0f;
     }
 
+    if(tower_stationed(botIdx))maxDist=50;
     if (dist > maxDist) {
         return false; // Beyond awareness distance
     }
@@ -19197,7 +19204,7 @@ static int find_nearest_static_voxel(const Vector3 *pos, float *out_dist_sq) {
         if (v->simulate || v->isBullet) {
             continue;
         }
-        if (v->type != 0 || v->pendingActivation) {
+        if (v->type != 0 || v->pendingActivation || v->towerTag) {
             continue;
         }
         float dx = v->pos.x - pos->x;
@@ -19383,6 +19390,7 @@ static void bot_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float
 #include "duck_gameplay.inc"
 #include "combat_ui.inc"
 #include "equipment.inc"
+#include "builder_towers.inc"
 #include "firefight_progression.inc"
 #include "chunk_regeneration_net.inc"
 static void UpdateBot(int playerIdx, float dt) {
@@ -19390,6 +19398,8 @@ static void UpdateBot(int playerIdx, float dt) {
     players[playerIdx].vel=v_sub(players[playerIdx].vel,exBotApplied[playerIdx]);exBotApplied[playerIdx]=(Vector3){0};
     if(enemyLab && enemyLabPaused && !enemyLabStep) return;
     if(netTransport.role==NET_ROLE_CLIENT)return;
+    if(players[playerIdx].enemyType==ENEMY_TYPE_BUILDER){tower_builder(playerIdx,dt);return;}
+    if(!fp_carrier(playerIdx) && tower_rifle(playerIdx,dt))return;
     if(fp_carrier(playerIdx)){fp_update_carrier(playerIdx,dt);return;}
     if(enemy_is_special(playerIdx)) {enemy_update(playerIdx,dt);return;}
     ai_tick(playerIdx,dt);

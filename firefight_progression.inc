@@ -12,7 +12,7 @@ static const FfEquipmentRule fpRules[]={
 #define FP_RULE_COUNT ((int)(sizeof(fpRules)/sizeof(fpRules[0])))
 static bool fp_active(void){return gameMode==GAME_MODE_FIREFIGHT&&!firefightPractice&&!enemyLab&&!equipmentLab;}
 static int fp_team_size(void){if(netTransport.role==NET_ROLE_OFFLINE)return firefightHumans;int count=0;for(int i=0;i<MAX_PLAYERS;i++)count+=netPlayerPresent[i];return count>0?count:1;}
-static bool fp_carrier(int i){return fp_active()&&i>=MAX_PLAYERS&&i<MAX_COMBATANTS&&fpCarrierType[i]>0;}
+static bool fp_carrier(int i){return (fp_active()||(enemyLab && enemyLabCase==ENEMY_TYPE_BUILDER))&&i>=MAX_PLAYERS&&i<MAX_COMBATANTS&&fpCarrierType[i]>0;}
 static int fp_rule(int type){for(int n=0;n<FP_RULE_COUNT;n++)if(fpRules[n].type==type)return n;return -1;}
 static bool fp_reserve(size_t count){
  if(count<=fpCapacity)return true;size_t cap=fpCapacity?fpCapacity*2:128;while(cap<count)cap*=2;

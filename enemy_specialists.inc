@@ -109,6 +109,7 @@ static void enemy_on_death(int i) {
     }
 }
 static void enemy_cleanup(bool removeEquipment) {
+    tower_reset();
     enemyCleanupPending=false;
     for(int i=MAX_PLAYERS;i<MAX_COMBATANTS;i++)enemy_drop_payload(i);
     if(removeEquipment) for(int i=MAX_PLAYERS;i<MAX_COMBATANTS;i++) {
@@ -438,53 +439,6 @@ static bool enemy_lob_hit(int voxel,int victim) {
     }
     return false;
 }
-static bool enemy_build_valid(int i,Vector3 origin,int kind) {
-    if(fabsf(origin.x)>FLOOR_SIZE-5 || fabsf(origin.z)>FLOOR_SIZE-5) return false;
-    /* A clear apron guarantees routes around both ends; never seal a doorway. */
-    for(int x=-4;x<=4;x++)for(int z=-1;z<=(kind?4:1);z++)for(int y=0;y<4;y++) {
-        Vector3 cell=crosscut_rotate((Vector3){x,y,z},enemySpecial[i].buildQuarter);
-        if(table_get((int)floorf(origin.x/.5f)+(int)cell.x,y,(int)floorf(origin.z/.5f)+(int)cell.z)>=0)return false;
-    }
-    for(int j=0;j<activePlayers;j++) if(players[j].respawn_timer<=0 &&
-        fabsf(players[j].pos.x-origin.x)<2.5f && fabsf(players[j].pos.z-origin.z)<2.5f) return false;
-    for(int p=0;p<MAX_PICKUPS;p++) if(pickups[p].active && v_length(world_delta(pickups[p].pos,origin))<4) return false;
-    if(fabsf(origin.x)>FLOOR_SIZE-8 && fabsf(origin.z)<9) return false; /* Foundry entrance lanes. */
-    int count=0,live=0;
-    for(int b=0;b<ENEMY_STRUCTURE_MAX;b++) if(enemyStructures[b].owner==i && enemyStructures[b].generation==enemySpecial[i].generation) {
-        bool any=false;for(int n=0;n<enemyStructures[b].count;n++) if(enemy_voxel(enemyStructures[b].ids[n])>=0) {live++;any=true;}
-        count+=any;
-    }
-    return count<2 && live+(kind?40:24)<=96;
-}
-static bool enemy_build(int i) {
-    EnemySpecialState *s=&enemySpecial[i];
-    if(!enemy_build_valid(i,s->buildOrigin,s->buildKind)) return false;
-    int slot=-1;
-    for(int b=0;b<ENEMY_STRUCTURE_MAX;b++) {
-        bool alive=false;for(int n=0;n<enemyStructures[b].count;n++) if(enemy_voxel(enemyStructures[b].ids[n])>=0) alive=true;
-        if(!alive) {slot=b;break;}
-    }
-    if(slot<0) return false;
-    EnemyStructure *b=&enemyStructures[slot];memset(b,0,sizeof(*b));b->owner=i;b->generation=s->generation;
-    int ox=(int)floorf(s->buildOrigin.x/.5f),oz=(int)floorf(s->buildOrigin.z/.5f);
-    int depth=s->buildKind?4:1,width=s->buildKind?4:6;
-    for(int z=0;z<depth;z++) for(int x=0;x<width;x++) for(int y=0;y<(s->buildKind?z+1:4);y++) {
-        Vector3 cell=crosscut_rotate((Vector3){x-width/2,y,z},s->buildQuarter);
-        int v=add_static_voxel_at_grid(ox+(int)cell.x,y,oz+(int)cell.z,enemy_color(ENEMY_TYPE_BUILDER),0);
-        if(v>=0) {b->ids[b->count++]=voxels[v].identity;voxels[v].owner=ENEMY_CONSTRUCTION_OWNER;}
-    }
-    rebuild_all_voxel_surfaces();rebuild_glue_constraints();return b->count>0;
-}
-static bool enemy_find_build_site(int i,Vector3 threat) {
-    EnemySpecialState *s=&enemySpecial[i];float base=atan2f(threat.z,threat.x);
-    for(int n=0;n<16;n++) {
-        float a=base+(n%8)*PI/4,range=n<8?4:n<12?6:8;
-        s->buildOrigin=v_add(players[i].pos,(Vector3){cosf(a)*range,0,sinf(a)*range});s->buildOrigin.y=0;
-        s->buildQuarter=fabsf(cosf(a))>fabsf(sinf(a))?(cosf(a)>0?3:1):(sinf(a)>0?0:2);
-        if(enemy_build_valid(i,s->buildOrigin,s->buildKind))return true;
-    }
-    return false;
-}
 static void enemy_stomp(int i) {
     hologram_blast(players[i].pos,3,20);
     for(int j=0;j<firefightHumans;j++)if(players[j].respawn_timer<=0 && v_length(world_delta(players[j].pos,players[i].pos))<=3) {
@@ -500,6 +454,7 @@ static void enemy_tick(float dt) {
     if(netTransport.role==NET_ROLE_CLIENT)return;
     if(enemyCleanupPending) enemy_cleanup(true);
     if(enemyLab && enemyLabPaused && !enemyLabStep) return;
+    tower_tick(dt);
     if(enemyLab && players[0].respawn_timer>0) {
         players[0].respawn_timer-=dt;
         if(players[0].respawn_timer<=0) {ff_restore_human(0,100);players[0].pos=(Vector3){0,BASE_EYE_HEIGHT,0};}
@@ -539,6 +494,7 @@ static void enemy_tick(float dt) {
     }
 }
 static void enemy_update(int i,float dt) {
+    if(players[i].enemyType==ENEMY_TYPE_BUILDER){tower_builder(i,dt);return;}
     if(netTransport.role==NET_ROLE_CLIENT)return;
     if(enemyLab && enemyLabPaused && !enemyLabStep){players[i].vel=(Vector3){0};return;}
     ai_tick(i,dt);
@@ -606,7 +562,7 @@ static void enemy_update(int i,float dt) {
             if(s->state==1)done=enemy_collect(i);
             if(s->state==2)done=enemy_plant(i);
             if(s->state==3){done=enemy_launch(i);if(!done){enemy_drop_payload(i);s->repositionTimer=2;}}
-            if(s->state==4)done=enemy_build(i);
+
             if(s->state==5){enemy_stomp(i);done=true;}
             s->actions+=done;s->reason=done?"recovering":"target invalid or blocked";
             s->cooldown=done?(t==ENEMY_TYPE_BUILDER?8:t==ENEMY_TYPE_SAPPER?8:t==ENEMY_TYPE_SCRAPPER?1:5):1;
@@ -642,23 +598,6 @@ static void enemy_update(int i,float dt) {
             if(s->searchTimer<=0){s->selected=enemy_sapper_target(i,s->target);s->searchTimer=s->selected?.5f:1;}
             int v=enemy_voxel(s->selected);
             if(v>=0 && !voxels[v].simulate) {move=world_delta(voxels[v].pos,p->pos);s->work=1;if(v_length(move)<=2.5f){s->state=2;s->windup=1.5f;enemy_cue(i);}}
-        }
-    }
-    if(t==ENEMY_TYPE_BUILDER) {
-        speed=.85f;if(distance<6)move=v_mul(to,-1);else if(distance<10)move=(Vector3){0};
-        if(!p->isExposed && s->cooldown<=0) {
-            if(s->searchTimer<=0) {
-                s->buildKind=ai_target_body(s->target)->pos.y-p->pos.y>.5f?1:0;
-                s->work=enemy_find_build_site(i,to)?1:0;s->searchTimer=s->work?.5f:1;
-                s->reason=s->work?"seeking build site":"no clear build site";
-                if(s->work)s->state=4;else s->state=0;
-            }
-            if(s->state==4) {
-                Vector3 d=world_delta(s->buildOrigin,p->pos);d.y=0;
-                if(v_length(d)>4.1f){move=d;s->work=1;}
-                else if(enemy_build_valid(i,s->buildOrigin,s->buildKind)){s->windup=2;enemy_cue(i);}
-                else {s->state=0;s->searchTimer=1;}
-            }
         }
     }
     if(t==ENEMY_TYPE_LOBBER || t==ENEMY_TYPE_FOUNDRY) {
@@ -723,6 +662,7 @@ static void enemy_draw_details(EnemyType type,Vector3 p,Color c) {
         if(type==ENEMY_TYPE_LOBBER) DrawCylinder(v_add(p,(Vector3){0,.25f,0}),.4f,.3f,1,8,c);
 }
 static void enemy_draw(void) {
+    tower_draw();
     for(int i=MAX_PLAYERS;i<activePlayers;i++) if(enemy_is_special(i) && players[i].respawn_timer<=0) {
         if(!periodic_visible(players[i].pos,5))continue;
         EnemySpecialState *s=&enemySpecial[i];Vector3 p=players[i].pos;Color c=enemy_color(players[i].enemyType);

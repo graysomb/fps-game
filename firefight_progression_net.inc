@@ -16,6 +16,11 @@ static void fp_snapshot(int peer){
  for(int k=0;k<3;k++)net_write_u8(&w,teamUpgradeLevels[k]);
  for(int i=0;i<MAX_PLAYERS;i++){net_write_u8(&w,combatantLife[i]);net_write_u8(&w,prepReady[i]);net_write_u8(&w,prepVotes[i]);net_write_u8(&w,prepMenuOpen[i]);net_write_f32(&w,reviveProgress[i]);net_write_u8(&w,reviveOwner[i]+1);}
  fp_send(peer,&w,false);
+ for(int b=0;b<ENEMY_STRUCTURE_MAX;b++){
+  EnemyStructure *t=&enemyStructures[b];net_writer_init(&w,data,sizeof(data));net_write_header(&w,NET_MSG_FIREFIGHT,0,netTransport.session_id,netServerTick);net_write_u8(&w,3);net_write_u8(&w,b);net_write_u8(&w,t->tower);
+  if(t->tower){net_write_u32(&w,t->tag);net_write_u8(&w,t->owner);net_write_u32(&w,t->generation);eq_write_vec(&w,t->origin);net_write_u8(&w,t->quarter);net_write_u8(&w,t->built);net_write_f32(&w,t->construction);net_write_f32(&w,t->pulse);net_write_u8(&w,t->occupant+1);}
+  fp_send(peer,&w,false);
+ }
  if(peer>=0 || fpSentRevision!=fpRevision){
   for(size_t start=0;start<fpCount || start==0;start+=32){
    int count=(int)fmin(32,fpCount-start);net_writer_init(&w,data,sizeof(data));net_write_header(&w,NET_MSG_FIREFIGHT,0,netTransport.session_id,netServerTick);net_write_u8(&w,1);
@@ -73,6 +78,13 @@ static bool fp_receive(NetMessageType type,NetReader *r,uint32_t tick){
   if(revision!=fpIncomingRevision||total!=fpIncomingCount||start!=fpIncomingNext)return true;
   if(count)memcpy(fpIncoming+start,items,count*sizeof(FfItem));fpIncomingNext+=count;
   if(fpIncomingNext==total){free(fpItems);fpItems=fpIncoming;fpIncoming=NULL;fpCount=fpCapacity=total;fpReceivedRevision=revision;}
+ }else if(part==3){
+  int b=net_read_u8(r),active=net_read_u8(r);if(b>=ENEMY_STRUCTURE_MAX || active>1 || tick<towerNetTick)return true;
+  EnemyStructure t={0};
+  if(active){t.tower=true;t.tag=net_read_u32(r);t.owner=net_read_u8(r);t.generation=net_read_u32(r);t.origin=eq_read_vec(r);t.quarter=net_read_u8(r);int built=net_read_u8(r);t.built=built;t.construction=net_read_f32(r);t.pulse=net_read_f32(r);t.occupant=net_read_u8(r)-1;
+   if(!t.tag || t.owner<MAX_PLAYERS || t.owner>=MAX_COMBATANTS || !v_isfinite(t.origin) || t.quarter>3 || built>1 || !isfinite(t.construction) || t.construction<0 || t.construction>2 || !isfinite(t.pulse) || t.pulse<0 || t.pulse>.35f || t.occupant>=MAX_COMBATANTS)return true;
+  }
+  if(!r->failed){enemyStructures[b]=t;towerNetTick=tick;}
  }else if(part==2){
   int i=net_read_u8(r);if(i<MAX_PLAYERS||i>=MAX_COMBATANTS||tick<fpActorTick[i])return true;
   int life=net_read_u8(r),enemy=net_read_u8(r),carrier=net_read_u8(r);Vector3 pos=eq_read_vec(r),vel=eq_read_vec(r);

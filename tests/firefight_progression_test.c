@@ -100,8 +100,9 @@ static void autonomous_carriers(void){
   fixture();int type=fpRules[r].type;carrier(type,15);players[15].pos=(Vector3){0,1,0};players[15].yaw=players[15].pitch=0;players[0].pos=(Vector3){0,1,type==PICKUP_SWORD?-3:-8};players[1].pos=(Vector3){30,1,30};players[0].invuln_timer=100;
   if(type==PICKUP_GOLD_TETHER){add_static_box_at_grid(3,4,0,1,-4,-3,GRAY);init_static_hash();rebuild_voxel_hash();}
   ai_select(15,0,players[0].pos,AI_ALERT_SEEN);aiCombat[15].reaction=0;aiCombat[15].wasVisible=true;
-  bool action=false;for(int n=0;n<100;n++){
-   UpdateBot(15,1.f/60);action|=players[15].matter<100||grenadeInventory[15]<2&&(type==PICKUP_GRENADE||type==PICKUP_ADHESIVE)||ex_grenade_count(15,GRENADE_GRAVITY)<2&&type==PICKUP_BLACK_HOLE||ex_grenade_count(15,GRENADE_IGLOO)<2&&type==PICKUP_IGLOO;
+  bool action=false;for(int n=0;n<(type==PICKUP_REINFORCED?1800:100);n++){
+   if(type==PICKUP_REINFORCED){tower_tick(1.f/60);net_integrate_player(&players[15],1.f/60,true);}
+   UpdateBot(15,1.f/60);action|=enemySpecial[15].actions>0||players[15].matter<100||grenadeInventory[15]<2&&(type==PICKUP_GRENADE||type==PICKUP_ADHESIVE)||ex_grenade_count(15,GRENADE_GRAVITY)<2&&type==PICKUP_BLACK_HOLE||ex_grenade_count(15,GRENADE_IGLOO)<2&&type==PICKUP_IGLOO;
    if(action)break;eq_tick(1.f/60);
   }
   fprintf(stderr,"carrier %s action=%d matter=%.1f\n",pickup_type_label(type),action,players[15].matter);assert(action);

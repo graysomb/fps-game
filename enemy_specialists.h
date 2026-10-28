@@ -21,7 +21,22 @@ typedef struct {
 } EnemySpecialState;
 typedef struct { bool active; int owner; uint64_t id,support; Vector3 pos; float fuse,beep; } EnemyCharge;
 typedef struct { uint64_t id, ids[ENEMY_LOB_MAX_VOXELS]; int count, owner; float age, hitCooldown[MAX_COMBATANTS]; Vector3 target; } EnemyLob;
-typedef struct { int owner; unsigned generation; uint64_t ids[96]; int count; } EnemyStructure;
+#define ENEMY_STRUCTURE_CELLS 512
+typedef struct {
+    int owner; unsigned generation; uint64_t ids[ENEMY_STRUCTURE_CELLS]; int count;
+    bool tower,built; uint32_t tag; Vector3 origin; int quarter,occupant;
+    float construction,repairClock,pulse,blocked,approach,bestDistance;
+} EnemyStructure;
+typedef struct {uint32_t tag;int waypoint,state,target,post;float stuck,blocked,lost,jump,retry;Vector3 last;} TowerRifle;
+static TowerRifle towerRifles[MAX_COMBATANTS];
+static uint32_t towerNextTag=1,towerNetTick;
+static void tower_reset(void);
+static void tower_release(int i);
+static void tower_builder(int i,float dt);
+static bool tower_rifle(int i,float dt);
+static bool tower_stationed(int i);
+static void tower_tick(float dt);
+static void tower_draw(void);
 static EnemySpecialState enemySpecial[MAX_COMBATANTS];
 static EnemyCharge enemyCharges[ENEMY_CHARGE_MAX];
 static EnemyLob enemyLobs[MAX_COMBATANTS*2];
@@ -33,7 +48,7 @@ static int enemyLabCase=ENEMY_TYPE_SCRAPPER;
 static bool enemyLabAll=false;
 static float enemyLabClock;
 static const char *enemy_names[ENEMY_TYPE_COUNT]={"normal","swarmer","goliath","scrapper","shieldbearer","sapper","lobber","builder","anchor","foundry"};
-static const char *enemy_hints[7]={"Strip its scavenged armor before it grows","Bait its turning shield, then flank","Shoot the blinking charge before detonation","Dodge the marker or tether the incoming scrap","Interrupt construction; harvest its cover","Break the external anchor to release its allies","Break 2 orange supports; shoot the gold core until destroyed"};
+static const char *enemy_hints[7]={"Strip its scavenged armor before it grows","Bait its turning shield, then flank","Shoot the blinking charge before detonation","Dodge the marker or tether the incoming scrap","Builds a rifleman watchtower; kill the nearby builder to stop rapid repairs","Break the external anchor to release its allies","Break 2 orange supports; shoot the gold core until destroyed"};
 static bool enemy_is_special(int i) {return i>=0 && i<MAX_COMBATANTS && players[i].enemyType>=ENEMY_TYPE_SCRAPPER;}
 static float enemy_matter(EnemyType type);
 static void enemy_init(int i);

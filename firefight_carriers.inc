@@ -1,4 +1,6 @@
 static void fp_update_carrier(int i,float dt){
+ if(players[i].enemyType==ENEMY_TYPE_BUILDER){tower_builder(i,dt);return;}
+ if(tower_rifle(i,dt))return;
  Player *p=&players[i];Equipment *e=&equipment[i];int type=fpCarrierType[i];
  ai_tick(i,dt);if(clarity_evade(i,dt)){eq_cancel_charge(i);e->held=false;return;}
  AiCombat *a=&aiCombat[i];fpCarrierClock[i]=fmaxf(0,fpCarrierClock[i]-dt);
@@ -18,11 +20,6 @@ static void fp_update_carrier(int i,float dt){
   float d2;int v=find_nearest_static_voxel(&p->pos,&d2);
   if(v>=0){Vector3 to=world_delta(voxels[v].pos,p->pos);ai_aim(i,world_image(voxels[v].pos,p->pos),dt);bot_apply_move(p,&botStates[i],to,MOVE_SPEED*.6f,dt);if(d2<MELEE_RANGE*MELEE_RANGE)perform_melee(i);}
   else if(distance<MELEE_RANGE)perform_melee(i);return;
- }
- if(type==PICKUP_REINFORCED){
-  if(fpCarrierClock[i]<=0 && enemy_voxel(fpCarrierPanel[i])<0){float pitch=p->pitch;p->pitch=-20;
-   fpCarrierClock[i]=1;int before=voxel_count;if(eq_build(i)&&voxel_count>before){fpCarrierPanel[i]=voxels[voxel_count-1].identity;fpCarrierClock[i]=8;}p->pitch=pitch;
-  }else if(ai_ready_to_fire(i))FireVoxel(i);return;
  }
  if(type==PICKUP_GOLD_TETHER){
   if(!p->tetherHolding && fpCarrierClock[i]<=0 && p->matter>=eqGoldGrabCost){

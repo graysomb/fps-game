@@ -11,6 +11,7 @@ static void enemy_lab_exit(void) {
     gameState=GAME_STATE_MENU;couchLobby=false;
 }
 static int enemy_parse_case(const char *name) {
+    if(name&&!strcmp(name,"tower"))return ENEMY_TYPE_BUILDER;
     if(name&&!strcmp(name,"golem"))return ENEMY_TYPE_COUNT+1;
     if(!name || !strcmp(name,"all") || !strcmp(name,"scrapper")) return ENEMY_TYPE_GOLIATH;
     if(!strcmp(name,"goliath"))return ENEMY_TYPE_GOLIATH;
@@ -77,8 +78,8 @@ static void enemy_lab_start(int which) {
     if(which==ENEMY_TYPE_SHIELDBEARER || which==ENEMY_TYPE_ANCHOR || which==ENEMY_TYPE_BUILDER) {
         enemy_lab_spawn(5,ENEMY_TYPE_STANDARD,(Vector3){3,BASE_EYE_HEIGHT,11});
         if(which==ENEMY_TYPE_BUILDER) {
-            add_static_box_at_grid(-4,4,0,3,-6,-3,GRAY);
-            players[0].pos=(Vector3){0,BASE_EYE_HEIGHT+2,-2};
+            players[0].pos=(Vector3){0,BASE_EYE_HEIGHT,-12};
+            eq_reset(5);
         }
     }
     if(which==ENEMY_TYPE_LOBBER || which==ENEMY_TYPE_COUNT) {
@@ -153,6 +154,15 @@ static bool enemy_lab_controls(void) {
         if(IsKeyPressed(KEY_ESCAPE))enemy_lab_exit();return true;
     }
     if(equipmentLab){if(IsKeyPressed(KEY_F4))eq_lab();if(IsKeyPressed(KEY_F7))enemyLabGod=!enemyLabGod;if(IsKeyPressed(KEY_ESCAPE))enemy_lab_exit();return true;}
+    if(enemyLabCase==ENEMY_TYPE_BUILDER){
+        const int guns[]={EQ_DEFAULT,EQ_GLOB,EQ_GLOCK,EQ_DMR,EQ_RAIL};
+        if(IsKeyPressed(KEY_F9)){
+            int next=0;for(int n=0;n<5;n++)if(eq_gun(5)==guns[n])next=(n+1)%5;
+            tower_release(5);eq_reset(5);equipment[5].gun[0]=guns[next];players[5].matter=100;
+            const int types[]={0,PICKUP_GLOB,PICKUP_GLOCK,PICKUP_DMR,PICKUP_RAILGUN};fpCarrierType[5]=types[next];
+        }
+        if(IsKeyPressed(KEY_F10)){players[0].matter=players[0].matter>0?0:100;players[0].isExposed=players[0].matter<=0;players[0].last_damage_time=(float)GetTime();}
+    }
     if(IsKeyPressed(KEY_F3)||couch_button(0,GAMEPAD_BUTTON_LEFT_FACE_RIGHT)) {
         int next=enemyLabCase+1;if(next==ENEMY_TYPE_SCRAPPER)next++;if(next>ENEMY_TYPE_COUNT+1) next=ENEMY_TYPE_GOLIATH;
         enemy_lab_start(next);
@@ -168,6 +178,10 @@ static bool enemy_lab_controls(void) {
 }
 static void enemy_lab_hud(int w,int h) {
     int fs=w<900?14:18;
+    if(enemyLabCase==ENEMY_TYPE_BUILDER){
+        DrawText(TextFormat("TOWER: F9 gun [%s] | F10 player Matter [%d]",eqGuns[eq_gun(5)].name,(int)players[0].matter),12,h-100,fs,SKYBLUE);
+        DrawText(TextFormat("Builder: %s | Rifleman: %s",enemySpecial[4].reason?enemySpecial[4].reason:"seeking site",towerRifles[5].state==2?"holding tower":towerRifles[5].state==3?"jump/melee":towerRifles[5].tag?"climbing":"seeking tower"),12,h-75,fs,RAYWHITE);
+    }
     if(goActive){
         int attached=0,owned=0;for(int i=0;i<goCount;i++)attached+=goCells[i].index>=0;for(int i=0;i<voxel_count;i++)owned+=voxels[i].golemOwned;
         if(goCombatEnabled){
@@ -277,12 +291,9 @@ static bool enemy_smoke_case(int type) {
         Vector3 velocity;add_static_box_at_grid(-4,4,7,7,24,34,GRAY);init_static_hash();
         ENEMY_CHECK(!enemy_lob_velocity(v_add(players[i].pos,(Vector3){0,2.3f,0}),s->aim,&velocity),"ceiling blocks trajectory");
     } else if(type==ENEMY_TYPE_BUILDER) {
-        s->buildOrigin=(Vector3){0,0,6};s->buildKind=1;
-        ENEMY_CHECK(enemy_build(i),"builder makes traversable ramp");
-        ENEMY_CHECK(!enemy_build(i),"builder cannot overlap existing structure");
-        s->buildOrigin=(Vector3){10,0,6};s->buildKind=0;ENEMY_CHECK(enemy_build(i),"second structure");
-        s->buildOrigin=(Vector3){-10,0,6};ENEMY_CHECK(!enemy_build(i),"two-structure cap");
-        s->buildOrigin=players[0].pos;ENEMY_CHECK(!enemy_build_valid(i,s->buildOrigin,0),"no building through players");
+        ENEMY_CHECK(tower_search(i),"builder finds grounded tower site");
+        EnemyStructure *tower=NULL;for(int n=0;n<ENEMY_STRUCTURE_MAX;n++)if(enemyStructures[n].tower && enemyStructures[n].owner==i)tower=&enemyStructures[n];
+        ENEMY_CHECK(tower && tower_place(tower),"builder constructs physical watchtower");
         uint64_t block=enemyStructures[0].ids[0];int v=enemy_voxel(block);ENEMY_CHECK(v>=0,"construction has physical voxels");
         int recycledBefore=recycleQueueCount,gx=voxels[v].gx,gy=voxels[v].gy,gz=voxels[v].gz;
         remove_static_voxels_in_region_recycle(gx,gx,gy,gy,gz,gz);
@@ -311,7 +322,7 @@ static bool enemy_smoke_case(int type) {
         ENEMY_CHECK(s->repairs<=12 && enemy_core_open(i),"boss repair budget never restores destroyed supports");
     }
     s->windup=1;s->state=3;players[i].isExposed=true;enemy_update(i,.01f);
-    ENEMY_CHECK(type==ENEMY_TYPE_FOUNDRY? !players[i].isExposed : s->windup==0,"boss keeps attacking; exposure interrupts specialists");
+    ENEMY_CHECK(type==ENEMY_TYPE_BUILDER || (type==ENEMY_TYPE_FOUNDRY? !players[i].isExposed : s->windup==0),"boss and builder keep working; exposure interrupts other specialists");
     enemy_cleanup(true);
     ENEMY_CHECK(enemySpecial[4].equipmentCount==0 && !enemyCharges[4].active,"cleanup clears equipment and charges");
     for(int n=0;n<ENEMY_STRUCTURE_MAX;n++) ENEMY_CHECK(!enemyStructures[n].count,"cleanup clears construction");
@@ -383,7 +394,7 @@ static bool enemy_run_smoke(const char *which) {
         if(frame>=570) {render_gameplay_view(views,&count,&w,&h,false);samples[frame-570]=(GetTime()-start)*1000;}
         ENEMY_CHECK(voxel_count<MAX_VOXELS && activePlayers<=MAX_COMBATANTS,"bounded mixed simulation");
         for(int i=4;i<activePlayers;i++) {
-            ENEMY_CHECK(enemySpecial[i].equipmentCount<=ENEMY_EQUIPMENT_MAX && enemySpecial[i].repairs<=12,"equipment and repair budgets");
+            ENEMY_CHECK(enemySpecial[i].equipmentCount<=ENEMY_EQUIPMENT_MAX && (players[i].enemyType==ENEMY_TYPE_BUILDER || enemySpecial[i].repairs<=12),"equipment and repair budgets");
             ENEMY_CHECK(isfinite(players[i].pos.x) && isfinite(players[i].pos.y),"finite actor positions");
         }
     }
