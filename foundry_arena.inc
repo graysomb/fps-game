@@ -33,9 +33,26 @@ static void foundry_shell(int x0,int x1,int y0,int y1,int z0,int z1,Color c,int 
 }
 /* Deterministic arena in the same grid units/material palette as the citadel. */
 static int foundryCrackedBay=-1,foundryCrackedPillar=-1;
+/* Independent of deterministic lab/procedural generation and cosmetic RNG use. */
+static uint32_t foundrySelectionState=0x9e3779b9u;
+static void foundry_selection_seed(uint32_t seed){
+    foundrySelectionState=seed?seed:0x9e3779b9u;
+    /* Mix nearby seeds before taking the first small-range sample. */
+    for(int n=0;n<4;n++){foundrySelectionState^=foundrySelectionState<<13;foundrySelectionState^=foundrySelectionState>>17;foundrySelectionState^=foundrySelectionState<<5;}
+    foundryCrackedBay=foundryCrackedPillar=-1;
+}
+static int foundry_select_corner(int previous){
+    uint32_t x=foundrySelectionState;x^=x<<13;x^=x>>17;x^=x<<5;foundrySelectionState=x;
+    int choice=(int)((x>>8)%(previous<0?4u:3u));
+    return previous>=0 && choice>=previous?choice+1:choice;
+}
+static void foundry_select_traps(void){
+    foundryCrackedBay=foundry_select_corner(foundryCrackedBay);
+    foundryCrackedPillar=foundry_select_corner(foundryCrackedPillar);
+}
 static void buildFoundryHoldout(void) {
     if(!firefightPractice && (!fpRestoring || foundryCrackedBay<0 || foundryCrackedPillar<0)){
-        foundryCrackedBay=GetRandomValue(0,3);foundryCrackedPillar=GetRandomValue(0,3);
+        foundry_select_traps();
     }
     int crackedBay=foundryCrackedBay,crackedPillar=foundryCrackedPillar;
     Color stone={82,102,117,255}, trim={127,173,178,255}, support={235,155,45,255};

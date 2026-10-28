@@ -21552,6 +21552,7 @@ int main(int argc, char **argv) {
     unsigned int randomSeed = automatedRun ? 1u : (unsigned int)time(NULL);
     srand(randomSeed);
     SetRandomSeed(randomSeed);
+    foundry_selection_seed(randomSeed);
     // prepare split-screen render textures
     RenderTexture2D screens[MAX_PLAYERS] = { 0 };
     int renderPlayers = 0;

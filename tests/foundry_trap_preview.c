@@ -10,8 +10,8 @@ int main(int argc,char **argv) {
     gameMode=GAME_MODE_FIREFIGHT;firefightHumans=1;firefightPractice=false;firefightFoundry=true;
     clear_all_chunks();clear_world_voxels();
     for(unsigned seed=1;seed<10000;seed++){
-        SetRandomSeed(seed);int b=GetRandomValue(0,3),p=GetRandomValue(0,3);
-        if(b==3 && p==3){SetRandomSeed(seed);break;}
+        foundry_selection_seed(seed);foundry_select_traps();int b=foundryCrackedBay,p=foundryCrackedPillar;
+        if(b==3 && p==3){foundry_selection_seed(seed);break;}
     }
     buildFoundryHoldout();voxel_ca_init();
     bool bay=getenv("FPS_BAY_PREVIEW")!=NULL;

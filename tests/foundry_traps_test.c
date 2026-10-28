@@ -71,17 +71,17 @@ static void post_checks(void) {
     }
     puts("Each corner trigger releases all four posts; other slab stays supported");
 }
-/* Seed the public random map construction, without a production test override. */
+/* Seed the isolated trap-selection stream for reproducible geometry cases. */
 static unsigned selection_seed(int corner,bool pillar) {
     for(unsigned seed=1;seed<10000;seed++){
-        SetRandomSeed(seed);int bay=GetRandomValue(0,3),post=GetRandomValue(0,3);
+        foundry_selection_seed(seed);foundry_select_traps();int bay=foundryCrackedBay,post=foundryCrackedPillar;
         if((pillar?post:bay)==corner)return seed;
     }
     assert(false);return 1;
 }
 static void bay_checks(void) {
     for(int corner=0;corner<4;corner++){
-        int bay=2;unsigned seed=selection_seed(corner,false);SetRandomSeed(seed);
+        int bay=2;unsigned seed=selection_seed(corner,false);foundry_selection_seed(seed);
         fresh();buildFoundryHoldout();FoundryTrap *t=&foundryTraps[bay];assert(t->kind==FOUNDRY_BAY);
         int orange=0,roof=0,wall=0;unsigned signature=2166136261u;
         for(int k=0;k<t->originalCount;k++){
@@ -91,7 +91,7 @@ static void bay_checks(void) {
         }
         assert(roof>10 && wall>20 && orange<t->originalCount/2);
         /* Rebuilding the same map must reproduce the exact crack network. */
-        fresh();SetRandomSeed(seed);buildFoundryHoldout();t=&foundryTraps[bay];unsigned rebuilt=2166136261u;
+        fresh();foundry_selection_seed(seed);buildFoundryHoldout();t=&foundryTraps[bay];unsigned rebuilt=2166136261u;
         for(int k=0;k<t->originalCount;k++){Voxel *v=&t->original[k];rebuilt=(rebuilt^(unsigned)foundry_bay_crack(t,v->gx,v->gy,v->gz))*16777619u;}
         assert(signature==rebuilt);
         int trigger=table_get_static_only(t->rx,t->ry,t->rz);assert(trigger>=0 && ColorToInt(voxels[trigger].color)==ColorToInt(ORANGE));
@@ -122,7 +122,7 @@ static void bay_checks(void) {
 }
 static void pillar_checks(void) {
     for(int corner=0;corner<4;corner++){
-        int n=3;SetRandomSeed(selection_seed(corner,true));
+        int n=3;foundry_selection_seed(selection_seed(corner,true));
         fresh();buildFoundryHoldout();FoundryTrap *t=&foundryTraps[n];
         assert(t->kind==FOUNDRY_PILLAR && t->originalCount==1280);
         assert(t->x1-t->x0+1==8 && t->z1-t->z0+1==8 && t->y1==19);
@@ -147,9 +147,20 @@ static void pillar_checks(void) {
     }
 }
 static void selection_checks(void) {
+    foundry_selection_seed(12345);
+    unsigned seenBay=0,seenPillar=0;
+    for(int n=0;n<128;n++){
+        int oldBay=foundryCrackedBay,oldPillar=foundryCrackedPillar;
+        SetRandomSeed(7);srand(7); /* Lab/map resets cannot restart trap choices. */
+        foundry_select_traps();
+        assert(foundryCrackedBay!=oldBay && foundryCrackedPillar!=oldPillar);
+        seenBay|=1u<<foundryCrackedBay;seenPillar|=1u<<foundryCrackedPillar;
+    }
+    assert(seenBay==15 && seenPillar==15);
+
     unsigned bayMask=0,pillarMask=0;
     for(unsigned seed=1;seed<=16;seed++){
-        fresh();SetRandomSeed(seed);buildFoundryHoldout();assert(foundryTrapCount==4);
+        fresh();foundry_selection_seed(seed);buildFoundryHoldout();assert(foundryTrapCount==4);
         FoundryTrap *bay=&foundryTraps[2],*pillar=&foundryTraps[3];
         assert(bay->kind==FOUNDRY_BAY && pillar->kind==FOUNDRY_PILLAR);
         int b=(bay->x0>0?2:0)+(bay->z0>0?1:0),p=(pillar->x0>0?2:0)+(pillar->z0>0?1:0);
