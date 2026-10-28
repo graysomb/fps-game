@@ -23,7 +23,7 @@ static const WaveDefinition ff_waves[FF_WAVE_COUNT] = {
     {"Fortified Patrol", {1,4,0,0,1,0,0,1}}, {"Siege Support", {1,4,0,0,0,0,1,0,1}},
     {"Heavy Works", {1,4,1,0,0,1,0,1}}, {"Shielded Siege", {1,4,0,0,1,0,1,0,1}},
     {"Combined Assault", {2,9,2,0,1,1,1,1,1}},
-    {"Walking Foundry", {0,6,0,0,0,0,0,0,0,1}}
+    {"Foundry Golem", {0,6,0,0,0,0,0,0,0,1}}
 };
 /* AI tiers: 0 easy, 1 medium, 2 hard. Riflemen ramp more slowly. */
 static inline int ff_ai_level(int wave, int type) {

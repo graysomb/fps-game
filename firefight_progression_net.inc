@@ -16,6 +16,16 @@ static void fp_snapshot(int peer){
  for(int k=0;k<3;k++)net_write_u8(&w,teamUpgradeLevels[k]);
  for(int i=0;i<MAX_PLAYERS;i++){net_write_u8(&w,combatantLife[i]);net_write_u8(&w,prepReady[i]);net_write_u8(&w,prepVotes[i]);net_write_u8(&w,prepMenuOpen[i]);net_write_f32(&w,reviveProgress[i]);net_write_u8(&w,reviveOwner[i]+1);}
  fp_send(peer,&w,false);
+ net_writer_init(&w,data,sizeof(data));net_write_header(&w,NET_MSG_FIREFIGHT,0,netTransport.session_id,netServerTick);net_write_u8(&w,4);net_write_u8(&w,goCombatEnabled);
+ if(goCombatEnabled){
+  net_write_u8(&w,goCombatDead);eq_write_vec(&w,go_core_position());eq_write_vec(&w,goFight.aim);net_write_f32(&w,goFight.shield);net_write_f32(&w,goFight.health);
+  for(int p=0;p<GM_COUNT;p++){
+   BoundingBox box={{FLT_MAX,FLT_MAX,FLT_MAX},{-FLT_MAX,-FLT_MAX,-FLT_MAX}};bool alive=false;
+   for(int c=0;c<goCount;c++)if(goCells[c].part==p){int v=go_find(goCells[c].id,goCells[c].index);if(v>=0){alive=true;for(int k=0;k<8;k++){box.min=Vector3Min(box.min,voxels[v].particles[k]->pos);box.max=Vector3Max(box.max,voxels[v].particles[k]->pos);}}}
+   net_write_u8(&w,alive);if(alive){eq_write_vec(&w,box.min);eq_write_vec(&w,box.max);net_write_f32(&w,goShields[p].value);net_write_f32(&w,goShields[p].flash);}
+  }
+ }
+ fp_send(peer,&w,false);
  for(int b=0;b<ENEMY_STRUCTURE_MAX;b++){
   EnemyStructure *t=&enemyStructures[b];net_writer_init(&w,data,sizeof(data));net_write_header(&w,NET_MSG_FIREFIGHT,0,netTransport.session_id,netServerTick);net_write_u8(&w,3);net_write_u8(&w,b);net_write_u8(&w,t->tower);
   if(t->tower){net_write_u32(&w,t->tag);net_write_u8(&w,t->owner);net_write_u32(&w,t->generation);eq_write_vec(&w,t->origin);net_write_u8(&w,t->quarter);net_write_u8(&w,t->built);net_write_f32(&w,t->construction);net_write_f32(&w,t->pulse);net_write_u8(&w,t->occupant+1);}
@@ -78,6 +88,18 @@ static bool fp_receive(NetMessageType type,NetReader *r,uint32_t tick){
   if(revision!=fpIncomingRevision||total!=fpIncomingCount||start!=fpIncomingNext)return true;
   if(count)memcpy(fpIncoming+start,items,count*sizeof(FfItem));fpIncomingNext+=count;
   if(fpIncomingNext==total){free(fpItems);fpItems=fpIncoming;fpIncoming=NULL;fpCount=fpCapacity=total;fpReceivedRevision=revision;}
+ }else if(part==4){
+  if(tick<goRemoteTick)return true;bool active=net_read_u8(r)!=0,dead=false;Vector3 core={0},aim={0};float shield=0,health=0;
+  BoundingBox bounds[GM_COUNT]={0};float shields[GM_COUNT]={0},flashes[GM_COUNT]={0};bool alive[GM_COUNT]={0};
+  if(active){dead=net_read_u8(r)!=0;core=eq_read_vec(r);aim=eq_read_vec(r);shield=net_read_f32(r);health=net_read_f32(r);
+   if(!v_isfinite(core)||!v_isfinite(aim)||!isfinite(shield)||shield<0||shield>goShieldMax||!isfinite(health)||health<0||health>goCoreMax)return true;
+   for(int p=0;p<GM_COUNT;p++){alive[p]=net_read_u8(r)!=0;if(alive[p]){bounds[p].min=eq_read_vec(r);bounds[p].max=eq_read_vec(r);shields[p]=net_read_f32(r);flashes[p]=net_read_f32(r);
+    if(!v_isfinite(bounds[p].min)||!v_isfinite(bounds[p].max)||!isfinite(shields[p])||shields[p]<0||!isfinite(flashes[p]))return true;
+   }}
+  }
+  if(!r->failed){goRemoteTick=tick;goRemoteActive=active;goRemoteDead=dead;goRemoteCore=core;goRemoteAim=aim;goRemoteShield=shield;goRemoteHealth=health;
+   for(int p=0;p<GM_COUNT;p++){goRemoteParts[p].alive=alive[p];goRemoteParts[p].box=bounds[p];goRemoteParts[p].shield=shields[p];goRemoteParts[p].flash=flashes[p];}
+  }
  }else if(part==3){
   int b=net_read_u8(r),active=net_read_u8(r);if(b>=ENEMY_STRUCTURE_MAX || active>1 || tick<towerNetTick)return true;
   EnemyStructure t={0};

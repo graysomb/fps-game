@@ -10150,7 +10150,7 @@ static void kill_player(int player_index, int attacker_index,
             return; // Friendly fire disabled in Firefight
         }
     }
-    if(go_combat_actor(player_index)){if(players[player_index].invuln_timer<=0)go_combat_damage(35,false);return;}
+    if(go_combat_actor(player_index)){if(players[player_index].invuln_timer<=0)go_combat_damage_from(35,false,attacker_index);return;}
     Player *player = &players[player_index];
     if(player->enemyType==ENEMY_TYPE_FOUNDRY && enemySpecial[player_index].coreHealth>0) {
         apply_matter_damage(player_index,attacker_index,35);return;
@@ -10282,7 +10282,7 @@ static void apply_matter_damage(int player_index, int attacker_index, float dama
     if (player->respawn_timer > 0.0f) {
         return;
     }
-    if(go_combat_actor(player_index)){if(player->invuln_timer<=0)go_combat_damage(damage,tetherDrainDamage);return;}
+    if(go_combat_actor(player_index)){if(player->invuln_timer<=0)go_combat_damage_from(damage,tetherDrainDamage,attacker_index);return;}
     if(damage>0 && player->invuln_timer<=0 && attacker_index>=0 && attacker_index<activePlayers)
         ai_alert(player_index,attacker_index,aiProjectileDamage?aiProjectileOrigin:players[attacker_index].pos,AI_ALERT_HIT);
     if(player->enemyType==ENEMY_TYPE_FOUNDRY) {
@@ -20971,6 +20971,12 @@ static void render_gameplay_view(RenderTexture2D *screens,
                     int wave_x = view_w - HUD_PADDING_X - wave_w;
                     int wave_y = HUD_PADDING_Y;
                     DrawText(wave_text, wave_x, wave_y, hudFont, (firefightWaveEnemiesRemaining <= 1) ? RED : ORANGE);
+                }
+                if((goCombatEnabled && !goCombatDead)||(goRemoteActive && !goRemoteDead)){
+                    float shield=goRemoteActive?goRemoteShield:goFight.shield,health=goRemoteActive?goRemoteHealth:goFight.health;
+                    int font=view_w<700?12:18;
+                    const char *boss=TextFormat("GOLEM | SHIELD %.0f | CORE %.0f",shield,health);
+                    DrawText(boss,(view_w-MeasureText(boss,font))/2,HUD_PADDING_Y+hudFont+8,font,SKYBLUE);
                 }
                 if (firefightWaveBannerTimer > 0.0f) {
                     int banner_size = view_w<700?24:48;

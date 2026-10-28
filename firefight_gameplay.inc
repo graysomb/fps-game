@@ -284,21 +284,37 @@ static void update_firefight_logic(float dt) {
     int living=0,goliaths=0,specialists=0,slot=-1;
     for(int i=MAX_PLAYERS;i<MAX_COMBATANTS;i++) {
         if(players[i].respawn_timer<=0) { living++; if(enemy_is_special(i)) specialists++; if(players[i].enemyType==ENEMY_TYPE_GOLIATH) goliaths++; }
-        else if(slot<0) slot=i;
+        else if(slot<0 && !go_combat_actor(i)) slot=i;
     }
     int waveCap=ff_wave_cap(firefightWave,fp_team_size());
     if(slot<0 || living>=waveCap) return;
     int type=-1;
     for(int n=0;n<FF_TYPE_COUNT;n++) { int t=(ffSpawnOrdinal+n)%FF_TYPE_COUNT;
-        if(t==ENEMY_TYPE_SWARMER && (firefightWave-1)%FF_WAVE_COUNT==FF_WAVE_COUNT-1) continue;
         int specialistCap=(firefightWave-1)%FF_WAVE_COUNT>=3?2:1;
         if(ffRemaining[t]>0 && (t!=2 || goliaths<2) && (t<3 || specialists<specialistCap)) {type=t;break;} }
+    if(ffRemaining[ENEMY_TYPE_FOUNDRY]>0)type=ENEMY_TYPE_FOUNDRY;
     if(type<0) return;
     int pack=type==ENEMY_TYPE_SWARMER?3:1, spawned=0;
     for(int n=0;n<pack && ffRemaining[type]>0 && living<waveCap;n++) {
         slot=-1;
-        for(int i=MAX_PLAYERS;i<MAX_COMBATANTS;i++) if(players[i].respawn_timer>0) {slot=i;break;}
+        for(int i=MAX_PLAYERS;i<MAX_COMBATANTS;i++) if(players[i].respawn_timer>0 && !go_combat_actor(i)) {slot=i;break;}
         if(slot<0) break;
+        if(type==ENEMY_TYPE_FOUNDRY){
+            if(players[MAX_PLAYERS].respawn_timer<=0)break;
+            float edge=fminf(36,FLOOR_SIZE-4);
+            Vector3 origin={(ffEntrance?1.f:-1.f)*edge,.04f,0};
+            bool clear=false;
+            for(int n=0;n<10;n++){
+                Vector3 candidate={(ffEntrance?1.f:-1.f)*(edge-(n/5)*4),.04f,(float)((n%5)-2)*3};
+                if(go_move_clear(candidate)){origin=candidate;clear=true;break;}
+            }
+            if(!clear)break;
+            if(!golem_physics_start_at(origin,ffEntrance?90:-90))break;
+            init_firefight_bot_entity(MAX_PLAYERS,ENEMY_TYPE_STANDARD,INPUT_TYPE_BOT_MEDIUM);
+            go_combat_start();clarity_spawn(MAX_PLAYERS);
+            ffRemaining[type]--;firefightEnemiesSpawned++;ffSpawnOrdinal++;living++;spawned++;
+            continue;
+        }
         players[slot].enemyType=(EnemyType)type;
         Vector3 position;
         if(!ff_spawn_position(slot,&position)) break;

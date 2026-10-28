@@ -33,7 +33,7 @@ static int eq_near_pickup(int i){int best=-1;float distance=1.4f;for(int p=0;p<M
 static bool eq_hostile(int i,int j){return i!=j && players[j].respawn_timer<=0 && (gameMode!=GAME_MODE_FIREFIGHT || combatantTeam[i]!=combatantTeam[j]);}
 static void eq_damage(int i,int target,float amount,bool lethal,DeathCause cause,Vector3 origin){
     if(amount<=0 || !eq_hostile(i,target) || players[target].invuln_timer>0 || !enemy_core_open(target))return;
-    if(go_combat_actor(target)){go_combat_damage(amount,cause==DEATH_GLOB);if(cause==DEATH_GLOB)goFight.suppressed=5;return;}
+    if(go_combat_actor(target)){go_combat_damage_from(amount,cause==DEATH_GLOB,i);if(cause==DEATH_GLOB)goFight.suppressed=5;return;}
     bool exposed=players[target].isExposed;float matter=players[target].matter;
     DeathCause prev=deathContext;deathContext=cause;bool known=damageOriginKnown;Vector3 old=damageOrigin;damageOriginKnown=true;damageOrigin=origin;
     if(cause==DEATH_GLOB){

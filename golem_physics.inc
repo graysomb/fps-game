@@ -261,8 +261,8 @@ static void golem_physics_tick(float dt){
         }
     }
 }
-static bool golem_physics_start(void){
-    golem_physics_reset();goRegen=true;goInput=golem_input();goInput.scale=goScale;goInput.position=(Vector3){0,.04f,10};goInput.side=1;goPose=golem_sample(&goInput);
+static bool golem_physics_start_at(Vector3 position,float yaw){
+    golem_physics_reset();goRegen=true;goInput=golem_input();goInput.scale=goScale;goInput.position=position;goInput.yaw=yaw;goInput.side=1;goPose=golem_sample(&goInput);
     golem_body_generate(go_collect,go_finish);
     for(int side=0;side<2;side++){go_body_grid(go_collect,2,1,2,(Vector3){0,.55f,0},GRAY);go_finish(GM_TURRET_L+side);}
     if(goAllocationFailed){golem_physics_reset();return false;}
@@ -305,7 +305,9 @@ static bool golem_physics_start(void){
     }
     go_connect();rebuild_voxel_hash();goClock=0;return true;
 }
+static bool golem_physics_start(void){return golem_physics_start_at((Vector3){0,.04f,10},0);}
 static void golem_lab_draw(void){
+    if(goRemoteActive){go_remote_draw();return;}
     if(!goActive)return;
     go_combat_draw();
     if(goOverlay)golem_draw_skeleton(&goPose);

@@ -1,6 +1,12 @@
-# Enemy Lab golem combat
+# Golem combat
 
-The golem remains an Enemy Lab encounter. Firefight and LAN boss integration are unchanged.
+The golem replaces the Foundry boss in Firefight boss waves (12, 24, and so on).
+It remains available with --enemy-lab=golem. Firefight reserves its reactor proxy
+slot, spawns the existing support roster, and uses normal kill credit, wave
+completion, rewards, and cleanup. The HUD shows shield and core health. LAN
+clients receive physical body poses and shield presentation; combat remains
+authoritative on the host. Matching protocol-31 builds are required. The old
+Foundry encounter remains available in Enemy Lab for regression testing.
 The physical body retains its original 283 cells, with eight additional cells for two
 independently destructible shoulder-gun mounts.
 

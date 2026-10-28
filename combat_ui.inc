@@ -8,7 +8,7 @@ static const char *combat_ui_death_text(int victim) {
     const char *causes[]={"Unknown cause","Fell out of the arena","Voxel shot","Crushed by debris","Explosion","Melee","Shotgun","Cutter beam","Railgun","Rocket","Sword","Glob gun","Glock","DMR"};
     if(n->cause==DEATH_FALL || n->attacker<0)return causes[n->cause];
     if(n->attacker==victim)return TextFormat("%s - self-inflicted",causes[n->cause]);
-    const char *names[]={"Rifleman","Swarmer","Goliath","Scrapper","Shieldbearer","Sapper","Lobber","Builder","Anchor","Foundry"};
+    const char *names[]={"Rifleman","Swarmer","Goliath","Scrapper","Shieldbearer","Sapper","Lobber","Builder","Anchor","Foundry","Golem"};
     return n->enemy>=0?TextFormat("%s - %s",causes[n->cause],names[n->enemy]):TextFormat("%s - Player %d",causes[n->cause],n->attacker+1);
 }
 static void combat_ui_death(int victim,int attacker,bool debris,bool downed) {
@@ -16,6 +16,7 @@ static void combat_ui_death(int victim,int attacker,bool debris,bool downed) {
     DeathCause cause=deathContext;
     if(cause==DEATH_UNKNOWN)cause=players[victim].pos.y< -10?DEATH_FALL:debris?DEATH_DEBRIS:explosionDamageContext?DEATH_EXPLOSION:attacker>=0?DEATH_MELEE:DEATH_UNKNOWN;
     int enemy=attacker>=0 && attacker<activePlayers && is_player_bot(attacker)?players[attacker].enemyType:-1;
+    if(go_combat_actor(attacker))enemy=ENEMY_TYPE_COUNT;
     deathNotices[victim]=(DeathNotice){cause,attacker,enemy,downed,(float)GetTime()+5};
     if(netTransport.role==NET_ROLE_HOST){
         uint8_t packet[48];NetWriter w;net_writer_init(&w,packet,sizeof(packet));net_write_header(&w,NET_MSG_COMBAT_UI,0,netTransport.session_id,netServerTick);
@@ -188,7 +189,7 @@ static bool combat_ui_receive(NetMessageType type,NetReader *r,uint32_t tick) {
     int kind=net_read_u8(r);
     if(kind==2){
         int victim=net_read_u8(r),cause=net_read_u8(r),attacker=(int)net_read_u8(r)-1,enemy=(int)net_read_u8(r)-1,downed=net_read_u8(r);
-        if(!r->failed && victim<MAX_PLAYERS && cause<DEATH_CAUSE_COUNT && attacker<MAX_COMBATANTS && enemy<ENEMY_TYPE_COUNT && downed<=1)
+        if(!r->failed && victim<MAX_PLAYERS && cause<DEATH_CAUSE_COUNT && attacker<MAX_COMBATANTS && enemy<=ENEMY_TYPE_COUNT && downed<=1)
             deathNotices[victim]=(DeathNotice){cause,attacker,enemy,downed,(float)GetTime()+5};
         return true;
     }

@@ -15,6 +15,7 @@ static struct {
 } goFight;
 #include "golem_arsenal.inc"
 static void go_combat_reset(void){
+    goRemoteActive=false;goRemoteTick=0;
     go_arsenal_reset();
     if(goCombatEnabled){players[MAX_PLAYERS].respawn_timer=9999;combatantLife[MAX_PLAYERS]=LIFE_UNUSED;}
     goInput.combatReach=false;goCombatEnabled=goCombatDead=false;memset(&goFight,0,sizeof(goFight));goFight.target=-1;
@@ -44,7 +45,7 @@ static void go_combat_start(void){
     combatantTeam[MAX_PLAYERS]=1;goFight.lastLimb[0]=goPose.hand[0];goFight.lastLimb[1]=goPose.hand[1];
     go_arsenal_start();go_combat_sync();
 }
-static void go_combat_damage(float amount,bool shieldOnly){
+static void go_combat_damage_from(float amount,bool shieldOnly,int attacker){
     if(!goCombatEnabled||goCombatDead||amount<=0||!isfinite(amount))return;
     if(shieldOnly&&goFight.shield<=0)return;
     float shield=goFight.shield;
@@ -58,9 +59,16 @@ static void go_combat_damage(float amount,bool shieldOnly){
         for(int p=1;p<GM_COUNT;p++)go_release_part(p);
         skeletonConstraintCount=0;play_sfx_at(SFX_EXPLOSION,go_core_position(),MAX_PLAYERS,2,.65f);
         for(int n=0;n<voxel_count;n++)if(voxels[n].golemOwned)voxels[n].golemReclaimStart=0;
+        if(gameMode==GAME_MODE_FIREFIGHT && !enemyLab){
+            /* Use the ordinary authoritative death path exactly once. */
+            goCombatEnabled=false;
+            kill_player(MAX_PLAYERS,attacker,true,false);
+            goCombatEnabled=true;
+        }
     }
     go_combat_sync();
 }
+static void go_combat_damage(float amount,bool shieldOnly){go_combat_damage_from(amount,shieldOnly,-1);}
 /* Physical cuboids are not unit grid cells. Test their oriented faces, and
  * exclude the reactor's visual cells: the actor proxy owns reactor damage. */
 static bool go_target_valid(int target){
@@ -81,32 +89,32 @@ static bool go_line_clear(Vector3 a,Vector3 b){
         if(hit.hit&&hit.distance<distance-.3f)return false;
     }return true;
 }
-/* A bounded lab navigation grid, expanded by the body's shoulder clearance.
- * Regenerate on a timer because the lab's structures are destructible. */
+/* An arena navigation grid, expanded by the body's shoulder clearance.
+ * Regenerate on a timer because the arena's structures are destructible. */
 static void go_route(Vector3 target){
-    enum {N=64,CELLS=N*N};unsigned char blocked[CELLS]={0};int parent[CELLS],queue[CELLS];
+    enum {N=96,CELLS=N*N};unsigned char blocked[CELLS]={0};int parent[CELLS],queue[CELLS];
     for(int n=0;n<CELLS;n++)parent[n]=-2;
     for(int n=0;n<voxel_count;n++){
         Voxel *v=&voxels[n];if(v->simulate||v->golemOwned||v->pos.y-v->rest_edge*.5f>5.3f||v->pos.y+v->rest_edge*.5f<.1f)continue;
         float r=v->rest_edge*.5f+2.1f;
-        int x0=Clamp(floorf(v->pos.x-r+32),0,63),x1=Clamp(ceilf(v->pos.x+r+32),0,63);
-        int z0=Clamp(floorf(v->pos.z-r+32),0,63),z1=Clamp(ceilf(v->pos.z+r+32),0,63);
+        int x0=Clamp(floorf(v->pos.x-r+48),0,95),x1=Clamp(ceilf(v->pos.x+r+48),0,95);
+        int z0=Clamp(floorf(v->pos.z-r+48),0,95),z1=Clamp(ceilf(v->pos.z+r+48),0,95);
         for(int z=z0;z<=z1;z++)for(int x=x0;x<=x1;x++)blocked[z*N+x]=1;
     }
-    for(int z=0;z<N;z++)for(int x=0;x<N;x++)if(x<3||z<3||x>N-4||z>N-4)blocked[z*N+x]=1;
-    int start=(int)Clamp(roundf(goFight.position.z+32),0,63)*N+(int)Clamp(roundf(goFight.position.x+32),0,63);
+    for(int z=0;z<N;z++)for(int x=0;x<N;x++)if(fabsf(x-48)>FLOOR_SIZE-3||fabsf(z-48)>FLOOR_SIZE-3)blocked[z*N+x]=1;
+    int start=(int)Clamp(roundf(goFight.position.z+48),0,95)*N+(int)Clamp(roundf(goFight.position.x+48),0,95);
     int head=0,tail=0,best=start;float bestDist=FLT_MAX;parent[start]=-1;queue[tail++]=start;
-    while(head<tail){int at=queue[head++],x=at%N,z=at/N;float dx=x-32-target.x,dz=z-32-target.z,d=dx*dx+dz*dz;
+    while(head<tail){int at=queue[head++],x=at%N,z=at/N;float dx=x-48-target.x,dz=z-48-target.z,d=dx*dx+dz*dz;
         if(d<bestDist){best=at;bestDist=d;}if(d<1)break;
         const int sx[4]={-1,1,0,0},sz[4]={0,0,-1,1};
         for(int k=0;k<4;k++){int nx=x+sx[k],nz=z+sz[k];if(nx<0||nx>=N||nz<0||nz>=N)continue;int next=nz*N+nx;
             if(!blocked[next]&&parent[next]==-2){parent[next]=at;queue[tail++]=next;}}
     }
     while(parent[best]>=0&&parent[best]!=start)best=parent[best];
-    goFight.waypoint=(Vector3){best%N-32,.04f,best/N-32};goFight.routeTimer=.35f;
+    goFight.waypoint=(Vector3){best%N-48,.04f,best/N-48};goFight.routeTimer=.35f;
 }
 static bool go_move_clear(Vector3 position){
-    if(fabsf(position.x)>29||fabsf(position.z)>29)return false;
+    if(fabsf(position.x)>FLOOR_SIZE-3||fabsf(position.z)>FLOOR_SIZE-3)return false;
     BoundingBox body={{position.x-1.9f,.08f,position.z-1.9f},{position.x+1.9f,5.3f,position.z+1.9f}};
     for(int n=0;n<voxel_count;n++){Voxel *v=&voxels[n];if(v->simulate||v->golemOwned)continue;
         Vector3 half={v->rest_edge*.5f,v->rest_edge*.5f,v->rest_edge*.5f};
@@ -267,5 +275,21 @@ static void go_combat_draw(void){
         DrawLine3D(goPose.hand[goFight.attack==1?0:1],goFight.aim,Fade(ORANGE,.55f));
     }
     rlDrawRenderBatchActive();rlEnableDepthMask();
+}
+static void go_remote_draw(void){
+    if(!goRemoteActive || goRemoteDead)return;
+    rlDrawRenderBatchActive();rlDisableDepthMask();
+    for(int p=1;p<GM_COUNT;p++)if(goRemoteParts[p].alive && goRemoteParts[p].shield>0){
+        BoundingBox b=goRemoteParts[p].box;Vector3 at=v_mul(v_add(b.min,b.max),.5f),size=v_sub(b.max,b.min);
+        DrawCubeWires(at,size.x+.05f,size.y+.05f,size.z+.05f,Fade(goRemoteParts[p].flash>0?WHITE:SKYBLUE,.6f));
+    }
+    if(goRemoteShield>0)DrawSphereWires(goRemoteCore,.52f,6,12,SKYBLUE);
+    rlDrawRenderBatchActive();rlEnableDepthMask();
+    for(int side=0;side<2;side++)if(goRemoteParts[GM_TURRET_L+side].alive){
+        BoundingBox b=goRemoteParts[GM_TURRET_L+side].box;Vector3 at=v_mul(v_add(b.min,b.max),.5f),dir=v_norm(v_sub(goRemoteAim,at));
+        Matrix m=MatrixMultiply(MatrixRotateX(asinf(Clamp(dir.y,-1,1))),MatrixRotateY(atan2f(-dir.x,-dir.z)));m=MatrixMultiply(m,MatrixTranslate(at.x,at.y,at.z));
+        WeaponVisual visual={.activity=1};Vector3 eye=drawViewPlayerIndex>=0?players[drawViewPlayerIndex].pos:(Vector3){0};
+        weapon_draw((WeaponPose){.kind=WEAPON_STANDARD,.transform=m},&visual,eye,(float)GetTime(),false,WEAPON_COLOR);
+    }
 }
 
