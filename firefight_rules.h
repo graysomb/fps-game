@@ -27,6 +27,7 @@ static const WaveDefinition ff_waves[FF_WAVE_COUNT] = {
 };
 /* AI tiers: 0 easy, 1 medium, 2 hard. Riflemen ramp more slowly. */
 static inline int ff_ai_level(int wave, int type) {
+    if(wave==4)return 1;
     if(type==0) return wave<5?0:wave<10?1:2;
     return wave==1?0:wave<=3?1:2;
 }

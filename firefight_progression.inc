@@ -118,6 +118,17 @@ static void fp_prepare_wave(int wave){
   if(replace<0)break;ffRemaining[replace]--;fpPending[fpPendingCount++]=wanted[n];
  }
  for(int n=0;n<fpPendingCount;n++)ffRemaining[fpRules[fpPending[n]].chassis]++;
+ if(wave==4){
+  // Keep the added default riflemen, replacing every builder with a shield bearer.
+  int builders=ffRemaining[ENEMY_TYPE_BUILDER];
+  ffRemaining[ENEMY_TYPE_STANDARD]+=builders;
+  ffRemaining[ENEMY_TYPE_SHIELDBEARER]+=builders;
+  ffRemaining[ENEMY_TYPE_BUILDER]=0;
+  // Reinforced-building repeats belonged to the removed builders; their
+  // replacement shield bearers use ordinary specialist AI, not carrier AI.
+  int kept=0;for(int n=0;n<fpPendingCount;n++)if(fpRules[fpPending[n]].chassis!=ENEMY_TYPE_BUILDER)fpPending[kept++]=fpPending[n];
+  fpPendingCount=kept;
+ }
 }
 static void fp_spawn(int i,int chassis){
  fp_pair_clear(i);
@@ -148,6 +159,7 @@ static void fp_tick(float dt){
  if(fpBannerTimer<=0 && fpBannerRead<fpBannerWrite){fpBannerTimer=3.5f;fpBannerRead++;play_sfx(SFX_WIN);}
  if(netTransport.role==NET_ROLE_CLIENT)return;
  fp_pairs_tick(dt);
+ shield_escort_tick();
  if(fpRestartTimer>0){fpRestartTimer=fmaxf(0,fpRestartTimer-dt);if(fpRestartTimer<=0)fp_restore();return;}
  for(int i=0;i<firefightHumans;i++)if(combatantLife[i]==LIFE_ALIVE){int n=fp_near(i,true);if(n>=0)fp_collect(i,(size_t)n,false);}
  fpSupplyTimer-=dt;if(fpSupplyTimer<=0){

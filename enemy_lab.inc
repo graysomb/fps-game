@@ -254,7 +254,7 @@ static bool enemy_smoke_case(int type) {
         ENEMY_CHECK(first_voxel_hit((Ray){{3,BASE_EYE_HEIGHT,10},{-1,0,0}},2.5f,-1)<0,"shield leaves side vulnerable");
         float before=players[i].yaw;players[0].pos.x=10;enemy_update(i,.1f);
         ENEMY_CHECK(fabsf(angle_diff_deg(before,players[i].yaw))<=12.01f,"shield turn-rate cap");
-        enemy_detach(front);ENEMY_CHECK(s->equipmentCount==19,"shield pieces detach");
+        enemy_detach(front);ENEMY_CHECK(s->equipmentCount==SHIELD_COLUMNS*SHIELD_ROWS-1,"shield pieces detach");
     } else if(type==ENEMY_TYPE_SAPPER) {
         s->selected=enemy_sapper_target(i,0);int support=enemy_voxel(s->selected);
         ENEMY_CHECK(support>=0,"sapper finds structural support");

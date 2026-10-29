@@ -19,7 +19,7 @@ static void check_crosscut_routes(void) {
     }
 }
 static void snapshot_packet(int part,uint32_t seq,bool broken){uint8_t data[1000];NetWriter w;net_writer_init(&w,data,sizeof(data));net_write_u32(&w,seq);net_write_u8(&w,part);for(int n=0;n<16;n++){net_write_u32(&w,n==0 && part==0?123:0);net_write_u8(&w,0);for(int c=0;c<6;c++)net_write_f32(&w,c==1?2:0);net_write_f32(&w,n==0?1:0);net_write_u8(&w,0);net_write_u8(&w,0);net_write_u64(&w,0);for(int a=0;a<3;a++)net_write_f32(&w,0);}NetReader r;net_reader_init(&r,data,broken?w.length-1:w.length);assert(clarity_net_receive(NET_MSG_GRENADES,&r,seq));}
-int main(int argc,char **argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,720,"Combat clarity regression");init_pbd_thread_pool();assert(initialize_physics_backend());
+int main(int argc,char **argv){bool shieldOnly=argc>1&&!strcmp(argv[1],"--shield-only");if(shieldOnly){argc--;argv++;}assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,720,"Combat clarity regression");init_pbd_thread_pool();assert(initialize_physics_backend());
     empty_arena();players[1].pos=(Vector3){10,1,0};grenadeInventory[0]=2;
     assert(clarity_throw(0));assert(grenadeInventory[0]==1);assert(!clarity_throw(0));clarity_tick(.5f);assert(clarity_throw(0));assert(grenadeInventory[0]==0);assert(!clarity_throw(0));
     for(int f=0;f<220;f++)clarity_tick(1.0f/60);for(int n=0;n<32;n++)assert(!grenades[n].id);assert(!debugDrawParticles);
@@ -28,18 +28,25 @@ int main(int argc,char **argv){assert(parse_physics_arguments(argc,argv));SetLog
     empty_arena();players[1].pos=(Vector3){3,1,0};add_static_box_at_grid(2,2,0,5,-3,3,GRAY);init_static_hash();clarity_explode((Vector3){0,1,0},0);assert(players[1].matter==100);
     empty_arena();enemy_lab_spawn(4,ENEMY_TYPE_STANDARD,(Vector3){2,1,0});players[4].invuln_timer=0;enemyCharges[5]=(EnemyCharge){.active=true,.pos={0,1,0},.fuse=3};assert(clarity_evade(4,.1f));assert(players[4].vel.x>0);enemyCharges[5].active=false;
     clarity_explode((Vector3){1,1,0},4);assert(players[4].matter<100);
-    enemy_lab_start(ENEMY_TYPE_SHIELDBEARER);enemyLabPaused=false;int v=enemy_voxel(enemySpecial[4].equipment[0].id);assert(clarity_shield_melee(v,0));assert(enemySpecial[4].equipmentCount==15);assert(players[4].matter==75);
+    enemy_lab_start(ENEMY_TYPE_SHIELDBEARER);enemyLabPaused=false;int v=enemy_voxel(enemySpecial[4].equipment[0].id);assert(clarity_shield_melee(v,0));assert(enemySpecial[4].equipmentCount==SHIELD_COLUMNS*SHIELD_ROWS-SHIELD_ROWS*2);assert(players[4].matter==75);
     for(int n=0;n<3;n++){v=enemy_voxel(enemySpecial[4].equipment[0].id);assert(clarity_shield_melee(v,0));}assert(enemySpecial[4].equipmentCount==0);
-    /* Shield sections absorb six projectiles, independent of melee and actor Matter. */
+    /* Twice the width/area, with twelve hits per section; melee remains a counter. */
     enemy_lab_start(ENEMY_TYPE_SHIELDBEARER);uint64_t plate=enemySpecial[4].equipment[0].id;
-    for(int n=0;n<5;n++){assert(clarity_shield_projectile(enemy_voxel(plate)));assert(enemySpecial[4].equipmentCount==20);}
-    assert(clarity_shield_projectile(enemy_voxel(plate)));assert(enemySpecial[4].equipmentCount==15 && players[4].matter==75);
+    float left=FLT_MAX,right=-FLT_MAX,bottom=FLT_MAX,top=-FLT_MAX;
+    for(int n=0;n<enemySpecial[4].equipmentCount;n++){
+        Vector3 p=enemySpecial[4].equipment[n].offset;left=fminf(left,p.x-.25f);right=fmaxf(right,p.x+.25f);bottom=fminf(bottom,p.y-.25f);top=fmaxf(top,p.y+.25f);
+        assert(enemySpecial[4].equipment[n].group>=0 && enemySpecial[4].equipment[n].group<4);
+    }
+    assert(fabsf(right-left-4)<.001f && fabsf(top-bottom-2.5f)<.001f);
+    for(int n=0;n<SHIELD_SECTION_HITS-1;n++){assert(clarity_shield_projectile(enemy_voxel(plate)));assert(enemySpecial[4].equipmentCount==SHIELD_COLUMNS*SHIELD_ROWS);}
+    assert(clarity_shield_projectile(enemy_voxel(plate)));assert(enemySpecial[4].equipmentCount==SHIELD_COLUMNS*SHIELD_ROWS-SHIELD_ROWS*2 && players[4].matter==75);
     enemy_lab_start(ENEMY_TYPE_SHIELDBEARER);players[4].pos=(Vector3){0,2,4};players[4].yaw=0;enemy_update_equipment(4);
-    for(int shot=0;shot<6;shot++) {
+    for(int shot=0;shot<SHIELD_SECTION_HITS;shot++) {
         int bullet=addVoxel(.25f,2,0,false,true,WHITE,0);voxels[bullet].isBullet=true;voxels[bullet].owner=0;voxels[bullet].vel=(Vector3){0,0,60};
         rebuild_voxel_hash();update_projectiles(.1f);assert(players[4].matter==75);
     }
-    assert(enemySpecial[4].equipmentCount==15);
+    assert(enemySpecial[4].equipmentCount==SHIELD_COLUMNS*SHIELD_ROWS-SHIELD_ROWS*2);
+    if(shieldOnly){enemy_cleanup(true);clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Shield regression: doubled area, twelve-hit sections, projectile interception and melee breaks passed");return 0;}
     /* Continuous, nonstacking healing with a finishing window and disabled-link cutoff. */
     empty_arena();enemy_lab_spawn(4,ENEMY_TYPE_ANCHOR,(Vector3){0,2,0});enemy_lab_spawn(5,ENEMY_TYPE_STANDARD,(Vector3){3,2,0});
     enemy_lab_spawn(6,ENEMY_TYPE_ANCHOR,(Vector3){0,2,3});players[5].matter=20;

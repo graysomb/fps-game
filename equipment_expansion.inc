@@ -67,7 +67,7 @@ static void ex_dmr_cut(int owner,Ray ray,VoxelHit hit){
 }
 static bool ex_fire(int i,int gun,Ray ray){
     if(gun==EQ_GLOB){int free=-1;for(int n=0;n<EX_GLOBS;n++)if(!exGlobs[n].id){free=n;break;}if(free<0)return false;exGlobs[free]=(GlobProjectile){.id=exNextId++,.owner=i,.pos=ray.position,.velocity=v_mul(ray.direction,60)};return true;}
-    float length=eqGuns[gun].range;VoxelHit hit;bool wall=first_voxel_hit_detailed(ray,length,-1,false,&hit);if(wall)length=hit.t;
+    float length=eqGuns[gun].range;VoxelHit hit;bool wall=rifle_shield_ray(ray,length,-1,i,&hit);if(wall)length=hit.t;
     int target=eq_actor_ray(i,ray,&length);
     ducks_ray(ray,length,0,-1,false);
     if(target>=0)eq_damage(i,target,eqGuns[gun].damage,gun==EQ_DMR,gun==EQ_DMR?DEATH_DMR:DEATH_GLOCK,ray.position);
@@ -96,7 +96,7 @@ static void ex_tick(float dt){
     }
     for(int n=0;n<EX_GLOBS;n++){GlobProjectile *g=&exGlobs[n];if(!g->id)continue;float step=fminf(dt,1-g->age);g->age+=dt;
         if(client){g->pos=world_wrap(v_add(g->pos,v_mul(g->velocity,step)));if(g->age>=1)g->id=0;continue;}
-        float length=60*step;Ray ray={g->pos,v_norm(g->velocity)};VoxelHit hit;bool wall=first_voxel_hit_detailed(ray,length,-1,false,&hit);if(wall)length=hit.t;int actor=eq_actor_ray(g->owner,ray,&length);
+        float length=60*step;Ray ray={g->pos,v_norm(g->velocity)};VoxelHit hit;bool wall=rifle_shield_ray(ray,length,-1,g->owner,&hit);if(wall)length=hit.t;int actor=eq_actor_ray(g->owner,ray,&length);
         bool floor=ray.direction.y<0 && ray.position.y+ray.direction.y*length<0;if(floor){length=-ray.position.y/ray.direction.y;actor=-1;}
         bool duck=ducks_ray(ray,length,.06f,-1,false);
         g->pos=world_wrap(v_add(ray.position,v_mul(ray.direction,length)));

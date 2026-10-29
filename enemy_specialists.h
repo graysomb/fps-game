@@ -1,5 +1,8 @@
 /* Included after combat globals. Equipment references survive voxel compaction. */
 #define ENEMY_EQUIPMENT_MAX 48
+#define SHIELD_COLUMNS 8
+#define SHIELD_ROWS 5
+#define SHIELD_SECTION_HITS 12
 #define ENEMY_STRUCTURE_MAX 24
 #define ENEMY_LOB_MAX_VOXELS 64
 #define ENEMY_CHARGE_MAX 64

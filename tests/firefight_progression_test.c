@@ -24,9 +24,11 @@ static void schedule(void){
  for(int humans=1;humans<=4;humans++){fixture();firefightHumans=humans;
   for(int wave=1;wave<=36;wave++){
    int before[10],sum=0;for(int t=0;t<10;t++)sum+=(before[t]=ffRemaining[t]=ff_count(wave,humans,t));
-   fp_prepare_wave(wave);int after=0;for(int t=0;t<10;t++){after+=ffRemaining[t];assert(ffRemaining[t]>=0);if(t>=2)assert(ffRemaining[t]>=before[t]);}assert(sum==after);
+   fp_prepare_wave(wave);int after=0;for(int t=0;t<10;t++){after+=ffRemaining[t];assert(ffRemaining[t]>=0);if(t>=2 && !(wave==4 && t==ENEMY_TYPE_BUILDER))assert(ffRemaining[t]>=before[t]);}
+   assert(sum+(wave==4?before[ENEMY_TYPE_BUILDER]+(humans<=2):0)==after);
+   if(wave==4)assert(ffRemaining[ENEMY_TYPE_BUILDER]==0);
    int introduced=0;for(int r=0;r<FP_RULE_COUNT;r++)if(fpRules[r].wave==wave && wave!=2){int found=0;for(int n=0;n<fpPendingCount;n++)found+=fpPending[n]==r;assert(found==1);introduced++;}
-   assert(fpPendingCount==introduced+(wave>=3?(humans+1)/2:0));for(int n=0;n<fpPendingCount;n++)assert(fpRules[fpPending[n]].wave<=wave);
+   assert(fpPendingCount==introduced+(wave>=3?(humans+1)/2:0)-(wave==4 && humans<=2));for(int n=0;n<fpPendingCount;n++)assert(fpRules[fpPending[n]].wave<=wave);
   }
  }
  puts("Schedules: waves 1-36, 1-4 players, guaranteed introductions and preserved quotas passed");
@@ -169,6 +171,27 @@ static void rifle_pairs(void){
  assert(v_length(world_delta(players[4].pos,players[5].pos))<8);
  puts("Rifle pairs: shared focus, visibility/memory, reaction timers, regrouping, lanes, lifecycle, periodicity, authority, spawning and Glob/Glock synergy passed");
 }
+static void fourth_wave_roster(void){
+ const int totals[]={8,13,13,18},rifles[]={2,3,2,3},shields[]={3,5,4,6};
+ for(int humans=1;humans<=4;humans++){
+  fixture();firefightHumans=humans;firefightFoundry=false;start_firefight_wave(3);start_firefight_wave(4);
+  int defaults=0,spawned=0,shieldCount=0,watchdog=1000;
+  assert(ffRemaining[ENEMY_TYPE_BUILDER]==0 && ffRemaining[ENEMY_TYPE_SHIELDBEARER]==shields[humans-1]);
+  assert(firefightWaveEnemiesTotal==totals[humans-1]);
+  while(firefightWaveState==FIREFIGHT_STATE_ACTIVE && watchdog-->0){
+   update_firefight_logic(.5f);
+   for(int i=4;i<MAX_COMBATANTS;i++)if(players[i].respawn_timer<=0){
+    assert(playerInput[i]==INPUT_TYPE_BOT_MEDIUM);spawned++;
+    assert(players[i].enemyType!=ENEMY_TYPE_BUILDER);
+    if(players[i].enemyType==ENEMY_TYPE_SHIELDBEARER){shieldCount++;assert(!fp_carrier(i));}
+    defaults+=players[i].enemyType==ENEMY_TYPE_STANDARD && eq_gun(i)==EQ_DEFAULT;
+    players[i].invuln_timer=0;players[i].isExposed=true;kill_player(i,0,false,false);
+   }
+  }
+  assert(watchdog>0 && defaults==rifles[humans-1] && shieldCount==shields[humans-1] && spawned==totals[humans-1] && firefightWaveState==FIREFIGHT_STATE_LOOT);
+ }
+ puts("Wave 4: medium difficulty, builders replaced by shields, preserved default riflemen, 1-4 player totals and completion passed");
+}
 static void ownership(void){
  fixture();size_t glob=carrier(PICKUP_GLOB,4);uint32_t id=fpItems[glob].id;fp_death(4,(Vector3){0,1,0});assert(fpItems[glob].owner==-1&&fpItems[glob].id==id);
  assert(fp_collect(0,glob,false)&&eq_gun(0)==EQ_GLOB);assert(fpUnlocked==(1u<<fp_rule(PICKUP_GLOB)));int banners=fpBannerWrite;assert(!fp_collect(1,glob,false));
@@ -233,6 +256,6 @@ static void lobby(void){
  RenderTexture2D rt=LoadRenderTexture(960,540);BeginTextureMode(rt);couch_title("FIREFIGHT LOBBY");couch_row(0,"Twelve-wave Firefight",false);couch_row(1,"Arena: Foundry Holdout",false);couch_row(2,"Checkpoints: OFF | X / C: toggle",false);couch_row(3,"P1: Keyboard | Not ready",false);EndTextureMode();Image im=LoadImageFromTexture(rt.texture);ImageFlipVertical(&im);ExportImage(im,".build/playtest-run/firefight-checkpoints.png");UnloadImage(im);UnloadRenderTexture(rt);
  puts("Keyboard/controller checkpoint lobby toggle passed");
 }
-int main(int argc,char **argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Firefight progression tests");init_pbd_thread_pool();assert(initialize_physics_backend());schedule();opening_rounds();second_wave_rounds();third_wave_rounds();rifle_pairs();ownership();enemy_weapons();autonomous_carriers();checkpoints();lobby();fp_shutdown();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Firefight progression passed");return 0;}
+int main(int argc,char **argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Firefight progression tests");init_pbd_thread_pool();assert(initialize_physics_backend());schedule();opening_rounds();second_wave_rounds();third_wave_rounds();rifle_pairs();fourth_wave_roster();ownership();enemy_weapons();autonomous_carriers();checkpoints();lobby();fp_shutdown();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Firefight progression passed");return 0;}
 
 

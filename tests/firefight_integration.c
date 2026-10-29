@@ -262,7 +262,7 @@ int main(int argc,char **argv) {
     testButtons[2][GAMEPAD_BUTTON_RIGHT_FACE_LEFT]=true;enemy_lab_controls();memset(testButtons,0,sizeof(testButtons));assert(enemyLabPaused);
     testButtons[2][GAMEPAD_BUTTON_RIGHT_TRIGGER_1]=true;enemy_lab_controls();memset(testButtons,0,sizeof(testButtons));assert(enemyLabStep);
     testButtons[2][GAMEPAD_BUTTON_RIGHT_FACE_UP]=true;enemy_lab_controls();memset(testButtons,0,sizeof(testButtons));
-    assert(enemySpecial[4].equipmentCount==20 && playerInput[0]==INPUT_TYPE_GAMEPAD && seat_device(0)==2);
+    assert(enemySpecial[4].equipmentCount==SHIELD_COLUMNS*SHIELD_ROWS && playerInput[0]==INPUT_TYPE_GAMEPAD && seat_device(0)==2);
     testButtons[2][GAMEPAD_BUTTON_MIDDLE_LEFT]=true;enemy_lab_controls();memset(testButtons,0,sizeof(testButtons));assert(!enemyLabGod);
     enemy_lab_exit();memset(testPads,0,sizeof(testPads));enemy_lab_start(ENEMY_TYPE_SCRAPPER);
     assert(playerInput[0]==INPUT_TYPE_KEYBOARD && multiplayerPlayerInput[0]==INPUT_TYPE_KEYBOARD);
@@ -270,7 +270,7 @@ int main(int argc,char **argv) {
     assert(enemyLabCase==ENEMY_TYPE_SHIELDBEARER && multiplayerActivePlayers==1);
     testKeys[KEY_F5]=true;enemy_lab_controls();memset(testKeys,0,sizeof(testKeys));assert(enemyLabPaused);
     testKeys[KEY_F6]=true;enemy_lab_controls();memset(testKeys,0,sizeof(testKeys));assert(enemyLabStep);
-    testKeys[KEY_F4]=true;enemy_lab_controls();memset(testKeys,0,sizeof(testKeys));assert(enemySpecial[4].equipmentCount==20);
+    testKeys[KEY_F4]=true;enemy_lab_controls();memset(testKeys,0,sizeof(testKeys));assert(enemySpecial[4].equipmentCount==SHIELD_COLUMNS*SHIELD_ROWS);
     enemyLabGod=false;players[0].invuln_timer=0;firefightTeamLives=0;kill_player(0,4,false,false);assert(players[0].respawn_timer==3);
     enemyLabPaused=false;enemy_tick(3.1f);assert(players[0].respawn_timer==0);
     enemy_lab_exit();assert(!enemyLab && firefightFoundry);

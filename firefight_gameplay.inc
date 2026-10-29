@@ -133,6 +133,8 @@ static void start_firefight_wave(int wave_number) {
         firefightWaveEnemiesTotal+=ffRemaining[t];
     }
     fp_prepare_wave(firefightWave);
+    firefightWaveEnemiesTotal=0;
+    for(int t=0;t<FF_TYPE_COUNT;t++)firefightWaveEnemiesTotal+=ffRemaining[t];
     firefightWaveEnemiesRemaining=firefightWaveEnemiesTotal;
     ffSpawnOrdinal=0; ffSpawnTimer=2; ffCleanupTimer=0; ffEntrance=(firefightWave-1)%2;
     ffEntrancePosition[0]=ffEntrancePosition[1]=0;

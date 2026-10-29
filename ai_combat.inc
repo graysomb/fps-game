@@ -7,6 +7,8 @@ static float ai_random(int i) {
 static void ai_reset(int i) {
     if(i<0 || i>=MAX_COMBATANTS)return;
     fp_pair_clear(i);
+    shieldEscort[i]=0;
+    for(int j=0;j<MAX_COMBATANTS;j++)if(shieldEscort[j]==i+1)shieldEscort[j]=0;
     if(towerRifles[i].tag)tower_release(i);
     players[i].drainTarget=0;players[i].netDrainVisualActive=false;
     for(int j=0;j<MAX_COMBATANTS;j++)if(players[j].drainTarget==i+1)players[j].drainTarget=0;

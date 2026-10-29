@@ -15,6 +15,16 @@ typedef struct {
     uint32_t random;
 } AiCombat;
 static AiCombat aiCombat[MAX_COMBATANTS];
+static int shieldEscort[MAX_COMBATANTS]; /* bearer index + 1; zero means unassigned */
+static bool rifle_friendly_shield(int shooter,int voxel);
+static bool shield_rifle_eligible(int rifle);
+static bool rifle_view_blocked(int rifle,Vector3 target);
+static bool shield_escort_valid(int rifle);
+static bool shield_has_escort(int bearer);
+static void shield_escort_tick(void);
+static void shield_escort_move(int rifle,float dt);
+static bool shield_escort_default(int rifle,float dt);
+static bool shield_escort_clear_shot(int rifle);
 static bool aiProjectileDamage;
 static Vector3 aiProjectileOrigin;
 static void ai_reset(int i);

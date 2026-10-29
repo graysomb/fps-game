@@ -110,6 +110,7 @@ static void enemy_on_death(int i) {
 }
 static void enemy_cleanup(bool removeEquipment) {
     memset(fpPairs,0,sizeof(fpPairs));
+    memset(shieldEscort,0,sizeof(shieldEscort));
     goRemoteActive=false;goRemoteTick=0;
     if(goActive){for(int v=voxel_count-1;v>=0;v--)if(voxels[v].golemOwned)remove_voxel_index(v);golem_physics_reset();}
     tower_reset();
@@ -138,7 +139,7 @@ static void enemy_cleanup(bool removeEquipment) {
 static int enemy_equipment_layout(EnemyType type,EnemyEquipment *out) {
     int count=0;
     if(type==ENEMY_TYPE_SHIELDBEARER)
-        for(int x=0;x<4;x++)for(int y=0;y<5;y++)out[count++]=(EnemyEquipment){.offset={(x-1.5f)*.5f,(y-1.5f)*.5f,-1},.group=x};
+        for(int x=0;x<SHIELD_COLUMNS;x++)for(int y=0;y<SHIELD_ROWS;y++)out[count++]=(EnemyEquipment){.offset={(x-(SHIELD_COLUMNS-1)*.5f)*.5f,(y-1.5f)*.5f,-1},.group=x/2};
     if(type==ENEMY_TYPE_ANCHOR)out[count++]=(EnemyEquipment){.offset={0,.9f,.65f},.group=0};
     if(type==ENEMY_TYPE_FOUNDRY){
         for(int g=0;g<4;g++)for(int y=0;y<4;y++)out[count++]=(EnemyEquipment){.offset={g%2?1.25f:-1.25f,-BASE_EYE_HEIGHT+.25f+y*.5f,g/2?1.25f:-1.25f},.group=g};
@@ -148,7 +149,7 @@ static int enemy_equipment_layout(EnemyType type,EnemyEquipment *out) {
 }
 static void enemy_init(int i) {
     EnemySpecialState *s=&enemySpecial[i];memset(s,0,sizeof(*s));
-    for(int g=0;g<4;g++)s->shieldHits[g]=6;
+    for(int g=0;g<4;g++)s->shieldHits[g]=SHIELD_SECTION_HITS;
     s->generation=++enemyGeneration;s->cooldown=2;s->spawnTimer=15;s->target=-1;s->reason="seeking";
     s->coreMax=s->coreHealth=enemy_matter(players[i].enemyType);
     players[i].matter=players[i].matterMax=enemy_matter(players[i].enemyType);
@@ -583,7 +584,8 @@ static void enemy_update(int i,float dt) {
     Vector3 move=to;float speed=1;s->work=0;
     if(t==ENEMY_TYPE_SHIELDBEARER) {
         speed=.7f;
-        for(int j=MAX_PLAYERS;j<activePlayers;j++)if(j!=i && players[j].respawn_timer<=0 && v_length(world_delta(p->pos,players[j].pos))<8) {
+        if(shield_has_escort(i))move=distance<8?v_mul(to,-1):distance>14?to:(Vector3){0};
+        else for(int j=MAX_PLAYERS;j<activePlayers;j++)if(j!=i && players[j].respawn_timer<=0 && v_length(world_delta(p->pos,players[j].pos))<8) {
             move=world_delta(v_add(players[j].pos,v_mul(v_norm(world_delta(ai_target_body(s->target)->pos,players[j].pos)),2)),p->pos);break;
         }
     }

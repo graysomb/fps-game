@@ -16274,9 +16274,9 @@ static bool go_body_ray(Ray ray,float reach,int ignore,const uint64_t *ignored,i
     }return found;
 }
 
-static bool first_voxel_hit_filtered(Ray ray, float t_max, int ignore_id,
+static bool first_voxel_hit_filtered_owner(Ray ray, float t_max, int ignore_id,
                                         bool static_only, int ignore_goliath_owner,
-                                        VoxelHit *out_hit,const uint64_t *ignored,int ignore_count)
+                                        VoxelHit *out_hit,const uint64_t *ignored,int ignore_count,int shield_owner)
 {
     VoxelHit goHit;bool hitGolem=!static_only && go_body_ray(ray,t_max,ignore_id,ignored,ignore_count,&goHit);
     if(hitGolem)t_max=fminf(t_max,goHit.t);
@@ -16301,6 +16301,7 @@ static bool first_voxel_hit_filtered(Ray ray, float t_max, int ignore_id,
 
     while (entry_t <= t_max + 1e-6f) {
         int id = static_only ? table_get_static_only(x, y, z) : table_get(x, y, z);
+        if(id>=0 && shield_owner>=0 && rifle_friendly_shield(shield_owner,id))id=table_get_static_only(x,y,z);
         if (id >= 0 && ignore_goliath_owner >= 0 &&
             get_goliath_owner_of_voxel(id) == ignore_goliath_owner)
             id = table_get_static_only(x, y, z);
@@ -16348,7 +16349,12 @@ static bool first_voxel_hit_filtered(Ray ray, float t_max, int ignore_id,
     return false;
 }
 
-static bool first_voxel_hit_detailed_ex(Ray ray,float t_max,int ignore_id,bool static_only,int ignore_goliath_owner,VoxelHit *out_hit){return first_voxel_hit_filtered(ray,t_max,ignore_id,static_only,ignore_goliath_owner,out_hit,NULL,0);}
+static bool first_voxel_hit_filtered(Ray ray,float reach,int ignore,bool static_only,int ignore_owner,VoxelHit *hit,const uint64_t *ignored,int count){return first_voxel_hit_filtered_owner(ray,reach,ignore,static_only,ignore_owner,hit,ignored,count,-1);}
+static bool rifle_shield_ray(Ray ray,float reach,int ignore,int owner,VoxelHit *hit){return first_voxel_hit_filtered_owner(ray,reach,ignore,false,-1,hit,NULL,0,owner);}
+static bool first_voxel_hit_detailed_ex(Ray ray,float t_max,int ignore_id,bool static_only,int ignore_goliath_owner,VoxelHit *out_hit){
+ int owner=ignore_id>=0 && ignore_id<voxel_count && voxels[ignore_id].isBullet?voxels[ignore_id].owner:-1;
+ return first_voxel_hit_filtered_owner(ray,t_max,ignore_id,static_only,ignore_goliath_owner,out_hit,NULL,0,owner);
+}
 
 static bool first_voxel_hit_detailed(Ray ray, float t_max, int ignore_id,
                                      bool static_only, VoxelHit *out_hit)
@@ -19142,7 +19148,7 @@ static bool check_ai_awareness_of_player(int botIdx, int targetIdx, float *out_d
     }
 
     // 3. THIRD CHECK: Ray trace to measure if view is occluded by voxels
-    if (is_view_occluded_by_voxels(bot->pos, target->pos)) {
+    if (shield_rifle_eligible(botIdx)?rifle_view_blocked(botIdx,target->pos):is_view_occluded_by_voxels(bot->pos,target->pos)) {
         return false; // Occluded by terrain or wall
     }
 
@@ -19392,6 +19398,7 @@ static void bot_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float
 #include "equipment.inc"
 #include "builder_towers.inc"
 #include "firefight_progression.inc"
+#include "shield_escort.inc"
 #include "sapper_ai.inc"
 #include "chunk_regeneration_net.inc"
 static void UpdateBot(int playerIdx, float dt) {
@@ -19401,6 +19408,7 @@ static void UpdateBot(int playerIdx, float dt) {
     if(netTransport.role==NET_ROLE_CLIENT)return;
     if(players[playerIdx].enemyType==ENEMY_TYPE_SAPPER){sapper_update(playerIdx,dt);return;}
     if(players[playerIdx].enemyType==ENEMY_TYPE_BUILDER){tower_builder(playerIdx,dt);return;}
+    if(shield_escort_default(playerIdx,dt))return;
     if(!fp_carrier(playerIdx) && tower_rifle(playerIdx,dt))return;
     if(fp_carrier(playerIdx)){fp_update_carrier(playerIdx,dt);return;}
     if(enemy_is_special(playerIdx)) {enemy_update(playerIdx,dt);return;}
