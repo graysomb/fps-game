@@ -7,9 +7,11 @@ static const FfEquipmentRule fpRules[]={
  {PICKUP_CUTTER,6,ENEMY_TYPE_STANDARD,'B'},{PICKUP_DMR,6,ENEMY_TYPE_STANDARD,'B'},
  {PICKUP_DYNAMIC_SHOT,7,ENEMY_TYPE_STANDARD,'A'},{PICKUP_SWORD,7,ENEMY_TYPE_STANDARD,'A'},
  {PICKUP_BLACK_HOLE,8,ENEMY_TYPE_SAPPER,'A'},{PICKUP_GOLD_TETHER,9,ENEMY_TYPE_LOBBER,'S'},
- {PICKUP_RAILGUN,10,ENEMY_TYPE_STANDARD,'S'},{PICKUP_ROCKET,11,ENEMY_TYPE_STANDARD,'S'}
+ {PICKUP_RAILGUN,10,ENEMY_TYPE_STANDARD,'S'},{PICKUP_ROCKET,11,ENEMY_TYPE_STANDARD,'S'},
+ {PICKUP_SHIELD_REGEN,4,ENEMY_TYPE_SHIELDBEARER,'B'}
 };
 #define FP_RULE_COUNT ((int)(sizeof(fpRules)/sizeof(fpRules[0])))
+#define FP_CARRIER_RULE_COUNT (FP_RULE_COUNT-1)
 static bool fp_active(void){return gameMode==GAME_MODE_FIREFIGHT&&!firefightPractice&&!enemyLab&&!equipmentLab;}
 static int fp_team_size(void){if(netTransport.role==NET_ROLE_OFFLINE)return firefightHumans;int count=0;for(int i=0;i<MAX_PLAYERS;i++)count+=netPlayerPresent[i];return count>0?count:1;}
 static bool fp_carrier(int i){return (fp_active()||(enemyLab && enemyLabCase==ENEMY_TYPE_BUILDER))&&i>=MAX_PLAYERS&&i<MAX_COMBATANTS&&fpCarrierType[i]>0;}
@@ -58,7 +60,7 @@ static bool fp_collect(int i,size_t n,bool replace){
   for(size_t k=0;k<fpCount;k++)if(fpItems[k].owner==i&&fpItems[k].slot==slot&&eq_pickup_gun(fpItems[k].type)==old)fp_drop(&fpItems[k],players[i].pos);
   item->owner=i;item->slot=slot;
  }else if(type==PICKUP_GOLD_TETHER){if(players[i].goldTetherCharged)return false;players[i].goldTetherCharged=true;item->owner=i;}
- else if(type==PICKUP_ADHESIVE || type==PICKUP_REINFORCED){if(!eq_pickup(i,type,false))return false;item->owner=i;}
+ else if(type==PICKUP_ADHESIVE || type==PICKUP_REINFORCED || type==PICKUP_SHIELD_REGEN){if(!eq_pickup(i,type,false))return false;item->owner=i;}
  else {
   int kind=type==PICKUP_BLACK_HOLE?GRENADE_GRAVITY:type==PICKUP_IGLOO?GRENADE_IGLOO:GRENADE_REGULAR;
   if(kind){if(!ex_grenade_pickup(i,kind))return false;}
@@ -76,6 +78,7 @@ static int fp_near(int i,bool automatic){
   if(automatic&&gun>=0&&e->gun[0]!=EQ_EMPTY&&e->gun[1]!=EQ_EMPTY)continue;
   if(fpItems[n].type==PICKUP_GOLD_TETHER&&players[i].goldTetherCharged)continue;
   if((fpItems[n].type==PICKUP_ADHESIVE&&(e->upgrades&EQ_ADHESIVE))||(fpItems[n].type==PICKUP_REINFORCED&&(e->upgrades&EQ_BUILD)))continue;
+  if(fpItems[n].type==PICKUP_SHIELD_REGEN && (e->upgrades&EQ_SHIELD))continue;
   int grenade=fpItems[n].type==PICKUP_GRENADE?GRENADE_REGULAR:fpItems[n].type==PICKUP_BLACK_HOLE?GRENADE_GRAVITY:fpItems[n].type==PICKUP_IGLOO?GRENADE_IGLOO:-1;
   if(grenade>=0&&ex_grenade_count(i,grenade)>=2)continue;
   Vector3 d=world_delta(fpItems[n].pos,players[i].pos);float length=v_length(d);VoxelHit hit;
@@ -83,9 +86,20 @@ static int fp_near(int i,bool automatic){
  }return best;
 }
 static bool fp_interact(int i){int n=fp_near(i,false);return n>=0 && fp_collect(i,(size_t)n,true);}
+static int fpFourthRoster[FF_TYPE_COUNT],fpFourthCarriers[8],fpFourthCarrierCount;
 static void fp_prepare_round(int wave,int round){
  memset(fpPairs,0,sizeof(fpPairs));
  if(!fp_active())return;
+ if(wave==4 && round>=2){
+  fpPendingCount=0;
+  for(int t=0;t<FF_TYPE_COUNT;t++)ffRemaining[t]=(fpFourthRoster[t]*(round+1)+1)/2;
+  int available[FF_TYPE_COUNT];memcpy(available,ffRemaining,sizeof(available));
+  for(int rule=0;rule<FP_RULE_COUNT;rule++){
+   int count=0;for(int n=0;n<fpFourthCarrierCount;n++)count+=fpFourthCarriers[n]==rule;
+   for(int n=0;n<(count*(round+1)+1)/2 && available[fpRules[rule].chassis]>0;n++){fpPending[fpPendingCount++]=rule;available[fpRules[rule].chassis]--;}
+  }
+  return;
+ }
  if(wave==3 && round>=2){
   fpPendingCount=0;
   int rifles=ff_round_count(wave,round,fp_team_size(),ENEMY_TYPE_STANDARD);
@@ -107,9 +121,9 @@ static void fp_prepare_wave(int wave){
  if(kept!=fpCount){fpCount=kept;++fpRevision;}
  if(wave==2){fp_prepare_round(wave,1);return;}
  int wanted[8],count=0;
- for(int n=0;n<FP_RULE_COUNT;n++)if(fpRules[n].wave==wave)wanted[count++]=n;
- if(wave>=3){int repeats=(fp_team_size()+1)/2;for(int k=0;k<repeats;k++)for(int n=0;n<FP_RULE_COUNT;n++){
-   int rule=fpRepeatCursor++%FP_RULE_COUNT;if(fpRules[rule].wave<wave){wanted[count++]=rule;break;}
+ for(int n=0;n<FP_CARRIER_RULE_COUNT;n++)if(fpRules[n].wave==wave)wanted[count++]=n;
+ if(wave>=3){int repeats=(fp_team_size()+1)/2;for(int k=0;k<repeats;k++)for(int n=0;n<FP_CARRIER_RULE_COUNT;n++){
+   int rule=fpRepeatCursor++%FP_CARRIER_RULE_COUNT;if(fpRules[rule].wave<wave){wanted[count++]=rule;break;}
  }}
  for(int n=0;n<count;n++){
   int replace=ffRemaining[ENEMY_TYPE_STANDARD]>0?ENEMY_TYPE_STANDARD:ffRemaining[ENEMY_TYPE_SWARMER]>0?ENEMY_TYPE_SWARMER:-1;
@@ -128,12 +142,16 @@ static void fp_prepare_wave(int wave){
   // replacement shield bearers use ordinary specialist AI, not carrier AI.
   int kept=0;for(int n=0;n<fpPendingCount;n++)if(fpRules[fpPending[n]].chassis!=ENEMY_TYPE_BUILDER)fpPending[kept++]=fpPending[n];
   fpPendingCount=kept;
+  memcpy(fpFourthRoster,ffRemaining,sizeof(fpFourthRoster));
+  fpFourthCarrierCount=fpPendingCount;
+  memcpy(fpFourthCarriers,fpPending,fpPendingCount*sizeof(*fpPending));
  }
 }
 static void fp_spawn(int i,int chassis){
  fp_pair_clear(i);
  eq_reset(i);ex_reset_player(i);fpCarrierType[i]=0;
  if(!fp_active())return;
+ if(chassis==ENEMY_TYPE_SHIELDBEARER){if(fp_reserve(fpCount+1)){fpItems[fpCount++]=(FfItem){.id=fpNextId++,.type=PICKUP_SHIELD_REGEN,.owner=i,.slot=-1,.pos=players[i].pos};++fpRevision;}return;}
  for(int n=0;n<fpPendingCount;n++)if(fpPending[n]>=0 && fpRules[fpPending[n]].chassis==chassis){
   int type=fpRules[fpPending[n]].type;fpPending[n]=-1;
   if(!fp_reserve(fpCount+1)){TraceLog(LOG_ERROR,"Could not allocate carrier item");return;}
@@ -179,11 +197,13 @@ static void fp_draw(WeaponRenderPass pass){
   if(duplicate)continue;p.y+=sinf(now*2+item->id)*.12f;
   if(v_length(world_delta(p,eye))>18 || detailed>=48){if(pass!=WEAPON_GLASS)DrawCube(p,.18f,.18f,.18f,GOLD);continue;}
   detailed++;int kind=eq_pickup_kind(item->type);
+  if(item->type==PICKUP_SHIELD_REGEN){eq_shield_pickup(p,now,pass);continue;}
   if(item->type==PICKUP_GOLD_TETHER)weapon_draw_pickup(false,p,eye,now,pass);
   else {if(kind<0)kind=WEAPON_ADHESIVE_GRENADE;WeaponVisual visual={.shot_time=-1000,.charge=.7f,.activity=1};Matrix m=MatrixMultiply(MatrixScale(.4f,.4f,.4f),MatrixRotateY(now*.6f));m=MatrixMultiply(m,MatrixTranslate(p.x,p.y,p.z));weapon_draw((WeaponPose){.kind=kind,.transform=m},&visual,eye,now,false,pass);}
  }
 }
 static void fp_icon(int type,int x,int y,Color c){
+ if(type==PICKUP_SHIELD_REGEN){eq_shield_icon(x,y,c);return;}
  int gun=eq_pickup_gun(type);if(gun>=0){eq_icon(gun,x,y,c);return;}
  if(type==PICKUP_REINFORCED){for(int a=0;a<3;a++)for(int b=0;b<3;b++)DrawRectangleLines(x+a*8,y+b*8,7,7,c);return;}
  if(type==PICKUP_GOLD_TETHER){DrawLineEx((Vector2){x+12,y+24},(Vector2){x+12,y+12},3,c);DrawLineEx((Vector2){x+12,y+12},(Vector2){x,y+5},3,c);DrawLineEx((Vector2){x,y+5},(Vector2){x+5,y},3,c);DrawLineEx((Vector2){x+12,y+12},(Vector2){x+24,y+5},3,c);DrawLineEx((Vector2){x+24,y+5},(Vector2){x+19,y},3,c);return;}
@@ -195,7 +215,7 @@ static void fp_hud(int i,int w,int h){
  if(!fp_active())return;
  if(fpBannerTimer>0 && fpBannerRead>0){
   int type=fpBannerQueue[(fpBannerRead-1)%32],r=fp_rule(type),size=h<500?18:25;
-  const char *text=TextFormat("WEAPON UNLOCKED!  %s  [%c]",pickup_type_label(type),r>=0?fpRules[r].tier:'?');
+  const char *text=TextFormat("%s UNLOCKED!  %s  [%c]",type==PICKUP_SHIELD_REGEN?"UPGRADE":"WEAPON",pickup_type_label(type),r>=0?fpRules[r].tier:'?');
   while(size>12&&MeasureText(text,size)>w-90)size--;
   int width=MeasureText(text,size)+48,x=(w-width)/2,y=46;
   DrawRectangle(x-8,y-6,width+16,38,Fade(BLACK,.85f));fp_icon(type,x+2,y,GOLD);DrawText(text,x+42,y+3,size,GOLD);

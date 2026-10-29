@@ -8828,7 +8828,7 @@ typedef enum {
     PICKUP_GRENADE,
     PICKUP_SHOTGUN, PICKUP_CUTTER, PICKUP_RAILGUN, PICKUP_ROCKET,
     PICKUP_SWORD, PICKUP_ADHESIVE, PICKUP_REINFORCED,
-    PICKUP_GLOB, PICKUP_GLOCK, PICKUP_DMR, PICKUP_BLACK_HOLE, PICKUP_IGLOO,
+    PICKUP_GLOB, PICKUP_GLOCK, PICKUP_DMR, PICKUP_BLACK_HOLE, PICKUP_IGLOO, PICKUP_SHIELD_REGEN,
     PICKUP_TYPE_COUNT
 } PickupType;
 
@@ -8852,7 +8852,7 @@ static const char *pickup_type_label(PickupType type) {
         case PICKUP_SHOTGUN:return "Shotgun";case PICKUP_CUTTER:return "Cutter";
         case PICKUP_RAILGUN:return "Railgun";case PICKUP_ROCKET:return "Rocket";
         case PICKUP_SWORD:return "Sword";case PICKUP_ADHESIVE:return "Adhesive";case PICKUP_REINFORCED:return "Reinforced";
-        case PICKUP_GLOB:return "Glob";case PICKUP_GLOCK:return "Glock";case PICKUP_DMR:return "DMR";case PICKUP_BLACK_HOLE:return "Black hole";case PICKUP_IGLOO:return "Igloo";
+        case PICKUP_GLOB:return "Glob";case PICKUP_GLOCK:return "Glock";case PICKUP_DMR:return "DMR";case PICKUP_BLACK_HOLE:return "Black hole";case PICKUP_IGLOO:return "Igloo";case PICKUP_SHIELD_REGEN:return "Shield Regenerator";
         default: return "Unknown";
     }
 }
@@ -9145,7 +9145,7 @@ static void update_pickups(float dt) {
                 if((p->type==PICKUP_AMMO || p->type==PICKUP_HEALTH) && ex_suppressed(j))continue;
                 if(p->type==PICKUP_BLACK_HOLE||p->type==PICKUP_IGLOO){if(!ex_grenade_pickup(j,p->type==PICKUP_BLACK_HOLE?GRENADE_GRAVITY:GRENADE_IGLOO))continue;p->active=false;p->respawnTimer=p->type==PICKUP_BLACK_HOLE?60:30;play_sfx(SFX_SHIELD);break;}
                 if(p->type==PICKUP_GRENADE && !ex_refill_grenades(j))continue;
-                if(eq_pickup_kind(p->type)>=0 && !(is_player_bot(j)&&p->type==PICKUP_DYNAMIC_SHOT)){if(!eq_pickup(j,p->type,false))continue;p->active=false;p->respawnTimer=(p->type==PICKUP_RAILGUN||p->type==PICKUP_ROCKET||p->type==PICKUP_DMR)?60:30;play_sfx(SFX_SHIELD);break;}
+                if((eq_pickup_kind(p->type)>=0 || p->type==PICKUP_SHIELD_REGEN) && !(is_player_bot(j)&&p->type==PICKUP_DYNAMIC_SHOT)){if(!eq_pickup(j,p->type,false))continue;p->active=false;p->respawnTimer=(p->type==PICKUP_RAILGUN||p->type==PICKUP_ROCKET||p->type==PICKUP_DMR)?60:30;play_sfx(SFX_SHIELD);break;}
                 // Collect
                 if (p->type == PICKUP_AMMO) {
                     add_player_matter(pl, 25.0f);
@@ -9181,8 +9181,9 @@ static void draw_pickup_models(Camera cam,WeaponRenderPass pass) {
     for(int n=0;n<MAX_PICKUPS;n++) {
         Pickup *p=&pickups[n];
         if(!periodic_visible(p->pos,2))continue;
-        if(!p->active || (eq_pickup_kind(p->type)<0 && p->type!=PICKUP_GOLD_TETHER))continue;
+        if(!p->active || (eq_pickup_kind(p->type)<0 && p->type!=PICKUP_GOLD_TETHER && p->type!=PICKUP_SHIELD_REGEN))continue;
         Vector3 pos=p->pos;pos.y+=sinf(p->bobTimer*2)*.2f;
+        if(p->type==PICKUP_SHIELD_REGEN){eq_shield_pickup(pos,p->bobTimer,pass);continue;}
         if(eq_pickup_kind(p->type)>=0){WeaponVisual vis={.shot_time=-1000,.charge=.8f,.activity=1};Matrix m=MatrixMultiply(MatrixScale(.4f,.4f,.4f),MatrixRotateY(p->bobTimer*.65f));m=MatrixMultiply(m,MatrixTranslate(pos.x,pos.y,pos.z));weapon_draw((WeaponPose){.kind=eq_pickup_kind(p->type),.transform=m},&vis,cam.position,p->bobTimer,false,pass);}else weapon_draw_pickup(false,pos,cam.position,p->bobTimer,pass);
     }
 }
@@ -9199,6 +9200,7 @@ static void draw_pickups(Camera cam) {
         float bobOffset = sinf(p->bobTimer * 2.0f) * 0.2f;
         Vector3 drawPos = { p->pos.x, p->pos.y + bobOffset, p->pos.z };
 
+        if(p->type==PICKUP_SHIELD_REGEN){eq_shield_pickup(drawPos,p->bobTimer,WEAPON_COLOR);continue;}
         if(p->type==PICKUP_GRENADE){DrawCube(drawPos,.4f,.5f,.4f,ORANGE);DrawCubeWires(drawPos,.44f,.54f,.44f,YELLOW);continue;}
         DrawCircle3D(v_add(p->pos,(Vector3){0,-.6f,0}),.6f,(Vector3){1,0,0},90,Fade(SKYBLUE,.5f));
         if(eq_pickup_kind(p->type)>=0 || p->type==PICKUP_GOLD_TETHER) {
@@ -10292,6 +10294,7 @@ static void apply_matter_damage(int player_index, int attacker_index, float dama
         if(boss->coreHealth<=0)kill_player(player_index,attacker_index,true,false);
         return;
     }
+    if(damage>0 && player->invuln_timer<=0 && !player->isExposed)eq_shield_damage(player_index);
     player->last_damage_time = (float)GetTime();
     if (player->invuln_timer > 0.0f || player->isExposed) {
         return;
@@ -16117,6 +16120,15 @@ static void draw_hud_bars(int player_index, const Player *p, int viewport_w, int
 
     DrawRectangle(bar_x, bar_y, bar_w, HUD_BAR_THICKNESS, bar_bg);
     DrawRectangle(bar_x, bar_y, (int)roundf(bar_w * matter_ratio), HUD_BAR_THICKNESS, matter_color);
+    if(player_index<MAX_PLAYERS && (equipment[player_index].upgrades&EQ_SHIELD)){
+        Equipment *e=&equipment[player_index];Color c=e->shieldRegenerating?SKYBLUE:Fade(SKYBLUE,.6f);
+        int cap=bar_x+(int)(bar_w*eqShieldCeiling);
+        if(e->shieldRegenerating){float pulse=.12f+.13f*(1+sinf((float)GetTime()*8));int start=bar_x+(int)(bar_w*fminf(matter_ratio,eqShieldCeiling));DrawRectangle(start,bar_y,cap-start,HUD_BAR_THICKNESS,Fade(SKYBLUE,pulse));}
+        DrawLine(cap,bar_y-2,cap,bar_y+HUD_BAR_THICKNESS+2,c);
+        eq_shield_icon(bar_x,bar_y-32,c);
+        const char *status=ex_suppressed(player_index)?"SUPPRESSED":e->shieldDelay>0?TextFormat("%.1fs",e->shieldDelay):e->shieldRegenerating?"RECHARGING":"50%";
+        DrawText(status,bar_x+32,bar_y-24,12,c);
+    }
     DrawRectangleLines(bar_x, bar_y, bar_w, HUD_BAR_THICKNESS, BLACK);
 
     const char *matter_text = TextFormat("MATTER %d/%d",
@@ -18323,6 +18335,7 @@ static void sample_character(int i,float now) {
     if(p->isExposed) {pose.effect=RED;pose.effectAmount=.45f+.2f*sinf(now*6);}
     else if(p->invuln_timer>0 || p->dynamicShotActive) {pose.effect=GOLD;pose.effectAmount=.3f+.15f*sinf(now*6);}
     else if(p->matter_flash_timer>0) {pose.effect=pose.gear;pose.effectAmount=clampf(p->matter_flash_timer/.2f,0,1);}
+    if(i<MAX_PLAYERS && equipment[i].shieldRegenerating && !down && p->respawn_timer<=0 && p->matter_flash_timer<=0 && p->invuln_timer<=0){pose.effect=SKYBLUE;pose.effectAmount=.12f+.08f*sinf(now*7);}
     characterSamples[i]=pose;
 }
 static void draw_rat_world(int i,bool emission) {
@@ -19396,6 +19409,7 @@ static void bot_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float
 #include "duck_gameplay.inc"
 #include "combat_ui.inc"
 #include "equipment.inc"
+#include "shield_regeneration.inc"
 #include "builder_towers.inc"
 #include "firefight_progression.inc"
 #include "shield_escort.inc"
@@ -20535,12 +20549,18 @@ static void debug_console_exec(const char *line)
         if(netTransport.role!=NET_ROLE_OFFLINE){debug_console_print("give: offline lab only");return;}
         const char *name=strtok(NULL," \t");
         if(name && (!strcmp(name,"gravity")||!strcmp(name,"igloo"))){int kind=!strcmp(name,"gravity")?1:2;exGrenades[local][kind-1]=2;exSelectedGrenade[local]=kind;debug_console_printf("2 %s grenades",name);return;}
+        if(name && !strcmp(name,"shield")){
+            if(fp_active() && !(equipment[local].upgrades&EQ_SHIELD)){
+                if(fp_reserve(fpCount+1)){size_t n=fpCount++;fpItems[n]=(FfItem){.id=fpNextId++,.type=PICKUP_SHIELD_REGEN,.owner=-1,.slot=-1,.pos=players[local].pos};++fpRevision;fp_collect(local,n,false);}
+            }else eq_pickup(local,PICKUP_SHIELD_REGEN,false);
+            debug_console_print("Shield Regenerator: 5s delay, 10 Matter/s, 50% cap");return;
+        }
         for(int g=0;name && g<EQ_GUN_COUNT;g++)if(!strcasecmp(name,eqGuns[g].name)){equipment[local].gun[equipment[local].selected]=g;equipment[local].switchTime=eqSwitchSeconds;aim_cancel(local);debug_console_printf("Equipped %s",eqGuns[g].name);return;}
-        debug_console_print("give glob|glock|dmr|gravity|igloo (or existing gun name)");return;
+        debug_console_print("give shield|glob|glock|dmr|gravity|igloo (or existing gun name)");return;
     }
     if (strcmp(cmd, "weaponlab") == 0) {eq_lab();debug_console_print("Weapon lab: pickups on left, targets ahead, panels on right.");return;}
     if (strcmp(cmd, "help") == 0) {
-        debug_console_print("give glob|glock|dmr|gravity|igloo; cycle grenades: D-pad Down / Tab / ;");
+        debug_console_print("give shield|glob|glock|dmr|gravity|igloo; cycle grenades: D-pad Down / Tab / ;");
         debug_console_print("help | weaponlab | clear | god [on|off] | matter [n] | exposed");
         debug_console_print("kill | pos | tp x y z | players | particles | belief | smush");
         debug_console_print("wave n | nextwave | lives n | armor | spawn swarmer|goliath|standard");

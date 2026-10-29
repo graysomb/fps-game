@@ -1,6 +1,7 @@
 /* Gameplay equipment is independent of renderer enum values and bot loadouts. */
 enum { EQ_DEFAULT,EQ_VOXEL,EQ_SHOTGUN,EQ_CUTTER,EQ_RAIL,EQ_ROCKET,EQ_BLADE,EQ_GLOB,EQ_GLOCK,EQ_DMR,EQ_GUN_COUNT,EQ_EMPTY=255 };
-enum { EQ_SWORD=1,EQ_ADHESIVE=2,EQ_BUILD=4 };
+enum { EQ_SWORD=1,EQ_ADHESIVE=2,EQ_BUILD=4,EQ_SHIELD=8,EQ_UPGRADE_MASK=15 };
+static const float eqShieldDelay=5,eqShieldRate=10,eqShieldCeiling=.5f;
 typedef struct {const char *name;WeaponKind visual;float cost,cooldown,range,damage,zoom;} GunDefinition;
 static const GunDefinition eqGuns[EQ_GUN_COUNT]={
     {"Default",WEAPON_STANDARD,MATTER_SHOT_COST,BULLET_COOLDOWN_SECONDS,100,34,1.5f},{"Voxel",WEAPON_DYNAMIC_LAUNCHER,MATTER_SHOT_COST,BULLET_COOLDOWN_SECONDS,100,34,1.25f},
@@ -13,8 +14,12 @@ static const float eqShotgunCone=12,eqRocketSpeed=22,eqRocketLife=5,eqRocketInne
 static const float eqShotgunImpulse=TETHER_THROW_IMPULSE,eqShotgunActivationBelief=1;
 static const float eqGoldGrabCost=25;
 static const float eqSwordReach=SWORD_REACH,eqSwordSweep=SWORD_SWEEP_DEGREES,eqSwordCycle=.8f,eqSwordDamage=10000;
-typedef struct {int gun[2],selected,upgrades;float cooldown[EQ_GUN_COUNT],switchTime,charge,cutTime,buildTime;bool initialized,held,buildHeld,wasEmpty;float depleted,depletionPulse;Vector3 beamEnd;} Equipment;
+typedef struct {int gun[2],selected,upgrades;float cooldown[EQ_GUN_COUNT],switchTime,charge,cutTime,buildTime;bool initialized,held,buildHeld,wasEmpty;float depleted,depletionPulse,shieldDelay;bool shieldRegenerating;Vector3 beamEnd;} Equipment;
 static Equipment equipment[MAX_COMBATANTS];
+static void eq_shield_damage(int i);
+static void eq_shield_tick(float dt);
+static void eq_shield_icon(int x,int y,Color color);
+static void eq_shield_pickup(Vector3 pos,float time,WeaponRenderPass pass);
 static bool equipmentLab;
 static bool equipmentEmission;
 typedef struct {bool active;int owner;Vector3 pos,vel;float life;} EquipmentRocket;

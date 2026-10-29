@@ -27,7 +27,7 @@ static void schedule(void){
    fp_prepare_wave(wave);int after=0;for(int t=0;t<10;t++){after+=ffRemaining[t];assert(ffRemaining[t]>=0);if(t>=2 && !(wave==4 && t==ENEMY_TYPE_BUILDER))assert(ffRemaining[t]>=before[t]);}
    assert(sum+(wave==4?before[ENEMY_TYPE_BUILDER]+(humans<=2):0)==after);
    if(wave==4)assert(ffRemaining[ENEMY_TYPE_BUILDER]==0);
-   int introduced=0;for(int r=0;r<FP_RULE_COUNT;r++)if(fpRules[r].wave==wave && wave!=2){int found=0;for(int n=0;n<fpPendingCount;n++)found+=fpPending[n]==r;assert(found==1);introduced++;}
+   int introduced=0;for(int r=0;r<FP_CARRIER_RULE_COUNT;r++)if(fpRules[r].wave==wave && wave!=2){int found=0;for(int n=0;n<fpPendingCount;n++)found+=fpPending[n]==r;assert(found==1);introduced++;}
    assert(fpPendingCount==introduced+(wave>=3?(humans+1)/2:0)-(wave==4 && humans<=2));for(int n=0;n<fpPendingCount;n++)assert(fpRules[fpPending[n]].wave<=wave);
   }
  }
@@ -175,20 +175,28 @@ static void fourth_wave_roster(void){
  const int totals[]={8,13,13,18},rifles[]={2,3,2,3},shields[]={3,5,4,6};
  for(int humans=1;humans<=4;humans++){
   fixture();firefightHumans=humans;firefightFoundry=false;start_firefight_wave(3);start_firefight_wave(4);
-  int defaults=0,spawned=0,shieldCount=0,watchdog=1000;
+  int base[FF_TYPE_COUNT];memcpy(base,ffRemaining,sizeof(base));
   assert(ffRemaining[ENEMY_TYPE_BUILDER]==0 && ffRemaining[ENEMY_TYPE_SHIELDBEARER]==shields[humans-1]);
-  assert(firefightWaveEnemiesTotal==totals[humans-1]);
-  while(firefightWaveState==FIREFIGHT_STATE_ACTIVE && watchdog-->0){
-   update_firefight_logic(.5f);
-   for(int i=4;i<MAX_COMBATANTS;i++)if(players[i].respawn_timer<=0){
-    assert(playerInput[i]==INPUT_TYPE_BOT_MEDIUM);spawned++;
-    assert(players[i].enemyType!=ENEMY_TYPE_BUILDER);
-    if(players[i].enemyType==ENEMY_TYPE_SHIELDBEARER){shieldCount++;assert(!fp_carrier(i));}
-    defaults+=players[i].enemyType==ENEMY_TYPE_STANDARD && eq_gun(i)==EQ_DEFAULT;
-    players[i].invuln_timer=0;players[i].isExposed=true;kill_player(i,0,false,false);
+  assert(firefightWaveEnemiesTotal==totals[humans-1] && ff_rounds(4)==3);
+  for(int round=1;round<=3;round++){
+   int defaults=0,spawned=0,shieldCount=0,watchdog=1000,expected=0,seen[FF_TYPE_COUNT]={0};
+   for(int t=0;t<FF_TYPE_COUNT;t++)expected+=(base[t]*(round+1)+1)/2;
+   assert(firefightRound==round && firefightWaveEnemiesTotal==expected);
+   while(firefightRound==round && firefightWaveState==FIREFIGHT_STATE_ACTIVE && watchdog-->0){
+    update_firefight_logic(.5f);
+    for(int i=4;i<MAX_COMBATANTS;i++)if(players[i].respawn_timer<=0){
+     assert(playerInput[i]==INPUT_TYPE_BOT_MEDIUM);spawned++;seen[players[i].enemyType]++;
+     assert(players[i].enemyType!=ENEMY_TYPE_BUILDER);
+     if(players[i].enemyType==ENEMY_TYPE_SHIELDBEARER){shieldCount++;assert(!fp_carrier(i));}
+     defaults+=players[i].enemyType==ENEMY_TYPE_STANDARD && eq_gun(i)==EQ_DEFAULT;
+     players[i].invuln_timer=0;players[i].isExposed=true;kill_player(i,0,false,false);
+    }
    }
+   assert(watchdog>0 && spawned==expected);
+   for(int t=0;t<FF_TYPE_COUNT;t++)assert(seen[t]==(base[t]*(round+1)+1)/2);
+   if(round==1)assert(defaults==rifles[humans-1]);
+   assert(firefightWaveState==(round<3?FIREFIGHT_STATE_ACTIVE:FIREFIGHT_STATE_LOOT));
   }
-  assert(watchdog>0 && defaults==rifles[humans-1] && shieldCount==shields[humans-1] && spawned==totals[humans-1] && firefightWaveState==FIREFIGHT_STATE_LOOT);
  }
  puts("Wave 4: medium difficulty, builders replaced by shields, preserved default riflemen, 1-4 player totals and completion passed");
 }
@@ -220,7 +228,7 @@ static void enemy_weapons(void){
  puts("Enemy slot 15: shared railgun/rocket lethality, Glob suppression, sticky throw, igloo and building passed");
 }
 static void autonomous_carriers(void){
- for(int r=0;r<FP_RULE_COUNT;r++){
+ for(int r=0;r<FP_CARRIER_RULE_COUNT;r++){
   fixture();int type=fpRules[r].type;carrier(type,15);players[15].pos=(Vector3){0,1,0};players[15].yaw=players[15].pitch=0;players[0].pos=(Vector3){0,1,type==PICKUP_SWORD?-3:-8};players[1].pos=(Vector3){30,1,30};players[0].invuln_timer=100;
   if(type==PICKUP_GOLD_TETHER){add_static_box_at_grid(3,4,0,1,-4,-3,GRAY);init_static_hash();rebuild_voxel_hash();}
   ai_select(15,0,players[0].pos,AI_ALERT_SEEN);aiCombat[15].reaction=0;aiCombat[15].wasVisible=true;

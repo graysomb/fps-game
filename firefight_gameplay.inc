@@ -25,6 +25,7 @@ static EnemyType pick_firefight_enemy_type(int wave, int spawn_index) {
 
 static void ff_restore_human(int i, float matter) {
     ex_clear_status(i);
+    equipment[i].shieldDelay=eqShieldDelay;equipment[i].shieldRegenerating=false;
     Player *p=&players[i];
     if(netTransport.role==NET_ROLE_HOST&&!netPlayerPresent[i]){combatantLife[i]=LIFE_UNUSED;p->respawn_timer=9999;return;}
     if(combatantLife[i]!=LIFE_DOWNED && !fp_active()) grenadeInventory[i]=1;
@@ -170,6 +171,8 @@ static void ff_wave_complete(void) {
             firefightWaveEnemiesTotal+=ffRemaining[t];
         }
         fp_prepare_round(firefightWave,firefightRound);
+        firefightWaveEnemiesTotal=0;
+        for(int t=0;t<FF_TYPE_COUNT;t++)firefightWaveEnemiesTotal+=ffRemaining[t];
         firefightWaveEnemiesRemaining=firefightWaveEnemiesTotal;
         firefightEnemiesSpawned=0;ffSpawnOrdinal=0;ffCleanupTimer=0;
         ffSpawnTimer=5;firefightWaveBannerTimer=5;

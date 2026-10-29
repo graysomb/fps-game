@@ -26,8 +26,8 @@ static bool eq_pickup(int i,int type,bool replace){
         if(slot<0)return false;aim_cancel(i);eq_cancel_charge(i);e->gun[slot]=gun;e->selected=slot;e->switchTime=eqSwitchSeconds;e->charge=0;e->held=false;
         players[i].dynamicShotActive=gun==EQ_VOXEL;return true;
     }
-    int flag=type==PICKUP_ADHESIVE?EQ_ADHESIVE:type==PICKUP_REINFORCED?EQ_BUILD:0;
-    if(!flag || (e->upgrades&flag))return false;e->upgrades|=flag;return true;
+    int flag=type==PICKUP_ADHESIVE?EQ_ADHESIVE:type==PICKUP_REINFORCED?EQ_BUILD:type==PICKUP_SHIELD_REGEN?EQ_SHIELD:0;
+    if(!flag || (e->upgrades&flag) || (flag==EQ_SHIELD && (i>=MAX_PLAYERS || is_player_bot(i))))return false;e->upgrades|=flag;if(flag==EQ_SHIELD){e->shieldDelay=eqShieldDelay;e->shieldRegenerating=false;}return true;
 }
 static int eq_near_pickup(int i){int best=-1;float distance=1.4f;for(int p=0;p<MAX_PICKUPS;p++)if(pickups[p].active && eq_pickup_kind(pickups[p].type)>=0 && pickups[p].type!=PICKUP_BLACK_HOLE && pickups[p].type!=PICKUP_IGLOO){float d=v_length(world_delta(pickups[p].pos,players[i].pos));if(d<distance){distance=d;best=p;}}return best;}
 static bool eq_hostile(int i,int j){return i!=j && players[j].respawn_timer<=0 && (gameMode!=GAME_MODE_FIREFIGHT || combatantTeam[i]!=combatantTeam[j]);}
@@ -274,6 +274,7 @@ static void eq_local(float dt){
 }
 static void eq_tick(float dt){
     if(dt<=0)return;
+    eq_shield_tick(dt);
     fp_tick(dt);
     ex_tick(dt);
     aim_tick(dt);
