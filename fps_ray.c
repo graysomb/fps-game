@@ -19392,12 +19392,14 @@ static void bot_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float
 #include "equipment.inc"
 #include "builder_towers.inc"
 #include "firefight_progression.inc"
+#include "sapper_ai.inc"
 #include "chunk_regeneration_net.inc"
 static void UpdateBot(int playerIdx, float dt) {
     if(go_combat_actor(playerIdx))return;
     players[playerIdx].vel=v_sub(players[playerIdx].vel,exBotApplied[playerIdx]);exBotApplied[playerIdx]=(Vector3){0};
     if(enemyLab && enemyLabPaused && !enemyLabStep) return;
     if(netTransport.role==NET_ROLE_CLIENT)return;
+    if(players[playerIdx].enemyType==ENEMY_TYPE_SAPPER){sapper_update(playerIdx,dt);return;}
     if(players[playerIdx].enemyType==ENEMY_TYPE_BUILDER){tower_builder(playerIdx,dt);return;}
     if(!fp_carrier(playerIdx) && tower_rifle(playerIdx,dt))return;
     if(fp_carrier(playerIdx)){fp_update_carrier(playerIdx,dt);return;}

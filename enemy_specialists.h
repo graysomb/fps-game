@@ -48,7 +48,7 @@ static int enemyLabCase=ENEMY_TYPE_SCRAPPER;
 static bool enemyLabAll=false;
 static float enemyLabClock;
 static const char *enemy_names[ENEMY_TYPE_COUNT]={"normal","swarmer","goliath","scrapper","shieldbearer","sapper","lobber","builder","anchor","foundry"};
-static const char *enemy_hints[7]={"Strip its scavenged armor before it grows","Bait its turning shield, then flank","Shoot the blinking charge before detonation","Dodge the marker or tether the incoming scrap","Builds a rifleman watchtower; kill the nearby builder to stop rapid repairs","Break the external anchor to release its allies","Break 2 orange supports; shoot the gold core until destroyed"};
+static const char *enemy_hints[7]={"Strip its scavenged armor before it grows","Bait its turning shield, then flank","Hides behind cover and lobs grenades; flank it or destroy its cover","Dodge the marker or tether the incoming scrap","Builds a rifleman watchtower; kill the nearby builder to stop rapid repairs","Break the external anchor to release its allies","Break 2 orange supports; shoot the gold core until destroyed"};
 static bool enemy_is_special(int i) {return i>=0 && i<MAX_COMBATANTS && players[i].enemyType>=ENEMY_TYPE_SCRAPPER;}
 static float enemy_matter(EnemyType type);
 static void enemy_init(int i);
@@ -61,6 +61,7 @@ static void enemy_detach(int v);
 static bool enemy_core_open(int i);
 static float enemy_knockback_scale(int i);
 static void enemy_update(int i,float dt);
+static void sapper_update(int i,float dt);
 static void enemy_tick(float dt);
 static void enemy_update_equipment(int i);
 static void enemy_draw(void);

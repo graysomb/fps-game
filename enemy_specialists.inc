@@ -497,6 +497,7 @@ static void enemy_tick(float dt) {
     }
 }
 static void enemy_update(int i,float dt) {
+    if(players[i].enemyType==ENEMY_TYPE_SAPPER){sapper_update(i,dt);return;}
     if(players[i].enemyType==ENEMY_TYPE_BUILDER){tower_builder(i,dt);return;}
     if(netTransport.role==NET_ROLE_CLIENT)return;
     if(enemyLab && enemyLabPaused && !enemyLabStep){players[i].vel=(Vector3){0};return;}
