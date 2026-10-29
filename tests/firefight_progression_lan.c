@@ -9,6 +9,7 @@ static bool focused(void){return true;}
 bool ffTestReviveHeld[4];
 static bool joined,sawItems,sawGun,sawCharge,sawCarrier,sawRestart,sawRestore,sawReady,sawRejected,sawLoot,sawLootReady;
 static uint32_t initialSession;
+static bool sawPair;
 static size_t savedCount;
 static void receive(NetTransport*t,int peer,uint8_t channel,const uint8_t*data,size_t length,void*u){
  NetReader r;NetPacketHeader h;net_reader_init(&r,data,length);if(!net_read_header(&r,&h))return;
@@ -18,11 +19,19 @@ static void receive(NetTransport*t,int peer,uint8_t channel,const uint8_t*data,s
   assert(fp_reserve(122));fpCount=122;for(size_t n=0;n<fpCount;n++)fpItems[n]=(FfItem){.id=fpNextId++,.type=n==1?PICKUP_RAILGUN:PICKUP_GLOB,.owner=-1,.slot=-1,.pos=n<2?players[1].pos:(Vector3){25,1,25}};++fpRevision;
   players[15].pos=(Vector3){-10,1,-10};players[15].respawn_timer=0;players[15].matter=100;players[15].enemyType=ENEMY_TYPE_STANDARD;combatantLife[15]=LIFE_ALIVE;fpCarrierType[15]=PICKUP_RAILGUN;equipment[15].gun[0]=EQ_RAIL;equipment[15].charge=.4f;equipment[15].held=true;
   initialSession=netTransport.session_id;joined=true;
+  players[0].pos=(Vector3){36,1,-24};players[0].invuln_timer=1000;
+  for(int i=16;i<=17;i++){
+   init_firefight_bot_entity(i,ENEMY_TYPE_STANDARD,INPUT_TYPE_BOT_EASY);
+   players[i].pos=(Vector3){i==16?34.5f:37.5f,1,-14};players[i].yaw=0;
+   fpCarrierType[i]=i==16?PICKUP_GLOCK:PICKUP_GLOB;equipment[i].gun[0]=i==16?EQ_GLOCK:EQ_GLOB;
+  }
+  fp_pair_link(16,17);
  }
  if(t->role==NET_ROLE_CLIENT){
   
   sawItems|=fpCount==122;sawGun|=equipment[1].gun[equipment[1].selected]==EQ_RAIL;sawCharge|=equipment[1].charge>.3f;
   sawCarrier|=fpCarrierType[15]==PICKUP_RAILGUN&&players[15].respawn_timer==0&&equipment[15].charge>.3f;
+  sawPair|=eq_gun(16)==EQ_GLOCK && eq_gun(17)==EQ_GLOB && players[16].matter<100 && players[17].matter<100;
   sawRestart|=firefightWaveState==FIREFIGHT_STATE_RESTART;
   sawLoot|=firefightWaveState==FIREFIGHT_STATE_LOOT&&firefightIntermissionTimer>0&&firefightIntermissionTimer<=FF_LOOT_SECONDS;
   if(!initialSession&&netWorldReady)initialSession=t->session_id;
@@ -38,6 +47,7 @@ int main(int argc,char**argv){bool late=argc>1&&!strcmp(argv[1],"late-host");boo
   if((host&&joined)||(!host&&netWorldReady)){if(at<0)at=now;float age=now-at;
    if(host){
     eq_tick(1.f/60);net_host_tick();
+    if(!failed)for(int i=16;i<=17;i++){UpdateBot(i,1.f/60);net_integrate_player(&players[i],1.f/60,true);}
     if(age>3&&eq_gun(1)==EQ_RAIL&&!captured){fp_capture();savedCount=fpCount;assert(savedCount==122);captured=true;original=netTransport.session_id;}
     if(captured&&age>5.5f&&equipment[1].charge>=eqRailCharge&&!failed){assert(fp_reserve(fpCount+1));fpItems[fpCount++]=(FfItem){.id=fpNextId++,.type=PICKUP_ROCKET,.owner=-1,.slot=-1,.pos={0,1,0}};++fpRevision;firefightScore=999;firefightTeamLives=0;for(int i=0;i<2;i++){combatantLife[i]=LIFE_SPECTATING;players[i].respawn_timer=9999;}ff_update_coop(.01f);assert(fpRestartTimer>0);failed=true;}
     if(failed&&netTransport.session_id!=original&&!restored){assert(fpCount==savedCount&&firefightScore!=999&&eq_gun(1)==EQ_RAIL);restored=true;
@@ -63,5 +73,6 @@ int main(int argc,char**argv){bool late=argc>1&&!strcmp(argv[1],"late-host");boo
  }
  if(host){fprintf(stderr,"host joined%d capture%d failed%d restored%d rejected%d ready%d lootReady%d\n",joined,captured,failed,restored,sawRejected,sawReady,sawLootReady);assert(joined&&captured&&failed&&restored&&sawRejected&&sawReady&&sawLootReady);puts("Firefight LAN host passed");}
  else {fprintf(stderr,"client items%d gun%d charge%d carrier%d restart%d restore%d loot%d\n",sawItems,sawGun,sawCharge,sawCarrier,sawRestart,sawRestore,sawLoot);assert(sawItems&&sawGun&&sawCharge&&sawCarrier&&sawRestart&&sawRestore&&sawLoot&&firefightCheckpoints);puts("Firefight LAN client passed");}
+ if(!host){assert(sawPair);puts("Coordinated Glock/Glob carriers replicated to LAN client");}
  net_transport_shutdown(&netTransport);net_transport_global_shutdown();fp_shutdown();CloseWindow();return 0;
 }

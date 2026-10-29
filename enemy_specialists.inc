@@ -109,6 +109,7 @@ static void enemy_on_death(int i) {
     }
 }
 static void enemy_cleanup(bool removeEquipment) {
+    memset(fpPairs,0,sizeof(fpPairs));
     goRemoteActive=false;goRemoteTick=0;
     if(goActive){for(int v=voxel_count-1;v>=0;v--)if(voxels[v].golemOwned)remove_voxel_index(v);golem_physics_reset();}
     tower_reset();

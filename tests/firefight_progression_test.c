@@ -71,6 +71,104 @@ static void second_wave_rounds(void){
  }
  puts("Wave 2: exact per-round rifleman/builder rosters, 1-4 players, preserved other enemies and carrier drops passed");
 }
+static void third_wave_rounds(void){
+ for(int humans=1;humans<=4;humans++){
+  fixture();firefightHumans=humans;firefightFoundry=false;firefightTeamLives=3;start_firefight_wave(3);
+  int opening[FF_TYPE_COUNT];memcpy(opening,ffRemaining,sizeof(opening));
+  for(int round=1;round<=3;round++){
+   int expected[FF_TYPE_COUNT],total=0,roster[FF_TYPE_COUNT]={0},glock=0,glob=0;
+   for(int t=0;t<FF_TYPE_COUNT;t++){
+    expected[t]=round==1?opening[t]:t==ENEMY_TYPE_STANDARD?4:(opening[t]*(round+1)+1)/2;
+    assert(ffRemaining[t]==expected[t]);total+=expected[t];
+   }
+   assert(firefightRound==round && firefightWaveEnemiesTotal==total);
+   int watchdog=1000;
+   while(firefightWaveState==FIREFIGHT_STATE_ACTIVE && firefightRound==round && watchdog-->0){
+    update_firefight_logic(.5f);
+    for(int i=4;i<MAX_COMBATANTS;i++)if(players[i].respawn_timer<=0){
+     roster[players[i].enemyType]++;glock+=fpCarrierType[i]==PICKUP_GLOCK;glob+=fpCarrierType[i]==PICKUP_GLOB;
+     players[i].invuln_timer=0;players[i].isExposed=true;kill_player(i,0,false,false);
+    }
+   }
+   assert(watchdog>0);
+   for(int t=0;t<FF_TYPE_COUNT;t++)assert(roster[t]==expected[t]);
+   assert(glock==(round==1?1:2) && glob==(round==1?1:2));
+   if(round<3){assert(firefightWaveState==FIREFIGHT_STATE_ACTIVE && ffSpawnTimer==5 && firefightTeamLives==3);update_firefight_logic(1);assert(firefightEnemiesSpawned==0);}
+  }
+  assert(firefightWaveState==FIREFIGHT_STATE_LOOT && firefightTeamLives==3);
+  int glocks=0,globs=0;for(size_t n=0;n<fpCount;n++){glocks+=fpItems[n].type==PICKUP_GLOCK;globs+=fpItems[n].type==PICKUP_GLOB;}
+  assert(glocks==5 && globs==5);
+ }
+ puts("Wave 3: three escalating rounds, 1-4 players, carrier drops and final-round loot passed");
+}
+static void rifle_pairs(void){
+ fixture();players[1].pos=(Vector3){30,1,30};players[0].pos=(Vector3){0,1,-10};
+ carrier(PICKUP_GLOB,4);carrier(PICKUP_GLOCK,5);
+ players[4].pos=(Vector3){-1.5f,1,0};players[5].pos=(Vector3){1.5f,1,0};
+ players[4].yaw=players[5].yaw=0;
+ fp_pairs_tick(.016f);assert(fp_pair_valid(4) && fpPairs[4].mate==6 && fpPairs[4].target==0);
+ for(int n=0;n<120;n++){
+  fp_pairs_tick(1.f/60);ai_tick(5,1.f/60);fp_pair_perception(5);ai_tick(4,1.f/60);fp_pair_perception(4);
+  assert(aiCombat[4].target==0 && aiCombat[5].target==0);
+ }
+ assert(aiCombat[4].reaction==0 && aiCombat[5].reaction==0);
+ players[1].pos=(Vector3){1,1,-3};fp_pairs_tick(.1f);assert(fpPairs[4].target==0); // stable focus
+ players[1].pos=(Vector3){30,1,30};
+ add_static_box_at_grid(-12,12,0,12,-10,-9,GRAY);init_static_hash();
+ fp_pairs_tick(1);ai_tick(4,.1f);fp_pair_perception(4);assert(!aiCombat[4].visible && fpPairs[4].target==0);
+ fp_pairs_tick(4);assert(fpPairs[4].target==-1);
+ clear_world_voxels();init_static_hash();fp_pairs_tick(.1f);assert(fpPairs[4].target==0);
+ players[5].pos=(Vector3){8,1,0};fp_pairs_tick(.1f);assert(fpPairs[4].regroup);
+ fp_pair_move(4,.1f);assert(players[4].vel.x>0);
+ players[5].pos=(Vector3){1.5f,1,0};fp_pairs_tick(.1f);assert(!fpPairs[4].regroup);
+ players[4].pos=(Vector3){0,1,0};players[5].pos=(Vector3){0,1,-3};players[4].yaw=0;
+ aiCombat[4].known=players[0].pos;assert(fp_pair_blocks_fire(4));
+ players[4].pos=(Vector3){0,1,-3};players[5].pos=(Vector3){0,1,0};players[5].yaw=0;aiCombat[5].visible=true;
+ fp_pair_move(4,.1f);assert(fabsf(players[4].vel.x)>0); // leave an occupied firing lane
+ holograms[0]=(Hologram){.life=10,.body={.pos={0,1,-6}}};
+ players[0].respawn_timer=9999;fp_pairs_tick(.1f);assert(fpPairs[4].target==MAX_COMBATANTS);
+ holograms[0].life=0;fp_pairs_tick(.1f);assert(fpPairs[4].target==-1);players[0].respawn_timer=0;
+ fp_death(5,players[5].pos);assert(!fpPairs[4].mate && !fpPairs[5].mate);
+ carrier(PICKUP_GLOCK,5);fp_pairs_tick(.1f);assert(fp_pair_valid(4));ai_reset(5);assert(!fpPairs[4].mate);
+ worldPeriodic=true;worldFloorHalfSize=40;players[4].pos=(Vector3){39,1,0};players[5].pos=(Vector3){-39,1,0};
+ fp_pairs_tick(.1f);assert(fp_pair_valid(4));worldPeriodic=false;
+ netTransport.role=NET_ROLE_CLIENT;fp_pair_clear(4);fp_pairs_tick(.1f);assert(!fpPairs[4].mate);netTransport.role=NET_ROLE_OFFLINE;
+
+ // Atomic pair spawning respects both capacity and failed placement.
+ fixture();firefightHumans=1;start_firefight_wave(3);int pending=fpPendingCount,total=firefightEnemiesSpawned;size_t items=fpCount;
+ assert(fp_pair_pending() && !fp_spawn_pair(3,4) && fpCount==items && fpPendingCount==pending);
+ assert(fp_spawn_pair(0,4));assert(firefightEnemiesSpawned==total+2);
+ assert(fp_pair_valid(4) && v_length(world_delta(players[4].pos,players[5].pos))<=4);
+ assert(eq_gun(4)==EQ_GLOCK && eq_gun(5)==EQ_GLOB);
+ assert(!player_aabb_hits_world_ex(players[4].pos,PLAYER_SIZE*.5f,4));
+ fp_pair_clear(4);enemy_cleanup(true);assert(!fpPairs[4].mate);
+
+ // Actual projectiles: Glob cannot execute, but suppresses recovery for its Glock partner.
+ fixture();players[1].pos=(Vector3){30,1,30};players[0].pos=(Vector3){0,2,-5};
+ carrier(PICKUP_GLOB,4);carrier(PICKUP_GLOCK,5);players[4].pos=(Vector3){0,2,0};players[5].pos=(Vector3){2,2,0};
+ players[0].matter=1;players[0].invuln_timer=0;
+ assert(ex_fire(4,EQ_GLOB,(Ray){players[4].pos,{0,0,-1}}));ex_tick(.1f);
+ assert(players[0].matter==0 && combatantLife[0]==LIFE_ALIVE && ex_suppressed(0));
+ assert(ex_fire(5,EQ_GLOCK,(Ray){players[5].pos,v_norm(world_delta(players[0].pos,players[5].pos))}));
+ assert(combatantLife[0]==LIFE_DOWNED);
+ // Real arena: spawn at an entrance and simulate the pair moving/firing together.
+ fixture();firefightHumans=1;firefightFoundry=true;buildFoundryHoldout();start_firefight_wave(3);
+ assert(fp_spawn_pair(0,4));Vector3 origin=players[4].pos;
+ players[0].pos=world_wrap(v_add(origin,(Vector3){origin.x>0?-12:12,0,0}));players[0].invuln_timer=1000;
+ for(int i=4;i<=5;i++){Vector3 d=world_delta(players[0].pos,players[i].pos);players[i].yaw=atan2f(-d.x,-d.z)*RAD2DEG;}
+ for(int n=0;n<600;n++){
+  eq_tick(1.f/60);
+  for(int i=4;i<=5;i++){
+   UpdateBot(i,1.f/60);net_integrate_player(&players[i],1.f/60,true);
+   assert(isfinite(players[i].pos.x) && isfinite(players[i].pos.y) && isfinite(players[i].pos.z));
+   assert(!towerRifles[i].tag && fp_pair_valid(i));
+  }
+ }
+ fprintf(stderr,"Foundry pair: travel %.2f, separation %.2f, Matter %.1f/%.1f\n",v_length(world_delta(players[4].pos,origin)),v_length(world_delta(players[4].pos,players[5].pos)),players[4].matter,players[5].matter);
+ assert(v_length(world_delta(players[4].pos,origin))>1);
+ assert(v_length(world_delta(players[4].pos,players[5].pos))<8);
+ puts("Rifle pairs: shared focus, visibility/memory, reaction timers, regrouping, lanes, lifecycle, periodicity, authority, spawning and Glob/Glock synergy passed");
+}
 static void ownership(void){
  fixture();size_t glob=carrier(PICKUP_GLOB,4);uint32_t id=fpItems[glob].id;fp_death(4,(Vector3){0,1,0});assert(fpItems[glob].owner==-1&&fpItems[glob].id==id);
  assert(fp_collect(0,glob,false)&&eq_gun(0)==EQ_GLOB);assert(fpUnlocked==(1u<<fp_rule(PICKUP_GLOB)));int banners=fpBannerWrite;assert(!fp_collect(1,glob,false));
@@ -135,6 +233,6 @@ static void lobby(void){
  RenderTexture2D rt=LoadRenderTexture(960,540);BeginTextureMode(rt);couch_title("FIREFIGHT LOBBY");couch_row(0,"Twelve-wave Firefight",false);couch_row(1,"Arena: Foundry Holdout",false);couch_row(2,"Checkpoints: OFF | X / C: toggle",false);couch_row(3,"P1: Keyboard | Not ready",false);EndTextureMode();Image im=LoadImageFromTexture(rt.texture);ImageFlipVertical(&im);ExportImage(im,".build/playtest-run/firefight-checkpoints.png");UnloadImage(im);UnloadRenderTexture(rt);
  puts("Keyboard/controller checkpoint lobby toggle passed");
 }
-int main(int argc,char **argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Firefight progression tests");init_pbd_thread_pool();assert(initialize_physics_backend());schedule();opening_rounds();second_wave_rounds();ownership();enemy_weapons();autonomous_carriers();checkpoints();lobby();fp_shutdown();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Firefight progression passed");return 0;}
+int main(int argc,char **argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Firefight progression tests");init_pbd_thread_pool();assert(initialize_physics_backend());schedule();opening_rounds();second_wave_rounds();third_wave_rounds();rifle_pairs();ownership();enemy_weapons();autonomous_carriers();checkpoints();lobby();fp_shutdown();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Firefight progression passed");return 0;}
 
 

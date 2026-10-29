@@ -288,8 +288,10 @@ static void update_firefight_logic(float dt) {
     }
     int waveCap=ff_wave_cap(firefightWave,fp_team_size());
     if(slot<0 || living>=waveCap) return;
+    if(fp_spawn_pair(living,waveCap))return;
     int type=-1;
     for(int n=0;n<FF_TYPE_COUNT;n++) { int t=(ffSpawnOrdinal+n)%FF_TYPE_COUNT;
+        if(t==ENEMY_TYPE_STANDARD && fp_pair_pending())continue;
         int specialistCap=(firefightWave-1)%FF_WAVE_COUNT>=3?2:1;
         if(ffRemaining[t]>0 && (t!=2 || goliaths<2) && (t<3 || specialists<specialistCap)) {type=t;break;} }
     if(ffRemaining[ENEMY_TYPE_FOUNDRY]>0)type=ENEMY_TYPE_FOUNDRY;

@@ -1,10 +1,13 @@
 static void fp_update_carrier(int i,float dt){
  if(players[i].enemyType==ENEMY_TYPE_BUILDER){tower_builder(i,dt);return;}
- if(tower_rifle(i,dt))return;
+ bool paired=fp_pair_valid(i);
+ if(paired){if(towerRifles[i].tag)tower_release(i);}else if(tower_rifle(i,dt))return;
  Player *p=&players[i];Equipment *e=&equipment[i];int type=fpCarrierType[i];
- ai_tick(i,dt);if(clarity_evade(i,dt)){eq_cancel_charge(i);e->held=false;return;}
+ ai_tick(i,dt);if(paired)fp_pair_perception(i);
+ if(clarity_evade(i,dt)){eq_cancel_charge(i);e->held=false;return;}
  AiCombat *a=&aiCombat[i];fpCarrierClock[i]=fmaxf(0,fpCarrierClock[i]-dt);
  if(a->target<0){
+  if(paired){eq_cancel_charge(i);fp_pair_move(i,dt);return;}
   eq_cancel_charge(i);BotState *b=&botStates[i];b->pathTimer-=dt;
   if(b->pathTimer<=0){b->pathTimer=3; a->known=world_wrap(v_add(p->pos,(Vector3){cosf(ai_random(i)*2*PI)*8,0,sinf(ai_random(i)*2*PI)*8}));}
   Vector3 wander=world_delta(a->known,p->pos);wander.y=0;bot_apply_move(p,b,wander,MOVE_SPEED*.45f,dt);ai_aim(i,a->known,dt);return;
@@ -12,7 +15,8 @@ static void fp_update_carrier(int i,float dt){
  Vector3 delta=world_delta(a->known,p->pos);float distance=v_length(delta);ai_aim(i,a->known,dt);
  int gun=eq_gun(i);float desired=gun==EQ_BLADE?SWORD_REACH*.65f:gun==EQ_SHOTGUN?6:gun==EQ_CUTTER?12:gun==EQ_RAIL||gun==EQ_DMR?22:10;
  Vector3 move=delta;move.y=0;
- if(distance>desired)bot_apply_move(p,&botStates[i],move,MOVE_SPEED*.8f,dt);else p->vel.x=p->vel.z=0;
+ if(paired)fp_pair_move(i,dt);
+ else if(distance>desired)bot_apply_move(p,&botStates[i],move,MOVE_SPEED*.8f,dt);else p->vel.x=p->vel.z=0;
  if(!a->visible || a->reaction>0){eq_cancel_charge(i);return;}
  bool supply=type==PICKUP_GRENADE||type==PICKUP_ADHESIVE||type==PICKUP_BLACK_HOLE||type==PICKUP_IGLOO;
  float needed=type==PICKUP_GOLD_TETHER?eqGoldGrabCost:eqGuns[gun].cost;
@@ -43,6 +47,7 @@ static void fp_update_carrier(int i,float dt){
  if(gun==EQ_BLADE){if(distance<SWORD_REACH*.9f)eq_fire(i);return;}
  if(gun==EQ_ROCKET && distance<4.5f)return;
  if(distance>eqGuns[gun].range)return;
+ if(paired && fp_pair_blocks_fire(i)){eq_cancel_charge(i);e->held=false;return;}
  if(v_dot(player_forward(p),v_norm(delta))<cosf(8*DEG2RAD))return;
  if(gun==EQ_RAIL){NetInputCommand c={0};if(e->charge<eqRailCharge)c.held=NET_INPUT_FIRE;eq_command(i,&c,dt);return;}
  if(a->recovery>0)return;

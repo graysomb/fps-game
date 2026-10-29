@@ -41,7 +41,7 @@ static inline int ff_count(int wave, int humans, int type) {
     int cycle = (wave-1)/FF_WAVE_COUNT;
     return (base * (humans+1) * (4+cycle) + 7)/8;
 }
-static inline int ff_rounds(int wave) { return wave==1 || wave==2?3:1; }
+static inline int ff_rounds(int wave) { return wave>=1 && wave<=3?3:1; }
 static inline int ff_round_count(int wave,int round,int humans,int type) {
     int base=ff_count(wave,humans,type);
     if(wave==1)return base << (round-1);
@@ -50,6 +50,15 @@ static inline int ff_round_count(int wave,int round,int humans,int type) {
         if(type==7)return round>=2?1:0;
         /* Preserve the existing swarmer/Goliath quotas, including round one's carrier replacement. */
         if(type==1 && round==1)return base-1;
+        return (base*(round+1)+1)/2;
+    }
+    if(wave==3 && round>=2){
+        /* Scale the opening roster after its equipment-carrier replacements. */
+        int repeats=(humans+1)/2;
+        if(type==0)return 4;
+        if(type==1)base-=2+repeats;
+        if(type==5)base++;
+        if(type==7)base=repeats-1;
         return (base*(round+1)+1)/2;
     }
     return base;

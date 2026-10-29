@@ -20,6 +20,7 @@ static bool fp_reserve(size_t count){
  fpItems=items;fpCapacity=cap;return true;
 }
 static void fp_new_run(void){
+ memset(fpPairs,0,sizeof(fpPairs));
  memset(fpCarrierType,0,sizeof(fpCarrierType));memset(fpCarrierClock,0,sizeof(fpCarrierClock));memset(fpCarrierPanel,0,sizeof(fpCarrierPanel));
  fpPendingCount=0;fpRestartTimer=0;fpSupplyTimer=0;fpBannerRead=fpBannerWrite=0;fpBannerTimer=0;
  if(fpRestoring)return;
@@ -38,6 +39,7 @@ static void fp_ground(FfItem *item){
 }
 static void fp_drop(FfItem *item,Vector3 at){item->owner=-1;item->slot=-1;item->pos=at;fp_ground(item);++fpRevision;}
 static void fp_death(int i,Vector3 at){
+ fp_pair_clear(i);
  if(!fp_active()||netTransport.role==NET_ROLE_CLIENT)return;
  for(size_t n=0;n<fpCount;n++)if(fpItems[n].owner==i)fp_drop(&fpItems[n],at);
  if(i>=MAX_PLAYERS&&i<MAX_COMBATANTS)fpCarrierType[i]=0;
@@ -82,12 +84,24 @@ static int fp_near(int i,bool automatic){
 }
 static bool fp_interact(int i){int n=fp_near(i,false);return n>=0 && fp_collect(i,(size_t)n,true);}
 static void fp_prepare_round(int wave,int round){
- if(wave!=2 || !fp_active())return;
+ memset(fpPairs,0,sizeof(fpPairs));
+ if(!fp_active())return;
+ if(wave==3 && round>=2){
+  fpPendingCount=0;
+  int rifles=ff_round_count(wave,round,fp_team_size(),ENEMY_TYPE_STANDARD);
+  for(int n=0;n<rifles;n++)fpPending[fpPendingCount++]=fp_rule(n%2?PICKUP_GLOB:PICKUP_GLOCK);
+  fpPending[fpPendingCount++]=fp_rule(PICKUP_GRENADE);
+  int builders=ff_round_count(wave,round,fp_team_size(),ENEMY_TYPE_BUILDER);
+  for(int n=0;n<builders;n++)fpPending[fpPendingCount++]=fp_rule(PICKUP_REINFORCED);
+  return;
+ }
+ if(wave!=2)return;
  fpPendingCount=0;
  if(round>=2)fpPending[fpPendingCount++]=fp_rule(PICKUP_REINFORCED);
  if(round==3){fpPending[fpPendingCount++]=fp_rule(PICKUP_GLOB);fpPending[fpPendingCount++]=fp_rule(PICKUP_GLOB);}
 }
 static void fp_prepare_wave(int wave){
+ memset(fpPairs,0,sizeof(fpPairs));
  fpPendingCount=0;memset(fpCarrierType,0,sizeof(fpCarrierType));if(!fp_active())return;
  size_t kept=0;for(size_t n=0;n<fpCount;n++)if(fpItems[n].owner!=-2)fpItems[kept++]=fpItems[n];
  if(kept!=fpCount){fpCount=kept;++fpRevision;}
@@ -106,6 +120,7 @@ static void fp_prepare_wave(int wave){
  for(int n=0;n<fpPendingCount;n++)ffRemaining[fpRules[fpPending[n]].chassis]++;
 }
 static void fp_spawn(int i,int chassis){
+ fp_pair_clear(i);
  eq_reset(i);ex_reset_player(i);fpCarrierType[i]=0;
  if(!fp_active())return;
  for(int n=0;n<fpPendingCount;n++)if(fpPending[n]>=0 && fpRules[fpPending[n]].chassis==chassis){
@@ -132,6 +147,7 @@ static void fp_tick(float dt){
  if(fpBannerTimer>0)fpBannerTimer=fmaxf(0,fpBannerTimer-dt);
  if(fpBannerTimer<=0 && fpBannerRead<fpBannerWrite){fpBannerTimer=3.5f;fpBannerRead++;play_sfx(SFX_WIN);}
  if(netTransport.role==NET_ROLE_CLIENT)return;
+ fp_pairs_tick(dt);
  if(fpRestartTimer>0){fpRestartTimer=fmaxf(0,fpRestartTimer-dt);if(fpRestartTimer<=0)fp_restore();return;}
  for(int i=0;i<firefightHumans;i++)if(combatantLife[i]==LIFE_ALIVE){int n=fp_near(i,true);if(n>=0)fp_collect(i,(size_t)n,false);}
  fpSupplyTimer-=dt;if(fpSupplyTimer<=0){
@@ -183,6 +199,7 @@ static void fp_radar(int i,int cx,int cy,int radius,float range){
   int x=cx+(int)(v_dot(d,right)*radius/range),y=cy-(int)(v_dot(d,f)*radius/range);DrawRectangle(x-2,y-2,4,4,GOLD);
  }
 }
+#include "firefight_pairs.inc"
 #include "firefight_carriers.inc"
 #include "firefight_checkpoint.inc"
 #include "firefight_progression_net.inc"

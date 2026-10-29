@@ -6,6 +6,7 @@ static float ai_random(int i) {
 }
 static void ai_reset(int i) {
     if(i<0 || i>=MAX_COMBATANTS)return;
+    fp_pair_clear(i);
     if(towerRifles[i].tag)tower_release(i);
     players[i].drainTarget=0;players[i].netDrainVisualActive=false;
     for(int j=0;j<MAX_COMBATANTS;j++)if(players[j].drainTarget==i+1)players[j].drainTarget=0;
@@ -106,8 +107,14 @@ static void ai_tick(int i,float dt) {
             if(d<nearestDistance){nearest=target;nearestDistance=d;}
         }
     }
+    bool paired=fp_pair_valid(i);
+    if(paired){
+        FfRiflePair *pair=&fpPairs[i];
+        if(a->target!=pair->target)ai_select(i,pair->target,pair->known,AI_ALERT_HEARD);
+        a->known=pair->known;a->memory=pair->memory;
+    }
     bool valid=ai_hostile(i,a->target),visible=valid && (mapAware || check_ai_awareness_of_player(i,a->target,NULL));
-    if(!locked && nearest>=0 && (!valid || a->memory<=0 || (a->commit<=0 &&
+    if(!paired && !locked && nearest>=0 && (!valid || a->memory<=0 || (a->commit<=0 &&
         v_length(world_delta(ai_target_body(nearest)->pos,players[i].pos))<.7f*v_length(world_delta(a->known,players[i].pos))))) {
         ai_select(i,nearest,ai_target_body(nearest)->pos,AI_ALERT_SEEN);valid=true;visible=true;
     }

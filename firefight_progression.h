@@ -8,6 +8,15 @@ static int fpCarrierType[MAX_COMBATANTS];
 static float fpCarrierClock[MAX_COMBATANTS];
 static uint64_t fpCarrierPanel[MAX_COMBATANTS];
 static int fpPending[8],fpPendingCount,fpRepeatCursor;
+typedef struct {int mate,target;Vector3 known,patrol;float memory,patrolTime;bool regroup;} FfRiflePair;
+/* mate is actor index + 1, so zero-initialized state is unpaired. */
+static FfRiflePair fpPairs[MAX_COMBATANTS];
+static void fp_pair_clear(int i);
+static void fp_pairs_tick(float dt);
+static bool fp_pair_valid(int i);
+static void fp_pair_link(int a,int b);
+static bool fp_spawn_pair(int living,int cap);
+static bool fp_pair_pending(void);
 static bool firefightCheckpoints=false,fpRestoring=false;
 static float fpRestartTimer,fpBannerTimer,fpSupplyTimer;
 static int fpBannerQueue[32],fpBannerRead,fpBannerWrite;
