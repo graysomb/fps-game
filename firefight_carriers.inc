@@ -24,6 +24,8 @@ static void fp_update_carrier(int i,float dt){
  bool supply=type==PICKUP_GRENADE||type==PICKUP_ADHESIVE||type==PICKUP_BLACK_HOLE||type==PICKUP_IGLOO;
  float needed=type==PICKUP_GOLD_TETHER?eqGoldGrabCost:eqGuns[gun].cost;
  if(!supply && p->matter<needed && e->charge<=0){
+  // Stay with the healer instead of abandoning the formation to mine.
+  if(escort && players[shieldEscort[i]-1].enemyType==ENEMY_TYPE_ANCHOR && enemySpecial[shieldEscort[i]-1].equipmentCount && enemySpecial[shieldEscort[i]-1].disabled<=0){eq_cancel_charge(i);e->held=false;return;}
   float d2;int v=find_nearest_static_voxel(&p->pos,&d2);
   if(v>=0){Vector3 to=world_delta(voxels[v].pos,p->pos);ai_aim(i,world_image(voxels[v].pos,p->pos),dt);bot_apply_move(p,&botStates[i],to,MOVE_SPEED*.6f,dt);if(d2<MELEE_RANGE*MELEE_RANGE)perform_melee(i);}
   else if(distance<MELEE_RANGE)perform_melee(i);return;

@@ -90,13 +90,23 @@ static int fpOpeningRoster[FF_TYPE_COUNT],fpOpeningCarriers[8],fpOpeningCarrierC
 static void fp_prepare_round(int wave,int round){
  memset(fpPairs,0,sizeof(fpPairs));
  if(!fp_active())return;
- if((wave==4 || wave==5) && round>=2){
+ if((wave>=4 && wave<=8) && round>=2){
   fpPendingCount=0;
   for(int t=0;t<FF_TYPE_COUNT;t++)ffRemaining[t]=(fpOpeningRoster[t]*(round+1)+1)/2;
+  if(wave==6 && round==3){
+   ffRemaining[ENEMY_TYPE_STANDARD]=3;
+   ffRemaining[ENEMY_TYPE_SAPPER]=3;
+   for(int n=0;n<3;n++)fpPending[fpPendingCount++]=fp_rule(PICKUP_DYNAMIC_SHOT);
+   for(int n=0;n<3;n++)fpPending[fpPendingCount++]=fp_rule(PICKUP_GRENADE);
+   return;
+  }
+  if(wave==7 && round==3)ffRemaining[ENEMY_TYPE_STANDARD]++;
   int available[FF_TYPE_COUNT];memcpy(available,ffRemaining,sizeof(available));
   for(int rule=0;rule<FP_RULE_COUNT;rule++){
    int count=0;for(int n=0;n<fpOpeningCarrierCount;n++)count+=fpOpeningCarriers[n]==rule;
-   for(int n=0;n<(count*(round+1)+1)/2 && available[fpRules[rule].chassis]>0;n++){fpPending[fpPendingCount++]=rule;available[fpRules[rule].chassis]--;}
+   int scaled=(count*(round+1)+1)/2;
+   if(wave==7 && round==3 && fpRules[rule].type==PICKUP_DMR)scaled=3;
+   for(int n=0;n<scaled && available[fpRules[rule].chassis]>0;n++){fpPending[fpPendingCount++]=rule;available[fpRules[rule].chassis]--;}
   }
   return;
  }
@@ -143,7 +153,7 @@ static void fp_prepare_wave(int wave){
   int kept=0;for(int n=0;n<fpPendingCount;n++)if(fpRules[fpPending[n]].chassis!=ENEMY_TYPE_BUILDER)fpPending[kept++]=fpPending[n];
   fpPendingCount=kept;
  }
- if(wave==4 || wave==5){
+ if(wave>=4 && wave<=8){
   memcpy(fpOpeningRoster,ffRemaining,sizeof(fpOpeningRoster));
   fpOpeningCarrierCount=fpPendingCount;
   memcpy(fpOpeningCarriers,fpPending,fpPendingCount*sizeof(*fpPending));

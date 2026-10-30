@@ -373,6 +373,29 @@ static void eq_build_sample(int seat,int slot,NetInputCommand *c){
 
 static Shader eqBeamShader;
 static bool eqBeamTried;
+/* Keep incoming cutter geometry out of the viewing player's camera. This is
+   presentation-only and is shared by color, bloom and shader-fallback passes. */
+static void eq_cutter_segment(Vector3 start,Vector3 end){
+    if(v_length(v_sub(end,start))<.001f)return;
+    DrawCylinderEx(start,end,.075f,.06f,8,Fade(LIME,.40f));
+    DrawCylinderEx(start,end,.026f,.025f,6,(Color){220,255,185,255});
+}
+static void eq_cutter_beam(int owner,Vector3 start,Vector3 end){
+    if(drawViewPlayerIndex<0 || drawViewPlayerIndex==owner){eq_cutter_segment(start,end);return;}
+    Vector3 eye=world_image(players[drawViewPlayerIndex].pos,end),delta=v_sub(end,start),offset=v_sub(start,eye);
+    float a=v_dot(delta,delta);if(a<.000001f)return;
+    float b=v_dot(offset,delta),c=v_dot(offset,offset)-1.2f*1.2f,disc=b*b-a*c;
+    if(disc<=0){eq_cutter_segment(start,end);return;}
+    float enter=(-b-sqrtf(disc))/a,leave=(-b+sqrtf(disc))/a;
+    if(leave<=0 || enter>=1){eq_cutter_segment(start,end);return;}
+    if(enter>0)eq_cutter_segment(start,v_add(start,v_mul(delta,enter)));
+    if(leave<1)eq_cutter_segment(v_add(start,v_mul(delta,leave)),end);
+}
+static float eq_cutter_contact_visibility(int owner,Vector3 end){
+    if(drawViewPlayerIndex<0 || drawViewPlayerIndex==owner)return 1;
+    float distance=v_length(world_delta(end,players[drawViewPlayerIndex].pos));
+    float fade=clampf((distance-1.5f)/1.5f,0,1);return fade*fade*(3-2*fade);
+}
 static void eq_beam_shutdown(void){if(eqSlashShader.id && eqSlashShader.id!=rlGetShaderIdDefault())UnloadShader(eqSlashShader);eqSlashShader=(Shader){0};eqSlashTried=false;if(eqBeamShader.id && eqBeamShader.id!=rlGetShaderIdDefault())UnloadShader(eqBeamShader);eqBeamShader=(Shader){0};eqBeamTried=false;}
 static void eq_world(void){
     if(!eqBeamTried){eqBeamTried=true;eqBeamShader=LoadShader(NULL,"shaders/equipment_beam.frag");}
@@ -394,13 +417,14 @@ static void eq_world(void){
                 Vector3 point=v_add(v_sub(tail,v_mul(axis,age*1.7f)),v_add(v_mul(right,cosf(angle)*age*.18f),v_mul(up,sinf(angle)*age*.18f)));
                 float size=.055f*(1-age);DrawCube(point,size,size,size,Fade(ORANGE,1-age));}
         }}
-    for(int i=0;i<MAX_COMBATANTS;i++){Equipment *e=&equipment[i];if(e->initialized && e->held && eq_gun(i)==EQ_CUTTER && players[i].respawn_timer<=0){WeaponPose pose=player_weapon_pose(i,i==drawViewPlayerIndex);DrawCylinderEx(pose.muzzle,e->beamEnd,.075f,.06f,8,Fade(LIME,.40f));DrawCylinderEx(pose.muzzle,e->beamEnd,.026f,.025f,6,(Color){220,255,185,255});
+    for(int i=0;i<MAX_COMBATANTS;i++){Equipment *e=&equipment[i];if(e->initialized && e->held && eq_gun(i)==EQ_CUTTER && players[i].respawn_timer<=0){WeaponPose pose=player_weapon_pose(i,i==drawViewPlayerIndex);eq_cutter_beam(i,pose.muzzle,e->beamEnd);
+            float contact=eq_cutter_contact_visibility(i,e->beamEnd);
             /* Full-range misses have no contact effect. A shorter actor/voxel ray does. */
-            if(v_length(v_sub(e->beamEnd,players[i].pos))<eqGuns[EQ_CUTTER].range-.01f){
-                DrawSphere(e->beamEnd,.085f,(Color){210,255,160,255});
+            if(contact>0 && v_length(v_sub(e->beamEnd,players[i].pos))<eqGuns[EQ_CUTTER].range-.01f){
+                DrawSphere(e->beamEnd,.085f,Fade((Color){210,255,160,255},contact));
                 for(int k=0;k<6;k++){float age=fmodf(time*3+k/6.f,1),angle=k*2.4f;
                     Vector3 offset={cosf(angle)*age*.34f,age*.30f-age*age*.4f,sinf(angle)*age*.34f};
-                    Vector3 point=v_add(e->beamEnd,offset);DrawLine3D(point,v_add(point,v_mul(offset,.25f)),Fade(LIME,1-age));}
+                    Vector3 point=v_add(e->beamEnd,offset);DrawLine3D(point,v_add(point,v_mul(offset,.25f)),Fade(LIME,(1-age)*contact));}
             }}
         if(e->charge>0 && eq_gun(i)==EQ_RAIL){Vector3 end=v_add(players[i].pos,v_mul(player_forward(&players[i]),100));DrawCylinderEx(player_weapon_pose(i,i==drawViewPlayerIndex).muzzle,end,.006f,.006f,4,Fade(PURPLE,.5f));}
         if(!equipmentEmission && i==drawViewPlayerIndex && e->buildHeld && players[i].respawn_timer<=0){Vector3 pos[EQ_PANEL_CUBES]={{0}};float lifts[MAX_COMBATANTS];bool valid=eq_panel_positions(i,pos)&&eq_build_ready(i)&&eq_build_lifts(eq_build_count(i),pos,lifts);if(v_length(pos[1])>.01f)for(int n=0;n<eq_build_count(i);n++)DrawCubeWires(pos[n],VOXEL_SIZE,VOXEL_SIZE,VOXEL_SIZE,valid?player_palette_color(i):RED);}

@@ -185,9 +185,12 @@ static bool enemy_braces(int anchor,int target) {
        !enemySpecial[anchor].equipmentCount || combatantTeam[anchor]!=combatantTeam[target]) return false;
     if(v_length(world_delta(players[anchor].pos,players[target].pos))>8 ||
        !enemy_clear_line(players[anchor].pos,players[target].pos)) return false;
-    int rank=0;
-    for(int j=MAX_PLAYERS;j<target;j++) if(j!=anchor && players[j].respawn_timer<=0 && combatantTeam[j]==combatantTeam[anchor] &&
-        v_length(world_delta(players[anchor].pos,players[j].pos))<=8 && enemy_clear_line(players[anchor].pos,players[j].pos)) rank++;
+    int rank=0;bool escort=shieldEscort[target]==anchor+1 && players[target].enemyType==ENEMY_TYPE_STANDARD;
+    for(int j=MAX_PLAYERS;j<activePlayers;j++) if(j!=anchor && j!=target && players[j].respawn_timer<=0 && combatantTeam[j]==combatantTeam[anchor] &&
+        v_length(world_delta(players[anchor].pos,players[j].pos))<=8 && enemy_clear_line(players[anchor].pos,players[j].pos)) {
+        bool other=shieldEscort[j]==anchor+1 && players[j].enemyType==ENEMY_TYPE_STANDARD;
+        if((other && !escort) || (other==escort && j<target))rank++;
+    }
     return rank<3;
 }
 static float enemy_knockback_scale(int i) {
@@ -524,6 +527,16 @@ static void enemy_update(int i,float dt) {
     }
     s->payloadFallback=fmaxf(0,s->payloadFallback-dt);s->cooldown-=dt;s->melee-=dt;s->repair-=dt;s->searchTimer-=dt;s->stompCooldown-=dt;s->repositionTimer=fmaxf(0,s->repositionTimer-dt);s->target=enemy_target(i);
     if(t==ENEMY_TYPE_LOBBER && lobber_harvest(i,dt))return;
+    if(t==ENEMY_TYPE_ANCHOR){
+        Vector3 group={0};int members=0;
+        for(int r=MAX_PLAYERS;r<activePlayers;r++)if(shieldEscort[r]==i+1 && shield_escort_valid(r)){group=v_add(group,world_delta(players[r].pos,p->pos));members++;}
+        if(members){
+            group=v_mul(group,1.f/members);group.y=0;
+            // Rejoin separated guards; otherwise wait together when searching.
+            if(v_length(group)>6){bot_apply_move(p,&botStates[i],group,MOVE_SPEED*.65f,dt);s->reason="regrouping with riflemen";return;}
+            if(s->target<0){p->vel.x=p->vel.z=0;s->reason="holding with riflemen";return;}
+        }
+    }
     // Gathering nearby ammunition does not require sight of a player. Keep this
     // preparation separate from the visible-target requirement for a throw.
     if(!aiCombat[i].visible && !s->harvesting && !p->isExposed && !p->tetherHolding && s->windup<=0 &&

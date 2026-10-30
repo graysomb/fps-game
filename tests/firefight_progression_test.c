@@ -235,6 +235,122 @@ static void fifth_wave_rounds(void){
  }
  puts("Wave 5: three escalating rounds, 1-4 players, shotgun drops, no igloos and final-round loot passed");
 }
+static void sixth_wave_rounds(void){
+ for(int humans=1;humans<=4;humans++){
+  fixture();firefightHumans=humans;firefightFoundry=false;
+  for(int wave=3;wave<=6;wave++)start_firefight_wave(wave);
+  int base[FF_TYPE_COUNT];memcpy(base,ffRemaining,sizeof(base));assert(ff_rounds(6)==3);
+  if(humans==1){
+   assert(base[0]==1 && base[1]==1 && base[2]==1 && base[5]==2 && base[8]==1);
+   multiplayerActivePlayers=1;firefightCheckpoints=true;fp_capture();fpRepeatCursor+=4;fp_restore();
+   assert(!memcmp(fpOpeningRoster,base,sizeof(base)));
+   assert(fpOpeningCarrierCount==fpCheckpoint.pendingCount && !memcmp(fpOpeningCarriers,fpCheckpoint.pending,fpOpeningCarrierCount*sizeof(*fpPending)));
+  }
+  for(int round=1;round<=3;round++){
+   int expected=0,roster[FF_TYPE_COUNT],seen[FF_TYPE_COUNT]={0},launchers=0,watchdog=2000;
+   for(int t=0;t<FF_TYPE_COUNT;t++)roster[t]=(base[t]*(round+1)+1)/2;
+   if(round==3){roster[ENEMY_TYPE_STANDARD]=3;roster[ENEMY_TYPE_SAPPER]=3;}
+   for(int t=0;t<FF_TYPE_COUNT;t++)expected+=roster[t];
+   assert(firefightWaveEnemiesTotal==expected && firefightRound==round);
+   if(humans==1)assert(expected==(round==1?6:round==2?11:12));
+   while(firefightWaveState==FIREFIGHT_STATE_ACTIVE && firefightRound==round && watchdog-->0){
+    update_firefight_logic(.5f);
+    for(int i=4;i<MAX_COMBATANTS;i++)if(players[i].respawn_timer<=0){
+     seen[players[i].enemyType]++;launchers+=fpCarrierType[i]==PICKUP_DYNAMIC_SHOT;
+     assert(fpCarrierType[i]!=PICKUP_CUTTER && fpCarrierType[i]!=PICKUP_DMR);
+     players[i].invuln_timer=0;players[i].isExposed=true;kill_player(i,0,false,false);
+    }
+   }
+   assert(watchdog>0 && launchers>=1);
+   if(round==3)assert(launchers==3);
+   for(int t=0;t<FF_TYPE_COUNT;t++)assert(seen[t]==roster[t]);
+   assert(firefightWaveState==(round<3?FIREFIGHT_STATE_ACTIVE:FIREFIGHT_STATE_LOOT));
+  }
+ }
+ puts("Wave 6: three escalating rounds, 1-4 players, launcher carriers, checkpoints and final-round loot passed");
+}
+static void seventh_wave_rounds(void){
+ for(int humans=1;humans<=4;humans++){
+  fixture();firefightHumans=humans;firefightFoundry=false;
+  for(int wave=3;wave<=7;wave++)start_firefight_wave(wave);
+  int base[FF_TYPE_COUNT];memcpy(base,ffRemaining,sizeof(base));assert(ff_rounds(7)==3);
+  if(humans==1){
+   assert(base[0]==1 && base[1]==3 && base[4]==1 && base[5]==1 && base[7]==1);
+   multiplayerActivePlayers=1;firefightCheckpoints=true;fp_capture();fpRepeatCursor+=4;fp_restore();
+   assert(!memcmp(fpOpeningRoster,base,sizeof(base)));
+   assert(fpOpeningCarrierCount==fpCheckpoint.pendingCount && !memcmp(fpOpeningCarriers,fpCheckpoint.pending,fpOpeningCarrierCount*sizeof(*fpPending)));
+  }
+  for(int round=1;round<=3;round++){
+   int expected=0,seen[FF_TYPE_COUNT]={0},dmrs=0,watchdog=2000;
+   for(int t=0;t<FF_TYPE_COUNT;t++)expected+=(base[t]*(round+1)+1)/2;
+   if(round==3)expected++;
+   assert(firefightWaveEnemiesTotal==expected && firefightRound==round);
+   if(humans==1)assert(expected==(round==1?7:round==2?13:15));
+   while(firefightWaveState==FIREFIGHT_STATE_ACTIVE && firefightRound==round && watchdog-->0){
+    update_firefight_logic(.5f);
+    for(int i=4;i<MAX_COMBATANTS;i++)if(players[i].respawn_timer<=0){
+     seen[players[i].enemyType]++;dmrs+=fpCarrierType[i]==PICKUP_DMR;
+     assert(fpCarrierType[i]!=PICKUP_CUTTER && fpCarrierType[i]!=PICKUP_SWORD);
+     players[i].invuln_timer=0;players[i].isExposed=true;kill_player(i,0,false,false);
+    }
+   }
+   assert(watchdog>0 && dmrs>=1);
+   if(round==3)assert(dmrs==3);
+   for(int t=0;t<FF_TYPE_COUNT;t++)assert(seen[t]==(base[t]*(round+1)+1)/2+(round==3 && t==ENEMY_TYPE_STANDARD));
+   assert(firefightWaveState==(round<3?FIREFIGHT_STATE_ACTIVE:FIREFIGHT_STATE_LOOT));
+  }
+ }
+ puts("Wave 7: three escalating rounds, 1-4 players, DMR carriers, checkpoints and final-round loot passed");
+}
+static void eighth_wave_rounds(void){
+ for(int humans=1;humans<=4;humans++){
+  fixture();firefightHumans=humans;firefightFoundry=false;
+  for(int wave=3;wave<=8;wave++)start_firefight_wave(wave);
+  int base[FF_TYPE_COUNT];memcpy(base,ffRemaining,sizeof(base));assert(ff_rounds(8)==3);
+  if(humans==1){
+   assert(base[0]==2 && base[1]==2 && base[5]==1 && base[6]==1 && base[8]==1);
+   multiplayerActivePlayers=1;firefightCheckpoints=true;fp_capture();fpRepeatCursor+=4;fp_restore();
+   assert(!memcmp(fpOpeningRoster,base,sizeof(base)));
+   assert(fpOpeningCarrierCount==fpCheckpoint.pendingCount && !memcmp(fpOpeningCarriers,fpCheckpoint.pending,fpOpeningCarrierCount*sizeof(*fpPending)));
+  }
+  for(int round=1;round<=3;round++){
+   int expected=0,seen[FF_TYPE_COUNT]={0},cutters=0,bombs=0,watchdog=2000;
+   for(int t=0;t<FF_TYPE_COUNT;t++)expected+=(base[t]*(round+1)+1)/2;
+   assert(firefightWaveEnemiesTotal==expected && firefightRound==round);
+   if(humans==1)assert(expected==(round==1?7:round==2?12:14));
+   while(firefightWaveState==FIREFIGHT_STATE_ACTIVE && firefightRound==round && watchdog-->0){
+    update_firefight_logic(.5f);
+    for(int i=4;i<MAX_COMBATANTS;i++)if(players[i].respawn_timer<=0){
+     seen[players[i].enemyType]++;cutters+=fpCarrierType[i]==PICKUP_CUTTER;bombs+=fpCarrierType[i]==PICKUP_BLACK_HOLE;
+     assert(fpCarrierType[i]!=PICKUP_SWORD && fpCarrierType[i]!=PICKUP_RAILGUN);
+     players[i].invuln_timer=0;players[i].isExposed=true;kill_player(i,0,false,false);
+    }
+   }
+   assert(watchdog>0 && cutters>=1 && bombs>=1);
+   for(int t=0;t<FF_TYPE_COUNT;t++)assert(seen[t]==(base[t]*(round+1)+1)/2);
+   assert(firefightWaveState==(round<3?FIREFIGHT_STATE_ACTIVE:FIREFIGHT_STATE_LOOT));
+  }
+ }
+ puts("Wave 8: three escalating rounds, 1-4 players, cutter/black-hole carriers, checkpoints and final-round loot passed");
+}
+static void anchor_groups(void){
+ fixture();init_firefight_bot_entity(8,ENEMY_TYPE_ANCHOR,INPUT_TYPE_BOT_HARD);players[8].pos=(Vector3){0,1,0};
+ for(int i=4;i<=6;i++){init_firefight_bot_entity(i,ENEMY_TYPE_STANDARD,INPUT_TYPE_BOT_MEDIUM);players[i].pos=(Vector3){(i-5)*2,1,-3};players[i].matter=40;}
+ carrier(PICKUP_DYNAMIC_SHOT,4);
+ players[4].matter=0;players[4].isExposed=true;enemySpecial[4].exposedAge=3;
+ shield_escort_tick();for(int i=4;i<=6;i++){assert(shieldEscort[i]==9 && shield_escort_valid(i));assert(enemy_braces(8,i));}
+ feedback_tick(.25f);assert(players[4].matter>0 && players[5].matter>40);
+ ai_select(8,0,(Vector3){0,1,-20},AI_ALERT_SEEN);aiCombat[8].visible=true;
+ players[4].pos=(Vector3){0,1,0};shield_escort_move(4,.1f);assert(players[4].vel.z<0);
+ // The anchor closes a gap instead of abandoning its guards.
+ for(int i=4;i<=6;i++)players[i].pos=(Vector3){(i-5)*2,1,-10};
+ enemy_update(8,.1f);assert(players[8].vel.z<0);
+ // Destroying the emitter disables healing; killing the anchor releases guards.
+ enemySpecial[8].disabled=8;assert(!enemy_braces(8,4));
+ players[8].respawn_timer=10;shield_escort_tick();for(int i=4;i<=6;i++)assert(!shield_escort_valid(i));
+ netTransport.role=NET_ROLE_CLIENT;shield_escort_tick();assert(!shieldEscort[4]);netTransport.role=NET_ROLE_OFFLINE;
+ puts("Anchor formations: assignment, healing, protective positions, regrouping and death release passed");
+}
 static void ownership(void){
  fixture();size_t glob=carrier(PICKUP_GLOB,4);uint32_t id=fpItems[glob].id;fp_death(4,(Vector3){0,1,0});assert(fpItems[glob].owner==-1&&fpItems[glob].id==id);
  assert(fp_collect(0,glob,false)&&eq_gun(0)==EQ_GLOB);assert(fpUnlocked==(1u<<fp_rule(PICKUP_GLOB)));int banners=fpBannerWrite;assert(!fp_collect(1,glob,false));
@@ -300,6 +416,6 @@ static void lobby(void){
  RenderTexture2D rt=LoadRenderTexture(960,540);BeginTextureMode(rt);couch_title("FIREFIGHT LOBBY");couch_row(0,"Twelve-wave Firefight",false);couch_row(1,"Arena: Foundry Holdout",false);couch_row(2,"Checkpoints: OFF | X / C: toggle",false);couch_row(3,"P1: Keyboard | Not ready",false);EndTextureMode();Image im=LoadImageFromTexture(rt.texture);ImageFlipVertical(&im);ExportImage(im,".build/playtest-run/firefight-checkpoints.png");UnloadImage(im);UnloadRenderTexture(rt);
  puts("Keyboard/controller checkpoint lobby toggle passed");
 }
-int main(int argc,char **argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Firefight progression tests");init_pbd_thread_pool();assert(initialize_physics_backend());schedule();opening_rounds();second_wave_rounds();third_wave_rounds();rifle_pairs();fourth_wave_roster();fifth_wave_rounds();ownership();enemy_weapons();autonomous_carriers();checkpoints();lobby();fp_shutdown();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Firefight progression passed");return 0;}
+int main(int argc,char **argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Firefight progression tests");init_pbd_thread_pool();assert(initialize_physics_backend());schedule();opening_rounds();second_wave_rounds();third_wave_rounds();rifle_pairs();fourth_wave_roster();fifth_wave_rounds();sixth_wave_rounds();seventh_wave_rounds();eighth_wave_rounds();anchor_groups();ownership();enemy_weapons();autonomous_carriers();checkpoints();lobby();fp_shutdown();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Firefight progression passed");return 0;}
 
 
