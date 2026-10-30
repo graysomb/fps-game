@@ -90,7 +90,7 @@ static int fpOpeningRoster[FF_TYPE_COUNT],fpOpeningCarriers[8],fpOpeningCarrierC
 static void fp_prepare_round(int wave,int round){
  memset(fpPairs,0,sizeof(fpPairs));
  if(!fp_active())return;
- if((wave>=4 && wave<=8) && round>=2){
+ if((wave>=4 && wave<FF_WAVE_COUNT) && round>=2){
   fpPendingCount=0;
   for(int t=0;t<FF_TYPE_COUNT;t++)ffRemaining[t]=(fpOpeningRoster[t]*(round+1)+1)/2;
   if(wave==6 && round==3){
@@ -153,7 +153,7 @@ static void fp_prepare_wave(int wave){
   int kept=0;for(int n=0;n<fpPendingCount;n++)if(fpRules[fpPending[n]].chassis!=ENEMY_TYPE_BUILDER)fpPending[kept++]=fpPending[n];
   fpPendingCount=kept;
  }
- if(wave>=4 && wave<=8){
+ if(wave>=4 && wave<FF_WAVE_COUNT){
   memcpy(fpOpeningRoster,ffRemaining,sizeof(fpOpeningRoster));
   fpOpeningCarrierCount=fpPendingCount;
   memcpy(fpOpeningCarriers,fpPending,fpPendingCount*sizeof(*fpPending));
