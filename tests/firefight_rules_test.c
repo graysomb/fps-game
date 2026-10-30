@@ -29,7 +29,7 @@ int main(void) {
         int total=0;for(int t=0;t<FF_TYPE_COUNT;t++)total+=ff_round_count(2,r,h,t);
         assert(total==expected[h-1][r-1]);
     }
-    assert(ff_rounds(1)==3 && ff_rounds(2)==3 && ff_rounds(3)==3 && ff_rounds(4)==3 && ff_rounds(5)==1);
+    assert(ff_rounds(1)==3 && ff_rounds(2)==3 && ff_rounds(3)==3 && ff_rounds(4)==3 && ff_rounds(5)==3 && ff_rounds(6)==1);
     int votes[4]={-1,-1,-1,-1}; assert(ff_vote(votes,4)==UPGRADE_BUILD);
     votes[0]=1; votes[1]=2; assert(ff_vote(votes,2)==UPGRADE_BUILD);
     votes[2]=1; assert(ff_vote(votes,3)==UPGRADE_HARVEST);

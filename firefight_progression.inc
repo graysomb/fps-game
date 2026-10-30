@@ -3,9 +3,9 @@ static const FfEquipmentRule fpRules[]={
  {PICKUP_GLOB,2,ENEMY_TYPE_STANDARD,'E'},{PICKUP_REINFORCED,2,ENEMY_TYPE_BUILDER,'E'},
  {PICKUP_GLOCK,3,ENEMY_TYPE_STANDARD,'C'},{PICKUP_GRENADE,3,ENEMY_TYPE_SAPPER,'C'},
  {PICKUP_ADHESIVE,4,ENEMY_TYPE_SAPPER,'C'},
- {PICKUP_SHOTGUN,5,ENEMY_TYPE_STANDARD,'B'},{PICKUP_IGLOO,5,ENEMY_TYPE_SAPPER,'B'},
- {PICKUP_CUTTER,6,ENEMY_TYPE_STANDARD,'B'},{PICKUP_DMR,6,ENEMY_TYPE_STANDARD,'B'},
- {PICKUP_DYNAMIC_SHOT,7,ENEMY_TYPE_STANDARD,'A'},{PICKUP_SWORD,7,ENEMY_TYPE_STANDARD,'A'},
+ {PICKUP_SHOTGUN,5,ENEMY_TYPE_STANDARD,'B'},{PICKUP_IGLOO,0,ENEMY_TYPE_SAPPER,'B'},
+ {PICKUP_CUTTER,8,ENEMY_TYPE_STANDARD,'B'},{PICKUP_DMR,7,ENEMY_TYPE_STANDARD,'B'},
+ {PICKUP_DYNAMIC_SHOT,6,ENEMY_TYPE_STANDARD,'A'},{PICKUP_SWORD,9,ENEMY_TYPE_STANDARD,'A'},
  {PICKUP_BLACK_HOLE,8,ENEMY_TYPE_SAPPER,'A'},{PICKUP_GOLD_TETHER,9,ENEMY_TYPE_LOBBER,'S'},
  {PICKUP_RAILGUN,10,ENEMY_TYPE_STANDARD,'S'},{PICKUP_ROCKET,11,ENEMY_TYPE_STANDARD,'S'},
  {PICKUP_SHIELD_REGEN,4,ENEMY_TYPE_SHIELDBEARER,'B'}
@@ -86,16 +86,16 @@ static int fp_near(int i,bool automatic){
  }return best;
 }
 static bool fp_interact(int i){int n=fp_near(i,false);return n>=0 && fp_collect(i,(size_t)n,true);}
-static int fpFourthRoster[FF_TYPE_COUNT],fpFourthCarriers[8],fpFourthCarrierCount;
+static int fpOpeningRoster[FF_TYPE_COUNT],fpOpeningCarriers[8],fpOpeningCarrierCount;
 static void fp_prepare_round(int wave,int round){
  memset(fpPairs,0,sizeof(fpPairs));
  if(!fp_active())return;
- if(wave==4 && round>=2){
+ if((wave==4 || wave==5) && round>=2){
   fpPendingCount=0;
-  for(int t=0;t<FF_TYPE_COUNT;t++)ffRemaining[t]=(fpFourthRoster[t]*(round+1)+1)/2;
+  for(int t=0;t<FF_TYPE_COUNT;t++)ffRemaining[t]=(fpOpeningRoster[t]*(round+1)+1)/2;
   int available[FF_TYPE_COUNT];memcpy(available,ffRemaining,sizeof(available));
   for(int rule=0;rule<FP_RULE_COUNT;rule++){
-   int count=0;for(int n=0;n<fpFourthCarrierCount;n++)count+=fpFourthCarriers[n]==rule;
+   int count=0;for(int n=0;n<fpOpeningCarrierCount;n++)count+=fpOpeningCarriers[n]==rule;
    for(int n=0;n<(count*(round+1)+1)/2 && available[fpRules[rule].chassis]>0;n++){fpPending[fpPendingCount++]=rule;available[fpRules[rule].chassis]--;}
   }
   return;
@@ -121,9 +121,9 @@ static void fp_prepare_wave(int wave){
  if(kept!=fpCount){fpCount=kept;++fpRevision;}
  if(wave==2){fp_prepare_round(wave,1);return;}
  int wanted[8],count=0;
- for(int n=0;n<FP_CARRIER_RULE_COUNT;n++)if(fpRules[n].wave==wave)wanted[count++]=n;
+ for(int n=0;n<FP_CARRIER_RULE_COUNT;n++)if(fpRules[n].wave==wave && fpRules[n].type!=PICKUP_GOLD_TETHER)wanted[count++]=n;
  if(wave>=3){int repeats=(fp_team_size()+1)/2;for(int k=0;k<repeats;k++)for(int n=0;n<FP_CARRIER_RULE_COUNT;n++){
-   int rule=fpRepeatCursor++%FP_CARRIER_RULE_COUNT;if(fpRules[rule].wave<wave){wanted[count++]=rule;break;}
+   int rule=fpRepeatCursor++%FP_CARRIER_RULE_COUNT;if(fpRules[rule].wave>0 && fpRules[rule].wave<wave && fpRules[rule].type!=PICKUP_GOLD_TETHER){wanted[count++]=rule;break;}
  }}
  for(int n=0;n<count;n++){
   int replace=ffRemaining[ENEMY_TYPE_STANDARD]>0?ENEMY_TYPE_STANDARD:ffRemaining[ENEMY_TYPE_SWARMER]>0?ENEMY_TYPE_SWARMER:-1;
@@ -142,16 +142,18 @@ static void fp_prepare_wave(int wave){
   // replacement shield bearers use ordinary specialist AI, not carrier AI.
   int kept=0;for(int n=0;n<fpPendingCount;n++)if(fpRules[fpPending[n]].chassis!=ENEMY_TYPE_BUILDER)fpPending[kept++]=fpPending[n];
   fpPendingCount=kept;
-  memcpy(fpFourthRoster,ffRemaining,sizeof(fpFourthRoster));
-  fpFourthCarrierCount=fpPendingCount;
-  memcpy(fpFourthCarriers,fpPending,fpPendingCount*sizeof(*fpPending));
+ }
+ if(wave==4 || wave==5){
+  memcpy(fpOpeningRoster,ffRemaining,sizeof(fpOpeningRoster));
+  fpOpeningCarrierCount=fpPendingCount;
+  memcpy(fpOpeningCarriers,fpPending,fpPendingCount*sizeof(*fpPending));
  }
 }
 static void fp_spawn(int i,int chassis){
  fp_pair_clear(i);
  eq_reset(i);ex_reset_player(i);fpCarrierType[i]=0;
  if(!fp_active())return;
- if(chassis==ENEMY_TYPE_SHIELDBEARER){if(fp_reserve(fpCount+1)){fpItems[fpCount++]=(FfItem){.id=fpNextId++,.type=PICKUP_SHIELD_REGEN,.owner=i,.slot=-1,.pos=players[i].pos};++fpRevision;}return;}
+ if(chassis==ENEMY_TYPE_SHIELDBEARER || chassis==ENEMY_TYPE_LOBBER){if(fp_reserve(fpCount+1)){fpItems[fpCount++]=(FfItem){.id=fpNextId++,.type=chassis==ENEMY_TYPE_LOBBER?PICKUP_GOLD_TETHER:PICKUP_SHIELD_REGEN,.owner=i,.slot=-1,.pos=players[i].pos};++fpRevision;}return;}
  for(int n=0;n<fpPendingCount;n++)if(fpPending[n]>=0 && fpRules[fpPending[n]].chassis==chassis){
   int type=fpRules[fpPending[n]].type;fpPending[n]=-1;
   if(!fp_reserve(fpCount+1)){TraceLog(LOG_ERROR,"Could not allocate carrier item");return;}

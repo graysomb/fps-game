@@ -17,7 +17,7 @@ static void enemy_cue(int i) {
     play_sfx_at(sounds[players[i].enemyType-ENEMY_TYPE_SCRAPPER],players[i].pos,i,2,1);
 }
 static float enemy_matter(EnemyType t) {
-    const float m[FF_TYPE_COUNT]={100,25,100,50,75,50,60,50,60,200};
+    const float m[FF_TYPE_COUNT]={100,25,100,50,75,50,120,50,60,200};
     return t==ENEMY_TYPE_FOUNDRY?200*(1+.5f*(firefightHumans-1)):m[t<ENEMY_TYPE_COUNT?t:0];
 }
 static void enemy_pin(int v,Vector3 pos,Vector3 vel) {
@@ -497,6 +497,7 @@ static void enemy_tick(float dt) {
         }
     }
 }
+#include "lobber_harvest.inc"
 static void enemy_update(int i,float dt) {
     if(players[i].enemyType==ENEMY_TYPE_SAPPER){sapper_update(i,dt);return;}
     if(players[i].enemyType==ENEMY_TYPE_BUILDER){tower_builder(i,dt);return;}
@@ -522,9 +523,10 @@ static void enemy_update(int i,float dt) {
         s->supplied=true;
     }
     s->payloadFallback=fmaxf(0,s->payloadFallback-dt);s->cooldown-=dt;s->melee-=dt;s->repair-=dt;s->searchTimer-=dt;s->stompCooldown-=dt;s->repositionTimer=fmaxf(0,s->repositionTimer-dt);s->target=enemy_target(i);
+    if(t==ENEMY_TYPE_LOBBER && lobber_harvest(i,dt))return;
     // Gathering nearby ammunition does not require sight of a player. Keep this
     // preparation separate from the visible-target requirement for a throw.
-    if(!aiCombat[i].visible && !p->isExposed && !p->tetherHolding && s->windup<=0 &&
+    if(!aiCombat[i].visible && !s->harvesting && !p->isExposed && !p->tetherHolding && s->windup<=0 &&
        s->cooldown<=0 && (t==ENEMY_TYPE_LOBBER || t==ENEMY_TYPE_FOUNDRY)) {
         if(s->searchTimer<=0){s->selected=enemy_find_payload(i);s->searchTimer=1;}
         int v=enemy_voxel(s->selected);
@@ -575,7 +577,7 @@ static void enemy_update(int i,float dt) {
         }
         return;
     }
-    if(!aiCombat[i].visible) {
+    if(!aiCombat[i].visible && t!=ENEMY_TYPE_LOBBER) {
         Vector3 investigate=to;investigate.y=0;
         if(v_length(investigate)>.5f)bot_apply_move(p,&botStates[i],investigate,MOVE_SPEED*.7f,dt);
         else p->vel.x=p->vel.z=0;
@@ -610,7 +612,8 @@ static void enemy_update(int i,float dt) {
         speed=t==ENEMY_TYPE_FOUNDRY?.35f:.75f;
         if(distance<10)move=v_mul(to,-1);else if(distance<24)move=(Vector3){0};
         if(s->repositionTimer>0){move=distance>24?to:(Vector3){to.z,0,-to.x};s->reason="repositioning for clear arc";}
-        if(!p->isExposed && s->cooldown<=0 && s->repositionTimer<=0) {
+        Vector3 coverMove={0};bool covered=t==ENEMY_TYPE_LOBBER && lobber_cover(i,dt,&coverMove);
+        if(!s->harvesting && !p->isExposed && s->cooldown<=0 && s->repositionTimer<=0) {
             if(s->searchTimer<=0 && !p->tetherHolding){s->selected=enemy_find_payload(i);s->searchTimer=1;s->reason=s->selected?"seeking payload":"no throwable group";}
             int v=enemy_voxel(s->selected);
             if(v>=0 && !p->tetherHolding) {
@@ -622,11 +625,13 @@ static void enemy_update(int i,float dt) {
                 }
             }
             if(p->tetherHolding) {
-                s->aim=ai_target_body(s->target)->pos;Vector3 velocity,center,extent;int count;
-                if(resolve_tether_voxel(p) && enemy_payload(i,p->tetherVoxel,&count,&center,&extent) && enemy_lob_arc(player_tether_hold_position(p),s->aim,extent,&velocity)) {s->state=3;s->windup=1.5f;enemy_cue(i);}
+                s->aim=aiCombat[i].known;Vector3 velocity,center,extent;int count;
+                if(covered && v_length(coverMove)>.5f){move=coverMove;}
+                else if(resolve_tether_voxel(p) && enemy_payload(i,p->tetherVoxel,&count,&center,&extent) && enemy_lob_arc(player_tether_hold_position(p),s->aim,extent,&velocity)) {s->state=3;s->windup=1.5f;enemy_cue(i);}
                 else {enemy_drop_payload(i);s->selected=0;s->searchTimer=s->cooldown=1;s->reason="blocked arc";s->repositionTimer=2;move=distance>24?to:(Vector3){to.z,0,-to.x};}
             }
         }
+        if(covered && (p->tetherHolding || s->cooldown>0))move=coverMove;
         if(t==ENEMY_TYPE_FOUNDRY && distance<3 && s->stompCooldown<=0 && s->windup<=0) {s->state=5;s->windup=1.25f;s->stompCooldown=6;enemy_cue(i);}
     }
     if(t==ENEMY_TYPE_ANCHOR) {

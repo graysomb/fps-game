@@ -19,7 +19,7 @@ static const WaveDefinition ff_waves[FF_WAVE_COUNT] = {
     /* normal, swarmer, Goliath, scrapper, shield, sapper, lobber, builder, anchor, foundry */
     {"First Contact", {0,3}}, {"Heavy Patrol", {1,4,1}},
     {"Demolition", {0,4,0,0,0,1}}, {"Field Works", {1,3,0,0,1,0,0,1}},
-    {"Incoming Scrap", {1,4,0,0,0,0,1}}, {"Anchored Assault", {0,3,1,0,0,1,0,0,1}},
+    {"Incoming Scrap", {1,3,0,0,0,0,1}}, {"Anchored Assault", {0,3,1,0,0,1,0,0,1}},
     {"Fortified Patrol", {1,4,0,0,1,0,0,1}}, {"Siege Support", {1,4,0,0,0,0,1,0,1}},
     {"Heavy Works", {1,4,1,0,0,1,0,1}}, {"Shielded Siege", {1,4,0,0,1,0,1,0,1}},
     {"Combined Assault", {2,9,2,0,1,1,1,1,1}},
@@ -42,7 +42,7 @@ static inline int ff_count(int wave, int humans, int type) {
     int cycle = (wave-1)/FF_WAVE_COUNT;
     return (base * (humans+1) * (4+cycle) + 7)/8;
 }
-static inline int ff_rounds(int wave) { return wave>=1 && wave<=4?3:1; }
+static inline int ff_rounds(int wave) { return wave>=1 && wave<=5?3:1; }
 static inline int ff_round_count(int wave,int round,int humans,int type) {
     int base=ff_count(wave,humans,type);
     if(wave==1)return base << (round-1);

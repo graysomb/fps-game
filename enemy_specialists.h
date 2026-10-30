@@ -7,6 +7,7 @@
 #define ENEMY_LOB_MAX_VOXELS 64
 #define ENEMY_CHARGE_MAX 64
 #define ENEMY_CONSTRUCTION_OWNER (-2) /* Temporary world material: never enqueue map restoration. */
+static const float lobberMineStart=.5f,lobberMineFinish=1.0f,lobberMineRange=24;
 typedef struct { uint64_t id; Vector3 offset; int group; } EnemyEquipment;
 typedef struct {
     float cooldown, windup, melee, exposure, repair, spawnTimer, disabled;
@@ -14,6 +15,13 @@ typedef struct {
     int shieldHits[4];
     float shieldFlash[4], exposedAge, healingPulse, coreCue, blockedCue;
     bool coreOpen, supplied;
+    bool harvesting;
+    float harvestSearch, harvestStuck;
+    uint64_t harvestTarget, harvestRejected;
+    Vector3 harvestLast;
+    float coverSearch;
+    uint64_t coverSupport;
+    Vector3 coverPosition;
     int actions, work;
     const char *reason;
     Vector3 aim, buildOrigin;

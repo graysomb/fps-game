@@ -19,7 +19,7 @@ static void fixture(void){
  fp_new_run();eq_reset_all();clarity_reset();combat_ui_reset();
  for(int i=0;i<MAX_COMBATANTS;i++){playerInput[i]=i<4?INPUT_TYPE_KEYBOARD:INPUT_TYPE_BOT_EASY;combatantLife[i]=i<2?LIFE_ALIVE:LIFE_UNUSED;combatantTeam[i]=i<4?0:1;players[i].respawn_timer=i<2?0:9999;players[i].matter=players[i].matterMax=100;players[i].pos=(Vector3){i*3,1,0};players[i].last_shot_time=players[i].last_melee_time=players[i].last_build_time=-100;ai_reset(i);}
 }
-static size_t carrier(int type,int slot){int r=fp_rule(type);assert(r>=0);fpPendingCount=1;fpPending[0]=r;players[slot].respawn_timer=0;combatantLife[slot]=LIFE_ALIVE;players[slot].enemyType=fpRules[r].chassis;fp_spawn(slot,fpRules[r].chassis);assert(fp_carrier(slot));return fpCount-1;}
+static size_t carrier(int type,int slot){int r=fp_rule(type);assert(r>=0);fpPendingCount=1;fpPending[0]=r;players[slot].respawn_timer=0;combatantLife[slot]=LIFE_ALIVE;players[slot].enemyType=fpRules[r].chassis;fp_spawn(slot,fpRules[r].chassis);assert(type==PICKUP_GOLD_TETHER?!fp_carrier(slot):fp_carrier(slot));return fpCount-1;}
 static void schedule(void){
  for(int humans=1;humans<=4;humans++){fixture();firefightHumans=humans;
   for(int wave=1;wave<=36;wave++){
@@ -27,8 +27,8 @@ static void schedule(void){
    fp_prepare_wave(wave);int after=0;for(int t=0;t<10;t++){after+=ffRemaining[t];assert(ffRemaining[t]>=0);if(t>=2 && !(wave==4 && t==ENEMY_TYPE_BUILDER))assert(ffRemaining[t]>=before[t]);}
    assert(sum+(wave==4?before[ENEMY_TYPE_BUILDER]+(humans<=2):0)==after);
    if(wave==4)assert(ffRemaining[ENEMY_TYPE_BUILDER]==0);
-   int introduced=0;for(int r=0;r<FP_CARRIER_RULE_COUNT;r++)if(fpRules[r].wave==wave && wave!=2){int found=0;for(int n=0;n<fpPendingCount;n++)found+=fpPending[n]==r;assert(found==1);introduced++;}
-   assert(fpPendingCount==introduced+(wave>=3?(humans+1)/2:0)-(wave==4 && humans<=2));for(int n=0;n<fpPendingCount;n++)assert(fpRules[fpPending[n]].wave<=wave);
+   int introduced=0;for(int r=0;r<FP_CARRIER_RULE_COUNT;r++)if(fpRules[r].wave==wave && wave!=2 && fpRules[r].type!=PICKUP_GOLD_TETHER){int found=0;for(int n=0;n<fpPendingCount;n++)found+=fpPending[n]==r;assert(found==1);introduced++;}
+   assert(fpPendingCount==introduced+(wave>=3?(humans+1)/2:0)-(wave==4 && humans<=2));for(int n=0;n<fpPendingCount;n++)assert(fpRules[fpPending[n]].wave>0 && fpRules[fpPending[n]].wave<=wave && fpRules[fpPending[n]].type!=PICKUP_IGLOO);
   }
  }
  puts("Schedules: waves 1-36, 1-4 players, guaranteed introductions and preserved quotas passed");
@@ -200,6 +200,41 @@ static void fourth_wave_roster(void){
  }
  puts("Wave 4: medium difficulty, builders replaced by shields, preserved default riflemen, 1-4 player totals and completion passed");
 }
+static void fifth_wave_rounds(void){
+ for(int humans=1;humans<=4;humans++){
+  fixture();firefightHumans=humans;firefightFoundry=false;
+  start_firefight_wave(3);start_firefight_wave(4);start_firefight_wave(5);
+  int base[FF_TYPE_COUNT];memcpy(base,ffRemaining,sizeof(base));
+  assert(ff_rounds(5)==3);
+  if(humans==1){
+   multiplayerActivePlayers=1;firefightCheckpoints=true;fp_capture();fpRepeatCursor+=4;fp_restore();
+   assert(!memcmp(fpOpeningRoster,base,sizeof(base)) && fpOpeningCarrierCount==fpCheckpoint.pendingCount);
+   assert(!memcmp(fpOpeningCarriers,fpCheckpoint.pending,fpOpeningCarrierCount*sizeof(*fpPending)));
+  }
+  if(humans==1)assert(base[ENEMY_TYPE_STANDARD]==2 && base[ENEMY_TYPE_SWARMER]==2 && base[ENEMY_TYPE_LOBBER]==1 && base[ENEMY_TYPE_SAPPER]==0);
+  for(int round=1;round<=3;round++){
+   int expected=0,seen[FF_TYPE_COUNT]={0},watchdog=2000,shotguns=0;
+   for(int t=0;t<FF_TYPE_COUNT;t++)expected+=(base[t]*(round+1)+1)/2;
+   assert(firefightWaveEnemiesTotal==expected && firefightRound==round);
+   if(humans==1)assert(expected==(round==1?5:round==2?8:10));
+   for(int n=0;n<fpPendingCount;n++)assert(fpRules[fpPending[n]].type!=PICKUP_IGLOO);
+   while(firefightWaveState==FIREFIGHT_STATE_ACTIVE && firefightRound==round && watchdog-->0){
+    update_firefight_logic(.5f);
+    for(int i=4;i<MAX_COMBATANTS;i++)if(players[i].respawn_timer<=0){
+     seen[players[i].enemyType]++;shotguns+=eq_gun(i)==EQ_SHOTGUN;
+     assert(fpCarrierType[i]!=PICKUP_IGLOO);
+     assert(playerInput[i]==(players[i].enemyType==ENEMY_TYPE_STANDARD?INPUT_TYPE_BOT_MEDIUM:INPUT_TYPE_BOT_HARD));
+     players[i].invuln_timer=0;players[i].isExposed=true;kill_player(i,0,false,false);
+    }
+   }
+   assert(watchdog>0 && shotguns>=1);
+   for(int t=0;t<FF_TYPE_COUNT;t++)assert(seen[t]==(base[t]*(round+1)+1)/2);
+   assert(firefightWaveState==(round<3?FIREFIGHT_STATE_ACTIVE:FIREFIGHT_STATE_LOOT));
+   for(size_t n=0;n<fpCount;n++)assert(fpItems[n].type!=PICKUP_IGLOO);
+  }
+ }
+ puts("Wave 5: three escalating rounds, 1-4 players, shotgun drops, no igloos and final-round loot passed");
+}
 static void ownership(void){
  fixture();size_t glob=carrier(PICKUP_GLOB,4);uint32_t id=fpItems[glob].id;fp_death(4,(Vector3){0,1,0});assert(fpItems[glob].owner==-1&&fpItems[glob].id==id);
  assert(fp_collect(0,glob,false)&&eq_gun(0)==EQ_GLOB);assert(fpUnlocked==(1u<<fp_rule(PICKUP_GLOB)));int banners=fpBannerWrite;assert(!fp_collect(1,glob,false));
@@ -229,6 +264,7 @@ static void enemy_weapons(void){
 }
 static void autonomous_carriers(void){
  for(int r=0;r<FP_CARRIER_RULE_COUNT;r++){
+  if(fpRules[r].type==PICKUP_GOLD_TETHER)continue;
   fixture();int type=fpRules[r].type;carrier(type,15);players[15].pos=(Vector3){0,1,0};players[15].yaw=players[15].pitch=0;players[0].pos=(Vector3){0,1,type==PICKUP_SWORD?-3:-8};players[1].pos=(Vector3){30,1,30};players[0].invuln_timer=100;
   if(type==PICKUP_GOLD_TETHER){add_static_box_at_grid(3,4,0,1,-4,-3,GRAY);init_static_hash();rebuild_voxel_hash();}
   ai_select(15,0,players[0].pos,AI_ALERT_SEEN);aiCombat[15].reaction=0;aiCombat[15].wasVisible=true;
@@ -239,7 +275,7 @@ static void autonomous_carriers(void){
   }
   fprintf(stderr,"carrier %s action=%d matter=%.1f\n",pickup_type_label(type),action,players[15].matter);assert(action);
  }
- puts("All 15 carrier types autonomously use their equipment passed");
+ puts("All scheduled carrier types autonomously use their equipment passed");
 }
 static void checkpoints(void){
  fixture();firefightFoundry=true;multiplayerActivePlayers=2;firefightCheckpoints=true;ResetGame();gameState=GAME_STATE_PLAYING;
@@ -264,6 +300,6 @@ static void lobby(void){
  RenderTexture2D rt=LoadRenderTexture(960,540);BeginTextureMode(rt);couch_title("FIREFIGHT LOBBY");couch_row(0,"Twelve-wave Firefight",false);couch_row(1,"Arena: Foundry Holdout",false);couch_row(2,"Checkpoints: OFF | X / C: toggle",false);couch_row(3,"P1: Keyboard | Not ready",false);EndTextureMode();Image im=LoadImageFromTexture(rt.texture);ImageFlipVertical(&im);ExportImage(im,".build/playtest-run/firefight-checkpoints.png");UnloadImage(im);UnloadRenderTexture(rt);
  puts("Keyboard/controller checkpoint lobby toggle passed");
 }
-int main(int argc,char **argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Firefight progression tests");init_pbd_thread_pool();assert(initialize_physics_backend());schedule();opening_rounds();second_wave_rounds();third_wave_rounds();rifle_pairs();fourth_wave_roster();ownership();enemy_weapons();autonomous_carriers();checkpoints();lobby();fp_shutdown();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Firefight progression passed");return 0;}
+int main(int argc,char **argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Firefight progression tests");init_pbd_thread_pool();assert(initialize_physics_backend());schedule();opening_rounds();second_wave_rounds();third_wave_rounds();rifle_pairs();fourth_wave_roster();fifth_wave_rounds();ownership();enemy_weapons();autonomous_carriers();checkpoints();lobby();fp_shutdown();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Firefight progression passed");return 0;}
 
 

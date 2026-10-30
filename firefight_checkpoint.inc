@@ -37,6 +37,11 @@ static void fp_restore(void){
  // Keep the original wave roster even if a LAN seat joined or disconnected.
  start_firefight_wave(fpCheckpoint.wave);
  memcpy(ffRemaining,fpCheckpoint.remaining,sizeof(ffRemaining));memcpy(fpPending,fpCheckpoint.pending,sizeof(fpPending));fpPendingCount=fpCheckpoint.pendingCount;
+ if(fpCheckpoint.wave==4 || fpCheckpoint.wave==5){
+  memcpy(fpOpeningRoster,ffRemaining,sizeof(fpOpeningRoster));
+  fpOpeningCarrierCount=fpPendingCount;
+  memcpy(fpOpeningCarriers,fpPending,fpPendingCount*sizeof(*fpPending));
+ }
  firefightWaveEnemiesTotal=firefightWaveEnemiesRemaining=fpCheckpoint.total;fpRepeatCursor=fpCheckpoint.repeatCursor;
  fpRestoring=false;fpRestartTimer=0;++fpGeneration;++fpRevision;fp_network_reset();
 }
