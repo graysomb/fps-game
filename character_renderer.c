@@ -319,3 +319,9 @@ void character_draw_arm(Vector3 shoulder,Vector3 hand,Color gear) {
 void character_view_hide(float amount){
     if(shader.id && shader.id!=rlGetShaderIdDefault()){SetShaderValue(shader,hideLoc,&amount,SHADER_UNIFORM_FLOAT);}
 }
+
+void character_presentation_light(Vector3 tint,float strength) {
+ if(!ready || !shaded)return;
+ Vector4 value={tint.x,tint.y,tint.z,strength};
+ SetShaderValue(shader,GetShaderLocation(shader,"presentationLight"),&value,SHADER_UNIFORM_VEC4);
+}

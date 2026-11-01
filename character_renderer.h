@@ -43,6 +43,8 @@ void character_draw_visor(CharacterPose pose);
 void character_draw_idle_arms(CharacterPose pose);
 void character_draw_paws(WeaponPose weapon, Color gear, bool emission);
 void character_draw_arm(Vector3 shoulder, Vector3 hand, Color gear);
+/* Optional presentation tint; strength zero restores the normal gameplay lighting. */
+void character_presentation_light(Vector3 tint,float strength);
 void character_view_hide(float amount);
 
 #endif
