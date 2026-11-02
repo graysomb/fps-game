@@ -2,7 +2,7 @@
 /* Authored animation seconds remain unchanged; playback stretches them to the song.
  * MP3 duration measured from its decoded sample count (44,100 Hz). */
 #define TOWN_MUSIC_PATH "assets/audio/pretty-good.mp3"
-#define TOWN_MUSIC_SECONDS 176.5355f
+#define TOWN_MUSIC_SECONDS 136.5355f
 static float town_playback_scale(void);
 enum TownSceneId { SC_POWER,SC_HOMES,SC_MARKET,SC_GARDEN,SC_PLAYGROUND,SC_SUPPER,SC_OBSERVATORY,SC_WIDE,SC_COUNT };
 typedef struct {const char *id,*title;float duration;Camera3D camera;bool oneWay;} TownSceneDef;

@@ -4,7 +4,7 @@ A standalone, presentation-only town montage. No victory UI, gameplay, networkin
 
 ## Eight scenes
 
-Each scene now lasts about 22.07 seconds, matching the supplied 2:56.5 soundtrack. The original eight-second animation timelines and one-second crossfades are uniformly stretched for playback.
+Each scene now lasts about 17.07 seconds, matching the supplied 2:16.5 soundtrack. The original eight-second animation timelines and one-second crossfades are uniformly stretched for playback.
 
 1. **Restoring power** — mice turn the generator wheel and connect a cable outside the northwest bay library. Coils and lamps brighten; a reader has a book beside the shelves.
 2. **Homes** — round doors, flower boxes, laundry and a mouse carrying produce.
@@ -43,7 +43,7 @@ python tests/encode_victory_town.py
 The harness writes `scenes.json` from the shared scene table. The encoder consumes this manifest rather than maintaining a separate name/order list.
 
 - PNG captures: 1280×720, deterministic 20 fps.
-- Eight individual GIFs: 768×432, about 22.07 seconds each.
+- Eight individual GIFs: 768×432, about 17.07 seconds each.
 - `reclaimed-foundry-eight-scenes.gif`: complete soundtrack-length montage.
 - `eight-scene-overview.png`: all eight camera compositions.
 - `--qa`: 32 frames, sampling each scene at 0, 3, 5.6 and 7.95 seconds.
@@ -77,7 +77,7 @@ Both meet the 16.7 ms median target. These are standalone preview render costs, 
 
 ## Soundtrack and stretched playback
 
-The supplied **pretty good.mp3** is packaged at `assets/audio/pretty-good.mp3`. Its duration is **176.5355 seconds (2:56.5)**. Interactive playback and the music video stretch the original 64 animation seconds by **2.75837×**, giving each scene **22.06694 seconds**, including its stretched transition. The music retains its original speed and pitch.
+The supplied **pretty good.mp3**, with its first 40 seconds removed, is packaged at `assets/audio/pretty-good.mp3`. Its duration is **136.5355 seconds (2:16.5)**. Interactive playback and the music video stretch the original 64 animation seconds by **2.13337×**, giving each scene **17.06694 seconds**, including its stretched transition. The music retains its original speed and pitch.
 
 Live playback follows the streamed audio clock. Space pauses/resumes both; arrows seek both; selecting a scene seeks to its matching section of the song. The complete montage repeats with the song. If an audio device or the track is unavailable, the preview keeps the same stretched timing silently. Music resources are released on exit.
 
@@ -90,10 +90,12 @@ $env:TOWN_FFMPEG='C:/path/to/ffmpeg.exe' # optional if ffmpeg is on PATH
 ./.build/victory-town-gl43/victory-town.exe --video
 ```
 
-Output: `artifacts/victory-town/reclaimed-foundry-with-music.mp4`, 1280×720 H.264 with AAC audio. This export streams frames directly to FFmpeg without generating thousands of additional PNGs. `--audio-test` checks the loaded duration, pause, seeking, resume and cleanup.
+Output: `artifacts/victory-town/reclaimed-foundry-credits-trimmed.mp4`, 1280×720 H.264 with AAC audio. This export streams frames directly to FFmpeg without generating thousands of additional PNGs. `--audio-test` checks the loaded duration, pause, seeking, resume and cleanup.
 
 ## Credits overlay
 
 The preview and newly rendered exports include five fading lower-left credit cards: Game by Michael; Music by Michael; Slop by chat; the Tim McGraw physics-engine attribution and work title; and all six play-testing names supplied by the creator. The overlay uses the same authored timeline as the soundtrack, so pause and scrubbing keep it synchronized. It is composited after bloom and scene crossfades for readable text with a subtle dark backdrop.
 
-`--credits-stills` captures one frame per credit card to `artifacts/victory-town/credit-0.png` through `credit-4.png`. The soundtrack video with credits is exported by `--video` to `artifacts/victory-town/reclaimed-foundry-credits.mp4`. Older exported GIFs/videos are historical captures; render them again to include the overlay.
+`--credits-stills` captures one frame per credit card to `artifacts/victory-town/credit-0.png` through `credit-4.png`. The soundtrack video with credits is exported by `--video` to `artifacts/victory-town/reclaimed-foundry-credits-trimmed.mp4`. Older exported GIFs/videos are historical captures; render them again to include the overlay.
+
+The soundtrack trim removes exactly 1,764,000 stereo sample frames at 44,100 Hz (40 seconds). The remaining 6,021,216 frames play for 136.53551 seconds; the montage and credits scale to that duration. The original uploaded song is unchanged.

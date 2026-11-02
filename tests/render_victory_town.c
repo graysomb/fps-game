@@ -39,7 +39,7 @@ int main(int argc,char **argv){
  if(video){
   const char *ffmpeg=getenv("TOWN_FFMPEG");if(!ffmpeg)ffmpeg="ffmpeg";
   assert(!strchr(ffmpeg,'"'));char command[2048];
-  snprintf(command,sizeof(command),"\"%s\" -y -loglevel error -f rawvideo -pixel_format rgb24 -video_size 1280x720 -framerate 20 -i - -i \"" TOWN_MUSIC_PATH "\" -map 0:v:0 -map 1:a:0 -c:v libx264 -preset fast -crf 20 -pix_fmt yuv420p -c:a aac -b:a 192k -t %.6f -movflags +faststart artifacts/victory-town/reclaimed-foundry-credits.mp4",ffmpeg,(double)TOWN_MUSIC_SECONDS);
+  snprintf(command,sizeof(command),"\"%s\" -y -loglevel error -f rawvideo -pixel_format rgb24 -video_size 1280x720 -framerate 20 -i - -i \"" TOWN_MUSIC_PATH "\" -map 0:v:0 -map 1:a:0 -c:v libx264 -preset fast -crf 20 -pix_fmt yuv420p -c:a aac -b:a 192k -t %.6f -movflags +faststart artifacts/victory-town/reclaimed-foundry-credits-trimmed.mp4",ffmpeg,(double)TOWN_MUSIC_SECONDS);
 #ifdef _WIN32
   char windowsCommand[2052];snprintf(windowsCommand,sizeof(windowsCommand),"\"%s\"",command);movie=_popen(windowsCommand,"wb");
 #else
