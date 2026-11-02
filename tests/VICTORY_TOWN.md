@@ -1,6 +1,6 @@
 # Reclaimed Foundry victory preview
 
-A standalone, presentation-only town montage. No victory UI, gameplay, networking, AI, physics, or audio is changed.
+The town montage is available from the results screen after completing all 12 Firefight waves. A three-second victory banner leads to results; Watch epilogue plays the trimmed song and credits full-screen. Hold B or Escape to skip back to results. Play again is controlled by the host in LAN games. Practice, endless and Enemy Lab sessions do not trigger the epilogue.
 
 ## Eight scenes
 
@@ -99,3 +99,13 @@ The preview and newly rendered exports include five fading lower-left credit car
 `--credits-stills` captures one frame per credit card to `artifacts/victory-town/credit-0.png` through `credit-4.png`. The soundtrack video with credits is exported by `--video` to `artifacts/victory-town/reclaimed-foundry-credits-trimmed.mp4`. Older exported GIFs/videos are historical captures; render them again to include the overlay.
 
 The soundtrack trim removes exactly 1,764,000 stereo sample frames at 44,100 Hz (40 seconds). The remaining 6,021,216 frames play for 136.53551 seconds; the montage and credits scale to that duration. The original uploaded song is unchanged.
+
+## In-game integration
+
+The epilogue keeps the authoritative match in GAMEOVER and freezes gameplay input. Presentation is local: each LAN participant can watch or skip independently. A host restart cancels any client playback. Results are retained across replays; the completion timer counts active play on the local machine (clients label this Time in run). Revive totals are shown offline and on the host; they are omitted on clients because the existing protocol does not replicate them.
+
+Scenery uses `assets/victory/foundry-shell.bin`, an immutable mesh snapshot, rather than rebuilding or replacing the live voxel world. Build scripts package this asset and the soundtrack. Missing scenery returns to results with an error; missing audio uses the same timed sequence silently. The banner uses a frozen final gameplay frame.
+
+To regenerate the shell after intentionally changing the source Foundry design, build the standalone preview, set `FPS_EXPORT_TOWN_SHELL=1`, then run it with `--credits-stills` from the repository root. Clear the environment variable afterward. The binary contains magic/version `TOW1`, a vertex count, positions, normals and colors; it targets the supported little-endian platforms.
+
+Regression harnesses: `tests/firefight_victory_test.c` tests frozen world geometry, results, keyboard/controller skip, replay, natural completion, exclusions and simulated disconnect/restart handling. `tests/firefight_victory_lan.c` runs as separate host/client processes (argument `host` for host, no argument for client), using port 27943, to test victory replication, independent playback and authoritative restart. Compile with the same renderer/network sources and libraries as the game, without NDEBUG so assertions remain enabled.

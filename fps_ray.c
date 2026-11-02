@@ -8467,6 +8467,7 @@ static bool menuSetupSubmenuOpen = false;
 
 static int clamp_active_players(int count);
 static void ResetGame(void);
+static void ffend_reset(void);
 #include "enemy_specialists.h"
 #include "combat_clarity.h"
 #include "combat_ui.h"
@@ -9345,6 +9346,7 @@ static void ResetCreative(void) {
 }
 
 static void ResetGame(void) {
+    ffend_reset();
     ducks_reset();
     fp_new_run();
     memset(holograms,0,sizeof(holograms));hologramReceiveTick=0;
@@ -20390,6 +20392,7 @@ static void net_host_tick(void) {
     }
     for (int slot = 1; slot < MAX_PLAYERS; ++slot) {
         if (!netPlayerPresent[slot] || !netHasPendingInput[slot]) continue;
+        if(gameState==GAME_STATE_GAMEOVER){netHasPendingInput[slot]=false;continue;}
         NetInputCommand command = netPendingInput[slot];
         netHasPendingInput[slot] = false;
         if(gameMode==GAME_MODE_FIREFIGHT && firefightWaveState==FIREFIGHT_STATE_LOOT && (command.pressed&NET_INPUT_PREP_READY))prepReady[slot]=!prepReady[slot];
@@ -21491,6 +21494,9 @@ static bool run_ai_awareness_smoke_test(void) {
 
 #include "combat_clarity_menu.inc"
 #include "couch_ui.inc"
+#include "victory_town.inc"
+#include "victory_town_credits.inc"
+#include "firefight_victory.inc"
 #include "enemy_lab.inc"
 static void eq_lab(void){
     enemy_lab_start(ENEMY_TYPE_STANDARD);equipmentLab=true;enemy_cleanup(true);clear_world_voxels();clear_pickups();eq_reset_all();
@@ -21728,6 +21734,7 @@ int main(int argc, char **argv) {
             //SetLoggingEnabled(!logsEnabled);
         }
         if(enemyLab) enemy_lab_controls();
+        if (ffend_frame(GetFrameTime())){for(int i=0;i<MAX_PLAYERS;i++)equipment[i].buildHeld=false;continue;}
         if (couch_frame()){aim_focus_tick();for(int i=0;i<MAX_PLAYERS;i++)equipment[i].buildHeld=false;continue;}
         if(gameState!=GAME_STATE_PLAYING)for(int i=0;i<MAX_PLAYERS;i++)equipment[i].buildHeld=false;
         switch (gameState) {
@@ -23117,6 +23124,7 @@ int main(int argc, char **argv) {
 
         }
     }
+    ffend_reset();
     shutdown_pbd_thread_pool();
     golem_physics_reset();
     foundry_traps_reset();

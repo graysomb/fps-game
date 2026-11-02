@@ -11,8 +11,7 @@ try {
  & gcc tests/render_victory_town.c @src -std=c11 -O2 @defs "-I.build/raylib-gl$GL/src" -Ithird_party/enet/include "-L.build/raylib-gl$GL/src" -lraylib -lopengl32 -lgdi32 -lwinmm -lws2_32 -lpthread -lm -o "$dest/victory-town.exe"
  if($LASTEXITCODE -ne 0){throw 'Preview build failed'}
  Copy-Item shaders $dest -Recurse -Force
- New-Item -ItemType Directory -Force "$dest/assets/audio" | Out-Null
- Copy-Item assets/audio/pretty-good.mp3 "$dest/assets/audio/pretty-good.mp3" -Force
+ Copy-Item assets $dest -Recurse -Force
  Copy-Item tests/VICTORY_TOWN.md "$dest/README.md" -Force
  foreach($dll in @('libwinpthread-1.dll','libgcc_s_seh-1.dll')){if(Test-Path "$ToolchainBin/$dll"){Copy-Item "$ToolchainBin/$dll" $dest -Force}}
  New-Item -ItemType Directory -Force "$dest/artifacts/victory-town/frames","$dest/artifacts/victory-town/scenes","$dest/artifacts/victory-town/qa" | Out-Null

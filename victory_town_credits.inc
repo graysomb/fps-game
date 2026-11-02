@@ -1,3 +1,5 @@
+#ifndef VICTORY_TOWN_CREDITS_INCLUDED
+#define VICTORY_TOWN_CREDITS_INCLUDED
 /* Presentation-only credits, drawn after scene composition and bloom.
  * The authored timeline also drives music playback, pause and seeking. */
 typedef struct { const char *heading,*lines[3]; } TownCredit;
@@ -32,3 +34,5 @@ static void town_credits_draw(float authoredTime,int width,int height){
   DrawText(credit->lines[i],x,y,textSize,Fade((Color){247,242,230,255},alpha));
  }
 }
+
+#endif

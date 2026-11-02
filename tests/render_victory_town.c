@@ -1,3 +1,4 @@
+#define VICTORY_TOWN_AUTHORING
 #define FIREFIGHT_TESTING
 #define main fps_application_main
 #include "../fps_ray.c"

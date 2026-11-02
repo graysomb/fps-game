@@ -83,6 +83,8 @@ elif [ -f "$project_root/shaders/pbd/pbd_pipeline.metallib" ]; then
     cp "$project_root/shaders/pbd/pbd_pipeline.metallib" "$bin_dir/shaders/pbd/pbd_pipeline.metallib"
 fi
 cp -R "$project_root/shaders/." "$bin_dir/shaders/"
+mkdir -p "$bin_dir/assets"
+cp -R "$project_root/assets/." "$bin_dir/assets/"
 if [ -f "$project_root/game_song.mp3" ]; then
     cp "$project_root/game_song.mp3" "$bin_dir/game_song.mp3"
 fi
@@ -91,6 +93,9 @@ cp "$bin_dir/fps_ray" "$bin_dir/fps_ray_gpu" "$bin_dir/fps_ray_cpu" "$app_dir/Co
 cp "$project_root/macos/Info.plist" "$app_dir/Contents/Info.plist"
 mkdir -p "$app_dir/Contents/Resources/shaders"
 cp -R "$bin_dir/shaders/." "$app_dir/Contents/Resources/shaders/"
+mkdir -p "$app_dir/Contents/Resources/assets" "$app_dir/Contents/MacOS/assets"
+cp -R "$bin_dir/assets/." "$app_dir/Contents/Resources/assets/"
+cp -R "$bin_dir/assets/." "$app_dir/Contents/MacOS/assets/"
 if [ -f "$project_root/game_song.mp3" ]; then
     cp "$project_root/game_song.mp3" "$app_dir/Contents/Resources/game_song.mp3"
     cp "$project_root/game_song.mp3" "$app_dir/Contents/MacOS/game_song.mp3"

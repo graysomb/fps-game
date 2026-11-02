@@ -45,6 +45,7 @@ cc "$project_root/fps_ray.c" "$project_root/weapon_renderer.c" "$project_root/ch
 cc "$project_root/fps_ray.c" "$project_root/weapon_renderer.c" "$project_root/character_renderer.c" "$project_root/duck_renderer.c" $enet_sources -DGRAPHICS_API_OPENGL_43 -I"$raylib43/src" -L"$raylib43/src" -o "$bin_dir/fps_ray_gpu" -lraylib $common_flags
 cc "$project_root/fps_launcher.c" -std=c11 -O2 -o "$bin_dir/fps_ray"
 cp -a "$project_root/shaders" "$bin_dir/"
+cp -a "$project_root/assets" "$bin_dir/"
 if [ -f "$project_root/game_song.mp3" ]; then
     cp "$project_root/game_song.mp3" "$bin_dir/game_song.mp3"
 fi
