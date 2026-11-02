@@ -4,9 +4,11 @@ typedef struct {float *v,*n;unsigned char *c;int count,capacity;} TownMesh;
 enum TownMaterial { T_STONE,T_LEAF,T_GLOW,T_WATER,T_WOOD,T_METAL,T_CLOTH,T_GLASS,T_SOIL,T_COUNT };
 enum TownActivity { A_EAT,A_IDLE,A_READ,A_WORK,A_CARRY,A_WATER,A_LIFT };
 typedef struct {Model models[T_COUNT];Shader shader,depthShader;RenderTexture2D shadow;Matrix lightMatrix;bool ready;int triangles;} VictoryTown;
-typedef struct {float time,phase;int scene;Camera3D camera;} TownSample;
+#include "victory_town_scenes.inc"
+typedef struct {float time,phase;int scene;Camera3D camera;TownStoryFrame story;} TownSample;
 static VictoryTown town;
 static Vector3 townHands[16][2];
+static Vector3 townLiftHands[2];
 static CharacterPose townVisors[16];static int townVisorCount;
 static const Color townWood={99,63,38,255},townLeaf={76,131,70,255},townGold={255,189,76,255};
 static void town_tri(TownMesh *b,Vector3 a,Vector3 c,Vector3 d,Color color){
@@ -28,6 +30,7 @@ static void town_disc(TownMesh *b,Vector3 p,float r,float depth,Color c){
 }
 static Model town_upload(TownMesh *b){Mesh mesh={0};mesh.vertices=b->v;mesh.normals=b->n;mesh.colors=b->c;mesh.vertexCount=b->count;mesh.triangleCount=b->count/3;UploadMesh(&mesh,false);town.triangles+=mesh.triangleCount;return LoadModelFromMesh(mesh);}
 #include "victory_town_detail.inc"
+#include "victory_town_stories.inc"
 static void victory_town_init(void){
  assert(!town.ready);TownMesh b[T_COUNT]={0};
  /* Snapshot exposed authored surfaces, then release the simulation world. */
@@ -51,15 +54,19 @@ static void victory_town_init(void){
  for(int k=0;k<6;k++)town_box(&b[T_CLOTH],(Vector3){17+k*.65f,2.4f,14},(Vector3){.5f,.7f,.04f},k%2?(Color){143,181,188,255}:(Color){219,202,167,255},NULL);
  for(int k=0;k<32;k++){float z=-14+k;town_box(&b[0],(Vector3){11,.025f,z},(Vector3){.9f,.06f,.7f},(Color){127,137,124,255},NULL);if(k%3==0){town_plant(&b[T_LEAF],(Vector3){12,.12f,z},k,1,true);town_box(&b[2],(Vector3){10,.28f,z},(Vector3){.12f,.12f,.12f},townGold,NULL);}}
  town_details(b);
+ town_story_geometry(b);
  town.shader=LoadShader("shaders/victory_town.vert","shaders/victory_town.frag");
  for(int i=0;i<T_COUNT;i++){town.models[i]=town_upload(&b[i]);if(town.shader.id!=rlGetShaderIdDefault())town.models[i].materials[0].shader=town.shader;}
+ for(int k=0;k<SP_COUNT;k++)storyModels[k].materials[0].shader=town.shader;
  town_bake_shadow();
  town.ready=true;printf("Town cached triangles: %d\n",town.triangles);
 }
 static TownSample victory_town_sample(int scene,float time){
- TownSample s={.scene=scene,.time=time,.phase=fmodf(time,8)/8};float a=sinf(s.phase*2*PI);
- Camera3D cams[4]={{{4.1f,3.6f,-4.8f},{0,2.65f,0},{0,1,0},48,0},{{23.5f,3.5f,10.8f},{21.2f,1.25f,14.8f},{0,1,0},63,0},{{21.5f,5.4f,13.3f},{15.7f,.8f,9.5f},{0,1,0},60,0},{{39,17,-38},{0,6,0},{0,1,0},57,0}};
- s.camera=cams[scene];s.camera.position.x+=a*(scene==3?3:.16f);s.camera.position.y+=(scene==3?1.2f:0)*(1-cosf(s.phase*2*PI));return s;
+ assert(scene>=0&&scene<SC_COUNT);float duration=townScenes[scene].duration;
+ TownSample s={.scene=scene,.time=fmaxf(time,0),.phase=fmodf(fmaxf(time,0),duration)/duration};float a=sinf(s.phase*2*PI);
+ s.camera=townScenes[scene].camera;s.camera.position.x+=a*(scene==SC_WIDE?3:.16f);s.camera.position.y+=(scene==SC_WIDE?1.2f:0)*(1-cosf(s.phase*2*PI));
+ if(scene==SC_OBSERVATORY)s.camera.target.y+=.7f*(.5f-.5f*cosf(s.phase*2*PI));
+ s.story=town_story_sample(scene,s.time,s.camera);return s;
 }
 static Vector3 town_carry_floor(float time){float a=time*PI/4;return (Vector3){19+1.2f*sinf(a),0,12.7f+.2f*cosf(a)};}
 static float town_carry_yaw(float time){float a=time*PI/4;return atan2f(-1.2f*cosf(a),.2f*sinf(a))*RAD2DEG;}
@@ -80,7 +87,7 @@ static void town_mouse(Vector3 floor,float yaw,Color gear,int activity,float t,b
  if(activity==A_WATER){hand.y=.04f;hand.z=-.31f;}
  if(activity==A_LIFT){hand.y=.09f;hand.z=-.32f;}
  if(activity==A_CARRY){hand.x=side*.13f;hand.y=.07f;hand.z=-.28f;}
- hand=Vector3Transform(hand,body);townHands[townVisorCount][j]=hand;character_draw_arm(shoulder,hand,gear);
+ hand=Vector3Transform(hand,body);if(activity==A_LIFT&&j==1)townLiftHands[floor.x<9?0:1]=hand;townHands[townVisorCount][j]=hand;character_draw_arm(shoulder,hand,gear);
  if(j==0&&activity==A_EAT){DrawCylinder(hand,.12f,.08f,.09f,10,(Color){169,125,75,255});DrawCylinder(Vector3Add(hand,(Vector3){0,.05f,0}),.105f,.105f,.008f,10,(Color){98,134,43,255});}
  if(j==1&&activity==A_EAT){Vector3 tip=Vector3Add(hand,Vector3Transform((Vector3){0,0,-.16f},rotation));DrawCylinderEx(hand,tip,.012f,.012f,5,(Color){170,150,105,255});DrawSphere(tip,.035f,(Color){181,166,128,255});}
  if(j==1&&activity==A_CARRY){Vector3 center=Vector3Transform((Vector3){0,.04f,-.3f},body);rlPushMatrix();rlTranslatef(center.x,center.y,center.z);rlRotatef(yaw,0,1,0);DrawCube((Vector3){0},.43f,.24f,.3f,townWood);for(int q=0;q<4;q++)DrawSphere((Vector3){(q%2-.5f)*.16f,.14f,(q/2-.5f)*.12f},.075f,q%2?ORANGE:GREEN);rlPopMatrix();}
@@ -94,8 +101,9 @@ static void town_mouse(Vector3 floor,float yaw,Color gear,int activity,float t,b
 static void victory_town_draw(TownSample s,bool emission){
  if(!emission)townVisorCount=0;
  int pass=emission;bool shader=town.shader.id&&town.shader.id!=rlGetShaderIdDefault();
- if(shader){SetShaderValueMatrix(town.shader,GetShaderLocation(town.shader,"lightMatrix"),town.lightMatrix);SetShaderValueTexture(town.shader,GetShaderLocation(town.shader,"shadowMap"),town.shadow.texture);SetShaderValue(town.shader,GetShaderLocation(town.shader,"townTime"),&s.time,SHADER_UNIFORM_FLOAT);SetShaderValue(town.shader,GetShaderLocation(town.shader,"eye"),&s.camera.position,SHADER_UNIFORM_VEC3);SetShaderValue(town.shader,GetShaderLocation(town.shader,"emissionPass"),&pass,SHADER_UNIFORM_INT);}
+ if(shader){SetShaderValue(town.shader,GetShaderLocation(town.shader,"townPower"),&s.story.power,SHADER_UNIFORM_FLOAT);SetShaderValueMatrix(town.shader,GetShaderLocation(town.shader,"lightMatrix"),town.lightMatrix);SetShaderValueTexture(town.shader,GetShaderLocation(town.shader,"shadowMap"),town.shadow.texture);SetShaderValue(town.shader,GetShaderLocation(town.shader,"townTime"),&s.time,SHADER_UNIFORM_FLOAT);SetShaderValue(town.shader,GetShaderLocation(town.shader,"eye"),&s.camera.position,SHADER_UNIFORM_VEC3);SetShaderValue(town.shader,GetShaderLocation(town.shader,"emissionPass"),&pass,SHADER_UNIFORM_INT);}
  for(int mode=0;mode<T_COUNT;mode++){if(emission&&mode!=2)continue;if(shader)SetShaderValue(town.shader,GetShaderLocation(town.shader,"townMode"),&mode,SHADER_UNIFORM_INT);if(mode==T_GLASS){rlDrawRenderBatchActive();rlDisableDepthMask();}DrawModel(town.models[mode],(Vector3){0},1,WHITE);if(mode==T_GLASS){rlDrawRenderBatchActive();rlEnableDepthMask();}}
+ town_story_draw(s.story,s.scene,s.time,emission);
  Color colors[4]={SKYBLUE,RED,GREEN,GOLD};
  for(int k=0;k<4;k++){float a=k*PI/2;town_mouse((Vector3){sinf(a)*2.1f,2.25f,cosf(a)*2.1f},k*90,colors[k],A_EAT,s.time,emission);}
  town_mouse((Vector3){23,.19f,14},-25,SKYBLUE,A_READ,s.time,emission);
@@ -106,7 +114,7 @@ static void victory_town_draw(TownSample s,bool emission){
  town_mouse((Vector3){-21,5.75f,-20},0,SKYBLUE,A_READ,s.time,emission);
  if(emission)camp_draw_at(s.camera,(Vector3){0,2.24f,0},s.time,true);
  if(!emission){DuckPose duck={.position={19+.55f*cosf(s.time*PI/4),.04f,9+sinf(s.time*PI/4)},.yaw=-s.time*45,.scale=.65f,.time=s.time,.speed=.5f};duck_draw_floor(duck,true);duck_draw(duck);
- Vector3 block={9.5f,1.4f+.2f*sinf(s.time*PI/2),12};DrawCube(block,.6f,.6f,.6f,(Color){140,159,165,255});weapon_draw_drain_state(townHands[8][1],block,s.time,true);weapon_draw_drain_state(townHands[9][1],block,s.time,true);
+ Vector3 block={9.5f,1.4f+.2f*sinf(s.time*PI/2),12};DrawCube(block,.6f,.6f,.6f,(Color){140,159,165,255});weapon_draw_drain_state(townLiftHands[0],block,s.time,true);weapon_draw_drain_state(townLiftHands[1],block,s.time,true);
  for(int i=0;i<townVisorCount;i++)for(int j=i+1;j<townVisorCount;j++)if(Vector3DistanceSqr(townVisors[j].position,s.camera.position)>Vector3DistanceSqr(townVisors[i].position,s.camera.position)){CharacterPose p=townVisors[i];townVisors[i]=townVisors[j];townVisors[j]=p;}
  for(int i=0;i<townVisorCount;i++)character_draw_visor(townVisors[i]);
  character_presentation_light((Vector3){1,1,1},0);
@@ -115,10 +123,11 @@ static void victory_town_draw(TownSample s,bool emission){
  character_presentation_light((Vector3){1,1,1},0);
 }
 static void victory_town_shutdown(void){
- if(!town.ready)return;Shader fallback={.id=rlGetShaderIdDefault(),.locs=rlGetShaderLocsDefault()};for(int i=0;i<T_COUNT;i++){town.models[i].materials[0].shader=fallback;UnloadModel(town.models[i]);}if(town.shadow.id)UnloadRenderTexture(town.shadow);if(town.depthShader.id&&town.depthShader.id!=fallback.id)UnloadShader(town.depthShader);if(town.shader.id&&town.shader.id!=fallback.id)UnloadShader(town.shader);town=(VictoryTown){0};
+ if(!town.ready)return;Shader fallback={.id=rlGetShaderIdDefault(),.locs=rlGetShaderLocsDefault()};for(int i=0;i<T_COUNT;i++){town.models[i].materials[0].shader=fallback;UnloadModel(town.models[i]);}town_story_shutdown();if(town.shadow.id)UnloadRenderTexture(town.shadow);if(town.depthShader.id&&town.depthShader.id!=fallback.id)UnloadShader(town.depthShader);if(town.shader.id&&town.shader.id!=fallback.id)UnloadShader(town.shader);town=(VictoryTown){0};
 }
 
-static void town_sky(Camera3D camera,float time) {
+static void town_sky(TownSample sample) {
+ Camera3D camera=sample.camera;float time=sample.time;
  const Color horizon={19,31,43,255};
     // One sky per viewport, before periodic world images. Direction only: no
     // parallax, tile repetition or discontinuity when the player wraps.
@@ -135,7 +144,7 @@ static void town_sky(Camera3D camera,float time) {
         SetShaderValue(nightSkyShader,GetShaderLocation(nightSkyShader,"viewUp"),&up,SHADER_UNIFORM_VEC3);
         SetShaderValue(nightSkyShader,GetShaderLocation(nightSkyShader,"viewport"),&viewport,SHADER_UNIFORM_VEC4);
         SetShaderValue(nightSkyShader,GetShaderLocation(nightSkyShader,"hazeColor"),&haze,SHADER_UNIFORM_VEC3);
-        Vector4 trail;float glow;shooting_star_sample(time,&trail,&glow);
+        Vector4 trail;float glow;shooting_star_sample(time,&trail,&glow);if(sample.scene==SC_OBSERVATORY){trail=sample.story.meteor;glow=sample.story.meteorGlow;}
         SetShaderValue(nightSkyShader,GetShaderLocation(nightSkyShader,"meteorTrail"),&trail,SHADER_UNIFORM_VEC4);
         SetShaderValue(nightSkyShader,GetShaderLocation(nightSkyShader,"meteorGlow"),&glow,SHADER_UNIFORM_FLOAT);
         Texture2D space=generated_space_texture();
@@ -164,7 +173,27 @@ static void town_sky(Camera3D camera,float time) {
 }
 
 static void victory_town_validate(void){
+ assert(SC_COUNT==8 && fabsf(town_duration()-64)<.001f);
+ for(int scene=0;scene<SC_COUNT;scene++)for(int f=0;f<160;f++){
+  TownSample a=victory_town_sample(scene,f/20.f),b=victory_town_sample(scene,f/20.f);
+  assert(!memcmp(&a.story,&b.story,sizeof(a.story)));
+  assert(a.story.count+11<=16 && a.story.power>=0 && a.story.power<=1);
+  for(int k=0;k<a.story.count;k++){
+   StoryActor actor=a.story.actors[k];assert(actor.scale>0 && isfinite(actor.floor.y));
+   for(int h=0;h<2;h++)assert(isfinite(actor.hands[h].x)&&isfinite(actor.hands[h].y)&&isfinite(actor.hands[h].z));
+  }
+  if(scene==SC_PLAYGROUND)for(int k=0;k<2;k++){
+   Vector3 anchor={31+(k?.32f:-.32f),3,-31},seat=Vector3Add(a.story.swingSeat,(Vector3){k?.32f:-.32f,0,0});
+   assert(fabsf(Vector3Distance(anchor,seat)-2.1f)<.0001f);
+  }
+ }
+ TownSample transfer=victory_town_sample(SC_MARKET,4);
+ assert(transfer.story.breadOwner==R_BUYER);
+ assert(Vector3Distance(transfer.story.bread,story_world_hand(&transfer.story.actors[1],1))<.0001f);
+ assert(victory_town_sample(SC_OBSERVATORY,5.6f).story.meteorGlow>.9f);
+ for(int k=0;k<SP_COUNT;k++)for(int i=0;i<storyModels[k].meshes[0].vertexCount*3;i++)assert(isfinite(storyModels[k].meshes[0].vertices[i]));
+
  for(int m=0;m<T_COUNT;m++)for(int i=0;i<town.models[m].meshes[0].vertexCount*3;i++){assert(isfinite(town.models[m].meshes[0].vertices[i]));assert(isfinite(town.models[m].meshes[0].normals[i]));}
- for(int scene=0;scene<4;scene++)for(int k=0;k<9;k++){TownSample s=victory_town_sample(scene,k);Vector3 delta=Vector3Subtract(s.camera.target,s.camera.position);RayCollision hit=GetRayCollisionMesh((Ray){s.camera.position,Vector3Normalize(delta)},town.models[T_STONE].meshes[0],MatrixIdentity());if(hit.hit&&hit.distance<.5f){fprintf(stderr,"Camera intersects scenery: scene %d time %d distance %.3f\n",scene,k,hit.distance);assert(false);}}
+ for(int scene=0;scene<SC_COUNT;scene++)for(int k=0;k<9;k++){TownSample s=victory_town_sample(scene,k);Vector3 delta=Vector3Subtract(s.camera.target,s.camera.position);RayCollision hit=GetRayCollisionMesh((Ray){s.camera.position,Vector3Normalize(delta)},town.models[T_STONE].meshes[0],MatrixIdentity());if(hit.hit&&hit.distance<.5f){fprintf(stderr,"Camera intersects scenery: scene %d time %d distance %.3f\n",scene,k,hit.distance);assert(false);}}
  puts("Town finite geometry and camera clearance passed");
 }
