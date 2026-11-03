@@ -6,6 +6,7 @@ static float ai_random(int i) {
 }
 static void ai_reset(int i) {
     if(i<0 || i>=MAX_COMBATANTS)return;
+    aiNavigation[i]=(AiNavigation){0};
     fp_pair_clear(i);
     shieldEscort[i]=0;
     for(int j=0;j<MAX_COMBATANTS;j++)if(shieldEscort[j]==i+1)shieldEscort[j]=0;
@@ -32,7 +33,7 @@ static void ai_cancel_burst(int i) {
 static void ai_select(int i,int target,Vector3 position,AiAlert source) {
     AiCombat *a=&aiCombat[i];
     if(a->target!=target){ai_cancel_burst(i);a->reaction=ai_reaction(i);a->tracking=0;a->visible=false;a->wasVisible=false;a->commit=1.5f;a->intentTime=0;}
-    a->target=target;a->known=position;a->memory=4;a->source=source;
+    a->target=target;a->known=position;a->memory=AI_PURSUIT_SECONDS;a->source=source;
 }
 static void ai_alert(int victim,int attacker,Vector3 position,AiAlert source) {
     if(netTransport.role==NET_ROLE_CLIENT || !ai_hostile(victim,attacker) || !is_player_bot(victim) || players[victim].respawn_timer>0)return;
@@ -122,7 +123,7 @@ static void ai_tick(int i,float dt) {
     }
     if(!valid || (!visible && a->memory<=0 && !locked)){a->target=-1;a->memory=0;visible=false;}
     if(visible) {
-        a->known=ai_target_body(a->target)->pos;a->memory=4;
+        a->known=ai_target_body(a->target)->pos;a->memory=AI_PURSUIT_SECONDS;
         if(!a->wasVisible){a->reaction=fmaxf(a->reaction,ai_reaction(i));a->tracking=0;}
         Vector3 velocity=ai_target_body(a->target)->vel;velocity.y=0;
         if(v_length(velocity)>1 && v_length(a->lastTargetVelocity)>1 && v_dot(v_norm(velocity),v_norm(a->lastTargetVelocity))<0)a->tracking=0;

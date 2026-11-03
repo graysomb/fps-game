@@ -24,7 +24,8 @@ static void fp_update_carrier(int i,float dt){
  Vector3 delta=world_delta(a->known,p->pos);float distance=v_length(delta);ai_aim(i,a->known,dt);
  int gun=eq_gun(i);float desired=gun==EQ_BLADE?SWORD_REACH*.65f:gun==EQ_SHOTGUN?6:gun==EQ_CUTTER?12:gun==EQ_RAIL||gun==EQ_DMR?22:10;
  Vector3 move=delta;move.y=0;
- if(escort)shield_escort_move(i,dt);
+ if(!a->visible)bot_apply_move(p,&botStates[i],v_length(move)>.4f?move:(Vector3){0},MOVE_SPEED*.8f,dt);
+ else if(escort)shield_escort_move(i,dt);
  else if(paired)fp_pair_move(i,dt);
  else if(distance>desired)bot_apply_move(p,&botStates[i],move,MOVE_SPEED*.8f,dt);else p->vel.x=p->vel.z=0;
  if(!a->visible || a->reaction>0){eq_cancel_charge(i);return;}

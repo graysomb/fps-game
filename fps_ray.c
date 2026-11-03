@@ -1891,7 +1891,7 @@ typedef enum {
     SFX_TETHER,
     SFX_WIN,
     SFX_SHIELD_BREAK,
-    SFX_STEP_1, SFX_STEP_2, SFX_STEP_3,
+    SFX_STEP_1, SFX_STEP_2, SFX_STEP_3, SFX_SQUEAK,
     SFX_COUNT
 } SfxId;
 
@@ -1910,7 +1910,7 @@ static const float sfxCooldowns[SFX_COUNT] = {
     0.1f,  // tether
     0.0f,  // win
     0.1f,  // shield break
-    .08f,.08f,.08f
+    .08f,.08f,.08f,0
 };
 static const float sfxChances[SFX_COUNT] = {
     1.00f,  // fire
@@ -1925,7 +1925,7 @@ static const float sfxChances[SFX_COUNT] = {
     1.00f,  // tether
     1.00f,  // win
     1.00f,  // shield break
-    1,1,1
+    1,1,1,1
 };
 static bool sfxReady = false;
 static float smushBannerTimer = 0.0f;
@@ -2199,6 +2199,19 @@ static Wave make_sfx_wave(float freq1, float freq2, float duration,
     return wave;
 }
 
+/* A short voiced chirp, with a rising/falling pitch and soft ends (no clicks). */
+static Wave make_hologram_squeak(void) {
+    const int rate=44100,count=10584;
+    short *data=malloc(count*sizeof(*data));if(!data)return (Wave){0};
+    float phase=0;
+    for(int n=0;n<count;n++){
+        float t=(float)n/count,arch=sinf(PI*t);
+        float frequency=1800+1900*arch+100*sinf(2*PI*7*t);
+        phase+=2*PI*frequency/rate;
+        data[n]=(short)(32767*.38f*arch*arch*(sinf(phase)+.18f*sinf(2*phase)));
+    }
+    return (Wave){.data=data,.frameCount=count,.sampleRate=rate,.sampleSize=16,.channels=1};
+}
 static Wave make_footstep_wave(int variant) {
     Wave w={.frameCount=3969,.sampleRate=44100,.sampleSize=16,.channels=1};
     short *data=calloc(w.frameCount,sizeof(short));if(!data)return (Wave){0};
@@ -2404,6 +2417,8 @@ static void init_sfx(void)
         wave=make_footstep_wave(n);
         sfxSounds[SFX_STEP_1+n]=LoadSoundFromWave(wave);UnloadWave(wave);
     }
+    wave=make_hologram_squeak();
+    sfxSounds[SFX_SQUEAK]=LoadSoundFromWave(wave);UnloadWave(wave);
     sfxReady = true;
     init_game_music();
 }
@@ -6038,7 +6053,21 @@ static bool voxel_outside_world_bounds(const Voxel *voxel) {
 // one at a time would tear a connected island apart and could leave shared
 // particles behind. Select complete physical islands. Normally every member
 // must be sleeping and aged; a queued-original deadline instead removes the
-// complete island unconditionally before its static source begins rebuilding.
+// complete island before its static source rebuilds, unless a tether holds it.
+/* Recycling must preserve the entire physical component of a live tether. */
+static bool recycle_voxel_held(int v) {
+    int tags[2]={tetherTag[v],tetherHoldClusterTag[v]};
+    for(int k=0;k<2;k++)if(tags[k]>0 && tags[k]<=MAX_COMBATANTS && players[tags[k]-1].tetherHolding)return true;
+    for(int p=0;p<activePlayers;p++)if(players[p].tetherHolding && players[p].tetherVoxelIdentity==voxels[v].identity)return true;
+    return false;
+}
+static unsigned char recycleHeldIsland[MAX_VOXELS];
+static void recycle_mark_held_islands(void) {
+    memset(recycleHeldIsland,0,(size_t)voxel_count);
+    for(int v=0;v<voxel_count;v++)if(recycleLifetimeParent[v]>=0 && recycle_voxel_held(v))
+        recycleHeldIsland[recycle_lifetime_find_root(v)]=1;
+    for(int v=0;v<voxel_count;v++)if(recycleLifetimeParent[v]>=0 && recycleHeldIsland[recycle_lifetime_find_root(v)])voxels[v].lifeFrames=0;
+}
 static bool recycle_sleeping_voxel_islands(void)
 {
     if (voxel_count <= 0) return false;
@@ -6076,7 +6105,7 @@ static bool recycle_sleeping_voxel_islands(void)
     int ready_islands = 0;
     int ready_voxels = 0;
     for (int root = 0; root < voxel_count; ++root) {
-        if (recycleLifetimeParent[root] != root) continue;
+        if (recycleLifetimeParent[root] != root || recycleHeldIsland[root]) continue;
         bool deadline_due = recycleRestorationDue[root] != 0;
         bool normal_ready = recycleComponentAllSleeping[root] &&
                             (recycleLifetimeExpired[root] || recycleLifetimeOutside[root]);
@@ -6239,7 +6268,7 @@ static bool freeze_lifetime_expired_islands(void)
     bool restored_static = false;
     for (int root = 0; root < voxel_count; ++root) {
         if (recycleLifetimeParent[root] != root ||
-            !recycleComponentAllAwake[root] || !recycleLifetimeExpired[root]) {
+            recycleHeldIsland[root] || !recycleComponentAllAwake[root] || !recycleLifetimeExpired[root]) {
             continue;
         }
         int count = 0;
@@ -6253,7 +6282,8 @@ static bool freeze_lifetime_expired_islands(void)
         bool converted = near_original
             ? restore_glue_cluster_to_static(glueClusterIndices, count)
             : freeze_dynamic_cluster_in_place(glueClusterIndices, count);
-        if (!converted) continue;
+        // Even a failed restore can compact indices while rolling back snapshots.
+        if (!converted && !near_original) continue;
 
         changed = true;
         restored_static = near_original;
@@ -6271,6 +6301,9 @@ static bool freeze_lifetime_expired_islands(void)
         rebuild_all_voxel_surfaces();
         rebuild_glue_constraints();
         refresh_static_voxel_beliefs();
+        // Static publication compacts voxel indices, including held islands.
+        build_recycle_physical_island_graph();
+        recycle_mark_held_islands();
     }
     return changed;
 }
@@ -6293,6 +6326,7 @@ static void recycle_dead_voxels(float dt) {
             voxel->lifeFrames = 0;
             continue;
         }
+        if(recycle_voxel_held(i)){voxel->lifeFrames=0;continue;}
         if(voxel->owner==ENEMY_SCRAP_OWNER)voxel->lifeFrames=0;
         else voxel->lifeFrames++;
         if (voxel->restorationQueued && voxel->restorationDeadlineFrame > 0 &&
@@ -6331,6 +6365,7 @@ static void recycle_dead_voxels(float dt) {
     }
 
     bool has_physical_islands = build_recycle_physical_island_graph();
+    if(has_physical_islands)recycle_mark_held_islands();
     if (has_physical_islands && freeze_lifetime_expired_islands()) {
         has_sleeping_voxels = true;
     }
@@ -10702,6 +10737,8 @@ static void handle_pbd_projectile_hits(void)
                 v->tetherReleaseOverlap=0;
             }
             if ((player_uses_rat(j)||players[j].enemyType==ENEMY_TYPE_FOUNDRY)?human_hit:(fabsf(dx) < threshold && fabsf(dy) < threshold && fabsf(dz) < threshold)) {
+                bool held=recycle_voxel_held(i);
+                if(held && players[j].contactDamageTimer>0)continue;
                 if(clarity_debris_hit(i,j))continue;
                 if(enemy_lob_hit(i,j))continue;
                 if (dynamic_voxel_glued_to_static(i)) {
@@ -10750,6 +10787,7 @@ static void handle_pbd_projectile_hits(void)
                     apply_matter_damage(j, attacker, damage);
                 }
                 damageOriginKnown=priorOriginKnown;damageOrigin=priorOrigin;
+                if(held){players[j].contactDamageTimer=.35f;break;}
                 remove_voxel_index(i);
                 removed = true;
                 break;
@@ -18716,7 +18754,7 @@ static bool player_aabb_hits_world_ex(Vector3 pos, float half, int player_idx) {
             for (int z = minz; z <= maxz; ++z) {
                 int voxel_idx = table_get(x, y, z);
                 if (voxel_idx >= 0 && voxel_idx < voxel_count) {
-                    if (player_idx < 0 || get_goliath_owner_of_voxel(voxel_idx) != player_idx)
+                    if (player_idx < 0 || (get_goliath_owner_of_voxel(voxel_idx) != player_idx && enemy_equipment_owner(voxel_idx) != player_idx))
                         return true;
                     if (table_get_static_only(x, y, z) >= 0) return true;
                 }
@@ -19341,8 +19379,11 @@ static Vector3 swarmer_approach(int index,int target,Vector3 destination,bool vi
     return v_add(radial,v_mul(tangent,blend*clampf(turn*1.4f+separation*.7f,-1.8f,1.8f)));
 }
 
+#include "ai_navigation.inc"
+
 static void bot_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float speed, float dt)
 {
+    desired_dir=ai_navigation_direction(bot,desired_dir,dt);
     desired_dir.y = 0.0f;
     float len = v_length(desired_dir);
     float half = player_collision_half(bot);
@@ -19350,6 +19391,7 @@ static void bot_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float
     if (player_idx < 0 || player_idx >= MAX_COMBATANTS || &players[player_idx] != bot) {
         player_idx = -1;
     }
+    if(player_idx>=0 && aiNavigation[player_idx].count && dt>0)speed=fminf(speed,len/dt);
     float probe = speed * fmaxf(dt, 1.0f / 60.0f) + 0.2f;
     if (len < 1e-3f) {
         bot->vel.x = 0.0f;
@@ -19784,20 +19826,7 @@ static void UpdateBot(int playerIdx, float dt) {
         bs->justBuilt = false;
     }
 
-    if (moving) {
-        float len = v_length(moveDir);
-        if (len > 0.01f) {
-            moveDir = v_mul(moveDir, 1.0f / len);
-            bot->vel.x = moveDir.x * MOVE_SPEED;
-            bot->vel.z = moveDir.z * MOVE_SPEED;
-        } else {
-            bot->vel.x = 0.0f;
-            bot->vel.z = 0.0f;
-        }
-    } else {
-        bot->vel.x = 0.0f;
-        bot->vel.z = 0.0f;
-    }
+    bot_apply_move(bot,bs,moving?moveDir:(Vector3){0},MOVE_SPEED,dt);
 
     if(aimingAtEnemy)ai_aim(playerIdx,lookTarget,dt);
     else {

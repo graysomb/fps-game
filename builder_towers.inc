@@ -74,7 +74,8 @@ static bool tower_place(EnemyStructure *t){
     }
     if(!missing){t->built=true;return true;}
     if(voxel_count+missing>=MAX_VOXELS || particle_pool_count-free_particle_count+8*missing>=MAX_PARTICLES)return false;
-    for(int i=0;i<activePlayers;i++)if(players[i].tetherHolding){int v=resolve_tether_voxel(&players[i])?players[i].tetherVoxel:-1;if(v>=0 && voxels[v].towerTag==t->tag){players[i].tetherHolding=players[i].goldTetherHolding=false;players[i].tetherVoxel=-1;players[i].tetherVoxelIdentity=0;}}
+    // Repair cannot confiscate debris currently being used by a player.
+    for(int v=0;v<voxel_count;v++)if(voxels[v].towerTag==t->tag && recycle_voxel_held(v))return false;
     for(int v=voxel_count-1;v>=0;v--)if(voxels[v].towerTag==t->tag && voxels[v].simulate)remove_voxel_index(v);
     uint64_t created[ENEMY_STRUCTURE_CELLS];int count=0;
     for(int k=0;k<towerCellCount;k++){

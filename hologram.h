@@ -6,7 +6,7 @@ typedef struct {
     uint32_t generation;
     Color color;
     WeaponKind weapon;
-    bool armed;
+    bool armed,arrivalAnnounced;
     Vector3 direction,visualTarget;
     CharacterAnimation animation;
     CharacterPose pose;

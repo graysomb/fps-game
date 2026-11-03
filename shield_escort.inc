@@ -88,7 +88,8 @@ static bool shield_escort_default(int i,float dt){
  if(!anchor && (players[i].isExposed || players[i].matter<MATTER_SHOT_COST))return false;
  if(towerRifles[i].tag)tower_release(i);
  ai_tick(i,dt);if(clarity_evade(i,dt))return true;
- shield_escort_move(i,dt);
+ if(aiCombat[i].target>=0 && !aiCombat[i].visible) {Vector3 move=world_delta(aiCombat[i].known,players[i].pos);move.y=0;bot_apply_move(&players[i],&botStates[i],v_length(move)>.4f?move:(Vector3){0},MOVE_SPEED*.8f,dt);}
+ else shield_escort_move(i,dt);
  if(aiCombat[i].target>=0){
   ai_aim(i,aiCombat[i].known,dt);
   if(!players[i].isExposed && players[i].matter>=MATTER_SHOT_COST && ai_ready_to_fire(i) && shield_escort_clear_shot(i))FireVoxel(i);

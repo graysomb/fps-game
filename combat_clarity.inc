@@ -23,7 +23,7 @@ static void play_sfx_at(SfxId id,Vector3 pos,int source,int priority,float pitch
     Vector3 delta=world_delta(pos,players[listener].pos),right=v_cross(player_forward(&players[listener]),(Vector3){0,1,0});
     float gain=clampf((30-distance)/27,0,1);VoxelHit hit;
     if(distance>.1f && first_voxel_hit_detailed((Ray){players[listener].pos,v_norm(delta)},distance-.2f,-1,true,&hit))gain*=.4f;
-    SetSoundVolume(v->sound,gain*(id>=SFX_STEP_1?.25f:1));SetSoundPan(v->sound,.5f+.45f*v_dot(v_norm(delta),v_norm(right)));
+    SetSoundVolume(v->sound,gain*(id>=SFX_STEP_1 && id<=SFX_STEP_3?.25f:1));SetSoundPan(v->sound,.5f+.45f*v_dot(v_norm(delta),v_norm(right)));
     SetSoundPitch(v->sound,pitch);PlaySound(v->sound);claritySoundLast[src][id]=clarityClock;
 }
 static void clarity_reset(void) {
@@ -37,6 +37,7 @@ static void clarity_reset(void) {
     for(int i=0;i<MAX_COMBATANTS;i++)grenadeInventory[i]=fp_active()?0:1;
 }
 static void clarity_effect(ClarityEffect e,bool broadcast) {
+    if(e.kind==4){play_sfx_at(SFX_SQUEAK,e.pos,e.attacker,2,1);if(broadcast)clarity_net_event(e);return;}
     int slot=0;for(int n=0;n<CLARITY_EFFECTS;n++){if(!clarityEffects[n].id){slot=n;break;}if(clarityEffects[n].age>clarityEffects[slot].age)slot=n;}
     clarityEffects[slot]=e;
     if(e.kind==1){play_sfx_at(SFX_DEATH,e.pos,-1,3,e.type==ENEMY_TYPE_SWARMER?1.6f:.8f);if(e.attacker>=0 && e.attacker<MAX_COMBATANTS){killConfirm[e.attacker]=.45f;if(net_player_is_local(e.attacker) && !is_player_bot(e.attacker))play_sfx(SFX_KILL);}}

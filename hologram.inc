@@ -71,6 +71,22 @@ static void hologram_blast(Vector3 pos,float radius,float damage) {
         if(distance<radius && !is_view_occluded_by_voxels(pos,holograms[n].body.pos))hologram_damage(MAX_COMBATANTS+n,damage*(1-distance/radius));
     }
 }
+static void hologram_arrived(int owner) {
+    Hologram *h=&holograms[owner];if(h->arrivalAnnounced)return;
+    h->arrivalAnnounced=true;
+    clarity_effect((ClarityEffect){.id=clarityNextId++,.kind=4,.pos=h->body.pos,.attacker=owner},true);
+    for(int i=0;i<activePlayers;i++)if(is_player_bot(i) && players[i].respawn_timer<=0 &&
+        ai_hostile(i,MAX_COMBATANTS+owner) && v_length(world_delta(players[i].pos,h->body.pos))<=24) {
+        if(!aiCombat[i].initialized)ai_reset(i);
+        ai_select(i,MAX_COMBATANTS+owner,h->body.pos,AI_ALERT_HEARD);
+        if(fp_pair_valid(i)) {
+            int mate=fpPairs[i].mate-1;
+            fpPairs[i].target=fpPairs[mate].target=MAX_COMBATANTS+owner;
+            fpPairs[i].known=fpPairs[mate].known=h->body.pos;
+            fpPairs[i].memory=fpPairs[mate].memory=AI_PURSUIT_SECONDS;
+        }
+    }
+}
 static void hologram_tick(float dt) {
     if(enemyLab && enemyLabPaused && !enemyLabStep)return;
     dt=clampf(dt,0,.25f);
@@ -104,6 +120,7 @@ static void hologram_tick(float dt) {
                 h->body.pos=world_wrap(h->body.pos);
                 if(!worldPeriodic){h->body.pos.x=clampf(h->body.pos.x,-FLOOR_SIZE+.4f,FLOOR_SIZE-.4f);h->body.pos.z=clampf(h->body.pos.z,-FLOOR_SIZE+.4f,FLOOR_SIZE-.4f);}
             }
+            if(h->travelRemaining<=0)hologram_arrived(n);
             for(int i=0;i<activePlayers;i++)if(is_player_bot(i) && players[i].respawn_timer<=0 && ai_hostile(i,MAX_COMBATANTS+n) && players[i].contactDamageTimer<=0) {
                 bool swarm=players[i].enemyType==ENEMY_TYPE_SWARMER,goliath=players[i].enemyType==ENEMY_TYPE_GOLIATH;
                 if((swarm || goliath) && v_length(world_delta(players[i].pos,h->body.pos))<(swarm?.75f:1.6f)) {

@@ -61,7 +61,7 @@ static void fp_pairs_tick(float dt){
    }
    seen=s.target>=0;
   }
-  if(seen){s.known=ai_target_body(s.target)->pos;s.memory=4;}
+  if(seen){s.known=ai_target_body(s.target)->pos;s.memory=AI_PURSUIT_SECONDS;}
   s.patrolTime=fmaxf(0,s.patrolTime-dt);
   if(s.target<0 && s.patrolTime<=0){
    Vector3 center=v_add(players[i].pos,v_mul(world_delta(players[j].pos,players[i].pos),.5f));
