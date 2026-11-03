@@ -28,7 +28,7 @@ static void arsenal_tests(void){
     assert(goShields[GOLEM_HAND_L].value==50&&goFight.shield==150);
     assert(go_shield_hit(cell,35)&&goShields[GOLEM_HAND_R].value==0);
     assert(go_find(goCells[goMount[GOLEM_HAND_R]].id,cell)>=0);
-    recycleFrameCounter++;assert(!go_shield_hit(cell,1));
+    recycleUpdateCounter++;assert(!go_shield_hit(cell,1));
     goFight.time=7.9f;go_shields_tick(.1f);assert(goShields[GOLEM_HAND_R].value==0);
     goFight.time=8;go_shields_tick(1);assert(goShields[GOLEM_HAND_R].value==5);
     goShields[GOLEM_HAND_R].suppressed=5;go_shields_tick(1);assert(goShields[GOLEM_HAND_R].value==5);
@@ -58,7 +58,7 @@ static void shield_weapon_tests(void){
     eq_shotgun_impacts(0,impacts,EQ_PELLETS);assert(goShields[part].value==25);
     SwordWave wave={0};VoxelHit hit={.id=v};
     assert(!sword_cut_hit(0,&wave,hit));assert(goShields[part].value==0);
-    recycleFrameCounter++;assert(!sword_cut_hit(0,&wave,hit));assert(enemy_voxel(id)>=0);
+    recycleUpdateCounter++;assert(!sword_cut_hit(0,&wave,hit));assert(enemy_voxel(id)>=0);
     fixture();v=goCells[goMount[GOLEM_HAND_R]].index;id=voxels[v].identity;
     eq_rocket_blast((EquipmentRocket){.owner=0,.pos=voxels[v].pos});
     assert(enemy_voxel(id)>=0);assert(goShields[GOLEM_HAND_R].value==0);

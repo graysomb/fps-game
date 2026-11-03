@@ -27,9 +27,9 @@ static bool go_shielded(int v){int p=go_shield_part(v);return p>=0&&goShields[p]
 static bool go_shield_hit(int v,float damage){
     int p=go_shield_part(v);if(p<0)return false;
     GoPartShield *s=&goShields[p];
-    if(s->value<=0)return s->brokenFrame==recycleFrameCounter;
+    if(s->value<=0)return s->brokenFrame==recycleUpdateCounter;
     s->lastHit=goFight.time;s->flash=.25f;s->value=fmaxf(0,s->value-fmaxf(0,damage));
-    if(s->value<=0){s->brokenFrame=recycleFrameCounter;play_sfx_at(SFX_SHIELD_BREAK,voxels[v].pos,MAX_PLAYERS,2,.8f);}
+    if(s->value<=0){s->brokenFrame=recycleUpdateCounter;play_sfx_at(SFX_SHIELD_BREAK,voxels[v].pos,MAX_PLAYERS,2,.8f);}
     return true;
 }
 static void go_shields_tick(float dt){

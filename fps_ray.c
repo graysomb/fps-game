@@ -607,6 +607,8 @@ static float worldFloorHalfSize=20.0f;
 #define GLUE_BREAK_VELOCITY_SKIP_FRAMES 3
 #define GLUE_VIRTUAL_EDGE_STRENGTH 0.4f
 #define GLUE_VIRTUAL_CENTER_STRENGTH 0.2f
+// Legacy frame-named lifetime fields store 60 Hz elapsed-time ticks, not rendered frames.
+#define RECYCLE_TICKS_PER_SECOND 60.0
 #define RECYCLE_DYNAMIC_MAX_FRAMES (60 * 10)
 #define CHUNK_SIZE 32
 #define CHUNK_SHIFT 5
@@ -1229,7 +1231,7 @@ typedef struct {
     uint8_t supportMask;
     uint8_t skipCollisionVelocityFrames;
     uint8_t tetherThrowCcdFrames;
-    int lifeFrames;
+    int lifeFrames; // Elapsed lifetime ticks (60/second); queue snapshots store enqueue ticks.
     int debugClusterTag;
     // The original static voxel was already captured by activation.  Dynamic
     // descendants carrying this flag must not enqueue a second restoration
@@ -1400,7 +1402,9 @@ static Voxel recycleQueueScratch[MAX_VOXELS];
 static int recycleQueueHead = 0;
 static int recycleQueueTail = 0;
 static int recycleQueueCount = 0;
-static int recycleFrameCounter = 0;
+static int recycleFrameCounter = 0; // Elapsed gameplay time in 60 Hz ticks.
+static double recycleTickRemainder = 0;
+static int recycleUpdateCounter = 0; // Actual updates, for same-update damage deduplication.
 static bool staticEditBatch = false;
 static void regeneration_step(float dt);
 static void regeneration_reset(void);
@@ -6309,7 +6313,13 @@ static bool freeze_lifetime_expired_islands(void)
 }
 
 static void recycle_dead_voxels(float dt) {
-    recycleFrameCounter++;
+    ++recycleUpdateCounter;
+    // Carry fractional ticks at high FPS; never clamp away time during overload.
+    double elapsedTicks = recycleTickRemainder +
+        (isfinite(dt) && dt > 0 ? (double)dt * RECYCLE_TICKS_PER_SECOND : 0);
+    int lifetimeTicks = (int)floor(elapsedTicks);
+    recycleTickRemainder = elapsedTicks - lifetimeTicks;
+    recycleFrameCounter += lifetimeTicks;
 
     bool has_sleeping_voxels = false;
     bool has_due_restoration = false;
@@ -6328,7 +6338,7 @@ static void recycle_dead_voxels(float dt) {
         }
         if(recycle_voxel_held(i)){voxel->lifeFrames=0;continue;}
         if(voxel->owner==ENEMY_SCRAP_OWNER)voxel->lifeFrames=0;
-        else voxel->lifeFrames++;
+        else voxel->lifeFrames += lifetimeTicks;
         if (voxel->restorationQueued && voxel->restorationDeadlineFrame > 0 &&
             recycleFrameCounter >= voxel->restorationDeadlineFrame) {
             has_due_restoration = true;
@@ -6387,7 +6397,7 @@ static void recycle_dead_voxels(float dt) {
         }
         if(voxel->persistentConstruction)continue;
         if (voxel->owner >= 0) {
-            voxel->lifeFrames++;
+            voxel->lifeFrames += lifetimeTicks;
             if (voxel->lifeFrames > RECYCLE_OWNED_STATIC_MAX_FRAMES) {
                 if (debugLogVoxelRecycle) {
                     TraceLog(LOG_INFO,
@@ -8930,6 +8940,8 @@ static void clear_world_voxels(void) {
     support_cache_reset();
     regeneration_reset();
     recycleQueueHead = recycleQueueTail = recycleQueueCount = recycleFrameCounter = 0;
+    recycleTickRemainder = 0;
+    recycleUpdateCounter = 0;
     voxel_count = 0;
     memset(goldReleaseGraceFrames, 0, sizeof(goldReleaseGraceFrames));
     goldReleaseGraceActiveCount = 0;
