@@ -47,8 +47,14 @@ if not expected_slots.issubset(metal_slots):
 # Combatant capacity is separate from the four local/network seats. Check both
 # uniform array declarations and the gold-tether offset/settling sentinel.
 c_uniforms = (ROOT / "physics_gpu_metal.h").read_text(encoding="utf-8")
-# Twelve 32-bit integers, sixteen floats, and three arrays of sixteen float4s.
-uniform_size = 12 * 4 + 16 * 4 + 3 * 16 * 16
+game_text = (ROOT / "fps_ray.c").read_text(encoding="utf-8")
+capacity = re.search(r"^\s*#define\s+MAX_COMBATANTS\s+(\d+)\s*$", game_text, re.MULTILINE)
+if capacity is None or int(capacity.group(1)) <= 0:
+    print("Cannot determine positive MAX_COMBATANTS from fps_ray.c", file=sys.stderr)
+    raise SystemExit(1)
+combatants = int(capacity.group(1))
+# Twelve 32-bit integers, sixteen floats, and three arrays of combatant float4s.
+uniform_size = 12 * 4 + 16 * 4 + 3 * combatants * 16
 for name, source, struct in (
     ("C", c_uniforms, "FpsGpuUniforms"),
     ("Metal", metal_text, "GpuUniforms"),
@@ -58,16 +64,20 @@ for name, source, struct in (
         errors.append(f"{name} uniform size assertion must be {uniform_size} bytes")
 
 for name, source, declarations in (
-    ("GLSL", glsl_text, ("uPlayerExtents[16]", "uPlayerPosHalf[16]", "uTetherTarget[16]")),
-    ("Metal", metal_text, ("player_extents[16]", "players[16]", "tether_targets[16]")),
-    ("C", c_uniforms, ("player_extents[16][4]", "players[16][4]", "tether_targets[16][4]")),
+    ("GLSL", glsl_text, ("uPlayerExtents", "uPlayerPosHalf", "uTetherTarget")),
+    ("Metal", metal_text, ("player_extents", "players", "tether_targets")),
+    ("C", c_uniforms, ("player_extents", "players", "tether_targets")),
 ):
     for declaration in declarations:
-        if declaration not in source:
-            errors.append(f"{name} missing combatant uniform {declaration}")
+        dimensions = rf"\s*\[\s*{combatants}\s*\]"
+        if name == "C":
+            dimensions += r"\s*\[\s*4\s*\]"
+        if re.search(rf"\b{declaration}{dimensions}\s*;", source) is None:
+            suffix = "[4]" if name == "C" else ""
+            errors.append(f"{name} missing combatant uniform {declaration}[{combatants}]{suffix}")
 for name, source in (("GLSL", glsl_text), ("Metal", metal_text)):
-    if "owner >= 16 ? owner - 16" not in source:
-        errors.append(f"{name} gold tether offset must be 16")
+    if re.search(rf"\bowner\s*>=\s*{combatants}\s*\?\s*owner\s*-\s*{combatants}\s*:", source) is None:
+        errors.append(f"{name} gold tether offset must be {combatants}")
 
 if errors:
     print("\n".join(errors), file=sys.stderr)

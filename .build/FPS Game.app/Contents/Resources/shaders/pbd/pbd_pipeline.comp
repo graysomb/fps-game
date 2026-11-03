@@ -20,6 +20,7 @@ struct VoxelState {
     vec4 bounds_min;
     vec4 bounds_max;
     uvec4 lifecycle;   // skipVelocityFrames, wakeSource, gluedFaceMask, breakMask
+    vec4 rest_shape;
 };
 
 struct StaticCollider {
@@ -40,7 +41,8 @@ layout(std430, binding = 8) buffer TetherBuffer { int tetherOwner[]; };
 layout(std430, binding = 9) buffer CollisionMetaBuffer { ivec4 collisionMeta[]; };
 layout(std430, binding = 10) readonly buffer StaticColliderBuffer { StaticCollider staticCollider[]; };
 layout(std430, binding = 11) readonly buffer RefcountBuffer { int particleRefcount[]; };
-layout(std430, binding = 12) readonly buffer ControlBuffer { ivec4 gpuControl; };
+struct SkeletonConstraint { uvec4 corner[3]; vec4 weight[2]; vec4 target; vec4 parameters; vec4 previous_target; };
+layout(std430, binding = 12) readonly buffer ControlBuffer { ivec4 gpuControl; ivec4 skeletonHeader; SkeletonConstraint skeleton[]; };
 layout(std430, binding = 13) buffer CloneParentBuffer { int cloneParent[]; };
 layout(std430, binding = 14) buffer DispatchBuffer { uint dispatchArgs[]; };
 layout(std430, binding = 15) buffer TopologyBuffer { ivec4 topology[]; };
@@ -69,8 +71,9 @@ uniform float uTetherSpring;
 uniform float uTetherDamping;
 uniform int uBreakDampFrames;
 uniform float uRestGridStep;
-uniform vec4 uPlayerPosHalf[4]; // xyz position, w < 0 when inactive
-uniform vec4 uTetherTarget[4];
+uniform vec4 uPlayerExtents[28];
+uniform vec4 uPlayerPosHalf[28]; // xyz position, w < 0 when inactive
+uniform vec4 uTetherTarget[28];
 
 const int MODE_RESET = 0;
 const int MODE_INTEGRATE = 1;
@@ -89,6 +92,10 @@ const int MODE_PREPARE_INDIRECT = 13;
 const int MODE_WAKE_GATHER = 14;
 const int MODE_WAKE_APPLY = 15;
 const int MODE_TOPOLOGY_REBUILD_SERIAL = 16;
+const int MODE_WRAP_GATHER = 17;
+const int MODE_WRAP_APPLY = 18;
+const int MODE_SKELETON = 19;
+const int MODE_SKELETON_SHAPE = 20;
 const int CONTROL_FLAG_OVERFLOW = 1;
 const int CONTROL_FLAG_TOPOLOGY_DIRTY = 2;
 const int CONTROL_FLAG_BREAK_OCCURRED = 4;
@@ -97,6 +104,20 @@ uint voxelParticle(VoxelState v, int corner) {
     return (corner < 4) ? v.particle_0_3[corner] : v.particle_4_7[corner - 4];
 }
 
+// Negative floor size enables horizontal periodic topology without changing the ABI.
+vec3 periodicDelta(vec3 d) {
+    if(uFloorSize<0.0)d.xz-=floor((d.xz-uFloorSize)/(-2.0*uFloorSize))*(-2.0*uFloorSize);
+    return d;
+}
+ivec3 periodicCell(ivec3 c) {
+    if(uFloorSize<0.0){int h=int(round(-uFloorSize/uVoxelSize)),n=2*h;c.x=((c.x+h)%n+n)%n-h;c.z=((c.z+h)%n+n)%n-h;}
+    return c;
+}
+StaticCollider periodicCollider(StaticCollider b,vec3 pos) {
+    vec3 center=(b.bounds_min.xyz+b.bounds_max.xyz)*0.5;
+    vec3 shift=pos+periodicDelta(center-pos)-center;
+    b.bounds_min.xyz+=shift;b.bounds_max.xyz+=shift;return b;
+}
 uint hashCoord(ivec3 c, int size) {
     uint h = uint(c.x) * 73856093u;
     h ^= uint(c.y) * 19349663u;
@@ -148,8 +169,10 @@ void integrateParticle(uint gid) {
         p.predicted_base_inv_mass.xyz += p.velocity.xyz * uDt;
         p.predicted_base_inv_mass.y -= uGravity * uDt * uDt;
         int owner = tetherOwner[id];
-        int tetherPlayer = owner >= 4 ? owner - 4 : owner;
-        if (tetherPlayer >= 0 && tetherPlayer < 4) {
+        int weakMask=owner>=64?owner>>6:0;
+        if(owner>=64)owner=(owner&63)-1;
+        int tetherPlayer = owner >= 28 ? owner - 28 : owner;
+        if (tetherPlayer >= 0 && tetherPlayer < 28) {
             float scale = uTetherTarget[tetherPlayer].w;
             vec3 accel = uTetherTarget[tetherPlayer].xyz * uTetherSpring * scale;
             p.predicted_base_inv_mass.xyz += accel * uDt * uDt;
@@ -158,6 +181,10 @@ void integrateParticle(uint gid) {
             vec3 disp = p.predicted_base_inv_mass.xyz - p.prev_inv_mass.xyz;
             p.predicted_base_inv_mass.xyz = p.prev_inv_mass.xyz + disp * (1.0 - damp);
             p.velocity.xyz *= 1.0 - damp;
+        }
+        for(int i=0;i<4;i++)if((weakMask&(1<<i))!=0){
+            vec3 dv=uTetherTarget[i].xyz*p.prev_inv_mass.w*uDt/float(max(1,particleRefcount[id]));
+            p.velocity.xyz+=dv;p.predicted_base_inv_mass.xyz+=dv*uDt;
         }
     }
     particle[id] = p;
@@ -172,11 +199,17 @@ void buildHash(uint gid) {
     uint id = simId[uint(gpuControl.z) + gid];
     if (particleRefcount[id] <= 0) return;
     ivec3 c = ivec3(floor(particle[id].predicted_base_inv_mass.xyz / uVoxelSize));
-    cell[id].xyz = c;
+    c=periodicCell(c);cell[id].xyz = c;
     uint h = hashCoord(c, uHashSize);
     hashNext[gid] = atomicExchange(hashHead[h], int(gid));
 }
 
+bool skeletonNeighbors(int a,int b){
+ if(a<131072||b<131072)return false;a-=131072;b-=131072;
+ if(a>=19||b>=19)return false;
+ const int parent[19]=int[19](-1,0,1,2,2,4,5,2,7,8,1,10,11,1,13,14,2,2,3);
+ return a==b||parent[a]==b||parent[b]==a||parent[a]==parent[b];
+}
 void pairCollisions(uint gid) {
     if (gid >= dispatchArgs[8]) return;
     uint aid = simId[uint(gpuControl.z) + gid];
@@ -188,17 +221,17 @@ void pairCollisions(uint gid) {
 
     vec3 scenePos = a.predicted_base_inv_mass.xyz;
     float sceneRadius = a.pos_radius.w;
-    for (int playerIndex = 0; playerIndex < uActivePlayers && playerIndex < 4; ++playerIndex) {
+    for (int playerIndex = 0; playerIndex < uActivePlayers && playerIndex < 28; ++playerIndex) {
         if (uPlayerPosHalf[playerIndex].w < 0.0) continue;
-        float halfSize = uPlayerPosHalf[playerIndex].w;
-        vec3 nearest = clamp(scenePos, uPlayerPosHalf[playerIndex].xyz - vec3(halfSize),
-                                      uPlayerPosHalf[playerIndex].xyz + vec3(halfSize));
+        vec3 halfSize = uPlayerExtents[playerIndex].xyz;
+        vec3 playerImage=scenePos+periodicDelta(uPlayerPosHalf[playerIndex].xyz-scenePos);
+        vec3 nearest=clamp(scenePos,playerImage-halfSize,playerImage+halfSize);
         vec3 sceneDelta = scenePos - nearest;
         float sceneDistSq = dot(sceneDelta, sceneDelta);
         if (sceneDistSq < sceneRadius * sceneRadius) {
             float sceneDist = sqrt(max(sceneDistSq, eps));
             float penetration = sceneRadius - sceneDist;
-            vec3 normal = (sceneDist > eps) ? -sceneDelta / sceneDist : vec3(0.0, 1.0, 0.0);
+            vec3 normal = (sceneDist > eps) ? sceneDelta / sceneDist : vec3(0.0, 1.0, 0.0);
             scenePos += normal * penetration;
         }
     }
@@ -210,7 +243,7 @@ void pairCollisions(uint gid) {
             for (int dx = -1; dx <= 1; ++dx) {
                 if (dz < 0 || (dz == 0 && dy < 0) ||
                     (dz == 0 && dy == 0 && dx < 0)) continue;
-                ivec3 nc = ac + ivec3(dx, dy, dz);
+                ivec3 nc = periodicCell(ac + ivec3(dx, dy, dz));
                 int item = hashHead[hashCoord(nc, uHashSize)];
                 int traversed = 0;
                 while (item >= 0 && item < int(dispatchArgs[8]) && traversed < int(dispatchArgs[8])) {
@@ -223,6 +256,7 @@ void pairCollisions(uint gid) {
                             ParticleState b = particle[bid];
                             ivec4 metaA = collisionMeta[aid];
                             ivec4 metaB = collisionMeta[bid];
+                            if(skeletonNeighbors(metaA.w,metaB.w)){item=hashNext[item];continue;}
                             if (metaA.w >= 0 && metaA.w == metaB.w) {
                                 vec3 restDelta = vec3(metaA.xyz - metaB.xyz) * uRestGridStep;
                                 float restTarget = a.pos_radius.w + b.pos_radius.w + 1e-5;
@@ -233,7 +267,7 @@ void pairCollisions(uint gid) {
                             }
                             float wb = b.prev_inv_mass.w;
                             float wsum = wa + wb;
-                            vec3 delta = a.predicted_base_inv_mass.xyz - b.predicted_base_inv_mass.xyz;
+                            vec3 delta = periodicDelta(a.predicted_base_inv_mass.xyz - b.predicted_base_inv_mass.xyz);
                             float distSq = dot(delta, delta);
                             float target = a.pos_radius.w + b.pos_radius.w;
                             if (wsum > 0.0 && distSq < target * target) {
@@ -293,6 +327,7 @@ void solveVgs(uint gid) {
     if (!dynamicParticle) return;
 
     float restEdge = v.pos_rest_edge.w;
+    float shapeBeta=v.rest_shape.w>0.0?v.rest_shape.w:uVgsBeta;
     float restVolume = v.velocity_rest_volume.w;
     for (int iteration = 0; iteration < 3; ++iteration) {
         vec3 centerPos = vec3(0.0);
@@ -304,9 +339,9 @@ void solveVgs(uint gid) {
         vec3 u0 = v0 - uVgsAlpha * (projectOnto(v1, v0) + projectOnto(v2, v0));
         vec3 u1 = v1 - uVgsAlpha * (projectOnto(v2, v1) + projectOnto(v0, v1));
         vec3 u2 = v2 - uVgsAlpha * (projectOnto(v0, v2) + projectOnto(v1, v2));
-        float target0 = mix(restEdge, length(v0), uVgsBeta);
-        float target1 = mix(restEdge, length(v1), uVgsBeta);
-        float target2 = mix(restEdge, length(v2), uVgsBeta);
+        float target0 = mix(v.rest_shape.x, length(v0), shapeBeta);
+        float target1 = mix(v.rest_shape.y, length(v1), shapeBeta);
+        float target2 = mix(v.rest_shape.z, length(v2), shapeBeta);
         if (length(u0) > uVgsEpsilon) u0 *= target0 / length(u0);
         if (length(u1) > uVgsEpsilon) u1 *= target1 / length(u1);
         if (length(u2) > uVgsEpsilon) u2 *= target2 / length(u2);
@@ -329,6 +364,7 @@ void solveVgs(uint gid) {
 }
 
 int findStaticCell(ivec3 coord) {
+    coord=periodicCell(coord);
     uint h = hashCoord(coord, uStaticHashSize);
     for (int probe = 0; probe < uStaticHashSize; ++probe) {
         ivec4 entry = staticCell[h];
@@ -340,6 +376,7 @@ int findStaticCell(ivec3 coord) {
 }
 
 vec3 pushOutOfBox(vec3 pos, float radius, StaticCollider box) {
+    box=periodicCollider(box,pos);
     vec3 bmin = box.bounds_min.xyz;
     vec3 bmax = box.bounds_max.xyz;
     bool inside = all(greaterThanEqual(pos, bmin)) && all(lessThanEqual(pos, bmax));
@@ -379,7 +416,8 @@ vec3 pushOutOfBox(vec3 pos, float radius, StaticCollider box) {
     return pos + normal * (radius + distances[best]);
 }
 
-vec3 pushOutOfPatch(vec3 pos, float radius, StaticCollider surfacePatch) {
+vec3 pushOutOfPatch(vec3 pos, float radius, StaticCollider surfacePatch, bool edges) {
+    surfacePatch=periodicCollider(surfacePatch,pos);
     vec3 closest = clamp(pos, surfacePatch.bounds_min.xyz, surfacePatch.bounds_max.xyz);
     vec3 normal = surfacePatch.center.xyz;
     vec3 delta = pos - closest;
@@ -388,6 +426,7 @@ vec3 pushOutOfPatch(vec3 pos, float radius, StaticCollider surfacePatch) {
     if (normal.x != 0.0) projectedInside = pos.y >= surfacePatch.bounds_min.y && pos.y <= surfacePatch.bounds_max.y && pos.z >= surfacePatch.bounds_min.z && pos.z <= surfacePatch.bounds_max.z;
     else if (normal.y != 0.0) projectedInside = pos.x >= surfacePatch.bounds_min.x && pos.x <= surfacePatch.bounds_max.x && pos.z >= surfacePatch.bounds_min.z && pos.z <= surfacePatch.bounds_max.z;
     else projectedInside = pos.x >= surfacePatch.bounds_min.x && pos.x <= surfacePatch.bounds_max.x && pos.y >= surfacePatch.bounds_min.y && pos.y <= surfacePatch.bounds_max.y;
+    if (projectedInside == edges) return pos;
     if (projectedInside && signedDistance < 0.0 && signedDistance >= -radius) return pos + normal * (radius - signedDistance);
     if (signedDistance < 0.0) return pos;
     float distanceSq = dot(delta, delta);
@@ -405,19 +444,19 @@ void staticCollisions(uint gid) {
     if (p.prev_inv_mass.w <= 0.0) return;
     float radius = p.pos_radius.w;
     vec3 pos = p.predicted_base_inv_mass.xyz;
-    float terrainLimit = uFloorSize - radius;
-    float floorLimit = max(0.0, 0.5 * uVoxelSize - radius);
+    float terrainLimit = abs(uFloorSize) - radius;
+    float floorLimit = collisionMeta[id].x>500000000?radius:max(0.0, 0.5 * uVoxelSize - radius);
     bool floorContact = pos.y < floorLimit;
     pos.y = max(pos.y, floorLimit);
     if (floorContact) p.prev_inv_mass.xz = pos.xz -
         (pos.xz - p.prev_inv_mass.xz) * 0.05;
-    pos.xz = clamp(pos.xz, vec2(-terrainLimit), vec2(terrainLimit));
+    if(uFloorSize>=0.0)pos.xz = clamp(pos.xz, vec2(-terrainLimit), vec2(terrainLimit));
     const float eps = 1e-6;
-    for (int i = 0; i < uActivePlayers && i < 4; ++i) {
+    for (int i = 0; i < uActivePlayers && i < 28; ++i) {
         if (uPlayerPosHalf[i].w < 0.0) continue;
-        float halfSize = uPlayerPosHalf[i].w;
-        vec3 nearest = clamp(pos, uPlayerPosHalf[i].xyz - vec3(halfSize),
-                                  uPlayerPosHalf[i].xyz + vec3(halfSize));
+        vec3 halfSize = uPlayerExtents[i].xyz;
+        vec3 playerImage=pos+periodicDelta(uPlayerPosHalf[i].xyz-pos);
+        vec3 nearest=clamp(pos,playerImage-halfSize,playerImage+halfSize);
         vec3 delta = pos - nearest;
         float distSq = dot(delta, delta);
         if (distSq < radius * radius) {
@@ -427,6 +466,8 @@ void staticCollisions(uint gid) {
         }
     }
     ivec3 center = ivec3(floor(pos / uVoxelSize));
+    // Interior contacts first, so chunk seams cannot act as rounded edges.
+    for (int pass=0; pass<(dispatchArgs[12] == 0u ? 1 : 2); ++pass) {
     int seen[128]; int seenCount = 0;
     for (int z=-1; z<=1; ++z) for (int y=-1; y<=1; ++y) for (int x=-1; x<=1; ++x) {
         int item = findStaticCell(center + ivec3(x,y,z));
@@ -443,10 +484,11 @@ void staticCollisions(uint gid) {
             for (int s=0; s<seenCount; ++s) duplicate = duplicate || (seen[s] == patchId);
             if (!duplicate && seenCount < 128) {
                 seen[seenCount++] = patchId;
-                pos = pushOutOfPatch(pos, 0.25 * uVoxelSize, surfacePatch);
+                pos = pushOutOfPatch(pos, 0.25 * uVoxelSize, surfacePatch, pass != 0);
             }
             item = floatBitsToInt(surfacePatch.center.w);
         }
+    }
     }
     center = ivec3(floor(pos / uVoxelSize));
     int recovery = findStaticCell(center);
@@ -470,8 +512,8 @@ void gatherBreakMask(uint gid) {
     }
     for (int i=0; i<8; ++i) {
         uint id=voxelParticle(v,i);
-        // Owners 4..7 are held gold groups; 8 is the short release settling window.
-        if (id<uint(gpuControl.x) && tetherOwner[id]>=4 && tetherOwner[id]<=8) return;
+        // Owners 28..55 are held gold groups; 56 is the short release settling window.
+        if(id<uint(gpuControl.x)){int owner=tetherOwner[id];if(owner>=64)owner=(owner&63)-1;if(owner>=28&&owner<=56)return;}
     }
     vec3 p[8];
     for (int i=0; i<8; ++i) {
@@ -482,18 +524,19 @@ void gatherBreakMask(uint gid) {
     vec3 axis1=((p[2]-p[0])+(p[3]-p[1])+(p[6]-p[4])+(p[7]-p[5]))*0.25;
     vec3 axis2=((p[4]-p[0])+(p[5]-p[1])+(p[6]-p[2])+(p[7]-p[3]))*0.25;
     vec3 lengths=vec3(length(axis0),length(axis1),length(axis2));
-    vec3 strain=abs(lengths-vec3(v.pos_rest_edge.w))/v.pos_rest_edge.w;
+    vec3 strain=abs(lengths-v.rest_shape.xyz)/v.rest_shape.xyz;
+    float durability=(v.lifecycle.w & 0x40000000u)!=0u?2.0:1.0;
     uint glued=v.lifecycle.z; uint mask=0u; bool exceeded=false;
-    if (strain.x>uStrainBreakThreshold) { exceeded=true; mask |= glued & ((1u<<0)|(1u<<1)); }
-    if (strain.y>uStrainBreakThreshold) { exceeded=true; mask |= glued & ((1u<<2)|(1u<<3)); }
-    if (strain.z>uStrainBreakThreshold) { exceeded=true; mask |= glued & ((1u<<4)|(1u<<5)); }
+    if (strain.x>uStrainBreakThreshold*durability) { exceeded=true; mask |= glued & ((1u<<0)|(1u<<1)); }
+    if (strain.y>uStrainBreakThreshold*durability) { exceeded=true; mask |= glued & ((1u<<2)|(1u<<3)); }
+    if (strain.z>uStrainBreakThreshold*durability) { exceeded=true; mask |= glued & ((1u<<4)|(1u<<5)); }
     vec3 n0=(lengths.x>uVgsEpsilon)?axis0/lengths.x:vec3(0.0);
     vec3 n1=(lengths.y>uVgsEpsilon)?axis1/lengths.y:vec3(0.0);
     vec3 n2=(lengths.z>uVgsEpsilon)?axis2/lengths.z:vec3(0.0);
-    if (abs(dot(n0,n1))>uShearBreakThreshold) { exceeded=true; mask |= glued & ((1u<<4)|(1u<<5)); }
-    if (abs(dot(n0,n2))>uShearBreakThreshold) { exceeded=true; mask |= glued & ((1u<<2)|(1u<<3)); }
-    if (abs(dot(n1,n2))>uShearBreakThreshold) { exceeded=true; mask |= glued & ((1u<<0)|(1u<<1)); }
-    const float hingeCosLimit = 0.9396926208; // cos(20 degrees)
+    if (abs(dot(n0,n1))>uShearBreakThreshold*durability) { exceeded=true; mask |= glued & ((1u<<4)|(1u<<5)); }
+    if (abs(dot(n0,n2))>uShearBreakThreshold*durability) { exceeded=true; mask |= glued & ((1u<<2)|(1u<<3)); }
+    if (abs(dot(n1,n2))>uShearBreakThreshold*durability) { exceeded=true; mask |= glued & ((1u<<0)|(1u<<1)); }
+    float hingeCosLimit = cos(radians(20.0*durability)); // cos(20 degrees)
     const int faceCorners[24] = int[24](
         1,3,5,7, 0,2,4,6, 2,3,6,7,
         0,1,4,5, 4,5,6,7, 0,1,2,3);
@@ -655,16 +698,41 @@ void finalizeVoxel(uint gid) {
     v.pos_rest_edge.xyz=centerPos; voxel[gid]=v;
 }
 
+void wrapGather(uint gid) {
+    if(gid>=uint(gpuControl.y))return;
+    uint id=simId[gid],anchor=uint(round(particle[id].velocity.w));
+    vec3 p=particle[anchor].pos_radius.xyz;
+    correction[id]=uvec4(floatBitsToUint(periodicDelta(p)-p),0u);
+}
+void wrapApply(uint gid) {
+    if(gid>=uint(gpuControl.y))return;
+    uint id=simId[gid];vec3 shift=uintBitsToFloat(correction[id].xyz);
+    particle[id].pos_radius.xyz+=shift;particle[id].prev_inv_mass.xyz+=shift;
+    particle[id].predicted_base_inv_mass.xyz+=shift;
+}
+void solveSkeleton(uint gid){
+ if(gid>=uint(skeletonHeader.x))return;
+ SkeletonConstraint c=skeleton[gid];uint id=c.corner[0].x;if(id>=uint(gpuControl.x))return;
+ vec3 target=c.target.xyz,previous=c.previous_target.xyz;float denom=particle[id].prev_inv_mass.w+c.parameters.x/(uDt*uDt);
+ for(int k=0;k<8;k++){uint j=c.corner[(k+1)/4][(k+1)%4];float w=c.weight[k/4][k%4];if(j<uint(gpuControl.x)){target+=particle[j].predicted_base_inv_mass.xyz*w;previous+=particle[j].pos_radius.xyz*w;denom+=particle[j].prev_inv_mass.w*w*w;}}
+ if(denom<=0)return;
+ vec3 delta=target-particle[id].predicted_base_inv_mass.xyz-((particle[id].predicted_base_inv_mass.xyz-particle[id].pos_radius.xyz)-(target-previous))*(20.0*uDt/12.0);float len=length(delta);if(len>c.parameters.y)delta*=c.parameters.y/len;delta/=denom;
+ accumulate(id,delta*particle[id].prev_inv_mass.w,1.0);
+ for(int k=0;k<8;k++){uint j=c.corner[(k+1)/4][(k+1)%4];float w=c.weight[k/4][k%4];if(j<uint(gpuControl.x))accumulate(j,-delta*w*particle[j].prev_inv_mass.w,1.0);}
+}
 void main() {
     uint gid=gl_GlobalInvocationID.x;
     if (uParticleCount < 0 || uSimCount < 0) return;
-    if (uMode==MODE_RESET) resetCorrections(gid);
+    if (uMode==MODE_SKELETON) solveSkeleton(gid);
+    else if (uMode==MODE_WRAP_GATHER) wrapGather(gid);
+    else if (uMode==MODE_WRAP_APPLY) wrapApply(gid);
+    else if (uMode==MODE_RESET) resetCorrections(gid);
     else if (uMode==MODE_INTEGRATE) integrateParticle(gid);
     else if (uMode==MODE_HASH_CLEAR) clearHash(gid);
     else if (uMode==MODE_HASH_BUILD) buildHash(gid);
     else if (uMode==MODE_PAIR_COLLISIONS) pairCollisions(gid);
     else if (uMode==MODE_APPLY) applyCorrections(gid);
-    else if (uMode==MODE_VGS) solveVgs(gid);
+    else if (uMode==MODE_VGS || (uMode==MODE_SKELETON_SHAPE && gid<uint(uVoxelCount) && voxel[gid].rest_shape.w<0.1)) solveVgs(gid);
     else if (uMode==MODE_STATIC_COLLISIONS) staticCollisions(gid);
     else if (uMode==MODE_BREAK_MASK) gatherBreakMask(gid);
     else if (uMode==MODE_FINALIZE_PARTICLES) finalizeParticle(gid);
