@@ -5,7 +5,11 @@
 #undef main
 #include <assert.h>
 #ifndef GRAPHICS_API_OPENGL_43
+#if defined(__APPLE__)
+#include <OpenGL/gl3.h>
+#else
 #include <GL/gl.h>
+#endif
 #endif
 bool ffTestReviveHeld[4];
 #include "../victory_town.inc"
