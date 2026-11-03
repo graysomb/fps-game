@@ -72,6 +72,7 @@ static bool ex_fire(int i,int gun,Ray ray){
     ducks_ray(ray,length,0,-1,false);
     if(target>=0)eq_damage(i,target,eqGuns[gun].damage,gun==EQ_DMR,gun==EQ_DMR?DEATH_DMR:DEATH_GLOCK,ray.position);
     else if(wall && go_shield_hit(hit.id,eqGuns[gun].damage)){}
+    else if(wall && clarity_shield_projectile(hit.id)){}
     else if(wall && foundry_trap_hit(hit.id,i,false)){}
     else if(wall && gun==EQ_DMR)ex_dmr_cut(i,ray,hit);
     eq_trace(player_weapon_pose(i,false).muzzle,v_add(ray.position,v_mul(ray.direction,length)),gun,i);return true;
@@ -105,12 +106,13 @@ static void ex_tick(float dt){
                 if(players[actor].respawn_timer<=0){exSuppression[actor]=5;ex_splat(g->pos,actor,-1,false);}
             }g->id=0;
         }else if(wall||floor||duck){
+            uint64_t support=wall&&!floor?voxels[hit.id].identity:0;
             if(wall&&!floor){
                 int part=go_shield_part(hit.id);
                 if(part>=0){go_shield_hit(hit.id,eqGuns[EQ_GLOB].damage);goShields[part].suppressed=5;}
-                else foundry_trap_hit(hit.id,g->owner,false);
+                else if(!clarity_shield_projectile(hit.id))foundry_trap_hit(hit.id,g->owner,false);
             }
-            ex_splat(g->pos,-1,wall&&!floor?hit.id:-1,false);g->id=0;
+            ex_splat(g->pos,-1,support?enemy_voxel(support):-1,false);g->id=0;
         }else if(g->age>=1)g->id=0;
     }
     int budget=32;for(int n=0;n<EX_FIELDS;n++)if(exFields[n].id){GravityField *f=&exFields[n];f->age+=dt;if(f->age>=5){f->id=0;continue;}if(!client){ex_gravity_activate(f,&budget);ex_gravity_pull(f,dt);}}

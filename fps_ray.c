@@ -19163,7 +19163,7 @@ static bool check_ai_awareness_of_player(int botIdx, int targetIdx, float *out_d
     }
 
     // 3. THIRD CHECK: Ray trace to measure if view is occluded by voxels
-    if (shield_rifle_eligible(botIdx)?rifle_view_blocked(botIdx,target->pos):is_view_occluded_by_voxels(bot->pos,target->pos)) {
+    if ((shield_rifle_eligible(botIdx)||bot->enemyType==ENEMY_TYPE_SHIELDBEARER)?rifle_view_blocked(botIdx,target->pos):is_view_occluded_by_voxels(bot->pos,target->pos)) {
         return false; // Occluded by terrain or wall
     }
 

@@ -42,7 +42,7 @@ static int lobber_find_mine(int i){
 }
 static bool lobber_harvest(int i,float dt){
  Player *p=&players[i];EnemySpecialState *s=&enemySpecial[i];
- if(p->enemyType!=ENEMY_TYPE_LOBBER)return false;
+ if(p->enemyType!=ENEMY_TYPE_LOBBER && !(p->enemyType==ENEMY_TYPE_STANDARD && fp_carrier(i)))return false;
  if(!s->harvesting && (p->isExposed || p->matter<player_max_matter(p)*lobberMineStart)){
   s->harvesting=true;s->harvestSearch=s->harvestStuck=0;s->harvestTarget=s->harvestRejected=0;s->harvestLast=p->pos;
   enemy_drop_payload(i);s->windup=0;s->state=0;s->selected=0;

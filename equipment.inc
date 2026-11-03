@@ -105,6 +105,7 @@ static void eq_shotgun_impacts(int owner,ShotgunImpact *hits,int count){
     for(int n=0;n<count;n++){
         ShotgunImpact *h=&hits[n];int v=enemy_voxel(h->id);if(v<0)continue;
         int gear=enemy_equipment_owner(v),armor=get_goliath_owner_of_voxel(v);
+        if(clarity_shield_projectile(v)){h->id=0;continue;}
         if(gear>=0)ai_alert(gear,owner,players[owner].pos,AI_ALERT_HIT);
         if(armor>=0)ai_alert(armor,owner,players[owner].pos,AI_ALERT_HIT);
         if(gear>=0 || armor>=0 || voxel_is_fluid(&voxels[v]) || voxels[v].isBullet){h->id=0;continue;}

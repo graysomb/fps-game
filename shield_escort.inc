@@ -13,8 +13,10 @@ static bool anchor_escort_eligible(int i){
   players[i].enemyType==ENEMY_TYPE_ANCHOR;
 }
 static bool rifle_friendly_shield(int shooter,int v){
- if(!shield_rifle_eligible(shooter) || !clarity_shield_voxel(v))return false;
+ if(!clarity_shield_voxel(v))return false;
  int owner=voxels[v].owner;
+ if(shooter==owner)return true; // The bearer's own shield cannot blind it.
+ if(!shield_rifle_eligible(shooter))return false;
  return shield_bearer_eligible(owner) && combatantTeam[shooter]==combatantTeam[owner];
 }
 static bool rifle_view_blocked(int i,Vector3 target){

@@ -100,9 +100,13 @@ static void repair_check(void){
         fixture();goRegen=true;go_release_part(losses[t]);
         if(t==1)go_release_part(GOLEM_THIGH_R);
         int before=attached_count();bool restored=false;
+        int groupBefore[GM_COUNT]={0},groupTotal[GM_COUNT]={0};
+        for(int c=0;c<goCount;c++){int g=go_repair_group(goCells[c].part);groupTotal[g]++;groupBefore[g]+=goCells[c].index>=0;}
         for(int f=0;f<480;f++){
             simulate_voxel_pbd_steps(1.f/60,1);recycle_dead_voxels(1.f/60);
-            int now=attached_count();assert(now==before||now==goCount);
+            int now=attached_count(),groupNow[GM_COUNT]={0};
+            for(int c=0;c<goCount;c++)groupNow[go_repair_group(goCells[c].part)]+=goCells[c].index>=0;
+            for(int g=1;g<GM_COUNT;g++)assert(groupNow[g]==groupBefore[g]||groupNow[g]==groupTotal[g]);
             if(now==goCount)restored=true;
             if(restored)healthy();
             if(getenv("GOLEM_CAPTURE")&&t==1&&f<360&&f%3==0)capture(TextFormat("leg-regrowth/%03d",f/3));
@@ -119,7 +123,7 @@ static void repair_check(void){
     }
     /* An allocation failure after some cells were created must not publish
      * any part of the replacement, consume debris, or advance recovery. */
-    fixture();goRegen=true;go_release_part(GOLEM_ARM_R);goClock=2;
+    fixture();goRegen=true;go_release_part(GOLEM_ARM_R);goClock=goRepairDelay+.1f;
     int before=attached_count(),total=voxel_count;
     goRepairFailAfter=3;
     for(int f=0;f<30;f++)simulate_voxel_pbd_steps(1.f/60,1);
@@ -134,7 +138,7 @@ static void repair_check(void){
     /* A held piece cannot be reclaimed even when it occupies the exact target. */
     fixture();goRegen=true;
     int cell=goMount[GOLEM_HAND_R],held=goCells[cell].index;uint64_t heldId=voxels[held].identity;
-    go_release_part(GOLEM_HAND_R);goClock=2;
+    go_release_part(GOLEM_HAND_R);goClock=goRepairDelay+.1f;
     players[0].tetherHolding=true;players[0].tetherVoxel=held;players[0].tetherVoxelIdentity=heldId;
     for(int i=0;i<20;i++)golem_physics_prepare();
     assert(goCells[cell].index<0&&go_find(heldId,held)>=0&&voxels[held].golemReclaimStart==0);
@@ -144,7 +148,7 @@ static void repair_check(void){
     /* An actor blocks the repair; clearing it doesn't restart the delay. */
     fixture();goRegen=true;cell=goMount[GOLEM_HAND_R];
     Vector3 target=Vector3Transform(goCells[cell].center,go_matrix(GOLEM_HAND_R));
-    go_release_part(GOLEM_HAND_R);goClock=2;
+    go_release_part(GOLEM_HAND_R);goClock=goRepairDelay+.1f;
     players[0].pos=target;players[0].respawn_timer=0;
     golem_physics_prepare();assert(goCells[cell].index<0);
     assert(goRepair[GOLEM_ARM_R].phase==GO_REPAIR_BLOCKED);
@@ -159,7 +163,7 @@ static void repair_edges(void){
     remove_voxel_index(goCells[goMount[GOLEM_SHIN_R]].index);
     for(int f=0;f<360;f++)simulate_voxel_pbd_steps(1.f/60,1);
     healthy();assert(goPose.kneel<.01f);
-    fixture();goRegen=true;go_release_part(GOLEM_HAND_R);goClock=2;
+    fixture();goRegen=true;go_release_part(GOLEM_HAND_R);goClock=goRepairDelay+.1f;
     golem_physics_prepare();assert(goRepair[GOLEM_ARM_R].phase==GO_REPAIR_BUILD);
     goRegen=false;golem_physics_prepare();
     for(int n=0;n<voxel_count;n++)assert(voxels[n].golemReclaimStart==0);

@@ -19,7 +19,8 @@ static float goActionStart;
 static float goLastHandLaunch=-1;
 static const float goScale=1.5f;
 typedef enum GoRepairPhase { GO_REPAIR_IDLE, GO_REPAIR_WAIT, GO_REPAIR_BLOCKED, GO_REPAIR_BUILD, GO_REPAIR_RECOVER } GoRepairPhase;
-typedef struct GoRepair {GoRepairPhase phase;float since;} GoRepair;
+typedef struct GoRepair {GoRepairPhase phase;float since,nextCheck;} GoRepair;
+static const float goRepairDelay=4.0f,goRepairRetry=.10f;
 static GoRepair goRepair[GM_COUNT];
 #ifdef FIREFIGHT_TESTING
 static int goRepairFailAfter=-1;

@@ -59,13 +59,17 @@ horizontal travel with gravity compensation. With no player target it fires
 sixteen meters forward. Release and velocity assignment happen once before
 physics upload, so CPU and GPU receive the same launch.
 
-Regeneration starts after 1.25 seconds and restores a complete missing limb
+Regeneration starts after 4 seconds and restores a complete missing limb
 assembly in one transaction. The arm's upper arm, forearm and hand remain
 separate articulated groups; both legs share a repair transaction. Surviving
 cells keep their identity. Every new cell and weld is ready before physics
 advances. Allocation failure rolls back newly created cells and retries.
 
 Placement uses oriented cell geometry against actors, terrain and debris.
+A coarse assembly bound filters the world before cell overlap checks. Blocked
+assemblies retry at 10 Hz, with at most one assembly checked per physics step.
+Reclamation uses cached identities and descending removals to avoid repeated
+world scans; each completed limb is still published atomically.
 Only overlapping, unheld debris belonging to this golem is reclaimed, with a
 quarter-second cyan shrink effect. Other fallen pieces remain available to
 throw. Actors, held debris and unrelated structures block repair until cleared.
@@ -235,3 +239,25 @@ unavailable on this machine.
 
 Run `python tools/golem_physics_media.py` after the capture commands to produce
 `physical-leg-regrowth.gif` alongside the existing action GIFs.
+
+### November 2026 repair performance regression
+
+`tests/playtest_enemy_regression.c` exercises carrier harvesting, paired decoy
+retargeting, shield-bearer melee and Glob/Glock/DMR shield impacts. Its Foundry
+fixture also measures blocked repair checks and complete right-arm replacement
+with about 24,166 world voxels. The complete-repair portion explicitly clears
+terrain intersecting the replacement before measuring publication.
+
+On this Windows machine, the old repeated world scan averaged 35.1 ms and peaked
+at 45.8 ms. After culling and throttling checks, the blocked-check peak measured
+1.8 ms; the successful repair timeline peaked at 5.9 ms, including a 4.7 ms arm
+commit. These are isolated CPU repair-path timings from an O1 test harness with
+the GPU backend, not end-to-end frame times or a guaranteed frame-rate gain.
+`GOLEM_REPAIR_PROFILE=1` prints broad phase, narrow phase and cleanup timings in
+test builds. Production builds omit that instrumentation.
+
+The CPU and GPU repair regressions validate atomicity per assembly (different
+assemblies can complete on different steps), obstruction, held debris, allocation
+rollback, identity remapping and damage during recovery. Rebuild the harnesses
+with the normal renderer/network sources and raylib libraries, leaving assertions
+enabled; run with `--physics-backend=gpu` or `--physics-backend=cpu-st`.

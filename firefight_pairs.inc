@@ -41,6 +41,18 @@ static void fp_pairs_tick(float dt){
   FfRiflePair s=fpPairs[i];s.memory=fmaxf(0,s.memory-dt);
   if(!ai_hostile(i,s.target))s.target=-1;
   bool seen=s.target>=0 && (fp_pair_sees(i,s.target)||fp_pair_sees(j,s.target));
+  // Like unpaired riflemen, a nearby decoy can draw a team off a distant
+  // player. Don't retain a visible real player indefinitely.
+  if(seen && !target_is_hologram(s.target)){
+   float nearest=.7f*fminf(v_length(world_delta(s.known,players[i].pos)),v_length(world_delta(s.known,players[j].pos)));
+   for(int h=0;h<MAX_PLAYERS;h++){
+    int target=MAX_COMBATANTS+h;
+    if(!fp_pair_sees(i,target)&&!fp_pair_sees(j,target))continue;
+    Vector3 at=ai_target_body(target)->pos;
+    float distance=fminf(v_length(world_delta(at,players[i].pos)),v_length(world_delta(at,players[j].pos)));
+    if(distance<nearest){nearest=distance;s.target=target;}
+   }
+  }
   if(s.target<0 || (!seen && s.memory<=0)){
    s.target=-1;float nearest=FLT_MAX;
    for(int t=0;t<MAX_COMBATANTS+MAX_PLAYERS;t++)if(fp_pair_sees(i,t)||fp_pair_sees(j,t)){

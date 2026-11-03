@@ -49,9 +49,14 @@ static bool go_separates(Vector3 axis,const Vector3 a[8],const Vector3 b[8]){
     for(int k=0;k<8;k++){float x=v_dot(a[k],axis),y=v_dot(b[k],axis);alo=fminf(alo,x);ahi=fmaxf(ahi,x);blo=fminf(blo,y);bhi=fmaxf(bhi,y);}
     return ahi<=blo+.002f || bhi<=alo+.002f;
 }
+static inline void go_bounds_include(BoundingBox *b,Vector3 p){
+    if(p.x<b->min.x)b->min.x=p.x;if(p.x>b->max.x)b->max.x=p.x;
+    if(p.y<b->min.y)b->min.y=p.y;if(p.y>b->max.y)b->max.y=p.y;
+    if(p.z<b->min.z)b->min.z=p.z;if(p.z>b->max.z)b->max.z=p.z;
+}
 static bool go_boxes_overlap(const Vector3 a[8],const Vector3 b[8]){
     BoundingBox ba={a[0],a[0]},bb={b[0],b[0]};
-    for(int k=1;k<8;k++){ba.min=Vector3Min(ba.min,a[k]);ba.max=Vector3Max(ba.max,a[k]);bb.min=Vector3Min(bb.min,b[k]);bb.max=Vector3Max(bb.max,b[k]);}
+    for(int k=1;k<8;k++){go_bounds_include(&ba,a[k]);go_bounds_include(&bb,b[k]);}
     if(!CheckCollisionBoxes(ba,bb))return false;
     Vector3 ea[3]={v_sub(a[1],a[0]),v_sub(a[2],a[0]),v_sub(a[4],a[0])};
     Vector3 eb[3]={v_sub(b[1],b[0]),v_sub(b[2],b[0]),v_sub(b[4],b[0])};
@@ -73,21 +78,65 @@ static bool go_held(int index){
 static bool go_reclaimable(int index){
     Voxel *v=&voxels[index];return v->golemOwned&&!v->persistentConstruction&&!go_held(index);
 }
+static void go_voxel_points(int index,Vector3 points[8]){
+    Voxel *v=&voxels[index];
+    for(int k=0;k<8;k++)points[k]=v->particles[k]?v->particles[k]->pos:v_add(v->pos,(Vector3){corner_signs[k][0]*v->rest_edge*.5f,corner_signs[k][1]*v->rest_edge*.5f,corner_signs[k][2]*v->rest_edge*.5f});
+}
+static BoundingBox go_points_bounds(const Vector3 points[8]){
+    BoundingBox b={points[0],points[0]};
+    for(int k=1;k<8;k++)go_bounds_include(&b,points[k]);return b;
+}
+typedef struct {uint64_t id;int index;} GoReclaim;
+static int go_reclaim_descending(const void *a,const void *b){
+    int x=((const GoReclaim*)a)->index,y=((const GoReclaim*)b)->index;return (y>x)-(y<x);
+}
 static void go_repair_prepare(void){
+#ifdef FIREFIGHT_TESTING
+    double profileStart=GetTime(),profileBroad=0,profileNarrow=0,profileCleanup;
+#endif
     /* Index storage is scratch only; persistent references use identities. */
     int *pending=malloc((size_t)goCount*sizeof(int));
     GoCell *backup=malloc((size_t)goCount*sizeof(GoCell));
-    uint64_t *reclaim=malloc((size_t)(voxel_count+1)*sizeof(uint64_t));
-    if(!pending||!backup||!reclaim){free(pending);free(backup);free(reclaim);return;}
+    GoReclaim *reclaim=malloc((size_t)(voxel_count+1)*sizeof(*reclaim));
+    int *candidates=malloc((size_t)(voxel_count+1)*sizeof(int));
+    if(!pending||!backup||!reclaim||!candidates){free(pending);free(backup);free(reclaim);free(candidates);return;}
     for(int n=0;n<voxel_count;n++)if(voxels[n].golemReclaimStart>0&&!go_reclaimable(n))voxels[n].golemReclaimStart=0;
+    bool checkedAssembly=false;
     for(int group=1;group<GM_COUNT;group++){
         int count=0;float earliest=goClock;
         for(int i=0;i<goCount;i++)if(goCells[i].index<0&&go_repair_group(goCells[i].part)==group){pending[count++]=i;earliest=fminf(earliest,goCells[i].missing);}
         GoRepair *repair=&goRepair[group];
         if(!count){if(repair->phase!=GO_REPAIR_RECOVER||goClock-repair->since>=.8f)repair->phase=GO_REPAIR_IDLE;continue;}
         if(repair->phase==GO_REPAIR_IDLE||repair->phase==GO_REPAIR_RECOVER)*repair=(GoRepair){GO_REPAIR_WAIT,earliest};
-        if(!goRegen||goClock-repair->since<1.25f)continue;
+        if(!goRegen||checkedAssembly||goClock-repair->since<goRepairDelay||goClock<repair->nextCheck)continue;
+        checkedAssembly=true;
+        repair->nextCheck=goClock+goRepairRetry;
         repair->phase=GO_REPAIR_BLOCKED;
+        // Cull the world once per assembly, not once per missing cell. Only
+        // nearby candidates need the expensive oriented-box overlap tests.
+        BoundingBox assembly={{FLT_MAX,FLT_MAX,FLT_MAX},{-FLT_MAX,-FLT_MAX,-FLT_MAX}};
+        for(int k=0;k<count;k++){
+            Vector3 points[8];go_cell_points(pending[k],points);BoundingBox b=go_points_bounds(points);
+            assembly.min=Vector3Min(assembly.min,b.min);assembly.max=Vector3Max(assembly.max,b.max);
+        }
+        int candidateCount=0;
+#ifdef FIREFIGHT_TESTING
+        double broadStart=GetTime();
+#endif
+        for(int n=0;n<voxel_count;n++){
+            Voxel *v=&voxels[n];if(v->golemOwned&&v->persistentConstruction)continue;
+            BoundingBox bounds;
+            if(!v->simulate){
+                float half=v->rest_edge*.5f;Vector3 extent={half,half,half};
+                bounds=(BoundingBox){v_sub(v->pos,extent),v_add(v->pos,extent)};
+            }else{
+                Vector3 points[8];go_voxel_points(n,points);bounds=go_points_bounds(points);
+            }
+            if(CheckCollisionBoxes(assembly,bounds))candidates[candidateCount++]=n;
+        }
+#ifdef FIREFIGHT_TESTING
+        profileBroad+=GetTime()-broadStart;double narrowStart=GetTime();
+#endif
         bool blocked=false;int reclaimCount=0;
         for(int k=0;k<count&&!blocked;k++){
             int cell=pending[k],parent=goParent[goCells[cell].part];
@@ -97,16 +146,24 @@ static void go_repair_prepare(void){
                 Vector3 b[8];go_box_points(combatant_bounds_at(p,players[p].pos,PLAYER_SIZE*.5f),b);
                 if(go_boxes_overlap(a,b))blocked=true;
             }
-            for(int n=0;n<voxel_count&&!blocked;n++){
-                Voxel *v=&voxels[n];if(v->golemOwned&&v->persistentConstruction)continue;
+            for(int candidate=0;candidate<candidateCount&&!blocked;candidate++){
+                int n=candidates[candidate];Voxel *v=&voxels[n];
                 Vector3 b[8];
-                for(int c=0;c<8;c++)b[c]=v->particles[c]?v->particles[c]->pos:v_add(v->pos,(Vector3){corner_signs[c][0]*v->rest_edge*.5f,corner_signs[c][1]*v->rest_edge*.5f,corner_signs[c][2]*v->rest_edge*.5f});
+                go_voxel_points(n,b);
                 if(!go_boxes_overlap(a,b))continue;
-                if(!go_reclaimable(n)){blocked=true;break;}
-                bool known=false;for(int j=0;j<reclaimCount;j++)if(reclaim[j]==v->identity)known=true;
-                if(!known)reclaim[reclaimCount++]=v->identity;
+                if(!go_reclaimable(n)){
+#ifdef FIREFIGHT_TESTING
+                    if(getenv("GOLEM_REPAIR_PROFILE"))printf("Repair obstruction group=%d cell=%d voxel=%d static=%d position=%.2f,%.2f,%.2f target=%.2f,%.2f,%.2f\n",group,cell,n,!v->simulate,v->pos.x,v->pos.y,v->pos.z,a[0].x,a[0].y,a[0].z);
+#endif
+                    blocked=true;break;
+                }
+                bool known=false;for(int j=0;j<reclaimCount;j++)if(reclaim[j].id==v->identity)known=true;
+                if(!known)reclaim[reclaimCount++]=(GoReclaim){v->identity,n};
             }
         }
+#ifdef FIREFIGHT_TESTING
+        profileNarrow+=GetTime()-narrowStart;
+#endif
         if(blocked)continue;
         /* Reserve all fallible storage before changing the world or reclaiming
          * debris. No joint can be published with only part of its cells. */
@@ -116,7 +173,7 @@ static void go_repair_prepare(void){
         if(!skeleton_reserve((goWeldCount+goLinkCount)*4+GM_COUNT*4+goCount*8))continue;
         bool dissolving=false;
         for(int j=0;j<reclaimCount;j++){
-            int n=go_find(reclaim[j],-1);if(n<0)continue;
+            int n=go_find(reclaim[j].id,reclaim[j].index);if(n<0)continue;
             if(voxels[n].golemReclaimStart<=0)voxels[n].golemReclaimStart=fmaxf(goClock,.0001f);
             if(goClock-voxels[n].golemReclaimStart<.25f)dissolving=true;
         }
@@ -137,14 +194,26 @@ static void go_repair_prepare(void){
         }
         /* Remove only debris still overlapping this transaction. Compaction
          * is resolved before publishing connections. */
-        for(int j=0;j<reclaimCount;j++){int n=go_find(reclaim[j],-1);if(n>=0)remove_voxel_index(n);}
+        // Descending removal keeps pending debris indices valid. Repair the
+        // cached reference to any swapped body cell immediately; don't scan
+        // the complete world for every debris and replacement identity.
+        qsort(reclaim,reclaimCount,sizeof(*reclaim),go_reclaim_descending);
+        for(int j=0;j<reclaimCount;j++){
+            int n=go_find(reclaim[j].id,reclaim[j].index);if(n<0)continue;
+            uint64_t moved=voxels[voxel_count-1].identity;remove_voxel_index(n);
+            for(int c=0;c<goCount;c++)if(goCells[c].id==moved)goCells[c].index=n;
+        }
         for(int i=0;i<goCount;i++)goCells[i].index=go_find(goCells[i].id,goCells[i].index);
         go_connect();collisionTopologyDirty=true;
         for(int k=0;k<count;k++)goOverload[goCells[pending[k]].part]=0;
         *repair=(GoRepair){GO_REPAIR_RECOVER,goClock};
+        break; // At most one complete assembly is published per physics step.
     }
     /* A moving/held obstruction or a disabled repair cancels its cosmetic
      * dissolve. Reclamation never leaves a surviving voxel invisible. */
+#ifdef FIREFIGHT_TESTING
+    profileCleanup=GetTime();
+#endif
     for(int n=0;n<voxel_count;n++)if(voxels[n].golemReclaimStart>0){
         bool needed=false;
         if(goRegen&&go_reclaimable(n)){
@@ -155,7 +224,10 @@ static void go_repair_prepare(void){
         }
         if(!needed)voxels[n].golemReclaimStart=0;
     }
-    free(pending);free(backup);free(reclaim);
+    free(pending);free(backup);free(reclaim);free(candidates);
+#ifdef FIREFIGHT_TESTING
+    if(getenv("GOLEM_REPAIR_PROFILE"))printf("Repair ms total %.3f broad %.3f narrow %.3f cleanup %.3f\n",(GetTime()-profileStart)*1000,profileBroad*1000,profileNarrow*1000,(GetTime()-profileCleanup)*1000);
+#endif
 }
 static const char *go_repair_status(void){
     static const char *names[]={"ready","waiting","blocked","rebuilding","recovering"};

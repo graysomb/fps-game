@@ -599,7 +599,8 @@ static void enemy_update(int i,float dt) {
     Vector3 move=to;float speed=1;s->work=0;
     if(t==ENEMY_TYPE_SHIELDBEARER) {
         speed=.7f;
-        if(shield_has_escort(i))move=distance<8?v_mul(to,-1):distance>14?to:(Vector3){0};
+        if(distance<3)move=to; // Push back at attackers who close on the shield.
+        else if(shield_has_escort(i))move=distance<8?v_mul(to,-1):distance>14?to:(Vector3){0};
         else for(int j=MAX_PLAYERS;j<activePlayers;j++)if(j!=i && players[j].respawn_timer<=0 && v_length(world_delta(p->pos,players[j].pos))<8) {
             move=world_delta(v_add(players[j].pos,v_mul(v_norm(world_delta(ai_target_body(s->target)->pos,players[j].pos)),2)),p->pos);break;
         }
@@ -671,7 +672,8 @@ static void enemy_update(int i,float dt) {
             s->spawnTimer=added?15:1;
         }
     }
-    if(distance<1.4f && enemy_clear_line(p->pos,ai_target_body(s->target)->pos) && s->melee<=0 && s->windup<=0 && t!=ENEMY_TYPE_FOUNDRY) {
+    bool meleeLine=distance<(t==ENEMY_TYPE_SHIELDBEARER?2.2f:1.4f) && (t==ENEMY_TYPE_SHIELDBEARER?!rifle_view_blocked(i,ai_target_body(s->target)->pos):enemy_clear_line(p->pos,ai_target_body(s->target)->pos));
+    if(distance<(t==ENEMY_TYPE_SHIELDBEARER?2.2f:1.4f) && meleeLine && s->melee<=0 && s->windup<=0 && t!=ENEMY_TYPE_FOUNDRY) {
         if(target_is_hologram(s->target))hologram_damage(s->target,10);else if(players[s->target].isExposed)kill_player(s->target,i,true,false);else apply_matter_damage(s->target,i,10);s->melee=1.5f;
     }
     move.y=0;

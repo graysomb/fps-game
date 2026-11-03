@@ -7,6 +7,13 @@ static void fp_update_carrier(int i,float dt){
  ai_tick(i,dt);if(paired)fp_pair_perception(i);
  if(clarity_evade(i,dt)){eq_cancel_charge(i);e->held=false;return;}
  AiCombat *a=&aiCombat[i];fpCarrierClock[i]=fmaxf(0,fpCarrierClock[i]-dt);
+ // Recovery must run before target visibility, patrol and formation branches.
+ // Use the timed melee harvest path, including hysteresis and stuck recovery.
+ if(p->enemyType==ENEMY_TYPE_STANDARD &&
+    !(escort && players[shieldEscort[i]-1].enemyType==ENEMY_TYPE_ANCHOR &&
+      enemySpecial[shieldEscort[i]-1].equipmentCount && enemySpecial[shieldEscort[i]-1].disabled<=0)){
+  if(lobber_harvest(i,dt)){eq_cancel_charge(i);e->held=false;return;}
+ }
  if(a->target<0){
   if(escort){eq_cancel_charge(i);shield_escort_move(i,dt);return;}
   if(paired){eq_cancel_charge(i);fp_pair_move(i,dt);return;}
