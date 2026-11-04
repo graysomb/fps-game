@@ -1404,6 +1404,16 @@ static int recycleQueueTail = 0;
 static int recycleQueueCount = 0;
 static int recycleFrameCounter = 0; // Elapsed gameplay time in 60 Hz ticks.
 static double recycleTickRemainder = 0;
+#if defined(FIREFIGHT_TESTING) && !defined(DEBRIS_BENCHMARK)
+#define DEBRIS_COUNT(x) ((void)(x))
+#else
+#define DEBRIS_COUNT(x) ((void)0)
+#endif
+static atomic_uint activationClaimRevision;
+static bool completeSleepIsland;
+static int enemy_equipment_owner(int v);
+static unsigned long long sleepGroupsChecked,sleepGroupsBlocked,sleepGroupsFrozen,wakeQueries,wakeTransitions;
+static unsigned long long sleepProtected,sleepMixed,sleepNotCalm,sleepUnsupported;
 static int recycleUpdateCounter = 0; // Actual updates, for same-update damage deduplication.
 static bool staticEditBatch = false;
 static void regeneration_step(float dt);
@@ -1853,6 +1863,7 @@ static void rollback_activation_buffer(UnitVoxelBuffer *buffer, int startIndex)
             atomic_store_explicit(&activationClaims[idx], 0, memory_order_release);
         }
     }
+    if(buffer->count!=startIndex)atomic_fetch_add_explicit(&activationClaimRevision,1,memory_order_release);
     buffer->count = startIndex;
 }
 
@@ -5062,6 +5073,7 @@ static bool activation_try_enqueue(int voxel_idx,
         }
     }
 
+    atomic_fetch_add_explicit(&activationClaimRevision,1,memory_order_release);
     candidate->pendingActivation = true;
     if (!unit_voxel_buffer_push(buffer,
                                 candidate->gx, candidate->gy, candidate->gz,
@@ -5403,12 +5415,78 @@ typedef struct {
     int radius;
 } ActivateJob;
 
+/* Per-worker, per-pass discovery. Rejected components never acquire activation claims. */
+typedef struct {
+    unsigned seen[MAX_VOXELS], rejected[MAX_VOXELS], search, region, claimRevision;
+    float resistance[MAX_VOXELS];
+    unsigned short componentSize[MAX_VOXELS];
+    int ids[VOXEL_ACTIVATION_UNIT_BUDGET], x,y,z;
+    float radius;
+    bool centerValid;
+    unsigned long long searches,hits,rejects,visited;
+} ActivationCandidates;
+static ActivationCandidates activationCandidates[PBD_MAX_THREADS+1];
+#ifdef FIREFIGHT_TESTING
+static bool activationCandidateCacheDisabled;
+#endif
+static void activation_candidates_reset(void) {
+    for(int w=0;w<=PBD_MAX_THREADS;w++){
+        ActivationCandidates *c=&activationCandidates[w];c->centerValid=false;
+        c->searches=c->hits=c->rejects=c->visited=0;
+    }
+}
+/* Returns true only for a complete rejected component. Incomplete searches use
+ * the original collector, preserving its unit-budget and claim handling. */
+static bool activation_candidate_rejected(ActivationCandidates *c,int seed,int x,int y,int z,float radius,float force,int budget) {
+    unsigned revision=atomic_load_explicit(&activationClaimRevision,memory_order_acquire);
+    if(!c->centerValid || c->claimRevision!=revision || c->x!=x || c->y!=y || c->z!=z || c->radius!=radius){
+        c->claimRevision=revision;c->centerValid=true;c->x=x;c->y=y;c->z=z;c->radius=radius;
+        if(++c->region==0){memset(c->rejected,0,sizeof(c->rejected));c->region=1;}
+    }
+    bool cached=true;
+#ifdef FIREFIGHT_TESTING
+    cached=!activationCandidateCacheDisabled;
+#endif
+    if(cached && c->rejected[seed]==c->region){
+        if(c->componentSize[seed]>budget)return false;
+        DEBRIS_COUNT(c->hits++);return !dynamic_belief_overcomes_static(force+1e-5f,c->resistance[seed]);
+    }
+    if(budget<=0)return false;
+    DEBRIS_COUNT(c->searches++);
+    if(++c->search==0){memset(c->seen,0,sizeof(c->seen));c->search=1;}
+    int count=1,head=0;c->ids[0]=seed;c->seen[seed]=c->search;
+    float sum=0,minimum=1;
+    const int d[6][3]={{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+    while(head<count){
+        int v=c->ids[head++];Voxel *a=&voxels[v];
+        /* Concurrent accepted work changes the available component. Do not cache it. */
+        if(atomic_load_explicit(&activationClaims[v],memory_order_acquire))return false;
+        sum+=a->freezeBelief;minimum=fminf(minimum,a->freezeBelief);DEBRIS_COUNT(c->visited++);
+        for(int k=0;k<6;k++){
+            int n=table_get_static_only(a->gx+d[k][0],a->gy+d[k][1],a->gz+d[k][2]);
+            if(n<0 || n>=voxel_count || c->seen[n]==c->search || voxels[n].simulate || voxel_is_fluid(&voxels[n]))continue;
+            float dx=voxels[n].gx-x,dy=voxels[n].gy-y,dz=voxels[n].gz-z;
+            if(radius>=0 && dx*dx+dy*dy+dz*dz>radius)continue;
+            if(count==budget)return false;
+            c->seen[n]=c->search;c->ids[count++]=n;
+        }
+    }
+    if(atomic_load_explicit(&activationClaimRevision,memory_order_acquire)!=revision)return false;
+    float belief=.5f*(sum/count+minimum);
+    if(dynamic_belief_overcomes_static(force+1e-5f,belief))return false;
+    DEBRIS_COUNT(c->rejects++);
+    /* Cache only this source's neighborhood. Accepted work invalidates it below. */
+    for(int k=0;k<count;k++){int v=c->ids[k];c->rejected[v]=c->region;c->resistance[v]=belief;c->componentSize[v]=(unsigned short)count;}
+    return true;
+}
+
 static void activate_static_worker(int start, int end, int worker_id, void *user) {
     ActivateJob *job = (ActivateJob *)user;
     int buf_idx = (worker_id < 0) ? 0 : (worker_id + 1);
     UnitVoxelBuffer *buffer = &activate_thread_buffers[buf_idx];
     float radius_sq = job->radius_sq;
     int radius = job->radius;
+    ActivationCandidates *discovery=&activationCandidates[buf_idx];
 
     for (int i = start; i < end; ++i) {
         if (buffer->count >= VOXEL_ACTIVATION_UNIT_BUDGET) {
@@ -5464,6 +5542,7 @@ static void activate_static_worker(int start, int end, int worker_id, void *user
                         continue;
                     }
 
+                    if(activation_candidate_rejected(discovery,idx,center_gx,center_gy,center_gz,radius_sq,dynamic->activationBelief,VOXEL_ACTIVATION_UNIT_BUDGET-buffer->count))continue;
                     int previousCount = buffer->count;
                     int added = collect_static_activation_cluster(idx, activator,
                                                                   center_gx, center_gy, center_gz,
@@ -5478,6 +5557,7 @@ static void activate_static_worker(int start, int end, int worker_id, void *user
                         rollback_activation_buffer(buffer, previousCount);
                         continue;
                     }
+                    discovery->centerValid=false;
                     expand_activation_cluster_unbounded(buffer, previousCount,
                                                         dynamic->activationBelief, activator);
                     if (buffer->count >= VOXEL_ACTIVATION_UNIT_BUDGET) {
@@ -5596,7 +5676,10 @@ static bool activate_static_voxels_near_dynamic(void)
     float radius = (float)VOXEL_ACTIVATION_RADIUS;
     float radius_sq = radius * radius;
 
+    activation_candidates_reset();
+    bool sleepingFluid=false;
     for (int i = 0; i < voxel_count; ++i) {
+        sleepingFluid |= !voxels[i].simulate && voxel_is_fluid(&voxels[i]);
         atomic_store_explicit(&activationClaims[i], 0, memory_order_relaxed);
     }
 
@@ -5607,6 +5690,7 @@ static bool activate_static_voxels_near_dynamic(void)
     ActivateJob job = { .radius_sq = radius_sq, .radius = VOXEL_ACTIVATION_RADIUS };
     pbd_parallel_for(0, voxel_count, activate_static_worker, &job);
 
+    if(sleepingFluid){
     // Wake sleeping fluid near dynamic solid voxels
     for (int i = 0; i < voxel_count; ++i) {
         Voxel *dyn = &voxels[i];
@@ -5647,6 +5731,8 @@ static bool activate_static_voxels_near_dynamic(void)
             }
         }
     }
+
+    } // No fluid queries are necessary in worlds without sleeping fluid.
 
     for (int i = 0; i < PBD_MAX_THREADS + 1; ++i) {
         UnitVoxelBuffer *tb = &activate_thread_buffers[i];
@@ -7186,7 +7272,7 @@ static bool freeze_dynamic_cluster_in_place(const int *cluster, int cluster_coun
 
     // Never turn a particle shared with an awake voxel outside this island into
     // an anchor.  This should be rare, but protects partially rebuilt glue graphs.
-    for (int i = 0; i < voxel_count; ++i) {
+    for (int i = 0; !completeSleepIsland && i < voxel_count; ++i) {
         if (sleepClusterVisited[i] || !voxel_is_awake_dynamic(&voxels[i])) continue;
         for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
             Particle *particle = voxels[i].particles[corner]; //pointer
@@ -7225,6 +7311,21 @@ static bool freeze_dynamic_cluster_in_place(const int *cluster, int cluster_coun
     return true;
 }
 
+#define WAKE_BUCKETS 8192
+static int wakeHead[WAKE_BUCKETS],wakeNext[MAX_VOXELS];
+static uint64_t wakeKey[MAX_VOXELS];
+static unsigned char wakeIndexed[MAX_VOXELS];
+static bool wakeIndexActive;
+static int wake_coord(int g){return (int)floorf(world_grid(g)/4.f);}
+static uint64_t wake_key(int x,int y,int z){return mortonKey(x,y,z);}
+static void wake_index_add(int i){
+    Voxel *a=&voxels[i];
+    if(!wakeIndexActive || wakeIndexed[i] || !a->vgs_active || !voxel_is_awake_dynamic(a) ||
+       !(a->isBullet || a->wasTethered || v_length(a->vel)>=VOXEL_DEACTIVATION_VELOCITY_THRESHOLD))return;
+    uint64_t key=wake_key(wake_coord(a->gx),(int)floorf(a->gy/4.f),wake_coord(a->gz));
+    int bucket=hashVoxelKey(key)&(WAKE_BUCKETS-1);
+    wakeIndexed[i]=1;wakeKey[i]=key;wakeNext[i]=wakeHead[bucket];wakeHead[bucket]=i;
+}
 static bool wake_sleeping_cluster_in_place(int start_idx)
 {
     if (start_idx < 0 || start_idx >= voxel_count ||
@@ -7255,6 +7356,7 @@ static bool wake_sleeping_cluster_in_place(int start_idx)
         voxel->wake_source = false;
         voxel->break_mask = 0;
         voxel->vel = (Vector3){ 0.0f, 0.0f, 0.0f };
+        wake_index_add(idx);
         voxel->lifeFrames = 0;
         for (int corner = 0; corner < VOXEL_CORNER_COUNT; ++corner) {
             Particle *particle = voxel->particles[corner]; //pointer
@@ -7276,6 +7378,8 @@ static bool voxel_bounds_within_margin(const Voxel *a, const Voxel *b, float mar
     VoxelWorldBounds aa, bb;
     voxel_particle_world_bounds(a, &aa);
     voxel_particle_world_bounds(b, &bb);
+    Vector3 offset=v_sub(world_image(b->pos,a->pos),b->pos);
+    bb.minx+=offset.x;bb.maxx+=offset.x;bb.minz+=offset.z;bb.maxz+=offset.z;
     return aa.maxx + margin >= bb.minx && bb.maxx + margin >= aa.minx &&
            aa.maxy + margin >= bb.miny && bb.maxy + margin >= aa.miny &&
            aa.maxz + margin >= bb.minz && bb.maxz + margin >= aa.minz;
@@ -7285,34 +7389,33 @@ static bool wake_sleeping_voxels_near_awake(void)
 {
     bool changed = false;
     const float contact_margin = VOXEL_SIZE * 0.15f;
-    const float wake_speed = VOXEL_DEACTIVATION_VELOCITY_THRESHOLD;
-    for (int i = 0; i < voxel_count; ++i) {
-        Voxel *sleeper = &voxels[i];
-        if (!sleeper->simulate || !sleeper->sleeping) continue;
-
-        bool should_wake = false;
-        for (int dz = -2; dz <= 2 && !should_wake; ++dz) {
-            for (int dy = -2; dy <= 2 && !should_wake; ++dy) {
-                for (int dx = -2; dx <= 2; ++dx) {
-                    int other_idx = table_get(sleeper->gx + dx,
-                                              sleeper->gy + dy,
-                                              sleeper->gz + dz);
-                    if (other_idx < 0 || other_idx >= voxel_count || other_idx == i) continue;
-                    Voxel *other = &voxels[other_idx];
-                    if (!voxel_is_awake_dynamic(other)) continue;
-                    bool energetic = other->isBullet || other->wasTethered ||
-                                     v_length(other->vel) >= wake_speed;
-                    if (energetic && voxel_bounds_within_margin(sleeper, other, contact_margin)) {
-                        should_wake = true;
-                        break;
-                    }
-                }
+    memset(wakeHead,0xff,sizeof(wakeHead));
+    memset(wakeIndexed,0,(size_t)voxel_count);
+    wakeIndexActive=true;wakeQueries=wakeTransitions=0;
+    for(int i=0;i<voxel_count;i++)wake_index_add(i);
+    for(int i=0;i<voxel_count;i++){
+        Voxel *sleeper=&voxels[i];if(!sleeper->simulate || !sleeper->sleeping)continue;
+        int coords[3][5],counts[3]={0};
+        int center[3]={sleeper->gx,sleeper->gy,sleeper->gz};
+        for(int axis=0;axis<3;axis++)for(int d=-2;d<=2;d++){
+            int c=axis==1?(int)floorf((center[axis]+d)/4.f):wake_coord(center[axis]+d);
+            bool found=false;for(int k=0;k<counts[axis];k++)found|=coords[axis][k]==c;
+            if(!found)coords[axis][counts[axis]++]=c;
+        }
+        bool should_wake=false;
+        for(int z=0;z<counts[2]&&!should_wake;z++)for(int y=0;y<counts[1]&&!should_wake;y++)for(int x=0;x<counts[0]&&!should_wake;x++){
+            uint64_t key=wake_key(coords[0][x],coords[1][y],coords[2][z]);
+            DEBRIS_COUNT(wakeQueries++);
+            for(int n=wakeHead[hashVoxelKey(key)&(WAKE_BUCKETS-1)];n>=0;n=wakeNext[n]){
+                if(n==i || wakeKey[n]!=key)continue;
+                Voxel *other=&voxels[n];
+                if(abs(world_grid(other->gx-sleeper->gx))>2 || abs(other->gy-sleeper->gy)>2 || abs(world_grid(other->gz-sleeper->gz))>2)continue;
+                if(voxel_bounds_within_margin(sleeper,other,contact_margin)){should_wake=true;break;}
             }
         }
-        if (should_wake && wake_sleeping_cluster_in_place(i)) {
-            changed = true;
-        }
+        if(should_wake && wake_sleeping_cluster_in_place(i)){changed=true;DEBRIS_COUNT(wakeTransitions++);}
     }
+    wakeIndexActive=false;
     return changed;
 }
 
@@ -7407,167 +7510,72 @@ static bool deactivate_sleeping_voxels(void)
 
     pbd_parallel_for(0, voxel_count, evaluate_voxel_calm_range, NULL);
 
-    memset(sleepClusterVisited, 0, sizeof(sleepClusterVisited));
-    for (int i = 0; i < voxel_count; ++i) {
-        Voxel *voxel = &voxels[i];
-        if (!voxel_is_awake_dynamic(voxel) || voxel->type != 0 || voxel->isBullet ||
-            get_goliath_owner_of_voxel(i) >= 0) {
-            continue;
-        }
-        if (sleepClusterVisited[i]) {
-            continue;
-        }
-
-        int head = 0;
-        int tail = 0;
-        glueClusterIndices[tail++] = i;
-        sleepClusterVisited[i] = 1;
-
-        bool cluster_calm = (voxelCalmFlags[i] != 0);
-        int min_sleep = voxel->sleepFrames;
-
-        while (head < tail) {
-            int idx = glueClusterIndices[head++];
-            Voxel *member = &voxels[idx];
-            if (!voxelCalmFlags[idx]) {
-                cluster_calm = false;
-            }
-            if (member->sleepFrames < min_sleep) {
-                min_sleep = member->sleepFrames;
-            }
-            int neighbors[MAX_FACE_NEIGHBORS];
-            int neighbor_count = gather_glued_neighbors_symmetric(idx, neighbors, MAX_FACE_NEIGHBORS);
-            for (int n = 0; n < neighbor_count; ++n) {
-                int neighbor = neighbors[n];
-                if (neighbor < 0 || neighbor >= voxel_count) {
-                    continue;
-                }
-                if (sleepClusterVisited[neighbor]) {
-                    continue;
-                }
-                sleepClusterVisited[neighbor] = 1;
-                if (tail < MAX_VOXELS) {
-                    glueClusterIndices[tail++] = neighbor;
-                }
-            }
-        }
-
-        int next_sleep = cluster_calm ? min_sleep + 1 : 0;
-        if (cluster_calm && min_sleep >= INT_MAX) {
-            next_sleep = INT_MAX;
-        } else if (cluster_calm && next_sleep < min_sleep) {
-            next_sleep = INT_MAX;
-        }
-
-        for (int c = 0; c < tail; ++c) {
-            int member_idx = glueClusterIndices[c];
-            Voxel *member = &voxels[member_idx];
-            member->sleepFrames = next_sleep;
-        }
+    /* One ownership map joins BOTH glue neighbors and shared corner particles.
+     * Include protected members so a group cannot freeze their shared particles. */
+    static int owner[MAX_PARTICLES];
+    memset(owner,0xff,(size_t)particle_pool_count*sizeof(*owner));
+    for(int i=0;i<voxel_count;i++){
+        recycleLifetimeParent[i]=voxels[i].simulate?i:-1;
+        recycleLifetimeHead[i]=recycleLifetimeNext[i]=-1;
     }
-
-    int idx = 0;
-    while (idx < voxel_count && remaining_budget > 0) {
-        Voxel *voxel = &voxels[idx];
-        if (!voxel_is_awake_dynamic(voxel) || voxel->type != 0 || voxel->isBullet) {
-            ++idx;
-            continue;
+    for(int i=0;i<voxel_count;i++)if(recycleLifetimeParent[i]>=0){
+        for(int c=0;c<VOXEL_CORNER_COUNT;c++){
+            Particle *p=voxels[i].particles[c];if(!p)continue;
+            ptrdiff_t id=p-particles_pool;if(id<0 || id>=particle_pool_count)continue;
+            if(owner[id]>=0)recycle_lifetime_union(i,owner[id]);else owner[id]=i;
         }
-        if (voxel->sleepFrames < VOXEL_DEACTIVATION_FRAMES) {
-            if (debugLogVoxelDeactivation && voxel->sleepFrames > 0) {
-                TraceLog(LOG_INFO,
-                         "[Deactivate] voxel=%d sleep=%d/%d waiting",
-                         idx, voxel->sleepFrames, VOXEL_DEACTIVATION_FRAMES);
-            }
-            ++idx;
-            continue;
-        }
-
-        memset(sleepClusterVisited, 0, sizeof(unsigned char) * (size_t)voxel_count);
-        int head = 0;
-        int tail = 0;
-        glueClusterIndices[tail++] = idx;
-        sleepClusterVisited[idx] = 1;
-
-        while (head < tail) {
-            int current = glueClusterIndices[head++];
-            int neighbors[MAX_FACE_NEIGHBORS];
-            int neighbor_count = gather_glued_neighbors_symmetric(current, neighbors, MAX_FACE_NEIGHBORS);
-            for (int n = 0; n < neighbor_count; ++n) {
-                int neighbor = neighbors[n];
-                if (neighbor < 0 || neighbor >= voxel_count) {
-                    continue;
-                }
-                if (sleepClusterVisited[neighbor]) {
-                    continue;
-                }
-                sleepClusterVisited[neighbor] = 1;
-                if (tail < MAX_VOXELS) {
-                    glueClusterIndices[tail++] = neighbor;
-                }
-            }
-        }
-
-        int cluster_count = tail;
-        if (cluster_count <= 0) {
-            ++idx;
-            continue;
-        }
-
-        bool cluster_ready = true;
-        for (int c = 0; c < cluster_count; ++c) {
-            int cidx = glueClusterIndices[c];
-            if (cidx < 0 || cidx >= voxel_count) {
-                cluster_ready = false;
-                break;
-            }
-            Voxel *member = &voxels[cidx];
-            if (!voxel_is_awake_dynamic(member) || member->type != 0 || member->isBullet ||
-                member->sleepFrames < VOXEL_DEACTIVATION_FRAMES) {
-                cluster_ready = false;
-                break;
-            }
-        }
-
-        if (!cluster_ready) {
-            keep_cluster_awake(glueClusterIndices, cluster_count);
-            ++idx;
-            continue;
-        }
-
-        if (!glue_cluster_has_static_support(glueClusterIndices, cluster_count)) {
-            keep_cluster_awake(glueClusterIndices, cluster_count);
-            ++idx;
-            continue;
-        }
-
-        bool near_original = cluster_is_near_original_grid_pose(glueClusterIndices,
-                                                                 cluster_count);
-        for(int member=0;member<cluster_count;member++)if(voxels[glueClusterIndices[member]].owner==ENEMY_SCRAP_OWNER || clarity_is_remains(voxels[glueClusterIndices[member]].identity))near_original=false;
-        if (near_original) {
-            if (!restore_glue_cluster_to_static(glueClusterIndices, cluster_count)) {
-                ++idx;
-                continue;
-            }
-            restored_static = true;
-        } else if (!freeze_dynamic_cluster_in_place(glueClusterIndices, cluster_count)) {
-            ++idx;
-            continue;
-        }
-
-        if (debugLogVoxelDeactivation) {
-            TraceLog(LOG_INFO,
-                     "[Deactivate] %s cluster starting=%d count=%d remaining_budget_before=%d",
-                     near_original ? "restored near-origin" : "froze in place",
-                     idx, cluster_count, remaining_budget);
-        }
-        remaining_budget -= cluster_count;
-        if (remaining_budget < 0) {
-            remaining_budget = 0;
-        }
-        changed = true;
-        continue;
+        int neighbors[MAX_FACE_NEIGHBORS];
+        int n=gather_glued_neighbors_symmetric(i,neighbors,MAX_FACE_NEIGHBORS);
+        for(int k=0;k<n;k++)if(neighbors[k]>=0 && neighbors[k]<voxel_count && recycleLifetimeParent[neighbors[k]]>=0)
+            recycle_lifetime_union(i,neighbors[k]);
     }
+    for(int i=0;i<voxel_count;i++)if(recycleLifetimeParent[i]>=0){
+        int root=recycle_lifetime_find_root(i);
+        recycleLifetimeNext[i]=recycleLifetimeHead[root];recycleLifetimeHead[root]=i;
+    }
+    sleepGroupsChecked=sleepGroupsBlocked=sleepGroupsFrozen=0;
+    sleepProtected=sleepMixed=sleepNotCalm=sleepUnsupported=0;
+    for(int root=0;root<voxel_count && remaining_budget>0;root++){
+        if(recycleLifetimeParent[root]!=root)continue;
+        bool eligible=true,calm=true,awake=false,near_original=true,hasSleeping=false;
+        int count=0,min_sleep=INT_MAX;
+        for(int v=recycleLifetimeHead[root];v>=0;v=recycleLifetimeNext[v]){
+            Voxel *a=&voxels[v];glueClusterIndices[count++]=v;
+            awake|=voxel_is_awake_dynamic(a);hasSleeping|=a->sleeping;
+            eligible &= voxel_is_awake_dynamic(a) && a->type==0 && !a->isBullet &&
+                !a->persistentConstruction && !recycle_voxel_held(v) &&
+                get_goliath_owner_of_voxel(v)<0 && enemy_equipment_owner(v)<0;
+            calm &= voxelCalmFlags[v]!=0;if(a->sleepFrames<min_sleep)min_sleep=a->sleepFrames;
+            if(a->owner==ENEMY_SCRAP_OWNER || clarity_is_remains(a->identity))near_original=false;
+        }
+        if(!awake)continue;
+        DEBRIS_COUNT(sleepGroupsChecked++);
+        if(!eligible){
+            DEBRIS_COUNT(sleepGroupsBlocked++);
+            if(hasSleeping)DEBRIS_COUNT(sleepMixed++);else DEBRIS_COUNT(sleepProtected++);
+            continue;
+        }
+        if(!calm)DEBRIS_COUNT(sleepNotCalm++);
+        int next_sleep=calm?(min_sleep<INT_MAX?min_sleep+1:INT_MAX):0;
+        for(int k=0;k<count;k++)voxels[glueClusterIndices[k]].sleepFrames=next_sleep;
+        if(next_sleep<VOXEL_DEACTIVATION_FRAMES)continue;
+        if(!glue_cluster_has_static_support(glueClusterIndices,count)){
+            DEBRIS_COUNT(sleepUnsupported++);
+            keep_cluster_awake(glueClusterIndices,count);continue;
+        }
+        near_original &= cluster_is_near_original_grid_pose(glueClusterIndices,count);
+        bool converted;
+        if(near_original)converted=restore_glue_cluster_to_static(glueClusterIndices,count);
+        else {
+            completeSleepIsland=true;
+            converted=freeze_dynamic_cluster_in_place(glueClusterIndices,count);
+            completeSleepIsland=false;
+        }
+        if(converted){changed=true;DEBRIS_COUNT(sleepGroupsFrozen++);remaining_budget-=count;}
+        /* Restoration (including rollback) can compact voxel indices. */
+        if(near_original){restored_static=true;break;}
+    }
+    if(voxel_count>0)memset(sleepClusterVisited,0,(size_t)voxel_count);
 
     bool fluid_deactivated = false;
     // Cluster evaluation and deactivation for fluid voxels
