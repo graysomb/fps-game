@@ -4,6 +4,14 @@
 <dict>
 	<key>files</key>
 	<dict>
+		<key>Resources/assets/audio/pretty-good.mp3</key>
+		<data>
+		zw6VY8knbDT2o1ko6l8LcYo6eRc=
+		</data>
+		<key>Resources/assets/victory/foundry-shell.bin</key>
+		<data>
+		Lz3v4KeTxC4OZe2qgCCLZWs2zTY=
+		</data>
 		<key>Resources/couch_settings.cfg</key>
 		<data>
 		kicY5yb2MvIv0V8A4u2lks43rOc=
@@ -30,7 +38,7 @@
 		</data>
 		<key>Resources/shaders/character.frag</key>
 		<data>
-		llvK6hf3oVthLbKi+iLlIAGZUMo=
+		h+6K/Zmdbh5wV9rEiRDPyyJy0dg=
 		</data>
 		<key>Resources/shaders/character.vert</key>
 		<data>
@@ -228,6 +236,26 @@
 		<data>
 		Jx9Y0bm9fUiH4O0klZbWm2nFbAM=
 		</data>
+		<key>Resources/shaders/victory_shadow.frag</key>
+		<data>
+		MTQFhrXN1G7k6sdiCKhHdznruPk=
+		</data>
+		<key>Resources/shaders/victory_shadow.vert</key>
+		<data>
+		S04LnlZ2vmA864k/6KXr9LrCI3I=
+		</data>
+		<key>Resources/shaders/victory_sky.frag</key>
+		<data>
+		O7NWKYwQ5/RxVzAWH/LEOMOs7Cc=
+		</data>
+		<key>Resources/shaders/victory_town.frag</key>
+		<data>
+		TmRh5NumeidQF8OhIDHlJvz+V7c=
+		</data>
+		<key>Resources/shaders/victory_town.vert</key>
+		<data>
+		eMMjeUTOtoGGyN5ZRBKlXL2zEGQ=
+		</data>
 		<key>Resources/shaders/voxel.frag</key>
 		<data>
 		ATqHf+MbD8R8Cl2qQylme6/7ehg=
@@ -303,23 +331,41 @@
 	</dict>
 	<key>files2</key>
 	<dict>
+		<key>MacOS/assets/audio/pretty-good.mp3</key>
+		<dict>
+			<key>cdhash</key>
+			<data>
+			PR+xB+zzrQMhc+my5YrquOVWZe0=
+			</data>
+			<key>requirement</key>
+			<string>cdhash H"3d1fb107ecf3ad032173e9b2e58aeab8e55665ed"</string>
+		</dict>
+		<key>MacOS/assets/victory/foundry-shell.bin</key>
+		<dict>
+			<key>cdhash</key>
+			<data>
+			iwBvoEOY7fHcGgnuycTf6LZuO3I=
+			</data>
+			<key>requirement</key>
+			<string>cdhash H"8b006fa04398edf1dc1a09eec9c4dfe8b66e3b72"</string>
+		</dict>
 		<key>MacOS/fps_ray_cpu</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			l6hqhwMDA1X16dPg1kz0dBEUP0g=
+			RHEn5OW3qKBQ2R1tulgPTePUehI=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"97a86a8703030355f5e9d3e0d64cf47411143f48"</string>
+			<string>cdhash H"447127e4e5b7a8a050d91d6dba580f4de3d47a12"</string>
 		</dict>
 		<key>MacOS/fps_ray_gpu</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			X7w1f2DSyYCEcAd8Yr0SAJS/myQ=
+			4ap8RcGWgqwfWnxx5ah5GjsKcUk=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"5fbc357f60d2c9808470077c62bd120094bf9b24"</string>
+			<string>cdhash H"e1aa7c45c19682ac1f5a7c71e5a8791a3b0a7149"</string>
 		</dict>
 		<key>MacOS/game_song.mp3</key>
 		<dict>
@@ -329,6 +375,20 @@
 			</data>
 			<key>requirement</key>
 			<string>cdhash H"3eb47df1cd2004222fde07a687fbeed6cb1a1259"</string>
+		</dict>
+		<key>Resources/assets/audio/pretty-good.mp3</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			IcQ2DvBlZOpiFdMcw3vFmzWJ7R4QmzAcTfx+JwHCM8Q=
+			</data>
+		</dict>
+		<key>Resources/assets/victory/foundry-shell.bin</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			q/v+2/SSgKcgUbx+jaDpRIK794ri8xPEpanC5Gfqtrs=
+			</data>
 		</dict>
 		<key>Resources/couch_settings.cfg</key>
 		<dict>
@@ -369,7 +429,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			SqO0Bf+aGQ0vxS3eyhZhDMuEE7Cb+jyfnNILL5z/Nl4=
+			uE6Vbk10NEU3kIwk/e6hUy/aR1rHXzYwlaKRhNk0bkA=
 			</data>
 		</dict>
 		<key>Resources/shaders/character.vert</key>
@@ -713,6 +773,41 @@
 			<key>hash2</key>
 			<data>
 			tQ+NuHyXnUo5IyWZ+zBNagoC81NLp09c+/FlWcQGWBA=
+			</data>
+		</dict>
+		<key>Resources/shaders/victory_shadow.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			G/qOQfXmriIcaVE8RrP8LCfIM3AZ9Bpu2fUYzGfSmKg=
+			</data>
+		</dict>
+		<key>Resources/shaders/victory_shadow.vert</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			cVVwic9U2TCiwn3lY6Jv1qscnLW2bhm9NgEZ8bXdb2c=
+			</data>
+		</dict>
+		<key>Resources/shaders/victory_sky.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			yFDOKh1dZW2I4Bm427ZP6biEKecZeEKJbxa9lLVgPyY=
+			</data>
+		</dict>
+		<key>Resources/shaders/victory_town.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			Zbu+Lyr6DrX9dwpXRjEHm30Ng4gTJQ30suFHirjhLLw=
+			</data>
+		</dict>
+		<key>Resources/shaders/victory_town.vert</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			y0/ePKpNEG5UUSzIIJnHy2kZBeChZNNWUv5A3W3G9XY=
 			</data>
 		</dict>
 		<key>Resources/shaders/voxel.frag</key>

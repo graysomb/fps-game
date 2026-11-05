@@ -17,6 +17,17 @@ Each scene now lasts about 17.07 seconds, matching the supplied 2:16.5 soundtrac
 
 ## Build and run
 
+On macOS, after building the game once to prepare raylib:
+
+```sh
+./tests/build_victory_town_macos.sh
+open ".build/Reclaimed Foundry Credits.app"
+```
+
+The app includes its shaders, scenery and soundtrack and can be opened directly
+from Finder. The macOS build has passed credit-card rendering, geometry/camera
+validation and the soundtrack duration/pause/seek/resume check on Apple Silicon.
+
 From the repository root with the existing raylib libraries:
 
 ```powershell
