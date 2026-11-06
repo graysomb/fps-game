@@ -316,21 +316,21 @@ static int eq_build_count(int i){int side=eq_build_side(i);return side*side*side
 static bool eq_panel_positions(int i,Vector3 out[EQ_PANEL_CUBES]){
     Ray ray={players[i].pos,player_forward(&players[i])};VoxelHit hit;Vector3 at,normal={0,1,0};
     int side=eq_build_side(i),half=side/2;
-    if(first_voxel_hit_detailed(ray,TETHER_RANGE,-1,false,&hit)){
+    // Search across the map, bounded so periodic worlds cannot trace forever.
+    float reach=FLOOR_SIZE*4.0f;
+    float ground=ray.direction.y<-.001f?-ray.position.y/ray.direction.y:INFINITY;
+    if(first_voxel_hit_detailed(ray,fminf(reach,ground),-1,false,&hit)){
         normal=hit.normal;at=(Vector3){(hit.x+.5f)*VOXEL_SIZE,(hit.y+.5f)*VOXEL_SIZE,(hit.z+.5f)*VOXEL_SIZE};
         at=v_add(at,v_mul(normal,(half+1)*VOXEL_SIZE));
-    }else {if(ray.direction.y>=-.001f)return false;float t=-ray.position.y/ray.direction.y;if(t<0 || t>TETHER_RANGE)return false;
-        at=v_add(ray.position,v_mul(ray.direction,t));at.y=(half+.5f)*VOXEL_SIZE;}
+    }else if(ground>=0 && ground<=reach){
+        at=v_add(ray.position,v_mul(ray.direction,ground));at.y=(half+.5f)*VOXEL_SIZE;
+    }else {at=v_add(ray.position,v_mul(ray.direction,8.0f));}
     at=world_wrap(at);at=(Vector3){(floorf(at.x/VOXEL_SIZE)+.5f)*VOXEL_SIZE,(floorf(at.y/VOXEL_SIZE)+.5f)*VOXEL_SIZE,(floorf(at.z/VOXEL_SIZE)+.5f)*VOXEL_SIZE};
     bool valid=true;int count=eq_build_count(i);
     for(int n=0;n<count;n++){
         out[n]=world_wrap(v_add(at,(Vector3){(n%side-half)*VOXEL_SIZE,((n/side)%side-half)*VOXEL_SIZE,(n/(side*side)-half)*VOXEL_SIZE}));
         int x=floorf(out[n].x/VOXEL_SIZE),y=floorf(out[n].y/VOXEL_SIZE),z=floorf(out[n].z/VOXEL_SIZE);
-        int existing=table_get(x,y,z);
-        bool blocked=existing>=0 && !voxel_is_fluid(&voxels[existing]) && enemy_equipment_owner(existing)<0 && get_goliath_owner_of_voxel(existing)<0;
-        if(y<0 || out[n].y>FLOOR_SIZE*2 || blocked || (!worldPeriodic && (fabsf(out[n].x)>FLOOR_SIZE || fabsf(out[n].z)>FLOOR_SIZE)))valid=false;
-        Vector3 extent={VOXEL_SIZE*.499f,VOXEL_SIZE*.499f,VOXEL_SIZE*.499f};BoundingBox cube={v_sub(out[n],extent),v_add(out[n],extent)};
-        for(int v=0;v<voxel_count;v++)if(voxels[v].simulate && !voxels[v].isBullet){VoxelWorldBounds b;voxel_particle_world_bounds(&voxels[v],&b);Vector3 center={(b.minx+b.maxx)*.5f,(b.miny+b.maxy)*.5f,(b.minz+b.maxz)*.5f};Vector3 shift=v_sub(world_image(center,out[n]),center);if(CheckCollisionBoxes(cube,(BoundingBox){v_add((Vector3){b.minx,b.miny,b.minz},shift),v_add((Vector3){b.maxx,b.maxy,b.maxz},shift)}) && get_goliath_owner_of_voxel(v)<0)valid=false;}
+        if(y<0 || out[n].y>FLOOR_SIZE*2 || (!worldPeriodic && (fabsf(out[n].x)>FLOOR_SIZE || fabsf(out[n].z)>FLOOR_SIZE)))valid=false;
     }return valid;
 }
 static bool eq_build_ready(int i){int count=eq_build_count(i);return !players[i].isExposed && players[i].matter>=ff_build_cost(i) && GetTime()-players[i].last_build_time>=BUILD_COOLDOWN_SECONDS && voxel_count+count<MAX_VOXELS && MAX_PARTICLES-particle_pool_count+free_particle_count>=8*count;}
@@ -342,8 +342,6 @@ static bool eq_build_lifts(int count,const Vector3 *at,float lifts[MAX_COMBATANT
         for(int n=0;n<count&&!overlap;n++){Vector3 center=world_image(at[n],players[j].pos),extent={VOXEL_SIZE*.499f,VOXEL_SIZE*.499f,VOXEL_SIZE*.499f};overlap=CheckCollisionBoxes(body,(BoundingBox){v_sub(center,extent),v_add(center,extent)});}
         if(overlap){
             lifts[j]=fmaxf(0,roof-body.min.y+.02f);
-            Vector3 raised=v_add(players[j].pos,(Vector3){0,lifts[j],0});
-            if(player_aabb_hits_world_ex(raised,player_collision_half(&players[j]),j))return false;
         }
     }return true;
 }
@@ -351,9 +349,15 @@ static bool eq_build(int i){
     if(!eq_usable(i) || !eq_build_ready(i))return false;Player *p=&players[i];Vector3 at[EQ_PANEL_CUBES];
     if(!eq_panel_positions(i,at))return false;
     float lifts[MAX_COMBATANTS];if(!eq_build_lifts(eq_build_count(i),at,lifts))return false;
-    int count=eq_build_count(i);uint64_t ids[EQ_PANEL_CUBES]={0};int made=0;
-    for(int n=0;n<count;n++){int v=add_static_voxel_at_grid(floorf(at[n].x/VOXEL_SIZE),floorf(at[n].y/VOXEL_SIZE),floorf(at[n].z/VOXEL_SIZE),player_palette_color(i),0);if(v<0)break;ids[made++]=voxels[v].identity;voxels[v].reinforced=eq_upgrade(i,EQ_BUILD);tag_owned_static_voxel(v,i);mark_surface(v);mark_surface_neighbors(at[n]);}
-    if(made!=count){for(int n=0;n<made;n++){int v=enemy_voxel(ids[n]);if(v>=0)remove_voxel_index(v);}return false;}
+    int count=eq_build_count(i),made=0;
+    for(int n=0;n<count;n++){
+        int x=floorf(at[n].x/VOXEL_SIZE),y=floorf(at[n].y/VOXEL_SIZE),z=floorf(at[n].z/VOXEL_SIZE);
+        // Existing terrain fills this part of the brush; preserve its ownership and material.
+        if(table_get_static_only(x,y,z)>=0)continue;
+        int v=add_static_voxel_at_grid(x,y,z,player_palette_color(i),0);if(v<0)break;
+        made++;voxels[v].reinforced=eq_upgrade(i,EQ_BUILD);tag_owned_static_voxel(v,i);mark_surface(v);mark_surface_neighbors(at[n]);
+    }
+    if(!made)return false;
     for(int j=0;j<activePlayers;j++)if(lifts[j]>0){players[j].pos.y+=lifts[j];players[j].vel.y=fmaxf(0,players[j].vel.y);players[j].onGround=false;}
     eq_spend(i,ff_build_cost(i));p->last_build_time=GetTime();equipment[i].buildTime=.6f;play_sfx(SFX_SHIELD);return true;
 }
