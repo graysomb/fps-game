@@ -34,3 +34,9 @@ static bool fp_cache_collect(int i){
  if(!fp_collect(i,n,true)){fpCount--;return false;}
  return true;
 }
+
+/* Console skips grant only equipment introduced before the requested wave. */
+static void fp_unlock_previous_waves(int wave){
+ if(!fp_active() || netTransport.role==NET_ROLE_CLIENT)return;
+ for(int r=0;r<FP_RULE_COUNT;r++)if(fpRules[r].wave>0 && fpRules[r].wave<wave)fp_queue_unlock(fpRules[r].type);
+}

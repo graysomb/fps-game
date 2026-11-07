@@ -48,9 +48,25 @@ static void cache(void){
  fp_new_run();assert(!fpUnlocked && !fpCacheReady);
  puts("Cache: collected-only unlocks, shared team supplies, manual pickup/replacement, upgrades, checkpoint/reset and authority passed");
 }
+static void console_unlocks(void){
+ fixture(1);start_firefight_wave(5);assert(!fpUnlocked); // Normal progression still requires collection.
+ debug_console_exec("wave 4");
+ uint32_t early=(1u<<fp_rule(PICKUP_GLOB))|(1u<<fp_rule(PICKUP_REINFORCED))|(1u<<fp_rule(PICKUP_GLOCK))|(1u<<fp_rule(PICKUP_GRENADE));
+ assert(firefightWave==4 && fpUnlocked==early && fpCheckpoint.unlocked==early);
+ players[0].pos=fpCachePositions[fp_rule(PICKUP_GLOCK)];assert(fp_cache_collect(0));
+ debug_console_exec("nextwave");assert(firefightWave==5 && (fpUnlocked&(1u<<fp_rule(PICKUP_ADHESIVE))) && (fpUnlocked&(1u<<fp_rule(PICKUP_SHIELD_REGEN))));
+ assert(!(fpUnlocked&(1u<<fp_rule(PICKUP_SHOTGUN))));
+ uint32_t unlocked=fpUnlocked;int banners=fpBannerWrite;debug_console_exec("wave 5");assert(fpUnlocked==unlocked && fpBannerWrite==banners);
+ fp_restore();assert(fpUnlocked==unlocked);
+ debug_console_exec("wave 1");assert(fpUnlocked==unlocked); // Going back never removes earned unlocks.
+ debug_console_exec("wave 12");assert(fpUnlocked==(((1u<<FP_RULE_COUNT)-1)&~(1u<<fp_rule(PICKUP_IGLOO))));
+ netTransport.role=NET_ROLE_CLIENT;debug_console_exec("wave 5");assert(firefightWave==12);netTransport.role=NET_ROLE_OFFLINE;
+ fixture(1);debug_console_exec("wave 1");assert(!fpUnlocked);
+ puts("Console skips: earlier-wave unlocks, cache claims, nextwave, checkpoint persistence, idempotence and host authority passed");
+}
 int main(int argc,char **argv){
  assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Firefight cache regression");init_pbd_thread_pool();assert(initialize_physics_backend());
- timers();duplicates();cache();
+ timers();duplicates();cache();console_unlocks();
  fixture(1);assert(weapon_renderer_init());fpUnlocked=(1u<<FP_RULE_COUNT)-1;drawViewPlayerIndex=0;
  Camera3D camera={.position=v_add(fpCacheOrigin,(Vector3){13,14,20}),.target=v_add(fpCacheOrigin,(Vector3){0,0,7}),.up={0,1,0},.fovy=55};
  RenderTexture2D preview=LoadRenderTexture(960,540);BeginTextureMode(preview);ClearBackground((Color){25,29,35,255});BeginMode3D(camera);DrawPlane((Vector3){0},(Vector2){80,80},DARKGRAY);fp_draw(WEAPON_COLOR);fp_draw(WEAPON_GLASS);EndMode3D();DrawText("FIREFIGHT SPAWN CACHE",20,20,24,SKYBLUE);EndTextureMode();Image previewImage=LoadImageFromTexture(preview.texture);ImageFlipVertical(&previewImage);ExportImage(previewImage,".build/firefight-cache-preview.png");UnloadImage(previewImage);UnloadRenderTexture(preview);

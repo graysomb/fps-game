@@ -294,6 +294,8 @@ copy or replace the selected gun. Cache stands persist and require interaction;
 they never automatically collect or convert duplicate guns to Matter. Unlocks are
 shared by the team, survive Continue/checkpoint restoration, and reset on New Game.
 Wave-start disk saves give restored ground drops a fresh 60-second timer.
+Console `wave n` and `nextwave` also unlock equipment introduced in earlier waves
+for the shared cache; equipment introduced in the selected wave still needs collecting.
 
 **Checkpoints** default OFF. Toggle with `C` or controller `X` in the Firefight lobby
 before starting. When ON, exhausting the team's respawn reserves restarts the current

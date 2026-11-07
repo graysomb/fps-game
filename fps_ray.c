@@ -20707,7 +20707,10 @@ static void debug_console_exec(const char *line)
             debug_console_print("usage: wave n  (firefight only)");
             return;
         }
-        start_firefight_wave(atoi(arg));
+        if(netTransport.role==NET_ROLE_CLIENT){debug_console_print("wave: host only");return;}
+        int wave=atoi(arg);
+        fp_unlock_previous_waves(wave);
+        start_firefight_wave(wave);
         debug_console_printf("started wave %d", firefightWave);
         return;
     }
@@ -20716,6 +20719,8 @@ static void debug_console_exec(const char *line)
             debug_console_print("nextwave: firefight only");
             return;
         }
+        if(netTransport.role==NET_ROLE_CLIENT){debug_console_print("nextwave: host only");return;}
+        fp_unlock_previous_waves(firefightWave + 1);
         start_firefight_wave(firefightWave + 1);
         debug_console_printf("started wave %d", firefightWave);
         return;
