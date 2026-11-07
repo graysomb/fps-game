@@ -17,7 +17,9 @@ int main(void){
  SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(320,240,"Building placement");
  for(int upgrade=0;upgrade<2;upgrade++){
   fixture();equipment[0].upgrades=upgrade?EQ_BUILD:0;players[0].pos.y=5;players[0].pitch=0;
-  Vector3 at[EQ_PANEL_CUBES];assert(eq_panel_positions(0,at));assert(eq_build(0));
+  Vector3 at[EQ_PANEL_CUBES];assert(eq_panel_positions(0,at));
+  assert(fabsf(v_length(world_delta(at[eq_build_count(0)/2],players[0].pos))-(upgrade?16.0f:8.0f))<VOXEL_SIZE);
+  assert(eq_build(0));
   assert(voxel_count==(upgrade?125:27));assert(players[0].matter==90);
   puts("Unsupported midair build: PASS");
   fixture();equipment[0].upgrades=upgrade?EQ_BUILD:0;players[0].pos.y=5;players[0].pitch=-10;

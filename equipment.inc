@@ -324,7 +324,7 @@ static bool eq_panel_positions(int i,Vector3 out[EQ_PANEL_CUBES]){
         at=v_add(at,v_mul(normal,(half+1)*VOXEL_SIZE));
     }else if(ground>=0 && ground<=reach){
         at=v_add(ray.position,v_mul(ray.direction,ground));at.y=(half+.5f)*VOXEL_SIZE;
-    }else {at=v_add(ray.position,v_mul(ray.direction,8.0f));}
+    }else {at=v_add(ray.position,v_mul(ray.direction,eq_upgrade(i,EQ_BUILD)?16.0f:8.0f));}
     at=world_wrap(at);at=(Vector3){(floorf(at.x/VOXEL_SIZE)+.5f)*VOXEL_SIZE,(floorf(at.y/VOXEL_SIZE)+.5f)*VOXEL_SIZE,(floorf(at.z/VOXEL_SIZE)+.5f)*VOXEL_SIZE};
     bool valid=true;int count=eq_build_count(i);
     for(int n=0;n<count;n++){
