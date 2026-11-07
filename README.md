@@ -52,6 +52,11 @@ Reviving does not grant ammunition. Grenades detonate half a second after their 
 in flight wait for their first impact. Orange supply stations add one grenade and refill after 30 seconds. Grenades
 work in offline combat and LAN PvP; creative, paused, and downed players cannot throw.
 
+With the adhesive upgrade, D-pad Down / Tab / semicolon cycles between Regular,
+Sticky, Gravity and Igloo grenades (skipping unavailable types). Regular and Sticky
+share the same grenade ammo; Regular deals up to 75 damage and Sticky up to 100.
+The grenade HUD highlights the selected mode.
+
 **Explosions hurt everyone**, including the thrower, teammates, and other enemies.
 Sticky grenades deal up to 100 damage, regular grenades 75, and Sapper charges 60,
 all falling linearly to zero at four units. They share cover checks before terrain

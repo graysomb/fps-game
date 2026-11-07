@@ -16,6 +16,10 @@ try {
     & gcc tests/firefight_integration.c @sources @flags -o ".build/firefight_integration_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Integration build failed' }
     $backend = if ($Gpu) { 'gpu' } else { 'cpu-mt' }
+    & gcc tests/grenade_selection_test.c @sources @flags -o ".build/grenade_selection_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Grenade selection build failed' }
+    & ".build/grenade_selection_$variant.exe" "--physics=$backend"
+    if ($LASTEXITCODE -ne 0) { throw 'Grenade selection checks failed' }
     & gcc tests/firefight_cache_test.c @sources @flags -o ".build/firefight_cache_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Cache build failed' }
     & ".build/firefight_cache_$variant.exe" "--physics=$backend"

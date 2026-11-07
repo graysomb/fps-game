@@ -4,8 +4,13 @@ static bool ex_suppressed(int i){return i>=0 && i<MAX_COMBATANTS && exSuppressio
 static void ex_clear_status(int i){if(i<0||i>=MAX_COMBATANTS)return;exSuppression[i]=0;for(int n=0;n<EX_SPLATS;n++)if(exSplats[n].actor==i)exSplats[n].id=0;}
 static void ex_reset_player(int i){if(i<0||i>=MAX_COMBATANTS)return;ex_clear_status(i);exBotPull[i]=exBotApplied[i]=(Vector3){0};++exIncarnation[i];if(i<MAX_COMBATANTS){memset(exGrenades[i],0,sizeof(exGrenades[i]));exSelectedGrenade[i]=0;exFailedBuild[i]=0;}}
 static void ex_reset(void){memset(exGlobs,0,sizeof(exGlobs));memset(exFields,0,sizeof(exFields));memset(exSplats,0,sizeof(exSplats));memset(exPartTick,0,sizeof(exPartTick));memset(exLastCycleInput,0,sizeof(exLastCycleInput));for(int i=0;i<MAX_COMBATANTS;i++)ex_reset_player(i);exClock=0;ex_construction_reset();}
-static int ex_grenade_count(int i,int kind){if(i<0||i>=MAX_COMBATANTS||kind<0||kind>=GRENADE_KIND_COUNT)return 0;return kind?exGrenades[i][kind-1]:grenadeInventory[i];}
-static void ex_cycle(int i){if(i<0||i>=MAX_COMBATANTS)return;for(int n=1;n<=GRENADE_KIND_COUNT;n++){int k=(exSelectedGrenade[i]+n)%GRENADE_KIND_COUNT;if(ex_grenade_count(i,k)>0){exSelectedGrenade[i]=k;return;}}}
+static int ex_grenade_count(int i,int kind){if(i<0||i>=MAX_COMBATANTS||kind<0||kind>=GRENADE_SELECTION_COUNT)return 0;if(kind==GRENADE_STICKY)return eq_upgrade(i,EQ_ADHESIVE)?grenadeInventory[i]:0;return kind?exGrenades[i][kind-1]:grenadeInventory[i];}
+static void ex_cycle(int i){
+    if(i<0||i>=MAX_COMBATANTS)return;
+    const int order[]={GRENADE_REGULAR,GRENADE_STICKY,GRENADE_GRAVITY,GRENADE_IGLOO};int current=0;
+    for(int n=0;n<GRENADE_SELECTION_COUNT;n++)if(order[n]==exSelectedGrenade[i])current=n;
+    for(int n=1;n<=GRENADE_SELECTION_COUNT;n++){int k=order[(current+n)%GRENADE_SELECTION_COUNT];if(ex_grenade_count(i,k)>0){exSelectedGrenade[i]=k;return;}}
+}
 static bool ex_grenade_pickup(int i,int kind){if(i<0||i>=MAX_COMBATANTS||kind<1||kind>2||exGrenades[i][kind-1]>=2)return false;bool empty=ex_grenade_count(i,exSelectedGrenade[i])==0;exGrenades[i][kind-1]++;if(empty)exSelectedGrenade[i]=kind;return true;}
 static bool ex_refill_grenades(int i){
     if(i<0||i>=MAX_PLAYERS||is_player_bot(i))return false;
@@ -133,8 +138,12 @@ static void ex_draw(WeaponRenderPass pass){
 static void ex_hud(int i,int w,int h){
     if(exSuppression[i]>0)DrawText(TextFormat("MATTER RESTORE BLOCKED %.1fs",exSuppression[i]),w/2-110,h/2+85,w<700?12:16,LIME);
     if(exFailedBuild[i]>0)DrawText("Shelter blocked - grenade returned",w/2-130,h/2+105,w<700?12:16,SKYBLUE);
-    const char *name[]={"Frag","Gravity","Igloo"};int size=12;
-    for(int k=0;k<3;k++){int x=w-252+k*84,y=h-60;DrawRectangle(x-3,y-2,81,16,Fade(BLACK,.7f));Color c=k==exSelectedGrenade[i]?GOLD:GRAY;DrawText(TextFormat("%s %d",name[k],ex_grenade_count(i,k)),x,y,size,c);}
+    const char *name[]={"Regular","Sticky","Gravity","Igloo"};const int order[]={GRENADE_REGULAR,GRENADE_STICKY,GRENADE_GRAVITY,GRENADE_IGLOO};int size=12;
+    int columns=eq_upgrade(i,EQ_ADHESIVE)?4:3,column=0;
+    for(int n=0;n<4;n++){int k=order[n];if(k==GRENADE_STICKY && !eq_upgrade(i,EQ_ADHESIVE))continue;
+        int x=w-columns*84+(column++)*84,y=h-60;DrawRectangle(x-3,y-2,81,16,Fade(BLACK,.7f));Color c=k==exSelectedGrenade[i]?GOLD:GRAY;
+        DrawText(TextFormat("%s %d",name[n],ex_grenade_count(i,k)),x,y,size,c);
+    }
 }
 static void ex_layout(void){
     const int types[]={PICKUP_GLOB,PICKUP_GLOCK,PICKUP_DMR,PICKUP_BLACK_HOLE,PICKUP_IGLOO};

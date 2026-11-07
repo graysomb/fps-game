@@ -30,7 +30,7 @@ static void prepare_saved_wave(void){
     fpItems[2]=(FfItem){3,PICKUP_ADHESIVE,0,-1,{0,1,0}};
     equipment[0].gun[0]=EQ_GLOB;equipment[0].gun[1]=EQ_GLOCK;equipment[0].selected=1;equipment[0].upgrades=EQ_SHIELD|EQ_SWORD|EQ_ADHESIVE;
     players[0].kills=7;players[0].deaths=2;players[0].debrisKills=3;players[0].goldTetherCharged=true;
-    grenadeInventory[0]=2;exGrenades[0][0]=1;exSelectedGrenade[0]=GRENADE_GRAVITY;reviveCount[0]=4;
+    grenadeInventory[0]=2;exGrenades[0][0]=1;exSelectedGrenade[0]=GRENADE_STICKY;reviveCount[0]=4;
     firefightScore=12345;firefightKillsTotal=39;firefightTeamLives=5;teamUpgradeLevels[1]=2;
     start_firefight_wave(7);assert(fpSaveWave==7 && !fpSaveError);
 }
@@ -46,7 +46,7 @@ static void verify_saved_wave(void){
     assert(players[0].kills==7 && players[0].deaths==2 && players[0].debrisKills==3 && players[0].goldTetherCharged);
     assert(fabsf(players[0].kd_ratio-8.f/3)<.001f && reviveCount[0]==4);
     assert(eq_gun(0)==EQ_GLOCK && equipment[0].gun[0]==EQ_GLOB && eq_upgrade(0,EQ_SHIELD) && eq_upgrade(0,EQ_SWORD));
-    assert(grenadeInventory[0]==2 && exGrenades[0][0]==1 && exSelectedGrenade[0]==GRENADE_GRAVITY);
+    assert(grenadeInventory[0]==2 && exGrenades[0][0]==1 && exSelectedGrenade[0]==GRENADE_STICKY);
     assert(fpCount==3 && fpItems[0].owner==0 && fpItems[1].owner==-1 && fpNextId==4);
     assert(fpItems[2].type==PICKUP_ADHESIVE && fpItems[2].owner==0 && eq_upgrade(0,EQ_ADHESIVE));
     assert(!memcmp(fpOpeningRoster,fpCheckpoint.remaining,sizeof(fpOpeningRoster)));

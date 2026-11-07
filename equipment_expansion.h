@@ -1,4 +1,6 @@
 enum { GRENADE_REGULAR, GRENADE_GRAVITY, GRENADE_IGLOO, GRENADE_KIND_COUNT };
+/* Sticky is a selection using regular ammo and projectile kind, not a fourth ammo pool. */
+enum { GRENADE_STICKY=GRENADE_KIND_COUNT, GRENADE_SELECTION_COUNT };
 enum { EX_GLOBS=128, EX_FIELDS=4, EX_SPLATS=64 };
 typedef struct {uint32_t id;int owner;Vector3 pos,velocity;float age;} GlobProjectile;
 typedef struct {uint32_t id;int owner,activated,cursor;Vector3 pos;float age;} GravityField;

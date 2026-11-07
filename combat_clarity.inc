@@ -120,7 +120,9 @@ static bool clarity_throw(int slot) {
     float reach=first_voxel_hit_detailed((Ray){pos,forward},.6f,-1,false,&hit)?fmaxf(0,hit.t-.2f):.6f;
     pos=v_add(pos,v_mul(forward,reach));
     grenades[free]=(GrenadeState){.id=clarityNextId++,.owner=slot,.pos=pos,.vel=v_add(v_mul(forward,14),(Vector3){0,2,0}),.fuse=-1,.kind=exSelectedGrenade[slot],.incarnation=exIncarnation[slot],.launchOrigin=players[slot].pos};
-    int kind=grenades[free].kind;grenades[free].adhesive=kind==GRENADE_REGULAR&&eq_upgrade(slot,EQ_ADHESIVE);
+    int selection=exSelectedGrenade[slot];
+    int kind=selection==GRENADE_STICKY?GRENADE_REGULAR:selection;grenades[free].kind=kind;
+    grenades[free].adhesive=eq_upgrade(slot,EQ_ADHESIVE) && (selection==GRENADE_STICKY || (is_player_bot(slot)&&kind==GRENADE_REGULAR));
     if(kind)exGrenades[slot][kind-1]--;else grenadeInventory[slot]--;if(!ex_grenade_count(slot,kind))ex_cycle(slot);grenadeCooldown[slot]=.4f;play_sfx_at(SFX_MELEE,pos,slot,2,1.4f);return true;
 }
 static Matrix grenade_support_basis(int v){

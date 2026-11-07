@@ -66,7 +66,7 @@ static bool fp_save_valid(const FpSavedRun *s) {
         const FpSavedPlayer *p=&s->player[i];
         if(p->kills<0 || p->deaths<0 || p->debrisKills<0 || p->revives<0 ||
            p->grenades<0 || p->grenades>2 || p->special[0]<0 || p->special[0]>2 || p->special[1]<0 || p->special[1]>2 ||
-           p->selected<0 || p->selected>2 || p->gold<0 || p->gold>1 || p->gunSelected<0 || p->gunSelected>1 ||
+           p->selected<0 || p->selected>=GRENADE_SELECTION_COUNT || p->gold<0 || p->gold>1 || p->gunSelected<0 || p->gunSelected>1 ||
            p->upgrades<0 || (p->upgrades&~EQ_UPGRADE_MASK) ||
            (p->input!=INPUT_TYPE_KEYBOARD && p->input!=INPUT_TYPE_GAMEPAD) || p->device<0 || p->device>=4)return false;
         for(int g=0;g<2;g++)if(p->gun[g]!=EQ_EMPTY && (p->gun[g]<0 || p->gun[g]>=EQ_GUN_COUNT))return false;

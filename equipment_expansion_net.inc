@@ -20,7 +20,7 @@ static bool ex_receive(NetMessageType type,NetReader *r,uint32_t tick){
     int part=net_read_u8(r);if(part>12||tick<exPartTick[part])return true;
     if(part==0){
         int selection[4],counts[4][2];float failed[4],suppression[MAX_COMBATANTS];GravityField fields[EX_FIELDS]={0};IglooReveal reveals[8]={0};
-        for(int i=0;i<MAX_PLAYERS;i++){selection[i]=net_read_u8(r);counts[i][0]=net_read_u8(r);counts[i][1]=net_read_u8(r);failed[i]=net_read_f32(r);if(selection[i]>=3||counts[i][0]>2||counts[i][1]>2||!isfinite(failed[i])||failed[i]<0||failed[i]>2)return true;}
+        for(int i=0;i<MAX_PLAYERS;i++){selection[i]=net_read_u8(r);counts[i][0]=net_read_u8(r);counts[i][1]=net_read_u8(r);failed[i]=net_read_f32(r);if(selection[i]>=GRENADE_SELECTION_COUNT||counts[i][0]>2||counts[i][1]>2||!isfinite(failed[i])||failed[i]<0||failed[i]>2)return true;}
         for(int i=0;i<MAX_COMBATANTS;i++){suppression[i]=net_read_f32(r);if(!isfinite(suppression[i])||suppression[i]<0||suppression[i]>5)return true;}
         for(int n=0;n<EX_FIELDS;n++){GravityField *f=&fields[n];f->id=net_read_u32(r);if(f->id){int owner=net_read_u8(r);f->owner=owner==255?-1:owner;f->pos=eq_read_vec(r);f->age=net_read_f32(r);if(f->owner>=MAX_COMBATANTS||!v_isfinite(f->pos)||!isfinite(f->age)||f->age<0||f->age>5)return true;}}
         for(int n=0;n<8;n++){IglooReveal *v=&reveals[n];v->id=net_read_u32(r);if(v->id){v->origin=eq_read_vec(r);v->age=net_read_f32(r);v->rotation=net_read_u8(r);if(!v_isfinite(v->origin)||!isfinite(v->age)||v->age<0||v->age>1.2f||v->rotation>3)return true;}}
