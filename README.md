@@ -53,8 +53,9 @@ in flight wait for their first impact. Orange supply stations add one grenade an
 work in offline combat and LAN PvP; creative, paused, and downed players cannot throw.
 
 **Explosions hurt everyone**, including the thrower, teammates, and other enemies.
-Sapper charges and grenades share 60 damage falling to zero at four units, cover checks
-before terrain destruction, a two-unit demolition radius, and a four-unit debris impulse.
+Sticky grenades deal up to 100 damage, regular grenades 75, and Sapper charges 60,
+all falling linearly to zero at four units. They share cover checks before terrain
+destruction, a two-unit demolition radius, and a four-unit debris impulse.
 Blast-driven debris retains friendly fire for ten seconds or until it sleeps.
 Enemies abandon work and retreat from nearby live bombs; the Walking Foundry holds its
 position. Sapper charges retain their four-second fuse and remain shootable to disarm.
@@ -202,8 +203,8 @@ Foundry Holdout contrasts solid central platforms, stairs and entrance pylons wi
 one-voxel factory walls/roofs, narrow piers and hollow flank machinery. Practice
 retains its original geometry; Crosscut is unchanged. Six orange-marked traps cover
 the lower routes: two falling choke-point slabs, two suspended bay plates, and two
-cargo stacks that tip toward the arena. Shoot or melee the orange release cell,
-blast the assembly, or tether its payload to release it. Floor outlines mark the
+cargo stacks that tip toward the arena. Shoot or melee the orange release blocks (any orange section of a support post
+works with the default gun, Glob, or Glock), blast the assembly, or tether its payload to release it. Floor outlines mark the
 fall/tipping zone; each moving payload contains at most 160 voxels (hard cap 256).
 
 A connected trap piece of at least eight voxels must actually hit an actor while
@@ -279,7 +280,8 @@ existing enemy reaction and aim error. Grenadiers have two throws and a supply d
 builders use reinforced cover, and gold-tether carriers grab and throw scrap.
 
 A carrier's death releases one copy immediately. Guns and permanent upgrades persist
-at the last owner's death location; replacing a gun drops that same copy at your
+at the last owner's death location; multiple death drops spread into a small ring
+so sticky and other small upgrades stay visible beside the guns. Replacing a gun drops that same copy at your
 feet. Duplicates stay on the ground. Downing, revival and intermissions preserve
 owned equipment. Ground items have gold radar markers, safe placement after terrain
 changes, and no respawn timer. Nearby identical copies share a display model; distant items

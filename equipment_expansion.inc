@@ -81,7 +81,7 @@ static bool ex_fire(int i,int gun,Ray ray){
 #include "gravity_gameplay.inc"
 static void ex_grenade_landed(GrenadeState *g){g->landed=true;if(g->kind==GRENADE_IGLOO)g->fuse=0;}
 static void ex_grenade_deploy(GrenadeState g){
-    if(g.kind==GRENADE_REGULAR){clarity_explode(g.pos,g.owner);return;}
+    if(g.kind==GRENADE_REGULAR){clarity_explode_damage(g.pos,g.owner,g.adhesive?100:75);return;}
     if(g.kind==GRENADE_IGLOO){
         if(!ex_igloo(g)){int i=g.owner;if(i>=0&&i<MAX_COMBATANTS&&exIncarnation[i]==g.incarnation&&players[i].respawn_timer<=0){exGrenades[i][1]=(int)fminf(2,exGrenades[i][1]+1);exSelectedGrenade[i]=GRENADE_IGLOO;exFailedBuild[i]=2;}}return;
     }

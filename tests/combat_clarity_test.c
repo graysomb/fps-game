@@ -19,7 +19,19 @@ static void check_crosscut_routes(void) {
     }
 }
 static void snapshot_packet(int part,uint32_t seq,bool broken){uint8_t data[1000];NetWriter w;net_writer_init(&w,data,sizeof(data));net_write_u32(&w,seq);net_write_u8(&w,part);for(int n=0;n<16;n++){net_write_u32(&w,n==0 && part==0?123:0);net_write_u8(&w,0);for(int c=0;c<6;c++)net_write_f32(&w,c==1?2:0);net_write_f32(&w,n==0?1:0);net_write_u8(&w,0);net_write_u8(&w,0);net_write_u64(&w,0);for(int a=0;a<3;a++)net_write_f32(&w,0);}NetReader r;net_reader_init(&r,data,broken?w.length-1:w.length);assert(clarity_net_receive(NET_MSG_GRENADES,&r,seq));}
-int main(int argc,char **argv){bool shieldOnly=argc>1&&!strcmp(argv[1],"--shield-only");if(shieldOnly){argc--;argv++;}assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,720,"Combat clarity regression");init_pbd_thread_pool();assert(initialize_physics_backend());
+int main(int argc,char **argv){bool grenadeOnly=argc>1&&!strcmp(argv[1],"--grenade-only");if(grenadeOnly){argc--;argv++;}bool shieldOnly=argc>1&&!strcmp(argv[1],"--shield-only");if(shieldOnly){argc--;argv++;}assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,720,"Combat clarity regression");init_pbd_thread_pool();assert(initialize_physics_backend());
+    for(int sticky=0;sticky<2;sticky++)for(int distance=0;distance<=4;distance++) {
+        empty_arena();players[0].pos=(Vector3){10,1,0};players[1].pos=(Vector3){distance,1,0};
+        ex_grenade_deploy((GrenadeState){.kind=GRENADE_REGULAR,.adhesive=sticky,.pos={0,1,0},.owner=0});
+        float expected=100-(sticky?100:75)*(1-distance/4.0f);
+        assert(fabsf(players[1].matter-expected)<.001f);
+    }
+    for(int sticky=0;sticky<2;sticky++) {
+        empty_arena();players[1].pos=(Vector3){3,1,0};add_static_box_at_grid(2,2,0,5,-3,3,GRAY);init_static_hash();
+        ex_grenade_deploy((GrenadeState){.kind=GRENADE_REGULAR,.adhesive=sticky,.pos={0,1,0},.owner=0});assert(players[1].matter==100);
+    }
+    empty_arena();enemy_blast((EnemyCharge){.pos={0,1,0},.owner=0});assert(players[0].matter==40);
+    if(grenadeOnly){enemy_cleanup(true);shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Grenade damage checks passed");return 0;}
     empty_arena();players[1].pos=(Vector3){10,1,0};grenadeInventory[0]=2;
     assert(clarity_throw(0));assert(grenadeInventory[0]==1);assert(!clarity_throw(0));clarity_tick(.5f);assert(clarity_throw(0));assert(grenadeInventory[0]==0);assert(!clarity_throw(0));
     for(int f=0;f<220;f++)clarity_tick(1.0f/60);for(int n=0;n<32;n++)assert(!grenades[n].id);assert(!debugDrawParticles);

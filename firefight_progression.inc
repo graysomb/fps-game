@@ -44,7 +44,15 @@ static void fp_drop(FfItem *item,Vector3 at){item->owner=-1;item->slot=-1;item->
 static void fp_death(int i,Vector3 at){
  fp_pair_clear(i);
  if(!fp_active()||netTransport.role==NET_ROLE_CLIENT)return;
- for(size_t n=0;n<fpCount;n++)if(fpItems[n].owner==i)fp_drop(&fpItems[n],at);
+ size_t count=0,ordinal=0;
+ for(size_t n=0;n<fpCount;n++)if(fpItems[n].owner==i)count++;
+ // A player's small upgrades must not disappear inside their dropped gun models.
+ // Single-item carrier drops stay centered; every item still uses safe grounding.
+ for(size_t n=0;n<fpCount;n++)if(fpItems[n].owner==i){
+  Vector3 drop=at;
+  if(count>1){float angle=2*PI*(float)ordinal/(float)count;drop.x+=.8f*cosf(angle);drop.z+=.8f*sinf(angle);}
+  fp_drop(&fpItems[n],drop);ordinal++;
+ }
  if(i>=MAX_PLAYERS&&i<MAX_COMBATANTS)fpCarrierType[i]=0;
 }
 static void fp_queue_unlock(int type){

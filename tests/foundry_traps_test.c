@@ -240,6 +240,36 @@ static void expansion_trigger_checks(void) {
     }
     puts("Glob/Glock/DMR impacts trigger traps, remove triggers, credit owner, respect cover and activate once");
 }
+/* All orange cells on the real four-post support must behave like switches. */
+static void post_weapon_checks(void) {
+    const int guns[]={EQ_GLOB,EQ_GLOCK,EQ_DEFAULT};
+    for(int g=0;g<3;g++)for(int corner=0;corner<4;corner++)for(int y=2;y<7;y++)for(int blocked=0;blocked<2;blocked++){
+        fresh();ex_reset();eq_reset_all();gameState=GAME_STATE_PLAYING;
+        foundry_trap_define(FOUNDRY_DROP,0,3,7,7,0,3,0,3,0);foundry_trap_posts(&foundryTraps[0]);
+        int x=corner&1?3:0,z=corner&2?3:0;float direction=corner&1?-1.f:1.f;
+        Vector3 at={(x+.5f)*VOXEL_SIZE,(y+.5f)*VOXEL_SIZE,(z+.5f)*VOXEL_SIZE};
+        activePlayers=1;playerInput[0]=INPUT_TYPE_KEYBOARD;combatantLife[0]=LIFE_ALIVE;
+        players[0]=(Player){.pos=v_add(at,(Vector3){-direction*2,0,0}),.matter=100};
+        if(blocked)add_static_voxel_at_grid(x+(corner&1?2:-2),y,z,GRAY,0);
+        Ray ray={players[0].pos,{direction,0,0}};
+        if(guns[g]==EQ_DEFAULT){
+            int shot=addVoxel(ray.position.x,ray.position.y,ray.position.z,false,true,WHITE,0);
+            assert(shot>=0);voxels[shot].isBullet=true;voxels[shot].owner=0;voxels[shot].vel=v_mul(ray.direction,30);
+            update_projectiles(.1f);
+        }else{
+            equipment[0].gun[0]=guns[g];dir_to_yaw_pitch(ray.direction,&players[0].yaw,&players[0].pitch);
+            assert(eq_fire(0));ex_tick(.1f);
+        }
+        bool expected=!blocked && y>=3;
+        if(foundryTraps[0].pending!=expected)fprintf(stderr,"Post shot failed: gun=%d corner=%d height=%d blocked=%d pending=%d expected=%d\n",guns[g],corner,y,blocked,foundryTraps[0].pending,expected);
+        assert(foundryTraps[0].pending==expected);
+        foundry_traps_prepare();
+        if(foundryTraps[0].active!=expected)fprintf(stderr,"Release failed: gun=%d corner=%d height=%d blocked=%d active=%d expected=%d complete=%d\n",guns[g],corner,y,blocked,foundryTraps[0].active,expected,foundry_trap_complete(&foundryTraps[0]));
+        assert(foundryTraps[0].active==expected);
+        if(expected){assert(foundryTraps[0].owner==0);assert(table_get_static_only(x,y,z)<0);}
+    }
+    puts("Default/Glob/Glock activate every orange post cell; gray bases and blocking cover stay inert");
+}
 static void capture(void) {
     fresh();buildFoundryHoldout();voxel_ca_init();
     Camera3D cameras[3]={{{29,22,29},{0,0,0},{0,1,0},65,CAMERA_PERSPECTIVE},{{28,5,9},{21,2,0},{0,1,0},65,CAMERA_PERSPECTIVE},{{13,4,14},{21,2,21},{0,1,0},65,CAMERA_PERSPECTIVE}};
@@ -252,8 +282,10 @@ static void capture(void) {
     UnloadRenderTexture(target);voxel_ca_shutdown();
 }
 int main(int argc,char **argv) {
+    bool weaponsOnly=argc==2 && !strcmp(argv[1],"--weapon-triggers");
+    if(weaponsOnly)argc=1;
     assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Foundry traps");init_pbd_thread_pool();assert(initialize_physics_backend());
-    expansion_trigger_checks();release_checks();post_checks();bay_checks();pillar_checks();selection_checks();damage_checks();trigger_checks();capture();clear_all_chunks();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Foundry traps passed");
+    expansion_trigger_checks();post_weapon_checks();if(!weaponsOnly){release_checks();post_checks();bay_checks();pillar_checks();selection_checks();damage_checks();trigger_checks();capture();}clear_all_chunks();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Foundry traps passed");
 }
 

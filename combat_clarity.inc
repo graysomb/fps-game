@@ -90,16 +90,16 @@ static bool clarity_debris_hit(int v,int target) {
     }
     return true;
 }
-static void clarity_explode(Vector3 pos,int owner) {
+static void clarity_explode_damage(Vector3 pos,int owner,float maxDamage) {
     ducks_blast(pos,4);
-    hologram_blast(pos,4,60);
+    hologram_blast(pos,4,maxDamage);
     if(netTransport.role==NET_ROLE_CLIENT)return;
     float damage[MAX_COMBATANTS]={0};
     for(int i=0;i<activePlayers;i++)if(players[i].respawn_timer<=0) {
         Vector3 d=world_delta(players[i].pos,pos);float distance=v_length(d);VoxelHit hit;
-        if(distance<4 && (distance<.1f || !first_voxel_hit_detailed((Ray){pos,v_norm(d)},fmaxf(0,distance-.25f),-1,true,&hit)))damage[i]=60*(1-distance/4);
+        if(distance<4 && (distance<.1f || !first_voxel_hit_detailed((Ray){pos,v_norm(d)},fmaxf(0,distance-.25f),-1,true,&hit)))damage[i]=maxDamage*(1-distance/4);
     }
-    go_shield_blast(pos,4,60);
+    go_shield_blast(pos,4,maxDamage);
     enemy_blast_terrain((EnemyCharge){.pos=pos,.owner=owner});
     damageOriginKnown=true;damageOrigin=pos;
     for(int i=0;i<activePlayers;i++)if(damage[i]>0) {
@@ -109,6 +109,7 @@ static void clarity_explode(Vector3 pos,int owner) {
     damageOriginKnown=false;
     clarity_effect((ClarityEffect){.id=clarityNextId++,.kind=2,.pos=pos,.attacker=owner},true);
 }
+static void clarity_explode(Vector3 pos,int owner){clarity_explode_damage(pos,owner,60);}
 static void enemy_blast(EnemyCharge c){clarity_explode(c.pos,c.owner);}
 static bool clarity_throw(int slot) {
     aim_cancel(slot);

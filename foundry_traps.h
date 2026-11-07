@@ -55,7 +55,8 @@ static void foundry_trap_define(FoundryTrapKind kind,int x0,int x1,int y0,int y1
 
 static bool foundry_trap_trigger(const FoundryTrap *t,int x,int y,int z) {
     if(foundry_fractured(t))return foundry_bay_crack(t,x,y,z);
-    if(t->fourPosts)return y==t->ry && (x==t->x0 || x==t->x1) && (z==t->z0 || z==t->z1);
+    // Match the entire orange section painted by foundry_trap_posts, not just its bottom cell.
+    if(t->fourPosts)return y>=t->ry && y<t->y0 && (x==t->x0 || x==t->x1) && (z==t->z0 || z==t->z1);
     return x==t->rx && y==t->ry && z==t->rz;
 }
 static void foundry_trap_posts(FoundryTrap *t) {
