@@ -15792,7 +15792,7 @@ static bool resolve_tether_voxel(Player *player)
 static void acquire_tether_hit(int idx,int hit_id,Vector3 normal) {
     Player *p=&players[idx];
     if(p->respawn_timer>0 || p->tetherHolding || hit_id<0 || hit_id>=voxel_count)return;
-    if(go_drain_start(idx,hit_id))return;
+    if(go_shielded(hit_id))return; // Intact golem shields still protect physical parts.
     Voxel *hit = &voxels[hit_id];
     if (hit->simulate && (!hit->vgs_active || hit->isBullet || hit->type != 0 || voxel_is_fluid(hit))) {
         return;
@@ -15877,7 +15877,6 @@ static void start_tether(int idx) {
     Player *p=&players[idx];VoxelHit hit;
     if(p->respawn_timer>0 || p->tetherHolding || p->drainTarget)return;
     ducks_ray((Ray){p->pos,player_forward(p)},p->goldTetherCharged?GOLD_TETHER_RANGE:TETHER_RANGE,.03f,-1,false);
-    if(start_tether_drain(idx))return;
     if(first_voxel_hit_detailed((Ray){p->pos,player_forward(p)},(p->goldTetherCharged && ((is_player_bot(idx)&&!fp_carrier(idx)) || p->matter>=eqGoldGrabCost))?GOLD_TETHER_RANGE:TETHER_RANGE,-1,false,&hit))
         acquire_tether_hit(idx,hit.id,hit.normal);
 }

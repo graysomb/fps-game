@@ -54,24 +54,10 @@ static void go_shield_blast(Vector3 origin,float radius,float damage){
     for(int p=0;p<GM_COUNT;p++)if(indices[p]>=0)go_shield_hit(indices[p],amounts[p]);
 }
 static void go_drain_cancel(int i){if(i>=0&&i<MAX_PLAYERS)goDrainPart[i]=-1;}
-static bool go_drain_start(int i,int v){
-    if(i<0||i>=MAX_PLAYERS||!go_shielded(v))return false;
-    goDrainPart[i]=go_shield_part(v);players[i].drainTarget=MAX_COMBATANTS+1;return true;
-}
 static Vector3 go_part_center(int part){
     Vector3 at={0};int count=0;for(int c=0;c<goCount;c++)if(goCells[c].part==part){
         int v=go_find(goCells[c].id,goCells[c].index);if(v>=0){at=v_add(at,voxels[v].pos);count++;}}
     return count?v_mul(at,1.f/count):go_core_position();
-}
-static void go_drain_tick(int i,float dt){
-    if(!goCombatEnabled||i<0||i>=MAX_PLAYERS||goDrainPart[i]<0)return;
-    int part=goDrainPart[i];Player *p=&players[i];Vector3 to=v_sub(go_part_center(part),p->pos);VoxelHit h;
-    bool clear=first_voxel_hit_detailed((Ray){p->pos,v_norm(to)},v_length(to)+.5f,-1,false,&h)&&go_shield_part(h.id)==part;
-    if(!goCombatEnabled||goCombatDead||p->respawn_timer>0||!p->drainTarget||!go_part_alive(part)||v_length(to)>TETHER_RANGE||v_dot(player_forward(p),v_norm(to))<cosf(65*DEG2RAD)||!clear){
-        go_drain_cancel(i);p->drainTarget=0;return;}
-    go_shield_hit(h.id,2*player_bullet_damage(i)*dt);
-    // Keep the empty lock until release; a new press can physically grab the exposed part.
-    if(goShields[part].value<=0)goShields[part].lastHit=goFight.time;
 }
 static Vector3 go_tether_anchor(void){
     Vector3 hand=go_part_center(GOLEM_HAND_R),dir=v_norm(v_sub(goFight.aim,hand));

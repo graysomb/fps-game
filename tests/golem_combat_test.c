@@ -32,7 +32,7 @@ static void arsenal_tests(void){
     goFight.time=7.9f;go_shields_tick(.1f);assert(goShields[GOLEM_HAND_R].value==0);
     goFight.time=8;go_shields_tick(1);assert(goShields[GOLEM_HAND_R].value==5);
     goShields[GOLEM_HAND_R].suppressed=5;go_shields_tick(1);assert(goShields[GOLEM_HAND_R].value==5);
-    assert(go_drain_start(0,other));assert(!players[0].tetherHolding);release_tether(0);assert(goDrainPart[0]<0);
+    acquire_tether_hit(0,other,(Vector3){0,0,1});assert(!players[0].tetherHolding && !players[0].drainTarget);assert(goShields[GOLEM_HAND_L].value==50);release_tether(0);assert(goDrainPart[0]<0);
     go_release_part(GOLEM_ARM_R);go_shields_tick(.1f);assert(!go_part_alive(GM_TURRET_R));assert(goShields[GOLEM_HAND_R].value==0);
     fixture();goFight.target=0;goFight.aim=go_target_center(0);goArsenal.gunTimer=0;
     for(int n=0;n<7;n++){goFight.time+=1.f/3;go_arsenal_tick(1.f/3,10,false);}
