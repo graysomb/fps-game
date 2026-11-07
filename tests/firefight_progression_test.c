@@ -185,7 +185,7 @@ static void fourth_wave_roster(void){
    while(firefightRound==round && firefightWaveState==FIREFIGHT_STATE_ACTIVE && watchdog-->0){
     update_firefight_logic(.5f);
     for(int i=4;i<MAX_COMBATANTS;i++)if(players[i].respawn_timer<=0){
-     assert(playerInput[i]==INPUT_TYPE_BOT_MEDIUM);spawned++;seen[players[i].enemyType]++;
+     assert(playerInput[i]==(players[i].enemyType==ENEMY_TYPE_STANDARD?INPUT_TYPE_BOT_EASY:INPUT_TYPE_BOT_MEDIUM));spawned++;seen[players[i].enemyType]++;
      assert(players[i].enemyType!=ENEMY_TYPE_BUILDER);
      if(players[i].enemyType==ENEMY_TYPE_SHIELDBEARER){shieldCount++;assert(!fp_carrier(i));}
      defaults+=players[i].enemyType==ENEMY_TYPE_STANDARD && eq_gun(i)==EQ_DEFAULT;
@@ -198,7 +198,7 @@ static void fourth_wave_roster(void){
    assert(firefightWaveState==(round<3?FIREFIGHT_STATE_ACTIVE:FIREFIGHT_STATE_LOOT));
   }
  }
- puts("Wave 4: medium difficulty, builders replaced by shields, preserved default riflemen, 1-4 player totals and completion passed");
+ puts("Wave 4: easy riflemen and medium specialists, builders replaced by shields, preserved default riflemen, 1-4 player totals and completion passed");
 }
 static void fifth_wave_rounds(void){
  for(int humans=1;humans<=4;humans++){
