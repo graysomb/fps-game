@@ -386,7 +386,7 @@ static void anchor_groups(void){
 static void ownership(void){
  fixture();size_t glob=carrier(PICKUP_GLOB,4);uint32_t id=fpItems[glob].id;fp_death(4,(Vector3){0,1,0});assert(fpItems[glob].owner==-1&&fpItems[glob].id==id);
  assert(fp_collect(0,glob,false)&&eq_gun(0)==EQ_GLOB);assert(fpUnlocked==(1u<<fp_rule(PICKUP_GLOB)));int banners=fpBannerWrite;assert(!fp_collect(1,glob,false));
- size_t duplicate=carrier(PICKUP_GLOB,5);fp_death(5,players[0].pos);assert(!fp_collect(0,duplicate,true)&&fpItems[duplicate].owner==-1);
+ size_t duplicate=carrier(PICKUP_GLOB,5);fp_death(5,players[0].pos);players[0].matter=50;assert(fp_collect(0,duplicate,true)&&fpItems[duplicate].owner==-2&&players[0].matter==75);
  size_t rifle=carrier(PICKUP_DMR,6);fp_death(6,players[0].pos);assert(!fp_collect(0,rifle,false));assert(fp_collect(0,rifle,true));assert(fpItems[glob].owner==-1&&fpItems[rifle].owner==0&&fpCount==3);
  assert(fp_collect(1,glob,false)&&fpItems[glob].id==id&&fpBannerWrite==banners+1);
  size_t build=carrier(PICKUP_REINFORCED,7);fp_death(7,players[0].pos);assert(fp_collect(0,build,false));

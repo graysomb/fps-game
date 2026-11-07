@@ -9,6 +9,7 @@ static bool focused(void){return true;}
 bool ffTestReviveHeld[4];
 static bool joined,sawItems,sawGun,sawCharge,sawCarrier,sawRestart,sawRestore,sawReady,sawRejected,sawLoot,sawLootReady;
 static uint32_t initialSession;
+static bool sawCache;
 static bool sawPair,sawShieldDrop,sawShieldOwned,sawShieldRestore;
 static size_t savedCount;
 static void receive(NetTransport*t,int peer,uint8_t channel,const uint8_t*data,size_t length,void*u){
@@ -29,6 +30,7 @@ static void receive(NetTransport*t,int peer,uint8_t channel,const uint8_t*data,s
  }
  if(t->role==NET_ROLE_CLIENT){
   
+  sawCache|=fpCacheReady && v_isfinite(fpCachePositions[fp_rule(PICKUP_GLOB)]);
   sawShieldDrop|=fpCount==122 && fpItems[2].type==PICKUP_SHIELD_REGEN && fpItems[2].owner==-1;
   sawShieldOwned|=fpCount==122 && fpItems[2].owner==0 && (equipment[0].upgrades&EQ_SHIELD);
   sawShieldRestore|=sawRestart && netWorldReady && t->session_id!=initialSession && (equipment[0].upgrades&EQ_SHIELD);
@@ -58,7 +60,7 @@ int main(int argc,char**argv){bool late=argc>1&&!strcmp(argv[1],"late-host");boo
      // A previous-session interaction must not enter authoritative input state.
      uint8_t packet[128];NetWriter w;net_writer_init(&w,packet,sizeof(packet));net_write_header(&w,NET_MSG_INPUT,0,original,0);net_write_u8(&w,1);NetInputCommand bad={.sequence=99999,.pressed=NET_INPUT_EQUIP};net_write_input(&w,&bad);net_on_receive(&netTransport,1,FPS_NET_CHANNEL_INPUT,packet,w.length,NULL);assert(!netHasPendingInput[1]);sawRejected=true;
     }
-    if(age>9&&restored&&!vote){ff_wave_complete();vote=true;}
+    if(age>9&&restored&&!vote){firefightRound=ff_rounds(firefightWave);ff_wave_complete();vote=true;}
     if(vote&&firefightWaveState==FIREFIGHT_STATE_LOOT){
      sawLootReady|=prepReady[1];
      if(sawLootReady){assert(!prepReady[0] && firefightIntermissionTimer>FF_LOOT_SECONDS-1);prepReady[0]=true;update_firefight_logic(.01f);assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION && !prepReady[0] && !prepReady[1]);}
@@ -77,6 +79,6 @@ int main(int argc,char**argv){bool late=argc>1&&!strcmp(argv[1],"late-host");boo
  }
  if(host){fprintf(stderr,"host joined%d capture%d failed%d restored%d rejected%d ready%d lootReady%d\n",joined,captured,failed,restored,sawRejected,sawReady,sawLootReady);assert(joined&&captured&&failed&&restored&&sawRejected&&sawReady&&sawLootReady);puts("Firefight LAN host passed");}
  else {fprintf(stderr,"client items%d gun%d charge%d carrier%d restart%d restore%d loot%d\n",sawItems,sawGun,sawCharge,sawCarrier,sawRestart,sawRestore,sawLoot);assert(sawItems&&sawGun&&sawCharge&&sawCarrier&&sawRestart&&sawRestore&&sawLoot&&firefightCheckpoints);puts("Firefight LAN client passed");}
- if(!host){assert(sawPair && sawShieldDrop && sawShieldOwned && sawShieldRestore);puts("Coordinated Glock/Glob carriers replicated to LAN client");}
+ if(!host){assert(sawCache && sawPair && sawShieldDrop && sawShieldOwned && sawShieldRestore);puts("Coordinated Glock/Glob carriers replicated to LAN client");}
  net_transport_shutdown(&netTransport);net_transport_global_shutdown();fp_shutdown();CloseWindow();return 0;
 }

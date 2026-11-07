@@ -1,6 +1,11 @@
 /* Run-local earned equipment. owner -1 is on the ground; -2 is consumed. */
-typedef struct {uint32_t id;int type,owner,slot;Vector3 pos;} FfItem;
+typedef struct {uint32_t id;int type,owner,slot;Vector3 pos;float groundAge;} FfItem;
 typedef struct {int type,wave,chassis;char tier;} FfEquipmentRule;
+#define FP_DROP_SECONDS 60.0f
+#define FP_DUPLICATE_MATTER 25.0f
+static bool fpCacheReady;
+static Vector3 fpCacheOrigin,fpCachePositions[16];
+static void fp_cache_place(void);
 static FfItem *fpIncoming;
 static FfItem *fpItems;static size_t fpCount,fpCapacity;
 static uint32_t fpNextId=1,fpRevision=1,fpGeneration=1,fpUnlocked;

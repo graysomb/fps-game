@@ -157,6 +157,7 @@ static void reset_firefight_match(void) {
         players[0].pos=(Vector3){0,BASE_EYE_HEIGHT+2,1.5f};
         players[0].yaw=0;players[0].pitch=0;
     }
+    fp_cache_place();
     start_firefight_wave(1);
 }
 

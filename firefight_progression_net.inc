@@ -16,6 +16,8 @@ static void fp_snapshot(int peer){
  for(int k=0;k<3;k++)net_write_u8(&w,teamUpgradeLevels[k]);
  for(int i=0;i<MAX_PLAYERS;i++){net_write_u8(&w,combatantLife[i]);net_write_u8(&w,prepReady[i]);net_write_u8(&w,prepVotes[i]);net_write_u8(&w,prepMenuOpen[i]);net_write_f32(&w,reviveProgress[i]);net_write_u8(&w,reviveOwner[i]+1);}
  fp_send(peer,&w,false);
+ net_writer_init(&w,data,sizeof(data));net_write_header(&w,NET_MSG_FIREFIGHT,0,netTransport.session_id,netServerTick);net_write_u8(&w,5);
+ net_write_u8(&w,fpCacheReady);if(fpCacheReady){eq_write_vec(&w,fpCacheOrigin);for(int n=0;n<FP_RULE_COUNT;n++)eq_write_vec(&w,fpCachePositions[n]);}fp_send(peer,&w,false);
  net_writer_init(&w,data,sizeof(data));net_write_header(&w,NET_MSG_FIREFIGHT,0,netTransport.session_id,netServerTick);net_write_u8(&w,4);net_write_u8(&w,goCombatEnabled);
  if(goCombatEnabled){
   net_write_u8(&w,goCombatDead);eq_write_vec(&w,go_core_position());eq_write_vec(&w,goFight.aim);net_write_f32(&w,goFight.shield);net_write_f32(&w,goFight.health);
@@ -58,7 +60,7 @@ static bool fp_receive(NetMessageType type,NetReader *r,uint32_t tick){
  if(type==NET_MSG_FIREFIGHT_RESET){
   if(netTransport.role!=NET_ROLE_CLIENT)return true;uint32_t generation=net_read_u32(r),session=net_read_u32(r);
   if(r->failed || generation<=fpGeneration || !session)return true;
-  netTransport.session_id=session;fpGeneration=generation;fpCount=0;fpUnlocked=0;fpReceivedRevision=fpStateTick=0;memset(fpActorTick,0,sizeof(fpActorTick));
+  netTransport.session_id=session;fpGeneration=generation;fpCount=0;fpUnlocked=0;fpCacheReady=false;fpReceivedRevision=fpStateTick=0;memset(fpActorTick,0,sizeof(fpActorTick));
   free(fpIncoming);fpIncoming=NULL;fpIncomingNext=fpIncomingCount=0;fpBannerRead=fpBannerWrite=0;fpBannerTimer=0;
   memset(netPredictionCount,0,sizeof(netPredictionCount));memset(netPredictionHead,0,sizeof(netPredictionHead));
   clarity_reset();eq_reset_all();ducks_reset();memset(holograms,0,sizeof(holograms));netWorldReady=false;return true;
@@ -81,13 +83,17 @@ static bool fp_receive(NetMessageType type,NetReader *r,uint32_t tick){
  }else if(part==1){
   uint32_t revision=net_read_u32(r),start=net_read_u32(r),total=net_read_u32(r);int count=net_read_u8(r);
   if(r->failed||revision<fpReceivedRevision||total>1000000||count>32||start>total||(uint32_t)count>total-start)return true;
-  FfItem items[32];for(int n=0;n<count;n++){items[n].id=net_read_u32(r);items[n].type=net_read_u8(r);items[n].owner=net_read_u8(r)-2;items[n].slot=net_read_u8(r)-1;items[n].pos=eq_read_vec(r);
+  FfItem items[32]={0};for(int n=0;n<count;n++){items[n].id=net_read_u32(r);items[n].type=net_read_u8(r);items[n].owner=net_read_u8(r)-2;items[n].slot=net_read_u8(r)-1;items[n].pos=eq_read_vec(r);
    if(!items[n].id||fp_rule(items[n].type)<0||items[n].owner>=MAX_COMBATANTS||items[n].slot>1||!v_isfinite(items[n].pos))return true;
   }if(r->failed)return true;
   if(start==0){FfItem *next=total?malloc(total*sizeof(FfItem)):NULL;if(total&&!next)return true;free(fpIncoming);fpIncoming=next;fpIncomingCount=total;fpIncomingRevision=revision;fpIncomingNext=0;}
   if(revision!=fpIncomingRevision||total!=fpIncomingCount||start!=fpIncomingNext)return true;
   if(count)memcpy(fpIncoming+start,items,count*sizeof(FfItem));fpIncomingNext+=count;
   if(fpIncomingNext==total){free(fpItems);fpItems=fpIncoming;fpIncoming=NULL;fpCount=fpCapacity=total;fpReceivedRevision=revision;}
+ }else if(part==5){
+  if(tick<fpStateTick)return true;bool ready=net_read_u8(r)!=0;Vector3 origin={0},positions[FP_RULE_COUNT]={0};
+  if(ready){origin=eq_read_vec(r);if(!v_isfinite(origin))return true;for(int n=0;n<FP_RULE_COUNT;n++){positions[n]=eq_read_vec(r);if(!v_isfinite(positions[n]))return true;}}
+  if(!r->failed){fpCacheReady=ready;fpCacheOrigin=origin;memcpy(fpCachePositions,positions,sizeof(positions));}
  }else if(part==4){
   if(tick<goRemoteTick)return true;bool active=net_read_u8(r)!=0,dead=false;Vector3 core={0},aim={0};float shield=0,health=0;
   BoundingBox bounds[GM_COUNT]={0};float shields[GM_COUNT]={0},flashes[GM_COUNT]={0};bool alive[GM_COUNT]={0};

@@ -279,16 +279,21 @@ Carriers use the same weapon costs, damage and terrain effects as players, with
 existing enemy reaction and aim error. Grenadiers have two throws and a supply drop;
 builders use reinforced cover, and gold-tether carriers grab and throw scrap.
 
-A carrier's death releases one copy immediately. Guns and permanent upgrades persist
-at the last owner's death location; multiple death drops spread into a small ring
-so sticky and other small upgrades stay visible beside the guns. Replacing a gun drops that same copy at your
-feet. Duplicates stay on the ground. Downing, revival and intermissions preserve
-owned equipment. Ground items have gold radar markers, safe placement after terrain
-changes, and no respawn timer. Nearby identical copies share a display model; distant items
-use simple glowing markers, with at most 48 detailed models per viewport/pass.
-Each item remains independently collectible. The first team pickup of each type shows a queued
-**WEAPON UNLOCKED!** banner. Grenade supplies are consumable; no free grenades or
-weapons are granted at spawn or intermission. Health and Matter supplies remain.
+A carrier's death releases one copy immediately. Dropped guns, upgrades and grenade
+supplies despawn after 60 seconds on the ground. Multiple death drops spread into a
+small ring so upgrades stay visible beside guns. Replacing a gun drops the old copy
+with a fresh timer. Walking over a gun already in either slot consumes it and grants
+25 Matter, capped at the player's maximum. Downing, revival and intermissions
+preserve owned equipment. Ground items have gold radar markers and safe placement.
+
+The first team pickup of each type unlocks it for the current run and shows a queued
+**WEAPON UNLOCKED!** banner. A blue equipment cache near the initial player spawn
+provides all collected weapons, upgrades and grenade supplies. Approach a blue stand
+and press the equipment interaction key (B/Y, or hold X on controller) to claim a
+copy or replace the selected gun. Cache stands persist and require interaction;
+they never automatically collect or convert duplicate guns to Matter. Unlocks are
+shared by the team, survive Continue/checkpoint restoration, and reset on New Game.
+Wave-start disk saves give restored ground drops a fresh 60-second timer.
 
 **Checkpoints** default OFF. Toggle with `C` or controller `X` in the Firefight lobby
 before starting. When ON, exhausting the team's respawn reserves restarts the current
