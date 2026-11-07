@@ -133,15 +133,29 @@ static void combat_ui_abilities(int viewer,int w,int h) {
     int local=netTransport.role==NET_ROLE_OFFLINE?viewer:net_local_index_for_slot(viewer);if(local<0)return;
     int size=w<700?40:56;float y=h-size-80;
     bool usable=players[viewer].respawn_timer<=0 && combatantLife[viewer]==LIFE_ALIVE && !ff_input_blocked(viewer);
+    int selected=exSelectedGrenade[viewer];
+    const char *grenadeLabel=selected==GRENADE_STICKY?"STICKY GRENADE":selected==GRENADE_GRAVITY?"GRAVITY GRENADE":selected==GRENADE_IGLOO?"IGLOO GRENADE":"REGULAR GRENADE";
+    Color grenadeColor=selected==GRENADE_STICKY?GOLD:selected==GRENADE_GRAVITY?VIOLET:selected==GRENADE_IGLOO?SKYBLUE:ORANGE;
+    int labelSize=w<700?14:18,labelWidth=MeasureText(grenadeLabel,labelSize),right=w-30;
+    bool controller=playerInput[local]==INPUT_TYPE_GAMEPAD;
+    const char *cycleHint=controller?"D-DOWN: SWITCH":local==0?"TAB: SWITCH":"; : SWITCH";
+    int panelWidth=(int)fmaxf(labelWidth,MeasureText(cycleHint,12))+16;
+    DrawRectangle(right-panelWidth,(int)y-labelSize-27,panelWidth,labelSize+23,Fade(BLACK,.85f));
+    DrawText(grenadeLabel,right-labelWidth-8,(int)y-labelSize-23,labelSize,grenadeColor);
+    DrawText(cycleHint,right-MeasureText(cycleHint,12)-8,(int)y-19,12,LIGHTGRAY);
     for(int n=0;n<2;n++){
         float x=w-18-(2-n)*(size+12);Vector2 c={x+size*.5f,y+size*.5f};
         bool ready=usable && (n?ex_grenade_count(viewer,exSelectedGrenade[viewer])>0 && grenadeCooldown[viewer]<=0:holograms[viewer].cooldown<=0);
-        Color ink=ready?(n?(exSelectedGrenade[viewer]==GRENADE_GRAVITY?PURPLE:exSelectedGrenade[viewer]==GRENADE_IGLOO?SKYBLUE:ORANGE):SKYBLUE):(Color){100,106,114,255};
+        Color ink=ready?(n?(exSelectedGrenade[viewer]==GRENADE_GRAVITY?PURPLE:exSelectedGrenade[viewer]==GRENADE_IGLOO?SKYBLUE:exSelectedGrenade[viewer]==GRENADE_STICKY?GOLD:ORANGE):SKYBLUE):(Color){100,106,114,255};
         DrawRectangleRounded((Rectangle){x,y,size,size},.2f,6,Fade(BLACK,.8f));
         if(n){
             if(exSelectedGrenade[viewer]==GRENADE_GRAVITY){DrawRing(c,size*.16f,size*.24f,0,360,24,ink);DrawEllipseLines((int)c.x,(int)c.y,size*.32f,size*.12f,ink);}
             else if(exSelectedGrenade[viewer]==GRENADE_IGLOO){DrawCircleSector((Vector2){c.x-3,c.y+8},size*.28f,180,360,8,ink);DrawRectangle(c.x-6,c.y,8,12,BLACK);DrawRectangle(c.x+4,c.y-size*.28f,6,12,ink);}
             else {DrawEllipse((int)c.x-5,(int)c.y+2,size*.19f,size*.25f,ink);DrawRectangle((int)c.x-10,(int)y+6,12,6,ink);DrawLineEx((Vector2){c.x,y+8},(Vector2){c.x+7,y+18},3,ink);}
+            if(selected==GRENADE_STICKY){
+                DrawCircleLines((int)c.x-5,(int)c.y+2,size*.29f,ink);
+                for(int spike=0;spike<4;spike++){float angle=spike*PI*.5f;Vector2 start={c.x-5+cosf(angle)*size*.26f,c.y+2+sinf(angle)*size*.26f};DrawLineEx(start,(Vector2){c.x-5+cosf(angle)*size*.36f,c.y+2+sinf(angle)*size*.36f},2,ink);}
+            }
             DrawText(TextFormat("%d",ex_grenade_count(viewer,exSelectedGrenade[viewer])),(int)x+size-17,(int)y+size-25,size<50?22:28,ink);
         }else{
             DrawCircleV((Vector2){c.x-9,c.y-8},size*.13f,ink);DrawCircleV((Vector2){c.x+8,c.y-8},size*.13f,ink);

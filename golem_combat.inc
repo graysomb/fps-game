@@ -110,12 +110,43 @@ static void go_route(Vector3 target){
         for(int k=0;k<4;k++){int nx=x+sx[k],nz=z+sz[k];if(nx<0||nx>=N||nz<0||nz>=N)continue;int next=nz*N+nx;
             if(!blocked[next]&&parent[next]==-2){parent[next]=at;queue[tail++]=next;}}
     }
+    if(best==start){goFight.waypoint=(Vector3){target.x,.04f,target.z};goFight.routeTimer=.35f;return;}
     while(parent[best]>=0&&parent[best]!=start)best=parent[best];
     goFight.waypoint=(Vector3){best%N-48,.04f,best/N-48};goFight.routeTimer=.35f;
+}
+/* Clear only overlapping structure blocks, before the solver builds its contacts.
+ * The floor, projectiles, enemy equipment and every golem-owned block are excluded. */
+static void go_crush_structures(const BoundingBox *contacts,int count){
+    if(!goCombatEnabled || goCombatDead || netTransport.role==NET_ROLE_CLIENT)return;
+    bool changed=false;
+    for(int n=voxel_count-1;n>=0;n--){
+        Voxel *v=&voxels[n];if(v->golemOwned || v->isBullet || voxel_is_fluid(v))continue;
+        BoundingBox box={v->particles[0]->pos,v->particles[0]->pos};
+        for(int k=1;k<8;k++){box.min=Vector3Min(box.min,v->particles[k]->pos);box.max=Vector3Max(box.max,v->particles[k]->pos);}
+        if(box.max.y<=.08f)continue;
+        bool touching=false;for(int c=0;c<count;c++)if(CheckCollisionBoxes(contacts[c],box)){touching=true;break;}
+        if(!touching || go_held(n) || enemy_equipment_owner(n)>=0 || get_goliath_owner_of_voxel(n)>=0)continue;
+        if(!v->simulate && v->owner==-1)recycle_queue_push(v);
+        remove_voxel_index(n);changed=true;
+    }
+    if(changed)goFight.routeTimer=0;
+}
+static void go_crush_body_contacts(void){
+    BoundingBox contacts[GM_COUNT];bool used[GM_COUNT]={0};
+    for(int n=0;n<goCount;n++){
+        int v=go_find(goCells[n].id,goCells[n].index);if(v<0)continue;int part=goCells[n].part;
+        for(int k=0;k<8;k++){Vector3 at=voxels[v].particles[k]->pos;
+            if(!used[part]){contacts[part]=(BoundingBox){at,at};used[part]=true;}
+            else {contacts[part].min=Vector3Min(contacts[part].min,at);contacts[part].max=Vector3Max(contacts[part].max,at);}
+        }
+    }
+    int count=0;for(int p=0;p<GM_COUNT;p++)if(used[p])contacts[count++]=expand_bounds(contacts[p],.08f);
+    go_crush_structures(contacts,count);
 }
 static bool go_move_clear(Vector3 position){
     if(fabsf(position.x)>FLOOR_SIZE-3||fabsf(position.z)>FLOOR_SIZE-3)return false;
     BoundingBox body={{position.x-1.9f,.08f,position.z-1.9f},{position.x+1.9f,5.3f,position.z+1.9f}};
+    go_crush_structures(&body,1);
     for(int n=0;n<voxel_count;n++){Voxel *v=&voxels[n];if(v->simulate||v->golemOwned)continue;
         Vector3 half={v->rest_edge*.5f,v->rest_edge*.5f,v->rest_edge*.5f};
         if(CheckCollisionBoxes(body,(BoundingBox){v_sub(v->pos,half),v_add(v->pos,half)}))return false;
@@ -135,6 +166,7 @@ static void go_combat_prepare(float dt){
         if(v->golemDebrisAge>=45)remove_voxel_index(n);
     }
     if(goCombatDead){goFight.broken=fmaxf(0,goFight.broken-dt);return;}
+    go_crush_body_contacts();
     go_shields_tick(dt);
     goFight.time+=dt;goFight.elapsed+=dt;goFight.flash=fmaxf(0,goFight.flash-dt);goFight.broken=fmaxf(0,goFight.broken-dt);
     goFight.suppressed=fmaxf(0,goFight.suppressed-dt);goFight.routeTimer-=dt;

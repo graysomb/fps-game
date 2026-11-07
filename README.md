@@ -1359,3 +1359,7 @@ exposed reactor, and cyan regeneration. Tab selects a scenario; Space pauses;
 arrows scrub; S shows the skeleton. This is presentation-only and does not replace
 the existing Foundry fight. See [preview instructions](docs/foundry-golem-preview.md)
 for captures, shader fallback, renderer integration, and measured cost.
+
+The wave 12 golem crushes structure blocks and loose debris touching its body or
+blocking its next step. If enclosed, it pushes through a route toward its target.
+The arena floor, its own body, and held attack payloads are preserved.
