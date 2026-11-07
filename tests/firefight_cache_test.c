@@ -48,6 +48,20 @@ static void cache(void){
  fp_new_run();assert(!fpUnlocked && !fpCacheReady);
  puts("Cache: collected-only unlocks, shared team supplies, manual pickup/replacement, upgrades, checkpoint/reset and authority passed");
 }
+static void controller_cache(void){
+ fixture(1);debug_console_exec("wave 4");clear_pickups();
+ int rule=fp_rule(PICKUP_GLOCK);players[0].pos=v_add(fpCachePositions[rule],(Vector3){0,.2f,0});
+ playerInput[0]=INPUT_TYPE_GAMEPAD;aimStates[0]=(AimState){.tapArmed=true};NetInputCommand c={0};
+ assert(fp_near(0,false)<0 && fp_cache_near(0)==rule);
+ aim_interact(0,true,.26f,&c);assert(c.pressed&NET_INPUT_EQUIP);assert(!(c.held&NET_INPUT_REVIVE));
+ eq_command(0,&c,.016f);assert(equipment[0].gun[0]==EQ_GLOCK || equipment[0].gun[1]==EQ_GLOCK);
+ size_t count=fpCount;c=(NetInputCommand){0};aim_interact(0,true,.3f,&c);assert(!(c.pressed&NET_INPUT_EQUIP) && fpCount==count);
+ aim_interact(0,false,.01f,&c);
+ // LAN clients must also generate the interaction for the authoritative host.
+ eq_reset(0);aimStates[0].tapArmed=true;netTransport.role=NET_ROLE_CLIENT;c=(NetInputCommand){0};aim_interact(0,true,.26f,&c);assert(c.pressed&NET_INPUT_EQUIP);
+ netTransport.role=NET_ROLE_OFFLINE;
+ puts("Controller cache: hold X generates one pickup, equips weapon, and works for LAN input passed");
+}
 static void console_unlocks(void){
  fixture(1);start_firefight_wave(5);assert(!fpUnlocked); // Normal progression still requires collection.
  debug_console_exec("wave 4");
@@ -66,7 +80,7 @@ static void console_unlocks(void){
 }
 int main(int argc,char **argv){
  assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Firefight cache regression");init_pbd_thread_pool();assert(initialize_physics_backend());
- timers();duplicates();cache();console_unlocks();
+ timers();duplicates();cache();console_unlocks();controller_cache();
  fixture(1);assert(weapon_renderer_init());fpUnlocked=(1u<<FP_RULE_COUNT)-1;drawViewPlayerIndex=0;
  Camera3D camera={.position=v_add(fpCacheOrigin,(Vector3){13,14,20}),.target=v_add(fpCacheOrigin,(Vector3){0,0,7}),.up={0,1,0},.fovy=55};
  RenderTexture2D preview=LoadRenderTexture(960,540);BeginTextureMode(preview);ClearBackground((Color){25,29,35,255});BeginMode3D(camera);DrawPlane((Vector3){0},(Vector2){80,80},DARKGRAY);fp_draw(WEAPON_COLOR);fp_draw(WEAPON_GLASS);EndMode3D();DrawText("FIREFIGHT SPAWN CACHE",20,20,24,SKYBLUE);EndTextureMode();Image previewImage=LoadImageFromTexture(preview.texture);ImageFlipVertical(&previewImage);ExportImage(previewImage,".build/firefight-cache-preview.png");UnloadImage(previewImage);UnloadRenderTexture(preview);

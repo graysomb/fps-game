@@ -50,6 +50,7 @@ static void fp_prepare_round(int wave,int round);
 static void fp_spawn(int i,int chassis);
 static void fp_death(int i,Vector3 position);
 static int fp_near(int i,bool automatic);
+static int fp_cache_near(int i);
 static bool fp_interact(int i);
 static void fp_tick(float dt);
 static bool fp_retry(void);
