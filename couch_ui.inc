@@ -1,5 +1,6 @@
 /* Offline couch shell. LAN keeps its existing UI and four-seat protocol. */
 static bool couchLobby=false, couchAdvanced=false, couchSettings=false;
+static bool couchFirefightMenu=false;
 static bool couchReady[MAX_PLAYERS];
 static int couchSelection=0, couchSettingSeat=0, couchSettingRow=0;
 static float couchNavDelay=0;
@@ -55,10 +56,11 @@ static void couch_title(const char *title) {
 }
 static void couch_row(int row,const char *label,bool selected) {
     int y=116+row*48;
-    if(selected) DrawRectangle(40,y-6,(gameState==GAME_STATE_MENU && !couchLobby && !couchSettings && !couchAdvanced?GetScreenWidth()/2-64:GetScreenWidth()-80),42,(Color){40,77,94,255});
+    if(selected) DrawRectangle(40,y-6,(gameState==GAME_STATE_MENU && !couchLobby && !couchSettings && !couchAdvanced && !couchFirefightMenu?GetScreenWidth()/2-64:GetScreenWidth()-80),42,(Color){40,77,94,255});
     DrawText(label,56,y,24,selected?GOLD:LIGHTGRAY);
 }
 static void couch_begin_lobby(bool practice) {
+    couchFirefightMenu=false;
     enemyLab=false;
     if(gameMode==GAME_MODE_DEATHMATCH) {currentWorldType=WORLD_TYPE_CROSSCUT;useCustomMap=false;}
     firefightPractice=practice;
@@ -72,10 +74,30 @@ static void couch_begin_lobby(bool practice) {
 static void couch_launch(void) {
     if(firefightPractice) multiplayerActivePlayers=1;
     if(gameMode==GAME_MODE_FIREFIGHT && (firefightFoundry||firefightPractice)) useCustomMap=false;
-    ResetGame(); gameState=GAME_STATE_PLAYING; couchLobby=false;
+    fp_start_new_game(); gameState=GAME_STATE_PLAYING; couchLobby=false;
+}
+static void couch_firefight_options(void) {
+    couchFirefightMenu=true;couchLobby=false;fpSaveWave=-1;
+    couchSelection=fp_save_available()?0:1;
+}
+static void couch_draw_firefight_options(bool available) {
+    couch_title("FIREFIGHT");
+    couch_row(0,available?TextFormat("Continue - Wave %d (%d player%s)",fpSaveWave,fpSaveHumans,fpSaveHumans==1?"":"s"):"Continue - No saved game",couchSelection==0 && available);
+    couch_row(1,"New Game",couchSelection==1);
+    couch_row(2,"Back",couchSelection==2);
+    DrawText("Continue restarts the saved wave with its equipment and upgrades.",48,290,20,LIGHTGRAY);
+    DrawText("Progress saves at each wave start. New Game replaces your saved run.",48,320,20,LIGHTGRAY);
+    DrawText("Reconnect the saved players' controllers before continuing.",48,350,18,LIGHTGRAY);
+    if(fpSaveError)DrawText(fpSaveError,48,390,18,ORANGE);
+    DrawText(couch_menu_device()<0?"Arrows: select | Enter: confirm | Esc: back":"D-pad: select | A: confirm | B: back",48,450,20,LIGHTGRAY);
+}
+static void couch_return_to_lobby(void) {
+    gameState=GAME_STATE_MENU;memset(couchReady,0,sizeof(couchReady));
+    if(fp_active())couch_firefight_options();else couchLobby=true;
 }
 static void ff_draw_hud(int i,int w,int h) {
     if(enemyLab) {enemy_lab_hud(w,h);return;}
+    if(fpSaveEnabled && fpSaveError)DrawText("Firefight save failed - check save-folder access/free space",12,h-42,14,ORANGE);
     if(gameMode!=GAME_MODE_FIREFIGHT || i>=firefightHumans) return;
     if(firefightWaveState==FIREFIGHT_STATE_LOOT && combatantLife[i]==LIFE_ALIVE){
         int ready=0,total=0,fs=w<700?12:16;
@@ -221,7 +243,7 @@ static bool couch_frame(void) {
         if(confirm || pausePressed) {
             if(couchSelection==0&&missing<0) gameState=GAME_STATE_PLAYING;
             if(couchSelection==1) couchSettings=true;
-            if(couchSelection==2) {if(enemyLab) enemy_lab_exit();else {gameState=GAME_STATE_MENU;couchLobby=true;memset(couchReady,0,sizeof(couchReady));}}
+            if(couchSelection==2) {if(enemyLab) enemy_lab_exit();else couch_return_to_lobby();}
         }
         return true;
     }
@@ -234,7 +256,7 @@ static bool couch_frame(void) {
             DrawText(couchSelection==1?"> Lobby":"  Lobby",240,y,26,couchSelection==1?GOLD:LIGHTGRAY);
             DrawText(couch_menu_device()<0?"Arrows: select   Enter: confirm":"D-pad: select   A: confirm",56,y+34,16,LIGHTGRAY);
             EndDrawing();
-            if(confirm){if(couchSelection==0)couch_launch();else {gameState=GAME_STATE_MENU;couchLobby=true;memset(couchReady,0,sizeof(couchReady));}}
+            if(confirm){if(couchSelection==0)couch_launch();else couch_return_to_lobby();}
             return true;
         }
         BeginDrawing();couch_title(gameMode==GAME_MODE_FIREFIGHT?(firefightWaveState==FIREFIGHT_STATE_VICTORY?"VICTORY":"FIREFIGHT DEFEAT"):TextFormat("PLAYER %d WINS",winnerId));
@@ -251,6 +273,17 @@ static bool couch_frame(void) {
             if(couchSelection==0) couch_launch();
             else {gameState=GAME_STATE_MENU;couchLobby=true;memset(couchReady,0,sizeof(couchReady));}
         }
+        return true;
+    }
+    if(couchFirefightMenu) {
+        bool available=fp_save_available();
+        couchSelection=(couchSelection+couch_axis(false)+3)%3;
+        BeginDrawing();couch_draw_firefight_options(available);
+        EndDrawing();
+        if(back || (confirm && couchSelection==2)){couchFirefightMenu=false;couchSelection=0;}
+        else if(confirm && couchSelection==0 && available) {
+            if(fp_save_continue()){couchFirefightMenu=false;couchSelection=0;}
+        } else if(confirm && couchSelection==1)couch_begin_lobby(false);
         return true;
     }
     if(couchLobby) {
@@ -307,7 +340,8 @@ static bool couch_frame(void) {
     for(int i=0;i<6;i++) couch_row(i,items[i],couchSelection==i);
     DrawText(couch_menu_device()>=0?"D-pad / stick: navigate":"Arrow keys: navigate",48,425,18,LIGHTGRAY);DrawText(couch_menu_device()>=0?"Bottom face: confirm":"Enter: confirm",48,450,18,LIGHTGRAY);EndDrawing();
     if(confirm) {
-        if(couchSelection==0||couchSelection==1||couchSelection==2) {gameMode=couchSelection==1?GAME_MODE_DEATHMATCH:GAME_MODE_FIREFIGHT;couch_begin_lobby(couchSelection==2);}
+        if(couchSelection==0){gameMode=GAME_MODE_FIREFIGHT;firefightPractice=false;couch_firefight_options();}
+        else if(couchSelection==1||couchSelection==2) {gameMode=couchSelection==1?GAME_MODE_DEATHMATCH:GAME_MODE_FIREFIGHT;couch_begin_lobby(couchSelection==2);}
         else if(couchSelection==3)couchSettings=true;
         else if(couchSelection==5)enemy_lab_start(ENEMY_TYPE_SCRAPPER);
         else {couchAdvanced=true;firefightPractice=false;gameMode=GAME_MODE_DEATHMATCH;activePlayers=clamp_active_players(multiplayerActivePlayers);}

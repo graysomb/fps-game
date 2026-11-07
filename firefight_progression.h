@@ -28,6 +28,12 @@ typedef struct {
     FfItem *items;size_t count;
 } FfCheckpoint;
 static FfCheckpoint fpCheckpoint;
+/* Disk saves are armed only by an explicit offline New Game / Continue. */
+static bool fpSaveEnabled;
+static const char *fpSaveError;
+static void fp_save_write(void);
+static void fp_save_clear(void);
+static void fp_start_new_game(void);
 static bool fp_active(void);
 static int fp_rule(int type);
 static int fp_team_size(void);

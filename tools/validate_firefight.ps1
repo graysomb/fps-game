@@ -16,6 +16,12 @@ try {
     & gcc tests/firefight_integration.c @sources @flags -o ".build/firefight_integration_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Integration build failed' }
     $backend = if ($Gpu) { 'gpu' } else { 'cpu-mt' }
+    & gcc tests/firefight_save_test.c @sources @flags -o ".build/firefight_save_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Save build failed' }
+    & ".build/firefight_save_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Save checks failed' }
+    & ".build/firefight_save_$variant.exe" --read
+    if ($LASTEXITCODE -ne 0) { throw 'Cross-process Continue failed' }
     & gcc tests/firefight_progression_test.c @sources @flags -o ".build/firefight_progression_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Progression build failed' }
     & ".build/firefight_progression_$variant.exe" "--physics=$backend"

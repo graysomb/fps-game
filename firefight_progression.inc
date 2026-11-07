@@ -26,6 +26,7 @@ static void fp_new_run(void){
  memset(fpCarrierType,0,sizeof(fpCarrierType));memset(fpCarrierClock,0,sizeof(fpCarrierClock));memset(fpCarrierPanel,0,sizeof(fpCarrierPanel));
  fpPendingCount=0;fpRestartTimer=0;fpSupplyTimer=0;fpBannerRead=fpBannerWrite=0;fpBannerTimer=0;
  if(fpRestoring)return;
+ fpSaveEnabled=false;
  fpCount=0;fpNextId=1;fpUnlocked=0;fpRepeatCursor=0;++fpRevision;++fpGeneration;
  free(fpCheckpoint.items);fpCheckpoint=(FfCheckpoint){0};
 }
@@ -246,4 +247,5 @@ static void fp_radar(int i,int cx,int cy,int radius,float range){
 #include "firefight_pairs.inc"
 #include "firefight_carriers.inc"
 #include "firefight_checkpoint.inc"
+#include "firefight_save.inc"
 #include "firefight_progression_net.inc"

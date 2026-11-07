@@ -296,6 +296,24 @@ places living players safely with full Matter. Failed-attempt loot is rolled bac
 revives and individual reserve respawns do not trigger a checkpoint. The LAN host
 owns the checkpoint and changes the session generation to reject old input/snapshots.
 
+**Continue / New Game:** selecting Firefight opens a menu with both options. Offline
+solo and split-screen runs automatically save at the start of each wave, even when
+the retry Checkpoints option is OFF. Continue restarts that wave with its saved
+equipment, grenades, upgrades, lives, scores, unlocks, player count and world settings.
+Terrain is rebuilt and players return to safe spawns; combat, loot and changes made
+since the wave began are replayed. Reconnect the saved players' controllers before
+continuing. New Game replaces the save when the new match actually starts. Victory
+or a final defeat clears it. Practice, Enemy Lab, LAN and world previews do not
+overwrite an offline run. The advanced Firefight setup also offers Continue (`V`).
+
+The save is `firefight.sav` in `~/Library/Application Support/FPS Game` on macOS,
+`%APPDATA%/FPS Game` on Windows, or `$XDG_DATA_HOME/fps-game` on Linux (default
+`~/.local/share/fps-game`). Custom-map saves refer to the existing map slot, so keep
+that map available. Saves use a versioned, checked format and replace the previous
+file only after a successful write. `FPS_FIREFIGHT_SAVE` overrides the file location
+for isolated testing. `tests/build_firefight_save_macos.sh` builds and runs save,
+progression and integration regressions, including a separate-process Continue check.
+
 `tests/firefight_progression_test.c` covers schedules, shared enemy combat, copy
 conservation, repeated checkpoint restoration and controller/keyboard settings.
 `tests/firefight_progression_lan.c` checks real host/client inventory transfer,
