@@ -1798,6 +1798,7 @@ FORCE_INLINE bool v_isfinite(Vector3 v) {
 }
 static void set_voxel_velocity(Voxel *voxel, Vector3 vel);
 static void draw_creative_help_overlay(int player_idx, int view_w, int view_h);
+static bool ce_mouse_blocked(void);
 
 static void unit_voxel_buffer_clear(UnitVoxelBuffer *buffer) {
     if (!buffer) {
@@ -8895,13 +8896,14 @@ typedef struct {
 } Pickup;
 
 static Pickup pickups[MAX_PICKUPS];
+#include "creative_map.h"
 static const char *pickup_type_label(PickupType type) {
     switch (type) {
-        case PICKUP_AMMO: return "Ammo";
+        case PICKUP_AMMO: return "Matter";
         case PICKUP_HEALTH: return "Health";
         case PICKUP_VOID: return "Void";
-        case PICKUP_DYNAMIC_SHOT: return "Dynamic";
-        case PICKUP_GOLD_TETHER: return "Gold Tether";
+        case PICKUP_DYNAMIC_SHOT: return "Voxel launcher";
+        case PICKUP_GOLD_TETHER: return "Upgraded tether";
         case PICKUP_GRENADE: return "Grenade";
         case PICKUP_SHOTGUN:return "Shotgun";case PICKUP_CUTTER:return "Cutter";
         case PICKUP_RAILGUN:return "Railgun";case PICKUP_ROCKET:return "Rocket";
@@ -9096,6 +9098,8 @@ static bool load_map_slot(int slot) {
     meshDirty = true;
     return true;
 }
+
+#include "creative_map.inc"
 
 static void init_pickups_legacy(void) {
     if(currentWorldType==WORLD_TYPE_CROSSCUT && !useCustomMap &&
@@ -9398,6 +9402,7 @@ static void ResetCreative(void) {
     rebuild_all_voxel_surfaces();
     rebuild_static_hash_if_dirty();
     meshDirty = true;
+    ce_begin();
 }
 
 static void ResetGame(void) {
@@ -9504,7 +9509,8 @@ static void ResetGame(void) {
     meshDirty = true;
 
     if (useCustomMap) {
-        load_map_slot(creativeMapSlot);
+        if(cmSelectedPath[0] || cmTesting)cm_load_selected();else load_map_slot(creativeMapSlot);
+        for(int n=0;n<MAX_PLAYERS;n++){players[n].pos=pick_player_spawn(n);float yaw=players[n].yaw;Vector3 pos;if(cm_spawn(CM_PLAYER,n,&pos,&yaw)){players[n].pos=pos;players[n].yaw=yaw;}players[n].death_pos=players[n].pos;}
     }
 
     if(currentWorldType==WORLD_TYPE_CROSSCUT && !useCustomMap && gameMode==GAME_MODE_DEATHMATCH) {
@@ -14371,6 +14377,7 @@ static Vector3 sanctum_spawn_world(int spawn_index) {
 
 static bool is_view_occluded_by_voxels(Vector3 eye_pos, Vector3 target_pos);
 static Vector3 pick_player_spawn(int player_index) {
+    Vector3 authored;if(cm_spawn(player_index>=MAX_PLAYERS?CM_ENTRANCE:CM_PLAYER,player_index,&authored,NULL))return nudge_spawn_clear(authored,spawn_clear_half(player_index),0,player_index);
     if(player_index>=0 && player_index<MAX_PLAYERS) {characterAnimations[player_index].initialized=false;characterSampleTime[player_index]=0;}
     if(currentWorldType==WORLD_TYPE_CROSSCUT && !useCustomMap && gameMode==GAME_MODE_DEATHMATCH) {
         float half=spawn_clear_half(player_index);
@@ -18543,6 +18550,7 @@ static void draw_players(void) {
     eq_world();
     foundry_traps_draw();
     ducks_draw();
+    if(creativeModeActive)ce_world(drawViewPlayerIndex);
 }
 
 static void HandleKeyboardInput(int i, float dt) {
@@ -19887,6 +19895,7 @@ static void UpdateBot(int playerIdx, float dt) {
     }
 }
 
+#include "creative_net.inc"
 static void net_send_world_to(int slot) {
     uint8_t packet[FPS_NET_MAX_PACKET];
     NetWriter writer;
@@ -19899,6 +19908,7 @@ static void net_send_world_to(int slot) {
     net_write_u8(&writer, netRequestedCreative ? 1 : 0);
     net_write_f32(&writer, worldFloorHalfSize);
     net_write_u8(&writer, worldPeriodic ? 1 : 0);
+    net_write_u8(&writer, useCustomMap ? 1 : 0);
     net_transport_send(&netTransport, slot, FPS_NET_CHANNEL_WORLD, packet, writer.length, true);
 
     int cursor = 0;
@@ -19908,7 +19918,7 @@ static void net_send_world_to(int slot) {
         size_t count_offset = writer.length;
         net_write_u16(&writer, 0);
         uint16_t count = 0;
-        while (cursor < voxel_count && writer.length + 29 <= writer.capacity) {
+        while (cursor < voxel_count && writer.length + 30 <= writer.capacity) {
             Voxel *v = &voxels[cursor++];
             if (v->simulate || v->isBullet) continue;
             net_write_u64(&writer, v->identity);
@@ -19920,12 +19930,14 @@ static void net_send_world_to(int slot) {
             net_write_u8(&writer, v->color.b);
             net_write_u8(&writer, v->color.a);
             net_write_u8(&writer, (uint8_t)v->type);
+            net_write_u8(&writer, v->reinforced?1:0);
             ++count;
         }
         packet[count_offset] = (uint8_t)(count >> 8);
         packet[count_offset + 1] = (uint8_t)count;
         if (count) net_transport_send(&netTransport, slot, FPS_NET_CHANNEL_WORLD, packet, writer.length, true);
     }
+    cm_net_send(slot);
     ex_pickup_snapshot(slot);
     net_writer_init(&writer, packet, sizeof(packet));
     clarity_net_snapshot(slot);
@@ -19981,7 +19993,9 @@ static bool net_lobby_can_start(void) {
 static void net_host_start_match(void) {
     if (netTransport.role != NET_ROLE_HOST || netLobbyStarted) return;
     netLobbyStarted = true;
-    if (netRequestedCreative) ResetCreative(); else ResetGame();
+    if(netRequestedCreative){fprintf(stderr,"LAN editing is not supported by the arena editor\n");return;}
+    if(useCustomMap&&cmSelectedPath[0]&&!ce_validate_selected(gameMode==GAME_MODE_FIREFIGHT))return;
+    ResetGame();
     activePlayers = 1;
     for (int i = 1; i < MAX_PLAYERS; ++i) {
         if (netPlayerPresent[i]) activePlayers = i + 1;
@@ -20293,7 +20307,8 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
     } else if (header.type == NET_MSG_WORLD_BEGIN) {
         (void)net_read_u32(&reader); netRequestedCreative = net_read_u8(&reader) != 0;
         float extent=net_read_f32(&reader);int periodic=net_read_u8(&reader);
-        if(reader.failed || !isfinite(extent) || extent<20 || extent>40 || periodic>1) return;
+        if(reader.failed || !isfinite(extent) || extent<20 || extent>128 || periodic>1) return;
+        int custom=net_read_u8(&reader);if(reader.failed||custom>1)return;useCustomMap=custom!=0;
         worldFloorHalfSize=extent;worldPeriodic=periodic!=0;
         clear_world_voxels(); clear_pickups(); net_proxy_map_clear(); netWorldReady = false;
     } else if (header.type == NET_MSG_WORLD_STATIC) {
@@ -20302,13 +20317,17 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
             uint64_t identity = net_read_u64(&reader);
             int gx = net_read_i32(&reader), gy = net_read_i32(&reader), gz = net_read_i32(&reader);
             Color color = { net_read_u8(&reader), net_read_u8(&reader), net_read_u8(&reader), net_read_u8(&reader) };
-            int type = net_read_u8(&reader);
+            int type = net_read_u8(&reader),reinforced=net_read_u8(&reader);
+            if(reader.failed||reinforced>1||type>1||gx< -512||gx>512||gy<0||gy>512||gz< -512||gz>512)return;
             int index = add_static_voxel_at_grid(gx, gy, gz, color, type);
             if (index >= 0) {
+                voxels[index].reinforced=reinforced!=0;
                 voxels[index].identity = identity;
                 if (identity >= nextVoxelIdentity) nextVoxelIdentity = identity + 1;
             }
         }
+    } else if (header.type == NET_MSG_MAP_METADATA) {
+        cm_net_receive(&reader);
     } else if (header.type == NET_MSG_WORLD_END) {
         rebuild_all_voxel_surfaces(); init_static_hash(); meshDirty = true; netWorldReady = true;
         gameState = netRequestedCreative ? GAME_STATE_CREATIVE : GAME_STATE_PLAYING;
@@ -20889,11 +20908,11 @@ static void render_gameplay_view(RenderTexture2D *screens,
     voxel_render_frame++;
     nightSkyTime=GetTime();
     if(camp.active && !camp_visible())camp_end();
-    activePlayers = (gameMode == GAME_MODE_FIREFIGHT) ? MAX_COMBATANTS : clamp_active_players(activePlayers);
+    activePlayers = (gameMode == GAME_MODE_FIREFIGHT && !creative_mode) ? MAX_COMBATANTS : clamp_active_players(activePlayers);
     int viewCount = netTransport.role == NET_ROLE_OFFLINE ? activePlayers : netLocalPlayerCount;
     int humanPlayerSlots[MAX_PLAYERS];
     int humanCount = 0;
-    if (gameMode == GAME_MODE_FIREFIGHT && netTransport.role == NET_ROLE_OFFLINE) {
+    if (!creative_mode && gameMode == GAME_MODE_FIREFIGHT && netTransport.role == NET_ROLE_OFFLINE) {
         for (int p = 0; p < activePlayers; ++p) {
             if (p < firefightHumans) {
                 humanPlayerSlots[humanCount++] = p;
@@ -20912,7 +20931,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
     for (int view = 0; view < viewCount; ++view) {
         int i;
         if (netTransport.role == NET_ROLE_OFFLINE) {
-            i = (gameMode == GAME_MODE_FIREFIGHT) ? humanPlayerSlots[view] : view;
+            i = (gameMode == GAME_MODE_FIREFIGHT && !creative_mode) ? humanPlayerSlots[view] : view;
         } else {
             i = netLocalPlayerSlots[view];
         }
@@ -20953,7 +20972,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
     for (int view = 0; view < viewCount; ++view) {
         int i;
         if (netTransport.role == NET_ROLE_OFFLINE) {
-            i = (gameMode == GAME_MODE_FIREFIGHT) ? humanPlayerSlots[view] : view;
+            i = (gameMode == GAME_MODE_FIREFIGHT && !creative_mode) ? humanPlayerSlots[view] : view;
         } else {
             i = netLocalPlayerSlots[view];
         }
@@ -21031,15 +21050,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
             int hudFont=view_w<700?12:HUD_FONT_SIZE;
             DrawRectangle(0, 0, view_w, HUD_BAR_HEIGHT, Fade(BLACK, 0.5f));
             if (creative_mode) {
-                Color c = creative_block_palette(creativeBlockColorIndex[i]);
-                const char *label = TextFormat("P%d CREATIVE | Brush %d | Pickup %s | Color %d",
-                                               i + 1,
-                                               creativeBrushSpan[i],
-                                               pickup_type_label((PickupType)creativePickupType[i]),
-                                               (creativeBlockColorIndex[i] % 6 + 6) % 6 + 1);
-                DrawText(label, HUD_PADDING_X, HUD_PADDING_Y, hudFont, WHITE);
-                DrawRectangle(HUD_PADDING_X + 8, HUD_PADDING_Y + hudFont + 4, 36, 14, c);
-                draw_creative_help_overlay(i, view_w, view_h);
+                ce_hud(i,view_w,view_h);
             } else if(enemyLab) {
                 int living=0;for(int e=MAX_PLAYERS;e<activePlayers;e++) living+=players[e].respawn_timer<=0;
                 DrawText(TextFormat("P%d | ENEMY LAB | %d active enemies",i+1,living),HUD_PADDING_X,HUD_PADDING_Y,hudFont,WHITE);
@@ -21112,6 +21123,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                     DrawText(banner_text, banner_x, banner_y, banner_size, banner_color);
                 }
             }
+            if(!creative_mode){
             clarity_hud(i,view_w,view_h);
             ff_draw_hud(i, view_w, view_h);
             draw_hud_bars(i, &players[i], view_w, view_h);
@@ -21129,6 +21141,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
             if (players[i].exposed_flash_timer > 0.0f) {
                 float alpha = clampf(players[i].exposed_flash_timer / 0.35f, 0.0f, 1.0f);
                 DrawRectangle(0, 0, view_w, view_h, Fade(RED, 0.25f * alpha));
+            }
             }
             if (!creative_mode && players[i].respawn_timer > 0.0f && combatantLife[i]!=LIFE_DOWNED) {
                 if (gameMode == GAME_MODE_FIREFIGHT && firefightTeamLives <= 0) {
@@ -21171,7 +21184,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
             DrawRectangle(GetScreenWidth()/2-2, 0, 4, GetScreenHeight(), LIGHTGRAY);
             DrawRectangle(0, GetScreenHeight()/2-2, GetScreenWidth(), 4, LIGHTGRAY);
         }
-        {
+        if(!creative_mode){
             const int fps_font = 18;
             const int fps_pad = 20;
             const char *physics_note = physicsBackend.gpu_recovery_probe ? " (GPU validating)" :
@@ -21199,6 +21212,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
             }
         }
         debug_console_draw();
+        ce_overlay();
     EndDrawing();
     weaponFrameSampled = false;
 }
@@ -21545,6 +21559,7 @@ static bool run_ai_awareness_smoke_test(void) {
 
 #include "combat_clarity_menu.inc"
 #include "couch_ui.inc"
+#include "creative_editor.inc"
 #include "victory_town.inc"
 #include "victory_town_credits.inc"
 #include "firefight_victory.inc"
@@ -21784,7 +21799,8 @@ int main(int argc, char **argv) {
         if (IsKeyPressed(KEY_F2)) {
             //SetLoggingEnabled(!logsEnabled);
         }
-        if(enemyLab) enemy_lab_controls();
+        if(ce_frame())continue;
+        if(enemyLab&&!cmTesting) enemy_lab_controls();
         if (ffend_frame(GetFrameTime())){for(int i=0;i<MAX_PLAYERS;i++)equipment[i].buildHeld=false;continue;}
         if (couch_frame()){aim_focus_tick();for(int i=0;i<MAX_PLAYERS;i++)equipment[i].buildHeld=false;continue;}
         if(gameState!=GAME_STATE_PLAYING)for(int i=0;i<MAX_PLAYERS;i++)equipment[i].buildHeld=false;
@@ -21888,9 +21904,8 @@ int main(int argc, char **argv) {
                         DrawText(lan_text, SCREEN_WIDTH / 2 - MeasureText(lan_text, 18) / 2, boxY + 242, 18, DARKGRAY);
 
                         // Custom map
-                        DrawText(TextFormat("Custom Map: %s (Slot %d) - Press U to Toggle, L to Cycle",
-                                            useCustomMap ? "ON" : "OFF", creativeMapSlot + 1),
-                                 SCREEN_WIDTH / 2 - MeasureText("Custom Map: ON (Slot 1) - Press U to Toggle, L to Cycle", 18) / 2,
+                        DrawText(TextFormat("Custom Map: %s - U to Toggle, L for Library",useCustomMap ? "ON" : "OFF"),
+                                 SCREEN_WIDTH / 2 - MeasureText("Custom Map: ON - U to Toggle, L for Library", 18) / 2,
                                  boxY + 272, 18, DARKGRAY);
 
                         // World Info
@@ -22214,8 +22229,8 @@ int main(int argc, char **argv) {
                         }
 
                         Rectangle slotRec = { (float)(boxX + 464), (float)mRowY, 114.0f, 34.0f };
-                        if (DrawMenuButton(slotRec, TextFormat("Slot: %d (L)", creativeMapSlot + 1), 13, false, (Color){ 100, 100, 100, 255 }, (Color){ 235, 235, 240, 240 }, BLACK)) {
-                            creativeMapSlot = (creativeMapSlot + 1) % 3;
+                        if (DrawMenuButton(slotRec, "Map library (L)", 13, false, (Color){ 100, 100, 100, 255 }, (Color){ 235, 235, 240, 240 }, BLACK)) {
+                            ce_library(true);
                         }
 
                         Rectangle hostRec = { (float)(boxX + 588), (float)mRowY, 134.0f, 34.0f };
@@ -22340,7 +22355,7 @@ int main(int argc, char **argv) {
                         useCustomMap = !useCustomMap;
                     }
                     if (IsKeyPressed(KEY_L)) {
-                        creativeMapSlot = (creativeMapSlot + 1) % 3;
+                        ce_library(true);
                     }
                     if (IsKeyPressed(KEY_W)) {
                         currentWorldType = (WorldType)((currentWorldType + 1) % WORLD_TYPE_COUNT);
@@ -22534,7 +22549,7 @@ int main(int argc, char **argv) {
                             useCustomMap = !useCustomMap;
                         }
                         if (IsKeyPressed(KEY_L)) {
-                            creativeMapSlot = (creativeMapSlot + 1) % 3;
+                            ce_library(true);
                         }
                         if (netTransport.role == NET_ROLE_OFFLINE && IsKeyPressed(KEY_H)) {
                             netRequestedRole = NET_ROLE_HOST;
@@ -23032,46 +23047,11 @@ int main(int argc, char **argv) {
         break;
             }
             case GAME_STATE_CREATIVE: {
-                float dt = GetFrameTime();
-                debug_console_update();
+                float dt=GetFrameTime();
                 mouse_frame(dt);
-                if (netTransport.role == NET_ROLE_CLIENT) {
-                    net_client_update(dt);
-                    render_gameplay_view(screens, &renderPlayers, &renderW, &renderH, true);
-                    break;
-                }
-                update_pickups(dt);
-                update_creative_mode(dt);
-                activate_static_voxels_near_dynamic();
-                update_projectiles(dt);
-                prepare_tether_forces();
-                wake_sleeping_voxels_near_awake();
+                ce_update(dt);
                 rebuild_static_hash_if_dirty();
-                pbdTimeAccumulator += dt;
-                float pbd_fixed_dt = PBD_MAX_STEP_DT;
-                float pbd_max_accum = pbd_fixed_dt * (float)PBD_MAX_ACCUM_STEPS;
-                if (pbdTimeAccumulator > pbd_max_accum) {
-                    pbdTimeAccumulator = pbd_max_accum;
-                }
-                int pbd_steps_due = (int)(pbdTimeAccumulator / pbd_fixed_dt);
-                if (pbd_steps_due > PBD_MAX_ACCUM_STEPS) pbd_steps_due = PBD_MAX_ACCUM_STEPS;
-                if (pbd_steps_due > 0) {
-                    simulate_voxel_pbd_steps(pbd_fixed_dt, pbd_steps_due);
-                    pbdTimeAccumulator -= pbd_fixed_dt * (float)pbd_steps_due;
-                }
-                recycle_dead_voxels(dt);
-                log_dynamic_glue_cluster_breaks();
-                handle_pbd_projectile_hits();
-                voxelHashFramesSinceRebuild++;
-                if (voxelHashFramesSinceRebuild >= VOXEL_HASH_REBUILD_INTERVAL) {
-                    rebuild_voxel_hash();
-                }
-                deactivate_sleeping_voxels();
-                rebuild_static_hash_if_dirty();
-                if (IsKeyPressed(KEY_M) || IsKeyPressed(KEY_ESCAPE)) {
-                    gameState = GAME_STATE_MENU;
-                }
-                render_gameplay_view(screens, &renderPlayers, &renderW, &renderH, true);
+                render_gameplay_view(screens,&renderPlayers,&renderW,&renderH,true);
                 break;
             }
             case GAME_STATE_PAUSED:
@@ -23213,6 +23193,7 @@ int main(int argc, char **argv) {
     netVoxelProxyMap = NULL;
     shutdown_sfx();
     clarity_menu_shutdown();
+    ce_shutdown();
     fp_shutdown();
     CloseWindow();
     if (debugLogFile) {

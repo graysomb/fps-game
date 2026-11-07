@@ -128,6 +128,7 @@ static bool camp_site(Vector3 center,Vector3 *standing){
 static void camp_begin(void){
     camp_end();if(firefightPractice || enemyLab || netTransport.role==NET_ROLE_CLIENT)return;
     Vector3 center={0};if(!firefightFoundry){center=players[0].pos;Vector3 sum={0};for(int i=0;i<firefightHumans;i++)sum=v_add(sum,world_delta(players[i].pos,center));center=world_wrap(v_add(center,v_mul(sum,1.f/firefightHumans)));}
+    Vector3 authored;if(cm_spawn(CM_CAMP,0,&authored,NULL))center=authored;
     Vector3 standing[MAX_PLAYERS];
     for(int n=0;n<=160;n++){
         float angle=(n?((n-1)%16):0)*2*PI/16,radius=n?2*(1+(n-1)/16):0;

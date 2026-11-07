@@ -14,7 +14,7 @@ static void mouse_sync(void){
         int input=netTransport.role==NET_ROLE_CLIENT?s:actor;
         if(actor>=0 && input>=0 && playerInput[input]==INPUT_TYPE_KEYBOARD){seat=s;slot=actor;break;}
     }
-    bool capture=slot>=0 && IsWindowFocused() && !debugConsoleOpen &&
+    bool capture=!ce_mouse_blocked() && slot>=0 && IsWindowFocused() && !debugConsoleOpen &&
         (gameState==GAME_STATE_PLAYING || gameState==GAME_STATE_CREATIVE) && !(enemyLab && enemyLabPaused);
     if(mouseCaptured && (!capture || slot!=mouseSlot)){
         if(netTransport.role==NET_ROLE_CLIENT && mouseSlot>=0){

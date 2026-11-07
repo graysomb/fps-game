@@ -5,7 +5,8 @@ typedef enum { FOUNDRY_DROP, FOUNDRY_SWITCH, FOUNDRY_TIP, FOUNDRY_BAY, FOUNDRY_P
 typedef struct {
     FoundryTrapKind kind;
     int x0,x1,y0,y1,z0,z1,rx,ry,rz,owner;
-    bool active,pending,fourPosts;
+    bool active,pending,fourPosts,explicitCells;
+    unsigned char cellFlags[FOUNDRY_TRAP_PAYLOAD];
     unsigned activation;
     uint32_t victims;
     Color color;
@@ -32,7 +33,9 @@ static bool foundry_bay_crack(const FoundryTrap *t,int x,int y,int z) {
     return k>=0 && ColorToInt(t->original[k].color)==ColorToInt(ORANGE);
 }
 static bool foundry_fractured(const FoundryTrap *t) { return t->kind==FOUNDRY_BAY || t->kind==FOUNDRY_PILLAR; }
+static int foundry_explicit_flags(const FoundryTrap *t,int x,int y,int z){for(int k=0;k<t->originalCount;k++)if(t->original[k].gx==x&&t->original[k].gy==y&&t->original[k].gz==z)return t->cellFlags[k];return 0;}
 static bool foundry_trap_contains(const FoundryTrap *t,int x,int y,int z) {
+    if(t->explicitCells)return (foundry_explicit_flags(t,x,y,z)&1)!=0;
     if(foundry_fractured(t))return y>0 && foundry_bay_index(t,x,y,z)>=0 && !foundry_bay_crack(t,x,y,z);
     return x>=t->x0 && x<=t->x1 && y>=t->y0 && y<=t->y1 && z>=t->z0 && z<=t->z1;
 }
@@ -54,6 +57,7 @@ static void foundry_trap_define(FoundryTrapKind kind,int x0,int x1,int y0,int y1
 }
 
 static bool foundry_trap_trigger(const FoundryTrap *t,int x,int y,int z) {
+    if(t->explicitCells)return (foundry_explicit_flags(t,x,y,z)&4)!=0;
     if(foundry_fractured(t))return foundry_bay_crack(t,x,y,z);
     if(t->fourPosts)return y==t->ry && (x==t->x0 || x==t->x1) && (z==t->z0 || z==t->z1);
     return x==t->rx && y==t->ry && z==t->rz;

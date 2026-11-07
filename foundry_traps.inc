@@ -30,7 +30,7 @@ static void foundry_trap_release(int n) {
         int id=table_get_static_only(x,y,z);
         if(id>=0)unit_voxel_buffer_push(&buffer,x,y,z,voxels[id].color,0,false,id,0,t->owner);
     }
-    for(int k=0;k<t->originalCount;k++){const Voxel *v=&t->original[k];if(!foundry_trap_trigger(t,v->gx,v->gy,v->gz) && !(t->fourPosts && v->gy>=t->ry && v->gy<t->y0))continue;
+    for(int k=0;k<t->originalCount;k++){const Voxel *v=&t->original[k];if(t->explicitCells ? !(foundry_explicit_flags(t,v->gx,v->gy,v->gz)&2) : (!foundry_trap_trigger(t,v->gx,v->gy,v->gz) && !(t->fourPosts && v->gy>=t->ry && v->gy<t->y0)))continue;
         int release=table_get_static_only(v->gx,v->gy,v->gz);
         if(release>=0){recycle_queue_push(&voxels[release]);remove_voxel_index(release);}
     }
@@ -38,7 +38,7 @@ static void foundry_trap_release(int n) {
     if(t->fourPosts || foundry_fractured(t))for(int id=voxel_count-1;id>=0;id--){
         Voxel *v=&voxels[id];
         if(v->simulate && !v->isBullet && v->type==0 &&
-           ((foundry_fractured(t) && foundry_trap_trigger(t,v->orig_min_gx,v->orig_min_gy,v->orig_min_gz)) ||
+           ((t->explicitCells ? (foundry_explicit_flags(t,v->orig_min_gx,v->orig_min_gy,v->orig_min_gz)&2) : (foundry_fractured(t) && foundry_trap_trigger(t,v->orig_min_gx,v->orig_min_gy,v->orig_min_gz))) ||
            (t->fourPosts && v->orig_min_gy>=t->ry && v->orig_min_gy<t->y0 &&
            (v->orig_min_gx==t->x0 || v->orig_min_gx==t->x1) &&
            (v->orig_min_gz==t->z0 || v->orig_min_gz==t->z1))))remove_voxel_index(id);

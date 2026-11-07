@@ -71,7 +71,8 @@ static void couch_begin_lobby(bool practice) {
 }
 static void couch_launch(void) {
     if(firefightPractice) multiplayerActivePlayers=1;
-    if(gameMode==GAME_MODE_FIREFIGHT && (firefightFoundry||firefightPractice)) useCustomMap=false;
+    if(gameMode==GAME_MODE_FIREFIGHT && (firefightFoundry||firefightPractice) && !cmSelectedPath[0]) useCustomMap=false;
+    if(useCustomMap&&cmSelectedPath[0]&&!ce_validate_selected(gameMode==GAME_MODE_FIREFIGHT)){memset(couchReady,0,sizeof(couchReady));return;}
     ResetGame(); gameState=GAME_STATE_PLAYING; couchLobby=false;
 }
 static void ff_draw_hud(int i,int w,int h) {
@@ -275,41 +276,43 @@ static bool couch_frame(void) {
             useCustomMap=false;memset(couchReady,0,sizeof(couchReady));all=false;
         }
         if(gameMode==GAME_MODE_DEATHMATCH && (IsKeyPressed(KEY_TAB)||couch_menu_button(GAMEPAD_BUTTON_RIGHT_FACE_UP))) {
-            useCustomMap=!useCustomMap;memset(couchReady,0,sizeof(couchReady));all=false;
+            ce_library(true);memset(couchReady,0,sizeof(couchReady));all=false;
         }
         if(change && gameMode==GAME_MODE_FIREFIGHT && !firefightPractice) {
             firefightEndless=!firefightEndless;firefightFoundry=true;memset(couchReady,0,sizeof(couchReady));all=false;
         }
-        if(gameMode==GAME_MODE_FIREFIGHT && firefightEndless && (IsKeyPressed(KEY_TAB)||couch_menu_button(GAMEPAD_BUTTON_RIGHT_FACE_UP))) {firefightFoundry=!firefightFoundry;memset(couchReady,0,sizeof(couchReady));all=false;}
         if(gameMode==GAME_MODE_FIREFIGHT && !firefightPractice && (IsKeyPressed(KEY_C)||couch_menu_button(GAMEPAD_BUTTON_RIGHT_FACE_LEFT))){firefightCheckpoints=!firefightCheckpoints;memset(couchReady,0,sizeof(couchReady));all=false;}
+        if(gameMode==GAME_MODE_FIREFIGHT && !firefightPractice && (IsKeyPressed(KEY_TAB)||couch_menu_button(GAMEPAD_BUTTON_RIGHT_FACE_UP))){ce_library(true);memset(couchReady,0,sizeof(couchReady));all=false;}
         if(gameMode==GAME_MODE_FIREFIGHT && !firefightPractice && IsKeyPressed(KEY_H)){
             netRequestedRole=NET_ROLE_HOST;netRequestedCreative=false;netRequestedLocalPlayers=count;
             if(net_transport_host(&netTransport,netRequestedPort)){net_set_host_local_players(count);netLobbyStarted=false;couchLobby=false;gameState=GAME_STATE_LOBBY;return true;}
         }
         BeginDrawing();couch_title(firefightPractice?"LEARN COMBAT":gameMode==GAME_MODE_FIREFIGHT?"FIREFIGHT LOBBY":"LOCAL VERSUS LOBBY");
         couch_row(0,firefightPractice?"Harvest > expose > melee > throw":gameMode==GAME_MODE_FIREFIGHT?(firefightEndless?"Endless Survival (left/right changes mode)":"Twelve-wave Firefight (left/right changes mode)"):"Classic deathmatch",false);
-        if(gameMode==GAME_MODE_FIREFIGHT)couch_row(1,firefightFoundry?"Arena: Foundry Holdout":"Arena: current world / custom map",false);
+        if(gameMode==GAME_MODE_FIREFIGHT)couch_row(1,useCustomMap&&cmRuntime?TextFormat("Arena: %s",cmRuntime->name):"Arena: Foundry Holdout",false);
         else {
             const char *names[]={"Greek Temple","Megalith","Sun-Henge","Forerunner","Citadel","Test Arena","Blood Arena","Procedural","Crosscut"};
-            couch_row(1,useCustomMap?TextFormat("Custom map slot %d",creativeMapSlot+1):TextFormat("Arena: %s | Left/right: change",names[currentWorldType]),false);
+            couch_row(1,useCustomMap?TextFormat("Map: %s",cmRuntime?cmRuntime->name:"Choose map"):TextFormat("Arena: %s | Left/right: change",names[currentWorldType]),false);
         }
         if(gameMode==GAME_MODE_FIREFIGHT && !firefightPractice)couch_row(2,TextFormat("Checkpoints: %s | X / C: toggle",firefightCheckpoints?"ON (retry current wave)":"OFF"),false);
         for(int i=0;i<count;i++) couch_row(i+2+(gameMode==GAME_MODE_FIREFIGHT&&!firefightPractice),TextFormat("P%d: %s %d | %s",i+1,multiplayerPlayerInput[i]==INPUT_TYPE_GAMEPAD?"Controller":"Keyboard",multiplayerPlayerInput[i]==INPUT_TYPE_GAMEPAD?seat_device(i)+1:i+1,couchReady[i]?"READY":"Not ready"),couchReady[i]);
         DrawText("Start: join | Bottom face / Enter / RShift: ready | K: add keyboard P2",48,465,18,LIGHTGRAY);
-        DrawText(gameMode==GAME_MODE_DEATHMATCH?"Back: leave | Top face / Tab: use custom map":"Back: leave | Y / Tab: endless arena | H: host LAN",48,492,18,LIGHTGRAY);EndDrawing();
+        if(useCustomMap&&cmError[0])DrawText(cmError,48,525,16,ORANGE);
+        DrawText(gameMode==GAME_MODE_DEATHMATCH?"Back: leave | Top face / Tab: use custom map":"Back: leave | Y / Tab: map library | H: host LAN",48,492,18,LIGHTGRAY);EndDrawing();
         if(back) {couchLobby=false;memset(couchReady,0,sizeof(couchReady));}
         else if(all) couch_launch();
         return true;
     }
-    couchSelection=(couchSelection+couch_axis(false)+6)%6;
+    couchSelection=(couchSelection+couch_axis(false)+7)%7;
     BeginDrawing();couch_title("CONSTRUCTOR BRAWLER");clarity_menu();
-    const char *items[]={"Firefight","Local versus","Learn combat","Controller settings","World builder / LAN","Enemy Lab"};
-    for(int i=0;i<6;i++) couch_row(i,items[i],couchSelection==i);
-    DrawText(couch_menu_device()>=0?"D-pad / stick: navigate":"Arrow keys: navigate",48,425,18,LIGHTGRAY);DrawText(couch_menu_device()>=0?"Bottom face: confirm":"Enter: confirm",48,450,18,LIGHTGRAY);EndDrawing();
+    const char *items[]={"Firefight","Local versus","Learn combat","Controller settings","LAN / advanced","Enemy Lab","Creative editor"};
+    for(int i=0;i<7;i++) couch_row(i,items[i],couchSelection==i);
+    DrawText(couch_menu_device()>=0?"D-pad / stick: navigate":"Arrow keys: navigate",48,455,18,LIGHTGRAY);DrawText(couch_menu_device()>=0?"Bottom face: confirm":"Enter: confirm",48,480,18,LIGHTGRAY);EndDrawing();
     if(confirm) {
         if(couchSelection==0||couchSelection==1||couchSelection==2) {gameMode=couchSelection==1?GAME_MODE_DEATHMATCH:GAME_MODE_FIREFIGHT;couch_begin_lobby(couchSelection==2);}
         else if(couchSelection==3)couchSettings=true;
         else if(couchSelection==5)enemy_lab_start(ENEMY_TYPE_SCRAPPER);
+        else if(couchSelection==6){ResetCreative();gameState=GAME_STATE_CREATIVE;}
         else {couchAdvanced=true;firefightPractice=false;gameMode=GAME_MODE_DEATHMATCH;activePlayers=clamp_active_players(multiplayerActivePlayers);}
     }
     return true;

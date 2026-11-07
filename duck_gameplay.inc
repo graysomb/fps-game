@@ -1,6 +1,7 @@
 /* Ambient actors never enter combatant, voxel, pickup, score, or AI pools. */
 static bool ducks_enabled(void) {
-    return !useCustomMap && !creativeModeActive && !enemyLab && !firefightPractice &&
+    if(useCustomMap)return !creativeModeActive && !enemyLab && (netTransport.role==NET_ROLE_CLIENT || (cmRuntime&&cmRuntime->duckCount>0));
+    return !creativeModeActive && !enemyLab && !firefightPractice &&
         ((gameMode==GAME_MODE_FIREFIGHT && firefightFoundry) ||
          (gameMode!=GAME_MODE_FIREFIGHT && currentWorldType==WORLD_TYPE_CROSSCUT));
 }
@@ -27,10 +28,12 @@ static Vector3 duck_route(MapDuck *d,float phase) {
 static void ducks_initialize(void) {
     if(ducksInitialized || !ducks_enabled())return;
     for(int n=0;n<MAP_DUCKS;n++) {
+        if(useCustomMap&&cmRuntime&&n>=cmRuntime->duckCount){mapDucks[n].respawn=1e9f;continue;}
         // Four distinct open stretches between repeated arenas, away from the
         // centerline machinery. Swim across seams; keep bounded maps inside walls.
         float edge=worldFloorHalfSize-(worldPeriodic?1.0f:DUCK_ROUTE_RADIUS+2.0f);
         Vector3 home=crosscut_rotate((Vector3){edge,0,worldFloorHalfSize*.4f},n);
+        if(useCustomMap&&cmRuntime)home=cmRuntime->ducks[n];
         MapDuck *d=&mapDucks[n];*d=(MapDuck){.home=home,.phase=n*PI*.5f};
         d->pos=duck_route(d,d->phase);d->yaw=180-d->phase*RAD2DEG;
         d->alive=duck_clear(d->pos,true);

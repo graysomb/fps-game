@@ -185,7 +185,7 @@ static void ff_wave_complete(void) {
         return;
     }
     if(!fp_active())for(int i=0;i<firefightHumans;i++)grenadeInventory[i]=grenadeInventory[i]<1?1:grenadeInventory[i];
-    if(firefightFoundry && !firefightPractice) enemy_stock_scrap(false);
+    if(firefightFoundry && !firefightPractice && !useCustomMap) enemy_stock_scrap(false);
     if(firefightFoundry && !firefightPractice && !fp_active()) {
         for(int p=0;p<MAX_PICKUPS;p++)if(pickups[p].type==PICKUP_GOLD_TETHER || pickups[p].type==PICKUP_DYNAMIC_SHOT || pickups[p].type==PICKUP_GRENADE) {
             pickups[p].active=true;pickups[p].respawnTimer=0;
@@ -208,6 +208,12 @@ static void ff_wave_complete(void) {
 }
 
 static bool ff_spawn_position(int slot, Vector3 *out) {
+    if(useCustomMap&&cmRuntime){
+        bool present[32]={0};int groups[32],count=0;
+        for(int n=0;n<cmRuntime->spawnCount;n++)if(cmRuntime->spawns[n].kind==CM_ENTRANCE)present[cmRuntime->spawns[n].group]=true;
+        for(int n=0;n<32;n++)if(present[n])groups[count++]=n;
+        for(int attempt=0;attempt<count;attempt++){int group=groups[(ffEntrance+attempt)%count];for(int n=0;n<cmRuntime->spawnCount;n++){CmSpawn *s=&cmRuntime->spawns[(n+ffSpawnOrdinal)%cmRuntime->spawnCount];if(s->kind!=CM_ENTRANCE||s->group!=group)continue;Vector3 p=nudge_spawn_clear(s->pos,spawn_clear_half(slot),4,slot);if(spawn_position_clear_ex(p,spawn_clear_half(slot),4,slot)){*out=p;return true;}}}return false;
+    }
     if(firefightPractice) { *out=(Vector3){0,BASE_EYE_HEIGHT+2,-1}; return true; }
     if(!firefightFoundry && !firefightPractice) { *out=pick_player_spawn(slot); return spawn_position_clear_ex(*out,spawn_clear_half(slot),4,slot); }
     for(int entrance=0;entrance<2;entrance++) {
@@ -315,8 +321,9 @@ static void update_firefight_logic(float dt) {
                 Vector3 candidate={(ffEntrance?1.f:-1.f)*(edge-(n/5)*4),.04f,(float)((n%5)-2)*3};
                 if(go_move_clear(candidate)){origin=candidate;clear=true;break;}
             }
+            float yaw=ffEntrance?90:-90;Vector3 authored;if(cm_spawn(CM_BOSS,0,&authored,&yaw)){origin=authored;clear=go_move_clear(origin);}
             if(!clear)break;
-            if(!golem_physics_start_at(origin,ffEntrance?90:-90))break;
+            if(!golem_physics_start_at(origin,yaw))break;
             init_firefight_bot_entity(MAX_PLAYERS,ENEMY_TYPE_STANDARD,INPUT_TYPE_BOT_MEDIUM);
             go_combat_start();clarity_spawn(MAX_PLAYERS);
             ffRemaining[type]--;firefightEnemiesSpawned++;ffSpawnOrdinal++;living++;spawned++;
@@ -334,6 +341,6 @@ static void update_firefight_logic(float dt) {
         fp_spawn(slot,type);
         ffRemaining[type]--; firefightEnemiesSpawned++; ffSpawnOrdinal++; living++; spawned++;
     }
-    if(spawned) ffEntrance=1-ffEntrance;
+    if(spawned) ffEntrance=useCustomMap?(ffEntrance+1)%32:1-ffEntrance;
     ffSpawnTimer=firefightWave==1?0.5f:firefightWave==2?4:2;
 }
