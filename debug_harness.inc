@@ -352,9 +352,11 @@ static bool debug_setup_swarmer_pack(DebugRunState *state);
 static bool debug_setup_goliath_throw_cover(DebugRunState *state);
 static bool debug_setup_goliath_wall_stuck(DebugRunState *state);
 static bool debug_setup_goliath_idle(DebugRunState *state);
+static bool debug_setup_goliath_armor_shots(DebugRunState *state);
 static bool debug_setup_standard_look(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
+    { "goliath-armor-shots", "Default/glob shots versus intact armor at multiple angles and frame rates", debug_setup_goliath_armor_shots, 60, 60 },
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall, 60, 60 },
     { "creative-reset-cache", "Creative reset invalidates cached static render and collision surfaces", debug_setup_creative_reset_cache, 60, 60 },
     { "activation-floating", "Static cluster activated while unsupported", debug_setup_activation_floating, 60, 60 },
@@ -3767,8 +3769,11 @@ static bool debug_setup_standard_look(DebugRunState *state)
     return true;
 }
 
+ #include "debug_goliath_armor.inc"
+
 static void debug_physics_step(DebugRunState *state)
 {
+    if(strcmp(debugRunConfig.scenario,"goliath-armor-shots")==0)return;
     float dt = PBD_MAX_STEP_DT;
     if (state && state->melee_close_test && !state->melee_close_swung) {
         perform_melee(0);
@@ -3983,6 +3988,7 @@ static uint64_t debug_tagged_static_identity_signature(int tag)
 
 static void debug_validate_step(DebugRunState *state, int step)
 {
+    if(strcmp(debugRunConfig.scenario,"goliath-armor-shots")==0)return;
     debug_validate_all_sim_particles(state, step);
     if (state->falling_cube_player_test) {
         state->falling_cube_min_matter = fminf(state->falling_cube_min_matter,
@@ -4527,6 +4533,7 @@ static void debug_validate_step(DebugRunState *state, int step)
 
 static void debug_finalize_validation(DebugRunState *state)
 {
+    if(strcmp(debugRunConfig.scenario,"goliath-armor-shots")==0)return;
     if (physics_backend_is_gpu(physicsBackend.requested) &&
         physicsBackend.active != physicsBackend.requested) {
         debug_add_failure(state, "forced GPU run fell back to %s: %s",

@@ -16354,15 +16354,59 @@ static bool go_body_ray(Ray ray,float reach,int ignore,const uint64_t *ignored,i
     }return found;
 }
 
+// Attached armor is positioned between grid cells. Test its actual cube bounds;
+// the center-cell hash alone leaves openings through visibly solid plates.
+static bool goliath_armor_ray(Ray ray,float reach,int ignore,int ignore_owner,
+                              const uint64_t *ignored,int count,VoxelHit *out) {
+    float nearest=reach,period=worldFloorHalfSize*2;
+    int images=worldPeriodic?(int)ceilf(reach/period):0;bool found=false;
+    for(int p=0;p<activePlayers;p++) {
+        if(p==ignore_owner || players[p].enemyType!=ENEMY_TYPE_GOLIATH)continue;
+        GoliathState *gs=&goliathStates[p];
+        for(int n=0;n<gs->count;n++) {
+            uint64_t identity=gs->voxels[n].voxelIdentity;bool skip=false;
+            for(int k=0;k<count;k++)if(ignored[k]==identity){skip=true;break;}
+            if(skip)continue;
+            int id=enemy_voxel(identity);if(id<0 || id==ignore)continue;
+            Voxel *v=&voxels[id];
+            if(!v->simulate || !v->vgs_active || v->isBullet || v->type!=0)continue;
+            if(tetherCcdTracing && tetherCcdIgnore[id]==tetherCcdStamp)continue;
+            Vector3 center=world_image(v->pos,ray.position);
+            // Match the default projectile's expanded actor collision volume.
+            // A tiny skin keeps grazing rays stable across frame-step rounding.
+            float radius=ignore>=0 && ignore<voxel_count && voxels[ignore].isBullet?VOXEL_SIZE*.5f:0;
+            float h=v->rest_edge*.5f+radius+.001f;Vector3 half={h,h,h};
+            for(int x=-images;x<=images;x++)for(int z=-images;z<=images;z++) {
+                Vector3 at=v_add(center,(Vector3){x*period,0,z*period});
+                BoundingBox bounds={v_sub(at,half),v_add(at,half)};
+                RayCollision hit=GetRayCollisionBox(ray,bounds);
+                bool inside=ray.position.x>=bounds.min.x && ray.position.x<=bounds.max.x &&
+                    ray.position.y>=bounds.min.y && ray.position.y<=bounds.max.y &&
+                    ray.position.z>=bounds.min.z && ray.position.z<=bounds.max.z;
+                if(inside){hit.hit=true;hit.distance=0;hit.normal=v_mul(ray.direction,-1);}
+                if(hit.hit && hit.distance>=0 && hit.distance<=nearest) {
+                    nearest=hit.distance;*out=(VoxelHit){id,v->gx,v->gy,v->gz,nearest,hit.normal};found=true;
+                }
+            }
+        }
+    }
+    return found;
+}
+
 static bool first_voxel_hit_filtered_owner(Ray ray, float t_max, int ignore_id,
                                         bool static_only, int ignore_goliath_owner,
                                         VoxelHit *out_hit,const uint64_t *ignored,int ignore_count,int shield_owner)
 {
-    VoxelHit goHit;bool hitGolem=!static_only && go_body_ray(ray,t_max,ignore_id,ignored,ignore_count,&goHit);
-    if(hitGolem)t_max=fminf(t_max,goHit.t);
     float direction_length = v_length(ray.direction);
     if (direction_length <= 1e-8f || t_max < 0.0f) return false;
     Vector3 dir = v_mul(ray.direction, 1.0f / direction_length);
+    ray.direction=dir;
+    VoxelHit goHit;bool hitGolem=!static_only && go_body_ray(ray,t_max,ignore_id,ignored,ignore_count,&goHit);
+    if(hitGolem)t_max=fminf(t_max,goHit.t);
+    VoxelHit armorHit;
+    if(!static_only && goliath_armor_ray(ray,t_max,ignore_id,ignore_goliath_owner,ignored,ignore_count,&armorHit)){
+        goHit=armorHit;hitGolem=true;t_max=armorHit.t;
+    }
 
     int x = (int)floorf(ray.position.x / VOXEL_SIZE);
     int y = (int)floorf(ray.position.y / VOXEL_SIZE);
@@ -16381,6 +16425,11 @@ static bool first_voxel_hit_filtered_owner(Ray ray, float t_max, int ignore_id,
 
     while (entry_t <= t_max + 1e-6f) {
         int id = static_only ? table_get_static_only(x, y, z) : table_get(x, y, z);
+        // These plates were tested precisely above, including their periodic images.
+        // Fall back to terrain in this cell so armor cannot hide a static surface.
+        if(!static_only && id>=0 && voxels[id].owner>=0 && voxels[id].owner<activePlayers &&
+           players[voxels[id].owner].enemyType==ENEMY_TYPE_GOLIATH &&
+           get_goliath_owner_of_voxel(id)==voxels[id].owner)id=table_get_static_only(x,y,z);
         if(id>=0 && shield_owner>=0 && rifle_friendly_shield(shield_owner,id))id=table_get_static_only(x,y,z);
         if (id >= 0 && ignore_goliath_owner >= 0 &&
             get_goliath_owner_of_voxel(id) == ignore_goliath_owner)
