@@ -4,23 +4,7 @@ static bool couchReady[MAX_PLAYERS];
 static int couchSelection=0, couchSettingSeat=0, couchSettingRow=0;
 static float couchNavDelay=0;
 
-static void couch_load_settings(void) {
-    FILE *f=fopen("couch_settings.cfg","r");
-    if(!f) return;
-    for(int i=0;i<MAX_PLAYERS;i++) {
-        float sensitivity,deadzone; int invert;
-        if(fscanf(f,"%f %f %d",&sensitivity,&deadzone,&invert)!=3) break;
-        if(isfinite(sensitivity)&&isfinite(deadzone)&&sensitivity>=.5f&&sensitivity<=2&&deadzone>=.05f&&deadzone<=.3f&&(invert==0||invert==1)) {
-            localSeats[i].sensitivity=sensitivity; localSeats[i].deadzone=deadzone; localSeats[i].invert=invert!=0;
-        }
-    }
-    fclose(f);
-}
-static void couch_save_settings(void) {
-    FILE *f=fopen("couch_settings.cfg","w"); if(!f) return;
-    for(int i=0;i<MAX_PLAYERS;i++) fprintf(f,"%.3f %.3f %d\n",localSeats[i].sensitivity,localSeats[i].deadzone,localSeats[i].invert);
-    fclose(f);
-}
+static void couch_load_settings(void) {ct_load();}
 static bool couch_button(int seat, int button) {
     return seat>=0 && seat<MAX_PLAYERS && multiplayerPlayerInput[seat]==INPUT_TYPE_GAMEPAD &&
         IsGamepadAvailable(seat_device(seat)) && IsGamepadButtonPressed(seat_device(seat),button);
@@ -83,7 +67,7 @@ static void ff_draw_hud(int i,int w,int h) {
         for(int n=0;n<firefightHumans;n++)if(combatantLife[n]!=LIFE_UNUSED){total++;ready+=prepReady[n];}
         int seat=netTransport.role==NET_ROLE_CLIENT?net_local_index_for_slot(i):i;
         if(seat<0)seat=i;
-        const char *key=playerInput[seat]==INPUT_TYPE_GAMEPAD?"A":seat==0?"Space":"Right Shift";
+        const char *key=ct_hint(i,CT_READY);
         const char *line=TextFormat("%s: %s | Skip loot (%d/%d ready)",key,prepReady[i]?"Cancel":"Ready",ready,total);
         int width=MeasureText(line,fs),x=(w-width)/2;
         DrawRectangle(x-5,62,width+10,fs+4,Fade(BLACK,.65f));DrawText(line,x,64,fs,prepReady[i]?GOLD:RAYWHITE);
@@ -96,7 +80,7 @@ static void ff_draw_hud(int i,int w,int h) {
         const char *lines[3];
         lines[0]=TextFormat("%s %s",ff_upgrades_maxed()?"All upgrades maxed":ff_upgrade_label(prepVotes[i]<0?0:prepVotes[i]),prepReady[i]?"[READY]":"");
         lines[1]=TextFormat("Next: %s (%d enemies)",next->name,total);
-        lines[2]=prepMenuOpen[i]?(pad?"D-pad vote | A ready | Y build":"Look vote | Jump ready | V/N build"):(pad?"Y: vote menu":"V/N: vote menu");
+        lines[2]=prepMenuOpen[i]?TextFormat("%s / %s vote | %s ready | %s build",ct_hint(i,CT_PREP_LEFT),ct_hint(i,CT_PREP_RIGHT),ct_hint(i,CT_READY),ct_hint(i,CT_PREP_MENU)):TextFormat("%s: vote menu",ct_hint(i,CT_PREP_MENU));
         int rows=prepMenuOpen[i]?3:1;
         for(int n=0;n<rows;n++){const char *line=rows==1?lines[2]:lines[n];int width=MeasureText(line,fs),x=(w-width)/2;
             DrawRectangle(x-5,y+n*step-2,width+10,step,Fade(BLACK,.65f));DrawText(line,x,y+n*step,fs,n==0?GOLD:RAYWHITE);}
@@ -122,7 +106,7 @@ static void ff_draw_hud(int i,int w,int h) {
         text=steps[practiceStep<5?practiceStep:4];
     } else {
         for(int j=0;j<firefightHumans;j++) if(combatantLife[j]==LIFE_DOWNED) {
-            text=TextFormat("P%d: Hold %s to revive",j+1,playerInput[i]==INPUT_TYPE_GAMEPAD?"X":i==0?"X":","); break;
+            text=TextFormat("P%d: %s to revive",j+1,ct_hint(i,CT_REVIVE)); break;
         }
         if(!text && players[i].matter<1) text="No Matter: melee blocks to harvest";
         if(!text) {
@@ -169,6 +153,7 @@ static void ff_draw_hud(int i,int w,int h) {
 }
 
 static bool couch_frame(void) {
+    if(ctMenuOpen&&netTransport.role==NET_ROLE_OFFLINE)return ct_menu_frame();
     if(netTransport.role!=NET_ROLE_OFFLINE){
         if(gameMode!=GAME_MODE_FIREFIGHT||gameState!=GAME_STATE_GAMEOVER)return false;
         BeginDrawing();combat_ui_results();DrawText(netTransport.role==NET_ROLE_HOST?"Enter / A: new run   Esc / B: leave":"Waiting for host   Esc / B: leave",48,GetScreenHeight()-45,22,GOLD);EndDrawing();
@@ -190,24 +175,9 @@ static bool couch_frame(void) {
         return false;
     }
     if(gameState!=GAME_STATE_MENU && gameState!=GAME_STATE_PAUSED && gameState!=GAME_STATE_GAMEOVER) return false;
-    if(couchSettings) {
-        couchSettingRow=(couchSettingRow+couch_axis(false)+4)%4;
-        int change=couch_axis(true); LocalPlayerSeat *seat=&localSeats[couchSettingSeat];
-        if(couchSettingRow==0) couchSettingSeat=(couchSettingSeat+change+4)%4;
-        if(couchSettingRow==1) seat->sensitivity=clampf(seat->sensitivity+.1f*change,.5f,2);
-        if(couchSettingRow==2) seat->deadzone=clampf(seat->deadzone+.01f*change,.05f,.3f);
-        if(couchSettingRow==3 && (change||confirm)) seat->invert=!seat->invert;
-        BeginDrawing();couch_title("CONTROLLER SETTINGS");
-        couch_row(0,TextFormat("Player %d",couchSettingSeat+1),couchSettingRow==0);
-        seat=&localSeats[couchSettingSeat];
-        couch_row(1,TextFormat("Look sensitivity: %.1fx",seat->sensitivity),couchSettingRow==1);
-        couch_row(2,TextFormat("Deadzone: %.2f",seat->deadzone),couchSettingRow==2);
-        couch_row(3,TextFormat("Invert Y: %s",seat->invert?"Yes":"No"),couchSettingRow==3);
-        DrawText("Left/right: change | Back: save",56,350,22,LIGHTGRAY);EndDrawing();
-        if(back) {couch_save_settings();couchSettings=false;}
-        return true;
-    }
+    if(couchSettings) {ct_open();return ct_menu_frame();}
     if(gameState==GAME_STATE_PAUSED) {
+        bool justPaused=ctPauseOpened;ctPauseOpened=false;
         int missing=-1;
         for(int i=0;i<multiplayerActivePlayers;i++) if(multiplayerPlayerInput[i]==INPUT_TYPE_GAMEPAD&&!IsGamepadAvailable(seat_device(i))) {missing=i;break;}
         if(missing>=0) for(int d=0;d<4;d++) if(IsGamepadAvailable(d)&&IsGamepadButtonPressed(d,GAMEPAD_BUTTON_MIDDLE_RIGHT)) {
@@ -216,10 +186,11 @@ static bool couch_frame(void) {
         }
         couchSelection=(couchSelection+couch_axis(false)+3)%3;
         BeginDrawing();couch_title("PAUSED");
-        couch_row(0,"Resume",couchSelection==0);couch_row(1,"Controller settings",couchSelection==1);couch_row(2,"Return to lobby",couchSelection==2);
+        couch_row(0,"Resume",couchSelection==0);couch_row(1,"Controls & Settings",couchSelection==1);couch_row(2,"Return to lobby",couchSelection==2);
         if(missing>=0) DrawText(TextFormat("P%d disconnected. Reconnect, or press Start on a free controller to reassign.",missing+1),48,310,20,GOLD);
         EndDrawing();
-        if(confirm || pausePressed) {
+        if(!justPaused && missing<0 && (back||couch_menu_button(GAMEPAD_BUTTON_MIDDLE_RIGHT)))gameState=GAME_STATE_PLAYING;
+        if(!justPaused && (confirm || pausePressed)) {
             if(couchSelection==0&&missing<0) gameState=GAME_STATE_PLAYING;
             if(couchSelection==1) couchSettings=true;
             if(couchSelection==2) {if(enemyLab) enemy_lab_exit();else {gameState=GAME_STATE_MENU;couchLobby=true;memset(couchReady,0,sizeof(couchReady));}}
@@ -305,7 +276,7 @@ static bool couch_frame(void) {
     }
     couchSelection=(couchSelection+couch_axis(false)+7)%7;
     BeginDrawing();couch_title("CONSTRUCTOR BRAWLER");clarity_menu();
-    const char *items[]={"Firefight","Local versus","Learn combat","Controller settings","LAN / advanced","Enemy Lab","Creative editor"};
+    const char *items[]={"Firefight","Local versus","Learn combat","Controls & Settings","LAN / advanced","Enemy Lab","Creative editor"};
     for(int i=0;i<7;i++) couch_row(i,items[i],couchSelection==i);
     DrawText(couch_menu_device()>=0?"D-pad / stick: navigate":"Arrow keys: navigate",48,455,18,LIGHTGRAY);DrawText(couch_menu_device()>=0?"Bottom face: confirm":"Enter: confirm",48,480,18,LIGHTGRAY);EndDrawing();
     if(confirm) {

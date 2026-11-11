@@ -63,9 +63,7 @@ static bool ff_revive_held(int i) {
     extern bool ffTestReviveHeld[4];
     return ffTestReviveHeld[i];
 #else
-    return playerInput[i]==INPUT_TYPE_GAMEPAD ?
-        aimStates[i].revive :
-        IsKeyDown(i==0?KEY_X:KEY_COMMA);
+    return ct_down(ct_seat(i),CT_REVIVE) || aimStates[i].revive;
 #endif
 }
 
@@ -79,8 +77,7 @@ static void ff_update_coop(float dt) {
         }
         if(combatantLife[i]==LIFE_DOWNED) {
             float look=0;
-            if(playerInput[i]==INPUT_TYPE_GAMEPAD) look=-GetGamepadAxisMovement(seat_device(i),GAMEPAD_AXIS_RIGHT_X)*localSeats[i].sensitivity;
-            else look=(IsKeyDown(i==0?KEY_F:KEY_LEFT)?1.0f:0)-(IsKeyDown(i==0?KEY_H:KEY_RIGHT)?1.0f:0);
+            int seat=ct_seat(i);if(seat>=0)look=-ct_look_axes(seat).x;
             players[i].death_yaw+=look*90*dt;
             int rescuer=-1;
             for(int j=0;j<firefightHumans;j++) {
@@ -250,7 +247,7 @@ static void update_firefight_logic(float dt) {
             if(combatantLife[i]==LIFE_UNUSED)continue;
             if(netTransport.role!=NET_ROLE_HOST || net_player_is_local(i)) {
                 bool pad=playerInput[i]==INPUT_TYPE_GAMEPAD;
-                if(!debugConsoleOpen && (pad?IsGamepadButtonPressed(seat_device(i),GAMEPAD_BUTTON_RIGHT_FACE_DOWN):IsKeyPressed(i==0?KEY_SPACE:KEY_RIGHT_SHIFT)))prepReady[i]=!prepReady[i];
+                if(!debugConsoleOpen && ct_actor_pressed(i,CT_READY))prepReady[i]=!prepReady[i];
             }
             ready &= prepReady[i];
         }
@@ -269,12 +266,12 @@ static void update_firefight_logic(float dt) {
             if(combatantLife[i]==LIFE_UNUSED)continue;
             if(netTransport.role==NET_ROLE_HOST && !net_player_is_local(i)){ready &= prepReady[i];continue;}
             bool pad=playerInput[i]==INPUT_TYPE_GAMEPAD; int d=seat_device(i);
-            if(pad?IsGamepadButtonPressed(d,GAMEPAD_BUTTON_RIGHT_FACE_UP):IsKeyPressed(i==0?KEY_V:KEY_N)) prepMenuOpen[i]=!prepMenuOpen[i];
+            if(ct_actor_pressed(i,CT_PREP_MENU)) prepMenuOpen[i]=!prepMenuOpen[i];
             if(!prepMenuOpen[i]) {ready &= prepReady[i];continue;}
-            bool left=pad?IsGamepadButtonPressed(d,GAMEPAD_BUTTON_LEFT_FACE_LEFT):IsKeyPressed(i==0?KEY_F:KEY_LEFT);
-            bool right=pad?IsGamepadButtonPressed(d,GAMEPAD_BUTTON_LEFT_FACE_RIGHT):IsKeyPressed(i==0?KEY_H:KEY_RIGHT);
+            bool left=ct_actor_pressed(i,CT_PREP_LEFT);
+            bool right=ct_actor_pressed(i,CT_PREP_RIGHT);
             if((left || right) && !ff_upgrades_maxed()) { prepVotes[i]=ff_upgrade_choice(prepVotes[i],left?-1:1); prepReady[i]=false; }
-            if(pad?IsGamepadButtonPressed(d,GAMEPAD_BUTTON_RIGHT_FACE_DOWN):IsKeyPressed(i==0?KEY_SPACE:KEY_RIGHT_SHIFT)) prepReady[i]=!prepReady[i];
+            if(ct_actor_pressed(i,CT_READY)) prepReady[i]=!prepReady[i];
             ready &= prepReady[i];
         }
         if(firefightIntermissionTimer<=0 || (ready && firefightIntermissionTimer<=FF_PREP_SECONDS-FF_PREP_MIN_SECONDS)) {

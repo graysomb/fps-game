@@ -234,7 +234,7 @@ static void fp_hud(int i,int w,int h){
  }
  if(fpRestartTimer>0){const char *text=TextFormat("Checkpoint: restarting wave %d in %.0f",firefightWave,ceilf(fpRestartTimer));int size=w<700?17:28;DrawText(text,(w-MeasureText(text,size))/2,h/2,size,GOLD);}
  int n=fp_near(i,false);if(n>=0 && eq_pickup_gun(fpItems[n].type)>=0){Equipment *e=&equipment[i];int gun=eq_pickup_gun(fpItems[n].type);if(e->gun[0]!=gun&&e->gun[1]!=gun&&e->gun[0]!=EQ_EMPTY&&e->gun[1]!=EQ_EMPTY){
-  const char *key=playerInput[i]==INPUT_TYPE_GAMEPAD?"Hold X":i==0?"B":"Y";int size=w<700?12:18;const char *text=TextFormat("%s: replace with %s",key,pickup_type_label(fpItems[n].type));DrawText(text,(w-MeasureText(text,size))/2,h/2+55,size,WHITE);
+  const char *key=ct_hint(i,CT_EQUIP);int size=w<700?12:18;const char *text=TextFormat("%s: replace with %s",key,pickup_type_label(fpItems[n].type));DrawText(text,(w-MeasureText(text,size))/2,h/2+55,size,WHITE);
  }}
 }
 static void fp_radar(int i,int cx,int cy,int radius,float range){

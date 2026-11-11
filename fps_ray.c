@@ -816,6 +816,7 @@ static unsigned teamUpgradeLevels[3];
 static const unsigned teamUpgradeCaps[3]={9,8,8};
 static float ff_build_cost(int i);
 static float ff_throw_multiplier(int i);
+#include "controls.h"
 typedef struct { int device; float sensitivity, deadzone; bool invert; } LocalPlayerSeat;
 static LocalPlayerSeat localSeats[MAX_PLAYERS] = {{0,1,.15f,false},{1,1,.15f,false},{2,1,.15f,false},{3,1,.15f,false}};
 static int seat_device(int i) { return i>=0 && i<MAX_PLAYERS ? localSeats[i].device : -1; }
@@ -15007,7 +15008,7 @@ static void apply_aim_assist(int idx, float dt, float input_strength) {
     float assist_kd = gameMode == GAME_MODE_FIREFIGHT ? 1.0f : p->kd_ratio;
     float kd_norm = clampf((assist_kd - 0.5f) / 3.0f, 0.0f, 1.0f);
     float kd_mult = mixf(AIM_ASSIST_RATE_MAX_MULT, AIM_ASSIST_RATE_MIN_MULT, kd_norm);
-    float max_step = AIM_ASSIST_TURN_RATE * kd_mult * dt * angle_factor * input_factor;
+    float max_step = AIM_ASSIST_TURN_RATE * kd_mult * dt * angle_factor * input_factor * ct_assist(idx);
     if (max_step <= 0.0f) {
         return;
     }
@@ -18602,165 +18603,11 @@ static void draw_players(void) {
 }
 
 static void HandleKeyboardInput(int i, float dt) {
-    if (!keyboard_player_index(i)) {
-        return;
-    }
-    Player *p = &players[i];
-    if(!mouse_owns(i)) {
-    // turn
-    float yaw_accel = 0.0f;
-    if ((i==0 && IsKeyDown(KEY_F)) || (i==1 && IsKeyDown(KEY_LEFT)))  yaw_accel += (TURN_ACCELERATION*aim_scale(i));
-    if ((i==0 && IsKeyDown(KEY_H)) || (i==1 && IsKeyDown(KEY_RIGHT))) yaw_accel -= (TURN_ACCELERATION*aim_scale(i));
-
-    if (yaw_accel != 0.0f) {
-        p->yaw_vel += yaw_accel * dt;
-    } else {
-        // friction
-        if (p->yaw_vel > 0) {
-            p->yaw_vel -= TURN_FRICTION * dt;
-            if (p->yaw_vel < 0) p->yaw_vel = 0;
-        } else if (p->yaw_vel < 0) {
-            p->yaw_vel += TURN_FRICTION * dt;
-            if (p->yaw_vel > 0) p->yaw_vel = 0;
-        }
-    }
-    p->yaw_vel = clampf(p->yaw_vel, -(TURN_SPEED*aim_scale(i)), (TURN_SPEED*aim_scale(i)));
-    p->yaw += p->yaw_vel * dt;
-
-    // look up/down
-    float pitch_accel = 0.0f;
-    if ((i==0 && IsKeyDown(KEY_T)) || (i==1 && IsKeyDown(KEY_UP)))   pitch_accel += (TURN_ACCELERATION*aim_scale(i));
-    if ((i==0 && IsKeyDown(KEY_G)) || (i==1 && IsKeyDown(KEY_DOWN))) pitch_accel -= (TURN_ACCELERATION*aim_scale(i));
-
-    if (pitch_accel != 0.0f) {
-        p->pitch_vel += pitch_accel * dt;
-    } else {
-        // friction
-        if (p->pitch_vel > 0) {
-            p->pitch_vel -= TURN_FRICTION * dt;
-            if (p->pitch_vel < 0) p->pitch_vel = 0;
-        } else if (p->pitch_vel < 0) {
-            p->pitch_vel += TURN_FRICTION * dt;
-            if (p->pitch_vel > 0) p->pitch_vel = 0;
-        }
-    }
-    p->pitch_vel = clampf(p->pitch_vel, -(TURN_SPEED*aim_scale(i)), (TURN_SPEED*aim_scale(i)));
-    p->pitch += p->pitch_vel * dt;
-    p->pitch = clampf(p->pitch, -89, 89);
-
-    float input_strength = (fabsf(yaw_accel) > 0.0f || fabsf(pitch_accel) > 0.0f) ? 1.0f : 0.0f;
-    apply_aim_assist(i, dt, input_strength);
-    }
-    // compute forward/right
-    float yr = DEG2RAD * p->yaw;
-    Vector3 forward = { sinf(-yr), 0, -cosf(yr) };
-    Vector3 right   = { -forward.z, 0, forward.x };
-    // acceleration
-    Vector3 accel = {0,0,0};
-    if ((i==0 && IsKeyDown(KEY_W)) || (i==1 && IsKeyDown(KEY_I))) accel = v_add(accel, forward);
-    if ((i==0 && IsKeyDown(KEY_S)) || (i==1 && IsKeyDown(KEY_K))) accel = v_add(accel, v_mul(forward, -1));
-    if ((i==0 && IsKeyDown(KEY_A)) || (i==1 && IsKeyDown(KEY_J))) accel = v_add(accel, v_mul(right, -1));
-    if ((i==0 && IsKeyDown(KEY_D)) || (i==1 && IsKeyDown(KEY_L))) accel = v_add(accel, right);
-    if (!p->meleeKnockbackActive && (accel.x!=0 || accel.z!=0)) {
-        float len = sqrtf(accel.x*accel.x + accel.z*accel.z);
-        accel = v_mul(accel, 1/len);
-        player_walk_accelerate(p, accel, dt);
-    } else if (!p->meleeKnockbackActive && !ex_in_field((int)(p-players)) && !tether_grapple_airborne((int)(p-players))) {
-        // friction
-        float sp = sqrtf(p->vel.x*p->vel.x + p->vel.z*p->vel.z);
-        if (sp > 0) {
-            float dec = tether_grapple_ground_friction(i) * dt;
-            float ns = sp - dec; if (ns < 0) ns = 0;
-            p->vel.x *= ns/sp;
-            p->vel.z *= ns/sp;
-        }
-    }
+    ct_move(i,dt);
 }
 
 static void HandleGamepadInput(int i, float dt) {
-    if (!IsGamepadAvailable(seat_device(i))) return;
-
-    Player *p = &players[i];
-
-    // turn (right stick horizontal)
-    float yaw_accel = 0.0f;
-    float yaw_axis = GetGamepadAxisMovement(seat_device(i), GAMEPAD_AXIS_RIGHT_X);
-    if (fabsf(yaw_axis) > localSeats[i].deadzone) {
-        yaw_accel = -yaw_axis * (TURN_ACCELERATION*aim_scale(i)) * localSeats[i].sensitivity;
-    }
-
-    if (yaw_accel != 0.0f) {
-        p->yaw_vel += yaw_accel * dt;
-    } else {
-        // friction
-        if (p->yaw_vel > 0) {
-            p->yaw_vel -= TURN_FRICTION * dt;
-            if (p->yaw_vel < 0) p->yaw_vel = 0;
-        } else if (p->yaw_vel < 0) {
-            p->yaw_vel += TURN_FRICTION * dt;
-            if (p->yaw_vel > 0) p->yaw_vel = 0;
-        }
-    }
-    p->yaw_vel = clampf(p->yaw_vel, -(TURN_SPEED*aim_scale(i)) * localSeats[i].sensitivity, (TURN_SPEED*aim_scale(i)) * localSeats[i].sensitivity);
-    p->yaw += p->yaw_vel * dt;
-
-    // look up/down (right stick vertical)
-    float pitch_accel = 0.0f;
-    float pitch_axis = GetGamepadAxisMovement(seat_device(i), GAMEPAD_AXIS_RIGHT_Y) * (localSeats[i].invert ? -1.0f : 1.0f);
-    if (fabsf(pitch_axis) > localSeats[i].deadzone) {
-        pitch_accel = -pitch_axis * (TURN_ACCELERATION*aim_scale(i)) * localSeats[i].sensitivity;
-    }
-
-    if (pitch_accel != 0.0f) {
-        p->pitch_vel += pitch_accel * dt;
-    } else {
-        // friction
-        if (p->pitch_vel > 0) {
-            p->pitch_vel -= TURN_FRICTION * dt;
-            if (p->pitch_vel < 0) p->pitch_vel = 0;
-        } else if (p->pitch_vel < 0) {
-            p->pitch_vel += TURN_FRICTION * dt;
-            if (p->pitch_vel > 0) p->pitch_vel = 0;
-        }
-    }
-    p->pitch_vel = clampf(p->pitch_vel, -(TURN_SPEED*aim_scale(i)) * localSeats[i].sensitivity, (TURN_SPEED*aim_scale(i)) * localSeats[i].sensitivity);
-    p->pitch += p->pitch_vel * dt;
-    p->pitch = clampf(p->pitch, -89, 89);
-
-    float input_strength = fmaxf(fabsf(yaw_axis), fabsf(pitch_axis));
-    apply_aim_assist(i, dt, input_strength);
-
-    // compute forward/right
-    float yr = DEG2RAD * p->yaw;
-    Vector3 forward = { sinf(-yr), 0, -cosf(yr) };
-    Vector3 right   = { -forward.z, 0, forward.x };
-
-    // acceleration (left stick)
-    Vector3 accel = {0,0,0};
-    float accel_x = GetGamepadAxisMovement(seat_device(i), GAMEPAD_AXIS_LEFT_X);
-    float accel_y = GetGamepadAxisMovement(seat_device(i), GAMEPAD_AXIS_LEFT_Y);
-
-    if (fabsf(accel_y) > localSeats[i].deadzone) {
-        accel = v_add(accel, v_mul(forward, -accel_y));
-    }
-    if (fabsf(accel_x) > localSeats[i].deadzone) {
-        accel = v_add(accel, v_mul(right, accel_x));
-    }
-
-    if (accel.x!=0 || accel.z!=0) {
-        float len = sqrtf(accel.x*accel.x + accel.z*accel.z);
-        accel = v_mul(accel, 1/len);
-        player_walk_accelerate(p, accel, dt);
-    } else if (!tether_grapple_airborne(i) && !ex_in_field(i)) {
-        // friction
-        float sp = sqrtf(p->vel.x*p->vel.x + p->vel.z*p->vel.z);
-        if (sp > 0) {
-            float dec = tether_grapple_ground_friction(i) * dt;
-            float ns = sp - dec; if (ns < 0) ns = 0;
-            p->vel.x *= ns/sp;
-            p->vel.z *= ns/sp;
-        }
-    }
+    ct_move(i,dt);
 }
 
 static float net_axis_value(int16_t value) {
@@ -18959,97 +18806,9 @@ static int16_t net_quantize_axis(float value) {
 }
 
 static NetInputCommand net_sample_local_input(int local_index, int player_slot, float dt) {
-    NetInputCommand command = { 0 };
-    command.sequence = ++netInputSequence[player_slot];
-    command.client_tick = netServerTick;
-    float mx = 0.0f, my = 0.0f, lx = 0.0f, ly = 0.0f;
-    int device=seat_device(local_index);
-    bool use_gamepad = playerInput[local_index] == INPUT_TYPE_GAMEPAD && IsGamepadAvailable(device);
-    if (use_gamepad) {
-        mx = GetGamepadAxisMovement(device, GAMEPAD_AXIS_LEFT_X);
-        my = -GetGamepadAxisMovement(device, GAMEPAD_AXIS_LEFT_Y);
-        lx = GetGamepadAxisMovement(device, GAMEPAD_AXIS_RIGHT_X);
-        ly = GetGamepadAxisMovement(device, GAMEPAD_AXIS_RIGHT_Y);
-        if (IsGamepadButtonDown(device, GAMEPAD_BUTTON_LEFT_TRIGGER_2)) command.held |= NET_INPUT_TETHER;
-        if (IsGamepadButtonPressed(device, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT)) command.pressed |= NET_INPUT_JUMP;
-        if (IsGamepadButtonPressed(device, GAMEPAD_BUTTON_RIGHT_TRIGGER_2)) command.pressed |= NET_INPUT_FIRE;
-        if (IsGamepadButtonPressed(device, GAMEPAD_BUTTON_RIGHT_FACE_DOWN)) command.pressed |= NET_INPUT_MELEE;
-        if (IsGamepadButtonPressed(device, GAMEPAD_BUTTON_RIGHT_TRIGGER_1)) command.pressed |= NET_INPUT_BUILD;
-        if(IsGamepadButtonPressed(device,GAMEPAD_BUTTON_LEFT_FACE_UP))command.pressed|=NET_INPUT_GRENADE;
-
-        if(IsGamepadButtonPressed(device,GAMEPAD_BUTTON_LEFT_TRIGGER_1))command.pressed|=NET_INPUT_HOLOGRAM;
-    } else if (local_index == 0) {
-        mx = (IsKeyDown(KEY_D) ? 1.0f : 0.0f) - (IsKeyDown(KEY_A) ? 1.0f : 0.0f);
-        my = (IsKeyDown(KEY_W) ? 1.0f : 0.0f) - (IsKeyDown(KEY_S) ? 1.0f : 0.0f);
-        lx = (IsKeyDown(KEY_H) ? 1.0f : 0.0f) - (IsKeyDown(KEY_F) ? 1.0f : 0.0f);
-        ly = (IsKeyDown(KEY_G) ? 1.0f : 0.0f) - (IsKeyDown(KEY_T) ? 1.0f : 0.0f);
-        if (IsKeyDown(KEY_R)) command.held |= NET_INPUT_TETHER;
-        if (IsKeyPressed(KEY_SPACE)) command.pressed |= NET_INPUT_JUMP;
-        if (IsKeyPressed(KEY_LEFT_CONTROL)) command.pressed |= NET_INPUT_FIRE;
-        if (IsKeyPressed(KEY_Z)) command.pressed |= NET_INPUT_MELEE;
-        if (IsKeyPressed(KEY_E)) command.pressed |= NET_INPUT_BUILD;
-        if(IsKeyPressed(KEY_C))command.pressed|=NET_INPUT_GRENADE;
-        if(IsKeyDown(KEY_X))command.held|=NET_INPUT_REVIVE;
-        if(IsKeyPressed(KEY_V))command.pressed|=NET_INPUT_HOLOGRAM;
-    } else {
-        mx = (IsKeyDown(KEY_L) ? 1.0f : 0.0f) - (IsKeyDown(KEY_J) ? 1.0f : 0.0f);
-        my = (IsKeyDown(KEY_I) ? 1.0f : 0.0f) - (IsKeyDown(KEY_K) ? 1.0f : 0.0f);
-        lx = (IsKeyDown(KEY_RIGHT) ? 1.0f : 0.0f) - (IsKeyDown(KEY_LEFT) ? 1.0f : 0.0f);
-        ly = (IsKeyDown(KEY_DOWN) ? 1.0f : 0.0f) - (IsKeyDown(KEY_UP) ? 1.0f : 0.0f);
-        if (IsKeyDown(KEY_P)) command.held |= NET_INPUT_TETHER;
-        if (IsKeyPressed(KEY_RIGHT_SHIFT)) command.pressed |= NET_INPUT_JUMP;
-        if (IsKeyPressed(KEY_RIGHT_CONTROL)) command.pressed |= NET_INPUT_FIRE;
-        if (IsKeyPressed(KEY_M)) command.pressed |= NET_INPUT_MELEE;
-        if (IsKeyPressed(KEY_O)) command.pressed |= NET_INPUT_BUILD;
-        if(IsKeyPressed(KEY_PERIOD))command.pressed|=NET_INPUT_GRENADE;
-        if(IsKeyDown(KEY_COMMA))command.held|=NET_INPUT_REVIVE;
-        if(IsKeyPressed(KEY_SLASH))command.pressed|=NET_INPUT_HOLOGRAM;
-    }
-    ex_input(local_index,&command);
-    if(playerInput[netTransport.role==NET_ROLE_CLIENT?local_index:player_slot]==INPUT_TYPE_GAMEPAD){
-        int d=seat_device(local_index);
-        if(IsGamepadButtonDown(d,GAMEPAD_BUTTON_RIGHT_TRIGGER_2))command.held|=NET_INPUT_FIRE;
-        if(IsGamepadButtonPressed(d,GAMEPAD_BUTTON_LEFT_FACE_LEFT))command.pressed|=NET_INPUT_SWITCH;
-
-    }else{
-        if(IsKeyDown(local_index==0?KEY_LEFT_CONTROL:KEY_RIGHT_CONTROL))command.held|=NET_INPUT_FIRE;
-        if(IsKeyPressed(local_index==0?KEY_Q:KEY_U))command.pressed|=NET_INPUT_SWITCH;
-        if(IsKeyPressed(local_index==0?KEY_B:KEY_Y))command.pressed|=NET_INPUT_EQUIP;
-    }
-    if(fp_active()&&netTransport.role==NET_ROLE_CLIENT&&firefightWaveState==FIREFIGHT_STATE_INTERMISSION){
-        uint32_t prep=command.pressed&(NET_INPUT_PREP_LEFT|NET_INPUT_PREP_RIGHT|NET_INPUT_PREP_READY|NET_INPUT_PREP_MENU);
-        if(prep)command.pressed=prep;
-    }
-    command.move_x = net_quantize_axis(mx);
-    command.move_y = net_quantize_axis(my);
-    command.look_x = net_quantize_axis(lx);
-    command.look_y = net_quantize_axis(ly);
-    if (netRequestedCreative) {
-        command.pressed &= (uint32_t)~(NET_INPUT_GRENADE_CYCLE | NET_INPUT_FIRE | NET_INPUT_MELEE | NET_INPUT_BUILD | NET_INPUT_JUMP | NET_INPUT_GRENADE | NET_INPUT_HOLOGRAM);
-        command.held &= (uint32_t)~NET_INPUT_TETHER;
-        if (IsKeyDown(KEY_E)) command.held |= NET_INPUT_CREATIVE_UP;
-        if (IsKeyDown(KEY_Q)) command.held |= NET_INPUT_CREATIVE_DOWN;
-        if (IsKeyPressed(KEY_LEFT_CONTROL)) command.pressed |= NET_INPUT_CREATIVE_PLACE;
-        if (IsKeyPressed(KEY_LEFT_ALT)) command.pressed |= NET_INPUT_CREATIVE_REMOVE;
-        if (IsKeyPressed(KEY_P)) command.pressed |= NET_INPUT_CREATIVE_PICKUP;
-        if (IsKeyPressed(KEY_BACKSPACE)) command.pressed |= NET_INPUT_CREATIVE_REMOVE_PICKUP;
-        if (IsKeyPressed(KEY_K)) command.pressed |= NET_INPUT_CREATIVE_ACTIVATE;
-        int slot = player_slot;
-        if (IsKeyPressed(KEY_LEFT_BRACKET)) creativeBrushSpan[slot] = clampi(creativeBrushSpan[slot] - 1, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
-        if (IsKeyPressed(KEY_RIGHT_BRACKET)) creativeBrushSpan[slot] = clampi(creativeBrushSpan[slot] + 1, CREATIVE_BRUSH_MIN, CREATIVE_BRUSH_MAX);
-        if (IsKeyPressed(KEY_V)) ++creativeBlockColorIndex[slot];
-        if (IsKeyPressed(KEY_B)) --creativeBlockColorIndex[slot];
-        if (IsKeyPressed(KEY_TAB)) creativePickupType[slot] = (creativePickupType[slot] + 1) % PICKUP_TYPE_COUNT;
-        command.creative_brush = (uint8_t)creativeBrushSpan[slot];
-        command.creative_color = (uint8_t)creativeBlockColorIndex[slot];
-        command.creative_pickup = (uint8_t)creativePickupType[slot];
-    }
-    if(!netRequestedCreative)aim_sample(local_index,player_slot,dt,&command);
-    mouse_command(&command,local_index,player_slot,dt);
-    eq_build_sample(local_index,player_slot,&command);
-    if(fp_active() && (ff_input_blocked(player_slot)||players[player_slot].respawn_timer>0)){
-        command.move_x=command.move_y=0;command.held=0;command.pressed&=NET_INPUT_PREP_LEFT|NET_INPUT_PREP_RIGHT|NET_INPUT_PREP_READY|NET_INPUT_PREP_MENU;
-    }
+    NetInputCommand command=ct_command(local_index,player_slot,dt);
+    command.sequence=++netInputSequence[player_slot];command.client_tick=netServerTick;
+    if(netTransport.role==NET_ROLE_CLIENT)eq_build_command(player_slot,&command);
     return command;
 }
 
@@ -20680,9 +20439,10 @@ static void debug_console_exec(const char *line)
         debug_console_print("give shield|glob|glock|dmr|gravity|igloo (or existing gun name)");return;
     }
     if (strcmp(cmd, "weaponlab") == 0) {eq_lab();debug_console_print("Weapon lab: pickups on left, targets ahead, panels on right.");return;}
+    if (strcmp(cmd,"controls")==0){debugConsoleOpen=false;ct_open();return;}
     if (strcmp(cmd, "help") == 0) {
         debug_console_print("give shield|glob|glock|dmr|gravity|igloo; cycle grenades: D-pad Down / Tab / ;");
-        debug_console_print("help | weaponlab | clear | god [on|off] | matter [n] | exposed");
+        debug_console_print("help | controls | weaponlab | clear | god [on|off] | matter [n] | exposed");
         debug_console_print("kill | pos | tp x y z | players | particles | belief | smush");
         debug_console_print("wave n | nextwave | lives n | armor | spawn swarmer|goliath|standard");
         return;
@@ -20898,7 +20658,7 @@ static void debug_console_handle_input(void)
 
 static void debug_console_update(void)
 {
-    if (IsKeyPressed(KEY_GRAVE)) {
+    if (ct_pressed(0,CT_CONSOLE) || (debugConsoleOpen&&IsKeyPressed(KEY_GRAVE))) {
         debugConsoleOpen = !debugConsoleOpen;
         debugConsoleHistoryIndex = -1;
         while (GetCharPressed() != 0) {
@@ -21627,6 +21387,9 @@ static void eq_lab(void){
 }
 
 #include "mouse_input.inc"
+#include "controls_config.inc"
+#include "controls_runtime.inc"
+#include "controls_menu.inc"
 
 static void update_enemy_contact_damage(float dt) {
     if(netTransport.role==NET_ROLE_CLIENT)return;
@@ -21821,6 +21584,7 @@ int main(int argc, char **argv) {
 #if defined(__APPLE__)
         macos_gamepad_poll();
 #endif
+        ct_frame(GetFrameTime());
         update_game_music();
         voxel_ca_update(GetTime());
         voxel_render_frame++;
@@ -21847,6 +21611,11 @@ int main(int argc, char **argv) {
         if (IsKeyPressed(KEY_F2)) {
             //SetLoggingEnabled(!logsEnabled);
         }
+        for(int s=0;s<MAX_PLAYERS;s++){
+            if(ct_pressed(s,CT_SETTINGS))ct_open();
+            if(!ctMenuOpen&&!debugConsoleOpen&&gameState==GAME_STATE_PLAYING&&(ct_pressed(s,CT_PAUSE)||(s==0&&!enemyLab&&IsKeyPressed(KEY_ESCAPE))||(ct_pad(s)&&IsGamepadButtonPressed(seat_device(s),GAMEPAD_BUTTON_MIDDLE_RIGHT)))){ct_cancel_all();if(netTransport.role!=NET_ROLE_OFFLINE)ct_open();else {gameState=GAME_STATE_PAUSED;couchSelection=0;ctPauseOpened=true;}}
+        }
+        if(ctMenuOpen&&(netTransport.role==NET_ROLE_OFFLINE||gameState!=GAME_STATE_PLAYING)){ct_menu_frame();continue;}
         if(ce_frame())continue;
         if(enemyLab&&!cmTesting) enemy_lab_controls();
         if (ffend_frame(GetFrameTime())){for(int i=0;i<MAX_PLAYERS;i++)equipment[i].buildHeld=false;continue;}
@@ -22783,12 +22552,12 @@ int main(int argc, char **argv) {
         hologram_tick(dt);
         ducks_tick(dt);
         debug_console_update();
-        if(IsKeyPressed(KEY_PAUSE)){gameState=GAME_STATE_PAUSED;mouse_sync();break;}
+        if(!ctMenuOpen&&netTransport.role==NET_ROLE_OFFLINE&&IsKeyPressed(KEY_PAUSE)){gameState=GAME_STATE_PAUSED;mouse_sync();break;}
         mouse_frame(dt);
         if(gameState==GAME_STATE_PLAYING)eq_local(dt);
         if (netTransport.role == NET_ROLE_CLIENT) {
             net_client_update(dt);
-            render_gameplay_view(screens, &renderPlayers, &renderW, &renderH, false);
+            if(ctMenuOpen)ct_menu_frame();else render_gameplay_view(screens, &renderPlayers, &renderW, &renderH, false);
             break;
         }
         if (gameMode == GAME_MODE_FIREFIGHT) {
@@ -22872,85 +22641,12 @@ int main(int argc, char **argv) {
                 smushBannerTimer = 0.0f;
             }
         }
-        // input: shooting, bullet type, jump
-        for (int i = 0; i < activePlayers; ++i) {
-            if (netTransport.role == NET_ROLE_HOST && i<MAX_PLAYERS && !net_player_is_local(i)) continue;
-            if (players[i].respawn_timer > 0.0f || ff_input_blocked(i)) {
-                continue;
-            }
-            if (playerInput[i] == INPUT_TYPE_GAMEPAD) {
-                if(IsGamepadButtonPressed(seat_device(i),GAMEPAD_BUTTON_LEFT_FACE_UP))clarity_throw(i);
-                if(IsGamepadButtonPressed(seat_device(i),GAMEPAD_BUTTON_LEFT_TRIGGER_1))hologram_deploy(i);
+        ct_local_actions(dt);
 
-                if (IsGamepadButtonPressed(seat_device(i), GAMEPAD_BUTTON_RIGHT_FACE_DOWN) && !ff_input_blocked(i)) {
-                    perform_melee(i);
-                }
-
-                if (IsGamepadButtonPressed(seat_device(i), GAMEPAD_BUTTON_LEFT_TRIGGER_2)) {
-                    start_tether(i);
-                }
-                if (IsGamepadButtonReleased(seat_device(i), GAMEPAD_BUTTON_LEFT_TRIGGER_2)) {
-                    release_tether(i);
-                }
-                if (IsGamepadButtonPressed(seat_device(i), GAMEPAD_BUTTON_RIGHT_FACE_RIGHT) && players[i].onGround) {
-                    players[i].vel.y = JUMP_SPEED;
-                    players[i].onGround = false;
-                }
-            }
-        }
-
-        if (!debugConsoleOpen && !ff_input_blocked(0) && playerInput[0] == INPUT_TYPE_KEYBOARD && players[0].respawn_timer <= 0.0f) {
-            if(IsKeyPressed(KEY_C))clarity_throw(0);
-            if(IsKeyPressed(KEY_V))hologram_deploy(0);
-
-            if (!mouse_owns(0) && IsKeyPressed(KEY_Z)) perform_melee(0);
-
-            if (!mouse_owns(0) && IsKeyPressed(KEY_R)) start_tether(0);
-            if (!mouse_owns(0) && IsKeyReleased(KEY_R)) release_tether(0);
-            if (IsKeyPressed(KEY_SPACE) && players[0].onGround && !ff_input_blocked(0)) {
-                players[0].vel.y = JUMP_SPEED;
-                players[0].onGround = false;
-            }
-        }
-        if (!debugConsoleOpen && !ff_input_blocked(1) && net_player_is_local(1) && playerInput[1] == INPUT_TYPE_KEYBOARD && players[1].respawn_timer <= 0.0f) {
-            if(IsKeyPressed(KEY_PERIOD))clarity_throw(1);
-            if(IsKeyPressed(KEY_SLASH))hologram_deploy(1);
-
-            if (!mouse_owns(1) && IsKeyPressed(KEY_M)) perform_melee(1);
-
-            if (!mouse_owns(1) && IsKeyPressed(KEY_P)) start_tether(1);
-            if (!mouse_owns(1) && IsKeyReleased(KEY_P)) release_tether(1);
-            if (IsKeyPressed(KEY_RIGHT_SHIFT) && players[1].onGround && !ff_input_blocked(1)) {
-                players[1].vel.y = JUMP_SPEED;
-                players[1].onGround = false;
-            }
-        }
-
-        if (IsKeyPressed(KEY_PAUSE)) {
+        if (!ctMenuOpen&&netTransport.role==NET_ROLE_OFFLINE&&IsKeyPressed(KEY_PAUSE)) {
             gameState = GAME_STATE_PAUSED;
         }
 
-        if (!enemyLab && IsKeyPressed(KEY_F3)) {
-            debugDrawParticles = !debugDrawParticles;
-            if (!debugDrawParticles) {
-                debugColorParticlesByVelocity = false;
-            }
-        }
-        if (!enemyLab && IsKeyPressed(KEY_F4)) {
-            debugColorParticlesByVelocity = !debugColorParticlesByVelocity;
-            if (debugColorParticlesByVelocity) {
-                debugDrawParticles = true;
-            }
-        }
-        if (!enemyLab && IsKeyPressed(KEY_F6)) {
-            debugSfxKeysEnabled = !debugSfxKeysEnabled;
-        }
-        if (!enemyLab && IsKeyPressed(KEY_F7)) {
-            aimAssistDebugDraw = !aimAssistDebugDraw;
-        }
-        if (IsKeyPressed(KEY_F8)) {
-            aimAssistEnabled = !aimAssistEnabled;
-        }
         handle_sfx_debug_keys();
 
         // advance melee swing state and resolve hits during the active window
@@ -23091,7 +22787,7 @@ int main(int argc, char **argv) {
         // }
 
 
-        render_gameplay_view(screens, &renderPlayers, &renderW, &renderH, false);
+        if(ctMenuOpen)ct_menu_frame();else render_gameplay_view(screens, &renderPlayers, &renderW, &renderH, false);
         break;
             }
             case GAME_STATE_CREATIVE: {
@@ -23144,15 +22840,10 @@ int main(int argc, char **argv) {
                     int controlsSize = 18;
                     int controlsSpacing = 24;
                     DrawText("Controls", 100, controlsY, 20, BLACK);
-                    DrawText("Mouse: first keyboard seat | Aim / Left: shoot / Right: tether / Middle: melee",100,controlsY+controlsSpacing*4,controlsSize,DARKGRAY);
-                    DrawText("Keyboard P1: Move WASD | Look F/H (yaw), T/G (pitch) | Jump SPACE | Shoot LCTRL | Melee Z | Build E | Tether R",
-                             100, controlsY + controlsSpacing * 1, controlsSize, DARKGRAY);
-                    DrawText("Keyboard P2: Move IJKL | Look Arrows | Jump RSHIFT | Shoot RCTRL | Melee M | Build O | Tether P",
-                             100, controlsY + controlsSpacing * 2, controlsSize, DARKGRAY);
-                    DrawText("Gamepad: LS move | RS look | B jump | RT fire | A melee | RB build | LT tether | R3 aim",
-                             100, controlsY + controlsSpacing * 3, controlsSize, DARKGRAY);
-
-                    DrawText("X: tap switch / hold pickup or revive | Keyboard aim: Left Shift (P1), Enter (P2)",100,controlsY+controlsSpacing*5,controlsSize,DARKGRAY);
+                    for(int seat=0;seat<MAX_PLAYERS;seat++){
+                        DrawText(TextFormat("P%d: %s fire | %s jump | %s melee | %s build | %s tether | %s aim",seat+1,ct_hint(seat,CT_FIRE),ct_hint(seat,CT_JUMP),ct_hint(seat,CT_MELEE),ct_hint(seat,CT_BUILD),ct_hint(seat,CT_TETHER),ct_hint(seat,CT_AIM)),100,controlsY+controlsSpacing*(seat+1),controlsSize,DARKGRAY);
+                    }
+                    DrawText("Change profiles and bindings in Controls & Settings (or console: controls)",100,controlsY+controlsSpacing*5,controlsSize,DARKGRAY);
                     DrawText("Press M to return to Main Menu", 100, SCREEN_HEIGHT - 60, 20, DARKGRAY);
                 EndDrawing();
 

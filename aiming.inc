@@ -26,7 +26,9 @@ static void aim_interact(int i,bool down,float dt,NetInputCommand *c){
     AimState *a=&aimStates[i];a->revive=false;
     if(!a->tapArmed){if(!down)a->tapArmed=true;return;}
     if(down){a->tapTime+=fmaxf(0,dt);a->tapDown=true;if(a->tapTime>=.25f){
-        if(eq_near_pickup(i)>=0 || fp_near(i,false)>=0){if(!a->holdUsed)c->pressed|=NET_INPUT_EQUIP;a->holdUsed=true;}
+        bool revive=false;if(gameMode==GAME_MODE_FIREFIGHT)for(int j=0;j<firefightHumans;j++)if(j!=i&&combatantLife[j]==LIFE_DOWNED&&v_length(world_delta(players[j].death_pos,players[i].pos))<=2)revive=true;
+        if(revive&&!a->holdUsed){a->revive=true;c->held|=NET_INPUT_REVIVE;}
+        else if(eq_near_pickup(i)>=0 || fp_near(i,false)>=0){if(!a->holdUsed)c->pressed|=NET_INPUT_EQUIP;a->holdUsed=true;}
         else if(!a->holdUsed){a->revive=true;c->held|=NET_INPUT_REVIVE;}
     }}
     else {if(a->tapDown && a->tapTime<.25f)c->pressed|=NET_INPUT_SWITCH;a->tapDown=false;a->tapTime=0;a->holdUsed=false;}

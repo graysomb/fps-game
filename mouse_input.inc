@@ -14,7 +14,7 @@ static void mouse_sync(void){
         int input=netTransport.role==NET_ROLE_CLIENT?s:actor;
         if(actor>=0 && input>=0 && playerInput[input]==INPUT_TYPE_KEYBOARD){seat=s;slot=actor;break;}
     }
-    bool capture=!ce_mouse_blocked() && slot>=0 && IsWindowFocused() && !debugConsoleOpen &&
+    bool capture=!ctMenuOpen && !ce_mouse_blocked() && slot>=0 && IsWindowFocused() && !debugConsoleOpen &&
         (gameState==GAME_STATE_PLAYING || gameState==GAME_STATE_CREATIVE) && !(enemyLab && enemyLabPaused);
     if(mouseCaptured && (!capture || slot!=mouseSlot)){
         if(netTransport.role==NET_ROLE_CLIENT && mouseSlot>=0){
@@ -48,25 +48,9 @@ static void mouse_command(NetInputCommand *c,int seat,int slot,float dt){
 }
 static void mouse_frame(float dt){
     bool wasCaptured=mouseCaptured;int previous=mouseSlot;mouse_sync();
+    if(!wasCaptured || previous!=mouseSlot)ct_mouse_reset();
     mouseFrameDelta=mouseCaptured && wasCaptured && previous==mouseSlot?GetMouseDelta():(Vector2){0};
     if(!mouseButtonsArmed && wasCaptured && previous==mouseSlot && mouseCaptured &&
        !IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !IsMouseButtonDown(MOUSE_BUTTON_RIGHT) && !IsMouseButtonDown(MOUSE_BUTTON_MIDDLE) &&
        !IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && !IsMouseButtonPressed(MOUSE_BUTTON_MIDDLE))mouseButtonsArmed=true;
-    if(netTransport.role==NET_ROLE_CLIENT || mouseSlot<0)return;
-    NetInputCommand c={0};int i=mouseSlot;
-    bool first=mouseSeat==0;
-    c.look_x=net_quantize_axis((IsKeyDown(first?KEY_H:KEY_RIGHT)?1.f:0)-(IsKeyDown(first?KEY_F:KEY_LEFT)?1.f:0));
-    c.look_y=net_quantize_axis((IsKeyDown(first?KEY_G:KEY_DOWN)?1.f:0)-(IsKeyDown(first?KEY_T:KEY_UP)?1.f:0));
-    if(IsKeyDown(first?KEY_R:KEY_P))c.held|=NET_INPUT_TETHER;
-    if(IsKeyPressed(first?KEY_LEFT_CONTROL:KEY_RIGHT_CONTROL))c.pressed|=NET_INPUT_FIRE;
-    if(IsKeyPressed(first?KEY_Z:KEY_M))c.pressed|=NET_INPUT_MELEE;
-    mouse_command(&c,mouseSeat,i,dt);
-    players[i].yaw=c.aim_yaw;players[i].pitch=c.aim_pitch;players[i].yaw_vel=players[i].pitch_vel=0;
-    if(gameState!=GAME_STATE_PLAYING || !mouseCaptured)return;
-
-    if(c.pressed&NET_INPUT_MELEE)perform_melee(i);
-    bool held=(c.held&NET_INPUT_TETHER)!=0;
-    if(held && !mouseTetherHeld)start_tether(i);
-    if(!held && mouseTetherHeld)release_tether(i);
-    mouseTetherHeld=held;
 }

@@ -452,6 +452,35 @@ The engine implements three primary types of constraints:
     *   Shape matching skips if the voxel is not deformed.
 *   **Approximations:** Collisions use predicted positions for stability, effectively "looking ahead" to prevent tunneling.
 
+## Controls and Settings profiles
+
+Open **Controls & Settings** from the main/pause menu, the Creative session menu,
+or the console command `controls`. Use Tab / LB / RB for tabs, arrows / D-pad to
+navigate, Enter / A to select, and F5 / Start to apply. Escape / B cancels the draft.
+During binding capture, Escape cancels so B can itself be assigned.
+
+Each local seat can select a named profile containing primary and secondary keyboard,
+mouse and controller bindings for gameplay, Creative, and Enemy Lab. Conflicts offer
+Swap, Replace or Cancel. Modifier chords are supported; wheel bindings are restricted
+to discrete actions. Escape and Start recovery remain available.
+
+Mouse tuning includes separate horizontal/vertical and zoom sensitivity, inversion,
+acceleration and smoothing. Controller tuning adds movement/look deadzones, response
+curves, trigger threshold, acceleration, stopping speed, stick swapping and aim assist.
+Keyboard look has separate tuning. Aim and tether support hold/toggle modes. Combined
+tap-switch/hold-interact is optional; a nearby downed teammate takes revive priority.
+
+Apply saves profiles and seat assignments to `controls.cfg` in the working directory;
+startup loads it automatically. The Profiles tab supports reload, creation, duplication,
+renaming, deletion and reset. Sharing a profile applies its settings to every assigned
+seat. Old `couch_settings.cfg` values migrate on first use. Invalid files leave safe
+defaults available; failed saves preserve the previous file. Copy `controls.cfg` to
+back up or transfer profiles. These local settings files are gitignored.
+
+Menu/focus changes and respawns require held controls to be released before reuse.
+Opening settings during LAN play leaves the match running and cancels local attacks.
+The defaults listed below remain available through profile reset.
+
 ## Controls
 
 ### Player 1 (Keyboard)

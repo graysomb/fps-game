@@ -136,42 +136,42 @@ static void enemy_lab_ai_step(float dt) {
 static bool enemy_lab_controls(void) {
     enemyLabStep=false;
     if(goActive){
-        if(IsKeyPressed(KEY_F3)||couch_button(0,GAMEPAD_BUTTON_LEFT_FACE_RIGHT)){
+        if(ct_pressed(0,CT_LAB_NEXT)){
             if(goCombatEnabled){go_combat_reset();goAction=GOLEM_IDLE;}
             else if(goAction==GOLEM_THROW)go_combat_start();
             else goAction++;
             goActionStart=goClock;
         }
-        if(IsKeyPressed(KEY_F4)||couch_button(0,GAMEPAD_BUTTON_RIGHT_FACE_UP)){enemy_lab_start(ENEMY_TYPE_COUNT+1);return true;}
-        if(IsKeyPressed(KEY_F5)||couch_button(0,GAMEPAD_BUTTON_RIGHT_FACE_LEFT))enemyLabPaused=!enemyLabPaused;
-        if(IsKeyPressed(KEY_F6)||couch_button(0,GAMEPAD_BUTTON_RIGHT_TRIGGER_1)){enemyLabPaused=true;enemyLabStep=true;}
-        if(IsKeyPressed(KEY_F7)||couch_button(0,GAMEPAD_BUTTON_MIDDLE_LEFT))enemyLabGod=!enemyLabGod;
-        if(IsKeyPressed(KEY_F8)||couch_button(0,GAMEPAD_BUTTON_LEFT_FACE_DOWN))goRegen=!goRegen;
-        if(IsKeyPressed(KEY_F9))goOverlay=!goOverlay;
-        if(IsKeyPressed(KEY_F10)||couch_button(0,GAMEPAD_BUTTON_LEFT_TRIGGER_1))go_release_part(GOLEM_ARM_R);
-        if(IsKeyPressed(KEY_F11))go_release_part(GOLEM_SHIN_L);
-        if(IsKeyPressed(KEY_F12))go_release_part(GM_CHEST);
+        if(ct_pressed(0,CT_LAB_RESET)){enemy_lab_start(ENEMY_TYPE_COUNT+1);return true;}
+        if(ct_pressed(0,CT_LAB_PAUSE))enemyLabPaused=!enemyLabPaused;
+        if(ct_pressed(0,CT_LAB_STEP)){enemyLabPaused=true;enemyLabStep=true;}
+        if(ct_pressed(0,CT_LAB_GOD))enemyLabGod=!enemyLabGod;
+        if(ct_pressed(0,CT_LAB_FIXTURE))goRegen=!goRegen;
+        if(ct_pressed(0,CT_LAB_OVERLAY))goOverlay=!goOverlay;
+        if(ct_pressed(0,CT_LAB_ARM))go_release_part(GOLEM_ARM_R);
+        if(ct_pressed(0,CT_LAB_LEG))go_release_part(GOLEM_SHIN_L);
+        if(ct_pressed(0,CT_LAB_CHEST))go_release_part(GM_CHEST);
         if(IsKeyPressed(KEY_ESCAPE))enemy_lab_exit();return true;
     }
-    if(equipmentLab){if(IsKeyPressed(KEY_F4))eq_lab();if(IsKeyPressed(KEY_F7))enemyLabGod=!enemyLabGod;if(IsKeyPressed(KEY_ESCAPE))enemy_lab_exit();return true;}
+    if(equipmentLab){if(ct_pressed(0,CT_LAB_RESET))eq_lab();if(ct_pressed(0,CT_LAB_GOD))enemyLabGod=!enemyLabGod;if(IsKeyPressed(KEY_ESCAPE))enemy_lab_exit();return true;}
     if(enemyLabCase==ENEMY_TYPE_BUILDER){
         const int guns[]={EQ_DEFAULT,EQ_GLOB,EQ_GLOCK,EQ_DMR,EQ_RAIL};
-        if(IsKeyPressed(KEY_F9)){
+        if(ct_pressed(0,CT_LAB_OVERLAY)){
             int next=0;for(int n=0;n<5;n++)if(eq_gun(5)==guns[n])next=(n+1)%5;
             tower_release(5);eq_reset(5);equipment[5].gun[0]=guns[next];players[5].matter=100;
             const int types[]={0,PICKUP_GLOB,PICKUP_GLOCK,PICKUP_DMR,PICKUP_RAILGUN};fpCarrierType[5]=types[next];
         }
-        if(IsKeyPressed(KEY_F10)){players[0].matter=players[0].matter>0?0:100;players[0].isExposed=players[0].matter<=0;players[0].last_damage_time=(float)GetTime();}
+        if(ct_pressed(0,CT_LAB_ARM)){players[0].matter=players[0].matter>0?0:100;players[0].isExposed=players[0].matter<=0;players[0].last_damage_time=(float)GetTime();}
     }
-    if(IsKeyPressed(KEY_F3)||couch_button(0,GAMEPAD_BUTTON_LEFT_FACE_RIGHT)) {
+    if(ct_pressed(0,CT_LAB_NEXT)) {
         int next=enemyLabCase+1;if(next==ENEMY_TYPE_SCRAPPER)next++;if(next>ENEMY_TYPE_COUNT+1) next=ENEMY_TYPE_GOLIATH;
         enemy_lab_start(next);
     }
-    if(IsKeyPressed(KEY_F4)||couch_button(0,GAMEPAD_BUTTON_RIGHT_FACE_UP)) (enemyLabFixture>=0?enemy_lab_fixture(enemyLabFixture):enemy_lab_start(enemyLabCase));
-    if(IsKeyPressed(KEY_F8)||couch_button(0,GAMEPAD_BUTTON_LEFT_FACE_DOWN))enemy_lab_fixture(enemyLabFixture+1);
-    if(IsKeyPressed(KEY_F5)||couch_button(0,GAMEPAD_BUTTON_RIGHT_FACE_LEFT)) enemyLabPaused=!enemyLabPaused;
-    if(IsKeyPressed(KEY_F6)||couch_button(0,GAMEPAD_BUTTON_RIGHT_TRIGGER_1)) {enemyLabPaused=true;enemyLabStep=true;}
-    if(IsKeyPressed(KEY_F7)||couch_button(0,GAMEPAD_BUTTON_MIDDLE_LEFT)) enemyLabGod=!enemyLabGod;
+    if(ct_pressed(0,CT_LAB_RESET)) (enemyLabFixture>=0?enemy_lab_fixture(enemyLabFixture):enemy_lab_start(enemyLabCase));
+    if(ct_pressed(0,CT_LAB_FIXTURE))enemy_lab_fixture(enemyLabFixture+1);
+    if(ct_pressed(0,CT_LAB_PAUSE)) enemyLabPaused=!enemyLabPaused;
+    if(ct_pressed(0,CT_LAB_STEP)) {enemyLabPaused=true;enemyLabStep=true;}
+    if(ct_pressed(0,CT_LAB_GOD)) enemyLabGod=!enemyLabGod;
     if(enemyLabAll && enemyLabClock>=30) {int n=enemyLabCase+1;if(n==ENEMY_TYPE_SCRAPPER)n++;enemy_lab_start(n>=ENEMY_TYPE_COUNT?ENEMY_TYPE_GOLIATH:n);}
     if(IsKeyPressed(KEY_ESCAPE)) enemy_lab_exit();
     return true;
@@ -179,7 +179,7 @@ static bool enemy_lab_controls(void) {
 static void enemy_lab_hud(int w,int h) {
     int fs=w<900?14:18;
     if(enemyLabCase==ENEMY_TYPE_BUILDER){
-        DrawText(TextFormat("TOWER: F9 gun [%s] | F10 player Matter [%d]",eqGuns[eq_gun(5)].name,(int)players[0].matter),12,h-100,fs,SKYBLUE);
+        DrawText(TextFormat("TOWER: %s gun [%s] | %s player Matter [%d]",ct_hint(0,CT_LAB_OVERLAY),eqGuns[eq_gun(5)].name,ct_hint(0,CT_LAB_ARM),(int)players[0].matter),12,h-100,fs,SKYBLUE);
         DrawText(TextFormat("Builder: %s | Rifleman: %s",enemySpecial[4].reason?enemySpecial[4].reason:"seeking site",towerRifles[5].state==2?"holding tower":towerRifles[5].state==3?"jump/melee":towerRifles[5].tag?"climbing":"seeking tower"),12,h-75,fs,RAYWHITE);
     }
     if(goActive){
@@ -202,21 +202,21 @@ static void enemy_lab_hud(int w,int h) {
         int y=h-106;
         DrawRectangle(8,y-8,w-16,104,Fade(BLACK,.65f));
         DrawText(goCombatDead?"GOLEM DEFEATED - F4 / Top to fight again":goCombatEnabled?"Break legs to open chest. Drain shield, then damage reactor.":TextFormat("MANUAL DEMO %d | %s",goAction,enemyLabPaused?"PAUSED":"RUNNING"),16,y,fs,GOLD);
-        DrawText("F3/D-right mode | F4/Top reset | F5/Left pause | F6/RB step",16,y+22,fs,RAYWHITE);
-        DrawText("F7/Back god | F8/D-down regen | F9 skeleton | F10/LB arm | F11 leg | F12 chest",16,y+44,w<900?11:14,RAYWHITE);
+        DrawText(TextFormat("%s mode | %s reset | %s pause | %s step",ct_hint(0,CT_LAB_NEXT),ct_hint(0,CT_LAB_RESET),ct_hint(0,CT_LAB_PAUSE),ct_hint(0,CT_LAB_STEP)),16,y+22,fs,RAYWHITE);
+        DrawText(TextFormat("%s god | %s regen | %s skeleton | %s arm | %s leg | %s chest",ct_hint(0,CT_LAB_GOD),ct_hint(0,CT_LAB_FIXTURE),ct_hint(0,CT_LAB_OVERLAY),ct_hint(0,CT_LAB_ARM),ct_hint(0,CT_LAB_LEG),ct_hint(0,CT_LAB_CHEST)),16,y+44,w<900?11:14,RAYWHITE);
         DrawText(TextFormat("Body %d/%d | debris %d | repair %s | %.2fms | Esc exit",attached,goCount,owned-attached,go_repair_status(),physicsBackend.last_step_ms),16,y+66,fs,SKYBLUE);
         return;
     }
     if(equipmentLab){DrawText("WEAPON LAB | F4 reset | F7 god | Esc exit",16,75,fs,GOLD);DrawText("Cycle grenades: D-pad Down / Tab / ;  |  Console: give glob|glock|dmr|gravity|igloo",16,99,w<900?12:16,SKYBLUE);return;}
     DrawRectangle(8,70,w-16,232,Fade(BLACK,.8f));
     DrawText(TextFormat("ENEMY LAB: %s | %s | Invulnerable: %s",enemyLabCase==ENEMY_TYPE_COUNT?"mixed":enemy_names[enemyLabCase],enemyLabPaused?"PAUSED":"RUNNING",enemyLabGod?"ON":"OFF"),16,78,fs,GOLD);
-    DrawText("F3/D-right: next | F4/Top: reset | F5/Left face: pause",16,102,fs,RAYWHITE);
-    DrawText("F6/RB: step | F7/Back button: invulnerability | Esc: exit",16,126,fs,RAYWHITE);
+    DrawText(TextFormat("%s next | %s reset | %s pause",ct_hint(0,CT_LAB_NEXT),ct_hint(0,CT_LAB_RESET),ct_hint(0,CT_LAB_PAUSE)),16,102,fs,RAYWHITE);
+    DrawText(TextFormat("%s step | %s invulnerability | Esc exit",ct_hint(0,CT_LAB_STEP),ct_hint(0,CT_LAB_GOD)),16,126,fs,RAYWHITE);
     if(enemyLabCase<ENEMY_TYPE_COUNT) DrawText(enemyLabFixture>=0?enemyLabFixtureNames[enemyLabFixture]:enemy_description(enemyLabCase),16,150,fs,RAYWHITE);
     EnemySpecialState *s=&enemySpecial[4];
     DrawText(TextFormat("State %d | Target P%d | Cooldown %.1f | Wind-up %.1f | Equipment %d",s->state,s->target+1,fmaxf(0,s->cooldown),s->windup,s->equipmentCount),16,174,fs,SKYBLUE);
     DrawText(TextFormat("%s | work %d | actions %d | resource %llu",s->reason?s->reason:"seeking",s->work,s->actions,(unsigned long long)s->selected),16,200,fs,SKYBLUE);
-    DrawText("F8 / D-pad Down: combat fixtures | C / D-pad Up: grenade",16,224,fs,ORANGE);
+    DrawText(TextFormat("%s fixtures | %s grenade",ct_hint(0,CT_LAB_FIXTURE),ct_hint(0,CT_GRENADE)),16,224,fs,ORANGE);
     AiCombat *a=&aiCombat[4];const char *alerts[]={"none","seen","heard","near miss","hit"};
     DrawText(TextFormat("AI %s | P%d | %s | memory %.1f | aim %.1f deg",alerts[a->source],a->target+1,a->visible?"visible":"remembered",a->memory,a->error),16,250,fs,LIME);
     DrawText(TextFormat("Burst %d | reaction %.2f | recovery %.2f",a->burstShots,a->reaction,a->recovery),16,276,fs,LIME);

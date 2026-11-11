@@ -23,3 +23,7 @@ fps_ray.log
 artifacts/
 couch_settings.cfg
 debug-artifacts/
+
+# Local input profiles
+controls.cfg
+controls.cfg.tmp

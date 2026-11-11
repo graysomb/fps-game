@@ -197,6 +197,7 @@ static void eq_command(int i,const NetInputCommand *c,float dt){
     if(i<0 || i>=MAX_COMBATANTS)return;Equipment *e=&equipment[i];eq_gun(i);
     aim_command(i,c);
     eq_build_command(i,c);
+    if((c->pressed&(NET_INPUT_TETHER_CANCEL|NET_INPUT_BUILD_CANCEL|NET_INPUT_AIM_CANCEL))==(NET_INPUT_TETHER_CANCEL|NET_INPUT_BUILD_CANCEL|NET_INPUT_AIM_CANCEL)){eq_cancel_charge(i);e->buildHeld=false;return;}
     if(!eq_usable(i)){eq_cancel_charge(i);return;}
     if(c->pressed&NET_INPUT_GRENADE_CYCLE)ex_cycle(i);
     if((c->pressed&NET_INPUT_SWITCH) && !players[i].meleeSwingActive){int other=1-e->selected;if(e->gun[other]!=EQ_EMPTY){eq_cancel_charge(i);e->selected=other;e->switchTime=eqSwitchSeconds;e->charge=0;e->held=false;players[i].dynamicShotActive=eq_gun(i)==EQ_VOXEL;}}
@@ -262,14 +263,8 @@ static void eq_command(int i,const NetInputCommand *c,float dt){
 static void eq_local(float dt){
     if(netTransport.role==NET_ROLE_CLIENT)return;
     for(int i=0;i<MAX_PLAYERS && i<activePlayers;i++)if(!is_player_bot(i) && (netTransport.role==NET_ROLE_OFFLINE || net_player_is_local(i))){
-        NetInputCommand c={0};bool pad=playerInput[i]==INPUT_TYPE_GAMEPAD;int d=seat_device(i);
-        if(pad){if(IsGamepadButtonPressed(d,GAMEPAD_BUTTON_RIGHT_TRIGGER_2))c.pressed|=NET_INPUT_FIRE;if(IsGamepadButtonPressed(d,GAMEPAD_BUTTON_LEFT_FACE_LEFT))c.pressed|=NET_INPUT_SWITCH;if(IsGamepadButtonDown(d,GAMEPAD_BUTTON_RIGHT_TRIGGER_2))c.held|=NET_INPUT_FIRE;}
-        else {if(!mouse_owns(i) && IsKeyPressed(i==0?KEY_LEFT_CONTROL:KEY_RIGHT_CONTROL))c.pressed|=NET_INPUT_FIRE;if(IsKeyPressed(i==0?KEY_Q:KEY_U))c.pressed|=NET_INPUT_SWITCH;if(IsKeyPressed(i==0?KEY_B:KEY_Y))c.pressed|=NET_INPUT_EQUIP;if(IsKeyDown(i==0?KEY_LEFT_CONTROL:KEY_RIGHT_CONTROL))c.held|=NET_INPUT_FIRE;}
-        if(mouse_owns(i)){if(mouseCaptured&&mouseButtonsArmed&&IsMouseButtonPressed(MOUSE_BUTTON_LEFT))c.pressed|=NET_INPUT_FIRE;if(mouseCaptured&&mouseButtonsArmed&&IsMouseButtonDown(MOUSE_BUTTON_LEFT))c.held|=NET_INPUT_FIRE;if(mouseCaptured&&GetMouseWheelMove()!=0)c.pressed|=NET_INPUT_SWITCH;}
-        ex_input(i,&c);
-        eq_build_sample(i,i,&c);
-        aim_sample(netTransport.role==NET_ROLE_OFFLINE?i:net_local_index_for_slot(i),i,dt,&c);
-        if(debugConsoleOpen || !IsWindowFocused()){c.held=c.pressed=0;eq_cancel_charge(i);}
+        int seat=ct_seat(i);NetInputCommand c=ct_command(seat,i,dt);
+        players[i].yaw=c.aim_yaw;players[i].pitch=c.aim_pitch;
         eq_command(i,&c,dt);
     }
 }
@@ -463,7 +458,7 @@ static void eq_hud(int i,int w,int h){
     int g=eq_gun(i);DrawText(TextFormat("%.0f Matter%s  %.1fs",eqGuns[g].cost,g==EQ_CUTTER?"/s":"",e->cooldown[g]),14,y-19,sz,RAYWHITE);
     if(g==EQ_RAIL && e->charge>0 && aimStates[i].blend<.02f)DrawRectangle(w/2-40,h/2+35,(int)(80*e->charge/.65f),5,PURPLE);
     DrawText(TextFormat("%s %s %s","",e->upgrades&EQ_ADHESIVE?"STICKY":"",e->upgrades&EQ_BUILD?"5x5x5":""),230,y+27,sz,GOLD);
-    int n=eq_near_pickup(i);if(n>=0 && eq_pickup_gun(pickups[n].type)>=0 && e->gun[0]!=eq_pickup_gun(pickups[n].type) && e->gun[1]!=eq_pickup_gun(pickups[n].type)){const char *key=playerInput[i]==INPUT_TYPE_GAMEPAD?"Hold X":i==0?"B":"Y";const char *label=TextFormat("%s: equip %s",key,pickup_type_label(pickups[n].type));DrawText(label,(w-MeasureText(label,sz))/2,h/2+55,sz,WHITE);}
+    int n=eq_near_pickup(i);if(n>=0 && eq_pickup_gun(pickups[n].type)>=0 && e->gun[0]!=eq_pickup_gun(pickups[n].type) && e->gun[1]!=eq_pickup_gun(pickups[n].type)){const char *key=ct_hint(i,CT_EQUIP);const char *label=TextFormat("%s: equip %s",key,pickup_type_label(pickups[n].type));DrawText(label,(w-MeasureText(label,sz))/2,h/2+55,sz,WHITE);}
 }
 static void eq_layout(void){
     if(fp_active())return;
