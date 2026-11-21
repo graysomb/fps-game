@@ -14,7 +14,7 @@
 		</data>
 		<key>Resources/couch_settings.cfg</key>
 		<data>
-		kicY5yb2MvIv0V8A4u2lks43rOc=
+		fRJX0kBqD4gixA2Wjjc3GbG0BpU=
 		</data>
 		<key>Resources/game_song.mp3</key>
 		<data>
@@ -353,19 +353,19 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			RHEn5OW3qKBQ2R1tulgPTePUehI=
+			xKcjhHbwR0dLxYalqi9cHd77meg=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"447127e4e5b7a8a050d91d6dba580f4de3d47a12"</string>
+			<string>cdhash H"c4a7238476f047474bc586a5aa2f5c1ddefb99e8"</string>
 		</dict>
 		<key>MacOS/fps_ray_gpu</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			4ap8RcGWgqwfWnxx5ah5GjsKcUk=
+			vbZV8ISeJDUytOYjRZUeTBc0sZo=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"e1aa7c45c19682ac1f5a7c71e5a8791a3b0a7149"</string>
+			<string>cdhash H"bdb655f0849e243532b4e62345951e4c1734b19a"</string>
 		</dict>
 		<key>MacOS/game_song.mp3</key>
 		<dict>
@@ -394,7 +394,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			9RifU3ReXvJyQnhjcxsDwHI/OSByccHoFelCrt5HkVw=
+			olfWQ7Rzmnjb8HP821SLXHAdRSiSyfCjDFJiYjM5zyA=
 			</data>
 		</dict>
 		<key>Resources/game_song.mp3</key>

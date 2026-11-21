@@ -161,6 +161,8 @@ int main(int argc,char **argv) {
     for(int i=0;i<4;i++)testPads[i]=true;
     couch_frame();assert(couchMenuDevice==0);
     testButtons[0][GAMEPAD_BUTTON_RIGHT_FACE_DOWN]=true;couch_frame();memset(testButtons,0,sizeof(testButtons));
+    assert(couchFirefightMenu && !couchLobby && couchSelection==1);
+    testButtons[0][GAMEPAD_BUTTON_RIGHT_FACE_DOWN]=true;couch_frame();memset(testButtons,0,sizeof(testButtons));
     assert(couchLobby && multiplayerActivePlayers==1);
     for(int i=1;i<4;i++)testButtons[i][GAMEPAD_BUTTON_MIDDLE_RIGHT]=true;
     couch_frame();memset(testButtons,0,sizeof(testButtons));assert(multiplayerActivePlayers==4);

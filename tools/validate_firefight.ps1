@@ -16,6 +16,24 @@ try {
     & gcc tests/firefight_integration.c @sources @flags -o ".build/firefight_integration_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Integration build failed' }
     $backend = if ($Gpu) { 'gpu' } else { 'cpu-mt' }
+    & gcc tests/grenade_selection_test.c @sources @flags -o ".build/grenade_selection_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Grenade selection build failed' }
+    & ".build/grenade_selection_$variant.exe" "--physics=$backend"
+    if ($LASTEXITCODE -ne 0) { throw 'Grenade selection checks failed' }
+    & gcc tests/firefight_cache_test.c @sources @flags -o ".build/firefight_cache_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Cache build failed' }
+    & ".build/firefight_cache_$variant.exe" "--physics=$backend"
+    if ($LASTEXITCODE -ne 0) { throw 'Cache and drop checks failed' }
+    & gcc tests/firefight_sticky_drop_test.c @sources @flags -o ".build/firefight_sticky_drop_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Sticky drop build failed' }
+    & ".build/firefight_sticky_drop_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Sticky death-drop checks failed' }
+    & gcc tests/firefight_save_test.c @sources @flags -o ".build/firefight_save_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Save build failed' }
+    & ".build/firefight_save_$variant.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Save checks failed' }
+    & ".build/firefight_save_$variant.exe" --read
+    if ($LASTEXITCODE -ne 0) { throw 'Cross-process Continue failed' }
     & gcc tests/firefight_progression_test.c @sources @flags -o ".build/firefight_progression_$variant.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Progression build failed' }
     & ".build/firefight_progression_$variant.exe" "--physics=$backend"

@@ -1,4 +1,4 @@
-/* Enemy-earned equipment: a copy is minted only when a carrier is assigned. */
+/* Run unlocks come from collecting carrier equipment; the spawn cache supplies unlocked copies. */
 static const FfEquipmentRule fpRules[]={
  {PICKUP_GLOB,2,ENEMY_TYPE_STANDARD,'E'},{PICKUP_REINFORCED,2,ENEMY_TYPE_BUILDER,'E'},
  {PICKUP_GLOCK,3,ENEMY_TYPE_STANDARD,'C'},{PICKUP_GRENADE,3,ENEMY_TYPE_SAPPER,'C'},
@@ -22,10 +22,12 @@ static bool fp_reserve(size_t count){
  fpItems=items;fpCapacity=cap;return true;
 }
 static void fp_new_run(void){
+ fpCacheReady=false;
  memset(fpPairs,0,sizeof(fpPairs));
  memset(fpCarrierType,0,sizeof(fpCarrierType));memset(fpCarrierClock,0,sizeof(fpCarrierClock));memset(fpCarrierPanel,0,sizeof(fpCarrierPanel));
  fpPendingCount=0;fpRestartTimer=0;fpSupplyTimer=0;fpBannerRead=fpBannerWrite=0;fpBannerTimer=0;
  if(fpRestoring)return;
+ fpSaveEnabled=false;
  fpCount=0;fpNextId=1;fpUnlocked=0;fpRepeatCursor=0;++fpRevision;++fpGeneration;
  free(fpCheckpoint.items);fpCheckpoint=(FfCheckpoint){0};
 }
@@ -39,11 +41,19 @@ static void fp_ground(FfItem *item){
  }
  item->pos=origin;item->pos.y=fmaxf(.8f,item->pos.y);
 }
-static void fp_drop(FfItem *item,Vector3 at){item->owner=-1;item->slot=-1;item->pos=at;fp_ground(item);++fpRevision;}
+static void fp_drop(FfItem *item,Vector3 at){item->owner=-1;item->slot=-1;item->pos=at;item->groundAge=0;fp_ground(item);++fpRevision;}
 static void fp_death(int i,Vector3 at){
  fp_pair_clear(i);
  if(!fp_active()||netTransport.role==NET_ROLE_CLIENT)return;
- for(size_t n=0;n<fpCount;n++)if(fpItems[n].owner==i)fp_drop(&fpItems[n],at);
+ size_t count=0,ordinal=0;
+ for(size_t n=0;n<fpCount;n++)if(fpItems[n].owner==i)count++;
+ // A player's small upgrades must not disappear inside their dropped gun models.
+ // Single-item carrier drops stay centered; every item still uses safe grounding.
+ for(size_t n=0;n<fpCount;n++)if(fpItems[n].owner==i){
+  Vector3 drop=at;
+  if(count>1){float angle=2*PI*(float)ordinal/(float)count;drop.x+=.8f*cosf(angle);drop.z+=.8f*sinf(angle);}
+  fp_drop(&fpItems[n],drop);ordinal++;
+ }
  if(i>=MAX_PLAYERS&&i<MAX_COMBATANTS)fpCarrierType[i]=0;
 }
 static void fp_queue_unlock(int type){
@@ -54,7 +64,11 @@ static bool fp_collect(int i,size_t n,bool replace){
  if(!fp_active()||netTransport.role==NET_ROLE_CLIENT||i<0||i>=firefightHumans||players[i].respawn_timer>0||n>=fpCount)return false;
  FfItem *item=&fpItems[n];if(item->owner!=-1||combatantLife[i]!=LIFE_ALIVE)return false;int type=item->type,gun=eq_pickup_gun(type);Equipment *e=&equipment[i];
  if(gun>=0){
-  if(e->gun[0]==gun||e->gun[1]==gun)return false;
+  if(e->gun[0]==gun||e->gun[1]==gun){
+   item->owner=-2;item->groundAge=0;players[i].matter=fminf(player_max_matter(&players[i]),players[i].matter+FP_DUPLICATE_MATTER);
+   players[i].isExposed=players[i].matter<=0;players[i].matter_flash_timer=.2f;++fpRevision;
+   play_sfx_at(SFX_SHIELD,players[i].pos,i,1,1);return true;
+  }
   int slot=e->gun[0]==EQ_EMPTY?0:e->gun[1]==EQ_EMPTY?1:replace?e->selected:-1;if(slot<0)return false;
   int old=e->gun[slot];if(!eq_pickup(i,type,replace))return false;
   for(size_t k=0;k<fpCount;k++)if(fpItems[k].owner==i&&fpItems[k].slot==slot&&eq_pickup_gun(fpItems[k].type)==old)fp_drop(&fpItems[k],players[i].pos);
@@ -74,8 +88,8 @@ static int fp_near(int i,bool automatic){
  int best=-1;float distance=1.4f;
  for(size_t n=0;n<fpCount;n++)if(fpItems[n].owner==-1){
   int gun=eq_pickup_gun(fpItems[n].type);Equipment *e=&equipment[i];
-  if(gun>=0&&(e->gun[0]==gun||e->gun[1]==gun))continue;
-  if(automatic&&gun>=0&&e->gun[0]!=EQ_EMPTY&&e->gun[1]!=EQ_EMPTY)continue;
+  bool duplicate=gun>=0&&(e->gun[0]==gun||e->gun[1]==gun);
+  if(automatic&&gun>=0&&!duplicate&&e->gun[0]!=EQ_EMPTY&&e->gun[1]!=EQ_EMPTY)continue;
   if(fpItems[n].type==PICKUP_GOLD_TETHER&&players[i].goldTetherCharged)continue;
   if((fpItems[n].type==PICKUP_ADHESIVE&&(e->upgrades&EQ_ADHESIVE))||(fpItems[n].type==PICKUP_REINFORCED&&(e->upgrades&EQ_BUILD)))continue;
   if(fpItems[n].type==PICKUP_SHIELD_REGEN && (e->upgrades&EQ_SHIELD))continue;
@@ -85,7 +99,11 @@ static int fp_near(int i,bool automatic){
   if(length<distance && (length<.15f || !first_voxel_hit_detailed((Ray){players[i].pos,v_norm(d)},fmaxf(0,length-.15f),-1,false,&hit))){best=(int)n;distance=length;}
  }return best;
 }
-static bool fp_interact(int i){int n=fp_near(i,false);return n>=0 && fp_collect(i,(size_t)n,true);}
+#include "firefight_cache.inc"
+static bool fp_interact(int i){
+ int n=fp_near(i,false);if(n>=0 && fp_collect(i,(size_t)n,true))return true;
+ return fp_cache_collect(i);
+}
 static int fpOpeningRoster[FF_TYPE_COUNT],fpOpeningCarriers[8],fpOpeningCarrierCount;
 static void fp_prepare_round(int wave,int round){
  memset(fpPairs,0,sizeof(fpPairs));
@@ -191,9 +209,14 @@ static void fp_tick(float dt){
  fp_pairs_tick(dt);
  shield_escort_tick();
  if(fpRestartTimer>0){fpRestartTimer=fmaxf(0,fpRestartTimer-dt);if(fpRestartTimer<=0)fp_restore();return;}
+ for(size_t n=0;n<fpCount;n++)if(fpItems[n].owner==-1){
+  fpItems[n].groundAge+=fmaxf(0,dt);
+  if(fpItems[n].groundAge>=FP_DROP_SECONDS){fpItems[n].owner=-2;++fpRevision;}
+ }
  for(int i=0;i<firefightHumans;i++)if(combatantLife[i]==LIFE_ALIVE){int n=fp_near(i,true);if(n>=0)fp_collect(i,(size_t)n,false);}
  fpSupplyTimer-=dt;if(fpSupplyTimer<=0){
   fpSupplyTimer=.25f;static size_t cursor=0;
+  if(fpCacheReady)for(int r=0;r<FP_RULE_COUNT;r++){FfItem stand={.pos=fpCachePositions[r]};fp_ground(&stand);fpCachePositions[r]=stand.pos;}
   for(size_t n=0;n<16 && n<fpCount;n++){if(cursor>=fpCount)cursor=0;FfItem *item=&fpItems[cursor++];if(item->owner==-1){Vector3 old=item->pos;fp_ground(item);if(v_length(world_delta(old,item->pos))>.01f)++fpRevision;}}
  }
 }
@@ -202,8 +225,18 @@ static void fp_draw(WeaponRenderPass pass){
  // Keep late endless runs bounded even when many unclaimed weapons accumulate.
  struct DisplayCell {int x,y,z,type;bool used;} shown[256]={0};int detailed=0;
  if(!fp_active())return;Vector3 eye=drawViewPlayerIndex>=0?players[drawViewPlayerIndex].pos:(Vector3){0};float now=weaponFrameSampled?weaponFrameTime:(float)GetTime();
- for(size_t n=0;n<fpCount;n++)if(fpItems[n].owner==-1 && periodic_visible(fpItems[n].pos,2) && v_length(world_delta(fpItems[n].pos,eye))<60){
-  FfItem *item=&fpItems[n];Vector3 p=item->pos;int x=(int)floorf(p.x*2),y=(int)floorf(p.y*2),z=(int)floorf(p.z*2);
+ if(fpCacheReady && pass!=WEAPON_GLASS){
+  Vector3 marker=v_add(fpCacheOrigin,(Vector3){0,.5f,0});
+  if(periodic_visible(marker,2) && v_length(world_delta(marker,eye))<60){DrawCube(marker,.6f,.4f,.6f,SKYBLUE);DrawCubeWires(marker,.65f,.45f,.65f,WHITE);}
+ }
+ for(size_t n=0;n<fpCount+(fpCacheReady?FP_RULE_COUNT:0);n++){
+  bool cache=n>=fpCount;int rule=cache?(int)(n-fpCount):-1;
+  if(cache && !(fpUnlocked&(1u<<rule)))continue;
+  FfItem display={.id=cache?(uint32_t)(rule+1):0,.type=cache?fpRules[rule].type:0,.owner=-1,.pos=cache?fpCachePositions[rule]:(Vector3){0}};
+  FfItem *item=cache?&display:&fpItems[n];
+  if(item->owner!=-1 || !periodic_visible(item->pos,2) || v_length(world_delta(item->pos,eye))>=60)continue;
+  if(cache && pass!=WEAPON_GLASS)DrawCube(v_add(item->pos,(Vector3){0,-.45f,0}),.9f,.15f,.9f,SKYBLUE);
+  Vector3 p=item->pos;int x=(int)floorf(p.x*2),y=(int)floorf(p.y*2),z=(int)floorf(p.z*2);
   unsigned hash=((uint32_t)x*73856093u^(uint32_t)y*19349663u^(uint32_t)z*83492791u^(uint32_t)item->type*977u)&255;bool duplicate=false;
   for(int probe=0;probe<256;probe++){struct DisplayCell *cell=&shown[(hash+probe)&255];if(!cell->used){*cell=(struct DisplayCell){x,y,z,item->type,true};break;}if(cell->x==x&&cell->y==y&&cell->z==z&&cell->type==item->type){duplicate=true;break;}}
   if(duplicate)continue;p.y+=sinf(now*2+item->id)*.12f;
@@ -232,6 +265,15 @@ static void fp_hud(int i,int w,int h){
   int width=MeasureText(text,size)+48,x=(w-width)/2,y=46;
   DrawRectangle(x-8,y-6,width+16,38,Fade(BLACK,.85f));fp_icon(type,x+2,y,GOLD);DrawText(text,x+42,y+3,size,GOLD);
  }
+ int cacheRule=fp_cache_near(i);
+ if(cacheRule>=0){
+  const char *key=ct_hint(i,CT_EQUIP);
+  const char *text=TextFormat("%s: cache - %s",key,pickup_type_label(fpRules[cacheRule].type));int size=w<700?12:18;
+  DrawText(text,(w-MeasureText(text,size))/2,h/2+80,size,SKYBLUE);
+ }else if(fpCacheReady && v_length(world_delta(fpCacheOrigin,players[i].pos))<12){
+  const char *text=fpUnlocked?"SPAWN CACHE - approach a blue equipment stand":"SPAWN CACHE - collect enemy equipment to unlock supplies";int size=w<700?10:16;
+  DrawText(text,(w-MeasureText(text,size))/2,h/2+80,size,SKYBLUE);
+ }
  if(fpRestartTimer>0){const char *text=TextFormat("Checkpoint: restarting wave %d in %.0f",firefightWave,ceilf(fpRestartTimer));int size=w<700?17:28;DrawText(text,(w-MeasureText(text,size))/2,h/2,size,GOLD);}
  int n=fp_near(i,false);if(n>=0 && eq_pickup_gun(fpItems[n].type)>=0){Equipment *e=&equipment[i];int gun=eq_pickup_gun(fpItems[n].type);if(e->gun[0]!=gun&&e->gun[1]!=gun&&e->gun[0]!=EQ_EMPTY&&e->gun[1]!=EQ_EMPTY){
   const char *key=ct_hint(i,CT_EQUIP);int size=w<700?12:18;const char *text=TextFormat("%s: replace with %s",key,pickup_type_label(fpItems[n].type));DrawText(text,(w-MeasureText(text,size))/2,h/2+55,size,WHITE);
@@ -239,6 +281,7 @@ static void fp_hud(int i,int w,int h){
 }
 static void fp_radar(int i,int cx,int cy,int radius,float range){
  if(!fp_active())return;Vector3 f=player_forward(&players[i]);f.y=0;f=v_norm(f);Vector3 right={-f.z,0,f.x};
+ if(fpCacheReady){Vector3 d=world_delta(fpCacheOrigin,players[i].pos);d.y=0;if(v_length(d)<=range){int x=cx+(int)(v_dot(d,right)*radius/range),y=cy-(int)(v_dot(d,f)*radius/range);DrawRectangleLines(x-4,y-4,8,8,SKYBLUE);}}
  for(size_t n=0;n<fpCount;n++)if(fpItems[n].owner==-1){Vector3 d=world_delta(fpItems[n].pos,players[i].pos);d.y=0;if(v_length(d)>range)continue;
   int x=cx+(int)(v_dot(d,right)*radius/range),y=cy-(int)(v_dot(d,f)*radius/range);DrawRectangle(x-2,y-2,4,4,GOLD);
  }
@@ -246,4 +289,5 @@ static void fp_radar(int i,int cx,int cy,int radius,float range){
 #include "firefight_pairs.inc"
 #include "firefight_carriers.inc"
 #include "firefight_checkpoint.inc"
+#include "firefight_save.inc"
 #include "firefight_progression_net.inc"

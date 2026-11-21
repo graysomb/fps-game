@@ -114,7 +114,7 @@ static void ff_update_coop(float dt) {
             players[i].deaths++; ff_resolve_death(i);
             pending |= combatantLife[i]==LIFE_WAITING;
         }
-        if(!pending && !fp_retry()) { firefightWaveState=FIREFIGHT_STATE_DEFEAT; gameState=GAME_STATE_GAMEOVER; }
+        if(!pending && !fp_retry()) { firefightWaveState=FIREFIGHT_STATE_DEFEAT; gameState=GAME_STATE_GAMEOVER; fp_save_clear(); }
     }
 }
 
@@ -154,6 +154,7 @@ static void reset_firefight_match(void) {
         players[0].pos=(Vector3){0,BASE_EYE_HEIGHT+2,1.5f};
         players[0].yaw=0;players[0].pitch=0;
     }
+    fp_cache_place();
     start_firefight_wave(1);
 }
 
@@ -189,7 +190,7 @@ static void ff_wave_complete(void) {
         }
     }
     if(!firefightEndless && firefightWave>=FF_WAVE_COUNT) {
-        firefightWaveState=FIREFIGHT_STATE_VICTORY; gameState=GAME_STATE_GAMEOVER; return;
+        firefightWaveState=FIREFIGHT_STATE_VICTORY; gameState=GAME_STATE_GAMEOVER; fp_save_clear(); return;
     }
     firefightWaveState=FIREFIGHT_STATE_LOOT;
     firefightWaveBannerTimer=0; firefightIntermissionTimer=FF_LOOT_SECONDS;

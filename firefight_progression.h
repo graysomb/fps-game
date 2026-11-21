@@ -1,6 +1,11 @@
 /* Run-local earned equipment. owner -1 is on the ground; -2 is consumed. */
-typedef struct {uint32_t id;int type,owner,slot;Vector3 pos;} FfItem;
+typedef struct {uint32_t id;int type,owner,slot;Vector3 pos;float groundAge;} FfItem;
 typedef struct {int type,wave,chassis;char tier;} FfEquipmentRule;
+#define FP_DROP_SECONDS 60.0f
+#define FP_DUPLICATE_MATTER 25.0f
+static bool fpCacheReady;
+static Vector3 fpCacheOrigin,fpCachePositions[16];
+static void fp_cache_place(void);
 static FfItem *fpIncoming;
 static FfItem *fpItems;static size_t fpCount,fpCapacity;
 static uint32_t fpNextId=1,fpRevision=1,fpGeneration=1,fpUnlocked;
@@ -28,6 +33,12 @@ typedef struct {
     FfItem *items;size_t count;
 } FfCheckpoint;
 static FfCheckpoint fpCheckpoint;
+/* Disk saves are armed only by an explicit offline New Game / Continue. */
+static bool fpSaveEnabled;
+static const char *fpSaveError;
+static void fp_save_write(void);
+static void fp_save_clear(void);
+static void fp_start_new_game(void);
 static bool fp_active(void);
 static int fp_rule(int type);
 static int fp_team_size(void);
@@ -39,6 +50,7 @@ static void fp_prepare_round(int wave,int round);
 static void fp_spawn(int i,int chassis);
 static void fp_death(int i,Vector3 position);
 static int fp_near(int i,bool automatic);
+static int fp_cache_near(int i);
 static bool fp_interact(int i);
 static void fp_tick(float dt);
 static bool fp_retry(void);

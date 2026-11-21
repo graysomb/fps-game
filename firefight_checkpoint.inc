@@ -1,5 +1,5 @@
 static void fp_capture(void){
- if(!fp_active()||!firefightCheckpoints||fpRestoring||netTransport.role==NET_ROLE_CLIENT)return;
+ if(!fp_active()||fpRestoring||netTransport.role==NET_ROLE_CLIENT)return;
  FfItem *copy=fpCount?malloc(fpCount*sizeof(*copy)):NULL;
  if(fpCount&&!copy){TraceLog(LOG_ERROR,"Checkpoint allocation failed");fpCheckpoint.valid=false;return;}
  if(fpCount)memcpy(copy,fpItems,fpCount*sizeof(*copy));free(fpCheckpoint.items);
@@ -12,6 +12,7 @@ static void fp_capture(void){
   fpCheckpoint.grenades[i]=grenadeInventory[i];fpCheckpoint.selected[i]=exSelectedGrenade[i];fpCheckpoint.revives[i]=reviveCount[i];
   memcpy(fpCheckpoint.special[i],exGrenades[i],sizeof(fpCheckpoint.special[i]));
  }
+ fp_save_write();
 }
 static bool fp_retry(void){
  if(!fp_active()||!firefightCheckpoints||!fpCheckpoint.valid)return false;

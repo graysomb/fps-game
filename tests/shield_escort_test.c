@@ -7,13 +7,14 @@ bool ffTestReviveHeld[4];
 static void fresh(void){
  enemy_cleanup(true);clear_all_chunks();clear_world_voxels();init_static_hash();
  memset(players,0,sizeof(players));memset(enemySpecial,0,sizeof(enemySpecial));
- gameMode=GAME_MODE_FIREFIGHT;gameState=GAME_STATE_PLAYING;firefightHumans=1;activePlayers=MAX_COMBATANTS;
+ gameMode=GAME_MODE_FIREFIGHT;gameState=GAME_STATE_PLAYING;firefightHumans=1;firefightWave=4;activePlayers=MAX_COMBATANTS;
  firefightPractice=enemyLab=equipmentLab=creativeModeActive=false;firefightWaveState=FIREFIGHT_STATE_ACTIVE;worldPeriodic=false;worldFloorHalfSize=40;netTransport.role=NET_ROLE_OFFLINE;
  fp_new_run();eq_reset_all();clarity_reset();
  for(int i=0;i<MAX_COMBATANTS;i++){players[i].respawn_timer=9999;combatantLife[i]=LIFE_UNUSED;playerInput[i]=i<4?INPUT_TYPE_KEYBOARD:INPUT_TYPE_BOT_EASY;combatantTeam[i]=i<4?0:1;}
  players[0].pos=(Vector3){-.9f,1,-12};players[0].respawn_timer=0;players[0].matter=100;combatantLife[0]=LIFE_ALIVE;
  init_firefight_bot_entity(4,ENEMY_TYPE_STANDARD,INPUT_TYPE_BOT_EASY);players[4].pos=(Vector3){-.9f,1,0};players[4].yaw=0;players[4].pitch=0;
- init_firefight_bot_entity(5,ENEMY_TYPE_SHIELDBEARER,INPUT_TYPE_BOT_EASY);players[5].pos=(Vector3){0,1,-3};players[5].yaw=0;players[5].pitch=0;enemy_update_equipment(5);rebuild_voxel_hash();
+ assert(ff_ai_level(firefightWave,ENEMY_TYPE_STANDARD)==0);assert(ff_ai_level(firefightWave,ENEMY_TYPE_SHIELDBEARER)==1);
+ init_firefight_bot_entity(5,ENEMY_TYPE_SHIELDBEARER,INPUT_TYPE_BOT_MEDIUM);players[5].pos=(Vector3){0,1,-3};players[5].yaw=0;players[5].pitch=0;enemy_update_equipment(5);rebuild_voxel_hash();
  ai_select(4,0,players[0].pos,AI_ALERT_SEEN);aiCombat[4].reaction=0;
 }
 static void formations(void){

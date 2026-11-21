@@ -194,12 +194,37 @@ static void previews(void){
         }
     }
 }
+static void obstacle_tests(void){
+    fixture();int bodies=attached();Vector3 origin=goFight.position;
+    int x=(int)floorf(origin.x/VOXEL_SIZE),z=(int)floorf(origin.z/VOXEL_SIZE);
+    int wall=add_static_voxel_at_grid(x,3,z,GRAY,0);uint64_t wallId=voxels[wall].identity;
+    int scrap=addVoxel(origin.x+.5f,2,origin.z,false,true,GRAY,0);uint64_t scrapId=voxels[scrap].identity;
+    int floor=add_static_voxel_at_grid(x,-1,z,GRAY,0);uint64_t floorId=voxels[floor].identity;
+    int distant=add_static_voxel_at_grid(x+24,3,z,GRAY,0);uint64_t distantId=voxels[distant].identity;
+    init_static_hash();rebuild_voxel_hash();
+    netTransport.role=NET_ROLE_CLIENT;assert(!go_move_clear(origin));assert(enemy_voxel(wallId)>=0 && enemy_voxel(scrapId)>=0);netTransport.role=NET_ROLE_OFFLINE;
+    assert(go_move_clear(origin));assert(enemy_voxel(wallId)<0 && enemy_voxel(scrapId)<0);
+    assert(enemy_voxel(floorId)>=0 && enemy_voxel(distantId)>=0 && attached()==bodies);
+    assert(!go_move_clear((Vector3){FLOOR_SIZE,0,0}));
+    fixture();origin=goFight.position;x=(int)floorf(origin.x/VOXEL_SIZE);z=(int)floorf(origin.z/VOXEL_SIZE);
+    // An enclosing structure used to leave the navigation waypoint at the start.
+    add_static_box_at_grid(x-5,x+5,1,8,z-5,z-4,GRAY);add_static_box_at_grid(x-5,x+5,1,8,z+4,z+5,GRAY);
+    add_static_box_at_grid(x-5,x-4,1,8,z-3,z+3,GRAY);add_static_box_at_grid(x+4,x+5,1,8,z-3,z+3,GRAY);init_static_hash();
+    Vector3 target=v_add(origin,(Vector3){0,0,-12});go_route(target);assert(fabsf(goFight.waypoint.z-target.z)<.01f);
+    for(int n=0;n<80;n++){Vector3 next=v_add(goFight.position,(Vector3){0,0,-.1f});assert(go_move_clear(next));goFight.position=next;}
+    assert(goFight.position.z<origin.z-7.9f);
+    fixture();int cell=go_find(goCells[goMount[GOLEM_ARM_L]].id,-1);assert(cell>=0);
+    Vector3 at=voxels[cell].pos;int block=addVoxel(at.x,at.y,at.z,false,true,GRAY,0);uint64_t blockId=voxels[block].identity;bodies=attached();
+    go_crush_body_contacts();assert(enemy_voxel(blockId)<0 && attached()==bodies);
+    puts("Golem obstacle crushing: static/dynamic contact, trapped route escape, floor/body/distant preservation and host authority passed");
+}
 int main(int argc,char **argv){
     setvbuf(stdout,NULL,_IONBF,0);assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,720,"Golem combat tests");init_pbd_thread_pool();assert(initialize_physics_backend());weaponRenderingReady=weapon_renderer_init();
-    if(getenv("GOLEM_COMBAT_PREVIEW"))previews();
+    if(getenv("GOLEM_OBSTACLE_ONLY"))obstacle_tests();
+    else if(getenv("GOLEM_COMBAT_PREVIEW"))previews();
     else if(getenv("GOLEM_COMBAT_STRESS"))stress_test(atoi(getenv("GOLEM_COMBAT_STRESS")));
-    else {if(getenv("FPS_FORCE_GPU_VALIDATION_FAILURE_ONCE"))fallback_attack();arsenal_tests();shield_weapon_tests();shield_tests();ray_tests();attack_hits();combat_tests();integration_tests();}
+    else {if(getenv("FPS_FORCE_GPU_VALIDATION_FAILURE_ONCE"))fallback_attack();obstacle_tests();arsenal_tests();shield_weapon_tests();shield_tests();ray_tests();attack_hits();combat_tests();integration_tests();}
     clear_world_voxels();assert(!goActive&&!goCombatEnabled&&skeletonConstraintCount==0);
     shutdown_pbd_thread_pool();gpu_physics_shutdown();shutdown_shard_rendering();clear_all_chunks();shutdown_world_visuals();weapon_renderer_shutdown();CloseWindow();puts("Golem combat checks passed");return 0;
 }

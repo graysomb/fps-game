@@ -52,9 +52,15 @@ Reviving does not grant ammunition. Grenades detonate half a second after their 
 in flight wait for their first impact. Orange supply stations add one grenade and refill after 30 seconds. Grenades
 work in offline combat and LAN PvP; creative, paused, and downed players cannot throw.
 
+With the adhesive upgrade, D-pad Down / Tab / semicolon cycles between Regular,
+Sticky, Gravity and Igloo grenades (skipping unavailable types). Regular and Sticky
+share the same grenade ammo; Regular deals up to 75 damage and Sticky up to 100.
+The grenade HUD highlights the selected mode.
+
 **Explosions hurt everyone**, including the thrower, teammates, and other enemies.
-Sapper charges and grenades share 60 damage falling to zero at four units, cover checks
-before terrain destruction, a two-unit demolition radius, and a four-unit debris impulse.
+Sticky grenades deal up to 100 damage, regular grenades 75, and Sapper charges 60,
+all falling linearly to zero at four units. They share cover checks before terrain
+destruction, a two-unit demolition radius, and a four-unit debris impulse.
 Blast-driven debris retains friendly fire for ten seconds or until it sleeps.
 Enemies abandon work and retreat from nearby live bombs; the Walking Foundry holds its
 position. Sapper charges retain their four-second fuse and remain shootable to disarm.
@@ -202,8 +208,8 @@ Foundry Holdout contrasts solid central platforms, stairs and entrance pylons wi
 one-voxel factory walls/roofs, narrow piers and hollow flank machinery. Practice
 retains its original geometry; Crosscut is unchanged. Six orange-marked traps cover
 the lower routes: two falling choke-point slabs, two suspended bay plates, and two
-cargo stacks that tip toward the arena. Shoot or melee the orange release cell,
-blast the assembly, or tether its payload to release it. Floor outlines mark the
+cargo stacks that tip toward the arena. Shoot or melee the orange release blocks (any orange section of a support post
+works with the default gun, Glob, or Glock), blast the assembly, or tether its payload to release it. Floor outlines mark the
 fall/tipping zone; each moving payload contains at most 160 voxels (hard cap 256).
 
 A connected trap piece of at least eight voxels must actually hit an actor while
@@ -278,15 +284,23 @@ Carriers use the same weapon costs, damage and terrain effects as players, with
 existing enemy reaction and aim error. Grenadiers have two throws and a supply drop;
 builders use reinforced cover, and gold-tether carriers grab and throw scrap.
 
-A carrier's death releases one copy immediately. Guns and permanent upgrades persist
-at the last owner's death location; replacing a gun drops that same copy at your
-feet. Duplicates stay on the ground. Downing, revival and intermissions preserve
-owned equipment. Ground items have gold radar markers, safe placement after terrain
-changes, and no respawn timer. Nearby identical copies share a display model; distant items
-use simple glowing markers, with at most 48 detailed models per viewport/pass.
-Each item remains independently collectible. The first team pickup of each type shows a queued
-**WEAPON UNLOCKED!** banner. Grenade supplies are consumable; no free grenades or
-weapons are granted at spawn or intermission. Health and Matter supplies remain.
+A carrier's death releases one copy immediately. Dropped guns, upgrades and grenade
+supplies despawn after 60 seconds on the ground. Multiple death drops spread into a
+small ring so upgrades stay visible beside guns. Replacing a gun drops the old copy
+with a fresh timer. Walking over a gun already in either slot consumes it and grants
+25 Matter, capped at the player's maximum. Downing, revival and intermissions
+preserve owned equipment. Ground items have gold radar markers and safe placement.
+
+The first team pickup of each type unlocks it for the current run and shows a queued
+**WEAPON UNLOCKED!** banner. A blue equipment cache near the initial player spawn
+provides all collected weapons, upgrades and grenade supplies. Approach a blue stand
+and press the equipment interaction key (B/Y, or hold X on controller) to claim a
+copy or replace the selected gun. Cache stands persist and require interaction;
+they never automatically collect or convert duplicate guns to Matter. Unlocks are
+shared by the team, survive Continue/checkpoint restoration, and reset on New Game.
+Wave-start disk saves give restored ground drops a fresh 60-second timer.
+Console `wave n` and `nextwave` also unlock equipment introduced in earlier waves
+for the shared cache; equipment introduced in the selected wave still needs collecting.
 
 **Checkpoints** default OFF. Toggle with `C` or controller `X` in the Firefight lobby
 before starting. When ON, exhausting the team's respawn reserves restarts the current
@@ -295,6 +309,24 @@ grenades, upgrades, team lives, scores and unlocks, rebuilds a fresh arena, and
 places living players safely with full Matter. Failed-attempt loot is rolled back;
 revives and individual reserve respawns do not trigger a checkpoint. The LAN host
 owns the checkpoint and changes the session generation to reject old input/snapshots.
+
+**Continue / New Game:** selecting Firefight opens a menu with both options. Offline
+solo and split-screen runs automatically save at the start of each wave, even when
+the retry Checkpoints option is OFF. Continue restarts that wave with its saved
+equipment, grenades, upgrades, lives, scores, unlocks, player count and world settings.
+Terrain is rebuilt and players return to safe spawns; combat, loot and changes made
+since the wave began are replayed. Reconnect the saved players' controllers before
+continuing. New Game replaces the save when the new match actually starts. Victory
+or a final defeat clears it. Practice, Enemy Lab, LAN and world previews do not
+overwrite an offline run. The advanced Firefight setup also offers Continue (`V`).
+
+The save is `firefight.sav` in `~/Library/Application Support/FPS Game` on macOS,
+`%APPDATA%/FPS Game` on Windows, or `$XDG_DATA_HOME/fps-game` on Linux (default
+`~/.local/share/fps-game`). Custom-map saves refer to the existing map slot, so keep
+that map available. Saves use a versioned, checked format and replace the previous
+file only after a successful write. `FPS_FIREFIGHT_SAVE` overrides the file location
+for isolated testing. `tests/build_firefight_save_macos.sh` builds and runs save,
+progression and integration regressions, including a separate-process Continue check.
 
 `tests/firefight_progression_test.c` covers schedules, shared enemy combat, copy
 conservation, repeated checkpoint restoration and controller/keyboard settings.
@@ -1356,3 +1388,7 @@ exposed reactor, and cyan regeneration. Tab selects a scenario; Space pauses;
 arrows scrub; S shows the skeleton. This is presentation-only and does not replace
 the existing Foundry fight. See [preview instructions](docs/foundry-golem-preview.md)
 for captures, shader fallback, renderer integration, and measured cost.
+
+The wave 12 golem crushes structure blocks and loose debris touching its body or
+blocking its next step. If enclosed, it pushes through a route toward its target.
+The arena floor, its own body, and held attack payloads are preserved.

@@ -20534,7 +20534,10 @@ static void debug_console_exec(const char *line)
             debug_console_print("usage: wave n  (firefight only)");
             return;
         }
-        start_firefight_wave(atoi(arg));
+        if(netTransport.role==NET_ROLE_CLIENT){debug_console_print("wave: host only");return;}
+        int wave=atoi(arg);
+        fp_unlock_previous_waves(wave);
+        start_firefight_wave(wave);
         debug_console_printf("started wave %d", firefightWave);
         return;
     }
@@ -20543,6 +20546,8 @@ static void debug_console_exec(const char *line)
             debug_console_print("nextwave: firefight only");
             return;
         }
+        if(netTransport.role==NET_ROLE_CLIENT){debug_console_print("nextwave: host only");return;}
+        fp_unlock_previous_waves(firefightWave + 1);
         start_firefight_wave(firefightWave + 1);
         debug_console_printf("started wave %d", firefightWave);
         return;
@@ -22083,12 +22088,14 @@ int main(int argc, char **argv) {
 
                         // Primary Action Buttons
                         int actY = boxY + 520;
-                        Rectangle startRec = { (float)(boxX + 28), (float)actY, 430.0f, 54.0f };
-                        const char *startText = (gameMode == GAME_MODE_FIREFIGHT) ? ">>> START FIREFIGHT (ENTER) <<<" : ">>>  START GAME  (ENTER)  <<<";
+                        bool saveActions = gameMode == GAME_MODE_FIREFIGHT && !firefightPractice;
+                        bool canContinue = saveActions && fp_save_available();
+                        Rectangle startRec = { (float)(boxX + 28), (float)actY, saveActions ? 210.0f : 430.0f, 54.0f };
+                        const char *startText = (gameMode == GAME_MODE_FIREFIGHT) ? "New Game (ENTER)" : ">>>  START GAME  (ENTER)  <<<";
                         Color startCol = (gameMode == GAME_MODE_FIREFIGHT) ? (Color){ 195, 45, 40, 255 } : (Color){ 36, 140, 72, 255 };
                         if (DrawMenuButton(startRec, startText, 20, true, startCol, startCol, RAYWHITE)) {
                             if (netTransport.role == NET_ROLE_OFFLINE) {
-                                ResetGame();
+                                fp_start_new_game();
                                 if (droneIntroEnabled) {
                                     gameState = GAME_STATE_DRONE_INTRO;
                                     droneTimer = 3.0f;
@@ -22096,6 +22103,14 @@ int main(int argc, char **argv) {
                                     gameState = GAME_STATE_PLAYING;
                                 }
                             }
+                        }
+
+                        if (saveActions) {
+                            Rectangle continueRec = { (float)(boxX + 248), (float)actY, 210.0f, 54.0f };
+                            if (DrawMenuButton(continueRec, canContinue ? TextFormat("Continue W%d (V)", fpSaveWave) : "No saved game", 18, canContinue,
+                                (Color){36,140,72,255}, (Color){190,195,200,255}, BLACK) && canContinue && !menuEditingSeed)
+                                fp_save_continue();
+                            DrawText(fpSaveError ? fpSaveError : "Autosaves at wave start. New Game replaces the saved run.", boxX + 28, actY + 60, 14, fpSaveError ? RED : DARKBLUE);
                         }
 
                         Rectangle setRec = { (float)(boxX + 472), (float)actY, 250.0f, 54.0f };
@@ -22136,7 +22151,7 @@ int main(int argc, char **argv) {
                         (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) &&
                         (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))) {
                         gameMode = GAME_MODE_FIREFIGHT;
-                        ResetGame();
+                        fp_start_new_game();
                         if (droneIntroEnabled) {
                             gameState = GAME_STATE_DRONE_INTRO;
                             droneTimer = 3.0f;
@@ -22339,7 +22354,7 @@ int main(int argc, char **argv) {
                         }
 
                         if (netTransport.role == NET_ROLE_OFFLINE && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))) {
-                            ResetGame();
+                            fp_start_new_game();
                             if (droneIntroEnabled) {
                                 gameState = GAME_STATE_DRONE_INTRO;
                                 droneTimer = 3.0f;
@@ -22347,6 +22362,7 @@ int main(int argc, char **argv) {
                                 gameState = GAME_STATE_PLAYING;
                             }
                         }
+                        if (netTransport.role == NET_ROLE_OFFLINE && gameMode == GAME_MODE_FIREFIGHT && !firefightPractice && IsKeyPressed(KEY_V) && fp_save_available()) fp_save_continue();
                         if (netTransport.role == NET_ROLE_OFFLINE && IsKeyPressed(KEY_S)) {
                             gameState = GAME_STATE_SETTINGS;
                         }
@@ -22513,7 +22529,7 @@ int main(int argc, char **argv) {
                     EndDrawing();
 
                     if (IsKeyPressed(KEY_R)) {
-                        ResetGame();
+                        fp_start_new_game();
                         gameState = GAME_STATE_PLAYING;
                     }
                     if (IsKeyPressed(KEY_M)) {
