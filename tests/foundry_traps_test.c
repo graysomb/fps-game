@@ -6,6 +6,44 @@ static void fresh(void) {
     clear_all_chunks();clear_world_voxels();activePlayers=0;worldPeriodic=false;worldFloorHalfSize=40;
     gameMode=GAME_MODE_FIREFIGHT;firefightHumans=1;firefightPractice=false;firefightFoundry=true;
 }
+static void spawn_reset_checks(void) {
+    fresh();
+    currentWorldType = WORLD_TYPE_CROSSCUT;
+    useCustomMap = enemyLab = false;
+    multiplayerActivePlayers = 1;
+    foundry_selection_seed(12345);
+    for (int start = 0; start < 3; ++start) {
+        int previousBay = foundryCrackedBay;
+        int previousPillar = foundryCrackedPillar;
+        bool retry = start == 2;
+        fpRestoring = retry;
+        ResetGame();
+        fpRestoring = false;
+        assert(foundryTrapCount == 4);
+        assert(recycleQueueCount == 0);
+        assert((foundryCrackedBay == previousBay) == retry);
+        assert((foundryCrackedPillar == previousPillar) == retry);
+        for (int n = 0; n < foundryTrapCount; ++n) {
+            FoundryTrap *trap = &foundryTraps[n];
+            assert(!trap->active && !trap->pending && foundry_trap_complete(trap));
+        }
+        for (int id = 0; id < voxel_count; ++id) {
+            const Voxel *cell = &voxels[id];
+            if (cell->simulate || cell->isBullet) continue;
+            int triggers = 0;
+            for (int n = 0; n < foundryTrapCount; ++n) {
+                triggers += foundry_trap_trigger(&foundryTraps[n], cell->gx, cell->gy, cell->gz);
+            }
+            assert(triggers == (ColorToInt(cell->color) == ColorToInt(ORANGE)));
+        }
+        FoundryTrap *bay = &foundryTraps[2];
+        assert(bay->kind == FOUNDRY_BAY);
+        assert(foundry_trap_hit(table_get_static_only(bay->rx, bay->ry, bay->rz), 0, false));
+        foundry_traps_prepare();
+        assert(bay->active && recycleQueueCount > 0);
+    }
+    puts("Foundry spawn, rematch and checkpoint retry keep orange cells and triggers in sync");
+}
 static void release_checks(void) {
     fresh();buildFoundryHoldout();assert(foundryTrapCount==4);
     fprintf(stderr,"Foundry cells=%d, fragile=%d vs %d (%.1f%% reduction)\n",voxel_count,foundryFragileCells,foundryFragileReferenceCells,100.f*(1-(float)foundryFragileCells/foundryFragileReferenceCells));
@@ -286,6 +324,7 @@ int main(int argc,char **argv) {
     if(weaponsOnly)argc=1;
     assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Foundry traps");init_pbd_thread_pool();assert(initialize_physics_backend());
+    if(!weaponsOnly)spawn_reset_checks();
     expansion_trigger_checks();post_weapon_checks();if(!weaponsOnly){release_checks();post_checks();bay_checks();pillar_checks();selection_checks();damage_checks();trigger_checks();capture();}clear_all_chunks();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Foundry traps passed");
 }
 

@@ -9475,22 +9475,7 @@ static void ResetGame(void) {
         players[i].dynamicShotActive = false;
         goliathStates[i].count = 0;
     }
-    // clear voxels
-    voxel_count = 0;
-    memset(goldReleaseGraceFrames, 0, sizeof(goldReleaseGraceFrames));
-    goldReleaseGraceActiveCount = 0;
-    reset_particle_pool();
-    staticBeliefsInitialized = false;
-    staticBeliefsForceFullRefresh = false;
-    staticBeliefDirtyCount = 0;
-    dynamicGlueClustersInitialized = false;
-    memset(debugTagBreakLogged, 0, sizeof(debugTagBreakLogged));
-    memset(staticBeliefDirty, 0, sizeof(staticBeliefDirty));
-    memset(staticBeliefQueued, 0, sizeof(staticBeliefQueued));
-    // clear hash
-    memset(static_table, 0, sizeof(static_table));
-    memset(dynamic_table, 0, sizeof(dynamic_table));
-    table_cache_invalidate();
+    clear_world_voxels();
     // build static blocks
     buildDemo();
     rebuild_all_voxel_surfaces();
