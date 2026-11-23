@@ -63,6 +63,54 @@ static void actions(void){
     fixture();tm[0]=true;ct_frame(.016f);assert(ct_down(0,CT_FIRE));players[0].respawn_timer=2;ct_frame(.016f);assert(!ct_down(0,CT_FIRE));players[0].respawn_timer=0;ct_frame(.016f);assert(!ct_down(0,CT_FIRE));tm[0]=false;ct_frame(.016f);tm[0]=true;ct_frame(.016f);assert(ct_pressed(0,CT_FIRE));
     puts("Shared actions: remaps, mouse ownership, wheel, device IDs, focus and editor chords PASS");
 }
+static void console_shortcut(void) {
+    fixture();
+    playerInput[0] = INPUT_TYPE_GAMEPAD;
+    localSeats[0].device = 1;
+    ct_frame(.016f);
+
+    tk[KEY_GRAVE] = tk[KEY_W] = true;
+    ct_frame(.016f);
+    debug_console_update();
+    assert(debugConsoleOpen && !ct_down(0, CT_FORWARD));
+    ct_frame(.016f);
+    debug_console_update();
+    assert(debugConsoleOpen);
+
+    neutral();
+    ct_frame(.016f);
+    tp[KEY_ESCAPE] = true;
+    debug_console_update();
+    assert(!debugConsoleOpen);
+
+    CtProfile *profile = ct_profile(0);
+    profile->bindings[0][CT_CONSOLE][0] = (CtBinding){1, KEY_F1, 1};
+    profile->bindings[2][CT_CONSOLE][0] = (CtBinding){4, GAMEPAD_BUTTON_MIDDLE_LEFT, 0};
+    neutral();
+    pads[1] = false;
+    tk[KEY_F1] = tk[KEY_LEFT_CONTROL] = true;
+    ct_frame(.016f);
+    debug_console_update();
+    assert(debugConsoleOpen);
+
+    neutral();
+    pads[1] = true;
+    ct_frame(.016f);
+    pb[1][GAMEPAD_BUTTON_MIDDLE_LEFT] = true;
+    ct_frame(.016f);
+    debug_console_update();
+    assert(!debugConsoleOpen);
+
+    neutral();
+    ct_frame(.016f);
+    ctMenuOpen = true;
+    tk[KEY_F1] = tk[KEY_LEFT_CONTROL] = true;
+    ct_frame(.016f);
+    debug_console_update();
+    assert(!debugConsoleOpen);
+    ctMenuOpen = false;
+    puts("Console shortcut: keyboard and remaps with controllers, Escape and modal controls PASS");
+}
 static void modes(void){
     fixture();ct_profile(0)->aimToggle[0]=0;tk[KEY_LEFT_SHIFT]=true;ct_frame(.016f);NetInputCommand c=ct_command(0,0,.016f);aim_command(0,&c);assert(aimStates[0].active);tk[KEY_LEFT_SHIFT]=false;ct_frame(.016f);c=ct_command(0,0,.016f);aim_command(0,&c);assert(!aimStates[0].active);
     fixture();ct_profile(0)->tetherToggle[1]=1;tm[1]=true;ct_frame(.016f);assert(ct_command(0,0,.016f).held&NET_INPUT_TETHER);tm[1]=false;ct_frame(.016f);assert(ct_command(0,0,.016f).held&NET_INPUT_TETHER);tm[1]=true;ct_frame(.016f);assert(!(ct_command(0,0,.016f).held&NET_INPUT_TETHER));
@@ -177,4 +225,4 @@ static void menus(void){
     fixture();ct_open();for(int size=0;size<2;size++){SetWindowSize(size?640:1280,size?360:720);for(int tab=0;tab<5;tab++){ctTab=tab;ctRow=ctScroll=0;ct_menu_frame();ct_menu_frame();Image image=LoadImageFromScreen();assert(ExportImage(image,TextFormat("controls-%d-%d.png",size,tab)));UnloadImage(image);}}
     ct_close(false);puts("Menu draft/apply/cancel, profile duplicate, conflict swap, B capture and screenshots PASS");
 }
-int main(void){SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(1280,720,"Controls tests");MakeDirectory("artifacts");MakeDirectory("artifacts/controls-test");assert(ChangeDirectory("artifacts/controls-test"));persistence();actions();modes();tuning();lan();camera_fov();fov_menu();menus();CloseWindow();puts("Controls regression suite PASS");return 0;}
+int main(void){SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(1280,720,"Controls tests");MakeDirectory("artifacts");MakeDirectory("artifacts/controls-test");assert(ChangeDirectory("artifacts/controls-test"));persistence();actions();console_shortcut();modes();tuning();lan();camera_fov();fov_menu();menus();CloseWindow();puts("Controls regression suite PASS");return 0;}

@@ -37,7 +37,9 @@ static void ct_frame(float dt){
     for(int k=0;k<7;k++)ctRaw.mouse[k]=IsMouseButtonDown(k);
     ctRaw.delta=GetMouseDelta();ctRaw.wheel=GetMouseWheelMove();
     for(int d=0;d<4;d++){ctRaw.available[d]=IsGamepadAvailable(d);for(int b=0;b<32;b++)ctRaw.pad[d][b]=ctRaw.available[d]&&IsGamepadButtonDown(d,b);for(int a=0;a<8;a++)ctRaw.axes[d][a]=ctRaw.available[d]?GetGamepadAxisMovement(d,a):0;}
-    int context=ct_context();bool blocked=ctMenuOpen||debugConsoleOpen||!IsWindowFocused()||(gameState!=GAME_STATE_PLAYING&&gameState!=GAME_STATE_CREATIVE);
+    int context=ct_context();
+    bool inputBlocked=ctMenuOpen||!IsWindowFocused()||(gameState!=GAME_STATE_PLAYING&&gameState!=GAME_STATE_CREATIVE);
+    bool blocked=inputBlocked||debugConsoleOpen;
     if(blocked&&!ctWasBlocked)ct_cancel_all();ctWasBlocked=blocked;
     for(int s=0;s<4;s++){
         bool pad=ct_pad(s);int device=pad?seat_device(s):-1;CtProfile *p=ct_profile(s);
@@ -47,7 +49,9 @@ static void ct_frame(float dt){
         bool disabled=blocked||(pad&&(device<0||device>=4||!ctRaw.available[device]));
         if(disabled||changed){ctToggle[s]=false;ctVelocity[s]=(Vector2){0};ctSmooth[s]=(Vector2){0};}
         for(int a=0;a<CT_COUNT;a++){
-            bool down=false,pulse=false;for(int d=pad?2:0;d<=(pad?2:1);d++)for(int b=0;b<2;b++){
+            // Player 1 owns the console shortcut even when playing with a controller.
+            bool console=s==0&&a==CT_CONSOLE;
+            bool down=false,pulse=false;for(int d=pad&&!console?2:0;d<=(pad?2:1);d++)for(int b=0;b<2;b++){
                 CtBinding binding=p->bindings[d][a][b];bool active=ct_binding_down(binding,s,device);
                 // Modified editor shortcuts take precedence over their plain-key actions.
                 if(active&&binding.kind==1)for(int other=0;other<CT_COUNT;other++)if(ctDefinitions[other].context&context)for(int n=0;n<2;n++){CtBinding candidate=p->bindings[0][other][n];int modifier=(binding.code==KEY_LEFT_CONTROL||binding.code==KEY_RIGHT_CONTROL)?1:(binding.code==KEY_LEFT_SHIFT||binding.code==KEY_RIGHT_SHIFT)?2:(binding.code==KEY_LEFT_ALT||binding.code==KEY_RIGHT_ALT)?4:0;
@@ -55,7 +59,7 @@ static void ct_frame(float dt){
                 if(active&&(context&CT_LAB)&&ctDefinitions[a].context==CT_GAME)for(int other=0;other<CT_COUNT;other++)if(ctDefinitions[other].context==CT_LAB)for(int n=0;n<2;n++){CtBinding candidate=p->bindings[d][other][n];if(candidate.kind==binding.kind&&candidate.code==binding.code&&candidate.mods==binding.mods&&ct_binding_down(candidate,s,device))active=false;}
                 if(active){ctActionDevice[s][a]=d;pulse|=binding.kind==3;}down|=active;
             }
-            bool capture=disabled||(dead&&ctDefinitions[a].context==CT_GAME)||(ce.active&&!ce.testing&&(ce.menu||ceSeats[s].panel)&&(a==CT_PLACE||a==CT_ERASE||a==CT_SAMPLE));
+            bool capture=(console?inputBlocked:disabled)||(dead&&ctDefinitions[a].context==CT_GAME)||(ce.active&&!ce.testing&&(ce.menu||ceSeats[s].panel)&&(a==CT_PLACE||a==CT_ERASE||a==CT_SAMPLE));
             if(capture||changed)ctArmed[s][a]=false;if(!down||pulse)ctArmed[s][a]=true;
             if(!(ctDefinitions[a].context&context)||capture||!ctArmed[s][a])down=false;
             CtActionState old=ctState[s][a];ctState[s][a]=(CtActionState){down,down&&(!old.down||pulse),!down&&old.down};

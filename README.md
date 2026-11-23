@@ -495,6 +495,7 @@ Each local seat can select a named profile containing primary and secondary keyb
 mouse and controller bindings for gameplay, Creative, and Enemy Lab. Conflicts offer
 Swap, Replace or Cancel. Modifier chords are supported; wheel bindings are restricted
 to discrete actions. Escape and Start recovery remain available.
+During a match, the backtick key opens the debug console even when Player 1 uses a controller.
 
 Mouse tuning includes separate horizontal/vertical and zoom sensitivity, inversion,
 acceleration and smoothing. Controller tuning adds movement/look deadzones, response
