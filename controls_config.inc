@@ -1,4 +1,5 @@
 #include <stddef.h>
+enum { CT_CONFIG_VERSION = 2 };
 typedef struct {const char *name,*label;int context,key[2],pad,mouse;} CtDefinition;
 #define CT_DEF(id,label,ctx,k1,k2,p,m) {#id,label,ctx,{k1,k2},p,m},
 static const CtDefinition ctDefinitions[]={CT_ACTIONS(CT_DEF)};
@@ -28,7 +29,21 @@ static void ct_default_profile(CtProfile *p,int layout,const char *name){
     p->bindings[1][CT_SWITCH][0]=(CtBinding){3,1,0};p->bindings[1][CT_SWITCH][1]=(CtBinding){3,-1,0};
     if(!layout){p->bindings[1][CT_DIST_UP][0]=(CtBinding){3,1,0};p->bindings[1][CT_DIST_DOWN][0]=(CtBinding){3,-1,0};}
 }
-static void ct_defaults(CtLibrary *l){memset(l,0,sizeof(*l));l->version=1;l->count=4;for(int i=0;i<4;i++){char name[48];snprintf(name,sizeof(name),"Player %d",i+1);ct_default_profile(&l->profiles[i],i==1,name);l->assigned[i]=i;}}
+static void ct_defaults(CtLibrary *l){memset(l,0,sizeof(*l));l->version=CT_CONFIG_VERSION;l->count=4;for(int i=0;i<4;i++){char name[48];snprintf(name,sizeof(name),"Player %d",i+1);ct_default_profile(&l->profiles[i],i==1,name);l->assigned[i]=i;}}
+static void ct_migrate_keyboard_defaults(CtProfile *p) {
+    CtAction action = p->layout ? CT_EQUIP : CT_GRENADE;
+    int oldKey = p->layout ? KEY_Y : KEY_C;
+    int newKey = ctDefinitions[action].key[p->layout];
+    CtBinding *binding = &p->bindings[0][action][0];
+    if (binding->kind != 1 || binding->code != oldKey || binding->mods || p->bindings[0][action][1].kind) return;
+    for (int a = 0; a < CT_COUNT; a++) {
+        if (ctDefinitions[a].context == CT_EDIT) continue;
+        for (int slot = 0; slot < 2; slot++) {
+            if (p->bindings[0][a][slot].code == newKey) return;
+        }
+    }
+    binding->code = newKey;
+}
 static bool ct_binding_valid(CtBinding b,int device){
     if(b.mods<0||b.mods>7)return false;if(!b.kind)return b.code==0;
     if(device==0)return b.kind==1&&b.code>0&&b.code<512;
@@ -54,7 +69,7 @@ static bool ct_validate(const CtLibrary *l){
 static bool ct_save_file(const char *path,const CtLibrary *l){
     if(!ct_validate(l)){snprintf(ctError,sizeof(ctError),"Invalid control settings");return false;}
     char tmp[600];if(snprintf(tmp,sizeof(tmp),"%s.tmp",path)>=(int)sizeof(tmp))return false;FILE *f=fopen(tmp,"w");if(!f){snprintf(ctError,sizeof(ctError),"Cannot write %s",path);return false;}
-    fprintf(f,"CONTROLS 1 %d\nSEATS %d %d %d %d\n",l->count,l->assigned[0],l->assigned[1],l->assigned[2],l->assigned[3]);
+    fprintf(f,"CONTROLS %d %d\nSEATS %d %d %d %d\n",CT_CONFIG_VERSION,l->count,l->assigned[0],l->assigned[1],l->assigned[2],l->assigned[3]);
     for(int i=0;i<l->count;i++){const CtProfile *p=&l->profiles[i];fprintf(f,"PROFILE %d %d\nNAME %s\n",i,p->layout,p->name);
         if (p->verticalFov != CT_FOV_DEFAULT) fprintf(f, "FOV %d\n", p->verticalFov);
         for(int d=0;d<3;d++){CtTuning t=p->tuning[d];fprintf(f,"OPTIONS %d %d %d %d %d %d %d %d\n",d,p->aimToggle[d],p->tetherToggle[d],p->combined[d],t.invertX,t.invertY,t.direct,t.swap);
@@ -71,13 +86,13 @@ static bool ct_save_file(const char *path,const CtLibrary *l){
 }
 static bool ct_read_file(const char *path,CtLibrary *out){
     FILE *f=fopen(path,"r");if(!f)return false;CtLibrary *l=calloc(1,sizeof(*l));if(!l){fclose(f);return false;}ct_defaults(l);
-    char line[512],name[64];int version,count;bool ok=fgets(line,sizeof(line),f)&&sscanf(line,"CONTROLS %d %d",&version,&count)==2&&version==1&&count>0&&count<=CT_PROFILES;
+    char line[512],name[64];int version,count;bool ok=fgets(line,sizeof(line),f)&&sscanf(line,"CONTROLS %d %d",&version,&count)==2&&(version==1||version==CT_CONFIG_VERSION)&&count>0&&count<=CT_PROFILES;
     if(ok){l->count=count;for(int i=4;i<count;i++)ct_default_profile(&l->profiles[i],0,"Imported");}
     int profile=-1,seen=0;bool end=false;
     while(ok&&fgets(line,sizeof(line),f)){
         if(!strchr(line,'\n')&&!feof(f)){ok=false;break;}line[strcspn(line,"\r\n")]=0;
         if(!strcmp(line,"END")){end=true;break;}
-        int d,a,b,c,e,g,h;float value;
+        int d,a,b,c,e,g,h,swap;float value;
         if(!strncmp(line,"SEATS ",6)){ok=sscanf(line+6,"%d %d %d %d",&l->assigned[0],&l->assigned[1],&l->assigned[2],&l->assigned[3])==4;continue;}
         if(!strncmp(line,"PROFILE ",8)){ok=sscanf(line+8,"%d %d",&a,&b)==2&&a==seen&&a<count&&b>=0&&b<2;if(ok){profile=a;ct_default_profile(&l->profiles[a],b,"Imported");seen++;}continue;}
         if(!strcmp(line,"ENDPROFILE")){profile=-1;continue;}if(profile<0){ok=false;break;}CtProfile *p=&l->profiles[profile];
@@ -88,12 +103,14 @@ static bool ct_read_file(const char *path,CtLibrary *out){
             ok = *endValue == '\0' && fov >= CT_FOV_MIN && fov <= CT_FOV_MAX;
             if (ok) p->verticalFov = (int)fov;
         }
-        else if(!strncmp(line,"OPTIONS ",8)){ok=sscanf(line+8,"%d %d %d %d %d %d %d %d",&d,&a,&b,&c,&e,&g,&h,&version)==8&&d>=0&&d<3;if(ok){p->aimToggle[d]=a;p->tetherToggle[d]=b;p->combined[d]=c;p->tuning[d].invertX=e;p->tuning[d].invertY=g;p->tuning[d].direct=h;p->tuning[d].swap=version;}}
+        else if(!strncmp(line,"OPTIONS ",8)){ok=sscanf(line+8,"%d %d %d %d %d %d %d %d",&d,&a,&b,&c,&e,&g,&h,&swap)==8&&d>=0&&d<3;if(ok){p->aimToggle[d]=a;p->tetherToggle[d]=b;p->combined[d]=c;p->tuning[d].invertX=e;p->tuning[d].invertY=g;p->tuning[d].direct=h;p->tuning[d].swap=swap;}}
         else if(!strncmp(line,"TUNE ",5)){ok=sscanf(line+5,"%d %63s %f",&d,name,&value)==3&&d>=0&&d<3;if(ok)for(int n=0;n<13;n++)if(!strcmp(name,ctFields[n].name))*ct_value(&p->tuning[d],n)=value;}
         else if(!strncmp(line,"BIND ",5)){ok=sscanf(line+5,"%d %63s %d %d %d %d",&d,name,&a,&b,&c,&e)==6&&d>=0&&d<3&&a>=0&&a<2;if(ok)for(int n=0;n<CT_COUNT;n++)if(!strcmp(name,ctDefinitions[n].name))p->bindings[d][n][a]=(CtBinding){b,c,e};}
         else if(line[0]&&line[0]!='#')ok=false;
     }
-    ok=ok&&end&&seen==count&&ct_validate(l);fclose(f);if(ok)*out=*l;free(l);return ok;
+    ok=ok&&end&&seen==count&&ct_validate(l);
+    if (ok && version == 1) for (int i = 0; i < count; i++) ct_migrate_keyboard_defaults(&l->profiles[i]);
+    fclose(f);if(ok)*out=*l;free(l);return ok;
 }
 static void ct_load(void){
     ct_defaults(&ctLibrary);ctReady=true;

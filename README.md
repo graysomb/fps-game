@@ -45,7 +45,7 @@ The main menu scans a slowly rotating rat and enemy roster. Left/right browses t
 entries; each explains its ability and counter. Scans advance automatically every ten
 seconds without spawning gameplay actors.
 
-Throw a grenade with **C** (keyboard P1), **period** (keyboard P2), or **D-pad Up**.
+Throw a grenade with **Y** (keyboard P1), **period** (keyboard P2), or **D-pad Up**.
 Carry two, start with one, and receive at least one at Firefight intermissions.
 Reviving does not grant ammunition. Grenades detonate half a second after their first bounce, but never before
 1.5 seconds after release. Later bounces do not reset the countdown; grenades still
@@ -294,7 +294,7 @@ preserve owned equipment. Ground items have gold radar markers and safe placemen
 The first team pickup of each type unlocks it for the current run and shows a queued
 **WEAPON UNLOCKED!** banner. A blue equipment cache near the initial player spawn
 provides all collected weapons, upgrades and grenade supplies. Approach a blue stand
-and press the equipment interaction key (B/Y, or hold X on controller) to claim a
+and press the equipment interaction key (B/C, or hold X on controller) to claim a
 copy or replace the selected gun. Cache stands persist and require interaction;
 they never automatically collect or convert duplicate guns to Matter. Unlocks are
 shared by the team, survive Continue/checkpoint restoration, and reset on New Game.
@@ -695,7 +695,7 @@ and respawn. LAN peers must all use protocol
 version 5, which adds successful-shot sequence/age and powered-shot visual state.
 
 Human players now have two gun slots (default plus one empty at spawn). New gun
-pickups require holding X / Square, or keyboard B (second keyboard: Y). They fill an
+pickups require holding X / Square, or keyboard B (second keyboard: C). They fill an
 empty slot or replace the selected weapon when full. Switch with a tap of X, D-pad Left / Q (second
 keyboard: U), or the mouse wheel. Duplicates remain on the map. Switching takes
 0.25 seconds and cancels beams/charging without resetting cooldowns. Ranged guns use
@@ -1266,7 +1266,7 @@ This measures the scripted visual effects, not gameplay physics.
 
 Foundry and Crosscut now have symmetric authored pickups for all five items.
 Glob, Glock and DMR use the existing two-slot gun inventory. Empty slots fill on
-contact; with two guns, hold X (keyboard B / second player Y) to replace the
+contact; with two guns, hold X (keyboard B / second player C) to replace the
 selected gun. Duplicates stay on the ground. Guns and igloo supplies respawn in
 30 seconds; DMR and gravity supplies take 60 seconds. Wave completion does not
 restock the new supplies.
@@ -1280,8 +1280,8 @@ restock the new supplies.
 | Igloo Grenade | Deploys a connected 0.5 m voxel shelter, entrance facing the launch position, with an open square chimney. Reinforced shell persists until destroyed. Requires a supported footprint and clear shell/doorway; failed placement refunds one grenade to the same living player incarnation. |
 
 Grenade counts are separate: up to two regular, two gravity and two igloo.
-**D-pad Down / Tab / semicolon** cycles stocked types. Existing throw controls
-remain **D-pad Up / C / period**. Last-use selection advances to another stocked
+**D-pad Down / Tab / semicolon** cycles stocked types. Default throw controls
+are **D-pad Up / Y / period**. Last-use selection advances to another stocked
 type. Adhesive upgrades affect regular grenades only. Downs and revives preserve
 equipment; true death resets special supplies. Reviving clears Glob suppression.
 

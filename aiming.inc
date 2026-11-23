@@ -51,7 +51,7 @@ static void aim_sample(int seat,int i,float dt,NetInputCommand *c){
         bool first=seat==0;
         if(!IsKeyDown(first?KEY_LEFT_SHIFT:KEY_ENTER))aimStates[i].toggleArmed=true;
         if(aimStates[i].toggleArmed && IsKeyPressed(first?KEY_LEFT_SHIFT:KEY_ENTER))c->pressed|=NET_INPUT_AIM;
-        if(IsKeyPressed(first?KEY_Z:KEY_M)||IsKeyPressed(first?KEY_E:KEY_O)||IsKeyPressed(first?KEY_C:KEY_PERIOD)||IsKeyPressed(first?KEY_V:KEY_SLASH)||IsKeyDown(first?KEY_R:KEY_P)||IsKeyDown(first?KEY_X:KEY_COMMA))c->pressed|=NET_INPUT_AIM_CANCEL;
+        if(IsKeyPressed(first?KEY_Z:KEY_M)||IsKeyPressed(first?KEY_E:KEY_O)||IsKeyPressed(first?KEY_Y:KEY_PERIOD)||IsKeyPressed(first?KEY_V:KEY_SLASH)||IsKeyDown(first?KEY_R:KEY_P)||IsKeyDown(first?KEY_X:KEY_COMMA))c->pressed|=NET_INPUT_AIM_CANCEL;
         if(mouse_owns(i)&&mouseCaptured&&mouseButtonsArmed&&(IsMouseButtonDown(MOUSE_BUTTON_RIGHT)||IsMouseButtonPressed(MOUSE_BUTTON_MIDDLE)))c->pressed|=NET_INPUT_AIM_CANCEL;
     }
 }

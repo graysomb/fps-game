@@ -41,10 +41,16 @@ static void persistence(void){
     f=fopen("couch_settings.cfg","w");fputs("1.8 0.22 1\n1 0.15 0\n1 0.15 0\n1 0.15 0\n",f);fclose(f);remove("controls.cfg");ct_load();assert(ctLibrary.profiles[0].tuning[1].x==1.8f&&ctLibrary.profiles[0].tuning[2].inner==.22f&&ctLibrary.profiles[0].tuning[1].invertY);assert(FileExists("couch_settings.cfg")&&FileExists("controls.cfg"));
     f = fopen("legacy.cfg", "w");
     assert(f);
-    fputs("CONTROLS 1 1\nSEATS 0 0 0 0\nPROFILE 0 0\nNAME Legacy\nTUNE 1 x 2\nENDPROFILE\nEND\n", f);
+    fprintf(f, "CONTROLS 1 3\nSEATS 0 1 2 2\n"
+               "PROFILE 0 0\nNAME Legacy\nTUNE 1 x 2\nOPTIONS 2 1 0 1 0 0 0 0\nBIND 0 GRENADE 0 1 %d 0\nENDPROFILE\n"
+               "PROFILE 1 1\nBIND 0 EQUIP 0 1 %d 0\nENDPROFILE\n"
+               "PROFILE 2 0\nBIND 0 GRENADE 0 1 %d 0\nENDPROFILE\nEND\n", KEY_C, KEY_Y, KEY_N);
     fclose(f);
     assert(ct_read_file("legacy.cfg", &b));
     assert(b.profiles[0].verticalFov == 60 && b.profiles[0].tuning[1].x == 2);
+    assert(b.profiles[0].bindings[0][CT_GRENADE][0].code == KEY_Y);
+    assert(b.profiles[1].bindings[0][CT_EQUIP][0].code == KEY_C);
+    assert(b.profiles[2].bindings[0][CT_GRENADE][0].code == KEY_N);
     f = fopen("bad-fov.cfg", "w");
     assert(f);
     fputs("CONTROLS 1 1\nSEATS 0 0 0 0\nPROFILE 0 0\nNAME Invalid FOV\nFOV 95\nENDPROFILE\nEND\n", f);
@@ -54,6 +60,17 @@ static void persistence(void){
     puts("Profiles: round trip, migration, invalid input and atomic save failure PASS");
 }
 static void actions(void){
+    fixture();
+    tk[KEY_Y]=true;ct_frame(.016f);
+    assert(ct_command(0,0,.016f).pressed&NET_INPUT_GRENADE);
+    assert(!(ct_command(1,1,.016f).pressed&NET_INPUT_EQUIP));
+    assert(!strcmp(ct_hint(0,CT_GRENADE),"Y"));
+    neutral();ct_frame(.016f);
+    tk[KEY_C]=tk[KEY_PERIOD]=true;pb[3][GAMEPAD_BUTTON_LEFT_FACE_UP]=true;ct_frame(.016f);
+    assert(!(ct_command(0,0,.016f).pressed&NET_INPUT_GRENADE));
+    assert((ct_command(1,1,.016f).pressed&(NET_INPUT_EQUIP|NET_INPUT_GRENADE))==(NET_INPUT_EQUIP|NET_INPUT_GRENADE));
+    assert(ct_command(2,2,.016f).pressed&NET_INPUT_GRENADE);
+
     fixture();CtProfile *p=ct_profile(0);p->bindings[0][CT_FIRE][0]=(CtBinding){1,KEY_K,0};tk[KEY_LEFT_CONTROL]=true;ct_frame(.016f);assert(!(ct_command(0,0,.016f).pressed&NET_INPUT_FIRE));tk[KEY_LEFT_CONTROL]=false;tk[KEY_K]=true;ct_frame(.016f);assert(ct_command(0,0,.016f).pressed&NET_INPUT_FIRE);assert(ct_command(0,0,.016f).pressed&NET_INPUT_FIRE);
     neutral();ct_frame(.016f);tm[0]=true;ct_frame(.016f);assert(ct_command(0,0,.016f).held&NET_INPUT_FIRE);assert(!(ct_command(1,1,.016f).held&NET_INPUT_FIRE));
     neutral();ct_frame(.016f);wheel=1;ct_frame(.016f);assert(ct_pressed(0,CT_SWITCH));ct_frame(.016f);assert(ct_pressed(0,CT_SWITCH));

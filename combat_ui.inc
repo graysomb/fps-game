@@ -164,7 +164,7 @@ static void combat_ui_abilities(int viewer,int w,int h) {
             if(holograms[viewer].life>0)DrawCircle((int)x+size-5,(int)y+5,5,SKYBLUE);
         }
         bool pad=playerInput[local]==INPUT_TYPE_GAMEPAD;
-        const char *key=n?(pad?"D-UP":local==0?"C":"."):(pad?"LB":local==0?"V":"/");
+        const char *key=n?ct_hint(viewer,CT_GRENADE):(pad?"LB":local==0?"V":"/");
         DrawText(key,(int)c.x-MeasureText(key,12)/2,(int)y+size+3,12,LIGHTGRAY);
     }
 }
