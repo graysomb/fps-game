@@ -16262,7 +16262,9 @@ static void draw_player_radar(int player_index, int viewport_w, int viewport_h) 
         float ny = ry / RADAR_WORLD_RADIUS;
         int blip_x = (int)roundf(cx + nx * radius_px);
         int blip_y = (int)roundf(cy - ny * radius_px);
-        DrawCircle(blip_x, blip_y, 3, (Color){ 120, 200, 255, 230 });
+        bool teammate = gameMode == GAME_MODE_FIREFIGHT && combatantTeam[player_index] == combatantTeam[j];
+        Color blip_color = teammate ? (Color){ 120, 200, 255, 230 } : (Color){ 255, 80, 80, 230 };
+        DrawCircle(blip_x, blip_y, 3, blip_color);
     }
     for(int j=MAX_PLAYERS;j<activePlayers;j++)if(swarmHintActive[j] && players[j].respawn_timer<=0) {
         Vector3 d=world_delta(swarmHints[j],p->pos);float distance=sqrtf(d.x*d.x+d.z*d.z);
