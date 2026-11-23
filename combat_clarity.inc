@@ -296,7 +296,7 @@ static void clarity_supply_layout(void) {
 }
 static void clarity_supply_update(void) {
     if(useCustomMap || firefightPractice || (!firefightFoundry && currentWorldType!=WORLD_TYPE_CROSSCUT))return;
-    for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].active || pickups[n].respawnTimer>0) {
+    for(int n=0;n<MAX_PICKUPS;n++)if(!pickups[n].droppedMatter && (pickups[n].active || pickups[n].respawnTimer>0)) {
         Vector3 at=pickups[n].pos;VoxelHit hit;float floor=0;
         if(first_voxel_hit_detailed((Ray){{at.x,12,at.z},{0,-1,0}},12,-1,true,&hit))floor=12-hit.t;
         if(fabsf(at.y-(floor+.8f))>.05f)pickups[n].pos.y=floor+.8f;

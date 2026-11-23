@@ -8891,6 +8891,7 @@ typedef enum {
 typedef struct {
     Vector3 pos;
     bool active;
+    bool droppedMatter;
     float respawnTimer;
     float bobTimer;
     PickupType type;
@@ -8934,11 +8935,7 @@ static Color creative_block_palette(int index) {
 
 static void clear_pickups(void) {
     for (int i = 0; i < MAX_PICKUPS; ++i) {
-        pickups[i].pos = (Vector3){ 0.0f, -10.0f, 0.0f };
-        pickups[i].active = false;
-        pickups[i].respawnTimer = 0.0f;
-        pickups[i].bobTimer = 0.0f;
-        pickups[i].type = PICKUP_AMMO;
+        pickups[i] = (Pickup){ .pos = { 0.0f, -10.0f, 0.0f }, .type = PICKUP_AMMO };
     }
 }
 
@@ -9014,13 +9011,13 @@ static bool save_map_slot(int slot) {
     }
     int pickup_count = 0;
     for (int i = 0; i < MAX_PICKUPS; ++i) {
-        if (pickups[i].active || pickups[i].respawnTimer > 0.0f) {
+        if (!pickups[i].droppedMatter && (pickups[i].active || pickups[i].respawnTimer > 0.0f)) {
             pickup_count++;
         }
     }
     fprintf(fp, "PICKUPS %d\n", pickup_count);
     for (int i = 0; i < MAX_PICKUPS; ++i) {
-        if (pickups[i].active || pickups[i].respawnTimer > 0.0f) {
+        if (!pickups[i].droppedMatter && (pickups[i].active || pickups[i].respawnTimer > 0.0f)) {
             fprintf(fp, "%.3f %.3f %.3f %d %d %.3f\n",
                     pickups[i].pos.x, pickups[i].pos.y, pickups[i].pos.z,
                     (int)pickups[i].type, pickups[i].active ? 1 : 0,
@@ -9171,6 +9168,37 @@ static void init_pickups_legacy(void) {
 }
 
 static void init_pickups(void) {init_pickups_legacy();}
+
+static float matter_drop_height(Vector3 pos) {
+    pos.y = fmaxf(pos.y, .8f);
+    VoxelHit hit;
+    if (first_voxel_hit_detailed((Ray){ pos, { 0, -1, 0 } }, pos.y, -1, true, &hit)) {
+        return pos.y - hit.t + .8f;
+    }
+    return .8f;
+}
+
+static void drop_enemy_matter(Vector3 pos) {
+    int slot = -1;
+    for (int i = 0; i < MAX_PICKUPS; ++i) {
+        Pickup *p = &pickups[i];
+        if (!p->active && p->respawnTimer <= 0.0f) {
+            slot = i;
+            break;
+        }
+        if (p->droppedMatter && (slot < 0 || p->bobTimer > pickups[slot].bobTimer)) slot = i;
+    }
+    if (slot < 0) return;
+    pos = world_wrap(pos);
+    if (!worldPeriodic) {
+        float limit = FLOOR_SIZE - PLAYER_RADIUS;
+        pos.x = clampf(pos.x, -limit, limit);
+        pos.z = clampf(pos.z, -limit, limit);
+    }
+    pos.y = matter_drop_height(pos);
+    pickups[slot] = (Pickup){ .pos = pos, .active = true, .droppedMatter = true, .type = PICKUP_AMMO };
+}
+
 static void update_pickups(float dt) {
     if(fp_active())for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].type!=PICKUP_HEALTH && pickups[n].type!=PICKUP_AMMO && pickups[n].type!=PICKUP_GRENADE)pickups[n].active=false,pickups[n].respawnTimer=0;
     clarity_supply_update();
@@ -9189,14 +9217,21 @@ static void update_pickups(float dt) {
         }
 
         p->bobTimer += dt;
+        if (p->droppedMatter) {
+            if (p->bobTimer >= FP_DROP_SECONDS) {
+                p->active = false;
+                continue;
+            }
+            p->pos.y = matter_drop_height(p->pos);
+        }
 
         for (int j = 0; j < activePlayers; j++) {
             Player *pl = &players[j];
             if(pl->respawn_timer>0 || (p->type==PICKUP_GRENADE && is_player_bot(j)))continue;
-            float dx = p->pos.x - pl->pos.x;
-            float dy = (p->pos.y + sinf(p->bobTimer * 2.0f) * 0.2f) - pl->pos.y;
-            float dz = p->pos.z - pl->pos.z;
-            float distSq = dx*dx + dy*dy + dz*dz;
+            Vector3 delta = v_sub(p->pos, pl->pos);
+            if (p->droppedMatter) delta = world_wrap(delta);
+            delta.y += sinf(p->bobTimer * 2.0f) * 0.2f;
+            float distSq = v_dot(delta, delta);
             
             float hitRad = PLAYER_RADIUS + PICKUP_SIZE;
             if (p->type == PICKUP_VOID) hitRad += 1.0f; // Larger hitbox for void
@@ -9209,9 +9244,11 @@ static void update_pickups(float dt) {
                 if((eq_pickup_kind(p->type)>=0 || p->type==PICKUP_SHIELD_REGEN) && !(is_player_bot(j)&&p->type==PICKUP_DYNAMIC_SHOT)){if(!eq_pickup(j,p->type,false))continue;p->active=false;p->respawnTimer=(p->type==PICKUP_RAILGUN||p->type==PICKUP_ROCKET||p->type==PICKUP_DMR)?60:30;play_sfx(SFX_SHIELD);break;}
                 // Collect
                 if (p->type == PICKUP_AMMO) {
+                    if (p->droppedMatter && (j >= firefightHumans || combatantLife[j] != LIFE_ALIVE ||
+                                             pl->matter >= player_max_matter(pl))) continue;
                     add_player_matter(pl, 25.0f);
                     play_sfx(SFX_SHIELD); 
-                    if(currentWorldType!=WORLD_TYPE_CROSSCUT && !(gameMode==GAME_MODE_FIREFIGHT && firefightFoundry))grenadeInventory[j]=clampi(grenadeInventory[j]+1,0,2);
+                    if(!p->droppedMatter && currentWorldType!=WORLD_TYPE_CROSSCUT && !(gameMode==GAME_MODE_FIREFIGHT && firefightFoundry))grenadeInventory[j]=clampi(grenadeInventory[j]+1,0,2);
                 } else if(p->type==PICKUP_GRENADE) {
                     // All available grenade types were refilled above.
                     play_sfx(SFX_SHIELD);
@@ -9231,7 +9268,7 @@ static void update_pickups(float dt) {
                 }
                 
                 p->active = false;
-                p->respawnTimer = (p->type == PICKUP_VOID) ? PICKUP_VOID_RESPAWN_TIME : PICKUP_RESPAWN_TIME;
+                if (!p->droppedMatter) p->respawnTimer = (p->type == PICKUP_VOID) ? PICKUP_VOID_RESPAWN_TIME : PICKUP_RESPAWN_TIME;
                 break;
             }
         }
@@ -9688,11 +9725,8 @@ static void creative_place_pickup(int player_idx) {
     if (slot < 0) {
         slot = 0;
     }
-    pickups[slot].pos = pos;
-    pickups[slot].type = (PickupType)creativePickupType[player_idx];
-    pickups[slot].active = true;
-    pickups[slot].respawnTimer = 0.0f;
-    pickups[slot].bobTimer = (float)GetRandomValue(0, 100) / 10.0f;
+    pickups[slot] = (Pickup){ .pos = pos, .active = true,
+        .bobTimer = (float)GetRandomValue(0, 100) / 10.0f, .type = (PickupType)creativePickupType[player_idx] };
 }
 
 static void creative_remove_pickup(int player_idx) {
@@ -10285,6 +10319,9 @@ static void kill_player(int player_index, int attacker_index,
 
     if (gameMode == GAME_MODE_FIREFIGHT) {
         if (is_player_bot(player_index)) {
+            if (player_index >= MAX_PLAYERS && netTransport.role != NET_ROLE_CLIENT) {
+                drop_enemy_matter(player->death_pos);
+            }
             if (firefightWaveEnemiesRemaining > 0) {
                 firefightWaveEnemiesRemaining--;
             }

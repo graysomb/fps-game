@@ -24,7 +24,7 @@ static CmMap *cm_capture(const char *name){
   m->cells[m->count++]=c;
  }
  m->trapCount=foundryTrapCount;for(int t=0;t<m->trapCount;t++)m->seeds[t]=t+1;
- for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].active||pickups[n].respawnTimer>0){Pickup p=pickups[n];p.active=true;p.respawnTimer=0;m->supplies[m->pickupCount++]=p;}
+ for(int n=0;n<MAX_PICKUPS;n++)if(!pickups[n].droppedMatter&&(pickups[n].active||pickups[n].respawnTimer>0)){Pickup p=pickups[n];p.active=true;p.respawnTimer=0;m->supplies[m->pickupCount++]=p;}
  qsort(m->cells,m->count,sizeof(CmCell),cm_compare);return m;
 }
 static bool cm_apply(const CmMap *m,bool editing){
