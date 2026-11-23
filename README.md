@@ -509,6 +509,9 @@ seat. Old `couch_settings.cfg` values migrate on first use. Invalid files leave 
 defaults available; failed saves preserve the previous file. Copy `controls.cfg` to
 back up or transfer profiles. These local settings files are gitignored.
 
+The Profiles tab also sets **Vertical FOV** for each assigned profile. It defaults
+to 60° and ranges from 45° to 90° in 5° steps. Weapon aim magnifies the selected view.
+
 Menu/focus changes and respawns require held controls to be released before reuse.
 Opening settings during LAN play leaves the match running and cancels local attacks.
 The defaults listed below remain available through profile reset.

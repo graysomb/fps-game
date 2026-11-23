@@ -9,6 +9,19 @@ static Vector2 ctPreviewAim,ctPreviewVelocity,ctPreviewSmooth;
 static float ctMenuRepeat;
 static const char *ctTabs[]={"Profiles","Bindings","Mouse","Controller","Keyboard Look"};
 static const char *ctDevices[]={"Keyboard","Mouse","Controller"};
+enum {
+    CT_PROFILE_SEAT,
+    CT_PROFILE_ASSIGNMENT,
+    CT_PROFILE_FOV,
+    CT_PROFILE_CREATE,
+    CT_PROFILE_DUPLICATE,
+    CT_PROFILE_RENAME,
+    CT_PROFILE_DELETE,
+    CT_PROFILE_RESET_FIRST,
+    CT_PROFILE_RESET_SECOND,
+    CT_PROFILE_RELOAD,
+    CT_PROFILE_ROWS
+};
 static CtProfile *ct_edit_profile(void){return &ctDraft.profiles[ctDraft.assigned[ctEditSeat]];}
 static void ct_open(void){if(ctMenuOpen)return;ct_cancel_all();debugConsoleOpen=false;ctDraft=ctLibrary;ctMenuOpen=true;ctCapture=-1;ctConflict=-1;ctTyping=false;ctDeleteConfirm=false;ctRow=ctScroll=0;ctPreviewAim=ctPreviewVelocity=ctPreviewSmooth=(Vector2){0};EnableCursor();mouseCaptured=false;mouseButtonsArmed=false;}
 static void ct_close(bool apply){if(apply){if(!ct_save_file("controls.cfg",&ctDraft))return;ctLibrary=ctDraft;}ctMenuOpen=false;couchSettings=false;ct_cancel_all();}
@@ -93,12 +106,41 @@ static bool ct_menu_frame(void){
     if(tabStep){ctTab=(ctTab+tabStep+5)%5;ctRow=ctScroll=0;}
     for(int t=0;t<5;t++)if(click&&CheckCollisionPointRec(mouse,(Rectangle){left+t*(width-60)/5.f,82,(width-60)/5.f,38})){ctTab=t;ctRow=ctScroll=0;click=false;}
     if(back){ct_close(false);return true;}
-    CtProfile *p=ct_edit_profile();int fields[32],count=ctTab==0?9:ctTab==1?CT_COUNT+3:ct_tuning_rows(ctTab==2?1:ctTab==3?2:0,fields);
+    CtProfile *p=ct_edit_profile();int fields[32],count=ctTab==0?CT_PROFILE_ROWS:ctTab==1?CT_COUNT+3:ct_tuning_rows(ctTab==2?1:ctTab==3?2:0,fields);
     ctRow=(ctRow+vertical+count)%count;if(ctRaw.wheel&&mouse.x<width*.65f)ctRow=Clamp(ctRow-(int)ctRaw.wheel,0,count-1);
     if(ctRow<ctScroll)ctScroll=ctRow;if(ctRow>=ctScroll+visible)ctScroll=ctRow-visible+1;
     if(click&&mouse.x>=left&&mouse.x<left+listWidth&&mouse.y>=top&&mouse.y<top+visible*rowH){int row=ctScroll+(int)((mouse.y-top)/rowH);if(row<count){ctRow=row;confirm=true;}}
-    if(ctTab==0){if(ctRow==0&&horizontal)ctEditSeat=(ctEditSeat+horizontal+4)%4;if(ctRow==1&&(horizontal||confirm))ctDraft.assigned[ctEditSeat]=(ctDraft.assigned[ctEditSeat]+(horizontal?horizontal:1)+ctDraft.count)%ctDraft.count;
-        if(confirm){if(ctRow==2)ct_name_begin(0);if(ctRow==3)ct_name_begin(1);if(ctRow==4)ct_name_begin(2);if(ctRow==5&&ctDraft.count>1)ctDeleteConfirm=true;if(ctRow==6||ctRow==7){char name[CT_NAME];strcpy(name,p->name);ct_default_profile(p,ctRow==7,name);}if(ctRow==8){CtLibrary loaded;if(ct_read_file("controls.cfg",&loaded)){ctDraft=loaded;ctError[0]=0;}else snprintf(ctError,sizeof(ctError),"Could not load controls.cfg; current draft kept");}}
+    int fovY = top + (CT_PROFILE_FOV - ctScroll) * rowH;
+    Rectangle fovDecrease = {left + listWidth - 72, fovY, 28, rowH - 6};
+    Rectangle fovIncrease = {left + listWidth - 38, fovY, 28, rowH - 6};
+    if(ctTab==0){
+        if (ctRow == CT_PROFILE_SEAT && horizontal) ctEditSeat = (ctEditSeat + horizontal + 4) % 4;
+        if (ctRow == CT_PROFILE_ASSIGNMENT && (horizontal || confirm)) {
+            ctDraft.assigned[ctEditSeat] = (ctDraft.assigned[ctEditSeat] + (horizontal ? horizontal : 1) + ctDraft.count) % ctDraft.count;
+        }
+        if (ctRow == CT_PROFILE_FOV) {
+            if (click && CheckCollisionPointRec(mouse, fovDecrease)) horizontal = -1;
+            if (click && CheckCollisionPointRec(mouse, fovIncrease)) horizontal = 1;
+            p->verticalFov = clampi(p->verticalFov + horizontal * CT_FOV_STEP, CT_FOV_MIN, CT_FOV_MAX);
+        }
+        if (confirm) {
+            if (ctRow == CT_PROFILE_CREATE) ct_name_begin(0);
+            if (ctRow == CT_PROFILE_DUPLICATE) ct_name_begin(1);
+            if (ctRow == CT_PROFILE_RENAME) ct_name_begin(2);
+            if (ctRow == CT_PROFILE_DELETE && ctDraft.count > 1) ctDeleteConfirm = true;
+            if (ctRow == CT_PROFILE_RESET_FIRST || ctRow == CT_PROFILE_RESET_SECOND) {
+                char name[CT_NAME];
+                strcpy(name, p->name);
+                ct_default_profile(p, ctRow == CT_PROFILE_RESET_SECOND, name);
+            }
+            if (ctRow == CT_PROFILE_RELOAD) {
+                CtLibrary loaded;
+                if (ct_read_file("controls.cfg", &loaded)) {
+                    ctDraft = loaded;
+                    ctError[0] = 0;
+                } else snprintf(ctError, sizeof(ctError), "Could not load controls.cfg; current draft kept");
+            }
+        }
     }else if(ctTab==1){if(ctRow==0&&(horizontal||confirm))ctDevice=(ctDevice+(horizontal?horizontal:1)+3)%3;else if(ctRow==1&&(horizontal||confirm))ctBindingSlot=1-ctBindingSlot;else if(ctRow==2&&confirm){CtProfile defaults;ct_default_profile(&defaults,p->layout,p->name);memcpy(p->bindings[ctDevice],defaults.bindings[ctDevice],sizeof(p->bindings[ctDevice]));}else if(ctRow>=3){int action=ctRow-3;if(IsKeyPressed(KEY_DELETE)||(device>=0&&IsGamepadButtonPressed(device,GAMEPAD_BUTTON_RIGHT_FACE_LEFT)))p->bindings[ctDevice][action][ctBindingSlot]=(CtBinding){0};if(confirm){ctCapture=action;ctCaptureArmed=false;ctError[0]=0;}}}
     else {int d=ctTab==2?1:ctTab==3?2:0,field=fields[ctRow];if(horizontal||confirm){int direction=horizontal?horizontal:1;if(field==200){CtProfile defaults;ct_default_profile(&defaults,p->layout,p->name);p->tuning[d]=defaults.tuning[d];p->aimToggle[d]=defaults.aimToggle[d];p->tetherToggle[d]=defaults.tetherToggle[d];p->combined[d]=defaults.combined[d];}else if(field<100){float *value=ct_value(&p->tuning[d],field);*value=Clamp(*value+direction*ctFields[field].step,ctFields[field].min,ctFields[field].max);}else{int *value=ct_option(p,d,field);*value=!*value;}}}
     bool apply=IsKeyPressed(KEY_F5)||(device>=0&&IsGamepadButtonPressed(device,GAMEPAD_BUTTON_MIDDLE_RIGHT));
@@ -110,10 +152,32 @@ static bool ct_menu_frame(void){
     for(int t=0;t<5;t++){int x=left+t*(width-60)/5;DrawRectangle(x,82,(width-60)/5-4,38,t==ctTab?(Color){40,77,94,255}:(Color){25,34,43,255});ct_menu_text(compact&&t==4?"Keyboard":ctTabs[t],x+8,92,compact?13:17,(width-60)/5-18,t==ctTab?GOLD:LIGHTGRAY);}
     DrawText(ctTab==1?"Enter/A: bind | Delete/X: clear | Left/right: device or slot":"Arrows / D-pad: select and adjust | Tab / LB / RB: tabs",30,134,compact?12:16,LIGHTGRAY);
     p=ct_edit_profile();for(int n=ctScroll;n<count&&n<ctScroll+visible;n++){const char *label;
-        if(ctTab==0){switch(n){case 0:label=TextFormat("Local player: %d",ctEditSeat+1);break;case 1:label=TextFormat("Assigned profile: %s",p->name);break;case 2:label="Create profile";break;case 3:label="Duplicate profile";break;case 4:label="Rename profile";break;case 5:label="Delete profile";break;case 6:label="Reset profile: first keyboard defaults";break;case 7:label="Reset profile: second keyboard defaults";break;default:label="Reload saved controls";}}
+        if(ctTab==0){
+            switch (n) {
+                case CT_PROFILE_SEAT: label = TextFormat("Local player: %d", ctEditSeat + 1); break;
+                case CT_PROFILE_ASSIGNMENT: label = TextFormat("Assigned profile: %s", p->name); break;
+                case CT_PROFILE_FOV: label = TextFormat("Vertical FOV: %d°", p->verticalFov); break;
+                case CT_PROFILE_CREATE: label = "Create profile"; break;
+                case CT_PROFILE_DUPLICATE: label = "Duplicate profile"; break;
+                case CT_PROFILE_RENAME: label = "Rename profile"; break;
+                case CT_PROFILE_DELETE: label = "Delete profile"; break;
+                case CT_PROFILE_RESET_FIRST: label = "Reset profile: first keyboard defaults"; break;
+                case CT_PROFILE_RESET_SECOND: label = "Reset profile: second keyboard defaults"; break;
+                default: label = "Reload saved controls"; break;
+            }
+        }
         else if(ctTab==1){if(n==0)label=TextFormat("Device: %s",ctDevices[ctDevice]);else if(n==1)label=TextFormat("Binding slot: %s",ctBindingSlot?"Secondary":"Primary");else if(n==2)label="Reset this device's bindings";else{int a=n-3;const char *group=ctDefinitions[a].context==CT_EDIT?"Editor":ctDefinitions[a].context==CT_LAB?"Lab":ctDefinitions[a].context==CT_PREP?"Prep":"Play";label=TextFormat("[%s] %s: %s",group,ctDefinitions[a].label,ct_binding_name(p->bindings[ctDevice][a][ctBindingSlot]));}}
         else {int d=ctTab==2?1:ctTab==3?2:0,f=fields[n];label=f==200?"Reset this tab":f<100?TextFormat("%s: %.2f",ctFields[f].label,*ct_value(&p->tuning[d],f)):TextFormat("%s: %s",ct_option_name(f),*ct_option(p,d,f)?"On":"Off");}
-        int y=top+(n-ctScroll)*rowH;if(n==ctRow)DrawRectangle(left-6,y-3,listWidth,rowH-2,(Color){40,77,94,255});ct_menu_text(label,left,y+3,compact?14:17,listWidth-12,n==ctRow?GOLD:RAYWHITE);
+        int y=top+(n-ctScroll)*rowH;if(n==ctRow)DrawRectangle(left-6,y-3,listWidth,rowH-2,(Color){40,77,94,255});
+        bool fovRow = ctTab == 0 && n == CT_PROFILE_FOV;
+        ct_menu_text(label,left,y+3,compact?14:17,listWidth-(fovRow?80:12),n==ctRow?GOLD:RAYWHITE);
+        if (fovRow) {
+            Color button = {40, 50, 64, 255};
+            DrawRectangleRec(fovDecrease, button);
+            DrawRectangleRec(fovIncrease, button);
+            DrawText("-", fovDecrease.x + 10, y + 3, 16, p->verticalFov > CT_FOV_MIN ? RAYWHITE : GRAY);
+            DrawText("+", fovIncrease.x + 9, y + 3, 16, p->verticalFov < CT_FOV_MAX ? RAYWHITE : GRAY);
+        }
     }
     if(!compact&&ctTab>=2)ct_preview(width*.67f,170,width*.30f,height-300,dt);
     else if(!compact) {DrawText("Profiles are local to this machine.",width*.67f,180,15,LIGHTGRAY);DrawText("Apply saves to controls.cfg.",width*.67f,207,15,LIGHTGRAY);DrawText("Escape / Start recovery stays available.",width*.67f,234,14,LIGHTGRAY);if(ctTab==1&&ctDevice==0&&ct_shared_keys())DrawText("Shared keyboard overlap:\ncheck the other player's bindings.",width*.67f,275,15,ORANGE);}

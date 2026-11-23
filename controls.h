@@ -1,6 +1,10 @@
 /* Local device profiles. Stable action names are the persistence interface. */
 #define CT_PROFILES 16
 #define CT_NAME 48
+#define CT_FOV_DEFAULT 60
+#define CT_FOV_MIN 45
+#define CT_FOV_MAX 90
+#define CT_FOV_STEP 5
 #define CT_COMMON 1
 #define CT_GAME 2
 #define CT_EDIT 4
@@ -69,7 +73,7 @@ typedef enum {CT_ACTIONS(CT_ENUM) CT_COUNT} CtAction;
 /* Device: 0 keyboard, 1 mouse, 2 controller. Kind: none/key/mouse/wheel/button. */
 typedef struct {int kind,code,mods;} CtBinding;
 typedef struct {float x,y,zoom,accel,brake,inner,outer,curve,trigger,assist,smooth,moveInner,moveOuter;int invertX,invertY,direct,swap;} CtTuning;
-typedef struct {char name[CT_NAME];CtBinding bindings[3][CT_COUNT][2];CtTuning tuning[3];int aimToggle[3],tetherToggle[3],combined[3],layout;} CtProfile;
+typedef struct {char name[CT_NAME];CtBinding bindings[3][CT_COUNT][2];CtTuning tuning[3];int aimToggle[3],tetherToggle[3],combined[3],layout,verticalFov;} CtProfile;
 typedef struct {int version,count,assigned[4];CtProfile profiles[CT_PROFILES];} CtLibrary;
 typedef struct {bool down,pressed,released;} CtActionState;
 static CtLibrary ctLibrary;
@@ -84,6 +88,7 @@ static bool ct_pressed(int seat,int action);
 static bool ct_actor_pressed(int actor,int action);
 static const char *ct_hint(int actor,int action);
 static int ct_seat(int actor);
+static float ct_base_fov(int slot);
 static NetInputCommand ct_command(int seat,int slot,float dt);
 static void ct_move(int slot,float dt);
 static void ct_local_actions(float dt);

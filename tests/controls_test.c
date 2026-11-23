@@ -34,11 +34,23 @@ static void fixture(void){
     mouseCaptured=mouseButtonsArmed=true;mouseSeat=mouseSlot=0;ct_cancel_all();ct_frame(.016f);ct_frame(.016f);
 }
 static void persistence(void){
-    CtLibrary a,b;ct_defaults(&a);a.profiles[0].tuning[1].x=2.3f;a.profiles[0].bindings[0][CT_FIRE][0]=(CtBinding){1,KEY_K,3};a.assigned[3]=0;
+    CtLibrary a,b;ct_defaults(&a);a.profiles[0].tuning[1].x=2.3f;a.profiles[0].bindings[0][CT_FIRE][0]=(CtBinding){1,KEY_K,3};a.profiles[0].verticalFov=85;a.assigned[3]=0;
     assert(ct_save_file("roundtrip.cfg",&a));assert(ct_read_file("roundtrip.cfg",&b));assert(!memcmp(&a,&b,sizeof(a)));
     FILE *f=fopen("bad.cfg","w");fputs("CONTROLS 1 1\nSEATS 0 0 0 0\nPROFILE 0 0\nNAME Broken\nTUNE 1 x nan\nENDPROFILE\nEND\n",f);fclose(f);CtLibrary before=b;assert(!ct_read_file("bad.cfg",&b));assert(!memcmp(&before,&b,sizeof(b)));
     assert(!ct_save_file("missing/folder/settings.cfg",&a));assert(ct_read_file("roundtrip.cfg",&b));assert(!memcmp(&a,&b,sizeof(a)));
     f=fopen("couch_settings.cfg","w");fputs("1.8 0.22 1\n1 0.15 0\n1 0.15 0\n1 0.15 0\n",f);fclose(f);remove("controls.cfg");ct_load();assert(ctLibrary.profiles[0].tuning[1].x==1.8f&&ctLibrary.profiles[0].tuning[2].inner==.22f&&ctLibrary.profiles[0].tuning[1].invertY);assert(FileExists("couch_settings.cfg")&&FileExists("controls.cfg"));
+    f = fopen("legacy.cfg", "w");
+    assert(f);
+    fputs("CONTROLS 1 1\nSEATS 0 0 0 0\nPROFILE 0 0\nNAME Legacy\nTUNE 1 x 2\nENDPROFILE\nEND\n", f);
+    fclose(f);
+    assert(ct_read_file("legacy.cfg", &b));
+    assert(b.profiles[0].verticalFov == 60 && b.profiles[0].tuning[1].x == 2);
+    f = fopen("bad-fov.cfg", "w");
+    assert(f);
+    fputs("CONTROLS 1 1\nSEATS 0 0 0 0\nPROFILE 0 0\nNAME Invalid FOV\nFOV 95\nENDPROFILE\nEND\n", f);
+    fclose(f);
+    assert(!ct_read_file("bad-fov.cfg", &b));
+    assert(b.profiles[0].verticalFov == 60 && b.profiles[0].tuning[1].x == 2);
     puts("Profiles: round trip, migration, invalid input and atomic save failure PASS");
 }
 static void actions(void){
@@ -81,14 +93,88 @@ static void lan(void){
     net_transport_shutdown(&client);net_transport_shutdown(&netTransport);net_transport_global_shutdown();netTransport.role=NET_ROLE_OFFLINE;
     puts("Loopback LAN: remapped client input reaches authoritative host PASS");
 }
+static void camera_fov(void) {
+    fixture();
+    ct_profile(1)->verticalFov = 90;
+    assert(aim_fov(0) == 60 && aim_fov(1) == 90);
+    for (int seat = 0; seat < 2; ++seat) {
+        float baseFov = aim_fov(seat);
+        aimLensGun[seat] = EQ_RAIL;
+        aimStates[seat].blend = 1;
+        float magnification = tanf(baseFov * 0.5f * DEG2RAD) / tanf(aim_fov(seat) * 0.5f * DEG2RAD);
+        assert(fabsf(magnification - eqGuns[EQ_RAIL].zoom) < .001f);
+        aimStates[seat].blend = 0;
+        assert(aim_fov(seat) == baseFov);
+    }
+    netTransport.role = NET_ROLE_CLIENT;
+    netLocalPlayerCount = 2;
+    netLocalPlayerSlots[0] = 3;
+    netLocalPlayerSlots[1] = 2;
+    assert(aim_fov(3) == 60 && aim_fov(2) == 90);
+    assert(aim_fov(1) == 60);
+    netTransport.role = NET_ROLE_OFFLINE;
+    puts("FOV: split-screen profiles, LAN seat mapping and zoom magnification PASS");
+}
+
+static void fov_menu(void) {
+    fixture();
+    ctTab = ctEditSeat = 0;
+    ct_open();
+    ctRow = CT_PROFILE_FOV;
+    tp[KEY_LEFT] = true;
+    for (int press = 0; press < 5; ++press) ct_menu_frame();
+    assert(ct_edit_profile()->verticalFov == 45 && aim_fov(0) == 60);
+
+    neutral();
+    int width = GetScreenWidth();
+    int listWidth = (int)(width * .62f);
+    position = (Vector2){30 + listWidth - 24, 170 + CT_PROFILE_FOV * 32 + 8};
+    tmp[MOUSE_BUTTON_LEFT] = true;
+    ct_menu_frame();
+    assert(ct_edit_profile()->verticalFov == 50);
+    position.x -= 34;
+    ct_menu_frame();
+    assert(ct_edit_profile()->verticalFov == 45);
+
+    neutral();
+    couchMenuDevice = 3;
+    pp[3][GAMEPAD_BUTTON_LEFT_FACE_RIGHT] = true;
+    ct_menu_frame();
+    assert(ct_edit_profile()->verticalFov == 50);
+    neutral();
+    tp[KEY_RIGHT] = true;
+    for (int press = 0; press < 10; ++press) ct_menu_frame();
+    assert(ct_edit_profile()->verticalFov == 90);
+    neutral();
+    tp[KEY_F5] = true;
+    ct_menu_frame();
+    assert(!ctMenuOpen && aim_fov(0) == 90 && aim_fov(1) == 60);
+    CtLibrary saved;
+    assert(ct_read_file("controls.cfg", &saved) && saved.profiles[0].verticalFov == 90);
+
+    neutral();
+    ct_open();
+    ctRow = CT_PROFILE_RESET_FIRST;
+    tp[KEY_ENTER] = true;
+    ct_menu_frame();
+    assert(ct_edit_profile()->verticalFov == 60);
+    neutral();
+    tp[KEY_ESCAPE] = true;
+    ct_menu_frame();
+    assert(!ctMenuOpen && aim_fov(0) == 90);
+    assert(ct_read_file("controls.cfg", &saved) && saved.profiles[0].verticalFov == 90);
+    neutral();
+    puts("FOV menu: keyboard, mouse, controller, limits, reset, apply and cancel PASS");
+}
+
 static void menus(void){
     fixture();gameState=GAME_STATE_PAUSED;ctPauseOpened=true;couchSelection=0;tp[KEY_PAUSE]=true;couch_frame();assert(gameState==GAME_STATE_PAUSED);tp[KEY_PAUSE]=true;couch_frame();assert(gameState==GAME_STATE_PLAYING);neutral();
     ct_open();CtLibrary saved=ctLibrary;ctDraft.profiles[0].tuning[1].x=3;ct_close(false);assert(!memcmp(&saved,&ctLibrary,sizeof(saved)));
-    ct_open();ctNameAction=1;strcpy(ctNameBuffer,"My layout");ct_name_finish();assert(ctDraft.count==5&&!strcmp(ct_edit_profile()->name,"My layout"));
+    ct_open();ct_edit_profile()->verticalFov=75;ctNameAction=1;strcpy(ctNameBuffer,"My layout");ct_name_finish();assert(ctDraft.count==5&&!strcmp(ct_edit_profile()->name,"My layout")&&ct_edit_profile()->verticalFov==75);
     ctTab=1;ctDevice=0;ctCapture=CT_FIRE;ctBindingSlot=0;ctCandidate=ct_edit_profile()->bindings[0][CT_JUMP][0];ctConflict=ct_conflict(ct_edit_profile(),CT_FIRE,ctCandidate);assert(ctConflict==CT_JUMP);CtBinding old=ct_edit_profile()->bindings[0][CT_FIRE][0];ct_assign_binding(0);assert(ct_equal_binding(ct_edit_profile()->bindings[0][CT_JUMP][0],old));
     ct_close(true);CtLibrary loaded;assert(ct_read_file("controls.cfg",&loaded));assert(!memcmp(&loaded,&ctLibrary,sizeof(loaded)));
     ct_open();couchMenuDevice=3;ctDevice=2;ctCapture=CT_JUMP;ctCaptureArmed=true;pp[3][GAMEPAD_BUTTON_RIGHT_FACE_RIGHT]=pb[3][GAMEPAD_BUTTON_RIGHT_FACE_RIGHT]=true;ct_frame(.016f);ct_menu_frame();assert(ctCapture<0);neutral();ct_close(false);
     fixture();ct_open();for(int size=0;size<2;size++){SetWindowSize(size?640:1280,size?360:720);for(int tab=0;tab<5;tab++){ctTab=tab;ctRow=ctScroll=0;ct_menu_frame();ct_menu_frame();Image image=LoadImageFromScreen();assert(ExportImage(image,TextFormat("controls-%d-%d.png",size,tab)));UnloadImage(image);}}
     ct_close(false);puts("Menu draft/apply/cancel, profile duplicate, conflict swap, B capture and screenshots PASS");
 }
-int main(void){SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(1280,720,"Controls tests");MakeDirectory("artifacts");MakeDirectory("artifacts/controls-test");assert(ChangeDirectory("artifacts/controls-test"));persistence();actions();modes();tuning();lan();menus();CloseWindow();puts("Controls regression suite PASS");return 0;}
+int main(void){SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(1280,720,"Controls tests");MakeDirectory("artifacts");MakeDirectory("artifacts/controls-test");assert(ChangeDirectory("artifacts/controls-test"));persistence();actions();modes();tuning();lan();camera_fov();fov_menu();menus();CloseWindow();puts("Controls regression suite PASS");return 0;}

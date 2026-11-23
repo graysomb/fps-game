@@ -1,3 +1,5 @@
+#include <ctype.h>
+
 static void enemy_lab_spawn(int slot,EnemyType type,Vector3 position);
 /* Local arena editor. All edits affect cmDocument, never a live playtest. */
 typedef struct {int tool,item,brush[3],color,material,panel,row,group,trap,objectKind,objectIndex;bool reinforced,selected,corner,stroke,latched;Vector3 a,b;float distance,yaw,repeat;Vector3 preview,lastPos;float lastYaw,lastPitch;bool previewValid;} CeSeat;

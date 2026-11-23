@@ -7,7 +7,12 @@ static int aimDevices[MAX_PLAYERS]={-2,-2,-2,-2},aimInputs[MAX_PLAYERS]={-2,-2,-
 static bool aim_local(int i){return netTransport.role==NET_ROLE_OFFLINE || net_player_is_local(i);}
 static void aim_cancel(int i){if(i>=0 && i<MAX_PLAYERS)aimStates[i].active=false;}
 static float aim_zoom(int i){if(i<0 || i>=MAX_PLAYERS || is_player_bot(i))return 1;float a=aimStates[i].blend;a=a*a*(3-2*a);int gun=aimLensGun[i];return 1+(eqGuns[gun].zoom-1)*a;}
-static float aim_fov(int i){return 2*atanf(tanf(30*DEG2RAD)/aim_zoom(i))*RAD2DEG;}
+static float aim_fov(int i) {
+    float baseFov = ct_base_fov(i);
+    float zoom = aim_zoom(i);
+    if (zoom == 1.0f) return baseFov;
+    return 2.0f * atanf(tanf(baseFov * 0.5f * DEG2RAD) / zoom) * RAD2DEG;
+}
 static float aim_scale(int i){return 1/aim_zoom(i);}
 static float aim_player_scale(const Player *p){for(int i=0;i<MAX_PLAYERS;i++)if(p==&players[i])return aim_scale(i);return 1;}
 static float aim_seat_scale(int seat){int i=netTransport.role==NET_ROLE_OFFLINE?seat:netLocalPlayerSlots[seat];return aim_scale(i);}

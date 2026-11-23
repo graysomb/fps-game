@@ -10,8 +10,14 @@ static const CtField ctFields[]={CTF(x,"Horizontal sensitivity",.1f,5,.1f),CTF(y
 static char ctError[192];
 static float *ct_value(CtTuning *t,int field){return (float*)((unsigned char*)t+ctFields[field].offset);}
 static CtProfile *ct_profile(int seat){if(seat<0||seat>=4)seat=0;return &ctLibrary.profiles[ctLibrary.assigned[seat]];}
+static float ct_base_fov(int slot) {
+    if (!ctReady || slot < 0 || slot >= MAX_PLAYERS) return CT_FOV_DEFAULT;
+    int seat = ct_seat(slot);
+    return seat >= 0 && seat < MAX_PLAYERS ? ct_profile(seat)->verticalFov : CT_FOV_DEFAULT;
+}
 static void ct_default_profile(CtProfile *p,int layout,const char *name){
     memset(p,0,sizeof(*p));p->layout=layout;snprintf(p->name,sizeof(p->name),"%s",name);
+    p->verticalFov = CT_FOV_DEFAULT;
     for(int d=0;d<3;d++){p->tuning[d]=(CtTuning){.x=1,.y=1,.zoom=1,.accel=d==1?0:1,.brake=1,.inner=.15f,.moveInner=.15f,.trigger=.5f,.assist=1};p->aimToggle[d]=1;p->combined[d]=d==2;}
     for(int a=0;a<CT_COUNT;a++){
         int key=ctDefinitions[a].key[layout];if(key)p->bindings[0][a][0]=(CtBinding){1,key,0};
@@ -35,6 +41,8 @@ static bool ct_validate(const CtLibrary *l){
     for(int i=0;i<4;i++)if(l->assigned[i]<0||l->assigned[i]>=l->count)return false;
     for(int i=0;i<l->count;i++){
         const CtProfile *p=&l->profiles[i];if(!p->name[0]||!memchr(p->name,0,sizeof(p->name))||strchr(p->name,'\n')||strchr(p->name,'\r')||p->layout<0||p->layout>1)return false;
+        if (p->verticalFov < CT_FOV_MIN || p->verticalFov > CT_FOV_MAX ||
+            (p->verticalFov - CT_FOV_MIN) % CT_FOV_STEP != 0) return false;
         for(int d=0;d<3;d++){
             CtTuning t=p->tuning[d];for(int f=0;f<13;f++){float value=*ct_value(&t,f);if(!isfinite(value)||value<ctFields[f].min||value>ctFields[f].max)return false;}
             if(t.inner+t.outer>=.95f||t.moveInner+t.moveOuter>=.95f||t.invertX<0||t.invertX>1||t.invertY<0||t.invertY>1||t.direct<0||t.direct>1||t.swap<0||t.swap>1)return false;
@@ -48,6 +56,7 @@ static bool ct_save_file(const char *path,const CtLibrary *l){
     char tmp[600];if(snprintf(tmp,sizeof(tmp),"%s.tmp",path)>=(int)sizeof(tmp))return false;FILE *f=fopen(tmp,"w");if(!f){snprintf(ctError,sizeof(ctError),"Cannot write %s",path);return false;}
     fprintf(f,"CONTROLS 1 %d\nSEATS %d %d %d %d\n",l->count,l->assigned[0],l->assigned[1],l->assigned[2],l->assigned[3]);
     for(int i=0;i<l->count;i++){const CtProfile *p=&l->profiles[i];fprintf(f,"PROFILE %d %d\nNAME %s\n",i,p->layout,p->name);
+        if (p->verticalFov != CT_FOV_DEFAULT) fprintf(f, "FOV %d\n", p->verticalFov);
         for(int d=0;d<3;d++){CtTuning t=p->tuning[d];fprintf(f,"OPTIONS %d %d %d %d %d %d %d %d\n",d,p->aimToggle[d],p->tetherToggle[d],p->combined[d],t.invertX,t.invertY,t.direct,t.swap);
             for(int n=0;n<13;n++)fprintf(f,"TUNE %d %s %.9g\n",d,ctFields[n].name,*ct_value(&t,n));
             for(int a=0;a<CT_COUNT;a++)for(int b=0;b<2;b++){CtBinding v=p->bindings[d][a][b];fprintf(f,"BIND %d %s %d %d %d %d\n",d,ctDefinitions[a].name,b,v.kind,v.code,v.mods);}}
@@ -73,6 +82,12 @@ static bool ct_read_file(const char *path,CtLibrary *out){
         if(!strncmp(line,"PROFILE ",8)){ok=sscanf(line+8,"%d %d",&a,&b)==2&&a==seen&&a<count&&b>=0&&b<2;if(ok){profile=a;ct_default_profile(&l->profiles[a],b,"Imported");seen++;}continue;}
         if(!strcmp(line,"ENDPROFILE")){profile=-1;continue;}if(profile<0){ok=false;break;}CtProfile *p=&l->profiles[profile];
         if(!strncmp(line,"NAME ",5)){ok=strlen(line+5)>0&&strlen(line+5)<CT_NAME;if(ok)strcpy(p->name,line+5);}
+        else if (!strncmp(line, "FOV ", 4)) {
+            char *endValue;
+            long fov = strtol(line + 4, &endValue, 10);
+            ok = *endValue == '\0' && fov >= CT_FOV_MIN && fov <= CT_FOV_MAX;
+            if (ok) p->verticalFov = (int)fov;
+        }
         else if(!strncmp(line,"OPTIONS ",8)){ok=sscanf(line+8,"%d %d %d %d %d %d %d %d",&d,&a,&b,&c,&e,&g,&h,&version)==8&&d>=0&&d<3;if(ok){p->aimToggle[d]=a;p->tetherToggle[d]=b;p->combined[d]=c;p->tuning[d].invertX=e;p->tuning[d].invertY=g;p->tuning[d].direct=h;p->tuning[d].swap=version;}}
         else if(!strncmp(line,"TUNE ",5)){ok=sscanf(line+5,"%d %63s %f",&d,name,&value)==3&&d>=0&&d<3;if(ok)for(int n=0;n<13;n++)if(!strcmp(name,ctFields[n].name))*ct_value(&p->tuning[d],n)=value;}
         else if(!strncmp(line,"BIND ",5)){ok=sscanf(line+5,"%d %63s %d %d %d %d",&d,name,&a,&b,&c,&e)==6&&d>=0&&d<3&&a>=0&&a<2;if(ok)for(int n=0;n<CT_COUNT;n++)if(!strcmp(name,ctDefinitions[n].name))p->bindings[d][n][a]=(CtBinding){b,c,e};}
