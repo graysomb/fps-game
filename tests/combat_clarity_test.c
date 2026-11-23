@@ -24,19 +24,20 @@ int main(int argc,char **argv){bool grenadeOnly=argc>1&&!strcmp(argv[1],"--grena
         empty_arena();players[0].pos=(Vector3){10,1,0};players[1].pos=(Vector3){distance,1,0};
         ex_grenade_deploy((GrenadeState){.kind=GRENADE_REGULAR,.adhesive=sticky,.pos={0,1,0},.owner=0});
         float expected=100-(sticky?100:75)*(1-distance/4.0f);
-        assert(fabsf(players[1].matter-expected)<.001f);
+        assert(fabsf(players[1].health+players[1].shields-expected)<.001f);
+        if(expected>0)assert(players[1].matter==100);
     }
     for(int sticky=0;sticky<2;sticky++) {
         empty_arena();players[1].pos=(Vector3){3,1,0};add_static_box_at_grid(2,2,0,5,-3,3,GRAY);init_static_hash();
         ex_grenade_deploy((GrenadeState){.kind=GRENADE_REGULAR,.adhesive=sticky,.pos={0,1,0},.owner=0});assert(players[1].matter==100);
     }
-    empty_arena();enemy_blast((EnemyCharge){.pos={0,1,0},.owner=0});assert(players[0].matter==40);
+    empty_arena();enemy_blast((EnemyCharge){.pos={0,1,0},.owner=0});assert(players[0].shields==15 && players[0].matter==100);
     if(grenadeOnly){enemy_cleanup(true);shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Grenade damage checks passed");return 0;}
     empty_arena();players[1].pos=(Vector3){10,1,0};grenadeInventory[0]=2;
     assert(clarity_throw(0));assert(grenadeInventory[0]==1);assert(!clarity_throw(0));clarity_tick(.5f);assert(clarity_throw(0));assert(grenadeInventory[0]==0);assert(!clarity_throw(0));
     for(int f=0;f<220;f++)clarity_tick(1.0f/60);for(int n=0;n<32;n++)assert(!grenades[n].id);assert(!debugDrawParticles);
-    empty_arena();clarity_explode((Vector3){0,1,0},0);assert(players[0].matter==40 && players[1].matter<100);assert(!explosionDamageContext);
-    players[1].isExposed=true;players[1].matter=0;clarity_explode((Vector3){0,1,0},0);assert(combatantLife[1]==LIFE_DOWNED);assert(players[0].kills==0);
+    empty_arena();clarity_explode((Vector3){0,1,0},0);assert(players[0].shields==15 && players[1].shields<75);assert(!explosionDamageContext);
+    players[1].shields=0;clarity_explode((Vector3){0,1,0},0);assert(combatantLife[1]==LIFE_DOWNED);assert(players[0].kills==0);
     empty_arena();players[1].pos=(Vector3){3,1,0};add_static_box_at_grid(2,2,0,5,-3,3,GRAY);init_static_hash();clarity_explode((Vector3){0,1,0},0);assert(players[1].matter==100);
     empty_arena();enemy_lab_spawn(4,ENEMY_TYPE_STANDARD,(Vector3){2,1,0});players[4].invuln_timer=0;enemyCharges[5]=(EnemyCharge){.active=true,.pos={0,1,0},.fuse=3};assert(clarity_evade(4,.1f));assert(players[4].vel.x>0);enemyCharges[5].active=false;
     clarity_explode((Vector3){1,1,0},4);assert(players[4].matter<100);

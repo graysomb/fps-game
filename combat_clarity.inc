@@ -77,7 +77,8 @@ static bool clarity_shield_melee(int v,int attacker) {
 static void clarity_actor_damage(int target,int owner,float damage,bool debris) {
     if(target<0 || target>=activePlayers || players[target].respawn_timer>0 || players[target].invuln_timer>0)return;
     bool prior=explosionDamageContext;explosionDamageContext=true;
-    if(players[target].isExposed)kill_player(target,owner,true,debris);else apply_matter_damage(target,owner,damage);
+    if (uses_player_vitals(target)) apply_player_damage(target,owner,damage,false,true,debris);
+    else if(players[target].isExposed)kill_player(target,owner,true,debris);else apply_matter_damage(target,owner,damage);
     explosionDamageContext=prior;
 }
 static bool clarity_debris_hit(int v,int target) {

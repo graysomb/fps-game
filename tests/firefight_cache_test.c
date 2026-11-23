@@ -31,7 +31,7 @@ static void duplicates(void){
   fp_tick(.01f);assert(players[0].matter==65);
  }
  players[0].matter=player_max_matter(&players[0])-5;ground_item(PICKUP_GLOCK,players[0].pos);fp_tick(.01f);assert(players[0].matter==player_max_matter(&players[0]));
- players[0].matter=0;players[0].isExposed=true;ground_item(PICKUP_GLOCK,players[0].pos);fp_tick(.01f);assert(players[0].matter==25 && !players[0].isExposed);
+ players[0].matter=0;players[0].shields=0;ground_item(PICKUP_GLOCK,players[0].pos);fp_tick(.01f);assert(players[0].matter==25 && players[0].shields==0);
  puts("Duplicate guns: both slots, full loadout, single consumption, matter cap and exposed recovery passed");
 }
 static void cache(void){

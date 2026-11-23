@@ -604,27 +604,22 @@ Creative mode lets you fly around an empty world and build voxel maps that can b
 
 ## Constructor-Brawler Gameplay Loop
 
-This section outlines the planned "Constructor-Brawler" gameplay loop.
+Human-controlled players have 75 Shields, 25 Health, and a separate Matter pool.
+Shields recharge at 25 per second after five seconds without damage. Health recharges
+at five per second after eight seconds without damage, once shields are full. The
+Shield Regeneration upgrade increases shield recovery to 35 per second. Glob
+suppression interrupts recovery and continues to block Matter restoration.
 
-### Phase 1: Matter Core & Melee Harvest
-*   **Player Stats:** Health and Ammo are replaced by a single **Matter** resource (0-100).
-*   **Exposed State:** When Matter reaches 0, the player becomes **Exposed**.
-*   **Melee:** Short-range raycast. 
-    *   Hitting a voxel destroys it and grants +10 Matter.
-    *   Hitting an enemy applies knockback. If the enemy is Exposed, they are killed.
-*   **HUD:** Large Matter bar. Flashes transparent blue on damage to shields (Matter > 0) and transparent red when Exposed.
+The starter gun and Glob drain player shields. Other damage that could finish an
+exposed player carries through to Health at its normal damage value. Zero Health
+starts the death flow. In co-op Firefight, a teammate can revive a downed player
+with 12.5 Health, zero Shields, and 35 Matter. AI retains its Matter-based defenses
+and the Foundry keeps its core protection.
 
-### Phase 2: Gun & Build Mechanics
-*   **Shooting:** Consumes Matter. Prevented if Matter is 0.
-    *   Bullets deal damage to enemy Matter.
-    *   Bullets deal 0 damage to Exposed players (must use Melee or Physics).
-*   **Building:** Consumes 10 Matter to place a static voxel. Edits regenerate through the recycle pipeline but last longer than dynamic debris.
-
-### Phase 3: Physics Finisher (Gravity Tether)
-*   **Gravity Tether:** 
-    *   **Grab:** Raycast to find a dynamic voxel or pull a chunk off a static structure. Applies spring force towards the player's hand.
-    *   **Throw:** Release to apply a massive impulse in the look direction.
-*   **Physics Damage:** High-velocity objects hitting an Exposed player will kill them.
+Weapons and building consume Matter. Mine terrain with melee or collect green
+pickups, including Firefight enemy drops, to replenish it. Red pickups restore
+player Health. The HUD shows all three pools and highlights Health after a shield
+break. Qualifying thrown voxels and debris can damage both defenses.
 
 ## Building
 
@@ -1279,8 +1274,8 @@ restock the new supplies.
 | Item | Initial gameplay tuning |
 | --- | --- |
 | Glob Gun | Full auto, 6 shots/s, 1 Matter/shot, 18 damage, 60 m range. Body hits block all Matter restoration for 5 seconds; further hits refresh the timer. |
-| Glock | Semi-auto, up to 4 shots/s, 1 Matter/shot, 15 damage, 60 m range. Can execute exposed targets. |
-| DMR | Semi-auto, 2.5 shots/s, 3 Matter/shot, 25 damage, 75 m range, clear-view 3x zoom. Four hits kill an unprotected 100-Matter target. Cuts one contacted voxel and stops; activates adjacent terrain and shares a quarter of normal tether impulse across nearby loose islands. |
+| Glock | Semi-auto, up to 4 shots/s, 1 Matter/shot, 8 damage, 60 m range. Can damage Health after shields break. |
+| DMR | Semi-auto, 2.5 shots/s, 3 Matter/shot, 25 damage, 75 m range, clear-view 3x zoom. Four uninterrupted hits defeat a fully protected player. Cuts one contacted voxel and stops, activates adjacent terrain, and shares a quarter of normal tether impulse across nearby loose islands. |
 | Black Hole Bomb | Regular minimum/bounce fuse, then a stationary 6 m field for 5 seconds. Pulls everyone, including its owner, with no direct damage. Pulled debris uses normal collision damage. Goliaths resist pull; Foundries are immovable. |
 | Igloo Grenade | Deploys a connected 0.5 m voxel shelter, entrance facing the launch position, with an open square chimney. Reinforced shell persists until destroyed. Requires a supported footprint and clear shell/doorway; failed placement refunds one grenade to the same living player incarnation. |
 

@@ -11,7 +11,7 @@ static void fresh(void){
  firefightPractice=enemyLab=equipmentLab=creativeModeActive=false;firefightWaveState=FIREFIGHT_STATE_ACTIVE;worldPeriodic=false;worldFloorHalfSize=40;netTransport.role=NET_ROLE_OFFLINE;
  fp_new_run();eq_reset_all();clarity_reset();
  for(int i=0;i<MAX_COMBATANTS;i++){players[i].respawn_timer=9999;combatantLife[i]=LIFE_UNUSED;playerInput[i]=i<4?INPUT_TYPE_KEYBOARD:INPUT_TYPE_BOT_EASY;combatantTeam[i]=i<4?0:1;}
- players[0].pos=(Vector3){-.9f,1,-12};players[0].respawn_timer=0;players[0].matter=100;combatantLife[0]=LIFE_ALIVE;
+ players[0].pos=(Vector3){-.9f,1,-12};players[0].respawn_timer=0;players[0].matter=100;reset_player_vitals(&players[0],false);combatantLife[0]=LIFE_ALIVE;
  init_firefight_bot_entity(4,ENEMY_TYPE_STANDARD,INPUT_TYPE_BOT_EASY);players[4].pos=(Vector3){-.9f,1,0};players[4].yaw=0;players[4].pitch=0;
  assert(ff_ai_level(firefightWave,ENEMY_TYPE_STANDARD)==0);assert(ff_ai_level(firefightWave,ENEMY_TYPE_SHIELDBEARER)==1);
  init_firefight_bot_entity(5,ENEMY_TYPE_SHIELDBEARER,INPUT_TYPE_BOT_MEDIUM);players[5].pos=(Vector3){0,1,-3};players[5].yaw=0;players[5].pitch=0;enemy_update_equipment(5);rebuild_voxel_hash();
@@ -36,16 +36,16 @@ static void shots(void){
  assert(!rifle_shield_ray(ray,12,-1,4,&hit));assert(!rifle_view_blocked(4,players[0].pos));
  assert(rifle_shield_ray(ray,12,-1,0,&hit)); // human cannot phase through it
  int bullet=addVoxel(-.9f,1,-.8f,false,true,WHITE,0);voxels[bullet].isBullet=true;voxels[bullet].owner=4;voxels[bullet].vel=(Vector3){0,0,-60};
- rebuild_voxel_hash();update_projectiles(.2f);assert(players[0].matter<100);
+ rebuild_voxel_hash();update_projectiles(.2f);assert(players[0].shields<75&&players[0].matter==100);
  for(int g=0;g<4;g++)assert(enemySpecial[5].shieldHits[g]==SHIELD_SECTION_HITS);
  fresh();bullet=addVoxel(-.9f,1,-9,false,true,WHITE,0);voxels[bullet].isBullet=true;voxels[bullet].owner=0;voxels[bullet].vel=(Vector3){0,0,60};
  rebuild_voxel_hash();update_projectiles(.1f);
  int hits=0;for(int g=0;g<4;g++)hits+=SHIELD_SECTION_HITS-enemySpecial[5].shieldHits[g];assert(hits==1);
  fresh();add_static_box_at_grid(-4,4,0,5,-15,-14,GRAY);init_static_hash();rebuild_voxel_hash();
  assert(rifle_shield_ray(ray,12,-1,4,&hit));assert(!voxels[hit.id].simulate);assert(rifle_view_blocked(4,players[0].pos));
-  fresh();assert(ex_fire(4,EQ_GLOCK,ray));assert(players[0].matter<100);
+  fresh();assert(ex_fire(4,EQ_GLOCK,ray));assert(players[0].shields<75&&players[0].matter==100);
  for(int g=0;g<4;g++)assert(enemySpecial[5].shieldHits[g]==SHIELD_SECTION_HITS);
- fresh();ex_reset();assert(ex_fire(4,EQ_GLOB,ray));ex_tick(.21f);assert(players[0].matter<100);
+ fresh();ex_reset();assert(ex_fire(4,EQ_GLOB,ray));ex_tick(.21f);assert(players[0].shields<75&&players[0].matter==100);
  for(int g=0;g<4;g++)assert(enemySpecial[5].shieldHits[g]==SHIELD_SECTION_HITS);
  fresh();combatantTeam[5]=0;assert(rifle_shield_ray(ray,12,-1,4,&hit));
  puts("Shots: actual friendly projectile passage, player interception, health, walls and hostile shields passed");

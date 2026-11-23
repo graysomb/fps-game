@@ -43,6 +43,7 @@ static void verify_saved_wave(void){
     assert(gameState==GAME_STATE_PLAYING && firefightWave==7 && firefightRound==1 && !firefightCheckpoints && firefightEndless);
     assert(currentWorldType==WORLD_TYPE_TEST && !firefightFoundry && firefightHumans==2 && multiplayerActivePlayers==2);
     assert(firefightScore==12345 && firefightKillsTotal==39 && firefightTeamLives==5 && teamUpgradeLevels[1]==2);
+    assert(players[0].shields==75 && players[0].health==25);
     assert(players[0].kills==7 && players[0].deaths==2 && players[0].debrisKills==3 && players[0].goldTetherCharged);
     assert(fabsf(players[0].kd_ratio-8.f/3)<.001f && reviveCount[0]==4);
     assert(eq_gun(0)==EQ_GLOCK && equipment[0].gun[0]==EQ_GLOB && eq_upgrade(0,EQ_SHIELD) && eq_upgrade(0,EQ_SWORD));

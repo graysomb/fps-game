@@ -66,7 +66,7 @@ static bool fp_collect(int i,size_t n,bool replace){
  if(gun>=0){
   if(e->gun[0]==gun||e->gun[1]==gun){
    item->owner=-2;item->groundAge=0;players[i].matter=fminf(player_max_matter(&players[i]),players[i].matter+FP_DUPLICATE_MATTER);
-   players[i].isExposed=players[i].matter<=0;players[i].matter_flash_timer=.2f;++fpRevision;
+   players[i].matter_flash_timer=.2f;++fpRevision;
    play_sfx_at(SFX_SHIELD,players[i].pos,i,1,1);return true;
   }
   int slot=e->gun[0]==EQ_EMPTY?0:e->gun[1]==EQ_EMPTY?1:replace?e->selected:-1;if(slot<0)return false;

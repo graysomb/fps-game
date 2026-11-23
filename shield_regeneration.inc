@@ -1,23 +1,38 @@
-/* A player-owned passive upgrade. Simulation is authoritative, never per viewport. */
-static void eq_shield_damage(int i){
- if(i<0 || i>=MAX_PLAYERS)return;
- equipment[i].shieldDelay=eqShieldDelay;equipment[i].shieldRegenerating=false;
-}
-static void eq_shield_tick(float dt){
- if(netTransport.role==NET_ROLE_CLIENT || !isfinite(dt) || dt<=0)return;
- for(int i=0;i<MAX_PLAYERS;i++){
-  Equipment *e=&equipment[i];Player *p=&players[i];e->shieldRegenerating=false;
-  if(!(e->upgrades&EQ_SHIELD) || is_player_bot(i) || i>=activePlayers || p->respawn_timer>0 || gameState!=GAME_STATE_PLAYING ||
-     (enemyLab && enemyLabPaused && !enemyLabStep) || (gameMode==GAME_MODE_FIREFIGHT &&
-     (combatantLife[i]!=LIFE_ALIVE || firefightWaveState==FIREFIGHT_STATE_RESTART || firefightWaveState==FIREFIGHT_STATE_DEFEAT || firefightWaveState==FIREFIGHT_STATE_VICTORY)))continue;
-  // Only the fraction of this tick after both delays expire may restore Matter.
-  float blocked=fmaxf(e->shieldDelay,exSuppression[i]);
-  e->shieldDelay=fmaxf(0,e->shieldDelay-dt);
-  float recovery=fmaxf(0,dt-blocked),room=player_max_matter(p)*eqShieldCeiling-p->matter;
-  if(recovery<=0 || room<=0 || ex_suppressed(i))continue;
-  float before=p->matter;add_player_matter(p,fminf(room,eqShieldRate*recovery));
-  e->shieldRegenerating=p->matter>before;
- }
+static void player_vitals_tick(float dt) {
+    if (!isfinite(dt) || dt <= 0.0f) return;
+    for (int i = 0; i < MAX_PLAYERS && i < activePlayers; ++i) {
+        if (!uses_player_vitals(i)) continue;
+        Player *p = &players[i];
+        p->shieldHitFlash = fmaxf(0.0f, p->shieldHitFlash - dt);
+        p->shieldBreakFlash = fmaxf(0.0f, p->shieldBreakFlash - dt);
+        p->healthHitFlash = fmaxf(0.0f, p->healthHitFlash - dt);
+        if (netTransport.role == NET_ROLE_CLIENT) continue;
+
+        p->rechargeFlags = 0;
+        if (gameState != GAME_STATE_PLAYING || p->respawn_timer > 0.0f || p->health <= 0.0f ||
+            (enemyLab && enemyLabPaused && !enemyLabStep) || (gameMode == GAME_MODE_FIREFIGHT &&
+            (combatantLife[i] != LIFE_ALIVE || firefightWaveState == FIREFIGHT_STATE_RESTART ||
+             firefightWaveState == FIREFIGHT_STATE_DEFEAT || firefightWaveState == FIREFIGHT_STATE_VICTORY))) continue;
+
+        float suppression = fmaxf(0.0f, exSuppression[i]);
+        float shieldStart = fmaxf(suppression, p->recoveryDelay - (PLAYER_HEALTH_DELAY - PLAYER_SHIELD_DELAY));
+        float healthStart = fmaxf(suppression, p->recoveryDelay);
+        p->recoveryDelay = fmaxf(0.0f, p->recoveryDelay - dt);
+
+        if (p->shields < PLAYER_SHIELDS_MAX) {
+            float rate = (equipment[i].upgrades & EQ_SHIELD) ? PLAYER_SHIELD_UPGRADED_RATE : PLAYER_SHIELD_RATE;
+            // Health can use only the part of this frame after shields reach full.
+            healthStart = fmaxf(healthStart, shieldStart + (PLAYER_SHIELDS_MAX - p->shields) / rate);
+            if (dt > shieldStart) {
+                p->shields = fminf(PLAYER_SHIELDS_MAX, p->shields + rate * (dt - shieldStart));
+                if (p->shields < PLAYER_SHIELDS_MAX) p->rechargeFlags |= RECHARGE_SHIELDS;
+            }
+        }
+        if (p->health < PLAYER_HEALTH_MAX && dt > healthStart) {
+            p->health = fminf(PLAYER_HEALTH_MAX, p->health + PLAYER_HEALTH_RATE * (dt - healthStart));
+            if (p->health < PLAYER_HEALTH_MAX) p->rechargeFlags |= RECHARGE_HEALTH;
+        }
+    }
 }
 static void eq_shield_icon(int x,int y,Color color){
  Vector2 v[5]={{x+12,y},{x+24,y+5},{x+21,y+17},{x+12,y+26},{x+3,y+17}};

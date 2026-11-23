@@ -439,7 +439,8 @@ static bool enemy_lob_hit(int voxel,int victim) {
         if(l->hitCooldown[victim]<=0 && combatantTeam[victim]!=combatantTeam[l->owner]) {
             l->hitCooldown[victim]=.35f;
             bool prior=damageOriginKnown;Vector3 origin=damageOrigin;damageOriginKnown=true;damageOrigin=v_sub(voxels[voxel].pos,v_mul(v_norm(voxels[voxel].vel),2));
-            if(players[victim].isExposed)kill_player(victim,l->owner,true,true);else apply_matter_damage(victim,l->owner,30);
+            if (uses_player_vitals(victim)) apply_player_damage(victim,l->owner,30,false,true,true);
+            else if(players[victim].isExposed)kill_player(victim,l->owner,true,true);else apply_matter_damage(victim,l->owner,30);
             damageOriginKnown=prior;damageOrigin=origin;
         }
         return true;
@@ -674,7 +675,10 @@ static void enemy_update(int i,float dt) {
     }
     bool meleeLine=distance<(t==ENEMY_TYPE_SHIELDBEARER?2.2f:1.4f) && (t==ENEMY_TYPE_SHIELDBEARER?!rifle_view_blocked(i,ai_target_body(s->target)->pos):enemy_clear_line(p->pos,ai_target_body(s->target)->pos));
     if(distance<(t==ENEMY_TYPE_SHIELDBEARER?2.2f:1.4f) && meleeLine && s->melee<=0 && s->windup<=0 && t!=ENEMY_TYPE_FOUNDRY) {
-        if(target_is_hologram(s->target))hologram_damage(s->target,10);else if(players[s->target].isExposed)kill_player(s->target,i,true,false);else apply_matter_damage(s->target,i,10);s->melee=1.5f;
+        if(target_is_hologram(s->target))hologram_damage(s->target,10);
+        else if (uses_player_vitals(s->target)) apply_player_damage(s->target,i,10,false,true,false);
+        else if(players[s->target].isExposed)kill_player(s->target,i,true,false);else apply_matter_damage(s->target,i,10);
+        s->melee=1.5f;
     }
     move.y=0;
     if(s->windup>0 || v_length(move)<.25f){p->vel.x=p->vel.z=0;return;}

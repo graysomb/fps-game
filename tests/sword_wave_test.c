@@ -9,7 +9,7 @@ static void setup(void){
  memset(players,0,sizeof(players));memset(enemySpecial,0,sizeof(enemySpecial));memset(goliathStates,0,sizeof(goliathStates));
  gameMode=GAME_MODE_DEATHMATCH;gameState=GAME_STATE_PLAYING;activePlayers=2;worldPeriodic=false;worldFloorHalfSize=40;
  enemyLab=creativeModeActive=false;netTransport.role=NET_ROLE_OFFLINE;
- for(int i=0;i<MAX_COMBATANTS;i++){playerInput[i]=INPUT_TYPE_KEYBOARD;combatantLife[i]=LIFE_ALIVE;combatantTeam[i]=i;players[i].matter=players[i].matterMax=100;players[i].kd_ratio=1;players[i].pos=(Vector3){i*30.f,3,0};players[i].last_melee_time=-100;}
+ for(int i=0;i<MAX_COMBATANTS;i++){playerInput[i]=INPUT_TYPE_KEYBOARD;combatantLife[i]=LIFE_ALIVE;combatantTeam[i]=i;players[i].matter=players[i].matterMax=100;reset_player_vitals(&players[i],false);players[i].kd_ratio=1;players[i].pos=(Vector3){i*30.f,3,0};players[i].last_melee_time=-100;}
  eq_reset_all();clarity_reset();combat_ui_reset();eq_pickup(0,PICKUP_SWORD,false);equipment[0].switchTime=0;
 }
 static void advance(float seconds,int fps){int steps=(int)roundf(seconds*fps);for(int n=0;n<steps;n++)eq_tick(1.f/fps);}
@@ -42,13 +42,13 @@ static void behavior(void){
 static void swing_cost(void){
  int balances[]={0,24,25,100};
  for(int n=0;n<4;n++){
-  setup();players[0].matter=balances[n];players[0].isExposed=balances[n]==0;
+  setup();players[0].matter=balances[n];
   perform_sword(0);bool affordable=balances[n]>=25;
   assert(players[0].meleeSwingActive==affordable && swordWaves[0].active==affordable);
   assert(players[0].matter==balances[n]-(affordable?25:0));
   assert(swordNextDirection[0]==(affordable?1:0));float matter=players[0].matter;
   perform_sword(0);assert(players[0].matter==matter);assert(!eq_fire(0));assert(players[0].matter==matter);
-  if(affordable){assert(players[0].isExposed==(balances[n]==25));advance(.6f,60);assert(!swordWaves[0].active);}
+  if(affordable){assert(players[0].shields==75 && players[0].health==25);advance(.6f,60);assert(!swordWaves[0].active);}
  }
  setup();assert(eq_fire(0));assert(players[0].matter==75);advance(.6f,60);perform_sword(0);assert(players[0].matter==75); // Real-time cooldown rejects another attack.
  setup();netTransport.role=NET_ROLE_CLIENT;perform_sword(0);assert(players[0].matter==100 && swordWaves[0].active);netTransport.role=NET_ROLE_OFFLINE;

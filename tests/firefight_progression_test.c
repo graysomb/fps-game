@@ -17,7 +17,7 @@ static void fixture(void){
  memset(players,0,sizeof(players));memset(enemySpecial,0,sizeof(enemySpecial));memset(goliathStates,0,sizeof(goliathStates));
  gameMode=GAME_MODE_FIREFIGHT;gameState=GAME_STATE_PLAYING;activePlayers=MAX_COMBATANTS;firefightHumans=2;firefightPractice=enemyLab=equipmentLab=creativeModeActive=false;firefightCheckpoints=false;firefightWaveState=FIREFIGHT_STATE_ACTIVE;netTransport.role=NET_ROLE_OFFLINE;worldFloorHalfSize=40;
  fp_new_run();eq_reset_all();clarity_reset();combat_ui_reset();
- for(int i=0;i<MAX_COMBATANTS;i++){playerInput[i]=i<4?INPUT_TYPE_KEYBOARD:INPUT_TYPE_BOT_EASY;combatantLife[i]=i<2?LIFE_ALIVE:LIFE_UNUSED;combatantTeam[i]=i<4?0:1;players[i].respawn_timer=i<2?0:9999;players[i].matter=players[i].matterMax=100;players[i].pos=(Vector3){i*3,1,0};players[i].last_shot_time=players[i].last_melee_time=players[i].last_build_time=-100;ai_reset(i);}
+ for(int i=0;i<MAX_COMBATANTS;i++){playerInput[i]=i<4?INPUT_TYPE_KEYBOARD:INPUT_TYPE_BOT_EASY;combatantLife[i]=i<2?LIFE_ALIVE:LIFE_UNUSED;combatantTeam[i]=i<4?0:1;players[i].respawn_timer=i<2?0:9999;players[i].matter=players[i].matterMax=100;reset_player_vitals(&players[i],false);players[i].pos=(Vector3){i*3,1,0};players[i].last_shot_time=players[i].last_melee_time=players[i].last_build_time=-100;ai_reset(i);}
 }
 static size_t carrier(int type,int slot){int r=fp_rule(type);assert(r>=0);fpPendingCount=1;fpPending[0]=r;players[slot].respawn_timer=0;combatantLife[slot]=LIFE_ALIVE;players[slot].enemyType=fpRules[r].chassis;fp_spawn(slot,fpRules[r].chassis);assert(type==PICKUP_GOLD_TETHER?!fp_carrier(slot):fp_carrier(slot));return fpCount-1;}
 static void schedule(void){
@@ -148,9 +148,9 @@ static void rifle_pairs(void){
  // Actual projectiles: Glob cannot execute, but suppresses recovery for its Glock partner.
  fixture();players[1].pos=(Vector3){30,1,30};players[0].pos=(Vector3){0,2,-5};
  carrier(PICKUP_GLOB,4);carrier(PICKUP_GLOCK,5);players[4].pos=(Vector3){0,2,0};players[5].pos=(Vector3){2,2,0};
- players[0].matter=1;players[0].invuln_timer=0;
+ players[0].shields=1;players[0].health=eqGuns[EQ_GLOCK].damage;players[0].invuln_timer=0;
  assert(ex_fire(4,EQ_GLOB,(Ray){players[4].pos,{0,0,-1}}));ex_tick(.1f);
- assert(players[0].matter==0 && combatantLife[0]==LIFE_ALIVE && ex_suppressed(0));
+ assert(players[0].shields==0 && players[0].matter==100 && combatantLife[0]==LIFE_ALIVE && ex_suppressed(0));
  assert(ex_fire(5,EQ_GLOCK,(Ray){players[5].pos,v_norm(world_delta(players[0].pos,players[5].pos))}));
  assert(combatantLife[0]==LIFE_DOWNED);
  // Real arena: spawn at an entrance and simulate the pair moving/firing together.
@@ -402,9 +402,9 @@ static void ownership(void){
 static void enemy_weapons(void){
  Player preview={0};assert(player_weapon_melee_sample(&preview,0).sword_direction==0&&player_weapon_kind(&preview)==WEAPON_STANDARD);
  fixture();players[1].pos.x=30;players[0].pos=(Vector3){0,2,-3};carrier(PICKUP_RAILGUN,15);players[15].pos=(Vector3){0,2,0};players[15].yaw=players[15].pitch=0;
- NetInputCommand held={.held=NET_INPUT_FIRE},released={0};eq_command(15,&held,.65f);eq_command(15,&released,.01f);assert(players[0].matter==50&&players[15].matter==85);eq_tick(2);eq_command(15,&held,.65f);eq_command(15,&released,.01f);assert(combatantLife[0]==LIFE_DOWNED);
+ NetInputCommand held={.held=NET_INPUT_FIRE},released={0};eq_command(15,&held,.65f);eq_command(15,&released,.01f);assert(players[0].shields==25&&players[0].matter==100&&players[15].matter==85);eq_tick(2);eq_command(15,&held,.65f);eq_command(15,&released,.01f);assert(combatantLife[0]==LIFE_DOWNED);
  fixture();players[1].pos.x=30;carrier(PICKUP_ROCKET,15);players[0].pos=(Vector3){0,2,-3};eq_rocket_blast((EquipmentRocket){.owner=15,.pos={0,2,-3}});assert(combatantLife[0]==LIFE_DOWNED);
- fixture();players[1].pos.x=30;carrier(PICKUP_GLOB,15);players[15].pos=(Vector3){0,2,0};players[0].pos=(Vector3){0,2,-3};assert(eq_fire(15));ex_tick(.1f);assert(players[0].matter<100&&ex_suppressed(0));
+ fixture();players[1].pos.x=30;carrier(PICKUP_GLOB,15);players[15].pos=(Vector3){0,2,0};players[0].pos=(Vector3){0,2,-3};assert(eq_fire(15));ex_tick(.1f);assert(players[0].shields<75&&players[0].matter==100&&ex_suppressed(0));
  fixture();carrier(PICKUP_ADHESIVE,15);players[15].pos=(Vector3){0,2,0};assert(clarity_throw(15));int thrown=0;for(int n=0;n<CLARITY_GRENADES;n++)if(grenades[n].id&&grenades[n].owner==15){assert(grenades[n].adhesive);thrown++;}assert(thrown==1&&grenadeInventory[15]==1);
  fixture();carrier(PICKUP_IGLOO,15);players[0].pos.x=players[1].pos.x=players[15].pos.x=20;assert(ex_igloo((GrenadeState){.owner=15,.pos={.25f,.15f,.25f},.launchOrigin={0,1,-4}}));assert(voxel_count>100);
  fixture();carrier(PICKUP_REINFORCED,15);players[15].pos=(Vector3){0,1,0};players[15].pitch=-20;players[0].pos.x=players[1].pos.x=20;assert(eq_build(15)&&voxel_count==125&&players[15].matter==90);

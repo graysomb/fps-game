@@ -136,13 +136,27 @@ static void ex_draw(WeaponRenderPass pass){
     ex_construction_draw(pass);
 }
 static void ex_hud(int i,int w,int h){
-    if(exSuppression[i]>0)DrawText(TextFormat("MATTER RESTORE BLOCKED %.1fs",exSuppression[i]),w/2-110,h/2+85,w<700?12:16,LIME);
-    if(exFailedBuild[i]>0)DrawText("Shelter blocked - grenade returned",w/2-130,h/2+105,w<700?12:16,SKYBLUE);
+    if(exSuppression[i]>0){
+        int font=w<700?12:16;
+        const char *text=TextFormat(uses_player_vitals(i)?"RECOVERY BLOCKED %.1fs":"MATTER RESTORE BLOCKED %.1fs",exSuppression[i]);
+        DrawText(text,(w-MeasureText(text,font))/2,h/2+(h<400?42:85),font,LIME);
+    }
+    if(exFailedBuild[i]>0)DrawText("Shelter blocked - grenade returned",w/2-130,h/2+(h<400?58:105),w<700?12:16,SKYBLUE);
     const char *name[]={"Regular","Sticky","Gravity","Igloo"};const int order[]={GRENADE_REGULAR,GRENADE_STICKY,GRENADE_GRAVITY,GRENADE_IGLOO};int size=12;
     int columns=eq_upgrade(i,EQ_ADHESIVE)?4:3,column=0;
+    bool vitals = uses_player_vitals(i);
+    int columnWidth = 84;
+    if (vitals) columnWidth = clampi((w - hud_vitals_width(w) - 3 * HUD_PADDING_X) / columns, 1, 84);
+    const char *shortName[] = {"Reg", "Stick", "Grav", "Igloo"};
+    if (columnWidth < 68) size = 10;
     for(int n=0;n<4;n++){int k=order[n];if(k==GRENADE_STICKY && !eq_upgrade(i,EQ_ADHESIVE))continue;
-        int x=w-columns*84+(column++)*84,y=h-60;DrawRectangle(x-3,y-2,81,16,Fade(BLACK,.7f));Color c=k==exSelectedGrenade[i]?GOLD:GRAY;
-        DrawText(TextFormat("%s %d",name[n],ex_grenade_count(i,k)),x,y,size,c);
+        int x=(vitals?HUD_PADDING_X+3:w-columns*84)+(column++)*columnWidth;
+        int y=vitals?h-24:h-60;
+        if (columnWidth < 17) continue;
+        DrawRectangle(x-3,y-2,columnWidth-3,16,Fade(BLACK,.7f));Color c=k==exSelectedGrenade[i]?GOLD:GRAY;
+        const char *label = TextFormat("%s %d",columnWidth<68?shortName[n]:name[n],ex_grenade_count(i,k));
+        if (MeasureText(label,size) > columnWidth-6) label = TextFormat("%c %d",name[n][0],ex_grenade_count(i,k));
+        DrawText(label,x,y,size,c);
     }
 }
 static void ex_layout(void){

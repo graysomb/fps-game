@@ -38,20 +38,20 @@ static void swarmer_checks(void) {
     players[0].pos.x=7;ai_swarmer_rally(4);assert(aiCombat[5].known.x==3);
     arena(INPUT_TYPE_BOT_EASY);firefightWave=2;firefightWaveEnemiesRemaining=999;
     players[0].matter=100;players[0].isExposed=false;players[0].invuln_timer=0;
-    for(int hit=1;hit<=5;hit++) {
+    for(int hit=1;hit<=4;hit++) {
         enemy_lab_spawn(4,ENEMY_TYPE_SWARMER,players[0].pos);
         players[4].invuln_timer=0;players[4].contactDamageTimer=0;
         update_enemy_contact_damage(.1f);
         assert(players[4].respawn_timer>0);
-        if(hit<=4){assert(players[0].matter==100-25*hit);assert(players[0].respawn_timer<=0);}
+        if(hit<4){assert(players[0].health+players[0].shields==100-25*hit && players[0].matter==100);assert(players[0].respawn_timer<=0);}
     }
     assert(combatantLife[0]==LIFE_DOWNED);
     arena(INPUT_TYPE_BOT_EASY);enemy_lab_spawn(4,ENEMY_TYPE_SWARMER,players[0].pos);
     players[0].invuln_timer=1;players[0].matter=100;players[0].isExposed=false;
-    update_enemy_contact_damage(.1f);assert(players[0].matter==100 && players[4].respawn_timer<=0);
+    update_enemy_contact_damage(.1f);assert(players[0].shields==75 && players[0].matter==100 && players[4].respawn_timer<=0);
     netTransport.role=NET_ROLE_CLIENT;players[0].invuln_timer=0;
-    update_enemy_contact_damage(.1f);assert(players[0].matter==100);netTransport.role=NET_ROLE_OFFLINE;
-    fprintf(stderr,"Swarmer 25 damage, exposed finish, invulnerability, authority and local rally passed\n");
+    update_enemy_contact_damage(.1f);assert(players[0].shields==75 && players[0].matter==100);netTransport.role=NET_ROLE_OFFLINE;
+    fprintf(stderr,"Swarmer 25 damage, zero-health defeat, invulnerability, authority and local rally passed\n");
 }
 static void swarmer_spread_checks(void) {
     arena(INPUT_TYPE_BOT_EASY);worldPeriodic=false;activePlayers=12;

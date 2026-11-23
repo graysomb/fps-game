@@ -161,7 +161,7 @@ static bool enemy_lab_controls(void) {
             tower_release(5);eq_reset(5);equipment[5].gun[0]=guns[next];players[5].matter=100;
             const int types[]={0,PICKUP_GLOB,PICKUP_GLOCK,PICKUP_DMR,PICKUP_RAILGUN};fpCarrierType[5]=types[next];
         }
-        if(ct_pressed(0,CT_LAB_ARM)){players[0].matter=players[0].matter>0?0:100;players[0].isExposed=players[0].matter<=0;players[0].last_damage_time=(float)GetTime();}
+        if(ct_pressed(0,CT_LAB_ARM))players[0].matter=players[0].matter>0?0:100;
     }
     if(ct_pressed(0,CT_LAB_NEXT)) {
         int next=enemyLabCase+1;if(next==ENEMY_TYPE_SCRAPPER)next++;if(next>ENEMY_TYPE_COUNT+1) next=ENEMY_TYPE_GOLIATH;
@@ -284,9 +284,9 @@ static bool enemy_smoke_case(int type) {
         s->aim=players[0].pos;ENEMY_CHECK(enemy_launch(i),"lobber ballistic group launch");
         EnemyLob *lob=&enemyLobs[MAX_COMBATANTS*2-1];ENEMY_CHECK(lob->count==8,"real eight-voxel payload");
         v=enemy_voxel(lob->ids[0]);ENEMY_CHECK(v>=0,"payload exists");
-        enemyLabGod=false;players[0].invuln_timer=0;players[0].matter=100;players[0].isExposed=false;
+        enemyLabGod=false;players[0].invuln_timer=0;players[0].matter=100;reset_player_vitals(&players[0],false);
         ENEMY_CHECK(enemy_lob_hit(v,0) && enemy_lob_hit(enemy_voxel(lob->ids[1]),0),"payload members share impact routing");
-        ENEMY_CHECK(players[0].matter==70,"one payload cannot multiply damage across its members");enemyLabGod=true;
+        ENEMY_CHECK(players[0].shields==45 && players[0].matter==100,"one payload cannot multiply damage across its members");enemyLabGod=true;
         tetherTag[v]=1;enemy_tick(.1f);ENEMY_CHECK(voxels[v].owner==0 && !lob->id,"catch transfers whole payload attribution");tetherTag[v]=0;
         Vector3 velocity;add_static_box_at_grid(-4,4,7,7,24,34,GRAY);init_static_hash();
         ENEMY_CHECK(!enemy_lob_velocity(v_add(players[i].pos,(Vector3){0,2.3f,0}),s->aim,&velocity),"ceiling blocks trajectory");

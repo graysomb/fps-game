@@ -8,18 +8,18 @@ static void fixture(void){
  enemy_cleanup(true);clear_all_chunks();clear_world_voxels();clear_pickups();init_static_hash();worldPeriodic=false;
  memset(players,0,sizeof(players));memset(enemySpecial,0,sizeof(enemySpecial));memset(goliathStates,0,sizeof(goliathStates));
  gameMode=GAME_MODE_DEATHMATCH;gameState=GAME_STATE_PLAYING;activePlayers=2;enemyLab=false;creativeModeActive=false;netTransport.role=NET_ROLE_OFFLINE;worldFloorHalfSize=40;
- for(int i=0;i<MAX_COMBATANTS;i++){playerInput[i]=INPUT_TYPE_KEYBOARD;combatantLife[i]=LIFE_ALIVE;combatantTeam[i]=i;players[i].matter=players[i].matterMax=100;players[i].kd_ratio=1;players[i].pos=(Vector3){0,2,-3*i};players[i].last_shot_time=-100;players[i].last_build_time=-100;}
+ for(int i=0;i<MAX_COMBATANTS;i++){playerInput[i]=INPUT_TYPE_KEYBOARD;combatantLife[i]=LIFE_ALIVE;combatantTeam[i]=i;players[i].matter=players[i].matterMax=100;reset_player_vitals(&players[i],false);players[i].kd_ratio=1;players[i].pos=(Vector3){0,2,-3*i};players[i].last_shot_time=-100;players[i].last_build_time=-100;}
  eq_reset_all();clarity_reset();combat_ui_reset();
 }
 static void inventory(void){fixture();assert(eq_gun(0)==EQ_DEFAULT);assert(eq_pickup(0,PICKUP_SHOTGUN,false));assert(eq_gun(0)==EQ_SHOTGUN);assert(!eq_pickup(0,PICKUP_SHOTGUN,true));assert(!eq_pickup(0,PICKUP_RAILGUN,false));equipment[0].cooldown[EQ_SHOTGUN]=.8f;NetInputCommand c={.pressed=NET_INPUT_SWITCH};eq_command(0,&c,.01f);assert(eq_gun(0)==EQ_DEFAULT);eq_command(0,&c,.01f);assert(equipment[0].cooldown[EQ_SHOTGUN]==.8f);assert(eq_pickup(0,PICKUP_RAILGUN,true));players[0].matter=0;players[0].isExposed=true;eq_tick(.3f);assert(eq_gun(0)==EQ_RAIL);kill_player(0,1,false,false);assert(eq_gun(0)==EQ_DEFAULT);}
-static void attacks(void){fixture();eq_pickup(0,PICKUP_RAILGUN,false);equipment[0].switchTime=0;NetInputCommand hold={.held=NET_INPUT_FIRE},release={0};eq_command(0,&hold,.65f);eq_command(0,&release,.01f);assert(players[1].matter==50 && players[1].respawn_timer==0 && players[0].matter==85);eq_tick(2);eq_command(0,&hold,.65f);eq_command(0,&release,.01f);assert(players[1].respawn_timer>0);
+static void attacks(void){fixture();eq_pickup(0,PICKUP_RAILGUN,false);equipment[0].switchTime=0;NetInputCommand hold={.held=NET_INPUT_FIRE},release={0};eq_command(0,&hold,.65f);eq_command(0,&release,.01f);assert(players[1].shields==25 && players[1].matter==100 && players[1].respawn_timer==0 && players[0].matter==85);eq_tick(2);eq_command(0,&hold,.65f);eq_command(0,&release,.01f);assert(players[1].respawn_timer>0);
  fixture();eq_rocket_blast((EquipmentRocket){.owner=0,.pos={0,2,-3}});assert(players[1].respawn_timer>0);
- fixture();players[1].pos.z=-1;eq_pickup(0,PICKUP_SHOTGUN,false);equipment[0].switchTime=0;players[0].matter=50;players[1].matter=5;assert(eq_fire(0));assert(players[1].respawn_timer>0);assert(players[0].matter==44);assert(!eq_fire(0));
- fixture();eq_pickup(0,PICKUP_CUTTER,false);equipment[0].switchTime=0;players[0].matter=50;players[1].matter=1;
+ fixture();players[1].pos.z=-1;eq_pickup(0,PICKUP_SHOTGUN,false);equipment[0].switchTime=0;players[0].matter=50;players[1].shields=0;players[1].health=5;assert(eq_fire(0));assert(players[1].respawn_timer>0);assert(players[0].matter==44);assert(!eq_fire(0));
+ fixture();eq_pickup(0,PICKUP_CUTTER,false);equipment[0].switchTime=0;players[0].matter=50;players[1].shields=0;players[1].health=1;
  eq_command(0,&hold,.05f);assert(players[1].respawn_timer>0 && fabsf(players[0].matter-49.8f)<.001f);
- fixture();eq_pickup(0,PICKUP_CUTTER,false);equipment[0].switchTime=0;players[1].matter=1;players[1].invuln_timer=1;
- eq_command(0,&hold,.05f);assert(players[1].respawn_timer==0 && players[1].matter==1);
- fixture();eq_pickup(0,PICKUP_ROCKET,false);equipment[0].switchTime=0;for(int n=0;n<32;n++)eqRockets[n].active=true;assert(!eq_fire(0) && players[0].matter==100);memset(eqRockets,0,sizeof(eqRockets));players[0].matter=25;assert(eq_fire(0)&&players[0].isExposed&&eq_gun(0)==EQ_ROCKET);
+ fixture();eq_pickup(0,PICKUP_CUTTER,false);equipment[0].switchTime=0;players[1].shields=0;players[1].health=1;players[1].invuln_timer=1;
+ eq_command(0,&hold,.05f);assert(players[1].respawn_timer==0 && players[1].health==1 && players[1].matter==100);
+ fixture();eq_pickup(0,PICKUP_ROCKET,false);equipment[0].switchTime=0;for(int n=0;n<32;n++)eqRockets[n].active=true;assert(!eq_fire(0) && players[0].matter==100);memset(eqRockets,0,sizeof(eqRockets));players[0].matter=25;assert(eq_fire(0)&&players[0].matter==0&&players[0].shields==75&&eq_gun(0)==EQ_ROCKET);
  fixture();add_static_box_at_grid(-2,2,0,6,-4,-4,GRAY);init_static_hash();rebuild_voxel_hash();eq_pickup(0,PICKUP_CUTTER,false);equipment[0].switchTime=0;eq_command(0,&hold,.01f);assert(players[1].matter==100);eq_rocket_blast((EquipmentRocket){.owner=0,.pos={0,2,-1}});assert(players[1].matter==100);
  fixture();players[1].invuln_timer=1;eq_damage(0,1,100,true,DEATH_ROCKET,players[0].pos);assert(players[1].matter==100);gameMode=GAME_MODE_FIREFIGHT;combatantTeam[1]=0;players[1].invuln_timer=0;eq_damage(0,1,100,true,DEATH_RAIL,players[0].pos);assert(players[1].matter==100);
 }
@@ -28,20 +28,21 @@ static void rail_reservation(void){
  fixture();eq_pickup(0,PICKUP_RAILGUN,false);equipment[0].switchTime=0;
  eq_command(0,&hold,eqRailCharge*.5f);assert(fabsf(players[0].matter-92.5f)<.001f);
  exSuppression[0]=5;eq_command(0,&release,.01f);assert(players[0].matter==100 && equipment[0].charge==0 && players[1].matter==100);exSuppression[0]=0;
- // Damage to the remaining bar does not confiscate an already loaded shot.
+ // Damage and spending the remaining Matter do not confiscate an already loaded shot.
  eq_command(0,&hold,eqRailCharge);assert(players[0].matter==85);
- apply_matter_damage(0,1,85);assert(players[0].matter==0 && players[0].isExposed);
+ apply_matter_damage(0,1,85);assert(players[0].matter==85 && players[0].shields==0);
+ eq_spend(0,85);
  eq_tick(.01f);assert(weaponVisuals[0].depleted==0);
  eq_command(0,&hold,.1f);assert(equipment[0].charge==eqRailCharge);
- eq_command(0,&release,.01f);assert(players[1].matter==50 && players[0].matter==0 && equipment[0].charge==0 && equipment[0].cooldown[EQ_RAIL]>0);
- eq_command(0,&release,.01f);assert(players[1].matter==50 && players[0].matter==0);
+ eq_command(0,&release,.01f);assert(players[1].shields==25 && players[1].matter==100 && players[0].matter==0 && equipment[0].charge==0 && equipment[0].cooldown[EQ_RAIL]>0);
+ eq_command(0,&release,.01f);assert(players[1].shields==25 && players[1].matter==100 && players[0].matter==0);
  // Loading the last 15 Matter over multiple frames still reaches full charge.
  const int rates[]={20,30,60,90,120,144,165,240,360,1000};
  for(int hz=0;hz<10;hz++){
   fixture();eq_pickup(0,PICKUP_RAILGUN,false);equipment[0].switchTime=0;players[0].matter=15;
   for(int n=0;n<rates[hz];n++)eq_command(0,&hold,1.f/rates[hz]);
-  assert(equipment[0].charge==eqRailCharge && players[0].matter==0 && players[0].isExposed);
-  eq_command(0,&release,.01f);assert(players[1].matter==50 && players[0].matter==0);
+  assert(equipment[0].charge==eqRailCharge && players[0].matter==0 && players[0].shields==75);
+  eq_command(0,&release,.01f);assert(players[1].shields==25 && players[1].matter==100 && players[0].matter==0);
  }
  // Insufficient charge cannot fire; release refunds exactly what was loaded.
  fixture();eq_pickup(0,PICKUP_RAILGUN,false);equipment[0].switchTime=0;players[0].matter=5;
@@ -99,9 +100,9 @@ static void shotgun_structures(void){
  assert(goliathStates[1].count==1 && v_length(voxels[enemy_voxel(id)].vel)==0 && players[1].matter==100);
 }
 static void protection(void){
- fixture();players[1].enemyType=ENEMY_TYPE_GOLIATH;int armor=addVoxel(0,2,-1.5f,false,true,GRAY,0);goliathStates[1].count=1;goliathStates[1].voxels[0].voxelIdentity=voxels[armor].identity;rebuild_voxel_hash();eq_pickup(0,PICKUP_RAILGUN,false);equipment[0].switchTime=0;NetInputCommand hold={.held=NET_INPUT_FIRE},release={0};eq_command(0,&hold,.65f);eq_command(0,&release,.01f);assert(players[1].matter==50&&goliathStates[1].count==0);
+ fixture();players[1].enemyType=ENEMY_TYPE_GOLIATH;int armor=addVoxel(0,2,-1.5f,false,true,GRAY,0);goliathStates[1].count=1;goliathStates[1].voxels[0].voxelIdentity=voxels[armor].identity;rebuild_voxel_hash();eq_pickup(0,PICKUP_RAILGUN,false);equipment[0].switchTime=0;NetInputCommand hold={.held=NET_INPUT_FIRE},release={0};eq_command(0,&hold,.65f);eq_command(0,&release,.01f);assert(players[1].shields==25 && players[1].matter==100&&goliathStates[1].count==0);
  fixture();activePlayers=5;playerInput[4]=INPUT_TYPE_BOT_HARD;enemy_lab_spawn(4,ENEMY_TYPE_FOUNDRY,(Vector3){0,2,-5});float health=enemySpecial[4].coreHealth;eq_damage(0,4,100,true,DEATH_ROCKET,players[0].pos);assert(enemySpecial[4].coreHealth==health);enemySpecial[4].coreOpen=2;eq_damage(0,4,50,true,DEATH_RAIL,players[0].pos);assert(enemySpecial[4].coreHealth==health-50);
- fixture();worldPeriodic=true;worldFloorHalfSize=32;players[1].pos.z=10;eq_pickup(0,PICKUP_RAILGUN,false);equipment[0].switchTime=0;eq_command(0,&hold,.65f);eq_command(0,&release,.01f);assert(players[1].matter==50); // Behind locally, ahead in the adjacent periodic image; hit only once.
+ fixture();worldPeriodic=true;worldFloorHalfSize=32;players[1].pos.z=10;eq_pickup(0,PICKUP_RAILGUN,false);equipment[0].switchTime=0;eq_command(0,&hold,.65f);eq_command(0,&release,.01f);assert(players[1].shields==25 && players[1].matter==100); // Behind locally, ahead in the adjacent periodic image; hit only once.
 }
 static void stress(void){
  fixture();gameMode=GAME_MODE_FIREFIGHT;firefightFoundry=true;firefightPractice=false;useCustomMap=false;multiplayerActivePlayers=4;firefightHumans=4;currentWorldType=WORLD_TYPE_TEST;ResetGame();gameState=GAME_STATE_PLAYING;activePlayers=4;for(int i=0;i<4;i++){players[i].pitch=-15;players[i].invuln_timer=999;equipment[i].gun[1]=EQ_ROCKET;equipment[i].selected=1;equipment[i].upgrades=7;}
@@ -115,7 +116,7 @@ static void revised_weapons(void){
  fixture();players[1].pos.z=-6;add_static_box_at_grid(-2,2,1,6,-8,-4,GRAY);init_static_hash();rebuild_voxel_hash();
  eq_pickup(0,PICKUP_RAILGUN,false);equipment[0].switchTime=0;
  NetInputCommand held={.held=NET_INPUT_FIRE},release={0};eq_command(0,&held,.65f);eq_command(0,&release,.01f);
- assert(players[1].matter==50);VoxelHit hit;assert(!first_voxel_hit_detailed((Ray){players[0].pos,{0,0,-1}},10,-1,false,&hit));
+ assert(players[1].shields==25 && players[1].matter==100);VoxelHit hit;assert(!first_voxel_hit_detailed((Ray){players[0].pos,{0,0,-1}},10,-1,false,&hit));
  assert(eqTraces[0].life>0 && v_length(v_sub(eqTraces[0].start,players[0].pos))>.2f);
  fixture();players[1].pos.x=20;add_static_box_at_grid(-1,1,1,6,-20,-2,GRAY);init_static_hash();rebuild_voxel_hash();
  eq_pickup(0,PICKUP_CUTTER,false);equipment[0].switchTime=0;eq_command(0,&held,.25f);assert(fabsf(players[0].matter-99)<.001f);
@@ -178,7 +179,7 @@ static void matter_build_changes(void){
  }
  fixture();players[0].matter=0;players[0].isExposed=true;eq_tick(.2f);assert(weaponVisuals[0].depleted==1);players[0].matter=1;eq_tick(.2f);assert(weaponVisuals[0].depleted==0);
  assert(eqGuns[EQ_SHOTGUN].damage*EQ_PELLETS==50 && eqShotgunImpulse==TETHER_THROW_IMPULSE);
- fixture();players[1].pos.z=-1;eq_pickup(0,PICKUP_SHOTGUN,false);equipment[0].switchTime=0;assert(eq_fire(0));assert(players[1].matter==50);
+ fixture();players[1].pos.z=-1;eq_pickup(0,PICKUP_SHOTGUN,false);equipment[0].switchTime=0;assert(eq_fire(0));assert(players[1].shields==25 && players[1].matter==100);
  fixture();players[0].pitch=-40;players[1].pos.x=20;equipment[0].upgrades=EQ_BUILD;players[0].matter=9;assert(!eq_build(0) && !voxel_count && players[0].matter==9);
  players[0].matter=100;Vector3 points[EQ_PANEL_CUBES];assert(eq_panel_positions(0,points));players[1].pos=points[60];assert(eq_build(0) && voxel_count==125 && players[0].matter==90);assert(players[1].pos.y>points[60].y);
  clear_world_voxels();init_static_hash();players[0].matter=100;players[0].last_build_time=-100;players[1].pos.x=20;

@@ -106,8 +106,8 @@ static void combat_tests(void){
     assert(goFight.actions[0]>0&&goFight.actions[1]>0&&goFight.actions[2]>0);assert(players[0].matter==initial);
     enemyLabGod=false;players[0].matter=100;players[0].isExposed=false;players[0].invuln_timer=0;
     bool hit[MAX_COMBATANTS+MAX_PLAYERS]={0};Vector3 at=players[0].pos;
-    go_sweep_hits(at,at,.65f,40,hit);go_sweep_hits(at,at,.65f,40,hit);assert(players[0].matter==60);
-    players[0].invuln_timer=2;memset(hit,0,sizeof(hit));go_sweep_hits(at,at,.65f,40,hit);assert(players[0].matter==60);
+    go_sweep_hits(at,at,.65f,40,hit);go_sweep_hits(at,at,.65f,40,hit);assert(players[0].shields==35 && players[0].matter==100);
+    players[0].invuln_timer=2;memset(hit,0,sizeof(hit));go_sweep_hits(at,at,.65f,40,hit);assert(players[0].shields==35 && players[0].matter==100);
     puts("Autonomous attacks, god mode, hit deduplication and invulnerability passed");
     fixture();go_release_part(GOLEM_SHIN_L);goRegen=false;for(int f=0;f<90;f++)frame();
     assert(goFight.state==GC_KNEEL);capture("kneeling");goRegen=true;
@@ -127,8 +127,8 @@ static void attack_hits(void){
             if(goFight.state==GC_STRIKE&&Vector3Distance(at,go_target_center(0))<closest){closest=Vector3Distance(at,go_target_center(0));best=at;}
             if(getenv("GOLEM_COMBAT_CAPTURE")&&f%4==0)capture(TextFormat("attack-%d-%03d",scenario,f/4));
         }
-        printf("Attack %d actual player Matter %.1f, nearest fist %.2f\n",attack,players[0].matter,closest);printf("Best fist %.2f %.2f %.2f player %.2f %.2f %.2f\n",best.x,best.y,best.z,players[0].pos.x,players[0].pos.y,players[0].pos.z);
-        assert(players[0].matter==100-goAttacks[attack].damage);
+        printf("Attack %d player shields %.1f, nearest fist %.2f\n",attack,players[0].shields,closest);printf("Best fist %.2f %.2f %.2f player %.2f %.2f %.2f\n",best.x,best.y,best.z,players[0].pos.x,players[0].pos.y,players[0].pos.z);
+        assert(players[0].health+players[0].shields==100-goAttacks[attack].damage && players[0].matter==100);
         if(attack<2)assert(attached()==goCount);
     }
 }

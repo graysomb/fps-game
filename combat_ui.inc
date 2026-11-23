@@ -131,7 +131,7 @@ static void combat_ui_hud(int viewer,Camera3D camera,int w,int h) {
 static void combat_ui_abilities(int viewer,int w,int h) {
     if(viewer<0 || viewer>=MAX_PLAYERS || creativeModeActive)return;
     int local=netTransport.role==NET_ROLE_OFFLINE?viewer:net_local_index_for_slot(viewer);if(local<0)return;
-    int size=w<700?40:56;float y=h-size-80;
+    int size=w<700?40:56;float y=h-size-(uses_player_vitals(viewer)?90:80);
     bool usable=players[viewer].respawn_timer<=0 && combatantLife[viewer]==LIFE_ALIVE && !ff_input_blocked(viewer);
     int selected=exSelectedGrenade[viewer];
     const char *grenadeLabel=selected==GRENADE_STICKY?"STICKY GRENADE":selected==GRENADE_GRAVITY?"GRAVITY GRENADE":selected==GRENADE_IGLOO?"IGLOO GRENADE":"REGULAR GRENADE";

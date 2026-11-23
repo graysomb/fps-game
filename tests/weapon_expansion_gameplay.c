@@ -8,20 +8,20 @@ static void fixture(void){
  enemy_cleanup(true);clear_all_chunks();clear_world_voxels();clear_pickups();init_static_hash();worldPeriodic=false;
  memset(players,0,sizeof(players));memset(enemySpecial,0,sizeof(enemySpecial));memset(goliathStates,0,sizeof(goliathStates));
  gameMode=GAME_MODE_DEATHMATCH;gameState=GAME_STATE_PLAYING;activePlayers=2;enemyLab=false;creativeModeActive=false;netTransport.role=NET_ROLE_OFFLINE;worldFloorHalfSize=40;
- for(int i=0;i<MAX_COMBATANTS;i++){playerInput[i]=INPUT_TYPE_KEYBOARD;combatantLife[i]=LIFE_ALIVE;combatantTeam[i]=i;players[i].matter=players[i].matterMax=100;players[i].kd_ratio=1;players[i].pos=(Vector3){.25f,2.25f,-3*i+.25f};players[i].last_shot_time=players[i].last_build_time=-100;}
+ for(int i=0;i<MAX_COMBATANTS;i++){playerInput[i]=INPUT_TYPE_KEYBOARD;combatantLife[i]=LIFE_ALIVE;combatantTeam[i]=i;players[i].matter=players[i].matterMax=100;reset_player_vitals(&players[i],false);players[i].kd_ratio=1;players[i].pos=(Vector3){.25f,2.25f,-3*i+.25f};players[i].last_shot_time=players[i].last_build_time=-100;}
  eq_reset_all();clarity_reset();combat_ui_reset();
 }
 static void gun(int type){assert(eq_pickup(0,type,true));equipment[0].switchTime=0;}
 static void guns(void){
- fixture();gun(PICKUP_DMR);for(int n=0;n<4;n++){equipment[0].cooldown[EQ_DMR]=0;assert(eq_fire(0));if(n<3)assert(players[1].matter==75-25*n&&players[1].respawn_timer==0);}fprintf(stderr,"dmr dead=%f matter=%f\n",players[1].respawn_timer,players[0].matter);assert(players[1].respawn_timer>0);
- fixture();gun(PICKUP_GLOCK);players[1].matter=eqGuns[EQ_GLOCK].damage;assert(eq_fire(0));assert(players[1].isExposed&&players[1].respawn_timer==0);equipment[0].cooldown[EQ_GLOCK]=0;assert(eq_fire(0)&&players[1].respawn_timer>0);
- fixture();gun(PICKUP_GLOB);assert(eq_fire(0));ex_tick(.1f);assert(players[1].matter==82&&exSuppression[1]==5);add_player_matter(&players[1],100);assert(players[1].matter==82);ex_tick(4);equipment[0].cooldown[EQ_GLOB]=0;assert(eq_fire(0));ex_tick(.1f);assert(exSuppression[1]==5&&players[1].matter==64);ex_tick(5);add_player_matter(&players[1],10);assert(players[1].matter==74);
+ fixture();gun(PICKUP_DMR);for(int n=0;n<4;n++){equipment[0].cooldown[EQ_DMR]=0;assert(eq_fire(0));if(n<3)assert(players[1].shields==50-25*n&&players[1].matter==100&&players[1].respawn_timer==0);}fprintf(stderr,"dmr dead=%f matter=%f\n",players[1].respawn_timer,players[0].matter);assert(players[1].respawn_timer>0);
+ fixture();gun(PICKUP_GLOCK);players[1].shields=players[1].health=eqGuns[EQ_GLOCK].damage;assert(eq_fire(0));assert(players[1].shields==0&&players[1].respawn_timer==0);equipment[0].cooldown[EQ_GLOCK]=0;assert(eq_fire(0)&&players[1].respawn_timer>0);
+ fixture();gun(PICKUP_GLOB);players[1].matter=82;assert(eq_fire(0));ex_tick(.1f);assert(players[1].shields==57&&players[1].matter==82&&exSuppression[1]==5);add_player_matter(&players[1],100);assert(players[1].matter==82);ex_tick(4);equipment[0].cooldown[EQ_GLOB]=0;assert(eq_fire(0));ex_tick(.1f);assert(exSuppression[1]==5&&players[1].shields==39&&players[1].matter==82);ex_tick(5);add_player_matter(&players[1],10);assert(players[1].matter==92);
  fixture();gun(PICKUP_GLOB);for(int n=0;n<EX_GLOBS;n++)exGlobs[n].id=n+1;assert(!eq_fire(0)&&players[0].matter==100);
  fixture();gun(PICKUP_GLOB);add_static_box_at_grid(0,0,4,4,-3,-3,GRAY);init_static_hash();rebuild_voxel_hash();assert(eq_fire(0));ex_tick(.1f);assert(players[1].matter==100&&!exSuppression[1]);int splats=0;for(int n=0;n<EX_SPLATS;n++)splats+=exSplats[n].id!=0;assert(splats==1);
  fixture();gun(PICKUP_DMR);add_static_box_at_grid(0,0,4,4,-3,-3,GRAY);init_static_hash();rebuild_voxel_hash();assert(eq_fire(0));assert(players[1].matter==100&&!occupied(0,4,-3));
  fixture();gun(PICKUP_DMR);players[1].invuln_timer=1;assert(eq_fire(0)&&players[1].matter==100);
  fixture();gun(PICKUP_GLOB);gameMode=GAME_MODE_FIREFIGHT;combatantTeam[1]=combatantTeam[0];assert(eq_fire(0));ex_tick(.1f);assert(players[1].matter==100&&!exSuppression[1]);
- fixture();gun(PICKUP_GLOCK);players[0].matter=1;assert(eq_fire(0)&&players[0].isExposed&&eq_gun(0)==EQ_GLOCK);
+ fixture();gun(PICKUP_GLOCK);players[0].matter=1;assert(eq_fire(0)&&players[0].matter==0&&players[0].shields==75&&eq_gun(0)==EQ_GLOCK);
  puts("guns/suppression/costs/occlusion passed");
 }
 static void grenades_test(void){
@@ -67,7 +67,7 @@ static void edge_cases(void){
  fixture();gun(PICKUP_GLOB);players[1].pos.x=20;players[0].matter=50;exSuppression[0]=5;pickups[0]=(Pickup){.active=true,.type=PICKUP_AMMO,.pos=players[0].pos};update_pickups(0);assert(pickups[0].active&&players[0].matter==50);
  for(int n=0;n<5;n++)ex_splat(players[1].pos,1,-1,false);int count=0;for(int n=0;n<EX_SPLATS;n++)count+=exSplats[n].id!=0;assert(count==3);players[1].pos.x+=2;ex_tick(.1f);for(int n=0;n<EX_SPLATS;n++)if(exSplats[n].id)assert(exSplats[n].pos.x==players[1].pos.x);
  fixture();gun(PICKUP_GLOB);int armor=addVoxel(.25f,2.25f,-1,false,true,GRAY,0);goliathStates[1].count=1;goliathStates[1].voxels[0].voxelIdentity=voxels[armor].identity;rebuild_voxel_hash();assert(eq_fire(0));ex_tick(.1f);assert(!exSuppression[1]&&players[1].matter==100&&voxel_count==1);
- fixture();gun(PICKUP_DMR);worldPeriodic=true;worldFloorHalfSize=20;players[1].pos.z=10;assert(eq_fire(0));assert(players[1].matter==75);worldPeriodic=false;
+ fixture();gun(PICKUP_DMR);worldPeriodic=true;worldFloorHalfSize=20;players[1].pos.z=10;assert(eq_fire(0));assert(players[1].shields==50&&players[1].matter==100);worldPeriodic=false;
  fixture();exGrenades[0][0]=2;exSelectedGrenade[0]=1;for(int n=0;n<EX_FIELDS;n++)exFields[n]=(GravityField){.id=n+1,.owner=n};assert(!clarity_throw(0)&&exGrenades[0][0]==2);
  fixture();players[1].pos.x=20;GrenadeState g={.owner=0,.kind=GRENADE_IGLOO,.pos={.25f,.15f,.25f}};int saved=particle_pool_count;particle_pool_count=MAX_PARTICLES;assert(!ex_igloo(g)&&voxel_count==0);particle_pool_count=saved;
  fixture();netTransport.role=NET_ROLE_CLIENT;uint8_t bytes[8];NetWriter w;net_writer_init(&w,bytes,sizeof(bytes));net_write_u8(&w,255);NetReader r;net_reader_init(&r,bytes,w.length);assert(ex_receive(NET_MSG_EXPANSION,&r,10));netTransport.role=NET_ROLE_OFFLINE;

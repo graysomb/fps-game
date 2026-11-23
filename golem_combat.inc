@@ -249,7 +249,8 @@ static void go_hit_target(int target,float damage,Vector3 origin){
     if(target_is_hologram(target)){hologram_damage(target,damage);return;}
     Player *p=&players[target];if(p->invuln_timer>0||(enemyLab&&enemyLabGod))return;
     bool known=damageOriginKnown;Vector3 old=damageOrigin;damageOriginKnown=true;damageOrigin=origin;
-    if(p->isExposed)kill_player(target,MAX_PLAYERS,true,true);else apply_matter_damage(target,MAX_PLAYERS,damage);
+    if (uses_player_vitals(target)) apply_player_damage(target,MAX_PLAYERS,damage,false,true,true);
+    else if(p->isExposed)kill_player(target,MAX_PLAYERS,true,true);else apply_matter_damage(target,MAX_PLAYERS,damage);
     damageOriginKnown=known;damageOrigin=old;
     Vector3 push=v_norm(v_sub(p->pos,origin));push.y=fmaxf(.25f,push.y);p->vel=v_add(p->vel,v_mul(v_norm(push),6));p->meleeKnockbackActive=true;
 }

@@ -9,18 +9,20 @@ static void fixture(void){
  memset(players,0,sizeof(players));memset(enemySpecial,0,sizeof(enemySpecial));memset(goliathStates,0,sizeof(goliathStates));
  worldPeriodic=false;worldFloorHalfSize=40;activePlayers=6;firefightHumans=2;gameMode=GAME_MODE_DEATHMATCH;gameState=GAME_STATE_PLAYING;
  enemyLab=equipmentLab=creativeModeActive=firefightPractice=useCustomMap=false;netTransport.role=NET_ROLE_OFFLINE;fp_new_run();eq_reset_all();clarity_reset();combat_ui_reset();
- for(int i=0;i<MAX_COMBATANTS;i++){players[i].matter=players[i].matterMax=100;players[i].pos=(Vector3){20+i*3,BASE_EYE_HEIGHT,20};players[i].last_build_time=players[i].last_shot_time=-100;playerInput[i]=i<4?INPUT_TYPE_KEYBOARD:INPUT_TYPE_BOT_MEDIUM;combatantLife[i]=LIFE_ALIVE;combatantTeam[i]=i;ai_reset(i);}
+ for(int i=0;i<MAX_COMBATANTS;i++){players[i].matter=players[i].matterMax=100;reset_player_vitals(&players[i],false);players[i].pos=(Vector3){20+i*3,BASE_EYE_HEIGHT,20};players[i].last_build_time=players[i].last_shot_time=-100;playerInput[i]=i<4?INPUT_TYPE_KEYBOARD:INPUT_TYPE_BOT_MEDIUM;combatantLife[i]=LIFE_ALIVE;combatantTeam[i]=i;ai_reset(i);}
  players[0].pos=(Vector3){.25f,BASE_EYE_HEIGHT,.25f};
 }
 static void combat(void){
- for(int target=1;target<=4;target+=3){fixture();players[target].pos=(Vector3){.25f,BASE_EYE_HEIGHT,-2.75f};players[target].matter=10;
+ for(int target=1;target<=4;target+=3){fixture();players[target].pos=(Vector3){.25f,BASE_EYE_HEIGHT,-2.75f};if(target==1)players[target].shields=10;else players[target].matter=10;
   assert(eq_pickup(0,PICKUP_GLOB,false));equipment[0].switchTime=0;
   for(int n=0;n<4;n++){equipment[0].cooldown[EQ_GLOB]=0;assert(eq_fire(0));ex_tick(.1f);assert(players[target].respawn_timer==0&&combatantLife[target]==LIFE_ALIVE);}
-  assert(players[target].matter==0&&players[target].isExposed&&exSuppression[target]>4.8f);
+  assert(exSuppression[target]>4.8f);
+  if(target==1)assert(players[target].shields==0&&players[target].health==25&&players[target].matter==100);
+  else assert(players[target].matter==0&&players[target].isExposed);
  }
  fixture();players[4].enemyType=ENEMY_TYPE_FOUNDRY;enemySpecial[4].coreHealth=players[4].matter=5;enemySpecial[4].coreMax=100;enemySpecial[4].coreOpen=true;
  eq_damage(0,4,18,false,DEATH_GLOB,players[0].pos);assert(players[4].respawn_timer==0&&players[4].matter>0&&players[4].matter<5);
- fixture();players[1].pos=(Vector3){.25f,BASE_EYE_HEIGHT,-2.75f};assert(eq_pickup(0,PICKUP_GLOCK,false));equipment[0].switchTime=0;assert(eq_fire(0));assert(players[1].matter==92);
+ fixture();players[1].pos=(Vector3){.25f,BASE_EYE_HEIGHT,-2.75f};assert(eq_pickup(0,PICKUP_GLOCK,false));equipment[0].switchTime=0;assert(eq_fire(0));assert(players[1].shields==67&&players[1].matter==100);
  equipment[0].cooldown[EQ_GLOCK]=.25f;NetInputCommand swap={.pressed=NET_INPUT_SWITCH};eq_command(0,&swap,.01f);eq_tick(.12f);assert(equipment[0].switchTime==0);eq_command(0,&swap,.01f);assert(equipment[0].cooldown[EQ_GLOCK]>.12f);
  fixture();gameMode=GAME_MODE_FIREFIGHT;combatantTeam[4]=combatantTeam[5]=1;players[4].enemyType=ENEMY_TYPE_ANCHOR;players[4].pos=(Vector3){3,2,0};players[5].pos=(Vector3){5,2,0};players[5].matter=20;enemySpecial[4].equipmentCount=1;
  feedback_tick(1);assert(fabsf(players[5].matter-36)<.01f);exSuppression[5]=5;feedback_tick(1);assert(players[5].matter==36);

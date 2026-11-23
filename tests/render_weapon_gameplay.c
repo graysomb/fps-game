@@ -78,6 +78,7 @@ static void test_melee_hits(void) {
     Player saved[MAX_COMBATANTS]; memcpy(saved,players,sizeof(players));
     activePlayers=2;
     players[1].pos=v_add(players[0].pos,(Vector3){0,0,-1.5f});
+    reset_player_vitals(&players[1],false);
     perform_melee(0); assert(players[0].meleeSwingActive);
     float started=players[0].meleeSwingStartTime;
     perform_melee(0); assert(players[0].meleeSwingStartTime==started);
@@ -85,12 +86,12 @@ static void test_melee_hits(void) {
     WeaponPose miss=pose_at(players[0],.52f,true,16.0f/9);
     set_melee_phase(.52f); update_melee_swings();
     assert(players[0].meleeSwingHitApplied);
-    assert(fabsf(players[1].matter-(100-MATTER_MELEE_DAMAGE))<.0001f);
+    assert(fabsf(players[1].shields-(75-MATTER_MELEE_DAMAGE))<.0001f && players[1].matter==100);
     assert(fabsf(players[1].vel.z+MELEE_KNOCKBACK_SPEED)<.0001f);
     assert(fabsf(players[1].vel.y-MELEE_UPWARD_BOOST)<.0001f);
     WeaponPose hit=pose_at(players[0],.52f,true,16.0f/9);
     assert(v_length(v_sub(miss.muzzle,hit.muzzle))<.0001f);
-    update_melee_swings(); assert(fabsf(players[1].matter-(100-MATTER_MELEE_DAMAGE))<.0001f);
+    update_melee_swings(); assert(fabsf(players[1].shields-(75-MATTER_MELEE_DAMAGE))<.0001f && players[1].matter==100);
     set_melee_phase(1.01f); update_melee_swings(); assert(!players[0].meleeSwingActive);
     // A completed swing accepts a repeat; an empty swing leaves matter untouched.
     players[1].pos=(Vector3){10,2,-10}; players[0].last_melee_time=-1000;
@@ -99,6 +100,7 @@ static void test_melee_hits(void) {
     players[0].meleeSwingActive=false; players[0].last_melee_time=-1000;
     // Mine a single static cube on the production sweep, outside the overlap box.
     activePlayers=1; players[0].matter=40;
+    players[0].shields=12; players[0].health=10;
     float fraction=melee_reach_fraction(.52f);
     Vector3 target=v_add(melee_swing_origin(&players[0],fraction),
                         v_mul(melee_swing_direction(&players[0],fraction),1.5f));
@@ -106,6 +108,7 @@ static void test_melee_hits(void) {
     rebuild_static_hash_if_dirty();
     perform_melee(0); set_melee_phase(.52f); update_melee_swings();
     assert(players[0].meleeSwingHitApplied && players[0].matter==40+MATTER_MELEE_HARVEST);
+    assert(players[0].shields==12 && players[0].health==10);
     WeaponPose mining=pose_at(players[0],.52f,true,16.0f/9);
     assert(v_length(v_sub(miss.muzzle,mining.muzzle))<.0001f);
     update_melee_swings(); assert(players[0].matter==40+MATTER_MELEE_HARVEST);

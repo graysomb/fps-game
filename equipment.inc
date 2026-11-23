@@ -4,14 +4,14 @@ static void eq_reset_all(void){for(int i=0;i<MAX_COMBATANTS;i++)eq_reset(i);mems
 static int eq_gun(int i){if(i<0 || i>=MAX_COMBATANTS || (is_player_bot(i)&&!fp_carrier(i)))return EQ_DEFAULT;if(!equipment[i].initialized)eq_reset(i);return equipment[i].gun[equipment[i].selected];}
 static bool eq_upgrade(int i,int flag){return i>=0 && i<MAX_COMBATANTS && (!is_player_bot(i)||fp_carrier(i)) && (equipment[i].upgrades&flag)!=0;}
 static bool eq_usable(int i){return i>=0 && i<MAX_COMBATANTS && (!is_player_bot(i)||fp_carrier(i)) && netTransport.role!=NET_ROLE_CLIENT && gameState==GAME_STATE_PLAYING && players[i].respawn_timer<=0 && !ff_input_blocked(i) && !creativeModeActive && !(enemyLab&&enemyLabPaused);}
-static void eq_spend(int i,float cost){players[i].matter=fmaxf(0,players[i].matter-cost);players[i].isExposed=players[i].matter<=0;}
+static void eq_spend(int i,float cost){players[i].matter=fmaxf(0,players[i].matter-cost);if(!uses_player_vitals(i))players[i].isExposed=players[i].matter<=0;}
 // Charge time represents Matter already transferred into the railgun capacitor.
 // Refunds return owned Matter, so Glob's restoration suppression does not apply.
 static void eq_cancel_charge(int i){
     Equipment *e=&equipment[i];Player *p=&players[i];
     if(netTransport.role!=NET_ROLE_CLIENT && e->charge>0 && p->respawn_timer<=0 && combatantLife[i]==LIFE_ALIVE){
         p->matter=fminf(player_max_matter(p),p->matter+eqGuns[EQ_RAIL].cost*e->charge/eqRailCharge);
-        p->isExposed=p->matter<=0;
+        if(!uses_player_vitals(i))p->isExposed=p->matter<=0;
     }
     e->charge=0;e->held=false;
 }
@@ -27,7 +27,7 @@ static bool eq_pickup(int i,int type,bool replace){
         players[i].dynamicShotActive=gun==EQ_VOXEL;return true;
     }
     int flag=type==PICKUP_ADHESIVE?EQ_ADHESIVE:type==PICKUP_REINFORCED?EQ_BUILD:type==PICKUP_SHIELD_REGEN?EQ_SHIELD:0;
-    if(!flag || (e->upgrades&flag) || (flag==EQ_SHIELD && (i>=MAX_PLAYERS || is_player_bot(i))))return false;e->upgrades|=flag;if(flag==EQ_SHIELD){e->shieldDelay=eqShieldDelay;e->shieldRegenerating=false;}return true;
+    if(!flag || (e->upgrades&flag) || (flag==EQ_SHIELD && (i>=MAX_PLAYERS || is_player_bot(i))))return false;e->upgrades|=flag;return true;
 }
 static int eq_near_pickup(int i){int best=-1;float distance=1.4f;for(int p=0;p<MAX_PICKUPS;p++)if(pickups[p].active && eq_pickup_kind(pickups[p].type)>=0 && pickups[p].type!=PICKUP_BLACK_HOLE && pickups[p].type!=PICKUP_IGLOO){float d=v_length(world_delta(pickups[p].pos,players[i].pos));if(d<distance){distance=d;best=p;}}return best;}
 static bool eq_hostile(int i,int j){return i!=j && players[j].respawn_timer<=0 && (gameMode!=GAME_MODE_FIREFIGHT || combatantTeam[i]!=combatantTeam[j]);}
@@ -36,7 +36,9 @@ static void eq_damage(int i,int target,float amount,bool lethal,DeathCause cause
     if(go_combat_actor(target)){go_combat_damage_from(amount,cause==DEATH_GLOB,i);if(cause==DEATH_GLOB)goFight.suppressed=5;return;}
     bool exposed=players[target].isExposed;float matter=players[target].matter;
     DeathCause prev=deathContext;deathContext=cause;bool known=damageOriginKnown;Vector3 old=damageOrigin;damageOriginKnown=true;damageOrigin=origin;
-    if(cause==DEATH_GLOB){
+    if (uses_player_vitals(target)) {
+        apply_player_damage(target, i, amount, cause == DEATH_GLOB, true, false);
+    } else if(cause==DEATH_GLOB){
         // Suppression never executes exposed actors, including the Foundry's
         // special core-health path which normally kills at zero Matter.
         if(!exposed){if(players[target].enemyType==ENEMY_TYPE_FOUNDRY)amount=fminf(amount,fmaxf(0,enemySpecial[target].coreHealth-.01f));apply_matter_damage(target,i,amount);}
@@ -160,7 +162,10 @@ static void eq_rocket_blast(EquipmentRocket rocket){
     enemy_blast_terrain((EnemyCharge){.pos=rocket.pos,.owner=rocket.owner});
     for(int j=0;j<activePlayers;j++)if(damages[j]>0){
         if(j==rocket.owner && players[j].invuln_timer<=0){bool previous=explosionDamageContext;explosionDamageContext=true;DeathCause old=deathContext;deathContext=DEATH_ROCKET;
-            if(players[j].matter<=damages[j] || players[j].isExposed)kill_player(j,j,false,false);else apply_matter_damage(j,j,damages[j]);deathContext=old;explosionDamageContext=previous;
+            if (uses_player_vitals(j)) apply_player_damage(j,j,damages[j],false,false,false);
+            else if(players[j].matter<=damages[j] || players[j].isExposed)kill_player(j,j,false,false);
+            else apply_matter_damage(j,j,damages[j]);
+            deathContext=old;explosionDamageContext=previous;
         }else eq_damage(rocket.owner,j,damages[j],true,DEATH_ROCKET,rocket.pos);
         if(eq_hostile(rocket.owner,j))players[j].vel=v_add(players[j].vel,v_mul(v_norm(world_delta(players[j].pos,rocket.pos)),damages[j]*.1f));
     }
@@ -171,7 +176,7 @@ static bool eq_fire(int i){
     if(!eq_usable(i))return false;int gun=eq_gun(i);if(gun<EQ_SHOTGUN || gun==EQ_CUTTER || gun==EQ_RAIL)return false;
     Equipment *e=&equipment[i];Player *p=&players[i];const GunDefinition *def=&eqGuns[gun];
     if(gun==EQ_BLADE){if(e->switchTime>0 || p->meleeSwingActive)return false;return perform_sword(i);}
-    if(e->switchTime>0 || e->cooldown[gun]>0 || p->isExposed || p->matter<def->cost)return false;
+    if(e->switchTime>0 || e->cooldown[gun]>0 || (!uses_player_vitals(i) && p->isExposed) || p->matter<def->cost)return false;
     Vector3 f=player_forward(p);Ray ray={p->pos,f};
     if(gun==EQ_SHOTGUN){
         ShotgunImpact hits[EQ_PELLETS];int hitCount=0;
@@ -203,7 +208,7 @@ static void eq_command(int i,const NetInputCommand *c,float dt){
     if((c->pressed&NET_INPUT_SWITCH) && !players[i].meleeSwingActive){int other=1-e->selected;if(e->gun[other]!=EQ_EMPTY){eq_cancel_charge(i);e->selected=other;e->switchTime=eqSwitchSeconds;e->charge=0;e->held=false;players[i].dynamicShotActive=eq_gun(i)==EQ_VOXEL;}}
     if((c->pressed&NET_INPUT_EQUIP) && !players[i].meleeSwingActive && !fp_interact(i)){int n=eq_near_pickup(i);if(n>=0 && eq_pickup(i,pickups[n].type,true)){pickups[n].active=false;pickups[n].respawnTimer=pickups[n].type==PICKUP_RAILGUN||pickups[n].type==PICKUP_ROCKET||pickups[n].type==PICKUP_DMR?60:30;}}
     bool held=(c->held&NET_INPUT_FIRE)!=0;int gun=eq_gun(i);Player *p=&players[i];
-    if(e->switchTime>0 || (p->isExposed && gun!=EQ_BLADE && !(gun==EQ_RAIL && e->charge>0)) || p->meleeSwingActive || e->cooldown[gun]>0){eq_cancel_charge(i);return;}
+    if(e->switchTime>0 || ((uses_player_vitals(i)?p->matter<=0:p->isExposed) && gun!=EQ_BLADE && !(gun==EQ_RAIL && e->charge>0)) || p->meleeSwingActive || e->cooldown[gun]>0){eq_cancel_charge(i);return;}
     if((c->pressed&NET_INPUT_FIRE) && gun!=EQ_CUTTER && gun!=EQ_RAIL)FireVoxel(i);
     if(gun==EQ_GLOB && held)eq_fire(i);
     Ray ray={p->pos,player_forward(p)};
@@ -270,7 +275,7 @@ static void eq_local(float dt){
 }
 static void eq_tick(float dt){
     if(dt<=0)return;
-    eq_shield_tick(dt);
+    player_vitals_tick(dt);
     fp_tick(dt);
     ex_tick(dt);
     aim_tick(dt);
@@ -328,7 +333,7 @@ static bool eq_panel_positions(int i,Vector3 out[EQ_PANEL_CUBES]){
         if(y<0 || out[n].y>FLOOR_SIZE*2 || (!worldPeriodic && (fabsf(out[n].x)>FLOOR_SIZE || fabsf(out[n].z)>FLOOR_SIZE)))valid=false;
     }return valid;
 }
-static bool eq_build_ready(int i){int count=eq_build_count(i);return !players[i].isExposed && players[i].matter>=ff_build_cost(i) && GetTime()-players[i].last_build_time>=BUILD_COOLDOWN_SECONDS && voxel_count+count<MAX_VOXELS && MAX_PARTICLES-particle_pool_count+free_particle_count>=8*count;}
+static bool eq_build_ready(int i){int count=eq_build_count(i);return (uses_player_vitals(i) || !players[i].isExposed) && players[i].matter>=ff_build_cost(i) && GetTime()-players[i].last_build_time>=BUILD_COOLDOWN_SECONDS && voxel_count+count<MAX_VOXELS && MAX_PARTICLES-particle_pool_count+free_particle_count>=8*count;}
 static bool eq_build_lifts(int count,const Vector3 *at,float lifts[MAX_COMBATANTS]){
     float roof=0;for(int n=0;n<count;n++)roof=fmaxf(roof,at[n].y+VOXEL_SIZE*.5f);
     memset(lifts,0,sizeof(float)*MAX_COMBATANTS);

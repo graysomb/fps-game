@@ -642,6 +642,16 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 // KD-stats constants
 #define VOXEL_DAMAGE 34
 #define MATTER_MAX_DEFAULT 100.0f
+#define PLAYER_SHIELDS_MAX 75.0f
+#define PLAYER_HEALTH_MAX 25.0f
+#define PLAYER_SHIELD_DELAY 5.0f
+#define PLAYER_HEALTH_DELAY 8.0f
+#define PLAYER_SHIELD_RATE 25.0f
+#define PLAYER_SHIELD_UPGRADED_RATE 35.0f
+#define PLAYER_HEALTH_RATE 5.0f
+#define PLAYER_HIT_FLASH .25f
+#define PLAYER_BREAK_FLASH .55f
+enum { RECHARGE_SHIELDS = 1, RECHARGE_HEALTH = 2 };
 #define MATTER_MELEE_HARVEST 25.0f
 #define MATTER_MELEE_DAMAGE (MATTER_MELEE_HARVEST + 1.0f)
 #define MATTER_SHOT_COST 1.0f
@@ -762,7 +772,10 @@ typedef struct {
     float kd_ratio;
     float matter;
     float matterMax;
-    bool isExposed;
+    bool isExposed; // Matter-based exposure for AI combatants.
+    float health, shields, recoveryDelay;
+    float shieldHitFlash, shieldBreakFlash, healthHitFlash;
+    uint8_t rechargeFlags;
     float last_damage_time;
     float last_shot_time;
     float last_melee_time;
@@ -801,6 +814,31 @@ typedef struct {
     float contactDamageTimer;
 } Player;
 static Player players[MAX_COMBATANTS];
+
+static bool uses_player_vitals(int slot) {
+    return slot >= 0 && slot < MAX_PLAYERS && !is_player_bot(slot) &&
+           players[slot].enemyType != ENEMY_TYPE_FOUNDRY;
+}
+
+static bool combatant_unshielded(int slot) {
+    return uses_player_vitals(slot) ? players[slot].shields <= 0.0f : players[slot].isExposed;
+}
+
+static void reset_player_vitals(Player *p, bool revived) {
+    p->health = revived ? PLAYER_HEALTH_MAX * .5f : PLAYER_HEALTH_MAX;
+    p->shields = revived ? 0.0f : PLAYER_SHIELDS_MAX;
+    p->recoveryDelay = revived ? PLAYER_HEALTH_DELAY : 0.0f;
+    p->shieldHitFlash = p->shieldBreakFlash = p->healthHitFlash = 0.0f;
+    p->rechargeFlags = 0;
+}
+
+static void player_vitals_impact(Player *p, float oldShields, float oldHealth) {
+    if (p->shields < oldShields) {
+        p->shieldHitFlash = PLAYER_HIT_FLASH;
+        if (p->shields <= 0.0f) p->shieldBreakFlash = PLAYER_BREAK_FLASH;
+    }
+    if (p->health < oldHealth) p->healthHitFlash = PLAYER_HIT_FLASH;
+}
 static CharacterAnimation characterAnimations[MAX_PLAYERS];
 static float characterSampleTime[MAX_PLAYERS];
 
@@ -943,6 +981,8 @@ typedef struct NetPlayerWireState {
     float yaw_vel;
     float pitch_vel;
     float matter;
+    float matterMax, health, shields;
+    uint8_t rechargeFlags;
     float respawn_timer;
     uint32_t acknowledged_input;
     int16_t kills;
@@ -9253,7 +9293,12 @@ static void update_pickups(float dt) {
                     // All available grenade types were refilled above.
                     play_sfx(SFX_SHIELD);
                 } else if (p->type == PICKUP_HEALTH) {
-                    add_player_matter(pl, 50.0f);
+                    if (uses_player_vitals(j)) {
+                        if (pl->health <= 0.0f || pl->health >= PLAYER_HEALTH_MAX) continue;
+                        pl->health = fminf(PLAYER_HEALTH_MAX, pl->health + 50.0f);
+                    } else {
+                        add_player_matter(pl, 50.0f);
+                    }
                     play_sfx(SFX_SHIELD);
                 } else if (p->type == PICKUP_VOID) {
                     pl->invuln_timer = fmaxf(pl->invuln_timer, VOID_INVULN_DURATION);
@@ -9398,6 +9443,7 @@ static void reset_players_for_creative(void) {
         UpdateKdRatio(i);
         players[i].matter = players[i].matterMax;
         players[i].isExposed = false;
+        reset_player_vitals(&players[i], false);
         players[i].last_damage_time = -1000.0f;
         players[i].last_shot_time = -1000.0f;
         weapon_visual_reset(&weaponVisuals[i]);
@@ -9487,6 +9533,7 @@ static void ResetGame(void) {
         players[i].matterMax = MATTER_MAX_DEFAULT;
         players[i].matter = players[i].matterMax;
         players[i].isExposed = false;
+        reset_player_vitals(&players[i], false);
         players[i].last_damage_time = -1000.0f;
         players[i].last_shot_time = -1000.0f;
         weapon_visual_reset(&weaponVisuals[i]);
@@ -10159,7 +10206,7 @@ static void add_player_matter(Player *p, float amount) {
     if(amount>0 && ex_suppressed((int)(p-players)))return;
     float max_matter = player_max_matter(p);
     p->matter = clampf(p->matter + amount, 0.0f, max_matter);
-    if (p->matter > 0.0f) {
+    if (p->matter > 0.0f && !uses_player_vitals((int)(p - players))) {
         p->isExposed = false;
     }
 }
@@ -10227,7 +10274,7 @@ static void apply_matter_damage(int player_index,int attacker_index,float damage
 static void kill_player(int player_index, int attacker_index,
                         bool award_kill, bool award_debris)
 {
-    if (player_index < 0 || player_index >= activePlayers) {
+    if (netTransport.role == NET_ROLE_CLIENT || player_index < 0 || player_index >= activePlayers) {
         return;
     }
     if (gameMode == GAME_MODE_FIREFIGHT && attacker_index >= 0 && attacker_index < activePlayers) {
@@ -10246,6 +10293,13 @@ static void kill_player(int player_index, int attacker_index,
         return;
     }
     if(gameMode==GAME_MODE_FIREFIGHT && player_index<firefightHumans && player->invuln_timer>0) return;
+    bool playerVitals = uses_player_vitals(player_index);
+    if (playerVitals) {
+        float oldShields = player->shields, oldHealth = player->health;
+        player->shields = player->health = 0.0f;
+        player->rechargeFlags = 0;
+        player_vitals_impact(player, oldShields, oldHealth);
+    }
     aim_cancel(player_index);
     combat_ui_damage(player_index,attacker_index);
     combat_ui_death(player_index,attacker_index,award_debris,
@@ -10263,7 +10317,7 @@ static void kill_player(int player_index, int attacker_index,
         player->tetherHolding=player->goldTetherHolding=false;
         player->tetherVoxel=-1;
         player->matter=0;
-        player->isExposed=true;
+        player->isExposed = !playerVitals;
         return;
     }
     if (debugLogSmush && debugLogSmushDeaths) {
@@ -10304,8 +10358,8 @@ static void kill_player(int player_index, int attacker_index,
     player->vel = (Vector3){ 0, 0, 0 };
     player->onGround = true;
     player->matter = 0.0f;
-    player->isExposed = true;
-    player->exposed_flash_timer = 0.35f;
+    player->isExposed = !playerVitals;
+    if (!playerVitals) player->exposed_flash_timer = 0.35f;
     player->invuln_timer = 0.0f;
     player->tetherHolding = false;
     player->goldTetherCharged = false;
@@ -10354,9 +10408,47 @@ static void kill_player(int player_index, int attacker_index,
 }
 
 static bool tetherDrainDamage;
+
+static bool apply_player_damage(int target, int attacker, float damage, bool shieldOnly,
+                                bool awardKill, bool awardDebris) {
+    if (netTransport.role == NET_ROLE_CLIENT || !uses_player_vitals(target) ||
+        target >= activePlayers || !isfinite(damage) || damage <= 0.0f) return false;
+    Player *p = &players[target];
+    if (p->respawn_timer > 0.0f || p->invuln_timer > 0.0f || p->health <= 0.0f ||
+        (enemyLab && enemyLabGod && target < firefightHumans)) return false;
+    bool knownAttacker = attacker >= 0 && attacker < activePlayers;
+    if (gameMode == GAME_MODE_FIREFIGHT && knownAttacker && !explosionDamageContext &&
+        combatantTeam[target] == combatantTeam[attacker]) return false;
+
+    float oldShields = p->shields, oldHealth = p->health;
+    float absorbed = fminf(oldShields, damage);
+    p->shields -= absorbed;
+    if (!shieldOnly) p->health = fmaxf(0.0f, oldHealth - (damage - absorbed));
+    if (p->shields == oldShields && p->health == oldHealth) return false;
+
+    p->recoveryDelay = PLAYER_HEALTH_DELAY;
+    p->rechargeFlags = 0;
+    p->last_damage_time = (float)GetTime();
+    if (knownAttacker && attacker != target) players[attacker].last_damage_time = p->last_damage_time;
+    player_vitals_impact(p, oldShields, oldHealth);
+    if (oldShields > 0.0f && p->shields <= 0.0f) play_sfx_at(SFX_SHIELD_BREAK, p->pos, target, 2, 1);
+    else if (!tetherDrainDamage) play_sfx_at(SFX_IMPACT, p->pos, target, 1, 1);
+
+    if (p->health <= 0.0f) {
+        kill_player(target, attacker, awardKill, awardDebris);
+        return true;
+    }
+    combat_ui_damage(target, attacker);
+    return false;
+}
+
 static void apply_matter_damage(int player_index, int attacker_index, float damage)
 {
     if (player_index < 0 || player_index >= activePlayers) {
+        return;
+    }
+    if (uses_player_vitals(player_index)) {
+        apply_player_damage(player_index, attacker_index, damage, true, false, false);
         return;
     }
     if (gameMode == GAME_MODE_FIREFIGHT && attacker_index >= 0 && attacker_index < activePlayers) {
@@ -10380,7 +10472,6 @@ static void apply_matter_damage(int player_index, int attacker_index, float dama
         if(boss->coreHealth<=0)kill_player(player_index,attacker_index,true,false);
         return;
     }
-    if(damage>0 && player->invuln_timer<=0 && !player->isExposed)eq_shield_damage(player_index);
     player->last_damage_time = (float)GetTime();
     if (player->invuln_timer > 0.0f || player->isExposed) {
         return;
@@ -10827,7 +10918,12 @@ static void handle_pbd_projectile_hits(void)
                     (players[j].invuln_timer <= 0.0f && players[j].matter <= damage);
                 bool priorOriginKnown=damageOriginKnown;Vector3 priorOrigin=damageOrigin;
                 damageOriginKnown=true;damageOrigin=v_sub(v->pos,v_mul(v_norm(v->vel),2));
-                if (lethal_hit) {
+                if (uses_player_vitals(j)) {
+                    DeathCause priorCause = deathContext;
+                    deathContext = is_projectile ? DEATH_PROJECTILE : DEATH_DEBRIS;
+                    if (apply_player_damage(j, attacker, damage, false, award_kill, award_debris)) smushBannerTimer = 1.0f;
+                    deathContext = priorCause;
+                } else if (lethal_hit) {
                     DeathCause priorCause=deathContext;deathContext=is_projectile?DEATH_PROJECTILE:DEATH_DEBRIS;
                     kill_player(j, attacker, award_kill, award_debris);
                     deathContext=priorCause;
@@ -14175,7 +14271,7 @@ static bool FireVoxel(int idx) {
     if (is_player_bot(idx) ? !ai_shot_allowed(idx) : now - p->last_shot_time < BULLET_COOLDOWN_SECONDS) {
         return false;
     }
-    if (p->matter < MATTER_SHOT_COST || p->isExposed) {
+    if (p->matter < MATTER_SHOT_COST || (!uses_player_vitals(idx) && p->isExposed)) {
         return false;
     }
 
@@ -14186,7 +14282,8 @@ static bool FireVoxel(int idx) {
     bool dynamic_shot = p->dynamicShotActive;
     int vix=spawn_default_projectile(idx,start,dir,dynamic_shot)?0:-1;
     if(vix>=0){
-        p->matter=fmaxf(0,p->matter-MATTER_SHOT_COST);p->isExposed=p->matter<=0;
+        p->matter=fmaxf(0,p->matter-MATTER_SHOT_COST);
+        if (!uses_player_vitals(idx)) p->isExposed = p->matter <= 0.0f;
         if(is_player_bot(idx))ai_shot_fired(idx);
         ai_gunfire(idx,p->pos);
         play_sfx_at(SFX_FIRE,p->pos,idx,1,1);
@@ -15320,9 +15417,11 @@ static bool melee_hit_players(int attacker_idx, Vector3 start, Vector3 end, Vect
         players[j].vel = v_add(players[j].vel, v_mul(knock_dir, MELEE_KNOCKBACK_SPEED*brace));
         players[j].vel.y += MELEE_UPWARD_BOOST*brace;
         players[j].meleeKnockbackActive = true;
-        apply_matter_damage(j, attacker_idx, MATTER_MELEE_DAMAGE);
-        if (players[j].isExposed) {
-            kill_player(j, attacker_idx, true, false);
+        if (uses_player_vitals(j)) {
+            apply_player_damage(j, attacker_idx, MATTER_MELEE_DAMAGE, false, true, false);
+        } else {
+            apply_matter_damage(j, attacker_idx, MATTER_MELEE_DAMAGE);
+            if (players[j].isExposed) kill_player(j, attacker_idx, true, false);
         }
         play_sfx(SFX_MELEE);
         return true;
@@ -15881,7 +15980,7 @@ static void acquire_tether_hit(int idx,int hit_id,Vector3 normal) {
 
     p->tetherHolding = true;
     p->goldTetherHolding = gold;
-    if(gold && paidHuman){p->matter=fmaxf(0,p->matter-eqGoldGrabCost);p->isExposed=p->matter<=0;}
+    if(gold && paidHuman)p->matter=fmaxf(0,p->matter-eqGoldGrabCost);
     p->tetherVoxel = tether_idx;
     p->tetherVoxelIdentity = voxels[tether_idx].identity;
     p->tetherFace = hit_face;
@@ -16185,12 +16284,68 @@ static bool tether_cluster_center(int voxel_idx, Vector3 *out_center) {
 
 #include "teammate_hud.inc"
 
+static int hud_vitals_width(int viewport_w) {
+    int width = clampi(viewport_w * 42 / 100, 120, 300);
+    int available = viewport_w - HUD_PADDING_X * 2;
+    return width < available ? width : available;
+}
+
+static void draw_vitals_gauge(int x, int y, int width, int height, const char *label,
+                              float value, float cap, Color color, bool highlight) {
+    Rectangle bounds = { x, y, width, height };
+    DrawRectangleRec(bounds, (Color){ 19, 24, 30, 223 });
+    DrawRectangle(x, y, (int)roundf(width * clampf(value / cap, 0, 1)), height, Fade(color, .55f));
+    DrawRectangleLinesEx(bounds, highlight ? 2 : 1, highlight ? color : Fade(color, .6f));
+    int font = height - 6;
+    DrawText(label, x + 6, y + 3, font, highlight ? color : RAYWHITE);
+    const char *amount = TextFormat("%d / %d", (int)ceilf(value), (int)roundf(cap));
+    DrawText(amount, x + width - MeasureText(amount, font) - 6, y + 3, font, RAYWHITE);
+}
+
+static void draw_player_vitals_flash(const Player *p, int w, int h) {
+    float shield = .13f * p->shieldHitFlash / PLAYER_HIT_FLASH;
+    float broken = .18f * p->shieldBreakFlash / PLAYER_BREAK_FLASH;
+    if (shield + broken > 0.0f) DrawRectangle(0, 0, w, h, Fade(SKYBLUE, shield + broken));
+    if (p->healthHitFlash > 0.0f) {
+        Color edge = Fade(RED, .45f * p->healthHitFlash / PLAYER_HIT_FLASH);
+        int inset = clampi(h / 22, 5, 30);
+        DrawRectangle(0, 0, w, inset, edge);
+        DrawRectangle(0, h - inset, w, inset, edge);
+        DrawRectangle(0, inset, inset, h - 2 * inset, edge);
+        DrawRectangle(w - inset, inset, inset, h - 2 * inset, edge);
+    }
+}
+
 static void draw_hud_bars(int player_index, const Player *p, int viewport_w, int viewport_h) {
     if (!p || viewport_w <= 0 || viewport_h <= 0) {
         return;
     }
 
     int max_w = viewport_w - HUD_PADDING_X * 2;
+    if (uses_player_vitals(player_index)) {
+        int width = hud_vitals_width(viewport_w);
+        if (width < 110) return;
+        int height = viewport_h < 400 ? 16 : 20;
+        int x = viewport_w - HUD_PADDING_X - width;
+        int y = viewport_h - HUD_PADDING_Y - height;
+        bool shieldsDown = p->shields <= 0.0f;
+        const char *shieldLabel = shieldsDown ? "SHIELDS OFFLINE" :
+            (p->rechargeFlags & RECHARGE_SHIELDS) ? "SHIELDS RECHARGING" : "SHIELDS";
+        const char *healthLabel = (p->rechargeFlags & RECHARGE_HEALTH) ? "HEALTH RECHARGING" : "HEALTH";
+        if (width < (height == 16 ? 180 : 215)) {
+            shieldLabel = shieldsDown && width >= 155 ? "SHIELDS DOWN" : "SHIELDS";
+            healthLabel = "HEALTH";
+        }
+        draw_vitals_gauge(x, y - 2 * (height + 4), width, height, shieldLabel,
+                          p->shields, PLAYER_SHIELDS_MAX, SKYBLUE,
+                          p->shieldBreakFlash > 0.0f || (p->rechargeFlags & RECHARGE_SHIELDS));
+        draw_vitals_gauge(x, y - height - 4, width, height, healthLabel,
+                          p->health, PLAYER_HEALTH_MAX, (Color){ 255, 88, 80, 255 },
+                          shieldsDown || p->healthHitFlash > 0.0f);
+        draw_vitals_gauge(x, y, width, height, "MATTER", p->matter, player_max_matter(p),
+                          player_palette_color(player_index), false);
+        return;
+    }
     int bar_w = HUD_BAR_WIDTH * 2;
     if (bar_w > max_w) {
         bar_w = max_w;
@@ -16211,15 +16366,6 @@ static void draw_hud_bars(int player_index, const Player *p, int viewport_w, int
 
     DrawRectangle(bar_x, bar_y, bar_w, HUD_BAR_THICKNESS, bar_bg);
     DrawRectangle(bar_x, bar_y, (int)roundf(bar_w * matter_ratio), HUD_BAR_THICKNESS, matter_color);
-    if(player_index<MAX_PLAYERS && (equipment[player_index].upgrades&EQ_SHIELD)){
-        Equipment *e=&equipment[player_index];Color c=e->shieldRegenerating?SKYBLUE:Fade(SKYBLUE,.6f);
-        int cap=bar_x+(int)(bar_w*eqShieldCeiling);
-        if(e->shieldRegenerating){float pulse=.12f+.13f*(1+sinf((float)GetTime()*8));int start=bar_x+(int)(bar_w*fminf(matter_ratio,eqShieldCeiling));DrawRectangle(start,bar_y,cap-start,HUD_BAR_THICKNESS,Fade(SKYBLUE,pulse));}
-        DrawLine(cap,bar_y-2,cap,bar_y+HUD_BAR_THICKNESS+2,c);
-        eq_shield_icon(bar_x,bar_y-32,c);
-        const char *status=ex_suppressed(player_index)?"SUPPRESSED":e->shieldDelay>0?TextFormat("%.1fs",e->shieldDelay):e->shieldRegenerating?"RECHARGING":"50%";
-        DrawText(status,bar_x+32,bar_y-24,12,c);
-    }
     DrawRectangleLines(bar_x, bar_y, bar_w, HUD_BAR_THICKNESS, BLACK);
 
     const char *matter_text = TextFormat("MATTER %d/%d",
@@ -18474,10 +18620,14 @@ static void sample_character(int i,float now) {
             pose.position.y=surface+BASE_EYE_HEIGHT;
         }
     }
-    if(p->isExposed) {pose.effect=RED;pose.effectAmount=.45f+.2f*sinf(now*6);}
+    if(combatant_unshielded(i)) {pose.effect=RED;pose.effectAmount=.45f+.2f*sinf(now*6);}
     else if(p->invuln_timer>0 || p->dynamicShotActive) {pose.effect=GOLD;pose.effectAmount=.3f+.15f*sinf(now*6);}
     else if(p->matter_flash_timer>0) {pose.effect=pose.gear;pose.effectAmount=clampf(p->matter_flash_timer/.2f,0,1);}
-    if(i<MAX_PLAYERS && equipment[i].shieldRegenerating && !down && p->respawn_timer<=0 && p->matter_flash_timer<=0 && p->invuln_timer<=0){pose.effect=SKYBLUE;pose.effectAmount=.12f+.08f*sinf(now*7);}
+    if(uses_player_vitals(i) && p->respawn_timer<=0 && p->invuln_timer<=0 &&
+       (p->shieldHitFlash>0 || (p->rechargeFlags&RECHARGE_SHIELDS))) {
+        pose.effect=SKYBLUE;
+        pose.effectAmount=p->shieldHitFlash>0?.4f:.12f+.08f*sinf(now*7);
+    }
     characterSamples[i]=pose;
 }
 static void draw_rat_world(int i,bool emission) {
@@ -19637,7 +19787,7 @@ static void UpdateBot(int playerIdx, float dt) {
             moveDir = world_delta(targetDest, bot->pos);
             moveDir.y = 0;
             moving = v_length(moveDir) > 1;
-        } else if (target->isExposed) {
+        } else if (enemyIdx < MAX_COMBATANTS ? combatant_unshielded(enemyIdx) : target->isExposed) {
             moveDir = world_delta(targetDest, bot->pos);
             moveDir.y = 0.0f;
             moving = (enemyDist > MELEE_RANGE * 0.85f);
@@ -19896,7 +20046,10 @@ static void net_write_player_state(NetWriter *writer, int slot) {
     net_write_f32(writer, p->vel.x); net_write_f32(writer, p->vel.y); net_write_f32(writer, p->vel.z);
     net_write_f32(writer, p->yaw); net_write_f32(writer, p->pitch);
     net_write_f32(writer, p->yaw_vel); net_write_f32(writer, p->pitch_vel);
-    net_write_f32(writer, p->matter); net_write_f32(writer, p->respawn_timer);
+    net_write_f32(writer, p->matter); net_write_f32(writer, player_max_matter(p));
+    net_write_f32(writer, p->health); net_write_f32(writer, p->shields);
+    net_write_u8(writer, p->rechargeFlags);
+    net_write_f32(writer, p->respawn_timer);
     net_write_i16(writer, (int16_t)p->kills); net_write_i16(writer, (int16_t)p->deaths);
     net_write_i16(writer, (int16_t)p->debrisKills);
     net_write_u8(writer, (p->onGround ? 1u : 0u) | (p->isExposed ? 2u : 0u) |
@@ -19913,7 +20066,14 @@ static bool net_read_player_state(NetReader *reader, int *slot_out, NetPlayerWir
     state->vel = (Vector3){ net_read_f32(reader), net_read_f32(reader), net_read_f32(reader) };
     state->yaw = net_read_f32(reader); state->pitch = net_read_f32(reader);
     state->yaw_vel = net_read_f32(reader); state->pitch_vel = net_read_f32(reader);
-    state->matter = net_read_f32(reader); state->respawn_timer = net_read_f32(reader);
+    state->matter = net_read_f32(reader); state->matterMax = net_read_f32(reader);
+    state->health = net_read_f32(reader); state->shields = net_read_f32(reader);
+    state->rechargeFlags = net_read_u8(reader);
+    state->respawn_timer = net_read_f32(reader);
+    if (!isfinite(state->matter) || !isfinite(state->matterMax) || state->matter < 0 || state->matterMax <= 0 ||
+        !isfinite(state->health) || state->health < 0 || state->health > PLAYER_HEALTH_MAX ||
+        !isfinite(state->shields) || state->shields < 0 || state->shields > PLAYER_SHIELDS_MAX ||
+        (state->rechargeFlags & ~(RECHARGE_SHIELDS | RECHARGE_HEALTH))) return false;
     state->kills = net_read_i16(reader); state->deaths = net_read_i16(reader);
     state->debris_kills = net_read_i16(reader); state->flags = net_read_u8(reader);
     state->grenades=net_read_u8(reader);if(state->grenades>2)return false;
@@ -20019,6 +20179,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
             grenadeInventory[player_slot]=fp_active()?0:1;grenadeCooldown[player_slot]=0;netLastGrenadeInput[player_slot]=0;
             players[player_slot].respawn_timer=0;players[player_slot].invuln_timer=2;
             players[player_slot].matter=players[player_slot].matterMax=MATTER_MAX_DEFAULT;players[player_slot].isExposed=false;
+            reset_player_vitals(&players[player_slot], false);
             combatantLife[player_slot]=LIFE_ALIVE;
             if(gameMode==GAME_MODE_FIREFIGHT){combatantTeam[player_slot]=0;playerInput[player_slot]=INPUT_TYPE_KEYBOARD;firefightHumans=firefightHumans>player_slot?firefightHumans:player_slot+1;
                 if(fpCheckpoint.valid){fpCheckpoint.humans[player_slot]=players[player_slot];fpCheckpoint.equipment[player_slot]=equipment[player_slot];fpCheckpoint.grenades[player_slot]=0;fpCheckpoint.selected[player_slot]=0;memset(fpCheckpoint.special[player_slot],0,sizeof(fpCheckpoint.special[player_slot]));}
@@ -20079,6 +20240,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
     }
     if (transport->role != NET_ROLE_CLIENT) return;
     if (header.type == NET_MSG_WELCOME) {
+        netServerTick = header.server_tick;
         ducks_reset();
         fp_new_run();fpStateTick=fpReceivedRevision=0;memset(fpActorTick,0,sizeof(fpActorTick));free(fpIncoming);fpIncoming=NULL;fpIncomingNext=fpIncomingCount=0;
         clarity_net_reset();
@@ -20172,11 +20334,15 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
             pickups[i].active = net_read_u8(&reader) != 0;
         }
     } else if (header.type == NET_MSG_PLAYER_STATE) {
+        if (header.server_tick < netServerTick) return;
         uint8_t count = net_read_u8(&reader);
         netServerTick = header.server_tick;
         for (uint8_t i = 0; i < count; ++i) {
             int slot; NetPlayerWireState state;
             if (!net_read_player_state(&reader, &slot, &state)) break;
+            float oldHealth = players[slot].health;
+            float oldShields = players[slot].shields;
+            bool wasAlive = oldHealth > 0 && players[slot].respawn_timer <= 0;
             netPlayerPresent[slot] = true;
             if (slot + 1 > activePlayers) activePlayers = slot + 1;
             tether_grapple_receive(slot,state.visual.flags,
@@ -20193,6 +20359,16 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
             Player *p = &players[slot];
             grenadeInventory[slot]=state.grenades;
             p->matter = state.matter; p->respawn_timer = state.respawn_timer;
+            p->matterMax = state.matterMax;
+            p->health = state.health;
+            p->shields = state.shields;
+            p->rechargeFlags = state.rechargeFlags;
+            if (wasAlive) {
+                player_vitals_impact(p, oldShields, oldHealth);
+                if (oldShields > 0 && p->shields <= 0 && net_player_is_local(slot)) play_sfx(SFX_SHIELD_BREAK);
+            } else if (p->health > 0 && p->respawn_timer <= 0) {
+                p->shieldHitFlash = p->shieldBreakFlash = p->healthHitFlash = 0;
+            }
             p->kills = state.kills; p->deaths = state.deaths; p->debrisKills = state.debris_kills;
             p->isExposed = (state.flags & 2u) != 0;
             bool authoritative_melee = (state.visual.flags & NET_PLAYER_VISUAL_MELEE) != 0;
@@ -20487,13 +20663,16 @@ static void debug_console_exec(const char *line)
         const char *arg = strtok(NULL, " \t");
         float value = arg ? (float)atof(arg) : players[local].matterMax;
         players[local].matter = clampf(value, 0.0f, players[local].matterMax);
-        players[local].isExposed = (players[local].matter <= 0.0f);
+        if (!uses_player_vitals(local)) players[local].isExposed = players[local].matter <= 0.0f;
         debug_console_printf("p%d matter=%.1f", local, players[local].matter);
         return;
     }
     if (strcmp(cmd, "exposed") == 0) {
-        players[local].matter = 0.0f;
-        players[local].isExposed = true;
+        if (uses_player_vitals(local)) apply_player_damage(local, -1, PLAYER_SHIELDS_MAX, true, false, false);
+        else {
+            players[local].matter = 0.0f;
+            players[local].isExposed = true;
+        }
         debug_console_printf("p%d exposed", local);
         return;
     }
@@ -20968,14 +21147,15 @@ static void render_gameplay_view(RenderTexture2D *screens,
             combat_ui_abilities(i,view_w,view_h);
             combat_ui_hud(i,cams[i],view_w,view_h);
             eq_hud(i,view_w,view_h);
-            if (players[i].matter_flash_timer > 0.0f &&
+            if (uses_player_vitals(i)) draw_player_vitals_flash(&players[i], view_w, view_h);
+            else if (players[i].matter_flash_timer > 0.0f &&
                 !players[i].isExposed && players[i].matter > 0.0f) {
                 float alpha = clampf(players[i].matter_flash_timer / 0.2f, 0.0f, 1.0f);
                 Color flash = player_palette_color(i);
                 flash.a = 255;
                 DrawRectangle(0, 0, view_w, view_h, Fade(flash, 0.25f * alpha));
             }
-            if (players[i].exposed_flash_timer > 0.0f) {
+            if (!uses_player_vitals(i) && players[i].exposed_flash_timer > 0.0f) {
                 float alpha = clampf(players[i].exposed_flash_timer / 0.35f, 0.0f, 1.0f);
                 DrawRectangle(0, 0, view_w, view_h, Fade(RED, 0.25f * alpha));
             }
@@ -21453,7 +21633,9 @@ static void update_enemy_contact_damage(float dt) {
 
                     victim->vel = v_add(victim->vel, v_mul(knockDir, knockbackImpulse*enemy_knockback_scale(j)));
                     victim->meleeKnockbackActive = true;
-                    if(bot->enemyType==ENEMY_TYPE_SWARMER && victim->isExposed)
+                    if (bot->enemyType == ENEMY_TYPE_SWARMER && uses_player_vitals(j))
+                        apply_player_damage(j, i, contactDamage, false, true, false);
+                    else if(bot->enemyType==ENEMY_TYPE_SWARMER && victim->isExposed)
                         kill_player(j,i,true,false);
                     else apply_matter_damage(j, i, contactDamage);
                     bot->contactDamageTimer = (bot->enemyType == ENEMY_TYPE_SWARMER) ? 0.5f : 0.8f;
@@ -22652,6 +22834,7 @@ int main(int argc, char **argv) {
                     UpdateKdRatio(i);
                     players[i].matter = players[i].matterMax;
                     players[i].isExposed = false;
+                    reset_player_vitals(&players[i], false);
                     players[i].last_damage_time = (float)GetTime();
                     players[i].last_shot_time = -1000.0f;
                     players[i].last_melee_time = -1000.0f;

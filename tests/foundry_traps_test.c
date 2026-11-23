@@ -241,7 +241,8 @@ static void damage_checks(void) {
     players[1].invuln_timer=0;players[1].pos.x=12;
     foundry_traps_hits();assert(players[1].respawn_timer==0 && !foundryTraps[0].victims);
     players[1].pos.x=.75f;firefightHumans=2;playerInput[1]=INPUT_TYPE_GAMEPAD;combatantTeam[1]=0;
-    foundry_traps_hits();assert(combatantLife[1]==LIFE_DOWNED);
+    reset_player_vitals(&players[1],false);
+    foundry_traps_hits();assert(combatantLife[1]==LIFE_DOWNED && players[1].health==0 && players[1].shields==0);
     // A protected Walking Foundry cannot be bypassed; exposed core takes one hit.
     players[1].respawn_timer=0;players[1].enemyType=ENEMY_TYPE_FOUNDRY;foundryTraps[0].victims=0;
     enemySpecial[1]=(EnemySpecialState){.coreHealth=300};foundry_traps_hits();assert(enemySpecial[1].coreHealth==300);

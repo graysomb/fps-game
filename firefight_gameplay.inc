@@ -25,12 +25,12 @@ static EnemyType pick_firefight_enemy_type(int wave, int spawn_index) {
 
 static void ff_restore_human(int i, float matter) {
     ex_clear_status(i);
-    equipment[i].shieldDelay=eqShieldDelay;equipment[i].shieldRegenerating=false;
     Player *p=&players[i];
     if(netTransport.role==NET_ROLE_HOST&&!netPlayerPresent[i]){combatantLife[i]=LIFE_UNUSED;p->respawn_timer=9999;return;}
     if(combatantLife[i]!=LIFE_DOWNED && !fp_active()) grenadeInventory[i]=1;
     p->pos=pick_player_spawn(i); p->death_pos=p->pos;
     p->vel=(Vector3){0}; p->matter=matter; p->matterMax=MATTER_MAX_DEFAULT;
+    reset_player_vitals(p, false);
     p->isExposed=false; p->respawn_timer=0; p->invuln_timer=2;
     p->last_damage_time=(float)GetTime();
     p->tetherHolding=p->goldTetherHolding=false; p->tetherVoxel=-1;
@@ -101,6 +101,7 @@ static void ff_update_coop(float dt) {
                     deathNotices[i].until=0;
                     reviveCount[rescuer]++;
                     ff_restore_human(i,FF_REVIVE_MATTER);
+                    reset_player_vitals(&players[i], true);
                     players[i].pos=position;
                     play_sfx(SFX_SHIELD);
                 }

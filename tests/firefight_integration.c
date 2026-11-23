@@ -75,7 +75,7 @@ int main(int argc,char **argv) {
     players[0].last_damage_time=-1000;
     ffTestReviveHeld[0]=true;
     ff_update_coop(3.1f);
-    assert(combatantLife[1]==LIFE_ALIVE && players[1].matter==35);
+    assert(combatantLife[1]==LIFE_ALIVE && players[1].matter==35 && players[1].health==12.5f && players[1].shields==0);
     assert(players[0].matter==100 && reviveCount[0]==1);
     ffTestReviveHeld[0]=false;
     test_down(1);int deaths=players[1].deaths;
