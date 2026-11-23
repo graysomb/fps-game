@@ -1481,6 +1481,14 @@ static void mark_static_beliefs_dirty_for_voxel(const Voxel *voxel);
 static void mark_static_beliefs_dirty_column_above(int gx, int gz, int gy);
 static void update_dynamic_activation_beliefs(void);
 static bool activate_static_voxel_for_tether(int voxel_idx, int activator, float activationBelief);
+typedef enum {LAB_NONE, LAB_LOGS, LAB_SWING, LAB_PIT, LAB_TOWER, LAB_FOREST} TrapLabCase;
+static TrapLabCase trapLabCase;
+static void trap_lab_start(TrapLabCase which);
+static void trap_lab_tick(float dt);
+static void trap_lab_draw(void);
+static bool trap_lab_switch(int id,int owner);
+static void trap_lab_ramp(Player *p,float originalZ);
+static const char *trapLabNames[]={"","logs","swing","pit","tower","forest"};
 static bool foundry_trap_hit(int voxel_idx,int actor,bool payload);
 static void foundry_traps_prepare(void);
 static void foundry_traps_blast(Vector3 pos,int owner);
@@ -8979,6 +8987,7 @@ static void clear_pickups(void) {
 }
 
 static void clear_world_voxels(void) {
+    trapLabCase=LAB_NONE;
     golem_physics_reset();
     foundry_traps_reset();
     memset(tetherTag,0,sizeof(tetherTag));memset(tetherHoldClusterTag,0,sizeof(tetherHoldClusterTag));
@@ -14074,7 +14083,8 @@ static void advance_gold_release_grace(int fixed_steps) {
 
 static void simulate_voxel_pbd_steps(float dt, int fixed_steps) {
     /* Animated constraints need a committed body between fixed ticks. */
-    if((goActive||weak_tether_any())&&fixed_steps>1){for(int i=0;i<fixed_steps;i++)simulate_voxel_pbd_steps(dt,1);return;}
+    if((trapLabCase||goActive||weak_tether_any())&&fixed_steps>1){for(int i=0;i<fixed_steps;i++)simulate_voxel_pbd_steps(dt,1);return;}
+    if(fixed_steps>0 && trapLabCase)trap_lab_tick(dt);
     if (fixed_steps > 0) { go_combat_prepare(dt);foundry_traps_prepare();golem_physics_prepare(); }
     if(fixed_steps<=0)return;
     if(dynamic_particle_count()<=0){for(int fixed=0;fixed<fixed_steps;fixed++)weak_tether_prepare(dt);return;}
@@ -18710,6 +18720,7 @@ static void draw_players(void) {
     combat_ui_world();
     eq_world();
     foundry_traps_draw();
+    if(trapLabCase)trap_lab_draw();
     ducks_draw();
     if(creativeModeActive)ce_world(drawViewPlayerIndex);
 }
@@ -18869,7 +18880,7 @@ static void net_integrate_player(Player *p, float dt, bool query_world) {
     }
     ex_actor_pull(player_idx,dt);
     tether_grapple_pull(player_idx,dt);
-    if(player_uses_rat(player_idx)) {integrate_human_body(player_idx,dt,query_world);return;}
+    if(player_uses_rat(player_idx)) {float previousZ=p->pos.z;integrate_human_body(player_idx,dt,query_world);if(trapLabCase==LAB_PIT || trapLabCase==LAB_LOGS)trap_lab_ramp(p,previousZ);return;}
     bool collided = false;
     if (query_world && player_idx >= 0) {
         Vector3 try_x = { p->pos.x + p->vel.x * dt, p->pos.y, p->pos.z };
@@ -19415,6 +19426,18 @@ static void bot_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float
 #include "sapper_ai.inc"
 #include "chunk_regeneration_net.inc"
 static void UpdateBot(int playerIdx, float dt) {
+    if(trapLabCase){
+        // The pit target follows a player who approaches its end of the walkway.
+        if(trapLabCase==LAB_PIT && playerIdx==MAX_PLAYERS){
+            Player *bot=&players[playerIdx];Vector3 offset=v_sub(players[0].pos,bot->pos);offset.y=0;
+            if(v_length(offset)<3)botStates[playerIdx].hasTarget=true;
+            if(botStates[playerIdx].hasTarget){
+                Vector3 step=v_mul(v_norm(offset),fminf(2,v_length(offset)*3));
+                bot->vel.x=step.x;bot->vel.z=step.z;
+            }
+        }
+        return;
+    }
     if(go_combat_actor(playerIdx))return;
     players[playerIdx].vel=v_sub(players[playerIdx].vel,exBotApplied[playerIdx]);exBotApplied[playerIdx]=(Vector3){0};
     if(enemyLab && enemyLabPaused && !enemyLabStep) return;
@@ -20556,11 +20579,18 @@ static void debug_console_exec(const char *line)
         for(int g=0;name && g<EQ_GUN_COUNT;g++)if(!strcasecmp(name,eqGuns[g].name)){equipment[local].gun[equipment[local].selected]=g;equipment[local].switchTime=eqSwitchSeconds;aim_cancel(local);debug_console_printf("Equipped %s",eqGuns[g].name);return;}
         debug_console_print("give shield|glob|glock|dmr|gravity|igloo (or existing gun name)");return;
     }
+    if(!strcmp(cmd,"traplab")){
+        const char *name=strtok(NULL," \t");
+        if(netTransport.role!=NET_ROLE_OFFLINE){debug_console_print("Trap Lab requires offline play");return;}
+        if(name && !strcmp(name,"reset") && trapLabCase){trap_lab_start(trapLabCase);return;}
+        for(int n=LAB_LOGS;n<=LAB_FOREST;n++)if(name && !strcmp(name,trapLabNames[n])){trap_lab_start(n);return;}
+        debug_console_print("traplab logs | swing | pit | tower | forest | reset");return;
+    }
     if (strcmp(cmd, "weaponlab") == 0) {eq_lab();debug_console_print("Weapon lab: pickups on left, targets ahead, panels on right.");return;}
     if (strcmp(cmd,"controls")==0){debugConsoleOpen=false;ct_open();return;}
     if (strcmp(cmd, "help") == 0) {
         debug_console_print("give shield|glob|glock|dmr|gravity|igloo; cycle grenades: D-pad Down / Tab / ;");
-        debug_console_print("help | controls | weaponlab | clear | god [on|off] | matter [n] | exposed");
+        debug_console_print("help | controls | traplab | weaponlab | clear | god [on|off] | matter [n] | exposed");
         debug_console_print("kill | pos | tp x y z | players | particles | belief | smush");
         debug_console_print("wave n | nextwave | lives n | armor | spawn swarmer|goliath|standard");
         return;
@@ -21502,6 +21532,7 @@ static bool run_ai_awareness_smoke_test(void) {
 #include "victory_town_credits.inc"
 #include "firefight_victory.inc"
 #include "enemy_lab.inc"
+#include "trap_lab.inc"
 static void eq_lab(void){
     enemy_lab_start(ENEMY_TYPE_STANDARD);equipmentLab=true;enemy_cleanup(true);clear_world_voxels();clear_pickups();eq_reset_all();
     for(int i=4;i<activePlayers;i++)players[i].respawn_timer=9999;
@@ -23038,6 +23069,7 @@ int main(int argc, char **argv) {
     }
     ffend_reset();
     shutdown_pbd_thread_pool();
+    trapLabCase=LAB_NONE;
     golem_physics_reset();
     foundry_traps_reset();
     net_transport_shutdown(&netTransport);

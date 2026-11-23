@@ -5,6 +5,7 @@ static void foundry_traps_reset(void) {
 }
 static bool foundry_trap_hit(int id,int actor,bool payload) {
     if(id<0 || id>=voxel_count || voxels[id].simulate)return false;
+    if(trapLabCase && trap_lab_switch(id,actor))return true;
     Voxel *v=&voxels[id];
     for(int n=0;n<foundryTrapCount;n++) {
         FoundryTrap *t=&foundryTraps[n];if(t->active || t->pending)continue;
@@ -116,6 +117,7 @@ static void foundry_traps_blast(Vector3 pos,int owner) {
     }
 }
 static void foundry_traps_prepare(void) {
+    if(trapLabCase>=LAB_TOWER)return;
     if(!foundryTrapCount)return;
     bool live[FOUNDRY_TRAPS]={0};
     for(int i=0;i<voxel_count;i++)if(voxels[i].foundryTrapId && voxels[i].foundryTrapId<=foundryTrapCount)live[voxels[i].foundryTrapId-1]=true;
@@ -129,6 +131,14 @@ static void foundry_traps_prepare(void) {
         voxels[i].foundryTrapPrevious=voxels[i].pos;
         voxels[i].foundryTrapPreviousSpeed=v_length(voxels[i].vel);
     }
+}
+static void foundry_smash_actor(int slot,int owner){
+    bool previous=explosionDamageContext;
+    explosionDamageContext=true;
+    if(players[slot].enemyType==ENEMY_TYPE_FOUNDRY)apply_matter_damage(slot,owner,100);
+    else kill_player(slot,owner,false,owner>=0);
+    explosionDamageContext=previous;
+    smushBannerTimer=1;play_sfx_at(SFX_SMUSH,players[slot].pos,slot,1,.8f);
 }
 static void foundry_traps_hits(void) {
     if(!foundryTrapCount)return;
@@ -156,10 +166,7 @@ static void foundry_traps_hits(void) {
             if(!hit && length>.00001f){RayCollision c=GetRayCollisionBox((Ray){start,v_mul(path,1/length)},b);hit=c.hit && c.distance<=length;}
             if(!hit)continue;
             t->victims|=1u<<j;
-            bool previous=explosionDamageContext;explosionDamageContext=true;
-            if(players[j].enemyType==ENEMY_TYPE_FOUNDRY)apply_matter_damage(j,t->owner,100);
-            else kill_player(j,t->owner,false,t->owner>=0);
-            explosionDamageContext=previous;smushBannerTimer=1;play_sfx_at(SFX_SMUSH,players[j].pos,j,1,.8f);
+            foundry_smash_actor(j,t->owner);
         }
     }
 }

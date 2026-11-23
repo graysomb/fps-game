@@ -5,6 +5,7 @@ static float enemyLabAiTime,enemyLabAiNext;
 static const char *enemyLabFixtureNames[]={"Grenade range: C / D-pad Up; full friendly fire", "Bomb avoidance: enemies flee a live Sapper charge", "Death feedback: exposed enemies, slot reuse", "Melee shield: remove one section per swing", "Lobber: elevated target and real structure flight", "Anchor: damage linked allies; exposed recovery after 2 seconds", "Footsteps: listen while enemies move", "Tether accuracy: throw the side-offset block at the target", "AI rear attack: fire at the bot facing away", "AI near miss: fire past the bot shoulder", "AI shield alert: shoot the shield from either side", "AI alternating attackers: two scripted shooters", "AI occlusion: attacker behind wall; investigate without tracking", "AI stationary target: observe bursts and recovery", "AI reversing target: observe tracking accuracy"};
 static bool enemyLabPreviousFoundry,enemyLabPreviousCustom;
 static void enemy_lab_exit(void) {
+    trapLabCase=LAB_NONE;
     if(goActive){for(int i=voxel_count-1;i>=0;i--)if(voxels[i].golemOwned)remove_voxel_index(i);golem_physics_reset();}
     enemy_cleanup(true);enemyLab=false;enemyLabAll=false;enemyLabPaused=false;
     currentWorldType=enemyLabPreviousWorld;firefightFoundry=enemyLabPreviousFoundry;useCustomMap=enemyLabPreviousCustom;
@@ -134,6 +135,12 @@ static void enemy_lab_ai_step(float dt) {
     }
 }
 static bool enemy_lab_controls(void) {
+    if(trapLabCase){
+        if(debugConsoleOpen)return true;
+        if(IsKeyPressed(KEY_ESCAPE))enemy_lab_exit();
+        else if(ct_pressed(0,CT_LAB_RESET))trap_lab_start(trapLabCase);
+        return true;
+    }
     enemyLabStep=false;
     if(goActive){
         if(ct_pressed(0,CT_LAB_NEXT)){
@@ -177,6 +184,7 @@ static bool enemy_lab_controls(void) {
     return true;
 }
 static void enemy_lab_hud(int w,int h) {
+    if(trapLabCase){DrawText(TextFormat("Trap Lab / %s   |   %s",trapLabNames[trapLabCase],trapLabCase==LAB_PIT?"Walk onto the cracked floor":"Shoot an orange release"),12,h-80,17,RAYWHITE);return;}
     int fs=w<900?14:18;
     if(enemyLabCase==ENEMY_TYPE_BUILDER){
         DrawText(TextFormat("TOWER: %s gun [%s] | %s player Matter [%d]",ct_hint(0,CT_LAB_OVERLAY),eqGuns[eq_gun(5)].name,ct_hint(0,CT_LAB_ARM),(int)players[0].matter),12,h-100,fs,SKYBLUE);

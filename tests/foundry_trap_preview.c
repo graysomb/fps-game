@@ -2,10 +2,15 @@
 #include "../fps_ray.c"
 #undef main
 #include <assert.h>
+#include "trap_lab_preview.inc"
 int main(int argc,char **argv) {
     assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(800,500,"Drop slab trigger preview");
     init_pbd_thread_pool();assert(initialize_physics_backend());
+    const char *labCase=getenv("FPS_TRAP_LAB");
+    if(labCase){
+        trap_lab_run_preview(labCase);clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();return 0;
+    }
     activePlayers=0;worldPeriodic=false;worldFloorHalfSize=40;
     gameMode=GAME_MODE_FIREFIGHT;firefightHumans=1;firefightPractice=false;firefightFoundry=true;
     clear_all_chunks();clear_world_voxels();
