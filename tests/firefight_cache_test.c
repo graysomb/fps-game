@@ -41,12 +41,57 @@ static void cache(void){
  fp_tick(.01f);assert(fpCount==count);assert(fp_cache_collect(1));assert(eq_gun(1)==EQ_GLOCK || equipment[1].gun[0]==EQ_GLOCK || equipment[1].gun[1]==EQ_GLOCK);
  assert(!fp_cache_collect(1)); // No automatic duplicate conversion from the cache.
  fp_queue_unlock(PICKUP_GLOB);players[1].pos=fpCachePositions[fp_rule(PICKUP_GLOB)];assert(fp_cache_collect(1));
- fp_queue_unlock(PICKUP_ADHESIVE);players[1].pos=fpCachePositions[fp_rule(PICKUP_ADHESIVE)];assert(fp_cache_collect(1));assert(eq_upgrade(1,EQ_ADHESIVE));assert(!fp_cache_collect(1));
+ fp_queue_unlock(PICKUP_ADHESIVE);players[1].pos=fpCachePositions[fp_rule(PICKUP_ADHESIVE)];assert(!fp_cache_collect(1));fp_tick(.01f);assert(eq_upgrade(1,EQ_ADHESIVE));assert(!fp_cache_collect(1));
  move_away();fp_tick(120);assert(fpCacheReady && (fpUnlocked&(1u<<rule)));
  fp_capture();uint32_t unlocked=fpUnlocked;fp_restore();assert(fpUnlocked==unlocked && fpCacheReady);
  netTransport.role=NET_ROLE_CLIENT;players[0].pos=fpCachePositions[rule];assert(!fp_cache_collect(0));netTransport.role=NET_ROLE_OFFLINE;
  fp_new_run();assert(!fpUnlocked && !fpCacheReady);
  puts("Cache: collected-only unlocks, shared team supplies, manual pickup/replacement, upgrades, checkpoint/reset and authority passed");
+}
+static void supplies_and_glass(void) {
+ fixture(2);
+ int rule=fp_rule(PICKUP_GRENADE);
+ for(int i=0;i<2;i++)players[i].pos=fpCachePositions[rule];
+ fp_tick(.01f);assert(!grenadeInventory[0] && !grenadeInventory[1]);
+ fp_queue_unlock(PICKUP_GRENADE);fp_tick(.01f);
+ assert(grenadeInventory[0]==1 && grenadeInventory[1]==1);
+ grenadeInventory[0]=0;fp_tick(.01f);assert(!grenadeInventory[0]);
+ move_away();fp_tick(.01f);players[0].pos=fpCachePositions[rule];fp_tick(.01f);
+ assert(grenadeInventory[0]==1);
+ int glass=0;bool tested=false;
+ for(int v=0;v<voxel_count;v++)if(spawn_glass(v)){
+  glass++;
+  for(int axis=0;axis<2 && !tested;axis++){
+   Vector3 dir=axis?(Vector3){0,0,1}:(Vector3){1,0,0};
+   Vector3 a=v_sub(voxels[v].pos,dir),b=v_add(voxels[v].pos,dir);
+   VoxelHit hit;
+   if(!first_voxel_hit_detailed((Ray){a,dir},2,-1,true,&hit)||hit.id!=v)continue;
+   if(!first_voxel_hit_detailed((Ray){b,v_mul(dir,-1)},2,-1,true,&hit)||hit.id!=v)continue;
+   assert(!is_view_occluded_by_voxels(a,b));
+   players[4].pos=a;assert(!rifle_view_blocked(4,b));
+   assert(player_aabb_hits_world_ex(voxels[v].pos,.25f,4));
+   tested=true;
+  }
+ }
+ assert(glass>0 && tested);
+ // On a flat arena, cross each opening using the same body sweeps as enemy navigation.
+ clear_world_voxels();init_static_hash();players[0].pos=(Vector3){0,1,0};firefightHumans=1;fp_cache_place();
+ Vector3 low=fpCacheOrigin,high=fpCacheOrigin;
+ for(int v=0;v<voxel_count;v++)if(spawn_glass(v)){low=Vector3Min(low,voxels[v].pos);high=Vector3Max(high,voxels[v].pos);}
+ Vector3 middle=v_mul(v_add(low,high),.5f);middle.y=1;
+ players[4].enemyType=ENEMY_TYPE_STANDARD;players[4].respawn_timer=0;
+ for(int axis=0;axis<2;axis++)for(int side=0;side<2;side++){
+  Vector3 edge=middle,dir=axis?(Vector3){0,0,1}:(Vector3){1,0,0};
+  if(axis)edge.z=side?high.z:low.z;else edge.x=side?high.x:low.x;
+  assert(ai_nav_clear(4,v_sub(edge,dir),v_add(edge,dir)));
+  assert(!first_voxel_hit_detailed((Ray){v_sub(edge,dir),dir},2,-1,true,NULL));
+ }
+ Vector3 wall={low.x,1,low.z+1};
+ players[4].pos=v_add(wall,(Vector3){-1.5f,0,0});Vector3 goal=v_add(wall,(Vector3){2,0,0});
+ assert(!ai_nav_clear(4,players[4].pos,goal));
+ ai_nav_search(4,goal);assert(aiNavigation[4].count>0);
+ assert(Vector3Distance(aiNavigation[4].points[aiNavigation[4].count-1],goal)<1);
+ puts("Walk-up supplies, independent entry latches, glass collision and sight passed");
 }
 static void controller_cache(void){
  fixture(1);debug_console_exec("wave 4");clear_pickups();
@@ -84,7 +129,7 @@ static void console_unlocks(void){
 }
 int main(int argc,char **argv){
  assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Firefight cache regression");init_pbd_thread_pool();assert(initialize_physics_backend());
- timers();duplicates();cache();console_unlocks();controller_cache();
+ timers();duplicates();cache();supplies_and_glass();console_unlocks();controller_cache();
  fixture(1);assert(weapon_renderer_init());fpUnlocked=(1u<<FP_RULE_COUNT)-1;drawViewPlayerIndex=0;
  Camera3D camera={.position=v_add(fpCacheOrigin,(Vector3){13,14,20}),.target=v_add(fpCacheOrigin,(Vector3){0,0,7}),.up={0,1,0},.fovy=55};
  RenderTexture2D preview=LoadRenderTexture(960,540);BeginTextureMode(preview);ClearBackground((Color){25,29,35,255});BeginMode3D(camera);DrawPlane((Vector3){0},(Vector2){80,80},DARKGRAY);fp_draw(WEAPON_COLOR);fp_draw(WEAPON_GLASS);EndMode3D();DrawText("FIREFIGHT SPAWN CACHE",20,20,24,SKYBLUE);EndTextureMode();Image previewImage=LoadImageFromTexture(preview.texture);ImageFlipVertical(&previewImage);ExportImage(previewImage,".build/firefight-cache-preview.png");UnloadImage(previewImage);UnloadRenderTexture(preview);

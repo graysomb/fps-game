@@ -24,7 +24,7 @@ static bool rifle_view_blocked(int i,Vector3 target){
   Vector3 point=target;if(pass)point.y-=.4f;
   Vector3 d=world_delta(point,players[i].pos);float length=v_length(d);
   if(length<=.4f)return false;d=v_mul(d,1/length);VoxelHit hit;
-  if(!rifle_shield_ray((Ray){v_add(players[i].pos,v_mul(d,.2f)),d},length-.4f,-1,i,&hit))return false;
+  if(!first_voxel_hit_filtered_owner((Ray){v_add(players[i].pos,v_mul(d,.2f)),d},length-.4f,-1,false,-1,&hit,NULL,0,i,true))return false;
  }
  return true;
 }

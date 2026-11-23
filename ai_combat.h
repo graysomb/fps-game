@@ -1,3 +1,5 @@
+#define AI_MAX_AWARENESS_DIST 32.0f
+#define AI_FOV_DOT_THRESHOLD  0.50f  // cos(60 deg) -> 120 degree frontal vision cone
 #define AI_PURSUIT_SECONDS 7.0f
 #define SWARMER_CONTACT_DAMAGE 25.0f
 #define SWARMER_RALLY_RADIUS 18.0f
@@ -10,11 +12,12 @@ typedef struct {
     AiAlert source,pendingSource;
     bool visible,wasVisible,initialized;
     double clock,lastFire;
-    float rallyCooldown;
+    float rallyCooldown, sightGrowlHold;
     float memory,commit,overrideDelay,reaction,recovery,tracking,intentTime;
     float aimYaw,aimPitch,goalYaw,goalPitch,aimTimer,error,stuck,jumpDelay;
     uint32_t random;
 } AiCombat;
+static void ai_sighting_audio(int i,bool seen,float dt);
 static AiCombat aiCombat[MAX_COMBATANTS];
 static int shieldEscort[MAX_COMBATANTS]; /* bearer index + 1; zero means unassigned */
 static bool rifle_friendly_shield(int shooter,int voxel);

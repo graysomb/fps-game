@@ -53,6 +53,7 @@ static void fp_snapshot(int peer){
   EnemySpecialState *special=&enemySpecial[i];net_write_u8(&w,special->coreOpen);net_write_u8(&w,special->lostMask);net_write_f32(&w,special->coreHealth);net_write_f32(&w,special->coreMax);
   net_write_f32(&w,special->windup);net_write_f32(&w,special->disabled);net_write_f32(&w,special->healingPulse);net_write_u8(&w,special->state);eq_write_vec(&w,special->aim);eq_write_vec(&w,special->buildOrigin);net_write_u8(&w,special->buildKind);
   net_write_u8(&w,special->equipmentCount);for(int n=0;n<special->equipmentCount;n++){eq_write_vec(&w,special->equipment[n].offset);net_write_u8(&w,special->equipment[n].group);}
+  net_write_f32(&w,p->matterMax);net_write_f32(&w,p->matter_flash_timer);net_write_u8(&w,p->isExposed);
   fp_send(peer,&w,false);
  }
 }
@@ -126,7 +127,13 @@ static bool fp_receive(NetMessageType type,NetReader *r,uint32_t tick){
   if(!isfinite(special.coreHealth)||!isfinite(special.coreMax)||!isfinite(special.windup)||!isfinite(special.disabled)||!isfinite(special.healingPulse)||!v_isfinite(special.aim)||!v_isfinite(special.buildOrigin))return true;
   for(int n=0;n<SWORD_LANES;n++)if(!isfinite(s.stop[n]))return true;
   if(r->failed||enemy>=ENEMY_TYPE_COUNT||life>LIFE_UNUSED||(carrier&&fp_rule(carrier)<0)||e.gun[0]>=EQ_GUN_COUNT||!v_isfinite(pos)||!v_isfinite(vel)||!isfinite(matter)||!isfinite(yaw)||!isfinite(respawn))return true;
-  enemySpecial[i]=special;Player *p=&players[i];p->pos=pos;p->vel=vel;p->yaw=yaw;p->pitch=pitch;p->matter=matter;p->isExposed=matter<=0;p->respawn_timer=respawn;p->enemyType=enemy;
+  float maximum=enemy_matter(enemy),flash=0;bool exposed=matter<=0;
+  if(r->offset<r->length){
+   maximum=net_read_f32(r);flash=net_read_f32(r);int flag=net_read_u8(r);
+   if(r->failed || !isfinite(maximum) || maximum<0 || !isfinite(flash) || flash<0 || flag>1)return true;
+   exposed=flag!=0;
+  }
+  enemySpecial[i]=special;Player *p=&players[i];p->pos=pos;p->vel=vel;p->yaw=yaw;p->pitch=pitch;p->matter=matter;p->matterMax=maximum;p->matter_flash_timer=flash;p->isExposed=exposed;p->respawn_timer=respawn;p->enemyType=enemy;
   p->goldTetherCharged=gold;p->goldTetherHolding=holding;p->netTetherVisualActive=tether;p->netGoldTetherVisualActive=holding;p->netTetherVisualTarget=target;
   combatantLife[i]=life;combatantTeam[i]=1;playerInput[i]=INPUT_TYPE_BOT_EASY;fpCarrierType[i]=carrier;equipment[i]=e;swordWaves[i]=s;swordDirection[i]=s.direction;
   if(s.active){p->swordSwing=true;p->meleeSwingActive=true;p->meleeSwingStartTime=(float)GetTime()-s.age;}else p->meleeSwingActive=false;

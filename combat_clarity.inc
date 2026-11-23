@@ -6,15 +6,38 @@ static float claritySoundLast[MAX_COMBATANTS+1][SFX_COUNT];
 static void clarity_audio_shutdown(void) {
     for(int n=0;n<32;n++)if(clarityVoices[n].sound.frameCount){UnloadSoundAlias(clarityVoices[n].sound);clarityVoices[n]=(ClarityVoice){0};}
 }
+static double lastGrowl=-1, nextWarning;
+static bool warningActive;
+static void update_exposed_audio(void) {
+    bool exposed=false;
+    if(sfxReady && sfxEnabled && gameState==GAME_STATE_PLAYING)
+        for(int i=0;i<activePlayers && i<MAX_PLAYERS;i++)
+            if(net_player_is_local(i) && player_uses_rat(i) && players[i].respawn_timer<=0 &&
+               (gameMode!=GAME_MODE_FIREFIGHT || combatantLife[i]==LIFE_ALIVE) && players[i].isExposed)
+                exposed=true;
+    if(!exposed) {
+        if(warningActive && sfxReady)StopSound(sfxSounds[SFX_EXPOSED]);
+        warningActive=false;
+        return;
+    }
+    double now=GetTime();
+    if(!warningActive || now>=nextWarning) {
+        SetSoundVolume(sfxSounds[SFX_EXPOSED],warningActive?.45f:.85f);
+        play_sfx(SFX_EXPOSED);
+        nextWarning=now+1.25;
+    }
+    warningActive=true;
+}
 static void play_sfx_at(SfxId id,Vector3 pos,int source,int priority,float pitch) {
     if(!sfxReady || !sfxEnabled)return;
     int listener=-1;float distance=30;
-    for(int i=0;i<activePlayers;i++)if(!is_player_bot(i) && players[i].respawn_timer<=0 && (netTransport.role==NET_ROLE_OFFLINE || net_player_is_local(i))) {
+    for(int i=0;i<activePlayers;i++)if(player_uses_rat(i) && players[i].respawn_timer<=0 && (netTransport.role==NET_ROLE_OFFLINE || net_player_is_local(i))) {
         float d=v_length(world_delta(players[i].pos,pos));if(d<distance){distance=d;listener=i;}
     }
     if(listener<0)return;
+    if(id==SFX_SIGHT_GROWL && GetTime()-lastGrowl<.35)return;
     int src=source>=0 && source<MAX_COMBATANTS?source:MAX_COMBATANTS;
-    if(clarityClock-claritySoundLast[src][id]<.12f)return;
+    if(id!=SFX_SIGHT_GROWL && clarityClock-claritySoundLast[src][id]<.12f)return;
     int voice=-1;for(int n=0;n<32;n++)if(!clarityVoices[n].sound.frameCount || !IsSoundPlaying(clarityVoices[n].sound)){voice=n;break;}
     if(voice<0)for(int n=0;n<32;n++)if(clarityVoices[n].priority<priority){voice=n;break;}
     if(voice<0)return;
@@ -23,10 +46,13 @@ static void play_sfx_at(SfxId id,Vector3 pos,int source,int priority,float pitch
     Vector3 delta=world_delta(pos,players[listener].pos),right=v_cross(player_forward(&players[listener]),(Vector3){0,1,0});
     float gain=clampf((30-distance)/27,0,1);VoxelHit hit;
     if(distance>.1f && first_voxel_hit_detailed((Ray){players[listener].pos,v_norm(delta)},distance-.2f,-1,true,&hit))gain*=.4f;
-    SetSoundVolume(v->sound,gain*(id>=SFX_STEP_1 && id<=SFX_STEP_3?.25f:1));SetSoundPan(v->sound,.5f+.45f*v_dot(v_norm(delta),v_norm(right)));
+    SetSoundVolume(v->sound,gain*(id>=SFX_STEP_1 && id<=SFX_STEP_3?.25f:1));SetSoundPan(v->sound,.5f-.45f*v_dot(v_norm(delta),v_norm(right)));
+    if(id==SFX_SIGHT_GROWL)lastGrowl=GetTime();
     SetSoundPitch(v->sound,pitch);PlaySound(v->sound);claritySoundLast[src][id]=clarityClock;
 }
 static void clarity_reset(void) {
+    if(warningActive && sfxReady)StopSound(sfxSounds[SFX_EXPOSED]);
+    warningActive=false;lastGrowl=-1;
     combat_ui_reset();ex_reset();
     for(int n=0;n<32;n++)if(clarityVoices[n].sound.frameCount)StopSound(clarityVoices[n].sound);
     pendingRemainsCount=0;memset(enemyRemains,0,sizeof(enemyRemains));memset(footTravel,0,sizeof(footTravel));memset(footVariant,0,sizeof(footVariant));
@@ -37,6 +63,13 @@ static void clarity_reset(void) {
     for(int i=0;i<MAX_COMBATANTS;i++)grenadeInventory[i]=fp_active()?0:1;
 }
 static void clarity_effect(ClarityEffect e,bool broadcast) {
+    if(e.kind==CLARITY_PLAYER_HURT || e.kind==CLARITY_SIGHT_GROWL) {
+        if(e.kind==CLARITY_SIGHT_GROWL)play_sfx_at(SFX_SIGHT_GROWL,e.pos,e.attacker,2,1);
+        else if(e.attacker>=0 && e.attacker<MAX_PLAYERS && net_player_is_local(e.attacker))
+            play_sfx(SFX_PLAYER_HURT);
+        if(broadcast)clarity_net_event(e);
+        return;
+    }
     if(e.kind==4){play_sfx_at(SFX_SQUEAK,e.pos,e.attacker,2,1);if(broadcast)clarity_net_event(e);return;}
     int slot=0;for(int n=0;n<CLARITY_EFFECTS;n++){if(!clarityEffects[n].id){slot=n;break;}if(clarityEffects[n].age>clarityEffects[slot].age)slot=n;}
     clarityEffects[slot]=e;
@@ -44,6 +77,10 @@ static void clarity_effect(ClarityEffect e,bool broadcast) {
     else if(e.kind==3) play_sfx_at(SFX_SHIELD,e.pos,-1,1,1);
     else play_sfx_at(SFX_EXPLOSION,e.pos,-1,3,1);
     if(broadcast)clarity_net_event(e);
+}
+static void combat_audio_event(int kind,int slot) {
+    if(netTransport.role==NET_ROLE_CLIENT)return;
+    clarity_effect((ClarityEffect){.kind=kind,.id=clarityNextId++,.attacker=slot,.pos=players[slot].pos},true);
 }
 /* Pure presentation: spawn bursts must never allocate recyclable terrain.
    Call only after the actor has its final entrance position. */

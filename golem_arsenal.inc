@@ -154,7 +154,7 @@ static void go_arsenal_draw(void){
         for(int c=0;c<goCount;c++)if(goCells[c].part==p){int v=go_find(goCells[c].id,goCells[c].index);if(v>=0)
             for(int k=0;k<8;k++){box.min=Vector3Min(box.min,voxels[v].particles[k]->pos);box.max=Vector3Max(box.max,voxels[v].particles[k]->pos);}}
         Vector3 at=v_mul(v_add(box.min,box.max),.5f),size=v_add(v_sub(box.max,box.min),(Vector3){.05f,.05f,.05f});
-        Color color=goShields[p].flash>0?WHITE:SKYBLUE;
+        Color color=durability_color(goShields[p].value/go_shield_max(p));
         float recharge=goShields[p].value<go_shield_max(p)&&goFight.time-goShields[p].lastHit>=8&&goShields[p].suppressed<=0?.025f*(1+sinf(goFight.time*4)):0;
         if(goShields[p].value>0)DrawCube(at,size.x,size.y,size.z,Fade(color,.055f+recharge));
         float burst=goShields[p].value<=0?(1-goShields[p].flash/.25f)*.4f:0;

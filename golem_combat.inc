@@ -78,17 +78,18 @@ static bool go_target_valid(int target){
 static Vector3 go_target_center(int target){
     Player *p=ai_target_body(target);return v_add(p->pos,(Vector3){0,-.45f,0});
 }
-static bool go_line_clear(Vector3 a,Vector3 b){
+static bool go_trace_clear(Vector3 a,Vector3 b,bool sight){
     Vector3 d=v_sub(b,a);float distance=v_length(d);if(distance<.01f)return true;
     /* Ignore our own body for AI visibility, but never intact world cover. */
     Ray ray={a,v_mul(d,1/distance)};
     for(int n=0;n<voxel_count;n++){
-        Voxel *v=&voxels[n];if(v->golemOwned||v->isBullet||(!v->vgs_active&&v->simulate))continue;
+        Voxel *v=&voxels[n];if(v->golemOwned||v->isBullet||(!v->vgs_active&&v->simulate)||(sight && spawn_glass(n)))continue;
         float edge=v->rest_edge;Vector3 h={edge*.5f,edge*.5f,edge*.5f};
         RayCollision hit=GetRayCollisionBox(ray,(BoundingBox){v_sub(v->pos,h),v_add(v->pos,h)});
         if(hit.hit&&hit.distance<distance-.3f)return false;
     }return true;
 }
+static bool go_line_clear(Vector3 a,Vector3 b){return go_trace_clear(a,b,false);}
 /* An arena navigation grid, expanded by the body's shoulder clearance.
  * Regenerate on a timer because the arena's structures are destructible. */
 static void go_route(Vector3 target){
@@ -167,6 +168,15 @@ static void go_combat_prepare(float dt){
     }
     if(goCombatDead){goFight.broken=fmaxf(0,goFight.broken-dt);return;}
     go_crush_body_contacts();
+    bool seenHuman=false;
+    for(int h=0;h<firefightHumans && !seenHuman;h++) {
+        if(!player_uses_rat(h) || combatantLife[h]!=LIFE_ALIVE)continue;
+        Vector3 delta=world_delta(players[h].pos,go_core_position());
+        Vector3 facing={-sinf(goFight.yaw*DEG2RAD),0,-cosf(goFight.yaw*DEG2RAD)};
+        seenHuman=v_length(delta)<=AI_MAX_AWARENESS_DIST && v_dot(facing,v_norm(delta))>=AI_FOV_DOT_THRESHOLD &&
+                  go_trace_clear(go_core_position(),players[h].pos,true);
+    }
+    ai_sighting_audio(MAX_PLAYERS,seenHuman,dt);
     go_shields_tick(dt);
     goFight.time+=dt;goFight.elapsed+=dt;goFight.flash=fmaxf(0,goFight.flash-dt);goFight.broken=fmaxf(0,goFight.broken-dt);
     goFight.suppressed=fmaxf(0,goFight.suppressed-dt);goFight.routeTimer-=dt;
@@ -292,9 +302,11 @@ static const char *go_combat_status(void){
 static void go_combat_draw(void){
     if(!goCombatEnabled)return;go_arsenal_draw();Vector3 core=go_core_position();
     if(goCombatDead){if(goFight.broken>0)DrawSphereWires(core,.4f+(1.2f-goFight.broken)*1.5f,6,8,Fade(ORANGE,goFight.broken*.4f));return;}
-    float radius=.52f+.015f*sinf(goFight.time*4);Color color=goFight.flash>0?WHITE:goFight.time-goFight.lastHit>=goShieldDelay&&goFight.suppressed<=0?SKYBLUE:BLUE;
+    float radius=.52f+.015f*sinf(goFight.time*4);
     rlDrawRenderBatchActive();rlDisableDepthMask();
-    if(goFight.shield>0){DrawSphereEx(core,radius,8,12,Fade(color,.08f+.12f*goFight.shield/goShieldMax));DrawSphereWires(core,radius,6,12,Fade(color,.55f));}
+    Color shell=durability_color(goFight.shield>0?goFight.shield/goShieldMax:goFight.health/goCoreMax);
+    DrawSphereEx(core,radius,8,12,Fade(shell,.12f));
+    DrawSphereWires(core,radius,6,12,Fade(shell,goFight.flash>0?.85f:.5f));
     if(goFight.shield>0&&goFight.shield<goShieldMax&&goFight.time-goFight.lastHit>=goShieldDelay&&goFight.suppressed<=0){
         Vector3 ring=core;ring.y+=sinf(goFight.time*4)*.38f;
         DrawCircle3D(ring,.4f,(Vector3){1,0,0},90,SKYBLUE);
@@ -313,9 +325,13 @@ static void go_remote_draw(void){
     rlDrawRenderBatchActive();rlDisableDepthMask();
     for(int p=1;p<GM_COUNT;p++)if(goRemoteParts[p].alive && goRemoteParts[p].shield>0){
         BoundingBox b=goRemoteParts[p].box;Vector3 at=v_mul(v_add(b.min,b.max),.5f),size=v_sub(b.max,b.min);
-        DrawCubeWires(at,size.x+.05f,size.y+.05f,size.z+.05f,Fade(goRemoteParts[p].flash>0?WHITE:SKYBLUE,.6f));
+        Color tint=durability_color(goRemoteParts[p].shield/go_shield_max(p));
+        DrawCube(at,size.x+.05f,size.y+.05f,size.z+.05f,Fade(tint,.055f));
+        DrawCubeWires(at,size.x+.05f,size.y+.05f,size.z+.05f,Fade(tint,goRemoteParts[p].flash>0?.85f:.5f));
     }
-    if(goRemoteShield>0)DrawSphereWires(goRemoteCore,.52f,6,12,SKYBLUE);
+    Color shell=durability_color(goRemoteShield>0?goRemoteShield/goShieldMax:goRemoteHealth/goCoreMax);
+    DrawSphereEx(goRemoteCore,.52f,8,12,Fade(shell,.12f));
+    DrawSphereWires(goRemoteCore,.52f,6,12,Fade(shell,.5f));
     rlDrawRenderBatchActive();rlEnableDepthMask();
     for(int side=0;side<2;side++)if(goRemoteParts[GM_TURRET_L+side].alive){
         BoundingBox b=goRemoteParts[GM_TURRET_L+side].box;Vector3 at=v_mul(v_add(b.min,b.max),.5f),dir=v_norm(v_sub(goRemoteAim,at));

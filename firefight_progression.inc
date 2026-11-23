@@ -214,6 +214,7 @@ static void fp_tick(float dt){
   if(fpItems[n].groundAge>=FP_DROP_SECONDS){fpItems[n].owner=-2;++fpRevision;}
  }
  for(int i=0;i<firefightHumans;i++)if(combatantLife[i]==LIFE_ALIVE){int n=fp_near(i,true);if(n>=0)fp_collect(i,(size_t)n,false);}
+ for(int i=0;i<firefightHumans;i++)fp_cache_walkup(i);
  fpSupplyTimer-=dt;if(fpSupplyTimer<=0){
   fpSupplyTimer=.25f;static size_t cursor=0;
   if(fpCacheReady)for(int r=0;r<FP_RULE_COUNT;r++){FfItem stand={.pos=fpCachePositions[r]};fp_ground(&stand);fpCachePositions[r]=stand.pos;}

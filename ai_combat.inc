@@ -96,7 +96,9 @@ static void ai_tick(int i,float dt) {
     a->intentTime=fmaxf(0,a->intentTime-dt);a->jumpDelay=fmaxf(0,a->jumpDelay-dt);
     bool locked=enemy_is_special(i) && enemySpecial[i].windup>0;
     if(!locked && a->pendingTarget>=0){int target=a->pendingTarget;a->pendingTarget=-1;ai_alert(i,target,a->pendingPosition,a->pendingSource);}
-    int nearest=find_nearest_aware_enemy(i,NULL);
+    bool seenHuman=false;
+    int nearest=find_nearest_aware_enemy(i,NULL,&seenHuman);
+    if(gameMode==GAME_MODE_FIREFIGHT && i>=MAX_PLAYERS)ai_sighting_audio(i,seenHuman,dt);
     float nearestDistance=nearest<0?FLT_MAX:v_length(world_delta(ai_target_body(nearest)->pos,players[i].pos));
     for(int h=0;h<MAX_PLAYERS;h++) {
         int ref=MAX_COMBATANTS+h;float distance;

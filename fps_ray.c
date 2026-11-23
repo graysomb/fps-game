@@ -1909,6 +1909,7 @@ typedef enum {
     SFX_WIN,
     SFX_SHIELD_BREAK,
     SFX_STEP_1, SFX_STEP_2, SFX_STEP_3, SFX_SQUEAK,
+    SFX_PLAYER_HURT, SFX_SIGHT_GROWL, SFX_EXPOSED,
     SFX_COUNT
 } SfxId;
 
@@ -1927,7 +1928,7 @@ static const float sfxCooldowns[SFX_COUNT] = {
     0.1f,  // tether
     0.0f,  // win
     0.1f,  // shield break
-    .08f,.08f,.08f,0
+    .08f,.08f,.08f,0,.15f,0,0
 };
 static const float sfxChances[SFX_COUNT] = {
     1.00f,  // fire
@@ -1942,7 +1943,7 @@ static const float sfxChances[SFX_COUNT] = {
     1.00f,  // tether
     1.00f,  // win
     1.00f,  // shield break
-    1,1,1,1
+    1,1,1,1,1,1,1
 };
 static bool sfxReady = false;
 static float smushBannerTimer = 0.0f;
@@ -2229,6 +2230,32 @@ static Wave make_hologram_squeak(void) {
     }
     return (Wave){.data=data,.frameCount=count,.sampleRate=rate,.sampleSize=16,.channels=1};
 }
+static Wave make_alert_wave(bool growl)
+{
+    const int rate = 44100;
+    int frames = growl ? 15000 : 10000;
+    short *data = calloc(frames, sizeof(*data));
+    if (!data) return (Wave){0};
+    float phase = 0, roughness = 0;
+    for (int n = 0; n < frames; n++) {
+        float t = (float)n / rate;
+        float u = (float)n / frames;
+        float sample;
+        if (growl) {
+            phase += 2*PI*(115 - 56*u + 8*sinf(2*PI*24*t))/rate;
+            roughness += .13f*(randf_range(-1,1) - roughness);
+            sample = sinf(PI*u)*(.34f*sinf(phase) + .16f*sinf(3*phase) + .6f*roughness);
+        } else {
+            bool second = t >= .12f;
+            float pulse = (t - (second ? .12f : 0)) / .09f;
+            float envelope = pulse < 1 ? sinf(PI*pulse) : 0;
+            sample = .48f*envelope*envelope*sinf(2*PI*(second ? 540 : 810)*t);
+        }
+        data[n] = (short)(sample*32767);
+    }
+    return (Wave){.data=data,.frameCount=frames,.sampleRate=rate,.sampleSize=16,.channels=1};
+}
+
 static Wave make_footstep_wave(int variant) {
     Wave w={.frameCount=3969,.sampleRate=44100,.sampleSize=16,.channels=1};
     short *data=calloc(w.frameCount,sizeof(short));if(!data)return (Wave){0};
@@ -2434,6 +2461,12 @@ static void init_sfx(void)
         wave=make_footstep_wave(n);
         sfxSounds[SFX_STEP_1+n]=LoadSoundFromWave(wave);UnloadWave(wave);
     }
+    wave=make_sfx_wave(125,350,.09f,.56f,.42f,32);
+    sfxSounds[SFX_PLAYER_HURT]=LoadSoundFromWave(wave);UnloadWave(wave);
+    wave=make_alert_wave(true);
+    sfxSounds[SFX_SIGHT_GROWL]=LoadSoundFromWave(wave);UnloadWave(wave);
+    wave=make_alert_wave(false);
+    sfxSounds[SFX_EXPOSED]=LoadSoundFromWave(wave);UnloadWave(wave);
     wave=make_hologram_squeak();
     sfxSounds[SFX_SQUEAK]=LoadSoundFromWave(wave);UnloadWave(wave);
     sfxReady = true;
@@ -4026,6 +4059,12 @@ static bool occupied(int x, int y, int z) {
     int idx = table_get(x, y, z);
     if (idx < 0 || idx >= voxel_count) return false;
     return !voxel_is_fluid(&voxels[idx]);
+}
+
+/* The material swatch travels with ordinary static voxels in world snapshots. */
+static const Color spawnGlassColor={112,206,231,60};
+static bool spawn_glass(int id) {
+    return id>=0 && !voxels[id].simulate && ColorIsEqual(voxels[id].color,spawnGlassColor);
 }
 
 static int add_static_voxel_at_grid(int gx, int gy, int gz, Color color, int type)
@@ -10386,7 +10425,11 @@ static void apply_matter_damage(int player_index, int attacker_index, float dama
         return;
     }
     if(damage>0)combat_ui_damage(player_index,attacker_index);
+    float beforeDamage = player->matter;
     player->matter = fmaxf(0.0f, player->matter - damage);
+    if (player_uses_rat(player_index) &&
+        player->matter > 0 && player->matter < beforeDamage)
+        combat_audio_event(CLARITY_PLAYER_HURT, player_index);
     player->matter_flash_timer = 0.2f;
     if(!tetherDrainDamage)play_sfx_at(SFX_IMPACT,player->pos,player_index,1,1);
     if (player->matter <= 0.0f) {
@@ -13553,6 +13596,11 @@ static void voxel_measure_strain(const Voxel *voxel,
 
 #include "skeleton_constraints.inc"
 #include "golem_physics.inc"
+static Color durability_color(float ratio) {
+    Color low={255,56,45,255}, mid={255,179,52,255}, full={55,213,244,255};
+    ratio=clampf(ratio,0,1);
+    return ratio<.5f?ColorLerp(low,mid,ratio*2):ColorLerp(mid,full,ratio*2-1);
+}
 #include "golem_combat.inc"
 #include "tether_coupling.inc"
 #include "physics_gpu_common.inc"
@@ -16263,6 +16311,10 @@ static void draw_player_radar(int player_index, int viewport_w, int viewport_h) 
     DrawCircle(cx, cy, radius_px, fill);
     DrawCircleLines(cx, cy, radius_px, ring);
     DrawCircleLines(cx, cy, radius_px / 2, Fade(ring, 0.5f));
+    float halfAngle = atanf(tanf(aim_fov(player_index)*DEG2RAD*.5f) * viewport_w / viewport_h);
+    float dx = radius_px*sinf(halfAngle), dy = radius_px*cosf(halfAngle);
+    for (int side=-1; side<=1; side+=2)
+        DrawLineEx((Vector2){cx,cy}, (Vector2){cx+side*dx,cy-dy}, 1.5f, (Color){159,219,255,190});
     fp_radar(player_index,cx,cy,radius_px,RADAR_WORLD_RADIUS);
 
     Vector3 forward = player_forward(p);
@@ -16420,7 +16472,7 @@ static bool goliath_armor_ray(Ray ray,float reach,int ignore,int ignore_owner,
 
 static bool first_voxel_hit_filtered_owner(Ray ray, float t_max, int ignore_id,
                                         bool static_only, int ignore_goliath_owner,
-                                        VoxelHit *out_hit,const uint64_t *ignored,int ignore_count,int shield_owner)
+                                        VoxelHit *out_hit,const uint64_t *ignored,int ignore_count,int shield_owner,bool sight)
 {
     float direction_length = v_length(ray.direction);
     if (direction_length <= 1e-8f || t_max < 0.0f) return false;
@@ -16469,7 +16521,7 @@ static bool first_voxel_hit_filtered_owner(Ray ray, float t_max, int ignore_id,
             } else {
                 valid = (v->vgs_active && !v->isBullet && v->type == 0 && !voxel_is_fluid(v));
             }
-            if(v->golemOwned)valid=false;
+            if(v->golemOwned || (sight && spawn_glass(id)))valid=false;
             for(int n=0;valid && n<ignore_count;n++)if(v->identity==ignored[n])valid=false;
             if (valid) {
                 if (out_hit) {
@@ -16503,11 +16555,11 @@ static bool first_voxel_hit_filtered_owner(Ray ray, float t_max, int ignore_id,
     return false;
 }
 
-static bool first_voxel_hit_filtered(Ray ray,float reach,int ignore,bool static_only,int ignore_owner,VoxelHit *hit,const uint64_t *ignored,int count){return first_voxel_hit_filtered_owner(ray,reach,ignore,static_only,ignore_owner,hit,ignored,count,-1);}
-static bool rifle_shield_ray(Ray ray,float reach,int ignore,int owner,VoxelHit *hit){return first_voxel_hit_filtered_owner(ray,reach,ignore,false,-1,hit,NULL,0,owner);}
+static bool first_voxel_hit_filtered(Ray ray,float reach,int ignore,bool static_only,int ignore_owner,VoxelHit *hit,const uint64_t *ignored,int count){return first_voxel_hit_filtered_owner(ray,reach,ignore,static_only,ignore_owner,hit,ignored,count,-1,false);}
+static bool rifle_shield_ray(Ray ray,float reach,int ignore,int owner,VoxelHit *hit){return first_voxel_hit_filtered_owner(ray,reach,ignore,false,-1,hit,NULL,0,owner,false);}
 static bool first_voxel_hit_detailed_ex(Ray ray,float t_max,int ignore_id,bool static_only,int ignore_goliath_owner,VoxelHit *out_hit){
  int owner=ignore_id>=0 && ignore_id<voxel_count && voxels[ignore_id].isBullet?voxels[ignore_id].owner:-1;
- return first_voxel_hit_filtered_owner(ray,t_max,ignore_id,static_only,ignore_goliath_owner,out_hit,NULL,0,owner);
+ return first_voxel_hit_filtered_owner(ray,t_max,ignore_id,static_only,ignore_goliath_owner,out_hit,NULL,0,owner,false);
 }
 
 static bool first_voxel_hit_detailed(Ray ray, float t_max, int ignore_id,
@@ -16647,6 +16699,7 @@ typedef struct {
     BoundingBox bounds;
     Mesh mesh;
     bool mesh_loaded;
+    Mesh glass;
 } VoxelChunk;
 
 static VoxelChunk voxel_chunks[MAX_CHUNKS];
@@ -16775,6 +16828,8 @@ static void clear_all_chunks(void) {
             if (voxel_chunks[i].mesh_loaded && voxel_chunks[i].mesh.vertices) {
                 UnloadMesh(voxel_chunks[i].mesh);
             }
+            if(voxel_chunks[i].glass.vertexCount)UnloadMesh(voxel_chunks[i].glass);
+            voxel_chunks[i].glass=(Mesh){0};
             voxel_chunks[i].mesh = (Mesh){ 0 };
             voxel_chunks[i].mesh_loaded = false;
             voxel_chunks[i].in_use = false;
@@ -16787,6 +16842,9 @@ static uint32_t chunk_face_color(uint32_t colors[CHUNK_SIZE][CHUNK_SIZE][CHUNK_S
     return plane==0?colors[layer][j][i]:plane==1?colors[j][layer][i]:colors[j][i][layer];
 }
 
+static bool chunk_face_visible(int id,int neighbor) {
+    return neighbor<0 || (spawn_glass(neighbor) && !spawn_glass(id));
+}
 static void rebuild_chunk(VoxelChunk *chunk) {
     if(!chunk || !chunk->dirty)return;
     const int minx=chunk->cx*CHUNK_SIZE,miny=chunk->cy*CHUNK_SIZE,minz=chunk->cz*CHUNK_SIZE;
@@ -16804,12 +16862,12 @@ static void rebuild_chunk(VoxelChunk *chunk) {
     if(occupied_count)for(int z=0;z<CHUNK_SIZE;z++)for(int y=0;y<CHUNK_SIZE;y++)for(int x=0;x<CHUNK_SIZE;x++) {
         /* Wrapped neighbors hide seam faces, but only canonical cells own geometry. */
         if(cells[z][y][x]<0 || world_grid(minx+x)!=minx+x || world_grid(minz+z)!=minz+z)continue;
-        if((z>0?cells[z-1][y][x]:table_get_static_only(minx+x,miny+y,minz-1))<0)faces[0][z][y]|=1u<<x;
-        if((z<CHUNK_MASK?cells[z+1][y][x]:table_get_static_only(minx+x,miny+y,minz+CHUNK_SIZE))<0)faces[1][z][y]|=1u<<x;
-        if((y>0?cells[z][y-1][x]:table_get_static_only(minx+x,miny-1,minz+z))<0)faces[2][y][z]|=1u<<x;
-        if((y<CHUNK_MASK?cells[z][y+1][x]:table_get_static_only(minx+x,miny+CHUNK_SIZE,minz+z))<0)faces[3][y][z]|=1u<<x;
-        if((x>0?cells[z][y][x-1]:table_get_static_only(minx-1,miny+y,minz+z))<0)faces[4][x][z]|=1u<<y;
-        if((x<CHUNK_MASK?cells[z][y][x+1]:table_get_static_only(minx+CHUNK_SIZE,miny+y,minz+z))<0)faces[5][x][z]|=1u<<y;
+        if(chunk_face_visible(cells[z][y][x],z>0?cells[z-1][y][x]:table_get_static_only(minx+x,miny+y,minz-1)))faces[0][z][y]|=1u<<x;
+        if(chunk_face_visible(cells[z][y][x],z<CHUNK_MASK?cells[z+1][y][x]:table_get_static_only(minx+x,miny+y,minz+CHUNK_SIZE)))faces[1][z][y]|=1u<<x;
+        if(chunk_face_visible(cells[z][y][x],y>0?cells[z][y-1][x]:table_get_static_only(minx+x,miny-1,minz+z)))faces[2][y][z]|=1u<<x;
+        if(chunk_face_visible(cells[z][y][x],y<CHUNK_MASK?cells[z][y+1][x]:table_get_static_only(minx+x,miny+CHUNK_SIZE,minz+z)))faces[3][y][z]|=1u<<x;
+        if(chunk_face_visible(cells[z][y][x],x>0?cells[z][y][x-1]:table_get_static_only(minx-1,miny+y,minz+z)))faces[4][x][z]|=1u<<y;
+        if(chunk_face_visible(cells[z][y][x],x<CHUNK_MASK?cells[z][y][x+1]:table_get_static_only(minx+CHUNK_SIZE,miny+y,minz+z)))faces[5][x][z]|=1u<<y;
     }
     Patch *result=NULL;int count=0,capacity=0;
     for(int face=0;face<6;face++)for(int layer=0;layer<CHUNK_SIZE;layer++)for(int j=0;j<CHUNK_SIZE;j++) {
@@ -16841,7 +16899,14 @@ static void rebuild_chunk(VoxelChunk *chunk) {
                 .di=width,.dj=height,.col=voxel_display_color(&voxels[voxel]),.voxelIndex=voxel};
         }
     }
-    Mesh replacement=count?build_mesh_from_patches(result,count):(Mesh){0};
+    int opaque=0;
+    for(int n=0;n<count;n++) {
+        if(spawn_glass(result[n].voxelIndex))continue;
+        Patch tmp=result[opaque];result[opaque++]=result[n];result[n]=tmp;
+    }
+    Mesh replacement=opaque?build_mesh_from_patches(result,opaque):(Mesh){0};
+    if(chunk->glass.vertexCount)UnloadMesh(chunk->glass);
+    chunk->glass=count>opaque?build_mesh_from_patches(result+opaque,count-opaque):(Mesh){0};
     free(result);
     if(chunk->mesh_loaded)UnloadMesh(chunk->mesh);
     chunk->mesh=replacement;chunk->mesh_loaded=replacement.vertexCount>0;
@@ -18579,7 +18644,30 @@ static void draw_players(void) {
             if (!drawWeaponModels || !player_has_gun(i)) draw_melee_arm_world(i);
             draw_player_tether_world(i);
         }
-        if (p->matter_flash_timer > 0.0f && !p->isExposed && p->matter > 0.0f) {
+        bool enemyShell=gameMode==GAME_MODE_FIREFIGHT && i>=MAX_PLAYERS;
+        if(enemyShell) {
+            float ratio=p->matter/player_max_matter(p);
+            if(p->enemyType==ENEMY_TYPE_FOUNDRY && enemySpecial[i].coreMax>0) {
+                EnemySpecialState *boss=&enemySpecial[i];
+                ratio=enemy_core_open(i)?boss->coreHealth/boss->coreMax:(boss->lostMask?.5f:1);
+            }
+            Color tint=durability_color(p->isExposed?0:ratio);
+            float pulse=p->isExposed?.12f*(1+sinf((float)GetTime()*6)):0;
+            float hit=clampf(p->matter_flash_timer/.2f,0,1);
+            Vector3 extent={body_size+.12f,body_size+.12f,body_size+.12f};
+            Vector3 shellCenter=render_pos;
+            // Extend the body shell over each chassis' distinctive silhouette.
+            if(p->enemyType==ENEMY_TYPE_SCRAPPER){extent.z+=.24f;shellCenter.z+=.12f;}
+            if(p->enemyType==ENEMY_TYPE_SAPPER || p->enemyType==ENEMY_TYPE_LOBBER){
+                extent.y+=.4f;shellCenter.y+=.2f;
+            }
+            if(p->enemyType==ENEMY_TYPE_ANCHOR){extent.y+=.65f;shellCenter.y+=.325f;}
+            rlDrawRenderBatchActive();rlDisableDepthMask();
+            DrawCubeV(shellCenter,extent,Fade(tint,.09f+pulse*.4f));
+            DrawCubeWiresV(shellCenter,extent,Fade(tint,.32f+.45f*hit+pulse));
+            rlDrawRenderBatchActive();rlEnableDepthMask();
+        }
+        if (!enemyShell && p->matter_flash_timer > 0.0f && !p->isExposed && p->matter > 0.0f) {
             float flash = clampf(p->matter_flash_timer / 0.2f, 0.0f, 1.0f);
             float pulse = 0.5f + 0.5f * sinf((float)GetTime() * 8.0f);
             unsigned char alpha = (unsigned char)clampf(80.0f + 120.0f * flash * pulse, 60.0f, 210.0f);
@@ -18589,7 +18677,7 @@ static void draw_players(void) {
             DrawCubeWires(render_pos, body_size + 0.2f, body_size + 0.2f, body_size + 0.2f,
                           Fade(shield_color, 0.8f));
         }
-        if (p->isExposed) {
+        if (!enemyShell && p->isExposed) {
             float pulse = 0.5f + 0.5f * sinf((float)GetTime() * 6.0f);
             unsigned char alpha = (unsigned char)clampf(120.0f + 80.0f * pulse, 90.0f, 220.0f);
             Color exposed_color = (Color){ 220, 60, 60, alpha };
@@ -18874,8 +18962,6 @@ typedef enum {
     BOT_INTENT_FLEE
 } BotIntent;
 
-#define AI_MAX_AWARENESS_DIST 32.0f
-#define AI_FOV_DOT_THRESHOLD  0.50f  // cos(60 deg) -> 120 degree frontal vision cone
 #define SWARMER_HOP_INTERVAL 5.0f
 #define SWARMER_WANDER_MAX_STEP 5.0f
 #define SWARMER_WANDER_MAX_PAUSE 0.8f
@@ -18927,7 +19013,7 @@ static bool ray_hit_solid_voxel(Ray ray, float t_max) {
         if (id >= 0 && id < voxel_count) {
             Voxel *v = &voxels[id];
             bool solid = (!v->simulate || (v->vgs_active && !v->isBullet && v->type == 0 && !voxel_is_fluid(v)));
-            if (solid && get_goliath_owner_of_voxel(id) < 0 && tetherTag[id] <= 0) {
+            if (solid && !spawn_glass(id) && get_goliath_owner_of_voxel(id) < 0 && tetherTag[id] <= 0) {
                 return true;
             }
         }
@@ -19069,12 +19155,20 @@ static bool check_ai_awareness_of_player(int botIdx, int targetIdx, float *out_d
     return true; // All 3 checks passed! AI is aware of player
 }
 
-static int find_nearest_aware_enemy(int playerIdx, float *out_dist_sq) {
+static void ai_sighting_audio(int i,bool seen,float dt) {
+    float *hold=&aiCombat[i].sightGrowlHold;
+    if(seen && *hold<=0)combat_audio_event(CLARITY_SIGHT_GROWL,i);
+    *hold=seen?3:fmaxf(0,*hold-dt);
+}
+static int find_nearest_aware_enemy(int playerIdx, float *out_dist_sq,bool *seenHuman) {
     int bestEnemy = -1;
     float minDistSq = FLT_MAX;
     for (int i = 0; i < activePlayers; i++) {
         float dist = 0.0f;
         if (check_ai_awareness_of_player(playerIdx, i, &dist)) {
+            if(seenHuman && player_uses_rat(i) && combatantLife[i]==LIFE_ALIVE &&
+               v_dot(player_forward(&players[playerIdx]),v_norm(world_delta(players[i].pos,players[playerIdx].pos)))>=AI_FOV_DOT_THRESHOLD)
+                *seenHuman=true;
             float d2 = dist * dist;
             if (d2 < minDistSq) {
                 minDistSq = d2;
@@ -20830,6 +20924,13 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 draw_players();
                 if (drawWeaponModels) draw_remote_weapon_glass(i, imageCam.position);
                 draw_rat_visors(i,imageCam.position);
+                rlDrawRenderBatchActive();rlDisableDepthMask();
+                for(int c=0;c<voxel_chunk_count;c++) {
+                    VoxelChunk *chunk=&voxel_chunks[c];
+                    if(chunk->in_use && chunk->glass.vertexCount)
+                        DrawMesh(chunk->glass,greedyMaterial,MatrixIdentity());
+                }
+                rlDrawRenderBatchActive();rlEnableDepthMask();
                 draw_pickup_models(imageCam,WEAPON_GLASS);fp_draw(WEAPON_GLASS);
                 camp_draw(imageCam,false);
                 drawViewPlayerIndex = -1;
@@ -21304,7 +21405,7 @@ static bool run_ai_awareness_smoke_test(void) {
     }
 
     // 5. Test find_nearest_aware_enemy
-    int awareEnemy = find_nearest_aware_enemy(0, NULL);
+    int awareEnemy = find_nearest_aware_enemy(0, NULL,NULL);
     if (awareEnemy != 1) {
         fprintf(stderr, "ai-smoke FAIL: find_nearest_aware_enemy should return 1, got %d!\n", awareEnemy);
         return false;
@@ -21615,6 +21716,7 @@ int main(int argc, char **argv) {
 #endif
         ct_frame(GetFrameTime());
         update_game_music();
+        update_exposed_audio();
         voxel_ca_update(GetTime());
         voxel_render_frame++;
         nightSkyTime=GetTime();
