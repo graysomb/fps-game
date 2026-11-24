@@ -13659,6 +13659,19 @@ static Color durability_color(float ratio) {
     ratio=clampf(ratio,0,1);
     return ratio<.5f?ColorLerp(low,mid,ratio*2):ColorLerp(mid,full,ratio*2-1);
 }
+// Keep a red floor under the pulse so the depleted state reads between hits.
+static Color depleted_shield_color(void) { return (Color){255,18,38,255}; }
+static float depleted_shield_pulse(void) { return .5f+.5f*sinf((float)GetTime()*6); }
+static void draw_depleted_box(Vector3 center, Vector3 size) {
+    Color red=depleted_shield_color();
+    float pulse=depleted_shield_pulse();
+    DrawCubeV(center,size,Fade(red,.35f+.14f*pulse));
+    DrawCubeWiresV(center,size,Fade(red,.90f+.10f*pulse));
+    // A solid band stays legible at ranges where a one-pixel outline disappears.
+    Vector3 band=center;
+    band.y-=size.y*.33f;
+    DrawCube(band,size.x*1.012f,size.y*.085f,size.z*1.012f,Fade(red,.88f));
+}
 #include "golem_combat.inc"
 #include "tether_coupling.inc"
 #include "physics_gpu_common.inc"
@@ -18730,8 +18743,9 @@ static void draw_players(void) {
                 EnemySpecialState *boss=&enemySpecial[i];
                 ratio=enemy_core_open(i)?boss->coreHealth/boss->coreMax:(boss->lostMask?.5f:1);
             }
-            Color tint=durability_color(p->isExposed?0:ratio);
-            float pulse=p->isExposed?.12f*(1+sinf((float)GetTime()*6)):0;
+            bool depleted=p->isExposed || ratio<=0;
+            if(p->enemyType==ENEMY_TYPE_FOUNDRY && enemySpecial[i].coreMax>0)
+                depleted=enemy_core_open(i);
             float hit=clampf(p->matter_flash_timer/.2f,0,1);
             Vector3 extent={body_size+.12f,body_size+.12f,body_size+.12f};
             Vector3 shellCenter=render_pos;
@@ -18742,8 +18756,12 @@ static void draw_players(void) {
             }
             if(p->enemyType==ENEMY_TYPE_ANCHOR){extent.y+=.65f;shellCenter.y+=.325f;}
             rlDrawRenderBatchActive();rlDisableDepthMask();
-            DrawCubeV(shellCenter,extent,Fade(tint,.09f+pulse*.4f));
-            DrawCubeWiresV(shellCenter,extent,Fade(tint,.32f+.45f*hit+pulse));
+            if(depleted) draw_depleted_box(shellCenter,extent);
+            else {
+                Color tint=durability_color(ratio);
+                DrawCubeV(shellCenter,extent,Fade(tint,.09f));
+                DrawCubeWiresV(shellCenter,extent,Fade(tint,.32f+.45f*hit));
+            }
             rlDrawRenderBatchActive();rlEnableDepthMask();
         }
         if (!enemyShell && p->matter_flash_timer > 0.0f && !p->isExposed && p->matter > 0.0f) {

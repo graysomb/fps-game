@@ -299,14 +299,21 @@ static const char *go_combat_status(void){
     const char *state[]={"seeking","approaching","WINDUP","ATTACK","recovering","KNEEL / CORE OPEN","DEFEATED"};
     return state[goFight.state];
 }
+static void go_draw_core_shell(Vector3 core,float radius,float shield,float health,float rimAlpha){
+    Color shell=durability_color(shield>0?shield/goShieldMax:health/goCoreMax);
+    DrawSphereEx(core,radius,8,12,Fade(shell,.12f));
+    if(shield<=0){
+        Color red=depleted_shield_color();
+        DrawSphereEx(core,radius+.025f,8,12,Fade(red,.32f+.14f*depleted_shield_pulse()));
+        DrawSphereWires(core,radius+.025f,6,12,Fade(red,.95f));
+    }else DrawSphereWires(core,radius,6,12,Fade(shell,rimAlpha));
+}
 static void go_combat_draw(void){
     if(!goCombatEnabled)return;go_arsenal_draw();Vector3 core=go_core_position();
     if(goCombatDead){if(goFight.broken>0)DrawSphereWires(core,.4f+(1.2f-goFight.broken)*1.5f,6,8,Fade(ORANGE,goFight.broken*.4f));return;}
     float radius=.52f+.015f*sinf(goFight.time*4);
     rlDrawRenderBatchActive();rlDisableDepthMask();
-    Color shell=durability_color(goFight.shield>0?goFight.shield/goShieldMax:goFight.health/goCoreMax);
-    DrawSphereEx(core,radius,8,12,Fade(shell,.12f));
-    DrawSphereWires(core,radius,6,12,Fade(shell,goFight.flash>0?.85f:.5f));
+    go_draw_core_shell(core,radius,goFight.shield,goFight.health,goFight.flash>0?.85f:.5f);
     if(goFight.shield>0&&goFight.shield<goShieldMax&&goFight.time-goFight.lastHit>=goShieldDelay&&goFight.suppressed<=0){
         Vector3 ring=core;ring.y+=sinf(goFight.time*4)*.38f;
         DrawCircle3D(ring,.4f,(Vector3){1,0,0},90,SKYBLUE);
@@ -323,15 +330,14 @@ static void go_combat_draw(void){
 static void go_remote_draw(void){
     if(!goRemoteActive || goRemoteDead)return;
     rlDrawRenderBatchActive();rlDisableDepthMask();
-    for(int p=1;p<GM_COUNT;p++)if(goRemoteParts[p].alive && goRemoteParts[p].shield>0){
+    for(int p=1;p<GM_COUNT;p++)if(p!=GM_CORE && goRemoteParts[p].alive){
         BoundingBox b=goRemoteParts[p].box;Vector3 at=v_mul(v_add(b.min,b.max),.5f),size=v_sub(b.max,b.min);
+        if(goRemoteParts[p].shield<=0){draw_depleted_box(at,v_add(size,(Vector3){.05f,.05f,.05f}));continue;}
         Color tint=durability_color(goRemoteParts[p].shield/go_shield_max(p));
         DrawCube(at,size.x+.05f,size.y+.05f,size.z+.05f,Fade(tint,.055f));
         DrawCubeWires(at,size.x+.05f,size.y+.05f,size.z+.05f,Fade(tint,goRemoteParts[p].flash>0?.85f:.5f));
     }
-    Color shell=durability_color(goRemoteShield>0?goRemoteShield/goShieldMax:goRemoteHealth/goCoreMax);
-    DrawSphereEx(goRemoteCore,.52f,8,12,Fade(shell,.12f));
-    DrawSphereWires(goRemoteCore,.52f,6,12,Fade(shell,.5f));
+    go_draw_core_shell(goRemoteCore,.52f,goRemoteShield,goRemoteHealth,.5f);
     rlDrawRenderBatchActive();rlEnableDepthMask();
     for(int side=0;side<2;side++)if(goRemoteParts[GM_TURRET_L+side].alive){
         BoundingBox b=goRemoteParts[GM_TURRET_L+side].box;Vector3 at=v_mul(v_add(b.min,b.max),.5f),dir=v_norm(v_sub(goRemoteAim,at));

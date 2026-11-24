@@ -149,15 +149,16 @@ static void go_arsenal_draw(void){
         DrawCylinderEx(mouth,v_add(mouth,v_mul(dir,.03f)),.16f,.16f,8,goArsenal.rocketWindup>0?ORANGE:BLACK);
     }
     rlDrawRenderBatchActive();rlDisableDepthMask();
-    for(int p=1;p<GM_COUNT;p++)if(p!=GM_CORE&&(goShields[p].value>0||goShields[p].flash>0)&&go_part_alive(p)){
+    for(int p=1;p<GM_COUNT;p++)if(p!=GM_CORE&&go_part_alive(p)){
         BoundingBox box={{FLT_MAX,FLT_MAX,FLT_MAX},{-FLT_MAX,-FLT_MAX,-FLT_MAX}};
         for(int c=0;c<goCount;c++)if(goCells[c].part==p){int v=go_find(goCells[c].id,goCells[c].index);if(v>=0)
             for(int k=0;k<8;k++){box.min=Vector3Min(box.min,voxels[v].particles[k]->pos);box.max=Vector3Max(box.max,voxels[v].particles[k]->pos);}}
         Vector3 at=v_mul(v_add(box.min,box.max),.5f),size=v_add(v_sub(box.max,box.min),(Vector3){.05f,.05f,.05f});
         Color color=durability_color(goShields[p].value/go_shield_max(p));
         float recharge=goShields[p].value<go_shield_max(p)&&goFight.time-goShields[p].lastHit>=8&&goShields[p].suppressed<=0?.025f*(1+sinf(goFight.time*4)):0;
-        if(goShields[p].value>0)DrawCube(at,size.x,size.y,size.z,Fade(color,.055f+recharge));
-        float burst=goShields[p].value<=0?(1-goShields[p].flash/.25f)*.4f:0;
+        if(goShields[p].value<=0)draw_depleted_box(at,size);
+        else DrawCube(at,size.x,size.y,size.z,Fade(color,.055f+recharge));
+        float burst=goShields[p].value<=0 && goShields[p].flash>0?(1-goShields[p].flash/.25f)*.4f:0;
         DrawCubeWires(at,size.x+burst,size.y+burst,size.z+burst,Fade(color,goShields[p].value<=0?goShields[p].flash*3:.25f+.4f*goShields[p].value/go_shield_max(p)));
     }
     if(goArsenal.rocketWindup>0)DrawSphereWires(go_part_center(GOLEM_HEAD),.6f,6,10,ORANGE);
