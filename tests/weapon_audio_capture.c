@@ -58,15 +58,63 @@ static void second_weapon_sequence(int tick,bool prototype)
     }
 }
 
+// Alternating launch sounds share the same cadence. The sword contacts are
+// resolved by its normal sweep, including the miss in the empty first scene.
+static void third_weapon_sequence(int tick,bool prototype)
+{
+    Player *p=&players[0];
+    Equipment *e=&equipment[0];
+    if (tick==0) {
+        init_static_hash();
+        p->last_shot_time=p->last_melee_time=-10;
+        p->matter=p->matterMax=100;
+    }
+    bool burst=tick>=18 && tick<=58 && (tick-18)%10==0;
+    bool alternating=tick>=96 && tick<=246 && (tick-96)%30==0;
+    if (burst || alternating) {
+        bool voxel=alternating && ((tick-96)/30)%2;
+        e->gun[e->selected]=voxel ? EQ_VOXEL : EQ_DEFAULT;
+        p->dynamicShotActive=voxel;
+        p->pitch=voxel ? -15 : 12;
+        p->yaw=voxel ? -45 : 0;
+        assert(FireVoxel(0));
+        p->yaw=p->pitch=0;
+    }
+    if (tick<282 && voxel_count) {
+        update_projectiles(1.f/60);
+        simulate_voxel_pbd_steps(1.f/60,1);
+        handle_pbd_projectile_hits();
+    }
+    if (tick==282 || tick==386 || tick==490) {
+        clear_world_voxels();init_static_hash();
+        if (tick==386) add_static_box_at_grid(-2,2,2,6,-5,-5,GRAY);
+        if (tick==490) {
+            activePlayers=5;
+            for (int i=1;i<4;i++)players[i].respawn_timer=9999;
+            enemy_lab_spawn(4,ENEMY_TYPE_STANDARD,(Vector3){0,2,-2.5f});
+        }
+        rebuild_voxel_hash();
+        e->gun[e->selected]=EQ_BLADE;
+        assert(eq_fire(0));
+    }
+    eq_sword_tick(1.f/60);
+    if (prototype && tick==570) {
+        assert(labTake[LAB_DEFAULT]==8 && labTake[LAB_VOXEL]==3 && labTake[LAB_FRACTURE]==3);
+        assert(labTake[LAB_SWISH]==3 && labTake[LAB_SHEAR]==1 && labTake[LAB_STRIKE]==1);
+    }
+}
+
 int main(int argc,char **argv)
 {
-    assert(argc==3 || (argc==4 && !strcmp(argv[3],"second")));
-    bool second=argc==4;
-    int seconds=second ? 10 : SECONDS;
+    assert(argc==3 || (argc==4 && (!strcmp(argv[3],"second") || !strcmp(argv[3],"third"))));
+    bool second=argc==4 && !strcmp(argv[3],"second");
+    bool third=argc==4 && !second;
+    int seconds=argc==4 ? 10 : SECONDS;
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
     InitWindow(320,240,"Weapon Lab capture");
     SetRandomSeed(1835);
     srand(1835);
+    if (third) {init_pbd_thread_pool();assert(initialize_physics_backend());}
     init_sfx();
     assert(IsAudioDeviceReady());
     gameState=GAME_STATE_PLAYING;
@@ -86,6 +134,7 @@ int main(int argc,char **argv)
     for(int tick=0;tick<seconds*60;tick++){
         while(atomic_load(&recorded)<tick*(RATE/60)) WaitTime(.001);
         clarityClock=1+tick/60.f;
+        if(third){third_weapon_sequence(tick,prototype);continue;}
         if(second){second_weapon_sequence(tick,prototype);continue;}
         Equipment *e=&equipment[0];
         bool shotgun=tick==24 || (tick>=384 && tick<=480 && (tick-384)%48==0) || tick==990;
@@ -124,9 +173,10 @@ int main(int argc,char **argv)
     while(atomic_load(&recorded)<seconds*RATE)WaitTime(.001);
     DetachAudioMixedProcessor(capture);
     assert(fabs(GetTime()-started-seconds)<.35);
-    if(prototype && !second)assert(labTake[LAB_SPLAT]==labTake[LAB_GLOB] && labTake[LAB_GLOB]==15);
+    if(prototype && !second && !third)assert(labTake[LAB_SPLAT]==labTake[LAB_GLOB] && labTake[LAB_GLOB]==15);
     FILE *file=fopen(argv[2],"wb");assert(file);
     size_t samples=(size_t)seconds*RATE*2;
     assert(fwrite(reel,sizeof(float),samples,file)==samples);fclose(file);
+    if (third) {clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();}
     shutdown_sfx();CloseWindow();
 }

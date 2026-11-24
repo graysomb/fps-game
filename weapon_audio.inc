@@ -47,7 +47,7 @@ static void lab_lightning_reverb(short *pcm, unsigned frames, int take)
 
 static Wave lab_voice_wave(int voice, int take)
 {
-    const float lengths[] = {.40f, .85f, .19f, .21f, .24f, .76f, .28f, .14f};
+    const float lengths[] = {.40f, .85f, .19f, .21f, .24f, .76f, .28f, .14f, .09f, .22f, .16f, .20f, .21f, .13f};
     unsigned frames = (unsigned)(lengths[voice] * LAB_RATE);
     short *pcm = MemAlloc(frames * sizeof(*pcm));
     if (!pcm) return (Wave){0};
@@ -78,6 +78,28 @@ static Wave lab_voice_wave(int voice, int take)
         } else if (voice == LAB_GLOB) {
             float phase = 2*PI*(105*t + 5.1f*(1-expf(-54*t)));
             y = .59f * (sinf(phase) + .21f*sinf(2*phase)) * expf(-(34+variation*25)*t);
+        } else if (voice == LAB_DEFAULT) {
+            float phase=2*PI*(760*t + 1.8f*(1-expf(-155*t)));
+            y=(.37f*sinf(phase)+.19f*sinf(2.7f*phase))*expf(-66*t)
+              + .56f*(noise-low)*expf(-215*t);
+        } else if (voice == LAB_VOXEL) {
+            float latch=t-(.027f+variation*.04f);
+            y=(.48f*noise+.25f*sinf(2*PI*810*t))*expf(-125*t);
+            if (latch>0) y+=(1.2f*low+.41f*sinf(2*PI*165*latch)+.18f*sinf(2*PI*376*latch))*expf(-51*latch);
+        } else if (voice == LAB_FRACTURE) {
+            float chip=t-(.016f+variation*.05f);
+            y=(1.04f*(noise-low)+.24f*sinf(2*PI*2701*t))*expf(-111*t);
+            if (chip>0) y+=(.56f*noise+.18f*sinf(2*PI*1897*chip))*expf(-85*chip);
+        } else if (voice == LAB_SWISH) {
+            float phase=2*PI*(410*t+2850*t*t);
+            float sweep=t/.044f;
+            y=sweep*expf(1-sweep)*(.61f*low+.12f*sinf(phase)+.11f*noise);
+        } else if (voice == LAB_SHEAR) {
+            float grit=.55f+.30f*sinf(2*PI*(117*t+440*t*t));
+            y=(grit*(noise-low)+.24f*sinf(2*PI*(1117*t+1210*t*t)))*expf(-24*t);
+        } else if (voice == LAB_STRIKE) {
+            y=(1.45f*low+.52f*sinf(2*PI*134*t)+.20f*sinf(2*PI*328*t))*expf(-47*t)
+              + .52f*noise*expf(-164*t);
         } else if (voice == LAB_LAUNCH || voice == LAB_BOOM) {
             bool blast = voice == LAB_BOOM;
             railRumble += .035f*(low-railRumble);

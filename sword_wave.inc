@@ -75,6 +75,8 @@ static void sword_step(int owner,SwordWave *w,float previous){
                 if(w->cuts>=EQ_SWORD_CUTS || !sword_cut_hit(owner,w,hit)){
                     end=fmaxf(begin,distance-.002f);w->stop[lane]=fminf(w->stop[lane],end);break;
                 }
+                if (!w->cuts && labPrototype && lab_audio_available())
+                    lab_play_voice(LAB_SHEAR,v_add(origin,v_mul(d,distance)),owner);
                 w->cuts++;
                 if(!w->rewarded){if(players[owner].respawn_timer<=0)add_player_matter(&players[owner],ff_harvest_amount(owner));w->rewarded=true;}
                 // Re-query from this point after compaction; overlapping equipment can share a cell.
@@ -93,6 +95,7 @@ static void sword_step(int owner,SwordWave *w,float previous){
             if(hit.hit && hit.distance>=0 && hit.distance<=end-begin){
                 VoxelHit shield;float centerDistance=v_length(world_delta(players[j].pos,ray.position));
                 if(sword_trace(w,ray,centerDistance,&shield))continue;
+                if (labPrototype && lab_audio_available()) lab_play_voice(LAB_STRIKE,hit.point,owner);
                 w->hit[j]=true;eq_damage(owner,j,eqSwordDamage,true,DEATH_SWORD,w->origin);
             }
         }
@@ -107,7 +110,8 @@ static void eq_sword_tick(float dt){
             float step=fminf(left,1.f/120),previous=w->age;left-=step;w->age=fminf(SWORD_ANIM_SECONDS,w->age+step);
             if(!w->emitted && w->age>=SWORD_EMIT_SECONDS){
                 w->emitted=true;w->origin=world_wrap(players[i].pos);w->forward=player_forward(&players[i]);
-                play_sfx_at(SFX_MELEE,w->origin,i,1,.7f);
+                if (labPrototype && lab_audio_available()) lab_play_voice(LAB_SWISH,w->origin,i);
+                else play_sfx_at(SFX_MELEE,w->origin,i,1,.7f);
             }
             if(w->emitted && netTransport.role!=NET_ROLE_CLIENT)sword_step(i,w,previous);
             if(w->age>=SWORD_ANIM_SECONDS-1e-6f){w->age=SWORD_ANIM_SECONDS;

@@ -1177,6 +1177,7 @@ typedef struct {
     bool cutDetached; // Sword debris remains physical but cannot weld the cut closed.
     bool pendingActivation;
     bool isBullet;
+    bool labImpactPending;
     bool goliathProjectile;
     Vector3 shotOrigin;
     uint32_t towerTag;
@@ -1903,7 +1904,8 @@ static Music gameMusic;
 static bool gameMusicReady = false;
 static bool gameMusicPlaying = false;
 
-enum { LAB_SHOTGUN, LAB_RAIL, LAB_GLOB, LAB_SPLAT, LAB_LAUNCH, LAB_BOOM, LAB_DMR, LAB_GLOCK, LAB_VOICE_COUNT };
+enum { LAB_SHOTGUN, LAB_RAIL, LAB_GLOB, LAB_SPLAT, LAB_LAUNCH, LAB_BOOM, LAB_DMR, LAB_GLOCK,
+       LAB_DEFAULT, LAB_VOXEL, LAB_FRACTURE, LAB_SWISH, LAB_SHEAR, LAB_STRIKE, LAB_VOICE_COUNT };
 enum { LAB_VARIANTS = 4 };
 typedef enum {
     SFX_FIRE = 0,
@@ -4666,6 +4668,7 @@ static bool init_voxel_struct(Voxel *v,
     v->cutDetached = false;
     v->pendingActivation = false;
     v->isBullet = false;
+    v->labImpactPending = false;
     v->goliathProjectile = false;
     v->shotOrigin=v->pos;
     v->towerTag=0;
@@ -10798,6 +10801,38 @@ static bool dynamic_voxel_glued_to_static(int voxel_idx)
     return glue_cluster_has_static_support(glueClusterIndices, cluster_count);
 }
 
+static bool lab_audio_available(void);
+static void lab_play_voice(int voice,Vector3 pos,int source);
+
+static void lab_voxel_contact(Voxel *v, Vector3 pos)
+{
+    v->labImpactPending=false;
+    if (labPrototype && lab_audio_available()) lab_play_voice(LAB_FRACTURE,world_wrap(pos),v->owner);
+}
+
+static void lab_check_voxel_landing(int index)
+{
+    Voxel *v=&voxels[index];
+    if (!labPrototype || !lab_audio_available()) {v->labImpactPending=false;return;}
+    for (int n=0;n<8;n++) {
+        Particle *p=v->particles[n];
+        if (!p) continue;
+        if (p->pos.y <= fmaxf(0,.5f*VOXEL_SIZE-p->radius)+.01f) {
+            lab_voxel_contact(v,(Vector3){p->pos.x,0,p->pos.z});
+            return;
+        }
+        Vector3 travel=world_delta(p->pos,p->prev_pos);
+        float distance=v_length(travel);
+        if (distance<=1e-5f) continue;
+        Ray ray={p->prev_pos,v_mul(travel,1/distance)};
+        VoxelHit hit;
+        if (first_swept_voxel_hit(ray,distance+p->radius,index,&hit)) {
+            lab_voxel_contact(v,v_add(ray.position,v_mul(ray.direction,hit.t)));
+            return;
+        }
+    }
+}
+
 static void handle_pbd_projectile_hits(void)
 {
     foundry_traps_hits();
@@ -10807,6 +10842,7 @@ static void handle_pbd_projectile_hits(void)
     int i = 0;
     while (i < voxel_count) {
         Voxel *v = &voxels[i];
+        if(v->labImpactPending)lab_check_voxel_landing(i);
         if(v->simulate && !v->sleeping && !voxel_is_fluid(v))
             ducks_segment(v_sub(v->pos,v_mul(v->vel,PBD_MAX_STEP_DT)),v->pos,v->rest_edge*.6f,i);
         if(v->foundryTrapHeavy){++i;continue;}
@@ -10879,6 +10915,7 @@ static void handle_pbd_projectile_hits(void)
                              j, attacker, i);
                     --debugSmushLogBudget;
                 }
+                if(v->labImpactPending)lab_voxel_contact(v,v->pos);
                 play_sfx(SFX_SMUSH);
                 int cluster_count = build_glue_cluster_indices(i, glueClusterIndices);
                 if (cluster_count < 1) {
@@ -14217,6 +14254,7 @@ static bool spawn_default_projectile(int idx,Vector3 start,Vector3 dir,bool dyna
         shot->shotOrigin=start;
         shot->activator = idx;
         shot->isBullet = !dynamic;
+        shot->labImpactPending = dynamic && labPrototype && lab_audio_available() && !is_player_bot(idx);
         shot->glueEligible = dynamic;
         shot->simulate = true;
         shot->activationBelief = dynamic ? 1.0f : ACTIVATION_TYPE0_BULLET_BELIEF;
@@ -14257,7 +14295,9 @@ static bool FireVoxel(int idx) {
         p->matter=fmaxf(0,p->matter-MATTER_SHOT_COST);p->isExposed=p->matter<=0;
         if(is_player_bot(idx))ai_shot_fired(idx);
         ai_gunfire(idx,p->pos);
-        play_sfx_at(SFX_FIRE,p->pos,idx,1,1);
+        if (labPrototype && lab_audio_available() && !is_player_bot(idx))
+            lab_play_voice(dynamic_shot ? LAB_VOXEL : LAB_DEFAULT,p->pos,idx);
+        else play_sfx_at(SFX_FIRE,p->pos,idx,1,1);
         weapon_visual_shot(&weaponVisuals[idx], now);
     }
     if(vix>=0)p->last_shot_time = now;
