@@ -52,6 +52,31 @@ static void arsenal_tests(void){
     puts("Independent shields, regen delay, drain lock, turret bursts, head rocket and shared gold tether passed");
 }
 
+static void rocket_shadow_test(void){
+    fixture();
+    int hand=GOLEM_HAND_R;
+    for(int p=1;p<GM_COUNT;p++)goShields[p].value=p==hand?10:0;
+    RocketLimbBounds bounds={0};rocket_limb_bounds(&bounds);assert(bounds.present[hand]);
+    BoundingBox box=bounds.box[hand];Vector3 size=v_sub(box.max,box.min);
+    int axis=size.y<size.x?1:0;if(size.z<(&size.x)[axis])axis=2;
+    Vector3 dir={0};(&dir.x)[axis]=1;
+    Vector3 face=v_mul(v_add(box.min,box.max),.5f);
+    (&face.x)[axis]=(&box.min.x)[axis];
+    Vector3 rear=v_add(face,v_mul(dir,(&size.x)[axis]+.3f));
+    assert(Vector3Distance(face,rear)<4);
+    int rearId=addVoxel(rear.x,rear.y,rear.z,false,true,GRAY,0);
+    uint64_t behind=voxels[rearId].identity;
+    Vector3 front=v_sub(face,v_mul(dir,.7f));(&front.x)[(axis+1)%3]+=.8f;
+    int frontId=addVoxel(front.x,front.y,front.z,false,true,GRAY,0);
+    uint64_t exposed=voxels[frontId].identity;
+    rebuild_voxel_hash();
+    eqRockets[0]=(EquipmentRocket){true,0,v_sub(face,v_mul(dir,.12f)),v_mul(dir,22),5};
+    eq_tick(1.f/60);
+    assert(!eqRockets[0].active && goShields[hand].value==0);
+    rearId=enemy_voxel(behind);
+    assert(rearId>=0 && v_length(voxels[rearId].vel)<.001f && enemy_voxel(exposed)<0);
+    puts("Rocket broke the limb shield, removed exposed debris, and left sheltered debris intact and stationary");
+}
 static void shield_weapon_tests(void){
     fixture();int part=GOLEM_ARM_R,v=goCells[goMount[part]].index;uint64_t id=voxels[v].identity;
     ShotgunImpact impacts[EQ_PELLETS];for(int n=0;n<EQ_PELLETS;n++)impacts[n]=(ShotgunImpact){.id=id,.direction={0,0,1},.distance=2};
@@ -225,7 +250,7 @@ int main(int argc,char **argv){
     if(getenv("GOLEM_OBSTACLE_ONLY"))obstacle_tests();
     else if(getenv("GOLEM_COMBAT_PREVIEW"))previews();
     else if(getenv("GOLEM_COMBAT_STRESS"))stress_test(atoi(getenv("GOLEM_COMBAT_STRESS")));
-    else {if(getenv("FPS_FORCE_GPU_VALIDATION_FAILURE_ONCE"))fallback_attack();obstacle_tests();arsenal_tests();shield_weapon_tests();shield_tests();ray_tests();attack_hits();combat_tests();integration_tests();}
+    else {if(getenv("FPS_FORCE_GPU_VALIDATION_FAILURE_ONCE"))fallback_attack();obstacle_tests();arsenal_tests();rocket_shadow_test();shield_weapon_tests();shield_tests();ray_tests();attack_hits();combat_tests();integration_tests();}
     clear_world_voxels();assert(!goActive&&!goCombatEnabled&&skeletonConstraintCount==0);
     shutdown_pbd_thread_pool();gpu_physics_shutdown();shutdown_shard_rendering();clear_all_chunks();shutdown_world_visuals();weapon_renderer_shutdown();CloseWindow();puts("Golem combat checks passed");return 0;
 }

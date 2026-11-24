@@ -105,15 +105,16 @@ static void foundry_trap_release(int n) {
     collisionTopologyDirty=true;dynamic_voxels_dirty=true;rebuild_voxel_hash();rebuild_glue_constraints();
     play_sfx_at(SFX_GLUE_BREAK,(Vector3){(t->rx+.5f)*VOXEL_SIZE,(t->ry+.5f)*VOXEL_SIZE,(t->rz+.5f)*VOXEL_SIZE},t->owner,2,.65f);
 }
-static void foundry_traps_blast(Vector3 pos,int owner) {
+static void foundry_traps_blast(Vector3 pos,int owner,const RocketBlastCover *cover) {
     for(int n=0;n<foundryTrapCount;n++) {
         FoundryTrap *t=&foundryTraps[n];if(t->active)continue;
         Vector3 release={(t->rx+.5f)*VOXEL_SIZE,(t->ry+.5f)*VOXEL_SIZE,(t->rz+.5f)*VOXEL_SIZE};
         Vector3 at=world_image(pos,release);
         Vector3 nearest={clampf(at.x,t->x0*VOXEL_SIZE,(t->x1+1)*VOXEL_SIZE),clampf(at.y,t->y0*VOXEL_SIZE,(t->y1+1)*VOXEL_SIZE),clampf(at.z,t->z0*VOXEL_SIZE,(t->z1+1)*VOXEL_SIZE)};
         if(t->fourPosts)for(int x=t->x0;x<=t->x1;x+=t->x1-t->x0)for(int z=t->z0;z<=t->z1;z+=t->z1-t->z0)
-            if(v_length(world_delta((Vector3){(x+.5f)*VOXEL_SIZE,(t->ry+.5f)*VOXEL_SIZE,(z+.5f)*VOXEL_SIZE},pos))<4){t->pending=true;t->owner=owner;}
-        if(v_length(world_delta(release,pos))<4 || v_length(v_sub(at,nearest))<4){t->pending=true;t->owner=owner;}
+            {Vector3 post={(x+.5f)*VOXEL_SIZE,(t->ry+.5f)*VOXEL_SIZE,(z+.5f)*VOXEL_SIZE};
+             if(v_length(world_delta(post,pos))<4 && !rocket_cover_blocks(cover,post,0,-1)){t->pending=true;t->owner=owner;}}
+        if((v_length(world_delta(release,pos))<4 && !rocket_cover_blocks(cover,release,0,-1)) || (v_length(v_sub(at,nearest))<4 && !rocket_cover_blocks(cover,nearest,0,-1))){t->pending=true;t->owner=owner;}
     }
 }
 static void foundry_traps_prepare(void) {

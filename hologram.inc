@@ -65,12 +65,13 @@ static void hologram_melee(int owner,Vector3 start,Vector3 end) {
             hologram_damage(MAX_COMBATANTS+n,MATTER_MELEE_DAMAGE);
     }
 }
-static void hologram_blast(Vector3 pos,float radius,float damage) {
+static void hologram_blast_with_cover(Vector3 pos,float radius,float damage,const RocketBlastCover *cover) {
     for(int n=0;n<MAX_PLAYERS;n++)if(holograms[n].life>0) {
         float distance=v_length(world_delta(holograms[n].body.pos,pos));
-        if(distance<radius && !is_view_occluded_by_voxels(pos,holograms[n].body.pos))hologram_damage(MAX_COMBATANTS+n,damage*(1-distance/radius));
+        if(distance<radius && !rocket_cover_blocks(cover,holograms[n].body.pos,0,-1) && !is_view_occluded_by_voxels(pos,holograms[n].body.pos))hologram_damage(MAX_COMBATANTS+n,damage*(1-distance/radius));
     }
 }
+static void hologram_blast(Vector3 pos,float radius,float damage){hologram_blast_with_cover(pos,radius,damage,NULL);}
 static void hologram_arrived(int owner) {
     Hologram *h=&holograms[owner];if(h->arrivalAnnounced)return;
     h->arrivalAnnounced=true;

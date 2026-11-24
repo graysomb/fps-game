@@ -40,12 +40,14 @@ static void go_shields_tick(float dt){
         if(alive&&s->suppressed<=0&&goFight.time-s->lastHit>=8)s->value=fminf(go_shield_max(p),s->value+5*dt);
     }
 }
-static void go_shield_blast(Vector3 origin,float radius,float damage){
+#include "rocket_blast_shields.inc"
+static void go_shield_blast_with_cover(Vector3 origin,float radius,float damage,const RocketBlastCover *cover,int directLimb){
     if(!goCombatEnabled||goCombatDead)return;
     float amounts[GM_COUNT]={0};int indices[GM_COUNT];for(int p=0;p<GM_COUNT;p++)indices[p]=-1;
     for(int c=0;c<goCount;c++){
         int v=go_find(goCells[c].id,goCells[c].index);if(v<0)continue;int p=goCells[c].part;
-        float d=Vector3Distance(origin,voxels[v].pos);if(d>=radius)continue;
+        if(p==directLimb)continue;
+        float d=v_length(world_delta(origin,voxels[v].pos));if(d>=radius || rocket_cover_blocks(cover,voxels[v].pos,voxels[v].identity,p))continue;
         VoxelHit hit;Vector3 dir=v_norm(v_sub(voxels[v].pos,origin));
         if(first_voxel_hit_detailed((Ray){origin,dir},fmaxf(0,d-.2f),-1,false,&hit)&&go_shield_part(hit.id)!=p)continue;
         float amount=damage*(1-clampf((d-1)/(radius-1),0,1));
@@ -53,6 +55,7 @@ static void go_shield_blast(Vector3 origin,float radius,float damage){
     }
     for(int p=0;p<GM_COUNT;p++)if(indices[p]>=0)go_shield_hit(indices[p],amounts[p]);
 }
+static void go_shield_blast(Vector3 origin,float radius,float damage){go_shield_blast_with_cover(origin,radius,damage,NULL,-1);}
 static void go_drain_cancel(int i){if(i>=0&&i<MAX_PLAYERS)goDrainPart[i]=-1;}
 static Vector3 go_part_center(int part){
     Vector3 at={0};int count=0;for(int c=0;c<goCount;c++)if(goCells[c].part==part){

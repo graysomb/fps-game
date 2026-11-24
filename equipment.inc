@@ -170,15 +170,23 @@ static SfxId lab_next_voice(int voice)
     unsigned take = labTake[voice]++ % LAB_VARIANTS;
     return SFX_LAB_FIRST + voice*LAB_VARIANTS + take;
 }
-static void eq_rocket_blast(EquipmentRocket rocket){
-    ducks_blast(rocket.pos,4);
+static void eq_rocket_blast_at(EquipmentRocket rocket,int directLimb){
+    RocketBlastCover cover={.center=rocket.pos};
+    rocket_snapshot_cover(&cover,eqRocketOuter);
+    ducks_blast_with_cover(rocket.pos,4,&cover);
+    hologram_blast_with_cover(rocket.pos,4,100,&cover);
     float damages[MAX_COMBATANTS]={0};
     for(int j=0;j<activePlayers;j++)if(players[j].respawn_timer<=0){Vector3 d=world_delta(players[j].pos,rocket.pos);float dist=v_length(d);VoxelHit hit;
-        if(dist<eqRocketOuter && (dist<.15f || !first_voxel_hit_detailed((Ray){rocket.pos,v_norm(d)},fmaxf(0,dist-.3f),-1,false,&hit)))damages[j]=eqGuns[EQ_ROCKET].damage*(1-clampf((dist-eqRocketInner)/(eqRocketOuter-eqRocketInner),0,1));
+        if(dist<eqRocketOuter && !rocket_cover_blocks(&cover,players[j].pos,0,-1) && (dist<.15f || !first_voxel_hit_detailed((Ray){rocket.pos,v_norm(d)},fmaxf(0,dist-.3f),-1,false,&hit)))damages[j]=eqGuns[EQ_ROCKET].damage*(1-clampf((dist-eqRocketInner)/(eqRocketOuter-eqRocketInner),0,1));
     }
-    go_shield_blast(rocket.pos,eqRocketOuter,eqGuns[EQ_ROCKET].damage);
+    if(directLimb>=0){
+        int c=goMount[directLimb];
+        go_shield_hit(go_find(goCells[c].id,goCells[c].index),eqGuns[EQ_ROCKET].damage);
+    }
+    go_shield_blast_with_cover(rocket.pos,eqRocketOuter,eqGuns[EQ_ROCKET].damage,&cover,directLimb);
     // Protection is evaluated before the terrain becomes debris.
-    enemy_blast_terrain((EnemyCharge){.pos=rocket.pos,.owner=rocket.owner});
+    enemy_blast_terrain_with_cover((EnemyCharge){.pos=rocket.pos,.owner=rocket.owner},&cover);
+    free(cover.panels);
     for(int j=0;j<activePlayers;j++)if(damages[j]>0){
         if(j==rocket.owner && players[j].invuln_timer<=0){bool previous=explosionDamageContext;explosionDamageContext=true;DeathCause old=deathContext;deathContext=DEATH_ROCKET;
             if(players[j].matter<=damages[j] || players[j].isExposed)kill_player(j,j,false,false);else apply_matter_damage(j,j,damages[j]);deathContext=old;explosionDamageContext=previous;
@@ -186,8 +194,9 @@ static void eq_rocket_blast(EquipmentRocket rocket){
         if(eq_hostile(rocket.owner,j))players[j].vel=v_add(players[j].vel,v_mul(v_norm(world_delta(players[j].pos,rocket.pos)),damages[j]*.1f));
     }
     int kind = weapon_audio_enabled() ? CLARITY_ROCKET_BLAST : 2;
-    hologram_blast(rocket.pos,4,100);clarity_effect((ClarityEffect){.id=clarityNextId++,.kind=kind,.pos=rocket.pos,.attacker=rocket.owner},true);
+    clarity_effect((ClarityEffect){.id=clarityNextId++,.kind=kind,.pos=rocket.pos,.attacker=rocket.owner},true);
 }
+static void eq_rocket_blast(EquipmentRocket rocket){eq_rocket_blast_at(rocket,-1);}
 static bool weapon_audio_active_player(int i)
 {
     return i<activePlayers && equipment[i].initialized && players[i].respawn_timer<=0 &&
@@ -412,13 +421,28 @@ static void eq_tick(float dt){
         if(players[i].respawn_timer>0){e->held=false;e->charge=0;}
     }
     for(int n=0;n<32;n++)eqTraces[n].life=fmaxf(0,eqTraces[n].life-dt);
-    if(netTransport.role==NET_ROLE_CLIENT){for(int n=0;n<32;n++)if(eqRockets[n].active)eqRockets[n].pos=world_wrap(v_add(eqRockets[n].pos,v_mul(eqRockets[n].vel,dt)));return;}
-    for(int n=0;n<32;n++){EquipmentRocket *r=&eqRockets[n];if(!r->active)continue;float remaining=fminf(dt,.25f);
+    RocketLimbBounds limbs={0};bool boundsReady=false;
+    for(int n=0;n<32;n++){
+        EquipmentRocket *r=&eqRockets[n];if(!r->active)continue;
+        if(!boundsReady && !go_combat_actor(r->owner)){
+            limbs=(RocketLimbBounds){0};rocket_limb_bounds(&limbs);boundsReady=true;
+        }
+        if(netTransport.role==NET_ROLE_CLIENT){
+            Vector3 step=v_mul(r->vel,dt);float fraction=1;
+            if(!go_combat_actor(r->owner) && rocket_first_limb(&limbs,r->pos,step,&fraction)>=0)r->active=false;
+            r->pos=world_wrap(v_add(r->pos,v_mul(step,fraction)));continue;
+        }
+        float remaining=fminf(dt,.25f);
         while(remaining>0 && r->active){float step=fminf(remaining,1.f/120);remaining-=step;float length=v_length(r->vel)*step;Ray ray={r->pos,v_norm(r->vel)};VoxelHit hit;
-            bool collision=go_combat_actor(r->owner)?go_world_ray(ray,length,&hit):rifle_shield_ray(ray,length,-1,r->owner,&hit);if(collision)length=hit.t;int actor=eq_actor_ray(r->owner,ray,&length);
+            bool collision=go_combat_actor(r->owner)?go_world_ray(ray,length,&hit):rifle_shield_ray(ray,length,-1,r->owner,&hit);if(collision)length=hit.t;
+            float fraction=1;int limb=go_combat_actor(r->owner)?-1:rocket_first_limb(&limbs,ray.position,v_mul(ray.direction,length),&fraction);
+            if(limb>=0){collision=true;length*=fraction;}
+            int actor=eq_actor_ray(r->owner,ray,&length);
             bool duck=ducks_ray(ray,length,.12f,-1,false);
             r->pos=world_wrap(v_add(r->pos,v_mul(ray.direction,length)));r->life-=step;
-            if(collision || actor>=0 || duck || r->pos.y<.1f){EquipmentRocket copy=*r;r->active=false;eq_rocket_blast(copy);}else if(r->life<=0)r->active=false;
+            if(collision || actor>=0 || duck || r->pos.y<.1f){EquipmentRocket copy=*r;
+                if(collision && actor<0 && !duck)copy.pos=world_wrap(v_sub(copy.pos,v_mul(ray.direction,.02f)));
+                r->active=false;eq_rocket_blast_at(copy,actor<0 && !duck?limb:-1);boundsReady=false;}else if(r->life<=0)r->active=false;
         }
     }
 }

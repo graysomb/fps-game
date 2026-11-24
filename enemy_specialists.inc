@@ -240,22 +240,22 @@ static bool enemy_plant(int i) {
     Vector3 p=v_add(voxels[support].pos,v_mul(v_norm(d),.55f));
     return enemy_create_charge(i,p,s->selected);
 }
-static void enemy_blast_terrain(EnemyCharge c) {
-    foundry_traps_blast(c.pos,c.owner);
+static void enemy_blast_terrain_with_cover(EnemyCharge c,const RocketBlastCover *cover) {
+    foundry_traps_blast(c.pos,c.owner,cover);
     /* Excavation activation skips its interior; a blast must activate the radial shell explicitly. */
     static UnitVoxelBuffer shell;unit_voxel_buffer_clear(&shell);
     for(int v=0;v<voxel_count && shell.count<VOXEL_ACTIVATION_UNIT_BUDGET;v++) {
         Voxel *x=&voxels[v];float distance=v_length(world_delta(x->pos,c.pos));
-        if(!x->simulate && !x->type && distance>=2 && distance<4)
+        if(!x->simulate && !x->type && distance>=2 && distance<4 && !rocket_cover_blocks(cover,x->pos,x->identity,-1))
             unit_voxel_buffer_push(&shell,x->gx,x->gy,x->gz,x->color,x->type,false,v,x->debugClusterTag,c.owner);
     }
     remove_buffered_static_voxels(&shell);emit_unit_voxels_from_units(&shell,false,true,-1);
     init_static_hash();rebuild_voxel_hash();
-    for(int v=voxel_count-1;v>=0;v--)if(v_length(world_delta(voxels[v].pos,c.pos))<2 && enemy_equipment_owner(v)<0 && !go_shield_hit(v,0))remove_voxel_index(v);
+    for(int v=voxel_count-1;v>=0;v--)if(v_length(world_delta(voxels[v].pos,c.pos))<2 && !rocket_cover_blocks(cover,voxels[v].pos,voxels[v].identity,-1) && enemy_equipment_owner(v)<0 && !go_shield_hit(v,0))remove_voxel_index(v);
     int stamp=++particle_sync_stamp;
     for(int v=0;v<voxel_count;v++) {
         Voxel *x=&voxels[v];float distance=v_length(world_delta(x->pos,c.pos));
-        if(!x->simulate || distance>=4 || enemy_equipment_owner(v)>=0 || go_shield_hit(v,0))continue;
+        if(!x->simulate || distance>=4 || rocket_cover_blocks(cover,x->pos,x->identity,-1) || enemy_equipment_owner(v)>=0 || go_shield_hit(v,0))continue;
         if(x->sleeping)wake_sleeping_cluster_in_place(v);
         for(int f=0;f<6;f++)break_face_link(x,f);
         Vector3 direction=world_delta(x->pos,c.pos);direction.y+=1;
@@ -268,6 +268,7 @@ static void enemy_blast_terrain(EnemyCharge c) {
     }
     rebuild_voxel_hash();rebuild_all_voxel_surfaces();
 }
+static void enemy_blast_terrain(EnemyCharge c){enemy_blast_terrain_with_cover(c,NULL);}
 /* Supplies are real glued voxel bundles, shared by players and enemies. */
 static void enemy_scrap_bundle(Vector3 origin) {
     int first=voxel_count;

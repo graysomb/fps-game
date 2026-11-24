@@ -12,6 +12,19 @@ static void fixture(void){
  eq_reset_all();clarity_reset();combat_ui_reset();
 }
 static void inventory(void){fixture();assert(eq_gun(0)==EQ_DEFAULT);assert(eq_pickup(0,PICKUP_SHOTGUN,false));assert(eq_gun(0)==EQ_SHOTGUN);assert(!eq_pickup(0,PICKUP_SHOTGUN,true));assert(!eq_pickup(0,PICKUP_RAILGUN,false));equipment[0].cooldown[EQ_SHOTGUN]=.8f;NetInputCommand c={.pressed=NET_INPUT_SWITCH};eq_command(0,&c,.01f);assert(eq_gun(0)==EQ_DEFAULT);eq_command(0,&c,.01f);assert(equipment[0].cooldown[EQ_SHOTGUN]==.8f);assert(eq_pickup(0,PICKUP_RAILGUN,true));players[0].matter=0;players[0].isExposed=true;eq_tick(.3f);assert(eq_gun(0)==EQ_RAIL);kill_player(0,1,false,false);assert(eq_gun(0)==EQ_DEFAULT);}
+static void rocket_glass_cover(void){
+ fixture();
+ Vector3 impact={.25f,2.25f,-.48f};
+ add_static_voxel_at_grid(0,4,-2,spawnGlassColor,0);
+ players[0].pos=(Vector3){10,2,0};players[1].pos=(Vector3){.25f,2.25f,-1.75f};
+ int rear=add_static_voxel_at_grid(0,4,-5,GRAY,0);uint64_t behind=voxels[rear].identity;
+ init_static_hash();rebuild_voxel_hash();
+ eq_rocket_blast((EquipmentRocket){.owner=0,.pos=impact});
+ assert(players[1].matter==100 && v_length(players[1].vel)==0);
+ assert(table_get_static_only(0,4,-2)<0 && enemy_voxel(behind)>=0);
+ eq_rocket_blast((EquipmentRocket){.owner=0,.pos=impact});
+ assert(players[1].matter<100 && enemy_voxel(behind)<0);
+}
 static void combat_grapple(void){
  fixture();start_tether(0);assert(players[0].actorGrappleTarget==2);
  net_integrate_player(&players[1],1.f/60,true);assert(players[1].pos.z>-3 && players[0].vel.z==0);
@@ -301,4 +314,4 @@ static void polish_presentation(void){
  equipment[0].cooldown[EQ_ROCKET]=0;players[0].matter=0;eq_tick(.2f);assert(weaponVisuals[0].depleted==1 && weaponVisuals[0].cooldown==0);
  eq_reset(0);assert(weaponVisuals[0].deployment==0 && weaponVisuals[0].build_pulse==0);
 }
-int main(int argc,char**argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Equipment tests");init_pbd_thread_pool();assert(initialize_physics_backend());inventory();combat_grapple();combat_balance();rail_reservation();polish_presentation();matter_build_changes();persistent_tether();revised_weapons();attacks();panels();sticky();lifecycle();sword();shotgun_structures();protection();supplies_regenerate();maps();stress();captures();beam_captures();sword_reach_and_visuals();matter_captures();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Equipment tests passed");return 0;}
+int main(int argc,char**argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Equipment tests");init_pbd_thread_pool();assert(initialize_physics_backend());inventory();rocket_glass_cover();combat_grapple();combat_balance();rail_reservation();polish_presentation();matter_build_changes();persistent_tether();revised_weapons();attacks();panels();sticky();lifecycle();sword();shotgun_structures();protection();supplies_regenerate();maps();stress();captures();beam_captures();sword_reach_and_visuals();matter_captures();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Equipment tests passed");return 0;}

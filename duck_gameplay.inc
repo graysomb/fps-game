@@ -72,13 +72,14 @@ static void ducks_segment(Vector3 start,Vector3 end,float radius,int ignore) {
     Vector3 delta=world_delta(end,start);float length=v_length(delta);
     if(length>1e-6f)ducks_ray((Ray){start,v_mul(delta,1/length)},length,radius,ignore,false);
 }
-static void ducks_blast(Vector3 pos,float radius) {
+static void ducks_blast_with_cover(Vector3 pos,float radius,const RocketBlastCover *cover) {
     if(netTransport.role==NET_ROLE_CLIENT || !ducksInitialized || !ducks_enabled())return;
     for(int n=0;n<MAP_DUCKS;n++)if(mapDucks[n].alive) {
         Vector3 delta=world_delta(v_add(mapDucks[n].pos,(Vector3){0,.3f,0}),pos);float distance=v_length(delta);VoxelHit hit;
-        if(distance<radius && (distance<.01f || !first_voxel_hit_detailed((Ray){pos,v_norm(delta)},fmaxf(0,distance-.2f),-1,false,&hit)))duck_pop(n);
+        if(distance<radius && !rocket_cover_blocks(cover,v_add(mapDucks[n].pos,(Vector3){0,.3f,0}),0,-1) && (distance<.01f || !first_voxel_hit_detailed((Ray){pos,v_norm(delta)},fmaxf(0,distance-.2f),-1,false,&hit)))duck_pop(n);
     }
 }
+static void ducks_blast(Vector3 pos,float radius){ducks_blast_with_cover(pos,radius,NULL);}
 static void ducks_tick(float dt) {
     if(!ducks_enabled() || gameState!=GAME_STATE_PLAYING || dt<=0)return;
     duckClock+=dt;
