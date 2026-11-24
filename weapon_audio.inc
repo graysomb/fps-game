@@ -1,8 +1,15 @@
 // Offline Weapon Lab voices. Frequencies are Hz, envelope times are seconds.
 #include <stdatomic.h>
-enum { LAB_SHOTGUN, LAB_RAIL, LAB_GLOB, LAB_SPLAT, LAB_VOICE_COUNT };
-enum { LAB_RATE = 44100, LAB_VARIANTS = 4 };
+enum { LAB_RATE = 44100 };
 static bool labPrototype;
+static Sound labBeam, labContact, labMotors[32];
+static void lab_release_sustain(Sound *sound)
+{
+    if (sound->frameCount) {
+        UnloadSoundAlias(*sound);
+        *sound = (Sound){0};
+    }
+}
 static unsigned labTake[LAB_VOICE_COUNT];
 static AudioStream labChargeStream;
 static atomic_int labChargeLevel;
@@ -40,7 +47,7 @@ static void lab_lightning_reverb(short *pcm, unsigned frames, int take)
 
 static Wave lab_voice_wave(int voice, int take)
 {
-    const float lengths[] = {.40f, .85f, .19f, .21f};
+    const float lengths[] = {.40f, .85f, .19f, .21f, .24f, .76f, .28f, .14f};
     unsigned frames = (unsigned)(lengths[voice] * LAB_RATE);
     short *pcm = MemAlloc(frames * sizeof(*pcm));
     if (!pcm) return (Wave){0};
@@ -71,6 +78,21 @@ static Wave lab_voice_wave(int voice, int take)
         } else if (voice == LAB_GLOB) {
             float phase = 2*PI*(105*t + 5.1f*(1-expf(-54*t)));
             y = .59f * (sinf(phase) + .21f*sinf(2*phase)) * expf(-(34+variation*25)*t);
+        } else if (voice == LAB_LAUNCH || voice == LAB_BOOM) {
+            bool blast = voice == LAB_BOOM;
+            railRumble += .035f*(low-railRumble);
+            float thud = sinf(2*PI*(54*t + 1.25f*(1-expf(-65*t))));
+            y = (.64f*thud + 1.8f*low)*expf(-(blast ? 17 : 50)*t)
+              + (blast ? 4.3f*railRumble*expf(-7*t) : .60f*noise*expf(-26*t));
+        } else if (voice == LAB_DMR || voice == LAB_GLOCK) {
+            bool rifle = voice == LAB_DMR;
+            float returnTime = t - (rifle ? .075f : .031f) - variation*.05f;
+            y = (rifle ? 1.42f : 1.08f)*(noise-low)*expf(-(rifle ? 104 : 215)*t)
+              + (rifle ? 1.9f : .85f)*low*expf(-(rifle ? 42 : 100)*t);
+            if (returnTime > 0) {
+                float metal = sinf(2*PI*(rifle ? 540 : 1570)*returnTime);
+                y += (.38f*noise + .27f*metal)*expf(-(rifle ? 88 : 158)*returnTime);
+            }
         } else {
             float phase = 2*PI*(180*t + 2.4f*(1-expf(-57*t)));
             y = (.61f*low + .19f*sinf(phase + .7f*sinf(2*PI*49*t))) * expf(-(27+variation*40)*t);
@@ -100,6 +122,32 @@ static void lab_charge_callback(void *buffer, unsigned frames)
     }
 }
 
+// Sustained sources share mono samples. Their positions and motor pitch update in game time.
+static void lab_load_sustain(SfxId id)
+{
+    unsigned frames = LAB_RATE * (id == SFX_LAB_MOTOR ? 6 : 2);
+    short *pcm = MemAlloc(frames*sizeof(*pcm));
+    if (!pcm) return;
+    uint32_t seed = 725;
+    float low = 0;
+    for (unsigned i=0; i<frames; ++i) {
+        float t = (float)i/LAB_RATE, noise = lab_noise(&seed);
+        low += .18f*(noise-low);
+        float sample;
+        if (id == SFX_LAB_BEAM)
+            sample = .10f*sinf(2*PI*455*t+.46f*sinf(2*PI*112*t)) + .035f*sinf(2*PI*910*t);
+        else if (id == SFX_LAB_SIZZLE)
+            sample = (.20f+.11f*sinf(2*PI*39*t))*(noise-low) + .36f*low;
+        else
+            sample = .61f*low + .12f*(noise-low) + .075f*sinf(2*PI*340*t+.6f*sinf(2*PI*65*t));
+        float edge = fminf(1,i/120.f)*fminf(1,(frames-1-i)/120.f);
+        pcm[i] = (short)(30000*sample*edge);
+    }
+    Wave wave = {frames,LAB_RATE,16,1,pcm};
+    sfxSounds[id] = LoadSoundFromWave(wave);
+    UnloadWave(wave);
+}
+
 static void lab_audio_init(void)
 {
     for (int voice=0; voice<LAB_VOICE_COUNT; ++voice)
@@ -108,6 +156,7 @@ static void lab_audio_init(void)
             sfxSounds[SFX_LAB_FIRST + voice*LAB_VARIANTS + take] = LoadSoundFromWave(wave);
             UnloadWave(wave);
         }
+    for (int id=SFX_LAB_BEAM; id<=SFX_LAB_MOTOR; ++id) lab_load_sustain(id);
     labChargeStream = LoadAudioStream(LAB_RATE,32,1);
     SetAudioStreamCallback(labChargeStream,lab_charge_callback);
 }

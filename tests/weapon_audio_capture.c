@@ -19,9 +19,50 @@ static void capture(void *samples,unsigned frames)
     atomic_store(&recorded,start+count);
 }
 
+// Sweep through open air and a voxel wall, fire diagonally across the listener's
+// forward view, then alternate the two hitscan weapons at a fixed half-second cadence.
+static void second_weapon_sequence(int tick,bool prototype)
+{
+    Equipment *e=&equipment[0];
+    Player *p=&players[0];
+    if(tick==0){
+        init_static_hash();
+        add_static_box_at_grid(-2,2,3,5,-40,-10,GRAY);
+        init_static_hash(); rebuild_voxel_hash();
+        p->matter=p->matterMax=100;
+        e->gun[e->selected]=EQ_CUTTER;
+    }
+    if(tick<=140){
+        p->yaw=tick>=54 && tick<110 ? 0 : 60;
+        eq_command(0,&(NetInputCommand){.held=tick>=15 && tick<140 ? NET_INPUT_FIRE : 0},1.f/60);
+    }
+    if(tick==182){
+        e->gun[e->selected]=EQ_ROCKET;
+        p->yaw=-55;p->pitch=-8;
+        assert(eq_fire(0));
+    }
+    if(tick>=182){p->yaw=0;p->pitch=0;}
+    if(tick>=305 && tick<=515 && (tick-305)%30==0){
+        e->gun[e->selected]=((tick-305)/30)%2 ? EQ_DMR : EQ_GLOCK;
+        assert(eq_fire(0));
+    }
+    eq_tick(1.f/60);
+    lab_update_audio();
+    if(prototype){
+        if(tick==42)assert(labBeam.frameCount && !labContact.frameCount);
+        if(tick==66)assert(labContact.frameCount);
+        if(tick==125)assert(!labContact.frameCount);
+        if(tick==142)assert(!labBeam.frameCount);
+        if(tick==194)assert(labMotors[0].frameCount);
+        if(tick==285)assert(!labMotors[0].frameCount && labTake[LAB_BOOM]==1);
+    }
+}
+
 int main(int argc,char **argv)
 {
-    assert(argc==3);
+    assert(argc==3 || (argc==4 && !strcmp(argv[3],"second")));
+    bool second=argc==4;
+    int seconds=second ? 10 : SECONDS;
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
     InitWindow(320,240,"Weapon Lab capture");
     SetRandomSeed(1835);
@@ -42,9 +83,10 @@ int main(int argc,char **argv)
     assert(labPrototype==prototype);
     double started=GetTime();
     AttachAudioMixedProcessor(capture);
-    for(int tick=0;tick<SECONDS*60;tick++){
+    for(int tick=0;tick<seconds*60;tick++){
         while(atomic_load(&recorded)<tick*(RATE/60)) WaitTime(.001);
         clarityClock=1+tick/60.f;
+        if(second){second_weapon_sequence(tick,prototype);continue;}
         Equipment *e=&equipment[0];
         bool shotgun=tick==24 || (tick>=384 && tick<=480 && (tick-384)%48==0) || tick==990;
         bool glob=tick==302 || (tick>=780 && tick<870 && (tick-780)%10==0) ||
@@ -79,11 +121,12 @@ int main(int argc,char **argv)
         players[0].isExposed=tick>=1075 && tick<1160;
         update_exposed_audio();
     }
-    while(atomic_load(&recorded)<SECONDS*RATE)WaitTime(.001);
+    while(atomic_load(&recorded)<seconds*RATE)WaitTime(.001);
     DetachAudioMixedProcessor(capture);
-    assert(fabs(GetTime()-started-SECONDS)<.35);
-    if(prototype)assert(labTake[LAB_SPLAT]==labTake[LAB_GLOB] && labTake[LAB_GLOB]==15);
+    assert(fabs(GetTime()-started-seconds)<.35);
+    if(prototype && !second)assert(labTake[LAB_SPLAT]==labTake[LAB_GLOB] && labTake[LAB_GLOB]==15);
     FILE *file=fopen(argv[2],"wb");assert(file);
-    assert(fwrite(reel,sizeof(float),SECONDS*RATE*2,file)==SECONDS*RATE*2);fclose(file);
+    size_t samples=(size_t)seconds*RATE*2;
+    assert(fwrite(reel,sizeof(float),samples,file)==samples);fclose(file);
     shutdown_sfx();CloseWindow();
 }

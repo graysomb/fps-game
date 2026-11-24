@@ -149,6 +149,16 @@ static void eq_shotgun_impacts(int owner,ShotgunImpact *hits,int count){
     }
     play_sfx_at(SFX_IMPACT,world_wrap(v_add(players[owner].pos,v_mul(hits[0].direction,hits[0].distance))),owner,1,.8f);
 }
+static bool lab_audio_available(void)
+{
+    return equipmentLab && enemyLab && gameState == GAME_STATE_PLAYING && netTransport.role == NET_ROLE_OFFLINE;
+}
+
+static SfxId lab_next_voice(int voice)
+{
+    unsigned take = labTake[voice]++ % LAB_VARIANTS;
+    return SFX_LAB_FIRST + voice*LAB_VARIANTS + take;
+}
 static void eq_rocket_blast(EquipmentRocket rocket){
     ducks_blast(rocket.pos,4);
     float damages[MAX_COMBATANTS]={0};
@@ -164,13 +174,9 @@ static void eq_rocket_blast(EquipmentRocket rocket){
         }else eq_damage(rocket.owner,j,damages[j],true,DEATH_ROCKET,rocket.pos);
         if(eq_hostile(rocket.owner,j))players[j].vel=v_add(players[j].vel,v_mul(v_norm(world_delta(players[j].pos,rocket.pos)),damages[j]*.1f));
     }
-    hologram_blast(rocket.pos,4,100);clarity_effect((ClarityEffect){.id=clarityNextId++,.kind=2,.pos=rocket.pos,.attacker=rocket.owner},true);
+    SfxId boom = labPrototype && lab_audio_available() ? lab_next_voice(LAB_BOOM) : SFX_EXPLOSION;
+    hologram_blast(rocket.pos,4,100);clarity_effect_sound((ClarityEffect){.id=clarityNextId++,.kind=2,.pos=rocket.pos,.attacker=rocket.owner},true,boom);
 }
-static bool lab_audio_available(void)
-{
-    return equipmentLab && enemyLab && gameState == GAME_STATE_PLAYING && netTransport.role == NET_ROLE_OFFLINE;
-}
-
 static void lab_update_charge(void)
 {
     if (!sfxReady) return;
@@ -186,17 +192,58 @@ static void lab_update_charge(void)
     if (!level && GetTime()-lastCharge > .05 && IsAudioStreamPlaying(labChargeStream)) StopAudioStream(labChargeStream);
 }
 
+static void lab_sustain(Sound *instance,SfxId id,bool active,Vector3 pos,float pitch)
+{
+    float gain, pan;
+    if (!active || !clarity_spatial_mix(pos,&gain,&pan)) {
+        lab_release_sustain(instance);
+        return;
+    }
+    if (!instance->frameCount) *instance=LoadSoundAlias(sfxSounds[id]);
+    if (!instance->frameCount) return;
+    SetSoundVolume(*instance,gain);
+    SetSoundPan(*instance,pan);
+    SetSoundPitch(*instance,pitch);
+    if (!IsSoundPlaying(*instance)) PlaySound(*instance);
+}
+
+static void lab_update_audio(void)
+{
+    lab_update_charge();
+    if (!sfxReady) return;
+    bool enabled=labPrototype && lab_audio_available() && sfxEnabled && !enemyLabPaused;
+    Equipment *e=&equipment[0];
+    bool cutting=enabled && eq_usable(0) && eq_gun(0)==EQ_CUTTER && e->held &&
+                 e->switchTime<=0 && players[0].matter>0;
+    lab_sustain(&labBeam,SFX_LAB_BEAM,cutting,players[0].pos,1);
+    lab_sustain(&labContact,SFX_LAB_SIZZLE,cutting && e->beamContact,e->beamEnd,1);
+    for (int n=0;n<32;n++) {
+        EquipmentRocket *r=&eqRockets[n];
+        if (!r->active && !labMotors[n].frameCount) continue;
+        float age=eqRocketLife-r->life;
+        lab_sustain(&labMotors[n],SFX_LAB_MOTOR,enabled && r->active,r->pos,.78f+.48f*fminf(1,age));
+    }
+}
+
 static void lab_play_voice(int voice, Vector3 pos, int source)
 {
-    unsigned take = labTake[voice]++ % LAB_VARIANTS;
-    play_sfx_at(SFX_LAB_FIRST + voice*LAB_VARIANTS + take,pos,source,2,1);
+    play_sfx_at(lab_next_voice(voice),pos,source,2,1);
 }
 
 static void eq_fire_audio(int gun, Vector3 pos, int source)
 {
-    if (labPrototype && lab_audio_available() && (gun==EQ_SHOTGUN || gun==EQ_RAIL || gun==EQ_GLOB)) {
-        lab_play_voice(gun==EQ_SHOTGUN ? LAB_SHOTGUN : gun==EQ_RAIL ? LAB_RAIL : LAB_GLOB,pos,source);
-        return;
+    if (labPrototype && lab_audio_available()) {
+        int voice;
+        switch (gun) {
+        case EQ_SHOTGUN: voice=LAB_SHOTGUN; break;
+        case EQ_RAIL: voice=LAB_RAIL; break;
+        case EQ_GLOB: voice=LAB_GLOB; break;
+        case EQ_ROCKET: voice=LAB_LAUNCH; break;
+        case EQ_DMR: voice=LAB_DMR; break;
+        case EQ_GLOCK: voice=LAB_GLOCK; break;
+        default: voice=-1; break;
+        }
+        if (voice>=0) {lab_play_voice(voice,pos,source);return;}
     }
     float pitch = gun==EQ_RAIL ? .65f : gun==EQ_ROCKET ? .55f : gun==EQ_GLOCK ? 1.25f :
                   gun==EQ_GLOB ? 1.6f : gun==EQ_DMR ? .95f : .8f;
@@ -281,7 +328,8 @@ static void eq_command(int i,const NetInputCommand *c,float dt){
     }else if(gun==EQ_CUTTER && held && p->matter>0){
         float step=fminf(dt,p->matter/eqGuns[gun].cost),length=eqGuns[gun].range;VoxelHit hit;bool wall=rifle_shield_ray(ray,length,-1,i,&hit);if(wall)length=hit.t;
         int target=eq_actor_ray(i,ray,&length);e->beamEnd=v_add(p->pos,v_mul(ray.direction,length));
-        ducks_ray(ray,length,.08f,-1,false);
+        bool duck=ducks_ray(ray,length,.08f,-1,false);
+        e->beamContact=wall || target>=0 || duck;
         if(target>=0)eq_damage(i,target,eqGuns[gun].damage*step,true,DEATH_CUTTER,p->pos);
         bool shieldContact=target<0&&wall&&go_shield_hit(hit.id,eqGuns[gun].damage*step);
         e->cutTime+=step;bool cut=false;
@@ -291,7 +339,7 @@ static void eq_command(int i,const NetInputCommand *c,float dt){
             if(eq_actor_ray(i,ray,&stop)<0 && blocked)cut|=eq_cut(i,ray,eqGuns[gun].range);
         }
         if(shieldContact)e->cutTime=0;
-        if(cut){play_sfx_at(SFX_FIRE,p->pos,i,1,1.6f);ai_gunfire(i,p->pos);}
+        if(cut){if (!(labPrototype && lab_audio_available())) play_sfx_at(SFX_FIRE,p->pos,i,1,1.6f);ai_gunfire(i,p->pos);}
         eq_spend(i,eqGuns[gun].cost*step);
     }else e->cutTime=0;
     e->held=held;

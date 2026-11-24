@@ -14,7 +14,7 @@ static const float eqShotgunCone=12,eqRocketSpeed=22,eqRocketLife=5,eqRocketInne
 static const float eqShotgunImpulse=TETHER_THROW_IMPULSE,eqShotgunActivationBelief=1;
 static const float eqGoldGrabCost=25;
 static const float eqSwordReach=SWORD_REACH,eqSwordSweep=SWORD_SWEEP_DEGREES,eqSwordCycle=.8f,eqSwordDamage=10000;
-typedef struct {int gun[2],selected,upgrades;float cooldown[EQ_GUN_COUNT],switchTime,charge,cutTime,buildTime;bool initialized,held,buildHeld,wasEmpty;float depleted,depletionPulse,shieldDelay;bool shieldRegenerating;Vector3 beamEnd;} Equipment;
+typedef struct {int gun[2],selected,upgrades;float cooldown[EQ_GUN_COUNT],switchTime,charge,cutTime,buildTime;bool initialized,held,buildHeld,wasEmpty,beamContact;float depleted,depletionPulse,shieldDelay;bool shieldRegenerating;Vector3 beamEnd;} Equipment;
 static Equipment equipment[MAX_COMBATANTS];
 static void eq_shield_damage(int i);
 static void eq_shield_tick(float dt);

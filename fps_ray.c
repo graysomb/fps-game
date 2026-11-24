@@ -1903,6 +1903,8 @@ static Music gameMusic;
 static bool gameMusicReady = false;
 static bool gameMusicPlaying = false;
 
+enum { LAB_SHOTGUN, LAB_RAIL, LAB_GLOB, LAB_SPLAT, LAB_LAUNCH, LAB_BOOM, LAB_DMR, LAB_GLOCK, LAB_VOICE_COUNT };
+enum { LAB_VARIANTS = 4 };
 typedef enum {
     SFX_FIRE = 0,
     SFX_IMPACT,
@@ -1918,7 +1920,8 @@ typedef enum {
     SFX_SHIELD_BREAK,
     SFX_STEP_1, SFX_STEP_2, SFX_STEP_3, SFX_SQUEAK,
     SFX_PLAYER_HURT, SFX_SIGHT_GROWL, SFX_EXPOSED,
-    SFX_LAB_FIRST, SFX_COUNT = SFX_LAB_FIRST + 16
+    SFX_LAB_FIRST, SFX_LAB_BEAM = SFX_LAB_FIRST + LAB_VARIANTS*LAB_VOICE_COUNT,
+    SFX_LAB_SIZZLE, SFX_LAB_MOTOR, SFX_COUNT
 } SfxId;
 
 static Sound sfxSounds[SFX_COUNT];
@@ -2490,6 +2493,9 @@ static void shutdown_sfx(void)
         return;
     }
     atomic_store(&labChargeLevel,0);
+    lab_release_sustain(&labBeam);
+    lab_release_sustain(&labContact);
+    for (int n=0; n<32; ++n) lab_release_sustain(&labMotors[n]);
     UnloadAudioStream(labChargeStream);
     clarity_audio_shutdown();
     shutdown_game_music();
@@ -20588,7 +20594,7 @@ static void debug_console_exec(const char *line)
         if (!lab_audio_available()) debug_console_print("Open the offline Weapon Lab first.");
         else if (mode && (!strcmp(mode,"original") || !strcmp(mode,"prototype"))) {
             labPrototype = !strcmp(mode,"prototype");
-            lab_update_charge();
+            lab_update_audio();
             debug_console_printf("Weapon Lab audio: %s",mode);
         } else debug_console_print("weaponaudio original|prototype");
         return;
@@ -21761,7 +21767,7 @@ int main(int argc, char **argv) {
 #endif
         ct_frame(GetFrameTime());
         update_game_music();
-        lab_update_charge();
+        lab_update_audio();
         update_exposed_audio();
         voxel_ca_update(GetTime());
         voxel_render_frame++;
