@@ -1,8 +1,8 @@
-// Offline Weapon Lab voices. Frequencies are Hz, envelope times are seconds.
+// Procedural gameplay weapon voices. Frequencies are Hz, envelope times are seconds.
 #include <stdatomic.h>
 enum { LAB_RATE = 44100 };
-static bool labPrototype;
-static Sound labBeam, labContact, labMotors[32];
+static bool labPrototype=true;
+static Sound labBeam[MAX_PLAYERS], labContact[MAX_PLAYERS], labMotors[32];
 static void lab_release_sustain(Sound *sound)
 {
     if (sound->frameCount) {
@@ -11,9 +11,9 @@ static void lab_release_sustain(Sound *sound)
     }
 }
 static unsigned labTake[LAB_VOICE_COUNT];
-static AudioStream labChargeStream;
-static atomic_int labChargeLevel;
-static float labPhaseA, labPhaseB, labChargeGain;
+static AudioStream labChargeStream[MAX_PLAYERS];
+static atomic_int labChargeLevel[MAX_PLAYERS];
+static struct {float phaseA,phaseB,gain;} chargeOsc[MAX_PLAYERS];
 
 static float lab_noise(uint32_t *seed)
 {
@@ -127,22 +127,28 @@ static Wave lab_voice_wave(int voice, int take)
 }
 
 // Phase and envelope belong to the audio thread. The game publishes only charge.
-static void lab_charge_callback(void *buffer, unsigned frames)
+static void render_charge(int slot,void *buffer, unsigned frames)
 {
     float *out = buffer;
-    int level = atomic_load(&labChargeLevel);
+    int level = atomic_load(&labChargeLevel[slot]);
     float progress = fmaxf(0,(level-1)/1000.f);
     float hz = 244 + 232*progress;
     for (unsigned i=0; i<frames; ++i) {
-        labChargeGain += .006f * ((level ? .078f : 0) - labChargeGain);
-        labPhaseA += hz/LAB_RATE;
-        labPhaseB += (hz + 15*(1-progress))/LAB_RATE;
-        labPhaseA -= floorf(labPhaseA);
-        labPhaseB -= floorf(labPhaseB);
+        chargeOsc[slot].gain += .006f * ((level ? .078f : 0) - chargeOsc[slot].gain);
+        chargeOsc[slot].phaseA += hz/LAB_RATE;
+        chargeOsc[slot].phaseB += (hz + 15*(1-progress))/LAB_RATE;
+        chargeOsc[slot].phaseA -= floorf(chargeOsc[slot].phaseA);
+        chargeOsc[slot].phaseB -= floorf(chargeOsc[slot].phaseB);
         // A stronger fundamental keeps the full-charge tone audible at any phase.
-        out[i] = labChargeGain * (sinf(2*PI*labPhaseA) + .55f*sinf(2*PI*labPhaseB));
+        out[i] = chargeOsc[slot].gain * (sinf(2*PI*chargeOsc[slot].phaseA) + .55f*sinf(2*PI*chargeOsc[slot].phaseB));
     }
 }
+
+// raylib callbacks have no user-data parameter.
+static void charge0(void *p,unsigned n){render_charge(0,p,n);}
+static void charge1(void *p,unsigned n){render_charge(1,p,n);}
+static void charge2(void *p,unsigned n){render_charge(2,p,n);}
+static void charge3(void *p,unsigned n){render_charge(3,p,n);}
 
 // Sustained sources share mono samples. Their positions and motor pitch update in game time.
 static void lab_load_sustain(SfxId id)
@@ -179,6 +185,9 @@ static void lab_audio_init(void)
             UnloadWave(wave);
         }
     for (int id=SFX_LAB_BEAM; id<=SFX_LAB_MOTOR; ++id) lab_load_sustain(id);
-    labChargeStream = LoadAudioStream(LAB_RATE,32,1);
-    SetAudioStreamCallback(labChargeStream,lab_charge_callback);
+    AudioCallback callbacks[MAX_PLAYERS]={charge0,charge1,charge2,charge3};
+    for (int i=0;i<MAX_PLAYERS;i++){
+        labChargeStream[i]=LoadAudioStream(LAB_RATE,32,1);
+        SetAudioStreamCallback(labChargeStream[i],callbacks[i]);
+    }
 }

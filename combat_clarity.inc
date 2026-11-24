@@ -85,7 +85,18 @@ static void clarity_effect_sound(ClarityEffect e,bool broadcast,SfxId explosionS
     else play_sfx_at(explosionSound,e.pos,-1,3,1);
     if(broadcast)clarity_net_event(e);
 }
+static SfxId lab_next_voice(int voice);
 static void clarity_effect(ClarityEffect e,bool broadcast) {
+    if (e.kind==CLARITY_WEAPON_SOUND) {
+        play_sfx_at(SFX_LAB_FIRST+e.type,e.pos,e.attacker,2,1);
+        return;
+    }
+    if (e.kind==CLARITY_ROCKET_BLAST) {
+        if (broadcast) clarity_net_event(e);
+        e.kind=2;
+        clarity_effect_sound(e,false,lab_next_voice(LAB_BOOM));
+        return;
+    }
     clarity_effect_sound(e,broadcast,SFX_EXPLOSION);
 }
 static void combat_audio_event(int kind,int slot) {

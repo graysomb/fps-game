@@ -20,7 +20,7 @@ static uint32_t clarityNextId=1;
 static float clarityClock,swarmHintTimer,swarmPulseTimer;
 static Vector3 swarmHints[MAX_COMBATANTS];
 static bool swarmHintActive[MAX_COMBATANTS];
-enum { CLARITY_SIGHT_GROWL=5, CLARITY_PLAYER_HURT };
+enum { CLARITY_SIGHT_GROWL=5, CLARITY_PLAYER_HURT, CLARITY_WEAPON_SOUND, CLARITY_ROCKET_BLAST };
 static void combat_audio_event(int kind,int slot);
 static void update_exposed_audio(void);
 static void clarity_reset(void);

@@ -2494,11 +2494,13 @@ static void shutdown_sfx(void)
     if (!sfxReady) {
         return;
     }
-    atomic_store(&labChargeLevel,0);
-    lab_release_sustain(&labBeam);
-    lab_release_sustain(&labContact);
+    for (int i=0;i<MAX_PLAYERS;i++) {
+        atomic_store(&labChargeLevel[i],0);
+        lab_release_sustain(&labBeam[i]);
+        lab_release_sustain(&labContact[i]);
+        UnloadAudioStream(labChargeStream[i]);
+    }
     for (int n=0; n<32; ++n) lab_release_sustain(&labMotors[n]);
-    UnloadAudioStream(labChargeStream);
     clarity_audio_shutdown();
     shutdown_game_music();
     for (int i = 0; i < SFX_COUNT; ++i) {
@@ -9510,7 +9512,7 @@ static void ResetGame(void) {
     fp_new_run();
     memset(holograms,0,sizeof(holograms));hologramReceiveTick=0;
     clarity_reset();
-    eq_reset_all();equipmentLab=false;labPrototype=false;
+    eq_reset_all();equipmentLab=false;labPrototype=true;
     enemy_cleanup(true);
     worldFloorHalfSize=(!useCustomMap && (currentWorldType==WORLD_TYPE_CROSSCUT ||
         (gameMode==GAME_MODE_FIREFIGHT && (firefightFoundry||firefightPractice))))?32.0f:20.0f;
@@ -10801,19 +10803,19 @@ static bool dynamic_voxel_glued_to_static(int voxel_idx)
     return glue_cluster_has_static_support(glueClusterIndices, cluster_count);
 }
 
-static bool lab_audio_available(void);
+static bool weapon_audio_enabled(void);
 static void lab_play_voice(int voice,Vector3 pos,int source);
 
 static void lab_voxel_contact(Voxel *v, Vector3 pos)
 {
     v->labImpactPending=false;
-    if (labPrototype && lab_audio_available()) lab_play_voice(LAB_FRACTURE,world_wrap(pos),v->owner);
+    if (weapon_audio_enabled()) lab_play_voice(LAB_FRACTURE,world_wrap(pos),v->owner);
 }
 
 static void lab_check_voxel_landing(int index)
 {
     Voxel *v=&voxels[index];
-    if (!labPrototype || !lab_audio_available()) {v->labImpactPending=false;return;}
+    if (!weapon_audio_enabled()) {v->labImpactPending=false;return;}
     for (int n=0;n<8;n++) {
         Particle *p=v->particles[n];
         if (!p) continue;
@@ -14254,7 +14256,7 @@ static bool spawn_default_projectile(int idx,Vector3 start,Vector3 dir,bool dyna
         shot->shotOrigin=start;
         shot->activator = idx;
         shot->isBullet = !dynamic;
-        shot->labImpactPending = dynamic && labPrototype && lab_audio_available() && !is_player_bot(idx);
+        shot->labImpactPending = dynamic && weapon_audio_enabled();
         shot->glueEligible = dynamic;
         shot->simulate = true;
         shot->activationBelief = dynamic ? 1.0f : ACTIVATION_TYPE0_BULLET_BELIEF;
@@ -14295,7 +14297,7 @@ static bool FireVoxel(int idx) {
         p->matter=fmaxf(0,p->matter-MATTER_SHOT_COST);p->isExposed=p->matter<=0;
         if(is_player_bot(idx))ai_shot_fired(idx);
         ai_gunfire(idx,p->pos);
-        if (labPrototype && lab_audio_available() && !is_player_bot(idx))
+        if (weapon_audio_enabled())
             lab_play_voice(dynamic_shot ? LAB_VOXEL : LAB_DEFAULT,p->pos,idx);
         else play_sfx_at(SFX_FIRE,p->pos,idx,1,1);
         weapon_visual_shot(&weaponVisuals[idx], now);
@@ -20663,7 +20665,7 @@ static void debug_console_exec(const char *line)
         for(int n=LAB_LOGS;n<=LAB_FOREST;n++)if(name && !strcmp(name,trapLabNames[n])){trap_lab_start(n);return;}
         debug_console_print("traplab logs | swing | pit | tower | forest | reset");return;
     }
-    if (strcmp(cmd, "weaponlab") == 0) {eq_lab();debug_console_print("Weapon lab: pickups on left, targets ahead, panels on right. Try weaponaudio prototype.");return;}
+    if (strcmp(cmd, "weaponlab") == 0) {eq_lab();debug_console_print("Weapon lab: pickups on left, targets ahead, panels on right. Compare with weaponaudio original.");return;}
     if (strcmp(cmd,"controls")==0){debugConsoleOpen=false;ct_open();return;}
     if (strcmp(cmd, "help") == 0) {
         debug_console_print("give shield|glob|glock|dmr|gravity|igloo; cycle grenades: D-pad Down / Tab / ;");

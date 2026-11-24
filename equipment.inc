@@ -154,6 +154,11 @@ static bool lab_audio_available(void)
     return equipmentLab && enemyLab && gameState == GAME_STATE_PLAYING && netTransport.role == NET_ROLE_OFFLINE;
 }
 
+// The legacy mix is selectable only for offline Weapon Lab comparisons.
+static bool weapon_audio_enabled(void)
+{
+    return !lab_audio_available() || labPrototype;
+}
 static SfxId lab_next_voice(int voice)
 {
     unsigned take = labTake[voice]++ % LAB_VARIANTS;
@@ -174,22 +179,36 @@ static void eq_rocket_blast(EquipmentRocket rocket){
         }else eq_damage(rocket.owner,j,damages[j],true,DEATH_ROCKET,rocket.pos);
         if(eq_hostile(rocket.owner,j))players[j].vel=v_add(players[j].vel,v_mul(v_norm(world_delta(players[j].pos,rocket.pos)),damages[j]*.1f));
     }
-    SfxId boom = labPrototype && lab_audio_available() ? lab_next_voice(LAB_BOOM) : SFX_EXPLOSION;
-    hologram_blast(rocket.pos,4,100);clarity_effect_sound((ClarityEffect){.id=clarityNextId++,.kind=2,.pos=rocket.pos,.attacker=rocket.owner},true,boom);
+    int kind = weapon_audio_enabled() ? CLARITY_ROCKET_BLAST : 2;
+    hologram_blast(rocket.pos,4,100);clarity_effect((ClarityEffect){.id=clarityNextId++,.kind=kind,.pos=rocket.pos,.attacker=rocket.owner},true);
 }
+static bool weapon_audio_active_player(int i)
+{
+    return i<activePlayers && equipment[i].initialized && players[i].respawn_timer<=0 &&
+           gameState==GAME_STATE_PLAYING && !ff_input_blocked(i) && !(enemyLab && enemyLabPaused);
+}
+
 static void lab_update_charge(void)
 {
     if (!sfxReady) return;
-    int level = 0;
-    if (labPrototype && lab_audio_available() && sfxEnabled && eq_usable(0) &&
-        eq_gun(0) == EQ_RAIL && equipment[0].charge > 0 &&
-        (players[0].matter > 0 || equipment[0].charge >= eqRailCharge))
-        level = 1 + (int)(1000 * equipment[0].charge / eqRailCharge);
-    static double lastCharge;
-    if (level) lastCharge = GetTime();
-    atomic_store(&labChargeLevel,level);
-    if (level && !IsAudioStreamPlaying(labChargeStream)) PlayAudioStream(labChargeStream);
-    if (!level && GetTime()-lastCharge > .05 && IsAudioStreamPlaying(labChargeStream)) StopAudioStream(labChargeStream);
+    static double lastCharge[MAX_PLAYERS];
+    for (int i=0;i<MAX_PLAYERS;i++) {
+        Equipment *e=&equipment[i];
+        int level=0;
+        float volume=0,pan=.5f;
+        if (sfxEnabled && weapon_audio_enabled() && weapon_audio_active_player(i) &&
+            eq_gun(i)==EQ_RAIL && e->charge>0 && (players[i].matter>0 || e->charge>=eqRailCharge) &&
+            clarity_spatial_mix(players[i].pos,&volume,&pan))
+            level=1+(int)(1000*e->charge/eqRailCharge);
+        atomic_store(&labChargeLevel[i],level);
+        AudioStream stream=labChargeStream[i];
+        if (level) {
+            lastCharge[i]=GetTime();
+            SetAudioStreamVolume(stream,volume);
+            SetAudioStreamPan(stream,pan);
+            if (!IsAudioStreamPlaying(stream)) PlayAudioStream(stream);
+        } else if (GetTime()-lastCharge[i]>.05 && IsAudioStreamPlaying(stream)) StopAudioStream(stream);
+    }
 }
 
 static void lab_sustain(Sound *instance,SfxId id,bool active,Vector3 pos,float pitch)
@@ -211,12 +230,14 @@ static void lab_update_audio(void)
 {
     lab_update_charge();
     if (!sfxReady) return;
-    bool enabled=labPrototype && lab_audio_available() && sfxEnabled && !enemyLabPaused;
-    Equipment *e=&equipment[0];
-    bool cutting=enabled && eq_usable(0) && eq_gun(0)==EQ_CUTTER && e->held &&
-                 e->switchTime<=0 && players[0].matter>0;
-    lab_sustain(&labBeam,SFX_LAB_BEAM,cutting,players[0].pos,1);
-    lab_sustain(&labContact,SFX_LAB_SIZZLE,cutting && e->beamContact,e->beamEnd,1);
+    bool enabled=weapon_audio_enabled() && sfxEnabled && gameState==GAME_STATE_PLAYING && !(enemyLab && enemyLabPaused);
+    for (int i=0;i<MAX_PLAYERS;i++) {
+        Equipment *e=&equipment[i];
+        bool cutting=enabled && weapon_audio_active_player(i) && eq_gun(i)==EQ_CUTTER && e->held &&
+                     e->switchTime<=0 && players[i].matter>0;
+        lab_sustain(&labBeam[i],SFX_LAB_BEAM,cutting,players[i].pos,1);
+        lab_sustain(&labContact[i],SFX_LAB_SIZZLE,cutting && e->beamContact,e->beamEnd,1);
+    }
     for (int n=0;n<32;n++) {
         EquipmentRocket *r=&eqRockets[n];
         if (!r->active && !labMotors[n].frameCount) continue;
@@ -227,12 +248,17 @@ static void lab_update_audio(void)
 
 static void lab_play_voice(int voice, Vector3 pos, int source)
 {
-    play_sfx_at(lab_next_voice(voice),pos,source,2,1);
+    if (netTransport.role==NET_ROLE_CLIENT) return; // Clients play the authoritative event.
+    SfxId sound=lab_next_voice(voice);
+    play_sfx_at(sound,pos,source,2,1);
+    if (netTransport.role==NET_ROLE_HOST)
+        clarity_net_event((ClarityEffect){.id=clarityNextId++,.kind=CLARITY_WEAPON_SOUND,
+                          .type=sound-SFX_LAB_FIRST,.pos=pos,.attacker=source});
 }
 
 static void eq_fire_audio(int gun, Vector3 pos, int source)
 {
-    if (labPrototype && lab_audio_available()) {
+    if (weapon_audio_enabled()) {
         int voice;
         switch (gun) {
         case EQ_SHOTGUN: voice=LAB_SHOTGUN; break;
@@ -339,7 +365,7 @@ static void eq_command(int i,const NetInputCommand *c,float dt){
             if(eq_actor_ray(i,ray,&stop)<0 && blocked)cut|=eq_cut(i,ray,eqGuns[gun].range);
         }
         if(shieldContact)e->cutTime=0;
-        if(cut){if (!(labPrototype && lab_audio_available())) play_sfx_at(SFX_FIRE,p->pos,i,1,1.6f);ai_gunfire(i,p->pos);}
+        if(cut){if (!(weapon_audio_enabled())) play_sfx_at(SFX_FIRE,p->pos,i,1,1.6f);ai_gunfire(i,p->pos);}
         eq_spend(i,eqGuns[gun].cost*step);
     }else e->cutTime=0;
     e->held=held;

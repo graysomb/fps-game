@@ -1,4 +1,4 @@
-// Run with "original" or "prototype" and an output path for stereo f32le at 48 kHz.
+// Run with "live", "original", or "prototype" and an output path for stereo f32le at 48 kHz.
 #define FIREFIGHT_TESTING
 #define main fps_application_main
 #include "../fps_ray.c"
@@ -49,10 +49,10 @@ static void second_weapon_sequence(int tick,bool prototype)
     eq_tick(1.f/60);
     lab_update_audio();
     if(prototype){
-        if(tick==42)assert(labBeam.frameCount && !labContact.frameCount);
-        if(tick==66)assert(labContact.frameCount);
-        if(tick==125)assert(!labContact.frameCount);
-        if(tick==142)assert(!labBeam.frameCount);
+        if(tick==42)assert(labBeam[0].frameCount && !labContact[0].frameCount);
+        if(tick==66)assert(labContact[0].frameCount);
+        if(tick==125)assert(!labContact[0].frameCount);
+        if(tick==142)assert(!labBeam[0].frameCount);
         if(tick==194)assert(labMotors[0].frameCount);
         if(tick==285)assert(!labMotors[0].frameCount && labTake[LAB_BOOM]==1);
     }
@@ -124,11 +124,12 @@ int main(int argc,char **argv)
     players[0].pos=(Vector3){0,2,0};
     combatantLife[0]=LIFE_ALIVE;
     eq_reset(0);
-    enemyLab=equipmentLab=true;
+    bool live=!strcmp(argv[1],"live");
+    enemyLab=equipmentLab=!live;
     enemyLabPaused=false;
-    bool prototype=!strcmp(argv[1],"prototype");
-    debug_console_exec(prototype?"weaponaudio prototype":"weaponaudio original");
-    assert(labPrototype==prototype);
+    bool prototype=live || !strcmp(argv[1],"prototype");
+    if(!live) debug_console_exec(prototype?"weaponaudio prototype":"weaponaudio original");
+    assert(weapon_audio_enabled()==prototype);
     double started=GetTime();
     AttachAudioMixedProcessor(capture);
     for(int tick=0;tick<seconds*60;tick++){
@@ -162,7 +163,7 @@ int main(int argc,char **argv)
             eq_command(0,&(NetInputCommand){.held=age<length?NET_INPUT_FIRE:0},1.f/60);
             lab_update_charge();
             if(prototype && age==length)assert(labTake[LAB_RAIL]==before+(n>=2));
-            if(n==1 && age==10)assert(!atomic_load(&labChargeLevel));
+            if(n==1 && age==10)assert(!atomic_load(&labChargeLevel[0]));
         }
         ex_tick(1.f/60);
         if(tick>=924 && tick<1160 && (tick-924)%22==0)

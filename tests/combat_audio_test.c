@@ -79,6 +79,21 @@ int main(void) {
     WaitTime(.36);play_sfx_at(SFX_SIGHT_GROWL,players[4].pos,4,2,1);
     double firstGrowl=lastGrowl;assert(GetTime()-firstGrowl<.05);
     play_sfx_at(SFX_SIGHT_GROWL,players[4].pos,5,2,1);assert(lastGrowl==firstGrowl);
+    activePlayers=firefightHumans=2;
+    for(int i=0;i<2;i++){
+        eq_reset(i);equipment[i].gun[0]=EQ_RAIL;equipment[i].charge=.35f;
+        players[i].respawn_timer=0;players[i].matter=50;players[i].isExposed=false;
+    }
+    lab_update_audio();
+    assert(IsAudioStreamPlaying(labChargeStream[0]) && IsAudioStreamPlaying(labChargeStream[1]));
+    netTransport.role=NET_ROLE_CLIENT;netPlayerPresent[0]=netPlayerPresent[1]=true;
+    equipment[1].gun[0]=EQ_CUTTER;equipment[1].held=equipment[1].beamContact=true;
+    equipment[1].beamEnd=players[1].pos;
+    lab_update_audio();
+    assert(atomic_load(&labChargeLevel[0])>0 && !atomic_load(&labChargeLevel[1]));
+    assert(IsSoundPlaying(labBeam[1]) && IsSoundPlaying(labContact[1]));
+    equipment[1].held=false;gameState=GAME_STATE_MENU;WaitTime(.06);lab_update_audio();
+    assert(!labBeam[1].frameCount && !labContact[1].frameCount && !IsAudioStreamPlaying(labChargeStream[0]));
     DetachAudioMixedProcessor(capture_mix);shutdown_sfx();CloseWindow();
     puts("Stereo, damage, warning, local ownership and growl rearm passed");
 }

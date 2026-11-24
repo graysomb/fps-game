@@ -113,7 +113,7 @@ static bool go_arsenal_tick(float dt,float distance,bool busy){
             for(int n=0;n<32;n++)if(!eqRockets[n].active){
                 eqRockets[n]=(EquipmentRocket){true,MAX_PLAYERS,v_add(head,v_mul(dir,1)),v_mul(dir,22),5};fired=true;break;}
             goArsenal.rocketWindup=0;goArsenal.rocketTimer=fired?15:1;
-            if(fired){goArsenal.rockets++;play_sfx_at(SFX_FIRE,head,MAX_PLAYERS,2,.55f);}
+            if(fired){goArsenal.rockets++;if(weapon_audio_enabled())lab_play_voice(LAB_LAUNCH,head,MAX_PLAYERS);else play_sfx_at(SFX_FIRE,head,MAX_PLAYERS,2,.55f);}
         }return true;
     }
     if(goArsenal.rocketWindup>0){goArsenal.rocketWindup=0;goArsenal.rocketTimer=1;}
@@ -126,7 +126,7 @@ static bool go_arsenal_tick(float dt,float distance,bool busy){
     float phase=(goArsenal.bullets*2.399963f),radius=tanf(4*DEG2RAD)*sqrtf(((goArsenal.bullets*37)%101)/100.f);
     dir=v_norm(v_add(dir,v_add(v_mul(right,cosf(phase)*radius),v_mul(up,sinf(phase)*radius))));
     if(spawn_default_projectile(MAX_PLAYERS,at,dir,false)){
-        goArsenal.shot[side]=goFight.time;goArsenal.bullets++;goArsenal.burst++;play_sfx_at(SFX_FIRE,at,MAX_PLAYERS,1,1);
+        goArsenal.shot[side]=goFight.time;goArsenal.bullets++;goArsenal.burst++;if(weapon_audio_enabled())lab_play_voice(LAB_DEFAULT,at,MAX_PLAYERS);else play_sfx_at(SFX_FIRE,at,MAX_PLAYERS,1,1);
         if(goArsenal.burst==3){goArsenal.burst=0;goArsenal.side^=1;goArsenal.gunTimer=2;}else goArsenal.gunTimer=1.f/3;
     }else goArsenal.gunTimer=.2f;
     return true;

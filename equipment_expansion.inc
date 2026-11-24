@@ -106,7 +106,7 @@ static void ex_tick(float dt){
         bool floor=ray.direction.y<0 && ray.position.y+ray.direction.y*length<0;if(floor){length=-ray.position.y/ray.direction.y;actor=-1;}
         bool duck=ducks_ray(ray,length,.06f,-1,false);
         g->pos=world_wrap(v_add(ray.position,v_mul(ray.direction,length)));
-        if ((actor>=0 || wall || floor || duck) && labPrototype && lab_audio_available())
+        if ((actor>=0 || wall || floor || duck) && weapon_audio_enabled())
             lab_play_voice(LAB_SPLAT,g->pos,g->owner);
         if(actor>=0){if(eq_hostile(g->owner,actor)&&players[actor].invuln_timer<=0&&enemy_core_open(actor)){
                 eq_damage(g->owner,actor,eqGuns[EQ_GLOB].damage,false,DEATH_GLOB,ray.position);
