@@ -1918,7 +1918,7 @@ typedef enum {
     SFX_SHIELD_BREAK,
     SFX_STEP_1, SFX_STEP_2, SFX_STEP_3, SFX_SQUEAK,
     SFX_PLAYER_HURT, SFX_SIGHT_GROWL, SFX_EXPOSED,
-    SFX_COUNT
+    SFX_LAB_FIRST, SFX_COUNT = SFX_LAB_FIRST + 16
 } SfxId;
 
 static Sound sfxSounds[SFX_COUNT];
@@ -2406,6 +2406,7 @@ static void update_game_music(void)
     }
 }
 
+#include "weapon_audio.inc"
 static void init_sfx(void)
 {
     if (sfxReady) {
@@ -2477,6 +2478,7 @@ static void init_sfx(void)
     sfxSounds[SFX_EXPOSED]=LoadSoundFromWave(wave);UnloadWave(wave);
     wave=make_hologram_squeak();
     sfxSounds[SFX_SQUEAK]=LoadSoundFromWave(wave);UnloadWave(wave);
+    lab_audio_init();
     sfxReady = true;
     init_game_music();
 }
@@ -2487,6 +2489,8 @@ static void shutdown_sfx(void)
     if (!sfxReady) {
         return;
     }
+    atomic_store(&labChargeLevel,0);
+    UnloadAudioStream(labChargeStream);
     clarity_audio_shutdown();
     shutdown_game_music();
     for (int i = 0; i < SFX_COUNT; ++i) {
@@ -9497,7 +9501,7 @@ static void ResetGame(void) {
     fp_new_run();
     memset(holograms,0,sizeof(holograms));hologramReceiveTick=0;
     clarity_reset();
-    eq_reset_all();equipmentLab=false;
+    eq_reset_all();equipmentLab=false;labPrototype=false;
     enemy_cleanup(true);
     worldFloorHalfSize=(!useCustomMap && (currentWorldType==WORLD_TYPE_CROSSCUT ||
         (gameMode==GAME_MODE_FIREFIGHT && (firefightFoundry||firefightPractice))))?32.0f:20.0f;
@@ -20579,6 +20583,16 @@ static void debug_console_exec(const char *line)
         for(int g=0;name && g<EQ_GUN_COUNT;g++)if(!strcasecmp(name,eqGuns[g].name)){equipment[local].gun[equipment[local].selected]=g;equipment[local].switchTime=eqSwitchSeconds;aim_cancel(local);debug_console_printf("Equipped %s",eqGuns[g].name);return;}
         debug_console_print("give shield|glob|glock|dmr|gravity|igloo (or existing gun name)");return;
     }
+    if (!strcmp(cmd,"weaponaudio")) {
+        const char *mode = strtok(NULL," \t");
+        if (!lab_audio_available()) debug_console_print("Open the offline Weapon Lab first.");
+        else if (mode && (!strcmp(mode,"original") || !strcmp(mode,"prototype"))) {
+            labPrototype = !strcmp(mode,"prototype");
+            lab_update_charge();
+            debug_console_printf("Weapon Lab audio: %s",mode);
+        } else debug_console_print("weaponaudio original|prototype");
+        return;
+    }
     if(!strcmp(cmd,"traplab")){
         const char *name=strtok(NULL," \t");
         if(netTransport.role!=NET_ROLE_OFFLINE){debug_console_print("Trap Lab requires offline play");return;}
@@ -20586,7 +20600,7 @@ static void debug_console_exec(const char *line)
         for(int n=LAB_LOGS;n<=LAB_FOREST;n++)if(name && !strcmp(name,trapLabNames[n])){trap_lab_start(n);return;}
         debug_console_print("traplab logs | swing | pit | tower | forest | reset");return;
     }
-    if (strcmp(cmd, "weaponlab") == 0) {eq_lab();debug_console_print("Weapon lab: pickups on left, targets ahead, panels on right.");return;}
+    if (strcmp(cmd, "weaponlab") == 0) {eq_lab();debug_console_print("Weapon lab: pickups on left, targets ahead, panels on right. Try weaponaudio prototype.");return;}
     if (strcmp(cmd,"controls")==0){debugConsoleOpen=false;ct_open();return;}
     if (strcmp(cmd, "help") == 0) {
         debug_console_print("give shield|glob|glock|dmr|gravity|igloo; cycle grenades: D-pad Down / Tab / ;");
@@ -21747,6 +21761,7 @@ int main(int argc, char **argv) {
 #endif
         ct_frame(GetFrameTime());
         update_game_music();
+        lab_update_charge();
         update_exposed_audio();
         voxel_ca_update(GetTime());
         voxel_render_frame++;

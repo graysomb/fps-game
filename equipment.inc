@@ -166,6 +166,42 @@ static void eq_rocket_blast(EquipmentRocket rocket){
     }
     hologram_blast(rocket.pos,4,100);clarity_effect((ClarityEffect){.id=clarityNextId++,.kind=2,.pos=rocket.pos,.attacker=rocket.owner},true);
 }
+static bool lab_audio_available(void)
+{
+    return equipmentLab && enemyLab && gameState == GAME_STATE_PLAYING && netTransport.role == NET_ROLE_OFFLINE;
+}
+
+static void lab_update_charge(void)
+{
+    if (!sfxReady) return;
+    int level = 0;
+    if (labPrototype && lab_audio_available() && sfxEnabled && eq_usable(0) &&
+        eq_gun(0) == EQ_RAIL && equipment[0].charge > 0 &&
+        (players[0].matter > 0 || equipment[0].charge >= eqRailCharge))
+        level = 1 + (int)(1000 * equipment[0].charge / eqRailCharge);
+    static double lastCharge;
+    if (level) lastCharge = GetTime();
+    atomic_store(&labChargeLevel,level);
+    if (level && !IsAudioStreamPlaying(labChargeStream)) PlayAudioStream(labChargeStream);
+    if (!level && GetTime()-lastCharge > .05 && IsAudioStreamPlaying(labChargeStream)) StopAudioStream(labChargeStream);
+}
+
+static void lab_play_voice(int voice, Vector3 pos, int source)
+{
+    unsigned take = labTake[voice]++ % LAB_VARIANTS;
+    play_sfx_at(SFX_LAB_FIRST + voice*LAB_VARIANTS + take,pos,source,2,1);
+}
+
+static void eq_fire_audio(int gun, Vector3 pos, int source)
+{
+    if (labPrototype && lab_audio_available() && (gun==EQ_SHOTGUN || gun==EQ_RAIL || gun==EQ_GLOB)) {
+        lab_play_voice(gun==EQ_SHOTGUN ? LAB_SHOTGUN : gun==EQ_RAIL ? LAB_RAIL : LAB_GLOB,pos,source);
+        return;
+    }
+    float pitch = gun==EQ_RAIL ? .65f : gun==EQ_ROCKET ? .55f : gun==EQ_GLOCK ? 1.25f :
+                  gun==EQ_GLOB ? 1.6f : gun==EQ_DMR ? .95f : .8f;
+    play_sfx_at(SFX_FIRE,pos,source,2,pitch);
+}
 #include "equipment_expansion.inc"
 static bool eq_fire(int i){
     if(!eq_usable(i))return false;int gun=eq_gun(i);if(gun<EQ_SHOTGUN || gun==EQ_CUTTER || gun==EQ_RAIL)return false;
@@ -191,7 +227,7 @@ static bool eq_fire(int i){
         // Start at the eye and sweep from it: no spawning through nearby walls.
         eqRockets[free]=(EquipmentRocket){true,i,p->pos,v_mul(f,eqRocketSpeed),eqRocketLife};
     }
-    eq_spend(i,def->cost);e->cooldown[gun]=def->cooldown;weapon_visual_shot(&weaponVisuals[i],(float)GetTime());play_sfx_at(SFX_FIRE,p->pos,i,2,gun==EQ_ROCKET?.55f:gun==EQ_GLOCK?1.25f:gun==EQ_GLOB?1.6f:gun==EQ_DMR?.95f:.8f);ai_gunfire(i,p->pos);return true;
+    eq_spend(i,def->cost);e->cooldown[gun]=def->cooldown;weapon_visual_shot(&weaponVisuals[i],(float)GetTime());eq_fire_audio(gun,p->pos,i);ai_gunfire(i,p->pos);return true;
 }
 static void eq_command(int i,const NetInputCommand *c,float dt){
     if(i<0 || i>=MAX_COMBATANTS)return;Equipment *e=&equipment[i];eq_gun(i);
@@ -239,7 +275,7 @@ static void eq_command(int i,const NetInputCommand *c,float dt){
                 if(hitActor)eq_damage(i,j,eqGuns[gun].damage,true,DEATH_RAIL,p->pos);
             }
             eq_rail_terrain(i,ray);
-            eq_trace(player_weapon_pose(i,false).muzzle,v_add(p->pos,v_mul(ray.direction,shieldStop)),EQ_RAIL,i);e->charge=0;e->cooldown[gun]=eqGuns[gun].cooldown;weapon_visual_shot(&weaponVisuals[i],(float)GetTime());play_sfx_at(SFX_FIRE,p->pos,i,2,.65f);ai_gunfire(i,p->pos);
+            eq_trace(player_weapon_pose(i,false).muzzle,v_add(p->pos,v_mul(ray.direction,shieldStop)),EQ_RAIL,i);e->charge=0;e->cooldown[gun]=eqGuns[gun].cooldown;weapon_visual_shot(&weaponVisuals[i],(float)GetTime());eq_fire_audio(gun,p->pos,i);ai_gunfire(i,p->pos);
         }
         if(!held)eq_cancel_charge(i);
     }else if(gun==EQ_CUTTER && held && p->matter>0){
