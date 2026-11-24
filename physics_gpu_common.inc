@@ -89,6 +89,9 @@ typedef struct {
     GpuBuffer static_collider_buffer;
     GpuBuffer refcount_buffer;
     GpuBuffer control_buffer;
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+    GpuBuffer skeleton_input[PBD_SUBSTEPS];
+#endif
     GpuBuffer clone_parent_buffer;
     GpuBuffer dispatch_buffer;
     GpuBuffer topology_buffer;
@@ -255,6 +258,9 @@ static void gpu_physics_release_resources(void) {
     gpu_buffer_destroy(&gpuPhysics.static_collider_buffer);
     gpu_buffer_destroy(&gpuPhysics.refcount_buffer);
     gpu_buffer_destroy(&gpuPhysics.control_buffer);
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+    for(int step=0;step<PBD_SUBSTEPS;step++)gpu_buffer_destroy(&gpuPhysics.skeleton_input[step]);
+#endif
     gpu_buffer_destroy(&gpuPhysics.clone_parent_buffer);
     gpu_buffer_destroy(&gpuPhysics.dispatch_buffer);
     gpu_buffer_destroy(&gpuPhysics.topology_buffer);
@@ -1272,7 +1278,7 @@ static bool gpu_refresh_tethers(void) {
     return true;
 }
 
-static bool gpu_upload_skeleton(void){
+static bool gpu_upload_skeleton(int step){
     int count=skeletonConstraintCount;
     if(!count)return true;
     if(count>gpuSkeletonCapacity){
@@ -1290,16 +1296,28 @@ static bool gpu_upload_skeleton(void){
         g->parameters[0]=c->compliance;g->parameters[1]=c->limit;
     }
     size_t required=32+(size_t)count*sizeof(*gpuSkeletonStage);
-    bool grew=gpuPhysics.control_buffer.capacity<required;
-    if(!gpu_buffer_ensure(&gpuPhysics.control_buffer,required))return false;
-    if(grew)gpu_buffer_update(&gpuPhysics.control_buffer,&gpuPhysics.control_stage,16,0);
-    int header[4]={count,0,0,0};gpu_buffer_update(&gpuPhysics.control_buffer,header,16,16);
-    if(count)gpu_buffer_update(&gpuPhysics.control_buffer,gpuSkeletonStage,(size_t)count*sizeof(*gpuSkeletonStage),32);
-    gpu_bind_world_buffers();return true;
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+    GpuBuffer *input=&gpuPhysics.skeleton_input[step];
+    if(required>input->capacity)return false;
+    /* The skeleton kernel reads the same particle-count prefix as the other
+     * kernels. Snapshot that prefix alongside this substep's immutable pose. */
+    gpu_buffer_update(input,&gpuPhysics.control_stage,sizeof(GpuControlState),0);
+#else
+    (void)step;
+    GpuBuffer *input=&gpuPhysics.control_buffer;
+    bool grew=input->capacity<required;
+    if(!gpu_buffer_ensure(input,required))return false;
+    if(grew)gpu_buffer_update(input,&gpuPhysics.control_stage,sizeof(GpuControlState),0);
+    gpu_bind_world_buffers();
+#endif
+    int header[4]={count,0,0,0};
+    gpu_buffer_update(input,header,sizeof header,16);
+    gpu_buffer_update(input,gpuSkeletonStage,(size_t)count*sizeof(*gpuSkeletonStage),32);
+    return true;
 }
-static bool gpu_dispatch_substep(float sub_dt) {
+static bool gpu_dispatch_substep(float sub_dt,int step) {
     golem_physics_tick(sub_dt);
-    if(!gpu_upload_skeleton())return false;
+    if(!gpu_upload_skeleton(step))return false;
     gpu_set_uniforms(sub_dt);
     if(!gpu_dispatch(GPU_MODE_PREPARE_INDIRECT,1))return false;
     if(worldPeriodic && (!gpu_dispatch_indirect(GPU_MODE_WRAP_GATHER) || !gpu_dispatch_indirect(GPU_MODE_WRAP_APPLY)))return false;
@@ -1314,7 +1332,16 @@ static bool gpu_dispatch_substep(float sub_dt) {
     for (int it = 0; ok && it < (skeletonConstraintCount ? 12 : PBD_CONSTRAINT_ITERS); ++it) {
         ok = gpu_dispatch(it<PBD_CONSTRAINT_ITERS?GPU_MODE_VGS:GPU_MODE_SKELETON_SHAPE, gpuPhysics.dynamic_voxel_count) &&
              gpu_dispatch_indirect(GPU_MODE_APPLY);
-        if(ok && skeletonConstraintCount)ok=gpu_dispatch(GPU_MODE_SKELETON,skeletonConstraintCount) && gpu_dispatch_indirect(GPU_MODE_APPLY);
+        if(ok && skeletonConstraintCount){
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+            fps_metal_bind_buffer(FPS_GPU_BUFFER_CONTROL,(void *)gpuPhysics.skeleton_input[step].id);
+#endif
+            ok=gpu_dispatch(GPU_MODE_SKELETON,skeletonConstraintCount);
+#if defined(__APPLE__) && defined(FPS_GPU_METAL)
+            fps_metal_bind_buffer(FPS_GPU_BUFFER_CONTROL,(void *)gpuPhysics.control_buffer.id);
+#endif
+            ok=ok && gpu_dispatch_indirect(GPU_MODE_APPLY);
+        }
     }
     ok = ok && gpu_dispatch_indirect_offset(GPU_MODE_STATIC_COLLISIONS, 16) &&
          gpu_dispatch(GPU_MODE_WAKE_GATHER, gpuPhysics.dynamic_voxel_count) &&
@@ -1362,6 +1389,17 @@ static int gpu_physics_steps(float dt, int fixed_steps) {
     }
     float sub_dt = dt / (float)PBD_SUBSTEPS;
 #if defined(__APPLE__) && defined(FPS_GPU_METAL)
+    if(goActive && !goCombatDead){
+        /* Animated fixed ticks are submitted individually. golem_physics_tick
+         * can discard welds within a tick but cannot add any after prepare. */
+        size_t max_constraints=(size_t)goWeldCount*4+GM_COUNT*4+(size_t)goCount*8;
+        for(int step=0;step<PBD_SUBSTEPS;step++){
+            if(!gpu_buffer_ensure(&gpuPhysics.skeleton_input[step],32+max_constraints*sizeof(*gpuSkeletonStage))){
+                gpu_set_step_failure(PHYSICS_GPU_FAILURE_TRANSIENT,"Metal skeleton input allocation failed");
+                return 0;
+            }
+        }
+    }
     if (!fps_metal_begin_batch()) {
         gpu_set_step_failure(PHYSICS_GPU_FAILURE_TRANSIENT, "Metal failed to begin a compute batch");
         return 0;
@@ -1373,14 +1411,7 @@ static int gpu_physics_steps(float dt, int fixed_steps) {
     bool ok = true;
     for (int fixed = 0; ok && fixed < fixed_steps; ++fixed) {
         for (int step = 0; step < PBD_SUBSTEPS; ++step) {
-            #if defined(__APPLE__) && defined(FPS_GPU_METAL)
-            /* Targets live in a shared buffer. Finish its previous use before
-             * rewriting it; normal gameplay retains batched submission. */
-            if(goActive && (fixed || step)) {
-                if(!fps_metal_end_batch() || !fps_metal_begin_batch()){ok=false;break;}
-            }
-#endif
-            if (!gpu_dispatch_substep(sub_dt)) { ok = false; break; }
+            if (!gpu_dispatch_substep(sub_dt,step)) { ok = false; break; }
         }
         if (ok) ok = gpu_rebuild_topology_if_needed();
     }

@@ -3754,7 +3754,14 @@ static inline size_t hashVoxelKey(uint64_t k)
 // Forward declarations
 static void static_table_insert(int x, int y, int z, int idx);
 
+/* Lazy bounds for blocks of static voxel slots. Registration and swap-removal
+ * invalidate only the affected leaves between full static-grid rebuilds. */
+enum { CRUSH_LEAF_SIZE = 32 };
+typedef struct { bool valid; uint32_t members; BoundingBox bounds; } CrushLeaf;
+static CrushLeaf crushLeaves[(MAX_VOXELS + CRUSH_LEAF_SIZE - 1) / CRUSH_LEAF_SIZE];
+
 static void init_static_hash(void) {
+    memset(crushLeaves, 0, sizeof crushLeaves);
     memset(static_table, 0, sizeof(static_table));
     for (int i = 0; i < voxel_count; i++) {
         Voxel *v = &voxels[i];
@@ -3933,6 +3940,7 @@ static void dynamic_table_remove(int x, int y, int z) {
 
 static void voxel_table_register(Voxel *v, int idx)
 {
+    if (!v->simulate) crushLeaves[idx / CRUSH_LEAF_SIZE].valid = false;
     int minx, maxx, miny, maxy, minz, maxz;
     voxel_compute_bounds(v, &minx, &maxx, &miny, &maxy, &minz, &maxz);
     v->min_gx = minx; v->max_gx = maxx;
@@ -3964,6 +3972,7 @@ static void voxel_table_unregister(const Voxel *v)
     if (!v) {
         return;
     }
+    if (!v->simulate) crushLeaves[(v - voxels) / CRUSH_LEAF_SIZE].valid = false;
     int minx, maxx, miny, maxy, minz, maxz;
     voxel_grid_bounds(v, &minx, &maxx, &miny, &maxy, &minz, &maxz);
     if (!v->simulate) static_cache_dirty_bounds(minx,maxx,miny,maxy,minz,maxz);
@@ -6043,6 +6052,7 @@ static bool restore_dynamic_snapshot(const Voxel *snapshot)
     }
     table_cache_invalidate();
     voxel_table_register(&voxels[voxel_count], voxel_count);
+    dynamic_voxels_dirty = true;
     ++voxel_count;
     return true;
 }

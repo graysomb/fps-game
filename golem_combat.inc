@@ -117,20 +117,74 @@ static void go_route(Vector3 target){
 }
 /* Clear only overlapping structure blocks, before the solver builds its contacts.
  * The floor, projectiles, enemy equipment and every golem-owned block are excluded. */
-static void go_crush_structures(const BoundingBox *contacts,int count){
-    if(!goCombatEnabled || goCombatDead || netTransport.role==NET_ROLE_CLIENT)return;
-    bool changed=false;
-    for(int n=voxel_count-1;n>=0;n--){
-        Voxel *v=&voxels[n];if(v->golemOwned || v->isBullet || voxel_is_fluid(v))continue;
-        BoundingBox box={v->particles[0]->pos,v->particles[0]->pos};
-        for(int k=1;k<8;k++){box.min=Vector3Min(box.min,v->particles[k]->pos);box.max=Vector3Max(box.max,v->particles[k]->pos);}
-        if(box.max.y<=.08f)continue;
-        bool touching=false;for(int c=0;c<count;c++)if(CheckCollisionBoxes(contacts[c],box)){touching=true;break;}
-        if(!touching || go_held(n) || enemy_equipment_owner(n)>=0 || get_goliath_owner_of_voxel(n)>=0)continue;
-        if(!v->simulate && v->owner==-1)recycle_queue_push(v);
-        remove_voxel_index(n);changed=true;
+static BoundingBox go_voxel_bounds(const Voxel *v){
+    BoundingBox box={v->particles[0]->pos,v->particles[0]->pos};
+    for(int k=1;k<8;k++){
+        box.min=Vector3Min(box.min,v->particles[k]->pos);
+        box.max=Vector3Max(box.max,v->particles[k]->pos);
     }
-    if(changed)goFight.routeTimer=0;
+    return box;
+}
+
+static bool go_crush_contact(int index,BoundingBox region,const BoundingBox *contacts,int count){
+    Voxel *v=&voxels[index];
+    if(v->golemOwned || v->isBullet || voxel_is_fluid(v))return false;
+    BoundingBox box=go_voxel_bounds(v);
+    if(box.max.y<=.08f || !CheckCollisionBoxes(region,box))return false;
+    for(int c=0;c<count;c++)if(CheckCollisionBoxes(contacts[c],box))return true;
+    return false;
+}
+
+static void go_refresh_crush_leaf(CrushLeaf *leaf,int first){
+    leaf->members=0;
+    for(int n=first;n<voxel_count && n<first+CRUSH_LEAF_SIZE;n++){
+        if(voxels[n].simulate)continue;
+        BoundingBox box=go_voxel_bounds(&voxels[n]);
+        if(box.max.y<=.08f)continue;
+        if(leaf->members){
+            leaf->bounds.min=Vector3Min(leaf->bounds.min,box.min);
+            leaf->bounds.max=Vector3Max(leaf->bounds.max,box.max);
+        }else leaf->bounds=box;
+        leaf->members|=UINT32_C(1)<<(n-first);
+    }
+    leaf->valid=true;
+}
+
+static int go_crush_candidates(const BoundingBox *contacts,int count,int *hits){
+    BoundingBox region=contacts[0];
+    for(int c=1;c<count;c++){
+        region.min=Vector3Min(region.min,contacts[c].min);
+        region.max=Vector3Max(region.max,contacts[c].max);
+    }
+    int used=0;
+    for(int first=0;first<voxel_count;first+=CRUSH_LEAF_SIZE){
+        CrushLeaf *leaf=&crushLeaves[first/CRUSH_LEAF_SIZE];
+        if(!leaf->valid)go_refresh_crush_leaf(leaf,first);
+        if(!leaf->members || !CheckCollisionBoxes(region,leaf->bounds))continue;
+        for(int n=first;n<voxel_count && n<first+CRUSH_LEAF_SIZE;n++){
+            if((leaf->members & (UINT32_C(1)<<(n-first))) && go_crush_contact(n,region,contacts,count))hits[used++]=n;
+        }
+    }
+    ensure_dynamic_voxels();
+    for(int i=0;i<dynamic_voxel_count;i++){
+        int n=dynamic_voxels[i];
+        if(go_crush_contact(n,region,contacts,count))hits[used++]=n;
+    }
+    qsort(hits,used,sizeof(*hits),activation_index_descending);
+    return used;
+}
+
+static void go_crush_structures(const BoundingBox *contacts,int count){
+    if(!count || !goCombatEnabled || goCombatDead || netTransport.role==NET_ROLE_CLIENT)return;
+    static int hits[MAX_VOXELS];
+    int used=go_crush_candidates(contacts,count,hits);
+    for(int i=0;i<used;i++){
+        int n=hits[i];
+        if(go_held(n) || enemy_equipment_owner(n)>=0 || get_goliath_owner_of_voxel(n)>=0)continue;
+        if(!voxels[n].simulate && voxels[n].owner==-1)recycle_queue_push(&voxels[n]);
+        remove_voxel_index(n);
+        goFight.routeTimer=0;
+    }
 }
 static void go_crush_body_contacts(void){
     BoundingBox contacts[GM_COUNT];bool used[GM_COUNT]={0};

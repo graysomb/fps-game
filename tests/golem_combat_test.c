@@ -194,6 +194,8 @@ static void integration_tests(void){
 static void fallback_attack(void){
     fixture();goFight.target=0;goFight.aim=go_target_center(0);assert(go_arsenal_grab());go_begin_attack(2);
     for(int a=0;a<3;a++)goFight.cooldown[a]=100;goArsenal.gunTimer=goArsenal.rocketTimer=100;
+    /* Arm the injected failure only on the strike being checked. */
+    gpu_forced_validation_failure_consumed=true;
     bool injected=false;
     for(int f=0;f<240;f++){
         if(!injected&&goFight.state==GC_STRIKE){gpu_forced_validation_failure_consumed=false;injected=true;}
@@ -220,7 +222,49 @@ static void previews(void){
         }
     }
 }
+/* Reference the original descending full scan, including inclusive face and
+ * corner contacts. Repeating the query exercises the cached static bounds. */
+static void compare_crush_candidates(BoundingBox *contacts,int count){
+    static int hits[MAX_VOXELS];
+    int used=go_crush_candidates(contacts,count,hits),matched=0;
+    for(int n=voxel_count-1;n>=0;n--){
+        Voxel *v=&voxels[n];
+        if(v->golemOwned || v->isBullet || voxel_is_fluid(v))continue;
+        BoundingBox box=go_voxel_bounds(v);
+        if(box.max.y<=.08f)continue;
+        for(int c=0;c<count;c++)if(CheckCollisionBoxes(contacts[c],box)){
+            assert(matched<used && hits[matched]==n);matched++;break;
+        }
+    }
+    assert(matched==used);
+}
+static void crush_query_test(void){
+    fixture();
+    Vector3 origin={16,2,16};
+    int scrap=addVoxel(16,2,16,false,true,GRAY,0);
+    voxels[scrap].sleeping=true;
+    int held=addVoxel(16,2,16,false,true,GRAY,0);
+    int equipment=addVoxel(16,2,16,false,true,GRAY,0);
+    tetherTag[held]=1;
+    assert(enemy_attach(MAX_PLAYERS+1,equipment,(Vector3){0},0));
+    enemy_pin(equipment,origin,(Vector3){0});
+    uint64_t heldId=voxels[held].identity,equipmentId=voxels[equipment].identity;
+    int wall=addVoxel(17,2,16,true,false,GRAY,0);
+    BoundingBox edge=go_voxel_bounds(&voxels[wall]);
+    BoundingBox queries[]={{origin,origin},{edge.min,edge.min},{edge.max,edge.max}};
+    compare_crush_candidates(queries,3);
+    compare_crush_candidates(queries,3);
+    remove_voxel_index(scrap); /* Last static slot moves into the sleeping slot. */
+    compare_crush_candidates(queries,3);
+    int moving=addVoxel(24,4,16,false,true,GRAY,0);
+    for(int k=0;k<8;k++)voxels[moving].particles[k]->pos=origin;
+    compare_crush_candidates(queries,3);
+    go_crush_structures(queries,3);
+    assert(enemy_voxel(heldId)>=0 && enemy_voxel(equipmentId)>=0);
+    compare_crush_candidates(queries,3);
+}
 static void obstacle_tests(void){
+    crush_query_test();
     fixture();int bodies=attached();Vector3 origin=goFight.position;
     int x=(int)floorf(origin.x/VOXEL_SIZE),z=(int)floorf(origin.z/VOXEL_SIZE);
     int wall=add_static_voxel_at_grid(x,3,z,GRAY,0);uint64_t wallId=voxels[wall].identity;

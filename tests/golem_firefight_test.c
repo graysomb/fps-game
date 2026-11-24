@@ -10,6 +10,8 @@ static void setup(void){
 int main(int argc,char **argv){
  assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(640,360,"Firefight golem regression");init_pbd_thread_pool();assert(initialize_physics_backend());
  setup();Vector3 initial=goFight.position;
+ /* Start the ranged attack while the target is still outside melee range. */
+ goArsenal.rocketTimer=0;
  players[0].pos=v_add(initial,(Vector3){initial.x>0?-9:9,1,0});
  for(int f=0;f<1800;f++){go_combat_prepare(1.f/60);golem_physics_tick(1.f/60);go_combat_commit(1.f/60);}
  fprintf(stderr,"Golem cells=%d bullets=%d rockets=%d movement=%.2f\n",goCount,goArsenal.bullets,goArsenal.rockets,Vector3Distance(initial,goFight.position));
