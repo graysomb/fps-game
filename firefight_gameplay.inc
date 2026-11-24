@@ -67,6 +67,19 @@ static bool ff_revive_held(int i) {
 #endif
 }
 
+static bool ff_between_waves(void) {
+    return firefightWaveState==FIREFIGHT_STATE_LOOT || firefightWaveState==FIREFIGHT_STATE_INTERMISSION;
+}
+
+static void ff_restore_casualties(void) {
+    for(int i=0;i<firefightHumans;i++) {
+        if(combatantLife[i]==LIFE_DOWNED || combatantLife[i]==LIFE_WAITING || combatantLife[i]==LIFE_SPECTATING) {
+            ff_restore_human(i,MATTER_MAX_DEFAULT);
+            deathNotices[i].until=0;
+        }
+    }
+}
+
 static void ff_update_coop(float dt) {
     if(netTransport.role==NET_ROLE_CLIENT)return;
     bool alive=false, pending=false;
@@ -109,7 +122,7 @@ static void ff_update_coop(float dt) {
         alive |= combatantLife[i]==LIFE_ALIVE;
         pending |= combatantLife[i]==LIFE_WAITING;
     }
-    if(!alive && !pending) {
+    if(!alive && !pending && !ff_between_waves()) {
         for(int i=0;i<firefightHumans;i++) if(combatantLife[i]==LIFE_DOWNED) {
             players[i].deaths++; ff_resolve_death(i);
             pending |= combatantLife[i]==LIFE_WAITING;
@@ -119,6 +132,7 @@ static void ff_update_coop(float dt) {
 }
 
 static void start_firefight_wave(int wave_number) {
+    if(ff_between_waves()) ff_restore_casualties();
     camp_end();
     enemy_cleanup(true);
     firefightWave=wave_number<1?1:wave_number;
@@ -253,6 +267,7 @@ static void update_firefight_logic(float dt) {
             ready &= prepReady[i];
         }
         if(firefightIntermissionTimer<=0 || ready){
+            ff_restore_casualties();
             firefightWaveState=FIREFIGHT_STATE_INTERMISSION;
             firefightIntermissionTimer=FF_PREP_SECONDS;
             for(int i=0;i<firefightHumans;i++){prepReady[i]=false;prepMenuOpen[i]=true;}

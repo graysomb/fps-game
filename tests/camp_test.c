@@ -1,10 +1,5 @@
 #define FIREFIGHT_TESTING
 #include "raylib.h"
-static int pressedKey,pressedButton;
-static bool testKey(int key){return key!=0 && key==pressedKey;}
-static bool testButton(int device,int button){(void)device;return button!=0 && button==pressedButton;}
-#define IsKeyPressed testKey
-#define IsGamepadButtonPressed testButton
 #define main fps_application_main
 #include "../fps_ray.c"
 #undef main
@@ -14,7 +9,7 @@ static void fixture(int humans){
     netTransport.role=NET_ROLE_OFFLINE;gameMode=GAME_MODE_FIREFIGHT;firefightFoundry=true;firefightPractice=false;enemyLab=false;
     multiplayerActivePlayers=humans;ResetGame();gameState=GAME_STATE_PLAYING;firefightEndless=true;
     for(int i=0;i<MAX_PLAYERS;i++)playerInput[i]=INPUT_TYPE_KEYBOARD;
-    pressedKey=pressedButton=0;
+    memset(ctState,0,sizeof(ctState));
 }
 static void timing(void){
     fixture(2);Vector3 before[2]={players[0].pos,players[1].pos};
@@ -39,30 +34,55 @@ static void timing(void){
     for(int i=0;i<2;i++)prepReady[i]=true;update_firefight_logic(4.1f);
     assert(firefightWave==4 && !camp.active && ff_upgrades_maxed());
 }
+static void press_ready(int seat){
+    ctState[seat][CT_READY].pressed=true;
+    update_firefight_logic(.1f);
+    ctState[seat][CT_READY].pressed=false;
+}
 static void skip_loot(void){
     fixture(2);firefightRound=ff_rounds(firefightWave);ff_wave_complete();
-    pressedKey=KEY_SPACE;update_firefight_logic(.1f);pressedKey=0;
+    press_ready(0);
     assert(prepReady[0] && !prepReady[1] && firefightWaveState==FIREFIGHT_STATE_LOOT);
-    pressedKey=KEY_SPACE;update_firefight_logic(.1f);pressedKey=0;
+    press_ready(0);
     assert(!prepReady[0] && firefightWaveState==FIREFIGHT_STATE_LOOT);
-    pressedKey=KEY_RIGHT_SHIFT;update_firefight_logic(.1f);pressedKey=0;
+    press_ready(1);
     assert(!prepReady[0] && prepReady[1] && firefightWaveState==FIREFIGHT_STATE_LOOT);
-    playerInput[0]=INPUT_TYPE_GAMEPAD;pressedButton=GAMEPAD_BUTTON_RIGHT_FACE_DOWN;
-    update_firefight_logic(.1f);pressedButton=0;
+    playerInput[0]=INPUT_TYPE_GAMEPAD;press_ready(0);
     assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION && camp.active && firefightIntermissionTimer==FF_PREP_SECONDS);
     for(int i=0;i<2;i++)assert(!prepReady[i] && prepMenuOpen[i]);
     update_firefight_logic(5.1f);assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION);
-    fixture(1);firefightRound=ff_rounds(firefightWave);ff_wave_complete();pressedKey=KEY_SPACE;update_firefight_logic(.1f);pressedKey=0;
+    fixture(1);firefightRound=ff_rounds(firefightWave);ff_wave_complete();press_ready(0);
     assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION);
     fixture(2);firefightRound=ff_rounds(firefightWave);ff_wave_complete();combatantLife[1]=LIFE_UNUSED;
-    pressedKey=KEY_SPACE;update_firefight_logic(.1f);pressedKey=0;
+    press_ready(0);
     assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION);
     fixture(1);firefightRound=ff_rounds(firefightWave);ff_wave_complete();netTransport.role=NET_ROLE_CLIENT;
-    NetInputCommand c={0};pressedKey=KEY_SPACE;ex_input(0,&c);pressedKey=0;
-    assert(c.pressed&NET_INPUT_PREP_READY);
-    c=(NetInputCommand){0};playerInput[0]=INPUT_TYPE_GAMEPAD;pressedButton=GAMEPAD_BUTTON_RIGHT_FACE_DOWN;
-    ex_input(0,&c);pressedButton=0;assert(c.pressed&NET_INPUT_PREP_READY);
+    ctCommandValid[0]=false;ctState[0][CT_READY].pressed=true;
+    assert(ct_command(0,0,.1f).pressed&NET_INPUT_PREP_READY);
+    playerInput[0]=INPUT_TYPE_GAMEPAD;ctCommandValid[0]=false;
+    assert(ct_command(0,0,.1f).pressed&NET_INPUT_PREP_READY);
     netTransport.role=NET_ROLE_OFFLINE;
+}
+static void gather_revives(void){
+    fixture(2);firefightRound=ff_rounds(firefightWave);ff_wave_complete();
+    players[1].invuln_timer=0;kill_player(1,4,false,false);
+    assert(combatantLife[1]==LIFE_DOWNED);
+    players[0].matter=63;
+    prepReady[0]=prepReady[1]=true;
+    update_firefight_logic(.01f);
+    assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION && combatantLife[1]==LIFE_ALIVE);
+    assert(players[1].respawn_timer==0 && players[1].matter==MATTER_MAX_DEFAULT && players[0].matter==63);
+
+    fixture(1);firefightRound=ff_rounds(firefightWave);ff_wave_complete();firefightTeamLives=0;
+    players[0].invuln_timer=0;kill_player(0,4,false,false);
+    assert(combatantLife[0]==LIFE_SPECTATING);
+    update_firefight_logic(1);assert(firefightWaveState==FIREFIGHT_STATE_LOOT);
+    update_firefight_logic(FF_LOOT_SECONDS);
+    assert(gameState==GAME_STATE_PLAYING && combatantLife[0]==LIFE_ALIVE && players[0].respawn_timer==0);
+    players[0].invuln_timer=0;kill_player(0,4,false,false);
+    update_firefight_logic(FF_PREP_SECONDS);
+    assert(firefightWaveState==FIREFIGHT_STATE_ACTIVE && firefightWave==2);
+    assert(combatantLife[0]==LIFE_ALIVE && players[0].respawn_timer==0 && firefightTeamLives==0);
 }
 static void placement(void){
     for(int humans=1;humans<=4;humans++){
@@ -132,7 +152,7 @@ static void captures(void){
 }
 int main(int argc,char **argv){
     assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Camp validation");
-    init_pbd_thread_pool();assert(initialize_physics_backend());timing();skip_loot();placement();captures();
+    init_pbd_thread_pool();assert(initialize_physics_backend());timing();skip_loot();gather_revives();placement();captures();
     for(int i=0;i<4;i++)weapon_bloom_unload(&weaponBlooms[i]);shutdown_world_visuals();weapon_renderer_shutdown();character_renderer_shutdown();
     clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Camp checks passed");return 0;
 }
