@@ -49,7 +49,16 @@ int main(int argc,char**argv){bool late=argc>1&&!strcmp(argv[1],"late-host");boo
  else {netRequestedLocalPlayers=1;net_prepare_client_local_players(1);assert(net_transport_connect(&netTransport,"127.0.0.1",27942));}
  double start=GetTime(),at=-1;uint32_t seq=0;bool replaced=false,captured=false,failed=false,restored=false,vote=false,lootVote=false;uint32_t original=0;
  while(GetTime()-start<30){net_transport_pump(&netTransport,receive,net_on_connect,NULL);double now=GetTime();
-  if((host&&joined)||(!host&&netWorldReady)){if(at<0)at=now;float age=now-at;
+  if((host&&joined)||(!host&&netWorldReady)){if(at<0){
+    at=now;
+    uint64_t signature=0;int count=0;
+    for(int i=0;i<voxel_count;i++)if(spawn_glass(i)){
+     Vector3 p=voxels[i].pos;
+     uint64_t key=mortonKey(floorf(p.x/VOXEL_SIZE),floorf(p.y/VOXEL_SIZE),floorf(p.z/VOXEL_SIZE));
+     signature^=net_identity_hash(key);count++;
+    }
+    assert(count>0);printf("Spawn shield cells %d hash %llu\n",count,(unsigned long long)signature);
+   }float age=now-at;
    if(host){
     eq_tick(1.f/60);net_host_tick();
     if(!failed)for(int i=16;i<=17;i++){UpdateBot(i,1.f/60);net_integrate_player(&players[i],1.f/60,true);}

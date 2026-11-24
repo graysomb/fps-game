@@ -50,6 +50,7 @@ static void foundry_select_traps(void){
     foundryCrackedBay=foundry_select_corner(foundryCrackedBay);
     foundryCrackedPillar=foundry_select_corner(foundryCrackedPillar);
 }
+enum { FOUNDRY_DECK_X=10, FOUNDRY_DECK_Z=8 };
 static void buildFoundryHoldout(void) {
     if(!firefightPractice && (!fpRestoring || foundryCrackedBay<0 || foundryCrackedPillar<0)){
         foundry_select_traps();
@@ -57,7 +58,7 @@ static void buildFoundryHoldout(void) {
     int crackedBay=foundryCrackedBay,crackedPillar=foundryCrackedPillar;
     Color stone={82,102,117,255}, trim={127,173,178,255}, support={235,155,45,255};
     /* Raised holdout, with stairs on north and south and an open lower ring. */
-    foundry_box(-10,10,0,3,-8,8,stone);
+    foundry_box(-FOUNDRY_DECK_X,FOUNDRY_DECK_X,0,3,-FOUNDRY_DECK_Z,FOUNDRY_DECK_Z,stone);
     for(int step=0;step<4;step++) {
         foundry_box(-4,4,0,step,9+(3-step)*2,10+(3-step)*2,trim);
         foundry_box(-4,4,0,step,-10-(3-step)*2,-9-(3-step)*2,trim);

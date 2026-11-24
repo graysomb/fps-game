@@ -75,7 +75,7 @@ static void supplies_and_glass(void) {
  }
  assert(glass>0 && tested);
  // On a flat arena, cross each opening using the same body sweeps as enemy navigation.
- clear_world_voxels();init_static_hash();players[0].pos=(Vector3){0,1,0};firefightHumans=1;fp_cache_place();
+ clear_world_voxels();init_static_hash();firefightFoundry=false;players[0].pos=(Vector3){0,1,0};firefightHumans=1;fp_cache_place();
  Vector3 low=fpCacheOrigin,high=fpCacheOrigin;
  for(int v=0;v<voxel_count;v++)if(spawn_glass(v)){low=Vector3Min(low,voxels[v].pos);high=Vector3Max(high,voxels[v].pos);}
  Vector3 middle=v_mul(v_add(low,high),.5f);middle.y=1;
@@ -92,6 +92,73 @@ static void supplies_and_glass(void) {
  ai_nav_search(4,goal);assert(aiNavigation[4].count>0);
  assert(Vector3Distance(aiNavigation[4].points[aiNavigation[4].count-1],goal)<1);
  puts("Walk-up supplies, independent entry latches, glass collision and sight passed");
+}
+static void foundry_shield_center(int humans){
+ fixture(humans);
+ Vector3 low={100,100,100},high={-100,-100,-100};
+ for(int v=0;v<voxel_count;v++)if(spawn_glass(v)){
+  low=Vector3Min(low,voxels[v].pos);high=Vector3Max(high,voxels[v].pos);
+ }
+ // The Foundry deck spans [-9.5,10.5] by [-7.5,8.5] in world coordinates.
+ assert(low.x< -9.5f && high.x>10.5f && low.z< -7.5f && high.z>8.5f);
+ assert((low.x+high.x)*.5f==.5f && (low.z+high.z)*.5f==.5f);
+ for(int i=0;i<FP_RULE_COUNT;i++){
+  Vector3 p=fpCachePositions[i],opposite=fpCachePositions[FP_RULE_COUNT-1-i];
+  assert(fabsf(p.x-fpCachePositions[i%4].x)<.01f);
+  assert(fabsf(p.z-fpCachePositions[i-i%4].z)<.01f);
+  assert(fabsf(p.x+opposite.x-low.x-high.x)<.01f);
+  assert(fabsf(p.z+opposite.z-low.z-high.z)<.01f);
+ }
+ for(int axis=0;axis<2;axis++)for(int side=0;side<2;side++){
+  int wall=(int)floorf((axis?(side?high.z:low.z):(side?high.x:low.x))/VOXEL_SIZE);
+  for(int t=-3;t<=4;t++)for(int y=0;y<12;y++)
+   assert(!spawn_glass(table_get_static_only(axis?t:wall,y,axis?wall:t)));
+ }
+}
+// Check the entire flat perimeter, including the image across a periodic seam.
+static void uniform_shield(bool periodic,Vector3 spawn){
+ clear_world_voxels();clear_all_chunks();init_static_hash();
+ firefightFoundry=false;worldPeriodic=periodic;worldFloorHalfSize=32;firefightHumans=1;players[0].pos=spawn;fp_cache_place();
+ int lo[2]={INT_MAX,INT_MAX},hi[2]={INT_MIN,INT_MIN},cells=0;
+ for(int v=0;v<voxel_count;v++)if(spawn_glass(v)){
+  Vector3 p=v_add(spawn,world_delta(voxels[v].pos,spawn));
+  int g[2]={floorf(p.x/VOXEL_SIZE),floorf(p.z/VOXEL_SIZE)};
+  for(int a=0;a<2;a++){if(g[a]<lo[a])lo[a]=g[a];if(g[a]>hi[a])hi[a]=g[a];}
+  cells++;
+ }
+ assert(cells>0);
+ if(periodic){
+  assert(lo[0]+hi[0]+1==2*lroundf(spawn.x/VOXEL_SIZE));
+  assert(lo[1]+hi[1]+1==2*lroundf(spawn.z/VOXEL_SIZE));
+ }
+ for(int a=0;a<2;a++)for(int side=0;side<2;side++){
+  int wall=side?hi[a]:lo[a],across=1-a,width=hi[across]-lo[across]+1;
+  assert(width%2==0 && width>8);
+  for(int k=0;k<width;k++){
+   int t=lo[across]+k,x=a?t:wall,z=a?wall:t;
+   bool gate=k>=(width-8)/2 && k<(width+8)/2;
+   for(int y=0;y<4;y++)assert(spawn_glass(table_get_static_only(x,y,z))==!gate);
+   assert(table_get_static_only(x,4,z)<0);
+   Vector3 mid=world_wrap((Vector3){(x+.5f)*VOXEL_SIZE,1.25f,(z+.5f)*VOXEL_SIZE});
+   for(int sign=-1;sign<=1;sign+=2){
+    Vector3 dir=a?(Vector3){0,0,sign}:(Vector3){sign,0,0};
+    Ray ray={world_wrap(v_sub(mid,v_mul(dir,.4f))),dir};
+    assert(first_voxel_hit_detailed(ray,.8f,-1,true,NULL)==!gate);
+   }
+  }
+ }
+ for(int n=0;n<FP_RULE_COUNT;n++){
+  Vector3 p=v_add(spawn,world_delta(fpCachePositions[n],spawn));
+  assert(p.x>(lo[0]+1)*VOXEL_SIZE && p.x<hi[0]*VOXEL_SIZE);
+  assert(p.z>(lo[1]+1)*VOXEL_SIZE && p.z<hi[1]*VOXEL_SIZE);
+ }
+ Vector3 dir={1,0,0},wall=world_wrap((Vector3){(lo[0]+.5f)*VOXEL_SIZE,1.25f,(lo[1]+2.5f)*VOXEL_SIZE});
+ Ray ray={world_wrap(v_sub(wall,dir)),dir};VoxelHit hit;
+ assert(first_voxel_hit_detailed(ray,2,-1,true,&hit) && spawn_glass(hit.id));
+ ex_dmr_cut(0,ray,hit);assert(table_get_static_only(hit.x,hit.y,hit.z)<0);
+ assert(!first_voxel_hit_detailed(ray,2,-1,true,NULL));
+ ray.position.z=world_wrap(v_add(ray.position,(Vector3){0,0,VOXEL_SIZE})).z;
+ assert(eq_cut(0,ray,2));assert(!first_voxel_hit_detailed(ray,2,-1,true,NULL));
 }
 static void controller_cache(void){
  fixture(1);debug_console_exec("wave 4");clear_pickups();
@@ -148,7 +215,7 @@ static void glass_visible_at_rest(void) {
 }
 int main(int argc,char **argv){
  assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Firefight cache regression");init_pbd_thread_pool();assert(initialize_physics_backend());
- timers();duplicates();cache();supplies_and_glass();glass_visible_at_rest();console_unlocks();controller_cache();
+ foundry_shield_center(1);foundry_shield_center(4);timers();duplicates();cache();supplies_and_glass();uniform_shield(false,(Vector3){23,1,24});uniform_shield(true,(Vector3){30,1,31});glass_visible_at_rest();console_unlocks();controller_cache();
  fixture(1);assert(weapon_renderer_init());fpUnlocked=(1u<<FP_RULE_COUNT)-1;drawViewPlayerIndex=0;
  Camera3D camera={.position=v_add(fpCacheOrigin,(Vector3){13,14,20}),.target=v_add(fpCacheOrigin,(Vector3){0,0,7}),.up={0,1,0},.fovy=55};
  RenderTexture2D preview=LoadRenderTexture(960,540);BeginTextureMode(preview);ClearBackground((Color){25,29,35,255});BeginMode3D(camera);DrawPlane((Vector3){0},(Vector2){80,80},DARKGRAY);fp_draw(WEAPON_COLOR);fp_draw(WEAPON_GLASS);EndMode3D();DrawText("FIREFIGHT SPAWN CACHE",20,20,24,SKYBLUE);EndTextureMode();Image previewImage=LoadImageFromTexture(preview.texture);ImageFlipVertical(&previewImage);ExportImage(previewImage,".build/firefight-cache-preview.png");UnloadImage(previewImage);UnloadRenderTexture(preview);
