@@ -127,9 +127,28 @@ static void console_unlocks(void){
  fixture(1);debug_console_exec("wave 1");assert(!fpUnlocked);
  puts("Console skips: earlier-wave unlocks, cache claims, nextwave, checkpoint persistence, idempotence and host authority passed");
 }
+static void glass_visible_at_rest(void) {
+ clear_world_voxels();clear_all_chunks();init_static_hash();
+ int id=add_static_voxel_at_grid(0,2,0,spawnGlassColor,0);
+ assert(id>=0);init_static_hash();
+ RenderTexture2D rt=LoadRenderTexture(80,80);
+ Vector3 center=voxels[id].pos;
+ const Vector3 views[]={{2,0,0},{-2,0,0},{0,0,2},{0,0,-2},{0,2,0},{0,-2,0}};
+ for(int i=0;i<6;i++){
+  Camera3D cam={.position=v_add(center,views[i]),.target=center,.up=i<4?(Vector3){0,1,0}:(Vector3){0,0,1},.fovy=45};
+  BeginTextureMode(rt);ClearBackground(BLACK);BeginMode3D(cam);
+  DrawVoxels(cam);draw_spawn_glass();
+  EndMode3D();EndTextureMode();
+  Image image=LoadImageFromTexture(rt.texture);Color pixel=GetImageColor(image,40,40);
+  assert(pixel.b>60 && pixel.b<150 && pixel.b>pixel.r+40);
+  UnloadImage(image);
+ }
+ UnloadRenderTexture(rt);
+ puts("Unhit glass transmits the background and shows its tint from all six sides");
+}
 int main(int argc,char **argv){
  assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Firefight cache regression");init_pbd_thread_pool();assert(initialize_physics_backend());
- timers();duplicates();cache();supplies_and_glass();console_unlocks();controller_cache();
+ timers();duplicates();cache();supplies_and_glass();glass_visible_at_rest();console_unlocks();controller_cache();
  fixture(1);assert(weapon_renderer_init());fpUnlocked=(1u<<FP_RULE_COUNT)-1;drawViewPlayerIndex=0;
  Camera3D camera={.position=v_add(fpCacheOrigin,(Vector3){13,14,20}),.target=v_add(fpCacheOrigin,(Vector3){0,0,7}),.up={0,1,0},.fovy=55};
  RenderTexture2D preview=LoadRenderTexture(960,540);BeginTextureMode(preview);ClearBackground((Color){25,29,35,255});BeginMode3D(camera);DrawPlane((Vector3){0},(Vector2){80,80},DARKGRAY);fp_draw(WEAPON_COLOR);fp_draw(WEAPON_GLASS);EndMode3D();DrawText("FIREFIGHT SPAWN CACHE",20,20,24,SKYBLUE);EndTextureMode();Image previewImage=LoadImageFromTexture(preview.texture);ImageFlipVertical(&previewImage);ExportImage(previewImage,".build/firefight-cache-preview.png");UnloadImage(previewImage);UnloadRenderTexture(preview);

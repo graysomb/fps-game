@@ -16712,12 +16712,14 @@ static Mesh build_mesh_from_patches(const Patch *patch_array, int count) {
             cols[(vofs+k)*4 + 3] = pt->col.a;
         }
         int iofs = p*6;
+        // iu x ju points toward +Z, -Y, or +X, depending on the plane.
+        bool forward = pt->positive != (pt->plane == 1);
         inds[iofs + 0] = vofs + 0;
-        inds[iofs + 1] = vofs + 1;
+        inds[iofs + 1] = vofs + (forward ? 1 : 3);
         inds[iofs + 2] = vofs + 2;
         inds[iofs + 3] = vofs + 0;
         inds[iofs + 4] = vofs + 2;
-        inds[iofs + 5] = vofs + 3;
+        inds[iofs + 5] = vofs + (forward ? 3 : 1);
     }
     mesh.vertexCount   = vCount;
     mesh.triangleCount = count * 2;
@@ -16961,7 +16963,11 @@ static void rebuild_chunk(VoxelChunk *chunk) {
     }
     int opaque=0;
     for(int n=0;n<count;n++) {
-        if(spawn_glass(result[n].voxelIndex))continue;
+        if(spawn_glass(result[n].voxelIndex)){
+            // Keep the serialized material swatch stable; tint only the visible pane.
+            result[n].col=(Color){58,179,220,106};
+            continue;
+        }
         Patch tmp=result[opaque];result[opaque++]=result[n];result[n]=tmp;
     }
     Mesh replacement=opaque?build_mesh_from_patches(result,opaque):(Mesh){0};
@@ -17967,6 +17973,17 @@ static void prepare_dynamic_voxel_transforms(void) {
 }
 
 // Draw all voxels via greedy mesh instead of per-voxel raycasting
+static void draw_spawn_glass(void) {
+    rlDrawRenderBatchActive();
+    rlDisableDepthMask();
+    for (int c=0;c<voxel_chunk_count;c++) {
+        VoxelChunk *chunk=&voxel_chunks[c];
+        if (chunk->in_use && chunk->glass.vertexCount)
+            DrawMesh(chunk->glass,greedyMaterial,MatrixIdentity());
+    }
+    rlEnableDepthMask();
+}
+
 static void DrawVoxels(Camera3D cam) {
     if (!instancingInitialized) {
         InitInstancing();
@@ -21014,13 +21031,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
                 draw_players();
                 if (drawWeaponModels) draw_remote_weapon_glass(i, imageCam.position);
                 draw_rat_visors(i,imageCam.position);
-                rlDrawRenderBatchActive();rlDisableDepthMask();
-                for(int c=0;c<voxel_chunk_count;c++) {
-                    VoxelChunk *chunk=&voxel_chunks[c];
-                    if(chunk->in_use && chunk->glass.vertexCount)
-                        DrawMesh(chunk->glass,greedyMaterial,MatrixIdentity());
-                }
-                rlDrawRenderBatchActive();rlEnableDepthMask();
+                draw_spawn_glass();
                 draw_pickup_models(imageCam,WEAPON_GLASS);fp_draw(WEAPON_GLASS);
                 camp_draw(imageCam,false);
                 drawViewPlayerIndex = -1;
@@ -22728,6 +22739,7 @@ int main(int argc, char **argv) {
                             DrawCubeWires(p->pos, PLAYER_SIZE,PLAYER_SIZE,PLAYER_SIZE, base_dark);
                         }
                         draw_rat_visors(-1,imageCam.position);
+                        draw_spawn_glass();
                     EndMode3D();
                     
                     }
