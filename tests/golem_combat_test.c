@@ -55,7 +55,8 @@ static void arsenal_tests(void){
 static void shield_weapon_tests(void){
     fixture();int part=GOLEM_ARM_R,v=goCells[goMount[part]].index;uint64_t id=voxels[v].identity;
     ShotgunImpact impacts[EQ_PELLETS];for(int n=0;n<EQ_PELLETS;n++)impacts[n]=(ShotgunImpact){.id=id,.direction={0,0,1},.distance=2};
-    eq_shotgun_impacts(0,impacts,EQ_PELLETS);assert(goShields[part].value==25);
+    eq_shotgun_impacts(0,impacts,EQ_PELLETS);assert(goShields[part].value==0 && enemy_voxel(id)>=0);
+    fixture();v=goCells[goMount[part]].index;id=voxels[v].identity;
     SwordWave wave={0};VoxelHit hit={.id=v};
     assert(!sword_cut_hit(0,&wave,hit));assert(goShields[part].value==0);
     recycleUpdateCounter++;assert(!sword_cut_hit(0,&wave,hit));assert(enemy_voxel(id)>=0);

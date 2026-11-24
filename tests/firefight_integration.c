@@ -89,12 +89,12 @@ int main(int argc,char **argv) {
     for(int i=0;i<3;i++)assert(combatantLife[i]==LIFE_WAITING);
     ff_update_coop(5.1f);assert(combatantLife[1]==LIFE_ALIVE);
     test_down(1);ff_update_coop(300);assert(combatantLife[1]==LIFE_DOWNED);
-    firefightWave=2;teamUpgrade=UPGRADE_THROW;teamUpgradeLevels[UPGRADE_THROW]=1;ff_wave_complete();
+    firefightWave=2;personalRanks[2][UPGRADE_SPEED]=1;ff_wave_complete();
     assert(combatantLife[1]==LIFE_ALIVE && players[1].matter==MATTER_MAX_DEFAULT);
-    assert(firefightTeamLives==1 && teamUpgradeLevels[UPGRADE_THROW]==1);
+    assert(firefightTeamLives==1 && personalRanks[2][UPGRADE_SPEED]==1);
     update_firefight_logic(FF_LOOT_SECONDS);
-    for(int i=0;i<4;i++){prepVotes[i]=UPGRADE_HARVEST;prepReady[i]=true;}
-    update_firefight_logic(5.1f);assert(firefightWave==3 && teamUpgrade==UPGRADE_HARVEST);
+    for(int i=0;i<4;i++){prepChoices[i]=i%3;prepReady[i]=true;}
+    update_firefight_logic(5.1f);assert(firefightWave==3 && ff_rank(0,UPGRADE_HARVEST)==1 && ff_capacity(1)==110 && players[1].matter==110 && ff_rank(2,UPGRADE_SPEED)==2);
     assert(ff_harvest_amount(0)==15 && ff_harvest_amount(4)==MATTER_MELEE_HARVEST);
     firefightWave=FF_WAVE_COUNT;firefightEndless=false;ff_wave_complete();assert(firefightWaveState==FIREFIGHT_STATE_VICTORY);
     firefightEndless=true;ff_wave_complete();assert(firefightWaveState==FIREFIGHT_STATE_LOOT);

@@ -23,10 +23,14 @@ capacity**, lasts eight seconds, and has a 15-second cooldown with no Matter cos
 It cannot attack, harvest, block projectiles, or grant kill rewards. Revive now uses
 **hold X / Square**; keyboard revive remains X/comma. Enemy Lab next-case is D-pad Right.
 
-Firefight votes accumulate team upgrade levels for the entire run. Build cost is
-`max(1, 10 / (1 + level))` (nine levels), harvest is `10 + 5 * level` (eight levels),
-and throw impulse is `1 + 0.25 * level` (eight levels). Voting shows current and next
-benefits, skips maxed choices, and stops once all upgrades are maxed. A rematch resets them.
+After each Firefight wave, each player chooses a personal upgrade. Every rank adds
+5 Matter per harvest, 10 Matter capacity and current Matter, or 5% movement speed.
+Each upgrade caps at eight ranks and persists through retries. A new run resets ranks.
+
+A drawn sword adds 25% movement speed. The shotgun fires eight 12.5-damage pellets.
+A fully charged railgun pierces cover and defeats every vulnerable non-boss on its
+line. Aim down sights to see hostiles through walls. Grapple a hostile to reel it in,
+or grapple a Goliath or boss to pull yourself toward it.
 
 Attached Goliath armor blocks regular bullets. Use melee, explosives, tethering, or
 thrown debris to remove it. The Foundry HUD identifies its two-support requirement,
@@ -90,7 +94,7 @@ close shield melee, and elevated Lobber fixtures. F4 resets the selected fixture
 `tools/validate_firefight.ps1` (and `-Gpu`) checks real structure flights, damage,
 supplies, inventory, events, and two-process LAN late join with dropped snapshots and
 duplicate inputs, alongside the existing Firefight regressions.
-LAN peers require protocol 14; use the same build on every machine.
+LAN peers require protocol 37; use the same build on every machine.
 
 ### Specialist enemies and Enemy Lab
 
@@ -124,16 +128,11 @@ console and focus loss release the cursor; leaving capture cancels a mouse-seat
 tether without throwing debris. Creative supports mouse aiming while keeping
 its existing editing keys. LAN mouse aim uses authoritative absolute angles.
 
-Hold the existing tether control while aiming at an opponent to lock on and drain
-Matter at twice your regular bullet damage per second. Actor drains use the normal
-8-unit tether range (gold upgrades still apply to voxel grabs). The lock follows
-the target within a 65-degree forward cone and breaks on release, cover, range,
-or death/downing. At empty Matter the link stays connected with a subdued beam,
-and draining resumes if the target regenerates Matter. It costs no Matter, grants none, cannot kill, has
-no movement effects and does not parry another tether. Foundry core protection
-still applies; an exposed core retains its final health point. A pulsing cyan beam
-and rotating contact rings distinguish draining from a normal voxel tether, with
-depth-aware bloom and a visible fallback when the shader is unavailable.
+Aim at a hostile within eight units and hold the tether control to grapple.
+Ordinary enemies and versus opponents are reeled toward the shooter. Goliaths,
+the Foundry boss and the golem anchor the line and pull the shooter toward them.
+Release the control to detach. Cover, excessive separation, or a downed target
+breaks the line. Actor grapples are free. Gold charges extend voxel grab range.
 
 Enemy AI in Firefight, Versus and Enemy Lab remembers specific attackers for four
 seconds, investigates their last observed position, and reacts to damage, shield
@@ -331,7 +330,7 @@ progression and integration regressions, including a separate-process Continue c
 `tests/firefight_progression_test.c` covers schedules, shared enemy combat, copy
 conservation, repeated checkpoint restoration and controller/keyboard settings.
 `tests/firefight_progression_lan.c` checks real host/client inventory transfer,
-carrier state, charging, wave votes, retry synchronization and stale input rejection.
+carrier state, charging, individual wave choices, retry synchronization and stale input rejection.
 
 After the last enemy dies, a 30-second loot period lets players explore and pick
 up dropped equipment before regrouping. A countdown shows when regrouping starts;
@@ -340,12 +339,10 @@ or `Right Shift` (keyboard seat 2) to toggle ready to skip looting. When everyon
 is ready, regrouping starts immediately. The HUD shows the vote count, and ready
 votes reset when preparation begins. This works in local and LAN sessions.
 Players then gather at the camp for a separate 30-second preparation period.
-Vote to increase the team's build, harvest, or throw
-upgrade level. Bonuses persist and stack across waves; ties default to building,
-or the next available upgrade when building is maxed. Everyone can
-ready to skip the remaining break after five seconds. Top face (keyboard `V`/`N`)
-toggles the vote panel so the normal combat bindings remain available for building
-and harvesting. The vote panel uses D-pad left/right and bottom face to ready;
+Choose a personal upgrade using D-pad left/right and bottom face to ready.
+Everyone can ready to skip the remaining break after five seconds. At timeout each
+player receives their highlighted upgrade. Top face (keyboard `V`/`N`) toggles the
+upgrade panel so combat bindings remain available for building and harvesting;
 keyboard players use their look keys and jump.
 
 Between waves, players gather facing a low-poly cooking pot on a short stand,
@@ -379,7 +376,7 @@ After building raylib with `build.ps1`, run `tools/validate_firefight.ps1` and
 also produce `.build/couch/fps_ray_cpu.exe` and
 `.build/couch/fps_ray_gpu.exe`, alongside the matching shaders and runtime. Run
 these from `.build/couch` (or run the normal game from the repository root).
-Tests cover wave scaling, votes, combatant
+Tests cover wave scaling, personal upgrades, combatant
 capacity, revives/reserves, solo play, tutorial progression, rendering layouts,
 and returning to PvP. `tools/validate_gpu_layout.py` checks shared shader layouts;
 Metal execution and real-controller couch play still require platform/device QA.
@@ -710,7 +707,7 @@ Matter; empty Matter does not remove equipment. Tether and melee remain free.
 Shotgun, cutter, railgun, rocket, sword and voxel launcher occupy weapon slots.
 Adhesive grenades and reinforced building are separate upgrades. Reinforced building
 places a solid reinforced 5x5x5 block for the same Matter cost as the standard
-3x3x3 block (normally 10, with Firefight discounts). Hold the build button to aim
+3x3x3 block (10 Matter). Hold the build button to aim
 a wireframe preview, then release to build. Invalid placement is red and spends
 nothing; menus, downing, focus loss, and device disconnect cancel the preview.
 The cutter has a 24-metre range and cuts 24 voxels/second for 4 Matter/second, with a thicker visible beam.
@@ -724,14 +721,13 @@ The luminous blade edge leads both swing directions; all viewports and LAN peers
 share the same swing direction and wave state.
 Invulnerability, friendly fire and closed Foundry cores retain their protection.
 Railgun shots bore through terrain along their 100-metre path and leave a luminous trail.
-Hold/release the railgun after charging; hold the cutter to cut. Railgun and rockets
-kill when their damage depletes Matter. Shotgun and cutter damage now also kills
+Hold to charge the railgun and release to defeat aligned non-boss hostiles. Bosses take 50 damage through their normal shield and core phases. Hold the cutter to cut. Rockets kill when their damage depletes Matter. Shotgun and cutter damage now also kills
 on Matter depletion, while retaining armor, cover, invulnerability and team protection. Equipment survives downs, revives and
 intermissions; true death and new matches reset it. Bots retain their old loadouts.
 Central tuning is in `equipment.h`.
 
 Shotgun pellets activate struck structures using dynamic-voxel impact resistance
-and push connected debris away from the shooter. Eight pellets deal up to 50
+and push connected debris away from the shooter. Eight pellets deal up to 100
 damage. A complete volley has the normal tether throw impulse, shared across
 the struck mass; partial hits contribute proportionally, without distance falloff. Each volley batches terrain activation and
 resolves all hits before removing cover; it cannot shoot through a wall it just

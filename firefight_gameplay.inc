@@ -2,19 +2,26 @@
 static int ffRemaining[FF_TYPE_COUNT], ffSpawnOrdinal;
 static float ffSpawnTimer, ffCleanupTimer;
 static int ffEntrance, ffEntrancePosition[2];
-static float ff_build_cost(int i) {return ff_bonus(i,UPGRADE_BUILD)?fmaxf(1,10.f/(1+teamUpgradeLevels[0])):MATTER_BUILD_COST;}
-static float ff_throw_multiplier(int i) {return ff_bonus(i,UPGRADE_THROW)?1+.25f*teamUpgradeLevels[2]:1;}
-static bool ff_upgrades_maxed(void) {return teamUpgradeLevels[0]>=9 && teamUpgradeLevels[1]>=8 && teamUpgradeLevels[2]>=8;}
-static int ff_upgrade_choice(int choice,int direction) {
-    for(int n=0;n<3;n++){choice=(choice+direction+3)%3;if(teamUpgradeLevels[choice]<teamUpgradeCaps[choice])return choice;}
+static float ff_build_cost(int i){(void)i;return MATTER_BUILD_COST;}
+static int ff_upgrade_choice(int i,int choice,int direction){
+    for(int n=0;n<3;n++){choice=(choice+direction+3)%3;if(personalRanks[i][choice]<8)return choice;}
     return -1;
 }
-static const char *ff_upgrade_label(int n) {
-    unsigned level=teamUpgradeLevels[n];
-    if(level>=teamUpgradeCaps[n])return TextFormat("%s Lv%u MAX",n==0?"Build":n==1?"Harvest":"Throw",level);
-    if(n==0)return TextFormat("Build Lv%u: %.2g -> %.2g Matter",level,fmaxf(1,10.f/(1+level)),fmaxf(1,10.f/(2+level)));
-    if(n==1)return TextFormat("Harvest Lv%u: %u -> %u Matter",level,10+5*level,15+5*level);
-    return TextFormat("Throw Lv%u: %.2gx -> %.2gx",level,1+.25f*level,1.25f+.25f*level);
+static const char *ff_upgrade_label(int i,int n){
+    if(n<0)return "All upgrades maxed";
+    const char *names[]={"Harvest","Total Matter","Speed"};
+    const char *effects[]={"+5 per harvest","+10 capacity and Matter","+5% movement"};
+    return TextFormat("%s Lv%u/8  %s",names[n],personalRanks[i][n],effects[n]);
+}
+static void ff_grant_wave_upgrades(void){
+    for(int i=0;i<firefightHumans;i++){
+        if(combatantLife[i]==LIFE_UNUSED)continue;
+        int n=prepChoices[i];
+        if(n<0 || n>=3 || personalRanks[i][n]>=8)n=ff_upgrade_choice(i,2,1);
+        if(n<0)continue;
+        personalRanks[i][n]++;
+        if(n==UPGRADE_CAPACITY){players[i].matterMax=ff_capacity(i);add_player_matter(&players[i],10);}
+    }
 }
 
 static EnemyType pick_firefight_enemy_type(int wave, int spawn_index) {
@@ -30,13 +37,13 @@ static void ff_restore_human(int i, float matter) {
     if(netTransport.role==NET_ROLE_HOST&&!netPlayerPresent[i]){combatantLife[i]=LIFE_UNUSED;p->respawn_timer=9999;return;}
     if(combatantLife[i]!=LIFE_DOWNED && !fp_active()) grenadeInventory[i]=1;
     p->pos=pick_player_spawn(i); p->death_pos=p->pos;
-    p->vel=(Vector3){0}; p->matter=matter; p->matterMax=MATTER_MAX_DEFAULT;
+    p->vel=(Vector3){0}; p->matter=matter; p->matterMax=ff_capacity(i);
     p->isExposed=false; p->respawn_timer=0; p->invuln_timer=2;
     p->last_damage_time=(float)GetTime();
     p->tetherHolding=p->goldTetherHolding=false; p->tetherVoxel=-1;
     p->meleeSwingActive=p->meleeSwingHitApplied=false;
     p->meleeKnockbackActive=false; p->onGround=false;
-    p->grappleAirborne=false;
+    p->grappleAirborne=false;p->actorGrappleTarget=0;
     combatantLife[i]=LIFE_ALIVE;
     reviveProgress[i]=0; reviveOwner[i]=-1;
 }
@@ -47,7 +54,7 @@ static void ff_resolve_death(int i) {
     eq_reset(i);
     players[i].goldTetherCharged=false;grenadeInventory[i]=fp_active()?0:1;
     if(enemyLab) {combatantLife[i]=LIFE_WAITING;players[i].respawn_timer=3;return;}
-    if(firefightPractice) { ff_restore_human(i,MATTER_MAX_DEFAULT); return; }
+    if(firefightPractice) { ff_restore_human(i,ff_capacity(i)); return; }
     if(firefightTeamLives>0) {
         firefightTeamLives--; combatantLife[i]=LIFE_WAITING;
         players[i].respawn_timer=PLAYER_RESPAWN_TIME;
@@ -74,7 +81,7 @@ static bool ff_between_waves(void) {
 static void ff_restore_casualties(void) {
     for(int i=0;i<firefightHumans;i++) {
         if(combatantLife[i]==LIFE_DOWNED || combatantLife[i]==LIFE_WAITING || combatantLife[i]==LIFE_SPECTATING) {
-            ff_restore_human(i,MATTER_MAX_DEFAULT);
+            ff_restore_human(i,ff_capacity(i));
             deathNotices[i].until=0;
         }
     }
@@ -86,7 +93,7 @@ static void ff_update_coop(float dt) {
     for(int i=0;i<firefightHumans;i++) {
         if(combatantLife[i]==LIFE_WAITING) {
             players[i].respawn_timer-=dt;
-            if(players[i].respawn_timer<=0) ff_restore_human(i,MATTER_MAX_DEFAULT);
+            if(players[i].respawn_timer<=0) ff_restore_human(i,ff_capacity(i));
         }
         if(combatantLife[i]==LIFE_DOWNED) {
             float look=0;
@@ -159,10 +166,10 @@ static void start_firefight_wave(int wave_number) {
 
 static void reset_firefight_match(void) {
     firefightScore=firefightKillsTotal=0; firefightTeamLives=3;
-    firefightIntermissionTimer=0; teamUpgrade=UPGRADE_NONE; memset(teamUpgradeLevels,0,sizeof(teamUpgradeLevels));
+    firefightIntermissionTimer=0; memset(personalRanks,0,sizeof(personalRanks));
     memset(reviveCount,0,sizeof(reviveCount));
     for(int i=0;i<MAX_COMBATANTS;i++) goliathStates[i].count=0;
-    for(int i=0;i<firefightHumans;i++){if(fp_active())grenadeInventory[i]=0;ff_restore_human(i,MATTER_MAX_DEFAULT);}
+    for(int i=0;i<firefightHumans;i++){if(fp_active())grenadeInventory[i]=0;ff_restore_human(i,ff_capacity(i));}
     practiceStep=0;
     if(firefightPractice) {
         players[0].pos=(Vector3){0,BASE_EYE_HEIGHT+2,1.5f};
@@ -212,9 +219,9 @@ static void ff_wave_complete(void) {
     for(int i=0;i<firefightHumans;i++) {
         Vector3 position=players[i].pos,velocity=players[i].vel;
         bool present=combatantLife[i]==LIFE_ALIVE || combatantLife[i]==LIFE_DOWNED;
-        ff_restore_human(i,MATTER_MAX_DEFAULT);
+        ff_restore_human(i,ff_capacity(i));
         if(present){players[i].pos=players[i].death_pos=position;players[i].vel=velocity;}
-        prepVotes[i]=ff_upgrade_choice(2,1); prepReady[i]=false; prepMenuOpen[i]=false;
+        prepChoices[i]=ff_upgrade_choice(i,2,1); prepReady[i]=false; prepMenuOpen[i]=false;
     }
     camp_end();
 }
@@ -286,17 +293,12 @@ static void update_firefight_logic(float dt) {
             if(!prepMenuOpen[i]) {ready &= prepReady[i];continue;}
             bool left=ct_actor_pressed(i,CT_PREP_LEFT);
             bool right=ct_actor_pressed(i,CT_PREP_RIGHT);
-            if((left || right) && !ff_upgrades_maxed()) { prepVotes[i]=ff_upgrade_choice(prepVotes[i],left?-1:1); prepReady[i]=false; }
+            if(left || right) { prepChoices[i]=ff_upgrade_choice(i,prepChoices[i],left?-1:1); prepReady[i]=false; }
             if(ct_actor_pressed(i,CT_READY)) prepReady[i]=!prepReady[i];
             ready &= prepReady[i];
         }
         if(firefightIntermissionTimer<=0 || (ready && firefightIntermissionTimer<=FF_PREP_SECONDS-FF_PREP_MIN_SECONDS)) {
-            teamUpgrade=UPGRADE_NONE;
-            if(!ff_upgrades_maxed()) {
-                teamUpgrade=ff_vote(prepVotes,firefightHumans);
-                if((int)teamUpgrade<0 || teamUpgrade>=UPGRADE_NONE || teamUpgradeLevels[teamUpgrade]>=teamUpgradeCaps[teamUpgrade])teamUpgrade=ff_upgrade_choice(2,1);
-                if((int)teamUpgrade>=0 && teamUpgrade<UPGRADE_NONE)teamUpgradeLevels[teamUpgrade]++;
-            }
+            ff_grant_wave_upgrades();
             start_firefight_wave(firefightWave+1);
         }
         return;

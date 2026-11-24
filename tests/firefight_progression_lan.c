@@ -7,6 +7,7 @@ static bool focused(void){return true;}
 #undef main
 #include <assert.h>
 bool ffTestReviveHeld[4];
+static bool reelPlaced,sawReel,sawRelease;
 static bool joined,sawItems,sawGun,sawCharge,sawCarrier,sawRestart,sawRestore,sawReady,sawRejected,sawLoot,sawLootReady;
 static uint32_t initialSession;
 static bool sawCache;
@@ -30,6 +31,8 @@ static void receive(NetTransport*t,int peer,uint8_t channel,const uint8_t*data,s
  }
  if(t->role==NET_ROLE_CLIENT){
   
+  if(firefightWave==7 && players[1].actorGrappleTarget==19)sawReel=true;
+  if(sawReel && !players[1].actorGrappleTarget)sawRelease=true;
   sawCache|=fpCacheReady && v_isfinite(fpCachePositions[fp_rule(PICKUP_GLOB)]);
   sawShieldDrop|=fpCount==122 && fpItems[2].type==PICKUP_SHIELD_REGEN && fpItems[2].owner==-1;
   sawShieldOwned|=fpCount==122 && fpItems[2].owner==0 && (equipment[0].upgrades&EQ_SHIELD);
@@ -62,6 +65,16 @@ int main(int argc,char**argv){bool late=argc>1&&!strcmp(argv[1],"late-host");boo
    if(host){
     eq_tick(1.f/60);net_host_tick();
     if(!failed)for(int i=16;i<=17;i++){UpdateBot(i,1.f/60);net_integrate_player(&players[i],1.f/60,true);}
+    if(firefightWave==7 && !reelPlaced){
+     players[0].pos=(Vector3){20,3,20};players[1].pos=(Vector3){.5f,3,2};
+     init_firefight_bot_entity(18,ENEMY_TYPE_STANDARD,INPUT_TYPE_BOT_EASY);
+     players[18].pos=(Vector3){.5f,2.25f,-2};reelPlaced=true;
+    }
+    if(reelPlaced){
+     net_integrate_player(&players[18],1.f/60,true);
+     if(players[1].actorGrappleTarget==19 && players[18].pos.z> -2)sawReel=true;
+     if(sawReel && !players[1].actorGrappleTarget)sawRelease=true;
+    }
     if(age>1 && !sawShieldOwned){assert(fp_collect(0,2,false));sawShieldOwned=true;}
     if(age>3&&eq_gun(1)==EQ_RAIL&&!captured){fp_capture();savedCount=fpCount;assert(savedCount==122);captured=true;original=netTransport.session_id;}
     if(captured&&age>5.5f&&equipment[1].charge>=eqRailCharge&&!failed){assert(fp_reserve(fpCount+1));fpItems[fpCount++]=(FfItem){.id=fpNextId++,.type=PICKUP_ROCKET,.owner=-1,.slot=-1,.pos={0,1,0}};++fpRevision;firefightScore=999;firefightTeamLives=0;for(int i=0;i<2;i++){combatantLife[i]=LIFE_SPECTATING;players[i].respawn_timer=9999;}ff_update_coop(.01f);assert(fpRestartTimer>0);failed=true;}
@@ -74,20 +87,29 @@ int main(int argc,char**argv){bool late=argc>1&&!strcmp(argv[1],"late-host");boo
      sawLootReady|=prepReady[1];
      if(sawLootReady){assert(!prepReady[0] && firefightIntermissionTimer>FF_LOOT_SECONDS-1);prepReady[0]=true;update_firefight_logic(.01f);assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION && !prepReady[0] && !prepReady[1]);}
     }
-    if(vote&&prepReady[1])sawReady=true;
+    if(vote && firefightWaveState==FIREFIGHT_STATE_INTERMISSION && prepReady[1]){
+     sawReady=true;prepReady[0]=true;update_firefight_logic(FF_PREP_MIN_SECONDS+.1f);
+    }
    }else{
     NetInputCommand c={.sequence=++seq};if(age>1&&eq_gun(1)==EQ_GLOB&&!replaced){c.pressed|=NET_INPUT_EQUIP;replaced=true;}
+    if(firefightWave==7 && !sawReel && combatantLife[18]==LIFE_ALIVE && fabsf(players[1].pos.z-2)<.2f){
+     c.held|=NET_INPUT_TETHER;c.mouse_look=1;
+     dir_to_yaw_pitch(world_delta(players[18].pos,players[1].pos),&c.aim_yaw,&c.aim_pitch);
+     c.aim_yaw=remainderf(c.aim_yaw,360);
+    }
     if(age>3.2&&!sawRestart)c.held|=NET_INPUT_FIRE;
     if(firefightWaveState==FIREFIGHT_STATE_LOOT&&!lootVote){c.pressed|=NET_INPUT_PREP_READY;lootVote=true;}
     if(firefightWaveState==FIREFIGHT_STATE_INTERMISSION&&!vote){c.pressed|=NET_INPUT_PREP_RIGHT|NET_INPUT_PREP_READY;vote=true;}
     uint8_t packet[128];NetWriter w;net_writer_init(&w,packet,sizeof(packet));net_write_header(&w,NET_MSG_INPUT,0,netTransport.session_id,0);net_write_u8(&w,netLocalPlayerSlots[0]);net_write_input(&w,&c);net_transport_send(&netTransport,0,FPS_NET_CHANNEL_INPUT,packet,w.length,c.pressed!=0);
    }
-   if(host?sawReady:sawRestore&&vote){if(age>12)break;}
+   if(host?sawReady:sawRestore&&vote){if(age>12 && sawRelease)break;}
   }
   WaitTime(1.f/60);
  }
  if(host){fprintf(stderr,"host joined%d capture%d failed%d restored%d rejected%d ready%d lootReady%d\n",joined,captured,failed,restored,sawRejected,sawReady,sawLootReady);assert(joined&&captured&&failed&&restored&&sawRejected&&sawReady&&sawLootReady);puts("Firefight LAN host passed");}
  else {fprintf(stderr,"client items%d gun%d charge%d carrier%d restart%d restore%d loot%d\n",sawItems,sawGun,sawCharge,sawCarrier,sawRestart,sawRestore,sawLoot);assert(sawItems&&sawGun&&sawCharge&&sawCarrier&&sawRestart&&sawRestore&&sawLoot&&firefightCheckpoints);puts("Firefight LAN client passed");}
+ assert(sawReel && sawRelease);
+ assert(ff_rank(0,UPGRADE_HARVEST)==1 && ff_rank(1,UPGRADE_CAPACITY)==1 && players[1].matterMax==110);
  if(!host){assert(sawCache && sawPair && sawShieldDrop && sawShieldOwned && sawShieldRestore);puts("Coordinated Glock/Glob carriers replicated to LAN client");}
  net_transport_shutdown(&netTransport);net_transport_global_shutdown();fp_shutdown();CloseWindow();return 0;
 }

@@ -13,8 +13,8 @@ static void fp_snapshot(int peer){
  net_write_u8(&w,firefightRound);net_write_i32(&w,firefightWave);net_write_u8(&w,firefightWaveState);net_write_i32(&w,firefightTeamLives);
  net_write_i32(&w,firefightScore);net_write_i32(&w,firefightKillsTotal);net_write_i32(&w,firefightWaveEnemiesTotal);net_write_i32(&w,firefightWaveEnemiesRemaining);net_write_i32(&w,firefightEnemiesSpawned);
  net_write_f32(&w,firefightIntermissionTimer);net_write_f32(&w,fpRestartTimer);net_write_u32(&w,fpUnlocked);
- for(int k=0;k<3;k++)net_write_u8(&w,teamUpgradeLevels[k]);
- for(int i=0;i<MAX_PLAYERS;i++){net_write_u8(&w,combatantLife[i]);net_write_u8(&w,prepReady[i]);net_write_u8(&w,prepVotes[i]);net_write_u8(&w,prepMenuOpen[i]);net_write_f32(&w,reviveProgress[i]);net_write_u8(&w,reviveOwner[i]+1);}
+ for(int i=0;i<MAX_PLAYERS;i++)for(int k=0;k<3;k++)net_write_u8(&w,personalRanks[i][k]);
+ for(int i=0;i<MAX_PLAYERS;i++){net_write_u8(&w,combatantLife[i]);net_write_u8(&w,prepReady[i]);net_write_u8(&w,prepChoices[i]);net_write_u8(&w,prepMenuOpen[i]);net_write_f32(&w,reviveProgress[i]);net_write_u8(&w,reviveOwner[i]+1);}
  fp_send(peer,&w,false);
  net_writer_init(&w,data,sizeof(data));net_write_header(&w,NET_MSG_FIREFIGHT,0,netTransport.session_id,netServerTick);net_write_u8(&w,5);
  net_write_u8(&w,fpCacheReady);if(fpCacheReady){eq_write_vec(&w,fpCacheOrigin);for(int n=0;n<FP_RULE_COUNT;n++)eq_write_vec(&w,fpCachePositions[n]);}fp_send(peer,&w,false);
@@ -71,15 +71,15 @@ static bool fp_receive(NetMessageType type,NetReader *r,uint32_t tick){
  if(part==0){
   if(tick<fpStateTick)return true;uint32_t generation=net_read_u32(r);bool checkpoints=net_read_u8(r),endless=net_read_u8(r),foundry=net_read_u8(r);int humans=net_read_u8(r);
   int round=net_read_u8(r);int wave=net_read_i32(r),state=net_read_u8(r),lives=net_read_i32(r),score=net_read_i32(r),kills=net_read_i32(r),total=net_read_i32(r),remaining=net_read_i32(r),spawned=net_read_i32(r);
-  float prep=net_read_f32(r),restart=net_read_f32(r);uint32_t unlocked=net_read_u32(r);unsigned upgrades[3];for(int k=0;k<3;k++)upgrades[k]=net_read_u8(r);
+  float prep=net_read_f32(r),restart=net_read_f32(r);uint32_t unlocked=net_read_u32(r);unsigned upgrades[MAX_PLAYERS][3];for(int i=0;i<MAX_PLAYERS;i++)for(int k=0;k<3;k++){upgrades[i][k]=net_read_u8(r);if(upgrades[i][k]>8)return true;}
   int life[4],ready[4],votes[4],menus[4],owners[4];float progress[4];for(int i=0;i<4;i++){life[i]=net_read_u8(r);ready[i]=net_read_u8(r);votes[i]=net_read_u8(r);menus[i]=net_read_u8(r);progress[i]=net_read_f32(r);owners[i]=net_read_u8(r)-1;}
   for(int n=0;n<4;n++)if(life[n]>LIFE_UNUSED||ready[n]>1||menus[n]>1||(votes[n]>2&&votes[n]!=255)||!isfinite(progress[n])||progress[n]<0||owners[n]>=4)return true;
   if(r->failed || round<1||round>3||humans<1||humans>4||wave<1||state>FIREFIGHT_STATE_LOOT||!isfinite(prep)||!isfinite(restart))return true;
   gameMode=GAME_MODE_FIREFIGHT;firefightPractice=false;activePlayers=MAX_COMBATANTS;firefightHumans=humans;firefightCheckpoints=checkpoints;firefightEndless=endless;firefightFoundry=foundry;
   firefightRound=round;firefightWave=wave;firefightWaveState=state;firefightTeamLives=lives;firefightScore=score;firefightKillsTotal=kills;firefightWaveEnemiesTotal=total;firefightWaveEnemiesRemaining=remaining;firefightEnemiesSpawned=spawned;
-  firefightIntermissionTimer=prep;fpRestartTimer=restart;memcpy(teamUpgradeLevels,upgrades,sizeof(upgrades));
+  firefightIntermissionTimer=prep;fpRestartTimer=restart;memcpy(personalRanks,upgrades,sizeof(upgrades));for(int i=0;i<humans;i++)players[i].matterMax=ff_capacity(i);
   if(fpStateTick)for(int n=0;n<FP_RULE_COUNT;n++)if((unlocked&(1u<<n)) && !(fpUnlocked&(1u<<n)))fp_queue_unlock(fpRules[n].type);fpUnlocked=unlocked;fpGeneration=generation;fpStateTick=tick;
-  for(int i=0;i<MAX_COMBATANTS;i++){combatantTeam[i]=i<MAX_PLAYERS?0:1;if(i<4){combatantLife[i]=life[i];prepReady[i]=ready[i];prepVotes[i]=votes[i]==255?-1:votes[i];prepMenuOpen[i]=menus[i];reviveProgress[i]=progress[i];reviveOwner[i]=owners[i];}else playerInput[i]=INPUT_TYPE_BOT_EASY;}
+  for(int i=0;i<MAX_COMBATANTS;i++){combatantTeam[i]=i<MAX_PLAYERS?0:1;if(i<4){combatantLife[i]=life[i];prepReady[i]=ready[i];prepChoices[i]=votes[i]==255?-1:votes[i];prepMenuOpen[i]=menus[i];reviveProgress[i]=progress[i];reviveOwner[i]=owners[i];}else playerInput[i]=INPUT_TYPE_BOT_EASY;}
   if(state==FIREFIGHT_STATE_DEFEAT||state==FIREFIGHT_STATE_VICTORY)gameState=GAME_STATE_GAMEOVER;else if(netWorldReady)gameState=GAME_STATE_PLAYING;
  }else if(part==1){
   uint32_t revision=net_read_u32(r),start=net_read_u32(r),total=net_read_u32(r);int count=net_read_u8(r);

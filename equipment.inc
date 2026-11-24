@@ -1,5 +1,5 @@
 /* Authoritative equipment behavior. All simulation runs once, outside viewports. */
-static void eq_reset(int i){if(i<0 || i>=MAX_COMBATANTS)return;swordNextDirection[i]=swordDirection[i]=0;if(!swordWaves[i].emitted)swordWaves[i].active=false;aimStates[i]=(AimState){0};netLastAimInput[i]=0;equipment[i]=(Equipment){.gun={EQ_DEFAULT,EQ_EMPTY},.initialized=true};players[i].dynamicShotActive=false;players[i].grappleInputHeld=false;players[i].grappleAirborne=false;players[i].netGrappleInverseMass=0;if(i<MAX_PLAYERS)weakTethers[i]=(WeakTetherCoupling){0};players[i].netGrappleAnchorTick=0;players[i].netGrappleAnchorVelocity=(Vector3){0};weaponVisuals[i].deployment=weaponVisuals[i].build_pulse=weaponVisuals[i].cooldown=0;}
+static void eq_reset(int i){if(i<0 || i>=MAX_COMBATANTS)return;swordNextDirection[i]=swordDirection[i]=0;if(!swordWaves[i].emitted)swordWaves[i].active=false;aimStates[i]=(AimState){0};netLastAimInput[i]=0;equipment[i]=(Equipment){.gun={EQ_DEFAULT,EQ_EMPTY},.initialized=true};players[i].dynamicShotActive=false;players[i].actorGrappleTarget=0;players[i].grappleInputHeld=false;players[i].grappleAirborne=false;players[i].netGrappleInverseMass=0;if(i<MAX_PLAYERS)weakTethers[i]=(WeakTetherCoupling){0};players[i].netGrappleAnchorTick=0;players[i].netGrappleAnchorVelocity=(Vector3){0};weaponVisuals[i].deployment=weaponVisuals[i].build_pulse=weaponVisuals[i].cooldown=0;}
 static void eq_reset_all(void){for(int i=0;i<MAX_COMBATANTS;i++)eq_reset(i);memset(swordWaves,0,sizeof(swordWaves));memset(swordSequences,0,sizeof(swordSequences));memset(eqRockets,0,sizeof(eqRockets));memset(eqTraces,0,sizeof(eqTraces));eqReceiveTick=0;memset(eqPartTick,0,sizeof(eqPartTick));}
 static int eq_gun(int i){if(i<0 || i>=MAX_COMBATANTS || (is_player_bot(i)&&!fp_carrier(i)))return EQ_DEFAULT;if(!equipment[i].initialized)eq_reset(i);return equipment[i].gun[equipment[i].selected];}
 static bool eq_upgrade(int i,int flag){return i>=0 && i<MAX_COMBATANTS && (!is_player_bot(i)||fp_carrier(i)) && (equipment[i].upgrades&flag)!=0;}
@@ -45,9 +45,10 @@ static void eq_damage(int i,int target,float amount,bool lethal,DeathCause cause
     else {apply_matter_damage(target,i,amount);if(lethal && matter<=amount && players[target].respawn_timer<=0)kill_player(target,i,true,false);}
     damageOriginKnown=known;damageOrigin=old;deathContext=prev;
 }
-static int eq_actor_ray(int owner,Ray ray,float *distance){
+static int eq_actor_ray_filtered(int owner,Ray ray,float *distance,bool hostileOnly){
     int found=-1;float period=worldFloorHalfSize*2;int images=worldPeriodic?(int)ceilf(*distance/period):0;
     for(int j=0;j<activePlayers;j++)if(j!=owner && players[j].respawn_timer<=0){
+        if(hostileOnly && (!grapple_living(j)||!eq_hostile(owner,j)))continue;
         Vector3 nearest=world_image(players[j].pos,ray.position);
         for(int x=-images;x<=images;x++)for(int z=-images;z<=images;z++){
             Vector3 at=v_add(nearest,(Vector3){x*period,0,z*period});
@@ -56,6 +57,7 @@ static int eq_actor_ray(int owner,Ray ray,float *distance){
         }
     }return found;
 }
+static int eq_actor_ray(int owner,Ray ray,float *distance){return eq_actor_ray_filtered(owner,ray,distance,false);}
 static void eq_trace(Vector3 a,Vector3 b,int gun,int owner){int slot=0;for(int n=0;n<32;n++)if(eqTraces[n].life<=0){slot=n;break;}eqTraces[slot]=(EquipmentTrace){a,b,.22f,gun,owner};}
 static bool eq_cut(int owner,Ray ray,float reach){
     VoxelHit hit;if(!rifle_shield_ray(ray,reach,-1,owner,&hit))return false;
@@ -73,11 +75,15 @@ static bool eq_cut(int owner,Ray ray,float reach){
 }
 // Bore a bounded, one-voxel-wide path. Actor hits are resolved first, so
 // compaction and equipment removal cannot change which actors the shot hits.
-static void eq_rail_terrain(int owner,Ray ray){
+static bool eq_rail_terrain(int owner,Ray ray,float coreDistance){
+    uint64_t passed[512];int passCount=0;bool hitBossShield=false;
     for(int n=0;n<512;n++){
-        VoxelHit hit;if(!rifle_shield_ray(ray,eqGuns[EQ_RAIL].range,-1,owner,&hit))break;
+        VoxelHit hit;if(!first_voxel_hit_filtered_owner(ray,eqGuns[EQ_RAIL].range,-1,false,-1,&hit,passed,passCount,owner,false))break;
         int v=hit.id;if(v<0 || v>=voxel_count)break;
-        if(go_shield_hit(v,eqGuns[EQ_RAIL].damage))break;
+        if(go_shield_hit(v,!hitBossShield && hit.t<=coreDistance?eqGuns[EQ_RAIL].damage:0)){
+            if(hit.t<=coreDistance)hitBossShield=true;
+            passed[passCount++]=voxels[v].identity;continue;
+        }
         Vector3 at=world_wrap(v_add(ray.position,v_mul(ray.direction,hit.t+.01f)));
         uint64_t id=voxels[v].identity;
         if(!voxels[v].simulate){
@@ -86,9 +92,9 @@ static void eq_rail_terrain(int owner,Ray ray){
         }else {enemy_detach(v);detach_goliath_armor_voxel(v);remove_voxel_index(v);}
         mark_surface_neighbors(at);
         // Fluids are activated, not deleted; do not repeatedly revisit them.
-        if(enemy_voxel(id)>=0)break;
+        if(enemy_voxel(id)>=0)passed[passCount++]=id;
     }
-    rebuild_voxel_hash();
+    rebuild_voxel_hash();return hitBossShield;
 }
 typedef struct { uint64_t id; VoxelHit hit; Vector3 direction; float distance; bool wasStatic; } ShotgunImpact;
 static void eq_shotgun_impacts(int owner,ShotgunImpact *hits,int count){
@@ -332,23 +338,26 @@ static void eq_command(int i,const NetInputCommand *c,float dt){
         }
         if(!held && e->held && e->charge>=eqRailCharge){
             ducks_ray(ray,eqGuns[gun].range,0,-1,true);
-            float shieldStop=eqGuns[gun].range;
-            uint64_t passed[goCount>0?goCount:1];int passCount=0;VoxelHit barrier;
-            while(goCombatEnabled&&passCount<goCount&&go_body_ray(ray,shieldStop,-1,passed,passCount,&barrier)){
-                if(go_shielded(barrier.id)){shieldStop=barrier.t;break;}
-                passed[passCount++]=voxels[barrier.id].identity;
-            }
+            float reach=eqGuns[gun].range,coreDistance=reach;bool victims[MAX_COMBATANTS]={0};
             for(int j=0;j<activePlayers;j++)if(eq_hostile(i,j)){
                 bool hitActor=false;float period=worldFloorHalfSize*2;int images=worldPeriodic?(int)ceilf(eqGuns[gun].range/period)+1:0;
                 Vector3 nearest=world_image(players[j].pos,p->pos);
                 for(int x=-images;x<=images && !hitActor;x++)for(int z=-images;z<=images && !hitActor;z++){
                     Vector3 at=v_add(nearest,(Vector3){x*period,0,z*period});RayCollision hit=GetRayCollisionBox(ray,combatant_bounds_at(j,at,PLAYER_SIZE*.5f));
-                    hitActor=hit.hit && hit.distance>=0 && hit.distance<=shieldStop;
+                    hitActor=hit.hit && hit.distance>=0 && hit.distance<=reach;
+                    if(hitActor && go_combat_actor(j))coreDistance=hit.distance;
                 }
-                if(hitActor)eq_damage(i,j,eqGuns[gun].damage,true,DEATH_RAIL,p->pos);
+                victims[j]=hitActor;
             }
-            eq_rail_terrain(i,ray);
-            eq_trace(player_weapon_pose(i,false).muzzle,v_add(p->pos,v_mul(ray.direction,shieldStop)),EQ_RAIL,i);e->charge=0;e->cooldown[gun]=eqGuns[gun].cooldown;weapon_visual_shot(&weaponVisuals[i],(float)GetTime());eq_fire_audio(gun,p->pos,i);ai_gunfire(i,p->pos);
+            bool hitBossShield=eq_rail_terrain(i,ray,coreDistance);
+            for(int j=0;j<activePlayers;j++){
+                if(victims[j] && !(go_combat_actor(j)&&hitBossShield)){
+                    bool boss=go_combat_actor(j)||players[j].enemyType==ENEMY_TYPE_FOUNDRY;
+                    float damage=boss?eqGuns[gun].damage:fmaxf(players[j].matter,eqGuns[gun].damage);
+                    eq_damage(i,j,damage,true,DEATH_RAIL,p->pos);
+                }
+            }
+            eq_trace(player_weapon_pose(i,false).muzzle,v_add(p->pos,v_mul(ray.direction,reach)),EQ_RAIL,i);e->charge=0;e->cooldown[gun]=eqGuns[gun].cooldown;weapon_visual_shot(&weaponVisuals[i],(float)GetTime());eq_fire_audio(gun,p->pos,i);ai_gunfire(i,p->pos);
         }
         if(!held)eq_cancel_charge(i);
     }else if(gun==EQ_CUTTER && held && p->matter>0){

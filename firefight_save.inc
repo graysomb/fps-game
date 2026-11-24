@@ -1,5 +1,5 @@
 /* Versioned, pointer-free wave saves. Never serialize Player/Equipment runtime state. */
-#define FP_SAVE_VERSION 1u
+#define FP_SAVE_VERSION 2u
 #define FP_SAVE_MAX_ITEMS 100000u
 #define FP_SAVE_MAX_WAVE 100000
 /* Fixed-width fields keep CPU/GPU builds compatible. Bump the version on schema changes. */
@@ -14,6 +14,7 @@ typedef struct {
     int32_t humans,world,foundry,endless,checkpoints,customMap,mapSlot;
     int32_t templeStage,megalithStage,megalithType,hyperStage,forerunnerStage,forerunnerType,sanctumSteps,sanctumTopology;
     FpSavedPlayer player[MAX_PLAYERS];
+    uint32_t ranks[MAX_PLAYERS][3];
 } FpSavedRun;
 typedef struct {uint32_t id;int32_t type,owner,slot;float x,y,z;} FpSavedItem;
 static int fpSaveWave=-1,fpSaveHumans;
@@ -61,7 +62,7 @@ static bool fp_save_valid(const FpSavedRun *s) {
     for(int t=0;t<FF_TYPE_COUNT;t++){if(s->remaining[t]<0 || s->remaining[t]>100000)return false;total+=s->remaining[t];}
     if(total!=s->total || total<=0)return false;
     for(int n=0;n<s->pendingCount;n++)if(s->pending[n]<0 || s->pending[n]>=FP_RULE_COUNT)return false;
-    for(int k=0;k<3;k++)if(s->upgrades[k]>teamUpgradeCaps[k])return false;
+    for(int i=0;i<MAX_PLAYERS;i++)for(int k=0;k<3;k++)if(s->ranks[i][k]>8)return false;
     for(int i=0;i<s->humans;i++) {
         const FpSavedPlayer *p=&s->player[i];
         if(p->kills<0 || p->deaths<0 || p->debrisKills<0 || p->revives<0 ||
@@ -79,9 +80,24 @@ static bool fp_save_read(FpSavedRun *s,FfItem **items) {
     if(!fp_save_path(path,sizeof(path),false))return false;
     FILE *f=fopen(path,"rb");if(!f)return false;
     char magic[8];uint32_t expected;
+    memset(s,0,sizeof(*s));
+    size_t legacySize=offsetof(FpSavedRun,ranks);
     bool ok=fread(magic,1,8,f)==8 && !memcmp(magic,"FPSFFSV1",8) &&
-        fread(&expected,sizeof(expected),1,f)==1 && fread(s,sizeof(*s),1,f)==1 && fp_save_valid(s);
-    uint32_t hash=ok?fp_save_hash(2166136261u,s,sizeof(*s)):0;
+        fread(&expected,sizeof(expected),1,f)==1 && fread(s,legacySize,1,f)==1;
+    uint32_t hash=fp_save_hash(2166136261u,s,legacySize);
+    if(ok && s->version==1 && s->size==legacySize){
+        ok=s->upgrades[0]<=9 && s->upgrades[1]<=8 && s->upgrades[2]<=8;
+        for(int i=0;i<s->humans && i<MAX_PLAYERS;i++){
+            s->ranks[i][UPGRADE_HARVEST]=s->upgrades[1];
+            s->ranks[i][UPGRADE_CAPACITY]=s->upgrades[0]>8?8:s->upgrades[0];
+            s->ranks[i][UPGRADE_SPEED]=s->upgrades[2];
+        }
+        s->version=FP_SAVE_VERSION;s->size=sizeof(*s);
+    }else if(ok && s->version==FP_SAVE_VERSION){
+        ok=fread(s->ranks,sizeof(s->ranks),1,f)==1;
+        hash=fp_save_hash(hash,s->ranks,sizeof(s->ranks));
+    }else ok=false;
+    ok=ok && fp_save_valid(s);
     FfItem *copy=ok && s->count?calloc(s->count,sizeof(*copy)):NULL;
     if(ok && s->count && !copy)ok=false;
     for(uint32_t n=0;ok && n<s->count;n++) {
@@ -114,7 +130,7 @@ static void fp_save_write(void) {
         .customMap=useCustomMap,.mapSlot=creativeMapSlot,.templeStage=templeTargetStage,.megalithStage=megalithTargetStage,
         .megalithType=megalithArchetype,.hyperStage=hyperTargetStage,.forerunnerStage=forerunnerTargetStage,
         .forerunnerType=forerunnerArchetype,.sanctumSteps=sanctumGrowthSteps,.sanctumTopology=sanctumTopologyMode};
-    memcpy(s.remaining,c->remaining,sizeof(s.remaining));memcpy(s.pending,c->pending,sizeof(s.pending));memcpy(s.upgrades,c->upgrades,sizeof(s.upgrades));
+    memcpy(s.remaining,c->remaining,sizeof(s.remaining));memcpy(s.pending,c->pending,sizeof(s.pending));memcpy(s.ranks,c->upgrades,sizeof(s.ranks));
     for(int i=0;i<s.humans;i++) {
         Player *p=&c->humans[i];Equipment *e=&c->equipment[i];
         s.player[i]=(FpSavedPlayer){.kills=p->kills,.deaths=p->deaths,.debrisKills=p->debrisKills,
@@ -167,7 +183,7 @@ static bool fp_save_continue(void) {
     free(fpCheckpoint.items);
     fpCheckpoint=(FfCheckpoint){.valid=true,.wave=s.wave,.lives=s.lives,.score=s.score,.kills=s.kills,
         .repeatCursor=s.repeatCursor,.nextId=s.nextId,.unlocked=s.unlocked,.pendingCount=s.pendingCount,.total=s.total,.items=items,.count=s.count};
-    memcpy(fpCheckpoint.remaining,s.remaining,sizeof(s.remaining));memcpy(fpCheckpoint.pending,s.pending,sizeof(s.pending));memcpy(fpCheckpoint.upgrades,s.upgrades,sizeof(s.upgrades));
+    memcpy(fpCheckpoint.remaining,s.remaining,sizeof(s.remaining));memcpy(fpCheckpoint.pending,s.pending,sizeof(s.pending));memcpy(fpCheckpoint.upgrades,s.ranks,sizeof(s.ranks));
     gameMode=GAME_MODE_FIREFIGHT;firefightPractice=enemyLab=equipmentLab=false;
     multiplayerActivePlayers=firefightHumans=s.humans;
     currentWorldType=s.world;set_current_world_seed(s.seed);

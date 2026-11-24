@@ -99,12 +99,13 @@ static void ff_draw_hud(int i,int w,int h) {
         bool pad=playerInput[i]==INPUT_TYPE_GAMEPAD;
         const WaveDefinition *next=&ff_waves[firefightWave%FF_WAVE_COUNT];int total=0;
         for(int t=0;t<FF_TYPE_COUNT;t++)total+=ff_count(firefightWave+1,fp_team_size(),t);
-        const char *lines[3];
-        lines[0]=TextFormat("%s %s",ff_upgrades_maxed()?"All upgrades maxed":ff_upgrade_label(prepVotes[i]<0?0:prepVotes[i]),prepReady[i]?"[READY]":"");
-        lines[1]=TextFormat("Next: %s (%d enemies)",next->name,total);
-        lines[2]=prepMenuOpen[i]?TextFormat("%s / %s vote | %s ready | %s build",ct_hint(i,CT_PREP_LEFT),ct_hint(i,CT_PREP_RIGHT),ct_hint(i,CT_READY),ct_hint(i,CT_PREP_MENU)):TextFormat("%s: vote menu",ct_hint(i,CT_PREP_MENU));
-        int rows=prepMenuOpen[i]?3:1;
-        for(int n=0;n<rows;n++){const char *line=rows==1?lines[2]:lines[n];int width=MeasureText(line,fs),x=(w-width)/2;
+        const char *lines[4];
+        lines[0]=TextFormat("%s %s",ff_upgrade_label(i,prepChoices[i]),prepReady[i]?"[READY]":"");
+        lines[1]=TextFormat("Harvest %u/8    Matter %u/8    Speed %u/8",personalRanks[i][0],personalRanks[i][1],personalRanks[i][2]);
+        lines[2]=TextFormat("Next: %s (%d enemies)",next->name,total);
+        lines[3]=prepMenuOpen[i]?TextFormat("%s / %s choose | %s ready | %s build",ct_hint(i,CT_PREP_LEFT),ct_hint(i,CT_PREP_RIGHT),ct_hint(i,CT_READY),ct_hint(i,CT_PREP_MENU)):TextFormat("%s: personal upgrade",ct_hint(i,CT_PREP_MENU));
+        int rows=prepMenuOpen[i]?4:1;
+        for(int n=0;n<rows;n++){const char *line=rows==1?lines[3]:lines[n];int width=MeasureText(line,fs),x=(w-width)/2;
             DrawRectangle(x-5,y+n*step-2,width+10,step,Fade(BLACK,.65f));DrawText(line,x,y+n*step,fs,n==0?GOLD:RAYWHITE);}
         return;
     }

@@ -357,19 +357,19 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			FVqGO11E9tdUe2kuRtKb4Gp4YeI=
+			71lbehtfBR0lLVLzxNvIoN78/a4=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"155a863b5d44f6d7547b692e46d29be06a7861e2"</string>
+			<string>cdhash H"ef595b7a1b5f051d252d52f3c4dbc8a0defcfdae"</string>
 		</dict>
 		<key>MacOS/fps_ray_gpu</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			LiNK6+U0DJMzIeF1cmsm0J+Vn7Q=
+			lIQxZ8zTcTtx/tmCCsd10RcOj7Y=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"2e234aebe5340c933321e175726b26d09f959fb4"</string>
+			<string>cdhash H"94843167ccd3713b71fed9820ac775d1170e8fb6"</string>
 		</dict>
 		<key>MacOS/game_song.mp3</key>
 		<dict>

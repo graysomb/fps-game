@@ -11,6 +11,8 @@ static void ai_reset(int i) {
     shieldEscort[i]=0;
     for(int j=0;j<MAX_COMBATANTS;j++)if(shieldEscort[j]==i+1)shieldEscort[j]=0;
     if(towerRifles[i].tag)tower_release(i);
+    players[i].actorGrappleTarget=0;
+    for(int j=0;j<MAX_PLAYERS;j++)if(players[j].actorGrappleTarget==i+1)players[j].actorGrappleTarget=0;
     players[i].drainTarget=0;players[i].netDrainVisualActive=false;
     for(int j=0;j<MAX_COMBATANTS;j++)if(players[j].drainTarget==i+1)players[j].drainTarget=0;
     aiCombat[i]=(AiCombat){.target=-1,.pendingTarget=-1,.intent=-1,.lastFire=-1000,.initialized=true,.random=0x51a700u+(uint32_t)i*977u,.lastPosition=players[i].pos};

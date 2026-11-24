@@ -19,8 +19,7 @@ static void equipment_grab(EnemyType type,bool gold){
     players[0].yaw=180;players[0].pitch=0;players[0].goldTetherCharged=gold;
     rebuild_voxel_hash();float matter=players[4].matter;
     start_tether(0);
-    assert(players[0].tetherHolding && !players[0].drainTarget);
-    assert(get_goliath_owner_of_voxel(players[0].tetherVoxel)<0);
+    assert(players[0].actorGrappleTarget==5 && !players[0].drainTarget);
     update_tether_drains(1);assert(players[4].matter==matter);release_tether(0);
 }
 int main(int argc,char **argv){

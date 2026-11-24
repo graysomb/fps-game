@@ -5,7 +5,7 @@ static const float eqShieldDelay=5,eqShieldRate=10,eqShieldCeiling=.5f;
 typedef struct {const char *name;WeaponKind visual;float cost,cooldown,range,damage,zoom;} GunDefinition;
 static const GunDefinition eqGuns[EQ_GUN_COUNT]={
     {"Default",WEAPON_STANDARD,MATTER_SHOT_COST,BULLET_COOLDOWN_SECONDS,100,34,1.5f},{"Voxel",WEAPON_DYNAMIC_LAUNCHER,MATTER_SHOT_COST,BULLET_COOLDOWN_SECONDS,100,34,1.25f},
-    {"Shotgun",WEAPON_IMPULSE_SHOTGUN,6,.8f,12,6.25f,1.2f},{"Cutter",WEAPON_CUTTER,4,0,24,20,2},
+    {"Shotgun",WEAPON_IMPULSE_SHOTGUN,6,.8f,12,12.5f,1.2f},{"Cutter",WEAPON_CUTTER,4,0,24,20,2},
     {"Railgun",WEAPON_RAILGUN,15,1.8f,100,50,4},{"Rocket",WEAPON_ROCKET_LAUNCHER,25,1.5f,110,100,1.75f},{"Sword",WEAPON_SWORD,25,.8f,6,10000,1},
     {"Glob",WEAPON_GLOB_GUN,1,1.f/6,60,18,1.5f},{"Glock",WEAPON_GLOCK,1,.25f,60,8,1.5f},{"DMR",WEAPON_DMR,3,.4f,75,25,3}};
 enum { EQ_PELLETS=8, EQ_PANEL_SIDE=5, EQ_PANEL_CUBES=EQ_PANEL_SIDE*EQ_PANEL_SIDE*EQ_PANEL_SIDE, EQ_SWORD_CUTS=96 };

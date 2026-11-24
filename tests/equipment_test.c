@@ -12,7 +12,68 @@ static void fixture(void){
  eq_reset_all();clarity_reset();combat_ui_reset();
 }
 static void inventory(void){fixture();assert(eq_gun(0)==EQ_DEFAULT);assert(eq_pickup(0,PICKUP_SHOTGUN,false));assert(eq_gun(0)==EQ_SHOTGUN);assert(!eq_pickup(0,PICKUP_SHOTGUN,true));assert(!eq_pickup(0,PICKUP_RAILGUN,false));equipment[0].cooldown[EQ_SHOTGUN]=.8f;NetInputCommand c={.pressed=NET_INPUT_SWITCH};eq_command(0,&c,.01f);assert(eq_gun(0)==EQ_DEFAULT);eq_command(0,&c,.01f);assert(equipment[0].cooldown[EQ_SHOTGUN]==.8f);assert(eq_pickup(0,PICKUP_RAILGUN,true));players[0].matter=0;players[0].isExposed=true;eq_tick(.3f);assert(eq_gun(0)==EQ_RAIL);kill_player(0,1,false,false);assert(eq_gun(0)==EQ_DEFAULT);}
-static void attacks(void){fixture();eq_pickup(0,PICKUP_RAILGUN,false);equipment[0].switchTime=0;NetInputCommand hold={.held=NET_INPUT_FIRE},release={0};eq_command(0,&hold,.65f);eq_command(0,&release,.01f);assert(players[1].matter==50 && players[1].respawn_timer==0 && players[0].matter==85);eq_tick(2);eq_command(0,&hold,.65f);eq_command(0,&release,.01f);assert(players[1].respawn_timer>0);
+static void combat_grapple(void){
+ fixture();start_tether(0);assert(players[0].actorGrappleTarget==2);
+ net_integrate_player(&players[1],1.f/60,true);assert(players[1].pos.z>-3 && players[0].vel.z==0);
+ release_tether(0);assert(!players[0].actorGrappleTarget);
+ fixture();players[1].enemyType=ENEMY_TYPE_GOLIATH;start_tether(0);
+ net_integrate_player(&players[0],1.f/60,true);assert(players[0].pos.z<0 && players[1].vel.z==0);
+ add_static_box_at_grid(-1,1,0,6,-3,-3,GRAY);init_static_hash();rebuild_voxel_hash();
+ net_integrate_player(&players[0],1.f/60,true);assert(!players[0].actorGrappleTarget);
+}
+static void combat_balance(void){
+ // Find offsets that put one, four or all eight pellets through a single hitbox,
+ // then fire the normal shotgun and measure the actual Matter lost.
+ for(int wanted=1;wanted<=8;wanted*=2){
+  if(wanted==2)continue;
+  fixture();players[1].matter=players[1].matterMax=200;
+  bool found=false;Vector3 origin=players[0].pos;
+  for(int dx=0;dx<80 && !found;dx++)for(int dy=0;dy<80 && !found;dy++){
+   players[1].pos=v_add(origin,(Vector3){dx*.012f,dy*.012f,-2});
+   int hits=0;
+   for(int n=0;n<EQ_PELLETS;n++){
+    float angle=n*2*PI/EQ_PELLETS,slope=tanf(eqShotgunCone*.5f*DEG2RAD);
+    Ray ray={origin,v_norm((Vector3){cosf(angle)*slope,sinf(angle)*slope,-1})};
+    hits+=GetRayCollisionBox(ray,combatant_bounds(1,PLAYER_SIZE*.5f)).hit;
+   }
+   found=hits==wanted;
+  }
+  assert(found);eq_pickup(0,PICKUP_SHOTGUN,false);equipment[0].switchTime=0;
+  assert(eq_fire(0));assert(players[1].matter==200-wanted*12.5f);
+ }
+ fixture();activePlayers=4;players[3].invuln_timer=1;
+ add_static_box_at_grid(-1,1,1,6,-3,-3,spawnGlassColor);
+ add_static_box_at_grid(-1,1,1,6,-9,-9,GRAY);init_static_hash();rebuild_voxel_hash();
+ eq_pickup(0,PICKUP_RAILGUN,false);equipment[0].switchTime=0;
+ NetInputCommand hold={.held=NET_INPUT_FIRE},release={0};
+ eq_command(0,&hold,eqRailCharge);eq_command(0,&release,.01f);
+ assert(players[1].deaths==1 && players[2].deaths==1 && players[3].deaths==0);
+ fixture();gameMode=GAME_MODE_FIREFIGHT;firefightHumans=2;firefightPractice=false;
+ memset(personalRanks,0,sizeof(personalRanks));personalRanks[0][UPGRADE_SPEED]=2;
+ equipment[0].gun[0]=EQ_BLADE;
+ for(int n=0;n<60;n++){
+  player_walk_accelerate(&players[0],(Vector3){1,0,0},1.f/60);
+  net_integrate_player(&players[0],1.f/60,false);
+ }
+ assert(fabsf(players[0].pos.x-5*1.25f*1.10f)<.02f);
+ equipment[0].gun[0]=EQ_DEFAULT;assert(fabsf(combat_walk_scale(0)-1.1f)<.001f);
+ activePlayers=5;players[4].pos=(Vector3){10,2,0};playerInput[4]=INPUT_TYPE_BOT_EASY;
+ fpCarrierType[4]=PICKUP_SWORD;equipment[4].gun[0]=EQ_BLADE;
+ bot_apply_move(&players[4],&botStates[4],(Vector3){1,0,0},MOVE_SPEED,1.f/60);
+ assert(fabsf(players[4].vel.x-6.25f)<.01f);
+ fixture();Camera3D cam={.position=players[0].pos,.target=players[1].pos,.up={0,1,0},.fovy=55};
+ RenderTexture2D rt=LoadRenderTexture(160,100);
+ equipment[0].gun[0]=EQ_RAIL;aimStates[0].active=true;
+ for(int viewer=0;viewer<2;viewer++){
+  BeginTextureMode(rt);ClearBackground(BLACK);BeginMode3D(cam);
+  DrawCube((Vector3){0,2,-1.5f},2,2,.5f,DARKBLUE);EndMode3D();draw_rail_heat(viewer,cam);EndTextureMode();
+  Image img=LoadImageFromTexture(rt.texture);Color pixel=GetImageColor(img,80,50);
+  assert((pixel.r>100)==(viewer==0));UnloadImage(img);
+ }
+ UnloadRenderTexture(rt);
+ puts("Pellet damage, sword movement and personal rail heat checks passed");
+}
+static void attacks(void){fixture();eq_pickup(0,PICKUP_RAILGUN,false);equipment[0].switchTime=0;NetInputCommand hold={.held=NET_INPUT_FIRE},release={0};eq_command(0,&hold,.65f);eq_command(0,&release,.01f);assert(players[1].respawn_timer>0 && players[0].kills==1);eq_tick(2);eq_command(0,&hold,.65f);eq_command(0,&release,.01f);assert(players[1].respawn_timer>0);
  fixture();eq_rocket_blast((EquipmentRocket){.owner=0,.pos={0,2,-3}});assert(players[1].respawn_timer>0);
  fixture();players[1].pos.z=-1;eq_pickup(0,PICKUP_SHOTGUN,false);equipment[0].switchTime=0;players[0].matter=50;players[1].matter=5;assert(eq_fire(0));assert(players[1].respawn_timer>0);assert(players[0].matter==44);assert(!eq_fire(0));
  fixture();eq_pickup(0,PICKUP_CUTTER,false);equipment[0].switchTime=0;players[0].matter=50;players[1].matter=1;
@@ -33,15 +94,15 @@ static void rail_reservation(void){
  apply_matter_damage(0,1,85);assert(players[0].matter==0 && players[0].isExposed);
  eq_tick(.01f);assert(weaponVisuals[0].depleted==0);
  eq_command(0,&hold,.1f);assert(equipment[0].charge==eqRailCharge);
- eq_command(0,&release,.01f);assert(players[1].matter==50 && players[0].matter==0 && equipment[0].charge==0 && equipment[0].cooldown[EQ_RAIL]>0);
- eq_command(0,&release,.01f);assert(players[1].matter==50 && players[0].matter==0);
+ eq_command(0,&release,.01f);assert(players[1].respawn_timer>0 && players[0].matter==0 && equipment[0].charge==0 && equipment[0].cooldown[EQ_RAIL]>0);
+ eq_command(0,&release,.01f);assert(players[1].respawn_timer>0 && players[0].matter==0);
  // Loading the last 15 Matter over multiple frames still reaches full charge.
  const int rates[]={20,30,60,90,120,144,165,240,360,1000};
  for(int hz=0;hz<10;hz++){
   fixture();eq_pickup(0,PICKUP_RAILGUN,false);equipment[0].switchTime=0;players[0].matter=15;
   for(int n=0;n<rates[hz];n++)eq_command(0,&hold,1.f/rates[hz]);
   assert(equipment[0].charge==eqRailCharge && players[0].matter==0 && players[0].isExposed);
-  eq_command(0,&release,.01f);assert(players[1].matter==50 && players[0].matter==0);
+  eq_command(0,&release,.01f);assert(players[1].respawn_timer>0 && players[0].matter==0);
  }
  // Insufficient charge cannot fire; release refunds exactly what was loaded.
  fixture();eq_pickup(0,PICKUP_RAILGUN,false);equipment[0].switchTime=0;players[0].matter=5;
@@ -99,9 +160,9 @@ static void shotgun_structures(void){
  assert(goliathStates[1].count==1 && v_length(voxels[enemy_voxel(id)].vel)==0 && players[1].matter==100);
 }
 static void protection(void){
- fixture();players[1].enemyType=ENEMY_TYPE_GOLIATH;int armor=addVoxel(0,2,-1.5f,false,true,GRAY,0);goliathStates[1].count=1;goliathStates[1].voxels[0].voxelIdentity=voxels[armor].identity;rebuild_voxel_hash();eq_pickup(0,PICKUP_RAILGUN,false);equipment[0].switchTime=0;NetInputCommand hold={.held=NET_INPUT_FIRE},release={0};eq_command(0,&hold,.65f);eq_command(0,&release,.01f);assert(players[1].matter==50&&goliathStates[1].count==0);
+ fixture();players[1].enemyType=ENEMY_TYPE_GOLIATH;int armor=addVoxel(0,2,-1.5f,false,true,GRAY,0);goliathStates[1].count=1;goliathStates[1].voxels[0].voxelIdentity=voxels[armor].identity;rebuild_voxel_hash();eq_pickup(0,PICKUP_RAILGUN,false);equipment[0].switchTime=0;NetInputCommand hold={.held=NET_INPUT_FIRE},release={0};eq_command(0,&hold,.65f);eq_command(0,&release,.01f);assert(players[1].respawn_timer>0&&goliathStates[1].count==0);
  fixture();activePlayers=5;playerInput[4]=INPUT_TYPE_BOT_HARD;enemy_lab_spawn(4,ENEMY_TYPE_FOUNDRY,(Vector3){0,2,-5});float health=enemySpecial[4].coreHealth;eq_damage(0,4,100,true,DEATH_ROCKET,players[0].pos);assert(enemySpecial[4].coreHealth==health);enemySpecial[4].coreOpen=2;eq_damage(0,4,50,true,DEATH_RAIL,players[0].pos);assert(enemySpecial[4].coreHealth==health-50);
- fixture();worldPeriodic=true;worldFloorHalfSize=32;players[1].pos.z=10;eq_pickup(0,PICKUP_RAILGUN,false);equipment[0].switchTime=0;eq_command(0,&hold,.65f);eq_command(0,&release,.01f);assert(players[1].matter==50); // Behind locally, ahead in the adjacent periodic image; hit only once.
+ fixture();worldPeriodic=true;worldFloorHalfSize=32;players[1].pos.z=10;eq_pickup(0,PICKUP_RAILGUN,false);equipment[0].switchTime=0;eq_command(0,&hold,.65f);eq_command(0,&release,.01f);assert(players[1].respawn_timer>0); // Behind locally, ahead in the adjacent periodic image; hit only once.
 }
 static void stress(void){
  fixture();gameMode=GAME_MODE_FIREFIGHT;firefightFoundry=true;firefightPractice=false;useCustomMap=false;multiplayerActivePlayers=4;firefightHumans=4;currentWorldType=WORLD_TYPE_TEST;ResetGame();gameState=GAME_STATE_PLAYING;activePlayers=4;for(int i=0;i<4;i++){players[i].pitch=-15;players[i].invuln_timer=999;equipment[i].gun[1]=EQ_ROCKET;equipment[i].selected=1;equipment[i].upgrades=7;}
@@ -115,7 +176,7 @@ static void revised_weapons(void){
  fixture();players[1].pos.z=-6;add_static_box_at_grid(-2,2,1,6,-8,-4,GRAY);init_static_hash();rebuild_voxel_hash();
  eq_pickup(0,PICKUP_RAILGUN,false);equipment[0].switchTime=0;
  NetInputCommand held={.held=NET_INPUT_FIRE},release={0};eq_command(0,&held,.65f);eq_command(0,&release,.01f);
- assert(players[1].matter==50);VoxelHit hit;assert(!first_voxel_hit_detailed((Ray){players[0].pos,{0,0,-1}},10,-1,false,&hit));
+ assert(players[1].respawn_timer>0);VoxelHit hit;assert(!first_voxel_hit_detailed((Ray){players[0].pos,{0,0,-1}},10,-1,false,&hit));
  assert(eqTraces[0].life>0 && v_length(v_sub(eqTraces[0].start,players[0].pos))>.2f);
  fixture();players[1].pos.x=20;add_static_box_at_grid(-1,1,1,6,-20,-2,GRAY);init_static_hash();rebuild_voxel_hash();
  eq_pickup(0,PICKUP_CUTTER,false);equipment[0].switchTime=0;eq_command(0,&held,.25f);assert(fabsf(players[0].matter-99)<.001f);
@@ -177,8 +238,8 @@ static void matter_build_changes(void){
   release_tether(0);assert(players[0].matter==matter && players[0].goldTetherCharged);
  }
  fixture();players[0].matter=0;players[0].isExposed=true;eq_tick(.2f);assert(weaponVisuals[0].depleted==1);players[0].matter=1;eq_tick(.2f);assert(weaponVisuals[0].depleted==0);
- assert(eqGuns[EQ_SHOTGUN].damage*EQ_PELLETS==50 && eqShotgunImpulse==TETHER_THROW_IMPULSE);
- fixture();players[1].pos.z=-1;eq_pickup(0,PICKUP_SHOTGUN,false);equipment[0].switchTime=0;assert(eq_fire(0));assert(players[1].matter==50);
+ assert(eqGuns[EQ_SHOTGUN].damage*EQ_PELLETS==100 && eqShotgunImpulse==TETHER_THROW_IMPULSE);
+ fixture();players[1].pos.z=-1;eq_pickup(0,PICKUP_SHOTGUN,false);equipment[0].switchTime=0;assert(eq_fire(0));assert(players[1].respawn_timer>0);
  fixture();players[0].pitch=-40;players[1].pos.x=20;equipment[0].upgrades=EQ_BUILD;players[0].matter=9;assert(!eq_build(0) && !voxel_count && players[0].matter==9);
  players[0].matter=100;Vector3 points[EQ_PANEL_CUBES];assert(eq_panel_positions(0,points));players[1].pos=points[60];assert(eq_build(0) && voxel_count==125 && players[0].matter==90);assert(players[1].pos.y>points[60].y);
  clear_world_voxels();init_static_hash();players[0].matter=100;players[0].last_build_time=-100;players[1].pos.x=20;
@@ -240,4 +301,4 @@ static void polish_presentation(void){
  equipment[0].cooldown[EQ_ROCKET]=0;players[0].matter=0;eq_tick(.2f);assert(weaponVisuals[0].depleted==1 && weaponVisuals[0].cooldown==0);
  eq_reset(0);assert(weaponVisuals[0].deployment==0 && weaponVisuals[0].build_pulse==0);
 }
-int main(int argc,char**argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Equipment tests");init_pbd_thread_pool();assert(initialize_physics_backend());inventory();rail_reservation();polish_presentation();matter_build_changes();persistent_tether();revised_weapons();attacks();panels();sticky();lifecycle();sword();shotgun_structures();protection();supplies_regenerate();maps();stress();captures();beam_captures();sword_reach_and_visuals();matter_captures();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Equipment tests passed");return 0;}
+int main(int argc,char**argv){assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,540,"Equipment tests");init_pbd_thread_pool();assert(initialize_physics_backend());inventory();combat_grapple();combat_balance();rail_reservation();polish_presentation();matter_build_changes();persistent_tether();revised_weapons();attacks();panels();sticky();lifecycle();sword();shotgun_structures();protection();supplies_regenerate();maps();stress();captures();beam_captures();sword_reach_and_visuals();matter_captures();clear_world_voxels();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Equipment tests passed");return 0;}

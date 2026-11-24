@@ -429,12 +429,12 @@ static void checkpoints(void){
  fixture();firefightFoundry=true;multiplayerActivePlayers=2;firefightCheckpoints=true;ResetGame();gameState=GAME_STATE_PLAYING;
  assert(fpCheckpoint.valid&&fpCheckpoint.wave==1);for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].active)assert(pickups[n].type==PICKUP_HEALTH||pickups[n].type==PICKUP_AMMO||pickups[n].type==PICKUP_GRENADE);assert(!grenadeInventory[0]);
  size_t glob=carrier(PICKUP_GLOB,4);fp_death(4,players[0].pos);assert(fp_collect(0,glob,false));size_t ground=carrier(PICKUP_REINFORCED,5);fp_death(5,players[1].pos);
- grenadeInventory[0]=1;firefightScore=123;players[0].kills=7;teamUpgradeLevels[1]=2;start_firefight_wave(3);size_t count=fpCount;uint32_t next=fpNextId,unlocks=fpUnlocked;int voxelsBefore=voxel_count;
+ grenadeInventory[0]=1;firefightScore=123;players[0].kills=7;personalRanks[0][UPGRADE_HARVEST]=2;start_firefight_wave(3);size_t count=fpCount;uint32_t next=fpNextId,unlocks=fpUnlocked;int voxelsBefore=voxel_count;
  for(int attempt=0;attempt<3;attempt++){
-  size_t rocket=carrier(PICKUP_ROCKET,6);fp_death(6,players[0].pos);assert(fp_collect(0,rocket,true));assert(fp_collect(0,ground,false));firefightTeamLives=0;firefightScore=999;grenadeInventory[0]=0;teamUpgradeLevels[1]=8;
+  size_t rocket=carrier(PICKUP_ROCKET,6);fp_death(6,players[0].pos);assert(fp_collect(0,rocket,true));assert(fp_collect(0,ground,false));firefightTeamLives=0;firefightScore=999;grenadeInventory[0]=0;personalRanks[0][UPGRADE_HARVEST]=8;
   remove_voxel_index(voxel_count-1);for(int i=0;i<2;i++){players[i].invuln_timer=0;players[i].isExposed=true;players[i].matter=0;kill_player(i,8,false,false);}ff_update_coop(.01f);
   assert(firefightWaveState==FIREFIGHT_STATE_RESTART&&fpRestartTimer==3&&gameState==GAME_STATE_PLAYING);fp_tick(3.1f);
-  assert(firefightWave==3&&firefightWaveState==FIREFIGHT_STATE_ACTIVE&&firefightScore==123&&players[0].kills==7&&teamUpgradeLevels[1]==2);
+  assert(firefightWave==3&&firefightWaveState==FIREFIGHT_STATE_ACTIVE&&firefightScore==123&&players[0].kills==7&&personalRanks[0][UPGRADE_HARVEST]==2);
   assert(!memcmp(ffRemaining,fpCheckpoint.remaining,sizeof(ffRemaining))&&!memcmp(fpPending,fpCheckpoint.pending,sizeof(fpPending)));
   assert(fpCount==count&&fpNextId==next&&fpUnlocked==unlocks&&fpItems[glob].owner==0&&fpItems[ground].owner==-1&&eq_gun(0)==EQ_GLOB&&!eq_upgrade(0,EQ_BUILD));
   assert(grenadeInventory[0]==1&&players[0].matter==100&&firefightTeamLives==3&&voxel_count==voxelsBefore);

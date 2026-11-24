@@ -28,7 +28,7 @@ static int fpBannerQueue[32],fpBannerRead,fpBannerWrite;
 typedef struct {
     bool valid;int wave,lives,score,kills,repeatCursor;uint32_t nextId,unlocked;
     int remaining[FF_TYPE_COUNT],pending[8],pendingCount,total;
-    unsigned upgrades[3];Player humans[MAX_PLAYERS];Equipment equipment[MAX_PLAYERS];
+    unsigned upgrades[MAX_PLAYERS][3];Player humans[MAX_PLAYERS];Equipment equipment[MAX_PLAYERS];
     int grenades[MAX_PLAYERS],special[MAX_PLAYERS][2],selected[MAX_PLAYERS],revives[MAX_PLAYERS];
     FfItem *items;size_t count;
 } FfCheckpoint;

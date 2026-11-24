@@ -42,14 +42,14 @@ static void armor_and_release(void){
 }
 static void upgrades(void){
     fresh();gameMode=GAME_MODE_FIREFIGHT;firefightHumans=1;
-    memset(teamUpgradeLevels,0,sizeof(teamUpgradeLevels));assert(ff_build_cost(0)==10);
-    teamUpgradeLevels[0]=1;teamUpgradeLevels[1]=2;teamUpgradeLevels[2]=3;
-    assert(ff_build_cost(0)==5 && ff_harvest_amount(0)==20 && ff_throw_multiplier(0)==1.75f);
+    memset(personalRanks,0,sizeof(personalRanks));assert(ff_build_cost(0)==MATTER_BUILD_COST);
+    personalRanks[0][UPGRADE_SPEED]=3;personalRanks[0][UPGRADE_HARVEST]=2;
+    assert(ff_harvest_amount(0)==20 && fabsf(combat_walk_scale(0)-1.15f)<.001f);
     firefightWave=2;firefightEndless=true;firefightFoundry=false;firefightPractice=false;ff_wave_complete();
-    assert(teamUpgradeLevels[0]==1 && teamUpgradeLevels[1]==2 && teamUpgradeLevels[2]==3);
-    teamUpgradeLevels[0]=9;teamUpgradeLevels[1]=teamUpgradeLevels[2]=8;
-    assert(ff_upgrades_maxed() && ff_upgrade_choice(0,1)==-1 && ff_build_cost(0)==1);
-    reset_firefight_match();assert(teamUpgradeLevels[0]==0 && teamUpgradeLevels[1]==0 && teamUpgradeLevels[2]==0);
+    assert(personalRanks[0][UPGRADE_SPEED]==3);
+    for(int k=0;k<3;k++)personalRanks[0][k]=8;
+    assert(ff_upgrade_choice(0,0,1)==-1 && ff_build_cost(0)==MATTER_BUILD_COST);
+    reset_firefight_match();assert(ff_rank(0,UPGRADE_SPEED)==0);
 }
 static void decoys(void){
     // Aim at a floor point four meters ahead; stop precisely, then remain idle.

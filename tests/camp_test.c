@@ -23,16 +23,20 @@ static void timing(void){
     update_firefight_logic(.11f);assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION && camp.active && firefightIntermissionTimer==30);
     assert(equipment[0].gun[0]==EQ_RAIL && eq_gun(0)==EQ_GLOB && players[0].goldTetherCharged);
     for(int i=0;i<2;i++){assert(prepMenuOpen[i] && !prepReady[i]);prepReady[i]=true;}
+    prepChoices[1]=UPGRADE_CAPACITY;
     update_firefight_logic(4.9f);assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION && camp.active);
     prepReady[1]=false;update_firefight_logic(.2f);assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION);
     prepReady[1]=true;update_firefight_logic(.01f);assert(firefightWave==2 && !camp.active);
     firefightRound=ff_rounds(firefightWave);ff_wave_complete();update_firefight_logic(FF_LOOT_SECONDS);
+    assert(ff_rank(0,UPGRADE_HARVEST)==1 && ff_capacity(1)==110);
+    prepChoices[0]=UPGRADE_SPEED;
     update_firefight_logic(29.9f);assert(firefightWaveState==FIREFIGHT_STATE_INTERMISSION);
     update_firefight_logic(.2f);assert(firefightWave==3 && !camp.active);
-    for(int n=0;n<3;n++)teamUpgradeLevels[n]=teamUpgradeCaps[n];
+    assert(ff_rank(0,UPGRADE_SPEED)==1 && ff_rank(1,UPGRADE_HARVEST)==1);
+    for(int n=0;n<3;n++)personalRanks[0][n]=8;
     firefightRound=ff_rounds(firefightWave);ff_wave_complete();update_firefight_logic(FF_LOOT_SECONDS);update_firefight_logic(1);assert(camp.active && firefightWaveState==FIREFIGHT_STATE_INTERMISSION);
     for(int i=0;i<2;i++)prepReady[i]=true;update_firefight_logic(4.1f);
-    assert(firefightWave==4 && !camp.active && ff_upgrades_maxed());
+    assert(firefightWave==4 && !camp.active && ff_upgrade_choice(0,2,1)<0);
 }
 static void press_ready(int seat){
     ctState[seat][CT_READY].pressed=true;

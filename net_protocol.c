@@ -192,6 +192,7 @@ bool net_write_player_visual(NetWriter *writer, const NetPlayerVisualState *stat
         net_write_u8(writer, state->melee_progress);
     }
     if (state->flags & NET_PLAYER_VISUAL_TETHER) {
+        net_write_u8(writer,state->actor_target);
         net_write_f32(writer, state->tether_x);
         net_write_f32(writer, state->tether_y);
         net_write_f32(writer, state->tether_z);
@@ -221,6 +222,7 @@ bool net_read_player_visual(NetReader *reader, NetPlayerVisualState *state) {
         state->melee_progress = net_read_u8(reader);
     }
     if (state->flags & NET_PLAYER_VISUAL_TETHER) {
+        state->actor_target=net_read_u8(reader);
         state->tether_x = net_read_f32(reader);
         state->tether_y = net_read_f32(reader);
         state->tether_z = net_read_f32(reader);

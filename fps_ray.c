@@ -788,6 +788,7 @@ typedef struct {
     Vector3 netTetherVisualTarget;
     Vector3 netGrappleAnchorVelocity;
     uint32_t netGrappleAnchorTick;
+    int actorGrappleTarget; // Slot + 1 while attached to a combatant.
     bool grappleInputHeld;
     bool grappleAirborne;
     float netGrappleInverseMass;
@@ -808,24 +809,23 @@ static CombatantLifeState combatantLife[MAX_COMBATANTS];
 static int combatantTeam[MAX_COMBATANTS];
 static float reviveProgress[MAX_PLAYERS];
 static int reviveOwner[MAX_PLAYERS], reviveCount[MAX_PLAYERS];
-static int prepVotes[MAX_PLAYERS];
+static int prepChoices[MAX_PLAYERS];
 static bool prepReady[MAX_PLAYERS];
 static bool prepMenuOpen[MAX_PLAYERS];
-static TeamUpgrade teamUpgrade = UPGRADE_NONE; /* Most recent vote, for diagnostics. */
-static unsigned teamUpgradeLevels[3];
-static const unsigned teamUpgradeCaps[3]={9,8,8};
+static unsigned personalRanks[MAX_PLAYERS][3];
 static float ff_build_cost(int i);
-static float ff_throw_multiplier(int i);
+
 #include "controls.h"
 typedef struct { int device; float sensitivity, deadzone; bool invert; } LocalPlayerSeat;
 static LocalPlayerSeat localSeats[MAX_PLAYERS] = {{0,1,.15f,false},{1,1,.15f,false},{2,1,.15f,false},{3,1,.15f,false}};
 static int seat_device(int i) { return i>=0 && i<MAX_PLAYERS ? localSeats[i].device : -1; }
-static bool ff_bonus(int i, TeamUpgrade bonus) { return gameMode==GAME_MODE_FIREFIGHT && i>=0 && i<firefightHumans && teamUpgradeLevels[bonus]>0; }
-static float ff_harvest_amount(int i) {
-    if(gameMode==GAME_MODE_FIREFIGHT && i>=0 && i<firefightHumans)
-        return 10.0f+(ff_bonus(i,UPGRADE_HARVEST)?5.0f*teamUpgradeLevels[UPGRADE_HARVEST]:0);
-    return MATTER_MELEE_HARVEST;
+static unsigned ff_rank(int i,int upgrade){
+    return gameMode==GAME_MODE_FIREFIGHT && i>=0 && i<firefightHumans?personalRanks[i][upgrade]:0;
 }
+static float ff_harvest_amount(int i){
+    return gameMode==GAME_MODE_FIREFIGHT && i>=0 && i<firefightHumans?10+5*ff_rank(i,UPGRADE_HARVEST):MATTER_MELEE_HARVEST;
+}
+static float ff_capacity(int i){return MATTER_MAX_DEFAULT+10*ff_rank(i,UPGRADE_CAPACITY);}
 static void ff_restore_human(int i, float matter);
 static void ff_wave_complete(void);
 static void ff_resolve_death(int i);
@@ -10201,7 +10201,7 @@ static void UpdateKdRatio(int player_index) {
 
     if (gameMode == GAME_MODE_FIREFIGHT) {
         // Firefight Matter is fixed by enemy type, regardless of K/D.
-        p->matterMax = is_player_bot(player_index)?enemy_matter(p->enemyType):MATTER_MAX_DEFAULT;
+        p->matterMax = is_player_bot(player_index)?enemy_matter(p->enemyType):ff_capacity(player_index);
     } else {
         // Scale matter max based on K/D: Lower K/D -> More Matter.
         // Base 100 at K/D 1.0. Max ~200 at K/D 0. Min ~20 at K/D 9.
@@ -16018,13 +16018,39 @@ static void acquire_tether_hit(int idx,int hit_id,Vector3 normal) {
 }
 
 #include "tether_drain.inc"
+static bool eq_hostile(int i,int j);
+static int eq_actor_ray_filtered(int owner,Ray ray,float *distance,bool hostileOnly);
+static int grapple_voxel_actor(int id){
+    if(goCombatEnabled && go_shield_part(id)>=0)return MAX_PLAYERS;
+    int owner=get_goliath_owner_of_voxel(id);
+    return owner>=0?owner:enemy_equipment_owner(id);
+}
+static bool grapple_living(int i){
+    return i>=0 && i<activePlayers && players[i].respawn_timer<=0 &&
+        (gameMode!=GAME_MODE_FIREFIGHT || combatantLife[i]==LIFE_ALIVE);
+}
+static bool grapple_heavy(int i){
+    return go_combat_actor(i)||players[i].enemyType==ENEMY_TYPE_GOLIATH||players[i].enemyType==ENEMY_TYPE_FOUNDRY;
+}
+
 static void start_tether(int idx) {
     aim_cancel(idx);
     Player *p=&players[idx];VoxelHit hit;
     if(p->respawn_timer>0 || p->tetherHolding || p->drainTarget)return;
     ducks_ray((Ray){p->pos,player_forward(p)},p->goldTetherCharged?GOLD_TETHER_RANGE:TETHER_RANGE,.03f,-1,false);
-    if(first_voxel_hit_detailed((Ray){p->pos,player_forward(p)},(p->goldTetherCharged && ((is_player_bot(idx)&&!fp_carrier(idx)) || p->matter>=eqGoldGrabCost))?GOLD_TETHER_RANGE:TETHER_RANGE,-1,false,&hit))
-        acquire_tether_hit(idx,hit.id,hit.normal);
+    Ray ray={p->pos,player_forward(p)};
+    float reach=(p->goldTetherCharged && ((is_player_bot(idx)&&!fp_carrier(idx)) || p->matter>=eqGoldGrabCost))?GOLD_TETHER_RANGE:TETHER_RANGE;
+    bool wall=first_voxel_hit_detailed(ray,reach,-1,false,&hit);
+    if(idx<MAX_PLAYERS && !is_player_bot(idx)){
+        float distance=wall?fminf(hit.t,TETHER_RANGE):TETHER_RANGE;
+        int target=eq_actor_ray_filtered(idx,ray,&distance,true);
+        if(target<0 && wall && hit.t<=TETHER_RANGE)target=grapple_voxel_actor(hit.id);
+        if(grapple_living(target) && eq_hostile(idx,target)){
+            p->actorGrappleTarget=target+1;
+            play_sfx_at(SFX_TETHER,p->pos,idx,1,1);return;
+        }
+    }
+    if(wall)acquire_tether_hit(idx,hit.id,hit.normal);
 }
 
 static void measure_tether_cluster(int player_idx, const int *cluster, int cluster_count)
@@ -16173,6 +16199,7 @@ static void prepare_tether_forces(void) {
 
 static void release_tether_velocity(int idx,const Vector3 *launch) {
     Player *p = &players[idx];
+    p->actorGrappleTarget=0;
     p->drainTarget=0;
     go_drain_cancel(idx);
     if (!p->tetherHolding) {
@@ -16217,7 +16244,7 @@ static void release_tether_velocity(int idx,const Vector3 *launch) {
             if(go_combat_actor(idx))dir=v_norm(v_sub(go_tether_aim(),tetherComByPlayer[idx]));
             Vector3 impulse = v_mul(dir, p->goldTetherHolding
                 ? TETHER_THROW_IMPULSE : TETHER_THROW_IMPULSE / (float)cluster_count);
-            if(ff_bonus((int)(p-players), UPGRADE_THROW)) impulse=v_mul(impulse,ff_throw_multiplier((int)(p-players)));
+
             if(!launch) {
                 Vector3 average={0};for(int c=0;c<cluster_count;c++)average=v_add(average,voxels[glueClusterIndices[c]].vel);
                 /* Retain forward momentum, but discard side drift and per-corner jitter. */
@@ -18374,6 +18401,7 @@ static bool player_tether_visual_target(int player_index, Vector3 *out_target) {
         *out_target = p->netTetherVisualTarget;
         *out_target=world_image(*out_target,p->pos);return true;
     }
+    if(p->actorGrappleTarget>0 && p->actorGrappleTarget<=activePlayers){*out_target=world_image(players[p->actorGrappleTarget-1].pos,p->pos);return true;}
     if(goCombatEnabled&&player_index<MAX_PLAYERS&&goDrainPart[player_index]>=0){*out_target=go_part_center(goDrainPart[player_index]);return true;}
     if(p->drainTarget>0 && p->drainTarget<=activePlayers){*out_target=world_image(players[p->drainTarget-1].pos,p->pos);return true;}
     if (!p->tetherHolding || !resolve_tether_voxel(p)) return false;
@@ -18959,6 +18987,7 @@ static void net_integrate_player(Player *p, float dt, bool query_world) {
     float max_speed = MOVE_SPEED;
     if (p->enemyType == ENEMY_TYPE_SWARMER) max_speed = MOVE_SPEED * 1.35f;
     else if (p->enemyType == ENEMY_TYPE_GOLIATH) max_speed = MOVE_SPEED * 0.85f;
+    max_speed*=combat_walk_scale(player_idx);
     if(ex_in_field(player_idx) || tether_grapple_active(player_idx) || tether_grapple_airborne(player_idx))max_speed+=TETHER_GRAPPLE_MAX_APPROACH;
     float speed = sqrtf(p->vel.x * p->vel.x + p->vel.z * p->vel.z);
     if (!p->meleeKnockbackActive && speed > max_speed) {
@@ -18967,6 +18996,7 @@ static void net_integrate_player(Player *p, float dt, bool query_world) {
     }
     ex_actor_pull(player_idx,dt);
     tether_grapple_pull(player_idx,dt);
+    actor_grapple_pull(player_idx,dt);
     if(player_uses_rat(player_idx)) {float previousZ=p->pos.z;integrate_human_body(player_idx,dt,query_world);if(trapLabCase==LAB_PIT || trapLabCase==LAB_LOGS)trap_lab_ramp(p,previousZ);return;}
     bool collided = false;
     if (query_world && player_idx >= 0) {
@@ -19444,6 +19474,7 @@ static void bot_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float
     if (player_idx < 0 || player_idx >= MAX_COMBATANTS || &players[player_idx] != bot) {
         player_idx = -1;
     }
+    speed*=combat_walk_scale(player_idx);
     if(player_idx>=0 && aiNavigation[player_idx].count && dt>0)speed=fminf(speed,len/dt);
     float probe = speed * fmaxf(dt, 1.0f / 60.0f) + 0.2f;
     if (len < 1e-3f) {
@@ -20086,6 +20117,11 @@ static void net_write_player_state(NetWriter *writer, int slot) {
         Vector3 target=players[p->drainTarget-1].pos;
         visual.tether_x=target.x;visual.tether_y=target.y;visual.tether_z=target.z;
     }
+    if(p->actorGrappleTarget>0 && p->actorGrappleTarget<=activePlayers){
+        Vector3 point=players[p->actorGrappleTarget-1].pos;
+        visual.flags|=NET_PLAYER_VISUAL_TETHER;visual.actor_target=p->actorGrappleTarget;
+        visual.tether_x=point.x;visual.tether_y=point.y;visual.tether_z=point.z;
+    }
     if((visual.flags&NET_PLAYER_VISUAL_TETHER)&&!(visual.flags&(NET_PLAYER_VISUAL_GOLD_TETHER|NET_PLAYER_VISUAL_DRAIN))&&slot<MAX_PLAYERS){
         WeakTetherCoupling c=weakTethers[slot];
         if(weak_tether_sample(slot,&c)){
@@ -20163,8 +20199,8 @@ static void net_on_connect(NetTransport *transport, int slot, bool connected, vo
             for(int n=0;n<EX_FIELDS;n++)if(exFields[n].owner==player_slot)exFields[n].owner=-1;
             netPlayerPresent[player_slot] = false;
             if(players[player_slot].tetherHolding)release_tether(player_slot);
-            players[player_slot].drainTarget=0;
-            players[player_slot].respawn_timer=9999;combatantLife[player_slot]=LIFE_UNUSED;prepReady[player_slot]=true;prepVotes[player_slot]=-1;
+            players[player_slot].actorGrappleTarget=0;players[player_slot].drainTarget=0;
+            players[player_slot].respawn_timer=9999;combatantLife[player_slot]=LIFE_UNUSED;prepReady[player_slot]=true;prepChoices[player_slot]=-1;
             netPlayerReady[player_slot] = false;
             netHasPendingInput[player_slot] = false;
             for(int n=0;n<CLARITY_GRENADES;n++)if(grenades[n].id && grenades[n].owner==player_slot)grenades[n].owner=-1;
@@ -20383,6 +20419,7 @@ static void net_on_receive(NetTransport *transport, int peer_slot, uint8_t chann
             if (!net_read_player_state(&reader, &slot, &state)) break;
             netPlayerPresent[slot] = true;
             if (slot + 1 > activePlayers) activePlayers = slot + 1;
+            players[slot].actorGrappleTarget=state.visual.actor_target<=MAX_COMBATANTS?state.visual.actor_target:0;
             tether_grapple_receive(slot,state.visual.flags,
                 (Vector3){state.visual.tether_x,state.visual.tether_y,state.visual.tether_z},
                 (Vector3){state.visual.tether_vx,state.visual.tether_vy,state.visual.tether_vz},state.visual.tether_inverse_mass,header.server_tick);
@@ -20504,7 +20541,7 @@ static void net_host_tick(void) {
         if(gameMode==GAME_MODE_FIREFIGHT && firefightWaveState==FIREFIGHT_STATE_INTERMISSION){
             if(command.pressed&NET_INPUT_PREP_MENU)prepMenuOpen[slot]=!prepMenuOpen[slot];
             if(prepMenuOpen[slot]){
-                if(command.pressed&(NET_INPUT_PREP_LEFT|NET_INPUT_PREP_RIGHT)){prepVotes[slot]=ff_upgrade_choice(prepVotes[slot],command.pressed&NET_INPUT_PREP_LEFT?-1:1);prepReady[slot]=false;}
+                if(command.pressed&(NET_INPUT_PREP_LEFT|NET_INPUT_PREP_RIGHT)){prepChoices[slot]=ff_upgrade_choice(slot,prepChoices[slot],command.pressed&NET_INPUT_PREP_LEFT?-1:1);prepReady[slot]=false;}
                 if(command.pressed&NET_INPUT_PREP_READY)prepReady[slot]=!prepReady[slot];
             }
         }
@@ -20958,6 +20995,27 @@ static void debug_console_draw(void)
     }
 }
 
+static void draw_rail_heat(int viewer,Camera3D camera){
+    if(eq_gun(viewer)!=EQ_RAIL || !aimStates[viewer].active || !grapple_living(viewer))return;
+    float period=2*worldFloorHalfSize,reach=eqGuns[EQ_RAIL].range;
+    int images=worldPeriodic?(int)ceilf(reach/period):0;
+    Vector3 forward=v_norm(v_sub(camera.target,camera.position));
+    BeginMode3D(camera);rlDrawRenderBatchActive();rlDisableDepthTest();rlDisableDepthMask();
+    for(int j=0;j<activePlayers;j++)if(eq_hostile(viewer,j)&&grapple_living(j)){
+        Vector3 nearest=world_image(players[j].pos,camera.position);
+        for(int x=-images;x<=images;x++)for(int z=-images;z<=images;z++){
+            Vector3 at=v_add(nearest,(Vector3){x*period,0,z*period});
+            Vector3 offset=v_sub(at,camera.position);
+            if(v_dot(offset,forward)<=0 || v_dot(offset,offset)>reach*reach)continue;
+            BoundingBox body=combatant_bounds_at(j,at,player_collision_half(&players[j]));
+            Vector3 size=v_sub(body.max,body.min),center=v_mul(v_add(body.max,body.min),.5f);
+            Vector3 end={0,size.y*.22f,0};
+            DrawCapsule(v_add(center,end),v_sub(center,end),fminf(size.x*.48f,size.y*.28f),8,4,(Color){255,118,48,172});
+        }
+    }
+    rlDrawRenderBatchActive();rlEnableDepthMask();rlEnableDepthTest();EndMode3D();
+}
+
 static void render_gameplay_view(RenderTexture2D *screens,
                                  int *renderPlayers,
                                  int *renderW,
@@ -21058,6 +21116,7 @@ static void render_gameplay_view(RenderTexture2D *screens,
             EndMode3D();
             }
             periodic_fog(screens[view],cams[i],false,screens[view].depth);
+            draw_rail_heat(i,cams[i]);
             // Preserve world depth for the remote-gun mask before drawing the viewmodel.
             if (bloom) {
                 EndTextureMode();

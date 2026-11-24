@@ -4,6 +4,11 @@ static bool keys[512],buttons[32],pad;
 static bool test_pressed(int key){return key>=0 && key<512 && keys[key];}
 static bool test_pad(int i){return pad && i==0;}
 static bool test_button(int i,int b){return test_pad(i) && b>=0 && b<32 && buttons[b];}
+#ifdef __APPLE__
+#include "../macos/macos_gamepad.h"
+#undef IsGamepadAvailable
+#undef IsGamepadButtonPressed
+#endif
 #define IsKeyPressed test_pressed
 #define IsGamepadAvailable test_pad
 #define IsGamepadButtonPressed test_button
@@ -31,7 +36,7 @@ static void prepare_saved_wave(void){
     equipment[0].gun[0]=EQ_GLOB;equipment[0].gun[1]=EQ_GLOCK;equipment[0].selected=1;equipment[0].upgrades=EQ_SHIELD|EQ_SWORD|EQ_ADHESIVE;
     players[0].kills=7;players[0].deaths=2;players[0].debrisKills=3;players[0].goldTetherCharged=true;
     grenadeInventory[0]=2;exGrenades[0][0]=1;exSelectedGrenade[0]=GRENADE_STICKY;reviveCount[0]=4;
-    firefightScore=12345;firefightKillsTotal=39;firefightTeamLives=5;teamUpgradeLevels[1]=2;
+    firefightScore=12345;firefightKillsTotal=39;firefightTeamLives=5;personalRanks[0][UPGRADE_HARVEST]=2;personalRanks[1][UPGRADE_CAPACITY]=3;
     start_firefight_wave(7);assert(fpSaveWave==7 && !fpSaveError);
 }
 static void verify_saved_wave(void){
@@ -42,7 +47,8 @@ static void verify_saved_wave(void){
     assert(fp_save_continue());
     assert(gameState==GAME_STATE_PLAYING && firefightWave==7 && firefightRound==1 && !firefightCheckpoints && firefightEndless);
     assert(currentWorldType==WORLD_TYPE_TEST && !firefightFoundry && firefightHumans==2 && multiplayerActivePlayers==2);
-    assert(firefightScore==12345 && firefightKillsTotal==39 && firefightTeamLives==5 && teamUpgradeLevels[1]==2);
+    assert(firefightScore==12345 && firefightKillsTotal==39 && firefightTeamLives==5 && personalRanks[0][UPGRADE_HARVEST]==2);
+    assert(players[1].matterMax==130 && players[1].matter==130 && ff_capacity(0)==100);
     assert(players[0].kills==7 && players[0].deaths==2 && players[0].debrisKills==3 && players[0].goldTetherCharged);
     assert(fabsf(players[0].kd_ratio-8.f/3)<.001f && reviveCount[0]==4);
     assert(eq_gun(0)==EQ_GLOCK && equipment[0].gun[0]==EQ_GLOB && eq_upgrade(0,EQ_SHIELD) && eq_upgrade(0,EQ_SWORD));
@@ -51,6 +57,17 @@ static void verify_saved_wave(void){
     assert(fpItems[2].type==PICKUP_ADHESIVE && fpItems[2].owner==0 && eq_upgrade(0,EQ_ADHESIVE));
     assert(!memcmp(fpOpeningRoster,fpCheckpoint.remaining,sizeof(fpOpeningRoster)));
     assert(!memcmp(fpOpeningCarriers,fpCheckpoint.pending,fpPendingCount*sizeof(int)));
+}
+static void legacy_ranks(void){
+    FpSavedRun s;FfItem *items;assert(fp_save_read(&s,&items));free(items);
+    s.version=1;s.size=offsetof(FpSavedRun,ranks);s.count=0;
+    s.upgrades[0]=9;s.upgrades[1]=2;s.upgrades[2]=3;
+    uint32_t hash=fp_save_hash(2166136261u,&s,s.size);
+    FILE *f=fopen(savePath,"wb");assert(f);
+    fwrite("FPSFFSV1",1,8,f);fwrite(&hash,4,1,f);fwrite(&s,s.size,1,f);assert(!fclose(f));
+    assert(fp_save_read(&s,&items));free(items);
+    for(int i=0;i<s.humans;i++)assert(s.ranks[i][UPGRADE_HARVEST]==2 && s.ranks[i][UPGRADE_CAPACITY]==8 && s.ranks[i][UPGRADE_SPEED]==3);
+    fp_save_write();
 }
 static void malformed_files(void){
     FpSavedRun s;FfItem *items;assert(fp_save_read(&s,&items));free(items);
@@ -95,7 +112,7 @@ int main(int argc,char **argv){
     if(argc>1 && !strcmp(argv[1],"--read")){verify_saved_wave();puts("Cross-process Continue passed");}
     else {
         remove(savePath);fpSaveWave=-1;assert(!fp_save_available());
-        prepare_saved_wave();verify_saved_wave();malformed_files();menu();
+        prepare_saved_wave();verify_saved_wave();legacy_ranks();malformed_files();menu();
         /* A failed replacement leaves the previous complete save available. */
         assert(MakeDirectory(".build/firefight-save-test.sav.tmp")==0);
         fp_save_write();assert(fpSaveError);

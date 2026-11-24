@@ -3,6 +3,7 @@ static bool tether_grapple_anchor(int i,Vector3 *target,Vector3 *velocity){
     if(i<0||i>=MAX_PLAYERS||i>=activePlayers||is_player_bot(i)||gameState!=GAME_STATE_PLAYING||creativeModeActive||
        ff_input_blocked(i)||combatantLife[i]!=LIFE_ALIVE||players[i].respawn_timer>0||(enemyLab&&enemyLabPaused))return false;
     Player *p=&players[i];
+    if(p->actorGrappleTarget)return false;
     if(netTransport.role==NET_ROLE_CLIENT){
         if(!p->grappleInputHeld||!p->netGrappleAnchorTick||!p->netTetherVisualActive||p->netGoldTetherVisualActive||p->netDrainVisualActive)return false;
         *target=world_image(p->netTetherVisualTarget,p->pos);*velocity=p->netGrappleAnchorVelocity;
@@ -16,15 +17,44 @@ static bool tether_grapple_active(int i){Vector3 target,velocity;return tether_g
 static bool tether_grapple_airborne(int i){
     return i>=0&&i<MAX_PLAYERS&&!players[i].onGround&&(players[i].grappleAirborne||tether_grapple_active(i));
 }
+static float combat_walk_scale(int i){
+    if(i<0 || i>=MAX_COMBATANTS)return 1;
+    return (eq_gun(i)==EQ_BLADE?1.25f:1.f)*(1+.05f*ff_rank(i,UPGRADE_SPEED));
+}
+// Apply the reel after steering and before the usual swept collision step.
+static void actor_grapple_pull(int mover,float dt){
+    for(int i=0;i<MAX_PLAYERS && i<activePlayers;i++){
+        Player *owner=&players[i];int target=owner->actorGrappleTarget-1;
+        if(target<0)continue;
+        if(!grapple_living(i)||!grapple_living(target)||!eq_hostile(i,target)||ff_input_blocked(i)){
+            owner->actorGrappleTarget=0;continue;
+        }
+        bool heavy=grapple_heavy(target);
+        if(mover!=(heavy?i:target))continue;
+        Vector3 delta=world_delta(players[target].pos,owner->pos);
+        float distance=v_length(delta);
+        if(distance<.01f)continue;
+        Vector3 dir=v_mul(delta,1/distance);VoxelHit obstruction;
+        if(distance>TETHER_RANGE+1 || (first_voxel_hit_detailed((Ray){owner->pos,dir},fmaxf(0,distance-.25f),-1,false,&obstruction) && grapple_voxel_actor(obstruction.id)!=target)){
+            owner->actorGrappleTarget=0;continue;
+        }
+        if(distance<1.4f || dt<=0)continue;
+        if(!heavy)dir=v_mul(dir,-1);
+        Player *p=&players[mover];
+        float desired=fminf(TETHER_GRAPPLE_MAX_APPROACH,(distance-1.4f)*4);
+        float approach=v_dot(p->vel,dir);
+        if(approach<desired)p->vel=v_add(p->vel,v_mul(dir,desired-approach));
+    }
+}
 static void player_walk_accelerate(Player *p,Vector3 direction,float dt){
     float previousSpeed=hypotf(p->vel.x,p->vel.z);
-    p->vel=v_add(p->vel,v_mul(direction,ACCELERATION*dt));
+    p->vel=v_add(p->vel,v_mul(direction,ACCELERATION*combat_walk_scale((int)(p-players))*dt));
     int i=(int)(p-players);
     if(!tether_grapple_active(i)&&!tether_grapple_airborne(i))return;
     /* The higher grapple ceiling belongs to physical impulses, not the walk
      * motor. Steering may preserve existing momentum, but cannot manufacture
      * extra speed above walking speed. Braking input can still reduce it. */
-    float limit=fmaxf(MOVE_SPEED,previousSpeed),speed=hypotf(p->vel.x,p->vel.z);
+    float limit=fmaxf(MOVE_SPEED*combat_walk_scale(i),previousSpeed),speed=hypotf(p->vel.x,p->vel.z);
     if(speed>limit){p->vel.x*=limit/speed;p->vel.z*=limit/speed;}
 }
 static float tether_grapple_ground_friction(int i){

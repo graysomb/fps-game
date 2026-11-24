@@ -171,7 +171,6 @@ static void hologram_net_snapshot(int peer) {
     if(netTransport.role!=NET_ROLE_HOST)return;
     uint8_t packet[512];NetWriter w;net_writer_init(&w,packet,sizeof(packet));
     net_write_header(&w,NET_MSG_HOLOGRAMS,0,netTransport.session_id,netServerTick);
-    for(int n=0;n<3;n++)net_write_u8(&w,teamUpgradeLevels[n]);
     for(int n=0;n<MAX_PLAYERS;n++){
         Hologram *h=&holograms[n];net_write_u32(&w,h->generation);
         net_write_f32(&w,h->life);net_write_f32(&w,h->health);net_write_f32(&w,h->cooldown);
@@ -186,8 +185,7 @@ static void hologram_net_snapshot(int peer) {
 static bool hologram_net_receive(NetMessageType type,NetReader *r,uint32_t tick) {
     if(type!=NET_MSG_HOLOGRAMS)return false;
     if(netTransport.role!=NET_ROLE_CLIENT || tick<hologramReceiveTick)return true;
-    Hologram incoming[MAX_PLAYERS]={0};unsigned levels[3];
-    for(int n=0;n<3;n++){levels[n]=net_read_u8(r);if(levels[n]>teamUpgradeCaps[n])return true;}
+    Hologram incoming[MAX_PLAYERS]={0};
     for(int n=0;n<MAX_PLAYERS;n++){
         Hologram *h=&incoming[n];h->generation=net_read_u32(r);h->life=net_read_f32(r);h->health=net_read_f32(r);h->cooldown=net_read_f32(r);
         h->body.pos=(Vector3){net_read_f32(r),net_read_f32(r),net_read_f32(r)};
@@ -198,7 +196,6 @@ static bool hologram_net_receive(NetMessageType type,NetReader *r,uint32_t tick)
            !isfinite(h->life) || h->life<0 || h->life>hologram_max_life()+.01f || !isfinite(h->health) || h->health<0 || h->health>50 ||
            !isfinite(h->cooldown) || h->cooldown<0 || h->cooldown>15 || h->weapon>WEAPON_DYNAMIC_LAUNCHER)return true;
     }
-    memcpy(teamUpgradeLevels,levels,sizeof(levels));
     for(int n=0;n<MAX_PLAYERS;n++){
         Hologram old=holograms[n];holograms[n]=incoming[n];holograms[n].visualTarget=incoming[n].body.pos;
         holograms[n].pose=character_pose(incoming[n].body.pos,incoming[n].body.yaw,0,0,incoming[n].body.onGround,false,incoming[n].color,(float)GetTime());
