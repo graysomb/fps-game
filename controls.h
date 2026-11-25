@@ -66,7 +66,8 @@
  X(TEST_TOOLS,"Sandbox tools",CT_TEST,KEY_F5,KEY_F5,0,-1) \
  X(CONSOLE,"Debug console",CT_COMMON,KEY_GRAVE,KEY_GRAVE,0,-1) \
  X(SETTINGS,"Controls & Settings",CT_COMMON,0,0,0,-1) \
- X(PAUSE,"Pause / session menu",CT_COMMON,KEY_PAUSE,KEY_PAUSE,GAMEPAD_BUTTON_MIDDLE_RIGHT,-1)
+ X(PAUSE,"Pause / session menu",CT_COMMON,KEY_PAUSE,KEY_PAUSE,GAMEPAD_BUTTON_MIDDLE_RIGHT,-1) \
+ X(ACTIVATE_STRUCTURE,"Activate / reset structure physics",CT_EDIT,KEY_V,KEY_KP_5,GAMEPAD_BUTTON_MIDDLE_LEFT,-1)
 #define CT_ENUM(id,label,ctx,k1,k2,p,m) CT_##id,
 typedef enum {CT_ACTIONS(CT_ENUM) CT_COUNT} CtAction;
 #undef CT_ENUM

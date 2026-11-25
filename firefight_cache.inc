@@ -102,7 +102,8 @@ static Vector3 fp_base_center(void){
     return center;
 }
 
-static void fp_build_spawn_glass(void){
+static FpRect fp_spawn_glass_footprint(void){
+    if(firefightFoundry && !useCustomMap)return fp_foundry_deck();
     Vector3 low=fpCacheOrigin,high=low;
     for(int n=0;n<FP_RULE_COUNT;n++){
         Vector3 at=v_add(fpCacheOrigin,world_delta(fpCachePositions[n],fpCacheOrigin));
@@ -114,11 +115,6 @@ static void fp_build_spawn_glass(void){
     }
     int limit=(int)floorf(FLOOR_SIZE/VOXEL_SIZE);
     Vector3 center=fp_base_center();
-    if(firefightFoundry && !useCustomMap){
-        FpRect deck=fp_foundry_deck();
-        low.x=fminf(low.x,deck.x0*VOXEL_SIZE);high.x=fmaxf(high.x,(deck.x1+1)*VOXEL_SIZE);
-        low.z=fminf(low.z,deck.z0*VOXEL_SIZE);high.z=fmaxf(high.z,(deck.z1+1)*VOXEL_SIZE);
-    }
     int cx=lroundf(center.x/VOXEL_SIZE),cz=lroundf(center.z/VOXEL_SIZE);
     int xmin=floorf((low.x-2.5f)/VOXEL_SIZE)-1,xend=ceilf((high.x+2.5f)/VOXEL_SIZE)+1;
     int zmin=floorf((low.z-2.5f)/VOXEL_SIZE)-1,zend=ceilf((high.z+2.5f)/VOXEL_SIZE)+1;
@@ -130,9 +126,16 @@ static void fp_build_spawn_glass(void){
         cz=clampi(cz,ceilf((zend-limit+3)*.5f),floorf((zmin+limit-3)*.5f));
     }
     int rx=(int)fmaxf(cx-xmin,xend-cx),rz=(int)fmaxf(cz-zmin,zend-cz);
-    FpRect base={cx-rx,cx+rx-1,cz-rz,cz+rz-1};
-    FpSurvey s={.area={base.x0-FP_LAYOUT_MARGIN-2,base.x1+FP_LAYOUT_MARGIN+2,
-                       base.z0-FP_LAYOUT_MARGIN-2,base.z1+FP_LAYOUT_MARGIN+2}};
+    return (FpRect){cx-rx,cx+rx-1,cz-rz,cz+rz-1};
+}
+
+static void fp_build_spawn_glass(void){
+    FpRect base=fp_spawn_glass_footprint();
+    // The Foundry deck has a fixed rim. Other arenas survey for an accessible footprint.
+    int margin=firefightFoundry && !useCustomMap ? 0 : FP_LAYOUT_MARGIN;
+    int limit=(int)floorf(FLOOR_SIZE/VOXEL_SIZE);
+    FpSurvey s={.area={base.x0-margin-2,base.x1+margin+2,
+                       base.z0-margin-2,base.z1+margin+2}};
     s.width=s.area.x1-s.area.x0+1;
     int count=s.width*(s.area.z1-s.area.z0+1);
     s.sites=calloc(count,sizeof(*s.sites));s.seen=calloc(count,sizeof(int));s.queue=malloc(count*sizeof(int));
@@ -149,7 +152,7 @@ static void fp_build_spawn_glass(void){
     FpRect best=base;int bestScore=INT_MAX,bestExtra=INT_MAX;
     // Minimize blocked access first, then total outward displacement. Even side
     // lengths put an eight-cell gate exactly on each side's midpoint.
-    for(int dx=0;dx<=FP_LAYOUT_MARGIN;dx++)for(int dz=0;dz<=FP_LAYOUT_MARGIN;dz++){
+    for(int dx=0;dx<=margin;dx++)for(int dz=0;dz<=margin;dz++){
         int extra=dx+dz;if(bestScore==0 && extra>=bestExtra)continue;
         FpRect r={base.x0-dx,base.x1+dx,base.z0-dz,base.z1+dz};
         if(!worldPeriodic && (r.x0< -limit+3||r.x1>limit-4||r.z0< -limit+3||r.z1>limit-4))continue;

@@ -100,7 +100,7 @@ static void foundry_shield_center(int humans){
   low=Vector3Min(low,voxels[v].pos);high=Vector3Max(high,voxels[v].pos);
  }
  // The Foundry deck spans [-9.5,10.5] by [-7.5,8.5] in world coordinates.
- assert(low.x< -9.5f && high.x>10.5f && low.z< -7.5f && high.z>8.5f);
+ assert(low.x== -9.25f && high.x==10.25f && low.z== -7.25f && high.z==8.25f);
  assert((low.x+high.x)*.5f==.5f && (low.z+high.z)*.5f==.5f);
  for(int i=0;i<FP_RULE_COUNT;i++){
   Vector3 p=fpCachePositions[i],opposite=fpCachePositions[FP_RULE_COUNT-1-i];
@@ -111,8 +111,15 @@ static void foundry_shield_center(int humans){
  }
  for(int axis=0;axis<2;axis++)for(int side=0;side<2;side++){
   int wall=(int)floorf((axis?(side?high.z:low.z):(side?high.x:low.x))/VOXEL_SIZE);
-  for(int t=-3;t<=4;t++)for(int y=0;y<12;y++)
-   assert(!spawn_glass(table_get_static_only(axis?t:wall,y,axis?wall:t)));
+  for(int t=-3;t<=4;t++){
+   for(int y=0;y<12;y++)assert(!spawn_glass(table_get_static_only(axis?t:wall,y,axis?wall:t)));
+   int previous=-1;
+   for(int d=-2;d<=2;d++){
+    FpSite lane=fp_survey_column(axis?t:wall+d,axis?wall+d:t,4);
+    assert(lane.walkable && (previous<0 || abs(lane.ground-previous)<=1));
+    previous=lane.ground;
+   }
+  }
  }
 }
 // Check the entire flat perimeter, including the image across a periodic seam.

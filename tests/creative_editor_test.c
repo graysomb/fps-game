@@ -1,4 +1,8 @@
-#include "../.build/raylib-gl43/src/raylib.h"
+#include "raylib.h"
+#ifdef __APPLE__
+#include <OpenGL/gl3.h>
+#define MACOS_GAMEPAD_IMPLEMENTATION
+#endif
 static bool testInput,focus=true,kd[512],kp[512],pads[4],pd[4][32],pp[4][32];static float axes[4][8];
 static bool tkd(int k){return testInput?kd[k]:IsKeyDown(k);}static bool tkp(int k){return testInput?kp[k]:IsKeyPressed(k);}static bool ta(int d){return testInput?pads[d]:IsGamepadAvailable(d);}static bool tpd(int d,int b){return testInput?pd[d][b]:IsGamepadButtonDown(d,b);}static bool tpp(int d,int b){return testInput?pp[d][b]:IsGamepadButtonPressed(d,b);}static float tax(int d,int a){return testInput?axes[d][a]:GetGamepadAxisMovement(d,a);}static bool tf(void){return testInput?focus:IsWindowFocused();}
 #define IsKeyDown tkd
@@ -21,6 +25,30 @@ static void editing(void){base();assert(ce_edit(0,false));ce_commit();assert(cmD
 static void templates(void){base();ce.dirty=false;ce_action(11);assert(cmDocument->count>1000);if(!cm_validate(cmDocument))fprintf(stderr,"Foundry: %s\n",cmError);assert(cm_validate(cmDocument));if(!ce_ready(true))fprintf(stderr,"Foundry ready: %s\n",ce.notice);assert(ce_ready(true));assert(cm_write(cmDocument,"artifacts/creative-foundry.map"));printf("Foundry: %d cells, %d traps\n",cmDocument->count,cmDocument->trapCount);ce.dirty=false;ce_action(12);if(!cm_validate(cmDocument))fprintf(stderr,"Crosscut: %s\n",cmError);assert(cm_validate(cmDocument));if(!ce_ready(true))fprintf(stderr,"Crosscut ready: %s\n",ce.notice);assert(ce_ready(true));printf("Crosscut: %d cells, %d traps\n",cmDocument->count,cmDocument->trapCount);}
 static void gameplay(void){base();ce_play(2);assert(cmTesting&&gameState==GAME_STATE_PLAYING&&cmRuntime&&useCustomMap);assert(activePlayers==MAX_COMBATANTS);Vector3 p;assert(cm_spawn(CM_ENTRANCE,0,&p,NULL));assert(ff_spawn_position(4,&p));add_static_voxel_at_grid(1,0,1,RED,0);ce_return();assert(!cmTesting&&voxel_count==0&&cmDocument->count==0&&activePlayers==1);puts("Firefight test and exact editor restoration: PASS");}
 static void custom_trap(void){base();CeSeat *s=&ceSeats[0];s->tool=5;s->item=5;assert(ce_edit(0,false));assert(cmDocument->trapCount==1);assert(cm_validate(cmDocument));ce_commit();int orange=0;for(int n=0;n<cmDocument->count;n++)orange+=(cmDocument->cells[n].flags&CM_REMOVE)!=0;assert(orange>1);assert(cm_apply(cmDocument,false));int trigger=-1;for(int n=0;n<voxel_count;n++)if(foundry_trap_trigger(&foundryTraps[0],voxels[n].gx,voxels[n].gy,voxels[n].gz)){trigger=n;break;}assert(trigger>=0);assert(foundry_trap_hit(trigger,0,false));foundry_trap_release(0);assert(foundryTraps[0].active);for(int n=0;n<cmDocument->count;n++){CmCell *c=&cmDocument->cells[n];if(c->flags&CM_REMOVE)assert(table_get_static_only(c->x,c->y,c->z)<0);}puts("Custom branching trap activation: PASS");}
+static void physics_button(void){
+ base();
+ players[0].pos=(Vector3){.25f,5.25f,0};
+ assert(cm_reserve(cmDocument,4));
+ ce_add_cell(cmDocument,0,10,-8,BLUE,0,true,0,0);
+ ce_add_cell(cmDocument,1,10,-8,BLUE,0,false,0,0);
+ ce_add_cell(cmDocument,3,10,-8,WHITE,0,false,0,0);
+ ce_refresh();
+ ct_defaults(&ctLibrary);ctReady=true;testInput=true;
+ ct_frame(.016f);ct_frame(.016f);
+ kd[KEY_V]=true;ct_frame(.016f);ce_update(.016f);
+ assert(ce.physicsPreview && table_get_static_only(0,10,-8)<0 && table_get_static_only(1,10,-8)<0);
+ assert(table_get_static_only(3,10,-8)>=0);
+ kd[KEY_V]=false;ct_frame(.016f);
+ for(int n=0;n<30;n++)ce_update(PBD_MAX_STEP_DT);
+ for(int n=0;n<voxel_count;n++)if(voxels[n].simulate)assert(voxels[n].pos.y<5);
+ kd[KEY_V]=true;ct_frame(.016f);ce_update(.016f);
+ assert(!ce.physicsPreview && table_get_static_only(0,10,-8)>=0 && voxel_count==3);
+ assert(!ce.dirty && ce.historyCount==1 && cmDocument->count==3);
+ kd[KEY_V]=false;ct_frame(.016f);testInput=false;
+ players[0].pitch=80;
+ ce_toggle_physics(0);assert(!ce.physicsPreview);
+ puts("Creative physics button, falling structure, independent neighbor and reset: PASS");
+}
 static void object_moves(void){base();CeSeat *s=&ceSeats[0];s->tool=1;assert(ce_edit(0,false));assert(cmDocument->pickupCount==1);Vector3 before=cmDocument->supplies[0].pos;s->objectKind=1;s->objectIndex=0;s->distance=12;s->previewValid=false;assert(ce_edit(0,false));assert(cmDocument->pickupCount==1&&Vector3Distance(before,cmDocument->supplies[0].pos)>2);s->tool=4;s->item=CM_PLAYER;s->objectKind=2;s->objectIndex=0;s->yaw=90;int count=cmDocument->spawnCount;assert(ce_edit(0,false));assert(cmDocument->spawnCount==count&&cmDocument->spawns[0].yaw==90);s->tool=6;s->objectKind=0;assert(ce_edit(0,false));s->objectKind=3;s->objectIndex=0;s->distance=16;s->previewValid=false;assert(ce_edit(0,false));assert(cmDocument->duckCount==1);for(int n=0;n<140;n++)ce_commit();assert(ce.historyCount==128&&ce.bytes<=64u*1024u*1024u);puts("Move authored objects and bounded history: PASS");}
 static void controls(void){base();testInput=true;ct_defaults(&ctLibrary);ctReady=true;ctMenuOpen=false;pads[3]=true;playerInput[0]=multiplayerPlayerInput[0]=INPUT_TYPE_GAMEPAD;localSeats[0].device=3;
  for(int d=0;d<4;d++){axes[d][GAMEPAD_AXIS_LEFT_TRIGGER]=axes[d][GAMEPAD_AXIS_RIGHT_TRIGGER]=-1;}ct_frame(.016f);ct_frame(.016f);
@@ -41,4 +69,4 @@ static void scenes(void){base();weaponRenderingReady=weapon_renderer_init();char
  double times[90];for(int f=0;f<100;f++){double start=GetTime();ce_thumbnails();render_gameplay_view(screens,&rp,&rw,&rh,true);glFinish();if(f>=10)times[f-10]=(GetTime()-start)*1000;}for(int a=0;a<90;a++)for(int b=a+1;b<90;b++)if(times[b]<times[a]){double t=times[a];times[a]=times[b];times[b]=t;}printf("Editor %dm four-view: median %.3f ms, p95 %.3f ms\n",(int)cmDocument->width,times[45],times[85]);TakeScreenshot(scenario?"artifacts/creative-256-scene.png":"artifacts/creative-foundry-scene.png");assert(activePlayers==4);}
  for(int i=0;i<rp;i++)UnloadRenderTexture(screens[i]);character_renderer_shutdown();weapon_renderer_shutdown();shutdown_world_visuals();}
 static void captures(void){base();ceSeats[0].panel=1;for(int size=0;size<2;size++){int w=size?640:1280,h=size?360:720;RenderTexture2D rt=LoadRenderTexture(w,h);BeginTextureMode(rt);ClearBackground(DARKGRAY);ce_hud(0,w,h);EndTextureMode();Image im=LoadImageFromTexture(rt.texture);ImageFlipVertical(&im);ExportImage(im,size?"artifacts/creative-four-player.png":"artifacts/creative-full.png");UnloadImage(im);UnloadRenderTexture(rt);}}
-int main(int argc,char **argv){SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(1280,720,"Creative tests");MakeDirectory("artifacts");if(argc>1){if(!strcmp(argv[1],"bench")){scenes();ce_shutdown();CloseWindow();return 0;}return lan(!strcmp(argv[1],"host"));}files();editing();templates();gameplay();custom_trap();object_moves();controls();file_menu();sandbox();captures();ce_shutdown();clear_world_voxels();CloseWindow();puts("Creative regression tests passed");return 0;}
+int main(int argc,char **argv){SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(1280,720,"Creative tests");MakeDirectory("artifacts");if(argc>1){if(!strcmp(argv[1],"bench")){scenes();ce_shutdown();CloseWindow();return 0;}return lan(!strcmp(argv[1],"host"));}physics_button();files();editing();templates();gameplay();custom_trap();object_moves();controls();file_menu();sandbox();captures();ce_shutdown();clear_world_voxels();CloseWindow();puts("Creative regression tests passed");return 0;}

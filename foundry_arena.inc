@@ -63,8 +63,14 @@ static void buildFoundryHoldout(void) {
         foundry_box(-4,4,0,step,9+(3-step)*2,10+(3-step)*2,trim);
         foundry_box(-4,4,0,step,-10-(3-step)*2,-9-(3-step)*2,trim);
     }
-    foundry_box(-10,-9,4,5,-5,-1,trim);
-    foundry_box(9,10,4,5,1,5,trim);
+    // Connect the lower ring to the glass gates on the east and west deck edges.
+    for(int step=0;step<3;step++){
+        int distance=FOUNDRY_DECK_X+1+step;
+        foundry_box(-distance,-distance,0,2-step,-2,2,trim);
+        foundry_box(distance,distance,0,2-step,-2,2,trim);
+    }
+    foundry_box(-10,-9,4,5,-5,-3,trim);
+    foundry_box(9,10,4,5,3,5,trim);
     /* Heavy slabs at east/west choke points, with four linked release posts. */
     for(int side=-1;side<=1;side+=2) {
         int x=side*23;

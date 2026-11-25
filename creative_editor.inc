@@ -7,7 +7,7 @@ static CeSeat ceSeats[4];
 static char ceFileSummary[280][160];
 static RenderTexture2D ceThumb[4];
 static int ceThumbKind[4]={-99,-99,-99,-99};
-static struct {bool active,dirty,testing,lobby,typing,sandbox;int menu,row,pending,textAction,textKey,sandboxEnemy,sandboxGun;char text[CM_PATH],path[CM_PATH],notice[256];CmMap *history[128];int historyCount,cursor;size_t bytes;Player cameras[4];int seats;FilePathList files;} ce;
+static struct {bool active,dirty,testing,lobby,typing,sandbox,physicsPreview;float physicsTime;int menu,row,pending,textAction,textKey,sandboxEnemy,sandboxGun;char text[CM_PATH],path[CM_PATH],notice[256];CmMap *history[128];int historyCount,cursor;size_t bytes;Player cameras[4];int seats;FilePathList files;} ce;
 static const char *ceTools[]={"Terrain","Weapons","Upgrades","Supplies","Spawns","Traps","Ducks","Selection"};
 static const char *ceSpawns[]={"Player spawn","Enemy entrance","Camp","Boss spawn"};
 static const int ceWeapons[]={PICKUP_DYNAMIC_SHOT,PICKUP_SHOTGUN,PICKUP_CUTTER,PICKUP_RAILGUN,PICKUP_ROCKET,PICKUP_SWORD,PICKUP_GLOB,PICKUP_GLOCK,PICKUP_DMR};
@@ -36,6 +36,85 @@ static Vector3 ce_target(int i){CeSeat *s=&ceSeats[i];Player *p=&players[i];if(s
 static bool ce_in_box(CmCell c,Vector3 a,Vector3 b){Vector3 p={(c.x+.5f)*VOXEL_SIZE,(c.y+.5f)*VOXEL_SIZE,(c.z+.5f)*VOXEL_SIZE};return p.x>=fminf(a.x,b.x)-.01f&&p.x<=fmaxf(a.x,b.x)+.01f&&p.y>=fminf(a.y,b.y)-.01f&&p.y<=fmaxf(a.y,b.y)+.01f&&p.z>=fminf(a.z,b.z)-.01f&&p.z<=fmaxf(a.z,b.z)+.01f;}
 static void ce_add_cell(CmMap *m,int x,int y,int z,Color c,int material,bool reinforced,int trap,int flags){m->cells[m->count++]=(CmCell){x,y,z,c,material,reinforced,trap,flags};}
 static void ce_refresh(void){ce_normalize_traps();cm_apply(cmDocument,true);for(int i=0;i<4;i++)ceSeats[i].previewValid=false;}
+static void ce_reset_physics(void){
+ if(!ce.physicsPreview)return;
+ ce_refresh();
+ ce.physicsPreview=false;
+ ce.physicsTime=0;
+ ce_notice("Structure restored");
+}
+
+static bool ce_release_structure(int first){
+ // Creative maps use unit cells. Follow shared faces, leaving authored traps independent.
+ static UnitVoxelBuffer cells;
+ static bool seen[MAX_VOXELS];
+ memset(seen,0,(size_t)voxel_count*sizeof(*seen));
+ for(int n=0;n<cmDocument->count;n++){
+  CmCell *cell=&cmDocument->cells[n];
+  if(!cell->trap)continue;
+  int id=table_get_static_only(cell->x,cell->y,cell->z);
+  if(id>=0)seen[id]=true;
+ }
+ static const int offsets[6][3]={{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+ cells.count=0;
+ Voxel *v=&voxels[first];
+ unit_voxel_buffer_push(&cells,v->gx,v->gy,v->gz,v->color,v->type,false,first,0,-1);
+ seen[first]=true;
+ for(int head=0;head<cells.count;head++){
+  UnitVoxelSeed *seed=&cells.voxels[head];
+  for(int d=0;d<6;d++){
+   int id=table_get_static_only(seed->gx+offsets[d][0],seed->gy+offsets[d][1],seed->gz+offsets[d][2]);
+   if(id<0||seen[id]||voxels[id].type!=0)continue;
+   seen[id]=true;
+   v=&voxels[id];
+   unit_voxel_buffer_push(&cells,v->gx,v->gy,v->gz,v->color,v->type,false,id,0,-1);
+  }
+ }
+ // Descending removal keeps lower indices valid as the voxel array compacts.
+ ++staticBeliefBatchDepth;
+ static int indices[MAX_VOXELS];
+ for(int n=0;n<cells.count;n++)indices[n]=cells.voxels[n].voxelIndex;
+ qsort(indices,cells.count,sizeof(*indices),activation_index_descending);
+ for(int n=0;n<cells.count;n++)remove_voxel_index(indices[n]);
+ --staticBeliefBatchDepth;
+ int spawned=emit_unit_voxels_from_units(&cells,false,true,-1);
+ if(spawned!=cells.count){ce_refresh();return false;}
+ rebuild_voxel_hash();
+ refresh_activation_surfaces(&cells);
+ refresh_static_voxel_beliefs();
+ return true;
+}
+
+static void ce_toggle_physics(int seat){
+ if(ce.physicsPreview){ce_reset_physics();return;}
+ Player *p=&players[seat];
+ VoxelHit hit;
+ if(!first_voxel_hit_detailed((Ray){p->pos,player_forward(p)},cmDocument->width*2,-1,true,&hit)||voxels[hit.id].type!=0){
+  ce_notice("Aim at a solid structure");return;
+ }
+ bool released=false,trap=false;
+ for(int n=0;n<foundryTrapCount;n++){
+  if(!foundry_explicit_flags(&foundryTraps[n],hit.x,hit.y,hit.z))continue;
+  foundry_trap_release(n);
+  released=foundryTraps[n].active;
+  trap=true;
+  break;
+ }
+ if(!trap)released=ce_release_structure(hit.id);
+ ce.physicsPreview=released;
+ ce.physicsTime=0;
+ ce_notice(released?"Physics running":"Insufficient physics capacity");
+}
+
+static void ce_step_physics(float dt){
+ if(!ce.physicsPreview)return;
+ ce.physicsTime=fminf(ce.physicsTime+dt,PBD_MAX_STEP_DT*PBD_MAX_ACCUM_STEPS);
+ int steps=(int)(ce.physicsTime/PBD_MAX_STEP_DT);
+ if(!steps)return;
+ ce.physicsTime-=steps*PBD_MAX_STEP_DT;
+ simulate_voxel_pbd_steps(PBD_MAX_STEP_DT,steps);
+ for(int i=0;i<4;i++)ceSeats[i].previewValid=false;
+}
 static bool ce_edit(int i,bool erase){
  CeSeat *s=&ceSeats[i];CmMap *m=cmDocument;Vector3 at=ce_target(i);if(erase){for(int n=0;n<4;n++)ceSeats[n].objectKind=0;}if(erase&&s->tool==0){VoxelHit hit;if(first_voxel_hit_detailed((Ray){players[i].pos,player_forward(&players[i])},s->distance,-1,true,&hit))at=(Vector3){(hit.x+.5f)*VOXEL_SIZE,(hit.y+.5f)*VOXEL_SIZE,(hit.z+.5f)*VOXEL_SIZE};}if(!cm_inside(m,at)){ce_notice("Outside world bounds");return false;}
  if(s->tool==7 || (s->tool==5&&s->item==0)){
@@ -115,16 +194,18 @@ static void ce_update(float dt){
  int keyboards=0;for(int n=0;n<activePlayers;n++)keyboards+=playerInput[n]==INPUT_TYPE_KEYBOARD;
  if(ct_pressed(0,CT_JOIN_EDITOR)&&activePlayers<4&&keyboards<2){int i=activePlayers++;ce.seats=multiplayerActivePlayers=activePlayers;playerInput[i]=multiplayerPlayerInput[i]=INPUT_TYPE_KEYBOARD;players[i].pos=(Vector3){0,5,0};}
  for(int i=0;i<activePlayers;i++){CeSeat *s=&ceSeats[i];bool pad=playerInput[i]==INPUT_TYPE_GAMEPAD;bool secondary=false;for(int n=0;n<i;n++)secondary|=playerInput[n]==INPUT_TYPE_KEYBOARD;int device=seat_device(i);if(pad&&!IsGamepadAvailable(device)){if(s->stroke)ce_commit();s->stroke=s->latched=false;continue;}
-  if(ct_pressed(i,CT_PAUSE)||ce_pad_press(i,GAMEPAD_BUTTON_MIDDLE_RIGHT)||(!pad&&IsKeyPressed(KEY_ESCAPE)&&!s->panel)){if(s->stroke){ce_commit();s->stroke=false;}ce.menu=2;ce.row=0;return;}
-  bool palette=ct_pressed(i,CT_PALETTE);bool props=ct_pressed(i,CT_PROPERTIES);if(palette||props){s->panel=s->panel?0:palette?1:2;s->row=0;}
+  if(ct_pressed(i,CT_PAUSE)||ce_pad_press(i,GAMEPAD_BUTTON_MIDDLE_RIGHT)||(!pad&&IsKeyPressed(KEY_ESCAPE)&&!s->panel)){if(s->stroke){ce_commit();s->stroke=false;}ce_reset_physics();ce.menu=2;ce.row=0;return;}
+  bool palette=ct_pressed(i,CT_PALETTE);bool props=ct_pressed(i,CT_PROPERTIES);if(palette||props){ce_reset_physics();s->panel=s->panel?0:palette?1:2;s->row=0;}
   int vertical=pad?(ce_pad_press(i,GAMEPAD_BUTTON_LEFT_FACE_DOWN)-ce_pad_press(i,GAMEPAD_BUTTON_LEFT_FACE_UP)):(IsKeyPressed(KEY_DOWN)-IsKeyPressed(KEY_UP));int horizontal=pad?(ce_pad_press(i,GAMEPAD_BUTTON_LEFT_FACE_RIGHT)-ce_pad_press(i,GAMEPAD_BUTTON_LEFT_FACE_LEFT)):(IsKeyPressed(KEY_RIGHT)-IsKeyPressed(KEY_LEFT));
   if(s->panel){if(!pad&&mouseSlot==i){int vx,vy,vw,vh;get_viewport(i,activePlayers,&vx,&vy,&vw,&vh);Vector2 p=GetMousePosition();int fs=vw<700?13:18;int row=(int)((p.y-vy-75)/(fs+5));if(p.x>=vx+6&&p.x<vx+vw-6&&p.y>=vy+75&&row>=0&&row<(s->panel==1?8:11)&&IsMouseButtonPressed(MOUSE_BUTTON_LEFT)){s->row=row;if(s->panel==1){s->tool=row;s->item=0;s->objectKind=0;s->previewValid=false;s->panel=2;s->row=0;}else ce_property(s,row,1);}if(GetMouseWheelMove())ce_property(s,s->row,GetMouseWheelMove()>0?1:-1);}if(s->stroke){ce_commit();s->stroke=false;}if(ce_pad_press(i,GAMEPAD_BUTTON_RIGHT_FACE_RIGHT)||(!pad&&IsKeyPressed(KEY_ESCAPE))){s->panel=0;continue;}s->row=(s->row+vertical+(s->panel==1?8:11))%(s->panel==1?8:11);bool confirm=ce_pad_press(i,GAMEPAD_BUTTON_RIGHT_FACE_DOWN)||(!pad&&IsKeyPressed(KEY_ENTER));if(s->panel==1&&confirm){s->tool=s->row;s->item=0;s->objectKind=0;s->previewValid=false;s->panel=2;s->row=0;}else if(s->panel==2&&(horizontal||confirm))ce_property(s,s->row,horizontal?horizontal:1);continue;}
+  if(ct_pressed(i,CT_UNDO)||ct_pressed(i,CT_REDO))ce_reset_physics();
   if(ct_pressed(i,CT_UNDO))ce_undo(i,false);if(ct_pressed(i,CT_REDO))ce_undo(i,true);
   int size=ct_pressed(i,CT_SIZE_UP)-ct_pressed(i,CT_SIZE_DOWN);if(size)for(int a=0;a<3;a++)s->brush[a]=clampi(s->brush[a]+size,1,20);
   float distance=ct_pressed(i,CT_DIST_UP)-ct_pressed(i,CT_DIST_DOWN);if(distance){s->distance=clampf(s->distance+distance,1,256);s->previewValid=false;}
   Player *p=&players[i];Vector2 axes=ct_move_axes(i);float mx=axes.x,mz=axes.y,my=ct_down(i,CT_UP)-ct_down(i,CT_DOWN);
   ct_edit_look(i,dt);
   Vector3 f=player_forward(p),r=v_norm(v_cross(f,(Vector3){0,1,0})),move=v_add(v_add(v_mul(f,mz),v_mul(r,mx)),(Vector3){0,my,0});float speed=ct_down(i,CT_FAST)?22:10;if(v_length(move)>1)move=v_norm(move);p->pos=world_wrap(v_add(p->pos,v_mul(move,speed*dt)));p->pos.y=clampf(p->pos.y,.5f,cmDocument->width+10);
+  if(ct_pressed(i,CT_ACTIVATE_STRUCTURE)){if(s->stroke){ce_commit();s->stroke=false;}ce_toggle_physics(i);continue;}
   bool sample=ct_pressed(i,CT_SAMPLE);if(sample){
    Ray ray={p->pos,player_forward(p)};float best=s->distance;int kind=0,index=-1;
    for(int category=1;category<=3;category++){int count=category==1?cmDocument->pickupCount:category==2?cmDocument->spawnCount:cmDocument->duckCount;for(int n=0;n<count;n++){Vector3 pos=category==1?cmDocument->supplies[n].pos:category==2?cmDocument->spawns[n].pos:cmDocument->ducks[n];pos=world_image(pos,p->pos);RayCollision h=GetRayCollisionSphere(ray,pos,.8f);if(h.hit&&h.distance<best){best=h.distance;kind=category;index=n;}}}
@@ -136,9 +217,10 @@ static void ce_update(float dt){
    if(kind)ce_notice("Object selected: aim and apply to move it. Palette selects a new object.");
   }
   bool apply=ct_down(i,CT_PLACE);bool erase=ct_down(i,CT_ERASE);
-  s->repeat-=dt;bool discrete=s->tool!=0;bool busy=false;for(int n=0;n<activePlayers;n++)if(n!=i&&ceSeats[n].stroke)busy=true;if(busy){apply=erase=false;}if((apply||erase)&&s->repeat<=0&&(!discrete||!s->latched)){bool changed=ce_edit(i,erase);s->latched=true;s->stroke|=changed;s->repeat=discrete?.25f:.12f;}
+  s->repeat-=dt;bool discrete=s->tool!=0;bool busy=false;for(int n=0;n<activePlayers;n++)if(n!=i&&ceSeats[n].stroke)busy=true;if(busy){apply=erase=false;}if((apply||erase)&&s->repeat<=0&&(!discrete||!s->latched)){ce_reset_physics();bool changed=ce_edit(i,erase);s->latched=true;s->stroke|=changed;s->repeat=discrete?.25f:.12f;}
   if(!(apply||erase)){if(s->stroke)ce_commit();s->stroke=false;s->latched=false;s->repeat=0;}
  }
+ ce_step_physics(dt);
 }
 static void ce_world(int i){if(!ce.active||ce.testing||!cmDocument||i<0||i>=4)return;CeSeat *s=&ceSeats[i];Vector3 at=ce_target(i);Color c=cm_inside(cmDocument,at)?SKYBLUE:RED;DrawCubeWires(at,s->brush[0]*VOXEL_SIZE,s->brush[1]*VOXEL_SIZE,s->brush[2]*VOXEL_SIZE,c);
  if(s->selected||s->corner){Vector3 a=s->a,b=s->corner?at:s->b;DrawBoundingBox((BoundingBox){v_sub(Vector3Min(a,b),(Vector3){.25f,.25f,.25f}),v_add(Vector3Max(a,b),(Vector3){.25f,.25f,.25f})},GOLD);}
@@ -147,7 +229,7 @@ static void ce_world(int i){if(!ce.active||ce.testing||!cmDocument||i<0||i>=4)re
  for(int n=0;n<cmDocument->duckCount;n++){duck_renderer_init(NULL);DuckPose pose={.position=cmDocument->ducks[n],.scale=.75f,.time=0};duck_draw(pose);DrawSphereWires(v_add(cmDocument->ducks[n],(Vector3){0,.3f,0}),.6f,4,8,GREEN);}
 }
 static void ce_hud(int i,int w,int h){if(!ce.active||!cmDocument)return;CeSeat *s=&ceSeats[i];int font=w<700?13:18;DrawRectangle(0,0,w,58,Fade(BLACK,.85f));DrawText(TextFormat("P%d %s%s | %d/%d voxels",i+1,cmDocument->name,ce.dirty?" *":"",cmDocument->count,MAX_VOXELS),8,6,font,WHITE);DrawText(TextFormat("%s: %s | %.0fm | %dx%dx%d",ceTools[s->tool],ce_item_name(s),s->distance,s->brush[0],s->brush[1],s->brush[2]),8,28,font,SKYBLUE);
- DrawRectangle(0,h-44,w,44,Fade(BLACK,.8f));DrawText(TextFormat("%s apply | %s erase | %s palette | %s properties",ct_hint(i,CT_PLACE),ct_hint(i,CT_ERASE),ct_hint(i,CT_PALETTE),ct_hint(i,CT_PROPERTIES)),8,h-40,font,WHITE);DrawText(TextFormat("%s",ce.notice),8,h-21,font-2,GOLD);
+ DrawRectangle(0,h-64,w,64,Fade(BLACK,.8f));DrawText(TextFormat("%s  %s",ct_hint(i,CT_ACTIVATE_STRUCTURE),ce.physicsPreview?"Reset physics":"Activate structure physics"),8,h-60,font,SKYBLUE);DrawText(TextFormat("%s apply | %s erase | %s palette | %s properties",ct_hint(i,CT_PLACE),ct_hint(i,CT_ERASE),ct_hint(i,CT_PALETTE),ct_hint(i,CT_PROPERTIES)),8,h-40,font,WHITE);DrawText(TextFormat("%s",ce.notice),8,h-21,font-2,GOLD);
  if(s->panel){int rows=s->panel==1?8:11;DrawRectangle(6,65,w-12,rows*(font+5)+36,Fade((Color){15,24,32,255},.97f));for(int n=0;n<rows;n++){const char *label;if(s->panel==1)label=ceTools[n];else {switch(n){case 0:label=ce_item_name(s);break;case 1:case 2:case 3:label=TextFormat("Brush %s: %d",n==1?"width":n==2?"height":"depth",s->brush[n-1]);break;case 4:label=TextFormat("Distance: %.0f m",s->distance);break;case 5:label=TextFormat("Color: %d",s->color+1);break;case 6:label=s->material?"Material: fluid":"Material: solid";break;case 7:label=s->reinforced?"Reinforced: yes":"Reinforced: no";break;case 8:label=TextFormat("Rotation: %.0f",s->yaw);break;case 9:label=TextFormat("Entrance group: %d",s->group);break;default:label=TextFormat("Linked trap: %d",s->trap);}}
  DrawText(label,16,75+n*(font+5),font,n==s->row?GOLD:WHITE);}DrawText("Up/down select | Left/right change | B / Tab close",16,80+rows*(font+5),font-2,SKYBLUE);if(s->panel==2&&ceThumb[i].id&&s->tool>=1&&s->tool<=3)DrawTexturePro(ceThumb[i].texture,(Rectangle){0,0,240,-140},(Rectangle){w-220,90,210,123},(Vector2){0},0,WHITE);}
 }
