@@ -16,6 +16,17 @@ static const float eqGoldGrabCost=25;
 static const float eqSwordReach=SWORD_REACH,eqSwordSweep=SWORD_SWEEP_DEGREES,eqSwordCycle=.8f,eqSwordDamage=10000;
 typedef struct {int gun[2],selected,upgrades;float cooldown[EQ_GUN_COUNT],switchTime,charge,cutTime,buildTime;bool initialized,held,buildHeld,wasEmpty,beamContact;float depleted,depletionPulse,shieldDelay;bool shieldRegenerating;Vector3 beamEnd;} Equipment;
 static Equipment equipment[MAX_COMBATANTS];
+static const float railSpinSeconds=.35f;
+typedef struct {
+    bool active;
+    float age,startYaw,startPitch;
+    Vector3 aimPoint,hitOffset,previousEye;
+    int target;
+    uint32_t incarnation;
+} RailSpin;
+static RailSpin railSpins[MAX_PLAYERS];
+static bool rail_spinning(int slot){return slot>=0 && slot<MAX_PLAYERS && railSpins[slot].active;}
+
 static void eq_shield_damage(int i);
 static void eq_shield_tick(float dt);
 static void eq_shield_icon(int x,int y,Color color);

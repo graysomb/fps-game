@@ -291,6 +291,8 @@ typedef struct DebugRunState {
     float goliath_throw_cover_launched_dot;
     bool goliath_wall_stuck_test;
     bool goliath_idle_test;
+    int railFrame,railHits;
+    bool railTrial;
     bool standard_look_test;
     float standard_look_align;
     Vector3 goliath_start_pos;
@@ -353,9 +355,11 @@ static bool debug_setup_goliath_throw_cover(DebugRunState *state);
 static bool debug_setup_goliath_wall_stuck(DebugRunState *state);
 static bool debug_setup_goliath_idle(DebugRunState *state);
 static bool debug_setup_goliath_armor_shots(DebugRunState *state);
+static bool debug_setup_rail_spin(DebugRunState *state);
 static bool debug_setup_standard_look(DebugRunState *state);
 
 static const DebugScenarioDefinition debugScenarios[] = {
+    { "rail-360-noscope", "First-person stationary and strafing rail trick shots", debug_setup_rail_spin, 300, 300 },
     { "goliath-armor-shots", "Default/glob shots versus intact armor at multiple angles and frame rates", debug_setup_goliath_armor_shots, 60, 60 },
     { "dynamic-freefall", "Dynamic cluster freefall control", debug_setup_dynamic_freefall, 60, 60 },
     { "creative-reset-cache", "Creative reset invalidates cached static render and collision surfaces", debug_setup_creative_reset_cache, 60, 60 },
@@ -1085,6 +1089,18 @@ static void debug_draw_overlay(const DebugRunState *state, const DebugSample *sa
 
 static void debug_render_scene(DebugRunState *state, const DebugSample *sample)
 {
+    if(state->railTrial){
+        static RenderTexture2D views[MAX_PLAYERS];
+        static int count,width,height;
+        render_gameplay_view(views,&count,&width,&height,false);
+        BeginTextureMode(state->target);
+        DrawTexturePro(views[0].texture,(Rectangle){0,0,width,-height},
+            (Rectangle){0,0,DEBUG_RENDER_WIDTH,DEBUG_RENDER_HEIGHT},(Vector2){0},0,WHITE);
+        const char *trial=state->railFrame<=100?"Stationary target":state->railFrame<=200?"Strafing right":"Strafing left";
+        DrawText(trial,24,45,28,RAYWHITE);
+        EndTextureMode();
+        return;
+    }
     voxel_render_frame++;
     BeginTextureMode(state->target);
         ClearBackground((Color){ 32, 42, 58, 255 });
@@ -3771,8 +3787,48 @@ static bool debug_setup_standard_look(DebugRunState *state)
 
  #include "debug_goliath_armor.inc"
 
+static bool debug_setup_rail_spin(DebugRunState *state){
+    enemy_lab_fixture(15);
+    state->railTrial=true;
+    voxel_ca_init();voxel_ca_update(1);
+    weaponRenderingReady=weapon_renderer_init();
+    character_renderer_init();
+    return true;
+}
+
+static void debug_rail_step(DebugRunState *state){
+    if(state->railFrame>=300)return;
+    int trial=state->railFrame/100,frame=state->railFrame%100;
+    float dt=1.f/60;
+    int target=trial?5:4;
+    if(frame==0){
+        enemy_lab_fixture(15);
+        players[0].pitch=0;
+        if(trial)players[4].pos.x=-3;
+    }
+    if(trial && players[target].respawn_timer<=0){
+        players[target].pos.x=(trial==1?1.f:-1.f)*(frame-55)*.065f;
+    }
+    if(frame<=55){
+        dir_to_yaw_pitch(world_delta(players[target].pos,players[0].pos),&players[0].yaw,&players[0].pitch);
+        players[0].yaw=remainderf(players[0].yaw,360);
+    }
+    eq_tick(dt);
+    eq_command(0,&(NetInputCommand){.held=(frame>=13 && frame<55)?NET_INPUT_FIRE:0},dt);
+    if(frame==55 && (!rail_spinning(0)||railSpins[0].target!=target||players[target].deaths))
+        debug_add_failure(state,"Trial %d failed to reserve the aimed shot",trial+1);
+    if(frame==77){
+        if(players[target].deaths==1 && players[0].kills==1 && !rail_spinning(0) &&
+           equipment[0].cooldown[EQ_RAIL]>0 && fabsf(players[0].matter-85)<.01f &&
+           (!trial || fabsf(players[target].death_pos.x)>1))state->railHits++;
+        else debug_add_failure(state,"Trial %d missed or duplicated the reserved shot",trial+1);
+    }
+    state->railFrame++;
+}
+
 static void debug_physics_step(DebugRunState *state)
 {
+    if(state->railTrial){debug_rail_step(state);return;}
     if(strcmp(debugRunConfig.scenario,"goliath-armor-shots")==0)return;
     float dt = PBD_MAX_STEP_DT;
     if (state && state->melee_close_test && !state->melee_close_swung) {
@@ -3988,6 +4044,7 @@ static uint64_t debug_tagged_static_identity_signature(int tag)
 
 static void debug_validate_step(DebugRunState *state, int step)
 {
+    if(state->railTrial)return;
     if(strcmp(debugRunConfig.scenario,"goliath-armor-shots")==0)return;
     debug_validate_all_sim_particles(state, step);
     if (state->falling_cube_player_test) {
@@ -4533,6 +4590,7 @@ static void debug_validate_step(DebugRunState *state, int step)
 
 static void debug_finalize_validation(DebugRunState *state)
 {
+    if(state->railTrial){if(state->railHits!=3)debug_add_failure(state,"Expected three confirmed rail hits, got %d",state->railHits);return;}
     if(strcmp(debugRunConfig.scenario,"goliath-armor-shots")==0)return;
     if (physics_backend_is_gpu(physicsBackend.requested) &&
         physicsBackend.active != physicsBackend.requested) {

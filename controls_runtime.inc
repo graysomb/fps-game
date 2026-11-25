@@ -92,6 +92,12 @@ static NetInputCommand ct_command(int s,int slot,float dt){
     if(!ct_safe(s,slot)){ctToggle[s]=false;c.pressed=NET_INPUT_AIM_CANCEL|NET_INPUT_BUILD_CANCEL|NET_INPUT_TETHER_CANCEL;}
     else {
         Vector2 move=ct_move_axes(s);c.move_x=net_quantize_axis(move.x);c.move_y=net_quantize_axis(move.y);
+        if(rail_spinning(slot)){
+            c.held=NET_INPUT_RAIL_SPIN;
+            if(ctTetherWas[s] || players[slot].grappleInputHeld)c.held|=NET_INPUT_TETHER;
+            if(ct_pressed(s,CT_JUMP))c.pressed|=NET_INPUT_JUMP;
+            ctCommands[s]=c;return c;
+        }
         Player aim=players[slot];ct_look(s,slot,&aim,dt,false);
         if(ct_pad(s)||!mouse_owns(slot)){InputType savedInput=playerInput[slot];playerInput[slot]=ct_pad(s)?INPUT_TYPE_GAMEPAD:INPUT_TYPE_KEYBOARD;float yaw=players[slot].yaw,pitch=players[slot].pitch;players[slot].yaw=aim.yaw;players[slot].pitch=aim.pitch;Vector2 look=ct_look_axes(s);apply_aim_assist(slot,dt,fmaxf(fabsf(look.x),fabsf(look.y)));aim.yaw=players[slot].yaw;aim.pitch=players[slot].pitch;players[slot].yaw=yaw;players[slot].pitch=pitch;playerInput[slot]=savedInput;}
         c.aim_yaw=aim.yaw;c.aim_pitch=aim.pitch;

@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define FPS_NET_MAGIC 0x4650534eu /* "FPSN" */
-#define FPS_NET_PROTOCOL_VERSION 37u /* Personal wave progression and actor grapples. */
+#define FPS_NET_PROTOCOL_VERSION 38u /* Replicated railgun spin and look ownership. */
 #define FPS_NET_DEFAULT_PORT 27015u
 #define FPS_NET_DISCOVERY_PORT 27016u
 #define FPS_NET_MAX_PACKET 1100u
@@ -60,7 +60,7 @@ typedef enum NetInputButtons {
     NET_INPUT_HOLOGRAM = 1u << 14,
     NET_INPUT_REVIVE = 1u << 15,
     NET_INPUT_SWITCH=1u<<16, NET_INPUT_EQUIP=1u<<17, NET_INPUT_AIM=1u<<18, NET_INPUT_AIM_CANCEL=1u<<19, NET_INPUT_BUILD_CANCEL=1u<<20, NET_INPUT_GRENADE_CYCLE=1u<<21,
-    NET_INPUT_PREP_LEFT=1u<<22, NET_INPUT_PREP_RIGHT=1u<<23, NET_INPUT_PREP_READY=1u<<24, NET_INPUT_PREP_MENU=1u<<25
+    NET_INPUT_PREP_LEFT=1u<<22, NET_INPUT_PREP_RIGHT=1u<<23, NET_INPUT_PREP_READY=1u<<24, NET_INPUT_PREP_MENU=1u<<25, NET_INPUT_RAIL_SPIN=1u<<26
 } NetInputButtons;
 
 typedef struct NetPacketHeader {

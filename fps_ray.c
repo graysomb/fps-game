@@ -18978,8 +18978,10 @@ static float net_axis_value(int16_t value) {
    actions are deliberately not handled here. */
 static void net_apply_movement_command(Player *p, const NetInputCommand *command, float dt) {
     p->grappleInputHeld=(command->held&NET_INPUT_TETHER)!=0 && !(command->pressed&NET_INPUT_TETHER_CANCEL);
-    if(command->mouse_look){p->yaw=command->aim_yaw;p->pitch=command->aim_pitch;p->yaw_vel=p->pitch_vel=0;}
-    if(!command->mouse_look){
+    int slot=(int)(p-players);
+    bool lockLook=rail_spinning(slot)||(command->held&NET_INPUT_RAIL_SPIN);
+    if(!lockLook && command->mouse_look){p->yaw=command->aim_yaw;p->pitch=command->aim_pitch;p->yaw_vel=p->pitch_vel=0;}
+    if(!lockLook && !command->mouse_look){
     float yaw_accel = -net_axis_value(command->look_x) * (TURN_ACCELERATION*aim_player_scale(p));
     float pitch_accel = -net_axis_value(command->look_y) * (TURN_ACCELERATION*aim_player_scale(p));
     if (fabsf(yaw_accel) > 0.01f) p->yaw_vel += yaw_accel * dt;
@@ -18995,7 +18997,7 @@ static void net_apply_movement_command(Player *p, const NetInputCommand *command
 
     }
     if (!p->onGround) return;
-    float yr = DEG2RAD * p->yaw;
+    float yr = DEG2RAD * (rail_spinning(slot)?railSpins[slot].startYaw:p->yaw);
     Vector3 forward = { sinf(-yr), 0.0f, -cosf(yr) };
     Vector3 right = { -forward.z, 0.0f, forward.x };
     float move_x = net_axis_value(command->move_x);
@@ -19666,7 +19668,10 @@ static void bot_apply_move(Player *bot, BotState *bs, Vector3 desired_dir, float
 #include "shield_escort.inc"
 #include "sapper_ai.inc"
 #include "chunk_regeneration_net.inc"
+static int enemyLabFixture=-1;
+static void enemy_lab_fixture(int which);
 static void UpdateBot(int playerIdx, float dt) {
+    if(enemyLab && enemyLabFixture==15)return;
     if(trapLabCase){
         // The pit target follows a player who approaches its end of the walkway.
         if(trapLabCase==LAB_PIT && playerIdx==MAX_PLAYERS){
@@ -21959,9 +21964,10 @@ int main(int argc, char **argv) {
         shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();return ok?0:5;
     }
     if(enemyLabRequested) {
-        int which=enemy_parse_case(enemyLabRequested);
+        bool railRange=!strcmp(enemyLabRequested,"rail-360-noscope");
+        int which=railRange?ENEMY_TYPE_STANDARD:enemy_parse_case(enemyLabRequested);
         if(which<0 || netRequestedRole!=NET_ROLE_OFFLINE) {fprintf(stderr,"Invalid/offline-only Enemy Lab case\n");CloseWindow();return 2;}
-        enemyLabAll=!strcmp(enemyLabRequested,"all");enemy_lab_start(which);
+        enemyLabAll=!strcmp(enemyLabRequested,"all");if(railRange)enemy_lab_fixture(15);else enemy_lab_start(which);
     }
     if (physicsSmokeSteps > 0) {
         bool ok = run_physics_smoke_test(physicsSmokeSteps);

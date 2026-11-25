@@ -1,5 +1,5 @@
 /* Authoritative equipment behavior. All simulation runs once, outside viewports. */
-static void eq_reset(int i){if(i<0 || i>=MAX_COMBATANTS)return;swordNextDirection[i]=swordDirection[i]=0;if(!swordWaves[i].emitted)swordWaves[i].active=false;aimStates[i]=(AimState){0};netLastAimInput[i]=0;equipment[i]=(Equipment){.gun={EQ_DEFAULT,EQ_EMPTY},.initialized=true};players[i].dynamicShotActive=false;players[i].actorGrappleTarget=0;players[i].grappleInputHeld=false;players[i].grappleAirborne=false;players[i].netGrappleInverseMass=0;if(i<MAX_PLAYERS)weakTethers[i]=(WeakTetherCoupling){0};players[i].netGrappleAnchorTick=0;players[i].netGrappleAnchorVelocity=(Vector3){0};weaponVisuals[i].deployment=weaponVisuals[i].build_pulse=weaponVisuals[i].cooldown=0;}
+static void eq_reset(int i){if(i<0 || i>=MAX_COMBATANTS)return;if(i<MAX_PLAYERS)railSpins[i]=(RailSpin){0};swordNextDirection[i]=swordDirection[i]=0;if(!swordWaves[i].emitted)swordWaves[i].active=false;aimStates[i]=(AimState){0};netLastAimInput[i]=0;equipment[i]=(Equipment){.gun={EQ_DEFAULT,EQ_EMPTY},.initialized=true};players[i].dynamicShotActive=false;players[i].actorGrappleTarget=0;players[i].grappleInputHeld=false;players[i].grappleAirborne=false;players[i].netGrappleInverseMass=0;if(i<MAX_PLAYERS)weakTethers[i]=(WeakTetherCoupling){0};players[i].netGrappleAnchorTick=0;players[i].netGrappleAnchorVelocity=(Vector3){0};weaponVisuals[i].deployment=weaponVisuals[i].build_pulse=weaponVisuals[i].cooldown=0;}
 static void eq_reset_all(void){for(int i=0;i<MAX_COMBATANTS;i++)eq_reset(i);memset(swordWaves,0,sizeof(swordWaves));memset(swordSequences,0,sizeof(swordSequences));memset(eqRockets,0,sizeof(eqRockets));memset(eqTraces,0,sizeof(eqTraces));eqReceiveTick=0;memset(eqPartTick,0,sizeof(eqPartTick));}
 static int eq_gun(int i){if(i<0 || i>=MAX_COMBATANTS || (is_player_bot(i)&&!fp_carrier(i)))return EQ_DEFAULT;if(!equipment[i].initialized)eq_reset(i);return equipment[i].gun[equipment[i].selected];}
 static bool eq_upgrade(int i,int flag){return i>=0 && i<MAX_COMBATANTS && (!is_player_bot(i)||fp_carrier(i)) && (equipment[i].upgrades&flag)!=0;}
@@ -317,8 +317,78 @@ static bool eq_fire(int i){
     }
     eq_spend(i,def->cost);e->cooldown[gun]=def->cooldown;weapon_visual_shot(&weaponVisuals[i],(float)GetTime());eq_fire_audio(gun,p->pos,i);ai_gunfire(i,p->pos);return true;
 }
+static void eq_rail_fire(int i,Ray ray){
+    Player *p=&players[i];
+    Equipment *e=&equipment[i];
+    const int gun=EQ_RAIL;
+    ducks_ray(ray,eqGuns[gun].range,0,-1,true);
+    float reach=eqGuns[gun].range,coreDistance=reach;bool victims[MAX_COMBATANTS]={0};
+    for(int j=0;j<activePlayers;j++)if(eq_hostile(i,j)){
+        bool hitActor=false;float period=worldFloorHalfSize*2;int images=worldPeriodic?(int)ceilf(eqGuns[gun].range/period)+1:0;
+        Vector3 nearest=world_image(players[j].pos,p->pos);
+        for(int x=-images;x<=images && !hitActor;x++)for(int z=-images;z<=images && !hitActor;z++){
+            Vector3 at=v_add(nearest,(Vector3){x*period,0,z*period});RayCollision hit=GetRayCollisionBox(ray,combatant_bounds_at(j,at,PLAYER_SIZE*.5f));
+            hitActor=hit.hit && hit.distance>=0 && hit.distance<=reach;
+            if(hitActor && go_combat_actor(j))coreDistance=hit.distance;
+        }
+        victims[j]=hitActor;
+    }
+    bool hitBossShield=eq_rail_terrain(i,ray,coreDistance);
+    for(int j=0;j<activePlayers;j++){
+        if(victims[j] && !(go_combat_actor(j)&&hitBossShield)){
+            bool boss=go_combat_actor(j)||players[j].enemyType==ENEMY_TYPE_FOUNDRY;
+            float damage=boss?eqGuns[gun].damage:fmaxf(players[j].matter,eqGuns[gun].damage);
+            eq_damage(i,j,damage,true,DEATH_RAIL,p->pos);
+        }
+    }
+    eq_trace(player_weapon_pose(i,false).muzzle,v_add(p->pos,v_mul(ray.direction,reach)),EQ_RAIL,i);e->charge=0;e->cooldown[gun]=eqGuns[gun].cooldown;weapon_visual_shot(&weaponVisuals[i],(float)GetTime());eq_fire_audio(gun,p->pos,i);ai_gunfire(i,p->pos);
+}
+
+static bool rail_spin_begin(int i,Ray ray){
+    if(!player_uses_rat(i) || aimStates[i].active || aimStates[i].blend>.001f)return false;
+    float distance=eqGuns[EQ_RAIL].range;
+    int target=eq_actor_ray_filtered(i,ray,&distance,true);
+    if(target<0 || first_voxel_hit(ray,distance,-1)>=0)return false;
+    Vector3 hit=v_add(ray.position,v_mul(ray.direction,distance));
+    railSpins[i]=(RailSpin){.active=true,.startYaw=players[i].yaw,.startPitch=players[i].pitch,
+        .target=target,.incarnation=exIncarnation[target],.aimPoint=hit,.previousEye=ray.position,.hitOffset=world_delta(hit,players[target].pos)};
+    // Transfer the already-paid shot out of the refundable capacitor.
+    equipment[i].charge=0;
+    return true;
+}
+
+static void rail_spin_tick(int i,float dt){
+    RailSpin *spin=&railSpins[i];
+    Player *p=&players[i];
+    if(!spin->active)return;
+    if(gameState!=GAME_STATE_PLAYING || p->respawn_timer>0 || eq_gun(i)!=EQ_RAIL ||
+       (gameMode==GAME_MODE_FIREFIGHT && combatantLife[i]!=LIFE_ALIVE)){spin->active=false;return;}
+    // Keep the chosen periodic image on the same sightline across a map seam.
+    Vector3 expectedEye=v_add(spin->previousEye,world_delta(p->pos,spin->previousEye));
+    spin->aimPoint=v_add(spin->aimPoint,v_sub(p->pos,expectedEye));
+    spin->previousEye=p->pos;
+    if(netTransport.role!=NET_ROLE_CLIENT && spin->target>=0){
+        int j=spin->target;
+        if(exIncarnation[j]==spin->incarnation && grapple_living(j) && eq_hostile(i,j)){
+            Vector3 point=v_add(players[j].pos,spin->hitOffset);
+            spin->aimPoint=v_add(spin->aimPoint,world_delta(point,spin->aimPoint));
+        }else spin->target=-1;
+    }
+    spin->age=fminf(railSpinSeconds,spin->age+dt);
+    float t=spin->age/railSpinSeconds;
+    float ease=t*t*(3-2*t);
+    Vector3 direction=v_norm(v_sub(spin->aimPoint,p->pos));
+    float yaw,pitch;dir_to_yaw_pitch(direction,&yaw,&pitch);
+    p->yaw=remainderf(spin->startYaw+ease*(360+remainderf(yaw-spin->startYaw,360)),360);
+    p->pitch=clampf(spin->startPitch+ease*(pitch-spin->startPitch),-89,89);
+    if(t<1 || netTransport.role==NET_ROLE_CLIENT)return;
+    spin->active=false;
+    eq_rail_fire(i,(Ray){p->pos,direction});
+}
+
 static void eq_command(int i,const NetInputCommand *c,float dt){
     if(i<0 || i>=MAX_COMBATANTS)return;Equipment *e=&equipment[i];eq_gun(i);
+    if(rail_spinning(i) || (c->held&NET_INPUT_RAIL_SPIN))return;
     aim_command(i,c);
     eq_build_command(i,c);
     if((c->pressed&(NET_INPUT_TETHER_CANCEL|NET_INPUT_BUILD_CANCEL|NET_INPUT_AIM_CANCEL))==(NET_INPUT_TETHER_CANCEL|NET_INPUT_BUILD_CANCEL|NET_INPUT_AIM_CANCEL)){eq_cancel_charge(i);e->buildHeld=false;return;}
@@ -346,27 +416,7 @@ static void eq_command(int i,const NetInputCommand *c,float dt){
             }
         }
         if(!held && e->held && e->charge>=eqRailCharge){
-            ducks_ray(ray,eqGuns[gun].range,0,-1,true);
-            float reach=eqGuns[gun].range,coreDistance=reach;bool victims[MAX_COMBATANTS]={0};
-            for(int j=0;j<activePlayers;j++)if(eq_hostile(i,j)){
-                bool hitActor=false;float period=worldFloorHalfSize*2;int images=worldPeriodic?(int)ceilf(eqGuns[gun].range/period)+1:0;
-                Vector3 nearest=world_image(players[j].pos,p->pos);
-                for(int x=-images;x<=images && !hitActor;x++)for(int z=-images;z<=images && !hitActor;z++){
-                    Vector3 at=v_add(nearest,(Vector3){x*period,0,z*period});RayCollision hit=GetRayCollisionBox(ray,combatant_bounds_at(j,at,PLAYER_SIZE*.5f));
-                    hitActor=hit.hit && hit.distance>=0 && hit.distance<=reach;
-                    if(hitActor && go_combat_actor(j))coreDistance=hit.distance;
-                }
-                victims[j]=hitActor;
-            }
-            bool hitBossShield=eq_rail_terrain(i,ray,coreDistance);
-            for(int j=0;j<activePlayers;j++){
-                if(victims[j] && !(go_combat_actor(j)&&hitBossShield)){
-                    bool boss=go_combat_actor(j)||players[j].enemyType==ENEMY_TYPE_FOUNDRY;
-                    float damage=boss?eqGuns[gun].damage:fmaxf(players[j].matter,eqGuns[gun].damage);
-                    eq_damage(i,j,damage,true,DEATH_RAIL,p->pos);
-                }
-            }
-            eq_trace(player_weapon_pose(i,false).muzzle,v_add(p->pos,v_mul(ray.direction,reach)),EQ_RAIL,i);e->charge=0;e->cooldown[gun]=eqGuns[gun].cooldown;weapon_visual_shot(&weaponVisuals[i],(float)GetTime());eq_fire_audio(gun,p->pos,i);ai_gunfire(i,p->pos);
+            if(!rail_spin_begin(i,ray))eq_rail_fire(i,ray);
         }
         if(!held)eq_cancel_charge(i);
     }else if(gun==EQ_CUTTER && held && p->matter>0){
@@ -404,6 +454,7 @@ static void eq_tick(float dt){
     aim_tick(dt);
     eq_sword_tick(dt);
     for(int i=0;i<MAX_COMBATANTS;i++){Equipment *e=&equipment[i];for(int g=0;g<EQ_GUN_COUNT;g++)e->cooldown[g]=fmaxf(0,e->cooldown[g]-dt);e->switchTime=fmaxf(0,e->switchTime-dt);e->buildTime=fmaxf(0,e->buildTime-dt);
+        if(i<MAX_PLAYERS)rail_spin_tick(i,dt);
         if(netTransport.role!=NET_ROLE_CLIENT && !eq_usable(i))eq_cancel_charge(i);
         if(e->initialized && (!is_player_bot(i)||fp_carrier(i)))players[i].dynamicShotActive=eq_gun(i)==EQ_VOXEL;
         if(gameState!=GAME_STATE_PLAYING || ff_input_blocked(i) || players[i].respawn_timer>0)e->buildHeld=false;

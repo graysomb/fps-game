@@ -1,8 +1,8 @@
 /* Interactive fixtures and smoke checks use the same specialist update functions. */
 static WorldType enemyLabPreviousWorld;
-static int enemyLabFixture=-1;
+
 static float enemyLabAiTime,enemyLabAiNext;
-static const char *enemyLabFixtureNames[]={"Grenade range: C / D-pad Up; full friendly fire", "Bomb avoidance: enemies flee a live Sapper charge", "Death feedback: exposed enemies, slot reuse", "Melee shield: remove one section per swing", "Lobber: elevated target and real structure flight", "Anchor: damage linked allies; exposed recovery after 2 seconds", "Footsteps: listen while enemies move", "Tether accuracy: throw the side-offset block at the target", "AI rear attack: fire at the bot facing away", "AI near miss: fire past the bot shoulder", "AI shield alert: shoot the shield from either side", "AI alternating attackers: two scripted shooters", "AI occlusion: attacker behind wall; investigate without tracking", "AI stationary target: observe bursts and recovery", "AI reversing target: observe tracking accuracy"};
+static const char *enemyLabFixtureNames[]={"Grenade range: C / D-pad Up; full friendly fire", "Bomb avoidance: enemies flee a live Sapper charge", "Death feedback: exposed enemies, slot reuse", "Melee shield: remove one section per swing", "Lobber: elevated target and real structure flight", "Anchor: damage linked allies; exposed recovery after 2 seconds", "Footsteps: listen while enemies move", "Tether accuracy: throw the side-offset block at the target", "AI rear attack: fire at the bot facing away", "AI near miss: fire past the bot shoulder", "AI shield alert: shoot the shield from either side", "AI alternating attackers: two scripted shooters", "AI occlusion: attacker behind wall; investigate without tracking", "AI stationary target: observe bursts and recovery", "AI reversing target: observe tracking accuracy","Railgun 360: hip-fire at the stationary or strafing target"};
 static bool enemyLabPreviousFoundry,enemyLabPreviousCustom;
 static void enemy_lab_exit(void) {
     trapLabCase=LAB_NONE;
@@ -90,7 +90,8 @@ static void enemy_lab_start(int which) {
     gameState=GAME_STATE_PLAYING;couchLobby=false;couchAdvanced=false;
 }
 static void enemy_lab_fixture(int which) {
-    which=(which+15)%15;
+    int count=sizeof(enemyLabFixtureNames)/sizeof(enemyLabFixtureNames[0]);
+    which=(which+count)%count;
     enemy_lab_start(which>=8?(which==10?ENEMY_TYPE_SHIELDBEARER:ENEMY_TYPE_STANDARD):which==3?ENEMY_TYPE_SHIELDBEARER:which==4?ENEMY_TYPE_LOBBER:which==5?ENEMY_TYPE_ANCHOR:which==6?ENEMY_TYPE_SWARMER:ENEMY_TYPE_SAPPER);
     enemyLabFixture=which;enemyLabAiTime=enemyLabAiNext=0;grenadeInventory[0]=2;
     if(which==0){enemy_cleanup(true);players[4].respawn_timer=9999;add_static_box_at_grid(-4,4,0,5,16,16,GRAY);enemy_lab_spawn(5,ENEMY_TYPE_STANDARD,(Vector3){3,BASE_EYE_HEIGHT,8});}
@@ -100,7 +101,15 @@ static void enemy_lab_fixture(int which) {
     if(which==4){add_static_box_at_grid(-3,3,0,5,-3,3,GRAY);players[0].pos.y=BASE_EYE_HEIGHT+3;}
     if(which==5){for(int i=5;i<8;i++){enemy_lab_spawn(i,ENEMY_TYPE_STANDARD,(Vector3){(i-6)*2,BASE_EYE_HEIGHT,8});players[i].matter=i==5?0:20;players[i].isExposed=i==5;}}
     if(which==7){enemy_cleanup(true);players[4].respawn_timer=9999;add_static_box_at_grid(-2,2,0,8,40,40,ORANGE);int v=addVoxel(1,BASE_EYE_HEIGHT,3,false,true,GRAY,0);players[0].yaw=180;acquire_tether_hit(0,v,(Vector3){0,0,1});}
-    if(which>=8) {
+    if(which==15){
+        players[0].yaw=0;players[4].pos=(Vector3){0,1,-7};
+        enemy_lab_spawn(5,ENEMY_TYPE_STANDARD,(Vector3){3,1,-10});
+        enemy_lab_spawn(6,ENEMY_TYPE_STANDARD,(Vector3){-5,1,-9});
+        add_static_box_at_grid(-12,-8,0,5,-14,-14,GRAY);
+        add_static_box_at_grid(10,11,0,6,-9,-8,ORANGE);
+        add_static_box_at_grid(-6,-4,0,3,8,9,SKYBLUE);
+        equipment[0].gun[0]=EQ_RAIL;equipment[0].selected=0;
+    }else if(which>=8) {
         for(int i=5;i<activePlayers;i++)players[i].respawn_timer=9999;
         players[4].pos=(Vector3){0,BASE_EYE_HEIGHT,12};players[4].yaw=which==8?180:0;
         players[0].pos=(Vector3){which==9?1.2f:0,BASE_EYE_HEIGHT,0};players[0].yaw=180;
@@ -125,7 +134,9 @@ static void enemy_lab_ai_step(float dt) {
         players[4].matter=players[4].matterMax;players[4].isExposed=false;
         apply_matter_damage(4,source,1);
     }
-    if(enemyLabFixture>=13) {
+    if(enemyLabFixture==15){
+        if(players[5].respawn_timer<=0)players[5].pos.x=3+2*sinf(enemyLabAiTime*2.4f);
+    }else if(enemyLabFixture>=13) {
         players[1].pos=(Vector3){0,BASE_EYE_HEIGHT,-8};players[1].vel=(Vector3){0};
         if(enemyLabFixture==14) {
             float phase=fmodf(enemyLabAiTime,4);
@@ -184,6 +195,10 @@ static bool enemy_lab_controls(void) {
     return true;
 }
 static void enemy_lab_hud(int w,int h) {
+    if(enemyLabFixture==15){
+        if(!debug_run_requested())DrawText(TextFormat("Railgun range  |  %s reset targets",ct_hint(0,CT_LAB_RESET)),16,55,18,RAYWHITE);
+        return;
+    }
     if(trapLabCase){DrawText(TextFormat("Trap Lab / %s   |   %s",trapLabNames[trapLabCase],trapLabCase==LAB_PIT?"Walk onto the cracked floor":"Shoot an orange release"),12,h-80,17,RAYWHITE);return;}
     int fs=w<900?14:18;
     if(enemyLabCase==ENEMY_TYPE_BUILDER){
