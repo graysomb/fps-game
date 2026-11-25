@@ -1,3 +1,4 @@
+#define EX_SUPPRESSION_SECONDS 5.f
 enum { GRENADE_REGULAR, GRENADE_GRAVITY, GRENADE_IGLOO, GRENADE_KIND_COUNT };
 /* Sticky is a selection using regular ammo and projectile kind, not a fourth ammo pool. */
 enum { GRENADE_STICKY=GRENADE_KIND_COUNT, GRENADE_SELECTION_COUNT };

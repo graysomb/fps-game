@@ -673,7 +673,6 @@ static const float STATIC_SUPPORT_GROUND_EPS = 0.02f;
 #define TETHER_THROW_CCD_SKIN (VOXEL_SIZE * 0.01f)
 #define TETHER_THROW_CCD_RESTITUTION 0.15f
 #define TETHER_THROW_IMPACT_LIFETIME_FRAMES 8
-#define SMUSH_POINT_MULT 4
 #define POINTS_UPDATE_DURATION 0.6f
 #define BULLET_MAX_SPAN 4
 #define BULLET_DAMAGE_SCALE_MAX 3.0f
@@ -15037,7 +15036,7 @@ static int player_points(const Player *p) {
     if (!p) {
         return 0;
     }
-    return p->kills + p->debrisKills * SMUSH_POINT_MULT;
+    return p->kills + p->debrisKills;
 }
 
 static int player_bullet_damage(int attacker_index) {
@@ -15446,10 +15445,10 @@ static bool melee_hit_players(int attacker_idx, Vector3 start, Vector3 end, Vect
             !segment_intersects_aabb(attacker_pos, body_end, box_min, box_max)) {
             continue;
         }
-        /* Equipment intercepts frontal melee too; the voxel melee pass can strip it. */
+        /* Cover intercepts the swing. The voxel pass can still strike the blocker. */
         Vector3 toVictim=world_delta(players[j].pos,attacker_pos);float victimDistance=v_length(toVictim);
         int blocker=first_voxel_hit((Ray){attacker_pos,v_norm(toVictim)},fmaxf(0,victimDistance-.3f),-1);
-        if(blocker>=0 && enemy_equipment_owner(blocker)==j) continue;
+        if(blocker>=0) continue;
         Vector3 knock_dir = world_delta(players[j].pos, attacker_pos);
         knock_dir.y = 0.0f;
         float knock_len = v_length(knock_dir);
@@ -15622,6 +15621,71 @@ static void draw_melee_arm_world(int playerIdx) {
     DrawSphere(end, radius * 1.15f, Fade(arm_color, 0.9f));
 }
 
+static int meleeLungeTarget[MAX_PLAYERS];
+static float meleeLungeProgress[MAX_PLAYERS];
+static bool player_aabb_hits_world_ex(Vector3 pos,float half,int player_idx);
+
+static bool melee_lunge_enemy(int slot,int target){
+    if(slot==target || players[target].respawn_timer>0)return false;
+    return gameMode!=GAME_MODE_FIREFIGHT ||
+        (combatantLife[target]==LIFE_ALIVE && combatantTeam[target]!=combatantTeam[slot]);
+}
+
+static int melee_lunge_target(int slot){
+    Player *p=&players[slot];
+    if(!p->onGround || p->meleeKnockbackActive)return -1;
+    Vector3 forward=player_forward(p);
+    float bestDot=cosf(20*DEG2RAD),bestDistance=FLT_MAX;
+    int target=-1;
+    for(int j=0;j<activePlayers;j++){
+        if(!melee_lunge_enemy(slot,j))continue;
+        Vector3 offset=world_delta(players[j].pos,p->pos);
+        float distance=v_length(offset);
+        if(distance<.001f || distance>MELEE_RANGE+.6f)continue;
+        Vector3 direction=v_mul(offset,1.f/distance);
+        float dot=v_dot(forward,direction);
+        if(dot<bestDot || (dot==bestDot && distance>=bestDistance))continue;
+        if(first_voxel_hit((Ray){p->pos,direction},distance,-1)>=0)continue;
+        bestDot=dot;bestDistance=distance;target=j;
+    }
+    return target;
+}
+
+static void update_melee_lunge(int slot,float elapsed){
+    int target=meleeLungeTarget[slot];
+    if(target<0 || target>=activePlayers)return;
+    Player *p=&players[slot];
+    if(!p->onGround || p->meleeKnockbackActive || !melee_lunge_enemy(slot,target)){
+        meleeLungeTarget[slot]=-1;return;
+    }
+    float progress=clampf(elapsed/.10f,0,1);
+    float remaining=.6f*(progress-meleeLungeProgress[slot]);
+    meleeLungeProgress[slot]=progress;
+    Vector3 delta=world_delta(players[target].pos,p->pos);
+    delta.y=0;
+    Vector3 direction=v_norm(delta);
+    // Small body steps also check support between the start and destination.
+    while(remaining>.00001f){
+        float step=fminf(.05f,remaining);
+        Vector3 next=v_add(p->pos,v_mul(direction,step)),foot=next;
+        foot.y-=.01f;
+        if((!worldPeriodic && (fabsf(next.x)>FLOOR_SIZE-CHARACTER_HALF_WIDTH || fabsf(next.z)>FLOOR_SIZE-CHARACTER_HALF_WIDTH)) ||
+           player_aabb_hits_world_ex(next,.25f,slot) ||
+           (next.y>BASE_EYE_HEIGHT+.001f && !player_aabb_hits_world_ex(foot,.25f,slot)))break;
+        BoundingBox body=combatant_bounds_at(slot,next,.25f);
+        bool blocked=false;
+        for(int j=0;j<activePlayers;j++){
+            if(j==slot || players[j].respawn_timer>0)continue;
+            BoundingBox other=combatant_bounds_at(j,world_image(players[j].pos,next),PLAYER_SIZE*.5f);
+            if(CheckCollisionBoxes(body,other)){blocked=true;break;}
+        }
+        if(blocked)break;
+        p->pos=world_wrap(next);
+        remaining-=step;
+    }
+    if(remaining>.00001f || progress>=1)meleeLungeTarget[slot]=-1;
+}
+
 static void perform_melee(int idx) {
     aim_cancel(idx);
     Player *p = &players[idx];
@@ -15632,6 +15696,10 @@ static void perform_melee(int idx) {
     float min_cooldown = fmaxf(MELEE_COOLDOWN_SECONDS, MELEE_ANIM_DURATION_SECONDS);
     if (now - p->last_melee_time < min_cooldown) {
         return;
+    }
+    if(player_uses_rat(idx)){
+        meleeLungeTarget[idx]=melee_lunge_target(idx);
+        meleeLungeProgress[idx]=0;
     }
     p->swordSwing=false;
     p->last_melee_time = now;
@@ -15662,6 +15730,7 @@ static void update_melee_swings(void) {
             continue;
         }
         float raw_progress = i<MAX_PLAYERS && p->swordSwing ? swordWaves[i].age/SWORD_ANIM_SECONDS : (now - p->meleeSwingStartTime) / MELEE_ANIM_DURATION_SECONDS;
+        if(!p->swordSwing && player_uses_rat(i) && netTransport.role!=NET_ROLE_CLIENT)update_melee_lunge(i,now-p->meleeSwingStartTime);
         if (raw_progress >= 1.0f) {
             p->meleeSwingActive = false;
             p->meleeSwingHitApplied = false;
@@ -16360,6 +16429,33 @@ static bool tether_cluster_center(int voxel_idx, Vector3 *out_center) {
 
 #include "teammate_hud.inc"
 
+static void draw_matter_slime(int x,int y,int width,float remaining){
+    if(remaining<=0)return;
+    float elapsed=1-clampf(remaining/EX_SUPPRESSION_SECONDS,0,1);
+    // Stagger release order across the meter. Keep the final bead until recovery.
+    static const int order[]={3,0,5,2,6,1,4};
+    static const float centers[]={.065f,.235f,.337f,.492f,.635f,.793f,.923f};
+    for(int i=0;i<7;i++){
+        float end=(order[i]+1)/7.f;
+        if(elapsed>=end)continue;
+        float stretch=clampf((elapsed-end+.21f)/.18f,0,1);
+        float fall=clampf((elapsed-end+.03f)/.03f,0,1);
+        float radius=fminf(11.f,width/24.f)*(i%2?.82f:1.f);
+        float cx=x+width*centers[i];
+        float lean=radius*(i%2?-.32f:.24f);
+        float top=y+4+(i*5)%7;
+        float tip=top+radius*(.55f+.25f*(i%3)+1.4f*stretch)+7*fall*fall;
+        Color slime={83,183,31,244},glint={187,241,93,255};
+        if(fall<=0){
+            DrawEllipse(cx-lean,top,radius*(1.25f+.2f*(i%3)),radius*.55f,slime);
+            DrawEllipse(cx+radius*.7f,top+2,radius*.65f,radius*.45f,slime);
+            DrawLineEx((Vector2){cx,top},(Vector2){cx+lean,tip},radius*(.85f-.58f*stretch),slime);
+        }
+        DrawEllipse(cx+lean,tip,radius*.66f,radius*(.63f+.16f*stretch),slime);
+        DrawCircleV((Vector2){cx+lean-radius*.22f,tip-radius*.2f},radius*.18f,glint);
+    }
+}
+
 static void draw_hud_bars(int player_index, const Player *p, int viewport_w, int viewport_h) {
     if (!p || viewport_w <= 0 || viewport_h <= 0) {
         return;
@@ -16392,11 +16488,12 @@ static void draw_hud_bars(int player_index, const Player *p, int viewport_w, int
         if(e->shieldRegenerating){float pulse=.12f+.13f*(1+sinf((float)GetTime()*8));int start=bar_x+(int)(bar_w*fminf(matter_ratio,eqShieldCeiling));DrawRectangle(start,bar_y,cap-start,HUD_BAR_THICKNESS,Fade(SKYBLUE,pulse));}
         DrawLine(cap,bar_y-2,cap,bar_y+HUD_BAR_THICKNESS+2,c);
         eq_shield_icon(bar_x,bar_y-32,c);
-        const char *status=ex_suppressed(player_index)?"SUPPRESSED":e->shieldDelay>0?TextFormat("%.1fs",e->shieldDelay):e->shieldRegenerating?"RECHARGING":"50%";
-        DrawText(status,bar_x+32,bar_y-24,12,c);
+        const char *status=e->shieldDelay>0?TextFormat("%.1fs",e->shieldDelay):e->shieldRegenerating?"RECHARGING":"50%";
+        if(!ex_suppressed(player_index))DrawText(status,bar_x+32,bar_y-24,12,c);
     }
     DrawRectangleLines(bar_x, bar_y, bar_w, HUD_BAR_THICKNESS, BLACK);
 
+    draw_matter_slime(bar_x,bar_y,bar_w,exSuppression[player_index]);
     const char *matter_text = TextFormat("MATTER %d/%d",
                                          (int)roundf(p->matter),
                                          (int)roundf(player_max_matter(p)));
@@ -18897,6 +18994,7 @@ static void net_apply_movement_command(Player *p, const NetInputCommand *command
     p->pitch = clampf(p->pitch + p->pitch_vel * dt, -89.0f, 89.0f);
 
     }
+    if (!p->onGround) return;
     float yr = DEG2RAD * p->yaw;
     Vector3 forward = { sinf(-yr), 0.0f, -cosf(yr) };
     Vector3 right = { -forward.z, 0.0f, forward.x };

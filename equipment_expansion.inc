@@ -110,7 +110,7 @@ static void ex_tick(float dt){
             lab_play_voice(LAB_SPLAT,g->pos,g->owner);
         if(actor>=0){if(eq_hostile(g->owner,actor)&&players[actor].invuln_timer<=0&&enemy_core_open(actor)){
                 eq_damage(g->owner,actor,eqGuns[EQ_GLOB].damage,false,DEATH_GLOB,ray.position);
-                if(players[actor].respawn_timer<=0){exSuppression[actor]=5;ex_splat(g->pos,actor,-1,false);}
+                if(players[actor].respawn_timer<=0){exSuppression[actor]=EX_SUPPRESSION_SECONDS;ex_splat(g->pos,actor,-1,false);}
             }g->id=0;
         }else if(wall||floor||duck){
             uint64_t support=wall&&!floor?voxels[hit.id].identity:0;
@@ -138,7 +138,6 @@ static void ex_draw(WeaponRenderPass pass){
     ex_construction_draw(pass);
 }
 static void ex_hud(int i,int w,int h){
-    if(exSuppression[i]>0)DrawText(TextFormat("MATTER RESTORE BLOCKED %.1fs",exSuppression[i]),w/2-110,h/2+85,w<700?12:16,LIME);
     if(exFailedBuild[i]>0)DrawText("Shelter blocked - grenade returned",w/2-130,h/2+105,w<700?12:16,SKYBLUE);
     const char *name[]={"Regular","Sticky","Gravity","Igloo"};const int order[]={GRENADE_REGULAR,GRENADE_STICKY,GRENADE_GRAVITY,GRENADE_IGLOO};int size=12;
     int columns=eq_upgrade(i,EQ_ADHESIVE)?4:3,column=0;

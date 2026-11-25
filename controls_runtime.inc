@@ -107,12 +107,12 @@ static NetInputCommand ct_command(int s,int slot,float dt){
     if(ct_context()&CT_PREP){if(ct_pressed(s,CT_READY))c.pressed|=NET_INPUT_PREP_READY;if(ct_pressed(s,CT_PREP_LEFT))c.pressed|=NET_INPUT_PREP_LEFT;if(ct_pressed(s,CT_PREP_RIGHT))c.pressed|=NET_INPUT_PREP_RIGHT;if(ct_pressed(s,CT_PREP_MENU))c.pressed|=NET_INPUT_PREP_MENU;}
     ctCommands[s]=c;return c;
 }
-static void ct_move(int slot,float dt){int s=ct_seat(slot);if(s<0)return;NetInputCommand c=ct_command(s,slot,dt);c.pressed&=~NET_INPUT_JUMP;net_apply_movement_command(&players[slot],&c,dt);}
+static void ct_move(int slot,float dt){int s=ct_seat(slot);if(s<0)return;NetInputCommand c=ct_command(s,slot,dt);net_apply_movement_command(&players[slot],&c,dt);}
 static void ct_local_actions(float dt){
     if(netTransport.role==NET_ROLE_CLIENT)return;
     for(int i=0;i<MAX_PLAYERS&&i<activePlayers;i++)if(!is_player_bot(i)&&(netTransport.role==NET_ROLE_OFFLINE||net_player_is_local(i))){int s=ct_seat(i);if(s<0)continue;NetInputCommand c=ct_command(s,i,dt);bool tether=(c.held&NET_INPUT_TETHER)!=0;
         if(c.pressed&NET_INPUT_TETHER_CANCEL){Vector3 zero={0};release_tether_velocity(i,&zero);eq_cancel_charge(i);}else if(tether&&!ctTetherWas[s])start_tether(i);else if(!tether&&ctTetherWas[s])release_tether(i);ctTetherWas[s]=tether;
-        if(c.pressed&NET_INPUT_MELEE)perform_melee(i);if(c.pressed&NET_INPUT_GRENADE)clarity_throw(i);if(c.pressed&NET_INPUT_HOLOGRAM)hologram_deploy(i);if((c.pressed&NET_INPUT_JUMP)&&players[i].onGround){players[i].vel.y=JUMP_SPEED;players[i].onGround=false;}}
+        if(c.pressed&NET_INPUT_MELEE)perform_melee(i);if(c.pressed&NET_INPUT_GRENADE)clarity_throw(i);if(c.pressed&NET_INPUT_HOLOGRAM)hologram_deploy(i);}
 }
 static void ct_edit_look(int seat,float dt){ct_look(seat,seat,&players[seat],dt,true);}
 static const char *ct_binding_name(CtBinding b){

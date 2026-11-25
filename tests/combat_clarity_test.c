@@ -153,19 +153,20 @@ int main(int argc,char **argv){bool grenadeOnly=argc>1&&!strcmp(argv[1],"--grena
     clarity_net_reset();memset(grenades,0,sizeof(grenades));snapshot_packet(1,10,false);assert(!grenades[0].id);snapshot_packet(0,10,true);assert(!grenades[0].id);snapshot_packet(0,10,false);assert(grenades[0].id==123);snapshot_packet(0,9,false);assert(clarityReceiveSequence==10);
     empty_arena();
     GrenadeState bounce={.id=1,.owner=0,.pos={0,.16f,0},.vel={0,-5,0},.fuse=-1};
-    clarity_grenade_step(&bounce,.02f);assert(bounce.vel.y>0 && fabsf(bounce.fuse-1.48f)<.0001f);
+    clarity_grenade_step(&bounce,.02f);assert(bounce.vel.y>0 && bounce.fuse>.33f && bounce.fuse<.35f);
     /* Further floor contacts cannot extend the original deadline. */
+    float firstFuse=bounce.fuse;
     bounce.pos.y=.16f;bounce.vel.y=-5;clarity_grenade_step(&bounce,.02f);
-    assert(fabsf(bounce.fuse-1.46f)<.0001f);
-    for(int n=0;n<145;n++)clarity_grenade_step(&bounce,.01f);
-    assert(bounce.fuse>0);clarity_grenade_step(&bounce,.011f);assert(bounce.fuse==0);
+    assert(fabsf(bounce.fuse-(firstFuse-.02f))<.0001f);
+    for(int n=0;n<31;n++)clarity_grenade_step(&bounce,.01f);
+    assert(bounce.fuse>0);clarity_grenade_step(&bounce,.025f);assert(bounce.fuse==0);
     /* No airburst at the old three-second deadline. */
     GrenadeState late={.id=2,.pos={0,1000,0},.fuse=-1};
     for(int n=0;n<400;n++)clarity_grenade_step(&late,.01f);
     assert(late.fuse==-1 && late.age==1.5f);
     late.pos.y=.16f;late.vel.y=-5;clarity_grenade_step(&late,.02f);
-    assert(late.fuse>.48f && late.fuse<.5f);
-    for(int n=0;n<47;n++)clarity_grenade_step(&late,.01f);
+    assert(late.fuse>.33f && late.fuse<.35f);
+    for(int n=0;n<32;n++)clarity_grenade_step(&late,.01f);
     assert(late.fuse>0);clarity_grenade_step(&late,.03f);assert(late.fuse==0);
     empty_arena();players[0].invuln_timer=2;clarity_explode(players[0].pos,1);assert(players[0].matter==100);
     empty_arena();grenadeInventory[0]=0;combatantLife[0]=LIFE_DOWNED;ff_restore_human(0,30);assert(grenadeInventory[0]==0);combatantLife[0]=LIFE_WAITING;ff_restore_human(0,100);assert(grenadeInventory[0]==1);

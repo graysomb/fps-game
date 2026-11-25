@@ -12,6 +12,92 @@ static void fixture(void){
  for(int i=0;i<MAX_COMBATANTS;i++){players[i].matter=players[i].matterMax=100;players[i].pos=(Vector3){20+i*3,BASE_EYE_HEIGHT,20};players[i].last_build_time=players[i].last_shot_time=-100;playerInput[i]=i<4?INPUT_TYPE_KEYBOARD:INPUT_TYPE_BOT_MEDIUM;combatantLife[i]=LIFE_ALIVE;combatantTeam[i]=i;ai_reset(i);}
  players[0].pos=(Vector3){.25f,BASE_EYE_HEIGHT,.25f};
 }
+static void combat_feel(void){
+ fixture();
+ Player *p=&players[0];
+ for(int role=0;role<3;role++){
+  netTransport.role=role;
+  p->onGround=true;p->vel=(Vector3){0};
+  NetInputCommand jump={.pressed=NET_INPUT_JUMP,.move_y=32767};
+  net_apply_movement_command(p,&jump,.016f);
+  assert(!p->onGround && p->vel.z<0 && p->vel.y==JUMP_SPEED);
+  Vector3 takeoff=p->vel;
+  NetInputCommand reverse={.move_y=-32767,.move_x=32767,.mouse_look=1,.aim_yaw=90};
+  net_apply_movement_command(p,&reverse,.1f);
+  net_apply_movement_command(p,&(NetInputCommand){0},.1f);
+  assert(Vector3Equals(takeoff,p->vel) && p->yaw==90);
+  p->onGround=false;p->vel=(Vector3){0};net_apply_movement_command(p,&reverse,.02f);
+  assert(Vector3Length(p->vel)==0);
+  p->onGround=true;net_apply_movement_command(p,&reverse,.02f);assert(Vector3Length(p->vel)>0);
+  p->yaw=0;
+ }
+ fixture();p->onGround=true;p->last_melee_time=-10;
+ players[1].pos=v_add(p->pos,(Vector3){0,0,-2.61f});assert(melee_lunge_target(0)<0);
+ players[1].pos.z+=.02f;
+ players[2].pos=v_add(p->pos,(Vector3){.2f,0,-2});
+ assert(melee_lunge_target(0)==1);
+ gameMode=GAME_MODE_FIREFIGHT;combatantTeam[1]=combatantTeam[0];
+ assert(melee_lunge_target(0)==2);gameMode=GAME_MODE_DEATHMATCH;
+ perform_melee(0);float z=p->pos.z;
+ update_melee_lunge(0,.05f);assert(fabsf(p->pos.z-z+.3f)<.002f);
+ update_melee_lunge(0,.10f);assert(fabsf(p->pos.z-z+.6f)<.002f);
+ update_melee_lunge(0,.12f);assert(fabsf(p->pos.z-z+.6f)<.002f);
+ p->meleeSwingStartTime=(float)GetTime()-MELEE_ANIM_DURATION_SECONDS*.52f;
+ update_melee_swings();float afterHit=players[1].matter;
+ assert(afterHit<100 && p->meleeSwingHitApplied);
+ update_melee_swings();assert(players[1].matter==afterHit);
+ add_static_box_at_grid(0,0,0,3,-3,-3,spawnGlassColor);init_static_hash();
+ assert(melee_lunge_target(0)<0);
+ fixture();p->pos.y+=.5f;p->onGround=true;p->last_melee_time=-10;
+ add_static_voxel_at_grid(0,0,0,GRAY,0);init_static_hash();
+ players[1].pos=v_add(p->pos,(Vector3){0,0,-2});
+ perform_melee(0);update_melee_lunge(0,.1f);
+ assert(p->pos.z> -CHARACTER_HALF_WIDTH && p->pos.z<.25f);
+ fixture();p->onGround=true;p->last_melee_time=-10;
+ players[1].pos=v_add(p->pos,(Vector3){0,0,-.85f});perform_melee(0);
+ z=p->pos.z;update_melee_lunge(0,.1f);assert(p->pos.z>z-.09f);
+ fixture();p->kills=1;p->debrisKills=1;assert(player_points(p)==2);
+ for(int sticky=0;sticky<2;sticky++){
+  fixture();grenadeInventory[0]=1;
+  if(sticky){equipment[0].upgrades|=EQ_ADHESIVE;exSelectedGrenade[0]=GRENADE_STICKY;}
+  assert(clarity_throw(0));GrenadeState *g=&grenades[CLARITY_GRENADES-1];
+  assert(g->id && g->adhesive==sticky && fabsf(g->vel.z+20)<.001f);
+  g->pos.y=100;
+  for(int n=0;n<60;n++)clarity_grenade_step(g,1.f/120);
+  assert(g->fuse==-1);
+  g->pos.y=.15f;g->vel.y=-5;
+  for(int n=0;n<41;n++)clarity_grenade_step(g,1.f/120);
+  assert(g->fuse>0 && g->attached==sticky);
+  clarity_grenade_step(g,.009f);assert(g->fuse==0);
+ }
+ puts("Movement momentum, melee targeting and stops, smush score, grenade launch and contact fuse passed");
+}
+static void slime_capture(void){
+ fixture();players[0].matter=0;players[0].isExposed=true;
+ const float remaining[]={5,2.5f,.05f,0};
+ RenderTexture2D rt=LoadRenderTexture(360,72);
+ Image strip=GenImageColor(360,4*50,DARKGRAY);
+ for(int n=0;n<4;n++){
+  exSuppression[0]=remaining[n];
+  BeginTextureMode(rt);ClearBackground(DARKGRAY);draw_hud_bars(0,&players[0],360,72);EndTextureMode();
+  Image image=LoadImageFromTexture(rt.texture);ImageFlipVertical(&image);
+  int green=0;
+  for(int y=26;y<72;y++)for(int x=0;x<360;x++){
+   Color c=GetImageColor(image,x,y);green+=c.g>130 && c.g>c.r+35 && c.g>c.b+70;
+  }
+  assert((green>0)==(remaining[n]>0));
+  players[1].matter=0;players[1].isExposed=true;
+  BeginTextureMode(rt);ClearBackground(DARKGRAY);draw_hud_bars(1,&players[1],360,72);EndTextureMode();
+  Image other=LoadImageFromTexture(rt.texture);
+  for(int y=0;y<46;y++)for(int x=0;x<360;x++){
+   Color c=GetImageColor(other,x,y);assert(!(c.g>130 && c.g>c.r+35 && c.g>c.b+70));
+  }
+  UnloadImage(other);
+  ImageDraw(&strip,image,(Rectangle){0,22,360,50},(Rectangle){0,n*50,360,50},WHITE);
+  UnloadImage(image);
+ }
+ ExportImage(strip,".build/playtest-glob-bar.png");UnloadImage(strip);UnloadRenderTexture(rt);
+}
 static void combat(void){
  for(int target=1;target<=4;target+=3){fixture();players[target].pos=(Vector3){.25f,BASE_EYE_HEIGHT,-2.75f};players[target].matter=10;
   assert(eq_pickup(0,PICKUP_GLOB,false));equipment[0].switchTime=0;
@@ -70,4 +156,4 @@ static void visuals(void){
  BeginTextureMode(rt);ClearBackground((Color){20,26,35,255});BeginMode3D(camera);fp_draw(WEAPON_COLOR);EndMode3D();EndTextureMode();Image image=LoadImageFromTexture(rt.texture);ImageFlipVertical(&image);ExportImage(image,"artifacts/playtest-tether-pickup.png");UnloadImage(image);
  UnloadRenderTexture(rt);weapon_renderer_shutdown();puts("Local glob attachment leaves color/emission capture unchanged; tether pickup captured");
 }
-int main(void){SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(640,480,"Playtest fixes");combat();construction();refills();attraction();visuals();clear_world_voxels();CloseWindow();puts("Playtest fixes passed");return 0;}
+int main(void){SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(640,480,"Playtest fixes");combat_feel();slime_capture();combat();construction();refills();attraction();visuals();clear_world_voxels();CloseWindow();puts("Playtest fixes passed");return 0;}

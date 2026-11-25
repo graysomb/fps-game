@@ -61,10 +61,10 @@ static void walking_speed(void){
     NetInputCommand forward={.move_y=32767};net_apply_movement_command(&players[0],&forward,.02f);
     assert(fabsf(players[0].vel.z+12)<.001f&&players[0].vel.y==2);
     NetInputCommand side={.move_x=32767};net_apply_movement_command(&players[0],&side,.02f);
-    assert(fabsf(hypotf(players[0].vel.x,players[0].vel.z)-12)<.001f);
+    assert(players[0].vel.x==0 && players[0].vel.z==-12);
     NetInputCommand brake={.move_y=-32767};net_apply_movement_command(&players[0],&brake,.01f);
-    assert(hypotf(players[0].vel.x,players[0].vel.z)<12);
-    puts("Walk motor cap, client prediction, directional input and airborne steering passed");
+    assert(players[0].vel.x==0 && players[0].vel.z==-12);
+    puts("Walk motor cap, client prediction, ground input and airborne momentum passed");
 }
 static void step(float dt,bool physics){
     NetInputCommand command={.held=players[0].tetherHolding?NET_INPUT_TETHER:0};net_apply_movement_command(&players[0],&command,dt);

@@ -169,6 +169,15 @@ static void clarity_explode_damage(Vector3 pos,int owner,float maxDamage) {
 }
 static void clarity_explode(Vector3 pos,int owner){clarity_explode_damage(pos,owner,60);}
 static void enemy_blast(EnemyCharge c){clarity_explode(c.pos,c.owner);}
+static bool clarity_fast_grenade(int owner,int kind){
+    return owner>=0 && owner<MAX_PLAYERS && (kind==GRENADE_REGULAR || kind==GRENADE_STICKY);
+}
+static const float clarityContactFuse=.35f;
+static int clarity_grenade_beat(const GrenadeState *g){
+    if(g->fuse<0)return -1;
+    float rate=clarity_fast_grenade(g->owner,g->kind)?3.f/clarityContactFuse:3.f;
+    return (int)(g->fuse*rate);
+}
 static bool clarity_throw(int slot) {
     aim_cancel(slot);
     if(netTransport.role==NET_ROLE_CLIENT || slot<0 || slot>=MAX_COMBATANTS || slot>=activePlayers || creativeModeActive || (netTransport.role!=NET_ROLE_OFFLINE && netRequestedCreative) || gameState!=GAME_STATE_PLAYING || players[slot].respawn_timer>0 || ff_input_blocked(slot) || (enemyLab && enemyLabPaused) || !ex_throw_available(slot,exSelectedGrenade[slot]) || grenadeCooldown[slot]>0)return false;
@@ -177,7 +186,7 @@ static bool clarity_throw(int slot) {
     Vector3 forward=player_forward(&players[slot]),pos=players[slot].pos;VoxelHit hit;
     float reach=first_voxel_hit_detailed((Ray){pos,forward},.6f,-1,false,&hit)?fmaxf(0,hit.t-.2f):.6f;
     pos=v_add(pos,v_mul(forward,reach));
-    grenades[free]=(GrenadeState){.id=clarityNextId++,.owner=slot,.pos=pos,.vel=v_add(v_mul(forward,14),(Vector3){0,2,0}),.fuse=-1,.kind=exSelectedGrenade[slot],.incarnation=exIncarnation[slot],.launchOrigin=players[slot].pos};
+    grenades[free]=(GrenadeState){.id=clarityNextId++,.owner=slot,.pos=pos,.vel=v_add(v_mul(forward,clarity_fast_grenade(slot,exSelectedGrenade[slot])?20:14),(Vector3){0,2,0}),.fuse=-1,.kind=exSelectedGrenade[slot],.incarnation=exIncarnation[slot],.launchOrigin=players[slot].pos};
     int selection=exSelectedGrenade[slot];
     int kind=selection==GRENADE_STICKY?GRENADE_REGULAR:selection;grenades[free].kind=kind;
     grenades[free].adhesive=eq_upgrade(slot,EQ_ADHESIVE) && (selection==GRENADE_STICKY || (is_player_bot(slot)&&kind==GRENADE_REGULAR));
@@ -209,7 +218,7 @@ static void clarity_grenade_step(GrenadeState *g,float dt) {
     if(collision && g->adhesive && g->fuse==-1){g->attached=true;g->support=support>=0?voxels[support].identity:0;g->vel=(Vector3){0};if(support>=0)g->attachment=Vector3Transform(world_image(g->pos,voxels[support].pos),MatrixInvert(grenade_support_basis(support)));}
     /* Only the first contact starts the timer. Account for contact within this step. */
     if(collision && g->fuse==-1)
-        g->fuse=fmaxf(1.5f-g->age,dt*fraction+.5f);
+        g->fuse=clarity_fast_grenade(g->owner,g->kind)?dt*fraction+clarityContactFuse:fmaxf(1.5f-g->age,dt*fraction+.5f);
     if(collision)ex_grenade_landed(g);
     g->age=fminf(1.5f,g->age+dt);
     if(g->fuse>=0)g->fuse=fmaxf(0,g->fuse-dt);
@@ -240,10 +249,10 @@ static void clarity_tick(float dt) {
     for(int n=0;n<CLARITY_EFFECTS;n++)if(clarityEffects[n].id){clarityEffects[n].age+=dt;if(clarityEffects[n].age>(clarityEffects[n].kind==2?.9f:.8f))clarityEffects[n].id=0;}
     for(int i=0;i<activePlayers;i++){grenadeCooldown[i]=fmaxf(0,grenadeCooldown[i]-dt);killConfirm[i]=fmaxf(0,killConfirm[i]-dt);}
     for(int n=0;n<CLARITY_GRENADES;n++)if(grenades[n].id) {
-        int oldBeat=(int)(grenades[n].fuse*3);
-        if(netTransport.role==NET_ROLE_CLIENT){if(grenades[n].fuse>=0)grenades[n].fuse=fmaxf(0,grenades[n].fuse-dt);grenades[n].pos=Vector3Lerp(grenades[n].pos,grenadeVisualTarget[n],fminf(1,dt*15));if((int)(grenades[n].fuse*3)!=oldBeat)play_sfx_at(SFX_SHIELD,grenades[n].pos,grenades[n].owner,2,1.4f);continue;}
+        int oldBeat=clarity_grenade_beat(&grenades[n]);
+        if(netTransport.role==NET_ROLE_CLIENT){if(grenades[n].fuse>=0)grenades[n].fuse=fmaxf(0,grenades[n].fuse-dt);grenades[n].pos=Vector3Lerp(grenades[n].pos,grenadeVisualTarget[n],fminf(1,dt*15));if(clarity_grenade_beat(&grenades[n])!=oldBeat)play_sfx_at(SFX_SHIELD,grenades[n].pos,grenades[n].owner,2,1.4f);continue;}
         float remaining=fminf(dt,.25f);while(remaining>0 && grenades[n].id){float step=fminf(remaining,1.0f/120);clarity_grenade_step(&grenades[n],step);remaining-=step;if(grenades[n].fuse==0){GrenadeState g=grenades[n];grenades[n].id=0;ex_grenade_deploy(g);}}
-        if(grenades[n].id && (int)(grenades[n].fuse*3)!=oldBeat)play_sfx_at(SFX_SHIELD,grenades[n].pos,grenades[n].owner,2,1.4f);
+        if(grenades[n].id && clarity_grenade_beat(&grenades[n])!=oldBeat)play_sfx_at(SFX_SHIELD,grenades[n].pos,grenades[n].owner,2,1.4f);
     }
     int alive=0,queued=0;
     for(int i=MAX_PLAYERS;i<activePlayers;i++)if(players[i].respawn_timer<=0) {
@@ -259,11 +268,11 @@ static void clarity_grenades_draw(WeaponRenderPass pass){
         GrenadeState *g=&grenades[n];
         if(g->adhesive || g->kind){
             WeaponVisual v={.shot_time=-1000,.activity=g->fuse>=0,.attached=g->attached,
-                .charge=g->fuse>=0?1-clampf(g->fuse/1.5f,0,1):0};
+                .charge=g->fuse>=0?1-clampf(g->fuse/(clarity_fast_grenade(g->owner,g->kind)?clarityContactFuse:1.5f),0,1):0};
             Matrix m=MatrixMultiply(MatrixScale(.45f,.45f,.45f),MatrixTranslate(g->pos.x,g->pos.y,g->pos.z));
             weapon_draw((WeaponPose){.kind=g->kind==GRENADE_GRAVITY?WEAPON_BLACK_HOLE_BOMB:g->kind==GRENADE_IGLOO?WEAPON_IGLOO_GRENADE:WEAPON_ADHESIVE_GRENADE,.transform=m},&v,eye,clarityClock,false,pass);
         }else if(pass==WEAPON_COLOR)DrawCube(g->pos,.22f,.3f,.22f,ORANGE);
-        if(pass==WEAPON_COLOR && g->kind!=GRENADE_IGLOO){DrawCubeWires(g->pos,.26f,.34f,.26f,((int)(g->fuse*8)%2)?YELLOW:RED);DrawCircle3D(g->pos,4,(Vector3){1,0,0},90,Fade(ORANGE,.35f));}
+        if(pass==WEAPON_COLOR && g->kind!=GRENADE_IGLOO){DrawCubeWires(g->pos,.26f,.34f,.26f,(clarity_grenade_beat(g)%2)?YELLOW:RED);DrawCircle3D(g->pos,4,(Vector3){1,0,0},90,Fade(ORANGE,.35f));}
     }
 }
 static void clarity_draw(void) {
