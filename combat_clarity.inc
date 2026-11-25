@@ -334,7 +334,39 @@ static bool clarity_supply_position(Vector3 anchor,int quarter,Vector3 *out) {
     }
     return false;
 }
+static void crosscut_versus_pickups(void) {
+    // Two exits behind each screen, two outer resupplies, then the open shed approach.
+    const Vector3 anchors[CROSSCUT_QUADRANT_PICKUPS]={{12,0,19},{-12,0,19},{17,0,16},{-22,0,10},{19.5f,0,8.5f}};
+    const PickupType common[]={PICKUP_GLOCK,PICKUP_GLOB,PICKUP_AMMO,PICKUP_GRENADE};
+    const PickupType guns[]={PICKUP_SHOTGUN,PICKUP_DYNAMIC_SHOT,PICKUP_DMR,PICKUP_CUTTER};
+    const PickupType prizes[]={PICKUP_SWORD,PICKUP_GOLD_TETHER,PICKUP_RAILGUN,PICKUP_ROCKET};
+    int first=GetRandomValue(0,3);
+    int second=(first+GetRandomValue(1,3))%4;
+    const PickupType mid[]={guns[first],PICKUP_ADHESIVE,guns[second],PICKUP_SHIELD_REGEN};
+    int rotation=GetRandomValue(0,3);
+    for(int k=0;k<CROSSCUT_QUADRANT_PICKUPS;k++){
+        Vector3 pos;
+        if(!clarity_supply_position(anchors[k],0,&pos)){
+            TraceLog(LOG_ERROR,"Crosscut pickup group %d has no accessible placement",k);
+            continue;
+        }
+        for(int q=0;q<4;q++){
+            PickupType type=k==4?mid[(q+rotation)%4]:common[k];
+            pickups[q*CROSSCUT_QUADRANT_PICKUPS+k]=(Pickup){.type=type,.active=true,.pos=crosscut_rotate(pos,q)};
+        }
+    }
+    if(crosscutCenterTrap<0 || crosscutCenterTrap>=foundryTrapCount)return;
+    const FoundryTrap *center=&foundryTraps[crosscutCenterTrap];
+    pickups[CROSSCUT_PRIZE_SLOT]=(Pickup){.type=prizes[GetRandomValue(0,3)],.active=true,
+        .pos={0,(center->y1+1)*VOXEL_SIZE+.8f,0}};
+}
+
 static void clarity_supply_layout(void) {
+    if(crosscut_versus()){
+        clear_pickups();
+        if(netTransport.role!=NET_ROLE_CLIENT)crosscut_versus_pickups();
+        return;
+    }
     if(useCustomMap || firefightPractice)return;
     bool foundry=gameMode==GAME_MODE_FIREFIGHT && firefightFoundry,crosscut=clarity_crosscut();
     if(!foundry && !crosscut)return;
@@ -355,6 +387,7 @@ static void clarity_supply_layout(void) {
 static void clarity_supply_update(void) {
     if(useCustomMap || firefightPractice || (!firefightFoundry && currentWorldType!=WORLD_TYPE_CROSSCUT))return;
     for(int n=0;n<MAX_PICKUPS;n++)if(!pickups[n].droppedMatter && (pickups[n].active || pickups[n].respawnTimer>0)) {
+        if(n==CROSSCUT_PRIZE_SLOT && crosscut_versus())continue;
         Vector3 at=pickups[n].pos;VoxelHit hit;float floor=0;
         if(first_voxel_hit_detailed((Ray){{at.x,12,at.z},{0,-1,0}},12,-1,true,&hit))floor=12-hit.t;
         if(fabsf(at.y-(floor+.8f))>.05f)pickups[n].pos.y=floor+.8f;

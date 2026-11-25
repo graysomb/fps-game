@@ -8,18 +8,65 @@ static void empty_arena(void){enemyLab=false;gameMode=GAME_MODE_FIREFIGHT;firefi
 static void check_crosscut_routes(void) {
     enum {SIDE=129};static unsigned char blocked[SIDE*SIDE],seen[SIDE*SIDE];static int queue[SIDE*SIDE];
     for(int z=0;z<SIDE;z++)for(int x=0;x<SIDE;x++)blocked[z*SIDE+x]=spawn_aabb_blocked_for((Vector3){(x-64)*.5f,BASE_EYE_HEIGHT+.05f,(z-64)*.5f},PLAYER_SIZE*.5f,0);
-    for(int q=0;q<4;q++) {
-        memset(seen,0,sizeof(seen));Vector3 spawn=crosscut_spawn_point(q*2);
+    for(int seat=0;seat<8;seat++) {
+        int q=seat/2;
+        memset(seen,0,sizeof(seen));Vector3 spawn=crosscut_spawn_point(seat);
         int start=((int)roundf(spawn.z*2)+64)*SIDE+(int)roundf(spawn.x*2)+64,head=0,tail=0;
         assert(!blocked[start]);queue[tail++]=start;seen[start]=1;
         while(head<tail){int cell=queue[head++],x=cell%SIDE,z=cell/SIDE;int dx[4]={1,-1,0,0},dz[4]={0,0,1,-1};
             for(int n=0;n<4;n++){int nx=x+dx[n],nz=z+dz[n];if(nx<0||nx>=SIDE||nz<0||nz>=SIDE)continue;int next=nz*SIDE+nx;if(!blocked[next]&&!seen[next]){seen[next]=1;queue[tail++]=next;}}}
-        Vector3 at=pickups[q*3+1].pos;int end=((int)roundf(at.z*2)+64)*SIDE+(int)roundf(at.x*2)+64;
-        assert(seen[end]);
+        for(int k=0;k<5;k++){
+            Vector3 at=pickups[q*5+k].pos;int end=((int)roundf(at.z*2)+64)*SIDE+(int)roundf(at.x*2)+64;
+            assert(seen[end]);
+            if(k==(seat%2))assert(Vector3Distance(at,spawn)<7);
+            if(k==4)assert(seen[end-1] && seen[end+1] && seen[end-SIDE] && seen[end+SIDE]);
+        }
     }
+}
+static void crosscut_match_test(void){
+    gameMode=GAME_MODE_DEATHMATCH;currentWorldType=WORLD_TYPE_CROSSCUT;
+    useCustomMap=false;enemyLab=false;multiplayerActivePlayers=2;ResetGame();
+    check_crosscut_routes();
+    unsigned prizeMask=0,gunMask=0;
+    const PickupType guns[]={PICKUP_SHOTGUN,PICKUP_DYNAMIC_SHOT,PICKUP_DMR,PICKUP_CUTTER};
+    const PickupType prizes[]={PICKUP_SWORD,PICKUP_GOLD_TETHER,PICKUP_RAILGUN,PICKUP_ROCKET};
+    for(int seed=0;seed<48;seed++){
+        SetRandomSeed(seed);clarity_supply_layout();
+        int counts[PICKUP_TYPE_COUNT]={0},total=0;
+        for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].active){total++;counts[pickups[n].type]++;}
+        assert(total==21 && counts[PICKUP_GLOB]==4 && counts[PICKUP_GLOCK]==4);
+        assert(counts[PICKUP_AMMO]==4 && counts[PICKUP_GRENADE]==4);
+        assert(counts[PICKUP_ADHESIVE]==1 && counts[PICKUP_SHIELD_REGEN]==1);
+        int mid=0,high=0;
+        for(int n=0;n<4;n++){
+            assert(counts[guns[n]]<=1);mid+=counts[guns[n]];high+=counts[prizes[n]];
+            if(counts[guns[n]])gunMask|=1u<<n;
+            if(pickups[20].type==prizes[n])prizeMask|=1u<<n;
+            assert((eq_pickup_gun(pickups[n*5+4].type)>=0)==
+                   (eq_pickup_gun(pickups[((n+2)%4)*5+4].type)>=0));
+        }
+        assert(mid==2 && high==1);
+    }
+    assert(prizeMask==15 && gunMask==15);
+    Pickup *prize=&pickups[CROSSCUT_PRIZE_SLOT];PickupType type=prize->type;
+    FoundryTrap *slab=&foundryTraps[crosscutCenterTrap];
+    assert(fabsf(prize->pos.y-4.8f)<.01f);
+    for(int n=1;n<activePlayers;n++)players[n].respawn_timer=9999;
+    players[0].pos=(Vector3){0,1,0};update_pickups(.016f);assert(prize->active);
+    players[0].pos=prize->pos;update_pickups(.016f);assert(!prize->active && prize->respawnTimer>0);
+    players[0].pos=(Vector3){30,1,30};
+    update_pickups(prize->respawnTimer+1);assert(prize->active && prize->type==type);
+    assert(foundry_trap_hit(table_get_static_only(slab->rx,slab->ry,slab->rz),0,false));
+    foundry_traps_prepare();update_pickups(.016f);assert(slab->active && !prize->active);
+    for(int v=voxel_count-1;v>=0;v--)if(voxels[v].foundryTrapId==crosscutCenterTrap+1)remove_voxel_index(v);
+    recycleFrameCounter+=RECYCLE_STATIC_RESTORE_DELAY+1;
+    for(int step=0;step<4000 && recycleQueueCount;step++){recycleFrameCounter++;regeneration_step(1.f/60);}
+    foundry_traps_prepare();update_pickups(.1f);
+    assert(!slab->active && prize->active && prize->type==type && fabsf(prize->pos.y-4.8f)<.01f);
 }
 static void snapshot_packet(int part,uint32_t seq,bool broken){uint8_t data[1000];NetWriter w;net_writer_init(&w,data,sizeof(data));net_write_u32(&w,seq);net_write_u8(&w,part);for(int n=0;n<16;n++){net_write_u32(&w,n==0 && part==0?123:0);net_write_u8(&w,0);for(int c=0;c<6;c++)net_write_f32(&w,c==1?2:0);net_write_f32(&w,n==0?1:0);net_write_u8(&w,0);net_write_u8(&w,0);net_write_u64(&w,0);for(int a=0;a<3;a++)net_write_f32(&w,0);}NetReader r;net_reader_init(&r,data,broken?w.length-1:w.length);assert(clarity_net_receive(NET_MSG_GRENADES,&r,seq));}
 int main(int argc,char **argv){bool grenadeOnly=argc>1&&!strcmp(argv[1],"--grenade-only");if(grenadeOnly){argc--;argv++;}bool shieldOnly=argc>1&&!strcmp(argv[1],"--shield-only");if(shieldOnly){argc--;argv++;}assert(parse_physics_arguments(argc,argv));SetLoggingEnabled(false);SetTraceLogLevel(LOG_WARNING);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(960,720,"Combat clarity regression");init_pbd_thread_pool();assert(initialize_physics_backend());
+    if(getenv("FPS_CROSSCUT_TEST")){crosscut_match_test();shutdown_pbd_thread_pool();gpu_physics_shutdown();CloseWindow();puts("Crosscut layouts, routes and prize regeneration passed");return 0;}
     for(int sticky=0;sticky<2;sticky++)for(int distance=0;distance<=4;distance++) {
         empty_arena();players[0].pos=(Vector3){10,1,0};players[1].pos=(Vector3){distance,1,0};
         ex_grenade_deploy((GrenadeState){.kind=GRENADE_REGULAR,.adhesive=sticky,.pos={0,1,0},.owner=0});
@@ -123,8 +170,8 @@ int main(int argc,char **argv){bool grenadeOnly=argc>1&&!strcmp(argv[1],"--grena
     empty_arena();players[0].invuln_timer=2;clarity_explode(players[0].pos,1);assert(players[0].matter==100);
     empty_arena();grenadeInventory[0]=0;combatantLife[0]=LIFE_DOWNED;ff_restore_human(0,30);assert(grenadeInventory[0]==0);combatantLife[0]=LIFE_WAITING;ff_restore_human(0,100);assert(grenadeInventory[0]==1);
     empty_arena();enemy_lab_spawn(4,ENEMY_TYPE_SWARMER,(Vector3){4,1,4});firefightWaveState=FIREFIGHT_STATE_ACTIVE;memset(ffRemaining,0,sizeof(ffRemaining));for(int n=0;n<81;n++)clarity_tick(.1f);assert(swarmHintActive[4]);firefightWaveState=FIREFIGHT_STATE_INTERMISSION;clarity_tick(.1f);assert(!swarmHintActive[4]);
-    gameMode=GAME_MODE_DEATHMATCH;currentWorldType=WORLD_TYPE_CROSSCUT;firefightFoundry=false;enemyLab=false;ResetGame();int supplyCount=0;for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].active)supplyCount++;fprintf(stderr,"Crosscut supplies %d\n",supplyCount);assert(supplyCount==41);for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].active)assert(clarity_supply_clear(pickups[n].pos));
-    for(int q=0;q<4;q++)for(int k=0;k<3;k++){Vector3 expected=crosscut_rotate(pickups[k].pos,q);assert(v_length(v_sub(pickups[q*3+k].pos,expected))<.01f);assert(pickups[q*3+k].pos.y<1.4f);}
+    gameMode=GAME_MODE_DEATHMATCH;currentWorldType=WORLD_TYPE_CROSSCUT;firefightFoundry=false;enemyLab=false;ResetGame();int supplyCount=0;for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].active)supplyCount++;fprintf(stderr,"Crosscut supplies %d\n",supplyCount);assert(supplyCount==21);for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].active)assert(clarity_supply_clear(pickups[n].pos));
+    for(int q=0;q<4;q++)for(int k=0;k<5;k++){Vector3 expected=crosscut_rotate(pickups[k].pos,q);assert(v_length(v_sub(pickups[q*5+k].pos,expected))<.01f);assert(pickups[q*5+k].pos.y<1.4f);}
     check_crosscut_routes();
     gameMode=GAME_MODE_FIREFIGHT;firefightFoundry=true;enemyLab=false;ResetGame();int types[PICKUP_TYPE_COUNT]={0};for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].active)types[pickups[n].type]++;assert(types[PICKUP_GRENADE]==2 && types[PICKUP_HEALTH]==2 && types[PICKUP_GOLD_TETHER]==2 && types[PICKUP_DYNAMIC_SHOT]==2);
     ff_wave_complete();int validSupplies=0;for(int n=0;n<MAX_PICKUPS;n++)if(pickups[n].active){assert(pickups[n].pos.y>=0);validSupplies++;}assert(validSupplies==24);

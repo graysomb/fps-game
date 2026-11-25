@@ -25,6 +25,7 @@ static void crosscut_trap(int q,float x0,float x1,float z0,float z1) {
     int loZ=(int)roundf(fminf(a.z,b.z)/VOXEL_SIZE),hiZ=(int)roundf(fmaxf(a.z,b.z)/VOXEL_SIZE)-1;
     foundry_trap_define(FOUNDRY_DROP,loX,hiX,7,7,loZ,hiZ,loX-1,7,loZ);
 }
+static int crosscutCenterTrap=-1;
 static void buildCrosscut(void) {
     Color stone={190,184,159,255},support={130,137,140,255};
     const Color routes[4]={{61,156,182,255},{187,88,107,255},{137,158,73,255},{146,113,185,255}};
@@ -58,7 +59,9 @@ static void buildCrosscut(void) {
         crosscut_box(q,17,17.5f,0,3.5f,8,12,stone);
         crosscut_box(q,3,4.5f,2.5f,4,9.5f,10.5f,routes[q]);
     }
+    int center=foundryTrapCount;
     crosscut_trap(0,-1.5f,1.5f,-1.5f,1.5f);
+    crosscutCenterTrap=foundryTrapCount>center?center:-1;
     for(int q=0;q<4;q++) crosscut_box(q,2,2.5f,0,4,1,1.5f,support);
 }
 static int crosscutSpawnCursor=0;

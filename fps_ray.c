@@ -9173,7 +9173,14 @@ static bool load_map_slot(int slot) {
 
 #include "creative_map.inc"
 
+enum { CROSSCUT_QUADRANT_PICKUPS=5, CROSSCUT_PRIZE_SLOT=4*CROSSCUT_QUADRANT_PICKUPS };
+
+static bool crosscut_versus(void) {
+    return gameMode==GAME_MODE_DEATHMATCH && currentWorldType==WORLD_TYPE_CROSSCUT && !useCustomMap;
+}
+
 static void init_pickups_legacy(void) {
+    if(crosscut_versus()){clear_pickups();return;} // Place the match roll after terrain construction.
     if(currentWorldType==WORLD_TYPE_CROSSCUT && !useCustomMap &&
        !(gameMode==GAME_MODE_FIREFIGHT && (firefightFoundry||firefightPractice))) {
         clear_pickups();
@@ -9279,6 +9286,13 @@ static void update_pickups(float dt) {
     for (int i = 0; i < MAX_PICKUPS; i++) {
         Pickup *p = &pickups[i];
 
+        if (i==CROSSCUT_PRIZE_SLOT && crosscut_versus() && crosscutCenterTrap>=0 && crosscutCenterTrap<foundryTrapCount &&
+            foundryTraps[crosscutCenterTrap].active && (p->active || p->respawnTimer>0)) {
+            // Keep the prize on its pedestal while the slab falls and regenerates.
+            p->active=false;
+            p->respawnTimer=fmaxf(.01f,p->respawnTimer-dt);
+            continue;
+        }
         if (!p->active) {
             if (p->respawnTimer <= 0.0f) continue;
             p->respawnTimer -= dt;
