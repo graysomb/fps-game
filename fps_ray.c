@@ -16116,7 +16116,9 @@ static bool eq_hostile(int i,int j);
 static int eq_actor_ray_filtered(int owner,Ray ray,float *distance,bool hostileOnly);
 static int grapple_voxel_actor(int id, bool includeArmor){
     if(goCombatEnabled && go_shield_part(id)>=0)return MAX_PLAYERS;
-    return includeArmor ? get_goliath_owner_of_voxel(id) : enemy_equipment_owner(id);
+    if(includeArmor)return get_goliath_owner_of_voxel(id);
+    if(clarity_shield_voxel(id))return -1;
+    return enemy_equipment_owner(id);
 }
 static bool grapple_living(int i){
     return i>=0 && i<activePlayers && players[i].respawn_timer<=0 &&
@@ -16137,7 +16139,7 @@ static void start_tether(int idx) {
     if(idx<MAX_PLAYERS && !is_player_bot(idx)){
         float distance=wall?fminf(hit.t,TETHER_RANGE):TETHER_RANGE;
         int target=eq_actor_ray_filtered(idx,ray,&distance,true);
-        // A directly hit Goliath plate is a grabbable voxel. Let the physical grab detach it.
+        // Let the physical grab detach exposed Goliath armor and Shieldbearer plates.
         if(target<0 && wall && hit.t<=TETHER_RANGE)target=grapple_voxel_actor(hit.id, false);
         if(grapple_living(target) && eq_hostile(idx,target)){
             p->actorGrappleTarget=target+1;

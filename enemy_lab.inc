@@ -275,9 +275,23 @@ static bool enemy_smoke_case(int type) {
         int front=first_voxel_hit((Ray){{0,BASE_EYE_HEIGHT,6},{0,0,1}},4,-1);
         ENEMY_CHECK(front>=0 && enemy_equipment_owner(front)==i,"shield intercepts frontal shot path");
         ENEMY_CHECK(first_voxel_hit((Ray){{3,BASE_EYE_HEIGHT,10},{-1,0,0}},2.5f,-1)<0,"shield leaves side vulnerable");
+        players[0].pos=(Vector3){0,BASE_EYE_HEIGHT,6};
+        players[0].pitch=0;
+        front=first_voxel_hit((Ray){players[0].pos,player_forward(&players[0])},4,-1);
+        ENEMY_CHECK(clarity_shield_voxel(front),"player aims at shield plate");
+        uint64_t plate=voxels[front].identity;
+        start_tether(0);
+        ENEMY_CHECK(players[0].tetherHolding && !players[0].actorGrappleTarget &&
+                    players[0].tetherVoxelIdentity==plate && enemy_equipment_owner(front)<0 &&
+                    s->equipmentCount==SHIELD_COLUMNS*SHIELD_ROWS-1,"tether pulls the targeted shield plate free");
+        release_tether(0);
+        remove_voxel_index(front);
+        rebuild_voxel_hash();
+        start_tether(0);
+        ENEMY_CHECK(players[0].actorGrappleTarget==i+1 && !players[0].tetherHolding,"tether grapples bearer through shield gap");
+        release_tether(0);
         float before=players[i].yaw;players[0].pos.x=10;enemy_update(i,.1f);
         ENEMY_CHECK(fabsf(angle_diff_deg(before,players[i].yaw))<=12.01f,"shield turn-rate cap");
-        enemy_detach(front);ENEMY_CHECK(s->equipmentCount==SHIELD_COLUMNS*SHIELD_ROWS-1,"shield pieces detach");
     } else if(type==ENEMY_TYPE_SAPPER) {
         s->selected=enemy_sapper_target(i,0);int support=enemy_voxel(s->selected);
         ENEMY_CHECK(support>=0,"sapper finds structural support");
