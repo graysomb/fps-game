@@ -35,7 +35,7 @@ static void actor_grapple_pull(int mover,float dt){
         float distance=v_length(delta);
         if(distance<.01f)continue;
         Vector3 dir=v_mul(delta,1/distance);VoxelHit obstruction;
-        if(distance>TETHER_RANGE+1 || (first_voxel_hit_detailed((Ray){owner->pos,dir},fmaxf(0,distance-.25f),-1,false,&obstruction) && grapple_voxel_actor(obstruction.id)!=target)){
+        if(distance>TETHER_RANGE+1 || (first_voxel_hit_detailed((Ray){owner->pos,dir},fmaxf(0,distance-.25f),-1,false,&obstruction) && grapple_voxel_actor(obstruction.id, true)!=target)){
             owner->actorGrappleTarget=0;continue;
         }
         if(distance<1.4f || dt<=0)continue;

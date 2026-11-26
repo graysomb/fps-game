@@ -70,5 +70,30 @@ static bool debug_setup_goliath_armor_shots(DebugRunState *state) {
         if(players[1].matter>=100)debug_add_failure(state,"Unarmored positive control did not take damage");
     }
     spawn_goliath_armor(1);update_goliath_armor_positions(1);rebuild_voxel_hash();
+    // Aim straight through the front plate, then through the gap left by removing it.
+    players[0].pos = v_add(players[1].pos, (Vector3){0, 0, 4});
+    players[0].yaw = players[0].pitch = 0;
+    players[0].respawn_timer = players[1].respawn_timer = 0;
+    combatantLife[0] = combatantLife[1] = LIFE_ALIVE;
+    Ray aim = {players[0].pos, player_forward(&players[0])};
+    if (!first_voxel_hit_detailed(aim, TETHER_RANGE, -1, false, &hit) ||
+        get_goliath_owner_of_voxel(hit.id) != 1) {
+        debug_add_failure(state, "Tether test did not start on an attached Goliath plate");
+        return true;
+    }
+    int count = goliathStates[1].count;
+    uint64_t plate = voxels[hit.id].identity;
+    start_tether(0);
+    if (!players[0].tetherHolding || players[0].actorGrappleTarget ||
+        players[0].tetherVoxelIdentity != plate || goliathStates[1].count != count - 1 ||
+        get_goliath_owner_of_voxel(hit.id) >= 0)
+        debug_add_failure(state, "Aiming at Goliath armor did not grab and detach the targeted plate");
+    release_tether(0);
+    remove_voxel_index(hit.id);
+    rebuild_voxel_hash();
+    start_tether(0);
+    if (players[0].actorGrappleTarget != 2 || players[0].tetherHolding)
+        debug_add_failure(state, "Aiming through the gap did not grapple the exposed Goliath");
+    release_tether(0);
     return true;
 }
