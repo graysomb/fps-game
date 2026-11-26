@@ -29,6 +29,25 @@ static void combat_feel(void){
   p->onGround=false;p->vel=(Vector3){0};net_apply_movement_command(p,&reverse,.02f);
   assert(Vector3Length(p->vel)==0);
   p->onGround=true;net_apply_movement_command(p,&reverse,.02f);assert(Vector3Length(p->vel)>0);
+  const int rates[]={30,60,144};
+  for(int n=0;n<3;n++){
+   float dt=1.f/rates[n];
+   NetInputCommand launch={.pressed=NET_INPUT_JUMP,.move_x=16384,.mouse_look=1,.aim_yaw=90};
+   p->onGround=true;p->vel=(Vector3){0};net_apply_movement_command(p,&launch,dt);
+   assert(fabsf(p->vel.x)<.001f && fabsf(p->vel.z + .5f*MOVE_SPEED)<.001f);
+   Vector3 start=p->pos,velocity=p->vel;
+   net_apply_movement_command(p,&reverse,dt);
+   net_integrate_player(p,dt,true);
+   assert(!p->onGround && fabsf((p->pos.z-start.z)-velocity.z*dt)<.001f && p->pos.y>start.y);
+   launch.move_x=launch.move_y=32767;
+   p->onGround=true;p->vel=(Vector3){0};net_apply_movement_command(p,&launch,dt);
+   assert(fabsf(hypotf(p->vel.x,p->vel.z)-MOVE_SPEED)<.001f);
+   p->onGround=true;p->vel=(Vector3){0,0,3};net_apply_movement_command(p,&launch,dt);
+   assert(p->vel.x==0 && p->vel.z==3);
+   launch.move_x=launch.move_y=0;
+   p->onGround=true;p->vel=(Vector3){0};net_apply_movement_command(p,&launch,dt);
+   assert(p->vel.x==0 && p->vel.z==0 && p->vel.y==JUMP_SPEED);
+  }
   p->yaw=0;
  }
  fixture();p->onGround=true;p->last_melee_time=-10;

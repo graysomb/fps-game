@@ -19004,8 +19004,19 @@ static void net_apply_movement_command(Player *p, const NetInputCommand *command
     float move_y = net_axis_value(command->move_y);
     Vector3 accel = v_add(v_mul(right, move_x), v_mul(forward, move_y));
     float accel_len = sqrtf(accel.x * accel.x + accel.z * accel.z);
+    if (accel_len > 1.0f) accel = v_mul(accel, 1.0f / accel_len);
+    if (command->pressed & NET_INPUT_JUMP) {
+        // Sample the stick once at liftoff. A running jump carries its existing velocity.
+        if (!p->meleeKnockbackActive && accel_len > 0.01f && hypotf(p->vel.x, p->vel.z) < 0.01f) {
+            float launch_speed = MOVE_SPEED * combat_walk_scale(slot);
+            p->vel.x = accel.x * launch_speed;
+            p->vel.z = accel.z * launch_speed;
+        }
+        p->vel.y = JUMP_SPEED;
+        p->onGround = false;
+        return;
+    }
     if (!p->meleeKnockbackActive && accel_len > 0.01f) {
-        if (accel_len > 1.0f) accel = v_mul(accel, 1.0f / accel_len);
         player_walk_accelerate(p, accel, dt);
     } else if (!p->meleeKnockbackActive && !ex_in_field((int)(p-players)) && !tether_grapple_airborne((int)(p-players))) {
         float speed = sqrtf(p->vel.x * p->vel.x + p->vel.z * p->vel.z);
@@ -19014,10 +19025,6 @@ static void net_apply_movement_command(Player *p, const NetInputCommand *command
             p->vel.x *= next / speed;
             p->vel.z *= next / speed;
         }
-    }
-    if ((command->pressed & NET_INPUT_JUMP) && p->onGround) {
-        p->vel.y = JUMP_SPEED;
-        p->onGround = false;
     }
 }
 
