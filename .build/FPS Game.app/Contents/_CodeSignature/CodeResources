@@ -4,9 +4,37 @@
 <dict>
 	<key>files</key>
 	<dict>
+		<key>Resources/controls.cfg</key>
+		<data>
+		mHbd23+GLJ6yu6Fnp27pv/87Yno=
+		</data>
+		<key>Resources/couch_settings.cfg</key>
+		<data>
+		KZo9m8O1EwugIYO+5DFO0BX/UW8=
+		</data>
 		<key>Resources/shaders/.DS_Store</key>
 		<data>
 		sveUwjcNfvGbIuda3Kmw+Eca2fU=
+		</data>
+		<key>Resources/shaders/aim_sight.frag</key>
+		<data>
+		yDw1rxbtkw0wwwAn4RoP8UxXqEo=
+		</data>
+		<key>Resources/shaders/camp.frag</key>
+		<data>
+		sy65KbixtSY/GA4u5zhPCgJuznI=
+		</data>
+		<key>Resources/shaders/camp.vert</key>
+		<data>
+		2tBSs/TjyRE5ypfbG8xKlnPRMiM=
+		</data>
+		<key>Resources/shaders/character.frag</key>
+		<data>
+		h+6K/Zmdbh5wV9rEiRDPyyJy0dg=
+		</data>
+		<key>Resources/shaders/character.vert</key>
+		<data>
+		wXS1DsC6paLZRsGNkQWF6K2BmUQ=
 		</data>
 		<key>Resources/shaders/debug_AABB.frag</key>
 		<data>
@@ -15,6 +43,22 @@
 		<key>Resources/shaders/debug_AABB.vert</key>
 		<data>
 		AbAe6648hQPbGShjp8l2ZIbC9xo=
+		</data>
+		<key>Resources/shaders/duck.frag</key>
+		<data>
+		PxrxE0RmH742r/hVgz3GzUi5MlI=
+		</data>
+		<key>Resources/shaders/duck.vert</key>
+		<data>
+		eWkNNBPtlCBJU0QSrh4XE0JasO8=
+		</data>
+		<key>Resources/shaders/duck_floor.frag</key>
+		<data>
+		0fhHbWiwXcFqirXR3m7zEaD5Rsw=
+		</data>
+		<key>Resources/shaders/equipment_beam.frag</key>
+		<data>
+		92/z0EJwVDZa0iwG67onamO8aik=
 		</data>
 		<key>Resources/shaders/fluid_hull.frag</key>
 		<data>
@@ -32,6 +76,22 @@
 		<data>
 		zjZiI4Ozn5kQcNlQkUlbJLeQsIw=
 		</data>
+		<key>Resources/shaders/gold_pickup.frag</key>
+		<data>
+		31wNuDrvt7DRroc5i4Faldp1eTA=
+		</data>
+		<key>Resources/shaders/gold_pickup.vert</key>
+		<data>
+		T6BL4+sY/VMBNGkZS3ug+ywiVN4=
+		</data>
+		<key>Resources/shaders/golem.frag</key>
+		<data>
+		JKV6D+qPo0rXDxBJhPbQvjY3orA=
+		</data>
+		<key>Resources/shaders/golem.vert</key>
+		<data>
+		ZXtuhJe5hjdgz4+0dDwXuASsxDY=
+		</data>
 		<key>Resources/shaders/instanced_voxel_hack.frag</key>
 		<data>
 		69ae14Bw2sfMw8l3cgUsyNm4G0k=
@@ -39,6 +99,18 @@
 		<key>Resources/shaders/instanced_voxel_hack.vert</key>
 		<data>
 		XMTMXqLIABEkrbaedHfLhtISVKU=
+		</data>
+		<key>Resources/shaders/menu_preview.frag</key>
+		<data>
+		OphXeDfqW0zmkY5CSgMCfFAxioI=
+		</data>
+		<key>Resources/shaders/menu_preview.vert</key>
+		<data>
+		5kPooim7kgQz4EMYNT/Qd2wsNK0=
+		</data>
+		<key>Resources/shaders/night_sky.frag</key>
+		<data>
+		xdUI+l0sozbxW00Re8fH8x2y8RI=
 		</data>
 		<key>Resources/shaders/object_shader.frag</key>
 		<data>
@@ -118,15 +190,31 @@
 		</data>
 		<key>Resources/shaders/pbd/pbd_pipeline.comp</key>
 		<data>
-		NZej2JbIpAADJ329nwdjVqTUyJw=
+		n4RbxQ8MIevVW2DRsAwW4TaBuJo=
 		</data>
 		<key>Resources/shaders/pbd/pbd_pipeline.metal</key>
 		<data>
-		k4FL2wdncmbeRsMsORukJfGXMD4=
+		d6VltO8k6J5ZCSoUE2EbjOFCoHA=
 		</data>
 		<key>Resources/shaders/pbd/pbd_pipeline.metallib</key>
 		<data>
 		JLocVDugD4LoRa3b8gNYI7/BMSw=
+		</data>
+		<key>Resources/shaders/regeneration.frag</key>
+		<data>
+		EoWWrfM2lIFuOYq/RygH6nssh/A=
+		</data>
+		<key>Resources/shaders/regeneration.vert</key>
+		<data>
+		MmQj7fMym7qs2PkLBLhY9dYvAC8=
+		</data>
+		<key>Resources/shaders/shard_instanced.frag</key>
+		<data>
+		n8Rm8/Z2LigAJVIR+rDdeqwhlUU=
+		</data>
+		<key>Resources/shaders/shard_instanced.vert</key>
+		<data>
+		TME8P40Bu2gJBK/wM8osre9F3JI=
 		</data>
 		<key>Resources/shaders/skybox_shader.frag</key>
 		<data>
@@ -136,6 +224,30 @@
 		<data>
 		ayte48AIZZl1Xc9bCSYpXEGw0YY=
 		</data>
+		<key>Resources/shaders/sword_slash.frag</key>
+		<data>
+		Jx9Y0bm9fUiH4O0klZbWm2nFbAM=
+		</data>
+		<key>Resources/shaders/victory_shadow.frag</key>
+		<data>
+		MTQFhrXN1G7k6sdiCKhHdznruPk=
+		</data>
+		<key>Resources/shaders/victory_shadow.vert</key>
+		<data>
+		S04LnlZ2vmA864k/6KXr9LrCI3I=
+		</data>
+		<key>Resources/shaders/victory_sky.frag</key>
+		<data>
+		O7NWKYwQ5/RxVzAWH/LEOMOs7Cc=
+		</data>
+		<key>Resources/shaders/victory_town.frag</key>
+		<data>
+		TmRh5NumeidQF8OhIDHlJvz+V7c=
+		</data>
+		<key>Resources/shaders/victory_town.vert</key>
+		<data>
+		eMMjeUTOtoGGyN5ZRBKlXL2zEGQ=
+		</data>
 		<key>Resources/shaders/voxel.frag</key>
 		<data>
 		ATqHf+MbD8R8Cl2qQylme6/7ehg=
@@ -143,6 +255,10 @@
 		<key>Resources/shaders/voxel.vert</key>
 		<data>
 		DsUpnShQx2deoZpwcs+W4MBmd98=
+		</data>
+		<key>Resources/shaders/voxel_ca_step.frag</key>
+		<data>
+		jrz1LtcuvbBqxe1cdUCsiuX737o=
 		</data>
 		<key>Resources/shaders/voxel_simple.frag</key>
 		<data>
@@ -160,6 +276,50 @@
 		<data>
 		twC2VFC3AEe5U0ryYShVUL76TWM=
 		</data>
+		<key>Resources/shaders/water/water_ca.comp</key>
+		<data>
+		yQS8GtsV1X4AfnhajUCQej2xfOw=
+		</data>
+		<key>Resources/shaders/water/water_ca.metal</key>
+		<data>
+		KcUgpP6ASxpdhvDutFJdJ8mVqKQ=
+		</data>
+		<key>Resources/shaders/water_instanced.frag</key>
+		<data>
+		xmpDJsD7ABk0gGYgVzLDADm4hVo=
+		</data>
+		<key>Resources/shaders/water_instanced.vert</key>
+		<data>
+		Y4aAORd8jcvnSHrjCQB7C0cgB0M=
+		</data>
+		<key>Resources/shaders/weapon.frag</key>
+		<data>
+		RFYdfZVawsPMO5hfo/0hIpTaXs0=
+		</data>
+		<key>Resources/shaders/weapon.vert</key>
+		<data>
+		htBur+Q4eHrlp3yiBK2lKjuzQSg=
+		</data>
+		<key>Resources/shaders/weapon_blur.frag</key>
+		<data>
+		Z0gOKp2h1VVgwwjSPZbPMZiJDZ0=
+		</data>
+		<key>Resources/shaders/weapon_effect.frag</key>
+		<data>
+		PEkbX53S+uWtUnAxO7XlHxKljXU=
+		</data>
+		<key>Resources/shaders/weapon_effect.vert</key>
+		<data>
+		Vp66n0jqp8N+xomSRvYQAJAOZg4=
+		</data>
+		<key>Resources/shaders/weapon_glock.frag</key>
+		<data>
+		1IDbwCod3hXIUOd2deen5gkUkF4=
+		</data>
+		<key>Resources/shaders/world_fog.frag</key>
+		<data>
+		hVUixwQKauelTyoN7P7RgDZxYDM=
+		</data>
 	</dict>
 	<key>files2</key>
 	<dict>
@@ -167,19 +327,68 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			drnEk/DH1lD3j3l7CU5chpkdZDg=
+			ziSYcgsREjn2AtcfWUZ0NLafaXI=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"76b9c493f0c7d650f78f797b094e5c86991d6438"</string>
+			<string>cdhash H"ce2498720b111239f602d71f59467434b69f6972"</string>
 		</dict>
 		<key>MacOS/fps_ray_gpu</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			HKkF5fYrx7Ohmu4M4auwSaTuCI8=
+			vBdSbkOC9rCYrdmaeboqiAtfns4=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"1ca905e5f62bc7b3a19aee0ce1abb049a4ee088f"</string>
+			<string>cdhash H"bc17526e4382f6b098add99a79ba2a880b5f9ece"</string>
+		</dict>
+		<key>Resources/controls.cfg</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			DmKlzG5ftfzEg4/EfbugH/3Ln/o4yeHBF/Q8QehxjK0=
+			</data>
+		</dict>
+		<key>Resources/couch_settings.cfg</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			Fm+q76kK7Avooc5gKTRBbkoWYqWFgMH7dJE4pVIh/KU=
+			</data>
+		</dict>
+		<key>Resources/shaders/aim_sight.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			jqH/gz1E+ku8VhwcO8k1zI7XmxEFXBNsjiKtScN1Lu8=
+			</data>
+		</dict>
+		<key>Resources/shaders/camp.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			rIlQ1gruaPxwgQ2+Zaoa7/00LbP7ykoCzSGGvC1tnQg=
+			</data>
+		</dict>
+		<key>Resources/shaders/camp.vert</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			X+sgr8Cb8v/5h5XVQt2ax7sV8cfIn7gVHxHWlD7tcd4=
+			</data>
+		</dict>
+		<key>Resources/shaders/character.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			uE6Vbk10NEU3kIwk/e6hUy/aR1rHXzYwlaKRhNk0bkA=
+			</data>
+		</dict>
+		<key>Resources/shaders/character.vert</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			ffCDJlIapxUemEHWRIA9QU3ZRrjcO93LLTjup7B3yQA=
+			</data>
 		</dict>
 		<key>Resources/shaders/debug_AABB.frag</key>
 		<dict>
@@ -193,6 +402,34 @@
 			<key>hash2</key>
 			<data>
 			SLmyHf1lf4AMnwuTWgR8skdH2Xmd7yzICcKDyGzdPQs=
+			</data>
+		</dict>
+		<key>Resources/shaders/duck.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			w5z9O/GamEesoBV8spA0ipBVfBzfp6X0xb/mjOpHKg0=
+			</data>
+		</dict>
+		<key>Resources/shaders/duck.vert</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			gX6mkGcYfMzVsDa7MZuc2uM1F8+4ebdik92eIEDPpps=
+			</data>
+		</dict>
+		<key>Resources/shaders/duck_floor.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			KphVS9pe00Q2GFuVBu18CVIKmwP/gPDzrJvZFPT17xQ=
+			</data>
+		</dict>
+		<key>Resources/shaders/equipment_beam.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			7OSSTxq9dxYSdSg1CZ+iKiFLpDrrW9zPlNq5VBCSqO0=
 			</data>
 		</dict>
 		<key>Resources/shaders/fluid_hull.frag</key>
@@ -223,6 +460,34 @@
 			+6XI20b9T7i1xklgraqpYaT+xYe2HeYY5YISEoRuN6U=
 			</data>
 		</dict>
+		<key>Resources/shaders/gold_pickup.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			7/JaxQYYR1gh4VddUj6rlpARevTvj/nnwNAQFX8reb8=
+			</data>
+		</dict>
+		<key>Resources/shaders/gold_pickup.vert</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			F01CIrEV6ZT09Xy2S1z7A335dOzqvtR0BOJVAw6db/0=
+			</data>
+		</dict>
+		<key>Resources/shaders/golem.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			n6GuNsgfok4OqvT0L/SyrR6X+9eDZGiC12uq9tQqL2k=
+			</data>
+		</dict>
+		<key>Resources/shaders/golem.vert</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			Y6QyH7XgQYkBPpnM/VHQuJgEjUqE5rruKoZn7UXz+fs=
+			</data>
+		</dict>
 		<key>Resources/shaders/instanced_voxel_hack.frag</key>
 		<dict>
 			<key>hash2</key>
@@ -235,6 +500,27 @@
 			<key>hash2</key>
 			<data>
 			VoEBN1aeUB46GUEYDPfeUFY4J0SMLAO6pXFOvASFxvU=
+			</data>
+		</dict>
+		<key>Resources/shaders/menu_preview.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			0GFlRAnxPdWORqHNd/WZfoX6GHKmjZsUDWQHR9bcpqI=
+			</data>
+		</dict>
+		<key>Resources/shaders/menu_preview.vert</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			5fHARAmrrlW66N/OU8zZucHpGnlXzfXWMXSmQGxUWkI=
+			</data>
+		</dict>
+		<key>Resources/shaders/night_sky.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			AnzSAP7dKBu9ehC3N79yAKf04T/Pt+doB4Da3E69td4=
 			</data>
 		</dict>
 		<key>Resources/shaders/object_shader.frag</key>
@@ -374,14 +660,14 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			0aDUJJDBnjbvOvY63U2IawTHFTz5Fdd8K8B1zO4UD7c=
+			j7YK7udaBu4G4nRCsXfKowhktFygf4+S8LdNZrIIrhE=
 			</data>
 		</dict>
 		<key>Resources/shaders/pbd/pbd_pipeline.metal</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			PpAYc3DjDV6KofNiP16m76gT39SPVR+iyepGIAlUEi0=
+			JRUqdYFdBYYXKXMlDw5eWNKB6x3KiyscO7Z9Ac4KrPI=
 			</data>
 		</dict>
 		<key>Resources/shaders/pbd/pbd_pipeline.metallib</key>
@@ -389,6 +675,34 @@
 			<key>hash2</key>
 			<data>
 			gM+BTNeLUZmLv4vm9lxHi8xAAdug4/V5uoXWMuYrwjY=
+			</data>
+		</dict>
+		<key>Resources/shaders/regeneration.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			IlUFCtUk5ejof0MEZfIaG+pK6gFs/vfTOoJoEBy8S3U=
+			</data>
+		</dict>
+		<key>Resources/shaders/regeneration.vert</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			OSp8XH6iQWl4R6MuMPHwEHfq8zr44LnT1cnMwiY4T+8=
+			</data>
+		</dict>
+		<key>Resources/shaders/shard_instanced.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			8i4GS0sFwpbbvsKLbAkAEBccvMd4YPdKcZpsltLHT7M=
+			</data>
+		</dict>
+		<key>Resources/shaders/shard_instanced.vert</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			7y0XplqfCmvQd39F0cm5YnSpLOEkiNDaCUqvshHcTS8=
 			</data>
 		</dict>
 		<key>Resources/shaders/skybox_shader.frag</key>
@@ -405,6 +719,48 @@
 			a8+NlhY+AWSaJnAJ5QZO4UuG902ErQG40rNZgWJC59g=
 			</data>
 		</dict>
+		<key>Resources/shaders/sword_slash.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			tQ+NuHyXnUo5IyWZ+zBNagoC81NLp09c+/FlWcQGWBA=
+			</data>
+		</dict>
+		<key>Resources/shaders/victory_shadow.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			G/qOQfXmriIcaVE8RrP8LCfIM3AZ9Bpu2fUYzGfSmKg=
+			</data>
+		</dict>
+		<key>Resources/shaders/victory_shadow.vert</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			cVVwic9U2TCiwn3lY6Jv1qscnLW2bhm9NgEZ8bXdb2c=
+			</data>
+		</dict>
+		<key>Resources/shaders/victory_sky.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			yFDOKh1dZW2I4Bm427ZP6biEKecZeEKJbxa9lLVgPyY=
+			</data>
+		</dict>
+		<key>Resources/shaders/victory_town.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			Zbu+Lyr6DrX9dwpXRjEHm30Ng4gTJQ30suFHirjhLLw=
+			</data>
+		</dict>
+		<key>Resources/shaders/victory_town.vert</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			y0/ePKpNEG5UUSzIIJnHy2kZBeChZNNWUv5A3W3G9XY=
+			</data>
+		</dict>
 		<key>Resources/shaders/voxel.frag</key>
 		<dict>
 			<key>hash2</key>
@@ -417,6 +773,13 @@
 			<key>hash2</key>
 			<data>
 			meYzVF3Ed8wmQ1rNo6mU1PybkAHmLaQM1DD/uMKhxLg=
+			</data>
+		</dict>
+		<key>Resources/shaders/voxel_ca_step.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			SED5WgbGfO3z29+w4syiePdMrZZT3QUYzuzyixcDhps=
 			</data>
 		</dict>
 		<key>Resources/shaders/voxel_simple.frag</key>
@@ -445,6 +808,83 @@
 			<key>hash2</key>
 			<data>
 			37oLiPJxMdtkaFdppgqkRri7E1BrXKdRKMGH3Gs6Iuo=
+			</data>
+		</dict>
+		<key>Resources/shaders/water/water_ca.comp</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			uXtg+CuihhMBRfhzU926yP418qRQSsoylD+I7OAhJck=
+			</data>
+		</dict>
+		<key>Resources/shaders/water/water_ca.metal</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			athk0fcfXnyxLtYNneg9JGIvAzoEvPtZNGKmRlOs9uQ=
+			</data>
+		</dict>
+		<key>Resources/shaders/water_instanced.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			SwmVS8G//v7tQPSXT4vEekH9hq1PGE0DYXl2aJs32Po=
+			</data>
+		</dict>
+		<key>Resources/shaders/water_instanced.vert</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			sOz4SqBWo2y1AeZvxOQnfgo0J39SA3Omn8/XcgdauGY=
+			</data>
+		</dict>
+		<key>Resources/shaders/weapon.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			2QMSs9PwCJoY+Hs1/A6+A/+72Q3aqHhy2l//VFXPD44=
+			</data>
+		</dict>
+		<key>Resources/shaders/weapon.vert</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			vSDskxNQmSUo47RspllxJMdEVDPXYC4M4TItATyHZpE=
+			</data>
+		</dict>
+		<key>Resources/shaders/weapon_blur.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			5tEBmJ57ca7jCCXpMYr3JQmG3smYBgylCjiw2kNSrQI=
+			</data>
+		</dict>
+		<key>Resources/shaders/weapon_effect.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			2L6uiajNFWY4Zp5vuyMVHWTxth2R/FjhkP9fpu3XPeA=
+			</data>
+		</dict>
+		<key>Resources/shaders/weapon_effect.vert</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			ppzbzPPcXRmexZW/QLcfH8TFpm/Wb8Lj7yGW1v3BSek=
+			</data>
+		</dict>
+		<key>Resources/shaders/weapon_glock.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			PIXfH9zeO+ZjtFcWAbL47bkJuOEFWUml8npnD4P8Pos=
+			</data>
+		</dict>
+		<key>Resources/shaders/world_fog.frag</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			Ju99Us69JtCezrl++7pF1oDmTc2OEC9VzNuEK2Whs1w=
 			</data>
 		</dict>
 	</dict>
